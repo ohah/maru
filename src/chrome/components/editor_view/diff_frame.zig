@@ -87,6 +87,11 @@ pub const Written = struct {
     max_top_piece: u32 = 0,
     visual_rows: usize,
     truncated: bool,
+    /// **각 열이 실제로 채운 행 수.** `visual_rows`는 둘 중 큰 값이라 어느 쪽이 몇 줄인지 모른다 —
+    /// 비교 뷰 히트테스트가 좌우 행 배열을 따로 굳히려면 이 둘이 필요하다(§4.1g "비교 뷰").
+    /// 저장소는 `splitScratch`가 이미 반으로 갈라 각 열이 자기 몫만 채운다.
+    left_visual_rows: usize = 0,
+    right_visual_rows: usize = 0,
     /// 오른쪽 열이 시작하는 x. 히트테스트(어느 열을 눌렀나)가 쓴다 — 제품은 같은 판정을
     /// `isRightColumn`으로 하고, 그쪽은 `columns()`를 다시 불러 같은 값을 얻는다.
     split_x: i32,
@@ -323,6 +328,8 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         .max_top_piece = longer.max_top_piece,
         .ops = lw.ops + moved,
         .visual_rows = @max(lw.visual_rows, rw.visual_rows),
+        .left_visual_rows = lw.visual_rows,
+        .right_visual_rows = rw.visual_rows,
         .truncated = lw.truncated or rw.truncated or moved < rw.ops,
         .split_x = cols.right.x,
         .left_scrollbar = lw.scrollbar,

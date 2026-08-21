@@ -115,6 +115,10 @@ pub const PaneFrame = struct {
     ops_len: usize,
     /// 그린 시각 행 수(스크롤 clamp용).
     visual_rows: usize,
+    /// 비교 뷰에서 **각 열이 채운 행 수**(단일 편집기면 0). 좌우 행 배열을 따로 굳히는 데 쓴다 —
+    /// `visual_rows`는 둘 중 큰 값이라 어느 쪽이 몇 줄인지 모른다(§4.1g "비교 뷰").
+    left_visual_rows: usize = 0,
+    right_visual_rows: usize = 0,
     /// **문서 전체**의 시각 행 수(랩 포함). 렌더만 접힘을 아므로, 스크롤 입력이 쓰도록 함께 낸다.
     total_visual_rows: u32,
     /// 스크롤 **상한** `(줄, 조각)` — 같은 이유로 함께 낸다(§4.1d).
@@ -310,6 +314,135 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     return line.start + off_in_line;
 }
 
+/// 비교 뷰 본문의 화면 좌표를 **(어느 열, 행, 행 안 byte)**로 옮긴다(§4.1g "비교 뷰").
+///
+/// **단일 편집기보다 두 단계 짧다.** 접힘 층(③)은 비교에서 거절되고(`foldsUnavailable`), 문서 offset
+/// 변환(⑤)은 대상 문서가 없다 — 화면에 서는 것은 원본 줄이 아니라 짝을 맞춰 정렬한 행 배열이다.
+///
+/// `null`이면 이 좌표가 이 함수의 것이 아니다: 비교 상태가 아니거나, 아직 안 그렸거나, gutter거나,
+/// 열 사이 틈이다.
+///
+/// **`side`를 강제할 수 있다.** 드래그가 반대 열로 넘어가도 잡은 열에 머물러야 하므로(계약: 좌우를
+/// 걸치는 선택은 만들지 않는다), 호출자가 잡은 열을 넘기면 그 열로만 답한다.
+pub const DiffHit = struct { side: DiffSide, row: usize, byte: usize };
+pub const DiffSide = enum { left, right };
+
+pub fn hitTestDiffBody(term: *Term, x_px: f64, y_px: f64, force: ?DiffSide) ?DiffHit {
+    if (term.kind != .editor) return null;
+    const st = term.rt.editor_diff orelse return null;
+    if (st.view != .compare) return null;
+    const g = term.rt.editor_diff_hit_geom;
+    if (g.cell_w_px == 0 or g.cell_h_px == 0) return null;
+
+    const px_limit: f64 = 1 << 30;
+    const cx: f64 = if (std.math.isNan(x_px)) 0 else @max(-px_limit, @min(px_limit, x_px));
+    const cy: f64 = if (std.math.isNan(y_px)) 0 else @max(-px_limit, @min(px_limit, y_px));
+    const xi: i64 = @intFromFloat(cx);
+    const yi: i64 = @intFromFloat(cy);
+
+    // ① 어느 열인가. 잡은 열이 있으면 그것을 쓴다 — 드래그가 반대 열로 넘어가도 머문다.
+    const side: DiffSide = force orelse blk: {
+        // 두 열의 본문 시작 x를 비교한다. 오른쪽 열 원점보다 왼쪽이면 왼쪽 열이다(틈은 아래에서 걸린다).
+        break :blk if (xi >= @as(i64, g.right_x)) .right else .left;
+    };
+    const col_x: i64 = if (side == .right) g.right_x else g.left_x;
+    const rows_len = if (side == .right) term.rt.editor_diff_hit_len_right else term.rt.editor_diff_hit_len_left;
+    if (rows_len == 0) return null;
+    const rows = if (side == .right) term.rt.editor_diff_hit_rows_right else term.rt.editor_diff_hit_rows_left;
+
+    const content_left: i64 = col_x + @as(i64, g.content_left_px);
+    if (xi < content_left) return null; // gutter — 이 좌표계가 받지 않는다
+
+    // ② 화면 행 → 그 열의 행. 세로는 clamp한다(드래그가 pane을 벗어나는 것은 정상이다).
+    const rel_y: i64 = yi - @as(i64, g.body_y);
+    const row_i: usize = if (rel_y < 0) 0 else blk: {
+        const r: usize = @intCast(@divFloor(rel_y, @as(i64, g.cell_h_px)));
+        break :blk @min(r, rows_len - 1);
+    };
+    const v = rows[row_i];
+    const texts = if (side == .right) st.right_texts else st.left_texts;
+    const line_idx: usize = v.line;
+    if (line_idx >= texts.len) return null;
+
+    // ③ 열·칸 안 픽셀 → 행 안 byte. **단일 편집기와 같은 함수**다.
+    const off = chrome_editor.content.byteAtPoint(
+        texts[line_idx],
+        g.tab_width,
+        @min(v.start_byte, texts[line_idx].len),
+        v.start_byte_col,
+        v.start_col,
+        g.content_width,
+        @intCast(@min(xi - content_left, @as(i64, std.math.maxInt(i32)))),
+        g.cell_w_px,
+    );
+    return .{ .side = side, .row = line_idx, .byte = off };
+}
+
+/// 한 열의 행 배열을 굳힌다. 저장소는 **필요한 만큼 한 번 잡고 재사용**한다(단일 편집기와 같은 관례).
+/// 못 잡으면 길이를 0으로 세워 그 프레임의 그 열만 클릭을 안 받는다 — 화면은 이미 다 그렸다.
+fn storeOneSide(
+    self: *AppSession,
+    src: []const chrome_editor.visual_map.VisualRow,
+    rows: *[]chrome_editor.visual_map.VisualRow,
+    len: *usize,
+) void {
+    if (src.len > rows.len) {
+        const grown = self.allocator.alloc(chrome_editor.visual_map.VisualRow, src.len) catch {
+            len.* = 0;
+            return;
+        };
+        if (rows.len > 0) self.allocator.free(rows.*);
+        rows.* = grown;
+    }
+    @memcpy(rows.*[0..src.len], src);
+    len.* = src.len;
+}
+
+/// 비교 뷰의 **좌우 행 배열과 열 기하**를 굳힌다(§4.1g "비교 뷰"). 단일 편집기의 `storeHitRows`와
+/// 같은 자리·같은 이유이고, 축만 다르다 — 이쪽 행 인덱스는 그 열의 정렬된 행 배열의 것이다.
+///
+/// **접힘을 풀지 않는다.** 비교에서는 접힘이 거절되므로(`foldsUnavailable`) 화면 행이 곧 그 배열의
+/// 행이다 — 단일 편집기의 ③단계가 여기 없는 이유다.
+fn storeDiffHitRows(
+    self: *AppSession,
+    term: *Term,
+    leaf_rect: maru.session.SplitRect,
+    left: []const chrome_editor.visual_map.VisualRow,
+    right: []const chrome_editor.visual_map.VisualRow,
+) void {
+    storeOneSide(self, left, &term.rt.editor_diff_hit_rows_left, &term.rt.editor_diff_hit_len_left);
+    storeOneSide(self, right, &term.rt.editor_diff_hit_rows_right, &term.rt.editor_diff_hit_len_right);
+
+    // 열 기하도 같은 순간에 굳힌다 — 단일 편집기와 같은 규율(§4.1g "스냅숏의 경계").
+    const body_outer = editorBodyRect(self, leaf_rect, term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const inner_w = body_outer.w -| inset * 2;
+    const inner_h = body_outer.h -| inset * 2;
+    const cols = chrome_editor.diff_frame.columns(
+        .{ .x = 0, .y = 0, .w = inner_w, .h = inner_h },
+        @intCast(self.cell_width_px),
+    );
+    const m = chrome_editor.diff_frame.sideMetrics(@intCast(cols.left.w), inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    const lay = chrome_editor.geometry.compute(m.total_cols, diffRowCount(term), .{});
+    const origin_x: i32 = @intCast(body_outer.x + inset);
+    term.rt.editor_diff_hit_geom = .{
+        .left_x = origin_x + cols.left.x,
+        .right_x = origin_x + cols.right.x,
+        .body_y = @intCast(body_outer.y + inset),
+        .content_left_px = @as(u32, lay.contentLeft()) * @as(u32, self.cell_width_px),
+        .content_width = lay.content.width,
+        .cell_w_px = @intCast(@min(self.cell_width_px, std.math.maxInt(u16))),
+        .cell_h_px = @intCast(@min(self.cell_height_px, std.math.maxInt(u16))),
+        .tab_width = term.rt.editor_tab_width,
+    };
+}
+
+/// 비교 뷰의 행 수(좌우가 같다 — 짝을 맞춰 정렬했으므로). gutter 자릿수가 이 값으로 정해진다.
+fn diffRowCount(term: *const Term) usize {
+    const st = term.rt.editor_diff orelse return 0;
+    return st.left_texts.len;
+}
+
 /// 마지막 프레임의 행들을 Term에 복사하고, **그 자리에서 절대 원본 줄까지 푼다**.
 ///
 /// 저장소는 **필요한 만큼만 한 번 잡고 재사용**한다 — 화면 행 수는 창 크기로 정해지므로 프레임마다
@@ -437,6 +570,8 @@ pub fn buildDiffPaneOps(
         .ops = scratch.ops[0..w.ops],
         .ops_len = w.ops,
         .visual_rows = w.visual_rows,
+        .left_visual_rows = w.left_visual_rows,
+        .right_visual_rows = w.right_visual_rows,
         .total_visual_rows = w.total_visual_rows,
         .max_top_line = w.max_top_line,
         .max_top_piece = w.max_top_piece,
@@ -621,7 +756,17 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **비교 뷰에서는 담지 않는다.** `hitTestBody`가 diff를 첫 줄에서 거절하므로 결과가 영영 안
     // 쓰이고, 게다가 비교 경로의 `visual_rows`는 좌우 열이 섞인 배열이라 이 축으로 해석하면 값
     // 자체가 틀린다 — 뒷날 diff 가드를 풀 때 조용히 잘못된 값을 내는 지뢰가 된다(7차 적대적 검증).
-    if (term.rt.editor_diff == null) {
+    if (term.rt.editor_diff) |st| {
+        // **비교 뷰도 담는다**(§4.1g "비교 뷰"). 7차가 *"좌우가 섞인 배열이라 담아 두면 지뢰"*라 한
+        // 것은 **섞인 하나**를 담는 것에 대한 지적이었고, 렌더가 이미 저장소를 반으로 갈라 각 열이
+        // 자기 몫만 채우므로 갈라 받으면 그 지적이 성립하지 않는다.
+        if (st.view == .compare) {
+            const half = visual_rows.len / 2;
+            const l = visual_rows[0..@min(pf.left_visual_rows, half)];
+            const r = visual_rows[half..][0..@min(pf.right_visual_rows, visual_rows.len - half)];
+            storeDiffHitRows(self, term, leaf_rect, l, r);
+        }
+    } else {
         storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
     }
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.

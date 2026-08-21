@@ -1720,6 +1720,28 @@ const TermRuntime = struct {
     editor_selection_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
     /// 위 배열이 가리키는 실제 저장소. 줄마다 범위가 **하나**뿐이라(선택은 연속이다) 줄 수만큼이면 된다.
     editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
+    /// 비교 뷰의 **좌우 행 배열**(§4.1g "비교 뷰"). 단일 편집기의 `editor_hit_rows`와 같은 관례이고
+    /// 축만 다르다 — 이쪽은 그 열의 **정렬된 행 배열**(`left_texts`/`right_texts`) 인덱스다.
+    ///
+    /// **둘로 나눠 담는 것이 계약이다.** 하나로 담으면 좌우가 섞여 이 축으로 해석한 값이 틀린다
+    /// (7차 적대적 검증이 그것을 지적해 통째로 안 담고 있었다). 렌더 쪽은 이미 `splitScratch`가
+    /// 저장소를 반으로 갈라 각 열이 자기 몫만 채우므로, 여기서도 갈라 받으면 그 지적이 성립하지 않는다.
+    editor_diff_hit_rows_left: []chrome.ui.visual_map.VisualRow = &.{},
+    editor_diff_hit_rows_right: []chrome.ui.visual_map.VisualRow = &.{},
+    editor_diff_hit_len_left: usize = 0,
+    editor_diff_hit_len_right: usize = 0,
+    /// 그 행들을 그릴 때의 **열 원점과 폭**(창 좌표·열). 단일 편집기의 `editor_hit_geom`과 같은
+    /// 이유로 렌더가 굳힌다 — 클릭 시점에 다시 구하면 행 배열과 다른 프레임의 값이 된다.
+    editor_diff_hit_geom: struct {
+        left_x: i32 = 0,
+        right_x: i32 = 0,
+        body_y: i32 = 0,
+        content_left_px: u32 = 0,
+        content_width: u16 = 0,
+        cell_w_px: u16 = 0,
+        cell_h_px: u16 = 0,
+        tab_width: u8 = 0,
+    } = .{},
     editor_hit_geom: struct {
         body_x: i32 = 0,
         body_y: i32 = 0,

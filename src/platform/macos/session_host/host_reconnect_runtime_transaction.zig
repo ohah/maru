@@ -131,6 +131,28 @@ pub const Cursor = struct {
         return ledger.summarizeTerminalRows(self.job, rows);
     }
 
+    /// A shared-Client terminal failure invalidates every runtime on that connection. Rows whose
+    /// new generation was already published retain that controller provenance, but all local
+    /// mutation authority closes and every row becomes retryable from an unavailable shell.
+    pub fn failAllForTerminalConnection(
+        self: *Cursor,
+        rows: []ledger.RuntimeRow,
+    ) !ledger.TerminalSummary {
+        if (!self.valid(rows) or self.failed().? or self.next_index == 0 or
+            self.next_index == rows.len)
+            return error.InvalidRuntimeSet;
+        for (rows, 0..) |*row, index| row.* = ledger.RuntimeRow.init(
+            row.identity,
+            if (index < self.next_index) .new_controller_evidenced else .old_valid,
+            .frozen_unavailable,
+            .closed,
+        );
+        self.next_index = @intCast(rows.len);
+        self.terminal_count = @intCast(rows.len);
+        self.failed_raw = 1;
+        return ledger.summarizeTerminalRows(self.job, rows);
+    }
+
     pub fn finishSuccess(self: Cursor, rows: []const ledger.RuntimeRow) !ledger.TerminalSummary {
         if (!self.valid(rows) or self.failed().? or self.next_index != rows.len)
             return error.InvalidRuntimeSet;
@@ -213,4 +235,24 @@ test "CR5b-2c cursor는 copy order drift replay와 nonterminal finish를 거부�
         error.InvalidRuntimeSet,
         cursor.failAndResolveRemaining(&rows, .retry_old_valid),
     );
+}
+
+test "CR5c cursor는 shared Client terminal에서 앞선 publication까지 모두 unavailable로 닫는다" {
+    var rows = testRows();
+    var cursor = try Cursor.initial(testJob(), &rows);
+    try cursor.commitPublishedNew(&rows);
+    const summary = try cursor.failAllForTerminalConnection(&rows);
+    try std.testing.expectEqual(@as(u32, 0), summary.published_new);
+    try std.testing.expectEqual(@as(u32, 3), summary.frozen_unavailable);
+    try std.testing.expectEqual(@as(u32, 3), summary.retry_reserved);
+    try std.testing.expectEqual(
+        @intFromEnum(ledger.RuntimeLedger.new_controller_evidenced),
+        rows[0].ledger_raw,
+    );
+    try std.testing.expectEqual(
+        @intFromEnum(ledger.RuntimeLedger.old_valid),
+        rows[1].ledger_raw,
+    );
+    try std.testing.expect(cursor.valid(&rows));
+    try std.testing.expectError(error.InvalidRuntimeSet, cursor.failAllForTerminalConnection(&rows));
 }

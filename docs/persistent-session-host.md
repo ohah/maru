@@ -928,10 +928,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    CR5b-2c의 actual 3-runtime k=1/2/3 제품 표는 shared Client가 usable인 `authority_conflict`를 사용하므로 앞선
    `published_new/open` 행과 실제 transport usability가 함께 보존된다. candidate/resize/transport terminal failure처럼 shared
-   Client 자체를 fail-close하는 경우는 앞선 성공 행도 더 이상 input-open으로 볼 수 없다. 그 host-wide terminal 전이와 Window
-   notice/action은 다음 CR5 Window/host-failure gate에서 닫기 전까지 CR5b-2c 완료 증거에 포함하지 않는다. 현재 제품
-   completion leaf는 이런 failure가 첫 success 뒤 발생하면 terminal summary를 게시하지 않고 기존 fail-closed job을 그대로
-   보존해 거짓 `published_new/open` 증거를 만들지 않는다.
+   Client 자체를 fail-close하는 경우는 앞선 성공 행도 더 이상 input-open으로 볼 수 없다. CR5c는 먼저 모든 published row의
+   current attachment와 stable-screen unavailable 권위를 같은 final-address job에 준비하고, 준비가 모두 성공한 뒤에만 전 행을
+   no-fail `frozen_unavailable/closed`로 게시한다. 게시됐던 행은 `new_controller_evidenced`를 유지해 provenance를 잃지 않고,
+   untouched 행은 `old_valid`로 남는다. `published_new=0`, `retry_reserved=total` summary를 봉인하고 terminal runtime,
+   shared retired Client와 replacement receipt는 retry job에 유지해 backend teardown에서 runtime-first로 정산한다. Window
+   notice/action과 2 Window move/close 경쟁은 다음 CR5 Window gate가 소유한다.
 
    현재 CR4a 제품 행은 실제 manifest/socket connect와 same-adapter replacement 뒤, 동일 job final address에서 observer
    candidate와 staged receipt까지 게시한다. connect에서 발급한 absolute deadline을 attach/snapshot/delta/barrier에 그대로

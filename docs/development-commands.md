@@ -396,7 +396,16 @@ Maru 작업에서 사용하는 기본 명령이다.
   terminal summary에서 shared retired Client를 exact once 회수한다. failure는 앞선 published generation을 보존하고 retry가
   필요한 frozen suffix가 참조하는 shared retired Client/receipt를 terminal job에 유지했다가 backend 정산에서 remote-first로
   회수한다. 첫 success 뒤 shared Client terminal failure는 앞선 행을 `published_new/open`으로 잘못 봉인하지 않고 terminal
-  summary 게시 0으로 거부한다. 그 all-row 전이는 Window move/close 경쟁과 함께 다음 CR5 Window/host-failure gate가 소유한다.
+  summary 게시 0으로 거부한다. 그 all-row 전이는 바로 다음 CR5c gate가 소유한다.
+- 영속 세션 호스트 CR5c host-wide terminal failure gate: `zig build test-session-host-cr5c`. CR5b-2c를 상속하고 첫 runtime
+  publication 뒤 shared Client가 terminal이 된 실제 manifest/daemon/socket 행에서 이미 게시된 generation까지 전부
+  `frozen_unavailable/closed`로 전환한다. 게시됐던 행은 `new_controller_evidenced` provenance를 유지하고 untouched suffix는
+  `old_valid`로 남기되 input은 전 행에서 닫힌다. 전 published row의 retirement를 먼저 준비한 뒤 allocation/callback 없는
+  no-fail unavailable suffix와 `published_new=0`, `retry_reserved=total` terminal summary를 검증한다. 두 번째 runtime
+  lookup을 의도적으로 실패시킨 preflight 행은 첫 번째 prepared owner를 abort하고 job/row를 mutation 0으로 보존한 뒤 clean retry가
+  성공함을 고정한다. retry에 필요한 terminal
+  runtime/retired Client/replacement receipt는 job에 계속 결속하고 backend teardown에서 runtime-first로 정산한다. Debug·ReleaseFast마다 cursor 계약 1개, actual socket
+  제품 행 1개, source boundary 1개를 exact-count한다. 2 Window move/close와 Take Control action 경쟁은 다음 CR5 Window gate다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

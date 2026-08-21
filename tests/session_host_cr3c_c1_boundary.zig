@@ -132,6 +132,7 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
     try std.testing.expectEqual(@as(usize, 1), count(backend, "preflightRetirementDetachBeforeAdmissionClose("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "preflightRetirementCleanupBeforeAdmissionClose("));
     try std.testing.expectEqual(@as(usize, 0), count(backend, "preflightClientReplacement("));
-    // Seven product state validations, CR5b-2b hostile assertion, and CR5b-2c terminal retry row.
-    try std.testing.expectEqual(@as(usize, 9), count(backend, "preflightPublishedClientReplacement("));
+    // Seven earlier product state validations, the CR5b-2b hostile assertion, the CR5b-2c
+    // terminal retry row, and CR5c's retained host-failure terminal validation.
+    try std.testing.expectEqual(@as(usize, 10), count(backend, "preflightPublishedClientReplacement("));
 }

@@ -47,12 +47,13 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
         "inputAllowed",
         &.{"platform/macos/session_host/host_reconnect_runtime_ledger.zig"},
     ));
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(transaction, "summarizeTerminalRows"));
+    // CR5c adds the all-row terminal-connection summary consumer to the same cursor contract.
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(transaction, "summarizeTerminalRows"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "validateCanonicalRows"));
-    try std.testing.expectEqual(@as(usize, 1), countIdentifier(backend, "summarizeTerminalRows"));
-    // CR5b-2c terminal validation adds canonical local-state checks, summary recomputation, and
-    // the actual k-conflict row oracle without opening another ledger implementation.
-    try std.testing.expectEqual(@as(usize, 23), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // CR5c validates its retained all-row terminal summary against the same canonical ledger.
+    try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "summarizeTerminalRows"));
+    // CR5b-2c terminal validation and CR5c all-row host failure both reuse this ledger owner.
+    try std.testing.expectEqual(@as(usize, 30), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     inline for (.{ "validateCanonicalRows", "host_reconnect_runtime_ledger.zig" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),

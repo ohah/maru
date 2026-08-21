@@ -1229,8 +1229,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    final-address CR4 scratch를 재사용하며, 각 성공 publication 뒤 row commit→scratch tombstone→cursor advance를 no-fail 순서로
    수행한다. 마지막 row의 terminal summary를 봉인하기 전에는 job과 shared replacement receipt를 파기하지 않는다. 어느 단계도 runtime마다 Client replacement를
    반복하거나 첫 runtime 정산 중 sibling attachment가 참조하는 shared Client를 파괴하지 않는다. shared Client 자체를
-   fail-close하는 candidate/resize/transport failure의 앞선 published 행 전체 전이는 다음 Window/host-failure gate가 소유한다.
-   그 전까지 completion leaf는 이 조합의 terminal summary 게시를 거부한다.
+   fail-close하는 candidate/resize/transport failure는 CR5c가 앞선 published 행의 controller provenance를 유지한 채 전 행을
+   `frozen_unavailable/closed`로 전환하고, 모든 published retirement prepare가 성공한 뒤에만 no-fail unavailable suffix를
+   실행한다. CR5c summary는 `published_new=0`과 `retry_reserved=total`을 봉인하고 terminal runtime/retired Client/replacement
+   receipt를 retry job에 유지한다. 이어지는 CR5 Window gate는 이 terminal summary를 소비해 2 Window move/close,
+   stale Take Control/close action, `termination_unconfirmed→abandoned_to_inventory` 경쟁을 닫는다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

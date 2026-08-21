@@ -729,5 +729,5 @@ fn allZero(bytes: []const u8) bool {
 
 fn frozenLedgerValid(ledger: RuntimeLedger) bool {
     return ledger == .old_valid or ledger == .takeover_sent_unknown or
-        ledger == .authority_conflict;
+        ledger == .authority_conflict or ledger == .new_controller_evidenced;
 }

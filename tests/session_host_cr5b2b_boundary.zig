@@ -45,7 +45,7 @@ test "CR5b-2b 경계는 all-runtime terminal 뒤 shared Client exact once public
     const commit = between(
         backend,
         "pub fn commitHostReconnectSharedReplacement(",
-        "/// Connected job의 fresh Client",
+        "/// A terminal shared transport invalidates every runtime",
     ) orelse return error.TestUnexpectedResult;
     inline for (.{
         "RemoteRuntime.backend_api.commitHostWideRetirementNoFail(",
@@ -72,10 +72,9 @@ test "CR5b-2b 경계는 all-runtime terminal 뒤 shared Client exact once public
         adapter: usize = 0,
         slot: usize = 0,
     }{
-        .{ .id = "commitHostWideRetirementNoFail", .backend = 1, .runtime = 3 },
-        // CR5b-2b preparation/commit validation plus CR5b-2c terminal-row
-        // validation are the three backend-owned consumers.
-        .{ .id = "hostWideRetirementCommittedExact", .backend = 3, .runtime = 3 },
+        // CR5c adds one host-failure no-fail commit and its terminal-state validation.
+        .{ .id = "commitHostWideRetirementNoFail", .backend = 2, .runtime = 3 },
+        .{ .id = "hostWideRetirementCommittedExact", .backend = 4, .runtime = 3 },
         .{ .id = "commitHostRetirementNoFail", .runtime = 1, .attachment = 1 },
         .{ .id = "hostRetirementCommittedExact", .runtime = 1, .attachment = 1 },
         .{ .id = "commitPreparedUnavailableNoFail", .runtime = 1, .screen = 1 },

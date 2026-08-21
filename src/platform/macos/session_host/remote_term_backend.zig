@@ -44,8 +44,10 @@ const short_endpoint = @import("short_endpoint.zig");
 const reconnect_admission_owner = @import("reconnect_admission_owner.zig");
 const reconnect_resident_budget = @import("reconnect_resident_budget.zig");
 const reconnect_mutation_seal = @import("reconnect_mutation_seal.zig");
+const reconnect_reducer = @import("reconnect_reducer.zig");
 const host_reconnect_runtime_ledger = @import("host_reconnect_runtime_ledger.zig");
 const host_reconnect_runtime_transaction = @import("host_reconnect_runtime_transaction.zig");
+const host_reconnect_window_transaction = @import("host_reconnect_window_transaction.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
@@ -83,6 +85,23 @@ pub const CloseTransitionTarget = struct {
     projection: remote_runtime.CloseTransitionProjection = .{},
 };
 
+/// AppSession owns Window/topology identity while the backend owns runtime generation and the
+/// terminal host-job rows.  The draft deliberately omits runtime_generation so callers cannot
+/// manufacture that half of a CR5d binding.
+pub const WindowBindingDraft = struct {
+    window_addr: u64 = 0,
+    app_session_generation: u64 = 0,
+    graph_generation: u64 = 0,
+    runtime_handle: RuntimeHandle = 0,
+    surface_id: u64 = 0,
+};
+
+const WindowTransactionProjection = struct {
+    summary: host_reconnect_runtime_ledger.TerminalSummary,
+    rows: []const host_reconnect_runtime_ledger.RuntimeRow,
+    binding_count: usize,
+};
+
 const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
     threadlocal var skip_destroy: bool = false;
@@ -99,6 +118,7 @@ const B5TestState = if (builtin.is_test) struct {
     threadlocal var cr5b_before_connect_row_count: u32 = 0;
     threadlocal var cr5b2b_runtime_commit_count: usize = 0;
     threadlocal var cr5b2b_retired_counts: [3]usize = .{0} ** 3;
+    threadlocal var cr5d2_window_hook: ?*const fn (*RemoteTermBackend) anyerror!void = null;
 } else struct {};
 
 pub const RemoteBackendSingletonLifecycle = enum(u8) {
@@ -1222,6 +1242,9 @@ pub const RemoteTermBackend = struct {
     host_reconnect_job: ?*HostReconnectJob = null,
     host_reconnect_preparing: bool = false,
     next_host_reconnect_job_generation: u64 = 0,
+    host_reconnect_window_owner: host_reconnect_window_transaction.Owner = .{},
+    host_reconnect_window_transaction: host_reconnect_window_transaction.Transaction = .{},
+    next_host_reconnect_window_action_generation: u64 = 0,
     paused_paste_budget: reconnect_mutation_seal.GlobalPasteBudget = .{},
     app_quit_routing_tombstoned: bool = false,
     app_quit_connections_terminalized: bool = false,
@@ -2453,6 +2476,217 @@ pub const RemoteTermBackend = struct {
         try RemoteRuntime.backend_api.applyCloseTransitionProjection(entry.runtime, target.projection);
     }
 
+    /// CR5d-2 bridge: the backend keeps the terminal summary/runtime rows private and supplies the
+    /// canonical runtime generation for each AppSession-owned Window draft.  No topology mutation
+    /// occurs here; the returned transaction is still consumed only by the AppSession coordinator.
+    pub fn prepareHostReconnectWindowTransaction(
+        self: *RemoteTermBackend,
+        drafts: []const WindowBindingDraft,
+        action: host_reconnect_window_transaction.ActionRequest,
+        now_ns: u64,
+    ) !*host_reconnect_window_transaction.Transaction {
+        if (action.action_generation != 0) return error.InvalidHostReconnectJob;
+        if (std.meta.eql(self.host_reconnect_window_owner, host_reconnect_window_transaction.Owner{}))
+            try self.host_reconnect_window_owner.initInPlace(self.singleton_owner.owner_generation);
+        if (!std.meta.eql(self.host_reconnect_window_transaction, host_reconnect_window_transaction.Transaction{}))
+            try host_reconnect_window_transaction.recycleConsumed(
+                &self.host_reconnect_window_owner,
+                &self.host_reconnect_window_transaction,
+            );
+        var bindings: [host_reconnect_window_transaction.max_bindings]host_reconnect_window_transaction.WindowBinding = undefined;
+        const projection = try self.fillWindowTransactionProjection(drafts, &bindings);
+        var canonical_action = action;
+        canonical_action.action_generation = std.math.add(
+            u64,
+            self.next_host_reconnect_window_action_generation,
+            1,
+        ) catch return error.InvalidHostReconnectJob;
+        try host_reconnect_window_transaction.prepare(
+            &self.host_reconnect_window_owner,
+            &self.host_reconnect_window_transaction,
+            projection.summary,
+            projection.rows,
+            bindings[0..projection.binding_count],
+            canonical_action,
+            now_ns,
+        );
+        self.next_host_reconnect_window_action_generation = canonical_action.action_generation;
+        return &self.host_reconnect_window_transaction;
+    }
+
+    pub fn consumeHostReconnectWindowTransaction(
+        self: *RemoteTermBackend,
+        transaction: *host_reconnect_window_transaction.Transaction,
+        drafts: []const WindowBindingDraft,
+        now_ns: u64,
+    ) !void {
+        var bindings: [host_reconnect_window_transaction.max_bindings]host_reconnect_window_transaction.WindowBinding = undefined;
+        const projection = try self.fillWindowTransactionProjection(drafts, &bindings);
+        try host_reconnect_window_transaction.consume(
+            &self.host_reconnect_window_owner,
+            transaction,
+            projection.summary,
+            projection.rows,
+            bindings[0..projection.binding_count],
+            now_ns,
+        );
+    }
+
+    /// The only CR5d close commit.  Both fallible authorities are checked before consuming the
+    /// Window gesture; after consume, applying the already-projected reducer transition is a
+    /// same-thread no-allocation suffix and any drift is common proof loss.
+    pub fn commitHostReconnectWindowClose(
+        self: *RemoteTermBackend,
+        transaction: *host_reconnect_window_transaction.Transaction,
+        drafts: []const WindowBindingDraft,
+        now_ns: u64,
+    ) !void {
+        if (transaction.action.kind_raw != @intFromEnum(host_reconnect_window_transaction.ActionKind.close))
+            return error.InvalidHostReconnectJob;
+        const close_target = try self.closeTransitionTarget(
+            transaction.action.target_runtime_handle,
+            remote_runtime.CloseEvent.init(.abandon_to_inventory),
+        );
+        if (close_target.projection.decision_raw != @intFromEnum(reconnect_reducer.Decision.abandon_shell_to_inventory))
+            return error.InvalidHostReconnectJob;
+        try self.consumeHostReconnectWindowTransaction(transaction, drafts, now_ns);
+        self.applyCloseTransitionTarget(close_target) catch process_seal.fatalIntegrity(.proof_loss);
+    }
+
+    /// Removes one Window-abandoned runtime from the terminal host-wide job and the client-side
+    /// backend graph in one forward-only suffix. The host runtime is not terminated: discovery can
+    /// admit it again from inventory, while the remaining Window bindings keep the same job.
+    pub fn detachAbandonedWindowTerm(
+        self: *RemoteTermBackend,
+        runtime_handle: RuntimeHandle,
+    ) void {
+        self.validateReconnectCoordinatorTarget() catch process_seal.fatalIntegrity(.proof_loss);
+        const transaction = &self.host_reconnect_window_transaction;
+        const job = self.host_reconnect_job orelse process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.host_failure_complete) or
+            !host_reconnect_window_transaction.consumedExact(
+                &self.host_reconnect_window_owner,
+                transaction,
+            ) or
+            transaction.action.target_runtime_handle != runtime_handle)
+            process_seal.fatalIntegrity(.proof_loss);
+        const rows = job.runtimeRowsSlice() orelse process_seal.fatalIntegrity(.proof_loss);
+        if (rows.len <= 1) process_seal.fatalIntegrity(.proof_loss);
+
+        var removed_index: ?usize = null;
+        var next_rows: [host_reconnect_runtime_ledger.max_runtime_rows]host_reconnect_runtime_ledger.RuntimeRow = undefined;
+        var next_count: usize = 0;
+        for (rows, 0..) |row, index| {
+            if (row.identity.runtime_handle == runtime_handle) {
+                if (removed_index != null) process_seal.fatalIntegrity(.proof_loss);
+                removed_index = index;
+            } else {
+                next_rows[next_count] = row;
+                next_count += 1;
+            }
+        }
+        _ = removed_index orelse process_seal.fatalIntegrity(.proof_loss);
+        const entry = self.runtimes.get(runtime_handle) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        if (!RemoteRuntime.backend_api.hostReconnectAbandonedToInventoryExact(entry.runtime))
+            process_seal.fatalIntegrity(.proof_loss);
+        const next_summary = host_reconnect_runtime_ledger.summarizeTerminalRows(
+            job.runtimeSetJobIdentity(),
+            next_rows[0..next_count],
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (next_summary.published_new != 0 or next_summary.frozen_unavailable != next_count)
+            process_seal.fatalIntegrity(.proof_loss);
+
+        @memcpy(job.runtime_rows[0..next_count], next_rows[0..next_count]);
+        job.runtime_row_count = @intCast(next_count);
+        job.runtime_cursor.next_index = @intCast(next_count);
+        job.runtime_cursor.terminal_count = @intCast(next_count);
+        job.runtime_rows_digest = HostReconnectJob.runtimeRowsDigest(job.runtime_rows[0..next_count]);
+        job.terminal_summary = next_summary;
+        self.surface_runtime.detachSurface(entry.runtime.surface.id);
+        const removed = self.runtimes.fetchRemove(runtime_handle) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        if (removed.value.runtime != entry.runtime or removed.value.host_id != entry.host_id or
+            removed.value.runtime_generation != entry.runtime_generation)
+            process_seal.fatalIntegrity(.proof_loss);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+        // Only resource callbacks remain. The authoritative job/map projection above is already
+        // fully committed, so reentry cannot observe a half-removed runtime row.
+        removed.value.runtime.detachClientSide();
+        self.allocator.destroy(removed.value.runtime);
+        if (self.host_pool) |pool| pool.release(removed.value.host_id);
+    }
+
+    pub fn revokeStaleHostReconnectWindowTransaction(
+        self: *RemoteTermBackend,
+        transaction: *host_reconnect_window_transaction.Transaction,
+    ) !void {
+        if (transaction != &self.host_reconnect_window_transaction) return error.InvalidHostReconnectJob;
+        try host_reconnect_window_transaction.revokeStale(
+            &self.host_reconnect_window_owner,
+            transaction,
+        );
+    }
+
+    fn fillWindowTransactionProjection(
+        self: *RemoteTermBackend,
+        drafts: []const WindowBindingDraft,
+        bindings: *[host_reconnect_window_transaction.max_bindings]host_reconnect_window_transaction.WindowBinding,
+    ) !WindowTransactionProjection {
+        try self.validateReconnectCoordinatorTarget();
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.host_failure_complete))
+            return error.InvalidHostReconnectJob;
+        const rows = job.runtimeRowsSlice() orelse return error.InvalidHostReconnectJob;
+        const summary = job.terminal_summary orelse return error.InvalidHostReconnectJob;
+        if (drafts.len > host_reconnect_window_transaction.max_bindings)
+            return error.InvalidHostReconnectJob;
+        for (drafts, 0..) |draft, index| {
+            if (draft.window_addr == 0 or draft.app_session_generation == 0 or
+                draft.graph_generation == 0 or draft.runtime_handle == 0 or draft.surface_id == 0 or
+                (index != 0 and drafts[index - 1].runtime_handle >= draft.runtime_handle))
+                return error.InvalidHostReconnectJob;
+        }
+        // A pair of Windows may also contain remote Terms from another host.  The backend job is
+        // the authority for this host's exact runtime set, so select its sorted rows from the
+        // broader sorted Window projection instead of requiring every remote Term to belong to
+        // this job.  Missing or duplicate matching bindings remain a closed rejection.
+        var draft_index: usize = 0;
+        for (rows, 0..) |row, index| {
+            while (draft_index < drafts.len and
+                drafts[draft_index].runtime_handle < row.identity.runtime_handle) : (draft_index += 1)
+            {}
+            if (draft_index == drafts.len or
+                drafts[draft_index].runtime_handle != row.identity.runtime_handle)
+                return error.InvalidHostReconnectJob;
+            const draft = drafts[draft_index];
+            if (draft_index + 1 < drafts.len and
+                drafts[draft_index + 1].runtime_handle == draft.runtime_handle)
+                return error.InvalidHostReconnectJob;
+            const entry = self.runtimes.get(draft.runtime_handle) orelse return error.InvalidHostReconnectJob;
+            if (entry.runtime_generation != row.identity.runtime_generation or
+                @intFromPtr(entry.runtime) != row.identity.runtime_addr)
+                return error.InvalidHostReconnectJob;
+            bindings[index] = .{
+                .window_addr = draft.window_addr,
+                .app_session_generation = draft.app_session_generation,
+                .graph_generation = draft.graph_generation,
+                .runtime_handle = draft.runtime_handle,
+                .runtime_generation = row.identity.runtime_generation,
+                .surface_id = draft.surface_id,
+            };
+            draft_index += 1;
+        }
+        return .{ .summary = summary, .rows = rows, .binding_count = rows.len };
+    }
+
     fn releaseProductSingleton(self: *RemoteTermBackend) void {
         if (std.meta.eql(self.singleton_owner, RemoteBackendSingletonOwner{})) return;
         if (!validRemoteBackendSingleton(&self.singleton_owner, @intFromPtr(self)))
@@ -3096,6 +3330,63 @@ pub const RemoteTermBackend = struct {
     }
 
     pub const testing_api = if (builtin.is_test) struct {
+        pub fn cr5d2WindowSurface(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+        ) ?*Surface {
+            const entry = remote_backend.runtimes.get(handle) orelse return null;
+            return &entry.runtime.surface;
+        }
+
+        pub fn cr5d2WindowRuntime(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+        ) ?*RemoteRuntime {
+            return (remote_backend.runtimes.get(handle) orelse return null).runtime;
+        }
+
+        pub fn cr5d2SetWindowSurfaceId(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+            surface_id: u64,
+        ) !void {
+            if (surface_id == 0) return error.InvalidTestState;
+            const entry = remote_backend.runtimes.get(handle) orelse return error.InvalidTestState;
+            entry.runtime.surface.id = surface_id;
+        }
+
+        pub fn cr5d2MakeTerminationUnconfirmed(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+        ) !void {
+            const job = remote_backend.host_reconnect_job orelse return error.InvalidTestState;
+            const rows = job.runtimeRowsSlice() orelse return error.InvalidTestState;
+            const row = for (rows) |candidate| {
+                if (candidate.identity.runtime_handle == handle) break candidate;
+            } else return error.InvalidTestState;
+            var target = try remote_backend.closeTransitionTarget(handle, .{
+                .tag_raw = @intFromEnum(remote_runtime.CloseEventTag.termination_requested),
+                .intent_generation = 1,
+                .shell_generation = row.identity.shell_generation,
+                .deadline_ns = 100,
+            });
+            try remote_backend.applyCloseTransitionTarget(target);
+            target = try remote_backend.closeTransitionTarget(handle, .{
+                .tag_raw = @intFromEnum(remote_runtime.CloseEventTag.termination_timed_out),
+                .now_ns = 100,
+            });
+            try remote_backend.applyCloseTransitionTarget(target);
+        }
+
+        pub fn runCr5d2WindowFixture(
+            hook: *const fn (*RemoteTermBackend) anyerror!void,
+        ) !void {
+            if (B5TestState.cr5d2_window_hook != null) return error.InvalidTestState;
+            B5TestState.cr5d2_window_hook = hook;
+            defer B5TestState.cr5d2_window_hook = null;
+            try runCr4aActualIssuerReplacementStage(.multi_runtime_terminal_after_success);
+        }
+
         /// CR2d3 AppSession routing fixture. `runtime`은 caller 소유이며 두 값이 scope를 벗어나기 전에
         /// 반드시 remove해야 한다. 제품 runtime admission은 이 test-only 경로를 보지 않는다.
         pub fn installEventCursorRuntime(
@@ -3819,11 +4110,16 @@ pub const RemoteTermBackend = struct {
     /// controller를 detach로 처리해 유지). 앱 quit 시 host-backed Term에 쓴다(윈도우/탭 명시 close는 `remove`=terminate).
     /// **vtable 밖** — app_session deinit이 app_quitting일 때 직접 부른다.
     pub fn detachTerm(self: *RemoteTermBackend, handle: RuntimeHandle) void {
-        const entry = self.runtimes.get(handle) orelse return;
+        if (!self.runtimes.contains(handle)) return;
         if ((self.app_quit_routing_tombstoned or self.app_quit_connections_terminalized) and
             !self.app_quit_owner_graphs_settled)
             process_seal.fatalIntegrity(.proof_loss);
 
+        self.detachTermClientSideNoFail(handle);
+    }
+
+    fn detachTermClientSideNoFail(self: *RemoteTermBackend, handle: RuntimeHandle) void {
+        const entry = self.runtimes.get(handle) orelse process_seal.fatalIntegrity(.proof_loss);
         // Runtime owner와 attachment graph를 map membership이 살아 있는 동안 먼저 닫는다. 이 호출 뒤에는 callback과
         // fallible 작업이 없으며, exact row를 제거한 다음 allocation과 host lease만 마지막으로 회수한다.
         const generation_adapter = if (builtin.is_test)
@@ -5309,6 +5605,10 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
                                 host_reconnect_runtime_ledger.RuntimeLedger.old_valid),
                             row.ledger_raw,
                         );
+                    }
+                    if (B5TestState.cr5d2_window_hook) |hook| {
+                        try hook(&backend_value);
+                        return;
                     }
                     try testing.expectError(
                         error.InvalidHostReconnectJob,

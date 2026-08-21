@@ -307,6 +307,38 @@ pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index:
     }
 }
 
+/// CR5d-2 forward-only local retirement.  The reducer has already published
+/// `abandoned_to_inventory`; remove the local shell through the ordinary topology cascade but make
+/// destroyTerm detach the remote runtime without a terminate RPC.
+pub fn abandonTermAt(
+    self: *AppSession,
+    tab_index: usize,
+    pane: *Pane,
+    term_index: usize,
+    backend: *app_session_mod.session_host.remote_term_backend.RemoteTermBackend,
+) void {
+    if (tab_index >= self.tabs.items.len or term_index >= pane.terms.items.len)
+        app_session_mod.session_host.pending_term_close_graph.fatalProofLoss();
+    const target = pane.terms.items[term_index];
+    if (!target.rt.live_initialized or target.surface.remote == null or target.rt.handle == 0 or
+        target.rt.abandoned_to_inventory)
+        app_session_mod.session_host.pending_term_close_graph.fatalProofLoss();
+    target.rt.close_complete = true;
+    target.rt.abandoned_to_inventory = true;
+    cancelPointerGestureForTermRemoval(self, tab_index, pane, term_index);
+    const term = pane.terms.orderedRemove(term_index);
+    destroyTermWithAbandonBackend(self, term, backend);
+    if (pane.terms.items.len > 0) {
+        pane.active_term = activeIndexAfterRemoval(pane.active_term, term_index, pane.terms.items.len);
+        refreshAfterReap(self, tab_index);
+    } else if (self.tabs.items[tab_index].panes.items.len > 1) {
+        pane_ops.collapsePaneIn(self, self.tabs.items[tab_index], pane);
+        refreshAfterReap(self, tab_index);
+    } else {
+        tab_ops.closeTab(self, tab_index);
+    }
+}
+
 /// Read-only fixture evidence that opening an inline archive disclosure did not replace the
 /// user's active terminal surface. A zero result means there is no initialized active
 /// surface, never an archive-detail sentinel.
@@ -570,6 +602,14 @@ pub fn createTerm(
 /// 해제 + surface.deinit + 슬롯 해제, M3a) → destroy). runtime이 살아 있을 때만 detach. createPane/⌘T errdefer·close·
 /// split 실패 정리에 쓴다. (deinit은 surface 정리를 config/appearance 해제 앞에 두려 2-pass를 직접 풀어 쓴다 — 여기 쓰지 않는다.)
 pub fn destroyTerm(self: *AppSession, term: *Term) void {
+    return destroyTermWithAbandonBackend(self, term, null);
+}
+
+fn destroyTermWithAbandonBackend(
+    self: *AppSession,
+    term: *Term,
+    abandon_backend: ?*app_session_mod.session_host.remote_term_backend.RemoteTermBackend,
+) void {
     const surface_id = term.surface.id;
     // 탭 드래그 preview는 `*Term`을 **프레임 간 캐시**하는 유일한 자리라, 다른 Term 포인터 보유 상태
     // (rename·context_menu_target)와 같은 barrier가 여기 필요하다. `cancelPointerGestureForTermRemoval`은
@@ -641,7 +681,10 @@ pub fn destroyTerm(self: *AppSession, term: *Term) void {
         // 직접 만지지 않는다. closeAndDetach가 reader를 먼저 join하므로(멱등) reader가 잡던 `&surface.core`가 번들
         // deinit의 surface.deinit 순간까지 살아 있다. handle(= surface_id)은 remove 실행 전에 읽었다(remove가 슬롯을
         // 해제하므로 이후 term.surface/handle deref 금지).
-        if (is_macos and term.rt.restored_existing and term.surface.remote != null) {
+        if (is_macos and term.rt.abandoned_to_inventory and term.surface.remote != null) {
+            const rb = abandon_backend orelse app_session_mod.session_host.pending_term_close_graph.fatalProofLoss();
+            rb.detachAbandonedWindowTerm(term.rt.handle);
+        } else if (is_macos and term.rt.restored_existing and term.surface.remote != null) {
             // restore staging rollback: 기존 runtime의 subscription/client state만 회수한다. terminate는 절대 보내지 않는다.
             if (app_session_mod.app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
         } else {

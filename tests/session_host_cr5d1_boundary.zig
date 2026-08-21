@@ -1,4 +1,4 @@
-//! CR5d-1 source boundary: the sealed two-Window transaction remains a caller-zero prerequisite.
+//! CR5d boundary: CR5d-1 stays the sole contract owner while CR5d-2 first opens the backend bridge.
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
@@ -15,6 +15,8 @@ test "CR5d-1 경계는 sealed Window transaction과 product caller zero를 고�
     defer allocator.free(service);
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
+    const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
+    defer allocator.free(backend);
 
     inline for (.{
         "pub const WindowBinding = struct {",
@@ -24,6 +26,7 @@ test "CR5d-1 경계는 sealed Window transaction과 product caller zero를 고�
         "pub fn prepare(",
         "pub fn validate(",
         "pub fn consume(",
+        "pub fn recycleConsumed(",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), count(contract, needle));
     try std.testing.expectEqual(@as(usize, 3), count(contract, "test \"CR5d-1 Window transaction은"));
     try std.testing.expectEqual(@as(usize, 1), count(seal, "pub const HostReconnectWindowTransactionSealInput = struct {"));
@@ -34,8 +37,16 @@ test "CR5d-1 경계는 sealed Window transaction과 product caller zero를 고�
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(contract, "hostReconnectWindowTransactionSeal"));
     try std.testing.expectEqual(
         @as(usize, 0),
-        try countProductIdentifiersExcept(allocator, "host_reconnect_window_transaction", &.{}),
+        try countProductIdentifiersExcept(allocator, "host_reconnect_window_transaction", &.{
+            "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/app_session/session_host_window.zig",
+            "platform/macos/session_host.zig",
+        }),
     );
+    // CR5d-2 validates the consumed lifecycle and target before shrinking the terminal host job.
+    try std.testing.expectEqual(@as(usize, 31), countIdentifier(backend, "host_reconnect_window_transaction"));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn prepareHostReconnectWindowTransaction("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn consumeHostReconnectWindowTransaction("));
     try std.testing.expectEqual(
         @as(usize, 0),
         try countProductIdentifiersExcept(allocator, "hostReconnectWindowTransactionSeal", &.{
@@ -44,7 +55,7 @@ test "CR5d-1 경계는 sealed Window transaction과 product caller zero를 고�
         }),
     );
 
-    const gate = between(build, "const session_host_cr5d1_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5d1_step =", "const session_host_cr5d2_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5d1\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5d1_step.dependOn(session_host_cr5c_step);"));

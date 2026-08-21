@@ -3345,6 +3345,15 @@ pub const RemoteRuntime = struct {
                 process_seal_service.fatalIntegrity(.proof_loss);
         }
 
+        pub fn hostReconnectAbandonedToInventoryExact(runtime: *RemoteRuntime) bool {
+            runtime.reconnect_executor.validate(&runtime.generation_owner) catch return false;
+            const state = runtime.reconnect_executor.state orelse return false;
+            return switch (state.close) {
+                .abandoned_to_inventory => true,
+                else => false,
+            };
+        }
+
         pub fn frameSummaryReady(runtime: *const RemoteRuntime) bool {
             return runtime.currentGenerationConst().frame_summary_ready;
         }

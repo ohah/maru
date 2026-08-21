@@ -1242,6 +1242,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    close, TTL exact expiry, runtime/job generation drift는 topology·binding·wire mutation 0으로 거부한다. 이 단계는
    AppSession topology를 아직 바꾸지 않으며 CR5d-2가 같은 transaction을 실제 2 Window move/close와
    `termination_unconfirmed→abandoned_to_inventory`에 연결한다.
+   CR5d-2는 별도의 Window 수술을 만들지 않는다. 두 AppSession의 현재 Term binding을 backend terminal job의
+   canonical runtime row와 대조해 CR5d-1 transaction을 준비한다. 같은 Window의 다른 host Term은 해당 host job의
+   canonical row에 없으므로 transaction에서 제외하고 그대로 보존한다. 기존 `moveWorkspaceToSession`이 어느 Window의
+   graph generation을 전진시키면 그 전에 준비된 Take Control/close action을 topology·wire mutation 0으로 stale 처리한다.
+   close action은 transaction과 backend의 typed `abandon_to_inventory` projection을 모두 preflight한 뒤 transaction을
+   먼저 one-shot consume하고, reducer의 `termination_unconfirmed→abandoned_to_inventory`를 게시한 다음 해당 Window의
+   로컬 Term을 terminate 없이 detach·제거한다. transaction consume과 reducer publication까지는 allocation/callback 없는
+   authority suffix이며, 그 뒤 기존 AppSession close chokepoint의 cleanup callback은 forward-only로 실행돼 옛 Window graph를
+   복원하거나 host runtime을 terminate하지 않는다. action expiry exact/+1, Window 이동/닫기, runtime row/job drift,
+   double-click/replay는 reducer·topology·takeover/terminate wire mutation 0이어야 한다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

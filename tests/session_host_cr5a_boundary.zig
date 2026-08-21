@@ -52,9 +52,11 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(transaction, "summarizeTerminalRows"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "validateCanonicalRows"));
     // CR5c validates its retained all-row terminal summary against the same canonical ledger.
-    try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "summarizeTerminalRows"));
-    // CR5b-2c terminal validation and CR5c all-row host failure both reuse this ledger owner.
-    try std.testing.expectEqual(@as(usize, 30), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // CR5d-2 also recomputes the surviving terminal summary after one Window abandons its row.
+    try std.testing.expectEqual(@as(usize, 3), countIdentifier(backend, "summarizeTerminalRows"));
+    // CR5b-2c terminal validation, CR5c all-row failure, and CR5d-2's private Window projection
+    // plus terminal-row shrink reuse this ledger owner.
+    try std.testing.expectEqual(@as(usize, 35), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     inline for (.{ "validateCanonicalRows", "host_reconnect_runtime_ledger.zig" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),

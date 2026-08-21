@@ -412,6 +412,14 @@ Maru 작업에서 사용하는 기본 명령이다.
   hostile 표는 copy/move/replay, active/spent double-click, exact/+1 expiry-spent, Window/app-session/graph/runtime/surface/action generation 및
   terminal summary drift의 mutation 0을 검증한다. 제품 caller는 0이며 실제 AppSession topology, takeover/terminate wire,
   `termination_unconfirmed→abandoned_to_inventory`는 CR5d-2 전까지 완료로 세지 않는다.
+- 영속 세션 호스트 CR5d-2 AppSession Window wiring gate: `zig build test-session-host-cr5d2`. CR5d-1을 상속하고
+  backend terminal job의 canonical runtime row와 실제 두 AppSession Term binding으로 transaction을 준비한다. 기존
+  `moveWorkspaceToSession` 뒤 stale action은 양 Window topology·close reducer·takeover/terminate wire mutation 0으로
+  거부하고, close success는 typed `abandon_to_inventory` projection과 transaction을 함께 preflight한 뒤 one-shot consume,
+  `termination_unconfirmed→abandoned_to_inventory`, terminate 없는 local detach/topology 제거 순서로 실행한다.
+  Debug·ReleaseFast마다 actual AppSession 제품 행과 source boundary를 exact-count하며 double-click/replay, exact/+1 expiry,
+  sibling Window/runtime와 같은 Window의 다른 host Term 보존을 포함한다. 이 gate는 CR5 Window 경쟁을 닫지만 real
+  AppKit/IME/clipboard/soak CR6 완료는 아니다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

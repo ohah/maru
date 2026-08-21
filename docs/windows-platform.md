@@ -890,8 +890,8 @@ Mono"`, `fallback = "Jetendard"`를 주고 `fontCandidates`는 **설정값을 �
 파일이 없어도 JetBrains Mono를 먼저 찾고, 그 폰트가 이 기계에 없어서 티어의 Cascadia Mono로 내려간
 것이다. "빈 값이라 티어가 골랐다"가 아니다 — JetBrains Mono가 설치된 기계에서는 그 줄이 달라진다.
 `Jetendard`는 그때 Windows에서 열리지 않아 폴백 사슬 앞에 무해하게 남았다. **§2m.14가 그것을
-뒤집었다** — 이제 번들 폰트를 파일에서 직접 열므로 위 "없음" 줄은 `font_family=JetBrains Mono`가 된다
-(셀은 `9x17` 그대로다). 표는 그때의 측정이라 남겨 둔다.
+뒤집었다** — 이제 번들 폰트를 파일에서 직접 열므로 위 "없음" 줄은 `font_family=JetBrains Mono`·
+`cell_px=9x19`가 된다(폭은 그대로, **높이가 17 → 19로 는다**). 표는 그때의 측정이라 남겨 둔다.
 
 **아직 안 배선한 것**(정직하게 적는다): 테마 색·팔레트·`max_scrollback` 같은 앱 수준 값은 이 스모크가
 하드코딩한다. `shell.command`·`shell.windows-shell`도 소비자가 없다 — 스모크는
@@ -1883,8 +1883,13 @@ CreateFontFace(TRUETYPE, 1, [file], 0, NONE)                            슬롯 9
 후       주 폰트 = JetBrains Mono  셀 9x17   한글 = Jetendard     16.80px, 2칸 18px → 여백 1.20px
 ```
 
-**셀 크기는 안 바뀐다** — `ceil(0.5875×14)` 와 `ceil(0.6×14)` 가 둘 다 9 다. 바뀌는 것은 글리프와 한글
-여백뿐이다.
+**셀 폭은 안 바뀌고 높이는 바뀐다.** 폭은 `ceil(0.5875×14)` 와 `ceil(0.6×14)` 가 둘 다 9 다. 높이는
+`ascent + descent + line_gap` 에서 나오는데 그 값이 폰트마다 달라 **17 → 19** 가 된다. 처음에 "셀 크기는
+안 바뀐다" 고 적었는데 **폭만 보고 쓴 것**이었다 — 제품 바이너리를 실제로 돌려서야 드러났다
+(`win32-terminal-smoke` 가 `font_family=JetBrains Mono` `cell_px=9x19` 를 찍는다).
+
+**높이 2px 는 한 화면의 줄 수를 줄인다** — 같은 창에서 행이 약 10% 줄어든다. 폰트를 바꾸면 따라오는
+정상적인 결과지만, "아무것도 안 바뀐다" 로 적어 두면 사용자가 회귀로 읽는다.
 
 **"정확히 2 배" 는 기본 조합의 성질이다 — Jetendard 단독의 보장이 아니다.** Jetendard 안에서
 `M`=600, `한`=1200(upem 1000)이고, 격자는 **주 폰트**의 advance 로 만들어진다. 기본 주 폰트

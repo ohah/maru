@@ -532,7 +532,10 @@ pub fn assetSearchRoots(exe_dir: []const u8, cwd: []const u8, up_levels: usize, 
             n += 1;
         }
     }
-    if (cwd.len > 0) {
+    // **`n < out.len` 을 여기서도 본다.** 위 루프가 버퍼를 채웠으면(`up_levels` 가 크면 그렇게 된다)
+    // 이 자리가 `out[out.len]` 을 쓴다 — 안전 모드에서는 패닉이고 `ReleaseFast` 에서는 메모리 훼손이다.
+    // 지금 호출부는 `up_levels = 2` 라 안 닿지만, 이 함수는 `pub` 이고 인자는 임의의 `usize` 다.
+    if (cwd.len > 0 and n < out.len) {
         const c = trimTrailingSep(cwd);
         // 이미 같은 자리를 보고 있으면 다시 안 본다.
         var dup = false;
@@ -609,6 +612,15 @@ test "assetSearchRoots: 좁은 곳부터, 중복은 한 번만" {
     // 둘 다 없으면 후보가 없다(호출부가 조용히 `/assets/...` 를 열지 않게).
     try testing.expectEqual(@as(usize, 0), assetSearchRoots("", "", 2, &buf).len);
     try testing.expectEqual(@as(usize, 0), assetSearchRoots("", "", 0, &buf).len);
+
+    // **버퍼를 넘지 않는다.** `up_levels` 가 크면 위로 오르는 것만으로 `out` 이 찬다 — 그 뒤 작업
+    // 디렉터리를 넣으려다 `out[out.len]` 을 쓰던 자리다(적대적 검증 3 라운드가 패닉으로 잡았다).
+    const full = assetSearchRoots("/a/b/c/d/e", "/cwd", 3, &buf);
+    try testing.expectEqual(@as(usize, 4), full.len);
+    try testing.expectEqualStrings("/a/b/c/d/e", full[0]);
+    try testing.expectEqualStrings("/a/b", full[3]); // 작업 디렉터리는 자리가 없어 안 들어간다
+    // 더 크게 줘도 마찬가지다.
+    try testing.expectEqual(@as(usize, 4), assetSearchRoots("/a/b/c/d/e/f/g", "/cwd", 99, &buf).len);
 }
 
 /// 중립 층 경로에 **이름 한 칸**을 잇는다. 결과는 계약대로 `/`만 쓴다(§5 규칙 1).

@@ -71,7 +71,6 @@ const inventory = [_]Entry{
     //     doc 주석을 애초에 토큰으로 세지 않으므로 그 근거는 성립할 수 없었다.
     //   · `remote_runtime.zig` 3 — 진단 문자열.
     .{ .path = "src/platform/macos/shell_integration.zig", .count = 48 },
-    .{ .path = "src/chrome/components/confirm.zig", .count = 3 },
     // `components/settings.zig`(8) 은 **0 이 되어 빠졌다.** 키 힌트·색 선택기·단축키 녹음 문구가
     // comptime `const` 라 언어를 못 탔다 — 값이 컴파일 시점에 박히므로 `t()` 를 넣어도 안 바뀐다.
     // 상수를 **함수로** 바꿔야 언어 전환이 다음 프레임에 따라온다. 폭 계산과 그리기가 같은 문자열을
@@ -197,7 +196,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 184;
+const header_total = 181;
 const header_config_total = 53;
 
 comptime {

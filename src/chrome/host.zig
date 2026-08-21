@@ -354,7 +354,7 @@ test "host: Confirm 라우팅 — Enter=confirm_accept·Esc=confirm_cancel·다�
     try std.testing.expectEqual(HostAction.confirm_cancel, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .escape } }).?);
     try std.testing.expect(!host.confirm.open);
     // Enter → accept + 닫힘.
-    host.confirm.show("x", .{});
+    host.confirm.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(HostAction.confirm_accept, host.handleInput(std.testing.allocator, .{ .key = .{ .key = .enter } }).?);
     try std.testing.expect(!host.confirm.open);
 }

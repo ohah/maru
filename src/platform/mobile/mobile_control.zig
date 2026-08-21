@@ -24,7 +24,11 @@ pub const max_frame = 64 * 1024;
 pub const max_noise = 64 * 1024;
 
 /// 우리가 아는 프로토콜 이름. 다르면 축을 끈다 — 모르는 프로토콜을 "아마 맞겠지" 로 읽지 않는다.
-pub const protocol_id = "maru.control.v1";
+///
+/// **문자열을 옮겨 적지 않고 서버 것을 그대로 든다.** 두 벌이면 한쪽만 고쳐지고, 그 차이는
+/// "폰만 붙는 서버가 없다" 로 나타난다 — 이 저장소가 값 드리프트로 여러 번 겪은 모양이다
+/// (적대적 검증이 잡았다).
+pub const protocol_id = @import("maru").session.control_plane.protocol_id;
 
 /// 컨트롤 축이 어디까지 왔나.
 pub const State = enum {
@@ -421,4 +425,70 @@ test "필드 읽기는 이스케이프를 넘긴다" {
     try testing.expectEqualStrings("x\\\"y", jsonStringField(line, "a").?);
     try testing.expectEqualStrings("z", jsonStringField(line, "b").?);
     try testing.expectEqual(@as(?[]const u8, null), jsonStringField(line, "c"));
+}
+
+test "서버가 실제로 만드는 hello 를 그대로 읽는다" {
+    // **문자열을 지어내 재면 아무것도 안 잰다.** 서버의 직렬화기(`control_plane.serializeHello`)가
+    // 만든 바이트를 그대로 먹여, 필드 자리·따옴표·배열 표기가 우리 판정과 맞는지 본다 —
+    // 그 둘이 어긋나면 기기에서 "왜인지 축이 안 선다" 로만 보인다.
+    const cp = @import("maru").session.control_plane;
+    const wire = try cp.serializeHello(testing.allocator, .{
+        .server_version = "0.1.0",
+        .capabilities = &.{ "sessions.list", "session.capture" },
+    });
+    defer testing.allocator.free(wire);
+
+    var c: Client = .{};
+    var line: [max_frame]u8 = undefined;
+    const n = wire.len;
+    @memcpy(line[0..n], wire);
+    line[n] = '\n';
+
+    const step = feedAll(&c, line[0 .. n + 1]);
+    try testing.expectEqual(State.ready, step.state);
+    try testing.expectEqualStrings("0.1.0", c.serverVersion());
+    try testing.expect(c.supports("sessions.list"));
+    try testing.expect(c.supports("session.capture"));
+    try testing.expect(!c.supports("browser.navigate"));
+}
+
+test "capabilities 가 빈 서버는 아무 메서드도 못 부른다" {
+    // 빈 목록을 "전부 된다" 로 읽으면, 폰이 없는 메서드를 부르고 그 오류를 사용자에게 보인다.
+    const cp = @import("maru").session.control_plane;
+    const wire = try cp.serializeHello(testing.allocator, .{
+        .server_version = "0.1.0",
+        .capabilities = &.{},
+    });
+    defer testing.allocator.free(wire);
+
+    var c: Client = .{};
+    var line: [max_frame]u8 = undefined;
+    @memcpy(line[0..wire.len], wire);
+    line[wire.len] = '\n';
+    const step = feedAll(&c, line[0 .. wire.len + 1]);
+    try testing.expectEqual(State.ready, step.state);
+    try testing.expect(!c.supports("sessions.list"));
+}
+
+test "capabilities 밖의 우연한 일치는 능력이 아니다" {
+    // 메서드 이름이 **다른 필드에** 들어 있을 수 있다(버전 문자열·설명 등). 줄 전체에서 찾으면
+    // 그것을 능력으로 읽고, 폰은 없는 메서드를 부른다.
+    const cp = @import("maru").session.control_plane;
+    const wire = try cp.serializeHello(testing.allocator, .{
+        // **따옴표째 똑같아야 이 테스트가 뜻이 있다.** 처음에는 `0.1.0+sessions.list` 로 썼는데
+        // 그러면 `"sessions.list"` 라는 정확한 패턴이 안 생겨(앞이 `+`) 변이가 살아남았다.
+        .server_version = "sessions.list",
+        .capabilities = &.{"session.capture"},
+    });
+    defer testing.allocator.free(wire);
+
+    var c: Client = .{};
+    var line: [max_frame]u8 = undefined;
+    @memcpy(line[0..wire.len], wire);
+    line[wire.len] = '\n';
+    _ = feedAll(&c, line[0 .. wire.len + 1]);
+
+    try testing.expect(c.supports("session.capture"));
+    // **버전에 든 글자를 능력으로 읽지 않는다.**
+    try testing.expect(!c.supports("sessions.list"));
 }

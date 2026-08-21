@@ -98,6 +98,31 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
         }
     }
 
+    // **수식자가 붙은 특수 키는 CSI 파라미터 형식이다**(xterm legacy). 이 갈래가 없어서 `Ctrl+←`가
+    // 평범한 `←`로 나갔고 셸이 단어 이동을 못 했다 — 사용자 제보로 드러났다(2026-08-22).
+    //
+    // **kitty 경로와 같은 헬퍼를 쓴다.** `encodeKittySeq`가 만드는 letter-final 형식이 곧 xterm legacy
+    // 형식(`CSI 1;<mod><final>`)이고, `~` final 도 `CSI <n>;<mod>~`로 같다. 수식자 정수도 같은 규칙
+    // (`1 + shift + alt*2 + ctrl*4 + meta*8`)이라 **두 경로가 갈릴 자리가 없다**. 규칙을 두 벌 적으면
+    // 한쪽만 고치는 사고가 난다.
+    //
+    // **수식자가 붙으면 SS3(DECCKM)를 쓰지 않는다.** xterm 도 application cursor 모드에서 `Ctrl+←`를
+    // `SS3 1;5D`가 아니라 `CSI 1;5D`로 보낸다 — SS3 에는 파라미터 자리가 없다.
+    if (legacyModifiedKey(event.key)) {
+        const mods = legacyModsSeqInt(event.modifiers);
+        if (mods > 1) {
+            const ent = kittyEntry(event.key);
+            return encodeKittySeq(buffer, ent.code, ent.final, mods);
+        }
+    }
+    // `Shift+Tab`은 파라미터가 아니라 **전용 final**(`CSI Z`, backtab)이다. 역방향 완성/포커스 이동에
+    // 널리 쓰여 빠뜨리면 눈에 띈다. Shift 하나일 때만이다 — `Ctrl+Shift+Tab`은 legacy 인코딩이 없다.
+    if (event.key == .tab and event.modifiers.shift and
+        !event.modifiers.control and !event.modifiers.option and !event.modifiers.command)
+    {
+        return "\x1b[Z";
+    }
+
     var len: usize = 0;
     if (options.option_as_meta and event.modifiers.option and !keyBaseStartsWithEscape(event.key)) {
         // macOS Option/Alt is the traditional terminal "Meta" modifier. The
@@ -318,6 +343,42 @@ pub fn controlByte(codepoint: u21) !u8 {
     return error.InvalidControlKey;
 }
 
+/// 이 키가 **xterm legacy 수식자 형식**을 갖는가.
+///
+/// 커서 키(화살표·Home/End)·편집키(Insert/Delete/PageUp/PageDown)·기능키(F1~F12)만이다. 그 셋이
+/// `CSI 1;<mod><letter>` 또는 `CSI <n>;<mod>~` 형식을 갖는다.
+///
+/// **`enter`·`tab`·`backspace`·`escape`·문자는 아니다.** xterm legacy 에는 그 키들의 수식자 형식이
+/// 없다 — `Ctrl+Enter`는 그냥 `\r`이고 `Ctrl+<letter>`는 C0 바이트다(그 규칙은 아래 `char` 갈래가
+/// 소유한다). 그 자리까지 CSI 로 바꾸면 **셸이 못 알아듣는다**. 수식자를 다 실어 보내려면 앱이
+/// kitty 프로토콜을 켜야 하고, 그 경로는 `encodeKitty`가 이미 갖고 있다.
+/// xterm legacy 수식자 정수. **`command`(⌘)를 빼는 것만 kitty 와 다르다.**
+///
+/// xterm 의 비트 8 은 **Meta** 인데 macOS 에서 Meta 는 Option 이고 그것은 이미 비트 2 다. ⌘ 를 8 로
+/// 실으면 `Cmd+←` 가 `CSI 1;9D` 로 나가는데, 그것은 어떤 셸도 모르는 시퀀스이고 **오늘은 평범한 `←`로
+/// 나가 커서가 움직인다**. 즉 실어 보내면 동작이 조용히 나빠진다.
+///
+/// **kitty 는 8 을 쓴다** — 그 프로토콜은 `super` 를 명시적으로 정의하고 앱이 그것을 켰다는 뜻이라
+/// 모호하지 않다. 두 경로가 여기서만 갈리고, 그 이유가 이 doc 이다.
+///
+/// ⌘ 만 눌린 경우 `mods == 1` 이라 호출부가 **수식자 없는 인코딩으로 떨어진다**(오늘 동작 유지).
+fn legacyModsSeqInt(mods: ModifierSet) u16 {
+    var v: u16 = 0;
+    if (mods.shift) v |= 1;
+    if (mods.option) v |= 2;
+    if (mods.control) v |= 4;
+    return v + 1;
+}
+
+fn legacyModifiedKey(key: Key) bool {
+    return switch (key) {
+        .arrow_up, .arrow_down, .arrow_left, .arrow_right, .home, .end => true,
+        .insert, .delete, .page_up, .page_down => true,
+        .function => true,
+        else => false,
+    };
+}
+
 fn keyBaseStartsWithEscape(key: Key) bool {
     return switch (key) {
         // base 인코딩이 ESC로 시작하는 키들. Option(Meta)이 눌려도 ESC를 한 번 더 붙이지 않는다
@@ -446,10 +507,16 @@ test "option modifier does not double-escape ESC-introduced keys" {
     var buffer: [encoded_key_buffer_len]u8 = undefined;
     // Arrows/escape already begin with ESC; the Meta prefix must not turn
     // Option+Up into \x1b\x1b[A.
+    // **이 테스트가 지키는 것은 "이중 ESC 금지" 다.** 예전 기대값 `\x1b[A`(수식자 통째로 버림)는
+    // 이 테스트의 의도가 아니라 **그때의 미완성 인코딩**이 박힌 것이었다. 이제 xterm legacy
+    // 수식자 형식이 나오고 — 여전히 ESC 는 하나다.
     try std.testing.expectEqualStrings(
-        "\x1b[A",
+        "\x1b[1;3A",
         try encodeKey(.{ .key = .arrow_up, .modifiers = .{ .option = true } }, &buffer, .{}),
     );
+    // 이중 ESC 가 아니라는 것을 값이 아니라 **성질**로도 못 박는다.
+    const alt_up = try encodeKey(.{ .key = .arrow_up, .modifiers = .{ .option = true } }, &buffer, .{});
+    try std.testing.expect(!std.mem.startsWith(u8, alt_up, "\x1b\x1b"));
     try std.testing.expectEqualStrings(
         "\x1b",
         try encodeKey(.{ .key = .escape, .modifiers = .{ .option = true } }, &buffer, .{}),
@@ -515,8 +582,63 @@ test "encodeKey: PC-style function keys (legacy xterm sequences)" {
 test "encodeKey: Option does not double-ESC function keys" {
     var buf: [encoded_key_buffer_len]u8 = undefined;
     // base가 ESC로 시작하므로 Option(Meta)이 눌려도 ESC를 또 안 붙인다.
-    try std.testing.expectEqualStrings("\x1b[3~", try encodeKey(.{ .key = .delete, .modifiers = .{ .option = true } }, &buf, .{}));
-    try std.testing.expectEqualStrings("\x1bOP", try encodeKey(.{ .key = .{ .function = 1 }, .modifiers = .{ .option = true } }, &buf, .{}));
+    // 값은 xterm legacy 수식자 형식이다(예전 기대값은 수식자를 버리던 시절의 것).
+    try std.testing.expectEqualStrings("\x1b[3;3~", try encodeKey(.{ .key = .delete, .modifiers = .{ .option = true } }, &buf, .{}));
+    // **수식자가 붙으면 SS3 가 아니라 CSI 다** — SS3 에는 파라미터 자리가 없다.
+    try std.testing.expectEqualStrings("\x1b[1;3P", try encodeKey(.{ .key = .{ .function = 1 }, .modifiers = .{ .option = true } }, &buf, .{}));
+    // 수식자가 없으면 예전 그대로다(회귀 대조군).
+    try std.testing.expectEqualStrings("\x1b[3~", try encodeKey(.{ .key = .delete, .modifiers = .{} }, &buf, .{}));
+    try std.testing.expectEqualStrings("\x1bOP", try encodeKey(.{ .key = .{ .function = 1 }, .modifiers = .{} }, &buf, .{}));
+}
+
+test "encodeKey: xterm legacy 수식자 — Ctrl+화살표가 단어 이동으로 간다" {
+    var buf: [encoded_key_buffer_len]u8 = undefined;
+    const eq = std.testing.expectEqualStrings;
+
+    // **이 슬라이스의 존재 이유.** 이 갈래가 없어서 `Ctrl+←`가 평범한 `←`로 나갔고 셸이 단어 이동을
+    // 못 했다(사용자 제보 2026-08-22). 수식자 정수는 `1 + shift + alt*2 + ctrl*4 + meta*8`.
+    try eq("\x1b[1;5D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\x1b[1;5C", try encodeKey(.{ .key = .arrow_right, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\x1b[1;2D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .shift = true } }, &buf, .{}));
+    try eq("\x1b[1;3D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .option = true } }, &buf, .{}));
+    try eq("\x1b[1;6D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .control = true, .shift = true } }, &buf, .{}));
+
+    // Home/End 도 커서 키라 letter final 이다.
+    try eq("\x1b[1;5H", try encodeKey(.{ .key = .home, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\x1b[1;5F", try encodeKey(.{ .key = .end, .modifiers = .{ .control = true } }, &buf, .{}));
+
+    // 편집키는 `~` final 이라 코드가 앞에 온다.
+    try eq("\x1b[3;5~", try encodeKey(.{ .key = .delete, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\x1b[5;2~", try encodeKey(.{ .key = .page_up, .modifiers = .{ .shift = true } }, &buf, .{}));
+
+    // 기능키: F1~F4 는 letter final(SS3 의 짝), F5~ 는 `~` final.
+    try eq("\x1b[1;5P", try encodeKey(.{ .key = .{ .function = 1 }, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\x1b[15;5~", try encodeKey(.{ .key = .{ .function = 5 }, .modifiers = .{ .control = true } }, &buf, .{}));
+
+    // **수식자가 붙으면 DECCKM 을 무시하고 CSI 다** — SS3 에는 파라미터 자리가 없다. 이것이 없으면
+    // vim 안에서 `Ctrl+←`가 깨진 시퀀스로 나간다.
+    const app: EncodeOptions = .{ .application_cursor_keys = true };
+    try eq("\x1bOD", try encodeKey(.{ .key = .arrow_left, .modifiers = .{} }, &buf, app));
+    try eq("\x1b[1;5D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .control = true } }, &buf, app));
+
+    // **대조군: 수식자가 없으면 예전 그대로다.** 이게 없으면 회귀를 못 잡는다.
+    try eq("\x1b[D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{} }, &buf, .{}));
+    try eq("\x1b[3~", try encodeKey(.{ .key = .delete, .modifiers = .{} }, &buf, .{}));
+
+    // **대조군: 문자·Enter·Backspace 는 안 건드린다.** xterm legacy 에 그 수식자 형식이 없다 —
+    // `Ctrl+A` 는 C0 바이트고 `Ctrl+Enter` 는 그냥 CR 이다. 거기까지 CSI 로 바꾸면 셸이 못 알아듣는다.
+    try eq("\x01", try encodeKey(.{ .key = .{ .char = 0x61 }, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\r", try encodeKey(.{ .key = .enter, .modifiers = .{ .control = true } }, &buf, .{}));
+
+    // **⌘ 는 legacy 수식자에 안 싣는다.** xterm 의 8 은 Meta 이고 macOS 에서 그것은 Option(이미 2)이다.
+    // 실어 보내면 `CSI 1;9D` 라는, 어떤 셸도 모르는 시퀀스가 된다 — 오늘은 평범한 `←`로 나간다.
+    try eq("\x1b[D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .command = true } }, &buf, .{}));
+    // ⌘ 가 섞여도 나머지 수식자만 실린다(Ctrl 은 4).
+    try eq("\x1b[1;5D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .command = true, .control = true } }, &buf, .{}));
+
+    // Shift+Tab 은 파라미터가 아니라 전용 final(backtab).
+    try eq("\x1b[Z", try encodeKey(.{ .key = .tab, .modifiers = .{ .shift = true } }, &buf, .{}));
+    try eq("\t", try encodeKey(.{ .key = .tab, .modifiers = .{} }, &buf, .{}));
 }
 
 test "encodeKey kitty: disambiguate text/ctrl/escape/functional (audit 4/5b-2)" {

@@ -2115,7 +2115,8 @@ mouse_events=9  selections=1  extends=7        ← 드래그가 코어까지 간
 **`Ctrl+←` 단어 이동은 여기서 안 고친다.** 같은 제보에서 나왔지만 원인이 다르다 — 중립 인코더
 (`terminal/input.zig`)에 **수식자 붙은 화살표 갈래가 아예 없다**(`[D` 만 있고 `[1;5D` 가 없다).
 Windows 배선은 오히려 맞다(`translateModifiers` 가 `Ctrl+←` 를 `.control` 로 넘긴다). **macOS 도 같은
-상태라 양 플랫폼 공용 슬라이스**이고 이 절 밖이다.
+상태라 양 플랫폼 공용 슬라이스**이고 이 절 밖이다 — `terminal/input.zig` 에서 닫았고, 그 결정은
+[key-input-and-shortcuts.md](key-input-and-shortcuts.md)가 소유한다.
 
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 

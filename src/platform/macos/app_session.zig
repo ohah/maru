@@ -19163,6 +19163,35 @@ test "hook mode fills state and conversation from the event log, and only then" 
         session.loaded_config.config.sidebar.agent_hooks = true;
     }
 
+    // ── ⑯b **종료를 놓친 유령을 목록이 거둔다**(계약 §2) ──────────────────────────────────
+    // 자식의 `SubagentStop` 은 유실될 수 있다(§4.3 동시 append·상한). 그러면 우리는 그 자식을 영영
+    // 붙잡는다 — **안 풀리는 배지**다. provider 가 `Stop` 에 실어 주는 목록이 그것을 정리한다:
+    // `type: "subagent"` 항목의 `id` 가 수명 이벤트의 `agent_id` 와 **정확히 같다**(실측).
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{
+            .sub_path = log_rel,
+            .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ghost-1\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ab8b2cd7ddd4dce44\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"백그라운드로 띄웠습니다\",\"background_tasks\":[{\"id\":\"ab8b2cd7ddd4dce44\",\"type\":\"subagent\",\"status\":\"running\",\"description\":\"List and summarize files\"}]}\n",
+        });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        // 유령은 거둬지고, 목록이 «도는 중» 이라 말한 자식만 남아 배지를 붙잡는다.
+        try std.testing.expectEqual(@as(usize, 1), term.agent_hook_progress.childCount());
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+        // 그 자식이 끝나면 그때가 진짜 턴 끝이다 — 유령이 남아 있었다면 여기서 안 풀렸다.
+        try tmp.dir.writeFile(io, .{
+            .sub_path = log_rel,
+            .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ghost-1\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ab8b2cd7ddd4dce44\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"백그라운드로 띄웠습니다\",\"background_tasks\":[{\"id\":\"ab8b2cd7ddd4dce44\",\"type\":\"subagent\",\"status\":\"running\",\"description\":\"List and summarize files\"}]}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"ab8b2cd7ddd4dce44\"}\n",
+        });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        try std.testing.expectEqual(@as(usize, 0), term.agent_hook_progress.childCount());
+    }
+
     // ── ⑰ **실측 줄을 그대로 태운다**(2026-08-21 claude 서브에이전트 턴) ─────────────────────
     // 위의 모든 제품 테스트는 입력이 **내가 손으로 쓴 JSON** 이다 — 내가 생각한 키만 들어 있다.
     // 진짜 줄에는 `effort`·`tool_use_id`·`session_crons`·`agent_type`·`agent_transcript_path`·
@@ -59772,6 +59801,10 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
 // `pollAgentState`가 running → idle을 판정하고, 그 순간 스냅샷이 찍히는지 본다. 위 테스트가 "찍힌 뒤"를 보고
 // 이 테스트가 "언제 찍는가"를 봐서, 에이전트 없이 §6.1 전 구간이 닫힌다.
 test "에이전트 화면이 running → idle이 되는 순간 작업트리가 굳는다" {
+    // **이 테스트도 턴 스냅샷을 실제로 찍겠다고 밝힌다**(`test_allow_turn_snapshot`) — 링이 채워지는지
+    // 보는 테스트라 게이트를 켜야 한다. 앞서 하나만 켜고 이 자리를 놓쳐 CI 가 빨개졌다.
+    agent_ops.test_allow_turn_snapshot = true;
+    defer agent_ops.test_allow_turn_snapshot = false;
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;

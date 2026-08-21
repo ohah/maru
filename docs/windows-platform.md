@@ -1934,6 +1934,50 @@ lround 8px       칸 넘침 12(1px)    칸 넘침 0
 열었으므로(`GetFirstMatchingFont` 에 `font_weight_normal` 고정) 회귀는 아니지만, macOS 는 번들이
 R/B/I/BI 넷을 등록한다. SGR 1/3 을 Windows 에서 제대로 하려면 그 자리가 따로 필요하다.
 
+### 2m.15 번들 폰트를 **컬렉션**에 담는다 — 다리가 이름으로만 찾기 때문이다 (실측 2026-08-21)
+
+**§2m.14 가 연 것으로는 다리가 못 쓴다.** 그 절은 래스터라이저를 위해 파일 → face 를 열었다. 그런데
+셰이핑 다리(§2m.13)가 쓰는 `IDWriteTextLayout` 은 폰트를 **이름으로 컬렉션에서** 찾는다. 번들 폰트는
+시스템 컬렉션 밖이므로, 컬렉션이 없으면 layout 이 번들 폰트를 **아예 못 본다** — `font.family` 기본값과
+`font.fallback` 기본값이 둘 다 번들이라 크롬 텍스트 전체가 시스템 폰트로 내려간다.
+
+**구현할 COM 객체가 없다.** 커스텀 컬렉션의 고전적인 길은 `IDWriteFontCollectionLoader` +
+`IDWriteFontFileEnumerator` 를 **우리가 구현**하는 것이다. `IDWriteFontSetBuilder`(Factory3)로 가면
+그럴 일이 없다 — 파일을 넣고 세트를 컬렉션으로 바꾸기만 한다. 실기에서 끝까지 확인했다:
+
+```text
+Factory3 QI                                  hr=0
+CreateFontSetBuilder            (슬롯 36)     hr=0
+QI IDWriteFontSetBuilder1                    hr=0
+AddFontFile × 2                              hr=0
+CreateFontSet                                hr=0
+CreateFontCollectionFromFontSet (슬롯 37)     hr=0
+→ "Jetendard" 찾음 · "JetBrains Mono" 찾음 · "Malgun Gothic" 없음
+```
+
+마지막 줄이 판정이다. **`Malgun Gothic` 이 없는 것이 맞다** — 이 컬렉션에는 우리가 넣은 것만 있다. 거기서
+시스템 폰트가 나왔다면 컬렉션이 아니라 시스템을 보고 있다는 뜻이라 앞의 성공이 아무것도 증명하지 못한다.
+테스트가 이 대조군을 갖는다.
+
+**슬롯 36·37 은 손으로 세고 실측으로 확인했다.** 유도는 §2m.12 의 방식 그대로다 — `IDWriteFactory` 24
+(`CreateGlyphRunAnalysis == 23` 이 소유) + Factory1 2 + Factory2 5(`GetSystemFontFallback == 26` 은 실측)
+→ Factory3 의 첫 메서드가 31, 그 뒤 여섯 번째가 `CreateFontSetBuilder`(36)다. assert 를 붙였다.
+
+**`AddFontFile` 은 `IDWriteFontSetBuilder1` 것이다**(Win10 1703+). `QueryInterface` 로 올린 포인터에서만
+부른다 — 안 올리고 그 자리를 부르면 `CreateFontSet` 을 부르게 된다.
+
+**파일 경로 탐색이 이름마다 도는 것을 없앴다.** §2m.14 는 이름 하나를 열 때마다 루트 후보를 훑었다. 이제
+컬렉션을 **`Rasterizer.create` 에서 한 번** 만들고, 그 뒤로는 시스템 컬렉션과 **같은 방식으로**
+(`FindFamilyName`) 찾는다. 폴백 후보가 여럿이면 그만큼 디스크를 덜 친다.
+
+**순서는 그대로다 — 시스템이 먼저, 번들이 나중.** 사용자가 직접 설치한 폰트가 이긴다(§2m.14).
+
+**컬렉션에서 온 face 도 쓸 수 있는지 본다.** `resolveFace` 는 `hr` 만 보는데, §2m.14 의 적대적 검증이
+"`hr=0` 인데 못 쓰는 face" 가 실재함을 보였다. 컬렉션 경로에도 같은 확인을 건다.
+
+**하나도 못 찾으면 `null` 이고 시스템 폰트로만 간다** — 오류가 아니다. `assets/` 가 없는 배포 형태가 실제로
+있고(§2m.14 의 한계), 그때 조용히 내려가는 것이 맞다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

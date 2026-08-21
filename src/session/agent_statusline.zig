@@ -4,7 +4,8 @@
 //! **기본 경로는 이게 아니다.** 평소에는 에이전트가 자식에게 내려주는 세션 신원(`CLAUDE_CODE_SESSION_ID`)을 읽는다
 //! (§7.2.1) — 사용자 파일을 하나도 건드리지 않는다. 다만 그 값은 **자식이 존재할 때만** 읽히므로, 도구를 전혀
 //! 실행하지 않는 세션은 신원을 얻지 못한다. 이 모듈은 그 빈틈을 메우되 **사용자 소유 파일을 고쳐 쓰는 대가**를
-//! 치르므로 config(`sidebar.agent-transcript-hook`)로 끌 수 있다.
+//! 치렀다. **이제 설치하지 않는다**(계약 §5, 2026-08-21) — 이 모듈에 남은 것은 지난 버전이
+//! 설치해 둔 것을 **알아보고 되돌리는** 규칙뿐이다.
 //!
 //! **화면을 바꾸지 않는다.** claude는 상태줄 명령의 stdout을 그려주는데, 우리 스크립트는 아무것도 출력하지 않는다.
 //! 사용자가 보는 claude 상태줄은 설치 전후가 같다.
@@ -42,22 +43,6 @@ pub const marker_header = "maru-statusline v2";
 pub const Marker = struct {
     wrapped: ?[]const u8,
 };
-
-/// 마커 본문을 만든다. 명령은 **바이트 그대로** 두므로 이스케이프가 없고(개행이 든 명령도 그대로 산다), 대신
-/// 길이를 함께 적어 잘림을 검출한다.
-pub fn markerBody(
-    out: *std.ArrayListUnmanaged(u8),
-    allocator: std.mem.Allocator,
-    wrapped: ?[]const u8,
-) !void {
-    try out.appendSlice(allocator, marker_header);
-    if (wrapped) |cmd| {
-        try out.print(allocator, "\nwrapped 1 {d}\n", .{cmd.len});
-        try out.appendSlice(allocator, cmd);
-    } else {
-        try out.appendSlice(allocator, "\nwrapped 0\n");
-    }
-}
 
 /// 마커를 읽는다. null = 우리 마커가 아니거나 잘렸다 → **모른다**.
 ///
@@ -101,56 +86,6 @@ test "configDir는 CLAUDE_CONFIG_DIR 우선, 없으면 home 기준" {
     // 빈 값은 "설정하지 않음"과 같게 본다 — 빈 경로에 설치하면 루트에 파일을 만든다.
     try testing.expectEqualStrings("/Users/a/.claude", configDir(&buf, "", "/Users/a").?);
     try testing.expectEqual(@as(?[]const u8, null), configDir(&buf, null, null));
-}
-
-/// 스크립트 본문. **claude가 stdin으로 주는 JSON**에서 `session_id`를 뽑아 per-pane 파일에 적고, stdout은 비운다.
-///
-/// 규율 셋:
-/// 1. `MARU_PANE_ID`가 없으면 **우리 기록만 건너뛴다** — Maru 밖에서 띄운 claude엔 남길 pane이 없다. 다만 감싼
-///    사용자 명령은 **그 경우에도 반드시 실행**한다. 조기 `exit`으로 묶었더니 Maru 밖 세션에서 사용자의 상태줄이
-///    통째로 사라졌다(실제로 그 상태를 만들었다가 실행 검증에서 잡았다).
-/// 2. stdin을 반드시 **끝까지 읽는다**(`cat`). 안 그러면 claude 쪽 파이프가 막힌다.
-/// 3. stdout에 출력하지 않는다 — 상태줄 모양을 바꾸지 않기 위해서다.
-///
-/// `sed`로 뽑는 이유는 의존성을 늘리지 않기 위해서다(jq가 없는 환경이 흔하다). 값 형식이 uuid라 정규식이 단순하다.
-pub fn scriptBody(
-    out: *std.ArrayListUnmanaged(u8),
-    allocator: std.mem.Allocator,
-    session_dir_abs: []const u8,
-    /// 설치 전에 사용자가 쓰던 `statusLine.command`(없으면 null). 있으면 **우리 일을 마친 뒤 그대로 실행**하고
-    /// 그 stdout을 통과시킨다 — 그 사람이 보던 상태줄이 그대로 유지된다.
-    wrapped_command: ?[]const u8,
-) !void {
-    try out.print(allocator,
-        \\#!/bin/sh
-        \\# maru가 설치한 상태줄 훅입니다 — 사이드바 에이전트 행에 마지막 대화를 표시하는 데만 씁니다.
-        \\# 화면에는 아무것도 출력하지 않으므로 claude 상태줄 모양은 그대로입니다.
-        \\# 제거: maru 설정에서 sidebar.agent-transcript-hook 을 끄면 이 파일과 settings.json 항목이 함께 지워집니다.
-        \\payload=$(cat)
-        \\if [ -n "$MARU_PANE_ID" ]; then
-        \\dir='{s}'
-        \\mkdir -p "$dir" 2>/dev/null
-        \\id=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-        \\[ -n "$id" ] && printf '%s' "$id" > "$dir/$MARU_PANE_ID" 2>/dev/null
-        \\fi
-        \\
-    , .{session_dir_abs});
-    // 사용자가 쓰던 상태줄이 있었으면 **같은 payload로 그대로 실행**하고 stdout을 통과시킨다. 우리 기록은 위에서
-    // 이미 끝났고, 여기서부터는 그 사람 화면이다. 인용은 홑따옴표 안의 `'`를 `'\''`로 끊어 붙이는 POSIX 관용을 쓴다.
-    if (wrapped_command) |cmd| {
-        // **표식 블록으로 가둔다.** 사용자가 이 파일을 열어봐도 "여기부터 내 원래 상태줄"임이 보이고, 제거할 때
-        // 우리는 이 두 줄 사이를 읽어 `settings.json`에 그대로 되돌린다(`extractWrappedCommand`).
-        try out.appendSlice(allocator, wrapped_begin);
-        try out.append(allocator, '\n');
-        try out.appendSlice(allocator, "printf '%s' \"$payload\" | sh -c '");
-        for (cmd) |c| {
-            if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
-        }
-        try out.appendSlice(allocator, "'\n");
-        try out.appendSlice(allocator, wrapped_end);
-        try out.append(allocator, '\n');
-    }
-    try out.appendSlice(allocator, "exit 0\n");
 }
 
 /// `settings.json`의 `statusLine.command`가 **우리 스크립트**를 가리키는가. 경로 끝의 파일명으로 판정한다 —
@@ -206,16 +141,6 @@ fn unquoteSingleQuoted(allocator: std.mem.Allocator, raw: []const u8) ![]const u
     return out.toOwnedSlice(allocator);
 }
 
-/// `settings.json`의 현재 `statusLine` 상태에 대해 우리가 무엇을 해야 하는가.
-pub const InstallPlan = enum {
-    /// statusLine이 없다 → 우리 것을 넣는다.
-    install,
-    /// 이미 우리 것이다 → 경로만 최신으로 유지(내용이 같으면 아무것도 안 한다).
-    refresh,
-    /// 사용자(또는 다른 도구)의 statusLine이 있다 → **그것을 감싸서** 설치한다(원래 명령은 마커에 저장해 복원용).
-    wrap_existing,
-};
-
 /// `settings.json`에서 읽어낸 `statusLine` 상태.
 ///
 /// **"없다"와 "못 읽었다"는 절대 같지 않다.** 후자를 전자로 접으면 "이 사람은 상태줄이 원래 없었다"를 **확정**으로
@@ -233,79 +158,6 @@ pub const SettingsState = union(enum) {
 /// 설치된 스크립트 파일의 상태. `settings`와 같은 이유로 **없음과 못 읽음을 가른다** — 0바이트 스크립트는
 /// 비원자 쓰기가 남기던 잔해이고, 그것을 "없음"으로 접으면 재생성 예외를 타서 감싼 명령이 사라진다.
 pub const ScriptState = enum { absent, unreadable, present };
-
-/// 설치 계획을 정한다. 판정 불가(`unreadable`)면 null — 호출부는 아무것도 쓰지 않는다.
-///
-/// **남의 상태줄을 지우지 않는다 — 감싼다.** claude의 `statusLine`은 필드가 **하나뿐**이라 나란히 둘 자리가 없다.
-/// 그렇다고 건너뛰면 그 사용자는 이 기능을 아예 못 쓴다. 그래서 원래 명령을 **우리 스크립트가 대신 실행**하고
-/// stdout을 통과시킨다 — 그 사람이 보던 화면은 그대로이고, 우리는 payload에서 신원만 가져간다.
-pub fn planFor(settings: SettingsState) ?InstallPlan {
-    return switch (settings) {
-        .unreadable => null,
-        .absent => .install,
-        .command => |cmd| blk: {
-            const trimmed = std.mem.trim(u8, cmd, " \t\r\n");
-            if (trimmed.len == 0) break :blk .install;
-            break :blk if (commandIsOurs(trimmed)) .refresh else .wrap_existing;
-        },
-    };
-}
-
-/// 계획을 실제 쓰기로 옮길 때 **무엇을 감쌀 것인가**, 혹은 아예 쓰지 않을 것인가.
-pub const Action = union(enum) {
-    /// 아무것도 쓰지 않는다. 감쌌던 원본이 있었는지 없었는지 **모르는** 상태라, 쓰는 순간 손실이 확정된다.
-    skip,
-    write: Write,
-
-    pub const Write = struct {
-        /// 스크립트가 감쌀 명령(없으면 null).
-        wrapped: ?[]const u8,
-        /// 이 결과를 마커에 **확정으로 기록해도 되는가**. "모른다"에서 나온 값은 기록하지 않는다 — 마커의
-        /// `wrapped 0`은 "감쌀 것이 없었다"는 확정이고, 그 확정은 나중에 `statusLine` 키를 지우는 근거가 된다.
-        record_marker: bool,
-    };
-};
-
-/// 설치·갱신에서 실제 쓰기를 정한다. `planFor`가 "어떤 상황인가"라면 이쪽은 **"써도 되는가"**를 본다.
-///
-/// 핵심은 `refresh`다. 스크립트에 wrap이 없다는 사실만으로 "감쌀 게 없었다"고 단정하면, 경합으로 wrap이 한 번
-/// 탈락한 순간 그 판단이 사용자 상태줄을 영구히 지운다(실제 사고). 그래서 **마커를 먼저 보고**, 마커조차 없으면
-/// **물러난다** — 사용자가 `statusLine`을 자기 것으로 되돌리면 그때 `wrap_existing`으로 정상 복귀한다.
-pub fn actionFor(
-    /// `settings.json`의 `statusLine` 상태.
-    settings: SettingsState,
-    /// 마커(파싱 성공 시). null = 마커 부재/손상 = **모른다**.
-    marker: ?Marker,
-    /// 스크립트 파일 상태.
-    script: ScriptState,
-    /// 스크립트 표식 블록에서 되찾은 명령(마커가 없을 때의 폴백. `script == .present`일 때만 의미가 있다).
-    script_wrapped: ?[]const u8,
-) Action {
-    const plan = planFor(settings) orelse return .skip;
-    return switch (plan) {
-        // settings를 **읽어서** statusLine이 없음을 확인했다 → 감쌀 것이 없음이 확정이다.
-        .install => .{ .write = .{ .wrapped = null, .record_marker = true } },
-        .wrap_existing => .{ .write = .{ .wrapped = settings.command, .record_marker = true } },
-        .refresh => switch (script) {
-            // 스크립트를 못 읽었다 = 그 안에 감싼 명령이 있었는지 알 수 없다.
-            .unreadable => .skip,
-            // 마커가 단일 출처다. 이미 마커에 있는 값을 다시 쓸 이유는 없다(매 실행 마커를 흔들지 않는다).
-            .present => if (marker) |m|
-                .{ .write = .{ .wrapped = m.wrapped, .record_marker = false } }
-            else if (script_wrapped) |cmd|
-                // 마커 이전 설치 — 스크립트에 남은 근거를 마커로 **승격**한다(1회 마이그레이션).
-                .{ .write = .{ .wrapped = cmd, .record_marker = true } }
-            else
-                .skip,
-            // 스크립트가 없다 = `statusLine`이 없는 파일을 가리키는 상태다. 그대로 두는 편이 더 나쁘므로
-            // 재생성하되, 감쌀 것이 있었는지는 **모르므로 마커에 확정을 남기지 않는다**.
-            .absent => if (marker) |m|
-                .{ .write = .{ .wrapped = m.wrapped, .record_marker = false } }
-            else
-                .{ .write = .{ .wrapped = null, .record_marker = false } },
-        },
-    };
-}
 
 /// 옵션을 껐을 때 `settings.json`을 어떻게 할 것인가.
 pub const RestoreAction = union(enum) {
@@ -350,6 +202,78 @@ pub fn plausibleIdentity(value: []const u8) bool {
     return true;
 }
 
+// ── 테스트 전용: 지난 버전이 설치해 둔 모양 ──────────────────────────────────────────────────
+//
+// 제품 경로는 이제 **거두기만** 한다(계약 §5). 그래도 이 둘은 남긴다 — 복원 규칙이 읽어야 하는
+// 것이 «지난 버전이 쓴 바로 그 바이트» 이기 때문이다. 손으로 적은 리터럴로 바꾸면 그 모양이 실제
+// 산출물과 조용히 갈리고, 그러면 테스트는 통과하는데 사용자 파일은 못 읽는 상태가 된다.
+
+/// 마커 본문을 만든다. 명령은 **바이트 그대로** 두므로 이스케이프가 없고(개행이 든 명령도 그대로 산다), 대신
+/// 길이를 함께 적어 잘림을 검출한다.
+fn markerBody(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    wrapped: ?[]const u8,
+) !void {
+    try out.appendSlice(allocator, marker_header);
+    if (wrapped) |cmd| {
+        try out.print(allocator, "\nwrapped 1 {d}\n", .{cmd.len});
+        try out.appendSlice(allocator, cmd);
+    } else {
+        try out.appendSlice(allocator, "\nwrapped 0\n");
+    }
+}
+
+/// 스크립트 본문. **claude가 stdin으로 주는 JSON**에서 `session_id`를 뽑아 per-pane 파일에 적고, stdout은 비운다.
+///
+/// 규율 셋:
+/// 1. `MARU_PANE_ID`가 없으면 **우리 기록만 건너뛴다** — Maru 밖에서 띄운 claude엔 남길 pane이 없다. 다만 감싼
+///    사용자 명령은 **그 경우에도 반드시 실행**한다. 조기 `exit`으로 묶었더니 Maru 밖 세션에서 사용자의 상태줄이
+///    통째로 사라졌다(실제로 그 상태를 만들었다가 실행 검증에서 잡았다).
+/// 2. stdin을 반드시 **끝까지 읽는다**(`cat`). 안 그러면 claude 쪽 파이프가 막힌다.
+/// 3. stdout에 출력하지 않는다 — 상태줄 모양을 바꾸지 않기 위해서다.
+///
+/// `sed`로 뽑는 이유는 의존성을 늘리지 않기 위해서다(jq가 없는 환경이 흔하다). 값 형식이 uuid라 정규식이 단순하다.
+fn scriptBody(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    session_dir_abs: []const u8,
+    /// 설치 전에 사용자가 쓰던 `statusLine.command`(없으면 null). 있으면 **우리 일을 마친 뒤 그대로 실행**하고
+    /// 그 stdout을 통과시킨다 — 그 사람이 보던 상태줄이 그대로 유지된다.
+    wrapped_command: ?[]const u8,
+) !void {
+    try out.print(allocator,
+        \\#!/bin/sh
+        \\# maru가 설치한 상태줄 훅입니다 — 사이드바 에이전트 행에 마지막 대화를 표시하는 데만 씁니다.
+        \\# 화면에는 아무것도 출력하지 않으므로 claude 상태줄 모양은 그대로입니다.
+        \\# 제거: maru 설정에서 sidebar.agent-transcript-hook 을 끄면 이 파일과 settings.json 항목이 함께 지워집니다.
+        \\payload=$(cat)
+        \\if [ -n "$MARU_PANE_ID" ]; then
+        \\dir='{s}'
+        \\mkdir -p "$dir" 2>/dev/null
+        \\id=$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        \\[ -n "$id" ] && printf '%s' "$id" > "$dir/$MARU_PANE_ID" 2>/dev/null
+        \\fi
+        \\
+    , .{session_dir_abs});
+    // 사용자가 쓰던 상태줄이 있었으면 **같은 payload로 그대로 실행**하고 stdout을 통과시킨다. 우리 기록은 위에서
+    // 이미 끝났고, 여기서부터는 그 사람 화면이다. 인용은 홑따옴표 안의 `'`를 `'\''`로 끊어 붙이는 POSIX 관용을 쓴다.
+    if (wrapped_command) |cmd| {
+        // **표식 블록으로 가둔다.** 사용자가 이 파일을 열어봐도 "여기부터 내 원래 상태줄"임이 보이고, 제거할 때
+        // 우리는 이 두 줄 사이를 읽어 `settings.json`에 그대로 되돌린다(`extractWrappedCommand`).
+        try out.appendSlice(allocator, wrapped_begin);
+        try out.append(allocator, '\n');
+        try out.appendSlice(allocator, "printf '%s' \"$payload\" | sh -c '");
+        for (cmd) |c| {
+            if (c == '\'') try out.appendSlice(allocator, "'\\''") else try out.append(allocator, c);
+        }
+        try out.appendSlice(allocator, "'\n");
+        try out.appendSlice(allocator, wrapped_end);
+        try out.append(allocator, '\n');
+    }
+    try out.appendSlice(allocator, "exit 0\n");
+}
+
 const testing = std.testing;
 
 test "commandIsOurs: 파일명으로만 판정해 홈 경로가 달라도 선다" {
@@ -359,22 +283,6 @@ test "commandIsOurs: 파일명으로만 판정해 홈 경로가 달라도 선다
     try testing.expect(!commandIsOurs("/Users/a/.claude/my-statusline.sh"));
     try testing.expect(!commandIsOurs("bunx ccusage statusline"));
     try testing.expect(!commandIsOurs(""));
-}
-
-test "pane 게이트는 우리 기록만 막고 사용자 상태줄은 항상 실행한다" {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(testing.allocator);
-    try scriptBody(&out, testing.allocator, "/tmp/x", "my-statusline");
-    const body = out.items;
-
-    // pane 게이트가 **조기 종료**면 Maru 밖 세션에서 사용자 상태줄이 통째로 사라진다(실제로 그 버그를 냈다).
-    // 게이트는 if 블록이어야 하고, 그 블록이 감싼 명령보다 **먼저 닫혀야** 한다.
-    const gate = std.mem.indexOf(u8, body, "if [ -n \"$MARU_PANE_ID\" ]; then") orelse return error.NoGate;
-    const fi = std.mem.indexOfPos(u8, body, gate, "\nfi\n") orelse return error.GateNotClosed;
-    const wrapped = std.mem.indexOf(u8, body, wrapped_begin) orelse return error.NoWrap;
-    try testing.expect(fi < wrapped);
-    // 게이트 앞에 조기 exit이 없어야 한다.
-    try testing.expect(std.mem.indexOf(u8, body[0..gate], "exit 0") == null);
 }
 
 test "감싼 사용자 상태줄: 표식 블록에 갇히고 그대로 복원된다" {
@@ -469,77 +377,6 @@ test "마커: 어느 지점에서 잘려도 명령으로 파싱되지 않는다"
     try testing.expectEqualStrings(original, parseMarker(full.items).?.wrapped.?);
 }
 
-test "actionFor: 근거를 잃은 refresh는 덮어쓰지 않는다" {
-    const user = "sh ~/.claude/statusline-command.sh";
-    const ours: SettingsState = .{ .command = "/Users/a/.claude/maru-statusline.sh" };
-
-    // 이번 사고의 회귀 지점 — 스크립트에 wrap이 없고 마커도 없다(마커 이전 설치이거나 경합으로 탈락). "감쌀 게
-    // 없었다"고 단정하면 그 순간 사용자 상태줄이 영구히 사라진다.
-    try testing.expectEqual(Action.skip, actionFor(ours, null, .present, null));
-
-    // **읽지 못한 것은 없는 것이 아니다.** settings를 못 읽었으면(중간 쓰기·권한·손상 JSON) 아무것도 쓰지 않는다 —
-    // 여기서 `.install`로 접으면 마커에 "감쌀 것 없었음"을 확정으로 찍어 원본을 지운다(적대 검증 F1/H1).
-    try testing.expectEqual(Action.skip, actionFor(.unreadable, null, .present, user));
-    try testing.expectEqual(Action.skip, actionFor(.unreadable, .{ .wrapped = user }, .absent, null));
-    // 스크립트를 못 읽은 것도 "없음"이 아니다 — 0바이트 잔해가 재생성 예외를 타면 안 된다.
-    try testing.expectEqual(Action.skip, actionFor(ours, null, .unreadable, null));
-
-    // 마커가 있으면 스크립트가 wrap을 잃었어도 되살아난다(그리고 이미 마커에 있으니 다시 기록하지 않는다).
-    switch (actionFor(ours, .{ .wrapped = user }, .present, null)) {
-        .write => |w| {
-            try testing.expectEqualStrings(user, w.wrapped.?);
-            try testing.expect(!w.record_marker);
-        },
-        .skip => return error.MarkerIgnored,
-    }
-    // **마커가 스크립트를 이긴다.** 둘이 다른 값을 들고 있으면 단일 출처가 이겨야 한다 — 문서(§7.2.2)가
-    // "갱신·복원 모두 마커를 우선 신뢰한다"고 못 박은 계약인데 코드가 반대였다(적대 검증 M1/F6).
-    switch (actionFor(ours, .{ .wrapped = user }, .present, "옛 세대 스크립트에 남은 값")) {
-        .write => |w| try testing.expectEqualStrings(user, w.wrapped.?),
-        .skip => return error.MarkerNotPreferred,
-    }
-    // 마커가 "감쌀 것 없었음"을 확정하면 그대로 감싸지 않고 쓴다 — 스크립트에 남은 옛 wrap을 되살리지 않는다
-    // (그게 문서가 금지한 "시간 여행"이다).
-    switch (actionFor(ours, .{ .wrapped = null }, .present, "옛 세대 값")) {
-        .write => |w| try testing.expectEqual(@as(?[]const u8, null), w.wrapped),
-        .skip => return error.ConfirmedNoneIgnored,
-    }
-
-    // 스크립트가 없으면 statusLine이 없는 파일을 가리키는 상태다 — 재생성하되 **확정을 남기지 않는다**.
-    switch (actionFor(ours, null, .absent, null)) {
-        .write => |w| {
-            try testing.expectEqual(@as(?[]const u8, null), w.wrapped);
-            try testing.expect(!w.record_marker);
-        },
-        .skip => return error.DanglingPointerLeft,
-    }
-
-    // 스크립트 wrap은 마커가 없을 때의 폴백이고, 이때는 마커로 **승격**한다(1회 마이그레이션).
-    switch (actionFor(ours, null, .present, user)) {
-        .write => |w| {
-            try testing.expectEqualStrings(user, w.wrapped.?);
-            try testing.expect(w.record_marker);
-        },
-        .skip => return error.ScriptWrapIgnored,
-    }
-
-    // 설치·감싸기는 settings를 읽어서 확인한 것이라 마커에 확정으로 기록한다.
-    switch (actionFor(.absent, null, .absent, null)) {
-        .write => |w| {
-            try testing.expectEqual(@as(?[]const u8, null), w.wrapped);
-            try testing.expect(w.record_marker);
-        },
-        .skip => return error.InstallSkipped,
-    }
-    switch (actionFor(.{ .command = user }, null, .absent, null)) {
-        .write => |w| {
-            try testing.expectEqualStrings(user, w.wrapped.?);
-            try testing.expect(w.record_marker);
-        },
-        .skip => return error.WrapExistingSkipped,
-    }
-}
-
 test "restoreActionFor: 마커가 스크립트보다 앞서고, 모르면 아무것도 안 한다" {
     const ours: SettingsState = .{ .command = "/Users/a/.claude/maru-statusline.sh" };
     const user = "sh ~/.claude/statusline-command.sh";
@@ -567,22 +404,6 @@ test "restoreActionFor: 마커가 스크립트보다 앞서고, 모르면 아무
     try testing.expectEqual(RestoreAction.clear, restoreActionFor(ours, null, null));
 }
 
-test "planFor: 사용자 커스텀 상태줄은 지우지 않고 감싼다" {
-    // 읽지 못했으면 판정 자체를 하지 않는다.
-    try testing.expectEqual(@as(?InstallPlan, null), planFor(.unreadable));
-    // 읽어서 없음을 확인했으면 설치.
-    try testing.expectEqual(InstallPlan.install, planFor(.absent));
-    try testing.expectEqual(InstallPlan.install, planFor(.{ .command = "" }));
-    try testing.expectEqual(InstallPlan.install, planFor(.{ .command = "   \n" }));
-    // 우리 것이면 최신 유지.
-    try testing.expectEqual(InstallPlan.refresh, planFor(.{ .command = "/Users/a/.claude/maru-statusline.sh" }));
-    // **사용자 것이면 감싼다** — statusLine은 필드가 하나뿐이라 나란히 둘 자리가 없지만, 건너뛰면 그 사용자는
-    // 기능을 아예 못 쓴다. 원래 명령은 마커에 남아 복원 가능하다.
-    try testing.expectEqual(InstallPlan.wrap_existing, planFor(.{ .command = "bunx ccusage statusline" }));
-    try testing.expectEqual(InstallPlan.wrap_existing, planFor(.{ .command = "~/bin/my-statusline" }));
-    try testing.expectEqual(InstallPlan.wrap_existing, planFor(.{ .command = "/opt/other-tool/statusline.sh" }));
-}
-
 test "plausibleIdentity: 파일이 잘리거나 오염돼도 그대로 쓰지 않는다" {
     try testing.expect(plausibleIdentity("03e06864-0379-4a52-8602-c28b95c32559"));
     try testing.expect(plausibleIdentity("019f9538-ea58-7b93-81a5-b78ef23a8292\n"));
@@ -591,24 +412,4 @@ test "plausibleIdentity: 파일이 잘리거나 오염돼도 그대로 쓰지 �
     try testing.expect(!plausibleIdentity("../../etc/passwd")); // 경로 조각 — 파일명으로 쓰면 위험하다
     try testing.expect(!plausibleIdentity("id with space"));
     try testing.expect(!plausibleIdentity("id\nwith\nnewline"));
-}
-
-test "scriptBody: 규율 셋(pane 게이트·stdin drain·무출력)이 본문에 있다" {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(testing.allocator);
-    try scriptBody(&out, testing.allocator, "/tmp/maru/agent-sessions", null);
-    const body = out.items;
-    // MARU_PANE_ID가 없으면 즉시 종료 — Maru 밖 claude의 설정을 오염시키지 않는다.
-    try testing.expect(std.mem.indexOf(u8, body, "MARU_PANE_ID") != null);
-    // stdin을 끝까지 읽는다(안 읽으면 claude 쪽 파이프가 막힌다).
-    try testing.expect(std.mem.indexOf(u8, body, "payload=$(cat)") != null);
-    // 상태줄에 출력하지 않는다 — echo/printf로 stdout에 쓰는 줄이 없어야 한다(파일 리다이렉트만 허용).
-    var it = std.mem.splitScalar(u8, body, '\n');
-    while (it.next()) |line| {
-        const t = std.mem.trim(u8, line, " \t");
-        if (t.len == 0 or t[0] == '#') continue;
-        if (std.mem.startsWith(u8, t, "echo ")) return error.WritesToStdout;
-        if (std.mem.startsWith(u8, t, "printf ") and std.mem.indexOf(u8, t, ">") == null) return error.WritesToStdout;
-    }
-    try testing.expect(std.mem.indexOf(u8, body, "/tmp/maru/agent-sessions") != null);
 }

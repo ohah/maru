@@ -428,7 +428,10 @@ walk-up해 캐시하므로 비활성 Term을 함께 읽어도 비용이 늘지 �
 
 
 §7.2.1은 **자식이 존재할 때만** 신원을 읽는다. 도구를 한 번도 실행하지 않는 세션은 그 창이 없어 대화 줄이 빈다.
-그 빈틈을 claude 상태줄로 메운다 — `sidebar.agent-transcript-hook`으로 끌 수 있다(기본 on).
+그 빈틈을 claude 상태줄로 메웠었다. **그 훅은 2026-08-21에 제거됐다**([agent-hooks.md](agent-hooks.md) §5) —
+`SessionStart`가 상위집합이고 사용자 `statusLine`을 감싸던 침습이 사고를 냈기 때문이다. 그래서 지금 관측
+모드에서 그 빈틈은 **다시 열려 있다**: 도구를 한 번도 안 쓰는 세션은 대화 줄이 빈다. 훅 모드(`sidebar.agent-hooks`)를
+켜면 그 축이 `UserPromptSubmit`/`Stop`으로 채워진다.
 
 **무엇을 쓰는가**: claude는 `settings.json`의 `statusLine.command`를 매 턴 실행하면서 **stdin으로 JSON**
 (`session_id`·`transcript_path`·cwd·`rate_limits`)을 주고 **stdout을 상태줄에 그린다**. 우리는 stdin만 쓰고

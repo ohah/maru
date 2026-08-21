@@ -69,7 +69,7 @@ pub fn finishInitialSurface(self: *AppSession) void {
     self.surface_initialized = true;
     // 상태줄 훅을 config에 맞춘다(설치/복원). 사용자 파일을 건드리는 유일한 자리라 시작 시 한 번만 조정하고,
     // config를 다시 적용할 때 같은 함수가 다시 맞춘다.
-    agent_ops.reconcileAgentStatusline(self);
+    agent_ops.removeAgentStatuslineHook(self);
     // provider 훅도 같은 자리에서 맞춘다(docs/agent-hooks.md §5). 게이트가 꺼져 있으면 그 함수가 즉시 나간다.
     agent_ops.reconcileAgentHooks(self);
     // 지난 실행이 남긴 이벤트 로그를 지운다 — **게이트와 무관**하고 **시작할 때만** 돈다(계약 §4.2).

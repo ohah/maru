@@ -50,8 +50,10 @@ pub fn configDir(provider: command.Provider, buf: []u8, env_value: ?[]const u8, 
 }
 
 /// 어느 provider 의 세트든 넘지 않는 크기. 순수 층이라 할당하지 않으므로 고정 배열의 상한이 필요하다.
-/// 세트가 이보다 커지면 컴파일이 막힌다(아래 테스트).
-pub const max_events: usize = 8;
+///
+/// **손으로 적지 않고 세트에서 뽑는다.** 손으로 적으면 이벤트를 하나 더할 때 여기를 잊고, 그러면
+/// `scan` 의 고정 배열이 범위를 넘어 터진다(실제로 그렇게 한 번 터졌다).
+pub const max_events: usize = @max(command.claude_events.len, command.codex_events.len);
 
 /// platform 이 설정 파일을 훑어 채우는 요약. **우리 항목만** 센다 — 사용자 항목은 세지 않는다(건드리지 않으므로).
 pub const Known = struct {
@@ -848,15 +850,29 @@ test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
     const a = arena.allocator();
     const want = try wantCommand(a);
 
-    // claude 세트로 넣은 파일을 codex 세트로 훑으면 `Notification` 이 «세트 밖» 이다.
+    // claude 세트로 넣은 파일을 codex 세트로 훑으면 claude 에만 있는 이벤트가 «세트 밖» 이다.
     // 이 대조가 **세트 분리가 실제로 판정을 바꾼다**는 것을 보인다 — 안 그러면 분리가 장식이다.
     var hooks: std.json.ObjectMap = .empty;
     try apply(.claude, a, &hooks, want, .install);
     var wrapper: std.json.ObjectMap = .empty;
     try wrapper.put(a, "hooks", .{ .object = hooks });
 
+    // 기대치를 손으로 적지 않는다 — 세트가 달라질 때마다 여기를 고치게 되고, 그러면 이 테스트가
+    // «분리가 판정을 바꾼다» 대신 «내가 최근에 무엇을 더했나» 를 재게 된다.
+    const claude_only = comptime blk: {
+        var n: usize = 0;
+        for (command.claude_events) |c| {
+            var in_codex = false;
+            for (command.codex_events) |x| {
+                if (std.mem.eql(u8, c.name, x.name)) in_codex = true;
+            }
+            if (!in_codex) n += 1;
+        }
+        break :blk n;
+    };
+    try testing.expect(claude_only > 0); // 대조가 성립하는 전제
     const as_codex = scan(.codex, wrapper.get("hooks"), want).?;
-    try testing.expectEqual(@as(usize, 1), as_codex.events_outside); // Notification 하나
+    try testing.expectEqual(claude_only, as_codex.events_outside);
     try testing.expectEqual(Plan.refresh, planForSet(.codex, .{ .known = as_codex }, .ensure));
 
     const as_claude = scan(.claude, wrapper.get("hooks"), want).?;
@@ -864,11 +880,13 @@ test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
     try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = as_claude }, .ensure));
 }
 
-test "세트가 고정 배열 상한을 넘지 않는다" {
-    // `scan` 이 순수 층이라 할당하지 않고 고정 배열로 «덮은 이벤트» 를 센다. 세트가 그보다 커지면
-    // 조용히 잘리는 것이 아니라 여기서 걸려야 한다.
+test "고정 배열 상한이 세트를 따라온다" {
+    // `scan`·`ourPlacements` 는 순수 층이라 할당하지 않고 고정 배열로 «덮은 이벤트» 를 센다. 그 상한을
+    // 손으로 적으면 이벤트를 더할 때 잊고 범위를 넘긴다 — 그래서 세트에서 뽑는다. 여기서는 그 유도가
+    // **두 provider 를 다 덮는지** 만 확인한다.
     try testing.expect(command.claude_events.len <= max_events);
     try testing.expect(command.codex_events.len <= max_events);
+    try testing.expect(max_events == command.claude_events.len or max_events == command.codex_events.len);
 }
 
 test "모르는 모양이면 판정을 포기한다 — 거기에 쓰면 사용자 설정을 뭉갠다" {

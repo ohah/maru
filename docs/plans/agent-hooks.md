@@ -103,7 +103,12 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
   단독으로 켜면 `agent_state`가 `unknown`에 고정돼 **사이드바 배지가 통째로 사라진다.** AH4가 들어온 뒤
   기본값을 켠다(또는 두 단계를 한 PR로 묶는다).
 - 훅 모드 Term에서 **OSC 9/777 알림 drain을 건너뛰고**(pending은 비워 버린다), `agent_observer`에 화면·OSC
-  title/progress·`output_active`를 넣지 않는다. **OSC 7/133/52/11 등은 그대로 돈다**(계약 §1.1).
+  title/progress·`output_active`를 넣지 않는다.
+- **턴 스냅샷은 훅 쪽에서 찍는다.** 관측 트리거를 끄기만 하면 게이트를 켠 것만으로 «에이전트가 방금 바꾼
+  것»이 사라진다 — 같은 술어(`isTurnEnd`)를 훅 전이에 태운다(2026-08-21, 문서-코드 대조가 잡은 누락).
+  **배치당 한 번**만 찍고(배치 안의 이벤트는 같은 작업트리를 본다), 회전본을 건지는 경로도 같은 규율을
+  탄다. 자식이 남아 lead를 붙잡은 동안에는 찍지 않는다 — 그때 찍으면 자식이 고칠 파일이 스냅샷 뒤에
+  바뀌어 빠진다. **OSC 7/133/52/11 등은 그대로 돈다**(계약 §1.1).
 - 검증: 모드별로 상태·알림 소스가 정확히 하나인지(교차 오염 0), 강등이 기록되는지, 무관 OSC가 훅 모드에서도
   동작하는지, 같은 창에 두 모드 pane 공존.
 
@@ -111,12 +116,29 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 
 - `Term.agent_state`를 훅 모드에서 훅 payload로 채운다: `UserPromptSubmit`~`Stop` = 진행중,
   `PermissionRequest` = 입력 대기, `Stop` = 완료. `stop_hook_active` 재진입은 무시한다.
-- **`Stop.background_tasks`가 비어 있지 않으면 완료로 단정하지 않는다** — 턴은 끝났어도 셸 작업이
-  돌고 있다(실측으로 `{id, type: shell, status: running, description}` 형태를 확인했다).
+- **`Stop.background_tasks`에 `status: running`인 항목이 있으면 완료로 단정하지 않는다** — 턴은 끝났어도
+  셸 작업이 돌고 있다(실측으로 `{id, type: shell, status: running, description}` 형태를 확인했다).
+  «비어 있나»로 보면 끝난 항목 하나가 배지를 영원히 붙잡는다. **claude 전용 필드다** — codex 바이너리에는
+  그 키가 없고(2026-08-21 실측), 없으면 «도는 것 0»이라 codex에서는 평소 `Stop` 규칙 그대로다.
+- **`StopFailure`도 턴 끝으로 다룬다** — 오류로 끝난 턴은 `Stop`이 오지 않는다. codex 열거에는 없다.
+- **서브에이전트를 `SubagentStart`/`SubagentStop`으로 «센다»** — 자식이 도는 동안 lead의 `Stop`은 턴 끝이
+  아니고, 마지막 자식이 끝날 때 푼다. 세지 않고 «떴다» 표시만 들면 자식의 `Stop`이 `agent_id` 때문에
+  무시되어 **배지가 영영 안 풀린다**(그 설계를 한 번 짰다가 되돌렸다). 두 이벤트는 양 provider에 다 있고
+  **자식의 `agent_id`를 싣는다**(실측) — 그래서 «자식 이벤트는 무시» 가드를 수명 이벤트보다 앞에 두면
+  셈이 통째로 죽는다.
+- 풀지 말지는 **«lead의 턴이 열려 있는가»**로 가른다(계약 §2). 「lead가 끝났는가」로 물으면 «아직 시작
+  안 함»과 «이미 끝남»이 같은 값이 되어 대기 상태에 자식 한 쌍이 오면 배지가 갇힌다 — 전수 탐색이 잡았다.
+- **턴 식별자도 리셋 신호로 쓴다**(claude `prompt_id`·codex `turn_id`). `UserPromptSubmit` 하나에만 걸면
+  그 줄이 유실될 때(§4.3) 지난 턴의 셈이 넘어와 배지가 안 풀린다. ⚠️ 자식 이벤트의 키는 보지 않는다 —
+  codex의 자식은 **자기 `turn_id`**를 쓴다(실측).
 - 진행중 세부와 **AI 소행 경로**(편집 도구의 `tool_input.file_path`)가 모두 `PreToolUse`에서 온다.
   진행중 라벨은 `tool_name` + **`tool_input.description`**(사람이 읽는 설명, 실측 확인)에서
   온다. 명령 원문은 길고 민감해 배지에 쓰지 않는다 — 관측 모드의 foreground
   process 라벨과 **같은 자리**에 그리되 소스는 섞지 않는다.
+  **구현됨**: `agent_hook_mode.labelFor`(순수 규칙)가 세우고 지우는 자리를 정하고, `Term.agent_hook_tool`이
+  들고, 사이드바의 running 상태줄이 `"▁▅▇▃ 진행중 · <세부>"`로 그린다. 세부가 없으면(관측 모드거나 아직
+  도구를 안 부른 구간) **예전과 바이트가 같은** 문자열이다. 자식의 도구 호출은 부모 줄을 갈아 끼우지
+  않고(`agent_id`), 턴 경계(`Stop`·`StopFailure`·`UserPromptSubmit`·`SessionStart`)에서 비운다.
 - 검증: 상태 전이표 단위 테스트, 조용히 오래 도는 셸 명령에서 진행중 유지(관측 모드가 틀리는 케이스),
   `AskUserQuestion`이 `PreToolUse`로만 올 때 입력 대기로 잡히는지.
 - **완료 조건에 대화형 수동 검증을 포함한다** — `PermissionRequest`가 헤드리스에서 발화하지 않아
@@ -135,6 +157,8 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 
 - `Stop`→완료(`last_assistant_message`), `PermissionRequest`→주의(`tool_name`+`tool_input`),
   `Notification(idle_prompt)`→기본 억제.
+- **codex에도 알림이 간다.** 없는 것은 `Notification` 이벤트 하나이고, 완료(`Stop`)·주의
+  (`PermissionRequest`)는 codex 열거에 다 있다(계약 §2, 2026-08-21 `hooks/list` 실측).
 - **중복 방지**: 턴 단위 1회 + 재발화 가드 토큰. 주의 알림은 디바운스하되 **배지는 즉시** 바꾼다(자동 승인으로
   해소되는 요청 때문).
 - 활성·포커스 pane은 배너 억제·목록만(현행 정책과 동형).

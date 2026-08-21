@@ -73,22 +73,38 @@ pub const claude_events = [_]Event{
     .{ .name = "SessionStart" },
     .{ .name = "UserPromptSubmit" },
     .{ .name = "Stop" },
+    // 오류로 끝난 턴은 `Stop` 이 **오지 않는다** — 이것을 안 걸면 그 pane 이 영영 «진행 중» 이다(계약 §2).
+    // codex 열거에는 없어 claude 세트에만 둔다.
+    .{ .name = "StopFailure" },
     .{ .name = "Notification" },
     .{ .name = "PermissionRequest", .matcher = "*" },
     .{ .name = "PreToolUse", .matcher = "*" },
+    // 자식 수를 **세는** 유일한 신뢰 신호다(계약 §2). 자식이 도는 동안 lead 의 `Stop` 은 턴 끝이
+    // 아니고, 세지 않으면 «자식이 아직 도는데 완료 알림» 이 나간다. 양 provider 열거에 다 있다(실측).
+    .{ .name = "SubagentStart" },
+    .{ .name = "SubagentStop" },
 };
 
-/// codex 세트 — **`Notification` 이 없다**(계약 §2.1 실측: codex 의 훅 이벤트 열거에 그 이름이 없고
-/// `hooks/src/events/` 아래에도 그 파일이 없다. 알림은 훅이 아니라 별도 경로다). 없는 이벤트를 걸면
-/// 잘해야 무시되고, 나쁘면 그 파일의 파싱을 통째로 깨뜨린다 — 남의 설정 파일이라 시험 삼아 넣지 않는다.
+/// codex 세트 — **`Notification` 과 `StopFailure` 가 없다**(2026-08-21 실측). codex 자신에게 물어
+/// 확정했다: app-server `hooks/list` 는 **codex 가 실제로 로드한 것만** 돌려주므로, 모르는 이름을 함께
+/// 적어 두고 목록에서 빠지는지를 보면 추측이 필요 없다. 그렇게 물었을 때 빠진 것이 정확히 이 둘이다.
+/// 없는 이벤트를 걸면 잘해야 무시되고, 나쁘면 그 파일의 파싱을 통째로 깨뜨린다 — 남의 설정 파일이라
+/// 시험 삼아 넣지 않는다.
 ///
-/// 나머지 다섯은 claude 와 같은 이름이다(codex 도 `hooks.json` 에는 PascalCase 로 적는다 — 실측).
+/// codex 에는 `PostToolUse`·`SessionEnd`·`PreCompact` 도 있으나 걸지 않는다 — 앞의 것은 비용 때문이고
+/// (계약 §3.1) 나머지 둘은 지금 쓰는 자리가 없다.
+///
+/// 나머지 일곱은 claude 와 같은 이름이다(codex 도 `hooks.json` 에는 PascalCase 로 적는다 — 실측).
 pub const codex_events = [_]Event{
     .{ .name = "SessionStart" },
     .{ .name = "UserPromptSubmit" },
     .{ .name = "Stop" },
     .{ .name = "PermissionRequest", .matcher = "*" },
     .{ .name = "PreToolUse", .matcher = "*" },
+    // 자식 수를 **세는** 유일한 신뢰 신호다(계약 §2). 자식이 도는 동안 lead 의 `Stop` 은 턴 끝이
+    // 아니고, 세지 않으면 «자식이 아직 도는데 완료 알림» 이 나간다. 양 provider 열거에 다 있다(실측).
+    .{ .name = "SubagentStart" },
+    .{ .name = "SubagentStop" },
 };
 
 /// 그 provider 가 거는 이벤트. **전역 세트를 두지 않는다** — 하나로 두면 codex 에 없는 이벤트가
@@ -145,10 +161,23 @@ pub fn build(
     // maru 가 주입하는 값은 언제나 surface.id(숫자)이므로(`pty/macos.zig`), 그 밖의 모양이면 우리 세션이
     // 아니라고 보고 나간다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
     try out.appendSlice(allocator, "case \"$MARU_PANE_ID\" in ''|*[!0-9]*) exit 0 ;; esac; ");
-    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then mh_p='{{\"hook_event_name\":\"{s}\"}}'; fi; ", .{
-        max_payload_bytes,
-        event.oversized_marker,
-    });
+    // **상한을 넘겨도 «무엇이었는지» 는 살린다**(2026-08-21 실사용에서 실제로 넘겼다 — codex payload 하나).
+    //
+    // 예전에는 이름까지 버리고 `__oversized__` 하나만 남겼다. 그런데 `Stop` 은 최종 답변 전문
+    // (`last_assistant_message`)을 싣는다 — 긴 보고서를 낸 턴이면 상한을 넘고, 그러면 **턴 끝 신호를
+    // 통째로 잃어 배지가 안 풀린다.** 이 층이 막으려는 바로 그 실패다.
+    //
+    // 그래서 payload 를 버리기 **전에** 이름만 뽑는다. 세트의 이름을 `case` 로 훑는 것이라 프로세스가
+    // 늘지 않는다(셸 내장). 이름을 못 찾으면 예전처럼 표식만 남긴다 — 모르는 것을 지어내지 않는다.
+    // 본문은 사라지므로 알림 문구는 비지만, **상태는 옳게 간다**. 그 둘 중 무엇을 지킬지는 계약이
+    // 이미 정해 두었다: 안 풀리는 배지가 더 나쁘다.
+    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then case \"$mh_p\" in ", .{max_payload_bytes});
+    // **claude 세트로 훑는다 — codex 세트는 그 부분집합이다**(위 테스트가 못박는다). 그래서 커맨드가
+    // provider 마다 갈리지 않고, 한 벌로 두 곳을 덮는다.
+    for (claude_events) |e| {
+        try out.print(allocator, "*'\"hook_event_name\":\"{s}\"'*) mh_p='{{\"hook_event_name\":\"{s}\"}}' ;; ", .{ e.name, e.name });
+    }
+    try out.print(allocator, "*) mh_p='{{\"hook_event_name\":\"{s}\"}}' ;; esac; fi; ", .{event.oversized_marker});
     // **`{ … } 2>/dev/null` 로 감싼다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 **리다이렉션
     // 대상이 없을 때 셸이 내는 에러**(`No such file or directory`)는 못 막는다 — 실측에서 로그 디렉터리가
     // 없을 때 그 메시지가 provider 화면으로 샜다. 훅은 어떤 실패도 사용자에게 보이지 않아야 한다.
@@ -288,11 +317,15 @@ test "표식에 사람이 읽는 안내가 있고, 그 문구는 언어에 따�
 }
 
 test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
-    try testing.expectEqual(@as(usize, 6), claude_events.len);
+    // 6 → 9: `StopFailure`(오류로 끝난 턴) + `SubagentStart`/`SubagentStop`(자식 세기).
+    try testing.expectEqual(@as(usize, 9), claude_events.len);
     // codex 에는 `Notification` 이 없다(계약 §2.1 실측).
-    try testing.expectEqual(@as(usize, 5), codex_events.len);
+    // 5 → 7: 서브에이전트 둘. `StopFailure` 는 codex 열거에 없어 더하지 않는다.
+    try testing.expectEqual(@as(usize, 7), codex_events.len);
     for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "Notification"));
-    // 그 하나를 뺀 나머지는 같아야 한다 — 두 세트가 따로 흘러가면 provider 마다 다른 상태가 된다.
+    for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "StopFailure"));
+    // codex 세트는 claude 세트의 **부분집합**이어야 한다(이름도 matcher 도) — 두 세트가 따로 흘러가면
+    // provider 마다 다른 상태가 된다.
     for (codex_events) |c| {
         var found = false;
         for (claude_events) |cl| {

@@ -53,7 +53,13 @@ const tab_ops = @import("tab.zig");
 
 /// 에이전트 턴이 끝났다 — 그 순간의 작업트리를 tree 하나로 굳힌다(§6.1). 실패하면 그냥 안 찍힌 것이고
 /// 다음 턴에 다시 시도한다(스냅샷 실패가 목록·diff를 막지 않는다).
+/// 테스트 전용 호출 카운터. 이 함수는 git 저장소가 없으면 **조용히 돌아가므로**, 결과(링)로는
+/// «불렸는가» 를 볼 수 없다 — 훅 모드가 턴 끝에 이것을 부르는지는 호출 자체를 세야 알 수 있다.
+/// 제품 빌드에서는 `comptime` 으로 사라진다(배타 카운터와 같은 규약).
+pub var test_turn_snapshot_calls: usize = 0;
+
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
+    if (builtin.is_test) test_turn_snapshot_calls += 1;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
     // 저장소가 바뀌었으면 링을 버린다 — 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
@@ -492,6 +498,11 @@ pub fn agentIdentityFromStatuslineFile(self: *AppSession, term: *Term, buf: []u8
 /// best-effort다. 실패는 조용히 지나간다 — 이 훅이 없어도 대화는 자식 신원 경로(§7.2.1)로 대부분 잡힌다.
 pub fn reconcileAgentStatusline(self: *AppSession) void {
     if (!is_macos) return;
+    // **테스트에서는 밝힌 경우에만 돈다** — `reconcileAgentHooks` 와 같은 규율이다. 이 경로도 같은
+    // `settings.json` 을 고치고, 격리를 잊은 테스트가 개발자의 **사용자 상태줄 설정을 덮어썼다**
+    // (2026-08-21 재현: 심어 둔 사용자 `statusLine` 이 maru 스크립트로 갈렸다). 계약이 "과거에 실제로
+    // 사용자 상태줄을 잃은 사고를 냈다" 고 적어 둔 바로 그 자리다.
+    if (builtin.is_test and !test_allow_provider_writes) return;
     const sl = maru.session.agent_statusline;
 
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -624,6 +635,19 @@ fn agentHookLogDir(a: std.mem.Allocator) ?[:0]const u8 {
 /// 여러 번 만들므로 정리 경로를 보려면 이 값을 되돌린다.
 pub var hook_logs_cleaned = false;
 
+/// 테스트가 **시작 시 정리를 실제로 돌리겠다**고 밝히는 스위치. 기본은 꺼짐이다.
+///
+/// 왜 필요한가: 이 정리는 로그 디렉터리의 `<숫자>.ndjson` 을 **전부** 지운다. 테스트가 `AppSession.init`
+/// 을 부르면서 `XDG_CACHE_HOME`(또는 `HOME`)을 격리하지 않으면 그 «전부» 가 **개발자의 진짜 캐시**다 —
+/// 실제로 그렇게 사용자가 쓰고 있던 세션의 이벤트 로그를 날렸다(2026-08-21, 실사용 중에 재현). 테스트는
+/// 자기 머신 밖에 흔적을 남기지 않아야 하고, 남기더라도 **그러겠다고 밝힌 테스트만** 그래야 한다.
+pub var test_allow_log_cleanup = false;
+
+/// 테스트가 **provider 설정 파일을 실제로 고치겠다**고 밝히는 스위치. 기본은 꺼짐이다.
+/// 격리를 잊은 테스트가 개발자의 `~/.claude/settings.json`·`~/.codex/hooks.json` 을 고치지 않게 —
+/// 그 사고가 실제로 났다(`reconcileAgentHooks`).
+pub var test_allow_provider_writes = false;
+
 /// 시작할 때 남아 있는 훅 이벤트 로그를 **읽지 않고 지운다**(docs/agent-hooks.md §4.2·§5).
 ///
 /// **게이트와 무관하게 돈다.** 게이트를 꺼도 이미 설치된 훅은 계속 쓰는데, 회전이 «소비»에 붙어 있어
@@ -641,6 +665,9 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
     // 하나 더 열 때마다 이 함수가 다시 돌면 **먼저 열린 창의 터미널이 지금 쓰고 있는 로그를 지운다.** 지금은
     // 소비자가 없어 티가 안 나지만 AH3이 들어오면 그대로 조용한 유실이다.
     if (hook_logs_cleaned) return;
+    // **테스트에서는 밝힌 경우에만 돈다.** 격리를 잊은 테스트가 개발자의 진짜 로그를 지우지 않게 —
+    // 그 사고가 실제로 났다(위 `test_allow_log_cleanup`).
+    if (builtin.is_test and !test_allow_log_cleanup) return;
     hook_logs_cleaned = true;
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
@@ -695,6 +722,12 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
 /// best-effort다. 실패는 조용히 지나가고, 그러면 그 세션은 관측 모드로 남는다(계약 §1.2).
 pub fn reconcileAgentHooks(self: *AppSession) void {
     if (!is_macos) return;
+    // **테스트에서는 밝힌 경우에만 돈다.** 이 함수는 게이트가 꺼져 있으면 «지운다» 경로를 타는데,
+    // `CLAUDE_CONFIG_DIR`·`HOME` 을 격리하지 않은 테스트가 `AppSession.init` 을 부르면 그 대상이
+    // **개발자의 진짜 `~/.claude/settings.json`** 이다 — 실제로 사용자가 켜 둔 훅을 지웠다(2026-08-21,
+    // 표식 있는 항목만 정확히 사라지는 것으로 재현했다. 로직은 맞고 대상이 틀렸다).
+    // 로그 정리(`cleanupAgentHookLogs`)와 같은 규율이다.
+    if (builtin.is_test and !test_allow_provider_writes) return;
     const hook_command = maru.session.agent_hook_command;
 
     // **끄면 지운다**(계약 §5). 게이트 값이 곧 의도다 — 켜고 끄기가 한 쌍이라야 사용자가 되돌릴 수 있다.
@@ -1121,9 +1154,17 @@ pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) b
 pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observation_current: bool) void {
     switch (agentHookMode(self, term)) {
         .hook => pollAgentHookEvents(self, term, displayed),
-        .observe => if (observation_current) {
-            pollAgentState(self, term, displayed);
-            pollAgentTranscript(self, term, displayed);
+        .observe => {
+            // 훅 모드에서 남은 **진행 중 세부**를 버린다. 남겨 두면 관측 소스가 그린 배지 옆에 훅이
+            // 적은 문구가 붙는다 — 그것이 곧 계약 §1 이 금지하는 «한 Term 두 소스» 다.
+            term.agent_hook_tool.clear();
+            // 자식 셈도 버린다. 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
+            // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
+            term.agent_hook_progress.reset();
+            if (observation_current) {
+                pollAgentState(self, term, displayed);
+                pollAgentTranscript(self, term, displayed);
+            }
         },
     }
 }
@@ -1184,10 +1225,14 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const batch = term.agent_hook_cursor.take(buf[0..n], &events);
 
     const before = term.agent_state;
+    const tool_before = term.agent_hook_tool;
     const had_reply = term.agent_transcript.owned.reply().len > 0;
     var conversation_changed = false;
+    var turn_ended = false;
     for (events[0..batch.count]) |ev| {
-        if (applyHookEvent(self, term, ev)) conversation_changed = true;
+        const applied = applyHookEvent(self, term, ev);
+        if (applied.conversation) conversation_changed = true;
+        if (applied.turn_end) turn_ended = true;
         // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
         term.agent_last_output_ms = self.awakeMs();
         term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
@@ -1199,7 +1244,13 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
             .{ batch.count, batch.dropped, batch.recovered, batch.more },
         );
     }
+    // **배치당 한 번만 찍는다** — 배치 안의 이벤트는 모두 같은 작업트리를 본다(위 `applyHookEvent`).
+    if (turn_ended) captureTurnSnapshot(self, term.surfaceId());
     if (displayed and term.agent_state != before) self.metal_dirty = true;
+    // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
+    // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
+    if (displayed and !std.mem.eql(u8, term.agent_hook_tool.text(), tool_before.text()))
+        self.chrome_dirty = true;
 
     // **다 읽은 뒤에 회전한다**(계약 §4.2). 읽기 전에 돌리면 방금 온 이벤트를 회전본에 두고 새 파일부터
     // 읽게 되어, tail 재수집이 없으면 그대로 유실이다. `more` 가 남아 있으면(tick 상한에 걸렸다) 미룬다 —
@@ -1218,16 +1269,74 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
 /// **두 경로가 이것을 공유해야 한다**(평시 tail 읽기와 회전본 건지기). 처음엔 각자 적었는데, 회전본 쪽이
 /// 대화를 빠뜨려 **마지막 `Stop` 이 회전본에 들어가면 응답을 잃는** 결함이 생겼다(테스트가 잡았다).
 /// 대화가 바뀌었으면 `true` 를 돌려준다 — 응답 줄이 생기거나 사라지면 행 높이가 달라져 재투영이 필요하다.
-fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) bool {
+/// 이벤트 하나를 적용한 뒤 **호출자가 배치 단위로 처리해야 하는 사실들**.
+const Applied = struct {
+    /// 마지막 대화가 바뀌었다 — 응답 줄이 생기거나 사라지면 행 높이가 달라져 재투영이 필요하다.
+    conversation: bool = false,
+    /// 이 이벤트로 턴이 끝났다.
+    turn_end: bool = false,
+};
+
+fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
     const prev_state = term.agent_state;
-    term.agent_state = mode_mod.next(term.agent_state, ev);
+    // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지
+    // 않으면서도 마지막 자식이 끝날 때 배지가 풀린다(계약 §2).
+    term.agent_state = mode_mod.advance(&term.agent_hook_progress, term.agent_state, ev);
+
+    // **진행 중 세부**(계약 §2). 훅 모드는 화면·프로세스 관측을 끄므로(§1.1) 이 자리를 안 채우면
+    // 배지가 «진행중» 한 마디만 말한다 — 훅을 켠 사용자가 정보를 잃는다(§8).
+    switch (mode_mod.labelFor(ev)) {
+        .keep => {},
+        .clear => term.agent_hook_tool.clear(),
+        .set => |body| term.agent_hook_tool.set(body),
+    }
+
+    // **턴이 끝났다는 사실만 돌려준다**(계약 §1 표 — 훅 모드의 턴 경계는 `UserPromptSubmit`/`Stop`).
+    // 관측 모드는 `pollAgentState` 가 같은 일을 하는데 훅 모드는 그 함수를 **아예 부르지 않으므로**
+    // (§1.3 배타) 이것을 안 하면 «에이전트가 방금 바꾼 것» 이 통째로 사라진다 — 게이트를 켠 것만으로
+    // 조용히 잃는 기능이 된다. 판정은 관측 모드와 **같은 술어**(`isTurnEnd`)를 쓴다: 두 모드가 서로
+    // 다른 «턴 끝» 을 갖는 순간 링의 의미가 갈린다.
+    //
+    // **여기서 찍지 않는 이유**: 한 tick 의 배치에 턴 끝이 여럿 들어올 수 있고(회전본을 건질 때가
+    // 특히 그렇다), 그때마다 찍으면 `git write-tree` 가 그 수만큼 **동기로** 돈다. 배치 안의 이벤트는
+    // 모두 **같은 작업트리**를 보므로 여러 번 찍어도 나오는 tree 가 같다 — 비용만 늘고 얻는 것이 없다.
+    // 호출자가 배치 끝에서 한 번 찍는다.
+    const turn_end = maru.session.turn_snapshot.isTurnEnd(turnStateOf(prev_state), turnStateOf(term.agent_state));
 
     // **알림은 전이에 붙는다**(계약 §6). 같은 턴에서 `Stop` 이 여러 번 와도 상태가 이미 `idle` 이라
     // 전이가 없어 두 번 울리지 않는다 — 「턴 단위 1회」를 따로 세지 않아도 성립한다.
-    switch (mode_mod.noticeOn(prev_state, term.agent_state)) {
+    // **세션이 (재)시작되며 만든 전이는 알리지 않는다**(§6). `resume`·컨텍스트 압축은 턴 중간에도
+    // `SessionStart` 를 만드는데, 그것이 상태를 «대기» 로 놓는 것은 «턴이 끝났다» 가 아니라 «다시
+    // 시작했다» 다. 배지는 그대로 바뀌고 알림만 가려진다.
+    const notice = if (mode_mod.suppressesNotice(ev)) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, term.agent_state);
+    switch (notice) {
         .none => {},
-        .done => term.agent_hook_notice.set(.done, ev.text, self.awakeMs()),
+        // 턴 끝은 같은 전이지만 **오류로 끝난 턴을 «완료» 라 부르지 않는다**(계약 §2). 그 사실은
+        // 진행 상태가 들고 있다 — 자식이 남았으면 끝 전이가 `StopFailure` 가 아니라 마지막
+        // `SubagentStop` 에서 일어나기 때문이다.
+        //
+        // **오류 사유를 버리지 않는다.** `StopFailure` 도 `last_assistant_message` 에 사유를 싣고 온다
+        // (실측 — 로그인 안 된 세션에서 "Not logged in · Please run /login" 을 받았다). 그 자리를 비우면
+        // 알림이 «오류로 끝났습니다» 한 마디만 하고, 사용자는 무엇이 잘못됐는지 다시 찾아야 한다.
+        // 자식 뒤에 끝난 경우엔 마지막 `SubagentStop` 이 전이를 만들어 그 이벤트에 사유가 없다 — 그때는
+        // 비어 있고, 그것은 원래 사유가 없는 것이지 버린 것이 아니다.
+        //
+        // **본문은 lead 의 것이어야 한다.** 자식이 남아 lead 를 붙잡았다면 턴 끝 전이는 마지막
+        // `SubagentStop` 에서 일어나는데, 그 이벤트의 `last_assistant_message` 는 **자식의 응답**이다
+        // (실측에서 `"from-child"` 를 받았다). 그것을 그대로 실으면 «완료: from-child» 가 나가 lead 가
+        // 무슨 말을 했는지 대신 자식이 무슨 말을 했는지를 알린다. 자식 이벤트가 만든 전이에서는
+        // 그 Term 에 이미 쌓아 둔 **lead 의 마지막 응답**을 쓴다.
+        .done => {
+            const body = if (ev.agent_id.len == 0) ev.text else term.agent_transcript.owned.reply();
+            if (term.agent_hook_progress.takeFailed())
+                term.agent_hook_notice.set(.failed, body, self.awakeMs())
+            else
+                term.agent_hook_notice.set(.done, body, self.awakeMs());
+        },
+        // `noticeOn` 은 전이만 보므로 지금은 이 값을 내지 않는다(위 `.done` 에서 갈린다). 그래도
+        // `unreachable` 을 두지 않는다 — 뒷날 그 함수가 이벤트를 보게 되면 그 순간 제품이 죽는다.
+        .failed => term.agent_hook_notice.set(.failed, "", self.awakeMs()),
         .attention => {
             // 무엇을 승인하는지 — 사람이 읽는 설명이 있으면 그것, 없으면 도구 이름. **명령 원문은
             // 싣지 않는다**(계약 §7: 길고 민감하다).
@@ -1243,15 +1352,18 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
             term.agent_transcript.owned.setPrompt(ev.text);
             // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
             term.agent_transcript.owned.setReply("");
-            return true;
+            return .{ .conversation = true, .turn_end = turn_end };
         },
-        .stop => if (ev.text.len > 0) {
+        // **오류 사유도 마지막 응답이다.** provider 가 `StopFailure` 의 `last_assistant_message` 로
+        // 사유를 준다(실측). 저장하지 않으면 사이드바 대화 줄이 오류 턴만 비고, 자식이 남아 알림이
+        // 늦게 나가는 경우엔 그 본문마저 잃는다(위 `.done` 분기가 이 값을 쓴다).
+        .stop, .stop_failure => if (ev.text.len > 0) {
             term.agent_transcript.owned.setReply(ev.text);
-            return true;
+            return .{ .conversation = true, .turn_end = turn_end };
         },
         else => {},
     }
-    return false;
+    return .{ .turn_end = turn_end };
 }
 
 /// 종료할 때 **이 세션이 소유한 pane 의** 이벤트 로그를 지운다(계약 §4.2).
@@ -1345,7 +1457,11 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
     var events: [event.max_events_per_tick]event.Event = undefined;
     while (true) {
         const batch = cursor.take(text, &events);
-        for (events[0..batch.count]) |ev| _ = applyHookEvent(self, term, ev);
+        var rotated_turn_end = false;
+        for (events[0..batch.count]) |ev| {
+            if (applyHookEvent(self, term, ev).turn_end) rotated_turn_end = true;
+        }
+        if (rotated_turn_end) captureTurnSnapshot(self, term.surfaceId());
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }
@@ -1366,7 +1482,8 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
     const kind = term.agent_hook_notice.kind;
     switch (kind) {
         .none => return null,
-        .done => {},
+        // 완료도 오류도 **바로** 띄운다 — 디바운스는 «곧 저절로 해소될 수 있는» 주의 알림만의 규율이다.
+        .done, .failed => {},
         .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
             .wait => return null,
             .drop => {

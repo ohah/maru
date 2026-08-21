@@ -54,6 +54,8 @@ pub const events = [_]EventTrust{
     .{ .json_name = "Stop", .snake = "stop", .matcher_in_hash = false, .confidence = .measured },
     .{ .json_name = "PermissionRequest", .snake = "permission_request", .matcher_in_hash = true, .confidence = .measured },
     .{ .json_name = "PreToolUse", .snake = "pre_tool_use", .matcher_in_hash = true, .confidence = .measured },
+    .{ .json_name = "SubagentStart", .snake = "subagent_start", .matcher_in_hash = true, .confidence = .measured },
+    .{ .json_name = "SubagentStop", .snake = "subagent_stop", .matcher_in_hash = true, .confidence = .measured },
 };
 
 pub fn forEvent(json_name: []const u8) ?EventTrust {
@@ -265,7 +267,7 @@ fn hashAlloc(entry: EventTrust, cmd: []const u8, timeout_seconds: u32, matcher: 
 // 즉 codex 에게 «네가 계산한 값이 뭐냐» 고 물을 수 있다 — 역산도, 모델 호출도 필요 없다.
 // 아래 다섯은 그렇게 받은 값이고, 우리 구현이 그것과 어긋나면 그 훅은 영영 미신뢰로 남는다.
 //
-// fixture 는 `hooks.json` 의 다섯 이벤트 **모두에** `matcher: "*"` 를 적은 상태다. 그런데도
+// fixture 는 `hooks.json` 의 세트 이벤트 **모두에** `matcher: "*"` 를 적은 상태다. 그런데도
 // `user_prompt_submit`·`stop` 의 값은 matcher 없이 계산해야 맞는다 — codex 가 그 둘에서 matcher 를
 // **로드할 때 버리기** 때문이다(목록이 `matcher: null` 로 온다). 이 대비가 이 fixture 의 핵심이다.
 const golden_command = "printf fired > /dev/null; exit 0";
@@ -276,12 +278,14 @@ const golden = [_]GoldenCase{
     .{ .json_name = "SessionStart", .hash = "sha256:9b1757037d5ae6563e2fb361ce7b37fc0899aae52c1b7d80bfab17816d62b8e3" },
     .{ .json_name = "PreToolUse", .hash = "sha256:75d94ad4c3d9f7b851f02876acd2e9c7dc427f0b4f5929310516df12dc0b0635" },
     .{ .json_name = "PermissionRequest", .hash = "sha256:75cb26dffd4ee64f19c90136bc2f5299e5a9df1133c4ad35fd447e717024268f" },
+    .{ .json_name = "SubagentStart", .hash = "sha256:97c305fa72ceb659e6097ac1f91571ffa57d6b6c2bfaceb64c27c8c6641dffeb" },
+    .{ .json_name = "SubagentStop", .hash = "sha256:fd60f580c15c67ed17cef4dca2b2a8092c6452e63f62a842ea0b0bf2bdc16d19" },
     // 아래 둘은 fixture 에 matcher 가 **있는데도** 없이 계산한 값이다.
     .{ .json_name = "UserPromptSubmit", .hash = "sha256:6ccb18ff90f1de0bbc4e0ddc0818549d36697d64710ab0c5040a165fd86ba45a" },
     .{ .json_name = "Stop", .hash = "sha256:d445818a88b2e64da7d09e58850802e0f15124c6a7d9d428e44e437e433f017d" },
 };
 
-test "golden: 다섯 이벤트 모두 codex 가 계산한 값과 같다" {
+test "golden: 세트의 모든 이벤트가 codex 가 계산한 값과 같다" {
     // 세트 전체를 덮는다 — 하나라도 빠지면 그 이벤트만 조용히 미신뢰가 된다.
     try testing.expectEqual(command.codex_events.len, golden.len);
     for (golden) |g| {
@@ -302,7 +306,7 @@ test "golden: matcher 를 빼는 두 이벤트는 matcher 를 줘도 값이 같�
         try testing.expectEqualStrings(with_m, without_m);
     }
     // 반대로 넣는 이벤트는 달라야 한다.
-    for ([_][]const u8{ "SessionStart", "PreToolUse", "PermissionRequest" }) |name| {
+    for ([_][]const u8{ "SessionStart", "PreToolUse", "PermissionRequest", "SubagentStart", "SubagentStop" }) |name| {
         const with_m = try hashAlloc(forEvent(name).?, golden_command, golden_timeout, "*");
         defer testing.allocator.free(with_m);
         const without_m = try hashAlloc(forEvent(name).?, golden_command, golden_timeout, null);

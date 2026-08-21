@@ -111,6 +111,14 @@ pub fn Model(comptime Rt: type) type {
             /// 아직 띄우지 않은 훅 알림(계약 §6). 전이에서 예약하고 드레인 루프가 꺼내 간다 — 고정 크기라
             /// 힙을 잡지 않는다.
             agent_hook_notice: agent_hook_mode.PendingNotice = .{},
+            /// 이 턴의 진행 상태 — 자식이 몇이나 도는지와 lead 가 이미 끝났는지(계약 §2). 자식이 도는
+            /// 동안 lead 의 `Stop` 은 턴 끝이 아니고, 그것을 완료로 다루면 «자식이 아직 도는데 완료
+            /// 알림» 이 나간다.
+            agent_hook_progress: agent_hook_mode.Progress = .{},
+            /// 훅 모드의 **진행 중 세부**(계약 §2). 관측 모드는 이 값을 쓰지 않는다 — 모드가
+            /// 바뀌면 소비처가 아니라 `pollAgentConsumer` 가 비운다(남은 값이 다른 소스의 배지
+            /// 옆에 붙으면 그것이 곧 두 소스 혼합이다).
+            agent_hook_tool: agent_hook_mode.ToolLabel = .{},
             /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
             /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
             agent_transcript: agent_transcript_mod.Cache = .{},

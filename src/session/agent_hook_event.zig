@@ -57,6 +57,12 @@ pub const Kind = enum {
     session_start,
     user_prompt_submit,
     stop,
+    /// 오류로 끝난 턴. provider 가 `Stop` **대신** 보낸다 — 걸지 않으면 그 pane 이 영영 «진행 중» 이다.
+    stop_failure,
+    /// 서브에이전트가 떴다. 자식 수를 **세는** 유일한 신뢰 신호다.
+    subagent_start,
+    /// 서브에이전트가 끝났다.
+    subagent_stop,
     permission_request,
     pre_tool_use,
     notification,
@@ -93,8 +99,12 @@ pub const Event = struct {
     source: []const u8 = "",
     /// 참이면 이 `Stop`은 재진입이므로 **턴 종료로 세지 않는다**(계약 §2).
     stop_hook_active: bool = false,
-    /// `background_tasks`가 비어 있지 않다. 참이면 턴이 끝나도 **완료로 단정하지 않는다**(계약 §2).
-    has_background_tasks: bool = false,
+    /// `background_tasks` 중 **`status`가 `running`인 것의 수**(계약 §2). 배열이 비었는지만 보면 끝났거나
+    /// 실패한 항목 하나 때문에 배지가 영원히 «진행 중» 에 멈춘다 — 그 항목도 목록에 남기 때문이다.
+    running_background_tasks: usize = 0,
+    /// 서브에이전트 이벤트가 실어 오는 자식 식별자(계약 §2). 있으면 그 이벤트는 **자식의 것**이라 부모
+    /// 상태에 그대로 섞으면 안 된다.
+    agent_id: []const u8 = "",
 };
 
 fn kindFromName(name: []const u8) Kind {
@@ -102,6 +112,9 @@ fn kindFromName(name: []const u8) Kind {
         .{ "SessionStart", Kind.session_start },
         .{ "UserPromptSubmit", Kind.user_prompt_submit },
         .{ "Stop", Kind.stop },
+        .{ "StopFailure", Kind.stop_failure },
+        .{ "SubagentStart", Kind.subagent_start },
+        .{ "SubagentStop", Kind.subagent_stop },
         .{ "PermissionRequest", Kind.permission_request },
         .{ "PreToolUse", Kind.pre_tool_use },
         .{ "Notification", Kind.notification },
@@ -140,6 +153,8 @@ pub fn parseLine(line: []const u8) ?Event {
             ev.turn_key = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "tool_name")) {
             ev.tool_name = scan.stringValue() orelse return null;
+        } else if (std.mem.eql(u8, key, "agent_id")) {
+            ev.agent_id = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "source")) {
             ev.source = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "prompt") or std.mem.eql(u8, key, "last_assistant_message")) {
@@ -147,7 +162,7 @@ pub fn parseLine(line: []const u8) ?Event {
         } else if (std.mem.eql(u8, key, "stop_hook_active")) {
             ev.stop_hook_active = scan.boolValue() orelse return null;
         } else if (std.mem.eql(u8, key, "background_tasks")) {
-            ev.has_background_tasks = scan.nonEmptyArrayValue() orelse return null;
+            ev.running_background_tasks = scan.runningTaskCount() orelse return null;
         } else if (std.mem.eql(u8, key, "tool_input")) {
             // 중첩 객체 안에서도 **키 위치**만 본다. 값 안에 같은 단어가 있어도 걸리지 않는다.
             if (!scan.expectObjectStart()) {
@@ -554,6 +569,63 @@ const Scanner = struct {
         return false;
     }
 
+    /// 배열을 훑으며 `"status":"running"` 인 항목의 수를 센다.
+    ///
+    /// **비어 있는지만 보면 안 된다**(계약 §2) — 끝났거나 실패한 항목도 목록에 남으므로, 그것 하나 때문에
+    /// 배지가 영원히 «진행 중» 이 된다. 깊이를 세어 **그 배열의 항목 안**에 있는 `status` 만 인정한다.
+    fn runningTaskCount(self: *Scanner) ?usize {
+        const c = self.peek() orelse {
+            self.failed = true;
+            return null;
+        };
+        if (c != '[') {
+            // 형이 바뀌었다(배열이 아니다) — 값을 건너뛰고 «없다» 로 본다.
+            if (!self.skipValue()) {
+                self.failed = true;
+                return null;
+            }
+            return 0;
+        }
+        self.i += 1;
+        var running: usize = 0;
+        var depth: usize = 1;
+        var pending_status = false; // 방금 읽은 키가 `status` 였다
+        while (self.i < self.src.len) {
+            const ch = self.src[self.i];
+            if (ch == '"') {
+                const text = self.rawString() orelse {
+                    self.failed = true;
+                    return null;
+                };
+                // 항목 하나의 깊이(2)에서만 본다 — 더 깊은 곳의 같은 이름에 걸리지 않게.
+                if (depth == 2) {
+                    if (pending_status) {
+                        if (std.mem.eql(u8, text, "running")) running += 1;
+                        pending_status = false;
+                    } else if (std.mem.eql(u8, text, "status")) {
+                        pending_status = true;
+                        // 다음 토큰이 값이어야 한다 — `:` 를 건너뛴다.
+                        self.skipWs();
+                        if (self.i < self.src.len and self.src[self.i] == ':') self.i += 1;
+                    }
+                }
+                continue;
+            }
+            self.i += 1;
+            switch (ch) {
+                '[', '{' => depth += 1,
+                ']', '}' => {
+                    depth -= 1;
+                    if (depth == 0) return running;
+                    if (depth == 1) pending_status = false; // 항목이 끝났다
+                },
+                else => {},
+            }
+        }
+        self.failed = true;
+        return null;
+    }
+
     /// 배열 값을 건너뛰면서 **비어 있지 않은지**만 답한다.
     fn nonEmptyArrayValue(self: *Scanner) ?bool {
         const c = self.peek() orelse {
@@ -662,13 +734,13 @@ test "Stop의 재진입 가드와 background_tasks를 읽는다" {
     const ev = parseLine(busy).?;
     try testing.expectEqual(Kind.stop, ev.kind);
     try testing.expectEqualStrings("p1", ev.turn_key);
-    try testing.expect(ev.has_background_tasks);
+    try testing.expectEqual(@as(usize, 1), ev.running_background_tasks);
     try testing.expect(!ev.stop_hook_active);
     try testing.expectEqualStrings("끝났습니다", ev.text);
 
     const idle = "codex\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[],\"stop_hook_active\":true}";
     const ev2 = parseLine(idle).?;
-    try testing.expect(!ev2.has_background_tasks);
+    try testing.expectEqual(@as(usize, 0), ev2.running_background_tasks);
     try testing.expect(ev2.stop_hook_active);
 }
 
@@ -952,7 +1024,7 @@ test "provider 가 필드의 형을 바꿔도 줄 전체를 잃지 않는다" {
     // `background_tasks` 가 배열이 아니다 → «없음» 으로 보고 계속.
     const not_array = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":42,\"prompt_id\":\"p2\"}";
     const b = parseLine(not_array).?;
-    try testing.expect(!b.has_background_tasks);
+    try testing.expectEqual(@as(usize, 0), b.running_background_tasks);
     try testing.expectEqualStrings("p2", b.turn_key);
 
     // `stop_hook_active` 가 불리언이 아니다 → 거짓으로 보고 계속(턴 종료를 놓치는 쪽이 아니라 세는 쪽).
@@ -1000,4 +1072,55 @@ test "회전본 이름은 원본 이름으로 시작한다 — 시작 시 정리
     // 회전 도중 죽으면 회전본만 남는다. 이름이 우리 것으로 안 보이면 영영 치워지지 않는다.
     try testing.expect(std.mem.startsWith(u8, "7.ndjson" ++ rotated_suffix, "7.ndjson"));
     try testing.expect(rotated_suffix.len > 0);
+}
+
+test "background_tasks 는 running 인 것만 센다 — 끝난 항목도 목록에 남는다" {
+    // 배열이 비었는지만 보면 **끝난 작업 하나 때문에 배지가 영원히 «진행 중»** 에 멈춘다(계약 §2).
+    const line = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
+        "{\"id\":\"a\",\"type\":\"shell\",\"status\":\"completed\",\"description\":\"빌드\"}," ++
+        "{\"id\":\"b\",\"type\":\"shell\",\"status\":\"running\",\"description\":\"테스트\"}," ++
+        "{\"id\":\"c\",\"type\":\"shell\",\"status\":\"failed\",\"description\":\"린트\"}]}";
+    const ev = parseLine(line).?;
+    try testing.expectEqual(@as(usize, 1), ev.running_background_tasks);
+
+    // 다 끝났으면 0 이다 — 이 대조가 «비어 있나» 와 «도는 게 있나» 를 가른다.
+    const done = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
+        "{\"id\":\"a\",\"status\":\"completed\"},{\"id\":\"b\",\"status\":\"failed\"}]}";
+    try testing.expectEqual(@as(usize, 0), parseLine(done).?.running_background_tasks);
+
+    // 여럿이면 여럿으로 센다.
+    const many = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
+        "{\"status\":\"running\"},{\"status\":\"running\"},{\"status\":\"queued\"}]}";
+    try testing.expectEqual(@as(usize, 2), parseLine(many).?.running_background_tasks);
+}
+
+test "status 는 그 항목의 깊이에서만 인정한다 — 값에 든 같은 단어에 안 걸린다" {
+    // 설명이나 중첩 객체에 «running» 이 들어 있어도 세면 안 된다.
+    const line = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
+        "{\"status\":\"completed\",\"description\":\"status running 이라고 적힌 설명\"," ++
+        "\"meta\":{\"status\":\"running\"}}]}";
+    try testing.expectEqual(@as(usize, 0), parseLine(line).?.running_background_tasks);
+}
+
+test "StopFailure 를 안다 — 오류로 끝난 턴이 Stop 대신 온다" {
+    const line = "claude\t{\"hook_event_name\":\"StopFailure\",\"session_id\":\"s1\"}";
+    const ev = parseLine(line).?;
+    try testing.expectEqual(Kind.stop_failure, ev.kind);
+    try testing.expectEqualStrings("s1", ev.session_id);
+}
+
+test "자식 이벤트는 agent_id 를 싣고 온다 — lead 이벤트는 아니다" {
+    // 자식 활동은 `agent_id` 를 실은 이벤트로 따로 온다(계약 §2) — 그것이 있으면 부모 상태에 그대로
+    // 섞으면 안 된다.
+    const child = "claude\t{\"hook_event_name\":\"PreToolUse\",\"agent_id\":\"child-7\",\"tool_name\":\"Bash\"}";
+    const ev = parseLine(child).?;
+    try testing.expectEqualStrings("child-7", ev.agent_id);
+
+    // 같은 도구 이벤트라도 lead 가 부른 것에는 그 필드가 없다 — 이 대조가 없으면 «늘 비어 있다» 는
+    // 파서로도 위 단언이 통과한다.
+    const spawn = "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Agent\"," ++
+        "\"tool_input\":{\"description\":\"조사\"}}";
+    const ev2 = parseLine(spawn).?;
+    try testing.expectEqualStrings("조사", ev2.tool_description);
+    try testing.expectEqual(@as(usize, 0), ev2.agent_id.len); // lead 이벤트라 자식 식별자가 없다
 }

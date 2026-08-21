@@ -3268,6 +3268,8 @@ const EventForeignThreadReleaseProbe = struct {
 };
 
 test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the owner" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     var reentry_allocator: EventReleaseReentryAllocator = .{ .parent = std.testing.allocator };
     const allocator = reentry_allocator.allocator();
@@ -3464,6 +3466,8 @@ test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the 
 }
 
 test "CR3a-2c3d C2 owner lease payload seal and same-address stale owner transfer without free" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const EventCorruptionCase = enum {
         byte_pristine,
         lease,

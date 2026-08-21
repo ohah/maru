@@ -4261,12 +4261,38 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
             }
         }
-        let deferInitialSurface = (preparedWorkspaceWindowCount ?? 0) > 0
+        // CR6a-2: 일반 launch는 저장 Workspace 유무와 무관하게 terminal publication을 잠깐 defer한다. secure
+        // discovery/inventory가 먼저 끝난 뒤 저장 창을 apply하거나 아래에서 default surface를 명시적으로 finish해,
+        // launch가 방금 만든 runtime을 자기 orphan으로 관측하지 않게 한다. smoke는 recovery 제품 범위 밖이다.
+        let deferInitialSurface = !smokeMode
 
         if !startAppSession(smokeMode: smokeMode, deferInitialSurface: deferInitialSurface) {
             writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
             NSApp.terminate(nil)
             return
+        }
+        if let session = primary?.appSession {
+            maru_macos_app_session_set_primary_window(session, 1)
+            if !smokeMode {
+                if let text = preparedWorkspace {
+                    let bytes = Array(text.utf8)
+                    _ = bytes.withUnsafeBufferPointer { buf in
+                        maru_macos_app_session_prepare_recovered_sessions(session, buf.baseAddress, buf.count, 1)
+                    }
+                } else {
+                    _ = maru_macos_app_session_prepare_recovered_sessions(session, nil, 0, 0)
+                }
+                // parse 가능한 저장 Window가 없으면 recovery cut 뒤에만 기본 shell을 만든다. 실제 저장 Window가
+                // 있으면 applyWorkspaceWindow가 deferred surface를 완성한다.
+                if (preparedWorkspaceWindowCount ?? 0) <= 0 {
+                    guard maru_macos_app_session_finish_deferred_initial_surface(session) == Self.statusOK else {
+                        exitCode = 1
+                        writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
+                        NSApp.terminate(nil)
+                        return
+                    }
+                }
+            }
         }
 
         // 저장된 workspace를 복원한다(R4b) — 첫 블록을 primary에 적용하고 나머지 블록마다 새 창. 저장 없음·복원
@@ -5756,6 +5782,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 쓴다(창 개수 변경 후 다음 tick이 먼저 돌아 실무상 최신).
             if let s = surface.appSession {
                 maru_macos_app_session_set_last_window(s, windows.count <= 1 ? 1 : 0)
+                maru_macos_app_session_set_primary_window(s, surface === windows.first ? 1 : 0)
             }
             let status = renderTick()
             explicitSurface = nil

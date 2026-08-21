@@ -889,6 +889,70 @@ pub export fn maru_macos_app_session_set_last_window(session: ?*AppSession, is_l
     app_session.is_last_window = is_last != 0;
 }
 
+/// CR6a-2 primary-only virtual recovery projection identity. Swift의 `windows.first`가 단일 출처이며 quick은
+/// AppSession에서 항상 false로 닫힌다.
+pub export fn maru_macos_app_session_set_primary_window(session: ?*AppSession, is_primary: u32) void {
+    const app_session = session orelse return;
+    app_session.setPrimaryWindow(is_primary != 0);
+}
+
+/// CR6a-2 launch recovery coordinator. `has_workspace=0`이면 ptr/len을 읽지 않고 빈 trusted binding set으로
+/// discovery한다. 반환값은 AppSession.RecoveredSessionsLaunchOutcome raw 값이다.
+pub export fn maru_macos_app_session_prepare_recovered_sessions(
+    session: ?*AppSession,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+    has_workspace: u32,
+) u32 {
+    const app_session = session orelse return @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable);
+    const text: ?[]const u8 = if (has_workspace != 0) blk: {
+        const ptr = text_ptr orelse return @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable);
+        break :blk ptr[0..text_len];
+    } else null;
+    return @intFromEnum(app_session.prepareRecoveredSessionsAtLaunch(text));
+}
+
+pub export fn maru_macos_app_session_finish_deferred_initial_surface(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    app_session.finishDeferredInitialSurface() catch return @intFromEnum(Status.create_failed);
+    return @intFromEnum(Status.ok);
+}
+
+test "CR6a-2 ABI는 recovery launch 인자의 null 경계를 fail closed한다" {
+    try std.testing.expectEqual(
+        @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable),
+        maru_macos_app_session_prepare_recovered_sessions(null, @ptrFromInt(1), std.math.maxInt(usize), 1),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.null_out)),
+        maru_macos_app_session_finish_deferred_initial_surface(null),
+    );
+    maru_macos_app_session_set_primary_window(null, 1);
+
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const config: AppSessionConfig = .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .defer_initial_surface = 1,
+    };
+    var session: ?*AppSession = null;
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.ok)),
+        maru_macos_app_session_create(&config, &session),
+    );
+    defer maru_macos_app_session_destroy(session);
+    try std.testing.expect(session.?.tabs.items.len == 0);
+
+    try std.testing.expectEqual(
+        @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable),
+        maru_macos_app_session_prepare_recovered_sessions(session, null, 1, 1),
+    );
+    try std.testing.expect(session.?.tabs.items.len == 0);
+}
+
 /// cross-window 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지(§8A.2) + 이동한
 /// surface 수(§8A.3). 라이브 배선(M3d-2b Swift)이 source_window_closed=1일 때 NSWindow를 닫는다(판정은 Zig, close는 platform).
 pub const MoveResult = extern struct {

@@ -1731,6 +1731,18 @@ typedef struct {
 static MaruChromeFontCacheEntry maru_chrome_font_cache[MARU_CHROME_FONT_CACHE_CAPACITY];
 static size_t maru_chrome_font_cache_count = 0;
 static size_t maru_chrome_font_cache_cursor = 0;
+// Wall-clock timing cannot distinguish a real cache regression from scheduler/CoreText noise.
+// Tests sample these monotonically increasing counters around an already-warmed request instead.
+// Hidden visibility keeps this diagnostic out of the shipped app ABI while still allowing the
+// statically linked Zig test root to observe the exact product cache branch.
+static uint64_t maru_chrome_font_cache_hits = 0;
+static uint64_t maru_chrome_font_cache_misses = 0;
+
+__attribute__((visibility("hidden")))
+void maru_macos_coretext_chrome_font_cache_stats_for_test(uint64_t *out_hits, uint64_t *out_misses) {
+    if (out_hits != NULL) *out_hits = maru_chrome_font_cache_hits;
+    if (out_misses != NULL) *out_misses = maru_chrome_font_cache_misses;
+}
 
 static bool maru_chrome_font_key_bytes_equal(const char *a, size_t a_len, const char *b, size_t b_len) {
     if (a_len != b_len) return false;
@@ -1810,8 +1822,10 @@ static CTFontRef maru_chrome_font_for(
         // hit에서는 요청 face를 실제로 얻었는지 다시 판정하지 않는다(그 판정이 CTFont 생성이라 캐시의
         // 목적을 무너뜨린다). 캐시에 있다는 것은 이미 한 번 해석에 성공했다는 뜻이므로 매치로 본다.
         if (out_requested_matched != NULL) *out_requested_matched = 1;
+        maru_chrome_font_cache_hits += 1;
         return maru_chrome_font_cache[i].font;
     }
+    maru_chrome_font_cache_misses += 1;
     CTFontRef font = maru_chrome_font_create(size, weight, family, family_len, fallback, fallback_len, out_requested_matched);
     if (font == NULL) { *out_name = NULL; return NULL; }
     CFStringRef name = CTFontCopyPostScriptName(font);

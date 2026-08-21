@@ -231,7 +231,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
                 .group_header => |gh| if (gh.tab == 3) {
                     b_row = s;
                 },
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .card => {},
             };
             if (tab_ops.groupNestPlan(self, b_row, 1)) |plan| {
@@ -286,7 +286,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             tab_ops.recomputeVisibleTabs(self); // rows에서 B 헤더 표시 row를 찾는다
             var b_row: usize = 0;
             for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .group_header => |gh| if (gh.tab == 3) {
                     b_row = s;
                 },
@@ -394,7 +394,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             const target_tab: usize = if (std.c.getenv("MARU_FORCE_SR4_DRAG_INTO") != null) 1 else 2;
             var into_row: usize = 0;
             for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .card => |c| if (c.tab == target_tab) {
                     into_row = s;
                 },
@@ -500,7 +500,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
                 // 그룹 A(마커 index1)를 X row 앞으로 드래그 확정 → [그룹 A, 탭 X].
                 var x_row: usize = 0;
                 for (self.sidebar_rows.items, 0..) |row, s| switch (row) {
-                    .agent_toggle, .agent => {},
+                    .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                     .card => |c| if (c.tab == 0) {
                         x_row = s;
                     },

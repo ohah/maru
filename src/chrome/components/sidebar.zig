@@ -58,6 +58,12 @@ pub const Row = union(enum) {
     /// lines=이 행이 그리는 줄 수(라벨 / 폴더·브랜치 / 마지막 응답) — 카드와 같은 규율로 행 높이가 여기서 나온다.
     /// last=이 행이 그 카드 묶음의 마지막 행인가(위 `agent_toggle.last`와 같은 목적).
     agent: struct { tab: usize, pane: usize, term: usize, depth: u8 = 0, lines: u8 = 2, last: bool = false },
+    /// App-global session-host recovery projection의 typed system header. 사용자 그룹이 아니므로 tab/name/drag
+    /// identity를 싣지 않는다. primary Window만 이 variant를 materialize한다.
+    recovered_sessions_header,
+    /// `Recovered Sessions` 아래의 inert candidate. projection_index만 싣고 platform이 app-global canonical row를
+    /// live 재조회한다. CR6a-2에서는 클릭/Enter/action이 없고 CR6b가 이 typed identity에 adopt를 붙인다.
+    recovered_session: struct { projection_index: usize, lines: u8 = 1 },
 };
 
 /// row_index가 그룹 헤더 row인가(클릭 시 선택이 아니라 접기 토글 대상). closeButton과 같은 결의 순수 hit-test
@@ -201,6 +207,8 @@ pub fn rowHeight(row: Row, m: Metrics) u32 {
         // 촘촘한 여백을 그대로 쓰면 글자가 밴드 하단에 붙는다(사용자 피드백).
         .agent_toggle => |t| listRowHeight(1, m, t.last),
         .agent => |a| listRowHeight(a.lines, m, a.last),
+        .recovered_sessions_header => m.header_row_h,
+        .recovered_session => |r| listRowHeight(r.lines, m, true),
     };
 }
 
@@ -476,7 +484,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     for (rows, 0..) |r, i| switch (r) {
         .group_header => |h| if (h.has_color) try out.append(arena, bandFill(rows, i, w, m, .tab_hover_bg, p.shape)),
         // 에이전트 목록 행은 소속 카드 아래 붙는 부속이라 자기 색 밴드를 내지 않는다(hover/active는 아래 공통 경로).
-        .card, .agent_toggle, .agent => {},
+        .card, .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
     };
 
     // 활성 슬롯 밴드(첫 active=true 카드 row). group_header row는 활성 대상이 아니다.
@@ -486,7 +494,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             active_idx = i;
             break;
         },
-        .group_header, .agent_toggle, .agent => {},
+        .group_header, .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
     };
     if (active_idx) |ai| {
         // 활성 밴드는 **카드 + 그 아래 에이전트 목록 전체**를 덮는다 — 목록은 그 워크스페이스에 딸린 부속이라
@@ -513,6 +521,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
                 // `.tab_active_bg`는 활성색과 **똑같아** 둘 다 그 위에서 구분이 사라진다(사용자 제보 — 활성 카드의
                 // 하위 행을 호버해도 색 변화가 없다). 활성보다 한 단계 밝은 전용 role로 오버레이한다.
                 .agent_toggle, .agent => .row_hover_bg,
+                .recovered_sessions_header, .recovered_session => .row_hover_bg,
             };
             // 카드·헤더 호버 밴드는 **행 전체**(bandFill = 클릭 판정 구간과 동일). 목록 행만 사방 `list_pad_v/2`
             // 한 겹 들여 "카드에 딸린 부속"으로 보이게 하고 활성 밴드 위 위아래 행과 맞닿지 않게 한다
@@ -520,6 +529,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             switch (rows[hs]) {
                 .agent_toggle, .agent => try out.append(arena, listRowHoverBand(rows, hs, w, m, hover_role, p.shape)),
                 .card, .group_header => try out.append(arena, bandFill(rows, hs, w, m, hover_role, p.shape)),
+                .recovered_sessions_header, .recovered_session => {},
             }
         }
     }

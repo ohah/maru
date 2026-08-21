@@ -661,6 +661,8 @@ fn terminateAndReapFixtureChild(pid: c.pid_t) bool {
 }
 
 test "product resolver discovers and pins the one host that owns a live runtime" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const daemon = @import("daemon.zig");
     const short_endpoint = @import("short_endpoint.zig");

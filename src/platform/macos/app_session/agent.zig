@@ -336,7 +336,7 @@ pub fn anyAgentRunning(self: *AppSession) bool {
     for (self.sidebar_rows.items) |row| switch (row) {
         .card => |c| if (c.tab < self.tabs.items.len and tab_ops.tabHasRunningAgent(self.tabs.items[c.tab])) return true,
         .agent_toggle, .agent => {}, // 같은 탭의 부속이라 카드 판정으로 충분
-        .group_header => {}, // 헤더 row엔 에이전트가 없다
+        .group_header, .recovered_sessions_header, .recovered_session => {}, // system/header row엔 에이전트가 없다
     };
     return false;
 }

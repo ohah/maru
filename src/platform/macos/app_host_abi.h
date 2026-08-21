@@ -719,6 +719,23 @@ void maru_macos_app_session_set_last_window(
     MaruAppHostSession *session,
     uint32_t is_last
 );
+/* CR6a-2 app-global Recovered Sessions projection을 렌더할 유일한 일반 primary Window identity. */
+void maru_macos_app_session_set_primary_window(
+    MaruAppHostSession *session,
+    uint32_t is_primary
+);
+/* CR6a-2 launch-before-terminal secure discovery/ephemeral inventory/projection coordinator.
+   result: 0 skipped, 1 published, 2 unavailable. */
+uint32_t maru_macos_app_session_prepare_recovered_sessions(
+    MaruAppHostSession *session,
+    const uint8_t *text,
+    size_t text_len,
+    uint32_t has_workspace
+);
+/* recovery preflight 뒤 저장 Workspace가 없을 때 default shell surface를 명시적으로 완성한다. */
+int32_t maru_macos_app_session_finish_deferred_initial_surface(
+    MaruAppHostSession *session
+);
 /* cross-window workspace 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지
    (§8A.2) + 이동한 surface 수(§8A.3). Swift(M3d-2b)가 source_window_closed=1이면 NSWindow를 닫는다(판정은 Zig,
    close는 platform). app_host_abi.zig MoveResult와 layout이 정합해야 한다(ABI 계약 테스트가 @sizeOf/@offsetOf로 강제). */

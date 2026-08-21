@@ -1002,6 +1002,105 @@ pub fn build(b: *std.Build) void {
         "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
         "skip-in-aggregate-v1",
     );
+    // CR6a-2 real-host fixture는 별도 exact filtered artifact에서 fresh process-global owner graph로 실행한다.
+    // app-host aggregate에서 중복 실행하면 뒤 CR0b owner fixture의 canonical publication port를 바꾸므로 제외한다.
+    run_macos_app_host_abi_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_CR6A2_REAL_HOST_AGGREGATE_SKIP",
+        "skip-in-app-host-aggregate-v1",
+    );
+    // 아래 행들은 process-global signal/seal/daemon namespace 또는 CoreText process-global cache를 소유한다.
+    // 3,802개 단일 프로세스 aggregate에서는 건너뛰고, 바로 아래 fresh exact artifact에서 각각 실행한다.
+    run_macos_app_host_abi_tests.setEnvironmentVariable(
+        "MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP",
+        "skip-in-app-host-aggregate-v1",
+    );
+
+    const macos_chrome_face_cache_fresh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/chrome_system_text_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"chrome text shaping reuses one face across roles instead of rebuilding it per run"},
+    });
+    macos_chrome_face_cache_fresh_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+    macos_chrome_face_cache_fresh_tests.root_module.addCSourceFile(.{
+        .file = b.path("src/platform/macos/coretext_smoke.m"),
+        .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+    });
+    macos_chrome_face_cache_fresh_tests.root_module.linkFramework("Foundation", .{});
+    macos_chrome_face_cache_fresh_tests.root_module.linkFramework("CoreText", .{});
+    macos_chrome_face_cache_fresh_tests.root_module.linkFramework("CoreGraphics", .{});
+    const run_macos_chrome_face_cache_fresh_tests = b.addRunArtifact(macos_chrome_face_cache_fresh_tests);
+    // wrapper의 이름 없는 import sentinel 1 + 실제 성능 판정자 1.
+    run_macos_chrome_face_cache_fresh_tests.addArg("--maru-expect-tests=2");
+    run_macos_chrome_face_cache_fresh_tests.setCwd(b.path("."));
+
+    const macos_external_tty_fresh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/external_tty.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .filters = &.{
+            "real openpty enters raw mode, reports initial size, and restores exactly",
+            "real PTY restores before reraising every supported termination signal",
+            "invalid self-pipe byte is rejected without constructing an arbitrary signal",
+            "SIGWINCH bursts coalesce and termination wins in one wake batch",
+            "termination survives a SIGWINCH-saturated wake pipe",
+            "openpty child turns SIGWINCH burst into one latest window size",
+            "forked child cannot signal the parent raw TTY self-pipe",
+            "stale copied owner cannot repeat cleanup after the lexical owner finishes",
+        },
+    });
+    const run_macos_external_tty_fresh_tests = b.addRunArtifact(macos_external_tty_fresh_tests);
+    run_macos_external_tty_fresh_tests.addArg("--maru-expect-tests=8");
+    run_macos_external_tty_fresh_tests.setCwd(b.path("."));
+
+    const macos_external_attach_fresh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/external_attach.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"external attach product transaction resolves connects and assembles one live runtime"},
+    });
+    const run_macos_external_attach_fresh_tests = b.addRunArtifact(macos_external_attach_fresh_tests);
+    run_macos_external_attach_fresh_tests.addArg("--maru-expect-tests=1");
+    run_macos_external_attach_fresh_tests.setCwd(b.path("."));
+
+    const macos_attach_resolver_fresh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/attach_product_resolver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"product resolver discovers and pins the one host that owns a live runtime"},
+    });
+    const run_macos_attach_resolver_fresh_tests = b.addRunArtifact(macos_attach_resolver_fresh_tests);
+    run_macos_attach_resolver_fresh_tests.addArg("--maru-expect-tests=1");
+    run_macos_attach_resolver_fresh_tests.setCwd(b.path("."));
+
+    const macos_event_release_fresh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/generation_transport.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"CR3a-2c3d C2"},
+    });
+    const run_macos_event_release_fresh_tests = b.addRunArtifact(macos_event_release_fresh_tests);
+    run_macos_event_release_fresh_tests.addArg("--maru-expect-tests=5");
+    run_macos_event_release_fresh_tests.setCwd(b.path("."));
 
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
@@ -1103,7 +1202,14 @@ pub fn build(b: *std.Build) void {
     const install_macos_app_host_abi_lib = b.addInstallArtifact(macos_app_host_abi_lib, .{});
 
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
-    test_macos_app_host_abi_step.dependOn(&run_macos_app_host_abi_tests.step);
+    // fresh-process 행도 서로 병렬 실행하면 daemon fixture와 wall-clock 성능 오라클이 다시 경쟁한다.
+    // aggregate 뒤 실제 TTY, 제품 socket 두 행, teardown, CoreText cache 행 순으로 직렬화한다.
+    run_macos_external_tty_fresh_tests.step.dependOn(&run_macos_app_host_abi_tests.step);
+    run_macos_external_attach_fresh_tests.step.dependOn(&run_macos_external_tty_fresh_tests.step);
+    run_macos_attach_resolver_fresh_tests.step.dependOn(&run_macos_external_attach_fresh_tests.step);
+    run_macos_event_release_fresh_tests.step.dependOn(&run_macos_attach_resolver_fresh_tests.step);
+    run_macos_chrome_face_cache_fresh_tests.step.dependOn(&run_macos_event_release_fresh_tests.step);
+    test_macos_app_host_abi_step.dependOn(&run_macos_chrome_face_cache_fresh_tests.step);
 
     const macos_app_host_abi_lib_step = b.step("macos-app-host-abi-lib", "Build the Zig static library exported to the Swift macOS app host");
     macos_app_host_abi_lib_step.dependOn(&install_macos_app_host_abi_lib.step);
@@ -5625,6 +5731,79 @@ pub fn build(b: *std.Build) void {
         run_cr6a1_boundary_tests.setCwd(b.path("."));
         session_host_cr6a1_step.dependOn(&run_cr6a1_boundary_tests.step);
         boundary_step.dependOn(&run_cr6a1_boundary_tests.step);
+    }
+    const session_host_cr6a2_step = b.step(
+        "test-session-host-cr6a2",
+        "CR6a-2 launch recovery collector and primary sidebar gates",
+    );
+    session_host_cr6a2_step.dependOn(session_host_cr6a1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6a2_optimize| {
+        const cr6a2_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr6a2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6a-2 primary sidebar는"},
+        });
+        cr6a2_app_session_tests.root_module.linkFramework("AppKit", .{});
+        cr6a2_app_session_tests.root_module.linkFramework("Metal", .{});
+        cr6a2_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        cr6a2_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        cr6a2_app_session_tests.root_module.linkFramework("CoreText", .{});
+        cr6a2_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr6a2_app_session_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_cr6a2_app_session_tests = b.addRunArtifact(cr6a2_app_session_tests);
+        run_cr6a2_app_session_tests.addArg("--maru-expect-tests=6");
+        run_cr6a2_app_session_tests.setCwd(b.path("."));
+        session_host_cr6a2_step.dependOn(&run_cr6a2_app_session_tests.step);
+
+        const cr6a2_abi_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_host_abi.zig"),
+                .target = target,
+                .optimize = cr6a2_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "build_options", .module = build_options_test_mod },
+                },
+            }),
+            .filters = &.{"CR6a-2 ABI는"},
+        });
+        cr6a2_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+        if (target.result.os.tag == .macos) {
+            cr6a2_abi_tests.root_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/coretext_smoke.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            cr6a2_abi_tests.root_module.linkFramework("Foundation", .{});
+            cr6a2_abi_tests.root_module.linkFramework("CoreText", .{});
+            cr6a2_abi_tests.root_module.linkFramework("CoreGraphics", .{});
+        }
+        const run_cr6a2_abi_tests = b.addRunArtifact(cr6a2_abi_tests);
+        run_cr6a2_abi_tests.addArg("--maru-expect-tests=6");
+        run_cr6a2_abi_tests.setCwd(b.path("."));
+        session_host_cr6a2_step.dependOn(&run_cr6a2_abi_tests.step);
+
+        const cr6a2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr6a2_boundary.zig"),
+                .target = target,
+                .optimize = cr6a2_optimize,
+            }),
+            .filters = &.{"CR6a-2 경계는"},
+        });
+        const run_cr6a2_boundary_tests = b.addRunArtifact(cr6a2_boundary_tests);
+        run_cr6a2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr6a2_boundary_tests.setCwd(b.path("."));
+        session_host_cr6a2_step.dependOn(&run_cr6a2_boundary_tests.step);
+        boundary_step.dependOn(&run_cr6a2_boundary_tests.step);
     }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

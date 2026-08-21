@@ -162,7 +162,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
                 for (rrows, 0..) |r, s| switch (r) {
                     .card => |c| if (c.tab == idx) break :blk_sr s,
                     .agent_toggle, .agent => {},
-                    .group_header => {},
+                    .group_header, .recovered_sessions_header, .recovered_session => {},
                 };
                 break :blk_sr (self.displaySlotOf(idx) orelse return null);
             };
@@ -224,7 +224,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
                     hdr_depth = gh.depth;
                     break;
                 },
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .card => {},
             };
             const sr = slot_row orelse return null;

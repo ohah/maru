@@ -1161,7 +1161,7 @@ pub fn newWorkspaceHighlightSlot(self: *const AppSession) usize {
     const insert_at = self.firstGroupStartInRegion(tab_ops.countPinnedTabs(self), self.tabs.items.len) orelse return self.sidebar_rows.items.len;
     for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
         .group_header => |h| if (h.tab == insert_at) return slot,
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => {},
     };
     return self.sidebar_rows.items.len;

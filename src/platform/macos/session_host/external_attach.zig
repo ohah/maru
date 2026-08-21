@@ -1115,6 +1115,8 @@ test "external takeover rejects a coalesced own-stream revoke before authority p
 }
 
 test "external attach product transaction resolves connects and assembles one live runtime" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const builtin = @import("builtin");
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const c = std.c;

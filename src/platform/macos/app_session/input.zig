@@ -803,7 +803,7 @@ pub fn buildKeyHintBadges(self: *AppSession, props: chrome.ChromeProps, tokens: 
             const abs = switch (row) {
                 .card => |c| c.tab,
                 .agent_toggle, .agent => continue, // 목록 행엔 ⌘숫자 배지가 없다
-                .group_header => continue, // 헤더 row엔 ⌘숫자(select_tab) 배지가 없다
+                .group_header, .recovered_sessions_header, .recovered_session => continue, // system/header row엔 ⌘숫자 배지가 없다
             };
             if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다
             const cs = (try Local.chordStr(resolver, Action{ .select_tab = abs }, arena)) orelse continue;

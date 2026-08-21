@@ -105,6 +105,8 @@ pub const Event = struct {
     /// 서브에이전트 이벤트가 실어 오는 자식 식별자(계약 §2). 있으면 그 이벤트는 **자식의 것**이라 부모
     /// 상태에 그대로 섞으면 안 된다.
     agent_id: []const u8 = "",
+    /// `Notification.notification_type`(계약 §6). 종류를 모르면 상태를 흔들지 않는다 — 아는 것만 옮긴다.
+    notification_type: NotificationKind = .none,
     /// `background_tasks` 배열의 **원문 슬라이스**(`[` 부터 `]` 까지). 비면 그 키가 없었다는 뜻이다.
     ///
     /// 값이 아니라 원문을 드는 이유: 이 목록에서 뽑아야 하는 것은 «지금 도는 서브에이전트 id 집합» 인데,
@@ -113,6 +115,37 @@ pub const Event = struct {
     /// 읽기 버퍼를 가리키므로 **그 배치를 처리하는 동안만** 유효하다.
     background_tasks_raw: []const u8 = "",
 };
+
+/// `Notification` 이 말하는 종류(계약 §6).
+///
+/// **아는 것만 든다.** claude 의 목록은 열넷이고(2026-08-21 실측 — 바이너리의 enum 을 그대로 읽었다)
+/// 그중 상태를 옮길 만한 것은 «사용자 입력을 기다린다» 는 다섯뿐이다. 나머지(인증 성공·쿼터 재개·
+/// computer use 진입/이탈 등)는 배지와 무관하므로 **모르는 것과 같이 취급한다** — 종류를 모르는 채
+/// 배지를 옮기면 임의의 provider 알림이 「입력 대기」로 보인다.
+pub const NotificationKind = enum {
+    /// `Notification` 이 아니거나 종류가 없다.
+    none,
+    /// 승인·입력을 기다린다 — `permission_prompt`·`worker_permission_prompt`·`elicitation_dialog`·
+    /// `elicitation_url_dialog`·`agent_needs_input`.
+    needs_input,
+    /// 우리가 아는 종류지만 배지와 무관하다(`idle_prompt`·`auth_success`·쿼터 재개 등).
+    other,
+};
+
+/// 종류 이름을 위 셋으로 접는다.
+pub fn notificationKindOf(name: []const u8) NotificationKind {
+    const needs_input = [_][]const u8{
+        "permission_prompt",
+        "worker_permission_prompt",
+        "elicitation_dialog",
+        "elicitation_url_dialog",
+        "agent_needs_input",
+    };
+    for (needs_input) |k| {
+        if (std.mem.eql(u8, name, k)) return .needs_input;
+    }
+    return .other;
+}
 
 /// `liveSubagentIds` 의 결과.
 pub const SubagentTally = struct {
@@ -262,6 +295,9 @@ pub fn parseLine(line: []const u8) ?Event {
             ev.text = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "stop_hook_active")) {
             ev.stop_hook_active = scan.boolValue() orelse return null;
+        } else if (std.mem.eql(u8, key, "notification_type")) {
+            const name = scan.stringValue() orelse return null;
+            ev.notification_type = notificationKindOf(name);
         } else if (std.mem.eql(u8, key, "background_tasks")) {
             // 원문 슬라이스를 함께 잡는다 — 회수 규칙이 그것을 다시 훑는다(위 `liveSubagentIds`).
             const raw_start = scan.i;
@@ -1275,4 +1311,38 @@ test "background_tasks 원문 슬라이스를 잡는다 — 회수 규칙이 그
     try testing.expectEqualStrings("c1", out[0]);
     // 그 뒤 키도 정상적으로 읽힌다 — 슬라이스를 잡느라 커서가 어긋나지 않았다.
     try testing.expectEqualStrings("p1", ev.turn_key);
+}
+
+test "Notification 의 종류를 읽는다 — 아는 것만 상태를 옮길 수 있다" {
+    // claude 의 목록은 열넷이다(실측). 그중 «사용자 입력을 기다린다» 는 다섯만 배지를 옮긴다.
+    for ([_][]const u8{
+        "permission_prompt",      "worker_permission_prompt", "elicitation_dialog",
+        "elicitation_url_dialog", "agent_needs_input",
+    }) |name| {
+        try testing.expectEqual(NotificationKind.needs_input, notificationKindOf(name));
+    }
+    // 나머지는 배지와 무관하다 — 모르는 것과 같이 취급한다.
+    for ([_][]const u8{
+        "idle_prompt",        "auth_success",            "agent_completed", "push_notification",
+        "computer_use_enter", "quota_auto_resume_fired",
+        "무엇인지 모르는 새 종류",
+    }) |name| {
+        try testing.expectEqual(NotificationKind.other, notificationKindOf(name));
+    }
+}
+
+test "Notification payload 에서 종류를 뽑는다" {
+    const blocked = "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"permission_prompt\"," ++
+        "\"message\":\"Claude needs your permission to use Bash\"}";
+    const ev = parseLine(blocked).?;
+    try testing.expectEqual(Kind.notification, ev.kind);
+    try testing.expectEqual(NotificationKind.needs_input, ev.notification_type);
+
+    // 실측에서 받은 유휴 알림 — 배지를 옮기지 않는다.
+    const idle = "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\"}";
+    try testing.expectEqual(NotificationKind.other, parseLine(idle).?.notification_type);
+
+    // 종류가 없는 알림도 옮기지 않는다.
+    const bare = "claude\t{\"hook_event_name\":\"Notification\"}";
+    try testing.expectEqual(NotificationKind.none, parseLine(bare).?.notification_type);
 }

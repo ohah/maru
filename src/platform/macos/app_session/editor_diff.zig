@@ -1710,3 +1710,74 @@ test "비교 뷰에서는 접기를 거절한다 — 성공을 돌려주고 아�
     try testing.expectEqual(cells_before, after.dl.cells.len);
     try testing.expect(!editor_ops.unfoldAll(fx.session));
 }
+
+test "DSEL1 비교 뷰 좌표계: 좌우를 갈라 그 열의 행과 byte를 답한다 (§4.1g 비교 뷰)" {
+    // **문서가 둘이면 offset 하나로 못 적는다.** 화면에 서는 것은 원본 줄이 아니라 짝을 맞춰
+    // 정렬한 행 배열이고, 빈 행이 그 안에 섞여 있다 — 그래서 좌표를 `(어느 열, 행, 행 안 byte)`
+    // 셋으로 적는다. 단일 편집기보다 두 단계 짧다(접힘 층·문서 offset 변환이 없다).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 왼쪽만 있는 줄·오른쪽만 있는 줄·양쪽 다 있는 줄이 섞이게 만든다.
+    var entry = testEntry("keep\nremoved\ntail\n", "keep\nadded line\ntail\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    drawn.dl.deinit(allocator);
+
+    // **좌우 행이 굳었다.**
+    try testing.expect(fx.term.rt.editor_diff_hit_len_left > 0);
+    try testing.expect(fx.term.rt.editor_diff_hit_len_right > 0);
+
+    const g = fx.term.rt.editor_diff_hit_geom;
+    try testing.expect(g.right_x > g.left_x); // 오른쪽 열이 실제로 오른쪽에 있다
+
+    const y0: f64 = @floatFromInt(g.body_y + 1);
+    const left_text_x: f64 = @floatFromInt(g.left_x + @as(i32, @intCast(g.content_left_px)) + 1);
+    const right_text_x: f64 = @floatFromInt(g.right_x + @as(i32, @intCast(g.content_left_px)) + 1);
+
+    // ⑴ **왼쪽 열을 누르면 왼쪽이라 답한다.**
+    const l = editor_ops.hitTestDiffBody(fx.term, left_text_x, y0, null) orelse return error.NoHit;
+    try testing.expectEqual(editor_ops.DiffSide.left, l.side);
+    try testing.expectEqual(@as(usize, 0), l.row);
+    try testing.expectEqual(@as(usize, 0), l.byte);
+
+    // ⑵ **오른쪽 열을 누르면 오른쪽이다.**
+    const r = editor_ops.hitTestDiffBody(fx.term, right_text_x, y0, null) orelse return error.NoHit;
+    try testing.expectEqual(editor_ops.DiffSide.right, r.side);
+    try testing.expectEqual(@as(usize, 0), r.row);
+
+    // ⑶ **열 안에서 x가 커지면 byte가 커진다** — `byteAtPoint`가 실제로 걸었다.
+    const far_x: f64 = @floatFromInt(g.left_x + @as(i32, @intCast(g.content_left_px)) + @as(i32, @intCast(3 * @as(u32, g.cell_w_px))) + 1);
+    const l3 = editor_ops.hitTestDiffBody(fx.term, far_x, y0, null) orelse return error.NoHit;
+    try testing.expectEqual(@as(usize, 3), l3.byte);
+
+    // ⑷ **아래로 가면 행이 는다.**
+    const y1: f64 = @floatFromInt(g.body_y + @as(i32, @intCast(g.cell_h_px)) + 1);
+    const l4 = editor_ops.hitTestDiffBody(fx.term, left_text_x, y1, null) orelse return error.NoHit;
+    try testing.expectEqual(@as(usize, 1), l4.row);
+
+    // ⑸ **gutter는 받지 않는다** — 줄 번호 자리다.
+    const gutter_x: f64 = @floatFromInt(g.left_x + 1);
+    try testing.expectEqual(@as(?editor_ops.DiffHit, null), editor_ops.hitTestDiffBody(fx.term, gutter_x, y0, null));
+
+    // ⑹ **잡은 열을 강제하면 반대 열 좌표에도 그 열로 답한다** — 드래그가 열을 안 넘는다는 계약.
+    const forced = editor_ops.hitTestDiffBody(fx.term, right_text_x, y0, .left) orelse return error.NoHit;
+    try testing.expectEqual(editor_ops.DiffSide.left, forced.side);
+
+    // ⑺ **세로 밖은 clamp한다**(드래그가 pane을 벗어나는 것은 정상이다).
+    const far_below: f64 = @floatFromInt(g.body_y + 100000);
+    const l7 = editor_ops.hitTestDiffBody(fx.term, left_text_x, far_below, null) orelse return error.NoHit;
+    try testing.expectEqual(fx.term.rt.editor_diff_hit_len_left - 1, l7.row);
+
+    // ⑻ **비교가 아니면 받지 않는다.**
+    fx.term.rt.editor_diff.?.view = .loading;
+    try testing.expectEqual(@as(?editor_ops.DiffHit, null), editor_ops.hitTestDiffBody(fx.term, left_text_x, y0, null));
+}

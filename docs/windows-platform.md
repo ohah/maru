@@ -1695,7 +1695,7 @@ Draw hr=0  runs=6  glyphs=15
 | ① advance | `DWRITE_GLYPH_RUN.glyphAdvances` — 9.4 등폭 유지 |
 | ② 글리프↔문자 | `DWRITE_GLYPH_RUN_DESCRIPTION` 의 `clusterMap`·`textPosition`·`stringLength` |
 | ③ left overhang | `GetDesignGlyphMetrics(run.fontFace)` — 저수준과 동일 |
-| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 — **시스템 컬렉션에 있는 폰트만**(아래) |
+| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 — **시스템 컬렉션에 있는 폰트만**(아래; 현 계약에서는 항상 참) |
 | ⑤ 말줄임 | `SetWordWrapping(NO_WRAP)` + `CreateEllipsisTrimmingSign` + `SetTrimming` |
 | ⑥ 컬러 글리프 | `run.fontFace` 에 `COLR`/`sbix` 테이블이 있는가 |
 
@@ -1755,21 +1755,26 @@ GetFontFromFontFace(시스템 컬렉션, 그 face)                              
 **폴백 목록은 우리가 지정해야 한다 — macOS 도 OS 에 "그냥 맡기지" 않는다.** 이 절이 처음에
 "macOS 가 `CTLine` 하나에 맡기는 것을 Windows 도 `IDWriteTextLayout` 하나에 맡긴다" 고 적었는데
 **그 대칭 서술이 한쪽을 잘못 그렸다**. macOS 셰이퍼는 주 폰트에 `kCTFontCascadeListAttribute` 로
-**`font.fallback` 목록을 박고** 시스템 cascade 를 그 뒤에 잇는다([configuration.md](configuration.md)
-`font.fallback`; 기본값은 번들 `Jetendard`).
+`font.fallback` 목록을 박고 시스템 cascade 를 그 뒤에 잇는다.
 
-그 기본값에는 실측 근거가 있다(`config/theme.zig` `FontConfig.fallback` doc). 시스템 cascade 가 고르는
-한글 폰트는 비례 폰트라 advance 가 등폭 격자와 무관하고, 그것이 "한글만 자간이 넓다" 로 보인다.
-Jetendard 는 한글을 라틴 2 배 폭으로 디자인해 격자에 맞는다.
+**Windows 도 이미 목록을 갖고 있다.** W7.3 이 그 자리를 정해 뒀다 — `dwrite_font.fallbackCandidates`
+(사용자 CSV 가 앞, `windows_fallback_tier` 가 뒤)가 **Windows 폴백 순서의 단일 출처**이고, 그 함수의
+doc 이 "DirectWrite 에는 자동 cascade 가 `IDWriteFactory2` 이후에만 있어 **목록을 우리가 갖는다**" 를
+이미 적어 두었다.
 
 **그런데 이 절의 실측은 그 목록을 안 준 상태였다:**
 
 ```text
-"한글" 런의 폰트 = Malgun Gothic        ← 시스템이 고른 것. Jetendard 가 아니다
+"한글" 런의 폰트 = Malgun Gothic        ← DirectWrite 가 시스템에서 고른 것
 ```
 
-즉 **고수준에 그냥 맡기면 macOS 와 다른 폰트로 그려진다** — 대칭이 깨지는 쪽은 Windows 다.
-`font.fallback` 을 무시하는 것이기도 하다.
+**결과 자체는 계약대로다.** §2e 가 `Jetendard` 는 "Windows 에서는 열리지 않고 폴백 사슬 앞에 무해하게
+남는다" 고 적었고, `windows_fallback_tier` 의 첫 항목이 `Malgun Gothic` 이다. 즉 **이 글자가 Malgun
+Gothic 으로 간 것은 결함이 아니다.**
+
+**문제는 누가 골랐느냐다.** 위 실측에서는 `fallbackCandidates` 가 아니라 **DirectWrite 가** 골랐다.
+둘이 우연히 같은 답을 냈을 뿐이고, 사용자가 `font.fallback = D2Coding` 을 주면 갈린다 — 터미널은
+그 폰트를 쓰고 크롬은 무시한다. **한 Windows 안에서 터미널과 크롬이 다른 폰트를 쓰게 된다.**
 
 **우회로는 실재한다.** 둘 다 실기에서 확인했다:
 
@@ -1779,12 +1784,24 @@ layout → IDWriteTextLayout2 QueryInterface            hr=0  ptr=있음   (SetF
 ```
 
 `IDWriteFontFallbackBuilder` 가 `kCTFontCascadeListAttribute` 의 짝이고, `IDWriteTextLayout2.SetFontFallback`
-으로 layout 에 건다. **다리는 이 둘을 반드시 쓴다** — 안 쓰면 `font.fallback` 설정이 Windows 에서 죽는다.
-④ 의 번들 폰트 문제도 같은 뿌리다(번들 폰트는 시스템 컬렉션 밖에 있다).
+으로 layout 에 건다. **다리는 `fallbackCandidates` 의 답을 이 둘로 layout 에 박는다** — 그래야 터미널과
+크롬이 같은 목록을 본다.
+
+**④ 의 번들 폰트 문제는 이 계약에서는 안 터진다.** Windows 는 번들 폰트를 아예 안 열기 때문이다(§2e).
+런의 face 는 항상 시스템 컬렉션에서 온 것이라 `GetFontFromFontFace` 가 통한다. **그 계약이 바뀌면 —
+번들 폰트를 열기 시작하면 — 그날 같이 터진다.**
+
+> **사용자 판단이 필요한 것 하나(문서에 없다).** `Malgun Gothic` 은 한글 advance 가 등폭 격자와 안 맞는다.
+> 이 절의 실측(em 28px): 라틴 advance 16.41px, 한글 advance **28.00px**, 격자 2 칸 32.81px → 글자마다
+> **4.81px 이 빈다**. 이것은 `config/theme.zig` `FontConfig.fallback` doc 이 macOS 기본값을 번들
+> `Jetendard` 로 정한 바로 그 이유다. §2e 는 Jetendard 가 Windows 에서 안 열리는 것을 "무해하다" 고
+> 적었는데 **advance 관점은 안 봤다.** 번들 폰트를 Windows 에서 여는 것은 별개 슬라이스이고
+> (파일 → `CreateFontFileReference` → `CreateFontFace` 는 실기에서 되는 것을 확인했다), **할지 말지는
+> 결정된 바 없다.**
 
 **그래서 다리는 고수준으로 간다.** `IDWriteTextLayout` 이 셰이핑·구간 분할·말줄임을 하고, **폴백 목록은
-우리가 박는다.** macOS 가 CoreText 에 대해 하는 것과 같은 모양이다 — §2m.12 가 "일관성" 을 근거로 A 를
-고른 논리를 끝까지 민 결과다.
+`fallbackCandidates` 가 준다.** macOS 가 CoreText 에 대해 하는 것과 같은 모양이다 — §2m.12 가 "일관성" 을
+근거로 A 를 고른 논리를 끝까지 민 결과다.
 
 **구현할 COM 객체가 바뀐다.** `IDWriteTextAnalysisSource`(8 슬롯) 대신 `IDWriteTextRenderer`(10 슬롯 —
 IUnknown 3 + `IDWritePixelSnapping` 3 + 자기 것 4)다. 부담은 비슷하고, 대신 스크립트 분석 호출과 런별 face

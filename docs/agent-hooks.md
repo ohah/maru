@@ -913,9 +913,17 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 7. 비용 측정은 **우리가 `sh` 를 띄워** 잰 것이다(§3). 샌드박스 안팎에는 차이가 없었으나(AH6 재측정),
    provider 가 자기 프로세스에서 fork·exec 하는 경로는 다를 수 있다 — 그 차이는 spawn 비용이지 우리
    스크립트의 몫이 아니므로 「스크립트 최적화 여지가 없다」는 결론은 그대로다.
-8. **`Notification` 은 codex 에 없다.** claude 에서는 이제 «입력 대기» 판정에 쓰지만(§6), codex 열거에는
-   그 이벤트가 없으므로(§2 실측) codex 의 그 배지는 `PermissionRequest` 하나에만 걸린다 — 그것이 대화형
-   codex 에서 발화하는지는 미검증이다. 완료(`Stop`) 알림은 양쪽 다 정상이다.
+8. **`Notification` 은 codex 에 없다 — 그래도 codex 의 «입력 대기» 는 선다**(2026-08-22 확인). claude 에서는
+   `Notification` 도 «입력 대기» 판정에 쓰지만(§6) codex 열거에는 그 이벤트가 없어(§2) 그 배지의 소스가
+   `PermissionRequest` 하나뿐이다. **그것이 대화형 codex 에서 실제로 발화하는 것을 확인했다** —
+   `codex -a on-request -s read-only` 로 띄워 파일 쓰기를 시키면 권한 상승을 요구하고, 그때
+   `PreToolUse(apply_patch)` 에 이어 `PermissionRequest(apply_patch)` 가 온다.
+
+   그 payload 가 계약의 다른 서술도 확인했다: `tool_input` 은 **`command` 하나뿐**이고 경로는 패치 텍스트
+   안에 있다(§3.1 — `patchPaths` 가 그래서 있다), `turn_id` 를 턴 키로 싣고, `model` 은 codex 에만 있다.
+   ⚠️ 그래서 codex 의 주의 알림 본문은 `tool_input.description` 이 없어 **도구 이름**(`apply_patch`)이 된다.
+
+   완료(`Stop`) 알림은 양쪽 다 정상이다.
 9. **관측 모드의 대화 줄이 다시 빈다.** statusLine 훅을 제거하면서(§5) 세션 신원을 자식 env 로만 얻는다.
    도구를 한 번도 안 쓰는 세션은 그 값을 못 얻어 사이드바 대화 줄이 빈다. 훅 모드를 켜면 채워지지만 그
    게이트는 아직 기본 꺼짐이다.

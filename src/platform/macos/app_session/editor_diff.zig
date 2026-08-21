@@ -1789,6 +1789,67 @@ test "DSEL1 비교 뷰 좌표계: 좌우를 갈라 그 열의 행과 byte를 답
     try testing.expectEqual(@as(?editor_ops.DiffHit, null), editor_ops.hitTestDiffBody(fx.term, left_text_x, y0, null));
     fx.term.rt.editor_diff.?.view = saved_view;
 }
+// DSEL4: **더블·트리플 클릭 뒤 뒤로 끌어도 잡은 단위가 남는다.**
+//
+// 단일 편집기의 SEL4와 같은 계약인데 비교 뷰가 **점 anchor**로 따로 서 있어 갈렸다 — `"beta"`를
+// 잡고 왼쪽으로 끌면 `"pha "`가 남았다(적대적 검증이 제품 경로로 재현). anchor를 범위로 만들고
+// `kind`를 실은 뒤에도 그 갈림이 안 돌아오는지 **복사 결과**로 잰다(내부 필드가 아니라 사용자가
+// 얻는 것으로 재야 한다).
+test "DSEL4: 비교 뷰도 더블클릭 뒤 뒤로 끌면 잡은 단어가 안 잘린다" {
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var entry = testEntry("alpha beta gamma\n", "alpha beta gamma\nx\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    drawn.dl.deinit(allocator);
+
+    const g = fx.term.rt.editor_diff_hit_geom;
+    const y0: f64 = @floatFromInt(g.body_y + 1);
+    const cw: i32 = @intCast(g.cell_w_px);
+    const col_x = struct {
+        fn at(geom: anytype, w: i32, col: i32) f64 {
+            return @floatFromInt(geom.left_x + @as(i32, @intCast(geom.content_left_px)) + w * col + 1);
+        }
+    }.at;
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |t, i| {
+        if (t == fx.term) pane.active_term = i;
+    }
+
+    // ⑴ `beta`(byte 6..10)를 더블클릭 — 그 단어만 잡힌다.
+    //    **제품 진입점을 탄다**(`selectWordOrLineAt`) — 그래야 "비교 뷰로 갈리는가"까지 함께 잰다.
+    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, false, col_x(g, cw, 7), y0));
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("beta", fx.session.chrome_clipboard_write);
+
+    // ⑵ **뒤로** 끌어 `alpha` 안(byte 2)으로 — `beta`의 끝이 남아 `alpha beta`가 된다.
+    //    점 anchor였다면 `pha `만 남는다(그 회귀가 이 단언에서 죽는다).
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, col_x(g, cw, 2), y0));
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("alpha beta", fx.session.chrome_clipboard_write);
+
+    // ⑶ **앞으로** 끌어 `gamma` 안(byte 13)으로 — 지나가는 단어가 통째로 들어와 `beta gamma`다.
+    //    `kind`가 없으면 글자 단위로 늘어 `beta ga`가 된다.
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, col_x(g, cw, 13), y0));
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("beta gamma", fx.session.chrome_clipboard_write);
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, col_x(g, cw, 13), y0));
+
+    // ⑷ **트리플클릭은 줄 단위**다 — 뒤로 끌어도 줄 전체가 남는다.
+    try testing.expect(editor_ops.selectWordOrLineAt(fx.session, pane, true, col_x(g, cw, 7), y0));
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, col_x(g, cw, 2), y0));
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("alpha beta gamma", fx.session.chrome_clipboard_write);
+    try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, col_x(g, cw, 2), y0));
+}
+
 
 test "DSEL2 비교 뷰 선택: 한 열에 머물고, 빈 행은 복사에서 빠진다 (§4.1g 비교 뷰)" {
     // **좌우를 걸치는 선택은 만들지 않는다**(계약). 두 파일의 조각을 이어 붙인 텍스트는 어느 쪽
@@ -1827,14 +1888,14 @@ test "DSEL2 비교 뷰 선택: 한 열에 머물고, 빈 행은 복사에서 빠
     try testing.expect(editor_ops.beginDiffBodySelection(fx.session, pane, left_x, y0));
     const s0 = fx.term.rt.editor_diff_selection orelse return error.NoSelection;
     try testing.expectEqual(editor_ops.DiffSide.left, s0.side);
-    try testing.expectEqual(s0.anchor_row, s0.focus_row); // 클릭만으로는 범위가 없다
+    try testing.expect(s0.sel.isEmpty()); // 클릭만으로는 범위가 없다
 
     // ⑵ **오른쪽 열로 끌어도 왼쪽에 머문다** — 계약의 핵심.
     const last_y: f64 = @floatFromInt(g.body_y + @as(i32, @intCast(2 * @as(u32, g.cell_h_px))) + 1);
     try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 2, right_x, last_y));
     const s1 = fx.term.rt.editor_diff_selection orelse return error.NoSelection;
     try testing.expectEqual(editor_ops.DiffSide.left, s1.side);
-    try testing.expect(s1.focus_row > s0.anchor_row); // 세로로는 따라갔다
+    try testing.expect(s1.sel.focus.row > s0.sel.anchorLo().row); // 세로로는 따라갔다
 
     // ⑶ **선택 띠가 그 열에만 선다.**
     try testing.expect(editor_ops.buildDiffSelectionMarksForTest(fx.session, fx.term, .left) != null);
@@ -1979,7 +2040,11 @@ test "DSEL4 선택을 든 채 문서가 짧아져도 죽지 않는다 (§4.1g �
     d0.dl.deinit(allocator);
 
     // 뒤쪽 행을 고른다.
-    fx.term.rt.editor_diff_selection = .{ .side = .left, .anchor_row = 30, .anchor_byte = 0, .focus_row = 35, .focus_byte = 3 };
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = .{
+        .anchor_start = .{ .row = 30, .byte = 0 },
+        .anchor_end = .{ .row = 30, .byte = 0 },
+        .focus = .{ .row = 35, .byte = 3 },
+    } };
 
     // **짧은 내용으로 다시 계산한다** — 파일 감시가 하는 일과 같다.
     entry.diff_ready = false;
@@ -1997,7 +2062,11 @@ test "DSEL4 선택을 든 채 문서가 짧아져도 죽지 않는다 (§4.1g �
     d1.dl.deinit(allocator);
 
     // ⑶ **선택이 남아 있어도 안 죽는다**(방어 가드) — invalidate를 못 타는 경로가 뒷날 생겨도.
-    fx.term.rt.editor_diff_selection = .{ .side = .left, .anchor_row = 30, .anchor_byte = 0, .focus_row = 35, .focus_byte = 3 };
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = .{
+        .anchor_start = .{ .row = 30, .byte = 0 },
+        .anchor_end = .{ .row = 30, .byte = 0 },
+        .focus = .{ .row = 35, .byte = 3 },
+    } };
     var d2 = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
     d2.dl.deinit(allocator);
     try testing.expect(!editor_ops.copyDiffSelection(fx.session)); // 복사도 안 죽는다

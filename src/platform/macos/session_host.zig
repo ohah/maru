@@ -75,6 +75,10 @@ pub const recovery_discovery = if (builtin.os.tag == .macos)
     @import("session_host/recovery_discovery.zig")
 else
     struct {};
+pub const recovered_sessions_projection = if (builtin.os.tag == .macos)
+    @import("session_host/recovered_sessions_projection.zig")
+else
+    struct {};
 pub const connection_slot = @import("session_host/connection_slot.zig");
 // 창 닫기 graph는 syscall이나 backend 포인터를 갖지 않는 scalar 권위 leaf라 ABI 교차 빌드에서도 같은
 // 저장 형식과 전이를 검사한다. 실제 RemoteRuntime 실행 경로만 아래 macOS 전용 barrel에 남긴다.

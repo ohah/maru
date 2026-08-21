@@ -1271,6 +1271,10 @@ unavailable placeholder로 전환하고 Retry 성공 시 host snapshot으로 재
 CR6 제품 활성화는 R2b Recovered Sessions projection/adopt 제품 경로가 완료된 뒤에만 가능하다. 그 전에는 unconfirmed Term이
 있는 Window close를 제품에서 허용하지 않아 사용자가 찾을 수 없는 orphan runtime을 만들지 않는다.
 
+CR6a-1은 그 경로의 app-global 파생 projection owner를 먼저 닫는다. 전체 Workspace binding과 complete inventory를
+transactional reconcile해 typed system row DTO만 게시하며, opt-out/secondary/quick은 row publish·owner mutation 0, 실패는 기존 projection
+mutation 0이다. socket issuer와 sidebar row materialization, 사용자 adopt는 각각 CR6a-2/CR6b에 남긴다.
+
 ## Provider session continuity 잔여 제거(persistent-session P1, 완료)
 
 Claude/Codex provider-native resume/fork는 제품 경로로 되살리지 않는다. P1에서 legacy workspace typed field/parser,

@@ -5689,6 +5689,15 @@ valid manifest를 apply하거나 default surface를 명시적으로 finish해, l
   `{runtime_handle,projection_generation}` stable key만 들고 action 직전 all-window binding/Window token을 다시
   찾아 workspace generation이 달라졌거나 target이 이동·닫힘이면 attach/spawn/terminate 0으로 stale 처리한다.
 
+**CR6a-1 구현 계약:** `Recovered Sessions`의 첫 제품 전제는 app-global 파생 projection owner다. 이 owner는
+R2a가 검증한 전체 Workspace binding과 완결된 inventory snapshot을 한 번에 reconcile하고, 성공한 전체 결과만 checked
+`projection_generation`과 함께 교체한다. row는 typed system-group identity, exact runtime handle, candidate kind,
+host authority tuple, ended conflict의 canonical manifest ordinal, 제어문자 없는 runtime ID 짧은 표기만 가진다. keep-alive
+opt-out·secondary Window·quick은 row publish와 owner mutation이 모두 0이고, OOM·잘못된 authority·세대 overflow에서는 기존 projection을
+그대로 보존한다. 이 슬라이스는 attach/spawn/terminate/checkpoint와 sidebar materialization을 호출하지 않는다.
+다음 CR6a-2가 launch-before-Window coordinator에서 secure discovery/collector를 이 owner에 연결하고 primary Window의
+typed virtual row로 내린다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**

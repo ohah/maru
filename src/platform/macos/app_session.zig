@@ -18325,7 +18325,10 @@ pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 /// provider 파일을 전혀 건드리지 않는 상태를 만드는 빈 config. 상태줄 훅 키가 사라졌으므로(계약 §5) 이
 /// 않는다"를 검사하는 fixture다(docs/agent-session.md «사이드바 대화 표시와의 경계»).
-const hook_off_config = "";
+// **게이트를 명시적으로 끈다.** 예전에는 빈 문자열이었고 「기본값이 꺼짐」에 기댔다 — 기본을 켜는
+// 순간 이 테스트가 정반대 상황을 검사하게 된다(실제로 그렇게 깨졌다). 무엇을 검사하는지는 config 가
+// 말해야 하고, 기본값이 말하면 안 된다.
+const hook_off_config = "sidebar.agent-hooks = false\n";
 /// 같은 계약의 반대편 — 켠 경로에서 `statusLine` 키 외에는 손대지 않는지 검사하는 fixture.
 const hook_on_config = "";
 

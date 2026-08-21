@@ -37,7 +37,7 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 
 ### AH2 — 설치와 제거
 
-**AH2a(claude) ✅ 완료.** `sidebar.agent-hooks`(기본 `false`) 게이트와 claude `settings.json` 배선이 섰다 —
+**AH2a(claude) ✅ 완료.** `sidebar.agent-hooks` 게이트와 claude `settings.json` 배선이 섰다 —
 판정·트리 수술은 [`session/agent_hook_install.zig`](../../src/session/agent_hook_install.zig)(순수, 단위 21개),
 파일 세계는 `app_session/agent.zig`의 `reconcileAgentHooks`가 지킨다. **시작 시 로그 정리**(`cleanupAgentHookLogs`)도 함께 들어갔다 — 소비자가 아직 없어(AH3) 회전이 돌지 않으므로
 그것이 없으면 프롬프트·명령 원문이 담긴 파일이 무한히 자란다. 검증은 **제품 경로 무인 게이트**
@@ -101,7 +101,7 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 - 정적: 설치됨 + 게이트 on → 훅 모드로 시작. 동적: **그 pane의 로그 파일이 없으면** 관측 모드로 강등 +
   기록(계약 §1.2 — 2026-08-21 확정). 이벤트 개수로 잡으면 가만히 있는 세션이, 시간으로 잡으면 이미 돌던
   세션이 잘못 강등된다.
-- **이 단계는 게이트 기본 off로 머지한다.** AH3은 관측 입력을 끄기만 하고 훅으로 채우는 쪽은 AH4다 —
+- **이 단계는 게이트 기본 off로 머지했다**(그때의 결정 — 2026-08-22 에 기본을 켰다). AH3은 관측 입력을 끄기만 하고 훅으로 채우는 쪽은 AH4다 —
   단독으로 켜면 `agent_state`가 `unknown`에 고정돼 **사이드바 배지가 통째로 사라진다.** AH4가 들어온 뒤
   기본값을 켠다(또는 두 단계를 한 PR로 묶는다).
 - 훅 모드 Term에서 **OSC 9/777 알림 drain을 건너뛰고**(pending은 비워 버린다), `agent_observer`에 화면·OSC

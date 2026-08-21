@@ -990,9 +990,20 @@ pub const SidebarConfig = struct {
     /// 시작할 때 그 설치물을 **거두기만** 한다 — `sidebar.agent-transcript-hook` 키도 함께 사라졌다
     /// (로더가 forgiving 이라 남아 있는 config 는 그 줄을 무시한다).
     ///
-    /// ⚠️ 대가: 관측 모드에서 자식 env 로 세션 신원을 못 잡는 세션은 사이드바 대화 줄이 빈다. 이 게이트가
-    /// 아직 기본 꺼짐이라, 켜지 않은 사용자에게는 **잃기만 하는** 변경이다(계약 §5).
-    agent_hooks: bool = false,
+    /// **기본이 켜짐이다**(2026-08-22). 그전까지 꺼져 있던 이유는 셋이었고 셋 다 닫혔다:
+    /// 비용은 쟀고(훅 1회 10.39 ms, 스크립트 몫은 측정 한계 아래 — 계약 §3), 배지·알림이 실제로 도는 것을
+    /// **양 provider 대화형에서 눈으로 확인했으며**(§9-6·§9-8), 끄는 수단이 설정 GUI 에 있다.
+    ///
+    /// 그래서 §5 의 대가도 함께 사라진다 — 관측 모드에서 대화 줄이 비던 세션이 이제 훅 payload 로 채워진다.
+    ///
+    /// ⚠️ **켜면 사용자의 provider 설정 파일을 고친다**(claude `settings.json`, codex `hooks.json` +
+    /// `config.toml` 신뢰 블록). 되돌릴 수 있다 — 끄면 **우리 표식이 붙은 항목만** 거두고 사용자 항목은
+    /// 순서까지 보존한다(§2a). 그 되돌림도 제품 경로 게이트가 실제로 «켰다 → 껐다» 를 돌려 확인한다.
+    ///
+    /// ⚠️ 남은 위험 하나: **codex 의 오류 턴은 미검증이다**(§9-10). codex 에는 `StopFailure` 가 없어, 오류로
+    /// 끝난 턴에 `Stop` 이 오지 않으면 그 pane 배지가 안 풀린다. 기본을 켜면 그 경우가 실사용에서 처음
+    /// 드러난다 — 그때는 이 키를 끄는 것이 즉시 회피책이다.
+    agent_hooks: bool = true,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
         .show_branch = Meta{ .doc = .cfg_sidebar_show_branch, .widget = .toggle, .section = .sidebar },

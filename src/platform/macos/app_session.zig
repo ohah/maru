@@ -19248,9 +19248,8 @@ test "hook mode fills state and conversation from the event log, and only then" 
         // 자식 셈도 함께 버린다 — 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
         // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
         term.agent_hook_progress = .{ .turn_open = true };
-        term.agent_hook_progress.children[0] = .{ .len = 2 };
-        term.agent_hook_progress.children[0].buf[0] = 'c';
-        term.agent_hook_progress.children[0].buf[1] = '1';
+        // 자식 자리는 **id 해시**다(전문을 담지 않는다) — 여기서는 «하나 담겨 있다» 만 만들면 된다.
+        term.agent_hook_progress.children[0] = 0xc1;
         term.agent_hook_progress.child_count = 1;
         session.loaded_config.config.sidebar.agent_hooks = false;
         agent_ops.pollAgentConsumer(&session, term, false, false);

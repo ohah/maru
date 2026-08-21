@@ -314,6 +314,64 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     return line.start + off_in_line;
 }
 
+/// 상태바가 보여 줄 **커서 위치**(줄:열). 선택이 없으면 `null`.
+///
+/// **열은 그래핌 클러스터 기준 1-based다**(§2.2). byte offset은 내부 축이고 사람이 읽는 값이 아니다.
+/// **탭은 탭스톱까지의 폭이 아니라 문자 하나로 센다** — 이 값은 *"몇 번째 글자인가"*를 답하지 화면
+/// 위치를 답하지 않고, 화면 위치는 caret이 이미 보여 준다. 그래서 `stepColumn`(렌더의 열)이 아니라
+/// `grapheme.clusterEnd`로 센다 — 두 축을 섞으면 탭이 있는 줄에서 상태바가 화면과 다른 수를 낸다.
+///
+/// **줄도 1-based다.** 내부 인덱스는 0-based이지만 gutter가 1부터 그리므로, 상태바가 0을 말하면
+/// 같은 줄을 두 이름으로 부르게 된다.
+pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, truncated: bool } {
+    if (term.kind != .editor) return null;
+    // 비교 뷰는 축이 다르다(행 배열이고 문서가 둘이다) — 그 자리는 §4.1g "비교 뷰"가 따로 정한다.
+    if (term.rt.editor_diff != null) return null;
+    const sel = term.rt.editor_selection orelse return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const off = @min(sel.focus, doc.file.doc.content.len);
+    const line_idx = doc.file.lines.lineAt(off);
+    const line = doc.file.lines.line(line_idx) orelse return null;
+
+    // **줄 끝에서 묶는다.** `contentEnd()`는 줄 끝 문자 앞이다 — 안 묶으면 CRLF 줄에서 CR을 한
+    // 글자로 세어 **줄에 있는 글자 수보다 큰 열**이 나온다(실측: 글자 셋인 줄에서 `1:5`).
+    // `line_index.offsetInLine`이 같은 clamp를 같은 이유로 지킨다.
+    const end = @min(off, line.contentEnd());
+    std.debug.assert(end >= line.start); // lineAt이 off를 담는 줄을 주고 contentEnd >= start다
+    const text = doc.file.doc.content[line.start..end];
+
+    // 줄 머리에서 caret까지 **클러스터를 센다** — 상한까지만.
+    var col: usize = 1;
+    var i: usize = 0;
+    while (i < text.len and col <= max_status_column) {
+        i = maru.grapheme.clusterEnd(text, i);
+        col += 1;
+    }
+    // **덜 센 것과 딱 맞게 센 것을 가른다.** `col > 상한`으로 보면 정확히 상한만큼인 줄이 끝까지
+    // 세고도 잘렸다고 말한다 — 남은 바이트가 있는지로 본다.
+    return .{ .line = line_idx + 1, .column = col, .truncated = i < text.len };
+}
+
+/// 상태바 열을 **여기까지만 센다**.
+///
+/// **상한이 없으면 매 프레임 줄 전체를 훑는다.** 상태바는 프레임마다 다시 조립되는데, 긴 줄 끝에
+/// caret이 있으면 그 길이에 비례하는 일이 렌더 루프에 들어온다 — 1MB 한 줄에서 ASCII 기준 프레임당
+/// **6.5~9.5ms**(ReleaseFast/M4 Max, 부하가 있는 머신에서 잰 값이라 **상한**이다). 60fps 예산
+/// 16.7ms의 절반쯤을 한 줄이 먹는다. 더블·트리플 클릭 한 번이면 focus가 줄 끝으로 가므로 도달도
+/// 쉽다. 같은 파일군이 이 부류를 이미 두 번 잡아 상한을 박았다(`frame.max_first_col` — 60,000열
+/// 한 줄에서 프레임당 498ms/Debug, `frame.max_cols_count_limit`).
+///
+/// **`max_first_col`이 아니라 `max_cols_count_limit`을 쓴다.** 앞은 **가장 왼쪽 열**의 상한이라
+/// 최대 스크롤에서도 화면 오른쪽 끝은 `max_first_col + 보이는 열`이다 — 그 값으로 묶으면 **화면에
+/// 실제로 보이고 클릭도 되는** 글자를 상태바가 못 세고 `+`가 "그 너머는 볼 수 없다"는 거짓을 말한다.
+/// 뒤는 그 여유(4,096열)를 이미 품은 값이라 화면에 오를 수 있는 열을 전부 덮는다.
+///
+/// **단위는 같지 않다.** 렌더의 열은 탭을 탭스톱까지·전각을 두 칸으로 세고(`content.stepColumn`),
+/// 이 값은 그래핌 클러스터를 센다. 클러스터 수 ≤ 열 수이므로 열 상한을 클러스터 상한으로 쓰면
+/// **보수적인 방향으로만** 어긋난다 — 화면에 오를 수 있는 글자를 못 세는 일은 없다.
+/// 14,096 클러스터를 세는 데 ASCII 88µs·한글 NFC 131µs쯤 든다.
+pub const max_status_column: usize = chrome_editor.frame.max_cols_count_limit;
+
 /// 비교 뷰 본문의 화면 좌표를 **(어느 열, 행, 행 안 byte)**로 옮긴다(§4.1g "비교 뷰").
 ///
 /// **단일 편집기보다 두 단계 짧다.** 접힘 층(③)은 비교에서 거절되고(`foldsUnavailable`), 문서 offset
@@ -7720,4 +7778,118 @@ test "SEL6 막대 띠 위 더블·트리플 클릭은 선택을 열지 않는다
     try testing.expect(selectWordOrLineAt(fx.session, pane, false, text_x, row0));
     try testing.expect(term.rt.editor_selection != null);
     fx.session.cancelPointerGesture();
+}
+
+test "CUR1 상태바 커서 위치: 그래핌 1-based이고 탭은 한 글자다 (§2.2)" {
+    // **화면 위치가 아니라 "몇 번째 글자인가"를 답한다.** 그래서 렌더의 열(`stepColumn` — 탭이
+    // 탭스톱까지 먹고 CJK가 두 칸이다)이 아니라 클러스터를 센다. 두 축을 섞으면 탭이 있는 줄에서
+    // 상태바가 화면과 다른 수를 낸다 — 화면 위치는 caret이 이미 보여 준다(§2.2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 1행: 탭 둘 + 글자, 2행: 한글(다중 byte), 3행: 결합 이모지.
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "\t\tabc\n안녕하세요\n👨‍👩‍👧x\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "c.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 선택이 없으면 항목도 없다 — 읽기 전용이라 caret이 늘 있지는 않다.
+    try testing.expectEqual(@as(?@TypeOf(cursorPosition(term).?), null), cursorPosition(term));
+
+    // ⑴ **줄도 1-based다.** gutter가 1부터 그리므로 상태바가 0을 말하면 같은 줄을 두 이름으로 부른다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    const p0 = cursorPosition(term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 1), p0.line);
+    try testing.expectEqual(@as(usize, 1), p0.column);
+
+    // ⑵ **탭은 한 글자다.** `"\t\tabc"`에서 byte 2(= 'a' 앞)는 **3열**이지 탭스톱 폭(9)이 아니다.
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    const p1 = cursorPosition(term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 1), p1.line);
+    try testing.expectEqual(@as(usize, 3), p1.column);
+
+    // ⑶ **한글은 한 글자다**(두 칸이 아니다). 둘째 줄 "안녕하세요"에서 '하' 앞 = byte 6.
+    const line2_start: usize = 6; // "\t\tabc\n"
+    term.rt.editor_selection = editor_selection.Selection.at(line2_start + 6);
+    const p2 = cursorPosition(term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 2), p2.line);
+    try testing.expectEqual(@as(usize, 3), p2.column); // 안·녕 다음
+
+    // ⑷ **ZWJ 이모지 가족은 한 클러스터다.** 셋째 줄 "👨‍👩‍👧x"에서 'x' 앞은 2열이다.
+    const line3_start: usize = line2_start + 16; // "안녕하세요\n" = 15 + 1
+    const family_len: usize = 18; // 👨 ZWJ 👩 ZWJ 👧
+    term.rt.editor_selection = editor_selection.Selection.at(line3_start + family_len);
+    const p3 = cursorPosition(term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 3), p3.line);
+    try testing.expectEqual(@as(usize, 2), p3.column);
+
+    // ⑸ **`focus`를 본다 — `anchor`가 아니다.** caret이 있는 끝이 커서 위치다(§3.2 primary
+    //    selection). 앞뒤로 끈 선택 둘이 서로 다른 값을 내야 그 축이 굳는다 — `anchorLo`로 바꾼
+    //    뮤턴트가 살아남았다(적대적 검증: 판정자가 전부 collapsed 선택이라 anchor == focus였다).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 2 };
+    const fwd = cursorPosition(term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 3), fwd.column); // focus가 뒤 → 그 자리
+    term.rt.editor_selection = .{ .anchor_start = 2, .anchor_end = 2, .focus = 0 };
+    const back = cursorPosition(term) orelse return error.NoPos;
+    try testing.expectEqual(@as(usize, 1), back.column); // focus가 앞 → 그 자리
+
+    // ⑹ **CRLF 줄에서 줄 끝을 넘지 않는다.** CR을 한 글자로 세면 글자 수보다 큰 열이 나온다.
+    {
+        var fx2 = try PaneFixture.init(allocator);
+        defer fx2.deinit(allocator);
+        try fx2.dir.dir.writeFile(io, .{ .sub_path = "crlf.txt", .data = "ab \r\ncd\r\n" });
+        var rb2: [std.fs.max_path_bytes]u8 = undefined;
+        const r2 = rb2[0..try fx2.dir.dir.realPath(io, &rb2)];
+        const crlf_path = try std.fs.path.join(allocator, &.{ r2, "crlf.txt" });
+        defer allocator.free(crlf_path);
+        const t2 = try openPathInActivePane(fx2.session, crlf_path);
+        // CR(byte 3) 위에 caret을 두어도 줄 끝(글자 3개)을 넘지 않는다.
+        t2.rt.editor_selection = editor_selection.Selection.at(4);
+        const c = cursorPosition(t2) orelse return error.NoPos;
+        try testing.expectEqual(@as(usize, 1), c.line);
+        try testing.expectEqual(@as(usize, 4), c.column); // "ab " 뒤 = 4열, 5가 아니다
+    }
+
+    // ⑺ **상한을 넘으면 세기를 멈추고 그 사실을 말한다.** 안 묶으면 긴 줄 끝에 caret이 있을 때
+    //    매 프레임 줄 전체를 훑는다(실측 1MB 한 줄에서 프레임당 22ms — 60fps 예산의 132%).
+    {
+        var fx3 = try PaneFixture.init(allocator);
+        defer fx3.deinit(allocator);
+        var long: std.ArrayList(u8) = .empty;
+        defer long.deinit(allocator);
+        try long.appendNTimes(allocator, 'x', max_status_column + 500);
+        try long.append(allocator, '\n');
+        try fx3.dir.dir.writeFile(io, .{ .sub_path = "long.txt", .data = long.items });
+        var rb3: [std.fs.max_path_bytes]u8 = undefined;
+        const r3 = rb3[0..try fx3.dir.dir.realPath(io, &rb3)];
+        const long_path = try std.fs.path.join(allocator, &.{ r3, "long.txt" });
+        defer allocator.free(long_path);
+        const t3 = try openPathInActivePane(fx3.session, long_path);
+        t3.rt.editor_selection = editor_selection.Selection.at(max_status_column + 400);
+        const c = cursorPosition(t3) orelse return error.NoPos;
+        try testing.expect(c.truncated);
+        try testing.expectEqual(max_status_column + 1, c.column); // 상한에서 멈췄다
+        // 상한 안이면 정확히 센다 — 위가 항진명제가 아니다.
+        t3.rt.editor_selection = editor_selection.Selection.at(10);
+        const c2 = cursorPosition(t3) orelse return error.NoPos;
+        try testing.expect(!c2.truncated);
+        try testing.expectEqual(@as(usize, 11), c2.column);
+
+        // **경계: 딱 상한만큼 센 것은 잘린 게 아니다.** `col > 상한`으로 판정하면 여기서 거짓
+        // 양성이 난다(끝까지 세고도 `+`가 붙는다).
+        t3.rt.editor_selection = editor_selection.Selection.at(max_status_column);
+        const edge = cursorPosition(t3) orelse return error.NoPos;
+        try testing.expectEqual(max_status_column + 1, edge.column);
+        try testing.expect(!edge.truncated);
+    }
+
+    // ⑻ **비교 뷰는 답하지 않는다** — 축이 다르다(행 배열이고 문서가 둘이다).
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer term.rt.editor_diff = null;
+    try testing.expectEqual(@as(?@TypeOf(cursorPosition(term).?), null), cursorPosition(term));
 }

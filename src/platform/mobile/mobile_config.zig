@@ -68,6 +68,14 @@ pub const Server = struct {
     port: u16 = 22,
     user: []const u8 = "",
     fingerprint: []const u8 = "",
+    /// 그 기계의 `maru` 절대경로. **비워 두면 `maru` 를 그대로 쓴다**(계약
+    /// [컨트롤 플레인 §4a](../../../docs/control-plane.md)).
+    ///
+    /// 왜 필요한가: 비대화형 `exec` 은 로그인 셸의 rc 를 대개 안 읽어 **PATH 가 좁다** — 설치돼
+    /// 있어도 127 이 난다(실측: 시뮬레이터가 붙은 맥에서 그대로 재현됐다). 우리가 설치 경로를
+    /// 추측해 차례로 시도하지 않는 이유는, 맞아도 사용자는 무엇이 돌았는지 모르고 틀리면 그만큼
+    /// 느려지기 때문이다.
+    maru_path: []const u8 = "",
 
     /// 붙을 수 있는 줄인가. **반쯤 적은 줄로 붙으러 가지 않는다** — 그러면 실패 이유가
     /// "네트워크" 처럼 보여 사용자가 무엇을 안 적었는지 모른다.
@@ -161,7 +169,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !Parsed {
             if (std.mem.eql(u8, sk.field, "name")) dst.name = dup
                 // 포트만 숫자다. **못 읽는 값은 기본(22)을 지킨다** — forgiving 규율(§3)이고,
                 // 여기서 0 으로 떨어뜨리면 붙을 수 없는 줄이 조용히 생긴다.
-            else if (std.mem.eql(u8, sk.field, "host")) dst.host = dup else if (std.mem.eql(u8, sk.field, "user")) dst.user = dup else if (std.mem.eql(u8, sk.field, "fingerprint")) dst.fingerprint = dup else if (std.mem.eql(u8, sk.field, "port")) dst.port = std.fmt.parseInt(u16, value, 10) catch dst.port;
+            else if (std.mem.eql(u8, sk.field, "host")) dst.host = dup else if (std.mem.eql(u8, sk.field, "user")) dst.user = dup else if (std.mem.eql(u8, sk.field, "fingerprint")) dst.fingerprint = dup else if (std.mem.eql(u8, sk.field, "maru-path")) dst.maru_path = dup else if (std.mem.eql(u8, sk.field, "port")) dst.port = std.fmt.parseInt(u16, value, 10) catch dst.port;
             continue;
         }
         _ = schema.tryParse(a, &config, key, value, &diags, line_no) catch continue;
@@ -618,6 +626,9 @@ pub fn withServers(allocator: std.mem.Allocator, original: []const u8, list: []c
         try out.print(allocator, "ssh.server.{d}.port = {d}\n", .{ n, srv.port });
         if (srv.user.len > 0) try out.print(allocator, "ssh.server.{d}.user = {s}\n", .{ n, srv.user });
         if (srv.fingerprint.len > 0) try out.print(allocator, "ssh.server.{d}.fingerprint = {s}\n", .{ n, srv.fingerprint });
+        // **적혀 있으면 그대로 지킨다.** 화면에는 아직 이 칸이 없지만(S10d 백로그) 파일에 손으로
+        // 적은 값을 저장 한 번에 잃으면, 그 사용자는 목록이 왜 다시 안 뜨는지 모른다.
+        if (srv.maru_path.len > 0) try out.print(allocator, "ssh.server.{d}.maru-path = {s}\n", .{ n, srv.maru_path });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -696,4 +707,31 @@ test "범위는 스키마가 정한다" {
     try std.testing.expect(outOfRange("cursor.blink-interval-ms", 50)); // 최소 100
     try std.testing.expect(outOfRange("cursor.blink-interval-ms", 20000)); // 최대 10000
     try std.testing.expect(!outOfRange("cursor.blink-interval-ms", 500));
+}
+
+test "maru 경로는 읽고 다시 쓴다 — 저장 한 번에 안 잃는다" {
+    // 화면에 아직 이 칸이 없어서(S10d 백로그) **손으로 적은 값**만 있는 상태다. 저장이 그것을
+    // 지우면 사용자는 목록이 왜 다시 안 뜨는지 모른다.
+    const text =
+        \\ssh.server.1.host = 127.0.0.1
+        \\ssh.server.1.user = me
+        \\ssh.server.1.maru-path = /opt/maru/bin/maru
+    ;
+    var p = try parse(std.testing.allocator, text);
+    defer p.deinit();
+    try std.testing.expectEqualStrings("/opt/maru/bin/maru", p.servers[0].maru_path);
+
+    const rewritten = try withServers(std.testing.allocator, "", p.servers[0..p.server_count]);
+    defer std.testing.allocator.free(rewritten);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "ssh.server.1.maru-path = /opt/maru/bin/maru") != null);
+}
+
+test "maru 경로가 없으면 그 줄도 없다" {
+    // 빈 값을 적으면 파일이 "비워 두라" 를 값으로 기록하는 셈이고, 다음 사람이 그것을 설정으로 읽는다.
+    const text = "ssh.server.1.host = h\nssh.server.1.user = u\n";
+    var p = try parse(std.testing.allocator, text);
+    defer p.deinit();
+    const rewritten = try withServers(std.testing.allocator, "", p.servers[0..p.server_count]);
+    defer std.testing.allocator.free(rewritten);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "maru-path") == null);
 }

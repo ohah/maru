@@ -52,6 +52,18 @@ pub fn classifyRead(n: isize, eof_end: End) Step {
     return .{ .ended = .io_error };
 }
 
+/// 쓰기 한 번의 결과. **"못 썼다" 를 한 갈래로 두면 안 된다** — 상대가 닫아서 못 쓴 것
+/// (`EPIPE`·`ECONNRESET`)은 **정상 종료**이고, 그 밖은 실패다.
+pub const WriteEnd = enum { ok, closed, failed };
+
+/// `write` 가 실패했을 때 그 `errno` 를 뜻으로 바꾼다.
+pub fn classifyWriteErrno(err: std.c.E) WriteEnd {
+    return switch (err) {
+        .PIPE, .CONNRESET => .closed,
+        else => .failed,
+    };
+}
+
 /// 끝을 사람 말로. **stderr 로만 나간다.**
 pub fn endMessage(end: End) []const u8 {
     return switch (end) {
@@ -102,6 +114,18 @@ const posix_relay = control_client.gate == null;
 pub fn relayFds(in_fd: std.c.fd_t, out_fd: std.c.fd_t, sock_fd: std.c.fd_t) End {
     if (!posix_relay) return .io_error;
     const c = std.c;
+
+    // **`SIGPIPE` 를 막는다.** 폰이 컨트롤 채널을 닫으면 sshd 가 우리 stdout 을 닫고, 그때 마침
+    // 쓰고 있으면 이 프로세스는 **끝 메시지도 없이 즉사한다** — "끝은 세 갈래로 가른다" 는
+    // 규칙이 그 자리에서 통째로 무의미해지고, 소켓도 안 닫힌 채 남는다. 목록 화면을 나갈 때마다
+    // 닿는 자리다(적대적 검증이 잡았다). 무시로 두면 `write` 가 `EPIPE` 를 돌려주고 우리가
+    // **정상 종료로** 다룰 수 있다. 앱 쪽 서버는 같은 이유로 `SO_NOSIGPIPE` 를 쓴다.
+    const ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ignore, null);
     var buf: [chunk_bytes]u8 = undefined;
     var fds = [_]std.c.pollfd{
         .{ .fd = in_fd, .events = std.c.POLL.IN, .revents = 0 },
@@ -121,8 +145,27 @@ pub fn relayFds(in_fd: std.c.fd_t, out_fd: std.c.fd_t, sock_fd: std.c.fd_t) End 
         if (fds[0].revents != 0) {
             const n = c.read(in_fd, &buf, buf.len);
             switch (classifyRead(n, .stdin_eof)) {
-                .ended => |e| return e,
-                .moved => |len| if (!control_client.writeAllFd(sock_fd, buf[0..len])) return .io_error,
+                // **stdin 이 끝난 것은 "더 보낼 게 없다" 이지 "받을 게 없다" 가 아니다.**
+                // 폰이 쓰기 쪽만 닫고 마지막 답을 기다릴 수 있는데, 여기서 곧장 끝내면 그 답을
+                // **잃는다**. 그 fd 만 폴링에서 빼고(음수 fd 는 `poll` 이 무시한다) 소켓은 계속
+                // 읽는다 — 진짜 끝은 소켓이 닫힐 때다(적대적 검증이 잡았다).
+                //
+                // **그러려면 소켓에 "나는 다 보냈다" 를 알려야 한다**(`shutdown(SHUT_WR)`).
+                // 안 알리면 서버는 더 올 요청을 기다리고 우리는 그 답을 기다려 **둘 다 영영
+                // 멈춘다** — 처음 고칠 때 그 자리를 빠뜨려 테스트가 두 시간을 매달려 있었다.
+                .ended => |e| switch (e) {
+                    .stdin_eof => {
+                        fds[0].fd = -1;
+                        _ = c.shutdown(sock_fd, std.posix.SHUT.WR);
+                    },
+                    else => return e,
+                },
+                // 소켓에 못 쓴다 = maru 가 닫았다(그쪽이 상대다).
+                .moved => |len| switch (writeAll(sock_fd, buf[0..len])) {
+                    .ok => {},
+                    .closed => return .socket_eof,
+                    .failed => return .io_error,
+                },
             }
         }
 
@@ -131,10 +174,33 @@ pub fn relayFds(in_fd: std.c.fd_t, out_fd: std.c.fd_t, sock_fd: std.c.fd_t) End 
             switch (classifyRead(n, .socket_eof)) {
                 .ended => |e| return e,
                 // **stdout 으로 그대로 나간다** — 여기서 해석하지 않는다.
-                .moved => |len| if (!control_client.writeAllFd(out_fd, buf[0..len])) return .io_error,
+                // stdout 에 못 쓴다 = 폰이 채널을 닫았다.
+                .moved => |len| switch (writeAll(out_fd, buf[0..len])) {
+                    .ok => {},
+                    .closed => return .stdin_eof,
+                    .failed => return .io_error,
+                },
             }
         }
     }
+}
+
+/// 다 쓸 때까지 쓴다. **부분 쓰기를 잃지 않고**, 왜 못 썼는지를 갈라 준다.
+fn writeAll(fd: std.c.fd_t, bytes: []const u8) WriteEnd {
+    const c = std.c;
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = c.write(fd, bytes.ptr + off, bytes.len - off);
+        if (n < 0) {
+            const err = std.posix.errno(n);
+            if (err == .INTR) continue;
+            return classifyWriteErrno(err);
+        }
+        // 0 바이트를 썼다는 것은 진행이 없다는 뜻이다 — 무한 루프 대신 실패로 끝낸다.
+        if (n == 0) return .failed;
+        off += @intCast(n);
+    }
+    return .ok;
 }
 
 fn finish(stderr: *std.Io.Writer, end: End) !void {
@@ -200,11 +266,17 @@ test "폰이 보낸 바이트가 소켓으로 그대로 간다" {
     // 줄 경계에 안 맞는 조각을 일부러 섞는다.
     const sent = "{\"id\":1}\n{\"id\"";
     try testing.expect(std.c.write(in[1], sent.ptr, sent.len) == sent.len);
-    _ = std.c.close(in[1]); // 폰이 채널을 닫았다
+    _ = std.c.close(in[1]); // 폰이 **쓰기 쪽을** 닫았다
 
-    try testing.expectEqual(End.stdin_eof, relayFds(in[0], out[1], sock[0]));
+    // **상대도 "더 안 보낸다" 를 알려야 끝난다.** 안 그러면 중계는 답을 기다리며 영원히 산다 —
+    // 그것이 옳은 동작이다(위 half-close 규칙). `close` 가 아니라 `shutdown(WR)` 인 이유는
+    // **우리가 보낸 바이트를 아래에서 읽어야** 하기 때문이다(읽기 방향은 살아 있다).
+    _ = std.c.shutdown(sock[1], std.posix.SHUT.WR);
 
     var got: [64]u8 = undefined;
+    const end = relayFds(in[0], out[1], sock[0]);
+    // stdin 이 먼저 끝났고, `shutdown` 을 받은 상대가 EOF 를 돌려주므로 끝은 소켓 쪽이다.
+    try testing.expectEqual(End.socket_eof, end);
     const n = std.c.read(sock[1], &got, got.len);
     try testing.expectEqualStrings(sent, got[0..@intCast(n)]);
 }
@@ -245,4 +317,75 @@ test "끝을 두 갈래로 가른다 — 누가 닫았는지" {
     // 둘 다 닫혔을 때도 **하나를 골라** 돌려준다(무한 루프가 아니다).
     const end = relayFds(in[0], out[1], sock[0]);
     try testing.expect(end == .stdin_eof or end == .socket_eof);
+}
+
+test "닫힌 쪽에 쓰다 죽지 않는다 — 끝 메시지가 남는다" {
+    if (!posix_relay) return error.SkipZigTest;
+    // **이 테스트는 `SIGPIPE` 무시를 재지 못한다 — 그 사실을 조용히 두지 않는다.**
+    //
+    // 실측(2026-08-21): Zig 로 빌드한 **보통 실행 파일**은 닫힌 파이프에 쓰면 `SIGPIPE` 로 죽는다
+    // (`exit 141`). 즉 제품 경로(`maru control --stdio` 로 exec 된 프로세스)에서 그 신호는 진짜이고,
+    // 위 `sigaction` 이 없으면 중계는 **끝 메시지도 없이 사라진다**. 그런데 **테스트 러너는 그
+    // 신호를 이미 가로채 둔다** — 그래서 여기서는 무시를 빼도 안 죽고, 변이 검사가 살아남는다.
+    //
+    // 그러니 기본 동작일 때만 이 테스트가 뜻이 있다. 아니면 **건너뛴다**(초록으로 위장하지 않는다).
+    {
+        var current: std.posix.Sigaction = undefined;
+        std.posix.sigaction(std.posix.SIG.PIPE, null, &current);
+        if (current.handler.handler != std.posix.SIG.DFL) return error.SkipZigTest;
+    }
+    const in = try testPipe();
+    const out = try testPipe();
+    const sock = try testSocketPair();
+    defer for ([_]std.c.fd_t{ in[0], in[1], out[1], sock[0] }) |fd| {
+        _ = std.c.close(fd);
+    };
+
+    _ = std.c.close(out[0]); // 폰이 채널을 닫았다 — 우리 stdout 의 상대가 사라졌다
+    const reply = "{\"jsonrpc\":\"2.0\"}\n";
+    try testing.expect(std.c.write(sock[1], reply.ptr, reply.len) == reply.len);
+    _ = std.c.close(sock[1]);
+
+    // 죽지 않고, **폰이 닫았다** 로 끝난다(소켓이 닫힌 것과 구별한다).
+    try testing.expectEqual(End.stdin_eof, relayFds(in[0], out[1], sock[0]));
+}
+
+test "못 쓴 이유를 가른다 — 상대가 닫은 것과 진짜 실패" {
+    // 한 갈래로 두면 "폰이 나갔다" 가 "중계가 깨졌다" 로 보고되고, 화면은 없는 문제를 말한다.
+    try testing.expectEqual(WriteEnd.closed, classifyWriteErrno(.PIPE));
+    try testing.expectEqual(WriteEnd.closed, classifyWriteErrno(.CONNRESET));
+    try testing.expectEqual(WriteEnd.failed, classifyWriteErrno(.BADF));
+    try testing.expectEqual(WriteEnd.failed, classifyWriteErrno(.IO));
+}
+
+test "폰이 쓰기 쪽만 닫아도 마지막 답을 흘린다" {
+    if (!posix_relay) return error.SkipZigTest;
+    // **stdin EOF 는 "더 보낼 게 없다" 이지 "받을 게 없다" 가 아니다.** 여기서 곧장 끝내면
+    // 요청을 보내고 답을 기다리던 폰이 **그 답을 못 받는다** — 그리고 그 실패는 "가끔 목록이
+    // 안 뜬다" 로만 보인다.
+    const in = try testPipe();
+    const out = try testPipe();
+    const sock = try testSocketPair();
+    defer for ([_]std.c.fd_t{ in[0], out[0], out[1], sock[0] }) |fd| {
+        _ = std.c.close(fd);
+    };
+
+    const req = "{\"id\":1}\n";
+    try testing.expect(std.c.write(in[1], req.ptr, req.len) == req.len);
+    _ = std.c.close(in[1]); // 폰이 **쓰기 쪽만** 닫았다
+
+    const reply = "{\"id\":1,\"result\":{}}\n";
+    try testing.expect(std.c.write(sock[1], reply.ptr, reply.len) == reply.len);
+    // **`close` 가 아니라 `shutdown(WR)` 이다.** 닫아 버리면 중계가 요청을 밀어 넣을 때 `EPIPE`
+    // 로 **즉시** 끝나고, 답은 stdout 으로 흐르지 않는다 — 그러면 이 테스트는 재려던 것을
+    // 못 재고 `read` 에서 매달린다(실제로 그렇게 두 시간을 매달렸다). 답을 다 준 서버가
+    // 쓰기만 닫은 모양이 우리가 재려는 상황이다.
+    _ = std.c.shutdown(sock[1], std.posix.SHUT.WR);
+
+    // 끝은 **소켓** 쪽이다 — stdin 이 먼저 끝났다고 거기서 멈추지 않았다.
+    try testing.expectEqual(End.socket_eof, relayFds(in[0], out[1], sock[0]));
+
+    var got: [64]u8 = undefined;
+    const n = std.c.read(out[0], &got, got.len);
+    try testing.expectEqualStrings(reply, got[0..@intCast(n)]);
 }

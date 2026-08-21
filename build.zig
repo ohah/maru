@@ -800,10 +800,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_relay_tests = b.addRunArtifact(cli_relay_tests);
     run_cli_relay_tests.setCwd(b.path("."));
-    // 27 = 이름이 필터에 걸리는 중계 테스트 6개 + 이 모듈 그래프의 **이름 없는 test 블록** 21개
+    // 30 = 이름이 필터에 걸리는 중계 테스트 9개 + 이 모듈 그래프의 **이름 없는 test 블록** 21개
     // (필터는 이름 있는 것만 거르고 익명 블록은 늘 컴파일된다 — 파일 탐색기 게이트와 같은 셈법).
     // 숫자가 틀렸다고 나오면 먼저 **어느 테스트가 빠졌는지** 보고, 정당한 증감일 때만 갱신한다.
-    run_cli_relay_tests.addArg("--maru-expect-tests=27");
+    run_cli_relay_tests.addArg("--maru-expect-tests=30");
     const test_cli_relay_step = b.step("test-cli-relay", "Run the `maru control --stdio` relay tests only");
     test_cli_relay_step.dependOn(&run_cli_relay_tests.step);
 

@@ -140,6 +140,10 @@ pub const ScenarioId = enum {
     /// gutter를 침범하지 않는지가 단위 테스트로 안 보이는 부분이다 — 열을 셀 폭으로 환산해 놓는
     /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다(강조가 7칸 밀린 §4.1c 전례).
     editor_selection,
+    /// N1 §4.1g "비교 뷰" — **좌우 두 열 중 한 쪽만** 선택 띠가 서는지 픽셀로 본다. 계약이
+    /// *"좌우를 걸치는 선택은 만들지 않는다"*로 정한 것이 화면에서 어떻게 보이는가이고, 짝맞춤
+    /// 빈 행(왼쪽 3행)에 띠가 어떻게 서는지도 여기서만 드러난다 — 그 행은 그 자리에 줄이 **없다**.
+    editor_diff_selection,
     /// N1.5 §7 — **나란한 비교.** 좌우 두 열이 같은 행을 같은 높이에 세우는지, 짝을 맞추려 넣은 빈
     /// 행이 반대쪽 줄을 밀지 않는지, 두 gutter가 **각자 문서의 번호**를 다는지를 픽셀로 본다.
     /// 세로 어긋남은 단위 테스트로도 잡히지만(같은 y), **한 칸 어긋난 gutter 폭이나 가운데 틈이
@@ -233,7 +237,7 @@ pub fn buildFrame(
         .scm_rows, .scm_row_hover, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection => buildEditorGutterFrame(scenario, buffers),
-        .editor_diff, .editor_diff_scrolled => buildEditorDiffFrame(scenario, buffers),
+        .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -712,6 +716,15 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 위와 같은 단일 출처. **비교는 좌우가 이것을 반씩 나눠 쓴다**(`diff_frame.splitScratch`).
     var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
 
+    // **오른쪽 열만 고른 상태.** 계약이 *"좌우를 걸치는 선택은 만들지 않는다"*로 정했으므로 한쪽만
+    // 띠가 선다 — 2행 중간부터 4행 앞부분까지, 짝맞춤 빈 행이 있는 왼쪽과 나란히 놓여 대비된다.
+    const sel_r1 = [_]editor_view.frame.Mark{.{ .start = 2, .len = 9 }}; // "var b = 2;"의 일부
+    const sel_r2 = [_]editor_view.frame.Mark{.{ .start = 0, .len = 12 }}; // 행 전체
+    const sel_r3 = [_]editor_view.frame.Mark{.{ .start = 0, .len = 6 }}; // "  log("
+    const sel_none = [_]editor_view.frame.Mark{};
+    const right_selection = [_][]const editor_view.frame.Mark{ &sel_none, &sel_r1, &sel_r2, &sel_r3, &sel_none };
+    const selecting = scenario.id == .editor_diff_selection;
+
     const w = editor_view.diff_frame.build(.{
         .left = if (scrolled)
             .{ .lines = &long_left, .numbers = &long_left_nums, .total_lines = long_rows, .bands = &long_left_bands }
@@ -720,7 +733,7 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .right = if (scrolled)
             .{ .lines = &long_right, .numbers = &long_right_nums, .total_lines = long_rows, .bands = &long_right_bands }
         else
-            .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands, .marks = &right_marks },
+            .{ .lines = &right_texts, .numbers = &right_numbers, .total_lines = 5, .bands = &right_bands, .marks = &right_marks, .selection_marks = if (selecting) &right_selection else null },
         // **문서 중간부터 그린다** — 막대가 트랙 가운데에 서고, 맨 위 줄 번호가 41이다.
         .first_line = if (scrolled) 40 else 0,
         .tab_width = lab_tab_width,
@@ -844,7 +857,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

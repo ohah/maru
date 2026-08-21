@@ -44,8 +44,9 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 (`zig build test-provider-session-removal`)가 `AppSession.init`을 실제로 돌려 본다: 사용자 항목 순서 보존,
 과거 표식 잔존, 로그 디렉터리 `0700`, 지난 실행 로그 정리와 남의 파일 보존, 재실행 시 바이트 무변경,
 **게이트 off에서 `hooks` 키 무생성**.
-**AH2b(codex) ✅ 완료.** 세트를 provider 별로 가르고(codex 5개), 신뢰 값 계산을 순수 층으로 세우고
-(`agent_hook_trust.zig` — golden 다섯이 **codex 자신이 계산한 값**), `hooks.json` 설치와 `config.toml`
+**AH2b(codex) ✅ 완료.** 세트를 provider 별로 가르고(codex 7개 — 세트가 늘어날 때 이 숫자가 5 로 남아
+있었다), 신뢰 값 계산을 순수 층으로 세우고
+(`agent_hook_trust.zig` — golden 전원이 **codex 자신이 계산한 값**), `hooks.json` 설치와 `config.toml`
 신뢰 기록을 배선했다. 제품 경로 게이트가 `AppSession.init`으로 확인한다: codex 세트대로 설치, 과거 표식
 잔존, 사용자 항목이 앞, **신뢰 키가 실체 경로**(심링크 `CODEX_HOME` 픽스처로 못박음), 재실행 시 바이트
 무변경, 새 `config.toml` 은 `0600`.
@@ -58,13 +59,14 @@ codex 는 `config.toml` 의 우리 신뢰 블록까지 거둔 뒤 남는 것이 
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는
   `config.toml`의 `trusted_hash`를 **함께** 갱신한다.
-- **Codex 세트는 7개다** — `Notification` 과 `StopFailure` 가 Codex 에 없다(계약 §2.1 실측). 그래서 이 단계는 먼저
+- **Codex 세트는 7개다** — `Notification` 과 `StopFailure` 가 Codex 에 없다(계약 §2 — codex 는 공개 소스의
+  `HookEventName` 열거가 권위이고, 2026-08-22 대조에서 실측과 일치했다). 그래서 이 단계는 먼저
   `agent_hook_command.events` 를 **provider 별로 가른다**(`planForSet` 이 쓰는 세트 크기도 함께 갈린다).
   그 항목이 파일 파싱을 깨는지 조용히 무시되는지도 실험으로 확인한다 — 깨면 사용자의 `hooks.json` 이
   통째로 무효가 된다.
 - **해시 입력도 matcher 규칙도 일곱 다 확정됐다**(계약 §2.1 — 이벤트 신원 객체, app-server `hooks/list`로
   codex 자신의 값을 받아 대조). 계산은 [`session/agent_hook_trust.zig`](../../src/session/agent_hook_trust.zig)
-  가 소유하고 golden 다섯이 그 값을 못박는다. 신뢰 항목은 **키가 비어 있을 때만** 쓴다(§2.1 — codex 쪽
+  가 소유하고 golden 이 세트 전원에 대해 그 값을 못박는다. 신뢰 항목은 **키가 비어 있을 때만** 쓴다(§2.1 — codex 쪽
   포맷이 바뀌어도 무한 프롬프트가 되지 않게).
 - Codex `hooks.json`도 claude `settings.json`과 **같은 모양**이다(실측: `hooks` → 이벤트 → 그룹 →
   `hooks[]` → `{type, command}`). 그래서 `agent_hook_install`의 트리 수술을 그대로 쓴다 — 다른 것은
@@ -146,9 +148,10 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
   않고(`agent_id`), 턴 경계(`Stop`·`StopFailure`·`UserPromptSubmit`·`SessionStart`)에서 비운다.
 - 검증: 상태 전이표 단위 테스트, 조용히 오래 도는 셸 명령에서 진행중 유지(관측 모드가 틀리는 케이스),
   `AskUserQuestion`이 `PreToolUse`로만 올 때 입력 대기로 잡히는지.
-- **완료 조건에 대화형 수동 검증을 포함한다** — `PermissionRequest` 도 `Notification` 도 헤드리스에서는
-  발화를 재현할 수 없다(계약 §9-6). 실제 승인 프롬프트가 뜨는 세션에서 입력 대기 전이를 눈으로 확인한다.
-  둘 중 **어느 쪽이 와도** 같은 전이라 하나만 와도 배지는 선다.
+- **완료 조건에 대화형 수동 검증을 포함한다** — ✅ **충족**(2026-08-22). 실제 승인 프롬프트가 뜨는
+  세션에서 `PreToolUse → PermissionRequest → Notification(permission_prompt)` 을 받았고 **배지가
+  「입력 대기」로 서는 것을 눈으로 확인했다**(계약 §9-6). 한 승인에 두 소스가 다 발화하지만 전이가
+  하나뿐이라 알림도 하나다.
 
 ### AH4b — 사이드바 대화 줄
 
@@ -170,7 +173,9 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
   해소되는 요청 때문).
 - 활성·포커스 pane은 배너 억제·목록만(현행 정책과 동형).
 - 검증: 같은 턴 중복 0, 자동 해소된 승인에서 배너 0·배지 전이 1, 포커스 억제, 알림 문구에 위치 접두.
-- **주의 알림도 대화형 수동 검증이 완료 조건이다**(같은 이유, 계약 §9-6).
+- **주의 알림도 대화형 수동 검증이 완료 조건이다**(같은 이유, 계약 §9-6). ✅ 배지 전이는 확인했다.
+  ⚠️ **배너 자체는 아직 못 봤다** — 그 pane 을 보고 있으면 억제되는 것이 정책이라, 배너를 확인하려면
+  다른 pane 을 보는 동안 승인 요구가 떠야 한다.
 
 ### AH6 — 비용 측정과 후퇴 경로
 
@@ -207,8 +212,12 @@ AH1~AH3까지가 인프라이고, AH4·AH5·AT1이 그 위의 소비자다. **AH
   손해이고, 되찾는 수단은 그 Term에서 훅을 끄는 것뿐이다.
 - 도구 훅 비용은 측정을 마쳤다(AH6, 계약 §3). 샌드박스 안팎에 차이가 없었고 스크립트 몫은 측정 한계
   아래였다. 남은 레버는 발화 횟수뿐이고, 지금 수치로는 후퇴가 필요 없다.
-- **`PermissionRequest`는 양 provider 모두 미검증**이다(계약 §9-6) — 헤드리스로는 발화를 재현할 수 없어
-  AH4·AH5의 완료 조건이 대화형 수동 검증이다. `Notification` 은 claude 실사용에서 오는 것을 봤고
-  (`idle_prompt`), 그래서 claude 의 「입력 대기」는 소스가 둘이다. Codex `PostToolUse`도 미검증이라 AH4의
+- **claude 는 검증됐다**(2026-08-22) — 대화형에서 `PermissionRequest` 와 `Notification` 이 **둘 다** 오고
+  배지가 「입력 대기」로 선다(계약 §9-6). **codex 는 여전히 미검증**이다 — `Notification` 이 없으므로 그
+  배지의 소스가 `PermissionRequest` 하나뿐인데, 그것이 대화형 codex 에서 발화하는지 확인하지 않았다.
+- **승인된 뒤 명령이 도는 동안 배지가 「입력 대기」로 남는다**(계약 §6). 그 요구를 푸는 이벤트가 없다 —
+  `PostToolUse` 를 payload 크기 때문에 뺐기 때문이다(§3.1). 다음 `PreToolUse`·`Stop` 이 와야 풀린다.
+  자동 승인은 밀리초라 알림은 디바운스가 삼키지만 **사람이 승인한 긴 명령**은 그 시간 동안 배지가 실제와
+  다르다. 되찾으려면 도구 종료 신호가 필요하고, 그것은 세트를 늘리는 결정이다. Codex `PostToolUse`도 미검증이라 AH4의
   Codex 경로는 `PreToolUse`/`Stop`만으로도 상태가 서야 한다.
 - 훅은 사용자 소유 설정 파일을 고친다. 게이트 기본값은 AH2 리뷰에서 사용자와 정한다.

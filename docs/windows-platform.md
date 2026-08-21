@@ -889,7 +889,9 @@ arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loa
 Mono"`, `fallback = "Jetendard"`를 주고 `fontCandidates`는 **설정값을 맨 앞에** 놓는다. 그래서 config
 파일이 없어도 JetBrains Mono를 먼저 찾고, 그 폰트가 이 기계에 없어서 티어의 Cascadia Mono로 내려간
 것이다. "빈 값이라 티어가 골랐다"가 아니다 — JetBrains Mono가 설치된 기계에서는 그 줄이 달라진다.
-`Jetendard`는 macOS 번들 한글 폰트라 Windows에서는 열리지 않고 폴백 사슬 앞에 무해하게 남는다.
+`Jetendard`는 그때 Windows에서 열리지 않아 폴백 사슬 앞에 무해하게 남았다. **§2m.14가 그것을
+뒤집었다** — 이제 번들 폰트를 파일에서 직접 열므로 위 "없음" 줄은 `font_family=JetBrains Mono`가 된다
+(셀은 `9x17` 그대로다). 표는 그때의 측정이라 남겨 둔다.
 
 **아직 안 배선한 것**(정직하게 적는다): 테마 색·팔레트·`max_scrollback` 같은 앱 수준 값은 이 스모크가
 하드코딩한다. `shell.command`·`shell.windows-shell`도 소비자가 없다 — 스모크는
@@ -1695,7 +1697,7 @@ Draw hr=0  runs=6  glyphs=15
 | ① advance | `DWRITE_GLYPH_RUN.glyphAdvances` — 9.4 등폭 유지 |
 | ② 글리프↔문자 | `DWRITE_GLYPH_RUN_DESCRIPTION` 의 `clusterMap`·`textPosition`·`stringLength` |
 | ③ left overhang | `GetDesignGlyphMetrics(run.fontFace)` — 저수준과 동일 |
-| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 — **시스템 컬렉션에 있는 폰트만**(아래; 현 계약에서는 항상 참) |
+| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 — **시스템 컬렉션에 있는 폰트만**(아래). §2m.14 이후 번들 face 는 여기 없다 |
 | ⑤ 말줄임 | `SetWordWrapping(NO_WRAP)` + `CreateEllipsisTrimmingSign` + `SetTrimming` |
 | ⑥ 컬러 글리프 | `run.fontFace` 에 `COLR`/`sbix` 테이블이 있는가 |
 
@@ -1787,9 +1789,14 @@ layout → IDWriteTextLayout2 QueryInterface            hr=0  ptr=있음   (SetF
 으로 layout 에 건다. **다리는 `fallbackCandidates` 의 답을 이 둘로 layout 에 박는다** — 그래야 터미널과
 크롬이 같은 목록을 본다.
 
-**④ 의 번들 폰트 문제는 이 계약에서는 안 터진다.** Windows 는 번들 폰트를 아예 안 열기 때문이다(§2e).
-런의 face 는 항상 시스템 컬렉션에서 온 것이라 `GetFontFromFontFace` 가 통한다. **그 계약이 바뀌면 —
-번들 폰트를 열기 시작하면 — 그날 같이 터진다.**
+**④ 의 번들 폰트 문제는 이제 실재한다.** 이 절은 "Windows 는 번들 폰트를 아예 안 여니 런의 face 는
+항상 시스템 컬렉션에서 온다" 고 적었는데, **§2m.14 가 바로 그 계약을 바꿨다.** 기본 config 의 주 폰트
+(`JetBrains Mono`)와 폴백(`Jetendard`)이 둘 다 번들이므로, 다리가 만나는 런의 face 는 **대개 시스템
+컬렉션 밖**이고 `GetFontFromFontFace` 는 `DWRITE_E_NOFONT` 를 낸다.
+
+**그래서 다리는 face → 이름을 시스템 컬렉션에 묻지 않는다.** 우리가 연 face 는 우리가 이름과 함께
+들고 있다(`Rasterizer.faces` 와 그 이름). 시스템 조회는 그 표에 없는 face(DirectWrite 가 스스로 고른
+폴백)에만 쓴다.
 
 > **사용자 판단이 필요한 것 하나(문서에 없다).** `Malgun Gothic` 은 한글 advance 가 등폭 격자와 안 맞는다.
 > 이 절의 실측(em 28px): 라틴 advance 16.41px, 한글 advance **28.00px**, 격자 2 칸 32.81px → 글자마다
@@ -1814,6 +1821,83 @@ DirectWrite 가 다른 인터페이스를 묻고, 우리가 준 포인터를 그
 **§2m.12 의 "새 인터페이스마다 슬롯 assert" 옆에 이것을 나란히 둔다** — 우리가 구현하는 COM 객체는
 슬롯과 IID 를 **둘 다** 틀릴 수 있고, 증상이 구분되지 않는다.
 
+
+### 2m.14 번들 폰트를 Windows 에서도 연다 (사용자 결정, 실측 2026-08-21)
+
+**§2l 이 "Windows 에서는 열리지 않는다" 고 적은 것을 뒤집는다.** 사용자 결정이다("맥이랑 동일하게").
+근거는 한글 자간이고, macOS 가 번들 `Jetendard` 를 기본 폴백으로 삼은 것과 같은 이유다
+([font-strategy.md](font-strategy.md) "번들 폰트"; 값의 소유자는 `config/theme.zig` `FontConfig.fallback`).
+
+**무엇이 문제였나.** config 기본값은 `font.family = JetBrains Mono`, `font.fallback = Jetendard` 이고
+**둘 다 번들 폰트**다. macOS 는 앱 번들이 `ATSApplicationFontsPath` 로 프로세스에 등록해 줘서 이름만으로
+열린다. Windows 에는 그 장치가 없고 `resolveFace` 가 **시스템 컬렉션만** 봤다 — 그래서 두 기본값이 전부
+조용히 건너뛰어지고 티어의 `Cascadia Mono` + 시스템 `Malgun Gothic` 으로 내려갔다.
+
+**컬렉션도 COM 구현도 필요 없다.** 파일 경로 하나로 face 가 나온다:
+
+```text
+CreateFontFileReference(assets/fonts/Jetendard/Jetendard-Regular.ttf)   슬롯 7
+CreateFontFace(TRUETYPE, 1, [file], 0, NONE)                            슬롯 9
+```
+
+`IDWriteFontSetBuilder`(Factory5)나 커스텀 컬렉션 로더는 **안 쓴다** — 저 둘로 충분하고, 슬롯이 깊을수록
+틀릴 자리만 는다(§2m.12 가 슬롯을 네 번 틀린 이력을 갖고 있다). 두 슬롯에는 assert 를 붙였다.
+
+**`CreateFontFileReference` 로 성공을 판정하면 안 된다.** 그것은 경로를 받아 두기만 하고 파일을 열지
+않아 **없는 경로에도 `hr=0`** 을 준다. 실제로 여는 것은 `CreateFontFace` 다. 테스트가 없는 파일로 그
+자리를 지킨다.
+
+**`DWRITE_FONT_FACE_TYPE_TRUETYPE` 은 1 이다**(0 은 CFF). 처음에 0 으로 적었다가 잡았다 — 틀리면
+`CreateFontFace` 가 실패하고 **번들 폰트가 조용히 안 열린다**(예전 동작과 구분되지 않는다).
+
+**시스템이 먼저, 번들이 나중이다.** 사용자가 직접 설치한 폰트가 이긴다 — 같은 이름의 번들본으로 조용히
+바꿔치기하면 "내가 깐 폰트가 안 먹는다" 가 된다. 번들은 **없을 때의 바닥**이다.
+
+**`assets/` 를 어디서 찾는가.** 실행 형태가 셋이라(개발 중 `zig-out/bin/`, 테스트는 저장소 루트가 작업
+디렉터리, 앞으로의 배포 묶음은 exe 옆) 한 자리만 보면 나머지 둘에서 조용히 못 찾는다. 순서는
+**좁은 곳부터** — exe 옆 → 위로 두 단계 → 작업 디렉터리. 배포 묶음이 이겨야 사용자의 우연한 작업
+디렉터리가 폰트를 바꾸지 않는다. 규칙은 `path_shape.assetSearchRoots` 가 소유하고 `os_tag` 를 안 받아
+**macOS·Linux CI 가 전부 지킨다**(§2m.4).
+
+**`GetModuleFileNameW` 의 잘림을 실패로 접는다.** 버퍼가 모자라면 잘라 넣고 크기를 그대로 돌려준다
+(에러가 아니다). 그 값으로 파일을 열면 다른 파일을 열거나 조용히 못 연다.
+
+**얼마나 좋아지는가 — 실측(이 기계, 기본 config, 크기 14).**
+
+```text
+전       주 폰트 = Cascadia Mono   셀 9x17   한글 = Malgun Gothic 14.00px, 2칸 18px → 여백 4.00px
+후       주 폰트 = JetBrains Mono  셀 9x17   한글 = Jetendard     16.80px, 2칸 18px → 여백 1.20px
+```
+
+**셀 크기는 안 바뀐다** — `ceil(0.5875×14)` 와 `ceil(0.6×14)` 가 둘 다 9 다. 바뀌는 것은 글리프와 한글
+여백뿐이다.
+
+**폰트 비율은 오차가 없다.** upem 1000 에서 `M`=600, `한`=1200 — **정확히 2 배**다. 테스트가 이 성질을
+못 박는다(폰트를 갈면 거기서 걸린다).
+
+**남는 여백 1.20px 은 격자가 정수라서다.** 그리고 그 반올림 규칙이 두 OS 가 다르다:
+
+| | 규칙 | 크기 14 의 셀 |
+|---|---|---|
+| Windows | `ceil` (`dwrite_font.cellMetricsFrom`) | 9px |
+| macOS | `lround` (`coretext_smoke.m`) | 8px |
+
+**`ceil` 을 유지하기로 했다**(사용자 결정). 두 규칙으로 실제 픽셀을 래스터해 견줬다:
+
+```text
+                 ASCII 94 자        한글 401 자
+ceil   9px       칸 넘침 0          칸 넘침 0
+lround 8px       칸 넘침 12(1px)    칸 넘침 0
+```
+
+`lround` 로 가면 ASCII 의 13% 가 오른쪽으로 1px 넘고, 아틀라스 슬롯이 칸 크기라 그만큼 **잘린다**.
+한글 간격은 `lround` 쪽이 자연스럽지만(1:1 에서도 보인다) 터미널 내용의 대부분이 ASCII 다. 그리고
+**여백의 대부분(4.00 → 1.20)은 폰트를 바꾸는 것만으로 얻어진다** — `ceil`↔`lround` 는 그 뒤 1.20 ↔ 0 의
+차이다.
+
+**아직 안 한 것.** 번들에서 **Regular 만** 연다. Windows 래스터라이저는 원래도 굵게/기울임 face 를 안
+열었으므로(`GetFirstMatchingFont` 에 `font_weight_normal` 고정) 회귀는 아니지만, macOS 는 번들이
+R/B/I/BI 넷을 등록한다. SGR 1/3 을 Windows 에서 제대로 하려면 그 자리가 따로 필요하다.
 
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 

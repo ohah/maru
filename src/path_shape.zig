@@ -479,6 +479,106 @@ pub fn trimTrailingSep(base: []const u8) []const u8 {
     return base;
 }
 
+/// 경로의 **부모**를 준다(입력의 부분 슬라이스라 할당이 없다). 부모가 없으면 `null`.
+///
+/// **루트에서 멈춘다.** `/`·`C:/` 의 부모는 없다 — 계속 올라가면 빈 문자열이 되고, 그 빈 문자열에
+/// 무언가를 이으면 절대경로가 상대경로로 바뀐다(`trimTrailingSep` 이 길이 1 을 안 떼는 이유와 같다).
+///
+/// **`/` 만 센다**(§5 규칙 1). 중립 층 경로가 입력이고, POSIX 에서 `p\q` 는 평범한 파일 이름이다.
+pub fn parentOf(path: []const u8) ?[]const u8 {
+    const trimmed = trimTrailingSep(path);
+    const root_len = rootPrefixLenFor(.windows, trimmed) orelse rootPrefixLenFor(.linux, trimmed);
+    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return null;
+    if (root_len) |rl| {
+        // 루트 안쪽으로는 안 내려간다. `C:/a` 의 부모는 `C:/`, `C:/` 의 부모는 없다.
+        if (trimmed.len <= rl) return null;
+        if (idx + 1 <= rl) return trimmed[0..rl];
+    }
+    if (idx == 0) return trimmed[0..1]; // `/a` 의 부모는 `/`
+    return trimmed[0..idx];
+}
+
+/// 번들 에셋(폰트 등)을 찾을 **루트 후보를 순서대로** 준다. 전부 입력의 부분 슬라이스다.
+///
+/// **왜 한 자리가 아닌가.** maru 는 실행 형태가 셋이다 — 개발 중 `zig-out/bin/maru.exe`(저장소 루트에
+/// `assets/` 가 있다), 테스트(작업 디렉터리가 저장소 루트다), 그리고 앞으로의 배포 묶음(exe 옆에
+/// `assets/` 를 둔다). 어느 하나만 보면 나머지 둘에서 조용히 못 찾는다.
+///
+/// 순서는 **좁은 곳부터**다: exe 옆 → 위로 두 단계 → 작업 디렉터리. 배포 묶음이 이겨야 사용자의 우연한
+/// 작업 디렉터리가 폰트를 바꾸지 않는다.
+///
+/// **`os_tag` 를 안 받는다.** 중립 층 경로만 다루므로 갈래가 없고, 그래서 macOS·Linux CI 가 이 규칙을
+/// 전부 지킨다(docs/windows-platform.md §2m.4).
+pub fn assetSearchRoots(exe_dir: []const u8, cwd: []const u8, out: *[4][]const u8) []const []const u8 {
+    var n: usize = 0;
+    if (exe_dir.len > 0) {
+        out[n] = trimTrailingSep(exe_dir);
+        n += 1;
+        if (parentOf(exe_dir)) |up1| {
+            out[n] = up1;
+            n += 1;
+            if (parentOf(up1)) |up2| {
+                out[n] = up2;
+                n += 1;
+            }
+        }
+    }
+    if (cwd.len > 0) {
+        const c = trimTrailingSep(cwd);
+        // 이미 같은 자리를 보고 있으면 다시 안 본다.
+        var dup = false;
+        for (out[0..n]) |r| {
+            if (std.mem.eql(u8, r, c)) dup = true;
+        }
+        if (!dup) {
+            out[n] = c;
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+test "parentOf: 루트에서 멈춘다" {
+    try testing.expectEqualStrings("/a/b", parentOf("/a/b/c").?);
+    try testing.expectEqualStrings("/a", parentOf("/a/b").?);
+    try testing.expectEqualStrings("/", parentOf("/a").?);
+    try testing.expect(parentOf("/") == null);
+    try testing.expectEqualStrings("C:/a", parentOf("C:/a/b").?);
+    try testing.expectEqualStrings("C:/", parentOf("C:/a").?);
+    try testing.expect(parentOf("C:/") == null);
+    // 후행 구분자가 붙어도 같은 답이어야 한다.
+    try testing.expectEqualStrings("/a", parentOf("/a/b/").?);
+    // 구분자가 없으면 부모가 없다(상대 이름 하나).
+    try testing.expect(parentOf("maru") == null);
+    try testing.expect(parentOf("") == null);
+}
+
+test "assetSearchRoots: 좁은 곳부터, 중복은 한 번만" {
+    var buf: [4][]const u8 = undefined;
+
+    const roots = assetSearchRoots("C:/tools/maru/zig-out/bin", "D:/work", &buf);
+    try testing.expectEqual(@as(usize, 4), roots.len);
+    try testing.expectEqualStrings("C:/tools/maru/zig-out/bin", roots[0]);
+    try testing.expectEqualStrings("C:/tools/maru/zig-out", roots[1]);
+    try testing.expectEqualStrings("C:/tools/maru", roots[2]); // 저장소 루트 — 개발 중 여기 `assets/` 가 있다
+    try testing.expectEqualStrings("D:/work", roots[3]);
+
+    // exe 옆이 곧 작업 디렉터리면 한 번만 본다.
+    const dup = assetSearchRoots("/opt/maru", "/opt/maru", &buf);
+    try testing.expectEqual(@as(usize, 3), dup.len);
+    try testing.expectEqualStrings("/opt/maru", dup[0]);
+    try testing.expectEqualStrings("/opt", dup[1]);
+    try testing.expectEqualStrings("/", dup[2]);
+
+    // exe 경로를 모르면 작업 디렉터리만 남는다 — 빈 문자열을 루트로 지어내지 않는다.
+    const only_cwd = assetSearchRoots("", "/repo", &buf);
+    try testing.expectEqual(@as(usize, 1), only_cwd.len);
+    try testing.expectEqualStrings("/repo", only_cwd[0]);
+
+    // 둘 다 없으면 후보가 없다(호출부가 조용히 `/assets/...` 를 열지 않게).
+    try testing.expectEqual(@as(usize, 0), assetSearchRoots("", "", &buf).len);
+}
+
 /// 중립 층 경로에 **이름 한 칸**을 잇는다. 결과는 계약대로 `/`만 쓴다(§5 규칙 1).
 ///
 /// **`std.fs.path.join`을 쓰면 안 되는 자리다.** 그것은 호스트 native 구분자를 넣으므로 Windows에서

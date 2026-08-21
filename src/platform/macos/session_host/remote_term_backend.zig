@@ -136,6 +136,7 @@ const HostReconnectJobState = enum(u8) {
     shared_replacement_reserved = 15,
     shared_replacement_published = 16,
     runtime_transactions_complete = 17,
+    host_failure_complete = 18,
 };
 
 pub const HostReconnectStart = union(enum) {
@@ -347,6 +348,7 @@ const HostReconnectJob = struct {
             @intFromEnum(HostReconnectJobState.shared_replacement_reserved),
             @intFromEnum(HostReconnectJobState.shared_replacement_published),
             @intFromEnum(HostReconnectJobState.runtime_transactions_complete),
+            @intFromEnum(HostReconnectJobState.host_failure_complete),
             => true,
             else => false,
         };
@@ -486,6 +488,7 @@ const HostReconnectJob = struct {
         if (!self.validateRuntimeSet(backend)) return false;
         const multi_runtime = !self.runtime_cursor.pristine();
         if (self.state_raw != @intFromEnum(HostReconnectJobState.runtime_transactions_complete) and
+            self.state_raw != @intFromEnum(HostReconnectJobState.host_failure_complete) and
             self.terminal_summary != null) return false;
         if ((self.state_raw == @intFromEnum(HostReconnectJobState.preparing) or
             self.state_raw == @intFromEnum(HostReconnectJobState.connected) or
@@ -873,11 +876,56 @@ const HostReconnectJob = struct {
                     }
                 }
             },
+            @intFromEnum(HostReconnectJobState.host_failure_complete) => {
+                if (!multi_runtime or self.client != null or self.runtime_handle != 0 or
+                    self.runtime_addr != 0 or self.runtime_generation != 0 or self.request_nonce != 0 or
+                    self.candidateFailureReason() == null or
+                    !std.meta.eql(self.reconnect, remote_runtime.PreparedReconnect{}) or
+                    self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0) or
+                    self.controller_generation != 0 or self.terminal_summary == null or
+                    !self.terminal_summary.?.valid() or self.terminal_summary.?.published_new != 0 or
+                    self.terminal_summary.?.frozen_unavailable != self.runtime_row_count or
+                    !self.runtime_cursor.valid(self.runtimeRowsSlice() orelse return false) or
+                    self.runtime_cursor.next_index != self.runtime_row_count or
+                    self.replacementLifecycleRaw() !=
+                        @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.published) or
+                    adapter.slot.retiredClientCount() != 1)
+                    return false;
+                adapter.preflightPublishedClientReplacement(&self.replacement) catch return false;
+                adapter.preflightAttachmentConnectionFailedClosed(
+                    self.candidateFailureReason().?,
+                ) catch return false;
+                const expected_summary = host_reconnect_runtime_ledger.summarizeTerminalRows(
+                    self.runtimeSetJobIdentity(),
+                    self.runtimeRowsSlice() orelse return false,
+                ) catch return false;
+                if (!std.meta.eql(expected_summary, self.terminal_summary.?)) return false;
+                for (self.runtimeRowsSlice() orelse return false) |row| {
+                    const entry = backend.runtimes.get(row.identity.runtime_handle) orelse return false;
+                    const ledger = std.enums.fromInt(
+                        host_reconnect_runtime_ledger.RuntimeLedger,
+                        row.ledger_raw,
+                    ) orelse return false;
+                    const expected_shell_generation = if (ledger == .new_controller_evidenced)
+                        std.math.add(u64, row.identity.shell_generation, 1) catch return false
+                    else
+                        row.identity.shell_generation;
+                    if (!RemoteRuntime.backend_api.hostReconnectTerminalIdentityExact(
+                        entry.runtime,
+                        row.identity.runtime_id,
+                        expected_shell_generation,
+                    ) or !RemoteRuntime.backend_api.hostWideRetirementCommittedExact(
+                        entry.runtime,
+                        adapter,
+                    )) return false;
+                }
+            },
             else => return false,
         }
         if (multi_runtime and self.state_raw != @intFromEnum(HostReconnectJobState.shared_replacement_reserved) and
             self.state_raw != @intFromEnum(HostReconnectJobState.shared_replacement_published) and
-            self.state_raw != @intFromEnum(HostReconnectJobState.runtime_transactions_complete))
+            self.state_raw != @intFromEnum(HostReconnectJobState.runtime_transactions_complete) and
+            self.state_raw != @intFromEnum(HostReconnectJobState.host_failure_complete))
         {
             const active = self.runtime_cursor.activeRow(
                 self.runtimeRowsSlice() orelse return false,
@@ -1296,6 +1344,7 @@ pub const RemoteTermBackend = struct {
             } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_published) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.shared_replacement_published) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.runtime_transactions_complete) or
+                job.state_raw == @intFromEnum(HostReconnectJobState.host_failure_complete) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
                 job.state_raw == @intFromEnum(HostReconnectJobState.authority_conflict) or
@@ -1770,6 +1819,83 @@ pub const RemoteTermBackend = struct {
         job.controller_generation = 0;
         job.terminal_summary = summary;
         job.state_raw = @intFromEnum(HostReconnectJobState.runtime_transactions_complete);
+        job.seal = process_seal.hostReconnectJobSeal(
+            job.pid,
+            job.process_nonce,
+            job.sealInput() orelse process_seal.fatalIntegrity(.proof_loss),
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+        return summary;
+    }
+
+    /// A terminal shared transport invalidates every runtime on the connection, including rows
+    /// that already published a new generation. Prepare all such rows first, publish unavailable
+    /// in a no-fail suffix, then retain the terminal generations and retired Client under the retry
+    /// job until runtime-first backend teardown can reclaim them in canonical order.
+    pub fn failHostReconnectRuntimeTransactionsAfterSharedClientTerminal(
+        self: *RemoteTermBackend,
+    ) !host_reconnect_runtime_ledger.TerminalSummary {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or job.state_raw != @intFromEnum(HostReconnectJobState.candidate_failed) or
+            job.runtime_cursor.next_index == 0)
+            return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        const reason = job.candidateFailureReason() orelse return error.InvalidHostReconnectJob;
+        try adapter.preflightAttachmentConnectionFailedClosed(reason);
+        const rows = job.runtimeRowsSlice() orelse return error.InvalidHostReconnectJob;
+        const published_count: usize = job.runtime_cursor.next_index;
+        var prepared_count: usize = 0;
+        errdefer for (rows[0..prepared_count]) |row| {
+            const entry = self.runtimes.get(row.identity.runtime_handle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            RemoteRuntime.backend_api.abortHostWideRetirement(
+                entry.runtime,
+                adapter,
+                @intFromPtr(job),
+                job.job_generation,
+            ) catch process_seal.fatalIntegrity(.proof_loss);
+        };
+        for (rows[0..published_count]) |row| {
+            const entry = self.runtimes.get(row.identity.runtime_handle) orelse
+                return error.InvalidHostReconnectJob;
+            try RemoteRuntime.backend_api.prepareHostWideRetirement(
+                entry.runtime,
+                adapter,
+                @intFromPtr(job),
+                job.job_generation,
+            );
+            prepared_count += 1;
+        }
+        for (rows[0..published_count]) |row| {
+            const entry = self.runtimes.get(row.identity.runtime_handle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            RemoteRuntime.backend_api.commitHostWideRetirementNoFail(
+                entry.runtime,
+                adapter,
+                @intFromPtr(job),
+                job.job_generation,
+            );
+        }
+        prepared_count = 0;
+        const summary = try job.runtime_cursor.failAllForTerminalConnection(
+            job.runtime_rows[0..rows.len],
+        );
+        job.runtime_rows_digest = HostReconnectJob.runtimeRowsDigest(
+            job.runtimeRowsSlice() orelse process_seal.fatalIntegrity(.proof_loss),
+        );
+        job.runtime_handle = 0;
+        job.runtime_addr = 0;
+        job.runtime_generation = 0;
+        job.request_nonce = 0;
+        job.reconnect = .{};
+        job.stage = null;
+        job.mutation_digest = [_]u8{0} ** 32;
+        job.controller_generation = 0;
+        job.terminal_summary = summary;
+        job.state_raw = @intFromEnum(HostReconnectJobState.host_failure_complete);
         job.seal = process_seal.hostReconnectJobSeal(
             job.pid,
             job.process_nonce,
@@ -5127,16 +5253,67 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
                         job.state_raw,
                     );
                     try testing.expect(job.valid(&backend_value));
+                    // Remove the second runtime from the backend map after the first publication.
+                    // The host-wide preflight must unwind the first row and preserve the job
+                    // before restoring the exact row allows a later clean retry to commit.
+                    const adapter = pool.get(host_id).?;
+                    const first_published = backend_value.runtimes.get(job.runtime_rows[0].identity.runtime_handle).?;
+                    const missing_handle = job.runtime_rows[1].identity.runtime_handle;
+                    const missing_entry = backend_value.runtimes.get(missing_handle).?;
+                    try testing.expect(backend_value.runtimes.remove(missing_handle));
+                    const job_before_preflight_reject = job.*;
                     try testing.expectError(
                         error.InvalidHostReconnectJob,
-                        backend_value.failHostReconnectRuntimeTransactions(),
+                        backend_value.failHostReconnectRuntimeTransactionsAfterSharedClientTerminal(),
                     );
+                    try testing.expectEqualDeep(job_before_preflight_reject, job.*);
+                    try testing.expect(!RemoteRuntime.backend_api.hostWideRetirementPreparedExact(
+                        first_published.runtime,
+                        adapter,
+                        @intFromPtr(job),
+                        job.job_generation,
+                    ));
+                    try backend_value.runtimes.put(allocator, missing_handle, missing_entry);
+                    const summary = try backend_value
+                        .failHostReconnectRuntimeTransactionsAfterSharedClientTerminal();
                     try testing.expect(job.valid(&backend_value));
-                    try testing.expect(job.terminal_summary == null);
-                    try testing.expectEqual(@as(u32, 1), job.runtime_cursor.next_index);
+                    try testing.expectEqual(@as(u32, 0), summary.published_new);
+                    try testing.expectEqual(@as(u32, 3), summary.frozen_unavailable);
+                    try testing.expectEqual(@as(u32, 3), summary.retry_reserved);
+                    try testing.expectEqual(
+                        @intFromEnum(HostReconnectJobState.host_failure_complete),
+                        job.state_raw,
+                    );
+                    try testing.expectEqual(@as(u32, 3), job.runtime_cursor.next_index);
                     try testing.expectEqual(@as(i32, -1), host_adapter_mod.HostAdapter.testing.rawClient(
                         pool.get(host_id).?,
                     ).fd);
+                    try testing.expectEqual(@as(usize, 1), pool.get(host_id).?.slot.retiredClientCount());
+                    try testing.expectEqual(
+                        client_slot_mod.PreparedClientReplacement.Lifecycle.published,
+                        job.replacement.lifecycle,
+                    );
+                    for (job.runtime_rows[0..runtime_count], 0..) |row, row_index| {
+                        try testing.expectEqual(
+                            @intFromEnum(host_reconnect_runtime_ledger.LocalState.frozen_unavailable),
+                            row.local_raw,
+                        );
+                        try testing.expectEqual(
+                            @intFromEnum(host_reconnect_runtime_ledger.MutationState.closed),
+                            row.mutation_raw,
+                        );
+                        try testing.expectEqual(
+                            @intFromEnum(if (row_index == 0)
+                                host_reconnect_runtime_ledger.RuntimeLedger.new_controller_evidenced
+                            else
+                                host_reconnect_runtime_ledger.RuntimeLedger.old_valid),
+                            row.ledger_raw,
+                        );
+                    }
+                    try testing.expectError(
+                        error.InvalidHostReconnectJob,
+                        backend_value.failHostReconnectRuntimeTransactionsAfterSharedClientTerminal(),
+                    );
                     return;
                 }
                 _ = try backend_value.prepareHostReconnectObserverStage(handle);
@@ -5716,6 +5893,9 @@ test "CR5b-2c actual host job은 kth failure에서 앞선 publication을 보존�
     try runCr4aActualIssuerReplacementStage(.multi_runtime_conflict_1);
     try runCr4aActualIssuerReplacementStage(.multi_runtime_conflict_2);
     try runCr4aActualIssuerReplacementStage(.multi_runtime_conflict_3);
+}
+
+test "CR5c actual host job은 shared Client terminal에서 앞선 publication까지 host-wide unavailable로 닫는다" {
     try runCr4aActualIssuerReplacementStage(.multi_runtime_terminal_after_success);
 }
 

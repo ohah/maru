@@ -50,9 +50,9 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
     try std.testing.expectEqual(@as(usize, 1), count(begin, "job.prepareForConnect("));
     try std.testing.expectEqual(@as(usize, 1), count(begin, "host_connect.connectExistingHostUntil("));
 
-    // CR5b-2c adds the sealed cursor, terminal summary, product success/failure projections, and
-    // terminal live-state/summary recomputation plus the k-conflict row oracle.
-    try std.testing.expectEqual(@as(usize, 23), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // CR5b-2c adds ordered runtime completion; CR5c adds the all-row terminal connection
+    // transition while retaining the same canonical runtime-set owner.
+    try std.testing.expectEqual(@as(usize, 30), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     const backend_product = backend[0 .. std.mem.indexOf(u8, backend, "const testing = std.testing;") orelse
         return error.TestUnexpectedResult];
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend_product, "reconnectRuntimeSetIdentity"));

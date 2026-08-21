@@ -2003,10 +2003,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   cursor는 handle 정렬 순서로만 전진하고 한 시점의 active CR4 scratch는 exact 1이다. success 행은
   `new_controller_evidenced/published_new/open`, 현재 conflict 행은 exact `authority_conflict/frozen_unavailable/closed`, untouched
   suffix는 `old_valid/frozen_unavailable/closed`로 닫는다. allocation-free cursor 계약은 typed reject·takeover unknown·ended
-  disposition도 canonical row로만 투영한다. shared Client를 fail-close하는 candidate/resize/transport failure가 앞선
-  `published_new/open` 행 전체에 미치는 host-wide terminal 정책은 다음 CR5 Window/host-failure gate 전까지 제품 완료로 세지 않는다.
-  대신 CR5b-2c actual socket hostile은 첫 success 뒤 deadline으로 shared Client가 fail-close되면 terminal summary 0,
-  기존 cursor/job seal 보존으로 거부되는 것을 고정한다.
+  disposition도 canonical row로만 투영한다. CR5c gate는 첫 success 뒤 deadline으로 shared Client가 fail-close되는 실제 socket
+  행을 이어 받아 published prefix의 retirement를 전부 prepare한 뒤에만 all-row unavailable no-fail suffix를 실행한다.
+  published prefix는 `new_controller_evidenced/frozen_unavailable/closed`, untouched suffix는
+  `old_valid/frozen_unavailable/closed`이고 summary는 `published_new=0`, `retry_reserved=total`이다. 전 runtime input 0,
+  두 번째 runtime preflight lookup 실패에서 앞선 prepared owner abort와 job/row mutation 0 뒤 clean retry, terminal
+  runtime/retired Client/replacement receipt의 retry-job 결속과 backend teardown runtime-first 정산, replay 거부를 검증한다.
   k=1/2/3 conflict 표는
   앞선 success generation/screen/mutation projection의 bytewise 불변, 뒤쪽 status/takeover/resize/publication wire 0, summary seal 뒤
   replay/copy/cursor·row·replacement drift mutation 0을 확인한다. 첫 success 뒤에도 job/replacement는 live이고 마지막 row terminal
@@ -2015,7 +2017,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   replacement receipt를 tombstone한다. failure summary의 `frozen_unavailable` 행은 아직 terminal attachment가 shared retired
   Client를 참조하므로 `retry_reserved` receipt/Client를 job에 유지하며, backend 최종 정산은 runtime owner를 먼저 파괴한 뒤
   Client를 회수한다. 두 경로 모두 Client-before-RemoteGeneration 파괴는 0이어야 한다.
-  이 세 gate가 green이어도 실제 2 Window move/close 경쟁은 CR5의 다음 Window gate 전까지 완료로 세지 않는다.
+  CR5c까지 green이어도 실제 2 Window move/close 경쟁은 CR5의 다음 Window gate 전까지 완료로 세지 않는다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6

@@ -148,7 +148,8 @@ pub fn summarizeTerminalRows(job: HostJobIdentity, rows: []const RuntimeRow) Err
         .frozen_unavailable => {
             const ledger = row.ledger().?;
             if ((ledger != .old_valid and ledger != .takeover_sent_unknown and
-                ledger != .authority_conflict) or row.mutation().? != .closed)
+                ledger != .authority_conflict and ledger != .new_controller_evidenced) or
+                row.mutation().? != .closed)
                 return error.NonTerminalRuntime;
             result.frozen_unavailable = std.math.add(u32, result.frozen_unavailable, 1) catch
                 return error.InvalidRuntimeSet;

@@ -62,7 +62,7 @@ test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 term
     const failure = between(
         backend,
         "pub fn failHostReconnectRuntimeTransactions(",
-        "/// Connected job의 fresh Client",
+        "/// A terminal shared transport invalidates every runtime",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(failure, "failAndResolveRemaining("));
     inline for (.{ ".allocator.create(", ".allocator.alloc(", "std.Thread.spawn(" }) |needle| {
@@ -73,7 +73,8 @@ test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 term
     const inventory = [_]struct { id: []const u8, backend: usize, runtime: usize }{
         .{ .id = "publishReconnectPromotedCandidateRetainingSharedClient", .backend = 1, .runtime = 1 },
         .{ .id = "reclaimHostWideRetiringGenerationRetainingClient", .backend = 1, .runtime = 1 },
-        .{ .id = "hostReconnectTerminalIdentityExact", .backend = 2, .runtime = 1 },
+        // CR5c adds the all-row host-failure terminal identity validation.
+        .{ .id = "hostReconnectTerminalIdentityExact", .backend = 3, .runtime = 1 },
     };
     for (inventory) |entry| {
         try std.testing.expectEqual(entry.backend, countIdentifier(backend, entry.id));
@@ -89,7 +90,8 @@ test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 term
     }
 
     const cursor_inventory = [_]struct { id: []const u8, contract: usize, backend: usize }{
-        .{ .id = "commitPublishedNew", .contract = 4, .backend = 1 },
+        // CR5c adds one cursor setup publication before terminalizing the shared Client.
+        .{ .id = "commitPublishedNew", .contract = 5, .backend = 1 },
         .{ .id = "failAndResolveRemaining", .contract = 4, .backend = 1 },
         .{ .id = "finishSuccess", .contract = 3, .backend = 1 },
     };
@@ -106,7 +108,7 @@ test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 term
         ));
     }
 
-    const gate = between(build, "const session_host_cr5b2c_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5b2c_step =", "const session_host_cr5c_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5b2c\""));
     try std.testing.expectEqual(

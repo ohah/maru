@@ -2370,7 +2370,12 @@ pub const ReconnectGenerationOwner = struct {
                             const replacement_published =
                                 adapter.connectionGeneration() == next_connection_generation and
                                 adapter.slot.retiredClientCount() != 0;
-                            if (!replacement_failed and !replacement_published)
+                            const published_current_failed =
+                                adapter.connectionGeneration() == current.connection_generation and
+                                adapter.slot.retiredClientCount() != 0 and
+                                adapter.slot.attachmentConnectionFailureReason() != null;
+                            if (!replacement_failed and !replacement_published and
+                                !published_current_failed)
                                 return error.InvalidAuthority;
                         } else adapter.slot.validateRetirementPlaceholder(
                             self.screen_source.?.current.generation,

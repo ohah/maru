@@ -37,7 +37,7 @@ pub const Lang = enum(u8) { en, ko };
 ///   - `common_*` — **두 파일 이상이 같은 의미로 쓰는 문장**. 파일 접두를 쓰면 그 키가 한 곳 것처럼
 ///     읽혀 다른 소비처가 안 보이므로, 공유가 확인되면 이 접두로 옮긴다(같은 문장에 키를 둘 두면
 ///     이중 출처가 되어 한쪽만 고쳐지는 드리프트가 생긴다).
-pub const Table = struct {
+const Table = struct {
     // ── 파일 탐색기 루트 (I3a 첫 슬라이스) ────────────────────────────────
     // 전부 `reportFileTreeRootOutcome`의 인자로만 쓰인다. 그 함수가 유일한 소비처라
     // 파라미터 타입을 `?Key`로 바꿔 리터럴이 애초에 넘어갈 수 없게 했다(계약 §7.2 1차).
@@ -685,7 +685,7 @@ pub const Table = struct {
     set_language_auto: [:0]const u8,
 };
 
-pub const en: Table = .{
+const en: Table = .{
     .fp_root_stale_generation = "Explorer root changed, so the folder selection was discarded.",
     .fp_root_open_failed = "Cannot open the selected folder.",
     .fp_root_identity_unknown = "Cannot verify the selected folder's identity.",
@@ -1215,7 +1215,7 @@ pub const en: Table = .{
     .ctx_pin = "Pin",
 };
 
-pub const ko: Table = .{
+const ko: Table = .{
     .fp_root_stale_generation = "탐색기 루트가 바뀌어 폴더 선택 결과를 취소했습니다.",
     .fp_root_open_failed = "선택한 폴더를 열 수 없습니다.",
     .fp_root_identity_unknown = "선택한 폴더 identity를 확인할 수 없습니다.",

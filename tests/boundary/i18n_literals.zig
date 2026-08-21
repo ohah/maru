@@ -12,8 +12,9 @@
 // CoreText 스모크의 9 건은 **디버그 출력 2 + 스모크 fixture 7**(탭 제목·기본 텍스트)이라 원장을 올렸다.
 // 늘었다는 사실만으로 자동 반영하면 게이트가 아무것도 안 지킨다 — 매번 그 자리를 열어 봐야 한다.
 //
-// **왜 개수 원장인가.** 남은 152 건은 대부분 **표시 문자열이 아니다** — config 파싱 진단(55),
-// Chrome Lab 개발 도구(15), 계약 §6.2 위반이라 I2 가 먼저 드는 자리(정렬 공백·아이콘 결합), trace
+// **왜 개수 원장인가.** 남은 것(수는 `header_total`·`header_config_total` 이 comptime 에 검증한다)은
+// 대부분 **표시 문자열이 아니다** — config 파싱 진단,
+// Chrome Lab 개발 도구, 계약 §6.2 위반이라 I2 가 먼저 드는 자리(정렬 공백·아이콘 결합), trace
 // 로그. 그것들을 0 으로 만드는 것은 이 계약의 일이 아니므로 **현재 수를 고정**하고 **늘면 실패**시킨다.
 // 줄이는 것은 언제나 환영이고, 그때는 원장을 함께 줄이라고 안내한다.
 //
@@ -39,6 +40,12 @@ const roots = [_][]const u8{ "src/chrome", "src/session", "src/platform/macos", 
 /// 그러면 그 파일은 "한국어 0" 이 기본값이 되어 한 건만 들어와도 실패한다.
 const english_only_roots = [_][]const u8{"src/cli"};
 const english_only_files = [_][]const u8{"src/main.zig"};
+
+/// 표 자신. 이 **경로**만 면제한다(이름으로 빼면 아무 데나 `*i18n.zig` 를 두고 우회할 수 있다).
+///
+/// 오늘 `roots` 는 표를 담지 않으므로 이 면제는 **안 걸린다** — 표가 훑는 뿌리 아래로 옮겨졌을 때를
+/// 위한 것이다. 그때 이름 비교였으면 우회가 함께 열린다.
+const table_path = "src/i18n.zig";
 
 const Entry = struct { path: []const u8, count: usize };
 
@@ -184,11 +191,67 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
     return total;
 }
 
-fn lookup(path: []const u8) ?usize {
+/// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
+/// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
+const header_total = 183;
+const header_config_total = 53;
+
+comptime {
+    // 원장이 커서 기본 분기 한도(1000)를 넘는다.
+    @setEvalBranchQuota(200_000);
+
+    var sum = 0;
+    var config_sum = 0;
     for (inventory) |e| {
-        if (std.mem.eql(u8, e.path, path)) return e.count;
+        sum += e.count;
+        if (std.mem.startsWith(u8, e.path, "src/config/")) config_sum += e.count;
+    }
+    if (sum != header_total)
+        @compileError(std.fmt.comptimePrint("원장 합계가 {d} 인데 이 파일 머리는 {d} 라고 적었다", .{ sum, header_total }));
+    if (config_sum != header_config_total)
+        @compileError(std.fmt.comptimePrint("config 합계가 {d} 인데 머리는 {d} 라고 적었다", .{ config_sum, header_config_total }));
+    // 같은 경로를 두 번 적으면 앞엣것이 이기고 뒤엣것은 죽은 줄이 된다 — 원장 자신의 불변식이다.
+    for (inventory, 0..) |a, i| {
+        for (inventory[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.path, b.path))
+                @compileError("원장에 같은 경로가 두 번 적혀 있다: " ++ a.path);
+        }
+    }
+}
+
+/// 원장 항목이 실제로 소비됐는가. **소비 안 된 항목은 썩은 것**이고, 그것을 안 보면 파일이 사라진 뒤에도
+/// 그 줄이 영원히 통과한다(형제 게이트 둘은 이 검사를 갖는데 이 파일만 없었다).
+///
+/// 파일 수준 `var` 라 이 파일에 둘째 테스트가 붙으면 첫 테스트의 소비 표시가 새어 나간다. 형제 게이트는
+/// 테스트 지역 배열을 쓴다 — 여기는 `lookup` 이 파일 수준 함수라 그렇게 못 하므로, **테스트 시작에서
+/// 반드시 지운다**.
+var consumed = [_]bool{false} ** inventory.len;
+
+fn lookup(path: []const u8) ?usize {
+    for (inventory, 0..) |e, idx| {
+        if (!std.mem.eql(u8, e.path, path)) continue;
+        consumed[idx] = true;
+        return e.count;
     }
     return null;
+}
+
+fn reportUnconsumed() bool {
+    var ok = true;
+    // `english_only_files` 는 원장에 없어 위 소비 검사가 못 닿는다 — 그 파일이 사라지면 §7.1 감시
+    // 대상이 통째로 없어지는데 조용하다(실측). 여기서 존재만 확인한다.
+    for (english_only_files) |f| {
+        std.Io.Dir.cwd().access(std.testing.io, f, .{}) catch {
+            ok = false;
+            std.debug.print("영어 고정 대상 {s} 를 못 찾았다 — 옮겨졌거나 사라졌다. 목록을 고쳐라.\n", .{f});
+        };
+    }
+    for (inventory, consumed) |e, hit| {
+        if (hit) continue;
+        ok = false;
+        std.debug.print("원장에 적힌 {s} 를 못 찾았다 — 파일이 사라졌거나 이름이 바뀌었다. 항목을 지워라.\n", .{e.path});
+    }
+    return ok;
 }
 
 /// 원장과 어긋나면 **무엇을 어떻게 고칠지** 말하고 false 를 돌려준다. 두 축(§7.2 번역 대상 ·
@@ -219,6 +282,7 @@ fn reportIfDrifted(path: []const u8, found: usize) bool {
 }
 
 test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않는다" {
+    consumed = @splat(false);
     const allocator = std.testing.allocator;
     var failed = false;
     var scanned: usize = 0;
@@ -231,12 +295,28 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
         defer walker.deinit();
 
         while (try walker.next(std.testing.io)) |entry| {
-            if (entry.kind != .file) continue;
+            // **심링크도 훑는다.** `.file` 만 받으면 심링크된 `.zig` 가 통째로 안 보인다.
+            // **`.zig` 가 아닌 심링크는 실패시킨다.** walker 는 디렉터리 심링크에 안 들어가므로 그 안은
+            // **통째로 안 보이고 `scanned` 도 안 올라간다** — 눈이 먼 것을 통과로 읽는 것이다. 앞 판은
+            // 심링크된 **파일**만 받아들이고 디렉터리는 그대로 뒀는데, 형제 게이트에는 이 실패 모드를
+            // 이미 짜 두었으면서 여기만 반쪽이었다. 조용히 안 보느니 시끄럽게 막는다.
+            if (entry.kind == .sym_link and !std.mem.endsWith(u8, entry.basename, ".zig")) {
+                std.debug.print(
+                    "{s}/{s}: `.zig` 가 아닌 심링크다 — 그 안은 통째로 안 보인다. 실제 디렉터리로 두어라.\n",
+                    .{ root, entry.path },
+                );
+                return error.TestUnexpectedResult;
+            }
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
 
             var path_buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, entry.path });
-            if (std.mem.endsWith(u8, path, "i18n.zig")) continue;
+            // 표 자신은 값을 **정의**한다 — 그것을 위반으로 세면 이 게이트가 늘 빨갛다.
+            // **파일 이름이 아니라 경로로** 뺀다. 이름으로 빼면 아무 디렉터리에나 `*i18n.zig` 를 두고
+            // 그 안에서 한국어 리터럴을 마음껏 쓸 수 있다(실측으로 통과했다 — 형제 게이트 둘은 같은
+            // 결함을 경로 비교로 고쳤는데 이 파일만 남아 있었다).
+            if (std.mem.eql(u8, path, table_path)) continue;
 
             const source = try dir.readFileAllocOptions(
                 std.testing.io,
@@ -263,7 +343,20 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
         defer walker.deinit();
 
         while (try walker.next(std.testing.io)) |entry| {
-            if (entry.kind != .file) continue;
+            // **심링크도 훑는다.** 앞 판은 두 walk 루프 중 **하나만** 고쳤다 — 이쪽(§7.1 이
+            // 영어로 고정한 표면)이 남아 심링크로 한국어를 들여올 수 있었다(실측).
+            // **`.zig` 가 아닌 심링크는 실패시킨다.** walker 는 디렉터리 심링크에 안 들어가므로 그 안은
+            // **통째로 안 보이고 `scanned` 도 안 올라간다** — 눈이 먼 것을 통과로 읽는 것이다. 앞 판은
+            // 심링크된 **파일**만 받아들이고 디렉터리는 그대로 뒀는데, 형제 게이트에는 이 실패 모드를
+            // 이미 짜 두었으면서 여기만 반쪽이었다. 조용히 안 보느니 시끄럽게 막는다.
+            if (entry.kind == .sym_link and !std.mem.endsWith(u8, entry.basename, ".zig")) {
+                std.debug.print(
+                    "{s}/{s}: `.zig` 가 아닌 심링크다 — 그 안은 통째로 안 보인다. 실제 디렉터리로 두어라.\n",
+                    .{ root, entry.path },
+                );
+                return error.TestUnexpectedResult;
+            }
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
             if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
 
             var path_buf: [512]u8 = undefined;
@@ -285,5 +378,6 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
     // 훑을 파일이 없다면 경로가 바뀐 것이다 — 0 을 통과시키면 "규칙이 지켜진다"와 "아무것도 안 봤다"를
     // 구분할 수 없어진다.
     try std.testing.expect(scanned > 0);
+    if (!reportUnconsumed()) failed = true;
     try std.testing.expect(!failed);
 }

@@ -18227,11 +18227,11 @@ fn expectProviderFixtureEntries(io: std.Io, base: []const u8, expected: []const 
 pub extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 pub extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-/// `sidebar.agent-transcript-hook`을 끈 config 파일 내용. 이 계약의 "옵션이 꺼지면 provider 파일을 전혀 건드리지
+/// provider 파일을 전혀 건드리지 않는 상태를 만드는 빈 config. 상태줄 훅 키가 사라졌으므로(계약 §5) 이
 /// 않는다"를 검사하는 fixture다(docs/agent-session.md «사이드바 대화 표시와의 경계»).
-const hook_off_config = "sidebar.agent-transcript-hook = false\n";
+const hook_off_config = "";
 /// 같은 계약의 반대편 — 켠 경로에서 `statusLine` 키 외에는 손대지 않는지 검사하는 fixture.
-const hook_on_config = "sidebar.agent-transcript-hook = true\n";
+const hook_on_config = "";
 
 test "provider files remain unchanged across AppSession.init when the statusline hook is off" {
     // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다**(`test_allow_provider_writes`).
@@ -18398,7 +18398,7 @@ test "provider files remain unchanged across AppSession.init when the statusline
 
 /// 훅 게이트를 켠 fixture. **상태줄 훅은 꺼 둔다** — 둘은 별개 키이고, 켜 두면 늘어난 파일이 어느 쪽 것인지
 /// 흐려진다(docs/agent-hooks.md §5).
-const agent_hooks_on_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = true\n";
+const agent_hooks_on_config = "sidebar.agent-hooks = true\n";
 
 test "agent hooks install into the claude hooks array and leave user entries untouched" {
     // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다.** 기본은 꺼짐이다 — 격리를 잊은
@@ -18605,7 +18605,7 @@ fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
 }
 
 /// 게이트를 끈 fixture — 위 `agent_hooks_on_config` 의 짝이다(상태줄 훅도 계속 꺼 둔다).
-const agent_hooks_off_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = false\n";
+const agent_hooks_off_config = "sidebar.agent-hooks = false\n";
 
 test "hook mode runs exactly one source and takes over notifications" {
     // **계약 §1의 핵심 규칙을 그 자리에서 본다.** 앞선 제품 테스트는 `pollAgentHookEvents` 를 직접 불러
@@ -19672,7 +19672,7 @@ test "agent hooks stay out of provider files while the gate is off" {
     try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
 }
 
-test "agent statusline hook edits only the statusLine key and preserves the wrapped user command" {
+test "statusline hook is removed on startup — the wrapped original comes back and our files go" {
     // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다**(`test_allow_provider_writes`).
     agent_ops.test_allow_provider_writes = true;
     defer agent_ops.test_allow_provider_writes = false;
@@ -19685,24 +19685,11 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     defer tmp.cleanup();
     var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
     defer env_guard.restore();
-    test_config_text = hook_on_config;
+    test_config_text = "";
     defer test_config_text = "";
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
-    try tmp.dir.createDirPath(io, "codex");
-    try tmp.dir.createDirPath(io, "xdg/maru/agent-sessions");
     try tmp.dir.createDirPath(io, "cache");
-
-    // 사용자 파일에는 우리가 절대 건드리면 안 되는 것이 셋 있다 — 다른 최상위 키(`model`), provider **hook event**,
-    // 그리고 이미 쓰던 상태줄 명령. 셋 다 fixture에 넣고 설치 뒤에 그대로인지 본다.
-    const user_command = "bunx ccusage statusline --theme dark";
-    const user_hook = "printf ok # user hook";
-    const settings_before = "{\"model\":\"opus\",\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"" ++ user_hook ++ "\"}]}]},\"statusLine\":{\"type\":\"command\",\"command\":\"" ++ user_command ++ "\"}}";
-    const codex_before = "{\"hooks\":{\"Stop\":[]}}";
-    const mapping_42 = "{\"hook_event_name\":\"Stop\",\"session_id\":\"legacy\"}";
-    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
-    try tmp.dir.writeFile(io, .{ .sub_path = "codex/hooks.json", .data = codex_before });
-    try tmp.dir.writeFile(io, .{ .sub_path = "xdg/maru/agent-sessions/42", .data = mapping_42 });
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
@@ -19710,20 +19697,32 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     defer a.free(home);
     const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
     defer a.free(claude);
-    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
-    defer a.free(codex);
-    const xdg = try std.fmt.allocPrintSentinel(a, "{s}/xdg", .{root}, 0);
-    defer a.free(xdg);
     const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
     defer a.free(cache);
     const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
     defer a.free(config);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
-    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
-    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CONFIG_HOME", xdg.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+
+    // 지난 버전이 설치해 둔 상태를 그대로 만든다: settings 는 우리 스크립트를 가리키고, 스크립트는
+    // 사용자 명령을 감싸고 있으며, 마커가 그 원본을 들고 있다.
+    const user_command = "bunx ccusage statusline --theme dark";
+    const script_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ claude, sl.script_name });
+    defer a.free(script_path);
+    const settings_before = try std.fmt.allocPrint(a, "{{\"model\":\"opus\",\"statusLine\":{{\"type\":\"command\",\"command\":\"{s}\"}}}}", .{script_path});
+    defer a.free(settings_before);
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/settings.json", .data = settings_before });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "claude/" ++ sl.script_name,
+        .data = "#!/bin/sh\n" ++ sl.wrapped_begin ++ "\nprintf '%s' \"$payload\" | sh -c '" ++ user_command ++ "'\n" ++ sl.wrapped_end ++ "\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "claude/" ++ sl.marker_name,
+        .data = sl.marker_header ++ "\nwrapped 1 " ++ "36" ++ "\n" ++ user_command,
+    });
 
     var session: AppSession = undefined;
     try session.init(io, a, .{
@@ -19735,110 +19734,23 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     });
     session.deinit();
 
-    // 늘어난 파일은 이름으로 우리 것임이 드러나는 스크립트와 마커 둘뿐이다. codex와 옛 mapping은 이 경로와 무관하다.
-    try expectProviderFixtureEntries(io, claude, &.{
-        .{ .name = sl.marker_name, .kind = .file },
-        .{ .name = "settings.json", .kind = .file },
-        .{ .name = sl.script_name, .kind = .file },
-    });
-    try expectProviderFixtureEntries(io, codex, &.{.{ .name = "hooks.json", .kind = .file }});
-    const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(4096));
-    defer a.free(codex_after);
-    try std.testing.expectEqualStrings(codex_before, codex_after);
-    const mapping_after = try tmp.dir.readFileAlloc(io, "xdg/maru/agent-sessions/42", a, .limited(4096));
-    defer a.free(mapping_after);
-    try std.testing.expectEqualStrings(mapping_42, mapping_after);
+    // **원본이 돌아온다.** 감싸는 설계의 존재 이유가 이것이었고, 제거가 그 약속을 지키는 자리다.
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+    defer a.free(after);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, after, .{});
+    defer parsed.deinit();
+    const root_obj = parsed.value.object;
+    const status = root_obj.get("statusLine") orelse return error.StatusLineGone;
+    try std.testing.expectEqualStrings(user_command, status.object.get("command").?.string);
+    // 다른 최상위 키는 그대로다 — 우리는 그 한 키만 다룬다.
+    try std.testing.expectEqualStrings("opus", root_obj.get("model").?.string);
 
-    {
-        const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
-        defer a.free(settings_after);
-        var parsed = try std.json.parseFromSlice(std.json.Value, a, settings_after, .{});
-        defer parsed.deinit();
-        const obj = parsed.value.object;
-        // 키가 늘지도 줄지도 않았고(3개 그대로), 우리 것이 아닌 값은 그대로다 — 특히 사용자 hook event.
-        try std.testing.expectEqual(@as(usize, 3), obj.count());
-        try std.testing.expectEqualStrings("opus", obj.get("model").?.string);
-        try std.testing.expectEqualStrings(user_hook, obj.get("hooks").?.object
-            .get("Stop").?.array.items[0].object
-            .get("hooks").?.array.items[0].object
-            .get("command").?.string);
-        try std.testing.expect(sl.commandIsOurs(obj.get("statusLine").?.object.get("command").?.string));
-    }
-
-    // 사용자 상태줄은 지워진 게 아니라 우리 스크립트 안에 감싸여 있다 — 사람이 열어봐도 보이는 표식이다.
-    const script_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
-    defer a.free(script_after);
-    const wrapped = sl.extractWrappedCommand(a, script_after) orelse {
-        std.debug.print("설치한 스크립트에 사용자 상태줄이 감싸여 있지 않다:\n{s}\n", .{script_after});
-        return error.WrappedUserCommandMissing;
-    };
-    defer a.free(wrapped);
-    try std.testing.expectEqualStrings(user_command, wrapped);
-
-    // **복원의 근거는 마커다.** 스크립트는 우리가 매 실행마다 덮어쓰는 파일이라 근거가 될 수 없다(§7.2.2).
-    {
-        const marker_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
-        defer a.free(marker_after);
-        const parsed_marker = sl.parseMarker(marker_after) orelse return error.MarkerMissing;
-        try std.testing.expectEqualStrings(user_command, parsed_marker.wrapped orelse return error.MarkerLostCommand);
-    }
-
-    // **경합 회귀**: 다른 인스턴스가 wrap 없는 본문으로 스크립트를 덮은 상태를 그대로 만든다. 예전에는 이 상태에서
-    // 다시 켜면 `refresh` + wrap 없음으로 판정해 원본을 영구히 잃었다. 이제는 마커에서 되살아나야 한다.
-    {
-        var clobbered: std.ArrayListUnmanaged(u8) = .empty;
-        defer clobbered.deinit(a);
-        try sl.scriptBody(&clobbered, a, "/tmp/does-not-matter", null);
-        try tmp.dir.writeFile(io, .{ .sub_path = "claude/" ++ sl.script_name, .data = clobbered.items });
-
-        var again: AppSession = undefined;
-        try again.init(io, a, .{
-            .abi_version = abi_version,
-            .cols = 40,
-            .rows = 10,
-            .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-        });
-        again.deinit();
-
-        const healed_script = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
-        defer a.free(healed_script);
-        const healed = sl.extractWrappedCommand(a, healed_script) orelse {
-            std.debug.print("마커가 있는데도 감싼 명령이 되살아나지 않았다:\n{s}\n", .{healed_script});
-            return error.WrappedUserCommandLost;
-        };
-        defer a.free(healed);
-        try std.testing.expectEqualStrings(user_command, healed);
-    }
-
-    // 옵션을 끄면 설치 전 상태로 돌아간다 — 원래 명령이 `statusLine`에 복원되고 우리 스크립트는 사라진다.
-    test_config_text = hook_off_config;
-    var off_session: AppSession = undefined;
-    try off_session.init(io, a, .{
-        .abi_version = abi_version,
-        .cols = 40,
-        .rows = 10,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    off_session.deinit();
-
-    try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
-    const restored = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
-    defer a.free(restored);
-    var restored_parsed = try std.json.parseFromSlice(std.json.Value, a, restored, .{});
-    defer restored_parsed.deinit();
-    const restored_obj = restored_parsed.value.object;
-    try std.testing.expectEqual(@as(usize, 3), restored_obj.count());
-    try std.testing.expectEqualStrings("opus", restored_obj.get("model").?.string);
-    try std.testing.expectEqualStrings(user_command, restored_obj.get("statusLine").?.object.get("command").?.string);
+    // **우리 파일은 사라진다.** 남겨 두면 provider 가 계속 실행하고, 아무도 그 결과를 읽지 않는다.
+    try std.testing.expect(tmp.dir.statFile(io, "claude/" ++ sl.script_name, .{}) catch null == null);
+    try std.testing.expect(tmp.dir.statFile(io, "claude/" ++ sl.marker_name, .{}) catch null == null);
 }
 
-// 상태줄 훅이 **파일에 대해** 지키기로 한 규율 — 직렬화·원자 교체·쓰기 순서·"모르면 손대지 않음" — 을 제품
-// 경로에서 검증한다. 적대 검증이 이 넷을 전부 무력화해도 기존 게이트가 green이라는 것을 실측으로 보였다
-// (마커 **내용** 로직만 덮여 있었다). 각 블록은 그 뮤테이션 하나에 대응한다.
-test "agent statusline hook serializes, preserves file identity, and refuses to guess" {
-    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다**(`test_allow_provider_writes`).
+test "statusline removal leaves someone else's statusLine alone" {
     agent_ops.test_allow_provider_writes = true;
     defer agent_ops.test_allow_provider_writes = false;
 
@@ -19850,26 +19762,11 @@ test "agent statusline hook serializes, preserves file identity, and refuses to 
     defer tmp.cleanup();
     var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
     defer env_guard.restore();
-    test_config_text = hook_on_config;
+    test_config_text = "";
     defer test_config_text = "";
     try tmp.dir.createDirPath(io, "home");
     try tmp.dir.createDirPath(io, "claude");
-    try tmp.dir.createDirPath(io, "codex");
-    try tmp.dir.createDirPath(io, "xdg/maru/agent-sessions");
     try tmp.dir.createDirPath(io, "cache");
-
-    // `settings.json`을 **심링크**로 둔다 — dotfile 관리자(stow·chezmoi)의 흔한 구성이다. 원자 교체가 rename이라
-    // 그대로 두면 링크가 실체 파일로 갈아 끼워져 관리 대상에서 조용히 이탈한다(적대 검증 실측).
-    const user_command = "sh ~/.claude/mine.sh --theme it's-dark";
-    const settings_before = "{\"model\":\"opus\",\"statusLine\":{\"type\":\"command\",\"command\":\"" ++ user_command ++ "\"}}";
-    try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles-settings.json", .data = settings_before });
-    {
-        // 0600은 env·자격 증명을 담는 사용자가 실제로 쓰는 권한이다. 넓어지면 보안 회귀다.
-        const f = try tmp.dir.openFile(io, "dotfiles-settings.json", .{});
-        defer f.close(io);
-        try f.setPermissions(io, @enumFromInt(0o600));
-    }
-    try tmp.dir.symLink(io, "../dotfiles-settings.json", "claude/settings.json", .{});
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
@@ -19877,139 +19774,46 @@ test "agent statusline hook serializes, preserves file identity, and refuses to 
     defer a.free(home);
     const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
     defer a.free(claude);
-    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
-    defer a.free(codex);
-    const xdg = try std.fmt.allocPrintSentinel(a, "{s}/xdg", .{root}, 0);
-    defer a.free(xdg);
     const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
     defer a.free(cache);
     const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
     defer a.free(config);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
-    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
-    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CONFIG_HOME", xdg.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
 
-    const marker_path = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude, sl.marker_name }, 0);
-    defer a.free(marker_path);
+    // 사용자가 그 사이 statusLine 을 **직접** 바꿔 두었다(우리 스크립트를 안 가리킨다). 그 값은 사용자의
+    // 현재 의사이므로 되돌리면 안 된다 — 우리 파일만 거둔다.
+    const theirs = "bunx someone-elses-statusline";
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "claude/settings.json",
+        .data = "{\"statusLine\":{\"type\":\"command\",\"command\":\"" ++ theirs ++ "\"}}",
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/" ++ sl.script_name, .data = "#!/bin/sh\nexit 0\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "claude/" ++ sl.marker_name, .data = sl.marker_header ++ "\nwrapped 0 0\n" });
 
-    const runOnce = struct {
-        fn call(run_io: std.Io, run_a: std.mem.Allocator) !void {
-            var s: AppSession = undefined;
-            try s.init(run_io, run_a, .{
-                .abi_version = abi_version,
-                .cols = 40,
-                .rows = 10,
-                .queue_capacity = 16,
-                .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-            });
-            s.deinit();
-        }
-    }.call;
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.deinit();
 
-    // ── 1. 잠긴 동안에는 아무것도 쓰지 않는다(직렬화) ──────────────────────────────────────────
-    // 다른 인스턴스가 임계구역에 있는 상태를 fd 하나로 정확히 재현한다. 락을 통째로 지워도 기존 게이트는
-    // green이었다 — 이 블록이 그 공백을 메운다.
-    {
-        const fd = std.c.open(marker_path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
-        try std.testing.expect(fd >= 0);
-        defer _ = std.c.close(fd);
-        try std.testing.expectEqual(@as(c_int, 0), std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB));
-
-        try runOnce(io, a);
-
-        // 스크립트도 settings도 손대지 않았다.
-        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "claude/" ++ sl.script_name, .{}));
-        const settings_now = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
-        defer a.free(settings_now);
-        try std.testing.expectEqualStrings(settings_before, settings_now);
-    }
-    // 잠금 해제 후 남은 빈 마커는 다음 실행이 정상적으로 채운다.
-
-    // ── 2. 정상 설치: 심링크와 권한을 그대로 둔다(원자 교체의 대가를 되돌린다) ─────────────────
-    try runOnce(io, a);
-    {
-        const link_stat = try tmp.dir.statFile(io, "claude/settings.json", .{ .follow_symlinks = false });
-        try std.testing.expectEqual(std.Io.File.Kind.sym_link, link_stat.kind);
-        const target_stat = try tmp.dir.statFile(io, "dotfiles-settings.json", .{});
-        try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intFromEnum(target_stat.permissions)) & 0o777);
-
-        // 심링크 **너머**의 실체 파일이 갱신됐다(링크가 끊기지 않았다는 증거).
-        const target_text = try tmp.dir.readFileAlloc(io, "dotfiles-settings.json", a, .limited(16 * 1024));
-        defer a.free(target_text);
-        var parsed = try std.json.parseFromSlice(std.json.Value, a, target_text, .{});
-        defer parsed.deinit();
-        try std.testing.expect(sl.commandIsOurs(parsed.value.object.get("statusLine").?.object.get("command").?.string));
-
-        // 임시 파일 잔해가 없다.
-        try expectProviderFixtureEntries(io, claude, &.{
-            .{ .name = sl.marker_name, .kind = .file },
-            .{ .name = "settings.json", .kind = .sym_link },
-            .{ .name = sl.script_name, .kind = .file },
-        });
-
-        const marker_text = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
-        defer a.free(marker_text);
-        try std.testing.expectEqualStrings(user_command, (sl.parseMarker(marker_text) orelse return error.MarkerMissing).wrapped.?);
-    }
-
-    // ── 3. `settings.json`을 못 읽으면 아무것도 하지 않는다("모른다"를 "없었다"로 접지 않는다) ──
-    // 0바이트는 claude가 파일을 쓰는 중간 상태이자 옛 비원자 쓰기의 잔해다. 여기서 `.install`로 접으면
-    // 마커에 "감쌀 것 없었음"을 확정으로 찍어 사용자 명령을 영구히 지운다.
-    {
-        const script_before = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
-        defer a.free(script_before);
-        try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles-settings.json", .data = "" });
-
-        try runOnce(io, a);
-
-        const marker_text = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
-        defer a.free(marker_text);
-        const kept = (sl.parseMarker(marker_text) orelse return error.MarkerLost).wrapped orelse return error.MarkerDowngraded;
-        try std.testing.expectEqualStrings(user_command, kept);
-        const script_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
-        defer a.free(script_after);
-        try std.testing.expectEqualStrings(script_before, script_after);
-    }
-
-    // ── 4. 끄기인데 현재 상태를 못 읽으면 **근거를 지우지 않는다** ─────────────────────────────
-    // 지우고 나면 사용자가 파일을 고쳐도 되살릴 것이 없다. 옛 코드는 복원 성공 여부와 무관하게 지웠다.
-    {
-        test_config_text = hook_off_config;
-        defer test_config_text = hook_on_config;
-
-        try runOnce(io, a);
-
-        try tmp.dir.access(io, "claude/" ++ sl.marker_name, .{});
-        try tmp.dir.access(io, "claude/" ++ sl.script_name, .{});
-    }
-
-    // ── 5. 마커가 스크립트보다 **먼저** 쓰인다 ────────────────────────────────────────────────
-    // 스크립트 자리를 디렉터리로 막아 그 쓰기만 실패시킨다. 순서가 뒤집혀 있으면 마커에 아무것도 남지 않는다.
-    {
-        try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles-settings.json", .data = settings_before });
-        try tmp.dir.deleteFile(io, "claude/" ++ sl.marker_name);
-        try tmp.dir.deleteFile(io, "claude/" ++ sl.script_name);
-        try tmp.dir.createDirPath(io, "claude/" ++ sl.script_name);
-        defer tmp.dir.deleteTree(io, "claude/" ++ sl.script_name) catch {};
-
-        try runOnce(io, a);
-
-        const marker_text = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
-        defer a.free(marker_text);
-        const recorded = (sl.parseMarker(marker_text) orelse return error.MarkerMissing).wrapped orelse
-            return error.MarkerWrittenAfterScript;
-        try std.testing.expectEqualStrings(user_command, recorded);
-        // 스크립트를 쓰지 못했으므로 `statusLine`은 아직 사용자 것이어야 한다 — 없는 실행 파일을 가리키면 안 된다.
-        const settings_now = try tmp.dir.readFileAlloc(io, "dotfiles-settings.json", a, .limited(16 * 1024));
-        defer a.free(settings_now);
-        var parsed = try std.json.parseFromSlice(std.json.Value, a, settings_now, .{});
-        defer parsed.deinit();
-        try std.testing.expectEqualStrings(user_command, parsed.value.object.get("statusLine").?.object.get("command").?.string);
-    }
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+    defer a.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, theirs) != null); // 남의 값은 그대로
+    try std.testing.expect(tmp.dir.statFile(io, "claude/" ++ sl.script_name, .{}) catch null == null);
+    try std.testing.expect(tmp.dir.statFile(io, "claude/" ++ sl.marker_name, .{}) catch null == null);
 }
+
+// 상태줄 훅이 **파일에 대해** 지키기로 한 규율 — 직렬화·원자 교체·쓰기 순서·"모르면 손대지 않음" — 을 제품
+// 경로에서 검증한다. 적대 검증이 이 넷을 전부 무력화해도 기존 게이트가 green이라는 것을 실측으로 보였다
+// (마커 **내용** 로직만 덮여 있었다). 각 블록은 그 뮤테이션 하나에 대응한다.
 
 test "macOS app session config rejects unsafe fixed-width ABI input" {
     // Swift가 넘긴 config는 Zig allocator나 slice를 포함하지 않는 fixed-width record다.
@@ -59888,6 +59692,11 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
 // [E1 §6.1] 턴 스냅샷 전 구간을 **실제 git**으로 돌린다: 스냅샷 요청 → 링 적재 → 목록이 그 기준으로 턴 범위를
 // 읽어 오기까지. 에이전트 감지 자체는 별도(agent_observer·turn_snapshot 단위 테스트)이고, 여기서는 그 뒤 배관을 본다.
 test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일을 읽어 온다" {
+    // **이 테스트는 턴 스냅샷을 실제로 찍겠다고 밝힌다.** 기본은 꺼짐이다 — 그 경로가 `git` 을 띄우고
+    // detached worker 에 job 을 넘겨, 곧바로 `deinit` 하는 테스트에서 타이밍 누수를 낸다
+    // (`test_allow_turn_snapshot`).
+    agent_ops.test_allow_turn_snapshot = true;
+    defer agent_ops.test_allow_turn_snapshot = false;
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;

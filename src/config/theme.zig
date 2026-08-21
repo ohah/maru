@@ -898,36 +898,29 @@ pub const SidebarConfig = struct {
     /// macOS 어댑터) 상수를 직접 공유하진 못하고 값만 맞춘다. 여기 range는 거친 저장 검증 하한일 뿐이고, 런타임은
     /// 헤더 아이콘 겹침을 막는 **동적** 하한(sidebarMinPt — cell 폭 비례)으로 다시 clamp한다.
     width_pt: u32 = 180,
-    /// 사이드바 에이전트 행의 **마지막 대화**를 항상 채우기 위해 claude 상태줄 훅을 설치할지(기본 true).
-    /// loader `sidebar.agent-transcript-hook`.
-    ///
-    /// **왜 옵션인가**: 이걸 켜면 Maru가 `~/.claude/settings.json`(사용자 소유 파일)에 상태줄 명령을 써 넣는다.
-    /// 그게 없어도 대화는 대부분 보이지만(에이전트가 자식에게 내려주는 세션 신원을 읽는다), 도구를 한 번도 쓰지
-    /// 않는 세션은 신원을 얻을 수 없어 빈다. 훅은 그 빈틈을 없애는 대신 남의 설정 파일을 건드리는 대가를 치른다.
-    /// 설치물은 이름과 마커로 **Maru가 넣은 것임이 한눈에 보이고**, 끄면 그것만 정확히 제거한다.
-    ///
-    /// codex는 해당 없다 — 외부 스크립트를 실행하는 상태줄/훅 설정이 없어 자식 신원 경로만 쓴다.
-    agent_transcript_hook: bool = true,
     /// provider 훅(claude `settings.json` / codex `hooks.json`)을 설치할지(**기본 false — opt-in**).
     /// loader `sidebar.agent-hooks`.
     ///
-    /// **왜 옵션인가**: 켜면 Maru가 사용자 소유 설정 파일에 훅 항목을 써 넣는다. 위의
-    /// `agent_transcript_hook`이 상태줄 하나를 건드리는 것과 달리, 이쪽은 턴 경계·상태·알림을 통째로
-    /// 훅에서 받는 **모드 전환**이라 대가가 더 크다(docs/agent-hooks.md §1 — 두 모드는 섞이지 않는다).
+    /// **왜 옵션인가**: 켜면 Maru가 사용자 소유 설정 파일에 훅 항목을 써 넣는다. 상태줄 훅 하나를
+    /// 건드리던 옛 경로와 달리, 이쪽은 턴 경계·상태·알림을 통째로 훅에서 받는 **모드 전환**이라 대가가
+    /// 더 크다(docs/agent-hooks.md §1 — 두 모드는 섞이지 않는다).
     ///
     /// **끄면 지운다**(계약 §5) — 켜고 끄기가 한 쌍이라야 사용자가 되돌릴 수 있다. 지우는 것은 우리
     /// 표식이 붙은 항목뿐이고, codex 는 `config.toml` 의 신뢰 블록도 함께 거둔다. 판정이 개수에만
     /// 달려 있어(`ours > 0`) 이미 지워진 상태에서 다시 불러도 무동작이다.
     ///
-    /// 위의 `agent_transcript_hook`과는 **자리가 겹친다** — 훅 모드가 서면 상태줄 훅이 하던 일
-    /// (세션 신원 하나)은 `SessionStart`의 부분집합이 되어 그 훅을 제거한다(계약 §5). 그 전까지는 둘이
-    /// 공존하고, 이 키가 켜졌다고 저 키가 자동으로 꺼지지는 않는다.
+    /// **상태줄 훅은 없앴다**(계약 §5, 2026-08-21). 그것이 하던 일(세션 신원 하나)은 `SessionStart` 의
+    /// 부분집합이고, 사용자 `statusLine.command` 를 감싸던 침습은 과거에도 오늘도 사고를 냈다. 앱은
+    /// 시작할 때 그 설치물을 **거두기만** 한다 — `sidebar.agent-transcript-hook` 키도 함께 사라졌다
+    /// (로더가 forgiving 이라 남아 있는 config 는 그 줄을 무시한다).
+    ///
+    /// ⚠️ 대가: 관측 모드에서 자식 env 로 세션 신원을 못 잡는 세션은 사이드바 대화 줄이 빈다. 이 게이트가
+    /// 아직 기본 꺼짐이라, 켜지 않은 사용자에게는 **잃기만 하는** 변경이다(계약 §5).
     agent_hooks: bool = false,
 
     pub const schema = .{ // 키: sidebar.show-branch / sidebar.show-folder / sidebar.width
         .show_branch = Meta{ .doc = .cfg_sidebar_show_branch, .widget = .toggle, .section = .sidebar },
         .show_folder = Meta{ .doc = .cfg_sidebar_show_folder, .widget = .toggle, .section = .sidebar },
-        .agent_transcript_hook = Meta{ .doc = .cfg_sidebar_agent_transcript_hook, .widget = .toggle, .section = .sidebar },
         .agent_hooks = Meta{ .doc = .cfg_sidebar_agent_hooks, .widget = .toggle, .section = .sidebar },
         // 필드명은 width_pt지만 키는 `sidebar.width`(key_seg). u32라 range 메타 필수(파서 검증 + GUI number 위젯 공유).
         .width_pt = Meta{ .key_seg = "width", .doc = .cfg_sidebar_width_pt, .range = .{ 120, 480 }, .widget = .number, .section = .sidebar },

@@ -60,6 +60,18 @@ pub var test_turn_snapshot_calls: usize = 0;
 
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
     if (builtin.is_test) test_turn_snapshot_calls += 1;
+    // **테스트에서는 세기만 하고 실제 작업은 하지 않는다.**
+    //
+    // 아래 `submitSnapshot` 은 detached worker 에 job 을 넘기고 그 해제를 **그 스레드가** 한다. 테스트는
+    // 세션을 만들자마자 `deinit` 하므로 worker 가 아직 안 끝난 순간이 있고, 그러면 job 의 `create`·`dupe`
+    // 가 누수로 잡힌다 — 타이밍을 타서 **로컬은 통과하고 CI 만 빨개진다**(실제로 그렇게 났다).
+    // 게다가 이 경로는 `git` 을 띄우고 캐시에 임시 index 를 쓴다: 테스트가 개발자 머신에 부작용을 내지
+    // 않는다는 규율(`test_allow_provider_writes`·`test_allow_log_cleanup`)과 같은 자리다.
+    //
+    // 세는 것은 계속한다 — 훅 모드가 «턴 끝에 이것을 부르는가» 는 그 카운터가 보는 계약이고, 부르는 것과
+    // 실제로 git 을 돌리는 것은 다른 사실이다. **링을 실제로 채우는 것을 보는 테스트**는 아래 스위치로
+    // 밝히고 돈다(통째로 막았더니 그 테스트가 깨졌다 — 막는 것과 못 돌게 하는 것은 다르다).
+    if (builtin.is_test and !test_allow_turn_snapshot) return;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
     // 저장소가 바뀌었으면 링을 버린다 — 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
@@ -496,12 +508,25 @@ pub fn agentIdentityFromStatuslineFile(self: *AppSession, term: *Term, buf: []u8
 /// - 끄면 감쌌던 원래 명령을 `statusLine`에 복원하고 우리 것(스크립트·마커)을 지운다 — 설치 전 상태로 돌아간다.
 ///
 /// best-effort다. 실패는 조용히 지나간다 — 이 훅이 없어도 대화는 자식 신원 경로(§7.2.1)로 대부분 잡힌다.
-pub fn reconcileAgentStatusline(self: *AppSession) void {
+/// **상태줄 훅을 거둔다**(계약 §5 — 2026-08-21 실행). 설치는 더 이상 하지 않는다.
+///
+/// 그 훅이 하던 일은 payload 에서 `session_id` 를 뽑아 pane 파일에 적는 것 하나였는데, provider 훅
+/// `SessionStart` 가 `session_id` + `transcript_path` + `cwd` 를 함께 준다 — 상위집합이고 경로 조립도
+/// 사라진다. 사용자 `statusLine.command` 를 감싸던 침습이 없어지는 것은 순이득이다: 그 경로는 과거에
+/// 실제로 사용자 상태줄을 잃은 사고를 냈고, **오늘도 한 번 더 냈다**(격리를 잊은 실험이 사용자 원본을
+/// 덮었다 — 감싸는 설계는 «settings 의 현재 값 = 사용자 것» 을 믿을 수밖에 없어 그 믿음이 깨지면
+/// 원본이 사라진다).
+///
+/// ⚠️ **대가**: 관측 모드에서 세션 신원을 자식 env 로 못 잡는 세션은 사이드바 대화 줄이 빈다
+/// (sidebar-agent-list.md §7.2 가 원래 적어 둔 한계로 돌아간다). 훅 게이트가 아직 기본 꺼짐이라,
+/// 켜지 않은 사용자에게는 **잃기만 하는** 변경이다. 그 사실을 계약 §5 에 적어 둔다.
+///
+/// 이 함수는 **되돌리는 일만** 한다 — 우리 것이면 원본으로 되돌리고 우리 파일을 거둔다. 사용자가 그 사이
+/// statusLine 을 직접 바꿨으면 settings 는 그대로 두고 우리 파일만 치운다.
+pub fn removeAgentStatuslineHook(self: *AppSession) void {
     if (!is_macos) return;
-    // **테스트에서는 밝힌 경우에만 돈다** — `reconcileAgentHooks` 와 같은 규율이다. 이 경로도 같은
-    // `settings.json` 을 고치고, 격리를 잊은 테스트가 개발자의 **사용자 상태줄 설정을 덮어썼다**
-    // (2026-08-21 재현: 심어 둔 사용자 `statusLine` 이 maru 스크립트로 갈렸다). 계약이 "과거에 실제로
-    // 사용자 상태줄을 잃은 사고를 냈다" 고 적어 둔 바로 그 자리다.
+    // **테스트에서는 밝힌 경우에만 돈다** — `reconcileAgentHooks` 와 같은 규율이다. 격리를 잊은 테스트가
+    // 개발자의 사용자 상태줄 설정을 덮은 사고가 실제로 났다.
     if (builtin.is_test and !test_allow_provider_writes) return;
     const sl = maru.session.agent_statusline;
 
@@ -509,9 +534,7 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    // **claude가 설치돼 있을 때만 손댄다.** 설정 디렉터리는 claude 자신의 규칙대로 `CLAUDE_CONFIG_DIR`이
-    // 우선이고 없으면 `$HOME/.claude`다(과거 hook cleanup과 같은 판정). 그 디렉터리가 없으면 claude를 쓰지
-    // 않는 사람이므로 **디렉터리를 만들지 않고 그대로 물러난다** — 남의 홈에 우리 흔적을 남길 이유가 없다.
+    // **claude 가 설치돼 있을 때만 손댄다.** 디렉터리가 없으면 claude 를 쓰지 않는 사람이므로 만들지 않는다.
     var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return;
     const dir_handle = std.Io.Dir.openDirAbsolute(self.io, claude_dir, .{}) catch return;
@@ -520,35 +543,18 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
     const hooks_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
     const marker_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude_dir, sl.marker_name }, 0) catch return;
 
-    const want = self.loaded_config.config.sidebar.agent_transcript_hook;
-
-    // 여기서부터 끝까지가 하나의 read-modify-write다 — 락 안에서만 읽고 쓴다. 읽기와 쓰기 사이에 다른 인스턴스가
-    // 끼어드는 것이 원본 소실의 원인이었다.
-    //
-    // 훅을 끈 사람에게는 **마커를 만들지 않는다**(`create = want`). 만들었다 지우는 것도 남의 홈을 건드리는
-    // 일이고, 조기 반환 경로에서 빈 마커가 잔류한다. 마커가 없으면 잠글 것도 없으니 락 없이 진행한다.
-    const marker_existed = readFileState(self.io, a, marker_path) != .absent;
-    const lock = switch (StatuslineLock.acquire(marker_path, want)) {
+    // **마커를 만들지 않는다**(`create = false`). 지우는 쪽이라 잠글 것이 없으면 할 일도 없다 — 만들었다
+    // 지우는 것도 남의 홈을 건드리는 일이다.
+    const lock = switch (StatuslineLock.acquire(marker_path, false)) {
         // 다른 인스턴스가 지금 같은 일을 하고 있다 → 우리가 할 일은 없다.
         .contended => return,
-        // 애초에 잠글 수 없는 환경(권한·파일시스템)이다. 락을 넣기 전과 같은 위험을 지고 진행한다 —
-        // 조용한 영구 무동작보다 낫다.
+        // 애초에 잠글 수 없는 환경(권한·파일시스템)이다. 락을 넣기 전과 같은 위험을 지고 진행한다.
         .unlockable => |l| l,
         .locked => |l| l,
     };
     defer lock.release();
-    var marker_written = false;
-    // 잠그느라 **새로 만든** 빈 마커는 아무것도 기록하지 않았으면 남기지 않는다(원래 있던 마커는 건드리지 않는다).
-    defer if (!marker_existed and !marker_written) {
-        std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
-    };
 
     const script_read = readFileState(self.io, a, script_path);
-    const script_state: sl.ScriptState = switch (script_read) {
-        .absent => .absent,
-        .unreadable => .unreadable,
-        .present => .present,
-    };
     const existing_script: ?[]const u8 = switch (script_read) {
         .present => |body| body,
         else => null,
@@ -560,67 +566,19 @@ pub fn reconcileAgentStatusline(self: *AppSession) void {
     };
     const script_wrapped = if (existing_script) |body| sl.extractWrappedCommand(a, body) else null;
 
-    if (!want) {
-        // **복원**: 마커 → 스크립트 wrap 순으로 원본을 찾는다. 사용자가 그 사이 statusLine을 직접 바꿨다면
-        // (우리 것이 아니면) settings는 그대로 두고 우리 파일만 거둔다.
-        const restored = switch (sl.restoreActionFor(settings, marker, script_wrapped)) {
-            // 현재 상태를 못 읽었다 — 지우고 나면 되돌릴 근거가 사라지므로 **아무것도 하지 않는다**.
-            .unknown => return,
-            .leave => true,
-            .set => |cmd| writeStatusLineCommand(a, self.io, hooks_path, cmd, settings),
-            .clear => writeStatusLineCommand(a, self.io, hooks_path, null, settings),
-        };
-        // **복원에 실패했으면 근거를 지우지 않는다.** 지워버리면 사용자가 나중에 파일을 고쳐도 되살릴 것이 없다.
-        if (!restored) return;
-        std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
-        // 마커는 락 대상이라 지금 잡고 있는 fd가 가리킨다. 지우고 나서 close해도 락은 정상적으로 풀린다.
-        std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
-        return;
-    }
-
-    // 읽은 뒤에도 우리가 잠근 그 마커가 맞는지 확인한다 — 다른 인스턴스가 지우고 새로 만들었으면 우리 락은
-    // 더 이상 아무것도 막지 못한다.
-    if (!lock.stillOwns(self.io, marker_path)) return;
-
-    // 계획(없으면 설치·우리 것이면 갱신·남의 것이면 감싼다)과 **써도 되는가**를 함께 판정한다.
-    const write = switch (sl.actionFor(settings, marker, script_state, script_wrapped)) {
-        .skip => return,
-        .write => |w| w,
+    // **복원**: 마커 → 스크립트 wrap 순으로 원본을 찾는다.
+    const restored = switch (sl.restoreActionFor(settings, marker, script_wrapped)) {
+        // 현재 상태를 못 읽었다 — 지우고 나면 되돌릴 근거가 사라지므로 **아무것도 하지 않는다**.
+        .unknown => return,
+        .leave => true,
+        .set => |cmd| writeStatusLineCommand(a, self.io, hooks_path, cmd, settings),
+        .clear => writeStatusLineCommand(a, self.io, hooks_path, null, settings),
     };
-
-    const cache_base = sessionCacheBase(a) orelse return;
-    const session_dir = std.fmt.allocPrint(a, "{s}/{s}", .{ cache_base, sl.session_dir_rel }) catch return;
-
-    var body: std.ArrayListUnmanaged(u8) = .empty;
-    defer body.deinit(a);
-    sl.scriptBody(&body, a, session_dir, write.wrapped) catch return;
-
-    // 마커를 **스크립트보다 먼저** 쓴다 — 이 순서라야 중간에 죽어도 원본을 되찾을 근거가 남는다. 확정이 아닌
-    // 값(모르는 상태에서 나온 것)은 기록하지 않는다: `wrapped 0`은 나중에 `statusLine` 키를 지우는 근거가 된다.
-    if (write.record_marker) {
-        var marker_body: std.ArrayListUnmanaged(u8) = .empty;
-        defer marker_body.deinit(a);
-        sl.markerBody(&marker_body, a, write.wrapped) catch return;
-        // 내용이 같으면 다시 쓰지 않는다 — reconcile은 세팅 GUI 조작마다 돌고, 매번 truncate하면 그때마다
-        // 잘린 마커가 보이는 창이 생긴다.
-        const same = switch (readFileState(self.io, a, marker_path)) {
-            .present => |old| std.mem.eql(u8, old, marker_body.items),
-            else => false,
-        };
-        marker_written = same or lock.writeBody(marker_body.items);
-        if (!marker_written) return; // 근거를 남기지 못했으면 스크립트도 바꾸지 않는다
-    } else {
-        marker_written = marker != null; // 기존 마커는 그대로 둔다
-    }
-
-    // 내용이 같으면 쓰지 않는다 — 매 실행마다 사용자 파일의 mtime을 흔들 이유가 없다.
-    if (existing_script) |old| if (std.mem.eql(u8, old, body.items)) {
-        if (settings != .command or !sl.commandIsOurs(settings.command))
-            _ = writeStatusLineCommand(a, self.io, hooks_path, script_path, settings);
-        return;
-    };
-    writeExecutableFile(self.io, script_path, body.items, true) catch return;
-    _ = writeStatusLineCommand(a, self.io, hooks_path, script_path, settings);
+    // **복원에 실패했으면 근거를 지우지 않는다.** 지워버리면 사용자가 나중에 파일을 고쳐도 되살릴 것이 없다.
+    if (!restored) return;
+    std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
+    // 마커는 락 대상이라 지금 잡고 있는 fd 가 가리킨다. 지우고 나서 close 해도 락은 정상적으로 풀린다.
+    std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
 }
 
 /// 훅 이벤트 로그 디렉터리의 절대 경로. **설치와 정리가 같은 자리를 봐야 한다** — 두 곳에서 따로 조립하면
@@ -647,6 +605,14 @@ pub var test_allow_log_cleanup = false;
 /// 격리를 잊은 테스트가 개발자의 `~/.claude/settings.json`·`~/.codex/hooks.json` 을 고치지 않게 —
 /// 그 사고가 실제로 났다(`reconcileAgentHooks`).
 pub var test_allow_provider_writes = false;
+
+/// 테스트가 **턴 스냅샷을 실제로 찍겠다**고 밝히는 스위치. 기본은 꺼짐이다.
+///
+/// 이 경로는 `git` 을 띄우고 캐시에 임시 index 를 쓰며, `submitSnapshot` 이 job 을 **detached worker** 에
+/// 넘기고 그 해제를 그 스레드가 한다. 테스트가 곧바로 `deinit` 하면 worker 가 아직 안 끝난 순간이 있어
+/// job 의 `create`·`dupe` 가 누수로 잡힌다 — 타이밍을 타서 **로컬은 통과하고 CI 만 빨개진다**(실제로
+/// 그렇게 났다). 링을 실제로 채우는지 보는 테스트만 켜고 돈다.
+pub var test_allow_turn_snapshot = false;
 
 /// 시작할 때 남아 있는 훅 이벤트 로그를 **읽지 않고 지운다**(docs/agent-hooks.md §4.2·§5).
 ///

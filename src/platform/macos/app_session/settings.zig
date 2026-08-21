@@ -1020,7 +1020,7 @@ pub fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
 /// config 기본으로 되돌려야 하므로 applyLoadedConfig(false)를 직접 부른다.
 pub fn reapplyLoadedConfig(self: *AppSession) void {
     applyLoadedConfig(self, true);
-    agent_ops.reconcileAgentStatusline(self); // 토글을 껐으면 여기서 복원·제거까지 간다
+    agent_ops.removeAgentStatuslineHook(self); // 토글을 껐으면 여기서 복원·제거까지 간다
     agent_ops.reconcileAgentHooks(self); // 훅 게이트도 여기서 설치·**제거**까지 간다(계약 §5 — 끄면 지운다)
 }
 

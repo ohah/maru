@@ -5470,6 +5470,41 @@ pub fn build(b: *std.Build) void {
         session_host_cr5c_step.dependOn(&run_cr5c_boundary_tests.step);
         boundary_step.dependOn(&run_cr5c_boundary_tests.step);
     }
+    const session_host_cr5d1_step = b.step(
+        "test-session-host-cr5d1",
+        "CR5d-1 two-Window reconnect transaction prerequisite gates",
+    );
+    session_host_cr5d1_step.dependOn(session_host_cr5c_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5d1_optimize| {
+        const cr5d1_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_reconnect_window_transaction.zig"),
+                .target = target,
+                .optimize = cr5d1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR5d-1 Window transaction은"},
+        });
+        const run_cr5d1_contract_tests = b.addRunArtifact(cr5d1_contract_tests);
+        run_cr5d1_contract_tests.addArg("--maru-expect-tests=3");
+        run_cr5d1_contract_tests.setCwd(b.path("."));
+        session_host_cr5d1_step.dependOn(&run_cr5d1_contract_tests.step);
+
+        const cr5d1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr5d1_boundary.zig"),
+                .target = target,
+                .optimize = cr5d1_optimize,
+            }),
+            .filters = &.{"CR5d-1 경계는"},
+        });
+        const run_cr5d1_boundary_tests = b.addRunArtifact(cr5d1_boundary_tests);
+        run_cr5d1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr5d1_boundary_tests.setCwd(b.path("."));
+        session_host_cr5d1_step.dependOn(&run_cr5d1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr5d1_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

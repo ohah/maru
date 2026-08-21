@@ -64,6 +64,7 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
             try countProductIdentifiersExcept(allocator, identifier, &.{
                 "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
                 "platform/macos/session_host/host_reconnect_runtime_transaction.zig",
+                "platform/macos/session_host/host_reconnect_window_transaction.zig",
                 "platform/macos/session_host/remote_term_backend.zig",
                 "platform/macos/session_host/remote_runtime.zig",
             }),

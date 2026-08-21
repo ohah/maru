@@ -246,6 +246,41 @@ pub const HostReconnectJobSealInput = struct {
     state_raw: u8,
 };
 
+pub const HostReconnectWindowTransactionSealInput = struct {
+    self_addr: u64,
+    owner_addr: u64,
+    owner_generation: u64,
+    thread_id: u64,
+    transaction_generation: u64,
+    job_generation: u64,
+    host_id: u128,
+    pool_membership_generation: u64,
+    expected_connection_generation: u64,
+    summary_digest: Digest,
+    rows_digest: Digest,
+    bindings_digest: Digest,
+    binding_count: u32,
+    target_window_addr: u64,
+    target_runtime_handle: u64,
+    target_surface_id: u64,
+    action_generation: u64,
+    expires_at_ns: u64,
+    action_kind_raw: u8,
+    lifecycle_raw: u8,
+};
+
+pub const HostReconnectWindowOwnerSealInput = struct {
+    self_addr: u64,
+    thread_id: u64,
+    owner_generation: u64,
+    next_transaction_generation: u64,
+    active_transaction_addr: u64,
+    active_action_generation: u64,
+    spent_action_generation: u64,
+    spent_action_digest: Digest,
+    lifecycle_raw: u8,
+};
+
 pub const SessionHostCoordinatorSealInput = struct {
     self_addr: u64,
     thread_id: u64,

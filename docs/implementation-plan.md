@@ -1234,6 +1234,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    실행한다. CR5c summary는 `published_new=0`과 `retry_reserved=total`을 봉인하고 terminal runtime/retired Client/replacement
    receipt를 retry job에 유지한다. 이어지는 CR5 Window gate는 이 terminal summary를 소비해 2 Window move/close,
    stale Take Control/close action, `termination_unconfirmed→abandoned_to_inventory` 경쟁을 닫는다.
+   CR5d-1은 그 Window gate의 첫 제품 prerequisite다. backend가 보존한 exact terminal summary와 runtime row를
+   재검증한 뒤, 두 Window의 현재 binding projection을 final-address owner의 active transaction 하나에 정렬·봉인한다. owner는
+   active/spent action generation을 보존해 같은 gesture의 두 번째 transaction 발급도 거부한다. move/close
+   action은 `{window address, AppSession generation, graph generation, runtime handle/generation, surface id,
+   action generation, expiry}` 전체가 일치할 때만 한 번 admit하고, copied/moved/replayed transaction과 Window 이동,
+   close, TTL exact expiry, runtime/job generation drift는 topology·binding·wire mutation 0으로 거부한다. 이 단계는
+   AppSession topology를 아직 바꾸지 않으며 CR5d-2가 같은 transaction을 실제 2 Window move/close와
+   `termination_unconfirmed→abandoned_to_inventory`에 연결한다.
 8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
    reconnect를 제품 설정에 연결한다.
 

@@ -406,6 +406,12 @@ Maru 작업에서 사용하는 기본 명령이다.
   성공함을 고정한다. retry에 필요한 terminal
   runtime/retired Client/replacement receipt는 job에 계속 결속하고 backend teardown에서 runtime-first로 정산한다. Debug·ReleaseFast마다 cursor 계약 1개, actual socket
   제품 행 1개, source boundary 1개를 exact-count한다. 2 Window move/close와 Take Control action 경쟁은 다음 CR5 Window gate다.
+- 영속 세션 호스트 CR5d-1 Window transaction prerequisite gate: `zig build test-session-host-cr5d1`. CR5c를 상속하고
+  Debug·ReleaseFast에서 terminal summary와 두 Window binding을 final-address owner/transaction으로 봉인하는 계약 3개와 source
+  boundary 1개를 exact-count한다. canonical success는 handle 정렬·두 Window·full binding identity와 at-1 action admit을,
+  hostile 표는 copy/move/replay, active/spent double-click, exact/+1 expiry-spent, Window/app-session/graph/runtime/surface/action generation 및
+  terminal summary drift의 mutation 0을 검증한다. 제품 caller는 0이며 실제 AppSession topology, takeover/terminate wire,
+  `termination_unconfirmed→abandoned_to_inventory`는 CR5d-2 전까지 완료로 세지 않는다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

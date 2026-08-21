@@ -2018,6 +2018,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   Client를 참조하므로 `retry_reserved` receipt/Client를 job에 유지하며, backend 최종 정산은 runtime owner를 먼저 파괴한 뒤
   Client를 회수한다. 두 경로 모두 Client-before-RemoteGeneration 파괴는 0이어야 한다.
   CR5c까지 green이어도 실제 2 Window move/close 경쟁은 CR5의 다음 Window gate 전까지 완료로 세지 않는다.
+  CR5d-1은 CR5c terminal summary와 canonical runtime rows를 소비하는 final-address Window owner/transaction을 추가한다.
+  두 Window에 걸친 binding은 runtime handle 순으로 정렬되고 `{window address, AppSession generation, graph generation,
+  runtime handle/generation, surface id}`가 모두 유일해야 한다. fresh action은 action generation과 absolute expiry를
+  transaction에 봉인하며 at-1만 admit하고 exact/+1은 expired-spent다. owner는 active/spent action generation을 보존해
+  동일 action으로 별도 transaction을 다시 발급하지 않는다. copied/moved/replayed transaction, 동일 action의
+  double-click, Window 이동/close, runtime/job/summary drift는 topology·binding·takeover/terminate wire mutation 0이다.
+  이 prerequisite의 제품 caller는 0이며 CR5d-2가 실제 AppSession move/close와 close reducer를 연결하기 전에는
+  2 Window 제품 완료로 세지 않는다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6

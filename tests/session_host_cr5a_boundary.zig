@@ -39,6 +39,7 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
         try countProductIdentifiersExcept(allocator, "summarizeTerminalRows", &.{
             "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
             "platform/macos/session_host/host_reconnect_runtime_transaction.zig",
+            "platform/macos/session_host/host_reconnect_window_transaction.zig",
             "platform/macos/session_host/remote_term_backend.zig",
         }),
     );
@@ -60,6 +61,7 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
             try countProductIdentifiersExcept(allocator, identifier, &.{
                 "platform/macos/session_host/host_reconnect_runtime_ledger.zig",
                 "platform/macos/session_host/host_reconnect_runtime_transaction.zig",
+                "platform/macos/session_host/host_reconnect_window_transaction.zig",
                 "platform/macos/session_host/remote_term_backend.zig",
             }),
         );

@@ -83,7 +83,7 @@ test "CR5c 경계는 shared Client terminal 뒤 all-runtime unavailable 전이 �
     inline for (.{ ".allocator.create(", ".allocator.alloc(", "std.Thread.spawn(" }) |needle|
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, transition, needle));
 
-    const gate = between(build, "const session_host_cr5c_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5c_step =", "const session_host_cr5d1_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, gate, "\"test-session-host-cr5c\""));
     try std.testing.expectEqual(

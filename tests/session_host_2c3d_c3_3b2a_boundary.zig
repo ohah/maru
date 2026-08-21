@@ -39,6 +39,11 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     defer allocator.free(poll_owner);
     const connection_turn = try readSource(allocator, "src/platform/macos/session_host/connection_turn.zig");
     defer allocator.free(connection_turn);
+    const reconnect_window_transaction = try readSource(
+        allocator,
+        "src/platform/macos/session_host/host_reconnect_window_transaction.zig",
+    );
+    defer allocator.free(reconnect_window_transaction);
 
     try std.testing.expectEqual(@as(usize, 0), count(identity, "capability_key_secret"));
     try std.testing.expectEqual(@as(usize, 0), count(identity, "capability_key_secret_initialized"));
@@ -85,10 +90,12 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     // e3c1 app-global reconnect coordinator도 같은 process seal domain을 소비한다.
     // CR4 catch-up adds the poll owner as the sole ready-identity injector and the connection
     // turn as the pre-lock/private-commit verifier. Restore activation separately mints the
-    // fresh process domain immediately after exec. All remain one import per owner module.
-    try std.testing.expectEqual(@as(usize, 33), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
+    // fresh process domain immediately after exec. CR5d-1 adds the final-address two-Window
+    // transaction prerequisite. All remain one import per owner module.
+    try std.testing.expectEqual(@as(usize, 34), try countSessionHostSources(allocator, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(poll_owner, "@import(\"process_seal_service.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(connection_turn, "@import(\"process_seal_service.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(reconnect_window_transaction, "@import(\"process_seal_service.zig\")"));
     const restore_activation = try readSource(allocator, "src/platform/macos/session_host/restore_activation.zig");
     defer allocator.free(restore_activation);
     try std.testing.expectEqual(@as(usize, 1), count(restore_activation, "@import(\"process_seal_service.zig\")"));

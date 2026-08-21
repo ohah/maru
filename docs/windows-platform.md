@@ -1574,6 +1574,98 @@ after: staged_alpha=true untracked=1
 즉 이 정리는 **171 개 아티팩트의 모듈 루트를 옮기는 일**이고 별도 프로젝트다. 참조 수만 보면 싸 보인다 —
 `git_backend` 는 참조 230 곳 중 실제 `@import` 가 3 개뿐이라 "import 만 바꾸면 된다" 로 읽힌다. **모듈
 경계를 같이 보지 않으면 그렇게 잘못 읽는다.**
+
+### 2m.12 크롬 텍스트 셰이핑 다리 — 실측과 결정 (2026-08-21)
+
+에디터를 뺀 ADE 표면(사이드바·pane·소스 컨트롤·에이전트 도크)이 Windows 에서 안 그려지는 관문은
+**하나**다: `system_text.shapeUnresolvedRun` 이 `builtin.os.tag != .macos` 에서 곧장 에러다(§2m.6).
+그 함수의 Windows 짝을 세우는 일을 **셰이핑 다리**라 부른다.
+
+**셰이핑이 필요한 표면은 넷뿐이다.** `prepareRequest` 호출자를 세어 확인했다 — `agent_dock`·`pane`·
+`scm_dock`·`sidebar`. **에디터는 없다**(호출 0 회). 에디터 본문은 셀 그리드 텍스트라 셰이핑을 안 탄다.
+한때 "에디터도 같은 벽" 이라고 적었는데, `chrome_draw_lowering.buildTextDrawList` 를 보고
+"`ChromeDraw` 를 타니 셰이핑도 타겠지" 로 이은 것이었다 — 그 함수는 **셀 격자로 낮추는** 쪽이고
+셰이핑과 별개다.
+
+**macOS 에는 이 문제가 없다.** CoreText 의 `CTLine` 하나가 스크립트 분석·폰트 폴백·합자·커닝을 전부
+내부에서 한다 — `CFAttributedStringCreate` → `CTLineCreateWithAttributedString` 세 줄이다. DirectWrite 는
+그 층이 고수준(`IDWriteTextLayout`)과 저수준(`IDWriteTextAnalyzer`)으로 **갈라져** 있어, 어느 쪽을 써도
+COM 콜백을 하나는 구현해야 한다. **API 설계 차이지 Windows 가 더 어려운 문제를 푸는 것이 아니다.**
+
+**다른 터미널이 무엇을 하는지 확인했다**(코드는 안 봤다 — 접근 방식만).
+
+| | 방식 |
+|---|---|
+| Windows Terminal(AtlasEngine) | DirectWrite — `IDWriteTextAnalyzer` 로 셰이핑, **`IDWriteFontFallback` 으로 폰트 매핑** |
+| WezTerm·kitty | **HarfBuzz** 를 모든 플랫폼에서 — OS 간 결과가 같아지는 대신 외부 의존 |
+| Alacritty | 셰이핑을 안 한다(합자 미지원) |
+
+maru 는 이미 첫 줄이다(macOS 에서 CoreText). 그래서 Windows 에서 DirectWrite 를 쓰는 것이 **일관된
+선택**이고, HarfBuzz 로 갈아타는 것은 macOS 까지 바꾸는 일이라 이 슬라이스 밖이며 외부 의존 방침에도
+어긋난다.
+
+**두 길을 놓고 골랐다.**
+
+| | COM 콜백 | 스크립트 구간·폰트 폴백 |
+|---|---|---|
+| **A** — DirectWrite 에 맡김 | **구현해야 함** | **DirectWrite 가 함** |
+| B — `GetGlyphs` 만 직접 | 불필요 | **우리가 짜야 함** |
+
+처음엔 B 를 권했다 — "COM 구현은 이 저장소에 선례가 없어 위험하다". **그 근거는 난이도였고, 일관성
+관점에서 틀렸다.** macOS 는 OS 에 전부 맡기는데 B 는 Windows 에만 유니코드 판정 책임을 얹는다. 그
+비대칭이 곧 불일치다. **A 를 골랐다.**
+
+B 가 위험하다는 것도 실측으로 나왔다. 스크립트 값을 틀리면 **조용히 깨진다**(`hr=0` 인 채로):
+
+```text
+"한글" script=25(라틴) face=0(Cascadia Code) → ids 861,861   ← 엉뚱한 글리프
+"한글" script=18(한글)  face=0               → ids 0,0        ← .notdef
+"한글" script=18(한글)  face=1(Malgun Gothic) → ids 2846,788  ← 진짜 글리프
+```
+
+**스크립트 값만 맞춰선 안 되고 그 구간에 맞는 face 까지 바꿔 줘야 한다.** B 는 그 둘을 다 우리가 진다.
+
+**A 가 실제로 되는지 재 봤다.** `IDWriteTextAnalysisSource` 를 Zig 로 구현해 넘기고
+`IDWriteFontFallback.MapCharacters` 를 불렀다:
+
+```text
+MapCharacters hr=0x00000000  mapped_len=2  font=있음  scale=1.00
+우리 콜백 호출 횟수 = 202        (QueryInterface 2 + 텍스트 조회 2)
+```
+
+**`mapped_len=2` 가 결정적이다** — `"한글abc"` 에서 한글 2 글자만 잘라 폰트를 골랐다. 스크립트 경계
+판정과 폰트 폴백을 DirectWrite 가 해 줬다는 뜻이고, B 였다면 우리가 짜야 했던 바로 그 일이다.
+
+**합자도 확인했다.** 같은 폰트(Cascadia Code)에서 따로 셰이핑한 것과 비교했다:
+
+```text
+'-' → id 765     '>' → id 909     '->' → ids 842,1437
+```
+
+글리프 id 가 완전히 다르다 — `calt`/`liga` 가 적용됐다. 글리프 수가 2 로 유지되는 것은 **코딩 폰트의
+정상 동작**이다(등폭 정렬을 지키려고 빈 글리프 + 화살표로 만든다). `GetGlyphs` 는 콜백 없이도 이만큼은
+한다.
+
+**vtable 슬롯을 세 번 틀렸다.** `GetSystemFontFallback` 의 자리를 27 → 25 → **26** 으로 갔고 앞의 둘은
+**크래시**다. 그중 한 번은 엉뚱한 함수가 `hr=0` 과 포인터까지 돌려줘 **성공처럼 보였고**, 다음 호출이
+`E_INVALIDARG` 를 낸 뒤에야 드러났다.
+
+정답은 손으로 세는 대신 **이 파일의 기존 assert** 에서 나왔다:
+
+```zig
+std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateGlyphRunAnalysis") == 23);
+```
+
+즉 `IDWriteFactory` 는 24 슬롯이고, Factory1 이 둘을 더해 Factory2 의 첫 메서드가 26 이다.
+**새 COM 인터페이스마다 이 assert 를 붙인다** — 슬롯 실수는 크래시거나 조용한 오답이라 런타임 신호가
+나쁘다.
+
+**아직 안 정한 것: 참조 계수.** probe 는 `AddRef`/`Release` 가 그냥 1 을 돌려준다. 객체가 스택에 있고
+`MapCharacters` 호출 동안만 살아서 통했는데, DirectWrite 가 그 객체를 **호출 밖으로 안 들고 간다**는
+가정에 기댄 것이다. 제품 코드에서는 그 가정을 검증하거나 계수를 제대로 세야 한다.
+
+**설계는 여기 안 적는다.** 이 문서가 앞으로 할 일을 적었을 때 세 번 다 고쳐야 했고(§2m.4·그 직후 가설·
+§2m.10), 잰 것을 적었을 때는 고칠 게 없었다. 다리의 모양은 구현이 정하고, 끝난 뒤 실제 모양을 적는다.
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

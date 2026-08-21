@@ -2071,6 +2071,22 @@ pub fn build(b: *std.Build) void {
     const run_mobile_config_tests = b.addRunArtifact(mobile_config_tests);
     test_step.dependOn(&run_mobile_config_tests.step);
     test_mobile_step.dependOn(&run_mobile_config_tests.step);
+
+    // 폰의 ndjson 클라이언트(S10d-1). **OS 가 없는 층이라 전부 잴 수 있다** — 줄 조립·프레임
+    // 상한·`hello` 찾기·capabilities 판정이 여기 있고, 위 config 와 같은 이유로 브리지를 안 거치고
+    // 잰다(브리지 계약 테스트는 ABI 를 지나야 해서 이 판정들을 직접 못 본다).
+    const mobile_control_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/mobile/mobile_control.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_mobile_control_tests = b.addRunArtifact(mobile_control_tests);
+    test_step.dependOn(&run_mobile_control_tests.step);
+    test_mobile_step.dependOn(&run_mobile_control_tests.step);
+    const test_mobile_control_step = b.step("test-mobile-control", "Run the phone-side ndjson control client tests only");
+    test_mobile_control_step.dependOn(&run_mobile_control_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
     // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
     // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.

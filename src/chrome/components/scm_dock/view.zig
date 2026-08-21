@@ -235,8 +235,11 @@ pub fn view(
         const row_index = frame.tree.find(build.NodeIds.item(index)) orelse continue;
         const row = frame.tree.entries[row_index];
         writer.active_clip = clipRectOf(row);
+        // 동작 아이콘이 떠 있으면(호버) 그 띠의 왼쪽 경계. **한 번만 푼다** — 글자를 접는 쪽과 아이콘을
+        // 그리는 쪽이 같은 값을 봐야 하고(두 벌이면 한쪽만 호버를 놓쳐 다시 겹친다), tree 탐색도 한 번이면 된다.
+        const repo_actions_left: ?f32 = if (item == .repo) repoActionsLeftX(frame, state, index, m) else null;
         switch (item) {
-            .repo => |repo| try writer.repoRow(row, repo, m),
+            .repo => |repo| try writer.repoRow(row, repo, m, repo_actions_left),
             .commit_box => |box| try writer.commitBox(row, box, m),
             .commit_button => |button| {
                 // **면 노드**가 그 줄의 칠과 action을 갖는다(아래 여백은 줄의 것이다) — 글자·호버 해석도
@@ -262,34 +265,10 @@ pub fn view(
             .notice => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .muted_fg, .supporting, false),
         }
         // 머리 줄의 동작 아이콘 둘(②c). 같은 규율이다 — 히트 사각형은 늘 있고 글리프만 호버를 따른다.
+        // 겹침은 여기서 덮어서가 아니라 **`repoRow`가 그 자리의 글자를 안 그려서** 안 난다(그 함수 설명).
         if (item == .repo) {
             const repo = item.repo;
-            const hovered = isHovered(state, row.id) or hoveredRepoAction(state, index);
-            if (hovered) {
-                // **아이콘 밑을 먼저 덮는다**(사용자 지적 2026-08-19). 이 줄은 자리를 비워 두지 않으므로
-                // 배지와 브랜치 이름이 그 밑에 이미 그려져 있다 — 안 덮으면 아이콘이 글자 위에 겹친다
-                // (예약을 넣기 전 2026-08-17에 실제로 그랬던 화면이다).
-                //
-                // 색은 **칠하는 쪽에 되묻는다**(`resolveCard`) — 상태로 추측하면 어긋난다: 포인터가
-                // 자식 버튼 위에 있으면 행 자체의 hover는 풀려서 배경이 평상시 색이고, 그때 hover 색을
-                // 깔면 그 띠만 다른 색으로 뜬다. 같은 파일의 커밋 버튼 글자색이 그 교훈으로 이렇게 한다.
-                if (frame.tree.find(build.NodeIds.repoAction(index, 0))) |first_index| {
-                    const first = frame.tree.entries[first_index];
-                    const left = first.rect.x - @as(f32, @floatFromInt(m.gap));
-                    const right = row.rect.x + row.rect.width;
-                    if (right > left) {
-                        if (rowBackgroundRole(row, state, writer.tokens_ref)) |role| try writer.appendQuad(.{
-                            .rect = .{
-                                .x = @intFromFloat(@floor(left)),
-                                .y = @intFromFloat(@floor(row.rect.y)),
-                                .w = @intFromFloat(@ceil(right - left)),
-                                .h = @intFromFloat(@ceil(row.rect.height)),
-                            },
-                            .fill_role = role,
-                            .corner_radii = .{ 0, 0, 0, 0 },
-                        });
-                    }
-                }
+            if (repo_actions_left != null) {
                 inline for (.{ refresh_icon, stage_all_icon }, 0..) |glyph, slot| {
                     if (frame.tree.find(build.NodeIds.repoAction(index, slot))) |slot_index| {
                         const rect = frame.tree.entries[slot_index];
@@ -444,20 +423,21 @@ fn commitLabelRole(
     return if (enabled) .surface_fg else .muted_fg;
 }
 
-/// 그 행이 **실제로 칠해진 배경**의 색 역할. 카드가 아니면 null이다(덮을 근거가 없으므로 안 덮는다).
+/// 머리 줄의 동작 아이콘이 **지금 떠 있으면** 그 아이콘 띠의 왼쪽 경계, 아니면 null이다.
 ///
-/// `commitLabelRole`과 같은 규율이다 — 상태 표를 새로 만들지 않고 painter가 쓰는 `resolveCard`에
-/// 같은 입력을 물어본다. 그래야 호버·눌림·비활성에서 색이 갈리지 않는다.
-fn rowBackgroundRole(
-    entry: tree.RectEntry,
+/// 아이콘을 그리는 쪽과 그 자리의 글자(브랜치·배지·상태 라벨)를 접는 쪽이 **같은 판정**을 봐야 한다 —
+/// 두 벌로 두면 한쪽만 호버를 놓쳐 다시 겹친다. 포인터가 자식 버튼 위에 있으면 행 자체의 hover는
+/// 풀리므로 `hoveredRepoAction`도 함께 본다(안 그러면 아이콘이 깜빡인다).
+fn repoActionsLeftX(
+    frame: build.Frame,
     state: interaction.InteractionState,
-    tk: *const tokens.Tokens,
-) ?tokens.ColorRole {
-    const visual = switch (entry.visual) {
-        .card => |card| card,
-        else => return null,
-    };
-    return paint_style.resolveCard(entry.id, visual, entry.action, state, tk).background;
+    index: usize,
+    m: types.DockMetrics,
+) ?f32 {
+    const row_index = frame.tree.find(build.NodeIds.item(index)) orelse return null;
+    if (!isHovered(state, frame.tree.entries[row_index].id) and !hoveredRepoAction(state, index)) return null;
+    const first_index = frame.tree.find(build.NodeIds.repoAction(index, 0)) orelse return null;
+    return frame.tree.entries[first_index].rect.x - @as(f32, @floatFromInt(m.gap));
 }
 
 /// 빈 커밋 상자의 안내 문구. **컴포넌트가 소유한다** — platform이 넘기면 창마다 갈릴 수 있다.
@@ -525,12 +505,18 @@ fn isHovered(state: interaction.InteractionState, id: tree.UiId) bool {
     return hovered == id;
 }
 
-fn clipRectOf(entry: tree.RectEntry) draw.Rect {
+/// published `effective_clip`을 정수 rect로 옮긴다. **`entry.rect`가 아니다** — 스크롤로 밀린 행의
+/// rect는 목록 뷰포트 **밖까지** 이어지므로(가상화가 창의 첫 항목을 음수 origin으로 올려 둔다),
+/// 그것을 clip으로 실으면 그 행의 quad·글자가 위쪽 고정 chrome(탭 줄·요약 줄) 위에 그려진다
+/// (사용자 지적 2026-08-21: 목록을 스크롤하면 탭 줄·요약 줄과 겹쳤다). 부모 clip까지 접힌 값은
+/// tree가 소유하므로 그 값을 그대로 전달만 한다 — session_dock의 같은 이름 함수와 같은 계약이다.
+fn clipRectOf(entry: tree.RectEntry) ?draw.Rect {
+    const clip = entry.effective_clip orelse return null;
     return .{
-        .x = @intFromFloat(@floor(entry.rect.x)),
-        .y = @intFromFloat(@floor(entry.rect.y)),
-        .w = @intFromFloat(@floor(entry.rect.width)),
-        .h = @intFromFloat(@floor(entry.rect.height)),
+        .x = @intFromFloat(@floor(clip.x)),
+        .y = @intFromFloat(@floor(clip.y)),
+        .w = @intFromFloat(@max(@floor(clip.width), 0)),
+        .h = @intFromFloat(@max(@floor(clip.height), 0)),
     };
 }
 
@@ -624,17 +610,24 @@ const Writer = struct {
     ///
     /// **종류 아이콘과 브랜치 칩이 같은 글리프를 쓰지 않는다.** 워크트리 줄에 `⑂`가 둘이면 둘 중 무엇이
     /// 종류이고 무엇이 브랜치인지 읽히지 않는다 — 그래서 칩은 **글자만** 그린다.
-    fn repoRow(self: *Writer, rect: tree.RectEntry, repo: types.RepoItem, m: types.DockMetrics) ViewError!void {
+    /// `actions_left_x`는 **호버해서 동작 아이콘이 떠 있을 때** 그 아이콘 띠의 왼쪽 경계다(아니면 null).
+    ///
+    /// **동작 아이콘 자리를 평소에는 비워 두지 않는다**(사용자 지적 2026-08-19). 늘 비켜 두면 아이콘은
+    /// 호버해야 나타나므로 평소 화면에는 **이유를 말하지 않는 빈 띠**만 52px 남는다.
+    ///
+    /// 그렇다고 호버할 때 브랜치·배지를 왼쪽으로 밀면 그것들이 마우스를 따라 움직인다(2026-08-17에
+    /// 그래서 예약을 넣었다). 그래서 **호버하는 동안 그 둘을 아예 안 그린다** — 자리는 그대로고 겹치지도
+    /// 않는다. 옛 답("행 배경과 같은 색 사각형을 깔고 그 위에 아이콘을 놓는다")은 **원리적으로 통하지
+    /// 않았다**: chrome quad는 chrome 글자보다 **먼저** 그리는 층이라(`chrome_draw_lowering`의 layer
+    /// 규약), 나중에 깐 사각형이 이미 그린 글자를 덮지 못한다. 그래서 새로고침 아이콘이 브랜치 이름
+    /// 위에 겹쳐 보였다(사용자 지적 2026-08-21). 히트 사각형은 build가 늘 두므로 클릭 판정은 그대로다.
+    fn repoRow(self: *Writer, rect: tree.RectEntry, repo: types.RepoItem, m: types.DockMetrics, actions_left_x: ?f32) ViewError!void {
         const scale = effectiveScale(self.props.scale_milli);
-        // **동작 아이콘 자리를 비워 두지 않는다**(사용자 지적 2026-08-19). 그전에는 늘 비켜 뒀는데,
-        // 아이콘은 호버해야 나타나므로 평소 화면에는 **이유를 말하지 않는 빈 띠**만 52px 남았다.
-        //
-        // 그렇다고 호버할 때만 비키면 브랜치와 배지가 마우스를 따라 움직인다(2026-08-17에 그래서 예약을
-        // 넣었다). 그래서 세 번째 답을 쓴다 — **자리는 안 비우고, 호버하면 그 위에 덮어 그린다**:
-        // 아래에서 행 배경과 같은 색 사각형을 깔고 그 위에 아이콘을 놓는다. 히트 사각형은 build가
-        // 늘 두므로 클릭 판정은 그대로다(어차피 호버해야 누를 수 있어 보이는 것과 눌리는 것이 안 갈린다).
         const inset: f32 = @floatFromInt(m.inset_x);
         const right_inset: u32 = m.inset_x;
+        // 아이콘이 떠 있는 동안 오른쪽 것들이 설 수 있는 한계. 아이콘 띠 왼쪽에서 멈춘다.
+        const right_limit: f32 = actions_left_x orelse
+            (rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset)));
         try self.icon(rect, inset, if (repo.collapsed) chevron_right_icon else chevron_down_icon, m.icon_extent, .muted_fg);
         // 주 워크트리는 폴더, 링크된 워크트리는 브랜치 글리프 — 워크트리는 "딸린 것"이라는 사실이
         // 보여야 같은 이름의 두 줄을 사용자가 구별한다.
@@ -648,7 +641,8 @@ const Writer = struct {
         // 읽는데, 그건 **아직 모르는 것**과 다른 사실이다.
         var count_buf: [16]u8 = undefined;
         const count_text = std.fmt.bufPrint(&count_buf, "{d}", .{repo.count}) catch "";
-        const pill = if (repo.count > 0 and !repo.pending and !repo.failed) badge.countPill(rect.rect, .{
+        // 호버 중에는 배지를 안 그린다 — 아이콘 띠가 정확히 그 자리를 쓴다.
+        const pill = if (repo.count > 0 and !repo.pending and !repo.failed and actions_left_x == null) badge.countPill(rect.rect, .{
             .inset_x = right_inset,
             .label_cols = @max(@as(u16, @intCast(count_text.len)), 1),
             .cell_width_px = self.cell_width_px,
@@ -660,11 +654,16 @@ const Writer = struct {
         const name_x = kind_x + @as(f32, @floatFromInt(m.icon_extent + m.gap));
         if (repo.pending or repo.failed) {
             // 오른쪽 자리를 그대로 쓴다(브랜치가 설 자리) — 읽고 나면 그 자리에 브랜치와 배지가 온다.
-            // main의 i18n 라벨 함수와 ②c의 오른쪽 여백(아이콘 자리)을 **둘 다** 쓴다.
+            // main의 i18n 라벨 함수와 ②c의 오른쪽 여백(아이콘 자리)을 **둘 다** 쓴다. 브랜치와 같은
+            // 이유로 호버 중에는 안 그린다(아이콘이 그 자리에 서 있다).
             const label = if (repo.failed) repoFailedLabel() else repoPendingLabel();
-            try self.trailing(rect, label, .muted_fg, .supporting, right_inset);
-            const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + right_inset));
-            try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
+            if (actions_left_x == null) {
+                try self.trailing(rect, label, .muted_fg, .supporting, right_inset);
+                const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + right_inset));
+                try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
+            } else {
+                try self.lineWithin(rect, name_x - rect.rect.x, right_limit, repo.name, .surface_fg, .control, true);
+            }
             return;
         }
         const right_edge: f32 = if (pill) |p|
@@ -672,12 +671,13 @@ const Writer = struct {
             // 달라붙어 보인다(사용자 지적 2026-08-19: "11이 겹쳐 보인다").
             @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.badgeGapPx()))
         else
-            rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset));
+            right_limit;
 
         // 브랜치는 오른쪽에 붙는다(이름이 길면 이름이 먼저 잘린다 — 어느 저장소인지가 어느 브랜치인지보다
         // 앞선다). 자리를 못 잡으면 아예 안 그린다.
         var branch_width: f32 = 0;
-        if (repo.branch.len > 0) {
+        // 호버 중에는 브랜치도 안 그린다 — 아이콘 띠가 그 자리를 쓴다(위 설명).
+        if (repo.branch.len > 0 and actions_left_x == null) {
             const w = self.measureBudget(repo.branch);
             const line_h: f32 = @floatFromInt(typography.lineHeightPx(.supporting, scale));
             const x = right_edge - w;
@@ -1922,26 +1922,38 @@ test "커밋 상자는 글이 넘치면 스크롤바로 그 사실을 말한다"
     try testing.expectEqual(short_quads + 2, countAllQuads(long_draws));
 }
 
-test "머리 줄의 동작 아이콘은 브랜치 칩·개수 배지를 덮지 않는다 (②c)" {
-    // 자리를 비켜 두지 않으면 아이콘이 그 위에 겹쳐 그려져 둘 다 못 읽는다(제품 캡처 2026-08-17).
-    var storage: TestStorage = .{};
-    const items = [_]types.Item{
-        .{ .repo = .{ .index = 0, .name = "repo", .branch = "main", .count = 3, .can_stage_all = true } },
-    };
-    const draws = try renderFixture(&storage, .{ .hovered = build.NodeIds.item(0) }, &items);
-    const branch = findText(draws, "main") orelse return error.MissingBranch;
-    // 아이콘 둘은 그 오른쪽에 앉는다 — 겹치면 x가 브랜치 글자 안으로 들어온다.
-    var icon_left: i32 = std.math.maxInt(i32);
+/// 호버해서 떠 있는 동작 아이콘의 가장 왼쪽 x(하나도 안 그려졌으면 null).
+fn repoActionIconLeft(draws: draw.ChromeDraw) ?i32 {
+    var left: ?i32 = null;
     for (draws.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
             // 아이콘 조각은 글리프 하나짜리 문자열이다(`utf8Fit`) — 그 조각만 골라 본다.
             if (!std.mem.eql(u8, run.text, refresh_icon) and !std.mem.eql(u8, run.text, stage_all_icon)) continue;
-            icon_left = @min(icon_left, text.origin.x);
+            left = if (left) |l| @min(l, text.origin.x) else text.origin.x;
         },
         else => {},
     };
-    try testing.expect(icon_left < std.math.maxInt(i32)); // 아이콘이 실제로 그려졌다(호버 중)
-    try testing.expect(icon_left > branch.origin.x);
+    return left;
+}
+
+test "머리 줄의 동작 아이콘은 브랜치 칩·개수 배지와 안 겹친다 (②c)" {
+    // 자리를 비켜 두지도, 그 위를 덮지도 않는다 — **호버하는 동안 그 자리의 글자를 안 그린다**.
+    // 덮개는 원리적으로 안 통한다(chrome quad는 chrome 글자보다 먼저 그리는 층이다): 그래서
+    // 새로고침 아이콘이 브랜치 이름 위에 겹쳐 보였다(사용자 지적 2026-08-21, 제품 캡처 2026-08-17).
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        // props.branch("main")와 갈리는 이름을 쓴다 — 아래 고정 브랜치 줄의 글자와 헷갈리지 않게.
+        .{ .repo = .{ .index = 0, .name = "repo", .branch = "feat/x", .count = 3, .can_stage_all = true } },
+    };
+    const draws = try renderFixture(&storage, .{ .hovered = build.NodeIds.item(0) }, &items);
+    try testing.expect(repoActionIconLeft(draws) != null); // 아이콘이 실제로 그려졌다(호버 중)
+    // 그 자리에 있던 것들은 이 프레임에 **없다** — 있으면 겹친다.
+    try testing.expect(findExactText(draws, "feat/x") == null);
+    try testing.expect(findBadgeQuad(draws) == null);
+    // 남는 이름은 아이콘 띠 왼쪽에서 멈춘다(길면 말줄임이 되고, 아이콘 밑으로 파고들지 않는다).
+    const icon_left = repoActionIconLeft(draws).?;
+    const name = findExactText(draws, "repo") orelse return error.MissingName;
+    try testing.expect(name.origin.x + @as(i32, @intCast(name.max_width_px orelse 0)) <= icon_left);
 }
 
 test "읽지 못한 저장소는 0건이 아니라 그 사실을 적는다" {
@@ -2724,33 +2736,66 @@ test "머리 줄: 브랜치와 개수 배지 사이는 `gap` 하나보다 넓다
     try testing.expect(pill.rect.x - branch_right >= @as(i32, @intCast(m.badgeGapPx())));
 }
 
-test "머리 줄: 동작 아이콘은 자리를 비워 두지 않고 호버할 때 **덮어** 그린다 (사용자 지적 2026-08-19)" {
-    // 늘 비워 두면 아이콘이 호버해야 나오므로 평소 화면에는 이유를 말하지 않는 빈 띠만 남는다.
-    // 덮개 없이 그리면 배지·브랜치 글자 위에 아이콘이 겹친다(예약을 넣기 전 그 화면이었다).
+test "스크롤로 밀린 행은 목록 뷰포트 위(탭 줄·요약 줄)로 안 샌다 (사용자 지적 2026-08-21)" {
+    // 가상화는 창의 첫 항목을 **음수 origin**으로 올려 두므로 그 행의 rect는 목록 위쪽 띠 아래로
+    // 들어간다. 그 rect를 그대로 clip으로 실으면 clip이 뷰포트보다 커져 — 즉 clip이 아무것도 안 자르고 —
+    // 행의 칠과 글자가 고정 chrome 위에 그려졌다. clip의 단일 출처는 tree의 `effective_clip`이다.
     var storage: TestStorage = .{};
     const items = [_]types.Item{
-        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main", .primary = true, .count = 11, .can_stage_all = true } },
+        .{ .file = .{ .name = "index.html", .dir = "docs/poc/", .status = .modified, .letter = 'M', .action = .stage } },
+        .{ .file = .{ .name = "ask.html", .dir = "docs/poc/", .status = .modified, .letter = 'M', .action = .stage } },
     };
-    // ① 호버가 없으면 덮개도 없다 — 평소 화면에 덧칠이 늘지 않는다.
-    const plain = try renderFixture(&storage, .{}, &items);
-    const badge_plain = findBadgeQuad(plain) orelse return error.MissingBadge;
-
-    // ② 호버하면 그 아이콘 자리를 덮는 사각형이 **배지보다 뒤에** 온다(그려지는 순서 = 덮는 순서).
-    var storage_hover: TestStorage = .{};
-    const hover = try renderFixture(&storage_hover, .{ .hovered = build.NodeIds.item(0) }, &items);
-    var badge_index: ?usize = null;
-    var cover_index: ?usize = null;
-    for (hover.ops, 0..) |op, i| switch (op) {
-        .quad => |quad| {
-            if (quad.fill_role == .accent_bar and quad.rect.h >= badge_min_height) badge_index = i;
-            // 덮개는 배지가 아니라 **행 배경 색**이고, 배지보다 넓다(아이콘 둘을 담는다).
-            if (quad.fill_role != .accent_bar and quad.rect.w > badge_plain.rect.w) cover_index = i;
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+        .branch = "main",
+        .summary = .{ .added = 41, .removed = 12 },
+        // 창의 첫 항목이 8px 잘린 채 시작한다(스크롤 중간 — 가상화가 내는 그 상태다).
+        .content_first_item_origin_y_px = -8,
+        .content_h_px = 900,
+        .scroll_offset_px = 8,
+        .list_overflows = true,
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    const content_index = frame.tree.find(build.NodeIds.content) orelse return error.MissingContent;
+    const content = frame.tree.entries[content_index].rect;
+    const top: i32 = @intFromFloat(@floor(content.y));
+    try testing.expect(top > 0); // 위쪽 고정 chrome(탭 줄·요약 줄)이 실제로 있다
+    var saw_scroll_text = false;
+    for (draws.ops) |op| switch (op) {
+        // 목록 안의 글자는 전부 뷰포트 **아래**에서 시작하는 clip을 들어야 한다.
+        .text => |text| if (text.scroll_clipped) {
+            const clip = text.clip orelse return error.MissingClip;
+            try testing.expect(clip.y >= top);
+            saw_scroll_text = true;
         },
         else => {},
     };
-    const cover = cover_index orelse return error.MissingCover;
-    const badge_at = badge_index orelse return error.MissingBadge;
-    try testing.expect(cover > badge_at);
+    try testing.expect(saw_scroll_text);
+}
+
+test "머리 줄: 평소에는 아이콘 자리를 비워 두지 않는다 (사용자 지적 2026-08-19)" {
+    // 늘 비워 두면 아이콘은 호버해야 나오므로 평소 화면에는 **이유를 말하지 않는 빈 띠**만 52px 남는다.
+    // 그래서 접는 것은 호버하는 동안뿐이고, 평소 프레임은 그 자리를 브랜치·배지가 그대로 쓴다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/x", .primary = true, .count = 11, .can_stage_all = true } },
+    };
+    const plain = try renderFixture(&storage, .{}, &items);
+    const pill = findBadgeQuad(plain) orelse return error.MissingBadge;
+    try testing.expect(findExactText(plain, "feat/x") != null); // 브랜치도 평소에는 그린다
+    try testing.expect(repoActionIconLeft(plain) == null); // 호버가 아니면 아이콘은 없다
+    // 배지가 **행의 오른쪽 여백에 그대로 붙는다** — 아이콘 둘을 위해 미리 비워 둔 띠가 없다는 뜻이다.
+    const m = types.DockMetrics.resolve(1000);
+    try testing.expectEqual(@as(i32, 320 - @as(i32, @intCast(m.inset_x))), pill.rect.x + @as(i32, @intCast(pill.rect.w)));
 }
 
 test "접힌 저장소도 개수 배지를 그린다(접힌 채로 '여기 뭔가 있다'를 안다)" {

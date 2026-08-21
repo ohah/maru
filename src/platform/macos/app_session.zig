@@ -19792,6 +19792,33 @@ test "hook mode fills state and conversation from the event log, and only then" 
         session.loaded_config.config.sidebar.agent_hooks = true;
     }
 
+    // ── ⑯a **Notification 이 «입력 대기» 를 만든다**(계약 §6) ────────────────────────────────
+    // 「입력 대기」의 다른 소스인 `PermissionRequest` 는 실측에서 **한 번도 발화하지 않았다**(헤드리스에서는
+    // 권한이 실제로 거부돼도 안 온다 — §9-6). 그것 하나에만 걸어 두면 대화형에서도 안 올 경우 그 배지에
+    // 소스가 하나도 없다. `Notification` 은 실사용에서 **실제로 오는 것을 봤다**.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"파일 하나 고쳐줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs your permission to use Bash\"}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
+        // 무엇을 승인해야 하는지도 함께 온다.
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, term.agent_hook_notice.kind);
+
+        // **유휴 알림은 배지를 흔들지 않는다** — 실사용에서 이것이 턴 끝 뒤에 온다.
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_state = .unknown;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"파일 하나 고쳐줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\"}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+    }
+
     // ── ⑯b **종료를 놓친 유령을 목록이 거둔다**(계약 §2) ──────────────────────────────────
     // 자식의 `SubagentStop` 은 유실될 수 있다(§4.3 동시 append·상한). 그러면 우리는 그 자식을 영영
     // 붙잡는다 — **안 풀리는 배지**다. provider 가 `Stop` 에 실어 주는 목록이 그것을 정리한다:

@@ -125,7 +125,7 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 | `PreToolUse` | `*` | ✅ | 진행 중 세부 **및 AI 소행 경로**. 도구 종료는 다음 `PreToolUse`/`Stop`이 알려준다. **두 provider의 payload 모양이 다르다 — §2.1** |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
 | `SubagentStop` | — | ✅ | 자식이 끝났다. **마지막** 자식이 끝나고 lead 도 끝났으면 그때가 턴 끝이다 |
-| `Notification` | — | ❌ **없다** | provider가 알리고 싶은 시점(`notification_type`) |
+| `Notification` | — | ❌ **없다** | **입력 대기 판정**(`notification_type` — §6 표). `PermissionRequest`가 발화하지 않는 환경에서 그 배지의 유일한 소스다 |
 | `StopFailure` | — | ❌ **없다** | **오류로 끝난 턴.** 아래 ⚠️ |
 
 **codex 에서 알림이 안 되는가 — 아니다.** 없는 것은 `Notification` **이벤트 하나**이지 알림 경로가 아니다.
@@ -690,10 +690,28 @@ provider는 턴 종료와 권한 요구를 `Claude is waiting for your input` �
 | 주의(입력 대기) | `PermissionRequest` | `tool_name` + `tool_input` — 무엇을 승인하는지 |
 | 유휴 | `Notification`(`idle_prompt`) | 기본 억제. ⚠️ **배지도 바꾸지 않는다**(아래) |
 
-⚠️ **`Notification` 은 상태도 옮기지 않는다**(2026-08-21). 표의 «배지만 바꾼다» 를 하려면 `notification_type`
-으로 `idle_prompt` 를 가려야 하는데 **파서가 그 필드를 뽑지 않는다.** 종류를 모르는 채로 배지를 옮기면 임의의
-provider 알림이 「입력 대기」로 보이므로, 지금은 **상태를 흔들지 않는 쪽**을 택했다(모르는 이벤트와 같은 규율,
-§4). 되살리려면 파서에 필드를 더하는 것이 선결이다.
+**`Notification` 은 «입력 대기» 를 만든다**(2026-08-21). 파서가 `notification_type` 을 뽑고, **아는 종류만**
+배지를 옮긴다.
+
+claude 의 종류는 열넷이다(바이너리의 enum 을 그대로 읽었다). 그중 «사용자 입력을 기다린다» 는 다섯만
+`blocked` 로 간다.
+
+| 종류 | 처리 |
+| --- | --- |
+| `permission_prompt` · `worker_permission_prompt` | **입력 대기** |
+| `elicitation_dialog` · `elicitation_url_dialog` | **입력 대기** |
+| `agent_needs_input` | **입력 대기** |
+| `idle_prompt`(「Claude is waiting for your input」) · `agent_completed` · `auth_success` · `push_notification` · `computer_use_enter`/`exit` · `quota_auto_resume_*` | 상태를 흔들지 않는다 |
+| 종류가 없거나 **모르는 종류** | 상태를 흔들지 않는다 |
+
+**왜 이 자리가 필요한가**: 「입력 대기」의 다른 소스인 `PermissionRequest` 는 우리 실측에서 **한 번도
+발화하지 않았다**(§9-6 — 로그인된 세션에서 권한이 실제로 거부돼도 헤드리스에는 오지 않는다). 그것 하나에만
+걸어 두면 대화형에서도 안 올 경우 **그 배지에 소스가 하나도 없다.** 반면 `Notification` 은 실사용에서
+실제로 오는 것을 봤다(`idle_prompt`). 그래서 독립적인 둘을 둔다.
+
+**왜 «아는 것만» 인가**: 종류를 모르는 채 배지를 옮기면 임의의 provider 알림이 「입력 대기」로 보인다.
+모르는 종류는 모르는 이벤트와 같은 규율로 다룬다(§4) — 상태를 흔들지 않는다. 새 종류가 생겨도 조용히
+무시되고, 그것을 쓰려면 위 표에 **명시적으로** 더해야 한다.
 
 중복 방지가 **필수**다(없으면 같은 완료를 여러 번 알린다). **알림을 상태 «전이» 에 붙여 그것을 구조로
 얻는다**(2026-08-21) — 세는 코드는 언제나 어딘가에서 어긋난다:
@@ -755,10 +773,9 @@ provider 알림이 「입력 대기」로 보이므로, 지금은 **상태를 �
    이번 측정이 그것을 지웠다 — **대화형 승인 UI가 있어야만 오는 이벤트다.** 입력 대기 상태(AH4)와 주의
    알림(AH5)이 여기 걸려 있으므로 **그 두 단계는 대화형 수동 검증을 완료 조건으로 둔다.**
 7. 비용 측정은 샌드박스 안에서 이뤄졌다(§3). 절대값은 상한으로 읽는다.
-8. **`Notification` 은 codex 에 없고, claude 에서도 아직 안 쓴다.** 세트에는 걸어 두었으나 그 payload 의
-   `notification_type`(예: 오래 기다리는 중)을 배지·알림으로 옮기는 자리가 없다. codex 에서는 이벤트
-   자체가 없으므로(§2 실측) 그 계기를 애초에 못 받는다 — 완료(`Stop`)·주의(`PermissionRequest`) 알림은
-   양쪽 다 정상이다.
+8. **`Notification` 은 codex 에 없다.** claude 에서는 이제 «입력 대기» 판정에 쓰지만(§6), codex 열거에는
+   그 이벤트가 없으므로(§2 실측) codex 의 그 배지는 `PermissionRequest` 하나에만 걸린다 — 그것이 대화형
+   codex 에서 발화하는지는 미검증이다. 완료(`Stop`) 알림은 양쪽 다 정상이다.
 9. **관측 모드의 대화 줄이 다시 빈다.** statusLine 훅을 제거하면서(§5) 세션 신원을 자식 env 로만 얻는다.
    도구를 한 번도 안 쓰는 세션은 그 값을 못 얻어 사이드바 대화 줄이 빈다. 훅 모드를 켜면 채워지지만 그
    게이트는 아직 기본 꺼짐이다.

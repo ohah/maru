@@ -72,8 +72,17 @@ pub fn next(current: State, ev: event.Event) State {
             // «비어 있나» 가 아니라 «running 이 있나» 로 본다(그 차이가 «영영 안 풀리는 배지» 를 만든다).
             break :blk if (ev.running_background_tasks > 0) .running else .idle;
         },
-        // 알림은 상태를 옮기지 않는다(알림 소비는 §6이 따로 소유한다).
-        .notification => current,
+        // **아는 종류만 옮긴다**(계약 §6). claude 의 `notification_type` 은 열넷이고 그중 «사용자 입력을
+        // 기다린다» 는 다섯만 배지를 옮긴다 — 나머지(유휴 알림·인증 성공·쿼터 재개 등)와 종류를 모르는
+        // 알림은 상태를 흔들지 않는다. 그러지 않으면 **임의의 provider 알림이 「입력 대기」로 보인다.**
+        //
+        // 이 자리가 필요한 이유: 「입력 대기」의 다른 소스인 `PermissionRequest` 는 우리 실측에서 **한 번도
+        // 발화하지 않았다**(헤드리스에서는 권한이 실제로 거부돼도 안 온다 — §9-6). 그것 하나에만 걸어 두면
+        // 대화형에서도 안 올 경우 그 배지에 **소스가 하나도 없다**. 독립적인 둘을 둔다.
+        .notification => switch (ev.notification_type) {
+            .needs_input => .blocked,
+            .none, .other => current,
+        },
         // 서브에이전트 수명은 **여기서 다루지 않는다** — 세는 일이라 진행 상태가 필요하고, 그것은
         // `advance` 가 소유한다. `next` 는 «이벤트 하나 → 상태» 만 보는 순수 전이로 남긴다.
         .subagent_start, .subagent_stop => current,
@@ -1387,4 +1396,29 @@ test "회수는 lead 의 턴 끝에서만 한다 — 자식이 막 떴을 때 �
     tool.background_tasks_raw = "[]";
     state = advance(&progress, state, tool);
     try testing.expectEqual(@as(usize, 1), progress.childCount()); // 거두지 않는다
+}
+
+test "Notification 의 «입력 대기» 종류는 배지를 옮긴다 — 다른 종류는 조용하다" {
+    // 「입력 대기」의 다른 소스(`PermissionRequest`)는 실측에서 한 번도 발화하지 않았다. 그것 하나에만
+    // 걸면 대화형에서도 안 올 때 그 배지에 소스가 없다 — 독립적인 둘을 둔다.
+    var needs = evOf(.notification);
+    needs.notification_type = .needs_input;
+    try testing.expectEqual(State.blocked, next(.running, needs));
+    try testing.expectEqual(Notice.attention, noticeOn(.running, next(.running, needs)));
+
+    // 유휴 알림·인증 성공 같은 것은 배지를 흔들지 않는다.
+    var other = evOf(.notification);
+    other.notification_type = .other;
+    try testing.expectEqual(State.running, next(.running, other));
+    try testing.expectEqual(State.idle, next(.idle, other));
+
+    // 종류가 없는 알림도 마찬가지다 — 모르면 안 옮긴다.
+    try testing.expectEqual(State.running, next(.running, evOf(.notification)));
+}
+
+test "자식이 보낸 Notification 은 부모 배지를 옮기지 않는다" {
+    var child = evOf(.notification);
+    child.notification_type = .needs_input;
+    child.agent_id = "child-1";
+    try testing.expectEqual(State.running, next(.running, child));
 }

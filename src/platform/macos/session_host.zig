@@ -366,6 +366,10 @@ pub const remote_term_backend = if (builtin.os.tag == .macos)
     @import("session_host/remote_term_backend.zig")
 else
     struct {};
+pub const host_reconnect_window_transaction = if (builtin.os.tag == .macos)
+    @import("session_host/host_reconnect_window_transaction.zig")
+else
+    struct {};
 
 test {
     // 자식 파일의 inline test를 이 barrel의 test 그래프에 모은다(refAllDecls는 얕아 명시 참조가 필요).

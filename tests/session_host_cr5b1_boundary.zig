@@ -52,7 +52,10 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
 
     // CR5b-2c adds ordered runtime completion; CR5c adds the all-row terminal connection
     // transition while retaining the same canonical runtime-set owner.
-    try std.testing.expectEqual(@as(usize, 30), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // CR5d-2 reuses the sealed terminal summary/rows through the backend-private Window projection;
+    // no AppSession caller receives the ledger values directly.
+    // CR5d-2 adds the terminal-row shrink projection, digest and summary to the same host job owner.
+    try std.testing.expectEqual(@as(usize, 35), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     const backend_product = backend[0 .. std.mem.indexOf(u8, backend, "const testing = std.testing;") orelse
         return error.TestUnexpectedResult];
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend_product, "reconnectRuntimeSetIdentity"));

@@ -10,6 +10,10 @@ const notification_ops = @import("app_session/notification.zig");
 pub const input_ops = @import("app_session/input.zig");
 pub const web_ops = @import("app_session/web.zig");
 pub const workspace_ops = @import("app_session/workspace.zig");
+pub const session_host_window_ops = if (builtin.os.tag == .macos)
+    @import("app_session/session_host_window.zig")
+else
+    struct {};
 pub const settings_ops = @import("app_session/settings.zig");
 const scroll_ops = @import("app_session/scroll.zig");
 const sidebar_ops = @import("app_session/sidebar.zig");
@@ -1552,6 +1556,10 @@ const TermRuntime = struct {
     // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
     // 사용자 명시 close는 정상 terminate 의미를 가진다.
     restored_existing: bool = false,
+    // CR5d-2 Window close after termination became unconfirmed.  The host runtime must remain in
+    // inventory, so destroyTerm takes the existing detach-only remote teardown instead of sending
+    // runtime.terminate. This bit is set only by the CR5d abandon suffix immediately before removal.
+    abandoned_to_inventory: bool = false,
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
@@ -3371,6 +3379,11 @@ pub const AppSession = struct {
     close_session_generation: u64 = 1,
     next_window_close_graph_generation: u64 = 0,
     pending_window_close_graph: PendingTermCloseGraph = .{},
+    // CR5d-2: one Window action at a time is sealed against this heap-pinned AppSession and the
+    // app-global backend job.  The graph generation advances at every cross-window surgery so a
+    // gesture prepared in the old Window cannot act on the moved Term.
+    session_host_window_generation: u64 = 1,
+    session_host_window_graph_generation: u64 = 1,
     // `.terminateLater`의 end-all 확인 뒤에는 Swift에 accepted를 즉시 보내지 않는다. 이 final-address owner가
     // backend의 공통 deadline과 한-tick-one-target cursor를 보존해 모든 target terminal 뒤에만 승인한다.
     pending_app_quit_shutdown: PendingAppQuitShutdown = .{},
@@ -7070,6 +7083,8 @@ pub const AppSession = struct {
         dock_ops.dropPendingDockFocusIfHidden(dst);
         pane_ops.recomputeActivePaneRect(dst); // 복원된 활성 탭 기준으로 좌표 origin 재계산(adoptTab이 캡처한 마지막-adopt rect는 stale)
         sidebar_ops.rebuildSidebar(dst) catch {}; // [4] O(K²) 회피 — 매 adopt 대신 끝에 1회
+        workspace_ops.advanceSessionHostWindowGraph(src);
+        workspace_ops.advanceSessionHostWindowGraph(dst);
         return .{
             .moved_surfaces = moved,
             .from_window = @intCast(@intFromPtr(src)),
@@ -62199,4 +62214,216 @@ fn dirExpandedInRows(session: *AppSession, path: []const u8) !bool {
         else => {},
     };
     return error.MissingDirectoryRow;
+}
+
+test "CR5d-2 actual AppSession Window 이동은 stale close를 거부하고 fresh close만 inventory로 보낸다" {
+    if (!is_macos) return error.SkipZigTest;
+
+    const Fixture = struct {
+        fn appendRemoteTerm(
+            session: *AppSession,
+            backend: *RemoteSessionBackend,
+            handle: u64,
+            tab_index: usize,
+        ) !*Term {
+            const surface = RemoteSessionBackend.testing_api.cr5d2WindowSurface(backend, handle) orelse
+                return error.TestUnexpectedResult;
+            const term = try session.allocator.create(Term);
+            errdefer session.allocator.destroy(term);
+            term.* = .{};
+            term.surface = surface;
+            term.rt.handle = handle;
+            term.rt.live_initialized = true;
+            try session.tabs.items[tab_index].panes.items[0].terms.append(session.allocator, term);
+            return term;
+        }
+
+        // The CR5 host fixture owns these RemoteRuntime/Surface values. Sibling AppSession wrappers
+        // are removed without touching that owner; the target wrapper is retired by the product
+        // abandon suffix and therefore is deliberately absent here.
+        fn discardSiblingWrapper(session: *AppSession, handle: u64) !void {
+            for (session.tabs.items) |tab| for (tab.panes.items) |pane| {
+                for (pane.terms.items, 0..) |term, index| {
+                    if (term.rt.handle != handle or term.surface.remote == null) continue;
+                    const removed = pane.terms.orderedRemove(index);
+                    if (removed.git_branch) |value| session.allocator.free(value);
+                    if (removed.git_branch_cwd) |value| session.allocator.free(value);
+                    removed.auto_title.deinit(session.allocator);
+                    removed.rt.observation.deinit(session.allocator);
+                    if (removed.rt.ended_command.len != 0) session.allocator.free(removed.rt.ended_command);
+                    if (removed.rt.ended_runtime_host_id.len != 0)
+                        session.allocator.free(removed.rt.ended_runtime_host_id);
+                    if (removed.rt.ended_runtime_id.len != 0) session.allocator.free(removed.rt.ended_runtime_id);
+                    session.allocator.destroy(removed);
+                    return;
+                }
+            };
+            return error.TestUnexpectedResult;
+        }
+
+        fn closeSnapshot(
+            backend: *RemoteSessionBackend,
+            handle: u64,
+        ) !session_host.remote_runtime.testing_api.CloseSnapshot {
+            const runtime = RemoteSessionBackend.testing_api.cr5d2WindowRuntime(backend, handle) orelse
+                return error.TestUnexpectedResult;
+            return session_host.remote_runtime.testing_api.closeSnapshot(runtime);
+        }
+
+        fn appendForeignHostTerm(
+            session: *AppSession,
+            remote_source: maru.session.surface.ScreenSource,
+            handle: u64,
+            surface_id: u64,
+        ) !*maru.session.Surface {
+            const surface = try session.allocator.create(maru.session.Surface);
+            errdefer session.allocator.destroy(surface);
+            surface.* = try maru.session.Surface.init(session.allocator, surface_id, .{ .cols = 80, .rows = 24 });
+            errdefer surface.deinit();
+            surface.remote = remote_source;
+            const term = try session.allocator.create(Term);
+            errdefer session.allocator.destroy(term);
+            term.* = .{};
+            term.surface = surface;
+            term.rt.handle = handle;
+            term.rt.live_initialized = true;
+            try session.tabs.items[0].panes.items[0].terms.append(session.allocator, term);
+            return surface;
+        }
+
+        fn run(backend: *RemoteSessionBackend) anyerror!void {
+            const allocator = std.testing.allocator;
+            const first = try initSmokeSessionSized(allocator);
+            defer allocator.destroy(first);
+            defer first.deinit();
+            const second = try initSmokeSessionSized(allocator);
+            defer allocator.destroy(second);
+            defer second.deinit();
+
+            try RemoteSessionBackend.testing_api.cr5d2SetWindowSurfaceId(backend, 1, 0xD501);
+            try RemoteSessionBackend.testing_api.cr5d2SetWindowSurfaceId(backend, 2, 0xD502);
+            try RemoteSessionBackend.testing_api.cr5d2SetWindowSurfaceId(backend, 3, 0xD503);
+            _ = try appendRemoteTerm(first, backend, 1, 0);
+            const target = try appendRemoteTerm(second, backend, 2, 0);
+            _ = try tab_ops.newTab(second);
+            _ = try appendRemoteTerm(second, backend, 3, 1);
+            // The same Window may contain a Term owned by another host job. Its handle is absent
+            // from this backend job's canonical rows and must neither block nor join the action.
+            const foreign_handle: u64 = 99;
+            const foreign_surface_id: u64 = 0xD5FF;
+            const foreign_surface = try appendForeignHostTerm(
+                first,
+                target.surface.remote.?,
+                foreign_handle,
+                foreign_surface_id,
+            );
+            defer {
+                discardSiblingWrapper(first, foreign_handle) catch {};
+                foreign_surface.deinit();
+                allocator.destroy(foreign_surface);
+            }
+            defer for ([_]*AppSession{ first, second }) |session| for ([_]u64{ 1, 2, 3 }) |handle|
+                discardSiblingWrapper(session, handle) catch {};
+
+            try std.testing.expectError(
+                error.InvalidAuthority,
+                session_host_window_ops.prepareCloseWithBackend(
+                    first,
+                    second,
+                    foreign_surface_id,
+                    102,
+                    100,
+                    backend,
+                ),
+            );
+            try std.testing.expect(term_ops.terminalSurfaceById(first, foreign_surface_id) != null);
+
+            try RemoteSessionBackend.testing_api.cr5d2MakeTerminationUnconfirmed(backend, 2);
+            switch ((try closeSnapshot(backend, 2)).state.close) {
+                .termination_unconfirmed => {},
+                else => return error.TestUnexpectedResult,
+            }
+
+            const stale = try session_host_window_ops.prepareCloseWithBackend(
+                first,
+                second,
+                target.surface.id,
+                102,
+                100,
+                backend,
+            );
+            const stale_generation = stale.action.action_generation;
+            const first_generation_before = first.session_host_window_graph_generation;
+            const second_generation_before = second.session_host_window_graph_generation;
+            var moved_ids: [16]u64 = undefined;
+            const moved = try workspace_ops.moveWorkspaceToSession(second, first, 0, &moved_ids);
+            try std.testing.expect(moved.cross_window);
+            try std.testing.expect(first.session_host_window_graph_generation > first_generation_before);
+            try std.testing.expect(second.session_host_window_graph_generation > second_generation_before);
+            const first_tabs_after_move = first.tabs.items.len;
+            const second_tabs_after_move = second.tabs.items.len;
+            try std.testing.expectError(
+                error.InvalidWindowBinding,
+                session_host_window_ops.commitCloseWithBackend(first, second, stale, 100, backend),
+            );
+            try std.testing.expectEqual(first_tabs_after_move, first.tabs.items.len);
+            try std.testing.expectEqual(second_tabs_after_move, second.tabs.items.len);
+            try std.testing.expect(backend.runtimes.contains(2));
+            switch ((try closeSnapshot(backend, 2)).state.close) {
+                .termination_unconfirmed => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectError(
+                error.InvalidWindowBinding,
+                session_host_window_ops.commitCloseWithBackend(first, second, stale, 100, backend),
+            );
+
+            const expired = try session_host_window_ops.prepareCloseWithBackend(
+                first,
+                second,
+                target.surface.id,
+                101,
+                100,
+                backend,
+            );
+            try std.testing.expect(expired.action.action_generation > stale_generation);
+            try std.testing.expectError(
+                error.Expired,
+                session_host_window_ops.commitCloseWithBackend(first, second, expired, 101, backend),
+            );
+            try std.testing.expect(backend.runtimes.contains(2));
+            switch ((try closeSnapshot(backend, 2)).state.close) {
+                .termination_unconfirmed => {},
+                else => return error.TestUnexpectedResult,
+            }
+
+            const expired_generation = expired.action.action_generation;
+            const fresh = try session_host_window_ops.prepareCloseWithBackend(
+                first,
+                second,
+                target.surface.id,
+                102,
+                100,
+                backend,
+            );
+            try std.testing.expect(fresh.action.action_generation > expired_generation);
+            const target_id = target.surface.id;
+            try session_host_window_ops.commitCloseWithBackend(first, second, fresh, 100, backend);
+            try std.testing.expect(!backend.runtimes.contains(2));
+            try std.testing.expect(term_ops.terminalSurfaceById(first, target_id) == null);
+            try std.testing.expect(term_ops.terminalSurfaceById(second, target_id) == null);
+            try std.testing.expect(term_ops.terminalSurfaceById(first, foreign_surface_id) != null);
+            try std.testing.expect(backend.runtimes.contains(1));
+            try std.testing.expect(backend.runtimes.contains(3));
+            try std.testing.expectEqual(@as(u32, 2), backend.host_reconnect_job.?.runtime_row_count);
+            try std.testing.expectEqual(@as(u32, 2), backend.host_reconnect_job.?.terminal_summary.?.total);
+            try std.testing.expectEqual(@as(u32, 2), backend.host_reconnect_job.?.terminal_summary.?.frozen_unavailable);
+            try std.testing.expectError(
+                error.InvalidWindowBinding,
+                session_host_window_ops.commitCloseWithBackend(first, second, fresh, 100, backend),
+            );
+        }
+    };
+
+    try RemoteSessionBackend.testing_api.runCr5d2WindowFixture(Fixture.run);
 }

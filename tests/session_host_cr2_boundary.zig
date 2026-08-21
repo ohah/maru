@@ -449,8 +449,10 @@ test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 
         cr5_runtime_set,
         "const reconnect_reducer = @import(\"reconnect_reducer.zig\");",
     ));
+    // RemoteRuntime executes transitions, the CR5 ledger reuses tags, and CR5d verifies the exact
+    // abandon decision at its backend-owned Window commit boundary.
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         try countProductSourcesExceptTwo(
             allocator,
             "@import(\"reconnect_reducer",

@@ -57,6 +57,14 @@ const termLabel = app_session_mod.termLabel;
 const close_graph = app_session_mod.session_host.pending_term_close_graph;
 const max_window_close_targets = app_session_mod.session_host.protocol.max_inventory_runtimes;
 
+pub fn advanceSessionHostWindowGraph(self: *AppSession) void {
+    self.session_host_window_graph_generation = std.math.add(
+        u64,
+        self.session_host_window_graph_generation,
+        1,
+    ) catch close_graph.fatalProofLoss();
+}
+
 /// rename 중인 대상 판정(렌더가 편집 텍스트로 라벨을 대체할 때 쓴다). 라이브 포인터 동일성 비교.
 pub fn renamingWorkspace(self: *const AppSession, tab: *Tab) bool {
     const r = self.rename orelse return false;
@@ -353,6 +361,10 @@ pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, ou
     pending_transfer.commit(dst);
     const tab = tab_ops.detachTabForMove(src, idx, false, cross_window).?; // 위에서 idx 검증 → non-null. 단일 이동이라 즉시 사이드바 재빌드.
     try tab_ops.adoptTab(dst, tab, false); // capacity 예약됨 → 무실패. insert+정규화+resize+trace 재지정.
+    if (cross_window) {
+        advanceSessionHostWindowGraph(src);
+        advanceSessionHostWindowGraph(dst);
+    }
     const source_closed = cross_window and src.tabs.items.len == 0; // §1.6: cross-window로 src가 비었나
     if (source_closed) src.ended_seen = true; // 빈 source 종료 latch(직접 — activeSurface 안 만짐, 실제 close는 M3d-2b)
     return .{

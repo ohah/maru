@@ -5519,6 +5519,52 @@ pub fn build(b: *std.Build) void {
         session_host_cr5d1_step.dependOn(&run_cr5d1_boundary_tests.step);
         boundary_step.dependOn(&run_cr5d1_boundary_tests.step);
     }
+    const session_host_cr5d2_step = b.step(
+        "test-session-host-cr5d2",
+        "CR5d-2 actual two-Window move and abandon wiring gates",
+    );
+    session_host_cr5d2_step.dependOn(session_host_cr5d1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5d2_optimize| {
+        const cr5d2_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr5d2_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR5d-2 actual AppSession Window 이동은"},
+        });
+        cr5d2_app_session_tests.root_module.linkFramework("AppKit", .{});
+        cr5d2_app_session_tests.root_module.linkFramework("Metal", .{});
+        cr5d2_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        cr5d2_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        cr5d2_app_session_tests.root_module.linkFramework("CoreText", .{});
+        cr5d2_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr5d2_app_session_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_cr5d2_app_session_tests = b.addRunArtifact(cr5d2_app_session_tests);
+        // app_session root의 세 무명 sentinel과 CR5d-2 제품 증거 한 행.
+        run_cr5d2_app_session_tests.addArg("--maru-expect-tests=4");
+        run_cr5d2_app_session_tests.setCwd(b.path("."));
+        session_host_cr5d2_step.dependOn(&run_cr5d2_app_session_tests.step);
+
+        const cr5d2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr5d2_boundary.zig"),
+                .target = target,
+                .optimize = cr5d2_optimize,
+            }),
+            .filters = &.{"CR5d-2 경계는"},
+        });
+        const run_cr5d2_boundary_tests = b.addRunArtifact(cr5d2_boundary_tests);
+        run_cr5d2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr5d2_boundary_tests.setCwd(b.path("."));
+        session_host_cr5d2_step.dependOn(&run_cr5d2_boundary_tests.step);
+        boundary_step.dependOn(&run_cr5d2_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

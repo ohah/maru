@@ -2026,6 +2026,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   double-click, Window 이동/close, runtime/job/summary drift는 topology·binding·takeover/terminate wire mutation 0이다.
   이 prerequisite의 제품 caller는 0이며 CR5d-2가 실제 AppSession move/close와 close reducer를 연결하기 전에는
   2 Window 제품 완료로 세지 않는다.
+- CR5d-2는 backend terminal job에서 runtime generation을 다시 얻어 두 AppSession의 실제 Term binding과 CR5d-1
+  transaction을 결속한다. 기존 `moveWorkspaceToSession`으로 target Term을 다른 Window에 옮긴 뒤 옛 action을 실행하는
+  행은 stale reject와 양 Window topology·reducer·takeover/terminate wire mutation 0을 확인한다. close success는 실제
+  `termination_unconfirmed` runtime에서 typed abandon projection을 준비하고 transaction을 one-shot consume한 뒤
+  `abandoned_to_inventory`를 게시하며, 같은 suffix에서 로컬 Term만 detach·제거하고 host runtime terminate는 0이다.
+  transaction/reducer preflight 전 allocation 실패와 exact/+1 expiry는 전부 mutation 0이다. reducer 게시 뒤에는 기존
+  AppSession close cleanup callback을 포함한 forward-only 정산만 허용하며 옛 graph rollback과 host terminate는 0이다. 정상
+  close, moved-stale, double-click/replay, 두 번째 Window/sibling runtime 및 같은 Window의 다른 host Term 보존을
+  Debug·ReleaseFast 제품 행과 source boundary로 고정해야 CR5 Window gate를 닫는다.
 - 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6

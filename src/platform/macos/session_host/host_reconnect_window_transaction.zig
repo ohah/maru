@@ -40,7 +40,7 @@ pub const ActionRequest = struct {
     expires_at_ns: u64,
 };
 
-const Lifecycle = enum(u8) { pristine = 0, prepared = 1, consumed = 2 };
+pub const Lifecycle = enum(u8) { pristine = 0, prepared = 1, consumed = 2 };
 const OwnerLifecycle = enum(u8) { pristine = 0, ready = 1 };
 
 pub const Owner = struct {
@@ -194,6 +194,43 @@ pub fn consume(
         return error.Expired;
     }
     if (!validate(owner, transaction, summary, rows, bindings, now_ns)) return error.InvalidAuthority;
+    consumeNoFail(owner, transaction);
+}
+
+/// Reuses the backend-owned storage only after the prior one-shot transaction is provably spent.
+/// The owner retains the spent action digest/generation, so recycling storage cannot re-arm the
+/// same gesture.
+pub fn recycleConsumed(owner: *Owner, transaction: *Transaction) Error!void {
+    if (!consumedExact(owner, transaction)) return error.InvalidAuthority;
+    transaction.* = .{};
+}
+
+pub fn consumedExact(owner: *const Owner, transaction: *const Transaction) bool {
+    const digest = actionIdentityDigest(transaction.action);
+    return validOwner(owner) and owner.active_transaction_addr == 0 and owner.active_action_generation == 0 and
+        transaction.self_addr == @intFromPtr(transaction) and transaction.owner_addr == @intFromPtr(owner) and
+        transaction.owner_generation == owner.owner_generation and transaction.pid == owner.pid and
+        transaction.process_nonce == owner.process_nonce and transaction.thread_id == owner.thread_id and
+        transaction.lifecycle_raw == @intFromEnum(Lifecycle.consumed) and
+        transaction.action.action_generation == owner.spent_action_generation and
+        std.mem.eql(u8, &digest, &owner.spent_action_digest) and
+        std.mem.eql(u8, &transaction.seal, &([_]u8{0} ** 32));
+}
+
+/// Retires an exact prepared gesture after its external Window/job projection became stale.  It
+/// intentionally does not validate those moving projections; the internal final-address owner and
+/// transaction seal are sufficient to prove which one-shot action is being revoked.
+pub fn revokeStale(owner: *Owner, transaction: *Transaction) Error!void {
+    if (!validOwner(owner) or transaction.lifecycle_raw != @intFromEnum(Lifecycle.prepared) or
+        transaction.self_addr != @intFromPtr(transaction) or transaction.owner_addr != @intFromPtr(owner) or
+        transaction.owner_generation != owner.owner_generation or transaction.pid != owner.pid or
+        transaction.process_nonce != owner.process_nonce or transaction.thread_id != owner.thread_id or
+        owner.active_transaction_addr != @intFromPtr(transaction) or
+        owner.active_action_generation != transaction.action.action_generation)
+        return error.InvalidAuthority;
+    const expected = transactionSeal(transaction, @intFromPtr(transaction)) catch return error.InvalidAuthority;
+    if (!std.crypto.timing_safe.eql(process_seal.CleanupSeal, expected, transaction.seal))
+        return error.InvalidAuthority;
     consumeNoFail(owner, transaction);
 }
 
@@ -402,6 +439,14 @@ test "CR5d-1 Window transaction은 terminal summary와 two-window binding을 exa
     try std.testing.expectError(error.Busy, prepare(&owner, &duplicate, summary, &rows, &bindings, testAction(), 99));
     try std.testing.expect(validate(&owner, &transaction, summary, &rows, &bindings, 99));
     try consume(&owner, &transaction, summary, &rows, &bindings, 99);
+    try std.testing.expect(consumedExact(&owner, &transaction));
+    var consumed_copy = transaction;
+    try std.testing.expect(!consumedExact(&owner, &consumed_copy));
+    inline for (.{ "target_window_addr", "target_runtime_handle", "target_surface_id", "action_generation" }) |field| {
+        var hostile = transaction;
+        @field(hostile.action, field) += 1;
+        try std.testing.expect(!consumedExact(&owner, &hostile));
+    }
     try std.testing.expectError(error.InvalidAuthority, consume(&owner, &transaction, summary, &rows, &bindings, 99));
     try std.testing.expectError(error.InvalidAuthority, prepare(&owner, &duplicate, summary, &rows, &bindings, testAction(), 99));
     const sibling_action: ActionRequest = .{

@@ -5585,6 +5585,14 @@ publish waiter, writer-pending 뒤 신규 reader 차단, error unwind, destroy/p
   restore되고, 사용자가 그 Window를 먼저 닫았다면 binding은 제거되지만 host runtime은 종료하지 않아 Recovered Sessions에
   나타난다. Window close는 local close intent/action/shell을 exact-once `abandoned_to_inventory`로 retire한다. 이후 재발견은
   host inventory만 소유하며 local shell을 pin하지 않는다. durable close journal이나 hidden layout owner는 만들지 않는다.
+  CR5d-2의 host별 transaction은 두 Window에 함께 있는 다른 host Term을 canonical runtime row 선택에서 제외해 보존한다.
+  move 경쟁은 새 이동 구현이 아니라 기존 `moveWorkspaceToSession`이 양 AppSession의 graph generation을
+  전진시키는 것으로 증명한다. 그 전에 준비된 Take Control/close transaction은 새 binding과 맞지 않아 reducer·topology·
+  takeover/terminate wire mutation 0으로 거부된다. close success는 backend terminal job과 두 Window binding,
+  `termination_unconfirmed` projection을 모두 allocation-free로 preflight하고 Window transaction을 먼저 consume한 뒤
+  `abandoned_to_inventory`를 게시한다. 그 다음에는 해당 local Term을 host terminate 없이 detach하고 기존 AppSession
+  close chokepoint로 topology에서 제거하는 forward-only cleanup만 남는다. 이 cleanup은 기존 allocator/UI 정산 callback을
+  실행할 수 있지만 reducer publication 뒤 옛 Window graph 복원이나 local shell 재부착은 금지한다.
   문구는 “세션 종료를 확인하는 중입니다.
   확인되기 전에는 앱을 다시 열었을 때 세션이 다시 나타날 수 있습니다”다.
 

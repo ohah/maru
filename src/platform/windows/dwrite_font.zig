@@ -196,6 +196,10 @@ comptime {
             }
         };
         std.debug.assert(slot.at(IDWriteFactory.VTable, "GetSystemFontCollection") == 3);
+        std.debug.assert(slot.at(IDWriteFactory3.VTable, "CreateFontSetBuilder") == 36);
+        std.debug.assert(slot.at(IDWriteFactory3.VTable, "CreateFontCollectionFromFontSet") == 37);
+        std.debug.assert(slot.at(IDWriteFontSetBuilder.VTable, "CreateFontSet") == 6);
+        std.debug.assert(slot.at(IDWriteFontSetBuilder.VTable, "AddFontFile") == 7);
         std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateFontFileReference") == 7);
         std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateFontFace") == 9);
         std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateGlyphRunAnalysis") == 23);
@@ -280,6 +284,53 @@ const font_face_type_truetype: UINT = 1;
 /// `DWRITE_FONT_SIMULATIONS_NONE`. 굵게/기울임을 **합성하지 않는다** — 번들에 진짜 face 가 따로 있다.
 const font_simulations_none: UINT = 0;
 const cleartype_bytes_per_pixel: usize = 3;
+
+/// `IDWriteFactory3`. **번들 폰트를 컬렉션에 담는 유일한 이유**로 쓴다 — `IDWriteTextLayout` 은 폰트를
+/// **이름으로 컬렉션에서** 찾으므로, 파일에서 연 face 만으로는 다리(§2m.13)가 못 쓴다.
+///
+/// 슬롯은 `IDWriteFactory` 24(0..23, 이 파일의 assert 가 소유) + Factory1 2(24,25) + Factory2 5(26..30 —
+/// `GetSystemFontFallback`=26 은 §2m.12 가 실측) 뒤에 온다. 아래 assert 가 그 유도를 못 박고, 값이
+/// 틀리면 **크래시거나 조용한 오답**이라 실기 실행으로도 확인했다(§2m.15).
+const IDWriteFactory3 = extern struct {
+    vtable: *const VTable,
+    const VTable = extern struct {
+        head: [36]*const anyopaque,
+        CreateFontSetBuilder: *const fn (*IDWriteFactory3, *?*IDWriteFontSetBuilder) callconv(abi.winapi) HRESULT,
+        CreateFontCollectionFromFontSet: *const fn (*IDWriteFactory3, *anyopaque, *?*IDWriteFontCollection) callconv(abi.winapi) HRESULT,
+    };
+};
+
+/// `IDWriteFontSetBuilder` + `IDWriteFontSetBuilder1` 의 `AddFontFile`.
+///
+/// **`AddFontFile` 은 `IDWriteFontSetBuilder1`(Win10 1703+) 것이다** — `QueryInterface` 로 올린
+/// 포인터에서만 부른다. 안 올리고 부르면 `CreateFontSet` 자리를 부르게 된다.
+const IDWriteFontSetBuilder = extern struct {
+    vtable: *const VTable,
+    const VTable = extern struct {
+        QueryInterface: *const fn (*IDWriteFontSetBuilder, *const d3d11.GUID, *?*anyopaque) callconv(abi.winapi) HRESULT,
+        AddRef: *const anyopaque,
+        Release: *const anyopaque,
+        AddFontFaceReferenceWithProps: *const anyopaque,
+        AddFontFaceReference: *const anyopaque,
+        AddFontSet: *const anyopaque,
+        CreateFontSet: *const fn (*IDWriteFontSetBuilder, *?*anyopaque) callconv(abi.winapi) HRESULT,
+        /// `IDWriteFontSetBuilder1` 의 첫 추가 메서드.
+        AddFontFile: *const fn (*IDWriteFontSetBuilder, *anyopaque) callconv(abi.winapi) HRESULT,
+    };
+};
+
+const IID_IDWriteFactory3 = d3d11.GUID{
+    .data1 = 0x9a1b41c3,
+    .data2 = 0xd3bb,
+    .data3 = 0x466a,
+    .data4 = .{ 0x87, 0xfc, 0xfe, 0x67, 0x55, 0x6a, 0x3b, 0x65 },
+};
+const IID_IDWriteFontSetBuilder1 = d3d11.GUID{
+    .data1 = 0x3ff7715f,
+    .data2 = 0x3cdc,
+    .data3 = 0x4dc6,
+    .data4 = .{ 0x9b, 0x72, 0xec, 0x56, 0x21, 0xdc, 0xca, 0xfd },
+};
 
 extern "dwrite" fn DWriteCreateFactory(factory_type: UINT, iid: *const d3d11.GUID, out: *?*anyopaque) callconv(abi.winapi) HRESULT;
 extern "kernel32" fn GetModuleFileNameW(module: ?*anyopaque, filename: [*]u16, size: u32) callconv(abi.winapi) u32;
@@ -432,6 +483,9 @@ pub const Rasterizer = struct {
     factory: *IDWriteFactory,
     /// 주 폰트가 `faces[0]`, 그 뒤가 폴백 순서다. **글리프가 없으면 다음 face로 내려간다.**
     faces: [max_faces]?*IDWriteFontFace = @splat(null),
+    /// 번들 폰트만 담은 컬렉션. 없으면 `null`(시스템 폰트로만 간다).
+    /// **셰이핑 다리(§2m.13)가 이것을 layout 에 넘긴다** — 그쪽은 이름으로만 폰트를 찾는다.
+    bundled: ?*IDWriteFontCollection = null,
     face_count: usize = 0,
     /// 실제로 고른 주 폰트 이름(진단·보고용). `family_name_buf`를 가리킨다.
     family: []const u8,
@@ -557,7 +611,7 @@ pub const Rasterizer = struct {
     /// `M`=600, `한`=1200), 기본 주 폰트 `JetBrains Mono` 가 마침 같은 0.6 em 이라 둘이 맞아떨어진다.
     /// **주 폰트를 다른 번들로 바꾸면 그 정확함은 안 따라온다** — 범위와 실측은
     /// docs/windows-platform.md §2m.14 의 표가 소유한다.
-    fn resolveBundledFace(factory: *IDWriteFactory, family: []const u8) ?*IDWriteFontFace {
+    fn resolveBundledPath(factory: *IDWriteFactory, family: []const u8, out: []u8) ?[]const u8 {
         const rel = maru.config.theme.bundledRegularRelPath(family) orelse return null;
         var exe_buf: [1024]u8 = undefined;
         const exe_dir = exeDirNeutral(&exe_buf) orelse "";
@@ -578,20 +632,81 @@ pub const Rasterizer = struct {
         const cwd: []const u8 = if (builtin.is_test) "." else "";
         const up_levels: usize = if (builtin.mode == .Debug or builtin.is_test) 2 else 0;
         for (maru.path_shape.assetSearchRoots(exe_dir, cwd, up_levels, &roots)) |root| {
-            var path_buf: [1400]u8 = undefined;
-            const joined = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, rel }) catch continue;
-            if (openFaceFromFile(factory, joined)) |f| return f;
+            const joined = std.fmt.bufPrint(out, "{s}/{s}", .{ root, rel }) catch continue;
+            // **열어 봐야 안다.** `CreateFontFileReference` 는 없는 경로에도 `hr=0` 이라 존재 확인이
+            // 안 되고, 종류가 틀리면 반쪽짜리 face 가 나온다(`openFaceFromFile` doc).
+            const face = openFaceFromFile(factory, joined) orelse continue;
+            d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(face)));
+            return joined;
         }
         return null;
+    }
+
+    /// 번들 폰트만 담은 **폰트 컬렉션**을 만든다. 하나도 못 찾으면 `null`.
+    ///
+    /// **왜 컬렉션이 필요한가.** 래스터라이저는 face 만 있으면 되지만 `IDWriteTextLayout`(셰이핑 다리,
+    /// §2m.13)은 폰트를 **이름으로 컬렉션에서** 찾는다. 번들 폰트가 시스템 컬렉션 밖이라, 컬렉션이
+    /// 없으면 다리가 번들 폰트를 아예 못 쓴다.
+    ///
+    /// **구현할 COM 객체가 없다.** 커스텀 컬렉션의 고전적인 길은 `IDWriteFontCollectionLoader` +
+    /// `IDWriteFontFileEnumerator` 를 우리가 구현하는 것인데, `IDWriteFontSetBuilder`(Factory3) 로 가면
+    /// 파일을 넣고 세트를 컬렉션으로 바꾸기만 하면 된다 — 실기에서 확인했다(§2m.15).
+    ///
+    /// **없는 폰트는 조용히 건너뛴다.** 배포 형태에 따라 `assets/` 가 없을 수 있고, 그때는 시스템 폰트로
+    /// 내려가는 것이 맞다(`resolveFace` 의 규약과 같다).
+    pub fn createBundledCollection(factory: *IDWriteFactory) ?*IDWriteFontCollection {
+        var raw3: ?*anyopaque = null;
+        if (d3d11.failed(DWriteCreateFactory(factory_type_shared, &IID_IDWriteFactory3, &raw3))) return null;
+        const f3: *IDWriteFactory3 = @ptrCast(@alignCast(raw3 orelse return null));
+        defer d3d11.releaseOpt(raw3);
+
+        var builder_raw: ?*IDWriteFontSetBuilder = null;
+        if (d3d11.failed(f3.vtable.CreateFontSetBuilder(f3, &builder_raw))) return null;
+        const builder = builder_raw orelse return null;
+        defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(builder)));
+
+        // `AddFontFile` 은 `IDWriteFontSetBuilder1` 것이다.
+        var b1_raw: ?*anyopaque = null;
+        if (d3d11.failed(builder.vtable.QueryInterface(builder, &IID_IDWriteFontSetBuilder1, &b1_raw))) return null;
+        const b1: *IDWriteFontSetBuilder = @ptrCast(@alignCast(b1_raw orelse return null));
+        defer d3d11.releaseOpt(b1_raw);
+
+        var added: usize = 0;
+        for (maru.config.theme.bundled_fonts) |bf| {
+            var path_buf: [1400]u8 = undefined;
+            const path = resolveBundledPath(factory, bf.family, &path_buf) orelse continue;
+            var wide: [1024]u16 = undefined;
+            const wlen = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], path) catch continue;
+            wide[wlen] = 0;
+            var file_ref: ?*anyopaque = null;
+            if (d3d11.failed(factory.vtable.CreateFontFileReference(factory, @ptrCast(&wide), null, &file_ref))) continue;
+            defer d3d11.releaseOpt(file_ref);
+            if (d3d11.failed(b1.vtable.AddFontFile(b1, file_ref.?))) continue;
+            added += 1;
+        }
+        if (added == 0) return null;
+
+        var set: ?*anyopaque = null;
+        if (d3d11.failed(builder.vtable.CreateFontSet(builder, &set))) return null;
+        defer d3d11.releaseOpt(set);
+
+        var coll: ?*IDWriteFontCollection = null;
+        if (d3d11.failed(f3.vtable.CreateFontCollectionFromFontSet(f3, set orelse return null, &coll))) return null;
+        return coll;
     }
 
     /// 이름 하나를 face 로 바꾼다 — **시스템 먼저, 없으면 번들.**
     ///
     /// 순서가 이 방향인 이유: 사용자가 직접 설치한 폰트가 이긴다. 같은 이름의 번들본으로 조용히
     /// 바꿔치기하면 "내가 깐 폰트가 안 먹는다" 가 된다. 번들은 **없을 때의 바닥**이다.
-    fn resolveFaceAnywhere(factory: *IDWriteFactory, collection: *IDWriteFontCollection, name: []const u8) ?*IDWriteFontFace {
-        if (resolveFace(collection, name)) |f| return f;
-        return resolveBundledFace(factory, name);
+    fn resolveFaceAnywhere(system: *IDWriteFontCollection, bundled: ?*IDWriteFontCollection, name: []const u8) ?*IDWriteFontFace {
+        if (resolveFace(system, name)) |f| return f;
+        const bc = bundled orelse return null;
+        const f = resolveFace(bc, name) orelse return null;
+        // 컬렉션에서 왔어도 쓸 수 있는지는 따로 본다 — `openFaceFromFile` doc 의 이유와 같다.
+        if (faceIsUsable(f)) return f;
+        d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
+        return null;
     }
 
     /// `configured`가 비어 있으면 티어의 첫 항목부터 시도한다. `fallback_csv`는 config `font.fallback`
@@ -625,9 +740,13 @@ pub const Rasterizer = struct {
         // 여기서부터 face를 열기 시작하므로, 이후 실패는 열린 것을 전부 놓아야 한다.
         errdefer self.releaseFaces();
 
+        // **번들 컬렉션은 한 번만 만든다.** 이름마다 파일을 뒤지면 후보 수만큼 디스크를 친다.
+        // 못 만들면 `null` 이고 시스템 폰트로만 간다 — 오류가 아니다.
+        self.bundled = createBundledCollection(factory);
+
         var chosen: []const u8 = "";
         for (candidates) |name| {
-            if (resolveFaceAnywhere(factory, collection.?, name)) |f| {
+            if (resolveFaceAnywhere(collection.?, self.bundled, name)) |f| {
                 self.faces[0] = f;
                 self.face_count = 1;
                 chosen = name;
@@ -640,7 +759,7 @@ pub const Rasterizer = struct {
         var fb_buf: [max_faces][]const u8 = undefined;
         for (fallbackCandidates(fallback_csv, chosen, &fb_buf)) |name| {
             if (self.face_count == max_faces) break;
-            if (resolveFaceAnywhere(factory, collection.?, name)) |f| {
+            if (resolveFaceAnywhere(collection.?, self.bundled, name)) |f| {
                 self.faces[self.face_count] = f;
                 self.face_count += 1;
             }
@@ -683,6 +802,8 @@ pub const Rasterizer = struct {
     fn releaseFaces(self: *Rasterizer) void {
         for (self.faces[0..self.face_count]) |f| d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
         self.face_count = 0;
+        d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.bundled)));
+        self.bundled = null;
     }
 
     pub fn destroy(self: *Rasterizer) void {
@@ -946,19 +1067,22 @@ test "scratchSize: 셀보다 큰 글리프도 담을 만큼 잡는다" {
     try testing.expectEqual(@as(usize, 0), Rasterizer.scratchSize(0, 16));
 }
 
-test "번들 폰트: 시스템에 없어도 파일에서 열린다" {
+test "번들 폰트: 시스템에 없어도 컬렉션에서 이름으로 찾힌다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var factory_raw: ?*anyopaque = null;
     try check(DWriteCreateFactory(factory_type_shared, &IID_IDWriteFactory, &factory_raw), error.CreateFactoryFailed);
     defer d3d11.releaseOpt(factory_raw);
     const factory: *IDWriteFactory = @ptrCast(@alignCast(factory_raw.?));
 
-    // `Jetendard` 는 배포판이 없어 시스템에 설치될 일이 없는 **번들 전용** 폰트다. 그래서 이 하나로
-    // "번들 경로가 실제로 도는가" 를 판정할 수 있다.
-    const jet = Rasterizer.resolveBundledFace(factory, "Jetendard") orelse {
-        std.debug.print("\n  번들 Jetendard 를 못 열었다 — assets/fonts 를 못 찾은 것이다\n", .{});
+    const coll = Rasterizer.createBundledCollection(factory) orelse {
+        std.debug.print("\n  번들 컬렉션을 못 만들었다 — assets/fonts 를 못 찾은 것이다\n", .{});
         return error.TestUnexpectedResult;
     };
+    defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(coll)));
+
+    // `Jetendard` 는 배포판이 없어 시스템에 설치될 일이 없는 **번들 전용** 폰트다. 그래서 이 하나로
+    // "번들 경로가 실제로 도는가" 를 판정할 수 있다.
+    const jet = Rasterizer.resolveFace(coll, "Jetendard") orelse return error.TestUnexpectedResult;
     defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(jet)));
 
     // **null 이 아닌 것만으로는 부족하다.** face 종류를 틀리면 `CreateFontFace` 가 실패하지 않고
@@ -969,11 +1093,23 @@ test "번들 폰트: 시스템에 없어도 파일에서 열린다" {
     jet.vtable.GetMetrics(jet, &fm);
     try std.testing.expect(fm.design_units_per_em > 0);
 
-    // **대조군 ⑴**: 번들이 아닌 이름은 null 이다. 이게 없으면 위 성공이 "아무 이름이나 연다" 여도 통과한다.
-    try std.testing.expect(Rasterizer.resolveBundledFace(factory, "Malgun Gothic") == null);
-    try std.testing.expect(Rasterizer.resolveBundledFace(factory, "") == null);
+    // **대조군 ⑴**: 이 컬렉션에는 **번들만** 있다. 시스템 폰트가 여기서 나오면 컬렉션이 아니라 시스템을
+    // 보고 있는 것이다 — 그러면 위 성공이 아무것도 증명하지 못한다.
+    try std.testing.expect(Rasterizer.resolveFace(coll, "Malgun Gothic") == null);
+    try std.testing.expect(Rasterizer.resolveFace(coll, "") == null);
 
-    // **대조군 ⑵**: 없는 파일은 실패해야 한다. `CreateFontFileReference` 는 경로를 받아 두기만 하고
+    // **대조군 ⑵**: 번들 다섯이 전부 들어 있어야 한다. 하나라도 빠지면 그 폰트를 고른 사용자가
+    // 조용히 시스템 폰트로 내려간다.
+    for (maru.config.theme.bundled_fonts) |bf| {
+        const f = Rasterizer.resolveFace(coll, bf.family) orelse {
+            std.debug.print("\n  번들 컬렉션에 \"{s}\" 가 없다\n", .{bf.family});
+            return error.TestUnexpectedResult;
+        };
+        defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
+        try std.testing.expect(Rasterizer.faceIsUsable(f));
+    }
+
+    // **대조군 ⑶**: 없는 파일은 실패해야 한다. `CreateFontFileReference` 는 경로를 받아 두기만 하고
     // `hr=0` 을 주므로, 거기서 성공을 판정하면 **없는 폰트가 열린 것처럼 보인다**.
     try std.testing.expect(Rasterizer.openFaceFromFile(factory, "assets/fonts/NoSuchFont/NoSuchFont-Regular.ttf") == null);
 }
@@ -985,7 +1121,9 @@ test "번들 Jetendard: 한글 advance 가 라틴의 정확히 2배다" {
     defer d3d11.releaseOpt(factory_raw);
     const factory: *IDWriteFactory = @ptrCast(@alignCast(factory_raw.?));
 
-    const face = Rasterizer.resolveBundledFace(factory, "Jetendard") orelse return error.TestUnexpectedResult;
+    const coll = Rasterizer.createBundledCollection(factory) orelse return error.TestUnexpectedResult;
+    defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(coll)));
+    const face = Rasterizer.resolveFace(coll, "Jetendard") orelse return error.TestUnexpectedResult;
     defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(face)));
 
     // **이 성질이 이 슬라이스의 존재 이유다.** 한글이 라틴 2 칸에 맞으려면 advance 가 정확히 2 배여야

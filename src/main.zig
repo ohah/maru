@@ -118,7 +118,15 @@ fn dispatch(
     }
     if (std.mem.eql(u8, command, "win32-terminal-smoke")) {
         if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
-        try runWin32TerminalSmoke(io, allocator, stdout, stderr);
+        // 스모크는 **상한이 있어야 한다** — 사람이 안 닫아도 끝나야 CI·자동 캡처가 성립한다.
+        try runWin32Terminal(io, allocator, stdout, stderr, smoke_spin_cap);
+        return;
+    }
+    if (std.mem.eql(u8, command, "win32-terminal")) {
+        if (!maru.pty.backend_available) return ptyBackendMissing(stderr);
+        // **같은 코드 경로다.** 다른 것은 상한 하나뿐이라 "스모크에서는 되는데 앱에서는 안 되는" 자리가
+        // 안 생긴다. 창을 닫을 때까지 돈다.
+        try runWin32Terminal(io, allocator, stdout, stderr, null);
         return;
     }
 
@@ -1789,7 +1797,11 @@ fn runWin32GitSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 ///
 /// 창 크기가 바뀌면 **터미널 격자도 바꾼다**(`resizeActiveSurface`) — 스왑체인만 맞추면 셸이 옛 크기로
 /// 계속 출력해 줄이 어긋난다.
-fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+/// 스모크가 도는 최대 스핀 수. 한 스핀이 약 16ms 라 대략 10 초다 — 사람이 눈으로 보기에 충분하고
+/// 자동 캡처가 기다릴 수 있는 길이다. **앱(`win32-terminal`)에는 이 상한이 없다.**
+const smoke_spin_cap: usize = 600;
+
+fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize) !void {
     if (@import("builtin").os.tag != .windows) {
         try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
         try stderr.flush();
@@ -1923,7 +1935,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
 
-    const colors = maru.renderer.metal_frame.CellColors{
+    var colors = maru.renderer.metal_frame.CellColors{
         .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
         .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
         // **커서를 켠다.** 기본값 `null`은 "커서를 투영하지 않는다"이고(그 doc: 아틀라스 픽셀을 그대로
@@ -1976,6 +1988,9 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // 선택·스크롤이 조용히 사라지고 원인을 못 찾는다(빠른 드래그에서 실제로 찰 수 있다).
     var core_command_drops: usize = 0;
     var selections: usize = 0;
+    // **선택이 화면까지 갔는가.** 코어에 선택이 생기는 것과 그것이 셀에 칠해지는 것은 다른 일이고,
+    // 실측으로 그 둘이 갈렸다(`selections` 는 오르는데 파란 띠가 없었다). 프레임 수를 따로 센다.
+    var selection_frames: usize = 0;
     var extends: usize = 0;
     var word_selections: usize = 0;
     var line_selections: usize = 0;
@@ -2027,7 +2042,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     // 셸이 죽고, 그 뒤 키는 죽은 PTY 에 쓰인다(실측: keys_to_shell=16 인데 화면에 안 나왔다).
     // 각본으로 끝내는 검증은 `win32-frame-smoke`(W7.2c-1)가 한다.
     var spins: usize = 0;
-    while (spins < 600 and !window.quit_requested and !close_requested) : (spins += 1) {
+    while ((max_spins == null or spins < max_spins.?) and !window.quit_requested and !close_requested) : (spins += 1) {
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
                 try present.resize(r.width_px, r.height_px);
@@ -2449,6 +2464,16 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
             region_uploads += 1;
         }
 
+        // **선택 하이라이트를 매 프레임 채운다.** `CellColors.selection` 은 기본값이 `null` 이고
+        // 그것은 "선택을 투영하지 않는다" 는 뜻이다 — 커서와 **정확히 같은 함정**이다(그 doc 참조).
+        // 안 채우면 드래그가 코어까지 가서 선택 상태가 생기는데 **화면에는 아무 일도 안 일어난다**.
+        // 실측으로 그렇게 걸렸다: `selections` 카운터는 오르는데 파란 띠가 없었다.
+        //
+        // 읽기라 메인 스레드에서 해도 된다(코어 mutate 만 리더 위임이다 — 같은 루프의
+        // `active.core.mouse_tracking` 과 같은 자리다). macOS 도 같은 한 줄이다.
+        colors.selection = if (app_window.active()) |a| a.core.selectionViewportSpan() else null;
+        if (colors.selection != null) selection_frames += 1;
+
         // ⑶ 중립 투영 → D3D11 셀.
         const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
             allocator,
@@ -2488,7 +2513,7 @@ fn runWin32TerminalSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
     try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus_todo={d}\n", .{ copies, copy_bytes, right_click_pastes, right_click_menus_unimplemented });
     // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.
-    try stdout.print("mouse_events={d} reports={d} selections={d} extends={d} words={d} lines={d}\n", .{ mouse_events, mouse_reports, selections, extends, word_selections, line_selections });
+    try stdout.print("mouse_events={d} reports={d} selections={d} selection_frames={d} extends={d} words={d} lines={d}\n", .{ mouse_events, mouse_reports, selections, selection_frames, extends, word_selections, line_selections });
     // **이 줄이 판정이다.** 명령을 몇 개 보냈는지가 아니라, 그것이 코어에 **닿아 선택이 생겼는지**를
     // 본다 — 명령 수만 세면 리더가 하나도 적용 못 해도 성공처럼 보인다("성공처럼 보이는 실패").
     {

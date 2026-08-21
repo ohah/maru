@@ -573,7 +573,7 @@ pub const Rasterizer = struct {
         var face: ?*IDWriteFontFace = null;
         if (d3d11.failed(factory.vtable.CreateFontFace(factory, font_face_type_truetype, 1, &files, 0, font_simulations_none, &face))) return null;
         const f = face orelse return null;
-        if (!faceIsUsable(f)) {
+        if (!faceIsUsable(f, true)) {
             d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
             return null;
         }
@@ -582,14 +582,22 @@ pub const Rasterizer = struct {
 
     /// face 가 실제로 쓸 수 있는지 본다 — **`hr=0` 은 답이 아니다**(위 doc).
     ///
-    /// **`Rasterizer.create` 가 실제로 부르는 셋을 그대로 확인한다**: `GetMetrics` 의 `upem`,
-    /// `GetGlyphIndices`, `GetDesignGlyphMetrics` 의 advance. 앞의 둘만 보면 부족하다 — 변이 실험에서
-    /// 잘못 만든 face 가 **인덱스는 돌려주고 디자인 메트릭에서만** 실패했다. 그 순서로 확인해야
-    /// "여기서 통과했는데 저기서 죽는" 자리가 안 생긴다.
-    fn faceIsUsable(face: *IDWriteFontFace) bool {
+    /// **`strict` 는 주 폰트냐 폴백이냐를 가른다.** 확인 항목이 소비자와 같아야 하기 때문이다:
+    ///
+    /// - **주 폰트**(`strict = true`): `create` 가 여기서 **셀 격자를 뽑는다** — `upem` 과 `'M'` 의
+    ///   디자인 advance 가 필요하다. 셋 다 본다. 앞의 둘만 보면 부족하다는 것이 변이 실험에서 드러났다
+    ///   (잘못 만든 face 가 **인덱스는 돌려주고 디자인 메트릭에서만** 실패했다).
+    /// - **폴백**(`strict = false`): 격자를 안 만든다. 필요한 것은 글리프 조회가 도는 것뿐이라
+    ///   `upem` 만 본다.
+    ///
+    /// **폴백에 `'M'` 을 요구하면 안 된다.** 라틴 글리프가 없는 폰트가 정당한 폴백일 수 있다 — 이모지·
+    /// 기호 전용 폰트가 그렇다. `windows_fallback_tier` 는 오늘 전부 `'M'` 을 갖고 있지만(실측),
+    /// 그것에 기대면 목록에 그런 폰트를 넣는 순간 **조용히 버려진다**.
+    fn faceIsUsable(face: *IDWriteFontFace, strict: bool) bool {
         var fm: FontMetrics = undefined;
         face.vtable.GetMetrics(face, &fm);
         if (fm.design_units_per_em == 0) return false;
+        if (!strict) return true;
         const probe = [_]u32{'M'};
         var gid: [1]u16 = undefined;
         if (d3d11.failed(face.vtable.GetGlyphIndices(face, &probe, 1, &gid))) return false;
@@ -699,12 +707,20 @@ pub const Rasterizer = struct {
     ///
     /// 순서가 이 방향인 이유: 사용자가 직접 설치한 폰트가 이긴다. 같은 이름의 번들본으로 조용히
     /// 바꿔치기하면 "내가 깐 폰트가 안 먹는다" 가 된다. 번들은 **없을 때의 바닥**이다.
-    fn resolveFaceAnywhere(system: *IDWriteFontCollection, bundled: ?*IDWriteFontCollection, name: []const u8) ?*IDWriteFontFace {
-        if (resolveFace(system, name)) |f| return f;
+    fn resolveFaceAnywhere(system: *IDWriteFontCollection, bundled: ?*IDWriteFontCollection, name: []const u8, strict: bool) ?*IDWriteFontFace {
+        if (usableFaceFrom(system, name, strict)) |f| return f;
         const bc = bundled orelse return null;
-        const f = resolveFace(bc, name) orelse return null;
-        // 컬렉션에서 왔어도 쓸 수 있는지는 따로 본다 — `openFaceFromFile` doc 의 이유와 같다.
-        if (faceIsUsable(f)) return f;
+        return usableFaceFrom(bc, name, strict);
+    }
+
+    /// 컬렉션 하나에서 이름을 찾고 **쓸 수 있는지까지** 본다.
+    ///
+    /// **시스템도 검증한다.** 예전에는 번들만 봤는데, 그러면 망가진 **시스템** 폰트가 `faces[0]` 이 되어
+    /// `create` 가 `MetricsFailed` 로 죽는다 — 티어의 다음 후보로 안 내려간다. 두 갈래가 같은 규약을
+    /// 쓰는 것이 맞다(`resolveFace` 의 "없으면 null, 오류가 아니다").
+    fn usableFaceFrom(collection: *IDWriteFontCollection, name: []const u8, strict: bool) ?*IDWriteFontFace {
+        const f = resolveFace(collection, name) orelse return null;
+        if (faceIsUsable(f, strict)) return f;
         d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
         return null;
     }
@@ -746,7 +762,7 @@ pub const Rasterizer = struct {
 
         var chosen: []const u8 = "";
         for (candidates) |name| {
-            if (resolveFaceAnywhere(collection.?, self.bundled, name)) |f| {
+            if (resolveFaceAnywhere(collection.?, self.bundled, name, true)) |f| {
                 self.faces[0] = f;
                 self.face_count = 1;
                 chosen = name;
@@ -759,7 +775,7 @@ pub const Rasterizer = struct {
         var fb_buf: [max_faces][]const u8 = undefined;
         for (fallbackCandidates(fallback_csv, chosen, &fb_buf)) |name| {
             if (self.face_count == max_faces) break;
-            if (resolveFaceAnywhere(collection.?, self.bundled, name)) |f| {
+            if (resolveFaceAnywhere(collection.?, self.bundled, name, false)) |f| {
                 self.faces[self.face_count] = f;
                 self.face_count += 1;
             }
@@ -1088,7 +1104,7 @@ test "번들 폰트: 시스템에 없어도 컬렉션에서 이름으로 찾힌�
     // **null 이 아닌 것만으로는 부족하다.** face 종류를 틀리면 `CreateFontFace` 가 실패하지 않고
     // 반쪽짜리 face 를 준다 — 적대적 검증의 변이(`TRUETYPE`→`CFF`)가 이 테스트를 그냥 통과했다.
     // 그래서 `Rasterizer.create` 가 실제로 쓰는 값까지 본다.
-    try std.testing.expect(Rasterizer.faceIsUsable(jet));
+    try std.testing.expect(Rasterizer.faceIsUsable(jet, true));
     var fm: FontMetrics = undefined;
     jet.vtable.GetMetrics(jet, &fm);
     try std.testing.expect(fm.design_units_per_em > 0);
@@ -1106,7 +1122,7 @@ test "번들 폰트: 시스템에 없어도 컬렉션에서 이름으로 찾힌�
             return error.TestUnexpectedResult;
         };
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
-        try std.testing.expect(Rasterizer.faceIsUsable(f));
+        try std.testing.expect(Rasterizer.faceIsUsable(f, true));
     }
 
     // **대조군 ⑶**: 없는 파일은 실패해야 한다. `CreateFontFileReference` 는 경로를 받아 두기만 하고
@@ -1166,4 +1182,28 @@ test "Rasterizer: config 기본값이 번들 폰트로 해석된다" {
         if (g[0] != 0) found = true;
     }
     try std.testing.expect(found);
+}
+
+test "폴백 티어: 설치된 폰트가 느슨한 검사를 통과한다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var factory_raw: ?*anyopaque = null;
+    try check(DWriteCreateFactory(factory_type_shared, &IID_IDWriteFactory, &factory_raw), error.CreateFactoryFailed);
+    defer d3d11.releaseOpt(factory_raw);
+    const factory: *IDWriteFactory = @ptrCast(@alignCast(factory_raw.?));
+    var coll: ?*IDWriteFontCollection = null;
+    try check(factory.vtable.GetSystemFontCollection(factory, &coll, 0), error.NoFontFound);
+    const c = coll orelse return error.SkipZigTest;
+    defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(c)));
+
+    // **폴백은 느슨하게 본다**(`faceIsUsable` doc). 이 루프가 그 규약을 지킨다 — 티어에 라틴 없는
+    // 폰트(이모지·기호 전용)를 넣어도 조용히 버려지지 않아야 한다.
+    var checked: usize = 0;
+    for (windows_fallback_tier) |name| {
+        const f = Rasterizer.resolveFace(c, name) orelse continue; // 이 기계에 없으면 건너뛴다
+        defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
+        checked += 1;
+        try std.testing.expect(Rasterizer.faceIsUsable(f, false));
+    }
+    // 하나도 못 봤으면 이 테스트가 아무것도 안 지킨 것이다.
+    try std.testing.expect(checked > 0);
 }

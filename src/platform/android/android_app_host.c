@@ -121,6 +121,17 @@ static void startSshIfAsked(void);
 static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
 static void publishPublicKey(struct android_app *app);
 static void drainPassword(void);
+static void driveControlChannel(void);
+
+/// 단조 시계(ms). **시한을 재는 것은 host 의 일이다** — 코어에는 시계가 없다.
+static unsigned long long nowMs(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)(ts.tv_nsec / 1000000);
+}
+
+/// 컨트롤 채널을 연 시각(0 이면 안 열었다). 시한 판정에 쓴다.
+static unsigned long long g_control_open_ms = 0;
 static void drainHostKeyDecision(void);
 static void frameCallback(int64_t frame_time_ns, void *data);  // onAppCmd 가 먼저라 선언이 필요하다
 static uint8_t *g_glyph_px = NULL;
@@ -745,6 +756,7 @@ static void drawFrame(void) {
     startSshIfAsked(); // 붙어 달라는 요청이 있으면 여기서 시작한다
     drainPassword(); // 사용자가 친 비밀번호를 펌프로 넘긴다
     drainHostKeyDecision(); // 지문 승인·거절도 같은 자리에서 나른다
+    driveControlChannel(); // 목록 화면이 원하면 컨트롤 채널을 열고 요청을 나른다
     const MaruQuad *quads = maru_mobile_quads();
 
     VkCommandBuffer cb = g.cbs[idx];
@@ -1015,6 +1027,13 @@ static void ssh_screen(void *ctx, const unsigned char *bytes, unsigned long len)
     maru_mobile_term_write(bytes, len);
 }
 
+// **컨트롤 채널의 ndjson**(S10d-3). 화면 훅과 **다른 자리**로 온다 — 합치면 파서가 사람 화면을
+// 읽게 된다(계약 §4a).
+static void ssh_control(void *ctx, const unsigned char *bytes, unsigned long len) {
+    (void)ctx;
+    maru_mobile_control_feed(bytes, len);
+}
+
 static unsigned long ssh_take_response(void *ctx, unsigned char *out, unsigned long cap) {
     (void)ctx;
     return maru_mobile_take_response(out, cap);
@@ -1175,6 +1194,9 @@ Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring hos
     hooks.screen = ssh_screen;
     hooks.take_response = ssh_take_response;
     hooks.state_changed = ssh_state;
+    // **훅이 없으면 채널을 못 연다**(펌프가 거절한다) — 받을 사람이 없으면 코어가 배압으로
+    // 멈추고 터미널까지 함께 멎기 때문이다.
+    hooks.control = ssh_control;
 
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     // 푼 키는 펌프가 복사해 갔다 — 여기 사본은 지운다.
@@ -1641,6 +1663,40 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
 
 /// **사용자가 친 비밀번호를 펌프로 넘긴다.** 화면(브리지)이 받아 두고 여기서 가져간다 —
 /// 브리지엔 소켓이 없고 펌프엔 화면이 없다. 넘긴 뒤 **자기 사본을 지운다**(계약 §3.4).
+/// 컨트롤 축을 프레임마다 굴린다(S10d-3).
+///
+/// **여는 시점은 코어가 정한다** — 화면이 목록 자리에 왔을 때만 1 이 된다(계약 §4a: 채널을 여는
+/// 것은 그 서버에서 명령을 하나 실행하는 일이라 감사 로그에 남는다).
+static void driveControlChannel(void) {
+    if (!maru_ssh_pump_is_running()) return;
+
+    if (maru_mobile_take_control_open()) {
+        // **경로를 추측하지 않는다**(계약 §4a). 서버 항목의 선택 필드는 아직 UI 가 없어 기본만 쓴다.
+        static const char cmd[] = "maru control --stdio";
+        if (maru_ssh_pump_open_control(cmd, (unsigned int)(sizeof cmd - 1)) != 0) {
+            LOGI("MARU_CONTROL open failed: %s", maru_ssh_pump_error());
+        } else {
+            g_control_open_ms = nowMs();
+        }
+    }
+
+    if (maru_mobile_take_control_close()) {
+        maru_ssh_pump_close_control();
+        g_control_open_ms = 0;
+    }
+
+    // **시한은 host 가 잰다** — 코어에는 시계가 없다(계약 §4a: 5초).
+    if (g_control_open_ms != 0 && maru_mobile_control_state() == MARU_MOBILE_CONTROL_WAITING &&
+        nowMs() - g_control_open_ms > 5000) {
+        maru_mobile_control_timeout();
+        g_control_open_ms = 0;
+    }
+
+    unsigned char req[512];
+    unsigned long n = maru_mobile_take_control_request(req, sizeof req);
+    if (n > 0) maru_ssh_pump_write_control(req, n);
+}
+
 static void drainPassword(void) {
     unsigned char pw[256];
     pthread_mutex_lock(&g_bridge_lock);

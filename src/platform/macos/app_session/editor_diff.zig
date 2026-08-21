@@ -43,6 +43,23 @@ pub const State = struct {
     /// 화면에 남기면 §3.8 가시화가 제어 문자로 그린다 — 계산과 표시의 요구가 갈리는 자리다.
     left_texts: []const []const u8 = &.{},
     right_texts: []const []const u8 = &.{},
+    /// 각 행이 **원본에서 무엇으로 끝났는가**(`"\n"` / `"\r\n"` / `""`). 위에서 뗀 그것이다.
+    /// 짝맞춤 빈 행은 `null`이다 — 그 자리에 줄이 **없으므로** 줄 끝도 없다.
+    ///
+    /// **복사가 되돌려 붙인다** — 안 되돌리면 CRLF 문서가 LF로 바뀌어 클립보드에 나간다. 뗄 때
+    /// 같은 자리에서 함께 굳히는 것이 요점이다: 나중에 줄 번호로 원본 배열을 되짚으면 그 인덱스
+    /// 산술이 맞다는 것을 **런타임 단언에 기대야** 하는데, 출하 빌드(ReleaseFast)에는 단언도 경계
+    /// 검사도 없어서 어긋나는 순간 남의 메모리가 클립보드로 나간다.
+    ///
+    /// **길이가 같다는 것은 타입이 아니라 이 파일의 불변식이다** — `materialize`가 `*_texts`와
+    /// 같은 문장에서 같은 `rows.*.len`으로 잡는다. 읽는 쪽은 그 불변식을 **확인하고 거절한다**
+    /// (`copyDiffSelection`) — 어긋난 채로 이어 붙이면 틀린 바이트가 조용히 클립보드로 간다.
+    ///
+    /// **`""`와 `null`을 가른 이유**: 둘 다 "붙일 것이 없다"지만 뜻이 다르다. `""`는 *끝 개행이 없는
+    /// 마지막 줄*이고 `null`은 *줄이 아예 없다*이다. 한 값이 둘을 겸하면, 나중에 짝맞춤 행을 다르게
+    /// 다루기로 할 때 그 겸침이 두 줄을 분리자 없이 붙인다.
+    left_endings: []const ?[]const u8 = &.{},
+    right_endings: []const ?[]const u8 = &.{},
     /// 각 행이 달 줄 번호. 짝을 맞추려 넣은 빈 행은 `null`이다(없는 줄에 번호를 붙이면 거짓이다).
     left_numbers: []const ?u32 = &.{},
     right_numbers: []const ?u32 = &.{},
@@ -116,6 +133,27 @@ pub fn markRequested(self: *AppSession, term: *Term) void {
     term.rt.editor_diff = .{ .requested_ms = nowMs(self) };
 }
 
+/// `materialize`가 잡은 **행 배열 전부**를 푼다(`view`는 안 건드린다 — 소유가 다르다).
+///
+/// **한 곳에 모아 둔 이유가 있다.** 예전에는 `invalidate`와 할당 실패 주입 테스트가 이 목록을 각자
+/// 손으로 들고 있었는데, 필드를 하나 더하면 **두 곳을 고쳐야** 했다. `*_endings`를 더하며 테스트
+/// 쪽을 빠뜨려 `MemoryLeakDetected`가 났다 — 이 파일이 이미 겪은 부류다(가드만 베끼고 해제를 안
+/// 베끼는 것). 새 배열은 여기 한 줄만 더하면 된다.
+fn freeRowArrays(allocator: std.mem.Allocator, st: *State) void {
+    if (st.left_lines.len > 0) allocator.free(st.left_lines);
+    if (st.right_lines.len > 0) allocator.free(st.right_lines);
+    if (st.left_texts.len > 0) allocator.free(st.left_texts);
+    if (st.right_texts.len > 0) allocator.free(st.right_texts);
+    if (st.left_endings.len > 0) allocator.free(st.left_endings);
+    if (st.right_endings.len > 0) allocator.free(st.right_endings);
+    if (st.left_numbers.len > 0) allocator.free(st.left_numbers);
+    if (st.right_numbers.len > 0) allocator.free(st.right_numbers);
+    if (st.left_bands.len > 0) allocator.free(st.left_bands);
+    if (st.right_bands.len > 0) allocator.free(st.right_bands);
+    freeMarks(allocator, st.left_marks);
+    freeMarks(allocator, st.right_marks);
+}
+
 /// **entry의 두 쪽 버퍼가 갈리기 전에** 부른다. 우리 줄 배열이 그 버퍼를 빌리므로, 순서가 뒤집히면
 /// 해제된 메모리를 가리키는 행이 남는다.
 pub fn invalidate(self: *AppSession, term: *Term) void {
@@ -124,20 +162,13 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     const st: *State = if (term.rt.editor_diff) |*p| p else return;
     if (st.view == .compare) st.view.compare.deinit(self.allocator);
     st.view = .loading;
-    if (st.left_lines.len > 0) self.allocator.free(st.left_lines);
-    if (st.right_lines.len > 0) self.allocator.free(st.right_lines);
-    if (st.left_texts.len > 0) self.allocator.free(st.left_texts);
-    if (st.right_texts.len > 0) self.allocator.free(st.right_texts);
-    if (st.left_numbers.len > 0) self.allocator.free(st.left_numbers);
-    if (st.right_numbers.len > 0) self.allocator.free(st.right_numbers);
-    if (st.left_bands.len > 0) self.allocator.free(st.left_bands);
-    if (st.right_bands.len > 0) self.allocator.free(st.right_bands);
-    freeMarks(self.allocator, st.left_marks);
-    freeMarks(self.allocator, st.right_marks);
+    freeRowArrays(self.allocator, st);
     st.left_lines = &.{};
     st.right_lines = &.{};
     st.left_texts = &.{};
     st.right_texts = &.{};
+    st.left_endings = &.{};
+    st.right_endings = &.{};
     st.left_numbers = &.{};
     st.right_numbers = &.{};
     st.left_bands = &.{};
@@ -263,6 +294,10 @@ fn materialize(allocator: std.mem.Allocator, st: *State) error{OutOfMemory}!void
     st.left_texts = lt;
     const rt = try allocator.alloc([]const u8, rows.right.len);
     st.right_texts = rt;
+    const le = try allocator.alloc(?[]const u8, rows.left.len);
+    st.left_endings = le;
+    const re = try allocator.alloc(?[]const u8, rows.right.len);
+    st.right_endings = re;
     const ln = try allocator.alloc(?u32, rows.left.len);
     st.left_numbers = ln;
     const rn = try allocator.alloc(?u32, rows.right.len);
@@ -275,12 +310,16 @@ fn materialize(allocator: std.mem.Allocator, st: *State) error{OutOfMemory}!void
     // 해제만 하므로(내용을 읽지 않는다) 안전하다.
     for (rows.left, 0..) |r, i| {
         lt[i] = displayText(r.text);
+        // **뗀 것을 같은 자리에서 든다.** `displayText`는 뒤에서 자르기만 하므로 나머지가 곧 줄 끝이다.
+        // 짝맞춤 행은 `r.text`가 비어 있는데, 그것을 `""`로 두면 "끝 개행 없는 마지막 줄"과 겸친다.
+        le[i] = if (r.line == null) null else r.text[lt[i].len..];
         ln[i] = r.line;
         // **왼쪽은 삭제만 칠한다.** context와 빈 행은 색이 없다.
         lb[i] = if (r.kind == .removed) .removed else .none;
     }
     for (rows.right, 0..) |r, i| {
         rt[i] = displayText(r.text);
+        re[i] = if (r.line == null) null else r.text[rt[i].len..];
         rn[i] = r.line;
         rb[i] = if (r.kind == .added) .added else .none;
     }
@@ -1148,19 +1187,11 @@ test "표시 배열 만들기가 어디서 할당에 실패해도 새지 않는�
             if (view != .compare) return;
 
             var st: State = .{ .view = view };
-            defer {
-                // `invalidate`가 하는 것과 같은 해제다(그것은 세션이 필요해 여기서 직접 한다).
-                if (st.left_texts.len > 0) allocator.free(st.left_texts);
-                if (st.right_texts.len > 0) allocator.free(st.right_texts);
-                if (st.left_numbers.len > 0) allocator.free(st.left_numbers);
-                if (st.right_numbers.len > 0) allocator.free(st.right_numbers);
-                if (st.left_bands.len > 0) allocator.free(st.left_bands);
-                if (st.right_bands.len > 0) allocator.free(st.right_bands);
-                freeMarks(allocator, st.left_marks);
-                freeMarks(allocator, st.right_marks);
-            }
+            // **제품과 같은 해제를 부른다** — 목록을 손으로 복제하면 새 배열이 늘 때 여기가 뒤처진다
+            // (`invalidate`는 세션이 필요해 못 부르지만, 해제 자체는 이 함수가 소유한다).
+            defer freeRowArrays(allocator, &st);
             try materialize(allocator, &st);
-            st.view = .loading; // rows 소유는 위 defer에 있다
+            st.view = .loading; // rows는 위 `view.compare.deinit` defer가 푼다(`freeRowArrays`는 배열만)
         }
     };
     try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{
@@ -1789,6 +1820,119 @@ test "DSEL1 비교 뷰 좌표계: 좌우를 갈라 그 열의 행과 byte를 답
     try testing.expectEqual(@as(?editor_ops.DiffHit, null), editor_ops.hitTestDiffBody(fx.term, left_text_x, y0, null));
     fx.term.rt.editor_diff.?.view = saved_view;
 }
+// DSEL5: **복사가 줄 끝을 원본대로 낸다.**
+//
+// `*_texts`는 §3.8 가시화 때문에 줄 끝을 뗀 것이라, 그것만 이어 붙이면 CRLF 문서가 **LF로 바뀌어**
+// 클립보드에 나간다. 단일 편집기(`copySelection`)는 문서 byte를 그대로 뜨므로 CRLF가 보존되는데,
+// 그러면 **같은 `copy_editor_selection` 명령이 뷰에 따라 다른 바이트를 낸다** — DSEL2가 빈 줄
+// 처리를 두고 이미 못박은 규율("같은 명령이 뷰에 따라 다르게 동작하면 안 된다")과 같은 자리다.
+test "DSEL5: 비교 뷰 복사가 CRLF를 LF로 뭉개지 않는다 (§4.1g 비교 뷰)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // CRLF 문서. 가운데 줄이 한쪽에만 있어 반대쪽에 짝맞춤 빈 행이 생긴다.
+    var entry = testEntry("keep\r\ntail\r\n", "keep\r\nadded\r\ntail\r\n");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    drawn.dl.deinit(allocator);
+
+    // **편집기 Term을 활성으로 세운다** — `copyDiffSelection`이 `activeTerm()`으로 대상을 고른다
+    // (제품 경로와 같다). Fixture는 추가만 하고 활성을 안 바꾼다.
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |t, i| {
+        if (t == fx.term) pane.active_term = i;
+    }
+
+    // ⑴ **여러 줄을 걸쳐 복사하면 CRLF가 그대로 나간다.** 오른쪽 열의 세 줄 전부.
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = .{
+        .anchor_start = .{ .row = 0, .byte = 0 },
+        .anchor_end = .{ .row = 0, .byte = 0 },
+        .focus = .{ .row = 2, .byte = 4 },
+    } };
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("keep\r\nadded\r\ntail", fx.session.chrome_clipboard_write);
+
+    // ⑵ **왼쪽 열은 짝맞춤 빈 행을 건너뛰고도 CRLF를 지킨다.** 빈 행 자리에 줄이 없으므로
+    //    `keep`과 `tail`이 이어지는데, 그 사이 분리자도 원본 줄 끝이어야 한다.
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = .{
+        .anchor_start = .{ .row = 0, .byte = 0 },
+        .anchor_end = .{ .row = 0, .byte = 0 },
+        .focus = .{ .row = 2, .byte = 4 },
+    } };
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("keep\r\ntail", fx.session.chrome_clipboard_write);
+
+    // ⑶ **짝맞춤 빈 행만 고르면 복사할 것이 없다.** 왼쪽 열의 행 1은 오른쪽의 `added`에 맞춰 넣은
+    //    빈 행이라 그 자리에 줄이 **없다** — 개행을 내면 원본에 없던 빈 줄이 붙는다.
+    //
+    //    **이 단언이 filler 축을 지킨다.** 복사 루프가 `endings[i] == null`로 그 행을 거르는데,
+    //    filler를 "빈 줄 끝을 가진 진짜 줄"로 취급해도 **이어 붙인 바이트는 똑같다**(filler는
+    //    아무것도 안 붙이고 다음 줄 앞에 `""`를 붙일 뿐이다). 그래서 exact-string 단언들은 그
+    //    축을 못 잡는다 — 갈리는 것은 **filler만 고른 선택의 반환값**뿐이고 그것이 여기다.
+    //    (적대적 검증 2026-08-22: 이 자리가 없으면 `orelse continue` → `orelse ""` 뮤턴트가 산다.)
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = .{
+        .anchor_start = .{ .row = 1, .byte = 0 },
+        .anchor_end = .{ .row = 1, .byte = 0 },
+        .focus = .{ .row = 1, .byte = 1 },
+    } };
+    try testing.expect(!editor_ops.copyDiffSelection(fx.session));
+
+    // ⑷ **LF 문서는 LF 그대로다** — ⑴이 "항상 CRLF를 붙인다"가 아니다.
+    var lf_entry = testEntry("keep\ntail\n", "keep\nadded\ntail\n");
+    fx.term.file_entry = &lf_entry;
+    invalidate(fx.session, fx.term);
+    poll(fx.session, fx.term);
+    var drawn2 = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    drawn2.dl.deinit(allocator);
+    fx.term.rt.editor_diff_selection = .{ .side = .right, .sel = .{
+        .anchor_start = .{ .row = 0, .byte = 0 },
+        .anchor_end = .{ .row = 0, .byte = 0 },
+        .focus = .{ .row = 2, .byte = 4 },
+    } };
+    try testing.expect(editor_ops.copyDiffSelection(fx.session));
+    try testing.expectEqualStrings("keep\nadded\ntail", fx.session.chrome_clipboard_write);
+
+    // ⑸ **불변식이 깨지면 복사를 거절한다.** 길이가 같다는 것은 타입이 아니라 `materialize`가
+    //    지키는 것이라, 어긋난 상태를 손으로 만들어 그 거절을 잰다 — 이 자리가 없으면 그 분기는
+    //    제품 경로로 도달 불가라 아무도 재지 않는다(적대적 검증 2026-08-22가 `@panic`을 넣어도
+    //    34/34가 통과하는 것을 실측했다). **틀린 바이트를 내느니 안 내는 편이 낫다.**
+    {
+        // **`st`가 아니라 지금 값을 읽는다** — `st`는 함수 앞에서 값 복사된 스냅숏이고, ⑷가
+        // 재계산하며 그 배열은 이미 풀렸다. 그것을 되돌려 놓으면 다음 `invalidate`가 **두 번**
+        // 푼다(실측: `Double free detected`).
+        const live = &fx.term.rt.editor_diff.?;
+        const saved = live.left_endings;
+        defer live.left_endings = saved;
+        live.left_endings = saved[0 .. saved.len - 1];
+        fx.term.rt.editor_diff_selection = .{ .side = .left, .sel = .{
+            .anchor_start = .{ .row = 0, .byte = 0 },
+            .anchor_end = .{ .row = 0, .byte = 0 },
+            .focus = .{ .row = 1, .byte = 1 },
+        } };
+        try testing.expect(!editor_ops.copyDiffSelection(fx.session));
+    }
+
+    // ⑹ **끝 개행은 안 붙는다** — 지금 동작을 눈에 보이게 남긴다(§4.1g "아직 없는 것").
+    //    `splitLines`는 마지막 줄 끝 뒤에 줄을 만들지 않는데 단일 편집기의 `line_index`는 빈 줄을
+    //    하나 더 두므로(그 자리에 caret이 설 수 있어야 한다), 본문 끝까지 고르면 단일 쪽에만 그
+    //    개행이 들어온다. **줄 배열의 정의가 갈린 결과**라 복사 쪽만 고쳐서는 안 닫힌다.
+    //    (여기 클립보드는 ⑷가 남긴 **LF 문서**의 것이다 — CRLF로 재면 `keep\r\ntail\r\n` 12바이트
+    //    vs `keep\r\ntail` 10이고, 축은 같다.)
+    //
+    //    **판정은 위 exact-string이 이미 한다** — 이 줄은 그것에 포섭된다(적대적 검증 2026-08-22가
+    //    **이 단언만** 지우고 같은 뮤턴트를 넣어 ⑴이 잡는 것을 실측했다). 갈림을 **양쪽에서** 재려면
+    //    `copySelection`을 같은 문서·같은 범위로 함께 불러 대조해야 하는데, 그러려면 단일 편집기
+    //    Term이 필요해 이 픽스처 밖이다. 그 판정자는 갈림을 닫는 슬라이스가 함께 만든다.
+    try testing.expect(!std.mem.endsWith(u8, fx.session.chrome_clipboard_write, "\n"));
+}
+
 // DSEL4: **더블·트리플 클릭 뒤 뒤로 끌어도 잡은 단위가 남는다.**
 //
 // 단일 편집기의 SEL4와 같은 계약인데 비교 뷰가 **점 anchor**로 따로 서 있어 갈렸다 — `"beta"`를
@@ -1796,6 +1940,7 @@ test "DSEL1 비교 뷰 좌표계: 좌우를 갈라 그 열의 행과 byte를 답
 // `kind`를 실은 뒤에도 그 갈림이 안 돌아오는지 **복사 결과**로 잰다(내부 필드가 아니라 사용자가
 // 얻는 것으로 재야 한다).
 test "DSEL4: 비교 뷰도 더블클릭 뒤 뒤로 끌면 잡은 단어가 안 잘린다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try Fixture.init(allocator);
     defer fx.deinit(allocator);

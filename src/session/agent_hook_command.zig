@@ -347,6 +347,14 @@ test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
     try testing.expect(std.mem.endsWith(u8, cmd, marker_comment));
     // 권한을 **가장 먼저** 좁힌다 — 뒤에 두면 그 사이에 만들어진 파일이 넓은 권한으로 남는다.
     try testing.expect(std.mem.startsWith(u8, cmd, "umask 077; "));
+
+    // **payload 를 커맨드라인에 올리지 않는다**(계약 §4.1). argv 에 실으면 같은 머신의 다른 프로세스가
+    // `ps` 로 읽고 보안 제품이 그 명령줄을 수집·저장한다 — 그 안에는 소스 코드와 셸 명령 원문이 있다(§7).
+    // payload 는 stdin 으로 받아 변수에 담고(`read -r mh_p`) `printf` 의 **인자로 확장**된다. 그 확장은
+    // 우리 프로세스 안에서 일어나므로 커맨드 문자열 자체에는 값이 없다 — 여기서 보는 것은 «커맨드에 값을
+    // 박는 모양이 아니다» 이고, 그 모양이면 반드시 `$mh_p` 같은 참조로만 나타난다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "read -r mh_p") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "\"$mh_p\"") != null);
 }
 
 test "커맨드가 쓴 줄을 파서가 읽는다 — 형식이 두 곳에 따로 적히면 조용히 깨진다" {

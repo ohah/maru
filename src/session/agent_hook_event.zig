@@ -25,6 +25,26 @@ pub const max_line_bytes: usize = 32 * 1024;
 /// 남은 줄은 다음 tick이 이어서 읽는다(오프셋이 전진하므로 다시 읽지 않는다).
 pub const max_events_per_tick: usize = 64;
 
+/// 이 크기를 넘으면 회전한다(계약 §4.2). **1 MiB** 인 근거: `PreToolUse` payload 가 실측 최대 4 KB 이고
+/// 경계 훅은 그보다 훨씬 작다(§3). 도구를 많이 쓰는 턴이 수십 KB 이므로 이 값은 «정상 세션 여러 턴을
+/// 담되» 디스크에 오래 남을 양은 아니다.
+///
+/// ⚠️ **상한과 유실은 반대로 움직인다.** 낮추면 회전이 잦아지고, 회전할 때마다 «훅이 옛 fd 로 계속 쓰는»
+/// 창이 열린다(§4.2의 절차가 그 창을 tail 재수집으로 메운다). 그래서 평시의 잔존 축소는 «회전을 자주» 가
+/// 아니라 «상한을 적당히» 로 얻는다.
+pub const rotate_at_bytes: u64 = 1024 * 1024;
+
+/// 회전본 이름의 접미. 원본이 `<pane>.ndjson` 이면 회전본은 `<pane>.ndjson.rotated` 다.
+///
+/// **시작 시 정리가 이 이름도 지우게** 같은 접두를 유지한다 — 회전 도중 죽으면 회전본만 남는데, 이름이
+/// 우리 것으로 안 보이면 영영 치워지지 않는다.
+pub const rotated_suffix = ".rotated";
+
+/// 지금 회전해야 하는가. **크기만 본다** — 시간으로 잡으면 조용한 세션도 회전해 유실 창을 공짜로 연다.
+pub fn shouldRotate(size: u64) bool {
+    return size >= rotate_at_bytes;
+}
+
 /// 로그 한 줄의 provider 표식과 payload를 가르는 구분자. **payload에는 절대 나오지 않는다** — JSON은 제어문자를
 /// 이스케이프하므로 raw 탭이 들어올 수 없다(실측: payload는 개행 없는 한 줄 JSON이다).
 pub const field_separator: u8 = '\t';
@@ -960,4 +980,24 @@ test "빈 out 은 진전을 못 만든다 — more 로 도는 호출자가 무�
     try testing.expectEqual(@as(usize, 1), batch.count);
     try testing.expect(batch.advanced > 0); // out 이 있으면 반드시 전진한다
     try testing.expect(batch.more);
+}
+
+test "회전은 크기로만 판정한다" {
+    try testing.expect(!shouldRotate(0));
+    try testing.expect(!shouldRotate(rotate_at_bytes - 1));
+    try testing.expect(shouldRotate(rotate_at_bytes));
+    try testing.expect(shouldRotate(rotate_at_bytes * 4));
+}
+
+test "상한은 한 줄보다 충분히 크다 — 한 줄도 못 담으면 회전이 끝나지 않는다" {
+    // 상한이 줄 상한보다 작으면, 긴 줄 하나를 적는 순간 넘겨 매 tick 회전하고 그때마다 유실 창이 열린다.
+    try testing.expect(rotate_at_bytes > max_line_bytes);
+    // tick 당 처리량보다도 커야 한다 — 한 번에 읽을 수 있는 양보다 작으면 읽기 전에 회전한다.
+    try testing.expect(rotate_at_bytes >= max_line_bytes * max_events_per_tick / 2);
+}
+
+test "회전본 이름은 원본 이름으로 시작한다 — 시작 시 정리가 같이 치운다" {
+    // 회전 도중 죽으면 회전본만 남는다. 이름이 우리 것으로 안 보이면 영영 치워지지 않는다.
+    try testing.expect(std.mem.startsWith(u8, "7.ndjson" ++ rotated_suffix, "7.ndjson"));
+    try testing.expect(rotated_suffix.len > 0);
 }

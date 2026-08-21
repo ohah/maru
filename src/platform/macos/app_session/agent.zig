@@ -657,8 +657,14 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
         if (entry.kind != .file) continue;
         // **우리가 만든 이름만 지운다** — pane 식별자(숫자) + `.ndjson`. 남이 이 디렉터리에 무엇을 두었든
         // 그것까지 치우는 것은 우리 일이 아니다.
-        if (!std.mem.endsWith(u8, entry.name, ".ndjson")) continue;
-        const stem = entry.name[0 .. entry.name.len - ".ndjson".len];
+        // 회전 도중 죽으면 `<id>.ndjson.rotated` 만 남는다 — 그것도 우리 것이므로 함께 거둔다.
+        const rotated_suffix = maru.session.agent_hook_event.rotated_suffix;
+        const without_rotated = if (std.mem.endsWith(u8, entry.name, rotated_suffix))
+            entry.name[0 .. entry.name.len - rotated_suffix.len]
+        else
+            entry.name;
+        if (!std.mem.endsWith(u8, without_rotated, ".ndjson")) continue;
+        const stem = without_rotated[0 .. without_rotated.len - ".ndjson".len];
         if (stem.len == 0) continue;
         var all_digits = true;
         for (stem) |c| {
@@ -1144,7 +1150,6 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     if (builtin.is_test) test_hook_calls += 1;
     if (!is_macos) return;
     const event = maru.session.agent_hook_event;
-    const mode_mod = maru.session.agent_hook_mode;
 
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
@@ -1182,36 +1187,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const had_reply = term.agent_transcript.owned.reply().len > 0;
     var conversation_changed = false;
     for (events[0..batch.count]) |ev| {
-        const prev_state = term.agent_state;
-        term.agent_state = mode_mod.next(term.agent_state, ev);
-        // **알림은 전이에 붙는다**(계약 §6). 같은 턴에서 `Stop` 이 여러 번 와도 상태가 이미 `idle` 이라
-        // 전이가 없어 두 번 울리지 않는다 — 「턴 단위 1회」를 따로 세지 않아도 성립한다.
-        switch (mode_mod.noticeOn(prev_state, term.agent_state)) {
-            .none => {},
-            .done => term.agent_hook_notice.set(.done, ev.text, self.awakeMs()),
-            .attention => {
-                // 무엇을 승인하는지 — 사람이 읽는 설명이 있으면 그것, 없으면 도구 이름. **명령 원문은
-                // 싣지 않는다**(계약 §7: 길고 민감하다).
-                const body = if (ev.tool_description.len > 0) ev.tool_description else ev.tool_name;
-                term.agent_hook_notice.set(.attention, body, self.awakeMs());
-            },
-        }
-        // **마지막 대화도 훅에서 온다**(계약 §4b). 그 Term 은 transcript 파일을 읽지 않으므로 신원 해소·
-        // 256 KiB tail 파싱·폴링이 통째로 빠진다. 파서가 `prompt` 와 `last_assistant_message` 를 같은
-        // 필드에 싣는다 — 어느 쪽인지는 이벤트 종류가 말해 준다.
-        switch (ev.kind) {
-            .user_prompt_submit => if (ev.text.len > 0) {
-                term.agent_transcript.owned.setPrompt(ev.text);
-                // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
-                term.agent_transcript.owned.setReply("");
-                conversation_changed = true;
-            },
-            .stop => if (ev.text.len > 0) {
-                term.agent_transcript.owned.setReply(ev.text);
-                conversation_changed = true;
-            },
-            else => {},
-        }
+        if (applyHookEvent(self, term, ev)) conversation_changed = true;
         // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
         term.agent_last_output_ms = self.awakeMs();
         term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
@@ -1224,11 +1200,153 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
         );
     }
     if (displayed and term.agent_state != before) self.metal_dirty = true;
+
+    // **다 읽은 뒤에 회전한다**(계약 §4.2). 읽기 전에 돌리면 방금 온 이벤트를 회전본에 두고 새 파일부터
+    // 읽게 되어, tail 재수집이 없으면 그대로 유실이다. `more` 가 남아 있으면(tick 상한에 걸렸다) 미룬다 —
+    // 아직 읽을 것이 있는 파일을 갈아 끼울 이유가 없다.
+    if (!batch.more and event.shouldRotate(st.size)) rotateAgentHookLog(self, term, log_path);
     // 응답 줄이 생기거나 사라지면 **행 높이가 바뀐다** — 재투영까지 해야 옛 높이가 남지 않는다
     // (관측 모드의 `pollAgentKinds` 가 같은 이유로 그렇게 한다).
     if (conversation_changed) {
         const has_reply = term.agent_transcript.owned.reply().len > 0;
         if (has_reply != had_reply) sidebar_ops.rebuildSidebar(self) catch {} else if (displayed) self.metal_dirty = true;
+    }
+}
+
+/// 훅 이벤트 하나를 Term 에 적용한다 — 상태·마지막 대화·알림 예약이 **한 곳에서** 일어난다.
+///
+/// **두 경로가 이것을 공유해야 한다**(평시 tail 읽기와 회전본 건지기). 처음엔 각자 적었는데, 회전본 쪽이
+/// 대화를 빠뜨려 **마지막 `Stop` 이 회전본에 들어가면 응답을 잃는** 결함이 생겼다(테스트가 잡았다).
+/// 대화가 바뀌었으면 `true` 를 돌려준다 — 응답 줄이 생기거나 사라지면 행 높이가 달라져 재투영이 필요하다.
+fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) bool {
+    const mode_mod = maru.session.agent_hook_mode;
+    const prev_state = term.agent_state;
+    term.agent_state = mode_mod.next(term.agent_state, ev);
+
+    // **알림은 전이에 붙는다**(계약 §6). 같은 턴에서 `Stop` 이 여러 번 와도 상태가 이미 `idle` 이라
+    // 전이가 없어 두 번 울리지 않는다 — 「턴 단위 1회」를 따로 세지 않아도 성립한다.
+    switch (mode_mod.noticeOn(prev_state, term.agent_state)) {
+        .none => {},
+        .done => term.agent_hook_notice.set(.done, ev.text, self.awakeMs()),
+        .attention => {
+            // 무엇을 승인하는지 — 사람이 읽는 설명이 있으면 그것, 없으면 도구 이름. **명령 원문은
+            // 싣지 않는다**(계약 §7: 길고 민감하다).
+            const body = if (ev.tool_description.len > 0) ev.tool_description else ev.tool_name;
+            term.agent_hook_notice.set(.attention, body, self.awakeMs());
+        },
+    }
+
+    // **마지막 대화도 훅에서 온다**(계약 §4b). 그 Term 은 transcript 파일을 읽지 않으므로 신원 해소·
+    // 256 KiB tail 파싱·폴링이 통째로 빠진다.
+    switch (ev.kind) {
+        .user_prompt_submit => if (ev.text.len > 0) {
+            term.agent_transcript.owned.setPrompt(ev.text);
+            // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
+            term.agent_transcript.owned.setReply("");
+            return true;
+        },
+        .stop => if (ev.text.len > 0) {
+            term.agent_transcript.owned.setReply(ev.text);
+            return true;
+        },
+        else => {},
+    }
+    return false;
+}
+
+/// 종료할 때 **이 세션이 소유한 pane 의** 이벤트 로그를 지운다(계약 §4.2).
+///
+/// **시작 시 정리와 범위가 다르다.** 그쪽은 디렉터리를 통째로 훑는다(그 시점엔 우리 프로세스가 하나뿐이다).
+/// 종료는 다른 창이 아직 쓰는 중일 수 있어 **내 Term 만** 지운다 — 남의 pane 로그를 지우면 그 창의 배지가
+/// 그 자리에서 멈춘다.
+///
+/// ⚠️ **강제 종료로는 이 경로가 안 돈다.** 그래서 다음 시작의 정리가 여전히 안전망이다 — 둘 중 하나만 두면
+/// «정상 종료 후 다음 실행까지» 또는 «강제 종료 뒤 영영» 남는다.
+pub fn cleanupOwnedAgentHookLogs(self: *AppSession) void {
+    if (!is_macos) return;
+    const event = maru.session.agent_hook_event;
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const dir = agentHookLogDir(a) orelse return;
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                const base = std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ dir, term.surfaceId() }) catch continue;
+                std.Io.Dir.cwd().deleteFile(self.io, base) catch {};
+                // 회전 도중 죽은 흔적도 함께 거둔다.
+                const rotated = std.fmt.allocPrint(a, "{s}{s}", .{ base, event.rotated_suffix }) catch continue;
+                std.Io.Dir.cwd().deleteFile(self.io, rotated) catch {};
+            }
+        }
+    }
+}
+
+/// 이벤트 로그를 회전한다(계약 §4.2). **순서가 계약이다** — 네 단계 중 셋째를 빼면 회전할 때마다 마지막
+/// 몇 이벤트가 조용히 사라진다.
+///
+/// 1. `rename` — 이 순간 훅이 열어 둔 fd 는 **옛 inode 에 계속 쓴다.**
+/// 2. 커서를 되돌린다(새 파일은 아직 없거나 비어 있다).
+/// 3. **회전본을 한 번 더 읽어 tail 을 건진다.** ⑴에서 열린 창을 여기서 메운다.
+/// 4. 건진 뒤 회전본을 지운다.
+///
+/// best-effort 다. 어느 단계가 실패해도 다음 tick 이 같은 자리에서 다시 시도한다(회전본이 남아 있으면
+/// 시작 시 정리가 치운다 — 이름이 원본 접두를 유지하는 이유다).
+fn rotateAgentHookLog(self: *AppSession, term: *Term, log_path: []const u8) void {
+    const event = maru.session.agent_hook_event;
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const rotated = std.fmt.allocPrint(a, "{s}{s}", .{ log_path, event.rotated_suffix }) catch return;
+    // 옛 회전본이 남아 있으면(직전 회전이 도중에 죽었다) 먼저 치운다 — rename 이 그것을 덮어쓰면 아직
+    // 건지지 않은 tail 을 잃는다.
+    if (readFileState(self.io, a, rotated) != .absent) {
+        drainRotatedAgentHookLog(self, term, rotated);
+    }
+    std.Io.Dir.renameAbsolute(log_path, rotated, self.io) catch return;
+
+    // **커서를 여기서 건드리지 않는다.** 다음 poll 의 `resetIfRotated` 가 잡는다 — 그것은 inode 와 크기를
+    // **둘 다** 보므로(`same_file and file_size >= offset` 일 때만 유지) 새 파일이 같은 inode 를
+    // 재사용하더라도 크기가 작아 리셋된다. 여기서 한 번 더 지우면 같은 일을 두 곳에서 하게 되고, 커서에
+    // 필드가 늘 때 한쪽만 고쳐지는 자리가 생긴다. **우리가 아닌 쪽이 갈아 끼운 경우까지 잡아야 하므로
+    // `resetIfRotated` 는 어차피 없앨 수 없다** — 그래서 그쪽을 유일한 자리로 둔다.
+    //
+    // ⚠️ 이 마지막 건지기가 막는 것은 **동시 기록 경합**이다 — 우리가 마지막으로 읽은 뒤 `rename` 전까지
+    // 훅이 덧쓴 줄. 단일 프로세스 테스트로는 그 창을 만들 수 없어 자동 검증이 없다(`drainRotated…` 함수
+    // 자체는 «회전 도중 죽어 남은 회전본» 테스트가 덮는다).
+    drainRotatedAgentHookLog(self, term, rotated);
+}
+
+/// 회전본의 **남은 tail 을 건지고 지운다**(위 절차 ③④). 커서는 새 파일 것이라 여기서 쓰지 않는다 —
+/// 회전본은 통째로 한 번 읽고 끝이다.
+/// 테스트가 «회전 도중 죽어 남은 회전본» 상황을 만들 수 있게 연 seam. 그 상황은 단일 프로세스에서
+/// 자연히 생기지 않는다(회전과 건지기가 한 호출 안에서 끝난다).
+pub fn drainRotatedAgentHookLogForTest(self: *AppSession, term: *Term, rotated_path: []const u8) void {
+    drainRotatedAgentHookLog(self, term, rotated_path);
+}
+
+fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []const u8) void {
+    const event = maru.session.agent_hook_event;
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    defer std.Io.Dir.cwd().deleteFile(self.io, rotated_path) catch {};
+
+    const text = switch (readFileState(self.io, a, rotated_path)) {
+        .present => |body| body,
+        else => return,
+    };
+    // **커서를 새로 만들어 통째로 훑는다.** tick 상한은 여기 적용하지 않는다 — 회전은 드물고, 남은 것을
+    // 다음 기회로 미루면 그 파일을 지울 수 없다.
+    var cursor: event.Cursor = .{};
+    var events: [event.max_events_per_tick]event.Event = undefined;
+    while (true) {
+        const batch = cursor.take(text, &events);
+        for (events[0..batch.count]) |ev| _ = applyHookEvent(self, term, ev);
+        if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }
 

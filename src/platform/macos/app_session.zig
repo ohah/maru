@@ -17645,6 +17645,9 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        // 훅 이벤트 로그는 «기록» 이 아니라 «소비 즉시 비우는 큐» 다(docs/agent-hooks.md §4.2) — 그 안에는
+        // 프롬프트 원문과 셸 명령이 평문으로 들어 있다. Term 을 놓기 **전에** 지운다(surfaceId 가 필요하다).
+        agent_ops.cleanupOwnedAgentHookLogs(self);
         settings_ops.clearBranchMenuText(self); // 브랜치 목록 버퍼(owned) 해제 — 메뉴가 열린 채 종료돼도 남지 않게
         self.resource_meter.deinit(self.allocator); // pid별 이전 CPU 맵 — 창마다 있으니 닫을 때 반드시 푼다
         // 소스 컨트롤(E1) 자원: backend는 detached worker를 refcount로 붙들고 있으므로 여기서 놓아야 스레드가
@@ -18901,12 +18904,79 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind); // 버려졌다
     }
 
-    // ⑨ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
+    // ⑨ **회전해도 마지막 이벤트를 잃지 않는다**(계약 §4.2). rename 하는 순간 훅이 열어 둔 fd 는 옛 inode 에
+    //    계속 쓰므로, 회전본을 한 번 더 읽어 tail 을 건지지 않으면 그 사이 이벤트가 조용히 사라진다.
+    {
+        const hook_event = maru.session.agent_hook_event;
+        // 상한을 넘길 만큼 채우되, **마지막 줄이 상태를 바꾸는 이벤트**여야 유실이 드러난다.
+        var big: std.ArrayListUnmanaged(u8) = .empty;
+        defer big.deinit(a);
+        // 실측 payload 크기(≈4 KB)에 맞춘 줄로 채운다 — 짧은 줄로 채우면 1 MiB 를 만드는 데 2 만 줄이
+        // 필요해 tick 상한(64) 때문에 테스트가 수백 번 돌아야 한다(그 배치로 한 번 실패했다).
+        var filler: std.ArrayListUnmanaged(u8) = .empty;
+        defer filler.deinit(a);
+        try filler.appendSlice(a, "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"pad\":\"");
+        try filler.appendNTimes(a, 'p', 4000);
+        try filler.appendSlice(a, "\"}\n");
+        while (big.items.len < hook_event.rotate_at_bytes + 1024) try big.appendSlice(a, filler.items);
+        try big.appendSlice(a, "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"회전 뒤에도 남는다\"}\n");
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = big.items });
+
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        // tick 상한 때문에 한 번에 다 못 읽는다 — `more` 가 남으면 회전을 미루므로 여러 번 돈다.
+        var spins: usize = 0;
+        while (spins < 200) : (spins += 1) {
+            agent_ops.pollAgentHookEvents(&session, term, false);
+            if (term.agent_state == .idle) break; // 마지막 `Stop` 까지 읽었다
+        }
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        try std.testing.expectEqualStrings("회전 뒤에도 남는다", term.agent_transcript.owned.reply());
+
+        // 회전이 실제로 일어나 **원본이 작아졌다**(또는 사라졌다).
+        const after = tmp.dir.statFile(io, log_rel, .{}) catch null;
+        if (after) |st| try std.testing.expect(st.size < hook_event.rotate_at_bytes);
+        // 회전본은 남지 않는다 — 건진 뒤 지운다.
+        const rotated_rel = try std.fmt.allocPrint(a, "{s}{s}", .{ log_rel, hook_event.rotated_suffix });
+        defer a.free(rotated_rel);
+        try std.testing.expect(tmp.dir.statFile(io, rotated_rel, .{}) catch null == null);
+    }
+
+    // ⑩ **회전 뒤 새 파일을 처음부터 읽는다.** 커서를 되돌리지 않으면 옛 오프셋(1 MiB 근처)이 새 파일보다
+    //    커서 «읽을 것이 없다» 로 보고 그 pane 의 이벤트가 영영 안 들어온다.
+    {
+        const fresh = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"회전 뒤 첫 줄\"}\n";
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = fresh });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualStrings("회전 뒤 첫 줄", term.agent_transcript.owned.prompt());
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    }
+
+    // ⑪ **회전 도중 죽어 남은 회전본을 거둔다.** rename 은 됐는데 tail 을 못 건지고 죽으면
+    //    `<id>.ndjson.rotated` 가 남는다 — 읽지 않고 덮어쓰면 그 안의 이벤트를 통째로 잃는다.
+    {
+        const hook_event = maru.session.agent_hook_event;
+        const rotated_rel = try std.fmt.allocPrint(a, "{s}{s}", .{ log_rel, hook_event.rotated_suffix });
+        defer a.free(rotated_rel);
+        try tmp.dir.writeFile(io, .{
+            .sub_path = rotated_rel,
+            .data = "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"회전본에 남아 있던 응답\"}\n",
+        });
+        const rotated_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, rotated_rel });
+        defer a.free(rotated_abs);
+        agent_ops.drainRotatedAgentHookLogForTest(&session, term, rotated_abs);
+        try std.testing.expectEqualStrings("회전본에 남아 있던 응답", term.agent_transcript.owned.reply());
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        try std.testing.expect(tmp.dir.statFile(io, rotated_rel, .{}) catch null == null); // 건진 뒤 지운다
+    }
+
+    // ⑫ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
     session.loaded_config.config.sidebar.agent_hooks = false;
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
     session.loaded_config.config.sidebar.agent_hooks = true;
 
-    // ⑩ 에이전트가 없으면 모드를 논할 것도 없다.
+    // ⑬ 에이전트가 없으면 모드를 논할 것도 없다.
     term.agent_kind = .none;
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 }

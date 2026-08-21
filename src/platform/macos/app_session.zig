@@ -7491,7 +7491,21 @@ pub const AppSession = struct {
                 // 마지막-창 종료 확인("maru를 종료할까요?")을 건너뛴다(code-review max). 활성 Term이 파일일 때
                 // 2단계 close로 보내는 것은 `requestClose`가 `scope == .term`에서 이미 한다.
                 .workspace => self.requestClose(.term_or_pane),
-                .dock_pending => if (!dock_ops.pendingDockEntryOwnsInput(self)) {
+                // **barrier가 소유 중이어도 닫기는 통과시킨다.** `.dock_pending`의 뜻은 "이 파일 WebView가
+                // 아직 native publish/typed ack 전"이지 "무엇을 닫을지 모른다"가 아니다 —
+                // `pendingDockEntryOwnsInput`이 참이라는 것은 그 entry가 **활성 pane의 활성 Term**이라는
+                // 뜻이므로(`fileEntryIsFocusTarget`) 닫을 대상이 이미 확정돼 있고, `.workspace`와 같은
+                // `requestClose`에 맡기면 2단계 dirty close도 마지막-창 종료 확인도 그대로 탄다.
+                //
+                // 여기서 삼키면 **파일 탭을 닫아 승계된 탭도 파일일 때** 그 ack가 올 때까지 ⌘W가 통째로
+                // 사라진다(승계 focus 요청이 곧바로 새 barrier를 만든다 — `closeFilePanelSurfaceNow`).
+                // 같은 barrier가 포커스 테두리까지 지우므로(`appendFocusOwnerBorder`) 사용자에게는
+                // "포커스가 안 잡혀서 안 닫힌다"로 보인다(사용자 지적 2026-08-21: 그 탭을 한 번 클릭하면
+                // 다시 먹었다 — 클릭이 `focusFilePanelSurface`로 barrier를 해소했기 때문이다).
+                //
+                // barrier가 지키려던 것은 **부수효과의 대상이 불분명한 경로**다: PTY write·paste·drop은
+                // 각자의 경로에서 그대로 fail-close한다(이 분기가 그 판정을 대신하지 않는다).
+                .dock_pending => {
                     workspace_ops.focusWorkspaceInput(self);
                     self.requestClose(.term_or_pane);
                 },
@@ -36805,7 +36819,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     try std.testing.expect(session.focus_owner == .file_tree);
 }
 
-test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 fail-close한다" {
+test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·paste·drop을 fail-close한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -36846,16 +36860,66 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·터미널 close를 
     const upload_counter = session.upload_counter;
     try std.testing.expect(session.handleDroppedImage("private-image"));
     try std.testing.expectEqual(upload_counter, session.upload_counter);
-    session.dispatchAppAction(.close_focused);
-    try std.testing.expect(file_panel_ops.fileEntryForId(session, b_id) != null);
+    // **닫기는 barrier를 통과한다**(2026-08-21). barrier가 지목한 entry는 활성 pane의 활성 Term이라
+    // 대상이 확정돼 있고, 여기서 삼키면 "파일 탭을 닫았더니 승계된 파일 탭에서 ⌘W가 안 먹는다"가 된다.
+    // 다만 그 판정을 이 테스트의 주제(PTY·paste·drop fail-close)와 섞지 않으려고, 여기서는 barrier가
+    // **여전히 살아 있는 동안** 위 세 경로가 막혀 있다는 사실만 확인하고 close는 아래 전용 테스트가 본다.
+    try std.testing.expect(dock_ops.pendingDockEntryOwnsInput(session));
     try std.testing.expectEqual(workspace_count, session.tabs.items.len);
     try std.testing.expectEqual(terms_before_blocked_close, pane_ops.activePane(session).terms.items.len);
     try std.testing.expectEqual(terminal_surface, term_ops.activeSurface(session).id);
     try std.testing.expect(session.pending_file_panel_close == null);
+    try std.testing.expect(file_panel_ops.fileEntryForId(session, b_id) != null);
 
     try std.testing.expect(session.completePendingDockFocus(successor.surface_id));
     try std.testing.expect(term_ops.focusedDockSurface(session) == successor.surface_id);
     try std.testing.expectEqual(successor.surface_id, term_ops.focusedDockSurface(session).?);
+}
+
+test "파일 탭을 연달아 ⌘W로 닫는다 — 승계된 탭도 파일이면 publish barrier가 그 키를 삼키지 않는다" {
+    // 사용자 지적 2026-08-21: 파일 탭을 닫고 **승계된 탭도 파일이면** ⌘W가 안 먹었다. 승계 focus 요청이
+    // 곧바로 `.dock_pending` barrier를 만들고, 옛 `close_focused`가 그 barrier에서 무동작이었기 때문이다.
+    // 같은 barrier가 포커스 테두리도 지워(`appendFocusOwnerBorder`) 화면상 "포커스가 안 잡힌다"로 보였다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // 세 파일을 연달아 연다 — 마지막에 연 C가 활성이다(터미널 Term은 그 아래 그대로 남는다).
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/wclose-a.html", .html);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/wclose-b.html", .html);
+    const c_open = try pane_ops.openFileTermInActivePane(session, "/tmp/wclose-c.html", .html);
+    file_panel_ops.assignDockSurfaceIds(session);
+    const c_surface = c_open.term.file_entry.?.surface_id;
+    try std.testing.expect(session.focusFilePanelSurface(c_surface)); // 사용자가 그 탭을 보고 있는 상태
+    try std.testing.expectEqual(@as(usize, 3), file_panel_ops.fileEntryCount(session));
+
+    // **실제 키 경로로 친다**(`dispatchAppAction` 직접 호출이 아니라). 그래야 이 회귀의 진짜 관문 둘을
+    // 함께 지난다: ⑴ `handleMetalKeyEvent`는 barrier 를 **의도적으로 보존**한다(`inputFocus()` 가
+    // `.dock_pending` 이라 stale 정합이 안 걸린다), ⑵ 그 뒤 `handleKeyEvent` 의 barrier 게이트가
+    // `resolveFileTree` 로 app action 만 통과시킨다. 액션을 직접 부르면 둘 다 건너뛰어, 게이트가 키를
+    // 삼키도록 되돌아가도 테스트는 그대로 초록이다(적대적 검증).
+    const cmd_w: terminal.KeyEvent = .{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } };
+
+    // ① 첫 ⌘W — 여기까진 옛 코드도 됐다. 승계는 B이고 그것이 barrier를 만든다.
+    _ = try input_ops.handleMetalKeyEvent(session, cmd_w);
+    try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
+    try std.testing.expect(session.focus_owner == .dock_pending);
+    try std.testing.expect(dock_ops.pendingDockEntryOwnsInput(session)); // ack 전 — 옛 코드가 삼키던 자리
+    try std.testing.expectEqualStrings("/tmp/wclose-b.html", pane_ops.activePane(session).activeTerm().file_entry.?.path);
+
+    // ② **native ack 없이** 바로 다음 ⌘W가 먹어야 한다(사용자는 tick을 기다려 주지 않는다).
+    _ = try input_ops.handleMetalKeyEvent(session, cmd_w);
+    try std.testing.expectEqual(@as(usize, 1), file_panel_ops.fileEntryCount(session));
+    try std.testing.expectEqualStrings("/tmp/wclose-a.html", pane_ops.activePane(session).activeTerm().file_entry.?.path);
+
+    // ③ 마지막 파일도 같은 방식으로 닫히고, 그 뒤엔 터미널 Term만 남아 입력이 workspace로 돌아온다.
+    _ = try input_ops.handleMetalKeyEvent(session, cmd_w);
+    try std.testing.expectEqual(@as(usize, 0), file_panel_ops.fileEntryCount(session));
+    try std.testing.expect(session.focus_owner == .workspace);
+    try std.testing.expect(pane_ops.activePane(session).activeTerm().file_entry == null);
+    // barrier token 도 함께 사라졌다 — 남으면 늦은 native ack 이 이미 닫힌 파일로 focus 를 돌린다.
+    try std.testing.expect(session.pending_dock_focus == null);
 }
 
 test "FP9 closing pending entry reissues typed focus for its live successor" {

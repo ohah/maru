@@ -1169,7 +1169,20 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const had_reply = term.agent_transcript.owned.reply().len > 0;
     var conversation_changed = false;
     for (events[0..batch.count]) |ev| {
+        const prev_state = term.agent_state;
         term.agent_state = mode_mod.next(term.agent_state, ev);
+        // **알림은 전이에 붙는다**(계약 §6). 같은 턴에서 `Stop` 이 여러 번 와도 상태가 이미 `idle` 이라
+        // 전이가 없어 두 번 울리지 않는다 — 「턴 단위 1회」를 따로 세지 않아도 성립한다.
+        switch (mode_mod.noticeOn(prev_state, term.agent_state)) {
+            .none => {},
+            .done => term.agent_hook_notice.set(.done, ev.text, self.awakeMs()),
+            .attention => {
+                // 무엇을 승인하는지 — 사람이 읽는 설명이 있으면 그것, 없으면 도구 이름. **명령 원문은
+                // 싣지 않는다**(계약 §7: 길고 민감하다).
+                const body = if (ev.tool_description.len > 0) ev.tool_description else ev.tool_name;
+                term.agent_hook_notice.set(.attention, body, self.awakeMs());
+            },
+        }
         // **마지막 대화도 훅에서 온다**(계약 §4b). 그 Term 은 transcript 파일을 읽지 않으므로 신원 해소·
         // 256 KiB tail 파싱·폴링이 통째로 빠진다. 파서가 `prompt` 와 `last_assistant_message` 를 같은
         // 필드에 싣는다 — 어느 쪽인지는 이벤트 종류가 말해 준다.
@@ -1204,6 +1217,37 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
         const has_reply = term.agent_transcript.owned.reply().len > 0;
         if (has_reply != had_reply) sidebar_ops.rebuildSidebar(self) catch {} else if (displayed) self.metal_dirty = true;
     }
+}
+
+/// 꺼내 간 훅 알림. 본문은 **Term 소유 고정 버퍼를 빌린 것**이라 호출자가 바로 dupe 해야 한다
+/// (`emitNotification` 이 그렇게 한다).
+pub const HookNotice = struct {
+    kind: maru.session.agent_hook_mode.Notice,
+    body: []const u8,
+};
+
+/// 예약된 훅 알림을 지금 띄울 수 있는가(계약 §6). 완료 알림은 바로, 주의 알림은 디바운스 뒤에 —
+/// 그 사이 상태가 `blocked` 를 떠났으면(자동 승인으로 해소) **버린다**.
+///
+/// 꺼내 가면 슬롯을 비운다. 비우지 않으면 다음 tick 마다 같은 것을 다시 본다.
+pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
+    const mode_mod = maru.session.agent_hook_mode;
+    const kind = term.agent_hook_notice.kind;
+    switch (kind) {
+        .none => return null,
+        .done => {},
+        .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
+            .wait => return null,
+            .drop => {
+                term.agent_hook_notice.clear();
+                return null;
+            },
+            .emit => {},
+        },
+    }
+    const body = term.agent_hook_notice.text();
+    term.agent_hook_notice.clear();
+    return .{ .kind = kind, .body = body };
 }
 
 /// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<surface_id>.ndjson`). 훅 커맨드가 적는 그 이름이다.

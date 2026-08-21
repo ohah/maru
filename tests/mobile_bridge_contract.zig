@@ -4559,6 +4559,17 @@ fn feedControl(bytes: []const u8) usize {
     return bridge.maru_mobile_control_feed(bytes.ptr, bytes.len);
 }
 
+/// **세션 화면으로 돌아간다.** 앞 테스트가 다른 화면을 남겨 두면 그리기 판정이 아예 안 돌고,
+/// 그러면 이 테스트들은 "아무것도 안 재면서" 실패하거나(운이 좋으면) 통과한다 — 처음 쓴 판이
+/// 그래서 `loading` 만 봤다.
+fn gotoSessionsScreen() void {
+    var guard: usize = 0;
+    while (!std.mem.eql(u8, bridge.currentScreenName(), "sessions") and guard < 8) : (guard += 1) {
+        _ = bridge.maru_mobile_pop_screen();
+        advanceFrame(402, 874, 16);
+    }
+}
+
 test "hello 를 받으면 축이 서고 목록 요청이 만들어진다" {
     bridge.maru_mobile_control_reset();
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_control_state()); // WAITING
@@ -4645,4 +4656,60 @@ test "광고 안 한 메서드는 안 부른다" {
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_state());
     var out: [256]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&out, out.len));
+}
+
+test "세션 목록이 화면에 실제로 그려진다 — 상태마다 다른 것을" {
+    // **판정이 그리기 경로 안에서 세워진다.** 값만 맞고 닿는 자리가 틀린 결함을 이 저장소가
+    // 여러 번 겪었다(브리지에 값을 넣어 놓고 화면은 안 바뀌던 부류).
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    // 아직 아무것도 안 받았다 → **"없다" 가 아니라 "받는 중"** 이다.
+    try std.testing.expectEqual(bridge.RemoteShown.loading, bridge.remoteSessionsShown());
+
+    // 축이 서고 빈 목록이 왔다 → 그때 비로소 "없다".
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}\n");
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.none, bridge.remoteSessionsShown());
+
+    // 세션 둘이 오면 줄이 둘 그려진다.
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[{\"id\":{\"surface_id\":7},\"title\":\"a\"},{\"id\":{\"surface_id\":9},\"title\":\"b\"}]}\n");
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+    try std.testing.expectEqual(@as(usize, 2), bridge.remoteRowsDrawn());
+
+    // 줄마다 누를 자리가 있고 **서로 다르다**(같으면 한 줄만 닿는다).
+    const a = bridge.remoteRowCenter(0) orelse return error.TestUnexpectedResult;
+    const b = bridge.remoteRowCenter(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(b.y > a.y);
+    try std.testing.expectEqual(@as(?@TypeOf(a), null), bridge.remoteRowCenter(2));
+
+    bridge.maru_mobile_control_reset();
+}
+
+test "축이 꺼지면 그 이유를 화면이 말한다" {
+    // 같은 문구로 뭉치면 사용자가 **고칠 자리**를 못 찾는다.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    bridge.maru_mobile_control_timeout();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.off, bridge.remoteSessionsShown());
+    try std.testing.expectEqual(@as(usize, 0), bridge.remoteRowsDrawn());
+    bridge.maru_mobile_control_reset();
+}
+
+test "다시 붙으면 화면도 '받는 중' 으로 돌아간다" {
+    // 남겨 두면 **죽은 세션을 살아 있는 것처럼** 보여 준다.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7}}]}\n");
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+
+    bridge.maru_mobile_control_reset();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.loading, bridge.remoteSessionsShown());
+    try std.testing.expectEqual(@as(usize, 0), bridge.remoteRowsDrawn());
 }

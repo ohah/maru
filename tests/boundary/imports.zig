@@ -3427,8 +3427,10 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_strict_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
+    // CR6a-2 app-host aggregate 격리는 C2 다섯 행을 같은 generation_transport root의
+    // fresh exact artifact에서 실행하므로 이 owner 경로가 하나 늘어난다.
     try std.testing.expectEqual(
-        @as(usize, 14),
+        @as(usize, 15),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }

@@ -29,14 +29,15 @@ test "CR6a-1 경계는 inert projection owner와 caller zero를 고정한다" {
     try std.testing.expectEqual(@as(usize, 1), count(app, "pub fn replaceRecoveredSessionsProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(app, "pub fn recoveredSessionsRows("));
     try std.testing.expectEqual(@as(usize, 1), count(app, "test \"CR6a-1 AppSession은 recovered projection을"));
-    try std.testing.expectEqual(@as(usize, 3), countIdentifier(app, "replaceRecoveredSessionsProjection"));
-    try std.testing.expectEqual(@as(usize, 5), countIdentifier(app, "recoveredSessionsRows"));
+    try std.testing.expectEqual(@as(usize, 5), countIdentifier(app, "replaceRecoveredSessionsProjection"));
+    // CR6a-2 actual launch fixture가 primary projection과 runtime identity를 두 번 직접 관측한다.
+    try std.testing.expectEqual(@as(usize, 8), countIdentifier(app, "recoveredSessionsRows"));
     try std.testing.expectEqual(@as(usize, 0), try countProductIdentifiersExcept(
         allocator,
         "replaceRecoveredSessionsProjection",
         &.{"platform/macos/app_session.zig"},
     ));
-    try std.testing.expectEqual(@as(usize, 0), try countProductIdentifiersExcept(
+    try std.testing.expectEqual(@as(usize, 1), try countProductIdentifiersExcept(
         allocator,
         "recoveredSessionsRows",
         &.{"platform/macos/app_session.zig"},
@@ -44,7 +45,7 @@ test "CR6a-1 경계는 inert projection owner와 caller zero를 고정한다" {
     try std.testing.expect(std.mem.indexOf(u8, persistent, "CR6a-1 구현 계약") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "CR6a-1은") != null);
 
-    const gate = between(build, "const session_host_cr6a1_step =", "const b3_1_boundary_tests =") orelse return error.TestUnexpectedResult;
+    const gate = between(build, "const session_host_cr6a1_step =", "const session_host_cr6a2_step =") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr6a1\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr6a1_step.dependOn(session_host_cr5d2_step);"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=3"));

@@ -403,6 +403,8 @@ pub fn Registry(
 }
 
 test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reuses released rows" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const TestRegistry = Registry(4096, 256 * 1024);
     const allocator = std.testing.allocator;
     const registry = try allocator.create(TestRegistry);

@@ -2457,6 +2457,8 @@ test "B3-1 registry owns final-address RPC authority init settle and zero clear"
 }
 
 test "CR3a-2c3d C2 B3-1 registry footprint drop and empty corruption gates are bounded" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const LegacyEntry = struct {
         lifecycle: EntryLifecycle = .empty,
         reservation_id: u64 = 0,
@@ -3470,6 +3472,8 @@ test "CR3a-2c3d C1 event generation exhaustion is sticky and mutation free" {
 }
 
 test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const expected_tags = [_][]const u8{
         "idle",
         "reserved",

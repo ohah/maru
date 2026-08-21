@@ -184,7 +184,7 @@ pub fn sidebarCardRowFor(self: *const AppSession, raw_row: usize) usize {
     var r = raw_row;
     while (r < rows.len) : (r -= 1) {
         switch (rows[r]) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             else => return r,
         }
         if (r == 0) break;
@@ -204,7 +204,7 @@ pub fn sidebarCardDropTopLevel(self: *AppSession, raw_row: usize) bool {
     if (raw_row >= self.sidebar_rows.items.len) return false;
     return switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| c.tab < self.tabs.items.len and tab_ops.enclosingGroupMarkerIndex(self, c.tab) == null, // 타겟이 최상위면 최상위 복귀
-        .agent_toggle, .agent => false, // 에이전트 목록 행은 드롭 타겟이 아니다
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => false, // 목록/system 행은 드롭 타겟이 아니다
         .group_header => false, // 헤더 드롭 = 그룹 안(멤버)
     };
 }
@@ -245,7 +245,7 @@ pub fn sidebarCardDropAfterGroup(self: *AppSession, raw_row: usize, from: usize,
             if (tab_ops.groupSubtreeEnd(self, tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
             break :blk .{ .m = tl, .j = c.tab + 1 }; // 위 가드가 j==c.tab+1 확립 → 재사용
         },
-        .agent_toggle, .agent => return null, // 에이전트 목록 행은 그룹 gap 판정 대상이 아니다
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 그룹 gap 대상이 아니다
         .group_header => |h| blk: {
             if (h.tab >= len) return null;
             if (!h.collapsed) return null; // 펼친 헤더 아래 경계 = 첫 멤버(모호) → skip(일반 헤더 드롭)
@@ -278,7 +278,7 @@ pub fn sidebarGroupDropBoundary(self: *AppSession, raw_row: usize, m: usize) ?us
     if (m >= len or raw_row >= self.sidebar_rows.items.len) return null;
     const target_tab: usize = switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| c.tab,
-        .agent_toggle, .agent => return null, // 목록 행은 탭 인덱스 도메인이 아니다
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 탭 인덱스 도메인이 아니다
         .group_header => |h| h.tab,
     };
     if (target_tab >= len) return null;
@@ -763,7 +763,7 @@ pub fn sidebarRenderRows(self: *const AppSession) []const chrome.components.side
 ///    위치 고정). 도메인은 sidebarRenderRows()(드래그 중 preview_rows).
 pub fn sidebarRowShowsPin(self: *const AppSession, row: chrome.components.sidebar.Row) bool {
     return switch (row) {
-        .agent_toggle, .agent => false, // 목록 행 자체는 pin 대상이 아니다(소속 카드가 든다)
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => false, // 목록/system 행은 pin 대상이 아니다.
         .group_header => |gh| gh.tab < self.tabs.items.len and self.tabs.items[gh.tab].pinned,
         .card => |c| blk: {
             if (c.local_pinned) break :blk true; // 로컬 pin 멤버 📌(§13.6 선두 분기 — pin_derived 억제보다 우선)
@@ -981,7 +981,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         // ghost 카드도 self.tabs pinned가 드래그 내내 불변이라 추적이 안정. 고정 그룹 0개면 flip이 없어 no-op(byte-identical).
         const row_pinned: ?bool = switch (row) {
             .card => |c| if (c.tab < self.tabs.items.len) self.tabs.items[c.tab].pinned else null,
-            .agent_toggle, .agent => null,
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => null,
             .group_header => |h| if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].pinned else null,
         };
         if (row_pinned) |rp| {
@@ -998,7 +998,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
             .card => |c| if (c.tab < self.tabs.items.len and self.tabs.items[c.tab].top_level) {
                 current_group_color = 0;
             },
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .group_header => {},
         }
         const orig = switch (row) {
@@ -1009,7 +1009,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 current_group_color = if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].group_color else 0;
                 continue;
             },
-            .agent_toggle, .agent => continue, // 목록 행은 per-card tint/accent 대상이 아니다(소속 카드가 그린다)
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => continue, // 목록/system 행은 per-card tint/accent 대상이 아니다.
         };
         // SG8d: 고스트 카드(preview_rows[ghost_lo,hi))는 아래 반투명 밴드+삽입선으로만 표시하고 per-card 배경 tint·
         // 불투명 accent 막대는 생략한다 — 불투명 막대가 "떠 있는" 반투명 고스트를 깨뜨리기 때문. current_group_color
@@ -1086,7 +1086,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 .group_header => |h| h.depth,
                 .card => |c| c.depth,
                 // 목록 행은 드래그 대상이 아니라 고스트가 될 수 없다 — 방어적으로 최상위 depth를 쓴다.
-                .agent_toggle, .agent => 1,
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => 1,
             };
             // nest 들여쓰기(기존 group_depth 반영) — 헤더 glyph indent (depth-1)*group_indent와 정렬. 형제/카드는 0(전폭).
             const indent_px: f32 = if (is_nest and ghost_depth > 1)
@@ -1105,7 +1105,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                     scan -= 1;
                     const hit = switch (rows[scan]) {
                         .group_header => |h| h.depth == want, // 타깃 그룹 마커(depth == ghost_depth-1)
-                        .card, .agent_toggle, .agent => false,
+                        .card, .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => false,
                     };
                     if (hit) {
                         pr = scan;
@@ -1465,7 +1465,7 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
                 // 목록 행은 **배경 tint 소스가 없을 뿐** 밴드 자체는 그려야 한다. 예전 `continue`는 Zig에서 바깥
                 // for를 탈출해 밴드 op을 통째로 버렸고, 그 결과 에이전트 행 호버 하이라이트가 100% 사라졌다
                 // (code-review max — view()가 일부러 내는 밴드를 platform이 삼킨 것).
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .group_header => |h| {
                     // SG5-2: 그룹 헤더 밴드에 그룹 공통 색을 블렌드(카드 배경 tint와 **같은** blend 경로·같은 알파). 층
                     // 분리 — 그룹 색은 헤더 밴드·소속 카드 막대에만 실리고 개별 카드 background_color와 안 겹친다(서로 다른 row).
@@ -2014,6 +2014,39 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 try card_running.append(self.allocator, if (aterm) |t| (t.agent_state == .running) else false);
                 try close_rows.append(self.allocator, aterm != null); // 에이전트 행 ✕ = 그 Term 닫기
                 try ages.append(self.allocator, try agentAgeOwned(self, aterm));
+                continue;
+            },
+            .recovered_sessions_header => {
+                try names.append(self.allocator, try self.allocator.dupe(u8, "Recovered Sessions"));
+                try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try agents.append(self.allocator, 0);
+                try inline_icons.append(self.allocator, 0);
+                try pins.append(self.allocator, false);
+                try card_kinds.append(self.allocator, .none);
+                try card_running.append(self.allocator, false);
+                try close_rows.append(self.allocator, false);
+                try ages.append(self.allocator, try self.allocator.dupe(u8, ""));
+                continue;
+            },
+            .recovered_session => |candidate| {
+                const recovered = self.recoveredSessionsRows(self.is_primary_window);
+                const label: []const u8 = if (candidate.projection_index < recovered.len)
+                    recovered[candidate.projection_index].label[0..]
+                else
+                    "";
+                try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "  {s}", .{label}));
+                try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try agents.append(self.allocator, 0);
+                try inline_icons.append(self.allocator, 0);
+                try pins.append(self.allocator, false);
+                try card_kinds.append(self.allocator, .none);
+                try card_running.append(self.allocator, false);
+                try close_rows.append(self.allocator, false);
+                try ages.append(self.allocator, try self.allocator.dupe(u8, ""));
                 continue;
             },
             .group_header => |gh| {

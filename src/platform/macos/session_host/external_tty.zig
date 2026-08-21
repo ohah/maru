@@ -544,6 +544,8 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
 }
 
 test "real openpty enters raw mode, reports initial size, and restores exactly" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     var initial: posix.termios = std.mem.zeroes(posix.termios);
     initial.iflag.ICRNL = true;
     initial.oflag.OPOST = true;
@@ -963,10 +965,14 @@ fn runSignalRestoreCase(signal: posix.SIG) !void {
 }
 
 test "real PTY restores before reraising every supported termination signal" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     for (termination_signals) |signal| try runSignalRestoreCase(signal);
 }
 
 test "invalid self-pipe byte is rejected without constructing an arbitrary signal" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const initial = fakeInitialTermios();
     const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;
@@ -986,6 +992,8 @@ test "invalid self-pipe byte is rejected without constructing an arbitrary signa
 }
 
 test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const initial = fakeInitialTermios();
     const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;
@@ -1024,6 +1032,8 @@ test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
 }
 
 test "termination survives a SIGWINCH-saturated wake pipe" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const initial = fakeInitialTermios();
     const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;
@@ -1052,6 +1062,8 @@ test "termination survives a SIGWINCH-saturated wake pipe" {
 }
 
 test "openpty child turns SIGWINCH burst into one latest window size" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const initial = fakeInitialTermios();
     const window: posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;
@@ -1194,6 +1206,8 @@ test "ignored and custom termination dispositions are rejected without mutation"
 }
 
 test "forked child cannot signal the parent raw TTY self-pipe" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const initial = fakeInitialTermios();
     const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;
@@ -1226,6 +1240,8 @@ test "forked child cannot signal the parent raw TTY self-pipe" {
 }
 
 test "stale copied owner cannot repeat cleanup after the lexical owner finishes" {
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const initial = fakeInitialTermios();
     const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;

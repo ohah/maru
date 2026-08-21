@@ -1275,6 +1275,14 @@ CR6a-1은 그 경로의 app-global 파생 projection owner를 먼저 닫는다. 
 transactional reconcile해 typed system row DTO만 게시하며, opt-out/secondary/quick은 row publish·owner mutation 0, 실패는 기존 projection
 mutation 0이다. socket issuer와 sidebar row materialization, 사용자 adopt는 각각 CR6a-2/CR6b에 남긴다.
 
+CR6a-2는 첫 일반 Window의 deferred terminal publication보다 앞선 app-global coordinator를 제품 경로에 연결한다.
+secure discovery와 ephemeral inventory가 모두 완결된 뒤에만 CR6a-1 projection을 교체하고, primary sidebar에 typed
+`Recovered Sessions` system header/row를 materialize한다. secondary/quick 중복 0, 일반 group/tab action 0,
+attach/spawn/terminate/checkpoint 0을 focused product/ABI/sidebar/boundary 및 시각 fixture로 검증한다. collector 실패는
+launch를 실패시키지 않고 기존 projection mutation 0 + 정상 restore/default-surface 진행으로 귀결한다. CR6b만 row의
+explicit one-item adopt와 fresh `host.info`/`runtime.get` revalidation을 연다.
+개별 dead/malformed/unknown host evidence는 빈 inventory로 삭제하지 않고 typed unavailable row로 reconcile한다.
+
 ## Provider session continuity 잔여 제거(persistent-session P1, 완료)
 
 Claude/Codex provider-native resume/fork는 제품 경로로 되살리지 않는다. P1에서 legacy workspace typed field/parser,

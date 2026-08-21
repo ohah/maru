@@ -2499,6 +2499,8 @@ var app_session_host_coordinator: session_host.session_host_coordinator.SessionH
 // CR6a-1 Recovered Sessions는 Window별 상태가 아니라 앱 전역 derived projection이다. 실제 launch collector는
 // CR6a-2에서 이 owner를 갱신하며, secondary/quick은 별도 사본을 만들지 않고 primary가 이 rows를 빌려 렌더한다.
 var app_recovered_sessions_projection: session_host.recovered_sessions_projection.Projection = .{};
+var app_recovered_sessions_workspace_generation: u64 = 0;
+var app_recovered_sessions_launch_attempted: bool = false;
 var app_process_incident_nonce: u128 = 0;
 // 공개 종료 ABI는 mutable owner graph를 읽기 전에 이 immutable publication token으로 caller thread를 거른다.
 var app_process_incident_owner_thread = std.atomic.Value(u64).init(0);
@@ -3106,6 +3108,182 @@ pub const AppSession = struct {
         if (!primary_window or self.is_quick or !app_keep_alive_after_quit) return &.{};
         return app_recovered_sessions_projection.rows;
     }
+
+    pub fn setPrimaryWindow(self: *AppSession, value: bool) void {
+        const next = value and !self.is_quick;
+        if (self.is_primary_window == next) return;
+        self.is_primary_window = next;
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+    }
+
+    pub const RecoveredSessionsLaunchOutcome = enum(u32) {
+        skipped = 0,
+        published = 1,
+        unavailable = 2,
+    };
+
+    /// CR6a-2 launch-before-terminal coordinator. 저장 Workspace 전체 binding과 secure host inventory를 한 번에
+    /// reconcile해 app-global projection을 교체한다. attach/adopt/runtime spawn은 하지 않는다.
+    pub fn prepareRecoveredSessionsAtLaunch(self: *AppSession, workspace_text: ?[]const u8) RecoveredSessionsLaunchOutcome {
+        if (!is_macos or !app_keep_alive_after_quit or self.is_quick or !self.is_primary_window)
+            return .skipped;
+        if (app_recovered_sessions_launch_attempted) return .skipped;
+        app_recovered_sessions_launch_attempted = true;
+
+        const allocator = std.heap.smp_allocator;
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const base = sessionHostRuntimeBase(arena) orelse return .unavailable;
+        return self.prepareRecoveredSessionsAtLaunchFromBase(workspace_text, base, arena);
+    }
+
+    fn prepareRecoveredSessionsAtLaunchFromBase(
+        self: *AppSession,
+        workspace_text: ?[]const u8,
+        base: []const u8,
+        arena: std.mem.Allocator,
+    ) RecoveredSessionsLaunchOutcome {
+        const allocator = std.heap.smp_allocator;
+
+        var parsed: ?maru.session.workspace.ParsedWorkspace = null;
+        defer if (parsed) |*value| value.deinit();
+        const ws: maru.session.workspace.Workspace = if (workspace_text) |text| blk: {
+            parsed = maru.session.workspace.parse(allocator, text) catch return .unavailable;
+            break :blk parsed.?.workspace;
+        } else .{ .windows = &.{} };
+        maru.session.workspace.validateRuntimeBindings(arena, ws) catch return .unavailable;
+
+        var dir_buf: [512]u8 = undefined;
+        const session_dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return .unavailable;
+        var discovered = session_host.recovery_discovery.discover(allocator, session_dir);
+        defer discovered.deinit(allocator);
+        const entries = switch (discovered) {
+            .unavailable => return .unavailable,
+            .complete => |items| items,
+        };
+
+        var candidates: std.ArrayListUnmanaged(session_host.recovery_discovery.Candidate) = .empty;
+        defer candidates.deinit(arena);
+        var adapter_generations: std.ArrayListUnmanaged(u64) = .empty;
+        defer adapter_generations.deinit(arena);
+        for (entries) |entry| switch (entry) {
+            .unavailable => {},
+            .candidate => |candidate| {
+                if (self.ensureRestoreHostAdapterAtBase(base, candidate.manifest.host_id) != .ready) continue;
+                const generation = if (app_remote_host_pool) |*pool|
+                    pool.adapterGeneration(candidate.manifest.host_id) orelse continue
+                else
+                    continue;
+                candidates.append(arena, candidate) catch return .unavailable;
+                adapter_generations.append(arena, generation) catch return .unavailable;
+            },
+        };
+
+        const next_workspace_generation = std.math.add(u64, app_recovered_sessions_workspace_generation, 1) catch
+            return .unavailable;
+        var collection = session_host.recovery_discovery.collect(
+            allocator,
+            base,
+            candidates.items,
+            adapter_generations.items,
+            next_workspace_generation,
+        );
+        defer collection.deinit(allocator);
+        const inventories = switch (collection) {
+            .unavailable => return .unavailable,
+            .complete => |items| items,
+        };
+        var reconciled_inventories: std.ArrayListUnmanaged(maru.session.runtime_reconcile.HostInventory) = .empty;
+        defer reconciled_inventories.deinit(arena);
+        mergeDiscoveredInventories(
+            arena,
+            entries,
+            candidates.items,
+            inventories,
+            &reconciled_inventories,
+        ) catch return .unavailable;
+        self.replaceRecoveredSessionsProjection(ws, reconciled_inventories.items, true, next_workspace_generation) catch
+            return .unavailable;
+        app_recovered_sessions_workspace_generation = next_workspace_generation;
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+        return .published;
+    }
+
+    fn mergeDiscoveredInventories(
+        allocator: std.mem.Allocator,
+        entries: []const session_host.recovery_discovery.Entry,
+        collected_candidates: []const session_host.recovery_discovery.Candidate,
+        collected_inventories: []const maru.session.runtime_reconcile.HostInventory,
+        out: *std.ArrayListUnmanaged(maru.session.runtime_reconcile.HostInventory),
+    ) !void {
+        if (collected_candidates.len != collected_inventories.len) return error.InvalidAuthority;
+        var collected_index: usize = 0;
+        for (entries) |entry| switch (entry) {
+            .unavailable => |value| try out.append(allocator, .{ .unavailable = .{
+                .host_id = value.host_id,
+                .reason = switch (value.reason) {
+                    .invalid_manifest => .malformed,
+                    .lease_free => .lifecycle,
+                    .lease_unknown => .stale,
+                },
+            } }),
+            .candidate => |value| {
+                if (collected_index < collected_candidates.len and
+                    collected_candidates[collected_index].manifest.host_id == value.manifest.host_id)
+                {
+                    if (collected_inventories[collected_index].hostId() != value.manifest.host_id)
+                        return error.InvalidAuthority;
+                    try out.append(allocator, collected_inventories[collected_index]);
+                    collected_index += 1;
+                } else try out.append(allocator, .{ .unavailable = .{
+                    .host_id = value.manifest.host_id,
+                    .reason = .endpoint,
+                } });
+            },
+        };
+        if (collected_index != collected_candidates.len) return error.InvalidAuthority;
+    }
+
+    /// Launch가 recovery inventory를 먼저 끝낸 뒤 저장 Workspace가 없거나 적용 불가일 때만 기본 shell surface를
+    /// 명시적으로 완성한다. 이미 restore가 surface를 게시했으면 mutation 0이다.
+    pub fn finishDeferredInitialSurface(self: *AppSession) !void {
+        if (self.tabs.items.len != 0) return;
+        var spawn_config = self.new_tab_config;
+        if (spawn_config.width_px > 0 and spawn_config.height_px > 0) {
+            spawn_config.size = layout_math.gridFromBacking(
+                spawn_config.width_px,
+                spawn_config.height_px,
+                self.cell_width_px,
+                self.cell_height_px,
+                self.sidebar_width_px,
+                self.gridPadding(),
+            );
+        }
+        var first_req = spawnRequest(
+            spawn_config,
+            self.loaded_config.config.term,
+            self.loaded_config.config.shell,
+            self.loaded_config.config.env,
+            self.new_tab_zdotdir,
+            self.new_tab_ssh_bin,
+        );
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        self.applySpawnCwd(&first_req, &root_buf, false);
+        _ = try tab_ops.createTab(
+            self,
+            first_req,
+            spawn_config.size,
+            spawn_config.queue_capacity,
+            "Maru shell",
+            commandName(spawn_config.command_kind),
+        );
+        term_ops.finishInitialSurface(self);
+        self.writeSummaryFromState();
+    }
     /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
     pub fn focusWorkspaceInput(self: *AppSession) void {
         return workspace_ops.focusWorkspaceInput(self);
@@ -3495,6 +3673,9 @@ pub const AppSession = struct {
     chrome_minimal: bool = false,
     // quick은 full chrome 설정도 가능하므로 chrome_minimal로 판별하지 않는다. command_kind가 주는 명시 identity다.
     is_quick: bool = false,
+    // CR6a-2: Swift Window owner가 windows.first와 동기화하는 일반 primary identity. app-global recovery
+    // projection은 이 창에서만 materialize하고 secondary/quick에는 중복하지 않는다.
+    is_primary_window: bool = false,
     // minimal 세션에서 탭(워크스페이스·Term) 생성을 허용하는가. false(기본)면 chrome_minimal일 때 dispatchAppAction이
     // new_tab/new_term을 무동작으로 막는다(사이드바·탭 바가 없어 안 보이는 탭 생성 차단). true면 허용(파워유저).
     // chrome_minimal=false면 tabsBlocked()가 항상 false라 full 모드 탭은 이 값과 무관하게 동작한다.
@@ -6036,6 +6217,16 @@ pub const AppSession = struct {
     /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
     pub fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
         if (!is_macos) return .unavailable;
+        const alloc = std.heap.smp_allocator;
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const base = sessionHostRuntimeBase(arena.allocator()) orelse return .unavailable;
+        return self.ensureRestoreHostAdapterAtBase(base, wanted_host_id);
+    }
+
+    /// Restore와 CR6 launch collector가 같은 exact base를 계속 사용하게 하는 owner leaf다. discovery와 adapter
+    /// publication 사이에 전역 경로를 다시 추측하면 다른 registry의 동명 host를 결속할 수 있어 base를 값으로 넘긴다.
+    fn ensureRestoreHostAdapterAtBase(self: *AppSession, base: []const u8, wanted_host_id: u128) RestoreHostOutcome {
         self.ensureProcessIncidentOwner() catch return .unavailable;
         if (builtin.is_test and app_incident_testing.stop_after_bootstrap) return .ready;
         if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return .ready;
@@ -6046,9 +6237,6 @@ pub const AppSession = struct {
         if (session_host.protocol.version_major < 2) return .unavailable;
 
         const alloc = std.heap.smp_allocator;
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
-        const base = sessionHostRuntimeBase(arena.allocator()) orelse return .unavailable;
         var connected = switch (session_host.host_connect.connectExistingHost(
             alloc,
             base,
@@ -6110,6 +6298,10 @@ pub const AppSession = struct {
             if (!claimInstalledRemoteBackend(created_pool, wanted_host_id)) {
                 return .unavailable;
             }
+            // attach-only pool은 과거 runtime 복원만 가능하고 새 runtime spawn owner가 아니다. 이를 current backend처럼
+            // 보이면 launch recovery 직후 default surface/new tab이 SpawnHostUnavailable로 막힌다. 새 셸은 명시적으로
+            // in-process fallback을 택하고, recovered runtime attach는 위 pool을 계속 사용한다.
+            host_connect_failed = true;
         }
         return .ready;
     }
@@ -7327,7 +7519,7 @@ pub const AppSession = struct {
         if (slot >= self.sidebar_rows.items.len) return;
         const gh = switch (self.sidebar_rows.items[slot]) {
             .group_header => |h| h,
-            .agent_toggle, .agent => return, // 목록 행 클릭은 별도 경로(접기 토글·Term 이동)
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return, // 목록/system 행은 별도 또는 inert
             .card => return,
         };
         if (gh.tab >= self.tabs.items.len) return;
@@ -8663,6 +8855,18 @@ pub const AppSession = struct {
     /// 테스트가 이 시그니처(order/group_depth)를 그대로 부른다 — identity면 옛 flat 동작과 byte-identical.
     pub fn projectRowsFrom(self: *AppSession, order: []const usize, group_depth: []const u8) void {
         _ = self.projectRowsCore(&self.sidebar_rows, order, group_depth, null, null); // 라이브는 top_level·고스트 range 미사용(tab.top_level 직접)
+        self.appendRecoveredSessionRows(&self.sidebar_rows);
+    }
+
+    /// 라이브/드래그 프리뷰가 같은 app-global system suffix를 그리게 하는 단일 projection leaf다.
+    /// 이 행들은 탭 순열의 일부가 아니므로 ghost range 뒤에만 붙고 drag plan에는 절대 들어가지 않는다.
+    pub fn appendRecoveredSessionRows(self: *AppSession, out: *std.ArrayList(chrome.components.sidebar.Row)) void {
+        const recovered = self.recoveredSessionsRows(self.is_primary_window);
+        if (recovered.len == 0) return;
+        out.append(self.allocator, .recovered_sessions_header) catch return;
+        for (recovered, 0..) |_, index| out.append(self.allocator, .{
+            .recovered_session = .{ .projection_index = index },
+        }) catch return;
     }
 
     /// SG8c 프리뷰 투영 컨텍스트 — projectRowsCore가 프리뷰 모드일 때 [ghost_lo, ghost_hi) **표시 위치**를 접힘 게이트
@@ -8997,8 +9201,7 @@ pub const AppSession = struct {
     pub fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
         for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
             .card => |c| if (c.tab == tab_index) return slot,
-            .agent_toggle, .agent => {},
-            .group_header => {},
+            .agent_toggle, .agent, .group_header, .recovered_sessions_header, .recovered_session => {},
         };
         return null;
     }
@@ -20356,7 +20559,7 @@ test "SG8a: projectRowsFrom(identity)가 recomputeVisibleTabs와 byte-identical 
         const want = expected[i];
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
-            .agent_toggle, .agent => try std.testing.expect(false), // 이 fixture는 목록 행을 만들지 않는다
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => try std.testing.expect(false), // 이 fixture는 목록 행을 만들지 않는다
             .card => |wc| {
                 try std.testing.expectEqual(wc.tab, got.card.tab);
                 try std.testing.expectEqual(wc.active, got.card.active);
@@ -21763,7 +21966,7 @@ test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             header_pins += 1;
         },
@@ -22170,7 +22373,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         fn f(s: *AppSession, tab_index: usize) chrome.components.sidebar.Row {
             for (s.sidebar_rows.items) |r| switch (r) {
                 .card => |c| if (c.tab == tab_index) return r,
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .group_header => {},
             };
             unreachable;
@@ -22238,7 +22441,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => {},
     };
     try std.testing.expectEqual(@as(usize, 2), card_pins); // X1·X2만
@@ -22339,7 +22542,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     // X를 TOP1 row(=그룹 뒤 gap의 top카드) 옆으로 드래그. 분류: 타겟 TOP1이 최상위 → 전이 의도 true(그룹 밖 gap).
     var top1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 2) {
             top1_row = s;
         },
@@ -22370,7 +22573,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     tab_ops.recomputeVisibleTabs(session);
     var x_depth: u8 = 255;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == x_idx) {
             x_depth = c.depth;
         },
@@ -22404,7 +22607,7 @@ test "SR4(b): 카드를 그룹 안(멤버 카드)으로 드래그 → top_level=
     // X를 a1(멤버) row로 드래그 → 그룹 A 안(멤버). 분류: 타겟 a1이 멤버 → 전이 의도 false(그룹 안).
     var a1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             a1_row = s;
         },
@@ -22487,7 +22690,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
         try tab_ops.refreshDragPreview(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena2.allocator());
         var hdrs: usize = 0;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .group_header => hdrs += 1,
             .card => {},
         };
@@ -22501,7 +22704,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
     {
         var hdrs: usize = 0;
         for (session.sidebar_rows.items) |row| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .group_header => hdrs += 1,
             .card => {},
         };
@@ -22552,7 +22755,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     // 프리뷰 고스트(X)가 depth 0(그룹 밖 최상위)로 투영되는가 — 가상 top_level[]이 pass1 depth를 몰았는지.
     var preview_depth: u8 = 255;
     for (session.sidebar_preview_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 3) {
             preview_depth = c.depth;
         },
@@ -22571,7 +22774,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     };
     var confirmed_depth: u8 = 255;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == x_idx) {
             confirmed_depth = c.depth;
         },
@@ -22616,7 +22819,7 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
     // a1(t1) row + 그 row의 아래/위 경계 y(production과 같은 rowTop/rowHeight 누적).
     var a1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             a1_row = s;
         },
@@ -22685,7 +22888,7 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
     var ha_row: usize = 0;
     var hb_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| {
             if (gh.tab == 0) ha_row = s;
             if (gh.tab == 2) hb_row = s;
@@ -22810,7 +23013,7 @@ test "SR5(d): pin × local_pinned × top_level 3축 공존 — 고정 그룹 안
     var saw_lp = false;
     var saw_top_card = false;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| {
             if (c.tab == 1) {
                 saw_lp = c.local_pinned; // lp 카드 local_pinned 힌트
@@ -23073,7 +23276,7 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
 /// (원본 tab이 카드 row로 방출됐는가)과 depth 정확성을 함께 본다(카드 .tab=원본 인덱스, 프리뷰 가상순서도 동일).
 fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u8 {
     for (rows) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == tab) return c.depth,
         .group_header => {},
     };
@@ -23084,7 +23287,7 @@ fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u
 /// member_count·depth 단언용(헤더 .tab=마커 원본 인덱스).
 fn sg8cFindHeader(rows: []const chrome.components.sidebar.Row, tab: usize) ?chrome.components.sidebar.Row {
     for (rows) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => |h| if (h.tab == tab) return row,
         .card => {},
     };
@@ -23242,7 +23445,7 @@ test "SG8c: none plan 프리뷰 → preview_rows == 원본 rows·ghost range 비
         const want = live[i];
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |wc| {
                 try std.testing.expectEqual(wc.tab, got.card.tab);
                 try std.testing.expectEqual(wc.depth, got.card.depth);
@@ -23286,7 +23489,7 @@ test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collap
     // 매치 카드(t1)가 접힘 무시하고 펼쳐 보인다.
     var saw_t1_card = false;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             saw_t1_card = true;
         },
@@ -23697,7 +23900,7 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
     var header_depths: [4]u8 = undefined;
     var hc: usize = 0;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| {
             if (hc < header_depths.len) header_depths[hc] = gh.depth;
             hc += 1;
@@ -24470,7 +24673,7 @@ test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 
     var card_pins: usize = 0;
     var header_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
@@ -24514,7 +24717,7 @@ test "GL3(a2): 공존 렌더 — 그룹째 고정 그룹 안 로컬 pin 멤버 =
     var header_pins: usize = 0;
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             header_pins += 1;
         },
@@ -24612,7 +24815,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 preview_ptrs[pn] = pre[c.tab]; // 프리뷰 .tab = pre-move self.tabs 인덱스
                 pn += 1;
@@ -24630,7 +24833,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var commit_ptrs: [8]*Tab = undefined;
         var cn: usize = 0;
         for (session.sidebar_rows.items) |r| switch (r) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 commit_ptrs[cn] = session.tabs.items[c.tab]; // 확정 .tab = post-move self.tabs 인덱스
                 cn += 1;
@@ -24664,7 +24867,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 preview_ptrs[pn] = pre[c.tab];
                 pn += 1;
@@ -24685,7 +24888,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var commit_ptrs: [8]*Tab = undefined;
         var cn: usize = 0;
         for (session.sidebar_rows.items) |r| switch (r) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 commit_ptrs[cn] = session.tabs.items[c.tab];
                 cn += 1;
@@ -24927,7 +25130,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     var header_pins: usize = 0;
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             header_pins += 1;
         },
@@ -24957,7 +25160,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     tab_ops.recomputeVisibleTabs(session);
     var member_pins_after: usize = 0;
     for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             member_pins_after += 1;
         },
@@ -25040,7 +25243,7 @@ test "GL4(b): 중첩 — 자식 subgroup 안 leaf 로컬 pin float(부모→자�
     // 로컬 pin 📌: A 직접(t2)·자식 B(t5) 둘. 마커 카드·최상위·헤더는 억제.
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             if (c.local_pinned) member_pins += 1;
         },
@@ -25119,7 +25322,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         // 매치 카드 t3(로컬 pin)이 접힘 무시하고 보이며, local_pinned 힌트·📌 유지.
         var saw_lp = false;
         for (session.sidebar_rows.items) |row| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |c| if (c.tab == 2) { // t3 = float 후 self.tabs index2
                 saw_lp = true;
                 try std.testing.expect(c.local_pinned); // ★ 검색 중에도 로컬 pin 힌트
@@ -25204,7 +25407,7 @@ fn expectCardTopLevelPinned(session: *AppSession, tab: *Tab) !void {
     tab_ops.recomputeVisibleTabs(session);
     var found = false;
     for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == idx) {
             found = true;
             try std.testing.expectEqual(@as(u8, 0), c.depth); // ★ 렌더 depth 0 = 최상위(그룹 흡수 없음)
@@ -25330,7 +25533,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
             tab_ops.recomputeVisibleTabs(s);
             var n: usize = 0;
             for (s.sidebar_rows.items) |r| switch (r) {
-                .agent_toggle, .agent => {},
+                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
                 .card => if (sidebar_ops.sidebarRowShowsPin(s, r)) {
                     n += 1;
                 },
@@ -25409,7 +25612,7 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     var card_pins: usize = 0;
     var header_pins: usize = 0;
     for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
@@ -25535,7 +25738,7 @@ test "SG5-1: 그룹 통째 이동(tab_ops.moveGroupRange + sidebarGroupDropBound
 /// 표시 카드 row 인덱스를 tab 인덱스로 찾는다(그룹 드래그 경계 테스트가 커서 hit-test 대신 쓰는 헤드리스 헬퍼).
 fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == tab_idx) return s,
         .group_header => {},
     };
@@ -25786,7 +25989,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         tab_ops.recomputeVisibleTabs(session);
         var b_header_row: usize = 0;
         for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .group_header => |gh| if (gh.tab == 2) {
                 b_header_row = s;
             },
@@ -25819,7 +26022,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         tab_ops.recomputeVisibleTabs(session);
         var b_header_row: usize = 0;
         for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .group_header => |gh| if (gh.tab == 2) {
                 b_header_row = s;
             },
@@ -25930,7 +26133,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         var a_card_rows: usize = 0;
         var a_header_collapsed = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .group_header => |h| if (h.tab == 0) {
                 a_header_rows += 1;
                 a_header_collapsed = h.collapsed;
@@ -25968,7 +26171,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         try tab_ops.refreshDragPreview(session, 2, .{ .card = .{ .target_tab = target } }, 0, arena_state.allocator());
         var x_visible = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
-            .agent_toggle, .agent => {},
+            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
             .card => |c| if (c.tab == 2) {
                 x_visible = true;
             },
@@ -26254,7 +26457,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     tab_ops.recomputeVisibleTabs(session);
     var b_header_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| if (gh.tab == 4) {
             b_header_row = s;
         },
@@ -26277,7 +26480,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     var hc: usize = 0;
     var prev_marker_ok = true;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| {
             if (hc < depths.len) depths[hc] = gh.depth;
             hc += 1;
@@ -33122,7 +33325,7 @@ fn sidebarCardDepth(session: *AppSession, tab: *Tab) ?u8 {
     };
     const ti = idx orelse return null;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == ti) return c.depth,
         .group_header => {},
     };
@@ -35520,7 +35723,12 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
-    try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
+    // 비동기 `one` scan이 이 tick 전에 끝났다면 reveal intent는 정상적으로 이미 소멸한다. 남아 있는 경우에만
+    // 이전 target인지 확인한다. 여기서 닫아야 하는 계약은 root 밖 `outside`가 기존 intent를 덮지 않는다는 것이다.
+    if (session.file_tree.revealTarget()) |target| {
+        try std.testing.expectEqualStrings(one, target);
+        try std.testing.expect(!std.mem.eql(u8, outside, target));
+    }
     // one은 초기 viewport 안의 행이다. follow가 보이는 대상을 다시 위로 당기면 사용자의 탐색 위치를
     // 빼앗으므로 pending을 끝내고 scroll=0을 보존해야 한다.
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
@@ -35546,7 +35754,10 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
+    if (session.file_tree.revealTarget()) |target| {
+        try std.testing.expectEqualStrings(one, target);
+        try std.testing.expect(!std.mem.eql(u8, outside, target));
+    }
     const auto_pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
     try std.testing.expect(auto_pending.auto); // 사용자 조작이 아니라 따라가기다
     try std.testing.expectEqual(FileTreeRootOperation.replace, auto_pending.operation);
@@ -40393,7 +40604,7 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
     var new_card_slot: ?usize = null;
     var first_header_slot: ?usize = null;
     for (session.sidebar_rows.items, 0..) |row, slot| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             new_card_slot = slot;
             try std.testing.expectEqual(@as(u8, 0), c.depth); // 최상위 = 들여쓰기 0
@@ -40443,7 +40654,7 @@ test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크
     var saw_header = false;
     var saw_grouped_member = false;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent => {},
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
         .card => |c| {
             if (c.tab == 1) {
                 saw_new_card = true;
@@ -62984,4 +63195,218 @@ test "CR6a-1 AppSession은 recovered projection을 app-global primary owner 하�
 
     app_keep_alive_after_quit = false;
     try std.testing.expectEqual(@as(usize, 0), primary.recoveredSessionsRows(true).len);
+}
+
+test "CR6a-2 primary sidebar는 recovered system header와 inert row만 materialize한다" {
+    if (!is_macos) return error.SkipZigTest;
+    app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+    const old_policy = app_keep_alive_after_quit;
+    defer {
+        app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+        app_keep_alive_after_quit = old_policy;
+    }
+    app_keep_alive_after_quit = true;
+
+    var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer session.sidebar_rows.deinit(std.testing.allocator);
+    session.is_primary_window = true;
+    const runtimes = [_]maru.session.runtime_reconcile.Runtime{.{ .runtime_id = 0x12 }};
+    const hosts = [_]maru.session.runtime_reconcile.HostInventory{.{ .complete = .{
+        .authority = .{
+            .host_id = 1,
+            .adapter_generation = 1,
+            .upgrade_epoch = 1,
+            .authority_generation = 1,
+            .membership_generation = 1,
+            .workspace_generation = 1,
+        },
+        .runtimes = &runtimes,
+    } }};
+    try session.replaceRecoveredSessionsProjection(.{ .windows = &.{} }, &hosts, true, 1);
+    session.projectRowsFrom(&.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
+    try std.testing.expect(session.sidebar_rows.items[0] == .recovered_sessions_header);
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items[1].recovered_session.projection_index);
+    try std.testing.expect(!chrome.components.sidebar.onGroupHeader(session.sidebar_rows.items, 0));
+    try std.testing.expect(chrome.components.sidebar.agentAt(session.sidebar_rows.items, 1) == null);
+    try std.testing.expect(tab_ops.visibleTab(&session, 0) == null);
+    try std.testing.expect(tab_ops.visibleTab(&session, 1) == null);
+    session.sidebar_width_px = 200;
+    session.sidebar_header_height_px = 40;
+    session.sidebar_metrics = chrome.components.sidebar.Metrics.init(20, 24);
+    const header_y = sidebar_ops.testSidebarRowCenterY(&session, 0);
+    const candidate_y = sidebar_ops.testSidebarRowCenterY(&session, 1);
+    try std.testing.expect(settings_ops.renameTargetAt(&session, 10, header_y) == null);
+    try std.testing.expect(settings_ops.renameTargetAt(&session, 10, candidate_y) == null);
+    try std.testing.expect(pane_ops.computePaneDropDest(&session, 10, candidate_y) == null);
+    session.mouse(1, 10, header_y, 0, 0);
+    session.mouse(1, 10, candidate_y, 0, 0);
+    try std.testing.expect(session.pointer_gesture_owner == .none);
+    try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+
+    session.is_primary_window = false;
+    session.projectRowsFrom(&.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 0), session.sidebar_rows.items.len);
+}
+
+test "CR6a-2 primary sidebar는 dead 또는 malformed discovery를 complete empty로 세탁하지 않는다" {
+    const entries = [_]session_host.recovery_discovery.Entry{
+        .{ .unavailable = .{ .host_id = 1, .reason = .lease_free } },
+        .{ .unavailable = .{ .host_id = 2, .reason = .invalid_manifest } },
+        .{ .unavailable = .{ .host_id = 3, .reason = .lease_unknown } },
+    };
+    var inventories: std.ArrayListUnmanaged(maru.session.runtime_reconcile.HostInventory) = .empty;
+    defer inventories.deinit(std.testing.allocator);
+    try AppSession.mergeDiscoveredInventories(
+        std.testing.allocator,
+        &entries,
+        &.{},
+        &.{},
+        &inventories,
+    );
+    try std.testing.expectEqual(@as(usize, 3), inventories.items.len);
+    try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.lifecycle, inventories.items[0].unavailable.reason);
+    try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.malformed, inventories.items[1].unavailable.reason);
+    try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.stale, inventories.items[2].unavailable.reason);
+}
+
+test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory 뒤에만 materialize한다" {
+    if (!is_macos) return error.SkipZigTest;
+    if (std.c.getenv("MARU_SESSION_HOST_CR6A2_REAL_HOST_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-cr6a2-launch-{d}", .{std.c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = std.c.mkdir(base.ptr, 0o700);
+    var dir_buf: [192]u8 = undefined;
+    const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    const fixture_host_id: u128 = @as(u128, @intCast(std.c.getpid())) + 0xC6A2_0000;
+    var socket_buf: [128]u8 = undefined;
+    const socket = session_host.short_endpoint.currentSocketPathIn(&socket_buf, fixture_host_id) catch return error.SkipZigTest;
+
+    const child = std.c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = std.c.setsid();
+        session_host.daemon.runSessionHostWithIdentity(std.heap.page_allocator, io, dir, socket, fixture_host_id) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = std.c.kill(child, std.posix.SIG.TERM);
+        var status: c_int = undefined;
+        var reaped = false;
+        var reap_attempt: usize = 0;
+        while (reap_attempt < 200) : (reap_attempt += 1) {
+            if (std.c.waitpid(child, &status, std.c.W.NOHANG) == child) {
+                reaped = true;
+                break;
+            }
+            _ = usleep(5 * 1000);
+        }
+        if (!reaped) {
+            _ = std.c.kill(child, std.posix.SIG.KILL);
+            _ = std.c.waitpid(child, &status, 0);
+        }
+        _ = std.c.unlink(socket.ptr);
+        _ = std.c.rmdir(dir.ptr);
+        _ = std.c.rmdir(base.ptr);
+    }
+
+    var spawner: ?session_host.client.Client = null;
+    var wait_count: usize = 0;
+    while (wait_count < 250 and spawner == null) : (wait_count += 1) {
+        spawner = session_host.client.Client.connect(allocator, socket, .gui) catch null;
+        if (spawner == null) _ = usleep(20 * 1000);
+    }
+    if (spawner == null) {
+        std.debug.print("CR6a-2 fixture: legacy endpoint did not become ready\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    defer spawner.?.deinit();
+    const spawn_response = try spawner.?.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}");
+    defer allocator.free(spawn_response);
+    const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse {
+        std.debug.print("CR6a-2 fixture: spawn response omitted runtime id\n", .{});
+        return error.TestUnexpectedResult;
+    };
+
+    app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+    app_recovered_sessions_workspace_generation = 0;
+    app_recovered_sessions_launch_attempted = false;
+    const old_policy = app_keep_alive_after_quit;
+    defer {
+        app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+        app_recovered_sessions_workspace_generation = 0;
+        app_recovered_sessions_launch_attempted = false;
+        app_keep_alive_after_quit = old_policy;
+        host_connect_failed = false;
+        if (app_remote_backend) |*backend| backend.deinit();
+        app_remote_backend = null;
+        if (app_remote_host_pool) |*pool| pool.deinit();
+        app_remote_host_pool = null;
+        if (app_remote_client) |*client| client.deinit();
+        app_remote_client = null;
+    }
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .defer_initial_surface = 1,
+    });
+    defer session.deinit();
+    try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+    app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+    session.is_primary_window = true;
+
+    // coordinator 전제도 실제 registry에서 독립 확인한다. legacy socket에 붙었다는 사실만으로 secure manifest/lease
+    // discovery가 되었다고 간주하면 제품 경로가 빈 projection으로 false-green 될 수 있다.
+    var discovered = session_host.recovery_discovery.discover(allocator, dir);
+    defer discovered.deinit(allocator);
+    const discovered_entries = switch (discovered) {
+        .complete => |entries| entries,
+        .unavailable => |reason| {
+            std.debug.print("CR6a-2 fixture: discovery unavailable {s}\n", .{@tagName(reason)});
+            return error.TestUnexpectedResult;
+        },
+    };
+    var discovered_host_id: ?u128 = null;
+    for (discovered_entries) |entry| switch (entry) {
+        .candidate => |candidate| discovered_host_id = candidate.manifest.host_id,
+        .unavailable => {},
+    };
+    const host_id = discovered_host_id orelse {
+        std.debug.print("CR6a-2 fixture: discovery returned no live candidate ({d} entries)\n", .{discovered_entries.len});
+        return error.TestUnexpectedResult;
+    };
+    const adapter_outcome = session.ensureRestoreHostAdapterAtBase(base, host_id);
+    if (adapter_outcome != .ready)
+        std.debug.print("CR6a-2 fixture: adapter publication returned {s}\n", .{@tagName(adapter_outcome)});
+    try std.testing.expectEqual(AppSession.RestoreHostOutcome.ready, adapter_outcome);
+    try std.testing.expect(app_remote_host_pool.?.adapterGeneration(host_id) != null);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const outcome = session.prepareRecoveredSessionsAtLaunchFromBase(null, base, arena_state.allocator());
+    try std.testing.expectEqual(AppSession.RecoveredSessionsLaunchOutcome.published, outcome);
+    try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.recoveredSessionsRows(true).len);
+    try std.testing.expectEqual(
+        try std.fmt.parseInt(u128, &runtime_id, 16),
+        session.recoveredSessionsRows(true)[0].runtime_id,
+    );
+    try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
+    try std.testing.expect(tab_ops.visibleTab(session, 0) == null);
+    try std.testing.expect(tab_ops.visibleTab(session, 1) == null);
+
+    try session.finishDeferredInitialSurface();
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 3), session.sidebar_rows.items.len);
 }

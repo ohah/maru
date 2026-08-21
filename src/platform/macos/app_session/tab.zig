@@ -808,7 +808,7 @@ pub fn sidebarGroupDropTargetTab(self: *AppSession, raw_row: usize, from: usize)
     if (len == 0) return null;
     switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| return c.tab, // 그 카드 위치로 — 위치 파생이 소속을 정한다(같은 그룹/최상위)
-        .agent_toggle, .agent => return null, // 에이전트 목록 행은 그룹 소속 판정 대상이 아니다(그 카드의 부속)
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 그룹 소속 판정 대상이 아니다
         .group_header => |h| {
             const m = h.tab; // 그룹 시작(마커) 탭 인덱스
             if (m >= len) return null;
@@ -1237,6 +1237,7 @@ pub fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
         .card => |c| c.tab,
         .agent_toggle, .agent => null, // 선택 대상이 아님(각자 접기 토글·Term 이동으로 분기)
         .group_header => null, // 헤더 row는 탭이 아님 — 클릭 시 선택 아니라 접기 토글(SG3c)
+        .recovered_sessions_header, .recovered_session => null, // CR6a-2는 표시만 한다. adopt는 CR6b 전까지 0이다.
     };
 }
 
@@ -2240,7 +2241,7 @@ pub fn groupNestPlan(self: *AppSession, raw_row: usize, m: usize) ?GroupNestPlan
     if (raw_row >= self.sidebar_rows.items.len) return null;
     const gh = switch (self.sidebar_rows.items[raw_row]) {
         .group_header => |h| h,
-        .agent_toggle, .agent => return null, // 목록 행 드롭은 그룹 경계 판정 대상이 아니다
+        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행 드롭은 그룹 경계 판정 대상이 아니다
         .card => return null, // 카드 드롭 = 형제 경계(SG5-1 보존)
     };
     const g = gh.tab;
@@ -2357,6 +2358,7 @@ pub fn refreshDragPreview(self: *AppSession, origin: usize, plan: DropPlan, curs
     // 가상 order/depth를 프리뷰 모드로 투영 — 고스트 [lo,hi)는 접힘 게이트 예외로 강제 방출(사라짐 방지)·헤더 flip.
     // 반환 range는 vl.ghost(order 위치 도메인)를 방출 후 **표시-row 도메인**으로 옮긴 것(렌더가 그대로 씀).
     const rng = self.projectRowsCore(&self.sidebar_preview_rows, vl.order, vl.group_depth, vl.top_level, .{ .ghost_lo = vl.ghost_lo, .ghost_hi = vl.ghost_hi, .dragged_collapsed = dragged_collapsed });
+    self.appendRecoveredSessionRows(&self.sidebar_preview_rows);
     // subtree 길이(카드=1·그룹=groupSubtreeEnd-origin·none=0). 프리뷰 상태 메타(확정·origin 안정성 문서화용).
     const origin_len: usize = switch (plan) {
         .none => 0,

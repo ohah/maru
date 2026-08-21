@@ -116,6 +116,13 @@ pub extern fn maru_macos_coretext_shape_chrome_text(
     glyph_record_capacity: usize,
 ) void;
 
+/// Test-only observation of the hidden counters around the product cache branch. The native
+/// symbol has hidden visibility and is not part of the shipped app-host ABI.
+pub extern fn maru_macos_coretext_chrome_font_cache_stats_for_test(
+    out_hits: *u64,
+    out_misses: *u64,
+) void;
+
 pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

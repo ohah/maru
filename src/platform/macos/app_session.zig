@@ -2492,6 +2492,9 @@ const IncidentOwnerTerminationOutcome = enum(u32) {
 var app_process_incident_owner: session_host.app_process_incident_owner.AppProcessIncidentOwner = .{};
 const incident_publication_port = session_host.app_process_incident_owner;
 var app_session_host_coordinator: session_host.session_host_coordinator.SessionHostCoordinator = .{};
+// CR6a-1 Recovered Sessions는 Window별 상태가 아니라 앱 전역 derived projection이다. 실제 launch collector는
+// CR6a-2에서 이 owner를 갱신하며, secondary/quick은 별도 사본을 만들지 않고 primary가 이 rows를 빌려 렌더한다.
+var app_recovered_sessions_projection: session_host.recovered_sessions_projection.Projection = .{};
 var app_process_incident_nonce: u128 = 0;
 // 공개 종료 ABI는 mutable owner graph를 읽기 전에 이 immutable publication token으로 caller thread를 거른다.
 var app_process_incident_owner_thread = std.atomic.Value(u64).init(0);
@@ -3077,6 +3080,27 @@ pub const AppSession = struct {
     /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
     pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
         return workspace_ops.applyWorkspaceWindow(self, win);
+    }
+
+    /// CR6a-1 app-global projection publish seam. 아직 launch coordinator caller는 0이며 socket/adopt 효과도 없다.
+    pub fn replaceRecoveredSessionsProjection(
+        self: *AppSession,
+        ws: maru.session.workspace.Workspace,
+        inventories: []const maru.session.runtime_reconcile.HostInventory,
+        primary_window: bool,
+        workspace_generation: u64,
+    ) !void {
+        try app_recovered_sessions_projection.refresh(std.heap.smp_allocator, .{
+            .keep_alive = app_keep_alive_after_quit,
+            .primary_window = primary_window,
+            .quick_window = self.is_quick,
+            .workspace_generation = workspace_generation,
+        }, ws, inventories);
+    }
+
+    pub fn recoveredSessionsRows(self: *const AppSession, primary_window: bool) []const session_host.recovered_sessions_projection.Row {
+        if (!primary_window or self.is_quick or !app_keep_alive_after_quit) return &.{};
+        return app_recovered_sessions_projection.rows;
     }
     /// 본문 분리: app_session/workspace.zig(F10). ABI가 직접 부르므로 진입만 남긴다.
     pub fn focusWorkspaceInput(self: *AppSession) void {
@@ -62426,4 +62450,42 @@ test "CR5d-2 actual AppSession Window 이동은 stale close를 거부하고 fres
     };
 
     try RemoteSessionBackend.testing_api.runCr5d2WindowFixture(Fixture.run);
+}
+test "CR6a-1 AppSession은 recovered projection을 app-global primary owner 하나에만 게시한다" {
+    if (!is_macos) return error.SkipZigTest;
+    app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+    const old_policy = app_keep_alive_after_quit;
+    defer {
+        app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+        app_keep_alive_after_quit = old_policy;
+    }
+    app_keep_alive_after_quit = true;
+
+    var primary: AppSession = undefined;
+    primary.is_quick = false;
+    const runtimes = [_]maru.session.runtime_reconcile.Runtime{.{ .runtime_id = 9 }};
+    const hosts = [_]maru.session.runtime_reconcile.HostInventory{.{ .complete = .{
+        .authority = .{
+            .host_id = 1,
+            .adapter_generation = 1,
+            .upgrade_epoch = 1,
+            .authority_generation = 1,
+            .membership_generation = 1,
+            .workspace_generation = 1,
+        },
+        .runtimes = &runtimes,
+    } }};
+    try primary.replaceRecoveredSessionsProjection(.{ .windows = &.{} }, &hosts, true, 1);
+    try std.testing.expectEqual(@as(usize, 1), primary.recoveredSessionsRows(true).len);
+    try std.testing.expectEqual(@as(usize, 0), primary.recoveredSessionsRows(false).len);
+
+    var secondary: AppSession = undefined;
+    secondary.is_quick = false;
+    const before_generation = app_recovered_sessions_projection.generation;
+    try secondary.replaceRecoveredSessionsProjection(.{ .windows = &.{} }, &.{}, false, 2);
+    try std.testing.expectEqual(before_generation, app_recovered_sessions_projection.generation);
+    try std.testing.expectEqual(@as(usize, 1), primary.recoveredSessionsRows(true).len);
+
+    app_keep_alive_after_quit = false;
+    try std.testing.expectEqual(@as(usize, 0), primary.recoveredSessionsRows(true).len);
 }

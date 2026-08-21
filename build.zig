@@ -5567,6 +5567,65 @@ pub fn build(b: *std.Build) void {
         session_host_cr5d2_step.dependOn(&run_cr5d2_boundary_tests.step);
         boundary_step.dependOn(&run_cr5d2_boundary_tests.step);
     }
+    const session_host_cr6a1_step = b.step(
+        "test-session-host-cr6a1",
+        "CR6a-1 Recovered Sessions derived projection owner gates",
+    );
+    session_host_cr6a1_step.dependOn(session_host_cr5d2_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6a1_optimize| {
+        const cr6a1_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr6a1_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6a-1 AppSession은 recovered projection을"},
+        });
+        cr6a1_app_session_tests.root_module.linkFramework("AppKit", .{});
+        cr6a1_app_session_tests.root_module.linkFramework("Metal", .{});
+        cr6a1_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        cr6a1_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        cr6a1_app_session_tests.root_module.linkFramework("CoreText", .{});
+        cr6a1_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr6a1_app_session_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_cr6a1_app_session_tests = b.addRunArtifact(cr6a1_app_session_tests);
+        run_cr6a1_app_session_tests.addArg("--maru-expect-tests=4");
+        run_cr6a1_app_session_tests.setCwd(b.path("."));
+        session_host_cr6a1_step.dependOn(&run_cr6a1_app_session_tests.step);
+
+        const cr6a1_projection_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/recovered_sessions_projection.zig"),
+                .target = target,
+                .optimize = cr6a1_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6a recovered projection은"},
+        });
+        const run_cr6a1_projection_tests = b.addRunArtifact(cr6a1_projection_tests);
+        run_cr6a1_projection_tests.addArg("--maru-expect-tests=3");
+        run_cr6a1_projection_tests.setCwd(b.path("."));
+        session_host_cr6a1_step.dependOn(&run_cr6a1_projection_tests.step);
+
+        const cr6a1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr6a1_boundary.zig"),
+                .target = target,
+                .optimize = cr6a1_optimize,
+            }),
+            .filters = &.{"CR6a-1 경계는"},
+        });
+        const run_cr6a1_boundary_tests = b.addRunArtifact(cr6a1_boundary_tests);
+        run_cr6a1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr6a1_boundary_tests.setCwd(b.path("."));
+        session_host_cr6a1_step.dependOn(&run_cr6a1_boundary_tests.step);
+        boundary_step.dependOn(&run_cr6a1_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

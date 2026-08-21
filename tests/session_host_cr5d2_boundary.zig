@@ -117,7 +117,7 @@ test "CR5d-2 경계는 기존 Window 이동 뒤 fresh abandon commit 하나만 �
         },
     ));
 
-    const gate = between(build, "const session_host_cr5d2_step =", "const b3_1_boundary_tests =") orelse
+    const gate = between(build, "const session_host_cr5d2_step =", "const session_host_cr6a1_step =") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5d2\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5d2_step.dependOn(session_host_cr5d1_step);"));

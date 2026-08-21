@@ -36,7 +36,8 @@
 **축이 사라지며 함께 사라진 결함 계열**: "logical owner만 stale하고 실제 키 소스는 Metal"이라는 상태가 **구조적으로 불가능**해졌다(소유가 곧 활성 Term이므로). 그 race를 방어하던 코드와 테스트도 함께 정리했다.
 
 **`.dock_pending`(publish 대기 barrier)** — entry는 있는데 그 WKWebView가 아직 native publish/typed ack 전인 짧은 구간의 fail-closed owner다. 옛 `.dock_group`이 "보이는 group"을 키로 들었던 자리를 **그 파일의 `EntryId`**가 대신한다. 규칙:
-- `requestDockEntryFocus`는 `surface_id`가 이미 있어도 workspace 소유로 **승격하지 않는다** — typed completion(`completePendingDockFocus`)이나 실제 WebView primary-down만 승격이다. 그 전까지 키·붙여넣기·터미널 close는 barrier가 fail-closed로 소비한다.
+- `requestDockEntryFocus`는 `surface_id`가 이미 있어도 workspace 소유로 **승격하지 않는다** — typed completion(`completePendingDockFocus`)이나 실제 WebView primary-down만 승격이다. 그 전까지 키·붙여넣기·드롭은 barrier가 fail-closed로 소비한다.
+- **닫기(`close_focused`)는 barrier를 통과한다**(2026-08-21 사용자 지적으로 뒤집었다). barrier가 막아야 하는 것은 **대상이 불분명한 부수효과**(PTY write·paste·drop)이지 닫기가 아니다 — barrier가 소유 중이라는 것은 정의상 그 entry가 **활성 pane의 활성 Term**이라는 뜻이므로(`fileEntryIsFocusTarget`) 닫을 대상이 확정돼 있고, `.workspace`와 같은 `requestClose(.term_or_pane)`에 맡기면 2단계 dirty close도 마지막-창 종료 확인도 그대로 탄다. 옛 계약(무동작)은 **파일 탭을 닫아 승계된 탭도 파일일 때** 그 다음 `⌘W`를 통째로 삼켰다(승계 focus 요청이 곧바로 새 barrier를 만든다). 같은 barrier가 focus border까지 지우므로(아래 시각 의미) 화면에는 "포커스가 안 잡혀서 안 닫힌다"로 보였고, 실제로 그 탭을 한 번 클릭하면(=`focusFilePanelSurface`가 barrier를 해소하면) 다시 닫혔다.
 - barrier는 **활성 워크스페이스의 파일만** 소유한다(`pendingDockEntryOwnsInput`). 워크스페이스를 전환하거나 창 병합으로 그 파일이 배경에 앉으면 token을 **버린다**(`dropPendingDockFocusIfHidden`) — 보이지 않는 파일의 barrier가 화면에 있는 워크스페이스의 입력을 삼키면 안 되기 때문이다.
 - 파일 탭을 닫으면 pane의 `active_term` 승계가 고른 파일로 barrier를 **다시 발급**한다(승계가 터미널이면 `.workspace`).
 

@@ -65,6 +65,31 @@ pub const Identity = struct {
     }
 };
 
+/// **직접 연 핸들을 `fstat` 한 값**만 담는 봉투. 부모 순회가 준 항목 identity 와 섞이지 않게 **타입으로**
+/// 가른다 — 이름만 다른 두 필드로는 실수를 못 막는다는 것이 2026-08-21 결함의 교훈이다.
+///
+/// **축이 셋이다.** 같은 경로라도 재는 방법마다 다른 값이 나온다:
+///
+/// | 축 | 재는 방법 | 무엇을 가리키나 |
+/// |---|---|---|
+/// | `readdir` | 디렉터리 순회가 준 inode | 그 디렉터리 엔트리 |
+/// | `lstat` | `fstatat` + `SYMLINK_NOFOLLOW` | 링크 자신 |
+/// | `fstat` | 열린 핸들 | 링크가 가리키는 실체 |
+///
+/// macOS 에서는 셋이 실제로 갈린다 — 심링크(`/etc`)는 물론이고 **firmlink**(`/Users`·`/private`·
+/// `/opt`·`/cores`)에서는 `readdir` 이 주는 합성 inode 가 `lstat` 과도 다르다(실측: `Users`
+/// readdir=1152921500312570703 · lstat=14494 · fstat=14494).
+///
+/// 스냅샷 검증은 **`fstat` 축끼리만** 비교해야 하므로 그 값만 이 타입으로 감싼다. 다른 축의 값을 넣으려면
+/// 명시적으로 감싸야 하고, 그 자리가 곧 "축을 바꾸고 있다"는 표시가 된다.
+pub const ScanIdentity = struct {
+    value: Identity,
+
+    pub fn eql(self: ScanIdentity, other: ScanIdentity) bool {
+        return self.value.eql(other.value);
+    }
+};
+
 pub const RootMode = enum(u8) { inferred, explicit };
 
 pub const RootCapability = struct {
@@ -286,7 +311,18 @@ const Node = struct {
     name: []u8,
     path: []u8,
     kind: Kind,
+    /// **부모 디렉터리를 훑어 얻은** 그 항목의 identity. 링크는 링크 자신을 가리키고(`lstat` 축),
+    /// 삭제·이름변경 가드가 같은 축(`fstatat` + `SYMLINK_NOFOLLOW`)으로 다시 재 비교한다.
     identity: ?Identity = null,
+    /// **이 디렉터리를 직접 열어 잰** identity(`fstat` — 타입이 축을 봉인한다). 위 `identity`와 **축이 다르다** — 링크를 따라간
+    /// 실체를 가리키고, macOS 루트의 firmlink(`/Users`·`/private`·`/opt`·`/cores`)에서는 `readdir` 이
+    /// 주는 합성 inode 와도 다르다(실측 2026-08-21: `Users` readdir=1152921500312570703 · lstat=14494).
+    ///
+    /// **그래서 스냅샷 검증은 이 값끼리만 비교한다.** 예전에는 부모가 준 `identity` 를 기대값으로 삼고
+    /// 직접 잰 값과 견줬는데, 그 둘은 재배치가 없어도 어긋난다 — macOS 에서 root 를 `/` 로 열면 `System`
+    /// 을 뺀 거의 모든 항목이 걸려, 펼칠 때마다 "폴더가 바뀌었으니 다시 여세요" 안내가 다시 떴다
+    /// (사용자 보고 2026-08-21 — 안내가 끊이지 않아 조작이 막혔다).
+    scan_identity: ?ScanIdentity = null,
     children: std.ArrayList(Node) = .empty,
     loaded: bool = false,
     expanded: bool = false,
@@ -294,6 +330,20 @@ const Node = struct {
     /// git 이 무시하는 항목인가(`check-ignore` 결과). 기본 false = **모름** — 저장소가 아니거나 아직
     /// 안 물어본 상태에서 흐리게 그리지 않기 위해서다(`Row.ignored` 주석과 같은 계약).
     ignored: bool = false,
+
+    /// 노드를 **새로 만들며 이어받아야 하는 파일시스템 신원**을 한자리에서 옮긴다.
+    ///
+    /// **이 파일에는 그런 자리가 넷이다** — 복제(`clone`)·스냅샷 이전(`applySnapshotLimited`)·root
+    /// 재구성(`replaceExplicitRoots`)·root 트랜잭션(`cloneForRootTransaction`). 새 축 필드를 넣을 때
+    /// 넷을 다 고쳐야 한다는 규율이 **사람 기억에 의존하면 반드시 하나를 놓친다**: 2026-08-21 적대적
+    /// 검증에서 `scan_identity` 를 넣으며 넷 중 셋을 연달아 놓쳤고, 그때마다 재배치 감지가 조용히
+    /// 죽었다(빠뜨림은 게이트도 컴파일러도 못 잡는다 — 기존 테스트의 `expectError` 가 잡았다).
+    ///
+    /// 그래서 **옮기는 규칙을 함수 하나로 모은다.** 축이 또 늘면 여기만 고치면 된다.
+    fn inheritIdentityFrom(self: *Node, source: Node) void {
+        self.identity = source.identity;
+        self.scan_identity = source.scan_identity;
+    }
 
     fn deinit(self: *Node, allocator: std.mem.Allocator) void {
         for (self.children.items) |*child| child.deinit(allocator);
@@ -308,11 +358,12 @@ const Node = struct {
             .name = try allocator.dupe(u8, self.name),
             .path = undefined,
             .kind = self.kind,
-            .identity = self.identity,
             .loaded = self.loaded,
             .expanded = self.expanded,
             .loading = self.loading,
         };
+        // **신원은 같은 규칙을 지난다**(위 `inheritIdentityFrom` 주석 — 빠뜨리면 재배치 감지가 죽는다).
+        copy.inheritIdentityFrom(self.*);
         errdefer allocator.free(copy.name);
         copy.path = try allocator.dupe(u8, self.path);
         errdefer allocator.free(copy.path);
@@ -400,14 +451,16 @@ pub const Tree = struct {
             errdefer self.allocator.free(name);
             const scan = try self.allocator.dupe(u8, root.path);
             errdefer self.allocator.free(scan);
+            // subtree 는 곧 버리고 다시 읽지만 root 폴더 자체가 바뀐 것은 아니므로 **신원은 따라온다** —
+            // 안 옮기면 트랜잭션을 열 때마다 재배치 감지가 초기화된다.
             copy.roots.appendAssumeCapacity(.{
                 .name = name,
                 .path = path,
                 .kind = .directory,
-                .identity = root.identity,
                 .expanded = true,
                 .loading = true,
             });
+            copy.roots.items[copy.roots.items.len - 1].inheritIdentityFrom(root);
             copy.scan_requests.appendAssumeCapacity(scan);
         }
         try clonePathList(self.allocator, self.recent.items, &copy.recent);
@@ -644,19 +697,22 @@ pub const Tree = struct {
             errdefer self.allocator.free(owned_name);
             const scan_path = try self.allocator.dupe(u8, path);
             errdefer self.allocator.free(scan_path);
-            var preserved_identity: ?Identity = null;
+            // **신원은 남긴다.** root 목록을 다시 세우는 것은 그 폴더가 바뀌었다는 뜻이 아니다(다른
+            // root 를 더하거나 빼는 일이 대부분이다) — 버리면 다음 스캔이 "첫 스캔"이 되어 무엇이 오든
+            // 받아들이고 재배치 감지가 죽는다.
+            var previous: ?Node = null;
             for (self.roots.items) |root| if (std.mem.eql(u8, root.path, path)) {
-                preserved_identity = root.identity;
+                previous = root;
                 break;
             };
             staged_roots.appendAssumeCapacity(.{
                 .name = owned_name,
                 .path = owned_path,
                 .kind = .directory,
-                .identity = preserved_identity,
                 .expanded = true,
                 .loading = true,
             });
+            if (previous) |old_root| staged_roots.items[staged_roots.items.len - 1].inheritIdentityFrom(old_root);
             staged_scans.appendAssumeCapacity(scan_path);
         }
         for (self.roots.items) |*root| root.deinit(self.allocator);
@@ -921,13 +977,23 @@ pub const Tree = struct {
         return self.applySnapshotWithIdentity(directory_path, null, inputs);
     }
 
-    pub fn applySnapshotWithIdentity(self: *Tree, directory_path: []const u8, identity: ?Identity, inputs: []const EntryInput) !void {
+    /// **비교의 양변이 같은 축이어야 한다**(`scan_identity`) — 부모가 훑어 준 값은 링크 자신·firmlink
+    /// 합성 inode 라 직접 잰 값과 원래 다르다. 첫 스캔은 기준을 세우고(비교 없음) 그다음부터 재배치를
+    /// 잡는다: 같은 경로를 다시 열었는데 실체가 달라졌으면 그때가 진짜 `IdentityMismatch` 다.
+    pub fn applySnapshotWithIdentity(self: *Tree, directory_path: []const u8, identity: ?ScanIdentity, inputs: []const EntryInput) !void {
         const node = self.findNode(directory_path) orelse return error.NotFound;
-        if (node.identity) |expected| if (identity) |actual| {
+        if (node.scan_identity) |expected| if (identity) |actual| {
             if (!expected.eql(actual)) return error.IdentityMismatch;
         };
         try self.applySnapshotLimited(directory_path, inputs, max_materialized_nodes);
-        if (identity) |value| (self.findNode(directory_path) orelse return error.NotFound).identity = value;
+        if (identity) |value| {
+            const node_after = self.findNode(directory_path) orelse return error.NotFound;
+            node_after.scan_identity = value;
+            // **`identity` 도 계속 갱신한다.** 디렉터리 노드의 그 값은 예전부터 "직접 잰 값"이었고
+            // (부모가 준 항목 값이 아니라) 삭제·이름변경 가드가 그것을 쓴다 — 여기서 안 채우면 root
+            // 처럼 부모가 없는 노드는 영영 비어, 그 가드가 대상을 식별하지 못한다.
+            node_after.identity = value.value;
+        }
     }
 
     fn applySnapshotLimited(self: *Tree, directory_path: []const u8, inputs: []const EntryInput, node_limit: usize) !void {
@@ -975,6 +1041,9 @@ pub const Tree = struct {
                 next.loaded = old.loaded;
                 next.expanded = old.expanded;
                 next.loading = old.loading;
+                // **파일시스템 신원도 함께 옮긴다.** 기준선을 watcher refresh 마다 버리면 "같은 경로가
+                // 다른 실체로 바뀌었다" 를 영영 못 잡는다 — 그 자리가 곧 이 검사의 존재 이유다.
+                next.inheritIdentityFrom(old.*);
                 break;
             }
         }
@@ -1617,14 +1686,60 @@ test "file tree watcher requests normalize explorer and open-entry safety roots"
     try std.testing.expect(tree.takeWatchRequest() == null);
 }
 
+test "스냅샷 검증은 직접 잰 축끼리만 견준다 — 부모가 준 항목 identity 와 섞지 않는다" {
+    // 사용자 보고(2026-08-21): 탐색기 root 를 `/` 로 열면 "폴더가 바뀌었으니 다시 여세요" 안내가
+    // 끊이지 않아 조작이 막혔다. 원인은 **축이 다른 두 값을 견준 것**이다 — 부모 순회는 `readdir` 이
+    // 준 항목 정보를(심링크면 링크 자신, macOS firmlink 면 합성 inode) 싣고, 그 폴더를 펼치면 열린
+    // 핸들을 `fstat` 해 실체를 잰다. 실측: `/etc` 는 링크(1152921500312570782) 대 실체(808658951),
+    // `/Users` 는 firmlink 라 심링크가 아닌데도 readdir(1152921500312570703) 대 lstat/fstat(14494).
+    //
+    // 재배치가 없어도 어긋나므로 **첫 비교부터 거짓 경보**였다. 지금은 직접 잰 값이 기준선이 되고,
+    // 그 축끼리 달라졌을 때만 진짜 `IdentityMismatch` 다.
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/project"});
+
+    // 부모가 준 항목 identity(링크 자신 축) — 노드에 실린다.
+    const from_parent: Identity = .{ .device = 1, .inode = 111, .kind = @intFromEnum(IdentityKind.symlink) };
+    try tree.applySnapshot("/project", &.{.{ .name = "link", .kind = .symlink_directory, .identity = from_parent }});
+
+    // 그 폴더를 펼쳐 직접 잰 값은 **실체**라 위와 다르다. 옛 코드는 여기서 IdentityMismatch 였다.
+    const scanned: ScanIdentity = .{ .value = .{ .device = 1, .inode = 222, .kind = @intFromEnum(IdentityKind.directory) } };
+    try tree.applySnapshotWithIdentity("/project/link", scanned, &.{.{ .name = "inside.txt", .kind = .file }});
+
+    // 같은 축으로 다시 오면 통과한다(정상 refresh).
+    try tree.applySnapshotWithIdentity("/project/link", scanned, &.{.{ .name = "inside.txt", .kind = .file }});
+
+    // **재배치는 여전히 잡는다** — 같은 경로가 다른 실체를 열면 그때가 진짜 mismatch 다.
+    const replaced: ScanIdentity = .{ .value = .{ .device = 1, .inode = 333, .kind = @intFromEnum(IdentityKind.directory) } };
+    try std.testing.expectError(
+        error.IdentityMismatch,
+        tree.applySnapshotWithIdentity("/project/link", replaced, &.{}),
+    );
+
+    // 삭제·이름변경 가드가 읽는 `identity` 는 **계속 채워진다**(직접 잰 값 — 예전 동작 그대로).
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(allocator);
+    try tree.buildRows(allocator, &.{}, &rows);
+    for (rows.items) |row| switch (row) {
+        .directory => |dir| if (std.mem.eql(u8, dir.path, "/project/link")) {
+            try std.testing.expect(dir.identity != null);
+            try std.testing.expectEqual(@as(u64, 222), dir.identity.?.inode);
+        },
+        else => {},
+    };
+}
+
 test "file tree transaction clone is independent and pinned root rejects replacement identity" {
     const allocator = std.testing.allocator;
     var tree = Tree.init(allocator);
     defer tree.deinit();
     try tree.replaceExplicitRoots(&.{"/project"});
     const pinned: Identity = .{ .device = 7, .inode = 11, .kind = @intFromEnum(IdentityKind.directory) };
+    const pinned_scan: ScanIdentity = .{ .value = pinned };
     try std.testing.expect(tree.pinRootIdentity("/project", pinned));
-    try tree.applySnapshotWithIdentity("/project", pinned, &.{.{ .name = "docs", .kind = .directory }});
+    try tree.applySnapshotWithIdentity("/project", pinned_scan, &.{.{ .name = "docs", .kind = .directory }});
 
     var candidate = try tree.clone();
     defer candidate.deinit();
@@ -1632,7 +1747,7 @@ test "file tree transaction clone is independent and pinned root rejects replace
     try std.testing.expectEqual(@as(usize, 1), tree.rootCount());
     try std.testing.expectEqual(@as(usize, 2), candidate.rootCount());
 
-    const replaced: Identity = .{ .device = 7, .inode = 12, .kind = @intFromEnum(IdentityKind.directory) };
+    const replaced: ScanIdentity = .{ .value = .{ .device = 7, .inode = 12, .kind = @intFromEnum(IdentityKind.directory) } };
     try std.testing.expectError(error.IdentityMismatch, candidate.applySnapshotWithIdentity("/project", replaced, &.{}));
     try std.testing.expect(try candidate.removeExplicitRoot("/outside"));
     try std.testing.expectError(error.IdentityMismatch, candidate.applySnapshotWithIdentity("/project", replaced, &.{}));

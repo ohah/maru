@@ -577,7 +577,9 @@ pub fn updateFileTree(self: *AppSession) !void {
                         break :root_result;
                     }
                     self.file_tree_root_validation.?.round = 1;
-                    self.file_tree_root_validation.?.identity = identity;
+                    // root 검증도 같은 `fstat` 축이지만, root 계열(RootCapability·pin·mutation 가드)은
+                    // 아직 타입이 안 따라왔다 — 여기서 명시적으로 풀어 그 사실이 보이게 둔다(후속 범위).
+                    self.file_tree_root_validation.?.identity = identity.value;
                     break :root_result;
                 }
                 const expected_identity = pending.identity orelse {
@@ -595,7 +597,9 @@ pub fn updateFileTree(self: *AppSession) !void {
                     reportFileTreeRootOutcome(self, .identity_missing, .fp_root_capability_gone);
                     break :root_result;
                 };
-                if (!expected_identity.eql(actual_identity)) {
+                // 양변 다 `fstat` 축이다(기대값은 1라운드에서 같은 검증이 남긴 값) — root 계열이
+                // 아직 타입을 안 입어 여기서 풀어 비교한다(후속 범위).
+                if (!expected_identity.eql(actual_identity.value)) {
                     self.file_tree_root_validation = null;
                     reportFileTreeRootOutcome(self, .identity_changed, .fp_root_identity_changed);
                     break :root_result;
@@ -618,7 +622,9 @@ pub fn updateFileTree(self: *AppSession) !void {
                     },
                     .none => break :root_result,
                 }
-                if (result.identity) |identity| _ = candidate.pinRootIdentity(result.path, identity);
+                // pin 도 `fstat` 축을 받는다(`openValidatedFileTreeRow` 가 같은 축으로 다시 잰다) — root
+                // 계열이 아직 타입을 안 입어 풀어 넘긴다(후속 범위).
+                if (result.identity) |identity| _ = candidate.pinRootIdentity(result.path, identity.value);
                 resetFileTreeWatchRootsFor(self, &candidate, null) catch {
                     reportFileTreeRootOutcome(self, .watcher_stage_failed, .fp_root_watch_change_failed);
                     break :root_result;

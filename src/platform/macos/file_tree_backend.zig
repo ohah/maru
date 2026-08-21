@@ -27,7 +27,10 @@ pub const Result = struct {
     path: []u8,
     entries: std.ArrayList(OwnedEntry) = .empty,
     file_hash: u64 = 0,
-    identity: ?file_tree.Identity = null,
+    /// **열린 핸들을 `fstat` 한 값**(`file_tree.ScanIdentity`). 부모 순회가 항목에 실어 주는
+    /// identity 와는 축이 달라, 타입이 그 둘을 섞지 못하게 막는다(2026-08-21 결함 — `readdir`·
+    /// `lstat`·`fstat` 셋이 macOS 의 심링크·firmlink 에서 실제로 갈린다).
+    identity: ?file_tree.ScanIdentity = null,
     ok: bool = false,
     request_id: u64 = 0,
     expected_root_generation: u64 = 0,
@@ -273,7 +276,7 @@ fn validateRoot(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Resu
     const validated = (validateRootSnapshot(allocator, io, owned_path) catch return result) orelse return result;
     allocator.free(result.path);
     result.path = validated.path;
-    result.identity = validated.identity;
+    result.identity = .{ .value = validated.identity };
     result.validated_dir = validated.dir;
     result.ok = true;
     return result;
@@ -486,7 +489,7 @@ fn scanOpenedDirectory(allocator: std.mem.Allocator, io: std.Io, owned_path: []u
     var owned_dir = dir;
     defer owned_dir.close(io);
     const dir_identity = directoryIdentity(io, owned_dir) catch return result;
-    result.identity = dir_identity;
+    result.identity = .{ .value = dir_identity };
 
     // **ID 표를 한 번에 읽는다**(Windows). 항목마다 `stat` 을 부르면 1,000 항목에 58 ms 인데 이쪽은
     // 순회와 같은 0.4 ms 다 — 실측. POSIX 에서는 빈 표라 `entry.inode` 를 그대로 쓴다.
@@ -715,6 +718,55 @@ fn canonicalAncestorContains(io: std.Io, lexical_parent: []const u8, target_real
     return false;
 }
 
+test "심링크 폴더는 부모가 준 identity 와 직접 잰 identity 가 **원래** 다르다" {
+    // 스냅샷 검증이 두 축을 섞으면 안 되는 **물리적 근거**를 고정한다. 위 단위 테스트들은 값을 손으로
+    // 지어내므로 "실제로 갈린다"를 증명하지 못한다 — 여기서 진짜 파일시스템으로 잰다.
+    //
+    // 사용자 보고(2026-08-21): 탐색기 root 를 `/` 로 열면 "폴더가 바뀌었으니 다시 여세요" 가 끊이지
+    // 않았다. macOS 루트는 `/etc`·`/tmp`·`/var` 가 심링크이고 `/Users`·`/private`·`/opt`·`/cores` 가
+    // firmlink 라, 부모가 준 값과 직접 잰 값이 거의 모든 항목에서 어긋난다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "real", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "real/inside.txt", .data = "x" });
+    try tmp.dir.symLink(io, "real", "link", .{ .is_directory = true });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    // ① 부모를 훑어 얻은 `link` 항목의 identity — 링크 자신을 가리킨다.
+    var parent = scanDirectory(allocator, io, try allocator.dupe(u8, root));
+    defer parent.deinit(allocator, io);
+    try std.testing.expect(parent.ok);
+    var from_parent: ?file_tree.Identity = null;
+    for (parent.entries.items) |entry| {
+        if (std.mem.eql(u8, entry.name, "link")) from_parent = entry.identity;
+    }
+    const parent_identity = from_parent orelse return error.LinkEntryMissing;
+
+    // ② 그 폴더를 열어 직접 잰 identity — 링크가 가리키는 **실체**다.
+    const link_path = try std.fs.path.join(allocator, &.{ root, "link" });
+    defer allocator.free(link_path);
+    var scanned = scanDirectory(allocator, io, try allocator.dupe(u8, link_path));
+    defer scanned.deinit(allocator, io);
+    try std.testing.expect(scanned.ok);
+    const scan_identity = scanned.identity orelse return error.ScanIdentityMissing;
+
+    // **두 값은 원래 다르다.** 재배치가 없어도 그렇다 — 예전에는 이 둘을 견줘 매번 실패했다.
+    try std.testing.expect(!parent_identity.eql(scan_identity.value));
+
+    // 실체 쪽은 `real` 을 직접 스캔한 값과 같다(링크를 따라갔다는 증거).
+    const real_path = try std.fs.path.join(allocator, &.{ root, "real" });
+    defer allocator.free(real_path);
+    var real = scanDirectory(allocator, io, try allocator.dupe(u8, real_path));
+    defer real.deinit(allocator, io);
+    try std.testing.expect(real.ok);
+    try std.testing.expect(scan_identity.eql(real.identity.?));
+}
+
 test "file tree backend scans off-model with exclusions and symlink kinds" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -803,7 +855,7 @@ test "file tree root validation canonicalizes a directory alias and rejects a re
     defer valid.deinit(allocator, io);
     try std.testing.expect(valid.ok);
     try std.testing.expectEqualStrings(actual, valid.path);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.directory)), valid.identity.?.kind);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.directory)), valid.identity.?.value.kind);
 
     const file = try std.fs.path.join(allocator, &.{ root, "plain.txt" });
     var invalid = validateRoot(allocator, io, file);

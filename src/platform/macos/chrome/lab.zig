@@ -286,7 +286,7 @@ const editor_selection_lines = [_][]const u8{
 };
 
 /// 줄별 선택 범위. `render(self` 뒤부터 셋째 줄 `for (rows)`까지 — 세 줄에 걸친다.
-const editor_selection_marks_row0 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 10, .len = 18 }}; // "self: *View) void" 
+const editor_selection_marks_row0 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 10, .len = 18 }}; // "self: *View) void"
 const editor_selection_marks_row1 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 0, .len = 34 }}; // 줄 전체
 const editor_selection_marks_row2 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 0, .len = 14 }}; // "    for (rows)"
 const editor_selection_marks_none = [_]chrome.components.editor_view.frame.Mark{};

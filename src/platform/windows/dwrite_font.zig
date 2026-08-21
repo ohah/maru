@@ -562,15 +562,21 @@ pub const Rasterizer = struct {
         var exe_buf: [1024]u8 = undefined;
         const exe_dir = exeDirNeutral(&exe_buf) orelse "";
         var roots: [4][]const u8 = undefined;
-        // **정책은 여기 한 곳에 있다**(`assetSearchRoots` doc). 제품은 **exe 옆만** 본다 — 위로
-        // 올라가는 것과 작업 디렉터리를 보는 것은 공격자가 고를 수 있는 자리를 연다. 폰트는
-        // DirectWrite 가 **프로세스 안에서** 파싱하므로 출처를 좁혀 둔다.
+        // **정책은 여기 한 곳에 있다**(`assetSearchRoots` doc). 폰트는 DirectWrite 가 **프로세스
+        // 안에서** 파싱하므로 출처를 좁힌다. 손잡이가 **둘이고 서로 다르게** 걸린다:
         //
-        // 개발·테스트에서만 넓힌다: `zig-out/bin/maru.exe` 는 위로 두 단계가 저장소 루트이고, 테스트
-        // 바이너리는 `.zig-cache` 안에 있어 작업 디렉터리로만 닿는다.
-        const dev = builtin.mode == .Debug or builtin.is_test;
-        const cwd: []const u8 = if (dev) "." else "";
-        const up_levels: usize = if (dev) 2 else 0;
+        // **작업 디렉터리는 테스트에서만 본다.** 이것이 가장 나쁜 자리다 — 아무 저장소나
+        // `assets/fonts/<Family>/<Family>-Regular.ttf` 를 담아 둘 수 있고, 터미널 사용자는 낯선
+        // 저장소로 `cd` 하는 일이 잦다. 테스트 바이너리는 `.zig-cache` 안에 있어 여기로만 닿는다.
+        // **`Debug` 로는 안 켠다** — 오늘 만드는 Windows 바이너리는 전부 `Debug` 라
+        // (`standardOptimizeOption` 기본값이고 `.mise.toml` 의 Release 레시피는 macOS 뿐이다)
+        // 최적화 모드로 가르면 그 방어가 **하나도 안 걸린다**(적대적 검증 3 라운드).
+        //
+        // **위로 오르는 것은 개발 빌드에서 켠다.** `zig-out/bin/maru.exe` 는 위로 두 단계가 저장소
+        // 루트다. 이 자리가 공격자 것이 되려면 **maru 를 적대적 트리 안에서 빌드**해야 하는데,
+        // 그 지경이면 폰트가 문제가 아니다.
+        const cwd: []const u8 = if (builtin.is_test) "." else "";
+        const up_levels: usize = if (builtin.mode == .Debug or builtin.is_test) 2 else 0;
         for (maru.path_shape.assetSearchRoots(exe_dir, cwd, up_levels, &roots)) |root| {
             var path_buf: [1400]u8 = undefined;
             const joined = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, rel }) catch continue;

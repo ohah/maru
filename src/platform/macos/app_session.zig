@@ -14403,6 +14403,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedTabHover(self); // 캡처 전용: 탭 바 버튼 배경은 호버해야 얹힌다(같은 이유)
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
+        debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
         debug_fixtures.applyForcedBaseMenu(self); // 캡처 전용: 기준 목록은 그 메뉴를 한 번 더 눌러야 뜬다(§3.5)

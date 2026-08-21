@@ -859,6 +859,43 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
+/// 강제된 **편집기 caret**(캡처 전용, `MARU_FORCE_EDITOR_CARET=<줄>:<열>`, 1-based).
+///
+/// 상태바의 커서 위치 항목은 **선택이 있을 때만** 뜨는데(§2.2), 선택은 클릭으로만 생긴다 —
+/// 포인터가 없는 캡처 하니스에서는 그 항목이 있는 화면을 얻을 방법이 아예 없다. 커밋 메시지·
+/// 사이드바 호버를 같은 이유로 강제하는 것과 같은 자리다.
+///
+/// **줄·열은 사용자가 보는 축 그대로 받는다**(1-based, 열은 그래핌 클러스터). 여기서 offset으로
+/// 바꾸므로 픽스처가 내부 축을 알 필요가 없다.
+pub fn applyForcedEditorCaret(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_EDITOR_CARET") orelse return;
+    const spec = std.mem.span(raw);
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return;
+    const want_line = std.fmt.parseInt(usize, spec[0..colon], 10) catch return;
+    const want_col = std.fmt.parseInt(usize, spec[colon + 1 ..], 10) catch return;
+    if (want_line == 0 or want_col == 0) return;
+
+    const pane = pane_ops.activePane(self);
+    const term = pane.activeTerm();
+    if (term.kind != .editor) return;
+    const doc = term.rt.editor_doc orelse return;
+    const line = doc.file.lines.line(want_line - 1) orelse return;
+
+    // 열을 클러스터로 세어 offset을 찾는다 — 상태바가 되짚는 것과 **같은 축**이라야 캡처가
+    // 보여주는 값이 요청한 값과 같다.
+    var off = line.start;
+    var col: usize = 1;
+    const text = doc.file.doc.content[line.start..line.contentEnd()];
+    var i: usize = 0;
+    while (col < want_col and i < text.len) {
+        i = maru.grapheme.clusterEnd(text, i);
+        off = line.start + i;
+        col += 1;
+    }
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
+    self.metal_dirty = true;
+}
+
 pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
     if (self.debug_file_panel_opened or !self.dock_initialized) return;
     const raw = std.c.getenv("MARU_FILE_PANEL") orelse return;

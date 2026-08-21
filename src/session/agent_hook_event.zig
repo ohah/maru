@@ -105,7 +105,108 @@ pub const Event = struct {
     /// 서브에이전트 이벤트가 실어 오는 자식 식별자(계약 §2). 있으면 그 이벤트는 **자식의 것**이라 부모
     /// 상태에 그대로 섞으면 안 된다.
     agent_id: []const u8 = "",
+    /// `background_tasks` 배열의 **원문 슬라이스**(`[` 부터 `]` 까지). 비면 그 키가 없었다는 뜻이다.
+    ///
+    /// 값이 아니라 원문을 드는 이유: 이 목록에서 뽑아야 하는 것은 «지금 도는 서브에이전트 id 집합» 인데,
+    /// 그것을 `Event` 에 배열로 담으면 이벤트 하나당 수백 바이트가 되고 tick 당 상한(64개)만큼 곱해진다.
+    /// 슬라이스 하나(16 바이트)만 들고, 필요한 자리에서 `liveSubagentIds` 로 다시 훑는다. 슬라이스는
+    /// 읽기 버퍼를 가리키므로 **그 배치를 처리하는 동안만** 유효하다.
+    background_tasks_raw: []const u8 = "",
 };
+
+/// `liveSubagentIds` 의 결과.
+pub const SubagentTally = struct {
+    /// 담은 id 수.
+    count: usize = 0,
+    /// 담을 자리가 모자랐다 — **목록이 불완전하다**. 이때는 «없으니 끝났다» 로 읽으면 안 된다.
+    truncated: bool = false,
+    /// 목록을 읽다 모양이 어긋났다. 역시 판단 근거로 쓰지 않는다.
+    malformed: bool = false,
+};
+
+/// `background_tasks` 원문에서 **`type` 이 `subagent` 이고 `status` 가 `running` 인 항목의 `id`** 를 모은다.
+///
+/// 이것이 «아직 도는 자식» 의 목록이다. 여기 없는데 우리가 붙잡고 있는 자식은 **끝난 것**이다 — 종료
+/// 이벤트를 놓쳤거나(줄 유실) 담을 자리가 없었거나 한 유령이다.
+///
+/// ⚠️ `truncated`·`malformed` 면 목록이 진실의 일부일 뿐이므로 **회수 근거로 쓰면 안 된다**. 살아 있는
+/// 자식을 지우는 쪽이 훨씬 나쁜 실패다.
+pub fn liveSubagentIds(raw: []const u8, out: [][]const u8) SubagentTally {
+    var tally: SubagentTally = .{};
+    if (raw.len == 0) return tally;
+    var scan: Scanner = .{ .src = raw, .i = 0 };
+    if ((scan.peek() orelse return .{ .malformed = true }) != '[') return .{ .malformed = true };
+    scan.i += 1;
+
+    var depth: usize = 1;
+    var id: []const u8 = "";
+    var is_subagent = false;
+    var is_running = false;
+    var pending: enum { none, id, status, kind } = .none;
+
+    while (scan.i < raw.len) {
+        const ch = raw[scan.i];
+        if (ch == '"') {
+            const text = scan.rawString() orelse return .{ .malformed = true };
+            // 항목 하나의 깊이(2)에서만 본다 — 더 깊은 곳의 같은 이름에 걸리지 않게.
+            if (depth == 2) {
+                switch (pending) {
+                    .id => {
+                        id = text;
+                        pending = .none;
+                    },
+                    .status => {
+                        is_running = std.mem.eql(u8, text, "running");
+                        pending = .none;
+                    },
+                    .kind => {
+                        is_subagent = std.mem.eql(u8, text, "subagent");
+                        pending = .none;
+                    },
+                    .none => {
+                        if (std.mem.eql(u8, text, "id")) {
+                            pending = .id;
+                        } else if (std.mem.eql(u8, text, "status")) {
+                            pending = .status;
+                        } else if (std.mem.eql(u8, text, "type")) {
+                            pending = .kind;
+                        }
+                        if (pending != .none) {
+                            scan.skipWs();
+                            if (scan.i < raw.len and raw[scan.i] == ':') scan.i += 1;
+                        }
+                    },
+                }
+            }
+            continue;
+        }
+        scan.i += 1;
+        switch (ch) {
+            '[', '{' => depth += 1,
+            ']', '}' => {
+                depth -= 1;
+                if (depth == 1) {
+                    // 항목 하나가 끝났다 — 셋이 다 맞으면 담는다.
+                    if (is_subagent and is_running and id.len != 0) {
+                        if (tally.count < out.len) {
+                            out[tally.count] = id;
+                            tally.count += 1;
+                        } else {
+                            tally.truncated = true;
+                        }
+                    }
+                    id = "";
+                    is_subagent = false;
+                    is_running = false;
+                    pending = .none;
+                }
+                if (depth == 0) return tally;
+            },
+            else => {},
+        }
+    }
+    return .{ .malformed = true };
+}
 
 fn kindFromName(name: []const u8) Kind {
     const table = .{
@@ -162,7 +263,10 @@ pub fn parseLine(line: []const u8) ?Event {
         } else if (std.mem.eql(u8, key, "stop_hook_active")) {
             ev.stop_hook_active = scan.boolValue() orelse return null;
         } else if (std.mem.eql(u8, key, "background_tasks")) {
+            // 원문 슬라이스를 함께 잡는다 — 회수 규칙이 그것을 다시 훑는다(위 `liveSubagentIds`).
+            const raw_start = scan.i;
             ev.running_background_tasks = scan.runningTaskCount() orelse return null;
+            if (scan.i > raw_start) ev.background_tasks_raw = scan.src[raw_start..scan.i];
         } else if (std.mem.eql(u8, key, "tool_input")) {
             // 중첩 객체 안에서도 **키 위치**만 본다. 값 안에 같은 단어가 있어도 걸리지 않는다.
             if (!scan.expectObjectStart()) {
@@ -1123,4 +1227,52 @@ test "자식 이벤트는 agent_id 를 싣고 온다 — lead 이벤트는 아�
     const ev2 = parseLine(spawn).?;
     try testing.expectEqualStrings("조사", ev2.tool_description);
     try testing.expectEqual(@as(usize, 0), ev2.agent_id.len); // lead 이벤트라 자식 식별자가 없다
+}
+
+test "liveSubagentIds: 도는 서브에이전트의 id 만 모은다 — 실측 모양 그대로" {
+    // 실측(2026-08-21): `type: "subagent"` 항목의 `id` 가 수명 이벤트의 `agent_id` 와 **정확히 같다**.
+    // 그 사실이 회수 규칙의 근거다 — 이 목록에 없는데 우리가 붙잡고 있으면 그 자식은 끝난 것이다.
+    const raw =
+        "[{\"id\":\"ab8b2cd7ddd4dce44\",\"type\":\"subagent\",\"status\":\"running\",\"description\":\"List files\"}," ++
+        "{\"id\":\"done-1\",\"type\":\"subagent\",\"status\":\"completed\",\"description\":\"끝남\"}," ++
+        "{\"id\":\"sh-1\",\"type\":\"shell\",\"status\":\"running\",\"command\":\"sleep 9\"}]";
+    var out: [8][]const u8 = undefined;
+    const tally = liveSubagentIds(raw, &out);
+    try testing.expect(!tally.truncated and !tally.malformed);
+    try testing.expectEqual(@as(usize, 1), tally.count); // 도는 **서브에이전트**만
+    try testing.expectEqualStrings("ab8b2cd7ddd4dce44", out[0]);
+}
+
+test "liveSubagentIds: 자리가 모자라면 «불완전» 이라고 말한다 — 조용히 자르지 않는다" {
+    // 잘린 목록을 «없으니 끝났다» 로 읽으면 **살아 있는 자식을 지운다**. 그래서 자름을 드러낸다.
+    const raw =
+        "[{\"id\":\"a\",\"type\":\"subagent\",\"status\":\"running\"}," ++
+        "{\"id\":\"b\",\"type\":\"subagent\",\"status\":\"running\"}]";
+    var one: [1][]const u8 = undefined;
+    const tally = liveSubagentIds(raw, &one);
+    try testing.expect(tally.truncated);
+    try testing.expectEqual(@as(usize, 1), tally.count);
+}
+
+test "liveSubagentIds: 모양이 어긋나면 판단 근거로 쓰지 않는다" {
+    var out: [4][]const u8 = undefined;
+    try testing.expect(liveSubagentIds("{\"not\":\"an array\"}", &out).malformed);
+    try testing.expect(liveSubagentIds("[{\"id\":\"a\"", &out).malformed); // 닫히지 않았다
+    // 빈 원문은 «목록이 없었다» 이지 «비었다» 가 아니다 — 둘 다 회수하지 않는다.
+    const none = liveSubagentIds("", &out);
+    try testing.expect(!none.malformed and none.count == 0);
+}
+
+test "background_tasks 원문 슬라이스를 잡는다 — 회수 규칙이 그것을 다시 훑는다" {
+    const line = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":" ++
+        "[{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"running\"}],\"prompt_id\":\"p1\"}";
+    const ev = parseLine(line).?;
+    try testing.expectEqual(@as(usize, 1), ev.running_background_tasks);
+    try testing.expect(ev.background_tasks_raw.len != 0);
+    var out: [4][]const u8 = undefined;
+    const tally = liveSubagentIds(ev.background_tasks_raw, &out);
+    try testing.expectEqual(@as(usize, 1), tally.count);
+    try testing.expectEqualStrings("c1", out[0]);
+    // 그 뒤 키도 정상적으로 읽힌다 — 슬라이스를 잡느라 커서가 어긋나지 않았다.
+    try testing.expectEqualStrings("p1", ev.turn_key);
 }

@@ -192,6 +192,34 @@ pub const Progress = struct {
         return false;
     }
 
+    /// **목록에 없는 자식을 거둔다.** `live` 는 지금 도는 서브에이전트 id 들이다.
+    ///
+    /// 왜 필요한가: 우리가 붙잡는 근거는 «시작을 봤다» 인데, 그 종료를 못 볼 수 있다 — 줄이 유실되거나
+    /// (§4.3 동시 append), 담을 자리가 없었거나, 상한을 넘겼거나. 그러면 그 자식은 **유령**이 되어 배지를
+    /// 영영 붙잡는다. provider 가 실어 주는 목록이 그 유령을 정리해 준다.
+    ///
+    /// ⚠️ 호출자가 **목록이 완전할 때만** 부른다. 잘리거나 어긋난 목록으로 거두면 살아 있는 자식을
+    /// 지운다 — 이 층이 막으려는 조기 해제 그 자체다.
+    fn reapMissing(self: *Progress, live: []const []const u8) void {
+        var i: usize = 0;
+        while (i < self.child_count) {
+            var found = false;
+            for (live) |id| {
+                if (childKey(id) == self.children[i]) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                i += 1;
+                continue;
+            }
+            self.children[i] = self.children[self.child_count - 1];
+            self.child_count -= 1;
+            // 자리를 당겨 왔으므로 `i` 는 그대로 두고 다시 본다.
+        }
+    }
+
     pub fn turnKey(self: *const Progress) []const u8 {
         return self.turn_buf[0..self.turn_len];
     }
@@ -263,6 +291,14 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
     // 자식이 끝날 때 푼다(위 `.subagent_stop`).
     if (ev.agent_id.len == 0 and (ev.kind == .stop or ev.kind == .stop_failure)) {
         progress.turn_open = false;
+        // **여기서 유령을 거둔다**(계약 §2). lead 의 턴 끝은 목록이 가라앉은 자리이고, 붙잡을지 말지를
+        // 정하기 **직전**이라 그 판단이 최신 사실 위에서 이뤄진다. 다른 이벤트에서는 거두지 않는다 —
+        // 자식이 막 떴는데 목록이 아직 그것을 안 실은 순간에 거두면 살아 있는 자식을 지운다.
+        var live: [max_children][]const u8 = undefined;
+        const tally = event.liveSubagentIds(ev.background_tasks_raw, &live);
+        // **완전할 때만 근거로 쓴다.** 잘리거나 어긋난 목록은 진실의 일부일 뿐이다.
+        if (ev.background_tasks_raw.len != 0 and !tally.truncated and !tally.malformed)
+            progress.reapMissing(live[0..tally.count]);
         if (base == .idle and progress.child_count > 0) return .running;
     }
     return base;
@@ -1269,4 +1305,86 @@ test "상한을 넘긴 자식은 붙잡지 못한다 — 그 방향을 골랐다
     // 그리고 새 프롬프트가 셈을 버려 다음 턴은 깨끗하다.
     state = advance(&progress, state, evOf(.user_prompt_submit));
     try testing.expectEqual(@as(usize, 0), progress.childCount());
+}
+
+test "회수: 종료를 놓친 유령을 lead 의 턴 끝에서 거둔다" {
+    // 자식의 `SubagentStop` 이 유실되면(§4.3 인터리브·상한) 우리는 그 자식을 영영 붙잡는다. provider 가
+    // 실어 주는 목록이 그것을 정리해 준다 — 도는 목록에 없으면 끝난 것이다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, childEvId(.subagent_start, "ghost"));
+    state = advance(&progress, state, childEvId(.subagent_start, "alive"));
+    try testing.expectEqual(@as(usize, 2), progress.childCount());
+
+    // lead 가 끝난다. 목록에는 `alive` 만 도는 중이다 → `ghost` 는 거둬진다.
+    var stop = evOf(.stop);
+    stop.running_background_tasks = 1;
+    stop.background_tasks_raw = "[{\"id\":\"alive\",\"type\":\"subagent\",\"status\":\"running\"}]";
+    state = advance(&progress, state, stop);
+    try testing.expectEqual(@as(usize, 1), progress.childCount()); // 유령이 사라졌다
+    try testing.expectEqual(State.running, state); // 살아 있는 자식이 남아 붙잡는다
+
+    // 그 자식이 끝나면 그때가 진짜 턴 끝이다.
+    state = advance(&progress, state, childEvId(.subagent_stop, "alive"));
+    try testing.expectEqual(State.idle, state);
+}
+
+test "회수: 목록이 모두 끝났다고 말하면 lead 의 Stop 이 곧 턴 끝이다" {
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, childEvId(.subagent_start, "c1"));
+
+    var stop = evOf(.stop);
+    // 목록은 있는데 도는 서브에이전트가 없다(끝났거나 셸뿐이다).
+    stop.background_tasks_raw = "[{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"completed\"}]";
+    state = advance(&progress, state, stop);
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
+    try testing.expectEqual(State.idle, state);
+}
+
+test "회수: 잘리거나 어긋난 목록으로는 거두지 않는다 — 살아 있는 자식을 지우는 쪽이 더 나쁘다" {
+    // **대조**: 완전하고 비어 있는 목록은 «다 끝났다» 라는 뜻이라 거둔다. 잘린 목록과 구분되는 지점이다.
+    {
+        var progress: Progress = .{};
+        var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+        state = advance(&progress, state, childEvId(.subagent_start, "c1"));
+        var stop = evOf(.stop);
+        stop.background_tasks_raw = "[]";
+        state = advance(&progress, state, stop);
+        try testing.expectEqual(@as(usize, 0), progress.childCount());
+        try testing.expectEqual(State.idle, state);
+    }
+    // 어긋난 목록(닫히지 않음) — 거두지 않는다.
+    {
+        var progress: Progress = .{};
+        var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+        state = advance(&progress, state, childEvId(.subagent_start, "c1"));
+        var stop = evOf(.stop);
+        stop.background_tasks_raw = "[{\"id\":\"c1\",\"type\":\"subagent\"";
+        state = advance(&progress, state, stop);
+        try testing.expectEqual(@as(usize, 1), progress.childCount()); // 그대로 붙잡는다
+        try testing.expectEqual(State.running, state);
+    }
+    // 목록 자체가 없으면(키 부재) 역시 거두지 않는다.
+    {
+        var progress: Progress = .{};
+        var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+        state = advance(&progress, state, childEvId(.subagent_start, "c1"));
+        state = advance(&progress, state, evOf(.stop)); // background_tasks_raw 없음
+        try testing.expectEqual(@as(usize, 1), progress.childCount());
+        try testing.expectEqual(State.running, state);
+    }
+}
+
+test "회수는 lead 의 턴 끝에서만 한다 — 자식이 막 떴을 때 거두면 산 것을 지운다" {
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, childEvId(.subagent_start, "fresh"));
+
+    // 목록을 실은 **도구 호출**이 온다. 아직 그 자식이 목록에 안 실렸다고 하자.
+    var tool = evOf(.pre_tool_use);
+    tool.tool_name = "Bash";
+    tool.background_tasks_raw = "[]";
+    state = advance(&progress, state, tool);
+    try testing.expectEqual(@as(usize, 1), progress.childCount()); // 거두지 않는다
 }

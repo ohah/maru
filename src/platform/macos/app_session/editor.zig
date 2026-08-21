@@ -1817,7 +1817,12 @@ fn buildDiffSelectionMarks(self: *AppSession, term: *Term, side: DiffSide) ?[]co
 /// 비교 뷰 선택을 클립보드로. 복사할 것이 없으면 `false`.
 ///
 /// **빈 행은 건너뛴다.** 짝맞춤 행은 그 자리에 줄이 **없는** 것이므로, 개행을 내면 원본에 없던
-/// 빈 줄이 붙는다(줄 번호가 `null`인 행이 그것이다). §4.1g "비교 뷰"가 정한 규칙이다.
+/// 빈 줄이 붙는다(줄 끝이 `null`인 행이 그것이다 — `*_endings`). §4.1g "비교 뷰"가 정한 규칙이다.
+///
+/// **줄 끝은 원본에서 되돌린다** — `*_texts`는 화면용이라 떼어져 있어서, 그대로 이으면 CRLF 문서가
+/// LF로 바뀐다. 다만 **끝 개행 하나는 아직 갈린다**(§4.1g "아직 없는 것") — `splitLines`는 마지막
+/// 줄 끝 뒤에 줄을 만들지 않는데 단일 편집기의 `line_index`는 빈 줄을 하나 더 두므로, 본문 끝까지
+/// 고르면 단일 쪽에만 그 개행이 들어온다.
 pub fn copyDiffSelection(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
@@ -1825,7 +1830,15 @@ pub fn copyDiffSelection(self: *AppSession) bool {
     const st = term.rt.editor_diff orelse return false;
     if (st.view != .compare) return false;
     const texts = if (sel.side == .right) st.right_texts else st.left_texts;
-    const numbers = if (sel.side == .right) st.right_numbers else st.left_numbers;
+    // **줄 끝은 뗄 때 함께 굳혀 둔 것을 쓴다.** `*_texts`는 §3.8 가시화 때문에 줄 끝을 뗀 것이라
+    // 그것만 이어 붙이면 CRLF 문서가 LF로 바뀌어 나간다. 줄 번호로 원본 배열을 되짚지 않는 이유는
+    // 그 인덱스 산술이 맞다는 보장이 **출하 빌드에 없기** 때문이다(ReleaseFast에는 단언도 경계
+    // 검사도 없다).
+    const endings = if (sel.side == .right) st.right_endings else st.left_endings;
+    // **불변식을 확인하고 어긋나면 거절한다.** 길이가 같다는 것은 타입이 아니라 `materialize`가
+    // 지키는 것이라(같은 문장에서 같은 `rows.*.len`으로 잡는다) 여기서 확인할 값어치가 있다.
+    // 어긋난 채로 이어 붙이면 **틀린 바이트가 조용히 클립보드로 간다** — 안 하는 편이 낫다.
+    if (endings.len != texts.len) return false;
 
     // 정규화는 타입이 한다(위 `buildDiffSelectionMarks`와 같다) — 같은 네 줄을 복제하던 자리다.
     const lo = sel.sel.start();
@@ -1843,17 +1856,24 @@ pub fn copyDiffSelection(self: *AppSession) bool {
     // 줄**일 때 그 개행이 사라진다(실측: `keep`/``/`tail`에서 행 1~2를 고르면 `"tail"`만 나왔고,
     // 빈 줄만 고르면 아무것도 안 갔다). 단일 편집기는 문서 byte를 그대로 뜨므로 `"\n"`이 나온다 —
     // 같은 명령이 뷰에 따라 다르게 동작하면 안 된다.
-    var wrote_any = false;
+    // **직전 줄의 끝** — 다음 줄을 쓸 때 앞에 붙인다. `null`이면 아직 아무 줄도 안 썼다는 뜻이라
+    // 초기값을 지어낼 필요가 없다(첫 줄 앞에는 분리자가 없다).
+    var pending_ending: ?[]const u8 = null;
     for (lo_row..@min(hi_row + 1, texts.len)) |i| {
-        if (i < numbers.len and numbers[i] == null) continue; // 짝맞춤 빈 행 — 그 자리에 줄이 없다
+        // **짝맞춤 빈 행은 `endings`가 스스로 말한다**(`null` = 그 자리에 줄이 없다). 예전에는
+        // `numbers`를 봤는데, 그러면 이 배열의 안전성이 **다른 배열**에 달린다 — 짝맞춤 처리를
+        // 나중에 바꾸면 뜻 없는 값이 분리자로 새어 나간다.
+        const ending = endings[i] orelse continue;
         const text = texts[i];
         const from = if (i == lo_row) @min(lo_byte, text.len) else 0;
         const to = if (i == hi_row) @min(hi_byte, text.len) else text.len;
-        if (wrote_any) out.append(self.allocator, '\n') catch return false;
-        wrote_any = true;
+        if (pending_ending) |e| out.appendSlice(self.allocator, e) catch return false;
         if (to > from) out.appendSlice(self.allocator, text[from..to]) catch return false;
+        // **그 줄이 실제로 무엇으로 끝났는지**를 다음 분리자로 쓴다. `'\n'`을 하드코딩하면 CRLF
+        // 문서가 LF로 바뀌어 나간다.
+        pending_ending = ending;
     }
-    if (!wrote_any) return false; // 고른 것이 짝맞춤 빈 행뿐이다 — 그 자리에 줄이 없다
+    if (pending_ending == null) return false; // 고른 것이 짝맞춤 빈 행뿐이다 — 그 자리에 줄이 없다
 
     const captured = self.allocator.dupe(u8, out.items) catch return false;
     if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);

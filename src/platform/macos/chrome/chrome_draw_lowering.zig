@@ -455,6 +455,16 @@ pub fn appendBackgroundQuadsWithTerminalOpacity(
             else
                 quad.alpha;
             const fill = packRgba(tk.get(quad.fill_role), fill_alpha);
+            // **그라디언트는 두 값이 다 있을 때만 성립한다.** `gradient`(방향)와 `fill_role_end`(끝 색)
+            // 중 하나만 온 quad는 solid로 접는다 — 반쪽만 실어 놓고 "왜 그라디언트가 안 나오지" 를 화면에서
+            // 찾게 하는 것보다, 선언이 불완전하면 선언한 대로(단색) 그리는 쪽이 읽기 쉽다.
+            //
+            // 값은 셰이더의 `gradient_kind` 와 **같은 축**이다(`maru_metal_shader.h`: `<0.5` solid,
+            // `>1.5` 가로=local.x, 그 사이 세로=local.y). enum 값이 곧 그 숫자라 여기서 표를 다시 만들지
+            // 않는다 — 두 벌이 되면 방향이 조용히 뒤집힌다.
+            const gradient_end: ?chrome.tokens.ColorRole = if (quad.gradient == .solid) null else quad.fill_role_end;
+            const fill_end = if (gradient_end) |role| packRgba(tk.get(role), fill_alpha) else fill;
+            const gradient_kind: u32 = if (gradient_end == null) 0 else @intFromEnum(quad.gradient);
             // **색 없는 테두리는 폭도 0이다.** 여기서 null 역할을 RGBA 0으로 packing하는데 폭을 그대로
             // 넘기면, 셰이더가 그 띠를 투명하게 칠해 **그 자리가 뚫려 뒤가 비친다**. 버튼 배경이 아래
             // 표면과 같은 색이면 안 보이다가, 그 위에 호버 밴드처럼 다른 색이 깔리는 순간 어두운 링으로
@@ -486,9 +496,9 @@ pub fn appendBackgroundQuadsWithTerminalOpacity(
                     @floatFromInt(border_widths[3]),
                 },
                 .fill_color0 = fill,
-                .fill_color1 = fill,
+                .fill_color1 = fill_end,
                 .border_color = border,
-                .gradient_kind = 0,
+                .gradient_kind = gradient_kind,
                 .layer = layer,
                 // 클리핑은 shader가 한다 — rect를 미리 자르면 잘린 변에 없어야 할 corner radius와 border
                 // stroke가 생긴다. 여기서는 component가 실어 보낸 뷰포트를 backing 좌표로 옮기기만 한다.
@@ -968,6 +978,46 @@ test "appendBackgroundQuads drops an empty clip instead of inverting it into no 
     appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 0, 0, &quads, 2);
     try std.testing.expectEqual(@as(usize, 2), quads.items.len);
     for (quads.items) |q| try std.testing.expectEqual(@as(f32, 0), q.y);
+}
+
+test "gradient 선언이 GPU quad 까지 전달된다(조용히 버려지지 않는다)" {
+    // 이 배선은 **양끝만 있고 가운데가 끊겨 있었다**: 셰이더는 `fill0`/`fill1`/`gradient_kind` 로 이미
+    // 그라디언트를 그리고 컴포넌트 API 에도 `gradient`/`fill_role_end` 가 선언돼 있었는데, 이 lowerer 가
+    // 둘 다 읽지 않고 `gradient_kind = 0`·`fill_color1 = fill` 을 하드코딩했다. 그래서 그 필드를 쓰면
+    // **아무 일도 안 일어나고 에러도 안 났다** — 이 저장소가 반복해서 당한 형태(두 벌이 갈리는데 조용히
+    // 통과)라 소비처가 생기기 전에 테스트로 못 박는다.
+    const Rgb = maru.color.Rgb;
+    var palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 });
+    palette.set(.surface_bg, .{ .r = 0x10, .g = 0x20, .b = 0x30 });
+    palette.set(.accent_bar, .{ .r = 0x40, .g = 0x50, .b = 0x60 });
+    const tk = chrome.Tokens{ .palette = palette };
+    const ops = [_]chrome.draw.Op{
+        // ① 방향과 끝 색이 **둘 다** 있으면 그대로 실린다. enum 값이 곧 셰이더의 `gradient_kind` 다.
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg, .fill_role_end = .accent_bar, .gradient = .horizontal } },
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg, .fill_role_end = .accent_bar, .gradient = .vertical } },
+        // ② 반쪽 선언은 solid 로 접는다 — 끝 색만 있고 방향이 없다.
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg, .fill_role_end = .accent_bar } },
+        // ③ 방향만 있고 끝 색이 없다.
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .fill_role = .surface_bg, .gradient = .horizontal } },
+    };
+
+    var quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    defer quads.deinit(std.testing.allocator);
+    appendBackgroundQuads(std.testing.allocator, &.{.{ .layer = .sidebar, .ops = &ops }}, &tk, 0, 0, &quads, 2);
+    try std.testing.expectEqual(@as(usize, 4), quads.items.len);
+
+    // 셰이더 규약: `<0.5` solid, `>1.5` 가로(local.x), 그 사이 세로(local.y).
+    try std.testing.expectEqual(@as(u32, 2), quads.items[0].gradient_kind);
+    try std.testing.expectEqual(@as(u32, 1), quads.items[1].gradient_kind);
+    // 끝 색이 시작 색과 **달라야** 그라디언트다 — 같으면 배선이 여전히 끊긴 것이다.
+    try std.testing.expect(quads.items[0].fill_color0 != quads.items[0].fill_color1);
+    try std.testing.expectEqual(quads.items[0].fill_color1, quads.items[1].fill_color1);
+
+    // 반쪽 선언 둘은 solid: kind 0 이고 두 색이 같다.
+    for (quads.items[2..]) |q| {
+        try std.testing.expectEqual(@as(u32, 0), q.gradient_kind);
+        try std.testing.expectEqual(q.fill_color0, q.fill_color1);
+    }
 }
 
 test "색 없는 테두리는 폭이 0으로 정규화된다(투명한 띠가 배경을 뚫지 않는다)" {

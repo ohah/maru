@@ -1890,18 +1890,39 @@ test "DSEL3 그려진 것이 곧 클릭이 답한 것이다 — 스크롤·열�
     fx.term.file_entry = &entry;
     poll(fx.session, fx.term);
     try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .compare);
-    fx.term.rt.editor_wrap = false;
 
     const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 200 };
 
+    // **랩 켬·끔을 둘 다 돈다.** 랩이 켜지면 한 논리 행이 여러 시각 행이 되고 `v.line`이 그 행들
+    // 모두에서 같다 — 그 축을 안 재면 "마지막 시각 행 = 마지막 행"이라는 전제가 판정자에 숨는다
+    // (적대적 검증이 지적한 자리다).
+    for ([_]bool{ false, true }) |wrap| {
+        fx.term.rt.editor_wrap = wrap;
+        try runDsel3Pass(fx.session, fx.term, leaf, allocator, wrap);
+    }
+}
+
+fn runDsel3Pass(
+    session: *AppSession,
+    term: *Term,
+    leaf: maru.session.SplitRect,
+    allocator: std.mem.Allocator,
+    wrap: bool,
+) !void {
+    const fx = .{ .session = session, .term = term };
+
     // **세로로 굴리고 오른쪽 열만 가로로 민다.** 둘 다 축이 하나씩 더 붙는 자리다 —
     // 세로는 `first_line`(그것을 빠뜨려 클릭 7발이 전부 어긋났다), 가로는 열마다 각자다(§3.5).
+    fx.term.rt.editor_first_line = 0; // 각 회차를 같은 자리에서 시작한다
     _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -7);
+    // 랩이면 가로 축이 없다(`effectiveFirstCol`) — 그때는 밀어도 그림이 같다.
     fx.term.rt.editor_first_col_right = 4;
 
     var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
     defer drawn.dl.deinit(allocator);
     try testing.expect(fx.term.rt.editor_first_line > 0); // 전제: 실제로 굴렀다
+    const st_check = fx.term.rt.editor_diff.?;
+    _ = st_check;
 
     const g = fx.term.rt.editor_diff_hit_geom;
     const st = fx.term.rt.editor_diff.?;
@@ -1928,7 +1949,7 @@ test "DSEL3 그려진 것이 곧 클릭이 답한 것이다 — 스크롤·열�
             bad += 1;
         }
     }
-    std.debug.print("[DSEL3] first_line={d} judged={d} bad={d}\n", .{ fx.term.rt.editor_first_line, judged, bad });
+    std.debug.print("[DSEL3] wrap={} first_line={d} judged={d} bad={d}\n", .{ wrap, fx.term.rt.editor_first_line, judged, bad });
     try testing.expect(judged >= 40); // 판정할 것이 실제로 있다
     try testing.expectEqual(@as(usize, 0), bad);
 }

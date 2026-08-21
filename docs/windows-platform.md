@@ -1666,6 +1666,68 @@ std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateGlyphRunAnalysis") == 23)
 
 **설계는 여기 안 적는다.** 이 문서가 앞으로 할 일을 적었을 때 세 번 다 고쳐야 했고(§2m.4·그 직후 가설·
 §2m.10), 잰 것을 적었을 때는 고칠 게 없었다. 다리의 모양은 구현이 정하고, 끝난 뒤 실제 모양을 적는다.
+
+### 2m.13 셰이핑 다리는 **한 층 위**다 (실측 2026-08-21)
+
+§2m.12 는 DirectWrite 의 저수준(`IDWriteTextAnalyzer` + `IDWriteFontFallback`)을 재고 A 를 골랐다.
+그 결정의 **근거는 그대로 유효하다** — 스크립트 구간 판정과 폰트 폴백은 OS 가 한다. **틀린 것은 층이다.**
+
+§2m.12 가 저수준을 고른 이유는 하나였다: *"COM 구현은 이 저장소에 선례가 없어 위험하다"*. 그런데 같은
+문서가 그 전제를 스스로 무너뜨렸다 — `IDWriteTextAnalysisSource` 를 구현해 DirectWrite 가 우리를 되불렀다.
+**COM 구현이 되는 순간, 저수준을 고를 이유가 남지 않는다.** 그래서 고수준(`IDWriteTextLayout` +
+`IDWriteTextRenderer`)을 재 봤다. 그쪽이 CoreText `CTLine` 의 **대칭 자리**다.
+
+**출력 여섯을 전부 한 길에서 받았다.** `"Wi->l 한글 😀 tail"` 하나를 `CreateTextLayout` → `Draw` 로 흘렸다:
+
+```text
+Draw hr=0  runs=6  glyphs=15
+런별 문자범위(pos,len) = (0,6) (6,2) (8,1) (9,2) (11,1) (12,4)
+런별 폰트 = Cascadia Code / Malgun Gothic / Cascadia Code / Segoe UI Emoji(컬러) / Cascadia Code / Cascadia Code
+첫 런 ids = 194 299 842 1437 323 861     advances = 9.4 ×6
+```
+
+| 출력 | 어디서 오는가 |
+|---|---|
+| ① advance | `DWRITE_GLYPH_RUN.glyphAdvances` — 9.4 등폭 유지 |
+| ② 글리프↔문자 | `DWRITE_GLYPH_RUN_DESCRIPTION` 의 `clusterMap`·`textPosition`·`stringLength` |
+| ③ left overhang | `GetDesignGlyphMetrics(run.fontFace)` — 저수준과 동일 |
+| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 |
+| ⑤ 말줄임 | `SetWordWrapping(NO_WRAP)` + `CreateEllipsisTrimmingSign` + `SetTrimming` |
+| ⑥ 컬러 글리프 | `run.fontFace` 에 `COLR`/`sbix` 테이블이 있는가 |
+
+**`ids 842,1437` 이 저수준에서 잰 `->` 합자와 같은 값이다.** 두 길이 같은 셰이퍼를 탄다는 뜻이고, 고수준을
+써도 합자·커닝을 잃지 않는다는 확인이다.
+
+**⑤ 가 갈림길이다.** 저수준에는 말줄임이 없어 우리가 손으로 짜야 했다 — 어디서 자를지, 무엇을 붙일지,
+자른 뒤 advance 를 어떻게 다시 맞출지가 전부 우리 몫이다. 고수준은 세 번의 호출로 끝난다:
+
+```text
+폭 60px, NO_WRAP + EllipsisTrimmingSign → runs=1 glyphs=5 말줄임기호=1     (자르기 전 15 글리프)
+```
+
+**첫 시도는 15 → 15 로 안 줄었다.** 줄바꿈이 켜져 있으면 DirectWrite 는 자르지 않고 **다음 줄로 넘긴다**.
+말줄임은 `NO_WRAP` 일 때만 일어난다. `hr=0` 이 세 번 다 나왔으므로 **HRESULT 로는 못 잡는 조건**이고,
+글리프 수를 세야만 드러난다.
+
+**⑥ 은 macOS 와 같은 판정을 쓴다.** `maru_font_is_color` 는 `sbix`/`COLR` 테이블 유무로 **런 폰트 단위**
+판정한다(글리프 단위가 아니다). Windows 짝은 `IDWriteFontFace.TryGetFontTable` 이고, 태그가
+**리틀엔디언 4CC** 라 CoreText 와 바이트 순서가 반대다. 이모지 런에서 `Segoe UI Emoji` + `COLR` 로 확인했다.
+
+**그래서 다리는 고수준으로 간다.** macOS 가 `CTLine` 하나에 맡기는 것을 Windows 도 `IDWriteTextLayout`
+하나에 맡긴다 — §2m.12 가 "일관성" 을 근거로 A 를 고른 논리를 끝까지 민 결과다.
+
+**구현할 COM 객체가 바뀐다.** `IDWriteTextAnalysisSource`(8 슬롯) 대신 `IDWriteTextRenderer`(10 슬롯 —
+IUnknown 3 + `IDWritePixelSnapping` 3 + 자기 것 4)다. 부담은 비슷하고, 대신 스크립트 분석 호출과 런별 face
+교체가 통째로 사라진다.
+
+**`QueryInterface` 를 아무 IID 에나 통과시키면 안 된다.** probe 에서 그렇게 두었더니 `Draw` 가 크래시했다.
+DirectWrite 가 다른 인터페이스를 묻고, 우리가 준 포인터를 그 인터페이스로 알고 **엉뚱한 vtable 슬롯**으로
+뛴다. 이건 슬롯을 잘못 센 것과 증상이 같아서 한참 그쪽을 뒤졌다 — `IUnknown`·`IDWritePixelSnapping`·
+`IDWriteTextRenderer` 셋만 받고 나머지는 `E_NOINTERFACE` 로 막으니 바로 돌았다.
+**§2m.12 의 "새 인터페이스마다 슬롯 assert" 옆에 이것을 나란히 둔다** — 우리가 구현하는 COM 객체는
+슬롯과 IID 를 **둘 다** 틀릴 수 있고, 증상이 구분되지 않는다.
+
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

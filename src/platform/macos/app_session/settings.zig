@@ -1021,7 +1021,7 @@ pub fn adjustSelectedSetting(self: *AppSession, dir: i8) void {
 pub fn reapplyLoadedConfig(self: *AppSession) void {
     applyLoadedConfig(self, true);
     agent_ops.reconcileAgentStatusline(self); // 토글을 껐으면 여기서 복원·제거까지 간다
-    agent_ops.reconcileAgentHooks(self); // 훅 게이트는 «끔 = 설치하지 않음»이라 여기서 제거까지 가지는 않는다
+    agent_ops.reconcileAgentHooks(self); // 훅 게이트도 여기서 설치·**제거**까지 간다(계약 §5 — 끄면 지운다)
 }
 
 /// reapplyLoadedConfig 본체. 메모리의 loaded_config(스키마 필드 in-place 변경)에서 appearance를 다시 resolve해 적용한다.

@@ -41,6 +41,14 @@ zig_provider=$(sed -n 's/^pub const max_provider_len: usize = \([0-9]*\);$/\1/p'
 [ -n "$zig_provider" ] || fail_early "provider 이름 상한 상수를 찾지 못했다: $ev_src"
 zig_limit=$((zig_kib * 1024 - zig_provider - 1))
 grep -q "gt $zig_limit" "$golden" || fail_early "golden 이 낡았다 — payload 상한이 $zig_limit 인데 fixture 와 다르다"
+# 표식·상한만 보면 **둘 다 안 건드리는 로직 변경**을 놓친다 — 실제로 그렇게 골든이 조용히 낡았다(상한
+# 초과 시 이름을 살리는 `case` 사슬을 넣었는데 두 앵커가 다 그대로였다). 커맨드는 이제 세트의 이름을
+# 전부 담으므로 그것을 세 번째 앵커로 쓴다: 세트가 바뀌거나 그 사슬이 사라지면 여기서 멈춘다.
+ev_names=$(sed -n 's/^[[:space:]]*\.{ \.name = "\([A-Za-z]*\)".*/\1/p' "$src" | sort -u)
+[ -n "$ev_names" ] || fail_early "빌더에서 이벤트 이름을 찾지 못했다: $src"
+for ev_name in $ev_names; do
+  grep -q "\"$ev_name\"" "$golden" || fail_early "golden 이 낡았다 — 세트의 '$ev_name' 이 fixture 에 없다"
+done
 
 cmd=$(sed "s|__LOG_DIR__|$logdir|g" "$golden")
 
@@ -82,12 +90,21 @@ printf '%s\n%s\n' "$payload" "$big" | env MARU_PANE_ID=8 /bin/sh -c "$cmd" || fa
 [ "$(wc -l < "$logdir/8.ndjson")" -eq 1 ] || fail "첫 줄만 기록해야 한다"
 pass "stdin 드레인"
 
-echo "4) 상한을 넘긴 payload 는 표식으로 접힌다 — 조용히 사라지지 않는다"
+echo "4) 상한을 넘긴 payload 는 접히되 **이름은 살아남는다** — 턴 끝을 잃으면 배지가 안 풀린다"
 huge=$(awk 'BEGIN { printf "{\"hook_event_name\":\"Stop\",\"x\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"}" }')
 printf '%s\n' "$huge" | env MARU_PANE_ID=9 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
-grep -q '__oversized__' "$logdir/9.ndjson" || fail "상한 표식이 없다"
+# **이름이 살아야 한다.** `Stop` 은 최종 답변 전문을 실어 상한을 넘길 수 있는데(실사용에서 codex payload
+# 하나가 실제로 넘겼다), 이름까지 버리면 그 턴의 끝을 못 보고 배지가 «진행 중» 에 멈춘다.
+grep -q '"hook_event_name":"Stop"' "$logdir/9.ndjson" || fail "상한을 넘겼다고 이름까지 버렸다"
+if grep -q '__oversized__' "$logdir/9.ndjson"; then fail "이름을 알 수 있는데 표식으로 접었다"; fi
 [ "$(wc -c < "$logdir/9.ndjson")" -lt 200 ] || fail "상한을 넘긴 원문이 그대로 실렸다"
-pass "상한 접기"
+pass "상한 접기(이름 보존)"
+
+echo "4b) 이름을 모르면 표식으로 접는다 — 모르는 것을 지어내지 않는다"
+huge2=$(awk 'BEGIN { printf "{\"hook_event_name\":\"NoSuchEvent\",\"x\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"}" }')
+printf '%s\n' "$huge2" | env MARU_PANE_ID=11 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+grep -q '__oversized__' "$logdir/11.ndjson" || fail "모르는 이름인데 표식이 없다"
+pass "상한 접기(미지 이름)"
 
 echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
 # **stderr 까지 조용해야 한다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 리다이렉션 대상이

@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const event = @import("agent_hook_event.zig");
+const transcript = @import("agent_transcript.zig");
 
 /// 이 Term 의 상태·알림이 **어디서 오는가**.
 pub const Mode = enum {
@@ -51,23 +52,212 @@ pub const State = @import("agent_observer.zig").State;
 /// - `stop_hook_active` 가 참인 `Stop` 은 **턴 종료로 세지 않는다**(서브에이전트·백그라운드로 재발화한다).
 /// - `background_tasks` 가 비어 있지 않으면 **완료로 단정하지 않는다** — 턴은 끝났어도 셸 작업이 돌고 있다.
 pub fn next(current: State, ev: event.Event) State {
+    // **자식 이벤트는 부모 상태를 옮기지 않는다**(계약 §2). 서브에이전트 활동은 `agent_id` 를 실은
+    // 이벤트로 따로 오는데, 그것을 그대로 부모에 먹이면 자식이 도구를 부를 때마다 부모가 «진행 중» 이
+    // 되고 자식이 끝날 때 부모가 «완료» 가 된다 — 부모의 턴과 무관하게 배지가 춤춘다.
+    if (ev.agent_id.len != 0) return current;
+
     return switch (ev.kind) {
         // 세션이 시작됐다. 아직 턴이 없으므로 «대기» 다.
         .session_start => .idle,
         .user_prompt_submit => .running,
         .pre_tool_use => .running,
         .permission_request => .blocked,
+        // **오류로 끝난 턴**(계약 §2). provider 가 `Stop` **대신** 보내므로, 이것을 안 받으면 그 pane 은
+        // 영영 «진행 중» 에 멈춘다. 끝은 끝이라 같은 전이를 쓴다 — 문구만 알림에서 갈린다.
+        .stop_failure => .idle,
         .stop => blk: {
             if (ev.stop_hook_active) break :blk current; // 재발화 — 턴이 끝난 것이 아니다
-            // 셸 작업이 남아 있으면 여전히 «돌고 있다».
-            break :blk if (ev.has_background_tasks) .running else .idle;
+            // **아직 도는 것이 있으면** 여전히 «돌고 있다». 끝났거나 실패한 항목도 목록에 남으므로
+            // «비어 있나» 가 아니라 «running 이 있나» 로 본다(그 차이가 «영영 안 풀리는 배지» 를 만든다).
+            break :blk if (ev.running_background_tasks > 0) .running else .idle;
         },
         // 알림은 상태를 옮기지 않는다(알림 소비는 §6이 따로 소유한다).
         .notification => current,
+        // 서브에이전트 수명은 **여기서 다루지 않는다** — 세는 일이라 진행 상태가 필요하고, 그것은
+        // `advance` 가 소유한다. `next` 는 «이벤트 하나 → 상태» 만 보는 순수 전이로 남긴다.
+        .subagent_start, .subagent_stop => current,
         // 상한을 넘겨 접힌 이벤트와 모르는 이벤트는 **상태를 흔들지 않는다** — 내용을 모르는 채로 옮기면
         // 배지가 틀린 값에 고정된다.
         .oversized, .unknown => current,
     };
+}
+
+/// 한 턴의 진행 상태. **자식이 몇이나 도는지**와 **lead 가 이미 끝났는지**를 든다.
+///
+/// 왜 필요한가(계약 §2): 서브에이전트가 도는 동안 lead 의 `Stop` 은 턴 끝이 아니다. 그것을 완료로 다루면
+/// **자식이 아직 도는데 «완료» 알림이 나간다.** 반대로 lead `Stop` 에서 무작정 «진행 중» 을 유지하면 이번엔
+/// 배지가 안 풀린다 — 자식이 끝나는 것을 봐야 풀 수 있고, 그래서 **세야** 한다.
+/// 자식 하나의 식별자. 실측 길이는 claude 17 자·codex uuid 36 자라 40 이면 넉넉하다.
+pub const ChildId = struct {
+    buf: [40]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn slice(self: *const ChildId) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// 한 턴에 동시에 담을 자식 수. 넘치면 담지 못한 자식의 종료를 못 알아보지만, 담긴 것들이 끝나면
+/// 배지는 풀리고 다음 프롬프트가 셈을 버린다(§2 리셋).
+pub const max_children: usize = 8;
+
+pub const Progress = struct {
+    /// 지금 도는 자식들의 `agent_id`.
+    ///
+    /// **개수로 세면 안 된다**(2026-08-21 실사용이 뒤집었다). claude 는 우리가 시작을 본 적 없는
+    /// 내부 에이전트의 `SubagentStop` 도 보낸다 — 한 턴에서 `SubagentStart` 는 하나였는데
+    /// `SubagentStop` 이 **다섯 개의 서로 다른 `agent_id`** 로 왔고, 그중 우리 것의 짝은 **맨 마지막**
+    /// 이었다. 개수를 세면 남의 첫 종료에서 이미 0 이 되어 **자식이 도는데 배지가 풀린다**.
+    ///
+    /// 그래서 **우리가 시작을 본 id 만** 담고, 그 id 의 종료에만 반응한다. 짝 없는 종료는 남의 것이라
+    /// 무시한다.
+    children: [max_children]ChildId = @splat(.{}),
+    child_count: u8 = 0,
+    /// **lead 의 턴이 아직 열려 있는가.** 프롬프트·도구 호출처럼 lead 가 «돌고 있다» 를 뜻하는 이벤트가
+    /// 열고, lead 의 `Stop`/`StopFailure` 가 닫는다.
+    ///
+    /// 왜 «lead 가 끝났다» 가 아니라 «열려 있다» 인가: 마지막 자식이 끝났을 때 배지를 풀지 말지는
+    /// **lead 가 아직 일하는가** 로 갈린다. 「끝났다」 플래그로 물으면 «아직 시작도 안 했다» 와
+    /// «이미 끝났다» 가 같은 값(거짓)이 되어, 대기 상태에 자식 한 쌍이 오면 배지가 «진행 중» 에
+    /// 갇힌다(전수 탐색이 그 자리를 짚었다 — `SubagentStart` 는 `running` 으로 밀고, 이어진
+    /// `SubagentStop` 은 풀어 줄 근거가 없어 그대로 둔다). 「열려 있다」 로 물으면 그 둘이 갈린다.
+    turn_open: bool = false,
+    /// 지금 보고 있는 턴의 식별자(claude `prompt_id` / codex `turn_id`). 빈 값 = 아직 못 봤다.
+    ///
+    /// 왜 드나: 턴 리셋의 유일한 신호가 `UserPromptSubmit` 이면 **그 줄이 유실될 때** 지난 턴의 자식
+    /// 셈이 새 턴으로 넘어와 lead 의 `Stop` 이 붙잡힌다 — 안 풀리는 배지다. 줄 유실은 가정이 아니라
+    /// 계약이 감당하기로 한 것이다(§4.3 동시 append·상한 초과). 키가 바뀌는 것 자체가 **두 번째,
+    /// 독립적인** 턴 경계 신호라 그 구멍을 메운다.
+    turn_buf: [64]u8 = undefined,
+    turn_len: usize = 0,
+    /// lead 의 턴이 **오류로** 끝났다. 알림 문구가 여기서 갈린다.
+    ///
+    /// 왜 상태에 드나: 자식이 남아 있으면 턴 끝 전이가 `StopFailure` 가 아니라 **마지막 `SubagentStop`**
+    /// 에서 일어난다. 그 순간의 이벤트만 보면 오류였다는 사실이 사라져 «턴이 끝났습니다» 가 나간다.
+    lead_failed: bool = false,
+
+    pub fn reset(self: *Progress) void {
+        // **턴 키는 남긴다.** 이것은 «지금 어느 턴인가» 라는 사실이지 그 턴의 진행 상태가 아니다.
+        // 함께 지우면 같은 턴의 다음 이벤트가 «키가 바뀌었다» 로 읽혀 매번 리셋이 돈다.
+        const key = self.turnKey();
+        var buf: [64]u8 = undefined;
+        @memcpy(buf[0..key.len], key);
+        const n = key.len;
+        self.* = .{};
+        @memcpy(self.turn_buf[0..n], buf[0..n]);
+        self.turn_len = n;
+    }
+
+    pub fn childCount(self: *const Progress) usize {
+        return self.child_count;
+    }
+
+    /// 자식을 담는다. **같은 id 를 두 번 담지 않는다** — provider 가 같은 시작을 두 번 보내도(재동기화·
+    /// 배치 재처리) 셈이 부풀지 않게.
+    ///
+    /// `id` 가 비어 있으면 담지 않는다. 담을 수 없는 자식을 «돈다» 고 붙잡으면 그 종료를 영영 못 알아봐
+    /// 배지가 안 풀린다 — 이 층이 막으려는 바로 그 실패다. 실측에서는 수명 이벤트가 늘 `agent_id` 를
+    /// 싣고 오므로 이 경로는 방어다.
+    fn addChild(self: *Progress, id: []const u8) void {
+        if (id.len == 0 or id.len > @sizeOf(@FieldType(ChildId, "buf"))) return;
+        for (self.children[0..self.child_count]) |c| {
+            if (std.mem.eql(u8, c.slice(), id)) return;
+        }
+        if (self.child_count >= max_children) return;
+        var slot: ChildId = .{ .len = @intCast(id.len) };
+        @memcpy(slot.buf[0..id.len], id);
+        self.children[self.child_count] = slot;
+        self.child_count += 1;
+    }
+
+    /// **우리가 시작을 본 자식**이면 빼고 `true`. 아니면 아무것도 안 하고 `false` — 남의 에이전트다.
+    fn removeChild(self: *Progress, id: []const u8) bool {
+        if (id.len == 0) return false;
+        var i: usize = 0;
+        while (i < self.child_count) : (i += 1) {
+            if (!std.mem.eql(u8, self.children[i].slice(), id)) continue;
+            self.children[i] = self.children[self.child_count - 1];
+            self.child_count -= 1;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn turnKey(self: *const Progress) []const u8 {
+        return self.turn_buf[0..self.turn_len];
+    }
+
+    /// 이 키가 **새 턴**인가. 빈 키는 판정하지 않는다(그 provider·이벤트가 안 주는 것이지 바뀐 것이 아니다).
+    fn adoptTurn(self: *Progress, key: []const u8) bool {
+        if (key.len == 0 or key.len > self.turn_buf.len) return false;
+        if (std.mem.eql(u8, self.turnKey(), key)) return false;
+        const had = self.turn_len != 0;
+        @memcpy(self.turn_buf[0..key.len], key);
+        self.turn_len = key.len;
+        // 처음 본 키는 «바뀐 것» 이 아니다 — 훅을 이미 돌던 세션에 붙였을 뿐이다.
+        return had;
+    }
+
+    /// 이번 턴이 오류로 끝났는지 **가져가며 지운다**. 지우지 않으면 다음 턴의 정상 종료까지 «오류» 라
+    /// 부른다 — 안 풀리는 배지와 같은 부류의 실패다.
+    pub fn takeFailed(self: *Progress) bool {
+        defer self.lead_failed = false;
+        return self.lead_failed;
+    }
+};
+
+/// 이벤트를 진행 상태에 반영하고 **그 뒤의 배지 상태**를 돌려준다. 기본 전이는 `next` 가 하고, 여기서는
+/// 자식 때문에 달라지는 부분만 얹는다.
+pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
+    switch (ev.kind) {
+        .subagent_start => {
+            progress.addChild(ev.agent_id);
+            // 자식이 떴다 = 무언가 돌고 있다. lead 가 이미 `Stop` 을 보냈어도 턴은 안 끝났다.
+            return .running;
+        },
+        .subagent_stop => {
+            // **우리가 시작을 본 자식일 때만** 반응한다. claude 는 알린 적 없는 내부 에이전트의
+            // 종료도 보내므로(실측), 그것을 우리 자식의 종료로 세면 자식이 도는 중에 배지가 풀린다.
+            if (!progress.removeChild(ev.agent_id)) return current;
+            // **마지막 자식이 끝났는데 lead 의 턴도 안 열려 있으면** 그때가 진짜 턴 끝이다. lead 가
+            // 아직 일하는 중이면(턴이 열려 있으면) 자식이 다 끝나도 턴은 안 끝났다.
+            if (progress.child_count == 0 and !progress.turn_open) return .idle;
+            return current;
+        },
+        else => {},
+    }
+
+    // **턴 키가 바뀌었으면 그것만으로 새 턴이다**(실측: claude `prompt_id`·codex `turn_id` 가 한 턴의
+    // 모든 lead 이벤트에 같은 값으로 실린다). `UserPromptSubmit` 이 유실돼도 이 신호가 남는다.
+    // 자식 이벤트는 보지 않는다 — codex 의 자식은 **자기 turn_id** 를 싣고 오므로(실측) 그것을 부모의
+    // 턴 변화로 읽으면 자식이 뜰 때마다 셈이 초기화된다.
+    if (ev.agent_id.len == 0 and progress.adoptTurn(ev.turn_key)) progress.reset();
+
+    // 새 턴이 시작되면 지난 턴의 셈을 버린다 — 안 버리면 한 번 어긋난 수가 영영 남는다.
+    // **새 세션도 마찬가지다.** 같은 pane 에서 에이전트를 다시 띄우면(또는 다른 provider 로 바꾸면)
+    // 지난 세션의 자식은 이미 없다. 놓친 `SubagentStop` 하나가 세션을 건너뛰어 따라오지 않게 한다.
+    if ((ev.kind == .user_prompt_submit or ev.kind == .session_start) and ev.agent_id.len == 0)
+        progress.reset();
+
+    const base = next(current, ev);
+
+    // lead 의 턴이 끝났는데 자식이 남아 있으면 **완료로 단정하지 않는다**. 그 사실을 기억해 두었다가
+    // 마지막 자식이 끝날 때 푼다(위 `.subagent_stop`).
+    if (ev.agent_id.len == 0 and ev.kind == .stop_failure) progress.lead_failed = true;
+
+    // **lead 가 돌고 있다는 신호가 턴을 연다.** 프롬프트만 보고 열면, 훅을 이미 돌던 세션에 붙인 경우
+    // (첫 이벤트가 도구 호출인 경우)에 턴이 영영 안 열린 것으로 보여 자식이 끝나는 순간 **아직 일하는
+    // lead 를 완료로 단정한다**. 그래서 `running`·`blocked` 로 가는 lead 이벤트를 모두 문으로 삼는다.
+    if (ev.agent_id.len == 0 and (base == .running or base == .blocked)) progress.turn_open = true;
+
+    // lead 의 턴이 끝났는데 자식이 남아 있으면 **완료로 단정하지 않는다**. 턴을 닫아 두었다가 마지막
+    // 자식이 끝날 때 푼다(위 `.subagent_stop`).
+    if (ev.agent_id.len == 0 and (ev.kind == .stop or ev.kind == .stop_failure)) {
+        progress.turn_open = false;
+        if (base == .idle and progress.child_count > 0) return .running;
+    }
+    return base;
 }
 
 // ── 알림 정책(계약 §6) ─────────────────────────────────────────────────────────────────────────
@@ -81,6 +271,9 @@ pub const Notice = enum {
     none,
     /// 턴이 끝났다(`Stop`). 내용은 마지막 응답.
     done,
+    /// 턴이 **오류로** 끝났다(`StopFailure`). 같은 전이지만 문구가 다르다(계약 §2) — 오류로 끊긴 턴에
+    /// «완료» 라고 알리면 그 알림 자체가 거짓말이다. provider 가 마지막 응답을 주지 않으므로 내용은 없다.
+    failed,
     /// 입력을 기다린다(`PermissionRequest`). 내용은 무엇을 승인하는지.
     attention,
 };
@@ -89,11 +282,32 @@ pub const Notice = enum {
 /// 상태도 안 옮기므로 전이가 생기지 않는다(계약 §6 표).
 pub fn noticeOn(prev: State, now: State) Notice {
     if (prev == now) return .none;
+    // **«모르다» 에서 나오는 것은 전이가 아니다.** `unknown → idle` 은 «턴이 끝났다» 가 아니라 «이제
+    // 알게 됐다» 다. 이것을 완료로 치면 **세션을 여는 것만으로 «턴이 끝났습니다» 알림이 나간다** —
+    // `SessionStart` 가 상태를 `idle` 로 놓기 때문이다(실사용 로그가 그 자리를 짚었다: 손으로 쓴
+    // 테스트는 첫 이벤트가 늘 프롬프트라 안 걸렸다).
+    //
+    // 배지는 그대로 바뀐다 — 가려지는 것은 **알림뿐**이다. 사용자가 모르는 사이 끝난 턴을 놓치는 것이
+    // 아니라, 애초에 우리가 못 보던 구간이라 알릴 «변화» 가 없는 것이다.
+    if (prev == .unknown) return .none;
     return switch (now) {
         .idle => .done,
         .blocked => .attention,
         .running, .unknown => .none,
     };
+}
+
+/// 이 이벤트가 만든 전이는 **알리지 않는다**.
+///
+/// `SessionStart` 가 그렇다. 그것은 상태를 «대기» 로 놓지만(아직 턴이 없다) 그 전이는 «턴이 끝났다» 가
+/// 아니라 «세션이 (재)시작됐다» 다. 배지가 «진행 중» 인 동안 `SessionStart` 가 오면 — resume 이나
+/// 컨텍스트 압축이 그렇다(실측: 한 pane 에 `startup`·`resume`·`startup` 이 이어서 왔다) — 그 전이를
+/// 완료로 읽어 **«턴이 끝났습니다» 가 나간다**. 세션 시작이 턴을 끝낸 것이 아니다.
+///
+/// `unknown` 에서 나오는 전이를 억제하는 것과 같은 부류다(`noticeOn`): 상태만 보면 «완료» 로 보이지만
+/// 사실은 «이제 알게 됐다»·«다시 시작했다» 인 자리들이다.
+pub fn suppressesNotice(ev: event.Event) bool {
+    return ev.kind == .session_start;
 }
 
 /// 주의 알림을 **바로 띄우지 않는 시간**(계약 §6 — 자동 승인으로 곧 해소되는 요청이 있다).
@@ -116,6 +330,61 @@ pub fn attentionDebounce(state_now: State, since_ms: u64, now_ms: u64) Debounce 
 }
 
 /// Term 이 들고 있는 «아직 안 띄운 알림». 고정 크기라 힙을 잡지 않는다(Term 은 수십 개가 산다).
+/// 지금 무엇을 하고 있는지 — **진행 중 세부**(계약 §2). `PreToolUse` 의 `tool_input.description`(사람이
+/// 읽는 설명), 없으면 도구 이름이다. **명령 원문은 담지 않는다**(계약 §7 — 길고 민감하다).
+///
+/// 왜 있어야 하나: 훅 모드는 화면·프로세스 관측을 끄므로(§1.1) 이 자리를 비워 두면 배지가 «진행중» 한
+/// 마디만 말한다. 훅을 켠 사용자가 정보를 **잃는다** — 그러면 켤 이유가 없다(§8).
+pub const ToolLabel = struct {
+    /// 사이드바 한 줄에 곁들이는 값이라 길 필요가 없다. 넘치면 자른다(버리지 않는다).
+    pub const max_text = 120;
+
+    len: usize = 0,
+    buf: [max_text]u8 = undefined,
+
+    pub fn text(self: *const ToolLabel) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn set(self: *ToolLabel, body: []const u8) void {
+        // UTF-8 시퀀스 한가운데서 자르면 렌더가 U+FFFD 를 뿌린다 — 글자 경계로 물린다.
+        const clamped = transcript.clampUtf8(body, max_text);
+        @memcpy(self.buf[0..clamped.len], clamped);
+        self.len = clamped.len;
+    }
+
+    pub fn clear(self: *ToolLabel) void {
+        self.len = 0;
+    }
+};
+
+/// 이 이벤트가 진행 중 세부를 어떻게 바꾸는가. 순수 규칙으로 떼어 둔 이유는 «언제 지우는가» 가
+/// «언제 세우는가» 만큼 중요하기 때문이다 — 안 지우면 턴이 끝난 pane 이 마지막 도구를 계속 말한다.
+pub const LabelChange = union(enum) {
+    /// 이 이벤트는 세부와 무관하다.
+    keep,
+    /// 세부를 비운다(턴 경계).
+    clear,
+    /// 세부를 이 문구로 바꾼다.
+    set: []const u8,
+};
+
+pub fn labelFor(ev: event.Event) LabelChange {
+    // 자식의 도구 호출은 **부모의** 세부가 아니다(계약 §2 — 자식 활동은 `agent_id` 를 싣고 따로 온다).
+    // 이것을 안 가르면 부모 줄이 자식이 하는 일로 계속 갈아 끼워져 «누가 무엇을» 이 뒤섞인다.
+    if (ev.agent_id.len != 0) return .keep;
+    switch (ev.kind) {
+        .pre_tool_use => {
+            const body = if (ev.tool_description.len > 0) ev.tool_description else ev.tool_name;
+            // 둘 다 비면 지우지 않는다 — 이름 없는 이벤트 하나가 멀쩡한 세부를 날리지 않게.
+            return if (body.len == 0) .keep else .{ .set = body };
+        },
+        // 턴 경계에서는 비운다. 도구 종료는 **다음 `PreToolUse` 또는 `Stop`** 으로 안다(계약 §2).
+        .stop, .stop_failure, .user_prompt_submit, .session_start => return .clear,
+        else => return .keep,
+    }
+}
+
 pub const PendingNotice = struct {
     pub const max_text = 512;
 
@@ -162,8 +431,23 @@ fn evOf(kind: event.Kind) event.Event {
         .text = "",
         .source = "",
         .stop_hook_active = false,
-        .has_background_tasks = false,
+        .running_background_tasks = 0,
     };
+}
+
+/// 자식 수명 이벤트를 **실측 모양대로** 만든다. `SubagentStart`/`SubagentStop` 은 자식의 `agent_id` 를
+/// 싣고 온다(2026-08-21 실측). 이것을 빈 `agent_id` 로 시험하면 «자식 이벤트는 무시» 가드를 위로
+/// 올리는 리팩터링이 **제품만 깨뜨리고 테스트는 통과한다** — 실제로 그 순서 때문에 동작하는 코드다.
+fn childEv(kind: event.Kind) event.Event {
+    return childEvId(kind, "a533c21143f8edccb"); // 실측에서 받은 모양
+}
+
+/// 자식을 **id 로 구분해** 만든다. 실사용에서 한 턴에 여러 자식 id 가 섞여 오므로(그중 남의 것도
+/// 있다) 테스트도 그 모양을 써야 한다.
+fn childEvId(kind: event.Kind, id: []const u8) event.Event {
+    var ev = evOf(kind);
+    ev.agent_id = id;
+    return ev;
 }
 
 test "모드는 게이트·에이전트·로그 셋이 다 서야 훅이다" {
@@ -210,7 +494,7 @@ test "재발화 Stop 은 턴 종료가 아니다" {
 test "백그라운드 작업이 남아 있으면 완료로 단정하지 않는다" {
     // 턴은 끝났어도 셸 작업이 돌고 있다(실측: `{id, type: shell, status: running, description}`).
     var ev = evOf(.stop);
-    ev.has_background_tasks = true;
+    ev.running_background_tasks = 1;
     try testing.expectEqual(State.running, next(.running, ev));
 }
 
@@ -226,11 +510,28 @@ test "모르는 이벤트와 접힌 이벤트는 상태를 흔들지 않는다" 
 test "파서가 아는 모든 이벤트에 전이가 있다 — 한쪽만 늘면 그 이벤트가 상태를 못 옮긴다" {
     // `Kind` 는 파서가 소유하고 전이는 여기가 소유한다. 새 이벤트를 파서에 넣고 여기를 잊으면 그 이벤트는
     // 조용히 «상태 유지» 가 되는데, 그것이 의도인지 누락인지 코드만 봐서는 알 수 없다.
+    // 서브에이전트 둘은 `advance` 가 옮긴다 — 그쪽이 실제로 상태를 바꾸는지 여기서 함께 못박는다.
+    {
+        var progress: Progress = .{};
+        try testing.expectEqual(State.running, advance(&progress, .idle, childEv(.subagent_start)));
+        try testing.expectEqual(@as(usize, 1), progress.childCount());
+    }
+    {
+        // **담을 수 없는 자식은 붙잡지 않는다.** `agent_id` 가 없으면 그 종료를 영영 못 알아보므로,
+        // «돈다» 고 세어 두면 배지가 안 풀린다 — 이 층이 막으려는 바로 그 실패다. 배지는 그 순간
+        // «진행 중» 으로 가되(무언가 돌긴 한다), 붙잡는 근거로는 쓰지 않는다.
+        var progress: Progress = .{};
+        try testing.expectEqual(State.running, advance(&progress, .idle, evOf(.subagent_start)));
+        try testing.expectEqual(@as(usize, 0), progress.childCount());
+    }
     inline for (@typeInfo(event.Kind).@"enum".fields) |field| {
         const kind: event.Kind = @enumFromInt(field.value);
         const moved = next(.unknown, evOf(kind));
         const holds = switch (kind) {
             .notification, .oversized, .unknown => true,
+            // 서브에이전트 수명은 `next` 가 아니라 `advance` 가 옮긴다(세는 일이라 진행 상태가 필요하다).
+            // 그래서 여기서는 «상태를 안 흔든다» 가 맞고, 그 사실을 아래에서 따로 못박는다.
+            .subagent_start, .subagent_stop => true,
             else => false,
         };
         if (holds) {
@@ -261,7 +562,7 @@ test "재발화 Stop 과 백그라운드 작업은 애초에 전이를 만들지
     try testing.expectEqual(Notice.none, noticeOn(.running, after_reentrant));
 
     var background = evOf(.stop);
-    background.has_background_tasks = true;
+    background.running_background_tasks = 1;
     const after_background = next(.running, background);
     try testing.expectEqual(Notice.none, noticeOn(.running, after_background));
 
@@ -296,4 +597,614 @@ test "예약한 알림은 잘리되 사라지지 않는다" {
     notice.clear();
     try testing.expectEqual(Notice.none, notice.kind);
     try testing.expectEqual(@as(usize, 0), notice.text().len);
+}
+
+test "오류로 끝난 턴도 끝이다 — 안 받으면 배지가 영영 «진행 중»" {
+    // provider 가 API·모델 오류에서는 `Stop` **대신** `StopFailure` 를 보낸다(계약 §2 실측).
+    try testing.expectEqual(State.idle, next(.running, evOf(.stop_failure)));
+    try testing.expectEqual(State.idle, next(.blocked, evOf(.stop_failure)));
+    // 알림도 나간다 — 전이가 있으므로.
+    try testing.expectEqual(Notice.done, noticeOn(.running, next(.running, evOf(.stop_failure))));
+}
+
+test "끝난 백그라운드 항목 때문에 배지가 멈추지 않는다" {
+    // 배열이 «비어 있나» 로 보면 completed 항목 하나가 영원히 진행 중을 만든다. running 만 센다.
+    var done_only = evOf(.stop);
+    done_only.running_background_tasks = 0; // completed·failed 만 남은 상태
+    try testing.expectEqual(State.idle, next(.running, done_only));
+
+    var still = evOf(.stop);
+    still.running_background_tasks = 2;
+    try testing.expectEqual(State.running, next(.running, still));
+}
+
+test "자식 이벤트는 부모 상태를 옮기지 않는다" {
+    // 자식이 도구를 부를 때마다 부모가 «진행 중» 이 되고 자식이 끝날 때 부모가 «완료» 가 되면, 부모의
+    // 턴과 무관하게 배지가 춤춘다(계약 §2 — 자식 활동은 `agent_id` 를 실은 이벤트로 온다).
+    var child_tool = evOf(.pre_tool_use);
+    child_tool.agent_id = "child-1";
+    try testing.expectEqual(State.idle, next(.idle, child_tool)); // 부모는 그대로 대기
+
+    var child_stop = evOf(.stop);
+    child_stop.agent_id = "child-1";
+    try testing.expectEqual(State.running, next(.running, child_stop)); // 자식이 끝나도 부모는 진행 중
+
+    // 대조: 같은 이벤트라도 `agent_id` 가 없으면 부모 것이라 옮긴다.
+    try testing.expectEqual(State.idle, next(.running, evOf(.stop)));
+}
+
+test "자식이 도는 동안 lead 의 Stop 은 턴 끝이 아니다 — 그리고 마지막 자식이 끝나면 풀린다" {
+    var progress: Progress = .{};
+    var state: State = .idle;
+
+    state = advance(&progress, state, evOf(.user_prompt_submit)); // 턴 시작
+    try testing.expectEqual(State.running, state);
+
+    state = advance(&progress, state, childEvId(.subagent_start, "child-a")); // 자식 둘
+    state = advance(&progress, state, childEvId(.subagent_start, "child-b"));
+    try testing.expectEqual(@as(usize, 2), progress.childCount());
+
+    // lead 가 먼저 끝났다 — **완료로 단정하지 않는다**(자식이 아직 돈다).
+    state = advance(&progress, state, evOf(.stop));
+    try testing.expectEqual(State.running, state);
+    try testing.expect(!progress.turn_open);
+
+    // 자식 하나가 끝나도 아직이다.
+    state = advance(&progress, state, childEvId(.subagent_stop, "child-a"));
+    try testing.expectEqual(State.running, state);
+
+    // **마지막 자식이 끝나면** 그때가 진짜 턴 끝이다.
+    state = advance(&progress, state, childEvId(.subagent_stop, "child-b"));
+    try testing.expectEqual(State.idle, state);
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
+}
+
+test "자식이 없으면 lead 의 Stop 이 곧 턴 끝이다" {
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    try testing.expect(progress.turn_open); // 프롬프트가 턴을 연다
+    state = advance(&progress, state, evOf(.stop));
+    try testing.expectEqual(State.idle, state);
+    try testing.expect(!progress.turn_open); // 그리고 `Stop` 이 닫는다
+    try testing.expectEqual(@as(usize, 0), progress.childCount()); // 붙잡을 자식이 없었다
+}
+
+test "새 턴은 지난 턴의 셈을 버린다 — 어긋난 수가 영영 남지 않게" {
+    var progress: Progress = .{};
+    _ = advance(&progress, .idle, childEvId(.subagent_start, "child-a"));
+    _ = advance(&progress, .running, childEvId(.subagent_start, "child-b"));
+    try testing.expectEqual(@as(usize, 2), progress.childCount()); // 자식 종료 이벤트를 놓쳤다고 하자
+
+    const state = advance(&progress, .running, evOf(.user_prompt_submit));
+    try testing.expectEqual(@as(usize, 0), progress.childCount()); // 새 턴에서 셈을 버린다
+    try testing.expectEqual(State.running, state);
+    // 그러니 다음 `Stop` 은 정상적으로 턴을 끝낸다.
+    try testing.expectEqual(State.idle, advance(&progress, state, evOf(.stop)));
+}
+
+test "자식 수는 음수로 내려가지 않는다" {
+    // 시작을 놓치고 종료만 오면(로그 유실·재접속) 0 에서 빼게 된다. 포화 뺄셈으로 막는다.
+    //
+    // **상태를 손으로 놓지 않고 이벤트로 만든다.** 예전에는 `(.running, 셈 0, 턴 안 열림)` 을 직접
+    // 넣었는데 그 조합은 실제로 도달할 수 없다 — lead 가 `running` 으로 미는 이벤트는 반드시 턴을
+    // 열기 때문이다. 도달 불가능한 상태에 대고 단언하면 규칙이 아니라 그 픽스처를 재게 된다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit)); // lead 가 일하는 중
+    state = advance(&progress, state, childEv(.subagent_stop)); // 시작을 못 본 종료
+    try testing.expectEqual(@as(usize, 0), progress.childCount()); // 0 밑으로 안 내려간다
+    try testing.expectEqual(State.running, state); // lead 의 턴이 열려 있으므로 그대로
+}
+
+test "오류로 끝난 턴도 자식을 기다린다" {
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, childEv(.subagent_start));
+    state = advance(&progress, state, evOf(.stop_failure));
+    try testing.expectEqual(State.running, state); // 자식이 남았다
+    state = advance(&progress, state, childEv(.subagent_stop));
+    try testing.expectEqual(State.idle, state);
+}
+
+test "진행 중 세부는 도구 설명에서 오고 턴 경계에서 비워진다" {
+    var label: ToolLabel = .{};
+
+    var tool = evOf(.pre_tool_use);
+    tool.tool_name = "Bash";
+    tool.tool_description = "테스트를 돌린다";
+    switch (labelFor(tool)) {
+        .set => |body| label.set(body),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("테스트를 돌린다", label.text());
+
+    // 설명이 없으면 도구 이름이라도 보인다 — 빈 줄보다 낫다.
+    var bare = evOf(.pre_tool_use);
+    bare.tool_name = "Read";
+    switch (labelFor(bare)) {
+        .set => |body| try testing.expectEqualStrings("Read", body),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // 턴이 끝나면 비운다 — 안 비우면 끝난 pane 이 마지막 도구를 계속 말한다.
+    for ([_]event.Kind{ .stop, .stop_failure, .user_prompt_submit, .session_start }) |kind| {
+        try testing.expectEqual(LabelChange.clear, labelFor(evOf(kind)));
+    }
+    label.clear();
+    try testing.expectEqualStrings("", label.text());
+}
+
+test "자식의 도구 호출은 부모의 세부를 갈아 끼우지 않는다" {
+    var child = evOf(.pre_tool_use);
+    child.tool_name = "Bash";
+    child.tool_description = "자식이 하는 일";
+    child.agent_id = "child-1";
+    try testing.expectEqual(LabelChange.keep, labelFor(child));
+
+    // 같은 이벤트라도 `agent_id` 가 없으면 부모 것이라 세운다.
+    child.agent_id = "";
+    try testing.expect(labelFor(child) == .set);
+}
+
+test "이름도 설명도 없는 도구 이벤트는 멀쩡한 세부를 날리지 않는다" {
+    try testing.expectEqual(LabelChange.keep, labelFor(evOf(.pre_tool_use)));
+}
+
+test "세부는 글자 경계로 잘린다 — 잘린 바이트를 그리면 U+FFFD 가 뜬다" {
+    var label: ToolLabel = .{};
+    const long = "가" ** 100; // 300 바이트, 상한(120)보다 길다
+    label.set(long);
+    try testing.expect(label.text().len <= ToolLabel.max_text);
+    try testing.expect(std.unicode.utf8ValidateSlice(label.text()));
+    try testing.expect(label.text().len % 3 == 0); // 3 바이트 글자만 온전히 남았다
+}
+
+test "오류로 끝난 턴을 «완료» 라 부르지 않는다" {
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, evOf(.stop_failure));
+    try testing.expectEqual(State.idle, state);
+    try testing.expectEqual(Notice.done, noticeOn(.running, state)); // 전이는 같고
+    try testing.expect(progress.takeFailed()); // 문구만 갈린다
+    try testing.expect(!progress.takeFailed()); // 가져가면 지워진다
+}
+
+test "자식 뒤에 끝난 오류 턴도 오류로 남는다" {
+    // 턴 끝 전이가 `StopFailure` 가 아니라 **마지막 `SubagentStop`** 에서 일어나는 경우다. 그 순간의
+    // 이벤트만 보면 오류였다는 사실이 사라져 «턴이 끝났습니다» 가 나간다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, childEv(.subagent_start));
+    state = advance(&progress, state, evOf(.stop_failure));
+    try testing.expectEqual(State.running, state); // 자식이 남았다
+    state = advance(&progress, state, childEv(.subagent_stop));
+    try testing.expectEqual(State.idle, state);
+    try testing.expect(progress.takeFailed());
+}
+
+test "정상으로 끝난 턴은 오류로 물들지 않는다" {
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, evOf(.stop_failure)); // 지난 턴은 오류였다
+    try testing.expect(progress.lead_failed);
+
+    // 새 턴이 시작되면 그 사실을 버린다 — 안 버리면 다음 턴의 정상 종료가 «오류» 로 나간다.
+    state = advance(&progress, state, evOf(.user_prompt_submit));
+    try testing.expect(!progress.lead_failed);
+    state = advance(&progress, state, evOf(.stop));
+    try testing.expectEqual(State.idle, state);
+    try testing.expect(!progress.takeFailed());
+}
+
+test "실측 순서를 그대로 재생한다 — claude 서브에이전트 턴(2026-08-21)" {
+    // 실제로 받은 순서다(`--settings` 로 훅만 주입하고 진짜 세션을 돌려 받았다):
+    //   SessionStart → UserPromptSubmit → PreToolUse(Agent) → SubagentStart(agent_id)
+    //   → PreToolUse(agent_id) → SubagentStop(agent_id) → Stop
+    // **자식이 lead 보다 먼저 끝난다** — 그래서 이 순서에서는 «lead 를 붙잡는» 경로가 아예 안 탄다.
+    // 그 경로는 순서가 뒤집히는 경우(비동기 자식)를 위한 방어이고, 여기서는 **평범한 순서가
+    // 평범하게 끝나는지** 를 못박는다. 이 테스트가 없으면 방어 코드가 정상 경로를 망가뜨려도 모른다.
+    var progress: Progress = .{};
+    var state: State = .unknown;
+
+    state = advance(&progress, state, evOf(.session_start));
+    try testing.expectEqual(State.idle, state);
+    state = advance(&progress, state, evOf(.user_prompt_submit));
+    try testing.expectEqual(State.running, state);
+
+    var spawn = evOf(.pre_tool_use); // lead 가 Agent 도구를 부른다
+    spawn.tool_name = "Agent";
+    spawn.tool_description = "Run echo command";
+    state = advance(&progress, state, spawn);
+    try testing.expectEqual(State.running, state);
+    // 그 순간의 «진행 중 세부» 는 lead 가 시킨 일이다.
+    try testing.expect(labelFor(spawn) == .set);
+
+    state = advance(&progress, state, childEv(.subagent_start));
+    try testing.expectEqual(@as(usize, 1), progress.childCount());
+
+    var child_tool = evOf(.pre_tool_use); // 자식이 부르는 도구
+    child_tool.agent_id = "a533c21143f8edccb";
+    child_tool.tool_name = "Bash";
+    child_tool.tool_description = "Echo from-child";
+    state = advance(&progress, state, child_tool);
+    try testing.expectEqual(State.running, state);
+    // 자식이 하는 일이 부모 줄을 갈아 끼우지 않는다.
+    try testing.expectEqual(LabelChange.keep, labelFor(child_tool));
+
+    // 자식이 먼저 끝난다(실측 순서). lead 는 아직이므로 배지는 그대로다.
+    var child_stop = childEv(.subagent_stop);
+    child_stop.text = "from-child"; // `last_assistant_message` 가 자식 응답으로 온다
+    state = advance(&progress, state, child_stop);
+    try testing.expectEqual(State.running, state);
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
+    try testing.expect(progress.turn_open);
+
+    // 그리고 lead 가 끝난다 — 그때가 턴 끝이고, 알림이 나간다.
+    const done = evOf(.stop);
+    const before = state;
+    state = advance(&progress, state, done);
+    try testing.expectEqual(State.idle, state);
+    try testing.expectEqual(Notice.done, noticeOn(before, state));
+    try testing.expect(!progress.takeFailed()); // 오류가 아니었다
+}
+
+test "실측 순서를 그대로 재생한다 — codex 서브에이전트 턴(2026-08-21)" {
+    // codex 도 같은 모양이다(실측):
+    //   PreToolUse(collaborationspawn_agent) → PreToolUse(collaborationwait_agent)
+    //   → SubagentStart(agent_id) → PreToolUse(agent_id) → SubagentStop(agent_id) → Stop
+    // **도구 이름이 claude 와 다르다** — 그래서 이름으로 «서브에이전트를 띄우는 순간» 을 알아내려던
+    // 옛 방식은 codex 에서 통하지 않았을 것이다. 수명 이벤트로 세는 지금 방식은 이름을 안 본다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+
+    var spawn = evOf(.pre_tool_use);
+    spawn.tool_name = "collaborationspawn_agent"; // codex 는 사람이 읽는 description 을 안 준다(§2.1)
+    state = advance(&progress, state, spawn);
+    switch (labelFor(spawn)) {
+        .set => |body| try testing.expectEqualStrings("collaborationspawn_agent", body),
+        else => return error.TestUnexpectedResult, // 이름뿐이어도 빈 줄보다 낫다
+    }
+
+    var child = childEv(.subagent_start);
+    child.agent_id = "01a022dd-680f-7151-8f1a-c1bf1f58a47c"; // 실측 모양(uuid)
+    state = advance(&progress, state, child);
+    try testing.expectEqual(@as(usize, 1), progress.childCount());
+
+    var child_stop = childEv(.subagent_stop);
+    child_stop.agent_id = child.agent_id;
+    child_stop.text = "from-child";
+    state = advance(&progress, state, child_stop);
+    try testing.expectEqual(State.running, state); // 자식이 먼저 끝나도 lead 가 남았다
+
+    state = advance(&progress, state, evOf(.stop));
+    try testing.expectEqual(State.idle, state);
+}
+
+test "새 세션은 지난 세션의 셈을 물려받지 않는다" {
+    var progress: Progress = .{};
+    _ = advance(&progress, .idle, childEv(.subagent_start));
+    _ = advance(&progress, .running, evOf(.stop_failure));
+    try testing.expectEqual(@as(usize, 1), progress.childCount());
+    try testing.expect(progress.lead_failed);
+
+    // 같은 pane 에서 에이전트를 다시 띄웠다 — 지난 세션의 자식은 이미 없다.
+    const state = advance(&progress, .running, evOf(.session_start));
+    try testing.expectEqual(State.idle, state);
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
+    try testing.expect(!progress.lead_failed);
+}
+
+// ── 전수 탐색 ─────────────────────────────────────────────────────────────────────────────────
+//
+// 손으로 고른 경우는 **내가 생각한 것**만 덮는다. 이 층의 실패는 «어떤 순서 뒤에 배지가 안 풀린다» 라
+// 순서가 곧 버그이고, 그 순서를 내가 떠올리지 못하면 테스트도 없다. 그래서 짧은 순서를 **전부** 돌린다.
+
+/// 전수 탐색에 쓰는 알파벳. lead 것과 자식 것을 **둘 다** 넣는다 — 실측에서 자식 수명 이벤트가
+/// `agent_id` 를 싣고 오므로, 그 구분이 규칙의 핵심이다.
+fn alphabetEvent(i: usize) event.Event {
+    const kinds = [_]event.Kind{
+        .session_start, .user_prompt_submit, .pre_tool_use,   .permission_request,
+        .stop,          .stop_failure,       .subagent_start, .subagent_stop,
+        .notification,  .oversized,
+    };
+    const child = i >= kinds.len;
+    var ev = evOf(kinds[i % kinds.len]);
+    if (child) ev.agent_id = "child-1";
+    return ev;
+}
+const alphabet_len: usize = 20; // 위 10 종 × (lead | 자식)
+
+test "전수: 어떤 순서 뒤에도 «새 턴 → 정상 종료» 는 반드시 대기로 끝난다" {
+    // **안 풀리는 배지**의 일반형이다. 앞에 무엇이 왔든(이벤트 유실·자식 셈 어긋남·오류 잔재),
+    // 새 프롬프트로 시작해 정상으로 끝난 턴은 «대기» 로 보여야 한다. 하나라도 아니면 그 pane 은
+    // 사용자가 다시 프롬프트를 넣기 전까지 거짓말을 한다.
+    const depth = 3;
+    var seq: [depth]usize = .{0} ** depth;
+    var total: usize = 0;
+    while (true) {
+        var progress: Progress = .{};
+        var state: State = .unknown;
+        for (seq) |i| state = advance(&progress, state, alphabetEvent(i));
+
+        // 새 턴 → 정상 종료.
+        state = advance(&progress, state, evOf(.user_prompt_submit));
+        try testing.expectEqual(State.running, state);
+        state = advance(&progress, state, evOf(.stop));
+        if (state != .idle) {
+            std.debug.print("안 풀린 순서: {any} → {s}\n", .{ seq, @tagName(state) });
+            return error.StuckBadge;
+        }
+        total += 1;
+
+        // 다음 순서(자리올림).
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
+    try testing.expectEqual(alphabet_len * alphabet_len * alphabet_len, total);
+}
+
+test "전수: 자식 셈은 알파벳 어디를 지나도 실제로 산 자식 수를 넘지 않는다" {
+    // 셈이 새면 lead 의 `Stop` 이 영영 붙잡힌다. 상한은 «지금까지 본 `SubagentStart` 수» 다.
+    const depth = 3;
+    var seq: [depth]usize = .{0} ** depth;
+    while (true) {
+        var progress: Progress = .{};
+        var state: State = .unknown;
+        var started: u32 = 0;
+        for (seq) |i| {
+            const ev = alphabetEvent(i);
+            // 알파벳의 자식 이벤트는 **같은 id** 를 쓰므로 담기는 것은 많아야 하나다. 같은 시작이
+            // 여러 번 와도 셈이 부풀지 않는 것(중복 미담기)까지 여기서 함께 본다.
+            if (ev.kind == .subagent_start and ev.agent_id.len != 0) started = 1;
+            // 턴이 새로 열리면 셈이 버려지므로 기준도 함께 버린다.
+            if ((ev.kind == .user_prompt_submit or ev.kind == .session_start) and ev.agent_id.len == 0)
+                started = 0;
+            state = advance(&progress, state, ev);
+            try testing.expect(progress.childCount() <= started);
+        }
+
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
+}
+
+test "전수: 알림은 «전이가 있을 때만» 나온다 — 같은 상태로 머무는 이벤트는 조용하다" {
+    // 「턴 단위 1회」를 세는 코드 없이 얻는다는 계약 §6 의 주장을 순서 전체에서 확인한다.
+    const depth = 3;
+    var seq: [depth]usize = .{0} ** depth;
+    while (true) {
+        var progress: Progress = .{};
+        var state: State = .unknown;
+        for (seq) |i| {
+            const prev = state;
+            state = advance(&progress, state, alphabetEvent(i));
+            if (prev == state) try testing.expectEqual(Notice.none, noticeOn(prev, state));
+        }
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
+}
+
+test "전수: 자식 한 쌍만으로는 배지가 갇히지 않는다" {
+    // 대기 상태에 `SubagentStart` 가 오면 «무언가 돈다» 로 밀리는데, 이어진 `SubagentStop` 이 그것을
+    // 풀지 못하면 lead 의 `Stop` 은 이미 지나갔으므로 **풀어 줄 이벤트가 없다**. 「lead 가 끝났다」
+    // 플래그로 물으면 «아직 시작 안 함» 과 «이미 끝남» 이 같은 값이 되어 그 자리가 생겼다.
+    const depth = 3;
+    var seq: [depth]usize = .{0} ** depth;
+    while (true) {
+        var progress: Progress = .{};
+        var state: State = .unknown;
+        for (seq) |i| state = advance(&progress, state, alphabetEvent(i));
+
+        const before = state;
+        const open_before = progress.turn_open;
+        state = advance(&progress, state, childEv(.subagent_start));
+        state = advance(&progress, state, childEv(.subagent_stop));
+        // lead 의 턴이 안 열려 있었다면 자식 한 쌍은 **아무것도 바꾸지 않아야** 한다.
+        if (!open_before and progress.childCount() == 0 and state == .running and before != .running) {
+            std.debug.print("자식 한 쌍이 가둔 순서: {any} ({s} → {s})\n", .{ seq, @tagName(before), @tagName(state) });
+            return error.StuckBadge;
+        }
+
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
+}
+
+test "턴 키가 바뀌면 프롬프트를 못 봤어도 새 턴이다" {
+    // `UserPromptSubmit` 은 유실될 수 있다(§4.3 동시 append·상한 초과). 그때 지난 턴의 자식 셈이
+    // 넘어오면 lead 의 `Stop` 이 붙잡혀 **배지가 안 풀린다** — 고치려던 바로 그 부류다.
+    var progress: Progress = .{};
+    var first = evOf(.user_prompt_submit);
+    first.turn_key = "turn-1";
+    var state = advance(&progress, .idle, first);
+    state = advance(&progress, state, childEv(.subagent_start));
+    try testing.expectEqual(@as(usize, 1), progress.childCount());
+    // 이 턴의 `Stop` 과 자식 종료를 **둘 다 놓쳤다** 고 하자.
+
+    // 다음 턴의 프롬프트도 놓치고 도구 호출부터 봤다 — 키가 다르다.
+    var next_tool = evOf(.pre_tool_use);
+    next_tool.turn_key = "turn-2";
+    state = advance(&progress, state, next_tool);
+    try testing.expectEqual(@as(usize, 0), progress.childCount()); // 지난 턴의 셈을 버렸다
+    try testing.expectEqualStrings("turn-2", progress.turnKey());
+
+    // 그러니 이 턴의 `Stop` 은 정상적으로 끝난다.
+    var done = evOf(.stop);
+    done.turn_key = "turn-2";
+    try testing.expectEqual(State.idle, advance(&progress, state, done));
+}
+
+test "같은 턴의 이벤트는 리셋을 만들지 않는다" {
+    var progress: Progress = .{};
+    var prompt = evOf(.user_prompt_submit);
+    prompt.turn_key = "turn-1";
+    var state = advance(&progress, .idle, prompt);
+    state = advance(&progress, state, childEv(.subagent_start));
+
+    var tool = evOf(.pre_tool_use);
+    tool.turn_key = "turn-1"; // 같은 턴
+    state = advance(&progress, state, tool);
+    try testing.expectEqual(@as(usize, 1), progress.childCount()); // 셈이 살아 있다
+
+    // 그리고 lead 가 끝나면 자식을 기다린다.
+    var done = evOf(.stop);
+    done.turn_key = "turn-1";
+    state = advance(&progress, state, done);
+    try testing.expectEqual(State.running, state);
+    state = advance(&progress, state, childEv(.subagent_stop));
+    try testing.expectEqual(State.idle, state);
+}
+
+test "자식의 턴 키는 부모의 턴을 바꾸지 않는다 — codex 의 자식은 자기 turn_id 를 쓴다" {
+    var progress: Progress = .{};
+    var prompt = evOf(.user_prompt_submit);
+    prompt.turn_key = "turn-1";
+    var state = advance(&progress, .idle, prompt);
+    state = advance(&progress, state, childEv(.subagent_start));
+
+    var child_tool = childEv(.pre_tool_use);
+    child_tool.turn_key = "turn-child"; // 실측: codex 자식은 다른 turn_id 를 싣는다
+    state = advance(&progress, state, child_tool);
+    try testing.expectEqual(@as(usize, 1), progress.childCount()); // 부모의 셈이 살아 있다
+    try testing.expectEqualStrings("turn-1", progress.turnKey());
+}
+
+test "처음 본 턴 키는 «바뀐 것» 이 아니다" {
+    // 훅을 이미 돌던 세션에 붙이면 첫 이벤트가 턴 중간이다. 그것을 «턴이 바뀌었다» 로 읽어도 지울
+    // 것이 없어 해는 없지만, 규칙을 분명히 해 둔다.
+    var progress: Progress = .{};
+    var tool = evOf(.pre_tool_use);
+    tool.turn_key = "turn-9";
+    _ = advance(&progress, .unknown, tool);
+    try testing.expectEqualStrings("turn-9", progress.turnKey());
+    try testing.expect(progress.turn_open); // 도구 호출이 턴을 열었다
+}
+
+test "세션을 여는 것만으로 «완료» 알림이 나가지 않는다" {
+    // `SessionStart` 는 상태를 `idle` 로 놓는다. 그 직전이 `unknown` 이라 **전이는 생기지만**, 그것은
+    // «턴이 끝났다» 가 아니라 «이제 알게 됐다» 다. 실사용 로그의 첫 줄이 `SessionStart` 라 이 결함이
+    // 그 자리에서 드러났다 — 손으로 쓴 테스트는 첫 이벤트가 늘 프롬프트였다.
+    var progress: Progress = .{};
+    const state = advance(&progress, .unknown, evOf(.session_start));
+    try testing.expectEqual(State.idle, state); // 배지는 «대기» 로 간다
+    try testing.expectEqual(Notice.none, noticeOn(.unknown, state)); // 그러나 알리지는 않는다
+
+    // 훅을 이미 돌던 세션에 붙어 첫 이벤트가 `Stop` 인 경우도 같다.
+    try testing.expectEqual(Notice.none, noticeOn(.unknown, advance(&progress, .unknown, evOf(.stop))));
+
+    // 대조: 진짜 턴이 끝나면 알린다.
+    var p2: Progress = .{};
+    const running = advance(&p2, .idle, evOf(.user_prompt_submit));
+    try testing.expectEqual(Notice.done, noticeOn(running, advance(&p2, running, evOf(.stop))));
+}
+
+test "전수: «모르다» 에서 나오는 첫 전이는 조용하다" {
+    const depth = 2;
+    var seq: [depth]usize = .{0} ** depth;
+    while (true) {
+        var progress: Progress = .{};
+        const state = advance(&progress, .unknown, alphabetEvent(seq[0]));
+        try testing.expectEqual(Notice.none, noticeOn(.unknown, state));
+        _ = seq[1];
+
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
+}
+
+test "실사용 순서: 남의 SubagentStop 이 섞여 와도 우리 자식이 끝날 때 풀린다(2026-08-21)" {
+    // 실제 세션에서 받은 순서다. `SubagentStart` 는 **하나**(ac96…)인데 `SubagentStop` 이 **다섯 개의
+    // 서로 다른 id** 로 왔고, 우리 것의 짝은 **맨 마지막**이었다. 개수를 세면 남의 첫 종료에서 이미
+    // 0 이 되어 자식이 도는 중에 배지가 풀린다 — 그 결함을 이 순서가 잡았다.
+    var progress: Progress = .{};
+    var state: State = .unknown;
+
+    state = advance(&progress, state, evOf(.user_prompt_submit));
+    var spawn = evOf(.pre_tool_use);
+    spawn.tool_name = "Agent";
+    spawn.tool_description = "디렉터리 구조 조사";
+    state = advance(&progress, state, spawn);
+    state = advance(&progress, state, childEvId(.subagent_start, "ac963bb35f95b11fd"));
+    try testing.expectEqual(@as(usize, 1), progress.childCount());
+
+    // lead 가 먼저 답을 마쳤다 — 백그라운드로 띄웠다고 말하며, `background_tasks` 에 도는 것이 하나다.
+    var lead_stop = evOf(.stop);
+    lead_stop.running_background_tasks = 1;
+    lead_stop.text = "탐색 에이전트를 백그라운드로 띄웠습니다";
+    state = advance(&progress, state, lead_stop);
+    try testing.expectEqual(State.running, state);
+
+    // **남의 에이전트 종료가 넷 섞여 온다.** 하나도 우리 자식이 아니다 — 배지는 그대로여야 한다.
+    for ([_][]const u8{ "ab60fb9ff9", "a7b485fe68", "a9a53a68c2", "ac32d5a3e1" }) |other| {
+        state = advance(&progress, state, childEvId(.subagent_stop, other));
+        try testing.expectEqual(State.running, state);
+        try testing.expectEqual(@as(usize, 1), progress.childCount());
+    }
+
+    // 그리고 **우리 자식**이 끝난다 — 그때가 진짜 턴 끝이다.
+    state = advance(&progress, state, childEvId(.subagent_stop, "ac963bb35f95b11fd"));
+    try testing.expectEqual(State.idle, state);
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
+}
+
+test "background_tasks 가 끝까지 도는 중이어도 자식이 끝나면 풀린다" {
+    // 실측에서 마지막 자식 종료까지 `background_tasks` 는 계속 «도는 중 1» 이었다. 그것을 «아직 안
+    // 끝났다» 의 근거로 쓰면 **배지가 영영 안 풀린다** — 0 이 되는 순간을 알려 줄 이벤트가 없다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    state = advance(&progress, state, childEvId(.subagent_start, "c1"));
+    var lead_stop = evOf(.stop);
+    lead_stop.running_background_tasks = 1;
+    state = advance(&progress, state, lead_stop);
+    try testing.expectEqual(State.running, state);
+
+    var child_stop = childEvId(.subagent_stop, "c1");
+    child_stop.running_background_tasks = 1; // 여전히 도는 중이라고 말한다
+    try testing.expectEqual(State.idle, advance(&progress, state, child_stop));
+}
+
+test "세션이 다시 시작돼도 «턴이 끝났습니다» 가 나가지 않는다" {
+    // resume·컨텍스트 압축은 턴 중간에도 `SessionStart` 를 만든다(실측: 한 pane 에 startup·resume·
+    // startup 이 이어서 왔고 resume 은 턴 키까지 실었다). 배지가 «진행 중» 일 때 그것이 오면 상태는
+    // «대기» 로 가는데, 그 전이를 완료로 읽으면 **끝나지도 않은 턴에 완료 알림이 나간다**.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    try testing.expectEqual(State.running, state);
+
+    const restart = evOf(.session_start);
+    const before = state;
+    state = advance(&progress, state, restart);
+    try testing.expectEqual(State.idle, state); // 배지는 «대기» 로 간다
+    try testing.expectEqual(Notice.done, noticeOn(before, state)); // 상태만 보면 «완료» 로 보이고
+    try testing.expect(suppressesNotice(restart)); // 그래서 이벤트가 그것을 막는다
+
+    // 대조: 진짜 턴 끝은 안 막는다.
+    try testing.expect(!suppressesNotice(evOf(.stop)));
+    try testing.expect(!suppressesNotice(evOf(.stop_failure)));
+    try testing.expect(!suppressesNotice(evOf(.subagent_stop)));
 }

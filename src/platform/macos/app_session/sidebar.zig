@@ -1524,11 +1524,16 @@ pub fn runningLabel() []const u8 {
 
 /// running 상태줄/라벨 파형 문자열 "▁▅▇▃ 진행중"(owned). 사이드바 카드(workspaceStatusLine)와 단일 Term
 /// 폴백(agentStatusLine)이 **같은 문자열**을 쓰도록 단일화(code-review max — 옛 두 곳 중복 방지).
-pub fn runningStatusLine(self: *AppSession) ![]const u8 {
+pub fn runningStatusLine(self: *AppSession, detail: []const u8) ![]const u8 {
     const bars = try spinnerBarsUtf8(self, self.allocator);
     defer self.allocator.free(bars);
     // 문구가 런타임 값이 되어 `++`(comptime 결합)를 쓸 수 없다 — 파형과 문구를 인자로 넘긴다.
-    return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ bars, runningLabel() });
+    //
+    // `detail` 은 훅 모드의 **진행 중 세부**(계약 §2)다. 비어 있으면 — 관측 모드거나 아직 도구를 안 부른
+    // 구간 — 예전과 **바이트가 같은** 문자열이 나온다. 세부를 «없으면 빈 칸» 으로 채우지 않는 이유는
+    // 그것이 곧 줄 끝의 떠 있는 구분자가 되기 때문이다.
+    if (detail.len == 0) return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ bars, runningLabel() });
+    return std.fmt.allocPrint(self.allocator, "{s} {s} \u{00b7} {s}", .{ bars, runningLabel(), detail });
 }
 
 /// 배지의 **색 구간** — 어느 열 범위가 어느 종류인지. 색칠 루프가 셀만 보고는 알 수 없기 때문에 있다:
@@ -1757,7 +1762,8 @@ pub fn agentRowBranchOwned(self: *AppSession, term: *Term, indent: []const u8) !
 pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
     if (term.agent_kind == .none) return self.allocator.dupe(u8, "");
     return switch (term.agent_state) {
-        .running => runningStatusLine(self), // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처)
+        // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처). 훅 모드면 **무엇을 하는 중인지**까지 붙는다.
+        .running => runningStatusLine(self, term.agent_hook_tool.text()),
         // 마커(`?`·`✓`·`·`)는 **번역 대상이 아니다** — 기호이지 문장이 아니다. 문구만 키를 거친다.
         .blocked => std.fmt.allocPrint(self.allocator, "? {s}", .{maru.i18n.t(.sb_awaiting_input)}),
         .idle => std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{maru.i18n.t(.sb_agent_idle)}),

@@ -121,6 +121,7 @@ pub fn pendingNotification(self: *AppSession) ?PendingNotification {
                     if (agent_ops.takeAgentHookNotice(self, term)) |notice| {
                         const title = switch (notice.kind) {
                             .done => maru.i18n.t(.agent_hook_notice_done),
+                            .failed => maru.i18n.t(.agent_hook_notice_failed),
                             .attention => maru.i18n.t(.agent_hook_notice_attention),
                             .none => unreachable,
                         };

@@ -18330,6 +18330,10 @@ const hook_off_config = "sidebar.agent-transcript-hook = false\n";
 const hook_on_config = "sidebar.agent-transcript-hook = true\n";
 
 test "provider files remain unchanged across AppSession.init when the statusline hook is off" {
+    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다**(`test_allow_provider_writes`).
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const a = std.testing.allocator;
@@ -18493,6 +18497,11 @@ test "provider files remain unchanged across AppSession.init when the statusline
 const agent_hooks_on_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = true\n";
 
 test "agent hooks install into the claude hooks array and leave user entries untouched" {
+    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다.** 기본은 꺼짐이다 — 격리를 잊은
+    // 테스트가 개발자의 진짜 `~/.claude/settings.json` 을 고치는 사고가 났다(`test_allow_provider_writes`).
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const hook_command = maru.session.agent_hook_command;
     const hook_install = maru.session.agent_hook_install;
@@ -18538,7 +18547,10 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     // 지난 실행이 남긴 로그 둘을 미리 둔다 — 시작 시 정리가 **실제로** 지우는지 보기 위해서다. 소비자가
     // 없는 지금 이것이 없으면 파일이 무한히 자란다(계약 §4.2·§5).
     try tmp.dir.createDirPath(io, "cache/maru/agent-turn-events");
-    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/7.ndjson", .data = "claude\t{}\n" });
+    // **이 세션이 소유할 수 없는 id 를 쓴다.** 예전에는 `7.ndjson` 이었는데 이 테스트의 Term 이 하필
+    // surface_id 7 을 받아, 종료 시 «소유 pane 정리»(`cleanupOwnedAgentHookLogs`)가 지웠다 — 시작 시
+    // 정리가 돌든 안 돌든 통과하는, **딴 것을 재던** 테스트였다. 큰 수는 이 프로세스가 발급하지 않는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/987654.ndjson", .data = "claude\t{}\n" });
     // 우리 이름 모양이 **아닌** 것은 남의 것이라 건드리지 않는다. 두 가드(확장자·숫자 stem)를 따로 물게
     // 하려고 둘 다 둔다 — 하나만 두면 다른 가드를 지워도 이 검사가 통과한다(뮤테이션으로 확인했다).
     try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/notes.txt", .data = "keep me" });
@@ -18549,6 +18561,10 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     // 정리는 **프로세스에 한 번**이라(창마다 도는 것을 막는다) 같은 바이너리의 앞선 테스트가 이미 썼다.
     // 이 테스트가 그 경로를 보려면 되돌려야 한다 — 그 되돌림이 필요하다는 사실 자체가 계약의 일부다.
     agent_ops.hook_logs_cleaned = false;
+    // **이 테스트는 진짜 정리를 돌리겠다고 밝힌다.** 기본은 꺼짐이다 — 격리를 잊은 테스트가 개발자의
+    // 진짜 캐시를 지우는 사고가 실제로 났다(`test_allow_log_cleanup`).
+    agent_ops.test_allow_log_cleanup = true;
+    defer agent_ops.test_allow_log_cleanup = false;
 
     var session: AppSession = undefined;
     try session.init(io, a, .{
@@ -18568,6 +18584,31 @@ test "agent hooks install into the claude hooks array and leave user entries unt
             .{ .name = "abc.ndjson", .kind = .file },
             .{ .name = "9.log", .kind = .file },
         });
+    }
+
+    // **밝히지 않은 테스트에서는 정리가 돌지 않는다.** 이 게이트가 없으면 격리를 잊은 테스트가
+    // **개발자의 진짜 캐시**를 지운다 — 사용자가 쓰고 있던 세션의 이벤트 로그를 실제로 날린 사고가
+    // 있었다(2026-08-21). 여기서는 격리된 디렉터리에 파일을 두고 «게이트를 끈 채» 다시 돌려, 그것이
+    // **살아남는지**로 게이트를 못박는다.
+    {
+        agent_ops.hook_logs_cleaned = false;
+        agent_ops.test_allow_log_cleanup = false; // 밝히지 않았다
+        try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/876543.ndjson", .data = "claude\t{}\n" });
+        var guarded: AppSession = undefined;
+        try guarded.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        guarded.deinit();
+        const events_dir = try std.fmt.allocPrint(a, "{s}/maru/agent-turn-events", .{cache});
+        defer a.free(events_dir);
+        const kept = try std.fmt.allocPrint(a, "{s}/876543.ndjson", .{events_dir});
+        defer a.free(kept);
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, kept, .{}) catch null != null);
+        try std.Io.Dir.cwd().deleteFile(io, kept);
     }
 
     // **claude 디렉터리에 새 파일을 만들지 않는다** — 훅은 `settings.json` 안의 항목이고 스크립트 파일이 없다
@@ -18773,6 +18814,132 @@ test "hook mode runs exactly one source and takes over notifications" {
     try std.testing.expect(std.mem.indexOf(u8, emitted.title, maru.i18n.t(.agent_hook_notice_done)) != null);
     // 한 번 방출하면 끝이다 — 슬롯이 비어 두 번 울리지 않는다.
     try std.testing.expect(notification_ops.pendingNotification(&session) == null);
+
+    // ── ④ **오류 사유를 버리지 않는다** ─────────────────────────────────────────────────────
+    // `StopFailure` 도 `last_assistant_message` 에 사유를 싣고 온다(실측 — 로그인 안 된 세션에서 그대로
+    // 받았다). 그 자리를 비우면 알림이 «오류로 끝났습니다» 한 마디만 하고 사용자는 무엇이 잘못됐는지
+    // 다시 찾아야 한다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_hook_notice.clear();
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"StopFailure\",\"last_assistant_message\":\"Not logged in · Please run /login\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    const with_reason = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+    try std.testing.expect(std.mem.indexOf(u8, with_reason.title, maru.i18n.t(.agent_hook_notice_failed)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, with_reason.body, "Please run /login") != null);
+
+    // ── ⑤ **훅 모드도 턴이 끝나면 작업트리를 굳힌다**(계약 §1 표) ─────────────────────────
+    // 관측 모드는 `pollAgentState` 가 그 일을 하는데 훅 모드는 그 함수를 아예 안 부른다(§1.3 배타).
+    // 여기서 안 하면 **게이트를 켠 것만으로** «에이전트가 방금 바꾼 것» 이 통째로 사라진다.
+    // 저장소가 없으면 그 함수가 조용히 돌아가므로 결과가 아니라 **호출 자체**를 센다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_turn_snapshot_calls = 0;
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_turn_snapshot_calls); // 턴 시작은 끝이 아니다
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+
+    // 자식이 남아 lead 를 붙잡은 동안에는 **아직 턴 끝이 아니다** — 그때 찍으면 자식이 고칠 파일이
+    // 스냅샷 뒤에 바뀌어 «AI 가 바꾼 것» 에서 빠진다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_turn_snapshot_calls = 0;
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a5\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_turn_snapshot_calls);
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a5\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a5\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+
+    // 한 배치에 턴 끝이 **여럿** 들어와도 한 번만 찍는다. 배치 안의 이벤트는 모두 같은 작업트리를
+    // 보므로 여러 번 찍어도 나오는 tree 가 같다 — 비용만 는다(회전본을 건질 때가 특히 그렇다).
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_turn_snapshot_calls = 0;
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n" ++ "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+
+    // ── ⑥ **자식이 만든 턴 끝의 알림 본문은 lead 의 것이다** ───────────────────────────────
+    // lead 가 먼저 끝나고 자식이 남으면 턴 끝 전이는 마지막 `SubagentStop` 에서 일어난다. 그 이벤트의
+    // `last_assistant_message` 는 **자식의 응답**이다(실측 `"from-child"`) — 그것을 그대로 실으면
+    // «완료: from-child» 가 나가 lead 가 한 말 대신 자식이 한 말을 알린다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_hook_notice.clear();
+    term.agent_transcript.owned.setReply("");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a533c21143f8edccb\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"lead 가 정리했습니다\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a533c21143f8edccb\",\"last_assistant_message\":\"from-child\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    const lead_body = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+    try std.testing.expect(std.mem.indexOf(u8, lead_body.body, "lead 가 정리했습니다") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lead_body.body, "from-child") == null);
+
+    // 오류로 끝난 경우도 같다 — 그 자리에 자식 응답이 들어가면 «오류 사유» 를 참칭한다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_hook_notice.clear();
+    term.agent_transcript.owned.setReply("");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a533c21143f8edccb\"}\n" ++ "claude\t{\"hook_event_name\":\"StopFailure\",\"last_assistant_message\":\"Not logged in · Please run /login\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a533c21143f8edccb\",\"last_assistant_message\":\"from-child\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    const fail_body = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+    try std.testing.expect(std.mem.indexOf(u8, fail_body.title, maru.i18n.t(.agent_hook_notice_failed)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, fail_body.body, "Please run /login") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fail_body.body, "from-child") == null);
+
+    // ── ⑦ **오류로 끝난 턴을 «완료» 라 부르지 않는다**(계약 §2) ──────────────────────────────
+    // 같은 전이(턴 끝)라 문구를 안 가르면 오류로 끊긴 턴이 «턴이 끝났습니다» 로 나간다 — 그 알림
+    // 자체가 거짓말이다. 자식이 남은 경우까지 본다: 그때는 끝 전이가 `StopFailure` 가 아니라
+    // **마지막 `SubagentStop`** 에서 일어나 오류였다는 사실이 사라지기 쉽다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_hook_notice.clear();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\"}\n" ++ "claude\t{\"hook_event_name\":\"StopFailure\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    const failed = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+    try std.testing.expect(std.mem.indexOf(u8, failed.title, maru.i18n.t(.agent_hook_notice_failed)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed.title, maru.i18n.t(.agent_hook_notice_done)) == null);
+
+    // 다음 턴이 정상으로 끝나면 다시 «완료» 다 — 오류 표시가 남으면 그 pane 이 영영 오류로 끝난다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_state = .unknown;
+    term.agent_hook_notice.clear();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    const ok = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+    try std.testing.expect(std.mem.indexOf(u8, ok.title, maru.i18n.t(.agent_hook_notice_done)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, ok.body, "다 했습니다") != null);
 }
 
 test "hook mode fills state and conversation from the event log, and only then" {
@@ -18965,23 +19132,195 @@ test "hook mode fills state and conversation from the event log, and only then" 
         });
         const rotated_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, rotated_rel });
         defer a.free(rotated_abs);
+        term.agent_state = .running; // 턴이 돌던 중에 회전이 있었다
+        agent_ops.test_turn_snapshot_calls = 0;
         agent_ops.drainRotatedAgentHookLogForTest(&session, term, rotated_abs);
         try std.testing.expectEqualStrings("회전본에 남아 있던 응답", term.agent_transcript.owned.reply());
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        // **건진 이벤트도 턴 끝을 만든다.** 회전본 쪽만 빠뜨리면 «마지막 Stop 이 회전본에 들어간 턴» 의
+        // 작업트리가 통째로 안 굳는다 — 대화를 빠뜨렸던 것과 같은 부류의 누락이다.
+        try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
         try std.testing.expect(tmp.dir.statFile(io, rotated_rel, .{}) catch null == null); // 건진 뒤 지운다
     }
 
-    // ⑫ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
+    // ⑫ **서브에이전트가 도는 동안 lead 의 Stop 을 완료로 단정하지 않는다**(계약 §2). 그리고 마지막 자식이
+    //    끝나면 풀린다 — 안 풀리면 그것도 «거짓말하는 배지» 다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        const sub_prompt_line = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n";
+        const sub_start_line = "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ac963bb35f95b11fd\"}\n";
+        const sub_lead_stop_line = "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"자식에게 맡겼습니다\"}\n";
+        // **남의 에이전트 종료** — 우리가 시작을 본 적 없는 id 다(실사용에서 넷이 섞여 왔다).
+        const sub_other_stop_line = "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"ab60fb9ff9c21ee0\"}\n";
+        const sub_our_stop_line = "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"ac963bb35f95b11fd\"}\n";
+
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = sub_prompt_line ++ sub_start_line ++ sub_lead_stop_line ++ sub_other_stop_line });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        // lead 는 끝났지만 자식이 돈다 → 여전히 진행 중이고 **완료 알림이 예약되지 않는다**.
+        // 남의 종료가 하나 섞여 왔어도 우리 자식은 그대로다 — 개수를 세면 여기서 이미 풀린다.
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+        try std.testing.expectEqual(@as(usize, 1), term.agent_hook_progress.childCount());
+        try std.testing.expect(!term.agent_hook_progress.turn_open); // lead 의 턴은 닫혔다
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+
+        // **우리** 자식이 끝나면 그때가 진짜 턴 끝이다.
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = sub_prompt_line ++ sub_start_line ++ sub_lead_stop_line ++ sub_other_stop_line ++ sub_our_stop_line });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    }
+
+    // ⑬ **오류로 끝난 턴도 끝이다.** `StopFailure` 를 안 받으면 그 pane 이 영영 «진행 중» 이다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++
+            "claude\t{\"hook_event_name\":\"StopFailure\"}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    }
+
+    // ⑭ **끝난 백그라운드 항목이 배지를 붙잡지 않는다.** 배열이 비었는지만 보면 completed 하나가 영원히
+    //    «진행 중» 을 만든다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++
+            "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"a\",\"status\":\"completed\"}]}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+
+        // 대조: 하나라도 running 이면 진행 중이다.
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_state = .unknown;
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++
+            "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"a\",\"status\":\"running\"}]}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    }
+
+    // ⑮ **진행 중 세부가 사이드바 줄까지 간다**(계약 §2·§8). 훅 모드는 화면·프로세스 관측을 끄므로
+    //    이 자리가 비면 훅을 켠 사용자가 관측 모드보다 **정보를 잃는다**.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_tool.clear();
+        session.agent_spin_frame = 0; // 파형은 애니메이션 — 고정해야 문자열이 실행마다 같다
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualStrings("테스트를 돌린다", term.agent_hook_tool.text());
+        const with_detail = try sidebar_ops.agentStatusLine(&session, term);
+        defer a.free(with_detail);
+        try std.testing.expect(std.mem.endsWith(u8, with_detail, "\u{00b7} 테스트를 돌린다"));
+        try std.testing.expect(std.mem.indexOf(u8, with_detail, sidebar_ops.runningLabel()) != null);
+
+        // 설명이 없는 도구는 이름이라도 보인다 — 빈 줄보다 낫다.
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualStrings("Read", term.agent_hook_tool.text());
+
+        // 자식의 도구 호출은 **부모의** 세부를 갈아 끼우지 않는다(계약 §2).
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"agent_id\":\"child-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"자식이 하는 일\"}}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualStrings("Read", term.agent_hook_tool.text());
+
+        // 새 턴이 시작되면 비운다 — 안 비우면 지난 턴의 마지막 도구가 계속 붙어 있다. 그리고 그때의
+        // 상태줄은 예전과 **바이트가 같다**(세부가 없으면 구분자도 없다).
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"agent_id\":\"child-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"자식이 하는 일\"}}\n" ++ "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualStrings("", term.agent_hook_tool.text());
+        const plain = try sidebar_ops.agentStatusLine(&session, term);
+        defer a.free(plain);
+        try std.testing.expect(std.mem.endsWith(u8, plain, sidebar_ops.runningLabel()));
+
+        // 관측 모드로 돌아가면 남은 세부를 버린다 — 남기면 다른 소스의 배지 옆에 훅 문구가 붙는다(§1).
+        term.agent_hook_tool.set("남은 것");
+        // 자식 셈도 함께 버린다 — 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
+        // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
+        term.agent_hook_progress = .{ .turn_open = true };
+        term.agent_hook_progress.children[0] = .{ .len = 2 };
+        term.agent_hook_progress.children[0].buf[0] = 'c';
+        term.agent_hook_progress.children[0].buf[1] = '1';
+        term.agent_hook_progress.child_count = 1;
+        session.loaded_config.config.sidebar.agent_hooks = false;
+        agent_ops.pollAgentConsumer(&session, term, false, false);
+        try std.testing.expectEqualStrings("", term.agent_hook_tool.text());
+        try std.testing.expectEqual(@as(usize, 0), term.agent_hook_progress.childCount());
+        try std.testing.expect(!term.agent_hook_progress.turn_open);
+        session.loaded_config.config.sidebar.agent_hooks = true;
+    }
+
+    // ── ⑰ **실측 줄을 그대로 태운다**(2026-08-21 claude 서브에이전트 턴) ─────────────────────
+    // 위의 모든 제품 테스트는 입력이 **내가 손으로 쓴 JSON** 이다 — 내가 생각한 키만 들어 있다.
+    // 진짜 줄에는 `effort`·`tool_use_id`·`session_crons`·`agent_type`·`agent_transcript_path`·
+    // `permission_mode` 처럼 한 번도 안 써 본 키가 있고 키 순서도 다르다. 그중 하나가 파서를 멈추면
+    // 그 이벤트는 **조용히 사라지고**, 그것이 곧 안 풀리는 배지다. 경로만 가리고 나머지는 한 글자도
+    // 안 고쳤다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        term.agent_transcript.owned.setReply("");
+        agent_ops.test_turn_snapshot_calls = 0;
+
+        const real_turn = "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}\n" ++
+            "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"prompt_id\":\"b916795d-79e4-4142-9f06-5c1869e7d82c\",\"permission_mode\":\"bypassPermissions\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Use the Task tool to launch exactly one general-purpose subagent that runs `echo from-child` and reports the output. Then reply with: done.\"}\n" ++
+            "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"prompt_id\":\"b916795d-79e4-4142-9f06-5c1869e7d82c\",\"permission_mode\":\"bypassPermissions\",\"effort\":{\"level\":\"high\"},\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Agent\",\"tool_input\":{\"description\":\"Run echo command\",\"prompt\":\"Run the shell command `echo from-child` using the Bash tool and report its exact stdout output as your final answer.\",\"subagent_type\":\"general-purpose\",\"run_in_background\":false},\"tool_use_id\":\"toolu_01VUSoQ6gMcYrneVHhgBbHbX\"}\n" ++
+            "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"prompt_id\":\"b916795d-79e4-4142-9f06-5c1869e7d82c\",\"agent_id\":\"a533c21143f8edccb\",\"agent_type\":\"general-purpose\",\"hook_event_name\":\"SubagentStart\"}\n" ++
+            "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"prompt_id\":\"b916795d-79e4-4142-9f06-5c1869e7d82c\",\"permission_mode\":\"bypassPermissions\",\"agent_id\":\"a533c21143f8edccb\",\"agent_type\":\"general-purpose\",\"effort\":{\"level\":\"high\"},\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo from-child\",\"description\":\"Echo from-child\"},\"tool_use_id\":\"toolu_01WiCBM8eTrUcFwDVQRpuptm\"}\n" ++
+            "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"prompt_id\":\"b916795d-79e4-4142-9f06-5c1869e7d82c\",\"permission_mode\":\"bypassPermissions\",\"agent_id\":\"a533c21143f8edccb\",\"agent_type\":\"general-purpose\",\"effort\":{\"level\":\"high\"},\"hook_event_name\":\"SubagentStop\",\"stop_hook_active\":false,\"agent_transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada/subagents/agent-a533c21143f8edccb.jsonl\",\"last_assistant_message\":\"from-child\",\"background_tasks\":[],\"session_crons\":[]}\n" ++
+            "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"prompt_id\":\"b916795d-79e4-4142-9f06-5c1869e7d82c\",\"permission_mode\":\"bypassPermissions\",\"effort\":{\"level\":\"high\"},\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"last_assistant_message\":\"서브에이전트가 `echo from-child`를 실행했고 출력은 `from-child`였습니다.\\n\\ndone\",\"background_tasks\":[],\"session_crons\":[]}\n";
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = real_turn });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+
+        // 턴이 끝났다 — 자식이 먼저 끝나고 lead 가 뒤에 끝나는 **실측 순서** 그대로다.
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        try std.testing.expectEqual(@as(usize, 0), term.agent_hook_progress.childCount());
+        try std.testing.expect(!term.agent_hook_progress.turn_open);
+        // 턴 키를 실제 payload 에서 집었다(`prompt_id`).
+        try std.testing.expectEqual(@as(usize, 36), term.agent_hook_progress.turnKey().len);
+        // 대화는 **lead 의 것**이다 — 자식의 `last_assistant_message`("from-child")가 아니다.
+        //
+        // 「"from-child" 를 포함하지 않는다」로 쓰면 안 된다: **lead 자신의 응답이 그 말을 인용한다**
+        // ("서브에이전트가 `echo from-child`를 실행했고 …"). 실측 데이터가 그 단언을 깼다 — 합성
+        // 입력이었다면 영영 안 걸렸을 함정이라, 이 자리는 «자식 것과 같지 않다» 로 물어야 한다.
+        try std.testing.expect(!std.mem.eql(u8, term.agent_transcript.owned.reply(), "from-child"));
+        try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.reply(), "done") != null);
+        try std.testing.expect(term.agent_transcript.owned.prompt().len > 0);
+        // 작업트리도 굳었다(배치 안이므로 한 번).
+        try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+        // 완료 알림이 예약됐고 오류가 아니다.
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, term.agent_hook_notice.kind);
+    }
+
+    // ⑯ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
     session.loaded_config.config.sidebar.agent_hooks = false;
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
     session.loaded_config.config.sidebar.agent_hooks = true;
 
-    // ⑬ 에이전트가 없으면 모드를 논할 것도 없다.
+    // ⑰ 에이전트가 없으면 모드를 논할 것도 없다.
     term.agent_kind = .none;
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 }
 
 test "turning the agent hooks gate off removes what we installed and nothing else" {
+    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다.** 기본은 꺼짐이다 — 격리를 잊은
+    // 테스트가 개발자의 진짜 `~/.claude/settings.json` 을 고치는 사고가 났다(`test_allow_provider_writes`).
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const hook_command = maru.session.agent_hook_command;
     const hook_install = maru.session.agent_hook_install;
@@ -19109,6 +19448,11 @@ test "turning the agent hooks gate off removes what we installed and nothing els
 }
 
 test "agent hooks install into codex and record trust without touching existing entries" {
+    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다.** 기본은 꺼짐이다 — 격리를 잊은
+    // 테스트가 개발자의 진짜 `~/.claude/settings.json` 을 고치는 사고가 났다(`test_allow_provider_writes`).
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const hook_command = maru.session.agent_hook_command;
     const hook_install = maru.session.agent_hook_install;
@@ -19425,6 +19769,10 @@ test "agent hooks stay out of provider files while the gate is off" {
 }
 
 test "agent statusline hook edits only the statusLine key and preserves the wrapped user command" {
+    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다**(`test_allow_provider_writes`).
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const sl = maru.session.agent_statusline;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -19586,6 +19934,10 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
 // 경로에서 검증한다. 적대 검증이 이 넷을 전부 무력화해도 기존 게이트가 green이라는 것을 실측으로 보였다
 // (마커 **내용** 로직만 덮여 있었다). 각 블록은 그 뮤테이션 하나에 대응한다.
 test "agent statusline hook serializes, preserves file identity, and refuses to guess" {
+    // **이 테스트는 provider 설정 파일을 실제로 고치겠다고 밝힌다**(`test_allow_provider_writes`).
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     const sl = maru.session.agent_statusline;
     const io = std.Io.Threaded.global_single_threaded.io();

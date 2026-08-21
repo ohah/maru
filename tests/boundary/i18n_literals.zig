@@ -83,6 +83,10 @@ const inventory = [_]Entry{
     .{ .path = "src/platform/macos/app_pty_metal_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/app_session.zig", .count = 16 },
     .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 3 },
+    // **표시 문자열이 아니라 판정자의 진단 출력이다**(§7 "표시가 아니면 그 사실을 적고 원장을
+    // 올린다"). DSEL3가 그려진 글자와 클릭이 답한 byte를 대조하다 어긋나면 그 자리를 사람이 읽을
+    // 수 있게 한 줄 찍는다 — 실패했을 때만 나오고 화면에는 영영 안 간다.
+    .{ .path = "src/platform/macos/app_session/editor_diff.zig", .count = 1 },
     .{ .path = "src/platform/macos/app_session/settings.zig", .count = 1 },
     // `sidebar.zig`(3) 는 **0 이 되어 빠졌다.** 에이전트 상태줄 넷 중 running 만 키를 거치고 나머지
     // 셋(`입력 대기`·`대기중`·`상태 확인 중`)이 한국어 리터럴이라, 영어 화면에서 **한 줄 안에 언어가
@@ -193,7 +197,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 183;
+const header_total = 184;
 const header_config_total = 53;
 
 comptime {

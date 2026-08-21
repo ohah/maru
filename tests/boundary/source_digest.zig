@@ -34,6 +34,34 @@ pub const Result = struct {
     }
 };
 
+/// 한 `test` 블록의 본문을 **균형 잡힌 중괄호까지** 훑어 표시한다. 표시한 마지막 토큰 다음 자리를 돌려준다.
+///
+/// 두 마스크가 이 루프를 공유한다 — 복사해 두면 이 저장소가 반복해서 당한 형태(두 벌이 갈린다)가 된다.
+fn markTestBody(
+    tree: *const std.zig.Ast,
+    excluded: []bool,
+    test_token: std.zig.Ast.TokenIndex,
+) !std.zig.Ast.TokenIndex {
+    var cursor = test_token;
+    var body_depth: usize = 0;
+    var body_started = false;
+    while (cursor < tree.tokens.len) : (cursor += 1) {
+        excluded[cursor] = true;
+        const part = tree.tokenSlice(cursor);
+        if (std.mem.eql(u8, part, "{")) {
+            body_started = true;
+            body_depth += 1;
+        } else if (std.mem.eql(u8, part, "}")) {
+            if (!body_started or body_depth == 0) return error.TestUnexpectedResult;
+            body_depth -= 1;
+            if (body_depth == 0) break;
+        }
+    }
+    if (!body_started or body_depth != 0 or cursor == tree.tokens.len)
+        return error.TestUnexpectedResult;
+    return cursor + 1;
+}
+
 /// `tree` 의 토큰 중 **최상위 `test` 블록에 속한 것**을 표시한다.
 ///
 /// 테스트를 빼는 이유는 원장이 지키려는 것이 **제품 코드의 성질**이기 때문이다 — 테스트를 고쳤다고
@@ -54,25 +82,7 @@ pub fn topLevelTestTokenMask(
     while (token < tree.tokens.len) {
         const part = tree.tokenSlice(token);
         if (lexical_depth == 0 and std.mem.eql(u8, part, "test")) {
-            var cursor = token;
-            var body_depth: usize = 0;
-            var body_started = false;
-            while (cursor < tree.tokens.len) : (cursor += 1) {
-                excluded[cursor] = true;
-                const body_part = tree.tokenSlice(cursor);
-                if (std.mem.eql(u8, body_part, "{")) {
-                    body_started = true;
-                    body_depth += 1;
-                } else if (std.mem.eql(u8, body_part, "}")) {
-                    if (!body_started or body_depth == 0)
-                        return error.TestUnexpectedResult;
-                    body_depth -= 1;
-                    if (body_depth == 0) break;
-                }
-            }
-            if (!body_started or body_depth != 0 or cursor == tree.tokens.len)
-                return error.TestUnexpectedResult;
-            token = cursor + 1;
+            token = try markTestBody(tree, excluded, token);
             continue;
         }
         if (std.mem.eql(u8, part, "{")) {
@@ -83,7 +93,39 @@ pub fn topLevelTestTokenMask(
         }
         token += 1;
     }
+    // 파일이 열린 중괄호로 끝나면 위 루프가 조용히 끝난다. `tree.errors` 가 앞에서 막으므로 오늘은 도달
+    // 하지 않지만, **추출하면서 이 줄을 지웠다가 적대적 검증에 잡혔다** — 도달 불가라는 판단은 파서가
+    // 바뀌면 같이 바뀐다. 방어 검사를 지우는 것은 리팩터링이 아니다.
     if (lexical_depth != 0) return error.TestUnexpectedResult;
+    return excluded;
+}
+
+/// `tree` 의 토큰 중 **어느 깊이든 `test` 블록에 속한 것**을 표시한다.
+///
+/// `topLevelTestTokenMask` 와 규칙이 하나 다르다 — struct 안에 중첩된 `test` 도 뺀다. 실제로
+/// `remote_term_backend.zig` 가 `pub const testing_api = if (builtin.is_test) struct { test "…" {…} }`
+/// 형태로 그렇게 쓴다. digest 원장은 **최상위**판을 쓴다(그 원장의 계약이 그렇게 굳어 있고, 바꾸면 236 개
+/// 항목이 한꺼번에 움직인다). 새로 세는 쪽은 이 판을 쓴다 — 중첩 테스트를 제품 코드로 세면 **권장하는
+/// 테스트를 쓴 사람이 벌받는다**. 오늘 그 파일의 중첩 `test` 안에는 `tIn`·`setLang` 이 없어서 두 마스크의
+/// 결과가 실제로 갈리는 자리는 **0 개다** — 즉 이것은 지금 나는 오탐을 고친 것이 아니라 **권장하는 형태를
+/// 쓸 때 나지 않게** 미리 막은 것이다.
+pub fn anyDepthTestTokenMask(
+    allocator: std.mem.Allocator,
+    tree: *const std.zig.Ast,
+) ![]bool {
+    if (tree.errors.len != 0) return error.TestUnexpectedResult;
+    const excluded = try allocator.alloc(bool, tree.tokens.len);
+    errdefer allocator.free(excluded);
+    @memset(excluded, false);
+
+    var token: std.zig.Ast.TokenIndex = 0;
+    while (token < tree.tokens.len) {
+        if (std.mem.eql(u8, tree.tokenSlice(token), "test")) {
+            token = try markTestBody(tree, excluded, token);
+            continue;
+        }
+        token += 1;
+    }
     return excluded;
 }
 

@@ -2525,9 +2525,36 @@ pub fn build(b: *std.Build) void {
     const run_i18n_orphan_key_boundary_tests = b.addRunArtifact(i18n_orphan_key_boundary_tests);
     run_i18n_orphan_key_boundary_tests.setCwd(b.path("."));
 
+    // i18n 4차 방어: 표시 문자열이 **한 언어로 얼어붙지** 않는가. 컴파일러는 절반만 막는다 —
+    // 컨테이너 수준 `const` 에 `i18n.t()` 를 넣으면 거부하지만(comptime-known 아님), 언어를 인자로 박은
+    // `i18n.tIn(.ko, …)` 는 통과하고 그 자리에서 굳는다. 한글 리터럴이 없으니 리터럴 게이트도 못 본다.
+    const i18n_pinned_language_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/pinned_language.zig"),
+            .target = target,
+            .optimize = optimize,
+            // 표의 **가시성 하나**를 컴파일러에게 묻는다(`@hasDecl` 세 줄) — `en`/`ko`/`Table` 이 다시
+            // `pub` 이 되면 comptime 에 거부한다. 그 셋을 비공개로 닫은 것이 이 브랜치의 변경이고,
+            // 문자열로 되묻지 않으려면 표를 모듈로 받아야 한다. 대가는 이 테스트가 단독 `zig test` 로
+            // 안 돈다는 것이고, 붙이는 명령은 그 파일 머리에 적혀 있다.
+            //
+            // 표의 **공개 표면 전체**를 명부로 고정하는 판도 있었으나 걷어냈다(위반 0 인 가정 방어였다).
+            // 그래서 다른 이름으로 재수출하는 것(`pub const ko2 = ko;`)은 **이 게이트가 안 잡는다** —
+            // 인정된 한계로 `pinned_language.zig` 머리와 `docs/i18n.md` §7.2 에 적혀 있다.
+            .imports = &.{.{ .name = "i18n_table", .module = b.createModule(.{
+                .root_source_file = b.path("src/i18n.zig"),
+                .target = target,
+                .optimize = optimize,
+            }) }},
+        }),
+    });
+    const run_i18n_pinned_language_boundary_tests = b.addRunArtifact(i18n_pinned_language_boundary_tests);
+    run_i18n_pinned_language_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
+    boundary_step.dependOn(&run_i18n_pinned_language_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);

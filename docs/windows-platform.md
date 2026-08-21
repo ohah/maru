@@ -1577,6 +1577,10 @@ after: staged_alpha=true untracked=1
 
 ### 2m.12 크롬 텍스트 셰이핑 다리 — 실측과 결정 (2026-08-21)
 
+> **층은 §2m.13 이 정정했다.** 이 절이 고른 **A**(스크립트 분석·폰트 폴백을 OS 에 맡긴다)는 그대로
+> 유효하지만, 이 절이 잰 **저수준**(`IDWriteTextAnalyzer` + `IDWriteFontFallback`)이 아니라
+> 고수준(`IDWriteTextLayout`)으로 간다. 여기 적힌 측정값은 전부 유효하다.
+
 에디터를 뺀 ADE 표면(사이드바·pane·소스 컨트롤·에이전트 도크)이 Windows 에서 안 그려지는 관문은
 **하나**다: `system_text.shapeUnresolvedRun` 이 `builtin.os.tag != .macos` 에서 곧장 에러다(§2m.6).
 그 함수의 Windows 짝을 세우는 일을 **셰이핑 다리**라 부른다.
@@ -1691,7 +1695,7 @@ Draw hr=0  runs=6  glyphs=15
 | ① advance | `DWRITE_GLYPH_RUN.glyphAdvances` — 9.4 등폭 유지 |
 | ② 글리프↔문자 | `DWRITE_GLYPH_RUN_DESCRIPTION` 의 `clusterMap`·`textPosition`·`stringLength` |
 | ③ left overhang | `GetDesignGlyphMetrics(run.fontFace)` — 저수준과 동일 |
-| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 |
+| ④ font_name | `GetSystemFontCollection` → `GetFontFromFontFace` → 가족 이름 — **시스템 컬렉션에 있는 폰트만**(아래) |
 | ⑤ 말줄임 | `SetWordWrapping(NO_WRAP)` + `CreateEllipsisTrimmingSign` + `SetTrimming` |
 | ⑥ 컬러 글리프 | `run.fontFace` 에 `COLR`/`sbix` 테이블이 있는가 |
 
@@ -1713,8 +1717,74 @@ Draw hr=0  runs=6  glyphs=15
 판정한다(글리프 단위가 아니다). Windows 짝은 `IDWriteFontFace.TryGetFontTable` 이고, 태그가
 **리틀엔디언 4CC** 라 CoreText 와 바이트 순서가 반대다. 이모지 런에서 `Segoe UI Emoji` + `COLR` 로 확인했다.
 
-**그래서 다리는 고수준으로 간다.** macOS 가 `CTLine` 하나에 맡기는 것을 Windows 도 `IDWriteTextLayout`
-하나에 맡긴다 — §2m.12 가 "일관성" 을 근거로 A 를 고른 논리를 끝까지 민 결과다.
+**⑤ 를 자르는 것은 `SetTrimming` 이지 `NO_WRAP` 이 아니다.** 처음 잰 두 점만으로는 둘을 못 가른다 —
+`NO_WRAP` 이 폭을 넘은 글리프를 그냥 버렸을 수도 있다. 2×2 로 다시 쟀다(`"Wi->l TAIL"`, 10 글리프):
+
+```text
+줄바꿈 켬 + 자르기 없음   폭 60   → runs=3 glyphs=10 기호=0    (세 줄로 넘긴다)
+NO_WRAP  + 자르기 없음   폭 60   → runs=1 glyphs=10 기호=0    ← 안 자른다. 넘칠 뿐이다
+NO_WRAP  + SetTrimming   폭 60   → runs=1 glyphs=5  기호=1    ← 자르는 것은 SetTrimming
+줄바꿈 켬 + SetTrimming   폭 60   → runs=3 glyphs=10 기호=0    (NO_WRAP 이 없으면 안 잘린다)
+NO_WRAP  + SetTrimming   폭 9999 → runs=1 glyphs=10 기호=0    (필요할 때만 자른다)
+```
+
+**둘 다 있어야 하고, 둘 중 어느 것도 혼자서는 안 한다.**
+
+**② 는 다대일이 실제로 나온다.** 처음엔 `clusterMap[0]` 만 봤는데 그 값은 **어느 런에서나 0** 이라 아무것도
+증명하지 않는다. 이모지로 다시 쟀다(`"A😀B"`, UTF-16 4 칸):
+
+```text
+런0: 문자 1칸  글리프 1개  clusterMap = 0
+런1: 문자 2칸  글리프 1개  clusterMap = 0 0     ← 서러게이트 쌍 두 칸이 한 글리프로
+런2: 문자 1칸  글리프 1개  clusterMap = 0
+```
+
+**④ 는 조건부다 — 시스템 컬렉션에 있는 폰트에서만 통한다.** 번들 폰트를
+`CreateFontFileReference` → `CreateFontFace` 로 만들어 쳐 봤다:
+
+```text
+CreateFontFileReference(assets/fonts/Jetendard/Jetendard-Regular.ttf)  hr=0
+CreateFontFace                                                          hr=0  face=있음
+GetFontFromFontFace(시스템 컬렉션, 그 face)                              hr=0x88985002  (DWRITE_E_NOFONT)
+```
+
+**저수준은 이 문제가 없었다** — `MapCharacters` 가 `IDWriteFont` 를 직접 돌려주므로 컬렉션을 되짚을 일이
+없다. 층을 올린 대가다. 번들 폰트의 이름은 **우리가 만든 face 를 우리가 이름과 함께 들고 있는 것**으로
+풀어야 하고, 시스템 컬렉션 조회로는 안 된다.
+
+**폴백 목록은 우리가 지정해야 한다 — macOS 도 OS 에 "그냥 맡기지" 않는다.** 이 절이 처음에
+"macOS 가 `CTLine` 하나에 맡기는 것을 Windows 도 `IDWriteTextLayout` 하나에 맡긴다" 고 적었는데
+**그 대칭 서술이 한쪽을 잘못 그렸다**. macOS 셰이퍼는 주 폰트에 `kCTFontCascadeListAttribute` 로
+**`font.fallback` 목록을 박고** 시스템 cascade 를 그 뒤에 잇는다([configuration.md](configuration.md)
+`font.fallback`; 기본값은 번들 `Jetendard`).
+
+그 기본값에는 실측 근거가 있다(`config/theme.zig` `FontConfig.fallback` doc). 시스템 cascade 가 고르는
+한글 폰트는 비례 폰트라 advance 가 등폭 격자와 무관하고, 그것이 "한글만 자간이 넓다" 로 보인다.
+Jetendard 는 한글을 라틴 2 배 폭으로 디자인해 격자에 맞는다.
+
+**그런데 이 절의 실측은 그 목록을 안 준 상태였다:**
+
+```text
+"한글" 런의 폰트 = Malgun Gothic        ← 시스템이 고른 것. Jetendard 가 아니다
+```
+
+즉 **고수준에 그냥 맡기면 macOS 와 다른 폰트로 그려진다** — 대칭이 깨지는 쪽은 Windows 다.
+`font.fallback` 을 무시하는 것이기도 하다.
+
+**우회로는 실재한다.** 둘 다 실기에서 확인했다:
+
+```text
+CreateFontFallbackBuilder (IDWriteFactory2 슬롯 27)   hr=0  ptr=있음
+layout → IDWriteTextLayout2 QueryInterface            hr=0  ptr=있음   (SetFontFallback 을 가진 층)
+```
+
+`IDWriteFontFallbackBuilder` 가 `kCTFontCascadeListAttribute` 의 짝이고, `IDWriteTextLayout2.SetFontFallback`
+으로 layout 에 건다. **다리는 이 둘을 반드시 쓴다** — 안 쓰면 `font.fallback` 설정이 Windows 에서 죽는다.
+④ 의 번들 폰트 문제도 같은 뿌리다(번들 폰트는 시스템 컬렉션 밖에 있다).
+
+**그래서 다리는 고수준으로 간다.** `IDWriteTextLayout` 이 셰이핑·구간 분할·말줄임을 하고, **폴백 목록은
+우리가 박는다.** macOS 가 CoreText 에 대해 하는 것과 같은 모양이다 — §2m.12 가 "일관성" 을 근거로 A 를
+고른 논리를 끝까지 민 결과다.
 
 **구현할 COM 객체가 바뀐다.** `IDWriteTextAnalysisSource`(8 슬롯) 대신 `IDWriteTextRenderer`(10 슬롯 —
 IUnknown 3 + `IDWritePixelSnapping` 3 + 자기 것 4)다. 부담은 비슷하고, 대신 스크립트 분석 호출과 런별 face

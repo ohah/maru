@@ -2409,6 +2409,19 @@ pub fn build(b: *std.Build) void {
     const run_cwd_axis_boundary_tests = b.addRunArtifact(cwd_axis_boundary_tests);
     run_cwd_axis_boundary_tests.setCwd(b.path("."));
 
+    // `fstat` 축(`file_tree.ScanIdentity`)을 만들거나 벗기는 자리를 재고로 고정한다. Zig 는 필드
+    // 프라이버시가 없어 타입만으로는 `.{ .value = 아무거나 }` 를 막지 못한다 — 언어가 못 하는 봉인을
+    // 이 소스 스캔이 대신한다(2026-08-21: 축을 섞어 탐색기 안내가 끊이지 않던 결함).
+    const scan_identity_axis_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/scan_identity_axis.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_scan_identity_axis_boundary_tests = b.addRunArtifact(scan_identity_axis_boundary_tests);
+    run_scan_identity_axis_boundary_tests.setCwd(b.path("."));
+
     // 중립 층으로 가는 경로를 native 구분자로 잇지 않는다 — Windows 전용 오답이라 macOS·Linux 러너에는
     // 안 보인다. 소스 스캔이 그 배선을 CI 로 끌어오는 유일한 길이다(docs/windows-platform.md §2m.5).
     const neutral_path_join_boundary_tests = addProjectTest(b, .{
@@ -2531,6 +2544,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
     boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
+    boundary_step.dependOn(&run_scan_identity_axis_boundary_tests.step);
     boundary_step.dependOn(&run_neutral_path_join_boundary_tests.step);
     boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);

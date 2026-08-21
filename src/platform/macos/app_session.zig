@@ -34700,7 +34700,7 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     const root_count = session.file_tree.rootCount();
     const initial_scan = session.file_tree.takeScanRequest().?;
     allocator.free(initial_scan);
-    try session.file_tree.applySnapshotWithIdentity(project, try testFileTreeIdentity(project), &.{
+    try session.file_tree.applySnapshotWithIdentity(project, try testFileTreeScanIdentity(project), &.{
         .{ .name = "one", .kind = .directory, .identity = try testFileTreeIdentity(one) },
         .{ .name = "two", .kind = .directory, .identity = try testFileTreeIdentity(two) },
     });
@@ -35056,7 +35056,7 @@ test "file tree markdown activation pins first hydration identity across leaf re
     _ = session.file_tree.pinRootIdentity(root, root_identity);
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
-    try session.file_tree.applySnapshotWithIdentity(root, root_identity, &.{.{
+    try session.file_tree.applySnapshotWithIdentity(root, .{ .value = root_identity }, &.{.{
         .name = "doc.md",
         .kind = .file,
         .identity = doc_identity,
@@ -37374,7 +37374,7 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expect(session.completePendingDockFocus(a_sid));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
-    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{
+    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeScanIdentity(root), &.{
         .{ .name = "a.md", .kind = .file, .identity = try testFileTreeIdentity(a_path) },
         .{ .name = "b.md", .kind = .file, .identity = try testFileTreeIdentity(b_path) },
     });
@@ -37408,6 +37408,21 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     try std.testing.expect(session.pending_dock_focus == null);
     try std.testing.expect(term_ops.focusedDockSurface(session) == a_sid);
     try std.testing.expectEqual(a_sid, session.takeFileTreeRestoreSurfaceAction().?);
+}
+
+/// 스냅샷 검증이 쓰는 **`fstat` 축**의 테스트 identity — 디렉터리를 실제로 열어 잰다.
+/// 아래 `testFileTreeIdentity`(lstat 축)와 섞으면 안 된다: 일반 폴더에서는 두 값이 같아 통과하지만,
+/// 심링크·firmlink 에서는 갈린다(그 혼용이 2026-08-21 결함의 씨앗이었고, 타입이 그것을 드러냈다).
+fn testFileTreeScanIdentity(path: []const u8) !file_tree.ScanIdentity {
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, path, .{});
+    defer dir.close(std.testing.io);
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstat(dir.handle, &stat) != 0) return error.StatFailed;
+    return .{ .value = .{
+        .device = @intCast(stat.dev),
+        .inode = @intCast(stat.ino),
+        .kind = @intFromEnum(file_tree.IdentityKind.directory),
+    } };
 }
 
 fn testFileTreeIdentity(path: []const u8) !file_tree.Identity {
@@ -37452,7 +37467,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, anchor));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
-    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{.{
+    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeScanIdentity(root), &.{.{
         .name = "anchor.md",
         .kind = .file,
         .identity = try testFileTreeIdentity(anchor),
@@ -37479,7 +37494,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
 
     // Reproject the worker result, then F2 edits the copied path identity. Rename remaps the live dock path
     // and retires/recreates its path-pinned WebView surface id.
-    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeIdentity(root), &.{
+    try session.file_tree.applySnapshotWithIdentity(root, try testFileTreeScanIdentity(root), &.{
         .{ .name = ".new.md", .kind = .file, .identity = try testFileTreeIdentity(created) },
         .{ .name = "anchor.md", .kind = .file, .identity = try testFileTreeIdentity(anchor) },
     });

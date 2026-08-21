@@ -15,6 +15,7 @@ const split_tree = @import("split_tree.zig");
 const agent_observer = @import("agent_observer.zig");
 const agent_transcript_mod = @import("agent_transcript.zig");
 const agent_hook_event = @import("agent_hook_event.zig");
+const agent_hook_mode = @import("agent_hook_mode.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 const control_surface = @import("control_surface.zig");
 const dock_panel = @import("dock_panel.zig"); // FP16: 파일 entry 소유를 Term으로 옮긴다(§1). 의존은 workspace.zig 경유로 이미 존재. // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
@@ -107,6 +108,9 @@ pub fn Model(comptime Rt: type) type {
             /// 커서가 읽고 있는 파일의 inode. **회전을 크기만으로 판정하면 놓친다** — 같은 크기로 갈린
             /// 파일이 있으면 옛 오프셋으로 새 내용을 읽어 줄 가운데부터 파싱한다(`resetIfRotated` 계약).
             agent_hook_cursor_inode: u64 = 0,
+            /// 아직 띄우지 않은 훅 알림(계약 §6). 전이에서 예약하고 드레인 루프가 꺼내 간다 — 고정 크기라
+            /// 힙을 잡지 않는다.
+            agent_hook_notice: agent_hook_mode.PendingNotice = .{},
             /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
             /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
             agent_transcript: agent_transcript_mod.Cache = .{},

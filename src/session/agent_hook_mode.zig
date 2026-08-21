@@ -70,6 +70,82 @@ pub fn next(current: State, ev: event.Event) State {
     };
 }
 
+// ── 알림 정책(계약 §6) ─────────────────────────────────────────────────────────────────────────
+//
+// **알림을 상태 «전이» 에 붙인다.** 그러면 계약이 요구하는 중복 방지가 규칙이 아니라 구조에서 나온다:
+// 같은 턴에서 `Stop` 이 여러 번 와도 상태는 이미 `idle` 이라 전이가 없고, 재발화(`stop_hook_active`)나
+// 백그라운드 작업이 남은 `Stop` 은 애초에 상태를 옮기지 않는다. 「턴 단위 1회」와 「재발화 가드」를 따로
+// 세지 않아도 된다 — 세는 코드는 언제나 어딘가에서 어긋난다.
+
+pub const Notice = enum {
+    none,
+    /// 턴이 끝났다(`Stop`). 내용은 마지막 응답.
+    done,
+    /// 입력을 기다린다(`PermissionRequest`). 내용은 무엇을 승인하는지.
+    attention,
+};
+
+/// 이 전이가 어떤 알림을 만드는가. **`Notification`(idle_prompt)은 기본 억제**라 여기 없다 — 그 이벤트는
+/// 상태도 안 옮기므로 전이가 생기지 않는다(계약 §6 표).
+pub fn noticeOn(prev: State, now: State) Notice {
+    if (prev == now) return .none;
+    return switch (now) {
+        .idle => .done,
+        .blocked => .attention,
+        .running, .unknown => .none,
+    };
+}
+
+/// 주의 알림을 **바로 띄우지 않는 시간**(계약 §6 — 자동 승인으로 곧 해소되는 요청이 있다).
+/// 배지는 즉시 바뀌고 배너만 늦는다 — 시각 상태와 OS 배너의 타이밍을 분리한다.
+pub const attention_debounce_ms: u64 = 1200;
+
+/// 예약해 둔 주의 알림을 지금 어떻게 할 것인가.
+pub const Debounce = enum {
+    /// 아직 이르다 — 다음 tick 에 다시 본다.
+    wait,
+    /// 띄운다.
+    emit,
+    /// **버린다** — 그 사이 상태가 `blocked` 를 떠났다(자동 승인으로 해소됐다는 뜻이다).
+    drop,
+};
+
+pub fn attentionDebounce(state_now: State, since_ms: u64, now_ms: u64) Debounce {
+    if (state_now != .blocked) return .drop;
+    return if (now_ms -| since_ms >= attention_debounce_ms) .emit else .wait;
+}
+
+/// Term 이 들고 있는 «아직 안 띄운 알림». 고정 크기라 힙을 잡지 않는다(Term 은 수십 개가 산다).
+pub const PendingNotice = struct {
+    pub const max_text = 512;
+
+    kind: Notice = .none,
+    /// 예약된 시각(awake clock, ms). 주의 알림의 디바운스가 이 값으로 잰다.
+    since_ms: u64 = 0,
+    len: usize = 0,
+    buf: [max_text]u8 = undefined,
+
+    pub fn text(self: *const PendingNotice) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn set(self: *PendingNotice, kind: Notice, body: []const u8, now_ms: u64) void {
+        self.kind = kind;
+        self.since_ms = now_ms;
+        // **자른다, 버리지 않는다.** 마지막 응답은 길 수 있는데 그것 때문에 알림을 통째로 잃으면
+        // 사용자는 «턴이 끝났다» 는 사실 자체를 놓친다.
+        const n = @min(body.len, max_text);
+        @memcpy(self.buf[0..n], body[0..n]);
+        self.len = n;
+    }
+
+    pub fn clear(self: *PendingNotice) void {
+        self.kind = .none;
+        self.len = 0;
+        self.since_ms = 0;
+    }
+};
+
 const testing = std.testing;
 
 fn evOf(kind: event.Kind) event.Event {
@@ -163,4 +239,61 @@ test "파서가 아는 모든 이벤트에 전이가 있다 — 한쪽만 늘면
             try testing.expect(moved != .unknown);
         }
     }
+}
+
+test "알림은 전이에 붙는다 — 같은 턴에서 두 번 울리지 않는다" {
+    // `Stop` 이 여러 번 와도 상태는 이미 `idle` 이라 두 번째부터는 전이가 없다. 「턴 단위 1회」를 따로
+    // 세지 않아도 성립하는 것이 이 설계의 요점이다.
+    try testing.expectEqual(Notice.done, noticeOn(.running, .idle));
+    try testing.expectEqual(Notice.none, noticeOn(.idle, .idle));
+    try testing.expectEqual(Notice.attention, noticeOn(.running, .blocked));
+    try testing.expectEqual(Notice.none, noticeOn(.blocked, .blocked));
+    // 시작·진행은 알릴 것이 없다.
+    try testing.expectEqual(Notice.none, noticeOn(.idle, .running));
+    try testing.expectEqual(Notice.none, noticeOn(.unknown, .running));
+}
+
+test "재발화 Stop 과 백그라운드 작업은 애초에 전이를 만들지 않는다" {
+    // 상태 전이 함수와 알림 정책이 **같은 사실**을 쓰는지 확인한다 — 둘이 따로 판단하면 어긋난다.
+    var reentrant = evOf(.stop);
+    reentrant.stop_hook_active = true;
+    const after_reentrant = next(.running, reentrant);
+    try testing.expectEqual(Notice.none, noticeOn(.running, after_reentrant));
+
+    var background = evOf(.stop);
+    background.has_background_tasks = true;
+    const after_background = next(.running, background);
+    try testing.expectEqual(Notice.none, noticeOn(.running, after_background));
+
+    // 대조: 평범한 Stop 은 알린다.
+    try testing.expectEqual(Notice.done, noticeOn(.running, next(.running, evOf(.stop))));
+}
+
+test "주의 알림은 디바운스하고, 그 사이 해소되면 버린다" {
+    // 자동 승인으로 곧 사라지는 요청이 있다(계약 §6). 배지는 이미 바뀌었고 배너만 늦춘다.
+    try testing.expectEqual(Debounce.wait, attentionDebounce(.blocked, 1000, 1000));
+    try testing.expectEqual(Debounce.wait, attentionDebounce(.blocked, 1000, 1000 + attention_debounce_ms - 1));
+    try testing.expectEqual(Debounce.emit, attentionDebounce(.blocked, 1000, 1000 + attention_debounce_ms));
+    // 그 사이 상태가 blocked 를 떠났다 = 자동 승인으로 해소됐다.
+    try testing.expectEqual(Debounce.drop, attentionDebounce(.running, 1000, 1000 + attention_debounce_ms));
+    try testing.expectEqual(Debounce.drop, attentionDebounce(.idle, 1000, 1000));
+}
+
+test "예약한 알림은 잘리되 사라지지 않는다" {
+    var notice: PendingNotice = .{};
+    try testing.expectEqual(Notice.none, notice.kind);
+
+    notice.set(.done, "끝났습니다", 42);
+    try testing.expectEqual(Notice.done, notice.kind);
+    try testing.expectEqual(@as(u64, 42), notice.since_ms);
+    try testing.expectEqualStrings("끝났습니다", notice.text());
+
+    // 긴 응답 때문에 «턴이 끝났다» 는 사실 자체를 잃으면 안 된다.
+    const long = "x" ** (PendingNotice.max_text + 64);
+    notice.set(.done, long, 1);
+    try testing.expectEqual(@as(usize, PendingNotice.max_text), notice.text().len);
+
+    notice.clear();
+    try testing.expectEqual(Notice.none, notice.kind);
+    try testing.expectEqual(@as(usize, 0), notice.text().len);
 }

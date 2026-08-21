@@ -112,6 +112,21 @@ pub fn pendingNotification(self: *AppSession) ?PendingNotification {
                 if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
                 // host-backed Term은 코어가 placeholder라 알림이 host에 있다 — 값싼 코어 drain에서 건너뛰고 아래 RPC pull로.
                 if (is_macos and term.surface.remote != null) continue;
+                // **훅 모드 Term 은 훅에서 알림이 온다**(계약 §6). 같은 tail(`emitNotification`)을 타므로
+                // 위치 접두·인앱 히스토리·전면 배너 억제가 관측 모드와 똑같이 적용된다.
+                //
+                // 여기서 `continue` 하지 않는다 — 아래 drain 이 그 Term 의 OSC `pending` 을 **비우는** 일을
+                // 겸한다(비우지 않으면 다음 tick 마다 같은 것을 다시 보고 루프가 그 Term 에서 멈춘다).
+                if (agent_ops.agentHookMode(self, term) == .hook) {
+                    if (agent_ops.takeAgentHookNotice(self, term)) |notice| {
+                        const title = switch (notice.kind) {
+                            .done => maru.i18n.t(.agent_hook_notice_done),
+                            .attention => maru.i18n.t(.agent_hook_notice_attention),
+                            .none => unreachable,
+                        };
+                        if (emitNotification(self, tab, term, focused_term, title, notice.body)) |n| return n;
+                    }
+                }
                 if (drainOscNotificationFrom(self, tab, term, focused_term)) |n| return n;
             }
         }

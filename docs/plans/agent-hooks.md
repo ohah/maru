@@ -89,8 +89,9 @@ platform 은 `pollAgentHookEvents` 가 tick 마다 로그를 tail 파싱해 `age
 훅 모드면 `pollAgentState`·`pollAgentTranscript` 를 **아예 부르지 않는다**. `drainOscNotificationFrom` 도 훅 모드
 Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루프가 그 Term 에서 멈춘다).
 
-**남은 것은 AH5(알림 소비)** 다 — 지금은 훅 모드에서 OSC 알림이 꺼지기만 하고 훅 payload 로 알림을 만들지
-않는다.
+**AH5(알림 소비)도 함께 들어갔다.** 알림을 상태 **전이**에 붙여 「턴 단위 1회」와 「재발화 가드」를 구조로
+얻고(세는 코드를 두지 않는다), 주의 알림은 디바운스해 자동 승인으로 해소된 요청을 버린다(배지는 즉시
+바뀐다). 방출은 관측 모드와 **같은 tail**(`emitNotification`)을 탄다.
 
 
 - 정적: 설치됨 + 게이트 on → 훅 모드로 시작. 동적: **그 pane의 로그 파일이 없으면** 관측 모드로 강등 +

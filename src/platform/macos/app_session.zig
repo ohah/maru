@@ -18672,12 +18672,32 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
     }
 
-    // ⑦ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
+    // ⑦ **알림은 전이에 붙는다**(계약 §6). 위 ⑥에서 `Stop` 을 읽어 idle 로 갔으므로 완료 알림이 예약돼
+    //    있어야 하고, 꺼내 가면 슬롯이 비어 **두 번 울리지 않아야** 한다.
+    {
+        const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, notice.kind);
+        try std.testing.expectEqualStrings("끝났습니다", notice.body);
+        try std.testing.expectEqual(@as(?agent_ops.HookNotice, null), agent_ops.takeAgentHookNotice(&session, term));
+    }
+
+    // ⑧ **주의 알림은 디바운스한다.** 예약 직후에는 아직 안 띄우고, 그 사이 상태가 blocked 를 떠나면
+    //    버린다(자동 승인으로 해소된 경우 — 배지만 바뀌고 배너는 안 뜬다).
+    {
+        term.agent_state = .blocked;
+        term.agent_hook_notice.set(.attention, "Bash 실행 승인", session.awakeMs());
+        try std.testing.expectEqual(@as(?agent_ops.HookNotice, null), agent_ops.takeAgentHookNotice(&session, term)); // 아직 이르다
+        term.agent_state = .running; // 자동 승인으로 해소됐다
+        try std.testing.expectEqual(@as(?agent_ops.HookNotice, null), agent_ops.takeAgentHookNotice(&session, term));
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind); // 버려졌다
+    }
+
+    // ⑨ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
     session.loaded_config.config.sidebar.agent_hooks = false;
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
     session.loaded_config.config.sidebar.agent_hooks = true;
 
-    // ⑧ 에이전트가 없으면 모드를 논할 것도 없다.
+    // ⑩ 에이전트가 없으면 모드를 논할 것도 없다.
     term.agent_kind = .none;
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 }

@@ -664,6 +664,13 @@ unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
 ///
 /// **터미널 흐름과 섞지 않는다** — 합치면 ndjson 파서가 사람 화면을 읽게 된다.
 
+/// **채널을 열어야 하나**(take-once). 화면이 목록을 보여 줄 자리에 오면 1 이 된다 —
+/// 계약 §4a "언제 여는가": 채널을 여는 것은 **그 서버에서 명령을 하나 실행하는 일**이라 감사
+/// 로그에 남고, 터미널만 쓰는 접속에서는 안 연다.
+int maru_mobile_take_control_open(void);
+/// **채널을 닫아야 하나**(take-once). 목록 자리를 벗어나면 1 이 된다 — 열어 둔 채로 두면
+/// 배터리·트래픽을 안 보는 화면에 쓴다.
+int maru_mobile_take_control_close(void);
 /// 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 축이 꺼진 것이다).
 unsigned long maru_mobile_control_feed(const unsigned char *bytes, unsigned long len);
 /// 우리가 만든 요청을 가져간다. **가져가면 사라진다**(take-once). 자리가 모자라면 0 이고

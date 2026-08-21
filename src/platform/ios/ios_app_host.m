@@ -19,6 +19,11 @@
 // (Android 에서 같은 순서로 두 번 데였다).
 static void drainConfigWrite(void);
 static void startSshIfAsked(void);
+static void driveControlChannel(void);
+
+/// 컨트롤 채널을 연 시각(ms, 0 이면 안 열었다). **시한을 재는 것은 host 의 일이다** —
+/// 코어에는 시계가 없다(계약 §4a: 5초).
+static double gControlOpenMs = 0;
 static void pumpSshOnMainThread(void);
 
 static NSString *const kShader =
@@ -964,6 +969,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
     // **저장 요청은 프레임마다 본다**(Android 와 같은 자리). 값이 바뀐 그 프레임에만 실제
     // 쓰기가 난다 — 가져가면 요청이 사라진다.
     drainConfigWrite();
+    driveControlChannel(); // 목록 화면이 원하면 컨트롤 채널을 열고 요청을 나른다
     // **키보드를 다시 올린다.** 우리는 시작부터 first responder 라 그 상태로는 iOS 가 키보드를
     // 다시 안 띄운다 — 사용자가 한 번 내리면(⌘K·스와이프) 숫자 칸을 눌러도 안 올라온다.
     // resign 후 become 이 그 자리다.
@@ -1173,6 +1179,17 @@ static void drainConfigWrite(void) {
 // `dispatch_sync` 로 당기면 `stop` 이 그 스레드를 기다리는 순간 교착한다(main 이 join 을 하고,
 // 펌프는 main 을 기다린다).
 
+// **컨트롤 채널의 ndjson**(S10d-3). 화면 훅과 **다른 자리**로 온다 — 합치면 파서가 사람 화면을
+// 읽게 된다(계약 §4a). 화면 훅과 같은 이유로 **복사한다**: 이 포인터는 코어 안을 가리키고
+// 블록이 나중에 실행되므로 그때는 이미 다른 내용이다.
+static void sshControl(void *ctx, const unsigned char *bytes, unsigned long len) {
+    (void)ctx;
+    NSData *copy = [NSData dataWithBytes:bytes length:len];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        maru_mobile_control_feed(copy.bytes, copy.length);
+    });
+}
+
 static void sshScreen(void *ctx, const unsigned char *bytes, unsigned long len) {
     (void)ctx;
     // **복사한다.** 이 포인터는 코어 안을 가리키고 다음 걸음이면 사라진다 — 블록이 나중에
@@ -1301,6 +1318,37 @@ static void publishPublicKey(void) {
 ///
 /// **키는 config 에 없다.** 앱 전용 파일(`Application Support/maru/id_ed25519`)을 읽는다 —
 /// 경로가 고정이라 설정에 적을 것이 없다(iOS Keychain 은 실기기 검증까지 보류: 계획 S9c-2).
+/// 컨트롤 축을 프레임마다 굴린다(S10d-3). Android 의 같은 이름 함수와 **한 벌**이다 — 두 벌이면
+/// 한쪽만 고쳐지고 그 차이는 "한 기기에서만 목록이 안 뜬다" 로 나타난다.
+static void driveControlChannel(void) {
+    if (!maru_ssh_pump_is_running()) return;
+
+    if (maru_mobile_take_control_open()) {
+        // **경로를 추측하지 않는다**(계약 §4a). 서버 항목의 선택 필드는 아직 UI 가 없어 기본만 쓴다.
+        static const char cmd[] = "maru control --stdio";
+        if (maru_ssh_pump_open_control(cmd, (unsigned int)(sizeof cmd - 1)) != 0) {
+            NSLog(@"MARU_CONTROL open failed: %s", maru_ssh_pump_error());
+        } else {
+            gControlOpenMs = CACurrentMediaTime() * 1000.0;
+        }
+    }
+
+    if (maru_mobile_take_control_close()) {
+        maru_ssh_pump_close_control();
+        gControlOpenMs = 0;
+    }
+
+    if (gControlOpenMs != 0 && maru_mobile_control_state() == MARU_MOBILE_CONTROL_WAITING &&
+        CACurrentMediaTime() * 1000.0 - gControlOpenMs > 5000) {
+        maru_mobile_control_timeout();
+        gControlOpenMs = 0;
+    }
+
+    unsigned char req[512];
+    unsigned long n = maru_mobile_take_control_request(req, sizeof req);
+    if (n > 0) maru_ssh_pump_write_control(req, n);
+}
+
 static void startSshIfAsked(void) {
     if (maru_ssh_pump_is_running()) return;
     unsigned int req = maru_mobile_take_server_connect();
@@ -1377,6 +1425,9 @@ static void startSshIfAsked(void) {
     memset(&hooks, 0, sizeof hooks);
     hooks.screen = sshScreen;
     hooks.state_changed = sshState;
+    // **훅이 없으면 채널을 못 연다**(펌프가 거절한다) — 받을 사람이 없으면 코어가 배압으로
+    // 멈추고 터미널까지 함께 멎기 때문이다.
+    hooks.control = sshControl;
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     memset(secret, 0, sizeof secret);
     NSLog(@"MARU_SSH start host=%s port=%u user=%s rc=%d", host, cfg.port, user, rc);

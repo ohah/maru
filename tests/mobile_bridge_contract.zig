@@ -4559,6 +4559,16 @@ fn feedControl(bytes: []const u8) usize {
     return bridge.maru_mobile_control_feed(bytes.ptr, bytes.len);
 }
 
+/// 세션 목록 줄을 눌러 **터미널로 들어간다**(목록 자리를 벗어나는 경로).
+fn gotoTerminalScreen() void {
+    if (std.mem.eql(u8, bridge.currentScreenName(), "terminal")) return;
+    gotoSessionsScreen();
+    const r = bridge.sessionsRowCenter();
+    bridge.maru_mobile_pointer(0, 72, r.x, r.y, fake_ms);
+    bridge.maru_mobile_pointer(2, 72, r.x, r.y, fake_ms);
+    advanceFrame(402, 874, 16);
+}
+
 /// **세션 화면으로 돌아간다.** 앞 테스트가 다른 화면을 남겨 두면 그리기 판정이 아예 안 돌고,
 /// 그러면 이 테스트들은 "아무것도 안 재면서" 실패하거나(운이 좋으면) 통과한다 — 처음 쓴 판이
 /// 그래서 `loading` 만 봤다.
@@ -4712,4 +4722,53 @@ test "다시 붙으면 화면도 '받는 중' 으로 돌아간다" {
     advanceFrame(402, 874, 16);
     try std.testing.expectEqual(bridge.RemoteShown.loading, bridge.remoteSessionsShown());
     try std.testing.expectEqual(@as(usize, 0), bridge.remoteRowsDrawn());
+}
+
+test "목록 자리에 오면 열어 달라고 하고, 나가면 닫아 달라고 한다" {
+    // 계약 §4a "언제 여는가": 채널을 여는 것은 **그 서버에서 명령을 하나 실행하는 일**이라
+    // 감사 로그에 남는다 — 터미널만 쓰는 접속에서는 안 연다.
+    bridge.maru_mobile_control_reset();
+    _ = bridge.maru_mobile_take_control_open();
+    _ = bridge.maru_mobile_take_control_close();
+
+    // 다른 화면에 있는 동안에는 안 연다.
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+
+    // 목록 자리에 오면 **한 번** 열어 달라고 한다.
+    gotoSessionsScreen();
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    advanceFrame(402, 874, 16);
+    // **다시 안 조른다** — 가져갔으면 사라진다.
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+
+    // 축이 서고 목록이 온 뒤 화면을 나가면 닫아 달라고 한다.
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}\n");
+    advanceFrame(402, 874, 16);
+    gotoTerminalScreen();
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+}
+
+test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
+    // 다시 열면 채널 번호가 겹치고, 무엇보다 **그 서버에서 명령이 한 번 더 돈다**.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    _ = bridge.maru_mobile_take_control_open();
+    _ = feedControl(hello_wire);
+    advanceFrame(402, 874, 16);
+
+    // 화면을 나갔다 다시 와도, 이미 목록을 받았으면 안 조른다.
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}\n");
+    gotoTerminalScreen();
+    _ = bridge.maru_mobile_take_control_close();
+    gotoSessionsScreen();
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+
+    bridge.maru_mobile_control_reset();
 }

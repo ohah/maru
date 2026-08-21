@@ -888,6 +888,46 @@ var control_req_len: usize = 0;
 /// 와 "아직 모른다" 를 갈라 말해야 한다.
 var control_listed: bool = false;
 
+/// **채널을 열어 달라**는 요청(take-once). 화면이 목록을 보여 줄 자리에 왔을 때 세운다.
+///
+/// 계약 §4a 의 "언제 여는가" 그대로다 — **터미널만 쓰는 접속에서는 안 연다**. 채널을 여는 것은
+/// 그 서버에서 명령을 하나 실행하는 일이라 감사 로그에 남고, 사용자가 "터미널 붙었을 뿐" 이라고
+/// 생각하는 동안 조용히 그러면 안 된다.
+var control_open_req: bool = false;
+/// **닫아 달라**는 요청(take-once). 목록 화면을 벗어나면 세운다 — 열어 둔 채로 두면 배터리·
+/// 트래픽을 쓰고, 그 비용은 사용자가 안 보는 화면을 위해 치르는 것이다.
+var control_close_req: bool = false;
+/// 지금 화면이 목록을 보여 주는 자리인가. **프레임마다 판정한다** — 화면 전환은 여러 경로로
+/// 일어나고(뒤로가기·팝·연결 실패), 그 전부에 갈고리를 다는 대신 결과만 본다.
+var control_screen_active: bool = false;
+
+/// 그리기가 이 값을 세운다(목록 자리에 왔나). **여는 판정을 화면 전환 코드에 흩지 않는다.**
+fn noteControlScreen(active: bool) void {
+    if (active == control_screen_active) return;
+    control_screen_active = active;
+    if (active) {
+        // **이미 서 있으면 다시 안 연다** — 다시 열면 채널 번호가 겹치고, 무엇보다 그 서버에서
+        // 명령이 한 번 더 돈다.
+        if (control_client.state == .waiting_hello and !control_listed) control_open_req = true;
+    } else {
+        if (control_client.state != .off or control_listed) control_close_req = true;
+    }
+}
+
+/// host 가 가져간다: 지금 채널을 열어야 하나. **가져가면 사라진다.**
+pub export fn maru_mobile_take_control_open() c_int {
+    const want = control_open_req;
+    control_open_req = false;
+    return if (want) 1 else 0;
+}
+
+/// host 가 가져간다: 지금 채널을 닫아야 하나. **가져가면 사라진다.**
+pub export fn maru_mobile_take_control_close() c_int {
+    const want = control_close_req;
+    control_close_req = false;
+    return if (want) 1 else 0;
+}
+
 /// host 가 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 배압이 아니라
 /// 축이 꺼진 것이다 — 코어와 달리 이 층은 버퍼가 없다).
 pub export fn maru_mobile_control_feed(bytes: [*]const u8, len: usize) usize {
@@ -3768,6 +3808,9 @@ pub fn remoteRowCenter(index: usize) ?struct { x: f32, y: f32 } {
 var remote_row0: SetRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
 
 fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
+    // **여는 판정은 그리는 자리에서 한다.** 화면 전환은 여러 경로로 일어나므로 그 전부에
+    // 갈고리를 달면 하나를 빠뜨린다 — 여기는 목록을 실제로 그리는 유일한 자리다.
+    noteControlScreen(true);
     const row_h: f32 = 56;
     var y = top;
     remote_rows_drawn = 0;
@@ -5377,6 +5420,9 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // **밀린 화면은 아래를 덮는다**(스택 — UX §3). 터미널을 먼저 세우는 이유는 두 가지다:
     // 코어 격자·아틀라스가 계속 살아 있어야 돌아왔을 때 화면이 그대로이고, 키바 사각형이
     // 서 있어야 `key_bar_ready` 가 거짓말을 안 한다.
+    // **목록 자리를 벗어났으면 닫는다.** 여는 판정은 `drawRemoteSessions` 가 하고, 나가는
+    // 판정은 여기서 한 번에 한다 — 화면 전환 경로마다 갈고리를 달면 하나를 빠뜨린다.
+    if (screenTop() != .sessions) noteControlScreen(false);
     switch (screenTop()) {
         .terminal => {},
         .sessions => drawSessions(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),

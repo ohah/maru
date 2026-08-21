@@ -51,6 +51,18 @@ pub const ScenarioId = enum {
     /// 없으면 그 버튼의 자리를 아무도 못 본다 — 실제로 `+`가 상태 문자와 겹치고(#2209), 색 없는 테두리가
     /// 배경을 뚫고, 버튼이 개수 배지 위로 올라온 결함 셋이 전부 이 상태에서만 보였다.
     scm_row_hover,
+    /// 같은 목록에서 **저장소 머리 줄에 호버**한 상태. 그 줄은 동작 아이콘 자리를 평소에 비워 두지
+    /// 않으므로(빈 띠 52px 을 안 남기려고) 호버하는 순간 아이콘과 브랜치·개수 배지가 **같은 자리**를
+    /// 다툰다. 옛 답("배경색 quad 로 덮는다")은 chrome quad 가 chrome 글자보다 먼저 그리는 층이라
+    /// 원리적으로 통하지 않았고, 그래서 새로고침 아이콘이 브랜치 이름 위에 그대로 겹쳐 보였다
+    /// (사용자 캡처 2026-08-21). 파일 행 호버(`scm_row_hover`)로는 그 자리가 안 보인다 — 머리 줄에만
+    /// 브랜치·배지가 선다.
+    scm_repo_hover,
+    /// 같은 목록을 **스크롤한** 상태. 가상화는 창의 첫 항목을 음수 origin 으로 올려 두므로 그 행의
+    /// rect 는 목록 뷰포트 **밖까지** 이어진다. 그 rect 를 clip 으로 실으면 clip 이 뷰포트보다 커져
+    /// 아무것도 자르지 않고, 행의 칠과 글자가 위쪽 고정 chrome(탭 줄·요약 줄) 위에 그려진다
+    /// (사용자 캡처 2026-08-21). 스크롤이 없는 `scm_rows` 로는 그 상태를 만들 수 없다.
+    scm_scrolled,
     /// 세션 기록 헤더의 **정렬 토글에 호버**한 상태. 이 토글은 `.ghost`라 평소에는 label만 보이고 면·테두리가
     /// 없다 — 즉 **호버·pressed 때만 존재하는 그림**이고, 그 그림을 보던 골든이 하나도 없었다. 실제로
     /// 목록 행용 hover 토큰(활성보다 밝게 잡은 색)이 그대로 깔려 작은 pill 하나만 튀는 상태가 사용자
@@ -234,7 +246,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -857,7 +869,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -945,6 +957,12 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
 }
 
 /// 앵커. 화면 왼쪽 위에서 조금 떨어뜨려 상자 테두리 네 변이 다 보이게 한다.
+/// 스크롤 픽스처가 목록을 밀어 올리는 양. 행 높이보다 **작아야** 첫 행이 반쯤 걸친 채 남는다(위 설명).
+const scm_scroll_fixture_offset_px: u32 = 12;
+/// 그 픽스처의 전체 콘텐츠 높이. 뷰포트보다 크기만 하면 되고(스크롤바가 서는 조건), 정확한 값은
+/// 이 캡처가 증언하는 것과 무관하다.
+const scm_scroll_fixture_content_h_px: u32 = 900;
+
 const context_menu_fixture_anchor_x: i32 = 24;
 const context_menu_fixture_anchor_y: i32 = 24;
 
@@ -986,6 +1004,13 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .ahead = 2,
         .behind = 1,
         .summary = .{ .added = 46, .removed = 7 },
+        // 스크롤 상태(가상화가 내는 그 형태): 창의 첫 항목을 음수 origin 으로 올려 **부분 가림**을 만든다.
+        // 전부 밀어내면(offset 이 행 높이보다 크면) 그 행의 clip 면적이 0 이 되어 lowering 이 quad 를
+        // 통째로 버리므로, "clip 이 위를 자르는가"를 증언하지 못한다 — 반쯤 걸친 행이 있어야 한다.
+        .scroll_offset_px = if (scenario.id == .scm_scrolled) scm_scroll_fixture_offset_px else 0,
+        .content_first_item_origin_y_px = if (scenario.id == .scm_scrolled) -@as(i32, scm_scroll_fixture_offset_px) else 0,
+        .content_h_px = if (scenario.id == .scm_scrolled) scm_scroll_fixture_content_h_px else 0,
+        .list_overflows = scenario.id == .scm_scrolled,
         .changed_file_count = 4,
         // 커밋 상자: 스테이지된 파일이 있으므로 버튼이 **켜진** 상태다(§7 — 실제 index 상태로만 정한다).
         // 두 상태(꺼짐/켜짐)를 한 캡처에 담을 수 없어, 켜진 쪽을 고른다 — 꺼짐은 단위 테스트가 본다.
@@ -1004,10 +1029,13 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
     // (제품도 같은 이유로 `MARU_FORCE_SCM_HOVER`를 둔다).
     // **파일 행**을 호버한다(그룹 헤더가 아니다) — 이 시나리오가 증언하는 것은 "행 동작 `+`가 상태
     // 문자를 비켜 앉는가"이고 그건 파일 행에서만 보인다. ②b에서 커밋 줄 둘이 앞에 들어와 자리가 밀렸다.
-    const state: chrome.ui.interaction.InteractionState = if (scenario.id == .scm_row_hover)
-        .{ .hovered = scm_dock.build.NodeIds.item(6) }
-    else
-        .{};
+    const state: chrome.ui.interaction.InteractionState = switch (scenario.id) {
+        .scm_row_hover => .{ .hovered = scm_dock.build.NodeIds.item(6) },
+        // 머리 줄은 목록의 **첫 항목**이다(②b 에서 커밋 줄 둘이 그 뒤에 온다). 이 시나리오가 증언하는
+        // 것은 "동작 아이콘이 브랜치·개수 배지 위에 겹치지 않는가"이고, 그건 머리 줄에서만 보인다.
+        .scm_repo_hover => .{ .hovered = scm_dock.build.NodeIds.item(0) },
+        else => .{},
+    };
     // **host와 같은 예산으로 그린다.** Lab 버퍼는 모든 시나리오를 덮도록 넉넉해서, 그냥 통째로 넘기면
     // `drawBufferSizes`가 낡아도 이 캡처는 멀쩡하고 제품만 빈 화면이 된다 — 2026-08-16에 실제로 그
     // 조합이었다(골든은 초록, 깨끗한 저장소의 도크는 통째로 사라짐). 예산을 지나게 하면 그 어긋남이

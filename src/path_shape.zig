@@ -551,6 +551,16 @@ test "parentOf: 루트에서 멈춘다" {
     // 구분자가 없으면 부모가 없다(상대 이름 하나).
     try testing.expect(parentOf("maru") == null);
     try testing.expect(parentOf("") == null);
+
+    // **UNC 도 루트에서 멈춘다.** 이 저장소는 UNC 경로를 실제로 다룬다(§5.1 W8.1) — 여기서 한 칸 더
+    // 올라가면 `//server` 같은 반쪽 경로가 에셋 루트 후보로 들어간다.
+    try testing.expectEqualStrings("//server/share", parentOf("//server/share/a").?);
+    try testing.expect(parentOf("//server/share") == null);
+    try testing.expect(parentOf("//") == null);
+
+    // 드라이브 문자만 있는 경우(`C:`)도 부모가 없다 — 붙이면 `C:/x` 라는 **다른 뜻**의 경로가 된다
+    // (`C:` 는 그 드라이브의 현재 디렉터리다).
+    try testing.expect(parentOf("C:") == null);
 }
 
 test "assetSearchRoots: 좁은 곳부터, 중복은 한 번만" {

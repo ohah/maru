@@ -500,6 +500,12 @@ pub const Rasterizer = struct {
     ///
     /// **없는 파일은 `CreateFontFace` 에서 걸린다.** `CreateFontFileReference` 는 경로를 받아 두기만 하고
     /// 실제로 열지 않아 `hr=0` 을 준다 — 여기서 성공을 판정하면 안 된다(아래 테스트가 그 자리를 지킨다).
+    ///
+    /// **`CreateFontFace` 의 `hr=0` 도 증거가 못 된다.** face 종류를 틀리면(`TRUETYPE` 대신 `CFF`)
+    /// 실패하지 않고 **반쪽짜리 face** 를 준다 — 적대적 검증의 변이가 실증했다. 글리프 **인덱스는
+    /// 나오는데 디자인 메트릭이 안 나온다**. 그런 face 가 `faces[0]` 이 되면 셀 격자를 못 뽑아
+    /// 래스터라이저 전체가 `MetricsFailed` 로 죽는다. 그래서 여기서 **쓸 수 있는지 확인하고** 아니면
+    /// `null` 로 접어 다음 후보로 넘어간다(`resolveFace` 의 "없으면 null" 규약과 같다).
     fn openFaceFromFile(factory: *IDWriteFactory, path: []const u8) ?*IDWriteFontFace {
         var wide: [1024]u16 = undefined;
         const wlen = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], path) catch return null;
@@ -512,7 +518,31 @@ pub const Rasterizer = struct {
 
         var face: ?*IDWriteFontFace = null;
         if (d3d11.failed(factory.vtable.CreateFontFace(factory, font_face_type_truetype, 1, &files, 0, font_simulations_none, &face))) return null;
-        return face;
+        const f = face orelse return null;
+        if (!faceIsUsable(f)) {
+            d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
+            return null;
+        }
+        return f;
+    }
+
+    /// face 가 실제로 쓸 수 있는지 본다 — **`hr=0` 은 답이 아니다**(위 doc).
+    ///
+    /// **`Rasterizer.create` 가 실제로 부르는 셋을 그대로 확인한다**: `GetMetrics` 의 `upem`,
+    /// `GetGlyphIndices`, `GetDesignGlyphMetrics` 의 advance. 앞의 둘만 보면 부족하다 — 변이 실험에서
+    /// 잘못 만든 face 가 **인덱스는 돌려주고 디자인 메트릭에서만** 실패했다. 그 순서로 확인해야
+    /// "여기서 통과했는데 저기서 죽는" 자리가 안 생긴다.
+    fn faceIsUsable(face: *IDWriteFontFace) bool {
+        var fm: FontMetrics = undefined;
+        face.vtable.GetMetrics(face, &fm);
+        if (fm.design_units_per_em == 0) return false;
+        const probe = [_]u32{'M'};
+        var gid: [1]u16 = undefined;
+        if (d3d11.failed(face.vtable.GetGlyphIndices(face, &probe, 1, &gid))) return false;
+        if (gid[0] == 0) return false;
+        var gm: [1]GlyphMetrics = undefined;
+        if (d3d11.failed(face.vtable.GetDesignGlyphMetrics(face, &gid, 1, &gm, 0))) return false;
+        return gm[0].advance_width > 0;
     }
 
     /// 번들 폰트를 **파일에서 직접** 연다. 시스템에 설치돼 있지 않아도 된다.
@@ -915,6 +945,14 @@ test "번들 폰트: 시스템에 없어도 파일에서 열린다" {
         return error.TestUnexpectedResult;
     };
     defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(jet)));
+
+    // **null 이 아닌 것만으로는 부족하다.** face 종류를 틀리면 `CreateFontFace` 가 실패하지 않고
+    // 반쪽짜리 face 를 준다 — 적대적 검증의 변이(`TRUETYPE`→`CFF`)가 이 테스트를 그냥 통과했다.
+    // 그래서 `Rasterizer.create` 가 실제로 쓰는 값까지 본다.
+    try std.testing.expect(Rasterizer.faceIsUsable(jet));
+    var fm: FontMetrics = undefined;
+    jet.vtable.GetMetrics(jet, &fm);
+    try std.testing.expect(fm.design_units_per_em > 0);
 
     // **대조군 ⑴**: 번들이 아닌 이름은 null 이다. 이게 없으면 위 성공이 "아무 이름이나 연다" 여도 통과한다.
     try std.testing.expect(Rasterizer.resolveBundledFace(factory, "Malgun Gothic") == null);

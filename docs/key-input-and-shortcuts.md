@@ -152,6 +152,55 @@ Command+B      -> 초기에는 오류
   기본값(numeric·legacy)으로 폴백한다.
 - config 파일 parser(`src/config/loader.zig` — `key = value` 줄 형식, TOML 아님)와 수동 runtime reload(메뉴 **Reload Config**, ABI v56)는 구현됐다. 형식·키·검증·reload 동작은 [설정(config) 파일](configuration.md)이 단일 출처다. schema 기반 설정 GUI는 진행 중이고 파일 변경 자동 감지와 남은 bespoke 위젯은 후속이다.
 
+## 수식자 붙은 특수 키 — 무엇을 베이스로 골랐나 (실측 2026-08-22)
+
+**베이스는 이 저장소가 광고하는 terminfo 다.** maru 의 terminfo 는 `use=xterm-256color` 로 그 항목을
+상속하므로(`terminfo/maru.terminfo`), **인코더가 보내는 바이트는 그 항목이 선언한 것과 같아야 한다** —
+readline·ncurses 앱은 terminfo 를 읽어 키를 인식하기 때문이다. 추측하지 않고 **이 기계의 terminfo
+데이터베이스에서 뽑아** 맞췄다:
+
+```text
+$ infocmp xterm-256color
+  kcbt = \E[Z        Shift+Tab (back-tab)
+  kLFT = \E[1;2D     Shift+←
+  kRIT = \E[1;2C     Shift+→
+  kf3  = \EOR        F3 (수식자 없음)
+  kf15 = \E[1;2R     Shift+F3
+  kf27 = \E[1;5R     Ctrl+F3
+```
+
+`encodeKey` 의 legacy 갈래가 위와 **바이트 단위로 같다.** 수식자 정수는 `1 + shift + alt*2 + ctrl*4` 이고,
+이것은 xterm 이 두 번째 CSI 파라미터에 쓰는 1+비트마스크 표현이다.
+
+**F3 은 형식이 튀는데, 그것이 xterm 의 선택이다.** `kf3` 은 SS3(`\EOR`)인데 `kf15`·`kf27` 은
+`CSI 1;{mod}R` 이다 — 즉 수식자가 붙는 순간 계열이 바뀐다. 처음에는 kitty 표를 그대로 재사용해
+`CSI 13;{mod}~` 를 보냈는데, **그러면 `kf27` 과 안 맞아 앱이 `Ctrl+F3` 을 인식하지 못한다.**
+
+> **받아들인 대가: `CSI ... R` 은 커서 위치 응답(CPR)과 형식이 같다.** 앱이 `CSI 6n` 을 보내 놓고 답을
+> 기다리는 중에 사용자가 `Ctrl+F3` 을 누르면 그것을 좌표로 오해할 수 있다. **kitty 는 이 충돌 때문에
+> 자기 프로토콜에서 F3 을 `CSI 13~` 으로 바꿨다** — 그 논의에서 관리자가 "there is a conflict with CPR
+> for press events which I didn't realize since I never use CPR ... I will change kitty to produce
+> `CSI 13 ~` instead for F3" 이라고 적었다([kitty#5813](https://github.com/kovidgoyal/kitty/discussions/5813)).
+>
+> **그럼에도 legacy 경로는 `CSI 1;{mod}R` 을 쓴다.** 그 경로의 존재 이유가 *기존 소비자와의 호환*이고,
+> 그 소비자들이 읽는 terminfo 가 `kf27=\E[1;5R` 이기 때문이다. 다른 것을 보내면 충돌은 피하지만 키가
+> **아예 안 먹는다**. `Ctrl+F3` 은 드물고 CPR 대기 중에 눌릴 확률은 더 낮다.
+>
+> **kitty 경로는 반대로 간다** — 거기서는 앱이 프로토콜을 명시적으로 켰으므로 `CSI 13~` 이 맞다.
+> 두 경로가 F3 에서 갈리는 이유가 이것이고, `legacyEntry` 의 doc 이 그 예외를 소유한다.
+
+**수식자가 붙으면 DECCKM(application cursor)을 무시하고 CSI 를 쓴다.** SS3 에는 파라미터 자리가 없다 —
+`kLFT`(`\E[1;2D`)가 CSI 인 것이 그 증거다. vim/less 가 켠 모드와 무관하게 같은 바이트가 나간다.
+
+**`⌘` 는 legacy 수식자에 안 싣는다.** xterm 의 비트 8 은 **Meta** 이고 macOS 에서 Meta 는 Option(이미
+비트 2)이다. ⌘ 를 8 로 실으면 `Cmd+←` 가 `CSI 1;9D` 라는, terminfo 에 없는 시퀀스가 된다 — 그러면
+**오늘 동작(평범한 `←` 로 나가 커서가 움직인다)보다 나빠진다.** kitty 는 8 을 쓰는 것이 맞다(그 프로토콜이
+`super` 를 명시하고 앱이 켰다는 뜻이라 모호하지 않다).
+
+**범위 밖 기능키(F13+)는 수식자가 붙어도 오류다.** `functionKeySequence` 가 이미 그렇게 막고 있는데
+수식자 경로만 통과시키면 `Ctrl+F13` 이 `Ctrl+F12` 와 **같은 시퀀스**로 나간다 — 오류가 조용한 오답이
+된다(적대적 검증이 잡았다).
+
 ## 충돌 규칙
 
 - global shortcut은 정확히 등록한 key chord만 소비한다. 예를 들어 `Ctrl+Cmd+,`를 등록해도 `Ctrl+B`, `Ctrl+C`, `Esc`에는 영향을 주지 않는다.

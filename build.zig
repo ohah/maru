@@ -1968,7 +1968,9 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         const win32_process_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/windows/win32_process.zig"),
+                // **루트는 얇은 shim 이다**(`src/win32_process_test_root.zig`). 그 파일을 직접 루트로
+                // 걸면 모듈 경로가 `src/platform/windows/` 가 되어 `../../path_shape.zig` 가 밖이 된다.
+                .root_source_file = b.path("src/win32_process_test_root.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,

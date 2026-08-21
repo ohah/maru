@@ -656,6 +656,41 @@ unsigned int maru_mobile_term_rows(void);
 /// 자리가 모자라면 **0 이고 아무것도 안 지운다**(잘라 보내면 원격 화면이 어긋난다).
 unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
 
+/// ── 컨트롤 축(S10d-2) ────────────────────────────────────────────────────────
+///
+/// 폰이 그 PC 의 세션 목록을 받는 길이다(계약 docs/control-plane.md §4a). host 는 SSH **컨트롤
+/// 채널**에서 읽은 바이트를 여기 넣고(`maru_mobile_ssh_control_ptr/len` → 아래 `feed`), 우리가
+/// 만든 요청을 가져가 그 채널로 보낸다(`maru_mobile_ssh_write_control`).
+///
+/// **터미널 흐름과 섞지 않는다** — 합치면 ndjson 파서가 사람 화면을 읽게 된다.
+
+/// 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 축이 꺼진 것이다).
+unsigned long maru_mobile_control_feed(const unsigned char *bytes, unsigned long len);
+/// 우리가 만든 요청을 가져간다. **가져가면 사라진다**(take-once). 자리가 모자라면 0 이고
+/// `maru_mobile_last_error` 에 이름이 남는다 — 자르지 않는다.
+unsigned long maru_mobile_take_control_request(unsigned char *out, unsigned long cap);
+/// `hello` 시한을 넘겼다고 알린다(계약 §4a — 5초). **시계는 코어에 없다.**
+void maru_mobile_control_timeout(void);
+/// 컨트롤 축 상태.
+#define MARU_MOBILE_CONTROL_WAITING 0
+#define MARU_MOBILE_CONTROL_READY 1
+#define MARU_MOBILE_CONTROL_OFF 2
+unsigned int maru_mobile_control_state(void);
+/// 왜 껐나. **하나로 뭉치면 화면이 사용자에게 할 말을 못 고른다.**
+#define MARU_MOBILE_CONTROL_OFF_NONE 0
+#define MARU_MOBILE_CONTROL_OFF_HELLO_TIMEOUT 1
+#define MARU_MOBILE_CONTROL_OFF_TOO_MUCH_NOISE 2
+#define MARU_MOBILE_CONTROL_OFF_PROTOCOL_MISMATCH 3
+#define MARU_MOBILE_CONTROL_OFF_FRAME_TOO_LARGE 4
+unsigned int maru_mobile_control_off_reason(void);
+/// 지금 아는 세션 수.
+unsigned int maru_mobile_control_session_count(void);
+/// 목록을 한 번이라도 받았나. **"세션이 없다" 와 "아직 모른다" 는 화면에서 다른 말이다.**
+int maru_mobile_control_listed(void);
+/// 세션이 새 연결에서 다시 시작한다 — 목록도 축도 처음부터. 남겨 두면 죽은 세션을 살아 있는
+/// 것처럼 보여 준다.
+void maru_mobile_control_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

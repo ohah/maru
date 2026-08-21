@@ -4546,3 +4546,103 @@ test "양폭 한글은 두 칸을 쓴다" {
     try std.testing.expectEqual(@as(?u8, 2), bridge.cellWidthAt(0, 0)); // 한글은 두 칸
     try std.testing.expectEqual(@as(?u8, 1), bridge.cellWidthAt(0, 2)); // 'a' 는 두 칸 뒤에 한 칸
 }
+
+// ── 컨트롤 축(S10d-2) ────────────────────────────────────────────────────────
+//
+// 순수 파서는 `mobile_control.zig` 가 자기 테스트로 잰다. 여기서 재는 것은 **그것이 ABI 를
+// 지나오는지**다 — 기기에서 "왜인지 목록이 안 뜬다" 가 났을 때 프로토콜 탓인지 배선 탓인지
+// 가르려면 이 층이 따로 재어져야 한다.
+
+const hello_wire = "{\"jsonrpc\":\"2.0\",\"method\":\"hello\",\"params\":{\"protocol\":\"maru.control.v1\",\"server_version\":\"0.1.0\",\"capabilities\":[\"sessions.list\"]}}\n";
+
+fn feedControl(bytes: []const u8) usize {
+    return bridge.maru_mobile_control_feed(bytes.ptr, bytes.len);
+}
+
+test "hello 를 받으면 축이 서고 목록 요청이 만들어진다" {
+    bridge.maru_mobile_control_reset();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_control_state()); // WAITING
+
+    try std.testing.expectEqual(hello_wire.len, feedControl(hello_wire));
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_state()); // READY
+
+    // **바로 묻는다** — 사용자가 화면에 있는 동안 기다리게 두지 않는다.
+    var out: [256]u8 = undefined;
+    const n = bridge.maru_mobile_take_control_request(&out, out.len);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..n], "sessions.list") != null);
+    // **가져가면 사라진다.**
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&out, out.len));
+}
+
+test "목록 응답이 세션으로 들어온다" {
+    bridge.maru_mobile_control_reset();
+    _ = feedControl(hello_wire);
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_listed());
+
+    const frame = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7},\"title\":\"maru\",\"cwd\":\"/dev\",\"at_prompt\":true}]}\n";
+    _ = feedControl(frame);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_session_count());
+    // **"세션이 없다" 와 "아직 모른다" 는 다른 말이다.**
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_control_listed());
+}
+
+test "알림 한 줄에 목록이 비지 않는다" {
+    // 응답이 아닌 프레임(이벤트)이 오면 목록을 지우면 안 된다 — 지우면 화면이 깜빡이며 빈다.
+    bridge.maru_mobile_control_reset();
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7}}]}\n");
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_session_count());
+
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"method\":\"surface.changed\",\"params\":{}}\n");
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_session_count());
+}
+
+test "시한을 넘기면 이유가 남는다" {
+    bridge.maru_mobile_control_reset();
+    bridge.maru_mobile_control_timeout();
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_control_state()); // OFF
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_off_reason()); // HELLO_TIMEOUT
+}
+
+test "프로토콜이 다르면 그 이유로 꺼진다" {
+    bridge.maru_mobile_control_reset();
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"method\":\"hello\",\"params\":{\"protocol\":\"other.v9\"}}\n");
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_control_state());
+    try std.testing.expectEqual(@as(u32, 3), bridge.maru_mobile_control_off_reason()); // PROTOCOL_MISMATCH
+}
+
+test "요청 자리가 모자라면 자르지 않고 이름을 남긴다" {
+    // 잘린 요청은 **다른 요청**이고, 서버는 그것을 파싱 오류로 만난다.
+    bridge.maru_mobile_control_reset();
+    _ = feedControl(hello_wire);
+    var tiny: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&tiny, tiny.len));
+    try std.testing.expectEqualStrings("control_request_too_large", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+    // 자리를 주면 그대로 남아 있다 — 잃지 않았다.
+    var out: [256]u8 = undefined;
+    try std.testing.expect(bridge.maru_mobile_take_control_request(&out, out.len) > 0);
+}
+
+test "다시 붙으면 목록도 축도 처음부터다" {
+    // 남겨 두면 **죽은 세션을 살아 있는 것처럼** 보여 준다.
+    bridge.maru_mobile_control_reset();
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7}}]}\n");
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_session_count());
+
+    bridge.maru_mobile_control_reset();
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_control_state());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_control_session_count());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_control_listed());
+}
+
+test "광고 안 한 메서드는 안 부른다" {
+    // 불러 놓고 오류를 보여 주는 것과 다르다 — 요청 자체가 안 나간다.
+    bridge.maru_mobile_control_reset();
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"method\":\"hello\",\"params\":{\"protocol\":\"maru.control.v1\",\"capabilities\":[]}}\n");
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_state());
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_control_request(&out, out.len));
+}

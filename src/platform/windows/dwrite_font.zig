@@ -26,6 +26,10 @@ const std = @import("std");
 const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 const builtin = @import("builtin");
 const d3d11 = @import("d3d11.zig");
+// **배럴로 가져온다.** `maru.zig` 는 이 파일을 내보내지 않으므로 순환이 아니고(형제 `win32_keys.zig`·
+// `win32_terminal.zig` 도 같다), 상대 경로로 `../../` 를 타면 이 파일이 모듈 루트가 되는 순간 깨진다
+// (`win32_process.zig` 가 실제로 그렇게 깨져 있었다 — docs/windows-platform.md §2m.8).
+const maru = @import("maru");
 
 pub const Error = error{
     UnsupportedPlatform,
@@ -151,9 +155,12 @@ const IDWriteFactory = extern struct {
         CreateCustomFontCollection: *const anyopaque,
         RegisterFontCollectionLoader: *const anyopaque,
         UnregisterFontCollectionLoader: *const anyopaque,
-        CreateFontFileReference: *const anyopaque,
+        /// 슬롯 7. **파일 경로 하나를 폰트 파일 참조로** 만든다 — 컬렉션도 로더 COM 객체도 필요 없다.
+        /// 번들 폰트를 여는 길이 이것이다(§2e).
+        CreateFontFileReference: *const fn (*IDWriteFactory, [*:0]const u16, ?*const anyopaque, *?*anyopaque) callconv(abi.winapi) HRESULT,
         CreateCustomFontFileReference: *const anyopaque,
-        CreateFontFace: *const anyopaque,
+        /// 슬롯 9. 파일 참조 배열에서 face 를 만든다.
+        CreateFontFace: *const fn (*IDWriteFactory, UINT, UINT, [*]const ?*anyopaque, UINT, UINT, *?*IDWriteFontFace) callconv(abi.winapi) HRESULT,
         CreateRenderingParams: *const anyopaque,
         CreateMonitorRenderingParams: *const anyopaque,
         CreateCustomRenderingParams: *const anyopaque,
@@ -189,6 +196,8 @@ comptime {
             }
         };
         std.debug.assert(slot.at(IDWriteFactory.VTable, "GetSystemFontCollection") == 3);
+        std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateFontFileReference") == 7);
+        std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateFontFace") == 9);
         std.debug.assert(slot.at(IDWriteFactory.VTable, "CreateGlyphRunAnalysis") == 23);
         std.debug.assert(slot.at(IDWriteFontCollection.VTable, "GetFontFamily") == 4);
         std.debug.assert(slot.at(IDWriteFontCollection.VTable, "FindFamilyName") == 5);
@@ -265,9 +274,15 @@ const rendering_mode_natural_symmetric: UINT = 5;
 const measuring_mode_natural: UINT = 0;
 /// `DWRITE_TEXTURE_CLEARTYPE_3x1` — 픽셀당 3바이트(RGB 서브픽셀). 우리는 평균해 회색으로 쓴다.
 const texture_cleartype_3x1: UINT = 1;
+/// `DWRITE_FONT_FACE_TYPE_TRUETYPE` = **1**(0 은 CFF 다). 번들 폰트는 전부 `.ttf` 다(assets/fonts/).
+/// 값을 틀리면 `CreateFontFace` 가 실패하고 번들 폰트가 **조용히 안 열린다** — 아래 테스트가 못 박는다.
+const font_face_type_truetype: UINT = 1;
+/// `DWRITE_FONT_SIMULATIONS_NONE`. 굵게/기울임을 **합성하지 않는다** — 번들에 진짜 face 가 따로 있다.
+const font_simulations_none: UINT = 0;
 const cleartype_bytes_per_pixel: usize = 3;
 
 extern "dwrite" fn DWriteCreateFactory(factory_type: UINT, iid: *const d3d11.GUID, out: *?*anyopaque) callconv(abi.winapi) HRESULT;
+extern "kernel32" fn GetModuleFileNameW(module: ?*anyopaque, filename: [*]u16, size: u32) callconv(abi.winapi) u32;
 
 // ── 폰트 티어 ────────────────────────────────────────────────────────────────────────────────
 
@@ -464,6 +479,76 @@ pub const Rasterizer = struct {
         return f;
     }
 
+    /// exe 가 있는 디렉터리를 **중립 경로**(`/`)로 준다. 못 얻으면 `null`.
+    ///
+    /// **잘린 경로는 안 쓴다.** `GetModuleFileNameW` 는 버퍼가 모자라면 잘라 넣고 크기를 그대로 돌려준다
+    /// (에러가 아니다). 그 값으로 파일을 열면 **다른 파일을 열거나 조용히 못 연다** — 그래서 가득 찬
+    /// 경우를 실패로 접는다.
+    fn exeDirNeutral(out: []u8) ?[]const u8 {
+        if (builtin.os.tag != .windows) return null;
+        var wide: [1024]u16 = undefined;
+        const n = GetModuleFileNameW(null, &wide, wide.len);
+        if (n == 0 or n >= wide.len) return null;
+        const written = std.unicode.utf16LeToUtf8(out, wide[0..n]) catch return null;
+        for (out[0..written]) |*c| {
+            if (c.* == '\\') c.* = '/';
+        }
+        return maru.path_shape.parentOf(out[0..written]);
+    }
+
+    /// 파일 하나를 face 로 연다. 컬렉션도, 로더 COM 객체도 필요 없다.
+    ///
+    /// **없는 파일은 `CreateFontFace` 에서 걸린다.** `CreateFontFileReference` 는 경로를 받아 두기만 하고
+    /// 실제로 열지 않아 `hr=0` 을 준다 — 여기서 성공을 판정하면 안 된다(아래 테스트가 그 자리를 지킨다).
+    fn openFaceFromFile(factory: *IDWriteFactory, path: []const u8) ?*IDWriteFontFace {
+        var wide: [1024]u16 = undefined;
+        const wlen = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], path) catch return null;
+        wide[wlen] = 0;
+
+        var file_ref: ?*anyopaque = null;
+        if (d3d11.failed(factory.vtable.CreateFontFileReference(factory, @ptrCast(&wide), null, &file_ref))) return null;
+        defer d3d11.releaseOpt(file_ref);
+        var files = [_]?*anyopaque{file_ref};
+
+        var face: ?*IDWriteFontFace = null;
+        if (d3d11.failed(factory.vtable.CreateFontFace(factory, font_face_type_truetype, 1, &files, 0, font_simulations_none, &face))) return null;
+        return face;
+    }
+
+    /// 번들 폰트를 **파일에서 직접** 연다. 시스템에 설치돼 있지 않아도 된다.
+    ///
+    /// macOS 는 앱 번들이 `ATSApplicationFontsPath` 로 폰트를 프로세스에 등록해 줘서 이름만으로 열린다.
+    /// Windows 에는 그 장치가 없어 **경로로 연다**. 두 OS 가 같은 폰트를 쓰게 하려면 이 자리가 필요하다 —
+    /// config 기본값(`font.family = JetBrains Mono`, `font.fallback = Jetendard`)이 둘 다 번들이라,
+    /// 이것이 없으면 Windows 만 시스템 폰트로 내려간다(§2e).
+    ///
+    /// **한글 자간이 실제 이유다.** 시스템 폴백(Malgun Gothic)의 한글 advance 는 셀 격자의 배수가 아니라
+    /// 칸마다 여백이 남는다. Jetendard 는 한글을 라틴의 **정확히 2 배**로 그려(실측: upem 1000 에서
+    /// `M`=600, `한`=1200) 그 여백이 반올림 오차만 남는다.
+    fn resolveBundledFace(factory: *IDWriteFactory, family: []const u8) ?*IDWriteFontFace {
+        const rel = maru.config.theme.bundledRegularRelPath(family) orelse return null;
+        var exe_buf: [1024]u8 = undefined;
+        const exe_dir = exeDirNeutral(&exe_buf) orelse "";
+        var roots: [4][]const u8 = undefined;
+        // 작업 디렉터리는 `"."` 로 넘긴다 — DirectWrite 가 상대 경로를 cwd 기준으로 연다. 굳이 절대
+        // 경로로 만들면 실패 지점만 하나 늘어난다.
+        for (maru.path_shape.assetSearchRoots(exe_dir, ".", &roots)) |root| {
+            var path_buf: [1400]u8 = undefined;
+            const joined = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, rel }) catch continue;
+            if (openFaceFromFile(factory, joined)) |f| return f;
+        }
+        return null;
+    }
+
+    /// 이름 하나를 face 로 바꾼다 — **시스템 먼저, 없으면 번들.**
+    ///
+    /// 순서가 이 방향인 이유: 사용자가 직접 설치한 폰트가 이긴다. 같은 이름의 번들본으로 조용히
+    /// 바꿔치기하면 "내가 깐 폰트가 안 먹는다" 가 된다. 번들은 **없을 때의 바닥**이다.
+    fn resolveFaceAnywhere(factory: *IDWriteFactory, collection: *IDWriteFontCollection, name: []const u8) ?*IDWriteFontFace {
+        if (resolveFace(collection, name)) |f| return f;
+        return resolveBundledFace(factory, name);
+    }
+
     /// `configured`가 비어 있으면 티어의 첫 항목부터 시도한다. `fallback_csv`는 config `font.fallback`
     /// 그대로(쉼표 구분)이고, 비어 있어도 내장 폴백 티어는 시도한다. `em_size_px`는 config `font.size`를
     /// 픽셀로 환산한 값이다(DPI 적용은 호출자 몫 — 이 파일은 픽셀만 안다).
@@ -497,7 +582,7 @@ pub const Rasterizer = struct {
 
         var chosen: []const u8 = "";
         for (candidates) |name| {
-            if (resolveFace(collection.?, name)) |f| {
+            if (resolveFaceAnywhere(factory, collection.?, name)) |f| {
                 self.faces[0] = f;
                 self.face_count = 1;
                 chosen = name;
@@ -510,7 +595,7 @@ pub const Rasterizer = struct {
         var fb_buf: [max_faces][]const u8 = undefined;
         for (fallbackCandidates(fallback_csv, chosen, &fb_buf)) |name| {
             if (self.face_count == max_faces) break;
-            if (resolveFace(collection.?, name)) |f| {
+            if (resolveFaceAnywhere(factory, collection.?, name)) |f| {
                 self.faces[self.face_count] = f;
                 self.face_count += 1;
             }
@@ -814,4 +899,80 @@ test "scratchSize: 셀보다 큰 글리프도 담을 만큼 잡는다" {
     try testing.expect(Rasterizer.scratchSize(8, 16) > @as(usize, 8) * 16 * 3);
     // 셀이 0이어도 0을 돌려주고 터지지 않는다(호출자가 0으로 부를 수 있다).
     try testing.expectEqual(@as(usize, 0), Rasterizer.scratchSize(0, 16));
+}
+
+test "번들 폰트: 시스템에 없어도 파일에서 열린다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var factory_raw: ?*anyopaque = null;
+    try check(DWriteCreateFactory(factory_type_shared, &IID_IDWriteFactory, &factory_raw), error.CreateFactoryFailed);
+    defer d3d11.releaseOpt(factory_raw);
+    const factory: *IDWriteFactory = @ptrCast(@alignCast(factory_raw.?));
+
+    // `Jetendard` 는 배포판이 없어 시스템에 설치될 일이 없는 **번들 전용** 폰트다. 그래서 이 하나로
+    // "번들 경로가 실제로 도는가" 를 판정할 수 있다.
+    const jet = Rasterizer.resolveBundledFace(factory, "Jetendard") orelse {
+        std.debug.print("\n  번들 Jetendard 를 못 열었다 — assets/fonts 를 못 찾은 것이다\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(jet)));
+
+    // **대조군 ⑴**: 번들이 아닌 이름은 null 이다. 이게 없으면 위 성공이 "아무 이름이나 연다" 여도 통과한다.
+    try std.testing.expect(Rasterizer.resolveBundledFace(factory, "Malgun Gothic") == null);
+    try std.testing.expect(Rasterizer.resolveBundledFace(factory, "") == null);
+
+    // **대조군 ⑵**: 없는 파일은 실패해야 한다. `CreateFontFileReference` 는 경로를 받아 두기만 하고
+    // `hr=0` 을 주므로, 거기서 성공을 판정하면 **없는 폰트가 열린 것처럼 보인다**.
+    try std.testing.expect(Rasterizer.openFaceFromFile(factory, "assets/fonts/NoSuchFont/NoSuchFont-Regular.ttf") == null);
+}
+
+test "번들 Jetendard: 한글 advance 가 라틴의 정확히 2배다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var factory_raw: ?*anyopaque = null;
+    try check(DWriteCreateFactory(factory_type_shared, &IID_IDWriteFactory, &factory_raw), error.CreateFactoryFailed);
+    defer d3d11.releaseOpt(factory_raw);
+    const factory: *IDWriteFactory = @ptrCast(@alignCast(factory_raw.?));
+
+    const face = Rasterizer.resolveBundledFace(factory, "Jetendard") orelse return error.TestUnexpectedResult;
+    defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(face)));
+
+    // **이 성질이 이 슬라이스의 존재 이유다.** 한글이 라틴 2 칸에 맞으려면 advance 가 정확히 2 배여야
+    // 한다. 폰트를 바꾸면(또는 번들을 갱신하면) 여기서 걸린다 — 화면에서만 드러나는 부류를 막는다.
+    const cps = [_]u32{ 'M', 0xd55c };
+    var gids: [2]u16 = undefined;
+    try check(face.vtable.GetGlyphIndices(face, &cps, 2, &gids), error.MetricsFailed);
+    try std.testing.expect(gids[0] != 0);
+    try std.testing.expect(gids[1] != 0); // 한글 글리프가 있어야 폴백으로 의미가 있다
+    var gm: [2]GlyphMetrics = undefined;
+    try check(face.vtable.GetDesignGlyphMetrics(face, &gids, 2, &gm, 0), error.MetricsFailed);
+    try std.testing.expectEqual(gm[0].advance_width * 2, gm[1].advance_width);
+}
+
+test "Rasterizer: config 기본값이 번들 폰트로 해석된다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const theme = maru.config.theme;
+    const defaults = theme.FontConfig{};
+
+    var r = try Rasterizer.create(std.testing.allocator, defaults.family, defaults.fallback, 14.0);
+    defer r.destroy();
+
+    // 주 폰트가 기본값 그대로여야 한다. 예전에는 번들을 못 열어 티어의 `Cascadia Mono` 로 내려갔다.
+    try std.testing.expectEqualStrings(defaults.family, r.family);
+    // 폴백도 열렸어야 한다 — 주 face + 최소 1 개.
+    try std.testing.expect(r.face_count >= 2);
+
+    // 한글이 **주 폰트에는 없고** 폴백 어딘가에는 있어야 한다. 그래야 폴백이 실제로 쓰인다.
+    const han = [_]u32{0xd55c};
+    var gid: [1]u16 = undefined;
+    const primary = r.faces[0].?;
+    try check(primary.vtable.GetGlyphIndices(primary, &han, 1, &gid), error.MetricsFailed);
+    try std.testing.expectEqual(@as(u16, 0), gid[0]); // JetBrains Mono 에는 한글이 없다
+
+    var found = false;
+    for (r.faces[1..r.face_count]) |maybe| {
+        const f = maybe orelse continue;
+        var g: [1]u16 = undefined;
+        if (d3d11.failed(f.vtable.GetGlyphIndices(f, &han, 1, &g))) continue;
+        if (g[0] != 0) found = true;
+    }
+    try std.testing.expect(found);
 }

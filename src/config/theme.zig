@@ -82,13 +82,89 @@ pub const render_frame_rate_max: u32 = 120;
 /// TTF name 테이블을 못 읽어 디렉터리명에서 패밀리명을 자동 도출할 수 없다). 사용자는 이 목록 밖 시스템/직접입력 폰트도
 /// `font.family`에 그대로 쓸 수 있다(폰트 드롭다운 팝업의 **"직접 입력…"** 항목을 고르면 인라인 편집이 열려 임의 폰트명을 타이핑 — docs/config-gui.md). 새 번들 폰트를 추가하면 이 목록 +
 /// 위 두 문서를 함께 갱신한다. 첫 항목은 config 기본값(FontConfig.family)과 일치시킨다.
-pub const bundled_font_families = [_][]const u8{
-    "JetBrains Mono",
-    "Jetendard",
-    "Fira Code",
-    "Cascadia Code",
-    "Hack",
+pub const bundled_font_families = blk: {
+    var out: [bundled_fonts.len][]const u8 = undefined;
+    for (bundled_fonts, &out) |f, *o| o.* = f.family;
+    break :blk out;
 };
+
+/// 번들 폰트 하나. **패밀리 이름과 디스크 경로를 한 자리에 묶는다** — 예전에는 패밀리 목록만 있고 경로는
+/// 부르는 쪽마다 문자열로 흩어져 있어(`chrome_lab_smoke.zig`) 이름이 바뀌면 조용히 어긋났다.
+pub const BundledFont = struct {
+    family: []const u8,
+    /// `assets/fonts/` 아래 디렉터리 이름. 패밀리에서 공백을 뺀 것이지만 **자동 도출하지 않는다** —
+    /// 규칙이 아니라 관례라서, 한 번이라도 깨지면 조용한 오답이 된다.
+    dir: []const u8,
+    /// `assets/fonts/<dir>/<dir>-Regular.ttf`. **구분자는 `/`** 다 — DirectWrite 도 CoreText 도 받는다
+    /// (`path_shape` 의 중립 경로 규약과 같다).
+    regular_rel: []const u8,
+};
+
+/// 번들 폰트의 단일 출처. `assets/fonts/<dir>/`·docs/third-party-licenses.md 와 **수동 동기화**한다.
+/// 첫 항목은 config 기본값(`FontConfig.family`)과 일치시킨다(아래 테스트가 못 박는다).
+pub const bundled_fonts = blk: {
+    const rows = [_][2][]const u8{
+        .{ "JetBrains Mono", "JetBrainsMono" },
+        .{ "Jetendard", "Jetendard" },
+        .{ "Fira Code", "FiraCode" },
+        .{ "Cascadia Code", "CascadiaCode" },
+        .{ "Hack", "Hack" },
+    };
+    var out: [rows.len]BundledFont = undefined;
+    for (rows, &out) |row, *o| {
+        o.* = .{
+            .family = row[0],
+            .dir = row[1],
+            .regular_rel = "assets/fonts/" ++ row[1] ++ "/" ++ row[1] ++ "-Regular.ttf",
+        };
+    }
+    break :blk out;
+};
+
+/// 패밀리 이름 → 번들 Regular 파일의 상대 경로. 못 찾으면 `null`(번들 폰트가 아니니 시스템에서 찾아라).
+///
+/// **대소문자를 무시한다.** config 는 사람이 손으로 적는 값이고 `font.family = jetendard` 가 실제로 온다.
+/// 폴백 목록의 중복 제거(`dwrite_font.fallbackCandidates`)도 같은 규칙을 쓴다.
+///
+/// **OS 를 안 본다.** 언제 쓸지는 부르는 쪽이 정한다 — macOS 는 앱 번들이 `ATSApplicationFontsPath` 로
+/// 이미 등록해 주므로 이 함수를 안 쓰고, Windows 는 번들 개념이 없어 파일을 직접 연다
+/// (docs/windows-platform.md §2e).
+pub fn bundledRegularRelPath(family: []const u8) ?[]const u8 {
+    for (bundled_fonts) |f| {
+        if (std.ascii.eqlIgnoreCase(f.family, family)) return f.regular_rel;
+    }
+    return null;
+}
+
+test "bundledRegularRelPath: 패밀리 이름이 번들 경로로 간다" {
+    const testing = std.testing;
+    try testing.expectEqualStrings("assets/fonts/Jetendard/Jetendard-Regular.ttf", bundledRegularRelPath("Jetendard").?);
+    try testing.expectEqualStrings("assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf", bundledRegularRelPath("JetBrains Mono").?);
+    // 대소문자 무시 — config 는 사람이 적는다.
+    try testing.expectEqualStrings("assets/fonts/Hack/Hack-Regular.ttf", bundledRegularRelPath("hack").?);
+    // 번들이 아닌 폰트는 null 이다. 이것이 "시스템에서 찾아라" 신호다.
+    try testing.expect(bundledRegularRelPath("Malgun Gothic") == null);
+    try testing.expect(bundledRegularRelPath("") == null);
+    // 부분 일치는 안 된다 — `Jet` 이 `Jetendard` 를 열면 엉뚱한 폰트가 잡힌다.
+    try testing.expect(bundledRegularRelPath("Jet") == null);
+    try testing.expect(bundledRegularRelPath("JetBrains Mono NL") == null);
+}
+
+test "bundled_fonts: 목록과 파생 이름 목록이 어긋나지 않는다" {
+    const testing = std.testing;
+    try testing.expectEqual(bundled_fonts.len, bundled_font_families.len);
+    for (bundled_fonts, bundled_font_families) |f, name| {
+        try testing.expectEqualStrings(f.family, name);
+        // 경로는 항상 같은 모양이다 — 한 항목이라도 다르면 부르는 쪽이 조용히 못 찾는다.
+        try testing.expect(std.mem.startsWith(u8, f.regular_rel, "assets/fonts/"));
+        try testing.expect(std.mem.endsWith(u8, f.regular_rel, "-Regular.ttf"));
+        try testing.expect(std.mem.indexOf(u8, f.regular_rel, f.dir) != null);
+        // **구분자는 `/` 만** — `\` 가 섞이면 Windows 에서만 도는 경로가 된다(§5 규칙 1).
+        try testing.expect(std.mem.indexOfScalar(u8, f.regular_rel, '\\') == null);
+    }
+    // 첫 항목은 config 기본값과 같아야 한다(위 doc 이 정한 규약).
+    try testing.expectEqualStrings((FontConfig{}).family, bundled_fonts[0].family);
+}
 
 pub const FontConfig = struct {
     family: []const u8 = "JetBrains Mono",

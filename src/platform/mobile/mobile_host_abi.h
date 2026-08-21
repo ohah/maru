@@ -668,6 +668,12 @@ unsigned long maru_mobile_take_response(unsigned char *out, unsigned long cap);
 /// 계약 §4a "언제 여는가": 채널을 여는 것은 **그 서버에서 명령을 하나 실행하는 일**이라 감사
 /// 로그에 남고, 터미널만 쓰는 접속에서는 안 연다.
 int maru_mobile_take_control_open(void);
+/// 컨트롤 채널이 돌릴 **명령 한 줄**을 만든다(그 서버 설정의 `maru-path` 를 쓴다). 자리가
+/// 모자라면 0 — **자르지 않는다**(잘린 명령은 다른 명령이다).
+///
+/// **인용은 코어가 한다.** `exec` 문자열은 원격 셸이 낱말로 쪼개므로 공백이 든 경로는 인용해야
+/// 하고, 그 규칙을 host 두 곳에 두면 갈린다.
+unsigned long maru_mobile_control_command(unsigned char *out, unsigned long cap);
 /// **채널을 닫아야 하나**(take-once). 목록 자리를 벗어나면 1 이 된다 — 열어 둔 채로 두면
 /// 배터리·트래픽을 안 보는 화면에 쓴다.
 int maru_mobile_take_control_close(void);

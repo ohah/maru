@@ -4772,3 +4772,31 @@ test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
 
     bridge.maru_mobile_control_reset();
 }
+
+test "컨트롤 명령은 설정 경로를 쓰고 셸이 쪼개지 못하게 인용한다" {
+    // `exec` 문자열은 **원격 셸이 낱말로 쪼갠다** — 공백이 든 경로를 그대로 실으면
+    // `/Applications/My Apps/maru` 가 두 낱말이 되고, 사용자는 "왜인지 안 된다" 만 본다.
+    var buf: [256]u8 = undefined;
+
+    // 경로가 없으면 기본을 그대로 쓴다(설치 경로를 추측하지 않는다 — 계약 §4a).
+    const cfg0 = "ssh.server.1.host = h\nssh.server.1.user = u\n";
+    bridge.maru_mobile_load_config(cfg0, cfg0.len);
+    var n = bridge.maru_mobile_control_command(&buf, buf.len);
+    try std.testing.expectEqualStrings("maru control --stdio", buf[0..n]);
+
+    // 공백이 든 경로는 인용된다.
+    const cfg = "ssh.server.1.host = h\nssh.server.1.user = u\nssh.server.1.maru-path = /My Apps/maru\n";
+    bridge.maru_mobile_load_config(cfg, cfg.len);
+    n = bridge.maru_mobile_control_command(&buf, buf.len);
+    try std.testing.expectEqualStrings("'/My Apps/maru' control --stdio", buf[0..n]);
+
+    // 작은따옴표가 든 경로도 셸이 한 낱말로 읽는다.
+    const cfg2 = "ssh.server.1.host = h\nssh.server.1.user = u\nssh.server.1.maru-path = /a'b/maru\n";
+    bridge.maru_mobile_load_config(cfg2, cfg2.len);
+    n = bridge.maru_mobile_control_command(&buf, buf.len);
+    try std.testing.expectEqualStrings("'/a'\\''b/maru' control --stdio", buf[0..n]);
+
+    // 자리가 모자라면 **자르지 않는다** — 잘린 명령은 다른 명령이다.
+    var tiny: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_control_command(&tiny, tiny.len));
+}

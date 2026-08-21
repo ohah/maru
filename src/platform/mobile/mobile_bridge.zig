@@ -914,6 +914,70 @@ fn noteControlScreen(active: bool) void {
     }
 }
 
+/// 컨트롤 채널이 돌릴 **명령 한 줄**. host 가 그대로 `exec` 에 싣는다.
+///
+/// **경로는 그 서버 설정에서 온다**(`ssh.server.<n>.maru-path`). 비어 있으면 `maru` 를 그대로
+/// 쓴다 — 우리가 설치 경로를 추측해 차례로 시도하지 않는다(계약 §4a).
+///
+/// **셸이 파싱한다.** `exec` 문자열은 원격 셸이 낱말로 쪼개므로 공백이 든 경로는 **여기서
+/// 인용해서** 실어야 한다(안 하면 `/Applications/My Apps/maru` 가 두 낱말이 된다). 작은따옴표
+/// 안에서는 작은따옴표만 특별하므로 그것만 `'\''` 로 바꾼다.
+pub export fn maru_mobile_control_command(out: [*]u8, cap: usize) usize {
+    const path = serverMaruPath();
+    const tail = " control --stdio";
+    if (path.len == 0) {
+        const plain = "maru" ++ " control --stdio";
+        // **자르지 않는다** — 잘린 명령은 다른 명령이다(계약 §4a). 이름을 남겨 host 가 안다.
+        if (plain.len > cap) {
+            setLastError("control_command_too_long");
+            return 0;
+        }
+        @memcpy(out[0..plain.len], plain);
+        return plain.len;
+    }
+
+    // 작은따옴표 안에서는 작은따옴표만 특별하므로 그것만 `'\''` 로 바꾼다 — 그 한 글자가
+    // 네 글자가 된다. 미리 세어 자리가 되는지 보고, 되면 그때 쓴다.
+    var quotes: usize = 0;
+    for (path) |c| {
+        if (c == '\'') quotes += 1;
+    }
+    const need = 1 + path.len + quotes * 3 + 1 + tail.len;
+    if (need > cap) {
+        setLastError("control_command_too_long");
+        return 0;
+    }
+
+    var n: usize = 0;
+    out[n] = '\'';
+    n += 1;
+    for (path) |c| {
+        if (c == '\'') {
+            @memcpy(out[n..][0..4], "'\\''");
+            n += 4;
+        } else {
+            out[n] = c;
+            n += 1;
+        }
+    }
+    out[n] = '\'';
+    n += 1;
+    @memcpy(out[n..][0..tail.len], tail);
+    return n + tail.len;
+}
+
+/// 지금 붙어 있는 서버의 `maru-path`(없으면 빈 값). **연결한 그 서버의 것**이어야 한다 —
+/// 목록의 첫 줄을 쓰면 다른 기계의 경로로 명령을 만든다.
+fn serverMaruPath() []const u8 {
+    const list = servers();
+    if (list.len == 0) return "";
+    // **연결한 그 줄**을 쓴다(`ssh_connecting` 은 그 값을 이미 든다 — 호스트키 승인이 같은 줄에
+    // 적힌다). 목록의 첫 줄을 쓰면 다른 기계의 경로로 명령을 만든다.
+    const idx = ssh_connecting orelse 0;
+    if (idx >= list.len) return "";
+    return list[idx].maru_path;
+}
+
 /// host 가 가져간다: 지금 채널을 열어야 하나. **가져가면 사라진다.**
 pub export fn maru_mobile_take_control_open() c_int {
     const want = control_open_req;

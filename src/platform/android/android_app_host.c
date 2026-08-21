@@ -1671,9 +1671,11 @@ static void driveControlChannel(void) {
     if (!maru_ssh_pump_is_running()) return;
 
     if (maru_mobile_take_control_open()) {
-        // **경로를 추측하지 않는다**(계약 §4a). 서버 항목의 선택 필드는 아직 UI 가 없어 기본만 쓴다.
-        static const char cmd[] = "maru control --stdio";
-        if (maru_ssh_pump_open_control(cmd, (unsigned int)(sizeof cmd - 1)) != 0) {
+        // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
+        // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
+        char cmd[512];
+        unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
+        if (cmd_len == 0 || maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len) != 0) {
             LOGI("MARU_CONTROL open failed: %s", maru_ssh_pump_error());
         } else {
             g_control_open_ms = nowMs();

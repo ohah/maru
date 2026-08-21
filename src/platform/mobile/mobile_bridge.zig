@@ -3810,6 +3810,18 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
     }
 }
 
+/// 둘째 줄에 조각을 잇는다. **자리가 모자라면 그 조각을 통째로 생략한다** — 반쯤 그린 값은
+/// 사용자가 값으로 읽는다.
+fn appendPart(buf: []u8, len: *usize, part: []const u8) void {
+    if (part.len == 0) return;
+    const sep: []const u8 = if (len.* > 0) "  " else "";
+    if (len.* + sep.len + part.len > buf.len) return;
+    @memcpy(buf[len.*..][0..sep.len], sep);
+    len.* += sep.len;
+    @memcpy(buf[len.*..][0..part.len], part);
+    len.* += part.len;
+}
+
 fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow, y: f32, row_h: f32) void {
     // 초점 있는 세션은 왼쪽에 띠 하나. **글자만으로 표시하면 목록에서 안 보인다.**
     if (row.focused) push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y), .w = 3, .h = @intFromFloat(row_h) }, tk.get(.accent_bar), 0xFF, 0, 0);
@@ -3818,12 +3830,15 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
     pushText(title, @intFromFloat(win.x + 16), @intFromFloat(y + 8), 17, tk.get(.surface_fg));
 
     // 둘째 줄: `cwd` · git · agent. **한 줄에 이어 붙이되 있는 것만** 적는다.
+    //
+    // **조용한 `catch` 를 안 쓴다**(계약 §5). 자리가 모자라면 그 조각을 **통째로 생략**한다 —
+    // 잘린 글자를 그리면 사용자는 그것을 값으로 읽는다.
     var line: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&line);
-    if (row.cwd_len > 0 and row.title_len > 0) w.print("{s}", .{row.cwd[0..row.cwd_len]}) catch {};
-    if (row.git_len > 0) w.print("{s}{s}", .{ if (w.buffered().len > 0) "  " else "", row.git[0..row.git_len] }) catch {};
-    if (row.agent_len > 0) w.print("{s}{s}", .{ if (w.buffered().len > 0) "  " else "", row.agent[0..row.agent_len] }) catch {};
-    const sub = w.buffered();
+    var len: usize = 0;
+    if (row.title_len > 0) appendPart(&line, &len, row.cwd[0..row.cwd_len]);
+    appendPart(&line, &len, row.git[0..row.git_len]);
+    appendPart(&line, &len, row.agent[0..row.agent_len]);
+    const sub = line[0..len];
     if (sub.len > 0) pushText(sub, @intFromFloat(win.x + 16), @intFromFloat(y + 30), 13, tk.get(.muted_fg));
 
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y + row_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);

@@ -58,11 +58,11 @@ codex 는 `config.toml` 의 우리 신뢰 블록까지 거둔 뒤 남는 것이 
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는
   `config.toml`의 `trusted_hash`를 **함께** 갱신한다.
-- **Codex 세트는 5개다** — `Notification` 이 Codex 에 없다(계약 §2.1 실측). 그래서 이 단계는 먼저
+- **Codex 세트는 7개다** — `Notification` 과 `StopFailure` 가 Codex 에 없다(계약 §2.1 실측). 그래서 이 단계는 먼저
   `agent_hook_command.events` 를 **provider 별로 가른다**(`planForSet` 이 쓰는 세트 크기도 함께 갈린다).
   그 항목이 파일 파싱을 깨는지 조용히 무시되는지도 실험으로 확인한다 — 깨면 사용자의 `hooks.json` 이
   통째로 무효가 된다.
-- **해시 입력도 matcher 규칙도 다섯 다 확정됐다**(계약 §2.1 — 이벤트 신원 객체, app-server `hooks/list`로
+- **해시 입력도 matcher 규칙도 일곱 다 확정됐다**(계약 §2.1 — 이벤트 신원 객체, app-server `hooks/list`로
   codex 자신의 값을 받아 대조). 계산은 [`session/agent_hook_trust.zig`](../../src/session/agent_hook_trust.zig)
   가 소유하고 golden 다섯이 그 값을 못박는다. 신뢰 항목은 **키가 비어 있을 때만** 쓴다(§2.1 — codex 쪽
   포맷이 바뀌어도 무한 프롬프트가 되지 않게).
@@ -116,6 +116,11 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 
 - `Term.agent_state`를 훅 모드에서 훅 payload로 채운다: `UserPromptSubmit`~`Stop` = 진행중,
   `PermissionRequest` = 입력 대기, `Stop` = 완료. `stop_hook_active` 재진입은 무시한다.
+- **「입력 대기」의 소스는 둘이다** — `PermissionRequest` 와 `Notification`(계약 §6). 후자는 **아는 종류**
+  다섯(`permission_prompt`·`worker_permission_prompt`·`elicitation_dialog`·`elicitation_url_dialog`·
+  `agent_needs_input`)만 배지를 옮기고, 모르는 종류·유휴 알림은 «모르는 이벤트» 와 같이 상태를 안 흔든다.
+  둘을 두는 이유는 `PermissionRequest` 가 우리 실측에서 **한 번도 발화하지 않았기** 때문이다 — 그것 하나에만
+  걸면 대화형에서도 안 올 경우 그 배지에 소스가 없다. codex 에는 `Notification` 이 없어 소스가 하나뿐이다.
 - **`Stop.background_tasks`에 `status: running`인 항목이 있으면 완료로 단정하지 않는다** — 턴은 끝났어도
   셸 작업이 돌고 있다(실측으로 `{id, type: shell, status: running, description}` 형태를 확인했다).
   «비어 있나»로 보면 끝난 항목 하나가 배지를 영원히 붙잡는다. **claude 전용 필드다** — codex 바이너리에는
@@ -141,8 +146,9 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
   않고(`agent_id`), 턴 경계(`Stop`·`StopFailure`·`UserPromptSubmit`·`SessionStart`)에서 비운다.
 - 검증: 상태 전이표 단위 테스트, 조용히 오래 도는 셸 명령에서 진행중 유지(관측 모드가 틀리는 케이스),
   `AskUserQuestion`이 `PreToolUse`로만 올 때 입력 대기로 잡히는지.
-- **완료 조건에 대화형 수동 검증을 포함한다** — `PermissionRequest`가 헤드리스에서 발화하지 않아
-  미검증이다(계약 §9-6). 실제 승인 프롬프트가 뜨는 세션에서 입력 대기 전이를 눈으로 확인한다.
+- **완료 조건에 대화형 수동 검증을 포함한다** — `PermissionRequest` 도 `Notification` 도 헤드리스에서는
+  발화를 재현할 수 없다(계약 §9-6). 실제 승인 프롬프트가 뜨는 세션에서 입력 대기 전이를 눈으로 확인한다.
+  둘 중 **어느 쪽이 와도** 같은 전이라 하나만 와도 배지는 선다.
 
 ### AH4b — 사이드바 대화 줄
 
@@ -156,8 +162,9 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 ### AH5 — 알림 소비
 
 - `Stop`→완료(`last_assistant_message`), `PermissionRequest`→주의(`tool_name`+`tool_input`),
-  `Notification(idle_prompt)`→기본 억제.
-- **codex에도 알림이 간다.** 없는 것은 `Notification` 이벤트 하나이고, 완료(`Stop`)·주의
+  `Notification`→**종류로 갈린다**(계약 §6): 승인·입력을 기다리는 다섯 종류는 주의, `idle_prompt` 를
+  포함한 나머지와 모르는 종류는 상태를 안 흔들어 알림도 안 난다.
+- **codex에도 알림이 간다.** 없는 것은 `Notification`·`StopFailure` 이고, 완료(`Stop`)·주의
   (`PermissionRequest`)는 codex 열거에 다 있다(계약 §2, 2026-08-21 `hooks/list` 실측).
 - **중복 방지**: 턴 단위 1회 + 재발화 가드 토큰. 주의 알림은 디바운스하되 **배지는 즉시** 바꾼다(자동 승인으로
   해소되는 요청 때문).
@@ -200,7 +207,8 @@ AH1~AH3까지가 인프라이고, AH4·AH5·AT1이 그 위의 소비자다. **AH
   손해이고, 되찾는 수단은 그 Term에서 훅을 끄는 것뿐이다.
 - 도구 훅 비용은 측정을 마쳤다(AH6, 계약 §3). 샌드박스 안팎에 차이가 없었고 스크립트 몫은 측정 한계
   아래였다. 남은 레버는 발화 횟수뿐이고, 지금 수치로는 후퇴가 필요 없다.
-- **`PermissionRequest`·`Notification`은 양 provider 모두 미검증**이다(계약 §9-6) — 헤드리스로는 발화를
-  재현할 수 없어 AH4·AH5의 완료 조건이 대화형 수동 검증이다. Codex `PostToolUse`도 미검증이라 AH4의
+- **`PermissionRequest`는 양 provider 모두 미검증**이다(계약 §9-6) — 헤드리스로는 발화를 재현할 수 없어
+  AH4·AH5의 완료 조건이 대화형 수동 검증이다. `Notification` 은 claude 실사용에서 오는 것을 봤고
+  (`idle_prompt`), 그래서 claude 의 「입력 대기」는 소스가 둘이다. Codex `PostToolUse`도 미검증이라 AH4의
   Codex 경로는 `PreToolUse`/`Stop`만으로도 상태가 서야 한다.
 - 훅은 사용자 소유 설정 파일을 고친다. 게이트 기본값은 AH2 리뷰에서 사용자와 정한다.

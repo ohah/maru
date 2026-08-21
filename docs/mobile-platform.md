@@ -160,6 +160,11 @@ LOAD 정렬이 전부 `0x1000` 이었고 4KB 기기가 "ELF 정렬 검사 실패
 | 코어 → 플랫폼 | 컨트롤 채널이 받은 ndjson | `maru_mobile_ssh_control_ptr/len` · `_control_consume` |
 | 플랫폼 → 코어 | 컨트롤 채널로 보낼 ndjson | `maru_mobile_ssh_write_control(h, bytes, len, &sent)` |
 | 코어 → 플랫폼 | 컨트롤 채널 상태·종료 코드·stderr | `maru_mobile_ssh_control_state` · `_control_exit_status` · `_control_stderr` |
+| 플랫폼 → 코어 | 컨트롤 채널에서 읽은 ndjson | `maru_mobile_control_feed(bytes, len)` |
+| 코어 → 플랫폼 | 코어가 만든 컨트롤 요청 | `maru_mobile_take_control_request(out, cap)` |
+| 플랫폼 → 코어 | `hello` 시한 초과 알림 | `maru_mobile_control_timeout()` |
+| 코어 → 플랫폼 | 컨트롤 축 상태·껀 이유·세션 수 | `maru_mobile_control_state` · `_off_reason` · `_session_count` · `_listed` |
+| 플랫폼 → 코어 | 새 연결에서 축을 처음부터 | `maru_mobile_control_reset()` |
 | 플랫폼 → 코어 | 호스트키 승인(사용자가 답한 뒤) | `maru_mobile_ssh_accept_host_key(h)` |
 | 플랫폼 → 코어 | **난수**(OS 난수를 채워 준다) | `maru_mobile_ssh_open(..., entropy, ...)` |
 | 플랫폼 → 코어 | 원격 출력을 화면에 넣는다 | `maru_mobile_term_write(bytes, len)` |

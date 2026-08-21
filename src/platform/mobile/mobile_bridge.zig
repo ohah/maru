@@ -825,6 +825,166 @@ pub export fn maru_mobile_term_rows() u32 {
 ///
 /// **자리가 모자라면 0 이고 아무것도 안 지운다.** 잘라 보내면 원격은 반쪽짜리 시퀀스를 읽고
 /// 그때부터 화면이 어긋난다 — config 쓰기가 같은 이유로 같은 규칙을 쓴다.
+// ── 컨트롤 축(S10d-2) ────────────────────────────────────────────────────────
+//
+// host 는 SSH 컨트롤 채널에서 읽은 바이트를 여기 밀어 넣고(`maru_mobile_control_feed`), 우리가
+// 만든 요청을 가져가 그 채널로 보낸다(`maru_mobile_take_control_request`). **터미널과 다른
+// 흐름이라 이름도 자리도 따로다** — 합치면 ndjson 파서가 사람 화면을 읽게 된다(계약 §4a).
+
+const control = @import("mobile_control.zig");
+
+/// 화면이 그릴 세션 목록의 상한. **폰 화면에 그 이상은 안 들어간다** — 넘으면 앞에서부터
+/// 담고(파서가 그렇게 한다) 개수로 드러난다.
+const max_sessions_shown = 32;
+
+/// 목록 값은 **받은 프레임 안을 가리킨다**(계약 §4a) — 다음 걸음이면 사라지므로 여기 복사한다.
+const SessionRow = struct {
+    surface_id: i64 = -1,
+    title: [64]u8 = @splat(0),
+    title_len: usize = 0,
+    cwd: [128]u8 = @splat(0),
+    cwd_len: usize = 0,
+    git: [48]u8 = @splat(0),
+    git_len: usize = 0,
+    agent: [48]u8 = @splat(0),
+    agent_len: usize = 0,
+    at_prompt: control.AtPrompt = .unknown,
+    focused: bool = false,
+
+    fn copyInto(dst: []u8, len: *usize, src: []const u8) void {
+        const n = @min(src.len, dst.len - 1);
+        @memcpy(dst[0..n], src[0..n]);
+        dst[n] = 0;
+        len.* = n;
+    }
+
+    fn set(self: *SessionRow, s: control.Session) void {
+        self.surface_id = s.surface_id;
+        self.at_prompt = s.at_prompt;
+        self.focused = s.focused;
+        copyInto(&self.title, &self.title_len, s.title);
+        copyInto(&self.cwd, &self.cwd_len, s.cwd);
+        copyInto(&self.git, &self.git_len, s.git_branch);
+        // 에이전트는 **한 값으로 붙여** 든다 — 화면이 `kind:state` 로 한 번에 그린다.
+        var buf: [48]u8 = undefined;
+        const joined = if (s.agent_kind.len == 0)
+            ""
+        else if (s.agent_state.len == 0)
+            std.fmt.bufPrint(&buf, "{s}", .{s.agent_kind}) catch s.agent_kind
+        else
+            std.fmt.bufPrint(&buf, "{s}:{s}", .{ s.agent_kind, s.agent_state }) catch s.agent_kind;
+        copyInto(&self.agent, &self.agent_len, joined);
+    }
+};
+
+var control_client: control.Client = .{};
+var control_rows: [max_sessions_shown]SessionRow = @splat(.{});
+var control_row_count: usize = 0;
+/// 우리가 만들어 둔 요청(host 가 가져간다). **한 번에 하나**면 충분하다 — 목록 갱신은 답을
+/// 받은 뒤에 다시 보낸다.
+var control_req: [512]u8 = undefined;
+var control_req_len: usize = 0;
+/// 목록을 한 번이라도 받았나. **0 개인 것과 아직 안 받은 것은 다르다** — 화면이 "세션이 없다"
+/// 와 "아직 모른다" 를 갈라 말해야 한다.
+var control_listed: bool = false;
+
+/// host 가 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 배압이 아니라
+/// 축이 꺼진 것이다 — 코어와 달리 이 층은 버퍼가 없다).
+pub export fn maru_mobile_control_feed(bytes: [*]const u8, len: usize) usize {
+    var off: usize = 0;
+    while (off < len) {
+        var consumed: usize = 0;
+        const step = control_client.feed(bytes[off..len], &consumed);
+        if (consumed == 0) break;
+        off += consumed;
+        if (step.state == .ready and control_req_len == 0 and !control_listed) {
+            // 축이 서면 **바로 목록을 묻는다** — 사용자가 화면에 있는 동안 기다리게 두지 않는다.
+            requestSessions();
+        }
+        if (step.frame) |frame| absorbFrame(frame);
+    }
+    return off;
+}
+
+fn requestSessions() void {
+    // **광고 안 한 메서드는 안 부른다**(계약 §4a).
+    if (!control_client.supports("sessions.list")) return;
+    // **조용히 넘기지 않는다.** 요청을 못 만들면 목록이 영영 안 오는데, 이름이 없으면 그 이유를
+    // 기기에서 알 길이 없다(그 부류를 이 저장소가 여러 번 겪었다).
+    const req = control_client.writeRequest(&control_req, "sessions.list", null) catch |e| {
+        setLastError(@errorName(e));
+        return;
+    };
+    control_req_len = req.len;
+}
+
+fn absorbFrame(frame: []const u8) void {
+    var parsed: [max_sessions_shown]control.Session = undefined;
+    const n = control.parseSessions(frame, &parsed);
+    // **응답이 아닌 프레임(알림 등)은 목록을 안 지운다.** 지우면 알림 하나에 화면이 빈다.
+    if (n == 0 and control.jsonValueField(frame, "result") == null) return;
+    for (parsed[0..n], 0..) |s, i| control_rows[i].set(s);
+    control_row_count = n;
+    control_listed = true;
+}
+
+/// 우리가 만든 요청을 가져간다. **가져가면 사라진다**(take-once — 모바일 ABI 의 규약).
+pub export fn maru_mobile_take_control_request(out: [*]u8, cap: usize) usize {
+    if (control_req_len == 0) return 0;
+    if (control_req_len > cap) {
+        setLastError("control_request_too_large");
+        return 0;
+    }
+    @memcpy(out[0..control_req_len], control_req[0..control_req_len]);
+    const n = control_req_len;
+    control_req_len = 0;
+    return n;
+}
+
+/// host 가 시한을 넘겼다고 알린다(계약 §4a — 5초). **시계는 이 층에 없다.**
+pub export fn maru_mobile_control_timeout() void {
+    control_client.timedOut();
+}
+
+/// 컨트롤 축 상태(0=hello 대기, 1=선다, 2=껐다).
+pub export fn maru_mobile_control_state() u32 {
+    return switch (control_client.state) {
+        .waiting_hello => 0,
+        .ready => 1,
+        .off => 2,
+    };
+}
+
+/// 왜 껐나(`MARU_MOBILE_CONTROL_OFF_*`). 화면이 사용자에게 할 말을 고르는 자리다.
+pub export fn maru_mobile_control_off_reason() u32 {
+    return switch (control_client.off_reason) {
+        .none => 0,
+        .hello_timeout => 1,
+        .too_much_noise => 2,
+        .protocol_mismatch => 3,
+        .frame_too_large => 4,
+    };
+}
+
+/// 지금 아는 세션 수. **아직 안 받았으면 0 이지만 `listed` 가 거짓이다**(아래).
+pub export fn maru_mobile_control_session_count() u32 {
+    return @intCast(control_row_count);
+}
+
+/// 목록을 한 번이라도 받았나. "세션이 없다" 와 "아직 모른다" 는 화면에서 다른 말이다.
+pub export fn maru_mobile_control_listed() c_int {
+    return if (control_listed) 1 else 0;
+}
+
+/// 세션이 새 연결에서 다시 시작한다. **끊겼다 붙으면 목록도 축도 처음부터**다 — 남겨 두면
+/// 죽은 세션을 살아 있는 것처럼 보여 준다.
+pub export fn maru_mobile_control_reset() void {
+    control_client = .{};
+    control_row_count = 0;
+    control_req_len = 0;
+    control_listed = false;
+}
+
 pub export fn maru_mobile_take_response(out: [*]u8, cap: usize) usize {
     const core = &(term_core orelse return 0);
     const pending = core.pendingResponse();

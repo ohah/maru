@@ -553,16 +553,25 @@ pub const Rasterizer = struct {
     /// 이것이 없으면 Windows 만 시스템 폰트로 내려간다(§2e).
     ///
     /// **한글 자간이 실제 이유다.** 시스템 폴백(Malgun Gothic)의 한글 advance 는 셀 격자의 배수가 아니라
-    /// 칸마다 여백이 남는다. Jetendard 는 한글을 라틴의 **정확히 2 배**로 그려(실측: upem 1000 에서
-    /// `M`=600, `한`=1200) 그 여백이 반올림 오차만 남는다.
+    /// 칸마다 여백이 남는다. Jetendard 는 한글을 자기 라틴의 **정확히 2 배**로 그리고(upem 1000 에서
+    /// `M`=600, `한`=1200), 기본 주 폰트 `JetBrains Mono` 가 마침 같은 0.6 em 이라 둘이 맞아떨어진다.
+    /// **주 폰트를 다른 번들로 바꾸면 그 정확함은 안 따라온다** — 범위와 실측은
+    /// docs/windows-platform.md §2m.14 의 표가 소유한다.
     fn resolveBundledFace(factory: *IDWriteFactory, family: []const u8) ?*IDWriteFontFace {
         const rel = maru.config.theme.bundledRegularRelPath(family) orelse return null;
         var exe_buf: [1024]u8 = undefined;
         const exe_dir = exeDirNeutral(&exe_buf) orelse "";
         var roots: [4][]const u8 = undefined;
-        // 작업 디렉터리는 `"."` 로 넘긴다 — DirectWrite 가 상대 경로를 cwd 기준으로 연다. 굳이 절대
-        // 경로로 만들면 실패 지점만 하나 늘어난다.
-        for (maru.path_shape.assetSearchRoots(exe_dir, ".", &roots)) |root| {
+        // **정책은 여기 한 곳에 있다**(`assetSearchRoots` doc). 제품은 **exe 옆만** 본다 — 위로
+        // 올라가는 것과 작업 디렉터리를 보는 것은 공격자가 고를 수 있는 자리를 연다. 폰트는
+        // DirectWrite 가 **프로세스 안에서** 파싱하므로 출처를 좁혀 둔다.
+        //
+        // 개발·테스트에서만 넓힌다: `zig-out/bin/maru.exe` 는 위로 두 단계가 저장소 루트이고, 테스트
+        // 바이너리는 `.zig-cache` 안에 있어 작업 디렉터리로만 닿는다.
+        const dev = builtin.mode == .Debug or builtin.is_test;
+        const cwd: []const u8 = if (dev) "." else "";
+        const up_levels: usize = if (dev) 2 else 0;
+        for (maru.path_shape.assetSearchRoots(exe_dir, cwd, up_levels, &roots)) |root| {
             var path_buf: [1400]u8 = undefined;
             const joined = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, rel }) catch continue;
             if (openFaceFromFile(factory, joined)) |f| return f;

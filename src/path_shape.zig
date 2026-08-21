@@ -500,27 +500,36 @@ pub fn parentOf(path: []const u8) ?[]const u8 {
 
 /// 번들 에셋(폰트 등)을 찾을 **루트 후보를 순서대로** 준다. 전부 입력의 부분 슬라이스다.
 ///
-/// **왜 한 자리가 아닌가.** maru 는 실행 형태가 셋이다 — 개발 중 `zig-out/bin/maru.exe`(저장소 루트에
-/// `assets/` 가 있다), 테스트(작업 디렉터리가 저장소 루트다), 그리고 앞으로의 배포 묶음(exe 옆에
-/// `assets/` 를 둔다). 어느 하나만 보면 나머지 둘에서 조용히 못 찾는다.
+/// **왜 한 자리가 아닌가.** maru 는 실행 형태가 셋이다 — 배포 묶음(exe 옆에 `assets/`), 개발 중
+/// `zig-out/bin/maru.exe`(위로 두 단계가 저장소 루트다), 테스트(작업 디렉터리가 저장소 루트다).
 ///
-/// 순서는 **좁은 곳부터**다: exe 옆 → 위로 두 단계 → 작업 디렉터리. 배포 묶음이 이겨야 사용자의 우연한
-/// 작업 디렉터리가 폰트를 바꾸지 않는다.
+/// **`up_levels` 와 `cwd` 는 부르는 쪽의 정책이다 — 편의가 아니라 신뢰의 문제다.** 위로 올라가는 것과
+/// 작업 디렉터리를 보는 것은 **공격자가 고를 수 있는 자리**를 연다:
+///
+/// - 작업 디렉터리: 적대적 저장소가 `assets/fonts/<Family>/<Family>-Regular.ttf` 를 담아 두면, 거기서
+///   maru 를 켠 사용자가 그 폰트를 **프로세스 안에서 파싱**한다. 터미널 사용자는 낯선 저장소로
+///   `cd` 하는 일이 잦다.
+/// - 위로 두 단계: 배포 묶음이 `C:/Program Files/maru` 에 있으면 두 단계 위가 **`C:` 드라이브 루트**다.
+///   기본 Windows 에서 그 자리는 일반 사용자도 쓸 수 있다.
+///
+/// 그래서 **제품은 exe 옆만 본다**(`up_levels = 0`, `cwd = ""`). 나머지는 개발·테스트 빌드의 편의로만
+/// 켠다. 정책은 부르는 쪽 한 곳에 적고, 이 함수는 **주어진 입력에 대한 순서만** 정한다.
+///
+/// 순서는 **좁은 곳부터**다 — 배포 묶음이 이겨야 우연한 작업 디렉터리가 폰트를 바꾸지 않는다.
 ///
 /// **`os_tag` 를 안 받는다.** 중립 층 경로만 다루므로 갈래가 없고, 그래서 macOS·Linux CI 가 이 규칙을
 /// 전부 지킨다(docs/windows-platform.md §2m.4).
-pub fn assetSearchRoots(exe_dir: []const u8, cwd: []const u8, out: *[4][]const u8) []const []const u8 {
+pub fn assetSearchRoots(exe_dir: []const u8, cwd: []const u8, up_levels: usize, out: *[4][]const u8) []const []const u8 {
     var n: usize = 0;
     if (exe_dir.len > 0) {
         out[n] = trimTrailingSep(exe_dir);
         n += 1;
-        if (parentOf(exe_dir)) |up1| {
-            out[n] = up1;
+        var up: []const u8 = out[0];
+        var climbed: usize = 0;
+        while (climbed < up_levels and n < out.len) : (climbed += 1) {
+            up = parentOf(up) orelse break;
+            out[n] = up;
             n += 1;
-            if (parentOf(up1)) |up2| {
-                out[n] = up2;
-                n += 1;
-            }
         }
     }
     if (cwd.len > 0) {
@@ -566,27 +575,40 @@ test "parentOf: 루트에서 멈춘다" {
 test "assetSearchRoots: 좁은 곳부터, 중복은 한 번만" {
     var buf: [4][]const u8 = undefined;
 
-    const roots = assetSearchRoots("C:/tools/maru/zig-out/bin", "D:/work", &buf);
+    // 개발·테스트 정책(위로 둘 + 작업 디렉터리).
+    const roots = assetSearchRoots("C:/tools/maru/zig-out/bin", "D:/work", 2, &buf);
     try testing.expectEqual(@as(usize, 4), roots.len);
     try testing.expectEqualStrings("C:/tools/maru/zig-out/bin", roots[0]);
     try testing.expectEqualStrings("C:/tools/maru/zig-out", roots[1]);
     try testing.expectEqualStrings("C:/tools/maru", roots[2]); // 저장소 루트 — 개발 중 여기 `assets/` 가 있다
     try testing.expectEqualStrings("D:/work", roots[3]);
 
+    // **제품 정책: exe 옆 하나뿐이다.** 위로도 안 가고 작업 디렉터리도 안 본다 — 둘 다 공격자가
+    // 고를 수 있는 자리다(위 doc). 이 줄이 그 정책을 못 박는다.
+    const shipped = assetSearchRoots("C:/Program Files/maru", "", 0, &buf);
+    try testing.expectEqual(@as(usize, 1), shipped.len);
+    try testing.expectEqualStrings("C:/Program Files/maru", shipped[0]);
+
+    // 위로 둘이면 `C:/Program Files/maru` 의 두 번째가 **드라이브 루트**다 — 왜 제품이 0 인지 보인다.
+    const climbed = assetSearchRoots("C:/Program Files/maru", "", 2, &buf);
+    try testing.expectEqual(@as(usize, 3), climbed.len);
+    try testing.expectEqualStrings("C:/", climbed[2]);
+
     // exe 옆이 곧 작업 디렉터리면 한 번만 본다.
-    const dup = assetSearchRoots("/opt/maru", "/opt/maru", &buf);
+    const dup = assetSearchRoots("/opt/maru", "/opt/maru", 2, &buf);
     try testing.expectEqual(@as(usize, 3), dup.len);
     try testing.expectEqualStrings("/opt/maru", dup[0]);
     try testing.expectEqualStrings("/opt", dup[1]);
     try testing.expectEqualStrings("/", dup[2]);
 
     // exe 경로를 모르면 작업 디렉터리만 남는다 — 빈 문자열을 루트로 지어내지 않는다.
-    const only_cwd = assetSearchRoots("", "/repo", &buf);
+    const only_cwd = assetSearchRoots("", "/repo", 2, &buf);
     try testing.expectEqual(@as(usize, 1), only_cwd.len);
     try testing.expectEqualStrings("/repo", only_cwd[0]);
 
     // 둘 다 없으면 후보가 없다(호출부가 조용히 `/assets/...` 를 열지 않게).
-    try testing.expectEqual(@as(usize, 0), assetSearchRoots("", "", &buf).len);
+    try testing.expectEqual(@as(usize, 0), assetSearchRoots("", "", 2, &buf).len);
+    try testing.expectEqual(@as(usize, 0), assetSearchRoots("", "", 0, &buf).len);
 }
 
 /// 중립 층 경로에 **이름 한 칸**을 잇는다. 결과는 계약대로 `/`만 쓴다(§5 규칙 1).

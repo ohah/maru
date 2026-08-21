@@ -2080,6 +2080,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/mobile/mobile_control.zig"),
             .target = target,
             .optimize = optimize,
+            // 프로토콜 이름을 **서버 것과 한 벌로** 든다(문자열을 옮겨 적지 않는다).
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
     const run_mobile_control_tests = b.addRunArtifact(mobile_control_tests);

@@ -155,7 +155,10 @@ const Entry = struct {
 const inventory = [_]Entry{
     // 모바일 그리기 경로. 이 화면은 런타임 언어 전환을 안 받으므로 `ko` 로 고정돼 있다
     // (`session_title` 의 doc 주석). 모바일이 OS 로케일을 받는 슬라이스가 이 수를 0 으로 만든다.
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 30 },
+    // 원격 세션 목록(S10d-2)이 여덟을 더했다 — 목록의 세 상태(받는 중·없다·줄들)와 축이 꺼진
+    // 네 이유, 그리고 그 화면의 제목. **같은 화면의 다른 줄들과 한 언어여야** 해서 같은 고정을 쓴다
+    // (모바일이 OS 로케일을 아직 안 받는다는 위 구조 그대로다).
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 38 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
     .{ .path = "src/platform/mobile/mobile_config.zig", .count = 8 },
     // 골든 캡처용 실행 파일. 한국어 화면을 찍는 것이 목적이라 프로세스째 `ko` 로 박는다 —

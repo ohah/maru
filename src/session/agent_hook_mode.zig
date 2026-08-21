@@ -252,6 +252,24 @@ pub const Progress = struct {
     }
 };
 
+/// 이 이벤트가 **lead 의 턴 진행**을 뜻하는가. 턴 셈(자식·턴 키·턴 문)을 건드려도 되는지의 단일 기준이다.
+///
+/// 둘을 뺀다.
+/// - **자식 이벤트**(`agent_id` 가 있다) — 자식의 활동은 부모의 턴이 아니다.
+/// - **`Notification`** — 그것은 「lead 가 일한다」가 아니라 「누군가 입력을 기다린다」다. 그리고 실측상
+///   claude 의 알림은 공통 payload 를 **에이전트 인자 없이** 만들어, 자식의 승인 요구도 `agent_id` 가 빈 채
+///   lead 처럼 도착한다(2026-08-22 생성부 대조 — `PermissionRequest` 는 그 인자를 넘긴다). 그래서 그것으로
+///   턴을 세면 **자식의 사정이 부모의 턴 셈을 흔든다.**
+///
+/// **한 이름으로 묶어 둔다.** 이 규칙을 조건마다 손으로 되풀이하면 다음에 자리를 하나 더할 때 잊는다 —
+/// 실제로 잊었고, 턴 문과 턴 키 두 자리에서 각각 «안 풀리는 배지» 와 «지워지는 자식 셈» 이 나왔다.
+/// 그래서 **턴 셈을 만지는 자리는 전부 이것을 지난다**(리셋·오류 표시·턴 문·턴 키·회수). 지금은 뒤의
+/// 셋이 종류로도 걸러져 결과가 같지만, 같은 규칙을 두 모양으로 적어 두면 그 «같음» 이 언제 깨지는지
+/// 아무도 안 본다.
+fn marksTurnProgress(ev: event.Event) bool {
+    return ev.agent_id.len == 0 and ev.kind != .notification;
+}
+
 /// 이벤트를 진행 상태에 반영하고 **그 뒤의 배지 상태**를 돌려준다. 기본 전이는 `next` 가 하고, 여기서는
 /// 자식 때문에 달라지는 부분만 얹는다.
 pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
@@ -259,7 +277,13 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
         .subagent_start => {
             progress.addChild(ev.agent_id);
             // 자식이 떴다 = 무언가 돌고 있다. lead 가 이미 `Stop` 을 보냈어도 턴은 안 끝났다.
-            return .running;
+            //
+            // **다만 «막힘» 은 덮지 않는다.** 병렬 워커 턴에서는 하나가 승인 게이트에 걸린 채 다른 하나가
+            // 뜬다(그 요구는 `agent_id` 없이 lead 로 온다 — §6). 「돈다」로 덮으면 **사용자가 할 일이 있다는
+            // 신호만 골라 사라진다.** 둘 다 참일 때 무엇을 보일지는 관측 모드가 이미 정해 두었다 —
+            // `visible_blocker` 가 최우선이다([agent-session.md](../../docs/agent-session.md) «해석»).
+            // 배지 열거를 공유하듯 그 우선순위도 공유한다.
+            return if (current == .blocked) current else .running;
         },
         .subagent_stop => {
             // **우리가 시작을 본 자식일 때만** 반응한다. claude 는 알린 적 없는 내부 에이전트의
@@ -277,28 +301,39 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
     // 모든 lead 이벤트에 같은 값으로 실린다). `UserPromptSubmit` 이 유실돼도 이 신호가 남는다.
     // 자식 이벤트는 보지 않는다 — codex 의 자식은 **자기 turn_id** 를 싣고 오므로(실측) 그것을 부모의
     // 턴 변화로 읽으면 자식이 뜰 때마다 셈이 초기화된다.
-    if (ev.agent_id.len == 0 and progress.adoptTurn(ev.turn_key)) progress.reset();
+    // **알림은 여기서도 빼놓는다**(§6). 그것은 턴 진행의 증거가 아닌데 공통 payload 를 타고 `prompt_id` 를
+    // 싣고 온다 — 지난 턴의 워커 승인 요구가 늦게 도착하면 «턴 키가 바뀌었다» 로 읽혀 **이번 턴의 자식
+    // 셈이 지워지고** lead 의 `Stop` 이 자식을 안 기다린다. 잃는 것은 없다: 턴을 실제로 옮기는 이벤트는
+    // 모두 그 키를 싣는다.
+    if (marksTurnProgress(ev) and progress.adoptTurn(ev.turn_key)) progress.reset();
 
     // 새 턴이 시작되면 지난 턴의 셈을 버린다 — 안 버리면 한 번 어긋난 수가 영영 남는다.
     // **새 세션도 마찬가지다.** 같은 pane 에서 에이전트를 다시 띄우면(또는 다른 provider 로 바꾸면)
     // 지난 세션의 자식은 이미 없다. 놓친 `SubagentStop` 하나가 세션을 건너뛰어 따라오지 않게 한다.
-    if ((ev.kind == .user_prompt_submit or ev.kind == .session_start) and ev.agent_id.len == 0)
+    if (marksTurnProgress(ev) and (ev.kind == .user_prompt_submit or ev.kind == .session_start))
         progress.reset();
 
     const base = next(current, ev);
 
     // lead 의 턴이 끝났는데 자식이 남아 있으면 **완료로 단정하지 않는다**. 그 사실을 기억해 두었다가
     // 마지막 자식이 끝날 때 푼다(위 `.subagent_stop`).
-    if (ev.agent_id.len == 0 and ev.kind == .stop_failure) progress.lead_failed = true;
+    if (marksTurnProgress(ev) and ev.kind == .stop_failure) progress.lead_failed = true;
 
     // **lead 가 돌고 있다는 신호가 턴을 연다.** 프롬프트만 보고 열면, 훅을 이미 돌던 세션에 붙인 경우
     // (첫 이벤트가 도구 호출인 경우)에 턴이 영영 안 열린 것으로 보여 자식이 끝나는 순간 **아직 일하는
     // lead 를 완료로 단정한다**. 그래서 `running`·`blocked` 로 가는 lead 이벤트를 모두 문으로 삼는다.
-    if (ev.agent_id.len == 0 and (base == .running or base == .blocked)) progress.turn_open = true;
+    //
+    // **`Notification` 만 뺀다.** 그것은 「lead 가 일한다」가 아니라 「누군가 입력을 기다린다」는 신호이고,
+    // 실측상 **에이전트 문맥을 안 싣는다** — claude 의 알림 생성부는 공통 payload 를 에이전트 인자 없이
+    // 부르므로 `worker_permission_prompt` 도 `agent_id` 가 빈 채 **lead 이벤트로** 도착한다
+    // (`PermissionRequest` 는 그 인자를 넘겨 자식 것이 자식으로 온다 — 2026-08-22 생성부 대조).
+    // 그래서 이것으로 턴을 열면 **lead 가 이미 `Stop` 을 보낸 뒤 자식이 승인을 요구한 순간 턴이 되살아나고**,
+    // 마지막 자식이 끝나도 «턴이 안 끝났다» 가 되어 배지가 영영 «입력 대기» 에 멈춘다.
+    if (marksTurnProgress(ev) and (base == .running or base == .blocked)) progress.turn_open = true;
 
     // lead 의 턴이 끝났는데 자식이 남아 있으면 **완료로 단정하지 않는다**. 턴을 닫아 두었다가 마지막
     // 자식이 끝날 때 푼다(위 `.subagent_stop`).
-    if (ev.agent_id.len == 0 and (ev.kind == .stop or ev.kind == .stop_failure)) {
+    if (marksTurnProgress(ev) and (ev.kind == .stop or ev.kind == .stop_failure)) {
         progress.turn_open = false;
         // **여기서 유령을 거둔다**(계약 §2). lead 의 턴 끝은 목록이 가라앉은 자리이고, 붙잡을지 말지를
         // 정하기 **직전**이라 그 판단이 최신 사실 위에서 이뤄진다. 다른 이벤트에서는 거두지 않는다 —
@@ -957,14 +992,18 @@ fn alphabetEvent(i: usize) event.Event {
     const kinds = [_]event.Kind{
         .session_start, .user_prompt_submit, .pre_tool_use,   .permission_request,
         .stop,          .stop_failure,       .subagent_start, .subagent_stop,
-        .notification,  .oversized,
+        .notification,  .oversized,          .notification,
     };
     const child = i >= kinds.len;
-    var ev = evOf(kinds[i % kinds.len]);
+    const k = i % kinds.len;
+    var ev = evOf(kinds[k]);
+    // **마지막 자리는 «입력 대기» 알림이다.** 종류 없는 알림만 넣으면 그 가지를 한 번도 안 밟는다 —
+    // 실제로 안 밟았고, 그 사이로 «자식이 남은 뒤 온 알림이 턴을 되살려 배지가 갇히는» 순서가 지나갔다.
+    if (k == kinds.len - 1) ev.notification_type = .needs_input;
     if (child) ev.agent_id = "child-1";
     return ev;
 }
-const alphabet_len: usize = 20; // 위 10 종 × (lead | 자식)
+const alphabet_len: usize = 22; // 위 11 종 × (lead | 자식)
 
 test "전수: 어떤 순서 뒤에도 «새 턴 → 정상 종료» 는 반드시 대기로 끝난다" {
     // **안 풀리는 배지**의 일반형이다. 앞에 무엇이 왔든(이벤트 유실·자식 셈 어긋남·오류 잔재),
@@ -998,6 +1037,37 @@ test "전수: 어떤 순서 뒤에도 «새 턴 → 정상 종료» 는 반드�
         if (k == depth) break;
     }
     try testing.expectEqual(alphabet_len * alphabet_len * alphabet_len, total);
+}
+
+test "전수: 알림은 턴 문을 건드리지 않는다 — 그것은 «일한다» 가 아니라 «기다린다» 다" {
+    // 실측(2026-08-22): claude 의 알림 생성부는 공통 payload 를 **에이전트 인자 없이** 부른다. 그래서
+    // 자식의 승인 요구(`worker_permission_prompt`)도 `agent_id` 가 빈 채 **lead 이벤트로** 온다
+    // (`PermissionRequest` 는 그 인자를 넘겨 자식 것이 자식으로 온다). 이것으로 턴을 열면 lead 가 이미
+    // `Stop` 을 보낸 뒤에도 턴이 되살아나 **마지막 자식이 끝나도 배지가 안 풀린다.**
+    const depth = 3;
+    var seq: [depth]usize = .{0} ** depth;
+    while (true) {
+        var progress: Progress = .{};
+        var state: State = .unknown;
+        for (seq) |i| state = advance(&progress, state, alphabetEvent(i));
+
+        const open_before = progress.turn_open;
+        var notice = evOf(.notification);
+        notice.notification_type = .needs_input;
+        _ = advance(&progress, state, notice);
+        if (progress.turn_open != open_before) {
+            std.debug.print("알림이 턴 문을 바꾼 순서: {any}\n", .{seq});
+            return error.NoticeOpenedTurn;
+        }
+
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
 }
 
 test "전수: 자식 셈은 알파벳 어디를 지나도 실제로 산 자식 수를 넘지 않는다" {
@@ -1042,6 +1112,35 @@ test "전수: 알림은 «전이가 있을 때만» 나온다 — 같은 상태�
             state = advance(&progress, state, alphabetEvent(i));
             if (prev == state) try testing.expectEqual(Notice.none, noticeOn(prev, state));
         }
+        var k: usize = 0;
+        while (k < depth) : (k += 1) {
+            seq[k] += 1;
+            if (seq[k] < alphabet_len) break;
+            seq[k] = 0;
+        }
+        if (k == depth) break;
+    }
+}
+
+test "전수: 자식이 떠도 «입력 대기» 는 안 지워진다 — 막힘이 이긴다" {
+    // 병렬 워커 턴에서 하나가 승인 게이트에 걸린 채 다른 하나가 뜬다. 「자식이 떴다 = 돈다」로 덮으면
+    // **사용자가 할 일이 있다는 신호만 골라 사라진다.** 관측 모드가 `visible_blocker` 를 최우선으로 두는
+    // 것과 같은 규율이다 — 배지 열거를 공유하듯 그 우선순위도 공유한다.
+    const depth = 3;
+    var seq: [depth]usize = .{0} ** depth;
+    while (true) {
+        var progress: Progress = .{};
+        var state: State = .unknown;
+        for (seq) |i| state = advance(&progress, state, alphabetEvent(i));
+
+        if (state == .blocked) {
+            const after = advance(&progress, state, childEv(.subagent_start));
+            if (after != .blocked) {
+                std.debug.print("막힘이 지워진 순서: {any} → {s}\n", .{ seq, @tagName(after) });
+                return error.BlockerErased;
+            }
+        }
+
         var k: usize = 0;
         while (k < depth) : (k += 1) {
             seq[k] += 1;
@@ -1421,4 +1520,85 @@ test "자식이 보낸 Notification 은 부모 배지를 옮기지 않는다" {
     child.notification_type = .needs_input;
     child.agent_id = "child-1";
     try testing.expectEqual(State.running, next(.running, child));
+}
+
+test "자식이 남은 뒤 온 알림이 턴을 다시 열면 배지가 영영 안 풀린다" {
+    // 실측: `worker_permission_prompt` 는 **`agent_id` 없이** 온다(claude 의 알림 생성부는 에이전트
+    // 문맥을 안 넘긴다). 그래서 자식의 승인 요구가 **lead 이벤트로** 도착한다 — lead 가 이미 `Stop` 을
+    // 보낸 뒤에도. 그때 턴이 다시 열리면 마지막 자식이 끝나도 «턴이 안 끝났다» 가 되어 안 풀린다.
+    var progress = Progress{};
+    var state = State.unknown;
+
+    const prompt = evOf(.user_prompt_submit);
+    state = advance(&progress, state, prompt);
+
+    var start = evOf(.subagent_start);
+    start.agent_id = "c1";
+    state = advance(&progress, state, start);
+
+    const stop = evOf(.stop);
+    state = advance(&progress, state, stop);
+    try testing.expectEqual(State.running, state); // 자식이 붙잡는다 — 옳다
+
+    var notice = evOf(.notification);
+    notice.notification_type = .needs_input;
+    state = advance(&progress, state, notice);
+    try testing.expectEqual(State.blocked, state); // 승인이 필요하다 — 옳다
+
+    var child_done = evOf(.subagent_stop);
+    child_done.agent_id = "c1";
+    state = advance(&progress, state, child_done);
+    // 마지막 자식이 끝났고 lead 는 이미 `Stop` 을 보냈다 — 턴은 끝났다.
+    try testing.expectEqual(State.idle, state);
+}
+
+test "승인을 기다리는 중에 자식이 떠도 «입력 대기» 가 지워지지 않는다" {
+    // 병렬 워커 턴에서 한 자식이 승인 게이트에 걸리고(그 알림은 `agent_id` 없이 lead 로 온다) 다른 자식이
+    // 이어서 뜬다. 「자식이 떴다 = 돈다」로 덮으면 **사용자가 할 일이 있다는 신호가 사라진다** — 관측 모드가
+    // `visible_blocker` 를 최우선으로 두는 것과 같은 이유로, 막힘이 이긴다.
+    var progress = Progress{};
+    var state = advance(&progress, .unknown, evOf(.user_prompt_submit));
+
+    var first = evOf(.subagent_start);
+    first.agent_id = "c1";
+    state = advance(&progress, state, first);
+    try testing.expectEqual(State.running, state);
+
+    var notice = evOf(.notification);
+    notice.notification_type = .needs_input;
+    state = advance(&progress, state, notice);
+    try testing.expectEqual(State.blocked, state);
+
+    var second = evOf(.subagent_start);
+    second.agent_id = "c2";
+    state = advance(&progress, state, second);
+    try testing.expectEqual(State.blocked, state); // 여전히 사용자를 기다린다
+    try testing.expectEqual(@as(usize, 2), progress.childCount()); // 셈은 그대로 는다
+}
+
+test "지난 턴의 알림이 늦게 와도 이번 턴의 자식 셈을 지우지 않는다" {
+    // 알림은 **턴 진행의 증거가 아니다**(§6). 그런데 공통 payload 를 타고 `prompt_id` 를 싣고 오므로,
+    // 지난 턴의 워커 승인 요구가 늦게 도착하면 «턴 키가 바뀌었다» 로 읽혀 **이번 턴의 자식 셈이 지워진다**
+    // — 그러면 lead 의 `Stop` 이 자식을 안 기다리고 배지가 일찍 풀린다.
+    var progress = Progress{};
+
+    var first = evOf(.user_prompt_submit);
+    first.turn_key = "turn-1";
+    var state = advance(&progress, .unknown, first);
+
+    var second = evOf(.user_prompt_submit);
+    second.turn_key = "turn-2";
+    state = advance(&progress, state, second);
+
+    var child = evOf(.subagent_start);
+    child.agent_id = "c1";
+    state = advance(&progress, state, child);
+    try testing.expectEqual(@as(usize, 1), progress.childCount());
+
+    // 지난 턴(turn-1)의 알림이 늦게 도착한다.
+    var late = evOf(.notification);
+    late.notification_type = .needs_input;
+    late.turn_key = "turn-1";
+    state = advance(&progress, state, late);
+    try testing.expectEqual(@as(usize, 1), progress.childCount()); // 셈은 살아 있어야 한다
 }

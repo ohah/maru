@@ -83,6 +83,16 @@ pub const Event = struct {
     /// 턴 식별자. Claude는 `prompt_id`, Codex는 `turn_id`로 온다 — 같은 자리에 담는다.
     turn_key: []const u8 = "",
     tool_name: []const u8 = "",
+    /// `Notification.message` — 사람이 읽는 «무엇을 기다리는지».
+    ///
+    /// **주의 알림 본문은 승인 경로와 이 경로가 다르다.** `PermissionRequest` 는 `tool_name`·
+    /// `tool_input` 을 싣지만 `Notification` payload 는 `message`·`title`·`notification_type` 뿐이라
+    /// (실측 2026-08-22 — 생성부 확인) 도구 이름 규칙을 그대로 쓰면 **본문이 빈 문자열**이다.
+    /// 알림이 뜨는데 아무 말도 안 하면 사용자는 창을 열어 다시 찾아야 한다.
+    ///
+    /// `text` 에 넣지 않고 자리를 따로 두는 이유: `text` 는 `Stop` 의 응답·`UserPromptSubmit` 의 프롬프트가
+    /// 쓰는 자리다. 뒷날 어느 provider 가 그 이벤트에 `message` 를 더하면 **대화 줄이 조용히 오염된다.**
+    notice_text: []const u8 = "",
     /// `tool_input.description` — 사람이 읽는 도구 설명. 진행 중 배지가 쓴다(명령 원문은 길고 민감해 쓰지 않는다).
     tool_description: []const u8 = "",
     /// `tool_input.file_path` — 편집 도구가 만지는 경로. AI 소행 확정이 쓴다.
@@ -118,10 +128,19 @@ pub const Event = struct {
 
 /// `Notification` 이 말하는 종류(계약 §6).
 ///
-/// **아는 것만 든다.** claude 의 목록은 열넷이고(2026-08-21 실측 — 바이너리의 enum 을 그대로 읽었다)
-/// 그중 상태를 옮길 만한 것은 «사용자 입력을 기다린다» 는 다섯뿐이다. 나머지(인증 성공·쿼터 재개·
-/// computer use 진입/이탈 등)는 배지와 무관하므로 **모르는 것과 같이 취급한다** — 종류를 모르는 채
-/// 배지를 옮기면 임의의 provider 알림이 「입력 대기」로 보인다.
+/// **아는 것만 든다.** 상태를 옮길 만한 것은 «사용자 입력을 기다린다» 는 다섯뿐이고, 나머지(유휴·인증
+/// 성공·쿼터 재개·elicitation 완료 등)는 배지와 무관하므로 **모르는 것과 같이 취급한다** — 종류를 모르는
+/// 채 배지를 옮기면 임의의 provider 알림이 「입력 대기」로 보인다.
+///
+/// **권위 있는 두 목록이 서로 다르다**(2026-08-22 대조). 공개 스펙(`code.claude.com/docs/en/hooks` 의
+/// Notification matcher)은 아홉을 적고, 제품이 실제로 내는 값은 열넷이다. 어느 한쪽에만 있는 것이 있다:
+///
+///   문서에만: `elicitation_complete`·`elicitation_response`(둘 다 «끝났다» 라 안 옮긴다)
+///   제품에만: `worker_permission_prompt`(자식의 승인 요구 — **옮긴다**)·`push_notification`·
+///            `computer_use_enter`/`exit`·`quota_auto_resume_*`
+///
+/// 그래서 **블랙리스트로 짜면 어느 한쪽에서 틀린다.** 화이트리스트 + 「모르면 안 옮긴다」는 두 목록 모두에
+/// 대해 성립하고, 목록이 또 갈라져도 조용히 무시되는 쪽으로 틀린다.
 pub const NotificationKind = enum {
     /// `Notification` 이 아니거나 종류가 없다.
     none,
@@ -295,6 +314,8 @@ pub fn parseLine(line: []const u8) ?Event {
             ev.text = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "stop_hook_active")) {
             ev.stop_hook_active = scan.boolValue() orelse return null;
+        } else if (std.mem.eql(u8, key, "message")) {
+            ev.notice_text = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "notification_type")) {
             const name = scan.stringValue() orelse return null;
             ev.notification_type = notificationKindOf(name);
@@ -1321,10 +1342,11 @@ test "Notification 의 종류를 읽는다 — 아는 것만 상태를 옮길 �
     }) |name| {
         try testing.expectEqual(NotificationKind.needs_input, notificationKindOf(name));
     }
-    // 나머지는 배지와 무관하다 — 모르는 것과 같이 취급한다.
+    // 나머지는 배지와 무관하다 — 모르는 것과 같이 취급한다. **공개 스펙에만 있는 두 이름도 여기 박는다**
+    // (`elicitation_complete`·`elicitation_response` — 둘 다 «끝났다» 이지 «기다린다» 가 아니다).
     for ([_][]const u8{
-        "idle_prompt",        "auth_success",            "agent_completed", "push_notification",
-        "computer_use_enter", "quota_auto_resume_fired",
+        "idle_prompt",        "auth_success",            "agent_completed",      "push_notification",
+        "computer_use_enter", "quota_auto_resume_fired", "elicitation_complete", "elicitation_response",
         "무엇인지 모르는 새 종류",
     }) |name| {
         try testing.expectEqual(NotificationKind.other, notificationKindOf(name));
@@ -1345,4 +1367,28 @@ test "Notification payload 에서 종류를 뽑는다" {
     // 종류가 없는 알림도 옮기지 않는다.
     const bare = "claude\t{\"hook_event_name\":\"Notification\"}";
     try testing.expectEqual(NotificationKind.none, parseLine(bare).?.notification_type);
+}
+
+test "Notification 의 message 를 싣는다 — 그 자리가 비면 알림이 아무 말도 안 한다" {
+    const line = "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"permission_prompt\"," ++
+        "\"message\":\"Claude needs your permission to use Bash\",\"title\":\"Claude Code\"}";
+    const ev = parseLine(line).?;
+    try testing.expectEqualStrings("Claude needs your permission to use Bash", ev.notice_text);
+    // **대화 줄을 건드리지 않는다** — `text` 는 `Stop` 의 응답과 프롬프트가 쓰는 자리다.
+    try testing.expectEqualStrings("", ev.text);
+}
+
+test "message 는 대화 줄을 덮지 않는다 — 두 자리가 섞이면 «질문은 새것, 답은 알림» 이 된다" {
+    const stop = "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 고쳤습니다\"}";
+    const ev = parseLine(stop).?;
+    try testing.expectEqualStrings("다 고쳤습니다", ev.text);
+    try testing.expectEqualStrings("", ev.notice_text);
+}
+
+test "중첩된 message 는 최상위 자리를 안 건드린다 — 커밋 도구가 그 키를 쓴다" {
+    const line = "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"message\":\"커밋 메시지입니다\",\"description\":\"커밋\"}}";
+    const ev = parseLine(line).?;
+    try testing.expectEqualStrings("커밋", ev.tool_description);
+    try testing.expectEqualStrings("", ev.notice_text);
 }

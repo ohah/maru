@@ -319,8 +319,11 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
 /// **단일 편집기보다 두 단계 짧다.** 접힘 층(③)은 비교에서 거절되고(`foldsUnavailable`), 문서 offset
 /// 변환(⑤)은 대상 문서가 없다 — 화면에 서는 것은 원본 줄이 아니라 짝을 맞춰 정렬한 행 배열이다.
 ///
-/// `null`이면 이 좌표가 이 함수의 것이 아니다: 비교 상태가 아니거나, 아직 안 그렸거나, gutter거나,
-/// 열 사이 틈이다.
+/// `null`이면 이 좌표가 이 함수의 것이 아니다: 비교 상태가 아니거나, 아직 안 그렸거나, **gutter**다.
+///
+/// **열 사이 틈은 `null`이 아니다.** 그 자리는 왼쪽 열의 오른쪽 밖이라 `byteAtPoint`가 그 행의 끝으로
+/// clamp한다(결정표의 *"행 끝 너머 → 그 행의 끝"*과 같은 규칙). 초판 doc이 그것을 `null`이라 적었는데
+/// 실측으로 `.left`를 답했다 — 동작이 아니라 문장이 틀렸다.
 ///
 /// **`side`를 강제할 수 있다.** 드래그가 반대 열로 넘어가도 잡은 열에 머물러야 하므로(계약: 좌우를
 /// 걸치는 선택은 만들지 않는다), 호출자가 잡은 열을 넘기면 그 열로만 답한다.
@@ -361,7 +364,11 @@ pub fn hitTestDiffBody(term: *Term, x_px: f64, y_px: f64, force: ?DiffSide) ?Dif
     };
     const v = rows[row_i];
     const texts = if (side == .right) st.right_texts else st.left_texts;
-    const line_idx: usize = v.line;
+    // **`VisualRow.line`은 뷰포트 상대다.** `first_line`을 더해야 그 열의 행 배열 인덱스가 된다 —
+    // 같은 파일 위쪽이 *"`v.line`은 상대 인덱스이고 그 배열은 절대 인덱스다"*라고 적어 둔 그
+    // 오류를 초판이 그대로 재현했고, 스크롤한 프레임에서 판정 7발이 **전부** 어긋났다(적대적 검증).
+    // 접힘이 거절되므로 없어지는 것은 번호표 단계뿐이고, 이 덧셈은 남는다.
+    const line_idx: usize = v.line + g.first_line;
     if (line_idx >= texts.len) return null;
 
     // ③ 열·칸 안 픽셀 → 행 안 byte. **단일 편집기와 같은 함수**다.
@@ -401,8 +408,10 @@ fn storeOneSide(
 /// 비교 뷰의 **좌우 행 배열과 열 기하**를 굳힌다(§4.1g "비교 뷰"). 단일 편집기의 `storeHitRows`와
 /// 같은 자리·같은 이유이고, 축만 다르다 — 이쪽 행 인덱스는 그 열의 정렬된 행 배열의 것이다.
 ///
-/// **접힘을 풀지 않는다.** 비교에서는 접힘이 거절되므로(`foldsUnavailable`) 화면 행이 곧 그 배열의
-/// 행이다 — 단일 편집기의 ③단계가 여기 없는 이유다.
+/// **접힘 번호표만 없어진다.** 비교에서는 접힘이 거절되므로(`foldsUnavailable`) ③의 두 단계 중
+/// 번호표 되짚기가 빠지지만, **`+ first_line`은 남는다** — `VisualRow.line`은 뷰포트 상대이고
+/// 세로 스크롤은 접힘과 별개다. 초판이 *"화면 행이 곧 그 배열의 행"*이라 적어 그 덧셈을 통째로
+/// 빠뜨렸고, 스크롤한 프레임에서 판정 7발이 전부 어긋났다(적대적 검증).
 fn storeDiffHitRows(
     self: *AppSession,
     term: *Term,
@@ -434,6 +443,7 @@ fn storeDiffHitRows(
         .cell_w_px = @intCast(@min(self.cell_width_px, std.math.maxInt(u16))),
         .cell_h_px = @intCast(@min(self.cell_height_px, std.math.maxInt(u16))),
         .tab_width = term.rt.editor_tab_width,
+        .first_line = term.rt.editor_first_line,
     };
 }
 
@@ -753,9 +763,6 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     //
     // **못 담으면 그냥 안 담는다.** 저장소를 못 잡아도 화면은 이미 다 그렸고, 클릭이 그 프레임 동안
     // 안 될 뿐이다(§2.1 캐시가 "못 잡으면 없이 그린다"와 같은 결).
-    // **비교 뷰에서는 담지 않는다.** `hitTestBody`가 diff를 첫 줄에서 거절하므로 결과가 영영 안
-    // 쓰이고, 게다가 비교 경로의 `visual_rows`는 좌우 열이 섞인 배열이라 이 축으로 해석하면 값
-    // 자체가 틀린다 — 뒷날 diff 가드를 풀 때 조용히 잘못된 값을 내는 지뢰가 된다(7차 적대적 검증).
     if (term.rt.editor_diff) |st| {
         // **비교 뷰도 담는다**(§4.1g "비교 뷰"). 7차가 *"좌우가 섞인 배열이라 담아 두면 지뢰"*라 한
         // 것은 **섞인 하나**를 담는 것에 대한 지적이었고, 렌더가 이미 저장소를 반으로 갈라 각 열이
@@ -1483,8 +1490,10 @@ pub fn applyDragAutoscroll(self: *AppSession, leaf_rect: maru.session.SplitRect)
         self.editor_drag_autoscroll_accum_ms = 0;
         return;
     }
-    const owner = switch (self.pointer_gesture_owner) {
-        .editor_selection => |g| g,
+    // 비교 뷰도 같은 tick이 굴린다 — 소유자만 다르다.
+    const owner_term: *Term = switch (self.pointer_gesture_owner) {
+        .editor_selection => |g| g.term,
+        .editor_diff_selection_drag => |g| g.term,
         else => {
             // 제스처가 끝났는데 방향이 남아 있으면 영원히 굴린다 — 터미널이 그 latch를 겪었다.
             self.editor_drag_autoscroll = 0;
@@ -1492,6 +1501,8 @@ pub fn applyDragAutoscroll(self: *AppSession, leaf_rect: maru.session.SplitRect)
             return;
         },
     };
+    const is_diff = self.pointerGestureIs(.editor_diff_selection_drag);
+    const owner = .{ .term = owner_term };
     self.editor_drag_autoscroll_accum_ms += self.msPerTick();
     if (self.editor_drag_autoscroll_accum_ms < scroll_ops.drag_autoscroll_step_ms) return;
     self.editor_drag_autoscroll_accum_ms -= scroll_ops.drag_autoscroll_step_ms;
@@ -1500,16 +1511,54 @@ pub fn applyDragAutoscroll(self: *AppSession, leaf_rect: maru.session.SplitRect)
 
     // 굴린 방향의 **가장자리 행**으로 선택을 늘린다. 지금 배열은 굴리기 전 것이므로 그 끝 행을
     // 쓰면 한 줄씩 정확히 따라간다(다음 렌더가 배열을 갱신하면 그 자리가 새 줄이 된다).
-    const g = owner.term.rt.editor_hit_geom;
-    if (g.cell_h_px == 0 or owner.term.rt.editor_hit_rows_len == 0) return;
+    const cell_h: u16 = if (is_diff) owner.term.rt.editor_diff_hit_geom.cell_h_px else owner.term.rt.editor_hit_geom.cell_h_px;
+    const body_y: i32 = if (is_diff) owner.term.rt.editor_diff_hit_geom.body_y else owner.term.rt.editor_hit_geom.body_y;
+    const rows_len: usize = if (is_diff) blk: {
+        const side = self.pointer_gesture_owner.editor_diff_selection_drag.side;
+        break :blk if (side == .right) owner.term.rt.editor_diff_hit_len_right else owner.term.rt.editor_diff_hit_len_left;
+    } else owner.term.rt.editor_hit_rows_len;
+    if (cell_h == 0 or rows_len == 0) return;
     // 위로 굴리면(양수) 가장자리는 **첫 행**, 아래로 굴리면 마지막 행이다(터미널이 같은 식을 쓴다).
-    const edge_row: usize = if (self.editor_drag_autoscroll > 0) 0 else owner.term.rt.editor_hit_rows_len - 1;
-    const edge_y: f64 = @as(f64, @floatFromInt(g.body_y)) +
-        @as(f64, @floatFromInt(edge_row * g.cell_h_px)) + 1;
-    _ = dragBodySelection(self, 2, self.editor_drag_x_px, edge_y);
+    const edge_row: usize = if (self.editor_drag_autoscroll > 0) 0 else rows_len - 1;
+    const edge_y: f64 = @as(f64, @floatFromInt(body_y)) +
+        @as(f64, @floatFromInt(edge_row * cell_h)) + 1;
+    if (is_diff) {
+        _ = dragDiffBodySelection(self, 2, self.editor_drag_x_px, edge_y);
+    } else {
+        _ = dragBodySelection(self, 2, self.editor_drag_x_px, edge_y);
+    }
     // `dragBodySelection`이 가장자리 좌표를 "안"으로 읽어 방향을 지운다 — 다시 세운다.
     self.editor_drag_autoscroll = if (edge_row == 0) 1 else -1;
     self.metal_dirty = true;
+}
+
+/// 비교 뷰의 더블(단어)·트리플(줄) 클릭. 단일 편집기의 `selectWordOrLineAt`과 같은 규칙이고
+/// 축만 다르다 — 대상이 문서가 아니라 그 열의 행이다.
+fn selectWordOrLineInDiff(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64) bool {
+    const term = pane.activeTerm();
+    if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
+    const hit = hitTestDiffBody(term, x_px, y_px, null) orelse return false;
+    const st = term.rt.editor_diff orelse return false;
+    const texts = if (hit.side == .right) st.right_texts else st.left_texts;
+    if (hit.row >= texts.len) return false;
+    const text = texts[hit.row];
+
+    const range: struct { lo: usize, hi: usize } = if (whole_line)
+        .{ .lo = 0, .hi = text.len } // 행 전체(줄 끝 문자는 이미 떼어져 있다)
+    else blk: {
+        const w = editor_selection.wordRangeAt(text, hit.byte);
+        break :blk .{ .lo = w.lo, .hi = w.hi };
+    };
+    term.rt.editor_diff_selection = .{
+        .side = hit.side,
+        .anchor_row = hit.row,
+        .anchor_byte = range.lo,
+        .focus_row = hit.row,
+        .focus_byte = range.hi,
+    };
+    self.beginPointerGesture(.{ .editor_diff_selection_drag = .{ .term = term, .side = hit.side } });
+    self.metal_dirty = true;
+    return true;
 }
 
 /// 비교 뷰 본문을 눌렀는가(§4.1g "비교 뷰"). 눌렀으면 선택을 시작하고 `true`.
@@ -1600,6 +1649,9 @@ fn buildDiffSelectionMarks(self: *AppSession, term: *Term, side: DiffSide) ?[]co
     const buf = buf_field.*[0..texts.len];
     @memset(rows, &.{});
 
+    // **행이 배열 밖이면 그릴 것이 없다.** `lo_row > texts.len`이면 아래 for-range가 `integer
+    // overflow`로 죽는다 — 선택을 든 채 문서가 짧아지는 경로가 실재한다(적대적 검증).
+    if (lo_row >= texts.len) return null;
     for (lo_row..@min(hi_row + 1, texts.len)) |i| {
         const text = texts[i];
         const from: u32 = if (i == lo_row) @intCast(@min(lo_byte, text.len)) else 0;
@@ -1632,17 +1684,24 @@ pub fn copyDiffSelection(self: *AppSession) bool {
     const hi_byte = if (back) sel.anchor_byte else sel.focus_byte;
     if (lo_row == hi_row and lo_byte == hi_byte) return false;
 
+    if (lo_row >= texts.len) return false; // 문서가 짧아졌다 — 위 `buildDiffSelectionMarks`와 같은 가드
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(self.allocator);
+    // **분리자는 "앞에 줄이 있었는가"로 붙인다.** `out.items.len > 0`으로 걸면 첫 줄이 **진짜 빈
+    // 줄**일 때 그 개행이 사라진다(실측: `keep`/``/`tail`에서 행 1~2를 고르면 `"tail"`만 나왔고,
+    // 빈 줄만 고르면 아무것도 안 갔다). 단일 편집기는 문서 byte를 그대로 뜨므로 `"\n"`이 나온다 —
+    // 같은 명령이 뷰에 따라 다르게 동작하면 안 된다.
+    var wrote_any = false;
     for (lo_row..@min(hi_row + 1, texts.len)) |i| {
         if (i < numbers.len and numbers[i] == null) continue; // 짝맞춤 빈 행 — 그 자리에 줄이 없다
         const text = texts[i];
         const from = if (i == lo_row) @min(lo_byte, text.len) else 0;
         const to = if (i == hi_row) @min(hi_byte, text.len) else text.len;
-        if (out.items.len > 0) out.append(self.allocator, '\n') catch return false;
+        if (wrote_any) out.append(self.allocator, '\n') catch return false;
+        wrote_any = true;
         if (to > from) out.appendSlice(self.allocator, text[from..to]) catch return false;
     }
-    if (out.items.len == 0) return false;
+    if (!wrote_any) return false; // 고른 것이 짝맞춤 빈 행뿐이다 — 그 자리에 줄이 없다
 
     const captured = self.allocator.dupe(u8, out.items) catch return false;
     if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
@@ -1682,6 +1741,10 @@ fn pointOnEditorScrollbar(term: *Term, x_px: f64, y_px: f64) bool {
 pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64) bool {
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
+    // **비교 뷰도 여기서 소비한다.** `hitTestBody`가 diff를 첫 줄에서 거절하므로 이 자리에서 갈리지
+    // 않으면 `false`가 나가고, 그 좌표는 `pxToCell`로 흘러 **터미널에** 단어/줄 선택 블록을 만든다
+    // (이 함수 doc이 도크 제보로 적어 둔 그 사고다 — 적대적 검증이 비교 뷰에서 재현했다).
+    if (term.rt.editor_diff != null) return selectWordOrLineInDiff(self, pane, whole_line, x_px, y_px);
     // **막대 띠는 여기서도 거절한다.** 단일 클릭은 pane 라우팅이 `divider → 막대 → 본문` 순서로
     // 걸러 주는데 kind 4/5는 그 블록을 안 타므로, 이 자리에서 같은 순서를 져야 한다 — 안 그러면
     // 막대 위 더블클릭이 **진행 중인 막대 드래그를 취소하고** 본문 선택을 연다(실측). 결정표의

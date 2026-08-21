@@ -1607,12 +1607,16 @@ fn selectWordOrLineInDiff(self: *AppSession, pane: *Pane, whole_line: bool, x_px
         const w = editor_selection.wordRangeAt(text, hit.byte);
         break :blk .{ .lo = w.lo, .hi = w.hi };
     };
+    // **anchor는 범위다** — 점으로 두면 뒤로 끌 때 잡은 단어가 통째로 사라진다(§3.2가 단일
+    // 편집기에서 anchor를 범위로 만든 이유 그대로다). `kind`는 드래그가 늘어나는 단위를 정한다.
     term.rt.editor_diff_selection = .{
         .side = hit.side,
-        .anchor_row = hit.row,
-        .anchor_byte = range.lo,
-        .focus_row = hit.row,
-        .focus_byte = range.hi,
+        .sel = editor_selection.RowSelection.fromAnchorRange(
+            .{ .row = hit.row, .byte = range.lo },
+            .{ .row = hit.row, .byte = range.hi },
+            .{ .row = hit.row, .byte = range.hi },
+            if (whole_line) .line else .word,
+        ),
     };
     self.beginPointerGesture(.{ .editor_diff_selection_drag = .{ .term = term, .side = hit.side } });
     self.metal_dirty = true;
@@ -1629,10 +1633,7 @@ pub fn beginDiffBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f
     const hit = hitTestDiffBody(term, x_px, y_px, null) orelse return false;
     term.rt.editor_diff_selection = .{
         .side = hit.side,
-        .anchor_row = hit.row,
-        .anchor_byte = hit.byte,
-        .focus_row = hit.row,
-        .focus_byte = hit.byte,
+        .sel = editor_selection.RowSelection.at(.{ .row = hit.row, .byte = hit.byte }),
     };
     self.beginPointerGesture(.{ .editor_diff_selection_drag = .{ .term = term, .side = hit.side } });
     self.metal_dirty = true;
@@ -1651,9 +1652,30 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
     switch (kind) {
         2 => {
             const hit = hitTestDiffBody(owner.term, x_px, y_px, owner.side) orelse return true;
-            if (owner.term.rt.editor_diff_selection) |*sel| {
-                sel.focus_row = hit.row;
-                sel.focus_byte = hit.byte;
+            if (owner.term.rt.editor_diff_selection) |*ds| {
+                // **잡은 단위로 늘어난다** — 단일 편집기의 `dragBodySelection`과 같은 규칙이다.
+                // 글자 단위로 늘면 잡은 단어의 반쪽이 남아 사용자가 본 것과 어긋난다.
+                const at: editor_selection.RowPos = .{ .row = hit.row, .byte = hit.byte };
+                ds.sel.focus = switch (ds.sel.kind) {
+                    .simple => at,
+                    .word, .line => blk: {
+                        const st = owner.term.rt.editor_diff orelse break :blk at;
+                        const texts = if (owner.side == .right) st.right_texts else st.left_texts;
+                        if (hit.row >= texts.len) break :blk at;
+                        const text = texts[hit.row];
+                        // 앞으로 끌면 그 단위의 **끝**, 뒤로 끌면 **시작**까지 삼킨다.
+                        const forward = !editor_selection.RowPos.lessThan(at, ds.sel.anchorHi());
+                        const edge: usize = switch (ds.sel.kind) {
+                            .line => if (forward) text.len else 0, // 줄 끝 문자는 이미 떼어져 있다
+                            .word => w: {
+                                const r = editor_selection.wordRangeAt(text, hit.byte);
+                                break :w if (forward) r.hi else r.lo;
+                            },
+                            .simple => unreachable,
+                        };
+                        break :blk .{ .row = hit.row, .byte = edge };
+                    },
+                };
                 self.metal_dirty = true;
             }
             return true;
@@ -1681,14 +1703,15 @@ fn buildDiffSelectionMarks(self: *AppSession, term: *Term, side: DiffSide) ?[]co
     const texts = if (side == .right) st.right_texts else st.left_texts;
     if (texts.len == 0) return null;
 
-    // 정규화: 뒤로 끌었으면 뒤집는다.
-    const back = sel.focus_row < sel.anchor_row or
-        (sel.focus_row == sel.anchor_row and sel.focus_byte < sel.anchor_byte);
-    const lo_row = if (back) sel.focus_row else sel.anchor_row;
-    const lo_byte = if (back) sel.focus_byte else sel.anchor_byte;
-    const hi_row = if (back) sel.anchor_row else sel.focus_row;
-    const hi_byte = if (back) sel.anchor_byte else sel.focus_byte;
-    if (lo_row == hi_row and lo_byte == hi_byte) return null; // caret뿐 — 그릴 띠가 없다
+    // **정규화는 타입이 한다.** `fixedEnd`가 드래그 방향에 따라 anchor 범위의 어느 끝을 고정할지
+    // 정하므로, 손으로 뒤집던 때와 달리 잡은 단어가 뒤로 끌어도 남는다.
+    const lo = sel.sel.start();
+    const hi = sel.sel.end();
+    const lo_row = lo.row;
+    const lo_byte = lo.byte;
+    const hi_row = hi.row;
+    const hi_byte = hi.byte;
+    if (sel.sel.isEmpty()) return null; // caret뿐 — 그릴 띠가 없다
 
     const rows_field = if (side == .right) &term.rt.editor_diff_marks_right else &term.rt.editor_diff_marks_left;
     const buf_field = if (side == .right) &term.rt.editor_diff_mark_buf_right else &term.rt.editor_diff_mark_buf_left;
@@ -1734,13 +1757,14 @@ pub fn copyDiffSelection(self: *AppSession) bool {
     const texts = if (sel.side == .right) st.right_texts else st.left_texts;
     const numbers = if (sel.side == .right) st.right_numbers else st.left_numbers;
 
-    const back = sel.focus_row < sel.anchor_row or
-        (sel.focus_row == sel.anchor_row and sel.focus_byte < sel.anchor_byte);
-    const lo_row = if (back) sel.focus_row else sel.anchor_row;
-    const lo_byte = if (back) sel.focus_byte else sel.anchor_byte;
-    const hi_row = if (back) sel.anchor_row else sel.focus_row;
-    const hi_byte = if (back) sel.anchor_byte else sel.focus_byte;
-    if (lo_row == hi_row and lo_byte == hi_byte) return false;
+    // 정규화는 타입이 한다(위 `buildDiffSelectionMarks`와 같다) — 같은 네 줄을 복제하던 자리다.
+    const lo = sel.sel.start();
+    const hi = sel.sel.end();
+    const lo_row = lo.row;
+    const lo_byte = lo.byte;
+    const hi_row = hi.row;
+    const hi_byte = hi.byte;
+    if (sel.sel.isEmpty()) return false;
 
     if (lo_row >= texts.len) return false; // 문서가 짧아졌다 — 위 `buildDiffSelectionMarks`와 같은 가드
     var out: std.ArrayList(u8) = .empty;

@@ -1725,17 +1725,17 @@ const TermRuntime = struct {
     /// 위 배열이 가리키는 실제 저장소. 줄마다 범위가 **하나**뿐이라(선택은 연속이다) 줄 수만큼이면 된다.
     editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
     /// 비교 뷰의 **선택**(§4.1g "비교 뷰"). 단일 편집기의 `editor_selection`과 자리는 같고 축이
-    /// 다르다 — 이쪽은 문서 offset이 아니라 `(어느 열, 행, 행 안 byte)`다.
+    /// 다르다 — 이쪽은 문서 offset이 아니라 `(행, 행 안 byte)`다.
     ///
-    /// **한 열만 든다.** 좌우를 걸치는 선택은 만들지 않으므로 `side`가 하나뿐이다.
+    /// **모델은 `session/editor/selection.zig`가 소유한다**(`RowSelection`). 여기 익명 struct로
+    /// 점 anchor를 들던 때는 §3.2가 anchor를 범위로 만든 이유가 이쪽에 없어, 더블클릭으로 잡은
+    /// 단어를 뒤로 끌면 그 단어가 통째로 사라졌다(실측: `"beta"` → `"pha "`).
+    ///
+    /// **한 열만 든다.** 좌우를 걸치는 선택은 만들지 않으므로 `side`가 하나뿐이고, 그 값은 축이
+    /// 아니라 **어느 열인가**라 selection 타입 밖에 둔다(뷰가 일급이 되면 사라질 필드다).
     editor_diff_selection: ?struct {
         side: editor_ops.DiffSide,
-        /// 잡은 자리(고정단). 드래그가 뒤로 가도 여기가 남는다.
-        anchor_row: usize,
-        anchor_byte: usize,
-        /// 움직이는 끝.
-        focus_row: usize,
-        focus_byte: usize,
+        sel: maru.session.editor.selection.RowSelection,
     } = null,
     /// 비교 뷰의 **좌우 행 배열**(§4.1g "비교 뷰"). 단일 편집기의 `editor_hit_rows`와 같은 관례이고
     /// 축만 다르다 — 이쪽은 그 열의 **정렬된 행 배열**(`left_texts`/`right_texts`) 인덱스다.

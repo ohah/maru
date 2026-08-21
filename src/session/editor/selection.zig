@@ -831,3 +831,136 @@ test "wordRangeAt: 줄을 넘지 않고, 낱말/구분자 런을 각각 잡는�
     }
     try t.expectEqual(@as(usize, 0), wordRangeAt("", 0).hi);
 }
+
+/// 정렬된 **행 배열** 위의 한 자리 — `(행, 행 안 byte)`.
+///
+/// 비교 뷰가 쓴다. 그쪽은 문서 offset 축이 없다(§4.1g "비교 뷰"): 화면에 서는 것이 원본 줄이 아니라
+/// 짝을 맞춰 정렬한 배열이고, **원본에 없는 빈 행**이 그 안에 섞여 있으며, 줄 끝 문자는 떼어져 있다.
+///
+/// **offset과 달리 전순서 스칼라가 아니다** — 비교가 사전식 두 단계다. `Selection`의 `@min`/`@max`·
+/// 뺄셈이 그대로 안 되는 이유이고, 그래서 이 타입이 따로 있다.
+pub const RowPos = struct {
+    row: usize,
+    byte: usize,
+
+    pub fn lessThan(a: RowPos, b: RowPos) bool {
+        if (a.row != b.row) return a.row < b.row;
+        return a.byte < b.byte;
+    }
+
+    pub fn eql(a: RowPos, b: RowPos) bool {
+        return a.row == b.row and a.byte == b.byte;
+    }
+
+    pub fn min(a: RowPos, b: RowPos) RowPos {
+        return if (lessThan(a, b)) a else b;
+    }
+
+    pub fn max(a: RowPos, b: RowPos) RowPos {
+        return if (lessThan(a, b)) b else a;
+    }
+};
+
+/// 행 배열 축의 선택 — `Selection`의 **계약을 그대로** 옮긴 것이고 축만 다르다.
+///
+/// **anchor가 범위인 이유가 여기서도 같다.** 점으로 두면 더블클릭으로 잡은 단어를 **뒤로** 끌 때
+/// 그 단어가 통째로 사라진다(실측: `"beta"`를 잡고 왼쪽으로 끌면 `"pha "`가 남았다). 단일 편집기는
+/// `fixedEnd`가 그것을 막는데, 비교 뷰가 점 anchor로 따로 서 있어 같은 제스처가 다르게 답했다.
+/// `kind`도 같은 이유다 — 없으면 더블클릭 뒤 드래그가 단어가 아니라 글자 단위로 는다.
+///
+/// **`side`는 여기 없다.** 그것은 "한 Term이 두 열을 든다"의 부산물이라 뷰가 일급이 되면 사라지고,
+/// `DiffSide`가 platform 타입이라 `check-boundaries`가 session 층으로 들이는 것도 막는다.
+/// 어느 열인가는 이 값을 **드는 쪽**이 든다.
+pub const RowSelection = struct {
+    anchor_start: RowPos,
+    anchor_end: RowPos,
+    focus: RowPos,
+    kind: AnchorKind = .simple,
+
+    pub fn at(pos: RowPos) RowSelection {
+        return .{ .anchor_start = pos, .anchor_end = pos, .focus = pos };
+    }
+
+    pub fn fromAnchorRange(a_start: RowPos, a_end: RowPos, focus: RowPos, kind: AnchorKind) RowSelection {
+        std.debug.assert(!RowPos.lessThan(a_end, a_start));
+        std.debug.assert((kind == .simple) == RowPos.eql(a_start, a_end));
+        return .{ .anchor_start = a_start, .anchor_end = a_end, .focus = focus, .kind = kind };
+    }
+
+    pub fn anchorLo(self: RowSelection) RowPos {
+        return RowPos.min(self.anchor_start, self.anchor_end);
+    }
+
+    pub fn anchorHi(self: RowSelection) RowPos {
+        return RowPos.max(self.anchor_start, self.anchor_end);
+    }
+
+    pub fn anchorIsPoint(self: RowSelection) bool {
+        return RowPos.eql(self.anchor_start, self.anchor_end);
+    }
+
+    /// **고정단** — 드래그 방향이 정한다. 뒤로 끌면 anchor 범위의 **끝**이 고정돼 잡은 단위가 남는다.
+    pub fn fixedEnd(self: RowSelection) RowPos {
+        const lo = self.anchorLo();
+        if (self.anchorIsPoint() or RowPos.lessThan(lo, self.focus)) return lo;
+        return self.anchorHi();
+    }
+
+    pub fn start(self: RowSelection) RowPos {
+        return RowPos.min(self.fixedEnd(), self.focus);
+    }
+
+    pub fn end(self: RowSelection) RowPos {
+        return RowPos.max(self.fixedEnd(), self.focus);
+    }
+
+    pub fn isEmpty(self: RowSelection) bool {
+        return RowPos.eql(self.start(), self.end());
+    }
+};
+
+test "RowSelection: anchor가 범위라 뒤로 끌어도 잡은 단위가 남는다" {
+    const t = std.testing;
+    const p = struct {
+        fn at(row: usize, byte: usize) RowPos {
+            return .{ .row = row, .byte = byte };
+        }
+    };
+
+    // "alpha beta gamma"에서 `beta`(6..10)를 더블클릭으로 잡았다.
+    var sel = RowSelection.fromAnchorRange(p.at(0, 6), p.at(0, 10), p.at(0, 10), .word);
+    try t.expect(RowPos.eql(sel.start(), p.at(0, 6)));
+    try t.expect(RowPos.eql(sel.end(), p.at(0, 10)));
+
+    // **뒤로** 끌어 `alpha` 안(byte 2)으로 갔다 — `beta`의 끝이 남아야 한다.
+    sel.focus = p.at(0, 2);
+    try t.expect(RowPos.eql(sel.start(), p.at(0, 2)));
+    try t.expect(RowPos.eql(sel.end(), p.at(0, 10))); // 점 anchor였다면 6이 되어 단어가 잘린다
+
+    // 앞으로 끌면 시작이 남는다.
+    sel.focus = p.at(0, 13);
+    try t.expect(RowPos.eql(sel.start(), p.at(0, 6)));
+    try t.expect(RowPos.eql(sel.end(), p.at(0, 13)));
+
+    // 행을 가로질러도 사전식으로 답한다.
+    sel.focus = p.at(3, 0);
+    try t.expect(RowPos.eql(sel.start(), p.at(0, 6)));
+    try t.expect(RowPos.eql(sel.end(), p.at(3, 0)));
+    sel.focus = p.at(0, 0);
+    try t.expect(RowPos.eql(sel.end(), p.at(0, 10)));
+
+    // caret 하나는 비어 있다.
+    try t.expect(RowSelection.at(p.at(2, 5)).isEmpty());
+    try t.expect(!sel.isEmpty());
+}
+
+test "RowPos: 사전식 순서 — 행이 먼저고 그 다음이 byte" {
+    const t = std.testing;
+    const a: RowPos = .{ .row = 1, .byte = 99 };
+    const b: RowPos = .{ .row = 2, .byte = 0 };
+    try t.expect(RowPos.lessThan(a, b)); // 행이 이긴다 — byte만 보면 뒤집힌다
+    try t.expect(!RowPos.lessThan(b, a));
+    try t.expect(RowPos.eql(RowPos.min(a, b), a));
+    try t.expect(RowPos.eql(RowPos.max(a, b), b));
+    try t.expect(!RowPos.lessThan(a, a));
+}

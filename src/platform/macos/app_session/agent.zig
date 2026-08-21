@@ -388,13 +388,7 @@ pub fn pollAgentKinds(self: *AppSession) void {
                     //
                     // 훅 로그 확인은 `observation_current` 를 요구하지 않는다 — 그것은 화면 관측이 최신인지의
                     // 조건이고, 파일을 읽는 데는 상관이 없다.
-                    switch (agentHookMode(self, term)) {
-                        .hook => pollAgentHookEvents(self, term, displayed),
-                        .observe => if (observation_current) {
-                            pollAgentState(self, term, displayed);
-                            pollAgentTranscript(self, term, displayed);
-                        },
-                    }
+                    pollAgentConsumer(self, term, displayed, observation_current);
                 }
             }
         }
@@ -1110,10 +1104,28 @@ pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) b
     return true;
 }
 
+/// 이 Term 의 상태·대화를 이번 tick 에 **누가** 채우는가. 계약 §1의 «소스는 Term 마다 정확히 하나» 가
+/// 여기서 지켜진다 — 두 소비자를 함께 부르면 그 Term 의 상태가 두 곳에서 오고, 증상은 «배지가 가끔 틀림»
+/// 이라 재현되지 않는다.
+///
+/// **이름 있는 함수로 뺀 이유**: 루프 안 `switch` 로 두었더니 그 규칙을 무는 테스트를 쓸 수 없었다.
+/// 실제 tick 경로(`pollAgentKinds`)는 도중에 `agent_kind` 를 다시 판정해 되돌리는 자리가 있어, 테스트가
+/// 그 뒤를 단언하려 하면 조건부로 건너뛰게 된다(실제로 그렇게 «통과하지만 아무것도 안 보는» 테스트를
+/// 한 번 썼고 뮤테이션이 그것을 드러냈다). seam 을 열어 두면 그 규칙만 정확히 겨눌 수 있다.
+pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observation_current: bool) void {
+    switch (agentHookMode(self, term)) {
+        .hook => pollAgentHookEvents(self, term, displayed),
+        .observe => if (observation_current) {
+            pollAgentState(self, term, displayed);
+            pollAgentTranscript(self, term, displayed);
+        },
+    }
+}
+
 /// 이 Term 이 지금 **어느 모드인가**(계약 §1.2). 판정의 유일한 동적 입력은 «그 pane 의 로그 파일이 있는가» 다.
 ///
-/// 파일 확인은 tick 마다 하지 않는다 — 한 번 생긴 파일은 세션 중에 사라지지 않고(회전은 우리가 하고 그때
-/// 다시 만든다), 없는 파일은 훅이 처음 도는 순간 생긴다. 그래서 **아직 없을 때만** 다시 본다.
+/// 한 번 생긴 파일은 세션 중에 사라지지 않는다 — 지금은 회전을 하지 않고(계약 §4.2의 ⚠️) 시작 시에만
+/// 치우기 때문이다. 없는 파일은 훅이 처음 도는 순간 생긴다.
 pub fn agentHookMode(self: *AppSession, term: *Term) maru.session.agent_hook_mode.Mode {
     const mode_mod = maru.session.agent_hook_mode;
     return mode_mod.modeFor(.{
@@ -1129,6 +1141,7 @@ pub fn agentHookMode(self: *AppSession, term: *Term) maru.session.agent_hook_mod
 /// **이 함수가 훅 모드의 유일한 상태 소스다.** 같은 tick 에서 `pollAgentState` 를 함께 부르면 두 소스가 한
 /// Term 에 섞이고, 그 증상은 «배지가 가끔 틀림» 이라 재현되지 않는다(계약 §1이 금지하는 그것).
 pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void {
+    if (builtin.is_test) test_hook_calls += 1;
     if (!is_macos) return;
     const event = maru.session.agent_hook_event;
     const mode_mod = maru.session.agent_hook_mode;
@@ -1271,7 +1284,14 @@ pub fn anyAgentPresent(self: *AppSession) bool {
 
 /// foreground process와 터미널이 이미 소유한 bounded 화면 tail·OSC title/progress·최근 PTY 출력을 결합한다.
 /// raw 화면/제목은 로그에 남기지 않고, 순수 observer의 rule id와 최종 상태만 진단한다.
+/// 테스트 전용 호출 카운터. **배타 규칙(계약 §1)은 «둘 다 돌지 않는다» 라 호출 여부를 세지 않으면
+/// 검증할 수 없다** — 두 소스가 같은 값을 낼 때는 상태만 봐서는 구분되지 않는다(뮤테이션이 그것을
+/// 드러냈다: 분기를 지워 둘 다 돌게 해도 테스트가 통과했다). 제품 빌드에서는 `comptime` 으로 사라진다.
+pub var test_observe_calls: usize = 0;
+pub var test_hook_calls: usize = 0;
+
 pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
+    if (builtin.is_test) test_observe_calls += 1;
     const agent: maru.session.agent_observer.Agent = switch (term.agent_kind) {
         .none => return,
         .claude => .claude,

@@ -18563,6 +18563,119 @@ fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
 /// 게이트를 끈 fixture — 위 `agent_hooks_on_config` 의 짝이다(상태줄 훅도 계속 꺼 둔다).
 const agent_hooks_off_config = "sidebar.agent-transcript-hook = false\nsidebar.agent-hooks = false\n";
 
+test "hook mode runs exactly one source and takes over notifications" {
+    // **계약 §1의 핵심 규칙을 그 자리에서 본다.** 앞선 제품 테스트는 `pollAgentHookEvents` 를 직접 불러
+    // 소비자 분기·OSC 차단·알림 방출이라는 세 seam 을 건너뛰었다 — 뮤테이션 셋이 모두 «못 잡음» 으로
+    // 그것을 드러냈다(분기를 지워 두 소스를 함께 돌려도, 훅 모드에서 OSC 를 방출해도, 훅 알림을 안 내도
+    // 통과했다). 그래서 여기서는 **실제 tick 경로**(`pollAgentKinds`)와 **실제 드레인**(`pendingNotification`)
+    // 을 부른다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "cache");
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.loaded_config.config.notifications.osc = true; // OSC 게이트 명시(기본값 의존 안 함)
+    session.window_focused = false; // 포커스 밖이라 전면 배너 억제가 끼어들지 않는다
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.agent_kind = .claude;
+
+    // 훅 로그를 놓고 한 번 소비해 훅 모드로 만든다(파일이 생겨야 훅 모드다 — 계약 §1.2).
+    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}", .{hook_command.log_dir_rel});
+    defer a.free(events_dir);
+    try tmp.dir.createDirPath(io, events_dir);
+    const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
+    defer a.free(log_rel);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"질문\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expect(term.agent_hook_log_present);
+
+    // ── ① 소비자는 정확히 하나다 ──────────────────────────────────────────────────────────────
+    // tick 카운터를 넘겨 observer probe 를 강제한다(kind probe 는 켜지 않는다 — 그것이 켜지면
+    // `classifyAgentProcesses` 가 smoke 셸을 보고 agent_kind 를 none 으로 되돌린다).
+    // **분기 seam 을 직접 부른다.** 실제 tick 경로(`pollAgentKinds`)는 도중에 `agent_kind` 를 다시 판정해
+    // smoke 셸을 보고 none 으로 되돌리므로, 그 뒤를 단언하면 조건부로 건너뛰게 된다 — 실제로 그렇게
+    // «통과하지만 아무것도 안 보는» 테스트를 한 번 썼고 뮤테이션이 그것을 드러냈다.
+    agent_ops.test_observe_calls = 0;
+    agent_ops.test_hook_calls = 0;
+    agent_ops.pollAgentConsumer(&session, term, false, true);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_hook_calls);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls); // **섞이지 않는다**
+
+    // 게이트를 끄면 반대가 된다 — 훅은 안 돌고 관측만 돈다.
+    session.loaded_config.config.sidebar.agent_hooks = false;
+    agent_ops.test_observe_calls = 0;
+    agent_ops.test_hook_calls = 0;
+    agent_ops.pollAgentConsumer(&session, term, false, true);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_hook_calls);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_observe_calls);
+    session.loaded_config.config.sidebar.agent_hooks = true;
+
+    // `pollAgentKinds` 가 kind probe 까지 돌면 `classifyAgentProcesses` 가 smoke 셸을 보고 `agent_kind` 를
+    // none 으로 되돌린다(그러면 모드가 관측이 되어 아래 단언이 무의미해진다). 다시 세운다.
+    term.agent_kind = .claude;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term));
+
+    // ── ② 훅 모드 Term 의 OSC 알림은 나가지 않는다 ────────────────────────────────────────────
+    // 그런데 `pending` 은 **비워져야** 한다 — 안 비우면 드레인 루프가 그 Term 에서 멈춰 다른 Term 의
+    // 알림까지 막힌다.
+    try term.surface.core.write("\x1b]9;OSC 알림이 나가면 안 된다\x07");
+    term.agent_hook_notice.clear(); // 훅 알림은 없는 상태로 둔다 — OSC 만 본다
+    try std.testing.expect(notification_ops.pendingNotification(&session) == null);
+    {
+        term.surface.lockCore(io);
+        defer term.surface.unlockCore(io);
+        try std.testing.expect(term.surface.core.pendingNotification() == null); // 비워졌다
+    }
+
+    // ── ③ 훅 알림은 실제로 방출된다 ──────────────────────────────────────────────────────────
+    term.agent_hook_notice.set(.done, "끝났습니다", session.awakeMs());
+    const emitted = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+    // 본문에는 그 Term 의 **마지막 대화**가 함께 실린다(`notificationBodyOwned` — 관측 모드와 같은 tail).
+    // 그래서 정확히 같지 않고 포함 관계다.
+    try std.testing.expect(std.mem.indexOf(u8, emitted.body, "끝났습니다") != null);
+    try std.testing.expect(std.mem.indexOf(u8, emitted.body, "질문") != null); // 무엇을 시킨 건지도 실린다
+    try std.testing.expectEqual(term.surfaceId(), emitted.surface_id);
+    try std.testing.expect(std.mem.indexOf(u8, emitted.title, maru.i18n.t(.agent_hook_notice_done)) != null);
+    // 한 번 방출하면 끝이다 — 슬롯이 비어 두 번 울리지 않는다.
+    try std.testing.expect(notification_ops.pendingNotification(&session) == null);
+}
+
 test "hook mode fills state and conversation from the event log, and only then" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const hook_mode = maru.session.agent_hook_mode;

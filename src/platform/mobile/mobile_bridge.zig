@@ -3737,6 +3737,96 @@ fn drawSessions(win: SetRect, tk: *const tokens.Tokens) void {
     pushText(session_title, @intFromFloat(sess_row_rect.x + 16), @intFromFloat(sess_row_rect.y + (row_h - 17) / 2), 17, tk.get(.surface_fg));
     push(.{ .x = @intFromFloat(sess_row_rect.x), .y = @intFromFloat(sess_row_rect.y + row_h), .w = @intFromFloat(sess_row_rect.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
     drawServersEntry(win, tk, row_h);
+    drawRemoteSessions(win, tk, sess_servers_rect.y + row_h + 1);
+}
+
+/// **그 PC 의 세션들**(S10d-2). 서버 목록 아래에 붙는다 — 뜻이 다르다(하나는 붙을 수 있는 것,
+/// 이것은 지금 그 기계에서 돌고 있는 것).
+///
+/// **"아직 모른다" 와 "없다" 를 가른다.** 같은 문구로 뭉치면 화면이 없는 사실을 말한다.
+/// 원격 목록 자리에 **무엇을 그렸나**. 테스트가 이 값을 본다 — "값은 맞는데 닿는 자리가 틀린"
+/// 부류를 잡으려면 판정이 **그리기 경로 안에서** 세워져야 한다(이 저장소가 그 모양의 결함을
+/// 여러 번 겪었다).
+pub const RemoteShown = enum { off, loading, none, rows };
+var remote_shown: RemoteShown = .loading;
+var remote_rows_drawn: usize = 0;
+
+pub fn remoteSessionsShown() RemoteShown {
+    return remote_shown;
+}
+
+pub fn remoteRowsDrawn() usize {
+    return remote_rows_drawn;
+}
+
+/// 첫 세션 줄의 가운데(누르는 자리). 아직 안 그렸으면 `null`.
+pub fn remoteRowCenter(index: usize) ?struct { x: f32, y: f32 } {
+    if (index >= remote_rows_drawn) return null;
+    return .{ .x = remote_row0.x + remote_row0.w / 2, .y = remote_row0.y + (remote_row0.h + 1) * @as(f32, @floatFromInt(index)) + remote_row0.h / 2 };
+}
+
+var remote_row0: SetRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+
+fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
+    const row_h: f32 = 56;
+    var y = top;
+    remote_rows_drawn = 0;
+
+    if (control_client.state == .off) {
+        // 껐다 — **왜 껐는지**를 말한다. 사용자가 고칠 자리가 이유마다 다르다.
+        const msg = switch (control_client.off_reason) {
+            .hello_timeout => maru.i18n.tIn(.ko, .mob_control_off_timeout),
+            .too_much_noise => maru.i18n.tIn(.ko, .mob_control_off_noise),
+            .protocol_mismatch => maru.i18n.tIn(.ko, .mob_control_off_protocol),
+            .frame_too_large => maru.i18n.tIn(.ko, .mob_control_off_frame),
+            .none => maru.i18n.tIn(.ko, .mob_sessions_none),
+        };
+        pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        remote_shown = .off;
+        return;
+    }
+
+    if (!control_listed) {
+        // 아직 안 받았다. **비어 있다고 말하지 않는다.**
+        pushText(maru.i18n.tIn(.ko, .mob_sessions_loading), @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        remote_shown = .loading;
+        return;
+    }
+
+    if (control_row_count == 0) {
+        pushText(maru.i18n.tIn(.ko, .mob_sessions_none), @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        remote_shown = .none;
+        return;
+    }
+
+    remote_shown = .rows;
+    remote_row0 = .{ .x = win.x, .y = top, .w = win.w, .h = row_h };
+    for (control_rows[0..control_row_count]) |*row| {
+        // 화면 밖으로 나가면 그만 그린다 — 스크롤은 U1 이 준다(여기서 흉내 내지 않는다).
+        if (y > win.y + win.h) return;
+        drawSessionRow(win, tk, row, y, row_h);
+        remote_rows_drawn += 1;
+        y += row_h + 1;
+    }
+}
+
+fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow, y: f32, row_h: f32) void {
+    // 초점 있는 세션은 왼쪽에 띠 하나. **글자만으로 표시하면 목록에서 안 보인다.**
+    if (row.focused) push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y), .w = 3, .h = @intFromFloat(row_h) }, tk.get(.accent_bar), 0xFF, 0, 0);
+
+    const title = if (row.title_len > 0) row.title[0..row.title_len] else row.cwd[0..row.cwd_len];
+    pushText(title, @intFromFloat(win.x + 16), @intFromFloat(y + 8), 17, tk.get(.surface_fg));
+
+    // 둘째 줄: `cwd` · git · agent. **한 줄에 이어 붙이되 있는 것만** 적는다.
+    var line: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&line);
+    if (row.cwd_len > 0 and row.title_len > 0) w.print("{s}", .{row.cwd[0..row.cwd_len]}) catch {};
+    if (row.git_len > 0) w.print("{s}{s}", .{ if (w.buffered().len > 0) "  " else "", row.git[0..row.git_len] }) catch {};
+    if (row.agent_len > 0) w.print("{s}{s}", .{ if (w.buffered().len > 0) "  " else "", row.agent[0..row.agent_len] }) catch {};
+    const sub = w.buffered();
+    if (sub.len > 0) pushText(sub, @intFromFloat(win.x + 16), @intFromFloat(y + 30), 13, tk.get(.muted_fg));
+
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y + row_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
 }
 
 /// 세션 화면 아래에 붙는 **서버 목록 입구**. 화면을 나눠 그리는 이유는 하나다 — 세션 줄과

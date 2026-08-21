@@ -165,6 +165,11 @@ pub fn invalidate(self: *AppSession, term: *Term) void {
     // **줄별 행 수 캐시도 옛 내용의 것이다**(§2.1). 새 줄 배열이 우연히 같은 주소·길이로 잡히면
     // 주소·길이 키만으로는 못 걸러지므로, 내용이 갈리는 이 자리에서 버린다.
     term.rt.editor_row_cache.filled = false;
+    // **선택도 옛 내용의 것이다.** 행 인덱스가 새 배열을 가리키지 않으므로 그대로 두면 다음 프레임이
+    // 범위 밖 행을 훑는다 — 실측으로 40행 선택을 든 채 1행짜리로 다시 계산하면 `integer overflow`로
+    // **죽었다**(파일 감시가 `requestDiffContent`를 걸면 제품에서 그 경로가 열린다). 위 일곱 축과
+    // 같은 이유·같은 자리다.
+    term.rt.editor_diff_selection = null;
 }
 
 /// Term이 죽을 때. `releaseEditorTerm`이 부른다.
@@ -1858,4 +1863,122 @@ test "DSEL2 비교 뷰 선택: 한 열에 머물고, 빈 행은 복사에서 빠
     try testing.expect(editor_ops.copyDiffSelection(fx.session));
     try testing.expectEqualStrings("keep\nadded\ntail", fx.session.chrome_clipboard_write);
     try testing.expect(editor_ops.dragDiffBodySelection(fx.session, 3, right_far_x, last_y));
+}
+
+test "DSEL3 그려진 것이 곧 클릭이 답한 것이다 — 스크롤·열별 가로 위치 (§4.1g 비교 뷰)" {
+    // **DSEL1·DSEL2는 자기 자신하고만 대조한다.** 클릭 좌표를 굳힌 기하에서 되계산하므로 그 값이
+    // 틀려도 답이 자기 정합이다 — 적대적 검증이 뮤턴트 넷으로 그것을 보였다: 행 축을 화면 행으로
+    // 바꿔도, gutter 자릿수 출처를 10⁶배 해도, 열 원점을 999px 밀어도, 좌우 저장소를 뒤바꿔도
+    // 열넷이 전부 통과했다. 이 테스트는 **렌더가 그린 것**을 기준선으로 삼는다(ADV3-A의 비교판).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 좌우가 갈리는 내용 — 행마다 글자가 달라야 대조가 성립한다.
+    var left_buf: std.ArrayList(u8) = .empty;
+    defer left_buf.deinit(allocator);
+    var right_buf: std.ArrayList(u8) = .empty;
+    defer right_buf.deinit(allocator);
+    for (0..40) |i| {
+        var num: [40]u8 = undefined;
+        try left_buf.appendSlice(allocator, std.fmt.bufPrint(&num, "L{d:0>3}aaaaaaaaaaaa\n", .{i}) catch unreachable);
+        try right_buf.appendSlice(allocator, std.fmt.bufPrint(&num, "R{d:0>3}bbbbbbbbbbbb\n", .{i}) catch unreachable);
+    }
+    var entry = testEntry(left_buf.items, right_buf.items);
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+    try testing.expectEqual(std.meta.activeTag(fx.term.rt.editor_diff.?.view), .compare);
+    fx.term.rt.editor_wrap = false;
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 200 };
+
+    // **세로로 굴리고 오른쪽 열만 가로로 민다.** 둘 다 축이 하나씩 더 붙는 자리다 —
+    // 세로는 `first_line`(그것을 빠뜨려 클릭 7발이 전부 어긋났다), 가로는 열마다 각자다(§3.5).
+    _ = editor_ops.scrollLines(fx.session, fx.term, leaf, -7);
+    fx.term.rt.editor_first_col_right = 4;
+
+    var drawn = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_first_line > 0); // 전제: 실제로 굴렀다
+
+    const g = fx.term.rt.editor_diff_hit_geom;
+    const st = fx.term.rt.editor_diff.?;
+
+    // **그려진 글자를 기준선으로 삼는다.** 각 셀의 codepoint가 그 자리에서 클릭이 답한 byte의
+    // 글자와 같아야 한다 — 스냅숏이 렌더와 갈리면 여기서 갈린다.
+    var judged: usize = 0;
+    var bad: usize = 0;
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint == ' ' or c.codepoint == 0) continue;
+        const cx: f64 = @floatFromInt(@as(i32, @intCast(drawn.rect.x)) + @as(i32, @intCast(c.col)) * @as(i32, @intCast(g.cell_w_px)) + 1);
+        const cy: f64 = @floatFromInt(@as(i32, @intCast(drawn.rect.y)) + @as(i32, @intCast(c.row)) * @as(i32, @intCast(g.cell_h_px)) + 1);
+        const hit = editor_ops.hitTestDiffBody(fx.term, cx, cy, null) orelse continue;
+        const texts = if (hit.side == .right) st.right_texts else st.left_texts;
+        if (hit.row >= texts.len) continue;
+        const text = texts[hit.row];
+        if (hit.byte >= text.len) continue;
+        judged += 1;
+        if (text[hit.byte] != c.codepoint) {
+            if (bad == 0) std.debug.print(
+                "\n[DSEL3] 어긋남 row={d} col={d} 그린='{u}' 답한='{c}' side={s} hit.row={d} byte={d}\n",
+                .{ c.row, c.col, c.codepoint, text[hit.byte], @tagName(hit.side), hit.row, hit.byte },
+            );
+            bad += 1;
+        }
+    }
+    std.debug.print("[DSEL3] first_line={d} judged={d} bad={d}\n", .{ fx.term.rt.editor_first_line, judged, bad });
+    try testing.expect(judged >= 40); // 판정할 것이 실제로 있다
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "DSEL4 선택을 든 채 문서가 짧아져도 죽지 않는다 (§4.1g 비교 뷰)" {
+    // **다음 프레임이 앱을 죽였다.** 옛 선택의 행 인덱스가 새 배열 밖이면 `for (lo..hi)`가
+    // `integer overflow`로 패닉한다 — `buildDiffSelectionMarks`는 매 프레임 불리므로 abort다.
+    // 제품 경로가 실재한다: 파일 감시가 `requestDiffContent`를 걸면 그 tick에 다시 계산된다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var long_buf: std.ArrayList(u8) = .empty;
+    defer long_buf.deinit(allocator);
+    for (0..40) |i| {
+        var num: [24]u8 = undefined;
+        try long_buf.appendSlice(allocator, std.fmt.bufPrint(&num, "line{d}\n", .{i}) catch unreachable);
+    }
+    var entry = testEntry(long_buf.items, long_buf.items);
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    var d0 = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    d0.dl.deinit(allocator);
+
+    // 뒤쪽 행을 고른다.
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .anchor_row = 30, .anchor_byte = 0, .focus_row = 35, .focus_byte = 3 };
+
+    // **짧은 내용으로 다시 계산한다** — 파일 감시가 하는 일과 같다.
+    entry.diff_ready = false;
+    entry.diff_original = @constCast("only\n");
+    entry.diff_modified = @constCast("only\n");
+    poll(fx.session, fx.term); // invalidate → 재계산
+    entry.diff_ready = true;
+    poll(fx.session, fx.term);
+
+    // ⑴ **선택이 버려졌다** — 옛 행을 가리키는 채로 두면 다음 프레임이 죽는다.
+    try testing.expectEqual(@as(?@TypeOf(fx.term.rt.editor_diff_selection.?), null), fx.term.rt.editor_diff_selection);
+
+    // ⑵ **그려도 안 죽는다.**
+    var d1 = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    d1.dl.deinit(allocator);
+
+    // ⑶ **선택이 남아 있어도 안 죽는다**(방어 가드) — invalidate를 못 타는 경로가 뒷날 생겨도.
+    fx.term.rt.editor_diff_selection = .{ .side = .left, .anchor_row = 30, .anchor_byte = 0, .focus_row = 35, .focus_byte = 3 };
+    var d2 = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    d2.dl.deinit(allocator);
+    try testing.expect(!editor_ops.copyDiffSelection(fx.session)); // 복사도 안 죽는다
+    fx.term.rt.editor_diff_selection = null;
 }

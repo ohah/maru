@@ -1760,6 +1760,10 @@ const TermRuntime = struct {
         cell_w_px: u16 = 0,
         cell_h_px: u16 = 0,
         tab_width: u8 = 0,
+        /// 그 프레임의 **첫 논리 행**. `VisualRow.line`은 뷰포트 상대 인덱스라 이것을 더해야 배열
+        /// 인덱스가 된다 — 단일 편집기가 `editor_hit_lines`로 푸는 것의 비교판이고, 빠뜨리면
+        /// 스크롤한 만큼 통째로 어긋난다(실측 100%).
+        first_line: usize = 0,
     } = .{},
     editor_hit_geom: struct {
         body_x: i32 = 0,

@@ -111,7 +111,7 @@ pub fn encodeKey(event: KeyEvent, buffer: *[encoded_key_buffer_len]u8, options: 
     if (legacyModifiedKey(event.key)) {
         const mods = legacyModsSeqInt(event.modifiers);
         if (mods > 1) {
-            const ent = kittyEntry(event.key);
+            const ent = legacyEntry(event.key);
             return encodeKittySeq(buffer, ent.code, ent.final, mods);
         }
     }
@@ -374,9 +374,32 @@ fn legacyModifiedKey(key: Key) bool {
     return switch (key) {
         .arrow_up, .arrow_down, .arrow_left, .arrow_right, .home, .end => true,
         .insert, .delete, .page_up, .page_down => true,
-        .function => true,
+        // **범위를 여기서 막는다.** `functionKeySequence` 는 F13+ 에 `error.UnsupportedFunctionKey` 를
+        // 내는데, 여기서 전부 통과시키면 `kittyEntry` 의 `else` 가 **F12 의 코드(24)** 를 줘서
+        // `Ctrl+F13` 이 `Ctrl+F12` 와 **같은 시퀀스**로 나간다 — 오류였던 것이 조용한 오답이 된다.
+        // 수식자가 없을 때와 같은 범위를 지켜야 두 갈래가 안 갈린다.
+        .function => |n| n >= 1 and n <= 12,
         else => false,
     };
+}
+
+/// legacy 수식자 형식의 (코드, final). **F3 을 빼면 `kittyEntry` 와 같다.**
+///
+/// `kittyEntry` 는 F3 을 `13;~` 로 준다(kitty 명세의 표). 그런데 이 파일의 수식자 **없는** 인코딩은
+/// F3 을 `ESC O R`(SS3 R)로 보낸다 — 그대로 재사용하면 한 키가 **서로 무관한 두 인코딩**을 갖는다:
+///
+/// ```text
+/// F3        → ESC O R          (functionKeySequence)
+/// Ctrl+F3   → ESC [ 13;5 ~     (kittyEntry 를 그대로 쓰면)
+/// ```
+///
+/// xterm 규약은 F1~F4 가 전부 letter final 이고(`P`·`Q`·`R`·`S`) 수식자가 붙으면 `CSI 1;{mod}{letter}`
+/// 다. F1·F2·F4 는 `kittyEntry` 도 그렇게 주는데 **F3 만 갈린다**. 그 하나만 덮는다.
+///
+/// **kitty 경로는 안 건드린다** — 그쪽은 자기 명세를 따르는 것이 맞다.
+fn legacyEntry(key: Key) KittyEntry {
+    if (key == .function and key.function == 3) return .{ .code = 1, .final = 'R' };
+    return kittyEntry(key);
 }
 
 fn keyBaseStartsWithEscape(key: Key) bool {
@@ -635,6 +658,19 @@ test "encodeKey: xterm legacy 수식자 — Ctrl+화살표가 단어 이동으�
     try eq("\x1b[D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .command = true } }, &buf, .{}));
     // ⌘ 가 섞여도 나머지 수식자만 실린다(Ctrl 은 4).
     try eq("\x1b[1;5D", try encodeKey(.{ .key = .arrow_left, .modifiers = .{ .command = true, .control = true } }, &buf, .{}));
+
+    // **F3 은 형식이 튄다.** `kittyEntry` 는 `13;~` 를 주는데 수식자 없는 인코딩이 `ESC O R` 라,
+    // 그대로 쓰면 한 키가 서로 무관한 두 인코딩을 갖는다. xterm 규약대로 letter final 이어야 한다.
+    try eq("\x1bOR", try encodeKey(.{ .key = .{ .function = 3 }, .modifiers = .{} }, &buf, .{}));
+    try eq("\x1b[1;5R", try encodeKey(.{ .key = .{ .function = 3 }, .modifiers = .{ .control = true } }, &buf, .{}));
+    // 이웃 셋은 원래부터 letter final 이라 안 갈린다(대조군).
+    try eq("\x1b[1;5Q", try encodeKey(.{ .key = .{ .function = 2 }, .modifiers = .{ .control = true } }, &buf, .{}));
+    try eq("\x1b[1;5S", try encodeKey(.{ .key = .{ .function = 4 }, .modifiers = .{ .control = true } }, &buf, .{}));
+
+    // **범위 밖 기능키는 수식자가 붙어도 오류다.** 여기서 안 막으면 `kittyEntry` 의 `else` 가 F12 의
+    // 코드를 줘서 `Ctrl+F13` 이 `Ctrl+F12` 와 같은 시퀀스로 나간다 — 오류가 조용한 오답이 된다.
+    try std.testing.expectError(error.UnsupportedFunctionKey, encodeKey(.{ .key = .{ .function = 13 }, .modifiers = .{} }, &buf, .{}));
+    try std.testing.expectError(error.UnsupportedFunctionKey, encodeKey(.{ .key = .{ .function = 13 }, .modifiers = .{ .control = true } }, &buf, .{}));
 
     // Shift+Tab 은 파라미터가 아니라 전용 final(backtab).
     try eq("\x1b[Z", try encodeKey(.{ .key = .tab, .modifiers = .{ .shift = true } }, &buf, .{}));

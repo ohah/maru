@@ -1717,12 +1717,22 @@ pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
     const status = try agentStatusLine(self, term);
     defer self.allocator.free(status);
     const parts = splitStatusLine(status);
-    // 마지막 **사용자 프롬프트**가 있으면 종류 이름·상태 문구 대신 그것을 싣는다(§7). 사용자가 이 행에서 알고
-    // 싶은 건 "무엇을 시켰는가"이고, 진행 여부는 앞의 마커(파형·✓)가 이미 말한다. 종류는 gutter 아이콘에 남는다.
+    // **본문은 상태가 정한다**(사용자 결정 2026-08-22). 예전에는 프롬프트가 있으면 언제나 그것을 실었는데,
+    // 훅 모드가 실제로 돌기 시작하니 프롬프트가 **항상** 있어 상태 문구가 영영 가려졌다:
+    //
+    // - `running` — «무엇을 하는 중인가»(§2 진행 중 세부). 그 세부는 이 행 말고 보일 자리가 없다.
+    //   프롬프트로 덮으면 훅 모드에서만 얻는 정보를 훅 모드에서 못 보게 된다.
+    // - `blocked` — «입력 대기». **사용자의 행동을 요구하는 유일한 상태**라 기호 하나(`?`)로 두지 않는다.
+    //   나머지 둘은 마커만으로도 읽힌다(파형은 움직이고 `✓`는 끝을 뜻한다) — 이것만 말이 필요하다.
+    // - `idle` — 마지막 프롬프트(«무엇을 시켰나»). 턴이 끝난 뒤 그 행에 남을 값은 그것이다.
+    //
+    // 종류 이름은 프롬프트를 아는 동안 싣지 않는다 — gutter 아이콘이 이미 말한다(아래 폴백은 그것도 모를 때다).
     const prompt = term.agent_transcript.prompt();
     if (prompt.len > 0) {
-        if (parts.marker.len == 0) return self.allocator.dupe(u8, prompt);
-        return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ parts.marker, prompt });
+        const body = if (term.agent_state == .idle) prompt else parts.text;
+        if (parts.marker.len == 0) return self.allocator.dupe(u8, body);
+        if (body.len == 0) return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ parts.marker, prompt });
+        return std.fmt.allocPrint(self.allocator, "{s} {s}", .{ parts.marker, body });
     }
     const kind_name: []const u8 = switch (term.agent_kind) {
         .claude => "Claude Code",

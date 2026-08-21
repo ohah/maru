@@ -19298,6 +19298,21 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expect(term.agent_hook_log_present);
 
+    // ── ⓪ **훅 모드로 «들어가는» 경로** ─────────────────────────────────────────────────────
+    // 위 단언은 `pollAgentHookEvents` 를 **직접** 부른 뒤라 이미 `log_present` 가 서 있다. 그래서
+    // 「파일은 디스크에 있는데 우리가 아직 그것을 본 적 없는」 진짜 시작 상태를 한 번도 안 본다.
+    // 그 상태에서 분기만 돌렸을 때 훅 모드로 들어가야 한다 — 안 들어가면 그 Term 은 훅이 계속 쓰는데도
+    // 영영 화면 관측으로 남는다(= 게이트를 켠 의미가 없다).
+    term.agent_hook_log_present = false;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_observe_calls = 0;
+    agent_ops.test_hook_calls = 0;
+    agent_ops.pollAgentConsumer(&session, term, false, true);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_hook_calls);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls);
+    try std.testing.expect(term.agent_hook_log_present);
+
     // ── ① 소비자는 정확히 하나다 ──────────────────────────────────────────────────────────────
     // tick 카운터를 넘겨 observer probe 를 강제한다(kind probe 는 켜지 않는다 — 그것이 켜지면
     // `classifyAgentProcesses` 가 smoke 셸을 보고 agent_kind 를 none 으로 되돌린다).
@@ -19805,8 +19820,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"파일 하나 고쳐줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs your permission to use Bash\"}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
-        // 무엇을 승인해야 하는지도 함께 온다.
+        // 무엇을 승인해야 하는지도 함께 온다. **본문까지 본다** — 종류만 물으면 «알림은 떴는데 아무 말도
+        // 안 하는» 경우가 통과한다. `Notification` payload 에는 `tool_name` 이 **없으므로**(실측: 키는
+        // `message`·`title`·`notification_type` + 공통부) 승인 경로의 본문 규칙을 그대로 쓰면 빈 문자열이다.
         try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, term.agent_hook_notice.kind);
+        try std.testing.expect(std.mem.indexOf(u8, term.agent_hook_notice.text(), "permission to use Bash") != null);
 
         // **유휴 알림은 배지를 흔들지 않는다** — 실사용에서 이것이 턴 끝 뒤에 온다.
         term.agent_hook_cursor = .{};
@@ -19817,6 +19835,22 @@ test "hook mode fills state and conversation from the event log, and only then" 
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
         try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+    }
+
+    // ── ⑯c **자식이 남은 뒤 온 알림이 배지를 가두지 않는다**(계약 §6) ─────────────────────
+    // `worker_permission_prompt` 는 **자식이 아니라 lead 가** 낸다(lead 가 자식들 요구를 모아 알린다).
+    // 그래서 `agent_id` 가 없고 lead 이벤트로 도착한다 — 그것이 턴을 되살리면 마지막 자식이 끝나도
+    // «턴이 안 끝났다» 가 되어 배지가 영영 「입력 대기」에 멈춘다. 순수 층이 그 규칙을 갖고 있어도
+    // **제품이 이벤트 사이로 상태를 안 이어 주면** 같은 결과가 안 나오므로 여기서 한 번 더 본다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"두 갈래로 조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"c1\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"맡겼습니다\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"worker_permission_prompt\",\"message\":\"c1 needs permission for Bash\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"c1\",\"last_assistant_message\":\"끝냈습니다\"}\n" });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
     }
 
     // ── ⑯b **종료를 놓친 유령을 목록이 거둔다**(계약 §2) ──────────────────────────────────
@@ -27785,6 +27819,28 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
         try std.testing.expect(std.mem.indexOf(u8, label, "배포 스크립트 고쳐줘") != null);
         try std.testing.expect(std.mem.indexOf(u8, label, "Claude Code") == null);
         try std.testing.expect(std.mem.indexOf(u8, label, "\u{2713}") != null);
+    }
+
+    // **본문은 상태가 정한다**(사용자 결정 2026-08-22). 프롬프트를 알아도 «지금» 이 더 급하면 그것을 싣는다.
+    // 이 규칙이 없으면 훅 모드에서 프롬프트가 **항상** 있어 상태 문구와 진행 중 세부가 영영 가려진다 —
+    // 훅을 켜야만 얻는 정보가 훅을 켠 화면에서만 안 보이는 뒤집힌 상태가 된다.
+    {
+        term.agent_state = .running;
+        term.agent_hook_tool.set("파일 씀");
+        const label = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(label);
+        try std.testing.expect(std.mem.indexOf(u8, label, "파일 씀") != null); // 무엇을 하는 중인지
+        try std.testing.expect(std.mem.indexOf(u8, label, "배포 스크립트 고쳐줘") == null);
+
+        term.agent_state = .blocked;
+        const blocked = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(blocked);
+        // 사용자의 **행동을 요구하는 유일한 상태**라 기호 하나로 두지 않는다.
+        try std.testing.expect(std.mem.indexOf(u8, blocked, maru.i18n.t(.sb_awaiting_input)) != null);
+        try std.testing.expect(std.mem.indexOf(u8, blocked, "배포 스크립트 고쳐줘") == null);
+
+        term.agent_hook_tool.clear();
+        term.agent_state = .idle;
     }
 
     // 줄 수: 응답 줄이 하나 늘어야 한다. 늘지 않으면 응답이 행 높이 밖에 그려져 아래 행을 침범한다.

@@ -1118,6 +1118,10 @@ pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) b
 /// 그 뒤를 단언하려 하면 조건부로 건너뛰게 된다(실제로 그렇게 «통과하지만 아무것도 안 보는» 테스트를
 /// 한 번 썼고 뮤테이션이 그것을 드러냈다). seam 을 열어 두면 그 규칙만 정확히 겨눌 수 있다.
 pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observation_current: bool) void {
+    // **모드 판정보다 먼저 «파일이 생겼는지» 를 본다.** 이 한 줄이 없으면 판정이 자기 자신을 잠근다:
+    // `log_present` 를 세우는 곳은 `pollAgentHookEvents` 뿐인데 그 함수는 **이미 훅 모드일 때만** 불린다.
+    // 그래서 새 Term 은 훅이 로그를 계속 쓰는데도 영영 관측 모드에 남는다 — 게이트를 켠 의미가 없다.
+    refreshAgentHookLogPresence(self, term);
     switch (agentHookMode(self, term)) {
         .hook => pollAgentHookEvents(self, term, displayed),
         .observe => {
@@ -1133,6 +1137,27 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             }
         },
     }
+}
+
+/// 훅이 이 pane 의 로그를 **한 번이라도 썼는지** 본다(계약 §1.2의 유일한 동적 입력).
+///
+/// 모드 판정과 그 입력을 갱신하는 일을 **갈라 둔다.** 한데 두면(= 훅 모드 안에서만 갱신하면) 판정이
+/// 자기 입력을 잠근다. 그 실패는 테스트로도 잘 안 드러난다 — 제품 테스트가 `pollAgentHookEvents` 를
+/// **직접** 부른 뒤 분기를 보면 이미 값이 서 있어 «들어가는» 경로를 한 번도 안 본다(실제로 그랬다).
+///
+/// 값싼 `stat` 하나이고 **아직 못 본 Term 에만** 돈다 — 한 번 생긴 파일은 세션 중에 사라지지 않으므로
+/// (회전을 시작 시에만 한다) 참이 된 뒤에는 다시 묻지 않는다.
+fn refreshAgentHookLogPresence(self: *AppSession, term: *Term) void {
+    if (!is_macos) return;
+    if (term.agent_hook_log_present) return;
+    if (!self.loaded_config.config.sidebar.agent_hooks) return;
+    if (term.agent_kind == .none) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const path = agentHookLogPath(arena_state.allocator(), term) orelse return;
+    _ = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return;
+    term.agent_hook_log_present = true;
 }
 
 /// 이 Term 이 지금 **어느 모드인가**(계약 §1.2). 판정의 유일한 동적 입력은 «그 pane 의 로그 파일이 있는가» 다.
@@ -1306,7 +1331,16 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
         .attention => {
             // 무엇을 승인하는지 — 사람이 읽는 설명이 있으면 그것, 없으면 도구 이름. **명령 원문은
             // 싣지 않는다**(계약 §7: 길고 민감하다).
-            const body = if (ev.tool_description.len > 0) ev.tool_description else ev.tool_name;
+            //
+            // **두 소스가 서로 다른 자리를 싣는다**(계약 §6). `PermissionRequest` 는 `tool_name`·
+            // `tool_input` 을, `Notification` 은 `message` 를 준다 — 도구 이름 규칙만 쓰면 후자에서
+            // **본문이 빈 문자열**이 되어 «떴는데 아무 말도 안 하는» 알림이 된다.
+            const body = if (ev.tool_description.len > 0)
+                ev.tool_description
+            else if (ev.tool_name.len > 0)
+                ev.tool_name
+            else
+                ev.notice_text;
             term.agent_hook_notice.set(.attention, body, self.awakeMs());
         },
     }

@@ -88,19 +88,27 @@ pub fn next(current: State, ev: event.Event) State {
 /// 왜 필요한가(계약 §2): 서브에이전트가 도는 동안 lead 의 `Stop` 은 턴 끝이 아니다. 그것을 완료로 다루면
 /// **자식이 아직 도는데 «완료» 알림이 나간다.** 반대로 lead `Stop` 에서 무작정 «진행 중» 을 유지하면 이번엔
 /// 배지가 안 풀린다 — 자식이 끝나는 것을 봐야 풀 수 있고, 그래서 **세야** 한다.
-/// 자식 하나의 식별자. 실측 길이는 claude 17 자·codex uuid 36 자라 40 이면 넉넉하다.
-pub const ChildId = struct {
-    buf: [40]u8 = undefined,
-    len: u8 = 0,
+/// 자식 하나의 자리. **id 전문을 담지 않고 해시만 담는다** — 우리가 하는 일은 «같은가» 비교뿐이고,
+/// 되읽거나 표시하지 않는다. 전문(claude 17 자·codex uuid 36 자)을 담으면 자리당 40 바이트라
+/// 동시 자식 수 상한을 낮게 잡을 수밖에 없는데, **그 상한이 곧 조기 해제 버그의 재발 지점**이다:
+/// 넘친 자식은 종료를 못 알아보므로, 담긴 것들이 끝나는 순간 아직 도는 자식을 두고 배지가 풀린다.
+/// 8 바이트면 상한을 넉넉히 올릴 수 있다.
+///
+/// 충돌은 64 비트 해시에 자식 수십 개라 실질적으로 없다(있어도 «남의 종료가 우리 자식을 지우는»
+/// 조기 해제 한 번이고, 다음 프롬프트가 정정한다).
+pub const ChildKey = u64;
 
-    pub fn slice(self: *const ChildId) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+/// 한 턴에 동시에 담을 자식 수. **워크플로가 자식을 크게 펼치는 경우까지 본다** — 손으로 8 을 잡았다가
+/// 「100 개 넘어가면 어쩌냐」는 지적을 받고 올렸다. 자리당 8 바이트라 Term 하나에 1 KiB 다.
+///
+/// 그래도 넘칠 수는 있다. 그때는 담지 못한 자식이 배지를 붙잡지 못한다 — 조기 해제 쪽으로 기울지만
+/// 다음 프롬프트가 셈을 버려 정정한다. 반대쪽(안 풀림)은 사용자가 손쓸 수 없으므로 이 방향을 고른다.
+pub const max_children: usize = 128;
 
-/// 한 턴에 동시에 담을 자식 수. 넘치면 담지 못한 자식의 종료를 못 알아보지만, 담긴 것들이 끝나면
-/// 배지는 풀리고 다음 프롬프트가 셈을 버린다(§2 리셋).
-pub const max_children: usize = 8;
+/// id 를 자리 키로 만든다. 빈 id 는 키가 될 수 없다(호출자가 먼저 거른다).
+fn childKey(id: []const u8) ChildKey {
+    return std.hash.Wyhash.hash(0, id);
+}
 
 pub const Progress = struct {
     /// 지금 도는 자식들의 `agent_id`.
@@ -112,7 +120,7 @@ pub const Progress = struct {
     ///
     /// 그래서 **우리가 시작을 본 id 만** 담고, 그 id 의 종료에만 반응한다. 짝 없는 종료는 남의 것이라
     /// 무시한다.
-    children: [max_children]ChildId = @splat(.{}),
+    children: [max_children]ChildKey = @splat(0),
     child_count: u8 = 0,
     /// **lead 의 턴이 아직 열려 있는가.** 프롬프트·도구 호출처럼 lead 가 «돌고 있다» 를 뜻하는 이벤트가
     /// 열고, lead 의 `Stop`/`StopFailure` 가 닫는다.
@@ -160,23 +168,23 @@ pub const Progress = struct {
     /// 배지가 안 풀린다 — 이 층이 막으려는 바로 그 실패다. 실측에서는 수명 이벤트가 늘 `agent_id` 를
     /// 싣고 오므로 이 경로는 방어다.
     fn addChild(self: *Progress, id: []const u8) void {
-        if (id.len == 0 or id.len > @sizeOf(@FieldType(ChildId, "buf"))) return;
+        if (id.len == 0) return;
+        const key = childKey(id);
         for (self.children[0..self.child_count]) |c| {
-            if (std.mem.eql(u8, c.slice(), id)) return;
+            if (c == key) return;
         }
         if (self.child_count >= max_children) return;
-        var slot: ChildId = .{ .len = @intCast(id.len) };
-        @memcpy(slot.buf[0..id.len], id);
-        self.children[self.child_count] = slot;
+        self.children[self.child_count] = key;
         self.child_count += 1;
     }
 
     /// **우리가 시작을 본 자식**이면 빼고 `true`. 아니면 아무것도 안 하고 `false` — 남의 에이전트다.
     fn removeChild(self: *Progress, id: []const u8) bool {
         if (id.len == 0) return false;
+        const key = childKey(id);
         var i: usize = 0;
         while (i < self.child_count) : (i += 1) {
-            if (!std.mem.eql(u8, self.children[i].slice(), id)) continue;
+            if (self.children[i] != key) continue;
             self.children[i] = self.children[self.child_count - 1];
             self.child_count -= 1;
             return true;
@@ -1207,4 +1215,58 @@ test "세션이 다시 시작돼도 «턴이 끝났습니다» 가 나가지 않
     try testing.expect(!suppressesNotice(evOf(.stop)));
     try testing.expect(!suppressesNotice(evOf(.stop_failure)));
     try testing.expect(!suppressesNotice(evOf(.subagent_stop)));
+}
+
+test "자식을 상한까지 담고, 그 안에서는 마지막 하나가 끝날 때 풀린다" {
+    // 워크플로가 자식을 크게 펼치는 경우다. 상한이 낮으면 넘친 자식이 배지를 못 붙잡아 **아직 도는데
+    // 풀리는** 버그가 상한 너머에서 그대로 재현된다 — 그래서 자리를 해시로 바꿔 상한을 올렸다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+
+    var buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < max_children) : (i += 1) {
+        const id = try std.fmt.bufPrint(&buf, "child-{d}", .{i});
+        state = advance(&progress, state, childEvId(.subagent_start, id));
+    }
+    try testing.expectEqual(max_children, progress.childCount());
+
+    state = advance(&progress, state, evOf(.stop)); // lead 가 먼저 끝난다
+    try testing.expectEqual(State.running, state);
+
+    i = 0;
+    while (i < max_children) : (i += 1) {
+        const id = try std.fmt.bufPrint(&buf, "child-{d}", .{i});
+        state = advance(&progress, state, childEvId(.subagent_stop, id));
+        // **마지막 하나가 끝나기 전까지는 풀리지 않는다.**
+        const expected: State = if (i + 1 == max_children) .idle else .running;
+        try testing.expectEqual(expected, state);
+    }
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
+}
+
+test "상한을 넘긴 자식은 붙잡지 못한다 — 그 방향을 골랐다는 사실을 못박는다" {
+    // 넘치면 담지 못한 자식의 종료를 못 알아본다. 조기 해제 쪽으로 기울지만 다음 프롬프트가 정정한다.
+    // 반대쪽(안 풀림)은 사용자가 손쓸 수 없다 — 그 비대칭이 이 선택의 근거다.
+    var progress: Progress = .{};
+    var state = advance(&progress, .idle, evOf(.user_prompt_submit));
+    var buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < max_children + 3) : (i += 1) {
+        const id = try std.fmt.bufPrint(&buf, "child-{d}", .{i});
+        state = advance(&progress, state, childEvId(.subagent_start, id));
+    }
+    try testing.expectEqual(max_children, progress.childCount()); // 넘친 셋은 안 담긴다
+
+    state = advance(&progress, state, evOf(.stop));
+    i = 0;
+    while (i < max_children) : (i += 1) {
+        const id = try std.fmt.bufPrint(&buf, "child-{d}", .{i});
+        state = advance(&progress, state, childEvId(.subagent_stop, id));
+    }
+    try testing.expectEqual(State.idle, state); // 넘친 셋이 아직 돌아도 여기서 풀린다
+
+    // 그리고 새 프롬프트가 셈을 버려 다음 턴은 깨끗하다.
+    state = advance(&progress, state, evOf(.user_prompt_submit));
+    try testing.expectEqual(@as(usize, 0), progress.childCount());
 }

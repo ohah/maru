@@ -23,11 +23,17 @@ const key_confirm = "Y";
 const key_alternate = "D";
 const key_cancel = "N";
 
-/// show가 받는 버튼 라벨(기본값 있음). 호출자는 `.{}`(기본 확인/취소)나 `.{ .confirm = "삭제", .cancel = "취소" }`처럼
-/// 용도에 맞는 라벨을 준다 — 컴포넌트가 닫기 전용이 아니라 범용이게 하는 재사용 seam.
+/// show가 받는 버튼 라벨. 호출자가 **둘 다 준다** — 컴포넌트가 닫기 전용이 아니라 범용이게 하는
+/// 재사용 seam이다.
+///
+/// **기본값을 두지 않는다.** `"확인"`/`"취소"` 를 기본값으로 두었더니 그 문자열이 struct 필드 기본값이라
+/// **comptime 에 얼어붙었다** — `.{}` 로 부르면 `ui.language` 와 무관하게 한국어가 나오고, 필드 기본값에는
+/// 런타임 조회(`i18n.t`)를 넣을 수 없다(컨테이너 수준 `const` 와 같은 제약이다). 제품 호출부는 전부
+/// 라벨을 명시하고 있었으므로 기본값은 **쓰이지 않는 함정**이었다. 없애면 빠뜨린 자리가 컴파일 에러가
+/// 된다 — 계약 §7.2 의 1차 방어(타입으로 막는다)와 같은 방식이다.
 pub const Buttons = struct {
-    confirm: []const u8 = "확인",
-    cancel: []const u8 = "취소",
+    confirm: []const u8,
+    cancel: []const u8,
 };
 
 /// 세 갈래 확인 descriptor. `primary`/`alternate`/`cancel`은 표시 순서와 무관한 안정적인 choice id이며,
@@ -35,7 +41,7 @@ pub const Buttons = struct {
 pub const Choices = struct {
     primary: []const u8,
     alternate: []const u8,
-    cancel: []const u8 = "취소",
+    cancel: []const u8,
 };
 
 /// 어느 버튼에 포커스가 있나(←/→로 이동). Enter가 포커스된 버튼을 실행한다. 열 때마다 기본 = confirm(Enter=확정 유지).
@@ -46,7 +52,7 @@ pub const Focus = enum { confirm, alternate, cancel };
 pub const State = struct {
     open: bool = false,
     message: []const u8 = "",
-    // 기본값은 빈 문자열 — 실제 라벨은 show(message, Buttons)가 채운다(기본 "확인"/"취소"는 Buttons 단일 출처).
+    // 기본값은 빈 문자열 — 실제 라벨은 show(message, Buttons)가 채운다(호출자가 둘 다 준다).
     // view는 open일 때만 그리고 show 없이는 열리지 않으므로 빈 기본값이 렌더되는 일은 없다.
     confirm_label: []const u8 = "",
     alternate_label: []const u8 = "",
@@ -301,9 +307,12 @@ test "confirm state: show가 메시지+버튼 라벨을 주입, dismiss로 닫�
     try std.testing.expectEqualStrings("취소", s.cancel_label);
     s.dismiss();
     try std.testing.expect(!s.open);
-    // 기본 라벨(.{})도 동작.
-    s.show("x", .{});
-    try std.testing.expectEqualStrings("확인", s.confirm_label);
+    // 다시 열면 **새 라벨로 갈린다** — 앞 확인의 라벨이 남지 않는다.
+    // (예전에는 여기서 `.{}` 로 부르고 기본값 `"확인"` 을 단정했는데, 그 기본값은 comptime 에
+    //  얼어붙는 함정이라 없앴다. 검증할 것은 "기본값이 무엇인가" 가 아니라 "주입이 갈아끼우는가" 다.)
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
+    try std.testing.expectEqualStrings("ok", s.confirm_label);
+    try std.testing.expectEqualStrings("no", s.cancel_label);
 }
 
 test "confirm handle: Enter/Y=confirmed · Esc/N=cancelled · 닫힘이면 null · 다른 키는 소비" {
@@ -311,32 +320,32 @@ test "confirm handle: Enter/Y=confirmed · Esc/N=cancelled · 닫힘이면 null 
     // 닫혀 있으면 무동작(라우팅 안 가로챔).
     try std.testing.expect(handle(.{ .key = .enter }, &s) == null);
 
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
     try std.testing.expect(!s.open); // confirmed면 닫힘
 
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
     try std.testing.expect(!s.open); // cancelled면 닫힘
 
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .char, .codepoint = 'y' }, &s).?);
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .char, .codepoint = 'Y' }, &s).?);
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .char, .codepoint = 'n' }, &s).?);
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .char, .codepoint = 'N' }, &s).?);
 
     // 다른 글자는 소비만(intent 없음, 모달이라 뒤로 안 샘) — 여전히 열려 있음.
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expect(handle(.{ .key = .char, .codepoint = 'a' }, &s) == null);
     try std.testing.expect(s.open);
 }
 
 test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 실행 (Esc는 항상 취소)" {
     var s = State{};
-    s.show("x", .{}); // 기본 포커스 = confirm
+    s.show("x", .{ .confirm = "ok", .cancel = "no" }); // 기본 포커스 = confirm
     try std.testing.expectEqual(Focus.confirm, s.focused);
 
     // → 이동 → cancel 포커스(소비, intent 없음 — 재렌더는 host).
@@ -349,7 +358,7 @@ test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 
     try std.testing.expect(!s.open);
 
     // ← 도 토글(버튼 둘뿐) — confirm→cancel.
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     try std.testing.expect(handle(.{ .key = .left }, &s) == null);
     try std.testing.expectEqual(Focus.cancel, s.focused);
     // 다시 ← → confirm으로.
@@ -359,7 +368,7 @@ test "confirm handle: ←/→로 포커스 이동, Enter는 포커스된 버튼 
     try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
 
     // Esc는 포커스와 무관하게 항상 취소.
-    s.show("x", .{});
+    s.show("x", .{ .confirm = "ok", .cancel = "no" });
     _ = handle(.{ .key = .right }, &s); // cancel 포커스로 옮겨도
     s.focused = .confirm; // 다시 confirm 포커스라도
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
@@ -371,14 +380,14 @@ test "confirm three choices expose stable primary alternate cancel actions" {
     try std.testing.expect(s.has_alternate);
     try std.testing.expectEqual(Action.confirmed, handle(.{ .key = .enter }, &s).?);
 
-    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기" });
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기", .cancel = "취소" });
     try std.testing.expect(handle(.{ .key = .right }, &s) == null);
     try std.testing.expectEqual(Focus.alternate, s.focused);
     try std.testing.expectEqual(Action.alternate, handle(.{ .key = .enter }, &s).?);
 
-    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기" });
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기", .cancel = "취소" });
     try std.testing.expectEqual(Action.alternate, handle(.{ .key = .char, .codepoint = 'd' }, &s).?);
-    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기" });
+    s.showChoices("dirty", .{ .primary = "저장", .alternate = "버리기", .cancel = "취소" });
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
 }
 

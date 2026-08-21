@@ -104,6 +104,12 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 
 ## 2. 이벤트 세트
 
+**여기서 «세트» 는 «우리가 거는 것» 이다** — provider 가 **가진** 이벤트는 훨씬 많다. 공개 스펙 기준 claude 는
+서른 개를 정의하고(`Setup`·`PermissionDenied`·`PostToolUseFailure`·`PostToolBatch`·`MessageDisplay`·
+`TaskCreated`/`TaskCompleted`·`TeammateIdle`·`FileChanged`·`WorktreeCreate`/`Remove`·`Elicitation` 등),
+codex 는 열하나다. 그 둘을 섞어 읽지 않는다 — «세트를 늘린다» 는 발화 비용과 codex 재승인을 부르는 결정이라
+(§3, §2.1) 무엇이 **있는지**와 무엇을 **거는지**는 다른 질문이다.
+
 **세트는 provider 마다 다르다** — claude 9 개, **codex 7 개**(`Notification`·`StopFailure` 가 없다). 코드에서도
 전역 세트를 두지 않고 `agent_hook_command.eventsFor(provider)` 로 갈라 둔다: 하나로 두면 codex 에 없는
 이벤트가 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다.
@@ -112,9 +118,23 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 로드한 것만** 돌려주므로, 모르는 이름을 함께 적어 두고 목록에서 빠지는지를 보면 추측이 필요 없다. 그렇게
 물었을 때 codex 가 로드한 것은 `session_start`·`user_prompt_submit`·`stop`·`permission_request`·
 `pre_tool_use`·`subagent_start`·`subagent_stop`·`post_tool_use`·`session_end`·`pre_compact` 이고,
-**무시한 것은 `Notification` 과 `StopFailure` 둘뿐**이다. 뒤의 셋(`post_tool_use`·`session_end`·`pre_compact`)
-은 codex 에 있지만 **우리가 안 건다** — `PostToolUse` 는 비용 때문이고(§3.1), 나머지 둘은 지금 쓰는 자리가
-없다.
+**무시한 것은 `Notification` 과 `StopFailure` 둘뿐**이다.
+
+**codex 쪽은 공개 소스가 권위다**(2026-08-22 대조 — `codex-rs/app-server-protocol` 의 `HookEventName`).
+codex 의 이벤트는 **열하나**다:
+
+    PreToolUse · PermissionRequest · PostToolUse · PreCompact · PostCompact · SessionStart
+    SessionEnd · UserPromptSubmit · SubagentStart · SubagentStop · Stop
+
+`Notification` 도 `StopFailure` 도 없다 — 실측과 같다. **우리가 안 거는 것은 넷**이다
+(`post_tool_use`·`session_end`·`pre_compact`·`post_compact`) — `PostToolUse` 는 비용 때문이고(§3.1),
+나머지 셋은 지금 쓰는 자리가 없다. 설치본(0.149.0)에도 넷 다 있다.
+
+payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny_unknown_fields`). `Stop` 은
+`session_id`·`turn_id`·`transcript_path`·`cwd`·`hook_event_name`·`model`·`permission_mode`·
+`stop_hook_active`·`last_assistant_message` 뿐이다 — **`background_tasks` 가 없다**(claude 전용 키라는
+우리 서술과 일치)는 것도, `turn_id` 를 준다는 것도(턴 키), `model` 은 codex 에만 있다는 것도 그 스키마가
+직접 말한다. `SubagentStop` 은 `agent_id` 를 **옵션이 아닌 문자열**로 싣는다.
 
 | 이벤트 | matcher | codex | 쓰는 곳 |
 | --- | --- | --- | --- |
@@ -128,6 +148,11 @@ Term마다 모드가 **하나**다. 한 Term의 상태·알림·턴은 그 모�
 | `Notification` | — | ❌ **없다** | **입력 대기 판정**(`notification_type` — §6 표). `PermissionRequest`가 발화하지 않는 환경에서 그 배지의 유일한 소스다 |
 | `StopFailure` | — | ❌ **없다** | **오류로 끝난 턴.** 아래 ⚠️ |
 
+**claude 쪽에서 안 거는 것 중 후보가 있다.** `PermissionDenied` 는 «거부로 끝났다» 를 바로 주므로 §6 이
+적어 둔 «승인 뒤에도 배지가 「입력 대기」에 남는» 한계의 절반을 닫는다. `PostToolUseFailure`·`TaskCompleted`
+도 턴 세부에 쓸 자리가 있다. 지금 걸지 않는 이유는 하나다 — **세트를 늘리면 턴당 발화가 늘고 codex 는
+사용자에게 재승인을 다시 요구한다**(§2.1, §3). 값을 재고 나서 정할 일로 남긴다.
+
 **codex 에서 알림이 안 되는가 — 아니다.** 없는 것은 `Notification` **이벤트 하나**이지 알림 경로가 아니다.
 maru 의 두 알림은 다른 이벤트에 걸려 있다: **완료 알림은 `Stop`**, **주의(승인 대기) 알림은
 `PermissionRequest`** — 둘 다 codex 에 있다(위 실측). codex 에서 실제로 못 받는 것은 **claude 의
@@ -136,6 +161,16 @@ maru 의 두 알림은 다른 이벤트에 걸려 있다: **완료 알림은 `St
 ⚠️ 다만 그 계기가 지금은 **claude 「입력 대기」 배지의 실질적인 소스**다(§6) — `PermissionRequest` 는 우리
 실측에서 한 번도 발화하지 않았기 때문이다. 그래서 **codex 의 그 배지는 소스가 하나뿐**이고, 그 하나가
 대화형 codex 에서 발화하는지는 미검증이다(§9-8).
+
+⚠️ **사유는 `last_assistant_message` 에서 읽는다 — `error` 가 아니다.** `StopFailure` payload 에는 `error`
+도 함께 온다. 그 이름 때문에 그쪽이 사유처럼 보이지만 스펙이 그것을 «error **type**» 이라 적고, 실측도
+같은 말을 한다(2026-08-22 격리 홈에서 재현):
+
+    error                  = "authentication_failed"
+    last_assistant_message = "Not logged in · Please run /login"
+
+알림 본문으로는 뒤엣것이 옳다. 이 대조를 안 적어 두면 다음 사람이 «오류 사유를 `error` 에서 안 읽는
+버그» 로 보고 «고쳐서» 알림을 코드 문자열로 되돌린다.
 
 **`StopFailure` 가 없는 것은 codex 쪽의 실질 위험이다.** claude 는 오류로 끝난 턴에 `Stop` 대신
 `StopFailure` 를 보내므로 그것을 걸어 배지를 푼다. codex 에는 그 이벤트가 없으니 **오류로 끝난 codex 턴이
@@ -171,7 +206,7 @@ maru 의 두 알림은 다른 이벤트에 걸려 있다: **완료 알림은 `St
 | 도구를 쓰는 턴 | 위 사이에 `PreToolUse`(`tool_name: "Bash"`, `tool_input.description: "Echo hello"`) |
 | **서브에이전트** | `PreToolUse`(`tool_name: "Agent"`) → `SubagentStart` → `PreToolUse`(자식) → `SubagentStop` → `Stop` |
 | **백그라운드 작업** | `Stop.background_tasks: [{id, type: "shell", status: "running", description, command}]` |
-| **오류로 끝난 턴** | `SessionStart` → `UserPromptSubmit` → `StopFailure`(`last_assistant_message`에 **사유**) |
+| **오류로 끝난 턴** | `SessionStart` → `UserPromptSubmit` → `StopFailure`(`last_assistant_message`에 **사유**, 아래 ⚠️) |
 | 승인이 필요한 도구 | `PreToolUse` → `Stop`. **`PermissionRequest`도 `Notification`도 오지 않는다** |
 
 같은 것을 codex 로도 받았다(격리 `CODEX_HOME` + `codex exec`):
@@ -345,7 +380,7 @@ trust 키는 `<hooks.json 절대경로>:<이벤트 snake_case>:<그룹 인덱스
 공식이 맞는지 확인할 때는 이 경로를 쓴다. (그 전에는 «우리가 계산한 값을 써 넣고 훅이 실제로 도는지» 로
 확인했다 — 신뢰를 우회한 **양성 대조군**과 함께. 두 방법이 같은 답을 냈다.)
 
-**`matcher` 를 해시에 넣을지는 이벤트마다 다르다. 다섯 다 실측했다:**
+**`matcher` 를 해시에 넣을지는 이벤트마다 다르다. 세트 전원을 실측했다:**
 
 | 이벤트 | 해시 입력의 matcher |
 | --- | --- |
@@ -697,8 +732,20 @@ provider는 턴 종료와 권한 요구를 `Claude is waiting for your input` �
 **`Notification` 은 «입력 대기» 를 만든다**(2026-08-21). 파서가 `notification_type` 을 뽑고, **아는 종류만**
 배지를 옮긴다.
 
-claude 의 종류는 열넷이다(바이너리의 enum 을 그대로 읽었다). 그중 «사용자 입력을 기다린다» 는 다섯만
-`blocked` 로 간다.
+**근거는 공개 스펙이다** — [Claude Code hooks](https://code.claude.com/docs/en/hooks) 가 `Notification` 의
+payload 를 `message`·`title`·`notification_type` 으로 적고, `notification_type` 값 목록도 matcher 표에 적어
+둔다. 그중 «사용자 입력을 기다린다» 는 다섯만 `blocked` 로 간다.
+
+⚠️ **권위 있는 두 목록이 서로 다르다**(2026-08-22 대조). 스펙은 아홉을 적고 제품이 실제로 내는 값은 열넷이다.
+
+| | 목록 |
+| --- | --- |
+| 스펙에만 | `elicitation_complete` · `elicitation_response` |
+| 제품에만 | `worker_permission_prompt` · `push_notification` · `computer_use_enter`/`exit` · `quota_auto_resume_*` |
+
+그래서 **블랙리스트로 짜면 어느 한쪽에서 틀린다.** 화이트리스트 + 「모르면 안 옮긴다」는 두 목록 모두에
+대해 성립하고, 목록이 또 갈라져도 **조용히 무시되는 쪽으로** 틀린다. 스펙에만 있는 둘은 «끝났다/답했다» 라
+기다림이 아니므로 무동작이 맞다 — 그 이름도 테스트에 박아 두었다.
 
 | 종류 | 처리 |
 | --- | --- |
@@ -716,6 +763,45 @@ claude 의 종류는 열넷이다(바이너리의 enum 을 그대로 읽었다).
 **왜 «아는 것만» 인가**: 종류를 모르는 채 배지를 옮기면 임의의 provider 알림이 「입력 대기」로 보인다.
 모르는 종류는 모르는 이벤트와 같은 규율로 다룬다(§4) — 상태를 흔들지 않는다. 새 종류가 생겨도 조용히
 무시되고, 그것을 쓰려면 위 표에 **명시적으로** 더해야 한다.
+
+**⚠️ `Notification` 만은 «lead 가 일한다» 는 증거가 아니다.** 스펙은 공통 필드 `agent_id` 를 «`--agent` 로
+돌거나 **서브에이전트 안에 있을 때**» 실린다고 적는다. 그런데 자식의 승인 요구(`worker_permission_prompt`)
+는 **자식이 아니라 lead 가** 낸다 — lead 가 자식의 요구를 모아 «<자식 id> 가 <도구> 권한을 요구한다» 는
+문구로 알린다(2026-08-22 생성부 대조). 그래서 그 알림에는 `agent_id` 가 없고 **lead 이벤트로** 도착한다.
+`PermissionRequest` 는 자식 문맥을 그대로 실어 자식 것이 자식으로 온다 — 두 소스가 이 점에서 다르다.
+
+두 가지가 여기서 따라온다.
+
+- **턴 셈을 건드리지 않는다.** 「lead 의 턴 진행인가」는 `marksTurnProgress` 한 자리가 정하고, 알림은
+  거기서 빠진다. 두 자리가 걸려 있다.
+  - **턴 문**(`turn_open`): lead 가 이미 `Stop` 을 보낸 뒤 자식이 승인을 요구하면 그것이 턴을 되살려,
+    마지막 자식이 끝나도 «턴이 안 끝났다» 가 되고 **배지가 영영 「입력 대기」에 멈춘다.**
+  - **턴 키**(`prompt_id`): 알림도 공통 payload 를 타고 그 키를 싣는다. 지난 턴의 요구가 늦게 도착하면
+    «턴이 바뀌었다» 로 읽혀 **이번 턴의 자식 셈이 지워지고** lead 의 `Stop` 이 자식을 안 기다린다.
+
+  잃는 것은 없다 — 턴을 실제로 옮기는 이벤트는 모두 그 키를 싣는다.
+- **자식의 요구가 세션 배지를 옮기는 것은 의도다.** 승인해야 하는 사람은 어차피 사용자이고, 그 요구가
+  자식에게서 왔다는 사실은 사용자가 할 일을 바꾸지 않는다.
+- **막힘은 자식이 떠도 안 지워진다.** 병렬 워커 턴에서는 하나가 승인 게이트에 걸린 채 다른 하나가 뜬다.
+  `SubagentStart` 를 「돈다」로 덮으면 **사용자가 할 일이 있다는 신호만 골라 사라진다.** 둘 다 참일 때
+  무엇을 보일지는 관측 모드가 이미 정해 두었다 — `visible_blocker` 가 최우선이다
+  ([agent-session.md](agent-session.md) «해석»). 배지 열거를 공유하듯 그 우선순위도 공유한다.
+  ⚠️ 이 결함은 `Notification` 이전부터 `PermissionRequest` 경로에 있었다 — 그것이 발화하지 않아 안 보였다.
+
+**알림 본문은 `message` 에서 온다.** `Notification` payload 에는 `tool_name` 도 `tool_input` 도 없으므로
+(키는 `message`·`title`·`notification_type` + 공통부) 승인 경로의 본문 규칙(`tool_input.description` →
+`tool_name`)을 그대로 쓰면 **본문이 빈 문자열**이 된다 — 알림이 뜨는데 아무 말도 안 한다. 그래서 그 자리를
+`message` 로 받치되 **대화 줄과는 다른 자리**에 담는다(`text` 는 `Stop` 의 응답·프롬프트가 쓰는 자리라,
+뒷날 어느 provider 가 그 이벤트에 `message` 를 더하면 대화 줄이 조용히 오염된다).
+
+⚠️ **승인된 뒤 명령이 도는 동안에도 배지는 「입력 대기」다.** 그 요구를 푸는 이벤트가 없기 때문이다
+(`PostToolUse` 는 payload 크기 때문에 세트에서 뺐다 — §3.1). 다음 `PreToolUse` 나 `Stop` 이 와야 풀린다.
+자동 승인은 밀리초 안에 지나가므로 알림은 디바운스가 삼키지만, **사람이 승인한 긴 명령**은 그 시간 동안
+배지가 실제와 다르다.
+
+닫는 길은 있다 — 스펙에 **`PermissionDenied`** 가 있고 그것은 «거부로 끝났다» 를 바로 준다. 승인 쪽은
+여전히 도구 종료 신호가 필요하다(`PostToolUse` 를 다시 볼지, `PostToolBatch` 의 크기를 재 볼지). 세트를
+늘리는 결정이므로 여기서는 하지 않고 후속으로 남긴다.
 
 중복 방지가 **필수**다(없으면 같은 완료를 여러 번 알린다). **알림을 상태 «전이» 에 붙여 그것을 구조로
 얻는다**(2026-08-21) — 세는 코드는 언제나 어딘가에서 어긋난다:
@@ -770,7 +856,50 @@ claude 의 종류는 열넷이다(바이너리의 enum 을 그대로 읽었다).
    유실은 아니고 `· 턴 중 변경`으로 강등된다.
 5b. **모델 이름은 훅만으로 얻을 수 없다.** Codex payload에는 `model`이 있으나 Claude에는 `SessionStart`·`Stop`
    어디에도 없다(실측). 사이드바에 모델을 보여야 하면 transcript나 관측 경로에서 따로 얻어야 한다.
-6. **`PermissionRequest`·`Notification`은 헤드리스에서 오지 않는다**(2026-08-21 재확인). 계약 §2 세트를
+6. **`PermissionRequest`·`Notification`은 헤드리스에서 오지 않는다 — 대화형에서는 둘 다 온다**
+   (2026-08-22 확인). 헤드리스 서술은 아래 그대로 유효하고, **대화형은 실제 승인 프롬프트가 뜨는
+   세션에서 확인했다**:
+
+       PreToolUse(Bash) → PermissionRequest(Bash) → Notification(permission_prompt)
+       셋 다 같은 `prompt_id`
+
+   그리고 그때 **사이드바 배지가 「입력 대기」로 섰다**(눈으로 확인).
+
+   ⚠️ **첫 확인은 훅이 아니라 관측이 그린 것이었다.** 모드 판정이 자기 입력을 잠그고 있었기 때문이다 —
+   `log_present` 를 세우는 곳이 `pollAgentHookEvents` 뿐인데 그 함수는 **이미 훅 모드일 때만** 불렸다.
+   그래서 게이트를 켜도 새 Term 은 훅 모드로 **들어갈 수 없었다.** 진단은 사용자의 한 마디였다 —
+   「승인 프롬프트에서 선택을 2번으로 옮기면 배지가 «대기중» 으로 바뀐다」. 훅은 «선택을 옮겼다» 를 보내지
+   않으므로 그 움직임은 **화면을 읽고 있다는 증거**다. 판정과 그 입력의 갱신을 갈라 고쳤고, 고친 뒤에는
+   선택을 옮겨도 배지가 움직이지 않는다(같은 방법으로 재확인).
+
+   그 결함이 테스트를 빠져나간 이유도 같은 부류다 — 제품 테스트가 `pollAgentHookEvents` 를 **직접** 부른
+   뒤 분기를 확인해, 「들어가는」 경로를 한 번도 안 봤다. 지금은 그 경로만 겨누는 테스트가 있다.
+
+   ✅ **두 번째 확인에서 훅 모드가 실제로 동작했다.** 배지가 화면을 따라 움직이지 않고, 사이드바 대화 줄이
+   `UserPromptSubmit.prompt` 로 채워졌다(관측 모드에서는 §9-9 때문에 비어 있던 자리다). 이것이 AH4·AH5 가 완료 조건으로
+   걸어 두었던 대화형 수동 검증이다.
+
+   ⚠️ **두 소스는 «언제» 가 다르다**(같은 세션에서 관찰). `PermissionRequest` 는 승인 요구와 **동시에**
+   오고, `Notification(permission_prompt)` 은 **사용자가 한동안 반응하지 않으면** 뒤늦게 온다 — claude
+   자신의 «자리를 비웠다» 판단이다. 그래서 바로 승인하면 알림이 아예 안 오는 턴도 있다(실제로 그런 턴을
+   봤고, 그대로 두자 몇 초 뒤에 왔다).
+
+   그 성질이 우리 설계와 겹치지 않고 맞물린다: 배지는 `PermissionRequest` 로 **즉시** 서고, 늦게 온
+   `Notification` 은 이미 `blocked` 라 아무것도 더 하지 않는다. 우리 주의 알림 디바운스(§6)는 그와 다른
+   층이다 — 그것은 «자동 승인으로 곧 해소될 요구» 를 버리는 규율이다.
+
+   ⚠️ **한 승인에 두 소스가 다 발화한다.** 우리 설계가 여기서 저절로 옳게 돈다 — `PermissionRequest` 가
+   먼저 `running → blocked` 전이를 만들고, 뒤이은 `Notification` 은 **이미 `blocked` 라 전이가 없어**
+   알림이 두 번 뜨지 않는다(§6 — 알림을 전이에 붙인 이유가 이것이다). 배너 본문도 그래서 먼저 온
+   `PermissionRequest` 의 도구 이름이 된다. **`Notification` 의 `message` 가 본문이 되는 자리는 워커
+   승인이다** — 그때는 `PermissionRequest` 가 `agent_id` 를 실어 걸러지므로 알림만 남는다.
+
+   실측 payload 로 확인한 것(위 실행에서 그대로 받았다): `Notification` 은 키 일곱뿐이고
+   **`tool_name` 도 `tool_input` 도 `agent_id` 도 없다** — `message`·`notification_type`·`prompt_id`·
+   `session_id`·`cwd`·`transcript_path`·`hook_event_name` 이다. 스펙이 적은 `title` 은 이 판에서 안 왔다
+   (선택 필드다 — 우리는 안 쓴다).
+
+   아래는 헤드리스 관찰이다. 계약 §2 세트를
    모두 건 **로그인된** 세션에서 `--permission-mode default`로 파일 쓰기 권한 거부를 실제로 유발했고,
    claude가 "파일 쓰기 권한이 거부되어…"라고 답할 만큼 거부가 실재했는데도 두 이벤트 다 오지 않았다
    (`PreToolUse` → `Stop`만 왔다). 앞선 측정은 격리 홈이라 «로그인이 없어서일 수도»라는 여지가 있었는데

@@ -27,7 +27,6 @@
 //! 표면이 정할 일이다. 그래서 호스트는 **셀 배열을 받아 그리기만** 하고 채우는 것은 호출자가 한다.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const maru = @import("../../maru.zig");
 const dwrite_font = @import("dwrite_font.zig");
@@ -44,6 +43,10 @@ pub const Error = error{HostSetupFailed};
 pub const Stage = enum { font, window, present, pipeline };
 
 pub var last_stage: Stage = .font;
+
+/// 선 자리의 **원래 오류**. 단계별로 `catch` 해서 하나로 접기 때문에 그냥 두면 `@errorName` 이
+/// 사라진다 — 옮기기 전 스모크는 그것을 함께 찍었고, 진단이 줄면 옮긴 것이 아니라 잃은 것이다.
+pub var last_error: anyerror = error.HostSetupFailed;
 
 pub const Options = struct {
     /// 창 제목(UTF-16, NUL 종단). `utf8ToUtf16LeStringLiteral` 로 만든다.
@@ -71,6 +74,10 @@ pub const Host = struct {
     /// 가 UV 를 나눌 때 쓰는 값이라 어긋나면 글자가 엉뚱한 자리를 가리킨다.
     atlas_w: u32,
     atlas_h: u32,
+    /// **`show()` 직후의 클라이언트 크기.** `grid()` 가 이것을 쓴다 — 호출 시점 크기를 다시 읽으면
+    /// 창을 키운 뒤 격자가 달라져 셀과 어긋난다. 표현 루프는 셀을 다시 만들지 않으므로 격자도
+    /// 처음 값이어야 한다(§2m.6 이 "창을 키워도 행이 더 보이지 않는다" 로 적어 둔 한계와 짝이다).
+    initial: win32_window.ClientSize,
 
     /// 사용: `var host = try Host.open(...); defer host.close();`
     ///
@@ -82,27 +89,35 @@ pub const Host = struct {
         opts: Options,
     ) Error!Host {
         last_stage = .font;
-        const raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch
+        const raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
+            last_error = err;
             return error.HostSetupFailed;
+        };
         errdefer raster.destroy();
         const cell_w = raster.metrics.width_px;
         const cell_h = raster.metrics.height_px;
 
-        const scratch = allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(cell_w * 2, cell_h)) catch
+        const scratch = allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(cell_w * 2, cell_h)) catch |err| {
+            last_error = err;
             return error.HostSetupFailed;
+        };
         errdefer allocator.free(scratch);
 
         last_stage = .window;
-        const window = win32_window.Window.create(allocator, opts.title, @intCast(opts.width_px), @intCast(opts.height_px)) catch
+        const window = win32_window.Window.create(allocator, opts.title, @intCast(opts.width_px), @intCast(opts.height_px)) catch |err| {
+            last_error = err;
             return error.HostSetupFailed;
+        };
         errdefer window.destroy();
         window.show();
 
         last_stage = .present;
         const initial = window.clientSize() orelse
             win32_window.ClientSize{ .width_px = @intCast(opts.width_px), .height_px = @intCast(opts.height_px) };
-        const present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch
+        const present = d3d11_present.Present.create(allocator, window.hwnd, initial.width_px, initial.height_px) catch |err| {
+            last_error = err;
             return error.HostSetupFailed;
+        };
         errdefer present.destroy();
 
         var renderer_state = maru.renderer.RendererState.init(allocator, .{
@@ -119,8 +134,10 @@ pub const Host = struct {
         const atlas_w = renderer_state.atlas.config.atlas_width_px;
         const atlas_h = renderer_state.atlas.config.atlas_height_px;
         last_stage = .pipeline;
-        const pipeline = d3d11_cells.CellPipeline.createEmptyAtlas(allocator, present.device, present.context, atlas_w, atlas_h) catch
+        const pipeline = d3d11_cells.CellPipeline.createEmptyAtlas(allocator, present.device, present.context, atlas_w, atlas_h) catch |err| {
+            last_error = err;
             return error.HostSetupFailed;
+        };
 
         var host = Host{
             .allocator = allocator,
@@ -136,6 +153,7 @@ pub const Host = struct {
             .cell_h = cell_h,
             .atlas_w = atlas_w,
             .atlas_h = atlas_h,
+            .initial = initial,
         };
         host.shaper = .{ .raster = raster };
         host.rasterizer = .{ .raster = raster, .scratch = scratch };
@@ -154,11 +172,9 @@ pub const Host = struct {
         self.raster.destroy();
     }
 
-    /// 지금 클라이언트 크기에 들어가는 셀 격자.
+    /// **처음 크기**에 들어가는 셀 격자. 위 `initial` 의 doc 참조 — 지금 크기를 다시 읽지 않는다.
     pub fn grid(self: *const Host) maru.terminal.Size {
-        const size = self.window.clientSize() orelse
-            return .{ .cols = 80, .rows = 24 };
-        return win32_window.cellsForClient(size.width_px, size.height_px, self.cell_w, self.cell_h) orelse
+        return win32_window.cellsForClient(self.initial.width_px, self.initial.height_px, self.cell_w, self.cell_h) orelse
             .{ .cols = 80, .rows = 24 };
     }
 
@@ -255,25 +271,25 @@ extern "c" fn usleep(usec: c_uint) c_int;
 pub fn reportSetupFailure(stderr: *std.Io.Writer, command: []const u8) !void {
     switch (last_stage) {
         .font => try stderr.print(
-            "maru {s}: could not set up the font(HRESULT 0x{X:0>8})\n",
-            .{ command, @as(u32, @bitCast(dwrite_font.last_hresult)) },
+            "maru {s}: could not set up the font({s}, HRESULT 0x{X:0>8})\n",
+            .{ command, @errorName(last_error), @as(u32, @bitCast(dwrite_font.last_hresult)) },
         ),
         .window => {
             try stderr.print(
-                "maru {s}: could not create the window(Win32 error {d})\n",
-                .{ command, win32_window.last_create_error },
+                "maru {s}: could not create the window({s}, Win32 error {d})\n",
+                .{ command, @errorName(last_error), win32_window.last_create_error },
             );
             if (win32_window.last_create_error == 8)
                 try stderr.writeAll("  error 8 (ERROR_NOT_ENOUGH_MEMORY) usually means the desktop heap is exhausted - check how many processes this session has.\n");
         },
         .present => try stderr.print(
-            "maru {s}: could not set up the present path(HRESULT 0x{X:0>8})\n",
-            .{ command, @as(u32, @bitCast(d3d11_present.last_hresult)) },
+            "maru {s}: could not set up the present path({s}, HRESULT 0x{X:0>8})\n",
+            .{ command, @errorName(last_error), @as(u32, @bitCast(d3d11_present.last_hresult)) },
         ),
         .pipeline => {
             try stderr.print(
-                "maru {s}: could not set up the cell pipeline(HRESULT 0x{X:0>8})\n",
-                .{ command, @as(u32, @bitCast(d3d11_cells.last_hresult)) },
+                "maru {s}: could not set up the cell pipeline({s}, HRESULT 0x{X:0>8})\n",
+                .{ command, @errorName(last_error), @as(u32, @bitCast(d3d11_cells.last_hresult)) },
             );
             if (d3d11_cells.shaderError().len > 0)
                 try stderr.print("  shader compiler: {s}\n", .{d3d11_cells.shaderError()});

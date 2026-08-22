@@ -1355,9 +1355,25 @@ pub fn buildFileTreeDrawList(
                 icon_style.foreground = c;
             };
         };
+        // 아이콘은 **2칸**으로 놓는다. 합성 아이콘은 슬롯의 짧은 변에 맞춰 그려지므로
+        // (`icon_glyph.fillCoverage`: side = min(w, h)) 1칸이면 셀 폭(~8px)까지 줄어 폴더·파일 실루엣이
+        // 뭉개진다 — 사이드바 보조줄(`wideIconGlyph`)과 도크 뷰 바(`dock_view_bar.icon_cols`)가 같은 이유로
+        // 이미 2칸이고, 같은 화면에서 트리 행만 절반 크기라 눈에 띄게 작았다(사용자 보고 2026-08-22).
+        //
+        // **끝을 넘길 때만 1칸으로 접는다.** 두 번째 칸이 `end`(= dirty/conflict 슬롯 앞) 밖이면 아이콘이
+        // 상태 표시 위로 번진다 — 좁은 도크에서만 나는 경우라 아이콘을 지우기보다 좁혀서 남긴다.
         if (icon) |cp| if (icon_col < end)
-            try cells.append(allocator, .{ .row = r, .col = icon_col, .codepoint = cp, .width = 1, .style = icon_style });
-        const label_col = if (icon != null) icon_col +| 2 else icon_col;
+            try cells.append(allocator, .{
+                .row = r,
+                .col = icon_col,
+                .codepoint = cp,
+                .width = if (icon_col +| 1 < end) 2 else 1,
+                .style = icon_style,
+            });
+        // 아이콘 2칸 + **간격 1칸**. 합성 아이콘은 슬롯을 꽉 채우므로(짧은 변에 맞춘 정사각) 2칸 뒤에
+        // 곧바로 글자가 오면 아이콘과 라벨이 붙어 버린다 — 사이드바가 `sidebar_row_icon_cols = 3`으로
+        // 같은 간격을 두는 이유다. 아이콘이 없는 행은 예전 자리(들여쓰기 기준) 그대로다.
+        const label_col = if (icon != null) icon_col +| 3 else icon_col;
         if (label_col < end)
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, r, label_col, end, style, false, .head);
         if (dirty and cols >= 2)
@@ -3140,7 +3156,10 @@ test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대�
     }
 }
 
-test "file tree icons occupy one cell between disclosure and label without state overlap" {
+// 아이콘은 disclosure 와 라벨 사이에서 **2칸**을 차지하고, 라벨은 그 뒤 한 칸을 띄고 시작한다
+// (사용자 보고 2026-08-22 — 1칸이던 동안 트리 아이콘만 사이드바·뷰 바의 절반 크기였다). 합성 아이콘은
+// 슬롯의 짧은 변에 맞춰 그려지므로(`icon_glyph.fillCoverage`) 칸 수가 곧 크기다.
+test "file tree icons occupy two cells between disclosure and label without state overlap" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const selected_fg: terminal.Color = .{ .rgb = .{ .r = 0x10, .g = 0x20, .b = 0x30 } };
@@ -3168,11 +3187,12 @@ test "file tree icons occupy one cell between disclosure and label without state
         try std.testing.expectEqual(selected_fg, cell.style.foreground);
         if (cell.codepoint == icons.codepoint(.document)) {
             saw_icon = true;
-            try std.testing.expectEqual(@as(u16, 5), cell.col);
+            try std.testing.expectEqual(@as(u16, 5), cell.col); // indent(3) + 2
+            try std.testing.expectEqual(@as(u2, 2), cell.width);
         }
         if (cell.codepoint == 'R') {
             saw_label = true;
-            try std.testing.expectEqual(@as(u16, 7), cell.col);
+            try std.testing.expectEqual(@as(u16, 8), cell.col); // 아이콘 2칸 + 간격 1칸
         }
     }
     try std.testing.expect(saw_icon and saw_label);
@@ -3180,8 +3200,13 @@ test "file tree icons occupy one cell between disclosure and label without state
     var narrow = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 7, dim, dim, null, null, null);
     defer narrow.deinit(allocator);
     for (narrow.cells, 0..) |cell, i| {
-        try std.testing.expect(cell.col < 7);
-        for (narrow.cells[i + 1 ..]) |other| try std.testing.expect(cell.row != other.row or cell.col != other.col);
+        try std.testing.expect(cell.col +| @as(u16, cell.width) <= 7); // 2칸 아이콘도 끝을 안 넘는다
+        for (narrow.cells[i + 1 ..]) |other| {
+            if (cell.row != other.row) continue;
+            const a_end = cell.col +| @as(u16, cell.width);
+            const b_end = other.col +| @as(u16, other.width);
+            try std.testing.expect(a_end <= other.col or b_end <= cell.col);
+        }
     }
 }
 
@@ -3205,7 +3230,15 @@ test "file tree disclosure icon label and state cells never overlap at narrow wi
         defer dl.deinit(allocator);
         for (dl.cells, 0..) |cell, i| {
             try std.testing.expect(cell.col < cols);
-            for (dl.cells[i + 1 ..]) |other| try std.testing.expect(cell.row != other.row or cell.col != other.col);
+            // **칸이 아니라 span 으로 본다.** 아이콘이 2칸이 된 뒤로는 시작 열만 비교하면 아이콘이 라벨
+            // 첫 글자나 상태 표시 위로 반 칸 번지는 것을 못 잡는다.
+            try std.testing.expect(cell.col +| @as(u16, cell.width) <= cols);
+            for (dl.cells[i + 1 ..]) |other| {
+                if (cell.row != other.row) continue;
+                const a_end = cell.col +| @as(u16, cell.width);
+                const b_end = other.col +| @as(u16, other.width);
+                try std.testing.expect(a_end <= other.col or b_end <= cell.col);
+            }
         }
     };
 }

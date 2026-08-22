@@ -1853,6 +1853,10 @@ const TermRuntime = struct {
     /// capture가 반복 relaunch에도 같은 handle을 기록한다.
     ended_runtime_host_id: []const u8 = "",
     ended_runtime_id: []const u8 = "",
+    /// CR6b ended-conflict row가 예약한 canonical runtime-binding ordinal. Workspace restore의
+    /// staged graph에서만 발급하며, handle이 같아도 다른 manifest 슬롯으로 action을 splice하지 못하게 한다.
+    /// `runtime_reconcile.max_runtime_bindings == 4096`이라 u16 sentinel 안에 닫힌다.
+    ended_manifest_index: u16 = std.math.maxInt(u16),
     /// **커널 cwd 폴백 캐시(Term별)** — OSC 7이 빈 Term의 cwd를 `proc_pidinfo`로 물어본 결과
     /// (docs/editor-surface-dock.md §3.5). `proc_pidinfo`는 syscall이라 매 프레임 부를 수 없어 저주기로만
     /// 갱신하고 그 사이에는 이 값을 그대로 쓴다. 경로 길이는 `PATH_MAX`로 정해져 있으므로 인라인 배열이다 —
@@ -2508,6 +2512,17 @@ var app_session_host_coordinator: session_host.session_host_coordinator.SessionH
 var app_recovered_sessions_projection: session_host.recovered_sessions_projection.Projection = .{};
 var app_recovered_sessions_workspace_generation: u64 = 0;
 var app_recovered_sessions_launch_attempted: bool = false;
+var app_recovered_session_windows: std.ArrayListUnmanaged(*AppSession) = .empty;
+var app_recovered_session_window_generation: u64 = 0;
+const RecoveredEndedLocation = struct {
+    session: *AppSession,
+    window_generation: u64,
+    graph_generation: u64,
+    tab_index: usize,
+    pane: *Pane,
+    term_index: usize,
+    tomb: *Term,
+};
 var app_process_incident_nonce: u128 = 0;
 // 공개 종료 ABI는 mutable owner graph를 읽기 전에 이 immutable publication token으로 caller thread를 거른다.
 var app_process_incident_owner_thread = std.atomic.Value(u64).init(0);
@@ -2539,6 +2554,102 @@ var app_keep_alive_policy_initialized: bool = false;
 // Zig test runner 안에서 full AppSession fixture가 모두 내려가면 다음 test의 첫 세션이 새 앱 launch처럼 config를
 // 다시 채택하게 한다. 같은 test의 두 번째 Window는 production resolver를 그대로 탄다.
 var live_app_sessions: usize = 0;
+
+/// Workspace restore submodule이 staged tombstone에 app-global reconciliation ordinal을 결속하는
+/// sole resolver. Ordinal을 Window마다 다시 세지 않고 exact host/runtime row에서만 가져온다.
+pub fn recoveredEndedManifestIndexForRestore(runtime_host_id: []const u8, runtime_id: []const u8) ?u16 {
+    if (runtime_host_id.len != 32 or runtime_id.len != 32) return null;
+    for (app_recovered_sessions_projection.rows) |row| {
+        if (row.kind != .ended_present_conflict or row.manifest_index == null or
+            row.manifest_index.? >= maru.session.runtime_reconcile.max_runtime_bindings) continue;
+        var host_buf: [32]u8 = undefined;
+        var runtime_buf: [32]u8 = undefined;
+        _ = std.fmt.bufPrint(&host_buf, "{x:0>32}", .{row.host_id}) catch unreachable;
+        _ = std.fmt.bufPrint(&runtime_buf, "{x:0>32}", .{row.runtime_id}) catch unreachable;
+        if (std.mem.eql(u8, runtime_host_id, &host_buf) and std.mem.eql(u8, runtime_id, &runtime_buf))
+            return @intCast(row.manifest_index.?);
+    }
+    return null;
+}
+
+fn bindRecoveredEndedManifestOrdinals() void {
+    for (app_recovered_session_windows.items) |session| {
+        for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!term.rt.ended_placeholder) continue;
+            term.rt.ended_manifest_index = recoveredEndedManifestIndexForRestore(
+                term.rt.ended_runtime_host_id,
+                term.rt.ended_runtime_id,
+            ) orelse std.math.maxInt(u16);
+        };
+    }
+}
+
+fn registerRecoveredSessionWindow(session: *AppSession) !void {
+    if (session.recovered_session_window_generation != 0) return error.InvalidAuthority;
+    const next_generation = std.math.add(u64, app_recovered_session_window_generation, 1) catch
+        return error.GenerationOverflow;
+    for (app_recovered_session_windows.items) |existing| if (existing == session)
+        return error.InvalidAuthority;
+    try app_recovered_session_windows.append(std.heap.smp_allocator, session);
+    app_recovered_session_window_generation = next_generation;
+    session.recovered_session_window_generation = next_generation;
+}
+
+fn unregisterRecoveredSessionWindow(session: *AppSession) void {
+    if (session.recovered_session_window_generation == 0) return;
+    for (app_recovered_session_windows.items, 0..) |existing, index| if (existing == session) {
+        _ = app_recovered_session_windows.swapRemove(index);
+        session.recovered_session_window_generation = 0;
+        if (app_recovered_session_windows.items.len == 0) {
+            app_recovered_session_windows.deinit(std.heap.smp_allocator);
+            app_recovered_session_windows = .empty;
+        }
+        return;
+    };
+    session_host.pending_term_close_graph.fatalProofLoss();
+}
+
+fn locateRecoveredEnded(row: session_host.recovered_sessions_projection.Row) !RecoveredEndedLocation {
+    if (row.kind != .ended_present_conflict or row.manifest_index == null or
+        row.manifest_index.? >= maru.session.runtime_reconcile.max_runtime_bindings)
+        return error.InvalidAuthority;
+    const manifest_index: u16 = @intCast(row.manifest_index.?);
+    var host_buf: [32]u8 = undefined;
+    var runtime_buf: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&host_buf, "{x:0>32}", .{row.host_id}) catch unreachable;
+    _ = std.fmt.bufPrint(&runtime_buf, "{x:0>32}", .{row.runtime_id}) catch unreachable;
+    var found: ?RecoveredEndedLocation = null;
+    for (app_recovered_session_windows.items) |session| {
+        if (session.recovered_session_window_generation == 0) return error.InvalidAuthority;
+        for (session.tabs.items, 0..) |tab, tab_index| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, term_index| {
+            if (!term.rt.ended_placeholder or
+                term.rt.ended_manifest_index != manifest_index or
+                !std.mem.eql(u8, term.rt.ended_runtime_host_id, &host_buf) or
+                !std.mem.eql(u8, term.rt.ended_runtime_id, &runtime_buf)) continue;
+            if (found != null) return error.InvalidAuthority;
+            found = .{
+                .session = session,
+                .window_generation = session.recovered_session_window_generation,
+                .graph_generation = session.session_host_window_graph_generation,
+                .tab_index = tab_index,
+                .pane = pane,
+                .term_index = term_index,
+                .tomb = term,
+            };
+        };
+    }
+    return found orelse error.InvalidAuthority;
+}
+
+fn recoveredEndedLocationCurrent(location: RecoveredEndedLocation) bool {
+    const session = location.session;
+    return session.recovered_session_window_generation == location.window_generation and
+        session.session_host_window_graph_generation == location.graph_generation and
+        location.tab_index < session.tabs.items.len and
+        location.term_index < location.pane.terms.items.len and
+        location.pane.terms.items[location.term_index] == location.tomb and
+        location.tomb.rt.ended_placeholder;
+}
 // test에서 `init`이 파싱할 config 텍스트. test는 개발자의 실제 config 파일을 읽지 않으므로(비결정적) 기본은 빈
 // 문자열이고, **config 값에 따라 갈리는 제품 경로**(예: 상태줄 훅 설치 여부)를 검사하는 test만 이 값을 세워
 // 결정적으로 주입한다. 세운 test는 defer로 되돌린다 — process-global이다.
@@ -3109,11 +3220,152 @@ pub const AppSession = struct {
             .quick_window = self.is_quick,
             .workspace_generation = workspace_generation,
         }, ws, inventories);
+        bindRecoveredEndedManifestOrdinals();
     }
 
     pub fn recoveredSessionsRows(self: *const AppSession, primary_window: bool) []const session_host.recovered_sessions_projection.Row {
         if (!primary_window or self.is_quick or !app_keep_alive_after_quit) return &.{};
         return app_recovered_sessions_projection.rows;
+    }
+
+    /// CR6b one-item adopt 제품 진입점. Sidebar row는 단지 locator이며, 현재 pool generation과 fresh
+    /// host.info/runtime.get을 다시 확인한 뒤에만 exact runtime attach를 시작한다. 실패는 projection과 topology를
+    /// 그대로 두고, attach 뒤 construction 실패는 createTerm의 client-side detach errdefer가 host runtime을 보존한다.
+    pub fn activateRecoveredSessionAt(self: *AppSession, projection_index: usize) !void {
+        if (!self.is_primary_window or self.is_quick or !app_keep_alive_after_quit)
+            return error.InvalidAuthority;
+        if (projection_index >= app_recovered_sessions_projection.rows.len)
+            return error.InvalidAuthority;
+        const row = app_recovered_sessions_projection.rows[projection_index];
+        const next_projection_generation = try app_recovered_sessions_projection.validateExact(projection_index, row);
+        const ended_location: ?RecoveredEndedLocation = switch (row.kind) {
+            .orphan => null,
+            .ended_present_conflict => try locateRecoveredEnded(row),
+        };
+        const pool = if (app_remote_host_pool) |*value| value else return error.SessionHostUnavailable;
+        const adapter_generation = pool.adapterGeneration(row.host_id) orelse return error.InvalidAuthority;
+        const adapter = pool.get(row.host_id) orelse return error.InvalidAuthority;
+        if (adapter.hostId() != row.host_id) return error.InvalidAuthority;
+
+        const allocator = std.heap.smp_allocator;
+        const action_deadline = session_host.client_deadline.AbsoluteDeadline.after(
+            self.io,
+            session_host.recovered_session_adopt.action_deadline_ns,
+        ) catch return error.InvalidAuthority;
+        const host_info = try adapter.callUntil("host.info", "{}", action_deadline);
+        defer allocator.free(host_info);
+        var runtime_id_buf: [32]u8 = undefined;
+        _ = std.fmt.bufPrint(&runtime_id_buf, "{x:0>32}", .{row.runtime_id}) catch unreachable;
+        var params_buf: [64]u8 = undefined;
+        const params = std.fmt.bufPrint(&params_buf, "{{\"runtime_id\":\"{s}\"}}", .{&runtime_id_buf}) catch
+            return error.InvalidAuthority;
+        const runtime_info = try adapter.callUntil("runtime.get", params, action_deadline);
+        defer allocator.free(runtime_info);
+        try session_host.recovered_session_adopt.validateFreshEvidence(allocator, row, .{
+            .projection_generation = app_recovered_sessions_projection.generation,
+            .workspace_generation = app_recovered_sessions_workspace_generation,
+            .adapter_generation = adapter_generation,
+            .adapter_host_id = adapter.hostId(),
+        }, host_info, runtime_info);
+
+        var host_id_buf: [32]u8 = undefined;
+        _ = std.fmt.bufPrint(&host_id_buf, "{x:0>32}", .{row.host_id}) catch unreachable;
+        switch (row.kind) {
+            .orphan => {
+                std.debug.assert(self.restore_runtime_host_id.len == 0 and self.restore_runtime_id.len == 0);
+                self.restore_runtime_host_id = &host_id_buf;
+                self.restore_runtime_id = &runtime_id_buf;
+                errdefer {
+                    self.restore_runtime_host_id = "";
+                    self.restore_runtime_id = "";
+                }
+                _ = try tab_ops.newTab(self);
+                std.debug.assert(self.restore_runtime_host_id.len == 0 and self.restore_runtime_id.len == 0);
+                // `createTerm` keeps this bit set only while an existing host runtime is staged: every
+                // fallible suffix before publication must detach instead of terminating it.  The tab is
+                // now part of the live AppSession graph, so later user/window teardown owns the normal
+                // terminate path just like a successfully published workspace restore.
+                pane_ops.activePane(self).activeTerm().rt.restored_existing = false;
+                app_recovered_sessions_projection.consumeExactNoFail(
+                    projection_index,
+                    row,
+                    next_projection_generation,
+                );
+                term_ops.finishInitialSurface(self);
+            },
+            .ended_present_conflict => try replaceRecoveredEnded(
+                ended_location orelse return error.InvalidAuthority,
+                &host_id_buf,
+                &runtime_id_buf,
+                projection_index,
+                row,
+                next_projection_generation,
+            ),
+        }
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+    }
+
+    fn replaceRecoveredEnded(
+        location: RecoveredEndedLocation,
+        host_id: []const u8,
+        runtime_id: []const u8,
+        projection_index: usize,
+        row: session_host.recovered_sessions_projection.Row,
+        next_projection_generation: u64,
+    ) !void {
+        if (!recoveredEndedLocationCurrent(location)) return error.InvalidAuthority;
+        const target = location.session;
+        const tomb = location.tomb;
+        const carried_name: ?[]const u8 = if (tomb.surface.custom_name) |name|
+            try target.allocator.dupe(u8, name)
+        else
+            null;
+        errdefer if (carried_name) |name| target.allocator.free(name);
+
+        const size = terminal.clampGridSize(tomb.surface.core.size);
+        var cfg = target.new_tab_config;
+        cfg.size = size;
+        const request = spawnRequest(
+            cfg,
+            target.loaded_config.config.term,
+            target.loaded_config.config.shell,
+            target.loaded_config.config.env,
+            target.shellIntegrationZdotdir(),
+            target.new_tab_ssh_bin,
+        );
+        std.debug.assert(target.restore_runtime_host_id.len == 0 and target.restore_runtime_id.len == 0);
+        target.restore_runtime_host_id = host_id;
+        target.restore_runtime_id = runtime_id;
+        errdefer {
+            target.restore_runtime_host_id = "";
+            target.restore_runtime_id = "";
+        }
+        const fresh = try term_ops.createTerm(target, request, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+        var fresh_owned = true;
+        errdefer if (fresh_owned) term_ops.destroyTerm(target, fresh);
+        if (!recoveredEndedLocationCurrent(location)) return error.InvalidAuthority;
+
+        fresh.surface.custom_name = carried_name;
+        fresh.rt.restored_existing = false;
+        location.pane.terms.items[location.term_index] = fresh;
+        fresh_owned = false;
+        app_recovered_sessions_projection.consumeExactNoFail(
+            projection_index,
+            row,
+            next_projection_generation,
+        );
+        // The exact pane-slot replacement is the publication point.  Before this store the errdefer
+        // above must preserve the host runtime; after it, the live Term has ordinary close ownership.
+        term_ops.destroyTerm(target, tomb);
+        const tab = target.tabs.items[location.tab_index];
+        target.surface_ptrs.items[location.tab_index] = tab.activePane().activeTerm().surface;
+        target.app_window.tabs = target.surface_ptrs.items;
+        workspace_ops.advanceSessionHostWindowGraph(target);
+        term_ops.finishInitialSurface(target);
+        if (location.tab_index == target.app_window.active_tab) pane_ops.recomputeActivePaneRect(target);
+        sidebar_ops.rebuildSidebar(target) catch {};
+        target.metal_dirty = true;
     }
 
     pub fn setPrimaryWindow(self: *AppSession, value: bool) void {
@@ -3597,6 +3849,7 @@ pub const AppSession = struct {
     // gesture prepared in the old Window cannot act on the moved Term.
     session_host_window_generation: u64 = 1,
     session_host_window_graph_generation: u64 = 1,
+    recovered_session_window_generation: u64 = 0,
     // `.terminateLater`의 end-all 확인 뒤에는 Swift에 accepted를 즉시 보내지 않는다. 이 final-address owner가
     // backend의 공통 deadline과 한-tick-one-target cursor를 보존해 모든 target terminal 뒤에만 승인한다.
     pending_app_quit_shutdown: PendingAppQuitShutdown = .{},
@@ -5161,6 +5414,7 @@ pub const AppSession = struct {
             );
             term_ops.finishInitialSurface(self);
         }
+        try registerRecoveredSessionWindow(self);
         self.writeSummaryFromState();
     }
 
@@ -10448,6 +10702,7 @@ pub const AppSession = struct {
     /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
+        if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
         // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
@@ -10934,6 +11189,11 @@ pub const AppSession = struct {
                             } else {
                                 agent_ops.focusAgentRow(self, ag.tab, ag.pane, ag.term);
                             }
+                        } else if (self.sidebar_rows.items[slot] == .recovered_session) {
+                            const candidate = self.sidebar_rows.items[slot].recovered_session;
+                            self.activateRecoveredSessionAt(candidate.projection_index) catch {
+                                self.showNoticeKey(.app_recovered_session_failed);
+                            };
                         } else if (chrome.components.sidebar.onGroupHeader(self.sidebar_rows.items, slot)) {
                             if (self.sidebar_search_active) {
                                 self.toggleGroupCollapsedAt(slot); // 검색 중 = 즉시 토글(그룹 통째 드래그 비활성)
@@ -17917,6 +18177,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        unregisterRecoveredSessionWindow(self);
         // 훅 이벤트 로그는 «기록» 이 아니라 «소비 즉시 비우는 큐» 다(docs/agent-hooks.md §4.2) — 그 안에는
         // 프롬프트 원문과 셸 명령이 평문으로 들어 있다. Term 을 놓기 **전에** 지운다(surfaceId 가 필요하다).
         agent_ops.cleanupOwnedAgentHookLogs(self);
@@ -63288,15 +63549,21 @@ test "CR6a-2 primary sidebar는 dead 또는 malformed discovery를 complete empt
     try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.stale, inventories.items[2].unavailable.reason);
 }
 
-test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory 뒤에만 materialize한다" {
+const Cr6RecoveredFixtureMode = enum { inert, orphan, ended_conflict, stale_projection, stale_manifest_slot, missing_runtime, deadline_stall, attach_oom };
+
+fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode) !void {
     if (!is_macos) return error.SkipZigTest;
     if (std.c.getenv("MARU_SESSION_HOST_CR6A2_REAL_HOST_AGGREGATE_SKIP") != null)
         return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-cr6a2-launch-{d}", .{std.c.getpid()}) catch
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-cr6a2-launch-{d}-{d}", .{
+        std.c.getpid(),
+        @intFromEnum(mode),
+    }) catch
         return error.SkipZigTest;
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
     _ = std.c.mkdir(base.ptr, 0o700);
     var dir_buf: [192]u8 = undefined;
     const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -63311,7 +63578,9 @@ test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory �
         session_host.daemon.runSessionHostWithIdentity(std.heap.page_allocator, io, dir, socket, fixture_host_id) catch {};
         std.c._exit(0);
     }
+    var child_stopped = false;
     defer {
+        if (child_stopped) _ = std.c.kill(child, std.posix.SIG.CONT);
         _ = std.c.kill(child, std.posix.SIG.TERM);
         var status: c_int = undefined;
         var reaped = false;
@@ -63327,9 +63596,7 @@ test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory �
             _ = std.c.kill(child, std.posix.SIG.KILL);
             _ = std.c.waitpid(child, &status, 0);
         }
-        _ = std.c.unlink(socket.ptr);
-        _ = std.c.rmdir(dir.ptr);
-        _ = std.c.rmdir(base.ptr);
+        std.Io.Dir.cwd().deleteTree(io, base) catch {};
     }
 
     var spawner: ?session_host.client.Client = null;
@@ -63424,7 +63691,217 @@ test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory �
     try std.testing.expect(tab_ops.visibleTab(session, 0) == null);
     try std.testing.expect(tab_ops.visibleTab(session, 1) == null);
 
+    var ended_target: ?*AppSession = null;
+    defer if (ended_target) |target| {
+        target.deinit();
+        allocator.destroy(target);
+    };
+    var original_tomb: ?*Term = null;
+    if (mode == .ended_conflict or mode == .stale_manifest_slot) {
+        const target = try allocator.create(AppSession);
+        var target_storage_owned = true;
+        errdefer if (target_storage_owned) allocator.destroy(target);
+        try target.init(io, allocator, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .defer_initial_surface = 1,
+        });
+        ended_target = target;
+        target_storage_owned = false;
+        var host_hex: [32]u8 = undefined;
+        _ = std.fmt.bufPrint(&host_hex, "{x:0>32}", .{host_id}) catch unreachable;
+        const surfaces = [_]maru.session.workspace.Surface{.{
+            .title = "Recovered tombstone",
+            .runtime_host_id = &host_hex,
+            .runtime_id = &runtime_id,
+            .runtime_state = .ended,
+        }};
+        const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+        const tabs = [_]maru.session.workspace.Tab{.{ .tree = &.{.{ .leaf = 0 }}, .panes = &panes }};
+        const preceding_surfaces = [_]maru.session.workspace.Surface{.{
+            .runtime_host_id = &host_hex,
+            .runtime_id = "0000000000000000000000000000dead",
+            .runtime_state = .ended,
+        }};
+        const preceding_panes = [_]maru.session.workspace.Pane{.{ .surfaces = &preceding_surfaces }};
+        const preceding_tabs = [_]maru.session.workspace.Tab{.{ .tree = &.{.{ .leaf = 0 }}, .panes = &preceding_panes }};
+        const windows = [_]maru.session.workspace.Window{ .{ .tabs = &preceding_tabs }, .{ .tabs = &tabs } };
+        // The action is issued by the primary `session`, but the canonical manifest ordinal 1 is
+        // owned by another live AppSession. This exercises the app-global Window registry and
+        // exact target-pane resolver instead of merely using a two-Window manifest in one Window.
+        try target.applyWorkspaceWindow(windows[1]);
+        original_tomb = pane_ops.activePane(target).activeTerm();
+        try std.testing.expect(original_tomb.?.rt.ended_placeholder);
+        try std.testing.expectEqual(std.math.maxInt(u16), original_tomb.?.rt.ended_manifest_index);
+        const authority = app_recovered_sessions_projection.rows[0].authority;
+        const runtime_value = try std.fmt.parseInt(u128, &runtime_id, 16);
+        const inventory_runtimes = [_]maru.session.runtime_reconcile.Runtime{.{ .runtime_id = runtime_value }};
+        const inventories = [_]maru.session.runtime_reconcile.HostInventory{.{ .complete = .{
+            .authority = authority,
+            .runtimes = &inventory_runtimes,
+        } }};
+        try session.replaceRecoveredSessionsProjection(.{ .windows = &windows }, &inventories, true, app_recovered_sessions_workspace_generation);
+        try std.testing.expectEqual(session_host.recovered_sessions_projection.CandidateKind.ended_present_conflict, app_recovered_sessions_projection.rows[0].kind);
+        try std.testing.expectEqual(@as(u16, 1), original_tomb.?.rt.ended_manifest_index);
+        try sidebar_ops.rebuildSidebar(session);
+    }
+
+    if (mode != .inert) {
+        const row_before = app_recovered_sessions_projection.rows[0];
+        const projection_generation_before = app_recovered_sessions_projection.generation;
+        const source_graph_generation_before = session.session_host_window_graph_generation;
+        const target_graph_generation_before = if (ended_target) |target|
+            target.session_host_window_graph_generation
+        else
+            null;
+        const backend_runtime_count_before = app_remote_backend.?.runtimes.count();
+        if (mode == .stale_projection)
+            app_recovered_sessions_workspace_generation = std.math.add(
+                u64,
+                app_recovered_sessions_workspace_generation,
+                1,
+            ) catch unreachable;
+        if (mode == .missing_runtime) {
+            var terminate_params_buf: [64]u8 = undefined;
+            const terminate_params = std.fmt.bufPrint(
+                &terminate_params_buf,
+                "{{\"runtime_id\":\"{s}\"}}",
+                .{&runtime_id},
+            ) catch unreachable;
+            const terminate_response = try spawner.?.call("runtime.terminate", terminate_params);
+            allocator.free(terminate_response);
+        }
+        if (mode == .deadline_stall) {
+            try std.testing.expectEqual(@as(c_int, 0), std.c.kill(child, std.posix.SIG.STOP));
+            child_stopped = true;
+        }
+        const action_started_ns = std.Io.Clock.awake.now(io).nanoseconds;
+        switch (mode) {
+            .inert => unreachable,
+            .orphan, .stale_projection, .missing_runtime, .deadline_stall, .attach_oom => {
+                session.sidebar_width_px = 200;
+                session.sidebar_header_height_px = 40;
+                session.sidebar_metrics = chrome.components.sidebar.Metrics.init(20, 24);
+                try sidebar_ops.rebuildSidebar(session);
+                const click_y = sidebar_ops.testSidebarRowCenterY(session, 1);
+                try std.testing.expectEqual(@as(?usize, 1), sidebar_ops.sidebarSlotAt(session, click_y));
+                if (mode == .attach_oom) {
+                    // Fresh wire evidence has already been obtained inside the action when newTab
+                    // reaches its first AppSession-owned allocation. Fail that actual product
+                    // construction point, then restore the allocator before any teardown reads
+                    // pre-existing allocations.
+                    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+                    session.allocator = failing.allocator();
+                    session.mouse(1, 10, click_y, 0, 0);
+                    session.allocator = allocator;
+                    try std.testing.expect(failing.has_induced_failure);
+                } else {
+                    session.mouse(1, 10, click_y, 0, 0);
+                }
+            },
+            .ended_conflict, .stale_manifest_slot => {
+                if (mode == .stale_manifest_slot)
+                    original_tomb.?.rt.ended_manifest_index = 0;
+                session.sidebar_search_active = true;
+                for (app_recovered_sessions_projection.rows[0].label) |byte|
+                    try session.sidebar_search_input.appendChar(session.allocator, byte);
+                _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+            },
+        }
+        if (mode == .deadline_stall) {
+            const elapsed_ns = std.Io.Clock.awake.now(io).nanoseconds - action_started_ns;
+            try std.testing.expect(elapsed_ns >= session_host.recovered_session_adopt.action_deadline_ns);
+            try std.testing.expect(elapsed_ns < session_host.recovered_session_adopt.action_deadline_ns + 3 * std.time.ns_per_s);
+            _ = std.c.kill(child, std.posix.SIG.CONT);
+            child_stopped = false;
+        }
+        if (mode == .stale_projection or mode == .stale_manifest_slot or mode == .missing_runtime or mode == .deadline_stall or mode == .attach_oom) {
+            try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), session.recoveredSessionsRows(true).len);
+            try std.testing.expectEqual(projection_generation_before, app_recovered_sessions_projection.generation);
+            try std.testing.expect(std.meta.eql(row_before, app_recovered_sessions_projection.rows[0]));
+            try std.testing.expectEqual(source_graph_generation_before, session.session_host_window_graph_generation);
+            try std.testing.expect(!session.surface_initialized);
+            try std.testing.expectEqual(backend_runtime_count_before, app_remote_backend.?.runtimes.count());
+            try std.testing.expect(session.chrome_host.notice.open);
+            try std.testing.expectEqualStrings(
+                maru.i18n.t(.app_recovered_session_failed),
+                session.chrome_host.notice.message,
+            );
+            if (mode == .stale_manifest_slot) {
+                const target = ended_target orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqual(@as(usize, 1), target.tabs.items.len);
+                try std.testing.expectEqual(target_graph_generation_before.?, target.session_host_window_graph_generation);
+                try std.testing.expect(pane_ops.activePane(target).activeTerm() == original_tomb.?);
+                try std.testing.expect(original_tomb.?.rt.ended_placeholder);
+            }
+            if (mode == .attach_oom) {
+                var live_params_buf: [64]u8 = undefined;
+                const live_params = std.fmt.bufPrint(
+                    &live_params_buf,
+                    "{{\"runtime_id\":\"{s}\"}}",
+                    .{&runtime_id},
+                ) catch unreachable;
+                const live_response = try spawner.?.call("runtime.get", live_params);
+                defer allocator.free(live_response);
+                try std.testing.expect(std.mem.indexOf(u8, live_response, &runtime_id) != null);
+            }
+        } else {
+            const adopted_session = ended_target orelse session;
+            try std.testing.expectEqual(@as(usize, if (ended_target == null) 1 else 0), session.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 1), adopted_session.tabs.items.len);
+            try std.testing.expectEqual(@as(usize, 0), session.recoveredSessionsRows(true).len);
+            try std.testing.expect(adopted_session.surface_initialized);
+            const adopted = pane_ops.activePane(adopted_session).activeTerm();
+            if (original_tomb) |tomb| try std.testing.expect(adopted != tomb);
+            try std.testing.expect(!adopted.rt.restored_existing);
+            try std.testing.expect(adopted.surface.remote != null);
+            try std.testing.expectEqual(host_id, app_remote_backend.?.runtimeHostId(adopted.rt.handle).?);
+            try std.testing.expectEqual(runtime_id, app_remote_backend.?.runtimeIdFor(adopted.rt.handle).?);
+        }
+    }
     try session.finishDeferredInitialSurface();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
-    try std.testing.expectEqual(@as(usize, 3), session.sidebar_rows.items.len);
+    try std.testing.expectEqual(@as(usize, switch (mode) {
+        .inert, .stale_projection, .missing_runtime, .deadline_stall, .attach_oom => 3,
+        // Failed search activation intentionally keeps the query open, so the newly created
+        // default tab is filtered out while the matching recovered header+row remain visible.
+        .stale_manifest_slot => 2,
+        .orphan, .ended_conflict => 1,
+    }), session.sidebar_rows.items.len);
+}
+
+test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory 뒤에만 materialize한다" {
+    return runCr6RecoveredSessionRealHostFixture(.inert);
+}
+
+test "CR6b orphan row action은 fresh authority 뒤 exact runtime을 새 비고정 탭으로 채택한다" {
+    return runCr6RecoveredSessionRealHostFixture(.orphan);
+}
+
+test "CR6b ended conflict row action은 다른 Window의 exact tombstone을 같은 pane 슬롯에서 교체한다" {
+    return runCr6RecoveredSessionRealHostFixture(.ended_conflict);
+}
+
+test "CR6b stale projection row action은 topology와 projection을 mutation zero로 보존한다" {
+    return runCr6RecoveredSessionRealHostFixture(.stale_projection);
+}
+
+test "CR6b stale manifest slot row action은 exact tombstone과 projection을 보존한다" {
+    return runCr6RecoveredSessionRealHostFixture(.stale_manifest_slot);
+}
+
+test "CR6b missing runtime row action은 fresh runtime get 뒤 topology와 projection을 보존한다" {
+    return runCr6RecoveredSessionRealHostFixture(.missing_runtime);
+}
+
+test "CR6b stalled host row action은 single absolute deadline 뒤 topology와 projection을 보존한다" {
+    return runCr6RecoveredSessionRealHostFixture(.deadline_stall);
+}
+
+test "CR6b attach construction OOM은 topology와 projection 및 기존 runtime을 보존한다" {
+    return runCr6RecoveredSessionRealHostFixture(.attach_oom);
 }

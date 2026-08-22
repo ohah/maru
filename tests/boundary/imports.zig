@@ -1578,6 +1578,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlineGenerationExecuteError" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRequestUntil" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executeGenerationRequestInternal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePublishedRpcResponseWithoutDecode" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readAttachmentCatchupBarrierPlanUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "requestAttachmentCatchupUntil" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightAttachmentControllerPromotion" },

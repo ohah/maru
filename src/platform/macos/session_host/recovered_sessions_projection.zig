@@ -31,10 +31,11 @@ pub const Context = struct {
 
 pub const Projection = struct {
     rows: []Row = &.{},
+    storage: []Row = &.{},
     generation: u64 = 0,
 
     pub fn deinit(self: *Projection, allocator: std.mem.Allocator) void {
-        if (self.rows.len != 0) allocator.free(self.rows);
+        if (self.storage.len != 0) allocator.free(self.storage);
         self.* = .{};
     }
 
@@ -48,10 +49,34 @@ pub const Projection = struct {
         errdefer if (next_rows.len != 0) allocator.free(next_rows);
         next_rows = try buildRows(allocator, context.workspace_generation, next_generation, ws, inventories);
 
-        const old_rows = self.rows;
+        const old_storage = self.storage;
         self.rows = next_rows;
+        self.storage = next_rows;
         self.generation = next_generation;
-        if (old_rows.len != 0) allocator.free(old_rows);
+        if (old_storage.len != 0) allocator.free(old_storage);
+    }
+
+    /// Fresh authority 검증과 topology commit이 모두 끝난 정확한 action만 목록에서 제거한다. caller가 들고 있던
+    /// index는 rebuild/refresh 사이에 stale할 수 있으므로 전체 row를 다시 대조하고, 성공 suffix는 allocation-free다.
+    pub fn validateExact(self: *const Projection, index: usize, expected: Row) !u64 {
+        if (index >= self.rows.len or self.generation == 0 or
+            self.generation != expected.projection_generation or
+            !std.meta.eql(self.rows[index], expected))
+            return error.InvalidAuthority;
+        return std.math.add(u64, self.generation, 1) catch error.GenerationOverflow;
+    }
+
+    pub fn consumeExactNoFail(self: *Projection, index: usize, expected: Row, next_generation: u64) void {
+        const recomputed = self.validateExact(index, expected) catch
+            @panic("recovered sessions projection authority drift after topology commit");
+        if (recomputed != next_generation)
+            @panic("recovered sessions projection generation drift after topology commit");
+        var cursor = index;
+        while (cursor + 1 < self.rows.len) : (cursor += 1)
+            self.rows[cursor] = self.rows[cursor + 1];
+        self.rows = self.rows[0 .. self.rows.len - 1];
+        self.generation = next_generation;
+        for (self.rows) |*row| row.projection_generation = next_generation;
     }
 };
 
@@ -158,10 +183,8 @@ test "CR6a recovered projection은 opt-out secondary quick과 refresh 실패에�
 }
 
 test "CR6a recovered projection은 OOM과 noncanonical binding authority drift에서 기존 snapshot을 보존한다" {
-    var projection: Projection = .{
-        .rows = try std.testing.allocator.alloc(Row, 1),
-        .generation = 9,
-    };
+    const initial = try std.testing.allocator.alloc(Row, 1);
+    var projection: Projection = .{ .rows = initial, .storage = initial, .generation = 9 };
     defer projection.deinit(std.testing.allocator);
     projection.rows[0] = makeRow(.orphan, testAuthority(1, 1), 2, null, 1, 9);
     const before_ptr = projection.rows.ptr;
@@ -212,4 +235,29 @@ test "CR6a recovered projection은 OOM과 noncanonical binding authority drift�
     }, .{ .windows = &.{} }, &hosts));
     try std.testing.expectEqual(std.math.maxInt(u64), projection.generation);
     try std.testing.expectEqual(before_ptr, projection.rows.ptr);
+}
+
+test "CR6b recovered projection exact consume은 sibling을 보존하고 세대를 함께 전진한다" {
+    const runtimes = [_]reconcile.Runtime{ .{ .runtime_id = 10 }, .{ .runtime_id = 11 } };
+    const hosts = [_]reconcile.HostInventory{.{ .complete = .{
+        .authority = testAuthority(1, 7),
+        .runtimes = &runtimes,
+    } }};
+    var projection: Projection = .{};
+    defer projection.deinit(std.testing.allocator);
+    try projection.refresh(std.testing.allocator, .{
+        .keep_alive = true,
+        .primary_window = true,
+        .quick_window = false,
+        .workspace_generation = 7,
+    }, .{ .windows = &.{} }, &hosts);
+    try std.testing.expectEqual(@as(usize, 2), projection.rows.len);
+    const consumed = projection.rows[0];
+    const sibling_runtime = projection.rows[1].runtime_id;
+    const next = try projection.validateExact(0, consumed);
+    projection.consumeExactNoFail(0, consumed, next);
+    try std.testing.expectEqual(@as(usize, 1), projection.rows.len);
+    try std.testing.expectEqual(sibling_runtime, projection.rows[0].runtime_id);
+    try std.testing.expectEqual(next, projection.rows[0].projection_generation);
+    try std.testing.expectError(error.InvalidAuthority, projection.validateExact(0, consumed));
 }

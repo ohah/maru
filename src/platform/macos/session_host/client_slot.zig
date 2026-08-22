@@ -8064,29 +8064,24 @@ pub fn executeGenerationRpcDecoded(
     if (builtin.is_test) rpc_substrate_fail_stop_test_hook.writeStage(.response_published);
     switch (execution.pre_decode(execution.pre_decode_context)) {
         .proceed => {},
-        .busy => return error.Busy,
-        .out_of_memory => return error.OutOfMemory,
-        .protocol_failure => return error.ProtocolError,
-        .connection_closed => return error.ConnectionClosed,
+        .busy => {
+            settlePublishedRpcResponseWithoutDecode(execution.request, response);
+            return error.Busy;
+        },
+        .out_of_memory => {
+            settlePublishedRpcResponseWithoutDecode(execution.request, response);
+            return error.OutOfMemory;
+        },
+        .protocol_failure => {
+            settlePublishedRpcResponseWithoutDecode(execution.request, response);
+            return error.ProtocolError;
+        },
+        .connection_closed => {
+            settlePublishedRpcResponseWithoutDecode(execution.request, response);
+            return error.ConnectionClosed;
+        },
         .stale => {
-            const stale_admission = beginGenerationRequestOwner(execution.request, false) catch
-                process_seal_service.fatalIntegrity(.proof_loss);
-            defer endRegisteredNodeOperation(stale_admission.operation);
-            var stale_borrow: rpc_executed_response.RpcResponseBorrow = .{};
-            beginRpcResponseBorrowUnderOwner(
-                execution.request,
-                response,
-                &stale_borrow,
-                &stale_admission,
-            ) catch process_seal_service.fatalIntegrity(.proof_loss);
-            finishRpcResponseOwnedUnderOwner(
-                execution.request,
-                response,
-                &stale_borrow,
-                .reusable,
-                &stale_admission,
-            ) catch process_seal_service.fatalIntegrity(.proof_loss);
-            if (!response.pristineExact()) process_seal_service.fatalIntegrity(.proof_loss);
+            settlePublishedRpcResponseWithoutDecode(execution.request, response);
             return error.Unauthorized;
         },
     }
@@ -8131,6 +8126,32 @@ pub fn executeGenerationRpcDecoded(
     if (disposition == .reusable and !response.pristineExact())
         process_seal_service.fatalIntegrity(.proof_loss);
     return disposition;
+}
+
+/// The correlated response has already been published before the runtime-level pre-decode hook
+/// drains interleaved events.  A hook failure must therefore release that exact response owner
+/// before returning its typed error; otherwise window teardown observes a permanently live RPC
+/// owner even though no caller remains that can borrow or finish it.  The response bytes were not
+/// decoded, so this is a reusable response-owner settlement.  Any connection poison established
+/// by the hook remains independently latched on Client.
+fn settlePublishedRpcResponseWithoutDecode(
+    request: GenerationRequestAbort,
+    response: *RpcExecutedResponse,
+) void {
+    const admission = beginGenerationRequestOwner(request, false) catch
+        process_seal_service.fatalIntegrity(.proof_loss);
+    defer endRegisteredNodeOperation(admission.operation);
+    var borrow: rpc_executed_response.RpcResponseBorrow = .{};
+    beginRpcResponseBorrowUnderOwner(request, response, &borrow, &admission) catch
+        process_seal_service.fatalIntegrity(.proof_loss);
+    finishRpcResponseOwnedUnderOwner(
+        request,
+        response,
+        &borrow,
+        .reusable,
+        &admission,
+    ) catch process_seal_service.fatalIntegrity(.proof_loss);
+    if (!response.pristineExact()) process_seal_service.fatalIntegrity(.proof_loss);
 }
 
 /// Arms one destructive, process-local B3-6 fixture. The hook is deliberately scalar-only and

@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const client_mod = @import("client.zig");
+const client_deadline = @import("client_deadline.zig");
 const protocol = @import("protocol.zig");
 const screen_stream = @import("screen_stream.zig");
 const compatibility = @import("compatibility.zig");
@@ -664,6 +665,17 @@ pub const HostAdapter = struct {
     /// host.info/runtime.list/host.upgrade.*처럼 screen codec과 독립된 control RPC.
     pub fn call(self: *HostAdapter, method: []const u8, params_json: ?[]const u8) client_mod.ClientError![]u8 {
         return self.slot.callCurrent(self.slot.connectionGeneration(), method, params_json);
+    }
+
+    /// UI recovery action의 fresh evidence RPC. Caller가 발급한 하나의 absolute deadline을 그대로
+    /// ClientSlot까지 전달하며 이 facade 안에서 phase별 timeout을 다시 만들지 않는다.
+    pub fn callUntil(
+        self: *HostAdapter,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) client_mod.DeadlineClientError![]u8 {
+        return self.slot.callCurrentUntil(self.slot.connectionGeneration(), method, params_json, deadline);
     }
 
     /// generation runtime 생성은 고정된 wire method만 노출해 호출자가 raw Client를 빌리지 않게 한다.

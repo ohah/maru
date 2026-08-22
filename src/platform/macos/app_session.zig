@@ -1787,6 +1787,13 @@ const TermRuntime = struct {
         /// 그 프레임이 쓴 **탭 폭**. 셀 크기와 같은 이유로 여기 든다 — 탭 폭이 곧 열 계산이라 한 칸만
         /// 달라도 클릭이 글자에서 밀린다.
         tab_width: u8 = 0,
+        /// gutter **접기 칸**의 왼쪽 끝과 폭(px, 뷰 원점 기준). 화살표 클릭이 이 띠를 받는다(§4.1f).
+        ///
+        /// **본문과 같은 이유로 렌더가 굳힌다** — 이 값은 layout에서 나오고 layout은 폰트·pane 폭이
+        /// 바뀌면 달라지므로, 클릭 시점에 다시 구하면 행 배열과 다른 프레임의 띠가 된다.
+        /// 폭 0은 *"접기 칸이 없다"*(`features.folding = false`)이고, 그때 hit-test가 아무것도 안 받는다.
+        fold_left_px: u32 = 0,
+        fold_width_px: u32 = 0,
     } = .{},
     /// 렌더가 쓸 **탭 폭**. 기본값은 `frame.default_tab_width` 하나에서 온다(여기 숫자를 다시 쓰면
     /// 그것이 두 번째 출처가 된다 — 2차 적대적 검증이 그 부류를 잡았다).
@@ -11149,6 +11156,17 @@ pub const AppSession = struct {
                     //    넘기므로 split에서 다른 열의 막대도 그 열이 스크롤된다.
                     if (editor_ops.beginScrollbarGesture(self, pane, x_px, y_px)) {
                         _ = pane_ops.focusPaneByPtr(self, pane); // 잡았으면 그 pane이 활성이 되는 것이 자연스럽다
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
+                    // ⓑ' gutter **접기 화살표** 클릭 → 그 블록 접기/펼치기(§4.1f 포인터 경로).
+                    //    **본문 선택 앞**이다 — §4.1g 결정표가 *"화살표 클릭이 붙으면 그쪽이 먼저
+                    //    가져간다"*고 그 자리를 예약해 두었다. 지금은 `hitTestBody`가 gutter를 거절해
+                    //    순서가 결과를 바꾸지 않지만, 그 거절이 없어지는 날 이 순서가 유일한 방어다.
+                    //    화살표가 없는 칸은 `false`를 주므로 아래 포커스 이동으로 흘러간다.
+                    if (editor_ops.toggleFoldAtPoint(self, pane, x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane); // 눌렀으면 그 pane이 활성이 되는 것이 자연스럽다
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
                         return;

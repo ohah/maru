@@ -372,6 +372,59 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
 /// 14,096 클러스터를 세는 데 ASCII 88µs·한글 NFC 131µs쯤 든다.
 pub const max_status_column: usize = chrome_editor.frame.max_cols_count_limit;
 
+/// gutter **접기 칸**의 화면 좌표를 그 행의 **문서 줄**(0-based)로 옮긴다 — §4.1f의 포인터 경로.
+///
+/// **본문 좌표계(`hitTestBody`)의 짝이다.** 그쪽은 gutter를 `null`로 거절하고(*"접힘 화살표 자리를
+/// 안 뺏는다"*), 이 함수가 그 자리를 가져간다. §4.1g 결정표가 *"화살표 클릭이 붙으면 그쪽이 먼저
+/// 가져가고, 그때까지 이 좌표계는 그 사각을 비워 둔다"*고 적어 둔 그 자리다.
+///
+/// **읽는 것은 렌더가 굳힌 스냅숏뿐이다**(`editor_hit_geom`·`editor_hit_rows`·`editor_hit_lines`).
+/// 띠의 위치는 layout에서 나오고 layout은 폰트·pane 폭을 따라 움직이므로, 클릭 시점에 다시 구하면
+/// 보이는 화살표와 다른 프레임의 띠를 재게 된다 — 본문이 실측 80%·93% 불일치로 겪은 축이다.
+///
+/// `null`인 경우: 편집기 Term이 아니거나, 비교 뷰이거나, 아직 그린 프레임이 없거나, 접기 칸이
+/// 꺼져 있거나, 좌표가 그 띠 **밖**이거나, 그 행이 **랩으로 이어진 조각**이다.
+///
+/// **세로를 clamp하지 않는다** — `hitTestBody`와 갈리는 유일한 축이고 이유가 있다. 그쪽은 드래그가
+/// pane을 벗어나는 것이 정상이라 늘 유효한 offset을 줘야 하지만, 접기는 **한 번 누르는 동작**이라
+/// 밖은 곧 *"이 자리가 아니다"*다. 여기서 clamp하면 pane 아래 빈 곳을 눌러도 마지막 줄이 접힌다.
+///
+/// **줄이 접을 수 있는 머리인지는 안 본다.** 그것은 좌표계가 아니라 접힘 상태의 물음이라
+/// `toggleFoldAtPoint`가 `editor_fold_ranges`로 판정한다 — 여기서 함께 보면 좌표 변환을 재는
+/// 테스트가 접힘 상태까지 세워야 돌아간다.
+pub fn hitTestFoldMark(term: *Term, x_px: f64, y_px: f64) ?u32 {
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_diff != null) return null; // 비교 뷰는 접힘 자체가 없다(`foldsUnavailable`)
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (rows_len == 0) return null;
+
+    const geom = term.rt.editor_hit_geom;
+    // 폭 0은 "접기 칸이 없다"(`features.folding = false`)이고, 셀 0은 "그린 프레임이 없다"이다.
+    if (geom.fold_width_px == 0 or geom.cell_h_px == 0) return null;
+
+    // **캐스트 전에 묶는다** — `hitTestBody`와 같은 이유다(NaN·무한대는 `@intFromFloat`에서 죽는다).
+    const px_limit: f64 = 1 << 30;
+    const clamped_x: f64 = if (std.math.isNan(x_px)) 0 else @max(-px_limit, @min(px_limit, x_px));
+    const clamped_y: f64 = if (std.math.isNan(y_px)) 0 else @max(-px_limit, @min(px_limit, y_px));
+    const rel_x: i64 = @as(i64, @intFromFloat(clamped_x)) - @as(i64, geom.body_x);
+    const rel_y: i64 = @as(i64, @intFromFloat(clamped_y)) - @as(i64, geom.body_y);
+
+    const left: i64 = @intCast(geom.fold_left_px);
+    const right: i64 = left + @as(i64, @intCast(geom.fold_width_px));
+    if (rel_x < left or rel_x >= right) return null;
+    if (rel_y < 0) return null; // 위 doc — 클릭은 밖을 끌어오지 않는다
+    const row_i: usize = @intCast(@divFloor(rel_y, @as(i64, geom.cell_h_px)));
+    if (row_i >= rows_len) return null;
+
+    // **랩으로 이어진 조각에는 화살표가 없다**(`gutter.rowsForVisual` — 한 줄에 표식이 여러 개 서면
+    // 접힌 줄 수를 오해한다). 그린 것과 눌리는 것이 같아야 하므로 여기서도 거절한다.
+    if (!term.rt.editor_hit_rows[row_i].showsLineNumber()) return null;
+
+    const source_line = term.rt.editor_hit_lines[row_i];
+    if (source_line >= term.rt.editor_lines.len) return null;
+    return source_line;
+}
+
 /// 비교 뷰 본문의 화면 좌표를 **(어느 열, 행, 행 안 byte)**로 옮긴다(§4.1g "비교 뷰").
 ///
 /// **단일 편집기보다 두 단계 짧다.** 접힘 층(③)은 비교에서 거절되고(`foldsUnavailable`), 문서 offset
@@ -591,6 +644,11 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         .cell_w_px = @intCast(self.cell_width_px),
         .cell_h_px = @intCast(self.cell_height_px),
         .tab_width = term.rt.editor_tab_width,
+        // **접기 띠도 같은 layout에서 뽑는다**(§4.1f 포인터 경로). 여기서 함께 굳히지 않으면
+        // 클릭이 다른 프레임의 열을 보고, 그리는 자리와 누르는 자리가 갈린다 — 본문이 이미 같은
+        // 사고를 겪은 축이다(위 doc).
+        .fold_left_px = @as(u32, lay.folding.start) * @as(u32, self.cell_width_px),
+        .fold_width_px = @as(u32, lay.folding.width) * @as(u32, self.cell_width_px),
     };
 }
 
@@ -2223,10 +2281,15 @@ pub fn foldAll(self: *AppSession) bool {
 /// **그 중첩 레벨의 블록만 접는다**(VSCode `editor.foldLevelN`). 레벨 1이 문서 맨 바깥이다.
 ///
 /// **집합을 합치지 않고 갈아 끼운다.** VSCode는 기존 접힘 위에 더하지만 Vim `foldlevel`은 그 레벨에
-/// 맞춰 열고 닫는다 — 두 선례가 갈리는 자리다. N1에는 **개별 접기가 없어** 접힘 상태가 늘 "전체 ·
-/// 어느 레벨 · 없음" 중 하나이므로, 갈아 끼우는 쪽이 (a) 같은 명령을 두 번 눌러도 결과가 같고
-/// (b) 레벨 2를 본 뒤 레벨 1을 누르면 더 크게 접히는 예측 가능한 사다리가 된다. 합치기를 택하면
-/// 되돌릴 방법이 전체 펼치기뿐이라 사다리를 내려올 수 없다.
+/// 맞춰 열고 닫는다 — 두 선례가 갈리는 자리다. 갈아 끼우는 쪽이 (a) 같은 명령을 두 번 눌러도
+/// 결과가 같고 (b) 레벨 2를 본 뒤 레벨 1을 누르면 더 크게 접히는 예측 가능한 사다리가 된다.
+/// 합치기를 택하면 되돌릴 방법이 전체 펼치기뿐이라 사다리를 내려올 수 없다.
+///
+/// **초판은 근거를 하나 더 적었다** — *"N1에는 개별 접기가 없어 접힘 상태가 늘 「전체 · 어느 레벨 ·
+/// 없음」 중 하나"*. 화살표 클릭(`toggleFoldAtPoint`)이 붙으면서 그 전제는 사라졌고, 이제 집합은
+/// 임의의 모양일 수 있다. 그래도 **결론은 그대로다**: 위 (a)·(b)가 개별 접기와 무관하게 서고,
+/// 손으로 접은 것을 레벨 명령이 갈아 끼워도 화살표로 다시 접을 수 있다(잃는 것은 한 번의 클릭이지,
+/// 되돌릴 길 자체가 아니다).
 ///
 /// 그 레벨에 블록이 없으면 **아무 일도 안 한다**(`false`) — 갈아 끼우는 모델에서 빈 집합을 넣으면
 /// "접기 명령을 눌렀는데 펼쳐지는" 화면이 된다.
@@ -2267,6 +2330,67 @@ fn applyFold(self: *AppSession, level: ?u16) bool {
     rebuildVisible(self, term) catch {
         @memcpy(term.rt.editor_folded_buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
         term.rt.editor_folded_len = prev_len; // 화면이 그대로니 상태도 그대로 둔다
+        return false;
+    };
+    restoreTop(term, anchor);
+    self.metal_dirty = true;
+    return true;
+}
+
+/// gutter **접기 화살표를 눌렀는가** — 눌렀으면 그 블록 하나를 뒤집고 `true`(§4.1f 포인터 경로).
+///
+/// **§4.1f는 이것을 "안 한다"고 적었고 그 근거는 *"N1은 편집기 pane에 포인터 경로가 없다"*였다.**
+/// 그 전제가 §4.1g(본문 hit-test·텍스트 선택, 2026-08-19~20)에서 사라졌다 — 결정표가 그때
+/// *"화살표 클릭이 붙으면 그쪽이 먼저 가져간다"*고 자리를 예약해 두었고, 이 함수가 그 자리다.
+/// 계약을 바꾼 것이 아니라 **막고 있던 조건이 없어진 것**이다.
+///
+/// 명령(전체·레벨 접기)과 **같은 상태**를 건드린다. 화살표는 그 상태의 다른 입구일 뿐이고, 그래서
+/// 화살표로 접은 뒤 `Unfold All`이 그것을 편다.
+///
+/// 대상 Term은 **눌린 pane**의 것이다(활성 pane이 아니다) — split에서 다른 열의 화살표를 눌러도 그
+/// 문서가 접혀야 하고, 스크롤바 드래그가 같은 규율을 쓴다.
+pub fn toggleFoldAtPoint(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+    const term = pane.activeTerm();
+    if (term.kind != .editor) return false;
+    if (foldsUnavailable(term)) return false; // 비교 뷰 등 — 접힘 자체가 성립하지 않는다
+    const line = hitTestFoldMark(term, x_px, y_px) orelse return false;
+    // 범위는 파일을 열 때 세지만(§4.1f), 그때 실패했을 수 있으므로 여기서도 한 번 확인한다.
+    ensureFoldRanges(self, term) catch return false;
+    // **화살표가 없는 줄의 접기 칸은 아무도 안 가져간다.** 여기서 `true`를 주면 빈 칸을 눌러도
+    // 클릭이 소비되어 pane 포커스 이동이 안 일어난다 — 보이는 것이 없는데 반응만 사라진다.
+    if (!containsSorted(term.rt.editor_fold_ranges, line)) return false;
+    return toggleFoldHead(self, term, line);
+}
+
+/// 머리 줄 하나의 접힘을 뒤집는다. **집합은 오름차순을 유지한다** — `hiddenSpans`가 그것을 계약으로
+/// 요구한다(전체·레벨 접기는 `compute` 순서를 그대로 걸러 담아 공짜로 만족하지만, 하나씩 넣고 빼는
+/// 이 경로는 스스로 지켜야 한다).
+///
+/// **실패하면 있던 집합으로 되돌린다** — `applyFold`와 같은 이유이고 같은 백업 배열을 쓴다. 화면은
+/// 그대로인데 상태만 달라지면 `unfoldAll`이 거절해 숨은 줄을 못 되찾는다.
+fn toggleFoldHead(self: *AppSession, term: *Term, head: u32) bool {
+    const prev_len = term.rt.editor_folded_len;
+    const buf = term.rt.editor_folded_buf;
+    @memcpy(term.rt.editor_folded_prev[0..prev_len], buf[0..prev_len]);
+
+    if (std.sort.binarySearch(u32, buf[0..prev_len], head, orderU32)) |i| {
+        // 접혀 있다 → 편다. 뒤를 당겨 순서를 지킨다.
+        std.mem.copyForwards(u32, buf[i .. prev_len - 1], buf[i + 1 .. prev_len]);
+        term.rt.editor_folded_len = prev_len - 1;
+    } else {
+        // **저장소는 범위 수만큼 잡혀 있다**(`ensureFoldRanges`)이고 머리는 범위마다 하나뿐이라
+        // 넘칠 수 없다. 그래도 묶는다 — 넘치면 남의 메모리를 쓰는 것이라 조용한 실패가 최악이다.
+        if (prev_len >= buf.len) return false;
+        const at = std.sort.lowerBound(u32, buf[0..prev_len], head, orderU32);
+        std.mem.copyBackwards(u32, buf[at + 1 .. prev_len + 1], buf[at..prev_len]);
+        buf[at] = head;
+        term.rt.editor_folded_len = prev_len + 1;
+    }
+
+    const anchor = topDocLine(term); // 화면을 다시 만들기 **전에** 맨 위가 문서 몇째 줄인지 잡는다
+    rebuildVisible(self, term) catch {
+        @memcpy(buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
+        term.rt.editor_folded_len = prev_len;
         return false;
     };
     restoreTop(term, anchor);
@@ -5935,8 +6059,239 @@ test "gutter에 접힘 화살표가 선다 — 펼침 ▾, 접힘 ▸" {
         lines.len,
         .{},
     );
-    try testing.expectEqual(layout.folding.start, mark_col);
+    // **span의 시작이 아니라 화살표가 서는 칸이다**(`Layout.foldMarkCol` — 접기 span은 두 셀이고
+    // 왼쪽 칸은 줄 번호와의 여백이다). 그리는 쪽과 이 판정이 같은 함수를 읽어야 갈리지 않는다.
+    try testing.expectEqual(layout.foldMarkCol(), mark_col);
     try testing.expect(number_col < mark_col);
+    // 번호 마지막 자리와 **한 칸 이상** 뜬다 — 맞붙어 있던 것이 사용자 지적의 내용이었다(2026-08-22).
+    try testing.expect(mark_col >= layout.line_numbers.end() + 1);
+}
+
+/// 접힘 클릭 판정자들이 쓰는 픽스처 — 머리 둘·몸통 둘짜리 문서를 세우고 화살표를 그려 둔다.
+///
+/// **줄 배열을 갈아 끼우는 방식이라 범위를 여기서 세운다.** 제품 경로(`finishAttach`)는 파일을 열 때
+/// 그 둘을 부르고, 픽스처는 파일 대신 배열을 넣으므로 같은 두 걸음을 손으로 밟는다.
+fn foldClickFixture(fx: *PaneFixture, lines: [][]const u8) !void {
+    lines[0] = "a:";
+    lines[1] = "  zzz"; // 접히면 사라질 글자
+    lines[2] = "  zzz";
+    lines[3] = "b:";
+    lines[4] = "  qqq"; // **다른 블록** — 하나만 접히는지 보는 대조군이다
+    lines[5] = "tail"; // 화살표가 없는 줄
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = false;
+    try ensureFoldRanges(fx.session, fx.term);
+    try rebuildVisible(fx.session, fx.term);
+}
+
+test "gutter 접기 화살표를 누르면 그 블록만 접히고, 다시 누르면 펴진다 (§4.1f 포인터 경로)" {
+    // **§4.1f는 이것을 "안 한다"고 적었고 그 근거는 *"N1은 편집기 pane에 포인터 경로가 없다"*였다.**
+    // §4.1g(본문 hit-test·선택, 2026-08-19~20)가 그 전제를 없앴고, 결정표가 *"화살표 클릭이 붙으면
+    // 그쪽이 먼저 가져간다"*고 예약해 둔 자리를 이 경로가 채운다. 사용자 지적은 더 직접적이었다 —
+    // *"닫기 아이콘 실제 동작도 안 된다"*(2026-08-22): 화살표는 보이는데 눌러도 아무 일이 없었다.
+    //
+    // **판정은 그린 자리에서 누른다.** 화살표가 실제로 그려진 셀의 가운데 픽셀을 쓰므로, 그리는 쪽
+    // (`gutter.build` → `foldMarkCol`)과 받는 쪽(`editor_hit_geom.fold_*`)이 갈리면 여기서 죽는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 6);
+    defer allocator.free(lines);
+    try foldClickFixture(&fx, lines);
+
+    const open_mark: u21 = chrome_editor.gutter.Fold.open.codepoint().?;
+    const collapsed_mark: u21 = chrome_editor.gutter.Fold.collapsed.codepoint().?;
+    const pane = pane_ops.activePane(fx.session);
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const ox: f64 = @floatFromInt(d0.rect.x);
+    const oy: f64 = @floatFromInt(d0.rect.y);
+    var mark_row: ?u16 = null;
+    var mark_col: u16 = 0;
+    var z_before: usize = 0;
+    for (d0.dl.cells) |c| {
+        if (c.codepoint == open_mark) {
+            if (mark_row == null or c.row < mark_row.?) {
+                mark_row = @intCast(c.row);
+                mark_col = @intCast(c.col);
+            }
+        }
+        if (c.codepoint == 'z') z_before += 1;
+    }
+    d0.dl.deinit(allocator);
+    try testing.expect(z_before > 0); // 접기 전에는 보인다 — 아니면 아래 판정이 공허하다
+    const row = mark_row orelse return error.NoFoldMarkDrawn;
+
+    // 셀 **가운데**를 누른다. 모서리(+1px)를 쓰면 반올림이 한 칸 옆으로 새도 통과할 수 있다.
+    const mark_x = ox + (@as(f64, @floatFromInt(mark_col)) + 0.5) * cw;
+    const mark_y = oy + (@as(f64, @floatFromInt(row)) + 0.5) * ch;
+
+    try testing.expect(toggleFoldAtPoint(fx.session, pane, mark_x, mark_y));
+    try testing.expectEqual(@as(usize, 1), foldedHeads(fx.term).len); // **그 블록 하나만**
+
+    var d1 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    var z_after: usize = 0;
+    var q_after: usize = 0;
+    var collapsed_after: usize = 0;
+    for (d1.dl.cells) |c| {
+        if (c.codepoint == 'z') z_after += 1;
+        if (c.codepoint == 'q') q_after += 1;
+        if (c.codepoint == collapsed_mark) collapsed_after += 1;
+    }
+    d1.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), z_after); // 누른 블록이 숨었다
+    try testing.expect(q_after > 0); // **다른 블록은 그대로다** — 이것이 전체 접기와 갈리는 자리다
+    try testing.expectEqual(@as(usize, 1), collapsed_after); // 방향이 바뀐 화살표도 하나뿐이다
+
+    // 같은 자리를 다시 누르면 펴진다 — 같은 상태를 두 입구가 공유한다(`unfoldAll`도 이것을 편다).
+    try testing.expect(toggleFoldAtPoint(fx.session, pane, mark_x, mark_y));
+    try testing.expectEqual(@as(usize, 0), foldedHeads(fx.term).len);
+
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer d2.dl.deinit(allocator);
+    var z_back: usize = 0;
+    for (d2.dl.cells) |c| {
+        if (c.codepoint == 'z') z_back += 1;
+    }
+    try testing.expectEqual(z_before, z_back);
+}
+
+test "접기 칸의 왼쪽 여백 칸도 화살표를 누른 것으로 친다 — 누르는 자리가 그리는 자리보다 넓다" {
+    // **span은 두 셀이고 글자는 오른쪽 칸 하나다**(`geometry.foldMarkCol`). 왼쪽 칸은 줄 번호와의
+    // 여백인데, 포인터에게는 그 칸까지 화살표의 자리다 — 1셀(≈8px)은 맞히기에 좁다. 반대 방향의
+    // 규율은 지킨다: **누르는 자리가 넓은 것은 괜찮지만 다른 자리면 안 된다**(§5.4).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 6);
+    defer allocator.free(lines);
+    try foldClickFixture(&fx, lines);
+
+    const pane = pane_ops.activePane(fx.session);
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const ox: f64 = @floatFromInt(d0.rect.x);
+    const oy: f64 = @floatFromInt(d0.rect.y);
+    d0.dl.deinit(allocator);
+
+    const geom = fx.term.rt.editor_hit_geom;
+    const fold_left_col: f64 = @floatFromInt(geom.fold_left_px / geom.cell_w_px);
+    // 첫 화면 행(문서 1줄 = 머리)의 **왼쪽 칸**을 누른다.
+    const x = ox + (fold_left_col + 0.5) * cw;
+    const y = oy + 0.5 * ch;
+
+    try testing.expect(toggleFoldAtPoint(fx.session, pane, x, y));
+    try testing.expectEqual(@as(usize, 1), foldedHeads(fx.term).len);
+}
+
+test "gutter 클릭이 접기를 가져가지 않는 자리들 — 본문·번호 칸·화살표 없는 줄·pane 밖" {
+    // **`true`를 남발하면 클릭이 소비되어 pane 포커스 이동이 조용히 죽는다.** 그리고 세로를
+    // clamp하면(본문 hit-test는 그렇게 한다) pane 아래 빈 곳을 눌러도 마지막 줄이 접힌다 —
+    // 두 좌표계가 갈리는 유일한 축이라 여기서 못 박는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 6);
+    defer allocator.free(lines);
+    try foldClickFixture(&fx, lines);
+
+    const pane = pane_ops.activePane(fx.session);
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const ox: f64 = @floatFromInt(d0.rect.x);
+    const oy: f64 = @floatFromInt(d0.rect.y);
+    d0.dl.deinit(allocator);
+
+    const geom = fx.term.rt.editor_hit_geom;
+    const fold_col: f64 = @floatFromInt(geom.fold_left_px / geom.cell_w_px);
+    const content_col: f64 = @floatFromInt(geom.content_left_px / geom.cell_w_px);
+    const head_y = oy + 0.5 * ch; // 문서 1줄 — 화살표가 서 있는 행
+
+    // 본문 열: 선택이 가져간다.
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, ox + (content_col + 0.5) * cw, head_y));
+    // 줄 번호 칸: 접기 띠 왼쪽이다.
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, ox + (fold_col - 0.5) * cw, head_y));
+    // 화살표가 없는 줄(6번째 = "tail")의 접기 칸.
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, ox + (fold_col + 0.5) * cw, oy + 5.5 * ch));
+    // pane **밖**: 아래로 한참, 그리고 위로.
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, ox + (fold_col + 0.5) * cw, oy + 10_000));
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, ox + (fold_col + 0.5) * cw, oy - 5));
+    // 극단값에서도 죽지 않는다(`@intFromFloat`은 표현 불가능한 값에서 illegal behavior다).
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, std.math.nan(f64), std.math.nan(f64)));
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, std.math.inf(f64), -std.math.inf(f64)));
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, 1e300, 1e300));
+
+    // 그 어느 것도 상태를 건드리지 않았다.
+    try testing.expectEqual(@as(usize, 0), foldedHeads(fx.term).len);
+}
+
+test "랩으로 이어진 조각의 접기 칸은 화살표가 없으므로 눌리지 않는다" {
+    // **그린 것과 눌리는 것이 같아야 한다.** gutter는 이어진 조각에 표식을 반복하지 않는데
+    // (`rowsForVisual` — 한 줄에 표식이 여러 개면 접힌 줄 수를 오해한다), hit-test가 그 행을 받으면
+    // **아무것도 없는 자리를 눌러 접히는** 상태가 된다. 행 → 줄 매핑(`editor_hit_lines`)은 이어진
+    // 조각에도 같은 원본 줄을 주므로 그 축만으로는 못 막는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, 3);
+    defer allocator.free(lines);
+    var long_head: [400]u8 = undefined;
+    @memset(&long_head, 'h');
+    long_head[long_head.len - 1] = ':';
+    lines[0] = &long_head; // 화면 폭보다 길어 여러 조각으로 접힌다
+    lines[1] = "  zzz";
+    lines[2] = "  zzz";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_wrap = true;
+    try ensureFoldRanges(fx.session, fx.term);
+    try rebuildVisible(fx.session, fx.term);
+
+    const pane = pane_ops.activePane(fx.session);
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    const ox: f64 = @floatFromInt(d0.rect.x);
+    const oy: f64 = @floatFromInt(d0.rect.y);
+    var marks: usize = 0;
+    const open_mark: u21 = chrome_editor.gutter.Fold.open.codepoint().?;
+    for (d0.dl.cells) |c| {
+        if (c.codepoint == open_mark) marks += 1;
+    }
+    d0.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), marks); // 머리 조각에만 선다 — 전제 확인
+
+    const geom = fx.term.rt.editor_hit_geom;
+    const fold_col: f64 = @floatFromInt(geom.fold_left_px / geom.cell_w_px);
+    try testing.expect(fx.term.rt.editor_hit_rows_len > 2); // 실제로 여러 조각으로 접혔다
+
+    // **둘째 조각**(화면 행 1)의 접기 칸 — 화살표가 없는 자리다.
+    try testing.expect(hitTestFoldMark(fx.term, ox + (fold_col + 0.5) * cw, oy + 1.5 * ch) == null);
+    try testing.expect(!toggleFoldAtPoint(fx.session, pane, ox + (fold_col + 0.5) * cw, oy + 1.5 * ch));
+    try testing.expectEqual(@as(usize, 0), foldedHeads(fx.term).len);
+
+    // 머리 조각(화면 행 0)은 받는다 — 위 거절이 "랩이면 전부 막는다"가 아님을 보인다.
+    try testing.expect(toggleFoldAtPoint(fx.session, pane, ox + (fold_col + 0.5) * cw, oy + 0.5 * ch));
+    try testing.expectEqual(@as(usize, 1), foldedHeads(fx.term).len);
 }
 
 /// 테스트 전용 libc 바인딩. Zig 0.16 std에는 `setenv`가 없고, 훅 확인은 **환경을 실제로 켜야만**
@@ -6338,6 +6693,16 @@ fn advCellIsUnmappable(line: []const u8, row: chrome_editor.visual_map.VisualRow
 }
 
 /// 행마다 gutter가 실제로 그린 줄 번호(1-based). 이어진 조각은 `null`.
+/// 판정자가 쓰는 **본문 시작 열**. 숫자를 손으로 적으면(`= 8`) `geometry`의 셀 배분이 바뀔 때마다
+/// 네 자리가 조용히 낡는다 — 실제로 접기 칸이 1→2셀이 되면서 그 넷이 한꺼번에 어긋났다(2026-08-22).
+/// **렌더가 굳힌 값에서 되읽는다**: 그것이 그 프레임이 실제로 그린 자리이므로, 판정자가 다시 계산해
+/// 갈릴 여지가 없다(§4.1g "스냅숏의 경계"와 같은 규율).
+fn advContentLeft(term: *Term) u16 {
+    const g = term.rt.editor_hit_geom;
+    if (g.cell_w_px == 0) return 0;
+    return @intCast(g.content_left_px / g.cell_w_px);
+}
+
 fn advGutterNumbers(dl: renderer.DrawList, content_left: u16, out: []?u32) void {
     for (out) |*o| o.* = null;
     for (dl.cells) |c| {
@@ -6405,7 +6770,7 @@ test "ADV3-A 그려진 글자가 곧 클릭이 답한 글자다 (랩이 실제�
 
         // 오라클 ①: gutter가 그린 번호 → 그 행의 원본 줄(이어진 조각은 위에서 물려받는다).
         var nums_buf: [512]?u32 = undefined;
-        const content_left: u16 = 8; // gutter 폭 — 자릿수가 아니라 `geometry.min_line_number_cells = 5`가 정한다 → 여백1+5+접힘1+여백1
+        const content_left: u16 = advContentLeft(term); // gutter 폭 — 렌더가 굳힌 값에서 되읽는다
         advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);
         var carry: ?u32 = null;
         var line_of_row: [512]?u32 = undefined;
@@ -6489,7 +6854,7 @@ test "ADV3-B 접힘을 켜도 클릭이 gutter가 그린 줄을 답한다" {
     const ch: f64 = @floatFromInt(fx.session.cell_height_px);
     const ox: f64 = @floatFromInt(drawn.rect.x);
     const oy: f64 = @floatFromInt(drawn.rect.y);
-    const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
+    const content_left: u16 = advContentLeft(term); // gutter 폭 — 렌더가 굳힌 값에서 되읽는다
 
     var nums_buf: [512]?u32 = undefined;
     advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);
@@ -6628,7 +6993,7 @@ test "ADV3-D 탭 폭 단일 출처: 렌더와 hit-test가 같은 값을 따른�
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
     defer drawn.dl.deinit(allocator);
 
-    const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
+    const content_left: u16 = advContentLeft(term); // gutter 폭 — 렌더가 굳힌 값에서 되읽는다
     const cw: f64 = @floatFromInt(fx.session.cell_width_px);
     const ch: f64 = @floatFromInt(fx.session.cell_height_px);
     const ox: f64 = @floatFromInt(drawn.rect.x);
@@ -6705,7 +7070,7 @@ test "ADV3-E 가로 스크롤 + 탭: 그려진 글자 = 클릭이 답한 글자"
         const ch: f64 = @floatFromInt(fx.session.cell_height_px);
         const ox: f64 = @floatFromInt(drawn.rect.x);
         const oy: f64 = @floatFromInt(drawn.rect.y);
-        const content_left: u16 = 8; // gutter 폭 — `geometry.min_line_number_cells = 5`가 정한다(자릿수가 아니다)
+        const content_left: u16 = advContentLeft(term); // gutter 폭 — 렌더가 굳힌 값에서 되읽는다
 
         var nums_buf: [512]?u32 = undefined;
         advGutterNumbers(drawn.dl, content_left, nums_buf[0..rows]);

@@ -251,7 +251,7 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
   // **워커 모드에서만 갈리던 결함 셋.** 전부 `worker/entry.ts` 의 `opts`/catch 경로다.
   const workerOpts = await p.evaluate(async () => {
     const t = (
-      globalThis as {
+      globalThis as unknown as {
         __term: {
           setOptions: (o: Record<string, unknown>) => void;
           selectionText: () => Promise<string | null>;

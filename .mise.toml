@@ -283,7 +283,9 @@ run = "zig build wasm-lib"
 # 커밋된 wasm 이 지금 소스에서 나온 것인지 확인한다. 바이너리를 커밋하는 대가로 드리프트가
 # 생길 수 있어(소스만 고치고 재빌드를 잊는다) 해시를 대조한다.
 description = "Verify the committed wasm matches a fresh build"
-depends = ["wasm-lib"]
+# **`wasm-lib` 에 의존하지 않는다.** 그 태스크는 산출물을 커밋 경로에도 놓아서, 먼저 돌면
+# 비교 대상을 덮어써 이 게이트가 절대 실패할 수 없게 된다. 스크립트가 격리 prefix 로 직접
+# 빌드한다.
 run = "sh tools/check-wasm-sync.sh"
 
 [tasks.check-targets]

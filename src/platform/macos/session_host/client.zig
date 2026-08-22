@@ -24430,6 +24430,13 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
 
 test "client: forked daemon serves ephemeral inventory while canonical GUI stays connected" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (c.getenv("MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP")) |raw| {
+        const mode = std.mem.span(raw);
+        if (std.mem.eql(u8, mode, "skip-in-aggregate-v1"))
+            return error.SkipZigTest;
+        if (!std.mem.eql(u8, mode, "fresh-process-v1"))
+            return error.TestUnexpectedResult;
+    }
     const allocator = testing.allocator;
     const discovery_mod = @import("discovery.zig");
     const short_endpoint_mod = @import("short_endpoint.zig");

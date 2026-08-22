@@ -114,6 +114,27 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 
 이 숫자는 최종 제품 목표가 아니다. 현재 core가 실수로 극단적으로 느려지는 것을 막는 최소 guardrail이다. 각 예산·반복 수의 상세 근거 주석은 `tools/perf/core.zig`를 단일 출처로 둔다.
 
+## CR6e 영속 세션 호스트 reconnect 예산
+
+이 예산은 hosted runner의 임의 숫자가 아니라 `Mac16,9`·Darwin `25.5.0`·16 logical CPU 전용 runner에서 ReleaseFast로 수집한 raw baseline에만 적용한다. 환경이 다르면 완화하거나 skip하지 않고 `EnvironmentMismatch`로 실패하며 재baseline PR이 이 표와 validator 상수를 함께 바꿔야 한다.
+
+- transport baseline: 6 batch. hello stall p50/p95/max `252.12/252.17/252.17ms`, backoff `192.85/200.04/200.04ms`; resident delta max `245,760B`, footprint delta max `65,536B`, CPU delta max `58,273ns`, FD는 전부 `5→5`였다.
+- actual-AppKit baseline: 5 batch의 각 iteration 0 warm-up을 제외한 20표본. launch→row p50/p95/max `451.59/499.40/559.95ms`, row→click `5.86/51.47/105.78ms`, click→visible `24.47/65.11/88.76ms`, visible→summary `92.53/173.35/183.16ms`, harness 전체 `717.54/967.11/1,074.19ms`; FD는 전부 `6→6`, 잔존 child는 전부 0이었다.
+- 표본이 20개뿐인 AppKit 축에서 p99는 사실상 max와 같아 별도 통계인 척 쓰지 않는다. hard cap은 관측 max 위에서 runner 노이즈를 흡수하되, 2배급 구조 회귀 전에 닫히도록 정했다.
+
+| 축 | hard cap |
+| --- | --- |
+| hello reply stall | typed `deadline_exceeded`, 1 attempt/0 wait, elapsed ≤260ms |
+| transient backoff | typed `host_gone`, 10 attempt/9 wait, deadline 이내·elapsed ≤225ms |
+| transport resource | FD delta 0, resident positive delta ≤512KiB, footprint positive delta ≤256KiB, CPU delta ≤2ms, peer/socket/manifest/host-dir residue 0 |
+| AppKit launch→row | ≤750ms |
+| AppKit row→click / click→visible | 각각 ≤250ms |
+| AppKit visible→summary | ≤300ms |
+| AppKit harness 전체 | ≤1,500ms |
+| AppKit identity/cleanup | Swift-returned iteration exact match, before/after capture exact 1쌍, marker exact 1, runtime 생존, controller/observer 0, FD delta 0, child/socket/host artifact residue 0 |
+
+`mise run session-host-cr6e-budget`은 한 pair를 판정한다. `mise run session-host-cr6e-soak`은 20 batch를 고정해 stalled transport 40행과 실제 AppKit recovery 100회를 실행하고 모든 raw pair를 마지막에 다시 전수 검증한다. 이 gate는 로그인된 WindowServer가 필요한 opt-in 제품 검증이므로 기본 `mise run check`와 hosted CI에 넣지 않는다. 대신 validator의 strict schema·환경 drift·budget overshoot·고정 batch-count 테스트는 `check-boundaries`에 포함한다.
+
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
 [control-plane-protocol.md §4.4](control-plane-protocol.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.

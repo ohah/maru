@@ -1265,8 +1265,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    남기고 정상·실패·종료에서 복원하며, 앱 강제 종료 뒤에는 부모의 별도 restore helper가 같은 record를 소비한다.
    복원은 current가 selected와 같을 때만 original을 다시 선택해 사용자 중간 변경을 덮지 않는다. view-local
    `NSTextInputContext`, marked text와 first-responder state도 종료 전에 정산하고 current source exact original과 restore
-   record 소멸을 executable oracle로 고정한다. CR6e는 stalled socket/backoff와 장시간 soak·성능 예산을 닫는다.
-   이 세 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다.
+   record 소멸을 executable oracle로 고정한다. CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
+   exact-host issuer에 실제 Unix peer의 accept 후 hello 무응답과 transient connect backoff를 주입하고, absolute deadline,
+   attempt/wait 수, elapsed, fd/RSS를 strict-schema raw artifact로 남긴다. **CR6e-a2 recovery baseline**은 반복 CR6c
+   recovery의 launch→row→click→remote-visible→Quit 구간과 runtime/authority/cleanup을 별도 strict-schema raw artifact로
+   남긴다. 두 baseline 단계는 수치 상한이나 CR6 완료를 주장하지 않는다. **CR6e-b budget/soak**는 같은 runner에서 얻은 baseline을
+   `performance-budget.md`에 하드 상한과 하드웨어/OS 조건으로 확정한 뒤 20 batch(transport 40행·actual-AppKit recovery 100행) 반복에서 stalled peer의 deadline 초과 0,
+   backoff 과잉 attempt 0, runtime/controller/observer/fd leak 0, RSS·CPU·recovery latency 예산 준수를 자동 판정한다.
+   CR6c·CR6d·CR6e-a1·CR6e-a2·CR6e-b의 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다. 그 후속 배선의 실행
+   소유권은 CR6e가 측정하지 않은 frame-thread block을 전제하지 않고 실제 product caller와 owner-thread 계약을 먼저 문서화한다.
 
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.

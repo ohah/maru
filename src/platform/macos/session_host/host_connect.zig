@@ -38,6 +38,13 @@ pub const Options = struct {
     connect_delay_ms: u32 = 20,
 };
 
+/// CR6e baseline이 deadline-aware 제품 issuer의 실제 attempt/wait 횟수를 raw artifact로
+/// 남기는 write-only observation이다. reconnect 결과나 정책을 바꾸지 않으며 일반 제품 caller는 null을 쓴다.
+pub const DeadlineConnectObservation = struct {
+    attempt_count: u32 = 0,
+    backoff_wait_count: u32 = 0,
+};
+
 pub const FailureReason = enum {
     invalid_endpoint,
     endpoint_denied,
@@ -549,6 +556,16 @@ pub fn connectExistingHostUntil(
     host_id: u128,
     phase: attach_phase_deadline.PhaseDeadline,
 ) Outcome {
+    return connectExistingHostUntilObserved(allocator, base_cache_dir, host_id, phase, null);
+}
+
+pub fn connectExistingHostUntilObserved(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    host_id: u128,
+    phase: attach_phase_deadline.PhaseDeadline,
+    observation: ?*DeadlineConnectObservation,
+) Outcome {
     if (builtin.os.tag != .macos or host_id == 0) return .{ .failed = .invalid_endpoint };
     if (phase.kind != .resolve and phase.kind != .connect_hello)
         return .{ .failed = .invalid_endpoint };
@@ -567,12 +584,13 @@ pub fn connectExistingHostUntil(
         return .{ .failed = .deadline_exceeded };
     if (manifest.lifecycle == .restoring)
         return .{ .failed = .startup_timeout };
-    const outcome = connectDiscoveredHostProfileUntil(
+    const outcome = connectDiscoveredHostProfileUntilObserved(
         allocator,
         base_cache_dir,
         manifest.descriptor(),
         .gui,
         phase,
+        observation,
     );
     if (phase.absolute.remainingNs() <= 0) {
         var expired = outcome;
@@ -623,16 +641,35 @@ pub fn connectDiscoveredHostProfileUntil(
     connection_profile: client_mod.ConnectionProfile,
     phase: attach_phase_deadline.PhaseDeadline,
 ) Outcome {
+    return connectDiscoveredHostProfileUntilObserved(
+        allocator,
+        base_cache_dir,
+        expected,
+        connection_profile,
+        phase,
+        null,
+    );
+}
+
+fn connectDiscoveredHostProfileUntilObserved(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+    phase: attach_phase_deadline.PhaseDeadline,
+    observation: ?*DeadlineConnectObservation,
+) Outcome {
     if (phase.kind != .resolve and phase.kind != .connect_hello)
         return .{ .failed = .invalid_endpoint };
     if (phase.absolute.remainingNs() <= 0)
         return .{ .failed = .deadline_exceeded };
-    return connectDiscoveredHostProfileWith(
+    return connectDiscoveredHostProfileWithObserved(
         allocator,
         base_cache_dir,
         expected,
         connection_profile,
         .{ .deadline = phase.absolute },
+        observation,
     );
 }
 
@@ -647,6 +684,24 @@ fn connectDiscoveredHostProfileWith(
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
     io: DiscoveredConnectIo,
+) Outcome {
+    return connectDiscoveredHostProfileWithObserved(
+        allocator,
+        base_cache_dir,
+        expected,
+        connection_profile,
+        io,
+        null,
+    );
+}
+
+fn connectDiscoveredHostProfileWithObserved(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+    io: DiscoveredConnectIo,
+    observation: ?*DeadlineConnectObservation,
 ) Outcome {
     if (builtin.os.tag != .macos or expected.host_id == 0) return .{ .failed = .invalid_endpoint };
     var dir_buf: [512]u8 = undefined;
@@ -680,6 +735,7 @@ fn connectDiscoveredHostProfileWith(
             deadline,
             deadline_attempt_ops,
             client_deadline.posix_ops,
+            observation,
         ),
     };
     if (deadlineExpired(io)) {
@@ -874,11 +930,13 @@ fn connectExactWithBackoffKindUntil(
     deadline: client_deadline.AbsoluteDeadline,
     attempt_ops: DeadlineAttemptOps,
     wait_ops: client_deadline.Ops,
+    observation: ?*DeadlineConnectObservation,
 ) Outcome {
     var attempts: usize = 0;
     var saw_transient = false;
     while (attempts < opts.connect_attempts) : (attempts += 1) {
         if (deadline.remainingNs() <= 0) return .{ .failed = .deadline_exceeded };
+        if (observation) |value| value.attempt_count +|= 1;
         const candidate = attempt_ops.connect(
             attempt_ops.context,
             allocator,
@@ -906,6 +964,7 @@ fn connectExactWithBackoffKindUntil(
         // No delay after the final failed attempt. The derived wake target cannot extend the
         // caller's phase and EINTR does not restart this interval.
         if (attempts + 1 >= opts.connect_attempts) break;
+        if (observation) |value| value.backoff_wait_count +|= 1;
         client_deadline.waitBackoffUntil(
             wait_ops,
             @as(i128, opts.connect_delay_ms) * std.time.ns_per_ms,
@@ -1043,6 +1102,7 @@ test "host_connect deadline retry shares one expiry and never sleeps after final
         deadline,
         .{ .context = &fixture, .connect = Fixture.attempt },
         fixture.waitOps(),
+        null,
     );
     try testing.expectEqual(FailureReason.transient_timeout, outcome.failed);
     try testing.expectEqual(@as(usize, 2), fixture.attempt_count);
@@ -1119,6 +1179,7 @@ test "host_connect deadline backoff expiry performs no later attempt" {
         deadline,
         .{ .context = &fixture, .connect = Fixture.attempt },
         fixture.waitOps(),
+        null,
     );
     try testing.expectEqual(FailureReason.deadline_exceeded, outcome.failed);
     try testing.expectEqual(@as(usize, 1), fixture.attempt_count);

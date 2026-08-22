@@ -5762,7 +5762,7 @@ reconnect가 screen/input history를 새 입력처럼 재전송할 수 없다.
 스모크의 read-only probe는 active remote screen에서 위 세 marker의 occurrence count만 읽을 수 있고 input/action,
 runtime handle, adapter pointer를 노출하지 않는다. IME callback count와 pasteboard 전후 값은 Swift가 actual AppKit
 경계에서 관측한다. 합성 물리 키가 실제 macOS IME를 통과하도록 **이 opt-in smoke process에서만** 현재
-system-global keyboard input source의 exact ID를 붙잡고 한국어 2벌식 source로 전환한다. 이 opt-in 자동화는 macOS Accessibility event-post 권한과 Maru의 exact frontmost PID·first responder를 source 전환 전 및 각 HID 게시 전에 요구하며, 권한이 없으면 source mutation 전에 `accessibility-unavailable`, 전역 focus가 없으면 bounded retry로 닫힌다. 전환 전에 original/selected
+system-global keyboard input source의 exact ID를 붙잡고 한국어 2벌식 source로 전환한다. 이 opt-in 자동화는 macOS Accessibility event-post 권한과 Maru의 exact frontmost PID·first responder를 source 전환 전 및 각 HID 게시 전에 요구하며, 권한이 없으면 source mutation 전에 `accessibility-unavailable`, 전역 focus가 없으면 bounded retry로 닫힌다. summary는 마지막 focus 판정의 `app_active`·`first_responder`·`frontmost_pid`를 따로 남겨, TCC 검사 전 focus 실패를 권한 실패로 오분류하지 않는다. 전환 전에 original/selected
 ID를 격리 artifact root에 atomic write하고, 정상·RED·`applicationWillTerminate`에서는 현재 source가 여전히 smoke가
 선택한 source일 때만 original로 복원한다. 강제 종료·timeout으로 앱 정산이 실행되지 않아도 부모 하네스의 별도 최소
 restore helper가 같은 record를 소비해 복원하며, 사용자가 중간에 제3 source를 선택했다면 그것을 덮어쓰지 않고 gate를
@@ -5770,7 +5770,38 @@ restore helper가 같은 record를 소비해 복원하며, 사용자가 중간�
 original source로 복원하고 marked text를 비운 뒤 CR6c와 같은 실제 Quit confirm/no-wire detach 및 host lease final-zero를
 수행한다. timeout, Korean source 부재, 전환/복원 실패, stale restore record, marked/insert callback 0, pasteboard sentinel
 drift, marker 0/2+, stale historical replay, 직접 ABI input 호출은 실패다. 이 gate는 IME·clipboard 연속성을 닫지만
-stalled socket/backoff, 장시간 soak와 성능 예산은 CR6e 계약 밖이다.
+stalled socket/backoff, 장시간 soak와 성능 예산은 이 CR6d 계약 밖이며 CR6e가 소유한다.
+
+**CR6e-a1 stalled peer·transport baseline artifact 계약:** 자동 reconnect 제품 설정은 아직 배선하지 않는다. CR4의 제품
+`connectExistingHostUntil`/deadline-aware hello 경계에 harness-owned user-only Unix socket과 exact manifest를 제공한다.
+peer는 `(1)` accept 뒤 hello frame을 읽고 reply를 영구 보류하는 read stall과 `(2)` connect가 transient로 실패하는
+backoff를 각각 만든다. caller가 부여한 하나의 monotonic absolute deadline은 manifest resolve, connect, hello와 backoff
+전체에서 재생성되지 않아야 한다. artifact는 OS build, machine model, logical CPU, iteration별 phase start/deadline/end,
+failure reason, connect attempt와 backoff wait 수, peer accept/read/close, process fd/RSS raw sample을 기록한다. validator는
+unknown/missing/duplicate field, monotonic 역전, deadline 뒤 성공과 timeout 뒤 추가 attempt/wait를 거부한다. observation API는
+결과나 정책을 바꾸지 않는 write-only counter이며 이 harness 밖 제품 caller는 0이다. CR6e-a1은 측정용 gate이며 latency/RSS
+숫자 상한, actual-AppKit 반복, 장시간 안정성, CR6 완료를 주장하지 않는다.
+
+transient backoff의 합법적인 terminal projection은 scheduler 속도에 따른 두 형태다. 10번째 attempt가 deadline 전에 끝나면
+`host_gone`과 `attempt=10/wait=9/end<=deadline`, N번째 wait가 남은 absolute deadline을 소비하면
+`deadline_exceeded`와 `1<=N<10/attempt=N/wait=N/end>=deadline`이다. validator는 exact attempt 10 하나를 환경 독립 계약으로
+오인하지 않고 이 두 형태의 count·시간 상관관계를 검증하며, 그 밖의 reason/count/time 조합은 fail-closed한다.
+
+**CR6e-a2 actual-AppKit recovery baseline artifact 계약:** CR6c와 같은 daemon/runtime을 보존한 채 매 iteration 새 앱
+process의 일반 discovery→row publication→실제 click→remote marker visible→Quit confirm을 통과한다. 각 구간 monotonic
+timestamp, app exit 뒤 runtime 생존, controller/observer 0, harness-owned child/fd/artifact final zero를 별도 strict-schema
+JSON에 기록한다. iteration identity는 parent가 붙인 배열 index가 아니라 앱이 받은 exact env 값을 summary에서 되읽고,
+before/after 캡처도 iteration별 고유 파일이어야 한다. validator는 unknown/missing/duplicate field, monotonic 역전, 직접 recovery action/ABI input 호출, marker
+0/2+, iteration identity drift를 거부한다. CR6e-a2도 측정용 gate이며 hard cap이나 CR6 완료를 주장하지 않는다.
+
+**CR6e-b budget·장시간 soak 계약:** CR6e-a1/a2 artifact를 동일 runner에서 여러 번 수집해 warm-up을 제외한 baseline 분포와
+runner noise를 먼저 고정하고, `performance-budget.md`에 runner/OS 조건, 표본 수, p50/p95/p99 또는 max를 사용하는 이유,
+RSS/FD/CPU/latency hard cap을 기록한다. 그 뒤 opt-in long soak는 20 batch로 두 stalled-peer 행 40개와
+actual-AppKit recovery 행 100개를 실행한다. recovery는 batch마다 같은 daemon/runtime에서 앱 5개를 순차 실행하고,
+batch 사이에는 daemon/runtime을 새로 만든다. 모든 stalled 행은 absolute deadline 이내 typed failure, deadline 뒤 attempt/wait 0이어야 하고,
+recovery 행은 marker exact 1, runtime 생존, controller/observer 0을 매 iteration 증명한다. 최종 validator는 fd·child·socket·
+manifest·host-owned artifact 0과 RSS/CPU/latency cap을 함께 판정한다. 측정 환경이 계약과 다르면 성공으로 세지 않고
+`environment_mismatch`로 fail-closed한다. CR6e-b가 통과하기 전 자동 reconnect 제품 설정 배선과 default-on 주장은 금지한다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고

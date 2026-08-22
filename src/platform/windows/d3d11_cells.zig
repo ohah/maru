@@ -96,6 +96,34 @@ comptime {
     }
 }
 
+/// GPU 로 올라가는 셀 배열의 **지문**. 같은 값이면 같은 그림이다 — `draw` 가 받는 것이 이 배열
+/// 전부이므로, 지문이 같으면 화면이 같다는 것이 **정의상** 성립한다.
+///
+/// **왜 필요한가.** 스모크에는 픽셀 읽기 경로가 없어서 "고치기 전과 그림이 같은가" 를 눈으로만
+/// 볼 수 있었다. 리팩터가 조용히 한 셀을 옮겨도 스크린샷 두 장을 나란히 놓고 사람이 알아채야 한다.
+/// 지문이 있으면 그 판정이 **숫자 한 줄**이 된다.
+///
+/// `Cell` 은 `[4]f32` 넷뿐인 extern struct 라 패딩이 없다(위 `@sizeOf` 어설션이 못 박는다) —
+/// 그래서 바이트를 그대로 해시해도 미정의 값이 안 섞인다.
+pub fn cellsDigest(cells: []const Cell) u64 {
+    return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(cells));
+}
+
+test "셀 지문: 한 값만 달라도 갈린다" {
+    var a = [_]Cell{
+        .{ .rect = .{ 0, 0, 8, 16 }, .uv = .{ 0, 0, 1, 1 }, .fg = .{ 1, 1, 1, 1 }, .bg = .{ 0, 0, 0, 1 } },
+        .{ .rect = .{ 8, 0, 8, 16 }, .uv = .{ 0, 0, 1, 1 }, .fg = .{ 1, 1, 1, 1 }, .bg = .{ 0, 0, 0, 1 } },
+    };
+    var b = a;
+    try std.testing.expectEqual(cellsDigest(&a), cellsDigest(&b));
+    // 한 셀을 1px 옮긴다 — 눈으로는 못 보는 차이다.
+    b[1].rect[0] = 9;
+    try std.testing.expect(cellsDigest(&a) != cellsDigest(&b));
+    // 순서만 바꿔도 갈린다. 그리는 순서가 겹침을 정하므로 같은 집합이어도 같은 그림이 아니다.
+    var c = [_]Cell{ a[1], a[0] };
+    try std.testing.expect(cellsDigest(&a) != cellsDigest(&c));
+}
+
 /// 프레임 상수. **16바이트 배수여야 한다** — D3D11 상수 버퍼의 규약이라 `_pad`가 장식이 아니다.
 const FrameConstants = extern struct {
     viewport_px: [2]f32,

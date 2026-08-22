@@ -147,6 +147,7 @@ static bool maru_test_capture_env_allows(void) {
     static const char *const gates[] = {
         "MARU_AGENT_SESSION_ARCHIVE_SMOKE", /* AS4-c 아카이브 상태 캡처 */
         "MARU_TAB_DRAG_SMOKE",              /* CIM4b 탭 드래그 — 끄는 도중 프레임 */
+        "MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", /* CR6c 복구 행 전후 실제 AppKit 프레임 */
     };
     for (size_t i = 0; i < sizeof(gates) / sizeof(gates[0]); i += 1) {
         const char *value = getenv(gates[i]);

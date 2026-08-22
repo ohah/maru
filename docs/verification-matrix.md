@@ -2044,6 +2044,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
   배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6
   real-AppKit/IME/clipboard/soak가 사용자에게 기능 완성을 안내할 수 있는 유일한 제품 gate다.
+- CR6c actual-AppKit 행은 별도 하네스가 current daemon/manifest에 구분 가능한 runtime을 만들고, Swift 제품 앱의
+  일반 launch discovery가 발행한 primary recovery row를 read-only rect probe로 찾는다. 하네스나 ABI가 adopt를 직접
+  호출하면 실패다. 실제 `NSEvent.leftMouseDown` 전/후 Metal readback 두 장은 서로 달라야 하며, 전에는
+  `Recovered Sessions` row, 후에는 daemon 화면 marker와 remote Term publication·row 소멸을 함께 증명한다. 앱 종료
+  는 실제 Quit confirm state machine을 통과하며, 뒤 같은 runtime의 `runtime.get` 성공과 controller/observer 0을
+  확인해 shared-connection EOF 뒤 no-wire client cleanup이 host를 죽이거나 lease를 남기지 않았음을 고정한다. unique host
+  외 entry mutation 0, child bounded reap, artifact root confinement도 같은 gate다. 이 행은 IME/clipboard/soak 완료로
+  세지 않는다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

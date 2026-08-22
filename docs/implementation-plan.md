@@ -1252,8 +1252,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    authority suffix이며, 그 뒤 기존 AppSession close chokepoint의 cleanup callback은 forward-only로 실행돼 옛 Window graph를
    복원하거나 host runtime을 terminate하지 않는다. action expiry exact/+1, Window 이동/닫기, runtime row/job drift,
    double-click/replay는 reducer·topology·takeover/terminate wire mutation 0이어야 한다.
-8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
-   reconnect를 제품 설정에 연결한다.
+8. **CR6 — 제품 gate:** CR6c에서 actual daemon/manifest → 일반 launch discovery → primary recovery row → 실제
+   AppKit `NSEvent` click → remote Term/CAMetalLayer readback을 먼저 닫는다. 다음 CR6d는 실제 macOS IME와 OS
+   clipboard의 reconnect 연속성·historical replay 0을, CR6e는 stalled socket/backoff와 장시간 soak·성능 예산을
+   닫는다. 이 세 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다.
 
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.

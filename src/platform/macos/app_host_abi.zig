@@ -738,6 +738,57 @@ pub const DividerSmokeProbe = extern struct {
     tab_model_first_id: u64,
 };
 
+pub const RecoveredSessionSmokeProbe = extern struct {
+    row_present: u32,
+    row_x_px: i32,
+    row_y_px: i32,
+    row_width_px: u32,
+    row_height_px: u32,
+    recovered_count: u32,
+    tab_count: u32,
+    surface_initialized: u32,
+    active_remote: u32,
+    marker_present: u32,
+    keep_alive_enabled: u32,
+    discovered_candidates: u32,
+    ready_adapters: u32,
+    inventory_runtimes: u32,
+    configured_keep_alive: u32,
+    live_session_count: u32,
+    target_activation_dispatched: u32,
+};
+
+/// CR6c 전용 read-only AppKit smoke projection. 이미 발행된 row rect와 aggregate
+/// 상태만 내보내며 adopt/action identity는 의도적으로 노출하지 않는다.
+pub export fn maru_macos_app_session_recovered_session_smoke_probe(
+    session: ?*AppSession,
+    out_probe: ?*RecoveredSessionSmokeProbe,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const probe = app_session.recoveredSessionAppKitSmokeProbe();
+    out.* = .{
+        .row_present = @intFromBool(probe.row_present),
+        .row_x_px = probe.row_x_px,
+        .row_y_px = probe.row_y_px,
+        .row_width_px = probe.row_width_px,
+        .row_height_px = probe.row_height_px,
+        .recovered_count = probe.recovered_count,
+        .tab_count = probe.tab_count,
+        .surface_initialized = @intFromBool(probe.surface_initialized),
+        .active_remote = @intFromBool(probe.active_remote),
+        .marker_present = @intFromBool(probe.marker_present),
+        .keep_alive_enabled = @intFromBool(probe.keep_alive_enabled),
+        .discovered_candidates = probe.discovered_candidates,
+        .ready_adapters = probe.ready_adapters,
+        .inventory_runtimes = probe.inventory_runtimes,
+        .configured_keep_alive = @intFromBool(probe.configured_keep_alive),
+        .live_session_count = probe.live_session_count,
+        .target_activation_dispatched = @intFromBool(probe.target_activation_dispatched),
+    };
+    return @intFromEnum(Status.ok);
+}
+
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the
 /// dedicated AppKit smoke. Like the archive probe this is deliberately not a general automation
 /// API: it carries no split pointer, no tree structure, and nothing the fixture could act on.

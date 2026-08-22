@@ -5728,6 +5728,23 @@ malformed response, deadline/OOM/attach 실패는 기존 tab/pane/tombstone과 p
 terminate·새 runtime spawn·checkpoint mutation은 0이다. 성공 publication 뒤에만 deferred surface/frame loop를 시작하고,
 live Term은 일반 persistent close ownership으로 전환한다.
 
+**CR6c 실제 AppKit 복구 스모크 계약:** opt-in 전용 하네스가 current 제품 daemon과 manifest를 띄우고
+구분 가능한 `/bin/cat` runtime 하나를 만든 뒤, 실제 Swift/AppKit 앱을 격리된 HOME과 explicit
+`session.keep-alive-after-quit=true` 설정으로 실행한다. 앱은 일반 launch 순서의 secure discovery → ephemeral
+inventory → app-global projection → primary `Recovered Sessions` row를 그대로 통과해야 한다. 스모크는 이미
+발행된 row의 read-only backing-pixel rect와 상태만 ABI로 읽을 수 있고, 채택 함수·runtime handle·adapter pointer를
+직접 호출하거나 주입할 수 없다. 그 rect로 만든 실제 `NSEvent.leftMouseDown`을 `MaruMetalTerminalView.mouseDown`에
+전달해 CR6b 제품 click chokepoint를 실행한다. 성공 증거는 `(1)` click 전 recovery row가 실제 Metal frame에
+그려진 캡처, `(2)` click 뒤 row one-shot 소멸과 remote Term publication, `(3)` daemon이 보낸 구분 가능한 화면
+문구가 실제 AppKit/CAMetalLayer readback에 남은 캡처, `(4)` 앱 종료 뒤 host runtime이 여전히 `runtime.get`으로
+살아 있고 controller/observer lease가 0임, `(5)` exact host socket/manifest/child/fd 정산이다. 자동 종료도
+`NSApp.terminate`를 직접 부르지 않고 실제 App Quit confirm 경로를 통과한다. keep-alive teardown은 shared data
+connection을 먼저 terminalize해 host EOF가 controller lease를 회수하게 한 뒤, 각 Runtime을 wire 재발행 없이
+client-side에서만 정산한다. 하네스는 자기 unique host entry만 정리하고 같은
+UID namespace의 다른 host·manifest는 읽기 외에 수정하지 않는다. timeout·row 미발행·잘못된 rect·직접 action
+호출·빈/동일 캡처는 실패다. 이 gate는 실제 AppKit render와 recovery click만 닫으며 물리 키보드 IME 후보창,
+OS clipboard, 장시간 poison/backoff·soak는 각각 후속 CR6 gate로 남긴다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**

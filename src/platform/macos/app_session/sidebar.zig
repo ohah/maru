@@ -1834,7 +1834,10 @@ pub fn agentSummaryLine(self: *AppSession, term: *Term) ![]const u8 {
 
 pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     const cw = self.cell_width_px;
-    if (cw == 0 or self.tabs.items.len == 0) return error.NoSidebar;
+    // A deferred persistent-session launch can intentionally have no terminal tab while the
+    // Recovered Sessions system rows are the only launch surface. Those rows are already the
+    // canonical sidebar projection and must remain drawable before adoption.
+    if (cw == 0 or (self.tabs.items.len == 0 and self.sidebar_rows.items.len == 0)) return error.NoSidebar;
     // U2/B2: 제목 영역 = 슬롯 폭에서 좌측(카드 패딩 + accent 막대)·우측(카드 패딩)을 inset한 content rect(선언적
     // 패딩, Rect.inset). 그 좌단을 셀 col로 ceil 환산(indent_cols)해 제목을 좌측 막대 우측·카드 안에 둔다(rich).
     // tui(0)면 left=right=0이라 전체 폭·indent 0(기존과 동일).
@@ -2454,7 +2457,11 @@ pub fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.Draw
 /// 멀티 페인 통합(collectShaped)이 직접 써 통합 placeMultiPane으로 한 atlas 세대에 묶는다.
 pub fn buildSidebarHeaderDrawList(self: *AppSession, part: HeaderPart) !?renderer.DrawList {
     const cw = self.cell_width_px;
-    if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
+    if (cw == 0 or self.cell_height_px == 0) return null;
+    // Deferred recovery는 의도적으로 tab/PTY를 하나도 만들지 않은 채 첫 제품 chrome을 그린다.
+    // 일반 empty session에는 header를 새로 열지 않고, 실제 recovery row가 있는 0-tab chooser에만
+    // 정상 sidebar affordance를 허용한다.
+    if (self.tabs.items.len == 0 and self.recoveredSessionsRows(self.is_primary_window).len == 0) return null;
     // 접힘이면 헤더 대신 좌상단 펼치기 버튼만 — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서 suffix
     // '앞'에 끼워 터미널 위에 보임). 헤더 높이·검색·카드는 없다(완전히 숨김 + 좌상단 버튼).
     // 접힘은 아이콘 파트가 대표해서 낸다 — 검색 줄이 없으므로 search 파트는 아무것도 내지 않는다(두 번 내면

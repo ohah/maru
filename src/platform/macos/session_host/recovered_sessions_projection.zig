@@ -81,18 +81,39 @@ pub const Projection = struct {
 };
 
 fn buildRows(allocator: std.mem.Allocator, workspace_generation: u64, projection_generation: u64, ws: workspace.Workspace, inventories: []const reconcile.HostInventory) ![]Row {
-    for (inventories) |inventory| switch (inventory) {
-        .unavailable => {},
-        .complete => |value| if (value.authority.workspace_generation != workspace_generation)
-            return error.InvalidAuthority,
-    };
     var bindings = try collectBindings(allocator, ws);
     defer bindings.deinit(allocator);
+    // Dead registry entries are retained by discovery as evidence for exact saved bindings, but an
+    // unreferenced dead host cannot produce an orphan row. Do not let crash/SIGKILL residue consume
+    // the live-host reconciliation cap a second time. Complete inventories always remain; an
+    // unavailable inventory remains only when an exact workspace binding needs its terminal proof.
+    const relevant_hosts = try allocator.alloc(reconcile.HostInventory, inventories.len);
+    defer allocator.free(relevant_hosts);
+    var relevant_len: usize = 0;
+    for (inventories) |inventory| {
+        const relevant = switch (inventory) {
+            .complete => |value| blk: {
+                if (value.authority.workspace_generation != workspace_generation)
+                    return error.InvalidAuthority;
+                break :blk true;
+            },
+            .unavailable => |value| blk: {
+                for (bindings.items) |binding| {
+                    if (binding.exact and binding.host_id == value.host_id) break :blk true;
+                }
+                break :blk false;
+            },
+        };
+        if (relevant) {
+            relevant_hosts[relevant_len] = inventory;
+            relevant_len += 1;
+        }
+    }
     const relations = try allocator.alloc(reconcile.BindingRelation, bindings.items.len);
     defer allocator.free(relations);
     const candidates = try allocator.alloc(reconcile.RecoveryCandidate, reconcile.max_runtime_bindings);
     defer allocator.free(candidates);
-    const result = try reconcile.reconcile(bindings.items, inventories, relations, candidates);
+    const result = try reconcile.reconcile(bindings.items, relevant_hosts[0..relevant_len], relations, candidates);
     const rows = try allocator.alloc(Row, result.candidates.len);
     errdefer allocator.free(rows);
     for (result.candidates, rows) |candidate, *row| row.* = switch (candidate) {
@@ -161,6 +182,32 @@ test "CR6a recovered projection은 primary에 orphan과 ended conflict만 inert 
     try std.testing.expectEqual(CandidateKind.orphan, projection.rows[1].kind);
     try std.testing.expectEqual(@as(u128, 12), projection.rows[1].runtime_id);
     try std.testing.expectEqualStrings("0000000c", &projection.rows[1].label);
+}
+
+test "CR6a recovered projection은 unreferenced dead host residue가 live orphan을 가리지 않게 한다" {
+    const dead_count = reconcile.max_inventory_hosts + 4;
+    var hosts: [dead_count + 1]reconcile.HostInventory = undefined;
+    for (hosts[0..dead_count], 0..) |*host, index| host.* = .{ .unavailable = .{
+        .host_id = @as(u128, index) + 1,
+        .reason = .lifecycle,
+    } };
+    const runtimes = [_]reconcile.Runtime{.{ .runtime_id = 0xabc }};
+    hosts[dead_count] = .{ .complete = .{
+        .authority = testAuthority(0x100, 7),
+        .runtimes = &runtimes,
+    } };
+
+    var projection: Projection = .{};
+    defer projection.deinit(std.testing.allocator);
+    try projection.refresh(std.testing.allocator, .{
+        .keep_alive = true,
+        .primary_window = true,
+        .quick_window = false,
+        .workspace_generation = 7,
+    }, .{ .windows = &.{} }, &hosts);
+    try std.testing.expectEqual(@as(usize, 1), projection.rows.len);
+    try std.testing.expectEqual(@as(u128, 0x100), projection.rows[0].host_id);
+    try std.testing.expectEqual(@as(u128, 0xabc), projection.rows[0].runtime_id);
 }
 
 test "CR6a recovered projection은 opt-out secondary quick과 refresh 실패에서 권위를 보존한다" {

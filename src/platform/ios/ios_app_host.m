@@ -1430,6 +1430,11 @@ static void startSshIfAsked(void) {
     // **훅이 없으면 채널을 못 연다**(펌프가 거절한다) — 받을 사람이 없으면 코어가 배압으로
     // 멈추고 터미널까지 함께 멎기 때문이다.
     hooks.control = sshControl;
+    // **새 연결이면 컨트롤 축도 처음부터**(계약 §4a). 안 그러면 끊겼다 다시 붙었을 때 **죽은
+    // 세션 목록이 그대로 남아** 살아 있는 것처럼 보인다 — 코어에는 그 판정에 쓸 연결 개념이
+    // 없으므로(시계도 소켓도 없다) 이 자리에서 알려야 한다.
+    maru_mobile_control_reset();
+    gControlOpenMs = 0;
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     memset(secret, 0, sizeof secret);
     NSLog(@"MARU_SSH start host=%s port=%u user=%s rc=%d", host, cfg.port, user, rc);

@@ -689,7 +689,8 @@ void maru_mobile_control_timeout(void);
 #define MARU_MOBILE_CONTROL_READY 1
 #define MARU_MOBILE_CONTROL_OFF 2
 unsigned int maru_mobile_control_state(void);
-/// 왜 껐나. **하나로 뭉치면 화면이 사용자에게 할 말을 못 고른다.**
+/// 왜 껐나. **화면은 브리지가 직접 그린다**(코어 안에서 값을 본다) — 이 함수들은 **host 진단용**
+/// 이다. 로그에 남기면 기기에서 "왜 목록이 안 뜨나" 를 그 자리에서 가를 수 있다.
 #define MARU_MOBILE_CONTROL_OFF_NONE 0
 #define MARU_MOBILE_CONTROL_OFF_HELLO_TIMEOUT 1
 #define MARU_MOBILE_CONTROL_OFF_TOO_MUCH_NOISE 2

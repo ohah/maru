@@ -1198,6 +1198,11 @@ Java_dev_maru_MaruSshService_nativeSshStart(JNIEnv *env, jclass cls, jstring hos
     // 멈추고 터미널까지 함께 멎기 때문이다.
     hooks.control = ssh_control;
 
+    // **새 연결이면 컨트롤 축도 처음부터**(계약 §4a — iOS 와 같은 자리). 안 그러면 끊겼다 다시
+    // 붙었을 때 죽은 세션 목록이 살아 있는 것처럼 남는다.
+    maru_mobile_control_reset();
+    g_control_open_ms = 0;
+
     int rc = maru_ssh_pump_start(&cfg, &hooks);
     // 푼 키는 펌프가 복사해 갔다 — 여기 사본은 지운다.
     memset(g_ssh_secret, 0, sizeof g_ssh_secret);

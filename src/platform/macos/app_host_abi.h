@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 169u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 170u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -759,6 +759,17 @@ typedef struct MaruAppHostRecoveredSessionSmokeProbe {
 int32_t maru_macos_app_session_recovered_session_smoke_probe(
     MaruAppHostSession *session,
     MaruAppHostRecoveredSessionSmokeProbe *out_probe
+);
+/* CR6d actual-AppKit smoke의 exact recovered-runtime read-only screen counters. */
+typedef struct MaruAppHostSessionHostInputSmokeProbe {
+    uint32_t active_remote;
+    uint32_t historical_count;
+    uint32_t ime_count;
+    uint32_t clipboard_count;
+} MaruAppHostSessionHostInputSmokeProbe;
+int32_t maru_macos_app_session_input_smoke_probe(
+    MaruAppHostSession *session,
+    MaruAppHostSessionHostInputSmokeProbe *out_probe
 );
 /* cross-window workspace 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지
    (§8A.2) + 이동한 surface 수(§8A.3). Swift(M3d-2b)가 source_window_closed=1이면 NSWindow를 닫는다(판정은 Zig,

@@ -622,14 +622,14 @@ pub fn settlePendingEvent(
         pending,
         attachment,
     );
-    const projection = pending.settlementEffectProjection() catch |err| return err;
+    const projection = try pending.settlementEffectProjection();
     if (!std.meta.eql(projection.effect_request, projectEffectRequest(expected_effect)))
         return error.InvalidOwner;
-    const binding = lifetime_owner.acquireSettlement(&lease_out, proof) catch |err| return err;
+    const binding = try lifetime_owner.acquireSettlement(&lease_out, proof);
     var lease_prepared = true;
     defer if (lease_prepared) lifetime_owner.abortSettlementPreAdmissionNoFail(&lease_out);
 
-    attachment.preflightPendingSettlementTransport(
+    try attachment.preflightPendingSettlementTransport(
         correlation,
         projection,
         lifetime_owner,
@@ -642,13 +642,13 @@ pub fn settlePendingEvent(
         &pending_permit,
         &begun,
         pending,
-    ) catch |err| return err;
+    );
     var transport_prepared = true;
     defer if (transport_prepared) attachment.abortPendingSettlementTransportPreAdmissionNoFail(
         &effect_permit,
         &release_permit,
     );
-    pending.preflightSettlement(lifetime_owner, &lease_out, .{
+    try pending.preflightSettlement(lifetime_owner, &lease_out, .{
         .lease = binding,
         .pending_owner_addr = projection.pending_owner_addr,
         .owner_incarnation = projection.owner_incarnation,
@@ -658,7 +658,7 @@ pub fn settlePendingEvent(
         .effect_out_addr = @intFromPtr(&effect_out),
         .release_out_addr = @intFromPtr(&release_out),
         .release_receipt_digest = projection.release.release_seal,
-    }, &pending_permit) catch |err| return err;
+    }, &pending_permit);
 
     pending.armSettlementNoFail(lifetime_owner, &lease_out, &pending_permit, binding);
     lease_prepared = false;

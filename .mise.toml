@@ -153,6 +153,10 @@ run = "zig build macos-app-smoke"
 description = "Run the actual AppKit recovered-session discovery/click/render smoke"
 run = "zig build macos-session-host-recovery-smoke"
 
+[tasks.macos-session-host-input-continuity-smoke]
+description = "Run actual AppKit recovered-session IME and OS clipboard continuity smoke"
+run = "zig build macos-session-host-input-continuity-smoke"
+
 [tasks.macos-agent-session-archive-smoke]
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"

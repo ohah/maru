@@ -2879,6 +2879,7 @@ pub const GenerationEventPublication = struct {
     correlation: EventCorrelation,
     header: protocol.Header,
     payload: []u8,
+    payload_allocator: std.mem.Allocator,
     admission: runtime_event_wire.Verdict,
     quarantine_reservation: GenerationEventQuarantine.Reservation,
     quarantine_identity: GenerationEventQuarantine.Identity,
@@ -9577,13 +9578,14 @@ pub fn takeGenerationEvent(
         &prepared,
         &owned,
     ) catch |err| {
-        if (err == error.Corrupt or err == error.InvalidPrepared)
+        if (err == error.Corrupt or err == error.InvalidPrepared) {
             return captureRegisteredOperationPoison(
                 slot,
                 operation,
                 poison_capture,
                 .local_invariant_violation,
             );
+        }
         return switch (err) {
             error.Terminal => error.Terminal,
             error.Corrupt, error.InvalidPrepared => error.Corrupt,
@@ -9680,7 +9682,9 @@ pub fn takeGenerationEvent(
             .expected_major = expected_major,
             .admission_tag = trusted_admission_projection.tag,
             .metadata_support_raw = metadata_support_raw,
-            .allocator_ptr = @intFromPtr(slot.current.client.allocator.ptr),
+            // Allocator context is deliberately not serialized: stateless allocators may carry
+            // undefined/zero context bits. The typed allocator travels with EventOwner instead.
+            .allocator_ptr = 0,
             .allocator_vtable = @intFromPtr(slot.current.client.allocator.vtable),
             .pin_owner_addr = @intFromPtr(&slot.current.pin_owner),
             .lease_addr = request.event_lease_addr,
@@ -9857,6 +9861,7 @@ pub fn takeGenerationEvent(
         .correlation = correlation,
         .header = event.header,
         .payload = event.payload,
+        .payload_allocator = event.payload_allocator,
         .admission = event.preflight,
         .quarantine_reservation = quarantine_reservation,
         .quarantine_identity = quarantine_identity,
@@ -10582,7 +10587,11 @@ pub fn prepareGenerationEventRelease(
         .{ .clean = .{ .owner_seal = projection.owner_seal } };
 }
 
-pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
+pub fn commitGenerationEventRelease(
+    out: *PreparedGenerationEventRelease,
+    payload_allocator: ?std.mem.Allocator,
+    payload: ?[]u8,
+) void {
     const state = preparedEventRelease(out);
     if (state.self_addr != @intFromPtr(out) or state.lifecycle != .prepared or
         anyGenerationEventReleaseCallbackActive() or
@@ -10598,14 +10607,17 @@ pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
                 state.request.owner.reservation.identity,
                 state.continuation,
             );
+            const allocator = payload_allocator orelse
+                @panic("generation event cleanup authority missing");
+            const owned_payload = payload orelse
+                @panic("generation event cleanup payload missing");
+            if (@intFromPtr(owned_payload.ptr) != state.mirror.payload_addr or
+                owned_payload.len != state.mirror.payload_len or
+                @intFromPtr(allocator.vtable) != state.mirror.allocator_vtable)
+                @panic("generation event cleanup authority drifted");
             state.lifecycle = .callback_active;
             generation_event_release_callback_active_addr = @intFromPtr(out);
-            const allocator: std.mem.Allocator = .{
-                .ptr = @ptrFromInt(state.mirror.allocator_ptr),
-                .vtable = @ptrFromInt(state.mirror.allocator_vtable),
-            };
-            const payload = @as([*]u8, @ptrFromInt(state.mirror.payload_addr))[0..state.mirror.payload_len];
-            allocator.free(payload);
+            allocator.free(owned_payload);
             generation_event_release_callback_active_addr = 0;
             _ = quarantine.settleRelease(
                 currentPid(),
@@ -10620,6 +10632,8 @@ pub fn commitGenerationEventRelease(out: *PreparedGenerationEventRelease) void {
             );
         },
         .corrupt => {
+            if (payload_allocator != null or payload != null)
+                @panic("corrupt event release received cleanup authority");
             if (!std.meta.eql(state.recovery_permit.event, state.trusted.event) or
                 state.recovery_permit.permit_generation != state.trusted.event.event_generation)
                 @panic("generation event recovery permit replayed or drifted");
@@ -11600,6 +11614,8 @@ pub fn finishPendingEventReleaseNoFail(
     release_permit: *settlement_contract.PreparedEventReleasePermit,
     begun: *PendingEventReleaseBegun,
     completion_out: *settlement_contract.EventReleaseCompletion,
+    payload_allocator: std.mem.Allocator,
+    payload: []u8,
 ) void {
     if (!settlement_contract.validPreparedEffectPermit(effect_permit) or
         !settlement_contract.validPreparedEventReleasePermit(release_permit) or
@@ -11614,11 +11630,10 @@ pub fn finishPendingEventReleaseNoFail(
         !std.meta.eql(completion_out.*, settlement_contract.EventReleaseCompletion{})) effectProofLoss();
     const operation = operationFromEffectPermit(effect_permit);
     const node = resolveRegisteredNodeOperation(operation) orelse effectProofLoss();
-    const allocator: std.mem.Allocator = .{
-        .ptr = @ptrFromInt(release_permit.allocator_ptr),
-        .vtable = @ptrFromInt(release_permit.allocator_vtable),
-    };
-    const payload = @as([*]u8, @ptrFromInt(release_permit.payload_addr))[0..release_permit.payload_len];
+    if (@intFromPtr(payload.ptr) != release_permit.payload_addr or
+        payload.len != release_permit.payload_len or
+        @intFromPtr(payload_allocator.vtable) != release_permit.allocator_vtable)
+        effectProofLoss();
     if (!std.meta.eql(pending_event_release_callback_binding, PendingEventReleaseCallbackBinding{}))
         effectProofLoss();
     advancePendingEventReleaseBegunNoFail(begun, .mirror_tombstoned, .callback_active);
@@ -11633,7 +11648,7 @@ pub fn finishPendingEventReleaseNoFail(
             (event_release_death_stage_raw == 2 and pending_event_payload_callback_count > 1))
             writeEventReleaseDeathMarker(0x49);
     }
-    allocator.free(payload);
+    payload_allocator.free(payload);
     if (builtin.is_test and event_release_death_stage_raw == 2) {
         writeEventReleaseDeathMarker(0x47);
         begun.seal[0] ^= 1;

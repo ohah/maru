@@ -61,7 +61,7 @@ test "CR3a-2c3d C2 release boundary remains leaf-owned and product-unwired" {
     try expectBefore(
         release_commit,
         ".consumeEventReleaseContinuationNoFail(",
-        "allocator.free(payload);",
+        "allocator.free(owned_payload);",
     );
     try expectBefore(
         release_commit,

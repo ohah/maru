@@ -29,6 +29,28 @@ pub fn main(init: std.process.Init) !void {
     if (product_path.len == 0 or product_path[0] != '/') return error.InvalidProductExecutable;
     const product_path_z = try allocator.dupeZ(u8, product_path);
     defer allocator.free(product_path_z);
+    const input_continuity = std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE") != null;
+    var restore_helper_path_z: ?[:0]u8 = null;
+    defer if (restore_helper_path_z) |path| allocator.free(path);
+    var restore_record_path_z: ?[:0]u8 = null;
+    defer if (restore_record_path_z) |path| allocator.free(path);
+    if (input_continuity) {
+        const helper_raw = std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE") orelse
+            return error.MissingInputSourceRestoreExecutable;
+        const helper_path = std.mem.span(helper_raw);
+        if (helper_path.len == 0 or helper_path[0] != '/') return error.InvalidInputSourceRestoreExecutable;
+        restore_helper_path_z = try allocator.dupeZ(u8, helper_path);
+        const artifact_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT") orelse
+            return error.MissingArtifactRoot;
+        const artifact_root = std.mem.span(artifact_raw);
+        if (artifact_root.len == 0 or artifact_root[0] != '/') return error.InvalidArtifactRoot;
+        restore_record_path_z = try std.fmt.allocPrintSentinel(
+            allocator,
+            "{s}/input-source-restore.json",
+            .{artifact_root},
+            0,
+        );
+    }
 
     try short_endpoint.prepareCurrentUserNamespace();
     var base_buf: [96]u8 = undefined;
@@ -78,10 +100,11 @@ pub fn main(init: std.process.Init) !void {
     }
     if (admin == null) return error.DaemonNotReady;
     defer if (admin) |*client| client.deinit();
-    const spawn = try admin.?.call(
-        "runtime.spawn",
-        "{\"argv\":[\"/bin/sh\",\"-c\",\"printf 'CR6C-RECOVERED-MARKER\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}",
-    );
+    const spawn_params = if (input_continuity)
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"printf 'CR6C-RECOVERED-MARKER\\nCR6D-HISTORICAL-ONCE\\n'; printf '\\\\033]52;c;Q1I2RC1ISVNUT1JJQ0FMLU9TQzUy\\\\007'; stty -echo; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
+    else
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"printf 'CR6C-RECOVERED-MARKER\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}";
+    const spawn = try admin.?.call("runtime.spawn", spawn_params);
     defer allocator.free(spawn);
     const runtime_id = client_mod.extractRuntimeId(spawn) orelse return error.RuntimeIdMissing;
     const inventory = try admin.?.call(
@@ -109,7 +132,21 @@ pub fn main(init: std.process.Init) !void {
         _ = std.c.execve(app_path_z.ptr, &argv, @ptrCast(std.c.environ));
         std.c._exit(127);
     }
-    try waitForExactExit(app_pid, 30_000);
+    var app_failure: ?anyerror = null;
+    waitForExactExit(app_pid, 30_000) catch |err| {
+        app_failure = err;
+    };
+    if (input_continuity) {
+        runInputSourceRestoreHelper(
+            restore_helper_path_z.?.ptr,
+            restore_record_path_z.?.ptr,
+        ) catch |err| {
+            std.debug.print("CR6d input-source restore helper failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        if (access(restore_record_path_z.?.ptr, 0) == 0) return error.InputSourceRestoreRecordSurvived;
+    }
+    if (app_failure) |err| return err;
 
     // AppKit teardown must detach from, not terminate, the keep-alive runtime.
     var params_buf: [80]u8 = undefined;
@@ -156,6 +193,34 @@ fn waitForExactExit(pid: c_int, timeout_ms: usize) !void {
         if (std.posix.errno(-1) != .INTR) break;
     }
     return error.AppTimedOut;
+}
+
+fn runInputSourceRestoreHelper(helper_path: [*:0]const u8, record_path: [*:0]const u8) !void {
+    const pid = std.c.fork();
+    if (pid < 0) return error.RestoreHelperForkFailed;
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ helper_path, record_path };
+        _ = std.c.execve(helper_path, &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    var status: c_int = 0;
+    var elapsed: usize = 0;
+    while (elapsed < 5_000) : (elapsed += 5) {
+        const rc = std.c.waitpid(pid, &status, std.c.W.NOHANG);
+        if (rc == pid) {
+            const unsigned: u32 = @bitCast(status);
+            if (!std.c.W.IFEXITED(unsigned) or std.c.W.EXITSTATUS(unsigned) != 0)
+                return error.InputSourceRestoreFailed;
+            return;
+        }
+        if (rc < 0) return error.RestoreHelperWaitFailed;
+        _ = usleep(5 * 1000);
+    }
+    _ = std.c.kill(pid, std.posix.SIG.KILL);
+    while (std.c.waitpid(pid, &status, 0) < 0) {
+        if (std.posix.errno(-1) != .INTR) break;
+    }
+    return error.RestoreHelperTimedOut;
 }
 
 fn terminateAndReap(pid: c_int) void {

@@ -125,6 +125,8 @@ test "C3-3b2b1 cleanup seal descriptor graph rejects ambiguous ownership" {
     try std.testing.expect(!seal.testing.cleanupDescriptorCanonical(present));
     present = descriptor(0x1000);
     present.allocator_ptr = 0;
+    try std.testing.expect(seal.testing.cleanupDescriptorCanonical(present));
+    present.allocator_vtable = 0;
     try std.testing.expect(!seal.testing.cleanupDescriptorCanonical(present));
     present = descriptor(0x1001);
     try std.testing.expect(!seal.testing.cleanupDescriptorCanonical(present));

@@ -683,7 +683,7 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다.
   generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. e3a는 actual product
   candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는 e3a1(candidate allocation 1개,
-  CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
+  CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner 반영 뒤 Debug 3,504바이트/ReleaseFast 3,488바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
   teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행한다. e3a2는 host base
   SSOT인 generation당 `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은
   64개 fixed inventory를 검증한다. 둘의 곱인 `max_tracked_bytes`는 구조적 표현 한계이고 app-global 정책 예산은 아니다.
@@ -722,10 +722,12 @@ generation의 resize wire sequence·baseline과 pump summary를 뜻한다. paylo
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
 CR3c2의 process/slot/node incarnation 결속, CR4a staged receipt owner와 CR4b stable mutation owner까지 포함한 현재
-`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,424/11,280`, ReleaseFast `3,408/11,232`다.
+`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,456/11,312`, ReleaseFast `3,440/11,264`다.
 CR3c2의 authority seal 128 KiB와 screen sequence 64 KiB에 더해 staged receipt owner는
 runtime당 304바이트, 4,096 runtime 상한에서 1,216 KiB를 추가한다. CR5b-2a retirement preparation
-authority는 runtime당 32바이트, 4,096 runtime 상한에서 128 KiB를 추가한다. CR2a는 이 물리적
+authority는 runtime당 32바이트, 4,096 runtime 상한에서 128 KiB를 추가한다. CR6d의 event payload
+정산은 stateless allocator의 null context를 정수 주소로 재구성하지 않고 exact typed allocator를 generation에
+보존하므로 runtime당 32바이트, 4,096 runtime 상한에서 128 KiB를 추가한다. CR2a는 이 물리적
 중첩만 수행하고 field 값, allocator ownership, deinit 순서, wire/API 동작을 바꾸지 않는다. CR2d가 ordered queue를 실제
 `InputOwner` facade로 옮기기 전까지 기존 `RemoteRuntime` field와 동작은 그대로다.
 
@@ -2318,8 +2320,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
    `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 11,280/ReleaseFast 11,232 bytes이며
-   `PendingEventOwner` 외 remainder는 각각 8,560/8,512 bytes다. CR4b가 stable shell에 inline으로 둔
+   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 11,312/ReleaseFast 11,264 bytes이며
+   `PendingEventOwner` 외 remainder는 각각 8,592/8,544 bytes다. CR4b가 stable shell에 inline으로 둔
    `MutationOwner` 576/560 bytes는 reconnect freeze 중 active lease와 generation을 보존하는 제품 권위이고,
    paused input metadata와 final-address paste store는 추가 464/480 bytes(runtime 상한에서 1,856/1,920 KiB)로
    원문 key/IME/control을 남기지 않고 완전한 paste 하나의 bounded owner만 결속한다.
@@ -5744,6 +5746,31 @@ client-side에서만 정산한다. 하네스는 자기 unique host entry만 정�
 UID namespace의 다른 host·manifest는 읽기 외에 수정하지 않는다. timeout·row 미발행·잘못된 rect·직접 action
 호출·빈/동일 캡처는 실패다. 이 gate는 실제 AppKit render와 recovery click만 닫으며 물리 키보드 IME 후보창,
 OS clipboard, 장시간 poison/backoff·soak는 각각 후속 CR6 gate로 남긴다.
+
+**CR6d 실제 IME·OS clipboard 연속성 계약:** CR6c와 같은 actual daemon/manifest, 일반 launch discovery,
+primary recovery row와 실제 `NSEvent` click으로 remote Term을 게시한 뒤에만 입력을 시작한다. 하네스는 복구 전에
+runtime이 구분 가능한 historical line과 OSC 52 write를 한 번 내보내게 하고, 새 AppKit process는 recovery 전에
+`NSPasteboard.general`에 별도 sentinel을 쓴다. 복구 직후 sentinel이 그대로여야 하므로 snapshot/delta가 과거 OSC 52
+side effect를 다시 실행할 수 없다. 이후 실제 terminal view의 view-local `NSTextInputContext`에
+`com.apple.inputmethod.Korean.2SetKorean`을 선택하고, 2벌식 `한글`의 물리 key code와 Return을 HID event tap의 실제 key-down
+`NSEvent`로 보낸다. `interpretKeyEvents`가 `setMarkedText`와 `insertText`를 모두 호출하고 Zig IME transaction이
+확정한 UTF-8 `한글`은 host PTY에서 exact 1회 관측돼야 한다. clipboard 행은 `NSPasteboard.general`에
+`CR6D-CLIPBOARD-ONCE\n`을 쓴 뒤 실제 Cmd+V `NSEvent`를 보내 기존 paste action→OS read→ordered remote input
+경로를 통과하며, screen에는 그 marker가 exact 1이어야 한다. historical line도 끝까지 exact 1이어야 하므로
+reconnect가 screen/input history를 새 입력처럼 재전송할 수 없다.
+
+스모크의 read-only probe는 active remote screen에서 위 세 marker의 occurrence count만 읽을 수 있고 input/action,
+runtime handle, adapter pointer를 노출하지 않는다. IME callback count와 pasteboard 전후 값은 Swift가 actual AppKit
+경계에서 관측한다. 합성 물리 키가 실제 macOS IME를 통과하도록 **이 opt-in smoke process에서만** 현재
+system-global keyboard input source의 exact ID를 붙잡고 한국어 2벌식 source로 전환한다. 이 opt-in 자동화는 macOS Accessibility event-post 권한과 Maru의 exact frontmost PID·first responder를 source 전환 전 및 각 HID 게시 전에 요구하며, 권한이 없으면 source mutation 전에 `accessibility-unavailable`, 전역 focus가 없으면 bounded retry로 닫힌다. 전환 전에 original/selected
+ID를 격리 artifact root에 atomic write하고, 정상·RED·`applicationWillTerminate`에서는 현재 source가 여전히 smoke가
+선택한 source일 때만 original로 복원한다. 강제 종료·timeout으로 앱 정산이 실행되지 않아도 부모 하네스의 별도 최소
+restore helper가 같은 record를 소비해 복원하며, 사용자가 중간에 제3 source를 선택했다면 그것을 덮어쓰지 않고 gate를
+실패시킨다. 앱과 부모는 복원 뒤 current source exact original과 record 소멸을 모두 확인한다. view-local input context도
+original source로 복원하고 marked text를 비운 뒤 CR6c와 같은 실제 Quit confirm/no-wire detach 및 host lease final-zero를
+수행한다. timeout, Korean source 부재, 전환/복원 실패, stale restore record, marked/insert callback 0, pasteboard sentinel
+drift, marker 0/2+, stale historical replay, 직접 ABI input 호출은 실패다. 이 gate는 IME·clipboard 연속성을 닫지만
+stalled socket/backoff, 장시간 soak와 성능 예산은 CR6e 계약 밖이다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고

@@ -124,6 +124,10 @@ pub const EventError = generation_event.EventError;
 pub const EventViewError = generation_event.EventViewError;
 pub const EventCorrelation = client_slot_mod.EventCorrelation;
 pub const PendingEventReleaseBegun = client_slot_mod.PendingEventReleaseBegun;
+const EventCleanupAuthority = struct {
+    allocator: std.mem.Allocator,
+    payload: []u8,
+};
 pub const PurgeEndedOutcome = contract.PurgeEndedOutcome;
 pub const PurgeEndedError = contract.PurgeEndedError;
 pub const ProjectedEventTake = struct {
@@ -166,6 +170,9 @@ pub const GenerationTransport = struct {
     prepared_storage: client_mod.PreparedBlockingRpcStorage = .{},
     rpc_response: rpc_executed_response.RpcExecutedResponse = .{},
     event_correlation: EventCorrelation = .{},
+    // Typed cleanup authority retained from the allocating Client. `Allocator.ptr` is never
+    // compared or serialized because stateless allocators may use undefined/zero context bits.
+    event_payload_allocator: ?std.mem.Allocator = null,
 
     pub const CatchupProjection = struct {
         slot_addr: usize,
@@ -404,7 +411,8 @@ pub const GenerationTransport = struct {
         if (!self.requestIdentityValid()) return error.InvalidOwner;
         if (!eventDestinationValid(self, out) or !generation_event.pristineExact(out))
             return error.InvalidOwner;
-        if (!eventCorrelationPristine(&self.event_correlation)) return error.InvalidOwner;
+        if (!eventCorrelationPristine(&self.event_correlation) or
+            self.event_payload_allocator != null) return error.InvalidOwner;
         const outcome = client_slot_mod.takeGenerationEvent(.{
             .owner = self.ownerQuery(),
             .bound_stream_id = self.bound_stream_id,
@@ -423,6 +431,7 @@ pub const GenerationTransport = struct {
             .taken => |publication| blk: {
                 const generation = publication.identity.receipt.event_generation;
                 self.event_correlation = publication.correlation;
+                self.event_payload_allocator = publication.payload_allocator;
                 generation_event.publish(out, publication);
                 break :blk .{
                     .outcome = .taken,
@@ -456,15 +465,31 @@ pub const GenerationTransport = struct {
                 generation_event.publishTerminal(owner);
             },
         }
-        client_slot_mod.commitGenerationEventRelease(&prepared);
+        const cleanup_allocator: ?std.mem.Allocator = switch (release) {
+            .clean => self.event_payload_allocator orelse
+                process_seal.fatalIntegrity(.proof_loss),
+            .corrupt => null,
+        };
+        const cleanup_payload: ?[]u8 = switch (release) {
+            .clean => @as([*]u8, @ptrFromInt(projection.payload_addr))[0..projection.payload_len],
+            .corrupt => null,
+        };
+        self.event_payload_allocator = null;
+        client_slot_mod.commitGenerationEventRelease(
+            &prepared,
+            cleanup_allocator,
+            cleanup_payload,
+        );
         switch (release) {
             .clean => {
                 generation_event.finalizeRelease(owner);
                 self.event_correlation = .{};
+                self.event_payload_allocator = null;
             },
             .corrupt => {
                 generation_event.finalizeTerminal(owner);
                 self.event_correlation = .{};
+                self.event_payload_allocator = null;
                 return error.Corrupt;
             },
         }
@@ -695,17 +720,28 @@ pub const GenerationTransport = struct {
     }
 
     pub fn tombstonePendingEventOwnerNoFail(
-        _: *GenerationTransport,
+        self: *GenerationTransport,
         owner: *EventOwner,
         release_permit: *settlement.PreparedEventReleasePermit,
         begun: *PendingEventReleaseBegun,
-    ) void {
-        generation_event.consumePreparedReleaseNoFail(owner, release_permit.event_owner_seal);
+    ) EventCleanupAuthority {
+        const event_cleanup = generation_event.consumePreparedReleaseNoFail(
+            owner,
+            release_permit.event_owner_seal,
+        );
+        const allocator = self.event_payload_allocator orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        self.event_payload_allocator = null;
+        const cleanup: EventCleanupAuthority = .{
+            .allocator = allocator,
+            .payload = event_cleanup.payload,
+        };
         if (!generation_event.pristineExact(owner))
             process_seal.fatalIntegrity(.proof_loss);
         const receipt = settlement.makeEventReleasePhaseReceipt(.owner, begun.lifecycle_raw, begun.lifecycle_raw + 1, release_permit.event_owner_addr, release_permit.event_generation, @intFromPtr(begun), release_permit.event_owner_seal, settlement.canonicalEventReleasePhaseAfterDigest(.owner, @intFromPtr(begun), release_permit.event_owner_addr, release_permit.event_generation, begun.lifecycle_raw + 1), release_permit.seal, settlement.zero_digest) catch
             process_seal.fatalIntegrity(.proof_loss);
         client_slot_mod.markPendingEventOwnerTombstonedNoFail(begun, receipt);
+        return cleanup;
     }
 
     pub fn beginPendingEventReleaseResourcesNoFail(
@@ -769,8 +805,16 @@ pub const GenerationTransport = struct {
         release_permit: *settlement.PreparedEventReleasePermit,
         begun: *client_slot_mod.PendingEventReleaseBegun,
         completion_out: *settlement.EventReleaseCompletion,
+        cleanup: EventCleanupAuthority,
     ) void {
-        client_slot_mod.finishPendingEventReleaseNoFail(effect_permit, release_permit, begun, completion_out);
+        client_slot_mod.finishPendingEventReleaseNoFail(
+            effect_permit,
+            release_permit,
+            begun,
+            completion_out,
+            cleanup.allocator,
+            cleanup.payload,
+        );
     }
 
     fn borrowClient(self: *GenerationTransport) ?*client_mod.Client {
@@ -1547,6 +1591,7 @@ pub fn terminalizeOwned(transport: *GenerationTransport, owner_addr: usize) Erro
         return error.InvalidTransport;
     transport.lifecycle = .terminal;
     transport.event_correlation = .{};
+    transport.event_payload_allocator = null;
     transport.slot_addr = 0;
     transport.owner_addr = 0;
     transport.owner_size = 0;
@@ -3032,6 +3077,7 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     owner.event = first;
     try generation_event.discardForTest(&owner.event);
     owner.transport.event_correlation = .{};
+    owner.transport.event_payload_allocator = null;
     owner.event = .{};
     try slot.current.client.bufferGenerationEventForTest(91, "{\"event\":\"future.event\"}");
     try std.testing.expectEqual(EventTakeOutcome.taken, try owner.transport.takeEvent(&owner.event));
@@ -3044,6 +3090,7 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     _ = try owner.event.view();
     try generation_event.discardForTest(&owner.event);
     owner.transport.event_correlation = .{};
+    owner.transport.event_payload_allocator = null;
 
     try slot.current.client.bufferGenerationEventForTest(
         91,
@@ -3058,6 +3105,7 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     owner.event = accepted_owner;
     try generation_event.discardForTest(&owner.event);
     owner.transport.event_correlation = .{};
+    owner.transport.event_payload_allocator = null;
 
     try slot.current.client.bufferGenerationEventForTest(
         91,
@@ -3396,7 +3444,13 @@ test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the 
             first_prepared_snapshot = first_prepared;
             first_prepared_snapshot_valid = true;
             generation_event.publishReleasing(&owner.event, clean.owner_seal);
-            client_slot_mod.commitGenerationEventRelease(&first_prepared);
+            const cleanup_allocator = owner.transport.event_payload_allocator.?;
+            owner.transport.event_payload_allocator = null;
+            client_slot_mod.commitGenerationEventRelease(
+                &first_prepared,
+                cleanup_allocator,
+                @as([*]u8, @ptrFromInt(projection.payload_addr))[0..projection.payload_len],
+            );
             generation_event.finalizeRelease(&owner.event);
             owner.transport.event_correlation = .{};
         } else {
@@ -3422,7 +3476,7 @@ test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the 
             _ = c.dup2(stderr_pipe[1], 2);
             _ = c.close(stderr_pipe[1]);
             first_prepared = first_prepared_snapshot;
-            client_slot_mod.commitGenerationEventRelease(&first_prepared);
+            client_slot_mod.commitGenerationEventRelease(&first_prepared, null, null);
             std.c._exit(0);
         }
         _ = c.close(stderr_pipe[1]);
@@ -3589,7 +3643,7 @@ test "CR3a-2c3d C2 owner lease payload seal and same-address stale owner transfe
                 }
                 const prepared_snapshot = prepared;
                 generation_event.publishTerminal(&owner.event);
-                client_slot_mod.commitGenerationEventRelease(&prepared);
+                client_slot_mod.commitGenerationEventRelease(&prepared, null, null);
                 generation_event.finalizeTerminal(&owner.event);
                 owner.transport.event_correlation = .{};
 
@@ -3604,7 +3658,7 @@ test "CR3a-2c3d C2 owner lease payload seal and same-address stale owner transfe
                         if (c.dup2(stderr_pipe[1], 2) < 0) std.c._exit(126);
                         _ = c.close(stderr_pipe[1]);
                         prepared = prepared_snapshot;
-                        client_slot_mod.commitGenerationEventRelease(&prepared);
+                        client_slot_mod.commitGenerationEventRelease(&prepared, null, null);
                         std.c._exit(0);
                     }
                     _ = c.close(stderr_pipe[1]);

@@ -216,7 +216,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 169;
+// 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
+// exact recovered runtime. The export carries no input/action authority, but Swift allocates the
+// new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
+pub const abi_version: u32 = 170;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3316,6 +3319,56 @@ pub const AppSession = struct {
         defer self.allocator.free(recent);
         out.marker_present = std.mem.indexOf(u8, recent, "CR6C-RECOVERED-MARKER") != null;
         return out;
+    }
+
+    /// CR6d reads only the exact recovered runtime's published screen. The runtime id remains in
+    /// the harness environment and is compared with RemoteTermBackend's canonical binding; no
+    /// handle, input method, or action identity crosses the ABI.
+    pub const SessionHostInputSmokeProbe = struct {
+        active_remote: bool = false,
+        historical_count: u32 = 0,
+        ime_count: u32 = 0,
+        clipboard_count: u32 = 0,
+    };
+
+    pub fn sessionHostInputSmokeProbe(self: *AppSession) SessionHostInputSmokeProbe {
+        const expected_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_RUNTIME_ID") orelse return .{};
+        const expected_text = std.mem.span(expected_raw);
+        if (expected_text.len != 32) return .{};
+        for (expected_text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return .{};
+
+        if (self.tabs.items.len == 0) return .{};
+        const tab = self.tabs.items[@min(self.app_window.active_tab, self.tabs.items.len - 1)];
+        if (tab.panes.items.len == 0) return .{};
+        const pane = tab.panes.items[@min(tab.active_pane, tab.panes.items.len - 1)];
+        if (pane.terms.items.len == 0) return .{};
+        const term = pane.terms.items[@min(pane.active_term, pane.terms.items.len - 1)];
+        if (term.surface.remote == null) return .{};
+        const remote = if (app_remote_backend) |*backend| backend else return .{};
+        const runtime_id = remote.runtimeIdFor(term.rt.handle) orelse return .{};
+        if (!std.mem.eql(u8, &runtime_id, expected_text)) return .{};
+
+        const recent = self.backendFor(term).dumpRecentText(
+            term.rt.handle,
+            self.allocator,
+            16,
+            8192,
+        ) catch return .{};
+        defer self.allocator.free(recent);
+        return .{
+            .active_remote = true,
+            .historical_count = @intCast(@min(
+                std.mem.count(u8, recent, "CR6D-HISTORICAL-ONCE"),
+                std.math.maxInt(u32),
+            )),
+            // UTF-8 bytes for the CR6d committed IME marker. This is a smoke oracle, not a
+            // localized product string, so it must not enter the UI translation inventory.
+            .ime_count = @intCast(@min(std.mem.count(u8, recent, "\xed\x95\x9c\xea\xb8\x80"), std.math.maxInt(u32))),
+            .clipboard_count = @intCast(@min(
+                std.mem.count(u8, recent, "CR6D-CLIPBOARD-ONCE"),
+                std.math.maxInt(u32),
+            )),
+        };
     }
 
     /// CR6b one-item adopt 제품 진입점. Sidebar row는 단지 locator이며, 현재 pool generation과 fresh

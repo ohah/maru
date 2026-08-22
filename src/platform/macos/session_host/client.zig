@@ -1116,7 +1116,10 @@ pub const BufferedEvent = struct {
         };
         const seal_value = self.admission_seal orelse return false;
         if (!std.meta.eql(seal_value.header, self.header)) return false;
-        if (!std.meta.eql(seal_value.allocator, canonical_allocator)) return false;
+        // `Allocator.ptr` may legally be undefined for stateless allocators; Zig explicitly
+        // forbids using that field as comparable identity. The admission seal retains the typed
+        // allocator that allocated this payload, while this comparison closes its implementation.
+        if (seal_value.allocator.vtable != canonical_allocator.vtable) return false;
         if (seal_value.payload_addr != @intFromPtr(self.payload.ptr) or
             seal_value.payload_len != self.payload.len)
             return false;
@@ -1142,7 +1145,7 @@ pub const BufferedEvent = struct {
     ) bool {
         const seal_value = self.admission_seal orelse return false;
         if (!std.meta.eql(seal_value.header, self.header) or
-            !std.meta.eql(seal_value.allocator, canonical_allocator) or
+            seal_value.allocator.vtable != canonical_allocator.vtable or
             seal_value.payload_addr != @intFromPtr(self.payload.ptr) or
             seal_value.payload_len != self.payload.len or
             !std.mem.eql(u8, &seal_value.payload_digest, &accepted.raw_digest) or
@@ -1162,7 +1165,7 @@ pub const BufferedEvent = struct {
     ) bool {
         const seal_value = self.admission_seal orelse return false;
         return std.meta.eql(seal_value.header, self.header) and
-            std.meta.eql(seal_value.allocator, canonical_allocator) and
+            seal_value.allocator.vtable == canonical_allocator.vtable and
             seal_value.payload_addr == @intFromPtr(self.payload.ptr) and
             seal_value.payload_len == self.payload.len and
             std.meta.activeTag(seal_value.admission) == .unknown;
@@ -1193,6 +1196,21 @@ test "CR3a-2c3d C1 event admission seal closes verdict and allocator provenance"
     };
     try std.testing.expect(event.sealMatches(std.testing.allocator));
     try std.testing.expect(!event.sealMatches(std.heap.page_allocator));
+
+    // Stateless allocators may carry undefined/zero context bits. Provenance validation must not
+    // compare or require that field; the typed allocator itself remains the cleanup authority.
+    var stateless = event;
+    stateless.admission_seal = BufferedEvent.seal(
+        accepted_header,
+        accepted_payload,
+        .{ .accepted = accepted },
+        std.heap.page_allocator,
+    );
+    try std.testing.expect(stateless.sealMatches(std.heap.page_allocator));
+    try std.testing.expectEqual(
+        std.heap.page_allocator.vtable,
+        stateless.admission_seal.?.allocator.vtable,
+    );
 
     event.preflight = .unknown;
     try std.testing.expect(!event.sealMatches(std.testing.allocator));
@@ -1663,6 +1681,7 @@ pub const PreparedGenerationEventTake = struct {
 pub const OwnedGenerationEvent = struct {
     header: protocol.Header,
     payload: []u8,
+    payload_allocator: std.mem.Allocator,
     preflight: runtime_event_wire.Verdict,
 };
 
@@ -11723,11 +11742,13 @@ pub const Client = struct {
             !std.mem.eql(u8, &validated.payload_digest, &prepared.payload_digest))
             @panic("validated generation event changed under mutation fence");
         const owned = self.pending_events.orderedRemove(index);
+        const payload_allocator = owned.admission_seal.?.allocator;
         self.pending_event_bytes -= owned.payload.len;
         prepared.lifecycle = .consumed;
         out.* = .{
             .header = owned.header,
             .payload = owned.payload,
+            .payload_allocator = payload_allocator,
             .preflight = owned.preflight.?,
         };
     }
@@ -14663,7 +14684,9 @@ pub const Client = struct {
     }
 
     fn latchFirstPoisonReason(self: *Client, reason: client_poison.ConnectionReason) void {
-        if (self.first_poison_reason == null) self.first_poison_reason = reason;
+        if (self.first_poison_reason == null) {
+            self.first_poison_reason = reason;
+        }
     }
 
     /// External transfer normalization may already hold the RX owner lease, so it cannot run the

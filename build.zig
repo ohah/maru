@@ -639,6 +639,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -1275,6 +1276,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -1321,6 +1323,23 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.setCwd(b.path("."));
         macos_app_compile.step.dependOn(&macos_app_mkdir.step);
         macos_app_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
+
+        // CR6d가 SIGKILL/timeout으로 AppKit teardown을 건너뛰어도 system-global input source를
+        // 원래 값으로 되돌리는 최소 실행파일이다. 일반 앱에는 진입점이 없고 opt-in harness만 호출한다.
+        const session_host_input_source_restore_compile = b.addSystemCommand(&.{
+            "xcrun", "swiftc", "-parse-as-library", "-target", macos_swift_target,
+        });
+        session_host_input_source_restore_compile.addFileArg(
+            b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"),
+        );
+        session_host_input_source_restore_compile.addFileArg(
+            b.path("src/platform/macos/SessionHostInputSourceRestore.swift"),
+        );
+        session_host_input_source_restore_compile.addArgs(&.{
+            "-o", "zig-out/bin/maru-session-host-input-source-restore",
+        });
+        session_host_input_source_restore_compile.setCwd(b.path("."));
+        session_host_input_source_restore_compile.step.dependOn(&macos_app_mkdir.step);
 
         const macos_app_build_step = b.step("macos-app-build", "Build the runnable macOS Swift app host app shell");
         macos_app_build_step.dependOn(&macos_app_compile.step);
@@ -1964,6 +1983,92 @@ pub fn build(b: *std.Build) void {
         session_host_cr6c_assert.setCwd(b.path("."));
         session_host_cr6c_assert.step.dependOn(&run_session_host_cr6c_appkit.step);
         session_host_cr6c_appkit_step.dependOn(&session_host_cr6c_assert.step);
+
+        const session_host_cr6d_appkit_step = b.step(
+            "macos-session-host-input-continuity-smoke",
+            "Run actual AppKit recovered-session IME and OS clipboard continuity smoke",
+        );
+        const session_host_cr6d_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-cr6d-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\"; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
+                "rm -f zig-out/maru-macos-app/app.summary.txt",
+        });
+        session_host_cr6d_fixture.setCwd(b.path("."));
+        const run_session_host_cr6d_appkit = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        run_session_host_cr6d_appkit.setCwd(b.path("."));
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE", "1");
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE",
+            b.pathFromRoot("zig-out/bin/maru-session-host-input-source-restore"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "25000");
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home/.config/maru/config"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6d_appkit.step.dependOn(&macos_app_bundle.step);
+        run_session_host_cr6d_appkit.step.dependOn(&file_panel_web_build.step);
+        run_session_host_cr6d_appkit.step.dependOn(&session_host_cr6d_fixture.step);
+        run_session_host_cr6d_appkit.step.dependOn(&session_host_input_source_restore_compile.step);
+        const session_host_cr6d_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr6d_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"CR6d 경계는"},
+        });
+        const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
+        run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
+        const session_host_cr6d_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_stage=2$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_stage=4$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_historical_count=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_ime_count=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_clipboard_count=1$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_marked_callbacks=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_insert_callbacks=[1-9][0-9]*$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_historical_clipboard_preserved=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_view_source_restored=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_global_source_selected=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_global_source_restored=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_post_event_access=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_source_record_cleared=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_input_smoke_failure=$' \"$summary\"",
+        });
+        session_host_cr6d_assert.setCwd(b.path("."));
+        session_host_cr6d_assert.step.dependOn(&run_session_host_cr6d_appkit.step);
+        session_host_cr6d_appkit_step.dependOn(&session_host_cr6d_assert.step);
 
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
@@ -2789,6 +2894,18 @@ pub fn build(b: *std.Build) void {
     run_i18n_pinned_language_boundary_tests.setCwd(b.path("."));
 
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
+    const session_host_cr6d_global_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr6d_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6d 경계는"},
+    });
+    const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_pinned_language_boundary_tests.step);

@@ -373,7 +373,10 @@ pub fn Registry(
                 mirror.payload_len <= protocol_max_control_json and
                 mirror.wire_major != 0 and mirror.expected_major != 0 and
                 mirror.admission_tag <= 1 and mirror.metadata_support_raw <= 1 and
-                mirror.allocator_ptr != 0 and mirror.allocator_vtable != 0 and
+                // `std.mem.Allocator.ptr` is an opaque context value, not a presence bit. A
+                // stateless allocator may canonically use address zero; the nonzero vtable and
+                // the outer exact descriptor comparison provide the authority boundary.
+                mirror.allocator_vtable != 0 and
                 mirror.pin_owner_addr != 0 and mirror.lease_addr != 0 and
                 mirror.slot_addr != 0 and mirror.slot_incarnation != 0 and
                 mirror.node_addr != 0 and mirror.node_incarnation == node_incarnation and
@@ -490,6 +493,45 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
         TestRegistry.Snapshot{ .occupied_slots = 0, .transferred_slots = 0, .retained_bytes = 0 },
         try registry.snapshot(41, 42),
     );
+    // Zig allocators may legitimately use address zero as their context (for example the
+    // stateless C allocator). The vtable is the presence discriminator; the context address is
+    // still sealed and compared exactly by the outer event owner.
+    const zero_context_mirror: TestRegistry.CleanupMirror = .{
+        .payload_addr = 0x9F0001,
+        .payload_len = 1,
+        .payload_digest = [_]u8{0} ** 32,
+        .admission_projection_digest = [_]u8{0} ** 32,
+        .wire_major = 1,
+        .expected_major = 1,
+        .admission_tag = 1,
+        .metadata_support_raw = 1,
+        .allocator_ptr = 0,
+        .allocator_vtable = 2,
+        .pin_owner_addr = 3,
+        .lease_addr = 4,
+        .slot_addr = 5,
+        .slot_incarnation = 6,
+        .node_addr = 7,
+        .node_incarnation = 7,
+        .host_id = 8,
+        .connection_generation = 1,
+        .stream_id = 9,
+        .process_nonce = 10,
+        .owner_thread_id = 42,
+    };
+    const zero_context_before = try registry.snapshot(41, 42);
+    const zero_context = try registry.reserveUnbound(41, 42, 7, 0x9F0000, zero_context_mirror);
+    const zero_context_identity = try registry.bind(41, 42, zero_context, 1);
+    _ = try registry.beginRelease(41, 42, zero_context, zero_context_identity);
+    _ = try registry.settleRelease(41, 42, zero_context, zero_context_identity);
+    try std.testing.expectEqualDeep(zero_context_before, try registry.snapshot(41, 42));
+    var missing_vtable = zero_context_mirror;
+    missing_vtable.allocator_vtable = 0;
+    try std.testing.expectError(
+        error.InvalidIdentity,
+        registry.reserveUnbound(41, 42, 7, 0x9F1000, missing_vtable),
+    );
+    try std.testing.expectEqualDeep(zero_context_before, try registry.snapshot(41, 42));
     const reused = try registry.reserveUnbound(41, 42, 7, 0xA00000, .{
         .payload_addr = 0xA00001,
         .payload_len = 1,

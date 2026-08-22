@@ -1080,12 +1080,22 @@ pub const GenerationAttachment = struct {
             out,
         )) process_seal.fatalIntegrity(.proof_loss);
         self.transport.preparePendingEventReleaseBegunNoFail(effect_permit, permit, begun);
-        self.transport.tombstonePendingEventOwnerNoFail(&self.event_owner, permit, begun);
+        const cleanup = self.transport.tombstonePendingEventOwnerNoFail(
+            &self.event_owner,
+            permit,
+            begun,
+        );
         self.transport.beginPendingEventReleaseResourcesNoFail(effect_permit, permit, begun);
         self.transport.tombstonePendingEventCorrelationNoFail(begun);
         self.event_generation_mirror = 0;
         self.transport.markPendingEventMirrorTombstonedNoFail(self.event_generation_mirror, begun);
-        self.transport.finishPendingEventReleaseNoFail(effect_permit, permit, begun, out);
+        self.transport.finishPendingEventReleaseNoFail(
+            effect_permit,
+            permit,
+            begun,
+            out,
+            cleanup,
+        );
     }
 
     pub fn allowsMutation(self: *const GenerationAttachment) bool {

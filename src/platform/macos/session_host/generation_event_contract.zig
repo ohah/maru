@@ -194,14 +194,25 @@ pub fn publishReleasing(owner: *EventOwner, expected_seal: owner_seal.Digest) vo
 /// C3-3b3은 이 호출 전에 embedded ConnectionLease pin을 이미 소비했다. allocator callback 전에
 /// public owner 전체를 지워 callback reentry가 payload pointer를 복구하지 못하게 하며, callback
 /// suffix는 이 storage를 다시 읽지 않는다.
-pub fn consumePreparedReleaseNoFail(owner: *EventOwner, expected_seal: owner_seal.Digest) void {
+pub const CleanupAuthority = struct {
+    payload: []u8,
+};
+
+pub fn consumePreparedReleaseNoFail(
+    owner: *EventOwner,
+    expected_seal: owner_seal.Digest,
+) CleanupAuthority {
     const state = internal(owner);
     if (!lifecycleRawValid(&state.lifecycle) or state.lifecycle != .live or
         state.self_addr != @intFromPtr(owner) or
         !std.crypto.timing_safe.eql(owner_seal.Digest, state.seal, expected_seal) or
         !std.crypto.timing_safe.eql(owner_seal.Digest, state.seal, sealFor(state)))
         @panic("prepared generation event owner release drifted");
+    const cleanup: CleanupAuthority = .{
+        .payload = state.payload,
+    };
     owner.* = .{};
+    return cleanup;
 }
 
 pub fn finalizeRelease(owner: *EventOwner) void {

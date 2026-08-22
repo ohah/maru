@@ -218,6 +218,8 @@ src/
 
 파일 패널의 웹 콘텐츠는 루트 `web/`에 둔다. `web/src/`는 vanilla TypeScript shell·격리 renderer·sanitizer, `web/scripts/`는 zntc bundle/SRI·runtime notice/license audit, `web/tests/`는 Bun adversarial fixture를 소유한다. 생성물 `web/dist/`와 `web/node_modules/`는 커밋하지 않는다. `build.zig`가 `web:build`를 선행해 `web/dist`를 앱 `Resources/web/`에 복사하므로 옛 `src/platform/macos/web/` placeholder는 FP4에서 제거했다. 파일 read/asset 경로 정책은 L2 `src/session/file_panel_bridge.zig`, 실 surface-pinned FS I/O와 Swift ABI는 `src/platform/macos/app_session.zig`·`app_host_abi.{zig,h}`가 소유한다. Mermaid helper의 wire codec과 앱 전역 queue/failure 정책은 각각 L2 `src/session/mermaid_protocol.zig`·`mermaid_coordinator.zig`, native transport는 목적별 `MermaidProtocolBridge.swift`·`MermaidHelperProcess.swift`, 별도 helper entrypoint는 `MaruMermaidRenderer.swift`가 소유한다. `MermaidRendererPage.swift`는 helper WKWebView의 inert HTML·CSP·ephemeral data store·base URL 구성을 단독 소유하며, FP10c2의 내부 scheme/navigation 정책도 이 page 경계에서 확장한다. helper Swift에는 wire serializer나 queue 정책을 두지 않는다.
 
+npm 라이브러리(`@maru/*`)는 루트 `packages/`에 둔다. `web/`과 분리하는 이유는 소유 주체가 다르기 때문이다 — `web/`은 **앱이 싣는** 파일 패널 콘텐츠이고, `packages/`는 **밖으로 배포하는** 패키지다. 워크스페이스 루트는 `packages/package.json`이고 하위에 `core`(wasm·바닐라 TS·렌더러)와 프레임워크 래퍼 `react`·`vue`·`svelte`·`lit`이 있다. 생성물 `packages/*/dist/`와 `packages/node_modules/`는 커밋하지 않지만, **`packages/core/wasm/maru-vt.wasm`은 커밋한다** — npm에 실려 나가는 배포 산출물이고 받는 쪽에 Zig 툴체인이 없다(소스와의 동기는 `check-wasm-sync`가 지킨다). `build.zig`의 `wasm-lib` step이 그 자리에 산출물을 놓는다. 계약은 [maru-term 라이브러리](maru-term-library.md)가 단일 출처다.
+
 루트의 `*.zig` 파일은 외부 import 경로를 안정화하는 facade다. 실제 구현은 위 하위 폴더에 목적별로 둔다.
 
 ## 테스트 구조

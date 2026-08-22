@@ -1,0 +1,112 @@
+# maru-term
+
+[maru](https://github.com/ohah/maru)의 터미널 코어를 WebAssembly로 컴파일한 브라우저 터미널.
+
+VT 파싱·화면 상태·키 인코딩·문자 폭 판정은 **wasm(Zig)**이 하고, 글리프 모양·폰트 폴백·DOM 통합은 **웹**이 한다.
+
+- **폭을 코어가 정한다** — 동아시아 폭(EAW)과 grapheme cluster(ZWJ·VS16·국기)를 터미널 본체와 같은 코드로 판정한다.
+- **폰트 없이 그리는 글리프** — 박스 드로잉·블록·파워라인·브라유·모자이크는 코어가 셀 크기에 맞춰 직접 그린다. **Nerd Font 가 없어도** 모양이 나오고, 표의 선이 셀 경계에서 끊기지 않는다.
+- **기본이 워커** — 코어와 렌더가 모두 워커에서 돌아 대량 출력에도 메인 스레드가 막히지 않는다. `SharedArrayBuffer`를 쓰지 않으므로 COOP/COEP 없이 어디에나 임베드된다.
+- **컨테이너를 채운다** — `cols`/`rows`를 주지 않으면 요소 크기에 맞춰 격자를 잡고 리사이즈를 따라간다.
+- **줄 편집 키가 본체와 같다** — `Cmd+Delete`(줄 삭제), `Cmd+←/→`(줄 시작·끝), `Option+←/→`(단어 이동)를 macOS 관례대로 셸 시퀀스로 보낸다.
+- **IME 조합이 뒤 텍스트를 민다** — 조합 글자가 화면에 실제로 들어간다. 줄을 다시 그리는 앱은 `onPreedit`를 구독해 직접 그릴 수 있다.
+
+| 패키지 | 내용 |
+|---|---|
+| `@maru/core` | wasm, 바닐라 TS API, Canvas 렌더러, 워커 |
+| `@maru/react` | `<MaruTerminal />` |
+| `@maru/vue` | `<MaruTerminal />` |
+| `@maru/svelte` | `use:terminal` 액션 |
+| `@maru/lit` | `<maru-terminal>` |
+
+## 쓰기
+
+```bash
+npm i @maru/core @maru/react
+```
+
+```tsx
+import { MaruTerminal } from "@maru/react";
+
+<MaruTerminal
+  options={{ fontSize: 14 }}   /* cols/rows 를 주지 않으면 컨테이너에 맞춘다 */
+  onData={(bytes) => socket.send(bytes)}   // 호스트로 보낼 바이트
+  onTitle={(t) => (document.title = t)}
+/>
+```
+
+바이트를 어디서 가져올지는 여러분이 정한다(WebSocket·SSH-over-WS·정적 trace 재생). 호스트가 준 바이트는 `write`로 되돌린다.
+
+```ts
+socket.onmessage = (e) => term.write(new Uint8Array(e.data));
+```
+
+> **`onData`를 반드시 호스트로 보내야 한다.** 키 입력뿐 아니라 터미널이 DA·CPR·OSC 질의에 답하는 바이트도 같은 경로로 나간다. 안 보내면 TUI가 응답을 기다리며 멈춘다.
+
+## 프레임워크별
+
+```vue
+<script setup>
+import { MaruTerminal } from "@maru/vue";
+</script>
+<template><MaruTerminal :options="{ fontSize: 14 }" @data="onData" /></template>
+```
+
+```svelte
+<script>
+  import { terminal } from "@maru/svelte";
+</script>
+<div use:terminal={{ options: { fontSize: 14 }, onData }} style="width:100%;height:400px" />
+```
+
+```html
+<script type="module">import "@maru/lit";</script>
+<maru-terminal style="width:100%;height:400px"></maru-terminal>
+```
+
+Svelte만 컴포넌트가 아니라 **액션**이다 — 마운트·갱신·파괴 훅이 모두 있어 기능은 같다.
+
+## 워커
+
+기본값은 **코어와 렌더를 모두 워커에 두는 것**이다. 대량 출력이 쌓여도 메인 스레드가 막히지 않는다.
+
+```ts
+new Terminal({ worker: "full" });  // 기본
+new Terminal({ worker: false });   // 메인 스레드
+```
+
+`Worker`나 `OffscreenCanvas`가 없으면(구형 Safari 등) 자동으로 내려가고 `onFallback`으로 알린다. 옵션을 **명시**했는데 지원이 없으면 `open()`이 실패한다.
+
+`SharedArrayBuffer`는 쓰지 않는다 — COOP/COEP가 서드파티 인증·결제 플로우를 깨뜨리는데, VT 파싱은 순차적이라 병렬 이득이 없다.
+
+## 테마
+
+```ts
+import { themes, parseGhosttyTheme } from "@maru/core";
+
+term.setTheme(themes.dracula);
+term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
+```
+
+[Ghostty가 배포하는 테마 파일](https://github.com/ghostty-org/ghostty)을 그대로 읽는다(iTerm2-Color-Schemes 계열, 수백 종).
+
+## 무엇이 다른가
+
+- **정확한 키 인코딩** — DECCKM, DECKPAM, 수식자 붙은 특수 키의 xterm legacy 형식, kitty CSI u
+- **문자 폭** — East Asian Width와 grapheme cluster를 코어가 판정한다. 폰트가 아니라 유니코드가 정한다
+- **폰트 없는 박스 드로잉** — 박스·파워라인·브라유를 계산으로 그려 폰트마다 선이 어긋나지 않는다
+- **리가처** — 같은 스타일의 ASCII 연속 구간을 한 번에 그려 `<--` `===` 같은 리가처가 산다
+
+## 만들기
+
+```bash
+zig build wasm-lib     # wasm (저장소 루트에서)
+bun install
+bun run build          # zntc 번들 + tsc 타입 선언
+bun run check          # 전체 게이트
+bun run test:browser   # 실제 브라우저 렌더 검증
+```
+
+## 라이선스
+
+MIT

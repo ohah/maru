@@ -139,7 +139,22 @@ flowchart TD
 - §3의 시각 계약을 구현한다. 히트테스트·컨텍스트 메뉴·이름 변경은 **이 단계에서 옮기지 않는다**
   (행 높이만 새 출처를 쓰고, 나머지 판정은 기존 경로 유지).
 - 검증: 컴포넌트 build/view 단위 테스트(행 내부 rect가 겹치지 않는다·폭 예산·상태 슬롯), 제품 Metal
-  캡처(dark·light) before/after, `mise run macos-file-explorer-perf`.
+  캡처 before/after, `mise run macos-file-explorer-perf`.
+
+**FT1이 계획과 달라진 곳(구현하며 드러난 것).**
+
+- **`ids.zig`를 만들지 않았다.** FT1은 action을 발행하지 않으므로(히트테스트가 기존 경로에 남아
+  있다) 빈 intent 표는 소비자 없는 파일이다. FT2가 히트테스트를 옮길 때 함께 만든다.
+- **행 높이 교체 지점이 셋이 아니라 다섯이었다.** 계획은 `fileTreeVisibleRows`·`fileTreeDrawWindow`·
+  히트테스트를 셋으로 셌는데, `fileTreeScrollExtent`(스크롤 상한)와 `scrollFileTreeRowIntoView`
+  (reveal)도 같은 축이었다. 앞의 셋만 옮기자 목록 끝 몇 행이 스크롤로 닿지 않는 상태가 테스트에
+  드러났다 — 계획이 축 하나를 과소평가한 것이고, 그래서 지금은 그 다섯이 전부 한 함수를 지난다.
+- **포커스된 선택의 표시를 바꿨다.** §3 표는 "선택: 라운드 밴드"만 적었는데, 옛 렌더는 포커스된
+  선택을 **accent로 행 전체를 칠하고 글자를 테마 대비색으로 뒤집었다**. 컴포넌트는 색을 role로
+  다루고 이 층에 "accent 위의 전경" role이 없어 그대로 옮기면 글자가 안 읽힌다. 면은 약하게 두고
+  **왼쪽 accent 막대**로 포커스를 말하도록 바꿨다(`Metrics.focus_bar_w`).
+- **이름 변경 인라인 편집을 FT1에서 보존했다.** 계획은 FT2로 미뤘지만, 편집 중 글자가 화면에서
+  사라지는 것은 이관 중이라도 회귀다. 라벨 치환만 옮겼고 caret·키 처리는 여전히 기존 경로다.
 
 ### FT2 — 상호작용 이관
 
@@ -177,12 +192,12 @@ flowchart TD
 
 ## 6. 위험과 미해결
 
-- **성능 예산과의 충돌 가능성.** [performance-budget.md](../performance-budget.md) "파일 탐색기
-  scrollbar/icon 예산"은 row projection과 scrollbar pointer 경로에 **allocator call = 0**을 hard gate로
-  걸고 있고, 그 macOS job은 branch protection required다. 반면 Session Dock·SCM Dock의 프레임 경로는
-  **프레임마다 arena를 연다**(`collectScmDock`). 두 규약이 같은 프레임 안에서 만나므로, FT1은
-  ⑴ 예산이 거는 두 경로가 arena 밖에 있음을 보이거나 ⑵ 노드/entry 버퍼를 고정 크기로 미리 잡아
-  allocation을 없애야 한다. **어느 쪽인지 정하는 것이 FT1의 첫 작업이다.**
+- ~~**성능 예산과의 충돌 가능성.**~~ **FT1에서 해소됐다(충돌 없음).** 예산 테스트를 읽어 보니
+  `allocator call = 0`이 실제로 재는 구간은 ⑴ `classifyFileTreeRowsCounted`(row projection)와
+  ⑵ 1,000회 스크롤바 pointer/geometry 루프뿐이고, 컴포넌트 프레임 빌드는 그 둘 어디에도 없다.
+  게다가 **기존 셀 경로도 이미 프레임마다 `ArrayList`를 할당하고 있었다**(`buildFileTreeDrawList`의
+  `cells`·`pool`) — arena는 새 비용이 아니라 같은 성질의 비용이다. 원문을 지우지 않고 남기는 이유는
+  "재 보기 전에는 몰랐다"가 기록이기 때문이다.
 - **measured text 비용.** 트리는 행이 수천 개가 될 수 있다. 측정은 **보이는 창에만** 걸고 캐시
   (`MeasuredTextCache`) 적중 시 CoreText를 부르지 않는 Session Dock 규약을 그대로 따른다. 스크롤 중
   매 프레임 측정이 들어오면 예산 job이 잡아야 한다 — FT1이 그 counter를 추가한다.
@@ -207,6 +222,6 @@ flowchart TD
 
 | 단계 | 상태 |
 | --- | --- |
-| FT1 — 컴포넌트 골격과 행 렌더 | 미착수 |
+| FT1 — 컴포넌트 골격과 행 렌더 | **완료**(같은 PR) |
 | FT2 — 상호작용 이관 | 미착수 |
 | FT3 — 셀 경로 제거 | 미착수(선행 조건: Windows 스모크 대체 결정) |

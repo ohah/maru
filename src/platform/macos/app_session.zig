@@ -91,6 +91,7 @@ const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig"); // 소스 컨트롤 도크 component 배선(P1b)
+pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
 const file_panel_ops = @import("app_session/file_panel.zig");
 const pane_ops = @import("app_session/pane.zig");
 const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
@@ -4509,6 +4510,9 @@ pub const AppSession = struct {
     agent_session_dock_rich_text_cache: ?MeasuredTextCache = null,
     /// 소스 컨트롤 도크의 measured 텍스트 캐시(같은 fingerprint면 CoreText를 다시 부르지 않는다).
     scm_dock_rich_text_cache: ?MeasuredTextCache = null,
+    /// 탐색기 트리 행 라벨의 measured 셰이핑 캐시(FT1). 도크 뷰마다 따로 두는 이유는 SCM 캐시와 같다 —
+    /// 한 캐시를 나눠 쓰면 뷰를 오갈 때마다 fingerprint가 어긋나 매 프레임 CoreText를 다시 부른다.
+    file_tree_rich_text_cache: ?MeasuredTextCache = null,
     /// 사이드바 헤더 검색 줄의 measured 셰이핑 캐시(이관 2단계). 슬롯이 도크와 따로인 이유는 fingerprint가
     /// 각자의 ops에서 나오기 때문이다 — 한 슬롯을 공유하면 검색어를 칠 때마다 도크 아티팩트가 버려진다.
     sidebar_search_text_cache: ?MeasuredTextCache = null,
@@ -9932,6 +9936,7 @@ pub const AppSession = struct {
     fn clearMeasuredTextCaches(self: *AppSession) void {
         MeasuredTextCache.clear(&self.agent_session_dock_rich_text_cache, self.allocator);
         MeasuredTextCache.clear(&self.scm_dock_rich_text_cache, self.allocator);
+        MeasuredTextCache.clear(&self.file_tree_rich_text_cache, self.allocator);
         MeasuredTextCache.clear(&self.sidebar_search_text_cache, self.allocator);
         MeasuredTextCache.clear(&self.pane_tab_title_text_cache, self.allocator);
     }
@@ -15663,15 +15668,6 @@ pub const AppSession = struct {
                 // 앰버 사각 ring은 제거했다. full/minimal 모두 아래 공용 FocusOwner body border 하나가 실제 입력 경계를 담당한다.
             }
 
-            // Resolve the identity-backed selection once for this projected frame. Both the background
-            // quad and the glyph paint below consume this exact index, including after async row rebuilds.
-            const file_tree_selected_index = file_panel_ops.selectedFileTreeRow(self);
-            const file_tree_selection_paint: ?coretext_frame_builder.FileTreeSelectionPaint =
-                if (file_panel_ops.fileTreeFocused(self)) if (file_tree_selected_index) |index| .{
-                    .index = index,
-                    .foreground = .{ .rgb = self.appearance.theme.accent_foreground },
-                } else null else null;
-
             // FP3 창-로컬 파일 도크 chrome. 순수 dockGeometry의 tab/header/divider rect를 그대로 쓴다.
             if (dock_ops.dockVisible(self)) {
                 const dg = dock_ops.dockGeometry(self);
@@ -15723,38 +15719,11 @@ pub const AppSession = struct {
                         .h = 1,
                     }, pane_ops.dividerColor(self));
                 }
-                if (self.dock.view == .explorer and dg.tree_content.w > 0 and self.cell_height_px > 0) {
-                    // 밴드는 행 텍스트와 **같은 창·같은 원점 편향**을 써야 한다 — 갈라지면 하이라이트가
-                    // 글자와 어긋난 채 반 칸 밀린다.
-                    const window = file_panel_ops.fileTreeDrawWindow(self);
-                    const start = window.start;
-                    const end = @min(self.file_tree_rows.items.len, start + window.count);
-                    // 텍스트 pane origin과 **같은 식**이다(둘 다 tree_content.y에서 shift를 뺀다).
-                    const band_top: u32 = dg.tree_content.y -| window.origin_shift_px;
-                    for (self.file_tree_rows.items[start..end], start..) |row, index| {
-                        const active = switch (row) {
-                            .recent_file => |v| v.active,
-                            .file => |v| v.active,
-                            else => false,
-                        };
-                        const hovered = self.file_tree_hovered_row == index;
-                        const selected = file_tree_selected_index != null and file_tree_selected_index.? == index;
-                        if (!active and !hovered and !selected) continue;
-                        self.appendClippedBarBgQuad(.{
-                            .x = dg.tree_content.x,
-                            .y = band_top + @as(u32, @intCast(index - start)) * self.cell_height_px,
-                            // gutter를 뺀 폭이다. 스크롤바가 layer 2(밴드와 같은 층)로 내려왔으므로 밴드가
-                            // 전폭이면 append 순서에 따라 스크롤바를 덮는다(SV2b).
-                            .w = dock_ops.dockListTextWidthPx(self),
-                            .h = self.cell_height_px,
-                        }, if (selected and file_panel_ops.fileTreeFocused(self))
-                            packOpaqueRgb(self.appearance.theme.accent)
-                        else if (selected)
-                            self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self))
-                        else
-                            self.chromeQuadBg(if (active) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self)), dg.tree_content);
-                    }
-                }
+                // 탐색기 행 밴드(선택·활성·호버)는 **컴포넌트가 그린다**(FT1). 예전에는 여기서 셀
+                // 높이로 사각 밴드를 쌓았는데, 그 방식은 모서리 반경·좌우 inset·행 높이를 표현할 수
+                // 없었다(docs/plans/file-tree-component.md §0). 지금은 `file_tree_dock_ops`가 발행한
+                // tree의 카드 rect를 `ui_paint`가 낸다 — 그리는 자리와 (FT2의) 누르는 자리가 같은
+                // 출처를 쓰게 하는 것이 이관의 요점이다.
                 self.appendBarBgQuad(dg.divider, pane_ops.dividerColor(self));
                 // **밴드보다 뒤에** 넣는다(SV2b). 스크롤바가 layer 2로 내려와 행 하이라이트 밴드와 같은
                 // 버킷이 됐고, 그 안에서는 배열 순서가 painter 순서다. 밴드 폭은 gutter 앞에서 끝나므로
@@ -16160,57 +16129,14 @@ pub const AppSession = struct {
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
                             agent_dock.collectAgentSessionDock(self, &collected, pane_frame_builder, tabbar_colors);
                         }
-                        if (self.dock.view == .explorer and tree_content_cols > 0 and draw_window.count > 0) {
-                            // 텍스트가 쓸 수 있는 칸 수는 **gutter를 뺀 폭**에서 나온다(SV2b). 예전에는
-                            // 칸을 통째로 예약해(`reservedColumns`) 셀 폭에 따라 예약량이 들쭉날쭉했고,
-                            // 스크롤바가 없으면 0칸이라 목록 폭이 나타났다 사라졌다 했다. gutter는 컨테이너가
-                            // 상시 소유하므로 스크롤바 유무로 행이 reflow하지 않는다.
-                            const content_cols: u16 = @intCast(@min(
-                                dock_ops.dockListTextWidthPx(self) / self.cell_width_px,
-                                @as(u32, std.math.maxInt(u16)),
-                            ));
-                            file_tree_rows: {
-                                // If an externally damaged/tiny layout cannot fit one full content cell beside the
-                                // scrollbar, draw no row glyphs instead of letting the track cover the only cell.
-                                if (content_cols == 0) break :file_tree_rows;
-                                const tree_edit_text = if (self.rename) |renaming|
-                                    if (renaming == .file_tree) settings_ops.renameEditText(self, self.allocator) catch null else null
-                                else
-                                    null;
-                                defer if (tree_edit_text) |owned| self.allocator.free(owned);
-                                const tree_edit: ?coretext_frame_builder.FileTreeEdit = if (self.rename) |renaming|
-                                    if (renaming == .file_tree and tree_edit_text != null) .{
-                                        .identity = .{ .kind = renaming.file_tree.row_kind, .path = renaming.file_tree.path() },
-                                        .text = tree_edit_text.?,
-                                    } else null
-                                else
-                                    null;
-                                if (coretext_frame_builder.buildFileTreeDrawList(
-                                    self.allocator,
-                                    self.file_tree_rows.items,
-                                    tree_edit,
-                                    draw_window.start,
-                                    draw_window.count,
-                                    content_cols,
-                                    dock_fg,
-                                    dock_active_fg,
-                                    file_tree_selection_paint,
-                                    &fileTreeIconColors(&self.buildChromeTokens()),
-                                    .{ .rgb = self.buildChromeTokens().palette.get(.muted_fg) },
-                                )) |tdl| {
-                                    self.collectShaped(&collected, tdl, pane_frame_builder, .{
-                                        .pane = .{
-                                            .origin_x = dg.tree_content.x,
-                                            // 창의 첫 행이 뷰포트 위로 밀려 나간 만큼 원점을 **올린다** —
-                                            // 이것이 부분 행을 만드는 유일한 산술이고, 위·아래로 삐져나온
-                                            // 몫은 아래 clip_rect가 자른다(SV2a).
-                                            .origin_y = dg.tree_content.y -| draw_window.origin_shift_px,
-                                            .colors = tabbar_colors,
-                                            .clip_rect = .{ .x = dg.tree_content.x, .y = dg.tree_content.y, .w = dg.tree_content.w, .h = dg.tree_content.h },
-                                        },
-                                    });
-                                } else |_| {}
-                            }
+                        if (self.dock.view == .explorer and draw_window.count > 0) {
+                            // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
+                            // 높이·라운드 밴드를 표현할 수 없어 이 자리에서 물러났다(SCM 도크가 P1b에서
+                            // 밟은 것과 같은 이관 — docs/plans/file-tree-component.md).
+                            //
+                            // 폭 판정도 컴포넌트가 한다: 예전에는 여기서 `content_cols == 0`으로 걸렀는데,
+                            // 그 기준은 **셀 칸**이라 픽셀 폭이 남아 있어도 글자를 통째로 버렸다.
+                            file_tree_dock_ops.collectFileTreeDock(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                     }
                 }
@@ -36390,11 +36316,11 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
 
     // 관측은 tick마다 같은 CWD를 되풀이한다. 같은 값에서 rows 재투영이나 scroll을 다시 걸면 사용자가
     // 탐색 중인 위치를 빼앗으므로, raw scroll과 dirty/pending 상태가 그대로여야 한다.
-    session.file_tree_scroll.offset_y_px = 2 * session.cell_height_px;
+    session.file_tree_scroll.offset_y_px = 2 * file_tree_dock_ops.fileTreeRowHeightPx(session);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expect(!session.file_tree_rows_dirty);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    try std.testing.expectEqual(2 * session.cell_height_px, session.file_tree_scroll.offset_y_px);
+    try std.testing.expectEqual(2 * file_tree_dock_ops.fileTreeRowHeightPx(session), session.file_tree_scroll.offset_y_px);
     try std.testing.expect(!session.file_tree_watch_reset_pending);
 
     // **root 밖 CWD는 root 전환을 건다**(2026-08-11 결정 — docs/file-explorer.md §1). 예전에는 무동작이었다.
@@ -36435,15 +36361,15 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // (도크 시작선과 view bar는 이제 terminal cell이 아니라 Chrome metric에서 나온다).
     // 상태바가 창 바닥을 먹으므로 그만큼 더 줘야 **한 행 viewport**라는 이 셋업의 의도가 유지된다. 안 더하면
     // 도크가 22px 짧아져 뷰 바가 접히고(낮은 도크 규칙) 본문이 오히려 커진다 — 전제가 뒤집힌다.
-    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + session.cell_height_px + session.statusBarHeightPx();
-    try std.testing.expectEqual(session.cell_height_px, dock_ops.dockGeometry(session).tree_content.h);
-    session.file_tree_scroll.offset_y_px = 6 * session.cell_height_px;
+    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) + session.statusBarHeightPx();
+    try std.testing.expectEqual(file_tree_dock_ops.fileTreeRowHeightPx(session), dock_ops.dockGeometry(session).tree_content.h);
+    session.file_tree_scroll.offset_y_px = 6 * file_tree_dock_ops.fileTreeRowHeightPx(session);
     try testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
     // 한 행 viewport라 index 1을 넣는 최소 이동은 그 행의 top(= 한 행 높이)이다.
-    try std.testing.expectEqual(session.cell_height_px, session.file_tree_scroll.offset_y_px);
+    try std.testing.expectEqual(file_tree_dock_ops.fileTreeRowHeightPx(session), session.file_tree_scroll.offset_y_px);
     session.backing_height_px = saved_backing_height_px;
 
     // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
@@ -36828,11 +36754,11 @@ test "file tree header and populated blank left click are inert while right clic
     try std.testing.expect(session.file_tree_rows.items.len >= 2);
 
     const header_x: f64 = @floatFromInt(content.x + 2);
-    const header_y: f64 = @floatFromInt(content.y + session.cell_height_px + 2);
+    const header_y: f64 = @floatFromInt(content.y + file_tree_dock_ops.fileTreeRowHeightPx(session) + 2);
     session.mouse(1, header_x, header_y, 0, 0);
     try std.testing.expect(!session.takeFilePanelPickRequest());
 
-    const blank_y_px = content.y + @as(u32, @intCast(session.file_tree_rows.items.len)) * session.cell_height_px + 2;
+    const blank_y_px = content.y + @as(u32, @intCast(session.file_tree_rows.items.len)) * file_tree_dock_ops.fileTreeRowHeightPx(session) + 2;
     try std.testing.expect(blank_y_px < content.y + content.h);
     const blank_y: f64 = @floatFromInt(blank_y_px);
     session.mouse(1, header_x, blank_y, 0, 0);
@@ -36893,7 +36819,7 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     //    그래서 "이미 온전히 보이는 행을 겨냥하면 아무 것도 움직이지 않는다"를 본다 — anchor가 현재
     //    스크롤을 실제로 읽고 있어야만 성립하는 성질이다. 픽셀 스크롤이라 창의 첫 행은 반쯤 걸쳐
     //    있을 수 있으므로, 그 다음 행부터가 "온전히 보이는" 첫 행이다.
-    const first_full_row = (after_track + session.cell_height_px - 1) / session.cell_height_px;
+    const first_full_row = (after_track + file_tree_dock_ops.fileTreeRowHeightPx(session) - 1) / file_tree_dock_ops.fileTreeRowHeightPx(session);
     const visible_index = first_full_row + file_panel_ops.fileTreeVisibleRows(session) / 2;
     file_panel_ops.scrollFileTreeRowIntoView(session, visible_index);
     try std.testing.expectEqual(after_track, file_panel_ops.fileTreeEffectiveScrollPx(session));
@@ -37175,15 +37101,17 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     var picked_remainder: u32 = 0;
     for (0..64) |bump| {
         _ = try session.resize(1400, 900 + @as(u32, @intCast(bump)), 1000);
-        if (session.cell_height_px == 0) continue;
+        // **행 높이는 셀이 아니라 컴포넌트가 소유한다**(FT1). 여기서 셀 높이로 나머지를 고르면
+        // 부분 행 전제가 실제 행 높이와 무관해져, 이 테스트가 판정한다고 믿는 상태에 도달하지 못한다.
+        if (file_tree_dock_ops.fileTreeRowHeightPx(session) == 0) continue;
         const h = dock_ops.dockGeometry(session).tree_content.h;
-        picked_remainder = h % session.cell_height_px;
+        picked_remainder = h % file_tree_dock_ops.fileTreeRowHeightPx(session);
         if (picked_remainder != 0) break;
     }
     if (picked_remainder == 0) return error.FileTreeFixtureCannotJudgePartialRow;
 
     const tree = dock_ops.dockGeometry(session).tree_content;
-    const cell_h = session.cell_height_px;
+    const cell_h = file_tree_dock_ops.fileTreeRowHeightPx(session);
     const visible = file_panel_ops.fileTreeVisibleRows(session);
     const remainder = picked_remainder;
 
@@ -37358,8 +37286,9 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         try std.testing.expect(file_panel_ops.fileTreeRowAt(session, track_x, track_y) == null);
     }
 
-    // ⑧ 셀 높이가 0이면 창도 0이다. 0으로 나누면 패닉이고, 1로 눌러 계산하면 창이 뷰포트 높이만큼
-    //    커져 없는 행을 그리려 한다.
+    // ⑧ **렌더 메트릭이 없으면 창도 0이다.** 행 높이 자체는 이제 셀과 무관하지만(FT1 — 컴포넌트
+    //    `Metrics`), "아직 그릴 수 없다"는 게이트는 `fileTreeRowHeightPx` 한 곳이 소유하고 0을 낸다.
+    //    그 게이트가 없으면 폰트가 없는 첫 스냅샷에서 없는 행을 그리려 든다.
     {
         const saved = session.cell_height_px;
         session.cell_height_px = 0;
@@ -38894,15 +38823,15 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     while (height < 940) : (height += 1) {
         _ = try session.resize(1400, height, 1000);
         geometry = dock_ops.dockGeometry(session);
-        if (geometry.tree_content.h % session.cell_height_px != 0) break;
+        if (geometry.tree_content.h % file_tree_dock_ops.fileTreeRowHeightPx(session) != 0) break;
     }
-    const full_rows = geometry.tree_content.h / session.cell_height_px;
+    const full_rows = geometry.tree_content.h / file_tree_dock_ops.fileTreeRowHeightPx(session);
     while (session.file_tree_rows.items.len <= full_rows) try session.file_tree_rows.append(allocator, .{ .empty = {} });
     session.file_tree_scroll.reset();
     try std.testing.expectEqual(@as(?usize, full_rows), file_panel_ops.fileTreeRowAt(
         session,
         @floatFromInt(geometry.tree_content.x + 1),
-        @floatFromInt(geometry.tree_content.y + full_rows * session.cell_height_px),
+        @floatFromInt(geometry.tree_content.y + full_rows * file_tree_dock_ops.fileTreeRowHeightPx(session)),
     ));
     // 뷰포트 **밖**은 여전히 행이 아니다 — 부분 행을 살렸다고 rect 경계까지 무른 것이 아니다.
     try std.testing.expect(file_panel_ops.fileTreeRowAt(
@@ -38949,7 +38878,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
         1,
         // FP16: 트리 좌측 가장자리는 outer divider grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
         @floatFromInt(tree_rect.x + tree_rect.w / 2),
-        @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a)) * session.cell_height_px - file_panel_ops.fileTreeEffectiveScrollPx(session) + 1),
+        @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a)) * file_tree_dock_ops.fileTreeRowHeightPx(session) - file_panel_ops.fileTreeEffectiveScrollPx(session) + 1),
         0,
         0,
     );
@@ -39033,9 +38962,9 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     if (visible > 0) {
         // 픽셀 좌표: 선택 행이 뷰포트 안에 **온전히** 들어와 있어야 한다.
         const offset = file_panel_ops.fileTreeEffectiveScrollPx(session);
-        const row_top = @as(u32, @intCast(end_index)) * session.cell_height_px;
+        const row_top = @as(u32, @intCast(end_index)) * file_tree_dock_ops.fileTreeRowHeightPx(session);
         try std.testing.expect(row_top >= offset);
-        try std.testing.expect(row_top + session.cell_height_px <= offset + dock_ops.dockGeometry(session).tree_content.h);
+        try std.testing.expect(row_top + file_tree_dock_ops.fileTreeRowHeightPx(session) <= offset + dock_ops.dockGeometry(session).tree_content.h);
     }
     _ = try session.handleKeyEvent(.{ .key = .page_up });
     try std.testing.expect(file_panel_ops.selectedFileTreeRow(session).? <= end_index);

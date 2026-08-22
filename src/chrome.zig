@@ -80,6 +80,7 @@ pub const components = struct {
     pub const session_dock = @import("chrome/components/session_dock.zig"); // archive session dock typed layout/action/view facade
     pub const scm_dock = @import("chrome/components/scm_dock.zig"); // 소스 컨트롤 도크 typed layout/action/view facade(도크 2판)
     pub const archive_detail = @import("chrome/components/archive_detail.zig"); // redacted archive detail typed layout/action/view facade
+    pub const file_tree = @import("chrome/components/file_tree.zig"); // 파일 탐색기 트리 행 typed layout/view facade(FT1)
 };
 
 test {

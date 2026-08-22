@@ -29,6 +29,9 @@ const scm_dock_view = @import("chrome/components/scm_dock/view.zig");
 // — 유일한 도달 경로가 `maru.zig` 루트였는데 그 아티팩트는 Windows 타깃 `callconv(.winapi)` 때문에
 // 이 환경에서 컴파일 자체가 안 된다(2026-08-18 — 줄별 행 수 캐시를 넣으며 뮤턴트로 확인했다.
 // 일부러 틀린 기대값을 넣어도 `test-chrome-ui`가 초록이었다). 탭 바·SCM 도크가 여기 온 이유와 같다.
+// 파일 탐색기 트리 행도 이 seam 위에 있다(FT1). 여기에 없으면 `test-chrome-ui`가 초록인 채로 행
+// 기하·상태 밴드 회귀가 지나간다 — 탭 바·SCM 도크가 여기 온 이유와 같다.
+const file_tree = @import("chrome/components/file_tree.zig");
 const editor_frame = @import("chrome/components/editor_view/frame.zig");
 const editor_diff_frame = @import("chrome/components/editor_view/diff_frame.zig");
 const editor_content = @import("chrome/components/editor_view/content.zig");
@@ -59,6 +62,9 @@ test {
     testing.refAllDecls(archive_detail);
     testing.refAllDecls(scm_dock_build);
     testing.refAllDecls(scm_dock_view);
+    testing.refAllDecls(file_tree.types);
+    testing.refAllDecls(file_tree.build);
+    testing.refAllDecls(file_tree.view);
     testing.refAllDecls(editor_frame);
     testing.refAllDecls(editor_diff_frame);
     testing.refAllDecls(editor_content);

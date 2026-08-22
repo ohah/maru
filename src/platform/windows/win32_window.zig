@@ -31,7 +31,7 @@ const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타�
 const builtin = @import("builtin");
 // **`maru`를 통해 받는다.** 이 파일은 `main.zig`(root 모듈)만 쓰는데, root가 `src/` 아래 파일을 상대
 // import하면 그 파일이 `maru` 모듈과 이중 소유가 된다(실측: `file exists in modules 'maru' and 'root'`).
-const terminal = @import("maru").terminal;
+const terminal = @import("../../maru.zig").terminal;
 const win32_keys = @import("win32_keys.zig");
 const win32_mouse = @import("win32_mouse.zig");
 

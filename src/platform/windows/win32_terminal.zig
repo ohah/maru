@@ -13,7 +13,7 @@
 //! macOS `AppSession`이 `tickWithFrameBuilder`에 CoreText 빌더를 꽂는 것과 같은 분담이다.
 
 const std = @import("std");
-const maru = @import("maru");
+const maru = @import("../../maru.zig");
 const win32_text = @import("win32_text.zig");
 const d3d11_cells = @import("d3d11_cells.zig");
 

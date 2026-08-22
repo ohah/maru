@@ -74,10 +74,13 @@ pub fn refAllRecursive(comptime T: type, comptime depth: usize) usize {
     }
     var touched: usize = 0;
     inline for (comptime std.meta.declarations(T)) |decl| {
-        const field = @field(T, decl.name);
-        const FieldType = @TypeOf(field);
+        // **값을 읽지 않는다.** `@TypeOf` 는 comptime 값을 요구하지 않는데 `@field` 로 값을 꺼내면
+        // `pub var` 에서 "unable to resolve comptime value" 로 막힌다 — Windows 플랫폼 파일들이
+        // `pub var last_hresult` 같은 진단 변수를 갖고 있어 그것들이 표면에 들어오는 순간 걸렸다.
+        // 타입 선언만 값이 필요하고 나머지는 아래에서 **주소만** 잡으면 된다(그게 분석을 강제한다).
+        const FieldType = @TypeOf(@field(T, decl.name));
         if (FieldType == type) {
-            touched += refAllRecursive(field, depth + 1);
+            touched += refAllRecursive(@field(T, decl.name), depth + 1);
         } else {
             // 주소를 잡으면 함수는 본문이 분석되고, 그 외 값은 그대로 참조된다.
             _ = &@field(T, decl.name);

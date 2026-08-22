@@ -4,24 +4,24 @@ const maru = @import("maru");
 const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
-const win32_window = @import("platform/windows/win32_window.zig");
+const win32_window = maru.win32_window;
 // W7.2a D3D11+DXGI 표시 경로. 창과 같은 이유로 최상위 import다(위 주석).
-const d3d11_present = @import("platform/windows/d3d11_present.zig");
+const d3d11_present = maru.d3d11_present;
 // W7.2b 셀 인스턴스 드로우.
-const d3d11_cells = @import("platform/windows/d3d11_cells.zig");
+const d3d11_cells = maru.d3d11_cells;
 // W7.3 DirectWrite 글리프 래스터라이저.
-const dwrite_font = @import("platform/windows/dwrite_font.zig");
+const dwrite_font = maru.dwrite_font;
 // W7.2c 중립 텍스트 계약 어댑터와 프레임 빌더.
-const win32_text = @import("platform/windows/win32_text.zig");
-const win32_terminal = @import("platform/windows/win32_terminal.zig");
+const win32_text = maru.win32_text;
+const win32_terminal = maru.win32_terminal;
 const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
 const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
-const win32_keys = @import("platform/windows/win32_keys.zig");
+const win32_keys = maru.win32_keys;
 // W7.4b Win32 클립보드(OSC 52 배수 + 붙여넣기).
-const win32_clipboard = @import("platform/windows/win32_clipboard.zig");
+const win32_clipboard = maru.win32_clipboard;
 // W7.4d Win32 마우스 규칙(선택·스크롤·리포팅) — 전부 순수 함수다.
-const win32_mouse = @import("platform/windows/win32_mouse.zig");
+const win32_mouse = maru.win32_mouse;
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");

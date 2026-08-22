@@ -1451,17 +1451,17 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     if (selected_row) |band_row| {
         var c: u32 = 0;
         while (c < grid.cols) : (c += 1) {
-            try cells.append(allocator, .{
-                .rect = .{
-                    @floatFromInt(c * cell_w),
-                    @floatFromInt(@as(u32, @intCast(band_row)) * cell_h),
-                    @floatFromInt(cell_w),
-                    @floatFromInt(cell_h),
-                },
-                .uv = .{ 0, 0, 0, 0 },
-                .fg = .{ 0, 0, 0, 0 },
-                .bg = d3d11_cells.colorFromArgb(0xFF3A5FCD),
-            });
+            // **`solidCell` 이 이 모양의 단일 출처다.** 손으로 쓰면 `uv` 표식이 갈린다 — 실제로
+            // 갈렸다: 여기 `uv = {0,0,0,0}` 은 아틀라스 (0,0) 을 읽어서 **첫 글리프의 좌상단 픽셀
+            // 알파**가 띠에 섞여 들고 있었다(§2m.22).
+            try cells.append(allocator, d3d11_cells.solidCell(
+                @floatFromInt(c * cell_w),
+                @floatFromInt(@as(u32, @intCast(band_row)) * cell_h),
+                @floatFromInt(cell_w),
+                @floatFromInt(cell_h),
+                d3d11_cells.colorFromArgb(0xFF3A5FCD),
+                .{ 0, 0, 0, 0 },
+            ));
             band_cells += 1;
         }
     }

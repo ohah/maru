@@ -68,6 +68,8 @@
 - [TerminalCore(core.zig) 분해: Parser/Screen 분리](docs/terminal-core-decomposition.md) — [분해 기록](docs/plans/terminal-core-decomposition.md) · [Screen struct fold](docs/plans/screen-struct-fold.md) · [page-aligned storage](docs/plans/page-aligned-storage.md)
 - [렌더러 전략](docs/renderer-strategy.md)
 - [레이어링과 이식성 전략](docs/layering-and-portability.md)
+- [터미널 코어의 wasm 이식성](docs/wasm-portability.md) — 코어를 wasm으로 컴파일 가능하게 유지하는 제약 하나(64비트 atomic)와 근거
+- [maru-term 라이브러리](docs/maru-term-library.md) — 코어를 npm 패키지로 내는 계약(패키지 경계·API·워커·렌더) · [구현 계획](docs/plans/maru-term-library.md)
 - [모바일 플랫폼(iOS·Android)](docs/mobile-platform.md) — [UX(화면·전환)](docs/mobile-ux.md) · [config(스키마·자리)](docs/mobile-config.md) · [구현 계획](docs/plans/mobile-platform.md)
 - [폰트 전략](docs/font-strategy.md)
 - [글리프 역할 렌더 모델](docs/glyph-role-render-model.md)

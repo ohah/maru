@@ -60,6 +60,7 @@ macOS 로컬 shell 1개 surface
 - [page-aligned storage](plans/page-aligned-storage.md)
 - [Windows 플랫폼 구현 계획](plans/windows-platform.md)
 - [SSH 클라이언트 구현 계획](plans/ssh-client.md)
+- [maru-term 라이브러리 구현 계획](plans/maru-term-library.md)
 
 설계 **계약**은 계획 문서가 아니라 각 영역의 설계 문서가 소유한다([AGENTS.md](../AGENTS.md) 참조).
 계획 문서는 그 계약을 어떤 순서로 구현했고 무엇이 남았는지만 기록한다.

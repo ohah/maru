@@ -391,14 +391,19 @@ pub fn deactivate(state: *InteractionState) InteractionError!Dispatch {
     return result;
 }
 
-const HitAction = struct {
+pub const HitAction = struct {
     id: UiId,
     action_id: UiActionId,
     /// 이 node가 drag를 선언했다면 그 능력. 선언은 published entry가 싣고 pure module은 그대로 옮긴다.
     drag: ?DragDeclaration = null,
 };
 
-fn hitAction(snapshot: UiRectTree, x_px: f64, y_px: f64) ?HitAction {
+/// 그 점이 **누구를 가리키는가**. dispatch 의 내부 술어이자 공개 질의다.
+///
+/// **pub 인 이유**: 상태를 바꾸지 않고 "여기 무엇이 있나"만 묻는 소비자가 있다(우클릭 메뉴처럼
+/// dispatch 를 태우면 호버가 딸려 움직이는 자리). 그때 소비자가 자기 rect 순회를 다시 쓰면 그것이 곧
+/// **두 번째 히트테스트**이고, 이 저장소가 반복해서 당한 "보이는 곳과 눌리는 곳이 다르다"의 씨앗이다.
+pub fn hitAction(snapshot: UiRectTree, x_px: f64, y_px: f64) ?HitAction {
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
 
     var index = snapshot.entries.len;

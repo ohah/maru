@@ -4502,6 +4502,12 @@ pub const AppSession = struct {
     scm_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     scm_dock_actions: std.ArrayList(chrome.components.scm_dock.ids.Entry) = .empty,
     scm_dock_interaction: chrome.ui.interaction.InteractionState = .{},
+    /// 탐색기 트리의 **발행된 히트 tree**(FT2). 그리는 rect 와 누르는 rect 가 같은 저장소를 지나게 하는
+    /// 것이 이 셋의 존재 이유다 — 예전에는 렌더가 컴포넌트 rect 를 쓰고 히트테스트는 `rowAtLocalY` 로
+    /// 따로 나눗셈을 했다(같은 답이어야 하는 두 산술).
+    file_tree_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
+    file_tree_actions: std.ArrayList(chrome.components.file_tree.ids.Entry) = .empty,
+    file_tree_interaction: chrome.ui.interaction.InteractionState = .{},
     scm_dock_snapshot_generation: u64 = 1,
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
@@ -4611,8 +4617,6 @@ pub const AppSession = struct {
     file_tree_perf_counters: ?*FileTreePerfCounters = null,
     // path+row-kind가 selection SSOT다. index는 rebuild에서 fallback/scroll 보정에만 쓰는 힌트이며 영속하지 않는다.
     file_tree_selection: file_tree_navigation.Selection = .{},
-    // fileTreeRowAt과 같은 visible-row index. hoverCursor가 갱신하고 GPU row 배경이 소비한다.
-    file_tree_hovered_row: ?usize = null,
     /// 호버 중인 뷰 스위처 슬롯(§3.5). 렌더가 배경 강조에 쓰고 hoverCursor가 갱신한다 — 트리 행 호버와 같은 규율.
     dock_view_hovered_slot: ?usize = null,
     /// 뷰 바 오른쪽 끝 동작 버튼의 호버 자리. 뷰 슬롯과 **다른 필드**다 — 한 필드로 겸하면 어느 쪽 자리인지
@@ -11039,6 +11043,22 @@ pub const AppSession = struct {
                 return;
             }
         }
+        // 탐색기도 같은 규칙을 쓴다(FT2). **여는 것은 up 이다** — down 에서 열면 누른 뒤 끌어서 떼도
+        // 그 행이 열린다. `dispatch` 가 capture 를 들고 같은 노드에서 뗐을 때만 intent 를 낸다.
+        if (dock_ops.dockVisible(self) and self.dock.view == .explorer and button == 0 and (kind == 2 or kind == 3) and
+            self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
+        {
+            const content = dock_ops.dockGeometry(self).dock;
+            const captured = self.file_tree_interaction.capture != null;
+            if (captured or layout_math.pointInRect(x_px, y_px, content)) {
+                const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
+                if (file_tree_dock_ops.fileTreeDockPointer(self, phase, x_px, y_px)) |intent|
+                    file_tree_dock_ops.applyFileTreeIntent(self, intent);
+                // **move 는 소비하지 않는다** — 도크 위 이동은 스크롤바 호버·커서 갱신도 함께 봐야 하고,
+                // 그 경로가 아래에 있다. up 만 여기서 끝낸다.
+                if (kind == 3) return;
+            }
+        }
         // 소스 컨트롤 도크도 같은 규칙을 쓴다(도크 뷰가 달라도 포인터 수명은 하나여야 한다).
         if (dock_ops.dockVisible(self) and self.dock.view == .source_control and button == 0 and (kind == 2 or kind == 3) and
             self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
@@ -11061,7 +11081,9 @@ pub const AppSession = struct {
         //  - 터미널 본문이면 **fall through** — 아래 mouse-reporting 경로(DECSET 1000~1003)가 우버튼을 트래킹 앱에
         //    리포트한다. 무조건 return하면 우-down은 안 가고 우-drag/up(kind 2/3)만 리포트돼 비대칭이 된다(회귀).
         if (kind == 1 and button == 2) {
-            if (file_panel_ops.fileTreeRowAt(self, x_px, y_px)) |row_index| {
+            // **발행된 tree 에 묻는다**(FT2). 우클릭은 `dispatch` 를 태우지 않는다 — 태우면 호버·capture 가
+            // 딸려 움직여서 메뉴를 띄우는 동안 좌클릭 상태가 오염된다. 대신 같은 술어(`hitAction`)를 쓴다.
+            if (file_tree_dock_ops.fileTreeRowAtPublished(self, x_px, y_px)) |row_index| {
                 if (file_panel_ops.fileTreeMutationTarget(self.file_tree_rows.items[row_index])) |tree_target| {
                     _ = file_panel_ops.setFileTreeSelection(self, row_index);
                     file_panel_ops.focusFileTree(self);
@@ -11231,15 +11253,15 @@ pub const AppSession = struct {
                 }
                 if (self.dock.view == .explorer) {
                     if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
-                    if (file_panel_ops.fileTreeRowAt(self, x_px, y_px)) |row_index| {
-                        if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
-                            file_panel_ops.focusFileTree(self);
-                            file_panel_ops.requestFilePanelPick(self);
-                            return;
-                        }
+                    // **down 은 잡기만 하고 여는 것은 up 이다**(FT2). 얻는 것은 두 가지다 — up 이
+                    // action 표를 지나므로 ⑴ 그 사이 투영이 바뀌면 **세대가 안 맞아 거부**되고,
+                    // ⑵ tree 가 교체되면 발행 경로가 capture 를 놓아 늦은 up 이 새 행을 열지 않는다.
+                    //
+                    // **밖에서 떼도 발화하는 것은 그대로다** — 공용 `chrome.ui.interaction` 계약이
+                    // 그렇고(잡은 노드가 살아 있으면 좌표 무관), 이 위젯만 다르게 하면 규칙이 둘이 된다.
+                    if (file_tree_dock_ops.fileTreeRowAtPublished(self, x_px, y_px) != null) {
                         file_panel_ops.focusFileTree(self);
-                        _ = file_panel_ops.setFileTreeSelection(self, row_index);
-                        file_panel_ops.activateFileTreeRow(self, row_index);
+                        _ = file_tree_dock_ops.fileTreeDockPointer(self, .down, x_px, y_px);
                         return;
                     }
                     if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
@@ -12942,7 +12964,12 @@ pub const AppSession = struct {
         }
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
-        file_panel_ops.setHoveredFileTreeRow(self, if (dock_ops.dockVisible(self)) file_panel_ops.fileTreeRowAt(self, x_px, y_px) else null);
+        // 호버 판정은 **발행된 tree** 가 한다(FT2 — `dispatch` 가 `InteractionState.hovered` 를 옮기고
+        // 그 값이 곧 paint 다). 여기서 인덱스를 따로 계산하면 그린 밴드와 다른 답이 나올 수 있다.
+        if (dock_ops.dockVisible(self) and self.dock.view == .explorer)
+            _ = file_tree_dock_ops.fileTreeDockPointer(self, .move, x_px, y_px)
+        else
+            file_panel_ops.clearFileTreeHover(self);
         dock_ops.setHoveredDockViewSlot(self, dock_ops.dockViewSlotAt(self, x_px, y_px));
         dock_ops.setHoveredDockAction(self, dock_ops.dockActionAt(self, x_px, y_px));
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
@@ -13040,7 +13067,7 @@ pub const AppSession = struct {
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 tab_ops.setHoveredTab(self, null);
                 self.clearHoverUrlAnchor();
-                file_panel_ops.setHoveredFileTreeRow(self, null);
+                file_panel_ops.clearFileTreeHover(self);
                 const slot = dock_ops.dockViewSlotAt(self, x_px, y_px);
                 const action = dock_ops.dockActionAt(self, x_px, y_px);
                 dock_ops.setHoveredDockViewSlot(self, slot);
@@ -13078,7 +13105,13 @@ pub const AppSession = struct {
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 tab_ops.setHoveredTab(self, null);
                 self.clearHoverUrlAnchor();
-                return if (file_panel_ops.fileTreeRowAt(self, x_px, y_px) != null) .link else .default;
+                // 커서도 **발행된 선언**에서 온다(FT2) — component 가 `cursor = .press` 를 실었고
+                // host 는 그것을 자기 커서로 옮기기만 한다(소스 컨트롤 뷰와 같은 규율).
+                return switch (file_tree_dock_ops.fileTreeHoverCursor(self)) {
+                    .press => .link,
+                    .text => .text,
+                    .arrow, .auto => .default,
+                };
             }
         }
         // 어느 pane의 탭 바 위면 호버 탭을 갱신(✕ 표시). 바 위면 URL/divider 아니므로 밑줄 해제하고 arrow.
@@ -16719,7 +16752,7 @@ pub const AppSession = struct {
     pub fn clearAllHover(self: *AppSession) void {
         self.setHoveredSlot(null);
         tab_ops.setHoveredTab(self, null);
-        file_panel_ops.setHoveredFileTreeRow(self, null);
+        file_panel_ops.clearFileTreeHover(self);
         self.setHoveredNavButton(null); // Phase 7e-4: 밴드 nav 버튼 호버(모달/알림 패널 열림 시 stale 하이라이트 방지)
         self.setHoveredFileHeaderMode(null); // 파일 헤더 mode 선택기 호버도 같은 이유로 정리
         self.setHoveredHeaderRegion(.none);
@@ -18439,6 +18472,8 @@ pub const AppSession = struct {
                 scm_dock_ops.clearScmPending(self); // 낙관 경로도 세션 allocator 소유다
                 self.scm_dock_entries.deinit(self.allocator);
                 self.scm_dock_actions.deinit(self.allocator);
+                self.file_tree_entries.deinit(self.allocator);
+                self.file_tree_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
                 self.agent_session_dock_actions.deinit(self.allocator);
                 for (self.agent_session_archive_collapsed_groups.items) |key| self.allocator.free(key);
@@ -37240,12 +37275,14 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
         var items: [96]chrome.ui.layout.Item = undefined;
         var flex: [96]chrome.ui.layout.FlexScratch = undefined;
         var child_rects: [96]chrome.ui.layout.UiRect = undefined;
+        var actions: [96]component.ids.Entry = undefined;
         const frame = try component.build.build(props, .{
             .nodes = &nodes,
             .entries = &entries,
             .layout_items = &items,
             .flex_scratch = &flex,
             .child_rects = &child_rects,
+            .actions = &actions,
         });
 
         // 창의 첫 행은 뷰포트 위로 **정확히 밀린 만큼** 올라가 있다. 이 값이 0이면 부분 행이 사라지고
@@ -37389,6 +37426,89 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
     session.file_tree_scroll.offset_y_px = std.math.maxInt(u32);
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
+}
+
+// FT2 의 세 계약을 한 세션에서 본다. 셋 다 **화면으로는 안 보이는** 종류라 캡처로는 못 잡는다.
+//
+//  ⑴ 발행된 rect 와 창 산술이 **같은 답**을 낸다. 클릭 경로는 published rect 를 보고 Windows chrome
+//     낮추기는 `rowAtLocalY` 를 쓰는데, 둘이 갈리면 플랫폼마다 다른 행이 열린다.
+//  ⑵ **down 은 열지 않는다** — 여는 것은 up 이고 그 up 은 action 표(세대 검증)를 지난다. 밖에서 떼도
+//     발화하는 것은 공용 interaction 계약이며, 그 사실도 함께 못 박는다(우리 선택이 아님을 남긴다).
+//  ⑶ tree 가 실제로 바뀌면 **잡고 있던 손가락을 놓는다**(CIM §9 의 capture cancel 증거).
+test "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 up 이며, tree 교체는 capture 를 취소한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..40) |index| {
+        const path = try std.fmt.allocPrint(allocator, "/repo/f{d}.zig", .{index});
+        errdefer allocator.free(path);
+        try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = path,
+            .label = path[6..],
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+    defer for (session.file_tree_rows.items) |row| allocator.free(row.file.path);
+    file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+
+    const tree = dock_ops.dockGeometry(session).tree_content;
+    const x: f64 = @floatFromInt(tree.x + tree.w / 2);
+
+    // ⑴ 두 축이 같은 답을 낸다 — 창 전체를 훑어 본다(한 점만 보면 상수를 반환해도 통과한다).
+    var y: u32 = 0;
+    var compared: usize = 0;
+    while (y < tree.h) : (y += 3) {
+        const at: f64 = @floatFromInt(tree.y + y);
+        const arithmetic = file_panel_ops.fileTreeRowAt(session, x, at);
+        const published = file_tree_dock_ops.fileTreeRowAtPublished(session, x, at);
+        try std.testing.expectEqual(arithmetic, published);
+        if (arithmetic != null) compared += 1;
+    }
+    try std.testing.expect(compared > 8); // 실제로 행 위를 여러 번 지났다
+
+    // ⑵ **down 은 열지 않는다.** 여는 것은 up 이고, 그 up 은 action 표(세대 검증)를 지난다.
+    const row_y: f64 = @floatFromInt(tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) * 3 + 2);
+    const before_selection = file_panel_ops.selectedFileTreeRow(session);
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, row_y);
+    try std.testing.expectEqual(before_selection, file_panel_ops.selectedFileTreeRow(session));
+    const intent = file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) orelse
+        return error.FileTreePointerProducedNoIntent;
+    switch (intent) {
+        .activate_row => |index| try std.testing.expectEqual(
+            file_panel_ops.fileTreeRowAt(session, x, row_y).?,
+            index,
+        ),
+    }
+
+    // ⑵b **밖에서 떼도 발화한다** — 이것은 이 위젯의 선택이 아니라 공용 `chrome.ui.interaction` 계약이다
+    //     (`dispatch` 의 `.up`: 잡은 노드가 여전히 같은 action 을 들고 있으면 좌표와 무관하게 발화).
+    //     macOS 버튼 관례(밖에서 떼면 취소)와 다르므로 **여기에 값으로 적어 둔다** — 바꾸려면 이 위젯이
+    //     아니라 CIM 계약을 바꿔야 하고, 그러면 탭·도크·세팅이 함께 움직인다.
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, row_y);
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .move, 10, row_y);
+    try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, 10, row_y) != null);
+
+    // ⑶ 누르고 있는 동안 tree 가 **실제로 바뀌면** capture 를 놓는다(늦은 up 이 새 행을 열지 않게).
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, row_y);
+    try std.testing.expect(session.file_tree_interaction.capture != null);
+    // 뗀 행의 경로도 우리 것이다 — `defer` 는 **남아 있는** 행만 훑으므로 여기서 놓아준다.
+    if (session.file_tree_rows.pop()) |removed| allocator.free(removed.file.path);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+    try std.testing.expect(session.file_tree_interaction.capture == null);
+    try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) == null);
 }
 
 test "file tree production hot paths emit bounded counter artifact" {
@@ -37567,6 +37687,9 @@ test "file tree stale root menu delete confirmation and busy removal are fail cl
     session.file_tree_rows_dirty = true;
     try file_panel_ops.updateFileTree(session);
     const content = dock_ops.dockGeometry(session).tree_content;
+    // **누를 것이 있으려면 먼저 발행해야 한다**(FT2 — 히트테스트가 published rect 를 본다). 제품에서는
+    // 첫 프레임이 채우지만 이 테스트는 렌더를 돌리지 않으므로 같은 build 를 직접 부른다.
+    file_tree_dock_ops.publishFileTreeHitTree(session);
     session.mouse(1, @floatFromInt(content.x + 2), @floatFromInt(content.y + 2), 2, 0);
     try std.testing.expect(session.file_tree_context_target != null);
     try std.testing.expectEqual(@as(usize, 6), settings_ops.contextMenuItems(session).len);
@@ -38893,14 +39016,14 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     try session.file_tree.recordOpened("/repo/docs/b.md", "/repo");
     session.file_tree_rows_dirty = true;
     const tree_rect = dock_ops.dockGeometry(session).tree_content;
-    session.mouse(
-        1,
-        // FP16: 트리 좌측 가장자리는 outer divider grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
-        @floatFromInt(tree_rect.x + tree_rect.w / 2),
-        @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a)) * file_tree_dock_ops.fileTreeRowHeightPx(session) - file_panel_ops.fileTreeEffectiveScrollPx(session) + 1),
-        0,
-        0,
-    );
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+    // FP16: 트리 좌측 가장자리는 outer divider grab band와 겹친다 — 밴드 밖(가운데)을 누른다.
+    const click_x: f64 = @floatFromInt(tree_rect.x + tree_rect.w / 2);
+    const click_y: f64 = @floatFromInt(tree_rect.y + @as(u32, @intCast(clicked_a)) * file_tree_dock_ops.fileTreeRowHeightPx(session) - file_panel_ops.fileTreeEffectiveScrollPx(session) + 1);
+    // **여는 것은 up 이다**(FT2) — down 은 잡기만 한다. 손가락을 끌어 다른 곳에서 떼면 안 열려야 하므로
+    // 제품 경로가 그렇게 바뀌었고, 클릭을 흉내 내는 테스트도 쌍으로 보낸다.
+    session.mouse(1, click_x, click_y, 0, 0);
+    session.mouse(3, click_x, click_y, 0, 0);
     try std.testing.expectEqualStrings("/repo/docs/a.md", file_panel_ops.fileTreeSelectionPath(session).?);
     _ = session.takeFileTreeFocusAction();
     _ = session.focusFilePanelSurface(sid);

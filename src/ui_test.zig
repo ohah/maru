@@ -63,6 +63,7 @@ test {
     testing.refAllDecls(scm_dock_build);
     testing.refAllDecls(scm_dock_view);
     testing.refAllDecls(file_tree.types);
+    testing.refAllDecls(file_tree.ids);
     testing.refAllDecls(file_tree.build);
     testing.refAllDecls(file_tree.view);
     testing.refAllDecls(editor_frame);

@@ -370,7 +370,9 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
             dock_ops.buildDockListScrollTree(self);
             self.dock_list_scrollbar_idle_ticks = 0;
             self.metal_dirty = true;
-            file_panel_ops.setHoveredFileTreeRow(self, file_panel_ops.fileTreeRowAt(self, x_px, y_px));
+            // **호버를 다시 계산하지 않는다**(FT2). 노드 id 는 창 안의 자리라, 스크롤해도 커서 밑의
+            // 자리는 그대로다 — 그 자리가 어느 파일인지는 다음 발행의 action 표가 답한다. 여기서
+            // 인덱스를 다시 구하면 발행 전 rect 로 계산한 두 번째 답이 생긴다.
         }
         // 목록 끝에 닿아도 소비한다 — 도크와 같은 규율(뒤 터미널로 새지 않는다).
         return;

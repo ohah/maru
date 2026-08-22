@@ -46,13 +46,13 @@ pub fn fileTreeRowHeightPx(self: *const AppSession) u32 {
 
 /// 도메인 행 하나를 컴포넌트 DTO로 옮긴다. **판정을 여기서 새로 만들지 않는다** — 무엇이 활성이고
 /// 무엇이 무시된 행인지는 도메인이 이미 답했다.
-fn projectRow(row: file_tree.Row, selected: bool, hovered: bool, ignored_known: bool) component.types.Row {
+fn projectRow(row: file_tree.Row, model_index: usize, selected: bool, ignored_known: bool) component.types.Row {
     var out: component.types.Row = .{
         .kind = .file,
         .label = "",
         .icon_kind = file_tree.rowIconKind(row),
         .selected = selected,
-        .hovered = hovered,
+        .model_index = model_index,
         .ignored = ignored_known and file_tree.rowIgnored(row),
     };
     switch (row) {
@@ -101,39 +101,51 @@ fn projectRow(row: file_tree.Row, selected: bool, hovered: bool, ignored_known: 
     return out;
 }
 
-/// 한 프레임의 트리 그리기.
-pub fn collectFileTreeDock(
-    self: *AppSession,
-    collected: *std.ArrayList(CollectedPane),
-    builder: coretext_frame_builder.CoreTextFrameBuilder,
-    colors: metal_frame.CellColors,
-) void {
-    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-    const content = dock_ops.dockGeometry(self).tree_content;
-    if (content.w == 0 or content.h == 0) return;
-    const text_w = dock_ops.dockListTextWidthPx(self);
-    if (text_w == 0) return;
-
-    const window = file_panel_ops.fileTreeDrawWindow(self);
-    if (window.count == 0) return;
-
+/// 히트 tree만 **그리지 않고** 만들어 발행한다.
+///
+/// **왜 별도 진입점인가**: 포인터 경로가 published rect 를 보게 되면서(FT2) "아직 한 번도 안 그린
+/// 세션"에는 누를 것이 없어졌다. 제품에서는 첫 프레임이 곧바로 채우지만, 렌더를 돌리지 않는 헤드리스
+/// 테스트는 그 상태에 영원히 머문다. 그 테스트가 자기 rect 를 지어내면 제품과 다른 기하를 판정하게
+/// 되므로, **같은 build 를 그대로** 부를 수 있는 문을 낸다(SCM 도크의 `testProps` 와 같은 자리).
+pub fn publishFileTreeHitTree(self: *AppSession) void {
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    const prepared = prepare(self, arena) orelse return;
+    publishFileTreeFrame(self, prepared.frame, prepared.content);
+}
+
+const Prepared = struct {
+    props: component.types.Props,
+    frame: component.build.Frame,
+    /// 도크 기하는 `session.split_tree.Rect` 다(그리기·발행이 같은 값을 쓰게 그대로 옮긴다).
+    content: @TypeOf(dock_ops.dockGeometry(@as(*AppSession, undefined)).tree_content),
+    text_w: u32,
+};
+
+/// 투영 → props → build. **그리기와 히트 tree 발행이 같은 입력을 쓰게 하는 자리**다 — 둘이 각자
+/// props 를 만들면 그 순간 화면과 판정이 갈린다.
+fn prepare(self: *AppSession, arena: std.mem.Allocator) ?Prepared {
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+    const content = dock_ops.dockGeometry(self).tree_content;
+    if (content.w == 0 or content.h == 0) return null;
+    const text_w = dock_ops.dockListTextWidthPx(self);
+    if (text_w == 0) return null;
+
+    const window = file_panel_ops.fileTreeDrawWindow(self);
+    if (window.count == 0) return null;
 
     const start = @min(window.start, self.file_tree_rows.items.len);
     const end = @min(start + window.count, self.file_tree_rows.items.len);
     const rows_src = self.file_tree_rows.items[start..end];
 
-    const rows = arena.alloc(component.types.Row, rows_src.len) catch return;
+    const rows = arena.alloc(component.types.Row, rows_src.len) catch return null;
     // 무시 여부는 저장소를 물어봤을 때만 뜻이 있다 — 안 물어본 상태에서 흐리게 그리면 "모르는 것"이
     // "무시됨"으로 보인다(docs/file-explorer.md의 `ignored_fg` 규율과 같은 판정을 그대로 쓴다).
     const ignored_known = self.git_result != null;
     // 선택은 **신원 기반**이다(`selectedFileTreeRow`) — 비동기 재빌드로 행이 밀려도 같은 항목을 가리킨다.
-    // 인덱스를 직접 비교하면 재빌드 직후 한 프레임 동안 엉뚱한 행이 선택돼 보인다.
     const selected_index = file_panel_ops.selectedFileTreeRow(self);
-    // 이름 변경 중이면 그 행의 라벨을 편집 중인 글자로 바꾼다. 편집 자체(caret·키)는 FT2가 옮기지만,
-    // **보이던 글자가 안 보이는 것**은 이관 중이라도 회귀다.
+    // 이름 변경 중이면 그 행의 라벨을 편집 중인 글자로 바꾼다.
     const edit_text: ?[]const u8 = if (self.rename) |renaming|
         if (renaming == .file_tree) settings_ops.renameEditText(self, arena) catch null else null
     else
@@ -149,8 +161,8 @@ pub fn collectFileTreeDock(
         const index = start + offset;
         out.* = projectRow(
             row,
+            index,
             selected_index != null and selected_index.? == index,
-            self.file_tree_hovered_row == index,
             ignored_known,
         );
         if (edit_identity) |want| if (file_tree.rowIdentity(row)) |identity| {
@@ -161,6 +173,7 @@ pub fn collectFileTreeDock(
     const props = component.types.Props{
         .viewport_px = .{ .width = @floatFromInt(text_w), .height = @floatFromInt(content.h) },
         .scale_milli = fileTreeScaleMilli(self),
+        .snapshot_generation = self.file_tree_projection_generation,
         .rows = rows,
         .selection_focused = file_panel_ops.fileTreeFocused(self),
         .origin_shift_px = window.origin_shift_px,
@@ -168,24 +181,47 @@ pub fn collectFileTreeDock(
 
     const sizes = component.build.bufferSizes(rows.len);
     const frame = component.build.build(props, .{
-        .nodes = arena.alloc(chrome.ui.tree.UiNode, sizes.nodes) catch return,
-        .entries = arena.alloc(chrome.ui.tree.RectEntry, sizes.entries) catch return,
-        .layout_items = arena.alloc(chrome.ui.layout.Item, sizes.entries) catch return,
-        .flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, sizes.entries) catch return,
-        .child_rects = arena.alloc(chrome.ui.layout.UiRect, sizes.entries) catch return,
-    }) catch return;
+        .nodes = arena.alloc(chrome.ui.tree.UiNode, sizes.nodes) catch return null,
+        .entries = arena.alloc(chrome.ui.tree.RectEntry, sizes.entries) catch return null,
+        .layout_items = arena.alloc(chrome.ui.layout.Item, sizes.entries) catch return null,
+        .flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, sizes.entries) catch return null,
+        .child_rects = arena.alloc(chrome.ui.layout.UiRect, sizes.entries) catch return null,
+        .actions = arena.alloc(component.ids.Entry, sizes.actions) catch return null,
+    }) catch return null;
+    return .{ .props = props, .frame = frame, .content = content, .text_w = text_w };
+}
+
+/// 한 프레임의 트리 그리기.
+pub fn collectFileTreeDock(
+    self: *AppSession,
+    collected: *std.ArrayList(CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const prepared = prepare(self, arena) orelse return;
+    const props = prepared.props;
+    const frame = prepared.frame;
+    const content = prepared.content;
+    const text_w = prepared.text_w;
+
+    // **발행이 먼저다.** 호버 색은 `InteractionState` 가 정하고 그 판정은 이 tree 를 본다 — 그리기 전에
+    // 넣어야 같은 프레임의 호버가 화면에 반영된다.
+    publishFileTreeFrame(self, frame, content);
 
     // 예산 산술은 **방출하는 쪽(component)**이 소유한다 — 여기서 세면 view가 op을 하나 더할 때마다
     // 조용히 낡고, 그 증상은 트리 전체가 빈 화면이다.
-    const budget = component.view.bufferSizes(rows.len);
+    const budget = component.view.bufferSizes(props.rows.len);
     const tokens = self.buildChromeTokens();
-    const draws = component.view.view(props, frame, .{}, &tokens, .{
+    const draws = component.view.view(props, frame, self.file_tree_interaction, &tokens, .{
         .ops = arena.alloc(chrome.draw.Op, budget.ops) catch return,
         .runs = arena.alloc(chrome.draw.Run, budget.runs) catch return,
         .text_bytes = arena.alloc(u8, budget.text_bytes) catch return,
     }) catch return;
 
-    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads, 2);
+    chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, @intCast(content.x), @intCast(content.y), &self.gpu_quads, 2);
 
     // **셀 경로를 쓰지 않는다.** SCM·Session Dock 은 여기서 `buildIconTextDrawList` 를 부르지만, 그것은
     // `wide_icons == true` 인 op 만 통과시킨다(`buildTextDrawListFiltered`). 이 컴포넌트의 텍스트·아이콘은
@@ -197,7 +233,7 @@ pub fn collectFileTreeDock(
     const cell_rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
 
     const scale = props.scale_milli;
-    const scroll_origin_y_px: i32 = -@as(i32, @intCast(@min(window.origin_shift_px, std.math.maxInt(i32))));
+    const scroll_origin_y_px: i32 = -@as(i32, @intCast(@min(props.origin_shift_px, std.math.maxInt(i32))));
     const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
         draws.ops,
         &tokens,
@@ -250,4 +286,134 @@ fn shapeFileTreeText(
     defer unresolved.deinit(self.allocator);
     const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
     app_session_mod.MeasuredTextCache.store(&self.file_tree_rich_text_cache, self.allocator, fingerprint, artifact, scroll_origin_y_px);
+}
+
+/// 히트 tree 발행. entries 는 **backing 좌표로 옮겨** 담는다 — 그리기는 pane origin 을 따로 더하지만
+/// 히트테스트는 창 좌표로 오므로, 같은 값을 두 좌표계로 두면 그 변환이 두 곳에 생긴다.
+///
+/// **같은 tree 가 다시 나오는 것은 교체가 아니다.** 그걸 교체로 치면 방금 누른 행이 AppKit 의 mouse-up
+/// 전에 취소된다(Session Dock·SCM 도크와 같은 판단).
+fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content: anytype) void {
+    const replaced = !frameEql(self.file_tree_entries.items, self.file_tree_actions.items, frame.tree.entries, frame.actions);
+    // 두 저장소를 **먼저** 확보한다. 할당이 실패해도 마지막으로 온전히 그린 hit tree 가 남아야 한다.
+    self.file_tree_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
+    self.file_tree_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
+    self.file_tree_entries.clearRetainingCapacity();
+    self.file_tree_actions.clearRetainingCapacity();
+    for (frame.tree.entries) |entry| {
+        var moved = entry;
+        moved.rect.x += @floatFromInt(content.x);
+        moved.rect.y += @floatFromInt(content.y);
+        if (moved.effective_clip) |*clip| {
+            clip.x += @floatFromInt(content.x);
+            clip.y += @floatFromInt(content.y);
+        }
+        self.file_tree_entries.appendAssumeCapacity(moved);
+    }
+    self.file_tree_actions.appendSlice(self.allocator, frame.actions) catch return;
+    if (replaced) self.file_tree_interaction.capture = null;
+}
+
+fn frameEql(
+    old_entries: []const chrome.ui.tree.RectEntry,
+    old_actions: []const component.ids.Entry,
+    new_entries: []const chrome.ui.tree.RectEntry,
+    new_actions: []const component.ids.Entry,
+) bool {
+    if (old_entries.len != new_entries.len or old_actions.len != new_actions.len) return false;
+    for (old_entries, new_entries) |old, new| {
+        if (old.id != new.id) return false;
+        if (old.rect.x != new.rect.x or old.rect.y != new.rect.y) return false;
+        if (old.rect.width != new.rect.width or old.rect.height != new.rect.height) return false;
+    }
+    for (old_actions, new_actions) |old, new| {
+        if (!std.meta.eql(old.intent, new.intent)) return false;
+    }
+    return true;
+}
+
+/// 포인터 한 건을 발행된 tree 에 흘린다. 반환값은 **손을 뗐을 때의 intent** 다.
+pub fn fileTreeDockPointer(
+    self: *AppSession,
+    phase: chrome.ui.interaction.UiPointerPhase,
+    x_px: f64,
+    y_px: f64,
+) ?component.ids.Intent {
+    if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
+    if (self.file_tree_entries.items.len == 0) return null;
+    // 스크롤바 트랙 위는 목록이 아니다 — 막대를 잡으려는 손이 행을 열면 안 된다(옛 `fileTreeRowAt` 의
+    // 같은 가드를 여기로 옮겼다).
+    if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
+    const tree_view = chrome.ui.tree.UiRectTree{ .entries = self.file_tree_entries.items };
+    const dispatched = chrome.ui.interaction.dispatch(
+        &self.file_tree_interaction,
+        tree_view,
+        .{ .phase = phase, .x_px = x_px, .y_px = y_px, .timestamp_ns = 0 },
+    ) catch return null;
+    for (dispatched.dirty.ids) |id| {
+        if (id != null) {
+            self.metal_dirty = true;
+            break;
+        }
+    }
+    const action = dispatched.action orelse return null;
+    var table = component.ids.Table.init(self.file_tree_actions.items);
+    table.count = self.file_tree_actions.items.len;
+    return table.resolve(action, self.file_tree_projection_generation);
+}
+
+/// 지금 호버한 행의 **모델 인덱스**. published action 표에서 되읽으므로 그린 행과 같은 답이다.
+pub fn hoveredRowIndex(self: *const AppSession) ?usize {
+    const hovered = self.file_tree_interaction.hovered orelse return null;
+    for (self.file_tree_entries.items) |entry| {
+        if (entry.id != hovered) continue;
+        const action = entry.action orelse return null;
+        for (self.file_tree_actions.items) |candidate| {
+            if (candidate.action_id != action.id) continue;
+            return switch (candidate.intent) {
+                .activate_row => |index| index,
+            };
+        }
+        return null;
+    }
+    return null;
+}
+
+/// 좌표가 가리키는 행의 **모델 인덱스**(우클릭처럼 dispatch 를 태우지 않는 자리용). 발행된 rect 를
+/// 되읽으므로 클릭 경로와 같은 답이다.
+pub fn fileTreeRowAtPublished(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+    if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
+    if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
+    const tree_view = chrome.ui.tree.UiRectTree{ .entries = self.file_tree_entries.items };
+    const hit = chrome.ui.interaction.hitAction(tree_view, x_px, y_px) orelse return null;
+    for (self.file_tree_actions.items) |candidate| {
+        if (candidate.action_id != hit.action_id) continue;
+        return switch (candidate.intent) {
+            .activate_row => |index| index,
+        };
+    }
+    return null;
+}
+
+/// 발행된 tree 가 선언한 커서. host 가 "누를 수 있나"를 다시 추론하지 않는다.
+pub fn fileTreeHoverCursor(self: *const AppSession) chrome.ui.tree.CursorHint {
+    const hovered = self.file_tree_interaction.hovered orelse return .auto;
+    for (self.file_tree_entries.items) |entry| {
+        if (entry.id == hovered) return entry.cursor;
+    }
+    return .auto;
+}
+
+/// intent 를 실제 동작으로 옮긴다. **모델 인덱스는 다시 조회한다** — intent 가 든 것은 인덱스뿐이고,
+/// 그 사이 비동기 재스캔이 목록을 바꿨을 수 있다(늦은 클릭이 엉뚱한 파일을 열지 않게). 세대 검증은
+/// 그 사이 **투영이 다시 발행된 경우**만 잡으므로 이 재조회를 대신하지 못한다.
+pub fn applyFileTreeIntent(self: *AppSession, intent: component.ids.Intent) void {
+    switch (intent) {
+        .activate_row => |index| {
+            if (index >= self.file_tree_rows.items.len) return;
+            file_panel_ops.focusFileTree(self);
+            _ = file_panel_ops.setFileTreeSelection(self, index);
+            file_panel_ops.activateFileTreeRow(self, index);
+        },
+    }
 }

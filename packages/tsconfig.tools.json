@@ -1,5 +1,14 @@
 {
   "extends": "./tsconfig.base.json",
-  "compilerOptions": { "noEmit": true, "types": ["bun"] },
-  "include": ["scripts/**/*", "tests/**/*"]
+  "compilerOptions": {
+    "noEmit": true,
+    "types": [
+      "bun"
+    ]
+  },
+  "include": [
+    "demo/**/*.ts",
+    "scripts/**/*",
+    "tests/**/*"
+  ]
 }

@@ -13,9 +13,9 @@
     "build": "bun run scripts/build.ts",
     "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.tools.json",
     "test": "bun test",
-    "lint": "oxlint core/src react/src vue/src svelte/src lit/src scripts tests",
-    "fmt": "oxfmt --write core/src react/src vue/src svelte/src lit/src scripts tests package.json",
-    "fmt-check": "oxfmt --check core/src react/src vue/src svelte/src lit/src scripts tests package.json",
+    "lint": "oxlint core/src react/src vue/src svelte/src lit/src scripts tests demo",
+    "fmt": "oxfmt --write core/src react/src vue/src svelte/src lit/src scripts tests demo package.json",
+    "fmt-check": "oxfmt --check core/src react/src vue/src svelte/src lit/src scripts tests demo package.json",
     "check": "bun run build && bun run test && bun run typecheck && bun run lint && bun run fmt-check",
     "test:browser": "bun run scripts/test-browser.ts",
     "demo": "bun run scripts/serve-demo.ts"

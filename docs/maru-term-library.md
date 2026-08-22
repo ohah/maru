@@ -214,6 +214,11 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 `blur` 는 `focus(false)` 로 덮는다. `registerCharacterJoiner`(리가처 커스텀)와 `loadAddon` 은
 설계가 달라 그대로 옮길 것이 아니다 — 리가처는 코어가 판정하고, 애드온 개념을 둘지는 미정이다.
 
+**성능과 메모리**(실측, [wasm 이식성](wasm-portability.md) §5): 처리량은 45 B 청크에서 7 MB/s, 4 KB 청크에서
+10 MB/s 다 — 호출당 오버헤드가 지배적이라 덩어리가 클수록 유리하다. 메모리는 인스턴스당 초기 4 MB(정적 버퍼
+2.3 MB 포함), 기본 스크롤백(1,000)에서 고수위 12 MB 대다. `scrollback` 을 10만으로 올리면 64 MB 상한에 닿으니
+터미널을 여럿 여는 앱은 그 값을 낮추는 것이 가장 큰 지렛대다.
+
 **검증되지 않은 것** — 지금까지의 확인은 계약 테스트와 데모(가짜 셸)까지다:
 
 - **실제 TUI 로 돌려본 적이 없다.** vim·tmux·htop 은 대체 화면·스크롤 영역·mouse tracking 을 섞어

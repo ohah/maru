@@ -29,7 +29,10 @@ const alloc = std.heap.wasm_allocator;
 /// 호출자가 여기에 바이트를 쓰고 길이를 넘긴다. **1 MB** — 붙여넣기는 청킹할 수 없어서다
 /// (`vt_paste` 가 bracketed 마커를 한 번 감싸므로 나누면 마커가 여러 번 붙는다).
 var input_buf: [1 << 20]u8 = undefined;
-var cell_buf: [256 * 96 * 20]u8 = undefined;
+/// 스냅샷 셀 버퍼. **512×128 = 65,536 셀** — 4K 디스플레이를 전체 화면으로 채워도(457×127 ≈
+/// 58,000 셀) 담긴다. 이전 256×96(24,576 셀)은 1440p 최대화(≈304×84 = 25,536)에서 이미 넘쳐
+/// 아래쪽 행이 영영 빈 채로 그려졌다.
+var cell_buf: [512 * 128 * 20]u8 = undefined;
 var glyph_buf: [64 * 64 * 4]u8 = undefined;
 
 export fn input_ptr() [*]u8 {
@@ -43,6 +46,11 @@ export fn input_cap() u32 {
 }
 export fn cells_ptr() [*]u8 {
     return &cell_buf;
+}
+/// 스냅샷이 담을 수 있는 최대 셀 수. 격자가 이걸 넘으면 아래쪽이 잘려 영영 안 그려지므로,
+/// 호출자가 `fit()` 단계에서 clamp 해야 한다.
+export fn cells_cap() u32 {
+    return cell_buf.len / 20;
 }
 export fn glyph_ptr() [*]u8 {
     return &glyph_buf;

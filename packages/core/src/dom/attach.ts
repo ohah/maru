@@ -34,6 +34,8 @@ export interface DomTarget {
 export interface AttachOptions {
   /** 폰트 확대(1)·축소(-1)·되돌리기(0). 본체의 Cmd+= / Cmd+- / Cmd+0 과 같다. */
   onFontZoom?: (delta: number) => void;
+  /** 스냅샷 셀 상한. `fit()` 이 격자를 여기에 맞춘다(넘으면 아래쪽이 안 그려진다). */
+  cellsCap?: number;
   /** 프로시저럴 글리프 공급자. 없으면 폰트로만 그린다. */
   glyphs?: GlyphSource | null;
   fontFamily?: string;
@@ -435,8 +437,15 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     fit() {
       const rect = el.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return; // 아직 레이아웃 전이다
-      const cols = Math.max(2, Math.floor(rect.width / metrics.cellWidth));
-      const rows = Math.max(1, Math.floor(rect.height / metrics.cellHeight));
+      let cols = Math.max(2, Math.floor(rect.width / metrics.cellWidth));
+      let rows = Math.max(1, Math.floor(rect.height / metrics.cellHeight));
+      // **스냅샷 셀 상한을 넘지 않는다.** 넘으면 코어는 멀쩡히 그리는데 스냅샷이 잘려
+      // 아래쪽 행이 영영 빈 배경으로 남는다(오류도 경고도 없이). 행을 줄여 맞춘다.
+      const cap = opts.cellsCap;
+      if (cap && cols * rows > cap) {
+        rows = Math.max(1, Math.floor(cap / cols));
+        if (cols * rows > cap) cols = Math.max(2, Math.floor(cap / rows));
+      }
       // **크기가 그대로면 아무것도 하지 않는다.** 리사이즈는 soft-wrap 을 재배치하고 커서를
       // 따라 옮기므로, 같은 값으로 다시 부르면 화면과 커서가 흐트러진다. `ResizeObserver` 는
       // observe() 직후 한 번 발화하므로 이 가드가 없으면 열자마자 그 일이 벌어진다(실측).

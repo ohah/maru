@@ -69,6 +69,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .width = .{ .percent = 1 },
             .height = .{ .px = @floatFromInt(list_h) },
             .padding = .{ .left = @floatFromInt(m.band_inset_x), .right = @floatFromInt(m.band_inset_x) },
+            // 목록 자신도 안 줄어든다 — 줄어들면 그 안의 행들이 다시 그만큼 깎인다(위 행 주석과 같은 사고).
+            .flex = .{ .shrink = 0 },
         },
         .direction = .column,
         .overflow = .visible,
@@ -113,6 +115,10 @@ fn rowNode(id: u64, row: types.Row, m: types.Metrics) tree.UiNode {
     const style: layout.UiStyle = .{
         .width = .{ .percent = 1 },
         .height = .{ .px = @floatFromInt(m.row_h) },
+        // **줄어들면 안 된다.** 목록은 뷰포트보다 길고(그게 스크롤의 정의다) flex 의 기본 `shrink = 1`은
+        // 넘치는 만큼을 자식에서 깎는다 — 실측으로 26px 행이 25.21875px 로 그려졌다. 그러면 그린 행 높이와
+        // 히트테스트가 쓰는 행 높이가 갈려 **아래로 내려갈수록 누른 행이 밀린다**(적대적 검증에서 잡았다).
+        .flex = .{ .shrink = 0 },
     };
     const band: ?tokens.ColorRole = if (row.selected)
         .tab_active_bg
@@ -215,6 +221,28 @@ test "선택·호버만 칠하는 면을 갖는다" {
     }
     try testing.expectEqual(@as(?tokens.ColorRole, .tab_active_bg), frame.tree.entries[frame.tree.find(NodeIds.row(1)).?].visual.card.paint.background);
     try testing.expectEqual(@as(?tokens.ColorRole, .row_hover_bg), frame.tree.entries[frame.tree.find(NodeIds.row(2)).?].visual.card.paint.background);
+}
+
+// **목록이 뷰포트보다 길어도 행 높이는 변하지 않는다.** flex 기본값이 `shrink = 1`이라 이 선언이 없으면
+// 넘치는 만큼이 행에서 깎이고(실측 26 → 25.21875), 그리면 그린 행과 히트테스트의 행 높이가 갈려 아래로
+// 갈수록 누른 행이 밀린다. 스크롤 목록에서 가장 흔한 이 사고를 값으로 못 박는다.
+test "뷰포트보다 긴 목록에서도 행 높이가 깎이지 않는다" {
+    var rows: [40]types.Row = undefined;
+    for (&rows) |*r| r.* = .{ .kind = .file, .label = "a", .icon_kind = 0 };
+    var nodes: [64]tree.UiNode = undefined;
+    var entries: [64]tree.RectEntry = undefined;
+    var items: [64]layout.Item = undefined;
+    var flex: [64]layout.FlexScratch = undefined;
+    var rects: [64]layout.UiRect = undefined;
+    // 뷰포트(120px)보다 목록(40행 × 26px)이 훨씬 길다 — 이 전제가 없으면 판정할 것이 없다.
+    const frame = try testBuild(.{ .viewport_px = .{ .width = 300, .height = 120 }, .rows = &rows }, &nodes, &entries, &items, &flex, &rects);
+    const m = frame.metrics;
+    try testing.expect(rows.len * m.row_h > 120);
+    for (0..rows.len) |i| {
+        const entry = frame.tree.entries[frame.tree.find(NodeIds.row(i)).?];
+        try testing.expectEqual(@as(f32, @floatFromInt(m.row_h)), entry.rect.height);
+        try testing.expectEqual(@as(f32, @floatFromInt(i * m.row_h)), entry.rect.y);
+    }
 }
 
 test "가상화: 첫 행이 위로 밀리면 그만큼 올라가고 root 가 자른다" {

@@ -14,6 +14,18 @@ fn clampChannel(c: u8, delta: i16) u8 {
 fn lightenRgb(rgb: Rgb, delta: u8) Rgb {
     return .{ .r = clampChannel(rgb.r, delta), .g = clampChannel(rgb.g, delta), .b = clampChannel(rgb.b, delta) };
 }
+/// `a`를 `percent`%만큼 남기고 나머지를 `b`로 채운 혼합색. platform `AppSession.mutedForeground()`가
+/// 55%로 하는 것과 **같은 식**이며, 그 값의 소유자를 토큰 층으로 옮기기 위한 것이다(`list_secondary_fg`).
+fn blendRgb(a: Rgb, b: Rgb, percent: u32) Rgb {
+    const p = @min(percent, 100);
+    const q = 100 - p;
+    return .{
+        .r = @intCast((@as(u32, a.r) * p + @as(u32, b.r) * q) / 100),
+        .g = @intCast((@as(u32, a.g) * p + @as(u32, b.g) * q) / 100),
+        .b = @intCast((@as(u32, a.b) * p + @as(u32, b.b) * q) / 100),
+    };
+}
+
 fn darkenRgb(rgb: Rgb, delta: u8) Rgb {
     const d: i16 = -@as(i16, delta);
     return .{ .r = clampChannel(rgb.r, d), .g = clampChannel(rgb.g, d), .b = clampChannel(rgb.b, d) };
@@ -104,6 +116,26 @@ pub const ColorRole = enum {
     /// **값은 `rowHoverBg`가 준다.** 2026-08-17까지 이 role은 `sidebar_active`를 그대로 담아 바로 위
     /// 문장이 금지한 상태("활성색과 완전히 같아 구분이 0")였다 — 의도는 주석에만 있고 값은 아니었다.
     /// platform이 같은 식을 따로 갖고 있어서 사이드바만 옳게 보였고, 그 어긋남은 적대적 검증에서 드러났다.
+    /// 목록 행의 **기본 전경**(파일 탐색기 트리 행·그 아이콘). `surface_fg`(최대 대비)와 `muted_fg`
+    /// 사이가 아니라 **`muted_fg`보다도 흐리다** — 목록은 훑는 표면이라 기본값이 최대 대비면 그 안에서
+    /// 무엇이 강조인지가 사라진다.
+    ///
+    /// **왜 `muted_fg`를 안 쓰는가**: rich 의 `muted_fg`는 `darkenRgb(sidebar_foreground, 48)`이고,
+    /// 사이드바 보조줄(폴더·브랜치)을 그리는 platform 코드는 `AppSession.mutedForeground()`
+    /// (전경 55% + 배경 45% 혼합)를 쓴다. 두 식이 갈려 있어서 같은 "흐린 글자"가 화면에서 다른 색이었다 —
+    /// 실측으로 사이드바 폴더 아이콘 rgb(158,160,163) 대 `muted_fg` rgb(207,207,207)이고, 트리를 컴포넌트로
+    /// 옮기며 role 을 쓰자 트리만 밝아졌다(사용자 보고 2026-08-22). 이 role 이 **그 혼합값의 토큰 층 소유자**다.
+    ///
+    /// **후속**: platform 의 `mutedForeground()`가 이 role 을 되읽게 하면 사본이 사라진다. 지금 그것까지
+    /// 하지 않는 이유는 그 함수의 소비자가 사이드바·상태바·탭 등 여럿이라 별도 슬라이스이기 때문이다.
+    list_secondary_fg,
+    /// 목록에서 **뒤로 물러난 행**의 전경(git 이 무시하는 파일). `list_secondary_fg`보다 한 단계 더 흐리다.
+    ///
+    /// **이 role 이 없던 동안 신호가 거꾸로였다.** 옛 셀 경로는 행 기본색에 `mutedForeground()`(≈158)를
+    /// 쓰고 "무시된 행은 흐리게"에 `muted_fg`(≈207)를 썼다 — 즉 **무시된 행이 더 밝았다.** 의도는 주석에만
+    /// 있고 값은 반대였던 것이고(`row_hover_bg`가 같은 사고를 겪었다), 트리를 컴포넌트로 옮기며 두 값을
+    /// 나란히 놓고서야 드러났다. 위계를 값으로 만들려면 그 아래에 값이 있는 role 이 필요하다.
+    list_disabled_fg,
     row_hover_bg,
     /// 경량 컨트롤(`.ghost` 버튼 — 헤더 정렬 토글·도크 유틸리티)을 **누르고 있는** 동안의 면.
     ///
@@ -313,6 +345,9 @@ pub const Tokens = struct {
         palette.set(.surface_bg, theme.sidebar_background);
         palette.set(.surface_fg, theme.sidebar_foreground);
         palette.set(.muted_fg, theme.sidebar_foreground);
+        // 바닥은 파생색을 쓰지 않는다(`muted_fg`와 같은 규율) — rich 가 그 위에 혼합값을 얹는다.
+        palette.set(.list_secondary_fg, theme.sidebar_foreground);
+        palette.set(.list_disabled_fg, theme.sidebar_foreground);
         palette.set(.inset_bg, insetBg(theme.sidebar_background));
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
@@ -378,6 +413,11 @@ pub const Tokens = struct {
         // 계단이 role 이름뿐 아니라 실제 색으로도 갈린다.
         tk.palette.set(.control_press_bg, darkenRgb(theme.sidebar_active, 6));
         tk.palette.set(.muted_fg, darkenRgb(theme.sidebar_foreground, 48));
+        // 목록 기본 전경은 **혼합**이다 — platform `AppSession.mutedForeground()`와 같은 식이라
+        // 사이드바 보조줄과 트리 행이 같은 색으로 보인다(위 role 주석의 실측이 그 어긋남이다).
+        tk.palette.set(.list_secondary_fg, blendRgb(theme.sidebar_foreground, theme.sidebar_background, 55));
+        // 물러난 행은 한 단계 더 배경 쪽으로. 35%는 "읽을 수는 있지만 먼저 읽히지 않는" 자리다.
+        tk.palette.set(.list_disabled_fg, blendRgb(theme.sidebar_foreground, theme.sidebar_background, 35));
         // C4b: rich 박스 모양 — 둥근 모서리 + 얇은 테두리(tui는 0=직각·셀 fill 유지). 컴포넌트 view가
         // 이 값을 Op.quad에 실어 GPU quad 프리미티브로 lowering된다(같은 코드, 토큰만 다름).
         tk.space.corner_radius_px = 8;
@@ -421,6 +461,37 @@ pub const Tokens = struct {
         return self.palette.get(role);
     }
 };
+
+// 목록 전경 **위계가 값으로도 성립하는가.** 이름만 계단이고 RGB 가 뒤집혀 있던 사고가 실제로 있었다
+// (`list_disabled_fg` role 주석 — 무시된 행이 기본 행보다 밝았다). 그 사고는 눈으로만 보이고 어떤
+// 컴파일러도 안 잡으므로, 밝기 순서를 여기서 못 박는다.
+test "목록 전경은 surface > secondary > disabled 순으로 실제로 어두워진다" {
+    const theme = ThemeColors{
+        .foreground = .{ .r = 255, .g = 255, .b = 255 },
+        .sidebar_background = .{ .r = 45, .g = 50, .b = 60 },
+        .sidebar_foreground = .{ .r = 255, .g = 255, .b = 255 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
+        .accent = .{ .r = 16, .g = 17, .b = 18 },
+        .diff_added = .{ .r = 19, .g = 20, .b = 21 },
+        .diff_removed = .{ .r = 22, .g = 23, .b = 24 },
+    };
+    const tk = Tokens.rich(theme);
+    const surface = tk.palette.get(.surface_fg).r;
+    const secondary = tk.palette.get(.list_secondary_fg).r;
+    const disabled = tk.palette.get(.list_disabled_fg).r;
+    try std.testing.expect(surface > secondary);
+    try std.testing.expect(secondary > disabled);
+    // 배경보다는 밝아야 읽힌다 — 계단을 만든다고 바닥까지 내려가면 안 보인다.
+    try std.testing.expect(disabled > tk.palette.get(.surface_bg).r);
+    // 그리고 목록 기본색은 `muted_fg`(darken 48)와 **다른 값**이다. 같아지면 이 role 을 만든 이유가
+    // 사라진 것이므로 그때 다시 판단해야 한다.
+    try std.testing.expect(secondary != tk.palette.get(.muted_fg).r);
+}
 
 test "Tokens.tui maps resolved theme colors to the semantic roles" {
     const c = struct {

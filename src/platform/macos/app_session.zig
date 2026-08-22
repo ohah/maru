@@ -33131,25 +33131,6 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
     }
 }
 
-// 아래 테스트 전용 헬퍼 — production 렌더는 모든 페인을 collectShaped→placeMultiPane([N])으로 한 atlas 세대에
-// 통합한다(cross-pane 정합). 이 헬퍼들은 sidebar/overlay/floating의 DrawList lowering(buildFromDrawList =
-// shapeOnly→placeMultiPane([1])→finishPane)을 단발로 검증한다 — production 통합[N] 경로 자체는 visible GPU smoke가
-// 검증한다(atlas readback). production fn으로 두면 미사용이라 test 전용 free 함수로 분리해 둔다.
-/// `IconKind` 순서대로 푼 파일 트리 아이콘 색. **매핑의 주인은 chrome**(`file_tree_icon.colorRole`)이고
-/// 이 자리는 그것을 토큰으로 풀기만 한다 — comptime 으로 전 kind 를 훑으므로 새 kind 가 생기면 그 자리가
-/// 자동으로 채워진다(빠뜨릴 자리가 없다).
-fn fileTreeIconColors(tk: *const chrome.Tokens) [std.meta.fields(chrome.file_tree_icon.IconKind).len]?terminal.Color {
-    var out: [std.meta.fields(chrome.file_tree_icon.IconKind).len]?terminal.Color = undefined;
-    inline for (std.meta.fields(chrome.file_tree_icon.IconKind)) |field| {
-        const kind: chrome.file_tree_icon.IconKind = @enumFromInt(field.value);
-        out[field.value] = if (chrome.file_tree_icon.colorRole(kind)) |role|
-            .{ .rgb = tk.get(role) }
-        else
-            null;
-    }
-    return out;
-}
-
 fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
     const dl = try sidebar_ops.buildSidebarTitleDrawList(session);
     return pane_ops.paneFrameBuilder(session).buildFromDrawList(session.allocator, dl, &session.renderer_state);
@@ -37210,8 +37191,16 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     }
 
     // ⑥ **렌더가 그 창을 실제로 쓴다.** 위의 것들은 host 산술이라, 렌더가 다른 수를 쓰면 전부 통과하면서
-    //    화면만 어긋난다. draw list를 같은 입력으로 만들어 cell row 범위를 본다.
-    session.file_tree_scroll.offset_y_px = 3 * cell_h;
+    //    화면만 어긋난다.
+    //
+    //    **이 단언은 한 번 죽은 적이 있다(적대적 검증).** FT1 이 행 렌더를 컴포넌트로 옮긴 뒤에도 여기는
+    //    옛 셀 draw list(`buildFileTreeDrawList`)를 계속 만들어 검사했다 — 제품이 더 이상 안 쓰는 경로다.
+    //    이름은 "렌더"라고 적혀 있는데 실제 렌더는 아무도 안 보는 상태였고, 그런 테스트는 초록인 채로
+    //    거짓이다. 그래서 **제품이 그리는 그 컴포넌트**로 바꾼다.
+    // **행 높이의 정확한 배수로 굴리면 이 블록이 아무것도 판정하지 못한다** — `origin_shift_px`가 0이 되어
+    // 아래 "위로 밀린 만큼 올라간다" 단언이 `0 == 0`이 된다(뮤테이션으로 확인: 컴포넌트에서 평행이동을
+    // 통째로 지워도 통과했다). 배수가 **아닌** 자리로 굴리고, 그 전제를 먼저 단언한다.
+    session.file_tree_scroll.offset_y_px = 3 * cell_h + cell_h / 3;
     {
         // 행마다 라벨을 다르게 준다 — 같으면 "어느 행을 그렸는지"를 판정할 수 없고 개수만 보게 된다.
         var labels: std.ArrayList([]u8) = .empty;
@@ -37227,40 +37216,70 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
 
         const window = file_panel_ops.fileTreeDrawWindow(session);
         try std.testing.expectEqual(file_panel_ops.fileTreeEffectiveScrollPx(session) / cell_h, window.start);
+        // 전제: 부분 행이 실제로 생겼다. 이게 0이면 아래 단언들이 조용히 무의미해진다.
+        try std.testing.expect(window.origin_shift_px > 0);
 
-        const fg: terminal.Color = .{ .rgb = .{ .r = 200, .g = 200, .b = 200 } };
-        var dl = try coretext_frame_builder.buildFileTreeDrawList(
-            allocator,
-            session.file_tree_rows.items,
-            null,
-            window.start,
-            window.count,
-            40,
-            fg,
-            fg,
-            null,
-            null,
-            null,
-        );
-        defer dl.deinit(allocator);
+        const component = chrome.components.file_tree;
+        var rows_buf: [64]component.types.Row = undefined;
+        if (window.count > rows_buf.len) return error.FileTreeFixtureWindowTooLarge;
+        for (0..window.count) |offset| {
+            rows_buf[offset] = .{
+                .kind = .file,
+                .label = session.file_tree_rows.items[window.start + offset].file.label,
+                .icon_kind = @intFromEnum(chrome.file_tree_icon.IconKind.code),
+            };
+        }
+        const props = component.types.Props{
+            .viewport_px = .{ .width = @floatFromInt(dock_ops.dockListTextWidthPx(session)), .height = @floatFromInt(tree.h) },
+            .scale_milli = file_tree_dock_ops.fileTreeScaleMilli(session),
+            .rows = rows_buf[0..window.count],
+            .origin_shift_px = window.origin_shift_px,
+        };
+        var nodes: [96]chrome.ui.tree.UiNode = undefined;
+        var entries: [96]chrome.ui.tree.RectEntry = undefined;
+        var items: [96]chrome.ui.layout.Item = undefined;
+        var flex: [96]chrome.ui.layout.FlexScratch = undefined;
+        var child_rects: [96]chrome.ui.layout.UiRect = undefined;
+        const frame = try component.build.build(props, .{
+            .nodes = &nodes,
+            .entries = &entries,
+            .layout_items = &items,
+            .flex_scratch = &flex,
+            .child_rects = &child_rects,
+        });
 
-        // 마지막 cell row가 창의 마지막 줄이다. 하나 덜 그리면 뷰포트 바닥에 빈 띠가 남는다 —
-        // 그것이 이 슬라이스 전의 상태였다.
-        var max_row: u16 = 0;
-        for (dl.cells) |cell| max_row = @max(max_row, cell.row);
-        try std.testing.expectEqual(window.count - 1, max_row);
+        // 창의 첫 행은 뷰포트 위로 **정확히 밀린 만큼** 올라가 있다. 이 값이 0이면 부분 행이 사라지고
+        // 목록이 셀 경계로 스냅한다(옛 행 좌표 시절의 모습).
+        const first = frame.tree.entries[frame.tree.find(component.build.NodeIds.row(0)).?];
+        try std.testing.expectEqual(-@as(f32, @floatFromInt(window.origin_shift_px)), first.rect.y);
 
-        // 화면 0행이 **창의 첫 행**이어야 한다. offset을 무시하면 개수는 같은 채로 다른 행이 그려진다.
-        const expect_digit: u21 = '0' + @as(u21, @intCast(window.start));
+        // **행 배치 법칙**: i번째 행의 top은 정확히 `-shift + i*row_h`다. 컴포넌트가 평행이동을 빠뜨리거나
+        // 행 높이를 다른 값으로 잡으면 여기서 죽는다.
+        const row_h_px = file_tree_dock_ops.fileTreeRowHeightPx(session);
+        for (0..window.count) |i| {
+            const entry = frame.tree.entries[frame.tree.find(component.build.NodeIds.row(i)).?];
+            const want_y = -@as(f32, @floatFromInt(window.origin_shift_px)) + @as(f32, @floatFromInt(i * row_h_px));
+            try std.testing.expectEqual(want_y, entry.rect.y);
+            try std.testing.expectEqual(@as(f32, @floatFromInt(row_h_px)), entry.rect.height);
+        }
+        // 그리고 그 창이 뷰포트를 **덮는다**(host 산술 — 하나 덜 그리면 바닥에 빈 띠가 남는다).
+        try std.testing.expect(window.count * row_h_px >= tree.h + window.origin_shift_px);
+
+        // 그리고 **그 창의 첫 행 라벨**이 실제로 그려진다. 개수만 맞고 다른 행을 그리면 여기서 죽는다.
+        var ops: [1024]chrome.draw.Op = undefined;
+        var runs: [256]chrome.draw.Run = undefined;
+        var text_bytes: [8192]u8 = undefined;
+        const tk = session.buildChromeTokens();
+        const draws = try component.view.view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+        var expect_label: [32]u8 = undefined;
+        const want = try std.fmt.bufPrint(&expect_label, "row{d}.zig", .{window.start});
         var saw_first_row_label = false;
-        for (dl.cells) |cell| {
-            if (cell.row != 0) continue;
-            if (cell.codepoint == 'r') {
-                // "row" 다음 글자가 인덱스 숫자다(창 시작이 한 자리인 fixture).
-                for (dl.cells) |next| {
-                    if (next.row == 0 and next.col == cell.col + 3 and next.codepoint == expect_digit)
-                        saw_first_row_label = true;
-                }
+        for (draws.ops) |op| {
+            if (op != .text or op.text.placement != .origin) continue;
+            if (@as(f32, @floatFromInt(op.text.origin.y)) < first.rect.y) continue;
+            if (@as(f32, @floatFromInt(op.text.origin.y)) >= first.rect.y + first.rect.height) continue;
+            for (op.text.runs) |run| {
+                if (std.mem.eql(u8, run.text, want)) saw_first_row_label = true;
             }
         }
         try std.testing.expect(saw_first_row_label);

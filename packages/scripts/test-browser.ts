@@ -213,7 +213,9 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
   // **줄 간격 여백이 위아래로 나뉘는가.** 실제 `measureMetrics` 를 불러 확인한다 — 늘어난
   // 몫을 전부 baseline 아래에 두면 선택 배경이 하단 패딩처럼 보인다.
   const lead = await p.evaluate(async () => {
-    const mod = (await import("/core/dist/index.js")) as {
+    // 경로를 변수로 둔다 — 브라우저 런타임 경로라 tsc 가 모듈로 해석하면 안 된다.
+    const url = "/core/dist/index.js";
+    const mod = (await import(url)) as {
       measureMetrics: (i: { fontFamily: string; fontSize: number; lineHeight: number }) => {
         cellHeight: number;
         ascent: number;

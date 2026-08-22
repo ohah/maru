@@ -40,6 +40,7 @@ const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
 const PendingDockFocus = app_session_mod.PendingDockFocus;
 const dock_ops = @import("dock.zig");
+const file_tree_dock_ops = @import("file_tree_dock.zig");
 const git_ops = @import("git.zig"); // 활성 터미널 cwd 해석을 소스 컨트롤 뷰와 공유한다(followActiveTerminalCwd)
 const pane_ops = @import("pane.zig");
 const renameatx_np = AppSession.renameatx_np;
@@ -216,7 +217,7 @@ pub fn fileSurfaceOwnsInput(self: *const AppSession, surface_id: u64) bool {
 /// 대상 행을 뷰포트 안으로 **최소한만** 민다(file-explorer §1 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
 /// 픽셀 좌표라 "보인다"의 기준은 행이 **온전히** 들어와 있는가다: 부분적으로 걸친 행은 마저 넣는다.
 pub fn scrollFileTreeRowIntoView(self: *AppSession, index: usize) void {
-    const row_h = self.cell_height_px;
+    const row_h = file_tree_dock_ops.fileTreeRowHeightPx(self);
     if (row_h == 0) return;
     const extent = fileTreeScrollExtent(self);
     if (extent.viewport_h_px == 0) return;
@@ -1974,7 +1975,7 @@ pub fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     // 산술은 `session/file_tree_layout.zig` 가 단일 출처다 — `fileTreeDrawWindow` 와 **같은 함수 쌍**이라
     // 그린 자리를 누르면 그 행이 나온다(그 짝은 그쪽 테스트가 조합을 훑어 못 박는다).
     return file_tree_layout.rowAtLocalY(
-        self.cell_height_px,
+        file_tree_dock_ops.fileTreeRowHeightPx(self),
         fileTreeEffectiveScrollPx(self),
         y_px - @as(f64, @floatFromInt(tree_rect.y)),
         self.file_tree_rows.items.len,
@@ -2539,8 +2540,11 @@ pub fn requestFilePanelPick(self: *AppSession) void {
 /// 키보드 Page 이동이 쓰는 "온전히 보이는 행 수". 창(`fileTreeDrawWindow`)과 달리 **부분 행을 세지
 /// 않는다** — 반쯤 걸친 행까지 한 페이지로 치면 Page Down이 그 행을 건너뛴다.
 pub fn fileTreeVisibleRows(self: *const AppSession) usize {
-    if (self.cell_height_px == 0) return 0;
-    return dock_ops.dockGeometry(self).tree_content.h / self.cell_height_px;
+    // 행 높이는 **컴포넌트가 소유한다**(FT1) — 예전에는 `cell_height_px`라 터미널 폰트를 바꾸면
+    // 페이지 단위까지 따라 움직였다(docs/plans/file-tree-component.md §1).
+    const row_h = file_tree_dock_ops.fileTreeRowHeightPx(self);
+    if (row_h == 0) return 0;
+    return dock_ops.dockGeometry(self).tree_content.h / row_h;
 }
 
 /// 이 entry의 surface가 입력·복원 소유였는지만 기록한다(통지·큐 정리 없음). Term teardown이 통지를
@@ -2581,14 +2585,14 @@ pub fn releaseFileTreeMutationEditorLocks(self: *AppSession, mutation_id: u64, u
 /// origin을 그만큼 **올려** 그 행을 부분적으로 보이게 한다. 그래서 `count`는 뷰포트를 덮는 데
 /// 필요한 행 수(위·아래 부분 행 포함)이며, 삐져나온 몫은 pane clip이 자른다.
 ///
-/// 행 높이가 균일(`cell_height_px`)하므로 `scroll_area.project`의 walk 대신 나눗셈으로 같은 답을
+/// 행 높이가 균일(`file_tree_dock_ops.fileTreeRowHeightPx`)하므로 `scroll_area.project`의 walk 대신 나눗셈으로 같은 답을
 /// 낸다 — 탐색기 행은 수천 개가 될 수 있고 창은 매 프레임 필요하다. 그 둘이 같은 답이라는 것은
 /// 테스트가 `project`와 대조해 고정한다(도크는 카드 높이가 가변이라 walk가 필수다).
 pub fn fileTreeDrawWindow(self: *const AppSession) file_tree_layout.DrawWindow {
     // 산술은 `session/file_tree_layout.zig` 가 단일 출처다 — 히트테스트와 **같은 함수 쌍**을 써야
     // 누른 행과 강조되는 행이 안 갈린다(그 짝은 그쪽 테스트가 못 박는다).
     return file_tree_layout.drawWindow(
-        self.cell_height_px,
+        file_tree_dock_ops.fileTreeRowHeightPx(self),
         fileTreeEffectiveScrollPx(self),
         dock_ops.dockGeometry(self).tree_content.h,
         self.file_tree_rows.items.len,
@@ -2777,7 +2781,9 @@ pub fn openPinnedFilePanelParent(io: std.Io, absolute_path: []const u8) FilePane
 }
 
 pub fn fileTreeScrollExtent(self: *const AppSession) FileTreeScrollExtent {
-    const row_h = self.cell_height_px;
+    // 행 높이는 컴포넌트가 소유한다(FT1). 여기서 셀 높이를 쓰면 스크롤 상한이 **그린 행 높이와 다른**
+    // 축으로 계산돼, 목록 끝에서 몇 행이 영영 안 보이거나 빈 공간이 남는다.
+    const row_h = file_tree_dock_ops.fileTreeRowHeightPx(self);
     const viewport = dock_ops.dockGeometry(self).tree_content.h;
     const content: u32 = @intCast(@min(
         @as(u64, self.file_tree_rows.items.len) * @as(u64, row_h),

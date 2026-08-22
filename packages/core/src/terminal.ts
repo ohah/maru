@@ -1,0 +1,435 @@
+import { LocalBackend } from "./backend/local";
+import type { GlyphSource } from "./render/types";
+import { loadBundledFont } from "./font";
+import { attachDom, type DomHost } from "./dom/attach";
+import { canUseWorker, WorkerBackend } from "./worker/proxy";
+import { DEFAULT_FONT } from "./render/metrics";
+import type { Backend, BackendEvent, FrameData, MouseReport } from "./backend/types";
+import type {
+  CursorShape,
+  Disposable,
+  FallbackReason,
+  KeyInput,
+  Size,
+  Snapshot,
+  TerminalOptions,
+  Theme,
+} from "./types";
+
+const DEFAULTS = { cols: 80, rows: 24, scrollback: 1000 } as const;
+const DEFAULT_THEME: Theme = { foreground: 0xc9d1d9, background: 0x000000, cursor: 0x58a6ff };
+
+type Listener<T> = (value: T) => void;
+
+class Emitter<T> {
+  #listeners = new Set<Listener<T>>();
+  get size(): number {
+    return this.#listeners.size;
+  }
+  on(cb: Listener<T>): Disposable {
+    this.#listeners.add(cb);
+    return { dispose: () => this.#listeners.delete(cb) };
+  }
+  emit(value: T): void {
+    for (const cb of this.#listeners) cb(value);
+  }
+  clear(): void {
+    this.#listeners.clear();
+  }
+}
+
+/**
+ * 터미널 하나. **명령은 단방향(동기), 조회는 항상 Promise**다 — 코어가 메인에 있든 워커에
+ * 있든 시그니처가 같아야 모드를 바꿔도 앱 코드가 안 바뀐다.
+ *
+ * `onData`가 이 클래스의 출력이다. 키 입력뿐 아니라 **DA·CPR·OSC 질의 응답도 같은 경로**로
+ * 나가므로, 소비자는 그 바이트를 반드시 호스트로 보내야 한다(안 보내면 TUI가 멈춘다).
+ */
+export class Terminal {
+  #opts: TerminalOptions;
+  #backend: Backend | null = null;
+  #size: Size;
+  #frame: FrameData | null = null;
+  #dom: DomHost | null = null;
+  /** cols/rows 를 명시하지 않았을 때만 컨테이너 크기를 따라간다. */
+  #resizeObserver: ResizeObserver | null = null;
+  /** Cmd+0 으로 되돌아갈 크기. */
+  readonly #baseFontSize: number;
+  #disposed = false;
+
+  readonly #data = new Emitter<Uint8Array>();
+  readonly #title = new Emitter<string>();
+  readonly #bell = new Emitter<void>();
+  readonly #preedit = new Emitter<string>();
+  readonly #resize = new Emitter<Size>();
+  readonly #fallback = new Emitter<FallbackReason>();
+  readonly #render = new Emitter<FrameData>();
+
+  constructor(opts: TerminalOptions = {}) {
+    this.#opts = { ...opts };
+    this.#size = { cols: opts.cols ?? DEFAULTS.cols, rows: opts.rows ?? DEFAULTS.rows };
+    this.#baseFontSize = opts.fontSize ?? 14;
+  }
+
+  get size(): Size {
+    return { ...this.#size };
+  }
+
+  /** 마지막으로 발행된 프레임. 렌더러가 붙기 전에도 읽을 수 있다. */
+  get frame(): FrameData | null {
+    return this.#frame;
+  }
+
+  /**
+   * 코어를 띄운다. **워커·wasm 생성은 전부 여기서** 한다 — 모듈 로드 시점에 `Worker`나
+   * `document`를 건드리면 SSR이 깨진다.
+   */
+  async open(el?: HTMLElement): Promise<void> {
+    if (this.#backend && (!el || this.#dom)) return;
+
+    // **워커 여부는 여기서 정한다.** 기본은 "full"이고, 명시하지 않았을 때만 능력 감지로
+    // 조용히 내린다 — 명시했는데 지원이 없으면 실패시키는 편이 조용한 성능 저하보다 낫다.
+    const wanted = this.#opts.worker ?? "full";
+    const explicit = this.#opts.worker !== undefined;
+    let mode: "full" | false = wanted;
+    if (wanted !== false && !canUseWorker()) {
+      if (explicit) {
+        throw new Error(
+          "maru-term: 이 환경에는 Worker나 OffscreenCanvas가 없다 (worker 옵션을 빼면 자동으로 내려간다)",
+        );
+      }
+      mode = false;
+      queueMicrotask(() =>
+        this.#fallback.emit(typeof Worker === "undefined" ? "no-worker" : "no-offscreen-canvas"),
+      );
+    }
+    // 폰트를 **먼저** 받는다 — 격자를 재기 전에 등록돼 있어야 셀 크기가 그 폰트 기준으로 잡힌다.
+    if (this.#opts.loadFont === "jetendard") await loadBundledFont(this.#opts.fontUrl);
+    if (el && mode === "full") {
+      await this.#openWorker(el);
+      this.#startAutoFit(el);
+      return;
+    }
+
+    if (!this.#backend) {
+      const backend = await LocalBackend.create(this.#size, this.#opts.wasmUrl);
+      backend.on((e) => this.#onBackendEvent(e));
+      this.#backend = backend;
+      this.#applyOptions();
+    }
+    if (el && !this.#dom) {
+      const local = this.#backend as { glyphSource?: () => GlyphSource } | null;
+      this.#dom = attachDom(el, this, {
+        ...this.#attachOptions(),
+        glyphs: local?.glyphSource?.() ?? null,
+        onFontZoom: (d) => this.#fontZoom(d),
+        // 워커 경로에만 있던 배선이다. 없으면 조합 텍스트가 화면에 들어가지 않는다.
+        onPreedit: (text) => this.#emitPreedit(text),
+      });
+    }
+    if (el) this.#startAutoFit(el);
+  }
+
+  /**
+   * `cols`/`rows`를 명시하지 않았으면 컨테이너를 채운다. 컨테이너를 받는 API 이므로 그 크기를
+   * 따르는 것이 기본이어야 한다 — 명시했으면 사용자가 정한 격자를 그대로 지킨다.
+   */
+  #startAutoFit(el: HTMLElement): void {
+    if (this.#opts.cols !== undefined && this.#opts.rows !== undefined) return;
+    if (typeof ResizeObserver === "undefined") {
+      this.fit();
+      return;
+    }
+    this.#resizeObserver = new ResizeObserver(() => this.fit());
+    this.#resizeObserver.observe(el);
+    this.fit();
+  }
+
+  /** 폰트 확대·축소·되돌리기. 되돌리기는 생성 당시 크기(없으면 기본 14)로 간다. */
+  #fontZoom(delta: number): void {
+    const base = this.#baseFontSize;
+    const cur = this.#opts.fontSize ?? base;
+    const next = delta === 0 ? base : Math.max(6, Math.min(72, cur + delta));
+    if (next !== cur) this.setOptions({ fontSize: next });
+  }
+
+  #attachOptions(render = true) {
+    return {
+      fontFamily: this.#opts.fontFamily ?? DEFAULT_FONT,
+      fontSize: this.#opts.fontSize ?? 14,
+      lineHeight: this.#opts.lineHeight ?? 1.22,
+      ligatures: this.#opts.ligatures ?? true,
+      theme: this.#opts.theme ?? DEFAULT_THEME,
+      render,
+    };
+  }
+
+  /** 코어와 렌더를 모두 워커에 두고, 메인은 입력만 잡는다. */
+  async #openWorker(el: HTMLElement): Promise<void> {
+    let worker: WorkerBackend | null = null;
+    // 캔버스를 먼저 만들어야 소유권을 넘길 수 있다. DOM 계층은 렌더를 하지 않는다.
+    const dom = attachDom(el, this, {
+      ...this.#attachOptions(false),
+      onPreedit: (text) => this.#emitPreedit(text),
+      onFontZoom: (d) => this.#fontZoom(d),
+      // **지역 변수로 잡는다.** 이 콜백은 `attachDom` 안의 타이머에서 불리는데, 거기서
+      // `this.#backend` 를 읽으면 항상 null 이었다(실측) — 워커 백엔드가 아래에서 나중에
+      // 대입되기 때문이다. 깜빡임 신호가 통째로 워커에 닿지 않아 커서가 멈춰 있었다.
+      onBlink: (on) => worker?.setBlink(on),
+      onResizeCanvas: (cols, rows) => this.#backend?.resize(cols, rows),
+    });
+    this.#dom = dom;
+    const offscreen = dom.canvas.transferControlToOffscreen();
+    const backend = await WorkerBackend.create(
+      offscreen,
+      this.#size,
+      {
+        theme: this.#opts.theme ?? DEFAULT_THEME,
+        ligatures: this.#opts.ligatures ?? true,
+        fontFamily: this.#opts.fontFamily ?? DEFAULT_FONT,
+        fontSize: this.#opts.fontSize ?? 14,
+        lineHeight: this.#opts.lineHeight ?? 1.22,
+        devicePixelRatio: Math.min(globalThis.devicePixelRatio || 1, 2),
+        cursorShape: this.#opts.cursorShape,
+        scrollback: this.#opts.scrollback ?? DEFAULTS.scrollback,
+        ambiguousWide: this.#opts.ambiguousWide,
+      },
+      this.#opts.wasmUrl,
+      // 커스텀 URL 이면 그대로 넘기고, 기본이면 워커가 스스로 Regular+Bold 를 받게 한다 —
+      // 여기서 URL 하나만 넘기면 Bold 가 빠진다.
+      this.#opts.fontUrl ? String(this.#opts.fontUrl) : undefined,
+      this.#opts.loadFont === "jetendard" && !this.#opts.fontUrl,
+    );
+    backend.on((e) => this.#onBackendEvent(e));
+    worker = backend;
+    this.#backend = backend;
+  }
+
+  /** 요소 크기에 맞춰 그리드를 다시 잡는다. `open(el)`로 붙였을 때만 유효하다. */
+  fit(): void {
+    this.#dom?.fit();
+  }
+
+  /** 붙은 canvas. 없으면 null. */
+  get canvas(): HTMLCanvasElement | null {
+    return this.#dom?.canvas ?? null;
+  }
+
+  /** 이미 만든 백엔드를 꽂는다. 워커 모드와 테스트가 쓴다. */
+  attachBackend(backend: Backend): void {
+    this.#backend?.dispose();
+    backend.on((e) => this.#onBackendEvent(e));
+    this.#backend = backend;
+    this.#applyOptions();
+  }
+
+  #applyOptions(): void {
+    const b = this.#backend;
+    if (!b) return;
+    if (this.#opts.theme) b.setTheme(this.#opts.theme);
+    if (this.#opts.cursorShape) b.setCursorShape(this.#opts.cursorShape);
+    if (this.#opts.ambiguousWide !== undefined) b.setAmbiguousWide(this.#opts.ambiguousWide);
+    b.setScrollback(this.#opts.scrollback ?? DEFAULTS.scrollback);
+  }
+
+  #onBackendEvent(e: BackendEvent): void {
+    switch (e.type) {
+      case "data":
+        this.#data.emit(e.bytes);
+        break;
+      case "title":
+        this.#title.emit(e.title);
+        break;
+      case "bell":
+        this.#bell.emit();
+        break;
+      case "resize":
+        this.#size = e.size;
+        this.#resize.emit(e.size);
+        break;
+      case "render":
+        this.#frame = e.frame;
+        this.#render.emit(e.frame);
+        break;
+    }
+  }
+
+  #need(): Backend {
+    if (this.#disposed) throw new Error("maru-term: 이미 dispose된 터미널이다");
+    if (!this.#backend) throw new Error("maru-term: open()을 먼저 불러라");
+    return this.#backend;
+  }
+
+  // ── 명령 ─────────────────────────────────────────────────
+  write(data: string | Uint8Array): void {
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+    this.#need().write(bytes);
+  }
+  resize(cols: number, rows: number): void {
+    // **여기서 `#size`를 갱신해야 한다.** 워커 모드에서는 실제 리사이즈가 비동기라, 이 값을
+    // 안 고치면 뒤이어 도는 `sizeCanvas()`가 옛 격자로 캔버스를 잡아 컨테이너에 여백이 남는다.
+    this.#size = { cols, rows };
+    this.#need().resize(cols, rows);
+  }
+  key(input: KeyInput): void {
+    // 타이핑하면 선택이 풀린다(터미널 표준). 남겨 두면 방금 친 글자 위에 하이라이트가 얹힌다.
+    const b = this.#need();
+    b.selectClear();
+    b.key(input);
+  }
+  /**
+   * IME 조합 텍스트를 화면에 넣는다(빈 문자열이면 물린다). 브라우저 IME 는 `open()`이 붙인
+   * 입력기가 자동으로 호출하므로 보통 직접 부를 일이 없다 — 커스텀 입력기나 모바일 조합을
+   * 직접 다룰 때 쓴다. 조합 텍스트는 **호스트로 나가지 않는다**(확정된 글자만 `onData`).
+   */
+  setPreedit(text: string): void {
+    this.#need().setPreedit(text);
+  }
+
+  /** 조합을 앱에 넘기거나(구독자 있음) 라이브러리가 직접 넣는다(구독자 없음). */
+  #emitPreedit(text: string): void {
+    const appDraws = this.#preedit.size > 0;
+    // 오버레이는 어느 쪽이든 라이브러리가 그린다(하이라이트·밑줄). 삽입만 갈린다.
+    const b = this.#backend as { setPreedit?: (t: string, insert?: boolean) => void } | null;
+    b?.setPreedit?.(text, !appDraws);
+    if (appDraws) this.#preedit.emit(text);
+  }
+  /**
+   * 바이트를 그대로 호스트로 보낸다(`onData`). 키바인드처럼 **코어 인코딩을 거치지 않고**
+   * 정해진 시퀀스를 보내야 할 때 쓴다. 화면에는 아무 영향이 없다 — 에코는 호스트 몫이다.
+   */
+  sendText(text: string | Uint8Array): void {
+    this.#data.emit(typeof text === "string" ? new TextEncoder().encode(text) : text);
+  }
+  paste(text: string): void {
+    this.#need().paste(text);
+  }
+  mouse(ev: MouseReport): void {
+    this.#need().mouse(ev);
+  }
+  focus(gained: boolean): void {
+    this.#need().focus(gained);
+  }
+  scroll(deltaUp: number): void {
+    this.#need().scroll(deltaUp);
+  }
+  scrollToBottom(): void {
+    this.#need().scrollToBottom();
+  }
+
+  selectStart(row: number, col: number, block = false): void {
+    this.#need().selectStart(row, col, block);
+  }
+  selectExtend(row: number, col: number): void {
+    this.#need().selectExtend(row, col);
+  }
+  selectWord(row: number, col: number): void {
+    this.#need().selectWord(row, col);
+  }
+  selectLine(row: number): void {
+    this.#need().selectLine(row);
+  }
+  selectAll(): void {
+    this.#need().selectAll();
+  }
+  selectClear(): void {
+    this.#need().selectClear();
+  }
+
+  setTheme(theme: Theme): void {
+    this.#opts.theme = theme;
+    this.#backend?.setTheme(theme);
+    this.#dom?.setOptions({ theme });
+  }
+  setCursorShape(shape: CursorShape): void {
+    this.#opts.cursorShape = shape;
+    this.#backend?.setCursorShape(shape);
+  }
+
+  setOptions(opts: Partial<TerminalOptions>): void {
+    this.#opts = { ...this.#opts, ...opts };
+    this.#applyOptions();
+    if (
+      this.#dom &&
+      (opts.fontFamily ||
+        opts.fontSize ||
+        opts.lineHeight ||
+        opts.theme ||
+        opts.ligatures !== undefined)
+    ) {
+      this.#dom.setOptions(this.#attachOptions());
+      (this.#backend as WorkerBackend | null)?.setRenderOptions?.({
+        fontFamily: this.#opts.fontFamily ?? DEFAULT_FONT,
+        fontSize: this.#opts.fontSize ?? 14,
+        lineHeight: this.#opts.lineHeight ?? 1.22,
+        ligatures: this.#opts.ligatures ?? true,
+      });
+    }
+  }
+
+  // ── 조회 (항상 Promise) ──────────────────────────────────
+  measureCells(text: string): Promise<number> {
+    return this.#need().measureCells(text);
+  }
+  snapshot(): Promise<Snapshot> {
+    return this.#need().snapshot();
+  }
+  selectionText(): Promise<string | null> {
+    return this.#need().selectionText();
+  }
+  linkAt(row: number, col: number): Promise<string | null> {
+    return this.#need().linkAt(row, col);
+  }
+
+  // ── 이벤트 ───────────────────────────────────────────────
+  onData(cb: Listener<Uint8Array>): Disposable {
+    return this.#data.on(cb);
+  }
+  /**
+   * IME 조합 텍스트가 바뀔 때마다 알린다(확정·취소 시 빈 문자열).
+   *
+   * **구독하면 조합을 그리는 책임이 앱으로 넘어간다** — 라이브러리는 코어에 넣지 않는다.
+   * 줄을 다시 그리는 앱(readline 류 셸)은 자기 줄에 조합 텍스트를 끼워 넣어야 하는데,
+   * 라이브러리가 화면을 따로 건드리면 그 재그리기와 어긋나기 때문이다. 구독자가 없으면
+   * 라이브러리가 `ICH`/`DCH`로 직접 넣어 준다(단순한 소비자를 위한 기본 동작).
+   */
+  onPreedit(cb: Listener<string>): Disposable {
+    return this.#preedit.on(cb);
+  }
+  onTitle(cb: Listener<string>): Disposable {
+    return this.#title.on(cb);
+  }
+  onBell(cb: Listener<void>): Disposable {
+    return this.#bell.on(cb);
+  }
+  onResize(cb: Listener<Size>): Disposable {
+    return this.#resize.on(cb);
+  }
+  onFallback(cb: Listener<FallbackReason>): Disposable {
+    return this.#fallback.on(cb);
+  }
+  onRender(cb: Listener<FrameData>): Disposable {
+    return this.#render.on(cb);
+  }
+
+  dispose(): void {
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#dom?.dispose();
+    this.#dom = null;
+    this.#backend?.dispose();
+    this.#backend = null;
+    for (const e of [
+      this.#data,
+      this.#title,
+      this.#bell,
+      this.#resize,
+      this.#fallback,
+      this.#render,
+      this.#preedit,
+    ])
+      e.clear();
+  }
+}

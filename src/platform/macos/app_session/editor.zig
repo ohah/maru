@@ -239,79 +239,39 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
 
-    // **기하도 셀 크기도 렌더가 굳힌 값을 쓴다**(`editor_hit_geom`). 여기서 다시 구하면 행 배열과
-    // 다른 프레임의 값이 되고, 실측으로 폭이 바뀐 뒤 클릭의 80%가, 폰트가 바뀐 뒤 93%가 다른 답을
-    // 냈다(10·11차 적대적 검증). **둘을 섞어도 같은 결과다** — 굳은 열에 live 셀 폭을 곱하면 그
-    // 곱 자체가 어느 프레임의 것도 아니게 된다.
-    // **셀 0 가드가 없다** — `geom`이 기본값(0)인 상태는 *"한 번도 안 그렸다"* 또는 *"해제됐다"*뿐이고
-    // 둘 다 `rows_len == 0`이라 위에서 이미 걸린다(`storeHitRows`가 넷을 함께 세우고
-    // `releaseEditorTerm`이 함께 지운다). 그린 프레임의 셀 크기는 0일 수 없다 — `appendPaneFrame`이
-    // 맨 앞에서 `cell_width_px == 0 or cell_height_px == 0`이면 `null`을 내므로 그리기 자체가 없다.
+    // **다섯 단계는 중립이 소유한다**(`chrome_editor.hit.bodyPoint`). 여기 있던 계산을 Windows
+    // 편집기 표면이 그대로 필요로 했고, 다시 쓰면 이 자리가 적대적 검증으로 쌓은 것을 다시 밟는다 —
+    // 좌표 묶기(NaN·무한대), gutter 거르기, 세로 clamp, 행 → 원본 줄, 줄 안 걸음. 그 근거는 전부
+    // 그 파일로 옮겼다.
+    //
+    // **이 함수가 남기는 것은 두 가지뿐이다**: ⒜ 굳힌 값을 모아 넘기고 ⒝ 줄 안 byte 를 **문서
+    // offset** 으로 바꾼다. ⒝ 는 문서 모델(session)을 알아야 해서 chrome 이 못 한다.
     const geom = term.rt.editor_hit_geom;
-    const cell_h: i64 = @intCast(geom.cell_h_px);
-
-    // **캐스트 전에 묶는다.** `@intFromFloat`는 표현 불가능한 값(NaN·무한대·i64 범위 밖)에서
-    // illegal behavior이고 안전 빌드에서 죽는다 — 이 함수는 계약상 *"드래그가 pane을 벗어나는 것은
-    // 정상"*인 자리라 극단값이 오는 것을 막을 수 없고, 어차피 아래에서 clamp한다.
-    const px_limit: f64 = 1 << 30;
-    const clamped_x: f64 = if (std.math.isNan(x_px)) 0 else @max(-px_limit, @min(px_limit, x_px));
-    const clamped_y: f64 = if (std.math.isNan(y_px)) 0 else @max(-px_limit, @min(px_limit, y_px));
-    const rel_x_raw: i64 = @as(i64, @intFromFloat(clamped_x)) - @as(i64, geom.body_x);
-    const rel_y: i64 = @as(i64, @intFromFloat(clamped_y)) - @as(i64, geom.body_y);
-
-    const content_left_px: i64 = @intCast(geom.content_left_px);
-    if (rel_x_raw < content_left_px) return null; // gutter — 이 좌표계가 받지 않는다
-    // **본문 오른쪽 밖을 여기서 묶지 않는다.** 결정표의 *"행 끝 너머 → 그 행의 끝"*을 실제로 지키는
-    // 것은 `byteAtPoint`의 `next_col > row_end_col` break다(`content.zig`). 여기서 한 번 더 묶어도
-    // 답이 안 바뀐다 — 실측: 랩 끔·500바이트 줄·`content_width=89`에서 사각 밖 +500px 클릭이 clamp
-    // 유무와 무관하게 **89**를 냈다(11차 적대적 검증. 그 clamp를 지운 뮤턴트를 판정자 열셋가 하나도
-    // 못 잡았고, 그것이 죽은 코드라는 증거였다).
-
-    // 세로는 clamp한다(위 doc). 행이 음수면 첫 행, 넘치면 마지막 행.
-    const row_i: usize = if (rel_y < 0) 0 else blk: {
-        const r: usize = @intCast(@divFloor(rel_y, cell_h));
-        break :blk @min(r, rows_len - 1);
-    };
-    const v = term.rt.editor_hit_rows[row_i];
-    // (초판에 있던 `v.line >= editorLines(term).len` 가드는 **축이 달라 아무것도 막지 못했다** —
-    //  `v.line`은 상대 인덱스이고 그 배열은 절대 인덱스다. 아래 ③이 `visible_idx`로 제대로 막는다.)
-
-    // ③ 보이는 줄 → 원본 논리 줄은 **렌더 시점에 이미 풀렸다**(`storeHitRows`). 여기서 다시 풀면
-    // `editor_first_line`·`editor_visible_numbers`를 live로 읽게 되고, 그 둘은 프레임 사이에 바뀐다
-    // (스크롤·접힘 토글이 `metal_dirty`만 세운다) — 실측으로 접힘 뒤 클릭이 36줄 어긋났다.
-    const source_line: usize = term.rt.editor_hit_lines[row_i];
-    if (source_line >= term.rt.editor_lines.len) return null;
-
-    // ④ 조각·열·칸 안 픽셀 → 줄 안 byte.
-    const text = term.rt.editor_lines[source_line];
-    // **렌더가 그 프레임에 실제로 쓴 값을 쓴다**(`editor_hit_geom.tab_width` — 단일 출처를 스냅숏으로
-    // 받는다). 여기서 다른 값을 쓰면 클릭이 화면과 어긋난다: 탭 폭이 곧 열 계산이라 한 칸만 달라도
-    // 커서가 글자에서 밀린다.
-    const tab_w: u16 = geom.tab_width;
-    const off_in_line = chrome_editor.content.byteAtPoint(
-        text,
-        tab_w,
-        @min(v.start_byte, text.len),
-        v.start_byte_col,
-        v.start_col,
-        geom.content_width,
-        // **여기 clamp가 없다.** 11차는 이 캐스트를 묶었는데 그 근거(*"`body_x`가 i32라 합이 i32를
-        // 넘을 수 있다"*)가 **거짓이었다** — 식은 뺄셈이고 `body_x`는 `SplitRect.x: u32`에서 오므로
-        // 항상 `≥ 0`이다. 그래서 `rel_x_raw ≤ px_limit = 2^30`이고 여기서 뺄셈이 그것을 더 키우지
-        // 못한다(위 gutter 가드가 하한도 세웠다). 실측으로 극단 입력 36발(±1e300·±inf·NaN·2^40)에서
-        // 죽지 않고, clamp를 지운 뮤턴트를 판정자 15개가 하나도 못 잡았다(12차 적대적 검증).
-        @intCast(rel_x_raw - content_left_px),
-        geom.cell_w_px,
-    );
+    const p = chrome_editor.hit.bodyPoint(
+        .{
+            .body_x = geom.body_x,
+            .body_y = geom.body_y,
+            .content_left_px = geom.content_left_px,
+            .content_width = geom.content_width,
+            .cell_w_px = geom.cell_w_px,
+            .cell_h_px = geom.cell_h_px,
+            .tab_width = geom.tab_width,
+        },
+        term.rt.editor_hit_rows[0..rows_len],
+        term.rt.editor_hit_lines[0..rows_len],
+        term.rt.editor_lines,
+        x_px,
+        y_px,
+    ) orelse return null;
 
     // ⑤ 줄 안 byte → 문서 offset. `Selection`이 문서 전체 offset을 요구한다.
     const doc = term.rt.editor_doc orelse return null;
-    const line = doc.file.lines.line(source_line) orelse return null;
+    const line = doc.file.lines.line(p.line) orelse return null;
     // **묶지 않고 단언한다.** `editor_lines[i]`는 `lineText(i) = bytes[start..contentEnd()]`이므로
     // `text.len == contentEnd() - start`가 항등이고, `byteAtPoint`의 모든 반환 경로가 `≤ text.len`
     // 이다. 묶으면 그 항등이 깨져도 조용히 다른 답을 내므로, 깨지는 순간 죽는 편이 낫다.
-    std.debug.assert(off_in_line <= line.contentEnd() - line.start);
-    return line.start + off_in_line;
+    std.debug.assert(p.byte_in_line <= line.contentEnd() - line.start);
+    return line.start + p.byte_in_line;
 }
 
 /// 상태바가 보여 줄 **커서 위치**(줄:열). 선택이 없으면 `null`.

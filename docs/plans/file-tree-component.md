@@ -85,7 +85,7 @@ flowchart TD
 
 | 항목 | 현행 | 목표 | 근거 |
 | --- | --- | --- | --- |
-| 라벨 | 등폭 14pt(터미널 `font.size` 종속) | **비례 14pt 목록 전용 role** | 사용자 결정. 기존 role을 재사용하지 않는 이유는 아래 박스 |
+| 라벨 | 등폭 14pt(터미널 `font.size` 종속) | **새 role `list_row`** — 14pt / line 20 / regular | 사용자 결정. 기존 role을 재사용하지 않는 이유는 아래 박스 |
 | 행 높이 | 셀 높이(기본 ~19px @1x) | **26px** 상당 logical pt | 아이콘 16px + 위아래 여백이 들어가는 최소치. 넉넉한 30px는 한 화면 행 수가 약 2/3로 줄어 기각(사용자 선택) |
 | 아이콘 | 16px(2칸 — PR #2552) | 16px 유지 | 이미 뷰 바·사이드바와 같다 |
 | 들여쓰기 | 2칸(폰트 종속) | **14px/depth + 가이드 선** | depth 축이 선으로 보여야 깊은 트리에서 부모를 눈으로 따라갈 수 있다 |
@@ -94,11 +94,31 @@ flowchart TD
 | dirty/conflict | 셀 열(`cols-2`/`cols-4`) | 우측 고정 슬롯(px) | 칸 기준이면 폰트에 따라 자리가 흔들린다 |
 | disclosure | ASCII `>`/`v` | chevron 아이콘 | 나머지가 전부 아이콘인데 여기만 글자다 |
 
-> **기존 typography role을 그대로 쓰지 않는 이유.** `chrome/ui/typography.zig`의 `body`는 **13pt**이고,
+> **왜 기존 role을 안 쓰고 role을 하나 더 만드는가.** `chrome/ui/typography.zig`의 `body`는 **13pt**이고,
 > 그 표에는 *"사용자 보고(2026-08-05): 도크 텍스트가 같은 화면의 터미널 글자보다 눈에 띄게 컸다 … 두
-> 단계 낮춘다"* 라는 이력이 붙어 있다. 지금 요청은 반대 방향이므로 **그 결정을 뒤집지 않고** 목록 행
-> 전용 role을 더한다. 한 표에서 값을 올리면 도크 헤더·카드·세팅까지 같이 커져 2026-08-05 보고가
-> 재현된다.
+> 단계 낮춘다"* 라는 이력이 붙어 있다. 지금 요청은 반대 방향이다. `body`를 14pt로 올리면 그 값을 쓰는
+> 자리가 전부 따라 커져 **2026-08-05 보고가 재현된다** — 그래서 값을 올리는 길은 닫혀 있다.
+>
+> **추가하는 것 자체는 이 표가 하라는 일이다.** 이 표는 "크기 목록"이 아니라 **semantic role의 위계**이고
+> (헤더 주석: *"Chrome component는 semantic role만 이름 짓고, 실제 face·point size는 platform text adapter가
+> 해석한다"*), 지금 표에 **14pt regular 자리가 비어 있다** — 14pt는 `group_heading`(semibold)과
+> `card_heading`(semibold)뿐이라 "훑어 읽는 목록 행"에 맞는 무게가 없다. 없는 위계를 채우는 것이지
+> 예외를 만드는 것이 아니다.
+>
+> | | point / line / weight | 성격 |
+> | --- | --- | --- |
+> | `card_heading`(기존) | 14 / 20 / semibold | 카드의 **제목** |
+> | **`list_row`(추가)** | **14 / 20 / regular** | 목록의 **한 항목 라벨** — 훑어 읽는 본문 |
+> | `body`(기존) | 13 / 18 / regular | 문단·설명 본문 |
+>
+> line 20은 행 높이 26px과 짝이다(위아래 3px). `card_heading`과 같은 line box를 쓰므로 제목 옆에 놓여도
+> baseline이 어긋나지 않는다.
+>
+> **규율 둘.** ⑴ 이름을 `file_tree_row`처럼 **위젯 이름으로 짓지 않는다** — 그러면 다음 목록이 또 role을
+> 만들고 표가 위젯 목록이 된다. `list_row`는 성격의 이름이다. ⑵ **기존 목록을 자동으로 갈아끼우지
+> 않는다.** 소스 컨트롤 파일 행·AI 세션 목록은 지금 `control`(13pt medium)·`metadata`(12pt)를 쓰는데,
+> 그 자리를 `list_row`로 옮기는 것은 **그 화면들의 크기가 커지는 별개 결정**이다. 필요하면 그때 각
+> 소유 문서에서 판단한다.
 
 ## 4. 단계
 
@@ -109,6 +129,8 @@ flowchart TD
 - `src/chrome/components/file_tree/{types,ids,build,view}.zig` 신설. Session Dock·SCM Dock과 같은
   4파일 구조(`types`=platform-neutral DTO·`ids`=노드/의도 식별자·`build`=geometry·action 투영·
   `view`=paint 방출).
+- `chrome/ui/typography.zig`에 `list_row`(14 / 20 / regular)를 더한다(§3 박스). 기존 값은 하나도
+  바꾸지 않으므로 다른 화면은 한 픽셀도 안 움직인다 — 그 사실을 role 표 테스트가 못 박는다.
 - `src/platform/macos/app_session/file_tree_dock.zig` 신설 — `project → props → build → view → paint`.
   `collectScmDock`과 **같은 순서**를 쓴다. 가상화 창은 기존 `fileTreeDrawWindow`가 그대로 준다.
 - 행 높이 출처를 `cell_height_px` → 컴포넌트 `Metrics`로 바꾼다. 바꿀 자리는 **셋뿐**이다

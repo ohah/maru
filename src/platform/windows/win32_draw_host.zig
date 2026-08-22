@@ -238,26 +238,45 @@ pub const Host = struct {
         return native.len;
     }
 
+    /// 이번 프레임의 창 이벤트. **스왑체인 크기 맞추기는 여기서 한다** — 그것을 호출자마다
+    /// 되풀이하면 하나가 빼먹는다(형제 스모크 셋 중 하나가 실제로 빼먹어 크기 변경 뒤 표현이
+    /// 깨졌다). 나머지는 그대로 넘겨 **표면이 자기 입력을 해석**하게 한다.
+    pub fn poll(self: *Host) ![]const win32_window.WindowEvent {
+        const events = self.window.poll();
+        for (events) |ev| switch (ev) {
+            .resized => |r| try self.present.resize(r.width_px, r.height_px),
+            else => {},
+        };
+        return events;
+    }
+
+    /// 창을 닫으라는 신호가 왔는가. `poll` 이 준 이벤트에서 `close_requested` 를 본 것과 같은 뜻이다.
+    pub fn quitting(self: *const Host) bool {
+        return self.window.quit_requested;
+    }
+
+    /// 셀 배열 한 벌을 한 프레임 그린다. 표현 간격(16ms)도 여기서 든다 — 표면마다 달라질 이유가 없다.
+    pub fn drawFrame(self: *Host, cells: []const d3d11_cells.Cell, clear_argb: u32) !void {
+        try self.present.beginFrame(d3d11_present.clearColorFromArgb(clear_argb));
+        try self.pipeline.draw(cells, self.present.width_px, self.present.height_px);
+        try self.present.present(false);
+        _ = usleep(16_000);
+    }
+
     /// 같은 셀 배열을 `frames` 번 표현한다. 창이 닫히거나 종료를 요청하면 일찍 끝난다.
     /// **실제로 표현한 프레임 수**를 준다.
     ///
-    /// 셀을 다시 만들지 않으므로 창을 키워도 행이 더 보이지는 않는다 — 스모크의 한계이지 잘못
-    /// 그리는 것이 아니다. 다만 **스왑체인은 따라간다**(형제 스모크 셋 중 하나가 이것을 빼먹어
-    /// 크기 변경 뒤 표현이 깨졌다).
+    /// 셀을 다시 만들지 않으므로 창을 키워도 행이 더 보이지는 않는다 — 정적 스모크의 한계이지 잘못
+    /// 그리는 것이 아니다. **입력에 반응해야 하는 표면은 `poll`·`drawFrame` 으로 자기 루프를 돈다.**
     pub fn presentLoop(self: *Host, cells: []const d3d11_cells.Cell, clear_argb: u32, frames: usize) !usize {
-        const clear = d3d11_present.clearColorFromArgb(clear_argb);
         var close_requested = false;
         var n: usize = 0;
-        while (n < frames and !self.window.quit_requested and !close_requested) : (n += 1) {
-            for (self.window.poll()) |ev| switch (ev) {
+        while (n < frames and !self.quitting() and !close_requested) : (n += 1) {
+            for (try self.poll()) |ev| switch (ev) {
                 .close_requested => close_requested = true,
-                .resized => |r| try self.present.resize(r.width_px, r.height_px),
                 else => {},
             };
-            try self.present.beginFrame(clear);
-            try self.pipeline.draw(cells, self.present.width_px, self.present.height_px);
-            try self.present.present(false);
-            _ = usleep(16_000);
+            try self.drawFrame(cells, clear_argb);
         }
         return n;
     }

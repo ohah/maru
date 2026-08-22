@@ -3496,14 +3496,15 @@ test "PTY 안내는 백엔드가 있는 호스트에 새지 않는다" {
     // 동어반복이라 아무것도 못 잡는다.
 }
 
-/// `maru win32-editor-draw-smoke` — W8.3⒜. **중립 편집기 뷰가 Windows 화면에 뜬다.**
+/// `maru win32-editor-draw-smoke` — W8.3⒜⒝⒞1. **중립 편집기 뷰가 Windows 화면에 뜨고 굴러간다.**
 ///
 /// §2m.6 이 파일 트리에서 세운 규율 그대로다: fixture 를 만들지 않고 **저장소 자신의 소스**를 연다.
 /// 화면에 뜨는 것이 진짜 코드라야 "그럴듯한 그림" 과 "실제로 도는 것" 이 갈린다.
 ///
 /// **중립 조각을 그대로 쓴다.** `editor_view` 는 이미 플랫폼 무관이고(`src/chrome/components/`),
 /// ops → `DrawList` 낮추기도 CoreText 를 안 부른다(본문 참조 0 회 — §2m.6 과 같은 방식으로 쟀다).
-/// 그러니 Windows 전용으로 새로 짜는 렌더 코드가 없다. 창부터 표현까지는 `win32_draw_host` 가 맡는다.
+/// 스크롤 상한도 중립이다(`editor_view.viewport.clampFirstRow`). 창부터 표현까지는
+/// `win32_draw_host` 가 맡는다.
 ///
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.
 fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
@@ -3550,10 +3551,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         }
     }
 
-    // ── 줄 → ops ─────────────────────────────────────────────────────────────────────────────
-    //
-    // **제품과 같은 함수**(`diff_frame.buildSide`)를 부른다. macOS `buildPaneOps` 가 부르는 것과
-    // 같은 자리라, 여기서 나오는 배치가 제품 편집기를 예고한다.
+    // ── scratch ──────────────────────────────────────────────────────────────────────────────
     const ops = try allocator.alloc(maru.chrome.draw.Op, 4096);
     defer allocator.free(ops);
     const text_bytes = try allocator.alloc(u8, 256 * 1024);
@@ -3586,15 +3584,13 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     //
     // **격자 크기(`cols*cell_w`)로 잡으면 안 된다.** 창은 셀 크기의 배수가 아니라 오른쪽·아래에
     // 자투리가 남고(884×581 vs 격자 882×570), 그러면 **배경 quad 가 그 띠를 안 덮는다.** clear
-    // color 가 배경색과 같아서 안 보였다 — clear 를 초록으로 바꾼 대조군에서 정확히 그만큼인
-    // 16,656 px 이 초록으로 남아 드러났다.
+    // color 가 배경색과 같아서 안 보였다 — 초록 대조군에서 정확히 그만큼인 16,656 px 이 드러났다.
     const view: maru.chrome.draw.Rect = .{
         .x = 0,
         .y = 0,
         .w = host.initial.width_px,
         .h = host.initial.height_px,
     };
-    // **내용은 한 겹 들어가고 배경은 전체를 덮는다** — `buildPaneOps` 의 계약 그대로(§4.1b).
     const inset: i32 = @intCast(editor_view.frame.content_inset_px);
     const inner: maru.chrome.draw.Rect = .{
         .x = 0,
@@ -3602,31 +3598,8 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         .w = view.w -| editor_view.frame.content_inset_px * 2,
         .h = view.h -| editor_view.frame.content_inset_px * 2,
     };
-    const written = editor_view.diff_frame.buildSide(
-        .{ .lines = lines.items, .total_lines = lines.items.len },
-        .{
-            .first_line = 0,
-            .wrap = false,
-            .tab_width = 4,
-            .cell_w_px = @intCast(cell_w),
-            .cell_h_px = @intCast(cell_h),
-            .font_px = @intCast(cell_h),
-        },
-        inner,
-        // **배경은 안쪽 사각보다 사방 `inset` 만큼 넓다.** 제품은 내용을 pane 원점 + inset 에 놓고
-        // 배경을 pane 원점에 놓아 딱 맞는데, 스모크는 내용을 창 (0,0) 에 놓으므로 배경이 음수로
-        // 시작하는 만큼 폭·높이도 늘려야 오른쪽·아래가 안 빈다.
-        //
-        // 실측으로 걸렸다: clear 를 초록으로 바꾼 대조군에서 `884×581 − 880×577 = 5,844` px 이
-        // 초록으로 남았다. clear color 가 배경색과 같아서 눈으로는 안 보이던 자리다.
-        .{ .x = -inset, .y = -inset, .w = view.w + editor_view.frame.content_inset_px * 2, .h = view.h + editor_view.frame.content_inset_px * 2 },
-        scratch,
-    );
 
-    // ── ops → DrawList ───────────────────────────────────────────────────────────────────────
-    //
-    // **색은 리터럴이다**(위 doc). 골든이 아니라 미리보기지만, config 가 끼면 "무엇이 판정을 바꿨나" 가
-    // 흐려지는 것은 같다.
+    // **색은 리터럴이다**(위 doc).
     const tokens = maru.chrome.Tokens.rich(.{
         .diff_added = .{ .r = 64, .g = 160, .b = 64 },
         .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
@@ -3641,136 +3614,253 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         .terminal_background = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
         .accent = .{ .r = 20, .g = 120, .b = 255 },
     });
-    // **낮추기가 무엇을 버리는지 센다.** `buildTextDrawList` 는 이름 그대로 **글자만** 셀로 만든다.
-    // 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을 못 본다
-    // (아래 보고의 `ops_dropped` — 이 스모크를 쓰면서 그렇게 한 번 넘길 뻔했다).
-    var ops_text: usize = 0;
-    var ops_fill: usize = 0;
-    var ops_dropped: usize = 0;
-    for (ops[0..written.ops]) |op| switch (op) {
-        .text => ops_text += 1,
-        .fill, .quad => ops_fill += 1,
-        .clip => {},
-        else => {
-            ops_dropped += 1;
-        },
-    };
-
-    const draw_list = try chrome_draw_lowering.buildTextDrawList(
-        allocator,
-        ops[0..written.ops],
-        &tokens,
-        cell_w,
-        cell_h,
-        grid.cols,
-        grid.rows,
-    );
-
-    // ── DrawList → 화면 ──────────────────────────────────────────────────────────────────────
-    const prepared = try host.prepare(allocator, draw_list);
-    var frame = prepared.frame;
-    defer frame.deinit(allocator);
-
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
         .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
     };
-    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
-    defer cells.deinit(allocator);
-
-    // ── 단색 사각(배경·스크롤바) ─────────────────────────────────────────────────────────────
-    //
-    // **쿼드 파이프라인이 필요 없었다.** `Cell.rect` 는 셀 격자가 아니라 **화면 픽셀 사각**이라
-    // 8px 스크롤바가 9px 셀 격자에 안 맞아도 그대로 실린다(`d3d11_cells.solidCell` 의 doc).
-    // §2m.7 이 "격자에 안 맞는 것은 쿼드" 라고 적었는데, 실제로 갈리는 기준은 격자 정렬이 아니라
-    // **둥근 모서리·테두리·그라디언트**다 — 이 셰이더에 없는 것들이고, 여기 둘은 그냥 직사각형이다.
-    //
-    // **글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다(§2m.7 실측).
-    for (ops[0..written.ops]) |op| {
-        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
-            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-            // **그라디언트·테두리는 아직 없다.** 이 셰이더에 그 계산이 없으므로 `solid` 가 아닌 것은
-            // 아래에서 세어 남긴다 — 조용히 단색으로 그리면 화면이 틀린 채로 그럴듯해진다.
-            .quad => |q| if (q.gradient == .solid and q.border_role == null)
-                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
-            else
-                continue,
-            else => continue,
-        };
-        // 뷰 밖으로 나간 몫은 잘라 낸다(배경이 `-inset` 에서 시작한다).
-        const x0 = @max(rect.x, 0);
-        const y0 = @max(rect.y, 0);
-        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(view.w)));
-        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(view.h)));
-        if (x1 <= x0 or y1 <= y0) continue;
-        const rgb = tokens.get(role);
-        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
-        try cells.append(allocator, d3d11_cells.solidCell(
-            @floatFromInt(x0),
-            @floatFromInt(y0),
-            @floatFromInt(x1 - x0),
-            @floatFromInt(y1 - y0),
-            d3d11_cells.colorFromArgb(argb),
-            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
-        ));
-    }
-    const fill_cells = cells.items.len;
-
-    _ = try host.appendGlyphCells(allocator, frame, colors, &cells);
 
     // **clear color 를 배경색과 일부러 다르게 둔다.** 같게 두면 배경 quad 가 어디를 안 덮어도
     // 화면이 멀쩡해 보인다 — 실제로 그렇게 두 번 숨었다(격자 크기로 잡은 뷰 16,656 px, 배경
     // 폭을 안 늘린 것 5,844 px). 마젠타면 안 덮인 자리가 캡처에서 **소리를 지른다.**
-    //
-    // 제대로 덮으면 이 색은 한 픽셀도 안 보인다(실측: 0/513,604).
-    const frames = try host.presentLoop(cells.items, 0xFFFF00FF, 120);
+    const clear_argb: u32 = 0xFFFF00FF;
 
-    // ── 판정 ─────────────────────────────────────────────────────────────────────────────────
+    // ── 한 프레임 ────────────────────────────────────────────────────────────────────────────
     //
-    // **행 수가 아니라 내용을 본다**(§2m.6 이 못 박은 규율). 그려진 셀에서 글자를 도로 읽어, 파일의
-    // 그 줄이 실제로 그 행에 있는지 확인한다. 어느 파일이든 성립하는 판정이라 fixture 에 안 묶인다.
-    //
-    // **전제 둘을 적어 둔다 — 깨지면 판정이 거짓으로 실패한다.**
-    // ⒜ `wrap = false` 라 시각 행 N 이 논리 줄 N 이다. 랩을 켜면 그 대응이 깨지므로 이 훑기도
-    //    `visual_map` 을 따라가야 한다.
-    // ⒝ 줄 **안쪽**에 탭이 없다고 본다. 렌더는 탭을 열로 펼치는데 여기 `want` 는 원본이라, 안쪽
-    //    탭이 있으면 접두가 안 맞는다. 지금 여는 파일은 `zig fmt` 가 공백으로 맞춰 둔 것이다.
-    var lines_checked: usize = 0;
-    var lines_matched: usize = 0;
-    {
-        var row_text: std.ArrayList(u8) = .empty;
-        defer row_text.deinit(allocator);
-        var row: u16 = 0;
-        while (row < written.visual_rows and row < lines.items.len) : (row += 1) {
-            const want = std.mem.trim(u8, lines.items[row], " \t");
-            // **짧은 줄은 판정에서 뺀다.** `//!` 처럼 흔한 접두는 아무 행에나 있어서 "맞았다" 가
-            // 아무 말도 아니게 된다. 대조군으로 쟀다 — 한 줄 밀어 그리게 뮤턴트를 심으니 28/28 이
-            // 6/28 로 떨어졌는데, **그 6 이 전부 이 부류**였다. 8 바이트 미만은 안 센다.
-            if (want.len < 8) continue;
-            row_text.clearRetainingCapacity();
-            for (frame.draw_list.cells) |c| {
-                if (c.row != row) continue;
-                var buf: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(@intCast(c.codepoint), &buf) catch continue;
-                try row_text.appendSlice(allocator, buf[0..n]);
-            }
-            lines_checked += 1;
-            // **접두로 본다** — 창이 좁으면 뒤가 잘리고, gutter 가 앞에 붙는다.
-            const head = want[0..@min(want.len, 24)];
-            if (std.mem.indexOf(u8, row_text.items, head) != null) lines_matched += 1;
+    // 스크롤이 붙으면서 프레임이 **여러 번** 만들어진다. 그래서 조립을 한 자리에 모은다 — 두 군데에
+    // 적으면 스크롤한 프레임과 첫 프레임이 조용히 갈린다.
+    const Built = struct {
+        frame: maru.renderer.RenderFrame,
+        written: editor_view.frame.Written,
+        cells: std.ArrayList(d3d11_cells.Cell),
+        ops_text: usize,
+        ops_fill: usize,
+        ops_dropped: usize,
+
+        fn deinit(self: *@This(), a: std.mem.Allocator) void {
+            self.cells.deinit(a);
+            self.frame.deinit(a);
         }
+    };
+    const build = struct {
+        fn go(
+            a: std.mem.Allocator,
+            h: *draw_host.Host,
+            ev: type,
+            first_line: usize,
+            ls: []const []const u8,
+            sc: anytype,
+            op_buf: []maru.chrome.draw.Op,
+            tk: *const maru.chrome.Tokens,
+            cl: maru.renderer.metal_frame.CellColors,
+            v: maru.chrome.draw.Rect,
+            inn: maru.chrome.draw.Rect,
+            ins: i32,
+            cw: u32,
+            ch: u32,
+            g: maru.terminal.Size,
+        ) !Built {
+            const w = ev.diff_frame.buildSide(
+                .{ .lines = ls, .total_lines = ls.len },
+                .{
+                    .first_line = first_line,
+                    .wrap = false,
+                    .tab_width = 4,
+                    .cell_w_px = @intCast(cw),
+                    .cell_h_px = @intCast(ch),
+                    .font_px = @intCast(ch),
+                },
+                inn,
+                // **배경은 안쪽 사각보다 사방 `inset` 만큼 넓다.** 제품은 내용을 pane 원점 + inset 에
+                // 놓고 배경을 pane 원점에 놓아 딱 맞는데, 스모크는 내용을 창 (0,0) 에 놓으므로 배경이
+                // 음수로 시작하는 만큼 폭·높이도 늘려야 오른쪽·아래가 안 빈다(초록 대조군 5,844 px).
+                .{ .x = -ins, .y = -ins, .w = v.w + ev.frame.content_inset_px * 2, .h = v.h + ev.frame.content_inset_px * 2 },
+                sc,
+            );
+
+            // **낮추기가 무엇을 버리는지 센다.** `buildTextDrawList` 는 이름 그대로 **글자만** 셀로
+            // 만든다. 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을
+            // 못 본다(이 스모크를 쓰면서 그렇게 한 번 넘길 뻔했다).
+            var n_text: usize = 0;
+            var n_fill: usize = 0;
+            var n_drop: usize = 0;
+            for (op_buf[0..w.ops]) |op| switch (op) {
+                .text => n_text += 1,
+                .fill, .quad => n_fill += 1,
+                .clip => {},
+                else => n_drop += 1,
+            };
+
+            const dl = try chrome_draw_lowering.buildTextDrawList(a, op_buf[0..w.ops], tk, cw, ch, g.cols, g.rows);
+            const prepared = try h.prepare(a, dl);
+            var built = Built{
+                .frame = prepared.frame,
+                .written = w,
+                .cells = .empty,
+                .ops_text = n_text,
+                .ops_fill = n_fill,
+                .ops_dropped = n_drop,
+            };
+            errdefer built.deinit(a);
+
+            // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
+            for (op_buf[0..w.ops]) |op| {
+                const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+                    .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+                    // **그라디언트·테두리는 아직 없다.** 이 셰이더에 그 계산이 없으므로 `solid` 가
+                    // 아닌 것은 세어서 남긴다 — 조용히 단색으로 그리면 화면이 틀린 채로 그럴듯해진다.
+                    .quad => |q| if (q.gradient == .solid and q.border_role == null)
+                        .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
+                    else
+                        continue,
+                    else => continue,
+                };
+                const x0 = @max(rect.x, 0);
+                const y0 = @max(rect.y, 0);
+                const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(v.w)));
+                const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(v.h)));
+                if (x1 <= x0 or y1 <= y0) continue;
+                const rgb = tk.get(role);
+                const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+                try built.cells.append(a, d3d11_cells.solidCell(
+                    @floatFromInt(x0),
+                    @floatFromInt(y0),
+                    @floatFromInt(x1 - x0),
+                    @floatFromInt(y1 - y0),
+                    d3d11_cells.colorFromArgb(argb),
+                    .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+                ));
+            }
+            _ = try h.appendGlyphCells(a, built.frame, cl, &built.cells);
+            return built;
+        }
+    }.go;
+
+    // **그려진 셀에서 글자를 도로 읽어** 그 행에 파일의 그 줄이 있는지 본다(§2m.6 의 규율).
+    //
+    // **전제 둘 — 깨지면 거짓으로 실패한다.** ⒜ `wrap = false` 라 시각 행 N 이 논리 줄
+    // `first_line + N` 이다 ⒝ 줄 **안쪽**에 탭이 없다(렌더는 탭을 열로 펼치는데 비교 대상은 원본).
+    const judge = struct {
+        fn rows(a: std.mem.Allocator, f: maru.renderer.RenderFrame, ls: []const []const u8, first_line: usize, visible: usize) !struct { checked: usize, matched: usize } {
+            var row_text: std.ArrayList(u8) = .empty;
+            defer row_text.deinit(a);
+            var checked: usize = 0;
+            var matched: usize = 0;
+            var row: u16 = 0;
+            while (row < visible and first_line + row < ls.len) : (row += 1) {
+                const want = std.mem.trim(u8, ls[first_line + row], " \t");
+                // **짧은 줄은 판정에서 뺀다.** `//!` 처럼 흔한 접두는 아무 행에나 있어서 "맞았다" 가
+                // 아무 말도 아니게 된다 — 한 줄 밀어 그리는 뮤턴트가 28/28 에서 6/28 로만 떨어졌고
+                // 그 6 이 전부 이 부류였다.
+                if (want.len < 8) continue;
+                row_text.clearRetainingCapacity();
+                for (f.draw_list.cells) |c| {
+                    if (c.row != row) continue;
+                    var buf: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(@intCast(c.codepoint), &buf) catch continue;
+                    try row_text.appendSlice(a, buf[0..n]);
+                }
+                checked += 1;
+                const head = want[0..@min(want.len, 24)];
+                if (std.mem.indexOf(u8, row_text.items, head) != null) matched += 1;
+            }
+            return .{ .checked = checked, .matched = matched };
+        }
+    }.rows;
+
+    // ── 스크롤 대본 ──────────────────────────────────────────────────────────────────────────
+    //
+    // **사람이 없어도 판정된다.** 실기 휠은 아래 루프가 받지만, 그것만으로는 자동 실행에서 스크롤이
+    // 도는지 알 수 없다 — 대본을 태워 각 단계마다 **보이는 첫 줄이 실제로 그 줄인지** 확인한다.
+    // 상한 두 자리(0 아래, 끝 위)도 함께 민다.
+    var first_line: usize = 0;
+    var script_steps: usize = 0;
+    var script_ok: usize = 0;
+    var clamp_top_ok = false;
+    var clamp_bottom_ok = false;
+    {
+        const total = lines.items.len;
+        for ([_]isize{ 0, 5, 20, -3, 10_000, -10_000 }) |delta| {
+            const before = first_line;
+            const want: usize = if (delta >= 0)
+                editor_view.viewport.clampFirstRow(before + @as(usize, @intCast(delta)), total, grid.rows)
+            else blk: {
+                const back: usize = @intCast(-delta);
+                break :blk editor_view.viewport.clampFirstRow(before -| back, total, grid.rows);
+            };
+            first_line = want;
+
+            var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+            defer built.deinit(allocator);
+            const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
+            script_steps += 1;
+            if (r.checked > 0 and r.matched == r.checked) script_ok += 1;
+            // **상한은 내용으로 잰다.** `first_line == maxFirstRow(..)` 로 재면 `clampFirstRow` 를
+            // `maxFirstRow` 로 확인하는 셈이라 동어반복이다 — 둘 다 같은 모듈의 같은 계산에서 온다.
+            // 대신 "끝까지 내리면 **마지막 줄이 화면에 있다**" 를 본다: 그리는 쪽과 세는 쪽이
+            // 갈리면 여기서 걸린다.
+            if (delta == -10_000) clamp_top_ok = (first_line == 0 and r.checked > 0 and r.matched == r.checked);
+            if (delta == 10_000) clamp_bottom_ok =
+                (first_line + built.written.visual_rows >= total and r.checked > 0 and r.matched == r.checked);
+        }
+        first_line = 0;
     }
 
-    const stats = maru.renderer.renderFrameStats(frame, host.renderer_state.atlas.entryCount());
+    // ── 실기 루프 ────────────────────────────────────────────────────────────────────────────
+    var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+    defer built.deinit(allocator);
+    var frames: usize = 0;
+    var wheel_events: usize = 0;
+    var closed = false;
+    // **프레임 수에 근거를 둔다** — build step 이 반복해서 도는데 그때마다 창이 오래 차지하면 안 된다.
+    // 120 프레임(약 3.5 초)이면 반복 표현·크기 변경을 보기에도 스크린샷을 잡기에도 족하다.
+    while (frames < 120 and !host.quitting() and !closed) : (frames += 1) {
+        var scroll: isize = 0;
+        for (try host.poll()) |ev| switch (ev) {
+            .close_requested => closed = true,
+            .mouse => |m| if (m.kind == .wheel) {
+                wheel_events += 1;
+                // 한 노치(120)에 세 줄 — Windows 기본 관례다. 정밀 터치패드는 120 미만이 온다.
+                scroll -= @divTrunc(m.wheel_delta * 3, 120);
+            },
+            .key => |k| switch (k.key) {
+                .page_down => scroll += @intCast(grid.rows),
+                .page_up => scroll -= @intCast(grid.rows),
+                .arrow_down => scroll += 1,
+                .arrow_up => scroll -= 1,
+                .home => scroll = -@as(isize, @intCast(lines.items.len)),
+                .end => scroll = @intCast(lines.items.len),
+                else => {},
+            },
+            else => {},
+        };
+        if (scroll != 0) {
+            const total = lines.items.len;
+            const next = if (scroll > 0)
+                editor_view.viewport.clampFirstRow(first_line + @as(usize, @intCast(scroll)), total, grid.rows)
+            else
+                editor_view.viewport.clampFirstRow(first_line -| @as(usize, @intCast(-scroll)), total, grid.rows);
+            if (next != first_line) {
+                first_line = next;
+                const next_built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+                built.deinit(allocator);
+                built = next_built;
+            }
+        }
+        try host.drawFrame(built.cells.items, clear_argb);
+    }
+
+    const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
+    const stats = maru.renderer.renderFrameStats(built.frame, host.renderer_state.atlas.entryCount());
     try stdout.writeAll("maru.win32-editor-draw-smoke.v1\n");
     try stdout.print("doc={s} lines={d}\n", .{ doc_path, lines.items.len });
     try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
-    try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ written.ops, ops_text, ops_fill, ops_dropped });
-    try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ written.visual_rows, written.total_visual_rows });
-    try stdout.print("fill_cells={d}\n", .{fill_cells});
-    try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ cells.items.len, d3d11_cells.cellsDigest(cells.items), prepared.region_uploads });
+    try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ built.written.ops, built.ops_text, built.ops_fill, built.ops_dropped });
+    try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ built.written.visual_rows, built.written.total_visual_rows });
+    try stdout.print("scroll_script={d}/{d} clamp_top={} clamp_bottom={}\n", .{ script_ok, script_steps, clamp_top_ok, clamp_bottom_ok });
+    try stdout.print("first_line={d} wheel_events={d}\n", .{ first_line, wheel_events });
+    try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });
     try stdout.print("frames_presented={d}\n", .{frames});
-    try stdout.print("lines_matched={d}/{d}\n", .{ lines_matched, lines_checked });
+    try stdout.print("lines_matched={d}/{d}\n", .{ r.matched, r.checked });
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
     try stdout.flush();
 }

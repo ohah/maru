@@ -1003,6 +1003,10 @@ pub fn build(b: *std.Build) void {
         "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
         "skip-in-aggregate-v1",
     );
+    run_macos_app_host_abi_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP",
+        "skip-in-aggregate-v1",
+    );
     // CR6a-2 real-host fixture는 별도 exact filtered artifact에서 fresh process-global owner graph로 실행한다.
     // app-host aggregate에서 중복 실행하면 뒤 CR0b owner fixture의 canonical publication port를 바꾸므로 제외한다.
     run_macos_app_host_abi_tests.setEnvironmentVariable(
@@ -1088,6 +1092,46 @@ pub fn build(b: *std.Build) void {
     const run_macos_attach_resolver_fresh_tests = b.addRunArtifact(macos_attach_resolver_fresh_tests);
     run_macos_attach_resolver_fresh_tests.addArg("--maru-expect-tests=1");
     run_macos_attach_resolver_fresh_tests.setCwd(b.path("."));
+
+    const macos_upgrade_multifd_fresh_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"forked daemon serves ephemeral inventory while canonical GUI stays connected"},
+    });
+    const run_macos_upgrade_multifd_fresh_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+    run_macos_upgrade_multifd_fresh_tests.addArg(
+        "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP=fresh-process-v1",
+    );
+    run_macos_upgrade_multifd_fresh_tests.addPrefixedArtifactArg(
+        "MARU_SESSION_HOST_PRODUCT_EXE=",
+        exe,
+    );
+    run_macos_upgrade_multifd_fresh_tests.addArtifactArg(macos_upgrade_multifd_fresh_tests);
+    run_macos_upgrade_multifd_fresh_tests.addArg("--maru-expect-tests=1");
+    run_macos_upgrade_multifd_fresh_tests.expectExitCode(0);
+    run_macos_upgrade_multifd_fresh_tests.setCwd(b.path("."));
+    const run_macos_upgrade_multifd_standalone = b.addSystemCommand(&.{"/usr/bin/env"});
+    run_macos_upgrade_multifd_standalone.addArg(
+        "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP=fresh-process-v1",
+    );
+    run_macos_upgrade_multifd_standalone.addPrefixedArtifactArg(
+        "MARU_SESSION_HOST_PRODUCT_EXE=",
+        exe,
+    );
+    run_macos_upgrade_multifd_standalone.addArtifactArg(macos_upgrade_multifd_fresh_tests);
+    run_macos_upgrade_multifd_standalone.addArg("--maru-expect-tests=1");
+    run_macos_upgrade_multifd_standalone.expectExitCode(0);
+    run_macos_upgrade_multifd_standalone.setCwd(b.path("."));
+    const test_macos_upgrade_multifd_fresh_step = b.step(
+        "test-session-host-upgrade-multifd-fresh",
+        "Run the same-PID exec multi-connection host test in one fresh process",
+    );
+    test_macos_upgrade_multifd_fresh_step.dependOn(&run_macos_upgrade_multifd_standalone.step);
 
     const macos_event_release_fresh_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -1208,7 +1252,8 @@ pub fn build(b: *std.Build) void {
     run_macos_external_tty_fresh_tests.step.dependOn(&run_macos_app_host_abi_tests.step);
     run_macos_external_attach_fresh_tests.step.dependOn(&run_macos_external_tty_fresh_tests.step);
     run_macos_attach_resolver_fresh_tests.step.dependOn(&run_macos_external_attach_fresh_tests.step);
-    run_macos_event_release_fresh_tests.step.dependOn(&run_macos_attach_resolver_fresh_tests.step);
+    run_macos_upgrade_multifd_fresh_tests.step.dependOn(&run_macos_attach_resolver_fresh_tests.step);
+    run_macos_event_release_fresh_tests.step.dependOn(&run_macos_upgrade_multifd_fresh_tests.step);
     run_macos_chrome_face_cache_fresh_tests.step.dependOn(&run_macos_event_release_fresh_tests.step);
     test_macos_app_host_abi_step.dependOn(&run_macos_chrome_face_cache_fresh_tests.step);
 
@@ -2070,6 +2115,86 @@ pub fn build(b: *std.Build) void {
         session_host_cr6d_assert.step.dependOn(&run_session_host_cr6d_appkit.step);
         session_host_cr6d_appkit_step.dependOn(&session_host_cr6d_assert.step);
 
+        const session_host_cr6e_recovery_step = b.step(
+            "macos-session-host-cr6e-recovery-baseline",
+            "Measure and validate repeated CR6e-a2 actual-AppKit recovery baseline",
+        );
+        const session_host_cr6e_recovery_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-cr6e-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\" tests/artifacts/perf; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
+                "rm -f zig-out/maru-macos-app/app.summary.txt " ++
+                "tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json",
+        });
+        session_host_cr6e_recovery_fixture.setCwd(b.path("."));
+        const run_session_host_cr6e_recovery = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        run_session_host_cr6e_recovery.setCwd(b.path("."));
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT",
+            b.pathFromRoot("tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
+        run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home/.config/maru/config"),
+        );
+        run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6e_recovery.step.dependOn(&macos_app_bundle.step);
+        run_session_host_cr6e_recovery.step.dependOn(&file_panel_web_build.step);
+        run_session_host_cr6e_recovery.step.dependOn(&session_host_cr6e_recovery_fixture.step);
+
+        const session_host_cr6e_recovery_validator = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-recovery-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6e_recovery_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const session_host_cr6e_recovery_validator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6e_recovery_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_session_host_cr6e_recovery_validator_tests = b.addRunArtifact(
+            session_host_cr6e_recovery_validator_tests,
+        );
+        const run_session_host_cr6e_recovery_validator = b.addRunArtifact(
+            session_host_cr6e_recovery_validator,
+        );
+        run_session_host_cr6e_recovery_validator.addArg(
+            "tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json",
+        );
+        run_session_host_cr6e_recovery_validator.setCwd(b.path("."));
+        run_session_host_cr6e_recovery_validator.step.dependOn(&run_session_host_cr6e_recovery.step);
+        session_host_cr6e_recovery_step.dependOn(&run_session_host_cr6e_recovery_validator.step);
+        session_host_cr6e_recovery_step.dependOn(&run_session_host_cr6e_recovery_validator_tests.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -2906,6 +3031,40 @@ pub fn build(b: *std.Build) void {
     run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
+    const session_host_cr6e_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr6e_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{ "CR6e-a1 경계는", "CR6e-a2 경계는" },
+    });
+    const run_session_host_cr6e_boundary_tests = b.addRunArtifact(session_host_cr6e_boundary_tests);
+    run_session_host_cr6e_boundary_tests.addArg("--maru-expect-tests=2");
+    run_session_host_cr6e_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_cr6e_boundary_tests.step);
+    const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6e-b hard budgets"},
+    });
+    const run_session_host_cr6e_budget_validator_tests = b.addRunArtifact(session_host_cr6e_budget_validator_tests);
+    run_session_host_cr6e_budget_validator_tests.addArg("--maru-expect-tests=1");
+    boundary_step.dependOn(&run_session_host_cr6e_budget_validator_tests.step);
+    const session_host_cr6e_soak_validator_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf/session_host_cr6e_soak_validator.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6e-b soak batch count"},
+    });
+    const run_session_host_cr6e_soak_validator_tests = b.addRunArtifact(session_host_cr6e_soak_validator_tests);
+    run_session_host_cr6e_soak_validator_tests.addArg("--maru-expect-tests=1");
+    boundary_step.dependOn(&run_session_host_cr6e_soak_validator_tests.step);
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
     boundary_step.dependOn(&run_i18n_pinned_language_boundary_tests.step);
@@ -8579,6 +8738,10 @@ pub fn build(b: *std.Build) void {
         "MARU_2C3E_C1_PROOF_AGGREGATE_SKIP",
         "skip-in-aggregate-v1",
     );
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP",
+        "skip-in-aggregate-v1",
+    );
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만
     // product launch smoke를 필수화하도록 root-module introspection 대신
     // 명시적인 test-only marker를 전달한다.
@@ -8833,6 +8996,50 @@ pub fn build(b: *std.Build) void {
         slow_observer_step.dependOn(&run_slow_observer_validator.step);
         slow_observer_step.dependOn(&run_slow_observer_probe_tests.step);
         slow_observer_step.dependOn(&run_slow_observer_e2e_tests.step);
+
+        const cr6e_baseline = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-baseline",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6e_baseline.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{.{ .name = "session_host", .module = slow_observer_session_host_mod }},
+            }),
+        });
+        const run_cr6e_baseline = b.addRunArtifact(cr6e_baseline);
+        run_cr6e_baseline.addArg("tests/artifacts/perf/session-host-cr6e-baseline-macos.json");
+        run_cr6e_baseline.setCwd(b.path("."));
+        run_cr6e_baseline.has_side_effects = true;
+
+        const cr6e_baseline_validator = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-baseline-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6e_baseline_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const cr6e_baseline_validator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6e_baseline_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_cr6e_baseline_validator_tests = b.addRunArtifact(cr6e_baseline_validator_tests);
+        const run_cr6e_baseline_validator = b.addRunArtifact(cr6e_baseline_validator);
+        run_cr6e_baseline_validator.addArg("tests/artifacts/perf/session-host-cr6e-baseline-macos.json");
+        run_cr6e_baseline_validator.setCwd(b.path("."));
+        run_cr6e_baseline_validator.has_side_effects = true;
+        run_cr6e_baseline_validator.step.dependOn(&run_cr6e_baseline.step);
+
+        const cr6e_baseline_step = b.step(
+            "test-session-host-cr6e-baseline-macos",
+            "Measure and validate the CR6e-a1 real stalled-peer transport baseline artifact",
+        );
+        cr6e_baseline_step.dependOn(&run_cr6e_baseline_validator.step);
+        cr6e_baseline_step.dependOn(&run_cr6e_baseline_validator_tests.step);
     }
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);

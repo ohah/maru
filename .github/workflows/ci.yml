@@ -433,12 +433,22 @@ jobs:
             zig-v2-${{ runner.os }}-slow-observer-
       - name: Verify real PTY slow-observer isolation and host RSS
         run: zig build test-session-host-slow-observer-macos
+      - name: Measure CR6e real stalled-peer baseline
+        run: zig build test-session-host-cr6e-baseline-macos
       - name: Upload session-host slow-observer artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: maru-session-host-slow-observer-macos-artifact
           path: tests/artifacts/perf/session-host-slow-observer-macos.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload CR6e stalled-peer baseline artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-session-host-cr6e-baseline-macos-artifact
+          path: tests/artifacts/perf/session-host-cr6e-baseline-macos.json
           if-no-files-found: error
           retention-days: 14
 

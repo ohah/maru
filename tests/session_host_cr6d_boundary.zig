@@ -101,14 +101,30 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
         return error.TestUnexpectedResult;
     try std.testing.expect(restore_view_at < restore_global_at);
     try std.testing.expectEqual(@as(usize, 1), count(swift, "guard CGPreflightPostEventAccess() else"));
+    // The generic smoke deadline must not bypass the product quit state machine while the
+    // CR6d input fixture is still waiting for focus/TCC. Otherwise the fixture reports a
+    // secondary dead runtime and loses the primary timeout reason.
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "self?.expireSmokeTimer()"));
+    const expire_smoke = between(
+        swift,
+        "private func expireSmokeTimer()",
+        "private func failSessionHostRecoverySmoke(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(expire_smoke, "isSessionHostInputContinuitySmokeMode"));
+    try std.testing.expectEqual(@as(usize, 1), count(expire_smoke, "failSessionHostInputSmoke(\"smoke-timeout\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(expire_smoke, "NSApp.terminate(nil)"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "private func sessionHostInputSmokeOwnsGlobalKeyboardFocus("));
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0"));
+    inline for (.{
+        "session_host_input_smoke_app_active=",
+        "session_host_input_smoke_first_responder=",
+        "session_host_input_smoke_frontmost_pid=",
+    }) |field| try std.testing.expectEqual(@as(usize, 1), count(swift, field));
     try std.testing.expectEqual(@as(usize, 2), count(swift, ".post(tap: .cghidEventTap)"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "func MaruCreateCarbonEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "handled = context.handleEvent(event)"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, ".postToPid(pid)"));
     try std.testing.expectEqual(@as(usize, 1), count(harness, "        runInputSourceRestoreHelper("));
-
     const gate = between(
         build,
         "const session_host_cr6d_appkit_step =",

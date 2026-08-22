@@ -2063,6 +2063,22 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   selected와 다른 제3 source이면 사용자 선택을 덮지 않고 실패해야 한다. current exact original, record 소멸, view-local
   source/marked text 복원, actual Quit confirm, runtime 생존, controller/observer 0과 exact artifact/child cleanup을 함께
   검증한다. stalled socket/backoff·soak·성능은 CR6e다.
+  이 gate는 잠금 해제된 interactive WindowServer에서 Maru가 실제 frontmost여야 하며, summary의
+  `session_host_input_smoke_app_active`·`session_host_input_smoke_first_responder`·`session_host_input_smoke_frontmost_pid`가
+  focus 선행조건과 그 뒤의 Accessibility 판정을 분리한다. `frontmost_pid`가 `loginwindow`인 실행은 실제 HID/IME
+  증거가 아니므로 성공으로 세지 않는다.
+- CR6e-a1 transport baseline 행은 자동 reconnect 설정을 배선하지 않은 채 제품 deadline-aware exact-host issuer에 harness-owned 실제
+  Unix stalled peer를 붙인다. accept+hello read 뒤 reply 보류와 transient connect backoff 각각에서 하나의 monotonic absolute
+  deadline, typed failure, attempt/wait 및 timeout 뒤 추가 작업 0, peer/fd/RSS raw sample을 strict-schema artifact로 남긴다.
+  transient backoff는 retry limit 선소진의 `host_gone + attempt=10/wait=9/end<=deadline`과 deadline 선소진의
+  `deadline_exceeded + attempt=N/wait=N/end>=deadline (1<=N<10)`만 허용해 runner scheduling 차이를 계약 위반과 구분한다.
+  write-only observation API의 harness 밖 제품 caller는 0이다. CR6e-a2 recovery baseline 행은 반복 CR6c actual-AppKit의
+  일반 discovery→row→실제 click→remote-visible→Quit confirm timestamp와 매 iteration runtime 생존/controller·observer 0,
+  앱이 되돌려 준 exact iteration identity·iteration별 고유 before/after 캡처와 final child/fd/artifact 0을 별도 strict-schema artifact로 기록한다. CR6e-a1/a2는 숫자 상한이나 장시간 완료를 주장하지
+  않는다. CR6e-b는 같은 runner의 반복 baseline으로 `performance-budget.md`에 환경·표본·RSS/FD/CPU/latency hard
+  cap을 먼저 확정하고, 계약된 long soak에서 deadline 초과·과잉 backoff·marker duplicate·authority/fd/process leak 0과 모든
+  성능 cap을 자동 판정한다. environment mismatch는 skip/pass가 아니라 typed failure다. CR6e-b 전에는 자동 reconnect 제품
+  설정을 배선하지 않는다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

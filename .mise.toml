@@ -157,6 +157,26 @@ run = "zig build macos-session-host-recovery-smoke"
 description = "Run actual AppKit recovered-session IME and OS clipboard continuity smoke"
 run = "zig build macos-session-host-input-continuity-smoke"
 
+[tasks.session-host-cr6e-baseline]
+description = "Measure and validate the CR6e-a1 real stalled-peer transport baseline artifact"
+run = "zig build test-session-host-cr6e-baseline-macos"
+
+[tasks.session-host-cr6e-recovery-baseline]
+description = "Measure and validate the CR6e-a2 repeated actual-AppKit recovery baseline artifact"
+run = "zig build macos-session-host-cr6e-recovery-baseline -Doptimize=ReleaseFast"
+
+[tasks.session-host-cr6e-budget]
+description = "Collect one CR6e transport/recovery pair and enforce the pinned runner hard budgets"
+run = """
+zig build test-session-host-cr6e-baseline-macos
+zig build macos-session-host-cr6e-recovery-baseline -Doptimize=ReleaseFast
+zig run tools/perf/session_host_cr6e_budget_validator.zig -- tests/artifacts/perf/session-host-cr6e-baseline-macos.json tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json
+"""
+
+[tasks.session-host-cr6e-soak]
+description = "Run the CR6e-b 20-batch/100-AppKit-recovery long soak"
+run = "tools/perf/session-host-cr6e-soak.sh"
+
 [tasks.macos-agent-session-archive-smoke]
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"

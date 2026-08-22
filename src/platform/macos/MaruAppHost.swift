@@ -3987,6 +3987,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostRecoverySmokeActiveRemoteObserved = false
     private var sessionHostRecoverySmokeMarkerObserved = false
     private var sessionHostRecoverySmokeCaptureRetries: UInt32 = 0
+    private var sessionHostRecoverySmokeLaunchNs = DispatchTime.now().uptimeNanoseconds
+    private var sessionHostRecoverySmokeRowNs: UInt64 = 0
+    private var sessionHostRecoverySmokeClickNs: UInt64 = 0
+    private var sessionHostRecoverySmokeRemoteVisibleNs: UInt64 = 0
+    private var sessionHostRecoverySmokeSummaryNs: UInt64 = 0
     private var sessionHostInputSmokeStage: UInt32 = 0
     private var sessionHostInputSmokeHistoricalCount: UInt32 = 0
     private var sessionHostInputSmokeImeCount: UInt32 = 0
@@ -4005,6 +4010,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostInputSmokeGlobalSourceRestored = false
     private var sessionHostInputSmokePostEventAccess = false
     private var sessionHostInputSmokeSourceRecordCleared = false
+    private var sessionHostInputSmokeAppActive = false
+    private var sessionHostInputSmokeFirstResponder = false
+    private var sessionHostInputSmokeFrontmostPID: pid_t = 0
     private var sessionHostInputSmokeOriginalPasteboard: [[NSPasteboard.PasteboardType: Data]]?
     private var sessionHostInputSmokePasteboardPrepared = false
     private var sessionHostInputSmokePasteboardRestored = false
@@ -4015,6 +4023,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var isSessionHostInputContinuitySmokeMode: Bool {
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE"] == "1"
+    }
+    private var isSessionHostRecoveryBaselineMode: Bool {
+        isSessionHostRecoverySmokeMode &&
+            ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"] != nil
+    }
+    private var sessionHostRecoveryBaselineIteration: UInt32? {
+        guard isSessionHostRecoveryBaselineMode,
+              let raw = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION"]
+        else { return nil }
+        return UInt32(raw)
     }
     /// 종료 경로 단계별 비용. 종료는 메인 스레드를 동기로 붙잡으므로 어느 단계가 그 시간을 쓰는지 남겨야
     /// 추측 없이 고칠 수 있다. 값은 종료 요약의 `quit_*` 필드로 나간다(docs/macos-app-host-boundary.md).
@@ -4415,8 +4433,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
         if let smokeDuration {
-            smokeTimer = Timer.scheduledTimer(withTimeInterval: Double(smokeDuration) / 1000.0, repeats: false) { _ in
-                NSApp.terminate(nil)
+            smokeTimer = Timer.scheduledTimer(withTimeInterval: Double(smokeDuration) / 1000.0, repeats: false) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.expireSmokeTimer() }
             }
         }
     }
@@ -8678,6 +8696,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
                 return
             }
+            if sessionHostRecoverySmokeRowNs == 0 {
+                sessionHostRecoverySmokeRowNs = DispatchTime.now().uptimeNanoseconds
+            }
             sessionHostRecoverySmokeCaptureRetries = 0
             let centerX = CGFloat(probe.row_x_px) + CGFloat(probe.row_width_px) / 2
             let centerY = CGFloat(probe.row_y_px) + CGFloat(probe.row_height_px) / 2
@@ -8699,6 +8720,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             view.mouseDown(with: down)
             view.mouseUp(with: up)
             sessionHostRecoverySmokeClickDispatched = true
+            sessionHostRecoverySmokeClickNs = DispatchTime.now().uptimeNanoseconds
             sessionHostRecoverySmokeStage = 1
         case 1:
             guard probe.recovered_count == 0, probe.tab_count >= 1,
@@ -8706,6 +8728,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                   probe.marker_present != 0 else { return }
             sessionHostRecoverySmokeRemotePublished = true
             sessionHostRecoverySmokeMarkerPresent = true
+            if sessionHostRecoverySmokeRemoteVisibleNs == 0 {
+                sessionHostRecoverySmokeRemoteVisibleNs = DispatchTime.now().uptimeNanoseconds
+            }
             sessionHostRecoverySmokeAfterCapture = captureSessionHostRecoverySmokeFrame("after", in: surface)
             if !sessionHostRecoverySmokeAfterCapture {
                 sessionHostRecoverySmokeCaptureRetries += 1
@@ -8771,15 +8796,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard isSessionHostRecoverySmokeMode, let renderer = surface.metalRenderer else { return false }
         guard let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
         let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
-        let expectedRoot = isSessionHostInputContinuitySmokeMode
-            ? "session-host-cr6d-home"
-            : "session-host-cr6c-home"
+        let expectedRoot = if isSessionHostInputContinuitySmokeMode {
+            "session-host-cr6d-home"
+        } else if isSessionHostRecoveryBaselineMode {
+            "session-host-cr6e-home"
+        } else {
+            "session-host-cr6c-home"
+        }
         guard root.lastPathComponent == expectedRoot,
               root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
         let dir = root.appendingPathComponent("captures", isDirectory: true)
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
-        let path = dir.appendingPathComponent("session-host-recovery-\(label).ppm").standardizedFileURL
+        let path = dir.appendingPathComponent(
+            "session-host-recovery-\(sessionHostRecoverySmokeCaptureLabel(label)).ppm"
+        ).standardizedFileURL
         guard path.deletingLastPathComponent() == dir else { return false }
         if FileManager.default.fileExists(atPath: path.path) { return true }
         guard maru_metal_renderer_request_test_capture(renderer, path.path) else { return false }
@@ -8788,6 +8819,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             _ = renderTick()
         }
         return FileManager.default.fileExists(atPath: path.path)
+    }
+
+    private func sessionHostRecoverySmokeCaptureLabel(_ label: String) -> String {
+        guard let iteration = sessionHostRecoveryBaselineIteration else { return label }
+        return "\(label)-\(iteration)"
+    }
+
+    /// CR6d may legitimately spend most of its deadline waiting for the user to foreground the
+    /// test window. A generic smoke termination here would bypass the keep-alive detach snapshot
+    /// and replace the primary focus/TCC timeout with a misleading dead-runtime failure.
+    private func expireSmokeTimer() {
+        if isSessionHostInputContinuitySmokeMode, sessionHostInputSmokeStage < 4 {
+            failSessionHostInputSmoke("smoke-timeout")
+            return
+        }
+        NSApp.terminate(nil)
     }
 
     private func failSessionHostRecoverySmoke(_ reason: String) {
@@ -9115,8 +9162,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: MaruMetalTerminalView) -> Bool {
-        return NSApp.isActive && view.window?.firstResponder === view &&
-            NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()
+        sessionHostInputSmokeAppActive = NSApp.isActive
+        sessionHostInputSmokeFirstResponder = view.window?.firstResponder === view
+        sessionHostInputSmokeFrontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        return sessionHostInputSmokeAppActive && sessionHostInputSmokeFirstResponder &&
+            sessionHostInputSmokeFrontmostPID == getpid()
     }
 
     /// View-local TSM selection must be restored before the system-global source. AppKit may
@@ -10660,6 +10710,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func writeSummary(visibleUI: Bool, abiReady: Bool, smokeDurationMs: UInt32?) {
+        sessionHostRecoverySmokeSummaryNs = DispatchTime.now().uptimeNanoseconds
         // 요약을 쓰는 이 시점이 종료 경로의 사실상 마지막이라, 여기서 total을 확정하면 단계로 나누지 않은
         // 잔여 시간까지 total에 들어온다. 종료가 아닌 경로로 불리면(start==0) total은 0으로 남는다.
         if terminationStartNs != 0 {
@@ -10742,6 +10793,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_recovery_smoke_surface_initialized=\(sessionHostRecoverySmokeSurfaceInitialized)
         session_host_recovery_smoke_active_remote_observed=\(sessionHostRecoverySmokeActiveRemoteObserved)
         session_host_recovery_smoke_marker_observed=\(sessionHostRecoverySmokeMarkerObserved)
+        session_host_recovery_smoke_launch_ns=\(sessionHostRecoverySmokeLaunchNs)
+        session_host_recovery_smoke_row_ns=\(sessionHostRecoverySmokeRowNs)
+        session_host_recovery_smoke_click_ns=\(sessionHostRecoverySmokeClickNs)
+        session_host_recovery_smoke_remote_visible_ns=\(sessionHostRecoverySmokeRemoteVisibleNs)
+        session_host_recovery_smoke_summary_ns=\(sessionHostRecoverySmokeSummaryNs)
+        session_host_recovery_smoke_baseline_iteration=\(sessionHostRecoveryBaselineIteration.map(String.init) ?? "disabled")
         session_host_input_smoke_stage=\(sessionHostInputSmokeStage)
         session_host_input_smoke_historical_count=\(sessionHostInputSmokeHistoricalCount)
         session_host_input_smoke_ime_count=\(sessionHostInputSmokeImeCount)
@@ -10754,6 +10811,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_global_source_restored=\(sessionHostInputSmokeGlobalSourceRestored)
         session_host_input_smoke_post_event_access=\(sessionHostInputSmokePostEventAccess)
         session_host_input_smoke_source_record_cleared=\(sessionHostInputSmokeSourceRecordCleared)
+        session_host_input_smoke_app_active=\(sessionHostInputSmokeAppActive)
+        session_host_input_smoke_first_responder=\(sessionHostInputSmokeFirstResponder)
+        session_host_input_smoke_frontmost_pid=\(sessionHostInputSmokeFrontmostPID)
         session_host_input_smoke_failure=\(sessionHostInputSmokeFailure)
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)

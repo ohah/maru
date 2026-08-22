@@ -19,6 +19,46 @@ const KittyImageStorage = kitty.KittyImageStorage;
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
 
+/// `std.atomic.Value`와 같은 인터페이스의 **비-atomic** 셀. wasm 타깃에서 `ObserverCell`이 이걸로 접힌다.
+/// 오버플로는 `+%`로 감싼다 — 소비자가 `!=`만 보므로(아래) 랩어라운드가 의미를 깨지 않는다.
+fn PlainValue(comptime T: type) type {
+    return struct {
+        raw: T,
+
+        const Self = @This();
+
+        pub fn init(value: T) Self {
+            return .{ .raw = value };
+        }
+
+        pub inline fn fetchAdd(self: *Self, operand: T, comptime _: std.builtin.AtomicOrder) T {
+            const previous = self.raw;
+            self.raw = previous +% operand;
+            return previous;
+        }
+
+        pub inline fn load(self: *const Self, comptime _: std.builtin.AtomicOrder) T {
+            return self.raw;
+        }
+
+        pub inline fn store(self: *Self, value: T, comptime _: std.builtin.AtomicOrder) void {
+            self.raw = value;
+        }
+    };
+}
+
+/// `observer_generation`의 저장 셀. 네이티브는 atomic(리더 스레드가 쓰고 메인이 락 없이 읽는다 —
+/// docs/io-render-threading.md), wasm은 비-atomic이다. 근거는 [wasm 이식성](../../docs/wasm-portability.md):
+/// ⑴ wasm 모듈은 단일 스레드라(SharedArrayBuffer 없이 경쟁이 성립하지 않는다) atomic이 불필요하고,
+/// ⑵ Zig 0.16은 wasm에서 64비트 atomic RMW를 거부한다(`expected 32-bit integer type or smaller`).
+/// **폭을 u32로 좁히지 않는 이유**: 이 값은 `app/event_cursor.zig`의 u64 시퀀스 묶음(bell·clipboard)과
+/// 함께 다니고 그 형제들은 대소 비교를 한다. 타깃마다 폭이 갈리면 그 계약이 깨진다.
+/// 네이티브 기계어는 이 분기 전후로 **완전히 동일**하다(`__TEXT,__text` 해시 일치 — 위 문서 §5).
+const ObserverCell = if (builtin.target.cpu.arch.isWasm())
+    PlainValue(u64)
+else
+    std.atomic.Value(u64);
+
 /// hover가 밑줄을 그릴 링크: 시작 anchor와 (공백 확장까지 반영한) 끝. `end`가 null이면 밑줄은 예전대로
 /// anchor에서 토큰 경계까지 계산한다(OSC 8 명시 링크 등 토큰 경계를 못 잡는 경우).
 pub const HoverLink = struct { anchor: types.SelectionPoint, end: ?types.SelectionPoint };
@@ -476,7 +516,7 @@ pub const TerminalCore = struct {
     title_generation: std.atomic.Value(u32) = .init(0),
     // PTY write가 들어올 때마다 증가하는 observer용 sequence. 화면 tail/title/progress가 그대로인 안정 idle Term은
     // 이 값으로 재직렬화를 건너뛴다. atomic이라 tick이 lock 전에 값만 싸게 확인할 수 있다.
-    observer_generation: std.atomic.Value(u64) = .init(0),
+    observer_generation: ObserverCell = .init(0),
     // 스크롤된(view_offset>0) 상태의 렌더용 합성 버퍼(rows×cols). renderSnapshot이 뷰포트 윈도를
     // 여기에 합성한다. view_offset==0이면 안 쓰므로 lazy 할당한다(스크롤할 때만 메모리 사용).
     viewport_cells: []types.Cell = &.{},

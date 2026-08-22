@@ -218,6 +218,40 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // wasm 터미널 코어. `@maru-term/core` 가 싣는 배포 산출물이다.
+    // **`addLibrary` 를 쓸 수 없다** — wasm 타깃에서 정적 링크는 `.wasm` 모듈이 아니라
+    // `ar` 아카이브(`!<ar`)를 낸다(실측 — docs/wasm-portability.md §5). 실행 파일로 만들고
+    // entry 를 끄는 것이 wasm 모듈을 얻는 경로다.
+    {
+        const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+        // 모듈 루트 하나(§mobile 과 같은 이유). `link_libc` 를 주지 않는다 — freestanding 에 libc 가 없다.
+        const wasm_maru_mod = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        const wasm = b.addExecutable(.{
+            .name = "maru-vt",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/wasm/wasm_bridge.zig"),
+                .target = wasm_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{.{ .name = "maru", .module = wasm_maru_mod }},
+            }),
+        });
+        wasm.entry = .disabled; // `_start` 없음 — 호스트가 export 를 직접 부른다
+        wasm.rdynamic = true; // export 를 심볼 테이블에 남긴다
+        // **iOS Safari 는 선언된 maximum 을 먼저 검증한다.** 2 GB 같은 큰 상한을 선언하면
+        // 실제로 100 MB 만 써도 instantiation 에서 OOM 으로 실패한다(docs/wasm-portability.md §5.2).
+        wasm.max_memory = 64 * 1024 * 1024;
+
+        const wasm_step = b.step("wasm-lib", "Build the WebAssembly terminal core");
+        // 실행할 수 없는 타깃이라 Run step 을 만들지 않는다(check-targets 와 같은 결).
+        wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
+        // 배포 자리로도 복사한다 — 받는 쪽에 Zig 툴체인이 없으므로 바이너리를 커밋한다.
+        wasm_step.dependOn(&b.addInstallFile(wasm.getEmittedBin(), "../packages/core/wasm/maru-vt.wasm").step);
+    }
+
     const app_smoke_step = b.step("app-smoke", "Run the app host frame smoke");
     const app_smoke_cmd = b.addRunArtifact(exe);
     app_smoke_cmd.step.dependOn(b.getInstallStep());

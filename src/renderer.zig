@@ -102,6 +102,13 @@ pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 /// 옮겨 겹치므로, 미등록 in-range를 합성으로 가로채면 그 글리프가 blank가 됐다 → 미등록은 폰트로 폴백한다.
 /// C 게이트는 같은 등록 집합을 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다.
 pub fn isSynthesizedCodepoint(cp: u32) bool {
+    return isTerminalSynthesizedCodepoint(cp) or icon_glyph.isRegisteredIcon(cp);
+}
+
+/// `isSynthesizedCodepoint`에서 **maru chrome 아이콘을 뺀** 부분집합 — 터미널 콘텐츠에 실제로
+/// 나오는 계열만이다. 아이콘은 앱 UI 자산이라 터미널만 쓰는 소비자(wasm 라이브러리)에는 필요가
+/// 없고, 그 등록 테이블이 wasm 을 91 KB 키운다(220 KB → 131 KB, 실측).
+pub fn isTerminalSynthesizedCodepoint(cp: u32) bool {
     return block_glyph.isBlockElement(cp) or
         box_glyph.isBoxDrawing(cp) or
         powerline_glyph.isPowerline(cp) or
@@ -110,8 +117,7 @@ pub fn isSynthesizedCodepoint(cp: u32) bool {
         legacy_wedge_glyph.isLegacyWedge(cp) or
         legacy_wedge_glyph.isCornerTriangle(cp) or
         legacy_smooth_glyph.isSmoothMosaic(cp) or
-        legacy_diagonal_glyph.isLegacyDiagonal(cp) or
-        icon_glyph.isRegisteredIcon(cp);
+        legacy_diagonal_glyph.isLegacyDiagonal(cp);
 }
 
 /// cp가 합성 대상이면 슬롯에 coverage를 채우고 **non_clear 픽셀 수**를, 아니면 null을 돌려준다 — 합성 dispatch의
@@ -119,6 +125,15 @@ pub fn isSynthesizedCodepoint(cp: u32) bool {
 /// 각 모듈 fillCoverage는 시그니처가 같아 분기만 다르다. 슬롯이 cell 크기라 합성은 셀에 꽉 차 이음매 없이
 /// 타일링/연결된다(폰트 글리프는 셀에 안 맞아 gap·흐림·끊김). isSynthesizedCodepoint와 같은 모듈 집합을 덮는다.
 pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) ?u32 {
+    if (synthesizeTerminalGlyph(cp, width_px, height_px, bytes_per_row, pixels)) |n| return n;
+    // maru chrome 아이콘(등록된 cp만 — 미등록 in-range는 폰트 폴백, Nerd Fonts v3 MDI 겹침). fillCoverage가 미등록이면
+    // null을 돌려줘 이 함수의 "합성 아님" 반환과 일치한다.
+    return icon_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+}
+
+/// `synthesizeGlyph`에서 **앱 아이콘을 뺀** 터미널 계열 dispatch. `isTerminalSynthesizedCodepoint`와
+/// 같은 집합을 덮는다 — 둘을 함께 고쳐야 한다.
+pub fn synthesizeTerminalGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize, pixels: []u8) ?u32 {
     if (block_glyph.isBlockElement(cp)) // U+2580~259F eighth/half/full/quadrant·shade
         return block_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     if (box_glyph.isBoxDrawing(cp)) // U+2500~257F 직선·모서리·T·사거리·둥근·이중선·대각선·반선
@@ -135,9 +150,7 @@ pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: us
         return legacy_smooth_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
     if (legacy_diagonal_glyph.isLegacyDiagonal(cp)) // 대각선 stroke·hatch
         return legacy_diagonal_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
-    // maru chrome 아이콘(등록된 cp만 — 미등록 in-range는 폰트 폴백, Nerd Fonts v3 MDI 겹침). fillCoverage가 미등록이면
-    // null을 돌려줘 이 함수의 "합성 아님" 반환과 일치한다 — coverageFor를 한 번만 스캔(isRegisteredIcon 사전 게이트 제거).
-    return icon_glyph.fillCoverage(cp, width_px, height_px, bytes_per_row, pixels);
+    return null;
 }
 
 test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {

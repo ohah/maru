@@ -12,6 +12,7 @@
 //! 세면 랩된 줄에서 번호가 본문과 어긋난다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
 const text_layout = @import("../../text_layout.zig"); // 텍스트 셀 배치 단일 출처(cluster 분절·폭)
@@ -472,7 +473,23 @@ fn splitsWhenStraddling(bytes: []const u8, i: usize) bool {
 /// 모두 그것을 부르는 것과 같은 구조다(코드 표현이 아니라 **구조**를 참고했다).
 pub const Step = struct { next_byte: usize, next_col: u32 };
 
+/// `stepColumn`이 **느린 경로**(디코드 + cluster 경계 + §3.8 훑기 + 폭 조회)를 탄 횟수.
+///
+/// **시간 대신 이것을 센다.** 빠른 경로가 사라지면 5만 줄 소스에서 첫 가로 휠이 28ms에서 501ms가
+/// 되는데, 그 회귀를 wall-clock으로 재면 러너 부하와 구분이 안 된다 — 같은 축의 도크 셰이핑
+/// 게이트가 부하 있는 머신에서 **변경 없이도 6회 중 5회** 빨간불이었고(`performance-budget.md`),
+/// 편집기 쪽 200ms 선도 부하가 크면 229ms로 넘겼다. 알고 싶은 것은 *얼마나 빠른가*가 아니라
+/// *빠른 경로를 탔는가*이고, 그것은 정확히 세진다.
+///
+/// **`is_test`로 묶지 않았다.** 그러면 제품 빌드에서 `void`가 되어 읽는 쪽이 comptime 분기를
+/// 들어야 하는데, 이 두 변수는 `usize` 둘이고 증가는 hot loop 안 `+= 1` 하나다. 실측으로 이
+/// 게이트의 3.3M 걸음에서 시간 차이가 안 보였다(19ms/157ms — 계측 전과 같은 자리).
+pub var slow_path_steps: usize = 0;
+/// `stepColumn`이 불린 총 횟수. **훑은 양**을 재는 축이다 — 셈이 상한에서 멈추는지 여기서 보인다.
+pub var total_steps: usize = 0;
+
 pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
+    total_steps += 1;
     const stop_width: u32 = if (tab_width == 0) 1 else tab_width;
     if (bytes[i] == '\t') return .{ .next_byte = i + 1, .next_col = ((col / stop_width) + 1) * stop_width };
 
@@ -488,6 +505,7 @@ pub fn stepColumn(bytes: []const u8, i: usize, col: u32, tab_width: u16) Step {
         return .{ .next_byte = i + 1, .next_col = col + 1 };
     }
 
+    slow_path_steps += 1;
     const base = text_layout.decodeCodepoint(bytes, i);
     const end = @min(text_layout.clusterEndAfter(bytes, i, base.advance), bytes.len);
 
@@ -2468,4 +2486,26 @@ test "byteAtPoint: 시작 열이 화면 0열보다 뒤여도 죽지 않는다 (s
     // 적대적 검증). `screen_col0`이 줄 전체보다 뒤라 걸음이 한 칸도 못 서고 행 끝으로 나가므로 3이다.
     const off = byteAtPoint("abc", 4, 0, 0, 5, 10, 4, 8);
     try std.testing.expectEqual(@as(usize, 3), off);
+}
+
+// **계측 자신을 먼저 잰다.** 이 카운터가 안 오르면 그것을 쓰는 게이트가 전부 **거짓 초록**이 된다 —
+// 실제로 그런 일이 있었다: 앵커 문자열이 이 파일에 세 번 나오는데 첫 번째(`splitsWhenStraddling`)에
+// 계측이 들어가, 빠른 경로를 막는 뮤턴트에서 시간은 28ms→1825ms로 튀는데 카운터는 0이었다. 그때
+// "카운터로는 못 잡는다"고 결론낼 뻔했다(적대적 검증 규율: 검증 도구부터 검증한다).
+test "stepColumn 계측이 두 경로를 갈라 센다" {
+    const line = "\t\tconst result = try computeSomething(a, b);";
+
+    // 탭 + 출력 가능한 ASCII만 — 빠른 경로로만 걷는다.
+    total_steps = 0;
+    slow_path_steps = 0;
+    _ = lineColumnsUpTo(line, 4, 1000);
+    try std.testing.expectEqual(line.len, total_steps); // 한 바이트에 한 걸음
+    try std.testing.expectEqual(@as(usize, 0), slow_path_steps);
+
+    // 한글 한 글자를 섞으면 그 자리만 느린 경로다 — 위가 "항상 0"이 아니라는 대조군.
+    total_steps = 0;
+    slow_path_steps = 0;
+    _ = lineColumnsUpTo("ab한cd", 4, 1000);
+    try std.testing.expect(slow_path_steps > 0);
+    try std.testing.expect(slow_path_steps < total_steps);
 }

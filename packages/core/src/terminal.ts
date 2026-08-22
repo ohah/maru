@@ -53,6 +53,8 @@ export class Terminal {
   #dom: DomHost | null = null;
   /** cols/rows 를 명시하지 않았을 때만 컨테이너 크기를 따라간다. */
   #resizeObserver: ResizeObserver | null = null;
+  /** 코어가 알려 준 `vt_modes`. DOM 층이 마우스 추적을 동기로 판단한다. */
+  #modes = 0;
   /** Cmd+0 으로 되돌아갈 크기. */
   readonly #baseFontSize: number;
   #disposed = false;
@@ -69,6 +71,11 @@ export class Terminal {
     this.#opts = { ...opts };
     this.#size = { cols: opts.cols ?? DEFAULTS.cols, rows: opts.rows ?? DEFAULTS.rows };
     this.#baseFontSize = opts.fontSize ?? 14;
+  }
+
+  /** 코어의 현재 모드 비트(`vt_modes`). 마우스 추적 판단에 쓴다. */
+  get modes(): number {
+    return this.#modes;
   }
 
   get size(): Size {
@@ -233,6 +240,10 @@ export class Terminal {
   }
 
   #onBackendEvent(e: BackendEvent): void {
+    if (e.type === "modes") {
+      this.#modes = e.value;
+      return;
+    }
     switch (e.type) {
       case "data":
         this.#data.emit(e.bytes);

@@ -25,6 +25,8 @@ export class LocalBackend implements Backend {
   #w: WasmExports;
   /** 입력 버퍼 용량. wasm 이 정한다 — TS 에 상수로 복제하면 어긋난다. */
   readonly #inputCap: number;
+  /** 마지막으로 알린 모드. 바뀔 때만 이벤트를 낸다. */
+  #lastModes = -1;
   /** 화면에 들어가 있는 조합 텍스트의 셀 폭. 되돌릴 때 이만큼만 지운다. */
   #preeditCells = 0;
   #h: number;
@@ -325,6 +327,12 @@ export class LocalBackend implements Backend {
 
   /** 프레임 발행을 마이크로태스크로 접는다 — 한 tick에 write가 여러 번 와도 한 번만 그린다. */
   #markDirty(): void {
+    // 모드가 바뀌면 알린다 — DOM 층이 마우스 추적 여부를 동기로 판단해야 한다.
+    const modes = this.#w.vt_modes(this.#h);
+    if (modes !== this.#lastModes) {
+      this.#lastModes = modes;
+      this.#cb?.({ type: "modes", value: modes });
+    }
     if (this.#flushQueued || this.#disposed) return;
     this.#flushQueued = true;
     queueMicrotask(() => {
@@ -361,6 +369,7 @@ export class LocalBackend implements Backend {
       cellCount: count,
       selection: this.#selection(),
       scroll: { offset: scroll >>> 16, length: scroll & 0xffff },
+      modes: this.#w.vt_modes(this.#h),
     };
   }
 }

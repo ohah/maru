@@ -268,3 +268,46 @@ test("입력 버퍼보다 큰 write 도 온전히 들어간다", async () => {
   expect(rowText(snap.cells, snap.size.cols, snap.size.rows - 1).trimEnd()).toBe("END");
   term.dispose();
 });
+
+test("앱이 마우스를 켜면 모드 비트가 올라온다", async () => {
+  // DOM 층은 이 비트로 '선택'과 '앱에 리포트'를 가른다. 비트가 안 오면 vim `set mouse=a`
+  // 에서 클릭이 커서를 못 옮기고 브라우저 선택만 칠해진다.
+  const term = await makeTerminal();
+  expect(term.modes >> 8).toBe(0);
+  term.write("\x1b[?1000h"); // DECSET 1000 — normal tracking
+  await settle();
+  expect(term.modes >> 8).toBeGreaterThan(0);
+  term.write("\x1b[?1000l");
+  await settle();
+  expect(term.modes >> 8).toBe(0);
+  term.dispose();
+});
+
+test("마우스 리포트가 호스트로 나간다", async () => {
+  const term = await makeTerminal();
+  term.write("\x1b[?1000h\x1b[?1006h"); // tracking + SGR 인코딩
+  await settle();
+  const out: string[] = [];
+  term.onData((b) => out.push(new TextDecoder().decode(b)));
+  term.mouse({ button: 0, col: 5, row: 3, pressed: true, motion: false, mods: 0 });
+  await settle();
+  // SGR: CSI < btn ; col ; row M — 좌표는 1-기반이다.
+  expect(out.join("")).toBe("\x1b[<0;6;4M");
+  term.dispose();
+});
+
+test("포커스 리포트는 그 모드일 때만 나간다", async () => {
+  const term = await makeTerminal();
+  const out: string[] = [];
+  term.onData((b) => out.push(new TextDecoder().decode(b)));
+  term.focus(true); // 모드가 꺼져 있으면 아무것도 안 나간다
+  await settle();
+  expect(out.join("")).toBe("");
+  term.write("\x1b[?1004h");
+  await settle();
+  term.focus(true);
+  term.focus(false);
+  await settle();
+  expect(out.join("")).toBe("\x1b[I\x1b[O");
+  term.dispose();
+});

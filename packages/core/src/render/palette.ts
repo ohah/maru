@@ -2,9 +2,12 @@ import type { Theme } from "../types";
 
 /** xterm 256색 기본 팔레트. 테마가 앞 16칸을 덮을 수 있다. */
 export function buildPalette(theme?: Theme): string[] {
+  // **`src/color.zig` 의 `ansi16` 과 같은 값이어야 한다.** 같은 코어가 낸 `\e[31m` 이 네이티브
+  // maru 와 이 라이브러리에서 다른 색으로 보이면 안 된다. 전에는 VS Code 테이블을 쓰고 있어
+  // 16칸 중 15칸이 달랐다(예: idx1 이 0x800000 vs 0xcd3131).
   const base = [
-    0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666,
-    0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xf5f5f5,
+    0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0, 0x808080,
+    0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
   ];
   const out: string[] = [];
   for (let i = 0; i < 16; i++) out.push(hex(theme?.palette?.[i] ?? base[i]!));

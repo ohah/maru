@@ -137,6 +137,22 @@ export fn glyph_box(cp: u32, w: u32, h: u32) u32 {
     return renderer.synthesizeTerminalGlyph(cp, w, h, w * 4, glyph_buf[0 .. w * h * 4]) orelse 0;
 }
 
+/// 측정 probe 의 폭. **자동 줄바꿈 지점이 곧 측정 한계다** — 텍스트가 이보다 넓으면 wrap 해
+/// 커서가 되감기고 작은 값이 나온다(오류 없이). 512 는 `fit()` 이 낼 수 있는 격자(4K 최대화
+/// ≈457)보다 넓고, 데모의 줄 편집기가 재는 한 줄도 넉넉히 덮는다.
+const probe_cols: u16 = 512;
+/// probe 의 행 수. **wrap 을 이용해 누적한다** — 폭이 한 줄을 넘으면 다음 줄로 넘어가므로
+/// `row * cols + col` 이 총 셀 수다. 1행이면 wrap 이 스크롤로 흡수돼 작은 값이 조용히 나온다.
+/// 512×16 = 8,192 셀까지 정확하고, 그보다 긴 텍스트는 아래에서 overflow 로 알린다.
+const probe_rows: u16 = 16;
+/// `measure_cells` 가 폭을 셀 수 없을 때 돌려주는 값(probe 를 넘겨 wrap 했다).
+const measure_overflow: u32 = 0xffff_ffff;
+
+/// 측정이 실패했음을 나타내는 값. JS 가 이 값을 확인한다.
+export fn measure_overflow_value() u32 {
+    return measure_overflow;
+}
+
 /// 측정 전용 1행 코어(재사용). 텍스트를 쓴 뒤 커서 col이 곧 **셀 폭**이다 — grapheme cluster가
 /// 합쳐지는지(ZWJ·VS16·국기), 동아시아 폭이 2인지가 전부 여기 반영된다.
 var probe: ?*terminal.TerminalCore = null;
@@ -147,7 +163,7 @@ var probe_ambiguous: bool = false;
 export fn measure_cells(len: u32) u32 {
     if (probe == null) {
         const core = alloc.create(terminal.TerminalCore) catch return 0;
-        core.* = terminal.TerminalCore.init(alloc, .{ .cols = 200, .rows = 1 }) catch {
+        core.* = terminal.TerminalCore.init(alloc, .{ .cols = probe_cols, .rows = probe_rows }) catch {
             alloc.destroy(core);
             return 0;
         };
@@ -157,7 +173,10 @@ export fn measure_cells(len: u32) u32 {
     core.ambiguous_wide = probe_ambiguous;
     core.write("\x1b[2J\x1b[H") catch return 0;
     core.write(input_buf[0..@min(len, input_buf.len)]) catch return 0;
-    return core.renderSnapshot().cursor.col;
+    const snap = core.renderSnapshot();
+    // 마지막 행까지 갔으면 스크롤로 앞부분이 사라졌을 수 있다 — 셀 수 없다고 알린다.
+    if (snap.cursor.row + 1 >= probe_rows) return measure_overflow;
+    return @as(u32, snap.cursor.row) * probe_cols + snap.cursor.col;
 }
 
 /// 그 텍스트가 만든 첫 셀의 base codepoint와 grapheme 여부(0=단일, 1=cluster).

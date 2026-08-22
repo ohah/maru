@@ -329,3 +329,28 @@ test("코어가 거절한 리사이즈는 격자를 바꾸지 않는다", async 
   expect(term.size).toEqual({ cols: 40, rows: 10 });
   term.dispose();
 });
+
+test("긴 텍스트도 폭을 정확히 잰다", async () => {
+  // 측정 probe 가 좁으면 wrap 이 스크롤로 흡수돼 실제보다 작은 값이 조용히 나온다.
+  // 데모의 줄 편집기가 그 값으로 CUB 를 보내므로, 틀리면 커서가 프롬프트 한가운데로 떨어진다.
+  const term = await makeTerminal();
+  expect(await term.measureCells("a".repeat(250))).toBe(250);
+  expect(await term.measureCells("a".repeat(600))).toBe(600);
+  expect(await term.measureCells("가".repeat(300))).toBe(600); // 한글은 2셀
+  term.dispose();
+});
+
+test("기본 팔레트가 src/color.zig 의 ansi16 과 같다", async () => {
+  // 같은 코어가 낸 SGR 색이 네이티브와 웹에서 다르면 안 된다. 값은 표준 xterm ansi16 이다.
+  const { buildPalette } = await import("../core/src/render/palette");
+  const p = buildPalette();
+  expect(p[0]).toBe("#000000");
+  expect(p[1]).toBe("#800000"); // VS Code 테이블이면 #cd3131 이 된다
+  expect(p[7]).toBe("#c0c0c0");
+  expect(p[9]).toBe("#ff0000");
+  expect(p[15]).toBe("#ffffff");
+  // 216 큐브와 그레이 램프는 색 계산식이 코어와 같아야 한다.
+  expect(p[16]).toBe("#000000");
+  expect(p[231]).toBe("#ffffff");
+  expect(p[232]).toBe("#080808");
+});

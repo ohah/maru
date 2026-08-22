@@ -27,6 +27,8 @@ export class LocalBackend implements Backend {
   readonly #inputCap: number;
   /** 스냅샷 셀 상한. 격자가 넘으면 아래쪽이 잘린다. */
   readonly #cellsCap: number;
+  /** `measure_cells` 의 '셀 수 없음' 신호. */
+  readonly #measureOverflow: number;
   /** 마지막으로 알린 모드. 바뀔 때만 이벤트를 낸다. */
   #lastModes = -1;
   /** 화면에 들어가 있는 조합 텍스트의 셀 폭. 되돌릴 때 이만큼만 지운다. */
@@ -42,6 +44,7 @@ export class LocalBackend implements Backend {
     this.#w = w;
     this.#inputCap = w.input_cap();
     this.#cellsCap = w.cells_cap();
+    this.#measureOverflow = w.measure_overflow_value() >>> 0;
     this.#h = h;
     this.#size = size;
   }
@@ -264,7 +267,14 @@ export class LocalBackend implements Backend {
   }
 
   #measureSync(text: string): number {
-    return this.#w.measure_cells(this.#stage(encoder.encode(text)));
+    const n = this.#w.measure_cells(this.#stage(encoder.encode(text))) >>> 0;
+    // probe 를 넘겼다 — 폭을 셀 수 없다. 0 으로 접어 호출자가 커서 이동을 시도하지 않게 한다
+    // (틀린 수를 돌려주면 CUB 가 어긋나 커서가 프롬프트 한가운데로 떨어진다).
+    if (n === this.#measureOverflow) {
+      console.warn("maru-term: 측정 한계를 넘는 텍스트 — 폭을 셀 수 없다");
+      return 0;
+    }
+    return n;
   }
 
   // ── 조회 ─────────────────────────────────────────────────

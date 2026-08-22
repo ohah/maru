@@ -21,6 +21,33 @@ VT 파싱·화면 상태·키 인코딩·문자 폭 판정은 **wasm(Zig)**이 �
 
 ## 쓰기
 
+### 바닐라 (프레임워크 없이)
+
+```bash
+npm i @maru/core
+```
+
+```ts
+import { Terminal } from "@maru/core";
+
+const term = new Terminal({ fontSize: 14 });   // cols/rows 를 주지 않으면 컨테이너에 맞춘다
+await term.open(document.getElementById("host")!);
+
+const socket = new WebSocket("wss://example.com/pty");
+socket.binaryType = "arraybuffer";
+
+term.onData((bytes) => socket.send(bytes));                 // 키 입력 → 호스트
+socket.onmessage = (e) => term.write(new Uint8Array(e.data)); // 호스트 → 화면
+
+term.onTitle((t) => (document.title = t));
+term.onResize(({ cols, rows }) => socket.send(JSON.stringify({ resize: [cols, rows] })));
+```
+
+`open()` 은 wasm 과 워커를 만들므로 **반드시 `await`** 한다. 끝낼 때는 `term.dispose()` 로
+워커·옵저버·이벤트를 정리한다.
+
+### React
+
 ```bash
 npm i @maru/core @maru/react
 ```
@@ -45,6 +72,8 @@ socket.onmessage = (e) => term.write(new Uint8Array(e.data));
 
 ## 프레임워크별
 
+### Vue
+
 ```vue
 <script setup>
 import { MaruTerminal } from "@maru/vue";
@@ -52,12 +81,16 @@ import { MaruTerminal } from "@maru/vue";
 <template><MaruTerminal :options="{ fontSize: 14 }" @data="onData" /></template>
 ```
 
+### Svelte
+
 ```svelte
 <script>
   import { terminal } from "@maru/svelte";
 </script>
 <div use:terminal={{ options: { fontSize: 14 }, onData }} style="width:100%;height:400px" />
 ```
+
+### Lit
 
 ```html
 <script type="module">import "@maru/lit";</script>

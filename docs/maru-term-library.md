@@ -143,6 +143,22 @@ JS  : zntc build()  — esm, external: peer deps, loader { ".wasm": "file" }
 
 **wasm 바이너리는 저장소에 커밋한다.** npm에 실려 나가는 배포 산출물이고 받는 쪽에 Zig 툴체인이 없다. 소스와 바이너리가 어긋나지 않도록 빌드 재현 후 해시를 비교하는 게이트를 둔다.
 
+## 6.1 검증
+
+| 층 | 도구 | 무엇을 |
+|---|---|---|
+| 코어 | `bun test` | 키 인코딩·폭 판정·선택 span·IME 삽입·합성 글리프 범위 |
+| 렌더·래퍼 | playwright | 실제 브라우저에서 픽셀과 마운트 |
+| wasm | `zig build wasm-lib` + `check-wasm-sync` | 컴파일과 소스-바이너리 동기 |
+
+**네 래퍼 모두 실제로 마운트되는지 본다.** 번들이 나오는 것만으로는 부족하고, 프레임워크 훅
+(`useEffect`·`onMounted`·액션·`firstUpdated`)이 코어를 띄우고 `onReady` 가 오는지까지 확인한다.
+React 픽스처만 번들이 필요한데(react·react-dom 은 브라우저에서 바로 부를 ESM 진입점이 없다)
+테스트 전용이므로 zntc 대신 Bun 번들러를 쓴다.
+
+브라우저 검사는 playwright 브라우저 바이너리를 요구한다(`bunx playwright install chromium`).
+CI 의 `packages:check` 는 이 검사를 돌리지 않으므로 로컬에서만 필요하다.
+
 ## 7. 이 문서가 정하지 않는 것
 
 - **바이트 전송로.** WebSocket·SSH-over-WS·trace 재생 중 무엇을 쓸지는 소비자가 정한다.

@@ -33,6 +33,22 @@ function check(name: string, ok: boolean, detail = ""): void {
   if (!ok) failures++;
 }
 
+// React 픽스처는 번들이 필요하다 — react·react-dom 은 브라우저에서 바로 부를 ESM 진입점이
+// 없다(19 기준 CJS 뿐). 테스트 전용이므로 zntc 대신 Bun 번들러를 쓴다.
+{
+  const out = await Bun.build({
+    entrypoints: [new URL("../tests/fixtures/react-entry.tsx", import.meta.url).pathname],
+    target: "browser",
+    format: "esm",
+    define: { "process.env.NODE_ENV": '"production"' },
+  });
+  if (!out.success) throw new Error(`react 픽스처 번들 실패: ${out.logs.join("\n")}`);
+  await Bun.write(
+    new URL("../tests/fixtures/react-bundle.js", import.meta.url).pathname,
+    await out.outputs[0]!.text(),
+  );
+}
+
 const browser = await chromium.launch();
 const page = await browser.newPage();
 const errors: string[] = [];
@@ -250,6 +266,41 @@ check(
   hashFull === hashMain,
   `${hashFull} vs ${hashMain}`,
 );
+
+// ── Vue·Svelte 래퍼가 실제로 마운트되는가 ──
+// 번들이 나오는 것만으로는 부족하다. 프레임워크 훅(onMounted·액션)이 코어를 실제로 띄우고
+// `onReady` 가 오는지까지 봐야 래퍼가 동작한다고 말할 수 있다.
+for (const [name, file] of [
+  ["react", "react.html"],
+  ["vue", "vue.html"],
+  ["svelte", "svelte.html"],
+] as const) {
+  const p = await browser.newPage();
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  p.on("console", (m) => {
+    if (m.type() === "error") errs.push(m.text());
+  });
+  await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/${file}`);
+  try {
+    await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+      timeout: 15_000,
+    });
+  } catch {
+    errs.push("__ready 가 오지 않았다");
+  }
+  const painted = await p.evaluate(() => {
+    const c = document.querySelector("canvas");
+    if (!c) return -1;
+    return c.width;
+  });
+  check(
+    `${name} 래퍼 마운트 + 렌더`,
+    errs.length === 0 && painted > 0,
+    errs[0] ?? `canvas ${painted}px`,
+  );
+  await p.close();
+}
 
 // ── Lit 커스텀 엘리먼트가 실제로 마운트되는가 ──
 {

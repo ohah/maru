@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term vue</title>
+<style>
+  html,
+  body {
+    margin: 0;
+    background: #000;
+  }
+  #host {
+    width: 520px;
+    height: 400px;
+  }
+</style>
+<script type="importmap">
+  {
+    "imports": {
+      "vue": "/node_modules/vue/dist/vue.esm-browser.prod.js",
+      "@maru/core": "/core/dist/index.js"
+    }
+  }
+</script>
+<div id="app"></div>
+<script type="module">
+  import { createApp, h, ref } from "vue";
+  import { MaruTerminal } from "/vue/dist/index.js";
+
+  let gotData = false;
+  const app = createApp({
+    render() {
+      return h(MaruTerminal, {
+        options: { cols: 50, rows: 15, worker: false, wasmUrl: "/core/wasm/maru-vt.wasm" },
+        onData: () => {
+          gotData = true;
+        },
+        onReady: (t) => {
+          globalThis.__term = t;
+        },
+        style: "width:520px;height:400px;display:block",
+      });
+    },
+  });
+  app.mount("#app");
+
+  const start = Date.now();
+  while (!globalThis.__term && Date.now() - start < 10000)
+    await new Promise((r) => setTimeout(r, 50));
+  globalThis.__term.write("\x1b[1;32mvue\x1b[0m ok\r\n");
+  await new Promise((r) => setTimeout(r, 200));
+  globalThis.__ready = true;
+</script>

@@ -1,0 +1,190 @@
+# 파일 탐색기 트리 컴포넌트 이관 — 단계 계획
+
+도크 **탐색기 뷰의 행 렌더**를 터미널 셀 격자에서 `chrome/ui` typed tree로 옮기는 계획이다. 트리의
+root 모델·스캔·감시·mutation 계약은 [파일 탐색기](../file-explorer.md)가 계속 소유하고, 공용 typed
+tree와 paint 경계는 [Metal UI 레이아웃](../metal-ui-layout.md)이, 이관 순서와 gesture 권위는
+[Chrome 상호작용 컴포넌트 이관 전략](../chrome-interaction-migration.md)이 소유한다. 이 문서는
+**무엇을 어느 순서로 만들고 각 단계를 무엇으로 검증하는가**만 정한다.
+
+## 0. 왜 지금인가 — 사용자 보고 두 건 (2026-08-22)
+
+1. **"아이콘이 왼쪽 폴더 수준보다 너무 작다"** → 셀 격자 **안에서** 고칠 수 있는 부분이었다. 행 아이콘이
+   1칸이라 셀 폭(~8px)까지 줄던 것을 2칸(~16px)으로 바꿨다(PR #2552). 여기서 끝난 축이다.
+2. **"폰트 크기도 키워 달라"**, **"디자인 자체가 허접하다 — 깔끔하고 모던하게"** → 셀 격자 안에서는
+   **불가능하다.** 이 계획이 그 두 번째 보고를 받는다.
+
+왜 불가능한지가 이 계획의 전제다.
+
+| 사용자가 원하는 것 | 셀 격자에서 가능한가 | 이유 |
+| --- | --- | --- |
+| 트리 라벨만 키우기 | **불가능** | 글자 크기가 `cell_width_px`/`cell_height_px`에 묶여 있고, 그 값은 터미널 `font.size`(기본 14pt)가 정한다. 트리만 키우는 값이 없다 |
+| 행 높이(밀도) 조절 | **불가능** | 행 높이 = 셀 높이다. 폰트를 바꾸면 밀도가 따라 움직인다 |
+| 라운드 선택 밴드·호버 | **불가능** | 셀 배경은 사각 셀 단위다. 모서리 반경·부분 inset이 없다 |
+| 들여쓰기 가이드 선 | **불가능** | 셀 사이에 걸친 1px 선은 셀 격자 밖 기하다 |
+| 비례폰트 | **불가능** | 셀 격자는 등폭 advance를 전제한다 |
+
+**같은 도크의 다른 뷰는 이미 이 결론을 밟았다.** 소스 컨트롤 2판이 뒤집은 항목이 그대로다 —
+[scm-dock.md §0](scm-dock.md): *"렌더 기반: 터미널 셀 그리드(`buildDockScmDrawList`) → `chrome/ui` typed
+tree — 체크박스·버튼·입력은 셀 그리드로 못 그린다."* AI 세션 기록 도크도 같은 구조다. 지금 도크 뷰를
+전환하면 **같은 컬럼 안에서 글자 렌더가 두 종류**로 갈리는 것이 눈으로 보인다.
+
+## 1. 이 계획이 뒤집는 결정과 뒤집지 않는 결정
+
+| | 현행 | 이관 후 | 근거 |
+| --- | --- | --- | --- |
+| 행 렌더 기반 | 터미널 셀 격자(`coretext_frame_builder.buildFileTreeDrawList`) | `chrome/ui` typed tree + measured text | 위 §0 표 |
+| 행 높이 출처 | `cell_height_px`(터미널 폰트 종속) | 컴포넌트 `Metrics`(logical pt × `scale_milli`) | 밀도를 폰트에서 떼어낸다 |
+| 히트테스트 | `file_tree_layout.rowAtLocalY` + `pointInRect` | 발행된 rect + `chrome.ui.interaction` | 그린 자리와 눌리는 자리의 단일 출처 |
+| 라벨 폭 예산 | `dockListTextWidthPx / cell_width_px`(칸) | measured advance(px) | 칸 양자화가 글자를 미리 자르던 것도 함께 사라진다 |
+
+**뒤집지 않는 것** — 이 계획 밖이고 손대지 않는다.
+
+- 도메인 모델(`src/session/file_tree.zig`)과 root/watcher/mutation 계약, 자동 reveal과 root 교체
+  ([file-explorer.md](../file-explorer.md) §1·§2).
+- 스크롤 좌표계. 이미 픽셀이다(§2).
+- 아이콘 분류. 중립 `src/chrome/file_tree_icon.zig`가 계속 소유하고 컴포넌트도 같은 `IconKind`를 쓴다.
+- 키보드 탐색 모델(`src/session/file_tree_navigation.zig`). Page 단위가 "온전히 보이는 행"이라는
+  규율도 그대로다 — 행 높이의 **출처**만 바뀐다.
+
+## 2. 이미 이관된 축 — 출발점이 절반인 이유
+
+이 이관이 SCM 2판보다 작은 이유가 여기 있다. 아래는 **이미 끝나 있다.**
+
+| 축 | 상태 | 위치 |
+| --- | --- | --- |
+| 스크롤 좌표 | 픽셀(`chrome.ui.scroll_area.State`) — 행 좌표가 아니다 | [file-explorer.md §3.1](../file-explorer.md) |
+| 스크롤바 | `chrome/ui/tree.zig`의 `scrollArea` 선언 하나(소스 컨트롤과 공유) | CIM3 완료 |
+| 행↔픽셀 산술 | `src/session/file_tree_layout.zig` — **`row_h_px`를 파라미터로 받는다** | 행 높이를 컴포넌트가 정해도 이 모듈은 무변경 |
+| 호버 상태 | `file_tree_hovered_row`가 이미 있고 밴드도 그린다(사각) | 형상만 바뀐다 |
+| 아이콘 자산 | 등록 PUA + `icon_glyph.fillCoverage` 합성 | 컴포넌트에서도 같은 경로 |
+
+즉 **새로 만들 것은 행 하나의 내부 배치와 그 페인트·히트테스트**이고, 스크롤·가상화·아이콘·도메인은
+있는 것을 그대로 쓴다.
+
+```mermaid
+flowchart TD
+  ROWS["file_tree.Row[] (도메인 — 무변경)"]
+  WIN["file_tree_layout.drawWindow(row_h_px, …) (무변경, row_h 출처만 교체)"]
+  OLD["현행: buildFileTreeDrawList → DrawCell 격자"]
+  NEW["이관: components/file_tree/build.zig → UiNode/UiRectTree"]
+  PAINT["ui_paint → chrome_draw_lowering (quad + measured text)"]
+  HIT["chrome.ui.interaction (발행된 rect로 히트테스트)"]
+  CELLTXT["등록 PUA 아이콘: 셀 draw list 유지 (Session Dock과 같은 규약)"]
+
+  ROWS --> WIN --> OLD
+  WIN --> NEW
+  NEW --> PAINT
+  NEW --> HIT
+  NEW --> CELLTXT
+```
+
+## 3. 시각 계약 (사용자 결정 2026-08-22 — "컴팩트 모던")
+
+수치의 소유자는 컴포넌트 `Metrics`이고, 아래 표는 **왜 그 값인가**를 남긴다. 실제 값은 상수 이름으로
+가리킨다([PR 체크리스트](../pr-checklist.md) "상수 값을 문서에 적는 규율").
+
+| 항목 | 현행 | 목표 | 근거 |
+| --- | --- | --- | --- |
+| 라벨 | 등폭 14pt(터미널 `font.size` 종속) | **비례 14pt 목록 전용 role** | 사용자 결정. 기존 role을 재사용하지 않는 이유는 아래 박스 |
+| 행 높이 | 셀 높이(기본 ~19px @1x) | **26px** 상당 logical pt | 아이콘 16px + 위아래 여백이 들어가는 최소치. 넉넉한 30px는 한 화면 행 수가 약 2/3로 줄어 기각(사용자 선택) |
+| 아이콘 | 16px(2칸 — PR #2552) | 16px 유지 | 이미 뷰 바·사이드바와 같다 |
+| 들여쓰기 | 2칸(폰트 종속) | **14px/depth + 가이드 선** | depth 축이 선으로 보여야 깊은 트리에서 부모를 눈으로 따라갈 수 있다 |
+| 선택 | 전폭 사각 밴드 | **라운드 6px**, 좌우 content inset | 목록 항목이 컨테이너 가장자리에 붙어 끝나는 것이 "허접하다"의 큰 몫이다 |
+| 호버 | 전폭 사각 | 선택과 같은 형상, 약한 배경 | 두 상태의 형상이 다르면 호버가 선택처럼 읽힌다 |
+| dirty/conflict | 셀 열(`cols-2`/`cols-4`) | 우측 고정 슬롯(px) | 칸 기준이면 폰트에 따라 자리가 흔들린다 |
+| disclosure | ASCII `>`/`v` | chevron 아이콘 | 나머지가 전부 아이콘인데 여기만 글자다 |
+
+> **기존 typography role을 그대로 쓰지 않는 이유.** `chrome/ui/typography.zig`의 `body`는 **13pt**이고,
+> 그 표에는 *"사용자 보고(2026-08-05): 도크 텍스트가 같은 화면의 터미널 글자보다 눈에 띄게 컸다 … 두
+> 단계 낮춘다"* 라는 이력이 붙어 있다. 지금 요청은 반대 방향이므로 **그 결정을 뒤집지 않고** 목록 행
+> 전용 role을 더한다. 한 표에서 값을 올리면 도크 헤더·카드·세팅까지 같이 커져 2026-08-05 보고가
+> 재현된다.
+
+## 4. 단계
+
+각 단계는 독립 PR이고, 앞 단계가 제품에서 도는 것을 본 뒤 다음으로 간다. 단계마다 문서 갱신을 포함한다.
+
+### FT1 — 컴포넌트 골격과 행 렌더 (읽기 전용, 화면이 바뀌는 단계)
+
+- `src/chrome/components/file_tree/{types,ids,build,view}.zig` 신설. Session Dock·SCM Dock과 같은
+  4파일 구조(`types`=platform-neutral DTO·`ids`=노드/의도 식별자·`build`=geometry·action 투영·
+  `view`=paint 방출).
+- `src/platform/macos/app_session/file_tree_dock.zig` 신설 — `project → props → build → view → paint`.
+  `collectScmDock`과 **같은 순서**를 쓴다. 가상화 창은 기존 `fileTreeDrawWindow`가 그대로 준다.
+- 행 높이 출처를 `cell_height_px` → 컴포넌트 `Metrics`로 바꾼다. 바꿀 자리는 **셋뿐**이다
+  (`fileTreeVisibleRows`·`fileTreeDrawWindow`·히트테스트 호출부) — 산술 자체는
+  `session/file_tree_layout.zig`가 이미 파라미터로 받는다.
+- §3의 시각 계약을 구현한다. 히트테스트·컨텍스트 메뉴·이름 변경은 **이 단계에서 옮기지 않는다**
+  (행 높이만 새 출처를 쓰고, 나머지 판정은 기존 경로 유지).
+- 검증: 컴포넌트 build/view 단위 테스트(행 내부 rect가 겹치지 않는다·폭 예산·상태 슬롯), 제품 Metal
+  캡처(dark·light) before/after, `mise run macos-file-explorer-perf`.
+
+### FT2 — 상호작용 이관
+
+- 히트테스트를 발행된 rect + `chrome.ui.interaction`으로 옮긴다. `file_tree_layout.rowAtLocalY`는
+  Windows chrome 낮추기가 계속 쓰므로 **삭제하지 않는다**([windows-platform.md](../windows-platform.md) §2m.4).
+- 컨텍스트 메뉴 앵커·행 인덱스 분기, 이름 변경 인라인 편집, disclosure/아이콘/라벨의 **부분 히트**
+  (지금은 행 전체가 한 target이다)를 정한다.
+- 검증: pointer fixture(호버·선택·컨텍스트·이름 변경 중 클릭), 키보드 동등 경로,
+  [chrome-interaction-migration.md §9](../chrome-interaction-migration.md)의 공통 완료 조건.
+
+### FT3 — 셀 경로 제거와 정리
+
+- `buildFileTreeDrawList`와 그 테스트를 제거한다.
+- **선행 확인이 필요하다**: 이 함수는 macOS 전용이 아니다. `maru win32-file-tree-draw-smoke`
+  (`src/main.zig`)가 Windows에서 행을 픽셀까지 내리는 유일한 경로로 쓴다. 지우기 전에 그 스모크의
+  대체(중립 투영을 Windows 셀 파이프라인에 먹이는 경로)를 정한다 — **정해지기 전에는 FT3를 열지 않는다.**
+- `docs/file-explorer.md` §3의 셀 열 서술을 컴포넌트 계약으로 교체하고, 성능 예산 표와 검증 매트릭스
+  행을 갱신한다.
+
+## 5. 보존해야 하는 동작 (회귀 표)
+
+이관 전에 이미 도는 제품 동작이다. 이관 PR은 각 항목을 fixture 또는 캡처로 다시 고정한다.
+
+| 동작 | 현재 소유 | 이관 후 확인 방법 |
+| --- | --- | --- |
+| git이 무시하는 행의 dimming(라벨+아이콘, `ignored_fg` null이면 무동작) | draw list | 단위 테스트 |
+| 아이콘 종류색(`file_tree_icon.colorRole`)과 **선택 행에서의 대비색 우선** | draw list | 단위 테스트 |
+| dirty(●)·conflict(!) 슬롯과 라벨 폭 예산의 상호배제 | 셀 열 산술 | rect 겹침 테스트 |
+| 최근 파일 헤더·빈 placeholder·root 행의 서로 다른 스타일 | draw list | 캡처 |
+| 부분 행(위·아래 잘림)과 pane clip | `origin_shift_px` + clip rect | 캡처 + 창 산술 테스트 |
+| Page 키 = **온전히 보이는 행** 수 | `fileTreeVisibleRows` | 기존 테스트(행 높이 출처만 교체) |
+| 자동 reveal·root 교체 뒤 스크롤 앵커 | domain | 기존 테스트 |
+| 이름 변경 중 라벨 자리 텍스트와 편집 대상 identity | draw list `FileTreeEdit` | FT2 fixture |
+| 스크롤바 gutter가 상시 예약돼 목록이 reflow하지 않음 | `dockListTextWidthPx` | 캡처 |
+
+## 6. 위험과 미해결
+
+- **성능 예산과의 충돌 가능성.** [performance-budget.md](../performance-budget.md) "파일 탐색기
+  scrollbar/icon 예산"은 row projection과 scrollbar pointer 경로에 **allocator call = 0**을 hard gate로
+  걸고 있고, 그 macOS job은 branch protection required다. 반면 Session Dock·SCM Dock의 프레임 경로는
+  **프레임마다 arena를 연다**(`collectScmDock`). 두 규약이 같은 프레임 안에서 만나므로, FT1은
+  ⑴ 예산이 거는 두 경로가 arena 밖에 있음을 보이거나 ⑵ 노드/entry 버퍼를 고정 크기로 미리 잡아
+  allocation을 없애야 한다. **어느 쪽인지 정하는 것이 FT1의 첫 작업이다.**
+- **measured text 비용.** 트리는 행이 수천 개가 될 수 있다. 측정은 **보이는 창에만** 걸고 캐시
+  (`MeasuredTextCache`) 적중 시 CoreText를 부르지 않는 Session Dock 규약을 그대로 따른다. 스크롤 중
+  매 프레임 측정이 들어오면 예산 job이 잡아야 한다 — FT1이 그 counter를 추가한다.
+- **Chrome Lab에 탐색기 scenario가 없다.** 현재 골든(`tests/fixtures/golden/dock/`)은 dock·scm·editor·
+  sidebar뿐이라 트리는 픽셀 회귀 게이트가 없다. FT1이 scenario를 추가한다 — 없으면 이 이관의 시각
+  결과를 지킬 자동 수단이 하나도 없다.
+- **Windows 의존**(FT3 박스). 셀 경로는 macOS만의 것이 아니다.
+- **도크 폭이 좁을 때의 열화 규칙**을 다시 정해야 한다. 셀 격자에서는 "칸이 모자라면 생략"이었는데
+  픽셀에서는 기준이 다르다(들여쓰기 clamp·라벨 최소 폭·상태 슬롯 우선순위).
+
+## 7. 완료로 보지 않는 것
+
+- 한 단계가 화면에 나온 것만으로 이관 완료로 적지 않는다. [chrome-interaction-migration.md §9](../chrome-interaction-migration.md)의
+  공통 조건(capture cancel 증거·같은 published generation·키보드 동등 경로·stale target 거부 E2E)을
+  모두 만족해야 한다.
+- 셀 경로(`buildFileTreeDrawList`)가 남아 있는 동안에는 **두 렌더 경로가 공존**한다. 그 상태를
+  "이관됨"으로 적지 않는다.
+- 드래그앤드롭(트리 안에서 파일 이동)은 이 계획 범위 밖이다. 지금도 없고, 만들려면 CIM의
+  `ReorderableList` capability 위에서 별도 슬라이스로 연다.
+
+## 8. 단계 상태
+
+| 단계 | 상태 |
+| --- | --- |
+| FT1 — 컴포넌트 골격과 행 렌더 | 미착수 |
+| FT2 — 상호작용 이관 | 미착수 |
+| FT3 — 셀 경로 제거 | 미착수(선행 조건: Windows 스모크 대체 결정) |

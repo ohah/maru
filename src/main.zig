@@ -3634,11 +3634,15 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을 못 본다
     // (아래 보고의 `ops_dropped` — 이 스모크를 쓰면서 그렇게 한 번 넘길 뻔했다).
     var ops_text: usize = 0;
+    var ops_fill: usize = 0;
     var ops_dropped: usize = 0;
     for (ops[0..written.ops]) |op| switch (op) {
         .text => ops_text += 1,
+        .fill, .quad => ops_fill += 1,
         .clip => {},
-        else => ops_dropped += 1,
+        else => {
+            ops_dropped += 1;
+        },
     };
 
     const draw_list = try chrome_draw_lowering.buildTextDrawList(
@@ -3662,6 +3666,45 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     };
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
+
+    // ── 단색 사각(배경·스크롤바) ─────────────────────────────────────────────────────────────
+    //
+    // **쿼드 파이프라인이 필요 없었다.** `Cell.rect` 는 셀 격자가 아니라 **화면 픽셀 사각**이라
+    // 8px 스크롤바가 9px 셀 격자에 안 맞아도 그대로 실린다(`d3d11_cells.solidCell` 의 doc).
+    // §2m.7 이 "격자에 안 맞는 것은 쿼드" 라고 적었는데, 실제로 갈리는 기준은 격자 정렬이 아니라
+    // **둥근 모서리·테두리·그라디언트**다 — 이 셰이더에 없는 것들이고, 여기 둘은 그냥 직사각형이다.
+    //
+    // **글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다(§2m.7 실측).
+    for (ops[0..written.ops]) |op| {
+        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            // **그라디언트·테두리는 아직 없다.** 이 셰이더에 그 계산이 없으므로 `solid` 가 아닌 것은
+            // 아래에서 세어 남긴다 — 조용히 단색으로 그리면 화면이 틀린 채로 그럴듯해진다.
+            .quad => |q| if (q.gradient == .solid and q.border_role == null)
+                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
+            else
+                continue,
+            else => continue,
+        };
+        // 뷰 밖으로 나간 몫은 잘라 낸다(배경이 `-inset` 에서 시작한다).
+        const x0 = @max(rect.x, 0);
+        const y0 = @max(rect.y, 0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(view.w)));
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(view.h)));
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tokens.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        try cells.append(allocator, d3d11_cells.solidCell(
+            @floatFromInt(x0),
+            @floatFromInt(y0),
+            @floatFromInt(x1 - x0),
+            @floatFromInt(y1 - y0),
+            d3d11_cells.colorFromArgb(argb),
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        ));
+    }
+    const fill_cells = cells.items.len;
+
     _ = try host.appendGlyphCells(allocator, frame, colors, &cells);
 
     const frames = try host.presentLoop(cells.items, 0xFF1E2430, 120);
@@ -3706,8 +3749,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.writeAll("maru.win32-editor-draw-smoke.v1\n");
     try stdout.print("doc={s} lines={d}\n", .{ doc_path, lines.items.len });
     try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
-    try stdout.print("ops={d} ops_text={d} ops_dropped={d}\n", .{ written.ops, ops_text, ops_dropped });
+    try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ written.ops, ops_text, ops_fill, ops_dropped });
     try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ written.visual_rows, written.total_visual_rows });
+    try stdout.print("fill_cells={d}\n", .{fill_cells});
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ cells.items.len, d3d11_cells.cellsDigest(cells.items), prepared.region_uploads });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("lines_matched={d}/{d}\n", .{ lines_matched, lines_checked });

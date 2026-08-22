@@ -83,17 +83,61 @@ pub const Cell = extern struct {
     /// 전경색 RGBA(0~1).
     fg: [4]f32,
     /// 배경색 RGBA(0~1). **알파가 판정이다** — 0이면 배경 없음(clear color가 비친다), 1이면 채운다.
+    ///
+    /// **단, 단색 채움 셀(`solidCell`)에서는 알파가 그대로 투명도다.** 그 셀은 글리프가 없으므로
+    /// "배경 없음" 이라는 뜻이 성립하지 않는다 — 셰이더가 `solid` 로 갈라 본다.
     bg: [4]f32,
+    /// 모서리 반지름 px, `[좌상, 우상, 우하, 좌하]`. **단색 채움 셀에서만 읽는다.**
+    ///
+    /// **왜 필드를 늘렸나.** 편집기 스크롤바가 `radii = {4,4,4,4}` 로 온다(chrome `Op.quad`). 셀
+    /// 격자 정렬은 문제가 아니었지만(`rect` 가 이미 임의 픽셀 사각이다) 둥근 모서리는 픽셀 셰이더가
+    /// 계산해야 한다. 남는 필드에 얹지 않고 이름 있는 자리를 하나 만든다 — `uv`·`fg` 가 단색 셀에서
+    /// 안 쓰인다고 거기 실으면 "이 값이 무엇인가" 가 셀 종류에 따라 갈려 곧 썩는다.
+    shape: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 comptime {
     if (@sizeOf(usize) == 8) {
-        std.debug.assert(@sizeOf(Cell) == 64);
+        std.debug.assert(@sizeOf(Cell) == 80);
         std.debug.assert(@offsetOf(Cell, "rect") == 0);
         std.debug.assert(@offsetOf(Cell, "uv") == 16);
         std.debug.assert(@offsetOf(Cell, "fg") == 32);
         std.debug.assert(@offsetOf(Cell, "bg") == 48);
+        std.debug.assert(@offsetOf(Cell, "shape") == 64);
     }
+}
+
+/// **글리프 없는 단색 사각** 하나. 행 띠·스크롤바·편집기 배경이 이것이다.
+///
+/// **쿼드 파이프라인이 따로 필요하지 않다.** `Cell.rect` 는 셀 격자가 아니라 **화면 픽셀 사각**이고
+/// (위 필드 doc) 정점 셰이더가 `rect.xy + corner * rect.zw` 로 그대로 편다. 그래서 셀 폭과 무관한
+/// 8px 스크롤바도 셀 하나로 그린다 — §2m.7 이 "쿼드가 필요한 것은 셀 격자에 안 맞는 것" 이라고 적었지만
+/// 실제로 갈리는 기준은 **격자 정렬이 아니라 둥근 모서리·테두리·그라디언트**다(이 셰이더에 없는 것들).
+///
+/// `uv` 를 한 점으로 둬 아틀라스를 안 읽게 한다(픽셀 셰이더의 `solid` 분기).
+pub fn solidCell(x_px: f32, y_px: f32, w_px: f32, h_px: f32, rgba: [4]f32, corner_radii: [4]f32) Cell {
+    return .{
+        .rect = .{ x_px, y_px, w_px, h_px },
+        .uv = .{ 0, 0, 0, 0 },
+        .fg = .{ 0, 0, 0, 0 },
+        .bg = rgba,
+        .shape = corner_radii,
+    };
+}
+
+test "단색 셀: 아틀라스를 안 읽는 모양이다" {
+    const c = solidCell(3, 5, 8, 40, colorFromArgb(0xFF3A5FCD), .{ 4, 4, 4, 4 });
+    // UV 사각이 한 점이어야 셰이더가 `solid` 로 판정한다 — 그것이 이 셀의 계약이다.
+    try testing.expectEqual(c.uv[0], c.uv[2]);
+    try testing.expectEqual(c.uv[1], c.uv[3]);
+    // **셀 격자와 무관한 크기가 그대로 실린다** — 8px 스크롤바가 9px 셀 격자에 안 맞아도 된다.
+    try testing.expectEqual(@as(f32, 8), c.rect[2]);
+    try testing.expectEqual(@as(f32, 40), c.rect[3]);
+    try testing.expectEqual(@as(f32, 1), c.bg[3]);
+    try testing.expectEqual(@as(f32, 4), c.shape[0]);
+    // **반투명도 실린다** — 스크롤바가 alpha 102 로 온다.
+    const t = solidCell(0, 0, 8, 8, colorFromArgb(0x663A5FCD), .{ 0, 0, 0, 0 });
+    try testing.expect(t.bg[3] > 0.3 and t.bg[3] < 0.5);
 }
 
 /// GPU 로 올라가는 셀 배열의 **지문**. 같은 값이면 같은 그림이다 — `draw` 가 받는 것이 이 배열
@@ -188,6 +232,7 @@ const hlsl_source =
     \\    float4 uv   : TEXCOORD1;
     \\    float4 fg   : TEXCOORD2;
     \\    float4 bg   : TEXCOORD3;
+    \\    float4 shape: TEXCOORD4;
     \\    uint   vid  : SV_VertexID;
     \\};
     \\
@@ -196,6 +241,13 @@ const hlsl_source =
     \\    float2 uv  : TEXCOORD0;
     \\    float4 fg  : TEXCOORD1;
     \\    float4 bg  : TEXCOORD2;
+    \\    // **글리프가 없는 셀인가**(단색 채움). VS 에서 판정한다 — 픽셀 셰이더에는 보간된 한 점만
+    \\    // 오므로 UV 사각이 한 점인지 거기서는 못 본다.
+    \\    float  solid : TEXCOORD3;
+    \\    // 둥근 모서리를 픽셀에서 재려면 사각을 알아야 한다: 중심(xy)과 반쪽 크기(zw), 화면 px.
+    \\    float4 box   : TEXCOORD4;
+    \\    float4 shape : TEXCOORD5;
+    \\    float2 frag  : TEXCOORD6;
     \\};
     \\
     \\VSOut vs_main(VSIn i) {
@@ -208,11 +260,38 @@ const hlsl_source =
     \\    o.uv = lerp(i.uv.xy, i.uv.zw, corner);
     \\    o.fg = i.fg;
     \\    o.bg = i.bg;
+    \\    float2 uv_span = abs(i.uv.zw - i.uv.xy);
+    \\    o.solid = (uv_span.x + uv_span.y > 0.0) ? 0.0 : 1.0;
+    \\    o.box = float4(i.rect.xy + i.rect.zw * 0.5, i.rect.zw * 0.5);
+    \\    o.shape = i.shape;
+    \\    o.frag = p;
     \\    return o;
     \\}
     \\
     \\float4 ps_main(VSOut i) : SV_Target {
     \\    // 커버리지는 알파에 있다 — RGB(흰색)는 쓰지 않는다. 색은 셀이 들고 온다.
+    \\    //
+    \\    // **단색 채움 셀이 먼저다.** 글리프가 없으므로 아틀라스를 안 읽는다 — 호출부가 주는
+    \\    // uv = {0,0,0,0} 을 그대로 샘플하면 아틀라스 (0,0) 에 놓인 **첫 글리프**의 좌상단 픽셀
+    \\    // 알파가 섞여 든다(`glyph_atlas` 의 next_x_px = 0). 지금까지 안 보인 것은 잉크가 그
+    \\    // 모서리에 잘 안 닿기 때문이고 **계약이 아니라 운**이었다.
+    \\    //
+    \\    // **알파를 그대로 쓴다.** 아래 글리프 갈래는 `bg.a < 0.5` 를 "배경 없음" 으로 읽는데,
+    \\    // 단색 채움에는 그 뜻이 없다 — 편집기 스크롤바가 alpha 102(40%)로 오고, 그 규칙을
+    \\    // 태우면 **막대가 통째로 안 보인다**(실측으로 그렇게 될 뻔했다).
+    \\    if (i.solid > 0.5) {
+    \\        // 둥근 모서리: 사각 SDF 로 재고 1px 로 부드럽게 자른다. 반지름 0 이면 직사각형이다.
+    \\        float2 q = abs(i.frag - i.box.xy) - i.box.zw;
+    \\        float2 s = sign(i.frag - i.box.xy);
+    \\        // 모서리별 반지름: [좌상, 우상, 우하, 좌하] 중 이 픽셀이 속한 사분면의 것.
+    \\        float r = (s.y < 0.0) ? ((s.x < 0.0) ? i.shape.x : i.shape.y)
+    \\                              : ((s.x < 0.0) ? i.shape.w : i.shape.z);
+    \\        r = min(r, min(i.box.z, i.box.w));
+    \\        float2 qr = q + r;
+    \\        float dist = min(max(qr.x, qr.y), 0.0) + length(max(qr, 0.0)) - r;
+    \\        float a = saturate(0.5 - dist);
+    \\        return float4(i.bg.rgb, i.bg.a * a);
+    \\    }
     \\    float cov = atlas.Sample(samp, i.uv).a;
     \\    if (i.bg.a < 0.5) {
     \\        return float4(i.fg.rgb, cov * i.fg.a);
@@ -228,13 +307,14 @@ const input_elements = [_]d3d11.InputElementDesc{
     .{ .semantic_name = "TEXCOORD", .semantic_index = 1, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 16, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
     .{ .semantic_name = "TEXCOORD", .semantic_index = 2, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 32, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
     .{ .semantic_name = "TEXCOORD", .semantic_index = 3, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 48, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
+    .{ .semantic_name = "TEXCOORD", .semantic_index = 4, .format = d3d11.format_r32g32b32a32_float, .input_slot = 0, .aligned_byte_offset = 64, .input_slot_class = d3d11.input_per_instance_data, .instance_data_step_rate = 1 },
 };
 
 comptime {
     // **두 곳이 서로를 검증하게 한다.** `Cell`을 재배치하면 위 오프셋 단언이 잡지만, 여기 리터럴 오프셋만
     // 잘못 고치면 아무것도 안 잡고 런타임에 색과 좌표가 뒤섞인다(오류가 아니라 잘못된 그림이 나온다).
     // 필드 이름과 슬롯 순서를 여기서 묶어 둔다.
-    const bound = [_][]const u8{ "rect", "uv", "fg", "bg" };
+    const bound = [_][]const u8{ "rect", "uv", "fg", "bg", "shape" };
     std.debug.assert(input_elements.len == bound.len);
     for (input_elements, bound) |elem, name| {
         std.debug.assert(elem.aligned_byte_offset == @offsetOf(Cell, name));

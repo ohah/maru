@@ -1228,7 +1228,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   runtime size golden이 이를 고정한다. generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류하며,
   mutation seal·authority/retry/close effect의 실제 제품 결속과 외부 ingress는 e3가 소유한다. e3a1은 actual
   empty-screen candidate→publish→retiring→reclaim allocator ledger의 structural base allocation 1개,
-  CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
+  CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner 반영 뒤 Debug 3,504바이트/ReleaseFast 3,488바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
   final-zero를 runtime 2개+boundary 1개로 고정한다. 가변 screen/metadata를 포함하지 않는 lower bound이므로
   e3a2의 actual bounded-workload ReleaseFast child raw RSS evidence와 기존 host base SSOT를 결합한다. generation
   1개의 최대 구조적 charge는 `base_update_max_bytes`(16 MiB screen+256 KiB metadata), fixed inventory는 mutation
@@ -2052,6 +2052,17 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   확인해 shared-connection EOF 뒤 no-wire client cleanup이 host를 죽이거나 lease를 남기지 않았음을 고정한다. unique host
   외 entry mutation 0, child bounded reap, artifact root confinement도 같은 gate다. 이 행은 IME/clipboard/soak 완료로
   세지 않는다.
+- CR6d actual-AppKit 입력 연속성 행은 CR6c 제품 recovery click 뒤의 실제 remote Term만 대상으로 한다. recovery 전
+  runtime은 historical line과 OSC 52 write를 한 번 내보내고, 새 AppKit process는 별도 OS pasteboard sentinel을 먼저
+  쓴다. recovery 뒤 sentinel 불변은 historical OSC 52 AppKit 호출 0을 증명한다. view-local 2-Set Korean
+  Accessibility event-post 권한을 사전 확인한 뒤 `NSTextInputContext`에 HID event tap의 물리 key-code `CGEvent`를 흘려 `setMarkedText`/`insertText`가 모두 1회 이상 발생하고 `한글`
+  screen marker가 exact 1인지 확인한다. `NSPasteboard.general`의 새 한 줄은 실제 Cmd+V `NSEvent`와 기존 paste action을
+  통해 PTY에 exact 1회 도달해야 한다. historical line도 exact 1을 유지한다. probe는 action/input authority를 노출하지
+  않는다. 권한이 없으면 input-source mutation 전에 `accessibility-unavailable` RED다. opt-in smoke는 original/한국어 2벌식 system-global input source ID를 전환 전에 atomic record로 봉인하고 실제
+  전환 뒤에만 합성 key를 보낸다. 정상·RED·종료 복원과 앱 강제 종료 뒤 parent restore helper를 각각 검증하며, current가
+  selected와 다른 제3 source이면 사용자 선택을 덮지 않고 실패해야 한다. current exact original, record 소멸, view-local
+  source/marked text 복원, actual Quit confirm, runtime 생존, controller/observer 0과 exact artifact/child cleanup을 함께
+  검증한다. stalled socket/backoff·soak·성능은 CR6e다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

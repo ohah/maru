@@ -111,7 +111,7 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
 };
 
 test "ABI v168 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 169), abi_version);
+    try std.testing.expectEqual(@as(u32, 170), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -758,6 +758,13 @@ pub const RecoveredSessionSmokeProbe = extern struct {
     target_activation_dispatched: u32,
 };
 
+pub const SessionHostInputSmokeProbe = extern struct {
+    active_remote: u32,
+    historical_count: u32,
+    ime_count: u32,
+    clipboard_count: u32,
+};
+
 /// CR6c 전용 read-only AppKit smoke projection. 이미 발행된 row rect와 aggregate
 /// 상태만 내보내며 adopt/action identity는 의도적으로 노출하지 않는다.
 pub export fn maru_macos_app_session_recovered_session_smoke_probe(
@@ -785,6 +792,24 @@ pub export fn maru_macos_app_session_recovered_session_smoke_probe(
         .configured_keep_alive = @intFromBool(probe.configured_keep_alive),
         .live_session_count = probe.live_session_count,
         .target_activation_dispatched = @intFromBool(probe.target_activation_dispatched),
+    };
+    return @intFromEnum(Status.ok);
+}
+
+/// CR6d actual-AppKit smoke의 exact recovered-runtime screen counter projection.
+/// 입력/action authority는 없고 이미 발행된 화면 텍스트만 센다.
+pub export fn maru_macos_app_session_input_smoke_probe(
+    session: ?*AppSession,
+    out_probe: ?*SessionHostInputSmokeProbe,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const probe = app_session.sessionHostInputSmokeProbe();
+    out.* = .{
+        .active_remote = @intFromBool(probe.active_remote),
+        .historical_count = probe.historical_count,
+        .ime_count = probe.ime_count,
+        .clipboard_count = probe.clipboard_count,
     };
     return @intFromEnum(Status.ok);
 }
@@ -6225,6 +6250,10 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),
         maru_macos_app_session_agent_session_archive_smoke_probe(null, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD, null),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.null_out)),
+        maru_macos_app_session_input_smoke_probe(null, null),
     );
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),

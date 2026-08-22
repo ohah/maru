@@ -1187,7 +1187,9 @@ fn cleanupDescriptorCanonical(value: CleanupDescriptor) bool {
         value.allocator_ptr == 0 and value.allocator_vtable == 0;
     if (value.present != 1 or value.address == 0 or value.length_bytes == 0 or
         value.capacity_bytes != value.length_bytes or value.alignment_log2 > 63 or
-        value.allocator_ptr == 0 or value.allocator_vtable == 0)
+        // Allocator context address zero is valid for stateless allocators. Presence is carried
+        // by `present`; the vtable must exist and the context value remains sealed exactly.
+        value.allocator_vtable == 0)
         return false;
     const alignment = @as(u64, 1) << @intCast(value.alignment_log2);
     if (value.address & (alignment - 1) != 0) return false;

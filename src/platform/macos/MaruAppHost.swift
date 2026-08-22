@@ -324,6 +324,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         imeLog("insertText", text)
         controller?.imeMarked("") // 조합 표시 제거(전송 판정은 Zig ime_end가)
         controller?.imeInsert(text)
+        controller?.recordSessionHostInputSmokeInsert()
     }
 
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
@@ -331,6 +332,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         imeLog("setMarkedText", markedTextBuffer)
         controller?.imeMarked(markedTextBuffer)
+        controller?.recordSessionHostInputSmokeMarked()
     }
 
     func unmarkText() {
@@ -3985,9 +3987,34 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostRecoverySmokeActiveRemoteObserved = false
     private var sessionHostRecoverySmokeMarkerObserved = false
     private var sessionHostRecoverySmokeCaptureRetries: UInt32 = 0
+    private var sessionHostInputSmokeStage: UInt32 = 0
+    private var sessionHostInputSmokeHistoricalCount: UInt32 = 0
+    private var sessionHostInputSmokeImeCount: UInt32 = 0
+    private var sessionHostInputSmokeClipboardCount: UInt32 = 0
+    private var sessionHostInputSmokeMarkedCallbacks: UInt32 = 0
+    private var sessionHostInputSmokeInsertCallbacks: UInt32 = 0
+    private var sessionHostInputSmokeHistoricalClipboardPreserved = false
+    private var sessionHostInputSmokeViewSourceRestored = false
+    private var sessionHostInputSmokeFailure = ""
+    private var sessionHostInputSmokeRetries: UInt32 = 0
+    private var sessionHostInputSmokeKeyIndex: Int = 0
+    private var sessionHostInputSmokeOriginalSource: String?
+    private var sessionHostInputSmokeOriginalGlobalSource: String?
+    private var sessionHostInputSmokeSourceRecordURL: URL?
+    private var sessionHostInputSmokeGlobalSourceSelected = false
+    private var sessionHostInputSmokeGlobalSourceRestored = false
+    private var sessionHostInputSmokePostEventAccess = false
+    private var sessionHostInputSmokeSourceRecordCleared = false
+    private var sessionHostInputSmokeOriginalPasteboard: [[NSPasteboard.PasteboardType: Data]]?
+    private var sessionHostInputSmokePasteboardPrepared = false
+    private var sessionHostInputSmokePasteboardRestored = false
     private var launchSummaryWritten = false
     private var isSessionHostRecoverySmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
+    }
+    private var isSessionHostInputContinuitySmokeMode: Bool {
+        isSessionHostRecoverySmokeMode &&
+            ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE"] == "1"
     }
     /// 종료 경로 단계별 비용. 종료는 메인 스레드를 동기로 붙잡으므로 어느 단계가 그 시간을 쓰는지 남겨야
     /// 추측 없이 고칠 수 있다. 값은 종료 요약의 `quit_*` 필드로 나간다(docs/macos-app-host-boundary.md).
@@ -4474,6 +4501,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
         terminationStartNs = DispatchTime.now().uptimeNanoseconds
+        _ = restoreSessionHostInputSmokeInputSource()
+        restoreSessionHostInputSmokePasteboard()
         tickTimer?.invalidate()
         tickTimer = nil
         smokeTimer?.invalidate()
@@ -5796,6 +5825,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // explicitSurface로 지정해, 세션별 forwarder(window/appSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickAppSession() {
         guard !windows.isEmpty || quick != nil else { return }
+        prepareSessionHostInputSmokePasteboard()
 
         // 일반 창들을 순회 tick(컬렉션 변형은 루프 뒤에서 — closeWindowOrQuit이 windows를 바꾸므로). 셸이 정상
         // 종료(SessionEnded)/fault면 그 창을 닫되, 마지막 일반 창이면 앱 종료(D4 — closeWindowOrQuit이 판정).
@@ -5838,6 +5868,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         maybeRunScrollbarSmokeEntry()
         maybeRunTabDragSmokeEntry()
         maybeRunSessionHostRecoverySmoke()
+        maybeRunSessionHostInputContinuitySmoke()
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -8685,6 +8716,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             sessionHostRecoverySmokeCaptureRetries = 0
             sessionHostRecoverySmokeStage = 2
+            if isSessionHostInputContinuitySmokeMode { return }
             // 자동 종료도 실제 제품 Quit state machine을 통과시킨다. smokeMode의 즉시
             // NSApp.terminate만 쓰면 Zig의 app-global detach snapshot이 게시되지 않아, 테스트가
             // 방금 복구한 host runtime을 명시 close처럼 종료해 버린다. confirm을 제품 key path로
@@ -8739,7 +8771,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard isSessionHostRecoverySmokeMode, let renderer = surface.metalRenderer else { return false }
         guard let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
         let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
-        guard root.lastPathComponent == "session-host-cr6c-home",
+        let expectedRoot = isSessionHostInputContinuitySmokeMode
+            ? "session-host-cr6d-home"
+            : "session-host-cr6c-home"
+        guard root.lastPathComponent == expectedRoot,
               root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
         let dir = root.appendingPathComponent("captures", isDirectory: true)
         var isDirectory: ObjCBool = false
@@ -8760,6 +8795,376 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         sessionHostRecoverySmokeStage = 3
         exitCode = 1
         DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
+    /// CR6d의 pasteboard sentinel은 첫 session tick보다 먼저 설치한다. 그래야 복구 시 historical
+    /// screen에 남아 있던 OSC 52가 재실행돼도 이 값이 바뀌는 것으로 관측할 수 있다.
+    private func prepareSessionHostInputSmokePasteboard() {
+        guard isSessionHostInputContinuitySmokeMode, !sessionHostInputSmokePasteboardPrepared else { return }
+        let pasteboard = NSPasteboard.general
+        sessionHostInputSmokeOriginalPasteboard = (pasteboard.pasteboardItems ?? []).map { item in
+            var copy: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) { copy[type] = data }
+            }
+            return copy
+        }
+        pasteboard.clearContents()
+        guard pasteboard.setString("CR6D-PASTEBOARD-SENTINEL", forType: .string) else {
+            failSessionHostInputSmoke("pasteboard-sentinel")
+            return
+        }
+        sessionHostInputSmokePasteboardPrepared = true
+    }
+
+    private func restoreSessionHostInputSmokePasteboard() {
+        guard isSessionHostInputContinuitySmokeMode, sessionHostInputSmokePasteboardPrepared,
+              !sessionHostInputSmokePasteboardRestored,
+              let snapshot = sessionHostInputSmokeOriginalPasteboard else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let items = snapshot.map { fields -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in fields { item.setData(data, forType: type) }
+            return item
+        }
+        if !items.isEmpty { pasteboard.writeObjects(items) }
+        sessionHostInputSmokePasteboardRestored = true
+    }
+
+    /// 시스템 전역 source를 바꾸는 유일한 제품-process 지점이다. CR6d opt-in과 격리된
+    /// artifact root를 모두 확인한 뒤 record를 먼저 쓰므로 SIGKILL 뒤에도 부모가 복원할 수 있다.
+    private func prepareSessionHostInputSmokeInputSource() -> Bool {
+        guard isSessionHostInputContinuitySmokeMode,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"]
+        else { return false }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6d-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let recordURL = root.appendingPathComponent("input-source-restore.json", isDirectory: false).standardizedFileURL
+        guard recordURL.deletingLastPathComponent() == root else { return false }
+        do {
+            let original = try SessionHostInputSourcePolicy.prepareKoreanSelection(recordURL: recordURL)
+            sessionHostInputSmokeOriginalGlobalSource = original
+            sessionHostInputSmokeSourceRecordURL = recordURL
+            sessionHostInputSmokeGlobalSourceSelected = true
+            return true
+        } catch {
+            sessionHostInputSmokeSourceRecordURL = recordURL
+            return false
+        }
+    }
+
+    /// current가 smoke-selected source일 때만 original을 복원한다. 제3 source는 사용자가 바꾼
+    /// 것으로 간주해 덮지 않으며, 남은 record를 부모 helper가 같은 규칙으로 판정하게 둔다.
+    @discardableResult
+    private func restoreSessionHostInputSmokeInputSource() -> Bool {
+        guard isSessionHostInputContinuitySmokeMode,
+              sessionHostInputSmokeGlobalSourceSelected,
+              let original = sessionHostInputSmokeOriginalGlobalSource,
+              let recordURL = sessionHostInputSmokeSourceRecordURL else { return true }
+        let outcome = SessionHostInputSourcePolicy.restore(recordURL: recordURL)
+        guard outcome == .restored || outcome == .noRecord,
+              SessionHostInputSourcePolicy.currentSourceID() == original,
+              !FileManager.default.fileExists(atPath: recordURL.path) else { return false }
+        sessionHostInputSmokeGlobalSourceRestored = true
+        sessionHostInputSmokeSourceRecordCleared = true
+        return true
+    }
+
+    func recordSessionHostInputSmokeMarked() {
+        guard isSessionHostInputContinuitySmokeMode else { return }
+        if sessionHostInputSmokeMarkedCallbacks == UInt32.max {
+            failSessionHostInputSmoke("marked-overflow")
+        } else {
+            sessionHostInputSmokeMarkedCallbacks += 1
+        }
+    }
+
+    func recordSessionHostInputSmokeInsert() {
+        guard isSessionHostInputContinuitySmokeMode else { return }
+        if sessionHostInputSmokeInsertCallbacks == UInt32.max {
+            failSessionHostInputSmoke("insert-overflow")
+        } else {
+            sessionHostInputSmokeInsertCallbacks += 1
+        }
+    }
+
+    /// CR6d는 CR6c가 실제 sidebar click으로 복구한 바로 그 AppKit view를 사용한다. 한글은
+    /// view-local NSTextInputContext와 물리 keyCode로, paste는 실제 Cmd+V keyDown으로 넣는다.
+    private func maybeRunSessionHostInputContinuitySmoke() {
+        guard isSessionHostInputContinuitySmokeMode, sessionHostRecoverySmokeStage == 2,
+              sessionHostInputSmokeStage < 4, let surface = primary,
+              let session = surface.appSession, let view = surface.view,
+              let window = surface.window else { return }
+        var probe = MaruAppHostSessionHostInputSmokeProbe()
+        guard maru_macos_app_session_input_smoke_probe(session, &probe) == Self.statusOK,
+              probe.active_remote != 0 else {
+            retrySessionHostInputSmoke("probe")
+            return
+        }
+        sessionHostInputSmokeHistoricalCount = probe.historical_count
+        sessionHostInputSmokeImeCount = probe.ime_count
+        sessionHostInputSmokeClipboardCount = probe.clipboard_count
+        guard probe.historical_count == 1, probe.ime_count <= 1, probe.clipboard_count <= 1 else {
+            failSessionHostInputSmoke("screen-count")
+            return
+        }
+
+        switch sessionHostInputSmokeStage {
+        case 0:
+            guard sessionHostInputSmokePasteboardPrepared else {
+                failSessionHostInputSmoke("pasteboard-sentinel")
+                return
+            }
+            let currentPasteboard = NSPasteboard.general.string(forType: .string)
+            if currentPasteboard == "CR6D-HISTORICAL.OSC52" {
+                failSessionHostInputSmoke("historical-osc52-replayed")
+                return
+            }
+            let expectedPasteboard = sessionHostInputSmokeKeyIndex == 0
+                ? "CR6D-PASTEBOARD-SENTINEL"
+                : "CR6D-CLIPBOARD-ONCE"
+            if currentPasteboard != expectedPasteboard {
+                // Re-arming would erase evidence. Before Cmd+V only the historical sentinel is
+                // valid; after dispatch the marker written by this smoke must remain exact.
+                failSessionHostInputSmoke("pasteboard-sentinel-drift")
+                return
+            }
+            // Recovery click publication and AppKit first-responder transfer are separate run-loop
+            // effects. Do not send the real shortcut while a recovery overlay still owns input or
+            // before this exact recovered view is the key responder; that would test a race rather
+            // than Cmd+V continuity.
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            guard !anyOverlayOpen, window.makeFirstResponder(view), window.firstResponder === view else {
+                retrySessionHostInputSmoke("clipboard-focus")
+                return
+            }
+            sessionHostInputSmokeHistoricalClipboardPreserved = true
+            let pasteboard = NSPasteboard.general
+            if sessionHostInputSmokeKeyIndex == 0 {
+                pasteboard.clearContents()
+                guard pasteboard.setString("CR6D-CLIPBOARD-ONCE", forType: .string),
+                      dispatchSessionHostInputKey(
+                        keyCode: 9, characters: "v", modifiers: .command, view: view, window: window
+                      ) else {
+                    failSessionHostInputSmoke("clipboard-event")
+                    return
+                }
+                // Paste dispatch can enqueue ownership work. Return belongs to the next AppKit
+                // owner turn so it cannot overtake the actual pasteboard read.
+                sessionHostInputSmokeKeyIndex = 1
+                return
+            }
+            guard dispatchSessionHostInputKey(
+                keyCode: 36, characters: "\r", modifiers: [], view: view, window: window
+            ) else {
+                failSessionHostInputSmoke("clipboard-event")
+                return
+            }
+            sessionHostInputSmokeKeyIndex = 0
+            sessionHostInputSmokeStage = 1
+            sessionHostInputSmokeRetries = 0
+        case 1:
+            guard probe.clipboard_count == 1 else {
+                retrySessionHostInputSmoke("clipboard-timeout")
+                return
+            }
+            guard let context = view.inputContext else {
+                failSessionHostInputSmoke("input-context")
+                return
+            }
+            sessionHostInputSmokeOriginalSource = context.selectedKeyboardInputSource
+            NSApp.activate(ignoringOtherApps: true)
+            _ = NSRunningApplication.current.activate(options: [.activateAllWindows])
+            window.makeKeyAndOrderFront(nil)
+            guard window.makeFirstResponder(view), sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else {
+                retrySessionHostInputSmoke("global-keyboard-focus")
+                return
+            }
+            // Only the explicit CR6d smoke posts system HID events. Check TCC before changing the
+            // system-global source so a machine without the opt-in permission is mutation-free.
+            guard CGPreflightPostEventAccess() else {
+                failSessionHostInputSmoke("accessibility-unavailable")
+                return
+            }
+            sessionHostInputSmokePostEventAccess = true
+            guard prepareSessionHostInputSmokeInputSource() else {
+                failSessionHostInputSmoke("global-input-source")
+                return
+            }
+            context.deactivate()
+            context.selectedKeyboardInputSource = SessionHostInputSourcePolicy.korean2SetSourceID
+            context.activate()
+            guard context.selectedKeyboardInputSource == SessionHostInputSourcePolicy.korean2SetSourceID,
+                  SessionHostInputSourcePolicy.currentSourceID() == SessionHostInputSourcePolicy.korean2SetSourceID else {
+                failSessionHostInputSmoke("input-source")
+                return
+            }
+            sessionHostInputSmokeKeyIndex = 0
+            sessionHostInputSmokeStage = 3
+            sessionHostInputSmokeRetries = 0
+        case 3:
+            // InputContext activation and each composition callback get their own AppKit run-loop
+            // turn. A pre-filled NSEvent.characters string would bypass the selected IME and merely
+            // insert six Latin letters, so the IME row uses HID-derived CGEvents instead.
+            let keys: [UInt16] = [5, 40, 1, 15, 46, 3]
+            guard let context = view.inputContext else {
+                failSessionHostInputSmoke("input-context")
+                return
+            }
+            if context.selectedKeyboardInputSource != SessionHostInputSourcePolicy.korean2SetSourceID ||
+                SessionHostInputSourcePolicy.currentSourceID() != SessionHostInputSourcePolicy.korean2SetSourceID {
+                context.deactivate()
+                context.selectedKeyboardInputSource = SessionHostInputSourcePolicy.korean2SetSourceID
+                context.activate()
+                retrySessionHostInputSmoke("input-source-drift")
+                return
+            }
+            guard sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else {
+                NSApp.activate(ignoringOtherApps: true)
+                _ = NSRunningApplication.current.activate(options: [.activateAllWindows])
+                view.window?.makeKeyAndOrderFront(nil)
+                retrySessionHostInputSmoke("global-keyboard-focus-drift")
+                return
+            }
+            if sessionHostInputSmokeKeyIndex < keys.count {
+                guard dispatchSessionHostInputPhysicalKey(
+                    keyCode: keys[sessionHostInputSmokeKeyIndex], view: view
+                ) else {
+                    failSessionHostInputSmoke("ime-event")
+                    return
+                }
+                sessionHostInputSmokeKeyIndex += 1
+                return
+            }
+            guard dispatchSessionHostInputPhysicalKey(keyCode: 36, view: view) else {
+                failSessionHostInputSmoke("ime-enter")
+                return
+            }
+            sessionHostInputSmokeStage = 2
+            sessionHostInputSmokeRetries = 0
+        case 2:
+            guard probe.ime_count == 1 else {
+                retrySessionHostInputSmoke("ime-timeout")
+                return
+            }
+            guard sessionHostInputSmokeMarkedCallbacks > 0,
+                  sessionHostInputSmokeInsertCallbacks > 0,
+                  !view.hasMarkedText(), view.inputContext != nil else {
+                failSessionHostInputSmoke("ime-callback")
+                return
+            }
+            guard restoreSessionHostInputSmokeViewSource() else {
+                failSessionHostInputSmoke("input-source-restore")
+                return
+            }
+            guard restoreSessionHostInputSmokeInputSource() else {
+                failSessionHostInputSmoke("global-input-source-restore")
+                return
+            }
+            restoreSessionHostInputSmokePasteboard()
+            sessionHostInputSmokeStage = 4
+            sessionHostInputSmokeRetries = 0
+            maru_macos_app_session_request_app_quit(session)
+            sendKeyEvent(MaruAppHostKeyEvent(
+                codepoint: 0, base_codepoint: 0,
+                key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
+                modifier_shift: 0, modifier_control: 0, modifier_option: 0, modifier_command: 0,
+                is_repeat: 0, raw_key_code: 36
+            ))
+        default:
+            break
+        }
+    }
+
+    private func dispatchSessionHostInputKey(
+        keyCode: UInt16,
+        characters: String,
+        modifiers: NSEvent.ModifierFlags,
+        view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: keyCode
+        ) else { return false }
+        view.keyDown(with: event)
+        return true
+    }
+
+    private func dispatchSessionHostInputPhysicalKey(
+        keyCode: UInt16,
+        view: MaruMetalTerminalView
+    ) -> Bool {
+        guard view.window?.firstResponder === view else { return false }
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
+        guard let down = CGEvent(
+            keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: true
+        ), let up = CGEvent(
+            keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: false
+        ) else { return false }
+        // Process-targeted or AppKit-created events bypass TSM. Posting at the HID tap is the
+        // public route that makes the selected system input source produce marked/insert callbacks.
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
+
+    private func sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: MaruMetalTerminalView) -> Bool {
+        return NSApp.isActive && view.window?.firstResponder === view &&
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()
+    }
+
+    /// View-local TSM selection must be restored before the system-global source. AppKit may
+    /// publish the view selection while tearing down its context; reversing this order can turn
+    /// a smoke RED into a late global source drift that the parent correctly refuses to overwrite.
+    @discardableResult
+    private func restoreSessionHostInputSmokeViewSource() -> Bool {
+        guard let original = sessionHostInputSmokeOriginalSource else { return true }
+        guard let view = primary?.view, let context = view.inputContext else { return false }
+        context.discardMarkedText()
+        context.deactivate()
+        context.selectedKeyboardInputSource = original
+        context.activate()
+        guard context.selectedKeyboardInputSource == original else { return false }
+        sessionHostInputSmokeViewSourceRestored = true
+        return true
+    }
+
+    private func retrySessionHostInputSmoke(_ reason: String) {
+        if sessionHostInputSmokeRetries == UInt32.max || sessionHostInputSmokeRetries >= 600 {
+            failSessionHostInputSmoke(reason)
+        } else {
+            sessionHostInputSmokeRetries += 1
+        }
+    }
+
+    private func failSessionHostInputSmoke(_ reason: String) {
+        guard sessionHostInputSmokeFailure.isEmpty else { return }
+        sessionHostInputSmokeFailure = reason
+        _ = restoreSessionHostInputSmokeViewSource()
+        _ = restoreSessionHostInputSmokeInputSource()
+        restoreSessionHostInputSmokePasteboard()
+        exitCode = 1
+        sessionHostInputSmokeStage = 4
+        if let session = primary?.appSession {
+            // A RED must still leave the recovered runtime under the same detach contract as a
+            // GREEN run. Direct NSApp termination would bypass the product quit decision and can
+            // turn a smoke assertion failure into an unrelated runtime-termination failure.
+            maru_macos_app_session_request_app_quit(session)
+            sendKeyEvent(MaruAppHostKeyEvent(
+                codepoint: 0, base_codepoint: 0,
+                key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
+                modifier_shift: 0, modifier_control: 0, modifier_option: 0, modifier_command: 0,
+                is_repeat: 0, raw_key_code: 36
+            ))
+        } else {
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
     }
 
     private var isTabDragSmokeMode: Bool {
@@ -10337,6 +10742,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_recovery_smoke_surface_initialized=\(sessionHostRecoverySmokeSurfaceInitialized)
         session_host_recovery_smoke_active_remote_observed=\(sessionHostRecoverySmokeActiveRemoteObserved)
         session_host_recovery_smoke_marker_observed=\(sessionHostRecoverySmokeMarkerObserved)
+        session_host_input_smoke_stage=\(sessionHostInputSmokeStage)
+        session_host_input_smoke_historical_count=\(sessionHostInputSmokeHistoricalCount)
+        session_host_input_smoke_ime_count=\(sessionHostInputSmokeImeCount)
+        session_host_input_smoke_clipboard_count=\(sessionHostInputSmokeClipboardCount)
+        session_host_input_smoke_marked_callbacks=\(sessionHostInputSmokeMarkedCallbacks)
+        session_host_input_smoke_insert_callbacks=\(sessionHostInputSmokeInsertCallbacks)
+        session_host_input_smoke_historical_clipboard_preserved=\(sessionHostInputSmokeHistoricalClipboardPreserved)
+        session_host_input_smoke_view_source_restored=\(sessionHostInputSmokeViewSourceRestored)
+        session_host_input_smoke_global_source_selected=\(sessionHostInputSmokeGlobalSourceSelected)
+        session_host_input_smoke_global_source_restored=\(sessionHostInputSmokeGlobalSourceRestored)
+        session_host_input_smoke_post_event_access=\(sessionHostInputSmokePostEventAccess)
+        session_host_input_smoke_source_record_cleared=\(sessionHostInputSmokeSourceRecordCleared)
+        session_host_input_smoke_failure=\(sessionHostInputSmokeFailure)
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)
         agent_session_archive_smoke_scenario=\(archiveSmokeScenario)

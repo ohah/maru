@@ -158,7 +158,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    decision inventory를 전수 소비한다. executor의 inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며
    runtime size golden으로 고정한다. e3은 다음 세 하위 gate를 순서대로 닫는다. **e3a**는 실제 제품
    `RemoteGeneration` candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는
-   **e3a1 완료** (candidate allocation 1개, CR5b-2a retirement preparation owner 반영 뒤 Debug 3,472바이트/ReleaseFast 3,456바이트; abort baseline 복원,
+   **e3a1 완료** (candidate allocation 1개, CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner 반영 뒤 Debug 3,504바이트/ReleaseFast 3,488바이트; abort baseline 복원,
    두 reconnect 뒤 heap current 1개, teardown final 0)와,
    별도 ReleaseFast process RSS를 측정하고, generation당 구조적 charge 상한
    `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은 64개 fixed
@@ -1255,8 +1255,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    double-click/replay는 reducer·topology·takeover/terminate wire mutation 0이어야 한다.
 8. **CR6 — 제품 gate:** CR6c에서 actual daemon/manifest → 일반 launch discovery → primary recovery row → 실제
    AppKit `NSEvent` click → remote Term/CAMetalLayer readback을 먼저 닫는다. 다음 CR6d는 실제 macOS IME와 OS
-   clipboard의 reconnect 연속성·historical replay 0을, CR6e는 stalled socket/backoff와 장시간 soak·성능 예산을
-   닫는다. 이 세 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다.
+   clipboard의 reconnect 연속성·historical replay 0을 닫는다. CR6d는 복구된 실제 `MaruMetalTerminalView`의
+   `NSTextInputContext`를 2-Set Korean input source에 결속한 뒤 Accessibility event-post 권한을 사전 확인하고 HID event tap의 물리 key-code `CGEvent`로 `한글`을 조합·확정하고,
+   `NSPasteboard.general`에 넣은 구분 가능한 UTF-8 한 줄을 실제 Cmd+V `NSEvent`로 붙인다. `/bin/cat` runtime의
+   제품 screen projection에는 IME와 clipboard marker가 각각 exact 1이어야 하며, 복구 전에 host가 한 번 출력한
+   historical marker도 exact 1을 유지해야 한다. 복구 전 OSC 52 write는 새 AppKit process의 pasteboard sentinel을
+   바꾸면 안 되고, 새 Cmd+V 직전의 pasteboard 값만 실제 PTY 입력이 된다. 실제 macOS IME가 합성 물리 키를 처리하도록
+   opt-in smoke에서만 시스템 전역 source를 한국어 2벌식으로 전환한다. 권한이 없으면 전환 전 `accessibility-unavailable`로 닫는다. original/selected ID를 전환 전 atomic record로
+   남기고 정상·실패·종료에서 복원하며, 앱 강제 종료 뒤에는 부모의 별도 restore helper가 같은 record를 소비한다.
+   복원은 current가 selected와 같을 때만 original을 다시 선택해 사용자 중간 변경을 덮지 않는다. view-local
+   `NSTextInputContext`, marked text와 first-responder state도 종료 전에 정산하고 current source exact original과 restore
+   record 소멸을 executable oracle로 고정한다. CR6e는 stalled socket/backoff와 장시간 soak·성능 예산을 닫는다.
+   이 세 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다.
 
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.

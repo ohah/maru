@@ -1385,7 +1385,10 @@ pub fn validPreparedEventReleasePermit(value: *const PreparedEventReleasePermit)
         std.mem.allEqual(u8, &value.lease_seal_digest, 0) or
         std.mem.allEqual(u8, &value.release_receipt_digest, 0) or
         std.mem.allEqual(u8, &value.event_owner_seal, 0) or value.payload_addr == 0 or value.payload_len == 0 or
-        std.mem.allEqual(u8, &value.payload_digest, 0) or value.allocator_ptr == 0 or value.allocator_vtable == 0 or
+        // Stateless allocators (including the product allocator used by the macOS app) legally
+        // carry a zero context pointer. The vtable is the presence discriminator; the context is
+        // still sealed and must match the quarantine mirror exactly throughout release.
+        std.mem.allEqual(u8, &value.payload_digest, 0) or value.allocator_vtable == 0 or
         value.pin_owner_addr == 0 or value.lease_addr == 0 or value.slot_addr == 0 or value.node_addr == 0 or
         value.pin_slot_incarnation == 0 or value.pin_node_incarnation == 0 or value.host_id == 0 or
         value.connection_generation == 0 or value.pin_process_nonce == 0 or

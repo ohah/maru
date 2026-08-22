@@ -11463,8 +11463,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3472,
-        .ReleaseFast => 3456,
+        .Debug => 3504,
+        .ReleaseFast => 3488,
         else => error.SkipZigTest,
     };
 }
@@ -14801,26 +14801,26 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 11280,
-            .ReleaseFast => 11232,
+            .Debug => 11312,
+            .ReleaseFast => 11264,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 11264,
-            .ReleaseFast => 11216,
+            .Debug => 11296,
+            .ReleaseFast => 11248,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8560,
-            .ReleaseFast => 8512,
+            .Debug => 8592,
+            .ReleaseFast => 8544,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 8544,
-            .ReleaseFast => 8496,
+            .Debug => 8576,
+            .ReleaseFast => 8528,
             else => unreachable,
         },
         else => unreachable,
@@ -17631,20 +17631,20 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3424,
-        .ReleaseFast => 3408,
+        .Debug => 3456,
+        .ReleaseFast => 3440,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 11280,
-            .ReleaseFast => 11232,
+            .Debug => 11312,
+            .ReleaseFast => 11264,
             else => unreachable,
         },
         .linux => switch (builtin.mode) {
-            .Debug => 11264,
-            .ReleaseFast => 11216,
+            .Debug => 11296,
+            .ReleaseFast => 11248,
             else => unreachable,
         },
         else => unreachable,

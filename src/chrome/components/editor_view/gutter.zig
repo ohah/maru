@@ -131,18 +131,26 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
                     runs[run_used] = .{ .text = mark };
                     const mark_slice = runs[run_used .. run_used + 1];
                     run_used += 1;
-                    out[op_count] = .{ .text = .{
-                        .origin = .{
-                            .x = props.origin_px.x + @as(i32, props.layout.folding.start) * @as(i32, props.cell_w_px),
-                            .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+                    out[op_count] = .{
+                        .text = .{
+                            .origin = .{
+                                // **span의 시작이 아니라 `foldMarkCol`이다.** 접기 span은 두 셀이고
+                                // 화살표는 그중 오른쪽 칸에 선다 — 왼쪽 칸이 우측 정렬된 줄 번호와의
+                                // 여백이다(`geometry.folding_cells` doc). 어느 칸인지는 저기가 소유한다:
+                                // 여기서 따로 세면 클릭을 받는 쪽과 갈린다(§5.4).
+                                .x = props.origin_px.x + @as(i32, props.layout.foldMarkCol()) * @as(i32, props.cell_w_px),
+                                .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+                            },
+                            .runs = mark_slice,
+                            .role = line_number_role,
+                            // **한 칸이다** — span이 두 셀이어도 글자는 하나이고, 그 자리에서 오른쪽으로
+                            // 남는 칸은 본문 여백이 아니라 `content_gap`의 몫이다.
+                            .max_cols = 1,
+                            .font_px = props.font_px,
+                            .line_height_px = props.cell_h_px,
+                            .cell_w_px = props.cell_w_px,
                         },
-                        .runs = mark_slice,
-                        .role = line_number_role,
-                        .max_cols = props.layout.folding.width,
-                        .font_px = props.font_px,
-                        .line_height_px = props.cell_h_px,
-                        .cell_w_px = props.cell_w_px,
-                    } };
+                    };
                     op_count += 1;
                 }
             }
@@ -385,6 +393,34 @@ test "접힘 표식 몫까지 예약한다 — 예약이 모자라면 뒤쪽 줄
     const w = build(testProps(layout, &rows), &ops, scratch, runs[0..]);
     try testing.expectEqual(@as(usize, 0), w.dropped_rows); // 한 줄도 못 그린 것이 없다
     try testing.expect(w.bytes <= need);
+}
+
+test "접힘 화살표는 줄 번호와 한 칸 뜬다 — 맞붙으면 숫자에 붙어 보인다" {
+    // **이 자리에 판정자가 없었다.** 화살표가 접기 span의 *시작*에 서던 때에는 우측 정렬된 번호의
+    // 마지막 자리와 늘 맞붙었고(열 5 → 열 6), 실제 앱에서 *"숫자랑 너무 붙어 있다"*는 지적이
+    // 나왔다(2026-08-22). 표식이 서는지만 보던 위 테스트들은 **열을 재지 않아** 그것을 못 잡는다.
+    const layout = geometry.compute(80, 100, .{});
+    const rows = [_]Row{.{ .number = 7, .visual_row = 0, .fold = .open }};
+
+    var ops: [4]draw.Op = undefined;
+    var scratch: [32]u8 = undefined;
+    var runs: [4]draw.Run = undefined;
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
+
+    try testing.expectEqual(@as(usize, 2), w.ops); // 화살표 + 번호
+    // 화살표가 먼저 나온다(`build`가 번호보다 앞에 낸다).
+    try testing.expectEqualStrings("\u{25BC}", ops[0].text.runs[0].text);
+    try testing.expectEqualStrings("7", ops[1].text.runs[0].text);
+
+    const cell_w: i32 = 8;
+    const mark_col = @divExact(ops[0].text.origin.x, cell_w);
+    const number_col = @divExact(ops[1].text.origin.x, cell_w);
+    // 번호는 열 5(영역 1~5의 오른쪽 끝), 화살표는 열 7 — **사이에 빈 칸이 하나 있다.**
+    try testing.expectEqual(@as(i32, 5), number_col);
+    try testing.expectEqual(@as(i32, layout.foldMarkCol()), mark_col);
+    try testing.expect(mark_col - number_col >= 2);
+    // 본문 쪽으로도 한 칸 뜬다 — 한쪽만 띄우면 화살표가 반대쪽에 붙어 보인다.
+    try testing.expectEqual(@as(i32, layout.contentLeft()) - 2, mark_col);
 }
 
 test "줄 번호는 우측 정렬된다 — 자릿수가 달라도 본문과의 간격이 같아야 한다" {

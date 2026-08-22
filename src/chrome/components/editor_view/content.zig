@@ -1122,13 +1122,15 @@ test "first_piece: 랩된 줄의 중간 행부터 화면이 시작한다" {
     var vrows: [8]visual_map.VisualRow = undefined;
     var scratch: [256]u8 = undefined;
 
-    const rows = [_]Row{ .{ .bytes = "0123456789" ** 4 }, .{ .bytes = "next" } };
+    const long = "0123456789" ** 4;
+    const rows = [_]Row{ .{ .bytes = long }, .{ .bytes = "next" } };
     var props = testProps(layout, &rows);
     props.wrap = true;
 
-    // 건너뛰지 않으면 첫 조각부터.
+    // 건너뛰지 않으면 첫 조각부터. **첫 조각의 길이는 본문 폭이 정한다** — 숫자를 적으면 gutter
+    // 배분이 바뀔 때마다 낡는다(접기 칸이 1→2셀이 되며 실제로 그랬다).
     const all = build(props, &ops, &scratch, &runs, &vrows);
-    try testing.expectEqualStrings("012345678901", ops[0].text.runs[0].text);
+    try testing.expectEqualStrings(long[0..layout.content.width], ops[0].text.runs[0].text);
     const total = all.visual_rows;
 
     // 두 조각을 건너뛰면 세 번째 조각이 화면 첫 행이다.
@@ -1472,8 +1474,9 @@ test "본문은 gutter 오른쪽에서 시작한다" {
     const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
 
     try testing.expectEqual(@as(usize, 1), w.ops);
-    // gutter 8셀 뒤에서 시작해야 한다(여백 1 + 번호 5 + 접기 1 + 여백 1).
-    try testing.expectEqual(@as(i32, 8 * 8), ops[0].text.origin.x);
+    // **셀 수를 손으로 적지 않는다** — 배분은 `geometry`가 소유하고(여백 1 + 번호 5 + 접기 2 + 여백 1),
+    // 여기서 다시 적으면 그쪽이 바뀔 때 이 판정이 조용히 낡는다(실제로 접기 칸이 1→2셀이 되며 그랬다).
+    try testing.expectEqual(@as(i32, @as(i32, layout.contentLeft()) * 8), ops[0].text.origin.x);
     try testing.expectEqualStrings("const x = 1;", ops[0].text.runs[0].text);
 }
 

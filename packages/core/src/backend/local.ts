@@ -23,6 +23,8 @@ const decoder = new TextDecoder();
  */
 export class LocalBackend implements Backend {
   #w: WasmExports;
+  /** 입력 버퍼 용량. wasm 이 정한다 — TS 에 상수로 복제하면 어긋난다. */
+  readonly #inputCap: number;
   /** 화면에 들어가 있는 조합 텍스트의 셀 폭. 되돌릴 때 이만큼만 지운다. */
   #preeditCells = 0;
   #h: number;
@@ -34,6 +36,7 @@ export class LocalBackend implements Backend {
 
   private constructor(w: WasmExports, h: number, size: Size) {
     this.#w = w;
+    this.#inputCap = w.input_cap();
     this.#h = h;
     this.#size = size;
   }
@@ -62,13 +65,26 @@ export class LocalBackend implements Backend {
     this.#markDirty();
   }
 
+  /**
+   * 입력 버퍼에 바이트를 놓는 **유일한 통로**. 넘치는 만큼 잘라 낸 길이를 돌려준다.
+   *
+   * 이 검사가 없으면 `new Uint8Array(memory, ptr, len).set(bytes)` 가 예외 없이 인접 정적
+   * 버퍼(`cell_buf` 등)를 덮어쓴다 — 선형 메모리는 넉넉하고 wasm 은 ReleaseSmall 이라 트랩도
+   * 없다. 200 KB 붙여넣기가 스냅샷 버퍼를 밟는 경로가 실제로 있었다.
+   */
+  #stage(bytes: Uint8Array): number {
+    const cap = this.#inputCap;
+    const n = Math.min(bytes.length, cap);
+    new Uint8Array(this.#w.memory.buffer, this.#w.input_ptr(), n).set(bytes.subarray(0, n));
+    return n;
+  }
+
   #writeRaw(bytes: Uint8Array): void {
-    // 입력 버퍼(64 KiB)보다 크면 나눠 넣는다 — 한 번에 밀면 넘친 만큼 조용히 잘린다.
-    const cap = 1 << 16;
+    // 버퍼보다 크면 나눠 넣는다 — write 는 순수 바이트 스트림이라 나눠도 결과가 같다.
+    const cap = this.#inputCap;
     for (let off = 0; off < bytes.length; off += cap) {
-      const chunk = bytes.subarray(off, Math.min(off + cap, bytes.length));
-      new Uint8Array(this.#w.memory.buffer, this.#w.input_ptr(), chunk.length).set(chunk);
-      this.#w.vt_write(this.#h, chunk.length);
+      const n = this.#stage(bytes.subarray(off, Math.min(off + cap, bytes.length)));
+      this.#w.vt_write(this.#h, n);
     }
   }
 
@@ -84,8 +100,14 @@ export class LocalBackend implements Backend {
   paste(text: string): void {
     if (this.#disposed) return;
     const bytes = encoder.encode(text);
-    new Uint8Array(this.#w.memory.buffer, this.#w.input_ptr(), bytes.length).set(bytes);
-    const n = this.#w.vt_paste(this.#h, bytes.length);
+    // **붙여넣기는 나눌 수 없다** — `vt_paste` 가 bracketed 마커로 한 번 감싸므로 청킹하면
+    // 마커가 여러 번 붙는다. 버퍼를 넘으면 잘라 넣고 알린다(조용히 흘리지 않는다).
+    if (bytes.length > this.#inputCap) {
+      console.warn(
+        `maru-term: 붙여넣기가 입력 버퍼를 넘어 잘렸다 — ${bytes.length} → ${this.#inputCap} 바이트`,
+      );
+    }
+    const n = this.#w.vt_paste(this.#h, this.#stage(bytes));
     if (n > 0) this.#emitData(this.#read(this.#w.paste_ptr(), n));
   }
 
@@ -219,16 +241,12 @@ export class LocalBackend implements Backend {
   }
 
   #measureSync(text: string): number {
-    const bytes = encoder.encode(text);
-    new Uint8Array(this.#w.memory.buffer, this.#w.input_ptr(), bytes.length).set(bytes);
-    return this.#w.measure_cells(bytes.length);
+    return this.#w.measure_cells(this.#stage(encoder.encode(text)));
   }
 
   // ── 조회 ─────────────────────────────────────────────────
   measureCells(text: string): Promise<number> {
-    const bytes = encoder.encode(text);
-    new Uint8Array(this.#w.memory.buffer, this.#w.input_ptr(), bytes.length).set(bytes);
-    return Promise.resolve(this.#w.measure_cells(bytes.length));
+    return Promise.resolve(this.#measureSync(text));
   }
 
   snapshot(): Promise<Snapshot> {

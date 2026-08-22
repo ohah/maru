@@ -10,6 +10,8 @@ export interface WasmExports {
 
   /** 입력 바이트를 쓰는 자리. `vt_write`/`vt_paste`/`measure_cells`가 여기서 읽는다. */
   input_ptr(): number;
+  /** 입력 버퍼 용량(바이트). 이걸 넘겨 쓰면 인접 정적 버퍼를 덮어쓴다. */
+  input_cap(): number;
   /** 셀 스냅샷이 쓰이는 자리. 셀당 20바이트 레코드. */
   cells_ptr(): number;
   /** 프로시저럴 글리프 커버리지(RGBA). */

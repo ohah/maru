@@ -1,0 +1,5 @@
+# workspace 가 있으면 bun 이 isolated 링커를 쓰는데, 그러면 `lit` 처럼 재export 로 이뤄진
+# 패키지의 하위 의존(`lit-html`·`lit-element`)을 TypeScript 가 해석하지 못한다(실측:
+# "Module 'lit' has no exported member 'LitElement'"). web/ 과 같은 평평한 구조로 맞춘다.
+[install]
+linker = "hoisted"

@@ -1,0 +1,29 @@
+{
+  "name": "@maru/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Terminal emulator core (VT parsing, cell grid, key encoding) compiled to WebAssembly",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "wasm",
+    "README.md",
+    "fonts"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./wasm": "./wasm/maru-vt.wasm",
+    "./fonts/*": "./fonts/*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ohah/maru.git",
+    "directory": "packages/core"
+  }
+}

@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term worker harness</title>
+<style>
+  html,
+  body {
+    margin: 0;
+    background: #000;
+  }
+  .host {
+    width: 520px;
+    height: 460px;
+  }
+</style>
+<div id="host" class="host"></div>
+<script type="module">
+  import { Terminal } from "/core/dist/index.js";
+  const mode = new URLSearchParams(location.search).get("worker");
+  const term = new Terminal({
+    cols: 60,
+    rows: 20,
+    worker: mode === "false" ? false : "full",
+    wasmUrl: "/core/wasm/maru-vt.wasm",
+    theme: {
+      foreground: 0xc9d1d9,
+      background: 0x000000,
+      cursor: 0x58a6ff,
+      selectionBackground: 0x264f78,
+    },
+  });
+  await term.open(document.getElementById("host"));
+  globalThis.__term = term;
+  globalThis.__ready = true;
+</script>

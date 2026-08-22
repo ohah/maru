@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term harness</title>
+<style>
+  html,
+  body {
+    margin: 0;
+    background: #000;
+  }
+  #host {
+    width: 900px;
+    height: 520px;
+  }
+</style>
+<div id="host"></div>
+<script type="module">
+  import { Terminal } from "/core/dist/index.js";
+  // 이 하네스는 **메인 렌더**를 픽셀로 검증한다 — 워커 모드면 캔버스 소유권이 넘어가
+  // 메인에서 getImageData 를 못 부른다(워커 모드는 worker.html 이 따로 검증한다).
+  const term = new Terminal({
+    cols: 60,
+    rows: 20,
+    worker: false,
+    wasmUrl: "/core/wasm/maru-vt.wasm",
+    theme: {
+      foreground: 0xc9d1d9,
+      background: 0x000000,
+      cursor: 0x58a6ff,
+      selectionBackground: 0x264f78,
+    },
+  });
+  await term.open(document.getElementById("host"));
+  globalThis.__term = term;
+  globalThis.__ready = true;
+</script>

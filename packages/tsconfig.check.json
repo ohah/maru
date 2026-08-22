@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "core/src/**/*",
+    "react/src/**/*",
+    "vue/src/**/*",
+    "svelte/src/**/*",
+    "lit/src/**/*",
+    "*.d.ts"
+  ]
+}

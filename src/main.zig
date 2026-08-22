@@ -3582,12 +3582,17 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         .count_scratch = count_scratch,
     };
 
-    // 뷰 사각은 창 전체다. 제품은 pane 기하에서 오지만 스모크에는 pane 이 없다.
+    // 뷰 사각은 **클라이언트 전체**다. 제품은 pane 기하에서 오지만 스모크에는 pane 이 없다.
+    //
+    // **격자 크기(`cols*cell_w`)로 잡으면 안 된다.** 창은 셀 크기의 배수가 아니라 오른쪽·아래에
+    // 자투리가 남고(884×581 vs 격자 882×570), 그러면 **배경 quad 가 그 띠를 안 덮는다.** clear
+    // color 가 배경색과 같아서 안 보였다 — clear 를 초록으로 바꾼 대조군에서 정확히 그만큼인
+    // 16,656 px 이 초록으로 남아 드러났다.
     const view: maru.chrome.draw.Rect = .{
         .x = 0,
         .y = 0,
-        .w = @as(u32, grid.cols) * cell_w,
-        .h = @as(u32, grid.rows) * cell_h,
+        .w = host.initial.width_px,
+        .h = host.initial.height_px,
     };
     // **내용은 한 겹 들어가고 배경은 전체를 덮는다** — `buildPaneOps` 의 계약 그대로(§4.1b).
     const inset: i32 = @intCast(editor_view.frame.content_inset_px);
@@ -3608,7 +3613,13 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             .font_px = @intCast(cell_h),
         },
         inner,
-        .{ .x = -inset, .y = -inset, .w = view.w, .h = view.h },
+        // **배경은 안쪽 사각보다 사방 `inset` 만큼 넓다.** 제품은 내용을 pane 원점 + inset 에 놓고
+        // 배경을 pane 원점에 놓아 딱 맞는데, 스모크는 내용을 창 (0,0) 에 놓으므로 배경이 음수로
+        // 시작하는 만큼 폭·높이도 늘려야 오른쪽·아래가 안 빈다.
+        //
+        // 실측으로 걸렸다: clear 를 초록으로 바꾼 대조군에서 `884×581 − 880×577 = 5,844` px 이
+        // 초록으로 남았다. clear color 가 배경색과 같아서 눈으로는 안 보이던 자리다.
+        .{ .x = -inset, .y = -inset, .w = view.w + editor_view.frame.content_inset_px * 2, .h = view.h + editor_view.frame.content_inset_px * 2 },
         scratch,
     );
 
@@ -3707,7 +3718,12 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
 
     _ = try host.appendGlyphCells(allocator, frame, colors, &cells);
 
-    const frames = try host.presentLoop(cells.items, 0xFF1E2430, 120);
+    // **clear color 를 배경색과 일부러 다르게 둔다.** 같게 두면 배경 quad 가 어디를 안 덮어도
+    // 화면이 멀쩡해 보인다 — 실제로 그렇게 두 번 숨었다(격자 크기로 잡은 뷰 16,656 px, 배경
+    // 폭을 안 늘린 것 5,844 px). 마젠타면 안 덮인 자리가 캡처에서 **소리를 지른다.**
+    //
+    // 제대로 덮으면 이 색은 한 픽셀도 안 보인다(실측: 0/513,604).
+    const frames = try host.presentLoop(cells.items, 0xFFFF00FF, 120);
 
     // ── 판정 ─────────────────────────────────────────────────────────────────────────────────
     //

@@ -6,7 +6,9 @@ export type BackendEvent =
   | { type: "title"; title: string }
   | { type: "bell" }
   | { type: "resize"; size: Size }
-  | { type: "render"; frame: FrameData };
+  | { type: "render"; frame: FrameData }
+  /** `vt_modes` 가 바뀌었다. 마우스 추적 여부를 **동기로** 알아야 하는 DOM 층이 캐시한다. */
+  | { type: "modes"; value: number };
 
 /** 렌더러가 한 프레임을 그리는 데 필요한 전부. */
 export interface FrameData {
@@ -17,6 +19,14 @@ export interface FrameData {
   cellCount: number;
   selection: SelectionSpan | null;
   scroll: { offset: number; length: number };
+  /**
+   * `vt_modes` 비트. 마우스 추적 여부를 **동기로** 알아야 해서 프레임에 싣는다 — 워커 모드에서
+   * 조회는 비동기라 mousedown 안에서 물을 수 없다.
+   *
+   * bit0 bracketed paste · bit1 application cursor keys · bit2 keypad · bit3 ambiguous wide ·
+   * bits8+ mouse tracking(0 none, 1 x10, 2 normal, 3 button, 4 any)
+   */
+  modes: number;
 }
 
 export interface SelectionSpan {

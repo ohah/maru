@@ -11,6 +11,10 @@ export interface DomTarget {
   key(input: import("../types").KeyInput): void;
   paste(text: string): void;
   sendText(text: string): void;
+  /** `vt_modes` 비트. bits8+ 가 마우스 추적이다. */
+  readonly modes: number;
+  mouse(ev: import("../backend/types").MouseReport): void;
+  focus(gained: boolean): void;
   resize(cols: number, rows: number): void;
   scroll(deltaUp: number): void;
   scrollToBottom(): void;
@@ -138,6 +142,20 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   let clickTimer = 0;
   let lastCell: [number, number] = [-9, -9];
   let hoverLink = 0;
+  /** 앱이 마우스를 잡고 있는가(DECSET 1000/1002/1003). Shift 를 누르면 선택이 우선한다. */
+  const mouseGrabbed = (ev: MouseEvent): boolean => term.modes >> 8 !== 0 && !ev.shiftKey;
+  /** DOM 버튼 번호를 xterm 관례로 옮긴다(좌 0 · 중 1 · 우 2). */
+  const reportOf = (ev: MouseEvent, pressed: boolean, motion: boolean) => {
+    const [row, col] = cellOf(ev);
+    return {
+      button: ev.button === 1 ? 1 : ev.button === 2 ? 2 : 0,
+      col,
+      row,
+      pressed,
+      motion,
+      mods: (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
+    };
+  };
   let hoverCell: [number, number] = [-9, -9];
 
   const ctx2d = doRender ? canvas.getContext("2d") : null;
@@ -290,6 +308,14 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   };
 
   const onMouseDown = (ev: MouseEvent) => {
+    // 앱이 마우스를 켜 두었으면(vim `set mouse=a`, tmux, htop) 클릭은 **앱의 것**이다.
+    // Shift 를 누르면 관례대로 선택이 우선한다.
+    if (mouseGrabbed(ev)) {
+      term.mouse(reportOf(ev, true, false));
+      ev.preventDefault();
+      setTimeout(() => ime.focus(), 0);
+      return;
+    }
     if (ev.button !== 0) return;
     const [row, col] = cellOf(ev);
     // 연속 클릭은 **같은 셀 근처에서만** 누적한다. 위치를 안 보면 400ms 안의 아무 클릭이나
@@ -312,6 +338,14 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   };
 
   const onMouseMove = (ev: MouseEvent) => {
+    if (mouseGrabbed(ev)) {
+      // 3=button-event(드래그 중만) · 4=any-event(항상). 그 아래는 이동을 안 보낸다.
+      const track = term.modes >> 8;
+      if (track >= 4 || (track === 3 && ev.buttons !== 0)) {
+        term.mouse(reportOf(ev, ev.buttons !== 0, true));
+      }
+      return;
+    }
     const [row, col] = cellOf(ev);
     if (dragging) {
       term.selectExtend(row, col);
@@ -329,7 +363,11 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     });
   };
 
-  const onMouseUp = () => {
+  const onMouseUp = (ev: MouseEvent) => {
+    if (mouseGrabbed(ev)) {
+      term.mouse(reportOf(ev, false, false));
+      return;
+    }
     dragging = false;
   };
 
@@ -343,6 +381,19 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
 
   const onWheel = (ev: WheelEvent) => {
     ev.preventDefault();
+    if (mouseGrabbed(ev)) {
+      // 휠은 버튼 64/65 로 보낸다(xterm 관례) — less·htop 이 이걸로 스크롤한다.
+      const [row, col] = cellOf(ev);
+      term.mouse({
+        button: ev.deltaY < 0 ? 64 : 65,
+        col,
+        row,
+        pressed: true,
+        motion: false,
+        mods: (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
+      });
+      return;
+    }
     term.scroll(Math.sign(-ev.deltaY) * 3);
   };
 
@@ -359,6 +410,10 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   ime.addEventListener("input", () => {
     if (!composing) ime.value = "";
   });
+  // 포커스 리포트(DECSET 1004). 코어가 그 모드일 때만 바이트를 내므로 항상 불러도 안전하다 —
+  // vim 은 이걸로 `FocusGained`/`FocusLost` 를 띄우고 tmux 는 패널 활성화를 따라간다.
+  ime.addEventListener("focus", () => term.focus(true));
+  ime.addEventListener("blur", () => term.focus(false));
 
   const renderSub = term.onRender(() => redraw());
 

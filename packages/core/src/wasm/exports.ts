@@ -14,6 +14,8 @@ export interface WasmExports {
   input_cap(): number;
   /** 셀 스냅샷이 쓰이는 자리. 셀당 20바이트 레코드. */
   cells_ptr(): number;
+  /** 스냅샷이 담을 수 있는 최대 셀 수. 격자가 넘으면 아래쪽이 잘린다. */
+  cells_cap(): number;
   /** 프로시저럴 글리프 커버리지(RGBA). */
   glyph_ptr(): number;
   /** OSC 8 URI와 창 제목이 공유하는 자리. */

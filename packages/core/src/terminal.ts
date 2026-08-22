@@ -174,6 +174,7 @@ export class Terminal {
   #attachOptions(render = true) {
     return {
       fontFamily: this.#opts.fontFamily ?? DEFAULT_FONT,
+      cellsCap: (this.#backend as { cellsCap?: () => number } | null)?.cellsCap?.(),
       fontSize: this.#opts.fontSize ?? 14,
       lineHeight: this.#opts.lineHeight ?? 1.22,
       ligatures: this.#opts.ligatures ?? true,
@@ -258,6 +259,8 @@ export class Terminal {
   }
 
   #onBackendEvent(e: BackendEvent): void {
+    // 백엔드가 알린 크기가 정답이다 — 낙관적으로 잡아 둔 값과 다르면 되돌린다.
+    if (e.type === "resize") this.#size = { ...e.size };
     if (e.type === "modes") {
       this.#modes = e.value;
       return;

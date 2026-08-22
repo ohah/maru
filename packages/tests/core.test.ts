@@ -311,3 +311,21 @@ test("포커스 리포트는 그 모드일 때만 나간다", async () => {
   expect(out.join("")).toBe("\x1b[I\x1b[O");
   term.dispose();
 });
+
+test("큰 격자도 스냅샷이 잘리지 않는다", async () => {
+  // 셀 버퍼가 작으면 코어는 멀쩡히 그리는데 스냅샷만 잘려 아래쪽 행이 영영 빈다 —
+  // 오류도 경고도 없다. 4K 전체 화면(≈457×127)보다 큰 격자로 확인한다.
+  const term = await makeTerminal({ cols: 400, rows: 120 });
+  const snap = await term.snapshot();
+  expect(snap.cells.length).toBe(400 * 120);
+  term.dispose();
+});
+
+test("코어가 거절한 리사이즈는 격자를 바꾸지 않는다", async () => {
+  // 실패했는데 size 를 바꾸면 프레임이 새 크기를 알리면서 셀은 옛 격자 것을 실어,
+  // 렌더러가 새 stride 로 인덱싱해 화면이 어긋난다.
+  const term = await makeTerminal({ cols: 40, rows: 10 });
+  term.resize(100_000, 100_000); // 코어가 거절할 크기
+  expect(term.size).toEqual({ cols: 40, rows: 10 });
+  term.dispose();
+});

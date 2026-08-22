@@ -25,6 +25,8 @@ export class LocalBackend implements Backend {
   #w: WasmExports;
   /** 입력 버퍼 용량. wasm 이 정한다 — TS 에 상수로 복제하면 어긋난다. */
   readonly #inputCap: number;
+  /** 스냅샷 셀 상한. 격자가 넘으면 아래쪽이 잘린다. */
+  readonly #cellsCap: number;
   /** 마지막으로 알린 모드. 바뀔 때만 이벤트를 낸다. */
   #lastModes = -1;
   /** 화면에 들어가 있는 조합 텍스트의 셀 폭. 되돌릴 때 이만큼만 지운다. */
@@ -39,6 +41,7 @@ export class LocalBackend implements Backend {
   private constructor(w: WasmExports, h: number, size: Size) {
     this.#w = w;
     this.#inputCap = w.input_cap();
+    this.#cellsCap = w.cells_cap();
     this.#h = h;
     this.#size = size;
   }
@@ -56,6 +59,11 @@ export class LocalBackend implements Backend {
 
   // ── 입력 ─────────────────────────────────────────────────
   /** 박스 드로잉 등을 폰트 없이 그리기 위한 커버리지 공급자. */
+  /** 스냅샷이 담을 수 있는 셀 수. `fit()` 이 격자를 여기에 맞춘다. */
+  cellsCap(): number {
+    return this.#cellsCap;
+  }
+
   glyphSource(): GlyphSource {
     return wasmGlyphSource(this.#w);
   }
@@ -86,7 +94,11 @@ export class LocalBackend implements Backend {
     const cap = this.#inputCap;
     for (let off = 0; off < bytes.length; off += cap) {
       const n = this.#stage(bytes.subarray(off, Math.min(off + cap, bytes.length)));
-      this.#w.vt_write(this.#h, n);
+      // 실패(1)를 흘리면 PTY 출력 한 덩어리가 조용히 사라지고 TUI 화면이 반쯤 그려진다.
+      if (this.#w.vt_write(this.#h, n) !== 0) {
+        console.warn("maru-term: 코어가 write 를 거절했다 — 출력 일부가 유실됐다");
+        return;
+      }
     }
   }
 
@@ -136,7 +148,16 @@ export class LocalBackend implements Backend {
   // ── 그리드 ───────────────────────────────────────────────
   resize(cols: number, rows: number): void {
     if (this.#disposed || (cols === this.#size.cols && rows === this.#size.rows)) return;
-    this.#w.vt_resize(this.#h, cols, rows);
+    // **반환값을 본다.** 0=성공·1=실패다. 실패했는데 `#size` 를 바꾸면 프레임이 새 격자
+    // 크기를 알리면서 셀은 옛 격자 것을 실어, 렌더러가 새 stride 로 인덱싱해 첫 줄은 어긋나고
+    // 나머지는 통째로 빈다.
+    if (this.#w.vt_resize(this.#h, cols, rows) !== 0) {
+      console.warn(`maru-term: 코어가 ${cols}×${rows} 리사이즈를 거절했다 — 격자를 유지한다`);
+      // **실제 크기를 다시 알린다.** 호출자는 캔버스를 먼저 잡으려고 낙관적으로 갱신하므로,
+      // 거절을 알리지 않으면 그 값이 잘못된 채 남아 프레임 크기와 셀이 어긋난다.
+      this.#cb?.({ type: "resize", size: { ...this.#size } });
+      return;
+    }
     this.#size = { cols, rows };
     this.#cb?.({ type: "resize", size: { cols, rows } });
     this.#markDirty();

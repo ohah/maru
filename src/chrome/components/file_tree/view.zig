@@ -17,6 +17,7 @@ const typography = @import("../../ui/typography.zig");
 const ui_paint = @import("../../ui/paint.zig");
 const ui_tree = @import("../../ui/tree.zig");
 const build_mod = @import("build.zig");
+const ids = @import("ids.zig");
 const types = @import("types.zig");
 
 /// 들여쓰기 가이드 선을 그릴 최대 depth. 깊은 트리에서 선이 행마다 수십 개가 되면 op 예산이 depth에
@@ -55,11 +56,13 @@ pub fn view(
     tk: *const tokens.Tokens,
     buffers: Buffers,
 ) ViewError!draw.ChromeDraw {
-    // 밴드(선택·호버)를 먼저 낸다 — chrome quad는 글자보다 **먼저** 그리는 층이라 순서가 곧 z다.
-    const painted = try ui_paint.paint(frame.tree, state, tk, .pane_overlay, .{ .ops = buffers.ops });
+    // **`ui_paint` 를 태우지 않는다.** 행 노드는 히트 대상일 뿐 그림이 아니고(`build` — `opacity = 0`),
+    // 밴드는 좌우로 들여 그려야 해서 노드 rect 와 모양이 다르다. 그래서 면도 여기서 낸다 — 밴드가
+    // 글자보다 **먼저** 나가야 하므로 행 루프 안에서 순서를 지킨다(chrome quad 는 글자보다 앞 층이다).
+    _ = tk;
     var w = Writer{
         .ops = buffers.ops,
-        .op_count = painted.ops.len,
+        .op_count = 0,
         .runs = buffers.runs,
         .text_bytes = buffers.text_bytes,
         .metrics = frame.metrics,
@@ -68,7 +71,7 @@ pub fn view(
     for (props.rows, 0..) |row, index| {
         const entry_index = frame.tree.find(build_mod.NodeIds.row(index)) orelse continue;
         const entry = frame.tree.entries[entry_index];
-        try w.row(row, entry, props.selection_focused);
+        try w.row(row, entry, props.selection_focused, state.hovered == build_mod.NodeIds.row(index));
     }
 
     return .{ .layer = .pane_overlay, .ops = buffers.ops[0..w.op_count] };
@@ -83,13 +86,30 @@ const Writer = struct {
     text_count: usize = 0,
     metrics: types.Metrics,
 
-    fn row(self: *Writer, r: types.Row, entry: ui_tree.RectEntry, focused: bool) ViewError!void {
+    fn row(self: *Writer, r: types.Row, entry: ui_tree.RectEntry, focused: bool, hovered: bool) ViewError!void {
         const m = self.metrics;
         const rect = entry.rect;
         const clip: ?draw.Rect = if (entry.effective_clip) |c| rectOf(c) else null;
         const x0: i32 = @intFromFloat(@floor(rect.x));
         const y0: i32 = @intFromFloat(@floor(rect.y));
         const w_px: u32 = @intFromFloat(@max(@floor(rect.width), 0));
+
+        // ── 상태 밴드 ───────────────────────────────────────────────────────────────────────
+        // 좌우로 **들여서** 그린다(목록이 컨테이너 가장자리에 붙어 끝나지 않게). 누르는 자리는 행
+        // 전체이므로 이 inset 은 순전히 시각이다.
+        if (bandRole(r, hovered)) |role| {
+            const inset = m.band_inset_x;
+            const band_w = w_px -| inset *| 2;
+            if (band_w > 0) {
+                const radius: u16 = m.corner_radius;
+                try self.quad(
+                    .{ .x = x0 + @as(i32, @intCast(inset)), .y = y0, .w = band_w, .h = m.row_h },
+                    role,
+                    .{ radius, radius, radius, radius },
+                    clip,
+                );
+            }
+        }
 
         // ── 포커스 표시자 ───────────────────────────────────────────────────────────────────
         // 선택된 행이 **키보드 포커스 안에** 있을 때만 왼쪽 끝에 accent 막대를 세운다. 면을 accent로
@@ -237,6 +257,17 @@ const Writer = struct {
     }
 };
 
+/// 행 면의 색. 없으면 안 그린다.
+///
+/// 세기 계단이 곧 의미다: 선택(지금 고른 것) > 활성(열려 있는 파일) > 호버(지나가는 중). 둘이 같은
+/// 값이면 그 구분이 화면에서 사라진다.
+fn bandRole(r: types.Row, hovered: bool) ?tokens.ColorRole {
+    if (r.selected) return .tab_active_bg;
+    if (r.active) return .tab_hover_bg;
+    if (hovered) return .row_hover_bg;
+    return null;
+}
+
 /// 라벨 색. 무시된 행이 **가장 강한 규칙**이다 — 선택 행은 그 위를 다시 덮는다(밝은 accent 위에서
 /// 흐린 색은 읽히지 않는다).
 fn labelRole(r: types.Row) tokens.ColorRole {
@@ -308,6 +339,7 @@ const Harness = struct {
     items: [16]layout.Item = undefined,
     flex: [16]layout.FlexScratch = undefined,
     rects: [16]layout.UiRect = undefined,
+    actions: [16]ids.Entry = undefined,
     ops: [256]draw.Op = undefined,
     runs: [64]draw.Run = undefined,
     text_bytes: [2048]u8 = undefined,
@@ -320,6 +352,7 @@ const Harness = struct {
             .layout_items = &self.items,
             .flex_scratch = &self.flex,
             .child_rects = &self.rects,
+            .actions = &self.actions,
         });
         const tk = testTokens();
         return view(props, frame, .{}, &tk, .{ .ops = &self.ops, .runs = &self.runs, .text_bytes = &self.text_bytes });
@@ -369,11 +402,12 @@ test "가이드 선은 depth 만큼이고 상한에서 멈춘다" {
     var h = Harness{};
     const shallow = [_]types.Row{.{ .kind = .file, .label = "a", .depth = 3, .icon_kind = 0 }};
     const deep = [_]types.Row{.{ .kind = .file, .label = "a", .depth = max_guide_depth + 5, .icon_kind = 0 }};
+    // 두 행 다 쉬는 상태라 **밴드 quad 가 없다** — 세는 것이 가이드 선뿐이다(FT2: 면은 선택·활성·호버
+    // 일 때만 나간다).
     const a = try h.run(&shallow);
-    const a_quads = countQuad(a.ops);
     var h2 = Harness{};
     const b = try h2.run(&deep);
-    try testing.expectEqual(@as(usize, 3), a_quads);
+    try testing.expectEqual(@as(usize, 3), countQuad(a.ops));
     try testing.expectEqual(@as(usize, max_guide_depth), countQuad(b.ops));
 }
 
@@ -475,6 +509,7 @@ test "op 버퍼가 모자라면 조용히 덜 그리지 않고 실패한다" {
         .layout_items = &h.items,
         .flex_scratch = &h.flex,
         .child_rects = &h.rects,
+        .actions = &h.actions,
     });
     const tk = testTokens();
     var tiny: [2]draw.Op = undefined;
@@ -517,4 +552,49 @@ test "스캔 중인 행은 chevron 대신 표시를 낸다" {
     const b = try h2.run(&idle);
     // 그리고 두 상태가 **실제로 다르게** 그려진다 — 같으면 이 테스트가 아무것도 판정하지 않는다.
     try testing.expect(countQuad(a.ops) != countQuad(b.ops));
+}
+
+// **밴드는 들어가고 히트는 전폭이다.** 이 둘이 같은 rect 였을 때 행 왼쪽 가장자리가 클릭 사각지대가
+// 됐다(FT2 — 그 상태를 app_session 의 우클릭 테스트가 잡았다). 시각과 히트가 갈라진다는 사실 자체가
+// 계약이므로 값으로 못 박는다.
+test "밴드는 좌우로 들어가고 행 히트 rect 는 전폭이다" {
+    var h = Harness{};
+    const rows = [_]types.Row{.{ .kind = .file, .label = "a", .icon_kind = 0, .selected = true }};
+    const painted = try h.run(&rows);
+    var band: ?draw.Op.Quad = null;
+    for (painted.ops) |op| if (op == .quad) {
+        if (band == null) band = op.quad;
+    };
+    try testing.expect(band != null);
+    const m = types.Metrics.resolve(1000);
+    // 행은 0..300 전폭, 밴드는 그 안쪽.
+    try testing.expectEqual(@as(i32, @intCast(m.band_inset_x)), band.?.rect.x);
+    try testing.expectEqual(@as(u32, 300) - m.band_inset_x * 2, band.?.rect.w);
+    try testing.expect(band.?.corner_radii[0] > 0);
+}
+
+// 호버는 **props 가 아니라 `InteractionState`** 에서 온다(FT2). 같은 props 로도 상태가 다르면 다른
+// 그림이 나와야 하고, props 에 호버 필드가 있으면 그 사실의 출처가 둘이 된다.
+test "호버는 InteractionState 로만 들어온다" {
+    const rows = [_]types.Row{.{ .kind = .file, .label = "a", .icon_kind = 0 }};
+    var h = Harness{};
+    const idle = try h.run(&rows);
+    try testing.expectEqual(@as(usize, 0), countQuad(idle.ops));
+
+    var h2 = Harness{};
+    const props = types.Props{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows };
+    const frame = try build_mod.build(props, .{
+        .nodes = &h2.nodes,
+        .entries = &h2.entries,
+        .layout_items = &h2.items,
+        .flex_scratch = &h2.flex,
+        .child_rects = &h2.rects,
+        .actions = &h2.actions,
+    });
+    const tk = testTokens();
+    const hovered = try view(props, frame, .{ .hovered = build_mod.NodeIds.row(0) }, &tk, .{ .ops = &h2.ops, .runs = &h2.runs, .text_bytes = &h2.text_bytes });
+    try testing.expectEqual(@as(usize, 1), countQuad(hovered.ops));
+    for (hovered.ops) |op| if (op == .quad) {
+        try testing.expectEqual(tokens.ColorRole.row_hover_bg, op.quad.fill_role);
+    };
 }

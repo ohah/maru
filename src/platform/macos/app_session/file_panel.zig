@@ -756,7 +756,7 @@ pub fn updateFileTree(self: *AppSession) !void {
         classifyFileTreeRows(self.file_tree_rows.items);
         reconcileFileTreeSelection(self);
         clampFileTreeScroll(self);
-        self.file_tree_hovered_row = null;
+        clearFileTreeHover(self);
         scrollFileTreeToFollowedCwd(self); // ET-CWD: 재투영된 행 기준으로 뷰포트 보정(file-explorer §1 정책 4)
         advanceFileTreeProjectionGeneration(self);
         self.file_tree_rows_dirty = false;
@@ -1965,6 +1965,12 @@ pub fn submitWaitingFileTreeMutation(self: *AppSession, mutation_id: u64) bool {
     return true;
 }
 
+/// 좌표 → 행 인덱스를 **산술로** 푼다.
+///
+/// **제품 클릭 경로는 더 이상 이것을 쓰지 않는다**(FT2 — 발행된 rect 를 보는
+/// `file_tree_dock.fileTreeRowAtPublished`). 그런데도 남기는 이유는 둘이다: ⑴ 같은 산술을 Windows
+/// chrome 낮추기가 쓰고(`session/file_tree_layout.rowAtLocalY`), ⑵ **두 답이 같은지**를 테스트가
+/// 대조하는 축이 필요하다. 그 대조가 없으면 published rect 와 창 산술이 조용히 갈려도 아무도 모른다.
 pub fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     // 다른 뷰를 보는 중이면 트리 행은 화면에 없다 — 좌표가 같은 rect 안이어도 hit이 되면 안 된다(§3.5).
     if (self.dock.view != .explorer) return null;
@@ -2599,9 +2605,15 @@ pub fn fileTreeDrawWindow(self: *const AppSession) file_tree_layout.DrawWindow {
     );
 }
 
-pub fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {
-    if (usizeOptEql(self.file_tree_hovered_row, row)) return;
-    self.file_tree_hovered_row = row;
+/// 호버를 **버린다**(값을 넣는 setter 는 없다 — FT2 이후 호버의 주인은 `InteractionState` 하나다).
+///
+/// 목록이 다시 투영되거나 스크롤로 자리가 바뀌면 예전 노드 id 는 다른 행을 가리킨다. 그때 호버를
+/// 들고 있으면 **마우스를 움직이지 않았는데 엉뚱한 행이 밝아진다**. capture 는 건드리지 않는다 —
+/// 누르고 있는 손가락은 목록 갱신과 무관하게 이어져야 하고, 그 취소는 발행 경로가 tree 가 실제로
+/// 바뀌었을 때만 한다.
+pub fn clearFileTreeHover(self: *AppSession) void {
+    if (self.file_tree_interaction.hovered == null) return;
+    self.file_tree_interaction.hovered = null;
     self.metal_dirty = true;
 }
 
@@ -3355,7 +3367,7 @@ pub fn setFileTreeScrollOffsetPx(self: *AppSession, offset_px: i64) void {
     // 옮긴 **직후**의 thumb을 지금 알아야 이어지는 드래그의 grab 기준점이 튀지 않는다. tree를 다시
     // 내면 track/thumb rect가 새 offset을 반영한다 — 기하를 두 번째로 만들지 않는다.
     dock_ops.buildDockListScrollTree(self);
-    self.file_tree_hovered_row = null;
+    clearFileTreeHover(self);
     self.dock_list_scrollbar_idle_ticks = 0;
     self.dock_list_scrollbar_last_offset_px = self.file_tree_scroll.offset_y_px;
     self.metal_dirty = true;

@@ -14,6 +14,7 @@ const std = @import("std");
 const tree = @import("../../ui/tree.zig");
 const layout = @import("../../ui/layout.zig");
 const tokens = @import("../../tokens.zig");
+const ids = @import("ids.zig");
 const types = @import("types.zig");
 
 pub const NodeIds = struct {
@@ -36,18 +37,20 @@ pub const Buffers = struct {
     layout_items: []layout.Item,
     flex_scratch: []layout.FlexScratch,
     child_rects: []layout.UiRect,
+    actions: []ids.Entry,
 };
 
 pub const Frame = struct {
     tree: tree.UiRectTree,
     metrics: types.Metrics,
+    actions: []const ids.Entry,
 };
 
-pub const BuildError = tree.BuildError || error{InsufficientNodeBuffer};
+pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer };
 
 /// 호출자가 잡아야 할 버퍼 크기. 행 수에서 파생되므로 호출부가 상수를 따로 들지 않는다.
-pub fn bufferSizes(row_count: usize) struct { nodes: usize, entries: usize } {
-    return .{ .nodes = row_count + 2, .entries = row_count + 2 };
+pub fn bufferSizes(row_count: usize) struct { nodes: usize, entries: usize, actions: usize } {
+    return .{ .nodes = row_count + 2, .entries = row_count + 2, .actions = row_count };
 }
 
 pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
@@ -55,9 +58,18 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const sizes = bufferSizes(props.rows.len);
     if (buffers.nodes.len < sizes.nodes) return error.InsufficientNodeBuffer;
 
+    if (buffers.actions.len < sizes.actions) return error.InsufficientActionBuffer;
+    var table = ids.Table.init(buffers.actions);
     const row_nodes = buffers.nodes[0..props.rows.len];
     for (row_nodes, props.rows, 0..) |*node, row, index| {
-        node.* = rowNode(NodeIds.row(index), row, m);
+        // **빈 자리 행은 누를 수 없다.** 그 행은 "폴더를 여세요" 안내이지 항목이 아니고, 여는 일은
+        // 배경 클릭(picker)이 이미 맡는다 — 여기에 action 을 달면 같은 동작이 두 주인을 갖는다.
+        const action: ?tree.UiAction = if (row.kind == .empty)
+            null
+        else
+            table.append(props.snapshot_generation, .{ .activate_row = row.model_index }, true) catch
+                return error.InsufficientActionBuffer;
+        node.* = rowNode(NodeIds.row(index), m, action);
     }
 
     // 목록 컨테이너가 **좌우 여백을 소유한다.** 행마다 margin을 주면 선택 밴드가 있는 행과 없는 행의
@@ -68,8 +80,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{
             .width = .{ .percent = 1 },
             .height = .{ .px = @floatFromInt(list_h) },
-            .padding = .{ .left = @floatFromInt(m.band_inset_x), .right = @floatFromInt(m.band_inset_x) },
-            // 목록 자신도 안 줄어든다 — 줄어들면 그 안의 행들이 다시 그만큼 깎인다(위 행 주석과 같은 사고).
+            // **여백을 여기서 떼지 않는다.** 밴드는 좌우로 들어가 보여야 하지만 **누르는 자리는 행
+            // 전체**여야 한다 — 컨테이너에서 떼면 그 여백이 클릭 사각지대가 된다(FT2 테스트가 왼쪽
+            // 가장자리 우클릭으로 잡았다). 그래서 여백은 `view` 가 밴드를 그릴 때만 적용한다.
             .flex = .{ .shrink = 0 },
         },
         .direction = .column,
@@ -101,17 +114,21 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .flex_scratch = buffers.flex_scratch,
         .child_rects = buffers.child_rects,
     });
-    return .{ .tree = .{ .entries = buffers.entries[0..built.entries.len] }, .metrics = m };
+    return .{
+        .tree = .{ .entries = buffers.entries[0..built.entries.len], .generation = props.snapshot_generation },
+        .metrics = m,
+        .actions = table.slice(),
+    };
 }
 
-/// 선택·호버가 아닌 행은 **아무것도 그리지 않는 컨테이너**다. card로 두면 variant 기본 배경·테두리가
-/// 깔려 모든 행이 칠해진 상자가 된다(`paint_style.baseCardStyle` — 모든 variant가 배경을 준다).
+/// 행 노드는 **히트 대상이고 그림이 아니다**(FT2). 면은 `view` 가 그린다 — 밴드는 좌우로 들여야
+/// 하는데 누르는 자리는 전폭이어야 해서, 그 둘을 한 rect 로 표현할 수 없기 때문이다. 여백을 부모
+/// 컨테이너에서 떼면 그 여백이 클릭 사각지대가 된다(테스트가 왼쪽 가장자리 우클릭으로 잡았다).
 ///
-/// 선택·호버 행만 card로 올리고 테두리를 0으로 눌러 **면만** 남긴다. 상태 색은 `paint_style`이 아니라
-/// 여기서 명시하는데, 그 이유는 FT1이 아직 `InteractionState`를 쓰지 않기 때문이다 — 호버 판정은
-/// host가 인덱스로 들고 있고(`file_tree_hovered_row`), FT2에서 발행된 rect 기반 히트테스트로 옮기면
-/// 그때 `resolveCard`의 상태 해석으로 갈아탄다.
-fn rowNode(id: u64, row: types.Row, m: types.Metrics) tree.UiNode {
+/// 그래서 `opacity = 0` 이고, 이 컴포넌트의 `view` 는 `ui_paint` 를 태우지 않는다. 그래도 이 선언을
+/// 남기는 이유는 다른 소비자가 이 tree 를 그리려 들 때 **"여기엔 그릴 것이 없다"** 가 값으로 보여야
+/// 하기 때문이다. 상태(선택·활성·호버)는 `view` 의 `bandRole` 이 소유한다.
+fn rowNode(id: u64, m: types.Metrics, action: ?tree.UiAction) tree.UiNode {
     const style: layout.UiStyle = .{
         .width = .{ .percent = 1 },
         .height = .{ .px = @floatFromInt(m.row_h) },
@@ -120,29 +137,23 @@ fn rowNode(id: u64, row: types.Row, m: types.Metrics) tree.UiNode {
         // 히트테스트가 쓰는 행 높이가 갈려 **아래로 내려갈수록 누른 행이 밀린다**(적대적 검증에서 잡았다).
         .flex = .{ .shrink = 0 },
     };
-    const band: ?tokens.ColorRole = if (row.selected)
-        .tab_active_bg
-    else if (row.active)
-        // 열려 있는 파일은 선택보다 **약한** 면으로 남는다 — 둘이 같은 세기면 "지금 고른 것"이 사라진다.
-        .tab_hover_bg
-    else if (row.hovered)
-        .row_hover_bg
-    else
-        null;
-    if (band == null) {
-        return tree.container(.{ .id = id, .style = style, .overflow = .clip }, &.{});
-    }
-    const radius: [4]u16 = .{ m.corner_radius, m.corner_radius, m.corner_radius, m.corner_radius };
+    // **모든 행이 card 다**(FT2). 예전에는 밴드가 필요한 행만 card 로 올렸는데, 그러면 나머지 행에
+    // action 을 달 수 없어 히트테스트가 published tree 밖에 남는다(`container` 는 action 을 안 든다).
+    // 쉬는 상태의 면은 `surface_bg` — 도크 배경과 **같은 role** 이라 눈에는 없는 것과 같고, 호버는
+    // `paint_style.resolveCard` 가 `row_hover_bg` 로 덮는다(그 판정의 주인이 하나가 된다).
     return tree.card(.{
         .id = id,
         .style = style,
         .variant = .surface,
         .paint = .{
-            .background = band,
+            .opacity = 0,
             .border_widths_px = .{ 0, 0, 0, 0 },
-            .corner_radii_px = radius,
             .shadow = .none,
         },
+        .action = action,
+        // 이 면 위의 커서는 component 가 선언한다 — host 가 "누를 수 있나"를 다시 추론하면 판정의
+        // 주인이 둘이 된다(`.press` 는 host 에서 pointing hand 로 풀린다).
+        .cursor = if (action != null) .press else .auto,
         .overflow = .clip,
     }, &.{});
 }
@@ -151,8 +162,10 @@ fn rowNode(id: u64, row: types.Row, m: types.Metrics) tree.UiNode {
 
 const testing = std.testing;
 
+var test_actions: [64]ids.Entry = undefined;
+
 fn testBuild(props: types.Props, nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect) BuildError!Frame {
-    return build(props, .{ .nodes = nodes, .entries = entries, .layout_items = items, .flex_scratch = flex, .child_rects = rects });
+    return build(props, .{ .nodes = nodes, .entries = entries, .layout_items = items, .flex_scratch = flex, .child_rects = rects, .actions = &test_actions });
 }
 
 test "행은 노드 하나이고 발행 수는 보이는 행 + 2 다" {
@@ -171,12 +184,12 @@ test "행은 노드 하나이고 발행 수는 보이는 행 + 2 다" {
     for (0..rows.len) |i| try testing.expect(frame.tree.find(NodeIds.row(i)) != null);
 }
 
-test "행 rect 는 좌우 여백만큼 좁고 상태와 무관하게 같은 폭이다" {
+test "행 rect 는 전폭이고 상태와 무관하게 같다" {
     // 선택 밴드가 생겼다고 라벨이 옆으로 움직이면 안 된다 — 그래서 여백은 부모가 소유한다.
     const rows = [_]types.Row{
         .{ .kind = .file, .label = "a", .icon_kind = 0 },
         .{ .kind = .file, .label = "b", .icon_kind = 0, .selected = true },
-        .{ .kind = .file, .label = "c", .icon_kind = 0, .hovered = true },
+        .{ .kind = .file, .label = "c", .icon_kind = 0, .active = true },
     };
     var nodes: [8]tree.UiNode = undefined;
     var entries: [8]tree.RectEntry = undefined;
@@ -194,15 +207,16 @@ test "행 rect 는 좌우 여백만큼 좁고 상태와 무관하게 같은 폭�
         } else first = rect;
         try testing.expectEqual(@as(f32, @floatFromInt(m.row_h)), rect.height);
     }
-    try testing.expectEqual(@as(f32, @floatFromInt(m.band_inset_x)), first.?.x);
-    try testing.expectEqual(@as(f32, 300 - @as(f32, @floatFromInt(m.band_inset_x * 2))), first.?.width);
+    // **행 rect 는 전폭이다** — 밴드만 들어가고 누르는 자리는 가장자리까지다(FT2).
+    try testing.expectEqual(@as(f32, 0), first.?.x);
+    try testing.expectEqual(@as(f32, 300), first.?.width);
 }
 
-test "선택·호버만 칠하는 면을 갖는다" {
+test "모든 행이 action 을 든 card 이고 쉬는 면은 도크 배경색이다" {
     const rows = [_]types.Row{
         .{ .kind = .file, .label = "plain", .icon_kind = 0 },
         .{ .kind = .file, .label = "sel", .icon_kind = 0, .selected = true },
-        .{ .kind = .file, .label = "hov", .icon_kind = 0, .hovered = true },
+        .{ .kind = .file, .label = "act", .icon_kind = 0, .active = true },
     };
     var nodes: [8]tree.UiNode = undefined;
     var entries: [8]tree.RectEntry = undefined;
@@ -210,17 +224,20 @@ test "선택·호버만 칠하는 면을 갖는다" {
     var flex: [8]layout.FlexScratch = undefined;
     var rects: [8]layout.UiRect = undefined;
     const frame = try testBuild(.{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows }, &nodes, &entries, &items, &flex, &rects);
-    const plain = frame.tree.entries[frame.tree.find(NodeIds.row(0)).?];
-    try testing.expectEqual(tree.NodeKind.container, plain.kind);
-    for ([_]usize{ 1, 2 }) |i| {
+    // **셋 다 card 이고 셋 다 누를 수 있다.** 하나라도 container 면 그 행의 히트테스트가 published tree
+    // 밖으로 새고, 그러면 그린 자리와 누르는 자리의 출처가 다시 둘이 된다(FT2 가 없앤 것).
+    for (0..rows.len) |i| {
         const entry = frame.tree.entries[frame.tree.find(NodeIds.row(i)).?];
         try testing.expectEqual(tree.NodeKind.card, entry.kind);
-        // 테두리 0 — 면만 남긴다. 남겨 두면 목록 행마다 상자가 그려진다.
+        try testing.expect(entry.action != null);
+        try testing.expectEqual(tree.CursorHint.press, entry.cursor);
         try testing.expectEqual([4]u16{ 0, 0, 0, 0 }, entry.visual.card.paint.border_widths_px.?);
-        try testing.expect(entry.visual.card.paint.corner_radii_px.?[0] > 0);
     }
-    try testing.expectEqual(@as(?tokens.ColorRole, .tab_active_bg), frame.tree.entries[frame.tree.find(NodeIds.row(1)).?].visual.card.paint.background);
-    try testing.expectEqual(@as(?tokens.ColorRole, .row_hover_bg), frame.tree.entries[frame.tree.find(NodeIds.row(2)).?].visual.card.paint.background);
+    // 행 노드는 **그림이 아니다** — 면은 `view` 가 그린다(밴드는 들이고 히트는 전폭이라야 해서).
+    for (0..rows.len) |i| {
+        const entry = frame.tree.entries[frame.tree.find(NodeIds.row(i)).?];
+        try testing.expectEqual(@as(u8, 0), entry.visual.card.paint.opacity);
+    }
 }
 
 // **목록이 뷰포트보다 길어도 행 높이는 변하지 않는다.** flex 기본값이 `shrink = 1`이라 이 선언이 없으면

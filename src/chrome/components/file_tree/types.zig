@@ -36,8 +36,13 @@ pub const Row = struct {
     /// 컴포넌트는 저장된 값을 옮기기만 한다(렌더가 자기 표를 들면 새 종류를 더할 때 한쪽만 갱신된다).
     icon_kind: u8,
     selected: bool = false,
-    hovered: bool = false,
+    /// **도메인 목록에서의 자리.** 창(가상화) 안의 인덱스가 아니다 — intent 가 이 값을 실어야 늦게
+    /// 도착한 up 이 스크롤로 밀린 다른 행을 열지 않는다.
+    model_index: usize = 0,
 };
+
+/// 행이 무엇으로 강조되는가. `hovered` 를 DTO 에서 뺀 이유는 그 판정이 **published tree 를 보는
+/// `InteractionState`** 로 옮겼기 때문이다(FT2) — props 로도 받으면 같은 사실의 출처가 둘이 된다.
 
 pub const Props = struct {
     /// 트리 content 사각형의 크기. **스크롤바 gutter를 뺀 폭**을 host가 넘긴다 — gutter는 컨테이너가
@@ -47,6 +52,8 @@ pub const Props = struct {
     scale_milli: u32 = 1000,
     /// **보이는 창만** 담는다(가상화). 전체 행을 넘기면 수천 개 노드를 만들게 된다.
     rows: []const Row = &.{},
+    /// 이 스냅샷의 세대. action 표가 이 값으로 태깅되고, 늦게 도착한 up 은 세대가 다르면 거부된다.
+    snapshot_generation: u64 = 0,
     /// 트리가 **키보드 포커스를 갖고 있는가.** 선택 밴드의 세기가 아니라 **accent 표시자**가 이 값에
     /// 달렸다(§선택 표시 — `Metrics.focus_bar_w`).
     selection_focused: bool = true,

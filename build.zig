@@ -1161,6 +1161,8 @@ pub fn build(b: *std.Build) void {
             // 스텝에서 조용히 빠져 있었고, 러너는 남은 test만으로 green이었다. 아래 expect 개수 단언이
             // 같은 사고를 다시 허용하지 않는다.
             "file tree pixel window is one arithmetic shared by follow, clamp, hit-test, and render",
+            // FT2: 발행된 rect ↔ 창 산술 일치, up 에서만 열림, tree 교체 시 capture 취소.
+            "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 up 이며, tree 교체는 capture 를 취소한다",
         },
     });
     const run_macos_file_explorer_perf_tests = b.addRunArtifact(macos_file_explorer_perf_tests);
@@ -1170,7 +1172,7 @@ pub fn build(b: *std.Build) void {
     // 컴파일된 test 수를 못 박아 그 사고를 실패로 바꾼다. 7 = 위 필터 2개 + 이 모듈 그래프의
     // 이름 없는 test 블록 5개(app_host_abi·app_session·session_host×2·control_socket).
     // 숫자가 틀렸다고 나오면 먼저 **어느 판정자가 빠졌는지** 확인하고, 정당한 증감일 때만 갱신한다.
-    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=7");
+    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=8");
     const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
     test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
 

@@ -1,0 +1,67 @@
+name: Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/packages.yml"
+      - ".mise.toml"
+      - "packages/**"
+      # wasm 은 Zig 소스에서 나오므로 코어가 바뀌면 여기도 다시 봐야 한다.
+      - "src/**"
+      - "build.zig"
+  # 트리거는 모든 PR에 열어 둔다(web.yml 과 같은 이유 — paths 필터를 두면 무관한 PR 에서
+  # 워크플로가 아예 안 돌아 required 체크가 영원히 pending 으로 머지를 막는다). 아래 job 이
+  # changed-areas.sh 의 판정으로 건너뛴다.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 분류 정책의 단일 출처는 tools/ci/changed-areas.sh 다.
+  changes:
+    name: changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.areas.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: areas
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh tools/ci/changed-areas.sh "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: npm packages build and tests
+    needs: changes
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.packages == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          # web.yml 과 같은 캐시 정책 — PR 에서는 저장하지 않는다(ref 스코프라 죽은 캐시가 쌓인다).
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-packages-${{ runner.os }}-${{ hashFiles('packages/bun.lock') }}
+          restore-keys: |
+            bun-packages-${{ runner.os }}-
+      - run: bun install --cwd packages --frozen-lockfile
+      - run: mise run packages:check
+      - name: Upload bundle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maru-packages-build
+          path: packages/*/dist/**
+          if-no-files-found: error
+          retention-days: 14

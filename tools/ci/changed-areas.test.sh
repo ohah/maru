@@ -150,6 +150,9 @@ expect "code=false runtime=false web=true packages=false docs=false" web/package
 # npm 라이브러리. Zig 게이트도 web:check도 이 경로를 안 읽으므로 packages 축만 켠다.
 expect "code=false runtime=false web=false packages=true docs=false" packages/core/src/index.ts
 expect "code=false runtime=false web=false packages=true docs=false" packages/react/package.json
+# 커밋된 wasm 은 **code 도 켠다** — `check-wasm-sync` 가 그 축에 매달려 있어서, 바이너리만
+# 바뀐 PR 에서 소스 동기 검사가 건너뛰어지면 안 된다.
+expect "code=true runtime=false web=false packages=true docs=false" packages/core/wasm/maru-vt.wasm
 
 # 문서와 코드가 섞이면 코드 쪽 축이 이긴다(문서만이라는 판정은 문서'만' 바뀔 때 성립한다).
 expect "code=true runtime=true web=false packages=true docs=true" docs/architecture.md src/core.zig

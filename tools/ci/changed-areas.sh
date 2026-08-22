@@ -134,6 +134,13 @@ while IFS= read -r path; do
 	# npm 라이브러리(@maru-term/*). `packages:check`가 읽는 유일한 경로다 — Zig 게이트도
 	# web:check도 여기를 안 읽는다. 다만 커밋된 wasm은 Zig 소스에서 나오므로, 그 동기는
 	# `check-wasm-sync`(code 축)가 지킨다.
+	# 커밋된 wasm 이 바뀌면 **소스와의 동기도 확인해야 한다** — `check-wasm-sync` 는 code 축에
+	# 매달려 있으므로 여기서 함께 켠다. 이 분기가 없으면 바이너리만 바꾼 PR 에서 그 게이트가
+	# 정확히 필요한 순간에 건너뛰어진다.
+	packages/core/wasm/*)
+		packages=true
+		code=true
+		;;
 	packages/*)
 		packages=true
 		;;

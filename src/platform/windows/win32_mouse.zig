@@ -470,3 +470,63 @@ test "ClickTracker: 시간과 거리로 연타를 가르고 트리플 뒤에 되
     try testing.expectEqual(ClickKind.single, t4.classify(1000, 10, 10, ms, 4, 4));
     try testing.expectEqual(ClickKind.double, t4.classify(1050, 14, 14, ms, 4, 4));
 }
+
+// ── 휠 → 줄 수 ───────────────────────────────────────────────────────────────────────────────
+
+/// 한 노치가 몇 줄인가. Windows 기본 설정(`SPI_GETWHEELSCROLLLINES`)의 기본값이다.
+///
+/// **OS 에 묻지 않는다** — 그것은 별도 항목이다. 지금 값이 기본 설정과 같아 화면이 갈리지 않는다.
+pub const default_lines_per_notch: i32 = 3;
+
+/// 휠 델타를 줄 수로 바꾼다. **나머지를 `acc` 에 남겨 다음 호출로 넘긴다.**
+///
+/// **잘라 버리면 정밀 터치패드에서 스크롤이 아예 안 된다.** 그 장치는 한 노치를 잘게 쪼개 보내는데
+/// (40 이하가 흔하다), 호출마다 `delta * lines / 120` 을 버림하면 전부 0 이 되어 **천천히 굴리면
+/// 아무 일도 안 일어난다.** 쌓아 두면 여러 이벤트에 걸쳐 한 줄이 된다.
+///
+/// **방향이 바뀌면 잔량을 버린다.** 위로 굴리다 아래로 바꿨는데 위쪽 잔량이 한 줄을 밀면 손끝과
+/// 화면이 어긋난다.
+///
+/// 부호는 델타 그대로다 — 양수가 "위로 굴림"(Windows 규약). 화면을 어느 쪽으로 옮길지는 호출자가
+/// 정한다.
+pub fn wheelLines(acc: *i32, delta: i32, lines_per_notch: i32) i32 {
+    if (delta == 0) return 0;
+    if (acc.* != 0 and (acc.* > 0) != (delta > 0)) acc.* = 0;
+    acc.* += delta * lines_per_notch;
+    const moved = @divTrunc(acc.*, wheel_delta);
+    acc.* -= moved * wheel_delta;
+    return moved;
+}
+
+test "휠: 한 노치가 세 줄이다" {
+    var acc: i32 = 0;
+    try testing.expectEqual(@as(i32, 3), wheelLines(&acc, wheel_delta, default_lines_per_notch));
+    try testing.expectEqual(@as(i32, 0), acc);
+    try testing.expectEqual(@as(i32, -3), wheelLines(&acc, -wheel_delta, default_lines_per_notch));
+}
+
+test "휠: 잘게 오는 델타가 사라지지 않는다 — 정밀 터치패드" {
+    // **이것이 이 함수가 있는 이유다.** 잘라 버리는 구현이면 여기서 전부 0 이 나온다.
+    var acc: i32 = 0;
+    var total: i32 = 0;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) total += wheelLines(&acc, 20, default_lines_per_notch);
+    // 20 x 8 = 160 델타 = 노치 1.33 개 = 4 줄.
+    try testing.expectEqual(@as(i32, 4), total);
+}
+
+test "휠: 방향을 바꾸면 잔량을 버린다" {
+    var acc: i32 = 0;
+    _ = wheelLines(&acc, 100, default_lines_per_notch); // 300 -> 2 줄, 잔량 60
+    try testing.expectEqual(@as(i32, 60), acc);
+    // 반대로 한 번. 잔량 60 이 남아 있으면 -1 줄이 아니라 0 줄이 나온다(60-60=0).
+    const back = wheelLines(&acc, -20, default_lines_per_notch);
+    try testing.expectEqual(@as(i32, 0), back);
+    try testing.expectEqual(@as(i32, -60), acc);
+}
+
+test "휠: 0 델타는 잔량을 안 건드린다" {
+    var acc: i32 = 55;
+    try testing.expectEqual(@as(i32, 0), wheelLines(&acc, 0, default_lines_per_notch));
+    try testing.expectEqual(@as(i32, 55), acc);
+}

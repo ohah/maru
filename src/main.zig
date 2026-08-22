@@ -3777,17 +3777,27 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     var script_ok: usize = 0;
     var clamp_top_ok = false;
     var clamp_bottom_ok = false;
+
+    // **스크롤 상한은 컴포넌트가 준 값을 쓴다** — `Written.max_top_line`. 그 필드 doc 이
+    // *"입력이 이것을 읽는다"* 고 못 박았고 macOS 도 그것을 굳혀 뒀다가 clamp 에 쓴다
+    // (`app_session/editor.zig` 의 `editor_max_top_line`).
+    //
+    // `viewport.clampFirstRow(.., lines.len, rows)` 로 따로 세면 **두 번째 출처**가 된다. 랩이
+    // 꺼져 있으면 값이 같아 지금은 안 갈리지만, 랩을 켜는 순간 논리 줄 수와 시각 행 수가 달라져
+    // 조용히 어긋난다 — 그 필드 doc 이 경고하는 자리가 정확히 이것이다.
+    var max_top: usize = 0;
     {
-        const total = lines.items.len;
+        var probe = try build(allocator, &host, editor_view, 0, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+        defer probe.deinit(allocator);
+        max_top = probe.written.max_top_line;
+    }
+    {
         for ([_]isize{ 0, 5, 20, -3, 10_000, -10_000 }) |delta| {
             const before = first_line;
-            const want: usize = if (delta >= 0)
-                editor_view.viewport.clampFirstRow(before + @as(usize, @intCast(delta)), total, grid.rows)
-            else blk: {
-                const back: usize = @intCast(-delta);
-                break :blk editor_view.viewport.clampFirstRow(before -| back, total, grid.rows);
-            };
-            first_line = want;
+            first_line = if (delta >= 0)
+                @min(before + @as(usize, @intCast(delta)), max_top)
+            else
+                before -| @as(usize, @intCast(-delta));
 
             var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
             defer built.deinit(allocator);
@@ -3800,7 +3810,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             // 갈리면 여기서 걸린다.
             if (delta == -10_000) clamp_top_ok = (first_line == 0 and r.checked > 0 and r.matched == r.checked);
             if (delta == 10_000) clamp_bottom_ok =
-                (first_line + built.written.visual_rows >= total and r.checked > 0 and r.matched == r.checked);
+                (first_line + built.written.visual_rows >= lines.items.len and r.checked > 0 and r.matched == r.checked);
         }
         first_line = 0;
     }
@@ -3811,6 +3821,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     var frames: usize = 0;
     var wheel_events: usize = 0;
     var closed = false;
+    // 휠 나머지. **누적 규칙은 `win32_mouse.wheelLines` 가 소유한다** — 여기 인라인으로 적으면
+    // 터미널이 같은 것을 또 적게 되고 둘이 갈린다(그 함수에 테스트 넷이 붙어 있다).
+    var wheel_remainder: i32 = 0;
     // **프레임 수에 근거를 둔다** — build step 이 반복해서 도는데 그때마다 창이 오래 차지하면 안 된다.
     // 120 프레임(약 3.5 초)이면 반복 표현·크기 변경을 보기에도 스크린샷을 잡기에도 족하다.
     while (frames < 120 and !host.quitting() and !closed) : (frames += 1) {
@@ -3819,8 +3832,8 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             .close_requested => closed = true,
             .mouse => |m| if (m.kind == .wheel) {
                 wheel_events += 1;
-                // 한 노치(120)에 세 줄 — Windows 기본 관례다. 정밀 터치패드는 120 미만이 온다.
-                scroll -= @divTrunc(m.wheel_delta * 3, 120);
+                // 양수 델타 = 위로 굴림(Windows 규약) → 화면은 위로, 즉 `first_line` 이 준다.
+                scroll -= win32_mouse.wheelLines(&wheel_remainder, m.wheel_delta, win32_mouse.default_lines_per_notch);
             },
             .key => |k| switch (k.key) {
                 .page_down => scroll += @intCast(grid.rows),
@@ -3834,11 +3847,11 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else => {},
         };
         if (scroll != 0) {
-            const total = lines.items.len;
+            // 상한은 **방금 그린 프레임이 준 값**이다(위 doc). 매 프레임 다시 세지 않는다.
             const next = if (scroll > 0)
-                editor_view.viewport.clampFirstRow(first_line + @as(usize, @intCast(scroll)), total, grid.rows)
+                @min(first_line + @as(usize, @intCast(scroll)), built.written.max_top_line)
             else
-                editor_view.viewport.clampFirstRow(first_line -| @as(usize, @intCast(-scroll)), total, grid.rows);
+                first_line -| @as(usize, @intCast(-scroll));
             if (next != first_line) {
                 first_line = next;
                 const next_built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);

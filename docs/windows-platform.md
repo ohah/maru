@@ -2263,6 +2263,25 @@ safe 모드는 패닉이고 **ReleaseFast 는 스택 밖 쓰기**다. 셰이퍼�
 512 글리프를 쉽게 넘는다.** 수집기를 호출자 버퍼에 직접 쓰게 바꾸는 것이 옳고, 그것은 배선이 아니라
 설계 변경이라 **W8.3 의 선행 항목**으로 둔다.
 
+**크롬 폰트는 이미 계약이 정해 뒀다 — 내가 한 번 "미결" 로 잘못 적었다.**
+`docs/font-strategy.md` "Chrome 텍스트 face" 가 measured 경로도 **`font.family`(+`font.fallback`
+cascade)를 쓴다**고 못 박고 있다(사용자 결정 2026-08-08). 근거는 도크와 사이드바가 **한 화면에 같이
+보인다**는 것 — 도크만 시스템 UI face 로 그리면 사용자가 고른 폰트를 앱이 절반만 따르는 셈이 된다.
+그러니 W8.2⒝ 가 크롬을 배선할 때 `Face` 에 **resolved appearance 의 `font.family`·`font.fallback` 을
+그대로 넘기면 된다.** 새로 정할 것이 없다.
+
+**빈 `Face` 만 플랫폼마다 답이 달랐다.** 그 경로는 Chrome Lab·단위 테스트처럼 resolved appearance 가
+없는 호출자뿐인데, macOS 는 시스템 UI face 로 가고 Windows 이음매는 **터미널 티어**로 떨어뜨리고 있었다
+(실측: 빈 family → `Cascadia Mono`). 터미널 폰트를 크롬 기본으로 쓰는 것은 어느 쪽 계약도 아니다.
+**번들 기본(`bundled_fonts[0]`)으로 간다**(사용자 결정 2026-08-22) — 시스템 폰트로 가면 설치 환경마다
+Lab 캡처가 흔들린다. 값을 손으로 안 적고 `config.theme.bundled_fonts[0].family` 에서 유도하므로 config
+기본값이 바뀌면 함께 움직인다.
+
+```text
+[실측] 빈 family -> "JetBrains Mono"
+[실측] Windows chrome 셰이핑: 글리프 11 · 폭 합 131.2px · 폴백 4 · 폰트 JetBrains Mono
+```
+
 **아직 없는 것**: 앞을 자르는 말줄임(`anchor_tail`)은 `error.UnsupportedHeadTrim` 이다. 입력 줄이 그것을
 필요로 하므로(§3.5) 에디터 표면(W8.3)과 함께 온다. **조용히 뒤를 자르지 않는다** — 그러면 사용자가 방금
 친 글자를 못 본다.
@@ -3727,17 +3746,6 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
   준 임의 경로라 — 위 표의 ①을 **결정한 적 없이 채택**하는 셈이 된다. 그래서 `error.UnsupportedOnWindows`로
   막았다. 컨트롤 플레인을 이식하는 사람이 이 결정을 잊으면 조용히 넓은 권한으로 쓰이는 대신 **여기서 시끄럽게
   실패한다.**
-- **크롬(UI) 텍스트의 기본 폰트**(§2m.18 이 드러냈다). macOS 는 `Face` 가 비면 **system UI face** 로
-  셰이핑한다 — 사이드바·탭·도크가 터미널 폰트가 아니라 OS UI 폰트로 그려진다. Windows 이음매는 지금
-  빈 family 를 **터미널 티어**(`Cascadia Mono`·`Consolas`·`Courier New`)로 떨어뜨린다(실측: 빈 family →
-  `Cascadia Mono`). 즉 **크롬이 고정폭으로 그려진다** — macOS 와 다른 화면이다.
-
-  후보는 ① `Segoe UI`(Windows 10 의 UI 폰트, macOS 의 SF Pro 자리) ② `IDWriteGdiInterop` /
-  `SystemParametersInfo(SPI_GETNONCLIENTMETRICS)` 로 **OS 에 물어본다**(테마·언어·DPI 를 따라간다) ③ 번들
-  폰트를 UI 에도 쓴다(§2m.14 의 Jetendard — 두 플랫폼이 같은 화면이 되지만 OS 관례와는 멀어진다).
-
-  **터미널 티어와 별도 티어여야 한다**는 것만 분명하다. 지금은 크롬 표면이 아직 안 그려져 드러나지
-  않지만, W8.2⒝ 가 첫 픽셀을 내는 순간 보인다 — **그 슬라이스의 선행 결정이다.**
 - **cwd 2단(PEB)을 둘 것인가**(§3.5). Ghostty는 안 두고 "모른다"를 표현하며, macOS maru는 둔다. Windows에서는
   비문서화 비용이 더해지므로 별도 판단이 필요하다.
 - **웹뷰 합성 모델**. WebView2는 별도 HWND라 macOS의 `CALayer` subview 3겹 합성이 그대로 오지 않는다.

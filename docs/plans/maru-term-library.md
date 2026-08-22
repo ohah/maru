@@ -36,6 +36,26 @@
 - **`onBlink` 가 `this.#backend` 를 직접 읽어 항상 null 이었다.** 그 콜백은 `attachDom` 안의 타이머에서 불리는데 워커 백엔드는 그 뒤에 대입된다. 지역 변수로 잡아 고쳤다.
 - **줄 간격 여백을 위아래로 나눈다**(계약 §5). 전부 아래에 두면 선택 배경이 하단 패딩처럼 보인다.
 
+## 후속 (이 PR 범위 밖)
+
+순서는 **실전 검증이 먼저**다. 기능을 더 넣기 전에 실제 TUI 를 붙여 봐야 지금 안 보이는 문제가
+드러난다.
+
+| 단계 | 내용 | 왜 이 순서인가 |
+|---|---|---|
+| **F1** | PTY 를 WebSocket 으로 물려 vim·tmux·htop 을 띄운다 | 대체 화면·스크롤 영역·mouse tracking 조합을 한 번도 안 밟았다. 여기서 나오는 결함이 아래 어느 기능보다 크다 |
+| **F2** | `reset`·`clear`·스크롤 제어(`scrollToTop`/`scrollToLine`) | 구현이 코어에 있고 export + 얇은 래핑이면 된다 |
+| **F3** | 상태 이벤트 — `onCursorMove`·`onScroll`·`onSelectionChange` | 앱이 터미널을 따라가려면 필요하다. 워커 모드에서 이벤트 채널을 태워야 한다 |
+| **F4** | 검색(`findMatches`) + `registerMarker`/`registerDecoration` | 검색 하이라이트를 그리려면 마커/장식이 함께 있어야 한다 |
+| **F5** | 클립보드(OSC 52)·알림(OSC 9/777)·셸 통합(OSC 7/133) | 각각 이벤트 채널 설계가 필요하다 |
+| **F6** | 화면 직렬화(`dumpUtf`)·`attachCustomKeyEventHandler` | |
+| **F7** | 이미지(Kitty graphics) | 렌더러가 픽셀을 다뤄야 해 가장 무겁다 |
+| **F8** | 접근성(스크린 리더 버퍼)·모바일 터치·Safari/Firefox 검증 | |
+
+**목록의 근거**: xterm.js 의 `Terminal` 공개 타입(`typings/xterm.d.ts`)과 1:1 대조해 뽑았다.
+처음 세었던 "빠진 기능 7가지"는 **애드온급 기능만 본 것**이라 API 표면 격차(이벤트 6종, 메서드
+10여 개)를 놓쳤다. 계약 §7 의 표가 그 대조 결과다.
+
 ## 선행 조건
 
 P1은 [터미널 코어의 wasm 이식성](../wasm-portability.md)이 규정한 제약 위에서만 성립한다 — 특히 `addLibrary`가 아니라 `addExecutable` + `entry = .disabled` + `rdynamic`을 써야 하고(§5 재현법), `max_memory`를 명시해야 한다(§5.2).

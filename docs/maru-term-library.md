@@ -159,7 +159,56 @@ React 픽스처만 번들이 필요한데(react·react-dom 은 브라우저에�
 브라우저 검사는 playwright 브라우저 바이너리를 요구한다(`bunx playwright install chromium`).
 CI 의 `packages:check` 는 이 검사를 돌리지 않으므로 로컬에서만 필요하다.
 
-## 7. 이 문서가 정하지 않는 것
+## 7. 현재 범위 — 무엇이 있고 무엇이 없나
+
+**파싱·화면·입력의 정확도는 본체와 같다.** wasm 은 `TerminalCore` 를 그대로 쓰므로 libvterm·
+Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EAW·grapheme cluster 폭 판정과
+키 인코딩도 같은 코드다. 합성 글리프는 xterm.js 에 없는 것으로, Nerd Font 없이도 파워라인·박스가
+셀 경계에서 끊기지 않는다.
+
+**그 위의 편의 기능은 아직 없다.** 코어에 구현이 있어도 wasm export 로 내지 않은 것들이다:
+
+| 기능 | 코어의 구현 | 비고 |
+|---|---|---|
+| 검색 | `findMatches`·`matchViewportSpan` | xterm.js 의 SearchAddon 에 해당 |
+| 클립보드(OSC 52) | `clipboardReadPending`·`pendingClipboardWrite` | 이벤트 채널 설계가 필요하다 |
+| 화면 직렬화 | `dumpUtf`·`dumpRecentTextUtf` | SerializeAddon 에 해당 |
+| 리셋 | `clearScreen`·`fullReset`·`resetInputModes` | `reset` 이 먹지 않는다 |
+| 셸 통합(OSC 7·133) | `currentCwd`·`shellEvents`·`cursorIsAtPrompt` | 프롬프트 인식·cwd 추적 |
+| 알림(OSC 9·777) | `pendingNotification` | |
+| 이미지 | `buildImageViews`·`buildPlacementViews` | 렌더러가 픽셀을 다뤄야 한다 |
+
+링크 **자동 감지**는 libc 를 요구하므로 넣지 않는다(§8, [wasm 이식성](wasm-portability.md) §2). OSC 8
+명시 링크만 지원한다.
+
+**API 표면도 좁다.** xterm.js 의 `Terminal` 과 대조하면 기능 애드온 말고도 이만큼이 없다:
+
+| 없는 것 | 쓰임 |
+|---|---|
+| `reset`·`clear` | `reset` 명령, 화면 비우기 |
+| `scrollToTop`·`scrollToLine`·`scrollPages` | 스크롤 제어(맨 아래로만 있다) |
+| `onCursorMove`·`onScroll`·`onSelectionChange` | 앱이 상태를 따라가야 할 때(복사 버튼·미니맵 등) |
+| `onKey`·`onBinary`·`onLineFeed`·`onWriteParsed` | 입력·출력 훅 |
+| `attachCustomKeyEventHandler` | 앱 단축키가 터미널보다 먼저 키를 잡아야 할 때 |
+| `registerMarker`·`registerDecoration` | 검색 하이라이트·주석 같은 확장의 기반 |
+| `hasSelection`·`getSelectionPosition`·`select`·`selectLines` | 선택 조회·프로그래밍 선택 |
+| `registerLinkProvider` | 커스텀 링크 규칙 |
+| `input`·`writeln`·`refresh` | 편의 |
+
+`blur` 는 `focus(false)` 로 덮는다. `registerCharacterJoiner`(리가처 커스텀)와 `loadAddon` 은
+설계가 달라 그대로 옮길 것이 아니다 — 리가처는 코어가 판정하고, 애드온 개념을 둘지는 미정이다.
+
+**검증되지 않은 것** — 지금까지의 확인은 계약 테스트와 데모(가짜 셸)까지다:
+
+- **실제 TUI 로 돌려본 적이 없다.** vim·tmux·htop 은 대체 화면·스크롤 영역·mouse tracking 을 섞어
+  쓰는데 그 조합을 밟아 본 적이 없다. **기능을 더 넣기 전에 이것부터 해야 한다** — PTY 를
+  WebSocket 으로 물려 실제 앱을 띄우면 지금 안 보이는 문제 대부분이 한 번에 드러난다.
+- **브라우저는 headless Chromium 만** 봤다. Safari(특히 iOS)·Firefox 미검증.
+- **접근성 없음.** xterm.js 는 스크린 리더용 버퍼를 따로 둔다.
+- **모바일·터치** 에서 선택·스크롤이 어떻게 되는지 모른다.
+- **실사용 0.** 대량 출력은 벤치만 했고 실전 로그를 흘려본 적 없다.
+
+## 8. 이 문서가 정하지 않는 것
 
 - **바이트 전송로.** WebSocket·SSH-over-WS·trace 재생 중 무엇을 쓸지는 소비자가 정한다.
 - **링크 자동 감지.** `openableLinkAt`는 libc를 요구하므로 wasm에 넣지 않는다. OSC 8 명시 링크만 지원한다([wasm 이식성](wasm-portability.md) §2·§6).

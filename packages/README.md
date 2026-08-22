@@ -123,6 +123,19 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 
 [Ghostty가 배포하는 테마 파일](https://github.com/ghostty-org/ghostty)을 그대로 읽는다(iTerm2-Color-Schemes 계열, 수백 종).
 
+## 지금 상태
+
+**파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
+그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
+
+- **없는 것**: 검색·클립보드(OSC 52)·화면 직렬화·이미지·`reset`/`clear`·스크롤 제어·
+  `onCursorMove`/`onScroll`/`onSelectionChange`·마커/장식
+- **검증 안 된 것**: 실제 TUI(vim·tmux·htop), Safari/Firefox, 모바일 터치, 접근성
+
+무엇이 어떤 순서로 올지는 [구현 계획](https://github.com/ohah/maru/blob/main/docs/plans/maru-term-library.md)에
+있다. 지금 쓰기 좋은 곳은 **정확한 VT 파싱과 폭 판정이 필요한 곳**이고, xterm.js 를 그대로
+대체하려면 아직 멀다.
+
 ## 무엇이 다른가
 
 - **정확한 키 인코딩** — DECCKM, DECKPAM, 수식자 붙은 특수 키의 xterm legacy 형식, kitty CSI u

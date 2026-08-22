@@ -19316,6 +19316,33 @@ test "hook mode runs exactly one source and takes over notifications" {
     try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls);
     try std.testing.expect(term.agent_hook_log_present);
 
+    // ── ⓿b **실제 제품 순서: 파일이 없는 채 시작해 훅이 만든 뒤 전환된다** ─────────────────
+    // 위 ⓿는 파일이 **이미 있는** 상태만 본다. 진짜 시작은 «파일 없음 → 관측 → 훅이 첫 이벤트를 적음 →
+    // 훅 모드» 이고, 깨져 있던 것이 정확히 그 전이다. 두 tick 을 실제로 돌려 그 경계를 본다.
+    try tmp.dir.deleteFile(io, log_rel);
+    term.agent_hook_log_present = false;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_state = .unknown;
+    agent_ops.test_observe_calls = 0;
+    agent_ops.test_hook_calls = 0;
+    agent_ops.pollAgentConsumer(&session, term, false, true);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_hook_calls); // 아직 훅이 안 돌았다
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_observe_calls);
+    try std.testing.expect(!term.agent_hook_log_present);
+
+    // 훅이 첫 이벤트를 적는다 — 그 순간부터 그 Term 의 소스는 훅이다.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"질문\"}\n",
+    });
+    agent_ops.test_observe_calls = 0;
+    agent_ops.test_hook_calls = 0;
+    agent_ops.pollAgentConsumer(&session, term, false, true);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_hook_calls);
+    try std.testing.expectEqual(@as(usize, 0), agent_ops.test_observe_calls); // 관측은 그 tick 부터 멎는다
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
     // ── ① 소비자는 정확히 하나다 ──────────────────────────────────────────────────────────────
     // tick 카운터를 넘겨 observer probe 를 강제한다(kind probe 는 켜지 않는다 — 그것이 켜지면
     // `classifyAgentProcesses` 가 smoke 셸을 보고 agent_kind 를 none 으로 되돌린다).

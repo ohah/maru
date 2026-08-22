@@ -2030,7 +2030,7 @@ W7 이 끝난 시점에 Windows 터미널은 **이미 다 돌고 있었다** —
 **앱 수준 config 도 이어서 배선했다**(§2m.17). 테마 색·팔레트·`scrollback.lines`·커서 모양이 이제
 config 에서 온다. `shell.command` 는 **이미 배선돼 있었다** — §2l 의 미배선 목록이 그 사이 낡았다.
 
-**탭·사이드바·에디터는 여기 없다.** 그것은 ADE 표면이고 셰이핑 다리(§2m.13)가 먼저다.
+**탭·사이드바·에디터는 여기 없다.** 그것은 ADE 표면이다 — 셰이핑 다리는 §2m.18 이 제품 경로에 붙였고, 남은 것은 그 위에 표면을 올리는 일이다.
 
 **앱으로 만들자마자 결함이 하나 드러났다 — 드래그 선택이 화면에 안 그려졌다.** 사용자가 실제로 써 보고
 알렸다. 마우스는 처음부터 돌고 있었다:
@@ -2085,7 +2085,7 @@ W7 이 끝난 시점에 Windows 터미널은 **이미 다 돌고 있었다** —
 `shell.command` 는 여전히 `CreateProcessW` 까지 안 간다(§2l 이 적은 그대로다). 그것들을 배선해도
 **화면이 뜨는 것과는 무관**해서 이 슬라이스에 안 넣었다 — 앱이 되는 데 필요한 것은 상한 하나였다.
 
-**탭·사이드바·에디터는 여기 없다.** 그것은 ADE 표면이고 셰이핑 다리(§2m.13)가 먼저다.
+**탭·사이드바·에디터는 여기 없다.** 그것은 ADE 표면이다 — 셰이핑 다리는 §2m.18 이 제품 경로에 붙였고, 남은 것은 그 위에 표면을 올리는 일이다.
 
 **앱으로 만들자마자 결함이 하나 드러났다 — 드래그 선택이 화면에 안 그려졌다.** 사용자가 실제로 써 보고
 알렸다. 마우스는 처음부터 돌고 있었다:
@@ -2169,6 +2169,104 @@ config 가 끼면 판정이 흐려진다 — §2l 이 `dwrite-text-smoke` 에 �
 - `font.line-height`·`font.letter-spacing` — §2e 의 래스터라이저가 em 크기만 받아 소비자가 없다.
   그 둘의 소비자는 셀 메트릭 계산이라 폰트 슬라이스와 함께 온다.
 
+### 2m.18 셰이핑 다리를 **제품 경로에 붙인다** (실측 2026-08-22)
+
+§2m.13~§2m.15 는 `IDWriteTextLayout` 으로 한 줄을 글리프로 바꾸는 **다리**를 만들었다. 그런데 그것을
+부르는 곳이 없었다 — 크롬 표면은 여전히 `error.UnsupportedSystemText` 로 떨어졌다. 이 절이 그 둘을 잇는다.
+
+**이음매는 `src/text_shaper.zig` 다.** `pty/session.zig` 와 같은 모양이다:
+
+```zig
+pub const shape = switch (builtin.os.tag) {
+    .windows => @import("platform/windows/dwrite_shape.zig").shapeInto,
+    else => unsupportedShape,
+};
+pub const available = shape != unsupportedShape;
+```
+
+`available` 을 `builtin.os.tag == .windows` 로 **다시 적지 않는다** — 백엔드가 늘 때 한쪽만 고치는 사고가
+난다. 위 switch 가 무엇을 골랐는지에서 유도하면 둘이 갈릴 수 없다(`pty.backend_available` 과 같은 규율).
+
+**`build.zig` 를 안 건드린다.** Zig 는 닿지 않는 선언을 분석하지 않으므로 macOS·Linux 타깃에서는
+`.windows` 가지가 안 골라져 `extern "dwrite"` 가 링크 대상이 되지 않는다. `check-targets` 가 세 타깃을
+그대로 통과했다.
+
+**자리를 세 번 옮겼다 — 세 게이트가 각각 다른 이유로 막았다.**
+
+| 시도 | 막은 것 | 왜 |
+|---|---|---|
+| 플랫폼 모듈을 배럴에 raw 로 노출 | `check-targets`(Linux) | `cross_target_surface` walker 가 모든 pub 선언의 **주소를 잡아** 강제 분석시킨다 — 가려 둔 `extern "user32"` 가 다시 링크 대상이 됐다 |
+| 배럴 안 파일에서 `@import("maru")` | 컴파일 | 모듈 자기 참조라 `build.zig` self-import 가 필요하다. `../../maru.zig` 로 우회했다 |
+| 이음매를 `src/chrome/` 에 배치 | `check-boundaries` | *"chrome layer imports forbidden layer 'platform'"* — chrome(L3)은 플랫폼 중립이어야 한다 |
+
+그래서 최종형은 **switch 로 가려서 내보내는 배럴 항목 + 최상위 중립 이음매**다:
+
+```zig
+pub const win32_window = if (builtin.os.tag == .windows) @import("...") else struct {};
+pub const text_shaper = @import("text_shaper.zig");
+```
+
+**배럴을 거치는 이유는 모듈 경로다.** 호출자 `platform/macos/chrome/system_text.zig` 는 모듈 루트가
+`platform/macos` 안인 아티팩트에서도 컴파일되어 `../../windows/…` 가 모듈 밖이 된다(§2m.11 과 같은 자리).
+
+**walker 가 값을 읽지 않게 고쳤다.** `const field = @field(T, name)` 은 `pub var` 에서
+*"unable to resolve comptime value"* 로 막힌다 — Windows 플랫폼 파일들이 `pub var last_hresult` 같은
+진단 변수를 갖고 있다. 이제 `@TypeOf(@field(..))` 로 타입만 보고, 타입 선언이면 재귀하고 아니면 주소만
+잡는다. 반사 접근 자리가 2 → 3 이 되어 `external_source_digests.zig` 를 손으로 갱신했다(그 표가 잡으라고
+있는 종류의 변화다).
+
+**종단 실측** — macOS 가 쓰는 것과 **같은** `prepareRequest` → `shapeRequest` 공개 경로로 잰다:
+
+```text
+[실측] Windows chrome 셰이핑: 글리프 11 · 폭 합 129.6px · 폴백 4 · 폰트 Cascadia Mono
+```
+
+`"Agent 세션 기록"` 11 자가 전부 나오고, 한글 4 자가 폴백으로 떨어졌다. x 가 오른쪽으로 증가하는 것도
+함께 본다 — 전부 0 이면 글자가 한 자리에 겹쳐 찍힌다.
+
+**그 실측이 결함 하나를 잡았다.** 프로세스 전역 셰이퍼를 **첫 호출자의 allocator** 로 만들고 있었다.
+프레임 아레나나 테스트 allocator 가 첫 호출자면 그것이 죽은 뒤에도 캐시된 포인터가 남아 매달린다.
+`testing.allocator` 가 누수로 잡아냈다. **수명이 프로세스면 allocator 도 프로세스여야 한다** —
+`std.heap.page_allocator` 로 바꿨다.
+
+**테스트가 Windows 에서 한 줄도 안 돌고 있었다.** `system_text.zig` 의 테스트들은 CoreText 를 링크하는
+아티팩트 안에만 있어서, 배선을 끝낸 직후 `zig build test` 출력에 `system_text` 가 **0 건**이었다 —
+컴파일만 되고 실행된 적이 없는 상태다. 얇은 루트(`src/chrome_system_text_win_test_root.zig`)로 Windows
+게이트 스텝을 걸었다. 다른 호스트에서는 시끄럽게 건너뛴다.
+
+> **컴파일된다 ≠ 돈다** 를 이 슬라이스에서 두 번 밟았다. 게이트가 초록인 것과 코드가 도는 것은 다르다.
+
+**적대적 검증이 메모리 안전 결함 하나를 더 냈다.** `std.unicode.utf8ToUtf16Le` 는 **목적지 버퍼를
+검사하지 않는다** — `utf16le[dest_index] = ..` 를 그대로 쓴다. 8 칸 버퍼에 16 자를 주고 실증했다:
+
+```text
+index out of bounds: index 16, len 8
+  std/unicode.zig:1205  utf16le[dest_index..][0..chunk_len].* = utf16_chunk;
+```
+
+safe 모드는 패닉이고 **ReleaseFast 는 스택 밖 쓰기**다. 셰이퍼에 그 함수가 노출된 고정 배열이 세 곳
+있었다:
+
+| 자리 | 입력 | 도달 경로 |
+|---|---|---|
+| `[1024]u16` 본문 | 임의 길이 | 에디터 한 줄이면 언제든 넘는다 |
+| `[128]u16` 주 폰트 이름 | config `font.family` | 사용자가 긴 이름을 적으면 된다 |
+| `[128]u16` 폴백 이름 | config `font.fallback` 항목 | 같다 |
+
+본문은 **자르지 않고 힙으로 넘어가게** 했고(UTF-16 유닛 수는 UTF-8 바이트 수를 안 넘으므로 바이트로
+재면 충분하다), 이름 둘은 길이를 먼저 보고 **시끄럽게** 실패하거나 그 후보만 건너뛴다. 잘린 폰트 이름은
+엉뚱한 폰트를 찾으므로 조용히 자르면 안 된다.
+
+**그 과정에서 수집기 상한이 드러났다 — 글리프 512.** 1600 자를 넣으니 `count=0 overflow=true` 였다.
+대조군으로 500 자는 500 글리프가 그대로 나온다. 상한에서 **시끄럽게** 서고(`shapeInto` 가
+`error.ShapeFailed` 로 접는다) 절단된 개수를 정상처럼 주지 않으므로 지금은 안전하지만, **에디터 한 줄은
+512 글리프를 쉽게 넘는다.** 수집기를 호출자 버퍼에 직접 쓰게 바꾸는 것이 옳고, 그것은 배선이 아니라
+설계 변경이라 **W8.3 의 선행 항목**으로 둔다.
+
+**아직 없는 것**: 앞을 자르는 말줄임(`anchor_tail`)은 `error.UnsupportedHeadTrim` 이다. 입력 줄이 그것을
+필요로 하므로(§3.5) 에디터 표면(W8.3)과 함께 온다. **조용히 뒤를 자르지 않는다** — 그러면 사용자가 방금
+친 글자를 못 본다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
@@ -2236,8 +2334,8 @@ config 가 끼면 판정이 흐려진다 — §2l 이 `dwrite-text-smoke` 에 �
 |---|---|---|
 | **W8.0** | **게이트를 먼저 넓힌다** — `check-targets` 가 ADE 표면(chrome 도크 셋·백엔드 공개 표면)을 **명시 참조로 강제 분석**하게 한다. 안 하면 W8 의 나머지가 검증 없이 쌓인다(§2m.2) | 없음 |
 | **W8.1** | **파일 트리 백엔드가 Windows 에서 돈다** — 완료. 아래 §2m.3 | W8.0 |
-| **W8.2** | **파일 패널 표면** — ⒜ 데이터 경로(스캔→트리→행)를 Win32 에서 끝까지 흘린다(**완료**, §2m.4) ⒝ chrome 이 그것을 그린다(다음) | W8.1 |
-| **W8.3** | **에디터 표면** — `session/editor/` 는 이미 중립이다. 배선과 입력 라우팅 | W8.2 |
+| **W8.2** | **파일 패널 표면** — ⒜ 데이터 경로(스캔→트리→행)를 Win32 에서 끝까지 흘린다(**완료**, §2m.4) ⒝ chrome 이 그것을 그린다(다음 — 선행인 셰이핑 다리는 §2m.18 로 **완료**) | W8.1 |
+| **W8.3** | **에디터 표면** — `session/editor/` 는 이미 중립이다. 배선과 입력 라우팅. **선행**: 셰이퍼 수집기의 512 글리프 상한을 걷는다(§2m.18) — 에디터 한 줄이 쉽게 넘는다 | W8.2 |
 | **W8.4** | **소스 컨트롤** — `git_backend` 의 Windows 프로세스 러너(`fork`/`execve`/`pipe` → `CreateProcessW` + 파이프). §4 의 spawn 절차를 재사용한다. **세 백엔드 중 유일하게 진짜 포팅이다** | W8.1 |
 | **W8.5b** | **에이전트 도크** — `agent_*` 백엔드 셋 | W8.2 |
 | **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
@@ -3629,6 +3727,17 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
   준 임의 경로라 — 위 표의 ①을 **결정한 적 없이 채택**하는 셈이 된다. 그래서 `error.UnsupportedOnWindows`로
   막았다. 컨트롤 플레인을 이식하는 사람이 이 결정을 잊으면 조용히 넓은 권한으로 쓰이는 대신 **여기서 시끄럽게
   실패한다.**
+- **크롬(UI) 텍스트의 기본 폰트**(§2m.18 이 드러냈다). macOS 는 `Face` 가 비면 **system UI face** 로
+  셰이핑한다 — 사이드바·탭·도크가 터미널 폰트가 아니라 OS UI 폰트로 그려진다. Windows 이음매는 지금
+  빈 family 를 **터미널 티어**(`Cascadia Mono`·`Consolas`·`Courier New`)로 떨어뜨린다(실측: 빈 family →
+  `Cascadia Mono`). 즉 **크롬이 고정폭으로 그려진다** — macOS 와 다른 화면이다.
+
+  후보는 ① `Segoe UI`(Windows 10 의 UI 폰트, macOS 의 SF Pro 자리) ② `IDWriteGdiInterop` /
+  `SystemParametersInfo(SPI_GETNONCLIENTMETRICS)` 로 **OS 에 물어본다**(테마·언어·DPI 를 따라간다) ③ 번들
+  폰트를 UI 에도 쓴다(§2m.14 의 Jetendard — 두 플랫폼이 같은 화면이 되지만 OS 관례와는 멀어진다).
+
+  **터미널 티어와 별도 티어여야 한다**는 것만 분명하다. 지금은 크롬 표면이 아직 안 그려져 드러나지
+  않지만, W8.2⒝ 가 첫 픽셀을 내는 순간 보인다 — **그 슬라이스의 선행 결정이다.**
 - **cwd 2단(PEB)을 둘 것인가**(§3.5). Ghostty는 안 두고 "모른다"를 표현하며, macOS maru는 둔다. Windows에서는
   비문서화 비용이 더해지므로 별도 판단이 필요하다.
 - **웹뷰 합성 모델**. WebView2는 별도 HWND라 macOS의 `CALayer` subview 3겹 합성이 그대로 오지 않는다.

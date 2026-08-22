@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 pub const app = @import("app.zig");
 pub const chrome = @import("chrome.zig");
 pub const user_paths = @import("user_paths.zig"); // 사용자별 경로 정책(홈·config·캐시 base) — OS를 인자로 받는 순수 판정
@@ -8,6 +9,28 @@ pub const observability = @import("observability.zig");
 pub const plugin = @import("plugin.zig");
 pub const pty = @import("pty.zig");
 pub const win32_process = @import("platform/windows/win32_process.zig"); // Windows 캡처 러너. **배럴에 거는 이유는 모듈 경로다** — 이것을 쓰는 `git_backend.zig` 가 모듈 루트가 `platform/macos` 안인 아티팩트에서도 컴파일되는데, 상대 경로로 가져오면 그때 모듈 밖이 되어 깨진다(실측: macOS CI)
+// **Windows 플랫폼 모듈은 switch 로 가려서 내보낸다.**
+// 그냥 `@import` 로 노출하면 `cross_target_surface` 의 walker 가 그 안의 모든 pub 함수 **주소를 잡아**
+// 강제로 분석시켜, macOS/Linux 타깃에서 `extern "user32"`·`extern "dwrite"` 가 링크 대상이 된다
+// (실측: `dependency on dynamic library 'user32' requires ... PIC`). `pty/session.zig` 가 같은 방식으로
+// `pty/windows.zig` 의 extern 37 개를 가리고 있고 `check-targets` 가 그것을 지킨다.
+//
+// **배럴에 있어야 하는 이유는 모듈 경로다** — `text_shaper.zig` 이음매가 `dwrite_shape` 를 끌어오고,
+// 그것이 `dwrite_font` 를 쓰는데 `main.zig` 가 같은 파일을 상대 경로로도 가져가면 한 파일이 두 모듈에
+// 들어가 컴파일이 막힌다("file exists in modules 'root' and 'maru'").
+pub const dwrite_font = if (builtin.os.tag == .windows) @import("platform/windows/dwrite_font.zig") else struct {};
+pub const win32_window = if (builtin.os.tag == .windows) @import("platform/windows/win32_window.zig") else struct {};
+pub const d3d11_present = if (builtin.os.tag == .windows) @import("platform/windows/d3d11_present.zig") else struct {};
+pub const d3d11_cells = if (builtin.os.tag == .windows) @import("platform/windows/d3d11_cells.zig") else struct {};
+pub const win32_text = if (builtin.os.tag == .windows) @import("platform/windows/win32_text.zig") else struct {};
+pub const win32_terminal = if (builtin.os.tag == .windows) @import("platform/windows/win32_terminal.zig") else struct {};
+pub const win32_keys = if (builtin.os.tag == .windows) @import("platform/windows/win32_keys.zig") else struct {};
+pub const win32_clipboard = if (builtin.os.tag == .windows) @import("platform/windows/win32_clipboard.zig") else struct {};
+pub const win32_mouse = if (builtin.os.tag == .windows) @import("platform/windows/win32_mouse.zig") else struct {};
+// 크로마‧편집기 한 줄을 글리프로 바꾸는 **플랫폼 이음매**(`pty.zig` 와 같은 자리의 중립 최상위 leaf).
+// **`src/chrome/` 안에 둬 수 없다** — chrome(L3)은 플랫폼을 import 하지 못하게 경계 게이트가
+// 막는다(docs/layering-and-portability.md §2). 실제로 거기 둬다가 `check-boundaries` 가 섰다.
+pub const text_shaper = @import("text_shaper.zig");
 pub const redact = @import("redact.zig"); // 민감정보 redaction 단일 출처(코드) — env·argv·fixture 공용 중립 leaf
 pub const renderer = @import("renderer.zig");
 pub const session = @import("session.zig");

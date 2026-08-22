@@ -17,7 +17,7 @@
 //! 그래서 `fontIdForFace`/`faceIndexFromFontId`가 이 파일에 함께 있고 순수 함수라 테스트된다.
 
 const std = @import("std");
-const maru = @import("maru");
+const maru = @import("../../maru.zig");
 const dwrite_font = @import("dwrite_font.zig");
 
 const renderer = maru.renderer;

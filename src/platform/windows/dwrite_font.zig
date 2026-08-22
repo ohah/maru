@@ -29,7 +29,9 @@ const d3d11 = @import("d3d11.zig");
 // **배럴로 가져온다.** `maru.zig` 는 이 파일을 내보내지 않으므로 순환이 아니고(형제 `win32_keys.zig`·
 // `win32_terminal.zig` 도 같다), 상대 경로로 `../../` 를 타면 이 파일이 모듈 루트가 되는 순간 깨진다
 // (`win32_process.zig` 가 실제로 그렇게 깨져 있었다 — docs/windows-platform.md §2m.8).
-const maru = @import("maru");
+// **상대 경로다.** 이 파일은 배럴(`maru.zig`)이 내보내므로 `@import("maru")` 로는 자기 모듈을
+// 못 부른다("no module named 'maru' within module 'maru'"). 같은 모듈의 루트 파일이라 안전하다.
+const maru = @import("../../maru.zig");
 
 pub const Error = error{
     UnsupportedPlatform,
@@ -425,6 +427,17 @@ pub fn fontCandidates(configured: []const u8, out: *[windows_font_tier.len + 1][
 
 /// 셀 하나의 픽셀 크기와 베이스라인. 폰트 메트릭에서 유도한다 — **셀 격자는 폰트가 정한다**(터미널이
 /// 임의로 정하면 글자가 셀을 넘거나 남는다).
+/// 번들 폰트 컬렉션을 **불투명 포인터로** 만든다 — 셰이핑 다리(`dwrite_shape`)가 쓴다.
+///
+/// 그쪽은 자기 `IDWriteFactory2` 를 들고 있는데 이 파일의 `IDWriteFactory` 는 비공개 타입이라 그대로는
+/// 못 넘긴다. **`shared` 팩토리는 같은 객체**이므로(§2m.15 실측) 불투명 포인터로 받아 캐스팅하면 된다.
+pub fn createBundledCollectionRaw(factory_raw: *anyopaque) ?*anyopaque {
+    if (builtin.os.tag != .windows) return null;
+    const factory: *IDWriteFactory = @ptrCast(@alignCast(factory_raw));
+    const coll = Rasterizer.createBundledCollection(factory) orelse return null;
+    return @ptrCast(coll);
+}
+
 pub const CellMetrics = struct {
     width_px: u32,
     height_px: u32,

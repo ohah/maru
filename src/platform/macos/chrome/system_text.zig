@@ -1310,7 +1310,10 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
     // The boundary/portable test targets link this module without the macOS CoreText object
     // file. Keep the product-only bridge unreachable there instead of leaving an undefined
     // native symbol merely because a detached-worker test imports its type.
-    if (builtin.os.tag != .macos) return error.UnsupportedSystemText;
+    // **Windows 는 이음매(`maru.text_shaper`)로 간다.** 그 이음매가 `switch (builtin.os.tag)` 로
+    // 백엔드를 고르므로 이 파일은 Windows 코드를 안 본다 — 이 파일은 모듈 루트가 `platform/macos` 안인
+    // 아티팩트에서도 컴파일되어 `../../windows/…` 를 상대 경로로 못 탄다(§2m.11).
+    if (builtin.os.tag != .macos and !maru.text_shaper.available) return error.UnsupportedSystemText;
     // **셀 격자면 폰트 크기가 셀에서 나온다.** 토큰(pt)은 chrome 고정값이라 편집기 폰트를 키워도
     // 그대로여서, 셀만 커지고 글자는 안 커지는 화면이 된다(실측으로 확인한 결함).
     //
@@ -1350,6 +1353,13 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
         @as(f64, @floatFromInt(token_pt)) * @as(f64, @floatFromInt(scale_milli)) / 1000.0;
     var native: bridge.NativeChromeTextShapeResult = .{};
     const capacity = @max(@as(usize, 16), run.text.len * 2);
+
+    // **여기서 갈라진다.** 위에서 정한 크기·줄 높이·색은 그대로 쓰고 글리프를 만드는 일만 플랫폼이
+    // 한다. 아래 CoreText 경로와 **같은 `UnresolvedGlyph`** 로 접히므로 두 플랫폼이 같은 화면을 낸다.
+    if (comptime builtin.os.tag != .macos) {
+        return shapeViaSeam(allocator, run, face, scaled_size, point_size, capacity);
+    }
+
     var glyphs = try allocator.alloc(bridge.NativeChromeTextGlyphRecord, capacity);
     defer allocator.free(glyphs);
     bridge.maru_macos_coretext_shape_chrome_text(
@@ -1393,6 +1403,106 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, face: Face
         };
     }
     return out;
+}
+
+/// `shapeUnresolvedRun` 의 비-macOS 갈래. **크기·줄 높이·색은 부르는 쪽이 이미 정했다** — 여기서는
+/// 글리프만 만들어 중립 `UnresolvedGlyph` 로 옮긴다.
+///
+/// macOS 가 `CTLine` 하나로 하는 일을 플랫폼 이음매가 한다. 폴백 목록·번들 폰트 컬렉션·말줄임은
+/// 그쪽이 소유한다(docs/windows-platform.md §2m.13·§2m.18).
+fn shapeViaSeam(
+    allocator: std.mem.Allocator,
+    run: Request.Run,
+    face: Face,
+    scaled_size: f64,
+    point_size: u16,
+    capacity: usize,
+) ![]UnresolvedGlyph {
+    const records = try allocator.alloc(maru.text_shaper.GlyphRecord, capacity);
+    defer allocator.free(records);
+
+    const count = maru.text_shaper.shape(allocator, .{
+        .text = run.text,
+        .family = face.family,
+        .fallback_csv = face.fallback,
+        .size_px = @floatCast(scaled_size),
+        .weight = weight(run.role),
+        .max_width_px = @floatFromInt(run.max_width_px),
+        .anchor_tail = run.anchor == .tail,
+    }, records) catch return error.CoreTextChromeTextShapeFailed;
+
+    const out = try allocator.alloc(UnresolvedGlyph, count);
+    for (records[0..count], out) |rec, *glyph| {
+        glyph.* = .{
+            .glyph_id = rec.glyph_id,
+            .codepoint = rec.codepoint,
+            .fallback = rec.fallback,
+            .color_glyph_kind = if (rec.color) .color else .monochrome,
+            .x_px = rec.x_px,
+            .advance_px = rec.advance_px,
+            .left_overhang_px = rec.left_overhang_px,
+            .font_name = rec.font_name,
+            .point_size = point_size,
+            .line_height_px = if (run.line_height_px) |lh|
+                @floatFromInt(lh)
+            else
+                @floatFromInt(chrome.ui.typography.lineHeightPx(run.role, 1000)),
+            .origin = run.origin,
+            .foreground = run.foreground,
+            .run_index = 0,
+        };
+    }
+    return out;
+}
+
+test "[실측] Windows: 같은 공개 경로가 이음매를 거쳐 글리프를 낸다" {
+    // **이 슬라이스의 진짜 판정이다.** 이음매와 브리지를 각각 테스트하는 것으로는 둘이
+    // 이어졌는지를 모른다 — macOS 가 쓰는 것과 **같은** `prepareRequest`→`shapeRequest` 를 타서
+    // 글리프가 나오는지를 본다.
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const runs = [_]chrome.draw.Run{.{ .text = "Agent 세션 기록" }};
+    const ops = [_]chrome.draw.Op{.{ .text = .{
+        .origin = .{ .x = 12, .y = 8 },
+        .runs = &runs,
+        .role = .surface_fg,
+        .text_role = .dock_heading,
+        .max_cols = 40,
+    } }};
+    const tokens = chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 10, .g = 10, .b = 10 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 50, .g = 50, .b = 50 },
+        .search_match = .{ .r = 20, .g = 120, .b = 255 },
+        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
+        .selection = .{ .r = 60, .g = 80, .b = 120 },
+        .cursor = .{ .r = 255, .g = 255, .b = 255 },
+        .terminal_background = .{ .r = 255, .g = 255, .b = 255 },
+        .accent = .{ .r = 20, .g = 120, .b = 255 },
+    });
+    var request = try prepareRequest(allocator, 44, &ops, &tokens, 16, .{});
+    defer request.deinit(allocator);
+    var artifact = try shapeRequest(allocator, &request, 1000);
+    defer artifact.deinit(allocator);
+
+    // 문자 수만큼은 나와야 한다 — 0 이 아니라는 것만 보면 한 글자만 나와도 통과한다.
+    try std.testing.expect(artifact.glyphs.len >= 10);
+    var advance_sum: f32 = 0;
+    var fallback_count: usize = 0;
+    for (artifact.glyphs) |g| {
+        advance_sum += g.advance_px;
+        if (g.fallback) fallback_count += 1;
+    }
+    // **x 가 오른쪽으로 간다.** 모두 0 이면 레이아웃이 없는 것이라 화면에 겹쳐 찍힌다.
+    try std.testing.expect(artifact.glyphs[artifact.glyphs.len - 1].x_px > artifact.glyphs[0].x_px);
+    try std.testing.expect(advance_sum > 0);
+    std.debug.print(
+        "[실측] Windows chrome 셰이핑: 글리프 {d} · 폭 합 {d:.1}px · 폴백 {d} · 폰트 {s}\n",
+        .{ artifact.glyphs.len, advance_sum, fallback_count, std.mem.sliceTo(&artifact.glyphs[0].font_name, 0) },
+    );
 }
 
 test "owned request shapes proportional text before renderer registry resolution" {

@@ -71,7 +71,7 @@ pub const inventory = [_]Proof{
     // 되며 움직인다(생성 지점 9곳이 `.doc_key = meta.doc` 을 함께 준다). count 는 108 그대로다 — 반사 접근이
     // 늘거나 준 것이 아니라 **필드가 하나 늘었을 뿐**이다.
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "1dc38a85f24b1eab672919f0a7c99dcee63abcf7fa3b3549fbe5e63103f7c91f" },
-    // **크로스 타깃 표면 walker**(W8.0, 계약 §2m.2). `@field` 두 자리는 **전부 재귀 참조**다 —
+    // **크로스 타깃 표면 walker**(W8.0, 계약 §2m.2). `@field` 세 자리는 **전부 재귀 참조**다 —
     // `maru.zig` 의 선언을 comptime 에 훑어 `_ = &@field(T, name)` 으로 주소를 잡는다. 그것이 함수
     // 본문을 의미 분석하게 만들고, 그래서 `check-targets` 가 세 타깃에서 중립 표면을 본다.
     // Client receiver·제품 vtable 과 무관하고 런타임 동작이 없다.
@@ -80,7 +80,13 @@ pub const inventory = [_]Proof{
     // 나열했더니 21 개 중 14 개가 빠졌고, ADE 표면 셋(`archive_detail`·`session_dock`·`scm_dock` 의
     // `view`)이 정확히 그 구멍이었다. 지금은 `maru.zig` 하나에서 유도하고, 훑은 선언 수에 컴파일
     // 타임 하한을 둬(실측 2,937 / 하한 2,000) walker 를 비우면 게이트가 선다.
-    .{ .path = "src/cross_target_surface.zig", .count = 2, .digest_hex = "838e962b1a88f42b2f82293727f6947a43eb34847acf156ebb9c7e917cd28c93" },
+    //
+    // **2로 세워 둔 것을 3으로 올린다**(W8.7). walker 가 이전엔 `const field = @field(T, name)` 으로
+    // 값을 꼰냈는데, 그러면 `pub var` 가 "unable to resolve comptime value" 로 막힌다 — Windows
+    // 플랫폼 파일의 진단 변수(`pub var last_hresult` 등)가 표면에 들어오면서 걸렸다. 지금은
+    // `@TypeOf(@field(..))` 로 **타입만 보고**, 타입 선언이면 재귀하고 아니면 주소만 잡는다.
+    // 세 자리가 각각 그 셋이다. **반사 범위는 똑같다** — 훑는 선언 수 하한 2,000 은 그대로다.
+    .{ .path = "src/cross_target_surface.zig", .count = 3, .digest_hex = "b406e8d88f6962715d19d87b5255c2aa66183a22056794fa0faa74be11b1030a" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.

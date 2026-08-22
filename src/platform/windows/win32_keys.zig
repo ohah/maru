@@ -27,7 +27,7 @@
 //! 있으면 반드시 어긋난다(그리고 어긋나도 컴파일은 된다).
 
 const std = @import("std");
-const maru = @import("maru");
+const maru = @import("../../maru.zig");
 
 const input = maru.terminal.input;
 const keybinding = maru.config.keybinding;

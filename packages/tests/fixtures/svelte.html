@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term svelte</title>
+<style>
+  html,
+  body {
+    margin: 0;
+    background: #000;
+  }
+  #host {
+    width: 520px;
+    height: 400px;
+    display: block;
+  }
+</style>
+<script type="importmap">
+  { "imports": { "@maru/core": "/core/dist/index.js" } }
+</script>
+<div id="host"></div>
+<script type="module">
+  // 액션은 순수 함수다 — Svelte 런타임 없이도 컴포넌트가 하는 일과 똑같이 부를 수 있다.
+  import { terminal } from "/svelte/dist/index.js";
+  const node = document.getElementById("host");
+  const action = terminal(node, {
+    options: { cols: 50, rows: 15, worker: false, wasmUrl: "/core/wasm/maru-vt.wasm" },
+    onReady: (t) => {
+      globalThis.__term = t;
+    },
+  });
+  const start = Date.now();
+  while (!globalThis.__term && Date.now() - start < 10000)
+    await new Promise((r) => setTimeout(r, 50));
+  globalThis.__term.write("\x1b[1;32msvelte\x1b[0m ok\r\n");
+  await new Promise((r) => setTimeout(r, 200));
+  globalThis.__hasDestroy = typeof action?.destroy === "function";
+  globalThis.__ready = true;
+</script>

@@ -248,6 +248,38 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
       below: met.cellHeight - met.ascent - desc,
     };
   });
+  // **워커 모드에서만 갈리던 결함 셋.** 전부 `worker/entry.ts` 의 `opts`/catch 경로다.
+  const workerOpts = await p.evaluate(async () => {
+    const t = (
+      globalThis as {
+        __term: {
+          setOptions: (o: Record<string, unknown>) => void;
+          selectionText: () => Promise<string | null>;
+          snapshot: () => Promise<{ size: { cols: number; rows: number } }>;
+        };
+      }
+    ).__term;
+    const canvasW = () => (document.querySelector("canvas") as HTMLCanvasElement).width;
+    const before = canvasW();
+    t.setOptions({ fontSize: 22 }); // 폰트를 키우면 backing 도 커져야 한다
+    await new Promise((r) => setTimeout(r, 600));
+    const afterFont = canvasW();
+    t.setOptions({ scrollback: 0 }); // 0 은 유효한 값이다(무시되면 안 된다)
+    await new Promise((r) => setTimeout(r, 300));
+    // 조회가 응답을 받는가 — 에러가 id 없이 오면 여기서 영원히 멈춘다.
+    const q = await Promise.race([
+      t.selectionText().then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 3000)),
+    ]);
+    return { before, afterFont, query: q };
+  });
+  check(
+    "worker: 폰트를 바꾸면 backing 도 따라간다",
+    workerOpts.afterFont > workerOpts.before,
+    `${workerOpts.before} → ${workerOpts.afterFont}`,
+  );
+  check("worker: 조회가 응답한다", workerOpts.query === "settled", String(workerOpts.query));
+
   check(
     "줄 간격 여백이 위아래로 나뉜다",
     lead.above > 0 && Math.abs(lead.above - lead.below) <= 1.01,

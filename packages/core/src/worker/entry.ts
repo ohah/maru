@@ -16,10 +16,13 @@ const renderer = new CanvasRenderer();
 let opts: WorkerRenderOptions | null = null;
 let preedit = "";
 let blinkOn = true;
+/** 마지막으로 잡은 격자. 폰트가 바뀌면 이 크기로 backing 을 다시 잡는다. */
+let lastSize: { cols: number; rows: number } | null = null;
 
 /** 캔버스 backing store 를 다시 잡고 렌더러를 붙인다. 메인은 이걸 못 한다(소유권 이전). */
 function sizeCanvas(cols: number, rows: number): void {
   if (!canvas || !metrics || !opts) return;
+  lastSize = { cols, rows };
   const dpr = opts.devicePixelRatio;
   canvas.width = Math.ceil(cols * metrics.cellWidth * dpr);
   canvas.height = rows * metrics.cellHeight * dpr;
@@ -77,7 +80,8 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         if (opts.theme) backend.setTheme(opts.theme);
         if (opts.cursorShape) backend.setCursorShape(opts.cursorShape);
         if (opts.ambiguousWide !== undefined) backend.setAmbiguousWide(opts.ambiguousWide);
-        if (opts.scrollback) backend.setScrollback(opts.scrollback);
+        // `0`(스크롤백 없음)도 유효한 값이라 `!== undefined` 로 본다.
+        if (opts.scrollback !== undefined) backend.setScrollback(opts.scrollback);
         post({ t: "ready" });
         return;
       }
@@ -126,15 +130,19 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         if (msg.opts.theme) backend?.setTheme(msg.opts.theme);
         if (msg.opts.cursorShape) backend?.setCursorShape(msg.opts.cursorShape);
         if (msg.opts.ambiguousWide !== undefined) backend?.setAmbiguousWide(msg.opts.ambiguousWide);
+        if (msg.opts.scrollback !== undefined) backend?.setScrollback(msg.opts.scrollback);
         if (msg.opts.fontFamily || msg.opts.fontSize || msg.opts.lineHeight) {
-          renderer.setMetrics(
-            measureMetrics({
-              fontFamily: opts.fontFamily,
-              fontSize: opts.fontSize,
-              lineHeight: opts.lineHeight,
-              devicePixelRatio: opts.devicePixelRatio,
-            }),
-          );
+          // **모듈 변수 `metrics` 도 함께 갱신한다.** `sizeCanvas()` 가 이 값으로 backing 을
+          // 잡고 `renderer.attach()` 로 렌더러 metrics 까지 덮어쓰므로, 여기서 안 바꾸면
+          // 다음 resize 가 방금의 setMetrics 를 되돌린다(폰트 줌이 워커에서만 깨졌다).
+          metrics = measureMetrics({
+            fontFamily: opts.fontFamily,
+            fontSize: opts.fontSize,
+            lineHeight: opts.lineHeight,
+            devicePixelRatio: opts.devicePixelRatio,
+          });
+          renderer.setMetrics(metrics);
+          if (lastSize) sizeCanvas(lastSize.cols, lastSize.rows);
         }
         redraw();
         return;
@@ -174,6 +182,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         return;
     }
   } catch (e) {
-    post({ t: "error", message: e instanceof Error ? e.message : String(e) });
+    // **`id` 를 함께 싣는다.** 조회(`query`)도 이 try 안에서 await 하는데 id 없이 보내면
+    // 프록시가 짝지을 대상을 못 찾아(`#pending` 에 그대로 남는다) 그 promise 가 영원히
+    // 안 풀린다 — Cmd+C 가 아무 말 없이 안 되고, hover 마다 거는 `linkAt` 이 쌓여 샌다.
+    const id = (msg as { id?: number }).id;
+    post({ t: "error", id, message: e instanceof Error ? e.message : String(e) });
   }
 };

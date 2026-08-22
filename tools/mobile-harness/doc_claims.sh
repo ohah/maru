@@ -31,6 +31,13 @@ echo "§5 조용히 실패하지 않는다"
 ck "브리지의 조용한 catch" 0 "$(grep -cE 'catch \{\}|catch return' $B $S | awk -F: '{s+=$2} END{print s+0}')"
 ck "두 host 가 last_error 를 읽고 비운다" 2 "$(grep -l maru_mobile_clear_error $I $A | wc -l | tr -d ' ')"
 
+# **컨트롤 축은 새 연결이면 처음부터다**(계약 §4a). 이 호출이 빠지면 끊겼다 다시 붙었을 때
+# **죽은 세션 목록이 살아 있는 것처럼** 남는다 — 화면만 보고는 그것이 낡은 값인지 알 수 없다.
+# 점검에서 실제로 두 host 가 안 부르고 있었다(2026-08-22).
+ck "두 host 가 컨트롤 축을 새 연결에서 재설정한다" 2 "$(grep -l maru_mobile_control_reset $I $A | wc -l | tr -d ' ')"
+# 컨트롤 채널을 여는 쪽도 둘 다여야 한다 — 한쪽만 있으면 그 기기에서만 목록이 안 뜬다.
+ck "두 host 가 컨트롤 채널을 연다" 2 "$(grep -l maru_ssh_pump_open_control $I $A | wc -l | tr -d ' ')"
+
 echo "§4 셀 기하·글자 크기 단일 출처"
 ck "헤더의 TEXT_PX 정의" 1 "$(grep -c 'define MARU_ATLAS_TEXT_PX' $H)"
 ck "host 에 남은 하드코딩 22" 0 "$(grep -cE '\(jfloat\)22\.0f|CFSTR\("Menlo"\), 22|, 22, NULL\)' $I $A | awk -F: '{s+=$2} END{print s+0}')"

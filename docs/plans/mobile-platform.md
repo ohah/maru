@@ -273,7 +273,7 @@ grapheme cluster mode(DECSET 2027) 합의가 없으면 코어는 ZWJ 시퀀스�
 | 히트 영역 | **보조 키바는 44 로 섰다**(아래 U1 절). 사이드바 카드 52는 통과, **탭 34는 여전히 미달** |
 | ~~소프트 키보드 다시 올리기~~ | **없는 문제였다.** 앱이 `resignFirstResponder`를 안 부르고 내리는 UI 도 없으며 백그라운드 왕복 뒤에도 입력이 들어간다(실측) |
 | ~~키보드 높이~~ | **닫았다**(아래 U1 절) |
-| 눌리는 대상 | **보조 키바뿐**(`maru_mobile_keybar_tap`). 탭·사이드바는 그리기만 |
+| 눌리는 대상 | **보조 키바뿐**(브리지가 `maru_mobile_pointer` 로 받아 자기 사각형과 맞춘다 — `maru_mobile_keybar_rect`·`_count` 는 host 가 그 자리를 아는 용도다). 탭·사이드바는 그리기만 |
 
 **폼 컴포넌트는 새로 만들 것이 없다** — `text_field`·`input_box`·`toggle`·`dropdown`·`confirm`·
 `modal_box`가 이미 있다. 전부 마우스 caret + 하드웨어 키보드 모델이라 **터치에서 쓸 수 있게 하는

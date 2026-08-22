@@ -163,7 +163,8 @@ LOAD 정렬이 전부 `0x1000` 이었고 4KB 기기가 "ELF 정렬 검사 실패
 | 플랫폼 → 코어 | 컨트롤 채널에서 읽은 ndjson | `maru_mobile_control_feed(bytes, len)` |
 | 코어 → 플랫폼 | 코어가 만든 컨트롤 요청 | `maru_mobile_take_control_request(out, cap)` |
 | 플랫폼 → 코어 | `hello` 시한 초과 알림 | `maru_mobile_control_timeout()` |
-| 코어 → 플랫폼 | 컨트롤 축 상태·껀 이유·세션 수 | `maru_mobile_control_state` · `_off_reason` · `_session_count` · `_listed` |
+| 코어 → 플랫폼 | 컨트롤 축 상태(host 가 시한 판정에 쓴다) | `maru_mobile_control_state` |
+| 코어 → 플랫폼 | **host 진단용** — 껀 이유·세션 수·받은 적 있나(화면은 브리지가 직접 그린다) | `maru_mobile_control_off_reason` · `_session_count` · `_listed` |
 | 플랫폼 → 코어 | 새 연결에서 축을 처음부터 | `maru_mobile_control_reset()` |
 | 플랫폼 → 코어 | 호스트키 승인(사용자가 답한 뒤) | `maru_mobile_ssh_accept_host_key(h)` |
 | 플랫폼 → 코어 | **난수**(OS 난수를 채워 준다) | `maru_mobile_ssh_open(..., entropy, ...)` |
@@ -199,7 +200,7 @@ TCP 를 열고, 읽은 바이트를 `feed` 로 밀어 넣고, 쌓인 바이트�
 **요청을 세우는 자리는 둘이고 요청은 하나다** — 사용자가 목록에서 고른 줄(S9b-2b)과, 원격
 세션이 없을 때의 자동 요청이다. host 는 어디서 왔는지 안 본다.
 
-**어느 서버에 붙을지는 브리지가 말한다.** host 가 매 프레임 `maru_mobile_take_ssh_connect()` 로
+**어느 서버에 붙을지는 브리지가 말한다.** host 가 매 프레임 `maru_mobile_take_server_connect()` 로
 가져가고(0=없음, 아니면 **번호+1**), 있으면 그 서버의 값을 읽어 붙는다. 판단이 브리지에 있는
 이유는 **누르는 화면이 거기**라서다 — host 가 목록을 다시 해석하면 화면이 고른 것과 갈린다.
 

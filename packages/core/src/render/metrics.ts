@@ -59,10 +59,17 @@ export function measureMetrics(input: MetricsInput, ctx?: CanvasRenderingContext
   const m = c.measureText("M");
   const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? input.fontSize * 0.8;
   const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? input.fontSize * 0.2;
+  // 줄 간격으로 늘어난 여백을 **위아래로 나눈다**(CSS 의 half-leading 과 같다). 전부 아래에
+  // 두면 글자가 셀 위쪽에 붙고 아래에 패딩이 있는 것처럼 보인다 — 선택 배경이 셀 전체를
+  // 칠하므로 그 치우침이 그대로 드러난다. 본체는 폰트가 정한 `line_gap` 만 쓰지만, 웹은
+  // `lineHeight` 배수를 받으므로 늘어난 몫을 나눠 줘야 같은 균형이 나온다.
+  const content = ascent + descent;
+  const cellHeight = Math.ceil(content * input.lineHeight);
   return {
     cellWidth: m.width,
-    cellHeight: Math.ceil((ascent + descent) * input.lineHeight),
-    ascent,
+    cellHeight,
+    // 렌더러가 baseline 으로 쓰는 값이다.
+    ascent: ascent + (cellHeight - content) / 2,
     fontSpec,
     devicePixelRatio: input.devicePixelRatio ?? 1,
   };

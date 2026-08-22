@@ -27369,13 +27369,26 @@ test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가
 
     // (2) 프롬프트를 알 때 — 본문만 갈리고 **마커 자리는 그대로**다. 두 라벨의 공통 prefix가 마커라는 것이
     // 이 회귀의 핵심 계약이므로, 프롬프트 포함 여부가 아니라 그 prefix를 단언한다.
+    //
+    // **본문을 무엇으로 채우는지는 2026-08-22 에 바뀌었다**(사용자 결정): 프롬프트를 알아도 `running` 이면
+    // «무엇을 하는 중인가» 를 싣는다. 그 세부는 이 행 말고 보일 자리가 없고, 훅 모드에서는 프롬프트가 **항상**
+    // 있어 예전 규칙으로는 영영 가려졌다. 프롬프트는 턴이 끝난 뒤 `idle` 에서 본문이 된다(아래 2b).
     term.agent_transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
     {
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
         defer a.free(label);
-        const expected = try std.fmt.allocPrint(a, "{s} 지금 용량 없는데 용량 늘려줘", .{bars});
+        const expected = try std.fmt.allocPrint(a, "{s} {s}", .{ bars, sidebar_ops.runningLabel() });
         defer a.free(expected);
         try std.testing.expectEqualStrings(expected, label);
+    }
+
+    // (2b) 같은 프롬프트라도 `idle` 이면 그것이 본문이다 — 마커만 갈린다.
+    {
+        term.agent_state = .idle;
+        defer term.agent_state = .running;
+        const label = try sidebar_ops.agentRowLabelOwned(session, term);
+        defer a.free(label);
+        try std.testing.expectEqualStrings("\u{2713} 지금 용량 없는데 용량 늘려줘", label);
     }
 
     // (3) running이 아닌 상태도 같은 규칙이다. unknown은 마커 자체가 `·`라, 옛 형태에서는 구분자와 겹쳐
@@ -27439,12 +27452,12 @@ test "에이전트 행 렌더: 프롬프트 유무가 갈린 두 행의 파형�
     const codex_brand = agent_ops.agentBrandColor(.codex).?;
     var first_col = [_]?u16{ null, null }; // slot 2·3의 이름줄 첫 파형 열
     var painted = [_]usize{ 0, 0 }; // 그중 브랜드색을 받은 칸
-    var prompt_glyphs: usize = 0; // 프롬프트가 실제로 그려졌는가(아래 전제)
+    var kind_glyphs: usize = 0; // 폴백 행에 종류 이름이 그려졌는가(아래 전제)
     for (dl.cells) |c| {
         const slot = c.row / coretext_frame_builder.sidebar_line_base;
         if (slot < 2 or slot > 3) continue;
         if ((c.row % coretext_frame_builder.sidebar_line_base) % 4 != 0) continue; // 이름줄만
-        if (slot == 3 and c.codepoint == '\u{c6a9}') prompt_glyphs += 1; // 프롬프트의 `용`
+        if (slot == 2 and c.codepoint == 'C') kind_glyphs += 1; // 폴백 행의 `Codex`
         if (!sidebar_ops.isAgentSpinnerCp(c.codepoint)) continue;
         const i = slot - 2;
         if (first_col[i] == null or c.col < first_col[i].?) first_col[i] = c.col;
@@ -27456,9 +27469,21 @@ test "에이전트 행 렌더: 프롬프트 유무가 갈린 두 행의 파형�
         }
     }
 
-    // **전제부터 단언한다.** 두 행이 실제로 다른 형태여야 이 비교가 의미를 갖는다 — 프롬프트가 안 그려졌다면
-    // 두 행이 같은 폴백이라 열이 같은 것이 당연해지고, 통과가 아무것도 증명하지 않는다.
-    try std.testing.expect(prompt_glyphs >= 2); // "용량"이 두 번
+    // **전제부터 단언한다.** 두 행이 실제로 다른 형태여야 이 비교가 의미를 갖는다 — 두 행이 같은 모양이면
+    // 열이 같은 것이 당연해지고, 통과가 아무것도 증명하지 않는다.
+    //
+    // 무엇이 두 행을 가르는지가 2026-08-22 에 바뀌었다. 예전에는 «프롬프트가 있나» 였는데, 이제 `running` 은
+    // 프롬프트를 알아도 상태 문구를 싣는다(사용자 결정). 그래서 가르는 것은 **폴백이냐** 다 — 프롬프트를
+    // 모르는 행만 `<마커> <종류> <문구>` 로 종류 이름을 싣는다. 옛 회귀(폴백이 마커를 뒤로 밀던 것)를 재는
+    // 데는 그 행이 정확히 필요하다.
+    try std.testing.expect(kind_glyphs >= 1); // 폴백 행의 `Codex`
+    {
+        const l0 = try sidebar_ops.agentRowLabelOwned(session, terms[0]);
+        defer a.free(l0);
+        const l1 = try sidebar_ops.agentRowLabelOwned(session, terms[1]);
+        defer a.free(l1);
+        try std.testing.expect(!std.mem.eql(u8, l0, l1)); // 두 행이 실제로 다른 형태다
+    }
     var expected_bars: usize = 0;
     for (0..sidebar_ops.spinner_bar_count) |bar| {
         if (sidebar_ops.isAgentSpinnerCp(sidebar_ops.spinnerBarCp(0, bar))) expected_bars += 1;

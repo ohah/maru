@@ -27,6 +27,7 @@ pub const win32_terminal = if (builtin.os.tag == .windows) @import("platform/win
 pub const win32_keys = if (builtin.os.tag == .windows) @import("platform/windows/win32_keys.zig") else struct {};
 pub const win32_clipboard = if (builtin.os.tag == .windows) @import("platform/windows/win32_clipboard.zig") else struct {};
 pub const win32_mouse = if (builtin.os.tag == .windows) @import("platform/windows/win32_mouse.zig") else struct {};
+pub const win32_draw_host = if (builtin.os.tag == .windows) @import("platform/windows/win32_draw_host.zig") else struct {}; // 표면 스모크가 공유하는 창·스왑체인·아틀라스·표현 절차
 // 크로마‧편집기 한 줄을 글리프로 바꾸는 **플랫폼 이음매**(`pty.zig` 와 같은 자리의 중립 최상위 leaf).
 // **`src/chrome/` 안에 둬 수 없다** — chrome(L3)은 플랫폼을 import 하지 못하게 경계 게이트가
 // 막는다(docs/layering-and-portability.md §2). 실제로 거기 둬다가 `check-boundaries` 가 섰다.

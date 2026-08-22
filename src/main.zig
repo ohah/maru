@@ -3774,6 +3774,12 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 상한 두 자리(0 아래, 끝 위)도 함께 민다.
     var first_line: usize = 0;
     var script_steps: usize = 0;
+    // 실제로 **잴 것이 있었던** 단계 수. `script_steps` 와 다를 수 있다 — 8 바이트 넘는 줄이 화면에
+    // 하나도 없으면(빈 파일·짧은 줄만 있는 파일) 판정할 것이 없다.
+    //
+    // **"실패" 와 "판정 불가" 를 가른다.** 처음엔 `script_ok/script_steps` 만 냈는데, 빈 파일로
+    // 돌려 보니 `0/6` 이 나와 스크롤이 깨진 것처럼 보였다 — 실제로는 잴 줄이 없었을 뿐이다.
+    var script_judged: usize = 0;
     var script_ok: usize = 0;
     var clamp_top_ok = false;
     var clamp_bottom_ok = false;
@@ -3803,14 +3809,16 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             defer built.deinit(allocator);
             const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
             script_steps += 1;
-            if (r.checked > 0 and r.matched == r.checked) script_ok += 1;
+            if (r.checked == 0) continue; // 잴 것이 없다 — 아래 상한 판정도 성립하지 않는다
+            script_judged += 1;
+            if (r.matched == r.checked) script_ok += 1;
             // **상한은 내용으로 잰다.** `first_line == maxFirstRow(..)` 로 재면 `clampFirstRow` 를
             // `maxFirstRow` 로 확인하는 셈이라 동어반복이다 — 둘 다 같은 모듈의 같은 계산에서 온다.
             // 대신 "끝까지 내리면 **마지막 줄이 화면에 있다**" 를 본다: 그리는 쪽과 세는 쪽이
             // 갈리면 여기서 걸린다.
-            if (delta == -10_000) clamp_top_ok = (first_line == 0 and r.checked > 0 and r.matched == r.checked);
+            if (delta == -10_000) clamp_top_ok = (first_line == 0 and r.matched == r.checked);
             if (delta == 10_000) clamp_bottom_ok =
-                (first_line + built.written.visual_rows >= lines.items.len and r.checked > 0 and r.matched == r.checked);
+                (first_line + built.written.visual_rows >= lines.items.len and r.matched == r.checked);
         }
         first_line = 0;
     }
@@ -3869,7 +3877,8 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
     try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ built.written.ops, built.ops_text, built.ops_fill, built.ops_dropped });
     try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ built.written.visual_rows, built.written.total_visual_rows });
-    try stdout.print("scroll_script={d}/{d} clamp_top={} clamp_bottom={}\n", .{ script_ok, script_steps, clamp_top_ok, clamp_bottom_ok });
+    // **분모가 `script_judged` 다.** `script_steps` 로 내면 "잴 것이 없었다" 가 "틀렸다" 로 보인다.
+    try stdout.print("scroll_script={d}/{d} steps={d} clamp_top={} clamp_bottom={}\n", .{ script_ok, script_judged, script_steps, clamp_top_ok, clamp_bottom_ok });
     try stdout.print("first_line={d} wheel_events={d}\n", .{ first_line, wheel_events });
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });
     try stdout.print("frames_presented={d}\n", .{frames});

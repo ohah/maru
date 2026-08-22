@@ -19,6 +19,15 @@ const server = Bun.serve({
 });
 
 let failures = 0;
+function digest(buf: Buffer | Uint8Array): string {
+  let h = 2166136261;
+  for (const b of buf) {
+    h ^= b;
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
 function check(name: string, ok: boolean, detail = ""): void {
   console.log(`  ${ok ? "ok" : "FAIL"}: ${name}${detail ? ` — ${detail}` : ""}`);
   if (!ok) failures++;
@@ -190,6 +199,42 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
     return Math.abs(Number.parseFloat(c.style.width) - host.clientWidth);
   });
   check("worker 모드에서 fit() 이 컨테이너를 채운다", fitGap < 12, `여백 ${fitGap}px`);
+
+  // **워커에서 커서가 실제로 깜빡이는가.** 깜빡임 타이머는 메인에 있고 신호를 워커로 보내는데,
+  // 그 경로가 끊기면 화면이 한 장으로 굳는다(실측: 워커 초기화가 `fonts.ready` 에서 멈춰
+  // 백엔드가 null 이 되자 신호가 통째로 사라졌다). 2초 동안 화면이 최소 두 장은 나와야 한다.
+  const frames = new Set<string>();
+  for (let i = 0; i < 6; i++) {
+    frames.add(digest(await p.locator("canvas").screenshot()));
+    await p.waitForTimeout(330);
+  }
+  check("worker 모드에서 커서가 깜빡인다", frames.size >= 2, `2초간 화면 ${frames.size}종`);
+
+  // **줄 간격 여백이 위아래로 나뉘는가.** 실제 `measureMetrics` 를 불러 확인한다 — 늘어난
+  // 몫을 전부 baseline 아래에 두면 선택 배경이 하단 패딩처럼 보인다.
+  const lead = await p.evaluate(async () => {
+    const mod = (await import("/core/dist/index.js")) as {
+      measureMetrics: (i: { fontFamily: string; fontSize: number; lineHeight: number }) => {
+        cellHeight: number;
+        ascent: number;
+      };
+    };
+    const probe = document.createElement("canvas").getContext("2d")!;
+    probe.font = "14px monospace";
+    const m = probe.measureText("M");
+    const asc = m.fontBoundingBoxAscent;
+    const desc = m.fontBoundingBoxDescent;
+    const met = mod.measureMetrics({ fontFamily: "monospace", fontSize: 14, lineHeight: 1.2 });
+    return {
+      above: met.ascent - asc,
+      below: met.cellHeight - met.ascent - desc,
+    };
+  });
+  check(
+    "줄 간격 여백이 위아래로 나뉜다",
+    lead.above > 0 && Math.abs(lead.above - lead.below) <= 1.01,
+    `위 ${lead.above.toFixed(1)}px · 아래 ${lead.below.toFixed(1)}px`,
+  );
   await p.close();
 }
 

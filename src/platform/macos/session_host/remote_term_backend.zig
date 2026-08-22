@@ -4127,7 +4127,12 @@ pub const RemoteTermBackend = struct {
         else
             null;
         self.surface_runtime.detachSurface(handle);
-        entry.runtime.detachClientSide();
+        if (self.app_quit_connections_terminalized) {
+            if (!self.app_quit_owner_graphs_settled) process_seal.fatalIntegrity(.proof_loss);
+            entry.runtime.detachClientSideAfterSharedConnectionTerminalized();
+        } else {
+            entry.runtime.detachClientSide();
+        }
         if (builtin.is_test) {
             if (generation_adapter) |adapter| {
                 if (remote_runtime.testing_api.appQuitSourceZero(adapter))

@@ -1890,6 +1890,81 @@ pub fn build(b: *std.Build) void {
         macos_tab_drag_smoke_assert.step.dependOn(&macos_tab_drag_smoke.step);
         macos_tab_drag_smoke_step.dependOn(&macos_tab_drag_smoke_assert.step);
 
+        const session_host_cr6c_appkit_harness = b.addExecutable(.{
+            .name = "maru-session-host-cr6c-appkit-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6c_appkit_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const session_host_cr6c_appkit_step = b.step(
+            "macos-session-host-recovery-smoke",
+            "Run actual AppKit recovered-session discovery, click, render, and keep-alive smoke",
+        );
+        const session_host_cr6c_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-cr6c-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\"; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
+                "rm -f zig-out/maru-macos-app/app.summary.txt",
+        });
+        session_host_cr6c_fixture.setCwd(b.path("."));
+        const run_session_host_cr6c_appkit = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        run_session_host_cr6c_appkit.setCwd(b.path("."));
+        run_session_host_cr6c_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_session_host_cr6c_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+        );
+        run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
+        run_session_host_cr6c_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"),
+        );
+        run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
+        run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
+        run_session_host_cr6c_appkit.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"),
+        );
+        run_session_host_cr6c_appkit.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"),
+        );
+        run_session_host_cr6c_appkit.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home/.config/maru/config"),
+        );
+        run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6c_appkit.step.dependOn(&macos_app_bundle.step);
+        run_session_host_cr6c_appkit.step.dependOn(&file_panel_web_build.step);
+        run_session_host_cr6c_appkit.step.dependOn(&session_host_cr6c_fixture.step);
+        const session_host_cr6c_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_stage=2$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_row_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_click_dispatched=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_remote_published=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_marker_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_before_capture=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_after_capture=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_failure=$' \"$summary\"; " ++
+                "before=zig-out/maru-macos-app/session-host-cr6c-home/captures/session-host-recovery-before.ppm; " ++
+                "after=zig-out/maru-macos-app/session-host-cr6c-home/captures/session-host-recovery-after.ppm; " ++
+                "test -s \"$before\"; test -s \"$after\"; ! cmp -s \"$before\" \"$after\"",
+        });
+        session_host_cr6c_assert.setCwd(b.path("."));
+        session_host_cr6c_assert.step.dependOn(&run_session_host_cr6c_appkit.step);
+        session_host_cr6c_appkit_step.dependOn(&session_host_cr6c_assert.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -5735,7 +5810,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6a recovered projection은"},
         });
         const run_cr6a1_projection_tests = b.addRunArtifact(cr6a1_projection_tests);
-        run_cr6a1_projection_tests.addArg("--maru-expect-tests=3");
+        run_cr6a1_projection_tests.addArg("--maru-expect-tests=4");
         run_cr6a1_projection_tests.setCwd(b.path("."));
         session_host_cr6a1_step.dependOn(&run_cr6a1_projection_tests.step);
 

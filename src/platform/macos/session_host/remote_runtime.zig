@@ -4131,9 +4131,21 @@ pub const RemoteRuntime = struct {
     /// `attachExisting`으로 재접속한다. `deinit`과 대칭이되 terminate만 뺀다.
     pub fn detachClientSide(self: *RemoteRuntime) void {
         self.admitDestructiveRuntimeOperation();
+        self.detachClientSideImpl(true);
+    }
+
+    /// App-quit owner가 shared data connection을 먼저 terminalize하고 host EOF가 controller lease를
+    /// 회수하도록 만든 뒤의 no-wire suffix다. 일반 detach와 달리 이미 닫힌 Client에 detach RPC를 다시
+    /// 발행하지 않는다. 이 leaf는 backend의 closed app-quit ordering에서만 호출해야 한다.
+    pub fn detachClientSideAfterSharedConnectionTerminalized(self: *RemoteRuntime) void {
+        self.admitDestructiveRuntimeOperation();
+        self.detachClientSideImpl(false);
+    }
+
+    fn detachClientSideImpl(self: *RemoteRuntime, send_detach: bool) void {
         // shared connection은 앱 종료 전까지 EOF가 오지 않을 수 있다. RPC detach 없이 로컬 객체만 버리면 host의 controller
         // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
-        self.detachBestEffort();
+        if (send_detach) self.detachBestEffort();
         self.surface.deinit();
         self.deinitGenerationOwnerAndScreenSource();
         if (self.paused_paste_store.initialized()) self.paused_paste_store.deinit();

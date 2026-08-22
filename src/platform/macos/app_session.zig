@@ -2514,6 +2514,10 @@ var app_recovered_sessions_workspace_generation: u64 = 0;
 var app_recovered_sessions_launch_attempted: bool = false;
 var app_recovered_session_windows: std.ArrayListUnmanaged(*AppSession) = .empty;
 var app_recovered_session_window_generation: u64 = 0;
+var app_recovery_smoke_discovered_candidates: u32 = 0;
+var app_recovery_smoke_ready_adapters: u32 = 0;
+var app_recovery_smoke_inventory_runtimes: u32 = 0;
+var app_recovery_smoke_last_activated_runtime_id: u128 = 0;
 const RecoveredEndedLocation = struct {
     session: *AppSession,
     window_generation: u64,
@@ -3228,6 +3232,91 @@ pub const AppSession = struct {
         return app_recovered_sessions_projection.rows;
     }
 
+    /// CR6c actual-AppKit smoke의 read-only 관측면. 제품 action identity나 runtime handle을
+    /// 내보내지 않고 이미 발행된 recovery row의 backing-pixel rect와 채택 뒤의 총계만 준다.
+    /// Swift는 이 rect로 실제 NSEvent를 만들 수 있지만 activateRecoveredSessionAt을 직접
+    /// 부를 수 없으므로, sidebar hit-test가 계속 유일한 click 제품 경계다.
+    pub const RecoveredSessionAppKitSmokeProbe = struct {
+        row_present: bool = false,
+        row_x_px: i32 = 0,
+        row_y_px: i32 = 0,
+        row_width_px: u32 = 0,
+        row_height_px: u32 = 0,
+        recovered_count: u32 = 0,
+        tab_count: u32 = 0,
+        surface_initialized: bool = false,
+        active_remote: bool = false,
+        marker_present: bool = false,
+        keep_alive_enabled: bool = false,
+        discovered_candidates: u32 = 0,
+        ready_adapters: u32 = 0,
+        inventory_runtimes: u32 = 0,
+        configured_keep_alive: bool = false,
+        live_session_count: u32 = 0,
+        target_activation_dispatched: bool = false,
+    };
+
+    pub fn recoveredSessionAppKitSmokeProbe(self: *AppSession) RecoveredSessionAppKitSmokeProbe {
+        const expected_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_RUNTIME_ID") orelse return .{};
+        const expected_text = std.mem.span(expected_raw);
+        if (expected_text.len != 32) return .{};
+        for (expected_text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return .{};
+        const expected_runtime_id = std.fmt.parseInt(u128, expected_text, 16) catch return .{};
+        if (expected_runtime_id == 0) return .{};
+        var out: RecoveredSessionAppKitSmokeProbe = .{
+            .tab_count = @intCast(@min(self.tabs.items.len, std.math.maxInt(u32))),
+            .surface_initialized = self.surface_initialized,
+            .keep_alive_enabled = app_keep_alive_after_quit,
+            .discovered_candidates = app_recovery_smoke_discovered_candidates,
+            .ready_adapters = app_recovery_smoke_ready_adapters,
+            .inventory_runtimes = app_recovery_smoke_inventory_runtimes,
+            .configured_keep_alive = self.loaded_config.config.session.keep_alive_after_quit,
+            .live_session_count = @intCast(@min(live_app_sessions, std.math.maxInt(u32))),
+            .target_activation_dispatched = app_recovery_smoke_last_activated_runtime_id == expected_runtime_id,
+        };
+        for (self.sidebar_rows.items, 0..) |row, index| switch (row) {
+            .recovered_session => |candidate| {
+                const rows = self.recoveredSessionsRows(self.is_primary_window);
+                if (candidate.projection_index >= rows.len or
+                    rows[candidate.projection_index].runtime_id != expected_runtime_id) continue;
+                const metrics = sidebar_ops.sidebarMetrics(self);
+                const top = chrome.components.sidebar.rowTop(
+                    self.sidebar_rows.items,
+                    index,
+                    self.sidebar_header_height_px,
+                    metrics,
+                    self.sidebar_scroll_offset_px,
+                );
+                const height = chrome.components.sidebar.rowHeight(row, metrics);
+                out.row_present = height > 0 and self.sidebar_width_px > 0;
+                out.row_x_px = 0;
+                out.row_y_px = @intCast(top);
+                out.row_width_px = self.sidebar_width_px;
+                out.row_height_px = height;
+                out.recovered_count = 1;
+                break;
+            },
+            else => {},
+        };
+        if (self.tabs.items.len == 0) return out;
+        const tab = self.tabs.items[@min(self.app_window.active_tab, self.tabs.items.len - 1)];
+        if (tab.panes.items.len == 0) return out;
+        const pane = tab.panes.items[@min(tab.active_pane, tab.panes.items.len - 1)];
+        if (pane.terms.items.len == 0) return out;
+        const term = pane.terms.items[@min(pane.active_term, pane.terms.items.len - 1)];
+        out.active_remote = term.surface.remote != null;
+        if (!out.active_remote) return out;
+        const recent = self.backendFor(term).dumpRecentText(
+            term.rt.handle,
+            self.allocator,
+            8,
+            4096,
+        ) catch return out;
+        defer self.allocator.free(recent);
+        out.marker_present = std.mem.indexOf(u8, recent, "CR6C-RECOVERED-MARKER") != null;
+        return out;
+    }
+
     /// CR6b one-item adopt 제품 진입점. Sidebar row는 단지 locator이며, 현재 pool generation과 fresh
     /// host.info/runtime.get을 다시 확인한 뒤에만 exact runtime attach를 시작한다. 실패는 projection과 topology를
     /// 그대로 두고, attach 뒤 construction 실패는 createTerm의 client-side detach errdefer가 host runtime을 보존한다.
@@ -3237,6 +3326,7 @@ pub const AppSession = struct {
         if (projection_index >= app_recovered_sessions_projection.rows.len)
             return error.InvalidAuthority;
         const row = app_recovered_sessions_projection.rows[projection_index];
+        app_recovery_smoke_last_activated_runtime_id = row.runtime_id;
         const next_projection_generation = try app_recovered_sessions_projection.validateExact(projection_index, row);
         const ended_location: ?RecoveredEndedLocation = switch (row.kind) {
             .orphan => null,
@@ -3428,10 +3518,15 @@ pub const AppSession = struct {
         defer candidates.deinit(arena);
         var adapter_generations: std.ArrayListUnmanaged(u64) = .empty;
         defer adapter_generations.deinit(arena);
+        app_recovery_smoke_discovered_candidates = 0;
+        app_recovery_smoke_ready_adapters = 0;
+        app_recovery_smoke_inventory_runtimes = 0;
         for (entries) |entry| switch (entry) {
             .unavailable => {},
             .candidate => |candidate| {
+                app_recovery_smoke_discovered_candidates +|= 1;
                 if (self.ensureRestoreHostAdapterAtBase(base, candidate.manifest.host_id) != .ready) continue;
+                app_recovery_smoke_ready_adapters +|= 1;
                 const generation = if (app_remote_host_pool) |*pool|
                     pool.adapterGeneration(candidate.manifest.host_id) orelse continue
                 else
@@ -3455,6 +3550,10 @@ pub const AppSession = struct {
             .unavailable => return .unavailable,
             .complete => |items| items,
         };
+        for (inventories) |inventory| switch (inventory) {
+            .unavailable => {},
+            .complete => |value| app_recovery_smoke_inventory_runtimes +|= @intCast(value.runtimes.len),
+        };
         var reconciled_inventories: std.ArrayListUnmanaged(maru.session.runtime_reconcile.HostInventory) = .empty;
         defer reconciled_inventories.deinit(arena);
         mergeDiscoveredInventories(
@@ -3463,9 +3562,16 @@ pub const AppSession = struct {
             candidates.items,
             inventories,
             &reconciled_inventories,
-        ) catch return .unavailable;
-        self.replaceRecoveredSessionsProjection(ws, reconciled_inventories.items, true, next_workspace_generation) catch
+        ) catch |err| {
+            if (std.c.getenv("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE") != null)
+                std.debug.print("CR6c recovery merge failed: {s}\n", .{@errorName(err)});
             return .unavailable;
+        };
+        self.replaceRecoveredSessionsProjection(ws, reconciled_inventories.items, true, next_workspace_generation) catch |err| {
+            if (std.c.getenv("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE") != null)
+                std.debug.print("CR6c recovery projection failed: {s}\n", .{@errorName(err)});
+            return .unavailable;
+        };
         app_recovered_sessions_workspace_generation = next_workspace_generation;
         sidebar_ops.rebuildSidebar(self) catch {};
         self.metal_dirty = true;
@@ -3505,12 +3611,27 @@ pub const AppSession = struct {
             },
         };
         if (collected_index != collected_candidates.len) return error.InvalidAuthority;
+        // Directory iteration order is not an authority. runtime_reconcile deliberately requires
+        // one canonical host-id order so duplicate/spliced inventories fail closed; normalize the
+        // discovery projection here before crossing that boundary. A single-host fixture cannot
+        // expose this, while a normal machine with multiple live hosts otherwise makes launch
+        // recovery unavailable nondeterministically.
+        std.mem.sort(maru.session.runtime_reconcile.HostInventory, out.items, {}, struct {
+            fn lessThan(_: void, lhs: maru.session.runtime_reconcile.HostInventory, rhs: maru.session.runtime_reconcile.HostInventory) bool {
+                return lhs.hostId() < rhs.hostId();
+            }
+        }.lessThan);
     }
 
     /// Launch가 recovery inventory를 먼저 끝낸 뒤 저장 Workspace가 없거나 적용 불가일 때만 기본 shell surface를
     /// 명시적으로 완성한다. 이미 restore가 surface를 게시했으면 mutation 0이다.
     pub fn finishDeferredInitialSurface(self: *AppSession) !void {
         if (self.tabs.items.len != 0) return;
+        // A published recovery row is the launch surface. Creating a throwaway default shell here
+        // would both obscure that choice and create a second persistent runtime before the user
+        // acts. The pre-surface mouse seam admits only a typed recovered row; successful adoption
+        // calls finishInitialSurface itself, while an empty recovery projection still falls through.
+        if (self.recoveredSessionsRows(self.is_primary_window).len != 0) return;
         var spawn_config = self.new_tab_config;
         if (spawn_config.width_px > 0 and spawn_config.height_px > 0) {
             spawn_config.size = layout_math.gridFromBacking(
@@ -4021,6 +4142,10 @@ pub const AppSession = struct {
     surface_initialized: bool = false,
     runtime_initialized: bool = false,
     renderer_initialized: bool = false,
+    // RendererState는 chrome-only 복구 화면에도 필요하지만 AppFrameLoop는 첫 live Term이 생긴 뒤에만
+    // 유효하다. 둘을 한 플래그로 표현하면 0-tab 복구 화면이 미초기화 frame_loop를 읽게 되므로 수명을
+    // 분리한다. frame_loop는 별도 deinit owner가 없는 값 타입이고, 이 플래그는 접근 가능성만 봉인한다.
+    frame_loop_initialized: bool = false,
     termination_finished: bool = false,
     total_output_events: u64 = 0,
     total_exit_events: u64 = 0,
@@ -13806,6 +13931,16 @@ pub const AppSession = struct {
         // 재배치한다. 단일 leaf면 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일.
         self.backing_width_px = width_px;
         self.backing_height_px = height_px;
+        // A primary launch may intentionally expose only inert Recovered Sessions rows until the
+        // user chooses one. That is a real window state, not a half-initialized active tab. Keep
+        // backing/sidebar geometry current without inventing a terminal or indexing active_tab.
+        if (self.tabs.items.len == 0) {
+            self.last_resize_size = size;
+            self.metal_dirty = true;
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+            return self.last_summary;
+        }
         try pane_ops.resizeActiveTabPanes(self);
         pane_ops.recomputeActivePaneRect(self); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
         self.last_resize_size = size;
@@ -15033,6 +15168,9 @@ pub const AppSession = struct {
         // app_should_terminate 신호로 실제로 닫는다 → active-surface 경로를 전부 건너뛰고 ended 요약만 만들어 조기
         // 반환한다(writeSummaryFromState는 위 [0] 가드로 0탭 안전). 드레인/reap 대상도 없다(탭 0개). 비-0탭 경로 불변.
         if (self.tabs.items.len == 0) {
+            if (!self.ended_seen and self.recoveredSessionsRows(self.is_primary_window).len != 0 and
+                (self.metal_dirty or self.chrome_dirty))
+                self.projectDeferredRecoverySidebar();
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(
                 if (self.ended_seen) EventKind.app_should_terminate else EventKind.frame_tick,
@@ -16428,6 +16566,102 @@ pub const AppSession = struct {
         // 건드리므로(last_summary는 매 tick 덮어쓰기가 아니라 필드별 갱신) epilogue가 quit_decision과 같은 단일 출처로 실는다.
         self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
         return self.last_summary;
+    }
+
+    /// Render the inert recovery chooser before any terminal exists. The ordinary full-frame path
+    /// is deliberately active-surface based; this narrow path publishes only the already-derived
+    /// sidebar rows into the same MetalFrameBuffer and cannot create/adopt a runtime.
+    fn projectDeferredRecoverySidebar(self: *AppSession) void {
+        if (builtin.os.tag != .macos) return;
+        // 첫 live Term 전에는 AppFrameLoop가 없지만 CoreText/atlas는 이 chrome frame에 필요하다.
+        // renderer만 독립 초기화하고 terminal pump/frame-loop는 실제 복구 row click이 성공할 때까지 만들지 않는다.
+        term_ops.ensureRendererState(self);
+        var collected: std.ArrayList(CollectedPane) = .empty;
+        defer {
+            for (collected.items) |*item| item.deinit(self.allocator);
+            collected.deinit(self.allocator);
+        }
+        const draw_list = sidebar_ops.buildSidebarTitleDrawList(self) catch return;
+        self.collectShaped(&collected, draw_list, pane_ops.paneFrameBuilder(self), .sidebar);
+        // 복구 chooser도 일반 창의 sidebar header와 같은 제품 chrome을 그린다. 제목 행만 단독으로
+        // 투영하면 검색·설정·새 workspace affordance가 사라져 실제 첫 화면과 복구 후 화면이 서로 다른
+        // UI가 된다. 세 경로는 full-frame 수집과 동일한 builder/destination을 재사용한다.
+        if (sidebar_ops.buildSidebarHeaderDrawList(self, .icons) catch null) |icons_dl|
+            self.collectShaped(&collected, icons_dl, pane_ops.paneFrameBuilder(self), .sidebar_header);
+        if (sidebar_ops.buildSidebarHeaderDrawList(self, .search) catch null) |search_dl|
+            self.collectShaped(&collected, search_dl, pane_ops.paneFrameBuilder(self), .{ .sidebar_search = .{
+                .origin_x = 0,
+                .origin_y = sidebar_ops.sidebarSearchGlyphOriginY(self),
+                .colors = .{ .default_fg = self.appearance.theme.foreground },
+            } });
+        sidebar_ops.collectSidebarSearchText(self, &collected, pane_ops.paneFrameBuilder(self));
+        const atlas_generation_before = self.renderer_state.atlas.generation;
+        var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+        defer pane_frames.deinit(self.allocator);
+        var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
+        defer {
+            for (built_frames.items) |*frame| frame.deinit(self.allocator);
+            built_frames.deinit(self.allocator);
+        }
+        var sidebar_frame: ?renderer.RenderFrame = null;
+        defer if (sidebar_frame) |*frame| frame.deinit(self.allocator);
+        var header: ?renderer.RenderFrame = null;
+        defer if (header) |*frame| frame.deinit(self.allocator);
+        var overlay: ?metal_frame.PaneFrame = null;
+        defer if (overlay) |*frame| frame.frame.deinit(self.allocator);
+        var floating: ?metal_frame.PaneFrame = null;
+        defer if (floating) |*frame| frame.frame.deinit(self.allocator);
+        var sticky: ?metal_frame.PaneFrame = null;
+        defer if (sticky) |*frame| frame.frame.deinit(self.allocator);
+        var active: ?ActiveResult = null;
+        self.placeAndDistribute(
+            &collected,
+            &pane_frames,
+            &built_frames,
+            &sidebar_frame,
+            &header,
+            &overlay,
+            &floating,
+            &sticky,
+            &active,
+        );
+        if (self.renderer_state.atlas.generation != atlas_generation_before) {
+            // The first placement may grow the shared atlas. Retry next tick with stable UVs,
+            // exactly like the normal chrome-only path.
+            self.metal_dirty = true;
+            return;
+        }
+        if (sidebar_frame == null) return;
+        const colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+        // replaceSidebar는 이미 존재하는 full frame을 보존하는 부분 갱신이다. 0-tab 선택기는 retained
+        // frame이 없으므로 full replace의 명시적 empty-pane 경로(1x1 draw guard + absolute chrome cells)를
+        // 사용해야 실제 CAMetalLayer가 첫 프레임을 받는다.
+        self.metal_buffer.replace(
+            self.allocator,
+            &.{},
+            self.renderer_state.atlas.config,
+            self.cell_width_px,
+            self.cell_height_px,
+            sidebar_frame,
+            header,
+            colors,
+            &.{},
+            &.{},
+            null,
+            null,
+            &.{},
+            &.{},
+            &.{},
+            &.{},
+            &.{},
+            &.{},
+            &.{},
+            &.{},
+        ) catch return;
+        self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
+        sidebar_ops.applySidebarGlyphPyTop(self);
+        self.metal_dirty = false;
+        self.chrome_dirty = false;
     }
 
     /// AppKit의 terminateLater 보류 동안 한 frame에 target 하나만 진행한다. 마지막 target의 admin outcome과
@@ -18602,7 +18836,7 @@ pub const AppSession = struct {
     pub fn writeSummaryFromState(self: *AppSession) void {
         self.last_summary.abi_version = abi_version;
         self.last_summary.terminal_surface = boolCode(self.surface_initialized);
-        self.last_summary.frame_loop_ticks = if (self.renderer_initialized) @intCast(self.frame_loop.frame_index) else 0;
+        self.last_summary.frame_loop_ticks = if (self.frame_loop_initialized) @intCast(self.frame_loop.frame_index) else 0;
         self.last_summary.output_events = self.total_output_events;
         self.last_summary.exit_events = self.total_exit_events;
         self.last_summary.key_events = self.total_key_events;
@@ -63668,9 +63902,9 @@ test "CR6a-2 primary sidebar는 recovered system header와 inert row만 material
 
 test "CR6a-2 primary sidebar는 dead 또는 malformed discovery를 complete empty로 세탁하지 않는다" {
     const entries = [_]session_host.recovery_discovery.Entry{
+        .{ .unavailable = .{ .host_id = 3, .reason = .lease_unknown } },
         .{ .unavailable = .{ .host_id = 1, .reason = .lease_free } },
         .{ .unavailable = .{ .host_id = 2, .reason = .invalid_manifest } },
-        .{ .unavailable = .{ .host_id = 3, .reason = .lease_unknown } },
     };
     var inventories: std.ArrayListUnmanaged(maru.session.runtime_reconcile.HostInventory) = .empty;
     defer inventories.deinit(std.testing.allocator);
@@ -63682,8 +63916,11 @@ test "CR6a-2 primary sidebar는 dead 또는 malformed discovery를 complete empt
         &inventories,
     );
     try std.testing.expectEqual(@as(usize, 3), inventories.items.len);
+    try std.testing.expectEqual(@as(u128, 1), inventories.items[0].hostId());
     try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.lifecycle, inventories.items[0].unavailable.reason);
+    try std.testing.expectEqual(@as(u128, 2), inventories.items[1].hostId());
     try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.malformed, inventories.items[1].unavailable.reason);
+    try std.testing.expectEqual(@as(u128, 3), inventories.items[2].hostId());
     try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.stale, inventories.items[2].unavailable.reason);
 }
 
@@ -64002,14 +64239,39 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         }
     }
     try session.finishDeferredInitialSurface();
-    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, switch (mode) {
-        .inert, .stale_projection, .missing_runtime, .deadline_stall, .attach_oom => 3,
-        // Failed search activation intentionally keeps the query open, so the newly created
-        // default tab is filtered out while the matching recovered header+row remain visible.
-        .stale_manifest_slot => 2,
+        // A live recovery row owns the deferred launch surface. Creating a default persistent
+        // shell here would add a second runtime to the same host on every app relaunch and hide
+        // the row that the user is expected to recover.
+        .inert, .stale_projection, .stale_manifest_slot, .missing_runtime, .deadline_stall, .attach_oom => 0,
+        .orphan, .ended_conflict => 1,
+    }), session.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, switch (mode) {
+        .inert, .stale_projection, .stale_manifest_slot, .missing_runtime, .deadline_stall, .attach_oom => 2,
         .orphan, .ended_conflict => 1,
     }), session.sidebar_rows.items.len);
+    if (mode == .inert) {
+        _ = try session.resize(800, 600, 1000);
+        try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+        try std.testing.expectEqual(@as(usize, 2), session.sidebar_rows.items.len);
+        try std.testing.expectEqual(@as(u32, 800), session.backing_width_px);
+        try std.testing.expectEqual(@as(u32, 600), session.backing_height_px);
+        // Recovered Sessions가 첫 launch surface인 동안 renderer는 chrome을 위해 살아야 하지만
+        // terminal pump를 빌리는 AppFrameLoop는 아직 존재하면 안 된다. 첫 placement가 atlas를 grow할
+        // 수 있으므로 유계 재시도하고, 실제 retained Metal frame이 1x1 draw guard+sidebar cells를 갖는지 본다.
+        try std.testing.expect(!session.renderer_initialized);
+        try std.testing.expect(!session.frame_loop_initialized);
+        for (0..4) |_| {
+            _ = try session.tick();
+            if (!session.metal_dirty) break;
+        }
+        try std.testing.expect(session.renderer_initialized);
+        try std.testing.expect(!session.frame_loop_initialized);
+        try std.testing.expectEqual(@as(u32, 1), session.metal_buffer.view().cols);
+        try std.testing.expectEqual(@as(u32, 1), session.metal_buffer.view().rows);
+        try std.testing.expect(session.metal_buffer.sidebar_cells.len > 0);
+        try std.testing.expectEqual(@as(u64, 0), session.last_summary.frame_loop_ticks);
+    }
 }
 
 test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory 뒤에만 materialize한다" {

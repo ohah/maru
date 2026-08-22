@@ -3963,6 +3963,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
     private var smokeMode = false
+    private var sessionHostRecoverySmokeStage: UInt32 = 0
+    private var sessionHostRecoverySmokeRowPresent = false
+    private var sessionHostRecoverySmokeClickDispatched = false
+    private var sessionHostRecoverySmokeRemotePublished = false
+    private var sessionHostRecoverySmokeMarkerPresent = false
+    private var sessionHostRecoverySmokeBeforeCapture = false
+    private var sessionHostRecoverySmokeAfterCapture = false
+    private var sessionHostRecoverySmokeFailure = ""
+    private var sessionHostRecoverySmokePrepareOutcome: UInt32 = 0
+    private var sessionHostRecoverySmokeKeepAliveEnabled = false
+    private var sessionHostRecoverySmokeDiscoveredCandidates: UInt32 = 0
+    private var sessionHostRecoverySmokeReadyAdapters: UInt32 = 0
+    private var sessionHostRecoverySmokeInventoryRuntimes: UInt32 = 0
+    private var sessionHostRecoverySmokeConfiguredKeepAlive = false
+    private var sessionHostRecoverySmokeLiveSessionCount: UInt32 = 0
+    private var sessionHostRecoverySmokeTargetActivationDispatched = false
+    private var sessionHostRecoverySmokeTargetRows: UInt32 = 0
+    private var sessionHostRecoverySmokeTabs: UInt32 = 0
+    private var sessionHostRecoverySmokeSurfaceInitialized = false
+    private var sessionHostRecoverySmokeActiveRemoteObserved = false
+    private var sessionHostRecoverySmokeMarkerObserved = false
+    private var sessionHostRecoverySmokeCaptureRetries: UInt32 = 0
+    private var launchSummaryWritten = false
+    private var isSessionHostRecoverySmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
+    }
     /// 종료 경로 단계별 비용. 종료는 메인 스레드를 동기로 붙잡으므로 어느 단계가 그 시간을 쓰는지 남겨야
     /// 추측 없이 고칠 수 있다. 값은 종료 요약의 `quit_*` 필드로 나간다(docs/macos-app-host-boundary.md).
     private var terminationTiming = TerminationTiming()
@@ -4254,7 +4280,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // workspace가 parse 가능한 실제 창을 하나 이상 가지면 첫 AppSession을 deferred surface 모드로 만든다.
         // Zig parser를 session=NULL preflight로 호출해 Swift가 wire를 따로 해석하지 않으면서 throwaway 셸 spawn을 막는다.
         let restoreDisabled = ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] != nil
-        let preparedWorkspace = (smokeMode || restoreDisabled) ? nil : loadWorkspaceText()
+        let recoverySmoke = isSessionHostRecoverySmokeMode
+        let preparedWorkspace = ((smokeMode && !recoverySmoke) || restoreDisabled) ? nil : loadWorkspaceText()
         let preparedWorkspaceWindowCount = preparedWorkspace.map { text -> Int64 in
             let bytes = Array(text.utf8)
             return bytes.withUnsafeBufferPointer { buf in
@@ -4264,7 +4291,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // CR6a-2: 일반 launch는 저장 Workspace 유무와 무관하게 terminal publication을 잠깐 defer한다. secure
         // discovery/inventory가 먼저 끝난 뒤 저장 창을 apply하거나 아래에서 default surface를 명시적으로 finish해,
         // launch가 방금 만든 runtime을 자기 orphan으로 관측하지 않게 한다. smoke는 recovery 제품 범위 밖이다.
-        let deferInitialSurface = !smokeMode
+        let deferInitialSurface = !smokeMode || recoverySmoke
 
         if !startAppSession(smokeMode: smokeMode, deferInitialSurface: deferInitialSurface) {
             writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
@@ -4273,14 +4300,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         if let session = primary?.appSession {
             maru_macos_app_session_set_primary_window(session, 1)
-            if !smokeMode {
+            if !smokeMode || recoverySmoke {
                 if let text = preparedWorkspace {
                     let bytes = Array(text.utf8)
                     _ = bytes.withUnsafeBufferPointer { buf in
                         maru_macos_app_session_prepare_recovered_sessions(session, buf.baseAddress, buf.count, 1)
                     }
                 } else {
-                    _ = maru_macos_app_session_prepare_recovered_sessions(session, nil, 0, 0)
+                    sessionHostRecoverySmokePrepareOutcome = maru_macos_app_session_prepare_recovered_sessions(session, nil, 0, 0)
                 }
                 // parse 가능한 저장 Window가 없으면 recovery cut 뒤에만 기본 shell을 만든다. 실제 저장 Window가
                 // 있으면 applyWorkspaceWindow가 deferred surface를 완성한다.
@@ -4349,7 +4376,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 꺼짐 — maru sessions list가 "인스턴스 없음"으로 접힌다). 소켓·스레드·collector·dispatch·auth는 전부 Zig.
         controlServerStarted = (maru_macos_control_server_start() == Self.statusOK)
 
-        if smokeMode && !isAgentSessionArchiveSmokeMode && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
+        if smokeMode && !isAgentSessionArchiveSmokeMode && !recoverySmoke && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
             if filePanelHookEnabled {
                 // FP11f cold helper/WKWebView Mermaid와 iframe→read→render→edit→save가 끝나기 전에 controlled
                 // PTY가 `a\n`을 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
@@ -5789,7 +5816,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if status == Self.statusOK {
                 _ = surface.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
                 // 첫(메인) 창의 첫 tick에 launch 진단 요약을 한 번 남긴다.
-                if surface === windows.first, surface.latestFrameSummary.frame_loop_ticks <= 1 {
+                if surface === windows.first, !launchSummaryWritten {
+                    launchSummaryWritten = true
                     withSurface(surface) {
                         writeSummary(visibleUI: surface.window != nil, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
                     }
@@ -5809,6 +5837,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         maybeRunDividerSmoke()
         maybeRunScrollbarSmokeEntry()
         maybeRunTabDragSmokeEntry()
+        maybeRunSessionHostRecoverySmoke()
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -6373,7 +6402,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         updateWindowTitle() // 비-debug일 때 OSC 0/2 제목 또는 cwd basename을 제목줄에 반영
 
         // backing scale이 런치 후 늦게 정착/변경되면 device_scale이 옛 값에 머문다. 변했을 때만 resize.
-        if !smokeMode, let window {
+        if (!smokeMode || isSessionHostRecoverySmokeMode), let window {
             let scale = window.backingScaleFactor
             if scale != lastSentBackingScale {
                 resizeAppSessionFromWindow()
@@ -8562,6 +8591,177 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    /// CR6c는 실제 제품 launch와 sidebar mouse 경계를 통과한다. ABI probe는 이미
+    /// 발행된 rect/aggregate만 읽고, action은 이 NSEvent가 유일하게 시작한다.
+    private func maybeRunSessionHostRecoverySmoke() {
+        guard isSessionHostRecoverySmokeMode, sessionHostRecoverySmokeStage < 3,
+              let surface = primary, let session = surface.appSession,
+              let view = surface.view, let window = surface.window else { return }
+        var probe = MaruAppHostRecoveredSessionSmokeProbe()
+        guard maru_macos_app_session_recovered_session_smoke_probe(session, &probe) == Self.statusOK else {
+            sessionHostRecoverySmokeFailure = "probe"
+            sessionHostRecoverySmokeStage = 3
+            return
+        }
+        sessionHostRecoverySmokeKeepAliveEnabled = probe.keep_alive_enabled != 0
+        sessionHostRecoverySmokeDiscoveredCandidates = probe.discovered_candidates
+        sessionHostRecoverySmokeReadyAdapters = probe.ready_adapters
+        sessionHostRecoverySmokeInventoryRuntimes = probe.inventory_runtimes
+        sessionHostRecoverySmokeConfiguredKeepAlive = probe.configured_keep_alive != 0
+        sessionHostRecoverySmokeLiveSessionCount = probe.live_session_count
+        sessionHostRecoverySmokeTargetActivationDispatched = probe.target_activation_dispatched != 0
+        sessionHostRecoverySmokeTargetRows = probe.recovered_count
+        sessionHostRecoverySmokeTabs = probe.tab_count
+        sessionHostRecoverySmokeSurfaceInitialized = probe.surface_initialized != 0
+        sessionHostRecoverySmokeActiveRemoteObserved = probe.active_remote != 0
+        sessionHostRecoverySmokeMarkerObserved = probe.marker_present != 0
+        switch sessionHostRecoverySmokeStage {
+        case 0:
+            guard probe.row_present != 0, probe.recovered_count == 1,
+                  probe.row_width_px > 0, probe.row_height_px > 0 else { return }
+            let scale = window.backingScaleFactor
+            guard scale > 0 else {
+                sessionHostRecoverySmokeFailure = "scale"
+                sessionHostRecoverySmokeStage = 3
+                return
+            }
+            // 다른 실제 host가 함께 존재하는 개발 머신에서도 target row가 viewport 밖인 좌표를 직접
+            // 주입해 통과시키지 않는다. 실제 NSView scroll 경로로 target을 화면 안에 들인 뒤에만 캡처와
+            // click을 진행해, before artifact가 사용자가 누를 수 있는 행을 증명하게 한다.
+            let viewportHeightPx = max(CGFloat(0), view.bounds.height * scale)
+            let targetTopPx = CGFloat(probe.row_y_px)
+            let targetBottomPx = targetTopPx + CGFloat(probe.row_height_px)
+            if targetTopPx < 0 || targetTopPx >= viewportHeightPx || targetBottomPx > viewportHeightPx {
+                guard dispatchSessionHostRecoveryScroll(probe, in: view, window: window, downward: true) else {
+                    failSessionHostRecoverySmoke("scroll-target")
+                    return
+                }
+                return
+            }
+            sessionHostRecoverySmokeRowPresent = true
+            sessionHostRecoverySmokeBeforeCapture = captureSessionHostRecoverySmokeFrame("before", in: surface)
+            guard sessionHostRecoverySmokeBeforeCapture else {
+                sessionHostRecoverySmokeCaptureRetries += 1
+                if sessionHostRecoverySmokeCaptureRetries >= 300 {
+                    failSessionHostRecoverySmoke("capture-before")
+                }
+                return
+            }
+            sessionHostRecoverySmokeCaptureRetries = 0
+            let centerX = CGFloat(probe.row_x_px) + CGFloat(probe.row_width_px) / 2
+            let centerY = CGFloat(probe.row_y_px) + CGFloat(probe.row_height_px) / 2
+            let local = NSPoint(x: centerX / scale, y: view.bounds.height - centerY / scale)
+            let windowPoint = view.convert(local, to: nil)
+            guard let down = NSEvent.mouseEvent(
+                with: .leftMouseDown, location: windowPoint, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            ), let up = NSEvent.mouseEvent(
+                with: .leftMouseUp, location: windowPoint, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 0
+            ) else {
+                sessionHostRecoverySmokeFailure = "event"
+                sessionHostRecoverySmokeStage = 3
+                return
+            }
+            view.mouseDown(with: down)
+            view.mouseUp(with: up)
+            sessionHostRecoverySmokeClickDispatched = true
+            sessionHostRecoverySmokeStage = 1
+        case 1:
+            guard probe.recovered_count == 0, probe.tab_count >= 1,
+                  probe.surface_initialized != 0, probe.active_remote != 0,
+                  probe.marker_present != 0 else { return }
+            sessionHostRecoverySmokeRemotePublished = true
+            sessionHostRecoverySmokeMarkerPresent = true
+            sessionHostRecoverySmokeAfterCapture = captureSessionHostRecoverySmokeFrame("after", in: surface)
+            if !sessionHostRecoverySmokeAfterCapture {
+                sessionHostRecoverySmokeCaptureRetries += 1
+                if sessionHostRecoverySmokeCaptureRetries >= 300 {
+                    failSessionHostRecoverySmoke("capture-after")
+                }
+                return
+            }
+            sessionHostRecoverySmokeCaptureRetries = 0
+            sessionHostRecoverySmokeStage = 2
+            // 자동 종료도 실제 제품 Quit state machine을 통과시킨다. smokeMode의 즉시
+            // NSApp.terminate만 쓰면 Zig의 app-global detach snapshot이 게시되지 않아, 테스트가
+            // 방금 복구한 host runtime을 명시 close처럼 종료해 버린다. confirm을 제품 key path로
+            // 수락하면 다음 tick의 drainQuitDecision이 terminate를 시작하고 remote Term은 detach된다.
+            maru_macos_app_session_request_app_quit(session)
+            sendKeyEvent(MaruAppHostKeyEvent(
+                codepoint: 0,
+                base_codepoint: 0,
+                key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
+                modifier_shift: 0,
+                modifier_control: 0,
+                modifier_option: 0,
+                modifier_command: 0,
+                is_repeat: 0,
+                raw_key_code: 36
+            ))
+        default:
+            break
+        }
+    }
+
+    /// Scrolls the real sidebar input route until the exact recovered target is visible. The
+    /// probe supplies geometry only; scroll ownership and clamping remain in Zig's normal mouse
+    /// path, so this cannot select or activate a row by itself.
+    private func dispatchSessionHostRecoveryScroll(
+        _ probe: MaruAppHostRecoveredSessionSmokeProbe,
+        in view: MaruMetalTerminalView,
+        window: NSWindow,
+        downward: Bool
+    ) -> Bool {
+        let scale = window.backingScaleFactor
+        guard scale > 0, let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(
+                scrollWheelEvent2Source: source,
+                units: .pixel,
+                wheelCount: 1,
+                wheel1: downward ? -96 : 96,
+                wheel2: 0,
+                wheel3: 0
+              ) else { return false }
+        let x = CGFloat(probe.row_x_px) + CGFloat(probe.row_width_px) / 2
+        let y = max(CGFloat(1), min(view.bounds.height * scale - 1, view.bounds.height * scale / 2))
+        let local = NSPoint(x: x / scale, y: view.bounds.height - y / scale)
+        event.location = view.convert(local, to: nil)
+        guard let nsEvent = NSEvent(cgEvent: event) else { return false }
+        view.scrollWheel(with: nsEvent)
+        return true
+    }
+
+    @discardableResult
+    private func captureSessionHostRecoverySmokeFrame(_ label: String, in surface: TerminalSurface) -> Bool {
+        guard isSessionHostRecoverySmokeMode, let renderer = surface.metalRenderer else { return false }
+        guard let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6c-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let dir = root.appendingPathComponent("captures", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
+        let path = dir.appendingPathComponent("session-host-recovery-\(label).ppm").standardizedFileURL
+        guard path.deletingLastPathComponent() == dir else { return false }
+        if FileManager.default.fileExists(atPath: path.path) { return true }
+        guard maru_metal_renderer_request_test_capture(renderer, path.path) else { return false }
+        withSurface(surface) {
+            metalNeedsRedraw = true
+            _ = renderTick()
+        }
+        return FileManager.default.fileExists(atPath: path.path)
+    }
+
+    private func failSessionHostRecoverySmoke(_ reason: String) {
+        sessionHostRecoverySmokeFailure = reason
+        sessionHostRecoverySmokeStage = 3
+        exitCode = 1
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
     private var isTabDragSmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_TAB_DRAG_SMOKE"] == "1"
     }
@@ -10116,6 +10316,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         final_frame_ended=\(frameEnded)
         smoke_mode=\(smokeMode)
         smoke_duration_ms=\(duration)
+        session_host_recovery_smoke_stage=\(sessionHostRecoverySmokeStage)
+        session_host_recovery_smoke_row_present=\(sessionHostRecoverySmokeRowPresent)
+        session_host_recovery_smoke_click_dispatched=\(sessionHostRecoverySmokeClickDispatched)
+        session_host_recovery_smoke_remote_published=\(sessionHostRecoverySmokeRemotePublished)
+        session_host_recovery_smoke_marker_present=\(sessionHostRecoverySmokeMarkerPresent)
+        session_host_recovery_smoke_before_capture=\(sessionHostRecoverySmokeBeforeCapture)
+        session_host_recovery_smoke_after_capture=\(sessionHostRecoverySmokeAfterCapture)
+        session_host_recovery_smoke_failure=\(sessionHostRecoverySmokeFailure)
+        session_host_recovery_smoke_prepare_outcome=\(sessionHostRecoverySmokePrepareOutcome)
+        session_host_recovery_smoke_keep_alive_enabled=\(sessionHostRecoverySmokeKeepAliveEnabled)
+        session_host_recovery_smoke_discovered_candidates=\(sessionHostRecoverySmokeDiscoveredCandidates)
+        session_host_recovery_smoke_ready_adapters=\(sessionHostRecoverySmokeReadyAdapters)
+        session_host_recovery_smoke_inventory_runtimes=\(sessionHostRecoverySmokeInventoryRuntimes)
+        session_host_recovery_smoke_configured_keep_alive=\(sessionHostRecoverySmokeConfiguredKeepAlive)
+        session_host_recovery_smoke_live_session_count=\(sessionHostRecoverySmokeLiveSessionCount)
+        session_host_recovery_smoke_target_activation_dispatched=\(sessionHostRecoverySmokeTargetActivationDispatched)
+        session_host_recovery_smoke_target_rows=\(sessionHostRecoverySmokeTargetRows)
+        session_host_recovery_smoke_tabs=\(sessionHostRecoverySmokeTabs)
+        session_host_recovery_smoke_surface_initialized=\(sessionHostRecoverySmokeSurfaceInitialized)
+        session_host_recovery_smoke_active_remote_observed=\(sessionHostRecoverySmokeActiveRemoteObserved)
+        session_host_recovery_smoke_marker_observed=\(sessionHostRecoverySmokeMarkerObserved)
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)
         agent_session_archive_smoke_scenario=\(archiveSmokeScenario)

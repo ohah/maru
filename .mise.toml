@@ -149,6 +149,10 @@ run = "zig build macos-app"
 description = "Run the macOS Swift app host dev shell smoke"
 run = "zig build macos-app-smoke"
 
+[tasks.macos-session-host-recovery-smoke]
+description = "Run the actual AppKit recovered-session discovery/click/render smoke"
+run = "zig build macos-session-host-recovery-smoke"
+
 [tasks.macos-agent-session-archive-smoke]
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"

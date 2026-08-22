@@ -736,6 +736,30 @@ uint32_t maru_macos_app_session_prepare_recovered_sessions(
 int32_t maru_macos_app_session_finish_deferred_initial_surface(
     MaruAppHostSession *session
 );
+/* CR6c actual-AppKit recovery smoke의 read-only row/상태 projection. action identity 없음. */
+typedef struct MaruAppHostRecoveredSessionSmokeProbe {
+    uint32_t row_present;
+    int32_t row_x_px;
+    int32_t row_y_px;
+    uint32_t row_width_px;
+    uint32_t row_height_px;
+    uint32_t recovered_count;
+    uint32_t tab_count;
+    uint32_t surface_initialized;
+    uint32_t active_remote;
+    uint32_t marker_present;
+    uint32_t keep_alive_enabled;
+    uint32_t discovered_candidates;
+    uint32_t ready_adapters;
+    uint32_t inventory_runtimes;
+    uint32_t configured_keep_alive;
+    uint32_t live_session_count;
+    uint32_t target_activation_dispatched;
+} MaruAppHostRecoveredSessionSmokeProbe;
+int32_t maru_macos_app_session_recovered_session_smoke_probe(
+    MaruAppHostSession *session,
+    MaruAppHostRecoveredSessionSmokeProbe *out_probe
+);
 /* cross-window workspace 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지
    (§8A.2) + 이동한 surface 수(§8A.3). Swift(M3d-2b)가 source_window_closed=1이면 NSWindow를 닫는다(판정은 Zig,
    close는 platform). app_host_abi.zig MoveResult와 layout이 정합해야 한다(ABI 계약 테스트가 @sizeOf/@offsetOf로 강제). */

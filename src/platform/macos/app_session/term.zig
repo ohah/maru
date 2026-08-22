@@ -74,8 +74,7 @@ pub fn finishInitialSurface(self: *AppSession) void {
     agent_ops.reconcileAgentHooks(self);
     // 지난 실행이 남긴 이벤트 로그를 지운다 — **게이트와 무관**하고 **시작할 때만** 돈다(계약 §4.2).
     agent_ops.cleanupAgentHookLogs(self);
-    self.renderer_state = renderer.RendererState.init(self.allocator, .{});
-    self.renderer_initialized = true;
+    ensureRendererState(self);
     self.frame_loop = app.AppFrameLoop.init(
         self.allocator,
         &self.app_window,
@@ -84,7 +83,16 @@ pub fn finishInitialSurface(self: *AppSession) void {
         &self.renderer_state,
         self.io,
     );
+    self.frame_loop_initialized = true;
     pane_ops.recomputeActivePaneRect(self);
+}
+
+/// RendererState는 terminal frame뿐 아니라 0-tab Recovered Sessions chrome의 CoreText/atlas도
+/// 소유한다. live Term 생성과 결속하지 않아야 복구 선택기를 그리려고 placeholder PTY를 만들 필요가 없다.
+pub fn ensureRendererState(self: *AppSession) void {
+    if (self.renderer_initialized) return;
+    self.renderer_state = renderer.RendererState.init(self.allocator, .{});
+    self.renderer_initialized = true;
 }
 
 pub fn renamingTerm(self: *const AppSession, term: *Term) bool {

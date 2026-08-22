@@ -14,6 +14,8 @@ const typography = @import("../../ui/typography.zig");
 /// 컴포넌트는 무엇을 그릴지만 알면 되고 무엇을 여는지는 host가 안다.
 pub const RowKind = enum { root, directory, file, recent_header, recent_file, empty };
 
+/// **호버는 여기 없다.** 그 판정의 주인은 published tree 를 보는 `InteractionState` 이고(FT2), DTO 로도
+/// 받으면 같은 사실의 출처가 둘이 된다. 선택·활성은 도메인이 아는 사실이라 여기 있다.
 pub const Row = struct {
     kind: RowKind,
     label: []const u8,
@@ -40,9 +42,6 @@ pub const Row = struct {
     /// 도착한 up 이 스크롤로 밀린 다른 행을 열지 않는다.
     model_index: usize = 0,
 };
-
-/// 행이 무엇으로 강조되는가. `hovered` 를 DTO 에서 뺀 이유는 그 판정이 **published tree 를 보는
-/// `InteractionState`** 로 옮겼기 때문이다(FT2) — props 로도 받으면 같은 사실의 출처가 둘이 된다.
 
 pub const Props = struct {
     /// 트리 content 사각형의 크기. **스크롤바 gutter를 뺀 폭**을 host가 넘긴다 — gutter는 컨테이너가

@@ -15,6 +15,7 @@ const dwrite_font = maru.dwrite_font;
 const win32_text = maru.win32_text;
 const win32_terminal = maru.win32_terminal;
 const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
+const chrome_draw_lowering = @import("platform/macos/chrome/chrome_draw_lowering.zig"); // 이름과 달리 ops → DrawList 낮추기는 CoreText 를 안 부른다 — 본문 참조 0 회(§2m.6 과 같은 방식으로 쟀다)
 const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = maru.win32_keys;
@@ -111,6 +112,10 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "win32-file-tree-draw-smoke")) {
         try runWin32FileTreeDrawSmoke(io, allocator, stdout, stderr);
+        return;
+    }
+    if (std.mem.eql(u8, command, "win32-editor-draw-smoke")) {
+        try runWin32EditorDrawSmoke(io, allocator, stdout, stderr);
         return;
     }
     if (std.mem.eql(u8, command, "win32-file-tree-smoke")) {
@@ -3489,4 +3494,215 @@ test "PTY 안내는 백엔드가 있는 호스트에 새지 않는다" {
     // 반대 방향 — "안내를 띄우는 호스트에서는 실행이 actual로 실패한다" — 은 그 사실이 사는 곳
     // (`src/pty/session.zig`)에서 spawn을 직접 불러 지킨다. 여기서 타입을 다시 비교하면 정의를 베껴 쓴
     // 동어반복이라 아무것도 못 잡는다.
+}
+
+/// `maru win32-editor-draw-smoke` — W8.3⒜. **중립 편집기 뷰가 Windows 화면에 뜬다.**
+///
+/// §2m.6 이 파일 트리에서 세운 규율 그대로다: fixture 를 만들지 않고 **저장소 자신의 소스**를 연다.
+/// 화면에 뜨는 것이 진짜 코드라야 "그럴듯한 그림" 과 "실제로 도는 것" 이 갈린다.
+///
+/// **중립 조각을 그대로 쓴다.** `editor_view` 는 이미 플랫폼 무관이고(`src/chrome/components/`),
+/// ops → `DrawList` 낮추기도 CoreText 를 안 부른다(본문 참조 0 회 — §2m.6 과 같은 방식으로 쟀다).
+/// 그러니 Windows 전용으로 새로 짜는 렌더 코드가 없다. 창부터 표현까지는 `win32_draw_host` 가 맡는다.
+///
+/// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.
+fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-editor-draw-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const editor_view = maru.chrome.components.editor_view;
+
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
+    var host = draw_host.Host.open(allocator, cfg, .{
+        .title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W8.3 editor)"),
+    }) catch {
+        try draw_host.reportSetupFailure(stderr, "win32-editor-draw-smoke");
+        return error.UnknownCommand;
+    };
+    defer host.close();
+    const cell_w = host.cell_w;
+    const cell_h = host.cell_h;
+    const grid = host.grid();
+
+    // ── 진짜 파일을 연다 ─────────────────────────────────────────────────────────────────────
+    //
+    // 이 저장소의 소스 하나를 고른다. 한글 주석과 ASCII 코드가 섞여 있어 폴백 경로도 함께 탄다.
+    const doc_path = "src/text_shaper.zig";
+    const source = std.Io.Dir.cwd().readFileAlloc(io, doc_path, allocator, .limited(4 << 20)) catch |err| {
+        try stderr.print("maru win32-editor-draw-smoke: could not read {s}({s})\n", .{ doc_path, @errorName(err) });
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer allocator.free(source);
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+    {
+        var it = std.mem.splitScalar(u8, source, 0x0A);
+        while (it.next()) |raw| {
+            // CRLF 를 여기서 벗긴다 — 편집기 뷰는 표시 텍스트를 받는다.
+            try lines.append(allocator, std.mem.trimEnd(u8, raw, "\r"));
+        }
+    }
+
+    // ── 줄 → ops ─────────────────────────────────────────────────────────────────────────────
+    //
+    // **제품과 같은 함수**(`diff_frame.buildSide`)를 부른다. macOS `buildPaneOps` 가 부르는 것과
+    // 같은 자리라, 여기서 나오는 배치가 제품 편집기를 예고한다.
+    const ops = try allocator.alloc(maru.chrome.draw.Op, 4096);
+    defer allocator.free(ops);
+    const text_bytes = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(text_bytes);
+    const runs = try allocator.alloc(maru.chrome.draw.Run, 4096);
+    defer allocator.free(runs);
+    const content_rows = try allocator.alloc(editor_view.content.Row, 512);
+    defer allocator.free(content_rows);
+    const visual_rows = try allocator.alloc(editor_view.visual_map.VisualRow, 512);
+    defer allocator.free(visual_rows);
+    const gutter_rows = try allocator.alloc(editor_view.gutter.Row, 512);
+    defer allocator.free(gutter_rows);
+    const row_counts = try allocator.alloc(u32, lines.items.len + 1);
+    defer allocator.free(row_counts);
+    const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
+    defer allocator.free(count_scratch);
+
+    const scratch = editor_view.frame.Scratch{
+        .ops = ops,
+        .text_bytes = text_bytes,
+        .runs = runs,
+        .content_rows = content_rows,
+        .visual_rows = visual_rows,
+        .gutter_rows = gutter_rows,
+        .row_counts = row_counts,
+        .count_scratch = count_scratch,
+    };
+
+    // 뷰 사각은 창 전체다. 제품은 pane 기하에서 오지만 스모크에는 pane 이 없다.
+    const view: maru.chrome.draw.Rect = .{
+        .x = 0,
+        .y = 0,
+        .w = @as(u32, grid.cols) * cell_w,
+        .h = @as(u32, grid.rows) * cell_h,
+    };
+    // **내용은 한 겹 들어가고 배경은 전체를 덮는다** — `buildPaneOps` 의 계약 그대로(§4.1b).
+    const inset: i32 = @intCast(editor_view.frame.content_inset_px);
+    const inner: maru.chrome.draw.Rect = .{
+        .x = 0,
+        .y = 0,
+        .w = view.w -| editor_view.frame.content_inset_px * 2,
+        .h = view.h -| editor_view.frame.content_inset_px * 2,
+    };
+    const written = editor_view.diff_frame.buildSide(
+        .{ .lines = lines.items, .total_lines = lines.items.len },
+        .{
+            .first_line = 0,
+            .wrap = false,
+            .tab_width = 4,
+            .cell_w_px = @intCast(cell_w),
+            .cell_h_px = @intCast(cell_h),
+            .font_px = @intCast(cell_h),
+        },
+        inner,
+        .{ .x = -inset, .y = -inset, .w = view.w, .h = view.h },
+        scratch,
+    );
+
+    // ── ops → DrawList ───────────────────────────────────────────────────────────────────────
+    //
+    // **색은 리터럴이다**(위 doc). 골든이 아니라 미리보기지만, config 가 끼면 "무엇이 판정을 바꿨나" 가
+    // 흐려지는 것은 같다.
+    const tokens = maru.chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .sidebar_background = .{ .r = 0x18, .g = 0x1D, .b = 0x28 },
+        .sidebar_foreground = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
+        .sidebar_active = .{ .r = 0x2A, .g = 0x33, .b = 0x44 },
+        .search_match = .{ .r = 20, .g = 120, .b = 255 },
+        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
+        .selection = .{ .r = 0x3A, .g = 0x5F, .b = 0xCD },
+        .cursor = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+        .terminal_background = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+        .accent = .{ .r = 20, .g = 120, .b = 255 },
+    });
+    // **낮추기가 무엇을 버리는지 센다.** `buildTextDrawList` 는 이름 그대로 **글자만** 셀로 만든다.
+    // 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을 못 본다
+    // (아래 보고의 `ops_dropped` — 이 스모크를 쓰면서 그렇게 한 번 넘길 뻔했다).
+    var ops_text: usize = 0;
+    var ops_dropped: usize = 0;
+    for (ops[0..written.ops]) |op| switch (op) {
+        .text => ops_text += 1,
+        .clip => {},
+        else => ops_dropped += 1,
+    };
+
+    const draw_list = try chrome_draw_lowering.buildTextDrawList(
+        allocator,
+        ops[0..written.ops],
+        &tokens,
+        cell_w,
+        cell_h,
+        grid.cols,
+        grid.rows,
+    );
+
+    // ── DrawList → 화면 ──────────────────────────────────────────────────────────────────────
+    const prepared = try host.prepare(allocator, draw_list);
+    var frame = prepared.frame;
+    defer frame.deinit(allocator);
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    };
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+    _ = try host.appendGlyphCells(allocator, frame, colors, &cells);
+
+    const frames = try host.presentLoop(cells.items, 0xFF1E2430, 120);
+
+    // ── 판정 ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // **행 수가 아니라 내용을 본다**(§2m.6 이 못 박은 규율). 그려진 셀에서 글자를 도로 읽어, 파일의
+    // 그 줄이 실제로 그 행에 있는지 확인한다. 어느 파일이든 성립하는 판정이라 fixture 에 안 묶인다.
+    var lines_checked: usize = 0;
+    var lines_matched: usize = 0;
+    {
+        var row_text: std.ArrayList(u8) = .empty;
+        defer row_text.deinit(allocator);
+        var row: u16 = 0;
+        while (row < written.visual_rows and row < lines.items.len) : (row += 1) {
+            const want = std.mem.trim(u8, lines.items[row], " \t");
+            // 빈 줄은 셀이 없다 — 판정에서 뺀다.
+            if (want.len == 0) continue;
+            row_text.clearRetainingCapacity();
+            for (frame.draw_list.cells) |c| {
+                if (c.row != row) continue;
+                var buf: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(@intCast(c.codepoint), &buf) catch continue;
+                try row_text.appendSlice(allocator, buf[0..n]);
+            }
+            lines_checked += 1;
+            // **접두로 본다** — 창이 좁으면 뒤가 잘리고, gutter 가 앞에 붙는다.
+            const head = want[0..@min(want.len, 12)];
+            if (std.mem.indexOf(u8, row_text.items, head) != null) lines_matched += 1;
+        }
+    }
+
+    const stats = maru.renderer.renderFrameStats(frame, host.renderer_state.atlas.entryCount());
+    try stdout.writeAll("maru.win32-editor-draw-smoke.v1\n");
+    try stdout.print("doc={s} lines={d}\n", .{ doc_path, lines.items.len });
+    try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
+    try stdout.print("ops={d} ops_text={d} ops_dropped={d}\n", .{ written.ops, ops_text, ops_dropped });
+    try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ written.visual_rows, written.total_visual_rows });
+    try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ cells.items.len, d3d11_cells.cellsDigest(cells.items), prepared.region_uploads });
+    try stdout.print("frames_presented={d}\n", .{frames});
+    try stdout.print("lines_matched={d}/{d}\n", .{ lines_matched, lines_checked });
+    try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
+    try stdout.flush();
 }

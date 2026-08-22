@@ -3670,6 +3670,12 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     //
     // **행 수가 아니라 내용을 본다**(§2m.6 이 못 박은 규율). 그려진 셀에서 글자를 도로 읽어, 파일의
     // 그 줄이 실제로 그 행에 있는지 확인한다. 어느 파일이든 성립하는 판정이라 fixture 에 안 묶인다.
+    //
+    // **전제 둘을 적어 둔다 — 깨지면 판정이 거짓으로 실패한다.**
+    // ⒜ `wrap = false` 라 시각 행 N 이 논리 줄 N 이다. 랩을 켜면 그 대응이 깨지므로 이 훑기도
+    //    `visual_map` 을 따라가야 한다.
+    // ⒝ 줄 **안쪽**에 탭이 없다고 본다. 렌더는 탭을 열로 펼치는데 여기 `want` 는 원본이라, 안쪽
+    //    탭이 있으면 접두가 안 맞는다. 지금 여는 파일은 `zig fmt` 가 공백으로 맞춰 둔 것이다.
     var lines_checked: usize = 0;
     var lines_matched: usize = 0;
     {
@@ -3678,8 +3684,10 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         var row: u16 = 0;
         while (row < written.visual_rows and row < lines.items.len) : (row += 1) {
             const want = std.mem.trim(u8, lines.items[row], " \t");
-            // 빈 줄은 셀이 없다 — 판정에서 뺀다.
-            if (want.len == 0) continue;
+            // **짧은 줄은 판정에서 뺀다.** `//!` 처럼 흔한 접두는 아무 행에나 있어서 "맞았다" 가
+            // 아무 말도 아니게 된다. 대조군으로 쟀다 — 한 줄 밀어 그리게 뮤턴트를 심으니 28/28 이
+            // 6/28 로 떨어졌는데, **그 6 이 전부 이 부류**였다. 8 바이트 미만은 안 센다.
+            if (want.len < 8) continue;
             row_text.clearRetainingCapacity();
             for (frame.draw_list.cells) |c| {
                 if (c.row != row) continue;
@@ -3689,7 +3697,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             }
             lines_checked += 1;
             // **접두로 본다** — 창이 좁으면 뒤가 잘리고, gutter 가 앞에 붙는다.
-            const head = want[0..@min(want.len, 12)];
+            const head = want[0..@min(want.len, 24)];
             if (std.mem.indexOf(u8, row_text.items, head) != null) lines_matched += 1;
         }
     }

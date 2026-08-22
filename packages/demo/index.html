@@ -1,0 +1,94 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term — Zig 터미널 코어, WebAssembly</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 20px; background: #0b0d10; color: #c9d1d9;
+         font: 14px ui-sans-serif, -apple-system, "Apple SD Gothic Neo", sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
+  h1 span { color: #8b949e; font-weight: 400; font-size: 14px; }
+  .sub { color: #8b949e; margin: 0 0 14px; font-size: 13px; }
+  .wrap { display: flex; gap: 14px; align-items: flex-start; }
+  #host { flex: 1 1 auto; min-width: 0; border: 1px solid #21262d; border-radius: 8px;
+          overflow: hidden; background: #000; }
+  .panel { flex: 0 0 232px; border: 1px solid #21262d; border-radius: 8px; padding: 12px; }
+  .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .5px;
+              color: #8b949e; margin: 0 0 10px; font-weight: 600; }
+  .row { margin-bottom: 10px; }
+  .row > label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 3px; }
+  .row output { float: right; color: #58a6ff; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; }
+  select, input[type=text] { width: 100%; background: #0d1117; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 5px; padding: 4px 6px; font: inherit; font-size: 12px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #c9d1d9; }
+  hr { border: 0; border-top: 1px solid #21262d; margin: 12px 0; }
+  button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+           border-radius: 5px; padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+  button:hover { background: #30363d; }
+  .foot { margin-top: 12px; font-size: 12px; color: #8b949e; }
+  #bytes { font-family: ui-monospace, monospace; color: #7ee787; word-break: break-all; min-height: 17px; }
+  #stat { font-family: ui-monospace, monospace; color: #58a6ff; }
+</style>
+
+<h1>maru-term <span>— Zig 터미널 코어, WebAssembly</span></h1>
+<p class="sub">파싱·폭 판정·키 인코딩은 wasm. 글리프와 폰트 폴백은 브라우저. 클릭하고 <b>help</b> 를 쳐보세요.</p>
+
+<div class="wrap">
+  <div id="host"></div>
+  <div class="panel">
+    <h2>렌더</h2>
+    <div class="row"><label>폰트 크기 <output id="v-size">14</output></label>
+      <input type="range" id="o-size" min="10" max="28" step="1" value="14" /></div>
+    <div class="row"><label>줄 간격 <output id="v-line">1.20</output></label>
+      <input type="range" id="o-line" min="1" max="2" step="0.05" value="1.2" /></div>
+    <div class="row"><label>폰트</label>
+      <select id="o-font">
+        <option value="">기본 (리가처 폰트 우선)</option>
+        <option value='"JetBrains Mono","JetBrainsMono Nerd Font",Jetendard,monospace'>JetBrains Mono + Jetendard</option>
+        <option value='Jetendard,monospace'>Jetendard (한글 등폭)</option>
+        <option value='"FiraCode Nerd Font","Fira Code",monospace'>Fira Code</option>
+        <option value='"CaskaydiaCove Nerd Font","Cascadia Code",monospace'>Cascadia Code</option>
+        <option value='"Victor Mono",monospace'>Victor Mono</option>
+        <option value='"Iosevka Nerd Font",Iosevka,monospace'>Iosevka</option>
+        <option value='"SFMono-Regular", ui-monospace, monospace'>SF Mono</option>
+        <option value='"Menlo", ui-monospace, monospace'>Menlo</option>
+        <option value='ui-monospace, monospace'>시스템 기본</option>
+      </select></div>
+    <div class="row"><label>격자</label>
+      <select id="o-grid">
+        <option value="auto">자동 (컨테이너에 맞춤)</option>
+        <option value="80x24">80 × 24</option>
+        <option value="100x30">100 × 30</option>
+        <option value="120x40">120 × 40</option>
+      </select></div>
+    <div class="row"><label>커서 모양</label>
+      <select id="o-cursor">
+        <option value="block">블록</option><option value="bar">막대</option><option value="underline">밑줄</option>
+      </select></div>
+    <hr />
+    <h2>코어</h2>
+    <div class="row"><label>스크롤백 <output id="v-sb">1000</output></label>
+      <input type="range" id="o-sb" min="0" max="5000" step="250" value="1000" /></div>
+    <div class="row"><label class="check"><input type="checkbox" id="o-jet" checked /> 번들 Jetendard (한글 등폭)</label></div>
+    <div class="row"><label class="check"><input type="checkbox" id="o-amb" /> Ambiguous 폭 = 2셀</label></div>
+    <div class="row"><label class="check"><input type="checkbox" id="o-lig" checked /> 리가처(ASCII run 병합)</label></div>
+    <hr />
+    <h2>테마 <output id="v-theme" style="float:right;color:#58a6ff"></output></h2>
+    <div class="row"><input type="text" id="o-theme-q" placeholder="테마 검색…" /></div>
+    <div class="row"><select id="o-theme" size="8"></select></div>
+    <hr />
+    <h2>모드</h2>
+    <div class="row"><select id="o-worker">
+      <option value="full">worker: full (기본)</option>
+      <option value="false">worker: false (메인)</option>
+    </select></div>
+    <div class="row"><button id="bench">처리량 측정</button> <span id="stat"></span></div>
+  </div>
+</div>
+
+<p class="foot">키를 누르면 <code>onData</code> 로 나가는 바이트 — 실제 앱은 이걸 PTY 호스트로 보냅니다.</p>
+<div id="bytes"></div>
+<p class="foot">IME 이벤트 (조합 문제를 재현하면 여기 순서가 남습니다)</p>
+<div id="imelog" style="font-family:ui-monospace,monospace;color:#d2a8ff;font-size:11px;min-height:34px;word-break:break-all"></div>
+
+<script type="module" src="/demo/demo.js"></script>

@@ -4094,6 +4094,15 @@ test "[측정] 첫 가로 휠이 문서 전체를 훑는 비용" {
     // 501ms 보다도 높다** — 즉 그 회귀가 그대로 돌아와도 통과했다. 잡겠다고 이름까지 적어 둔
     // 것을 못 잡는 감지선이었다. 지금 값은 28ms(이 기계)·39ms(CI 러너)이므로 200 은 실측의
     // 약 5배이면서 501ms 아래다 — 기계 편차는 흡수하고 회귀는 잡는다.
+    //
+    // **판정은 카운터가 한다**(2026-08-22). 이 픽스처는 탭과 ASCII뿐이라 `stepColumn`이 느린 경로를
+    // **한 걸음도** 타면 안 된다 — 빠른 경로가 사라지는 그 회귀가 501ms를 만들었다. 시간으로 재면
+    // 러너 부하와 구분이 안 되고(이 선도 부하가 크면 229ms로 넘겼다), 카운터는 안 흔들린다.
+    // 시간은 **출력만** 한다.
+    //
+    // (전환을 한 번 실패했다: 계측을 `stepColumn`이 아니라 같은 두 줄로 시작하는 다른 함수에 넣어
+    // 뮤턴트에서 카운터가 0이었고, "카운터로는 못 잡는다"고 결론낼 뻔했다. `content.zig`의
+    // `stepColumn 계측이 두 경로를 갈라 센다`가 그 계측 자신을 잰다.)
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
@@ -4113,19 +4122,27 @@ test "[측정] 첫 가로 휠이 문서 전체를 훑는 비용" {
         fx.term.rt.editor_wrap = false;
         fx.term.rt.editor_max_cols = 0;
 
+        chrome_editor.content.slow_path_steps = 0;
+        chrome_editor.content.total_steps = 0;
         const t0 = monotonicMsForTest();
         _ = scrollCols(fx.session, fx.term, leaf, -1, null);
         const t1 = monotonicMsForTest();
-        std.debug.print("\n[측정] {d}줄 × {d}B: 첫 가로 휠 {d}ms (max_cols={d})\n", .{ n, line.len, t1 - t0, fx.term.rt.editor_max_cols });
+        const slow_first = chrome_editor.content.slow_path_steps;
+        const total_first = chrome_editor.content.total_steps;
+        std.debug.print("\n[측정] {d}줄 × {d}B: 첫 가로 휠 {d}ms (max_cols={d}, 걸음 {d} 중 느린 걸음 {d})\n", .{ n, line.len, t1 - t0, fx.term.rt.editor_max_cols, total_first, slow_first });
 
-        try testing.expect(t1 - t0 < 200); // 실측 28~39ms, 수정 전 501ms — 그 사이에 선을 둔다
+        // **탭과 ASCII뿐이다 — 느린 경로는 한 걸음도 없어야 한다.** 이것이 501ms 회귀의 축이다.
+        try testing.expectEqual(@as(usize, 0), slow_first);
+        // 실제로 걸었는지도 본다 — 위가 "아무것도 안 했다"로도 통과하면 안 된다.
+        try testing.expectEqual(n * line.len, total_first);
 
-        // 두 번째부터는 캐시라 0에 가까워야 한다.
+        // 두 번째부터는 캐시라 **한 걸음도 다시 안 걷는다**. 시간이 아니라 걸음으로 잰다.
+        chrome_editor.content.total_steps = 0;
         const t2 = monotonicMsForTest();
         _ = scrollCols(fx.session, fx.term, leaf, -1, null);
         const t3 = monotonicMsForTest();
-        std.debug.print("[측정] {d}줄: 두 번째 휠 {d}ms\n", .{ n, t3 - t2 });
-        try testing.expect(t3 - t2 < 50); // 캐시가 안 먹으면 여기서 걸린다
+        std.debug.print("[측정] {d}줄: 두 번째 휠 {d}ms (걸음 {d})\n", .{ n, t3 - t2, chrome_editor.content.total_steps });
+        try testing.expectEqual(@as(usize, 0), chrome_editor.content.total_steps);
     }
 }
 
@@ -4231,12 +4248,15 @@ test "[측정] minified 한 줄(5MB)에서 첫 가로 휠" {
     fx.term.rt.editor_wrap = false;
     fx.term.rt.editor_max_cols = 0;
 
+    chrome_editor.content.total_steps = 0;
     const t0 = monotonicMsForTest();
     _ = scrollCols(fx.session, fx.term, leaf, -1, null);
     const t1 = monotonicMsForTest();
-    std.debug.print("\n[측정] 5MB 한 줄: 첫 가로 휠 {d}ms (max_cols={d}, 셈 상한={d})\n", .{ t1 - t0, fx.term.rt.editor_max_cols, chrome_editor.frame.max_cols_count_limit });
-    // 고치기 전 149ms. 줄 길이와 무관해야 한다 — 셈이 상한에서 멈추므로.
-    try testing.expect(t1 - t0 < 50);
+    std.debug.print("\n[측정] 5MB 한 줄: 첫 가로 휠 {d}ms (max_cols={d}, 셈 상한={d}, 걸음 {d})\n", .{ t1 - t0, fx.term.rt.editor_max_cols, chrome_editor.frame.max_cols_count_limit, chrome_editor.content.total_steps });
+    // 고치기 전 149ms. **줄 길이와 무관해야 한다** — 셈이 상한에서 멈추므로. 시간 대신 **훑은
+    // 걸음 수**로 잰다: 5MB(5,242,880)가 아니라 상한 근처여야 한다. 시간으로 재면 러너 부하와
+    // 구분이 안 되고, 걸음 수는 안 흔들린다.
+    try testing.expect(chrome_editor.content.total_steps <= chrome_editor.frame.max_cols_count_limit + 1);
     try testing.expectEqual(chrome_editor.frame.max_cols_count_limit, fx.term.rt.editor_max_cols);
 
     // **상한에 걸려도 갈 수 있는 거리는 그대로다.** 셈을 줄인 것이 도달 범위를 줄이면 안 된다.

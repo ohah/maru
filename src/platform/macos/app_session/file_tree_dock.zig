@@ -187,19 +187,14 @@ pub fn collectFileTreeDock(
 
     chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads, 2);
 
+    // **셀 경로를 쓰지 않는다.** SCM·Session Dock 은 여기서 `buildIconTextDrawList` 를 부르지만, 그것은
+    // `wide_icons == true` 인 op 만 통과시킨다(`buildTextDrawListFiltered`). 이 컴포넌트의 텍스트·아이콘은
+    // 전부 `wide_icons = false` 라 그 호출은 **빈 draw list** 를 낸다 — 매 프레임 할당만 하고 아무것도 안
+    // 그렸다(적대적 검증에서 잡았다). 아이콘은 measured 경로가 그린다: `shapesTextOp` 이 `!wide_icons` 를
+    // 태우고 `shapesRun` 이 `icon_in_rect` 를 명시적으로 살려 "worker 가 논리 rect 에서 SVG 를 직접 해석"
+    // 한다. 그 사실을 컴포넌트 테스트가 못 박는다(`view` — 모든 op 이 measured 대상이다).
     const cols: u16 = @intCast(@min(text_w / self.cell_width_px, std.math.maxInt(u16)));
     const cell_rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
-    // 등록 아이콘은 셀 경로로, **일반 글자는 measured CoreText 경로**로 간다. 아이콘만 그리면 트리가
-    // 배경과 화살표만 있는 빈 목록이 된다(SCM 도크가 첫 배선에서 실제로 그랬다).
-    const icon_dl = chrome_draw_lowering.buildIconTextDrawList(
-        self.allocator,
-        draws.ops,
-        &tokens,
-        self.cell_width_px,
-        self.cell_height_px,
-        cols,
-        cell_rows,
-    ) catch return;
 
     const scale = props.scale_milli;
     const scroll_origin_y_px: i32 = -@as(i32, @intCast(@min(window.origin_shift_px, std.math.maxInt(i32))));
@@ -231,11 +226,6 @@ pub fn collectFileTreeDock(
             );
         }
     }
-    self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
-        .origin_x = content.x,
-        .origin_y = content.y,
-        .colors = colors,
-    } });
 }
 
 /// 이 프레임의 글자를 셰이핑해 캐시에 넣는다. **다음 tick으로 미루지 않는다** — 미루면 그 프레임의

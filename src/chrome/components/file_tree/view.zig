@@ -117,9 +117,24 @@ const Writer = struct {
         const content_x = x0 + @as(i32, @intCast(m.contentLocalX(r.depth)));
         const icon_y = y0 + @as(i32, @intCast((m.row_h -| m.icon_extent) / 2));
         if (r.expandable) {
-            const cp: u21 = if (r.expanded) chevron_expanded else chevron_collapsed;
             const cy = y0 + @as(i32, @intCast((m.row_h -| m.chevron_extent) / 2));
-            try self.icon(.{ .x = content_x, .y = cy, .w = m.chevron_extent, .h = m.chevron_extent }, cp, @intCast(m.chevron_extent), foregroundFor(r, .muted_fg), clip);
+            if (r.loading) {
+                // **아직 스캔 중이다.** 옛 셀 경로는 이 자리에 `~`를 찍었는데, 컴포넌트로 옮기며 그 표시가
+                // 통째로 사라져 있었다(적대적 검증에서 잡았다 — 화면에는 접힌 폴더와 구분이 안 됐다).
+                // 스피너 자산을 새로 들이지 않고, chevron 대신 accent 점을 찍어 "여기서 무언가 돌고 있다"만
+                // 말한다. 방향(접힘/펼침)은 스캔이 끝나면 chevron 이 다시 답한다.
+                const dot = @max(m.chevron_extent / 2, 2);
+                const radius: u16 = @intCast(@min(dot / 2, std.math.maxInt(u16)));
+                try self.quad(.{
+                    .x = content_x + @as(i32, @intCast((m.chevron_extent -| dot) / 2)),
+                    .y = y0 + @as(i32, @intCast((m.row_h -| dot) / 2)),
+                    .w = dot,
+                    .h = dot,
+                }, .accent_bar, .{ radius, radius, radius, radius }, clip);
+            } else {
+                const cp: u21 = if (r.expanded) chevron_expanded else chevron_collapsed;
+                try self.icon(.{ .x = content_x, .y = cy, .w = m.chevron_extent, .h = m.chevron_extent }, cp, @intCast(m.chevron_extent), foregroundFor(r, .list_secondary_fg), clip);
+            }
         }
 
         // ── 종류 아이콘 ─────────────────────────────────────────────────────────────────────
@@ -128,9 +143,10 @@ const Writer = struct {
             // 아이콘 종류색은 **선택·무시 행에서 죽는다.** 선택은 accent 위 대비색을 따라야 읽히고,
             // 무시된 행은 통째로 물러나야 한다 — 거기만 색이 살아 있으면 오히려 더 눈에 띈다.
             const role: tokens.ColorRole = if (r.selected or r.ignored)
-                foregroundFor(r, .surface_fg)
+                foregroundFor(r, .list_secondary_fg)
             else
-                file_tree_icon.colorRole(@enumFromInt(r.icon_kind)) orelse foregroundFor(r, .surface_fg);
+                // 종류색이 없는 아이콘(폴더 등)은 **라벨과 같은 위계**로 떨어진다.
+                file_tree_icon.colorRole(@enumFromInt(r.icon_kind)) orelse labelRole(r);
             try self.icon(.{ .x = icon_x, .y = icon_y, .w = m.icon_extent, .h = m.icon_extent }, cp, @intCast(m.icon_extent), role, clip);
         }
 
@@ -225,17 +241,25 @@ const Writer = struct {
 /// 흐린 색은 읽히지 않는다).
 fn labelRole(r: types.Row) tokens.ColorRole {
     if (r.selected) return .surface_fg;
-    if (r.ignored) return .muted_fg;
+    // 무시된 행은 **기본 행보다 더** 물러난다. 옛 셀 경로는 이 자리에 `muted_fg`를 썼는데 그 값이
+    // 기본색보다 밝아 신호가 거꾸로였다(`tokens.list_disabled_fg` 주석의 실측).
+    if (r.ignored) return .list_disabled_fg;
     return switch (r.kind) {
         .root, .recent_header => .surface_fg,
         .empty => .muted_fg,
-        else => if (r.active) .accent_bar else .surface_fg,
+        // **평범한 행은 muted 다.** 목록의 기본 상태가 최대 대비면 그 안에서 무엇이 강조인지가 사라지고,
+        // 같은 화면의 사이드바 보조줄(폴더·브랜치)보다 트리만 튄다(사용자 보고 2026-08-22 — 실측으로
+        // 사이드바 폴더 아이콘 rgb(158,160,163) 대 트리 rgb(255,255,255)였다). 옛 셀 경로도 행 기본색이
+        // `mutedForeground()` 였고 밝은 색은 root·활성 파일에만 썼다 — 그 위계를 role 로 옮긴 것이다.
+        else => if (r.active) .surface_fg else .list_secondary_fg,
     };
 }
 
+/// 아이콘·chevron 의 기본 전경. 라벨과 **같은 위계**를 쓴다 — 아이콘만 밝으면 글자보다 아이콘이 먼저
+/// 읽혀 목록을 훑는 눈이 종류 표시에 걸린다.
 fn foregroundFor(r: types.Row, default: tokens.ColorRole) tokens.ColorRole {
     if (r.selected) return .surface_fg;
-    if (r.ignored) return .muted_fg;
+    if (r.ignored) return .list_disabled_fg;
     return default;
 }
 
@@ -384,12 +408,24 @@ test "dirty·conflict 는 우측 슬롯의 둥근 점이고 라벨 폭을 뺀다
 }
 
 // git이 무시하는 행은 **라벨도 아이콘도** 흐려진다. 아이콘만 종류색이 살아 있으면 오히려 더 눈에 띈다.
-test "무시된 행은 라벨과 아이콘이 함께 흐려진다" {
+test "무시된 행은 라벨과 아이콘이 함께, 그리고 기본 행보다 더 흐려진다" {
     var h = Harness{};
     const rows = [_]types.Row{.{ .kind = .file, .label = "dist.js", .icon_kind = @intFromEnum(file_tree_icon.IconKind.js), .ignored = true }};
     const painted = try h.run(&rows);
+    var count: usize = 0;
     for (painted.ops) |op| if (op == .text) {
-        try testing.expectEqual(tokens.ColorRole.muted_fg, op.text.role);
+        try testing.expectEqual(tokens.ColorRole.list_disabled_fg, op.text.role);
+        count += 1;
+    };
+    try testing.expect(count >= 2); // 라벨 + 종류 아이콘 둘 다
+
+    // **기본 행과 같은 role 이면 이 테스트는 아무것도 판정하지 않는다.** 옛 경로가 정확히 그 상태였고
+    // (게다가 값은 더 밝았다), 그래서 "흐려진다"가 초록인 채로 거짓이었다.
+    var h2 = Harness{};
+    const plain = [_]types.Row{.{ .kind = .file, .label = "dist.js", .icon_kind = @intFromEnum(file_tree_icon.IconKind.js) }};
+    const p2 = try h2.run(&plain);
+    for (p2.ops) |op| if (op == .text and op.text.placement == .origin) {
+        try testing.expect(op.text.role != tokens.ColorRole.list_disabled_fg);
     };
 }
 
@@ -443,4 +479,42 @@ test "op 버퍼가 모자라면 조용히 덜 그리지 않고 실패한다" {
     const tk = testTokens();
     var tiny: [2]draw.Op = undefined;
     try testing.expectError(error.InsufficientOpBuffer, view(props, frame, .{}, &tk, .{ .ops = &tiny, .runs = &h.runs, .text_bytes = &h.text_bytes }));
+}
+
+// **이 컴포넌트의 텍스트는 전부 measured 경로로 간다.** platform 배선이 `buildIconTextDrawList`를 부르지
+// 않는 근거가 이것이다 — 그 함수는 `wide_icons == true` 인 op 만 통과시키므로, 여기서 하나라도 true 를
+// 실으면 그 글리프는 **아무 경로로도 안 그려진다**(셀 경로는 배선에서 빠졌고 measured 는 `shapesTextOp`
+// 이 걸러낸다). 조용히 사라지는 종류라 값으로 못 박는다.
+test "모든 텍스트 op 은 measured 경로 대상이다(wide_icons=false)" {
+    var h = Harness{};
+    const rows = [_]types.Row{
+        .{ .kind = .root, .label = "maru3", .expandable = true, .expanded = true, .icon_kind = @intFromEnum(file_tree_icon.IconKind.folder_open) },
+        .{ .kind = .file, .label = "build.zig", .depth = 1, .icon_kind = @intFromEnum(file_tree_icon.IconKind.code), .dirty = true },
+    };
+    const painted = try h.run(&rows);
+    var text_ops: usize = 0;
+    for (painted.ops) |op| if (op == .text) {
+        try testing.expect(!op.text.wide_icons);
+        text_ops += 1;
+    };
+    try testing.expect(text_ops >= 4); // 라벨 둘 + 아이콘 둘 이상
+}
+
+// 스캔 중인 폴더는 **접힌 폴더와 구분되어야 한다.** 이관 중 이 표시가 통째로 사라졌던 자리다.
+test "스캔 중인 행은 chevron 대신 표시를 낸다" {
+    var h = Harness{};
+    const loading = [_]types.Row{.{ .kind = .directory, .label = "docs", .icon_kind = 0, .expandable = true, .loading = true }};
+    const a = try h.run(&loading);
+    var chevrons: usize = 0;
+    for (a.ops) |op| if (op == .text and op.text.placement == .icon_in_rect) {
+        const cp = op.text.placement.icon_in_rect.icon_codepoint;
+        if (cp == chevron_collapsed or cp == chevron_expanded) chevrons += 1;
+    };
+    try testing.expectEqual(@as(usize, 0), chevrons);
+
+    var h2 = Harness{};
+    const idle = [_]types.Row{.{ .kind = .directory, .label = "docs", .icon_kind = 0, .expandable = true }};
+    const b = try h2.run(&idle);
+    // 그리고 두 상태가 **실제로 다르게** 그려진다 — 같으면 이 테스트가 아무것도 판정하지 않는다.
+    try testing.expect(countQuad(a.ops) != countQuad(b.ops));
 }

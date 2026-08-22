@@ -4,7 +4,9 @@
   "type": "module",
   "description": "maru-term terminal for lit",
   "license": "MIT",
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/index.js"
+  ],
   "files": [
     "dist",
     "README.md"

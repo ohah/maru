@@ -111,7 +111,13 @@ export class Terminal {
       );
     }
     // 폰트를 **먼저** 받는다 — 격자를 재기 전에 등록돼 있어야 셀 크기가 그 폰트 기준으로 잡힌다.
+    // **await 마다 `#disposed` 를 다시 본다.** open 은 폰트 fetch·Worker 생성·wasm
+    // instantiate 로 여러 번 양보하는데, 그 사이 dispose 가 오면 그때는 아직 `#dom`·
+    // `#backend` 가 null 이라 아무것도 못 푼다. 그대로 두면 이미 버려진 인스턴스에 Worker·
+    // 타이머·DOM 이 붙는다(React StrictMode 는 mount→unmount→mount 라 매번 샌다).
+    if (this.#disposed) return;
     if (this.#opts.loadFont === "jetendard") await loadBundledFont(this.#opts.fontUrl);
+    if (this.#disposed) return;
     if (el && mode === "full") {
       await this.#openWorker(el);
       this.#startAutoFit(el);
@@ -120,6 +126,10 @@ export class Terminal {
 
     if (!this.#backend) {
       const backend = await LocalBackend.create(this.#size, this.#opts.wasmUrl);
+      if (this.#disposed) {
+        backend.dispose();
+        return;
+      }
       backend.on((e) => this.#onBackendEvent(e));
       this.#backend = backend;
       this.#applyOptions();
@@ -142,6 +152,7 @@ export class Terminal {
    * 따르는 것이 기본이어야 한다 — 명시했으면 사용자가 정한 격자를 그대로 지킨다.
    */
   #startAutoFit(el: HTMLElement): void {
+    if (this.#opts.autoFit === false) return;
     if (this.#opts.cols !== undefined && this.#opts.rows !== undefined) return;
     if (typeof ResizeObserver === "undefined") {
       this.fit();
@@ -208,6 +219,13 @@ export class Terminal {
       this.#opts.loadFont === "jetendard" && !this.#opts.fontUrl,
     );
     backend.on((e) => this.#onBackendEvent(e));
+    if (this.#disposed) {
+      // 만드는 동안 버려졌다 — 붙이지 않고 바로 되돌린다.
+      backend.dispose();
+      dom.dispose();
+      this.#dom = null;
+      return;
+    }
     worker = backend;
     this.#backend = backend;
   }

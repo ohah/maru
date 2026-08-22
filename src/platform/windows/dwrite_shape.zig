@@ -292,9 +292,16 @@ extern "dwrite" fn DWriteCreateFactory(kind: UINT, iid: *const d3d11.GUID, out: 
 
 // ── 우리가 구현하는 COM: IDWriteTextRenderer ─────────────────────────────────────────────────
 
-/// 한 번의 `Draw` 가 모으는 것. 런은 최대 `max_runs` 개까지만 본다 — 크롬 한 줄이 그보다 잘게 쪼개지면
-/// 폰트 폴백이 이상한 것이라 잘라도 화면이 크게 안 다르다.
-const max_runs = 32;
+/// 스택에 미리 두는 런 수. **이것은 상한이 아니라 흔한 경우의 크기다** — 넘으면 힙으로 옮긴다.
+///
+/// 런은 폰트가 바뀔 때마다 하나다. 처음엔 32 로 두고 "그보다 잘게 쪼개지면 폴백이 이상한 것" 이라고
+/// 적어 뒀는데, **재 보니 틀렸다**: 라틴/한글이 교대하는 800 자 줄이 256 런에서도 넘쳤다(아래 테스트).
+/// 임의의 숫자에서 줄이 통째로 사라지게 두지 않는다.
+const stack_runs = 64;
+
+/// `GetDesignGlyphMetrics` 를 한 번에 부르는 글리프 수. 런 길이와 무관하게 같은 결과가 나오도록
+/// **조각으로 나눠** 부르기 위한 스크래치 크기다(스택 `[128]u16` + `[128]GlyphMetrics`).
+const metrics_chunk = 128;
 
 const RunInfo = struct {
     face: ?*IDWriteFontFace = null,
@@ -305,16 +312,54 @@ const RunInfo = struct {
     string_length: u32 = 0,
 };
 
+/// **글리프를 호출자 버퍼에 바로 무대를 편다.** 예전에는 `[512]` 고정 배열 셋을 들고 있었는데,
+/// 그 숫자가 어디서도 안 나온 값이라 **에디터 한 줄이 512 글리프를 넘으면 그 줄이 통째로 사라졌다**
+/// (실측: 1600 자 → `count=0 overflow=true`). 상한은 이제 **호출자가 준 버퍼 크기**다 — 그것이
+/// 정직한 계약이고, 호출자는 이미 자기가 몇 개를 받을 수 있는지 알고 있다.
+///
+/// `GlyphRecord` 의 `glyph_id`·`advance_px`·`codepoint` 가 예전 평면 배열 셋과 정확히 같은 것을
+/// 담으므로 별도 저장이 필요 없다. 나머지 필드(폰트 이름·x·폴백 여부 등)는 `fill` 이 런 단위로
+/// 채운다.
 const Collector = struct {
-    runs: [max_runs]RunInfo = @splat(.{}),
+    /// 흔한 경우의 자리. 넘으면 `heap` 으로 옮긴다.
+    inline_runs: [stack_runs]RunInfo = @splat(.{}),
+    /// 스택을 넘었을 때만 산다. `Draw` 가 끝나면 `deinit` 이 돌려준다.
+    heap: ?[]RunInfo = null,
+    allocator: std.mem.Allocator,
     run_count: usize = 0,
-    /// 글리프 평면 배열 — 런들이 이 안의 구간을 가리킨다.
-    glyph_ids: [512]u16 = @splat(0),
-    advances: [512]f32 = @splat(0),
-    /// 글리프마다의 코드포인트(런 서술자의 `clusterMap` 에서 역산).
-    codepoints: [512]u32 = @splat(0),
+    /// 무대. `Draw` 동안 `glyph_id`·`advance_px`·`codepoint` 만 쓰이고, 나머지는 `fill` 이 채운다.
+    stage: []GlyphRecord,
     glyph_total: usize = 0,
     overflow: bool = false,
+
+    fn deinit(self: *Collector) void {
+        if (self.heap) |h| self.allocator.free(h);
+        self.heap = null;
+    }
+
+    fn runs(self: *const Collector) []const RunInfo {
+        const all = if (self.heap) |h| h else &self.inline_runs;
+        return all[0..self.run_count];
+    }
+
+    /// 런 하나를 더 담는다. **자리가 없으면 두 배로 늘린다.** 실패하면 `overflow` 로 남긴다 —
+    /// 여기는 COM 콜백이라 오류를 위로 못 던지고, 조용히 자르는 것보다 시끄러운 편이 낫다.
+    fn push(self: *Collector, info: RunInfo) void {
+        const cap = if (self.heap) |h| h.len else self.inline_runs.len;
+        if (self.run_count == cap) {
+            const bigger = self.allocator.alloc(RunInfo, cap * 2) catch {
+                self.overflow = true;
+                return;
+            };
+            const old = if (self.heap) |h| h else self.inline_runs[0..];
+            @memcpy(bigger[0..self.run_count], old[0..self.run_count]);
+            if (self.heap) |h| self.allocator.free(h);
+            self.heap = bigger;
+        }
+        const dst = if (self.heap) |h| h else self.inline_runs[0..];
+        dst[self.run_count] = info;
+        self.run_count += 1;
+    }
 };
 
 const TextRenderer = extern struct {
@@ -377,12 +422,8 @@ const TextRenderer = extern struct {
         _: ?*anyopaque,
     ) callconv(abi.winapi) HRESULT {
         const c = self.collector;
-        if (c.run_count >= max_runs) {
-            c.overflow = true;
-            return 0;
-        }
         const n = run.glyph_count;
-        if (c.glyph_total + n > c.glyph_ids.len) {
+        if (c.glyph_total + n > c.stage.len) {
             c.overflow = true;
             return 0;
         }
@@ -390,9 +431,9 @@ const TextRenderer = extern struct {
         const ids = run.glyph_indices orelse return 0;
         var i: usize = 0;
         while (i < n) : (i += 1) {
-            c.glyph_ids[start + i] = ids[i];
-            c.advances[start + i] = if (run.glyph_advances) |a| a[i] else 0;
-            c.codepoints[start + i] = 0;
+            c.stage[start + i].glyph_id = ids[i];
+            c.stage[start + i].advance_px = if (run.glyph_advances) |a| a[i] else 0;
+            c.stage[start + i].codepoint = 0;
         }
         // **글리프 → 코드포인트**는 `clusterMap` 을 뒤집어 얻는다. 그 배열은 **문자 기준**이라
         // (`clusterMap[문자] = 글리프`) 같은 글리프를 가리키는 첫 문자를 그 글리프의 대표로 삼는다 —
@@ -404,21 +445,21 @@ const TextRenderer = extern struct {
                     while (t < d.string_length) : (t += 1) {
                         const g = cm[t];
                         if (g >= n) continue;
-                        if (c.codepoints[start + g] != 0) continue; // 첫 문자만
-                        c.codepoints[start + g] = decodeUtf16At(str, d.string_length, t);
+                        if (c.stage[start + g].codepoint != 0) continue; // 첫 문자만
+                        c.stage[start + g].codepoint = decodeUtf16At(str, d.string_length, t);
                     }
                 }
             }
         }
-        c.runs[c.run_count] = .{
+        c.push(.{
             .face = if (run.font_face) |f| @ptrCast(@alignCast(f)) else null,
             .baseline_x = baseline_x,
             .glyph_start = start,
             .glyph_count = n,
             .text_position = if (desc) |d| d.text_position else 0,
             .string_length = if (desc) |d| d.string_length else 0,
-        };
-        c.run_count += 1;
+        });
+        if (c.overflow) return 0; // 자리를 못 늘렸다 — 이 런은 안 실렸다
         c.glyph_total += n;
         return 0;
     }
@@ -603,7 +644,8 @@ pub const Shaper = struct {
         const layout = layout_raw orelse return error.LayoutFailed;
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(layout)));
 
-        var collector = Collector{};
+        var collector = Collector{ .stage = out, .allocator = self.allocator };
+        defer collector.deinit();
         var renderer = TextRenderer{ .vtable = &TextRenderer.instance, .collector = &collector };
         try check(layout.vtable.Draw(layout, null, &renderer, 0, 0), error.DrawFailed);
 
@@ -662,10 +704,11 @@ pub const Shaper = struct {
         _ = primary_bundled;
         var result = ShapeResult{ .overflow = c.overflow, .primary_found = true };
         if (c.run_count == 0) return result;
-        const primary_face = c.runs[0].face;
+        const all_runs = c.runs();
+        const primary_face = all_runs[0].face;
 
         var n: usize = 0;
-        for (c.runs[0..c.run_count]) |run| {
+        for (all_runs) |run| {
             const face = run.face orelse continue;
             var name_buf: [128]u8 = @splat(0);
             self.familyName(face, &name_buf);
@@ -675,9 +718,14 @@ pub const Shaper = struct {
             face.vtable.GetMetrics(face, &fm);
             const upem: f32 = @floatFromInt(if (fm.design_units_per_em == 0) 1000 else fm.design_units_per_em);
 
-            var metrics: [512]GlyphMetrics = undefined;
-            const has_metrics = run.glyph_count <= metrics.len and
-                !d3d11.failed(face.vtable.GetDesignGlyphMetrics(face, c.glyph_ids[run.glyph_start..].ptr, @intCast(run.glyph_count), &metrics, 0));
+            // **디자인 메트릭은 조각으로 가져온다.** 예전에는 `[512]` 스크래치를 잡고 런이 그보다
+            // 길면 통째로 포기해(`has_metrics = false`) 합자 overhang 이 조용히 0 이 됐다. 길이와
+            // 무관하게 같은 결과가 나오도록 조각마다 부른다.
+            var chunk_ids: [metrics_chunk]u16 = undefined;
+            var metrics: [metrics_chunk]GlyphMetrics = undefined;
+            var chunk_base: usize = 0; // 이번 조각이 덮는 런 내 시작 인덱스
+            var chunk_len: usize = 0;
+            var has_metrics = false;
 
             var x = run.baseline_x;
             var i: usize = 0;
@@ -687,23 +735,33 @@ pub const Shaper = struct {
                     result.count = n;
                     return result;
                 }
-                const adv = c.advances[run.glyph_start + i];
+                if (i >= chunk_base + chunk_len) {
+                    chunk_base = i;
+                    chunk_len = @min(metrics_chunk, run.glyph_count - i);
+                    // 무대에는 `u32` 로 실려 있지만 값은 DirectWrite 가 준 `u16` 글리프 인덱스 그대로다.
+                    for (0..chunk_len) |k| chunk_ids[k] = @intCast(c.stage[run.glyph_start + i + k].glyph_id);
+                    has_metrics = !d3d11.failed(face.vtable.GetDesignGlyphMetrics(face, &chunk_ids, @intCast(chunk_len), &metrics, 0));
+                }
+                // **무대와 결과가 같은 버퍼다.** `n <= run.glyph_start + i` 가 늘 성립하므로(런을
+                // 건너뛰면 n 만 뒤처진다) 앞으로 접는 in-place 압축이고, 덮어쓰기 전에 읽어 둔다.
+                const staged = c.stage[run.glyph_start + i];
+                const m = metrics[i - chunk_base];
                 // ink 가 자기 자리 **왼쪽으로** 넘치는 만큼(합자만 양수).
-                const overhang: f32 = if (has_metrics and metrics[i].left_side_bearing < 0)
-                    @as(f32, @floatFromInt(-metrics[i].left_side_bearing)) * req.size_px / upem
+                const overhang: f32 = if (has_metrics and m.left_side_bearing < 0)
+                    @as(f32, @floatFromInt(-m.left_side_bearing)) * req.size_px / upem
                 else
                     0;
                 out[n] = .{
-                    .glyph_id = c.glyph_ids[run.glyph_start + i],
-                    .codepoint = c.codepoints[run.glyph_start + i],
+                    .glyph_id = staged.glyph_id,
+                    .codepoint = staged.codepoint,
                     .fallback = run.face != primary_face,
                     .color = is_color,
                     .x_px = x,
-                    .advance_px = adv,
+                    .advance_px = staged.advance_px,
                     .left_overhang_px = overhang,
                     .font_name = name_buf,
                 };
-                x += adv;
+                x += staged.advance_px;
                 n += 1;
             }
         }
@@ -782,12 +840,14 @@ test "셰이퍼: 빈 family 는 터미널 티어가 아니라 번들 기본으�
     try std.testing.expectEqualStrings(maru.config.theme.bundled_fonts[0].family, got);
 }
 
-test "셰이퍼: 1024 유닛을 넘는 줄이 스택을 넘어 쓰지 않는다" {
+test "셰이퍼: 1024 유닛을 넘는 긴 줄이 한 글자도 안 잘린다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    // **메모리 안전이 판정 대상이다.** 예전엔 고정 `[1024]u16` 에 바로 변환했는데
-    // `utf8ToUtf16Le` 는 dest 를 **검사하지 않는다**(실증: 8칸 버퍼에 16자를 주면
-    // `index out of bounds: index 16, len 8` 로 패닉한다 — ReleaseFast 였다면 스택 밖 쓰기다).
-    // 에디터 한 줄이면 언제든 닿는 길이라 힙으로 넘어가게 고쳤다.
+    // 두 가지를 한 번에 본다.
+    // ⒜ **메모리 안전** — 예전엔 고정 `[1024]u16` 에 바로 변환했는데 `utf8ToUtf16Le` 는 dest 를
+    //    **검사하지 않는다**(실증: 8칸 버퍼에 16자 → `index out of bounds: index 16, len 8`).
+    //    ReleaseFast 였다면 스택 밖 쓰기다.
+    // ⒝ **수집기 상한** — 예전엔 `[512]` 고정 배열이라 이 줄이 통째로 사라졌다(`count=0`).
+    //    이제 상한은 호출자 버퍼 크기다.
     var sh = try Shaper.create(std.testing.allocator);
     defer sh.destroy();
 
@@ -799,39 +859,72 @@ test "셰이퍼: 1024 유닛을 넘는 줄이 스택을 넘어 쓰지 않는다"
     const out = try std.testing.allocator.alloc(GlyphRecord, n + 16);
     defer std.testing.allocator.free(out);
 
-    // 여기까지 오는 것 자체가 판정이다 — 고치기 전이면 이 줄에서 패닉했다.
     const res = try sh.shape(.{ .text = text, .family = "Consolas", .fallback_csv = "", .size_px = 16 }, out);
     std.debug.print("  [실측] 긴 줄: 입력 {d}자 -> 글리프 {d} overflow={s}", .{ n, res.count, if (res.overflow) "true" else "false" });
-
-    // **수집기 상한(512 글리프)에서 시끄럽게 선다.** 절단된 개수를 정상처럼 주지 않는다 —
-    // 상한을 늘리는 것은 이 슬라이스가 아니라 에디터 표면(W8.3)의 일이다(§2m.18).
-    try std.testing.expect(res.overflow);
-    try std.testing.expectError(error.ShapeFailed, shapeInto(
-        std.testing.allocator,
-        .{ .text = text, .family = "Consolas", .fallback_csv = "", .size_px = 16 },
-        @as([]seam.GlyphRecord, @ptrCast(out)),
-    ));
+    try std.testing.expect(!res.overflow);
+    try std.testing.expectEqual(@as(usize, n), res.count);
+    // x 가 끝까지 오른쪽으로 간다 — 뒤쪽 절반이 0 에 몰려 있으면 무대 인덱스가 어긋난 것이다.
+    try std.testing.expect(out[n - 1].x_px > out[n / 2].x_px);
+    try std.testing.expect(out[n / 2].x_px > out[0].x_px);
 }
 
-test "셰이퍼: 수집기 상한 바로 아래는 한 글자도 안 잃는다" {
+test "[실측] 셰이퍼: 런 상한이 실제로 닿는가 — 폰트가 계속 바뀌는 줄" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
-    // 위 테스트의 대조군. 상한 아래에서는 절단이 없다는 것을 함께 못 박아야 "512 에서 선다" 가
-    // 성질이 된다.
+    // 런은 폰트가 바뀔 때마다 하나다. 라틴/한글을 번갈아 두면 글자마다 런이 생긴다 —
+    // 스택 자리(`stack_runs`)를 넘겨 **힙으로 옮겨 가는지** 본다. 예전에는 여기가 고정 상한이라
+    // 이 줄이 통째로 사라졌다(실측: 800자 교대 -> 글리프 256 overflow=true, max_runs=256).
     var sh = try Shaper.create(std.testing.allocator);
     defer sh.destroy();
 
-    const n = 500;
-    const text = try std.testing.allocator.alloc(u8, n);
-    defer std.testing.allocator.free(text);
-    @memset(text, 'x');
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    for (0..400) |_| try buf.appendSlice(std.testing.allocator, "a\u{d55c}");
 
-    const out = try std.testing.allocator.alloc(GlyphRecord, n + 16);
+    const out = try std.testing.allocator.alloc(GlyphRecord, 4096);
     defer std.testing.allocator.free(out);
-
-    const res = try sh.shape(.{ .text = text, .family = "Consolas", .fallback_csv = "", .size_px = 16 }, out);
-    std.debug.print("  [실측] 상한 아래: 입력 {d}자 -> 글리프 {d} overflow={s}", .{ n, res.count, if (res.overflow) "true" else "false" });
+    const res = try sh.shape(.{
+        .text = buf.items,
+        .family = "Consolas",
+        .fallback_csv = "Malgun Gothic",
+        .size_px = 16,
+    }, out);
+    std.debug.print(
+        "  [실측] 런 spill: 800자(라틴/한글 교대) -> 글리프 {d} overflow={s} (stack_runs={d})",
+        .{ res.count, if (res.overflow) "true" else "false", stack_runs },
+    );
+    // 이제는 **넘치지 않는다** — 자리가 모자라면 늘린다.
     try std.testing.expect(!res.overflow);
-    try std.testing.expectEqual(@as(usize, n), res.count);
+    try std.testing.expectEqual(@as(usize, 800), res.count);
+    // 폰트가 실제로 교대했는지 — 안 그러면 런이 하나뿐이라 이 테스트가 아무것도 안 잰다.
+    try std.testing.expect(out[0].fallback != out[1].fallback);
+
+    // **내용까지 본다.** 무대와 결과가 같은 버퍼라(in-place 앞 접기) 인덱스가 하나만 어긋나도
+    // 개수는 맞는데 글자가 뒤섞인다 — 개수만 세면 안 잡힌다.
+    for (out[0..res.count], 0..) |g, i| {
+        const want: u32 = if (i % 2 == 0) 'a' else 0xD55C;
+        try std.testing.expectEqual(want, g.codepoint);
+        // 짝수 자리는 주 폰트, 홀수 자리는 폴백이어야 한다.
+        try std.testing.expectEqual(i % 2 == 1, g.fallback);
+        // x 는 단조 증가한다.
+        if (i > 0) try std.testing.expect(g.x_px > out[i - 1].x_px);
+    }
+}
+
+test "셰이퍼: 옛 512 상한 자리에서 더 이상 안 선다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // 대조군. 정확히 예전 상한 바로 위·아래를 재서 "512 라는 숫자가 사라졌다" 를 성질로 만든다.
+    var sh = try Shaper.create(std.testing.allocator);
+    defer sh.destroy();
+    for ([_]usize{ 511, 512, 513 }) |n| {
+        const text = try std.testing.allocator.alloc(u8, n);
+        defer std.testing.allocator.free(text);
+        @memset(text, 'x');
+        const out = try std.testing.allocator.alloc(GlyphRecord, n);
+        defer std.testing.allocator.free(out);
+        const res = try sh.shape(.{ .text = text, .family = "Consolas", .fallback_csv = "", .size_px = 16 }, out);
+        try std.testing.expect(!res.overflow);
+        try std.testing.expectEqual(n, res.count);
+    }
 }
 
 test "셰이퍼: 버퍼보다 긴 폰트 이름을 조용히 자르지 않는다" {

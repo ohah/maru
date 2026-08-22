@@ -17,6 +17,8 @@
 #   code=true|false     Zig/빌드/테스트 등 제품 코드 경로가 바뀌었는가
 #   runtime=true|false  그 코드 변경이 **런타임 동작을 바꿀 수 있는가**(주석만 고쳤으면 false)
 #   web=true|false      web/ 번들 경로가 바뀌었는가
+#   packages=true|false npm 라이브러리(packages/)를 검사해야 하는가. Zig 소스가 바뀌어도 켠다 —
+#                       커밋된 wasm 이 그 소스에서 나오기 때문이다.
 #   docs=true|false     문서 경로가 바뀌었는가(config 문서 드리프트 게이트를 켜는 축)
 #
 # `code`와 `runtime`을 가르는 이유: 분류기는 확장자로만 영역을 나누므로, 문서 경로를 가리키는
@@ -44,6 +46,7 @@ emit_all() {
 	echo "code=true"
 	echo "runtime=true"
 	echo "web=true"
+	echo "packages=true"
 	echo "docs=true"
 }
 
@@ -77,6 +80,7 @@ fi
 code=false
 runtime=false
 web=false
+packages=false
 docs=false
 
 # 이 파일의 diff가 **주석·빈 줄만** 건드렸는가(0=그렇다). 소스 확장자에만 쓴다.
@@ -96,7 +100,7 @@ comment_only_diff() {
 	'
 }
 
-# 분류 규칙은 fail-safe다. 아래 어느 패턴에도 걸리지 않는 파일은 code·web을 **둘 다** 켠다.
+# 분류 규칙은 fail-safe다. 아래 어느 패턴에도 걸리지 않는 파일은 code·web·packages를 **모두** 켠다.
 # 새 최상위 디렉터리가 생겼는데 목록을 갱신하지 않으면 CI가 더 도는 쪽으로 틀린다(안전한 방향).
 while IFS= read -r path; do
 	[ -n "$path" ] || continue
@@ -121,16 +125,25 @@ while IFS= read -r path; do
 		code=true
 		runtime=true
 		web=true
+		packages=true
 		;;
 	# web 번들(bun build/test/lint/license). Zig 게이트는 이 경로를 읽지 않는다.
 	web/*)
 		web=true
+		;;
+	# npm 라이브러리(@maru-term/*). `packages:check`가 읽는 유일한 경로다 — Zig 게이트도
+	# web:check도 여기를 안 읽는다. 다만 커밋된 wasm은 Zig 소스에서 나오므로, 그 동기는
+	# `check-wasm-sync`(code 축)가 지킨다.
+	packages/*)
+		packages=true
 		;;
 	# Zig 제품 코드·테스트·빌드. web:check는 이 경로를 읽지 않는다.
 	# 소스 확장자는 주석 전용 변경이면 `runtime`을 켜지 않는다(위 헤더 참조). 그 밖의 경로
 	# (terminfo·assets·build.zig.zon 등)는 주석 개념이 없거나 형식이 달라 항상 켠다.
 	src/* | tests/* | tools/* | terminfo/* | assets/* | build.zig | build.zig.zon)
 		code=true
+		# Zig 소스가 바뀌면 커밋된 wasm 도 다시 나와야 한다 — packages 축을 함께 켠다.
+		packages=true
 		case "$path" in
 		*.zig | *.swift | *.m | *.h)
 			comment_only_diff "$path" || runtime=true
@@ -144,16 +157,18 @@ while IFS= read -r path; do
 		code=true
 		runtime=true
 		web=true
+		packages=true
 		;;
 	esac
 done <<EOF
 $files
 EOF
 
-echo "changed-areas: code=$code runtime=$runtime web=$web docs=$docs" >&2
+echo "changed-areas: code=$code runtime=$runtime web=$web packages=$packages docs=$docs" >&2
 echo "$files" | sed 's/^/changed-areas:   /' >&2
 
 echo "code=$code"
 echo "runtime=$runtime"
 echo "web=$web"
+echo "packages=$packages"
 echo "docs=$docs"

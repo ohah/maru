@@ -93,3 +93,28 @@ test("update 는 콜백을 지우지 않는다 — 부분 병합이다", () => {
   expect(typeof merged.onData).toBe("function");
   expect(merged.theme).toEqual({ foreground: 1, background: 2 });
 });
+
+test("마운트 직후 destroy 해도 늦게 끝난 open 이 살아남지 않는다", async () => {
+  // React StrictMode 는 mount→unmount→mount 다. open 은 폰트·Worker·wasm 으로 여러 번
+  // 양보하는데, 그 사이 destroy 가 오면 그때는 아직 붙은 게 없어 아무것도 못 푼다.
+  const { mountTerminal } = await import("../core/src/wrapper");
+  const el = { getBoundingClientRect: () => ({ width: 400, height: 200 }) } as HTMLElement;
+  let readyCalled = false;
+  const m = mountTerminal(el, { options: { worker: false }, onReady: () => (readyCalled = true) });
+  m.destroy(); // open 이 끝나기 전에
+  await m.ready.catch(() => undefined);
+  expect(readyCalled).toBe(false); // 버려진 터미널이 onReady 로 나가면 안 된다
+});
+
+test("autoFit 은 Terminal 이 소유한다 — 래퍼가 옵저버를 따로 걸지 않는다", async () => {
+  const src = await Bun.file(new URL("../core/src/wrapper.ts", import.meta.url).pathname).text();
+  // 래퍼가 ResizeObserver 를 만들면 같은 요소에 둘이 붙어 fit() 이 두 번 돈다.
+  expect(src.includes("new ResizeObserver")).toBe(false);
+  expect(src.includes("autoFit: props.autoFit")).toBe(true);
+});
+
+test("@maru/lit 은 사이드이펙트를 선언한다", async () => {
+  // `customElements.define` 이 모듈 스코프에 있으므로 sideEffects:false 면 번들러가 지운다.
+  const pkg = await Bun.file(new URL("../lit/package.json", import.meta.url).pathname).json();
+  expect(pkg.sideEffects).toEqual(["./dist/index.js"]);
+});

@@ -25,8 +25,14 @@ export class CanvasRenderer implements Renderer {
   #palette: string[] = buildPalette();
   #themeKey = "";
   #glyphs: GlyphSource | null = null;
-  /** 커버리지를 색칠해 둔 캐시. 색이 바뀌면 버린다. */
-  #stamps = new Map<string, ImageBitmap | OffscreenCanvas | HTMLCanvasElement>();
+  /**
+   * 커버리지를 색칠해 둔 캐시. **키에 색이 들어가므로 글리프 수가 아니라 색 수만큼 늘어난다** —
+   * btop 처럼 컬럼마다 truecolour 그라데이션을 칠하는 앱에서는 프레임마다 새 항목이 생긴다.
+   * 상한을 두고 넘으면 오래된 것부터 버린다(Map 은 삽입 순서를 지킨다). 상한이 없으면 살아 있는
+   * OffscreenCanvas 가 수십만 개가 되고, Safari 는 캔버스 예산이 바닥나면 `getContext` 가 null 을
+   * 돌려줘 합성 글리프가 통째로 폰트 경로로 떨어진다 — 이 모듈이 막으려던 바로 그 상태다.
+   */
+  #stamps = new Map<string, OffscreenCanvas | HTMLCanvasElement | null>();
 
   attach(canvas: HTMLCanvasElement | OffscreenCanvas, metrics: Metrics): void {
     const ctx = canvas.getContext("2d") as Ctx | null;
@@ -62,10 +68,13 @@ export class CanvasRenderer implements Renderer {
     if (!src || !src.covers(cp)) return false;
     const key = `${cp}:${w}x${h}:${color}`;
     let stamp = this.#stamps.get(key);
+    if (stamp === null) return false; // 코어가 안 그리는 글자 — 폰트로 간다
     if (stamp === undefined) {
       const cov = src.coverage(cp, w, h);
       if (!cov) {
-        this.#stamps.set(key, undefined as never);
+        // **null 로 넣는다.** `undefined` 로 두면 `Map.get` 이 미스와 구분되지 않아, 코어가
+        // 안 그리는 코드포인트마다 매 프레임 wasm 을 다시 부른다.
+        this.#stamps.set(key, null);
         return false;
       }
       const buf =
@@ -88,6 +97,11 @@ export class CanvasRenderer implements Renderer {
       bctx.putImageData(img, 0, 0);
       stamp = buf as OffscreenCanvas;
       this.#stamps.set(key, stamp);
+      // 오래된 것부터 버린다. 4096 이면 한 화면의 고유 (글리프, 색) 쌍을 넉넉히 덮는다.
+      if (this.#stamps.size > 4096) {
+        const oldest = this.#stamps.keys().next().value;
+        if (oldest !== undefined) this.#stamps.delete(oldest);
+      }
     }
     if (!stamp) return false;
     ctx.drawImage(stamp as CanvasImageSource, x, y);

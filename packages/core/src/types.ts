@@ -51,6 +51,13 @@ export interface TerminalOptions {
    *
    * `"jetendard"` 는 본체와 같은 한글 폴백이다 — 한글이 라틴 정확히 2배 폭이라 격자가 안 벌어진다.
    */
+  /**
+   * 컨테이너 크기를 따라갈지. 기본은 따라간다(`cols`/`rows` 를 명시하면 그쪽이 이긴다).
+   *
+   * **이 판단은 `Terminal` 이 소유한다.** 래퍼가 따로 `ResizeObserver` 를 걸면 같은 요소에
+   * 둘이 붙어 매 프레임 `fit()` 이 두 번 돈다.
+   */
+  autoFit?: boolean;
   loadFont?: "jetendard" | false;
   /** 번들 폰트 위치를 직접 지정한다. */
   fontUrl?: string | URL;

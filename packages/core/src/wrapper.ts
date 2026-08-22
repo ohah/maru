@@ -30,7 +30,12 @@ export function mountTerminal(
   destroy(): void;
 } {
   let current = props;
-  const term = new Terminal({ ...props.options, theme: props.theme ?? props.options?.theme });
+  // `autoFit` 은 Terminal 이 소유한다 — 래퍼가 따로 옵저버를 걸면 한쪽만 꺼져 결국 무시된다.
+  const term = new Terminal({
+    ...props.options,
+    theme: props.theme ?? props.options?.theme,
+    autoFit: props.autoFit,
+  });
   const subs = [
     term.onData((b) => current.onData?.(b)),
     term.onTitle((t) => current.onTitle?.(t)),
@@ -38,15 +43,14 @@ export function mountTerminal(
     term.onResize((s) => current.onResize?.(s)),
   ];
 
-  let observer: ResizeObserver | null = null;
+  // **여기서 ResizeObserver 를 걸지 않는다.** `Terminal` 이 `autoFit` 을 보고 자기 옵저버를
+  // 관리한다(`#startAutoFit`). 래퍼가 하나 더 걸면 같은 요소에 둘이 붙어 매 리사이즈마다
+  // `fit()` 이 두 번 돌고, `autoFit: false` 는 한쪽만 꺼져 결국 무시된다.
+  let destroyed = false;
   const ready = term.open(el).then(() => {
-    if (current.autoFit !== false) {
-      term.fit();
-      if (typeof ResizeObserver !== "undefined") {
-        observer = new ResizeObserver(() => term.fit());
-        observer.observe(el);
-      }
-    }
+    // open 은 여러 번 await 한다 — 그 사이에 destroy 가 왔으면 여기서 멈춘다. 안 그러면
+    // 이미 버려진 터미널이 `onReady` 로 나가고, 그걸 받은 앱의 첫 `write()` 가 던진다.
+    if (destroyed) return;
     current.onReady?.(term);
   });
 
@@ -63,7 +67,7 @@ export function mountTerminal(
       if (next.options) term.setOptions(next.options);
     },
     destroy() {
-      observer?.disconnect();
+      destroyed = true;
       for (const s of subs) s.dispose();
       term.dispose();
     },

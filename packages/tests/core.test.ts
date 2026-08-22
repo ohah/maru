@@ -241,3 +241,30 @@ test("조합 폭이 바뀌어도 되돌리기가 정확하다", async () => {
   expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("xy");
   term.dispose();
 });
+
+test("거대한 붙여넣기가 인접 버퍼를 밟지 않는다", async () => {
+  // `Uint8Array(memory, ptr, len).set()` 은 선형 메모리가 넉넉하면 예외 없이 옆 버퍼를
+  // 덮어쓴다(wasm 은 ReleaseSmall 이라 트랩도 없다). 입력 버퍼보다 큰 붙여넣기를 넣고,
+  // 화면이 멀쩡한지 — 즉 스냅샷 버퍼가 밟히지 않았는지 본다.
+  const term = await makeTerminal();
+  term.write("sentinel");
+  await settle();
+  const before = rowText((await term.snapshot()).cells, (await term.snapshot()).size.cols, 0);
+  term.paste("x".repeat(3_000_000)); // 3 MB — 어떤 입력 버퍼보다 크다
+  await settle();
+  const snap = await term.snapshot();
+  // 붙여넣기는 호스트로 나갈 뿐 화면을 건드리지 않는다. 첫 줄이 그대로여야 한다.
+  expect(rowText(snap.cells, snap.size.cols, 0)).toBe(before);
+  expect(snap.size.cols).toBeGreaterThan(0); // 스냅샷 자체가 성립한다
+  term.dispose();
+});
+
+test("입력 버퍼보다 큰 write 도 온전히 들어간다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  // write 는 순수 바이트 스트림이라 나눠 넣어도 결과가 같아야 한다.
+  term.write("A".repeat(2_000_000) + "\r\nEND");
+  await settle();
+  const snap = await term.snapshot();
+  expect(rowText(snap.cells, snap.size.cols, snap.size.rows - 1).trimEnd()).toBe("END");
+  term.dispose();
+});

@@ -26,12 +26,20 @@ pub const panic = std.debug.simple_panic;
 
 const alloc = std.heap.wasm_allocator;
 
-var input_buf: [1 << 16]u8 = undefined;
+/// 호출자가 여기에 바이트를 쓰고 길이를 넘긴다. **1 MB** — 붙여넣기는 청킹할 수 없어서다
+/// (`vt_paste` 가 bracketed 마커를 한 번 감싸므로 나누면 마커가 여러 번 붙는다).
+var input_buf: [1 << 20]u8 = undefined;
 var cell_buf: [256 * 96 * 20]u8 = undefined;
 var glyph_buf: [64 * 64 * 4]u8 = undefined;
 
 export fn input_ptr() [*]u8 {
     return &input_buf;
+}
+/// 입력 버퍼 용량. **호출자가 이걸 넘겨서는 안 된다** — JS 쪽 `Uint8Array(memory, ptr, len)`
+/// 는 선형 메모리가 크면 예외 없이 인접 정적 버퍼(`cell_buf` 등)를 덮어쓴다. ReleaseSmall 이라
+/// 트랩도 없다. 아래 export 들도 방어적으로 클램프하지만, 넘치기 전에 여기서 막아야 한다.
+export fn input_cap() u32 {
+    return input_buf.len;
 }
 export fn cells_ptr() [*]u8 {
     return &cell_buf;
@@ -57,7 +65,7 @@ export fn vt_new(cols: u32, rows: u32) ?*anyopaque {
 
 export fn vt_write(h: *anyopaque, len: u32) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
-    core.write(input_buf[0..len]) catch return 1;
+    core.write(input_buf[0..@min(len, input_buf.len)]) catch return 1;
     return 0;
 }
 
@@ -140,7 +148,7 @@ export fn measure_cells(len: u32) u32 {
     const core = probe.?;
     core.ambiguous_wide = probe_ambiguous;
     core.write("\x1b[2J\x1b[H") catch return 0;
-    core.write(input_buf[0..len]) catch return 0;
+    core.write(input_buf[0..@min(len, input_buf.len)]) catch return 0;
     return core.renderSnapshot().cursor.col;
 }
 
@@ -365,7 +373,7 @@ export fn paste_ptr() [*]u8 {
 /// bracketed paste 래핑까지 코어가 한다(모드가 꺼져 있으면 원문 그대로).
 export fn vt_paste(h: *anyopaque, len: u32) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
-    const out = core.encodePaste(alloc, input_buf[0..len]) catch return 0;
+    const out = core.encodePaste(alloc, input_buf[0..@min(len, input_buf.len)]) catch return 0;
     defer alloc.free(out);
     const n = @min(out.len, paste_buf.len);
     @memcpy(paste_buf[0..n], out[0..n]);

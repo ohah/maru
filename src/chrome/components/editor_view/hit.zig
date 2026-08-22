@@ -74,9 +74,15 @@ pub fn bodyPoint(
     // 둘 다 `rows.len == 0` 이라 위에서 이미 걸린다. 그린 프레임의 셀 크기는 0 일 수 없다.
     const cell_h: i64 = @intCast(geom.cell_h_px);
 
-    // **캐스트 전에 묶는다.** `@intFromFloat` 는 표현 불가능한 값(NaN·무한대·i64 범위 밖)에서
-    // illegal behavior 이고 안전 빌드에서 죽는다 — 이 함수는 계약상 *"드래그가 본문을 벗어나는 것은
-    // 정상"* 인 자리라 극단값이 오는 것을 막을 수 없고, 어차피 아래에서 clamp 한다.
+    // **캐스트 전에 묶는다.** `@intFromFloat` 는 표현 불가능한 값(무한대·i64 범위 밖)에서 illegal
+    // behavior 이고 안전 빌드에서 죽는다 — 이 함수는 계약상 *"드래그가 본문을 벗어나는 것은 정상"* 인
+    // 자리라 극단값이 오는 것을 막을 수 없다.
+    //
+    // **NaN 가드는 죽은 코드가 아니라 "답을 정하는" 코드다.** Zig 의 `@min`/`@max` 는 NaN 을
+    // **흡수한다**(실측: `@max(-lim, @min(lim, nan)) = 1073741824`) — 그래서 가드가 없어도 안 죽는다.
+    // 대신 NaN 이 **화면 맨 오른쪽**으로 해석되어 행 끝을 답한다. 가드는 그것을 **0(= gutter → null)**
+    // 으로 정한다. 둘 다 안 죽지만 답이 다르므로, 아래 테스트가 그 답을 못 박는다 — 안 박아 두면
+    // 가드를 지운 뮤턴트가 살아남는다(실제로 살아남았다).
     const px_limit: f64 = 1 << 30;
     const clamped_x: f64 = if (std.math.isNan(x_px)) 0 else @max(-px_limit, @min(px_limit, x_px));
     const clamped_y: f64 = if (std.math.isNan(y_px)) 0 else @max(-px_limit, @min(px_limit, y_px));
@@ -153,11 +159,27 @@ test "극단 좌표에서 안 죽는다 — 드래그는 화면 밖으로 나간
     const row_lines = [_]usize{ 0, 1 };
     const lines = [_][]const u8{ "hello world", "second line" };
     const g = Geometry{ .body_x = 5, .body_y = 5, .content_left_px = 0, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
-    // NaN·무한대·거대값 — `@intFromFloat` 가 곧장 illegal behavior 인 자리다.
+    // 무한대·거대값 — `@intFromFloat` 가 곧장 illegal behavior 인 자리다.
     for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 1e300, -1e300, 1 << 40 }) |bad| {
         _ = bodyPoint(g, rows, &row_lines, &lines, bad, 10);
         _ = bodyPoint(g, rows, &row_lines, &lines, 10, bad);
     }
+}
+
+test "NaN 은 원점으로 본다 — 안 죽는 것만으로는 부족하다" {
+    // **답을 못 박는다.** `@min`/`@max` 가 NaN 을 흡수하므로 가드가 없어도 안 죽지만, 그때 NaN 은
+    // **화면 맨 오른쪽**이 되어 행 끝을 답한다. 어느 쪽이든 죽지 않으니 "안 죽는다" 판정으로는
+    // 가드를 지운 뮤턴트가 살아남는다 — 실제로 살아남았고, 이 테스트가 그 구멍을 메운다.
+    var buf: [4]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(2, &buf);
+    const row_lines = [_]usize{ 0, 1 };
+    const lines = [_][]const u8{ "hello world", "second line" };
+    // gutter 가 있는 기하 — NaN 이 0 으로 접히면 gutter 라 `null` 이고, 오른쪽 끝으로 접히면 값이 온다.
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 40, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
+    try testing.expect(bodyPoint(g, rows, &row_lines, &lines, std.math.nan(f64), 10) == null);
+    // 세로 NaN 도 같은 규칙 — 첫 행이다(맨 아래가 아니다).
+    const p = bodyPoint(g, rows, &row_lines, &lines, 45, std.math.nan(f64)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0), p.row);
 }
 
 test "행 표가 짧으면 안 받는다 — 두 축이 갈린 상태" {

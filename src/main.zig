@@ -3786,7 +3786,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             cw: u32,
             ch: u32,
             total_cols: u16,
-        ) !struct { checked: usize, matched: usize } {
+        ) !struct { checked: usize, matched: usize, wide: usize } {
             // 행 → 원본 논리 줄. **랩·접힘이 없으므로 순차다** — 둘 중 하나라도 켜면 이 표를
             // 렌더가 만들어 줘야 한다(macOS `editor_hit_lines` 가 그 자리다).
             const row_lines = try a.alloc(usize, visible);
@@ -3805,11 +3805,13 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             };
 
             var checked: usize = 0;
+            var n_wide: usize = 0;
             var matched: usize = 0;
             for (f.draw_list.cells) |c| {
                 if (c.row >= visible) continue;
                 if (c.col < layout.contentLeft()) continue; // gutter 는 이 판정의 것이 아니다
                 if (c.codepoint == ' ' or c.codepoint == 0) continue;
+                if (c.codepoint >= 128) n_wide += 1;
                 // **셀의 왼쪽 안쪽을 찍는다.** `byteAtPoint` 는 *"어느 글자 위인가"* 가 아니라
                 // *"caret 이 어디로 가는가"* 를 답한다 — 왼쪽 절반이면 그 글자 **앞**, 오른쪽
                 // 절반이면 **뒤**다. 한가운데(`lo + cw/2`)는 정확히 그 경계라 다음 글자로 넘어간다.
@@ -3827,7 +3829,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 const cp = std.unicode.utf8Decode(text[p.byte_in_line..][0..len]) catch continue;
                 if (cp == c.codepoint) matched += 1;
             }
-            return .{ .checked = checked, .matched = matched };
+            return .{ .checked = checked, .matched = matched, .wide = n_wide };
         }
     }.run;
 
@@ -3847,6 +3849,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     var script_ok: usize = 0;
     var click_checked: usize = 0;
     var click_matched: usize = 0;
+    // **2 칸 글자를 몇 개나 쟀나.** 안 세면 한글이 조용히 빠져도 분모만 보고는 모른다 —
+    // 적대적 검증에서 실제로 물어본 것이라 보고에 남긴다(5,454 중 1,613 이 2 칸이다).
+    var click_wide: usize = 0;
     // 본문이 쓰는 열 수 — 히트테스트 layout 이 gutter 폭을 그 값에서 낸다. `buildSide` 가 안에서
     // 쓰는 것과 **같은 함수**로 구한다(다른 값을 쓰면 gutter 경계가 그림과 갈린다).
     const side_cols = editor_view.diff_frame.sideMetrics(inner.w, inner.h, @intCast(cell_w), @intCast(cell_h)).total_cols;
@@ -3898,6 +3903,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             );
             click_checked += ck.checked;
             click_matched += ck.matched;
+            click_wide += ck.wide;
             // **상한은 내용으로 잰다.** `first_line == maxFirstRow(..)` 로 재면 `clampFirstRow` 를
             // `maxFirstRow` 로 확인하는 셈이라 동어반복이다 — 둘 다 같은 모듈의 같은 계산에서 온다.
             // 대신 "끝까지 내리면 **마지막 줄이 화면에 있다**" 를 본다: 그리는 쪽과 세는 쪽이
@@ -4003,7 +4009,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ built.written.ops, built.ops_text, built.ops_fill, built.ops_dropped });
     try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ built.written.visual_rows, built.written.total_visual_rows });
     // **분모가 `script_judged` 다.** `script_steps` 로 내면 "잴 것이 없었다" 가 "틀렸다" 로 보인다.
-    try stdout.print("click_glyphs={d}/{d}\n", .{ click_matched, click_checked });
+    try stdout.print("click_glyphs={d}/{d} wide={d}\n", .{ click_matched, click_checked, click_wide });
     try stdout.print("scroll_script={d}/{d} steps={d} clamp_top={} clamp_bottom={}\n", .{ script_ok, script_judged, script_steps, clamp_top_ok, clamp_bottom_ok });
     try stdout.print("first_line={d} wheel_events={d} click_events={d} last_click={?}\n", .{ first_line, wheel_events, click_events, if (last_click) |lc| lc.line else null });
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });

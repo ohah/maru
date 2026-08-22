@@ -300,6 +300,17 @@ measured 경로도 `font.family`(+`font.fallback` cascade)를 쓴다. 근거는 
    계약이 깨진다).
 4. weight는 지금처럼 symbolic bold trait로 얻는다.
 
+**Windows(DirectWrite)도 같은 규칙이다** — `platform/windows/dwrite_shape.zig` 가 위 1~3 을 그대로
+따른다. 플랫폼마다 다른 것은 두 가지다.
+
+- **빈 family**: macOS 는 시스템 UI face(`kCTFontUIFontSystem`)로 가고 Windows 는 **번들 기본**
+  (`config.theme.bundled_fonts[0].family`)으로 간다(사용자 결정 2026-08-22). Windows 에서 시스템 UI
+  폰트로 가면 Chrome Lab 캡처가 설치 환경마다 흔들리기 때문이다. 이 경로는 어느 쪽이든 resolved
+  appearance 가 없는 호출자(Lab·단위 테스트)만 탄다 — **제품은 위 계약대로 `font.family` 를 넘긴다.**
+- **cascade**: CoreText 는 `kCTFontCascadeListAttribute` 가 자동인데 DirectWrite 는
+  `IDWriteFontFallbackBuilder` 로 **우리가 목록을 만든다**(docs/windows-platform.md §2m.13).
+  같은 `font.fallback` CSV 를 소비하므로 결과는 같다.
+
 **한계 (v1 범위 밖, 의도적)**
 
 - `font.family-bold`/`family-italic`은 measured chrome에 전달하지 않는다. 터미널은 bold가 1단계인데

@@ -544,7 +544,19 @@ pub const Shaper = struct {
         // ── 주 폰트 이름과 컬렉션 ────────────────────────────────────────────────────────────
         var fam_buf: [dwrite_font.max_faces][]const u8 = undefined;
         const primary = blk: {
-            const cands = dwrite_font.fontCandidates(req.family, fam_buf[0 .. dwrite_font.windows_font_tier.len + 1]);
+            // **여기는 크롬 텍스트다 — 빈 family 를 터미널 티어로 떨어뜨리지 않는다.**
+            //
+            // 계약은 이미 정해져 있다: docs/font-strategy.md "Chrome 텍스트 face" 가 measured 경로도
+            // `font.family`(+`font.fallback` cascade)를 쓴다고 못 박았다(사용자 결정 2026-08-08) —
+            // 도크와 사이드바가 한 화면에 같이 보이는데 face 가 갈리면 사용자가 고른 폰트를 앱이
+            // 절반만 따르는 셈이 되기 때문이다. 그러니 제품 경로에서는 이 값이 비지 않는다.
+            //
+            // 비는 것은 Chrome Lab·단위 테스트처럼 **resolved appearance 가 없는 호출자**뿐이다.
+            // macOS 는 그때 시스템 UI face 로 가고, Windows 는 **번들 기본**으로 간다
+            // (사용자 결정 2026-08-22). 시스템 폰트로 가면 설치 환경마다 캡처가 흔들린다.
+            const trimmed = std.mem.trim(u8, req.family, " \t");
+            if (trimmed.len == 0) break :blk maru.config.theme.bundled_fonts[0].family;
+            const cands = dwrite_font.fontCandidates(trimmed, fam_buf[0 .. dwrite_font.windows_font_tier.len + 1]);
             break :blk if (cands.len > 0) cands[0] else "Consolas";
         };
         var primary_w: [128]u16 = undefined;
@@ -751,6 +763,23 @@ fn faceHasTable(face: *IDWriteFontFace, tag: *const [4]u8) bool {
     if (d3d11.failed(face.vtable.TryGetFontTable(face, t, &data, &size, &ctx, &exists))) return false;
     if (ctx) |p| face.vtable.ReleaseFontTable(face, p);
     return exists != 0;
+}
+
+test "셰이퍼: 빈 family 는 터미널 티어가 아니라 번들 기본으로 간다" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // 크롬 텍스트는 계약상 `font.family` 를 쓴다(docs/font-strategy.md "Chrome 텍스트 face").
+    // 빈 값은 Lab·테스트 호출자뿐이고, 그때 **터미널 티어(Cascadia Mono)로 떨어지면 안 된다** —
+    // 그것은 터미널 폰트지 크롬 폰트가 아니다.
+    var sh = try Shaper.create(std.testing.allocator);
+    defer sh.destroy();
+
+    var out: [32]GlyphRecord = undefined;
+    const res = try sh.shape(.{ .text = "Agent", .family = "", .fallback_csv = "", .size_px = 16 }, &out);
+    try std.testing.expect(res.count > 0);
+    const got = std.mem.sliceTo(&out[0].font_name, 0);
+    std.debug.print("  [실측] 빈 family -> \"{s}\"", .{got});
+    // 값을 손으로 안 적는다 — config 기본값이 바뀌면 함께 움직여야 한다.
+    try std.testing.expectEqualStrings(maru.config.theme.bundled_fonts[0].family, got);
 }
 
 test "셰이퍼: 1024 유닛을 넘는 줄이 스택을 넘어 쓰지 않는다" {

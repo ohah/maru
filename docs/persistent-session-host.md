@@ -5713,9 +5713,20 @@ HostPool publication에 실패한 live candidate도 endpoint unavailable로 남�
 
 `Recovered Sessions`는 `chrome.sidebar.Row`의 별도 typed `system_header | recovered_session` variant다. 사용자 이름 기반
 `group_header`나 tab index를 위장하지 않으며 rename/drag/drop/close/checkpoint/검색 결과의 일반 workspace action 대상이
-아니다. header와 각 row는 primary에만 나타나고, row label은 projection의 8자리 lower-hex suffix만 그린다. CR6a-2의
-click/Enter는 무동작이며 host attach/spawn/terminate와 Workspace mutation은 0이다. 실제 one-item adopt와 row action은
-CR6b가 fresh authority revalidation과 함께 연다.
+아니다. header와 각 row는 primary에만 나타나고, row label은 projection의 8자리 lower-hex suffix만 그린다. 일반
+workspace row의 rename/drag/drop/close 경로는 recovery row를 소비하지 않으며, recovery row의 click/Enter만 아래 CR6b
+one-item adopt와 fresh authority revalidation을 시작한다.
+
+**CR6b 구현 계약:** primary의 typed recovery row만 실제 click 또는 검색 결과 Enter로 one-item action을 시작한다.
+deferred Window는 아직 terminal surface가 없어도 이 exact row hit만 허용하며 그 외 pointer/input/drag/rename 경로는 계속
+닫혀 있다. action은 projection/workspace/HostPool generation과 ended conflict의 app-global Window registry에서 유일한
+canonical manifest ordinal+exact tombstone slot을 먼저 검증한 뒤, 하나의 5초 absolute deadline 아래 같은 adapter의
+fresh `host.info`와 `runtime.get`을 차례로
+왕복한다. orphan 성공은 새 비고정 tab 하나를, ended conflict 성공은 예약된 pane slot의 tombstone을 제자리 live Term으로
+교체하고 그때만 projection row를 one-shot consume한다. stale projection, ordinal/Window graph drift, 사라진 runtime,
+malformed response, deadline/OOM/attach 실패는 기존 tab/pane/tombstone과 projection row/generation을 보존하며 host runtime
+terminate·새 runtime spawn·checkpoint mutation은 0이다. 성공 publication 뒤에만 deferred surface/frame loop를 시작하고,
+live Term은 일반 persistent close ownership으로 전환한다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
@@ -5727,7 +5738,8 @@ fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 �
 Quit/relaunch E2E는 별도 제품 gate로 남는다. 9의 manifest 전역 중복 검증은
 R2a core/ABI/source-order fixture까지 구현됐다. 8의 R2b는 core/wire와 secure host enumeration, canonical
 connection과 분리된 ephemeral inventory collector, launch-before-terminal 제품 coordinator 및 primary의 inert
-`Recovered Sessions` projection까지 구현됐고, row의 fresh-revalidate adopt는 CR6b로 남아 있다. canonical GUI connection을 유지한 채 별도 ephemeral inventory를 동시에
+`Recovered Sessions` projection과 CR6b의 explicit click/검색 Enter one-item adopt, fresh bounded revalidation 및
+orphan-tab/ended-slot publication까지 구현됐다. canonical GUI connection을 유지한 채 별도 ephemeral inventory를 동시에
 처리하는 제품 scheduling/process fixture는 T0b2b에서 구현됐다. 실제 제품 process에서 기존 checkpoint file 무변경을
 관측하는 E2E는 남아 있다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
@@ -5741,13 +5753,13 @@ write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지�
 host/host_id/runtime 불일치는 **분류에 따라 갈린다**(아래 표). 영구 부재는 그 Term만 per-Term ended placeholder로 두고
 창 apply를 성공시키며, 일시 실패는 종전처럼 해당 Window apply 실패로 fail-close한다(additional Window는 teardown,
 primary는 notice가 보이는 명시적 default-shell fallback + `restore incomplete`; 종료 시 `.bak` 1회 보존 후 현재 모델 저장).
-orphan recovery entry(`Recovered Sessions`)의 primary-only 표시는 CR6a-2에서 구현됐고, 실제 row 채택은 CR6b에서 연다.
+orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row 채택은 각각 CR6a-2/CR6b 계약을 따른다.
 
 **실패 원인 분류(부분 구현).** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
 그 판정에 쓸 구분을 attach 경로가 먼저 만든다. 오분류 비용이 비대칭이기 때문이다 — 영구를 일시로 보면 창 복원이 한 번
 실패할 뿐이지만, **일시를 영구로 보면 살아 있는 runtime이 placeholder로 굳어** 복구 권위를 잃는다. CR6a-2의
-`Recovered Sessions`는 해당 runtime을 다시 찾는 inert UI까지만 제공하고, CR6b 전에는 아직 채택할 수 없다. 그래서
-승격은 증거가 있는 것만 한다.
+`Recovered Sessions` projection 자체는 채택 권위가 아니며, CR6b action이 fresh host/runtime evidence를 재검증한
+경우에만 승격한다.
 
 | 관측 | 분류 | 근거 |
 | --- | --- | --- |
@@ -5773,8 +5785,8 @@ checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되�
 **새 live→ended 판정은 checkpoint 신호를 한 번 세운다(code-review max 수정).** 처음엔 "래치를 손대지 않는다"였다 — 일시 실패는 묘비가 되지
 않으니 `Unreachable` 묘비라는 범주가 구조적으로 없고, 파일 패널·dock·explorer의 drop만 래치를 세우면 충분하다는 논리였다.
 그 논리의 구멍은 **분류가 틀렸을 때**다: 접속을 한 번만 영구로 오분류해도 그 Term은 묘비가 된다. durable wire가
-handle을 보존하고 CR6a-2의 inert `Recovered Sessions`가 runtime을 다시 보여 주더라도, CR6b 전에는 UI에서 채택해
-오분류를 되돌릴 수 없으므로 첫 전이 때 마지막 완전본 backup 신호가 필요하다. 그래서 `applyWorkspaceWindow`는 이번
+handle을 보존하고 `Recovered Sessions`가 runtime을 다시 보여 주더라도 fresh evidence를 통과한 명시적 사용자 action
+전에는 오분류를 되돌릴 수 없으므로 첫 전이 때 마지막 완전본 backup 신호가 필요하다. 그래서 `applyWorkspaceWindow`는 이번
 창에서 새로 live→ended가 된 수를 `dropped`에 합산한다.
 이미 `runtime-state="ended"`로 들어온 후속 relaunch는 완전히 표현된 상태라 dropped 0이다.
 

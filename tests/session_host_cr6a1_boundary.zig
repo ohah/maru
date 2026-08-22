@@ -29,15 +29,17 @@ test "CR6a-1 경계는 inert projection owner와 caller zero를 고정한다" {
     try std.testing.expectEqual(@as(usize, 1), count(app, "pub fn replaceRecoveredSessionsProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(app, "pub fn recoveredSessionsRows("));
     try std.testing.expectEqual(@as(usize, 1), count(app, "test \"CR6a-1 AppSession은 recovered projection을"));
-    try std.testing.expectEqual(@as(usize, 5), countIdentifier(app, "replaceRecoveredSessionsProjection"));
-    // CR6a-2 actual launch fixture가 primary projection과 runtime identity를 두 번 직접 관측한다.
-    try std.testing.expectEqual(@as(usize, 8), countIdentifier(app, "recoveredSessionsRows"));
+    // CR6b ended-conflict actual fixture가 canonical Workspace를 다시 투영하는 caller 하나를 더한다.
+    try std.testing.expectEqual(@as(usize, 6), countIdentifier(app, "replaceRecoveredSessionsProjection"));
+    // CR6a-2 actual launch와 CR6b success/failure 행이 primary projection identity를 직접 관측한다.
+    try std.testing.expectEqual(@as(usize, 10), countIdentifier(app, "recoveredSessionsRows"));
     try std.testing.expectEqual(@as(usize, 0), try countProductIdentifiersExcept(
         allocator,
         "replaceRecoveredSessionsProjection",
         &.{"platform/macos/app_session.zig"},
     ));
-    try std.testing.expectEqual(@as(usize, 1), try countProductIdentifiersExcept(
+    // CR6b keyboard Enter가 sidebar module에서 app-global rows를 read-only 조회한다.
+    try std.testing.expectEqual(@as(usize, 2), try countProductIdentifiersExcept(
         allocator,
         "recoveredSessionsRows",
         &.{"platform/macos/app_session.zig"},

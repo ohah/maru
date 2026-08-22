@@ -431,6 +431,17 @@ Maru 작업에서 사용하는 기본 명령이다.
   ephemeral inventory→transactional projection→sidebar→restore/default-surface 순서와 secondary/quick 중복 0,
   rename/drag/drop/close/adopt/spawn/terminate/checkpoint 0을 고정한다. 이 gate는 row 표시까지이며 실제 click/Enter
   adopt와 fresh authority revalidation은 CR6b 전까지 완료로 세지 않는다.
+- 영속 세션 호스트 CR6b explicit one-item adopt gate: `zig build test-session-host-cr6b`. CR6a-2를 상속하며
+  Debug·ReleaseFast에서 projection generation·Workspace generation·HostPool adapter generation을 먼저 대조하고,
+  fresh `host.info`의 host/upgrade/authority/lifecycle과 fresh `runtime.get`의 exact runtime identity를 검증하는 닫힌
+  preflight 3행 및 source boundary를 실행한다. 제품 행은 실제 row click·검색 Enter, 하나의 5초 absolute deadline,
+  orphan 새 비고정 탭·primary 검색 action에서 다른 실제 Window의 ended tombstone global manifest ordinal 제자리 교체와
+  deferred surface 활성화를 검증한다. stale projection,
+  stale manifest slot, fresh missing runtime, attach construction OOM과 peer-alive host stall은 topology/projection mutation 0과
+  localized notice를 확인하고, OOM은 기존 host runtime 생존을 재조회하며 stall은 5초 deadline을 phase별로 재생성하지 않고
+  bounded 종료한다.
+  실제 daemon/manifest/HostPool을 쓰는 success·stale/missing 제품 행만 빠르게 재실행하려면
+  `zig build test-session-host-cr6b-product`를 사용한다.
 - CR0b runtime 수명 7개는 clean joined/detached와 writer failure 뒤 degraded joined 결과를 구분한다. stopping 이후 clock 실패와 실제 completion poll 오류는 backing을 해제하지 않는 degraded detached로 수렴하며 future AppHost ABI가 오류 provenance를 잃지 않게 한다.
 - CR0b daemon bootstrap prerequisite 1개는 실제 `runSessionHost`와 같은 `bootstrapIncidentRuntime` 제품 leaf로 daemon PID·process/service nonce·runtime/service generation·초기 sequence 0과 unpublished joined 정산을 검증한다. 별도 pointer-free fixed-64 bootstrap transcript 계약 1개가 closed GUI/daemon role, zero reserved와 두 child 비교의 scalar 경계를 고정한다. bootstrap 4는 서로 다른 canonical artifact인 전용 GUI child(actual 4: named 1+root/import sentinel 3)와 daemon child(actual 1)를 fresh exec하고, expected role·각 64-byte transcript·EOF·exit 0을 2초 absolute watchdog으로 회수해 서로 다른 PID/process nonce/service nonce/app-instance nonce와 양쪽 sequence 0을 검증한다.
 - 영속 세션 호스트 2c3d C3-3b2a process-seal prerequisite 집중 gate: `zig build test-session-host-2c3d-c3-3b2a` (neutral process-identity PID SSOT와 process-seal lifecycle, ready-last bootstrap, capability key source cutover, entropy/zero/terminal publication, Linux 실제 PID/fork 거부와 source boundary를 Debug·ReleaseFast로 실행하고 C3-3b1까지의 capability/reader/fork 회귀를 상속한다.)

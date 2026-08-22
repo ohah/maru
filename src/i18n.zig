@@ -185,6 +185,7 @@ const Table = struct {
     // ── 분기·보간형 notice (I3a 슬라이스 4) ──
     app_host_connect_failed: [:0]const u8,
     app_ended_placeholder: [:0]const u8,
+    app_recovered_session_failed: [:0]const u8,
     app_shell_died_startup: [:0]const u8,
     app_save_external_conflict: [:0]const u8,
     app_save_too_large: [:0]const u8,
@@ -831,6 +832,7 @@ const en: Table = .{
 
     .app_host_connect_failed = "Could not connect to the persistent session host ({0}). Terminals in this session will not persist (they close with the app).",
     .app_ended_placeholder = "{0} previous sessions had already ended, so those slots are empty — the layout was restored.",
+    .app_recovered_session_failed = "Could not recover this session. Refresh the session list and try again.",
     .app_shell_died_startup = "The shell exited abnormally right after start ({0}). Press Enter to retry, or check shell.command and shell.args in Settings (⌘,).",
     .app_save_external_conflict = "The file changed outside, so it cannot be saved. Reload the file and save again.",
     .app_save_too_large = "The file is too large to save.",
@@ -1369,6 +1371,7 @@ const ko: Table = .{
 
     .app_host_connect_failed = "영속 세션 host에 연결하지 못했습니다({0}). 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).",
     .app_ended_placeholder = "이전 세션 {0}개가 이미 종료돼 해당 자리는 비어 있습니다 — 레이아웃은 복원했습니다.",
+    .app_recovered_session_failed = "이 세션을 복구하지 못했습니다. 세션 목록을 새로 고친 뒤 다시 시도하세요.",
     .app_shell_died_startup = "셸이 시작 직후 비정상 종료됐습니다 ({0}). ⏎ 다시 시도 · ⌘, 설정에서 shell.command·shell.args 확인.",
     .app_save_external_conflict = "파일이 외부에서 바뀌어 저장할 수 없습니다. 파일을 다시 불러온 뒤 저장하세요.",
     .app_save_too_large = "파일이 너무 커서 저장할 수 없습니다.",

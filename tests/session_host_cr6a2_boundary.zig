@@ -90,7 +90,7 @@ test "CR6a-2 경계는 launch-before-terminal 순서와 inert system rows를 고
     try std.testing.expect(std.mem.indexOf(u8, persistent, "CR6a-2 구현 계약") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "CR6a-2는") != null);
 
-    const gate = between(build, "const session_host_cr6a2_step =", "const b3_1_boundary_tests =") orelse return error.TestUnexpectedResult;
+    const gate = between(build, "const session_host_cr6a2_step =", "const session_host_cr6b_step =") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr6a2\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr6a2_step.dependOn(session_host_cr6a1_step);"));
     try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests=6"));

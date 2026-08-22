@@ -5805,6 +5805,92 @@ pub fn build(b: *std.Build) void {
         session_host_cr6a2_step.dependOn(&run_cr6a2_boundary_tests.step);
         boundary_step.dependOn(&run_cr6a2_boundary_tests.step);
     }
+    const session_host_cr6b_step = b.step(
+        "test-session-host-cr6b",
+        "CR6b explicit recovered-session adopt gates",
+    );
+    const session_host_cr6b_product_step = b.step(
+        "test-session-host-cr6b-product",
+        "CR6b recovered-session real-host product rows only",
+    );
+    session_host_cr6b_step.dependOn(session_host_cr6a2_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6b_optimize| {
+        const cr6b_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/recovered_session_adopt.zig"),
+                .target = target,
+                .optimize = cr6b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6b recovered adopt"},
+        });
+        const run_cr6b_contract_tests = b.addRunArtifact(cr6b_contract_tests);
+        run_cr6b_contract_tests.addArg("--maru-expect-tests=3");
+        run_cr6b_contract_tests.setCwd(b.path("."));
+        session_host_cr6b_step.dependOn(&run_cr6b_contract_tests.step);
+
+        const cr6b_projection_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/recovered_sessions_projection.zig"),
+                .target = target,
+                .optimize = cr6b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6b recovered projection exact consume은"},
+        });
+        const run_cr6b_projection_tests = b.addRunArtifact(cr6b_projection_tests);
+        run_cr6b_projection_tests.addArg("--maru-expect-tests=1");
+        run_cr6b_projection_tests.setCwd(b.path("."));
+        session_host_cr6b_step.dependOn(&run_cr6b_projection_tests.step);
+
+        const cr6b_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = cr6b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "CR6b orphan row action은",
+                "CR6b ended conflict row action은",
+                "CR6b stale projection row action은",
+                "CR6b stale manifest slot row action은",
+                "CR6b missing runtime row action은",
+                "CR6b stalled host row action은",
+                "CR6b attach construction OOM은",
+            },
+        });
+        cr6b_product_tests.root_module.linkFramework("AppKit", .{});
+        cr6b_product_tests.root_module.linkFramework("Metal", .{});
+        cr6b_product_tests.root_module.linkFramework("MetalKit", .{});
+        cr6b_product_tests.root_module.linkFramework("QuartzCore", .{});
+        cr6b_product_tests.root_module.linkFramework("CoreText", .{});
+        cr6b_product_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr6b_product_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_cr6b_product_tests = b.addRunArtifact(cr6b_product_tests);
+        run_cr6b_product_tests.addArg("--maru-expect-tests=10");
+        run_cr6b_product_tests.setCwd(b.path("."));
+        session_host_cr6b_step.dependOn(&run_cr6b_product_tests.step);
+        session_host_cr6b_product_step.dependOn(&run_cr6b_product_tests.step);
+
+        const cr6b_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr6b_boundary.zig"),
+                .target = target,
+                .optimize = cr6b_optimize,
+            }),
+            .filters = &.{"CR6b 경계는"},
+        });
+        const run_cr6b_boundary_tests = b.addRunArtifact(cr6b_boundary_tests);
+        run_cr6b_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr6b_boundary_tests.setCwd(b.path("."));
+        session_host_cr6b_step.dependOn(&run_cr6b_boundary_tests.step);
+        boundary_step.dependOn(&run_cr6b_boundary_tests.step);
+    }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),

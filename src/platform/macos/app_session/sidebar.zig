@@ -488,6 +488,18 @@ pub fn sidebarSearchActivateFirst(self: *AppSession) void {
     if (tab_ops.firstMatchingTab(self)) |idx| {
         _ = tab_ops.switchTab(self, idx);
         closeSidebarSearch(self);
+        return;
+    }
+    const query = self.sidebar_search_input.query.items;
+    if (query.len == 0) return;
+    for (self.recoveredSessionsRows(self.is_primary_window), 0..) |row, index| {
+        if (std.ascii.indexOfIgnoreCase(&row.label, query) == null) continue;
+        self.activateRecoveredSessionAt(index) catch {
+            self.showNoticeKey(.app_recovered_session_failed);
+            return;
+        };
+        closeSidebarSearch(self);
+        return;
     }
 }
 
@@ -707,6 +719,29 @@ pub fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
     // 가변 높이(카드=slot_h·헤더=cell_h). 반환은 row 인덱스(호출처 visibleTab이 row→tab). header_row_h는 SG3b-2에서
     // 헤더 row가 실제로 생길 때 의미를 갖고, 지금(카드만)은 안 쓰인다 — cell_height_px를 근사로 넘긴다.
     return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, sidebarMetrics(self), self.sidebar_scroll_offset_px);
+}
+
+/// Deferred launch can intentionally have no terminal surface while `Recovered Sessions` is the
+/// only actionable UI.  `AppSession.mouse` normally rejects every pointer event in that state, so
+/// this narrow pre-surface seam admits only a primary click on a typed recovered row.  It cannot
+/// select, close, drag, rename, or reach terminal input because every other coordinate returns
+/// false and remains behind the ordinary surface gate.
+pub fn activateRecoveredRowBeforeInitialSurface(
+    self: *AppSession,
+    kind: i32,
+    x_px: f64,
+    y_px: f64,
+    button: i32,
+) bool {
+    if (self.surface_initialized or kind != 1 or button != 0 or !inSidebar(self, x_px)) return false;
+    const slot = sidebarSlotAt(self, y_px) orelse return false;
+    if (slot >= self.sidebar_rows.items.len or self.sidebar_rows.items[slot] != .recovered_session)
+        return false;
+    const candidate = self.sidebar_rows.items[slot].recovered_session;
+    self.activateRecoveredSessionAt(candidate.projection_index) catch {
+        self.showNoticeKey(.app_recovered_session_failed);
+    };
+    return true;
 }
 
 /// 사이드바 뷰포트의 세로 구간(backing px) — **하단 경계의 단일 출처**(`AppSession.SidebarViewport` 문서 참조).

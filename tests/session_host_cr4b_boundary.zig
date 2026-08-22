@@ -102,10 +102,15 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
             "platform/macos/session_host/generation_attachment.zig",
             "platform/macos/session_host/generation_batch_adapter.zig",
         } },
-        .{ "callCurrentUntil", &.{
-            "platform/macos/session_host/generation_batch_adapter.zig",
-            "platform/macos/session_host/client_slot.zig",
-        } },
+        .{
+            "callCurrentUntil",
+            &.{
+                "platform/macos/session_host/generation_batch_adapter.zig",
+                "platform/macos/session_host/client_slot.zig",
+                // CR6b HostAdapter facade가 one-item action의 host.info/runtime.get에 같은 absolute deadline을 전달한다.
+                "platform/macos/session_host/host_adapter.zig",
+            },
+        },
         .{ "executeReconnectControllerTakeoverUntil", &.{
             "platform/macos/session_host/remote_runtime.zig",
             "platform/macos/session_host/remote_term_backend.zig",

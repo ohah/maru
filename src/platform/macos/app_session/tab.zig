@@ -1191,7 +1191,10 @@ pub fn newTab(self: *AppSession) !*Tab {
     var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
+    // deferred launch의 Recovered Sessions orphan adopt는 아직 포커스 Term이 없다. 그때는 cwd 상속을 읽지
+    // 않고 기본 cwd로 attach한다(activeTab을 미초기화 index로 역참조하지 않는다).
+    if (self.tabs.items.len != 0)
+        self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
     return createTab(
         self,
         req,
@@ -1237,7 +1240,7 @@ pub fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
         .card => |c| c.tab,
         .agent_toggle, .agent => null, // 선택 대상이 아님(각자 접기 토글·Term 이동으로 분기)
         .group_header => null, // 헤더 row는 탭이 아님 — 클릭 시 선택 아니라 접기 토글(SG3c)
-        .recovered_sessions_header, .recovered_session => null, // CR6a-2는 표시만 한다. adopt는 CR6b 전까지 0이다.
+        .recovered_sessions_header, .recovered_session => null, // system row는 일반 tab action 대상이 아니며 adopt는 전용 typed row 경로가 소유한다.
     };
 }
 

@@ -1279,9 +1279,15 @@ CR6a-2는 첫 일반 Window의 deferred terminal publication보다 앞선 app-gl
 secure discovery와 ephemeral inventory가 모두 완결된 뒤에만 CR6a-1 projection을 교체하고, primary sidebar에 typed
 `Recovered Sessions` system header/row를 materialize한다. secondary/quick 중복 0, 일반 group/tab action 0,
 attach/spawn/terminate/checkpoint 0을 focused product/ABI/sidebar/boundary 및 시각 fixture로 검증한다. collector 실패는
-launch를 실패시키지 않고 기존 projection mutation 0 + 정상 restore/default-surface 진행으로 귀결한다. CR6b만 row의
-explicit one-item adopt와 fresh `host.info`/`runtime.get` revalidation을 연다.
+launch를 실패시키지 않고 기존 projection mutation 0 + 정상 restore/default-surface 진행으로 귀결한다. 완료된 CR6b
+제품 경로만 row의 explicit one-item adopt와 fresh `host.info`/`runtime.get` revalidation을 연다.
 개별 dead/malformed/unknown host evidence는 빈 inventory로 삭제하지 않고 typed unavailable row로 reconcile한다.
+
+CR6b는 primary typed row의 실제 click과 검색 Enter를 one-item product action에 연결한다. projection/workspace/pool
+generation, ended manifest ordinal과 Window graph를 preflight하고, 하나의 5초 absolute deadline으로 fresh
+`host.info`/`runtime.get`을 재검증한 뒤 orphan은 새 비고정 tab, ended conflict는 exact tombstone slot만 publish한다.
+성공 뒤 row를 one-shot consume하고 deferred surface를 활성화한다. stale generation/ordinal, missing runtime과 모든
+pre-publication 실패는 topology/projection mutation 0이며 host terminate/spawn/checkpoint는 호출하지 않는다.
 
 ## Provider session continuity 잔여 제거(persistent-session P1, 완료)
 

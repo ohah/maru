@@ -45,6 +45,7 @@ const pane_ops = @import("pane.zig");
 const CloseScope = app_session_mod.CloseScope;
 const PaneTree = app_session_mod.PaneTree;
 const Tab = app_session_mod.Tab;
+const Term = app_session_mod.Term;
 const dock_ops = @import("dock.zig");
 const file_panel_ops = @import("file_panel.zig");
 const settings_ops = @import("settings.zig");
@@ -653,6 +654,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     for (win.tabs) |tab_model| {
         new_tabs.appendAssumeCapacity(try tab_ops.buildWorkspaceTab(self, tab_model));
     }
+    try assignEndedManifestOrdinals(new_tabs.items, win);
 
     // 2) swap이 실패하지 않게 컬렉션 capacity를 미리 잡는다(teardown 뒤 append가 무실패여야 half-state가 없다).
     // FP16 2-2r: 탭이 다 생긴 지금이 배치 시점이다. staged 목록의 entry를 **활성 워크스페이스의 활성 pane**에
@@ -758,6 +760,34 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     dropped += self.ended_placeholder_dropped_pending - newly_ended_before;
     self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
+}
+
+/// Reconciliation numbers only runtime-bound Workspace surfaces, in Window/Tab/Pane/surface order.
+/// Bind that same ordinal to each staged durable tombstone before the graph is published. The full
+/// handle remains necessary but is not sufficient: CR6b must replace the exact reserved slot.
+fn assignEndedManifestOrdinals(tabs: []*Tab, win: maru.session.workspace.Window) !void {
+    var manifest_index: usize = 0;
+    for (win.tabs) |tab_model| for (tab_model.panes) |pane_model| for (pane_model.surfaces) |surface| {
+        if (surface.runtime_id.len == 0) continue;
+        if (manifest_index >= maru.session.runtime_reconcile.max_runtime_bindings)
+            return error.TooManyBindings;
+        if (surface.runtime_state == .ended) {
+            var found: ?*Term = null;
+            for (tabs) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                if (!term.rt.ended_placeholder or
+                    !std.mem.eql(u8, term.rt.ended_runtime_host_id, surface.runtime_host_id) or
+                    !std.mem.eql(u8, term.rt.ended_runtime_id, surface.runtime_id)) continue;
+                if (found != null) return error.InvalidRuntimeIdentity;
+                found = term;
+            };
+            const tomb = found orelse return error.InvalidRuntimeIdentity;
+            tomb.rt.ended_manifest_index = app_session_mod.recoveredEndedManifestIndexForRestore(
+                surface.runtime_host_id,
+                surface.runtime_id,
+            ) orelse std.math.maxInt(u16);
+        }
+        manifest_index += 1;
+    };
 }
 
 /// `window.opacity`(0~1)를 chrome **배경** alpha 바이트(0~255)로 환산한다 — 1.0이면 0xFF(불투명, 회귀 없음).

@@ -114,11 +114,16 @@ comptime {
 /// 8px 스크롤바도 셀 하나로 그린다 — §2m.7 이 "쿼드가 필요한 것은 셀 격자에 안 맞는 것" 이라고 적었지만
 /// 실제로 갈리는 기준은 **격자 정렬이 아니라 둥근 모서리·테두리·그라디언트**다(이 셰이더에 없는 것들).
 ///
-/// `uv` 를 한 점으로 둬 아틀라스를 안 읽게 한다(픽셀 셰이더의 `solid` 분기).
+/// `uv` 에 `solid_uv` 를 실어 아틀라스를 안 읽게 한다(픽셀 셰이더의 `solid` 분기).
+/// 단색 채움 셀의 UV 표식. **음수여야 한다** — 글리프 UV 는 0..1 이라 겹칠 수 없다.
+/// "UV 사각이 한 점" 으로 판정하려다 적대적 검증에서 걸렸다: **잉크 없는 글리프**는 아틀라스 슬롯이
+/// 0x0 이라 `uvFromAtlasRect` 가 한 점을 낸다. 그러면 그 글리프 셀이 통째로 배경색으로 칠해진다.
+pub const solid_uv: [4]f32 = .{ -1, -1, -1, -1 };
+
 pub fn solidCell(x_px: f32, y_px: f32, w_px: f32, h_px: f32, rgba: [4]f32, corner_radii: [4]f32) Cell {
     return .{
         .rect = .{ x_px, y_px, w_px, h_px },
-        .uv = .{ 0, 0, 0, 0 },
+        .uv = solid_uv,
         .fg = .{ 0, 0, 0, 0 },
         .bg = rgba,
         .shape = corner_radii,
@@ -127,9 +132,14 @@ pub fn solidCell(x_px: f32, y_px: f32, w_px: f32, h_px: f32, rgba: [4]f32, corne
 
 test "단색 셀: 아틀라스를 안 읽는 모양이다" {
     const c = solidCell(3, 5, 8, 40, colorFromArgb(0xFF3A5FCD), .{ 4, 4, 4, 4 });
-    // UV 사각이 한 점이어야 셰이더가 `solid` 로 판정한다 — 그것이 이 셀의 계약이다.
-    try testing.expectEqual(c.uv[0], c.uv[2]);
-    try testing.expectEqual(c.uv[1], c.uv[3]);
+    // **음수 UV 여야 셰이더가 `solid` 로 판정한다.** 한 점 UV 로는 안 된다 — 잉크 없는 글리프가
+    // 같은 모양을 내기 때문이다(그 상수의 doc).
+    try testing.expect(c.uv[0] < 0);
+    // 잉크 없는 글리프가 내는 모양(한 점, 음수 아님)과 **겹치지 않는다**.
+    const zero_ink = uvFromAtlasRect(7, 11, 0, 0, 512, 512);
+    try testing.expectEqual(zero_ink[0], zero_ink[2]);
+    try testing.expect(zero_ink[0] >= 0);
+    try testing.expect(c.uv[0] != zero_ink[0]);
     // **셀 격자와 무관한 크기가 그대로 실린다** — 8px 스크롤바가 9px 셀 격자에 안 맞아도 된다.
     try testing.expectEqual(@as(f32, 8), c.rect[2]);
     try testing.expectEqual(@as(f32, 40), c.rect[3]);
@@ -260,8 +270,11 @@ const hlsl_source =
     \\    o.uv = lerp(i.uv.xy, i.uv.zw, corner);
     \\    o.fg = i.fg;
     \\    o.bg = i.bg;
-    \\    float2 uv_span = abs(i.uv.zw - i.uv.xy);
-    \\    o.solid = (uv_span.x + uv_span.y > 0.0) ? 0.0 : 1.0;
+    \\    // **음수 UV 가 단색 채움의 신호다.** "UV 사각이 한 점" 으로 판정하려다 적대적 검증에서
+    \\    // 걸렸다 — 잉크 없는 글리프는 아틀라스 슬롯이 0x0 이라 `uvFromAtlasRect` 가 한 점을 낸다
+    \\    // (`renderer_glyph_zero_ink_count` 가 그런 글리프를 세고 있다). 글리프 UV 는 0..1 이라
+    \\    // 음수를 낼 수 없으므로 이 신호는 절대 겹치지 않는다.
+    \\    o.solid = (i.uv.x < 0.0) ? 1.0 : 0.0;
     \\    o.box = float4(i.rect.xy + i.rect.zw * 0.5, i.rect.zw * 0.5);
     \\    o.shape = i.shape;
     \\    o.frag = p;

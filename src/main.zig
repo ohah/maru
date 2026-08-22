@@ -3767,6 +3767,70 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         }
     }.rows;
 
+    // ── 클릭 판정 ────────────────────────────────────────────────────────────────────────────
+    //
+    // **그려진 글자가 곧 클릭이 답한 글자인가**(macOS ADV3-A 와 같은 판정). 셀에서 글자를 도로 읽어
+    // 그 셀 한가운데를 찍고, 히트테스트가 준 byte 의 글자가 **같은지** 본다.
+    //
+    // 히트테스트 계산은 중립이 소유한다(`editor_view.hit.bodyPoint`) — macOS `hitTestBody` 가 쓰던
+    // 그 함수 그대로다. Windows 가 하는 일은 **굳힌 기하와 행 표를 모아 넘기는 것**뿐이다.
+    const clickJudge = struct {
+        fn run(
+            a: std.mem.Allocator,
+            ev: type,
+            f: maru.renderer.RenderFrame,
+            rows: []const maru.chrome.ui.visual_map.VisualRow,
+            ls: []const []const u8,
+            first: usize,
+            visible: usize,
+            cw: u32,
+            ch: u32,
+            total_cols: u16,
+        ) !struct { checked: usize, matched: usize } {
+            // 행 → 원본 논리 줄. **랩·접힘이 없으므로 순차다** — 둘 중 하나라도 켜면 이 표를
+            // 렌더가 만들어 줘야 한다(macOS `editor_hit_lines` 가 그 자리다).
+            const row_lines = try a.alloc(usize, visible);
+            defer a.free(row_lines);
+            for (row_lines, 0..) |*rl, i| rl.* = first + i;
+
+            const layout = ev.geometry.compute(total_cols, ls.len, .{});
+            const geom = ev.hit.Geometry{
+                .body_x = 0,
+                .body_y = 0,
+                .content_left_px = @as(u32, layout.contentLeft()) * cw,
+                .content_width = layout.content.width,
+                .cell_w_px = @intCast(cw),
+                .cell_h_px = @intCast(ch),
+                .tab_width = 4,
+            };
+
+            var checked: usize = 0;
+            var matched: usize = 0;
+            for (f.draw_list.cells) |c| {
+                if (c.row >= visible) continue;
+                if (c.col < layout.contentLeft()) continue; // gutter 는 이 판정의 것이 아니다
+                if (c.codepoint == ' ' or c.codepoint == 0) continue;
+                // **셀의 왼쪽 안쪽을 찍는다.** `byteAtPoint` 는 *"어느 글자 위인가"* 가 아니라
+                // *"caret 이 어디로 가는가"* 를 답한다 — 왼쪽 절반이면 그 글자 **앞**, 오른쪽
+                // 절반이면 **뒤**다. 한가운데(`lo + cw/2`)는 정확히 그 경계라 다음 글자로 넘어간다.
+                //
+                // 실측으로 걸렸다: 한가운데를 찍었더니 1822/5454 만 맞았고 어긋난 것이 전부 한 칸씩
+                // 밀려 있었다. **판정이 틀린 것이지 히트테스트가 틀린 것이 아니다.**
+                const x: f64 = @floatFromInt(@as(u32, c.col) * cw + 1);
+                const y: f64 = @floatFromInt(@as(u32, c.row) * ch + ch / 2);
+                const p = ev.hit.bodyPoint(geom, rows[0..visible], row_lines, ls, x, y) orelse continue;
+                checked += 1;
+                const text = ls[p.line];
+                if (p.byte_in_line >= text.len) continue;
+                const len = std.unicode.utf8ByteSequenceLength(text[p.byte_in_line]) catch continue;
+                if (p.byte_in_line + len > text.len) continue;
+                const cp = std.unicode.utf8Decode(text[p.byte_in_line..][0..len]) catch continue;
+                if (cp == c.codepoint) matched += 1;
+            }
+            return .{ .checked = checked, .matched = matched };
+        }
+    }.run;
+
     // ── 스크롤 대본 ──────────────────────────────────────────────────────────────────────────
     //
     // **사람이 없어도 판정된다.** 실기 휠은 아래 루프가 받지만, 그것만으로는 자동 실행에서 스크롤이
@@ -3781,6 +3845,11 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 돌려 보니 `0/6` 이 나와 스크롤이 깨진 것처럼 보였다 — 실제로는 잴 줄이 없었을 뿐이다.
     var script_judged: usize = 0;
     var script_ok: usize = 0;
+    var click_checked: usize = 0;
+    var click_matched: usize = 0;
+    // 본문이 쓰는 열 수 — 히트테스트 layout 이 gutter 폭을 그 값에서 낸다. `buildSide` 가 안에서
+    // 쓰는 것과 **같은 함수**로 구한다(다른 값을 쓰면 gutter 경계가 그림과 갈린다).
+    const side_cols = editor_view.diff_frame.sideMetrics(inner.w, inner.h, @intCast(cell_w), @intCast(cell_h)).total_cols;
     var clamp_top_ok = false;
     var clamp_bottom_ok = false;
 
@@ -3812,6 +3881,23 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             if (r.checked == 0) continue; // 잴 것이 없다 — 아래 상한 판정도 성립하지 않는다
             script_judged += 1;
             if (r.matched == r.checked) script_ok += 1;
+
+            // **스크롤한 자리에서도 클릭이 맞아야 한다.** first_line 을 안 더하면 여기서 걸린다 —
+            // 화면 첫 행에서만 재면 그 결함이 안 드러난다.
+            const ck = try clickJudge(
+                allocator,
+                editor_view,
+                built.frame,
+                visual_rows,
+                lines.items,
+                first_line,
+                built.written.visual_rows,
+                cell_w,
+                cell_h,
+                side_cols,
+            );
+            click_checked += ck.checked;
+            click_matched += ck.matched;
             // **상한은 내용으로 잰다.** `first_line == maxFirstRow(..)` 로 재면 `clampFirstRow` 를
             // `maxFirstRow` 로 확인하는 셈이라 동어반복이다 — 둘 다 같은 모듈의 같은 계산에서 온다.
             // 대신 "끝까지 내리면 **마지막 줄이 화면에 있다**" 를 본다: 그리는 쪽과 세는 쪽이
@@ -3832,13 +3918,32 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 휠 나머지. **누적 규칙은 `win32_mouse.wheelLines` 가 소유한다** — 여기 인라인으로 적으면
     // 터미널이 같은 것을 또 적게 되고 둘이 갈린다(그 함수에 테스트 넷이 붙어 있다).
     var wheel_remainder: i32 = 0;
+    // 마지막 클릭이 답한 자리. **눌린 행을 띠로 칠해** 사람이 반응을 본다 — 판정은 위 `clickJudge`
+    // 가 이미 자동으로 하고, 이것은 실기 배선(창이 이벤트를 진짜 주는가)을 눈으로 보는 자리다.
+    var last_click: ?maru.chrome.components.editor_view.hit.Point = null;
+    var click_events: usize = 0;
     // **프레임 수에 근거를 둔다** — build step 이 반복해서 도는데 그때마다 창이 오래 차지하면 안 된다.
     // 120 프레임(약 3.5 초)이면 반복 표현·크기 변경을 보기에도 스크린샷을 잡기에도 족하다.
     while (frames < 120 and !host.quitting() and !closed) : (frames += 1) {
         var scroll: isize = 0;
         for (try host.poll()) |ev| switch (ev) {
             .close_requested => closed = true,
-            .mouse => |m| if (m.kind == .wheel) {
+            .mouse => |m| if (m.kind == .left_down) {
+                click_events += 1;
+                const row_lines = allocator.alloc(usize, built.written.visual_rows) catch continue;
+                defer allocator.free(row_lines);
+                for (row_lines, 0..) |*rl, i| rl.* = first_line + i;
+                const layout = editor_view.geometry.compute(side_cols, lines.items.len, .{});
+                last_click = editor_view.hit.bodyPoint(.{
+                    .body_x = 0,
+                    .body_y = 0,
+                    .content_left_px = @as(u32, layout.contentLeft()) * cell_w,
+                    .content_width = layout.content.width,
+                    .cell_w_px = @intCast(cell_w),
+                    .cell_h_px = @intCast(cell_h),
+                    .tab_width = 4,
+                }, visual_rows[0..built.written.visual_rows], row_lines, lines.items, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+            } else if (m.kind == .wheel) {
                 wheel_events += 1;
                 // 양수 델타 = 위로 굴림(Windows 규약) → 화면은 위로, 즉 `first_line` 이 준다.
                 scroll -= win32_mouse.wheelLines(&wheel_remainder, m.wheel_delta, win32_mouse.default_lines_per_notch);
@@ -3867,7 +3972,27 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 built = next_built;
             }
         }
-        try host.drawFrame(built.cells.items, clear_argb);
+        // **띠를 글리프 앞에 넣으려면 배열을 새로 만들어야 한다** — `built.cells` 는 이미 글리프가
+        // 뒤에 붙어 있다. 클릭이 있을 때만 만든다.
+        if (last_click) |lc| {
+            var with_band: std.ArrayList(d3d11_cells.Cell) = .empty;
+            defer with_band.deinit(allocator);
+            try with_band.ensureTotalCapacity(allocator, built.cells.items.len + 1);
+            // 배경(첫 단색 셀) 바로 뒤, 글리프 앞에 끼운다.
+            with_band.appendAssumeCapacity(built.cells.items[0]);
+            with_band.appendAssumeCapacity(d3d11_cells.solidCell(
+                0,
+                @floatFromInt(lc.row * cell_h),
+                @floatFromInt(view.w),
+                @floatFromInt(cell_h),
+                d3d11_cells.colorFromArgb(0x553A5FCD),
+                .{ 0, 0, 0, 0 },
+            ));
+            with_band.appendSliceAssumeCapacity(built.cells.items[1..]);
+            try host.drawFrame(with_band.items, clear_argb);
+        } else {
+            try host.drawFrame(built.cells.items, clear_argb);
+        }
     }
 
     const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
@@ -3878,8 +4003,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ built.written.ops, built.ops_text, built.ops_fill, built.ops_dropped });
     try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ built.written.visual_rows, built.written.total_visual_rows });
     // **분모가 `script_judged` 다.** `script_steps` 로 내면 "잴 것이 없었다" 가 "틀렸다" 로 보인다.
+    try stdout.print("click_glyphs={d}/{d}\n", .{ click_matched, click_checked });
     try stdout.print("scroll_script={d}/{d} steps={d} clamp_top={} clamp_bottom={}\n", .{ script_ok, script_judged, script_steps, clamp_top_ok, clamp_bottom_ok });
-    try stdout.print("first_line={d} wheel_events={d}\n", .{ first_line, wheel_events });
+    try stdout.print("first_line={d} wheel_events={d} click_events={d} last_click={?}\n", .{ first_line, wheel_events, click_events, if (last_click) |lc| lc.line else null });
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("lines_matched={d}/{d}\n", .{ r.matched, r.checked });

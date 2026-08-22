@@ -94,6 +94,8 @@ export interface WasmExports {
   cell_width(cp: number): number;
   /** `input_ptr()`의 UTF-8을 써서 잰 셀 폭. cluster·EAW가 모두 반영된다. */
   measure_cells(len: number): number;
+  /** `measure_cells` 가 폭을 셀 수 없을 때 돌려주는 값. */
+  measure_overflow_value(): number;
   /** `(isCluster << 24) | baseCodepoint` */
   measure_first_cell(len: number): number;
   /** 이 코드포인트를 코어가 직접 그리는가(1/0). 폰트보다 먼저 묻는다. */

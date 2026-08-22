@@ -1,0 +1,29 @@
+{
+  "name": "@maru/lit",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "maru-term terminal for lit",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "lit": ">=3",
+    "@maru/core": "workspace:^"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ohah/maru.git",
+    "directory": "packages/lit"
+  }
+}

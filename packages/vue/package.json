@@ -1,0 +1,29 @@
+{
+  "name": "@maru/vue",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "maru-term terminal for vue",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "vue": ">=3.3",
+    "@maru/core": "workspace:^"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ohah/maru.git",
+    "directory": "packages/vue"
+  }
+}

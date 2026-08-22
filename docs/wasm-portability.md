@@ -148,6 +148,20 @@ sha256(text)   62e1ce9698dfdea7a5d944d4c7b41963fe4fd7f6  (양쪽 동일)
 atomic 명령이 남는 u32안이 가장 느리다. 카운터를 아예 없애도 채택안과 처리량이 같다 — 즉 **비-atomic 증가는
 사실상 공짜**이므로 의미를 버릴 이유가 없다.
 
+**합성 글리프를 넣은 뒤의 크기**(export 49개 기준):
+
+| 구성 | 전체 | code | data |
+|---|---|---|---|
+| 박스 글리프만 | 127 KB | 122 KB | 5 KB |
+| `synthesizeGlyph`(앱 아이콘 포함) | 220 KB | 123 KB | **95 KB** |
+| **`synthesizeTerminalGlyph`(채택)** | **131 KB** | 122 KB | 7 KB |
+
+블록·파워라인·브라유·모자이크까지 덮는 대가는 +4 KB 뿐이고, 220 KB 로 부푼 것은 전부 **maru chrome 아이콘의
+등록 테이블**이었다(`data` 95 KB). 아이콘은 앱 UI 자산이라 터미널 콘텐츠에 나오지 않으므로 `renderer.zig` 의
+dispatch 를 `synthesizeGlyph`(본체, 아이콘 포함)와 `synthesizeTerminalGlyph`(wasm)로 나눠 뺀다.
+
+전송량은 이보다 훨씬 작다 — **gzip 50 KB, brotli 43 KB**(raw 의 33%).
+
 ### 5.2 메모리 — 상한은 스크롤백 cap이 만든다
 
 wasm 선형 메모리는 **줄어들지 않는다**(`grow`만 있고 shrink가 없다). 그래서 "얼마나 쓰느냐"보다 **"고수위가

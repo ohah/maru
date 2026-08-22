@@ -32,6 +32,10 @@
 - **워커의 `resize` 가 backing store 를 안 잡고 있었다**. CSS 만 늘고 backing 은 옛 격자로 남아 `worker: false` 와 레이아웃이 갈렸다(966×528 CSS 에 672×528 backing). 캔버스 소유권이 워커에 있으므로 메인은 CSS 만 바꿀 수 있다 — 두 곳을 함께 고쳐야 한다.
 - **기본 키바인딩 표를 본체와 맞췄다**(계약 §5.1). 코어 인코딩은 `Cmd+Backspace` 를 `Backspace` 와 구분하지 않아 줄 삭제가 한 글자 삭제로 나갔다.
 
+- **추측으로 넣은 방어 코드가 워커를 멈춰 세웠다.** 폰트 등록 직후 격자를 재면 폴백 값이 나올까 봐 `fonts.ready` 를 기다리게 했는데, **워커의 `fonts.ready` 는 resolve 되지 않는다**(문서가 없다). `WorkerBackend.create` 가 끝나지 않아 백엔드가 끝내 null 이었고, 깜빡임 신호가 워커에 닿지 않아 커서가 멈춘 화면이 나왔다. `FontFace.load()` 가 이미 로드를 보장하므로 그 대기는 애초에 불필요했다 — 근거 없이 방어를 더하지 않는다.
+- **`onBlink` 가 `this.#backend` 를 직접 읽어 항상 null 이었다.** 그 콜백은 `attachDom` 안의 타이머에서 불리는데 워커 백엔드는 그 뒤에 대입된다. 지역 변수로 잡아 고쳤다.
+- **줄 간격 여백을 위아래로 나눈다**(계약 §5). 전부 아래에 두면 선택 배경이 하단 패딩처럼 보인다.
+
 ## 선행 조건
 
 P1은 [터미널 코어의 wasm 이식성](../wasm-portability.md)이 규정한 제약 위에서만 성립한다 — 특히 `addLibrary`가 아니라 `addExecutable` + `entry = .disabled` + `rdynamic`을 써야 하고(§5 재현법), `max_memory`를 명시해야 한다(§5.2).

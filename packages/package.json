@@ -21,17 +21,17 @@
     "demo": "bun run scripts/serve-demo.ts"
   },
   "devDependencies": {
-    "@types/bun": "1.3.11",
-    "@types/react": "^19.0.0",
+    "@types/bun": "1.4.0",
+    "@types/react": "^19.2.18",
     "@zntc/core": "0.1.4",
-    "lit": "^3.2.0",
-    "oxfmt": "0.59.0",
-    "oxlint": "1.74.0",
-    "playwright": "1.61.1",
-    "react": "^19.0.0",
-    "svelte": "^5.0.0",
-    "typescript": "5.9.3",
-    "vue": "^3.5.0"
+    "lit": "^3.3.3",
+    "oxfmt": "0.64.0",
+    "oxlint": "1.79.0",
+    "playwright": "1.62.1",
+    "react": "^19.2.8",
+    "svelte": "^5.56.10",
+    "typescript": "7.0.2",
+    "vue": "^3.5.41"
   },
   "engines": {
     "bun": ">=1.3.0",

@@ -69,6 +69,7 @@ pub const components = struct {
         pub const content = @import("chrome/components/editor_view/content.zig");
         pub const viewport = @import("chrome/components/editor_view/viewport.zig");
         pub const hit = @import("chrome/components/editor_view/hit.zig"); // 화면 좌표 → (행·논리 줄·줄 안 byte). 플랫폼이 굳힌 기하만 대 준다
+        pub const selection_marks = @import("chrome/components/editor_view/selection_marks.zig"); // 문서 offset 선택 → 행마다의 Mark. 축(행→문서 줄)은 호출자가 푼다
         /// **`ui/visual_map`으로 옮겼다**(커밋 메시지 상자가 두 번째 소비자가 되면서 — docs/text-field-editor.md
         /// §12.4). 랩은 편집기 전용 개념이 아니라 공용 텍스트 레이아웃이고, `components/editor_view/`에 두면
         /// 그 디렉터리가 "편집기 뷰 것"이라고 하는 선언이 거짓이 된다. 이 별칭은 기존 호출부를 위해 남긴다.

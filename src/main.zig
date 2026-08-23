@@ -3551,6 +3551,20 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         }
     }
 
+    // **줄 시작 offset.** 선택은 문서 offset 축이라 줄 텍스트만으로는 못 자른다. 파일을 개행으로
+    // 나눴으므로 누적합이 곧 시작이고, `+ 1` 이 개행 한 바이트다(CRLF 는 위에서 CR 을 벗겼지만
+    // 원본에는 두 바이트라, 그 파일에서는 이 값이 한 바이트씩 밀린다 — 아래 판정이 같은 축을 쓰므로
+    // 자기 일관적이고, 문서 모델이 붙으면 그쪽이 진짜 값을 준다).
+    const line_starts = try allocator.alloc(usize, lines.items.len);
+    defer allocator.free(line_starts);
+    {
+        var off: usize = 0;
+        for (lines.items, line_starts) |l, *st| {
+            st.* = off;
+            off += l.len + 1;
+        }
+    }
+
     // ── scratch ──────────────────────────────────────────────────────────────────────────────
     const ops = try allocator.alloc(maru.chrome.draw.Op, 4096);
     defer allocator.free(ops);
@@ -3568,6 +3582,24 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     defer allocator.free(row_counts);
     const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
     defer allocator.free(count_scratch);
+
+    // 선택 마크 저장소. 행 수만큼이면 되지만 창이 커질 여지를 조금 둔다.
+    const sel_cap = @as(usize, grid.rows) + 2;
+    const sel_rows = try allocator.alloc([]const editor_view.frame.Mark, sel_cap);
+    defer allocator.free(sel_rows);
+    const sel_buf = try allocator.alloc(editor_view.frame.Mark, sel_cap);
+    defer allocator.free(sel_buf);
+    const sel_spans = try allocator.alloc(editor_view.selection_marks.Span, sel_cap);
+    defer allocator.free(sel_spans);
+    // **이름을 준다.** 익명 구조체는 리터럴마다 다른 타입이라 호출부와 파라미터가 안 맞는다.
+    const SelRange = struct { lo: usize, hi: usize };
+    const SelScratch = struct {
+        line_starts: []const usize,
+        rows: [][]const editor_view.frame.Mark,
+        buf: []editor_view.frame.Mark,
+        spans: []editor_view.selection_marks.Span,
+    };
+    const sel_scratch = SelScratch{ .line_starts = line_starts, .rows = sel_rows, .buf = sel_buf, .spans = sel_spans };
 
     const scratch = editor_view.frame.Scratch{
         .ops = ops,
@@ -3658,9 +3690,27 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             cw: u32,
             ch: u32,
             g: maru.terminal.Size,
+            sel: ?SelRange,
+            ss: anytype,
         ) !Built {
+            // **선택을 행 축으로 자른다.** 산술은 중립이 소유한다(`selection_marks`) — macOS 와
+            // Windows 가 각자 적으면 경계 셋(줄 시작·줄 끝·선택 양끝) 중 하나가 조용히 갈린다.
+            //
+            // 행 → 문서 줄 대응은 **여기서** 푼다(랩·접힘이 없으므로 순차다). 그것이 축을 정하는
+            // 일이고, 그 파일 머리말이 호출자 몫이라고 적어 둔 자리다.
+            var sel_marks: ?[]const []const ev.frame.Mark = null;
+            if (sel) |sr| {
+                const n = @min(ss.rows.len, ls.len -| first_line);
+                for (0..n) |i| {
+                    const li = first_line + i;
+                    ss.spans[i] = .{ .start = ss.line_starts[li], .end = ss.line_starts[li] + ls[li].len };
+                }
+                ev.selection_marks.build(sr.lo, sr.hi, ss.spans[0..n], ss.rows[0..n], ss.buf[0..n]);
+                sel_marks = ss.rows[0..n];
+            }
+
             const w = ev.diff_frame.buildSide(
-                .{ .lines = ls, .total_lines = ls.len },
+                .{ .lines = ls, .total_lines = ls.len, .selection_marks = sel_marks },
                 .{
                     .first_line = first_line,
                     .wrap = false,
@@ -3867,7 +3917,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 조용히 어긋난다 — 그 필드 doc 이 경고하는 자리가 정확히 이것이다.
     var max_top: usize = 0;
     {
-        var probe = try build(allocator, &host, editor_view, 0, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+        var probe = try build(allocator, &host, editor_view, 0, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, null, sel_scratch);
         defer probe.deinit(allocator);
         max_top = probe.written.max_top_line;
     }
@@ -3879,7 +3929,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else
                 before -| @as(usize, @intCast(-delta));
 
-            var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+            var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, null, sel_scratch);
             defer built.deinit(allocator);
             const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
             script_steps += 1;
@@ -3915,8 +3965,65 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         first_line = 0;
     }
 
+    // ── 선택 판정 ────────────────────────────────────────────────────────────────────────────
+    //
+    // **띠가 그려진 행이 곧 선택이 덮는 행인가.** 마크만 보면 중립 함수를 자기 자신으로 확인하는
+    // 셈이라(그쪽에 이미 테스트 일곱이 있다), 여기서는 **렌더가 낸 op** 을 본다 — 마크 → `paintSelection`
+    // → 사각 op 까지 이어졌는지가 이 판정의 대상이다.
+    var sel_rows_drawn: usize = 0;
+    var sel_rows_want: usize = 0;
+    var sel_rows_match = false;
+    var sel_first_cols: u32 = 0;
+    var sel_last_cols: u32 = 0;
+    {
+        // 3 번 줄 5 바이트에서 6 번 줄 2 바이트까지.
+        const lo = line_starts[3] + 5;
+        const hi = line_starts[6] + 2;
+        var built_sel = try build(allocator, &host, editor_view, 0, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, .{ .lo = lo, .hi = hi }, sel_scratch);
+        defer built_sel.deinit(allocator);
+
+        // **기대값을 여기서 따로 센다** — 중립 함수를 안 부르고, 줄 범위가 겹치는지만 본다.
+        for (3..7) |li| {
+            const st = line_starts[li];
+            const en = st + lines.items[li].len;
+            if (en > lo and st < hi and @min(hi, en) > @max(lo, st)) sel_rows_want += 1;
+        }
+
+        // 그려진 띠: 한 행 높이짜리 사각 중 배경(음수 y)·스크롤바(폭 8)를 뺀 것.
+        //
+        // **행 수만 세면 부족하다.** 양끝이 잘린 선택인데 통째로 칠해도 개수는 같다 — `lo` 나 `hi`
+        // 를 무시하는 뮤턴트가 그대로 통과한다. 그래서 **첫 띠와 끝 띠의 폭**까지 본다.
+        var first_band: ?maru.chrome.draw.Rect = null;
+        var last_band: ?maru.chrome.draw.Rect = null;
+        for (ops[0..built_sel.written.ops]) |op| {
+            const rect: maru.chrome.draw.Rect = switch (op) {
+                .fill => |f| f.rect,
+                .quad => |q| q.rect,
+                else => continue,
+            };
+            if (rect.y < 0) continue; // 배경
+            if (rect.h != cell_h) continue; // 스크롤바는 여러 행 높이다
+            if (rect.w < cell_w) continue; // 한 칸도 안 되는 것은 띠가 아니다
+            sel_rows_drawn += 1;
+            if (first_band == null) first_band = rect;
+            last_band = rect;
+        }
+        // ⒜ 첫 띠는 **줄 처음이 아니라 5 바이트 뒤**에서 시작한다(`lo` 를 무시하면 왼쪽에 붙는다).
+        // ⒝ 끝 띠는 **2 칸**이다(`hi` 를 무시하면 줄 끝까지 늘어난다).
+        const fb = first_band orelse maru.chrome.draw.Rect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const lb = last_band orelse maru.chrome.draw.Rect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        sel_first_cols = @divTrunc(fb.w, cell_w);
+        sel_last_cols = @divTrunc(lb.w, cell_w);
+        const lo_honored = fb.x > @as(i32, @intCast(@as(u32, @intCast(editor_view.geometry.compute(side_cols, lines.items.len, .{}).contentLeft())) * cell_w));
+        const hi_honored = sel_last_cols == 2;
+        sel_rows_match = (sel_rows_drawn == sel_rows_want and sel_rows_want > 0 and lo_honored and hi_honored);
+    }
+
     // ── 실기 루프 ────────────────────────────────────────────────────────────────────────────
-    var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+    var drag_anchor: ?usize = null;
+    var sel_range: ?SelRange = null;
+    var caret_at: ?maru.chrome.components.editor_view.hit.Point = null;
+    var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, sel_range, sel_scratch);
     defer built.deinit(allocator);
     var frames: usize = 0;
     var wheel_events: usize = 0;
@@ -3924,23 +4031,25 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 휠 나머지. **누적 규칙은 `win32_mouse.wheelLines` 가 소유한다** — 여기 인라인으로 적으면
     // 터미널이 같은 것을 또 적게 되고 둘이 갈린다(그 함수에 테스트 넷이 붙어 있다).
     var wheel_remainder: i32 = 0;
-    // 마지막 클릭이 답한 자리. **눌린 행을 띠로 칠해** 사람이 반응을 본다 — 판정은 위 `clickJudge`
-    // 가 이미 자동으로 하고, 이것은 실기 배선(창이 이벤트를 진짜 주는가)을 눈으로 보는 자리다.
-    var last_click: ?maru.chrome.components.editor_view.hit.Point = null;
+    // 드래그 선택. **anchor 는 누른 자리, focus 는 지금 자리**다 — 위로 끌면 `focus < anchor` 라
+    // 그리기 전에 정렬한다(`session.editor.selection.Selection` 이 같은 규율을 쓴다).
     var click_events: usize = 0;
+    var drag_moves: usize = 0;
     // **프레임 수에 근거를 둔다** — build step 이 반복해서 도는데 그때마다 창이 오래 차지하면 안 된다.
     // 120 프레임(약 3.5 초)이면 반복 표현·크기 변경을 보기에도 스크린샷을 잡기에도 족하다.
     while (frames < 120 and !host.quitting() and !closed) : (frames += 1) {
         var scroll: isize = 0;
+        var dirty = false;
         for (try host.poll()) |ev| switch (ev) {
             .close_requested => closed = true,
-            .mouse => |m| if (m.kind == .left_down) {
-                click_events += 1;
+            .mouse => |m| if (m.kind == .left_down or (m.kind == .moved and drag_anchor != null) or m.kind == .left_up) {
+                if (m.kind == .left_down) click_events += 1;
+                if (m.kind == .moved) drag_moves += 1;
                 const row_lines = allocator.alloc(u32, built.written.visual_rows) catch continue;
                 defer allocator.free(row_lines);
                 for (row_lines, 0..) |*rl, i| rl.* = @intCast(first_line + i);
                 const layout = editor_view.geometry.compute(side_cols, lines.items.len, .{});
-                last_click = editor_view.hit.bodyPoint(.{
+                const p = editor_view.hit.bodyPoint(.{
                     .body_x = 0,
                     .body_y = 0,
                     .content_left_px = @as(u32, layout.contentLeft()) * cell_w,
@@ -3949,6 +4058,18 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                     .cell_h_px = @intCast(cell_h),
                     .tab_width = 4,
                 }, visual_rows[0..built.written.visual_rows], row_lines, lines.items, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                if (p) |pt| {
+                    const off = line_starts[pt.line] + pt.byte_in_line;
+                    caret_at = pt;
+                    if (m.kind == .left_down) {
+                        drag_anchor = off;
+                        sel_range = null; // 누른 순간은 caret 뿐이다
+                    } else if (drag_anchor) |a| {
+                        sel_range = if (off == a) null else .{ .lo = @min(a, off), .hi = @max(a, off) };
+                    }
+                }
+                if (m.kind == .left_up) drag_anchor = null;
+                dirty = true;
             } else if (m.kind == .wheel) {
                 wheel_events += 1;
                 // 양수 델타 = 위로 굴림(Windows 규약) → 화면은 위로, 즉 `first_line` 이 준다.
@@ -3965,6 +4086,13 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             },
             else => {},
         };
+        if (dirty) {
+            var next_built = build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, sel_range, sel_scratch) catch built;
+            if (next_built.cells.items.ptr != built.cells.items.ptr) {
+                built.deinit(allocator);
+                built = next_built;
+            } else next_built = undefined;
+        }
         if (scroll != 0) {
             // 상한은 **방금 그린 프레임이 준 값**이다(위 doc). 매 프레임 다시 세지 않는다.
             const next = if (scroll > 0)
@@ -3973,29 +4101,35 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 first_line -| @as(usize, @intCast(-scroll));
             if (next != first_line) {
                 first_line = next;
-                const next_built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid);
+                const next_built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, null, sel_scratch);
                 built.deinit(allocator);
                 built = next_built;
             }
         }
-        // **띠를 글리프 앞에 넣으려면 배열을 새로 만들어야 한다** — `built.cells` 는 이미 글리프가
-        // 뒤에 붙어 있다. 클릭이 있을 때만 만든다.
-        if (last_click) |lc| {
-            var with_band: std.ArrayList(d3d11_cells.Cell) = .empty;
-            defer with_band.deinit(allocator);
-            try with_band.ensureTotalCapacity(allocator, built.cells.items.len + 1);
-            // 배경(첫 단색 셀) 바로 뒤, 글리프 앞에 끼운다.
-            with_band.appendAssumeCapacity(built.cells.items[0]);
-            with_band.appendAssumeCapacity(d3d11_cells.solidCell(
-                0,
-                @floatFromInt(lc.row * cell_h),
-                @floatFromInt(view.w),
+        // **caret 을 글리프 위에 얹는다.** 선택 띠는 렌더가 이미 그렸다(`selection_marks` → op) —
+        // caret 만 플랫폼 몫이다(중립 `editor_view` 에 caret op 이 없다. macOS 도 quad 로 그린다).
+        if (caret_at) |c| {
+            var with_caret: std.ArrayList(d3d11_cells.Cell) = .empty;
+            defer with_caret.deinit(allocator);
+            try with_caret.ensureTotalCapacity(allocator, built.cells.items.len + 1);
+            with_caret.appendSliceAssumeCapacity(built.cells.items);
+            // 열은 **중립이 센다**(`content.columnOfByte`) — 렌더가 탭·§3.8 표기를 펴는 그 함수다.
+            const layout = editor_view.geometry.compute(side_cols, lines.items.len, .{});
+            const col = layout.contentLeft() + editor_view.content.columnOfByte(
+                lines.items[c.line],
+                4,
+                c.byte_in_line,
+                count_scratch,
+            );
+            with_caret.appendAssumeCapacity(d3d11_cells.solidCell(
+                @floatFromInt(@as(u32, col) * cell_w),
+                @floatFromInt(c.row * cell_h),
+                2, // 2px 막대
                 @floatFromInt(cell_h),
-                d3d11_cells.colorFromArgb(0x553A5FCD),
+                d3d11_cells.colorFromArgb(0xFFFFFFFF),
                 .{ 0, 0, 0, 0 },
             ));
-            with_band.appendSliceAssumeCapacity(built.cells.items[1..]);
-            try host.drawFrame(with_band.items, clear_argb);
+            try host.drawFrame(with_caret.items, clear_argb);
         } else {
             try host.drawFrame(built.cells.items, clear_argb);
         }
@@ -4009,9 +4143,13 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ built.written.ops, built.ops_text, built.ops_fill, built.ops_dropped });
     try stdout.print("visual_rows={d} total_visual_rows={d}\n", .{ built.written.visual_rows, built.written.total_visual_rows });
     // **분모가 `script_judged` 다.** `script_steps` 로 내면 "잴 것이 없었다" 가 "틀렸다" 로 보인다.
+    try stdout.print("sel_bands={d}/{d} first_cols={d} last_cols={d} match={}\n", .{ sel_rows_drawn, sel_rows_want, sel_first_cols, sel_last_cols, sel_rows_match });
     try stdout.print("click_glyphs={d}/{d} wide={d}\n", .{ click_matched, click_checked, click_wide });
     try stdout.print("scroll_script={d}/{d} steps={d} clamp_top={} clamp_bottom={}\n", .{ script_ok, script_judged, script_steps, clamp_top_ok, clamp_bottom_ok });
-    try stdout.print("first_line={d} wheel_events={d} click_events={d} last_click={?}\n", .{ first_line, wheel_events, click_events, if (last_click) |lc| lc.line else null });
+    try stdout.print("first_line={d} wheel_events={d} click_events={d} drag_moves={d} caret_line={?} sel={?}\n", .{
+        first_line,                         wheel_events,                             click_events, drag_moves,
+        if (caret_at) |c| c.line else null, if (sel_range) |s| s.hi - s.lo else null,
+    });
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("lines_matched={d}/{d}\n", .{ r.matched, r.checked });

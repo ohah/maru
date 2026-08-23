@@ -37564,6 +37564,64 @@ test "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 
     try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) == null);
 }
 
+// **발행된 tree 는 행 목록보다 오래 살 수 있다.** 행이 줄어든 뒤 다음 프레임을 그리기 전에 포인터가
+// 오면(watcher 갱신·스캔 완료·폴더 접기 — 전부 렌더와 다른 시점에 일어난다) 발행된 action 표는 없는
+// 인덱스를 가리킨다.
+//
+// 그 인덱스를 그대로 `file_tree_rows.items[i]` 에 쓰면 **범위를 넘어 죽는다**. 실제로 우클릭 경로가
+// 그 상태였고(적대적 검증), activate 경로만 경계 검사를 갖고 있었다 — 같은 값의 소비자가 둘인데
+// 방어가 한쪽에만 있으면 그 비대칭이 곧 결함이다. 그래서 **질의 자체가** 지금 없는 행을 안 준다.
+test "file tree: 발행된 인덱스가 낡아도 범위를 넘지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..40) |index| {
+        const path = try std.fmt.allocPrint(allocator, "/repo/g{d}.zig", .{index});
+        errdefer allocator.free(path);
+        try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = path,
+            .label = path[6..],
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+    defer for (session.file_tree_rows.items) |row| allocator.free(row.file.path);
+    file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+
+    const tree = dock_ops.dockGeometry(session).tree_content;
+    const x: f64 = @floatFromInt(tree.x + tree.w / 2);
+    const deep_y: f64 = @floatFromInt(tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) * 20 + 2);
+    // 전제: 그 자리는 지금 행이다(아니면 이 테스트가 아무것도 판정하지 않는다).
+    try std.testing.expect(file_tree_dock_ops.fileTreeRowAtPublished(session, x, deep_y) != null);
+
+    // 행이 줄어든다 — **다시 발행하지 않는다**(렌더 전에 이벤트가 오는 상황 그대로).
+    while (session.file_tree_rows.items.len > 3) {
+        if (session.file_tree_rows.pop()) |removed| allocator.free(removed.file.path);
+    }
+
+    // ⑴ 질의가 없는 행을 주지 않는다.
+    try std.testing.expect(file_tree_dock_ops.fileTreeRowAtPublished(session, x, deep_y) == null);
+    // ⑵ 그래서 우클릭이 죽지 않고 메뉴도 안 뜬다(옛 상태에서는 여기서 배열 범위를 넘었다).
+    session.file_tree_context_target = null;
+    session.mouse(1, x, deep_y, 2, 0);
+    try std.testing.expect(session.file_tree_context_target == null);
+    // ⑶ 늦게 도착한 up 도 아무것도 열지 않는다.
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, deep_y);
+    try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, deep_y) == null);
+}
+
 test "file tree production hot paths emit bounded counter artifact" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

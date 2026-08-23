@@ -342,8 +342,12 @@ pub fn fileTreeDockPointer(
     if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
     if (self.file_tree_entries.items.len == 0) return null;
     // 스크롤바 트랙 위는 목록이 아니다 — 막대를 잡으려는 손이 행을 열면 안 된다(옛 `fileTreeRowAt` 의
-    // 같은 가드를 여기로 옮겼다).
-    if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
+    // 같은 가드를 여기로 옮겼다). **그냥 돌아가지 않고 호버를 놓는다** — 그러지 않으면 포인터가 막대
+    // 위에 있는데 마지막 행의 밴드가 켜진 채 남는다(적대적 검증).
+    if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) {
+        file_panel_ops.clearFileTreeHover(self);
+        return null;
+    };
     const tree_view = chrome.ui.tree.UiRectTree{ .entries = self.file_tree_entries.items };
     const dispatched = chrome.ui.interaction.dispatch(
         &self.file_tree_interaction,
@@ -359,28 +363,23 @@ pub fn fileTreeDockPointer(
     const action = dispatched.action orelse return null;
     var table = component.ids.Table.init(self.file_tree_actions.items);
     table.count = self.file_tree_actions.items.len;
-    return table.resolve(action, self.file_tree_projection_generation);
-}
-
-/// 지금 호버한 행의 **모델 인덱스**. published action 표에서 되읽으므로 그린 행과 같은 답이다.
-pub fn hoveredRowIndex(self: *const AppSession) ?usize {
-    const hovered = self.file_tree_interaction.hovered orelse return null;
-    for (self.file_tree_entries.items) |entry| {
-        if (entry.id != hovered) continue;
-        const action = entry.action orelse return null;
-        for (self.file_tree_actions.items) |candidate| {
-            if (candidate.action_id != action.id) continue;
-            return switch (candidate.intent) {
-                .activate_row => |index| index,
-            };
-        }
-        return null;
-    }
-    return null;
+    const intent = table.resolve(action, self.file_tree_projection_generation) orelse return null;
+    // **없는 행은 intent 로도 안 나간다.** 보통은 목록이 바뀌면 투영 세대가 올라가 위 `resolve` 가
+    // 거르지만, 세대를 안 올리고 행만 줄어드는 경로가 생기면 그 방어가 통째로 비껴간다 — 질의 경로
+    // (`fileTreeRowAtPublished`)가 정확히 그래서 죽었다. 같은 값의 두 소비자가 **같은 판정**을 쓰게 한다.
+    return switch (intent) {
+        .activate_row => |index| if (index < self.file_tree_rows.items.len) intent else null,
+    };
 }
 
 /// 좌표가 가리키는 행의 **모델 인덱스**(우클릭처럼 dispatch 를 태우지 않는 자리용). 발행된 rect 를
 /// 되읽으므로 클릭 경로와 같은 답이다.
+///
+/// **지금 없는 행은 주지 않는다.** 발행된 tree 는 행 목록보다 오래 살 수 있다 — watcher 갱신·스캔
+/// 완료·폴더 접기는 렌더와 다른 시점에 목록을 바꾸고, 그 사이 도착한 포인터는 옛 표를 본다. 그 인덱스를
+/// 그대로 돌려주면 소비자가 `file_tree_rows.items[i]` 에서 **범위를 넘어 죽는다**(실측:
+/// `index 20, len 3`). 방어를 소비자마다 두면 하나를 빠뜨리고, 실제로 우클릭 경로가 그랬다 — 그래서
+/// **질의 자체가** 판정한다.
 pub fn fileTreeRowAtPublished(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
     if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
@@ -389,7 +388,7 @@ pub fn fileTreeRowAtPublished(self: *const AppSession, x_px: f64, y_px: f64) ?us
     for (self.file_tree_actions.items) |candidate| {
         if (candidate.action_id != hit.action_id) continue;
         return switch (candidate.intent) {
-            .activate_row => |index| index,
+            .activate_row => |index| if (index < self.file_tree_rows.items.len) index else null,
         };
     }
     return null;

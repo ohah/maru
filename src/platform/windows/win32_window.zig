@@ -242,6 +242,7 @@ extern "user32" fn CreateWindowExW(DWORD, ?[*:0]const u16, ?[*:0]const u16, DWOR
 extern "user32" fn DefWindowProcW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
 extern "user32" fn DestroyWindow(HWND) callconv(abi.winapi) i32;
 extern "user32" fn PostQuitMessage(i32) callconv(abi.winapi) void;
+extern "user32" fn PostMessageW(?HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) i32;
 extern "user32" fn PeekMessageW(*MSG, ?HWND, UINT, UINT, UINT) callconv(abi.winapi) i32;
 extern "user32" fn TranslateMessage(*const MSG) callconv(abi.winapi) i32;
 extern "user32" fn DispatchMessageW(*const MSG) callconv(abi.winapi) LRESULT;
@@ -550,6 +551,30 @@ pub const Window = struct {
     ///
     /// 호출자가 매 프레임 불러도 된다 — 값이 같으면 IME 가 무시한다. 실패는 삼킨다(후보창 위치가
     /// 기본값으로 남을 뿐 조합 자체는 동작한다).
+    /// **합성 마우스 메시지를 자기 큐에 넣는다** — 판정용이다.
+    ///
+    /// 표면 스모크가 "눌러서 무언가 바뀌는가" 를 사람 없이 재려면 창이 실제로 받는 메시지가
+    /// 있어야 한다. 히트테스트 함수를 직접 부르면 **창 → `WindowEvent.mouse` → 위상 변환**이라는
+    /// 세 칸이 안 밟히고, 거기가 틀려도 판정이 초록이 된다(§2m.29).
+    ///
+    /// `SendInput` 을 쓰지 않는 이유: 그것은 **사용자의 실제 커서**를 움직여, 창이 포그라운드가
+    /// 아니면 엉뚱한 창을 누른다. 이 함수는 우리 창의 큐에만 넣는다.
+    ///
+    /// **한계**: OS 입력 스택(캡처·연타 타이밍·모디파이어 키 상태)은 안 밟는다. W7.4c 가 IME 에서
+    /// 받아들인 것과 같은 한계다.
+    pub fn postSyntheticMouse(self: *Window, kind: MouseEvent.Kind, x_px: i32, y_px: i32) void {
+        const msg: UINT = switch (kind) {
+            .moved => WM_MOUSEMOVE,
+            .left_down => WM_LBUTTONDOWN,
+            .left_up => WM_LBUTTONUP,
+            else => return,
+        };
+        // lParam 은 **부호 있는 16 비트 둘**이다. 음수를 그냥 넣으면 상위 절반을 침범한다.
+        const lo: u32 = @as(u16, @bitCast(@as(i16, @truncate(x_px))));
+        const hi: u32 = @as(u16, @bitCast(@as(i16, @truncate(y_px))));
+        _ = PostMessageW(self.hwnd, msg, 0, @intCast(lo | (hi << 16)));
+    }
+
     pub fn setImeCaret(self: *Window, row: u16, col: u16, cell_w: u32, cell_h: u32) void {
         if (cell_w == 0 or cell_h == 0) return;
         const himc = ImmGetContext(self.hwnd) orelse return;

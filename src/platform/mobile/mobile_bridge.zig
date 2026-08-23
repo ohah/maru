@@ -214,6 +214,11 @@ fn connectionMessage() ?[]const u8 {
             .mob_conn_failed;
         return maru.i18n.tIn(.ko, key);
     }
+    // **끝난 것을 진행 중이라고 말하지 않는다.** `CLOSED` 는 아래 "진행 상태" 갈래로 떨어져
+    // **끊긴 화면에 "붙는 중..." 이 떴다**(기기 실측: 끊기를 누르면 `state=12` 인데 배너는
+    // 붙는 중이라 했다 — 사용자는 앱이 알아서 다시 붙는 줄 안다). 이유 이름이 없어도 상태만으로
+    // 갈리는 자리다.
+    if (conn_state == 12) return maru.i18n.tIn(.ko, .mob_conn_ended); // MARU_SSH_STATE_CLOSED
     // 오류가 없으면 진행 상태다. 아직 시작 전이면 할 말이 없다(READY 는 위에서 이미 갈렸다).
     if (conn_state == 0) return null;
     return maru.i18n.tIn(.ko, .mob_conn_connecting);
@@ -713,6 +718,7 @@ pub fn terminalBackHitAt(x: f32, y: f32) bool {
 pub fn terminalChromeHitAt(x: f32, y: f32) bool {
     if (terminalBackHitAt(x, y)) return true;
     if (term_kb_rect.w > 0 and setHit(term_kb_rect, x, y)) return true;
+    if (term_disc_rect.w > 0 and setHit(term_disc_rect, x, y)) return true;
     if (term_copy_rect.w > 0 and setHit(term_copy_rect, x, y)) return true;
     return false;
 }
@@ -1928,6 +1934,29 @@ pub fn terminalKeyboardCenter() ?struct { x: f32, y: f32 } {
     if (term_kb_rect.w <= 0) return null;
     return .{ .x = term_kb_rect.x + term_kb_rect.w / 2, .y = term_kb_rect.y + term_kb_rect.h / 2 };
 }
+
+/// 원격 연결을 **사용자 뜻으로** 끊는 자리(앱 바). **늘 있다** — 뒤로가기는 화면만 빠져나오고
+/// 연결은 그대로 두므로(계약: 목록으로 돌아가도 세션은 산다), 끊을 길이 따로 없었다.
+///
+/// **파괴적이지 않다.** 우리가 놓는 것은 SSH 연결이지 원격의 작업이 아니다 — tmux 를 쓰면
+/// 세션은 서버에 그대로 남고 다시 붙으면 이어진다. 그래서 되묻지 않는다.
+var term_disc_rect: SetRect = .{};
+var term_disc_pressed = false;
+
+/// 그 자리 한가운데(테스트용).
+pub fn terminalDisconnectCenter() ?struct { x: f32, y: f32 } {
+    if (term_disc_rect.w <= 0) return null;
+    return .{ .x = term_disc_rect.x + term_disc_rect.w / 2, .y = term_disc_rect.y + term_disc_rect.h / 2 };
+}
+
+/// **끊어 달라는 요청.** host 가 가져가 펌프를 세운다 — 브리지는 소켓을 모른다(계약 §2:
+/// 브리지는 그리고 판정만 하고, 바깥일은 host 가 한다). `take` 한 번에 한 번만 나간다.
+var disconnect_req: bool = false;
+pub export fn maru_mobile_take_disconnect() u32 {
+    if (!disconnect_req) return 0;
+    disconnect_req = false;
+    return 1;
+}
 /// 배너가 먹은 높이(0 이면 없다). **본문을 밀지 않는다** — 코어 격자를 줄이면 원격이 믿는
 /// 크기와 갈리고, 배너는 잠깐 뜨는 것이라 그 값이 오르내리면 원격에 resize 가 쏟아진다.
 var term_banner_h: f32 = 0;
@@ -2101,6 +2130,26 @@ fn drawTerminalBar(tk: *const tokens.Tokens) void {
             kb_label,
             @intFromFloat(term_kb_rect.x + (set_head_h - @as(f32, @floatFromInt(textWidth(kb_label, 15)))) / 2),
             @intFromFloat(term_kb_rect.y + (set_head_h - 15) / 2),
+            15,
+            tk.get(.surface_fg),
+        );
+    }
+
+    // **끊는 자리.** 자판 왼쪽 고정이다 — 복사가 나타났다 사라져도 이 자리는 안 움직인다
+    // (조건부 버튼이 다른 버튼을 밀면 손가락이 겨눈 자리가 바뀐다).
+    term_disc_rect = .{ .x = term_bar_rect.x + term_bar_rect.w - set_head_h * 3, .y = term_bar_rect.y, .w = set_head_h, .h = set_head_h };
+    if (term_disc_pressed) push(.{
+        .x = @intFromFloat(term_disc_rect.x),
+        .y = @intFromFloat(term_disc_rect.y),
+        .w = @intFromFloat(term_disc_rect.w),
+        .h = @intFromFloat(term_disc_rect.h),
+    }, tk.get(.tab_hover_bg), 0xFF, 8, 0);
+    {
+        const disc_label = maru.i18n.tIn(.ko, .mob_disconnect);
+        pushText(
+            disc_label,
+            @intFromFloat(term_disc_rect.x + (set_head_h - @as(f32, @floatFromInt(textWidth(disc_label, 15)))) / 2),
+            @intFromFloat(term_disc_rect.y + (set_head_h - 15) / 2),
             15,
             tk.get(.surface_fg),
         );
@@ -5067,6 +5116,12 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     term_kb_pressed = true;
                     return 1;
                 }
+                if (term_disc_rect.w > 0 and setHit(term_disc_rect, x, y)) {
+                    if (!routeClaim(.chrome)) return 0;
+                    term_press.begin(x, y, time_ms, false);
+                    term_disc_pressed = true;
+                    return 1;
+                }
                 if (term_copy_rect.w > 0 and setHit(term_copy_rect, x, y)) {
                     if (!routeClaim(.chrome)) return 0;
                     term_press.begin(x, y, time_ms, false);
@@ -5087,6 +5142,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                     term_back_pressed = false;
                     term_copy_pressed = false;
                     term_kb_pressed = false;
+                    term_disc_pressed = false;
                 }
                 return 1;
             },
@@ -5094,9 +5150,11 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (!routeIs(.chrome)) return 0;
                 const was_copy = term_copy_pressed;
                 const was_kb = term_kb_pressed;
+                const was_disc = term_disc_pressed;
                 term_back_pressed = false;
                 term_copy_pressed = false;
                 term_kb_pressed = false;
+                term_disc_pressed = false;
                 routeClear(); // 이 띠는 한 손가락 자리다 — 뗀 순간 끝이다
                 if (phase == 3) {
                     term_press.cancel();
@@ -5105,6 +5163,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (was_kb) {
                     // **화면 전환이 아니다** — 그 자리에 머문 채 올려 달라고만 한다.
                     if (term_press.end() == .tap) kb_raise_req = true;
+                    return 1;
+                }
+                if (was_disc) {
+                    // **요청만 세운다.** 소켓을 놓는 것은 host 의 일이고, 화면은 연결 상태가
+                    // 바뀌는 것을 보고 저절로 따라간다 — 여기서 화면을 밀면 두 곳이 같은 일을
+                    // 하게 된다.
+                    if (term_press.end() == .tap) disconnect_req = true;
                     return 1;
                 }
                 if (was_copy) {

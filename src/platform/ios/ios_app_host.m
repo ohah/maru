@@ -978,6 +978,12 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         [self becomeFirstResponder];
         NSLog(@"MARU_INPUT keyboard_raised");
     }
+    // **끊어 달라는 요청을 실행한다.** 펌프만 세운다 — 화면은 상태가 바뀌는 것을 보고
+    // 저절로 따라가므로 여기서 화면을 밀지 않는다(Android `disconnectIfAsked` 와 같은 자리).
+    if (maru_mobile_take_disconnect() && maru_ssh_pump_is_running()) {
+        NSLog(@"MARU_SSH disconnect_requested");
+        maru_ssh_pump_stop();
+    }
     // 입력 종류가 바뀌면 키보드를 갈아 끼운다(Android `restartInput` 과 같은 자리).
     static unsigned int last_kind = 0xFFFFFFFF;
     unsigned int kind = maru_mobile_input_kind();

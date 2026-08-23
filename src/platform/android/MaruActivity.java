@@ -184,7 +184,24 @@ public class MaruActivity extends android.app.NativeActivity {
                     & (android.view.KeyEvent.META_CTRL_ON
                        | android.view.KeyEvent.META_ALT_ON
                        | android.view.KeyEvent.META_META_ON)) != 0;
-            if (from_soft && uch != 0 && !modified) return true;
+            // **막는 것은 "글자" 뿐이다 — 제어문자는 통과시킨다.**
+            //
+            // `getUnicodeChar` 는 엔터에 `\n`(0x0A), 탭에 `\t`(0x09) 를 준다. "0 이 아니면 글자"
+            // 로 보면 **그 둘이 함께 막힌다**, 그런데 IME 는 엔터·탭을 `commitText` 로 보내지
+            // 않고 키 이벤트로만 보낸다 — 막으면 대신 보내 줄 사람이 없어 **통째로 사라진다**
+            // (실측: 이 필터를 넣은 회차에서 원격 셸에 엔터가 안 먹었다).
+            //
+            // 판별은 **인쇄 가능한가**로 한다. 브리지가 눌러 둔 수정자를 실을 때 쓰는 기준과
+            // 같은 자리다(`ptr[0] >= 0x20 && ptr[0] != 0x7F` — "제어문자는 타이핑이 아니라
+            // 시퀀스다"). 두 층이 같은 말을 쓰면 어느 한쪽만 낡지 않는다.
+            //
+            // **경계는 스페이스 하나다.** 표준 키맵에서 엔터·탭·백스페이스·ESC 는 전부 0x20 아래
+            // (`\n`·`\t`·`\b`·0x1B)이고 방향키·F1~F12·Home/End·PgUp/PgDn 은 0 이라 자연히 통과한다.
+            // 스페이스만 `' '`(0x20)이라 **막는 쪽**에 떨어지는데, 그것이 맞다 — 스페이스는 글자라
+            // `commitText` 로 온다(위 `finishComposingText` 의 실측: 삼성 키보드에서 스페이스로
+            // 확정할 때 `commitText` 로 공백이 왔다). 안 막으면 다른 글자와 똑같이 **두 칸**이 된다.
+            final boolean printable = uch >= 0x20 && uch != 0x7F;
+            if (from_soft && printable && !modified) return true;
             nativeKey(event.getKeyCode(), event.getMetaState(), uch);
             return true;
         }

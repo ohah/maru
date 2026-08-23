@@ -76,9 +76,18 @@ static volatile int g_joinable;
 static volatile int g_running;
 static volatile int g_stop;
 static volatile unsigned int g_state = MARU_SSH_STATE_INVALID;
-static unsigned int g_handle;
+/// **`volatile` 인 이유는 옆의 `g_running` 과 같다** — 펌프 스레드가 세우고(`ssh_open` 의 out 인자)
+/// UI·렌더 스레드가 `open_control` 같은 자리에서 **자물쇠 밖으로** 읽는다. 한때 이것만 빠져 있었다.
+static volatile unsigned int g_handle;
 static int g_fd = -1;
+/// **터미널 축의 실패 이름.** 화면의 연결 배너가 이것으로 말한다(`maru_mobile_set_ssh_status`).
 static char g_error[64];
+/// **컨트롤 축의 실패 이름 — 슬롯이 따로인 것이 계약이다.** 컨트롤 채널의 사고는 터미널로
+/// 번지지 않는다(docs/control-plane.md §4a · docs/ssh-client.md §3.4.1). 한 슬롯을 같이 쓰던
+/// 시절에는 세션 목록을 열려다 난 `not_running` 이 배너에 박혀, **셸이 멀쩡히 떠 있는데
+/// "붙지 못했다" 가 세션 내내 남았다**(기기 실측). 로그도 같은 슬롯을 찍어 그 뒤의 컨트롤
+/// 실패가 전부 첫 이름으로 보였다 — 진짜 원인이 자기 로그에 가렸다.
+static char g_control_error[64];
 /// 세션이 끝난 뒤에도 남는 재키잉 횟수. **핸들을 닫으면 값이 사라지므로** 닫기 직전에 챙긴다 —
 /// 검증과 로그는 세션이 끝난 다음에 읽는다.
 static unsigned int g_last_rekeys;
@@ -104,6 +113,16 @@ static void set_error(const char *name) {
     // **먼저 난 실패를 남긴다** — 뒤에 난 것으로 덮으면 원인이 결과에 가린다.
     if (g_error[0] != 0) return;
     snprintf(g_error, sizeof g_error, "%s", name);
+}
+
+/// 컨트롤 축의 실패를 적는다. **터미널 축과 규율이 반대로, 최신이 이긴다.**
+///
+/// 터미널은 세션이 한 번 무너지는 이야기라 "먼저 난 것" 이 원인이다. 컨트롤은 다르다 —
+/// 목록 화면에 들어갈 때마다 여는 **독립 사건**이고(계약 §4a: 재시도는 사용자가 그 화면에
+/// 다시 올 때다), 첫 실패를 붙들면 그 뒤 시도의 이유를 영영 못 본다. 그래서 여는 자리에서
+/// 지우고 그 회차의 결과만 남긴다.
+static void set_control_error(const char *name) {
+    snprintf(g_control_error, sizeof g_control_error, "%s", name);
 }
 
 static void set_state(unsigned int state) {
@@ -656,6 +675,9 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
     if (g_has_secret) memcpy(g_secret, cfg->secret, sizeof g_secret);
     else memset(g_secret, 0, sizeof g_secret);
     g_error[0] = 0;
+    // 컨트롤 축도 새 세션에서 깨끗하게 시작한다 — 지난 세션의 이름이 남으면 목록 화면이
+    // 이번 세션에서 있지도 않은 일을 말한다.
+    g_control_error[0] = 0;
     g_last_rekeys = 0;
     g_handle = 0;
     g_stop = 0;
@@ -708,6 +730,8 @@ unsigned int maru_ssh_pump_rekeys(void) {
 
 const char *maru_ssh_pump_error(void) { return g_error; }
 
+const char *maru_ssh_pump_control_error(void) { return g_control_error; }
+
 unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len) {
     if (!g_running || g_handle == 0) return 0;
     unsigned long off = 0;
@@ -732,12 +756,14 @@ int maru_ssh_pump_open_control(const char *command, unsigned int len) {
     // 컨트롤 버퍼가 차서 코어가 배압으로 멈추고 **터미널까지 함께 멈춘다** — 채널 둘을 독립으로
     // 만든 이유를 그 자리에서 잃는다(적대적 검증이 잡았다). 여는 자리에서 거절하면 그 상황이
     // 아예 생기지 않는다.
+    // **이 회차의 결과만 남긴다** — 지난 시도의 이름이 남아 있으면 화면이 옛 이유를 말한다.
+    g_control_error[0] = 0;
     if (!g_hooks.control) {
-        set_error("no_control_hook");
+        set_control_error("no_control_hook");
         return -1;
     }
     if (!g_running || g_handle == 0) {
-        set_error("not_running");
+        set_control_error("not_running");
         return -1;
     }
     pthread_mutex_lock(&g_session_lock);
@@ -745,7 +771,12 @@ int maru_ssh_pump_open_control(const char *command, unsigned int len) {
     pthread_mutex_unlock(&g_session_lock);
     if (st != MARU_SSH_OK) {
         // **왜 못 열었는지를 남긴다** — 재키잉 중이면 다시 부르면 되고, 그 밖이면 축을 접어야 한다.
-        set_error(maru_mobile_ssh_last_error(g_handle));
+        set_control_error(maru_mobile_ssh_last_error(g_handle));
+        // **코어 슬롯도 비운다.** 슬롯의 `err_name` 은 선착순이라(mobile_ssh.zig 의 `setError`),
+        // 여기서 안 비우면 컨트롤이 박은 이름을 **터미널 경로가 집어 든다** — `step_idle`·
+        // `feed_buffered` 가 같은 슬롯을 읽는다. 헤더가 "읽은 쪽이 비운다" 고 정해 둔 규율인데
+        // (mobile_host_abi.h) 펌프가 한 번도 안 지키고 있었다: 축이 새는 두 번째 경로다.
+        maru_mobile_ssh_clear_error(g_handle);
         return st;
     }
     return 0;

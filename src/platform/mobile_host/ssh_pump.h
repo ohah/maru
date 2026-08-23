@@ -86,15 +86,23 @@ int maru_ssh_pump_accept_host_key(int accept);
 const char *maru_ssh_pump_host_key_fingerprint(void);
 /// 지금 세션이 키를 몇 번 갈았나. 안 돌고 있으면 0.
 unsigned int maru_ssh_pump_rekeys(void);
-/// 마지막 실패 이름. 없으면 빈 문자열.
+/// **터미널 축의** 마지막 실패 이름. 없으면 빈 문자열. 먼저 난 것이 남는다(원인이 결과에
+/// 가리지 않게). 컨트롤 채널의 실패는 여기 안 온다 — `maru_ssh_pump_control_error` 를 쓴다.
 const char *maru_ssh_pump_error(void);
+/// **컨트롤 축의** 마지막 실패 이름. 없으면 빈 문자열. 터미널과 달리 **최신이 이긴다** —
+/// 목록 화면에 들어갈 때마다 여는 독립 사건이라 첫 실패를 붙들면 그 뒤 이유를 못 본다.
+///
+/// **슬롯이 따로인 것이 계약이다**(docs/control-plane.md §4a): 컨트롤 축이 안 서는 것은
+/// "세션 목록이 안 보이는 것" 이지 "접속이 안 되는 것" 이 아니다.
+const char *maru_ssh_pump_control_error(void);
 /// 키 입력을 원격으로 보낸다(host 의 IME·키바가 부른다). 보낸 바이트 수.
 unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len);
 /// 창 크기가 바뀌었다.
 void maru_ssh_pump_resize(unsigned int cols, unsigned int rows);
 
 /// **두 번째 채널을 연다** — 원격에서 명령 하나를 돌린다(계약 docs/control-plane.md §4a).
-/// 0=열기 시작함, 음수=못 열었다(`maru_ssh_pump_error` 에 이름이 남는다).
+/// 0=열기 시작함, 음수=못 열었다(`maru_ssh_pump_control_error` 에 이름이 남는다 — **터미널
+/// 축의 `maru_ssh_pump_error` 가 아니다**).
 ///
 /// **셸이 뜬 뒤에 부른다**(`MARU_SSH_STATE_READY`). 재키잉 중이면 실패로 돌아오고 **아무것도
 /// 안 나갔으므로 다시 부르면 된다**.

@@ -903,6 +903,35 @@ test "Ctrl 을 다시 누르면 꺼진다" {
     bridge.maru_mobile_clear_error();
 }
 
+test "재현: 켜진 수정자만 눌린 것처럼 보인다" {
+    // **기기에서 ctrl 을 눌렀더니 alt 도 함께 밝아졌다.** 그리는 자리가 `armed_mods != 0` 만 봐서
+    // sticky 를 가진 키가 **전부** armed 로 칠해졌기 때문이다. 실제로 나가는 것은 ctrl 하나뿐이라
+    // (`armed_mods` 에는 하나만 실린다) 동작은 처음부터 옳았고 **화면만 거짓말을 했다** — 그래서
+    // `maru_mobile_armed_mods()` 를 아무리 재도 안 잡히고, 그리기 경로에서 재야 잡힌다.
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.keybarArmedDrawn());
+
+    const ctrl = keyCenter(bridge.keybarIndexOf("ctrl") orelse return error.TestUnexpectedResult);
+    _ = keybarTap(ctrl.x, ctrl.y);
+    // 다시 그려야 표시가 갱신된다 — 판정이 그리기 경로 안에 있다.
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_armed_mods()); // 실리는 것: ctrl
+    try std.testing.expectEqual(@as(u32, 2), bridge.keybarArmedDrawn()); // 보이는 것도 ctrl 뿐
+
+    // alt 로 바꾸면 표시도 따라 바뀐다 — 둘이 같이 켜지지 않는다(토글은 하나만 싣는다).
+    const alt = keyCenter(bridge.keybarIndexOf("alt") orelse return error.TestUnexpectedResult);
+    _ = keybarTap(alt.x, alt.y);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 4), bridge.maru_mobile_armed_mods());
+    try std.testing.expectEqual(@as(u32, 4), bridge.keybarArmedDrawn());
+
+    _ = keybarTap(alt.x, alt.y); // 정리
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.keybarArmedDrawn());
+    bridge.maru_mobile_clear_error();
+}
+
 // 셀 (row,col) 을 가리키는 화면 좌표를 **브리지에 물어** 찾는다. 좌표를 손으로 적으면
 // 레이아웃이 바뀔 때 테스트만 맞고(엉뚱한 자리를 눌러) 제품이 틀린 줄 모른다 — 실제로
 // 공백을 눌러 "선택이 안 된다" 로 보인 적이 있다.
@@ -4442,6 +4471,27 @@ test "붙은 뒤에는 아무 말도 안 한다 — 화면이 곧 답이다" {
     try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
 }
 
+test "재현: 셸이 떴으면 남은 이름이 있어도 침묵한다" {
+    // **기기에서 이렇게 났다.** 컨트롤 채널이 세션 준비 전에 지면서 남긴 `not_running` 이 펌프의
+    // 에러 슬롯에 박혔고(두 축이 슬롯 하나를 같이 썼다), 그 뒤 상태가 바뀔 때마다 host 가 그
+    // 이름을 함께 실어 날랐다. 결과는 **멀쩡히 돌아가는 셸 위에 "붙지 못했다" 가 세션 내내**
+    // 떠 있는 것이었다 — 로그는 `state=11 error=not_running` 이었다.
+    //
+    // 진짜 수정은 펌프에서 축을 가른 것이고(그 이름이 애초에 안 온다), 이 테스트가 지키는 것은
+    // **순서**다: READY 판정이 이름 검사보다 먼저 와야 다음에 어떤 이름이 새든 화면이 안 흔들린다.
+    bridge.maru_mobile_set_ssh_status(11, "not_running", 11);
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+
+    // 터미널 축의 진짜 실패여도 마찬가지다 — 셸이 떠 있는 동안 화면이 곧 답이다.
+    bridge.maru_mobile_set_ssh_status(11, "connect_failed", 14);
+    try std.testing.expectEqual(@as(?[]const u8, null), bridge.connectionMessageNow());
+
+    // **닫힌 뒤에는 다시 말한다** — 침묵이 READY 에만 걸리는지 확인한다(안 그러면 진짜 실패를 삼킨다).
+    bridge.maru_mobile_set_ssh_status(12, "connect_failed", 14);
+    try std.testing.expect(bridge.connectionMessageNow() != null);
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+}
+
 // ── 화면으로만 보던 것을 여기서 잰다 (데모 바이트 제거의 짝) ────────────────────
 //
 // **데모 바이트가 유일한 판정자였다.** 터미널에 박아 둔 시험용 줄이 박스·블록·브라유·SGR·
@@ -4751,6 +4801,42 @@ test "축이 꺼지면 그 이유를 화면이 말한다" {
     advanceFrame(402, 874, 16);
     try std.testing.expectEqual(bridge.RemoteShown.off, bridge.remoteSessionsShown());
     try std.testing.expectEqual(@as(usize, 0), bridge.remoteRowsDrawn());
+    bridge.maru_mobile_control_reset();
+}
+
+test "재현: 채널을 못 열면 기다리지 않고 그 이유를 말한다" {
+    // **기기에서 목록이 "세션을 받는 중" 에 갇혔다.** 여는 것은 host 인데(소켓이 그쪽에 있다)
+    // 실패를 host 만 알고 **아무에게도 안 알렸다** — 화면은 `listed` 가 거짓인 채로 남아 영원히
+    // 기다렸다. 시한(`timedOut`)도 안 걸린다: host 가 시계를 **열기에 성공했을 때만** 세우기
+    // 때문이다. 계약 §4a 는 "실패하면 그 화면에서 말한다" 이고, 그 통로가 없던 것이 결함이다.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    // 알리기 전에는 기다리는 것이 맞다 — "아직 모른다" 와 "없다" 는 다른 말이다.
+    try std.testing.expectEqual(bridge.RemoteShown.loading, bridge.remoteSessionsShown());
+
+    bridge.maru_mobile_control_open_failed();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.off, bridge.remoteSessionsShown());
+
+    // **시한과 다른 이유로 갈린다** — 뭉치면 "maru 가 안 떴다" 로 잘못 안내한다.
+    try std.testing.expectEqual(@as(u32, 5), bridge.maru_mobile_control_off_reason());
+    bridge.maru_mobile_control_reset();
+}
+
+test "이미 선 축은 열기 실패로 무너지지 않는다" {
+    // 늦게 온 실패 보고가 **이미 받은 목록을 지우면** 사용자는 멀쩡하던 화면을 잃는다.
+    // `timedOut` 이 `waiting_hello` 에서만 듣는 것과 같은 이유다.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7}}]}\n");
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+
+    bridge.maru_mobile_control_open_failed();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
     bridge.maru_mobile_control_reset();
 }
 

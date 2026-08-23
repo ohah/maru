@@ -696,7 +696,12 @@ unsigned int maru_mobile_control_state(void);
 #define MARU_MOBILE_CONTROL_OFF_TOO_MUCH_NOISE 2
 #define MARU_MOBILE_CONTROL_OFF_PROTOCOL_MISMATCH 3
 #define MARU_MOBILE_CONTROL_OFF_FRAME_TOO_LARGE 4
+/// 채널 자체를 못 열었다(앞의 넷과 달리 `hello` 를 기다려 볼 자리에도 못 갔다).
+#define MARU_MOBILE_CONTROL_OFF_OPEN_FAILED 5
 unsigned int maru_mobile_control_off_reason(void);
+/// **열기가 졌다고 host 가 알린다.** 여는 것은 host 가 하므로(소켓이 그쪽에 있다) 실패도 그쪽만
+/// 안다 — 안 알리면 화면은 이유를 모른 채 기다린다(계약 §4a: 실패하면 그 화면에서 말한다).
+void maru_mobile_control_open_failed(void);
 /// 지금 아는 세션 수.
 unsigned int maru_mobile_control_session_count(void);
 /// 목록을 한 번이라도 받았나. **"세션이 없다" 와 "아직 모른다" 는 화면에서 다른 말이다.**

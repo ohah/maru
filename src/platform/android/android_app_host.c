@@ -1675,13 +1675,23 @@ static int32_t onInputEvent(struct android_app *app, AInputEvent *ev) {
 static void driveControlChannel(void) {
     if (!maru_ssh_pump_is_running()) return;
 
-    if (maru_mobile_take_control_open()) {
+    // **셸이 뜬 뒤에만 연다.** 예전 가드는 `is_running` 뿐이었는데 그것은 `pthread_create` 직후
+    // 참이라 READY 와 무관하다 — 목록 화면이 nav 스택의 뿌리라 접속 중에 거기 있으면 요청이 곧바로
+    // 서고, 그때 열기가 `not_running`/`NotReady` 로 지고 **요청은 take-once 라 사라졌다**. 그러면
+    // 셸이 떠도 목록은 영영 "받는 중" 이었다(기기 실측). 상태로 가르면 준비 전에는 아예 안 가져가
+    // 요청이 남고, READY 가 된 프레임에 한 번 연다 — 자동 재시도가 아니라 **제 시점에 한 번**이라
+    // 계약(§4a: 재시도는 사용자가 그 화면에 다시 올 때다)과도 맞다.
+    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY && maru_mobile_take_control_open()) {
         // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];
         unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
         if (cmd_len == 0 || maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len) != 0) {
-            LOGI("MARU_CONTROL open failed: %s", maru_ssh_pump_error());
+            // **컨트롤 축의 이름을 찍는다.** 예전에는 터미널 슬롯을 찍어, 한 번 박힌 이름이
+            // 그 뒤 모든 실패를 덮어 **진짜 원인이 자기 로그에 가렸다**.
+            LOGI("MARU_CONTROL open failed: %s", maru_ssh_pump_control_error());
+            // **실패는 그 화면이 말한다**(계약 §4a). 안 알리면 목록은 이유도 모른 채 기다린다.
+            maru_mobile_control_open_failed();
         } else {
             g_control_open_ms = nowMs();
         }

@@ -132,6 +132,11 @@ pub const SocketServer = struct {
     /// GUI가 연결되지 않았거나 한 connection이 오래 살아 있어도 PTY exit/read-error lifecycle을 전진시키는 owner tick.
     owner_tick_ctx: ?*anyopaque = null,
     owner_tick: ?*const fn (ctx: *anyopaque) void = null,
+    /// Optional daemon-global PTY-output self-pipe. The poll owner alone drains it and then invokes
+    /// `owner_tick`; reader threads never enter socket/server state.
+    owner_wake_fd: c.fd_t = -1,
+    owner_wake_ctx: ?*anyopaque = null,
+    owner_wake_drain: ?*const fn (ctx: *anyopaque) bool = null,
     subscriptions: subscription_identity.Table,
 
     pub const backlog: c_uint = 16;
@@ -291,6 +296,11 @@ pub const SocketServer = struct {
 
     pub fn tickOwner(self: *SocketServer) void {
         if (self.owner_tick) |tick| tick(self.owner_tick_ctx.?);
+    }
+
+    pub fn drainOwnerWake(self: *SocketServer) bool {
+        const drain = self.owner_wake_drain orelse return false;
+        return drain(self.owner_wake_ctx.?);
     }
 };
 

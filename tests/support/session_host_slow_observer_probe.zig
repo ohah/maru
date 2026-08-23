@@ -69,6 +69,10 @@ pub const Report = extern struct {
     first_stall_send_buffer_bytes: u64,
     stale_client_observations: u64,
     pty_output_bytes: u64,
+    output_wake_notify_attempts: u64,
+    output_wake_published_writes: u64,
+    output_wake_coalesced_writes: u64,
+    output_wake_drain_turns: u64,
     live_child_pid: i32,
     reaped_children: u64,
     last_child_exit_status: i32,
@@ -79,6 +83,7 @@ pub const Report = extern struct {
         kind: ReportKind,
         telemetry: session_host.poll_owner.TelemetrySnapshot,
         pty_output_bytes: u64,
+        output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
     ) Report {
         const a = telemetry.accounting;
@@ -107,6 +112,10 @@ pub const Report = extern struct {
             .first_stall_send_buffer_bytes = telemetry.first_stall_send_buffer_bytes,
             .stale_client_observations = telemetry.stale_client_observations,
             .pty_output_bytes = pty_output_bytes,
+            .output_wake_notify_attempts = output_wake.notify_attempts,
+            .output_wake_published_writes = output_wake.published_writes,
+            .output_wake_coalesced_writes = output_wake.coalesced_writes,
+            .output_wake_drain_turns = output_wake.drain_turns,
             .live_child_pid = child_exit.live_child_pid,
             .reaped_children = child_exit.reaped_children,
             .last_child_exit_status = child_exit.last_exit_status,
@@ -185,6 +194,11 @@ test "report rejects every framing field corruption" {
         .stale_client_observations = 0,
     };
     const valid = Report.from(9, .snapshot, telemetry, 0, .{
+        .notify_attempts = 0,
+        .published_writes = 0,
+        .coalesced_writes = 0,
+        .drain_turns = 0,
+    }, .{
         .live_child_pid = 0,
         .reaped_children = 0,
         .last_exit_status = -1,
@@ -240,6 +254,11 @@ test "exact packet decodes and exact plus one datagram is rejected" {
         .stale_client_observations = 0,
     };
     const report = Report.from(18, .stop_ack, telemetry, 0, .{
+        .notify_attempts = 0,
+        .published_writes = 0,
+        .coalesced_writes = 0,
+        .drain_turns = 0,
+    }, .{
         .live_child_pid = 0,
         .reaped_children = 0,
         .last_exit_status = -1,

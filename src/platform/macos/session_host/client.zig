@@ -24669,7 +24669,9 @@ test "client: spawns, lists, and terminates a real runtime on a forked host over
     defer client.deinit();
 
     // runtime.spawn: 실 PTY runtime을 host에 띄우고 runtime_id를 받는다(client→socket→dispatch→RuntimeOps→forkpty 전 경로).
-    const spawn_resp = try client.call("runtime.spawn", "{\"argv\":[\"/bin/sh\",\"-c\",\"exit 0\"],\"cols\":40,\"rows\":10}");
+    // Keep this runtime alive until the explicit terminate below. `exit 0` races the host's
+    // prompt terminal-event wake, so successful exact-once reap can precede the list request.
+    const spawn_resp = try client.call("runtime.spawn", "{\"argv\":[\"/bin/sh\",\"-c\",\"sleep 30\"],\"cols\":40,\"rows\":10}");
     defer allocator.free(spawn_resp);
     const rid = extractRuntimeId(spawn_resp) orelse {
         try testing.expect(false); // 응답에 runtime_id가 없다.

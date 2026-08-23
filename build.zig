@@ -3079,6 +3079,23 @@ pub fn build(b: *std.Build) void {
     run_session_host_cr6e_boundary_tests.addArg("--maru-expect-tests=2");
     run_session_host_cr6e_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6e_boundary_tests.step);
+    const session_host_cr6f_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr6f_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"CR6f output wake"},
+    });
+    const run_session_host_cr6f_boundary_tests = b.addRunArtifact(session_host_cr6f_boundary_tests);
+    run_session_host_cr6f_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_cr6f_boundary_tests.setCwd(b.path("."));
+    const session_host_cr6f_step = b.step(
+        "test-session-host-cr6f",
+        "Verify CR6f output wake ownership and source boundaries",
+    );
+    session_host_cr6f_step.dependOn(&run_session_host_cr6f_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_cr6f_boundary_tests.step);
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),
@@ -9030,6 +9047,7 @@ pub fn build(b: *std.Build) void {
             "Run the ReleaseFast real PTY/RSS slow-observer artifact gate",
         );
         slow_observer_step.dependOn(&run_slow_observer_validator.step);
+        slow_observer_step.dependOn(&run_session_host_slow_observer_validator_tests.step);
         slow_observer_step.dependOn(&run_slow_observer_probe_tests.step);
         slow_observer_step.dependOn(&run_slow_observer_e2e_tests.step);
 

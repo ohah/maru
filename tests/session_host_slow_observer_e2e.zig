@@ -29,6 +29,8 @@ const workload_iterations_max: usize = 8;
 const baseline_sample_count = 10;
 const pressure_sample_count_min = 20;
 const post_sample_count = 10;
+const wake_sample_count = 7;
+const idle_wake_observation_ms: u64 = 250;
 const target_interval_us: c_uint = 20_000;
 const deadline_ms: u64 = 30_000;
 const sol_local: c_int = 0;
@@ -43,6 +45,20 @@ const RawSample = struct {
     ri_resident_size: u64,
     ri_phys_footprint: u64,
     ri_proc_start_abstime: u64,
+};
+
+const WakeSample = struct {
+    input_at_ns: u64,
+    input_accepted_at_ns: u64,
+    marker_at_ns: u64,
+    end_to_end_latency_ns: u64,
+    delivery_latency_ns: u64,
+};
+
+const IdleCpuSample = struct {
+    monotonic_ns: u64,
+    user_time_ns: u64,
+    system_time_ns: u64,
 };
 
 const ProcessIdentity = struct {
@@ -94,6 +110,23 @@ const Artifact = struct {
     slow_eagain_count: u64,
     slow_pollout_absent_count: u64,
     stall_at_ns: u64,
+    wake_sample_count: u64,
+    wake_latency_min_ns: u64,
+    wake_latency_median_ns: u64,
+    wake_latency_max_ns: u64,
+    wake_samples: []const WakeSample,
+    idle_wake_observation_ns: u64,
+    idle_wake_notify_delta: u64,
+    idle_wake_published_delta: u64,
+    idle_wake_coalesced_delta: u64,
+    idle_wake_drain_delta: u64,
+    idle_cpu_before: IdleCpuSample,
+    idle_cpu_after: IdleCpuSample,
+    idle_cpu_total_delta_ns: u64,
+    active_wake_notify_delta: u64,
+    active_wake_published_delta: u64,
+    active_wake_coalesced_delta: u64,
+    active_wake_drain_delta: u64,
     controller_input_at_ns: u64,
     healthy_marker_at_ns: u64,
     healthy_progress_batches_before: u64,
@@ -238,7 +271,7 @@ pub fn main(init: std.process.Init) !void {
 
     stage = "runtime spawn";
     const spawn_response = try controller.call("runtime.spawn",
-        \\{"argv":["/bin/sh","-c","if [ -e /dev/fd/3 ] || [ -e /dev/fd/4 ]; then exit 97; fi; /bin/stty -echo -onlcr; printf 'MARU_PROBE_FDS_CLOSED\\nMARU_SLOW_OBSERVER_READY\\n'; exec /bin/cat"],"cols":512,"rows":256}
+        \\{"argv":["/bin/sh","-c","if [ -e /dev/fd/3 ] || [ -e /dev/fd/4 ]; then exit 97; fi; /bin/stty -echo -onlcr -icrnl; printf 'MARU_PROBE_FDS_CLOSED\\nMARU_SLOW_OBSERVER_READY\\n'; exec /bin/cat"],"cols":80,"rows":24}
     );
     defer allocator.free(spawn_response);
     const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse
@@ -333,21 +366,166 @@ pub fn main(init: std.process.Init) !void {
     );
     if (!pty_probe_fds_closed) return error.ProbeFdLeakEvidenceMissing;
 
-    stage = "baseline reset";
+    stage = "output wake idle observation";
+    const idle_cpu_before = try takeIdleCpuSample(host_identity, init.io);
+    const idle_wake_before = try probe(
+        command_pair[0],
+        report_pair[0],
+        &sequence,
+        .snapshot,
+        deadline_ns,
+        init.io,
+    );
+    const idle_wake_started_at = monotonicNow(init.io);
+    _ = usleep(@intCast(idle_wake_observation_ms * std.time.us_per_ms));
+    const idle_wake_after = try probe(
+        command_pair[0],
+        report_pair[0],
+        &sequence,
+        .snapshot,
+        deadline_ns,
+        init.io,
+    );
+    const idle_cpu_after = try takeIdleCpuSample(host_identity, init.io);
+    const idle_wake_ended_at = monotonicNow(init.io);
+    if (idle_wake_after.output_wake_notify_attempts != idle_wake_before.output_wake_notify_attempts or
+        idle_wake_after.output_wake_published_writes != idle_wake_before.output_wake_published_writes or
+        idle_wake_after.output_wake_coalesced_writes != idle_wake_before.output_wake_coalesced_writes or
+        idle_wake_after.output_wake_drain_turns != idle_wake_before.output_wake_drain_turns)
+        return error.IdleOutputWakeStorm;
+
+    stage = "output wake latency";
+    var wake_samples: [wake_sample_count]WakeSample = undefined;
+    const wake_stages = [_][]const u8{
+        "output wake latency 1/7",
+        "output wake latency 2/7",
+        "output wake latency 3/7",
+        "output wake latency 4/7",
+        "output wake latency 5/7",
+        "output wake latency 6/7",
+        "output wake latency 7/7",
+    };
+    for (&wake_samples, 0..) |*sample, sample_index| {
+        stage = wake_stages[sample_index];
+        var wake_marker_buf: [96]u8 = undefined;
+        const wake_marker = try std.fmt.bufPrint(
+            &wake_marker_buf,
+            "\rMARU_CR6F_WAKE_{d}_{d}\n",
+            .{ c.getpid(), sample_index },
+        );
+        const input_at = monotonicNow(init.io);
+        try sendInputBeforeDeadline(
+            &controller,
+            controller_stream,
+            wake_marker,
+            deadline_ns,
+            init.io,
+        );
+        const input_accepted_at = monotonicNow(init.io);
+        try waitForMarker(
+            &healthy,
+            healthy_stream,
+            &healthy_screen,
+            wake_marker[1 .. wake_marker.len - 1],
+            &healthy_drained,
+            deadline_ns,
+            init.io,
+        );
+        const marker_at = monotonicNow(init.io);
+        sample.* = .{
+            .input_at_ns = input_at,
+            .input_accepted_at_ns = input_accepted_at,
+            .marker_at_ns = marker_at,
+            .end_to_end_latency_ns = marker_at - input_at,
+            .delivery_latency_ns = marker_at - input_accepted_at,
+        };
+        while (try pumpHealthy(
+            &controller,
+            controller_stream,
+            &controller_screen,
+            &controller_drained,
+        )) {}
+        while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
+    }
+    const active_wake_after = try probe(
+        command_pair[0],
+        report_pair[0],
+        &sequence,
+        .snapshot,
+        deadline_ns,
+        init.io,
+    );
+    if (active_wake_after.output_wake_notify_attempts < idle_wake_after.output_wake_notify_attempts + wake_sample_count or
+        active_wake_after.output_wake_published_writes < idle_wake_after.output_wake_published_writes + 1 or
+        active_wake_after.output_wake_drain_turns < idle_wake_after.output_wake_drain_turns + 1)
+        return error.OutputWakeEvidenceMissing;
+    var wake_latencies: [wake_sample_count]u64 = undefined;
+    for (wake_samples, 0..) |sample, index|
+        wake_latencies[index] = sample.delivery_latency_ns;
+    std.mem.sort(u64, &wake_latencies, {}, std.sort.asc(u64));
+
+    stage = "pressure geometry resize";
+    var resize_buf: [128]u8 = undefined;
+    const resize_params = try std.fmt.bufPrint(
+        &resize_buf,
+        "{{\"stream_id\":{d},\"cols\":512,\"rows\":256,\"client_sequence\":1}}",
+        .{controller_stream},
+    );
+    const resize_response = try controller.call("runtime.resize", resize_params);
+    defer allocator.free(resize_response);
+    if (std.mem.indexOf(u8, resize_response, "\"changed\":true") == null)
+        return error.ResizeFailed;
+    while (controller_screen.cols != 512 or controller_screen.rows_count != 256 or
+        healthy_screen.cols != 512 or healthy_screen.rows_count != 256)
+    {
+        _ = try pumpHealthy(
+            &controller,
+            controller_stream,
+            &controller_screen,
+            &controller_drained,
+        );
+        _ = try pumpHealthy(
+            &healthy,
+            healthy_stream,
+            &healthy_screen,
+            &healthy_drained,
+        );
+        while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
+        if (monotonicNow(init.io) >= deadline_ns) return error.ResizeTimeout;
+        _ = usleep(2_000);
+    }
+
+    var baseline_samples: [baseline_sample_count]RawSample = undefined;
+    for (&baseline_samples) |*sample| {
+        sample.* = try takeSample(host_identity, init.io);
+        // Resize/full-snapshot producer work is setup, not pressure. Keep every observer draining
+        // throughout the RSS baseline so no residual write queue owns the later stall identity.
+        _ = try pumpHealthy(
+            &controller,
+            controller_stream,
+            &controller_screen,
+            &controller_drained,
+        );
+        _ = try pumpHealthy(
+            &healthy,
+            healthy_stream,
+            &healthy_screen,
+            &healthy_drained,
+        );
+        while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
+        _ = usleep(target_interval_us);
+    }
+
+    stage = "pressure reset";
     const reset_report = try probe(command_pair[0], report_pair[0], &sequence, .reset_stall, deadline_ns, init.io);
     if (@as(probe_wire.ReportKind, @enumFromInt(reset_report.kind)) != .reset_ack)
         return error.ProbeProtocolError;
     const baseline_pty_output = reset_report.pty_output_bytes;
     const baseline_ledger = reset_report.resident_bytes;
-    // 초기 full snapshot과 READY marker는 pressure 격리의 진행 증거가 아니다.
-    // reset ACK를 phase barrier로 삼아 이후 healthy delivery만 별도로 센다.
+    // Resize/full snapshot/READY delivery is setup evidence. The post-baseline reset ACK is the
+    // phase barrier, so only workload delivery can own pressure progress or first-stall telemetry.
     healthy_drained = 0;
 
-    var baseline_samples: [baseline_sample_count]RawSample = undefined;
-    for (&baseline_samples) |*sample| {
-        sample.* = try takeSample(host_identity, init.io);
-        _ = usleep(target_interval_us);
-    }
     var pressure_samples: std.ArrayListUnmanaged(RawSample) = .empty;
     defer pressure_samples.deinit(allocator);
     try pressure_samples.append(allocator, try takeSample(host_identity, init.io));
@@ -550,6 +728,7 @@ pub fn main(init: std.process.Init) !void {
     if (!socket_removed) return error.SocketCleanupFailed;
     stage = "directory cleanup";
     try unlinkSessionLeaf(session_dir, "owner-v2.lock");
+    try removeSessionDirectoryLeaf(session_dir, "incidents");
     if (!removeDirectoryRetry(session_dir, 100)) return error.SessionDirectoryCleanupFailed;
     directory_exists = false;
 
@@ -603,6 +782,24 @@ pub fn main(init: std.process.Init) !void {
         .slow_eagain_count = 0,
         .slow_pollout_absent_count = stalled.pollout_absent_count,
         .stall_at_ns = stalled.first_stall_ns,
+        .wake_sample_count = wake_sample_count,
+        .wake_latency_min_ns = wake_latencies[0],
+        .wake_latency_median_ns = wake_latencies[wake_sample_count / 2],
+        .wake_latency_max_ns = wake_latencies[wake_sample_count - 1],
+        .wake_samples = &wake_samples,
+        .idle_wake_observation_ns = idle_wake_ended_at - idle_wake_started_at,
+        .idle_wake_notify_delta = idle_wake_after.output_wake_notify_attempts - idle_wake_before.output_wake_notify_attempts,
+        .idle_wake_published_delta = idle_wake_after.output_wake_published_writes - idle_wake_before.output_wake_published_writes,
+        .idle_wake_coalesced_delta = idle_wake_after.output_wake_coalesced_writes - idle_wake_before.output_wake_coalesced_writes,
+        .idle_wake_drain_delta = idle_wake_after.output_wake_drain_turns - idle_wake_before.output_wake_drain_turns,
+        .idle_cpu_before = idle_cpu_before,
+        .idle_cpu_after = idle_cpu_after,
+        .idle_cpu_total_delta_ns = (idle_cpu_after.user_time_ns - idle_cpu_before.user_time_ns) +
+            (idle_cpu_after.system_time_ns - idle_cpu_before.system_time_ns),
+        .active_wake_notify_delta = active_wake_after.output_wake_notify_attempts - idle_wake_after.output_wake_notify_attempts,
+        .active_wake_published_delta = active_wake_after.output_wake_published_writes - idle_wake_after.output_wake_published_writes,
+        .active_wake_coalesced_delta = active_wake_after.output_wake_coalesced_writes - idle_wake_after.output_wake_coalesced_writes,
+        .active_wake_drain_delta = active_wake_after.output_wake_drain_turns - idle_wake_after.output_wake_drain_turns,
         .controller_input_at_ns = controller_input_at,
         .healthy_marker_at_ns = marker_at,
         .healthy_progress_batches_before = healthy_progress_batches_before,
@@ -754,8 +951,11 @@ fn waitForMarker(
 ) !void {
     while (monotonicNow(io) < deadline_ns) {
         if (screenContains(assembler, marker)) return;
-        _ = try pumpHealthy(client, stream_id, assembler, drained_bytes);
-        _ = usleep(2_000);
+        const progressed = try pumpHealthy(client, stream_id, assembler, drained_bytes);
+        // Timestamp success in the same observation turn that applied the marker. Sleeping after
+        // progress adds a deterministic 2 ms harness delay to the product latency measurement.
+        if (screenContains(assembler, marker)) return;
+        if (!progressed) _ = usleep(2_000);
     }
     return error.MarkerTimeout;
 }
@@ -919,6 +1119,21 @@ fn takeSample(identity: ProcessIdentity, io: std.Io) !RawSample {
     };
 }
 
+fn takeIdleCpuSample(identity: ProcessIdentity, io: std.Io) !IdleCpuSample {
+    const pinned = try processIdentity(identity.pid, true);
+    if (!sameProcessIdentity(identity, pinned) or
+        pinned.start_abstime != identity.start_abstime)
+        return error.HostIdentityChanged;
+    var usage: mac.struct_rusage_info_v4 = std.mem.zeroes(mac.struct_rusage_info_v4);
+    if (mac.proc_pid_rusage(identity.pid, mac.RUSAGE_INFO_V4, @ptrCast(&usage)) != 0)
+        return error.RusageUnavailable;
+    return .{
+        .monotonic_ns = monotonicNow(io),
+        .user_time_ns = usage.ri_user_time,
+        .system_time_ns = usage.ri_system_time,
+    };
+}
+
 fn maybeSample(
     allocator: std.mem.Allocator,
     samples: *std.ArrayListUnmanaged(RawSample),
@@ -1062,6 +1277,12 @@ fn unlinkSessionLeaf(session_dir: [:0]const u8, leaf: []const u8) !void {
         return error.SessionDirectoryCleanupFailed;
 }
 
+fn removeSessionDirectoryLeaf(session_dir: [:0]const u8, leaf: []const u8) !void {
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ session_dir, leaf });
+    if (!removeDirectoryRetry(path, 10)) return error.SessionDirectoryCleanupFailed;
+}
+
 fn countClosedFds(fds: []const c.fd_t) u8 {
     var closed: u8 = 0;
     for (fds) |fd| {
@@ -1080,6 +1301,7 @@ fn cleanupSessionDirectory(
     const socket_rc = c.unlink(socket_path.ptr);
     if (socket_rc != 0 and posix.errno(socket_rc) != .NOENT) return;
     unlinkSessionLeaf(session_dir, "owner-v2.lock") catch return;
+    removeSessionDirectoryLeaf(session_dir, "incidents") catch return;
     _ = removeDirectoryRetry(session_dir, 100);
 }
 

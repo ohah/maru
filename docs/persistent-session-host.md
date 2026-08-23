@@ -14795,15 +14795,20 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 정확한 latency/RSS 숫자는 P3 구현 전에 baseline artifact를 측정해 `performance-budget.md`에 추가한다. 근거 없는 숫자를 이
 설계 PR에서 약속하지 않지만, 측정·상한 없는 default 전환도 허용하지 않는다.
 
-**입력 echo 지연(측정됨, default 전환 선결)**: host-backed 터미널의 키 입력→화면 반영은 in-process 대비 **약 20ms 더 느리다**
-(실측: 실 fork host + `/bin/cat` tty echo 왕복, 위상 분산 후에도 flat ~21–23ms; in-process 입력→모델은 tick 게이트가 없어
-~1–2ms). 원인은 무작위 tick 위상이 아니라 **구조적**이다 — reader 스레드는 core를 즉시 갱신하지만, delta **push**가 serve
-루프의 `poll(cfd, delta_tick_ms=20)`(`socket_server.zig`)에 묶여, 격리된 키 입력 뒤 poll이 풀 20ms를 블로킹한 다음에야
-`collectDeltas`가 밀어낸다. 이 20ms는 **의도적 단순화**(단일 스레드 push, cross-thread queue 불필요)의 대가이며, keep-alive가
-opt-in인 동안은 수용한다(체감 ~9ms→~30ms, Electron/SSH 터미널 수준). **해소책(후속·default 전환 선결)**: reader 스레드가
-core 갱신 시 self-pipe/eventfd로 serve 루프를 깨워 즉시 push(추가분 ~1–2ms, tmux식 이벤트 기반) — 단, 지금의 단일 스레드
-불변식(core lock 위 push)을 넘으므로 wakeup 정확성(놓친/스퍼리어스)에 주의한다. 급하면 중간값으로 `delta_tick_ms`를 4~8ms로
-낮춰 floor만 줄일 수 있다(복잡도 0, CPU wakeup↑). 이 지연 제거는 default `keep-alive-after-quit=true` 전환의 선결 항목이다.
+**입력 echo wake 계약(default 전환 선결)**: host-backed PTY reader는 core를 갱신하고 bounded `PtyEventQueue`에 output 또는
+terminal event를 성공적으로 publish한 뒤 daemon-global nonblocking self-pipe의 write end에 한 byte를 쓴다. reader는
+socket·`Connection`·subscription·producer를 직접 읽거나 변경하지 않는다. `poll_owner.Owner`가 listener/client fd와 함께
+self-pipe read end를 유일하게 poll하고, readable이면 pipe를 끝까지 drain한 뒤 `RuntimeManager.drainOwnedEvents`와 기존
+round-robin producer sweep을 같은 owner turn에서 시작한다. 따라서 `collectDeltas`와 screen publication의 단일-owner 불변식은
+유지된다.
+
+pipe가 가득 찬 `EAGAIN`은 이미 unread wake가 있다는 뜻이라 성공 coalesce이며 reader를 block하지 않는다. 각 성공 queue
+publication은 wake를 시도하므로 owner가 pipe를 비운 직후의 동시 publication도 다음 readiness를 남긴다. QueueFull/QueueClosed는
+새 publication이 아니므로 wake를 만들지 않는다. spurious wake는 빈 drain 뒤 no-op producer sweep이고, read end EOF/error는
+poll owner가 fail-close한다. 20ms `delta_tick_ms`는 metadata 관측과 lost-wake 안전망으로 남지만 정상 PTY output push의
+latency floor가 아니다. same-PID exec migration은 pipe/notifier/fd를 직렬화하지 않고 target process에서 새로 만든 뒤 reader를
+재개한다. 실제 input→delta latency와 idle wake/CPU hard cap은 [성능 예산](performance-budget.md)이 소유하며, 그 artifact가
+통과하기 전에는 default `keep-alive-after-quit=true` 전환 조건을 충족한 것으로 세지 않는다.
 
 ## 15. 구현 전 남은 사용자 결정
 

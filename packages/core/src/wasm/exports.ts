@@ -46,8 +46,12 @@ export interface WasmExports {
 
   vt_scroll(h: number, deltaUp: number): void;
   vt_scroll_bottom(h: number): void;
-  /** `(viewOffset << 16) | scrollbackLen` */
-  vt_scroll_state(h: number): number;
+  /** 바닥에서 위로 올라간 행 수. 절단 없음 — `scrollToLine` 이 델타 계산에 쓴다. */
+  vt_view_offset(h: number): number;
+  /** 스크롤백에 쌓인 행 수 = `vt_view_offset` 의 최대값. */
+  vt_scrollback_len(h: number): number;
+  /** 화면을 지운다. 반환 1은 셸에 `\x0c`(^L)를 보내야 한다는 뜻. */
+  vt_clear(h: number): number;
 
   /** 인코딩 길이를 반환하고 `key_ptr()`에 바이트를 채운다. 0이면 보낼 것이 없다. */
   vt_key(h: number, kind: number, cp: number, mods: number): number;

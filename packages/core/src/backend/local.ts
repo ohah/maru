@@ -178,6 +178,31 @@ export class LocalBackend implements Backend {
     this.#markDirty();
   }
 
+  scrollToTop(): void {
+    if (this.#disposed) return;
+    // 코어에는 상대 스크롤만 있다 — 남은 만큼 위로 민다(코어가 [0, sb.count] 로 clamp).
+    this.#w.vt_scroll(this.#h, this.#w.vt_scrollback_len(this.#h));
+    this.#markDirty();
+  }
+
+  scrollToLine(line: number): void {
+    if (this.#disposed) return;
+    // `line` 은 스크롤백 최상단이 0 인 절대 행. offset 은 바닥 기준이라 방향이 반대다.
+    const want = this.#w.vt_scrollback_len(this.#h) - Math.max(0, Math.trunc(line));
+    this.#w.vt_scroll(this.#h, want - this.#w.vt_view_offset(this.#h));
+    this.#markDirty();
+  }
+
+  clear(): void {
+    if (this.#disposed) return;
+    // 반환 1 = 프롬프트 상태라 전체를 비우고 커서를 홈에 뒀다. 셸이 ^L 로 프롬프트를 다시
+    // 그려야 화면이 완성된다 — 우리는 PTY 를 모르므로 호스트에게 바이트로 넘긴다.
+    if (this.#w.vt_clear(this.#h) === 1) {
+      this.#cb?.({ type: "data", bytes: new Uint8Array([0x0c]) });
+    }
+    this.#markDirty();
+  }
+
   // ── 선택 ─────────────────────────────────────────────────
   selectStart(row: number, col: number, block: boolean): void {
     // **순서가 중요하다**: start가 block 플래그를 false로 리셋하므로 block은 그 뒤여야 한다.
@@ -374,14 +399,16 @@ export class LocalBackend implements Backend {
 
   #frame(): FrameData {
     const count = this.#w.vt_snapshot(this.#h);
-    const scroll = this.#w.vt_scroll_state(this.#h);
     return {
       size: { ...this.#size },
       cursor: this.#cursor(),
       cells: this.#read(this.#w.cells_ptr(), count * CELL_STRIDE),
       cellCount: count,
       selection: this.#selection(),
-      scroll: { offset: scroll >>> 16, length: scroll & 0xffff },
+      scroll: {
+        offset: this.#w.vt_view_offset(this.#h),
+        length: this.#w.vt_scrollback_len(this.#h),
+      },
       modes: this.#w.vt_modes(this.#h),
     };
   }

@@ -450,6 +450,12 @@ export class LocalBackend implements Backend {
     }
   }
 
+  serialize(): Promise<string> {
+    if (this.#disposed) return Promise.resolve("");
+    const n = this.#w.vt_serialize(this.#h);
+    return Promise.resolve(decoder.decode(this.#read(this.#w.cells_ptr(), n)));
+  }
+
   cursorAtPrompt(): Promise<boolean> {
     if (this.#disposed) return Promise.resolve(false);
     return Promise.resolve(this.#w.vt_cursor_at_prompt(this.#h) === 1);

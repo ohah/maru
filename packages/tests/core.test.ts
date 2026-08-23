@@ -495,6 +495,70 @@ test("cursorAtPrompt는 셸 통합이 없으면 보수적으로 false다", async
   term.dispose();
 });
 
+test("serialize는 화면을 평문으로 뜬다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 3 });
+  term.write("\x1b[1;32mhello\x1b[0m\r\nworld");
+  await settle();
+
+  const text = await term.serialize();
+  const lines = text.split("\n");
+  expect(lines[0].trimEnd()).toBe("hello"); // SGR 은 버린다 — 렌더러가 아니다
+  expect(lines[1].trimEnd()).toBe("world");
+  expect(text).not.toContain("\x1b");
+  term.dispose();
+});
+
+test("hasSelection/getSelectionPosition은 동기로 답한다", async () => {
+  // 복사 버튼의 disabled 를 이벤트 핸들러 안에서 바로 정해야 한다 — Promise 면 못 쓴다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("hello world");
+  await settle();
+  expect(term.hasSelection()).toBe(false);
+  expect(term.getSelectionPosition()).toBeNull();
+
+  term.selectWord(0, 1);
+  await settle();
+  expect(term.hasSelection()).toBe(true);
+  const pos = term.getSelectionPosition()!;
+  expect(pos.startRow).toBe(0);
+  expect(pos.startCol).toBe(0);
+
+  term.selectClear();
+  await settle();
+  expect(term.hasSelection()).toBe(false);
+  term.dispose();
+});
+
+test("select/selectLines가 프로그래밍 선택을 만든다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("abcdefghij\r\nklmnopqrst\r\n");
+  await settle();
+
+  term.select(0, 2, 3); // 0행 2열부터 3칸 = "cde"
+  await settle();
+  expect(await term.selectionText()).toBe("cde");
+
+  term.selectLines(0, 1);
+  await settle();
+  expect(await term.selectionText()).toBe("abcdefghij\nklmnopqrst");
+
+  term.select(0, 0, 0); // 길이 0 은 무동작
+  await settle();
+  expect(await term.selectionText()).toBe("abcdefghij\nklmnopqrst");
+  term.dispose();
+});
+
+test("writeln은 CRLF를 붙인다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.writeln("first");
+  term.writeln("second");
+  await settle();
+  const lines = (await term.serialize()).split("\n");
+  expect(lines[0].trimEnd()).toBe("first");
+  expect(lines[1].trimEnd()).toBe("second"); // \r 이 없으면 이어져 붙는다
+  term.dispose();
+});
+
 test("alt screen에서 clear는 무동작이다", async () => {
   // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
   // 계약 §7 의 세 번째 조항.

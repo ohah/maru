@@ -39,7 +39,14 @@ export type ToWorker =
   | {
       t: "query";
       id: number;
-      kind: "measureCells" | "snapshot" | "selectionText" | "linkAt" | "find" | "cursorAtPrompt";
+      kind:
+        | "measureCells"
+        | "snapshot"
+        | "selectionText"
+        | "linkAt"
+        | "find"
+        | "cursorAtPrompt"
+        | "serialize";
       arg?: unknown;
     }
   | { t: "dispose" };

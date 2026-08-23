@@ -49,7 +49,7 @@
 | ~~**F4a**~~ | 검색(`findMatches`·`findNext`·`findPrevious`) | **완료** — 아래 기록 |
 | **F4b** | `registerMarker`/`registerDecoration` | 검색은 선택으로 칠하므로 급하지 않다. 여러 매치를 동시에 칠하거나 주석을 얹을 때 필요하다 |
 | ~~**F5**~~ | 클립보드(OSC 52)·알림(OSC 9/777)·셸 통합(OSC 7/133) | **완료** — 아래 기록 |
-| **F6** | 화면 직렬화(`dumpUtf`)·`attachCustomKeyEventHandler` | |
+| ~~**F6**~~ | 화면 직렬화·`attachCustomKeyEventHandler`·선택 조회·프로그래밍 선택 | **완료** — 아래 기록 |
 | **F7** | 이미지(Kitty graphics) | 렌더러가 픽셀을 다뤄야 해 가장 무겁다 |
 | **F7.5** | WebGL 렌더러 — **run 병합이 깨지는 화면에서만 의미가 있다** | 셀마다 색이 다른 앱(btop·lolcat)에서 run 이 셀 단위로 쪼개지면 8.64 ms/frame 쪽으로 간다. F1 에서 그 화면을 실제로 재보고 판단한다 |
 | **F7.6** | SharedArrayBuffer 옵션 — `Terminal.frame` 을 워커 모드에서 살린다 | **기본값으로는 안 된다**(COOP/COEP 가 소비자 페이지 전체를 제약). 이미 cross-origin isolation 을 켠 곳만 opt-in. 코어를 두 벌 빌드해야 하고 u64 atomic 분기를 다시 풀어야 한다 |
@@ -132,6 +132,25 @@
     그 경로를 밟게 했다. 하나씩 떼어 보내면 결함이 숨는다.
 - **F5 가 wasm 을 1.1 KB(gzip 439 B) 늘렸다.** export 13 개가 그 정도다 — 애드온 판정의 근거가
   또 하나 늘었다(F4a 는 2.8 KB 였다).
+
+- **F6 을 "API 표면 마무리"로 넓혔다.** 계획서는 화면 직렬화와 `attachCustomKeyEventHandler`
+  둘만 묶었는데, 남은 xterm.js 격차를 다시 재 보니 **선택 조회 4종이 거의 공짜**였다 — 선택이
+  이미 매 프레임 실려 오므로 `hasSelection`·`getSelectionPosition` 은 wasm 변경 없이 나오고,
+  `select`·`selectLines` 는 기존 `selectStart`/`selectExtend` 래핑이다. 한 번에 끝냈다.
+- **동기 조회를 되살렸다.** `hasSelection()` 은 Promise 가 아니다 — 복사 버튼의 `disabled` 를
+  이벤트 핸들러 안에서 정해야 하는데 Promise 면 못 쓴다. F3 에서 만든 `#prevMeta` 가 두 모드
+  모두에서 갱신되므로 **워커에서도 왕복 없이** 답한다(대가: 한 프레임 뒤처질 수 있다).
+- **xterm.js 에 있어도 넣지 않기로 한 것들**(계약 §7):
+  - `onLineFeed` — 코어에 훅이 없다. 프레임 파생으로는 한 프레임에 접힌 여러 LF 를 구별할 수
+    없어 **부정확한 이벤트가 된다** — 없는 것보다 나쁘다.
+  - `onWriteParsed` — `write()` 가 동기라 호출 직후가 곧 그 시점이다.
+  - `onBinary`·`input`·`refresh` — 각각 `onData`·`sendText`·dirty 렌더가 이미 덮는다.
+- **커스텀 키 핸들러는 IME 조합 정리 뒤에 부른다.** xterm.js 는 맨 앞에서 부르지만, 우리는
+  조합 중 `Cmd` 조합이 오면 먼저 조합을 취소해야 한다(안 그러면 조합 글자가 화면에 남는다 —
+  F2 에서 고친 그 문제다). 조합 자체를 가로채려면 `ev.isComposing` 을 보게 문서화했다.
+- **브라우저 검사에 기준선을 함께 넣었다.** "핸들러가 false 면 ⌘A 가 무시된다"만 보면 ⌘A 가
+  애초에 동작하지 않아도 통과한다 — F2 에서 겪은 `0/0` 통과와 같은 함정이다. "핸들러 없이는
+  ⌘A 가 전체 선택한다"를 먼저 단언한다.
 
 ## 선행 조건
 

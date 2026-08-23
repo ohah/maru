@@ -124,6 +124,8 @@ export interface Backend {
   find(needle: string): Promise<FindResult>;
   /** 커서가 셸 프롬프트에 있는가. 셸 통합(OSC 133)이 없으면 보수적으로 `false`("실행 중"). */
   cursorAtPrompt(): Promise<boolean>;
+  /** 화면을 평문으로. 스타일·색은 버린다(코어 `dumpUtf8` 의 계약). */
+  serialize(): Promise<string>;
 
   on(cb: (e: BackendEvent) => void): void;
   dispose(): void;

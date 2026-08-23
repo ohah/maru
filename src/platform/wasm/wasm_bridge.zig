@@ -377,6 +377,21 @@ export fn vt_cursor_at_prompt(h: *anyopaque) u32 {
     return if (core.cursorIsAtPrompt()) 1 else 0;
 }
 
+// ── 화면 직렬화 ───────────────────────────────────────────
+/// 화면을 평문으로 떠서 `cells_ptr()` 에 담고 바이트 수를 돌려준다. 셀 스냅샷과 같은 버퍼를
+/// 쓴다 — 둘 다 "지금 화면"이고 동시에 필요하지 않다(스냅샷은 그리기용, 이건 텍스트용).
+///
+/// 스타일·색은 버린다. 코어의 `dumpUtf8` 이 그런 계약이다("렌더러가 아니다") — 화면에 무엇이
+/// 쓰여 있는지 확인하는 용도라 xterm.js 의 SerializeAddon 처럼 SGR 을 복원하지 않는다.
+export fn vt_serialize(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const text = core.dumpUtf8(alloc) catch return 0;
+    defer alloc.free(text);
+    const n = @min(text.len, cell_buf.len);
+    @memcpy(cell_buf[0..n], text[0..n]);
+    return @intCast(n);
+}
+
 // ── 검색 ──────────────────────────────────────────────────
 /// `input_ptr()` 에 needle(UTF-8)을 쓰고 길이를 넘긴다. **반환은 총 매치 수**이고, 버퍼에는
 /// 앞의 `matches_cap()` 건까지만 담긴다 — UI 가 "1/2371" 처럼 총량을 보여줄 수 있어야 한다.

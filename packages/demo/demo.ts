@@ -367,6 +367,26 @@ $("bench").addEventListener("click", async () => {
   $("stat").textContent = `${((400 * chunk.length) / ms / 1000).toFixed(1)} MB/s`;
 });
 
+// ── 키 가로채기 · 직렬화 ───────────────────────────────────
+// `false` 를 돌려주면 터미널이 그 키를 완전히 무시한다 — 앱 단축키가 터미널보다 우선해야 할 때.
+$<HTMLInputElement>("o-hook").addEventListener("change", (e) => {
+  const on = (e.target as HTMLInputElement).checked;
+  term.attachCustomKeyEventHandler(
+    on
+      ? (ev) => {
+          if (!(ev.metaKey && ev.key === "k")) return true;
+          logOsc("⌘K 를 앱이 가로챘다");
+          return false;
+        }
+      : null,
+  );
+});
+$("c-dump").addEventListener("click", () => {
+  void term
+    .serialize()
+    .then((t) => logOsc(`화면 ${t.length}자 — ${t.trim().split("\n")[0] ?? ""}`));
+});
+
 // ── OSC 사건 ───────────────────────────────────────────────
 // **라이브러리는 아무것도 자동으로 하지 않는다.** 클립보드에 쓸지, 알림을 띄울지는 여기서
 // 정한다 — 터미널에서 도는 아무 프로그램이나 사용자 클립보드를 덮어쓸 수 있으면 안 된다.

@@ -32,6 +32,9 @@ const text_field = chrome.components.text_field;
 const redact = maru.redact;
 
 const component = chrome.components.scm_dock;
+/// 행 모델 → 컴포넌트 항목. **최상위 중립 leaf 다** — `session` 과 `chrome` 이 서로를 import 할 수
+/// 없어 이 변환이 둘 다 밖에 산다(`src/scm_items.zig` 머리말). Windows 표면이 같은 것을 쓴다.
+const scm_items = maru.scm_items;
 
 /// 도크가 그릴 **backing 스케일**. **Session Dock과 같은 값**을 쓴다 — 같은 컬럼의 두 뷰가 다른 축으로
 /// 커지면 뷰를 갈아 끼울 때 행 높이가 튄다(docs/editor-surface-dock.md §3.5).
@@ -146,43 +149,6 @@ fn listViewportHeightPx(self: *AppSession, has_branch: bool) u32 {
     return content.h -| fixed;
 }
 
-/// 모델 행 하나를 component 항목으로 옮긴다. **문자열은 복사하지 않는다** — `git_result`가 이 프레임
-/// 동안 살아 있고, component는 immutable snapshot만 읽는다.
-fn itemFor(row: scm_view.Row, repo_index: u32, model_index: usize, selected_row: ?usize, collapsed: [scm_view.section_count]bool) component.types.Item {
-    return switch (row) {
-        .section => |section| .{
-            .section = .{
-                .repo_index = repo_index,
-                .section = sectionOf(section.section),
-                .count = @intCast(section.count),
-                .collapsed = collapsed[@intFromEnum(section.section)],
-                // 섹션 헤더의 일괄 동작. 모델이 "대상이 하나도 없으면(전부 충돌) `.none`"까지 판정해 둔다.
-                .action = actionOf(section.action),
-            },
-        },
-        .file => |file| .{
-            .file = .{
-                .repo_index = repo_index,
-                .model_index = @intCast(model_index),
-                .name = std.fs.path.basename(file.path),
-                .dir = file.path[0 .. file.path.len - std.fs.path.basename(file.path).len],
-                .status = statusOf(file),
-                .letter = file.letter,
-                .added = file.added,
-                .removed = file.removed,
-                .has_delta = !file.unknown_delta and !file.binary,
-                .binary = file.binary,
-                // 행 동작(`+`/`−`). **충돌 행은 모델이 `.none`으로 준다** — `git add`는 충돌을 "해결됨"으로
-                // 표시하므로, 그 행에 `+`를 두면 사용자가 의도하지 않은 해결이 일어난다.
-                .action = actionOf(file.action),
-                .selected = selected_row != null and selected_row.? == model_index,
-            },
-        },
-        .more => |more| .{ .more = .{ .repo_index = repo_index, .section = sectionOf(more.section), .hidden = @intCast(more.hidden) } },
-        .notice => |notice| .{ .notice = notice.text() },
-    };
-}
-
 /// 그 저장소의 행 모델. **활성이면 목록 읽기**(증감까지), 아니면 머리 줄 읽기의 `status` 하나로 만든다
 /// (②d — 파일 줄의 실체는 status에서 나오고 numstat은 숫자만 채운다).
 fn modelForRepo(self: *AppSession, repo: []const u8, out: []scm_view.Row, scratch: []u8) ?scm_view.Model {
@@ -213,24 +179,6 @@ fn selectedRowIn(self: *const AppSession, repo: []const u8) ?usize {
     const index = self.scm_selected_row orelse return null;
     const selected_repo = self.scm_selected_repo orelse return null;
     return if (std.mem.eql(u8, selected_repo, repo)) index else null;
-}
-
-fn sectionOf(section: scm_view.Section) component.types.Section {
-    // 값 집합이 갈리면 이 switch가 컴파일에서 걸린다(component는 session 모듈을 import하지 않는다).
-    return switch (section) {
-        .staged => .staged,
-        .changes => .changes,
-    };
-}
-
-fn statusOf(file: scm_view.FileRow) component.types.StatusKind {
-    if (file.conflicted) return .conflicted;
-    if (file.untracked) return .added; // 새로 생긴 것과 같은 계열(§3.5.2)
-    return switch (file.letter) {
-        'A', 'C' => .added,
-        'D' => .deleted,
-        else => .modified,
-    };
 }
 
 pub const Extent = AppSession.FileTreeScrollExtent;
@@ -469,7 +417,7 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         }
         const selected = selectedRowIn(self, entry.path);
         for (rows, 0..) |row, index| {
-            items[n] = itemFor(row, @intCast(repo_index), index, selected, self.scm_collapsed);
+            items[n] = scm_items.itemFor(row, @intCast(repo_index), index, selected, self.scm_collapsed);
             n += 1;
         }
     }
@@ -2344,15 +2292,6 @@ pub fn scrollCommitToCaret(self: *AppSession) void {
     }
 }
 
-/// 모델의 행 동작을 component 값으로 옮긴다. 값이 갈리면 이 exhaustive switch가 컴파일로 걸린다.
-fn actionOf(action: scm_view.RowAction) component.types.RowAction {
-    return switch (action) {
-        .stage => .stage,
-        .unstage => .unstage,
-        .none => .none,
-    };
-}
-
 /// 낙관적으로 옮긴 행을 투영 결과에 얹는다(§7).
 ///
 /// **모델을 고치지 않는다.** `session/scm_view`는 git 출력의 순수 함수로 남아야 P4·P5가 그대로 쓴다 —
@@ -2605,17 +2544,17 @@ const testing = std.testing;
 
 test "상태 종류: 충돌·추적되지 않음·추가·삭제가 서로 다른 축으로 간다" {
     // 색은 종류가 정하고(component), 종류는 여기서 정한다 — 두 곳이 같은 판정을 하면 갈린다.
-    try testing.expectEqual(component.types.StatusKind.conflicted, statusOf(.{ .section = .changes, .path = "a", .letter = 'U', .action = .none, .conflicted = true }));
-    try testing.expectEqual(component.types.StatusKind.added, statusOf(.{ .section = .changes, .path = "a", .letter = 'U', .action = .stage, .untracked = true }));
-    try testing.expectEqual(component.types.StatusKind.added, statusOf(.{ .section = .staged, .path = "a", .letter = 'A', .action = .unstage }));
-    try testing.expectEqual(component.types.StatusKind.deleted, statusOf(.{ .section = .staged, .path = "a", .letter = 'D', .action = .unstage }));
-    try testing.expectEqual(component.types.StatusKind.modified, statusOf(.{ .section = .staged, .path = "a", .letter = 'M', .action = .unstage }));
+    try testing.expectEqual(component.types.StatusKind.conflicted, scm_items.statusOf(.{ .section = .changes, .path = "a", .letter = 'U', .action = .none, .conflicted = true }));
+    try testing.expectEqual(component.types.StatusKind.added, scm_items.statusOf(.{ .section = .changes, .path = "a", .letter = 'U', .action = .stage, .untracked = true }));
+    try testing.expectEqual(component.types.StatusKind.added, scm_items.statusOf(.{ .section = .staged, .path = "a", .letter = 'A', .action = .unstage }));
+    try testing.expectEqual(component.types.StatusKind.deleted, scm_items.statusOf(.{ .section = .staged, .path = "a", .letter = 'D', .action = .unstage }));
+    try testing.expectEqual(component.types.StatusKind.modified, scm_items.statusOf(.{ .section = .staged, .path = "a", .letter = 'M', .action = .unstage }));
 }
 
 test "섹션 값은 두 모듈 사이에서 1:1이다" {
     // component는 session 모듈을 import하지 않으므로 이 변환이 유일한 다리다. 값이 갈리면 여기서 걸린다.
-    try testing.expectEqual(component.types.Section.staged, sectionOf(.staged));
-    try testing.expectEqual(component.types.Section.changes, sectionOf(.changes));
+    try testing.expectEqual(component.types.Section.staged, scm_items.sectionOf(.staged));
+    try testing.expectEqual(component.types.Section.changes, scm_items.sectionOf(.changes));
     try testing.expectEqual(@intFromEnum(scm_view.Section.staged), sectionIndex(.staged));
     try testing.expectEqual(@intFromEnum(scm_view.Section.changes), sectionIndex(.changes));
 }
@@ -2731,7 +2670,7 @@ test "스크롤한 창에서도 intent는 모델 인덱스를 싣는다" {
     };
     var items: [rows.len]component.types.Item = undefined;
     for (rows, &items, 0..) |row, *item, index| {
-        item.* = itemFor(row, 0, index, null, @splat(false));
+        item.* = scm_items.itemFor(row, 0, index, null, @splat(false));
     }
 
     // 창이 2번째 행부터 시작한다고 하자(앞 둘은 스크롤아웃).
@@ -2752,7 +2691,7 @@ test "낙관적 반영: 그 행만 옮기고 개수·증감·동작은 낙관하
     };
     var items: [rows.len]component.types.Item = undefined;
     for (rows, &items, 0..) |row, *item, index| {
-        item.* = itemFor(row, 0, index, null, @splat(false));
+        item.* = scm_items.itemFor(row, 0, index, null, @splat(false));
     }
     // 낙관 없이는 원래 자리다.
     try testing.expectEqualStrings("moving.zig", items[3].file.name);
@@ -2789,7 +2728,7 @@ test "낙관적 반영: 도착 그룹이 화면에 없으면 옮기지 않는다
     };
     var items: [rows.len]component.types.Item = undefined;
     for (rows, &items, 0..) |row, *item, index| {
-        item.* = itemFor(row, 0, index, null, @splat(false));
+        item.* = scm_items.itemFor(row, 0, index, null, @splat(false));
     }
 
     var session: AppSession = undefined;

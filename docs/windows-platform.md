@@ -48,6 +48,14 @@ src/platform/windows/
 > 편의 계층이 없어 평범한 C 호출보다 손이 더 간다. **제2 언어가 필요하다는 뜻은 아니고**(C++ 불필요),
 > W7의 비용을 "C 함수만 부르면 된다"로 과소평가하지 않기 위한 단서다.
 
+**`platform/macos/` 안에 있는데 Windows 에서도 도는 파일들이 있다.** `main.zig` 의 `// 이름과 달리…`
+주석 다섯 줄이 그것이다(`file_tree_backend`·`git_backend`·`coretext_frame_builder`·
+`chrome_draw_lowering`·`system_text`). **공용 폴더(`src/common/`)를 새로 만들지 않는다** — 자리는 이미
+있고, 그 둘 중 진짜로 옮길 수 있는 것과 시점은
+[layering-and-portability.md](layering-and-portability.md) §3.4 가 단일 출처다(요지: 다섯 중 둘만
+네이티브 참조 0 이라 `src/app/` 으로 옮길 수 있고, **W8 이 끝난 뒤 독립 PR** 로 한다).
+
+
 ### 2a. GPU 백엔드 — D3D11 + DXGI (결정)
 
 Metal의 대응물은 **D3D11**이고 표시·프레임 페이싱은 **DXGI**가 맡는다. W7의 선행 결정 둘 중 하나였고, 이제

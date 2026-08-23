@@ -115,6 +115,50 @@ flowchart TD
 - **(b) 이식 기여 축** — 안에 섞인 OS-중립 순수 로직(좌표 변환 기하)을 `src/session`(L2)으로 뺀다. **b1·b2 `session/layout_math.zig`(grid·hit-test·drop-zone·pt→px·px↔cell)로 일단락**했고, 이 축이 위상에 영향을 주는 유일한 부분이다(find·sidebar·workspace는 실측 결과 각각 `chrome`·`metal_frame`·PTY 결합 orchestration이라 제외).
 - **(c) 읽기·편집 비용 축(2026-08-08 추가)** — 남은 orchestration을 `platform/macos/app_session/<group>.zig`로 가른다. **위상 기여 0**이며(L4 안에서만 이동), 근거·단계·리스크는 전적으로 위 문서가 소유한다. 이 문서는 그것을 이식 성과로 계상하지 않는다.
 
+### 3.4 공용 코드에 새 폴더를 만들지 않는다 (실측 2026-08-23, Windows 포팅 중)
+
+Windows 포팅이 진행되며 `src/main.zig` 에 이런 주석이 다섯 줄 쌓였다:
+
+```zig
+const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다
+```
+
+"공용 코드 폴더(`src/common/`)를 따로 만들까" 라는 물음이 여기서 나온다. **답은 아니다.**
+
+**자리는 이미 다 있다.** 이 문서 §2 가 정한 L1 `src/renderer/`·L2 `src/terminal/`·`src/session/`·
+L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층에도 안 붙는 잎은 최상위
+`src/*.zig` 다(`text_shaper.zig`·`scm_items.zig`·`path_shape.zig`·`color.zig`·`width.zig`…).
+`src/common/` 을 더하면 **세 번째 관례**가 생기고, 파일마다 "common 인가 최상위인가" 를 다시
+판단하게 된다 — 그 판단에는 옳은 답이 없다.
+
+그리고 이 문서는 이미 같은 것을 정해 놨다: 서두의 목적("OS-중립 코드가 `platform/macos`에 갇히지
+않도록")과 §3 2차의 결론("추출 후 `platform/macos`엔 **L4 어댑터만** 남는다"). 위 주석들은
+**폴더가 없어서 생긴 것이 아니라, 이 문서가 갚으라고 적어 둔 빚에 붙인 표지**다.
+
+**갚을 수 있는 것은 다섯 중 둘이다**(2026-08-23 실측 — 본문의 `coretext_*`·`objc`·`CTFont`·
+`CFRelease`·`extern "c"`·`@cImport` 참조 횟수):
+
+| 파일 | 줄 | 네이티브 참조 | 판정 |
+|---|---:|---:|---|
+| `platform/macos/file_tree_backend.zig` | 1360 | **0** | 옮길 수 있다 |
+| `platform/macos/git_backend.zig` | 3013 | **0** | 옮길 수 있다 |
+| `platform/macos/chrome/chrome_draw_lowering.zig` | 1062 | 10 | 섞임 — 쪼개는 별개 작업 |
+| `platform/macos/chrome/system_text.zig` | 1670 | 37 | 섞임 |
+| `platform/macos/coretext_frame_builder.zig` | 3766 | 54 | 섞임 |
+
+앞의 둘은 `std`·`builtin`·`maru` 배럴만 import 하고, 부르는 자리도 각각 둘뿐이다(`src/main.zig`,
+`platform/macos/app_session.zig`). **뒤의 셋은 옮기면 안 된다** — 이름만 macOS 인 게 아니라 실제로
+네이티브가 섞여 있어서, 중립 부분을 떼어내는 것은 이동이 아니라 분해다.
+
+**갈 자리는 `src/app/`** 이다 — §2 가 규정한 "L4 OS-중립 공통 런타임"(OS 호출은 어댑터로 위임,
+이식 시 재사용). `src/session/` 은 **안 된다**: `git_backend.zig` 가 `maru.win32_process`(platform)를
+쓰는데 session 은 platform import 가 금지다(`tests/boundary/imports.zig`).
+
+**시점: W8(Windows 포팅)이 끝난 뒤 독립 PR.** 기능이 하나도 안 바뀌는 4,400 줄짜리 순수 이동이라,
+진행 중인 포팅 diff 와 겹치면 리뷰가 둘 다 어려워진다. 뒤로 미뤄도 새로 쌓이는 빚은 주석 한 줄씩이다
+(사용자 합의 2026-08-23).
+
+
 ## 4. 렌더 백엔드 + 호스트 이식 (검증된 현실)
 
 이식 작업을 **GPU 백엔드(공유 가능) vs 플랫폼 호스트(타깃별 신규)** 2층으로 분리해 본다. 적대적 검증의 정직한 계량:

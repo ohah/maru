@@ -185,31 +185,38 @@ flowchart TD
   세션"에는 누를 것이 없어졌다. 테스트가 자기 rect를 지어내면 제품과 다른 기하를 판정하므로 같은
   build를 부르는 `publishFileTreeHitTree`를 냈다.
 
-### FT3 — 셀 경로 격리 (제거는 그 다음 슬라이스)
+### FT3 — 셀 투영을 공유 모듈로 옮기고 소비자를 잠근다
 
-**선행 조건을 풀었더니 "제거"가 아니라 "격리"가 답이었다.** 계획은 `buildFileTreeDrawList`를 지우자고
-했는데, 지울 자리가 없다는 것이 층 규칙에서 드러났다.
+계획은 `buildFileTreeDrawList`를 **지우자**고 했다. 지울 수는 없었지만(Windows가 쓴다) **macOS 파일에서
+빼는 것**은 됐다.
 
-- 이 투영은 `chrome`(분류·말줄임 규칙)과 `renderer`(DrawCell)를 **함께** 필요로 한다.
-- 그런데 `chrome`(L3)은 `renderer`를 import할 수 없고(`ui/tree.zig` 헤더 — 경계 가드),
-  `session`(L2)은 `chrome`(L3)을 import할 수 없다(위상 역전 — `tests/boundary/imports.zig`).
-- 그래서 두 층을 잇는 자리는 **L4(platform) 뿐**이고, **중립 집이 존재하지 않는다.** Windows로 옮기려
-  해도 이 투영이 기대는 `appendEllipsizedTitle`(말줄임 단일 출처, 같은 파일에서 23곳이 공유)이 함께
-  가야 해서, 결국 그 파일의 **중립 절반을 통째로 추출**하는 별도 슬라이스가 된다.
+**처음 판단이 틀렸다는 것을 적어 둔다.** 첫 시도에서 "중립 집이 존재하지 않는다"고 결론 내렸는데, 그때
+본 것은 **L4 아래**(chrome·session·renderer)뿐이었다. 그 셋이 막히는 것은 맞다 —
 
-그래서 FT3가 실제로 한 일은 **소비자를 하나로 줄이고 다시 새지 않게 막는 것**이다.
+- `chrome`(L3)은 `renderer`를 import할 수 없고(`ui/tree.zig` 헤더 — 경계 가드),
+- `session`(L2)은 `chrome`(L3)을 import할 수 없다(위상 역전 — `tests/boundary/imports.zig`).
 
-- macOS 스모크 둘을 자립시켰다. 아이콘 색 픽스처는 아이콘·색 매핑만 직접 세우고(그 픽스처의 관심사가
-  분류→색이지 행 배치가 아니다), 한글 cluster probe는 제품이 여전히 쓰는 `buildPaneLabelDrawList`로
-  옮겼다. **macOS에는 이 투영의 호출이 하나도 남지 않았다.**
-- 남은 소비자는 `maru win32-file-tree-draw-smoke` 하나다. 그 사실을 `tests/boundary/imports.zig`가
-  **센다** — macOS 쪽 호출이 0이 아니면 실패한다. 지울 수 없다면 되돌아오지 못하게 막는 것이 남은
-  방어이고, 실제로 FT1이 "렌더가 그 창을 쓴다"는 단언이 죽은 경로를 보던 상태를 정리한 적이 있다.
-- 함수의 doc comment가 이 소유권과 층 분석을 소유한다.
+그런데 **L4 안에 OS에 매이지 않는 공유 모듈**이라는 선례가 이미 있다(`src/platform/mobile/` — ios·android가
+공유한다). 거기라면 chrome과 renderer를 함께 들 수 있다. 사용자가 "왜 제거가 아니라 격리인가"를 물어
+다시 재고 나서야 보였다.
 
-**후속 슬라이스(FT4 후보)**: `coretext_frame_builder.zig`의 중립 절반(`appendEllipsizedTitle` 등 셀
-방출 glue)을 platform 아래 공용 투영 층으로 추출한다. 그것이 끝나야 Windows가 macOS 파일을 import하지
-않게 되고, 그때 이 함수는 그 층으로 옮겨 가거나(Windows가 계속 쓴다면) 사라진다.
+두 번째 걱정("`appendEllipsizedTitle`이 23곳에서 쓰여 함께 옮길 수 없다")도 과대평가였다. 그 23곳은
+**전부 같은 파일 안**이고, 옮긴 뒤 별칭 한 줄이면 호출부는 그대로다 — 실제 비용은 파일 하나와 별칭
+넷이었다.
+
+**한 일**
+
+- `src/platform/cell_text.zig` 신설(L4 공유). 투영과 그 짝(`appendEllipsizedTitle`·`appendCluster`·
+  `wideIconPredicate`·`wideIconGlyph`)·타입·`file_tree_inset_cols`를 옮겼다.
+- `coretext_frame_builder.zig`는 별칭으로 계속 쓴다 — 옮긴 것은 **코드의 집이지 호출 관계가 아니다**.
+- `src/main.zig`가 더 이상 `platform/macos/*`를 import하지 않는다(그 misnomer 주석도 사라졌다).
+- macOS 스모크 둘을 자립시켰다(아이콘 색 픽스처는 분류→색만, 한글 cluster probe는
+  `buildPaneLabelDrawList`로). **macOS에는 이 투영의 호출이 하나도 없다.**
+- 경계 게이트가 둘을 센다: **정의는 공유 모듈에만**, **호출은 Windows 스모크 하나만**.
+
+**아직 남은 것**: 함수 자체는 살아 있다. Windows가 `ChromeDraw`를 낮추는 층을 갖게 되어 그 스모크가
+컴포넌트 경로로 옮겨 가면 그때 지운다 — 게이트가 "Windows 호출 1"을 세고 있으므로, 0이 되는 순간
+게이트가 실패해 사람이 그 판단을 하게 된다.
 
 ## 5. 보존해야 하는 동작 (회귀 표)
 
@@ -261,4 +268,4 @@ flowchart TD
 | --- | --- |
 | FT1 — 컴포넌트 골격과 행 렌더 | **완료**(같은 PR) |
 | FT2 — 상호작용 이관 | **완료** |
-| FT3 — 셀 경로 **격리**(제거는 후속) | **완료** — 아래 §4 FT3 참조 |
+| FT3 — 셀 투영을 공유 모듈로 이동 + 소비자 잠금 | **완료** — 아래 §4 FT3 참조 |

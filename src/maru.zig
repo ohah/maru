@@ -18,6 +18,8 @@ pub const win32_process = @import("platform/windows/win32_process.zig"); // Wind
 // **배럴에 있어야 하는 이유는 모듈 경로다** — `text_shaper.zig` 이음매가 `dwrite_shape` 를 끌어오고,
 // 그것이 `dwrite_font` 를 쓰는데 `main.zig` 가 같은 파일을 상대 경로로도 가져가면 한 파일이 두 모듈에
 // 들어가 컴파일이 막힌다("file exists in modules 'root' and 'maru'").
+/// 파일 트리 행의 셀 투영·말줄임 방출 — macOS·Windows 공유(L4). OS 가드가 없다(순수 투영).
+pub const cell_text = @import("platform/cell_text.zig");
 pub const dwrite_font = if (builtin.os.tag == .windows) @import("platform/windows/dwrite_font.zig") else struct {};
 pub const win32_window = if (builtin.os.tag == .windows) @import("platform/windows/win32_window.zig") else struct {};
 pub const d3d11_present = if (builtin.os.tag == .windows) @import("platform/windows/d3d11_present.zig") else struct {};

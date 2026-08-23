@@ -74,7 +74,9 @@ const Allowed = struct {
 /// 사라짐) 아래 stale 검사가 "등재를 지우라"고 실패시킨다 — 목록이 실제와 어긋나 거짓말하지 않게.
 const allowlist = [_]Allowed{
     .{
-        .file = "platform/macos/coretext_frame_builder.zig",
+        // FT3에서 `platform/macos/coretext_frame_builder.zig`에서 옮겨 왔다 — 이 방출은 CoreText를 한 번도
+        // 안 부르고 Windows 스모크도 같은 코드를 쓰므로, macOS 파일이 아니라 공유 L4 모듈이 집이다.
+        .file = "platform/cell_text.zig",
         .function = "appendCluster",
         .reason = "cluster 방출 어댑터 — text_layout이 잡아 준 바이트 범위에서 base는 셀에, 나머지는 grapheme_pool에(CG1 방출부 그 자체).",
     },
@@ -337,7 +339,8 @@ test "cluster 경로 자체가 사라지지 않았는가 (CG1 회귀 가드)" {
     defer allocator.free(layout_source);
     try std.testing.expect(std.mem.indexOf(u8, layout_source, "grapheme.clusterEnd(") != null); // 분절이 cluster 경계로
 
-    const source = try readSource(allocator, "src/platform/macos/coretext_frame_builder.zig");
+    // 방출부는 FT3에서 공유 L4 모듈로 옮겼다(`platform/cell_text.zig`) — macOS 파일이 아니라 여기서 본다.
+    const source = try readSource(allocator, "src/platform/cell_text.zig");
     defer allocator.free(source);
     try std.testing.expect(std.mem.indexOf(u8, source, "text_layout.plan(") != null); // 방출이 중립 계획에 위임
     try std.testing.expect(std.mem.indexOf(u8, source, ".grapheme_offset = offset") != null);

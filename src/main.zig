@@ -14,7 +14,7 @@ const dwrite_font = maru.dwrite_font;
 // W7.2c 중립 텍스트 계약 어댑터와 프레임 빌더.
 const win32_text = maru.win32_text;
 const win32_terminal = maru.win32_terminal;
-const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
+const cell_text = maru.cell_text; // 파일 트리 행의 셀 투영 — macOS·Windows 공유 모듈(FT3)
 const chrome_draw_lowering = @import("platform/macos/chrome/chrome_draw_lowering.zig"); // 이름과 달리 ops → DrawList 낮추기는 CoreText 를 안 부른다 — 본문 참조 0 회(§2m.6 과 같은 방식으로 쟀다)
 const system_text = @import("platform/macos/chrome/system_text.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 는 §2m.18 이음매로 간다
 const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
@@ -1309,7 +1309,7 @@ fn runWin32FileTreeSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
 ///
 /// **이 슬라이스가 작은 이유**는 적대적 검증이 찾아냈다. §2m.4 에 "Windows 에는 `ChromeDraw` 를 낮추는
 /// 층이 없다" 고 적었는데, 탐색기 행의 **텍스트 투영은 이미 중립**이었다 —
-/// `coretext_frame_builder.buildFileTreeDrawList` 가 이름과 달리 CoreText 를 한 번도 안 부르고
+/// `cell_text.buildFileTreeDrawList` 가 이름과 달리 CoreText 를 한 번도 안 부르고
 /// `renderer.DrawList` 를 낸다. 실측 순서: 그 함수 본문에 `coretext_*` 참조 0 회 → OS 가드 없음 →
 /// Windows 로 컴파일·링크됨(해시 확인) → **런타임에 실제로 글자가 나온다**(`"vproj>src README.md"`).
 /// 앞의 셋만으로는 부족하다는 것을 이 저장소가 두 번 밟았다(`system_text` 는 컴파일되지만
@@ -1427,7 +1427,7 @@ fn runWin32FileTreeDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *
     // 스모크에는 사용자 조작이 없으니 인덱스를 정해 둔다. 행이 모자라면 선택이 없다.
     const selected_row: ?usize = if (visible > 3) 3 else null;
     const selection_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    const draw_list = try coretext_frame_builder.buildFileTreeDrawList(
+    const draw_list = try cell_text.buildFileTreeDrawList(
         allocator,
         rows.items,
         null,

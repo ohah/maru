@@ -631,6 +631,8 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         // 물을 수 있다 — 그 질문 없이 목록만 믿으면 프레임 사이의 스크롤을 못 본다(그 필드의 doc).
         .top_line = term.rt.editor_first_line,
         .top_piece = term.rt.editor_first_piece,
+        .visible_len = editorLines(term).len,
+        .wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap,
         .drawn = true,
     };
 }
@@ -1672,9 +1674,18 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     // 든 매치는 그 줄이 그려져 있다는 이유로 "보인다"고 답해 안 굴러간다(미니파이 JSON·긴 로그).
     // 가로도 같다. 둘 다 §5.2가 소유할 2차원 reveal이고 그때 함께 닫는다 — 여기서 "근사가
     // 아니라 사실이다"라고 적었던 것은 **줄 축에서만** 참이었다(2라운드 적대적 검증).
-    const snapshot_is_current = term.rt.editor_hit_geom.drawn and
-        term.rt.editor_hit_geom.top_line == term.rt.editor_first_line and
-        term.rt.editor_hit_geom.top_piece == term.rt.editor_first_piece;
+    // **스냅숏이 이 화면을 설명하는가.** 세로 위치만 묻던 초판은 위치를 안 바꾸면서 배치를
+    // 바꾸는 것들(접힘·랩·탭 폭·폰트 크기)을 못 봤다 — 그 창에서 다시 "이미 보인다"고 답했다.
+    // 아래 값들은 전부 **여기서 라이브로 다시 읽을 수 있는 것**이라 대조가 성립한다.
+    const geom = term.rt.editor_hit_geom;
+    const snapshot_is_current = geom.drawn and
+        geom.top_line == term.rt.editor_first_line and
+        geom.top_piece == term.rt.editor_first_piece and
+        geom.visible_len == editorLines(term).len and
+        geom.wrap == (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) and
+        geom.tab_width == term.rt.editor_tab_width and
+        geom.cell_w_px == self.cell_width_px and
+        geom.cell_h_px == self.cell_height_px;
     // **방금 폈으면 그 목록은 낡았다** — 펴기 전 화면의 것이다. 그때도 묻지 않고 굴린다.
     if (!unfolded and snapshot_is_current) {
         for (term.rt.editor_hit_lines[0..rows]) |drawn| {
@@ -9458,6 +9469,10 @@ test "EM11 한 프레임 안에 두 번 네비게이션해도 두 번째가 굴�
     fx.session.editor_find_source = term.surfaceId();
 
     // 아래쪽 매치로 — 굴러간다.
+    // **여는 자리가 0임을 못 박는다.** 형제(EM4·EM7·EM10)는 다 적는데 이것만 빠져 있었다 —
+    // 스크롤 복원(§4.1d)이 붙어 여는 자리가 0이 아니게 되면 아래 `> 0`이 공짜로 참이 되고
+    // 두 번째 단언도 우연히 통과한다(적대적 검증 2026-08-24).
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
     fx.session.chrome_host.find.current = 1;
     revealCurrentFindMatch(fx.session, term);
     try testing.expect(term.rt.editor_first_line > 0);
@@ -9467,4 +9482,99 @@ test "EM11 한 프레임 안에 두 번 네비게이션해도 두 번째가 굴�
     fx.session.chrome_host.find.current = 0;
     revealCurrentFindMatch(fx.session, term);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+}
+
+test "EM12 조각 축 스냅숏 낡음도 잡는다 — 긴 줄 안을 굴린 뒤 Enter" {
+    // **`top_piece` 비교를 지워도 아무도 못 잡았다**(적대적 검증 2026-08-24, 뮤턴트 P4).
+    // 제품 경로가 있다: `scrollPieces`는 랩된 긴 줄 **안에서** `first_line`은 그대로 두고
+    // `first_piece`만 바꾼다. 휠로 긴 줄 안을 굴린 뒤 같은 프레임에 Enter를 누르면 낡은
+    // `editor_hit_lines`를 그대로 믿는다 — EM11이 줄 축에서 막은 회귀의 조각 축 판이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    // **줄이 넉넉해야 한다** — `clampScrollToGeometry`가 `first_line`을 상한으로 되돌리면
+    // 아래 전제(줄 30에서 그렸다)가 성립하지 않는다.
+    for (0..200) |i| {
+        var buf: [800]u8 = undefined;
+        const filler = "long " ** 100; // 500자 — 한 줄이 여러 조각
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "pc.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "pc.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = true;
+
+    // **긴 줄 중간에서 한 프레임 그린다** — 스냅숏이 `(줄 30, 조각 20)`을 굳힌다.
+    term.rt.editor_first_line = 30;
+    term.rt.editor_first_piece = 20;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 30), term.rt.editor_hit_geom.top_line);
+    try testing.expectEqual(@as(u32, 20), term.rt.editor_hit_geom.top_piece);
+
+    // **조각만 되감는다**(휠로 그 줄 위쪽으로 굴린 것) — 프레임은 안 그린다.
+    term.rt.editor_first_piece = 0;
+
+    // 그 화면에 없는 매치로 간다. 조각을 안 보면 "줄 30이 그려져 있다"며 안 굴러간다.
+    try fx.session.editor_find_matches.append(allocator, .{ .line = 30, .start = 0, .len = 1 });
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+    revealCurrentFindMatch(fx.session, term);
+    // 조각 축을 보면 "낡았다"고 판정해 다시 자리를 잡는다.
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_piece);
+    try testing.expectEqual(@as(usize, 30 -| drawnDocLines(term) / 2), term.rt.editor_first_line);
+}
+
+test "EM13 배치가 바뀌면 스냅숏을 안 믿는다 — 랩을 켜고 프레임 없이 Enter" {
+    // **접힘·랩 토글은 `first_line`을 일부러 안 건드린다**(`toggleWrap`의 doc). 그래서 세로 위치만
+    // 대조하던 초판은 "신선하다"고 답하며 낡은 목록을 믿었다 — 적대적 검증 2026-08-24가 랩 토글로
+    // 실측했다(보이는 줄이 12개인데 줄 32를 "보인다"고 답해 안 굴렀다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |i| {
+        var buf: [400]u8 = undefined;
+        const filler = "wrap me " ** 20;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "wr.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "wr.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // **랩을 끈 채** 한 프레임 — 짧은 줄이 아니므로 화면에 줄이 많이 들어간다.
+    term.rt.editor_wrap = false;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const wide_docs = drawnDocLines(term);
+
+    // **랩을 켠다 — 프레임은 안 그린다.** 세로 위치는 그대로다(토글이 일부러 안 건드린다).
+    term.rt.editor_wrap = true;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+
+    // 랩을 켜면 실제로 보이는 줄이 훨씬 적어진다 — 그래야 판정이 성립한다.
+    const target: u32 = @intCast(wide_docs - 1);
+    try fx.session.editor_find_matches.append(allocator, .{ .line = target, .start = 0, .len = 1 });
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+    revealCurrentFindMatch(fx.session, term);
+    // 낡은 목록을 믿으면 "보인다"며 0에 남는다.
+    try testing.expect(term.rt.editor_first_line > 0);
 }

@@ -120,7 +120,12 @@ pub fn toggleFind(self: *AppSession) void {
         self.chrome_host.notice.dismiss(); // 배타적 — notice 위에 열지 않는다
         self.chrome_host.palette.hide();
         self.chrome_host.find.show(); // show가 검색어/현재/카운트를 비운다(새 검색)
-        self.find_nav = false; // 오버레이가 주도 — 닫힘-네비 플래그 해제
+        // **여는 쪽도 목록을 비운다.** `show()`는 컴포넌트 상태(검색어·현재·카운트)만 비우고
+        // 매치 목록은 세션 소유라 안 건드린다 — 그래서 ⌘G로 닫힘-네비를 하다 ⌘F를 다시 열면
+        // **빈 검색 상자에 옛 강조가 그대로 칠해져 있었다**(카운터는 0을 말하면서. 적대적 검증
+        // 2026-08-24가 `editor_find_matches=200`으로 실측). 헬퍼가 `hide()` 자리만 덮고 `show()`
+        // 자리를 안 덮은 것이 그 구멍이다 — 이 줄이 `find_nav` 해제도 함께 한다.
+        clearAllFindMatches(self);
     }
 }
 

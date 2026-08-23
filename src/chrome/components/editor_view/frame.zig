@@ -796,8 +796,10 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
     // 먼저 한 번 돌면 현재 매치는 **op이 하나라도 남아 있는 한** 그려진다(2라운드 적대적 검증이
     // 실측으로 잡았다 — `ops`를 6·8·9로 좁혀 보면 초판은 셋 다 현재 매치가 0개였다).
     //
-    // 랩된 줄은 조각마다 이 루프를 지나지만 `paintRowMarks`가 각 조각의 열 범위로 클립하므로
-    // 실제로 quad가 나는 조각은 하나다.
+    // **랩된 줄은 조각마다 quad가 날 수 있다.** 초판 주석은 "실제로 quad가 나는 조각은 하나"라
+    // 적었는데 **거짓이다** — 마크가 조각 경계를 넘으면 `paintRowMarks`가 조각마다 잘린 조각을
+    // 그린다(적대적 검증 2026-08-24 실측: 52자 마크가 조각 5개에서 quad 5개). 그리기는 옳고,
+    // 틀린 것은 그 주석이 옆의 예산 계산 근거를 오도했다는 점이다.
     if (props.search_current) |cur| {
         for (visual, 0..) |v, i| {
             if (n >= out.len) break;
@@ -2298,6 +2300,7 @@ test "SRCH1 검색 결과는 두 색으로 선다 — 현재 매치 하나만 �
 
     var normal_x: [4]i32 = undefined;
     var normal: usize = 0;
+    var current_n: usize = 0;
     var current: ?draw.Op.Quad = null;
     for (ops[0..w.ops]) |op| {
         if (op != .quad) continue;
@@ -2306,12 +2309,19 @@ test "SRCH1 검색 결과는 두 색으로 선다 — 현재 매치 하나만 �
                 if (normal < normal_x.len) normal_x[normal] = op.quad.rect.x;
                 normal += 1;
             },
-            .search_match_current => current = op.quad,
+            .search_match_current => {
+                current_n += 1;
+                current = op.quad;
+            },
             else => {},
         }
     }
     // 셋 중 둘은 보통 색, **하나만** 현재 색이다.
     try std.testing.expectEqual(@as(usize, 2), normal);
+    // **세어야 한다 — 대입이면 중복 칠을 못 잡는다.** 초판은 마지막 것을 덮어써서, 현재 매치를
+    // 두 번 그리는 뮤턴트가 저장소 3,347개를 전부 지나갔다(적대적 검증 2026-08-24). 두 번 칠하면
+    // 알파가 두 번 먹어 그 하나만 진해진다 — `paintSearch` doc이 "표현 불가능하다"고 적어 둔 상태다.
+    try std.testing.expectEqual(@as(usize, 1), current_n);
     const q = current orelse return error.CurrentMatchNotPainted;
     // 그 하나가 **가운데 매치 자리**에 선다 — 색만 맞고 자리가 틀리면 화면이 거짓말한다.
     // (열 계산을 다시 하지 않고 이웃 둘 사이에 있는지로 본다 — §4.1c가 금지한 두 번째 출처를
@@ -2463,4 +2473,82 @@ test "SRCH3 예산이 말라도 **현재 매치**는 남는다 — 위치 표시
     try std.testing.expectEqual(@as(usize, 1), current);
     // 그리고 실제로 말랐어야 판정이 성립한다 — 다 들어갔으면 이 테스트는 아무것도 안 잰다.
     try std.testing.expect(normal < row_marks.len - 1);
+}
+
+test "SRCH4 현재 매치가 **아래쪽 행**에 있어도 예산에 안 밀린다 (행 루프 밖 선행 패스)" {
+    // **`SRCH3`가 못 재는 절반이다**(적대적 검증 2026-08-24). 그쪽은 줄이 하나라, 현재 매치를
+    // "그 행 안에서 먼저"(1라운드 모양) 그려도 통과한다. 그런데 1라운드가 부족했던 근거는
+    // *"예산이 **그 행에 닿기 전에** 마른다"*였고, 그 상황은 **행이 둘 이상**이라야 난다.
+    //
+    // 그래서 여기서는 매치가 잔뜩인 행을 여러 개 두고 **현재 매치를 아래쪽 행**에 둔다.
+    // 선행 패스가 행 루프 **밖**에 있어야만 그 하나가 살아남는다.
+    var text: [2048]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [32]content.Row = undefined;
+    var visual_rows: [32]visual_map.VisualRow = undefined;
+    var gutter_rows: [32]gutter.Row = undefined;
+    var counts: [32]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    const row_marks = [_]Mark{
+        .{ .start = 0, .len = 1 }, .{ .start = 2, .len = 1 }, .{ .start = 4, .len = 1 },
+        .{ .start = 6, .len = 1 }, .{ .start = 8, .len = 1 },
+    };
+    var lines_buf: [6][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = "a a a a a";
+    var rows_buf: [6][]const Mark = undefined;
+    for (&rows_buf) |*r| r.* = row_marks[0..];
+
+    // 앞 행들이 예산을 먹고 나면 **마지막 행에는 자리가 안 남는다**. (배경·본문·gutter가 먼저
+    // 먹으므로 너무 좁히면 검색 층 자체가 0이 되어 판정이 성립하지 않는다 — 아래 `normal > 0`이
+    // 그 상태를 막는다.)
+    var ops: [24]draw.Op = undefined;
+    const total_cols: u16 = 24;
+    const w = build(.{
+        .lines = &lines_buf,
+        .first_line = 0,
+        .total_lines = lines_buf.len,
+        .search_marks = &rows_buf,
+        .search_current = .{ .line = 5, .start = 8 }, // **마지막 행의 마지막 매치**
+        .visible_rows = 6,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 6 * 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var normal: usize = 0;
+    var current: usize = 0;
+    var current_y: i32 = -1;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        switch (op.quad.fill_role) {
+            .search_match => normal += 1,
+            .search_match_current => {
+                current += 1;
+                current_y = op.quad.rect.y;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), current);
+    // 그리고 그것이 **마지막 행**에 섰다 — 행 루프 안에서 그렸다면 거기까지 예산이 못 간다.
+    try std.testing.expectEqual(@as(i32, 5 * 16), current_y);
+    // 판정이 성립하려면 **실제로 마르되 검색 층이 죽지는 않아야** 한다.
+    try std.testing.expect(normal > 0);
+    try std.testing.expect(normal < row_marks.len * lines_buf.len - 1);
 }

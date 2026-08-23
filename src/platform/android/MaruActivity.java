@@ -161,8 +161,31 @@ public class MaruActivity extends android.app.NativeActivity {
 
         @Override
         public boolean sendKeyEvent(android.view.KeyEvent event) {
-            if (event.getAction() == android.view.KeyEvent.ACTION_DOWN)
-                nativeKey(event.getKeyCode(), event.getMetaState(), event.getUnicodeChar(0));
+            if (event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;
+            final int uch = event.getUnicodeChar(0);
+            // **소프트 키보드의 글자는 여기서 안 보낸다 — `commitText` 가 이미 보냈다.**
+            //
+            // IME 는 글자 하나에 두 콜백을 다 부른다(실측: 삼성 키보드). 둘 다 넘기면 **같은
+            // 글자가 두 번** 원격으로 나간다 — `ㅈ` 한 번에 `ww` 가 찍혔다. 한글에서는 더 나쁘다:
+            // 물리 배열이 QWERTY 라 `getUnicodeChar` 가 자모가 아니라 **그 자리의 라틴 글자**를
+            // 준다. 그래서 "가" 를 치면 조합 결과와 **별개로** `rk` 가 나가 `zsh: command not
+            // found: rkr` 이 됐다. 로컬 화면에서는 `commitText` 만 반영하면 맞아 보여 안 드러나고,
+            // **원격이 나간 바이트를 에코하면서** 비로소 보였다.
+            //
+            // **하드웨어 키보드는 그대로 통과한다.** 물리 키보드는 IME 를 안 거쳐 이 경로로만
+            // 오므로, 여기서 글자를 막으면 그쪽 타이핑이 통째로 죽는다.
+            //
+            // **수정자가 걸린 것도 통과한다.** `Ctrl+C` 는 글자가 아니라 시퀀스이고, 그 판정은
+            // 코어가 한다(`maru_mobile_key`). 여기서 글자로 보고 막으면 제어문자가 사라진다.
+            final boolean from_soft =
+                    (event.getFlags() & android.view.KeyEvent.FLAG_SOFT_KEYBOARD) != 0
+                    || event.getDeviceId() == android.view.KeyCharacterMap.VIRTUAL_KEYBOARD;
+            final boolean modified = (event.getMetaState()
+                    & (android.view.KeyEvent.META_CTRL_ON
+                       | android.view.KeyEvent.META_ALT_ON
+                       | android.view.KeyEvent.META_META_ON)) != 0;
+            if (from_soft && uch != 0 && !modified) return true;
+            nativeKey(event.getKeyCode(), event.getMetaState(), uch);
             return true;
         }
     }

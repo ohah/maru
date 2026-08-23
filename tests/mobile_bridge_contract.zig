@@ -315,6 +315,51 @@ test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
     bridge.maru_mobile_set_preedit("", 0);
 }
 
+test "재현: 조합 폭은 바이트도 글자 수도 아니다 — 칸이다" {
+    // 셋이 전부 다르다. `한글` 은 6바이트·2글자·**4칸**이다. 커서를 이 값만큼 옮기는데
+    // 바이트로 세면 커서가 저 멀리 가고, 글자 수로 세면 조합 위에 겹쳐 앉는다.
+    bridge.maru_mobile_set_preedit("", 0);
+    try std.testing.expectEqual(@as(u16, 0), bridge.preeditColsNow());
+    bridge.maru_mobile_set_preedit("abc", 3);
+    try std.testing.expectEqual(@as(u16, 3), bridge.preeditColsNow());
+    bridge.maru_mobile_set_preedit("한글", 6);
+    try std.testing.expectEqual(@as(u16, 4), bridge.preeditColsNow());
+    bridge.maru_mobile_set_preedit("", 0);
+}
+
+test "재현: 조합 중에는 커서와 후보창 앵커가 그 뒤에 선다" {
+    // **기기에서 커서가 조합 첫 글자를 덮고 앉았다** — `mux` 를 치는 동안 블록이 `m` 위에
+    // 그대로 있었다. 조합은 아직 코어에 안 들어갔지만 화면에서는 이미 커서 앞자리를 차지한다.
+    //
+    // 후보창 앵커(`caret_rect`)도 같이 본다. **두 자리가 갈리면** 후보창이 자기가 방금 만든
+    // 글자를 덮는 자리에 뜬다 — 그래서 판정을 한 곳(`cursorColOnScreen`)이 소유한다.
+    var cp: u32 = 32;
+    while (cp < 127) : (cp += 1) atlasAdd1(cp, 0, 0, 0, 11);
+    bridge.maru_mobile_set_preedit("", 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const base = bridge.maru_mobile_caret_rect();
+    try std.testing.expect(base != 0);
+    const base_x = base >> 48;
+    const cell_w = (base >> 16) & 0xFFFF;
+
+    // 영문 세 칸이면 앵커도 세 칸 뒤다.
+    bridge.maru_mobile_set_preedit("abc", 3);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const moved = bridge.maru_mobile_caret_rect();
+    try std.testing.expectEqual(base_x + 3 * cell_w, moved >> 48);
+
+    // **한글은 두 칸씩이다** — 글자 수(2)가 아니라 칸 수(4)만큼 간다.
+    bridge.maru_mobile_set_preedit("한글", 6);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const wide = bridge.maru_mobile_caret_rect();
+    try std.testing.expectEqual(base_x + 4 * cell_w, wide >> 48);
+
+    // 확정되면 제자리로 돌아온다.
+    bridge.maru_mobile_set_preedit("", 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqual(base, bridge.maru_mobile_caret_rect());
+}
+
 // 헤더가 숫자 표의 단일 출처다. **한쪽만 고치면 host 가 모르는 id 를 보내고 키가 사라진다** —
 // 헤더를 읽어 브리지 매핑이 그 전부를 아는지 검사한다.
 test "헤더의 키 id 를 브리지가 전부 안다" {

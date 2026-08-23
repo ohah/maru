@@ -121,8 +121,13 @@ pub const Props = struct {
     /// 선택은 문서 전체 offset인데 그것을 줄로 자르는 것은 제품의 일이다 — 컴포넌트는 어느 줄이
     /// 문서 몇 번째 byte에서 시작하는지 모른다.
     selection_marks: ?[]const []const Mark = null,
-    /// **검색 결과**(§5.1). `selection_marks`와 같은 축(논리 줄)이고, 한 줄에 여러 개가 설 수 있다 —
+    /// **검색 결과**(§5.1). `selection_marks`와 같은 축이고, 한 줄에 여러 개가 설 수 있다 —
     /// 선택은 이어진 하나라 줄마다 최대 하나였지만 매치는 그렇지 않다.
+    ///
+    /// **축 이름 주의**: 여기서 "줄"은 **이 컴포넌트가 받은 `lines` 배열의 첨자**다. 제품이
+    /// 접힘을 켜면 그 배열은 `editor_visible_lines`(보이는 줄)이므로 제품 쪽 주석은 같은 값을
+    /// **"보이는 줄 축"**이라 부른다. 컴포넌트는 접힘을 모르니 그 이름을 쓸 수 없을 뿐 **같은
+    /// 것**이다 — §4.1g가 이 두 이름을 섞어 여러 번 틀린 이력이 있어 여기 적어 둔다.
     search_marks: ?[]const []const Mark = null,
     /// 그 중 **지금 보고 있는 매치**. `search_marks` 안에 이미 들어 있고 이것은 어느 것인지만
     /// 가리킨다 — 따로 담으면 두 목록이 어긋날 수 있고, 그러면 색이 둘인 매치나 색이 없는 매치가 난다.
@@ -180,7 +185,7 @@ pub const Props = struct {
 /// 그 호출자가 cluster 경계로 정한다 — 여기서는 이미 정해진 범위를 열로 옮겨 칠하기만 한다.
 pub const Mark = struct { start: u32, len: u32 };
 
-/// 지금 네비게이션이 가리키는 검색 결과 — 줄(논리 줄 축)과 그 줄 안 시작 byte.
+/// 지금 네비게이션이 가리키는 검색 결과 — 줄(`search_marks`와 **같은 축**)과 그 줄 안 시작 byte.
 ///
 /// `Mark`를 쓰지 않는 이유: 길이는 이미 `search_marks` 쪽에 있고, 여기 또 두면 둘이 다를 수 있다.
 pub const CurrentMatch = struct { line: u32, start: u32 };
@@ -207,6 +212,10 @@ pub const search_alpha: u8 = 92; // ≈36%
 /// 현재 매치는 **더 진하다**. 같은 세기면 여럿 중 어느 것이 현재인지 색상만으로 구분해야 하는데,
 /// 테마에 따라 두 색이 가까울 수 있다(사용자 테마는 우리가 못 고른다).
 pub const search_current_alpha: u8 = 153; // ≈60%
+
+/// 검색 강조가 남겨 두어야 하는 op 수 — 세로·가로 스크롤바가 각각 하나씩 쓴다
+/// (`scrollbar.build`/`buildHorizontal`의 `.ops = 1`). 자세한 이유는 `build`의 호출부에 있다.
+pub const scrollbar_reserve_ops: usize = 2;
 /// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
 /// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
 pub const strip_alpha: u8 = 153; // ≈60%
@@ -556,7 +565,20 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
     // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
-    const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops ..], scratch.count_scratch);
+    // **막대 몫을 남겨 둔다.** 검색 강조는 **줄당 개수에 상한이 없는 유일한 층**이고(선택은
+    // 구조적으로 줄당 하나다), 조립 순서상 두 스크롤바보다 **앞**이라 예산을 다 먹으면 막대가
+    // 통째로 안 그려진다. 그런데 `scrollbar.build`는 op이 0이어도 **기하는 그대로 반환**하므로
+    // 히트테스트는 살아 있다 — "안 보이는데 드래그는 되는" 상태가 된다.
+    //
+    // 도달 가능한 수치다(적대적 검증 2026-08-23 실측): 이 저장소의 `app_session.zig`에서 공백
+    // 한 칸을 검색하면 80행×160열 창에서 그려질 마크가 **3,120개**이고 예산은 2,560이다.
+    //
+    // 예약은 **두 개**면 충분하다 — 세로·가로 막대가 각각 정확히 op 하나를 쓴다(`scrollbar.zig`의
+    // 두 `return .{ .ops = 1, ... }`). 잘리는 쪽은 검색 강조이고, 그쪽은 잘려도 **화면이 조용히
+    // 덜 말할 뿐** 조작이 거짓이 되지는 않는다.
+    const find_base = bg.ops + cw.ops + gw.ops + band_ops + sel_ops;
+    const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
+    const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
 
     const sw = scrollbar.build(.{
         .content = .{
@@ -765,6 +787,10 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
         };
 
         // 현재 매치가 이 줄에 있나. 없으면 한 번에 그린다 — 대부분의 줄이 이쪽이다.
+        //
+        // **같은 `start`를 가진 마크는 한 줄에 둘일 수 없다**(그래서 이 조회가 모호하지 않다):
+        // ⑴ 이 행은 문서 줄 하나의 매치만 받고, ⑵ 그 줄 안에서 매치는 겹치지 않아 `start`가
+        // 엄격히 증가하며, ⑶ 보이는 줄 번호 표에 중복이 없어 같은 문서 줄이 두 행에 실리지 않는다.
         const cur: ?usize = blk: {
             const c = props.search_current orelse break :blk null;
             if (c.line != idx) break :blk null;
@@ -780,15 +806,20 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
 
         // **셋으로 나눠 같은 함수를 세 번 부른다.** 열 계산이 한 곳에 있어야 한다는 규칙(§4.1c)이
         // 여기서도 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
-        var p_before = paint;
-        p_before.marks = marks[0..k];
-        if (p_before.marks.len > 0) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols);
-
+        //
+        // **현재 매치를 먼저 그린다.** 초판은 그 줄의 앞선 매치들을 먼저 그렸는데, 예산이 앞에서
+        // 끝나면 **현재 매치만 빠지고 주변 매치는 보통 색으로 남았다** — "현재 위치 표시만 없는
+        // 화면"이라 Enter가 어디로 갈지 화면이 말해 주지 못한다(적대적 검증 2026-08-23).
+        // 순서를 뒤집으면 예산이 마를 때 잃는 것이 **주변 매치**가 된다. 그쪽이 덜 나쁘다.
         var p_cur = paint;
         p_cur.marks = marks[k .. k + 1];
         p_cur.role = .search_match_current;
         p_cur.alpha = search_current_alpha;
-        if (n < out.len) n += paintRowMarks(props, layout, p_cur, out[n..], scratch_cols);
+        n += paintRowMarks(props, layout, p_cur, out[n..], scratch_cols);
+
+        var p_before = paint;
+        p_before.marks = marks[0..k];
+        if (p_before.marks.len > 0 and n < out.len) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols);
 
         var p_after = paint;
         p_after.marks = marks[k + 1 ..];
@@ -2177,4 +2208,152 @@ test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 �
         if (op.quad.rect.y >= 16) found_on_second_row = true;
     }
     try testing.expect(found_on_second_row);
+}
+
+test "SRCH1 검색 결과는 두 색으로 선다 — 현재 매치 하나만 다르다 (§5.1)" {
+    // **뮤턴트로 잡힌 빈자리다**(적대적 검증 2026-08-23). `paintSearch`의 현재 매치 분기를
+    // 통째로 없애 전부 `.search_match`로 그려도 이 저장소의 판정자 **전부가 초록이었다** —
+    // 그 계약("Enter가 어디로 가는지 화면이 말한다")이 Lab 캡처(사람 눈)에만 걸려 있었다.
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    const lines = [_][]const u8{"row row row"}; // 0, 4, 8
+    const row_marks = [_]Mark{ .{ .start = 0, .len = 3 }, .{ .start = 4, .len = 3 }, .{ .start = 8, .len = 3 } };
+    const marks = [_][]const Mark{&row_marks};
+
+    const total_cols: u16 = 40;
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .search_marks = &marks,
+        // **가운데 것**이 현재다 — 첫 것을 고르면 "앞에서 자른 것"과, 마지막을 고르면 "뒤에서
+        // 자른 것"과 구별되지 않아 셋으로 가르는 코드가 판정되지 않는다.
+        .search_current = .{ .line = 0, .start = 4 },
+        .visible_rows = 2,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 32 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var normal_x: [4]i32 = undefined;
+    var normal: usize = 0;
+    var current: ?draw.Op.Quad = null;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        switch (op.quad.fill_role) {
+            .search_match => {
+                if (normal < normal_x.len) normal_x[normal] = op.quad.rect.x;
+                normal += 1;
+            },
+            .search_match_current => current = op.quad,
+            else => {},
+        }
+    }
+    // 셋 중 둘은 보통 색, **하나만** 현재 색이다.
+    try std.testing.expectEqual(@as(usize, 2), normal);
+    const q = current orelse return error.CurrentMatchNotPainted;
+    // 그 하나가 **가운데 매치 자리**에 선다 — 색만 맞고 자리가 틀리면 화면이 거짓말한다.
+    // (열 계산을 다시 하지 않고 이웃 둘 사이에 있는지로 본다 — §4.1c가 금지한 두 번째 출처를
+    // 판정자가 만들지 않게.)
+    try std.testing.expect(normal_x[0] < q.rect.x and q.rect.x < normal_x[1]);
+    try std.testing.expectEqual(@as(u32, 3 * 8), q.rect.w);
+    // 세기도 갈린다 — 사용자 테마에서 두 색이 가까울 수 있고, 그때는 이것만이 구분을 준다.
+    try std.testing.expectEqual(search_current_alpha, q.alpha);
+    try std.testing.expect(search_current_alpha != search_alpha);
+}
+
+test "SRCH2 매치가 예산을 말려도 스크롤바는 선다 — 안 보이는데 드래그되는 상태를 막는다" {
+    // **실측으로 도달 가능함이 확인된 자리다**(적대적 검증 2026-08-23): 이 저장소의
+    // `app_session.zig`에서 공백 한 칸을 검색하면 80행×160열 창에 그려질 마크가 3,120개인데
+    // 제품 예산은 2,560이다.
+    //
+    // 넘치면 `scrollbar.build`가 빈 슬라이스를 받아 op 0으로 돌아가는데 **기하는 그대로
+    // 반환한다** — 막대가 안 보이는 자리에서 드래그만 잡히는 상태가 된다.
+    // **일부러 좁힌다** — 3,000개짜리 창을 흉내 내지 않고 같은 상태를 만든다. 본문·gutter가
+    // 들어갈 만큼은 남기고(그쪽이 마르면 이 판정자가 다른 것을 재게 된다) 검색이 그 뒤를
+    // 다 먹을 만큼 좁힌다.
+    var ops: [96]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [64]content.Row = undefined;
+    var visual_rows: [64]visual_map.VisualRow = undefined;
+    var gutter_rows: [64]gutter.Row = undefined;
+    var counts: [64]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    // 한 줄에 마크를 잔뜩 — 예산을 확실히 넘긴다.
+    var many: [40]Mark = undefined;
+    for (&many, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
+    const marks_row = many[0..];
+    var rows_buf: [40][]const Mark = undefined;
+    for (&rows_buf) |*r| r.* = marks_row;
+
+    var lines_buf: [40][]const u8 = undefined;
+    for (&lines_buf) |*l| l.* = "a a a a a a a a a a a a a a a a a a a a";
+
+    const total_cols: u16 = 200; // 본문보다 넓다 — 가로 막대가 설 조건
+    const w = build(.{
+        .lines = &lines_buf,
+        .first_line = 0,
+        .total_lines = 40,
+        .search_marks = &rows_buf,
+        .content_max_cols = 200, // 본문보다 길다 — 가로 막대가 설 조건(`showsHorizontalBar`)
+        .visible_rows = 8,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = 320, .h = 8 * 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 8,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    // 검색 강조가 예산을 다 먹었어도 **두 막대가 그려져야 한다**.
+    var vertical = false;
+    var horizontal = false;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role == scrollbar.thumb_role and op.quad.alpha == scrollbar.thumb_alpha) {
+            // 세로 막대는 본문 오른쪽 거터, 가로 막대는 본문 아래 거터에 선다 — y로 가른다.
+            if (op.quad.rect.y >= @as(i32, 7 * 16)) horizontal = true else vertical = true;
+        }
+    }
+    try std.testing.expect(vertical);
+    try std.testing.expect(horizontal);
+    // 그리고 그 자리는 기하와 일치해야 한다(기하만 살고 그림이 없는 상태를 막는 것이 목적이다).
+    try std.testing.expect(w.scrollbar != null);
+    try std.testing.expect(w.horizontal_scrollbar != null);
 }

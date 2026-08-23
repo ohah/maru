@@ -362,3 +362,75 @@ test("setOptions 로 격자를 바꾸면 실제로 리사이즈된다", async ()
   expect(term.size).toEqual({ cols: 60, rows: 20 });
   term.dispose();
 });
+
+/* ── 실제 TUI 가 쓰는 시퀀스 ────────────────────────────────────────────────
+   vim·htop·tmux 를 PTY 로 띄워 확인한 것들을 **결정적 재현**으로 옮긴다. 앱 자체를 CI 에서
+   돌리면 셸·버전·프로세스 목록에 따라 화면이 달라져 우리 코드 문제와 환경 문제가 구분되지
+   않는다. 앱은 "이 시퀀스를 실제로 쓴다"를 확인하는 탐색 도구이고, 회귀는 여기서 지킨다. */
+
+test("대체 화면 — 들어갔다 나오면 원래 화면이 돌아온다 (vim)", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("MAIN_SCREEN");
+  await settle();
+  term.write("\x1b[?1049h"); // 대체 화면 진입
+  term.write("\x1b[2J\x1b[HALT_SCREEN");
+  await settle();
+  let snap = await term.snapshot();
+  expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("ALT_SCREEN");
+  term.write("\x1b[?1049l"); // 복원
+  await settle();
+  snap = await term.snapshot();
+  expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("MAIN_SCREEN");
+  term.dispose();
+});
+
+test("마우스 추적 단계가 모드 비트에 그대로 실린다 (htop·tmux)", async () => {
+  const term = await makeTerminal();
+  const track = () => term.modes >> 8;
+  for (const [seq, expected] of [
+    ["\x1b[?1000h", 2], // normal — htop 이 켜는 것
+    ["\x1b[?1002h", 3], // button-event — 드래그 중 이동까지
+    ["\x1b[?1003h", 4], // any-event — 항상 이동
+  ] as const) {
+    term.write(seq);
+    await settle();
+    expect({ seq, track: track() }).toEqual({ seq, track: expected });
+  }
+  term.write("\x1b[?1003l\x1b[?1002l\x1b[?1000l");
+  await settle();
+  expect(track()).toBe(0);
+  term.dispose();
+});
+
+test("스크롤 영역 안에서만 스크롤된다 (tmux·vim 상태줄)", async () => {
+  // DECSTBM 으로 하단 한 줄을 고정하면 그 줄은 스크롤에 밀리지 않는다 — 상태줄의 원리다.
+  const term = await makeTerminal({ cols: 10, rows: 5 });
+  term.write("\x1b[5;5H"); // 마지막 줄로
+  term.write("STATUS");
+  term.write("\x1b[1;4r"); // 1~4행만 스크롤 영역
+  term.write("\x1b[1;1H");
+  for (let i = 1; i <= 6; i++) term.write(`L${i}\r\n`);
+  await settle();
+  const snap = await term.snapshot();
+  const row = (r: number) => rowText(snap.cells, snap.size.cols, r).trim();
+  // **상태줄은 스크롤에 밀리지 않는다** — 이게 요점이다.
+  expect(row(4)).toBe("STATUS");
+  // 스크롤 영역(1~4행)에는 최근 줄만 남는다. 마지막 `\r\n` 이 한 번 더 밀어 4행은 비어 있다.
+  expect([row(0), row(1), row(2), row(3)]).toEqual(["L4", "L5", "L6", ""]);
+  term.dispose();
+});
+
+test("DECSCUSR 로 커서 모양이 바뀐다 (vim 삽입 모드)", async () => {
+  const term = await makeTerminal();
+  const shapeOf = async () => (await term.snapshot()).cursor?.shape;
+  term.write("\x1b[5 q"); // 깜빡이는 bar — vim 삽입 모드
+  await settle();
+  expect(await shapeOf()).toBe("bar");
+  term.write("\x1b[1 q"); // 깜빡이는 block — 노멀 모드
+  await settle();
+  expect(await shapeOf()).toBe("block");
+  term.write("\x1b[3 q"); // underline
+  await settle();
+  expect(await shapeOf()).toBe("underline");
+  term.dispose();
+});

@@ -14666,7 +14666,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         상속한다. **3a2**는 3a1의 전용 output과 2b3
         `ExternalPumpOwner`, initialized attachment screen, initial repaint, enter/leave reserve와 poll storage를
         한 final-address pre-raw owner에 모은 뒤에만 `RawTty.enter`와 enter write를 commit한다. 3a1과 3a2가
-        모두 green이기 전에는 3a 완료나 raw TTY 제품 loop를 주장하지 않는다.
+        모두 green이기 전에는 3a 완료나 raw TTY 제품 loop를 주장하지 않는다. 이 owner의 lifecycle은
+        `empty -> preparing -> prepared -> committing -> live -> tearing_down -> dead`의 닫힌 전이다. prepare는
+        inherited TTY termios/size를 읽기만 한 뒤 dedicated output, `ExternalPumpOwner`, initial full repaint,
+        64-byte enter/leave reserve, 4-entry poll storage를 순서대로 final address에 소유하며 termios·signal
+        disposition·ANSI output을 바꾸지 않는다. commit은 TTY termios/size를 mutation 전에 다시 확인하고
+        `RawTty.enter` 뒤 enter reserve를 dedicated output에 exact 전송한 경우에만 `live`를 게시한다. enter가
+        partial/blocked/error이면 bounded leave reserve를 best-effort로 시도하고 dedicated output을 닫은 뒤
+        `RawTty.restore`를 끝내고 재-commit 불가한 `tearing_down` cleanup authority로 수렴해 실패를 반환하며,
+        prepare/commit 어느 실패도 consumed `Prepared`, pump ledger, repaint를 caller에게 되돌리거나 유실하지 않는다.
+        첫 poll descriptor set은 live 게시 전에 stdin, host socket,
+        dedicated output, signal self-pipe를 모두 담고 첫 turn은 allocation 없이 실행 가능해야 한다. 3b가 이
+        owner를 실제 CLI loop에 연결하기 전까지 제품 caller는 exact 0이다. repaint allocator가 prepare 도중
+        teardown으로 재진입하거나 commit이 진행 중일 때 teardown은 소유물을 건드리지 않고 typed busy를 반환한다.
+        teardown은 leave reserve를 전송한 뒤 더 쓸 ANSI가 없는 dedicated output을 먼저 닫아 그 open-file-description의
+        output 소유권을 끝내고 나서 저장한 termios를 `TCSAFLUSH`로 복원한다. Darwin `openpty`에서도 peer가 leave를
+        이미 소비한 뒤 열린 writer 때문에 restore ioctl이 무기한 기다리지 않아야 하며, actual-fd gate가 이 순서를
+        Debug·ReleaseFast에서 검증한다.
       - **P5c3c-3b — integrated stack owner**: `RawTty`, ANSI queue, resize, chord, signal self-pipe와
         `Client.external_pump`를 한 stack owner에 묶는다. controller/observer/revoke/partial stdout·wire를
         injected poll/clock과 실제 `openpty` child로 검증한다. cleanup 진입 시 `in_flight_control != null`이거나

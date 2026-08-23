@@ -3,7 +3,7 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
-test "p5c3c-3a1 primitives keep neutral leaves portable and product callers dormant" {
+test "p5c3c-3a1 primitives keep neutral leaves portable and admit only the 3a2 caller" {
     const allocator = std.testing.allocator;
     const chord = try read(allocator, "src/platform/macos/session_host/external_detach_chord.zig");
     defer allocator.free(chord);
@@ -23,7 +23,7 @@ test "p5c3c-3a1 primitives keep neutral leaves portable and product callers dorm
     try std.testing.expectEqual(@as(usize, 0), count(output, "@import(\"external_tty.zig\")"));
     try std.testing.expectEqual(@as(usize, 0), count(output, "@import(\"client.zig\")"));
 
-    try std.testing.expectEqual(@as(usize, 0), try countProductIdentifierExcept(
+    try std.testing.expectEqual(@as(usize, 1), try countProductIdentifierExcept(
         allocator,
         "DedicatedOutput",
         &.{

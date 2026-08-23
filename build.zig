@@ -9527,6 +9527,74 @@ pub fn build(b: *std.Build) void {
         session_host_3a1_step.dependOn(&run_session_host_3a1_boundary_tests.step);
         boundary_step.dependOn(&run_session_host_3a1_boundary_tests.step);
 
+        const session_host_3a2_step = b.step(
+            "test-session-host-3a2",
+            "Run the P5c3c-3a2 final-address pre-raw commit barrier gate",
+        );
+        session_host_3a2_step.dependOn(session_host_3a1_step);
+        inline for ([_]struct { path: []const u8, name: []const u8, count: usize, imports_maru: bool }{
+            .{
+                .path = "src/platform/macos/session_host/external_tty.zig",
+                .name = "tty-inspection",
+                .count = 1,
+                .imports_maru = false,
+            },
+            .{
+                .path = "src/platform/macos/session_host/external_pump_owner.zig",
+                .name = "pre-raw-owner",
+                // The module imports external_tty.zig, whose matching 3a2 drift test is
+                // deliberately part of this composition gate in addition to the seven
+                // owner-local tests.
+                .count = 8,
+                .imports_maru = true,
+            },
+        }) |fixture| {
+            for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+                const tests = addProjectTest(b, .{
+                    .name = b.fmt("maru-session-host-3a2-{s}-{s}", .{ fixture.name, @tagName(mode) }),
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(fixture.path),
+                        .target = target,
+                        .optimize = mode,
+                        .link_libc = true,
+                        .imports = if (fixture.imports_maru)
+                            &.{.{ .name = "maru", .module = maru_mod }}
+                        else
+                            &.{},
+                    }),
+                    .filters = &.{"p5c3c-3a2"},
+                });
+                const run_tests = b.addRunArtifact(tests);
+                run_tests.addArg(b.fmt("--maru-expect-tests={d}", .{fixture.count}));
+                run_tests.setCwd(b.path("."));
+                session_host_3a2_step.dependOn(&run_tests.step);
+            }
+        }
+        const session_host_3a2_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-3a2-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3a2_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_session_host_3a2_sentinel = b.addRunArtifact(session_host_3a2_sentinel);
+        run_session_host_3a2_sentinel.setCwd(b.path("."));
+        session_host_3a2_step.dependOn(&run_session_host_3a2_sentinel.step);
+        const session_host_3a2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3a2_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"p5c3c-3a2 pre-raw owner"},
+        });
+        const run_session_host_3a2_boundary_tests = b.addRunArtifact(session_host_3a2_boundary_tests);
+        run_session_host_3a2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3a2_boundary_tests.setCwd(b.path("."));
+        session_host_3a2_step.dependOn(&run_session_host_3a2_boundary_tests.step);
+        boundary_step.dependOn(&run_session_host_3a2_boundary_tests.step);
+
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

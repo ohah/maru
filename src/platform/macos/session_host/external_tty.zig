@@ -31,6 +31,7 @@ pub const EnterError = error{
     SignalPipeFailed,
     SignalHandlerFailed,
     UnsupportedSignalDisposition,
+    TerminalChanged,
     RawModeFailed,
 };
 
@@ -77,6 +78,12 @@ const Ops = struct {
     close_fd: *const fn (*anyopaque, c.fd_t) void,
 };
 
+pub const Inspection = struct {
+    fd: c.fd_t,
+    original: posix.termios,
+    initial_size: Size,
+};
+
 /// `RawTty` is intentionally non-copy-safe by convention: exactly one lexical owner must call
 /// `restore`. P5c3 keeps it as a stack local around the attach event loop rather than storing it
 /// in a copyable session model.
@@ -99,11 +106,35 @@ pub const RawTty = struct {
         return enterWithOps(fd, posix_ops);
     }
 
+    pub fn inspect(fd: c.fd_t) EnterError!Inspection {
+        return inspectWithOps(fd, posix_ops);
+    }
+
+    pub fn enterPrepared(inspection: Inspection) EnterError!RawTty {
+        const current = try inspectWithOps(inspection.fd, posix_ops);
+        if (!std.meta.eql(current, inspection)) return error.TerminalChanged;
+        return enterInspected(current, posix_ops);
+    }
+
     fn enterWithOps(fd: c.fd_t, ops: Ops) EnterError!RawTty {
+        return enterInspected(try inspectWithOps(fd, ops), ops);
+    }
+
+    fn inspectWithOps(fd: c.fd_t, ops: Ops) EnterError!Inspection {
         const original = ops.get_termios(ops.context, fd) catch return error.NotATerminal;
         const window = ops.get_winsize(ops.context, fd) catch
             return error.WindowSizeUnavailable;
         if (window.col == 0 or window.row == 0) return error.InvalidWindowSize;
+        return .{
+            .fd = fd,
+            .original = original,
+            .initial_size = .{ .cols = window.col, .rows = window.row },
+        };
+    }
+
+    fn enterInspected(inspection: Inspection, ops: Ops) EnterError!RawTty {
+        const fd = inspection.fd;
+        const original = inspection.original;
 
         var previous_mask: posix.sigset_t = undefined;
         ops.block_signals(ops.context, &previous_mask) catch
@@ -116,7 +147,7 @@ pub const RawTty = struct {
         var self: RawTty = .{
             .fd = fd,
             .original = original,
-            .initial_size = .{ .cols = window.col, .rows = window.row },
+            .initial_size = inspection.initial_size,
             .wake_read_fd = pipe[0],
             .wake_write_fd = pipe[1],
             .signals = undefined,
@@ -604,6 +635,36 @@ test "real openpty enters raw mode, reports initial size, and restores exactly" 
         std.mem.asBytes(&before),
         std.mem.asBytes(&after),
     );
+}
+
+test "p5c3c-3a2 prepared raw TTY rejects pre-commit drift before termios mutation" {
+    const initial = fakeInitialTermios();
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(&master, &slave, null, &initial, &window));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    const inspection = try RawTty.inspect(slave);
+    try std.testing.expectEqual(Size{ .cols = 113, .rows = 37 }, inspection.initial_size);
+
+    var drifted: posix.winsize = .{ .row = 38, .col = 114, .xpixel = 0, .ypixel = 0 };
+    try std.testing.expectEqual(@as(c_int, 0), c.ioctl(master, darwin_tiocswinsz, &drifted));
+    try std.testing.expectError(error.TerminalChanged, RawTty.enterPrepared(inspection));
+    const after_reject = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&before),
+        std.mem.asBytes(&after_reject),
+    );
+
+    var restored_window = window;
+    try std.testing.expectEqual(@as(c_int, 0), c.ioctl(master, darwin_tiocswinsz, &restored_window));
+    var raw = try RawTty.enterPrepared(inspection);
+    try raw.restore();
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
 }
 
 const FakeOps = struct {

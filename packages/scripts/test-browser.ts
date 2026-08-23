@@ -177,6 +177,69 @@ check(
 
 // ── 워커 모드: 같은 입력이 같은 화면을 내는가 ──
 /**
+ * **두 모드가 같은 답을 내는지 대조한다.** 개별 API 를 워커에서 하나씩 확인해도, 같은 입력에
+ * 대해 두 모드가 **다른 결과**를 내는 회귀는 못 잡는다 — 계약 §2 가 약속하는 것이 바로 그
+ * 동일성이다. 정해진 시퀀스를 넣고 모든 조회를 걷어 온다.
+ */
+async function apiSnapshot(p: import("playwright").Page): Promise<Record<string, unknown>> {
+  return await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = () => new Promise((r) => setTimeout(r, 200));
+
+    t.reset();
+    await wait();
+    t.setOptions({ scrollback: 500 });
+    await wait();
+
+    // 결정적 입력 — 검색 매치 3건, 셸 사건, 스크롤백이 생기도록.
+    t.write("\x1b]133;A\x07$ ");
+    for (let i = 0; i < 40; i++) t.write(`row ${i} hit\r\n`);
+    t.write("\x1b]133;D;7\x07");
+    // **프롬프트 상태로 되돌린다.** `D` 로 끝내면 `cursorAtPrompt` 가 원래 false 라, 그 조회가
+    // 망가져도 두 모드가 나란히 false 를 내며 대조를 통과한다(실제로 그렇게 통과했다).
+    t.write("\x1b]133;A\x07$ ");
+    await wait();
+
+    const find = await t.findMatches("hit");
+    const ser = await t.serialize();
+    t.selectLines(0, 1);
+    await wait();
+    const selText = await t.selectionText();
+    const selPos = t.getSelectionPosition();
+    const has = t.hasSelection();
+
+    t.scrollToTop();
+    await wait();
+    const top = { off: 0, len: 0 };
+    await new Promise<void>((res) => {
+      const sub = t.onRender((m: any) => {
+        top.off = m.scroll.offset;
+        top.len = m.scroll.length;
+        sub.dispose();
+        res();
+      });
+      t.write("");
+    });
+
+    const atPrompt = await t.cursorAtPrompt();
+    const cells = await t.measureCells("한글ab");
+
+    return {
+      findTotal: find.total,
+      findFirst: find.matches[0] ? `${find.matches[0].startRow}:${find.matches[0].startCol}` : null,
+      serLines: ser.split("\n").length,
+      serHasEsc: ser.includes("\x1b"),
+      selText,
+      selPos: selPos ? `${selPos.startRow}-${selPos.endRow}` : null,
+      has,
+      scrollTop: `${top.off}/${top.len}`,
+      atPrompt,
+      cells,
+    };
+  });
+}
+
+/**
  * 커스텀 키 핸들러 검사. **두 워커 모드에서 모두 돌린다** — 키는 언제나 메인 스레드가 잡지만
  * `attachDom` 호출 경로가 모드마다 갈리므로(`#openLocal` 은 `render:true`, `#openWorker` 는
  * `render:false`) 한쪽만 보면 다른 쪽 회귀를 놓친다.
@@ -663,6 +726,41 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   await customKeyChecks(p, "main");
   check("main: 키 검사 중 에러 없음", errs.length === 0, errs[0] ?? "");
   await p.close();
+}
+
+// **두 모드 API 동일성.** 위 검사들이 각 모드를 따로 봤다면, 이건 같은 입력에 대해 두 모드가
+// 같은 답을 내는지 본다 — 계약 §2 가 약속하는 것이 그 동일성이다.
+{
+  const snaps: Record<string, unknown>[] = [];
+  for (const mode of ["full", "false"] as const) {
+    const p = await browser.newPage();
+    await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/worker.html?worker=${mode}`);
+    await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+      timeout: 15_000,
+    });
+    await p.waitForTimeout(300);
+    snaps.push(await apiSnapshot(p));
+    await p.close();
+  }
+  const [a, b] = snaps;
+  const diff = Object.keys(a).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
+  check(
+    "두 모드가 같은 API 결과를 낸다",
+    diff.length === 0,
+    diff.length === 0
+      ? `${Object.keys(a).length}개 항목 일치`
+      : diff.map((k) => `${k}: ${JSON.stringify(a[k])} vs ${JSON.stringify(b[k])}`).join(" · "),
+  );
+  // 값이 비어 있으면 "둘 다 빈 값"으로도 통과한다 — 실제로 무언가 나왔는지 못 박는다.
+  check(
+    "두 모드 대조가 실제 값을 봤다",
+    // "둘 다 빈 값"이나 "둘 다 false" 로도 일치는 통과한다 — 의미 있는 값을 봤는지 못 박는다.
+    (a.findTotal as number) > 0 &&
+      a.selText !== null &&
+      a.atPrompt === true &&
+      (a.cells as number) === 6,
+    JSON.stringify(a),
+  );
 }
 
 const shotFull = await renderShot("full");

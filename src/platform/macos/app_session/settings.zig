@@ -36,6 +36,7 @@ const SettingsSectionFields = AppSession.SettingsSectionFields;
 const resolverUnbinds = AppSession.resolverUnbinds;
 const workspace_ops = @import("workspace.zig");
 const term_ops = @import("term.zig");
+const editor_ops = @import("editor.zig");
 const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
 const input_ops = @import("input.zig");
@@ -1044,6 +1045,10 @@ pub fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
     self.audible_bell = self.loaded_config.config.bell.audible;
     self.bell_visual = self.loaded_config.config.bell.visual;
     self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
+    // **열려 있는 편집기에 새 탭 폭을 넣는다**(§9). 이 값은 캐시가 아니라 **파생값의 입력**이라
+    // 스칼라 대입으로 끝나지 않는다 — 접힘 겹수·`max_cols`·가로 위치·행 수 캐시가 옛 폭으로
+    // 계산돼 있고, 세터가 그것들을 한 단위로 버리고 보던 줄을 지킨다.
+    editor_ops.applyConfigTabWidth(self);
     self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
     self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
     self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;
@@ -1807,6 +1812,9 @@ pub fn reloadConfig(self: *AppSession) void {
     self.audible_bell = self.loaded_config.config.bell.audible;
     self.bell_visual = self.loaded_config.config.bell.visual;
     self.bell_dock_badge = self.loaded_config.config.bell.dock_badge;
+    // **파일에서 다시 읽은 탭 폭도 넣는다**(§9). 위 `applyLoadedConfig`는 세팅 GUI 재적용 경로이고
+    // 이쪽은 파일 reload라 **둘 다 필요하다**. 함수가 값이 같으면 건너뛰므로 중복 호출은 무해하다.
+    editor_ops.applyConfigTabWidth(self);
     self.page_keys_scroll = self.loaded_config.config.input.page_keys == .scroll;
     self.shift_enter_meta = self.loaded_config.config.input.shift_enter == .newline;
     self.ime_enter_newline = self.loaded_config.config.input.ime_enter == .newline;

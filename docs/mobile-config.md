@@ -185,7 +185,7 @@
 | `input.option-as-meta`·`input.right-click`·`input.mouse-hide-while-typing`·`input.url-click-modifier` | 마우스와 맥 키보드 축이다 |
 | `keyhint.*`·`keybind` | 하드웨어 키보드 축이다. 폰의 기본 입력은 소프트 키보드와 보조 키바다 |
 | `font.family`·`font.family-bold`·`font.family-italic`·`font.fallback` | 폰트를 **번들이 정한다**. 시스템 폴백은 host 가 하고 사용자가 파일을 넣을 자리가 없다 |
-| `editor.wrap`·`file-panel.external-link-target` | 그 화면이 모바일에 없다 |
+| `editor.wrap`·`editor.tab-width`·`file-panel.external-link-target` | 그 화면이 모바일에 없다 |
 | `notifications.update-check` | 스토어가 한다 |
 | `bell.dock-badge` | dock 이 없다. 앱 배지는 OS 알림 권한이 딸린 **다른 축**이라 이 키로 흉내 내지 않는다 |
 | `cursor.unfocused` | 창이 하나라 "포커스 잃은 창" 이 없다 |

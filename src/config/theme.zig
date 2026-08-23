@@ -1032,12 +1032,28 @@ pub const EditorConfig = struct {
     /// `nowrap`을 전제하는 것과 같은 자리다.
     wrap: bool = false,
 
-    pub const schema = .{ // 키: editor.wrap
-        // **아직 설정 GUI에 노출하지 않는다(`hidden`).** 네이티브 편집기가 제품 화면에 배선되기
-        // 전이라 이 값이 렌더에 닿는 경로가 없다 — 지금 UI에 띄우면 사용자가 토글해도 아무 일이
-        // 없어 **버그로 보인다**. `hidden`의 용도가 정확히 그것이다("미완성·실험 opt-in을 일반
-        // 사용자 UI에서 가린다"). config 파일로는 지금도 켤 수 있고, 편집기가 배선될 때 벗긴다.
+    /// 탭 하나가 몇 칸인가(§9). 렌더의 탭스톱과 hit-test·마크 계산이 **같은 값**을 쓴다.
+    ///
+    /// **기본 4.** VSCode·Zed 기본과 같고, 지금까지 코드가 상수로 들고 있던 값이다.
+    ///
+    /// **상한 16의 근거**: 그 위는 한 탭이 화면 폭의 상당 부분을 먹어 본문이 안 보인다. VSCode는
+    /// 상한을 안 두지만 그쪽은 워드랩·미니맵이 완충한다. 하한 1은 "탭을 한 칸으로"이고, 0은 뜻이
+    /// 없어(탭스톱이 0이면 열이 안 는다) 파서가 막는다 — `stepColumn`이 `if (tab_width == 0) 1`로
+    /// 방어하지만 설정에서 그 값이 오는 것 자체를 허용하지 않는다.
+    tab_width: u32 = 4,
+
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width
+        // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
+        // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
+        // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
+        // 갖춘 채 들어온다.
         .wrap = Meta{ .doc = .cfg_editor_wrap, .widget = .toggle, .section = .editor },
+        // 필드명은 `tab_width`지만 키는 `editor.tab-width`(key_seg). u32라 range 메타 필수
+        // (파서 검증 + GUI number 위젯 공유 — `sidebar.width`와 같은 선례).
+        //
+        // **이쪽은 `hidden`이 아니다.** 위 `wrap`이 가려진 이유는 *"값이 렌더에 닿는 경로가 없어
+        // 토글해도 아무 일이 없다"*였는데, 탭 폭은 이 슬라이스에서 그 경로가 선다.
+        .tab_width = Meta{ .key_seg = "tab-width", .doc = .cfg_editor_tab_width, .range = .{ 1, 16 }, .widget = .number, .section = .editor },
     };
 };
 

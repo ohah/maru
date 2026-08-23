@@ -277,6 +277,12 @@ fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *St
         st.view = .{ .unavailable = .unknown };
         return;
     };
+    // **탭 폭을 config에서 받는다**(§9). 비교 Term은 `pane.zig`가 `prepared == null`로 만들어
+    // **`finishAttach`를 안 타므로**, 그쪽 배선이 여기까지 오지 않는다 — 그대로 두면 같은 파일이
+    // 텍스트로는 8칸, 비교로는 구조체 기본값 4칸으로 그려진다. 아래 계수와 렌더가 이 값을 쓰므로
+    // **세기 전에** 넣는다.
+    term.rt.editor_tab_width = editor_ops.editorTabWidth(self);
+
     // **행 배열이 선 뒤에 센다** — `ensureMaxCols`가 그 배열(`left_texts`/`right_texts`)을 읽으므로
     // `materialize` 앞에서 부르면 빈 것을 세고 0으로 굳는다(캐시는 0을 "안 셌다"로 읽어 다음 프레임에
     // 다시 세지만, 그때는 이미 막대 없이 한 프레임이 나간 뒤다).

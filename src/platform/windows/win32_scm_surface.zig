@@ -134,8 +134,6 @@ pub const Options = struct {
     tokens: *const maru.chrome.Tokens,
 };
 
-pub const Error = error{ TreeBuildFailed, ViewFailed } || std.mem.Allocator.Error;
-
 /// 상태 → 화면. **매번 처음부터 짓는다** — 부분 갱신을 하려면 무엇이 바뀌었는지를 두 번째로 알아야
 /// 하고, 그 둘이 갈리는 것이 조용한 오답의 씨앗이다(§2m.27 의 `cellFromGpuGlyph` 와 같은 규율).
 pub fn build(

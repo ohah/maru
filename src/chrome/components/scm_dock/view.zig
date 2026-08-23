@@ -798,7 +798,10 @@ const Writer = struct {
         if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
             var glyph_buf: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(cp, &glyph_buf) catch 0;
-            if (len > 0) try self.icon(rect, @floatFromInt(m.iconColumnX()), glyph_buf[0..len], m.icon_extent, .muted_fg);
+            // 아이콘은 **자기 라벨과 같은 단**이다. `muted_fg`(밝기 207)를 쓰던 동안 아이콘이 이름
+            // (169)보다 밝아, 목록을 훑는 눈이 종류 표시에 먼저 걸렸다 — 파일 탐색기가 같은 이유로
+            // 아이콘과 라벨을 한 위계로 묶는다.
+            if (len > 0) try self.icon(rect, @floatFromInt(m.iconColumnX()), glyph_buf[0..len], m.icon_extent, .list_secondary_fg);
         }
         // 상태 문자는 오른쪽 끝(VS Code 배치). 색은 종류가 정하고, 글자는 그대로 그린다.
         var letter_buf: [1]u8 = .{file.letter};
@@ -845,10 +848,18 @@ const Writer = struct {
         const action_occupied: f32 = if (file.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
         const occupied = @max(delta_occupied, action_occupied);
         const text_end = rect.rect.x + rect.rect.width - right_used - occupied;
-        try self.lineWithin(rect, inset, text_end, file.name, if (file.selected) .focus_accent else .surface_fg, .control, true);
+        // **목록 행 타이포**(`list_row` 14pt regular)와 **전경 위계**를 파일 탐색기와 맞춘다. 같은 도크
+        // 컬럼에서 뷰만 바꿨는데 글자 크기·밝기가 달라지면 그 자체가 두 화면처럼 읽힌다.
+        //
+        // 이름이 굵지 않은 것도 그 위계의 일부다 — 섹션 제목이 `control` + bold 로 남으므로, 행이 regular
+        // 여야 "제목 아래 항목들"로 읽힌다(예전에는 둘 다 굵어 층이 없었다).
+        try self.lineWithin(rect, inset, text_end, file.name, if (file.selected) .focus_accent else .list_secondary_fg, .list_row, false);
         if (file.dir.len > 0) {
             const name_px = self.measureBudget(file.name);
-            try self.lineWithin(rect, inset + name_px + @as(f32, @floatFromInt(m.gap)), text_end, file.dir, .muted_fg, .supporting, false);
+            // 경로 꼬리는 이름보다 **한 단 더** 물러난다. 예전 `muted_fg`(밝기 207)는 이름이 쓰던
+            // `surface_fg` 보다는 흐렸지만, 이름이 `list_secondary_fg`(169)로 내려오면 **꼬리가 더 밝아진다**
+            // — 파일 탐색기에서 같은 역전을 실제로 겪었다(무시된 행이 기본 행보다 밝았다).
+            try self.lineWithin(rect, inset + name_px + @as(f32, @floatFromInt(m.gap)), text_end, file.dir, .list_disabled_fg, .supporting, false);
         }
     }
 
@@ -1174,13 +1185,14 @@ const Writer = struct {
         if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
             var icon_buf: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(cp, &icon_buf) catch 0;
-            if (len > 0) try self.icon(rect, indent, icon_buf[0..len], m.icon_extent, .muted_fg);
+            if (len > 0) try self.icon(rect, indent, icon_buf[0..len], m.icon_extent, .list_secondary_fg); // 위 파일 행과 같은 단
         }
         var letter_buf: [1]u8 = .{file.letter};
         try self.trailing(rect, letter_buf[0..], statusRole(file.status), .supporting, m.inset_x);
         const name_x = indent + @as(f32, @floatFromInt(m.icon_extent + m.gap));
         const right = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
-        try self.lineWithin(rect, name_x - rect.rect.x, right, file.name, .surface_fg, .control, true);
+        // 위 변경 파일 행과 **같은 목록 행 타이포**다(한 화면에서 두 목록이 다른 크기면 안 된다).
+        try self.lineWithin(rect, name_x - rect.rect.x, right, file.name, .list_secondary_fg, .list_row, false);
     }
 
     /// 글자 하나를 (x, y)에 그대로 놓는다(세로 가운데 계산 없이 — 두 줄 행이 자기 y를 안다).
@@ -1650,6 +1662,41 @@ test "행 글자와 요약·브랜치가 한 번에 나온다" {
     try testing.expectEqual(tokens.ColorRole.git_deleted_fg, findExactText(draws, "-3").?.role);
     try testing.expect(findText(draws, "main") != null); // 브랜치 줄
     try testing.expect(findText(draws, "↑ 2") != null);
+
+    // **목록 행 타이포가 파일 탐색기와 같다.** 이 단언이 없으면 role 을 되돌려도 아무도 모른다 —
+    // 화면에서만 보이는 종류이고, 같은 도크 컬럼에서 뷰만 바꿨을 때 글자 크기가 튀는 것이 그 증상이다.
+    const name = findExactText(draws, "scm_view.zig").?;
+    try testing.expectEqual(typography.ChromeTextRole.list_row, name.text_role);
+    try testing.expectEqual(tokens.ColorRole.list_secondary_fg, name.role);
+    try testing.expect(!name.runs[0].bold); // 섹션 제목만 굵다 — 행이 굵으면 층이 사라진다
+
+    // 경로 꼬리는 이름보다 **한 단 더** 물러난다. 두 값이 같거나 뒤집히면 위계가 사라진 것이다
+    // (파일 탐색기에서 실제로 뒤집혀 있었다).
+    const dir = findExactText(draws, "src/session/").?;
+    try testing.expectEqual(tokens.ColorRole.list_disabled_fg, dir.role);
+    try testing.expect(dir.role != name.role);
+
+    // **그 행의 아이콘도 라벨과 같은 단이다.** 실측으로 아이콘 207 대 라벨 169 였다 — 목록을 훑는
+    // 눈이 종류 표시에 먼저 걸리는 상태였고, 그 어긋남은 화면에서만 보인다.
+    //
+    // **같은 행의 것만 본다** — 브랜치·접힘 같은 다른 아이콘은 `muted_fg` 가 맞고, 전부 싸잡으면
+    // 이 단언이 그 자리들까지 끌고 간다(처음에 그렇게 썼다가 픽스처가 잡았다).
+    // **같은 행의 아이콘을 고른다.** 두 `origin.y` 를 그대로 비교하면 안 맞는다 — 아이콘은 16px 슬롯
+    // 중앙, 글자는 20px line box 중앙이라 기준이 다르다(실측으로 확인했다). 그래서 라벨과 세로로 가장
+    // 가까운 아이콘을 고르고, 그 거리가 한 행 안인지까지 본다.
+    var row_icon: ?tokens.ColorRole = null;
+    var best_dy: i32 = std.math.maxInt(i32);
+    for (draws.ops) |op| {
+        if (op != .text or op.text.placement != .icon_in_rect) continue;
+        const dy: i32 = @intCast(@abs(op.text.placement.icon_in_rect.content_rect.y - name.origin.y));
+        if (dy < best_dy) {
+            best_dy = dy;
+            row_icon = op.text.role;
+        }
+    }
+    try testing.expect(row_icon != null);
+    try testing.expect(best_dy < 20); // 같은 행이다(다른 행이면 행 높이만큼 떨어진다)
+    try testing.expectEqual(tokens.ColorRole.list_secondary_fg, row_icon.?);
 }
 
 test "상태 문자는 종류마다 다른 색 역할로 나온다(색만으로 구분하지 않되, 색은 다르다)" {

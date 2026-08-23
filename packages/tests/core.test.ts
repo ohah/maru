@@ -307,6 +307,88 @@ test("첫 프레임은 상태 이벤트를 내지 않는다", async () => {
   term.dispose();
 });
 
+test("findMatches는 스크롤백까지 훑고 절대 행을 준다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("needle here\r\n");
+  for (let i = 0; i < 40; i++) term.write(`pad ${i}\r\n`);
+  term.write("needle again\r\n");
+  await settle();
+
+  const { matches, total } = await term.findMatches("needle");
+  expect(total).toBe(2);
+  expect(matches).toHaveLength(2);
+  expect(matches[0].startRow).toBe(0); // 첫 줄 — 스크롤백 최상단
+  expect(matches[0].startCol).toBe(0);
+  expect(matches[1].startRow).toBe(41);
+  term.dispose();
+});
+
+test("findMatches는 없는 것과 빈 문자열에 빈 결과를 준다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("hello");
+  await settle();
+  expect((await term.findMatches("zzz")).total).toBe(0);
+  expect((await term.findMatches("")).total).toBe(0);
+  term.dispose();
+});
+
+test("매치가 상한을 넘으면 총 개수만 정확히 알린다", async () => {
+  // 버퍼는 4096 건까지다. UI 가 "1/5000" 을 보여줄 수 있어야 하므로 총량은 잘리면 안 된다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.setOptions({ scrollback: 6000 });
+  for (let i = 0; i < 5000; i++) term.write("hit\r\n");
+  await settle();
+
+  const r = await term.findMatches("hit");
+  expect(r.total).toBe(5000);
+  expect(r.matches).toHaveLength(4096);
+  expect(r.matches.at(-1)!.startRow).toBe(4095); // 앞에서부터 채운다
+  term.dispose();
+});
+
+test("findNext는 매치를 화면에 올리고 정확히 그 글자를 선택한다", async () => {
+  // **좌표계가 갈린다.** 매치는 절대 행이고 선택은 뷰포트 행이다 — 변환을 빼먹으면 스크롤백
+  // 깊은 매치에서 엉뚱한 줄이 선택된다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("alpha\r\n");
+  for (let i = 0; i < 40; i++) term.write(`pad ${i}\r\n`);
+  term.write("omega\r\n");
+  await settle();
+
+  expect(await term.findNext("alpha")).toBe(true);
+  await settle();
+  expect(await term.selectionText()).toBe("alpha"); // 선택된 글자가 곧 검증이다
+
+  expect(await term.findNext("omega")).toBe(true);
+  await settle();
+  expect(await term.selectionText()).toBe("omega");
+
+  expect(await term.findNext("nothing")).toBe(false);
+  term.dispose();
+});
+
+test("findNext/findPrevious는 순회하고 끝에서 돈다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 6 });
+  term.write("x1 hit\r\nx2 hit\r\nx3 hit\r\n");
+  await settle();
+
+  const seen: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    await term.findNext("hit");
+    await settle();
+    const sel = term.frame!.selection!;
+    seen.push(`${sel.startRow}:${sel.startCol}`);
+  }
+  expect(seen[0]).not.toBe(seen[1]);
+  expect(seen[3]).toBe(seen[0]); // 3건이므로 네 번째에 처음으로 돌아온다
+
+  await term.findPrevious("hit");
+  await settle();
+  const back = term.frame!.selection!;
+  expect(`${back.startRow}:${back.startCol}`).toBe(seen[2]);
+  term.dispose();
+});
+
 test("alt screen에서 clear는 무동작이다", async () => {
   // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
   // 계약 §7 의 세 번째 조항.

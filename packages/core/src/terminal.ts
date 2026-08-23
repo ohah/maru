@@ -1,4 +1,5 @@
 import { LocalBackend } from "./backend/local";
+import type { FindResult } from "./backend/types";
 import type { GlyphSource } from "./render/types";
 import { loadBundledFont } from "./font";
 import { attachDom, type DomHost } from "./dom/attach";
@@ -438,6 +439,76 @@ export class Terminal {
    */
   reset(): void {
     this.write("\x1bc");
+  }
+
+  /**
+   * 스크롤백을 포함해 전부 훑는다. 좌표는 **절대 행**(0 = 스크롤백 최상단)이라 스크롤해도
+   * 유효하다. 대소문자를 구분하고 정규식은 지원하지 않는다.
+   *
+   * `total` 이 `matches.length` 보다 클 수 있다 — 버퍼 상한(4096)을 넘긴 경우다. UI 는 그때
+   * "1/2371" 처럼 총량을 보여주면 된다.
+   */
+  findMatches(needle: string): Promise<FindResult> {
+    return this.#need().find(needle);
+  }
+
+  /**
+   * 다음 매치로 이동해 선택한다. 매치가 없으면 `false`.
+   *
+   * 커서가 아니라 **현재 선택**을 기준으로 다음을 찾는다 — 연달아 부르면 순회한다. 끝에서는
+   * 처음으로 돈다(xterm.js `findNext` 와 같다).
+   */
+  async findNext(needle: string): Promise<boolean> {
+    return this.#findStep(needle, 1);
+  }
+  /** 이전 매치로. 처음에서는 끝으로 돈다. */
+  async findPrevious(needle: string): Promise<boolean> {
+    return this.#findStep(needle, -1);
+  }
+
+  async #findStep(needle: string, dir: 1 | -1): Promise<boolean> {
+    const { matches } = await this.findMatches(needle);
+    if (matches.length === 0) return false;
+    const cur = this.#frame?.selection ?? null;
+    let i: number;
+    if (!cur) {
+      i = dir === 1 ? 0 : matches.length - 1;
+    } else {
+      // 현재 선택과 같은 매치를 찾아 거기서 한 칸 움직인다. 선택이 매치가 아니면(사용자가
+      // 드래그로 잡은 것) 그 위치를 기준으로 가장 가까운 다음/이전을 고른다.
+      const at = matches.findIndex(
+        (m) => m.startRow === cur.startRow && m.startCol === cur.startCol,
+      );
+      if (at >= 0) {
+        i = (at + dir + matches.length) % matches.length;
+      } else if (dir === 1) {
+        const nx = matches.findIndex(
+          (m) =>
+            m.startRow > cur.startRow || (m.startRow === cur.startRow && m.startCol > cur.startCol),
+        );
+        i = nx >= 0 ? nx : 0;
+      } else {
+        let pv = -1;
+        for (let k = 0; k < matches.length; k++) {
+          const m = matches[k];
+          if (
+            m.startRow < cur.startRow ||
+            (m.startRow === cur.startRow && m.startCol < cur.startCol)
+          )
+            pv = k;
+        }
+        i = pv >= 0 ? pv : matches.length - 1;
+      }
+    }
+    const m = matches[i];
+    // **선택은 뷰포트 행을 받는다**(코어가 안에서 절대로 바꾼다). 매치 좌표는 절대 행이므로
+    // 화면에 올린 뒤 그 화면의 첫 줄을 빼야 한다.
+    const len = this.#frame?.scroll.length ?? 0;
+    const top = Math.min(Math.max(0, m.startRow - Math.floor(this.#size.rows / 2)), len);
+    this.scrollToLine(top); // 이 뒤 화면 첫 줄의 절대 행이 곧 `top` 이다
+    this.selectStart(m.startRow - top, m.startCol);
+    this.selectExtend(m.endRow - top, m.endCol);
+    return true;
   }
 
   selectStart(row: number, col: number, block = false): void {

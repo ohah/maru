@@ -1,4 +1,4 @@
-import type { Backend, BackendEvent, FrameData, MouseReport } from "../backend/types";
+import type { Backend, BackendEvent, FindResult, FrameData, MouseReport } from "../backend/types";
 import type { FrameMeta } from "../types";
 import type { CursorShape, KeyInput, Size, Snapshot, Theme } from "../types";
 import type { FromWorker, ToWorker, WorkerRenderOptions } from "./protocol";
@@ -99,10 +99,7 @@ export class WorkerBackend implements Backend {
     this.#worker.postMessage(msg, transfer ?? []);
   }
 
-  #query<T>(
-    kind: "measureCells" | "snapshot" | "selectionText" | "linkAt",
-    arg?: unknown,
-  ): Promise<T> {
+  #query<T>(kind: Extract<ToWorker, { t: "query" }>["kind"], arg?: unknown): Promise<T> {
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
@@ -204,6 +201,10 @@ export class WorkerBackend implements Backend {
   }
   selectionText(): Promise<string | null> {
     return this.#query("selectionText");
+  }
+  find(needle: string): Promise<FindResult> {
+    // 매치 배열은 구조적 복제로 온다 — 검색은 사용자 행동당 한 번이라 프레임과 달리 왕복이 싸다.
+    return this.#query("find", needle);
   }
   linkAt(row: number, col: number): Promise<string | null> {
     return this.#query("linkAt", [row, col]);

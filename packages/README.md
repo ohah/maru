@@ -128,7 +128,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 검색·클립보드(OSC 52)·화면 직렬화·이미지·마커/장식
+- **없는 것**: 클립보드(OSC 52)·화면 직렬화·이미지·마커/장식
 - **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
@@ -144,6 +144,17 @@ term.scrollToLine(120);    // 절대 행(0 = 스크롤백 최상단)을 첫 줄�
 term.scrollLines(3);       // 양수가 아래 — 휠 방향
 term.scrollPages(-1);
 ```
+
+### 검색
+
+```ts
+const { matches, total } = await term.findMatches("error");  // 절대 행 좌표
+await term.findNext("error");      // 화면에 올리고 선택 — Enter 로 순회
+await term.findPrevious("error");  // Shift+Enter
+```
+
+스크롤백까지 훑고 대소문자를 구분한다(정규식은 없다). 매치가 4096 건을 넘으면 `total` 만
+정확하고 배열은 앞의 4096 건이다 — "1/5000" 같은 표시를 위해서다.
 
 ### 상태 이벤트
 

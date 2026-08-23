@@ -29,6 +29,20 @@ export interface FrameData {
   modes: number;
 }
 
+/** 검색 결과 한 건. 좌표는 **절대 행**(0 = 스크롤백 최상단)이라 스크롤해도 유효하다. */
+export interface Match {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+/** 검색 결과. `total` 이 `matches.length` 보다 클 수 있다(버퍼 상한). */
+export interface FindResult {
+  matches: Match[];
+  total: number;
+}
+
 export interface SelectionSpan {
   startRow: number;
   startCol: number;
@@ -80,6 +94,8 @@ export interface Backend {
   snapshot(): Promise<Snapshot>;
   selectionText(): Promise<string | null>;
   linkAt(row: number, col: number): Promise<string | null>;
+  /** 스크롤백을 포함해 전부 훑는다. 대소문자를 구분하고, 정규식은 지원하지 않는다. */
+  find(needle: string): Promise<FindResult>;
 
   on(cb: (e: BackendEvent) => void): void;
   dispose(): void;

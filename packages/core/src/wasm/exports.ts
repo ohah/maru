@@ -53,6 +53,12 @@ export interface WasmExports {
   /** 화면을 지운다. 반환 1은 셸에 `\x0c`(^L)를 보내야 한다는 뜻. */
   vt_clear(h: number): number;
 
+  /** `input_ptr()` 의 needle 로 검색. **반환은 총 매치 수**, 버퍼엔 `matches_cap()` 건까지. */
+  vt_find(h: number, needleLen: number): number;
+  /** 매치 버퍼 — 한 건이 `[startRow, startCol, endRow, endCol]` u32 넷. */
+  match_ptr(): number;
+  matches_cap(): number;
+
   /** 인코딩 길이를 반환하고 `key_ptr()`에 바이트를 채운다. 0이면 보낼 것이 없다. */
   vt_key(h: number, kind: number, cp: number, mods: number): number;
   vt_paste(h: number, len: number): number;

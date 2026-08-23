@@ -2895,16 +2895,50 @@ hovered`)는 바뀌는데 화면은 옛 프레임 그대로였다 — macOS 는 
 **실측**(`maru win32-scm-draw-smoke`, 저장소 자신의 git 상태):
 
 ```text
-branch_drawn=true names_matched=2/2
-row_hits=2/2
-collapse_toggled=true file_rows=2->0->2
-rebuilds=5 clicks=1 out_of_scope_intents=0
-window_intents=1 window_file_rows=2->0 hover_redraws=2/2
+branch_drawn=true names_matched=1/1
+row_hits=1/1
+collapse_toggled=true file_rows=1->0->1
+rebuilds=8 clicks=2 out_of_scope_intents=1
+window_intents=1 window_file_rows=1->0 hover_redraws=2/2 press_redraws=2
+rebuild_us_avg=5068 rebuild_us_max=5648
 ```
 
-`file_rows=2->0->2` 는 **직접 경로**가 두 방향 다 되는 것이고, `window_file_rows=2->0` 은 **창이 준
+`file_rows=1->0->1` 은 **직접 경로**가 두 방향 다 되는 것이고, `window_file_rows=1->0` 은 **창이 준
 클릭**이 같은 일을 하는 것이다(파일 수는 그때의 작업트리라 실행마다 다르다 — 판정은 그 수에 안
 묶인다).
+
+**적대적 검증 2 라운드가 판정 셋을 고쳤다.** 숫자가 초록이어도 그 숫자가 **무엇을 재는지**가
+틀려 있었다:
+
+| 무엇이 틀렸나 | 어떻게 드러났나 | 고침 |
+|---|---|---|
+| 첫 호버가 아예 안 재졌다 | 이벤트 추적: 첫 `moved` 가 `dirty=false` — ⒞1 이 남긴 호버가 같은 자리였다 | 루프 전에 상태를 씻고 다시 짓는다 |
+| `hover_redraws` 에 **누름**이 섞였다 | 같은 추적: `.down` 도 `dirty=true, intent=false` 라 호버로 세어졌다 | `phase == .move` 로 가르고 `press_redraws` 를 따로 센다 |
+| `out_of_scope_intents=0` 이 증거가 아니었다 | 그 자리를 **한 번도 안 지났다** — 행 동작 버튼을 누른 적이 없다 | 합성 클릭으로 `+` 를 눌러 `=1` 을 만든다 |
+
+**재조립 비용을 쟀다**: 보이는 행 1 개에 **5.1 ms**, 10 개에 **10 ms**(200 파일 저장소, 별도 실측).
+모델 단계는 8~386 µs 로 무시할 수준이고 거의 전부가 **셰이핑·래스터**다 — 대략 보이는 행당 0.5 ms.
+60 Hz 예산이 16.6 ms 이므로 목록이 길면 호버 전환 하나가 예산을 넘는다.
+
+> **여기서 세운 가설이 측정으로 반증됐다.** "macOS 는 `MeasuredTextCache` 로 이걸 건너뛴다" 고 보고
+> Windows 에도 같은 캐시를 붙였는데, **적중이 10 번 중 1 번**이었다. 이유는 컴포넌트 자신의 테스트가
+> 이미 적어 둔 것이다 — **호버하면 `+` 가 생긴다**(`view.zig` 의 *"호버에서 `+`가 나타난다"* 테스트).
+> 텍스트 op 이 진짜로 바뀌므로 지문이 달라지는 것이 **맞고**, macOS 도 호버 전환마다 다시 셰이핑한다.
+> 그 캐시가 막는 것은 *같은 상태로 매 프레임 다시 그리는* 비용이고, 이 루프는 애초에 이벤트
+> 구동이라 그 비용이 없다. **캐시를 되돌렸다** — 반증된 전제 위에 기계를 남기지 않는다.
+>
+> 그러니 이 5~10 ms 는 Windows 의 이탈이 아니라 **measured 텍스트 경로 자체의 성질**이다. 줄이려면
+> 호버가 바꾸는 것(행 하나의 `+`)만 다시 셰이핑해야 하는데, 그것은 두 플랫폼에 함께 하는 일이라
+> 이 슬라이스 밖이다.
+
+**누수 없음**: 재조립을 906 회 강제해도 작업 집합 최대 **40 MB** 로 246 회일 때와 같다.
+
+**남은 위험 하나(보고, 안 고침).** tree 가 바뀔 때 `state.interaction` 의 `hovered`·`capture` 를
+안 버린다. macOS 는 같은 자리에서 `if (replaced) capture = null` 을 한다. **이 슬라이스에서는 안
+닿는다** — 재조립은 완결된 제스처 뒤나 같은 자리 이벤트에서만 일어나고, node id 는
+`NodeIds.item(i)` 라 안정적이다. 닿는 것은 ⒞2 의 낙관적 반영이나 비동기 git 갱신처럼 **포인터가
+행 위에 있는 채로 목록이 바뀌는** 경우다. 접으면 인덱스가 밀리므로 그때 `hovered` 가 **다른 행**을
+가리킬 수 있다. ⒞2 가 그 자리를 열므로 거기서 함께 닫는다.
 
 **뮤턴트로 확인했다** — 판정이 속 비지 않았다:
 

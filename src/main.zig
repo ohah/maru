@@ -4373,6 +4373,14 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     //
     // **창이 준 좌표로도 한 번 잰다**(합성 메시지). 위 판정은 `pointer` 를 직접 불러서 창 →
     // `WindowEvent.mouse` → 위상 변환 세 칸을 안 밟는다 — 거기가 틀려도 초록이 된다.
+    // **상태를 씻고 다시 짓는다.** 안 그러면 ⒞1 이 남긴 호버가 그대로라 "마우스를 올렸다" 가
+    // 무변화로 읽힌다 — 실측으로 첫 이동이 `dirty=false` 였다.
+    state = .{};
+    if (scm_surface.build(allocator, &host, &state, opts)) |fresh| {
+        built.deinit();
+        built = fresh;
+    } else |_| {}
+
     var frames: usize = 0;
     var clicks: usize = 0;
     var out_of_scope: usize = 0;
@@ -4381,11 +4389,26 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     var window_intents: usize = 0;
     var hover_redraws: usize = 0;
     var hover_changed_picture: usize = 0;
+    var press_redraws: usize = 0;
+    var rebuild_ns_total: u64 = 0;
+    var rebuild_ns_max: u64 = 0;
     const header_center: ?struct { x: i32, y: i32 } = blk: {
         for (built.items, 0..) |item, i| switch (item) {
             .section => {
                 const slot = built.frame.tree.find(component.build.NodeIds.item(i)) orelse break :blk null;
                 const rect = built.frame.tree.entries[slot].rect;
+                break :blk .{ .x = @intFromFloat(rect.x + rect.width / 2), .y = @intFromFloat(rect.y + rect.height / 2) };
+            },
+            else => {},
+        };
+        break :blk null;
+    };
+    const row_action_center: ?struct { x: i32, y: i32 } = blk: {
+        for (built.items, 0..) |item, i| switch (item) {
+            .file => {
+                const slot = built.frame.tree.find(component.build.NodeIds.itemAction(i)) orelse continue;
+                const rect = built.frame.tree.entries[slot].rect;
+                if (rect.width <= 0 or rect.height <= 0) continue;
                 break :blk .{ .x = @intFromFloat(rect.x + rect.width / 2), .y = @intFromFloat(rect.y + rect.height / 2) };
             },
             else => {},
@@ -4400,6 +4423,12 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
         if (frames == 5) if (header_center) |c| {
             host.window.postSyntheticMouse(.moved, c.x, c.y);
             host.window.postSyntheticMouse(.moved, c.x, 2); // 바깥으로 — 호버가 나가는 것도 그림이 바뀐다
+        };
+        // **범위 밖 intent 도 한 번 눌러 본다.** 안 누르면 `out_of_scope_intents=0` 이 "안 삼킨다"
+        // 의 증거가 아니라 **한 번도 안 지난 자리**라는 뜻이 된다.
+        if (frames == 20) if (row_action_center) |c| {
+            host.window.postSyntheticMouse(.left_down, c.x, c.y);
+            host.window.postSyntheticMouse(.left_up, c.x, c.y);
         };
         if (frames == 30) if (header_center) |c| {
             host.window.postSyntheticMouse(.left_down, c.x, c.y);
@@ -4427,11 +4456,18 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
                 // **호버만 바뀌어도 다시 그린다.** 안 그러면 마우스를 올려도 아무 표시가 안 난다 —
                 // 상태는 바뀌는데 화면이 옛 프레임이다(적대적 검증에서 나온 결함).
                 if (!changed) continue;
-                const hover_only = routed.dirty and routed.intent == null;
+                // **호버와 누름을 가른다.** 한 통에 세면 "호버가 반응한다" 가 사실은 눌림 표시일
+                // 수 있다(실측으로 그랬다 — 첫 판에 `.down` 이 호버로 세어졌다).
+                const hover_only = routed.dirty and routed.intent == null and phase == .move;
+                if (routed.dirty and phase == .down) press_redraws += 1;
                 // **그림이 진짜 달라지는지 잰다.** 다시 그리기만 세면 "호버가 반응한다" 가 헛
                 // 그리기여도 초록이 된다 — 컴포넌트가 그 노드에 호버 상태를 안 그릴 수도 있다.
                 const before_digest = d3d11_cells.cellsDigest(built.cells);
+                const t0 = std.Io.Clock.awake.now(io).nanoseconds;
                 const next = scm_surface.build(allocator, &host, &state, opts) catch continue;
+                const dt: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds - t0);
+                rebuild_ns_total += dt;
+                if (dt > rebuild_ns_max) rebuild_ns_max = dt;
                 built.deinit();
                 built = next;
                 rebuilds += 1;
@@ -4456,7 +4492,8 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     try stdout.print("row_hits={d}/{d}\n", .{ hits_matched, hits_checked });
     try stdout.print("collapse_toggled={} file_rows={d}->{d}->{d}\n", .{ toggled, collapse_before, collapse_after, collapse_restored });
     try stdout.print("rebuilds={d} clicks={d} out_of_scope_intents={d}\n", .{ rebuilds, clicks, out_of_scope });
-    try stdout.print("window_intents={d} window_file_rows={d}->{d} hover_redraws={d}/{d}\n", .{ window_intents, window_rows_before, window_rows_after, hover_changed_picture, hover_redraws });
+    try stdout.print("window_intents={d} window_file_rows={d}->{d} hover_redraws={d}/{d} press_redraws={d}\n", .{ window_intents, window_rows_before, window_rows_after, hover_changed_picture, hover_redraws, press_redraws });
+    try stdout.print("rebuild_us_avg={d} rebuild_us_max={d}\n", .{ if (rebuilds > 2) rebuild_ns_total / (rebuilds - 2) / 1000 else 0, rebuild_ns_max / 1000 });
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ built.cells.len, d3d11_cells.cellsDigest(built.cells), built.atlas_region_uploads });
     try stdout.print("frames_presented={d}\n", .{frames});
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", built.stats);

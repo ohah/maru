@@ -26,6 +26,12 @@ pub const Side = struct {
     /// 좌우가 각자 자기 것을 넘긴다(한 번에 한 열만 고르므로 한쪽은 `null`이다).
     selection_marks: ?[]const []const frame.Mark = null,
 
+    /// 그 열의 행마다 **검색 결과**(§5.1)와 그 중 현재 매치. 단일 편집기만 채운다 —
+    /// 비교 뷰 검색은 어느 쪽을 검색하는지부터 정해야 하고, 그것은 가로 스크롤·히트테스트가
+    /// 좌우를 가른 뒤의 일이다(같은 슬라이스에 든다).
+    search_marks: ?[]const []const frame.Mark = null,
+    search_current: ?frame.CurrentMatch = null,
+
     /// 그 쪽 **행**들의 표시 텍스트. 좌우 길이가 같아야 같은 인덱스가 같은 높이다.
     lines: []const []const u8,
     /// gutter 자릿수를 정하는 **문서** 줄 수(행 수가 아니다). `null`이면 `lines.len`.
@@ -232,6 +238,8 @@ pub fn buildSide(
         .content_max_cols = side.content_max_cols,
         .row_cache = side.row_cache,
         .selection_marks = side.selection_marks,
+        .search_marks = side.search_marks,
+        .search_current = side.search_current,
         .row_bands = side.bands,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,

@@ -14,7 +14,56 @@
 const builtin = @import("builtin");
 
 const AppSession = @import("../app_session.zig").AppSession;
+const Term = @import("../app_session.zig").Term;
 const term_ops = @import("term.zig");
+const editor_ops = @import("editor.zig");
+const pane_ops = @import("pane.zig");
+const maru = @import("maru");
+
+/// ⌘F가 지금 **무엇을** 검색하는가 — 활성 Term이 네이티브 편집기면 그 Term(아니면 `null`).
+///
+/// **이 함수가 이 슬라이스의 핵심이다.** 그전까지 ⌘F는 갈래 없이 `activeSurface().core`를 검색했고,
+/// 편집기 Term의 코어는 **1×1 sentinel**이다(`createEditorTerm` — 텍스트는 `rt.editor_lines`에 있다).
+/// 그래서 편집기 pane에서 ⌘F는 "기능이 없다"가 아니라 **매치 0을 조용히 답하고** 있었다.
+///
+/// **비교 뷰는 아직 아니다.** 좌우 중 어느 쪽을 검색하는지부터 정해야 하고, 그 판정은 가로 스크롤·
+/// 히트테스트가 좌우를 가른 뒤에 함께 연다(§4.1g 결정표와 같은 자리). 그때까지 비교 Term에서 ⌘F는
+/// 지금까지대로 스크롤백 경로로 가 매치 0이다 — **바꾸지 않은 것이 아니라 아직 안 연 것**이다.
+fn activeEditorTerm(self: *AppSession) ?*Term {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_diff != null) return null; // 비교 뷰 — 위 문단
+    if (term.rt.editor_lines.len == 0) return null; // 아직 안 열렸다
+    return term;
+}
+
+/// 활성 Term이 네이티브 편집기 문서인가 — tick이 `find.target`을 세울 때 묻는다.
+///
+/// **`activeEditorTerm`과 같은 판정이어야 한다.** 둘이 갈리면 target은 `.editor`인데 검색은
+/// 스크롤백으로 가는(또는 그 반대) 상태가 나고, 그것은 화면이 말하는 것과 실제가 다른 부류다.
+pub fn activeTermIsEditor(self: *AppSession) bool {
+    return activeEditorTerm(self) != null;
+}
+
+/// 편집기 문서를 다시 검색한다. 매치가 **어느 Term의 것인지** 함께 싣는다(`editor_find_source`) —
+/// 그 표식이 없으면 pane을 바꾼 다음 프레임이 남의 좌표를 이 문서에 칠한다.
+fn recomputeEditorFind(self: *AppSession, term: *Term) void {
+    maru.session.editor.find.findMatches(
+        self.allocator,
+        term.rt.editor_lines,
+        self.chrome_host.find.input.query.items,
+        &self.editor_find_matches,
+    ) catch self.editor_find_matches.clearRetainingCapacity();
+    self.editor_find_source = if (self.editor_find_matches.items.len > 0) term.surfaceId() else 0;
+    self.chrome_host.find.setMatchCount(self.editor_find_matches.items.len);
+}
+
+/// 편집기 매치를 버린다 — 검색을 닫거나 대상이 편집기가 아니게 됐을 때.
+pub fn clearEditorFind(self: *AppSession) void {
+    self.editor_find_matches.clearRetainingCapacity();
+    self.editor_find_source = 0;
+}
 
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
 /// 닫혀 있으면 다른 배타 오버레이(notice·palette)를 먼저 닫고 연다(검색어 초기화는 컴포넌트의 show가).
@@ -22,6 +71,7 @@ pub fn toggleFind(self: *AppSession) void {
     if (self.chrome_host.find.open) {
         self.chrome_host.find.hide();
         self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
+        clearEditorFind(self); // 편집기 쪽도 같이. 목록이 둘이라 한쪽만 비우면 강조가 남는다
         self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
     } else {
         // alt screen(vim/less/Claude/Codex)에서도 연다 — alt에선 findMatches가 현재 화면만 검색해 매치를
@@ -42,6 +92,23 @@ pub fn toggleFind(self: *AppSession) void {
 pub fn findNavigate(self: *AppSession, forward: bool) void {
     if (!self.surface_initialized) return;
     if (self.chrome_host.find.input.query.items.len == 0) return; // 검색 이력 없음 — 무동작
+    if (activeEditorTerm(self)) |term| {
+        // 닫은 뒤 ⌘G로 돌아온 경우 목록이 비어 있다 — 보존된 검색어로 다시 채운다(스크롤백과 같은
+        // 규칙이고, 현재 인덱스는 `setMatchCount`가 범위로 clamp해 닫기 전 위치를 지킨다).
+        //
+        // **출처가 다르면 비어 있지 않아도 다시 찾는다.** pane을 옮겨 온 경우가 그것이고, 남의
+        // 문서 좌표로 네비게이션하면 엉뚱한 줄로 간다.
+        if (self.editor_find_matches.items.len == 0 or self.editor_find_source != term.surfaceId()) {
+            recomputeEditorFind(self, term);
+        }
+        if (self.editor_find_matches.items.len == 0) return;
+        self.find_nav = true;
+        if (forward) self.chrome_host.find.next() else self.chrome_host.find.prev();
+        scrollToCurrentMatch(self);
+        self.metal_dirty = true;
+        return;
+    }
+    clearEditorFind(self);
     if (self.find_matches.items.len == 0) {
         // findMatches는 코어 mutate(스크롤백 rewrap)+읽기 — 락 아래(docs/io-render-threading.md PR3, 리더 경합 방지).
         const s = term_ops.activeSurface(self);
@@ -62,6 +129,19 @@ pub fn findNavigate(self: *AppSession, forward: bool) void {
 /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
 pub fn recomputeFind(self: *AppSession) void {
     if (!self.surface_initialized) return;
+    if (activeEditorTerm(self)) |term| {
+        // **스크롤백 목록을 비운다.** 대상이 편집기로 넘어왔으므로 그쪽 매치는 이 화면 것이 아니다 —
+        // 웹으로 넘어갈 때 tick이 같은 이유로 비우는 그 자리와 짝이다(R5 실측).
+        self.find_matches.clearRetainingCapacity();
+        recomputeEditorFind(self, term);
+        self.chrome_host.find.current = 0; // 재검색은 첫 매치로(스크롤백과 같은 규칙)
+        scrollToCurrentMatch(self);
+        self.metal_dirty = true; // 하이라이트가 바뀐다 — 편집기는 출력이 없어 아무도 안 깨운다
+        return;
+    }
+    // 편집기가 아니면 스크롤백이다. **편집기 매치를 여기서 버린다** — 남겨 두면 pane을 옮긴 뒤에도
+    // 옛 문서의 강조가 남고, `isFindTarget`이 id로 막아 주는 것은 *다른* 편집기일 때뿐이다.
+    clearEditorFind(self);
     {
         // findMatches는 코어 mutate(ensureScrollbackRewrapped로 스크롤백 realloc)+읽기 — 락 아래
         // (docs/io-render-threading.md PR3 — 리더 core.write와 경합 시 UAF/크래시 방지).
@@ -86,6 +166,10 @@ pub fn recomputeFind(self: *AppSession) void {
 /// `recomputeFind`(증분 검색)가 분기를 우회했다 — 원격에서만 타이핑 중 매치로 스크롤이 안 되던 원인이다.
 pub fn scrollToCurrentMatch(self: *AppSession) void {
     if (!self.surface_initialized) return;
+    if (activeEditorTerm(self)) |term| {
+        editor_ops.revealCurrentFindMatch(self, term);
+        return;
+    }
     if (builtin.os.tag == .macos and term_ops.activeSurface(self).remote != null) {
         self.remote_find_scroll_pending = true;
         self.remote_find_dirty = true;

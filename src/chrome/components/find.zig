@@ -64,7 +64,16 @@ fn textCols(state: *const State, panel_cols: u32) u32 {
 /// session 소유). input의 query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤 preedit으로 보인다.
 /// 이 오버레이가 지금 **무엇을 검색하는지**. 활성 탭이 웹이면 페이지, 아니면 스크롤백이다(session이 tick마다
 /// 동기화 — docs/web-panel-features.md §8). 카운터 표시가 이 값에 따라 갈린다.
-pub const Target = enum { scrollback, page };
+pub const Target = enum {
+    scrollback,
+    page,
+    /// **네이티브 편집기 문서**(native-editor-visual-mapping.md §5.1). 카운터는 스크롤백과 같다
+    /// (`cur/total` — 매치 리스트가 있으니까). 값을 따로 두는 것은 **무엇을 검색 중인지**가 이 상태에
+    /// 적혀야 해서다: `.scrollback`으로 두면 편집기 pane에서 이 상태를 읽는 쪽이 "터미널 스크롤백을
+    /// 검색 중"이라는 거짓을 읽고, 실제로 그 거짓 때문에 편집기 ⌘F가 오랫동안 sentinel 코어를
+    /// 검색해 조용히 매치 0을 냈다. §5.1이 *"값 하나를 더하는 확장"*이라 적은 것이 이 자리다.
+    editor,
+};
 
 pub const State = struct {
     open: bool = false,

@@ -904,7 +904,14 @@ static void queryInsets(struct android_app *app, int *top, int *bottom, int *lef
     (*vm)->DetachCurrentThread(vm);
     if (ok) {
         *top = got_top;
-        *bottom = got_bottom;
+        // **하단 0 은 값이 아니라 가림의 표시다.** 소프트 키보드가 떠 있는 프레임에서는
+        // 시스템이 `systemBars().bottom` 을 0 으로 보고한다 — 키보드가 navigation bar 를
+        // 덮고 있어 바가 화면을 차지하지 않는다고 보기 때문이다. 그 0 을 저장하면 키보드를
+        // 내린 뒤에도 남아 **보조 키바가 3버튼 위에 겹친다**(기기 실측: 키보드가 뜬 채
+        // inset 재조회가 겹친 뒤 `bottom=135` 가 `bottom=0` 으로 바뀌었다).
+        //
+        // 키보드가 덮는 높이는 `keyboard_px` 가 따로 들고 있으므로 여기서 겹쳐 뺄 일이 없다.
+        if (got_bottom > 0) *bottom = got_bottom;
         *left = got_left;
         *right = got_right;
     } else LOGI("insets_read_failed");
@@ -1264,6 +1271,22 @@ Java_dev_maru_MaruActivity_nativeKeyboardHeight(JNIEnv *env, jclass cls, jint px
     LOGI("MARU_KEYBOARD height=%d", (int)px);
 }
 
+/// 하단 시스템 바가 차지하는 높이(px). Java `ImeInsets` 가 inset 이 바뀔 때마다 넘긴다.
+///
+/// **`queryInsets` 만으로는 부족하다** — 그것은 창이 생기거나 크기가 바뀔 때만 도는데,
+/// 3버튼/제스처 전환처럼 창 크기가 안 변하면서 바 높이만 바뀌는 경우를 놓친다. 리스너는
+/// 시스템이 값을 갱신할 때마다 불리므로 이쪽이 최신이다.
+JNIEXPORT void JNICALL
+Java_dev_maru_MaruActivity_nativeBottomInset(JNIEnv *env, jclass cls, jint px) {
+    (void)env;
+    (void)cls;
+    // 0 은 키보드에 가려진 프레임의 보고다 — 위 `queryInsets` 와 같은 이유로 안 받는다.
+    if (px <= 0) return;
+    if (g.inset_bottom == (int)px) return;
+    g.inset_bottom = (int)px;
+    LOGI("MARU_INSET bottom=%d", (int)px);
+}
+
 /// 밀린 화면을 하나 뺀다(하드웨어 뒤로가기). 1=뺐다, 0=뺄 것이 없어 host 가 알아서 한다.
 JNIEXPORT jint JNICALL
 Java_dev_maru_MaruActivity_nativePopScreen(JNIEnv *env, jclass cls) {
@@ -1282,6 +1305,17 @@ Java_dev_maru_MaruActivity_nativeInputKind(JNIEnv *env, jclass cls) {
     unsigned int k = maru_mobile_input_kind();
     pthread_mutex_unlock(&g_bridge_lock);
     return (jint)k;
+}
+
+/// **눌러 둔 보조 키바 수정자.** IME shim 이 조합을 건너뛸지 판정하는 데 쓴다 — `Ctrl+B` 는
+/// 조합할 글자가 아니라 **지금 나가야 하는 시퀀스**다(아래 `setComposingText` 주석).
+JNIEXPORT jint JNICALL
+Java_dev_maru_MaruActivity_nativeArmedMods(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int m = maru_mobile_armed_mods();
+    pthread_mutex_unlock(&g_bridge_lock);
+    return (jint)m;
 }
 
 /// 입력 종류가 바뀌면 **이미 떠 있는 키보드를 갈아 끼운다**. `inputType` 만 바꾸면 다음에 열 때나

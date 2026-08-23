@@ -194,51 +194,20 @@ test("합성 글리프는 박스만이 아니라 전 계열을 덮는다", async
   expect(w.glyph_box(0xe0b0, 9, 22)).toBeGreaterThan(0);
 });
 
-test("IME 조합 텍스트는 화면에 실제로 들어가고 뒤 텍스트를 민다", async () => {
-  // 오버레이로 덮어 그리기만 하면 커서 뒤 글자가 가려질 뿐 밀리지 않는다 — 조합 중에 뒤
-  // 텍스트가 사라진 것처럼 보인다. 코어에 넣어야 밀린다.
+test("IME 조합은 화면 버퍼를 건드리지 않는다", async () => {
+  // **앱이 화면을 소유한다.** zsh 는 프롬프트와 입력줄을 자기가 관리하므로, 우리가 ICH/DCH 로
+  // 끼어들면 그 다음 앱이 그릴 때 엉뚱한 자리를 밟는다 — 실제 PTY 에서 `echo ` 뒤에 조합을
+  // 시작하자 "ec" 가 지워졌다. 조합은 렌더러가 커서 자리에 그리고 뒤 셀을 밀어 그린다.
   const term = await makeTerminal();
   term.write("abc\x1b[D"); // 커서를 'c' 앞으로
   await settle();
+  const before = rowText((await term.snapshot()).cells, (await term.snapshot()).size.cols, 0);
   term.setPreedit("한");
   await settle();
-  let snap = await term.snapshot();
-  expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("ab한c");
-
-  // 조합을 물리면 원래 줄이 그대로 돌아온다 — 삽입한 만큼만 지운다.
+  expect(rowText((await term.snapshot()).cells, (await term.snapshot()).size.cols, 0)).toBe(before);
   term.setPreedit("");
   await settle();
-  snap = await term.snapshot();
-  expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("abc");
-  term.dispose();
-});
-
-test("조합을 물리면 화면이 원래대로 — 라이브러리 삽입 경로", async () => {
-  // `onPreedit` 를 구독하지 않으면 라이브러리가 ICH/DCH 로 직접 넣는다. 되돌리기가 정확하지
-  // 않으면 조합을 지워도 마지막 글자가 화면에 남는다.
-  const term = await makeTerminal();
-  term.write("ab");
-  await settle();
-  for (const step of ["ㅎ", "하", "한", "하", "ㅎ", ""]) {
-    term.setPreedit(step);
-    await settle();
-  }
-  const snap = await term.snapshot();
-  expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("ab");
-  term.dispose();
-});
-
-test("조합 폭이 바뀌어도 되돌리기가 정확하다", async () => {
-  // 한글(2셀) ↔ 라틴(1셀) 처럼 폭이 달라지는 전환에서 지우는 칸 수가 어긋나기 쉽다.
-  const term = await makeTerminal();
-  term.write("xy");
-  await settle();
-  for (const step of ["a", "가", "ab", "가나", ""]) {
-    term.setPreedit(step);
-    await settle();
-  }
-  const snap = await term.snapshot();
-  expect(rowText(snap.cells, snap.size.cols, 0).trimEnd()).toBe("xy");
+  expect(rowText((await term.snapshot()).cells, (await term.snapshot()).size.cols, 0)).toBe(before);
   term.dispose();
 });
 

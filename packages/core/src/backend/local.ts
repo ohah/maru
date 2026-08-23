@@ -232,33 +232,15 @@ export class LocalBackend implements Backend {
   }
 
   /**
-   * IME 조합 텍스트를 **화면에 실제로 넣는다**. 오버레이로 덮어 그리기만 하면 커서 뒤 글자가
-   * 가려질 뿐 밀리지 않아, 조합 중에 뒤 텍스트가 사라진 것처럼 보인다.
+   * IME 조합 텍스트. **화면 버퍼는 건드리지 않는다** — 렌더러가 커서 자리에 그리고 뒤 셀을
+   * 밀어 그린다(`render/canvas.ts`).
    *
-   * ICH(`CSI n @`)로 자리를 밀어내고 쓰고, 다음 갱신 때 커서를 되돌린 뒤 DCH(`CSI n P`)로
-   * 지운다 — 삽입한 만큼만 정확히 되돌리므로 원래 줄이 그대로 남는다.
+   * 예전에는 `ICH`/`DCH` 로 코어에 넣었는데, 화면을 소유한 앱과 어긋난다: zsh 는 프롬프트와
+   * 입력줄을 자기가 관리하므로 우리가 끼어들면 그 다음 앱이 그릴 때 엉뚱한 자리를 밟는다
+   * (실측: `echo ` 뒤에 조합을 시작하자 "ec" 가 지워졌다). 줄을 스스로 다시 그리는 앱은
+   * `onPreedit` 를 구독해 자기 줄에 넣으면 된다.
    */
-  setPreedit(text: string, insert = true): void {
-    if (!insert) {
-      // 앱이 직접 그린다 — 화면은 건드리지 않고, 남아 있던 삽입만 물린다.
-      if (this.#preeditCells > 0) {
-        this.#writeText(`\x1b[${this.#preeditCells}D\x1b[${this.#preeditCells}P`);
-        this.#preeditCells = 0;
-      }
-      this.#markDirty();
-      return;
-    }
-    if (this.#preeditCells > 0) {
-      this.#writeText(`\x1b[${this.#preeditCells}D\x1b[${this.#preeditCells}P`);
-      this.#preeditCells = 0;
-    }
-    if (text) {
-      const cells = this.#measureSync(text);
-      if (cells > 0) {
-        this.#writeText(`\x1b[${cells}@${text}`);
-        this.#preeditCells = cells;
-      }
-    }
+  setPreedit(_text: string, _insert = true): void {
     this.#markDirty();
   }
 

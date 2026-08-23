@@ -1828,7 +1828,17 @@ const TermRuntime = struct {
         /// 화면은 그대로. 옛 코드는 `first_line`을 라이브로 읽어 그 경우를 맞혔다.
         top_line: usize = 0,
         top_piece: u32 = 0,
-        /// 위 둘이 **한 번이라도 채워졌나**. 기본값 `(0, 0)`은 "맨 위를 그렸다"와 구별되지 않는다.
+        /// 그 프레임의 **보이는 줄 수**와 **랩**. 세로 위치가 그대로여도 이 둘이 바뀌면 목록은
+        /// 다른 화면의 것이다 — 접힘 토글(`invalidateFoldDerived`)과 랩 토글(`toggleWrap`)은
+        /// **둘 다 `first_line`을 일부러 안 건드린다**. 그래서 위치만 대조하면 "신선하다"고
+        /// 답하면서 낡은 목록을 믿는다(적대적 검증 2026-08-24가 랩 토글로 실측: 보이는 줄이
+        /// 12개인데 줄 32를 "보인다"고 답해 안 굴렀다).
+        ///
+        /// **전환 경로마다 무효화하지 않고 값으로 대조하는 이유**는 이 파일 이웃(`find.target`
+        /// 동기화)이 적어 둔 것과 같다 — 경로마다 세우면 반드시 새는 문이 남는다.
+        visible_len: usize = 0,
+        wrap: bool = false,
+        /// 위 값들이 **한 번이라도 채워졌나**. 기본값은 "맨 위를 그렸다"와 구별되지 않는다.
         drawn: bool = false,
     } = .{},
     /// 렌더가 쓸 **탭 폭**. 기본값은 `frame.default_tab_width` 하나에서 온다(여기 숫자를 다시 쓰면
@@ -35690,6 +35700,71 @@ test "EF5 웹으로 옮기면 편집기 매치를 버린다 — 렌더는 활성
     try std.testing.expectEqual(chrome.components.find.Target.page, session.chrome_host.find.target);
     try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
     try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
+}
+
+test "EF6 ⌘G 네비 중 팔레트를 열면 tick이 강조를 되살리지 않는다 — 플래그가 아니라 행동을 잰다" {
+    // **`EF4`는 이것을 못 잰다**(적대적 검증 2026-08-24, 뮤턴트 P7). 그쪽 시나리오는 오버레이를
+    // **연 채** 팔레트를 열 뿐이라 `find_nav`가 참이 된 적이 없다. 그래서 `clearAllFindMatches`의
+    // `find_nav = false`를 지워도 초록이었고, 커밋이 자랑한 *"편집기가 팔레트 뒤에서 맨 위로
+    // 튄다(283 → 0)"* 는 **아무도 재지 않았다**.
+    //
+    // **플래그를 안 잰다.** `expect(!find_nav)`는 그 한 줄이 있는지만 보는데, 여기서 문제인 것은
+    // 그 다음 tick의 **행동**이다 — 목록이 되살아나고 `current`가 0으로 리셋되며 뷰가 튄다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "MARUFIND top\n");
+    for (0..300) |i| {
+        var line_buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&line_buf, "filler {d}\n", .{i}));
+    }
+    try doc.appendSlice(allocator, "MARUFIND far below\n");
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+
+    // 검색해서 아래쪽 매치로 간 뒤 **닫는다**.
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.tick();
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 아래쪽 매치로
+    _ = try session.tick();
+    const scrolled = term.rt.editor_first_line;
+    try std.testing.expect(scrolled > 0);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+
+    // **⌘G로 닫힘-네비를 연다** — 여기가 `find_nav = true`가 서는 유일한 자리다.
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(session.find_nav);
+    try std.testing.expect(session.editor_find_matches.items.len > 0);
+    const before = term.rt.editor_first_line;
+
+    // 팔레트를 연다. 그리고 **한 프레임 더 돈다** — 되살아나는 것은 tick이다.
+    session.dispatchAppAction(.toggle_command_palette);
+    _ = try session.tick();
+
+    try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len); // 안 되살아난다
+    try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
+    try std.testing.expectEqual(before, term.rt.editor_first_line); // 그리고 뷰가 안 튄다
 }
 
 test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보존 검색어 재검색·타이핑이 종료)" {

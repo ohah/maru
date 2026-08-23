@@ -513,6 +513,8 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
 
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
     const rows = self.turn_ring.timeline(&rows_buf);
+    // 세션 수는 목록 전체에 하나다 — 행마다 다시 세지 않는다.
+    const session_count = self.turn_ring.sessionCount();
 
     // 펼친 턴의 파일 줄도 목록에 든다(커밋과 같은 규율·같은 슬롯).
     var file_rows: usize = 0;
@@ -546,9 +548,20 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             .turn = .{
                 .index = @intCast(index),
                 .title = turnTitle(arena, row.back, live),
-                .agent = if (head) |snap| agentKindLabel(snap.agent_kind) else "",
+                // **세션이 여럿이면 그 사실을 행이 말한다.** 번호를 안 붙이면 `마지막 턴` 이 세션마다
+                // 한 줄씩 나오는데 어느 것이 내 것인지 알 길이 없다(카운트를 세션별로 세는 이상 그 줄은
+                // 정상이다 — 감춰야 할 것은 중복이 아니라 «누구 것인지 모름» 이다).
+                //
+                // 진행 중은 예외로 비운다. 그 행의 오른쪽은 작업트리 전체라 **어느 세션의 것도 아니다** —
+                // 거기에 `#2` 를 붙이면 다른 세션과 사용자가 손댄 것까지 그 세션 소행으로 읽힌다.
+                // `row.surface_id` 가 «마지막 스냅샷을 남긴 세션» 을 들고 있어도 이 비교의 주인은 아니다.
+                .agent = if (head) |snap|
+                    agentLabel(arena, session_count, self.turn_ring.sessionOrdinal(row.surface_id), agentKindLabel(snap.agent_kind))
+                else
+                    "",
+                // **턴은 절대 시각이다**(커밋 히스토리는 상대 — `relativeTime`). 근거는 `formatTurnTime`.
                 .when = if (head) |snap|
-                    (if (snap.captured_s == 0) "" else relativeTime(self, arena, now_s - snap.captured_s))
+                    (if (snap.captured_s == 0) "" else turnTime(arena, snap.captured_s, now_s))
                 else
                     "",
                 .selected = keyMatches(self.scm_selected_turn, row),
@@ -644,6 +657,19 @@ fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
     if (back == 1) return maru.i18n.t(.scm_turn_last);
     return std.fmt.allocPrint(arena, "{d}{s}", .{ back, maru.i18n.t(.scm_turn_back_suffix) }) catch
         maru.i18n.t(.scm_turn_last);
+}
+
+/// 행에 실을 에이전트 표기. 세션이 하나면 종류만(`claude`), 여럿이면 순번을 붙인다(`claude #2`).
+///
+/// 종류를 모르면 번호만 남긴다(`#2`) — 그 자리를 통째로 비우면 세션이 섞인 목록에서 어느 줄이 어느
+/// 세션인지 다시 알 수 없다.
+///
+/// **세는 일은 호출자가 한 번만 한다**(`session_count`). 행마다 링을 다시 훑으면 같은 답을 행 수만큼
+/// 다시 계산하는 꼴이다.
+fn agentLabel(arena: std.mem.Allocator, session_count: usize, ordinal: usize, kind: []const u8) []const u8 {
+    if (session_count <= 1) return kind;
+    if (kind.len == 0) return std.fmt.allocPrint(arena, "#{d}", .{ordinal}) catch "";
+    return std.fmt.allocPrint(arena, "{s} #{d}", .{ kind, ordinal }) catch kind;
 }
 
 /// 에이전트 종류 라벨(모르면 빈 문자열 — 그 자리를 비운다).
@@ -885,10 +911,90 @@ fn openTurnFileDiff(self: *AppSession, index: u32) void {
     }
 }
 
+/// macOS libc 의 `struct tm`. **zig 0.16 std 에는 `tm` 도 `localtime_r` 도 없어** 여기서 최소한만 선언한다
+/// (`gmtoff`·`zone` 이 붙은 BSD 배치다 — 그 둘이 빠진 선언을 쓰면 `gmtoff` 자리가 어긋난다).
+///
+/// **이것으로 얻는 것은 오프셋 하나뿐이다.** 날짜·시각 계산은 아래 `formatTurnTime` 이 순수하게 한다 —
+/// libc 가 채운 필드를 그대로 화면에 쓰면 그 자리가 테스트 밖으로 나간다(이 파일의 다른 순수 헬퍼와 같은 규율).
+const CTm = extern struct {
+    sec: c_int,
+    min: c_int,
+    hour: c_int,
+    mday: c_int,
+    mon: c_int,
+    year: c_int,
+    wday: c_int,
+    yday: c_int,
+    isdst: c_int,
+    gmtoff: c_long,
+    zone: ?[*:0]const u8,
+};
+
+extern "c" fn localtime_r(timep: *const i64, result: *CTm) ?*CTm;
+
+/// 그 **시점의** UTC 오프셋(초). 시점마다 구하는 이유는 서머타임이다 — 지금 오프셋 하나로 과거 턴을
+/// 환산하면 경계를 넘은 턴이 한 시간 어긋난다. 실패하면 0(UTC)으로 본다: 시각을 안 보여 주는 것보다
+/// 낫고, 그 환경에서는 어차피 로컬이 UTC다.
+fn utcOffsetAt(unix_s: i64) i64 {
+    var tm: CTm = undefined;
+    if (localtime_r(&unix_s, &tm) == null) return 0;
+    return @intCast(tm.gmtoff);
+}
+
+/// 턴이 끝난 **시각**. 오늘이면 `14:32`, 아니면 `08-22 14:32`.
+///
+/// **왜 상대 표기가 아닌가**(2026-08-23 사용자 결정): 턴 목록에서 알고 싶은 것은 «얼마나 지났나» 가 아니라
+/// «언제 것인가» 다. `2턴 전` 옆의 `5분 전` 은 둘 다 상대라 서로를 설명하지 못하고, 특히 같은 저장소에
+/// 세션이 여럿이면 «어느 것이 내가 방금 돌린 턴인가» 를 시각으로 짚게 된다. 커밋 히스토리 탭은 그대로
+/// 상대 표기를 쓴다 — 몇 달 전 커밋에 `03-14 09:21` 은 오히려 읽기 어렵다.
+///
+/// ⚠️ **날짜가 붙으면 그 줄의 에이전트 라벨이 밀릴 수 있다.** `turnRow`(view.zig)는 시각을 오른쪽에
+/// 먼저 앉히고 남는 폭이 모자라면 라벨을 **통째로 그리지 않는다**. 오늘 턴(`14:32`, 5자)은 옛 `2시간 전`
+/// 보다 짧아 오히려 여유가 늘지만, 하루를 넘긴 턴(`08-22 14:32`, 11자)은 좁은 사이드바에서 라벨을
+/// 밀어낸다. 링이 메모리·창 로컬이라 그런 턴 자체가 드물고, 그때도 제목(`3턴 전`)은 남는다 —
+/// 우선순위를 뒤집는 것은 레이아웃 결정이라 여기서 하지 않는다.
+///
+/// **순수 함수다.** 오프셋은 호출자가 넘긴다(위 `utcOffsetAt`). 각 시점의 오프셋을 따로 받는 이유도
+/// 서머타임이다 — 하나로 합치면 경계를 넘은 턴에서 «오늘» 판정이 틀린다.
+fn formatTurnTime(buf: []u8, captured_s: i64, captured_off: i64, now_s: i64, now_off: i64) []const u8 {
+    const local = captured_s + captured_off;
+    if (local < 0) return ""; // 1970 이전은 그릴 값이 아니다(캡처 시각 0은 호출자가 이미 거른다)
+    const day: i64 = @divFloor(local, std.time.s_per_day);
+    const secs_in_day: u17 = @intCast(local - day * std.time.s_per_day);
+    const hour = secs_in_day / 3600;
+    const minute = (secs_in_day % 3600) / 60;
+
+    const now_local = now_s + now_off;
+    const now_day: i64 = @divFloor(now_local, std.time.s_per_day);
+    if (day == now_day) {
+        return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}", .{ hour, minute }) catch "";
+    }
+
+    const year_day = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+        month_day.month.numeric(),
+        @as(u32, month_day.day_index) + 1, // `day_index`는 0-based다
+        hour,
+        minute,
+    }) catch "";
+}
+
+/// 위 순수 함수를 arena 문자열로. 화면 항목이 프레임 동안만 들고 있으므로 arena 로 복사한다.
+fn turnTime(arena: std.mem.Allocator, captured_s: i64, now_s: i64) []const u8 {
+    var buf: [24]u8 = undefined;
+    const text = formatTurnTime(&buf, captured_s, utcOffsetAt(captured_s), now_s, utcOffsetAt(now_s));
+    if (text.len == 0) return "";
+    return arena.dupe(u8, text) catch "";
+}
+
 /// `3시간 전`처럼 사람이 읽는 상대 시각. **arena에 만든다**(프레임 안에서만 쓴다).
 ///
 /// git의 `%ar`를 쓰지 않는 이유: 그 문구는 git의 로케일을 타서 같은 화면 안에서 다른 상대시각 표기와
 /// 규칙이 갈린다. 미래 시각(시계가 어긋난 커밋)은 `방금`으로 접는다 — "-3시간 전"은 읽을 수 없다.
+///
+/// **턴 목록은 이것을 쓰지 않는다**(2026-08-23 — `formatTurnTime` 의 절대 표기로 갔다). 남은 사용처는
+/// 커밋 히스토리 탭이다: 몇 달 전 커밋에 `03-14 09:21` 은 오히려 읽기 어렵다.
 fn relativeTime(self: *AppSession, arena: std.mem.Allocator, delta_s: i64) []const u8 {
     _ = self;
     // 문구는 `agent_dock`·`notification` 과 **같은 키를 쓴다** — 같은 개념을 세 파일이 각자 적으면
@@ -3639,4 +3745,58 @@ fn draftTextFor(self: *const AppSession, repo: []const u8) []const u8 {
         if (std.mem.eql(u8, draft.repo, repo)) return draft.text;
     }
     return "";
+}
+
+test "턴 시각: 오늘이면 시:분, 다른 날이면 월-일까지 — 오프셋은 호출자가 넘긴다" {
+    var buf: [24]u8 = undefined;
+    const kst: i64 = 9 * 3600;
+
+    // 2026-08-23 17:14 UTC+9 (= 08:14 UTC).
+    const captured: i64 = 1787472840;
+    const same_day_now: i64 = captured + 3600; // 같은 날 한 시간 뒤
+    try std.testing.expectEqualStrings("17:14", formatTurnTime(&buf, captured, kst, same_day_now, kst));
+
+    // 하루 뒤에서 보면 «오늘»이 아니므로 날짜가 붙는다.
+    const next_day_now: i64 = captured + std.time.s_per_day;
+    try std.testing.expectEqualStrings("08-23 17:14", formatTurnTime(&buf, captured, kst, next_day_now, kst));
+
+    // **오프셋이 시각을 가른다.** 같은 순간을 UTC 로 보면 08:14 이다.
+    try std.testing.expectEqualStrings("08:14", formatTurnTime(&buf, captured, 0, same_day_now, 0));
+}
+
+test "턴 시각: 같은 순간도 오프셋이 다르면 다른 시각으로 그린다" {
+    var buf: [24]u8 = undefined;
+    var utc_buf: [24]u8 = undefined;
+    const kst: i64 = 9 * 3600;
+    const captured: i64 = 1787498400;
+    const utc_text = formatTurnTime(&utc_buf, captured, 0, captured, 0);
+    const kst_text = formatTurnTime(&buf, captured, kst, captured, kst);
+    // 둘 다 자기 기준으로는 «오늘»이라 시:분만 나오고, 그 값이 9시간 어긋난다.
+    try std.testing.expectEqual(@as(usize, 5), utc_text.len);
+    try std.testing.expectEqual(@as(usize, 5), kst_text.len);
+    try std.testing.expect(!std.mem.eql(u8, utc_text, kst_text));
+}
+
+test "턴 시각: 1970 이전은 그리지 않는다(빈 문자열)" {
+    var buf: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("", formatTurnTime(&buf, -1, 0, 0, 0));
+    // 오프셋 때문에 음수가 되는 경우도 같다.
+    try std.testing.expectEqualStrings("", formatTurnTime(&buf, 100, -3600, 0, 0));
+}
+
+test "에이전트 라벨: 세션이 하나면 종류만, 여럿이면 순번을 붙인다" {
+    var buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const a = fba.allocator();
+
+    // 세션이 하나면 번호가 없다 — 구분할 것이 없는데 번호를 붙이면 잡음이다.
+    try std.testing.expectEqualStrings("claude", agentLabel(a, 1, 1, "claude"));
+    try std.testing.expectEqualStrings("", agentLabel(a, 1, 1, ""));
+
+    // 여럿이면 붙는다.
+    try std.testing.expectEqualStrings("claude #2", agentLabel(a, 2, 2, "claude"));
+    try std.testing.expectEqualStrings("codex #1", agentLabel(a, 3, 1, "codex"));
+
+    // 종류를 몰라도 번호는 남긴다 — 그 자리를 비우면 어느 줄이 어느 세션인지 알 길이 없다.
+    try std.testing.expectEqualStrings("#3", agentLabel(a, 3, 3, ""));
 }

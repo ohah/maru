@@ -516,6 +516,13 @@ const Table = struct {
     scm_commit_no_files: [:0]const u8,
     /// 에이전트 탭: 이번 실행에서 관측한 턴이 없다. **오류가 아니다**(링은 메모리·창 로컬이다).
     scm_no_turns: [:0]const u8,
+    /// 에이전트 탭: 그 Term 에 에이전트가 있는데 **세션 신원을 모른다**. 훅 모드에서만 이 목록이 서므로
+    /// (계약 §6.1) 빈 이유를 «아직 턴이 없다» 와 구별해 말한다 — 관측 모드에서는 영영 안 뜨기 때문이다.
+    scm_turns_need_hooks: [:0]const u8,
+    /// 에이전트 탭: **기록하지 못한 턴 수.** 백엔드의 스냅샷 자리가 하나라 다른 세션의 캡처가 도는 중에
+    /// 턴이 끝나면 그 요청이 거절되고 그 턴은 영영 안 찍힌다. 재시도하지 않는 대신(스냅샷 시점이 어긋나
+    /// 내용이 틀린 턴이 된다) **몇 개를 놓쳤는지 말한다** — 한계를 숨기지 않는다.
+    scm_turns_missed: [:0]const u8,
     /// 에이전트 탭: 마지막 스냅샷 이후 작업트리에 생긴 변경(오른쪽이 작업트리라 계속 변한다).
     ///
     /// ⚠️ **에이전트 상태가 아니다.** 이 줄은 링에 스냅샷이 하나라도 있으면 **늘 선다** — 에이전트가
@@ -984,6 +991,8 @@ const en: Table = .{
     .scm_commit_files_truncated = "This commit's file list was truncated",
     .scm_commit_no_files = "This commit changed no files",
     .scm_no_turns = "No agent turns observed in this run",
+    .scm_turns_need_hooks = "Agent turns need hooks enabled",
+    .scm_turns_missed = "{0} turns were not recorded",
     .scm_turn_live = "Since last turn",
     .scm_turn_last = "Last turn",
     .scm_turn_back_suffix = " turns ago",
@@ -1530,6 +1539,8 @@ const ko: Table = .{
     .scm_commit_files_truncated = "이 커밋의 파일 목록이 잘렸습니다",
     .scm_commit_no_files = "이 커밋이 바꾼 파일이 없습니다",
     .scm_no_turns = "이번 실행에서 관측한 에이전트 턴이 없습니다",
+    .scm_turns_need_hooks = "에이전트 훅을 켜야 턴이 기록됩니다",
+    .scm_turns_missed = "기록하지 못한 턴 {0}개",
     .scm_turn_live = "마지막 턴 이후",
     .scm_turn_last = "마지막 턴",
     .scm_turn_back_suffix = "턴 전",

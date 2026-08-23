@@ -46,6 +46,11 @@ pub const Snapshot = struct {
 pub const Ring = struct {
     items: [capacity]Snapshot = @splat(.{}),
     len: usize = 0,
+    /// **기록하지 못한 턴 수.** 백엔드의 스냅샷 자리가 하나라, 다른 세션의 캡처가 도는 중에 이 세션의
+    /// 턴이 끝나면 그 요청이 거절되고 그 턴은 영영 안 찍힌다. 재시도는 하지 않는다 — 스냅샷 시점이
+    /// 어긋나 **내용이 틀린 턴**이 되고, 그것은 없는 것보다 나쁘다. 대신 **몇 개를 놓쳤는지 화면이
+    /// 말한다**(한계를 숨기지 않는다 — project-rules.md).
+    missed: u32 = 0,
     /// 다음에 덮어쓸 자리(가득 찼을 때).
     next: usize = 0,
 
@@ -167,69 +172,146 @@ pub const Ring = struct {
         return null;
     }
 
-    /// `head` 로 쓰일 수 있는 스냅샷 수. 링이 N개면 완료된 턴은 N−1개이므로 가장 오래된 하나는 빠진다
-    /// (`timeline` 의 `back + 1 < self.len` 과 같은 경계다 — 그쪽이 바뀌면 여기도 바뀐다).
-    fn visibleHeads(self: *const Ring) usize {
-        return if (self.len == 0) 0 else self.len - 1;
-    }
-
-    /// **목록에 실제로 서는** 턴들의 서로 다른 세션 수. 1 이하면 화면이 세션을 구분해 말할 필요가 없다.
-    ///
-    /// ⚠️ **링 전체를 세지 않는다**(2026-08-23 적대적 검증 5회차). 가장 오래된 스냅샷은 짝이 될 이전
-    /// 스냅샷이 없어 `head` 로 쓰이지 못하고 `base` 로만 들어간다 — 즉 그 세션의 턴 줄은 화면에 없다.
-    /// 링 전체를 세면 링 `[A1, B1, B2]` 에서 답이 2가 되어 화면에는 B 줄만 있는데 `#2` 가 붙고 **`#1` 은
-    /// 목록 어디에도 없다.** 존재하지 않는 세션을 가리키는 번호는 번호가 없느니만 못하다.
-    pub fn sessionCount(self: *const Ring) usize {
-        var seen: [capacity]u64 = undefined;
-        var n: usize = 0;
-        var i: usize = 0;
-        while (i < self.visibleHeads()) : (i += 1) {
-            const id = (self.nth(i) orelse break).surface_id;
-            var dup = false;
-            for (seen[0..n]) |s| {
-                if (s == id) dup = true;
-            }
-            if (!dup) {
-                seen[n] = id;
-                n += 1;
-            }
-        }
-        return n;
-    }
-
-    /// 그 세션의 **표시용 순번**(1-based). 링에 든 `surface_id` 를 오름차순으로 세운 자리다.
-    ///
-    /// **왜 등장 순서가 아니라 id 순인가**: 등장 순서로 매기면 가장 오래된 스냅샷이 링에서 밀릴 때마다
-    /// 번호가 통째로 바뀐다 — 화면에서 `#1` 이던 세션이 다음 턴에 `#2` 가 되면 그 번호는 아무것도
-    /// 가리키지 못한다. `surface_id` 는 세션이 사는 동안 안 변하므로 그 순서가 훨씬 안정적이다.
-    /// (그 세션이 링에서 완전히 사라지면 뒤 번호가 당겨진다 — 그때는 그 세션 줄도 함께 사라진 뒤다.)
-    ///
-    /// 세는 범위는 `sessionCount` 와 **같아야 한다** — 한쪽만 링 전체를 보면 «둘이라고 해 놓고 번호는
-    /// 셋» 같은 어긋남이 난다.
-    pub fn sessionOrdinal(self: *const Ring, surface_id: u64) usize {
-        var smaller: usize = 0;
-        var seen: [capacity]u64 = undefined;
-        var n: usize = 0;
-        var i: usize = 0;
-        while (i < self.visibleHeads()) : (i += 1) {
-            const id = (self.nth(i) orelse break).surface_id;
-            var dup = false;
-            for (seen[0..n]) |s| {
-                if (s == id) dup = true;
-            }
-            if (dup) continue;
-            seen[n] = id;
-            n += 1;
-            if (id < surface_id) smaller += 1;
-        }
-        return smaller + 1;
-    }
-
     /// `back`턴 전 스냅샷(0=마지막). 범위를 벗어나면 null — 없는 턴을 0번째로 접지 않는다.
     pub fn nth(self: *const Ring, back: usize) ?*const Snapshot {
         if (back >= self.len) return null;
         const idx = (self.next + capacity - 1 - back) % capacity;
         return &self.items[idx];
+    }
+};
+
+/// 동시에 기억하는 **세션 수**. 링이 세션당 하나이므로 이 값이 곧 «몇 세션까지 되짚을 수 있나» 다.
+///
+/// Term 이 링을 소유하던 때는 `destroyTerm` 이 정리를 공짜로 해 줬지만, 키가 세션 id 가 되면서 **아무도
+/// 안 지운다** — 그래서 상한이 필요하다(계약 §6.1). 넘으면 **가장 오래 안 쓴 세션**부터 버린다.
+pub const max_sessions: usize = 8;
+
+/// provider 세션 신원 문자열의 상한. claude·codex 둘 다 UUID(36자)지만 여유를 둔다.
+pub const max_session_id_len: usize = 64;
+
+/// 세션이 기억하는 저장소 경로의 상한. 넘는 경로는 **기억하지 않는다**(그 세션은 저장소 전환을 감지하지
+/// 못하고 링을 유지한다 — 잘라 담으면 다른 저장소를 같다고 볼 수 있어 그쪽이 더 나쁘다).
+pub const max_repo_len: usize = 512;
+
+/// 세션 id → 링. **할당하지 않는다** — 고정 배열이라 세션이 값으로 들고 있는다(`Ring` 과 같은 규율).
+///
+/// **키가 하나다**(계약 §6.1). 살아 있는 동안은 `surface_id`, 영속할 땐 세션 id 로 키가 둘이던 이원성을
+/// 없앤 자리다. 그래서 한 터미널에서 에이전트를 갈아타도 키가 달라 자동으로 갈리고, 앱을 재시작해
+/// `surface_id` 가 재발급돼도 같은 키이며, `--resume` 이 Term 을 새로 만들어도 그 링을 찾는다.
+pub const RingMap = struct {
+    pub const Entry = struct {
+        id: [max_session_id_len]u8 = undefined,
+        id_len: usize = 0,
+        ring: Ring = .{},
+        /// 그 세션이 마지막으로 보던 저장소. **저장소 축은 세션 안에 남는다**(계약 §6.1) — 한 세션이
+        /// `cd` 로 옮기면 그 링만 비운다. 다른 저장소의 tree 로 비교하면 전부 삭제로 보이기 때문이고,
+        /// 초판과 달라진 것은 그 범위가 전역이 아니라 세션이라는 점뿐이다.
+        repo: [max_repo_len]u8 = undefined,
+        repo_len: usize = 0,
+        /// 마지막으로 쓰인 순서(단조 증가). 0이면 빈 자리다. **시계가 아니라 카운터**인 이유는 순수
+        /// 층이라 시각을 모르기 때문이다 — 축출은 «오래된 시각» 이 아니라 «오래 안 쓴 순서» 로 정한다.
+        used: u64 = 0,
+
+        pub fn sessionId(self: *const Entry) []const u8 {
+            return self.id[0..self.id_len];
+        }
+
+        pub fn repoPath(self: *const Entry) []const u8 {
+            return self.repo[0..self.repo_len];
+        }
+    };
+
+    entries: [max_sessions]Entry = @splat(.{}),
+    /// 다음에 찍을 사용 순서. 단조 증가라 넘칠 걱정이 없다(u64).
+    tick: u64 = 0,
+
+    /// 그 세션의 링(**없으면 만든다**). 자리가 없으면 가장 오래 안 쓴 것을 버리고 그 자리를 쓴다.
+    ///
+    /// 빈 id 는 거절한다 — 신원 없는 세션은 링을 갖지 않는다(계약 §6.1: 확실히 알 수 없으면 말하지 않는다).
+    pub fn ringFor(self: *RingMap, session_id: []const u8, repo: []const u8) ?*Ring {
+        if (session_id.len == 0 or session_id.len > max_session_id_len) return null;
+        self.tick +|= 1;
+        if (self.findEntry(session_id)) |e| {
+            e.used = self.tick;
+            // **저장소가 바뀌었으면 그 세션의 링만 비운다.** 경로가 상한을 넘어 기억하지 못한 경우
+            // (`repo_len == 0`)는 비교할 근거가 없으므로 건드리지 않는다.
+            if (e.repo_len != 0 and repo.len != 0 and !std.mem.eql(u8, e.repoPath(), repo)) {
+                e.ring = .{};
+                e.repo_len = 0;
+            }
+            if (e.repo_len == 0) setRepo(e, repo);
+            return &e.ring;
+        }
+        const slot = self.victim();
+        slot.* = .{ .id_len = session_id.len, .used = self.tick };
+        @memcpy(slot.id[0..session_id.len], session_id);
+        setRepo(slot, repo);
+        return &slot.ring;
+    }
+
+    fn setRepo(e: *Entry, repo: []const u8) void {
+        if (repo.len == 0 or repo.len > max_repo_len) return; // 못 담으면 아예 기억하지 않는다
+        @memcpy(e.repo[0..repo.len], repo);
+        e.repo_len = repo.len;
+    }
+
+    /// 그 세션의 링(**만들지 않는다**). 화면이 쓴다 — 그리기만 하는 자리가 맵을 늘리면 안 된다.
+    pub fn find(self: *const RingMap, session_id: []const u8) ?*const Ring {
+        if (session_id.len == 0) return null;
+        for (&self.entries) |*e| {
+            if (e.used == 0) continue;
+            if (std.mem.eql(u8, e.sessionId(), session_id)) return &e.ring;
+        }
+        return null;
+    }
+
+    /// `find` 의 쓰기 변형. **결과가 늦게 도착하는 자리**가 쓴다 — 요청할 때 기억해 둔 세션 id 로
+    /// 되찾아 적는다(그 사이 활성 세션이 바뀌어도 남의 링에 적지 않는다).
+    pub fn findMut(self: *RingMap, session_id: []const u8) ?*Ring {
+        if (session_id.len == 0) return null;
+        for (&self.entries) |*e| {
+            if (e.used == 0) continue;
+            if (std.mem.eql(u8, e.sessionId(), session_id)) return &e.ring;
+        }
+        return null;
+    }
+
+    /// 그 세션이 마지막으로 보던 저장소(모르면 빈 슬라이스). 소비 쪽이 «지금 이 저장소가 맞나» 를
+    /// 확인할 때 쓴다 — 링을 비우는 판정은 `ringFor` 가 이미 했고, 여기서는 읽기만 한다.
+    pub fn repoFor(self: *const RingMap, session_id: []const u8) []const u8 {
+        if (session_id.len == 0) return "";
+        for (&self.entries) |*e| {
+            if (e.used == 0) continue;
+            if (std.mem.eql(u8, e.sessionId(), session_id)) return e.repoPath();
+        }
+        return "";
+    }
+
+    /// 지금 들고 있는 세션 수.
+    pub fn len(self: *const RingMap) usize {
+        var n: usize = 0;
+        for (&self.entries) |*e| {
+            if (e.used != 0) n += 1;
+        }
+        return n;
+    }
+
+    fn findEntry(self: *RingMap, session_id: []const u8) ?*Entry {
+        for (&self.entries) |*e| {
+            if (e.used == 0) continue;
+            if (std.mem.eql(u8, e.sessionId(), session_id)) return e;
+        }
+        return null;
+    }
+
+    /// 빈 자리, 없으면 **가장 오래 안 쓴** 자리.
+    fn victim(self: *RingMap) *Entry {
+        var oldest: *Entry = &self.entries[0];
+        for (&self.entries) |*e| {
+            if (e.used == 0) return e;
+            if (e.used < oldest.used) oldest = e;
+        }
+        return oldest;
     }
 };
 
@@ -409,65 +491,6 @@ test "타임라인: 세션이 하나면 `N턴 전`이 링 순서와 같다(회�
     try std.testing.expectEqual(@as(u64, 7), rows[2].surface_id);
 }
 
-test "세션 순번: id 오름차순이라 링이 밀려도 안 바뀐다" {
-    var ring: Ring = .{};
-    ring.push("a0", 20, 50, 1); // 가장 오래된 것은 base 로만 쓰여 세는 범위 밖이다
-    ring.push("a1", 20, 100, 1);
-    ring.push("b1", 7, 200, 2);
-    ring.push("a2", 20, 300, 1);
-
-    try std.testing.expectEqual(@as(usize, 2), ring.sessionCount());
-    // id 가 작은 쪽이 #1 — 등장 순서(20이 먼저)와 다르다.
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(7));
-    try std.testing.expectEqual(@as(usize, 2), ring.sessionOrdinal(20));
-
-    // 스냅샷이 더 쌓여 가장 오래된 것이 밀려도 순번은 그대로다(등장 순서였다면 뒤집혔다).
-    ring.push("b2", 7, 400, 2);
-    ring.push("a3", 20, 500, 1);
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(7));
-    try std.testing.expectEqual(@as(usize, 2), ring.sessionOrdinal(20));
-}
-
-test "세션 순번: 세션이 하나면 1이고 개수도 1이다(화면은 표시를 생략한다)" {
-    var ring: Ring = .{};
-    ring.push("s1", 42, 100, 1);
-    ring.push("s2", 42, 200, 1);
-    ring.push("s3", 42, 300, 1);
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionCount());
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(42));
-}
-
-test "세션 순번: 화면에 줄이 없는 세션은 세지 않는다 (적대적 검증 5회차)" {
-    // 링 `[A1, B1, B2]` — A1 은 짝이 될 이전 스냅샷이 없어 `head` 로 못 서고 `base` 로만 들어간다.
-    // 즉 목록에 A 의 턴 줄은 **없다**. 링 전체를 세면 답이 2가 되어 B 줄에 `#2` 가 붙고 `#1` 은
-    // 어디에도 없는 상태가 된다 — 존재하지 않는 세션을 가리키는 번호다.
-    var ring: Ring = .{};
-    ring.push("a1", 3, 100, 1); // A
-    ring.push("b1", 9, 200, 2); // B
-    ring.push("b2", 9, 300, 2); // B
-
-    var buf: [8]Ring.TimelineRow = undefined;
-    const rows = ring.timeline(&buf);
-    // 완료된 턴 둘 다 head 가 B 다 — 화면에 서는 세션은 하나뿐이다.
-    try std.testing.expectEqual(@as(u64, 9), rows[1].surface_id);
-    try std.testing.expectEqual(@as(u64, 9), rows[2].surface_id);
-
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionCount()); // 2가 아니다
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(9));
-}
-
-test "세션 순번: 스냅샷이 하나뿐이면 셀 턴이 없다(진행 중만 있다)" {
-    var ring: Ring = .{};
-    ring.push("only", 5, 100, 1);
-    try std.testing.expectEqual(@as(usize, 0), ring.sessionCount());
-}
-
-test "세션 순번: 링이 비면 개수 0(순번을 물어도 터지지 않는다)" {
-    const ring: Ring = .{};
-    try std.testing.expectEqual(@as(usize, 0), ring.sessionCount());
-    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(1));
-}
-
 test "턴 파일 수: 모르는 턴을 최신부터 하나씩 주고, 채우면 다음으로 넘어간다" {
     var ring: Ring = .{};
     ring.push("t1", 1, 100, 1);
@@ -507,4 +530,97 @@ test "턴 파일 수: tree OID 로 찾아 적는다(결과가 늦게 와도 남�
     ring.markFiles("aaa", 0);
     try std.testing.expect(ring.nth(1).?.files_known);
     try std.testing.expectEqual(@as(u32, 0), ring.nth(1).?.changed_files);
+}
+
+test "세션 맵: 같은 id 는 같은 링을 주고, 새 id 는 새 링을 만든다" {
+    var map: RingMap = .{};
+    try std.testing.expectEqual(@as(usize, 0), map.len());
+
+    const a = map.ringFor("sess-a", "/repo").?;
+    a.push("t1", 1, 100, 1);
+    const a_again = map.ringFor("sess-a", "/repo").?;
+    try std.testing.expectEqual(@as(usize, 1), a_again.len); // 같은 링이다
+    try std.testing.expectEqual(@as(usize, 1), map.len());
+
+    const b = map.ringFor("sess-b", "/repo").?;
+    try std.testing.expectEqual(@as(usize, 0), b.len); // 새 링이라 비어 있다
+    try std.testing.expectEqual(@as(usize, 2), map.len());
+}
+
+test "세션 맵: 신원이 없으면 링을 만들지 않는다(확실히 알 수 없으면 말하지 않는다)" {
+    var map: RingMap = .{};
+    try std.testing.expect(map.ringFor("", "/repo") == null);
+    try std.testing.expectEqual(@as(usize, 0), map.len());
+
+    var too_long: [max_session_id_len + 1]u8 = @splat('x');
+    try std.testing.expect(map.ringFor(&too_long, "/repo") == null);
+}
+
+test "세션 맵: `find` 는 만들지 않는다(그리기만 하는 자리가 맵을 늘리면 안 된다)" {
+    var map: RingMap = .{};
+    try std.testing.expect(map.find("sess-a") == null);
+    try std.testing.expectEqual(@as(usize, 0), map.len());
+
+    _ = map.ringFor("sess-a", "/repo");
+    try std.testing.expect(map.find("sess-a") != null);
+}
+
+test "세션 맵: 상한을 넘으면 가장 오래 안 쓴 세션부터 버린다" {
+    var map: RingMap = .{};
+    var i: usize = 0;
+    while (i < max_sessions) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        _ = map.ringFor(std.fmt.bufPrint(&buf, "s{d}", .{i}) catch unreachable, "/repo").?;
+    }
+    try std.testing.expectEqual(max_sessions, map.len());
+
+    // `s0` 를 다시 써서 **가장 최근**으로 만든다 — 그러면 다음 축출 대상은 `s1` 이다.
+    _ = map.ringFor("s0", "/repo").?;
+    _ = map.ringFor("newcomer", "/repo").?;
+
+    try std.testing.expectEqual(max_sessions, map.len()); // 늘지 않는다
+    try std.testing.expect(map.find("s0") != null); // 방금 썼으니 살아 있다
+    try std.testing.expect(map.find("s1") == null); // 가장 오래 안 쓴 것이 밀렸다
+    try std.testing.expect(map.find("newcomer") != null);
+}
+
+test "세션 맵: 밀려난 자리는 옛 링을 물려주지 않는다" {
+    var map: RingMap = .{};
+    var i: usize = 0;
+    while (i < max_sessions) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        const r = map.ringFor(std.fmt.bufPrint(&buf, "s{d}", .{i}) catch unreachable, "/repo").?;
+        r.push("tree", 1, 100, 1); // 전부 스냅샷 하나씩
+    }
+    const fresh = map.ringFor("newcomer", "/repo").?;
+    try std.testing.expectEqual(@as(usize, 0), fresh.len); // 옛 세션의 턴이 새 세션에 붙지 않는다
+}
+
+test "세션 맵: 그 세션이 저장소를 옮기면 그 링만 비운다(다른 세션은 그대로)" {
+    var map: RingMap = .{};
+    const a = map.ringFor("sess-a", "/repo/one").?;
+    a.push("t1", 1, 100, 1);
+    const b = map.ringFor("sess-b", "/repo/one").?;
+    b.push("t2", 2, 200, 1);
+
+    // A 가 다른 저장소로 옮겼다 — 그 tree 로 비교하면 전부 삭제로 보인다.
+    const a2 = map.ringFor("sess-a", "/repo/two").?;
+    try std.testing.expectEqual(@as(usize, 0), a2.len);
+    // B 는 건드리지 않는다(초판과 달라진 점이 정확히 이것이다).
+    try std.testing.expectEqual(@as(usize, 1), map.find("sess-b").?.len);
+
+    // 같은 저장소로 다시 물으면 비우지 않는다.
+    a2.push("t3", 1, 300, 1);
+    const a3 = map.ringFor("sess-a", "/repo/two").?;
+    try std.testing.expectEqual(@as(usize, 1), a3.len);
+}
+
+test "세션 맵: 저장소 경로가 상한을 넘으면 기억하지 않고 링도 안 비운다" {
+    var map: RingMap = .{};
+    var long: [max_repo_len + 1]u8 = @splat('p');
+    const r = map.ringFor("sess", &long).?;
+    r.push("t1", 1, 100, 1);
+    // 기억하지 못했으므로 «바뀌었다» 를 판정할 근거가 없다 — 잘라 담아 남의 저장소를 같다고 보는 것보다 낫다.
+    const again = map.ringFor("sess", "/other").?;
+    try std.testing.expectEqual(@as(usize, 1), again.len);
 }

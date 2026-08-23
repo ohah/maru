@@ -503,6 +503,33 @@ fn revealCommitBox(self: *AppSession, items: []const component.types.Item, m: co
 /// 히스토리 탭의 투영(P4). 커밋 원문 한 덩어리를 행으로 편다.
 ///
 /// **상대 시각은 여기서 만든다** — component에는 시간이 없고, `%ar`는 git의 로케일·문구를 탄다.
+/// **활성 세션**의 턴 링(없으면 null). 목록·클릭이 모두 이 자리를 거친다(AT0 — 계약 §6.1).
+///
+/// 활성 pane 을 옮기면 목록이 통째로 바뀐다 — «세션별» 이라는 말의 정직한 귀결이다. 에이전트가 붙지
+/// 않은 Term 이 활성이거나 신원이 없으면(관측 모드) null 이고, 그때 화면은 «관측한 턴이 없다» 를 말한다.
+///
+/// **`find` 를 쓴다(`ringFor` 가 아니다)** — 그리기만 하는 자리가 맵을 늘리면 안 된다.
+fn activeTurnRing(self: *AppSession) ?*const maru.session.turn_snapshot.Ring {
+    const identity = git_ops.activeOrLastSessionIdentity(self);
+    if (identity.len == 0) return null;
+    return self.turn_rings.find(identity);
+}
+
+/// 활성 Term 에 **에이전트는 붙어 있는데 신원이 없나**. 그 조합이 곧 «훅 모드가 아니다» 다(§6.1).
+fn agentPresentWithoutIdentity(self: *AppSession) bool {
+    if (!self.surface_initialized) return false;
+    const active_id = term_ops.activeSurface(self).id;
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.surface.id != active_id) continue;
+                return term.agent_kind != .none and term.agent_transcript.identity().len == 0;
+            }
+        }
+    }
+    return false;
+}
+
 /// 에이전트 탭의 투영(P5 — §3.5.4). **1급 항목은 턴이다.**
 ///
 /// 링은 **메모리·창 로컬**이라 앱을 껐다 켜면 사라진다 — 빈 목록은 오류가 아니라 "이번 실행에서 관측한
@@ -512,9 +539,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
 
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
-    const rows = self.turn_ring.timeline(&rows_buf);
-    // 세션 수는 목록 전체에 하나다 — 행마다 다시 세지 않는다.
-    const session_count = self.turn_ring.sessionCount();
+    const rows = if (activeTurnRing(self)) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
 
     // 펼친 턴의 파일 줄도 목록에 든다(커밋과 같은 규율·같은 슬롯).
     var file_rows: usize = 0;
@@ -525,17 +550,32 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         if (self.scm_commit_files_truncated) file_rows += 1;
     }
     const notice_rows: usize = if (rows.len == 0) 1 else 0;
+    // **놓친 턴은 목록이 비어 있든 아니든 말한다** — 그 사실이 목록의 완전성을 좌우한다.
+    const missed = if (activeTurnRing(self)) |ring| ring.missed else 0;
+    const missed_rows: usize = if (missed > 0) 1 else 0;
     // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — 쓰기는 변경 사항 탭에서 걸지만 **결과는 탭을
     // 따라온다**).
     const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
-    const items = arena.alloc(component.types.Item, rows.len + notice_rows + action_rows + file_rows) catch return null;
+    const items = arena.alloc(component.types.Item, rows.len + notice_rows + missed_rows + action_rows + file_rows) catch return null;
     var n: usize = 0;
     if (self.scm_write_error) |err| {
         items[n] = .{ .notice = err };
         n += 1;
     }
+    if (missed > 0 and n < items.len) {
+        var buf: [48]u8 = undefined;
+        const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turns_missed), &.{.{ .d = @intCast(missed) }});
+        items[n] = .{ .notice = arena.dupe(u8, text) catch "" };
+        n += 1;
+    }
     if (rows.len == 0) {
-        items[n] = .{ .notice = maru.i18n.t(.scm_no_turns) };
+        // **빈 이유를 구별해 말한다**(적대적 검증 2회차). 관측 모드에서는 이 목록이 영영 안 서는데
+        // «이번 실행에서 관측한 턴이 없다» 는 곧 뜰 것처럼 읽혀 고장으로 보인다. 에이전트는 붙어 있는데
+        // 신원이 없다 = 훅이 없다는 뜻이므로(계약 §6.1) 그때는 무엇을 해야 하는지 말한다.
+        items[n] = .{ .notice = if (agentPresentWithoutIdentity(self))
+            maru.i18n.t(.scm_turns_need_hooks)
+        else
+            maru.i18n.t(.scm_no_turns) };
         n += 1;
     }
 
@@ -548,17 +588,9 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             .turn = .{
                 .index = @intCast(index),
                 .title = turnTitle(arena, row.back, live),
-                // **세션이 여럿이면 그 사실을 행이 말한다.** 번호를 안 붙이면 `마지막 턴` 이 세션마다
-                // 한 줄씩 나오는데 어느 것이 내 것인지 알 길이 없다(카운트를 세션별로 세는 이상 그 줄은
-                // 정상이다 — 감춰야 할 것은 중복이 아니라 «누구 것인지 모름» 이다).
-                //
-                // 진행 중은 예외로 비운다. 그 행의 오른쪽은 작업트리 전체라 **어느 세션의 것도 아니다** —
-                // 거기에 `#2` 를 붙이면 다른 세션과 사용자가 손댄 것까지 그 세션 소행으로 읽힌다.
-                // `row.surface_id` 가 «마지막 스냅샷을 남긴 세션» 을 들고 있어도 이 비교의 주인은 아니다.
-                .agent = if (head) |snap|
-                    agentLabel(arena, session_count, self.turn_ring.sessionOrdinal(row.surface_id), agentKindLabel(snap.agent_kind))
-                else
-                    "",
+                // **순번을 붙이지 않는다**(AT0). 목록이 이미 한 세션 것이라 번호가 가리킬 대상이 없다
+                // — `마지막 턴` 이 세션마다 한 줄씩 나오던 문제도 링이 갈리면서 함께 사라졌다.
+                .agent = if (head) |snap| agentKindLabel(snap.agent_kind) else "",
                 // **턴은 절대 시각이다**(커밋 히스토리는 상대 — `relativeTime`). 근거는 `formatTurnTime`.
                 .when = if (head) |snap|
                     (if (snap.captured_s == 0) "" else turnTime(arena, snap.captured_s, now_s))
@@ -671,19 +703,6 @@ fn turnSummary(arena: std.mem.Allocator, snap: *const maru.session.turn_snapshot
     var buf: [32]u8 = undefined;
     const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turn_file_count), &.{.{ .d = @intCast(snap.changed_files) }});
     return arena.dupe(u8, text) catch "";
-}
-
-/// 행에 실을 에이전트 표기. 세션이 하나면 종류만(`claude`), 여럿이면 순번을 붙인다(`claude #2`).
-///
-/// 종류를 모르면 번호만 남긴다(`#2`) — 그 자리를 통째로 비우면 세션이 섞인 목록에서 어느 줄이 어느
-/// 세션인지 다시 알 수 없다.
-///
-/// **세는 일은 호출자가 한 번만 한다**(`session_count`). 행마다 링을 다시 훑으면 같은 답을 행 수만큼
-/// 다시 계산하는 꼴이다.
-fn agentLabel(arena: std.mem.Allocator, session_count: usize, ordinal: usize, kind: []const u8) []const u8 {
-    if (session_count <= 1) return kind;
-    if (kind.len == 0) return std.fmt.allocPrint(arena, "#{d}", .{ordinal}) catch "";
-    return std.fmt.allocPrint(arena, "{s} #{d}", .{ kind, ordinal }) catch kind;
 }
 
 /// 에이전트 종류 라벨(모르면 빈 문자열 — 그 자리를 비운다).
@@ -2072,7 +2091,7 @@ fn filesLoadedFor(self: *const AppSession, key: []const u8) bool {
 /// 그 자리가 **진행 중** 줄인가(오른쪽이 작업트리라 tree 둘로 읽을 수 없는 줄).
 fn isLiveTurnRow(self: *AppSession, index: u32) bool {
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
-    const rows = self.turn_ring.timeline(&rows_buf);
+    const rows = if (activeTurnRing(self)) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
     if (index >= rows.len) return false;
     return rows[index].head == null;
 }
@@ -2081,7 +2100,7 @@ fn isLiveTurnRow(self: *AppSession, index: u32) bool {
 /// 그 줄은 늘 맨 위라 눈으로 찾기 쉽고, 밴드가 없다고 잃을 것이 없다.
 fn selectTurn(self: *AppSession, index: u32) void {
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
-    const rows = self.turn_ring.timeline(&rows_buf);
+    const rows = if (activeTurnRing(self)) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
     if (index >= rows.len) return;
     var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
     if (self.scm_selected_turn) |old| self.allocator.free(old);
@@ -2094,7 +2113,7 @@ fn selectTurn(self: *AppSession, index: u32) void {
 /// 슬롯도 **같은 것**을 쓴다(두 탭 모두 한 번에 하나만 펼친다).
 pub fn toggleTurnExpanded(self: *AppSession, index: u32) void {
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
-    const rows = self.turn_ring.timeline(&rows_buf);
+    const rows = if (activeTurnRing(self)) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
     if (index >= rows.len) return;
     var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
     // **진행 중은 키가 없다** — 그래도 고르기는 되고, 펼침만 성립하지 않는다.
@@ -2179,7 +2198,10 @@ pub fn pumpTurnSummaries(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_tab != .agent) return; // 안 보는 탭 때문에 프로세스를 띄우지 않는다
     if (self.scm_commit_files_inflight != 0 or self.scm_turn_summary_inflight != 0) return;
-    const turn = self.turn_ring.nextUnknownFiles() orelse return;
+    const identity = git_ops.activeOrLastSessionIdentity(self);
+    if (identity.len == 0) return;
+    const ring = self.turn_rings.find(identity) orelse return;
+    const turn = ring.nextUnknownFiles() orelse return;
 
     const repo = self.git_repo orelse return;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2191,14 +2213,23 @@ pub fn pumpTurnSummaries(self: *AppSession) void {
     var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buf, "{s} {s}", .{ turn.base, turn.head }) catch return;
     const head_owned = self.allocator.dupe(u8, turn.head) catch return;
+    // **어느 세션의 링에 적을지도 지금 기억한다**(AT0). 도착 시점의 «지금 활성» 을 쓰면 그 사이 pane 을
+    // 옮겼을 때 남의 세션에 숫자를 적는다.
+    const session_owned = self.allocator.dupe(u8, identity) catch {
+        self.allocator.free(head_owned);
+        return;
+    };
 
     self.scm_commit_files_seq += 1;
     if (!self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq)) {
         self.allocator.free(head_owned);
+        self.allocator.free(session_owned);
         return;
     }
     if (self.scm_turn_summary_head) |old| self.allocator.free(old);
+    if (self.scm_turn_summary_session) |old| self.allocator.free(old);
     self.scm_turn_summary_head = head_owned;
+    self.scm_turn_summary_session = session_owned;
     self.scm_turn_summary_inflight = self.scm_commit_files_seq;
 }
 
@@ -2212,9 +2243,16 @@ fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
         var files = maru.session.git_status.iterateNameStatus(text);
         while (files.next()) |_| count +|= 1;
     }
-    self.turn_ring.markFiles(head, count);
+    // **어느 세션의 링인지 요청 시점에 기억해 둔 값으로 되찾는다**(AT0). 결과가 오는 사이 활성 세션이
+    // 바뀌었을 수 있고, 그때 «지금 활성» 링에 적으면 남의 세션에 숫자를 적는다. 그 세션이 맵에서
+    // 밀려났으면 버린다 — 화면에도 없는 링이다.
+    if (self.scm_turn_summary_session) |sid| {
+        if (self.turn_rings.findMut(sid)) |ring| ring.markFiles(head, count);
+    }
     self.allocator.free(head);
     self.scm_turn_summary_head = null;
+    if (self.scm_turn_summary_session) |sid| self.allocator.free(sid);
+    self.scm_turn_summary_session = null;
     self.metal_dirty = true;
 }
 
@@ -3848,23 +3886,6 @@ test "턴 시각: 1970 이전은 그리지 않는다(빈 문자열)" {
     try std.testing.expectEqualStrings("", formatTurnTime(&buf, -1, 0, 0, 0));
     // 오프셋 때문에 음수가 되는 경우도 같다.
     try std.testing.expectEqualStrings("", formatTurnTime(&buf, 100, -3600, 0, 0));
-}
-
-test "에이전트 라벨: 세션이 하나면 종류만, 여럿이면 순번을 붙인다" {
-    var buf: [256]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const a = fba.allocator();
-
-    // 세션이 하나면 번호가 없다 — 구분할 것이 없는데 번호를 붙이면 잡음이다.
-    try std.testing.expectEqualStrings("claude", agentLabel(a, 1, 1, "claude"));
-    try std.testing.expectEqualStrings("", agentLabel(a, 1, 1, ""));
-
-    // 여럿이면 붙는다.
-    try std.testing.expectEqualStrings("claude #2", agentLabel(a, 2, 2, "claude"));
-    try std.testing.expectEqualStrings("codex #1", agentLabel(a, 3, 1, "codex"));
-
-    // 종류를 몰라도 번호는 남긴다 — 그 자리를 비우면 어느 줄이 어느 세션인지 알 길이 없다.
-    try std.testing.expectEqualStrings("#3", agentLabel(a, 3, 3, ""));
 }
 
 test "턴 요약: 모르거나 0이면 자리를 비운다(실패한 턴도 0으로 오기 때문이다)" {

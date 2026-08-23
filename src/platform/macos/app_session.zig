@@ -4688,11 +4688,38 @@ pub const AppSession = struct {
     git_request_seq: u64 = 0,
     /// 아직 응답을 못 받은 요청 번호(없으면 0). 갱신 트리거가 겹쳐도 큐를 쌓지 않는다.
     git_inflight: u64 = 0,
-    /// 저장소별 턴 스냅샷 링(§6.1). 창 하나가 여러 저장소를 오갈 수 있지만 v1은 **목록이 읽힌 그 저장소** 하나만
-    /// 들고 간다 — 저장소가 바뀌면 링을 비운다(다른 저장소의 tree로 비교하면 전부 삭제로 보인다).
-    turn_ring: maru.session.turn_snapshot.Ring = .{},
-    /// 그 링이 속한 저장소(바뀌면 링을 버린다).
-    turn_ring_repo: ?[]u8 = null,
+    /// 지금 도는 턴 스냅샷이 **어느 세션의 것인가**(요청 시점의 신원, owned — AT0).
+    ///
+    /// 수확 때 신원을 다시 조회하면 안 된다: 그 사이 `/clear` 로 세션이 갈리면 `setIdentity` 가 새 값으로
+    /// 바뀌고, **옛 세션의 마지막 턴이 새 세션 링에 들어간다.** 요약 경로가 같은 이유로 세션 id 를
+    /// 기억하는 것과 같은 방어다(적대적 검증 1회차).
+    ///
+    /// 백엔드의 스냅샷 결과 자리가 하나라 도는 요청도 하나뿐이므로 슬롯 하나면 된다.
+    turn_snapshot_session: ?[]u8 = null,
+    /// 지금 도는 스냅샷이 **어느 저장소에서 떴나**(요청 시점, owned — 적대적 검증 3회차).
+    ///
+    /// 수확 때 `self.git_repo` 를 다시 읽으면 안 된다: 그 사이 사용자가 다른 워크트리 터미널로 옮기면
+    /// 그 값이 바뀌어 있고, 그러면 `ringFor` 가 «저장소가 바뀌었다» 로 판정해 **멀쩡한 링을 비우고**
+    /// 옛 저장소의 tree 를 새 저장소 링에 넣는다. `SnapshotResult` 는 tree 와 surface_id 만 실어 온다.
+    turn_snapshot_repo: ?[]u8 = null,
+    /// **직전에 본 에이전트 세션**(owned). 목록·클릭이 «활성 세션» 을 물을 때 활성 Term 에 에이전트가
+    /// 없으면 이 값으로 답한다.
+    ///
+    /// 없으면 **턴 목록에서 파일을 클릭해 diff 를 여는 순간 그 목록이 사라진다** — 활성 Term 이 파일
+    /// Term 이 되어 신원이 빈다(적대적 검증 4회차, 통합 테스트가 잡았다). 사용자는 그 diff 를 보면서
+    /// 목록을 봐야 하므로 «돌아가면 복구된다» 로 넘길 수 없다.
+    ///
+    /// [§3.5](../../../docs/editor-surface-dock.md)가 저장소 판정에 «직전에 목록을 읽은 저장소» 를 2순위로
+    /// 두는 것과 같은 규율이다.
+    last_agent_session: ?[]u8 = null,
+    /// **세션별** 턴 스냅샷 링(§6.1, AT0). 키는 provider 세션 id 하나다 — 살아 있는 동안은 `surface_id`,
+    /// 영속할 땐 세션 id 로 키가 둘이던 이원성을 없앤 자리다.
+    ///
+    /// 초판은 «저장소당 링 하나» 였는데, `repoRootFor` 가 워크트리의 `.git` **파일**도 저장소 루트로
+    /// 인정하므로 세션마다 워크트리를 파는 실사용에서 **오갈 때마다 링이 통째로 버려졌다.**
+    ///
+    /// 할당하지 않는다(고정 배열) — 세션 수 상한은 `turn_snapshot.max_sessions` 다.
+    turn_rings: maru.session.turn_snapshot.RingMap = .{},
     /// 턴 스냅샷용 임시 index 경로. **저장소 밖**이어야 한다(안에 두면 자기가 스냅샷에 잡힌다).
     turn_index_path: ?[]u8 = null,
     /// **지금 목록이 읽힌 저장소 루트.** 클릭 시 다시 구하면 안 된다 — 첫 diff가 열리는 순간 활성 Term이 웹
@@ -4746,6 +4773,9 @@ pub const AppSession = struct {
     /// 그 요약이 **어느 turn 의 것인가**(head tree, owned). 결과가 오는 사이 링이 밀릴 수 있어
     /// 자리가 아니라 tree 로 되찾는다(`Ring.markFiles`).
     scm_turn_summary_head: ?[]u8 = null,
+    /// 그 요약이 **어느 세션의 링으로 갈 것인가**(세션 id, owned — AT0). 결과가 오는 사이 활성 세션이
+    /// 바뀌었을 수 있어, 도착 시점의 «지금 활성» 이 아니라 이 값으로 되찾는다.
+    scm_turn_summary_session: ?[]u8 = null,
     scm_commit_files_failed: bool = false,
     scm_commit_files_truncated: bool = false,
     /// 펼친 커밋에서 **지금 열어 둔 파일**의 자리(P4b). 목록이 무엇을 보고 있는지 말해야 파일 여럿을
@@ -8899,7 +8929,7 @@ pub const AppSession = struct {
             // 왼쪽 트리/커밋: 브랜치 기준은 merge-base, 턴 기준은 마지막 스냅샷 tree. 둘 다 `<oid>:<경로>`로
             // 읽으므로 같은 자리를 쓴다(목록을 읽을 때 함께 받아 둔 값이라 여기서 git을 또 부르지 않는다).
             switch (entry.diff_base) {
-                .turn => if (self.turn_ring.latest()) |snap| snap.oid() else "",
+                .turn => git_ops.activeTurnLatestOid(self),
                 // 커밋 기준은 **그 비교가 든 커밋**이다(P4b) — 여기서 다시 구하면 그 사이 다른 커밋을
                 // 펼쳤을 때 남의 커밋을 읽는다.
                 .commit => entry.diff_commit_oid,
@@ -15090,20 +15120,39 @@ pub const AppSession = struct {
             // 클릭으로만 일어나므로 포인터 없는 캡처 하니스에서는 그 화면을 얻을 방법이 없다.
             // MARU_FORCE_SCM_TURNS=<n> — 관측한 턴이 없는 하니스에서 타임라인을 찍기 위해 스냅샷을
             // n개 심는다(P5). 링은 **이번 실행에서 관측한 것**이라 헤드리스에는 비어 있다.
+            //
+            // **AT0 이후로는 신원도 함께 심는다.** 링의 키가 provider 세션 id 이고 화면은 «활성 세션의
+            // 링» 을 그리므로, 신원 없이 링만 채우면 그 목록을 찾을 수 없다. 캡처 하니스에는 진짜
+            // 에이전트가 없으므로 활성 Term 에 데모 신원을 붙이고 같은 키로 링을 만든다.
             if (tab == .agent) {
                 if (std.c.getenv("MARU_FORCE_SCM_TURNS")) |raw_count| {
-                    if (self.turn_ring.len == 0) {
-                        const count = std.fmt.parseInt(usize, std.mem.span(raw_count), 10) catch 3;
-                        const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
-                        var i: usize = 0;
-                        while (i < count) : (i += 1) {
-                            var oid_buf: [16]u8 = undefined;
-                            const oid = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
-                            // **세션도 번갈아 심는다**(2026-08-23). 하나만 심으면 세션 순번(`claude #2`)이
-                            // 붙지 않는 경로만 찍혀, 같은 저장소에 에이전트가 둘일 때의 화면을 캡처로
-                            // 확인할 수 없다 — 그 표시가 있는 이유가 바로 그 상황이다.
-                            const surface: u64 = if (i % 2 == 0) 1 else 2;
-                            self.turn_ring.push(oid, surface, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                    const demo_session = "maru-demo-session";
+                    if (self.turn_rings.find(demo_session) == null) {
+                        if (self.surface_initialized) {
+                            const active_id = term_ops.activeSurface(self).id;
+                            outer: for (self.tabs.items) |tab_item| {
+                                for (tab_item.panes.items) |pane| {
+                                    for (pane.terms.items) |term| {
+                                        if (term.surface.id != active_id) continue;
+                                        term.agent_transcript.setIdentity(demo_session);
+                                        break :outer;
+                                    }
+                                }
+                            }
+                        }
+                        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse "");
+                        // `orelse return` 을 쓰지 않는다 — 여기서 나가면 그 프레임의 나머지 tick 작업이 통째로 스킵된다.
+                        if (self.turn_rings.ringFor(demo_session, repo)) |ring| {
+                            const count = std.fmt.parseInt(usize, std.mem.span(raw_count), 10) catch 3;
+                            const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+                            var i: usize = 0;
+                            while (i < count) : (i += 1) {
+                                var oid_buf: [16]u8 = undefined;
+                                const oid = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
+                                // 종류만 번갈아 심는다 — 한 링은 한 세션이므로 `surface_id` 는 하나다.
+                                ring.push(oid, 1, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                            }
                         }
                     }
                 }
@@ -18459,8 +18508,6 @@ pub const AppSession = struct {
         self.git_watch_path = null;
         if (self.git_repo) |path| self.allocator.free(path);
         self.git_repo = null;
-        if (self.turn_ring_repo) |path| self.allocator.free(path);
-        self.turn_ring_repo = null;
         if (self.turn_index_path) |path| self.allocator.free(path);
         self.turn_index_path = null;
 
@@ -18626,6 +18673,10 @@ pub const AppSession = struct {
         if (self.scm_selected_turn) |key| self.allocator.free(key);
         if (self.scm_commit_files_oid) |oid| self.allocator.free(oid);
         if (self.scm_turn_summary_head) |oid| self.allocator.free(oid); // 도는 턴 요약의 대상 tree
+        if (self.scm_turn_summary_session) |sid| self.allocator.free(sid); // 그 요약이 향한 세션
+        if (self.turn_snapshot_session) |sid| self.allocator.free(sid); // 도는 스냅샷이 향한 세션
+        if (self.turn_snapshot_repo) |path| self.allocator.free(path); // 그 스냅샷이 뜬 저장소
+        if (self.last_agent_session) |sid| self.allocator.free(sid); // 직전에 본 에이전트 세션
         if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)
@@ -58896,6 +58947,65 @@ test "히스토리 탭에서는 커밋 상자가 키를 먹지 않는다 (P4 적
     try std.testing.expect(session.scmCommitOwnsInput());
 }
 
+/// 테스트에서 **활성 세션의 링**을 얻는다(AT0 — 링의 키가 provider 세션 신원이다).
+///
+/// 예전에는 `session.turn_ring` 하나였지만 이제 키가 필요하다. 캡처 하니스와 같은 이유로 활성 Term 에
+/// 데모 신원을 붙이고 그 키로 링을 만든다 — 신원이 없으면 링도 없다는 계약(§6.1)이 테스트에도 그대로 산다.
+const test_turn_session = "test-turn-session";
+
+fn testTurnRing(session: *AppSession) *maru.session.turn_snapshot.Ring {
+    if (session.surface_initialized) {
+        const active_id = term_ops.activeSurface(session).id;
+        outer: for (session.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.surface.id != active_id) continue;
+                    term.agent_transcript.setIdentity(test_turn_session);
+                    break :outer;
+                }
+            }
+        }
+    }
+    return session.turn_rings.ringFor(test_turn_session, "") orelse unreachable;
+}
+
+/// 통합 테스트가 «캡처가 링에 들어왔나» 를 볼 때 쓴다. **신원을 심지 않는다** — 제품 경로가 붙인
+/// 신원으로 찾으므로, 신원이 없으면 null 이고 그 자체가 계약(§6.1)의 관측이다.
+fn turnRingForTest(session: *AppSession) ?*const maru.session.turn_snapshot.Ring {
+    if (!session.surface_initialized) return null;
+    const identity = git_ops.sessionIdentityFor(session, term_ops.activeSurface(session).id);
+    if (identity.len == 0) return null;
+    return session.turn_rings.find(identity);
+}
+
+fn turnRingLenForTest(session: *AppSession) usize {
+    const ring = turnRingForTest(session) orelse return 0;
+    return ring.len;
+}
+
+/// 그 surface 에 테스트용 세션 신원을 심는다. **링의 키가 신원**이므로(AT0), 신원 없이 캡처를 부르면
+/// 제품이 «관측 모드» 로 보고 아무것도 찍지 않는다 — 그 자체가 계약(§6.1)이고 아래 전용 테스트가 본다.
+fn seedTurnIdentity(session: *AppSession, surface_id: u64) void {
+    for (session.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.surface.id == surface_id) term.agent_transcript.setIdentity(test_turn_session);
+            }
+        }
+    }
+}
+
+/// 심어 둔 키로 링을 **직접** 본다. 활성 Term 이 diff·파일 Term 인 테스트에서는 «활성 세션» 조회가
+/// 성립하지 않기 때문이다(그 Term 에는 에이전트가 없다).
+fn seededTurnRing(session: *AppSession) ?*const maru.session.turn_snapshot.Ring {
+    return session.turn_rings.find(test_turn_session);
+}
+
+fn seededTurnRingLen(session: *AppSession) usize {
+    const ring = seededTurnRing(session) orelse return 0;
+    return ring.len;
+}
+
 test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)" {
     // 지금 결함(§2)을 구조로 고친다: 턴 K를 **스냅샷 두 개 사이**로 잡으면 작업트리가 어떻게 바뀌든
     // 그 항목이 고정된다. 진행 중만 오른쪽이 작업트리다.
@@ -58917,8 +59027,8 @@ test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)
     }
 
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(session.io).nanoseconds, std.time.ns_per_s));
-    session.turn_ring.push("aaaaaaa1111", 1, now_s - 7200, 1); // claude
-    session.turn_ring.push("bbbbbbb2222", 1, now_s - 10, 2); // codex — 방금 끝난 턴이라 오늘 시각이다
+    testTurnRing(session).push("aaaaaaa1111", 1, now_s - 7200, 1); // claude
+    testTurnRing(session).push("bbbbbbb2222", 1, now_s - 10, 2); // codex — 방금 끝난 턴이라 오늘 시각이다
 
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     try std.testing.expectEqual(@as(usize, 2), projection.items.len); // 진행 중 + 턴 하나
@@ -58948,8 +59058,8 @@ test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 �
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
-    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
+    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
 
     // 완료된 턴(자리 1)을 펼친다.
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
@@ -58979,12 +59089,12 @@ test "에이전트 탭: 새 턴이 들어와도 펼친 줄이 바뀌지 않는�
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
-    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
+    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 }); // 마지막 턴
 
     // 새 턴이 들어온다 — 그 줄은 이제 자리 2다.
-    session.turn_ring.push("ccccccc3333", 1, 300, 2);
+    testTurnRing(session).push("ccccccc3333", 1, 300, 2);
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     var expanded_count: usize = 0;
     for (projection.items) |item| switch (item) {
@@ -59043,8 +59153,8 @@ test "펼친 항목의 파일만 그린다 — 탭을 오가도 남의 파일이
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
-    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
-    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
+    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
 
     // 턴을 펼쳐 두고,
     scm_dock_ops.selectScmTab(session, .agent);
@@ -59212,8 +59322,8 @@ test "에이전트 탭: 턴 파일 클릭은 **턴 비교**를 연다 (P5 적대
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
-    session.turn_ring.push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
+    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
     session.scm_commit_files_oid = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
     session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/a.zig\n");
@@ -59265,7 +59375,7 @@ test "에이전트 탭: 진행 중인 턴은 tree 둘로 읽지 않는다 (P5)" 
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
     scm_dock_ops.selectScmTab(session, .agent);
-    session.turn_ring.push("aaaaaaa1111", 1, 100, 1);
+    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
 
     // **진행 중 줄은 변경 사항 탭으로 보낸다** — tree 둘로 읽을 수 없어 펼칠 것이 없는데, 아무 일도
     // 안 하면 죽은 컨트롤이 된다. 그 줄이 가리키는 목록은 실제로 그 탭이 보여 준다.
@@ -61401,15 +61511,21 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     git_ops.openDiffTerm(session, repo, opened, "kept.txt", null, .unstaged);
 
     // 턴이 끝났다 — 그 순간의 작업트리를 굳힌다(에이전트 상태 전이가 부르는 바로 그 함수).
-    agent_ops.captureTurnSnapshot(session, 1);
+    // **신원을 먼저 심는다**(AT0): 링의 키가 provider 세션 신원이라, 신원 없이 부르면 제품이 아무것도
+    // 찍지 않는다(그 계약은 아래 «신원이 없으면 찍지 않는다» 테스트가 따로 본다).
+    // **실제 surface id 를 쓴다.** 예전에는 `1` 을 그대로 넘겼는데, 그때는 신원 게이트가 없어 어느 id 든
+    // 통했다. 이제 그 id 의 Term 에서 신원을 찾으므로 **없는 id 를 넘기면 조용히 아무것도 안 찍힌다.**
+    const turn_sid = tab_ops.activeTab(session).panes.items[0].terms.items[0].surfaceId();
+    seedTurnIdentity(session, turn_sid);
+    agent_ops.captureTurnSnapshot(session, turn_sid);
     var spins: usize = 0;
-    while (spins < 500 and session.turn_ring.len == 0) : (spins += 1) {
+    while (spins < 500 and seededTurnRingLen(session) == 0) : (spins += 1) {
         git_ops.drainGitStatus(session);
         var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = std.c.nanosleep(&ts, null);
     }
-    try std.testing.expect(session.turn_ring.len == 1);
-    try std.testing.expect(session.turn_ring.latest().?.oid().len >= 40); // tree OID
+    try std.testing.expect(seededTurnRingLen(session) == 1);
+    try std.testing.expect(seededTurnRing(session).?.latest().?.oid().len >= 40); // tree OID
 
     // 그 뒤 파일을 고치면 목록의 턴 범위에 **그 파일만** 나온다(스냅샷 시점에 이미 있던 것은 안 나온다).
     git_backend_mod.testWriteFile(repo, "kept.txt", "v2\n") catch return error.SkipZigTest;
@@ -61469,6 +61585,9 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
 
     const term = tab_ops.activeTab(session).activeTerm();
     term.agent_kind = .claude;
+    // **신원이 있어야 링에 들어간다**(AT0). 제품에서는 훅 payload 가 이 값을 준다 — 관측 모드에서는
+    // 대개 비어 있고, 그때 아무것도 안 찍히는 것이 계약이다(바로 아래 테스트가 그쪽을 본다).
+    seedTurnIdentity(session, term.surfaceId());
     const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
     // 관측은 화면과 별개 경로(폴링)라 테스트에서 현재 상태로 둔다 — 여기서 보려는 것은 화면 판정이다.
     term.rt.observation.availability = .current;
@@ -61478,7 +61597,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     term.rt.observation.observer_generation +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
-    try std.testing.expectEqual(@as(usize, 0), session.turn_ring.len); // 아직 턴이 안 끝났다
+    try std.testing.expectEqual(@as(usize, 0), turnRingLenForTest(session)); // 아직 턴이 안 끝났다
 
     // ② 턴 종료: footer가 사라지고 입력 프롬프트만 남는다(실측 규칙 `live_prompt` — 수평선 + `❯ `).
     //    화면 지우기로는 부족하다. 판정은 **스크롤백을 포함한 최근 48행**을 보므로, 실제 에이전트가 그러듯
@@ -61490,13 +61609,33 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
 
     var spins: usize = 0;
-    while (spins < 500 and session.turn_ring.len == 0) : (spins += 1) {
+    while (spins < 500 and seededTurnRingLen(session) == 0) : (spins += 1) {
         git_ops.drainGitStatus(session);
         var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = std.c.nanosleep(&ts, null);
     }
-    try std.testing.expectEqual(@as(usize, 1), session.turn_ring.len);
-    try std.testing.expectEqual(term.surfaceId(), session.turn_ring.latest().?.surface_id);
+    try std.testing.expectEqual(@as(usize, 1), seededTurnRingLen(session));
+    try std.testing.expectEqual(term.surfaceId(), seededTurnRing(session).?.latest().?.surface_id);
+}
+
+test "턴 스냅샷: 세션 신원이 없으면 링을 만들지 않는다 (AT0 — 관측 모드에는 이 기능이 없다)" {
+    // 계약 §6.1: 링의 키가 provider 세션 신원이고, 신원을 확실히 알 수 없으면 **아무것도 말하지 않는다.**
+    // 관측 모드에서 목록이 비는 이유가 이것이다 — 자식 프로세스 env 는 도구 실행 중에만 읽히고 폴링은
+    // 1초라 짧은 도구를 대부분 놓친다. 추측으로 붙이면 틀린 세션에 남으므로 붙이지 않는다.
+    agent_ops.test_allow_turn_snapshot = true;
+    defer agent_ops.test_allow_turn_snapshot = false;
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // **신원을 심지 않는다.** 그 밖의 조건은 앞 테스트와 같다.
+    agent_ops.captureTurnSnapshot(session, 1);
+
+    // 링 자체가 만들어지지 않는다 — 빈 링이 생기는 것도 아니다(키가 없으므로 자리도 없다).
+    try std.testing.expect(session.turn_rings.find(test_turn_session) == null);
+    try std.testing.expectEqual(@as(usize, 0), session.turn_rings.len());
 }
 
 // [§2.6] 본문 우클릭 메뉴가 **native 경로로** 열리고, 항목마다 실행 주인이 갈리는지 본다. 화면 그리기는 이미 있는

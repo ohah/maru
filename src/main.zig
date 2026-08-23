@@ -4379,6 +4379,8 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     const window_rows_before: usize = countFileItems(built.items);
     var window_rows_after: usize = window_rows_before;
     var window_intents: usize = 0;
+    var hover_redraws: usize = 0;
+    var hover_changed_picture: usize = 0;
     const header_center: ?struct { x: i32, y: i32 } = blk: {
         for (built.items, 0..) |item, i| switch (item) {
             .section => {
@@ -4392,7 +4394,14 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     };
     while (frames < 240 and !host.quitting()) : (frames += 1) {
         // 창이 뜨고 몇 프레임 지난 뒤에 넣는다 — 첫 프레임엔 아직 `WM_SIZE` 등이 큐에 있다.
+        //
+        // **호버를 먼저 잰다.** 마우스를 올렸다 내리는 것만으로 화면이 다시 그려져야 한다 — 그
+        // 자리가 빠져 있어서 마우스를 올려도 아무 표시가 안 났다(적대적 검증).
         if (frames == 5) if (header_center) |c| {
+            host.window.postSyntheticMouse(.moved, c.x, c.y);
+            host.window.postSyntheticMouse(.moved, c.x, 2); // 바깥으로 — 호버가 나가는 것도 그림이 바뀐다
+        };
+        if (frames == 30) if (header_center) |c| {
             host.window.postSyntheticMouse(.left_down, c.x, c.y);
             host.window.postSyntheticMouse(.left_up, c.x, c.y);
         };
@@ -4405,17 +4414,32 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
                     else => continue,
                 };
                 if (phase == .up) clicks += 1;
-                const intent = scm_surface.pointer(&built, &state, phase, @floatFromInt(m.x_px), @floatFromInt(m.y_px)) orelse continue;
-                if (!state.apply(intent)) {
-                    out_of_scope += 1;
-                    continue;
+                const routed = scm_surface.pointer(&built, &state, phase, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                var changed = routed.dirty;
+                if (routed.intent) |intent| {
+                    if (state.apply(intent)) {
+                        changed = true;
+                        window_intents += 1;
+                    } else {
+                        out_of_scope += 1;
+                    }
                 }
+                // **호버만 바뀌어도 다시 그린다.** 안 그러면 마우스를 올려도 아무 표시가 안 난다 —
+                // 상태는 바뀌는데 화면이 옛 프레임이다(적대적 검증에서 나온 결함).
+                if (!changed) continue;
+                const hover_only = routed.dirty and routed.intent == null;
+                // **그림이 진짜 달라지는지 잰다.** 다시 그리기만 세면 "호버가 반응한다" 가 헛
+                // 그리기여도 초록이 된다 — 컴포넌트가 그 노드에 호버 상태를 안 그릴 수도 있다.
+                const before_digest = d3d11_cells.cellsDigest(built.cells);
                 const next = scm_surface.build(allocator, &host, &state, opts) catch continue;
                 built.deinit();
                 built = next;
                 rebuilds += 1;
-                window_intents += 1;
                 window_rows_after = countFileItems(built.items);
+                if (hover_only) {
+                    hover_redraws += 1;
+                    if (d3d11_cells.cellsDigest(built.cells) != before_digest) hover_changed_picture += 1;
+                }
             },
             else => {},
         };
@@ -4432,7 +4456,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     try stdout.print("row_hits={d}/{d}\n", .{ hits_matched, hits_checked });
     try stdout.print("collapse_toggled={} file_rows={d}->{d}->{d}\n", .{ toggled, collapse_before, collapse_after, collapse_restored });
     try stdout.print("rebuilds={d} clicks={d} out_of_scope_intents={d}\n", .{ rebuilds, clicks, out_of_scope });
-    try stdout.print("window_intents={d} window_file_rows={d}->{d}\n", .{ window_intents, window_rows_before, window_rows_after });
+    try stdout.print("window_intents={d} window_file_rows={d}->{d} hover_redraws={d}/{d}\n", .{ window_intents, window_rows_before, window_rows_after, hover_changed_picture, hover_redraws });
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ built.cells.len, d3d11_cells.cellsDigest(built.cells), built.atlas_region_uploads });
     try stdout.print("frames_presented={d}\n", .{frames});
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", built.stats);

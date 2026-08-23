@@ -2881,18 +2881,30 @@ macOS `app_session/scm_dock.zig` 의 `scmDockPointer` 와 **같은 두 함수**�
 움직여, 창이 포그라운드가 아니면 엉뚱한 창을 누르기 때문이다. 한계는 W7.4c 가 IME 에서 받아들인
 것과 같다 — OS 입력 스택(캡처·연타 타이밍·모디파이어)은 안 밟는다.
 
+**적대적 검증이 결함 하나를 냈다 — 마우스를 올려도 아무 표시가 안 났다.** `dispatch` 는 호버가
+들어오고 나갈 때 `dirty` 를 내는데 이 루프가 **intent 만 보고** 있었다. 상태(`InteractionState.
+hovered`)는 바뀌는데 화면은 옛 프레임 그대로였다 — macOS 는 같은 자리에서 그 값을 보고
+`metal_dirty` 를 세운다. `pointer` 가 `Routed{ intent, dirty }` 를 내고 호출자가 `dirty` 에도
+다시 그린다.
+
+**그리고 그 고침이 헛 그리기가 아닌지 다시 쟀다.** "다시 그렸다" 만 세면 컴포넌트가 그 노드에
+호버 상태를 안 그려도 초록이 된다. 그래서 다시 짓기 **전후의 셀 지문**을 비교한다 —
+`hover_redraws=2/2` 는 두 번 다 **그림이 실제로 달라졌다**는 뜻이다.
+
+
 **실측**(`maru win32-scm-draw-smoke`, 저장소 자신의 git 상태):
 
 ```text
-branch_drawn=true names_matched=4/4
-row_hits=4/4
-collapse_toggled=true file_rows=4->0->4
-rebuilds=3 clicks=1 out_of_scope_intents=0
-window_intents=1 window_file_rows=4->0
+branch_drawn=true names_matched=2/2
+row_hits=2/2
+collapse_toggled=true file_rows=2->0->2
+rebuilds=5 clicks=1 out_of_scope_intents=0
+window_intents=1 window_file_rows=2->0 hover_redraws=2/2
 ```
 
-`file_rows=4->0->4` 는 **직접 경로**가 두 방향 다 되는 것이고, `window_file_rows=4->0` 은 **창이 준
-클릭**이 같은 일을 하는 것이다.
+`file_rows=2->0->2` 는 **직접 경로**가 두 방향 다 되는 것이고, `window_file_rows=2->0` 은 **창이 준
+클릭**이 같은 일을 하는 것이다(파일 수는 그때의 작업트리라 실행마다 다르다 — 판정은 그 수에 안
+묶인다).
 
 **뮤턴트로 확인했다** — 판정이 속 비지 않았다:
 

@@ -561,25 +561,42 @@ export class Terminal {
    * 마지막 프레임의 값이라 워커 모드에서도 왕복 없이 답한다(한 프레임 뒤처질 수 있다).
    */
   hasSelection(): boolean {
-    return this.#prevMeta?.selection != null;
+    return !this.#disposed && this.#prevMeta?.selection != null;
   }
   /** 선택 범위(뷰포트 좌표). 없으면 `null`. `hasSelection` 과 같은 프레임을 본다. */
   getSelectionPosition(): FrameMeta["selection"] {
+    if (this.#disposed) return null;
     return this.#prevMeta?.selection ?? null;
   }
-  /** 한 행 안에서 `col` 부터 `length` 칸을 선택한다(xterm.js `select` 와 같은 인자). */
+  /**
+   * 한 행 안에서 `col` 부터 `length` 칸을 선택한다(xterm.js `select` 와 같은 인자).
+   *
+   * **좌표를 격자 안으로 clamp 한다.** 음수를 그대로 흘리면 wasm 에서 u32 로 캐스팅돼 거대한
+   * 수가 되고, 코어의 clamp 를 거쳐 **엉뚱한 칸이 잡힌다**(`select(0, -3, 2)` 가 마지막 열을
+   * 선택했다). 범위 밖 요청은 무동작이 옳다.
+   */
   select(row: number, col: number, length: number): void {
     if (length <= 0) return;
+    const { cols, rows } = this.#size;
+    const r = Math.trunc(row);
+    const c = Math.trunc(col);
+    if (r < 0 || r >= rows || c < 0 || c >= cols) return;
     const b = this.#need();
-    b.selectStart(row, col, false);
-    b.selectExtend(row, col + length - 1); // 코어의 선택은 끝 칸을 포함한다
+    b.selectStart(r, c, false);
+    b.selectExtend(r, Math.min(c + length - 1, cols - 1)); // 코어의 선택은 끝 칸을 포함한다
   }
-  /** `start` 행부터 `end` 행까지 통째로 선택한다. */
+  /** `start` 행부터 `end` 행까지 통째로 선택한다. 범위 밖은 격자로 clamp 한다. */
   selectLines(start: number, end: number): void {
+    const { cols, rows } = this.#size;
+    if (rows === 0 || cols === 0) return;
+    let a = Math.trunc(Math.min(start, end));
+    let z = Math.trunc(Math.max(start, end));
+    if (z < 0 || a >= rows) return; // 격자와 겹치는 구간이 없다
+    a = Math.max(0, a);
+    z = Math.min(rows - 1, z);
     const b = this.#need();
-    const [a, z] = start <= end ? [start, end] : [end, start];
     b.selectStart(a, 0, false);
-    b.selectExtend(z, Math.max(0, this.#size.cols - 1));
+    b.selectExtend(z, cols - 1);
   }
 
   /**

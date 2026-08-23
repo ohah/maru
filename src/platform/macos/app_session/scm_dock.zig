@@ -539,7 +539,9 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
 
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
-    const rows = if (activeTurnRing(self)) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
+    // **한 번만 조회한다** — 행과 «놓친 턴» 이 같은 링을 보므로 두 번 물으면 같은 답을 두 번 계산한다.
+    const active_ring = activeTurnRing(self);
+    const rows = if (active_ring) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
 
     // 펼친 턴의 파일 줄도 목록에 든다(커밋과 같은 규율·같은 슬롯).
     var file_rows: usize = 0;
@@ -551,7 +553,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     }
     const notice_rows: usize = if (rows.len == 0) 1 else 0;
     // **놓친 턴은 목록이 비어 있든 아니든 말한다** — 그 사실이 목록의 완전성을 좌우한다.
-    const missed = if (activeTurnRing(self)) |ring| ring.missed else 0;
+    const missed = if (active_ring) |ring| ring.missed else 0;
     const missed_rows: usize = if (missed > 0) 1 else 0;
     // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — 쓰기는 변경 사항 탭에서 걸지만 **결과는 탭을
     // 따라온다**).

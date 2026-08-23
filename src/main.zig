@@ -4323,10 +4323,16 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     // 사람 없이 잰다: 섹션 머리 줄 rect 의 한가운데를 `.up` 으로 찍고, 돌아온 intent 를 상태에
     // 적용한 뒤 **다시 지어** 파일 행이 실제로 사라지는지 본다. 행 수는 모델이 정하므로 이 판정은
     // 저장소 상태가 무엇이든 성립한다.
+    //
+    // **판정 불가와 실패를 가른다.** 변경이 하나도 없는 저장소에는 누를 머리 줄이 없어 전부 0 이
+    // 나오는데, 그것을 `collapse_toggled=false` 로만 적으면 **고장난 것처럼 읽힌다**(실측: 깨끗한
+    // 저장소에서 그랬다). 이 세션에서 같은 함정을 네 번 밟았다.
     var collapse_before: usize = 0;
     var collapse_after: usize = 0;
     var collapse_restored: usize = 0;
     var toggled = false;
+    var judgeable = true;
+    var skip_reason: []const u8 = "";
     {
         collapse_before = countFileItems(built.items);
         // 섹션 머리 줄을 찾는다 — 항목 목록에서 첫 `.section` 이다.
@@ -4338,8 +4344,16 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
             },
             else => {},
         };
+        if (header_index == null) {
+            judgeable = false;
+            skip_reason = "no_section_header";
+        }
         if (header_index) |hi| find_hit: {
-            const slot = built.frame.tree.find(component.build.NodeIds.item(hi)) orelse break :find_hit;
+            const slot = built.frame.tree.find(component.build.NodeIds.item(hi)) orelse {
+                judgeable = false;
+                skip_reason = "header_not_in_tree";
+                break :find_hit;
+            };
             const rect = built.frame.tree.entries[slot].rect;
             const cx = rect.x + rect.width / 2;
             const cy = rect.y + rect.height / 2;
@@ -4363,6 +4377,73 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
             built = next;
             rebuilds += 1;
             collapse_restored = countFileItems(built.items);
+        }
+    }
+
+    // ── 판정 ⒞2: **행을 누르면 강조가 그 행으로 간다** ───────────────────────────────────────
+    //
+    // ⒝ 는 intent 가 그 행을 **이름 대는** 것까지만 봤다. 실제로 강조가 옮겨 가는지는 안 봤는데,
+    // PR 은 그것을 주장하고 있었다(적대적 검증 3 회차). 셋을 다 본다: 상태가 바뀌었나, 다시 지은
+    // 항목에 `selected` 가 섰나, **그림이 달라졌나**.
+    var select_applied = false;
+    var select_marked = false;
+    var select_changed_picture = false;
+    var select_judgeable = true;
+    {
+        var file_index: ?usize = null;
+        for (built.items, 0..) |item, i| switch (item) {
+            .file => {
+                file_index = i;
+                break;
+            },
+            else => {},
+        };
+        if (file_index == null) select_judgeable = false;
+        if (file_index) |fi| sel: {
+            const slot = built.frame.tree.find(component.build.NodeIds.item(fi)) orelse {
+                select_judgeable = false;
+                break :sel;
+            };
+            const rect = built.frame.tree.entries[slot].rect;
+            const intent = scm_surface.click(&built, &state, rect.x + rect.width / 2, rect.y + rect.height / 2) orelse {
+                select_judgeable = false;
+                break :sel;
+            };
+            const ref = switch (intent) {
+                .open_row => |r| r,
+                else => {
+                    select_judgeable = false;
+                    break :sel;
+                },
+            };
+            select_applied = state.apply(intent);
+            const next = scm_surface.build(allocator, &host, &state, opts) catch break :sel;
+            built.deinit();
+            built = next;
+            rebuilds += 1;
+            // **강조만 뺀 프레임과 비교한다.** 클릭 전후를 비교하면 호버도 함께 움직여 그 차이가
+            // 강조 때문인지 알 수 없다 — 뮤턴트로 확인했다: 강조를 아예 안 세워도 `true` 였다.
+            // 같은 interaction 상태에서 `selected` 만 지운 프레임을 지어 지문을 견준다.
+            const with_selection = d3d11_cells.cellsDigest(built.cells);
+            {
+                var probe = state;
+                probe.selected = null;
+                if (scm_surface.build(allocator, &host, &probe, opts)) |*without| {
+                    var w = without.*;
+                    select_changed_picture = d3d11_cells.cellsDigest(w.cells) != with_selection;
+                    w.deinit();
+                    rebuilds += 1;
+                } else |_| {
+                    select_judgeable = false;
+                }
+            }
+            // **모델 인덱스로 찾는다** — 화면 자리로 찾으면 이 판정이 `scm_items` 의 그 규율을 깬다.
+            for (built.items) |item| switch (item) {
+                .file => |f| if (f.model_index == ref.model_index) {
+                    select_marked = f.selected;
+                },
+                else => {},
+            };
         }
     }
 
@@ -4490,7 +4571,17 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ built.ops, built.ops_text, built.ops_fill, built.ops_dropped });
     try stdout.print("branch_drawn={} names_matched={d}/{d}\n", .{ branch_ok, names_matched, names_checked });
     try stdout.print("row_hits={d}/{d}\n", .{ hits_matched, hits_checked });
-    try stdout.print("collapse_toggled={} file_rows={d}->{d}->{d}\n", .{ toggled, collapse_before, collapse_after, collapse_restored });
+    if (judgeable) {
+        try stdout.print("collapse_toggled={} file_rows={d}->{d}->{d}\n", .{ toggled, collapse_before, collapse_after, collapse_restored });
+    } else {
+        // **실패가 아니라 판정 불가다.** 이 저장소에는 누를 것이 없다.
+        try stdout.print("collapse_toggled=unjudgeable reason={s}\n", .{skip_reason});
+    }
+    if (select_judgeable) {
+        try stdout.print("select_applied={} select_marked={} select_changed_picture={}\n", .{ select_applied, select_marked, select_changed_picture });
+    } else {
+        try stdout.print("select=unjudgeable reason=no_file_row\n", .{});
+    }
     try stdout.print("rebuilds={d} clicks={d} out_of_scope_intents={d}\n", .{ rebuilds, clicks, out_of_scope });
     try stdout.print("window_intents={d} window_file_rows={d}->{d} hover_redraws={d}/{d} press_redraws={d}\n", .{ window_intents, window_rows_before, window_rows_after, hover_changed_picture, hover_redraws, press_redraws });
     try stdout.print("rebuild_us_avg={d} rebuild_us_max={d}\n", .{ if (rebuilds > 2) rebuild_ns_total / (rebuilds - 2) / 1000 else 0, rebuild_ns_max / 1000 });

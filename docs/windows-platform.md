@@ -2898,10 +2898,19 @@ hovered`)는 바뀌는데 화면은 옛 프레임 그대로였다 — macOS 는 
 branch_drawn=true names_matched=1/1
 row_hits=1/1
 collapse_toggled=true file_rows=1->0->1
-rebuilds=8 clicks=2 out_of_scope_intents=1
+select_applied=true select_marked=true select_changed_picture=true
+rebuilds=10 clicks=2 out_of_scope_intents=1
 window_intents=1 window_file_rows=1->0 hover_redraws=2/2 press_redraws=2
 rebuild_us_avg=5068 rebuild_us_max=5648
 ```
+
+**저장소 모양 셋으로 확인했다** — 판정이 이 저장소에 안 묶여 있다:
+
+| 저장소 | 결과 |
+|---|---|
+| maru 자신(변경 1, 한 섹션) | `file_rows=1->0->1`, `row_hits=1/1` |
+| staged 3 + changes 3(두 섹션) | `file_rows=6->3->6`(첫 섹션만 접힌다), `row_hits=6/6` |
+| **변경 0(깨끗)** | `collapse_toggled=unjudgeable reason=no_section_header` |
 
 `file_rows=1->0->1` 은 **직접 경로**가 두 방향 다 되는 것이고, `window_file_rows=1->0` 은 **창이 준
 클릭**이 같은 일을 하는 것이다(파일 수는 그때의 작업트리라 실행마다 다르다 — 판정은 그 수에 안
@@ -2932,6 +2941,27 @@ rebuild_us_avg=5068 rebuild_us_max=5648
 > 이 슬라이스 밖이다.
 
 **누수 없음**: 재조립을 906 회 강제해도 작업 집합 최대 **40 MB** 로 246 회일 때와 같다.
+
+**적대적 검증 3 라운드 — 안 재고 있던 주장 둘.**
+
+⑴ **"행을 누르면 강조가 옮겨 간다" 를 안 재고 있었다.** ⒝ 는 intent 가 그 행을 **이름 대는**
+것까지만 봤다. 판정 ⒞2 를 더해 셋을 본다: 상태가 바뀌었나(`select_applied`), 다시 지은 항목에
+`selected` 가 섰나(`select_marked` — **모델 인덱스로** 찾는다), 그림이 달라졌나
+(`select_changed_picture`).
+
+> **그 세 번째가 처음엔 가짜 신호였다.** 클릭 전후의 지문을 견줬는데, 클릭은 호버도 함께 옮기므로
+> **강조를 아예 안 세우는 뮤턴트에서도 `true`** 였다. 지금은 **같은 interaction 상태에서
+> `selected` 만 지운 프레임**을 따로 지어 견준다. 뮤턴트: 원본 `true`, 강조 없음 `false`.
+
+| 뮤턴트 | `select_marked` | `select_changed_picture` |
+|---|---|---|
+| 강조를 아예 안 세운다 | `false` | `false` |
+| **옆 행**에 강조를 세운다(`+1`) | `false` | — |
+| 원본 | `true` | `true` |
+
+⑵ **깨끗한 저장소에서 `collapse_toggled=false` 가 나왔다** — 누를 머리 줄이 없다는 뜻인데
+**고장난 것처럼 읽힌다.** 이 세션에서 네 번 밟은 "판정 불가 ≠ 실패" 다. 이제 `unjudgeable
+reason=no_section_header` 로 적는다.
 
 **남은 위험 하나(보고, 안 고침).** tree 가 바뀔 때 `state.interaction` 의 `hovered`·`capture` 를
 안 버린다. macOS 는 같은 자리에서 `if (replaced) capture = null` 을 한다. **이 슬라이스에서는 안

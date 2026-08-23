@@ -1622,42 +1622,100 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
 /// **이미 보이면 아무것도 하지 않는다.** 타이핑마다 재검색이 돌므로(증분 검색) 매번 화면을 옮기면
 /// 글자 하나 지울 때마다 본문이 튄다. VSCode도 화면 안 매치로는 뷰를 움직이지 않는다.
 pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
+    // **이 Term의 매치가 맞는지 먼저 묻는다.** 목록은 계산한 시점의 편집기 것이고, 그 뒤 pane이
+    // 바뀌었을 수 있다. 안 물으면 **남의 문서 줄 번호로 이 문서를 굴리고 이 문서의 접힘을
+    // 편다** — 읽기인 줄 알았던 자리가 남의 상태를 쓴다(적대적 검증 2026-08-23이 실제로 재현).
+    //
+    // `buildFindMarks` 쪽은 이미 같은 판정을 쓰고 있었는데 스크롤 쪽만 안 썼다. ⌘G 경로
+    // (`findNavigate`)도 출처를 확인한다 — **오버레이를 연 채 Enter만** 그 문을 안 지났다.
+    if (!isFindTarget(self, term)) return;
+
     const idx = self.chrome_host.find.current;
     if (idx >= self.editor_find_matches.items.len) return;
     const doc_line = self.editor_find_matches.items[idx].line;
 
     // **먼저 편다.** 접힌 채로 보이는 줄을 찾으면 그 줄이 없어 아무 데도 못 간다.
-    revealFoldedLine(self, term, doc_line);
+    const unfolded = revealFoldedLine(self, term, doc_line);
 
     const row = visibleRowOfDocLine(term, doc_line) orelse return; // 폈는데도 없다 — 그릴 것이 없다
-    // **렌더가 굳힌 행 수를 쓴다**(§4.1g ② — 스냅숏의 경계). pane 사각을 여기서 다시 구하면
+
+    // **렌더가 굳힌 스냅숏을 읽는다**(§4.1g ② — 스냅숏의 경계). pane 사각을 여기서 다시 구하면
     // 마지막 프레임과 다른 값이 나올 수 있고, 그러면 "보인다"는 판정이 화면과 갈린다.
     const rows = term.rt.editor_hit_rows_len;
     if (rows == 0) { // 아직 한 프레임도 안 그렸다 — 맨 위에 둔다
-        term.rt.editor_first_line = row;
-        self.metal_dirty = true;
+        setEditorTop(self, term, row);
         return;
     }
-    const top = term.rt.editor_first_line;
-    // **랩이 켜져 있으면 이 판정이 근사다** — 행 수는 시각 행인데 `first_line`은 논리 줄이라,
-    // 랩된 줄이 많으면 아래쪽 몇 줄을 "보인다"고 잘못 셀 수 있다. 그 경우의 대가는 이미 화면에
-    // 있는 매치로 안 굴러가는 것뿐이고(사용자는 강조로 그것을 본다), 반대 방향으로 틀리면
-    // 매번 튄다 — 틀릴 때 덜 나쁜 쪽으로 근사한다.
-    if (row >= top and row < top + rows) return;
+
+    // **"보인다"를 세지 않고 찾는다.** 초판은 `row < top + rows`로 셌는데, `rows`는 **시각 행**
+    // 수이고 `row`/`top`은 **논리 줄**이라 랩이 켜지면 축이 섞였다. 그 근사는 **과대 계수**라
+    // 뷰포트 **아래** 줄을 "보인다"고 답했고, 그러면 Enter를 눌러도 안 굴러가 **카운터만 올라가고
+    // 화면은 그대로**였다 — EM3가 접힘에 대해 "이 슬라이스가 고치려던 부류"라 부른 그 실패다.
+    // (초판 주석은 대가를 "이미 화면에 있는 매치로 안 굴러가는 것뿐"이라 적었는데, 과대 계수가
+    // 나는 줄은 정의상 화면 **밖**이라 그 문장이 결함을 가리고 있었다. 적대적 검증 2026-08-23.)
+    //
+    // 대신 `editor_hit_lines`를 본다 — 마지막 프레임이 **행마다 어느 문서 줄을 그렸는지**의
+    // 목록이다. 랩이든 접힘이든 그 목록에 있으면 그려진 것이고 없으면 안 그려진 것이라, 근사가
+    // 아니라 사실이다. 같은 스냅숏 규율이고 재료가 이미 있었다.
+    //
+    // **방금 폈으면 그 목록은 낡았다** — 펴기 전 화면의 것이다. 그때는 묻지 않고 굴린다.
+    if (!unfolded) {
+        for (term.rt.editor_hit_lines[0..rows]) |drawn| {
+            if (drawn == doc_line) return; // 이미 보인다 — 증분 검색이라 매번 굴리면 본문이 튄다
+        }
+    }
 
     // 화면 **가운데쯤**에 둔다. 맨 위에 두면 다음 매치가 어디로 이어지는지 안 보이고, Find 오버레이가
     // 활성 pane 위쪽 한 줄을 덮으므로 위에 붙은 매치는 가려진다(스크롤백 쪽이 같은 이유로 가운데다).
-    term.rt.editor_first_line = row -| rows / 2;
+    //
+    // **논리 줄 수로 나눈다 — 시각 행 수가 아니다.** 랩에서 한 줄이 세 행을 먹으면 시각 행의
+    // 절반은 논리 줄 여럿을 지나쳐, 매치를 가운데가 아니라 **화면 아래로 밀어낸다**.
+    setEditorTop(self, term, row -| drawnDocLines(term) / 2);
+}
+
+/// 마지막 프레임이 그린 **문서 줄 수**(시각 행 수가 아니다).
+///
+/// 랩이 켜지면 한 줄이 여러 행을 차지하므로 둘이 다르고, 그 차이를 무시하면 "가운데 뒀다"고
+/// 하면서 화면 밖에 두게 된다. `editor_hit_lines`는 행마다의 문서 줄이고 화면 아래로 갈수록
+/// 커지므로(같은 줄의 조각들이 이어 붙는다), **값이 바뀌는 횟수**가 곧 줄 수다.
+fn drawnDocLines(term: *const Term) usize {
+    const n = term.rt.editor_hit_rows_len;
+    if (n == 0) return 0;
+    const lines = term.rt.editor_hit_lines[0..n];
+    var count: usize = 1;
+    for (lines[1..], lines[0 .. n - 1]) |cur, prev| {
+        if (cur != prev) count += 1;
+    }
+    return count;
+}
+
+/// 화면 맨 위 줄을 옮긴다 — **조각 offset을 함께 지운다.**
+///
+/// 세로 위치는 `(줄, 조각)` 쌍이고(§4.1d), 다른 이동 지점은 전부 둘을 함께 세운다
+/// (`scrollPieces`·`clampTopToMax`·`setEditorVScrollFromBarPx`). 초판의 `revealCurrentFindMatch`만
+/// `first_line`을 혼자 썼고, 그래서 랩에서 긴 줄 중간(`first_piece > 0`)에 있다가 점프하면
+/// **옛 조각 offset이 남아 목적지 줄을 지나쳤다** — 그다음 Enter는 "이미 보인다"로 판정돼
+/// 영영 안 굴러갔다(적대적 검증 2026-08-23).
+///
+/// **접힘 경로는 우연히 안전했다**(`rebuildVisible`이 부르는 `invalidateFoldDerived`가 0을 놓는다).
+/// 우연에 기대지 않으려고 여기서 명시한다.
+fn setEditorTop(self: *AppSession, term: *Term, line: usize) void {
+    term.rt.editor_first_line = line;
+    term.rt.editor_first_piece = 0;
     self.metal_dirty = true;
 }
 
 /// `doc_line`을 숨기고 있는 접힘을 전부 편다(중첩이면 여러 겹). 숨어 있지 않으면 무동작.
 ///
+/// **폈으면 `true`.** 부르는 쪽이 그 사실을 알아야 하는 이유는 `editor_hit_lines`가 **펴기 전
+/// 화면의 스냅숏**이어서다 — 폈는데도 그 낡은 목록으로 "이미 보인다"를 판정하면, 방금 드러낸
+/// 줄을 안 보인다고(또는 그 반대로) 답한다.
+///
 /// **한 번만 다시 만든다.** 겹마다 `toggleFoldHead`를 부르면 그때마다 보이는 줄 배열을 다시 만들고
 /// 보던 자리를 되돌리는데, 여기서는 곧바로 다른 자리로 갈 것이라 그 일이 통째로 버려진다.
-fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) void {
-    if (term.rt.editor_folded_len == 0) return;
-    if (foldsUnavailable(term)) return;
+fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) bool {
+    if (term.rt.editor_folded_len == 0) return false;
+    if (foldsUnavailable(term)) return false;
     const buf = term.rt.editor_folded_buf;
     const prev_len = term.rt.editor_folded_len;
     // **되돌릴 자리를 만들고 나서 고친다.** 아래 압축은 `buf`를 제자리에서 덮으므로, 먼저 베끼지
@@ -1673,15 +1731,16 @@ fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) void {
         buf[kept] = head;
         kept += 1;
     }
-    if (kept == prev_len) return; // 숨긴 것이 없었다 — 압축이 제자리 복사라 `buf`도 그대로다
+    if (kept == prev_len) return false; // 숨긴 것이 없었다 — 압축이 제자리 복사라 `buf`도 그대로다
 
     term.rt.editor_folded_len = kept;
     rebuildVisible(self, term) catch {
         @memcpy(buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
         term.rt.editor_folded_len = prev_len;
-        return;
+        return false;
     };
     self.metal_dirty = true;
+    return true;
 }
 
 /// 이 Term이 지금 ⌘F가 검색하고 있는 문서인가.
@@ -1703,8 +1762,11 @@ pub const VisibleMatch = struct { row: u32, start: u32 };
 
 /// 문서 줄 → 보이는 줄. 접힘이 없으면 그대로다.
 ///
-/// **훑는다.** 보이는 줄 배열은 문서 순서라 이분 탐색도 되지만, 부르는 자리가 프레임당 한 번
-/// (현재 매치 하나)이라 그 복잡도를 지불할 이유가 없다.
+/// **훑는다.** 보이는 줄 배열은 문서 순서라 이분 탐색도 되지만, 이분 탐색을 넣어도 프레임
+/// 복잡도가 안 변한다 — **바로 옆 `buildFindMarks`가 이미 매 프레임 보이는 줄 전체를 훑기
+/// 때문**이다(선택 마크가 같은 모양이고, 둘을 함께 뷰포트 창으로 좁히는 것이 진짜 개선이다).
+/// 초판은 "프레임당 한 번뿐이라"를 근거로 댔는데, 그 근거는 결론을 지지하지 않았다
+/// (적대적 검증 2026-08-23 — 결론은 맞고 이유가 틀렸다).
 fn visibleRowOfDocLine(term: *const Term, doc_line: u32) ?u32 {
     const numbers = term.rt.editor_visible_numbers;
     if (term.rt.editor_visible_lines.len == 0 or numbers.len == 0) {
@@ -1778,6 +1840,10 @@ fn buildFindMarks(self: *AppSession, term: *Term, matches: []const maru.session.
         while (mi < matches.len and matches[mi].line < doc_line) mi += 1;
         const from = w;
         while (mi < matches.len and matches[mi].line == doc_line) : (mi += 1) {
+            // **도달 불가한 방어다.** 위에서 `buf.len >= matches.len`을 보장했고 `w`는 매치당
+            // 최대 1씩만 는다. 그래도 두는 이유는 `editorTabWidth`의 clamp와 같다 — 넘치면
+            // 남의 메모리를 쓰는 것이라 조용한 실패가 최악이고, **도달 불가한 것을 알고 두는
+            // 것과 모르고 두는 것은 다르다**(적대적 검증 2026-08-23이 죽은 가지로 확인).
             if (w >= buf.len) break;
             buf[w] = .{ .start = matches[mi].start, .len = matches[mi].len };
             w += 1;
@@ -9043,6 +9109,8 @@ test "EM3 접혀 숨은 매치로 가면 펴고 나서 간다 (§5.1 네비게�
     try testing.expect(buildFindMarks(fx.session, term, fx.session.editor_find_matches.items).?[0].len == 0); // 숨은 동안에는 그릴 것이 없다
 
     fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true; // 출처 검사를 지난다(EM9가 그 검사를 잰다)
+    fx.session.editor_find_source = term.surfaceId();
     revealCurrentFindMatch(fx.session, term);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len); // 폈다
     const vm = currentVisibleMatch(fx.session, term) orelse return error.NotVisible;
@@ -9064,7 +9132,13 @@ test "EM4 이미 보이는 매치로는 화면을 움직이지 않는다" {
         var buf: [32]u8 = undefined;
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
     }
-    try doc.appendSlice(allocator, "needle at the end\n");
+    // **매치를 문서 가운데 둔다.** 끝에 두면 아래 "한 칸 옮기기"가 스크롤 상한을 넘어
+    // `clampScrollToGeometry`가 되돌려 놓고, 그러면 판정자가 자기 전제를 잃는다.
+    try doc.appendSlice(allocator, "needle in the middle\n");
+    for (200..400) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
     try fx.dir.dir.writeFile(io, .{ .sub_path = "s.txt", .data = doc.items });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
@@ -9078,6 +9152,8 @@ test "EM4 이미 보이는 매치로는 화면을 움직이지 않는다" {
 
     try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
     fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true; // 출처 검사를 지난다
+    fx.session.editor_find_source = term.surfaceId();
 
     // 화면 **밖**이다 — 굴러가고, 매치가 가운데쯤 온다.
     try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
@@ -9085,9 +9161,134 @@ test "EM4 이미 보이는 매치로는 화면을 움직이지 않는다" {
     const after = term.rt.editor_first_line;
     try testing.expectEqual(@as(usize, 200 - rows_drawn / 2), after);
 
-    // 이제 화면 **안**이다 — 다시 불러도 그대로여야 한다.
+    // **여기서 자리를 한 칸 옮긴다.** 이 줄이 없으면 이 판정자가 아무것도 안 잰다 — 중앙 정렬
+    // 식(`row - rows/2`)이 **멱등**이라, 조기 반환을 통째로 지워도 두 번째 호출이 같은 값을
+    // 다시 계산해 초록이 남는다(뮤턴트 M7이 그렇게 살아남았다. 적대적 검증 2026-08-23).
+    // 한 칸 옮긴 자리에서도 매치는 여전히 화면 안이므로, **되돌리면 안 된다**가 판정이 된다.
+    const nudged = after + 1;
+    term.rt.editor_first_line = nudged;
+    var again = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    again.dl.deinit(allocator); // 옮긴 자리로 한 프레임 — `editor_hit_lines`가 그 화면의 것이어야 한다
+
+    // 이제 화면 **안**이다 — 다시 불러도 그 자리를 지켜야 한다.
     revealCurrentFindMatch(fx.session, term);
-    try testing.expectEqual(after, term.rt.editor_first_line);
+    try testing.expectEqual(nudged, term.rt.editor_first_line);
+}
+
+test "EM7 랩에서도 화면 밖 매치로 굴러간다 — 시각 행과 논리 줄을 안 섞는다" {
+    // **초판은 여기서 틀렸다**(적대적 검증 2026-08-23). `row < top + rows`의 `rows`가 시각 행
+    // 수인데 `row`/`top`은 논리 줄이라, 랩이 켜지면 **과대 계수**가 나 뷰포트 **아래** 줄을
+    // "보인다"고 답했다. Enter를 눌러도 안 굴러가고 카운터만 올라간다 — EM3가 접힘에 대해
+    // "이 슬라이스가 고치려던 부류"라 부른 그 실패 모드다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // **한 줄이 여러 행으로 접히게** 길게 쓴다. 그래야 두 축이 갈린다 — 짧은 줄만 있으면
+    // 시각 행과 논리 줄이 같아 이 판정자가 옛 구현에서도 통과한다.
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..60) |i| {
+        var buf: [400]u8 = undefined;
+        const filler = "wrap me " ** 20; // 160자 — 본문 폭보다 훨씬 길다
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
+    }
+    try doc.appendSlice(allocator, "needle at the end\n");
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "w.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "w.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = true;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const rows_drawn = term.rt.editor_hit_rows_len;
+    const docs_drawn = drawnDocLines(term);
+    // **판정이 성립하려면 두 축이 실제로 갈려야 한다.** 안 갈리면 이 테스트는 EM4의 복제일 뿐이다.
+    try testing.expect(docs_drawn < rows_drawn);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+
+    // 매치는 문서 줄 60이고 화면에는 첫 몇 줄뿐이다 — 굴러가야 한다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    revealCurrentFindMatch(fx.session, term);
+    // 시각 행 수로 나눴으면 훨씬 위(또는 0)에 섰다. 논리 줄 수로 나눠야 이 값이다.
+    try testing.expectEqual(@as(usize, 60 - docs_drawn / 2), term.rt.editor_first_line);
+    try testing.expect(term.rt.editor_first_line > 0); // 안 굴러간 것이 아니다
+}
+
+test "EM8 매치로 점프하면 조각 offset을 지운다 (§4.1d)" {
+    // 세로 위치는 `(줄, 조각)` 쌍이다. 초판은 `first_line`만 써서, 랩에서 긴 줄 중간에 있다가
+    // 점프하면 **옛 조각 offset이 남아 목적지 줄을 지나쳤다**(적대적 검증 2026-08-23).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..40) |_| try doc.appendSlice(allocator, "long " ** 60 ++ "\n");
+    try doc.appendSlice(allocator, "needle\n");
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "p.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "p.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = true;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+
+    // 긴 줄 **중간**에 서 있다 — 조각이 0이 아니다.
+    term.rt.editor_first_piece = 3;
+    revealCurrentFindMatch(fx.session, term);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_piece); // 남으면 목적지를 지나친다
+}
+
+test "EM9 남의 문서 매치로는 이 문서를 굴리지도 펴지도 않는다" {
+    // **읽기인 줄 알았던 자리가 남의 상태를 쓴다.** 오버레이를 연 채 다른 편집기로 옮기고
+    // Enter를 누르면 `revealCurrentFindMatch`가 그 Term에 대해 불리는데, 매치는 **앞 문서의
+    // 것**이다. 초판은 출처를 안 물어 엉뚱한 줄로 굴리고 **이 문서의 접힘을 폈다**
+    // (적대적 검증 2026-08-23이 재현). ⌘G 경로에는 그 검사가 있었는데 Enter 경로에만 없었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "head\n    a\n    b\n    c\ntail\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "b.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    try testing.expect(foldAll(fx.session));
+    const folded_before = term.rt.editor_folded_len;
+    try testing.expect(folded_before > 0);
+
+    // 매치는 **다른 Term**의 것이다(출처 id가 다르다).
+    try fx.session.editor_find_matches.append(allocator, .{ .line = 2, .start = 0, .len = 1 });
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId() + 1;
+
+    revealCurrentFindMatch(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line); // 안 굴렀다
+    try testing.expectEqual(folded_before, term.rt.editor_folded_len); // 접힘도 그대로다
 }
 
 test "EM5 검색 대상이 아닌 편집기에는 강조가 안 선다" {

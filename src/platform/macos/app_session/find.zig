@@ -46,6 +46,23 @@ pub fn activeTermIsEditor(self: *AppSession) bool {
     return activeEditorTerm(self) != null;
 }
 
+/// 지금 편집기 매치가 **어느 Term의 것이어야 하는가**(0 = 편집기가 아니거나 검색이 꺼져 있다).
+///
+/// **tick이 매 프레임 이 값과 `editor_find_source`를 대조한다.** `target` 값만 비교하던 초판은
+/// 편집기 A → 편집기 B 전환에서 **둘 다 `.editor`라 분기가 안 열렸고**, 그래서
+///   - B가 재검색되지 않아 **강조가 하나도 안 그려지고**(출처 id가 A라 `isFindTarget`이 막는다),
+///   - 카운터는 A의 수를 계속 말하고,
+///   - Enter는 A의 줄 번호로 B를 굴리려 했다(그쪽은 `revealCurrentFindMatch`의 출처 검사가 막는다).
+///
+/// 같은 게이트가 **Term 닫기**(다음 활성이 다른 편집기)와 **웹으로 이동**(target이 `.page`라
+/// 재검색 갈래를 건너뛰는데 렌더는 모든 leaf를 돈다)도 함께 닫는다 — 셋이 한 뿌리였다.
+/// 전환 경로마다 세우지 않고 **매 tick 대조**하는 것이 이 파일 이웃(`target` 동기화)의 규율이다.
+pub fn wantedEditorFindSource(self: *AppSession) u64 {
+    if (!(self.chrome_host.find.open or self.find_nav)) return 0;
+    const term = activeEditorTerm(self) orelse return 0;
+    return term.surfaceId();
+}
+
 /// 편집기 문서를 다시 검색한다. 매치가 **어느 Term의 것인지** 함께 싣는다(`editor_find_source`) —
 /// 그 표식이 없으면 pane을 바꾼 다음 프레임이 남의 좌표를 이 문서에 칠한다.
 fn recomputeEditorFind(self: *AppSession, term: *Term) void {
@@ -55,7 +72,10 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
         self.chrome_host.find.input.query.items,
         &self.editor_find_matches,
     ) catch self.editor_find_matches.clearRetainingCapacity();
-    self.editor_find_source = if (self.editor_find_matches.items.len > 0) term.surfaceId() else 0;
+    // **매치가 0이어도 출처를 세운다.** 이 값의 뜻은 "몇 개 찾았나"가 아니라 **"이 목록이 어느
+    // 문서의 것인가"**다. 0일 때 비워 두면 tick의 대조가 매 프레임 "안 맞는다"고 답해 재검색이
+    // 무한히 돈다. 매치가 없으면 `buildFindMarks`가 `null`을 주므로 강조는 어차피 안 그려진다.
+    self.editor_find_source = term.surfaceId();
     self.chrome_host.find.setMatchCount(self.editor_find_matches.items.len);
 }
 
@@ -63,6 +83,18 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
 pub fn clearEditorFind(self: *AppSession) void {
     self.editor_find_matches.clearRetainingCapacity();
     self.editor_find_source = 0;
+}
+
+/// **매치 목록 둘을 함께 비운다.** 검색 하이라이트를 멈춰야 하는 자리는 전부 이것을 부른다.
+///
+/// **왜 헬퍼인가.** 목록이 둘이라는 사실이 호출자마다 흩어지면 반드시 한쪽만 비우는 자리가
+/// 남는다 — 실제로 남았다. 초판은 `toggleFind`와 `.find_close` 둘만 짝을 맞췄고, **같은 성질의
+/// 나머지 세 자리**(커맨드 팔레트·설정 화면·모달 정리)는 `find_matches`만 비웠다. 터미널에서는
+/// 목록이 비어 증상이 안 보이지만, 편집기는 `find_nav`가 살아 있어 **오버레이가 사라졌는데
+/// 강조가 남았다**(적대적 검증 2026-08-23).
+pub fn clearAllFindMatches(self: *AppSession) void {
+    self.find_matches.clearRetainingCapacity();
+    clearEditorFind(self);
 }
 
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),

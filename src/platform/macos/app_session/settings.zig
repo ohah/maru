@@ -39,6 +39,7 @@ const term_ops = @import("term.zig");
 const editor_ops = @import("editor.zig");
 const git_ops = @import("git.zig");
 const agent_ops = @import("agent.zig");
+const find_ops = @import("find.zig"); // 검색 매치 목록 둘을 함께 비운다(clearAllFindMatches)
 const input_ops = @import("input.zig");
 const web_ops = @import("web.zig");
 const ctx_group_menu_color_first = app_session_mod.ctx_group_menu_color_first;
@@ -279,7 +280,7 @@ pub fn toggleSettings(self: *AppSession) void {
         self.chrome_host.notice.dismiss(); // 배타적
         self.chrome_host.find.hide();
         self.chrome_host.palette.hide();
-        self.find_matches.clearRetainingCapacity();
+        find_ops.clearAllFindMatches(self); // 목록은 둘이다 — 한쪽만 비우면 편집기 강조가 남는다
         self.chrome_host.settings.show();
         self.chrome_host.settings.section = 0; // 항상 첫 섹션부터(네비 — config-gui §4)
         refreshSettingsFieldCount(self);

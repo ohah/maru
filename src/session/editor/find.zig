@@ -60,6 +60,8 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8) ?usize {
         const hl = std.unicode.utf8ByteSequenceLength(line[i]) catch return null;
         if (i + hl > line.len) return null;
         const want = std.unicode.utf8Decode(needle_utf8[n .. n + nl]) catch return null;
+        // 못 읽는 자리는 **이 시작점의 불일치**다. 호출자가 `stepBytes`로 1 byte만 밀어 다음
+        // 자리를 다시 보므로, 여기서 몇 byte를 봤는지 알릴 필요가 없다.
         const have = std.unicode.utf8Decode(line[i .. i + hl]) catch return null;
         if (terminal.selection.foldCase(have) != terminal.selection.foldCase(want)) return null;
         i += hl;
@@ -68,14 +70,34 @@ fn matchAt(line: []const u8, from: usize, needle_utf8: []const u8) ?usize {
     return i;
 }
 
+/// 다음 코드포인트 경계까지의 byte 수 — **읽을 수 있을 때만** 그 길이다.
+///
+/// **선언된 길이를 믿지 않는다.** lead byte는 "내가 n byte짜리다"라고 말하지만 뒤따르는 byte가
+/// 잘렸거나 continuation이 아니면 그 말은 거짓이고, 그 거짓을 믿고 커서를 밀면 **뒤따르는 성한
+/// byte까지 삼킨다**. 적대적 검증이 실행으로 잡은 것이 그것이다(2026-08-23):
+///
+/// | 줄 | 검색어 | 옛 동작 | 기대 |
+/// |---|---|---|---|
+/// | `"\xE0abcabc"` | `abc` | 매치 1개(4에서) | 2개 — 1이 사라졌다 |
+/// | `"aa\xF0target"` | `target` | **0개** | 1개 — `tar`가 0xF0의 4-byte 폭에 먹혔다 |
+///
+/// 읽을 수 없으면 **1 byte만** 민다. 그러면 못 읽는 byte 하나만 잃고 다음 자리부터 다시 본다.
+fn stepBytes(s: []const u8, i: usize) usize {
+    const n = std.unicode.utf8ByteSequenceLength(s[i]) catch return 1;
+    if (i + n > s.len) return 1;
+    _ = std.unicode.utf8Decode(s[i .. i + n]) catch return 1;
+    return n;
+}
+
 /// 문서 줄 배열에서 needle을 찾아 `out`에 채운다(호출자 소유, 매번 비운다).
 ///
 /// **같은 줄 안에서 겹치지 않는다** — 매치 뒤부터 다시 본다. 터미널 검색과 같은 규칙이고,
 /// `aaa`에서 `aa`를 찾으면 둘이 아니라 하나다.
 ///
-/// **깨진 UTF-8 줄은 건너뛰지 않고 그 자리만 넘긴다.** 문서는 열 때 UTF-8을 검사하므로(§3.5)
+/// **깨진 UTF-8 줄은 그 byte 하나만 넘긴다**(`stepBytes`). 문서는 열 때 UTF-8을 검사하므로(§3.5)
 /// 여기 오는 줄은 성한 것이지만, 그 검사가 파일 전체를 보는 것이라 **이 함수 혼자로는 보장이
-/// 아니다** — 못 읽는 byte에서 멈추면 그 뒤 줄 내용이 통째로 검색에서 사라진다.
+/// 아니다** — 그리고 N2에서 편집이 붙으면 `editor_lines`가 그 검사를 안 지나는 순간이 온다.
+/// 초판은 이 걱정을 doc에 적어 두고 **구현이 그 걱정을 못 막았다**(`stepBytes`의 표).
 pub fn findMatches(
     allocator: std.mem.Allocator,
     lines: []const []const u8,
@@ -102,7 +124,7 @@ pub fn findMatches(
             }
             // 다음 **코드포인트 경계**로. byte 단위로 밀면 멀티바이트 글자 중간에서 시작하는
             // 비교를 하게 되고, 그것은 UTF-8에서 절대 맞지 않으므로 헛걸음이다.
-            i += std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
+            i += stepBytes(line, i);
         }
     }
 }
@@ -227,4 +249,55 @@ test "FND8: 재사용하는 out은 이전 결과를 남기지 않는다" {
     try testing.expectEqual(@as(usize, 3), out.items.len);
     try findMatches(testing.allocator, &lines, "zzz", &out);
     try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "FND9: 깨진 lead byte가 뒤따르는 성한 byte를 삼키지 않는다" {
+    // **적대적 검증이 실행으로 잡은 결함**(2026-08-23). 초판은 lead byte가 **선언한** 길이만큼
+    // 커서를 밀어서, 디코드가 실패해도 최대 4 byte를 건너뛰었다 — 그 안에 든 매치가 사라졌다.
+    //
+    // 오늘 제품 경로는 여기 못 닿는다(`document.open`이 UTF-8을 검사해 거절한다). 그래도 재는
+    // 이유는 **모듈 doc이 바로 이 걱정을 적어 두고 구현이 그것을 못 막고 있었기 때문**이고,
+    // N2에서 편집이 붙으면 `editor_lines`가 그 검사를 안 지나는 순간이 온다.
+    {
+        const lines = [_][]const u8{"\xE0abcabc"}; // 0xE0은 3 byte라 선언하지만 뒤가 안 맞는다
+        var m = try collect(&lines, "abc");
+        defer m.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 2), m.items.len); // 옛 동작은 1개
+        try testing.expectEqual(@as(u32, 1), m.items[0].start);
+        try testing.expectEqual(@as(u32, 4), m.items[1].start);
+    }
+    {
+        const lines = [_][]const u8{"aa\xF0target"}; // 0xF0은 4 byte 선언 — `tar`를 삼켰다
+        var m = try collect(&lines, "target");
+        defer m.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), m.items.len); // 옛 동작은 0개
+        try testing.expectEqual(@as(u32, 3), m.items[0].start);
+    }
+}
+
+test "FND10: 정규화는 하지 않는다 — NFD 문서에 NFC 검색어는 안 맞는다" {
+    // **적어 두는 이유는 이것이 결정이기 때문이다**(적대적 검증 2026-08-23이 "빠진 결정"으로
+    // 지적했다). 이 저장소는 한글 NFD를 1급으로 다루는데(`docs/grapheme-clustering.md`), 검색은
+    // 코드포인트 단위 비교라 `가`(NFC, U+AC00)와 `ᄀ`+`ᅡ`(NFD)가 **다른 것**이다.
+    //
+    // 정규화를 넣지 않은 이유: 그것은 검색만의 결정이 아니다 — 선택·복사·낱말 경계가 같은 축을
+    // 쓴다. 여기서 한쪽만 정규화하면 **검색 결과와 선택 범위가 어긋난다**.
+    //
+    // 이 판정자는 그 동작을 **고정**한다. 나중에 정규화를 들이면 이 테스트가 먼저 빨개져
+    // "그때 무엇을 함께 바꾸는지" 묻게 한다 — 조용히 바뀌지 않는다.
+    const nfc = [_][]const u8{"\u{AC00}"}; // 가 (완성형)
+    const nfd = [_][]const u8{"\u{1100}\u{1161}"}; // ᄀ + ᅡ (조합형)
+
+    var a = try collect(&nfc, "\u{1100}\u{1161}");
+    defer a.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), a.items.len);
+
+    var b = try collect(&nfd, "\u{AC00}");
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), b.items.len);
+
+    // 같은 표현끼리는 맞는다 — 위 둘이 "검색이 통째로 깨졌다"가 아님을 보인다.
+    var c = try collect(&nfd, "\u{1100}\u{1161}");
+    defer c.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), c.items.len);
 }

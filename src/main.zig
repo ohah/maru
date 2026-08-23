@@ -109,6 +109,10 @@ fn dispatch(
         try runWin32GitSmoke(io, allocator, stdout, stderr);
         return;
     }
+    if (std.mem.eql(u8, command, "win32-scm-draw-smoke")) {
+        try runWin32ScmDrawSmoke(io, allocator, stdout, stderr);
+        return;
+    }
 
     if (std.mem.eql(u8, command, "win32-file-tree-draw-smoke")) {
         try runWin32FileTreeDrawSmoke(io, allocator, stdout, stderr);
@@ -4153,6 +4157,195 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("lines_matched={d}/{d}\n", .{ r.matched, r.checked });
+    try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
+    try stdout.flush();
+}
+
+/// `maru win32-scm-draw-smoke` — W8.4. **소스 컨트롤 표면이 Windows 화면에 뜬다.**
+///
+/// §2m.6(파일 트리)·§2m.21(편집기)이 세운 모양 그대로다: fixture 를 안 만들고 **저장소 자신**의 git
+/// 상태를 읽어 그 행을 그린다. 화면에 뜨는 것이 진짜 변경 목록이라야 "그럴듯한 그림" 과 "실제로 도는
+/// 것" 이 갈린다.
+///
+/// **새로 짠 것이 거의 없다.** 프로세스 러너는 §2m.8·§2m.9 가 이미 Windows 로 옮겼고(`win32_process`
+/// 캡처 러너), 모델(`session.scm_view`)과 낮추기(`buildDockScmDrawList` — 본문에 `coretext_*` 참조
+/// **0 회**)는 중립이며, 창부터 표현까지는 §2m.20 의 공용 호스트가 맡는다.
+fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-scm-draw-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const scm_view = maru.session.scm_view;
+
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
+    var host = draw_host.Host.open(allocator, cfg, .{
+        .title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W8.4 source control)"),
+    }) catch {
+        try draw_host.reportSetupFailure(stderr, "win32-scm-draw-smoke");
+        return error.UnknownCommand;
+    };
+    defer host.close();
+    const cell_w = host.cell_w;
+    const cell_h = host.cell_h;
+    const grid = host.grid();
+
+    // ── 제품 진입점으로 git 을 부른다 ─────────────────────────────────────────────────────────
+    //
+    // `win32-git-smoke`(§2m.9)와 **같은 길**이다 — `submitRepoStatus` → 백그라운드 스레드 →
+    // `takeRepoStatusResult`. 중간을 건너뛰면 그 자리가 안 밟힌다.
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_native = root_buf[0..try std.Io.Dir.cwd().realPath(io, &root_buf)];
+    const repo = try maru.path_shape.normalizeSeparators(allocator, root_native);
+    defer allocator.free(repo);
+
+    var backend = try git_backend_mod.Backend.init(io);
+    defer backend.deinit();
+    if (!backend.submitRepoStatus("git", repo, 1)) {
+        try stderr.writeAll("maru win32-scm-draw-smoke: could not submit the repo status request\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    var rounds: usize = 0;
+    var taken: ?git_backend_mod.RepoStatusResult = null;
+    while (rounds < 6000) : (rounds += 1) {
+        if (backend.takeRepoStatusResult()) |t| {
+            taken = t;
+            break;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    var status = taken orelse {
+        try stderr.writeAll("maru win32-scm-draw-smoke: the repo status did not finish in time\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    // **`worker_allocator` 로 해제한다** — 결과는 백그라운드 스레드가 그 할당기로 만든다(§2m.9 실측).
+    defer status.deinit(git_backend_mod.worker_allocator);
+    if (!status.ok) {
+        try stderr.writeAll("maru win32-scm-draw-smoke: git status failed\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // ── 상태 텍스트 → 모델 ───────────────────────────────────────────────────────────────────
+    //
+    // **numstat 을 안 넘긴다.** 백엔드의 `RepoStatusResult` 는 `git status` 출력만 싣는다 — 증감 숫자는
+    // 별도 명령이고 이 슬라이스의 판정(목록이 화면에 뜨는가)에 필요하지 않다. 빈 문자열이면 모델이
+    // 숫자만 비운다.
+    const model_rows = try allocator.alloc(scm_view.Row, 256);
+    defer allocator.free(model_rows);
+    const model_scratch = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(model_scratch);
+    const collapsed = [_]bool{ false, false };
+    const expanded = [_]bool{ false, false };
+    const model = scm_view.build(
+        status.text,
+        "",
+        "",
+        "",
+        collapsed,
+        expanded,
+        false,
+        model_rows,
+        model_scratch,
+    );
+
+    // ── 모델 → DrawList ──────────────────────────────────────────────────────────────────────
+    const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 } };
+    const muted: maru.terminal.Color = .{ .rgb = .{ .r = 0x8A, .g = 0x94, .b = 0xA8 } };
+    const accent: maru.terminal.Color = .{ .rgb = .{ .r = 0xDD, .g = 0xA1, .b = 0x5E } };
+    const visible: u16 = @intCast(@min(model.rows.len + 1, grid.rows));
+    const draw_list = try coretext_frame_builder.buildDockScmDrawList(
+        allocator,
+        grid.cols,
+        visible,
+        model.head,
+        model.rows,
+        &collapsed,
+        if (model.rows.len > 1) 1 else null, // 선택 행 하나 — 강조가 그려지는지 함께 본다
+        0,
+        fg,
+        muted,
+        accent,
+    );
+
+    // ── DrawList → 화면 ──────────────────────────────────────────────────────────────────────
+    const prepared = try host.prepare(allocator, draw_list);
+    var frame = prepared.frame;
+    defer frame.deinit(allocator);
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    };
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+    _ = try host.appendGlyphCells(allocator, frame, colors, &cells);
+
+    const frames = try host.presentLoop(cells.items, 0xFF1E2430, 120);
+
+    // ── 판정 ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // **행 수가 아니라 내용을 본다**(§2m.6 의 규율). 그려진 셀에서 글자를 도로 읽어, 모델이 말한
+    // **브랜치 이름과 파일 이름**이 실제로 그 행에 있는지 확인한다. 저장소 상태가 무엇이든 성립하는
+    // 판정이라 fixture 에 안 묶인다.
+    var names_checked: usize = 0;
+    var names_matched: usize = 0;
+    var branch_ok = false;
+    {
+        var row_text: std.ArrayList(u8) = .empty;
+        defer row_text.deinit(allocator);
+        const readRow = struct {
+            fn go(a: std.mem.Allocator, f: maru.renderer.RenderFrame, buf: *std.ArrayList(u8), row: u16) !void {
+                buf.clearRetainingCapacity();
+                for (f.draw_list.cells) |c| {
+                    if (c.row != row) continue;
+                    var b: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(@intCast(c.codepoint), &b) catch continue;
+                    try buf.appendSlice(a, b[0..n]);
+                }
+            }
+        }.go;
+
+        // 브랜치 헤더는 0 행이다.
+        try readRow(allocator, frame, &row_text, 0);
+        if (model.head.branch) |b| {
+            if (b.len > 0) branch_ok = std.mem.indexOf(u8, row_text.items, b) != null;
+        }
+
+        // 파일 행: 모델이 말한 이름이 그 행에 있는가. 헤더가 0 행이므로 모델 행 i 는 화면 i+1 이다.
+        for (model.rows, 0..) |r, i| {
+            const name = switch (r) {
+                .file => |f| f.path,
+                else => continue,
+            };
+            const row: u16 = @intCast(i + 1);
+            if (row >= visible) break;
+            try readRow(allocator, frame, &row_text, row);
+            names_checked += 1;
+            // **파일명으로 본다.** 그 컴포넌트는 전체 경로를 한 덩어리로 안 그린다 — 아이콘 +
+            // **파일명** + 디렉터리 + 상태 글자 순이다(VS Code 의 SCM 목록과 같은 모양). 처음엔
+            // 경로 끝 12 바이트로 봤다가 `0/1` 이 나왔는데 그려진 것은 `main.zigsrc/M` 이었다 —
+            // **판정이 틀린 것이지 렌더가 틀린 것이 아니다.**
+            const slash = std.mem.lastIndexOfScalar(u8, name, '/');
+            const base = if (slash) |k| name[k + 1 ..] else name;
+            if (std.mem.indexOf(u8, row_text.items, base) != null) names_matched += 1;
+        }
+    }
+
+    const stats = maru.renderer.renderFrameStats(frame, host.renderer_state.atlas.entryCount());
+    try stdout.writeAll("maru.win32-scm-draw-smoke.v1\n");
+    try stdout.print("repo={s}\n", .{repo});
+    try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
+    try stdout.print("branch={?s} ahead={d} behind={d}\n", .{ model.head.branch, model.head.ahead, model.head.behind });
+    try stdout.print("model_rows={d} drawn_rows={d} empty={}\n", .{ model.rows.len, visible, model.empty });
+    try stdout.print("branch_drawn={} names_matched={d}/{d}\n", .{ branch_ok, names_matched, names_checked });
+    try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ cells.items.len, d3d11_cells.cellsDigest(cells.items), prepared.region_uploads });
+    try stdout.print("frames_presented={d}\n", .{frames});
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
     try stdout.flush();
 }

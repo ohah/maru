@@ -218,6 +218,19 @@
       </select>
     </div>
     <div class="row"><button id="bench">처리량 측정</button> <span id="stat"></span></div>
+    <hr />
+    <h2>제어</h2>
+    <div class="row">
+      <button id="c-clear">clear()</button> <button id="c-reset">reset()</button>
+    </div>
+    <div class="row">
+      <button id="c-top">맨 위</button> <button id="c-bottom">맨 아래</button>
+      <button id="c-pgup">▲ 1쪽</button> <button id="c-pgdn">▼ 1쪽</button>
+    </div>
+    <div class="row">
+      <label>행으로 이동 <output id="v-line-no">0</output></label>
+      <input type="range" id="c-line" min="0" max="0" step="1" value="0" />
+    </div>
   </div>
 </div>
 

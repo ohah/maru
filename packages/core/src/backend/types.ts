@@ -51,6 +51,16 @@ export interface Backend {
 
   scroll(deltaUp: number): void;
   scrollToBottom(): void;
+  /** 뷰포트를 스크롤백 맨 위로. */
+  scrollToTop(): void;
+  /** 절대 행 `line`(0 = 스크롤백 최상단)이 뷰포트 첫 줄에 오도록. */
+  scrollToLine(line: number): void;
+
+  /**
+   * 화면을 지운다. 셸이 프롬프트를 다시 그려야 하면 `\x0c`(^L)를 `data` 이벤트로 흘린다 —
+   * 호스트가 그걸 PTY 에 써 준다(본체 `.clear_screen` 과 같은 계약).
+   */
+  clear(): void;
 
   selectStart(row: number, col: number, block: boolean): void;
   selectExtend(row: number, col: number): void;

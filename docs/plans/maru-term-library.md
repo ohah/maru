@@ -43,8 +43,8 @@
 
 | 단계 | 내용 | 왜 이 순서인가 |
 |---|---|---|
-| **F1**(진행 중) | PTY 를 WebSocket 으로 물려 vim·tmux·htop 을 띄운다 | 대체 화면·스크롤 영역·mouse tracking 조합을 한 번도 안 밟았다. 여기서 나오는 결함이 아래 어느 기능보다 크다 |
-| **F2** | `reset`·`clear`·스크롤 제어(`scrollToTop`/`scrollToLine`) | 구현이 코어에 있고 export + 얇은 래핑이면 된다 |
+| ~~**F1**~~ | PTY 를 WebSocket 으로 물려 vim·tmux·htop 을 띄운다 | **완료** — 아래 기록 |
+| ~~**F2**~~ | `reset`·`clear`·스크롤 제어(`scrollToTop`/`scrollToLine`) | **완료** — 아래 기록 |
 | **F3** | 상태 이벤트 — `onCursorMove`·`onScroll`·`onSelectionChange` | 앱이 터미널을 따라가려면 필요하다. 워커 모드에서 이벤트 채널을 태워야 한다 |
 | **F4** | 검색(`findMatches`) + `registerMarker`/`registerDecoration` | 검색 하이라이트를 그리려면 마커/장식이 함께 있어야 한다 |
 | **F5** | 클립보드(OSC 52)·알림(OSC 9/777)·셸 통합(OSC 7/133) | 각각 이벤트 채널 설계가 필요하다 |
@@ -78,6 +78,23 @@
   테스트로 옮겼다.
 - **종료·재연결**: `exit` 로 셸이 끝나면 소켓이 닫히고 `[PTY 끊김]` 이 뜨며 터미널은 살아 있다.
 - **F1 1라운드 종료.** 남은 것은 Safari/Firefox, 모바일 터치, 접근성 — 전부 F8 이다.
+
+- **F2 의 "export + 얇은 래핑" 전제는 틀렸다.** 코어에 구현이 있는 것은 맞지만 **시맨틱이
+  xterm.js 와 다르다**. `clearScreen()` 은 OSC 133 상태에 따라 3갈래로 갈리고 alt screen 에선
+  무동작이며, 반환 bool 은 "셸에 ^L 을 보내라"는 뜻이다(본체 `.clear_screen` 이 그렇게 쓴다).
+  `scrollToAbs()` 는 Find 용이라 대상 행을 **화면 중앙**에 두는데 xterm.js `scrollToLine` 은
+  **맨 위**다. 그래서 코어 함수를 그대로 노출하지 않고, 본체 계약을 문서화한 뒤 그쪽에 맞췄다
+  (계약 §7). 라이브러리는 xterm.js 클론이 아니라 **maru 코어를 내는 것**이라 이 편이 옳다.
+- **`reset` 은 export 를 늘리지 않는다.** `ESC c` 를 흘리면 파서가 이미 `fullReset` 을 부른다 —
+  앱이 보낸 RIS 와 경로가 하나로 유지된다.
+- **F2 가 기존 결함을 하나 찾았다 — 스크롤 위치가 65535 행에서 잘렸다.** `vt_scroll_state` 가
+  `(offset << 16) | len` 으로 둘을 한 u32 에 실으며 각 필드를 `0xffff` 로 잘랐다. 70000 행을
+  쌓고 재보니 길이가 **4464** 로 보고됐다(실측) — 스크롤바가 6% 만 그려지고 절대 행 스크롤은
+  아예 불가능하다. `scrollback: 100000` 은 실제로 쓰는 설정이다([wasm 이식성](../wasm-portability.md)
+  §5.2 가 63.94MB 로 측정한 그 값이다). `vt_view_offset`·`vt_scrollback_len` 으로 나눴다.
+- **브라우저 검사에서 가짜 통과를 잡았다.** 새로 넣은 워커 제어 검사가 `0/0` 으로 통과하고
+  있었다 — 앞 검사가 `scrollback: 0` 을 남기고 가 스크롤백이 애초에 안 쌓였다. "쌓였는지"를
+  먼저 단언하도록 고쳤다(42 행 → clear 후 0). **0 대 0 비교는 통과가 아니다.**
 
 ## 선행 조건
 

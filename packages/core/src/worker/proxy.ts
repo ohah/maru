@@ -141,6 +141,20 @@ export class WorkerBackend implements Backend {
     this.#send({ t: "scrollBottom" });
   }
 
+  scrollToTop(): void {
+    this.#send({ t: "scrollTop" });
+  }
+
+  scrollToLine(line: number): void {
+    this.#send({ t: "scrollToLine", line });
+  }
+
+  clear(): void {
+    // ^L 이 필요한지는 워커 안 코어만 안다 — 판단도 거기서 하고, 필요하면 `data` 이벤트로
+    // 돌아온다(이미 프록시되는 채널이다).
+    this.#send({ t: "clear" });
+  }
+
   selectStart(row: number, col: number, block: boolean): void {
     this.#send({ t: "sel", op: "start", row, col, block });
   }

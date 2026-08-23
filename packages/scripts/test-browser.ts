@@ -319,6 +319,96 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   });
   check("worker: onRender 가 온다", rendered !== null, rendered ?? "(안 옴)");
 
+  // **제어 API 가 워커에서도 살아 있는가.** 프록시가 메시지를 안 실어 보내면 메인에서는
+  // 조용히 무동작이 된다 — 같은 API 가 모드에 따라 갈리는 그 결함이다. `clear` 는 특히
+  // 왕복이다: 판단은 워커 안 코어가 하고, ^L 은 `data` 이벤트로 메인까지 돌아와야 한다.
+  const control = await p.evaluate(async () => {
+    const t = (
+      globalThis as unknown as {
+        __term: {
+          setOptions: (o: Record<string, unknown>) => void;
+          write: (s: string) => void;
+          clear: () => void;
+          scrollToTop: () => void;
+          scrollToBottom: () => void;
+          reset: () => void;
+          onData: (cb: (b: Uint8Array) => void) => { dispose(): void };
+          onRender: (cb: (m: { scroll: { offset: number; length: number } }) => void) => {
+            dispose(): void;
+          };
+        };
+      }
+    ).__term;
+    let scroll = { offset: 0, length: 0 };
+    const sub = t.onRender((m) => {
+      scroll = m.scroll;
+    });
+    const out: number[] = [];
+    const dsub = t.onData((b) => out.push(...b));
+    const wait = () => new Promise((r) => setTimeout(r, 250));
+
+    // 앞 검사가 `scrollback: 0` 으로 두고 갔다 — 되돌리지 않으면 아래가 전부 0 대 0 으로
+    // 통과해 버린다(실제로 그렇게 통과하는 것을 보고 잡았다).
+    t.setOptions({ scrollback: 1000 });
+    await wait();
+
+    for (let i = 0; i < 60; i++) t.write(`ctl ${i}\r\n`);
+    await wait();
+    const grew = scroll.length;
+
+    t.scrollToTop();
+    await wait();
+    const atTop = scroll.offset;
+
+    t.scrollToBottom();
+    await wait();
+    const atBottom = scroll.offset;
+
+    t.write("\x1b]133;A\x07$ "); // 프롬프트를 선언해야 ^L 이 나간다
+    await wait();
+    t.clear();
+    await wait();
+    const afterClear = scroll.length;
+    const formFeed = out.filter((b) => b === 0x0c).length;
+
+    for (let i = 0; i < 20; i++) t.write(`more ${i}\r\n`);
+    await wait();
+    t.reset();
+    await wait();
+    const afterReset = scroll.length;
+
+    sub.dispose();
+    dsub.dispose();
+    return { grew, atTop, atBottom, afterClear, formFeed, afterReset };
+  });
+  // 이 단언이 먼저다 — 스크롤백이 비어 있으면 아래 셋이 전부 0 대 0 으로 통과한다.
+  check("worker: 스크롤백이 실제로 쌓였다", control.grew > 0, `${control.grew}행`);
+  check(
+    "worker: scrollToTop 이 맨 위로 간다",
+    control.grew > 0 && control.atTop === control.grew,
+    `${control.atTop}/${control.grew}`,
+  );
+  check(
+    "worker: scrollToBottom 이 바닥으로 온다",
+    control.atBottom === 0,
+    String(control.atBottom),
+  );
+  check(
+    "worker: clear 가 스크롤백을 비운다",
+    control.grew > 0 && control.afterClear === 0,
+    `${control.grew} → ${control.afterClear}`,
+  );
+  check(
+    "worker: clear 의 ^L 이 메인까지 돌아온다",
+    control.formFeed === 1,
+    `${control.formFeed}개`,
+  );
+  check(
+    "worker: reset 이 스크롤백을 비운다",
+    control.grew > 0 && control.afterReset === 0,
+    String(control.afterReset),
+  );
+
   check("worker: 조회가 응답한다", workerOpts.query === "settled", String(workerOpts.query));
 
   check(

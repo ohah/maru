@@ -128,9 +128,28 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 검색·클립보드(OSC 52)·화면 직렬화·이미지·`reset`/`clear`·스크롤 제어·
+- **없는 것**: 검색·클립보드(OSC 52)·화면 직렬화·이미지·
   `onCursorMove`/`onScroll`/`onSelectionChange`·마커/장식
-- **검증 안 된 것**: 실제 TUI(vim·tmux·htop), Safari/Firefox, 모바일 터치, 접근성
+- **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
+- **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
+  tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
+
+### 화면·스크롤 제어
+
+```ts
+term.reset();              // 하드 리셋(RIS)
+term.clear();              // 화면 비우기 — 아래 계약
+term.scrollToTop();
+term.scrollToBottom();
+term.scrollToLine(120);    // 절대 행(0 = 스크롤백 최상단)을 첫 줄에
+term.scrollLines(3);       // 양수가 아래 — 휠 방향
+term.scrollPages(-1);
+```
+
+`clear()` 는 xterm.js 와 다르다. **셸 통합(OSC 133)이 있고 프롬프트 상태일 때만** 전체를 비우고
+커서를 홈에 둔 뒤 `\x0c`(^L)를 `onData` 로 흘린다 — 그걸 PTY 에 써야 셸이 프롬프트를 다시
+그린다. 그 밖에는 커서를 옮기지 않고 스크롤백과 커서 위 행만 비운다(셸의 readline 모델과
+어긋나지 않기 위해서다). alt screen 에서는 무동작이다.
 
 무엇이 어떤 순서로 올지는 [구현 계획](https://github.com/ohah/maru/blob/main/docs/plans/maru-term-library.md)에
 있다. 지금 쓰기 좋은 곳은 **정확한 VT 파싱과 폭 판정이 필요한 곳**이고, xterm.js 를 그대로

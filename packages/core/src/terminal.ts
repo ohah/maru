@@ -360,6 +360,41 @@ export class Terminal {
   scrollToBottom(): void {
     this.#need().scrollToBottom();
   }
+  /** 스크롤백 맨 위로. */
+  scrollToTop(): void {
+    this.#need().scrollToTop();
+  }
+  /** 절대 행 `line`(0 = 스크롤백 최상단)을 뷰포트 첫 줄에 둔다. */
+  scrollToLine(line: number): void {
+    this.#need().scrollToLine(line);
+  }
+  /** 양수면 아래로 — 휠 방향과 같다(`scroll()` 은 위가 양수인 코어 방향이다). */
+  scrollLines(amount: number): void {
+    this.#need().scroll(-amount);
+  }
+  /** 한 페이지 = 현재 행 수. */
+  scrollPages(pages: number): void {
+    this.scrollLines(pages * this.#size.rows);
+  }
+
+  /**
+   * 화면을 지운다. 셸 통합(OSC 133)이 있고 프롬프트 상태이면 전체를 비우고 커서를 홈에 둔 뒤
+   * `\x0c`(^L)를 `onData` 로 흘려 셸이 프롬프트를 다시 그리게 한다. 그 밖에는 커서 모델을
+   * 건드리지 않도록 스크롤백과 커서 위 행만 비운다.
+   */
+  clear(): void {
+    this.#need().clear();
+  }
+
+  /**
+   * 하드 리셋(RIS). 화면·스크롤백·선택·모드·색을 초기 상태로 되돌린다.
+   *
+   * 전용 export 가 아니라 `ESC c` 를 흘려 보낸다 — 파서가 이미 RIS 를 `fullReset` 으로
+   * 처리하므로 경로가 하나로 유지된다(앱이 보낸 RIS 와 완전히 같은 동작이다).
+   */
+  reset(): void {
+    this.write("\x1bc");
+  }
 
   selectStart(row: number, col: number, block = false): void {
     this.#need().selectStart(row, col, block);

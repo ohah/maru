@@ -367,6 +367,28 @@ $("bench").addEventListener("click", async () => {
   $("stat").textContent = `${((400 * chunk.length) / ms / 1000).toFixed(1)} MB/s`;
 });
 
+// ── 제어 API ───────────────────────────────────────────────
+// 라이브러리가 내는 화면·스크롤 제어를 그대로 눌러 본다. `clear()` 는 셸 통합 여부에 따라
+// 동작이 갈리므로(계약 §7) 가짜 셸/진짜 PTY 둘 다에서 눌러 보면 차이가 보인다.
+$("c-clear").addEventListener("click", () => term.clear());
+$("c-reset").addEventListener("click", () => term.reset());
+$("c-top").addEventListener("click", () => term.scrollToTop());
+$("c-bottom").addEventListener("click", () => term.scrollToBottom());
+$("c-pgup").addEventListener("click", () => term.scrollPages(-1));
+$("c-pgdn").addEventListener("click", () => term.scrollPages(1));
+
+const lineSlider = $<HTMLInputElement>("c-line");
+lineSlider.addEventListener("input", () => {
+  const n = Number(lineSlider.value);
+  $("v-line-no").textContent = String(n);
+  term.scrollToLine(n);
+});
+// 슬라이더 범위는 스크롤백이 자라는 대로 따라간다.
+term.onRender((m) => {
+  const len = m.scroll.length;
+  if (Number(lineSlider.max) !== len) lineSlider.max = String(len);
+});
+
 /**
  * 진짜 PTY 에 붙는다. **이게 라이브러리가 실제로 쓰이는 형태다** — `onData` 로 나온 바이트를
  * 그대로 소켓에 보내고, 소켓이 준 바이트를 그대로 `write()` 한다. 그 사이에 아무 해석도 없다.

@@ -4561,6 +4561,11 @@ pub const AppSession = struct {
     file_tree_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     file_tree_actions: std.ArrayList(chrome.components.file_tree.ids.Entry) = .empty,
     file_tree_interaction: chrome.ui.interaction.InteractionState = .{},
+    /// **발행 시점의 입력.** 포인터가 올 때 이 값이 지금과 다르면 발행이 낡은 것이고, 그 상태로
+    /// 히트테스트하면 **다른 행이 열린다** — 스크롤은 투영 세대를 안 올리므로 세대 검사가 못 잡는다
+    /// (적대적 검증에서 휠 10행 뒤 발행이 2행을 가리키는 것을 재현했다).
+    file_tree_published_scroll_px: u32 = 0,
+    file_tree_published_rows: usize = 0,
     scm_dock_snapshot_generation: u64 = 1,
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
@@ -37634,6 +37639,67 @@ test "file tree: 발행된 인덱스가 낡아도 범위를 넘지 않는다" {
     // ⑶ 늦게 도착한 up 도 아무것도 열지 않는다.
     _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, deep_y);
     try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, deep_y) == null);
+}
+
+// **스크롤과 그리기 사이에 온 포인터가 보이는 행을 가리킨다.**
+//
+// 발행은 그리기 경로가 하므로 프레임 사이에 낡는다. 휠 이벤트와 클릭이 같은 run loop 패스에 들어오면
+// 그 사이에 paint 가 없고, 그러면 커서 밑에 **보이는** 행과 발행이 말하는 행이 달라진다 — 실측으로
+// 휠 10행 뒤 발행이 2행을 가리켰다(적대적 검증 3라운드). 세대 검사는 이것을 못 잡는다: 스크롤은
+// 목록을 바꾸지 않으므로 투영 세대가 그대로다.
+//
+// 증상이 "아무 일도 안 일어남" 이 아니라 **다른 파일이 열림** 이라 조용하지 않다.
+test "file tree: 스크롤 직후의 포인터도 보이는 행을 가리킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..80) |index| {
+        const path = try std.fmt.allocPrint(allocator, "/repo/p{d}.zig", .{index});
+        errdefer allocator.free(path);
+        try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = path,
+            .label = path[6..],
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+    defer for (session.file_tree_rows.items) |row| allocator.free(row.file.path);
+    file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+
+    const tree = dock_ops.dockGeometry(session).tree_content;
+    const x: f64 = @floatFromInt(tree.x + tree.w / 2);
+    const y: f64 = @floatFromInt(tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) * 2 + 4);
+    const before_pub = file_tree_dock_ops.fileTreeRowAtPublished(session, x, y);
+    const before_arith = file_panel_ops.fileTreeRowAt(session, x, y);
+    try std.testing.expectEqual(before_arith, before_pub);
+
+    // **스크롤만 하고 다시 그리지 않는다** — 이벤트 두 개가 같은 run loop 패스에 들어오는 상황.
+    file_panel_ops.setFileTreeScrollOffsetPx(session, file_tree_dock_ops.fileTreeRowHeightPx(session) * 10);
+    const after_pub = file_tree_dock_ops.fileTreeRowAtPublished(session, x, y);
+    const after_arith = file_panel_ops.fileTreeRowAt(session, x, y);
+    // 전제: 스크롤이 실제로 답을 바꿨다(안 바뀌면 이 테스트가 아무것도 판정하지 않는다).
+    try std.testing.expect(after_arith != null and after_arith.? != before_arith.?);
+    try std.testing.expectEqual(after_arith, after_pub);
+
+    // 그리고 그 자리를 누르면 **보이는 그 행**이 열린다(질의만 맞고 intent 가 낡으면 소용없다).
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, y);
+    const intent = file_tree_dock_ops.fileTreeDockPointer(session, .up, x, y) orelse
+        return error.FileTreeScrolledPointerProducedNoIntent;
+    switch (intent) {
+        .activate_row => |index| try std.testing.expectEqual(after_arith.?, index),
+    }
 }
 
 test "file tree production hot paths emit bounded counter artifact" {

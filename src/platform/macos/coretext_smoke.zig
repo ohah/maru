@@ -642,64 +642,60 @@ fn buildDockViewBarFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawL
     );
 }
 
-/// 파일 탐색기 여러 줄. **아이콘 색**이 관심사라 종류가 서로 다른 행을 한 화면에 세운다 — 색은 격자
-/// 덤프로 본다 — `writeGridBitmapDump` 가 커버리지를 그 glyph 의 전경색에 곱해 **컬러 PPM**(`grid.ppm`)
-/// 으로 내므로 종류색이 그대로 보인다. 폴더/일반 파일은 색이 없어야 하는 대조군이다.
+/// 파일 탐색기 **아이콘 색**. 종류가 서로 다른 아이콘을 한 화면에 세운다 — 색은 격자 덤프로 본다
+/// (`writeGridBitmapDump` 가 커버리지를 그 glyph 의 전경색에 곱해 **컬러 PPM**(`grid.ppm`)으로 내므로
+/// 종류색이 그대로 보인다). 폴더/일반 파일은 색이 없어야 하는 대조군이다.
+///
+/// **행 투영을 쓰지 않고 직접 세운다**(FT3). 이 픽스처의 관심사는 `file_tree_icon` 의 분류→색 매핑과
+/// 그 glyph 의 래스터이지 트리 행의 배치가 아니다. 제품 트리는 이제 typed component 가 그리므로
+/// (docs/plans/file-tree-component.md FT1), 셀 투영을 여기서 계속 부르면 **제품이 안 쓰는 경로**를
+/// macOS 스모크가 살려 두는 셈이 된다.
 fn buildFileTreeFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawList {
-    const Row = maru.session.file_tree.Row;
     const K = maru.chrome.file_tree_icon.IconKind;
-    const file = struct {
-        fn make(path: []const u8, label: []const u8, depth: u16, kind: K) Row {
-            return .{ .file = .{
-                .path = path,
-                .label = label,
-                .depth = depth,
-                .supported = true,
-                .open = false,
-                .active = false,
-                .dirty = false,
-                .external_change = false,
-                .symlink = false,
-                .icon_kind = @intFromEnum(kind),
-            } };
+    const tokens = maru.chrome.tokens.Tokens.rich(fixtureThemeInput());
+    const label_fg: terminal.Color = .{ .rgb = .{ .r = 0xc8, .g = 0xc8, .b = 0xc8 } };
+
+    const shown = [_]struct { kind: K, label: []const u8 }{
+        .{ .kind = .folder, .label = "src" }, // 대조군 — 종류색이 없다
+        .{ .kind = .code, .label = "main.zig" },
+        .{ .kind = .js, .label = "app.js" },
+        .{ .kind = .markup, .label = "index.html" },
+        .{ .kind = .style, .label = "app.css" },
+        .{ .kind = .data, .label = "data.json" },
+        .{ .kind = .git, .label = ".gitignore" },
+        .{ .kind = .image, .label = "logo.png" },
+        .{ .kind = .document, .label = "README.md" },
+        .{ .kind = .file, .label = "LICENSE" }, // 대조군
+    };
+
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    for (shown, 0..) |entry, index| {
+        const row: u16 = @intCast(index);
+        if (maru.chrome.file_tree_icon.codepoint(entry.kind)) |cp| {
+            const role = maru.chrome.file_tree_icon.colorRole(entry.kind);
+            const fg: terminal.Color = if (role) |r| .{ .rgb = tokens.palette.get(r) } else label_fg;
+            // 아이콘은 2칸이다 — 제품 트리와 같은 규약(1칸이면 셀 폭까지 줄어 실루엣이 뭉개진다).
+            try cells.append(allocator, .{ .row = row, .col = 1, .codepoint = cp, .width = 2, .style = .{ .foreground = fg } });
         }
-    };
-    const rows = [_]Row{
-        .{ .root = .{ .path = "/w", .label = "workspace", .expanded = true, .loading = false, .icon_kind = @intFromEnum(K.folder_open) } },
-        // git 이 무시하는 항목 — 흐리게 그려져야 한다(아이콘 종류색도 함께 죽는다).
-        .{ .directory = .{ .path = "/w/node_modules", .label = "node_modules", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_dependency), .ignored = true } },
-        .{ .directory = .{ .path = "/w/src", .label = "src", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_source) } },
-        // compact 표시: 단일 자식 디렉터리 체인이 한 줄로 접힌 모습(`buildRows` 가 만드는 라벨 형태 그대로).
-        .{ .directory = .{ .path = "/w/release/app", .label = "release/app", .depth = 1, .expanded = false, .loading = false, .symlink = false, .icon_kind = @intFromEnum(K.folder_output) } },
-        file.make("/w/main.zig", "main.zig", 1, .code),
-        file.make("/w/app.tsx", "app.tsx", 1, .ts),
-        file.make("/w/index.js", "index.js", 1, .js),
-        file.make("/w/page.html", "page.html", 1, .markup),
-        file.make("/w/theme.css", "theme.css", 1, .style),
-        file.make("/w/package.json", "package.json", 1, .data),
-        file.make("/w/.editorconfig", ".editorconfig", 1, .config),
-        file.make("/w/logo.png", "logo.png", 1, .image),
-        file.make("/w/README.md", "README.md", 1, .document),
-        file.make("/w/dist.tar.gz", "dist.tar.gz", 1, .archive),
-        file.make("/w/LICENSE", "LICENSE", 1, .file),
-        blk: {
-            var r = file.make("/w/dist.map.js", "dist.map.js", 1, .js);
-            r.file.ignored = true; // 무시된 **파일**: 종류색(js 노랑)이 죽고 흐려진다
-            break :blk r;
-        },
-    };
-    const fg: terminal.Color = .{ .rgb = .{ .r = 0xc8, .g = 0xc8, .b = 0xc8 } };
-    const active_fg: terminal.Color = .{ .rgb = .{ .r = 0xff, .g = 0xff, .b = 0xff } };
-    var colors: [std.meta.fields(K).len]?terminal.Color = @splat(null);
-    inline for (std.meta.fields(K)) |field| {
-        const kind: K = @enumFromInt(field.value);
-        colors[field.value] = if (maru.chrome.file_tree_icon.colorRole(kind)) |role|
-            .{ .rgb = maru.chrome.tokens.Tokens.rich(fixtureThemeInput()).get(role) }
-        else
-            null;
+        for (entry.label, 0..) |byte, offset| {
+            try cells.append(allocator, .{
+                .row = row,
+                .col = @intCast(4 + offset),
+                .codepoint = byte,
+                .width = 1,
+                .style = .{ .foreground = label_fg },
+            });
+        }
     }
-    const ignored_fg: terminal.Color = .{ .rgb = maru.chrome.tokens.Tokens.rich(fixtureThemeInput()).get(.muted_fg) };
-    return coretext_frame_builder.buildFileTreeDrawList(allocator, &rows, null, 0, rows.len, 30, fg, active_fg, null, &colors, ignored_fg);
+    return .{
+        .size = .{ .cols = 30, .rows = @intCast(shown.len) },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = @intCast(shown.len - 1) },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try allocator.alloc(u32, 0),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
 }
 
 /// 픽스처 토큰 입력 — 제품 테마가 아니라 **고정 값**이라 덤프가 결정적이다.
@@ -1430,18 +1426,10 @@ test "CoreText draw-list shaper composes an NFD Hangul chrome label identically 
     // 파일 트리 행 라벨을 chrome이 그리는 그대로 DrawList로 만들고, 첫 글자 글리프를 뽑는다.
     const Probe = struct {
         fn labelGlyph(a: std.mem.Allocator, sh: coretext_shaper.CoreTextDrawListShaper, fg: terminal.Color, label: []const u8) !struct { font_id: renderer.FontId, glyph_id: renderer.GlyphId } {
-            const rows = [_]maru.session.file_tree.Row{.{ .file = .{
-                .path = "/tmp/probe.md",
-                .label = label,
-                .depth = 0,
-                .supported = true,
-                .open = false,
-                .active = false,
-                .dirty = false,
-                .external_change = false,
-                .symlink = false,
-            } }};
-            var dl = try coretext_frame_builder.buildFileTreeDrawList(a, &rows, null, 0, 1, 40, fg, fg, null, null, null);
+            // **라벨 한 줄을 직접 만든다**(FT3). 이 probe 의 관심사는 셰이퍼가 NFD 음절을 한 cluster 로
+            // 묶는가이지 트리 행의 배치가 아니다 — 트리 투영을 부르면 제품이 안 쓰는 경로를 붙잡게 된다.
+            // `buildPaneLabelDrawList` 는 제품이 여전히 쓰는 셀 경로이고 cluster 규약(grapheme_pool)도 같다.
+            var dl = try coretext_frame_builder.buildPaneLabelDrawList(a, label, 40, fg, .head);
             defer dl.deinit(a);
             var fr = renderer.FontIdentityRegistry.init(a);
             defer fr.deinit();

@@ -4738,6 +4738,14 @@ pub const AppSession = struct {
     scm_commit_files_oid: ?[]u8 = null,
     scm_commit_files_inflight: u64 = 0,
     scm_commit_files_seq: u64 = 0,
+    /// 턴 요약(그 턴이 바꾼 파일 수) 요청 번호. 0이면 도는 것이 없다.
+    ///
+    /// **파일 목록 슬롯을 펼침 요청과 공유한다**(`git_backend` 의 결과 자리가 하나다). 그래서 둘을
+    /// 동시에 걸지 않고, 도착한 결과는 요청 번호로 갈라 보낸다 — 섞이면 늦게 온 쪽이 남의 자리를 덮는다.
+    scm_turn_summary_inflight: u64 = 0,
+    /// 그 요약이 **어느 turn 의 것인가**(head tree, owned). 결과가 오는 사이 링이 밀릴 수 있어
+    /// 자리가 아니라 tree 로 되찾는다(`Ring.markFiles`).
+    scm_turn_summary_head: ?[]u8 = null,
     scm_commit_files_failed: bool = false,
     scm_commit_files_truncated: bool = false,
     /// 펼친 커밋에서 **지금 열어 둔 파일**의 자리(P4b). 목록이 무엇을 보고 있는지 말해야 파일 여럿을
@@ -15130,6 +15138,7 @@ pub const AppSession = struct {
         scm_dock_ops.pumpScmLog(self); // 히스토리 탭을 보고 있고 아직 못 읽었으면 읽기를 건다(P4)
         scm_dock_ops.drainCommitFiles(self); // 펼친 커밋의 파일 목록을 싣는다(P4b)
         scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b·P5 공용 슬롯)
+        scm_dock_ops.pumpTurnSummaries(self); // 턴 줄의 `N개 파일`을 하나씩 채운다(같은 슬롯을 쓴다)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
         // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
@@ -18612,6 +18621,7 @@ pub const AppSession = struct {
         if (self.scm_expanded_turn) |key| self.allocator.free(key); // 펼친 턴(P5)
         if (self.scm_selected_turn) |key| self.allocator.free(key);
         if (self.scm_commit_files_oid) |oid| self.allocator.free(oid);
+        if (self.scm_turn_summary_head) |oid| self.allocator.free(oid); // 도는 턴 요약의 대상 tree
         if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
         if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
         if (self.scm_write_repo) |path| self.allocator.free(path); // 마지막 쓰기가 향한 저장소(②d)

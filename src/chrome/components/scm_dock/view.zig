@@ -1125,19 +1125,29 @@ const Writer = struct {
 
         const left = rect.rect.x + inset;
         const right = rect.rect.x + rect.rect.width - inset;
-        if (right > left) {
+        // **요약은 제목 줄 오른쪽에 선다.** 아래 줄(에이전트 · 시각)은 이미 양끝이 차 있어 여기밖에
+        // 자리가 없다. 제목이 먼저이므로 요약이 안 들어가면 요약을 뺀다 — 제목을 밀어내지 않는다.
+        var title_right = right;
+        if (turn.summary.len > 0) {
+            const w = self.measureBudget(turn.summary);
+            if (title_right - w > left) {
+                try self.emitAt(title_right - w, rect.rect.y + pad_y, turn.summary, .muted_fg, .supporting);
+                title_right -= w + gap;
+            }
+        }
+        if (title_right > left) {
             try self.emit(
                 left,
                 rect.rect.y + pad_y,
                 turn.title,
-                self.colsFor(right - left),
+                self.colsFor(title_right - left),
                 // **강조색을 쓰지 않는다**: 이 테마에서 그 역할은 본문보다 흐려서, 진행 중 줄이 오히려
                 // 덜 중요해 보였다(제품 캡처 2026-08-18). "진행 중"이라는 말과 빈 시각이 이미 그 사실을
                 // 말하므로 색을 하나 더 얹지 않는다.
                 .surface_fg,
                 .control,
                 true,
-                @intFromFloat(@max(right - left, 0)),
+                @intFromFloat(@max(title_right - left, 0)),
                 .origin,
             );
         }

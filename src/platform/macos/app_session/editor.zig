@@ -27,6 +27,7 @@ const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
 const editor_selection = maru.session.editor.selection;
 const chrome_editor = maru.chrome.components.editor_view;
+const settings_ops = @import("settings.zig");
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const renderer = app_session_mod.renderer;
@@ -1014,6 +1015,14 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     term.rt.editor_lines = prepared.lines;
     term.rt.editor_path = prepared.path;
 
+    // **탭 폭을 config에서 받는다**(§9). 아래 파생값(접힘 겹수·`max_cols`)이 이 값에 달렸으므로
+    // **그것들을 세기 전에** 넣어야 한다 — 뒤에 넣으면 세터가 방금 센 것을 도로 버린다.
+    //
+    // **여기서는 세터를 안 쓴다.** `setEditorTabWidth`는 *이미 선 파생값을 버리는* 함수인데 지금은
+    // 버릴 것이 없다(이 줄 아래에서 처음 센다). 세터를 부르면 아직 없는 접힘 층을 지우고 다시
+    // 세우려 해 같은 일을 두 번 한다.
+    term.rt.editor_tab_width = editorTabWidth(self);
+
     // **접을 범위를 여기서 센다** — §4.1f가 정한 갱신 시점이 "문서를 열 때"다. 첫 접기 명령까지
     // 미루면 **펼쳐진 화살표(▾)가 그때까지 안 보여** 접을 수 있는 자리를 알 수 없다.
     //
@@ -1024,6 +1033,55 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // 것을 안다(굴려 보기 전에는 알 길이 없다. 2026-08-18 사용자 지적). 접힘 화살표와 같은 이유·
     // 같은 시점이다. 할당하지 않으므로 실패 지점이 없다.
     ensureMaxCols(term, false);
+}
+
+/// config가 정한 탭 폭(§9 — `editor.tab-width`).
+///
+/// **한 곳에서만 읽는다.** 값이 필요한 자리가 셋이고(문서 열기·config 재적용·기본값), 각자
+/// `loaded_config`를 파고들면 스키마가 바뀔 때 한 곳만 따라가는 일이 난다 — 이 파일이 이미
+/// 겪은 부류다(탭 폭을 상수로 읽던 세 자리를 적대적 검증이 잡았다).
+pub fn editorTabWidth(self: *AppSession) u8 {
+    const raw = self.loaded_config.config.editor.tab_width;
+    // **파서가 이미 막는다** — u32 + range 필드는 범위 밖 값을 거절하고 기본값을 유지한다
+    // (`config/schema.zig`). 그래도 묶는 이유는 **여기가 이 값의 단일 출처**여서다: 스키마에서
+    // range가 빠지거나 테스트가 필드에 직접 쓰는 판에서도 0이 새면 탭스톱이 0이라 열이 안 늘어
+    // 훑기가 끝나지 않는다. 도달 불가한 방어인 것을 알고 두는 것과 모르고 두는 것은 다르다.
+    return @intCast(std.math.clamp(raw, 1, 16));
+}
+
+/// config가 다시 로드됐을 때 **열려 있는 편집기 Term 전부**에 탭 폭을 다시 넣는다.
+///
+/// **세터를 쓴다** — 여기서는 파생값이 이미 서 있고, 그것이 옛 폭으로 계산돼 있다. 세터가
+/// 접힘 층·`max_cols`·가로 위치·행 수 캐시를 한 단위로 버리고 다시 세우며 보던 줄을 지킨다.
+///
+/// **값이 같으면 건너뛴다.** 세터 자신은 같은 값이어도 무효화하는데(그 doc: 필드에 직접 대입한
+/// 뒤 부르는 경우를 막는다), 여기서는 그럴 일이 없고 reload마다 모든 편집기의 접힘이 펼쳐지면
+/// 사용자가 접어 둔 것을 잃는다 — config에서 그 키를 안 건드린 reload가 대부분이다.
+pub fn applyConfigTabWidth(self: *AppSession) void {
+    const want = editorTabWidth(self);
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.kind != .editor) continue;
+                if (term.rt.editor_tab_width == want) continue;
+                setEditorTabWidth(self, term, want);
+                // **다시 세어 준다.** 세터는 `max_cols`를 **버리기만** 하고(그것이 그 함수의 일이다),
+                // 제품에서 다시 세는 자리는 `finishAttach`와 첫 가로 휠뿐이다. 그대로 두면
+                // `maxColsForRender`가 0을 `null`로 읽어 **가로 막대를 아예 안 그리는데**, 그 막대는
+                // 본문 아래 여백에서 자리를 먹으므로 생겼다 사라지면 **본문 높이가 출렁인다**
+                // (`ensureMaxCols` doc이 금지한 그 상태다. ADV3-I가 세터 직후 `max_cols == 0`을
+                // 단언하고 곧바로 손으로 다시 세는 것이 이 사실의 증거다).
+                //
+                // 비교 뷰는 좌우를 함께 센다 — 세터가 `foldsUnavailable` 조기 반환으로 오른쪽 값도
+                // 버리는데, 그쪽 재계산 자리는 diff 결과가 다시 올 때뿐이라 더 오래 비어 있다.
+                if (term.rt.editor_diff != null) {
+                    ensureMaxColsForDiff(term);
+                } else {
+                    ensureMaxCols(term, false);
+                }
+            }
+        }
+    }
 }
 
 /// 경로를 열어 **활성 pane에 편집기 Term으로 붙인다**. N1의 "화면에 파일이 뜬다"가 여기서 닫힌다.
@@ -7812,6 +7870,85 @@ test "ADV3-G 번호 표가 행보다 짧으면 그 행의 클릭은 답하지 �
     // 표 안에 있는 첫 행은 여전히 답한다 — 가드가 전부를 막는 것이 아니다.
     const py0: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
     try testing.expect(hitTestBody(term, px, py0) != null);
+}
+
+// TAB1: **config가 실제로 편집기에 닿는가.** ADV3-I는 세터를 **직접** 부르는 경로만 재고, 그
+// 세터는 배선 전까지 제품 호출자가 0개였다 — 함수가 옳아도 호출부가 틀리면 아무 일도 안 난다.
+//
+// **그래서 이 판정자는 세터도 `applyConfigTabWidth`도 직접 부르지 않는다.** 첫 판은 그것을 직접
+// 불러서, 배선 두 줄(`applyLoadedConfig`·`reloadConfig`의 호출)을 지워도 전부 초록이었다 — 비판한
+// 실수를 한 층 위에서 반복한 것이다(적대적 검증 2026-08-23). 지금은 **제품 진입점만** 탄다.
+test "TAB1: config의 탭 폭이 문서를 열 때와 재적용 때 편집기에 닿는다 (§9)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 픽스처는 **탭 두 개짜리 줄**을 든다 — `max_cols`는 모든 줄의 최대라 그 줄이 값을 정한다.
+    // 탭 폭 8이면 `\t\tdef` = 16+3 = **19**, 4면 8+3 = **11**. 첫 판은 하한을 11로 잡아
+    // **탭 폭 4에서도 통과**했다(첫 줄만 계산한 착오다).
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "t.txt", .data = "\tabc\n\t\tdef\n" });
+    var rb: [std.fs.max_path_bytes]u8 = undefined;
+    const root = rb[0..try fx.dir.dir.realPath(io, &rb)];
+    const path = try std.fs.path.join(allocator, &.{ root, "t.txt" });
+    defer allocator.free(path);
+
+    // ⑴ **여는 시점에 config를 따른다** — 필드와 파생값 둘 다.
+    fx.session.loaded_config.config.editor.tab_width = 8;
+    const term = try openPathInActivePane(fx.session, path);
+    try testing.expectEqual(@as(u8, 8), term.rt.editor_tab_width);
+    try testing.expectEqual(@as(u32, 19), term.rt.editor_max_cols); // 정확히 잰다 — 하한이 아니다
+
+    // ⑵ **세팅 GUI 재적용 경로**(`applyLoadedConfig`)가 닿는가. **그 함수를 부른다** —
+    //    `applyConfigTabWidth`를 직접 부르면 배선이 지워져도 통과한다.
+    fx.session.loaded_config.config.editor.tab_width = 4;
+    settings_ops.applyLoadedConfig(fx.session, true);
+    try testing.expectEqual(@as(u8, 4), term.rt.editor_tab_width);
+    // **파생값이 다시 섰는가.** 세터는 버리기만 하므로 재계산 짝이 없으면 여기가 0이고,
+    // 그러면 가로 막대가 사라져 본문 높이가 출렁인다(`ensureMaxCols` doc).
+    try testing.expectEqual(@as(u32, 11), term.rt.editor_max_cols);
+
+    // ⑶ **접어 둔 상태를 지킨다** — 값이 같으면 세터를 안 탄다. 첫 판은 접힘 **개수**를 봤는데
+    //    세터가 `dropFoldState` 직후 다시 세우므로 개수는 어차피 같다(ADV3-I 주석이 그 사실을
+    //    적어 뒀다). 실제로 지켜야 하는 것은 **접힌 상태**다.
+    _ = ensureFoldRanges(fx.session, term) catch {};
+    if (applyFold(fx.session, 1)) {
+        const folded_before = term.rt.editor_folded_len;
+        try testing.expect(folded_before > 0); // 전제: 실제로 접혔다
+        settings_ops.applyLoadedConfig(fx.session, true); // 값이 같다 → 건너뛰어야 한다
+        try testing.expectEqual(folded_before, term.rt.editor_folded_len);
+    }
+
+    // ⑷ **파일 재로드 경로**(`reloadConfig`)도 닿는가. 이 경로는 config 파일을 **실제로 읽으므로**
+    //    환경을 켜서 탄다 — `MARU_CONFIG`가 기본 경로를 이긴다(`loader.defaultConfigPath`).
+    //
+    //    **프로브 함수로 흉내 내지 않는다.** 처음에 `applyConfigTabWidth`를 부르는 헬퍼를 만들었다가
+    //    지웠다: 그것은 **직접 호출과 같아서** 배선이 지워져도 초록이다. 같은 저장소의
+    //    `MARU_NATIVE_DIFF` 판정자가 정확히 그 이유로 환경을 실제로 켠다 — 그 주석이 *"끈 상태로
+    //    비교하면 양쪽 다 false라 아무것도 증명하지 못한다"*고 적었다.
+    {
+        try fx.dir.dir.writeFile(io, .{ .sub_path = "cfg.toml", .data = "editor.tab-width = 8\n" });
+        const cfg = try std.fs.path.join(allocator, &.{ root, "cfg.toml" });
+        defer allocator.free(cfg);
+        const cfg_z = try allocator.dupeZ(u8, cfg);
+        defer allocator.free(cfg_z);
+
+        const had = std.c.getenv("MARU_CONFIG");
+        defer if (had) |old| {
+            _ = setenv("MARU_CONFIG", old, 1);
+        } else {
+            _ = unsetenv("MARU_CONFIG");
+        };
+        _ = setenv("MARU_CONFIG", cfg_z.ptr, 1);
+
+        // 지금 값은 4다(⑵에서 그렇게 뒀다) — 8로 바뀌어야 재로드가 닿은 것이다.
+        try testing.expectEqual(@as(u8, 4), term.rt.editor_tab_width);
+        settings_ops.reloadConfig(fx.session);
+        try testing.expectEqual(@as(u8, 8), term.rt.editor_tab_width);
+        try testing.expectEqual(@as(u32, 19), term.rt.editor_max_cols); // 파생값도 다시 섰다
+    }
 }
 
 test "ADV3-I 탭 폭 파생값 셋이 같은 값을 따르고, 바뀌면 낡지 않는다 (§4.1a·§4.1f)" {

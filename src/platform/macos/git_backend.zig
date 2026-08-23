@@ -30,7 +30,17 @@ pub const worker_allocator: std.mem.Allocator = std.heap.smp_allocator;
 
 /// git 실행 파일 경로를 찾는다. **없으면 null** — 호출자는 그 사실을 화면에 말하고 실행을 시도하지 않는다.
 /// 후보 순서는 `git_locate`(순수)가 정하고, 여기서는 존재·실행권만 본다.
+/// `git` 실행 파일을 찾는다(POSIX 전용 — 아래 이유).
+///
+/// **Windows 에서는 `null` 이다.** 이 함수는 `PATH` 를 `std.c.environ` 에서 읽고 `access(X_OK)` 로
+/// 걸러내는데, msvcrt 에는 `environ` 심볼이 아예 없어 **링크가 깨진다**(실측: W8.4⒞2 가 처음
+/// 부르자 `lld-link: undefined symbol: environ`). 그리고 그 일이 Windows 에서는 필요하지도 않다 —
+/// `CreateProcessW` 가 `PATH` 를 스스로 찾으므로 호출자는 `"git"` 을 그대로 넘기면 된다
+/// (`win32-git-smoke`·`win32-scm-draw-smoke` 가 이미 그렇게 한다).
+///
+/// **조용히 `null` 을 내는 것이 아니다** — 호출자는 `orelse "git"` 으로 그 뜻을 적어야 한다.
 pub fn locate(buf: []u8) ?[]const u8 {
+    if (comptime builtin.os.tag == .windows) return null;
     var toolchain: ?bool = null;
     var it = git_locate.candidates(pathEnv());
     while (it.next(buf)) |candidate| {
@@ -2019,8 +2029,23 @@ pub fn runWriteSync(
     // **Windows 는 캡처 러너로 간다.** 읽기 갈래(`runArgvWithEnv`)와 같은 이유이고, 여기서 갈리는 것은
     // **어느 스트림을 받느냐**다 — 쓰기는 stderr 를 받는다(git 이 왜 거부했는지 못 보여 주면 쓸 수 없는
     // 기능이다). argv 조립은 위에서 이미 끝났으므로 두 갈래가 **같은 argv** 를 쓴다.
-    if (comptime builtin.os.tag == .windows) return runWriteSyncWindows(allocator, argv_slices);
+    // **`if/else` 여야 한다** — `if (...) return X;` 로 두면 아래 POSIX 본문이 Windows 에서도
+    // 분석돼 `environ` 링크가 깨진다. 그래서 이 갈래는 주석만 있고 **한 번도 링크된 적이 없었다**
+    // (W8.4⒞2 가 처음 부르자 `undefined symbol: environ` 으로 드러났다).
+    if (comptime builtin.os.tag == .windows) {
+        return runWriteSyncWindows(allocator, argv_slices);
+    } else {
+        return runWriteSyncPosix(allocator, kind, argv_slices);
+    }
+}
 
+/// `runWriteSync` 의 POSIX 갈래. **따로 함수로 둔 이유는 위 주석**이다 — 한 함수에 두면 Windows 에서도
+/// 본문이 분석된다.
+fn runWriteSyncPosix(
+    allocator: std.mem.Allocator,
+    kind: git_write_command.Kind,
+    argv_slices: []const []const u8,
+) !WriteOutput {
     var argv_store: std.ArrayList([:0]u8) = .empty;
     defer {
         for (argv_store.items) |a| allocator.free(a);

@@ -2988,6 +2988,59 @@ reason=no_section_header` 로 적는다.
 `false` 를 내고 스모크가 `out_of_scope_intents` 로 **센다** — 조용히 삼키지 않는다.
 
 
+### 2m.30 스테이지·언스테이지가 진짜 git 을 움직인다 (W8.4⒞2, 실측 2026-08-24)
+
+§2m.29 는 화면 상태만 바꿨다(접기·고르기). 여기서 처음으로 **저장소가 바뀐다.**
+
+**사용자의 작업트리를 절대 안 건드린다.** 이것이 `win32-scm-write-smoke` 가 그리기 스모크와 갈린
+유일한 이유다 — 읽기는 cwd 에서 돌아도 되지만 `git add` 는 사용자의 index 를 바꾼다. 쓰기 스모크는
+**자기 임시 저장소를 짓고**(`%LOCALAPPDATA%\maru\scm-write-smoke\`, `user_paths.cacheBaseFor` 가
+정한 자리) 거기서만 쓴다. 실행 뒤 사용자 저장소에 스테이지된 것이 없음을 확인했다.
+
+**두 저장소를 본다 — unborn 이 판정의 절반이다.** 첫 커밋 전에는 `HEAD` 가 없어
+`restore --staged` 가 못 돌고 `rm --cached` 여야 한다. 보통 저장소만 재면 **그 분기가 한 번도 안
+밟힌다.**
+
+```text
+[normal] stage_kind=stage unstage_kind=unstage        staged=0->1->0 changes=3->2->3 staged_ok=true restored_ok=true
+[unborn] stage_kind=stage unstage_kind=unstage_unborn staged=0->1->0 changes=3->2->3 staged_ok=true restored_ok=true
+```
+
+숫자는 **화면이 아니라 git** 이다 — 모델은 매 단계 `git status` 원문에서 다시 선다.
+
+**중립으로 뺀 것.** 규칙 둘이 `unborn` 특례를 품고 있어 두 플랫폼이 각자 적으면 한쪽만 갖게 되고,
+증상은 **첫 커밋 전 저장소에서만** 언스테이지가 안 되는 것이라 눈에 잘 안 띈다.
+`session/git_write_command.zig` 에 `kindForRow`·`kindForSection` 을 두고 **macOS 도 그것을 쓰게
+바꿨다**(`submitRowWrite`·`submitSectionWrite` 의 손 switch 를 지웠다).
+
+**뮤턴트로 확인했다** — 그 특례를 없애면(`unstage` 고정):
+
+```text
+maru win32-scm-write-smoke[unborn]: unstage exit=128 stderr=fatal: could not resolve HEAD
+cases_failed 로 exit=1
+```
+
+> **뮤턴트가 처음엔 안 걸리는 것처럼 보였다.** `unborn` 을 안 쓰게 고치니 `unused function
+> parameter` 로 **컴파일이 깨졌고**, 그 실패를 못 보고 **옛 바이너리를 돌려** "원본과 같다" 는
+> 결과를 읽을 뻔했다. 이 세션에서 네 번째다(§2m.23·§2m.25 가 같은 것을 적어 뒀다). 뮤턴트는
+> **컴파일되는 모양**이어야 한다(`if (unborn) .unstage else .unstage`).
+
+**가는 길에 Windows 에서 링크가 두 번 깨졌다 — 둘 다 "주석은 있는데 한 번도 안 불린 코드" 였다.**
+
+| 자리 | 무엇이었나 | 고침 |
+|---|---|---|
+| `git_backend.runWriteSync` | `if (comptime windows) return …;` 뒤의 POSIX 본문이 **여전히 분석**돼 `environ` 이 undefined 였다. Windows 갈래는 주석까지 있는데 **한 번도 링크된 적이 없었다** | POSIX 본문을 `runWriteSyncPosix` 로 갈라 진짜 `if/else` 로 만든다 |
+| `git_backend.locate` | `PATH` 를 `std.c.environ` 에서 읽고 `access(X_OK)` 로 거른다 — msvcrt 에 `environ` 이 없다 | Windows 에서 `null` 을 낸다(문서화). `CreateProcessW` 가 `PATH` 를 스스로 찾으므로 호출자는 `orelse "git"` |
+
+**§2m.29 가 남긴 위험을 여기서 닫았다.** 쓰기는 목록을 통째로 바꾸므로 포인터가 행 위에 있는 채로
+인덱스가 밀린다 — `State.invalidateTree()` 가 `hovered`·`focused`·`selected` 를 버리고 세대를
+올린다. **접힘은 남긴다** — 사용자가 접어 둔 것이지 목록의 성질이 아니다.
+
+**안 한 것: 낙관적 반영.** macOS 는 `setScmPending` 으로 행을 즉시 옮긴다(git 이 ~100 ms 걸려서
+두 번 누르게 되기 때문). 이 스모크는 `runWriteSync` 로 **동기 실행**하므로 그 자리가 없다. 제품
+루프가 붙을 때 함께 본다 — 지금 넣으면 소비자 없는 기계다.
+
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
@@ -3057,7 +3110,7 @@ reason=no_section_header` 로 적는다.
 | **W8.1** | **파일 트리 백엔드가 Windows 에서 돈다** — 완료. 아래 §2m.3 | W8.0 |
 | **W8.2** | **파일 패널 표면** — ⒜ 데이터 경로(스캔→트리→행)를 Win32 에서 끝까지 흘린다(**완료**, §2m.4) ⒝ chrome 이 그것을 그린다(다음 — 선행인 셰이핑 다리는 §2m.18 로 **완료**) | W8.1 |
 | **W8.3** | **에디터 표면** — ⒜ 본문·gutter(§2m.21) ⒝ 배경·스크롤바(§2m.22) ⒞1 스크롤(§2m.23) ⒞2 클릭 → 문서 offset(§2m.24) ⒞3 드래그 선택·caret(§2m.25) — **여기까지 완료**. 남은 것은 키보드 커서 이동·단어 선택·복사(전부 `Selection` 을 바꾸는 배선) | W8.2 |
-| **W8.4** | **소스 컨트롤** — ⒜ Windows 프로세스 러너(§2m.8·§2m.9, 완료) ⒝ 표면이 measured 텍스트로 화면에 뜬다(§2m.27·§2m.28, 완료) ⒞1 입력 — 접기·고르기(§2m.29, 완료) ⒞2 스테이지·언스테이지 — 남음(git 을 실제로 쓰므로 임시 저장소가 선행) | W8.1 |
+| **W8.4** | **소스 컨트롤** — ⒜ Windows 프로세스 러너(§2m.8·§2m.9, 완료) ⒝ 표면이 measured 텍스트로 화면에 뜬다(§2m.27·§2m.28, 완료) ⒞1 입력 — 접기·고르기(§2m.29, 완료) ⒞2 스테이지·언스테이지(§2m.30, 완료 — 임시 저장소 둘에서만 쓴다) — **W8.4 완료** | W8.1 |
 | **W8.5b** | **에이전트 도크** — `agent_*` 백엔드 셋 | W8.2 |
 | **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
 

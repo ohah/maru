@@ -2276,6 +2276,55 @@ pub fn finishFrozenDestroy(frozen: FrozenDestroy) void {
     frozen.handle.digest = handleDigest(frozen.handle);
 }
 
+/// The destroy callback has already freed the backing scratch. The final stack owner may now
+/// return only the authenticated scalar tombstone to the canonical empty state.
+pub fn resetDestroyedForOuterTurn(handle: *ExternalRxIntentHandle) bool {
+    if (handle.saved_self_addr != @intFromPtr(handle) or
+        handle.scratch_addr != 0 or handle.allocation_addr != 0 or
+        handle.allocation_len != 0 or handle.allocator_ptr_addr != 0 or
+        handle.allocator_vtable_addr != 0 or handle.cleanup_allocator != null or
+        handle.storage_addr != 0 or handle.reservation_generation != 0 or
+        handle.lifecycle != .destroyed or
+        !std.mem.eql(u8, &handle.digest, &handleDigest(handle)))
+        return false;
+    handle.* = .{};
+    return true;
+}
+
+test "f3d destroyed intent tombstone resets only from exact authenticated state" {
+    var handle: ExternalRxIntentHandle = .{
+        .saved_self_addr = undefined,
+        .lifecycle = .destroyed,
+        .digest = undefined,
+    };
+    handle.saved_self_addr = @intFromPtr(&handle);
+    handle.digest = handleDigest(&handle);
+
+    try std.testing.expect(resetDestroyedForOuterTurn(&handle));
+    try std.testing.expect(handlePristine(&handle));
+}
+
+test "f3d destroyed intent tombstone rejects forged fields and digest" {
+    var handle: ExternalRxIntentHandle = .{
+        .saved_self_addr = undefined,
+        .lifecycle = .destroyed,
+        .digest = undefined,
+    };
+    handle.saved_self_addr = @intFromPtr(&handle);
+    handle.digest = handleDigest(&handle);
+
+    handle.storage_addr = 1;
+    handle.digest = handleDigest(&handle);
+    try std.testing.expect(!resetDestroyedForOuterTurn(&handle));
+    handle.storage_addr = 0;
+    handle.digest = handleDigest(&handle);
+    handle.digest[0] ^= 0xff;
+    try std.testing.expect(!resetDestroyedForOuterTurn(&handle));
+    handle.digest = handleDigest(&handle);
+    handle.saved_self_addr +%= 1;
+    try std.testing.expect(!resetDestroyedForOuterTurn(&handle));
+}
+
 fn handlePristine(handle: *const ExternalRxIntentHandle) bool {
     return handle.saved_self_addr == 0 and handle.scratch_addr == 0 and
         handle.allocation_addr == 0 and handle.allocation_len == 0 and

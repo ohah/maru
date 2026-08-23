@@ -59,6 +59,14 @@ pub const Scratch = struct {
             client_external_mode.rxParseScratchPristine(&out.parse) and
             external_rx_intent.closedForOuterTurn(&out.intent);
     }
+
+    pub fn retireDestroyedIntent(out: *Scratch) bool {
+        if (!scratchControlValid(out, .closed) or
+            !external_rx_intent.resetDestroyedForOuterTurn(&out.intent))
+            return false;
+        out.digest = scratchDigest(out);
+        return closedForOuterTurn(out);
+    }
 };
 
 pub const Input = struct {

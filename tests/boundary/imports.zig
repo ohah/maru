@@ -7253,7 +7253,7 @@ test "recovery integration contract keeps future ledger generation out of contro
     try std.testing.expect(std.mem.count(u8, pump, ".snapshot_in_flight =>") >= 4);
 }
 
-test "f3c1 semantic producer remains private with zero product callsites" {
+test "f3c1 semantic producer remains private with one f3d product callsite" {
     const allocator = std.testing.allocator;
     const pump = try readZigFileZ(
         allocator,
@@ -7265,15 +7265,14 @@ test "f3c1 semantic producer remains private with zero product callsites" {
         "const ControlSemanticPreparationResult = enum {",
         "const F3c1FailAllocator = struct {",
     ) orelse return error.TestUnexpectedResult;
-    // The only product-region occurrence is the private method declaration. The base slice
-    // intentionally has no pump/adapter consumer until terminal binding is sealed.
+    // F3d adds exactly one product orchestration call beside the private declaration.
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         countOccurrences(product, "prepareCompletedControlSemanticUnderHeldLease("),
     );
 }
 
-test "f3c1 terminal binding and consumer remain private with zero product callsites" {
+test "f3c1 terminal binding and consumer remain private with one f3d product callsite" {
     const allocator = std.testing.allocator;
     const pump = try readZigFileZ(
         allocator,
@@ -7285,13 +7284,13 @@ test "f3c1 terminal binding and consumer remain private with zero product callsi
         "const ControlSemanticPreparationResult = enum {",
         "const F3c1FailAllocator = struct {",
     ) orelse return error.TestUnexpectedResult;
-    // Each private entry occurs once as its declaration; product pump orchestration is F3d.
+    // Each private entry occurs once as its declaration and once in F3d orchestration.
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         countOccurrences(product, "prepareControlSemanticTerminalBindingUnderHeldLease("),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         countOccurrences(product, "consumeControlSemanticTerminalUnderHeldLease("),
     );
     try std.testing.expectEqual(

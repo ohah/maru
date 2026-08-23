@@ -3608,7 +3608,12 @@ test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
     const releasing_entry = try registry.exactEntry(bound.reservation, bound.identity);
     try std.testing.expectEqual(@as(usize, 0), releasing_entry.event_authority.completion_addr);
     try std.testing.expectEqual(@as(u64, 0), releasing_entry.event_authority.registered_operation_id);
-    if (builtin.os.tag == .macos) {
+    // The product aggregate is already multi-threaded; fork-and-panic may inherit a locked
+    // test-runner/libc stderr mutex and reach the alarm instead of the intended fail-stop.
+    // Keep this subprocess oracle in the standalone component process.
+    if (builtin.os.tag == .macos and
+        std.c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") == null)
+    {
         const child = std.c.fork();
         try std.testing.expect(child >= 0);
         if (child == 0) {
@@ -3647,7 +3652,9 @@ test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
     const terminal_entry = try registry.exactEntry(bound.reservation, bound.identity);
     try std.testing.expectEqual(@as(usize, 0), terminal_entry.event_authority.completion_addr);
     try std.testing.expectEqual(@as(u64, 0), terminal_entry.event_authority.registered_operation_id);
-    if (builtin.os.tag == .macos) {
+    if (builtin.os.tag == .macos and
+        std.c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") == null)
+    {
         const child = std.c.fork();
         try std.testing.expect(child >= 0);
         if (child == 0) {

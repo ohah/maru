@@ -9346,6 +9346,42 @@ pub fn build(b: *std.Build) void {
         session_host_f3c2_step.dependOn(&run_external_pump_f3c2_tests.step);
         session_host_f3c2_step.dependOn(&run_session_host_f3c2_sentinel.step);
 
+        const external_pump_f3d_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3d"},
+        });
+        const run_external_pump_f3d_tests = b.addRunArtifact(
+            external_pump_f3d_tests,
+        );
+        run_external_pump_f3d_tests.addArg("--maru-expect-tests=6");
+        run_external_pump_f3d_tests.setCwd(b.path("."));
+        const session_host_f3d_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-f3d-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_f3d_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_session_host_f3d_sentinel = b.addRunArtifact(
+            session_host_f3d_sentinel,
+        );
+        run_session_host_f3d_sentinel.setCwd(b.path("."));
+        const session_host_f3d_step = b.step(
+            "test-session-host-f3d",
+            "Run the F3d same-turn control semantic orchestration gate",
+        );
+        session_host_f3d_step.dependOn(&run_external_pump_f3d_tests.step);
+        session_host_f3d_step.dependOn(&run_session_host_f3d_sentinel.step);
+
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

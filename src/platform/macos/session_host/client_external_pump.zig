@@ -9477,7 +9477,7 @@ pub const ExternalPumpStorage = struct {
         expected_parser_seal: client_external_mode.ParserAuthoritySeal,
         expected_tx_generation: u64,
     ) bool {
-        if (!self.validateWholeTurnLease(lease) or
+        if (!self.wholeTurnLeaseIdentityValid(lease) or
             scratch.saved_self_addr != @intFromPtr(scratch) or
             scratch.lifecycle != .busy or
             summary.policy.terminal != null or
@@ -9787,7 +9787,7 @@ pub const ExternalPumpStorage = struct {
     ) bool {
         const permit = &scratch.whole_drain_permit;
         const verdict = &scratch.control_semantic_verdict;
-        if (!self.validateWholeTurnLease(lease) or
+        if (!self.wholeTurnLeaseIdentityValid(lease) or
             scratch.saved_self_addr != @intFromPtr(scratch) or
             scratch.lifecycle != .busy or
             permit.saved_self_addr != @intFromPtr(permit) or
@@ -19402,6 +19402,152 @@ pub const ExternalPumpStorage = struct {
         ) and frozenControlResponsePristine(&scratch.control_terminal_frozen_response);
     }
 
+    fn resetConsumedControlSemanticDestinations(
+        scratch: *ExternalRxTurnScratch,
+    ) void {
+        scratch.whole_drain_permit = .{};
+        scratch.control_semantic_verdict = .{};
+        scratch.control_semantic_take = .{};
+        scratch.resize_semantic_commit = .{};
+        scratch.resize_semantic_response_take = .{};
+        scratch.resize_semantic_frozen_response = .{};
+        scratch.resync_ack_transition = .{};
+        scratch.resync_ack_response_take = .{};
+        scratch.resync_ack_frozen_response = .{};
+        scratch.resync_semantic_commit = .{};
+        scratch.projected_recovery_snapshot_commit = .{};
+        scratch.control_semantic_terminal = .{};
+        scratch.control_semantic_terminal_binding = .{};
+        scratch.control_terminal_response_take = .{};
+        scratch.control_terminal_frozen_response = .{};
+    }
+
+    fn controlSemanticAuthorityClear(self: *const ExternalPumpStorage) bool {
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        const completed_clear = switch (self.completed_control) {
+            .none => true,
+            .completed, .terminal => false,
+        };
+        return completed_clear and
+            self.control_correlation.state == .idle and
+            authority.role == .controller and authority.flow == .clear and
+            self.semantic_state == .active and self.semantic_state.active == .valid;
+    }
+
+    fn retireCommittedControlDrainEvidence(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        if (!self.wholeTurnLeaseIdentityValid(lease) or
+            evidence.lifecycle != .finished or
+            evidence.mode != .completed_control or
+            !rxDrainEvidenceSealed(evidence) or
+            evidence.storage_addr != @intFromPtr(self) or
+            evidence.owner_incarnation != self.owner_incarnation or
+            !std.mem.eql(
+                u8,
+                &evidence.owner_incarnation_digest,
+                &self.owner_incarnation_seal.digest,
+            ) or
+            evidence.lease_addr != @intFromPtr(lease) or
+            evidence.lease_generation != lease.operation_generation or
+            evidence.operation_generation != self.operation_generation or
+            evidence.read_scratch_addr != @intFromPtr(&scratch.read) or
+            scratch.read.generation != evidence.expected_post_settle_generation)
+        {
+            return false;
+        }
+        evidence.* = .{};
+        return true;
+    }
+
+    fn retireConsumedControlTraversal(scratch: *ExternalRxTurnScratch) bool {
+        if (client_external_rx_turn.Scratch.closedForOuterTurn(&scratch.traversal))
+            return true;
+        return client_external_rx_turn.Scratch.retireDestroyedIntent(
+            &scratch.traversal,
+        );
+    }
+
+    fn orchestrateCompletedControlUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        summary: RxPreparedSummary,
+        result: *client_pump.TurnResult,
+    ) bool {
+        const prepared = self.prepareCompletedControlSemanticUnderHeldLease(
+            lease,
+            scratch,
+            summary,
+        );
+        switch (prepared) {
+            .not_ready => return false,
+            .terminal_prepared => {
+                if (!self.prepareControlSemanticTerminalBindingUnderHeldLease(
+                    lease,
+                    scratch,
+                )) return false;
+                const terminal_consume = self.consumeControlSemanticTerminalUnderHeldLease(
+                    lease,
+                    scratch,
+                );
+                if (terminal_consume != .consumed_cleaned) return false;
+                const terminal = switch (self.semantic_state) {
+                    .terminal => |value| value,
+                    else => return false,
+                };
+                if (!self.retireCommittedControlDrainEvidence(lease, scratch))
+                    return false;
+                if (!retireConsumedControlTraversal(scratch)) return false;
+                resetConsumedControlSemanticDestinations(scratch);
+                scratch.lifecycle = .terminal;
+                result.* = self.terminalInjectedRxTurn(
+                    terminal.reason,
+                    result.rx_read_bytes,
+                    result.rx_bytes,
+                    result.rx_frames,
+                );
+                return true;
+            },
+            .prepared_pair => switch (scratch.control_semantic_verdict.control_kind) {
+                .resize => {
+                    if (!self.prepareResizeSemanticCommitUnderHeldLease(lease, scratch))
+                        return false;
+                    const resize_consume = self.consumeResizeSemanticCommitUnderHeldLease(
+                        lease,
+                        scratch,
+                    );
+                    if (resize_consume != .consumed_resize_cleaned) return false;
+                },
+                .resync => {
+                    const aggregate = self.validateReadyRxAggregate(lease);
+                    if (!self.prepareResyncSemanticCommitUnderHeldLease(
+                        lease,
+                        scratch,
+                        aggregate,
+                    )) return false;
+                    if (self.consumeResyncSemanticCommitUnderHeldLease(
+                        lease,
+                        scratch,
+                        aggregate,
+                    ) != .consumed_resync_cleaned) return false;
+                },
+            },
+        }
+        if (!self.retireCommittedControlDrainEvidence(lease, scratch))
+            return false;
+        if (!retireConsumedControlTraversal(scratch)) return false;
+        resetConsumedControlSemanticDestinations(scratch);
+        result.authority_clear = self.controlSemanticAuthorityClear();
+        return controlSemanticDestinationsPristine(scratch);
+    }
+
     /// Rebuilds the permit projection from live owners while the whole-turn lease excludes every
     /// sibling mutation. The caller deliberately invokes this again at each lifecycle edge:
     /// reusing the original seed would turn an immutable record into a stale capability.
@@ -20067,14 +20213,42 @@ pub const ExternalPumpStorage = struct {
             scratch,
             preparation,
         );
+        var completed_control_orchestrated = false;
+        // MARU_F3D_PRODUCT_ORCHESTRATION_BEGIN
+        if (result.terminal == null and scratch.lifecycle != .terminal) {
+            switch (preparation) {
+                .drained => |summary| {
+                    if (scratch.drain_evidence.mode == .completed_control) {
+                        if (!self.orchestrateCompletedControlUnderHeldLease(
+                            &lease,
+                            scratch,
+                            summary,
+                            &result,
+                        )) {
+                            scratch.lifecycle = .terminal;
+                            result = self.terminalInjectedRxTurn(
+                                .invariant_failure,
+                                result.rx_read_bytes,
+                                result.rx_bytes,
+                                result.rx_frames,
+                            );
+                        } else {
+                            completed_control_orchestrated = true;
+                        }
+                    }
+                },
+                .terminal, .without_drain => {},
+            }
+        }
+        // MARU_F3D_PRODUCT_ORCHESTRATION_END
         var tx_authority_prepared = false;
         if (result.terminal == null and scratch.lifecycle != .terminal) {
             switch (preparation) {
-                .drained => |summary| if (scratch.drain_evidence.mode == .completed_control) {
+                .drained => |summary| if (completed_control_orchestrated) {
                     // The completed-aware drain belongs exclusively to F3 semantic preparation.
                     // Until that consumer runs, it remains backpressure and must never mint D2 TX
                     // authority from a projection that intentionally forgave the response owner.
-                    result.authority_clear = false;
+                    result.authority_clear = self.controlSemanticAuthorityClear();
                 } else switch (self.prepareAuthorityUnderHeldLease(
                     &lease,
                     scratch,
@@ -27313,7 +27487,7 @@ fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
     );
 }
 
-test "f3c0 f3c1 typed control response publishes completed-aware drain evidence" {
+test "f3c0 f3c1 typed control response is consumed by same-turn product orchestration" {
     const Probe = struct {
         fn read(
             raw: *anyopaque,
@@ -27454,7 +27628,7 @@ test "f3c0 f3c1 typed control response publishes completed-aware drain evidence"
     const response_wire = try framing.encodeFrame(
         std.testing.allocator,
         .{ .kind = .response, .request_id = request_id },
-        "socket-response",
+        "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
     );
     defer std.testing.allocator.free(response_wire);
     try std.testing.expectEqual(
@@ -27473,63 +27647,26 @@ test "f3c0 f3c1 typed control response publishes completed-aware drain evidence"
         scratch,
     );
     try std.testing.expect(response_turn.terminal == null);
-    try std.testing.expect(!response_turn.authority_clear);
-    try std.testing.expectEqual(RxDrainEvidenceLifecycle.finished, scratch.drain_evidence.lifecycle);
-    try std.testing.expectEqual(RxDrainEvidenceMode.completed_control, scratch.drain_evidence.mode);
-    try std.testing.expect(!scratch.drain_evidence.work_budget_exhausted);
-    try std.testing.expect(!std.mem.allEqual(
-        u8,
-        &scratch.drain_evidence.completed_exception_digest,
-        0,
-    ));
-    const general_projection = storage.currentDrainBlockerProjection();
-    try std.testing.expect(general_projection != null);
-    try std.testing.expect(!general_projection.?.all_clear);
-    const completed_projection_optional = storage.currentDrainBlockerProjectionForMode(.completed_control);
-    try std.testing.expect(completed_projection_optional != null);
-    const completed_projection = completed_projection_optional.?;
-    try std.testing.expect(completed_projection.all_clear);
-    try std.testing.expect(std.mem.eql(
-        u8,
-        &completed_projection.completed_exception_digest,
-        &scratch.drain_evidence.completed_exception_digest,
-    ));
+    try std.testing.expect(response_turn.authority_clear);
+    try std.testing.expectEqual(RxDrainEvidenceLifecycle.empty, scratch.drain_evidence.lifecycle);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expect(storage.owner_resize == .current);
+    try std.testing.expectEqual(@as(u16, 80), storage.owner_resize.current.event.cols);
+    try std.testing.expectEqual(@as(u16, 24), storage.owner_resize.current.event.rows);
+    try std.testing.expectEqual(@as(u64, 2), storage.owner_resize.current.event.resize_generation);
+    try std.testing.expectEqual(ExternalRxTurnScratchLifecycle.ready, scratch.lifecycle);
+    try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
     const inherited_turn = storage.pumpRxTurn(
         .{ .readable = true, .writable = true, .now_ns = 104 },
         &ops,
         scratch,
     );
     try std.testing.expect(inherited_turn.terminal == null);
-    try std.testing.expect(!inherited_turn.authority_clear);
-    try std.testing.expectEqual(RxDrainEvidenceLifecycle.finished, scratch.drain_evidence.lifecycle);
-    try std.testing.expectEqual(RxDrainEvidenceMode.completed_control, scratch.drain_evidence.mode);
     try std.testing.expectEqual(@as(usize, 0), inherited_turn.tx_frames);
-    const sealed_evidence = scratch.drain_evidence;
-    scratch.drain_evidence.completed_exception_digest[0] ^= 1;
-    scratch.drain_evidence.digest = ExternalPumpStorage.drainEvidenceDigest(&scratch.drain_evidence);
-    try std.testing.expect(ExternalPumpStorage.rxDrainEvidenceSealed(&scratch.drain_evidence));
-    try std.testing.expect(!storage.finishedRxDrainEvidenceResettable(scratch));
-    scratch.drain_evidence = sealed_evidence;
-    try std.testing.expect(storage.finishedRxDrainEvidenceResettable(scratch));
-    try std.testing.expectEqualStrings(
-        "socket-response",
-        storage.completed_control.completed.payload.bytes(),
-    );
-    try std.testing.expectEqual(
-        @as(u64, 0),
-        storage.completed_control.completed.source_start_absolute,
-    );
-    try std.testing.expectEqual(
-        @as(u64, @intCast(response_wire.len)),
-        storage.completed_control.completed.source_end_absolute,
-    );
-    const sealed_completed = storage.completed_control;
-    storage.completed_control.completed.source_end_absolute -= 1;
-    try std.testing.expect(!storage.completedControlValid());
-    const drifted_projection = storage.currentDrainBlockerProjectionForMode(.completed_control);
-    try std.testing.expect(drifted_projection == null or !drifted_projection.?.all_clear);
-    storage.completed_control = sealed_completed;
-    try std.testing.expect(storage.completedControlValid());
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expect(storage.owner_resize == .current);
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
@@ -27741,6 +27878,160 @@ fn prepareF3c1ActualResponseWithInitialResize(
         try std.testing.expect(std.meta.eql(terminal_before, scratch.control_semantic_terminal));
     }
     return result;
+}
+
+fn pumpF3dActualResponse(
+    storage: *ExternalPumpStorage,
+    fixture: *TestClient,
+    scratch: *ExternalRxTurnScratch,
+    request: control_response_wire.ControlRequest,
+    payload: []const u8,
+) !client_pump.TurnResult {
+    try initActiveF2Storage(storage, fixture);
+    var canonical_request = request;
+    if (request == .resync) {
+        canonical_request.resync.recovery_authority.owner_incarnation =
+            storage.owner_incarnation;
+        storage.semantic_state = .{ .active = .{ .client_recovery = .{
+            .control_wait = .{
+                .epoch = request.resync.recovery_authority.recovery_epoch,
+                .deadline_ns = 1_000,
+            },
+        } } };
+    }
+    const admitted = storage.admitControl(.{
+        .request = canonical_request,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 100);
+    const request_id = switch (admitted) {
+        .admitted => |value| value.request_id,
+        else => return error.TestUnexpectedResult,
+    };
+    scratch.* = .{};
+    if (!ExternalRxTurnScratch.initInPlace(scratch))
+        return error.TestUnexpectedResult;
+    var probe = F2ProductProbe{ .use_posix = true };
+    const ops = probe.rxOps();
+    const sent = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 101 },
+        &ops,
+        scratch,
+    );
+    if (sent.terminal != null or sent.tx_bytes == 0)
+        return error.TestUnexpectedResult;
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    if (c.recv(fixture.peer_fd, &request_wire, request_wire.len, 0) <= 0)
+        return error.TestUnexpectedResult;
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        payload,
+    );
+    defer std.testing.allocator.free(response_wire);
+    if (c.send(fixture.peer_fd, response_wire.ptr, response_wire.len, 0) !=
+        @as(isize, @intCast(response_wire.len)))
+        return error.TestUnexpectedResult;
+    return storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 102 },
+        &ops,
+        scratch,
+    );
+}
+
+test "f3d product pump consumes resize response in the source turn" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+
+    const result = try pumpF3dActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 100,
+            .rows = 30,
+            .client_sequence = 1,
+        } },
+        "{\"result\":{\"cols\":100,\"rows\":30,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+    );
+    try std.testing.expectEqual(@as(?client_pump.ExternalPumpTerminal, null), result.terminal);
+    try std.testing.expect(result.authority_clear);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expect(storage.owner_resize == .current);
+    try std.testing.expectEqual(@as(u16, 100), storage.owner_resize.current.event.cols);
+    try std.testing.expectEqual(ExternalRxTurnScratchLifecycle.ready, scratch.lifecycle);
+    try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
+}
+
+test "f3d product pump consumes malformed response into terminal cleanup" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+
+    const result = try pumpF3dActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 100,
+            .rows = 30,
+            .client_sequence = 1,
+        } },
+        "{}",
+    );
+    try std.testing.expectEqual(client_pump.TerminalReason.protocol_error, result.terminal.?.reason);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .terminal);
+    try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
+}
+
+test "f3d product pump consumes resync ACK into awaiting snapshot" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+
+    const result = try pumpF3dActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        .{ .resync = .{
+            .stream_id = valid_evidence.stream_id,
+            .recovery_authority = .{
+                .owner_incarnation = fixture.client.attach_instance_id,
+                .origin = .client,
+                .recovery_epoch = 29,
+            },
+        } },
+        "{\"result\":{\"resync\":true}}",
+    );
+    try std.testing.expectEqual(@as(?client_pump.ExternalPumpTerminal, null), result.terminal);
+    try std.testing.expect(!result.authority_clear);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    const active = storage.semantic_state.active;
+    try std.testing.expect(active == .client_recovery);
+    try std.testing.expect(active.client_recovery == .awaiting_snapshot);
+    try std.testing.expectEqual(@as(u64, 29), active.client_recovery.awaiting_snapshot.context.epoch);
+    try std.testing.expectEqual(ExternalRxTurnScratchLifecycle.ready, scratch.lifecycle);
+    try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
 }
 
 test "f3c2 resize plan publishes first baseline and newer full state" {
@@ -30400,88 +30691,6 @@ test "f3b public pumpRxTurn suppresses writable input control and combined queue
     }
 }
 
-test "f3b public prior completed owner then revoke cleans payload without semantic apply or tx" {
-    var fixture = try TestClient.init();
-    defer fixture.deinitPeer();
-    var storage: ExternalPumpStorage = .{};
-    try initActiveF2Storage(&storage, &fixture);
-    defer if (storage.lifecycle != .dead) {
-        _ = teardownForTest(&storage);
-    };
-    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
-    defer std.testing.allocator.destroy(scratch);
-    scratch.* = .{};
-    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
-    try admitF3bProductQueue(&storage, .control);
-    const request_id = storage.control_correlation.state.in_flight.request_id;
-    var probe = F2ProductProbe{};
-    var ops = probe.rxOps();
-    const write_turn = storage.pumpRxTurn(
-        .{ .readable = true, .writable = true, .now_ns = 12 },
-        &ops,
-        scratch,
-    );
-    try std.testing.expect(write_turn.terminal == null);
-    try std.testing.expectEqual(@as(usize, 1), write_turn.tx_frames);
-    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
-    try std.testing.expect(c.recv(
-        fixture.peer_fd,
-        &request_wire,
-        request_wire.len,
-        0,
-    ) > 0);
-    const response_wire = try framing.encodeFrame(
-        std.testing.allocator,
-        .{ .kind = .response, .request_id = request_id },
-        "must-not-apply",
-    );
-    defer std.testing.allocator.free(response_wire);
-    const revoke_wire = try framing.encodeFrame(
-        std.testing.allocator,
-        .{ .kind = .event, .stream_id = valid_evidence.stream_id },
-        f3b_revoke_payload,
-    );
-    defer std.testing.allocator.free(revoke_wire);
-    try std.testing.expect(c.send(
-        fixture.peer_fd,
-        response_wire.ptr,
-        response_wire.len,
-        0,
-    ) > 0);
-    probe.use_posix = true;
-    ops = probe.rxOps();
-    const response_turn = storage.pumpRxTurn(
-        .{ .readable = true, .writable = true, .now_ns = 13 },
-        &ops,
-        scratch,
-    );
-    try std.testing.expect(response_turn.terminal == null);
-    try std.testing.expect(storage.completed_control == .completed);
-    try std.testing.expect(c.send(
-        fixture.peer_fd,
-        revoke_wire.ptr,
-        revoke_wire.len,
-        0,
-    ) > 0);
-    const terminal = storage.pumpRxTurn(
-        .{ .readable = true, .writable = true, .now_ns = 14 },
-        &ops,
-        scratch,
-    );
-    try std.testing.expectEqual(
-        client_pump.TerminalReason.revoked,
-        terminal.terminal.?.reason,
-    );
-    try std.testing.expectEqual(@as(usize, 0), terminal.tx_frames);
-    try std.testing.expect(storage.completed_control == .none);
-    try std.testing.expect(storage.control_correlation.state == .terminal);
-    try std.testing.expectEqual(
-        AttachmentRole.observer,
-        storage.owner_authority.current.role,
-    );
-    try expectF2FinalZero(&storage);
-}
-
 test "f3b prepared revoke failures abort rx and tx graphs without erasing evidence" {
     inline for (.{
         RevokePrepareFailpoint.after_aggregate,
@@ -30808,7 +31017,7 @@ test "f3b corrupt persisted cleanup tags fail closed before pointer recovery" {
     }
 }
 
-test "f3b response payload cleanup callback owner drift restores revoke state and quarantines" {
+test "f3d response payload cleanup callback owner drift terminalizes and quarantines" {
     resetCrossOwnerQuarantineForTest();
     defer resetCrossOwnerQuarantineForTest();
     var allocator_probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
@@ -30816,12 +31025,12 @@ test "f3b response payload cleanup callback owner drift restores revoke state an
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
     try initActiveF2Storage(&storage, &fixture);
-    defer if (storage.lifecycle != .dead) {
-        _ = teardownForTest(&storage);
-    };
     allocator_probe.storage = &storage;
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
-    defer std.testing.allocator.destroy(scratch);
+    defer {
+        if (storage.lifecycle != .dead) _ = teardownForTest(&storage);
+        std.testing.allocator.destroy(scratch);
+    }
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
     allocator_probe.rx_scratch = scratch;
@@ -30855,29 +31064,10 @@ test "f3b response payload cleanup callback owner drift restores revoke state an
     ) > 0);
     transport_probe.use_posix = true;
     ops = transport_probe.rxOps();
-    const response_turn = storage.pumpRxTurn(
-        .{ .readable = true, .writable = false, .now_ns = 13 },
-        &ops,
-        scratch,
-    );
-    try std.testing.expect(response_turn.terminal == null);
-    try std.testing.expect(storage.completed_control == .completed);
-    const revoke_wire = try framing.encodeFrame(
-        std.testing.allocator,
-        .{ .kind = .event, .stream_id = valid_evidence.stream_id },
-        f3b_revoke_payload,
-    );
-    defer std.testing.allocator.free(revoke_wire);
-    try std.testing.expect(c.send(
-        fixture.peer_fd,
-        revoke_wire.ptr,
-        revoke_wire.len,
-        0,
-    ) > 0);
     allocator_probe.mode = .revoke_response_cleanup_owner_drift;
     allocator_probe.fired = false;
     const terminal = storage.pumpRxTurn(
-        .{ .readable = true, .writable = true, .now_ns = 14 },
+        .{ .readable = true, .writable = false, .now_ns = 13 },
         &ops,
         scratch,
     );
@@ -30888,10 +31078,6 @@ test "f3b response payload cleanup callback owner drift restores revoke state an
     );
     try std.testing.expect(storage.completed_control == .none);
     try std.testing.expect(storage.control_correlation.state == .terminal);
-    try std.testing.expectEqual(
-        AttachmentRole.observer,
-        storage.owner_authority.current.role,
-    );
     try std.testing.expect(crossOwnerQuarantineStatus().latched);
     try expectF2FinalZero(&storage);
 }
@@ -31446,14 +31632,11 @@ test "f2 completion sink ignores unrelated request completions in either order" 
     }
 }
 
-test "f2 max request id survives product wire response and private reject cleanup" {
+test "f2 max request id survives same-turn product response cleanup" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
     try initActiveF2Storage(&storage, &fixture);
-    defer if (storage.lifecycle != .dead) {
-        _ = teardownForTest(&storage);
-    };
     storage.owner_request_ids = .last_available;
 
     const admitted = storage.admitControl(.{
@@ -31480,7 +31663,10 @@ test "f2 max request id survives product wire response and private reject cleanu
     try std.testing.expect(ownerAuthorityValid(&storage));
 
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
-    defer std.testing.allocator.destroy(scratch);
+    defer {
+        if (storage.lifecycle != .dead) _ = teardownForTest(&storage);
+        std.testing.allocator.destroy(scratch);
+    }
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
     var probe = F2ProductProbe{};
@@ -31510,7 +31696,7 @@ test "f2 max request id survives product wire response and private reject cleanu
     const response = try framing.encodeFrame(
         std.testing.allocator,
         .{ .kind = .response, .request_id = request_id },
-        "max-response",
+        "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
     );
     defer std.testing.allocator.free(response);
     try std.testing.expectEqual(
@@ -31524,33 +31710,19 @@ test "f2 max request id survives product wire response and private reject cleanu
         scratch,
     );
     try std.testing.expect(rx.terminal == null);
-    try std.testing.expectEqual(
-        request_id,
-        storage.completed_control.completed.request_id,
-    );
-    try std.testing.expectEqualStrings(
-        "max-response",
-        storage.completed_control.completed.payload.bytes(),
-    );
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expect(storage.owner_resize == .current);
     try std.testing.expect(storage.owner_request_ids.? == .max_consumed);
-
-    var take: PreparedControlResponseTake = .{};
-    try std.testing.expect(storage.prepareControlResponseTake(&take));
-    var lease: ExternalWholeTurnLease = .{};
-    try storage.acquireWholeTurnLease(
-        &lease,
-        @intFromPtr(scratch),
-        @sizeOf(ExternalRxTurnScratch),
-    );
-    try std.testing.expectEqual(
-        FinishControlResponseResult.rejected_terminal,
-        storage.takeControlResponseUnderHeldLease(&lease, &take),
-    );
-    try std.testing.expectEqual(
-        WholeTurnReleaseResult.released,
-        storage.releaseWholeTurnLease(&lease),
-    );
-    try std.testing.expect(storage.owner_request_ids.? == .max_consumed);
+    try std.testing.expect(storage.admitControl(.{
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 81,
+            .rows = 24,
+            .client_sequence = 2,
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 103) == .terminal);
     try expectF2FinalZero(&storage);
 }
 

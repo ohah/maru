@@ -193,8 +193,7 @@ pub fn main() !void {
                 return error.F3c2TransitiveSuffixFallibleOperation;
     }
 
-    // F3c2 is deliberately a private component slice. Before the first behavior test, the two
-    // semantic entrypoints may occur only at their definitions; F3d owns every product callsite.
+    // F3c2 keeps one definition and F3d owns the sole product orchestration callsite.
     const first_test = std.mem.indexOf(u8, source, "test \"") orelse
         return error.F3c2BehaviorGateEmpty;
     const product_source = source[0..first_test];
@@ -211,6 +210,6 @@ pub fn main() !void {
             count += 1;
             cursor = found + entrypoint.len;
         }
-        if (count != 1) return error.F3c2ProductBoundaryDrift;
+        if (count != 2) return error.F3c2ProductBoundaryDrift;
     }
 }

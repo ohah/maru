@@ -1835,7 +1835,30 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
                 }
                 routeClear(); // 마지막 손가락이었다 — 목적지를 놓는다(계약 §3.1)
             }
-            _ = body_press.end(); // 본문에는 탭이 없다 — 결과를 안 쓴다
+            // **본문을 짧게 두드리는 것은 "치겠다" 는 뜻이다** — 키보드를 올린다. 예전에는 상단
+            // `자판` 버튼만 그 일을 했는데, TUI 의 입력칸을 눈앞에 두고 화면 꼭대기까지 손을
+            // 올려야 했다.
+            //
+            // **어디가 입력칸인지는 우리가 모른다.** 터미널은 셀 격자만 보고 그 안에 그려진 것의
+            // 뜻은 앱만 안다. 대신 **커서를 본다** — Claude Code·Codex 같은 TUI 는 입력칸에 커서를
+            // 둔다(기기 실측: 입력 박스를 탭한 셀과 커서가 같은 행이었다). 그래서 커서 행을
+            // 두드리면 입력칸을 누른 것으로 본다.
+            //
+            // **커서가 안 보이면 그 판정을 못 한다.** TUI 는 화면을 다시 그리는 동안 DECTCEM
+            // (`?25l`)으로 커서를 끄고, 스크롤백을 보는 중에는 커서가 화면 밖이다. 그때는 근거가
+            // 없으므로 **아무 데나 두드려도 올린다** — 판정할 수 없을 때 아무것도 안 하면
+            // 사용자는 키보드를 못 부른다.
+            if (body_press.end() == .tap) {
+                if (term_core) |*tc| {
+                    const scrolled = tc.viewOffset() != 0;
+                    const hit = maru_mobile_hit_cell(x, y);
+                    if (!tc.cursor_visible or scrolled or hit == 0xFFFFFFFF) {
+                        kb_raise_req = true; // 판정 못 한다 — 두드렸으면 올린다
+                    } else if (@as(u16, @intCast(hit & 0xFFFF)) == tc.screen.cursor.row) {
+                        kb_raise_req = true; // 커서 행 = 입력칸
+                    }
+                }
+            }
             // 선택은 손을 떼도 **남는다** — 떼자마자 사라지면 복사할 수가 없다. 지우는 자리는
             // **다음 누름**이다(phase 0 이 이미 그렇게 한다).
             //
@@ -1871,6 +1894,18 @@ pub export fn maru_mobile_has_selection() u32 {
 /// 키 11개가 폰 세로 폭을 넘는다 — 그래서 가로 스크롤이 함께 온다. 줄이거나 키를 버리는 대신
 /// **크기를 지키고 스크롤한다**(사용자 결정).
 const key_w: f32 = 44.0;
+/// 본문(터미널 격자)의 안쪽 여백. **정의하는 곳과 빼는 곳이 같은 값을 봐야 한다** —
+/// 레이아웃 결과가 border box 라, 소비하는 쪽이 이만큼 물려야 격자가 제 자리에 앉는다.
+///
+/// **모바일은 0 이다.** 화면이 좁아 좌우 여백은 곧 열이고 상하는 곧 행인데, 터미널에서 그
+/// 한 칸이 데스크톱보다 훨씬 비싸다. 곡면·노치 대비는 host 가 이미 `inset_left/right` 로
+/// 빼서 넘겨 주므로(android_app_host.c 의 "좌우도 뺀다") 여기서 또 물릴 이유가 없다.
+///
+/// **0 이어도 이 상수는 남긴다.** 값이 아니라 **경계를 누가 소유하는가**가 요점이다 — 다시
+/// 여백을 주고 싶어지면 이 한 곳만 고치면 되고, 그때도 격자가 넘치지 않는다.
+const body_pad_x: f32 = 0.0;
+const body_pad_y: f32 = 0.0;
+
 const key_gap: f32 = 4.0;
 const key_h: f32 = 44.0;
 const key_bar_pad_x: f32 = 6.0;
@@ -3579,7 +3614,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // ── 본문: **진짜 터미널 화면**이다. 자식 없이 자리만 잡고, 그 사각형을
     // `TerminalCore` 의 셀 격자로 채운다(아래 `pushTerminal`). 앞 단계의 하드코딩
     // 문자열과 달리 VT 파서를 실제로 태우므로 SGR 색·한글 2셀 폭이 코어에서 나온다.
-    const body = tree.container(.{ .id = 300, .direction = .column, .style = .{ .flex = .{ .grow = 1 }, .padding = .{ .left = 16.0, .right = 16.0, .top = 14.0, .bottom = 14.0 } } }, &.{});
+    const body = tree.container(.{ .id = 300, .direction = .column, .style = .{ .flex = .{ .grow = 1 }, .padding = .{ .left = body_pad_x, .right = body_pad_x, .top = body_pad_y, .bottom = body_pad_y } } }, &.{});
 
     // ── 하단 바는 **없다.** 아이콘 다섯은 배선이 없었고(U3a), 남은 톱니 하나를 위해 44px 를
     // 영구히 쓰는 것은 두 플랫폼 관례도 아니다 — 하단은 이동 대상(destination) 자리이고
@@ -3709,7 +3744,19 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
     // **본문은 진짜 터미널 코어다.** 레이아웃이 잡아 준 본문 사각형에 셀 격자를 채운다.
     for (built.entries) |entry| {
         if (entry.id != 300) continue;
-        pushTerminal(entry.rect, tk);
+        // **레이아웃 결과는 border box 다**(`chrome/ui/layout.zig` 머리말). 그대로 넘기면 격자가
+        // padding 까지 제 몫으로 세어 **아래로 넘치고, 그 넘침이 보조 키바를 덮는다** — 기기에서
+        // `ctrl` 줄이 소프트 키보드에 잘려 `Ctrl+B` 를 못 누르는 것으로 나타났다.
+        //
+        // **이것이 폰트 크기와 키바를 얽히게 한 자리이기도 하다.** 설계상 둘은 독립이다(키바는
+        // 고정 높이를 요구하고 본문은 남은 것만 가져간다). 넘치는 양이 `line_h` 로 환산되니
+        // 글자를 줄일수록 더 많은 행이 되어 티가 커졌을 뿐이다 — 경계를 지키면 서로 무관해진다.
+        pushTerminal(.{
+            .x = entry.rect.x + body_pad_x,
+            .y = entry.rect.y + body_pad_y,
+            .width = @max(0.0, entry.rect.width - 2 * body_pad_x),
+            .height = @max(0.0, entry.rect.height - 2 * body_pad_y),
+        }, tk);
         break;
     }
     // **본문 뒤에** 그린다 — 앱 바 아래는 본문이 시작하는 자리라 먼저 그리면 덮인다.

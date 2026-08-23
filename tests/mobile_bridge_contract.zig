@@ -827,6 +827,55 @@ test "재현: 마우스를 켠 앱에는 화살표가 아니라 휠이 간다" {
     bridge.maru_mobile_clear_error();
 }
 
+// **본문을 두드리면 키보드가 올라온다 — 다만 아무 데나는 아니다.** 어디가 입력칸인지는 앱만
+// 알고 우리는 셀 격자만 본다. 대신 커서를 본다: TUI 는 입력칸에 커서를 둔다(기기 실측 — Claude
+// Code 의 입력 박스를 탭한 셀과 커서가 같은 행이었다).
+test "재현: 커서 행을 두드리면 키보드가 올라온다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_take_keyboard_raise(); // 앞선 요청을 비운다
+    bridge.maru_mobile_clear_error();
+
+    // 커서를 5행 1열로 옮긴다(CUP 은 1-based — 코어에서는 row 4).
+    _ = bridge.maru_mobile_term_write("\x1b[5;1H", 6);
+
+    // **커서 행이 아닌 곳**을 두드리면 안 올라온다 — 대화 영역을 스크롤하려던 손이다.
+    const other = pointForCell(1, 3) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 0, other.x, other.y, now());
+    bridge.maru_mobile_pointer(2, 0, other.x, other.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_keyboard_raise());
+
+    // **커서 행**을 두드리면 올라온다.
+    const at_cursor = pointForCell(4, 3) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 0, at_cursor.x, at_cursor.y, now());
+    bridge.maru_mobile_pointer(2, 0, at_cursor.x, at_cursor.y, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_keyboard_raise());
+
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
+// **판정할 수 없을 때는 올린다.** TUI 가 화면을 다시 그리는 동안 DECTCEM(`?25l`)으로 커서를 끄면
+// 어디가 입력칸인지 볼 근거가 사라진다 — 그때 아무것도 안 하면 사용자는 키보드를 못 부른다.
+test "재현: 커서가 숨으면 아무 데나 두드려도 키보드가 올라온다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    _ = bridge.maru_mobile_take_keyboard_raise();
+    bridge.maru_mobile_clear_error();
+
+    _ = bridge.maru_mobile_term_write("\x1b[5;1H\x1b[?25l", 12); // 커서를 옮기고 숨긴다
+    const far = pointForCell(1, 3) orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 0, far.x, far.y, now());
+    bridge.maru_mobile_pointer(2, 0, far.x, far.y, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_keyboard_raise());
+
+    _ = bridge.maru_mobile_term_write("\x1b[?25h", 8); // 되돌린다
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
 // 키 `index` 의 한가운데. **자리를 손으로 적지 않는다** — 브리지가 그린 자리를 그대로 묻는다
 // (적어 두면 레이아웃이 바뀔 때 테스트만 맞고 제품이 틀리게 된다).
 /// 키바를 **끝까지 민다.** 키가 손가락 크기(44)라 폰 폭을 넘치므로 오른쪽 키(`copy` 등)는

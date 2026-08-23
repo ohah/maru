@@ -59,12 +59,16 @@ public class MaruActivity extends android.app.NativeActivity {
      *  부터 edge-to-edge 가 강제되어 그 값이 **무시된다**. 안 빼면 키보드가 화면 절반을 덮는데
      *  레이아웃은 그대로라 하단이 통째로 가려진다(iOS 에서 보조 키바가 그렇게 사라졌다). */
     private static native void nativeKeyboardHeight(int px);
+    private static native void nativeBottomInset(int px);
 
     /** 밀린 화면을 하나 뺀다. 1=뺐다, 0=뺄 것이 없다(그러면 앱을 내린다). */
     private static native int nativePopScreen();
 
     /** 지금 무엇을 입력받는가 — 0=글자, 1=숫자. 키보드 종류를 이 값으로 고른다. */
     private static native int nativeInputKind();
+
+    /** 눌러 둔 보조 키바 수정자(Ctrl·Alt). 0 이면 없다. */
+    private static native int nativeArmedMods();
 
     /** **하드웨어 뒤로가기는 스택 pop 이다**(docs/mobile-ux.md §3). `NativeActivity` 는 이 키를
      *  네이티브 입력 큐로 안 넘겨 주므로(실측 — `nativeKey` 로도 안 온다) Java 쪽에서 받는다.
@@ -117,13 +121,49 @@ public class MaruActivity extends android.app.NativeActivity {
         /// 한다. 안 들고 있으면 확정된 글자가 통째로 사라진다.
         private String composing = "";
 
+        /// **ASCII 만으로 된 조합인가.** 터미널에서 영문 예측 입력은 방해다 — 누른 글자는 그
+        /// 자리에서 나가야 하고, 확정을 기다릴 이유가 없다. 조합이 필요한 것은 자모가 모여
+        /// 글자가 되는 한글뿐이고 그것은 항상 ASCII 밖이다.
+        ///
+        /// 이 구분이 없으면 **tmux prefix 다음 키가 영영 안 나간다** — `Ctrl+B` 는 수정자가
+        /// 걸려 있어 아래에서 바로 확정되지만, 이어지는 `m` 은 수정자가 없어 조합에 갇히고
+        /// tmux 는 오지 않는 키를 기다린다(기기 실측: `02` 뒤로 `6d` 가 안 나갔다).
+        private static boolean isAsciiOnly(String s) {
+            for (int i = 0; i < s.length(); i++) {
+                if (s.charAt(i) > 0x7F) return false;
+            }
+            return true;
+        }
+
         TerminalInputConnection(View target) {
             super(target, true);
         }
 
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
-            composing = text == null ? "" : text.toString();
+            final String next = text == null ? "" : text.toString();
+            // **수정자가 걸려 있으면 조합하지 않는다.** `Ctrl+B` 는 조합할 글자가 아니라 **지금
+            // 나가야 하는 시퀀스**다(tmux prefix 가 그렇다).
+            //
+            // 삼성 키보드는 영문도 조합으로 넘긴다 — 그러면 글자가 preedit 으로 화면에만 떠 있고
+            // `commitText` 는 확정할 때까지 안 온다. 눌러 둔 수정자는 그 `commitText` 자리에서
+            // 소비되므로, **그 시점이 영영 안 와서** Ctrl 이 켜진 채 글자만 나갔다(기기 실측).
+            //
+            // 여기서 바로 확정으로 넘기면 브리지가 키 경로로 보내며 수정자를 소비한다.
+            // **`sendKeyEvent` 를 대신 통과시키는 방법은 안 된다** — 그 글자가 키로 한 번 나가고,
+            // 나중에 조합이 확정되며 `commitText` 로 **또** 나가 중복이 된다.
+            if (!next.isEmpty() && (nativeArmedMods() != 0 || isAsciiOnly(next))) {
+                composing = "";
+                nativeComposing("");
+                nativeCommit(next);
+                // **IME 의 조합도 끊는다.** 우리가 가로채 커밋해도 프레임워크의 Editable 은 여전히
+                // 조합 중이라, 다음 글자가 **이어붙는다** — `Ctrl+B` 뒤에 `m` 을 치면 tmux 로
+                // 가야 할 `m` 이 `bm` 조합으로 쌓여 한 덩어리로 왔다(기기 실측: `commit_bytes=3`).
+                // 수정자가 걸린 입력은 한 번에 하나씩 나가야 하므로 여기서 상태를 비운다.
+                restartInput();
+                return true;
+            }
+            composing = next;
             nativeComposing(composing);
             return true;
         }
@@ -318,6 +358,13 @@ public class MaruActivity extends android.app.NativeActivity {
             int nav = insets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom;
             // 키보드는 navigation bar 를 덮는다 — 두 번 빼지 않는다(iOS 의 safe area 처리와 같다).
             nativeKeyboardHeight(ime > nav ? ime - nav : 0);
+            // **레이아웃이 쓰는 하단 inset 도 여기서 갱신한다.** native 쪽 `queryInsets` 는
+            // 창이 생기거나 크기가 바뀔 때만 도는데, 하필 키보드가 떠 있는 프레임에 걸리면
+            // 시스템이 0 을 돌려줘 그 값이 굳는다 — 키보드를 내려도 하단 키바가 3버튼 위에
+            // 겹쳐 남았다(기기 실측). 0 은 native 가 걸러 내므로 그대로 넘긴다.
+            nativeBottomInset(insets.getInsets(
+                    android.view.WindowInsets.Type.systemBars()
+                    | android.view.WindowInsets.Type.displayCutout()).bottom);
             // **기본 처리를 대체하지 않는다.** decorView 리스너는 시스템 경로를 가로채므로
             // 원래 동작을 그대로 돌려줘야 한다(안 그러면 다른 inset 처리가 통째로 죽는다).
             return v.onApplyWindowInsets(insets);

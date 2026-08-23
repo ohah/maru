@@ -141,7 +141,8 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 marker 7개를 controller input으로 보내고 healthy observer의 valid screen delta에서 각각 관측될 때까지의 monotonic 시간을
 raw artifact의 `wake_samples`에 전부 남긴다. 각 표본은 input 시작·socket 기록 완료·marker 적용 timestamp와 end-to-end·
 delivery latency를 함께 가진다. `wake_latency_min_ns`·`wake_latency_median_ns`·`wake_latency_max_ns`는 validator가 raw
-표본에서 다시 계산한다. marker가 들어온 batch를 적용한 뒤에는 측정 harness sleep 없이 같은 turn에서 timestamp를 찍고,
+표본에서 다시 계산한다. marker 대기자는 healthy 제품 socket의 kernel readability를 blocking poll해 periodic test sleep의
+runner overshoot를 제품 지연으로 귀속하지 않는다. marker가 들어온 batch를 적용한 뒤에는 측정 harness sleep 없이 같은 turn에서 timestamp를 찍고,
 모든 observer의 wake delta를 비운 뒤 stall telemetry를 reset한다. 이 구간은 slow observer pressure와 RSS sampling 전에
 측정해 stall 격리 비용을 입력 echo 예산으로 잘못 귀속하지 않는다.
 

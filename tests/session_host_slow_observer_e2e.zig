@@ -955,7 +955,31 @@ fn waitForMarker(
         // Timestamp success in the same observation turn that applied the marker. Sleeping after
         // progress adds a deterministic 2 ms harness delay to the product latency measurement.
         if (screenContains(assembler, marker)) return;
-        if (!progressed) _ = usleep(2_000);
+        if (!progressed) {
+            // Wait on the product socket itself instead of a periodic userspace sleep. Hosted
+            // macOS runners can resume a 2 ms usleep near the daemon's 20 ms fallback cadence,
+            // which attributes observer scheduling delay to the output-wake product path. A
+            // blocking poll is armed before the next frame arrives and therefore timestamps the
+            // same kernel-readiness edge that makes the valid delta observable.
+            const now_ns = monotonicNow(io);
+            if (now_ns >= deadline_ns) break;
+            const remaining_ns = deadline_ns - now_ns;
+            const remaining_ms = @max(
+                @as(u64, 1),
+                (remaining_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms,
+            );
+            var readable = c.pollfd{
+                .fd = client.fd,
+                .events = c.POLL.IN,
+                .revents = 0,
+            };
+            const rc = c.poll(
+                @ptrCast(&readable),
+                1,
+                std.math.cast(c_int, remaining_ms) orelse std.math.maxInt(c_int),
+            );
+            if (rc < 0 and posix.errno(rc) != .INTR) return error.ClientPollFailed;
+        }
     }
     return error.MarkerTimeout;
 }

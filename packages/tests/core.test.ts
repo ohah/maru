@@ -136,6 +136,29 @@ test("스크롤 위치는 65535행을 넘어도 정확하다", async () => {
   term.dispose();
 });
 
+test("폭을 줄이면 늘어난 스크롤백 행이 즉시 반영된다", async () => {
+  // 스크롤백 재-wrap 은 지연된다(`rewrap_pending`). `scrollbackLen()` 은 그걸 강제하지 않아
+  // 리사이즈 직후 옛 폭 기준 행 수가 나왔다 — 40→20 열에서 27 행이 57 행이 되는데 30 을
+  // 보고했고, `scrollToTop` 이 거기까지만 올라갔다(절반).
+  const term = await makeTerminal({ cols: 40, rows: 4 });
+  for (let i = 0; i < 30; i++) term.write("y".repeat(38) + "\r\n");
+  await settle();
+  const wide = term.frame!.scroll.length;
+
+  term.resize(20, 4);
+  await settle();
+  // 폭이 반이면 38 자 줄이 2 행이 된다 — 행 수는 거의 두 배여야 한다.
+  // (`> wide` 로는 부족하다. 재-wrap 전 값 30 도 27 보다 크기 때문이다.)
+  expect(term.frame!.scroll.length).toBeGreaterThan(wide * 1.8);
+
+  term.scrollToTop();
+  await settle();
+  // **같은 프레임 안에서** 비교한다. 앞서 읽어 둔 값과 대조하면 둘 다 틀렸을 때 통과한다.
+  const f = term.frame!.scroll;
+  expect(f.offset).toBe(f.length);
+  term.dispose();
+});
+
 test("scrollToLine은 절대 행을 뷰포트 첫 줄에 둔다", async () => {
   const term = await makeTerminal({ cols: 20, rows: 4 });
   for (let i = 0; i < 120; i++) term.write(`line ${i}\r\n`);

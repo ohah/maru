@@ -876,6 +876,35 @@ test "재현: 커서가 숨으면 아무 데나 두드려도 키보드가 올라
     bridge.maru_mobile_clear_error();
 }
 
+// **연결이 없으면 컨트롤 축의 잔해를 말하지 않는다.** 끊기면 채널도 함께 죽는데, 그 종료 코드가
+// 127 로 잡혀 목록이 `그 기계에 maru 가 없다` 고 했다 — 서버에는 멀쩡히 있었고 사용자가 고칠
+// 것은 아무것도 없었다(기기 실측). **틀린 안내는 침묵보다 나쁘다.**
+test "연결이 없으면 목록은 축의 사유가 아니라 연결을 말한다" {
+    endAnyGesture();
+    var guard: u32 = 0;
+    while (!std.mem.eql(u8, bridge.currentScreenName(), "sessions") and guard < 8) : (guard += 1) {
+        if (bridge.maru_mobile_pop_screen() == 0) break;
+    }
+
+    // 축이 127 로 진 상태를 만든다 — 그 말이 화면에 뜨던 자리다.
+    bridge.maru_mobile_control_note_exit(127);
+    bridge.maru_mobile_set_ssh_status(12, "", 0); // CLOSED
+    _ = bridge.maru_mobile_build(402, 874, now());
+
+    const shown = bridge.remoteOffMessage();
+    try std.testing.expect(!std.mem.eql(u8, shown, maru.i18n.tIn(.ko, .mob_control_off_missing)));
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.ko, .mob_conn_ended), shown);
+
+    // **붙어 있으면 축의 사유를 그대로 말한다** — 가리는 것이 아니라 자리를 가리는 것이다.
+    bridge.maru_mobile_set_ssh_status(11, "", 0); // READY
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.ko, .mob_control_off_missing), bridge.remoteOffMessage());
+
+    bridge.maru_mobile_control_reset();
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    bridge.maru_mobile_clear_error();
+}
+
 // **끝난 것을 진행 중이라고 말하지 않는다.** 끊긴 상태(`CLOSED`)가 "아직 이유 이름이 없는 진행
 // 상태" 갈래로 떨어져, 끊어 놓고 **"붙는 중..." 을 띄웠다** — 사용자는 앱이 알아서 다시 붙는
 // 줄 안다.
@@ -4848,6 +4877,10 @@ fn gotoTerminalScreen() void {
 /// 그러면 이 테스트들은 "아무것도 안 재면서" 실패하거나(운이 좋으면) 통과한다 — 처음 쓴 판이
 /// 그래서 `loading` 만 봤다.
 fn gotoSessionsScreen() void {
+    // **원격 목록을 보려면 연결이 서 있어야 한다.** 컨트롤 축은 그 연결 위에 서는 것이라,
+    // 연결이 없으면 화면은 축의 사유 대신 연결을 말한다(그래야 끊긴 뒤 남은 잔해가 안 뜬다).
+    // 축만 재는 아래 테스트들은 그 전제를 안 적고 있었다 — 여기 한 곳에 둔다.
+    bridge.maru_mobile_set_ssh_status(11, "", 0); // MARU_SSH_STATE_READY
     var guard: usize = 0;
     while (!std.mem.eql(u8, bridge.currentScreenName(), "sessions") and guard < 8) : (guard += 1) {
         _ = bridge.maru_mobile_pop_screen();

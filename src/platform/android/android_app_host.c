@@ -1752,8 +1752,13 @@ static void driveControlChannel(void) {
 
     // **명령이 그냥 끝났으면 시한을 기다리지 않는다.** 답할 것이 이미 죽었고, 종료 코드는
     // 사용자가 고칠 자리를 가른다(계약 §4a: 127 이면 그 기계에 `maru` 가 없다).
+    //
+    // **세션이 살아 있을 때만 그렇게 읽는다.** 연결이 죽으면 채널도 함께 죽는데, 그것은 명령이
+    // 실패한 것이 아니라 **명령이 서 있던 바닥이 사라진 것**이다. 안 가르면 끊을 때마다 그
+    // 잔해가 "그 기계에 maru 가 없다" 로 화면에 떴다(기기 실측 — 서버에는 있었다).
     unsigned int control_exit = 0;
-    if (g_control_open_ms != 0 && maru_ssh_pump_control_exit_status(&control_exit) == 0) {
+    if (g_control_open_ms != 0 && maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
+        maru_ssh_pump_control_exit_status(&control_exit) == 0) {
         maru_mobile_control_note_exit(control_exit);
         g_control_open_ms = 0;
     }

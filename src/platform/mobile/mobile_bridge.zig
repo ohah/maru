@@ -4157,6 +4157,24 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
     var y = top;
     remote_rows_drawn = 0;
 
+    // **연결이 없으면 컨트롤 축의 이유를 말하지 않는다.** 축은 그 연결 위에 서는 것이라,
+    // 연결이 사라지면 남아 있는 사유는 **그 연결이 죽으며 난 잔해**이지 지금의 사실이 아니다.
+    //
+    // 기기에서 이것이 물었다: 끊기를 누르자 채널도 함께 죽었는데, 그 종료 코드가 127 로 잡혀
+    // 목록이 **그 기계에 maru 가 없다 — 서버 설정에 maru 경로를 적는다** 고 했다. 서버에는
+    // maru 가 멀쩡히 있었고 사용자가 고칠 것은 아무것도 없었다. **틀린 안내는 침묵보다 나쁘다.**
+    //
+    // 연결 상태는 터미널 축의 사실이고 이미 사람 말로 바꾸는 자리가 있다 — 그것을 그대로 쓴다
+    // (같은 사실을 두 곳에서 말하면 갈린다).
+    if (conn_state != 11) { // MARU_SSH_STATE_READY 가 아니면 축이 설 자리가 없다
+        const msg = connectionMessage() orelse maru.i18n.tIn(.ko, .mob_sessions_loading);
+        pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        remote_off_msg_len = @min(msg.len, remote_off_msg.len);
+        @memcpy(remote_off_msg[0..remote_off_msg_len], msg[0..remote_off_msg_len]);
+        remote_shown = .off;
+        return;
+    }
+
     if (control_client.state == .off) {
         // 껐다 — **왜 껐는지**를 말한다. 사용자가 고칠 자리가 이유마다 다르다.
         var failed_buf: [128]u8 = undefined;

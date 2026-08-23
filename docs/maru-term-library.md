@@ -235,6 +235,23 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 | `scrollToLine(line)` | 절대 행(0 = 스크롤백 최상단)을 뷰포트 첫 줄에 |
 | `scrollLines(n)` / `scrollPages(n)` | 상대 이동. **양수가 아래** — 휠 방향이다(`scroll()` 은 위가 양수인 코어 방향이라 반대다) |
 
+### 상태 이벤트
+
+| 이벤트 | 인자 | 언제 |
+|---|---|---|
+| `onCursorMove` | `CursorState` | 커서가 **다른 칸으로** 옮겨갔을 때 |
+| `onScroll` | `{ offset, length }` | 뷰포트 위치나 스크롤백 길이가 바뀔 때 |
+| `onSelectionChange` | `SelectionSpan \| null` | 선택이 바뀌거나 해제될 때(해제는 `null`) |
+
+셋 다 **프레임에서 파생한다** — 코어에 별도 알림 채널을 두지 않는다. 이미 매 프레임 커서·
+선택·스크롤이 실려 오므로(`FrameMeta`), 직전 프레임과 달라진 것만 발행하면 된다. 파생을
+`Terminal` 한 곳에 두어 두 워커 모드가 같은 이벤트를 받는다.
+
+- **모양·깜빡임 변화는 `onCursorMove` 가 아니다.** 깜빡임은 매 프레임 토글되므로 위치 변화와
+  섞이면 쓸 수 없다. 위치만 본다.
+- **첫 프레임은 기준선일 뿐 발행하지 않는다.** 초기 상태를 "변화"로 내면 구독자가 마운트
+  직후 무의미한 알림을 받는다.
+
 `clear()` 는 xterm.js 와 시맨틱이 다르다 — **본체 ⌘K 와 같은 계약**이다:
 
 - **셸 통합(OSC 133)이 있고 프롬프트 상태**: 화면 전체 + 스크롤백을 비우고 커서를 홈에 둔 뒤
@@ -247,7 +264,6 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 
 | 없는 것 | 쓰임 |
 |---|---|
-| `onCursorMove`·`onScroll`·`onSelectionChange` | 앱이 상태를 따라가야 할 때(복사 버튼·미니맵 등) |
 | `onKey`·`onBinary`·`onLineFeed`·`onWriteParsed` | 입력·출력 훅 |
 | `attachCustomKeyEventHandler` | 앱 단축키가 터미널보다 먼저 키를 잡아야 할 때 |
 | `registerMarker`·`registerDecoration` | 검색 하이라이트·주석 같은 확장의 기반 |

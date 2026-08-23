@@ -3789,9 +3789,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         ) !struct { checked: usize, matched: usize, wide: usize } {
             // 행 → 원본 논리 줄. **랩·접힘이 없으므로 순차다** — 둘 중 하나라도 켜면 이 표를
             // 렌더가 만들어 줘야 한다(macOS `editor_hit_lines` 가 그 자리다).
-            const row_lines = try a.alloc(usize, visible);
+            const row_lines = try a.alloc(u32, visible);
             defer a.free(row_lines);
-            for (row_lines, 0..) |*rl, i| rl.* = first + i;
+            for (row_lines, 0..) |*rl, i| rl.* = @intCast(first + i);
 
             const layout = ev.geometry.compute(total_cols, ls.len, .{});
             const geom = ev.hit.Geometry{
@@ -3936,9 +3936,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             .close_requested => closed = true,
             .mouse => |m| if (m.kind == .left_down) {
                 click_events += 1;
-                const row_lines = allocator.alloc(usize, built.written.visual_rows) catch continue;
+                const row_lines = allocator.alloc(u32, built.written.visual_rows) catch continue;
                 defer allocator.free(row_lines);
-                for (row_lines, 0..) |*rl, i| rl.* = first_line + i;
+                for (row_lines, 0..) |*rl, i| rl.* = @intCast(first_line + i);
                 const layout = editor_view.geometry.compute(side_cols, lines.items.len, .{});
                 last_click = editor_view.hit.bodyPoint(.{
                     .body_x = 0,

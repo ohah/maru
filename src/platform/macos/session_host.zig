@@ -216,6 +216,12 @@ pub const external_tty = if (builtin.os.tag == .macos)
     @import("session_host/external_tty.zig")
 else
     struct {};
+pub const external_detach_chord = @import("session_host/external_detach_chord.zig");
+pub const external_stdout_progress = @import("session_host/external_stdout_progress.zig");
+pub const external_tty_output = if (builtin.os.tag == .macos)
+    @import("session_host/external_tty_output.zig")
+else
+    struct {};
 pub const external_resize = if (builtin.os.tag == .macos)
     @import("session_host/external_resize.zig")
 else

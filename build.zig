@@ -9475,6 +9475,58 @@ pub fn build(b: *std.Build) void {
         session_host_2b3_step.dependOn(&run_external_pump_2b3_tests.step);
         session_host_2b3_step.dependOn(&run_session_host_2b3_sentinel.step);
 
+        const session_host_3a1_step = b.step(
+            "test-session-host-3a1",
+            "Run the P5c3c-3a1 TTY output, detach chord, and stdout deadline gate",
+        );
+        session_host_3a1_step.dependOn(session_host_2b3_step);
+        inline for ([_]struct { path: []const u8, name: []const u8 }{
+            .{ .path = "src/platform/macos/session_host/external_detach_chord.zig", .name = "chord" },
+            .{ .path = "src/platform/macos/session_host/external_stdout_progress.zig", .name = "stdout-progress" },
+            .{ .path = "src/platform/macos/session_host/external_tty_output.zig", .name = "tty-output" },
+        }) |fixture| {
+            for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+                const tests = addProjectTest(b, .{
+                    .name = b.fmt("maru-session-host-3a1-{s}-{s}", .{ fixture.name, @tagName(mode) }),
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(fixture.path),
+                        .target = target,
+                        .optimize = mode,
+                        .link_libc = true,
+                    }),
+                    .filters = &.{"p5c3c-3a1"},
+                });
+                const run_tests = b.addRunArtifact(tests);
+                run_tests.addArg("--maru-expect-tests=3");
+                run_tests.setCwd(b.path("."));
+                session_host_3a1_step.dependOn(&run_tests.step);
+            }
+        }
+        const session_host_3a1_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-3a1-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3a1_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_session_host_3a1_sentinel = b.addRunArtifact(session_host_3a1_sentinel);
+        run_session_host_3a1_sentinel.setCwd(b.path("."));
+        session_host_3a1_step.dependOn(&run_session_host_3a1_sentinel.step);
+        const session_host_3a1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3a1_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"p5c3c-3a1 primitives"},
+        });
+        const run_session_host_3a1_boundary_tests = b.addRunArtifact(session_host_3a1_boundary_tests);
+        run_session_host_3a1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3a1_boundary_tests.setCwd(b.path("."));
+        session_host_3a1_step.dependOn(&run_session_host_3a1_boundary_tests.step);
+        boundary_step.dependOn(&run_session_host_3a1_boundary_tests.step);
+
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

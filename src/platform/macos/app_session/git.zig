@@ -103,9 +103,14 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
     // worktree면 object DB에 그 tree가 실제로 있어 조용히 성공한다). `captureTurnSnapshot`이 링을 만들 때 같은
     // 이유로 저장소를 대조하는데, **소비하는 쪽에도** 있어야 저장소를 바꾸는 모든 경로가 덮인다.
     const snapshot = blk: {
-        const ring_repo = self.turn_ring_repo orelse break :blk "";
-        if (!std.mem.eql(u8, ring_repo, repo)) break :blk "";
-        break :blk if (self.turn_ring.latest()) |snap| snap.oid() else "";
+        // **활성 세션의 링**을 본다(AT0). 저장소 대조는 `RingMap` 이 세션마다 하므로(옮겼으면 그 링을
+        // 비운다) 여기서는 «그 세션이 지금 이 저장소를 보고 있나» 만 확인하면 된다.
+        const identity = activeOrLastSessionIdentity(self);
+        if (identity.len == 0) break :blk "";
+        const entry_repo = self.turn_rings.repoFor(identity);
+        if (entry_repo.len != 0 and !std.mem.eql(u8, entry_repo, repo)) break :blk "";
+        const ring = self.turn_rings.find(identity) orelse break :blk "";
+        break :blk if (ring.latest()) |snap| snap.oid() else "";
     };
     // **비교 기준을 함께 넘긴다**(§3.5). 고른 것이 없으면 빈 값이고 그러면 `origin/HEAD`다 —
     // 이 하나가 ahead/behind·merge-base·브랜치 범위 셋의 왼쪽이라 여기서 갈리면 화면의 숫자와
@@ -320,12 +325,31 @@ pub fn drainGitStatus(self: *AppSession) void {
         // **"언제·누가"는 여기서 붙인다**(P5). 링은 순서만 알지 시간을 모르고, 에이전트 종류는 그 turn을
         // 돌린 Term이 갖고 있다 — 스냅샷이 도착한 이 자리가 둘을 아는 유일한 지점이다.
         const captured_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
-        self.turn_ring.push(
-            snapshot.tree,
-            snapshot.surface_id,
-            captured_s,
-            @intFromEnum(agentKindForSurface(self, snapshot.surface_id)),
-        );
+        // **링은 세션이 소유한다**(AT0 — 계약 §6.1). 키는 그 Term 의 provider 세션 신원이고, 저장소는
+        // `ringFor` 가 함께 받아 **그 세션이 옮겼는지**를 판정한다(옮겼으면 그 링만 비운다).
+        //
+        // 신원이 사라졌으면(그 사이 Term 이 죽었거나 관측 모드로 떨어졌다) 넣을 자리가 없으므로 버린다 —
+        // 화면에도 그 세션 줄이 없으니 잃는 것이 없다.
+        // **요청할 때 붙들어 둔 신원**을 쓴다 — 여기서 다시 조회하면 `/clear` 로 세션이 갈린 경우 옛
+        // 턴이 새 세션에 붙는다(적대적 검증 1회차).
+        const identity = self.turn_snapshot_session orelse "";
+        if (identity.len > 0) {
+            // **요청할 때 붙들어 둔 저장소**를 쓴다 — 여기서 `git_repo` 를 다시 읽으면 그 사이 다른
+            // 워크트리로 옮겼을 때 멀쩡한 링을 «저장소가 바뀌었다» 로 비운다(적대적 검증 3회차).
+            const repo = self.turn_snapshot_repo orelse "";
+            if (self.turn_rings.ringFor(identity, repo)) |ring| {
+                ring.push(
+                    snapshot.tree,
+                    snapshot.surface_id,
+                    captured_s,
+                    @intFromEnum(agentKindForSurface(self, snapshot.surface_id)),
+                );
+            }
+        }
+        if (self.turn_snapshot_session) |sid| self.allocator.free(sid);
+        self.turn_snapshot_session = null;
+        if (self.turn_snapshot_repo) |path| self.allocator.free(path);
+        self.turn_snapshot_repo = null;
         snapshot.deinit(git_backend_mod.worker_allocator);
         // 새 기준이 생겼으니 목록을 다시 읽는다(그 섹션이 이제 나온다).
         refreshGitStatus(self);
@@ -691,6 +715,60 @@ pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
 
 /// 그 surface를 든 Term의 에이전트 종류(없으면 `.none`). 스냅샷은 surface_id만 싣고 오므로 여기서
 /// 되찾는다 — Term이 그 사이 닫혔으면 `.none`이고, 그건 "모른다"가 아니라 "그 값을 잃었다"이다.
+/// «직전에 본 에이전트 세션» 을 갱신한다. 같은 값이면 아무것도 하지 않는다(할당을 아낀다).
+pub fn rememberAgentSession(self: *AppSession, identity: []const u8) void {
+    if (identity.len == 0) return;
+    const remembered = self.last_agent_session orelse "";
+    if (std.mem.eql(u8, remembered, identity)) return;
+    const owned = self.allocator.dupe(u8, identity) catch return;
+    if (self.last_agent_session) |old_sid| self.allocator.free(old_sid);
+    self.last_agent_session = owned;
+}
+
+/// 목록·비교가 볼 **세션 신원**. 활성 Term 에 에이전트가 있으면 그것이고, 없으면 **직전에 본 세션**이다.
+///
+/// 폴백이 필요한 이유는 diff 다: 턴 목록에서 파일을 클릭하면 활성 Term 이 파일 Term 이 되어 신원이 비는데,
+/// 사용자는 **그 diff 를 보면서 목록을 봐야 한다.** 활성만 보면 그 순간 목록과 비교 기준이 함께 사라진다
+/// (적대적 검증 4회차 — 통합 테스트가 잡았다). [§3.5](../../../docs/editor-surface-dock.md)가 저장소 판정에
+/// «직전에 목록을 읽은 저장소» 를 2순위로 두는 것과 같은 규율이다.
+///
+/// **조회가 한 자리인 것이 중요하다.** 처음에는 화면 쪽에만 폴백을 넣었는데, 비교 기준을 만드는 이쪽
+/// 경로가 여전히 활성만 보아 diff 를 열면 턴 범위가 비었다.
+pub fn activeOrLastSessionIdentity(self: *AppSession) []const u8 {
+    if (self.surface_initialized) {
+        const live = sessionIdentityFor(self, term_ops.activeSurface(self).id);
+        if (live.len > 0) {
+            rememberAgentSession(self, live);
+            return live;
+        }
+    }
+    return self.last_agent_session orelse "";
+}
+
+/// 활성 세션 링의 **마지막 스냅샷 tree**(없으면 빈 슬라이스). `diff_base == .turn` 이 왼쪽으로 쓴다.
+pub fn activeTurnLatestOid(self: *AppSession) []const u8 {
+    const identity = activeOrLastSessionIdentity(self);
+    if (identity.len == 0) return "";
+    const ring = self.turn_rings.find(identity) orelse return "";
+    return if (ring.latest()) |snap| snap.oid() else "";
+}
+
+/// 그 surface 의 **provider 세션 신원**(없으면 빈 슬라이스). 링의 키다(§6.1 AT0).
+///
+/// 훅 모드에서는 `applyHookEvent` 가 payload 의 `session_id` 로 채워 두므로 턴이 끝나는 순간 이미 있다.
+/// 관측 모드에서는 자식 프로세스 env 폴링에 기대는데 그 창을 대부분 놓치므로(1초 폴링 ↔ 짧은 도구)
+/// 비어 있는 것이 정상이다 — 그때는 링을 만들지 않는다.
+pub fn sessionIdentityFor(self: *AppSession, surface_id: u64) []const u8 {
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (term.surface.id == surface_id) return term.agent_transcript.identity();
+            }
+        }
+    }
+    return "";
+}
+
 fn agentKindForSurface(self: *AppSession, surface_id: u64) app_session_mod.AgentKind {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {

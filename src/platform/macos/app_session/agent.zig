@@ -72,17 +72,17 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
     // 실제로 git 을 돌리는 것은 다른 사실이다. **링을 실제로 채우는 것을 보는 테스트**는 아래 스위치로
     // 밝히고 돈다(통째로 막았더니 그 테스트가 깨졌다 — 막는 것과 못 돌게 하는 것은 다르다).
     if (builtin.is_test and !test_allow_turn_snapshot) return;
+    // **신원이 없으면 찍지 않는다**(AT0 — 계약 §6.1 «훅 모드 전용»). 링에 넣을 키가 없는데 찍으면
+    // git 프로세스만 공짜로 띄운다. 관측 모드에서 목록이 비는 것은 그래서이고, 오류가 아니다.
+    const identity = git_ops.sessionIdentityFor(self, surface_id);
+    if (identity.len == 0) return;
+    // **턴을 찍었다는 것 자체가 그 세션이 활동했다는 뜻이다** — 그러니 여기서도 «직전에 본 세션» 을
+    // 갱신한다. 화면 조회에만 맡기면, 사용자가 그 에이전트 Term 을 활성으로 한 번도 두지 않은 채
+    // (예: 목록을 열자마자 diff 를 연 상태) 턴이 끝나면 폴백이 영영 비어 목록이 서지 않는다.
+    git_ops.rememberAgentSession(self, identity);
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
-    // 저장소가 바뀌었으면 링을 버린다 — 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
-    if (self.turn_ring_repo) |current| {
-        if (!std.mem.eql(u8, current, repo)) {
-            self.allocator.free(current);
-            self.turn_ring_repo = null;
-            self.turn_ring = .{};
-        }
-    }
-    if (self.turn_ring_repo == null) self.turn_ring_repo = self.allocator.dupe(u8, repo) catch return;
+    // 저장소 전환은 **그 세션의 링만** 비운다 — `RingMap.ringFor` 가 수확 시점에 판정한다(§6.1).
 
     const index_file = self.turnIndexPath() orelse return;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -90,7 +90,27 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
-    _ = self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id);
+    // **요청 시점의 신원을 붙들어 둔다**(적대적 검증 1회차). 수확 때 다시 조회하면 그 사이 `/clear` 로
+    // 세션이 갈렸을 때 옛 턴이 새 세션 링에 들어간다.
+    const owned = self.allocator.dupe(u8, identity) catch return;
+    const owned_repo = self.allocator.dupe(u8, repo) catch {
+        self.allocator.free(owned);
+        return;
+    };
+    if (!self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id)) {
+        // **거절을 조용히 삼키지 않는다**(적대적 검증 3회차). 백엔드 스냅샷 자리가 하나라 다른 세션의
+        // 캡처가 도는 중이면 이 턴은 **영영 안 찍힌다** — 재시도하면 스냅샷 시점이 «턴이 끝난 순간» 이
+        // 아니라 «재시도한 순간» 이 되어 내용이 틀린 턴을 만드는데, 그것은 없는 것보다 나쁘다.
+        // 그래서 버리되 **버렸다는 사실을 남긴다**(화면이 그 수를 말한다).
+        self.allocator.free(owned);
+        self.allocator.free(owned_repo);
+        if (self.turn_rings.findMut(identity)) |ring| ring.missed +|= 1;
+        return;
+    }
+    if (self.turn_snapshot_session) |old_sid| self.allocator.free(old_sid);
+    if (self.turn_snapshot_repo) |old_repo| self.allocator.free(old_repo);
+    self.turn_snapshot_session = owned;
+    self.turn_snapshot_repo = owned_repo;
 }
 
 /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나

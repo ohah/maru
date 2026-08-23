@@ -2846,6 +2846,72 @@ regular role 인 run — 디렉터리 꼬리(`metadata`)와 증감 숫자 — **
 > 그대로 믿고 그 코드를 고쳤으면 멀쩡한 계산을 망가뜨렸을 것이다.
 
 
+### 2m.29 소스 컨트롤이 눌린다 — 접기·고르기 (W8.4⒞1, 실측 2026-08-23)
+
+§2m.28 까지의 표면은 **그림이었다.** 프레임을 한 번 만들어 120 번 표현할 뿐이라 눌러도 아무 일이
+일어나지 않았다. 여기서 처음으로 **누른 결과가 화면에 남는다.**
+
+**새로 짠 판정이 없다.** 픽셀 → intent 는 전부 중립이 소유한다 — `chrome.ui.interaction.dispatch`
+가 published tree 를 훑고, `component.ids.Table.resolve` 가 그 `UiActionId` 에 도메인 의미를 붙인다.
+macOS `app_session/scm_dock.zig` 의 `scmDockPointer` 와 **같은 두 함수**다. Windows 가 더한 것은
+창이 준 픽셀을 넘기고 돌아온 intent 를 상태에 적용하는 것뿐이다.
+
+| 조각 | 어디 | 새로 짰나 |
+|---|---|---|
+| 히트테스트 | `chrome.ui.interaction.dispatch` | 아니오 |
+| action → intent | `component.ids.Table.resolve` | 아니오 |
+| 행 모델 → 항목 | `scm_items.itemFor` | 아니오(§2m.27) |
+| 상태 적용(접기·고르기) | `win32_scm_surface.State.apply` | **예** — 20 줄 |
+| 다시 짓기 | `win32_scm_surface.build` | **예** — 조립을 상태의 함수로 |
+| 창 → 위상 | 스모크의 5 줄 switch | **예** |
+
+**조립을 상태의 함수로 만들었다.** `win32_scm_surface.build` 가 git 출력 + 상태를 받아 셀까지
+낸다. 한 번 조립에 배열이 열대여섯 개 드는데 개별 `defer` 를 다시 그리는 자리마다 되풀이하면
+하나 빠뜨린 누수가 프레임마다 쌓이므로, **arena 하나를 통째로 버린다.**
+
+**공유하지 않은 것과 그 이유.** `State.apply` 의 규칙 셋은 macOS `applyScmDockIntent` 에서 읽어
+왔지만 중립 leaf 로 빼지 **않았다** — macOS 의 선택은 `(repo, index)` 쌍인데(`scm_selected_repo`)
+여기는 저장소가 하나다. 지금 한 타입으로 묶으면 Windows 가 안 쓰는 저장소 축을 지거나 macOS 가
+못 쓰는 모양이 된다. `scm_items.zig` 도 중복이 실제로 둘이 된 뒤에 뺐다. 다만 **왜 접을 때 강조를
+내리는가**(행 번호가 밀린다 — macOS 적대적 검증 4 회차)는 두 곳에 다 적어 뒀다.
+
+**창까지 밟았다.** 판정 함수를 직접 부르면 **창 → `WindowEvent.mouse` → 위상 변환** 세 칸이 안
+밟히고, 거기가 틀려도 초록이 된다. 그래서 `win32_window.postSyntheticMouse` 로 우리 창의 큐에
+메시지를 넣어 같은 길을 한 번 더 돈다. `SendInput` 을 안 쓴 것은 그것이 **사용자의 실제 커서**를
+움직여, 창이 포그라운드가 아니면 엉뚱한 창을 누르기 때문이다. 한계는 W7.4c 가 IME 에서 받아들인
+것과 같다 — OS 입력 스택(캡처·연타 타이밍·모디파이어)은 안 밟는다.
+
+**실측**(`maru win32-scm-draw-smoke`, 저장소 자신의 git 상태):
+
+```text
+branch_drawn=true names_matched=4/4
+row_hits=4/4
+collapse_toggled=true file_rows=4->0->4
+rebuilds=3 clicks=1 out_of_scope_intents=0
+window_intents=1 window_file_rows=4->0
+```
+
+`file_rows=4->0->4` 는 **직접 경로**가 두 방향 다 되는 것이고, `window_file_rows=4->0` 은 **창이 준
+클릭**이 같은 일을 하는 것이다.
+
+**뮤턴트로 확인했다** — 판정이 속 비지 않았다:
+
+| 뮤턴트 | 결과 |
+|---|---|
+| 접기를 안 한다(`collapsed` 를 안 뒤집는다) | `file_rows=3->3->3` |
+| 접히기만 하고 안 펴진다(`= true`) | `file_rows=3->0->0` |
+| 원본 | `file_rows=3->0->3` |
+
+> **또 "실행된 적 없는 테스트" 를 밟았다.** `win32_scm_surface.zig` 의 단위 테스트 7 개가 추가 직후
+> `zig build test` 출력에 **한 줄도 안 나왔다** — 테스트 아티팩트는 `main` 을 안 부르므로 그 파일을
+> 쓰는 함수가 분석되지 않는다. `main.zig` 에 `test { _ = scm_surface; }` 한 줄로 켰다. §2m.18 이
+> `system_text` 에서 같은 것을 밟았고, 그때는 별도 테스트 루트가 필요했다.
+
+**⒞1 은 여기까지다.** 스테이지·언스테이지(⒞2)는 **git 을 실제로 쓰는** 일이라 따로 본다 — 스모크가
+사용자의 작업트리를 건드리면 안 되므로 임시 저장소가 선행이다. `State.apply` 는 그 intent 들에
+`false` 를 내고 스모크가 `out_of_scope_intents` 로 **센다** — 조용히 삼키지 않는다.
+
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
@@ -2915,7 +2981,7 @@ regular role 인 run — 디렉터리 꼬리(`metadata`)와 증감 숫자 — **
 | **W8.1** | **파일 트리 백엔드가 Windows 에서 돈다** — 완료. 아래 §2m.3 | W8.0 |
 | **W8.2** | **파일 패널 표면** — ⒜ 데이터 경로(스캔→트리→행)를 Win32 에서 끝까지 흘린다(**완료**, §2m.4) ⒝ chrome 이 그것을 그린다(다음 — 선행인 셰이핑 다리는 §2m.18 로 **완료**) | W8.1 |
 | **W8.3** | **에디터 표면** — ⒜ 본문·gutter(§2m.21) ⒝ 배경·스크롤바(§2m.22) ⒞1 스크롤(§2m.23) ⒞2 클릭 → 문서 offset(§2m.24) ⒞3 드래그 선택·caret(§2m.25) — **여기까지 완료**. 남은 것은 키보드 커서 이동·단어 선택·복사(전부 `Selection` 을 바꾸는 배선) | W8.2 |
-| **W8.4** | **소스 컨트롤** — ⒜ Windows 프로세스 러너(§2m.8·§2m.9, 완료) ⒝ 표면이 measured 텍스트로 화면에 뜬다(§2m.27·§2m.28, 완료) ⒞ 입력(스테이지·언스테이지·접기) — 남음 | W8.1 |
+| **W8.4** | **소스 컨트롤** — ⒜ Windows 프로세스 러너(§2m.8·§2m.9, 완료) ⒝ 표면이 measured 텍스트로 화면에 뜬다(§2m.27·§2m.28, 완료) ⒞1 입력 — 접기·고르기(§2m.29, 완료) ⒞2 스테이지·언스테이지 — 남음(git 을 실제로 쓰므로 임시 저장소가 선행) | W8.1 |
 | **W8.5b** | **에이전트 도크** — `agent_*` 백엔드 셋 | W8.2 |
 | **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
 

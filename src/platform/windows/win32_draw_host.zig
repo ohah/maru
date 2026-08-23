@@ -35,6 +35,8 @@ const win32_window = @import("win32_window.zig");
 const win32_terminal = @import("win32_terminal.zig");
 const d3d11_present = @import("d3d11_present.zig");
 const d3d11_cells = @import("d3d11_cells.zig");
+const chrome = maru.chrome;
+const renderer = maru.renderer;
 
 pub const Error = error{HostSetupFailed};
 
@@ -329,4 +331,61 @@ pub fn reportSetupFailure(stderr: *std.Io.Writer, command: []const u8) !void {
         },
     }
     try stderr.flush();
+}
+
+/// `chrome.draw.Op` 목록을 셀로 내린다 — **단색 사각 먼저, 글리프 나중**(그리는 순서가 곧 z 순서).
+///
+/// 편집기(§2m.22)와 소스 컨트롤(§2m.26)이 **같은 것을 쓴다.** 두 벌로 적으면 한쪽만 고쳐지고, 그
+/// 증상은 "한 표면에서만 배경이 안 덮인다" 라 눈으로 잘 안 걸린다.
+///
+/// 그라디언트·테두리는 이 셰이더에 없으므로 **세어서 남긴다**(`dropped`) — 조용히 단색으로 그리면
+/// 화면이 틀린 채로 그럴듯해진다.
+pub fn appendChromeOps(
+    allocator: std.mem.Allocator,
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    clip_w: u32,
+    clip_h: u32,
+    cells: *std.ArrayList(d3d11_cells.Cell),
+) !struct { text: usize, fill: usize, dropped: usize } {
+    var n_text: usize = 0;
+    var n_fill: usize = 0;
+    var n_drop: usize = 0;
+    for (ops) |op| {
+        const rect: chrome.draw.Rect, const role: chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .text => {
+                n_text += 1;
+                continue;
+            },
+            .clip => continue,
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            .quad => |q| if (q.gradient == .solid and q.border_role == null)
+                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
+            else {
+                n_drop += 1;
+                continue;
+            },
+            else => {
+                n_drop += 1;
+                continue;
+            },
+        };
+        n_fill += 1;
+        const x0 = @max(rect.x, 0);
+        const y0 = @max(rect.y, 0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tk.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        try cells.append(allocator, d3d11_cells.solidCell(
+            @floatFromInt(x0),
+            @floatFromInt(y0),
+            @floatFromInt(x1 - x0),
+            @floatFromInt(y1 - y0),
+            d3d11_cells.colorFromArgb(argb),
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        ));
+    }
+    return .{ .text = n_text, .fill = n_fill, .dropped = n_drop };
 }

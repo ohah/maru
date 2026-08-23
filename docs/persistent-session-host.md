@@ -14581,6 +14581,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
           **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
           RX→authority→f1 TX suffix와 cleanup leaf만 재사용하고 새 pump/write adapter/lease를 만들지 않는다.
+          completed-control drain은 같은 whole-turn lease 안에서
+          `prepareCompletedControlSemanticUnderHeldLease`를 정확히 한 번 호출한다. `prepared_pair`는 sealed verdict의
+          resize/resync tag로만 기존 f3c2 branch prepare→consume을 선택하고, `terminal_prepared`는 기존 terminal
+          binding prepare→consume을 선택한다. branch 선택 뒤에는 일반 D2 TX authority를 만들지 않는다. 성공한 resize만
+          canonical `semantic_state=active.valid`, controller authority `flow=clear`, correlation `idle`, completed owner
+          `none`에서 input/control/TX eligibility를 다시 파생한다. resync ACK는 `awaiting_snapshot`이므로 authority를 열지
+          않고 immediate/deadline은 기존 recovery poll hint에서만 파생한다. terminal 또는 어떤 prepare/consume 불일치도
+          이미 게시된 의미를 되돌리지 않고 owner-cleanup terminal로 닫는다. 성공 callback cleanup 뒤 consumed tombstone은
+          payload/ledger/aggregate owner가 모두 정산된 것을 확인한 같은 함수에서만 pristine scratch로 되돌리며, 다음 turn은
+          기존 `prepareRxTurnForNextTurn`/`commitRxTurnForNextTurn`을 그대로 통과한다. 별도 영속 bool, clock read, allocator,
+          raw pointer lookup, callback-capable post-publication fallible suffix는 추가하지 않는다.
           **f3e hostile evidence**는 pure 전수표→injected turn→실제 Darwin socketpair→fail-index/stress 순으로
           response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,
           incomplete header/payload+FIN, input/control offset 0/partial/retired/response-wait, deadline-1/exact/+1,

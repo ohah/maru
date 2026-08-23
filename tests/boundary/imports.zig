@@ -7253,15 +7253,22 @@ test "recovery integration contract keeps future ledger generation out of contro
     try std.testing.expect(std.mem.count(u8, pump, ".snapshot_in_flight =>") >= 4);
 }
 
-// 파일 탐색기 **셀 투영의 소비자는 Windows 스모크 하나뿐이다**(FT3).
+// 파일 탐색기 **셀 투영은 공유 모듈에 살고, 소비자는 Windows 스모크 하나뿐이다**(FT3).
 //
-// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 그런데 이 투영은 지울 수가 없다 — Windows 가
-// 행을 픽셀까지 내리는 유일한 경로이고, 중립 집이 층 규칙상 존재하지 않는다(그 분석은
-// `buildFileTreeDrawList` 의 doc comment 가 소유한다). 지울 수 없다면 **다시 새지 않게** 세는 것이
-// 남은 방어다: macOS 가 이 경로로 되돌아가면 제품에 렌더 경로가 둘이 되고, 그 둘은 조용히 갈린다
-// (FT1 이 정확히 그 상태를 정리했다 — "렌더가 그 창을 쓴다" 단언이 죽은 경로를 보고 있었다).
-test "파일 트리 셀 투영은 Windows 스모크 말고 소비자가 없다" {
+// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 그런데 이 투영은 지울 수 없다 — Windows 가
+// 행을 픽셀까지 내리는 유일한 경로다(W8.2 ⒝). 지울 수 없다면 **어디에 사는지**와 **누가 쓰는지**를
+// 세는 것이 남은 방어다.
+//
+// ⑴ `platform/cell_text.zig`(macOS·Windows 공유 L4)가 정의를 소유한다. `platform/macos` 로 되돌아가면
+//    `src/main.zig` 가 다시 macOS 파일을 import 하게 되고, 그게 이 이동이 없앤 층 냄새다.
+// ⑵ macOS 제품·스모크에는 호출이 0 이다. 되돌아오면 렌더 경로가 둘이 되고 그 둘은 조용히 갈린다
+//    (FT1 이 정확히 그 상태를 정리했다 — "렌더가 그 창을 쓴다" 단언이 죽은 경로를 보고 있었다).
+test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 스모크만 쓴다" {
     const allocator = std.testing.allocator;
+    const shared = try readZigFileZ(allocator, "src/platform/cell_text.zig");
+    defer allocator.free(shared);
+    const macos_builder = try readZigFileZ(allocator, "src/platform/macos/coretext_frame_builder.zig");
+    defer allocator.free(macos_builder);
     const main_source = try readZigFileZ(allocator, "src/main.zig");
     defer allocator.free(main_source);
     const smoke = try readZigFileZ(allocator, "src/platform/macos/coretext_smoke.zig");
@@ -7269,11 +7276,16 @@ test "파일 트리 셀 투영은 Windows 스모크 말고 소비자가 없다" 
     const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
 
-    // Windows 스모크가 **실제로 쓴다** — 0 이 되면 그때는 함수를 지울 수 있다는 뜻이므로 이 게이트도
-    // 함께 없애야 한다(그 판단을 사람이 하도록 여기서 실패시킨다).
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(main_source, "buildFileTreeDrawList("));
+    // ⑴ 정의는 공유 모듈에만 있다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(shared, "pub fn buildFileTreeDrawList("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(macos_builder, "pub fn buildFileTreeDrawList("));
+    // 그리고 Windows 스모크는 macOS 파일이 아니라 공유 모듈을 든다.
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(main_source, "platform/macos/coretext_frame_builder.zig"));
 
-    // macOS 쪽에는 **호출이 하나도 없다.** 주석 속 언급은 세지 않는다 — 여는 괄호까지 붙은 호출만 본다.
+    // ⑵ Windows 스모크가 **실제로 쓴다** — 0 이 되면 함수를 지울 수 있다는 뜻이므로 이 게이트도 함께
+    //    없애야 한다(그 판단을 사람이 하도록 여기서 실패시킨다).
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(main_source, "buildFileTreeDrawList("));
+    // macOS 제품·스모크에는 호출이 없다(주석 언급은 여는 괄호가 없어 안 세진다).
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(smoke, "buildFileTreeDrawList("));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "buildFileTreeDrawList("));
 }

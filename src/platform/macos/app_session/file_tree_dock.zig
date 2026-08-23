@@ -312,6 +312,9 @@ fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content
     }
     self.file_tree_actions.appendSlice(self.allocator, frame.actions) catch return;
     if (replaced) self.file_tree_interaction.capture = null;
+    // 이 발행이 **무엇을 보고 만들어졌는지** 남긴다. 포인터 입구가 이 값으로 신선도를 판정한다.
+    self.file_tree_published_scroll_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
+    self.file_tree_published_rows = self.file_tree_rows.items.len;
 }
 
 fn frameEql(
@@ -332,6 +335,21 @@ fn frameEql(
     return true;
 }
 
+/// 발행이 지금 상태를 반영하는지 보고, 아니면 **다시 낸다**.
+///
+/// 발행은 그리기 경로가 하므로 프레임 사이에 낡을 수 있다. 스크롤이 대표적이다 — 휠 이벤트와 클릭이
+/// 같은 run loop 패스에 들어오면 그 사이에 paint 가 없고, 그러면 **커서 밑에 보이는 행과 발행이 말하는
+/// 행이 다르다.** 세대 검사는 이것을 못 잡는다: 스크롤은 투영 세대를 올리지 않는다(올릴 이유도 없다 —
+/// 목록이 바뀐 게 아니다). 실측으로 휠 10행 뒤 발행이 2행을 가리켰다.
+///
+/// **무조건 다시 내지 않는다.** 포인터 이동은 초당 수십 번 오고 발행은 arena 를 연다 — 두 정수 비교로
+/// 바뀐 때만 낸다.
+fn ensureFreshHitTree(self: *AppSession) void {
+    if (self.file_tree_published_scroll_px == file_panel_ops.fileTreeEffectiveScrollPx(self) and
+        self.file_tree_published_rows == self.file_tree_rows.items.len) return;
+    publishFileTreeHitTree(self);
+}
+
 /// 포인터 한 건을 발행된 tree 에 흘린다. 반환값은 **손을 뗐을 때의 intent** 다.
 pub fn fileTreeDockPointer(
     self: *AppSession,
@@ -340,6 +358,7 @@ pub fn fileTreeDockPointer(
     y_px: f64,
 ) ?component.ids.Intent {
     if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
+    ensureFreshHitTree(self);
     if (self.file_tree_entries.items.len == 0) return null;
     // 스크롤바 트랙 위는 목록이 아니다 — 막대를 잡으려는 손이 행을 열면 안 된다(옛 `fileTreeRowAt` 의
     // 같은 가드를 여기로 옮겼다). **그냥 돌아가지 않고 호버를 놓는다** — 그러지 않으면 포인터가 막대
@@ -380,8 +399,9 @@ pub fn fileTreeDockPointer(
 /// 그대로 돌려주면 소비자가 `file_tree_rows.items[i]` 에서 **범위를 넘어 죽는다**(실측:
 /// `index 20, len 3`). 방어를 소비자마다 두면 하나를 빠뜨리고, 실제로 우클릭 경로가 그랬다 — 그래서
 /// **질의 자체가** 판정한다.
-pub fn fileTreeRowAtPublished(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+pub fn fileTreeRowAtPublished(self: *AppSession, x_px: f64, y_px: f64) ?usize {
     if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
+    ensureFreshHitTree(self);
     if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
     const tree_view = chrome.ui.tree.UiRectTree{ .entries = self.file_tree_entries.items };
     const hit = chrome.ui.interaction.hitAction(tree_view, x_px, y_px) orelse return null;

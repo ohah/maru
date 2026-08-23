@@ -156,7 +156,10 @@ pub const Host = struct {
             .initial = initial,
         };
         host.shaper = .{ .raster = raster };
-        host.rasterizer = .{ .raster = raster, .scratch = scratch };
+        // **래스터라이저에 폰트 크기와 배율을 준다.** measured 크롬 텍스트는 글리프마다 크기가
+        // 다르고(`GlyphCacheKey.raster_font_size_milli`), 이 둘이 없으면 그 값을 못 푼다 — 도크
+        // 글자가 전부 터미널 크기로 구워진다.
+        host.rasterizer = .{ .raster = raster, .scratch = scratch, .font_size_pt = cfg.font.size, .scale_milli = 1000 };
         // 창이 크기 변경을 처리할 때 스왑체인을 찾는 손잡이.
         host.window.present.opaque_handle = @ptrCast(present);
         return host;

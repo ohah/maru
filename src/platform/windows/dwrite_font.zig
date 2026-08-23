@@ -892,6 +892,23 @@ pub const Rasterizer = struct {
         pixels: []u8,
         scratch: []u8,
     ) Error!u32 {
+        return self.rasterizeGlyphAtSize(choice, self.em_size_px, cell_w, cell_h, bytes_per_row, pixels, scratch);
+    }
+
+    /// **em 크기를 호출자가 정한다.** measured 크롬 텍스트는 role 마다 크기가 다르고
+    /// (`GlyphCacheKey.raster_font_size_milli` — 그 필드 doc: *"플랫폼 래스터라이저만 소비한다"*),
+    /// 터미널 하나의 크기로 구우면 도크 글자가 전부 터미널 크기로 나온다. macOS 는 이미 그 값을
+    /// 읽는다(`coretext_raster.zig`) — 이 갈래가 그것의 Windows 짝이다.
+    pub fn rasterizeGlyphAtSize(
+        self: *Rasterizer,
+        choice: GlyphChoice,
+        em_size_px: f32,
+        cell_w: u32,
+        cell_h: u32,
+        bytes_per_row: usize,
+        pixels: []u8,
+        scratch: []u8,
+    ) Error!u32 {
         if (bytes_per_row < @as(usize, cell_w) * 4) return error.BufferTooSmall;
         if (pixels.len < bytes_per_row * cell_h) return error.BufferTooSmall;
         if (choice.face_index >= self.face_count) return error.FontFaceFailed;
@@ -900,7 +917,7 @@ pub const Rasterizer = struct {
 
         const run = GlyphRun{
             .font_face = use_face,
-            .font_em_size = self.em_size_px,
+            .font_em_size = em_size_px,
             .glyph_count = 1,
             .glyph_indices = &glyph,
             .glyph_advances = null,

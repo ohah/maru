@@ -251,16 +251,24 @@ async function mount() {
     ligatures: $<HTMLInputElement>("o-lig").checked,
     theme: allThemes[$<HTMLSelectElement>("o-theme").value] ?? Object.values(allThemes)[0],
   });
-  term.onData(onBytes);
-  // 조합을 이 셸이 그린다고 알린다 — 구독하면 라이브러리는 화면에 넣지 않는다.
-  term.onPreedit((text) => {
-    preedit = text;
-    void redraw();
-  });
+  // 바이트 출처 — 가짜 셸이거나 진짜 PTY 다. 라이브러리 입장에서는 둘 다 "호스트" 일 뿐이다.
+  const usePty = $<HTMLSelectElement>("o-source").value === "pty";
+  if (!usePty) {
+    term.onData(onBytes);
+    // 조합을 이 셸이 그린다고 알린다 — 구독하면 라이브러리는 화면에 넣지 않는다.
+    // **PTY 모드에서는 구독하지 않는다** — 줄을 다시 그리는 건 진짜 셸(readline)의 일이다.
+    term.onPreedit((text) => {
+      preedit = text;
+      void redraw();
+    });
+  }
   term.onFallback((r) => console.warn("워커 폴백:", r));
   await term.open($("host"));
-  term.write(BANNER);
-  prompt();
+  if (usePty) connectPty();
+  else {
+    term.write(BANNER);
+    prompt();
+  }
   watchIme();
   (globalThis as { __term?: TerminalT }).__term = term; // 콘솔에서 터미널을 만져볼 수 있게 노출한다
 }
@@ -331,6 +339,7 @@ live(
     if (t) term.setTheme(t);
   },
 );
+$<HTMLSelectElement>("o-source").addEventListener("change", mount); // 바이트 출처가 바뀌면 새로 연다
 $<HTMLSelectElement>("o-worker").addEventListener("change", mount); // 모드는 재마운트가 필요하다
 $<HTMLSelectElement>("o-grid").addEventListener("change", mount); // 격자 고정/자동 전환도 마찬가지
 $<HTMLInputElement>("o-jet").addEventListener("change", mount); // 폰트 로드는 마운트 시점에 정해진다
@@ -357,6 +366,29 @@ $("bench").addEventListener("click", async () => {
   const ms = performance.now() - t0;
   $("stat").textContent = `${((400 * chunk.length) / ms / 1000).toFixed(1)} MB/s`;
 });
+
+/**
+ * 진짜 PTY 에 붙는다. **이게 라이브러리가 실제로 쓰이는 형태다** — `onData` 로 나온 바이트를
+ * 그대로 소켓에 보내고, 소켓이 준 바이트를 그대로 `write()` 한다. 그 사이에 아무 해석도 없다.
+ */
+function connectPty(): void {
+  const ws = new WebSocket(`ws://${location.host}/pty`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    const { cols, rows } = term.size;
+    ws.send(JSON.stringify({ resize: [cols, rows] }));
+  };
+  ws.onmessage = (e) => term.write(new Uint8Array(e.data as ArrayBuffer));
+  ws.onclose = () => term.write("\r\n\x1b[31m[PTY 끊김]\x1b[0m\r\n");
+  term.onData((bytes) => {
+    $("bytes").textContent = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join(" ");
+    if (ws.readyState === WebSocket.OPEN) ws.send(bytes.slice().buffer);
+  });
+  // 격자가 바뀌면 알린다 — 안 하면 vim 이 옛 크기로 그린다.
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ resize: [cols, rows] }));
+  });
+}
 
 /* IME 이벤트를 그대로 찍는다 — 브라우저마다 조합 취소를 다르게 알린다. */
 function watchIme() {

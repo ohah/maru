@@ -205,6 +205,13 @@
     <hr />
     <h2>모드</h2>
     <div class="row">
+      <label>바이트 출처</label>
+      <select id="o-source">
+        <option value="fake">가짜 셸 (데모 내장)</option>
+        <option value="pty">진짜 PTY (WebSocket)</option>
+      </select>
+    </div>
+    <div class="row">
       <select id="o-worker">
         <option value="full">worker: full (기본)</option>
         <option value="false">worker: false (메인)</option>

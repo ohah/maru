@@ -15099,7 +15099,11 @@ pub const AppSession = struct {
                         while (i < count) : (i += 1) {
                             var oid_buf: [16]u8 = undefined;
                             const oid = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
-                            self.turn_ring.push(oid, 1, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                            // **세션도 번갈아 심는다**(2026-08-23). 하나만 심으면 세션 순번(`claude #2`)이
+                            // 붙지 않는 경로만 찍혀, 같은 저장소에 에이전트가 둘일 때의 화면을 캡처로
+                            // 확인할 수 없다 — 그 표시가 있는 이유가 바로 그 상황이다.
+                            const surface: u64 = if (i % 2 == 0) 1 else 2;
+                            self.turn_ring.push(oid, surface, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
                         }
                     }
                 }

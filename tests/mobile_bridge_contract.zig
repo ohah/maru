@@ -876,6 +876,64 @@ test "재현: 커서가 숨으면 아무 데나 두드려도 키보드가 올라
     bridge.maru_mobile_clear_error();
 }
 
+// **끝난 것을 진행 중이라고 말하지 않는다.** 끊긴 상태(`CLOSED`)가 "아직 이유 이름이 없는 진행
+// 상태" 갈래로 떨어져, 끊어 놓고 **"붙는 중..." 을 띄웠다** — 사용자는 앱이 알아서 다시 붙는
+// 줄 안다.
+test "끊긴 상태는 붙는 중이 아니라 끊겼다고 말한다" {
+    endAnyGesture();
+    bridge.maru_mobile_set_ssh_status(12, "", 0); // MARU_SSH_STATE_CLOSED
+    const msg = bridge.connectionMessageNow() orelse return error.TestUnexpectedResult;
+    const connecting = maru.i18n.tIn(.ko, .mob_conn_connecting);
+    try std.testing.expect(!std.mem.eql(u8, msg, connecting));
+    try std.testing.expectEqualStrings(maru.i18n.tIn(.ko, .mob_conn_ended), msg);
+
+    bridge.maru_mobile_set_ssh_status(0, "", 0);
+    bridge.maru_mobile_clear_error();
+}
+
+// **끊는 자리는 늘 있다.** 뒤로가기는 화면만 빠져나오고 연결은 그대로 두므로(목록으로 돌아가도
+// 세션은 산다), 사용자 뜻으로 놓을 길이 따로 필요하다 — 그것이 없어 앱을 죽이는 것 말고는
+// 끊을 방법이 없었다(사용자 요청).
+test "끊는 자리를 두드리면 host 가 가져갈 요청이 선다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_take_disconnect(); // 앞선 요청을 비운다
+    bridge.maru_mobile_clear_error();
+
+    // **자리를 손으로 적지 않는다** — 브리지가 그린 자리를 그대로 묻는다.
+    const at = bridge.terminalDisconnectCenter() orelse return error.TestUnexpectedResult;
+
+    // 누르기만 해서는 안 나간다 — 뗀 것이 탭일 때만이다.
+    bridge.maru_mobile_pointer(0, 0, at.x, at.y, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
+    bridge.maru_mobile_pointer(2, 0, at.x, at.y, now());
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_disconnect());
+
+    // **한 번 가져가면 사라진다** — 안 그러면 host 가 프레임마다 펌프를 세운다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
+
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
+// **밀면 안 끊는다.** 그 띠에서 손가락을 끌면 누르려던 것이 아니라 다른 것을 하려던 것이다 —
+// 끊는 일은 되돌릴 수 없으니 다른 버튼보다 더 확실할 때만 나가야 한다.
+test "끊는 자리에서 손가락을 끌면 안 끊는다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_take_disconnect();
+    bridge.maru_mobile_clear_error();
+
+    const at = bridge.terminalDisconnectCenter() orelse return error.TestUnexpectedResult;
+    bridge.maru_mobile_pointer(0, 0, at.x, at.y, now());
+    bridge.maru_mobile_pointer(1, 0, at.x, at.y + 80, now()); // 임계를 넘겨 끈다
+    bridge.maru_mobile_pointer(2, 0, at.x, at.y + 80, now());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
+
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
 // 키 `index` 의 한가운데. **자리를 손으로 적지 않는다** — 브리지가 그린 자리를 그대로 묻는다
 // (적어 두면 레이아웃이 바뀔 때 테스트만 맞고 제품이 틀리게 된다).
 /// 키바를 **끝까지 민다.** 키가 손가락 크기(44)라 폰 폭을 넘치므로 오른쪽 키(`copy` 등)는

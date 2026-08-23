@@ -117,6 +117,7 @@ static void recreateVulkan(struct android_app *app);
 static void drainConfigWrite(struct android_app *app);
 static void syncInputKind(void);
 static void raiseKeyboardIfAsked(void);
+static void disconnectIfAsked(void);
 static void startSshIfAsked(void);
 static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
 static void publishPublicKey(struct android_app *app);
@@ -753,6 +754,7 @@ static void drawFrame(void) {
     if (g_app) drainConfigWrite(g_app);
     syncInputKind(); // 입력 대상이 바뀌면 키보드도 바꾼다
     raiseKeyboardIfAsked();
+    disconnectIfAsked();
     startSshIfAsked(); // 붙어 달라는 요청이 있으면 여기서 시작한다
     drainPassword(); // 사용자가 친 비밀번호를 펌프로 넘긴다
     drainHostKeyDecision(); // 지문 승인·거절도 같은 자리에서 나른다
@@ -1333,6 +1335,18 @@ static void raiseKeyboardIfAsked(void) {
     if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
     (*vm)->DetachCurrentThread(vm);
     LOGI("MARU_INPUT keyboard_raised");
+}
+
+/// 끊어 달라는 요청을 실행한다. **펌프만 세운다** — 화면은 상태가 바뀌는 것을 보고 저절로
+/// 따라가므로 여기서 화면을 밀지 않는다(두 곳이 같은 일을 하면 어긋난다).
+static void disconnectIfAsked(void) {
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int want = maru_mobile_take_disconnect();
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (!want) return;
+    if (!maru_ssh_pump_is_running()) return; // 이미 끊겼다 — 부를 것이 없다
+    LOGI("MARU_SSH disconnect_requested");
+    maru_ssh_pump_stop();
 }
 
 /// **붙어 달라는 요청을 실행한다.** 어느 서버인지는 브리지가 말하고(config 가 단일 출처,

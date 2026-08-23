@@ -166,7 +166,10 @@ const inventory = [_]Entry{
     // **원장은 늘 실측으로 적는다.** 여기서 한 번 38 로 적었다가 CI 가 37 이라고 알려 줬다 —
     // 눈으로 센 수를 적으면 그 차이만큼 게이트가 헐거워진다.
     // 41: 원격 축이 꺼진 이유를 갈라 적으면서 셋이 늘었다(계약 §4a — 127·다른 코드·폴백).
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 41 },
+    // 42: 앱 바에 **끊는 자리**가 생겼다. 그 글자도 다른 앱 바 글자와 같은 자리에서 나온다 —
+    //     모바일 UI 는 아직 언어 해상도를 안 거치고 `.ko` 를 박는다(위 주석의 그 이유).
+    // 43: 끊긴 상태를 "붙는 중" 과 갈라 말한다 — 상태만으로 갈리는 자리라 문구가 하나 늘었다.
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 43 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
     .{ .path = "src/platform/mobile/mobile_config.zig", .count = 8 },
     // 골든 캡처용 실행 파일. 한국어 화면을 찍는 것이 목적이라 프로세스째 `ko` 로 박는다 —

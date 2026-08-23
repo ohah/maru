@@ -22,6 +22,8 @@ Maru 작업에서 사용하는 기본 명령이다.
 
 ## 빌드와 테스트
 
+- 영속 세션 호스트 P5c3c-3a1 TTY output/chord/deadline 집중 gate: `zig build test-session-host-3a1` (P5c3c-2b3을 상속하고 OS-neutral detach chord·stdout progress와 macOS 전용 final-address `DedicatedOutput`을 각각 Debug·ReleaseFast 3개, boundary 1개와 executable test-name sentinel로 검증한다. 전용 output은 `ttyname_r(stdout)` 경로를 `O_WRONLY|O_NOCTTY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW`로 다시 열고 open 전후 stdout 및 새 fd의 character-device/`st_rdev`, inherited stdout status flags 불변을 확인한다. path/flags/세 fstat/open/identity 실패 주입은 publication 0과 새 fd exact close를, 실제 `openpty`는 별도 open-file-description·nonblocking·close-on-exec·stdout flags 불변·전용 fd만 close를 고정한다. 이 gate의 product caller는 exact 0이며 pre-raw owner와 raw commit은 3a2 전에는 구현됐다고 보지 않는다.)
+
 - 파일 패널 웹 의존성 설치: `bun install --cwd web --frozen-lockfile`
 - 파일 패널 zntc 번들+SRI+production third-party notice 검증: `mise run web:build`
 - 파일 패널 renderer/sanitizer 테스트: `mise run web:test`

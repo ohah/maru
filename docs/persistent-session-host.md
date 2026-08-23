@@ -14656,6 +14656,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         64-byte leave reserve와 poll storage까지 모두 할당·검증되고 첫 poll turn을 allocation 없이 즉시 실행할 수
         있어야 한다. `POLLOUT=0`에서 zero-byte current를 계속 교체하는 fixture는 blocked epoch clock이
         reset되지 않고 최초 activation+30초에 exact 만료함을 고정한다.
+        3a는 실패 선형화가 다른 두 merge gate다. **3a1**은 OS-neutral
+        `external_detach_chord.zig`와 `external_stdout_progress.zig`, injected/actual-fd
+        `external_tty_output.zig`만 소유한다. chord는 `idle|prefix_wait` raw state와 1초 absolute
+        deadline 하나만 가지며 controller의 최대 2-byte forwarding과 observer의 non-chord suppression을
+        같은 reducer에서 결정한다. stdout progress는 current frame의 activation/last-progress/offset/len을
+        소유한다. 첫 byte 전에는 activation+30초만 deadline이고, 첫 write 뒤에는 last-progress+10초와
+        activation+30초 중 이른 값이다. offset 0 replacement만 activation과 아직-없음인 last-progress를
+        상속한다. **3a2**는 3a1의 전용 output과 2b3
+        `ExternalPumpOwner`, initialized attachment screen, initial repaint, enter/leave reserve와 poll storage를
+        한 final-address pre-raw owner에 모은 뒤에만 `RawTty.enter`와 enter write를 commit한다. 3a1과 3a2가
+        모두 green이기 전에는 3a 완료나 raw TTY 제품 loop를 주장하지 않는다.
       - **P5c3c-3b — integrated stack owner**: `RawTty`, ANSI queue, resize, chord, signal self-pipe와
         `Client.external_pump`를 한 stack owner에 묶는다. controller/observer/revoke/partial stdout·wire를
         injected poll/clock과 실제 `openpty` child로 검증한다. cleanup 진입 시 `in_flight_control != null`이거나

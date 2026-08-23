@@ -13,6 +13,14 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn openpty(
+    amaster: *c.fd_t,
+    aslave: *c.fd_t,
+    name: ?[*]u8,
+    termp: ?*const posix.termios,
+    winp: ?*const posix.winsize,
+) c_int;
+const darwin_tiocswinsz: c_int = @bitCast(@as(u32, 0x80087467));
 
 const ProductRxOrderEvent = if (builtin.is_test) enum {
     recv_bytes,
@@ -146,7 +154,10 @@ const client_mod = @import("client.zig");
 const compatibility = @import("compatibility.zig");
 const external_attach = @import("external_attach.zig");
 const external_attach_evidence = @import("external_attach_evidence.zig");
+const external_ansi = @import("external_ansi.zig");
 const external_rx_intent = @import("external_rx_intent.zig");
+const external_tty = @import("external_tty.zig");
+const external_tty_output = @import("external_tty_output.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const remote_attachment = @import("remote_attachment.zig");
@@ -502,28 +513,366 @@ pub const ExternalPumpOwner = struct {
         return .{ .hint = self.storage.pollHint() };
     }
 
+    fn socketPollFd(self: *const ExternalPumpOwner) ?c.fd_t {
+        if (!self.addressValid() or self.lifecycle != .live) return null;
+        return self.storage.pollSocketFd();
+    }
+
     pub fn teardown(self: *ExternalPumpOwner) TeardownResult {
         if (self.saved_self_addr == 0 and self.lifecycle == .empty)
             return .already_dead;
         if (!self.addressValid()) return .moved;
         if (self.lifecycle == .dead) return .already_dead;
-        if (self.lifecycle != .live) return .busy;
-        self.lifecycle = .tearing_down;
-        // RemoteAttachment releases every held charged lease and drops its stream before the
-        // storage begins ledger final-zero and Client committed cleanup.
-        self.attachment.deinit();
+        if (self.lifecycle == .live) {
+            self.lifecycle = .tearing_down;
+            // RemoteAttachment releases every held charged lease and drops its stream before the
+            // storage begins ledger final-zero and Client committed cleanup. A retry after
+            // transaction_busy must not deinit the attachment a second time.
+            self.attachment.deinit();
+        } else if (self.lifecycle != .tearing_down) return .busy;
         const result = self.storage.teardown(&self.cleanup_scratch);
-        self.lifecycle = .dead;
         return switch (result) {
-            .cleaned => .cleaned,
-            .cleaned_with_invariant => .cleaned_with_invariant,
-            .already_dead => .already_dead,
+            .cleaned => result: {
+                self.lifecycle = .dead;
+                break :result .cleaned;
+            },
+            .cleaned_with_invariant => result: {
+                self.lifecycle = .dead;
+                break :result .cleaned_with_invariant;
+            },
+            .already_dead => result: {
+                self.lifecycle = .dead;
+                break :result .already_dead;
+            },
             .moved_storage => .moved,
             .transaction_busy => .busy,
-            .quarantined => .quarantined,
+            .quarantined => result: {
+                self.lifecycle = .dead;
+                break :result .quarantined;
+            },
         };
     }
 };
+
+const PreRawLifecycle = enum(u8) {
+    empty,
+    preparing,
+    prepared,
+    committing,
+    live,
+    tearing_down,
+    dead,
+};
+
+pub const PreRawPrepareError = error{
+    DestinationNotEmpty,
+    InvalidAlias,
+    InvalidPrepared,
+    TtyInspectionFailed,
+    OutputRejected,
+    PumpRejected,
+    MissingScreen,
+    RepaintRejected,
+    InvalidPollSet,
+};
+
+pub const PreRawCommitError = error{
+    Moved,
+    InvalidLifecycle,
+    TerminalChanged,
+    RawEnterFailed,
+    EnterWriteFailed,
+    RestoreFailed,
+};
+
+pub const PreRawTeardownResult = enum {
+    cleaned,
+    cleaned_with_invariant,
+    already_dead,
+    moved,
+    busy,
+    restore_failed,
+    pump_busy,
+    pump_quarantined,
+};
+
+/// P5c3c-3a2 final-address owner. Preparation is mutation-free with respect to termios, signal
+/// dispositions, and ANSI output. Only `commit` may enter raw mode and publish the enter sequence.
+pub const PreRawOwner = struct {
+    saved_self_addr: usize = 0,
+    lifecycle: PreRawLifecycle = .empty,
+    inspection: external_tty.Inspection = undefined,
+    output: external_tty_output.DedicatedOutput = .{},
+    pump: ExternalPumpOwner = .{},
+    repaint: external_ansi.RepaintQueue = undefined,
+    repaint_initialized: bool = false,
+    pump_initialized: bool = false,
+    output_initialized: bool = false,
+    raw: ?external_tty.RawTty = null,
+    enter_reserve: [64]u8 = undefined,
+    enter_len: u7 = 0,
+    leave_reserve: [64]u8 = undefined,
+    leave_len: u7 = 0,
+    poll_fds: [4]posix.pollfd = undefined,
+    next_projection_sequence: u64 = 1,
+
+    pub fn prepareInPlace(
+        self: *PreRawOwner,
+        prepared: *external_attach.Prepared,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stdin_fd: c.fd_t,
+        stdout_fd: c.fd_t,
+    ) PreRawPrepareError!void {
+        if (self.saved_self_addr != 0 or self.lifecycle != .empty)
+            return error.DestinationNotEmpty;
+        if (rangesOverlap(
+            @intFromPtr(self),
+            @sizeOf(PreRawOwner),
+            @intFromPtr(prepared),
+            @sizeOf(external_attach.Prepared),
+        )) return error.InvalidAlias;
+
+        self.saved_self_addr = @intFromPtr(self);
+        self.lifecycle = .preparing;
+        errdefer self.abortPreparation();
+        self.inspection = external_tty.RawTty.inspect(stdin_fd) catch
+            return error.TtyInspectionFailed;
+        self.output.initInPlace(stdout_fd) catch return error.OutputRejected;
+        self.output_initialized = true;
+        self.pump.initInPlace(prepared) catch return error.PumpRejected;
+        self.pump_initialized = true;
+        const screen = if (self.pump.attachment.screen) |*value| value else return error.MissingScreen;
+        self.repaint = external_ansi.RepaintQueue.init(allocator);
+        self.repaint_initialized = true;
+        self.repaint.replaceLatest(
+            screen.screenSource(),
+            .{
+                .cols = self.inspection.initial_size.cols,
+                .rows = self.inspection.initial_size.rows,
+            },
+            io,
+            self.next_projection_sequence,
+        ) catch return error.RepaintRejected;
+        self.next_projection_sequence += 1;
+
+        @memcpy(self.enter_reserve[0..external_ansi.enter_bytes.len], external_ansi.enter_bytes);
+        self.enter_len = @intCast(external_ansi.enter_bytes.len);
+        @memcpy(self.leave_reserve[0..external_ansi.leave_bytes.len], external_ansi.leave_bytes);
+        self.leave_len = @intCast(external_ansi.leave_bytes.len);
+        const socket_fd = self.pump.socketPollFd() orelse return error.InvalidPollSet;
+        const output_fd = self.output.pollFd() catch return error.InvalidPollSet;
+        self.poll_fds = .{
+            .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = socket_fd, .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = output_fd, .events = posix.POLL.OUT, .revents = 0 },
+            .{ .fd = -1, .events = posix.POLL.IN, .revents = 0 },
+        };
+        if (!self.addressValid()) return error.InvalidPollSet;
+        self.lifecycle = .prepared;
+    }
+
+    pub fn commit(self: *PreRawOwner) PreRawCommitError!void {
+        var context = PosixWriteContext{};
+        return self.commitWithWriter(&context, posixWrite);
+    }
+
+    fn commitWithWriter(
+        self: *PreRawOwner,
+        write_context: *anyopaque,
+        write_fn: WriteFn,
+    ) PreRawCommitError!void {
+        if (!self.addressValid()) return error.Moved;
+        if (self.lifecycle != .prepared) return error.InvalidLifecycle;
+        // Resolve every fallible owner/output invariant before mutating termios. Once raw mode is
+        // entered, every remaining failure path must pass through leave+restore.
+        const output_fd = self.output.pollFd() catch return error.Moved;
+        self.lifecycle = .committing;
+        self.raw = external_tty.RawTty.enterPrepared(self.inspection) catch |err| {
+            self.lifecycle = .prepared;
+            return if (err == error.TerminalChanged)
+                error.TerminalChanged
+            else
+                error.RawEnterFailed;
+        };
+        self.poll_fds[3].fd = self.raw.?.wake_read_fd;
+        writeExactWith(
+            write_context,
+            write_fn,
+            output_fd,
+            self.enter_reserve[0..self.enter_len],
+        ) catch {
+            self.bestEffortLeaveWith(write_context, write_fn);
+            self.closeOutputBeforeRestore();
+            self.raw.?.restore() catch {
+                self.lifecycle = .tearing_down;
+                return error.RestoreFailed;
+            };
+            self.raw = null;
+            self.poll_fds[3].fd = -1;
+            // A partial enter sequence is not replay-safe. Retain the aggregate cleanup
+            // authority, but never admit a second commit after any enter-write failure.
+            self.lifecycle = .tearing_down;
+            return error.EnterWriteFailed;
+        };
+        self.lifecycle = .live;
+    }
+
+    pub fn pollSet(self: *PreRawOwner) PreRawCommitError!*[4]posix.pollfd {
+        if (!self.addressValid()) return error.Moved;
+        if (self.lifecycle != .live) return error.InvalidLifecycle;
+        return &self.poll_fds;
+    }
+
+    pub fn teardown(self: *PreRawOwner) PreRawTeardownResult {
+        if (self.saved_self_addr == 0 and self.lifecycle == .empty) return .already_dead;
+        if (!self.addressValid()) return .moved;
+        if (self.lifecycle == .dead) return .already_dead;
+        // `prepareInPlace` invokes the caller's allocator while repaint storage is being built.
+        // A reentrant teardown must not free that storage, the pump, or the output underneath the
+        // active allocation callback. Commit has the same closed transaction rule even though its
+        // product writer is POSIX-only; both transitions retain sole cleanup authority here.
+        if (self.lifecycle == .preparing or self.lifecycle == .committing) return .busy;
+        self.lifecycle = .tearing_down;
+        var terminal_result: PreRawTeardownResult = .cleaned;
+        if (self.raw) |*raw| {
+            self.bestEffortLeave();
+            // End this owner's dedicated output reference before TCSAFLUSH. On Darwin PTYs an
+            // already-consumed leave sequence can still leave tcsetattr waiting while another
+            // writer for the same slave remains open. Cleanup never writes ANSI after leave, so
+            // closing this independently-owned fd here is both the ownership boundary and the
+            // ordering required before termios restore.
+            self.closeOutputBeforeRestore();
+            raw.restore() catch return .restore_failed;
+            self.raw = null;
+            self.poll_fds[3].fd = -1;
+        }
+        if (self.repaint_initialized) {
+            self.repaint.deinit();
+            self.repaint_initialized = false;
+        }
+        if (self.pump_initialized) {
+            switch (self.pump.teardown()) {
+                .cleaned, .already_dead => self.pump_initialized = false,
+                .cleaned_with_invariant => {
+                    self.pump_initialized = false;
+                    terminal_result = .cleaned_with_invariant;
+                },
+                .busy => return .pump_busy,
+                .quarantined => {
+                    self.pump_initialized = false;
+                    terminal_result = .pump_quarantined;
+                },
+                .moved => return .moved,
+            }
+        }
+        if (self.output_initialized) {
+            self.output.deinit();
+            self.output_initialized = false;
+        }
+        self.lifecycle = .dead;
+        return terminal_result;
+    }
+
+    fn addressValid(self: *const PreRawOwner) bool {
+        if (self.saved_self_addr != @intFromPtr(self)) return false;
+        if (self.output_initialized) {
+            const fd = self.output.pollFd() catch return false;
+            if (fd < 0) return false;
+        }
+        if (self.pump_initialized and !self.pump.addressValid()) return false;
+        return self.enter_len <= self.enter_reserve.len and
+            self.leave_len <= self.leave_reserve.len;
+    }
+
+    fn abortPreparation(self: *PreRawOwner) void {
+        if (self.repaint_initialized) {
+            self.repaint.deinit();
+            self.repaint_initialized = false;
+        }
+        if (self.pump_initialized) {
+            switch (self.pump.teardown()) {
+                .cleaned, .cleaned_with_invariant, .already_dead, .quarantined => self.pump_initialized = false,
+                // Retain the cleanup authority and a retryable lifecycle. Never hide a live
+                // pump behind a dead pre-raw owner merely because preparation failed later.
+                .busy, .moved => {
+                    self.lifecycle = .tearing_down;
+                    return;
+                },
+            }
+        }
+        if (self.output_initialized) {
+            self.output.deinit();
+            self.output_initialized = false;
+        }
+        self.lifecycle = .dead;
+    }
+
+    fn bestEffortLeave(self: *PreRawOwner) void {
+        var context = PosixWriteContext{};
+        self.bestEffortLeaveWith(&context, posixWrite);
+    }
+
+    fn closeOutputBeforeRestore(self: *PreRawOwner) void {
+        if (!self.output_initialized) return;
+        self.output.deinit();
+        self.output_initialized = false;
+        self.poll_fds[2].fd = -1;
+    }
+
+    fn bestEffortLeaveWith(
+        self: *PreRawOwner,
+        write_context: *anyopaque,
+        write_fn: WriteFn,
+    ) void {
+        const fd = self.output.pollFd() catch return;
+        writeExactWith(
+            write_context,
+            write_fn,
+            fd,
+            self.leave_reserve[0..self.leave_len],
+        ) catch {};
+    }
+};
+
+const WriteOutcome = union(enum) {
+    bytes: usize,
+    interrupted,
+    failed,
+};
+
+const WriteFn = *const fn (*anyopaque, c.fd_t, []const u8) WriteOutcome;
+const PosixWriteContext = struct {};
+
+fn posixWrite(_: *anyopaque, fd: c.fd_t, bytes: []const u8) WriteOutcome {
+    const written = c.write(fd, bytes.ptr, bytes.len);
+    if (written > 0) return .{ .bytes = @intCast(written) };
+    if (written < 0 and posix.errno(written) == .INTR) return .interrupted;
+    return .failed;
+}
+
+fn writeExactWith(
+    context: *anyopaque,
+    write_fn: WriteFn,
+    fd: c.fd_t,
+    bytes: []const u8,
+) error{WriteFailed}!void {
+    var offset: usize = 0;
+    var attempts: u8 = 0;
+    while (offset < bytes.len) {
+        attempts = std.math.add(u8, attempts, 1) catch return error.WriteFailed;
+        if (attempts > 128) return error.WriteFailed;
+        switch (write_fn(context, fd, bytes[offset..])) {
+            .bytes => |written| {
+                if (written == 0 or written > bytes.len - offset)
+                    return error.WriteFailed;
+                offset += written;
+            },
+            .interrupted => continue,
+            .failed => return error.WriteFailed,
+        }
+    }
+}
 
 fn preparedAttachmentCanonical(attachment: *const remote_attachment.RemoteAttachment) bool {
     // A real attach already owns its initial screen. Binding is the only attachment field this
@@ -673,6 +1022,480 @@ const P5c3c2b3PreparedFixture = struct {
         self.peer_fd = -1;
     }
 };
+
+fn p5c3c3a2PreparedFixture(instance_id: u64) !P5c3c2b3PreparedFixture {
+    var fixture = try P5c3c2b3PreparedFixture.init(instance_id);
+    errdefer fixture.deinit();
+    try fixture.prepared.attachment.initScreen(screen_stream.codec_version);
+    return fixture;
+}
+
+fn readExactPty(fd: c.fd_t, destination: []u8) !void {
+    var offset: usize = 0;
+    while (offset < destination.len) {
+        var poll_fds = [_]posix.pollfd{.{
+            .fd = fd,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        }};
+        if (try posix.poll(&poll_fds, 5_000) != 1) return error.TestTimedOut;
+        const count = c.read(fd, destination.ptr + offset, destination.len - offset);
+        if (count > 0) {
+            offset += @intCast(count);
+            continue;
+        }
+        if (count < 0 and posix.errno(count) == .INTR) continue;
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn readExactPtyThread(fd: c.fd_t, destination: []u8) void {
+    readExactPty(fd, destination) catch @panic("PTY output reader failed");
+}
+
+fn waitP5c3c3a2ChildDeadline(pid: c.pid_t, timeout_ms: i64) !u32 {
+    var status: c_int = 0;
+    const started = std.Io.Timestamp.now(std.testing.io, .awake);
+    while (started.untilNow(std.testing.io, .awake).toMilliseconds() < timeout_ms) {
+        const result = c.waitpid(pid, &status, c.W.NOHANG);
+        if (result == pid) return @bitCast(status);
+        if (result < 0 and posix.errno(result) == .INTR) continue;
+        if (result < 0) return error.TestUnexpectedResult;
+        _ = usleep(10_000);
+    }
+    return error.TestTimedOut;
+}
+
+fn killP5c3c3a2ChildAndReap(pid: c.pid_t) void {
+    _ = c.kill(pid, posix.SIG.KILL);
+    _ = waitP5c3c3a2ChildDeadline(pid, 5_000) catch {};
+}
+
+test "p5c3c-3a2 pre-raw owner mutates no TTY or ANSI state before commit" {
+    const initial = std.mem.zeroes(posix.termios);
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        &initial,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    var fixture = try p5c3c3a2PreparedFixture(0x3a20);
+    defer fixture.deinit();
+    var owner: PreRawOwner = .{};
+    try owner.prepareInPlace(
+        &fixture.prepared,
+        std.testing.allocator,
+        std.testing.io,
+        slave,
+        slave,
+    );
+    const after_prepare = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&before),
+        std.mem.asBytes(&after_prepare),
+    );
+    var readable = [_]posix.pollfd{.{ .fd = master, .events = posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try posix.poll(&readable, 0));
+    try std.testing.expectEqual(PreRawLifecycle.prepared, owner.lifecycle);
+    try std.testing.expect(owner.repaint.current != null);
+    try std.testing.expectEqual(@as(u64, 0), fixture.prepared.attach_instance_id);
+    try std.testing.expectEqual(PreRawTeardownResult.cleaned, owner.teardown());
+}
+
+test "p5c3c-3a2 raw commit publishes exact enter and teardown restores with exact leave" {
+    const window: posix.winsize = .{ .row = 41, .col = 119, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        null,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    try std.testing.expect(before.lflag.ECHO and before.lflag.ICANON);
+
+    var ready: [2]c.fd_t = undefined;
+    var proceed: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&ready));
+    defer {
+        if (ready[0] >= 0) _ = c.close(ready[0]);
+        if (ready[1] >= 0) _ = c.close(ready[1]);
+    }
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&proceed));
+    defer {
+        if (proceed[0] >= 0) _ = c.close(proceed[0]);
+        if (proceed[1] >= 0) _ = c.close(proceed[1]);
+    }
+
+    const child = c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    var child_reaped = false;
+    errdefer if (!child_reaped) killP5c3c3a2ChildAndReap(child);
+    if (child == 0) {
+        _ = c.close(master);
+        _ = c.close(ready[0]);
+        _ = c.close(proceed[1]);
+        var fixture = p5c3c3a2PreparedFixture(0x3a21) catch c._exit(120);
+        var owner: PreRawOwner = .{};
+        owner.prepareInPlace(
+            &fixture.prepared,
+            std.heap.page_allocator,
+            std.testing.io,
+            slave,
+            slave,
+        ) catch c._exit(121);
+        owner.commit() catch c._exit(122);
+        const poll_set = owner.pollSet() catch c._exit(123);
+        if (poll_set[0].fd != slave or poll_set[1].fd < 0 or
+            poll_set[2].fd < 0 or poll_set[3].fd < 0)
+            c._exit(124);
+        const marker = [1]u8{1};
+        if (c.write(ready[1], &marker, marker.len) != marker.len) c._exit(125);
+        var acknowledgement: [1]u8 = undefined;
+        while (true) {
+            const count = c.read(proceed[0], &acknowledgement, acknowledgement.len);
+            if (count == 1) break;
+            if (count < 0 and posix.errno(count) == .INTR) continue;
+            c._exit(126);
+        }
+        if (owner.teardown() != .cleaned) c._exit(127);
+        c._exit(0);
+    }
+
+    _ = c.close(ready[1]);
+    ready[1] = -1;
+    _ = c.close(proceed[0]);
+    proceed[0] = -1;
+    var ready_poll = [_]posix.pollfd{.{
+        .fd = ready[0],
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+    if (try posix.poll(&ready_poll, 5_000) != 1) return error.TestTimedOut;
+    var marker: [1]u8 = undefined;
+    if (c.read(ready[0], &marker, marker.len) != marker.len) return error.TestUnexpectedResult;
+    const during = try posix.tcgetattr(slave);
+    try std.testing.expect(!during.lflag.ECHO and !during.lflag.ICANON);
+    if (c.write(proceed[1], &marker, marker.len) != marker.len)
+        return error.TestUnexpectedResult;
+
+    var tty_bytes: [external_ansi.enter_bytes.len + external_ansi.leave_bytes.len]u8 = undefined;
+    try readExactPty(master, &tty_bytes);
+    const status = try waitP5c3c3a2ChildDeadline(child, 5_000);
+    child_reaped = true;
+    try std.testing.expect(c.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(c_int, 0), c.W.EXITSTATUS(status));
+    try std.testing.expectEqualSlices(
+        u8,
+        external_ansi.enter_bytes,
+        tty_bytes[0..external_ansi.enter_bytes.len],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        external_ansi.leave_bytes,
+        tty_bytes[external_ansi.enter_bytes.len..],
+    );
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+}
+
+test "p5c3c-3a2 commit rejects TTY drift before raw mutation and remains cleanable" {
+    const initial = std.mem.zeroes(posix.termios);
+    const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        &initial,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    var fixture = try p5c3c3a2PreparedFixture(0x3a22);
+    defer fixture.deinit();
+    var owner: PreRawOwner = .{};
+    try owner.prepareInPlace(
+        &fixture.prepared,
+        std.testing.allocator,
+        std.testing.io,
+        slave,
+        slave,
+    );
+    var drifted: posix.winsize = .{ .row = 38, .col = 114, .xpixel = 0, .ypixel = 0 };
+    try std.testing.expectEqual(@as(c_int, 0), c.ioctl(master, darwin_tiocswinsz, &drifted));
+    try std.testing.expectError(error.TerminalChanged, owner.commit());
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+    try std.testing.expectEqual(PreRawLifecycle.prepared, owner.lifecycle);
+    try std.testing.expectEqual(PreRawTeardownResult.cleaned, owner.teardown());
+}
+
+const P5c3c3a2PartialEnterWriter = struct {
+    calls: usize = 0,
+    saw_leave: bool = false,
+
+    fn write(raw: *anyopaque, _: c.fd_t, bytes: []const u8) WriteOutcome {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.calls += 1;
+        return switch (self.calls) {
+            1 => .interrupted,
+            2 => .{ .bytes = 1 },
+            3 => .failed,
+            4 => result: {
+                self.saw_leave = std.mem.eql(u8, bytes, external_ansi.leave_bytes);
+                break :result .{ .bytes = bytes.len };
+            },
+            else => .failed,
+        };
+    }
+};
+
+test "p5c3c-3a2 partial enter write restores TTY and keeps terminal cleanup authority" {
+    const window: posix.winsize = .{ .row = 42, .col = 120, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        null,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    var fixture = try p5c3c3a2PreparedFixture(0x3a23);
+    defer fixture.deinit();
+    var owner: PreRawOwner = .{};
+    try owner.prepareInPlace(
+        &fixture.prepared,
+        std.testing.allocator,
+        std.testing.io,
+        slave,
+        slave,
+    );
+    var writer = P5c3c3a2PartialEnterWriter{};
+    try std.testing.expectError(
+        error.EnterWriteFailed,
+        owner.commitWithWriter(&writer, P5c3c3a2PartialEnterWriter.write),
+    );
+    try std.testing.expectEqual(@as(usize, 4), writer.calls);
+    try std.testing.expect(writer.saw_leave);
+    try std.testing.expectEqual(PreRawLifecycle.tearing_down, owner.lifecycle);
+    try std.testing.expect(!owner.output_initialized);
+    try std.testing.expectEqual(@as(c.fd_t, -1), owner.poll_fds[2].fd);
+    try std.testing.expectError(error.InvalidLifecycle, owner.commit());
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+    try std.testing.expectEqual(PreRawTeardownResult.cleaned, owner.teardown());
+}
+
+test "p5c3c-3a2 repaint allocation failure consumes or cleans every owner without raw mutation" {
+    const window: posix.winsize = .{ .row = 43, .col = 121, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        null,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    var fixture = try p5c3c3a2PreparedFixture(0x3a24);
+    defer fixture.deinit();
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var owner: PreRawOwner = .{};
+    try std.testing.expectError(error.RepaintRejected, owner.prepareInPlace(
+        &fixture.prepared,
+        failing.allocator(),
+        std.testing.io,
+        slave,
+        slave,
+    ));
+    try std.testing.expectEqual(@as(u64, 0), fixture.prepared.attach_instance_id);
+    try std.testing.expectEqual(PreRawLifecycle.dead, owner.lifecycle);
+    try std.testing.expectEqual(PreRawTeardownResult.already_dead, owner.teardown());
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+    var readable = [_]posix.pollfd{.{ .fd = master, .events = posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try posix.poll(&readable, 0));
+}
+
+const P5c3c3a2ReentrantAllocator = struct {
+    parent: std.mem.Allocator,
+    owner: ?*PreRawOwner = null,
+    teardown_result: ?PreRawTeardownResult = null,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.teardown_result == null)
+            self.teardown_result = self.owner.?.teardown();
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "p5c3c-3a2 repaint allocator teardown reentry is busy and preserves the final owner" {
+    const window: posix.winsize = .{ .row = 44, .col = 122, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        null,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    var fixture = try p5c3c3a2PreparedFixture(0x3a25);
+    defer fixture.deinit();
+    var owner: PreRawOwner = .{};
+    var reentrant = P5c3c3a2ReentrantAllocator{
+        .parent = std.testing.allocator,
+        .owner = &owner,
+    };
+    try owner.prepareInPlace(
+        &fixture.prepared,
+        reentrant.allocator(),
+        std.testing.io,
+        slave,
+        slave,
+    );
+    try std.testing.expectEqual(PreRawTeardownResult.busy, reentrant.teardown_result.?);
+    try std.testing.expectEqual(PreRawLifecycle.prepared, owner.lifecycle);
+    try std.testing.expectEqual(PreRawTeardownResult.cleaned, owner.teardown());
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+}
+
+const P5c3c3a2CommitReentrantWriter = struct {
+    owner: *PreRawOwner,
+    teardown_result: ?PreRawTeardownResult = null,
+
+    fn write(raw: *anyopaque, fd: c.fd_t, bytes: []const u8) WriteOutcome {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.teardown_result == null)
+            self.teardown_result = self.owner.teardown();
+        return posixWrite(raw, fd, bytes);
+    }
+};
+
+test "p5c3c-3a2 enter writer teardown reentry is busy until commit publishes live" {
+    const window: posix.winsize = .{ .row = 45, .col = 123, .xpixel = 0, .ypixel = 0 };
+    var master: c.fd_t = -1;
+    var slave: c.fd_t = -1;
+    try std.testing.expectEqual(@as(c_int, 0), openpty(
+        &master,
+        &slave,
+        null,
+        null,
+        &window,
+    ));
+    defer _ = c.close(master);
+    defer _ = c.close(slave);
+    const before = try posix.tcgetattr(slave);
+    var fixture = try p5c3c3a2PreparedFixture(0x3a26);
+    defer fixture.deinit();
+    var owner: PreRawOwner = .{};
+    try owner.prepareInPlace(
+        &fixture.prepared,
+        std.testing.allocator,
+        std.testing.io,
+        slave,
+        slave,
+    );
+    var writer = P5c3c3a2CommitReentrantWriter{ .owner = &owner };
+    try owner.commitWithWriter(&writer, P5c3c3a2CommitReentrantWriter.write);
+    try std.testing.expectEqual(PreRawTeardownResult.busy, writer.teardown_result.?);
+    try std.testing.expectEqual(PreRawLifecycle.live, owner.lifecycle);
+    var enter: [external_ansi.enter_bytes.len]u8 = undefined;
+    try readExactPty(master, &enter);
+    try std.testing.expectEqualSlices(u8, external_ansi.enter_bytes, &enter);
+
+    var leave: [external_ansi.leave_bytes.len]u8 = undefined;
+    const leave_reader = try std.Thread.spawn(.{}, readExactPtyThread, .{ master, &leave });
+    const teardown_result = owner.teardown();
+    leave_reader.join();
+    try std.testing.expectEqual(PreRawTeardownResult.cleaned, teardown_result);
+    try std.testing.expectEqualSlices(u8, external_ansi.leave_bytes, &leave);
+    const after = try posix.tcgetattr(slave);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before), std.mem.asBytes(&after));
+}
 
 const P5c3c2b3BindDriftAllocator = struct {
     parent: std.mem.Allocator,

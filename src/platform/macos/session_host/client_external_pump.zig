@@ -20885,6 +20885,19 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
+    /// Read-only descriptor projection for the final external-mode owner. Raw Client storage never
+    /// escapes the mechanics module.
+    pub fn pollSocketFd(self: *const ExternalPumpStorage) ?c.fd_t {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
+            !ownerIncarnationValid(self)) return null;
+        const client = if (self.owned_client) |*owned| owned else return null;
+        return switch (client.io_mode) {
+            .external => if (client.fd >= 0) client.fd else null,
+            .blocking => null,
+        };
+    }
+
     /// Read-only wake/deadline projection. Recovery, TX, and control expose one immediate bit and the
     /// earliest absolute deadline, while an incomplete product owner fails closed.
     pub fn pollHint(self: *const ExternalPumpStorage) client_pump.PollHint {

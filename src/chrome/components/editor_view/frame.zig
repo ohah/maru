@@ -570,12 +570,27 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 통째로 안 그려진다. 그런데 `scrollbar.build`는 op이 0이어도 **기하는 그대로 반환**하므로
     // 히트테스트는 살아 있다 — "안 보이는데 드래그는 되는" 상태가 된다.
     //
-    // 도달 가능한 수치다(적대적 검증 2026-08-23 실측): 이 저장소의 `app_session.zig`에서 공백
-    // 한 칸을 검색하면 80행×160열 창에서 그려질 마크가 **3,120개**이고 예산은 2,560이다.
+    // 도달 가능한 수치다(적대적 검증 2026-08-23 실측). 이 저장소의 `app_session.zig`에서 공백
+    // 한 칸을 검색할 때 80행×160열 창에 그려질 마크 수:
+    //
+    // | 통계 | 값 |
+    // |---|---|
+    // | 중앙값 | 720 |
+    // | 2,560 초과 창 | **0.4%**(64,792개 중 271개) |
+    // | 최댓값 | **3,120**(16,130줄부터) |
+    //
+    // **전형값이 아니라 꼬리다** — 그래도 막는 이유는 그 꼬리에서 나는 증상이 "안 보이는데
+    // 드래그는 되는" 상태여서다. 그리고 **검색이 실제로 쓸 수 있는 자리는 2,560이 아니라
+    // 앞 층들을 뺀 ≈2,238**이므로(행마다 배경·본문·gutter·밴드·선택이 먼저 먹는다) 넘침은
+    // 위 표보다 조금 일찍 시작한다.
     //
     // 예약은 **두 개**면 충분하다 — 세로·가로 막대가 각각 정확히 op 하나를 쓴다(`scrollbar.zig`의
-    // 두 `return .{ .ops = 1, ... }`). 잘리는 쪽은 검색 강조이고, 그쪽은 잘려도 **화면이 조용히
-    // 덜 말할 뿐** 조작이 거짓이 되지는 않는다.
+    // 두 `return .{ .ops = 1, ... }`이 유일한 방출 지점이고 트랙·캡을 안 그린다). 잘리는 쪽은
+    // 검색 강조이고, 그쪽은 잘려도 **화면이 조용히 덜 말할 뿐** 조작이 거짓이 되지는 않는다.
+    //
+    // **이 예약은 검색 층에만 걸린다.** 앞의 배경·본문·gutter·밴드·선택은 여전히 무예약이라,
+    // 그쪽이 먼저 다 먹으면 막대는 그대로 굶는다(기존 상태이고 이 슬라이스가 만든 것이 아니다).
+    // 검색만 예약하는 이유는 **줄당 개수에 상한이 없는 층이 그것뿐**이어서다.
     const find_base = bg.ops + cw.ops + gw.ops + band_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
     const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
@@ -770,17 +785,53 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
 fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
     const rows = props.search_marks orelse return 0;
     var n: usize = 0;
+
+    // ── 1) 현재 매치 먼저 ────────────────────────────────────────────────────
+    //
+    // **행 루프 밖에서 따로 돈다.** 초판은 "그 줄 안에서" 현재 매치를 앞으로 당겼는데, 그것으로는
+    // **예산이 그 행에 닿기 전에 마르는 경우**를 못 막는다 — 실측 조건(80행, 행당 39마크)에서
+    // 대략 58행째에 마르고, 현재 매치가 그 아래면 그대로 떨어진다. 그러면 주변 매치는 보통 색으로
+    // 남고 **현재 위치 표시만 없는 화면**이 된다: Enter가 어디로 갈지 화면이 말해 주지 못한다.
+    //
+    // 먼저 한 번 돌면 현재 매치는 **op이 하나라도 남아 있는 한** 그려진다(2라운드 적대적 검증이
+    // 실측으로 잡았다 — `ops`를 6·8·9로 좁혀 보면 초판은 셋 다 현재 매치가 0개였다).
+    //
+    // 랩된 줄은 조각마다 이 루프를 지나지만 `paintRowMarks`가 각 조각의 열 범위로 클립하므로
+    // 실제로 quad가 나는 조각은 하나다.
+    if (props.search_current) |cur| {
+        for (visual, 0..) |v, i| {
+            if (n >= out.len) break;
+            const idx = props.first_line + v.line;
+            if (idx != cur.line or idx >= rows.len or idx >= props.lines.len) continue;
+            const marks = rows[idx];
+            const k = for (marks, 0..) |m, mi| {
+                if (m.start == cur.start) break mi;
+            } else continue;
+            n += paintRowMarks(props, layout, .{
+                .line = props.lines[idx],
+                .row_start_col = v.start_col,
+                .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
+                .marks = marks[k .. k + 1],
+                .role = .search_match_current,
+                .alpha = search_current_alpha,
+            }, out[n..], scratch_cols);
+        }
+    }
+
+    // ── 2) 나머지 ────────────────────────────────────────────────────────────
+    //
+    // **셋으로 나눠 같은 함수를 부른다.** 열 계산이 한 곳에 있어야 한다는 규칙(§4.1c)이 여기서도
+    // 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
     for (visual, 0..) |v, i| {
         if (n >= out.len) break;
         const idx = props.first_line + v.line;
         if (idx >= rows.len or idx >= props.lines.len) continue;
         const marks = rows[idx];
         if (marks.len == 0) continue;
-        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         const paint = RowMarkPaint{
             .line = props.lines[idx],
             .row_start_col = v.start_col,
-            .y = y,
+            .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
             .marks = marks,
             .role = .search_match,
             .alpha = search_alpha,
@@ -804,22 +855,10 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
             continue;
         };
 
-        // **셋으로 나눠 같은 함수를 세 번 부른다.** 열 계산이 한 곳에 있어야 한다는 규칙(§4.1c)이
-        // 여기서도 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
-        //
-        // **현재 매치를 먼저 그린다.** 초판은 그 줄의 앞선 매치들을 먼저 그렸는데, 예산이 앞에서
-        // 끝나면 **현재 매치만 빠지고 주변 매치는 보통 색으로 남았다** — "현재 위치 표시만 없는
-        // 화면"이라 Enter가 어디로 갈지 화면이 말해 주지 못한다(적대적 검증 2026-08-23).
-        // 순서를 뒤집으면 예산이 마를 때 잃는 것이 **주변 매치**가 된다. 그쪽이 덜 나쁘다.
-        var p_cur = paint;
-        p_cur.marks = marks[k .. k + 1];
-        p_cur.role = .search_match_current;
-        p_cur.alpha = search_current_alpha;
-        n += paintRowMarks(props, layout, p_cur, out[n..], scratch_cols);
-
+        // 그 하나는 위에서 이미 그렸다 — 앞뒤만 채운다.
         var p_before = paint;
         p_before.marks = marks[0..k];
-        if (p_before.marks.len > 0 and n < out.len) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols);
+        if (p_before.marks.len > 0) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols);
 
         var p_after = paint;
         p_after.marks = marks[k + 1 ..];
@@ -2356,4 +2395,72 @@ test "SRCH2 매치가 예산을 말려도 스크롤바는 선다 — 안 보이�
     // 그리고 그 자리는 기하와 일치해야 한다(기하만 살고 그림이 없는 상태를 막는 것이 목적이다).
     try std.testing.expect(w.scrollbar != null);
     try std.testing.expect(w.horizontal_scrollbar != null);
+}
+
+test "SRCH3 예산이 말라도 **현재 매치**는 남는다 — 위치 표시가 먼저다" {
+    // **살아 있던 뮤턴트를 닫는다**(2라운드 적대적 검증). 현재 매치를 마지막에 그리도록 되돌려도
+    // 저장소 806개가 전부 초록이었다 — `SRCH2`는 `search_current`를 아예 안 넘기고 `SRCH1`은
+    // 예산이 남아돈다. 즉 "Enter가 어디로 갈지 화면이 말한다"는 계약이 다시 무판정이었다.
+    //
+    // 예산이 마르면 **주변 매치를 잃는 쪽**이 옳다. 반대로 현재 매치를 잃으면 색이 하나뿐인
+    // 화면이 되어, 사용자는 여러 매치 중 어디에 서 있는지 알 수 없다.
+    var text: [1024]u8 = undefined;
+    var runs: [64]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    const lines = [_][]const u8{"a a a a a"}; // 0,2,4,6,8
+    const row_marks = [_]Mark{
+        .{ .start = 0, .len = 1 }, .{ .start = 2, .len = 1 }, .{ .start = 4, .len = 1 },
+        .{ .start = 6, .len = 1 }, .{ .start = 8, .len = 1 },
+    };
+    const marks = [_][]const Mark{&row_marks};
+
+    // **일부러 마르게 한다.** 배경·본문·gutter가 먼저 먹고 나면 검색 몫이 마크 다섯을 못 담는다.
+    var ops: [8]draw.Op = undefined;
+    const total_cols: u16 = 24;
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .search_marks = &marks,
+        .search_current = .{ .line = 0, .start = 8 }, // **맨 끝** — 앞에서 마르면 떨어진다
+        .visible_rows = 2,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 32 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var normal: usize = 0;
+    var current: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        switch (op.quad.fill_role) {
+            .search_match => normal += 1,
+            .search_match_current => current += 1,
+            else => {},
+        }
+    }
+    // **현재 매치는 하나 있어야 한다.** 예산이 말랐으니 나머지는 다 못 그렸을 수 있다.
+    try std.testing.expectEqual(@as(usize, 1), current);
+    // 그리고 실제로 말랐어야 판정이 성립한다 — 다 들어갔으면 이 테스트는 아무것도 안 잰다.
+    try std.testing.expect(normal < row_marks.len - 1);
 }

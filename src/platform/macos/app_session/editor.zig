@@ -627,6 +627,11 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         // 사고를 겪은 축이다(위 doc).
         .fold_left_px = @as(u32, lay.folding.start) * @as(u32, self.cell_width_px),
         .fold_width_px = @as(u32, lay.folding.width) * @as(u32, self.cell_width_px),
+        // **어느 자리를 그렸는지도 굳힌다.** 이것이 있어야 나중에 "이 목록이 지금 화면 것인가"를
+        // 물을 수 있다 — 그 질문 없이 목록만 믿으면 프레임 사이의 스크롤을 못 본다(그 필드의 doc).
+        .top_line = term.rt.editor_first_line,
+        .top_piece = term.rt.editor_first_piece,
+        .drawn = true,
     };
 }
 
@@ -1647,19 +1652,31 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
         return;
     }
 
-    // **"보인다"를 세지 않고 찾는다.** 초판은 `row < top + rows`로 셌는데, `rows`는 **시각 행**
-    // 수이고 `row`/`top`은 **논리 줄**이라 랩이 켜지면 축이 섞였다. 그 근사는 **과대 계수**라
-    // 뷰포트 **아래** 줄을 "보인다"고 답했고, 그러면 Enter를 눌러도 안 굴러가 **카운터만 올라가고
-    // 화면은 그대로**였다 — EM3가 접힘에 대해 "이 슬라이스가 고치려던 부류"라 부른 그 실패다.
-    // (초판 주석은 대가를 "이미 화면에 있는 매치로 안 굴러가는 것뿐"이라 적었는데, 과대 계수가
-    // 나는 줄은 정의상 화면 **밖**이라 그 문장이 결함을 가리고 있었다. 적대적 검증 2026-08-23.)
+    // **"보인다"를 세지 않고 찾는다 — 단, 그 목록이 지금 화면 것일 때만.**
     //
-    // 대신 `editor_hit_lines`를 본다 — 마지막 프레임이 **행마다 어느 문서 줄을 그렸는지**의
-    // 목록이다. 랩이든 접힘이든 그 목록에 있으면 그려진 것이고 없으면 안 그려진 것이라, 근사가
-    // 아니라 사실이다. 같은 스냅숏 규율이고 재료가 이미 있었다.
+    // 초판은 `row < top + rows`로 셌는데, `rows`는 **시각 행** 수이고 `row`/`top`은 **논리 줄**이라
+    // 랩이 켜지면 축이 섞였다. 그 근사는 **과대 계수**라 뷰포트 **아래** 줄을 "보인다"고 답했고,
+    // 그러면 Enter를 눌러도 안 굴러가 **카운터만 올라가고 화면은 그대로**였다.
     //
-    // **방금 폈으면 그 목록은 낡았다** — 펴기 전 화면의 것이다. 그때는 묻지 않고 굴린다.
-    if (!unfolded) {
+    // 그래서 `editor_hit_lines`(마지막 프레임이 **행마다 어느 문서 줄을 그렸는지**)를 본다.
+    // **그런데 그 목록만 믿으면 다른 문이 열린다**: 세 재료가 전부 지난 프레임의 것이라
+    // **방금 자기가 한 스크롤을 못 본다**. 한 프레임 안에 Enter가 두 번 오면(키 반복 15ms <
+    // 프레임 16.7ms) 두 번째가 "보인다"고 답해 같은 증상이 다시 났다 — 2라운드 적대적 검증이
+    // 회귀로 잡았고, 옛 코드는 `top`을 라이브로 읽어 그 경우를 맞히고 있었다.
+    //
+    // 그래서 **묻고 나서 믿는다**: 스냅숏이 기록한 세로 위치가 지금 위치와 같을 때만 그 목록이
+    // 이 화면을 설명한다. 다르면 무엇이 보이는지 모르므로 **굴린다**(모를 때는 움직이는 쪽이
+    // 덜 나쁘다 — 안 움직이면 사용자는 "Enter가 죽었다"고 읽는다).
+    //
+    // **그래도 조각·열 축은 근사로 남는다.** 이 판정은 **줄**만 본다 — 한 화면보다 긴 줄 하나에
+    // 든 매치는 그 줄이 그려져 있다는 이유로 "보인다"고 답해 안 굴러간다(미니파이 JSON·긴 로그).
+    // 가로도 같다. 둘 다 §5.2가 소유할 2차원 reveal이고 그때 함께 닫는다 — 여기서 "근사가
+    // 아니라 사실이다"라고 적었던 것은 **줄 축에서만** 참이었다(2라운드 적대적 검증).
+    const snapshot_is_current = term.rt.editor_hit_geom.drawn and
+        term.rt.editor_hit_geom.top_line == term.rt.editor_first_line and
+        term.rt.editor_hit_geom.top_piece == term.rt.editor_first_piece;
+    // **방금 폈으면 그 목록은 낡았다** — 펴기 전 화면의 것이다. 그때도 묻지 않고 굴린다.
+    if (!unfolded and snapshot_is_current) {
         for (term.rt.editor_hit_lines[0..rows]) |drawn| {
             if (drawn == doc_line) return; // 이미 보인다 — 증분 검색이라 매번 굴리면 본문이 튄다
         }
@@ -9357,4 +9374,97 @@ test "EM6 닫은 채 ⌘G로 오가면 현재 매치만 그린다" {
         try testing.expectEqual(@as(usize, 0), rows[0].len);
         try testing.expectEqual(@as(usize, 1), rows[1].len);
     }
+}
+
+test "EM10 랩에서 가시성 판정도 두 축을 안 섞는다 — EM7이 못 재던 절반" {
+    // **EM7은 제목의 절반만 쟀다**(2라운드 적대적 검증 N11). `revealCurrentFindMatch`의 축 섞임은
+    // 두 군데였는데(가시성 판정, 가운데 두기 나눗셈) EM7의 매치가 문서 줄 60이라 **옛 근사로도
+    // "화면 밖"이 나왔다** — 그래서 나눗셈만 잡고 가시성 판정은 못 잡았다.
+    //
+    // 과대 계수가 나는 구간은 딱 `[drawnDocLines, editor_hit_rows_len)`다. 매치를 **그 안에** 둬야
+    // 옛 근사가 "보인다"(틀림)고 답하고 지금 코드가 "안 보인다"(맞음)고 답한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..80) |i| {
+        var buf: [400]u8 = undefined;
+        const filler = "wrap me " ** 20;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "b.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "b.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = true;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const rows_drawn = term.rt.editor_hit_rows_len;
+    const docs_drawn = drawnDocLines(term);
+    // **판정이 성립할 띠가 있어야 한다.** 없으면 이 테스트는 EM7의 복제다.
+    try testing.expect(docs_drawn + 1 < rows_drawn);
+
+    // 매치를 그 띠 **안**에 둔다 — 화면에는 없지만 옛 근사는 "보인다"고 답하는 자리다.
+    const target_line: u32 = @intCast(docs_drawn + (rows_drawn - docs_drawn) / 2);
+    try fx.session.editor_find_matches.append(allocator, .{ .line = target_line, .start = 0, .len = 1 });
+    fx.session.chrome_host.find.current = 0;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    revealCurrentFindMatch(fx.session, term);
+    // 옛 근사(`row < top + rows_drawn`)면 여기서 0이 남는다 — 카운터만 오르고 화면은 그대로.
+    try testing.expect(term.rt.editor_first_line > 0);
+}
+
+test "EM11 한 프레임 안에 두 번 네비게이션해도 두 번째가 굴러간다 (스냅숏 낡음)" {
+    // **2라운드 적대적 검증이 회귀로 잡았다.** 가시성 판정을 `editor_hit_lines`로 바꾸면서 세
+    // 재료가 전부 지난 프레임의 것이 됐고, 그래서 **방금 자기가 한 스크롤을 못 봤다**. 한 프레임
+    // 안에 Enter가 두 번 오면(키 반복 15ms < 프레임 16.7ms) 두 번째가 "보인다"고 답해 안 굴렀다 —
+    // 카운터만 오르고 화면은 그대로. **옛 코드는 `top`을 라이브로 읽어 이 경우를 맞히고 있었다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, "needle at top\n");
+    for (0..400) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
+    try doc.appendSlice(allocator, "needle far below\n");
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "t.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "t.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_find_matches.items.len);
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+
+    // 아래쪽 매치로 — 굴러간다.
+    fx.session.chrome_host.find.current = 1;
+    revealCurrentFindMatch(fx.session, term);
+    try testing.expect(term.rt.editor_first_line > 0);
+
+    // **프레임을 안 그리고** 위쪽 매치로 되돌아간다. 스냅숏은 아직 첫 화면(줄 0 포함)을 담고
+    // 있으므로, 그 목록만 믿으면 "이미 보인다"로 답해 안 굴러간다.
+    fx.session.chrome_host.find.current = 0;
+    revealCurrentFindMatch(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
 }

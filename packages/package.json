@@ -18,7 +18,8 @@
     "fmt-check": "oxfmt --check core/src react/src vue/src svelte/src lit/src scripts tests demo package.json",
     "check": "bun run build && bun run test && bun run typecheck && bun run lint && bun run fmt-check && bun run test:browser",
     "test:browser": "bun run scripts/test-browser.ts",
-    "demo": "bun run scripts/serve-demo.ts"
+    "demo": "bun run scripts/serve-demo.ts",
+    "bench:render": "bun run scripts/bench-render.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

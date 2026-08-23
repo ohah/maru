@@ -483,6 +483,26 @@ test("OSC 133이 셸 진행과 종료 코드를 알린다", async () => {
   term.dispose();
 });
 
+test("음수 종료 코드가 '없음'과 구별된다", async () => {
+  // 예전에는 `0xffff_ffff` 를 "없음" 표식으로 썼는데 그건 `@bitCast(@as(i32, -1))` 과 같은
+  // 비트다 — 종료 코드 -1 이 null 로 보고됐다. 유무를 별도 칸으로 받는다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const got: (number | null)[] = [];
+  term.onShellEvent((e) => {
+    if (e.kind === "command-end") got.push(e.exit);
+  });
+
+  for (const code of ["0", "1", "255", "-1", "-2"]) {
+    term.write(`\x1b]133;D;${code}\x07`);
+    await settle();
+  }
+  term.write("\x1b]133;D\x07"); // 코드 없음
+  await settle();
+
+  expect(got).toEqual([0, 1, 255, -1, -2, null]);
+  term.dispose();
+});
+
 test("cursorAtPrompt는 셸 통합이 없으면 보수적으로 false다", async () => {
   const term = await makeTerminal({ cols: 20, rows: 4 });
   term.write("no integration");
@@ -546,6 +566,55 @@ test("select/selectLines가 프로그래밍 선택을 만든다", async () => {
   await settle();
   expect(await term.selectionText()).toBe("abcdefghij\nklmnopqrst");
   term.dispose();
+});
+
+test("범위 밖 선택은 무동작이다", async () => {
+  // **음수를 그대로 흘리면 안 된다.** wasm 에서 u32 로 캐스팅돼 거대한 수가 되고, 코어의
+  // clamp 를 거쳐 엉뚱한 칸이 잡힌다 — `select(0, -3, 2)` 가 마지막 열을 선택했다.
+  const term = await makeTerminal({ cols: 10, rows: 4 });
+  term.write("abcdefghij\r\nklmnopqrst\r\n");
+  await settle();
+
+  term.select(0, 2, 3);
+  await settle();
+  expect(await term.selectionText()).toBe("cde");
+
+  term.select(0, -3, 2); // 음수 — 무동작이라 앞 선택이 그대로다
+  await settle();
+  expect(await term.selectionText()).toBe("cde");
+
+  term.select(99, 0, 2); // 행 초과
+  await settle();
+  expect(await term.selectionText()).toBe("cde");
+
+  term.selectClear();
+  await settle();
+  term.selectLines(99, 100); // 격자와 겹치는 구간이 없다
+  await settle();
+  expect(await term.selectionText()).toBeNull();
+
+  term.selectLines(-5, 1); // 겹치는 구간은 clamp 해서 선택한다
+  await settle();
+  expect(await term.selectionText()).toBe("abcdefghij\nklmnopqrst");
+
+  // 행 끝을 넘는 길이는 행 안으로 clamp 한다.
+  term.select(0, 8, 5);
+  await settle();
+  expect(await term.selectionText()).toBe("ij");
+  term.dispose();
+});
+
+test("dispose 후 동기 조회는 살아 있는 척하지 않는다", async () => {
+  const term = await makeTerminal({ cols: 10, rows: 4 });
+  term.write("text");
+  await settle();
+  term.selectAll();
+  await settle();
+  expect(term.hasSelection()).toBe(true);
+
+  term.dispose();
+  expect(term.hasSelection()).toBe(false);
+  expect(term.getSelectionPosition()).toBeNull();
 });
 
 test("writeln은 CRLF를 붙인다", async () => {

@@ -430,6 +430,7 @@ export class LocalBackend implements Backend {
         const kind = raw[i * 4];
         const row = raw[i * 4 + 1];
         const rawExit = raw[i * 4 + 2];
+        const hasExit = raw[i * 4 + 3] === 1;
         const ev: ShellEvent =
           kind === 0
             ? { kind: "prompt-start", row }
@@ -438,7 +439,8 @@ export class LocalBackend implements Backend {
               : kind === 2
                 ? { kind: "command-start", row }
                 : kind === 3
-                  ? { kind: "command-end", row, exit: rawExit === 0xffffffff ? null : rawExit | 0 }
+                  ? // 유무를 별도 칸으로 받는다 — 값으로 가르면 종료 코드 -1 이 "없음"과 겹친다.
+                    { kind: "command-end", row, exit: hasExit ? rawExit | 0 : null }
                   : { kind: "cwd-changed" };
         this.#cb?.({ type: "shell", event: ev });
         // cwd 는 사건이 아니라 상태다 — 값은 `currentCwd()` 가 권위이므로 그때 읽는다.

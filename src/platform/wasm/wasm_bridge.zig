@@ -344,27 +344,32 @@ export fn vt_take_shell_events(h: *anyopaque) u32 {
             .prompt_start => |row| {
                 match_buf[base] = 0;
                 match_buf[base + 1] = row;
-                match_buf[base + 2] = 0xffff_ffff;
+                match_buf[base + 2] = 0;
+                match_buf[base + 3] = 0;
             },
             .input_start => |row| {
                 match_buf[base] = 1;
                 match_buf[base + 1] = row;
-                match_buf[base + 2] = 0xffff_ffff;
+                match_buf[base + 2] = 0;
+                match_buf[base + 3] = 0;
             },
             .command_start => |row| {
                 match_buf[base] = 2;
                 match_buf[base + 1] = row;
-                match_buf[base + 2] = 0xffff_ffff;
+                match_buf[base + 2] = 0;
+                match_buf[base + 3] = 0;
             },
             .command_end => |ce| {
                 match_buf[base] = 3;
                 match_buf[base + 1] = ce.row;
-                match_buf[base + 2] = if (ce.exit) |x| @bitCast(@as(i32, x)) else 0xffff_ffff;
+                match_buf[base + 2] = if (ce.exit) |x| @bitCast(@as(i32, x)) else 0;
+                match_buf[base + 3] = if (ce.exit != null) 1 else 0;
             },
             .cwd_changed => {
                 match_buf[base] = 4;
                 match_buf[base + 1] = 0;
-                match_buf[base + 2] = 0xffff_ffff;
+                match_buf[base + 2] = 0;
+                match_buf[base + 3] = 0;
             },
         }
     }

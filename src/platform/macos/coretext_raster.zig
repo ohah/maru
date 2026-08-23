@@ -76,11 +76,10 @@ pub const CoreTextGlyphRasterizer = struct {
         self.rasterize_glyph(
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
+            // **규칙은 중립이 소유한다**(`renderer.glyphFontSizePt`) — Windows 가 같은 것을 쓴다.
+            // 한 줄짜리라 각자 적으면 눈에 안 띄게 갈린다.
             renderer.deviceFontSizeFromMilli(
-                if (request.run.cache_key.raster_font_size_milli == 0)
-                    self.appearance.font.size
-                else
-                    @as(f32, @floatFromInt(request.run.cache_key.raster_font_size_milli)) / 1000.0,
+                renderer.glyphFontSizePt(self.appearance.font.size, request.run.cache_key.raster_font_size_milli),
                 self.scale_milli,
             ),
             font_identity.postscript_name.ptr,

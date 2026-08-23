@@ -2719,6 +2719,51 @@ sel_bands=4/4 first_cols=81 last_cols=2 match=true
 **아직 없는 것**: 키보드 커서 이동(Shift+화살표)·단어 단위 선택·클립보드 복사. 셋 다 `Selection` 을
 바꾸는 축이라 `session/editor/selection.zig` 가 이미 갖고 있고, 붙이는 것은 배선이다.
 
+### 2m.27 measured 텍스트의 마지막 한 걸음 (실측 2026-08-23)
+
+§2m.18 이 셰이핑 다리를 붙였지만 **글리프까지**였다. 그 글리프를 자유 픽셀 자리에 그리는 길이
+Windows 에 없어서 measured 크롬 표면(소스 컨트롤·에이전트·세션 도크)이 전부 막혀 있었다.
+
+**처음엔 "큰 새 렌더 경로가 필요하다" 고 판단했고, 그것이 틀렸다.** 체인을 따라가 보니 거의 다 이미
+중립이었다:
+
+| 단계 | 함수 | 네이티브 참조 |
+|---|---|---|
+| ops → Request | `prepareRequest` | 0 |
+| Request → 글리프 | `shapeRequest` | §2m.18 이음매 → DirectWrite |
+| → Artifact | `resolveArtifact` | 0 |
+| records → GlyphRunList | `buildGlyphRunListFromShapedRecordsWithSurface` | **중립 renderer** |
+| → RenderFrame | `buildFrameFromGlyphRunListWithRasterizer` | 중립 renderer |
+| + placements → GpuGlyph | `appendGpuGlyphs` | **0** |
+
+`metal_frame.GpuGlyph` 는 이미 **자유 픽셀 `x,y,w,h` + 아틀라스 UV** 이고, 중립 아틀라스는 이미
+`raster_width_px` 로 슬롯을 잡는다(`glyph_atlas.zig`). `d3d11_cells.Cell` 도 §2m.22 이후 임의 픽셀
+사각 + UV 다. **`CoreTextFrameBuilder` 도 필요 없다** — `shapeFromRecords` 는 함수 포인터를 안 쓰고
+`TextLayoutConfig` 만 넘기는 20 줄짜리 껍데기라, Windows 는 중립 함수를 직접 부르면 된다.
+
+**진짜로 빠진 것은 둘이었다.**
+
+**⑴ 글리프별 em 크기.** `dwrite_font.rasterizeGlyph` 가 `self.em_size_px`(만들 때의 `cfg.font.size`)로
+고정이었다. measured 크롬은 role 마다 크기가 다른데(`GlyphCacheKey.raster_font_size_milli` — 그 필드
+doc: *"플랫폼 래스터라이저만 소비한다"*) 그 값을 안 읽어, **도크 글자가 전부 터미널 크기로 구워질**
+자리였다. `rasterizeGlyphAtSize` 를 내고 `NeutralRasterizer` 가 `font_size_pt`·`scale_milli` 로 그
+값을 푼다.
+
+**그 푸는 규칙은 중립에 뒀다**(`renderer.glyphFontSizePt`). 한 줄짜리(`0 이면 기본, 아니면 milli/1000`)
+라 각자 적으면 **눈에 안 띄게 갈린다** — 같은 도크가 두 플랫폼에서 다른 글자 크기로 구워진다.
+macOS `coretext_raster.zig` 도 이제 그 함수를 쓴다.
+
+**⑵ `GpuGlyph → Cell`.** `win32_terminal.cellFromGpuGlyph` — rect·UV·전경색을 옮긴다. `cellFromNative`
+와 **다른 함수로 둔다**: 그쪽은 행·열에 셀 크기를 곱하고 이쪽은 이미 픽셀이라, 한 함수로 묶으면
+"행·열이 0 이면 픽셀" 같은 규칙이 생기고 그것이 조용한 오답의 씨앗이다. 배경은 안 칠한다 — 이미
+그려진 표면 **위에** 얹히므로 커버리지 합성 갈래로 간다.
+
+**회귀 없음**: 파일 트리 지문 `0xA44158B8420F2238` 불변, 편집기 `click_glyphs=5454/5454` 불변
+(터미널 글리프는 `raster_font_size_milli == 0` 이라 예전 크기 그대로다).
+
+**소비자는 다음 슬라이스다.** 이 절은 길을 열었을 뿐 아직 아무 표면도 그 길로 안 간다 — 그것을
+"된다" 고 말할 수 없는 상태라는 뜻이다. 소스 컨트롤 표면(W8.4⒝)이 첫 소비자로 이어진다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

@@ -85,6 +85,10 @@ pub const Shaper = struct {
 pub const NeutralRasterizer = struct {
     raster: *dwrite_font.Rasterizer,
     scratch: []u8,
+    /// 터미널 폰트 크기(논리 pt). `raster_font_size_milli` 가 0 인 글리프가 이 값을 쓴다.
+    font_size_pt: f32 = 0,
+    /// 창 배율(밀리). 논리 pt → device px 로 바꿀 때 곱한다.
+    scale_milli: u32 = 1000,
 
     /// 슬롯 하나가 최대로 필요한 스크래치. `cell_w`는 **두 칸 글자를 포함한** 최대 슬롯 폭이어야 한다.
     pub fn scratchSizeFor(cell_w: u32, cell_h: u32) usize {
@@ -114,8 +118,21 @@ pub const NeutralRasterizer = struct {
         if (request.run.glyph_id == 0) return .{ .non_clear_pixels = 0 }; // 셰이퍼가 "없다"고 한 칸이다.
         const glyph_id: u16 = std.math.cast(u16, request.run.glyph_id) orelse return error.InvalidGlyphIndex;
 
-        const n = self.raster.rasterizeGlyph(
+        // **글리프마다 em 크기가 다를 수 있다.** measured 크롬 텍스트는 role 마다 크기를 싣는다
+        // (`GlyphCacheKey.raster_font_size_milli` — 그 필드 doc: *"플랫폼 래스터라이저만 소비한다"*).
+        // 0 이면 터미널 크기다. macOS 가 `coretext_raster.zig` 에서 같은 식을 쓴다 — 두 플랫폼이
+        // 다른 크기로 구우면 같은 도크가 서로 다른 글자 크기로 그려진다.
+        const em_px: f32 = if (self.font_size_pt > 0)
+            @floatCast(renderer.deviceFontSizeFromMilli(
+                renderer.glyphFontSizePt(self.font_size_pt, request.run.cache_key.raster_font_size_milli),
+                self.scale_milli,
+            ))
+        else
+            self.raster.em_size_px; // 크기를 안 준 호출자(기존 스모크) — 예전 동작 그대로
+
+        const n = self.raster.rasterizeGlyphAtSize(
             .{ .face_index = face_index, .glyph_id = glyph_id },
+            em_px,
             w,
             h,
             request.bytes_per_row,

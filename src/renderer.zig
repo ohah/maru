@@ -92,6 +92,7 @@ pub const prepareGlyphFrame = glyph_frame.prepareGlyphFrame;
 pub const textConfigFromFontSize = state.textConfigFromFontSize;
 pub const deviceScaleFromMilli = state.deviceScaleFromMilli;
 pub const deviceFontSizeFromMilli = state.deviceFontSizeFromMilli;
+pub const glyphFontSizePt = state.glyphFontSizePt;
 pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 
 /// cp가 합성 글리프(폰트 대신 rasterizer가 코드포인트로 직접 그리는)인지 — 모든 합성 모듈 술어의 합집합.

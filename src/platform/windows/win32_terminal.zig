@@ -75,6 +75,29 @@ pub const FrameCounts = struct {
     }
 };
 
+/// **자유 위치 글리프** 하나를 셀로 옮긴다. measured 크롬 텍스트(도크·사이드바·에디터 라벨)가
+/// 이 길로 온다 — 셀 격자가 아니라 `Placement.x_px`/`y_px` 가 정한 자리에 그린다.
+///
+/// **`cellFromNative` 와 다른 함수인 이유는 좌표계다.** 그쪽은 행·열에 셀 크기를 곱해 자리를 만들고,
+/// 이쪽은 이미 픽셀이다. 같은 함수로 묶으면 "행·열이 0 이면 픽셀" 같은 규칙이 생기고 그것이 곧
+/// 조용한 오답의 씨앗이다.
+///
+/// **파이프라인은 그대로다.** §2m.22 가 `Cell.rect` 를 임의 픽셀 사각으로, 셰이더를 둥근 모서리·
+/// 반투명까지 하게 만들어 둬서 새 드로우 콜이 필요 없다.
+pub fn cellFromGpuGlyph(glyph: metal_frame.GpuGlyph) d3d11_cells.Cell {
+    // `foreground` 는 0x00RRGGBB 다 — 알파가 없다. 커버리지가 알파를 정하므로 1.0 으로 둔다.
+    const fg = d3d11_cells.colorFromArgb(0xFF00_0000 | (glyph.foreground & 0x00FF_FFFF));
+    return .{
+        .rect = .{ glyph.x, glyph.y, glyph.w, glyph.h },
+        .uv = .{ glyph.u0, glyph.v0, glyph.u1, glyph.v1 },
+        .fg = fg,
+        // **배경을 안 칠한다.** 이 글자는 이미 그려진 표면 **위에** 얹힌다 — bg 알파가 0 이면
+        // 셰이더가 `float4(fg.rgb, cov * fg.a)` 로 커버리지만 합성한다(그 갈래의 계약).
+        .bg = .{ 0, 0, 0, 0 },
+        .shape = .{ 0, 0, 0, 0 },
+    };
+}
+
 /// `NativeMetalCell` 하나를 D3D11 셀로 옮기는 **순수** 변환.
 ///
 /// **왜 `NativeMetalCell`을 거치는가.** 이름은 Metal이지만 OS 의존이 없는 투영 DTO이고(§2b), 커서
@@ -176,4 +199,33 @@ test "cellFromNative: 두 칸 글자와 배경 없는 셀" {
     // 폭이 0으로 와도 1칸으로 접어 사각형이 사라지지 않게 한다.
     native.width = 0;
     try testing.expectEqual(@as(f32, 8), cellFromNative(native, 8, 16, 256, 128).rect[2]);
+}
+
+test "자유 위치 글리프: 픽셀 자리와 UV 를 그대로 옮기고 배경을 안 칠한다" {
+    const cell = cellFromGpuGlyph(.{
+        .x = 12.5,
+        .y = 340.25,
+        .w = 7,
+        .h = 16,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 0,
+        .u0 = 0.25,
+        .v0 = 0.5,
+        .u1 = 0.3,
+        .v1 = 0.55,
+        .foreground = 0x00D8E0F0,
+        .layer = 0,
+    });
+    // **소수 픽셀이 살아남는다** — 셀 격자로 접으면 measured 텍스트가 줄마다 들쭉날쭉해진다.
+    try testing.expectEqual(@as(f32, 12.5), cell.rect[0]);
+    try testing.expectEqual(@as(f32, 340.25), cell.rect[1]);
+    try testing.expectEqual(@as(f32, 0.25), cell.uv[0]);
+    try testing.expectEqual(@as(f32, 0.55), cell.uv[3]);
+    // 전경은 불투명, 배경은 없음(커버리지 합성 갈래로 간다).
+    try testing.expectEqual(@as(f32, 1), cell.fg[3]);
+    try testing.expectEqual(@as(f32, 0), cell.bg[3]);
+    // **`solid` 표식이 아니어야 한다** — 음수 UV 면 셰이더가 아틀라스를 안 읽어 글자가 안 보인다.
+    try testing.expect(cell.uv[0] >= 0);
 }

@@ -208,6 +208,22 @@ pub fn deviceScaleFromMilli(scale_milli: u32) u16 {
 /// 반올림하지 않고 분수 scale을 그대로 곱해, 분수 Retina(1.5×/2.5×)에서도 glyph가 실제 해상도로
 /// rasterize되고 cell 메트릭이 drawable과 어긋나지 않게 한다. font_size는 [1,512], scale_milli는
 /// [250,8000](0.25×~8×)로 막아 손상된 값에서도 곱이 overflow하지 않게 한다.
+/// 글리프 하나가 쓸 **논리 pt** 크기. `raster_font_size_milli` 가 0 이면 기본(터미널) 크기다.
+///
+/// **규칙을 여기 둔다** — measured 크롬 텍스트가 role 마다 크기를 싣고 그것을 푸는 쪽이 플랫폼
+/// 래스터라이저인데(그 필드 doc), macOS 와 Windows 가 각자 적으면 같은 도크가 두 플랫폼에서 다른
+/// 글자 크기로 구워진다. 한 줄짜리 규칙이라 더 그렇다 — 눈에 안 띄게 갈린다.
+pub fn glyphFontSizePt(default_pt: f32, raster_font_size_milli: u16) f32 {
+    if (raster_font_size_milli == 0) return default_pt;
+    return @as(f32, @floatFromInt(raster_font_size_milli)) / 1000.0;
+}
+
+test "글리프 폰트 크기: 0 은 기본, 그 외는 밀리를 pt 로" {
+    try std.testing.expectEqual(@as(f32, 13.0), glyphFontSizePt(13.0, 0));
+    try std.testing.expectEqual(@as(f32, 18.0), glyphFontSizePt(13.0, 18_000));
+    try std.testing.expectEqual(@as(f32, 11.5), glyphFontSizePt(13.0, 11_500));
+}
+
 pub fn deviceFontSizeFromMilli(font_size: f32, scale_milli: u32) f64 {
     const finite_size: f64 = if (std.math.isFinite(font_size)) @floatCast(font_size) else 1.0;
     const clamped_size = @max(@as(f64, 1.0), @min(@as(f64, 512.0), finite_size));

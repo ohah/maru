@@ -53,6 +53,23 @@ export interface WasmExports {
   /** 화면을 지운다. 반환 1은 셸에 `\x0c`(^L)를 보내야 한다는 뜻. */
   vt_clear(h: number): number;
 
+  vt_clipboard_write_ptr(h: number): number;
+  vt_clipboard_write_len(h: number): number;
+  vt_clear_clipboard_write(h: number): void;
+  vt_take_clipboard_rejected(h: number): number;
+  vt_clipboard_read_pending(h: number): number;
+  /** target 을 `link_ptr()` 에 담고 길이 반환. */
+  vt_clipboard_read_target(h: number): number;
+  vt_clear_clipboard_read(h: number): void;
+  /** `(titleLen << 16) | bodyLen`, 둘 다 `link_ptr()` 에 이어 담긴다. 없으면 0xffffffff. */
+  vt_notification(h: number): number;
+  vt_clear_notification(h: number): void;
+  /** cwd 를 `link_ptr()` 에 담고 길이 반환. */
+  vt_cwd(h: number): number;
+  /** `match_ptr()` 에 `[kind, row, exit]` × N 을 담고 개수 반환(drain 한다). */
+  vt_take_shell_events(h: number): number;
+  vt_cursor_at_prompt(h: number): number;
+
   /** `input_ptr()` 의 needle 로 검색. **반환은 총 매치 수**, 버퍼엔 `matches_cap()` 건까지. */
   vt_find(h: number, needleLen: number): number;
   /** 매치 버퍼 — 한 건이 `[startRow, startCol, endRow, endCol]` u32 넷. */

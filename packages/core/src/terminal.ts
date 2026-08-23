@@ -1,5 +1,5 @@
 import { LocalBackend } from "./backend/local";
-import type { FindResult } from "./backend/types";
+import type { FindResult, ShellEvent } from "./backend/types";
 import type { GlyphSource } from "./render/types";
 import { loadBundledFont } from "./font";
 import { attachDom, type DomHost } from "./dom/attach";
@@ -81,6 +81,12 @@ export class Terminal {
   readonly #fallback = new Emitter<FallbackReason>();
   readonly #render = new Emitter<FrameMeta>();
   readonly #cursorMove = new Emitter<CursorState>();
+  readonly #clipboardWrite = new Emitter<string>();
+  readonly #clipboardRead = new Emitter<string>();
+  readonly #clipboardRejected = new Emitter<void>();
+  readonly #notification = new Emitter<{ title: string; body: string }>();
+  readonly #cwd = new Emitter<string>();
+  readonly #shell = new Emitter<ShellEvent>();
   readonly #scrollEv = new Emitter<FrameMeta["scroll"]>();
   readonly #selectionChange = new Emitter<FrameMeta["selection"]>();
   /** 직전 프레임 — 상태 이벤트는 여기서 파생한다(셀은 없으므로 들고 있어도 가볍다). */
@@ -303,6 +309,24 @@ export class Terminal {
       case "resize":
         this.#size = e.size;
         this.#resize.emit(e.size);
+        break;
+      case "clipboard-write":
+        this.#clipboardWrite.emit(e.text);
+        break;
+      case "clipboard-read":
+        this.#clipboardRead.emit(e.target);
+        break;
+      case "clipboard-rejected":
+        this.#clipboardRejected.emit();
+        break;
+      case "notification":
+        this.#notification.emit({ title: e.title, body: e.body });
+        break;
+      case "cwd":
+        this.#cwd.emit(e.cwd);
+        break;
+      case "shell":
+        this.#shell.emit(e.event);
         break;
       case "render":
         this.#frame = e.frame;
@@ -641,6 +665,53 @@ export class Terminal {
    *
    * 두 모드에서 모두 온다. 구독자가 없으면 워커는 아무것도 보내지 않는다.
    */
+  /**
+   * 앱이 OSC 52 로 **클립보드에 쓰려 한다**. 라이브러리는 아무것도 하지 않는다 — 임의의 셸
+   * 스크립트가 사용자 클립보드를 덮어쓸 수 있으면 안 되므로, 쓸지는 소비자가 정한다.
+   *
+   * ```ts
+   * term.onClipboardWrite((text) => {
+   *   if (trusted) void navigator.clipboard.writeText(text);
+   * });
+   * ```
+   */
+  onClipboardWrite(cb: Listener<string>): Disposable {
+    return this.#clipboardWrite.on(cb);
+  }
+  /** OSC 52 쓰기가 상한(16 MB)을 넘어 거부됐다. 무음 실패 대신 이유를 보여줄 수 있다. */
+  onClipboardRejected(cb: Listener<void>): Disposable {
+    return this.#clipboardRejected.on(cb);
+  }
+  /**
+   * 앱이 클립보드를 **읽으려 한다**(OSC 52 `?`). 인자는 target(`c`/`p` 등)이다.
+   *
+   * **답하지 않는 것이 기본이다** — 답하면 터미널에서 도는 아무 프로그램이나 사용자
+   * 클립보드를 가져갈 수 있다. 굳이 답한다면 소비자가 만들어 보낸다:
+   * `term.sendText(`\x1b]52;${target};${btoa(text)}\x07`)`.
+   */
+  onClipboardRead(cb: Listener<string>): Disposable {
+    return this.#clipboardRead.on(cb);
+  }
+  /** OSC 9/777 데스크톱 알림. 띄울지는 소비자가 정한다(권한이 필요하다). */
+  onNotification(cb: Listener<{ title: string; body: string }>): Disposable {
+    return this.#notification.on(cb);
+  }
+  /** OSC 7 로 셸의 현재 디렉터리가 바뀌었다. */
+  onCwdChange(cb: Listener<string>): Disposable {
+    return this.#cwd.on(cb);
+  }
+  /** OSC 133 셸 진행 상태 — 프롬프트/입력/명령 시작과 끝(종료 코드 포함). */
+  onShellEvent(cb: Listener<ShellEvent>): Disposable {
+    return this.#shell.on(cb);
+  }
+  /**
+   * 커서가 셸 프롬프트에 있는가. 창을 닫기 전에 "명령이 도는 중인지" 묻는 용도다.
+   * 셸 통합이 없으면 보수적으로 `false`("실행 중")를 준다 — 확인 없이 닫는 것보다 낫다.
+   */
+  cursorAtPrompt(): Promise<boolean> {
+    return this.#need().cursorAtPrompt();
+  }
+
   onRender(cb: Listener<FrameMeta>): Disposable {
     return this.#render.on(cb);
   }

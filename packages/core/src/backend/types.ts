@@ -8,7 +8,33 @@ export type BackendEvent =
   | { type: "resize"; size: Size }
   | { type: "render"; frame: FrameData }
   /** `vt_modes` 가 바뀌었다. 마우스 추적 여부를 **동기로** 알아야 하는 DOM 층이 캐시한다. */
-  | { type: "modes"; value: number };
+  | { type: "modes"; value: number }
+  /**
+   * OSC 52 로 앱이 클립보드에 쓰려 한다. **라이브러리는 아무것도 하지 않는다** — 임의의 셸
+   * 스크립트가 사용자 클립보드를 덮어쓸 수 있으면 안 되므로, 정책은 소비자가 정한다.
+   */
+  | { type: "clipboard-write"; text: string }
+  /** 상한(16 MB) 초과로 거부됐다. 무음 실패 대신 이유를 보여줄 수 있게 알린다. */
+  | { type: "clipboard-rejected" }
+  /**
+   * OSC 52 로 앱이 클립보드를 **읽으려** 한다. 응답하려면 소비자가
+   * `\x1b]52;<target>;<base64>\x07` 를 만들어 보낸다 — 답하지 않는 것이 기본이다.
+   */
+  | { type: "clipboard-read"; target: string }
+  /** OSC 9/777 데스크톱 알림. 띄울지는 소비자가 정한다. */
+  | { type: "notification"; title: string; body: string }
+  /** OSC 7 로 현재 디렉터리가 바뀌었다. */
+  | { type: "cwd"; cwd: string }
+  /** OSC 133 셸 사건. `exit` 은 `command-end` 에서만 온다. */
+  | { type: "shell"; event: ShellEvent };
+
+/** OSC 133 이 알려 주는 셸 진행 상태. `row` 는 뷰포트 행이다. */
+export type ShellEvent =
+  | { kind: "prompt-start"; row: number }
+  | { kind: "input-start"; row: number }
+  | { kind: "command-start"; row: number }
+  | { kind: "command-end"; row: number; exit: number | null }
+  | { kind: "cwd-changed" };
 
 /** 렌더러가 한 프레임을 그리는 데 필요한 전부. */
 export interface FrameData {
@@ -96,6 +122,8 @@ export interface Backend {
   linkAt(row: number, col: number): Promise<string | null>;
   /** 스크롤백을 포함해 전부 훑는다. 대소문자를 구분하고, 정규식은 지원하지 않는다. */
   find(needle: string): Promise<FindResult>;
+  /** 커서가 셸 프롬프트에 있는가. 셸 통합(OSC 133)이 없으면 보수적으로 `false`("실행 중"). */
+  cursorAtPrompt(): Promise<boolean>;
 
   on(cb: (e: BackendEvent) => void): void;
   dispose(): void;

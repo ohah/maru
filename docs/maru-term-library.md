@@ -215,10 +215,7 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 
 | 기능 | 코어의 구현 | 비고 |
 |---|---|---|
-| 클립보드(OSC 52) | `clipboardReadPending`·`pendingClipboardWrite` | 이벤트 채널 설계가 필요하다 |
 | 화면 직렬화 | `dumpUtf`·`dumpRecentTextUtf` | SerializeAddon 에 해당 |
-| 셸 통합(OSC 7·133) | `currentCwd`·`shellEvents`·`cursorIsAtPrompt` | 프롬프트 인식·cwd 추적 |
-| 알림(OSC 9·777) | `pendingNotification` | |
 | 이미지 | `buildImageViews`·`buildPlacementViews` | 렌더러가 픽셀을 다뤄야 한다 |
 
 링크 **자동 감지**는 libc 를 요구하므로 넣지 않는다(§8, [wasm 이식성](wasm-portability.md) §2). OSC 8
@@ -233,6 +230,38 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 | `scrollToTop()` / `scrollToBottom()` | 스크롤백 양 끝 |
 | `scrollToLine(line)` | 절대 행(0 = 스크롤백 최상단)을 뷰포트 첫 줄에 |
 | `scrollLines(n)` / `scrollPages(n)` | 상대 이동. **양수가 아래** — 휠 방향이다(`scroll()` 은 위가 양수인 코어 방향이라 반대다) |
+
+### OSC 사건 — 정책은 소비자가 정한다
+
+| 이벤트 | OSC | 라이브러리가 하는 일 |
+|---|---|---|
+| `onClipboardWrite` | 52 | **알리기만 한다.** 클립보드에 쓰지 않는다 |
+| `onClipboardRejected` | 52 | 상한(16 MB) 초과로 거부됐다고 알린다 |
+| `onClipboardRead` | 52 `?` | 알리기만 한다. **답하지 않는 것이 기본** |
+| `onNotification` | 9·777 | 알리기만 한다. 띄우지 않는다 |
+| `onCwdChange` | 7 | 셸의 현재 디렉터리 |
+| `onShellEvent` | 133 | 프롬프트/입력/명령 시작·끝(종료 코드 포함) |
+| `cursorAtPrompt()` | 133 | 명령이 도는 중인지. 통합이 없으면 보수적으로 `false` |
+
+**코어가 OS 를 직접 만지지 않는 경계를 그대로 잇는다.** 본체에서는 platform 이 정책을 확인한 뒤
+시스템 클립보드에 쓰는데, 브라우저에서는 그 판단이 더 중요하다 — 터미널에서 도는 아무
+프로그램이나 사용자 클립보드를 덮어쓰거나 **읽어 갈** 수 있으면 안 된다. 그래서 라이브러리는
+알리기만 하고, 쓸지·답할지는 소비자가 정한다.
+
+읽기에 굳이 답한다면 소비자가 만들어 보낸다:
+
+```ts
+term.onClipboardRead((target) => {
+  if (!trusted) return;                       // 기본은 답하지 않는 것
+  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+  term.sendText(`\x1b]52;${target};${b64}\x07`);
+});
+```
+
+- **클립보드는 최대 16 MB 라 복사하지 않는다.** wasm 선형 메모리를 그대로 읽어 문자열을 만든다.
+- **wasm `i32` 는 JS 에서 부호 있는 수로 온다.** "없음" 표식으로 `0xffff_ffff` 를 쓰면 `-1` 로
+  도착하므로 `>>> 0` 로 받아야 한다 — 안 그러면 알림이 없는데도 매 write 마다 빈 알림이 샌다
+  (실제로 그랬다).
 
 ### 검색
 

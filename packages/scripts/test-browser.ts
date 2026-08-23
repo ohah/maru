@@ -442,6 +442,49 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
     for (const x of subs) x.dispose();
     return { cursor, scroll, selCount: sel.length, lastSelNull: sel.at(-1) === null };
   });
+  // OSC 사건은 워커에서 `event` 채널로 실려 온다. 클립보드·알림은 **알리기만** 해야 한다 —
+  // 라이브러리가 자동으로 쓰면 임의의 셸 스크립트가 사용자 클립보드를 덮어쓸 수 있다.
+  const osc = await p.evaluate(async () => {
+    const t = (
+      globalThis as unknown as {
+        __term: {
+          write: (s: string) => void;
+          cursorAtPrompt: () => Promise<boolean>;
+          onClipboardWrite: (cb: (s: string) => void) => { dispose(): void };
+          onNotification: (cb: (n: { title: string; body: string }) => void) => { dispose(): void };
+          onCwdChange: (cb: (c: string) => void) => { dispose(): void };
+          onShellEvent: (cb: (e: { kind: string }) => void) => { dispose(): void };
+        };
+      }
+    ).__term;
+    const clip: string[] = [];
+    const note: string[] = [];
+    const cwd: string[] = [];
+    const shell: string[] = [];
+    const subs = [
+      t.onClipboardWrite((x) => clip.push(x)),
+      t.onNotification((n) => note.push(n.title + n.body)),
+      t.onCwdChange((c) => cwd.push(c)),
+      t.onShellEvent((e) => shell.push(e.kind)),
+    ];
+    const wait = () => new Promise((r) => setTimeout(r, 250));
+    // **연달아 보낸다.** 하나씩 떼어 보내면 "알림 없는 write" 경로를 안 밟아, 부호 실수로
+    // 빈 알림이 새는 결함을 놓친다(실제로 그렇게 새고 있었다).
+    t.write("\x1b]52;c;" + btoa("from worker") + "\x07");
+    t.write("\x1b]9;done\x07");
+    t.write("\x1b]7;file://h/tmp/x\x07");
+    t.write("\x1b]133;A\x07$ ");
+    await wait();
+    const atPrompt = await t.cursorAtPrompt();
+    for (const x of subs) x.dispose();
+    return { clip: clip[0], note: note[0], cwd: cwd.at(-1), shell, atPrompt };
+  });
+  check("worker: OSC 52 쓰기가 메인까지 온다", osc.clip === "from worker", String(osc.clip));
+  check("worker: OSC 9 알림이 온다", (osc.note ?? "").includes("done"), String(osc.note));
+  check("worker: OSC 7 cwd 가 온다", osc.cwd === "/tmp/x", String(osc.cwd));
+  check("worker: OSC 133 셸 사건이 온다", osc.shell.includes("prompt-start"), osc.shell.join(","));
+  check("worker: cursorAtPrompt 조회가 답한다", osc.atPrompt === true, String(osc.atPrompt));
+
   // 검색은 조회라 워커 왕복이다 — 매치 배열이 구조적 복제로 제대로 건너오는지 본다.
   const found = await p.evaluate(async () => {
     const t = (

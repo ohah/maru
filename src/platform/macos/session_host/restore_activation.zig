@@ -141,6 +141,7 @@ fn activateValidated(
     var manager: runtime_manager.RuntimeManager = undefined;
     manager.init(allocator, io, &registry);
     defer manager.deinit();
+    manager.enableOutputWake() catch return error.RestoreFailed;
     var graph = try manager.prepareRestoredGraph(&validated.state.host);
     defer graph.discard();
     try checkRoleDeadline(invocation.role, deadline);
@@ -176,6 +177,15 @@ fn activateValidated(
             _ = owner.drainOwnedEvents();
         }
     }.tick;
+    server.owner_wake_fd = manager.outputWakeReadFd().?;
+    server.owner_wake_ctx = &manager;
+    server.owner_wake_drain = struct {
+        fn drain(ctx: *anyopaque) bool {
+            const owner: *runtime_manager.RuntimeManager =
+                @ptrCast(@alignCast(ctx));
+            return owner.drainOutputWake();
+        }
+    }.drain;
 
     var adoption = try host_manifest.prepareAdoptRestoringPinned(
         allocator,

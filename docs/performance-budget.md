@@ -135,6 +135,31 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 
 `mise run session-host-cr6e-budget`은 한 pair를 판정한다. `mise run session-host-cr6e-soak`은 20 batch를 고정해 stalled transport 40행과 실제 AppKit recovery 100회를 실행하고 모든 raw pair를 마지막에 다시 전수 검증한다. 이 gate는 로그인된 WindowServer가 필요한 opt-in 제품 검증이므로 기본 `mise run check`와 hosted CI에 넣지 않는다. 대신 validator의 strict schema·환경 drift·budget overshoot·고정 batch-count 테스트는 `check-boundaries`에 포함한다.
 
+## CR6f 영속 세션 호스트 output wake 예산
+
+`test-session-host-slow-observer-macos`의 실제 forkpty `/bin/cat` 제품 경로는 pressure workload 전에 별도 구분 가능한
+marker 7개를 controller input으로 보내고 healthy observer의 valid screen delta에서 각각 관측될 때까지의 monotonic 시간을
+raw artifact의 `wake_samples`에 전부 남긴다. 각 표본은 input 시작·socket 기록 완료·marker 적용 timestamp와 end-to-end·
+delivery latency를 함께 가진다. `wake_latency_min_ns`·`wake_latency_median_ns`·`wake_latency_max_ns`는 validator가 raw
+표본에서 다시 계산한다. marker가 들어온 batch를 적용한 뒤에는 측정 harness sleep 없이 같은 turn에서 timestamp를 찍고,
+모든 observer의 wake delta를 비운 뒤 stall telemetry를 reset한다. 이 구간은 slow observer pressure와 RSS sampling 전에
+측정해 stall 격리 비용을 입력 echo 예산으로 잘못 귀속하지 않는다.
+
+output-wake 소유 구간은 `tools/perf/session_host_slow_observer_validator.zig`가 7표본 median **10ms**와 개별 tail **20ms**
+hard cap을 소유한다. 기존 cadence-only 구조의 21~23ms floor는 두 gate에서 실패한다. wake 측정은 일반 80×24에서 수행한 뒤
+slow-observer/RSS pressure 전에 512×256으로 resize한다. 대형 화면 projection을 wake 책임에 섞었던 격리 전 표본은 최대
+99.9ms였지만, phase를 분리한 5회 연속 35표본은 median 2.8~3.1ms, 전체 max 5.2ms였다. validator는 7개 raw 표본의
+개수·순서·exact subtraction·min/median/max 재계산과 median/tail cap+1 실패를 검증한다.
+같은 artifact는 marker 전 250ms 이상 idle 구간의 `RuntimeManager.OutputWakeEvidence` 전후값과
+`proc_pid_rusage:RUSAGE_INFO_V4` user/system CPU 전후값도 남긴다. validator는 idle notify/write/coalesce/drain delta를 모두
+0으로, user+system CPU delta를 **25ms 이하**로 판정한다. 이 상한은 250ms 관측창에서 단일 core 10%이며, 짧은 표본의
+scheduler/계측 잡음에는 여유를 두면서 busy-spin이나 output-wake storm은 거부하는 값이다. active marker 구간은 notify delta 7 이상, 실제 write와 owner drain
+delta 1 이상이어야 하므로 우연히 20ms cadence에 걸린 빠른 표본을 wake 성공으로 세지 않는다. 실제 pipe 포화 `EAGAIN`,
+`EINTR` 분기, broken read-end `SIGPIPE`, drain 뒤 idle readiness와 restore graph의 새 process-local notifier는
+`runtime_manager.zig` 단위/process 테스트가 별도로 소유한다. 이 숫자를 바꾸려면 같은 runner의 raw artifact와 validator
+상수·이 절을 함께 갱신한다. wake counter와 idle CPU 표본까지 더한 뒤의 5회 연속 실행도 median 2.8~3.1ms, 전체 max
+8.7ms, idle wake delta 0, idle CPU delta 0.071~0.088ms였다. 250ms는 빠른 제품 gate이지 장시간 idle soak를 대체하지 않는다.
+
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
 [control-plane-protocol.md §4.4](control-plane-protocol.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.

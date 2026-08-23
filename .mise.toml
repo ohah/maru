@@ -177,6 +177,10 @@ zig run tools/perf/session_host_cr6e_budget_validator.zig -- tests/artifacts/per
 description = "Run the CR6e-b 20-batch/100-AppKit-recovery long soak"
 run = "tools/perf/session-host-cr6e-soak.sh"
 
+[tasks.session-host-cr6f-output-wake]
+description = "Measure and validate the CR6f real-PTY output wake latency artifact"
+run = "zig build test-session-host-slow-observer-macos -Doptimize=ReleaseFast"
+
 [tasks.macos-agent-session-archive-smoke]
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"

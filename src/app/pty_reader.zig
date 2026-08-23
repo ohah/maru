@@ -68,6 +68,11 @@ pub const QueuedPtyEvent = union(enum) {
 };
 
 pub const PtyEventQueue = struct {
+    pub const WakeNotifier = struct {
+        ctx: *anyopaque,
+        notify: *const fn (*anyopaque) void,
+    };
+
     io: std.Io,
     allocator: std.mem.Allocator,
     items: []QueuedPtyEvent,
@@ -77,6 +82,7 @@ pub const PtyEventQueue = struct {
     mutex: std.Io.Mutex = .init,
     not_empty: std.Io.Condition = .init,
     not_full: std.Io.Condition = .init,
+    wake_notifier: ?WakeNotifier = null,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, max_events: usize) QueueError!PtyEventQueue {
         if (max_events == 0) return error.ZeroCapacity;
@@ -136,27 +142,47 @@ pub const PtyEventQueue = struct {
         self.not_full.broadcast(self.io);
     }
 
-    pub fn tryPush(self: *PtyEventQueue, event: QueuedPtyEvent) QueueError!void {
+    /// Install before the reader starts. The callback runs after queue publication and after the
+    /// queue mutex is released, so a host wake adapter cannot re-enter queue state under this lock.
+    pub fn setWakeNotifier(self: *PtyEventQueue, notifier: WakeNotifier) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        std.debug.assert(self.len == 0 and !self.closed and self.wake_notifier == null);
+        self.wake_notifier = notifier;
+    }
 
-        if (self.closed) return error.QueueClosed;
-        if (self.len == self.items.len) return error.QueueFull;
+    pub fn tryPush(self: *PtyEventQueue, event: QueuedPtyEvent) QueueError!void {
+        self.mutex.lockUncancelable(self.io);
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return error.QueueClosed;
+        }
+        if (self.len == self.items.len) {
+            self.mutex.unlock(self.io);
+            return error.QueueFull;
+        }
         self.pushAssumeLocked(event);
+        const notifier = self.wake_notifier;
+        self.mutex.unlock(self.io);
+        if (notifier) |wake| wake.notify(wake.ctx);
     }
 
     pub fn pushBlocking(self: *PtyEventQueue, event: QueuedPtyEvent) QueueError!void {
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
         // PTY output은 버리면 안 된다. queue가 가득 차면 reader thread가 여기서
         // 기다리고, 그 결과 child stdout도 자연스럽게 느려진다. 이것이 문서화된
         // backpressure 정책이다.
         while (!self.closed and self.len == self.items.len) {
             self.not_full.waitUncancelable(self.io, &self.mutex);
         }
-        if (self.closed) return error.QueueClosed;
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return error.QueueClosed;
+        }
         self.pushAssumeLocked(event);
+        const notifier = self.wake_notifier;
+        self.mutex.unlock(self.io);
+        if (notifier) |wake| wake.notify(wake.ctx);
     }
 
     /// processing reader의 종료 이벤트 전용 비차단 push. processing 경로의 `.output`은 데이터가 아니라
@@ -173,19 +199,29 @@ pub const PtyEventQueue = struct {
         }
 
         self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        if (self.closed) return error.QueueClosed;
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return error.QueueClosed;
+        }
         if (self.len == self.items.len) {
             switch (self.items[self.head]) {
                 .output => |output| {
-                    if (output.bytes.len != 0) return error.QueueFull;
+                    if (output.bytes.len != 0) {
+                        self.mutex.unlock(self.io);
+                        return error.QueueFull;
+                    }
                     _ = self.popAssumeLocked();
                 },
-                .exited, .read_error => return error.QueueFull,
+                .exited, .read_error => {
+                    self.mutex.unlock(self.io);
+                    return error.QueueFull;
+                },
             }
         }
         self.pushAssumeLocked(event);
+        const notifier = self.wake_notifier;
+        self.mutex.unlock(self.io);
+        if (notifier) |wake| wake.notify(wake.ctx);
     }
 
     pub fn tryPop(self: *PtyEventQueue) ?QueuedPtyEvent {
@@ -1158,6 +1194,50 @@ test "pty event queue close stops new pushes and wakes empty consumers" {
         queue.pushBlocking(.{ .exited = .{ .pty_id = 1, .status = .{ .exited = 0 } } }),
     );
     try std.testing.expect(queue.popBlocking() == null);
+}
+
+test "pty event queue wake notifier observes successful publication but not rejected pushes" {
+    const Counter = struct {
+        value: usize = 0,
+        queue: *PtyEventQueue,
+        observed_count: usize = 0,
+
+        fn notify(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.value += 1;
+            self.observed_count = self.queue.count();
+        }
+    };
+
+    var queue = try PtyEventQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer queue.deinit();
+    var counter: Counter = .{ .queue = &queue };
+    queue.setWakeNotifier(.{ .ctx = &counter, .notify = Counter.notify });
+
+    try queue.tryPush(.{ .output = .{ .pty_id = 1, .bytes = &.{} } });
+    try std.testing.expectEqual(@as(usize, 1), counter.value);
+    try std.testing.expectEqual(@as(usize, 1), counter.observed_count);
+    try std.testing.expectError(
+        error.QueueFull,
+        queue.tryPush(.{ .output = .{ .pty_id = 1, .bytes = &.{} } }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), counter.value);
+
+    var event = queue.tryPop().?;
+    event.deinit(std.testing.allocator);
+    try queue.pushTerminalReplacingOutputSignal(.{ .exited = .{
+        .pty_id = 1,
+        .status = .{ .exited = 0 },
+    } });
+    try std.testing.expectEqual(@as(usize, 2), counter.value);
+    event = queue.tryPop().?;
+    event.deinit(std.testing.allocator);
+    queue.close();
+    try std.testing.expectError(
+        error.QueueClosed,
+        queue.tryPush(.{ .output = .{ .pty_id = 1, .bytes = &.{} } }),
+    );
+    try std.testing.expectEqual(@as(usize, 2), counter.value);
 }
 
 test "PtyWriteQueue: enqueue→drainChunk→consume preserves FIFO bytes" {

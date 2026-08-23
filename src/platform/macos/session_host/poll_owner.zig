@@ -1,7 +1,7 @@
 //! Single-thread daemon poll owner for one listener and at most 32 readiness clients.
 //!
-//! Kernel fd readiness and synthetic 20 ms producer work enter the same `ReactorCore.nextReady`
-//! round-robin selector. One iteration services at most one client turn, so a readable flood,
+//! Kernel fd readiness, PTY-output wakeups, and periodic metadata cadence enter the same
+//! `ReactorCore.nextReady` round-robin selector. One iteration services at most one client turn, so a readable flood,
 //! blocked writer, or many attached streams cannot monopolize the host owner.
 
 const std = @import("std");
@@ -181,7 +181,7 @@ pub const Owner = struct {
         const before_poll_ns = monotonicNow(self.io);
         self.scheduleCadence(before_poll_ns);
 
-        var poll_fds: [max_clients + 1]c.pollfd = undefined;
+        var poll_fds: [max_clients + 2]c.pollfd = undefined;
         var poll_slots: [max_clients]?usize = [_]?usize{null} ** max_clients;
         // Once an upgrade closes admission, the listener must leave the readiness set. Accepting
         // and immediately rejecting peers would still consume fd/client budgets while the upgrade
@@ -199,14 +199,19 @@ pub const Owner = struct {
             .events = if (admission_open) c.POLL.IN else 0,
             .revents = 0,
         };
-        var poll_count: usize = 1;
+        poll_fds[1] = .{
+            .fd = self.server.owner_wake_fd,
+            .events = if (self.server.owner_wake_fd >= 0) c.POLL.IN else 0,
+            .revents = 0,
+        };
+        var poll_count: usize = 2;
         for (self.clients, 0..) |maybe_client, slot_index| {
             const client = maybe_client orelse continue;
             if (!gate_open and !client.isUpgradeDraining()) continue;
             var events: c_short = c.POLL.IN;
             if (client.wantsWrite()) events |= c.POLL.OUT;
             poll_fds[poll_count] = .{ .fd = client.fd, .events = events, .revents = 0 };
-            poll_slots[poll_count - 1] = slot_index;
+            poll_slots[poll_count - 2] = slot_index;
             poll_count += 1;
         }
         const timeout_ms = self.pollTimeout(before_poll_ns, outer_timeout_ms);
@@ -226,13 +231,22 @@ pub const Owner = struct {
             return .listener_broken;
         }
 
+        if (poll_fds[1].revents & c.POLL.IN != 0) {
+            if (!self.server.drainOwnerWake()) return .listener_broken;
+            self.server.tickOwner();
+            self.scheduleProducerNow(now_ns);
+            progressed = true;
+        } else if (poll_fds[1].revents != 0) {
+            return .listener_broken;
+        }
+
         var ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var read_ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var write_ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var peer_broken: [max_clients]bool = [_]bool{false} ** max_clients;
-        var poll_index: usize = 1;
+        var poll_index: usize = 2;
         while (poll_index < poll_count) : (poll_index += 1) {
-            const slot_index = poll_slots[poll_index - 1].?;
+            const slot_index = poll_slots[poll_index - 2].?;
             const revents = poll_fds[poll_index].revents;
             if (revents & c.POLL.IN != 0) read_ready[slot_index] = true;
             if (revents & c.POLL.OUT != 0) write_ready[slot_index] = true;
@@ -468,6 +482,16 @@ pub const Owner = struct {
             if (!gate_open and !client.isUpgradeDraining()) continue;
             // A large sweep may span the next cadence. Resetting it to the full tracker count on
             // every timer edge would keep it permanently nonzero and revisit the same prefix.
+            if (self.producer_remaining[index] == 0)
+                self.producer_remaining[index] = client.beginProducerSweep(now_ns);
+        }
+    }
+
+    fn scheduleProducerNow(self: *Owner, now_ns: u64) void {
+        const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
+        for (self.clients, 0..) |maybe_client, index| {
+            const client = maybe_client orelse continue;
+            if (!gate_open and !client.isUpgradeDraining()) continue;
             if (self.producer_remaining[index] == 0)
                 self.producer_remaining[index] = client.beginProducerSweep(now_ns);
         }

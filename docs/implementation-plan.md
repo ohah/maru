@@ -1275,6 +1275,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    backoff 과잉 attempt 0, runtime/controller/observer/fd leak 0, RSS·CPU·recovery latency 예산 준수를 자동 판정한다.
    CR6c·CR6d·CR6e-a1·CR6e-a2·CR6e-b의 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다. 그 후속 배선의 실행
    소유권은 CR6e가 측정하지 않은 frame-thread block을 전제하지 않고 실제 product caller와 owner-thread 계약을 먼저 문서화한다.
+   **CR6f — output wake와 입력 echo 예산:** daemon-global nonblocking self-pipe를 `RuntimeManager`가 소유하고, 각
+   `PtyEventQueue`는 성공한 output/terminal publication 뒤 byte wake만 수행한다. `poll_owner.Owner`가 read end를 유일하게
+   poll/drain하고 같은 owner turn에서 runtime event drain과 producer sweep을 시작한다. reader thread가 socket, `Connection`,
+   subscription 또는 `collectDeltas`를 직접 호출하는 경로는 0이다. 20ms cadence는 metadata·lost-wake 안전망으로 유지하되
+   PTY output의 정상 push 조건으로 사용하지 않는다. self-pipe 포화는 이미 resident한 wake와 coalesce하고 reader를 block하지
+   않으며, EOF/broken read end는 host owner를 fail-close한다. fresh spawn과 same-PID restore가 각각 새 process-local pipe와
+   notifier를 만들고 handoff inventory는 notifier/fd를 직렬화하지 않는다. 실제 forkpty `/bin/cat` input→valid delta artifact가
+   구조적 20ms floor 제거와 hard latency cap, 250ms idle wake/CPU, active notifier/write/drain, fd·child cleanup을 증명한다.
+   실제 pipe 포화·broken read end와 restore graph의 새 notifier는 process/unit gate가 맡고, 장시간 idle은 운영 soak 범위다.
 
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.

@@ -18,6 +18,7 @@ const Probe = struct {
         self: *Probe,
         telemetry: session_host.poll_owner.TelemetrySnapshot,
         pty_output_bytes: u64,
+        output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
     ) ?session_host.daemon.FixtureAction {
         if (self.pending_sequence == 0) return null;
@@ -26,6 +27,7 @@ const Probe = struct {
             self.pending_kind,
             telemetry,
             pty_output_bytes,
+            output_wake,
             child_exit,
         );
         const rc = c.send(
@@ -48,10 +50,11 @@ const Probe = struct {
         context: *anyopaque,
         telemetry: session_host.poll_owner.TelemetrySnapshot,
         pty_output_bytes: u64,
+        output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
     ) session_host.daemon.FixtureAction {
         const self: *Probe = @ptrCast(@alignCast(context));
-        if (self.sendPending(telemetry, pty_output_bytes, child_exit)) |action| return action;
+        if (self.sendPending(telemetry, pty_output_bytes, output_wake, child_exit)) |action| return action;
 
         var packet_bytes: [@sizeOf(probe_wire.CommandPacket) + 1]u8 = undefined;
         const rc = c.recv(
@@ -80,7 +83,7 @@ const Probe = struct {
                 self.pending_after_send = .stop;
             },
         }
-        return self.sendPending(telemetry, pty_output_bytes, child_exit) orelse
+        return self.sendPending(telemetry, pty_output_bytes, output_wake, child_exit) orelse
             .continue_serving;
     }
 };

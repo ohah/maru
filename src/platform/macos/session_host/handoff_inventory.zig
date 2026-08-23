@@ -441,7 +441,7 @@ pub const pty_reader_groups = [_]Group{
 pub const pty_event_queue_groups = [_]Group{
     .{
         .disposition = .reconstructed,
-        .fields = &.{ "io", "allocator", "items", "head", "mutex", "not_empty", "not_full" },
+        .fields = &.{ "io", "allocator", "items", "head", "mutex", "not_empty", "not_full", "wake_notifier" },
         .why = "capacity and synchronization storage are rebuilt after U2 drains coalesced output signals",
     },
     .{
@@ -545,6 +545,9 @@ pub const socket_server_groups = [_]Group{
             "admission_gate",
             "owner_tick_ctx",
             "owner_tick",
+            "owner_wake_fd",
+            "owner_wake_ctx",
+            "owner_wake_drain",
             "subscriptions",
         },
         .why = "the listener, target build status, process-local callbacks, gate pointer, and subscription table are rebuilt only after the complete runtime graph is prepared; poll_owner is the sole transient connection/upgrade-marker authority and is drained before capture",
@@ -679,8 +682,9 @@ pub const runtime_manager_groups = [_]Group{
             "observed_last_child_exit_status",
             "output_metrics_enabled",
             "observed_output_bytes",
+            "output_wake",
         },
-        .why = "the self-referential manager graph is rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero",
+        .why = "the self-referential manager graph and process-local output self-pipe are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero",
     },
 };
 

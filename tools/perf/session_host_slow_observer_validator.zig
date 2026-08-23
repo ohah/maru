@@ -16,6 +16,11 @@ const mib: u64 = 1024 * 1024;
 const workload_bytes_per_iteration: u64 = 2 * mib;
 const workload_iterations_max: u64 = 8;
 const marker_input_bytes: u64 = 33; // 128-bit nonce의 lowercase hex 32 byte + LF.
+const wake_sample_count: usize = 7;
+const idle_wake_observation_min_ns: u64 = 250 * std.time.ns_per_ms;
+pub const idle_cpu_total_cap_ns: u64 = 25 * std.time.ns_per_ms;
+pub const output_wake_median_cap_ns: u64 = 10 * std.time.ns_per_ms;
+pub const output_wake_tail_cap_ns: u64 = 20 * std.time.ns_per_ms;
 const baseline_sample_count: usize = 10;
 const pressure_sample_count_min: usize = 20;
 const pressure_sample_count_max: usize = 4096;
@@ -47,6 +52,20 @@ const RawSample = struct {
     ri_resident_size: u64,
     ri_phys_footprint: u64,
     ri_proc_start_abstime: u64,
+};
+
+const WakeSample = struct {
+    input_at_ns: u64,
+    input_accepted_at_ns: u64,
+    marker_at_ns: u64,
+    end_to_end_latency_ns: u64,
+    delivery_latency_ns: u64,
+};
+
+const IdleCpuSample = struct {
+    monotonic_ns: u64,
+    user_time_ns: u64,
+    system_time_ns: u64,
 };
 
 /// Flat top-level fields make the artifact easy to inspect in CI while RawSample remains a typed
@@ -95,6 +114,23 @@ const Artifact = struct {
     slow_eagain_count: u64,
     slow_pollout_absent_count: u64,
     stall_at_ns: u64,
+    wake_sample_count: u64,
+    wake_latency_min_ns: u64,
+    wake_latency_median_ns: u64,
+    wake_latency_max_ns: u64,
+    wake_samples: []const WakeSample,
+    idle_wake_observation_ns: u64,
+    idle_wake_notify_delta: u64,
+    idle_wake_published_delta: u64,
+    idle_wake_coalesced_delta: u64,
+    idle_wake_drain_delta: u64,
+    idle_cpu_before: IdleCpuSample,
+    idle_cpu_after: IdleCpuSample,
+    idle_cpu_total_delta_ns: u64,
+    active_wake_notify_delta: u64,
+    active_wake_published_delta: u64,
+    active_wake_coalesced_delta: u64,
+    active_wake_drain_delta: u64,
     controller_input_at_ns: u64,
     healthy_marker_at_ns: u64,
     healthy_progress_batches_before: u64,
@@ -326,6 +362,58 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
     {
         return error.InvalidProgress;
     }
+    if (artifact.wake_sample_count != wake_sample_count or
+        artifact.wake_samples.len != wake_sample_count)
+        return error.InvalidSampleCount;
+    var wake_latencies: [wake_sample_count]u64 = undefined;
+    var previous_marker_ns: u64 = 0;
+    for (artifact.wake_samples, 0..) |sample, index| {
+        if (sample.input_at_ns <= previous_marker_ns or
+            sample.input_accepted_at_ns < sample.input_at_ns or
+            sample.marker_at_ns <= sample.input_accepted_at_ns or
+            sample.end_to_end_latency_ns != sample.marker_at_ns - sample.input_at_ns or
+            sample.delivery_latency_ns != sample.marker_at_ns - sample.input_accepted_at_ns)
+            return error.InvalidProgress;
+        wake_latencies[index] = sample.delivery_latency_ns;
+        previous_marker_ns = sample.marker_at_ns;
+    }
+    std.mem.sort(u64, &wake_latencies, {}, std.sort.asc(u64));
+    if (artifact.wake_latency_min_ns != wake_latencies[0] or
+        artifact.wake_latency_median_ns != wake_latencies[wake_sample_count / 2] or
+        artifact.wake_latency_max_ns != wake_latencies[wake_sample_count - 1] or
+        artifact.wake_latency_median_ns > output_wake_median_cap_ns or
+        artifact.wake_latency_max_ns > output_wake_tail_cap_ns)
+        return error.InvalidProgress;
+    if (artifact.idle_wake_observation_ns < idle_wake_observation_min_ns or
+        artifact.idle_wake_notify_delta != 0 or
+        artifact.idle_wake_published_delta != 0 or
+        artifact.idle_wake_coalesced_delta != 0 or
+        artifact.idle_wake_drain_delta != 0)
+        return error.InvalidProgress;
+    if (artifact.idle_cpu_after.monotonic_ns <= artifact.idle_cpu_before.monotonic_ns or
+        artifact.idle_cpu_after.user_time_ns < artifact.idle_cpu_before.user_time_ns or
+        artifact.idle_cpu_after.system_time_ns < artifact.idle_cpu_before.system_time_ns or
+        artifact.idle_cpu_after.monotonic_ns - artifact.idle_cpu_before.monotonic_ns <
+            idle_wake_observation_min_ns)
+        return error.InvalidProgress;
+    const idle_cpu_delta = std.math.add(
+        u64,
+        artifact.idle_cpu_after.user_time_ns - artifact.idle_cpu_before.user_time_ns,
+        artifact.idle_cpu_after.system_time_ns - artifact.idle_cpu_before.system_time_ns,
+    ) catch return error.InvalidProgress;
+    if (artifact.idle_cpu_total_delta_ns != idle_cpu_delta or
+        idle_cpu_delta > idle_cpu_total_cap_ns)
+        return error.InvalidProgress;
+    const active_accounted_writes = std.math.add(
+        u64,
+        artifact.active_wake_published_delta,
+        artifact.active_wake_coalesced_delta,
+    ) catch return error.InvalidProgress;
+    if (artifact.active_wake_notify_delta < wake_sample_count or
+        artifact.active_wake_published_delta == 0 or
+        artifact.active_wake_drain_delta == 0 or
+        active_accounted_writes > artifact.active_wake_notify_delta)
+        return error.InvalidProgress;
 
     if (artifact.sample_target_interval_ms != sample_target_interval_ms or
         artifact.pressure_sample_gap_max_ms != pressure_sample_gap_max_ms or
@@ -544,6 +632,15 @@ fn sampleSeries(
 const baseline_fixture = sampleSeries(10, 1_000_000_000, 20_000_000, 100_000_000);
 const pressure_fixture = sampleSeries(20, 1_200_000_000, 10_000_000, 120_000_000);
 const post_fixture = sampleSeries(10, 1_500_000_000, 20_000_000, 110_000_000);
+const wake_fixture = [_]WakeSample{
+    .{ .input_at_ns = 900_000_000, .input_accepted_at_ns = 901_000_000, .marker_at_ns = 905_000_000, .end_to_end_latency_ns = 5_000_000, .delivery_latency_ns = 4_000_000 },
+    .{ .input_at_ns = 910_000_000, .input_accepted_at_ns = 911_000_000, .marker_at_ns = 916_000_000, .end_to_end_latency_ns = 6_000_000, .delivery_latency_ns = 5_000_000 },
+    .{ .input_at_ns = 920_000_000, .input_accepted_at_ns = 921_000_000, .marker_at_ns = 927_000_000, .end_to_end_latency_ns = 7_000_000, .delivery_latency_ns = 6_000_000 },
+    .{ .input_at_ns = 930_000_000, .input_accepted_at_ns = 931_000_000, .marker_at_ns = 938_000_000, .end_to_end_latency_ns = 8_000_000, .delivery_latency_ns = 7_000_000 },
+    .{ .input_at_ns = 940_000_000, .input_accepted_at_ns = 941_000_000, .marker_at_ns = 949_000_000, .end_to_end_latency_ns = 9_000_000, .delivery_latency_ns = 8_000_000 },
+    .{ .input_at_ns = 950_000_000, .input_accepted_at_ns = 951_000_000, .marker_at_ns = 960_000_000, .end_to_end_latency_ns = 10_000_000, .delivery_latency_ns = 9_000_000 },
+    .{ .input_at_ns = 970_000_000, .input_accepted_at_ns = 971_000_000, .marker_at_ns = 981_000_000, .end_to_end_latency_ns = 11_000_000, .delivery_latency_ns = 10_000_000 },
+};
 
 fn goodArtifact() Artifact {
     return .{
@@ -586,6 +683,31 @@ fn goodArtifact() Artifact {
         .slow_eagain_count = 1,
         .slow_pollout_absent_count = 0,
         .stall_at_ns = 1_250_000_000,
+        .wake_sample_count = wake_sample_count,
+        .wake_latency_min_ns = 4_000_000,
+        .wake_latency_median_ns = 7_000_000,
+        .wake_latency_max_ns = 10_000_000,
+        .wake_samples = &wake_fixture,
+        .idle_wake_observation_ns = idle_wake_observation_min_ns,
+        .idle_wake_notify_delta = 0,
+        .idle_wake_published_delta = 0,
+        .idle_wake_coalesced_delta = 0,
+        .idle_wake_drain_delta = 0,
+        .idle_cpu_before = .{
+            .monotonic_ns = 700_000_000,
+            .user_time_ns = 100_000_000,
+            .system_time_ns = 50_000_000,
+        },
+        .idle_cpu_after = .{
+            .monotonic_ns = 950_000_000,
+            .user_time_ns = 105_000_000,
+            .system_time_ns = 52_000_000,
+        },
+        .idle_cpu_total_delta_ns = 7_000_000,
+        .active_wake_notify_delta = wake_sample_count,
+        .active_wake_published_delta = wake_sample_count,
+        .active_wake_coalesced_delta = 0,
+        .active_wake_drain_delta = wake_sample_count,
         .controller_input_at_ns = 1_260_000_000,
         .healthy_marker_at_ns = 1_270_000_000,
         .healthy_progress_batches_before = 10,
@@ -781,6 +903,65 @@ test "timestamp reversal and pressure gap allow runner jitter to 125ms" {
     artifact.healthy_marker_at_ns = 1_259_000_000;
     try testing.expectError(
         error.InvalidSampleCount,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    var wake_median = wake_fixture;
+    for (&wake_median, 0..) |*sample, index| {
+        sample.input_at_ns = 900_000_000 + index * 30_000_000;
+        sample.input_accepted_at_ns = sample.input_at_ns + 1_000_000;
+        sample.delivery_latency_ns = if (index < 3)
+            5_000_000
+        else
+            output_wake_median_cap_ns + 1;
+        sample.marker_at_ns = sample.input_accepted_at_ns + sample.delivery_latency_ns;
+        sample.end_to_end_latency_ns = sample.marker_at_ns - sample.input_at_ns;
+    }
+    artifact.wake_samples = &wake_median;
+    artifact.wake_latency_min_ns = 5_000_000;
+    artifact.wake_latency_median_ns = output_wake_median_cap_ns + 1;
+    artifact.wake_latency_max_ns = output_wake_median_cap_ns + 1;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    var wake_tail = wake_fixture;
+    wake_tail[wake_tail.len - 1].marker_at_ns =
+        wake_tail[wake_tail.len - 1].input_accepted_at_ns + output_wake_tail_cap_ns + 1;
+    wake_tail[wake_tail.len - 1].end_to_end_latency_ns =
+        wake_tail[wake_tail.len - 1].marker_at_ns - wake_tail[wake_tail.len - 1].input_at_ns;
+    wake_tail[wake_tail.len - 1].delivery_latency_ns = output_wake_tail_cap_ns + 1;
+    artifact.wake_samples = &wake_tail;
+    artifact.wake_latency_max_ns = output_wake_tail_cap_ns + 1;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.idle_wake_drain_delta = 1;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.idle_cpu_after.user_time_ns =
+        artifact.idle_cpu_before.user_time_ns + idle_cpu_total_cap_ns + 1;
+    artifact.idle_cpu_total_delta_ns = idle_cpu_total_cap_ns + 1 +
+        (artifact.idle_cpu_after.system_time_ns - artifact.idle_cpu_before.system_time_ns);
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.active_wake_notify_delta = wake_sample_count - 1;
+    try testing.expectError(
+        error.InvalidProgress,
         validateArtifact(testing.allocator, artifact),
     );
 }

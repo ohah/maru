@@ -58,6 +58,7 @@ pub const FixtureProbe = struct {
         ctx: *anyopaque,
         telemetry: poll_owner.TelemetrySnapshot,
         pty_output_bytes: u64,
+        output_wake: runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: runtime_manager.RuntimeManager.ChildExitEvidence,
     ) FixtureAction,
 };
@@ -461,6 +462,7 @@ fn runSessionHostImpl(
     var manager: runtime_manager.RuntimeManager = undefined;
     manager.init(allocator, io, &registry);
     defer manager.deinit();
+    manager.enableOutputWake() catch return error.ManifestFailed;
     if (fixture_probe != null) manager.enableOutputMetrics();
 
     const host_id = exact_host_id orelse newHostId();
@@ -586,6 +588,14 @@ fn runSessionHostImpl(
             _ = owner.drainOwnedEvents();
         }
     }.tick;
+    server.owner_wake_fd = manager.outputWakeReadFd().?;
+    server.owner_wake_ctx = &manager;
+    server.owner_wake_drain = struct {
+        fn drain(ctx: *anyopaque) bool {
+            const owner: *runtime_manager.RuntimeManager = @ptrCast(@alignCast(ctx));
+            return owner.drainOutputWake();
+        }
+    }.drain;
 
     var fd_owner = poll_owner.Owner.init(allocator, io, &server) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -668,6 +678,7 @@ fn runSessionHostImpl(
                 probe.ctx,
                 fd_owner.telemetrySnapshot(),
                 manager.totalPtyOutputBytes(),
+                manager.fixtureOutputWakeEvidence(),
                 manager.fixtureChildExitEvidence(),
             )) {
                 .continue_serving => {},

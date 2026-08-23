@@ -2079,6 +2079,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   cap을 먼저 확정하고, 계약된 long soak에서 deadline 초과·과잉 backoff·marker duplicate·authority/fd/process leak 0과 모든
   성능 cap을 자동 판정한다. environment mismatch는 skip/pass가 아니라 typed failure다. CR6e-b 전에는 자동 reconnect 제품
   설정을 배선하지 않는다.
+- **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지
+  않는지, callback이 queue mutex 밖에서 실행되는지 고정한다. daemon/restore는 runtime 생성 전에 process-local nonblocking
+  CLOEXEC self-pipe를 만들고, reader는 write end에 byte만 coalesce하며 `poll_owner.Owner`만 read end와 runtime event queue를
+  drain한다. wake가 도착한 owner turn은 cadence deadline을 기다리지 않고 모든 eligible client의 기존 producer sweep을
+  시작하되, 이미 진행 중인 sweep을 reset하지 않는다. pipe 포화·EINTR·spurious wake·broken read end, upgrade restore의
+  notifier/fd 재구성, idle CPU와 fd/child cleanup을 unit/process gate로 검증한다. 실제 forkpty `/bin/cat`의 구분 가능한 input을
+  controller wire로 보내 healthy client의 exact delta marker까지 측정한 raw artifact와 `performance-budget.md` hard cap이 없으면
+  구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 빠른 제품 gate는 250ms idle wake delta 0과 CPU
+  cap, 7 active marker의 notifier/write/drain 증가를 소유하며, 장시간 idle soak는 CR6f 이후 운영 soak 범위로 남긴다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

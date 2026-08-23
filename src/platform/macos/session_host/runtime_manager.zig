@@ -22,6 +22,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const c = std.c;
+const posix = std.posix;
 const maru = @import("maru");
 const server = @import("server.zig");
 const reg = @import("registry.zig");
@@ -62,6 +64,100 @@ pub const max_clipboard_wire_bytes: usize = 160 * 1024;
 const max_clipboard_target_bytes: usize = 32;
 
 const foreground_refresh_ns: i128 = 500 * std.time.ns_per_ms;
+
+/// One daemon-global nonblocking self-pipe. PTY readers only publish a byte; the sole poll owner
+/// drains runtime queues and projects deltas. This keeps core/socket ownership on the owner thread.
+const OutputWake = struct {
+    read_fd: c.fd_t,
+    write_fd: c.fd_t,
+    notify_attempts: std.atomic.Value(u64) = .init(0),
+    published_writes: std.atomic.Value(u64) = .init(0),
+    coalesced_writes: std.atomic.Value(u64) = .init(0),
+    drain_turns: std.atomic.Value(u64) = .init(0),
+
+    const WriteDisposition = enum { retry, published, coalesced, unavailable };
+
+    fn classifyWriteResult(written: isize, err: posix.E) WriteDisposition {
+        if (written == 1) return .published;
+        if (written < 0 and err == .INTR) return .retry;
+        if (written < 0 and err == .AGAIN) return .coalesced;
+        return .unavailable;
+    }
+
+    fn init() !OutputWake {
+        var fds: [2]c_int = undefined;
+        if (c.pipe(&fds) != 0) return error.OutputWakeUnavailable;
+        errdefer {
+            _ = c.close(fds[0]);
+            _ = c.close(fds[1]);
+        }
+        for (fds) |fd| {
+            const descriptor_flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
+            const status_flags = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+            const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+            if (descriptor_flags < 0 or status_flags < 0 or
+                c.fcntl(fd, c.F.SETFD, descriptor_flags | c.FD_CLOEXEC) < 0 or
+                c.fcntl(fd, c.F.SETFL, status_flags | nonblocking) < 0)
+                return error.OutputWakeUnavailable;
+        }
+        // A lifecycle bug or hostile fd close must become an observable EPIPE/fallback, never
+        // process-wide SIGPIPE termination from a PTY reader thread.
+        if (c.fcntl(fds[1], c.F.SETNOSIGPIPE, @as(c_int, 1)) < 0)
+            return error.OutputWakeUnavailable;
+        return .{ .read_fd = fds[0], .write_fd = fds[1] };
+    }
+
+    fn deinit(self: *OutputWake) void {
+        _ = c.close(self.read_fd);
+        _ = c.close(self.write_fd);
+        self.* = undefined;
+    }
+
+    fn notify(ctx: *anyopaque) void {
+        const self: *OutputWake = @ptrCast(@alignCast(ctx));
+        _ = self.notify_attempts.fetchAdd(1, .monotonic);
+        const bytes = [_]u8{1};
+        while (true) {
+            const written = c.write(self.write_fd, bytes[0..].ptr, bytes.len);
+            switch (classifyWriteResult(written, if (written < 0) posix.errno(written) else .SUCCESS)) {
+                .retry => continue,
+                // EAGAIN means an unread wake is already resident. Other failures are observed by
+                // the owner-side read fd and lifecycle gates; the reader must never block or own
+                // teardown.
+                .published => {
+                    _ = self.published_writes.fetchAdd(1, .monotonic);
+                    return;
+                },
+                .coalesced => {
+                    _ = self.coalesced_writes.fetchAdd(1, .monotonic);
+                    return;
+                },
+                .unavailable => return,
+            }
+        }
+    }
+
+    fn drain(self: *OutputWake) bool {
+        var bytes: [256]u8 = undefined;
+        var observed = false;
+        while (true) {
+            const read_count = c.read(self.read_fd, &bytes, bytes.len);
+            if (read_count > 0) {
+                observed = true;
+                continue;
+            }
+            if (read_count == 0) return false;
+            switch (posix.errno(read_count)) {
+                .INTR => continue,
+                .AGAIN => {
+                    if (observed) _ = self.drain_turns.fetchAdd(1, .monotonic);
+                    return true;
+                },
+                else => return false,
+            }
+        }
+    }
+};
 
 /// host가 drain해 보관하는 OSC 52 요청 상태(runtime별). client는 관측의 seq 증가로 요청을 알아채고,
 /// write 내용만 별도 RPC로 가져간다(텍스트가 커 관측 full-state에 실을 수 없다).
@@ -131,6 +227,7 @@ pub const RuntimeManager = struct {
     /// 소비형 플래그로는 둘째 요청을 놓친다). write 텍스트는 클 수 있어 관측에 싣지 않고 여기 보관했다가 client가
     /// `runtime.clipboard_write`로 가져간다. read는 target(Pc)만 짧아 관측에 함께 싣는다.
     clipboards: std.AutoHashMapUnmanaged(RuntimeHandle, ClipboardState) = .empty,
+    output_wake: ?OutputWake = null,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
     pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry) void {
@@ -148,6 +245,44 @@ pub const RuntimeManager = struct {
         self.foreground_cache = .empty;
         self.bell_counts = .empty;
         self.clipboards = .empty;
+        self.output_wake = null;
+    }
+
+    /// Product daemon/restore calls this before any runtime exists. Tests that do not exercise the
+    /// poll wake may keep the manager pipe-free, so their fd inventories remain stable.
+    pub fn enableOutputWake(self: *RuntimeManager) !void {
+        std.debug.assert(self.host_registry.count() == 0 and self.output_wake == null);
+        self.output_wake = try OutputWake.init();
+    }
+
+    pub fn outputWakeReadFd(self: *const RuntimeManager) ?c.fd_t {
+        return if (self.output_wake) |wake| wake.read_fd else null;
+    }
+
+    pub fn drainOutputWake(self: *RuntimeManager) bool {
+        return if (self.output_wake) |*wake| wake.drain() else false;
+    }
+
+    pub const OutputWakeEvidence = struct {
+        notify_attempts: u64,
+        published_writes: u64,
+        coalesced_writes: u64,
+        drain_turns: u64,
+    };
+
+    pub fn fixtureOutputWakeEvidence(self: *const RuntimeManager) OutputWakeEvidence {
+        if (self.output_wake) |*wake| return .{
+            .notify_attempts = wake.notify_attempts.load(.acquire),
+            .published_writes = wake.published_writes.load(.acquire),
+            .coalesced_writes = wake.coalesced_writes.load(.acquire),
+            .drain_turns = wake.drain_turns.load(.acquire),
+        };
+        return .{
+            .notify_attempts = 0,
+            .published_writes = 0,
+            .coalesced_writes = 0,
+            .drain_turns = 0,
+        };
     }
 
     /// 소유 registry를 해제한다. **호출 전 모든 runtime이 terminate돼 있어야** 한다(reader join·슬롯 회수가 terminate에서
@@ -163,6 +298,7 @@ pub const RuntimeManager = struct {
         }
         self.surface_runtime.deinit();
         self.live_registry.deinit();
+        if (self.output_wake) |*wake| wake.deinit();
         self.* = undefined;
     }
 
@@ -677,6 +813,10 @@ pub const RuntimeManager = struct {
                 default_queue_capacity,
             );
             live_initialized = true;
+            if (self.output_wake) |*wake| slot.terminal.live_pty.eventQueue().setWakeNotifier(.{
+                .ctx = wake,
+                .notify = OutputWake.notify,
+            });
             _ = try slot.terminal.live_pty.attachSurfacePrepared(
                 &self.surface_runtime,
                 &slot.terminal.surface,
@@ -1499,6 +1639,14 @@ pub const RuntimeManager = struct {
                 return error.RuntimeNotFound;
             terminal_slot.live_pty.setOutputByteCounter(&self.observed_output_bytes);
         }
+        if (self.output_wake) |*wake| {
+            const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse
+                return error.RuntimeNotFound;
+            terminal_slot.live_pty.eventQueue().setWakeNotifier(.{
+                .ctx = wake,
+                .notify = OutputWake.notify,
+            });
+        }
         _ = try be.attach(handle, true); // backend가 initial_config를 적용한 뒤 reader 시작 — 첫 output부터 host 설정 사용.
 
         // 무작위 runtime_id를 발급해 host registry에 등록한다. 충돌은 사실상 불가능하지만 방어적으로 재시도한다.
@@ -1671,6 +1819,89 @@ fn newRuntimeId() u128 {
 // 조회 대상으로 노출하고, `terminate`가 그 PTY/자식/reader를 누수 없이 회수하는지 고정한다. testing.allocator가
 // 누수를(reader join 실패·슬롯 미회수) 잡는다. 실 forkpty라 macOS opt-in(non-macOS는 barrel에서 제외돼 test 자체가 없다).
 // ─────────────────────────────────────────────────────────────────────────────
+
+test "runtime manager: output wake is nonblocking CLOEXEC and coalesces queue publication" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var host_registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(std.testing.allocator, std.testing.io, &host_registry);
+    defer manager.deinit();
+    try manager.enableOutputWake();
+
+    const wake_fd = manager.outputWakeReadFd().?;
+    const wake_write_fd = manager.output_wake.?.write_fd;
+    const descriptor_flags = c.fcntl(wake_fd, c.F.GETFD, @as(c_int, 0));
+    const status_flags = c.fcntl(wake_fd, c.F.GETFL, @as(c_int, 0));
+    const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+    try std.testing.expect(descriptor_flags >= 0 and descriptor_flags & c.FD_CLOEXEC != 0);
+    try std.testing.expect(status_flags >= 0 and status_flags & nonblocking != 0);
+    try std.testing.expectEqual(@as(c_int, 1), c.fcntl(wake_write_fd, c.F.GETNOSIGPIPE, @as(c_int, 0)));
+
+    var queue = try maru.app.PtyEventQueue.init(std.testing.io, std.testing.allocator, 2);
+    defer queue.deinit();
+    queue.setWakeNotifier(.{
+        .ctx = &manager.output_wake.?,
+        .notify = OutputWake.notify,
+    });
+    try queue.tryPush(.{ .output = .{ .pty_id = 1, .bytes = &.{} } });
+    try queue.tryPush(.{ .output = .{ .pty_id = 1, .bytes = &.{} } });
+
+    var ready = c.pollfd{ .fd = wake_fd, .events = c.POLL.IN, .revents = 0 };
+    try std.testing.expect(c.poll(@ptrCast(&ready), 1, 100) > 0);
+    try std.testing.expect(manager.drainOutputWake());
+    ready.revents = 0;
+    try std.testing.expectEqual(@as(c_int, 0), c.poll(@ptrCast(&ready), 1, 0));
+}
+
+test "runtime manager: output wake saturates into nonblocking coalescing and drains reusable" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var wake = try OutputWake.init();
+    defer wake.deinit();
+
+    const byte = [_]u8{1};
+    var published: usize = 0;
+    while (published < 16 * 1024 * 1024) : (published += 1) {
+        const written = c.write(wake.write_fd, &byte, byte.len);
+        if (written == 1) continue;
+        try std.testing.expect(written < 0);
+        try std.testing.expectEqual(posix.E.AGAIN, posix.errno(written));
+        break;
+    } else return error.TestUnexpectedResult;
+    try std.testing.expect(published != 0);
+
+    // The production callback must return while the pipe is full: the resident byte already owns
+    // the wake obligation. A successful drain then makes the same pipe reusable.
+    OutputWake.notify(&wake);
+    try std.testing.expect(wake.drain());
+    try std.testing.expectEqual(@as(isize, 1), c.write(wake.write_fd, &byte, byte.len));
+    try std.testing.expect(wake.drain());
+    var idle = c.pollfd{ .fd = wake.read_fd, .events = c.POLL.IN, .revents = 0 };
+    try std.testing.expectEqual(@as(c_int, 0), c.poll(@ptrCast(&idle), 1, 50));
+}
+
+test "runtime manager: output wake write disposition retries only EINTR" {
+    try std.testing.expectEqual(OutputWake.WriteDisposition.published, OutputWake.classifyWriteResult(1, .SUCCESS));
+    try std.testing.expectEqual(OutputWake.WriteDisposition.retry, OutputWake.classifyWriteResult(-1, .INTR));
+    try std.testing.expectEqual(OutputWake.WriteDisposition.coalesced, OutputWake.classifyWriteResult(-1, .AGAIN));
+    try std.testing.expectEqual(OutputWake.WriteDisposition.unavailable, OutputWake.classifyWriteResult(-1, .PIPE));
+    try std.testing.expectEqual(OutputWake.WriteDisposition.unavailable, OutputWake.classifyWriteResult(0, .SUCCESS));
+}
+
+test "runtime manager: broken output wake read end cannot raise SIGPIPE and deinit closes writer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var wake = try OutputWake.init();
+    const write_fd = wake.write_fd;
+    try std.testing.expectEqual(@as(c_int, 0), c.close(wake.read_fd));
+    wake.read_fd = -1;
+
+    // Without F_SETNOSIGPIPE this call terminates the entire test process instead of returning.
+    OutputWake.notify(&wake);
+    try std.testing.expect(c.fcntl(write_fd, c.F.GETFD, @as(c_int, 0)) >= 0);
+    wake.deinit();
+    try std.testing.expect(c.fcntl(write_fd, c.F.GETFD, @as(c_int, 0)) < 0);
+    try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+}
 
 test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminates it" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -1861,6 +2092,7 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     var target: RuntimeManager = undefined;
     target.init(allocator, std.testing.io, &target_registry);
     defer target.deinit();
+    try target.enableOutputWake();
     var graph = try target.prepareRestoredGraph(&decoded);
     var graph_active = true;
     defer if (graph_active) graph.discard();
@@ -1880,6 +2112,25 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     _ = try graph.revalidateAll();
     try std.testing.expectEqual(@as(usize, 1), target_registry.count());
     try std.testing.expectEqual(@as(usize, 1), target.live_registry.count());
+
+    // Restore must bind the target process's fresh self-pipe before any reader can be released.
+    // Publishing through that reconstructed queue proves the notifier does not retain old-image
+    // pointer/fd authority and that the new poll owner will observe the first restored event.
+    const target_handle = target.handleFor(runtime_id) orelse return error.TestUnexpectedResult;
+    const target_terminal = target.backend_impl.terminalForHostLifecycle(target_handle) orelse
+        return error.TestUnexpectedResult;
+    try target_terminal.live_pty.eventQueue().tryPush(.{
+        .output = .{ .pty_id = target_handle, .bytes = &.{} },
+    });
+    var restored_wake = c.pollfd{
+        .fd = target.outputWakeReadFd().?,
+        .events = c.POLL.IN,
+        .revents = 0,
+    };
+    try std.testing.expect(c.poll(@ptrCast(&restored_wake), 1, 100) > 0);
+    try std.testing.expect(target.drainOutputWake());
+    var restored_event = target_terminal.live_pty.eventQueue().tryPop().?;
+    restored_event.deinit(allocator);
 
     graph.discard();
     graph_active = false;

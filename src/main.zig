@@ -1773,6 +1773,70 @@ fn applyCoreConfig(
 
 const smoke_spin_cap: usize = 600;
 
+/// 도크 자리를 채우는 셀 — **배경과 디바이더**. W8.7a 는 여기까지다(파일 트리는 ⒜2 — 그것은
+/// 터미널과 **아틀라스를 나눠 써야** 하므로 별개의 배선이다).
+///
+/// 디바이더를 **그린다**는 것이 중요하다: 안 그리면 터미널과 도크가 같은 배경색으로 이어져 창이
+/// 갈렸다는 사실이 화면에 안 보이고, 사각형이 어긋나도 눈에 안 띈다.
+fn rebuildDockCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    geom: maru.session.dock_layout.Geometry,
+) !void {
+    out.clearRetainingCapacity();
+    if (geom.dock.w == 0 or geom.dock.h == 0) return;
+    try out.append(allocator, d3d11_cells.solidCell(
+        @floatFromInt(geom.dock.x),
+        @floatFromInt(geom.dock.y),
+        @floatFromInt(geom.dock.w),
+        @floatFromInt(geom.dock.h),
+        d3d11_cells.colorFromArgb(0xFF181D28),
+        .{ 0, 0, 0, 0 },
+    ));
+    if (geom.divider.w != 0 and geom.divider.h != 0) {
+        try out.append(allocator, d3d11_cells.solidCell(
+            @floatFromInt(geom.divider.x),
+            @floatFromInt(geom.divider.y),
+            @floatFromInt(geom.divider.w),
+            @floatFromInt(geom.divider.h),
+            d3d11_cells.colorFromArgb(0xFF2A3344),
+            .{ 0, 0, 0, 0 },
+        ));
+    }
+}
+
+/// 창 하나를 **터미널과 도크로 가르는** 기하. 계산은 중립이 하고(`session/dock_layout.compute`)
+/// 여기서는 Windows 가 아는 값(창 크기·셀 크기)만 채운다.
+///
+/// **사이드바와 타이틀바 띠는 0 이다** — Windows 는 네이티브 타이틀바를 쓰고(§2b) 사이드바는 아직
+/// 없다. 그 둘이 생기면 여기 두 값만 바뀐다.
+fn dockGeometryFor(
+    width_px: u32,
+    height_px: u32,
+    cell_w: u32,
+    cell_h: u32,
+    visible: bool,
+    size_pt: u32,
+) maru.session.dock_layout.Geometry {
+    const dock_layout = maru.session.dock_layout;
+    return dock_layout.compute(.{
+        .backing_width_px = width_px,
+        .backing_height_px = height_px,
+        .sidebar_width_px = 0,
+        .titlebar_height_px = 0,
+        .cell_width_px = cell_w,
+        .cell_height_px = cell_h,
+        .scale_milli = 1000,
+        .divider_px = dock_layout.dividerGrabBandPx(1000),
+        .side = .right,
+        .size_pt = size_pt,
+        .visible = visible,
+        .view = .explorer,
+        .view_bar_px = cell_h * 2,
+        .status_bar_px = 0,
+    });
+}
+
 fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize) !void {
     if (@import("builtin").os.tag != .windows) {
         try stderr.writeAll("maru win32-terminal-smoke: Windows only\n");
@@ -1844,9 +1908,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer present.destroy();
     window.present.opaque_handle = @ptrCast(present);
 
-    // ── PTY와 중립 프레임 루프 ─────────────────────────────────────────────────────────────
-    const start = win32_window.cellsForClient(initial.width_px, initial.height_px, cell_w, cell_h) orelse
+    // ── 창을 터미널과 도크로 가른다 (§2m.31) ────────────────────────────────────────────────
+    //
+    // **기하는 중립이 정한다**(`session/dock_layout.compute`) — macOS 가 쓰는 그 함수다. Windows 가
+    // 자기 산수로 다시 나누면 두 플랫폼의 도크 폭·디바이더 두께가 조용히 갈린다.
+    // 도크 상태. **⒞ 슬라이스가 이 둘을 움직인다**(디바이더 드래그·숨기기) — 지금은 고정이다.
+    const dock_visible = true;
+    const dock_size_pt: u32 = 0; // 0 = 뷰가 정한 기본 폭
+    var geom = dockGeometryFor(initial.width_px, initial.height_px, cell_w, cell_h, dock_visible, dock_size_pt);
+
+    // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
+    // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
+    const start = win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h) orelse
         maru.terminal.Size{ .cols = 80, .rows = 24 };
+    // 판정용 기준값 — **사각형에서 곧바로** 나온 격자. `start` 와 갈리면 격자를 창에서 유도한 것이다.
+    const want_cols: u16 = @intCast(geom.terminal.w / cell_w);
+    const want_rows: u16 = @intCast(geom.terminal.h / cell_h);
     const script = maru.app.fixture_script.interactiveEcho(@import("builtin").os.tag);
     // **셸도 config에서 온다** — `shell.command`가 1순위, 없으면 `shell.windows-shell`이 고른 티어.
     // 이 배선이 없던 동안 두 키는 파싱·검증만 되고 spawn까지 가지 않았다(실측: config가 `cmd`를 지정했는데
@@ -1921,6 +1998,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         return error.UnknownCommand;
     };
     defer pipeline.destroy();
+
+    // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
+    var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer dock_cells.deinit(allocator);
+    try rebuildDockCells(allocator, &dock_cells, geom);
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -2043,6 +2125,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var region_uploads: usize = 0;
     var atlas_resizes: usize = 0;
     var last_cells: usize = 0;
+    var term_cells_in_dock: usize = 0;
     var close_requested = false;
     var ended = false;
     // **각본을 보내지 않는다.** 이 스모크는 사람이 타이핑하는 자리다 — fixture 각본은 `exit`으로 끝나서
@@ -2053,9 +2136,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
                 try present.resize(r.width_px, r.height_px);
+                // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
+                geom = dockGeometryFor(r.width_px, r.height_px, cell_w, cell_h, dock_visible, dock_size_pt);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
-                if (win32_window.cellsForClient(r.width_px, r.height_px, cell_w, cell_h)) |size|
+                if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                     loop.resizeActiveSurface(size) catch {};
+                rebuildDockCells(allocator, &dock_cells, geom) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
@@ -2499,11 +2585,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             colors,
         );
         defer allocator.free(native);
+        // **터미널을 자기 사각형에 놓는다**(§2m.31). 원점을 안 찍으면 도크가 있어도 터미널이 창
+        // 왼쪽 위에서 시작해 도크 밑으로 깔린다.
+        maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
 
         cells.clearRetainingCapacity();
-        try cells.ensureTotalCapacity(allocator, native.len);
+        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len);
+        // **도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 도크 배경에 덮이면 안 된다.
+        cells.appendSliceAssumeCapacity(dock_cells.items);
+        const term_first = cells.items.len;
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
         last_cells = cells.items.len;
+
+        // **터미널 셀이 도크 사각형에 들어가면 안 된다**(§2m.31 의 진짜 위험). 격자를 창 폭에서
+        // 유도하는 실수는 화면에서 잘 안 보인다 — 도크 배경이 덮어 버리기 때문이다. 그래서 그림이
+        // 아니라 **셀 좌표**로 잰다.
+        if (geom.dock.w != 0) {
+            const dock_x0: f32 = @floatFromInt(geom.dock.x);
+            for (cells.items[term_first..]) |c| {
+                if (c.rect[0] + c.rect[2] > dock_x0) term_cells_in_dock += 1;
+            }
+        }
 
         try present.beginFrame(clear);
         try pipeline.draw(cells.items, present.width_px, present.height_px);
@@ -2514,6 +2616,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     if (close_requested) window.requestClose();
 
     try stdout.writeAll("maru.win32-terminal-smoke.v1\n");
+    try stdout.print("dock_visible={} term_rect={d}x{d}+{d}+{d} dock_rect={d}x{d}+{d}+{d} divider_w={d}\n", .{
+        dock_visible,
+        geom.terminal.w,
+        geom.terminal.h,
+        geom.terminal.x,
+        geom.terminal.y,
+        geom.dock.w,
+        geom.dock.h,
+        geom.dock.x,
+        geom.dock.y,
+        geom.divider.w,
+    });
+    // **이것이 진짜 판정이다.** 셀이 도크에 들어갔는지만 보면 **속 빈다** — 셸 출력이 짧으면 격자를
+    // 창 폭에서 잘못 유도해도 셀이 거기까지 안 닿는다(실측: 뮤턴트가 `terminal_size` 만 109x31 로
+    // 달라지고 `term_cells_in_dock` 은 그대로 0 이었다). 격자 자체를 사각형과 견준다.
+    try stdout.print("grid_follows_term_rect={} grid={d}x{d} want={d}x{d}\n", .{
+        start.cols == want_cols and start.rows == want_rows,
+        start.cols,
+        start.rows,
+        want_cols,
+        want_rows,
+    });
+    // 부차 판정: 그려진 셀이 도크 사각형을 침범했나(원점을 안 찍었거나 클립이 없을 때 잡힌다).
+    try stdout.print("term_cells_in_dock={d} dock_cells={d}\n", .{ term_cells_in_dock, dock_cells.items.len });
     try stdout.print("font_family={s}\n", .{raster.family});
     try stdout.print("cell_px={d}x{d}\n", .{ cell_w, cell_h });
     // **설정이 코어까지 갔는지 값으로 본다.** 색은 화면으로 판정되지만 스크롤백 길이는 안 보인다 —

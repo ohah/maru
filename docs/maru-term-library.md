@@ -318,6 +318,11 @@ term.attachCustomKeyEventHandler(null);                                    // �
 
 ### 상태 이벤트
 
+> **`onRender` 안에서 `write()` 를 부르지 않는다.** 그 write 가 다음 프레임을 만들고 그 프레임이
+> 다시 콜백을 부른다 — 자기 유발 루프다. 프레임이 마이크로태스크로 접혀 브라우저가 멈추지는
+> 않지만 끝나지 않는다.
+
+
 | 이벤트 | 인자 | 언제 |
 |---|---|---|
 | `onCursorMove` | `CursorState` | 커서가 **다른 칸으로** 옮겨갔을 때 |

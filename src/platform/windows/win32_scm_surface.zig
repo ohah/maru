@@ -279,26 +279,42 @@ pub fn build(
 /// `interaction.dispatch` 로 hover·click 을 풀고, `ids.Table.resolve` 로 도메인 의미를 붙인다.
 ///
 /// 스크롤바 드래그는 여기 없다 — 이 표면은 아직 스크롤하지 않는다(편집기는 §2m.23 에서 했다).
+pub const Routed = struct {
+    intent: ?component.ids.Intent = null,
+    /// **그림이 달라졌다.** intent 가 없어도 참일 수 있다 — 호버가 들어오고 나가는 것도 그림이
+    /// 바뀌는 일이다. 이것을 안 보면 **마우스를 올려도 아무 표시가 안 난다**: 상태는 바뀌는데
+    /// 화면을 다시 안 그린다(적대적 검증에서 나온 실제 결함이다. macOS 는 같은 자리에서
+    /// `dispatched.dirty` 를 보고 `metal_dirty` 를 세운다).
+    dirty: bool = false,
+};
+
 pub fn pointer(
     built: *const Built,
     state: *State,
     phase: interaction.UiPointerPhase,
     x_px: f64,
     y_px: f64,
-) ?component.ids.Intent {
+) Routed {
     const tree_view = maru.chrome.ui.tree.UiRectTree{ .entries = built.frame.tree.entries };
     const dispatched = interaction.dispatch(
         &state.interaction,
         tree_view,
         .{ .phase = phase, .x_px = x_px, .y_px = y_px, .timestamp_ns = 0 },
-    ) catch return null;
-    const action = dispatched.action orelse return null;
+    ) catch return .{};
+    var dirty = false;
+    for (dispatched.dirty.ids) |id| {
+        if (id != null) {
+            dirty = true;
+            break;
+        }
+    }
+    const action = dispatched.action orelse return .{ .dirty = dirty };
     // **`@constCast` 는 안전하다** — `resolve` 는 `self` 를 값으로 받고 읽기만 한다(그 함수 본문).
     // 표를 직접 훑지 않는 이유는 `enabled` 와 세대 판정이 **거기 있기** 때문이다: 손으로 훑으면
     // 꺼진 컨트롤도 눌린다(예전 스모크가 실제로 그 둘을 건너뛰고 있었다).
     var table = component.ids.Table.init(@constCast(built.frame.actions));
     table.count = built.frame.actions.len;
-    return table.resolve(action, built.props.snapshot_generation);
+    return .{ .intent = table.resolve(action, built.props.snapshot_generation), .dirty = dirty };
 }
 
 /// 한 자리를 **누르고 뗀다**. 판정 코드가 쓰는 편의 함수다.
@@ -308,7 +324,7 @@ pub fn pointer(
 /// `.up` 만 보내 `row_hits=0/3` 이 나왔는데, 그것은 히트테스트가 아니라 **판정이 틀린 것**이었다.
 pub fn click(built: *const Built, state: *State, x_px: f64, y_px: f64) ?component.ids.Intent {
     _ = pointer(built, state, .down, x_px, y_px);
-    return pointer(built, state, .up, x_px, y_px);
+    return pointer(built, state, .up, x_px, y_px).intent;
 }
 
 const testing = std.testing;

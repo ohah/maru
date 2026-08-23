@@ -142,7 +142,8 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 | `UserPromptSubmit` | — | ✅ | 턴 시작, `working` 진입, 턴 식별자 |
 | `Stop` | — | ✅ | 턴 종료 스냅샷, 턴 제목(`last_assistant_message`), 완료 상태·완료 알림, **`background_tasks`**(비어 있지 않으면 «턴은 끝났으나 작업이 도는 중» — 완료로 단정하지 않는다) |
 | `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. ⚠️ **미검증** — 헤드리스에서 권한 거부가 실제로 일어났는데도 이 이벤트도 `PermissionDenied`도 발화하지 않았다(§8-6) |
-| `PreToolUse` | `*` | ✅ | 진행 중 세부 **및 AI 소행 경로**. 도구 종료는 다음 `PreToolUse`/`Stop`이 알려준다. **두 provider의 payload 모양이 다르다 — §2.1** |
+| `PreToolUse` | `*` | ✅ | 진행 중 세부 **및 AI 소행 경로**·도구 구간 시작. **두 provider의 payload 모양이 다르다 — §2.1** |
+| `PostToolUse` | **`Bash`/`exec`만** | 미검증 | **셸 도구 구간 종료**(§3.1 예외 — 병렬 도구 호출에서 «다음 `Pre`»가 끝을 못 준다). 쓰는 것은 `tool_use_id`와 «끝났다»는 사실뿐 |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
 | `SubagentStop` | — | ✅ | 자식이 끝났다. **마지막** 자식이 끝나고 lead 도 끝났으면 그때가 턴 끝이다 |
 | `Notification` | — | ❌ **없다** | **입력 대기 판정**(`notification_type` — §6 표). `PermissionRequest`가 발화하지 않는 환경에서 그 배지의 유일한 소스다 |
@@ -463,7 +464,7 @@ append만 하므로 `sh` 하나로 끝난다(HTTP로 보내면 클라이언트 �
 fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 차이이지 우리 스크립트의 몫이 아니므로,
 「줄이려면 발화 횟수」라는 결론은 그대로다.
 
-### 3.1 그래서 `PostToolUse`를 걸지 않는다
+### 3.1 그래서 `PostToolUse`를 **편집 도구에는** 걸지 않는다
 
 두 가지가 이 결론으로 모였다.
 
@@ -488,6 +489,15 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
 
 필요한 경로는 `PreToolUse(Edit).tool_input.file_path`에 있고 그쪽은 1 KB 미만이다. 그래서 `PostToolUse`를
 **세트에서 뺀다.** 얻는 것: 발화 절반, 상한 절단 문제 소멸, `originalFile`이 로그에 남지 않아 평문 노출 축소.
+
+> ⚠️ **예외 — `Bash`/`exec`에는 건다**(2026-08-23, [턴 변경분](agent-turn-changes.md) A21). 위 근거는
+> `tool_response.originalFile`의 크기이고 **그 필드는 편집 도구에만 있다.** Bash payload는
+> `{stdout, stderr, interrupted, isImage, noOutputExpected}`로 실측 최대 18,187 B라 상한 안이다.
+>
+> 셸 브래킷([턴 변경분 §4.4](agent-turn-changes.md))이 이 이벤트를 **구간 종료 신호**로 쓴다. ⑴의
+> «다음 `Pre`가 종료를 알려준다»는 도구가 순차일 때만 참인데 **병렬 도구 호출에서 깨지기 때문**이다
+> (§2가 `tool_use_id`로 시작은 가르지만 끝은 주지 않는다). 이 용도에 필요한 것은 `tool_use_id`와
+> «끝났다»는 사실뿐이라 stdout이 커서 `oversized`로 잘려도 신호로는 온전하다.
 
 잃는 것은 «시도»와 «성공»의 구분인데, 그 차이는 이미 처리돼 있다 — 실패한 편집은 tree 비교에 나타나지
 않으므로 `↩ 순변경 없음` 배지가 붙는다([agent-turn-changes.md](agent-turn-changes.md) §4.2).

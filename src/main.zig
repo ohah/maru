@@ -16,6 +16,7 @@ const win32_text = maru.win32_text;
 const win32_terminal = maru.win32_terminal;
 const coretext_frame_builder = @import("platform/macos/coretext_frame_builder.zig"); // 이름과 달리 파일 트리 행 투영은 CoreText 를 안 부른다 — Windows 에서 실측으로 확인했다(§2m.6)
 const chrome_draw_lowering = @import("platform/macos/chrome/chrome_draw_lowering.zig"); // 이름과 달리 ops → DrawList 낮추기는 CoreText 를 안 부른다 — 본문 참조 0 회(§2m.6 과 같은 방식으로 쟀다)
+const system_text = @import("platform/macos/chrome/system_text.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 는 §2m.18 이음매로 간다
 const git_backend_mod = @import("platform/macos/git_backend.zig"); // 이름과 달리 두 OS 를 다 탄다 — Windows 갈래는 캡처 러너로 간다(§2m.9)
 // W7.4a Win32 키 입력 → 중립 KeyEvent.
 const win32_keys = maru.win32_keys;
@@ -107,6 +108,10 @@ fn dispatch(
     }
     if (std.mem.eql(u8, command, "win32-git-smoke")) {
         try runWin32GitSmoke(io, allocator, stdout, stderr);
+        return;
+    }
+    if (std.mem.eql(u8, command, "win32-scm-draw-smoke")) {
+        try runWin32ScmDrawSmoke(io, allocator, stdout, stderr);
         return;
     }
 
@@ -4153,6 +4158,378 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16}\n", .{ built.cells.items.len, d3d11_cells.cellsDigest(built.cells.items) });
     try stdout.print("frames_presented={d}\n", .{frames});
     try stdout.print("lines_matched={d}/{d}\n", .{ r.matched, r.checked });
+    try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
+    try stdout.flush();
+}
+
+/// `chrome.draw.Op` 목록을 셀로 내린다 — **단색 사각 먼저, 글리프 나중**(그리는 순서가 곧 z 순서).
+///
+/// 편집기(§2m.22)와 소스 컨트롤(§2m.26)이 **같은 것을 쓴다.** 두 벌로 적으면 한쪽만 고쳐지고, 그
+/// 증상은 "한 표면에서만 배경이 안 덮인다" 라 눈으로 잘 안 걸린다.
+///
+/// 그라디언트·테두리는 이 셰이더에 없으므로 **세어서 남긴다**(`dropped`) — 조용히 단색으로 그리면
+/// 화면이 틀린 채로 그럴듯해진다.
+fn appendChromeOpsAsCells(
+    allocator: std.mem.Allocator,
+    ops: []const maru.chrome.draw.Op,
+    tk: *const maru.chrome.Tokens,
+    clip_w: u32,
+    clip_h: u32,
+    cells: *std.ArrayList(d3d11_cells.Cell),
+) !struct { text: usize, fill: usize, dropped: usize } {
+    var n_text: usize = 0;
+    var n_fill: usize = 0;
+    var n_drop: usize = 0;
+    for (ops) |op| {
+        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .text => {
+                n_text += 1;
+                continue;
+            },
+            .clip => continue,
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            .quad => |q| if (q.gradient == .solid and q.border_role == null)
+                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
+            else {
+                n_drop += 1;
+                continue;
+            },
+            else => {
+                n_drop += 1;
+                continue;
+            },
+        };
+        n_fill += 1;
+        const x0 = @max(rect.x, 0);
+        const y0 = @max(rect.y, 0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tk.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        try cells.append(allocator, d3d11_cells.solidCell(
+            @floatFromInt(x0),
+            @floatFromInt(y0),
+            @floatFromInt(x1 - x0),
+            @floatFromInt(y1 - y0),
+            d3d11_cells.colorFromArgb(argb),
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        ));
+    }
+    return .{ .text = n_text, .fill = n_fill, .dropped = n_drop };
+}
+
+/// `maru win32-scm-draw-smoke` — W8.4⒝⒞. **소스 컨트롤 표면이 Windows 화면에 뜨고 눌린다.**
+///
+/// §2m.6(파일 트리)·§2m.21(편집기)이 세운 모양 그대로다: fixture 를 안 만들고 **저장소 자신**의 git
+/// 상태를 읽어 그 행을 그린다.
+///
+/// **컴포넌트 경로로 간다.** 처음엔 `coretext_frame_builder.buildDockScmDrawList`(셀 그리드)로 지었는데
+/// 그것은 **P1b 가 걷어낸 경로**다 — 형제 히트테스트(`scmRowAt`)는 이미 지웠고(`app_session/git.zig`
+/// 머리말) 그리기 함수만 고아로 남아 있었다. 계획 문서(`docs/plans/scm-dock.md` P1)가 *"셀 그리드
+/// 경로를 제거한다. 히트테스트는 `chrome.ui.interaction` 이 소유한다"* 고 적어 둔 것을 안 보고 쓴
+/// 실수였다. 지금은 macOS 제품과 **같은 함수**를 부른다: `build.build` → `view.view`.
+fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-scm-draw-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const scm_view = maru.session.scm_view;
+    const component = maru.chrome.components.scm_dock;
+    const interaction = maru.chrome.ui.interaction;
+
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
+    var host = draw_host.Host.open(allocator, cfg, .{
+        .title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W8.4 source control)"),
+    }) catch {
+        try draw_host.reportSetupFailure(stderr, "win32-scm-draw-smoke");
+        return error.UnknownCommand;
+    };
+    defer host.close();
+    const cell_w = host.cell_w;
+    const cell_h = host.cell_h;
+    const grid = host.grid();
+    const view_w = host.initial.width_px;
+    const view_h = host.initial.height_px;
+
+    // ── 제품 진입점으로 git 을 부른다 ─────────────────────────────────────────────────────────
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_native = root_buf[0..try std.Io.Dir.cwd().realPath(io, &root_buf)];
+    const repo = try maru.path_shape.normalizeSeparators(allocator, root_native);
+    defer allocator.free(repo);
+
+    var backend = try git_backend_mod.Backend.init(io);
+    defer backend.deinit();
+    if (!backend.submitRepoStatus("git", repo, 1)) {
+        try stderr.writeAll("maru win32-scm-draw-smoke: could not submit the repo status request\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    var rounds: usize = 0;
+    var got: ?git_backend_mod.RepoStatusResult = null;
+    while (rounds < 6000) : (rounds += 1) {
+        if (backend.takeRepoStatusResult()) |t| {
+            got = t;
+            break;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    var status = got orelse {
+        try stderr.writeAll("maru win32-scm-draw-smoke: the repo status did not finish in time\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    // **`worker_allocator` 로 해제한다** — 결과는 백그라운드 스레드가 그 할당기로 만든다(§2m.9 실측).
+    defer status.deinit(git_backend_mod.worker_allocator);
+    if (!status.ok) {
+        try stderr.writeAll("maru win32-scm-draw-smoke: git status failed\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+
+    // ── 상태 텍스트 → 행 모델 ────────────────────────────────────────────────────────────────
+    //
+    // **numstat 을 안 넘긴다.** 백엔드의 `RepoStatusResult` 는 `git status` 출력만 싣는다 — 증감 숫자는
+    // 별도 명령이고 이 슬라이스의 판정에 필요하지 않다. 빈 문자열이면 모델이 숫자만 비운다.
+    const rows_buf = try allocator.alloc(scm_view.Row, 256);
+    defer allocator.free(rows_buf);
+    const model_scratch = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(model_scratch);
+    const collapsed = [_]bool{ false, false };
+    const model = scm_view.build(status.text, "", "", "", collapsed, [_]bool{ false, false }, false, rows_buf, model_scratch);
+
+    // ── 행 모델 → 컴포넌트 항목 ──────────────────────────────────────────────────────────────
+    //
+    // **macOS 와 같은 함수다**(`maru.scm_items.itemFor`). 그 변환은 `session` 과 `chrome` 이 서로를
+    // import 할 수 없어 최상위 중립 leaf 에 산다.
+    const selected_row: ?usize = if (model.rows.len > 1) 1 else null;
+    const items = try allocator.alloc(component.types.Item, model.rows.len);
+    defer allocator.free(items);
+    for (model.rows, 0..) |row, i| items[i] = maru.scm_items.itemFor(row, 0, i, selected_row, collapsed);
+
+    // ── 항목 → tree ──────────────────────────────────────────────────────────────────────────
+    //
+    // **버퍼 크기를 직접 세지 않는다**(`bufferSizes` 의 doc: *"이 산술은 build 가 하는 것과 같으므로
+    // 호출처가 복제하면 안 된다"*).
+    const bs = component.build.bufferSizes(items);
+    const nodes = try allocator.alloc(maru.chrome.ui.tree.UiNode, bs.nodes);
+    defer allocator.free(nodes);
+    const entries = try allocator.alloc(maru.chrome.ui.tree.RectEntry, bs.entries);
+    defer allocator.free(entries);
+    const layout_items = try allocator.alloc(maru.chrome.ui.layout.Item, bs.layout_items);
+    defer allocator.free(layout_items);
+    const flex_scratch = try allocator.alloc(maru.chrome.ui.layout.FlexScratch, bs.flex_scratch);
+    defer allocator.free(flex_scratch);
+    const child_rects = try allocator.alloc(maru.chrome.ui.layout.UiRect, bs.child_rects);
+    defer allocator.free(child_rects);
+    const actions = try allocator.alloc(component.ids.Entry, bs.actions);
+    defer allocator.free(actions);
+
+    const props = component.types.Props{
+        .viewport_px = .{ .x = 0, .y = 0, .width = @floatFromInt(view_w), .height = @floatFromInt(view_h) },
+        .cell_width_px = cell_w,
+        .items = items,
+        .branch = model.head.branch orelse "",
+        .ahead = model.head.ahead,
+        .behind = model.head.behind,
+        .has_ab = model.head.has_ab,
+        // **활성 탭과 무관하게 채운다.** 안 채우면 탭 줄이 `변경 사항 (0)` 이라고 거짓말한다 — 그
+        // 필드 doc 이 그 증상을 그대로 예고해 뒀고, 처음엔 안 채워서 실제로 `Changes (0)` 이 떴다.
+        // 값은 중립 단일 출처에서 온다(`scm_view.changedFileCount`).
+        .changed_file_count = scm_view.changedFileCount(status.text),
+    };
+    const frame = component.build.build(props, .{
+        .nodes = nodes,
+        .entries = entries,
+        .layout_items = layout_items,
+        .flex_scratch = flex_scratch,
+        .child_rects = child_rects,
+        .actions = actions,
+    }) catch |err| {
+        try stderr.print("maru win32-scm-draw-smoke: tree build failed({s})\n", .{@errorName(err)});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+
+    // ── tree → ChromeDraw ────────────────────────────────────────────────────────────────────
+    const budget = component.view.drawBufferSizes(props, frame.tree.entries.len);
+    const op_buf = try allocator.alloc(maru.chrome.draw.Op, budget.ops);
+    defer allocator.free(op_buf);
+    const run_buf = try allocator.alloc(maru.chrome.draw.Run, budget.runs);
+    defer allocator.free(run_buf);
+    const text_buf = try allocator.alloc(u8, budget.text_bytes);
+    defer allocator.free(text_buf);
+
+    const tokens = maru.chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .sidebar_background = .{ .r = 0x18, .g = 0x1D, .b = 0x28 },
+        .sidebar_foreground = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
+        .sidebar_active = .{ .r = 0x2A, .g = 0x33, .b = 0x44 },
+        .search_match = .{ .r = 20, .g = 120, .b = 255 },
+        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
+        .selection = .{ .r = 0x3A, .g = 0x5F, .b = 0xCD },
+        .cursor = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+        .terminal_background = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+        .accent = .{ .r = 0xDD, .g = 0xA1, .b = 0x5E },
+    });
+    const state = interaction.InteractionState{};
+    const draws = component.view.view(props, frame, state, &tokens, .{
+        .ops = op_buf,
+        .runs = run_buf,
+        .text_bytes = text_buf,
+    }) catch |err| {
+        try stderr.print("maru win32-scm-draw-smoke: view failed({s})\n", .{@errorName(err)});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+
+    // ── ChromeDraw → 화면 (**measured 경로**) ────────────────────────────────────────────────
+    //
+    // **셀 격자로 내리면 안 된다.** 컴포넌트 행은 24px 자유 픽셀인데 셀은 19px 이라, `buildTextDrawList`
+    // 로 양자화하면 행 하나가 통째로 빈다(실측: 셀 행 4,5,6,**8**,9,10). macOS 도 이 표면을 measured
+    // 텍스트로 그린다(`app_session/scm_dock.zig` — `prepareRequest → shapeRequest → resolveArtifact`).
+    //
+    // §2m.27 이 연 마지막 한 걸음이 여기서 처음 실제로 돈다.
+    var request = try system_text.prepareRequest(allocator, 1, draws.ops, &tokens, cell_w, .{
+        .family = cfg.font.family,
+        .fallback = cfg.font.fallback,
+    });
+    defer request.deinit(allocator);
+    var unresolved = try system_text.shapeRequest(allocator, &request, 1000);
+    defer unresolved.deinit(allocator);
+    var artifact = try system_text.resolveArtifact(allocator, &host.renderer_state.font_registry, unresolved);
+    defer artifact.deinit(allocator);
+
+    // records → 글리프 런 → 프레임(아틀라스 슬롯·UV). 전부 중립 renderer 다.
+    const shape_surface = try system_text.emptyDrawList(allocator, artifact.records.len);
+    var layout_cfg = maru.renderer.textConfigFromFontSize(cfg.font.size, 1);
+    layout_cfg.cell_width_px = @intCast(cell_w);
+    layout_cfg.glyph_cell_width_px = @intCast(cell_w);
+    layout_cfg.cell_height_px = @intCast(cell_h);
+    var shaped = maru.renderer.buildGlyphRunListFromShapedRecordsWithSurface(
+        allocator,
+        artifact.records,
+        layout_cfg,
+        .{ .size = shape_surface.size, .cursor = shape_surface.cursor, .dirty = shape_surface.dirty, .overlays = shape_surface.overlays },
+    ) catch |err| {
+        var dl = shape_surface;
+        dl.deinit(allocator);
+        return err;
+    };
+    defer shaped.deinit(allocator);
+
+    // **래스터라이저에 이름 표를 준다.** measured 텍스트의 `font_id` 는 레지스트리 id 라
+    // 이것 없이는 face 를 못 찾는다 — 그러면 글자가 하나도 안 그려진다(§2m.27 실측).
+    var measured_rasterizer = host.rasterizer;
+    measured_rasterizer.registry = &host.renderer_state.font_registry;
+    var render_frame = try host.renderer_state.buildFrameFromGlyphRunListWithRasterizer(allocator, shape_surface, shaped.runs, measured_rasterizer);
+    defer render_frame.deinit(allocator);
+    // 아틀라스가 자랐으면 파이프라인 텍스처를 맞춘다(호스트의 `prepare` 가 하던 일).
+    try host.syncAtlas();
+    const uploads = host.uploadAtlasRegions(render_frame);
+    const prepared = .{ .region_uploads = uploads };
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    };
+    _ = colors;
+    var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer cells.deinit(allocator);
+    const counted = try appendChromeOpsAsCells(allocator, draws.ops, &tokens, view_w, view_h, &cells);
+
+    // **자유 위치 글리프를 얹는다** — §2m.27 의 `cellFromGpuGlyph`. 셀 격자가 아니라 placement 가
+    // 정한 픽셀 자리다.
+    var gpu_glyphs: std.ArrayList(maru.renderer.metal_frame.GpuGlyph) = .empty;
+    defer gpu_glyphs.deinit(allocator);
+    try artifact.appendGpuGlyphs(allocator, render_frame, host.renderer_state.atlas.config, 0, 0, null, 0, &gpu_glyphs);
+    for (gpu_glyphs.items) |g| try cells.append(allocator, win32_terminal.cellFromGpuGlyph(g, host.atlas_w, host.atlas_h));
+
+    // ── 판정 ⒜: 그려진 글자가 모델이 말한 것인가 ──────────────────────────────────────────────
+    var names_checked: usize = 0;
+    var names_matched: usize = 0;
+    var branch_ok = false;
+    {
+        var row_text: std.ArrayList(u8) = .empty;
+        defer row_text.deinit(allocator);
+        var all: std.ArrayList(u8) = .empty;
+        defer all.deinit(allocator);
+        // **measured 경로는 `draw_list.cells` 가 비어 있다.** 그쪽 DrawList 는 표면 크기만 나르는
+        // 합성 목록이고(`emptyDrawList` — 셀 0 개, 256×N), 글자는 `artifact.records` 에 있다.
+        // 처음엔 셀을 읽어 `0/5` 가 나왔다 — 렌더가 아니라 판정이 틀린 것이었다(이 세션에서 네 번째).
+        for (artifact.records) |r| {
+            var b: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(@intCast(r.codepoint), &b) catch continue;
+            try all.appendSlice(allocator, b[0..n]);
+        }
+        if (model.head.branch) |br| {
+            if (br.len > 0) branch_ok = std.mem.indexOf(u8, all.items, br) != null;
+        }
+        // **파일 이름으로 본다.** 컴포넌트는 경로를 한 덩어리로 안 그린다 — 파일명(굵게) + 디렉터리
+        // (흐리게)로 나눈다(`scm_items.itemFor` 가 그 분할의 단일 출처다).
+        for (model.rows) |r| {
+            const path = switch (r) {
+                .file => |f| f.path,
+                else => continue,
+            };
+            names_checked += 1;
+            if (std.mem.indexOf(u8, all.items, std.fs.path.basename(path)) != null) names_matched += 1;
+        }
+    }
+
+    // ── 판정 ⒝: 누른 자리가 그 행을 가리키는가 (W8.4⒞) ───────────────────────────────────────
+    //
+    // **히트테스트는 중립이 소유한다**(`chrome.ui.interaction.hitAction`) — published tree 를 그대로
+    // 질의한다. 파일 행의 rect 한가운데를 찍어 그 행의 intent 가 나오는지 본다. 사람이 없어도 판정된다.
+    var hits_checked: usize = 0;
+    var hits_matched: usize = 0;
+    {
+        // `frame.actions` 는 const 라 `Table.init` 에 못 넣는다 — 조회는 그 배열을 직접 훑는다.
+        for (items, 0..) |item, i| {
+            const file = switch (item) {
+                .file => |f| f,
+                else => continue,
+            };
+            const node_id = component.build.NodeIds.item(i);
+            const slot = frame.tree.find(node_id) orelse continue;
+            const rect = frame.tree.entries[slot].rect;
+            if (rect.width <= 0 or rect.height <= 0) continue;
+            hits_checked += 1;
+            const hit = interaction.hitAction(frame.tree, rect.x + rect.width / 2, rect.y + rect.height / 2) orelse continue;
+            var found: ?component.ids.Intent = null;
+            for (frame.actions) |e| {
+                if (e.action_id == hit.action_id and e.snapshot_generation == props.snapshot_generation) {
+                    found = e.intent;
+                    break;
+                }
+            }
+            switch (found orelse continue) {
+                .open_row => |ref| if (ref.model_index == file.model_index) {
+                    hits_matched += 1;
+                },
+                else => {},
+            }
+        }
+    }
+
+    const frames = try host.presentLoop(cells.items, 0xFF1E2430, 120);
+    const stats = maru.renderer.renderFrameStats(render_frame, host.renderer_state.atlas.entryCount());
+    try stdout.writeAll("maru.win32-scm-draw-smoke.v2\n");
+    try stdout.print("repo={s}\n", .{repo});
+    try stdout.print("cell_px={d}x{d} grid={d}x{d}\n", .{ cell_w, cell_h, grid.cols, grid.rows });
+    try stdout.print("branch={?s} ahead={d} behind={d}\n", .{ model.head.branch, model.head.ahead, model.head.behind });
+    try stdout.print("model_rows={d} items={d} tree_entries={d} actions={d} empty={}\n", .{ model.rows.len, items.len, frame.tree.entries.len, frame.actions.len, model.empty });
+    try stdout.print("ops={d} ops_text={d} ops_fill={d} ops_dropped={d}\n", .{ draws.ops.len, counted.text, counted.fill, counted.dropped });
+    try stdout.print("branch_drawn={} names_matched={d}/{d}\n", .{ branch_ok, names_matched, names_checked });
+    try stdout.print("row_hits={d}/{d}\n", .{ hits_matched, hits_checked });
+    try stdout.print("d3d_cells={d} cells_digest=0x{X:0>16} atlas_region_uploads={d}\n", .{ cells.items.len, d3d11_cells.cellsDigest(cells.items), prepared.region_uploads });
+    try stdout.print("frames_presented={d}\n", .{frames});
     try maru.renderer.writeRenderFrameStats(stdout, "renderer_", stats);
     try stdout.flush();
 }

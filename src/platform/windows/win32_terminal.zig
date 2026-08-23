@@ -84,12 +84,26 @@ pub const FrameCounts = struct {
 ///
 /// **파이프라인은 그대로다.** §2m.22 가 `Cell.rect` 를 임의 픽셀 사각으로, 셰이더를 둥근 모서리·
 /// 반투명까지 하게 만들어 둬서 새 드로우 콜이 필요 없다.
-pub fn cellFromGpuGlyph(glyph: metal_frame.GpuGlyph) d3d11_cells.Cell {
+///
+/// **UV 를 지금 아틀라스 크기로 다시 정규화한다 — `glyph.u0..v1` 을 그대로 쓰면 안 된다.** 그 값은
+/// **준비 시점** 크기 기준인데, 다른 표면이 그 사이에 아틀라스를 키우면 전부 엉뚱한 자리를 가리킨다
+/// (그 필드 doc: *"Final-atlas re-normalization needs the original pixel slot"*). `cellFromNative` 가
+/// 같은 이유로 native 의 UV 를 버리고 픽셀 사각에서 다시 만든다 — 이쪽도 같아야 한다.
+///
+/// 처음엔 `u0..v1` 을 그대로 옮겼다. 적대적 검증에서 그 필드 doc 을 다시 읽고 잡았다.
+pub fn cellFromGpuGlyph(glyph: metal_frame.GpuGlyph, atlas_w: u32, atlas_h: u32) d3d11_cells.Cell {
     // `foreground` 는 0x00RRGGBB 다 — 알파가 없다. 커버리지가 알파를 정하므로 1.0 으로 둔다.
     const fg = d3d11_cells.colorFromArgb(0xFF00_0000 | (glyph.foreground & 0x00FF_FFFF));
     return .{
         .rect = .{ glyph.x, glyph.y, glyph.w, glyph.h },
-        .uv = .{ glyph.u0, glyph.v0, glyph.u1, glyph.v1 },
+        .uv = d3d11_cells.uvFromAtlasRect(
+            glyph.atlas_x_px,
+            glyph.atlas_y_px,
+            glyph.atlas_width_px,
+            glyph.atlas_height_px,
+            atlas_w,
+            atlas_h,
+        ),
         .fg = fg,
         // **배경을 안 칠한다.** 이 글자는 이미 그려진 표면 **위에** 얹힌다 — bg 알파가 0 이면
         // 셰이더가 `float4(fg.rgb, cov * fg.a)` 로 커버리지만 합성한다(그 갈래의 계약).
@@ -201,31 +215,46 @@ test "cellFromNative: 두 칸 글자와 배경 없는 셀" {
     try testing.expectEqual(@as(f32, 8), cellFromNative(native, 8, 16, 256, 128).rect[2]);
 }
 
-test "자유 위치 글리프: 픽셀 자리와 UV 를 그대로 옮기고 배경을 안 칠한다" {
-    const cell = cellFromGpuGlyph(.{
+fn fixtureGlyph() metal_frame.GpuGlyph {
+    return .{
         .x = 12.5,
         .y = 340.25,
         .w = 7,
         .h = 16,
-        .atlas_x_px = 0,
-        .atlas_y_px = 0,
-        .atlas_width_px = 0,
-        .atlas_height_px = 0,
-        .u0 = 0.25,
-        .v0 = 0.5,
-        .u1 = 0.3,
-        .v1 = 0.55,
+        .atlas_x_px = 64,
+        .atlas_y_px = 128,
+        .atlas_width_px = 8,
+        .atlas_height_px = 16,
+        // **준비 시점 UV** — 512 기준으로 계산돼 있다. 아래 테스트가 이것을 **안 쓰는지** 본다.
+        .u0 = 0.125,
+        .v0 = 0.25,
+        .u1 = 0.140625,
+        .v1 = 0.28125,
         .foreground = 0x00D8E0F0,
         .layer = 0,
-    });
+    };
+}
+
+test "자유 위치 글리프: 픽셀 자리를 그대로 옮기고 배경을 안 칠한다" {
+    const cell = cellFromGpuGlyph(fixtureGlyph(), 512, 512);
     // **소수 픽셀이 살아남는다** — 셀 격자로 접으면 measured 텍스트가 줄마다 들쭉날쭉해진다.
     try testing.expectEqual(@as(f32, 12.5), cell.rect[0]);
     try testing.expectEqual(@as(f32, 340.25), cell.rect[1]);
-    try testing.expectEqual(@as(f32, 0.25), cell.uv[0]);
-    try testing.expectEqual(@as(f32, 0.55), cell.uv[3]);
+    // 64/512 = 0.125
+    try testing.expectEqual(@as(f32, 0.125), cell.uv[0]);
     // 전경은 불투명, 배경은 없음(커버리지 합성 갈래로 간다).
     try testing.expectEqual(@as(f32, 1), cell.fg[3]);
     try testing.expectEqual(@as(f32, 0), cell.bg[3]);
     // **`solid` 표식이 아니어야 한다** — 음수 UV 면 셰이더가 아틀라스를 안 읽어 글자가 안 보인다.
     try testing.expect(cell.uv[0] >= 0);
+}
+
+test "자유 위치 글리프: 아틀라스가 자라면 UV 가 따라간다 — 준비 시점 값을 쓰면 안 된다" {
+    // **이것이 그 결함의 판정이다.** `glyph.u0..v1` 을 그대로 옮기던 구현이면 두 UV 가 같다.
+    const small = cellFromGpuGlyph(fixtureGlyph(), 512, 512);
+    const grown = cellFromGpuGlyph(fixtureGlyph(), 1024, 1024);
+    try testing.expect(small.uv[0] != grown.uv[0]);
+    try testing.expectEqual(@as(f32, 0.125), small.uv[0]); // 64/512
+    try testing.expectEqual(@as(f32, 0.0625), grown.uv[0]); // 64/1024
+    // 준비 시점 값(0.125)을 그대로 썼다면 커진 뒤에도 0.125 다 — 글자가 아틀라스의 엉뚱한 자리를 본다.
 }

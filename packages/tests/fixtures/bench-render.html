@@ -1,0 +1,95 @@
+<!doctype html>
+<meta charset="utf-8" />
+<body style="margin: 0; background: #0d1117">
+  <div id="host" style="width: 2432px; height: 1176px"></div>
+  <script type="module">
+    import { Terminal, CanvasRenderer, measureMetrics } from "/core/dist/index.js";
+    const DEFAULT_THEME = { foreground: 0xc9d1d9, background: 0x000000, cursor: 0x58a6ff };
+
+    const WASM = "/core/wasm/maru-vt.wasm";
+    const COLS = Number(new URL(location.href).searchParams.get("cols") ?? 304);
+    const ROWS = Number(new URL(location.href).searchParams.get("rows") ?? 84);
+    const term = new Terminal({
+      worker: false,
+      wasmUrl: WASM,
+      cols: COLS,
+      rows: ROWS,
+      autoFit: false,
+      fontSize: 14,
+    });
+    await term.open(document.getElementById("host"));
+
+    // 화면을 채우는 두 가지 패턴
+    function fillUniform() {
+      // run 병합이 최대로 먹는 경우
+      let s = "\x1b[H\x1b[38;2;200;200;200m";
+      for (let r = 0; r < ROWS; r++) s += "x".repeat(COLS) + (r < ROWS - 1 ? "\r\n" : "");
+      term.write(s);
+    }
+    function fillGradient() {
+      // 셀마다 색이 달라 run 이 전부 쪼개지는 경우 (btop·lolcat)
+      let s = "\x1b[H";
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          s += `\x1b[38;2;${(r * 3) % 256};${(c * 5) % 256};${(r + c) % 256}mx`;
+        }
+        if (r < ROWS - 1) s += "\r\n";
+      }
+      term.write(s);
+    }
+
+    // 렌더만 분리해서 잰다 — 파싱이 병목이면 WebGL 은 무의미하다.
+    function benchDraw(frame, label, n = 30) {
+      const cv = document.createElement("canvas");
+      cv.width = COLS * 8;
+      cv.height = ROWS * 14;
+      const m = measureMetrics({ fontFamily: "monospace", fontSize: 14, lineHeight: 1.22 });
+      const rr = new CanvasRenderer();
+      rr.attach(cv, m);
+      const opts = { theme: DEFAULT_THEME, ligatures: true, blinkOn: true };
+      rr.draw(frame, opts); // warmup
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) rr.draw(frame, opts);
+      return { label, ms: (performance.now() - t0) / n };
+    }
+
+    // btop 은 셀마다 다른 색이 아니다 — 팔레트 몇 개가 블록 단위로 반복된다.
+    function fillPalette(n) {
+      return () => {
+        let s = "\x1b[H";
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            if (c % 8 === 0) s += `\x1b[38;5;${((r + c / 8) % n) | 0}m`; // 8셀마다 색이 바뀐다
+            s += "x";
+          }
+          if (r < ROWS - 1) s += "\r\n";
+        }
+        term.write(s);
+      };
+    }
+
+    const out = [];
+    for (const [name, fill] of [
+      ["uniform", fillUniform],
+      ["gradient", fillGradient],
+      ["palette-16 (btop 형)", fillPalette(16)],
+      ["palette-256", fillPalette(256)],
+    ]) {
+      fill(); // 한 번은 버린다(첫 파싱에 준비 비용이 섞인다)
+      await new Promise((r) => setTimeout(r, 300));
+      const tp = performance.now();
+      fill(); // **파싱만** 잰다 — write 는 동기다
+      const parseMs = performance.now() - tp;
+      await new Promise((r) => setTimeout(r, 300));
+      const frame = term.frame;
+      if (!frame) {
+        out.push({ label: name, err: "frame 없음" });
+        continue;
+      }
+      const d = benchDraw(frame, name);
+      out.push({ ...d, parseMs, cells: frame.cellCount });
+    }
+    globalThis.__bench = out;
+    globalThis.__done = true;
+  </script>
+</body>

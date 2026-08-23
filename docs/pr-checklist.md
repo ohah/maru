@@ -37,6 +37,7 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `lsp` | 언어 서버 — 진단·자동완성·정의로 이동·포맷·서버 수명. **`editor`와 함께 단다**(표시는 편집기, 실행·신뢰는 [editor-surface-tooling.md](editor-surface-tooling.md) §8.1) | `lsp` `diagnostics` `completion` |
 | `status-bar` | 하단 상태표시줄 — 항목·배치·클릭/호버, 창 높이 예약 | `status-bar` |
 | `web-panel` | WKWebView 합성·인앱 브라우저·`web/` 콘텐츠 | `web-panel` `browser` |
+| `terminal-web` | **웹 배포판** — 브라우저에서 도는 터미널(`packages/` 의 npm `@maru/*` 와 그것이 부르는 wasm 브리지 `src/platform/wasm/`). `terminal-core` 와 **같은 코어의 다른 타깃**이라 이름을 나란히 둔다 — 코어 파서 자체를 바꾸면 `terminal-core` 도 **함께** 단다. 앱 안의 WKWebView 인 `web-panel` 과는 다르다 | `packages` `wasm` |
 | `control-plane` | CLI·IPC·`browser.*` 제어·capability | `control` `cli` |
 | `session-host` | 영속 host·runtime 이관·host 업그레이드 | `session-host` |
 | `workspace` | workspace 저장/복원·창 이동성 | `workspace` `window` `mobility` |

@@ -119,6 +119,8 @@ pub const CollectStop = enum {
     would_block,
     allowance_reached,
     attempt_budget_exhausted,
+    eof_after_prefix,
+    socket_error_after_prefix,
 };
 
 pub const CollectReceipt = struct {
@@ -1207,12 +1209,18 @@ pub fn collectInjected(
                     max_consecutive_rx_read_interrupts)
                     return finishTerminal(scratch, .interrupt_limit, generation);
             },
-            .eof => return finishTerminal(scratch, .eof, generation),
-            .socket_error => return finishTerminal(
-                scratch,
-                .socket_error,
-                generation,
-            ),
+            .eof => return if (scratch.staged_len == 0)
+                finishTerminal(scratch, .eof, generation)
+            else
+                finishStopped(scratch, input.allowance, .eof_after_prefix),
+            .socket_error => return if (scratch.staged_len == 0)
+                finishTerminal(scratch, .socket_error, generation)
+            else
+                finishStopped(
+                    scratch,
+                    input.allowance,
+                    .socket_error_after_prefix,
+                ),
         }
     }
     return finishStopped(

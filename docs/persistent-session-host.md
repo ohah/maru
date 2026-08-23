@@ -14592,10 +14592,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           payload/ledger/aggregate owner가 모두 정산된 것을 확인한 같은 함수에서만 pristine scratch로 되돌리며, 다음 turn은
           기존 `prepareRxTurnForNextTurn`/`commitRxTurnForNextTurn`을 그대로 통과한다. 별도 영속 bool, clock read, allocator,
           raw pointer lookup, callback-capable post-publication fallible suffix는 추가하지 않는다.
-          **f3e hostile evidence**는 pure 전수표→injected turn→실제 Darwin socketpair→fail-index/stress 순으로
-          response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,
-          incomplete header/payload+FIN, input/control offset 0/partial/retired/response-wait, deadline-1/exact/+1,
-          EINTR/EAGAIN, no-end/chunk/1-byte drip과 common TX/parser/ledger/completed/FD final-zero를 검증한다.
+          **f3e hostile evidence**는 아래 네 층을 순서대로 모두 통과해야 하며, 앞 층의 green을 뒤 층의
+          대체 증거로 쓰지 않는다.
+          1. pure 전수표는 response/revoke/HUP, control `none|queued|partial|fully_sent|response_wait|missing|invalid`,
+             deadline-1/exact/+1의 닫힌 곱에서 terminal precedence와 TX suppression을 검증한다.
+          2. injected whole-turn은 revoke 위치 1/64/65와 parser resident 65, readable+writable write 0,
+             EINTR/EAGAIN, input/control offset 0/partial과 input retired/control response-wait를 검증한다.
+          3. 실제 Darwin socketpair는 response↔revoke 양순서, response+FIN/HUP, incomplete header/payload+FIN,
+             no-end/chunk/1-byte drip을 검증한다. 실제 socketpair를 쓰지 않는 플랫폼 skip은 완료 증거가 아니다.
+          4. allocation fail-index와 bounded stress는 첫 성공+1까지 반복하며 모든 반복에서 common
+             TX/parser/ledger/completed/FD final-zero를 검증한다.
+          집중 gate `zig build test-session-host-f3e`는 pure 1개와 제품 5개의 exact-count 및 executable
+          sentinel을 Debug/ReleaseFast로 실행한다. 여섯 테스트 중 하나라도 없거나 0-test filter가 되면 gate는 실패한다.
           f3a~b, f3c0, f3c1-base, f3c1-terminal-binding, 2b2e-integration, f3c2/d/e는 각각 독립 merge slice로 리뷰·회귀 격리한다. 모든 f3 slice가
           Debug/ReleaseFast, `check-boundaries`, 실제 socketpair와 전체 `mise run check`가 green이기 전에는
           f3 또는 TX/control/turn 통합을 완료로 표시하지 않는다. `ExternalPumpOwner`,

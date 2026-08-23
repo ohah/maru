@@ -8804,6 +8804,14 @@ pub fn build(b: *std.Build) void {
         "MARU_SESSION_HOST_UPGRADE_MULTIFD_AGGREGATE_SKIP",
         "skip-in-aggregate-v1",
     );
+    // Process-global signal/seal/registry fixtures have dedicated exact-count Debug/ReleaseFast
+    // artifacts. Keep them out of this 2,000+ test single-process aggregate for the same reason
+    // they are excluded from the app-host aggregate above: their proof requires a fresh process,
+    // and running them in an arbitrary aggregate order is neither isolation nor extra coverage.
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP",
+        "skip-in-session-host-aggregate-v1",
+    );
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만
     // product launch smoke를 필수화하도록 root-module introspection 대신
     // 명시적인 test-only marker를 전달한다.
@@ -9386,6 +9394,54 @@ pub fn build(b: *std.Build) void {
         );
         session_host_f3d_step.dependOn(&run_external_pump_f3d_tests.step);
         session_host_f3d_step.dependOn(&run_session_host_f3d_sentinel.step);
+
+        const client_pump_f3e_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"f3e"},
+        });
+        const run_client_pump_f3e_tests = b.addRunArtifact(client_pump_f3e_tests);
+        run_client_pump_f3e_tests.addArg("--maru-expect-tests=1");
+        run_client_pump_f3e_tests.setCwd(b.path("."));
+        const external_pump_f3e_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3e"},
+        });
+        const run_external_pump_f3e_tests = b.addRunArtifact(external_pump_f3e_tests);
+        // The external-pump root imports the pure planner module, so its filtered
+        // runner sees that one pure test plus the five product tests.
+        run_external_pump_f3e_tests.addArg("--maru-expect-tests=6");
+        run_external_pump_f3e_tests.setCwd(b.path("."));
+        const session_host_f3e_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-f3e-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_f3e_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_session_host_f3e_sentinel = b.addRunArtifact(session_host_f3e_sentinel);
+        run_session_host_f3e_sentinel.setCwd(b.path("."));
+        const session_host_f3e_step = b.step(
+            "test-session-host-f3e",
+            "Run the F3e hostile socket, fail-index, and stress evidence gate",
+        );
+        session_host_f3e_step.dependOn(&run_client_pump_f3e_tests.step);
+        session_host_f3e_step.dependOn(&run_external_pump_f3e_tests.step);
+        session_host_f3e_step.dependOn(&run_session_host_f3e_sentinel.step);
 
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

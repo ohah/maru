@@ -1268,6 +1268,37 @@ const Applied = struct {
     turn_end: bool = false,
 };
 
+/// 훅 payload 의 문자열을 **사람이 보는 형태로** 푼다(계약 §4).
+///
+/// 파서는 줄 버퍼를 빌려 쓰느라 JSON 이스케이프를 그대로 둔다(`agent_hook_event.Event` 주석 — «화면에
+/// 올릴 때만 `decodeInto` 로 푼다»). 그 규칙을 지키는 자리가 없어서, claude 응답처럼 **여러 줄인 값이
+/// 사이드바 대화 줄과 알림 본문에 `\n` 두 글자로** 그대로 나갔다(따옴표마다 역슬래시도 붙는다).
+/// 훅에서 온 문자열이 표시 버퍼로 들어가는 길목은 전부 이 함수를 지난다.
+///
+/// 담을 수 있는 만큼만 담으므로 호출자가 **자기 상한 크기의 버퍼**를 준다.
+///
+/// ⚠️ **글자 경계는 여기서 물린다 — 받는 쪽에 맡기면 안 된다.** 받는 쪽의 `clampUtf8` 은 «상한을 **넘을**
+/// 때만» 자르는데, 버퍼를 꽉 채우고 나온 이 슬라이스는 길이가 정확히 그 상한이라 **손을 안 댄다.**
+/// 512 바이트면 한글 170자 + 2바이트라, 조금 긴 한글 답변 하나면 알림 배너 끝에 U+FFFD 가 붙는다
+/// (적대적 검증 2차에서 실측으로 재현했다 — 「받는 쪽이 이미 한다」고 적어 둔 앞 판이 틀렸다).
+fn hookDisplayText(buf: []u8, raw: []const u8) []const u8 {
+    const decoded = maru.session.agent_hook_event.decodeInto(buf, raw);
+    return decoded[0..maru.session.agent_transcript.trimToCharBoundary(decoded)];
+}
+
+/// 훅 문자열을 **사이드바 한 줄에 담을 모양**으로 만든다: 이스케이프를 풀고(위) 여러 줄을 눕힌다.
+///
+/// **푸는 것만으로는 모자란다.** 사이드바 대화 줄·진행 중 세부는 한 줄 텍스트 run 이라 진짜 개행이
+/// 들어가면 글자가 뭉개진다 — 이스케이프를 그대로 두던 동안에는 `\n` 이 두 글자라 «못생겼지만 한 줄» 이었고,
+/// 푸는 순간 그것이 제어문자가 된다. 관측 모드 파서는 저장 직전에 `flatten` 을 지나므로(같은 파일) 훅 모드도
+/// 같은 자리를 지나야 **두 소스가 같은 모양**을 낸다(계약 §1).
+///
+/// 알림 본문은 이 함수를 쓰지 않는다 — OS 배너는 여러 줄을 제대로 보여주고, 인앱 히스토리는 자기 tail 에서
+/// 눕힌다(`flattenForHistory`). 두 표면의 요구가 다르다.
+fn hookConversationText(buf: []u8, scratch: []u8, raw: []const u8) []const u8 {
+    return maru.session.agent_transcript.flatten(hookDisplayText(scratch, raw), buf);
+}
+
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
     const prev_state = term.agent_state;
@@ -1277,10 +1308,12 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
 
     // **진행 중 세부**(계약 §2). 훅 모드는 화면·프로세스 관측을 끄므로(§1.1) 이 자리를 안 채우면
     // 배지가 «진행중» 한 마디만 말한다 — 훅을 켠 사용자가 정보를 잃는다(§8).
+    var label_buf: [mode_mod.ToolLabel.max_text]u8 = undefined;
+    var label_scratch: [mode_mod.ToolLabel.max_text]u8 = undefined;
     switch (mode_mod.labelFor(ev)) {
         .keep => {},
         .clear => term.agent_hook_tool.clear(),
-        .set => |body| term.agent_hook_tool.set(body),
+        .set => |body| term.agent_hook_tool.set(hookConversationText(&label_buf, &label_scratch, body)),
     }
 
     // **턴이 끝났다는 사실만 돌려준다**(계약 §1 표 — 훅 모드의 턴 경계는 `UserPromptSubmit`/`Stop`).
@@ -1319,7 +1352,9 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
         // 무슨 말을 했는지 대신 자식이 무슨 말을 했는지를 알린다. 자식 이벤트가 만든 전이에서는
         // 그 Term 에 이미 쌓아 둔 **lead 의 마지막 응답**을 쓴다.
         .done => {
-            const body = if (ev.agent_id.len == 0) ev.text else term.agent_transcript.owned.reply();
+            // 이벤트에서 바로 꺼낸 문자열만 푼다 — 쌓아 둔 lead 응답은 저장할 때 이미 풀었다.
+            var body_buf: [mode_mod.PendingNotice.max_text]u8 = undefined;
+            const body = if (ev.agent_id.len == 0) hookDisplayText(&body_buf, ev.text) else term.agent_transcript.owned.reply();
             if (term.agent_hook_progress.takeFailed())
                 term.agent_hook_notice.set(.failed, body, self.awakeMs())
             else
@@ -1335,21 +1370,24 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
             // **두 소스가 서로 다른 자리를 싣는다**(계약 §6). `PermissionRequest` 는 `tool_name`·
             // `tool_input` 을, `Notification` 은 `message` 를 준다 — 도구 이름 규칙만 쓰면 후자에서
             // **본문이 빈 문자열**이 되어 «떴는데 아무 말도 안 하는» 알림이 된다.
-            const body = if (ev.tool_description.len > 0)
+            const raw = if (ev.tool_description.len > 0)
                 ev.tool_description
             else if (ev.tool_name.len > 0)
                 ev.tool_name
             else
                 ev.notice_text;
-            term.agent_hook_notice.set(.attention, body, self.awakeMs());
+            var body_buf: [mode_mod.PendingNotice.max_text]u8 = undefined;
+            term.agent_hook_notice.set(.attention, hookDisplayText(&body_buf, raw), self.awakeMs());
         },
     }
 
     // **마지막 대화도 훅에서 온다**(계약 §4b). 그 Term 은 transcript 파일을 읽지 않으므로 신원 해소·
     // 256 KiB tail 파싱·폴링이 통째로 빠진다.
+    var text_buf: [maru.session.agent_transcript.max_text_bytes]u8 = undefined;
+    var text_scratch: [maru.session.agent_transcript.max_text_bytes]u8 = undefined;
     switch (ev.kind) {
         .user_prompt_submit => if (ev.text.len > 0) {
-            term.agent_transcript.owned.setPrompt(ev.text);
+            term.agent_transcript.owned.setPrompt(hookConversationText(&text_buf, &text_scratch, ev.text));
             // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
             term.agent_transcript.owned.setReply("");
             return .{ .conversation = true, .turn_end = turn_end };
@@ -1358,7 +1396,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
         // 사유를 준다(실측). 저장하지 않으면 사이드바 대화 줄이 오류 턴만 비고, 자식이 남아 알림이
         // 늦게 나가는 경우엔 그 본문마저 잃는다(위 `.done` 분기가 이 값을 쓴다).
         .stop, .stop_failure => if (ev.text.len > 0) {
-            term.agent_transcript.owned.setReply(ev.text);
+            term.agent_transcript.owned.setReply(hookConversationText(&text_buf, &text_scratch, ev.text));
             return .{ .conversation = true, .turn_end = turn_end };
         },
         else => {},

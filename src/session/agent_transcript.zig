@@ -73,8 +73,11 @@ pub const Owned = struct {
         self.cwd_len = 0;
     }
 
-    /// `text`를 이 버퍼에 복사하고 (오프셋, 길이)를 준다. 상한을 넘으면 앞부분만 남긴다(UTF-8 경계는 지킨다).
-    pub fn store(self: *Owned, text: []const u8) struct { off: usize, len: usize } {
+    /// `text`를 버퍼 **끝에 이어 담고** (오프셋, 길이)를 준다. 상한을 넘으면 앞부분만 남긴다(UTF-8 경계는 지킨다).
+    ///
+    /// **혼자 쓰면 안 된다 — `rewrite`만 부른다.** 이 함수는 `used`를 되돌리지 않으므로 같은 버퍼에 값을
+    /// 거듭 담으면 자리가 말라 버린다(아래 `rewrite` 주석의 실측 참조).
+    fn store(self: *Owned, text: []const u8) struct { off: usize, len: usize } {
         const room = self.buf.len - self.used;
         const n = @min(text.len, @min(room, max_text_bytes));
         if (n == 0) return .{ .off = self.used, .len = 0 };
@@ -85,22 +88,46 @@ pub const Owned = struct {
         return .{ .off = off, .len = kept };
     }
 
+    /// 세 값을 **빈 버퍼에 다시 담는다**(압축). 갱신 경로는 전부 여기를 지난다.
+    ///
+    /// **왜 이래야 하는가**: `buf`는 세 자리(각 `max_text_bytes`)뿐인 bump 버퍼이고 `store`는 `used`를
+    /// 앞으로만 민다. 그래서 같은 `Owned`에 값을 **거듭 쓰면** 몇 번 만에 자리가 말라 새 값이 조용히
+    /// 잘리고, 그 다음부터는 **길이 0**으로 들어간다 — 화면에서는 «대화 줄이 갑자기 사라진다»로 보인다.
+    /// 훅 모드가 정확히 그 모양이었다(Term이 든 이 버퍼에 턴마다 직접 썼다): 실측으로 4턴은 멀쩡하고
+    /// 5턴째에 프롬프트가 잘리고 6턴째부터 프롬프트·응답이 통째로 비었으며, `agent_kind`가 바뀌기 전에는
+    /// 회복되지 않았다. 관측 모드가 그 증상을 안 낸 것은 폴링마다 새 `Owned`로 다시 담았기 때문이고,
+    /// 그 «다시 담기»가 여기서 갱신 경로의 **기본값**이 된다.
+    ///
+    /// 인자가 `self.buf`를 가리켜도 안전하다 — 새 값을 임시 버퍼에 다 담은 뒤에 자신을 덮는다.
+    ///
+    /// ⚠️ **꺼내 둔 슬라이스는 갱신을 못 넘긴다.** 이어 담기만 하던 시절에는 한 번 꺼낸 `reply()` 가 계속
+    /// 그 내용을 가리켰지만, 압축은 **같은 버퍼 안에서 내용을 옮긴다** — 포인터는 살아 있는데 가리키는
+    /// 글자가 달라진다(길이도 그대로라 검사에 안 걸린다). 꺼낸 값은 **쓰기 전에 복사**한다. 지금 호출부는
+    /// 모두 그렇게 한다(`dupe`·`allocPrint`·`appendSlice`·고정 버퍼 `set`).
+    fn rewrite(self: *Owned, new_prompt: []const u8, new_reply: []const u8, new_cwd: []const u8) void {
+        var tmp: Owned = .{};
+        const p = tmp.store(new_prompt);
+        tmp.prompt_off = p.off;
+        tmp.prompt_len = p.len;
+        const r = tmp.store(new_reply);
+        tmp.reply_off = r.off;
+        tmp.reply_len = r.len;
+        const c = tmp.store(new_cwd);
+        tmp.cwd_off = c.off;
+        tmp.cwd_len = c.len;
+        self.* = tmp; // 오프셋 기반이라 복사가 안전하다(슬라이스였다면 여기서 dangling)
+    }
+
     pub fn setPrompt(self: *Owned, text: []const u8) void {
-        const r = self.store(text);
-        self.prompt_off = r.off;
-        self.prompt_len = r.len;
+        self.rewrite(text, self.reply(), self.cwd());
     }
 
     pub fn setReply(self: *Owned, text: []const u8) void {
-        const r = self.store(text);
-        self.reply_off = r.off;
-        self.reply_len = r.len;
+        self.rewrite(self.prompt(), text, self.cwd());
     }
 
     pub fn setCwd(self: *Owned, text: []const u8) void {
-        const r = self.store(text);
-        self.cwd_off = r.off;
-        self.cwd_len = r.len;
+        self.rewrite(self.prompt(), self.reply(), text);
     }
 };
 
@@ -116,11 +143,8 @@ pub fn mergeKeepingMissing(dst: *Owned, fresh: *const Owned) void {
     const p = if (fresh.prompt_len > 0) fresh.prompt() else dst.prompt();
     const r = if (fresh.reply_len > 0) fresh.reply() else dst.reply();
     const c = if (fresh.cwd_len > 0) fresh.cwd() else dst.cwd();
-    var tmp: Owned = .{};
-    tmp.setPrompt(p);
-    tmp.setReply(r);
-    tmp.setCwd(c);
-    dst.* = tmp; // 오프셋 기반이라 복사가 안전하다(슬라이스였다면 여기서 dangling)
+    // 세 값이 `dst`·`fresh` 어느 쪽 버퍼를 가리켜도 안전하다 — `rewrite`가 임시 버퍼에 다 담은 뒤 덮는다.
+    dst.rewrite(p, r, c);
 }
 
 /// 세션 파일 이름 상한. claude는 `<uuid>.jsonl`(41자)이라 넉넉하다.
@@ -198,7 +222,11 @@ pub fn clampUtf8(text: []const u8, max: usize) []const u8 {
 }
 
 /// UTF-8 시퀀스 한가운데서 자르지 않도록 길이를 뒤로 줄인다. 잘린 바이트를 그대로 두면 렌더가 U+FFFD를 뿌린다.
-fn trimToCharBoundary(text: []const u8) usize {
+///
+/// **`clampUtf8` 로는 못 메우는 자리가 있다.** 그쪽은 «상한을 넘을 때만» 자르므로, 이미 **버퍼 끝에서**
+/// 잘려 온 슬라이스(길이가 정확히 상한)는 손대지 않는다 — 훅 payload 를 고정 버퍼로 디코드하는 자리가
+/// 그렇다(512 = 한글 170자 + 2바이트). 그 자리는 이 함수를 직접 부른다.
+pub fn trimToCharBoundary(text: []const u8) usize {
     var n = text.len;
     while (n > 0) {
         const len = std.unicode.utf8ByteSequenceLength(text[n - 1]) catch {
@@ -510,7 +538,11 @@ pub fn parseClaudeTail(allocator: std.mem.Allocator, tail: []const u8, out: *Own
 
 /// 여러 줄 텍스트를 사이드바 **한 줄**로 눕힌다: 개행·탭을 공백으로, 연속 공백을 하나로, 앞뒤 공백 제거.
 /// 마크다운 기호는 그대로 둔다 — 없애면 코드 조각이나 목록이 뜻을 잃고, 잘라 보여주는 미리보기라 원문이 낫다.
-fn flatten(text: []const u8, buf: []u8) []const u8 {
+///
+/// **대화 줄에 담기 전에 반드시 지난다**(두 소스 공통). 이 파일의 파서는 저장 직전에 부르고, 훅 모드는
+/// platform 이 같은 자리에서 부른다 — 그 줄은 한 줄 텍스트 run 이라 진짜 개행이 들어가면 글자가 뭉개진다.
+/// 그래서 `pub` 이다: 규율을 두 곳에 각자 적으면 한쪽이 먼저 잊는다.
+pub fn flatten(text: []const u8, buf: []u8) []const u8 {
     var n: usize = 0;
     var pending_space = false;
     for (text) |c| {
@@ -702,9 +734,51 @@ test "clampUtf8: 상한을 넘으면 글자 경계에서 자른다" {
     try testing.expectEqualStrings("ab", clampUtf8("abc", 2));
 }
 
-test "Owned.store: 상한을 넘겨도 넘치지 않고 앞부분을 남긴다" {
+test "Owned: 상한을 넘겨도 넘치지 않고 앞부분을 남긴다" {
     var owned: Owned = .{};
     const long = "x" ** (max_text_bytes * 2);
-    const kept = owned.store(long);
-    try testing.expectEqual(max_text_bytes, kept.len);
+    owned.setReply(long);
+    try testing.expectEqual(max_text_bytes, owned.reply().len);
+}
+
+test "Owned: 같은 버퍼에 거듭 써도 값이 사라지지 않는다" {
+    // **훅 모드가 이 자리에서 깨졌다.** 그 경로는 Term이 든 `Owned`에 턴마다 직접 쓰는데, 예전 `store`는
+    // `used`를 앞으로만 밀어 몇 턴 만에 자리가 말랐다 — 실측으로 5턴째에 프롬프트가 잘리고 6턴째부터
+    // 프롬프트·응답이 통째로 비었다. 사용자에게는 «사이드바 대화 줄과 알림 본문이 갑자기 사라진다»로
+    // 보였고, `agent_kind`가 바뀌기 전에는 회복되지 않았다.
+    //
+    // **자리마다 따로 본다.** 섞어 쓰는 순서만 확인하면 셋 중 **하나만** 압축을 되돌려도 통과한다 —
+    // 다른 자리의 압축이 `used`를 리셋해 주기 때문이다(실제로 그 약한 테스트를 먼저 썼고, 뮤테이션이
+    // 그것을 드러냈다).
+    const long = "x" ** 400;
+    {
+        var owned: Owned = .{};
+        var i: usize = 0;
+        while (i < 20) : (i += 1) owned.setReply(long);
+        try testing.expectEqualStrings(long, owned.reply());
+    }
+    {
+        var owned: Owned = .{};
+        var i: usize = 0;
+        while (i < 20) : (i += 1) owned.setPrompt(long);
+        try testing.expectEqualStrings(long, owned.prompt());
+    }
+    {
+        var owned: Owned = .{};
+        var i: usize = 0;
+        while (i < 20) : (i += 1) owned.setCwd(long);
+        try testing.expectEqualStrings(long, owned.cwd());
+    }
+
+    // 훅 모드의 실제 순서(프롬프트 → 지난 응답 비우기 → 새 응답)로도 셋이 함께 살아 있어야 한다.
+    var owned: Owned = .{};
+    const reply = "x" ** 300;
+    var turn: usize = 0;
+    while (turn < 20) : (turn += 1) {
+        owned.setPrompt("배포 스크립트 고쳐줘 — 사용자가 친 문장이 이만큼 길 수 있다");
+        owned.setReply("");
+        owned.setReply(reply);
+    }
+    try testing.expectEqualStrings("배포 스크립트 고쳐줘 — 사용자가 친 문장이 이만큼 길 수 있다", owned.prompt());
+    try testing.expectEqualStrings(reply, owned.reply());
 }

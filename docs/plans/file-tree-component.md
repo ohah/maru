@@ -185,14 +185,31 @@ flowchart TD
   세션"에는 누를 것이 없어졌다. 테스트가 자기 rect를 지어내면 제품과 다른 기하를 판정하므로 같은
   build를 부르는 `publishFileTreeHitTree`를 냈다.
 
-### FT3 — 셀 경로 제거와 정리
+### FT3 — 셀 경로 격리 (제거는 그 다음 슬라이스)
 
-- `buildFileTreeDrawList`와 그 테스트를 제거한다.
-- **선행 확인이 필요하다**: 이 함수는 macOS 전용이 아니다. `maru win32-file-tree-draw-smoke`
-  (`src/main.zig`)가 Windows에서 행을 픽셀까지 내리는 유일한 경로로 쓴다. 지우기 전에 그 스모크의
-  대체(중립 투영을 Windows 셀 파이프라인에 먹이는 경로)를 정한다 — **정해지기 전에는 FT3를 열지 않는다.**
-- `docs/file-explorer.md` §3의 셀 열 서술을 컴포넌트 계약으로 교체하고, 성능 예산 표와 검증 매트릭스
-  행을 갱신한다.
+**선행 조건을 풀었더니 "제거"가 아니라 "격리"가 답이었다.** 계획은 `buildFileTreeDrawList`를 지우자고
+했는데, 지울 자리가 없다는 것이 층 규칙에서 드러났다.
+
+- 이 투영은 `chrome`(분류·말줄임 규칙)과 `renderer`(DrawCell)를 **함께** 필요로 한다.
+- 그런데 `chrome`(L3)은 `renderer`를 import할 수 없고(`ui/tree.zig` 헤더 — 경계 가드),
+  `session`(L2)은 `chrome`(L3)을 import할 수 없다(위상 역전 — `tests/boundary/imports.zig`).
+- 그래서 두 층을 잇는 자리는 **L4(platform) 뿐**이고, **중립 집이 존재하지 않는다.** Windows로 옮기려
+  해도 이 투영이 기대는 `appendEllipsizedTitle`(말줄임 단일 출처, 같은 파일에서 23곳이 공유)이 함께
+  가야 해서, 결국 그 파일의 **중립 절반을 통째로 추출**하는 별도 슬라이스가 된다.
+
+그래서 FT3가 실제로 한 일은 **소비자를 하나로 줄이고 다시 새지 않게 막는 것**이다.
+
+- macOS 스모크 둘을 자립시켰다. 아이콘 색 픽스처는 아이콘·색 매핑만 직접 세우고(그 픽스처의 관심사가
+  분류→색이지 행 배치가 아니다), 한글 cluster probe는 제품이 여전히 쓰는 `buildPaneLabelDrawList`로
+  옮겼다. **macOS에는 이 투영의 호출이 하나도 남지 않았다.**
+- 남은 소비자는 `maru win32-file-tree-draw-smoke` 하나다. 그 사실을 `tests/boundary/imports.zig`가
+  **센다** — macOS 쪽 호출이 0이 아니면 실패한다. 지울 수 없다면 되돌아오지 못하게 막는 것이 남은
+  방어이고, 실제로 FT1이 "렌더가 그 창을 쓴다"는 단언이 죽은 경로를 보던 상태를 정리한 적이 있다.
+- 함수의 doc comment가 이 소유권과 층 분석을 소유한다.
+
+**후속 슬라이스(FT4 후보)**: `coretext_frame_builder.zig`의 중립 절반(`appendEllipsizedTitle` 등 셀
+방출 glue)을 platform 아래 공용 투영 층으로 추출한다. 그것이 끝나야 Windows가 macOS 파일을 import하지
+않게 되고, 그때 이 함수는 그 층으로 옮겨 가거나(Windows가 계속 쓴다면) 사라진다.
 
 ## 5. 보존해야 하는 동작 (회귀 표)
 
@@ -244,4 +261,4 @@ flowchart TD
 | --- | --- |
 | FT1 — 컴포넌트 골격과 행 렌더 | **완료**(같은 PR) |
 | FT2 — 상호작용 이관 | **완료** |
-| FT3 — 셀 경로 제거 | 미착수(선행 조건: Windows 스모크 대체 결정) |
+| FT3 — 셀 경로 **격리**(제거는 후속) | **완료** — 아래 §4 FT3 참조 |

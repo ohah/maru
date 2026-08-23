@@ -1253,6 +1253,21 @@ pub const FileTreeSelectionPaint = struct {
     foreground: terminal.Color,
 };
 
+/// 파일 탐색기 행의 **셀 격자 투영 — 지금은 Windows 스모크 하나만 쓴다**(FT3).
+///
+/// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 이 함수가 남아 있는 이유는 하나다:
+/// `maru win32-file-tree-draw-smoke` 가 Windows 에서 행을 픽셀까지 내리는 유일한 경로이고, Windows 에는
+/// `ChromeDraw` 를 셀로 낮추는 층이 아직 없다.
+///
+/// **왜 중립 모듈로 못 옮기는가**(FT3 에서 실제로 시도하고 접은 이유 — 계획 문서 §4 FT3):
+/// 이 투영은 `chrome`(분류·말줄임 규칙)과 `renderer`(DrawCell)를 **함께** 필요로 하는데,
+///   · `chrome`(L3)은 `renderer` 를 import 할 수 없고(`ui/tree.zig` 헤더 — 경계 가드),
+///   · `session`(L2)은 `chrome`(L3)을 import 할 수 없다(위상 역전 — `tests/boundary/imports.zig`).
+/// 그래서 두 층을 잇는 자리는 **L4(platform) 뿐**이고, 중립 집이 존재하지 않는다. 진짜 해법은
+/// 이 파일의 중립 절반(`appendEllipsizedTitle` 등 23 곳이 공유하는 셀 방출 glue)을 platform 아래의
+/// 공용 투영 층으로 빼는 별도 슬라이스다. 그 전에 지우면 Windows 가 화면에서 트리를 잃는다.
+///
+/// 그동안 이 함수가 **macOS 로 다시 새지 않게** `tests/boundary/imports.zig` 가 소비자를 센다.
 pub fn buildFileTreeDrawList(
     allocator: std.mem.Allocator,
     rows: []const file_tree.Row,

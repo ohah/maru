@@ -110,10 +110,13 @@ pub fn pendingNotification(self: *AppSession) ?PendingNotification {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
-                // host-backed Term은 코어가 placeholder라 알림이 host에 있다 — 값싼 코어 drain에서 건너뛰고 아래 RPC pull로.
-                if (is_macos and term.surface.remote != null) continue;
                 // **훅 모드 Term 은 훅에서 알림이 온다**(계약 §6). 같은 tail(`emitNotification`)을 타므로
                 // 위치 접두·인앱 히스토리·전면 배너 억제가 관측 모드와 똑같이 적용된다.
+                //
+                // **host-backed 검사보다 앞에 둔다.** 이 알림은 훅 로그를 우리가 읽어 Term 에 쌓아 둔
+                // **client 측 상태**라 코어가 placeholder 인지와 무관하다. 아래 `continue` 뒤에 두었더니
+                // keep-alive 를 켠 순간 그 Term 의 훅 알림이 **통째로 사라졌다** — 원격 pull 경로는 host
+                // 코어의 OSC 만 꺼내므로 이 슬롯을 볼 자리가 없다.
                 //
                 // 여기서 `continue` 하지 않는다 — 아래 drain 이 그 Term 의 OSC `pending` 을 **비우는** 일을
                 // 겸한다(비우지 않으면 다음 tick 마다 같은 것을 다시 보고 루프가 그 Term 에서 멈춘다).
@@ -128,6 +131,9 @@ pub fn pendingNotification(self: *AppSession) ?PendingNotification {
                         if (emitNotification(self, tab, term, focused_term, title, notice.body)) |n| return n;
                     }
                 }
+                // host-backed Term은 코어가 placeholder라 OSC 알림이 host에 있다 — 값싼 코어 drain에서 건너뛰고
+                // 아래 RPC pull로(훅 알림은 위에서 이미 처리했다).
+                if (is_macos and term.surface.remote != null) continue;
                 if (drainOscNotificationFrom(self, tab, term, focused_term)) |n| return n;
             }
         }
@@ -289,6 +295,9 @@ pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingN
         const notif = app_session_mod.app_remote_backend.?.takeNotificationFor(term.rt.handle) orelse return null;
         defer notif.deinit(app_session_mod.app_remote_backend.?.allocator); // takeNotificationFor가 backend allocator로 dupe.
         if (!self.loaded_config.config.notifications.osc) return null; // 게이트 — host에서 이미 소비됨(drop).
+        // **훅 모드 Term 에서는 OSC 알림을 쓰지 않는다**(계약 §1.1) — in-process `drainOscNotificationFrom` 과
+        // 같은 규율이다. 여기서 함께 방출하면 같은 턴에 두 번 울린다. host 슬롯은 위에서 이미 비웠다(drop).
+        if (agent_ops.agentHookMode(self, term) == .hook) return null;
         return emitNotification(self, tab, term, focused_term, notif.title, notif.body);
     }
     return null;

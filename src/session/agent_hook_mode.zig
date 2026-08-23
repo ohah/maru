@@ -48,9 +48,10 @@ pub const State = @import("agent_observer.zig").State;
 /// 훅 이벤트로 상태를 옮긴다. **`Stop` 은 «완료» 가 아니라 «턴 끝» 이다**(계약 §2) — 사용자가 중단한 턴도
 /// `Stop` 으로 온다.
 ///
-/// 두 가지를 특별히 다룬다:
-/// - `stop_hook_active` 가 참인 `Stop` 은 **턴 종료로 세지 않는다**(서브에이전트·백그라운드로 재발화한다).
-/// - `background_tasks` 가 비어 있지 않으면 **완료로 단정하지 않는다** — 턴은 끝났어도 셸 작업이 돌고 있다.
+/// `stop_hook_active` 가 참인 `Stop` 은 **턴 종료로 세지 않는다**(서브에이전트·백그라운드로 재발화한다).
+///
+/// **`background_tasks` 는 여기서 보지 않는다** — 자식 때문에 붙잡는 일은 `advance` 가 자기 로스터로
+/// 단독으로 한다(계약 §2). 「이벤트 하나 → 상태」 만 보는 순수 전이로 남긴다.
 pub fn next(current: State, ev: event.Event) State {
     // **자식 이벤트는 부모 상태를 옮기지 않는다**(계약 §2). 서브에이전트 활동은 `agent_id` 를 실은
     // 이벤트로 따로 오는데, 그것을 그대로 부모에 먹이면 자식이 도구를 부를 때마다 부모가 «진행 중» 이
@@ -68,9 +69,13 @@ pub fn next(current: State, ev: event.Event) State {
         .stop_failure => .idle,
         .stop => blk: {
             if (ev.stop_hook_active) break :blk current; // 재발화 — 턴이 끝난 것이 아니다
-            // **아직 도는 것이 있으면** 여전히 «돌고 있다». 끝났거나 실패한 항목도 목록에 남으므로
-            // «비어 있나» 가 아니라 «running 이 있나» 로 본다(그 차이가 «영영 안 풀리는 배지» 를 만든다).
-            break :blk if (ev.running_background_tasks > 0) .running else .idle;
+            // **`background_tasks` 는 여기서 보지 않는다**(2026-08-23 결정). 예전에는 그 목록에 `running`
+            // 이 하나라도 있으면 «턴은 끝났으나 작업이 도는 중» 이라며 붙잡았는데, 그 셈이 `type` 을 안
+            // 가려 **셸 백그라운드 작업까지** 붙잡았다. 그런데 셸 작업에는 `SubagentStop` 같은 **푸는
+            // 이벤트가 없다** — 그래서 `run_in_background` 하나만 띄워 두면 그 pane 의 완료 알림이 그
+            // 작업이 끝날 때까지 **한 건도** 안 나갔다(실측). 붙잡는 일은 `advance` 가 자기 로스터로
+            // 단독으로 하고, 이 목록은 §2 대로 **거두는 데만** 쓴다.
+            break :blk .idle;
         },
         // **아는 종류만 옮긴다**(계약 §6). claude 의 `notification_type` 은 열넷이고 그중 «사용자 입력을
         // 기다린다» 는 다섯만 배지를 옮긴다 — 나머지(유휴 알림·인증 성공·쿼터 재개 등)와 종류를 모르는
@@ -343,6 +348,11 @@ pub fn advance(progress: *Progress, current: State, ev: event.Event) State {
         // **완전할 때만 근거로 쓴다.** 잘리거나 어긋난 목록은 진실의 일부일 뿐이다.
         if (ev.background_tasks_raw.len != 0 and !tally.truncated and !tally.malformed)
             progress.reapMissing(live[0..tally.count]);
+        // **붙잡는 근거는 로스터 하나다**(2026-08-23 결정). 목록은 위에서 «거두는» 데만 썼다 — 그것을
+        // 붙잡는 근거로도 쓰면 `type` 을 안 가리는 셈이 셸 백그라운드 작업까지 붙잡고, 그 축에는 푸는
+        // 이벤트가 없어 그 pane 의 완료 알림이 영영 안 나간다(실측). 목록에만 있고 우리가 시작을 못 본
+        // 자식은 붙잡히지 않는다 — **조기 해제 쪽으로 기울되**(§2 의 기준: 안 풀리는 배지가 더 나쁘다)
+        // 다음 프롬프트·턴 키 변화가 셈을 버려 정정한다.
         if (base == .idle and progress.child_count > 0) return .running;
     }
     return base;
@@ -491,9 +501,12 @@ pub const PendingNotice = struct {
         self.since_ms = now_ms;
         // **자른다, 버리지 않는다.** 마지막 응답은 길 수 있는데 그것 때문에 알림을 통째로 잃으면
         // 사용자는 «턴이 끝났다» 는 사실 자체를 놓친다.
-        const n = @min(body.len, max_text);
-        @memcpy(self.buf[0..n], body[0..n]);
-        self.len = n;
+        //
+        // **글자 경계에서 자른다**(`ToolLabel.set` 과 같은 규율). 바이트로 자르면 한글 응답의 알림
+        // 끝에 U+FFFD 가 붙는다 — 상한을 넘기는 것은 «길게 답한 턴» 이라 실제로 자주 걸린다.
+        const clamped = transcript.clampUtf8(body, max_text);
+        @memcpy(self.buf[0..clamped.len], clamped);
+        self.len = clamped.len;
     }
 
     pub fn clear(self: *PendingNotice) void {
@@ -519,7 +532,6 @@ fn evOf(kind: event.Kind) event.Event {
         .text = "",
         .source = "",
         .stop_hook_active = false,
-        .running_background_tasks = 0,
     };
 }
 
@@ -579,11 +591,20 @@ test "재발화 Stop 은 턴 종료가 아니다" {
     try testing.expectEqual(State.blocked, next(.blocked, ev));
 }
 
-test "백그라운드 작업이 남아 있으면 완료로 단정하지 않는다" {
-    // 턴은 끝났어도 셸 작업이 돌고 있다(실측: `{id, type: shell, status: running, description}`).
+test "셸 백그라운드 작업이 도는 중이어도 턴은 끝난다" {
+    // 실측 payload 그대로다(`Bash` 의 `run_in_background` 로 띄운 `sleep`). 예전에는 이 목록에 `running`
+    // 이 있으면 배지를 붙잡았는데, 셸 작업에는 **푸는 이벤트가 없어** 그 pane 의 완료 알림이 그 작업이
+    // 끝날 때까지 한 건도 안 나갔다. 이제 목록은 «거두는» 데만 쓰고 붙잡지 않는다(계약 §2).
     var ev = evOf(.stop);
-    ev.running_background_tasks = 1;
-    try testing.expectEqual(State.running, next(.running, ev));
+    ev.background_tasks_raw =
+        "[{\"id\":\"bmyb73pp8\",\"type\":\"shell\",\"status\":\"running\",\"description\":\"Sleep 200 seconds\"}]";
+    try testing.expectEqual(State.idle, next(.running, ev));
+
+    // 여럿이어도 같다 — 개수가 아니라 **누가 도는가**(서브에이전트인가)가 기준이다.
+    var many = evOf(.stop);
+    many.background_tasks_raw =
+        "[{\"id\":\"a\",\"type\":\"shell\",\"status\":\"running\"},{\"id\":\"b\",\"type\":\"shell\",\"status\":\"running\"}]";
+    try testing.expectEqual(State.idle, next(.running, many));
 }
 
 test "모르는 이벤트와 접힌 이벤트는 상태를 흔들지 않는다" {
@@ -642,17 +663,19 @@ test "알림은 전이에 붙는다 — 같은 턴에서 두 번 울리지 않�
     try testing.expectEqual(Notice.none, noticeOn(.unknown, .running));
 }
 
-test "재발화 Stop 과 백그라운드 작업은 애초에 전이를 만들지 않는다" {
+test "재발화 Stop 은 전이를 안 만들고, 백그라운드가 도는 Stop 은 만든다" {
     // 상태 전이 함수와 알림 정책이 **같은 사실**을 쓰는지 확인한다 — 둘이 따로 판단하면 어긋난다.
     var reentrant = evOf(.stop);
     reentrant.stop_hook_active = true;
     const after_reentrant = next(.running, reentrant);
     try testing.expectEqual(Notice.none, noticeOn(.running, after_reentrant));
 
+    // **셸 백그라운드가 도는 중이어도 알림은 나간다**(2026-08-23 결정). 사용자가 겪은 «알림이 안 온다» 가
+    // 정확히 이 자리였다 — `Stop` 은 «모든 작업이 끝났다» 가 아니라 «턴 끝» 이다(계약 §2).
     var background = evOf(.stop);
-    background.running_background_tasks = 1;
+    background.background_tasks_raw = "[{\"id\":\"s1\",\"type\":\"shell\",\"status\":\"running\"}]";
     const after_background = next(.running, background);
-    try testing.expectEqual(Notice.none, noticeOn(.running, after_background));
+    try testing.expectEqual(Notice.done, noticeOn(.running, after_background));
 
     // 대조: 평범한 Stop 은 알린다.
     try testing.expectEqual(Notice.done, noticeOn(.running, next(.running, evOf(.stop))));
@@ -695,15 +718,19 @@ test "오류로 끝난 턴도 끝이다 — 안 받으면 배지가 영영 «진
     try testing.expectEqual(Notice.done, noticeOn(.running, next(.running, evOf(.stop_failure))));
 }
 
-test "끝난 백그라운드 항목 때문에 배지가 멈추지 않는다" {
-    // 배열이 «비어 있나» 로 보면 completed 항목 하나가 영원히 진행 중을 만든다. running 만 센다.
-    var done_only = evOf(.stop);
-    done_only.running_background_tasks = 0; // completed·failed 만 남은 상태
-    try testing.expectEqual(State.idle, next(.running, done_only));
-
-    var still = evOf(.stop);
-    still.running_background_tasks = 2;
-    try testing.expectEqual(State.running, next(.running, still));
+test "목록의 모양이 어떻든 next 는 그것을 보지 않는다" {
+    // 붙잡는 일은 `advance` 가 자기 로스터로 단독으로 한다 — `next` 는 「이벤트 하나 → 상태」 만 보는
+    // 순수 전이다. 목록이 비었든, 끝난 항목만 남았든, 서브에이전트가 도는 중이라 말하든 여기서는 같다.
+    for ([_][]const u8{
+        "",
+        "[]",
+        "[{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"completed\"}]",
+        "[{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"running\"}]",
+    }) |raw| {
+        var ev = evOf(.stop);
+        ev.background_tasks_raw = raw;
+        try testing.expectEqual(State.idle, next(.running, ev));
+    }
 }
 
 test "자식 이벤트는 부모 상태를 옮기지 않는다" {
@@ -1306,7 +1333,6 @@ test "실사용 순서: 남의 SubagentStop 이 섞여 와도 우리 자식이 �
 
     // lead 가 먼저 답을 마쳤다 — 백그라운드로 띄웠다고 말하며, `background_tasks` 에 도는 것이 하나다.
     var lead_stop = evOf(.stop);
-    lead_stop.running_background_tasks = 1;
     lead_stop.text = "탐색 에이전트를 백그라운드로 띄웠습니다";
     state = advance(&progress, state, lead_stop);
     try testing.expectEqual(State.running, state);
@@ -1331,12 +1357,11 @@ test "background_tasks 가 끝까지 도는 중이어도 자식이 끝나면 풀
     var state = advance(&progress, .idle, evOf(.user_prompt_submit));
     state = advance(&progress, state, childEvId(.subagent_start, "c1"));
     var lead_stop = evOf(.stop);
-    lead_stop.running_background_tasks = 1;
+    lead_stop.background_tasks_raw = "[{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"running\"}]";
     state = advance(&progress, state, lead_stop);
     try testing.expectEqual(State.running, state);
 
-    var child_stop = childEvId(.subagent_stop, "c1");
-    child_stop.running_background_tasks = 1; // 여전히 도는 중이라고 말한다
+    const child_stop = childEvId(.subagent_stop, "c1");
     try testing.expectEqual(State.idle, advance(&progress, state, child_stop));
 }
 
@@ -1426,7 +1451,6 @@ test "회수: 종료를 놓친 유령을 lead 의 턴 끝에서 거둔다" {
 
     // lead 가 끝난다. 목록에는 `alive` 만 도는 중이다 → `ghost` 는 거둬진다.
     var stop = evOf(.stop);
-    stop.running_background_tasks = 1;
     stop.background_tasks_raw = "[{\"id\":\"alive\",\"type\":\"subagent\",\"status\":\"running\"}]";
     state = advance(&progress, state, stop);
     try testing.expectEqual(@as(usize, 1), progress.childCount()); // 유령이 사라졌다

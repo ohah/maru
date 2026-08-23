@@ -109,9 +109,6 @@ pub const Event = struct {
     source: []const u8 = "",
     /// 참이면 이 `Stop`은 재진입이므로 **턴 종료로 세지 않는다**(계약 §2).
     stop_hook_active: bool = false,
-    /// `background_tasks` 중 **`status`가 `running`인 것의 수**(계약 §2). 배열이 비었는지만 보면 끝났거나
-    /// 실패한 항목 하나 때문에 배지가 영원히 «진행 중» 에 멈춘다 — 그 항목도 목록에 남기 때문이다.
-    running_background_tasks: usize = 0,
     /// 서브에이전트 이벤트가 실어 오는 자식 식별자(계약 §2). 있으면 그 이벤트는 **자식의 것**이라 부모
     /// 상태에 그대로 섞으면 안 된다.
     agent_id: []const u8 = "",
@@ -320,10 +317,13 @@ pub fn parseLine(line: []const u8) ?Event {
             const name = scan.stringValue() orelse return null;
             ev.notification_type = notificationKindOf(name);
         } else if (std.mem.eql(u8, key, "background_tasks")) {
-            // 원문 슬라이스를 함께 잡는다 — 회수 규칙이 그것을 다시 훑는다(위 `liveSubagentIds`).
+            // **원문 슬라이스만** 잡는다 — 이 목록의 유일한 쓰임은 «도는 자식을 거두는» 것이고(계약 §2),
+            // 그 판정은 `liveSubagentIds` 가 `type` 까지 보며 따로 한다. 예전엔 여기서 «running 인 것의
+            // 수» 를 함께 세어 그것으로 배지를 붙잡았는데, 그 셈은 `type` 을 안 가려 **셸 백그라운드
+            // 작업까지** 붙잡았고 그것을 푸는 이벤트가 없어 알림이 영영 안 나갔다.
             const raw_start = scan.i;
-            ev.running_background_tasks = scan.runningTaskCount() orelse return null;
-            if (scan.i > raw_start) ev.background_tasks_raw = scan.src[raw_start..scan.i];
+            if (!scan.skipValue()) return null;
+            if (scan.i > raw_start) ev.background_tasks_raw = std.mem.trim(u8, scan.src[raw_start..scan.i], " \t\r\n");
         } else if (std.mem.eql(u8, key, "tool_input")) {
             // 중첩 객체 안에서도 **키 위치**만 본다. 값 안에 같은 단어가 있어도 걸리지 않는다.
             if (!scan.expectObjectStart()) {
@@ -491,6 +491,10 @@ pub fn looksLikeProvider(token: []const u8) bool {
 /// 사이드바 한 줄에 들어갈 분량이면 충분하고, 여기서 할당하지 않기 위해서다.
 /// `\uXXXX`는 **대체 문자 하나로** 접는다: 이 자리에 필요한 것은 사람이 읽을 한 줄이지 정확한 코드포인트 복원이
 /// 아니고, surrogate pair까지 다루면 파서가 이 모듈의 목적보다 커진다.
+///
+/// ⚠️ **`out`이 꽉 차면 글자 중간에서 끊는다.** 결과를 사람에게 보이는 자리는 **호출자가** 경계를 물려야 한다
+/// (`agent_transcript.trimToCharBoundary`) — 받는 쪽의 `clampUtf8`은 «상한을 **넘을** 때만» 자르므로 길이가
+/// 정확히 상한인 이 슬라이스를 손대지 않는다. 512바이트면 한글 170자 + 2바이트라 실제로 자주 걸린다.
 pub fn decodeInto(out: []u8, raw: []const u8) []const u8 {
     var n: usize = 0;
     var i: usize = 0;
@@ -730,63 +734,6 @@ const Scanner = struct {
         return false;
     }
 
-    /// 배열을 훑으며 `"status":"running"` 인 항목의 수를 센다.
-    ///
-    /// **비어 있는지만 보면 안 된다**(계약 §2) — 끝났거나 실패한 항목도 목록에 남으므로, 그것 하나 때문에
-    /// 배지가 영원히 «진행 중» 이 된다. 깊이를 세어 **그 배열의 항목 안**에 있는 `status` 만 인정한다.
-    fn runningTaskCount(self: *Scanner) ?usize {
-        const c = self.peek() orelse {
-            self.failed = true;
-            return null;
-        };
-        if (c != '[') {
-            // 형이 바뀌었다(배열이 아니다) — 값을 건너뛰고 «없다» 로 본다.
-            if (!self.skipValue()) {
-                self.failed = true;
-                return null;
-            }
-            return 0;
-        }
-        self.i += 1;
-        var running: usize = 0;
-        var depth: usize = 1;
-        var pending_status = false; // 방금 읽은 키가 `status` 였다
-        while (self.i < self.src.len) {
-            const ch = self.src[self.i];
-            if (ch == '"') {
-                const text = self.rawString() orelse {
-                    self.failed = true;
-                    return null;
-                };
-                // 항목 하나의 깊이(2)에서만 본다 — 더 깊은 곳의 같은 이름에 걸리지 않게.
-                if (depth == 2) {
-                    if (pending_status) {
-                        if (std.mem.eql(u8, text, "running")) running += 1;
-                        pending_status = false;
-                    } else if (std.mem.eql(u8, text, "status")) {
-                        pending_status = true;
-                        // 다음 토큰이 값이어야 한다 — `:` 를 건너뛴다.
-                        self.skipWs();
-                        if (self.i < self.src.len and self.src[self.i] == ':') self.i += 1;
-                    }
-                }
-                continue;
-            }
-            self.i += 1;
-            switch (ch) {
-                '[', '{' => depth += 1,
-                ']', '}' => {
-                    depth -= 1;
-                    if (depth == 0) return running;
-                    if (depth == 1) pending_status = false; // 항목이 끝났다
-                },
-                else => {},
-            }
-        }
-        self.failed = true;
-        return null;
-    }
-
     /// 배열 값을 건너뛰면서 **비어 있지 않은지**만 답한다.
     fn nonEmptyArrayValue(self: *Scanner) ?bool {
         const c = self.peek() orelse {
@@ -887,21 +834,23 @@ test "실측 payload 모양을 그대로 읽는다 — SessionStart" {
     try testing.expectEqualStrings("startup", ev.source);
 }
 
-test "Stop의 재진입 가드와 background_tasks를 읽는다" {
-    // `stop_hook_active`가 참이면 턴 종료가 아니고, `background_tasks`가 비어 있지 않으면 완료가 아니다.
+test "Stop의 재진입 가드와 background_tasks 원문을 읽는다" {
+    // `stop_hook_active`가 참이면 턴 종료가 아니다. `background_tasks`는 **세지 않고 원문만** 잡는다 —
+    // 그 목록의 유일한 쓰임은 «도는 자식을 거두는» 것이고, 판정은 `liveSubagentIds`가 `type`까지 보며
+    // 따로 한다(계약 §2).
     const busy = "codex\t{\"hook_event_name\":\"Stop\",\"prompt_id\":\"p1\"," ++
         "\"background_tasks\":[{\"id\":\"bc3k\",\"status\":\"running\"}]," ++
         "\"stop_hook_active\":false,\"last_assistant_message\":\"끝났습니다\"}";
     const ev = parseLine(busy).?;
     try testing.expectEqual(Kind.stop, ev.kind);
     try testing.expectEqualStrings("p1", ev.turn_key);
-    try testing.expectEqual(@as(usize, 1), ev.running_background_tasks);
+    try testing.expectEqualStrings("[{\"id\":\"bc3k\",\"status\":\"running\"}]", ev.background_tasks_raw);
     try testing.expect(!ev.stop_hook_active);
     try testing.expectEqualStrings("끝났습니다", ev.text);
 
     const idle = "codex\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[],\"stop_hook_active\":true}";
     const ev2 = parseLine(idle).?;
-    try testing.expectEqual(@as(usize, 0), ev2.running_background_tasks);
+    try testing.expectEqualStrings("[]", ev2.background_tasks_raw);
     try testing.expect(ev2.stop_hook_active);
 }
 
@@ -1185,7 +1134,11 @@ test "provider 가 필드의 형을 바꿔도 줄 전체를 잃지 않는다" {
     // `background_tasks` 가 배열이 아니다 → «없음» 으로 보고 계속.
     const not_array = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":42,\"prompt_id\":\"p2\"}";
     const b = parseLine(not_array).?;
-    try testing.expectEqual(@as(usize, 0), b.running_background_tasks);
+    // 배열이 아니면 회수 규칙이 그것을 근거로 쓰지 못해야 한다 — `liveSubagentIds` 가 `malformed` 로 답한다.
+    {
+        var out: [4][]const u8 = undefined;
+        try testing.expect(liveSubagentIds(b.background_tasks_raw, &out).malformed);
+    }
     try testing.expectEqualStrings("p2", b.turn_key);
 
     // `stop_hook_active` 가 불리언이 아니다 → 거짓으로 보고 계속(턴 종료를 놓치는 쪽이 아니라 세는 쪽).
@@ -1235,32 +1188,38 @@ test "회전본 이름은 원본 이름으로 시작한다 — 시작 시 정리
     try testing.expect(rotated_suffix.len > 0);
 }
 
-test "background_tasks 는 running 인 것만 센다 — 끝난 항목도 목록에 남는다" {
-    // 배열이 비었는지만 보면 **끝난 작업 하나 때문에 배지가 영원히 «진행 중»** 에 멈춘다(계약 §2).
+test "셸 백그라운드 작업은 이 목록의 소비자에게 보이지 않는다" {
+    // 이 목록을 읽는 곳은 회수 규칙 하나이고, 그것은 **서브에이전트만** 본다(계약 §2). 예전에는 파서가
+    // `type` 을 안 가리고 «running 인 것의 수» 를 함께 세어 그것으로 배지를 붙잡았는데, 셸 작업에는 푸는
+    // 이벤트가 없어 그 pane 의 완료 알림이 영영 안 나갔다(실측). 그래서 그 셈을 없앴다.
     const line = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
         "{\"id\":\"a\",\"type\":\"shell\",\"status\":\"completed\",\"description\":\"빌드\"}," ++
         "{\"id\":\"b\",\"type\":\"shell\",\"status\":\"running\",\"description\":\"테스트\"}," ++
         "{\"id\":\"c\",\"type\":\"shell\",\"status\":\"failed\",\"description\":\"린트\"}]}";
     const ev = parseLine(line).?;
-    try testing.expectEqual(@as(usize, 1), ev.running_background_tasks);
+    try testing.expect(ev.background_tasks_raw.len > 0); // 원문은 잡는다(회수가 훑는다)
+    var out: [4][]const u8 = undefined;
+    const tally = liveSubagentIds(ev.background_tasks_raw, &out);
+    try testing.expect(!tally.malformed and !tally.truncated);
+    try testing.expectEqual(@as(usize, 0), tally.count); // 셸은 하나도 안 잡힌다
 
-    // 다 끝났으면 0 이다 — 이 대조가 «비어 있나» 와 «도는 게 있나» 를 가른다.
-    const done = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
-        "{\"id\":\"a\",\"status\":\"completed\"},{\"id\":\"b\",\"status\":\"failed\"}]}";
-    try testing.expectEqual(@as(usize, 0), parseLine(done).?.running_background_tasks);
-
-    // 여럿이면 여럿으로 센다.
-    const many = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
-        "{\"status\":\"running\"},{\"status\":\"running\"},{\"status\":\"queued\"}]}";
-    try testing.expectEqual(@as(usize, 2), parseLine(many).?.running_background_tasks);
+    // 서브에이전트는 그대로 잡힌다 — 그 축은 `SubagentStop` 이라는 푸는 이벤트가 있다.
+    const child = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
+        "{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"running\"}," ++
+        "{\"id\":\"s1\",\"type\":\"shell\",\"status\":\"running\"}]}";
+    const child_tally = liveSubagentIds(parseLine(child).?.background_tasks_raw, &out);
+    try testing.expectEqual(@as(usize, 1), child_tally.count);
+    try testing.expectEqualStrings("c1", out[0]);
 }
 
-test "status 는 그 항목의 깊이에서만 인정한다 — 값에 든 같은 단어에 안 걸린다" {
-    // 설명이나 중첩 객체에 «running» 이 들어 있어도 세면 안 된다.
+test "type·status 는 그 항목의 깊이에서만 인정한다 — 값에 든 같은 단어에 안 걸린다" {
+    // 설명이나 중첩 객체에 «running»·«subagent» 가 들어 있어도 잡으면 안 된다.
     const line = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[" ++
-        "{\"status\":\"completed\",\"description\":\"status running 이라고 적힌 설명\"," ++
-        "\"meta\":{\"status\":\"running\"}}]}";
-    try testing.expectEqual(@as(usize, 0), parseLine(line).?.running_background_tasks);
+        "{\"id\":\"a\",\"type\":\"shell\",\"status\":\"completed\"," ++
+        "\"description\":\"status running 이라고 적힌 설명\"," ++
+        "\"meta\":{\"type\":\"subagent\",\"status\":\"running\"}}]}";
+    var deep: [4][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), liveSubagentIds(parseLine(line).?.background_tasks_raw, &deep).count);
 }
 
 test "StopFailure 를 안다 — 오류로 끝난 턴이 Stop 대신 온다" {
@@ -1324,7 +1283,6 @@ test "background_tasks 원문 슬라이스를 잡는다 — 회수 규칙이 그
     const line = "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":" ++
         "[{\"id\":\"c1\",\"type\":\"subagent\",\"status\":\"running\"}],\"prompt_id\":\"p1\"}";
     const ev = parseLine(line).?;
-    try testing.expectEqual(@as(usize, 1), ev.running_background_tasks);
     try testing.expect(ev.background_tasks_raw.len != 0);
     var out: [4][]const u8 = undefined;
     const tally = liveSubagentIds(ev.background_tasks_raw, &out);

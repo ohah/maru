@@ -19646,6 +19646,21 @@ test "hook mode runs exactly one source and takes over notifications" {
     // 한 번 방출하면 끝이다 — 슬롯이 비어 두 번 울리지 않는다.
     try std.testing.expect(notification_ops.pendingNotification(&session) == null);
 
+    // ── ③b **host-backed Term 도 훅 알림이 나온다** ────────────────────────────────────────
+    // 이 알림은 훅 로그를 우리가 읽어 Term 에 쌓아 둔 **client 측 상태**라 코어가 placeholder 인지와
+    // 무관하다. 그런데 드레인 루프가 «host-backed 면 건너뛴다» 를 훅 블록 **앞**에 두는 바람에,
+    // `session.keep-alive-after-quit` 를 켜는 순간 그 Term 의 훅 알림이 통째로 사라졌다 — 원격 pull
+    // 경로는 host 코어의 OSC 만 꺼내므로 이 슬롯을 볼 자리가 없다.
+    {
+        // 순수 분기 테스트라 vtable 을 부르지 않는다(위 `shouldDetachRemoteOnAppQuit` 테스트와 같은 주입).
+        term.surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
+        defer term.surface.remote = null;
+        term.agent_hook_notice.set(.done, "원격에서도 끝났습니다", session.awakeMs());
+        const remote_emitted = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+        try std.testing.expect(std.mem.indexOf(u8, remote_emitted.body, "원격에서도 끝났습니다") != null);
+        try std.testing.expectEqual(term.surfaceId(), remote_emitted.surface_id);
+    }
+
     // ── ④ **오류 사유를 버리지 않는다** ─────────────────────────────────────────────────────
     // `StopFailure` 도 `last_assistant_message` 에 사유를 싣고 온다(실측 — 로그인 안 된 세션에서 그대로
     // 받았다). 그 자리를 비우면 알림이 «오류로 끝났습니다» 한 마디만 하고 사용자는 무엇이 잘못됐는지
@@ -20016,8 +20031,9 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
     }
 
-    // ⑭ **끝난 백그라운드 항목이 배지를 붙잡지 않는다.** 배열이 비었는지만 보면 completed 하나가 영원히
-    //    «진행 중» 을 만든다.
+    // ⑭ **`background_tasks` 는 배지를 붙잡지 않는다**(2026-08-23 결정 — 계약 §2·§8). 예전 계약은
+    //    «하나라도 `running` 이면 진행 중» 이었는데, 그 셈이 `type` 을 안 가려 셸 작업까지 붙잡았고 그 축에는
+    //    푸는 이벤트가 없어 완료 알림이 통째로 막혔다. 이제 붙잡는 근거는 자식 로스터 하나다(아래 ⑮e).
     {
         term.agent_hook_progress = .{};
         term.agent_state = .unknown;
@@ -20028,14 +20044,14 @@ test "hook mode fills state and conversation from the event log, and only then" 
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
 
-        // 대조: 하나라도 running 이면 진행 중이다.
+        // `running` 이어도 같다 — 우리가 시작을 본 자식이 아니면 붙잡지 않는다.
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
         term.agent_state = .unknown;
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++
             "claude\t{\"hook_event_name\":\"Stop\",\"background_tasks\":[{\"id\":\"a\",\"status\":\"running\"}]}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
-        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
     }
 
     // ⑮ **진행 중 세부가 사이드바 줄까지 간다**(계약 §2·§8). 훅 모드는 화면·프로세스 관측을 끄므로
@@ -20208,6 +20224,132 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
         // 완료 알림이 예약됐고 오류가 아니다.
         try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, term.agent_hook_notice.kind);
+    }
+
+    // ⑮b **JSON 이스케이프를 푼 뒤에 보여 준다**(계약 §4). 파서는 줄 버퍼를 빌려 쓰느라 이스케이프를
+    //    그대로 두므로(`agent_hook_event.Event` 주석), 표시 자리에 그대로 실으면 **여러 줄 응답이 `\n`
+    //    두 글자로** 보이고 따옴표마다 역슬래시가 붙는다. claude 의 `last_assistant_message` 는 대개
+    //    여러 줄이라(위 ⑮ 실측 payload 도 `\n\n` 을 담고 있다) 실사용에서 늘 걸리던 자리다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{
+            .sub_path = log_rel,
+            .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"첫 줄\\n둘째 줄\"}\n" ++
+                "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"정리했습니다\\n\\n그는 \\\"네\\\"라고 했다\"}\n",
+        });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        // **대화 줄은 한 줄로 눕는다.** 이스케이프만 풀고 멈추면 그 자리에 진짜 개행이 들어가 한 줄
+        // 텍스트 run 이 뭉개진다 — 관측 모드 파서가 저장 직전에 `flatten` 을 지나는 것과 같은 모양이어야
+        // 한다(계약 §1: 두 소스가 같은 자리에 같은 모양을 그린다).
+        try std.testing.expectEqualStrings("첫 줄 둘째 줄", term.agent_transcript.owned.prompt());
+        try std.testing.expectEqualStrings("정리했습니다 그는 \"네\"라고 했다", term.agent_transcript.owned.reply());
+        try std.testing.expect(std.mem.indexOfScalar(u8, term.agent_transcript.owned.reply(), '\n') == null);
+        // 알림 본문은 **반대다** — OS 배너는 여러 줄을 제대로 보여주므로 개행을 살리고, 대신 `\n` 두 글자가
+        // 나가면 안 된다(인앱 히스토리는 자기 tail 에서 눕힌다).
+        const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
+        try std.testing.expect(std.mem.indexOfScalar(u8, notice.body, '\n') != null);
+        try std.testing.expect(std.mem.indexOf(u8, notice.body, "\\n") == null);
+    }
+
+    // ⑮b-2 **긴 한글 응답이 글자 중간에서 잘리지 않는다.** 훅 payload 는 고정 버퍼로 디코드되는데, 받는
+    //    쪽의 `clampUtf8` 은 «상한을 **넘을** 때만» 자르므로 **버퍼를 꽉 채우고 나온** 슬라이스(길이가 정확히
+    //    상한)를 손대지 않는다. 512 바이트면 한글 170자 + 2바이트라 조금 긴 답변 하나면 배너 끝에 U+FFFD 가
+    //    붙는다 — 경계를 푸는 쪽(`hookDisplayText`)에서 물려야 한다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        const long_korean = "가" ** 300; // 900 바이트 — 알림 상한(512)과 대화 상한(512)을 둘 다 넘긴다
+        try tmp.dir.writeFile(io, .{
+            .sub_path = log_rel,
+            .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"" ++ long_korean ++ "\"}\n" ++
+                "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"" ++ long_korean ++ "\"}\n",
+        });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
+        try std.testing.expect(notice.body.len > 0);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(notice.body)); // 배너
+        try std.testing.expect(std.unicode.utf8ValidateSlice(term.agent_transcript.owned.reply())); // 사이드바
+        try std.testing.expect(std.unicode.utf8ValidateSlice(term.agent_transcript.owned.prompt()));
+    }
+
+    // ⑮c **턴을 거듭해도 대화 줄이 안 빈다.** 훅 모드는 Term 이 든 `Owned` 버퍼에 **직접** 쓰는데, 그
+    //    버퍼가 앞으로만 미는 bump 였을 때 몇 턴 만에 자리가 말라 새 값이 잘리고 그 뒤로는 길이 0 으로
+    //    들어갔다(실측: 5턴째 잘림, 6턴째부터 통째로 빔). 사용자에게는 «사이드바 대화 줄과 알림 본문이
+    //    갑자기 사라진다» 로 보였고 `agent_kind` 가 바뀌기 전에는 회복되지 않았다. 관측 모드는 폴링마다
+    //    새 버퍼로 다시 담아 이 증상이 없었으므로, **훅 모드에서만** 나던 회귀다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_transcript.reset();
+
+        var log: std.ArrayListUnmanaged(u8) = .empty;
+        defer log.deinit(a);
+        const reply_len = 300; // 실사용 응답 길이대 — 짧은 문장으로 채우면 고갈이 한참 뒤로 밀린다
+        var turn: usize = 0;
+        while (turn < 8) : (turn += 1) {
+            try log.appendSlice(a, "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"배포 스크립트를 고치고 테스트까지 돌려줘 — 사용자가 실제로 치는 만큼 긴 문장\"}\n");
+            try log.appendSlice(a, "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"");
+            try log.appendNTimes(a, 'x', reply_len);
+            try log.appendSlice(a, "\"}\n");
+            try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = log.items });
+            agent_ops.pollAgentHookEvents(&session, term, false);
+        }
+        try std.testing.expectEqual(@as(usize, reply_len), term.agent_transcript.owned.reply().len);
+        try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.prompt(), "배포 스크립트") != null);
+    }
+
+    // ⑮d **백그라운드 셸 작업이 도는 중에도 완료 알림이 나간다**(2026-08-23 결정). 예전에는 `Stop` 의
+    //    `background_tasks` 에 `running` 이 하나라도 있으면 상태를 붙잡았는데, 그 셈이 `type` 을 안 가려
+    //    **셸 작업까지** 붙잡았다. 셸에는 `SubagentStop` 같은 푸는 이벤트가 없어, `run_in_background` 를
+    //    한 번 쓰면 그 pane 의 완료 알림이 그 작업이 끝날 때까지 **한 건도** 안 나갔다(사용자 보고 →
+    //    실측 확인). payload 는 실측 그대로다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{
+            .sub_path = log_rel,
+            .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"sleep 을 백그라운드로 띄워줘\"}\n" ++
+                "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"띄웠음\",\"stop_hook_active\":false," ++
+                "\"background_tasks\":[{\"id\":\"bmyb73pp8\",\"type\":\"shell\",\"status\":\"running\"," ++
+                "\"description\":\"Sleep 200 seconds in background\",\"command\":\"sleep 200\"}],\"session_crons\":[]}\n",
+        });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+        const bg = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
+        try std.testing.expect(std.mem.indexOf(u8, bg.title, maru.i18n.t(.agent_hook_notice_done)) != null);
+        try std.testing.expect(std.mem.indexOf(u8, bg.body, "띄웠음") != null);
+    }
+
+    // ⑮e **그래도 서브에이전트는 여전히 붙잡는다.** 위 결정은 «목록을 붙잡는 근거로 쓰지 않는다» 이지
+    //    «자식을 안 기다린다» 가 아니다 — 자식은 우리 로스터가 붙잡고 `SubagentStop` 이 푼다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        try tmp.dir.writeFile(io, .{
+            .sub_path = log_rel,
+            .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"자식을 하나 띄워줘\"}\n" ++
+                "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a533c21143f8edccb\"}\n" ++
+                "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"자식을 띄웠습니다\"," ++
+                "\"background_tasks\":[{\"id\":\"a533c21143f8edccb\",\"type\":\"subagent\",\"status\":\"running\"}]}\n",
+        });
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state); // 아직 턴 끝이 아니다
+        try std.testing.expect(notification_ops.pendingNotification(&session) == null);
     }
 
     // ⑯ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.

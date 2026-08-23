@@ -763,6 +763,70 @@ test "alt screen 에서는 뷰포트 대신 화살표가 나간다" {
     bridge.maru_mobile_clear_error();
 }
 
+// **휠을 직접 받겠다고 켠 앱에는 휠이 가야 한다.** Claude Code 같은 TUI 가 그 축이고, 그런 앱은
+// 대개 `?1007l` 로 화살표 변환을 끈다 — 그러면 위 alt-scroll 분기가 거짓이 되고 스크롤백을 보러
+// 가는데 **alt screen 에는 스크롤백이 없어** 손가락이 아무것도 못 움직였다(기기 실측).
+test "재현: 마우스를 켠 앱에는 화살표가 아니라 휠이 간다" {
+    endAnyGesture();
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_scroll_to_bottom();
+    bridge.maru_mobile_clear_error();
+
+    // Claude Code 가 켜는 것과 같은 모양: alt screen · SGR · 마우스 리포팅 · 화살표 변환 끄기.
+    // **원격이 보낸 바이트다** — `term_write` 로 넣는다(`input` 은 사용자가 친 것을 원격으로
+    // 보내는 반대 방향이라, 그 경로로 모드를 켜면 무엇을 재는지가 흐려진다).
+    _ = bridge.maru_mobile_term_write("\x1b[?1049h\x1b[?1006h\x1b[?1000h\x1b[?1007l", 32);
+    var drop: [256]u8 = undefined;
+    _ = bridge.maru_mobile_take_response(&drop, drop.len); // 앞선 것을 비운다
+    bridge.maru_mobile_clear_error();
+
+    // **전제를 못 박는다**: alt(1) · alternate_scroll 꺼짐(2 없음) · mouse_tracking 켜짐(4).
+    // 이 셋이 Claude Code 가 만드는 상황이고, 하나라도 달라지면 이 테스트가 재는 것이 달라진다.
+    try std.testing.expectEqual(@as(u32, 1 | 4), bridge.scrollModeBits());
+
+    // **손가락 자리를 세운다** — 휠에는 좌표가 실리고, 그 좌표로 앱이 어디를 굴릴지 고른다.
+    const p = pointForCell(3, 5) orelse return error.TestUnexpectedResult;
+    _ = bridge.maru_mobile_pointer(0, 0, p.x, p.y, now());
+    _ = bridge.maru_mobile_pointer(1, 0, p.x, p.y + 1, now());
+
+    // **누적 픽셀을 0 으로 놓고 시작한다.** 스크롤은 줄 높이에 못 미치는 픽셀을 다음 호출로
+    // 넘기는데(`scroll_px_carry`), 그 잔여가 앞 테스트에서 넘어오면 여기서 220px 이 한 줄도
+    // 못 만든다 — 실제로 그래서 이 테스트가 처음에 빨갰다.
+    bridge.maru_mobile_scroll_to_bottom();
+    // **원격 목적지로 놓고 잰다.** 모바일은 원격 전용이고(계약 §1), 그때만 바이트가 큐에 쌓여
+    // 밖에서 내용을 볼 수 있다 — 로컬이면 코어가 바로 삼켜 무엇이 나갔는지 못 잰다.
+    bridge.maru_mobile_set_input_sink(1);
+    defer bridge.maru_mobile_set_input_sink(0);
+    var flush: [512]u8 = undefined;
+    _ = bridge.maru_mobile_take_input(&flush, flush.len); // 앞선 것을 비운다
+    bridge.maru_mobile_scroll(220); // 10줄
+
+    // **입력 경로로 나간다 — 화살표와 같은 길이다.** 응답 큐에 두면 원격이 말할 때까지 안 나가고,
+    // 그 사이 한 글자만 쳐도 `drainUnconsumed` 가 버린다(이 테스트를 쓰다 실제로 밟았다).
+    var out: [512]u8 = undefined;
+    const n = bridge.maru_mobile_take_input(&out, out.len);
+    try std.testing.expect(n > 0);
+    const got = out[0..n];
+
+    // 응답 큐에는 아무것도 안 남는다 — 옮겨 갔다.
+    var leftover: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_take_response(&leftover, leftover.len));
+    // SGR 휠-업: `CSI < 64 ; col ; row M`. 버튼 번호가 규약(input_report.zig)과 같은지 본다.
+    try std.testing.expect(std.mem.indexOf(u8, got, "\x1b[<64;") != null);
+    // 좌표가 손가락이 있던 셀이다 — 1-based 로 인코딩된다.
+    var head: [32]u8 = undefined;
+    const want = std.fmt.bufPrint(&head, "\x1b[<64;{d};{d}M", .{ 5 + 1, 3 + 1 }) catch unreachable;
+    try std.testing.expect(std.mem.indexOf(u8, got, want) != null);
+
+    // **버려지지 않았다** — `drainUnconsumed` 를 부르면 `response_dropped` 가 남고 휠이 사라진다.
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    _ = bridge.maru_mobile_term_write("\x1b[?1000l\x1b[?1049l", 16);
+    _ = bridge.maru_mobile_take_response(&drop, drop.len);
+    endAnyGesture();
+    bridge.maru_mobile_clear_error();
+}
+
 // 키 `index` 의 한가운데. **자리를 손으로 적지 않는다** — 브리지가 그린 자리를 그대로 묻는다
 // (적어 두면 레이아웃이 바뀔 때 테스트만 맞고 제품이 틀리게 된다).
 /// 키바를 **끝까지 민다.** 키가 손가락 크기(44)라 폰 폭을 넘치므로 오른쪽 키(`copy` 등)는

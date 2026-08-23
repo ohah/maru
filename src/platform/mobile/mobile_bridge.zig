@@ -1547,6 +1547,54 @@ pub fn maru_mobile_scroll(dy_px: f32) void {
     scroll_px_carry -= lines_f * @as(f32, @floatFromInt(body_line_h));
     const lines: i32 = @intFromFloat(lines_f);
 
+    // **휠을 직접 받겠다고 켠 앱에는 휠을 준다**(DECSET 1000/1002/1003 + 1006). Claude Code 처럼
+    // 자기 화면을 스스로 굴리는 TUI 가 이 축이고, 그런 앱은 대개 `?1007l` 로 화살표 변환을 끈다
+    // — 아래 alt-scroll 분기가 거짓이 되고, 그러면 스크롤백을 보러 가는데 **alt screen 에는
+    // 스크롤백이 없어** 손가락이 아무것도 못 움직였다(기기 실측).
+    //
+    // **좌표를 함께 보낸다.** 어디를 굴릴지는 앱이 정한다 — 대화 영역이냐 입력 줄이냐를 그
+    // 좌표로 가르므로, 가운데 열로 때려 맞히면 그 판단이 조용히 틀린다. 데스크톱 마우스가
+    // 하는 것과 같은 일이라 규칙도 그쪽과 같다.
+    //
+    // **이 판정이 alt-scroll 보다 먼저다.** xterm 에서 alternate scroll 은 마우스 리포팅이
+    // **없을 때** 쓰는 대체 장치다 — 순서가 반대면 휠을 받겠다고 켠 앱에 화살표가 가서,
+    // 그 앱은 그것을 커서 이동이나 히스토리로 읽는다.
+    if (core.mouse_tracking != .none) {
+        // 변환하는 순간 그 화면은 프로그램이 다시 그린다 — 남은 선택은 좌표가 어긋난 유령이다.
+        core.selectionClear();
+        // 64=wheel-up · 65=wheel-down(`input_report.zig` 의 규약). 휠은 press 만 있고 release 가
+        // 없으며 motion 도 아니다.
+        const button: u8 = if (lines > 0) 64 else 65;
+        const hit = maru_mobile_hit_cell(ptr_last_x, ptr_last_y);
+        // 화면 밖이면 굴릴 자리가 없다 — 좌표를 지어내지 않는다.
+        if (hit == 0xFFFFFFFF) return;
+        const col: u16 = @intCast(hit >> 16);
+        const row: u16 = @intCast(hit & 0xFFFF);
+        var n: u32 = @abs(lines);
+        while (n > 0) : (n -= 1) {
+            core.reportMouse(button, col, row, 0, 0, true, false, 0);
+        }
+        // **코어가 만든 바이트를 입력 경로로 옮긴다 — 응답 큐에 두지 않는다.**
+        //
+        // 포맷을 정하는 것은 코어다(SGR·urxvt·x10 은 앱이 켠 모드에 달렸다). 그래서 만들기는
+        // `reportMouse` 에 맡기되, **보내는 길은 화살표와 같아야 한다.** 응답 큐에 두면 두 가지가
+        // 어긋난다: ① host 는 그것을 **원격이 뭔가 보냈을 때만** 가져간다(`ssh_pump.c` 의
+        // `drain_screen`) — 조용한 화면에서 굴리면 휠이 큐에 앉아 있는다. ② 그 사이 사용자가
+        // 한 글자라도 치면 `maru_mobile_input` 이 `drainUnconsumed` 로 **통째로 버린다**
+        // (`response_dropped` 만 남는다 — 테스트를 쓰다 실제로 밟았다).
+        const resp = core.pendingResponse();
+        if (resp.len > 0) {
+            var wheel: [512]u8 = undefined;
+            const take = @min(resp.len, wheel.len);
+            @memcpy(wheel[0..take], resp[0..take]);
+            core.clearResponse();
+            sendInput(core, wheel[0..take]);
+            // 이 바이트도 코어에 닿은 것이다 — 화살표 경로가 같은 이유로 세는 자리다.
+            delivered_len += take;
+        }
+        return;
+    }
+
     // **alt screen 은 뷰포트가 아니라 프로그램의 것이다**(DECSET 1007). less·vim 이 자기
     // 스크롤을 갖고 있으므로 화살표를 보낸다. 데스크톱이 정한 것과 같은 규칙이다.
     if (core.alt_active and core.alternate_scroll) {
@@ -1611,6 +1659,10 @@ pub export fn maru_mobile_long_press_ms() u32 {
 var body_press: gesture.Press = .{};
 /// 스크롤 델타·속도의 기준. **제스처 상태가 아니다.**
 var ptr_last_y: f32 = 0;
+/// 손가락이 있던 **가로** 자리. 스크롤 자체는 세로만 쓰지만, 마우스 리포팅을 켠 앱에는 휠을
+/// **좌표와 함께** 보내야 한다(`reportMouse` 의 col) — 그 앱이 "대화 영역이냐 입력 줄이냐" 를
+/// 그 좌표로 가른다. 세로만 들고 가운데 열로 때려 맞히면 그 판단이 조용히 틀린다.
+var ptr_last_x: f32 = 0;
 var ptr_last_ms: u64 = 0;
 /// 손을 뗀 뒤 남은 세로 관성(px/ms). **코어가 든다** — 전에는 host 가 들었는데, 목적지를
 /// host 가 더는 모르게 되자(R2) 키바로 간 제스처의 세로 속도까지 본문에 흘렸다(회귀였다).
@@ -1698,6 +1750,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             // (그 처리는 바로 아래 `body_fling = 0` 이다).
             body_press.begin(x, y, time_ms, false);
             ptr_last_y = y;
+            ptr_last_x = x;
             ptr_last_ms = time_ms;
             // **누르면 관성이 선다** — 흐르는 화면을 짚어 세우는 것은 모든 스크롤 면의 약속이다.
             body_fling = 0;
@@ -1738,6 +1791,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
                     }
                 }
                 ptr_last_y = y;
+                ptr_last_x = x;
                 return;
             }
             // **길게 누름은 여기서 안 본다** — 프레임마다 도는 `checkLongPress` 가 판정한다.
@@ -1751,6 +1805,7 @@ fn bodyPointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) void {
             const v = (y - ptr_last_y) / dt_ms;
             body_fling = @max(-scroll_area.Touch.max_velocity, @min(scroll_area.Touch.max_velocity, v));
             ptr_last_y = y;
+            ptr_last_x = x;
             ptr_last_ms = time_ms;
         },
         else => { // up · cancel
@@ -5567,6 +5622,17 @@ var armed_mods: u32 = 0;
 /// 그쪽은 "무엇이 실릴 것인가" 이고 이것은 "무엇이 눌린 것처럼 보이는가" 다. 둘이 어긋났던 것이
 /// 이 파일이 고친 결함이라, 어긋남을 밖에서 잴 수 있게 남긴다.
 var keybar_armed_drawn: u32 = 0;
+
+/// 스크롤이 무엇을 보고 갈래를 고르는지(테스트·진단용): bit0=alt_active · bit1=alternate_scroll ·
+/// bit2=mouse_tracking != none.
+pub fn scrollModeBits() u32 {
+    const core = &(term_core orelse return 0xFFFF);
+    var b: u32 = 0;
+    if (core.alt_active) b |= 1;
+    if (core.alternate_scroll) b |= 2;
+    if (core.mouse_tracking != .none) b |= 4;
+    return b;
+}
 
 /// 지금 화면에서 눌린 것처럼 보이는 수정자(테스트·진단용).
 pub fn keybarArmedDrawn() u32 {

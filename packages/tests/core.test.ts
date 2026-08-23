@@ -354,3 +354,11 @@ test("기본 팔레트가 src/color.zig 의 ansi16 과 같다", async () => {
   expect(p[231]).toBe("#ffffff");
   expect(p[232]).toBe("#080808");
 });
+
+test("setOptions 로 격자를 바꾸면 실제로 리사이즈된다", async () => {
+  // 경고만 하고 버리면 안 된다 — 할 수 있는 것은 적용해야 한다.
+  const term = await makeTerminal({ cols: 40, rows: 10 });
+  term.setOptions({ cols: 60, rows: 20 });
+  expect(term.size).toEqual({ cols: 60, rows: 20 });
+  term.dispose();
+});

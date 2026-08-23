@@ -25,6 +25,17 @@ export interface Theme {
   palette?: (number | undefined)[];
 }
 
+/**
+ * 한 프레임의 요약. `onRender` 가 이걸 준다 — **셀은 들어 있지 않다**(워커 모드에서 매 프레임
+ * 셀을 왕복시키지 않기 위해서다). 셀이 필요하면 `snapshot()` 을 쓴다.
+ */
+export interface FrameMeta {
+  size: Size;
+  cursor: CursorState;
+  selection: { startRow: number; startCol: number; endRow: number; endCol: number } | null;
+  scroll: { offset: number; length: number };
+}
+
 export interface TerminalOptions {
   cols?: number;
   rows?: number;

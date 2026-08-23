@@ -42,7 +42,13 @@ export class MaruTerminalElement extends LitElement {
     return this.#mounted?.terminal ?? null;
   }
 
-  override firstUpdated(): void {
+  /**
+   * **`firstUpdated` 가 아니라 여기서 만든다.** 그건 한 번만 불리므로, DOM 에서 떼었다 다시
+   * 붙이면(`disconnectedCallback` 이 destroy 했다) 영영 안 살아난다 — 리스트 재정렬이나
+   * 라우터의 노드 이동에서 빈 터미널이 남는다.
+   */
+  #mount(): void {
+    if (this.#mounted) return;
     const host = this.renderRoot.querySelector<HTMLElement>(".host");
     if (!host) return;
     this.#mounted = mountTerminal(host, {
@@ -55,6 +61,16 @@ export class MaruTerminalElement extends LitElement {
       onResize: (size) => this.dispatchEvent(new CustomEvent("resize", { detail: size })),
       onReady: (term) => this.dispatchEvent(new CustomEvent("ready", { detail: term })),
     });
+  }
+
+  override firstUpdated(): void {
+    this.#mount();
+  }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    // 다시 붙었으면 되살린다. 최초 연결에서는 renderRoot 가 아직 없어 `firstUpdated` 가 맡는다.
+    if (this.hasUpdated) this.#mount();
   }
 
   override updated(changed: PropertyValues): void {

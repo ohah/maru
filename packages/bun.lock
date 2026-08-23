@@ -1,9 +1,9 @@
 {
-  "lockfileVersion": 1,
+  "lockfileVersion": 2,
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@maru-term/workspace",
+      "name": "@maru/workspace",
       "devDependencies": {
         "@types/bun": "1.4.0",
         "@types/react": "^19.2.18",

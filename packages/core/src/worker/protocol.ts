@@ -1,3 +1,4 @@
+import type { FrameMeta } from "../types";
 import type { BackendEvent } from "../backend/types";
 import type { CursorShape, KeyInput, Size, Theme } from "../types";
 import type { MouseReport } from "../backend/types";
@@ -44,6 +45,12 @@ export type ToWorker =
 export type FromWorker =
   | { t: "ready" }
   | { t: "event"; event: Exclude<BackendEvent, { type: "render" }> }
+  /**
+   * 한 프레임을 그렸다. **셀 버퍼는 싣지 않는다** — 매 프레임 왕복하면 워커로 옮긴 이유가
+   * 사라진다(120×40 만 해도 96 KB). 앱이 "화면이 갱신됐다"를 알기에 충분한 것만 보내고,
+   * 셀이 필요하면 `snapshot()` 으로 그때 가져간다.
+   */
+  | { t: "rendered"; meta: FrameMeta }
   | { t: "reply"; id: number; value: unknown }
   | { t: "error"; id?: number; message: string };
 

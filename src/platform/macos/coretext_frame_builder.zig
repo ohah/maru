@@ -14,7 +14,8 @@ const cell_text = maru.cell_text; // 셀 투영·말줄임 방출의 공유 집(
 const appendEllipsizedTitle = cell_text.appendEllipsizedTitle;
 const wideIconPredicate = cell_text.wideIconPredicate;
 /// 도크 목록의 좌측 들여쓰기. 파일 트리 투영과 **같은 값**을 써야 해서 공유 모듈이 소유한다.
-pub const file_tree_inset_cols = cell_text.file_tree_inset_cols;
+/// 바깥 소비자가 없어 `pub` 이 아니다 — 재수출은 그 자체로 두 번째 출처처럼 읽힌다.
+const file_tree_inset_cols = cell_text.file_tree_inset_cols;
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
 const file_tree_icon = maru.chrome.file_tree_icon;
 const dock_view_bar = maru.chrome.components.dock_view_bar;

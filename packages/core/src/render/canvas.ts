@@ -259,27 +259,52 @@ export class CanvasRenderer implements Renderer {
     // ── 커서 / IME 조합 ──
     const cur = frame.cursor;
     if (opts.preedit) {
-      // 조합 텍스트는 코어에 이미 삽입돼 있다. 여기서는 **하이라이트와 밑줄만** 얹고
-      // 커서는 그리지 않는다 — 조합 구간이 이미 위치를 보여준다.
+      // **조합 텍스트는 화면 버퍼에 넣지 않고 여기서만 그린다.**
+      //
+      // 코어에 삽입하면 화면을 소유한 앱과 어긋난다 — zsh 는 프롬프트와 입력줄을 자기가
+      // 관리하는데, 우리가 ICH/DCH 로 끼어들면 그 다음 앱이 그릴 때 엉뚱한 자리를 밟는다
+      // (실측: `echo ` 뒤에 조합을 시작하자 "ec" 가 지워졌다). xterm.js 가 오버레이를 쓰는
+      // 이유도 같다.
+      //
+      // 대신 **커서 뒤 셀을 조합 폭만큼 밀어 그려** 밀리는 것처럼 보이게 한다. 화면 버퍼는
+      // 그대로이므로 앱과 어긋나지 않는다.
       ctx.font = m.fontSpec;
-      const width = [...opts.preedit].reduce((n, chr) => n + widthOf(chr), 0);
-      const start = Math.max(0, cur.col - width);
-      for (let c = start; c < cur.col; c++) {
+      const pre = [...opts.preedit];
+      const width = pre.reduce((n, chr) => n + widthOf(chr), 0);
+      const rowY = cur.row * ch;
+
+      // 1) 커서부터 줄 끝까지를 배경으로 지우고, 밀어서 다시 그린다.
+      ctx.fillStyle = bg;
+      ctx.fillRect(X(cur.col), rowY, X(cols) - X(cur.col), ch);
+      for (let c = cur.col; c < cols; c++) {
         const i = cur.row * cols + c;
         if (i >= frame.cellCount) break;
         const cell = cellAt(i);
         if (cell.flags & CellFlag.continuation) continue;
         const w = cell.flags & CellFlag.widthMask || 1;
-        const x = X(c);
-        const px = X(c + w) - x;
-        ctx.fillStyle = withAlpha(cursorColor, 0.3);
-        ctx.fillRect(x, cur.row * ch, px, ch);
+        const to = c + width;
+        if (to >= cols) break;
+        const x = X(to);
+        const color = resolveColor(cell.fg, this.#palette, fg) ?? fg;
         if (cell.cp !== 32 && cell.cp !== 0) {
-          ctx.fillStyle = fg;
-          drawGlyph(ctx, String.fromCodePoint(cell.cp), x, cur.row * ch + m.ascent, cw * w);
+          ctx.fillStyle = color;
+          drawGlyph(ctx, String.fromCodePoint(cell.cp), x, rowY + m.ascent, cw * w);
         }
+      }
+
+      // 2) 조합 텍스트를 커서 자리에 그린다 — 반투명 하이라이트 + 밑줄.
+      let col = cur.col;
+      for (const chr of pre) {
+        const w = widthOf(chr);
+        const x = X(col);
+        const px = X(col + w) - x;
+        ctx.fillStyle = withAlpha(cursorColor, 0.3);
+        ctx.fillRect(x, rowY, px, ch);
+        ctx.fillStyle = fg;
+        drawGlyph(ctx, chr, x, rowY + m.ascent, cw * w);
         ctx.fillStyle = cursorColor;
-        ctx.fillRect(x, cur.row * ch + ch - 2, px, 2);
+        ctx.fillRect(x, rowY + ch - 2, px, 2);
+        col += w;
       }
     } else if (cur.visible && (!cur.blink || (opts.blinkOn ?? true))) {
       // **코어의 blink 상태가 우선이다.** DECSCUSR 로 steady 를 고른 앱(vim 등)의 커서가

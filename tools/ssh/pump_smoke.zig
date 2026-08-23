@@ -569,8 +569,18 @@ test "아무 말도 안 하는 상대: 붙들려도 멈추라면 멈춘다" {
     const before = monotonicMs();
     pump.maru_ssh_pump_stop();
     const elapsed = monotonicMs() - before;
-    // 읽기 타임아웃(2초)마다 정지 표시를 보므로 그 안에는 돌아와야 한다.
-    try std.testing.expect(elapsed < 4000);
+    // **타임아웃을 기다리지 않는다 — 깨워서 알린다.**
+    //
+    // 예전에는 정지 표시만 세우고 펌프가 `poll` 타임아웃(2초)에 걸려 있어, 이 단언의 상한이
+    // 4000ms 였다. 그 느슨함이 **결함을 덮고 있었다**: 같은 구조 때문에 사용자가 친 글자도
+    // 서버가 먼저 말하거나 2초가 지날 때까지 소켓으로 안 나갔다(기기 실측 — 조용한 프롬프트에서
+    // 한 글자가 최대 2초 묶였다). 깨우기 관을 넣은 지금은 밀리초 단위로 돌아와야 하고, 이 상한이
+    // 그것을 지킨다 — `stop` 에서 `pump_wake()` 를 지우면 여기가 곧바로 빨개진다.
+    //
+    // **쓰기 경로는 여기서 직접 못 잰다** — 핸드셰이크가 선 세션이 있어야 `write` 가 받아 주는데
+    // 이 상대는 조용해서 거기까지 못 간다. 같은 `pump_wake()` 를 쓰므로 메커니즘은 이 단언이
+    // 증명하고, 실제 타이핑 체감은 기기 회차가 판정한다.
+    try std.testing.expect(elapsed < 500);
     try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_is_running());
 }
 

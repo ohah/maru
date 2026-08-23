@@ -80,6 +80,18 @@ static volatile unsigned int g_state = MARU_SSH_STATE_INVALID;
 /// UI·렌더 스레드가 `open_control` 같은 자리에서 **자물쇠 밖으로** 읽는다. 한때 이것만 빠져 있었다.
 static volatile unsigned int g_handle;
 static int g_fd = -1;
+/// **쓸 것이 생겼다고 읽기 대기를 깨우는 관.**
+///
+/// 친 글자를 소켓에 내보내는 것은 루프 머리의 `flush_out` 이고, 거기 닿으려면 아래 `poll` 이
+/// 리턴해야 한다. 깨울 방법이 없던 시절에는 그 조건이 **서버가 먼저 뭔가 보내거나 2초가 지나는
+/// 것** 뿐이었다 — 셸이 조용한 프롬프트에서 한 글자를 치면 **최대 2초 뒤에야** 나갔다(기기 실측:
+/// 연타하면 에코가 대신 깨워 줘서 빨라지고, 잠깐 멈췄다 치면 다시 굳는다).
+///
+/// 타임아웃을 줄이는 것으로는 못 고친다 — 그 값은 **정지 표시를 보는 주기**라 짧게 하면 초당
+/// 수십 번 깨어나고, 모바일이 30Hz 를 고른 이유(배터리·발열)와 정면으로 부딪힌다. 쓸 것이 생긴
+/// 순간에만 깨우면 조용할 때는 여전히 안 깨어난다.
+static volatile int g_wake_r = -1;
+static volatile int g_wake_w = -1;
 /// **터미널 축의 실패 이름.** 화면의 연결 배너가 이것으로 말한다(`maru_mobile_set_ssh_status`).
 static char g_error[64];
 /// **컨트롤 축의 실패 이름 — 슬롯이 따로인 것이 계약이다.** 컨트롤 채널의 사고는 터미널로
@@ -123,6 +135,28 @@ static void set_error(const char *name) {
 /// 지우고 그 회차의 결과만 남긴다.
 static void set_control_error(const char *name) {
     snprintf(g_control_error, sizeof g_control_error, "%s", name);
+}
+
+/// 읽기 대기를 깨운다. **다른 스레드에서 부른다**(UI·IME·회전).
+///
+/// 관이 가득 차 있어도 그냥 둔다 — 그것은 "이미 깨울 신호가 밀려 있다" 는 뜻이라 한 번 더 쓸
+/// 이유가 없다. 그래서 실패를 오류로 세지 않는다(§5 의 "조용한 실패" 와 다르다: 여기서는
+/// **아무것도 잃지 않는다**).
+static void pump_wake(void) {
+    int fd = g_wake_w;
+    if (fd < 0) return;
+    const unsigned char one = 1;
+    ssize_t w = write(fd, &one, 1);
+    (void)w;
+}
+
+/// 관에 쌓인 신호를 비운다. 몇 개가 왔든 할 일은 하나다 — 루프를 한 바퀴 도는 것.
+static void pump_wake_drain(void) {
+    int fd = g_wake_r;
+    if (fd < 0) return;
+    unsigned char buf[64];
+    while (read(fd, buf, sizeof buf) > 0) {
+    }
 }
 
 static void set_state(unsigned int state) {
@@ -600,6 +634,29 @@ static void *pump_main(void *unused) {
             set_error("packet_too_large");
             break;
         }
+        // **소켓과 깨우기 관을 함께 기다린다.** 예전에는 `read` 하나로 기다려서, 보낼 글자가
+        // 쌓여 있어도 **서버가 먼저 말하거나 2초가 지날 때까지** 못 나갔다 — 루프 머리의
+        // `flush_out` 에 닿질 못했기 때문이다. 두 fd 를 함께 보면 친 순간 깨어나 그 자리에서 보낸다.
+        struct pollfd pfds[2];
+        pfds[0].fd = g_fd;
+        pfds[0].events = POLLIN;
+        pfds[0].revents = 0;
+        pfds[1].fd = g_wake_r;
+        pfds[1].events = POLLIN;
+        pfds[1].revents = 0;
+        // 관이 없으면(만들기에 실패했다) 소켓만 본다 — 예전 동작으로 떨어질 뿐 세션은 산다.
+        int pr = poll(pfds, g_wake_r >= 0 ? 2 : 1, PUMP_READ_TIMEOUT_S * 1000);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            set_error("read_failed");
+            break;
+        }
+        // 타임아웃은 실패가 아니다 — 머리로 돌아가 정지 표시를 보고, 쌓인 것이 있으면 민다.
+        if (pr == 0) continue;
+        if (g_wake_r >= 0 && (pfds[1].revents & POLLIN)) pump_wake_drain();
+        // **깨우기만 왔으면 읽지 않는다.** 소켓은 조용한데 `read` 를 부르면 타임아웃만큼 다시
+        // 붙들려, 정작 보내려던 글자가 그만큼 또 늦는다.
+        if (!(pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
         long n = read(g_fd, g_in + g_in_len, sizeof g_in - g_in_len);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -642,6 +699,16 @@ done:
         close(g_fd);
         g_fd = -1;
     }
+    // **관을 닫는 것은 `g_running` 을 내리기 전이다.** 쓰는 쪽은 그 표시를 보고 들어오므로,
+    // 순서가 반대면 이미 닫은 fd 에 쓰는 창이 생긴다(그래도 EBADF 로 조용히 지나가지만,
+    // 순서를 지키면 그 창 자체가 없다).
+    {
+        int r = g_wake_r, w = g_wake_w;
+        g_wake_r = -1;
+        g_wake_w = -1;
+        if (r >= 0) close(r);
+        if (w >= 0) close(w);
+    }
     // **비밀은 안 남긴다.**
     memset(g_secret, 0, sizeof g_secret);
     g_running = 0;
@@ -680,6 +747,24 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
     g_control_error[0] = 0;
     g_last_rekeys = 0;
     g_handle = 0;
+    // **깨우기 관을 스레드보다 먼저 연다.** 뒤에 열면 그 사이에 친 글자가 깨울 곳을 못 찾는다.
+    // **양쪽 다 non-blocking 이다**: 쓰는 쪽은 관이 차도 안 막혀야 하고(UI 스레드다), 읽는 쪽은
+    // 비울 때 마지막 `read` 가 안 막혀야 한다. `pipe2` 는 리눅스 전용이라 `fcntl` 로 세운다 —
+    // 이 파일은 iOS·Android·데스크톱 스모크가 함께 쓴다.
+    if (g_wake_r >= 0) close(g_wake_r);
+    if (g_wake_w >= 0) close(g_wake_w);
+    g_wake_r = -1;
+    g_wake_w = -1;
+    {
+        int wp[2];
+        if (pipe(wp) == 0) {
+            fcntl(wp[0], F_SETFL, fcntl(wp[0], F_GETFL, 0) | O_NONBLOCK);
+            fcntl(wp[1], F_SETFL, fcntl(wp[1], F_GETFL, 0) | O_NONBLOCK);
+            g_wake_r = wp[0];
+            g_wake_w = wp[1];
+        }
+        // 실패해도 세션은 연다 — 그때는 예전처럼 타임아웃으로만 돈다(느릴 뿐 안 죽는다).
+    }
     g_stop = 0;
     g_state = MARU_SSH_STATE_INVALID;
     g_running = 1;
@@ -707,6 +792,9 @@ int maru_ssh_pump_start(const MaruSshPumpConfig *cfg, const MaruSshPumpHooks *ho
 void maru_ssh_pump_stop(void) {
     if (!g_joinable) return;
     g_stop = 1;
+    // **정지도 깨워서 알린다.** 표시만 세우면 펌프는 `poll` 타임아웃까지 그대로 있어, 앱을 끄거나
+    // 세션을 내릴 때 그만큼 붙들린다(그 값이 곧 종료 지연이 된다).
+    pump_wake();
     // **자기 자신은 안 거둔다.** 끝을 알리는 훅(`state_changed`) 안에서 host 가 `stop` 을 부르는
     // 것은 자연스러운 흐름인데(서비스를 내린다), 거기서 자기 스레드를 `join` 하면 그 자리에서
     // 교착한다 — 앱이 멈춘 채로 남는다.
@@ -744,6 +832,9 @@ unsigned long maru_ssh_pump_write(const unsigned char *bytes, unsigned long len)
         if (sent == 0) break; // 창이 닫혔다 — 나머지는 호출자가 다시 준다
         off += sent;
     }
+    // **여기서 깨운다.** 코어 버퍼에 넣는 것과 소켓으로 나가는 것은 다른 일이고, 내보내는 쪽은
+    // 펌프 스레드다 — 안 깨우면 그 스레드가 `poll` 에 붙들린 동안 글자가 버퍼에 앉아 있는다.
+    if (off > 0) pump_wake();
     return off;
 }
 
@@ -794,6 +885,8 @@ unsigned long maru_ssh_pump_write_control(const unsigned char *bytes, unsigned l
         if (sent == 0) break; // 창이 닫혔다 — 나머지는 호출자가 다시 준다
         off += sent;
     }
+    // 컨트롤 요청도 같은 이유로 깨운다 — 목록을 부르고 답을 기다리는 축이라 지연이 그대로 보인다.
+    if (off > 0) pump_wake();
     return off;
 }
 
@@ -833,4 +926,6 @@ void maru_ssh_pump_resize(unsigned int cols, unsigned int rows) {
     pthread_mutex_lock(&g_session_lock);
     maru_mobile_ssh_resize(g_handle, cols, rows);
     pthread_mutex_unlock(&g_session_lock);
+    // 회전·키보드 오르내림이 만드는 크기 변경도 **즉시** 나가야 원격 격자가 화면과 안 어긋난다.
+    pump_wake();
 }

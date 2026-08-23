@@ -30,6 +30,12 @@ pub const Snapshot = struct {
     /// 그 턴을 돌린 에이전트 종류(claude/codex/…). 값 집합은 host가 소유하므로 **정수로 받는다** —
     /// 이 모듈은 순수 층이라 그 enum을 import하지 않는다(같은 규율: `AgentState`도 값만 받는다).
     agent_kind: u8 = 0,
+    /// 그 턴이 바꾼 파일 수. **`head` 스냅샷에 싣는다** — 턴은 두 스냅샷의 쌍이고 그 오른쪽이 턴의
+    /// 신원이기 때문이다(선택·펼침 키도 그 쌍으로 만든다).
+    changed_files: u32 = 0,
+    /// 위 값을 실제로 읽었는가. **0(바꾼 것 없음)과 «아직 모름»은 다른 사실이라** 플래그로 가른다 —
+    /// 하나로 합치면 읽기 전 화면이 `0개 파일` 이라고 거짓을 말한다.
+    files_known: bool = false,
 
     pub fn oid(self: *const Snapshot) []const u8 {
         return self.tree[0..self.tree_len];
@@ -123,6 +129,42 @@ pub const Ring = struct {
             n += 1;
         }
         return out[0..n];
+    }
+
+    /// 그 tree 를 `head` 로 하는 턴의 파일 수를 채운다. **tree OID 로 찾는다** — 결과가 도착하는
+    /// 사이에 링이 밀릴 수 있고, 그때 자리로 찾으면 남의 턴에 숫자를 적는다. 못 찾으면 조용히 버린다
+    /// (그 턴은 이미 화면에 없다).
+    pub fn markFiles(self: *Ring, tree_oid: []const u8, count: u32) void {
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.next + capacity - 1 - i) % capacity;
+            if (std.mem.eql(u8, self.items[idx].oid(), tree_oid)) {
+                self.items[idx].changed_files = count;
+                self.items[idx].files_known = true;
+                return;
+            }
+        }
+    }
+
+    /// 아직 파일 수를 모르는 턴 하나(없으면 null). **최신 턴부터** 준다 — 사용자가 보는 순서다.
+    ///
+    /// 화면에 서는 턴만 본다(`back + 1 < len` — `timeline` 과 같은 경계). 목록에 없는 턴을 위해
+    /// 프로세스를 띄우지 않는다.
+    pub const UnknownTurn = struct {
+        /// 왼쪽(옛 쪽) tree.
+        base: []const u8,
+        /// 오른쪽(새 쪽) tree. **결과를 이 tree 에 적는다**(`markFiles`).
+        head: []const u8,
+    };
+
+    pub fn nextUnknownFiles(self: *const Ring) ?UnknownTurn {
+        var back: usize = 0;
+        while (back + 1 < self.len) : (back += 1) {
+            const head = self.nth(back) orelse return null;
+            const base = self.nth(back + 1) orelse return null;
+            if (!head.files_known) return .{ .base = base.oid(), .head = head.oid() };
+        }
+        return null;
     }
 
     /// `head` 로 쓰일 수 있는 스냅샷 수. 링이 N개면 완료된 턴은 N−1개이므로 가장 오래된 하나는 빠진다
@@ -424,4 +466,45 @@ test "세션 순번: 링이 비면 개수 0(순번을 물어도 터지지 않는
     const ring: Ring = .{};
     try std.testing.expectEqual(@as(usize, 0), ring.sessionCount());
     try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(1));
+}
+
+test "턴 파일 수: 모르는 턴을 최신부터 하나씩 주고, 채우면 다음으로 넘어간다" {
+    var ring: Ring = .{};
+    ring.push("t1", 1, 100, 1);
+    ring.push("t2", 1, 200, 1);
+    ring.push("t3", 1, 300, 1);
+
+    // 최신 턴(head=t3)이 먼저다 — 사용자가 보는 순서.
+    const first = ring.nextUnknownFiles().?;
+    try std.testing.expectEqualStrings("t2", first.base);
+    try std.testing.expectEqualStrings("t3", first.head);
+
+    ring.markFiles("t3", 5);
+    const second = ring.nextUnknownFiles().?;
+    try std.testing.expectEqualStrings("t1", second.base);
+    try std.testing.expectEqualStrings("t2", second.head);
+
+    ring.markFiles("t2", 0);
+    try std.testing.expect(ring.nextUnknownFiles() == null); // 화면에 서는 턴을 다 채웠다
+
+    // 가장 오래된 t1 은 `head` 로 서지 않으므로 영영 묻지 않는다(목록에 그 줄이 없다).
+    try std.testing.expect(!ring.nth(2).?.files_known);
+}
+
+test "턴 파일 수: tree OID 로 찾아 적는다(결과가 늦게 와도 남의 턴을 안 건드린다)" {
+    var ring: Ring = .{};
+    ring.push("aaa", 1, 100, 1);
+    ring.push("bbb", 1, 200, 1);
+
+    // 링에 없는 tree 로 오면 조용히 버린다 — 그 턴은 이미 화면에 없다.
+    ring.markFiles("zzz", 9);
+    try std.testing.expect(!ring.nth(0).?.files_known);
+
+    ring.markFiles("bbb", 3);
+    try std.testing.expect(ring.nth(0).?.files_known);
+    try std.testing.expectEqual(@as(u32, 3), ring.nth(0).?.changed_files);
+    // 0 도 «읽었다» 다 — «아직 모름» 과 구별된다.
+    ring.markFiles("aaa", 0);
+    try std.testing.expect(ring.nth(1).?.files_known);
+    try std.testing.expectEqual(@as(u32, 0), ring.nth(1).?.changed_files);
 }

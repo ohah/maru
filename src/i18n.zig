@@ -527,6 +527,9 @@ const Table = struct {
     scm_turn_last: [:0]const u8,
     /// 에이전트 탭: `N턴 전`의 접미. 숫자는 host가 붙인다.
     scm_turn_back_suffix: [:0]const u8,
+    /// 에이전트 탭: 그 턴이 바꾼 파일 수. 0이면 **자리를 비운다**(«0개»를 그리지 않는다 — 읽지 못한
+    /// 턴도 0으로 오기 때문이다).
+    scm_turn_file_count: [:0]const u8,
     /// 에이전트 탭: 그 턴의 파일 목록을 읽지 못했다.
     scm_turn_files_failed: [:0]const u8,
     /// 에이전트 탭: 그 턴이 바꾼 파일이 없다.
@@ -982,6 +985,7 @@ const en: Table = .{
     .scm_turn_live = "Since last turn",
     .scm_turn_last = "Last turn",
     .scm_turn_back_suffix = " turns ago",
+    .scm_turn_file_count = "{0} files",
     .scm_turn_files_failed = "Could not read this turn's files",
     .scm_turn_no_files = "This turn changed no files",
     .ad_no_model = "No model info",
@@ -1525,6 +1529,7 @@ const ko: Table = .{
     .scm_turn_live = "마지막 턴 이후",
     .scm_turn_last = "마지막 턴",
     .scm_turn_back_suffix = "턴 전",
+    .scm_turn_file_count = "{0}개 파일",
     .scm_turn_files_failed = "이 턴의 파일을 읽지 못했습니다",
     .scm_turn_no_files = "이 턴이 바꾼 파일이 없습니다",
     .ad_no_model = "모델 정보 없음",

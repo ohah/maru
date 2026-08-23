@@ -564,6 +564,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     (if (snap.captured_s == 0) "" else turnTime(arena, snap.captured_s, now_s))
                 else
                     "",
+                .summary = if (head) |snap| turnSummary(arena, snap) else "",
                 .selected = keyMatches(self.scm_selected_turn, row),
                 .expanded = keyMatches(self.scm_expanded_turn, row),
                 .live = live,
@@ -657,6 +658,19 @@ fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
     if (back == 1) return maru.i18n.t(.scm_turn_last);
     return std.fmt.allocPrint(arena, "{d}{s}", .{ back, maru.i18n.t(.scm_turn_back_suffix) }) catch
         maru.i18n.t(.scm_turn_last);
+}
+
+/// 그 턴이 바꾼 파일 수를 사람이 읽을 꼴로. **아직 모르거나 0이면 빈 문자열**이다.
+///
+/// 0을 그리지 않는 이유: 읽기에 실패한 턴도 0으로 적히기 때문이다(무한 재요청을 막으려고 실패도
+/// «읽었다»로 표시한다 — `applyTurnSummary`). «바꾼 것이 없다»와 «못 읽었다»를 한 글자로 구분할 수
+/// 없으니 둘 다 조용히 비운다. 실제로 아무것도 안 바꾼 턴은 링이 이미 걸러 낸다(같은 tree 연속이면
+/// push 하지 않는다).
+fn turnSummary(arena: std.mem.Allocator, snap: *const maru.session.turn_snapshot.Snapshot) []const u8 {
+    if (!snap.files_known or snap.changed_files == 0) return "";
+    var buf: [32]u8 = undefined;
+    const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turn_file_count), &.{.{ .d = @intCast(snap.changed_files) }});
+    return arena.dupe(u8, text) catch "";
 }
 
 /// 행에 실을 에이전트 표기. 세션이 하나면 종류만(`claude`), 여럿이면 순번을 붙인다(`claude #2`).
@@ -2152,12 +2166,70 @@ pub fn pumpCommitFiles(self: *AppSession) void {
     self.scm_commit_files_inflight = self.scm_commit_files_seq;
 }
 
+/// 턴 줄의 요약(`N개 파일`)을 **한 번에 하나씩** 채운다.
+///
+/// `pumpCommitFiles` 의 «펼쳤을 때만 읽는다» 규율과 다른 판단이 필요한 자리다. 커밋 히스토리는 수백 개라
+/// 미리 읽으면 프로세스를 공짜로 띄우지만, **턴은 최대 7개고 결과가 링에 남아 다시 묻지 않는다.**
+/// tree↔tree `--name-status` 는 실측 30 ms 라 목록 하나를 채우는 데 드는 총비용이 240 ms 남짓이고,
+/// 그것도 도크의 에이전트 탭을 **보고 있을 때만** 든다.
+///
+/// **슬롯을 펼침 요청과 공유하므로** 둘 중 하나만 돈다(§6 — `git_backend` 의 결과 자리가 하나다).
+/// 펼침이 먼저다: 사용자가 방금 누른 것이 요약보다 급하다.
+pub fn pumpTurnSummaries(self: *AppSession) void {
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
+    if (self.scm_tab != .agent) return; // 안 보는 탭 때문에 프로세스를 띄우지 않는다
+    if (self.scm_commit_files_inflight != 0 or self.scm_turn_summary_inflight != 0) return;
+    const turn = self.turn_ring.nextUnknownFiles() orelse return;
+
+    const repo = self.git_repo orelse return;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    if (self.git_backend == null) {
+        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    }
+
+    var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s} {s}", .{ turn.base, turn.head }) catch return;
+    const head_owned = self.allocator.dupe(u8, turn.head) catch return;
+
+    self.scm_commit_files_seq += 1;
+    if (!self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq)) {
+        self.allocator.free(head_owned);
+        return;
+    }
+    if (self.scm_turn_summary_head) |old| self.allocator.free(old);
+    self.scm_turn_summary_head = head_owned;
+    self.scm_turn_summary_inflight = self.scm_commit_files_seq;
+}
+
+/// 요약 결과를 링에 적는다. **실패해도 «읽었다»로 표시한다** — 안 그러면 같은 턴을 매 tick 다시 물어
+/// 프로세스를 무한히 띄운다. 그때 수는 0이고, 화면은 0을 그리지 않으므로 그 줄만 요약 없이 선다.
+fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
+    self.scm_turn_summary_inflight = 0;
+    const head = self.scm_turn_summary_head orelse return;
+    var count: u32 = 0;
+    if (ok) {
+        var files = maru.session.git_status.iterateNameStatus(text);
+        while (files.next()) |_| count +|= 1;
+    }
+    self.turn_ring.markFiles(head, count);
+    self.allocator.free(head);
+    self.scm_turn_summary_head = null;
+    self.metal_dirty = true;
+}
+
 /// 도착한 파일 목록을 싣는다. **OID로 맞춘다** — 사용자가 빠르게 다른 커밋을 펼치면 늦게 온 답이
 /// 남의 줄을 채운다.
 pub fn drainCommitFiles(self: *AppSession) void {
     const backend = &(self.git_backend orelse return);
     var taken = backend.takeCommitFilesResult() orelse return;
     defer taken.deinit(git_backend_mod.worker_allocator);
+    // **한 슬롯을 둘이 쓴다** — 요청 번호로 갈라 보낸다(§3.5.4 요약). 순서를 뒤집으면 요약 결과가
+    // 「내 것이 아니다」로 버려져 그 줄이 영영 안 채워진다.
+    if (taken.request_id == self.scm_turn_summary_inflight and self.scm_turn_summary_inflight != 0) {
+        applyTurnSummary(self, taken.ok, taken.text);
+        return;
+    }
     if (taken.request_id != self.scm_commit_files_inflight) return;
     self.scm_commit_files_inflight = 0;
     self.metal_dirty = true;
@@ -3799,4 +3871,25 @@ test "에이전트 라벨: 세션이 하나면 종류만, 여럿이면 순번을
 
     // 종류를 몰라도 번호는 남긴다 — 그 자리를 비우면 어느 줄이 어느 세션인지 알 길이 없다.
     try std.testing.expectEqualStrings("#3", agentLabel(a, 3, 3, ""));
+}
+
+test "턴 요약: 모르거나 0이면 자리를 비운다(실패한 턴도 0으로 오기 때문이다)" {
+    var buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const a = fba.allocator();
+
+    // 아직 안 읽었다 — `0개 파일` 이라고 말하면 거짓이다.
+    var unknown: maru.session.turn_snapshot.Snapshot = .{};
+    try std.testing.expectEqualStrings("", turnSummary(a, &unknown));
+
+    // 읽었는데 0이다. 실패한 턴도 이 모양으로 오므로(무한 재요청을 막으려고 실패를 «읽었다»로 표시한다)
+    // 둘을 가를 수 없어 둘 다 비운다.
+    var zero: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 0 };
+    try std.testing.expectEqualStrings("", turnSummary(a, &zero));
+
+    // 실제로 바꾼 것이 있으면 그 수를 말한다.
+    var three: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 3 };
+    const text = turnSummary(a, &three);
+    try std.testing.expect(text.len > 0);
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, '3') != null);
 }

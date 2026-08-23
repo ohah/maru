@@ -135,6 +135,38 @@ var delivered_len: usize = 0;
 var preedit_buf: [128]u8 = undefined;
 var preedit_len: usize = 0;
 
+/// 조합 중 문자열이 격자에서 차지하는 **칸 수**. 바이트 수도 글자 수도 아니다 — 한글은 한
+/// 글자가 두 칸이라 셋이 전부 다르다. 폭 판정은 코어와 **같은 자리**(`maru.width.cellWidth`)를
+/// 쓴다: 여기서 따로 세면 조합이 그려지는 자리와 커서가 서는 자리가 갈린다.
+fn preeditCols() u16 {
+    if (preedit_len == 0) return 0;
+    var cols: u16 = 0;
+    // 조용히 넘기지 않는다(§5) — 폭이 0 이면 커서가 안 움직여 "조합이 안 보인다" 로 나타나는데,
+    // 신호가 없으면 그 원인을 화면만 보고는 못 가른다.
+    var view = std.unicode.Utf8View.init(preedit_buf[0..preedit_len]) catch {
+        setLastError("preedit_bad_utf8");
+        return 0;
+    };
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| cols +|= maru.width.cellWidth(cp);
+    return cols;
+}
+
+/// 화면에서 커서가 **실제로 서는 열**. 조합 중이면 그 뒤다.
+///
+/// **한 곳이 정한다.** 커서를 그리는 자리와 후보창 앵커(`maru_mobile_caret_rect`)가 각자 세면
+/// 갈리고, 갈리면 후보창이 글자를 덮는 자리에 뜬다 — 이 저장소가 반복해 겪은 "두 벌" 사고다.
+fn cursorColOnScreen(cur_col: u16, cols: u16) u16 {
+    const pre = preeditCols();
+    if (pre == 0 or cols == 0) return cur_col;
+    return @min(cur_col +| pre, cols - 1);
+}
+
+/// 조합 중 문자열이 차지하는 칸 수(테스트·진단용).
+pub fn preeditColsNow() u16 {
+    return preeditCols();
+}
+
 /// config 파일 바이트를 넘긴다. **파일을 여는 것은 host** 다(계약 §7 — 브리지엔 OS 호출이 없다).
 /// 파일이 없으면 안 부르면 된다 — 그러면 기본값으로 돈다. 다시 부르면 통째로 갈아 끼운다.
 /// 지금 접속의 상태. **화면이 이것으로 말한다** — 예전에는 실패가 로그에만 남아, 사용자는
@@ -2301,7 +2333,11 @@ pub export fn maru_mobile_caret_rect() u64 {
     // **스크롤백은 여기서 0 이 아니다.** 커서를 그리지는 않지만 코어가 live 위치를 일부러
     // 보존한다 — "IME 후보창은 scroll-to-bottom 이 적용되기 전에도 이 anchor 를 즉시 써야
     // 한다"(`screen.renderSnapshot`). 타이핑하면 어차피 바닥으로 튄다.
-    const x = body_rect.x + @as(f32, @floatFromInt(@as(i32, cur.col) * body_cell_w));
+    // **조합 중이면 앵커도 그 뒤다.** 후보창은 지금 치고 있는 글자 **다음**에 떠야 한다 —
+    // 조합 시작 자리에 띄우면 자기가 방금 만든 글자를 가린다. 커서를 그리는 자리와 **같은
+    // 판정**을 쓴다(`cursorColOnScreen`): 두 벌로 세면 화면과 후보창이 어긋난다.
+    const anchor_col = cursorColOnScreen(cur.col, body_cols);
+    const x = body_rect.x + @as(f32, @floatFromInt(@as(i32, anchor_col) * body_cell_w));
     const y = body_rect.y + @as(f32, @floatFromInt(@as(i32, cur.row) * body_line_h));
     return (@as(u64, @intFromFloat(@max(0, x))) << 48) |
         (@as(u64, @intFromFloat(@max(0, y))) << 32) |
@@ -2472,8 +2508,10 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     const line_h: i32 = @intCast(cfg().font.size);
     const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
     const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
-    // chrome 라벨은 아직 예전 크기를 쓴다(본문 격자와 별개 — `pushText`).
-    const font_px: i32 = 15;
+    // **여기에 chrome 라벨 크기가 있었다.** 본문 격자를 그리는 함수가 그것을 든 이유는 조합 중
+    // 문자열을 `pushText` 로 그렸기 때문 하나뿐이었고, 그 경로가 격자와 어긋나는 것이 결함이었다.
+    // 조합을 셀 상자로 옮기면서 이 상수의 소비자가 사라졌다 — 남겨 두면 "본문에도 chrome 크기가
+    // 쓰인다" 는 잘못된 신호가 된다.
     const cols_f = @divTrunc(@as(i32, @intFromFloat(rect.width)), cell_w);
     const rows_f = @divTrunc(@as(i32, @intFromFloat(rect.height)), line_h);
     const cols: u16 = @intCast(@max(8, @min(max_cols, cols_f)));
@@ -2675,7 +2713,12 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     if (snap.cursor.visible) {
         const cur = snap.cursor;
         if (cur.col < grid_cols and cur.row < grid_rows) {
-            const cx = ox + @as(i32, cur.col) * cell_w;
+            // **조합 중이면 커서는 그 뒤에 선다.** preedit 은 아직 확정 안 된 글자지만 화면에서는
+            // 이미 커서 앞자리를 차지한다 — 안 옮기면 커서가 **조합 첫 글자를 덮고 앉는다**
+            // (기기 실측: `mux` 를 치는 동안 블록이 `m` 위에 그대로 있었다).
+            const pre_cols = preeditCols();
+            const cur_col = cursorColOnScreen(cur.col, grid_cols);
+            const cx = ox + @as(i32, cur_col) * cell_w;
             // 격자와 **같은 식**으로 y 를 낸다 — 따로 계산하면 한 줄씩 어긋난다.
             const cy = oy + @as(i32, cur.row) * line_h;
             const rgb = tk.get(.cursor);
@@ -2683,8 +2726,15 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
             // **2셀 글자 위에서는 두 칸을 덮는다.** 한 칸만 덮으면 한글 절반에만 걸려
             // "커서가 글자 가운데 있는" 모양이 된다(글자 폭은 코어가 정한 값을 쓴다).
             // continuation 칸(width 0)에 놓이면 한 칸이다 — 코어가 거기 커서를 두지 않는다.
-            const cur_cell = snap.cells[core.index(cur.row, cur.col)];
-            const cur_w = if (cur_cell.width == 2) cell_w * 2 else cell_w;
+            //
+            // **조합 중에는 그 칸의 셀을 안 본다.** 커서는 조합 **뒤**의 빈 자리에 서 있고,
+            // 거기 남아 있는 옛 셀의 폭은 지금 커서와 아무 상관이 없다.
+            const cur_w = if (pre_cols != 0)
+                cell_w
+            else if (snap.cells[core.index(cur.row, cur.col)].width == 2)
+                cell_w * 2
+            else
+                cell_w;
             // 블록은 칸을 채우고, 밑줄은 아래 굵은 선, 막대는 왼쪽 세로선이다.
             const r: draw.Rect = switch (shape) {
                 .block => .{ .x = cx, .y = cy, .w = @intCast(cur_w), .h = @intCast(line_h) },
@@ -2705,12 +2755,51 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 조합 중 문자열을 커서 자리에 **흐리게** 얹는다. **격자를 다 그린 뒤**라야 그 위에
     // 올라간다 — 앞에 두면 커서 자리에 글자가 있을 때 그 글자가 조합을 덮는다(주석은 "위에
     // 그려진다" 라고 적혀 있었는데 순서는 반대였다).
-    if (preedit_len > 0) {
-        const cur = core.screen.cursor;
-        const px = @as(i32, @intFromFloat(rect.x)) + @as(i32, cur.col) * cell_w;
-        const py = @as(i32, @intFromFloat(rect.y)) + @as(i32, cur.row) * line_h;
-        const dim = tk.get(.muted_fg);
-        pushText(preedit_buf[0..preedit_len], px, py, font_px, dim);
+    if (preedit_len > 0 and snap.cursor.row < grid_rows) {
+        // **격자 칸에 그린다 — chrome 텍스트로 그리지 않는다.** 예전에는 `pushText` 를 썼는데
+        // 그것은 사이드바·설정 라벨용이라 **자기 스케일로 펜을 진행**한다(`atlas_cell_w * scale`).
+        // 셀 글자는 `cell_w`·`line_h` 상자에 맞춰 그리므로, 같은 줄인데 조합만 **위로 뜨고 글자
+        // 간격도 어긋났다**(기기 실측: 확정된 `qd` 옆에 조합 `qd가나어더우` 가 딴 줄처럼 보였다).
+        // M4a3 이 격자를 글리프 quad 로 옮길 때 이 자리는 안 따라온 것이다.
+        const cur = snap.cursor;
+        const rgb = tk.get(.muted_fg);
+        const py = oy + @as(i32, cur.row) * line_h;
+        var col: u16 = cur.col;
+        var view = std.unicode.Utf8View.init(preedit_buf[0..preedit_len]) catch {
+            setLastError("preedit_bad_utf8");
+            return;
+        };
+        var it = view.iterator();
+        while (it.nextCodepoint()) |cp| {
+            const w: u16 = maru.width.cellWidth(cp);
+            // 줄 끝을 넘으면 거기서 멈춘다. **접어 넘기지 않는다** — 조합은 아직 코어에 안 들어간
+            // 겉치레라, 다음 줄에 그리면 그 줄의 진짜 내용을 덮는다.
+            if (col +| w > grid_cols) break;
+            // 미스면 `noteMiss` 가 굽기 목록에 올려 다음 프레임에 나온다(셀 경로와 같다).
+            if (atlasCell(&[_]u21{cp}, 0)) |glyph| {
+                if (!reserveQuad()) return;
+                const wide = w == 2;
+                quad_buf[quad_count] = .{
+                    .x = @floatFromInt(ox + @as(i32, col) * cell_w),
+                    .y = @floatFromInt(py),
+                    .w = @floatFromInt(if (wide) cell_w * 2 else cell_w),
+                    .h = @floatFromInt(line_h),
+                    .r = @as(f32, @floatFromInt(rgb.r)) / 255.0,
+                    .g = @as(f32, @floatFromInt(rgb.g)) / 255.0,
+                    .b = @as(f32, @floatFromInt(rgb.b)) / 255.0,
+                    .a = 1.0,
+                    .radius = 0,
+                    .kind = if (glyph.color)
+                        (if (wide) @as(u32, 4) else 5)
+                    else
+                        (if (wide) @as(u32, 1) else 3),
+                    .cell_x = glyph.col,
+                    .cell_y = glyph.row,
+                };
+                quad_count += 1;
+            }
+            col +|= w;
+        }
     }
 }
 

@@ -37,6 +37,10 @@ ck "두 host 가 last_error 를 읽고 비운다" 2 "$(grep -l maru_mobile_clear
 ck "두 host 가 컨트롤 축을 새 연결에서 재설정한다" 2 "$(grep -l maru_mobile_control_reset $I $A | wc -l | tr -d ' ')"
 # 컨트롤 채널을 여는 쪽도 둘 다여야 한다 — 한쪽만 있으면 그 기기에서만 목록이 안 뜬다.
 ck "두 host 가 컨트롤 채널을 연다" 2 "$(grep -l maru_ssh_pump_open_control $I $A | wc -l | tr -d ' ')"
+# **원격 명령이 그냥 끝난 것은 시한과 다른 말이다**(계약 §4a). 이 보고가 빠지면 `maru` 경로가
+# 안 잡힌 기계가 "답이 없다" 로만 뜨고, 종료 코드는 pump 가 들고 있는데 아무도 안 읽는다 —
+# 실제로 그 화면을 두 번 오진했다(2026-08-23).
+ck "두 host 가 exec 종료를 코어에 알린다" 2 "$(grep -l "maru_mobile_control_note_exit(" $I $A | wc -l | tr -d ' ')"
 
 echo "§4 셀 기하·글자 크기 단일 출처"
 ck "헤더의 TEXT_PX 정의" 1 "$(grep -c 'define MARU_ATLAS_TEXT_PX' $H)"

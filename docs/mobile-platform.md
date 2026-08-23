@@ -164,6 +164,7 @@ LOAD 정렬이 전부 `0x1000` 이었고 4KB 기기가 "ELF 정렬 검사 실패
 | 코어 → 플랫폼 | 코어가 만든 컨트롤 요청 | `maru_mobile_take_control_request(out, cap)` |
 | 플랫폼 → 코어 | `hello` 시한 초과 알림 | `maru_mobile_control_timeout()` |
 | 플랫폼 → 코어 | **채널을 못 열었다** 알림(여는 것은 host 다 — 실패도 host 만 안다) | `maru_mobile_control_open_failed()` |
+| 플랫폼 → 코어 | 원격 명령이 그냥 끝났다(그 종료 코드) | `maru_mobile_control_note_exit(code)` |
 | 코어 → 플랫폼 | 컨트롤 축 상태(host 가 시한 판정에 쓴다) | `maru_mobile_control_state` |
 | 코어 → 플랫폼 | **host 진단용** — 껀 이유·세션 수·받은 적 있나(화면은 브리지가 직접 그린다) | `maru_mobile_control_off_reason` · `_session_count` · `_listed` |
 | 플랫폼 → 코어 | 새 연결에서 축을 처음부터 | `maru_mobile_control_reset()` |

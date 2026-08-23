@@ -164,8 +164,9 @@ const inventory = [_]Entry{
     // 이던 것을 고치면서 생긴 자리다 — 같은 `switch` 의 다른 팔들과 한 언어여야 한다.
     //
     // **원장은 늘 실측으로 적는다.** 여기서 한 번 38 로 적었다가 CI 가 37 이라고 알려 줬다 —
-    // 눈으로 센 수를 적으면 그 차이만큼 게이트가 헐거워진다. 지금 38 인 것도 게이트가 알려 준 값이다.
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 38 },
+    // 눈으로 센 수를 적으면 그 차이만큼 게이트가 헐거워진다.
+    // 41: 원격 축이 꺼진 이유를 갈라 적으면서 셋이 늘었다(계약 §4a — 127·다른 코드·폴백).
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 41 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
     .{ .path = "src/platform/mobile/mobile_config.zig", .count = 8 },
     // 골든 캡처용 실행 파일. 한국어 화면을 찍는 것이 목적이라 프로세스째 `ko` 로 박는다 —

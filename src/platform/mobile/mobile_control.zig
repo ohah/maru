@@ -56,6 +56,9 @@ pub const OffReason = enum {
     /// 남아, 화면은 **영영 "받는 중"** 이었다(기기 실측) — 계약 §4a 는 "실패하면 그 화면에서
     /// 말한다" 이다.
     open_failed,
+    /// 원격 명령이 그냥 끝났다 — 열리지도 못했다. **시한을 기다릴 이유가 없다**: 답할 것이
+    /// 이미 죽었으므로 `hello_timeout` 으로 뭉치면 사용자가 고칠 자리를 못 찾는다.
+    command_failed,
 };
 
 /// `feed` 한 걸음의 결과.
@@ -91,6 +94,20 @@ pub const Client = struct {
 
     /// 요청 id. **0 은 안 쓴다** — 응답을 못 맞춘 자리와 구별한다.
     next_id: u64 = 1,
+
+    /// 원격 명령의 종료 코드. `command_failed` 일 때만 뜻이 있다.
+    exit_status: u32 = 0,
+
+    /// host 가 원격 명령이 끝났다고 알린다. **프로세스는 이 층에 없다.**
+    ///
+    /// 이미 `hello` 를 받아 살아 있던 축이 끝난 것은 정상 종료다 — 그것까지 실패로 칠하면
+    /// 정상적으로 닫은 화면이 오류를 띄운다.
+    pub fn commandFailed(self: *Client, status: u32) void {
+        if (self.state != .waiting_hello) return;
+        self.state = .off;
+        self.off_reason = .command_failed;
+        self.exit_status = status;
+    }
 
     /// host 가 시한을 넘겼다고 알린다. **시계는 이 층에 없다.**
     pub fn timedOut(self: *Client) void {
@@ -545,6 +562,22 @@ test "프로토콜 이름이 없는 hello 도 우리 것이 아니다" {
     const step = feedAll(&c, "{\"jsonrpc\":\"2.0\",\"method\":\"hello\"}\n");
     try testing.expectEqual(State.off, step.state);
     try testing.expectEqual(OffReason.protocol_mismatch, step.off_reason);
+}
+
+test "명령이 그냥 끝나면 시한과 다른 이유로 꺼진다" {
+    // 답할 것이 이미 죽었다 — 5초를 더 기다릴 이유가 없고, 종료 코드가 **고칠 자리**를 가른다.
+    var c: Client = .{};
+    c.commandFailed(127);
+    try testing.expectEqual(State.off, c.state);
+    try testing.expectEqual(OffReason.command_failed, c.off_reason);
+    try testing.expectEqual(@as(u32, 127), c.exit_status);
+
+    // 이미 선 축이 끝난 것은 정상 종료다 — 목록을 다 받고 닫은 화면에 오류를 띄우면 안 된다.
+    var ready: Client = .{};
+    _ = feedAll(&ready, hello_line);
+    ready.commandFailed(0);
+    try testing.expectEqual(State.ready, ready.state);
+    try testing.expectEqual(OffReason.none, ready.off_reason);
 }
 
 test "시한을 넘기면 host 가 껐다고 말할 수 있다" {

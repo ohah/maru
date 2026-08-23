@@ -684,6 +684,11 @@ unsigned long maru_mobile_control_feed(const unsigned char *bytes, unsigned long
 unsigned long maru_mobile_take_control_request(unsigned char *out, unsigned long cap);
 /// `hello` 시한을 넘겼다고 알린다(계약 §4a — 5초). **시계는 코어에 없다.**
 void maru_mobile_control_timeout(void);
+/// 원격 명령이 **그냥 끝났다**고 알린다 — `code` 는 그 종료 코드다(계약 §4a).
+///
+/// 시한과 다른 말이다: 답할 것이 이미 죽었으므로 화면이 **고칠 자리**를 말할 수 있다.
+/// 이미 선 축이 닫힌 것은 정상 종료라 아무 일도 안 일어난다.
+void maru_mobile_control_note_exit(unsigned int code);
 /// 컨트롤 축 상태.
 #define MARU_MOBILE_CONTROL_WAITING 0
 #define MARU_MOBILE_CONTROL_READY 1
@@ -698,6 +703,7 @@ unsigned int maru_mobile_control_state(void);
 #define MARU_MOBILE_CONTROL_OFF_FRAME_TOO_LARGE 4
 /// 채널 자체를 못 열었다(앞의 넷과 달리 `hello` 를 기다려 볼 자리에도 못 갔다).
 #define MARU_MOBILE_CONTROL_OFF_OPEN_FAILED 5
+#define MARU_MOBILE_CONTROL_OFF_COMMAND_FAILED 6
 unsigned int maru_mobile_control_off_reason(void);
 /// **열기가 졌다고 host 가 알린다.** 여는 것은 host 가 하므로(소켓이 그쪽에 있다) 실패도 그쪽만
 /// 안다 — 안 알리면 화면은 이유를 모른 채 기다린다(계약 §4a: 실패하면 그 화면에서 말한다).

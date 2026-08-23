@@ -1082,7 +1082,7 @@ test "C3 collector reaches allowance exactly and preserves the accepted prefix" 
     try std.testing.expectEqual(@as(usize, 4), result.validation_bytes);
 }
 
-test "C3 collector discards prior bytes on EOF and socket error" {
+test "C3 collector preserves a positive prefix before EOF and socket error" {
     inline for (.{ read.RxReadOutcome.eof, read.RxReadOutcome.socket_error }) |last| {
         const scratch = try std.testing.allocator.create(read.ExternalRxReadScratch);
         defer std.testing.allocator.destroy(scratch);
@@ -1108,14 +1108,23 @@ test "C3 collector discards prior bytes on EOF and socket error" {
                 .read_ops = &read_ops,
                 .authority_ops = &authority_ops,
             },
-            "",
+            "x",
             false,
         );
-        const expected: read.CollectTerminalReason =
-            if (last == .eof) .eof else .socket_error;
-        try std.testing.expectEqual(expected, result.collected.terminal.reason);
-        try std.testing.expect(!result.borrowed);
-        try std.testing.expect(!result.settled);
+        const expected: read.CollectStop =
+            if (last == .eof) .eof_after_prefix else .socket_error_after_prefix;
+        try std.testing.expectEqual(expected, result.collected.stopped.stop);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            result.collected.stopped.accepted_bytes,
+        );
+        try std.testing.expect(result.borrowed);
+        try std.testing.expect(result.bytes_equal);
+        try std.testing.expect(result.settled);
+        try std.testing.expectEqual(
+            read.ReadScratchTeardownResult.closed,
+            result.teardown_result,
+        );
     }
 }
 

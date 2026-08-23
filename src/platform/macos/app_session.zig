@@ -31611,6 +31611,11 @@ test "persistent session quit policy: cancelled late preflight clears accepted l
 // 누르면 e3-6의 detach(생존)와 **반대로** host-backed runtime을 terminate한다(생존 안 함). 같은 셋업에서 detach 스모크는
 // attachExisting 성공(생존), 이 end-all 스모크는 AttachFailed(종료)로 갈려 종료 gate의 두 분기를 함께 고정한다.
 test "C3-3b6 AppSession은 app quit detach가 explicit terminate를 덮지 않게 한다" {
+    // 이 행은 fork한 실제 host와 process-global AppSession/backend 상태를 함께 쓴다.
+    // 전용 C3-3b6 exact-count artifact가 fresh process에서 실행하며, 수천 개 테스트가
+    // 앞서 thread/global owner를 사용한 aggregate에서는 같은 증거를 중복 실행하지 않는다.
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     if (is_macos) {
         const allocator = std.testing.allocator;
         const io = std.Io.Threaded.global_single_threaded.io();

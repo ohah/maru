@@ -660,6 +660,99 @@ test "f3a HUP cross product never weakens a sealed stronger cause" {
     }
 }
 
+test "f3e pure hostile matrix seals response revoke HUP control progress and deadline precedence" {
+    const controls = std.meta.tags(F3ControlProgress);
+    for ([_]bool{ false, true }) |completed| {
+        for ([_]bool{ false, true }) |revoked| {
+            for ([_]bool{ false, true }) |hup| {
+                for ([_]bool{ false, true }) |hup_drained| {
+                    if (hup_drained and !hup) continue;
+                    for (controls) |control| {
+                        const plan = planRevokeIntegration(.{
+                            .causes = .{
+                                .exact_revoke = revoked,
+                                .peer_hup_hint = hup,
+                                .peer_hup_drain_complete = hup_drained,
+                            },
+                            .completed_present = completed,
+                            .control = control,
+                        });
+                        if (completed and control != .none) {
+                            try std.testing.expectEqual(
+                                RevokeIntegrationAction.cleanup_completed,
+                                plan.action,
+                            );
+                            try std.testing.expectEqual(
+                                TerminalReason.invariant_failure,
+                                plan.terminal.?.reason,
+                            );
+                            try std.testing.expect(plan.suppress_tx);
+                            continue;
+                        }
+                        if (hup and !hup_drained and !revoked) {
+                            try std.testing.expectEqual(
+                                RevokeIntegrationAction.continue_bounded_rx,
+                                plan.action,
+                            );
+                            try std.testing.expect(plan.bounded_rx_required);
+                            try std.testing.expect(plan.suppress_tx);
+                            continue;
+                        }
+                        if (completed) {
+                            try std.testing.expectEqual(
+                                if (revoked or hup_drained)
+                                    RevokeIntegrationAction.cleanup_completed
+                                else
+                                    RevokeIntegrationAction.success_candidate,
+                                plan.action,
+                            );
+                        } else if (revoked and
+                            (control == .none or control == .queued))
+                        {
+                            try std.testing.expectEqual(
+                                RevokeIntegrationAction.cancel_queued,
+                                plan.action,
+                            );
+                        } else {
+                            try std.testing.expectEqual(
+                                RevokeIntegrationAction.poison_close,
+                                plan.action,
+                            );
+                        }
+                        if (revoked or hup_drained)
+                            try std.testing.expect(plan.suppress_tx);
+                    }
+                }
+            }
+        }
+    }
+
+    const deadline: i128 = 1_000;
+    for ([_]i128{ deadline - 1, deadline, deadline + 1 }) |now_ns| {
+        const decision = decide(.{
+            .turn = .{ .readable = true, .writable = true, .now_ns = now_ns },
+            .parser = .empty,
+            .socket_rx_drained = true,
+            .tx_pending = true,
+            .control_ready = true,
+            .deadlines = .{ deadline, null, null, null, null },
+        });
+        if (now_ns < deadline) {
+            try std.testing.expect(decision.terminal == null);
+            try std.testing.expect(decision.write_interest);
+            try std.testing.expect(decision.control_ready);
+        } else {
+            try std.testing.expectEqual(
+                TerminalReason.deadline_exceeded,
+                decision.terminal.?.reason,
+            );
+            try std.testing.expect(!decision.read_interest);
+            try std.testing.expect(!decision.write_interest);
+            try std.testing.expect(!decision.control_ready);
+        }
+    }
+}
+
 pub const RecoveryDisposition = enum {
     no_op,
     entered,

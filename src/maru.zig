@@ -40,6 +40,7 @@ pub const terminfo_cache = @import("terminfo_cache.zig"); // maru 자체 terminf
 pub const width = @import("width.zig"); // Unicode 셀 폭(EAW) — 레이어 무관 중립 유틸(terminal·chrome·platform 공용)
 pub const grapheme = @import("grapheme.zig"); // UAX#29 grapheme cluster 분절 — 레이어 무관 중립 유틸(terminal·chrome 공용, width.zig와 동격)
 pub const path_shape = @import("path_shape.zig"); // 경로 모양(절대·루트·구분자) 판정 — L1 링크 감지와 L2 경로 가드가 공유하는 중립 유틸
+pub const scm_items = @import("scm_items.zig"); // 소스 컨트롤 행 모델 → 컴포넌트 항목. session 과 chrome 이 서로를 import 못 해 둘 다 밖에 산다
 pub const os_env = @import("os_env.zig"); // 환경변수를 UTF-8 로 읽는다 — Windows 의 ANSI `getenv` 를 피한다
 pub const hazard = @import("hazard.zig"); // §3.8 적대적 입력 판정 — 순수 유니코드(width.zig와 동격, chrome도 쓴다)
 pub const display_width = @import("display_width.zig"); // §4.2 편집기 표시 폭 — 열 계산(L3)과 셀 배치(L4)의 단일 출처

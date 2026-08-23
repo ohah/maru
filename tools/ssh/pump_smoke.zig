@@ -690,6 +690,13 @@ test "컨트롤 훅이 없으면 채널을 못 연다" {
     while (waited < 2000 and pump.maru_ssh_pump_is_running() == 0) : (waited += 20) sleepMs(20);
 
     try std.testing.expect(pump.maru_ssh_pump_open_control("x", 1) != 0);
-    try std.testing.expectEqualStrings("no_control_hook", std.mem.span(pump.maru_ssh_pump_error()));
+    // **이름은 컨트롤 축에 남는다.** 예전에는 이 단언이 `maru_ssh_pump_error` 를 봤고, 그래서
+    // 두 축이 슬롯 하나를 같이 쓰는 상태를 **테스트가 계약으로 고정하고 있었다**.
+    try std.testing.expectEqualStrings("no_control_hook", std.mem.span(pump.maru_ssh_pump_control_error()));
     try std.testing.expectEqual(@as(c_uint, 0), pump.maru_ssh_pump_control_state());
+
+    // **그리고 터미널 축은 안 건드린다 — 이것이 이 테스트의 절반이다.**
+    // 컨트롤이 지는 것은 "세션 목록이 안 보이는 것" 이지 "접속이 안 되는 것" 이 아니다
+    // (docs/control-plane.md §4a). 이 줄이 없으면 슬롯을 도로 합쳐도 위 단언은 초록이다.
+    try std.testing.expectEqualStrings("", std.mem.span(pump.maru_ssh_pump_error()));
 }

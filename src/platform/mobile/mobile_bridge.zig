@@ -190,6 +190,12 @@ pub export fn maru_mobile_set_ssh_status(state: u32, err: [*]const u8, len: usiz
 /// **이름을 그대로 안 보인다.** `connect_failed` 는 우리 말이고, 사용자가 할 일은 "주소와
 /// 포트를 확인" 이다 — 화면은 그것을 말해야 한다.
 fn connectionMessage() ?[]const u8 {
+    // **셸이 떴으면 아무 말도 안 한다 — 화면이 곧 답이다.** 이 판정이 이름 검사보다 **먼저**여야
+    // 한다: 뒤에 두면 남아 있는 이름 하나가 **멀쩡히 돌아가는 셸 위에** "붙지 못했다" 를 띄운다.
+    // 기기에서 실제로 그랬다 — 컨트롤 채널이 세션 준비 전에 지면서 남긴 `not_running` 이 세션
+    // 내내 배너로 떠 있었다. 그 이름이 애초에 안 오게 축을 갈랐지만(ssh_pump.c 의 두 슬롯),
+    // 순서를 그대로 두면 **다음에 어떤 이름이 새든 같은 사고가 다시 난다.**
+    if (conn_state == 11) return null; // MARU_SSH_STATE_READY
     const err = conn_err[0..conn_err_len];
     if (err.len > 0) {
         const key: maru.i18n.Key = if (std.mem.eql(u8, err, "connect_failed") or std.mem.eql(u8, err, "resolve_failed"))
@@ -208,8 +214,8 @@ fn connectionMessage() ?[]const u8 {
             .mob_conn_failed;
         return maru.i18n.tIn(.ko, key);
     }
-    // 오류가 없으면 진행 상태다. **붙은 뒤에는 아무 말도 안 한다** — 화면이 곧 답이다.
-    if (conn_state == 0 or conn_state == 11) return null;
+    // 오류가 없으면 진행 상태다. 아직 시작 전이면 할 말이 없다(READY 는 위에서 이미 갈렸다).
+    if (conn_state == 0) return null;
     return maru.i18n.tIn(.ko, .mob_conn_connecting);
 }
 
@@ -1082,6 +1088,14 @@ pub export fn maru_mobile_control_timeout() void {
     control_client.timedOut();
 }
 
+/// host 가 채널을 못 열었다고 알린다. **소켓은 이 층에 없다.**
+///
+/// 안 알리면 화면은 `listed` 가 거짓인 채로 남아 **영영 "받는 중"** 을 보인다 — 실패를 아는 쪽이
+/// host 뿐이라 그렇다. 계약 §4a 가 "실패하면 그 화면에서 말한다" 인 이유가 이것이다.
+pub export fn maru_mobile_control_open_failed() void {
+    control_client.openFailed();
+}
+
 /// 컨트롤 축 상태(0=hello 대기, 1=선다, 2=껐다).
 pub export fn maru_mobile_control_state() u32 {
     return switch (control_client.state) {
@@ -1099,6 +1113,7 @@ pub export fn maru_mobile_control_off_reason() u32 {
         .too_much_noise => 2,
         .protocol_mismatch => 3,
         .frame_too_large => 4,
+        .open_failed => 5,
     };
 }
 
@@ -2034,7 +2049,13 @@ fn drawKey(i: usize, kx: f32, ky: f32, kw: f32, tk: *const tokens.Tokens) void {
     // armed 는 `ctrl` 처럼 **다음 글자까지 유지되는 상태**이고, pressed 는 **지금 손가락이
     // 닿아 있다**는 순간 표시다. 이게 없으면 `ctrl` 말고는 눌러도 화면이 답하지 않는다.
     const pressed = kb_pressed != null and kb_pressed.? == i;
-    const armed = key_bar[i].sticky_mod != 0 and armed_mods != 0;
+    // **켜진 비트와 대조한다.** 예전에는 `armed_mods != 0` 만 봐서, ctrl 을 켜면 sticky 를 가진
+    // 키가 **전부** 함께 밝아졌다 — 화면에는 alt 도 눌린 것으로 보였다(기기 실측). 실제로 나가는
+    // 것은 ctrl 하나뿐이라(`armed_mods` 에는 하나만 실린다) **손가락이 거짓말을 보던** 자리다.
+    const armed = armed_mods & key_bar[i].sticky_mod != 0;
+    // **판정을 그리기 경로 안에서 세운다.** 값(`armed_mods`)만 맞고 그려지는 것이 틀린 결함을 이
+    // 저장소가 여러 번 겪었다 — 이 자리가 정확히 그 부류였다. 밖에서 볼 수 있어야 테스트가 잡는다.
+    if (armed) keybar_armed_drawn |= key_bar[i].sticky_mod;
     // **못 쓰는 키는 흐리다.** `copy` 는 늘 줄에 있지만 선택이 없으면 눌러도 아무 일이 없다 —
     // 그것이 화면에 보여야 한다(눌렀는데 무반응이면 고장으로 읽힌다).
     const dimmed = key_bar[i].is_copy and !copyEnabled();
@@ -3608,6 +3629,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
         // 나눈 칸은 44 보다 넓어 손가락에도 낫다.
         const cell_w = band_w / @as(f32, @floatFromInt(key_bar_cols));
         const kw = @floor(cell_w) - key_gap;
+        keybar_armed_drawn = 0;
         for (0..key_bar.len) |i| {
             const col = i % key_bar_cols;
             const row = i / key_bar_cols;
@@ -3975,6 +3997,7 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
             .too_much_noise => maru.i18n.tIn(.ko, .mob_control_off_noise),
             .protocol_mismatch => maru.i18n.tIn(.ko, .mob_control_off_protocol),
             .frame_too_large => maru.i18n.tIn(.ko, .mob_control_off_frame),
+            .open_failed => maru.i18n.tIn(.ko, .mob_control_off_open),
             .none => maru.i18n.tIn(.ko, .mob_sessions_none),
         };
         pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
@@ -5510,6 +5533,16 @@ var key_bar_ready = false;
 /// 눌러 둔 수정자(sticky). **다음 한 글자**에만 실린다 — 계속 걸려 있으면 그 다음 타이핑이
 /// 전부 제어문자가 된다.
 var armed_mods: u32 = 0;
+
+/// 마지막 build 에서 **armed 로 그려진** 키의 비트마스크. `armed_mods` 와 **다른 축이다** —
+/// 그쪽은 "무엇이 실릴 것인가" 이고 이것은 "무엇이 눌린 것처럼 보이는가" 다. 둘이 어긋났던 것이
+/// 이 파일이 고친 결함이라, 어긋남을 밖에서 잴 수 있게 남긴다.
+var keybar_armed_drawn: u32 = 0;
+
+/// 지금 화면에서 눌린 것처럼 보이는 수정자(테스트·진단용).
+pub fn keybarArmedDrawn() u32 {
+    return keybar_armed_drawn;
+}
 
 /// 플랫폼이 부른다: UI 를 조립하고 quad 개수를 돌려준다.
 /// 마지막 오류 이름. 0 quads 가 나왔을 때 **무엇이 실패했는지** 플랫폼이 볼 수 있어야 한다 —

@@ -51,6 +51,11 @@ pub const OffReason = enum {
     protocol_mismatch,
     /// 한 줄이 상한을 넘었다.
     frame_too_large,
+    /// **채널 자체를 못 열었다** — `hello` 를 기다려 볼 자리에도 못 갔다. 앞의 넷은 전부 "열긴
+    /// 열었는데 그 뒤가 틀어졌다" 이고 이것만 그 앞에서 진다. 없던 시절에는 이 실패가 host 로그에만
+    /// 남아, 화면은 **영영 "받는 중"** 이었다(기기 실측) — 계약 §4a 는 "실패하면 그 화면에서
+    /// 말한다" 이다.
+    open_failed,
 };
 
 /// `feed` 한 걸음의 결과.
@@ -92,6 +97,15 @@ pub const Client = struct {
         if (self.state != .waiting_hello) return;
         self.state = .off;
         self.off_reason = .hello_timeout;
+    }
+
+    /// host 가 채널을 못 열었다고 알린다. **소켓은 이 층에 없다** — 여는 것도 지는 것도 host 만
+    /// 안다. 시한(`timedOut`)과 같은 모양이고 이유만 다르다: 그쪽은 열고 나서 `hello` 가 안 온
+    /// 것이고, 이쪽은 **열지도 못한** 것이다.
+    pub fn openFailed(self: *Client) void {
+        if (self.state != .waiting_hello) return;
+        self.state = .off;
+        self.off_reason = .open_failed;
     }
 
     /// 바이트를 밀어 넣는다. **한 걸음에 프레임 하나**를 돌려주므로, 호출자는 `consumed` 만큼

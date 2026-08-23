@@ -1202,14 +1202,20 @@ static void sshScreen(void *ctx, const unsigned char *bytes, unsigned long len) 
 
 static void sshState(void *ctx, unsigned int state) {
     (void)ctx;
-    NSLog(@"MARU_SSH state=%u error=%s", state, maru_ssh_pump_error());
+    // **한 번만 읽어 그대로 나른다.** 예전에는 여기(펌프 스레드에서 즉시)와 아래 main 블록(나중에
+    // 실행)에서 각각 읽었다 — 그 사이에 값이 바뀌면 **로그와 화면이 서로 다른 이름을 본다**.
+    // Android 는 같은 스레드·같은 시점이라 그 창이 없었다: 두 host 가 한 벌이어야 하는 자리다.
+    // 문자열은 복사해 든다(헤더 규약: 다음 호출이 그 자리를 덮는다).
+    const char *err = maru_ssh_pump_error();
+    NSString *errCopy = err ? @(err) : @"";
+    NSLog(@"MARU_SSH state=%u error=%s", state, errCopy.UTF8String);
     dispatch_async(dispatch_get_main_queue(), ^{
         // **입력 목적지를 세션과 함께 옮긴다.** 안 옮기면 친 글자가 화면에 한 번 찍히고 원격에는
         // 영영 안 간다(안드로이드에서 실측한 것과 같은 자리다).
         maru_mobile_set_input_sink(state == MARU_SSH_STATE_CLOSED ? 0 : 1);
         // 상태와 실패 이름을 화면에 알린다(Android 와 같은 자리).
-        const char *serr = maru_ssh_pump_error();
-        maru_mobile_set_ssh_status(state, (const unsigned char *)serr, serr ? strlen(serr) : 0);
+        const char *serr = errCopy.UTF8String;
+        maru_mobile_set_ssh_status(state, (const unsigned char *)serr, strlen(serr));
         // **비밀번호를 물어야 하면 화면을 연다**(그 자리에서 펌프가 기다린다). 벗어나면 끈다.
         maru_mobile_set_password_prompt(state == MARU_SSH_STATE_PASSWORD_NEEDED ? 1 : 0);
         // **처음 보는 서버면 지문을 묻는다**(Android 와 같은 자리). 지문이 이미 있으면 펌프가
@@ -1323,13 +1329,21 @@ static void publishPublicKey(void) {
 static void driveControlChannel(void) {
     if (!maru_ssh_pump_is_running()) return;
 
-    if (maru_mobile_take_control_open()) {
+    // **셸이 뜬 뒤에만 연다.** 예전 가드는 `is_running` 뿐이었는데 그것은 `pthread_create` 직후
+    // 참이라 READY 와 무관하다 — 목록 화면이 nav 스택의 뿌리라 접속 중에 거기 있으면 요청이 곧바로
+    // 서고, 그때 열기가 `not_running`/`NotReady` 로 지고 **요청은 take-once 라 사라졌다**. 그러면
+    // 셸이 떠도 목록은 영영 "받는 중" 이었다(Android 기기에서 실측 — 같은 코드라 여기도 같다).
+    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY && maru_mobile_take_control_open()) {
         // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];
         unsigned long cmd_len = maru_mobile_control_command((unsigned char *)cmd, sizeof cmd);
         if (cmd_len == 0 || maru_ssh_pump_open_control(cmd, (unsigned int)cmd_len) != 0) {
-            NSLog(@"MARU_CONTROL open failed: %s", maru_ssh_pump_error());
+            // **컨트롤 축의 이름을 찍는다**(Android 와 같은 자리) — 터미널 슬롯을 찍으면 한 번
+            // 박힌 이름이 그 뒤 모든 실패를 덮는다.
+            NSLog(@"MARU_CONTROL open failed: %s", maru_ssh_pump_control_error());
+            // **실패는 그 화면이 말한다**(계약 §4a).
+            maru_mobile_control_open_failed();
         } else {
             gControlOpenMs = CACurrentMediaTime() * 1000.0;
         }

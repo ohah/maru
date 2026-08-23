@@ -58757,7 +58757,7 @@ test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)
 
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(session.io).nanoseconds, std.time.ns_per_s));
     session.turn_ring.push("aaaaaaa1111", 1, now_s - 7200, 1); // claude
-    session.turn_ring.push("bbbbbbb2222", 1, now_s - 10, 2); // codex — 60초 미만이라 `방금`이다
+    session.turn_ring.push("bbbbbbb2222", 1, now_s - 10, 2); // codex — 방금 끝난 턴이라 오늘 시각이다
 
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     try std.testing.expectEqual(@as(usize, 2), projection.items.len); // 진행 중 + 턴 하나
@@ -58769,7 +58769,11 @@ test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_turn_last), last.title);
     try std.testing.expect(!last.live);
     try std.testing.expectEqualStrings("codex", last.agent); // "누가"는 오른쪽 스냅샷이 든다
-    try std.testing.expectEqualStrings(maru.i18n.t(.ad_time_now), last.when);
+    // **턴은 절대 시각이다**(상대 표기는 커밋 히스토리 탭이 계속 쓴다 — `relativeTime`). 방금 끝난
+    // 턴이라 오늘이고, 그래서 `HH:MM` 다섯 자다. 실행 시각에 따라 값이 달라지므로 **모양**을 본다.
+    try std.testing.expectEqual(@as(usize, 5), last.when.len);
+    try std.testing.expectEqual(@as(u8, ':'), last.when[2]);
+    // 세션이 하나면 에이전트 자리에 번호가 붙지 않는다(구분할 것이 없다).
 }
 
 test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 온다 (P5)" {

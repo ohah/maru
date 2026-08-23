@@ -71,24 +71,38 @@ pub const Ring = struct {
 
     /// 타임라인 행 하나(§3.5.4). **비교 기준을 그대로 든다** — 화면이 그 두 값을 다시 계산하지 않게.
     pub const TimelineRow = struct {
-        /// 0 = 진행 중(오른쪽이 작업트리), 1 = 마지막 턴, 2 = 그 이전…
+        /// **그 세션 안에서** 몇 턴 전인가. 0 = 진행 중, 1 = 그 세션의 마지막 턴, 2 = 그 이전…
+        ///
+        /// **링 전역이 아니라 세션별로 센다.** 같은 저장소에서 세션이 둘 돌면 링에는 두 세션의 스냅샷이
+        /// 번갈아 쌓이는데, 전역으로 세면 «2턴 전» 이 그 세션의 2턴 전이 아니다 — 사이에 낀 남의 턴이
+        /// 숫자를 민다. 화면 문구가 곧 이 값이므로(`turnTitle`) 전역으로 세면 화면이 거짓을 말한다.
         back: usize,
-        /// 왼쪽(옛 쪽) tree. `진행 중`은 스냅샷[0], `K턴 전`은 스냅샷[K+1]이다.
+        /// 왼쪽(옛 쪽) tree. **바로 앞 스냅샷이다** — 세션이 같은지는 보지 않는다.
+        ///
+        /// `back` 과 기준이 다른 것이 의도다. 비교는 **가장 좁은 구간**이어야 남의 변경이 덜 섞이는데,
+        /// 같은 세션의 이전 스냅샷까지 건너뛰면 그 사이 모든 변경이 이 턴 것으로 보인다. 숫자는 세션
+        /// 기준으로, 비교는 인접 기준으로 — 둘 다 각자의 자리에서 가장 정직한 선택이다.
         base: *const Snapshot,
         /// 오른쪽(새 쪽) tree. **`진행 중`은 없다**(작업트리와 비교한다).
         head: ?*const Snapshot,
+        /// 이 턴을 돌린 세션. 진행 중은 «마지막 스냅샷을 남긴 세션» 이다.
+        surface_id: u64,
     };
 
     /// 타임라인을 편다. **진행 중이 맨 위**이고, 그 아래로 완료된 턴이 최신순이다.
     ///
     /// 링이 N개면 완료된 턴은 **N−1개**다(가장 오래된 스냅샷은 짝이 될 이전 스냅샷이 없어 그 턴을
     /// 만들 수 없다 — 없는 턴을 "전부 새로 생김"으로 그리면 거짓말이다).
+    ///
+    /// **행을 세션으로 거르지 않는다.** 목록에서 남의 턴을 빼면 그 시간에 무슨 일이 있었는지가 사라져,
+    /// 「내 턴 사이에 낀 변경」이 설명 없이 내 diff 에 나타난다. 대신 각 행이 **어느 세션인지 싣고**
+    /// (`surface_id`) 번호를 세션별로 매긴다 — 숨기지 않고 구분한다.
     pub fn timeline(self: *const Ring, out: []TimelineRow) []const TimelineRow {
         var n: usize = 0;
         if (self.latest()) |head| {
             if (n < out.len) {
                 // 진행 중: 마지막 스냅샷 ↔ 작업트리. 사용자가 손댄 것도 여기 든다(그게 사실이다).
-                out[n] = .{ .back = 0, .base = head, .head = null };
+                out[n] = .{ .back = 0, .base = head, .head = null, .surface_id = head.surface_id };
                 n += 1;
             }
         }
@@ -97,10 +111,62 @@ pub const Ring = struct {
             if (n == out.len) break;
             const head = self.nth(back) orelse break;
             const base = self.nth(back + 1) orelse break;
-            out[n] = .{ .back = back + 1, .base = base, .head = head };
+            // 그 세션의 몇 번째 턴인가 — 이 스냅샷보다 **새로운** 같은 세션 스냅샷 수 + 1.
+            // (`nth(0)` 이 가장 새 것이므로 0..back 이 «더 새로운» 구간이다.)
+            var same: usize = 0;
+            var newer: usize = 0;
+            while (newer < back) : (newer += 1) {
+                const s = self.nth(newer) orelse break;
+                if (s.surface_id == head.surface_id) same += 1;
+            }
+            out[n] = .{ .back = same + 1, .base = base, .head = head, .surface_id = head.surface_id };
             n += 1;
         }
         return out[0..n];
+    }
+
+    /// 링에 든 **서로 다른 세션 수**. 1이면 화면이 세션을 구분해 말할 필요가 없다.
+    pub fn sessionCount(self: *const Ring) usize {
+        var seen: [capacity]u64 = undefined;
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            const id = (self.nth(i) orelse break).surface_id;
+            var dup = false;
+            for (seen[0..n]) |s| {
+                if (s == id) dup = true;
+            }
+            if (!dup) {
+                seen[n] = id;
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    /// 그 세션의 **표시용 순번**(1-based). 링에 든 `surface_id` 를 오름차순으로 세운 자리다.
+    ///
+    /// **왜 등장 순서가 아니라 id 순인가**: 등장 순서로 매기면 가장 오래된 스냅샷이 링에서 밀릴 때마다
+    /// 번호가 통째로 바뀐다 — 화면에서 `#1` 이던 세션이 다음 턴에 `#2` 가 되면 그 번호는 아무것도
+    /// 가리키지 못한다. `surface_id` 는 세션이 사는 동안 안 변하므로 그 순서가 훨씬 안정적이다.
+    /// (그 세션이 링에서 완전히 사라지면 뒤 번호가 당겨진다 — 그때는 그 세션 줄도 함께 사라진 뒤다.)
+    pub fn sessionOrdinal(self: *const Ring, surface_id: u64) usize {
+        var smaller: usize = 0;
+        var seen: [capacity]u64 = undefined;
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            const id = (self.nth(i) orelse break).surface_id;
+            var dup = false;
+            for (seen[0..n]) |s| {
+                if (s == id) dup = true;
+            }
+            if (dup) continue;
+            seen[n] = id;
+            n += 1;
+            if (id < surface_id) smaller += 1;
+        }
+        return smaller + 1;
     }
 
     /// `back`턴 전 스냅샷(0=마지막). 범위를 벗어나면 null — 없는 턴을 0번째로 접지 않는다.
@@ -239,4 +305,82 @@ test "타임라인: 상한을 넘겨도 out 크기까지만 채운다" {
     }
     var small: [3]Ring.TimelineRow = undefined;
     try std.testing.expectEqual(@as(usize, 3), ring.timeline(&small).len);
+}
+
+test "타임라인: `N턴 전`은 그 세션 기준이다(남의 턴이 숫자를 밀지 않는다)" {
+    // 같은 저장소를 세션 둘이 번갈아 쓰는 상황. 링 전역으로 세면 A 의 두 번째 턴이 «3턴 전» 이 되는데,
+    // 그 사용자에게 그것은 자기 2턴 전이다 — 화면 문구가 곧 이 값이라 전역으로 세면 화면이 거짓을 말한다.
+    var ring: Ring = .{};
+    ring.push("a1", 1, 100, 1); // A
+    ring.push("b1", 2, 200, 2); // B
+    ring.push("a2", 1, 300, 1); // A
+    ring.push("b2", 2, 400, 2); // B
+    ring.push("a3", 1, 500, 1); // A
+
+    var buf: [8]Ring.TimelineRow = undefined;
+    const rows = ring.timeline(&buf);
+    try std.testing.expectEqual(@as(usize, 5), rows.len); // 진행 중 + 완료 4
+
+    // 진행 중은 마지막 스냅샷을 남긴 세션의 것이다.
+    try std.testing.expectEqual(@as(u64, 1), rows[0].surface_id);
+
+    // 완료된 턴들: 최신순으로 a3(A) · b2(B) · a2(A) · b1(B).
+    try std.testing.expectEqual(@as(u64, 1), rows[1].surface_id);
+    try std.testing.expectEqual(@as(usize, 1), rows[1].back); // A 의 마지막 턴
+    try std.testing.expectEqual(@as(u64, 2), rows[2].surface_id);
+    try std.testing.expectEqual(@as(usize, 1), rows[2].back); // **B 의 마지막 턴도 1이다**
+    try std.testing.expectEqual(@as(u64, 1), rows[3].surface_id);
+    try std.testing.expectEqual(@as(usize, 2), rows[3].back); // A 의 2턴 전(전역이면 3이었다)
+    try std.testing.expectEqual(@as(u64, 2), rows[4].surface_id);
+    try std.testing.expectEqual(@as(usize, 2), rows[4].back); // B 의 2턴 전
+
+    // **비교 구간은 인접 스냅샷 그대로다** — 세션이 같은 이전 스냅샷까지 건너뛰면 그 사이 남의 변경이
+    // 전부 이 턴 것으로 보인다. 숫자는 세션 기준, 비교는 인접 기준.
+    try std.testing.expectEqualStrings("b2", rows[1].base.oid());
+    try std.testing.expectEqualStrings("a3", rows[1].head.?.oid());
+}
+
+test "타임라인: 세션이 하나면 `N턴 전`이 링 순서와 같다(회귀 없음)" {
+    var ring: Ring = .{};
+    ring.push("s1", 7, 100, 1);
+    ring.push("s2", 7, 200, 1);
+    ring.push("s3", 7, 300, 1);
+
+    var buf: [8]Ring.TimelineRow = undefined;
+    const rows = ring.timeline(&buf);
+    try std.testing.expectEqual(@as(usize, 1), rows[1].back);
+    try std.testing.expectEqual(@as(usize, 2), rows[2].back);
+    try std.testing.expectEqual(@as(u64, 7), rows[2].surface_id);
+}
+
+test "세션 순번: id 오름차순이라 링이 밀려도 안 바뀐다" {
+    var ring: Ring = .{};
+    ring.push("a1", 20, 100, 1);
+    ring.push("b1", 7, 200, 2);
+    ring.push("a2", 20, 300, 1);
+
+    try std.testing.expectEqual(@as(usize, 2), ring.sessionCount());
+    // id 가 작은 쪽이 #1 — 등장 순서(20이 먼저)와 다르다.
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(7));
+    try std.testing.expectEqual(@as(usize, 2), ring.sessionOrdinal(20));
+
+    // 스냅샷이 더 쌓여 가장 오래된 것이 밀려도 순번은 그대로다(등장 순서였다면 뒤집혔다).
+    ring.push("b2", 7, 400, 2);
+    ring.push("a3", 20, 500, 1);
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(7));
+    try std.testing.expectEqual(@as(usize, 2), ring.sessionOrdinal(20));
+}
+
+test "세션 순번: 세션이 하나면 1이고 개수도 1이다(화면은 표시를 생략한다)" {
+    var ring: Ring = .{};
+    ring.push("s1", 42, 100, 1);
+    ring.push("s2", 42, 200, 1);
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionCount());
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(42));
+}
+
+test "세션 순번: 링이 비면 개수 0(순번을 물어도 터지지 않는다)" {
+    const ring: Ring = .{};
+    try std.testing.expectEqual(@as(usize, 0), ring.sessionCount());
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(1));
 }

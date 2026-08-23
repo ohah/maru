@@ -234,6 +234,79 @@ test("clear는 스크롤백을 비우고, 프롬프트 상태에서만 ^L을 흘
   term.dispose();
 });
 
+test("onCursorMove는 위치가 바뀔 때만 온다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write(""); // 기준선 프레임 — 실사용에선 `open()` 의 초기 렌더가 이 역할을 한다
+  await settle();
+  const seen: { row: number; col: number }[] = [];
+  term.onCursorMove((c) => seen.push({ row: c.row, col: c.col }));
+
+  term.write("ab");
+  await settle();
+  expect(seen.at(-1)).toEqual({ row: 0, col: 2 });
+
+  const n = seen.length;
+  term.write("\x1b[?25l"); // 커서 숨김 — 위치는 그대로다
+  await settle();
+  expect(seen.length).toBe(n); // 모양·가시성 변화는 이동이 아니다
+
+  term.write("\r\n");
+  await settle();
+  expect(seen.at(-1)).toEqual({ row: 1, col: 0 });
+  term.dispose();
+});
+
+test("onScroll은 뷰포트나 스크롤백 길이가 바뀔 때 온다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("");
+  await settle();
+  const seen: { offset: number; length: number }[] = [];
+  term.onScroll((s) => seen.push({ ...s }));
+
+  for (let i = 0; i < 10; i++) term.write(`line ${i}\r\n`);
+  await settle();
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen.at(-1)!.length).toBeGreaterThan(0); // 스크롤백이 자랐다
+
+  const n = seen.length;
+  term.scroll(3);
+  await settle();
+  expect(seen.length).toBeGreaterThan(n);
+  expect(seen.at(-1)!.offset).toBe(3);
+  term.dispose();
+});
+
+test("onSelectionChange는 선택과 해제를 알린다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("hello world");
+  await settle();
+  const seen: (object | null)[] = [];
+  term.onSelectionChange((s) => seen.push(s));
+
+  term.selectWord(0, 1);
+  await settle();
+  expect(seen.length).toBe(1);
+  expect(seen[0]).not.toBeNull();
+
+  term.selectClear();
+  await settle();
+  expect(seen.at(-1)).toBeNull(); // 해제는 null 로 온다 — 복사 버튼을 끄는 신호
+  term.dispose();
+});
+
+test("첫 프레임은 상태 이벤트를 내지 않는다", async () => {
+  // 초기 상태를 "변화"로 내면 구독자가 마운트 직후 무의미한 알림을 받는다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const seen: string[] = [];
+  term.onCursorMove(() => seen.push("cursor"));
+  term.onScroll(() => seen.push("scroll"));
+  term.onSelectionChange(() => seen.push("sel"));
+  term.write(""); // 프레임 하나를 강제한다
+  await settle();
+  expect(seen).toEqual([]);
+  term.dispose();
+});
+
 test("alt screen에서 clear는 무동작이다", async () => {
   // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
   // 계약 §7 의 세 번째 조항.

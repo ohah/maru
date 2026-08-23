@@ -403,6 +403,52 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
     control.formFeed === 1,
     `${control.formFeed}개`,
   );
+  // **상태 이벤트는 두 모드에서 와야 한다.** 파생을 `Terminal` 한 곳에 뒀으므로 워커에서도
+  // 같은 경로를 타지만, `onRendered` 가 죽으면 조용히 안 온다 — 그 회귀를 여기서 잡는다.
+  const evs = await p.evaluate(async () => {
+    const t = (
+      globalThis as unknown as {
+        __term: {
+          write: (s: string) => void;
+          scroll: (d: number) => void;
+          selectWord: (r: number, c: number) => void;
+          selectClear: () => void;
+          onCursorMove: (cb: () => void) => { dispose(): void };
+          onScroll: (cb: () => void) => { dispose(): void };
+          onSelectionChange: (cb: (s: unknown) => void) => { dispose(): void };
+        };
+      }
+    ).__term;
+    const wait = () => new Promise((r) => setTimeout(r, 250));
+    let cursor = 0;
+    let scroll = 0;
+    const sel: unknown[] = [];
+    const subs = [
+      t.onCursorMove(() => cursor++),
+      t.onScroll(() => scroll++),
+      t.onSelectionChange((s) => sel.push(s)),
+    ];
+    t.write("evt probe");
+    await wait();
+    // 앞 검사가 `reset()` 으로 스크롤백을 비웠다 — 화면 행 수를 확실히 넘겨야 다시 쌓인다.
+    for (let i = 0; i < 80; i++) t.write(`row ${i}\r\n`);
+    await wait();
+    t.scroll(2);
+    await wait();
+    t.selectWord(0, 1);
+    await wait();
+    t.selectClear();
+    await wait();
+    for (const x of subs) x.dispose();
+    return { cursor, scroll, selCount: sel.length, lastSelNull: sel.at(-1) === null };
+  });
+  check("worker: onCursorMove 가 온다", evs.cursor > 0, `${evs.cursor}회`);
+  check("worker: onScroll 이 온다", evs.scroll > 0, `${evs.scroll}회`);
+  check(
+    "worker: onSelectionChange 가 선택·해제를 알린다",
+    evs.selCount >= 2 && evs.lastSelNull,
+    `${evs.selCount}회 · 마지막 null=${evs.lastSelNull}`,
+  );
   check(
     "worker: reset 이 스크롤백을 비운다",
     control.grew > 0 && control.afterReset === 0,

@@ -7,6 +7,7 @@ import { DEFAULT_FONT } from "./render/metrics";
 import type { Backend, BackendEvent, FrameData, MouseReport } from "./backend/types";
 import type {
   CursorShape,
+  CursorState,
   Disposable,
   FallbackReason,
   FrameMeta,
@@ -18,6 +19,17 @@ import type {
 } from "./types";
 
 const DEFAULTS = { cols: 80, rows: 24, scrollback: 1000 } as const;
+
+/** 선택 영역 동일성. 둘 다 없으면 같고, 한쪽만 없으면 다르다. */
+function sameSelection(a: FrameMeta["selection"], b: FrameMeta["selection"]): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.startRow === b.startRow &&
+    a.startCol === b.startCol &&
+    a.endRow === b.endRow &&
+    a.endCol === b.endCol
+  );
+}
 const DEFAULT_THEME: Theme = { foreground: 0xc9d1d9, background: 0x000000, cursor: 0x58a6ff };
 
 type Listener<T> = (value: T) => void;
@@ -67,6 +79,11 @@ export class Terminal {
   readonly #resize = new Emitter<Size>();
   readonly #fallback = new Emitter<FallbackReason>();
   readonly #render = new Emitter<FrameMeta>();
+  readonly #cursorMove = new Emitter<CursorState>();
+  readonly #scrollEv = new Emitter<FrameMeta["scroll"]>();
+  readonly #selectionChange = new Emitter<FrameMeta["selection"]>();
+  /** 직전 프레임 — 상태 이벤트는 여기서 파생한다(셀은 없으므로 들고 있어도 가볍다). */
+  #prevMeta: FrameMeta | null = null;
 
   constructor(opts: TerminalOptions = {}) {
     this.#opts = { ...opts };
@@ -234,7 +251,7 @@ export class Terminal {
       return;
     }
     worker = backend;
-    backend.onRendered?.((meta) => this.#render.emit(meta));
+    backend.onRendered?.((meta) => this.#publishFrame(meta));
     this.#backend = backend;
   }
 
@@ -288,7 +305,7 @@ export class Terminal {
         break;
       case "render":
         this.#frame = e.frame;
-        this.#render.emit({
+        this.#publishFrame({
           size: e.frame.size,
           cursor: e.frame.cursor,
           selection: e.frame.selection,
@@ -296,6 +313,33 @@ export class Terminal {
         });
         break;
     }
+  }
+
+  /**
+   * 프레임을 발행하고, **직전 프레임과 달라진 것만** 상태 이벤트로 낸다.
+   *
+   * 두 워커 모드가 여기로 수렴한다(로컬은 `render` 이벤트, 워커는 `onRendered`) — 파생을
+   * 여기 한 곳에 두면 모드에 따라 이벤트가 갈리지 않는다.
+   *
+   * 첫 프레임은 기준선일 뿐 발행하지 않는다. 초기 상태를 "변화"로 내면 구독자가 마운트
+   * 직후 무의미한 알림을 받는다.
+   */
+  #publishFrame(meta: FrameMeta): void {
+    const prev = this.#prevMeta;
+    this.#prevMeta = meta;
+    if (prev) {
+      // **위치만 본다.** shape·visible 은 깜빡임으로 매 프레임 토글되므로 이동으로 오해하면 안 된다.
+      if (prev.cursor.row !== meta.cursor.row || prev.cursor.col !== meta.cursor.col) {
+        this.#cursorMove.emit(meta.cursor);
+      }
+      if (prev.scroll.offset !== meta.scroll.offset || prev.scroll.length !== meta.scroll.length) {
+        this.#scrollEv.emit(meta.scroll);
+      }
+      if (!sameSelection(prev.selection, meta.selection)) {
+        this.#selectionChange.emit(meta.selection);
+      }
+    }
+    this.#render.emit(meta);
   }
 
   #need(): Backend {
@@ -528,6 +572,21 @@ export class Terminal {
    */
   onRender(cb: Listener<FrameMeta>): Disposable {
     return this.#render.on(cb);
+  }
+  /**
+   * 커서가 **다른 칸으로 옮겨갔다**. 모양·깜빡임 변화는 여기 오지 않는다 — 깜빡임은 매
+   * 프레임 토글되므로 이동과 섞이면 쓸 수 없다.
+   */
+  onCursorMove(cb: Listener<CursorState>): Disposable {
+    return this.#cursorMove.on(cb);
+  }
+  /** 뷰포트 위치나 스크롤백 길이가 바뀌었다. 스크롤바를 그리는 쪽이 쓴다. */
+  onScroll(cb: Listener<FrameMeta["scroll"]>): Disposable {
+    return this.#scrollEv.on(cb);
+  }
+  /** 선택 영역이 바뀌었다. 해제되면 `null` 이 온다(복사 버튼을 끄는 신호). */
+  onSelectionChange(cb: Listener<FrameMeta["selection"]>): Disposable {
+    return this.#selectionChange.on(cb);
   }
 
   dispose(): void {

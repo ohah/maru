@@ -128,8 +128,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 검색·클립보드(OSC 52)·화면 직렬화·이미지·
-  `onCursorMove`/`onScroll`/`onSelectionChange`·마커/장식
+- **없는 것**: 검색·클립보드(OSC 52)·화면 직렬화·이미지·마커/장식
 - **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
@@ -145,6 +144,17 @@ term.scrollToLine(120);    // 절대 행(0 = 스크롤백 최상단)을 첫 줄�
 term.scrollLines(3);       // 양수가 아래 — 휠 방향
 term.scrollPages(-1);
 ```
+
+### 상태 이벤트
+
+```ts
+term.onCursorMove((c) => console.log(c.row, c.col)); // 다른 칸으로 옮겨갔을 때만
+term.onScroll(({ offset, length }) => drawScrollbar(offset, length));
+term.onSelectionChange((sel) => (copyButton.disabled = sel === null));
+```
+
+프레임에서 파생하므로 워커 모드에서도 똑같이 온다. 커서 **모양·깜빡임**은
+`onCursorMove` 로 오지 않는다 — 깜빡임이 매 프레임 토글돼 위치 변화와 섞이면 쓸 수 없다.
 
 `clear()` 는 xterm.js 와 다르다. **셸 통합(OSC 133)이 있고 프롬프트 상태일 때만** 전체를 비우고
 커서를 홈에 둔 뒤 `\x0c`(^L)를 `onData` 로 흘린다 — 그걸 PTY 에 써야 셸이 프롬프트를 다시

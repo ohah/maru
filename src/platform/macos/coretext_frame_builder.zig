@@ -12,9 +12,7 @@ const cell_text = maru.cell_text; // 셀 투영·말줄임 방출의 공유 집(
 /// 말줄임 방출은 **공유 모듈이 소유한다**(`platform/cell_text.zig`). 여기 별칭을 두는 이유는 이 파일의
 /// 23 개 호출부가 그대로 남기 때문이다 — 옮긴 것은 코드의 집이지 호출 관계가 아니다.
 const appendEllipsizedTitle = cell_text.appendEllipsizedTitle;
-const appendCluster = cell_text.appendCluster;
 const wideIconPredicate = cell_text.wideIconPredicate;
-const wideIconGlyph = cell_text.wideIconGlyph;
 /// 도크 목록의 좌측 들여쓰기. 파일 트리 투영과 **같은 값**을 써야 해서 공유 모듈이 소유한다.
 pub const file_tree_inset_cols = cell_text.file_tree_inset_cols;
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)

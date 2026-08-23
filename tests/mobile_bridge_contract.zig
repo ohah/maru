@@ -895,6 +895,7 @@ test "끊긴 상태는 붙는 중이 아니라 끊겼다고 말한다" {
 // 세션은 산다), 사용자 뜻으로 놓을 길이 따로 필요하다 — 그것이 없어 앱을 죽이는 것 말고는
 // 끊을 방법이 없었다(사용자 요청).
 test "끊는 자리를 두드리면 host 가 가져갈 요청이 선다" {
+    openTerminal(402, 874); // 끊는 자리는 터미널 화면에만 있다
     endAnyGesture();
     _ = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_take_disconnect(); // 앞선 요청을 비운다
@@ -912,6 +913,9 @@ test "끊는 자리를 두드리면 host 가 가져갈 요청이 선다" {
     // **한 번 가져가면 사라진다** — 안 그러면 host 가 프레임마다 펌프를 세운다.
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
 
+    // **그 자리에 안 남는다** — 끊긴 터미널에서 할 수 있는 것은 뒤로가기뿐이다(사용자 확정).
+    try std.testing.expectEqualStrings("sessions", bridge.currentScreenName());
+
     endAnyGesture();
     bridge.maru_mobile_clear_error();
 }
@@ -919,6 +923,7 @@ test "끊는 자리를 두드리면 host 가 가져갈 요청이 선다" {
 // **밀면 안 끊는다.** 그 띠에서 손가락을 끌면 누르려던 것이 아니라 다른 것을 하려던 것이다 —
 // 끊는 일은 되돌릴 수 없으니 다른 버튼보다 더 확실할 때만 나가야 한다.
 test "끊는 자리에서 손가락을 끌면 안 끊는다" {
+    openTerminal(402, 874);
     endAnyGesture();
     _ = bridge.maru_mobile_build(402, 874, now());
     _ = bridge.maru_mobile_take_disconnect();
@@ -929,6 +934,8 @@ test "끊는 자리에서 손가락을 끌면 안 끊는다" {
     bridge.maru_mobile_pointer(1, 0, at.x, at.y + 80, now()); // 임계를 넘겨 끈다
     bridge.maru_mobile_pointer(2, 0, at.x, at.y + 80, now());
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_take_disconnect());
+    // 화면도 그대로다 — 끊지 않았으면 나갈 이유도 없다.
+    try std.testing.expectEqualStrings("terminal", bridge.currentScreenName());
 
     endAnyGesture();
     bridge.maru_mobile_clear_error();

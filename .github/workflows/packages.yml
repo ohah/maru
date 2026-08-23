@@ -56,6 +56,15 @@ jobs:
           restore-keys: |
             bun-packages-${{ runner.os }}-
       - run: bun install --cwd packages --frozen-lockfile
+      # `packages:check` 는 `test:browser` 까지 돈다 — 브라우저 바이너리를 먼저 받아야 한다.
+      # 캐시 키에 playwright 버전을 넣어 올릴 때마다 새로 받는다.
+      - uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('packages/bun.lock') }}
+      - if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: bunx --cwd packages playwright install --with-deps chromium
       - run: mise run packages:check
       - name: Upload bundle evidence
         if: always()

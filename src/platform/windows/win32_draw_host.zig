@@ -242,6 +242,23 @@ pub const Host = struct {
         colors: maru.renderer.metal_frame.CellColors,
         cells: *std.ArrayList(d3d11_cells.Cell),
     ) !usize {
+        return self.appendGlyphCellsAt(allocator, frame, colors, 0, 0, cells);
+    }
+
+    /// 같은 일을 하되 프레임을 **창의 특정 픽셀 자리**에 놓는다(§2m.31 — 터미널이 도크 옆에 선다).
+    ///
+    /// 원점은 셀마다 찍는다 — `cellFromNative` 가 `origin + col*cell_w` 로 자리를 만들기 때문이다.
+    /// 그 찍는 일은 **중립이 소유한다**(`metal_frame.setCellsPaneOrigin`): 두 필드 중 하나만 쓰면
+    /// 프레임이 대각선으로 어긋난다.
+    pub fn appendGlyphCellsAt(
+        self: *const Host,
+        allocator: std.mem.Allocator,
+        frame: maru.renderer.RenderFrame,
+        colors: maru.renderer.metal_frame.CellColors,
+        origin_x_px: u32,
+        origin_y_px: u32,
+        cells: *std.ArrayList(d3d11_cells.Cell),
+    ) !usize {
         const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
             allocator,
             frame.glyph_quad_frame,
@@ -249,6 +266,7 @@ pub const Host = struct {
             colors,
         );
         defer allocator.free(native);
+        maru.renderer.metal_frame.setCellsPaneOrigin(native, origin_x_px, origin_y_px);
         try cells.ensureUnusedCapacity(allocator, native.len);
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, self.cell_w, self.cell_h, self.atlas_w, self.atlas_h));
         return native.len;

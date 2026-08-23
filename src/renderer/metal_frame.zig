@@ -1240,7 +1240,13 @@ fn setCellsClipIndex(cells: []NativeMetalCell, index: u16) void {
     for (cells) |*c| c.clip_index = index;
 }
 
-fn setCellsPaneOrigin(cells: []NativeMetalCell, origin_x: u32, origin_y: u32) void {
+/// pane 하나의 셀 전부에 **픽셀 원점**을 찍는다. 셀 자리는 `origin + col*cw` 로 나므로, 이 값이
+/// "이 프레임을 창 어디에 놓는가" 다.
+///
+/// **공개인 이유**: macOS 는 분할 pane 을 놓는 데 쓰고, Windows 는 같은 것으로 **터미널을 도크 옆에**
+/// 놓는다(§2m.31). 호출자가 각자 `for (cells) |*c| c.origin_x = …` 를 적으면 두 필드 중 하나를
+/// 빠뜨리는 순간 프레임이 대각선으로 어긋난다.
+pub fn setCellsPaneOrigin(cells: []NativeMetalCell, origin_x: u32, origin_y: u32) void {
     for (cells) |*c| {
         c.origin_x = origin_x;
         c.origin_y = origin_y;

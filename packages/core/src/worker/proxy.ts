@@ -1,4 +1,5 @@
 import type { Backend, BackendEvent, FrameData, MouseReport } from "../backend/types";
+import type { FrameMeta } from "../types";
 import type { CursorShape, KeyInput, Size, Snapshot, Theme } from "../types";
 import type { FromWorker, ToWorker, WorkerRenderOptions } from "./protocol";
 import { defaultWasmUrl } from "../wasm/loader";
@@ -13,6 +14,12 @@ import { defaultWasmUrl } from "../wasm/loader";
 export class WorkerBackend implements Backend {
   #worker: Worker;
   #cb: ((e: BackendEvent) => void) | null = null;
+  /** 프레임 요약 수신자(셀은 오지 않는다). */
+  #onRendered: ((m: FrameMeta) => void) | null = null;
+  onRendered(cb: (m: FrameMeta) => void): void {
+    this.#onRendered = cb;
+  }
+
   #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   #nextId = 1;
   #ready: Promise<void>;
@@ -43,6 +50,10 @@ export class WorkerBackend implements Backend {
       const msg = ev.data;
       if (msg.t === "ready") {
         resolveReady();
+        return;
+      }
+      if (msg.t === "rendered") {
+        self.#onRendered?.(msg.meta);
         return;
       }
       if (msg.t === "event") {

@@ -26,7 +26,7 @@ export interface DomTarget {
   selectClear(): void;
   selectionText(): Promise<string | null>;
   linkAt(row: number, col: number): Promise<string | null>;
-  onRender(cb: (f: FrameData) => void): { dispose(): void };
+  onRender(cb: (m: import("../types").FrameMeta) => void): { dispose(): void };
   readonly frame: FrameData | null;
   readonly size: { cols: number; rows: number };
 }
@@ -356,13 +356,20 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     // 워커 모드에는 메인에 프레임이 없다. 좌표가 바뀔 때만 코어에 물어본다.
     if (row === hoverCell[0] && col === hoverCell[1]) return;
     hoverCell = [row, col];
-    void term.linkAt(row, col).then((uri) => {
-      const next = uri ? 1 : 0;
-      if (next !== hoverLink) {
-        hoverLink = next;
-        canvas.style.cursor = uri ? "pointer" : "default";
-      }
-    });
+    // `.catch` 가 필요하다 — `WorkerBackend.dispose()` 는 in-flight 조회를 일부러 reject 하므로,
+    // 포인터를 캔버스에 둔 채 언마운트하면 미처리 거부가 되어 Vite/Next 에러 오버레이가 뜬다.
+    void term
+      .linkAt(row, col)
+      .then((uri) => {
+        const next = uri ? 1 : 0;
+        if (next !== hoverLink) {
+          hoverLink = next;
+          canvas.style.cursor = uri ? "pointer" : "default";
+        }
+      })
+      .catch(() => {
+        // 터미널이 사라졌다 — 커서 모양은 의미가 없다.
+      });
   };
 
   const onMouseUp = (ev: MouseEvent) => {
@@ -376,9 +383,12 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   const onClick = (ev: MouseEvent) => {
     if (!hoverLink) return;
     const [row, col] = cellOf(ev);
-    void term.linkAt(row, col).then((uri) => {
-      if (uri) globalThis.open(uri, "_blank", "noopener");
-    });
+    void term
+      .linkAt(row, col)
+      .then((uri) => {
+        if (uri) globalThis.open(uri, "_blank", "noopener");
+      })
+      .catch(() => {});
   };
 
   const onWheel = (ev: WheelEvent) => {

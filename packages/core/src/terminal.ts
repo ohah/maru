@@ -9,6 +9,7 @@ import type {
   CursorShape,
   Disposable,
   FallbackReason,
+  FrameMeta,
   KeyInput,
   Size,
   Snapshot,
@@ -65,7 +66,7 @@ export class Terminal {
   readonly #preedit = new Emitter<string>();
   readonly #resize = new Emitter<Size>();
   readonly #fallback = new Emitter<FallbackReason>();
-  readonly #render = new Emitter<FrameData>();
+  readonly #render = new Emitter<FrameMeta>();
 
   constructor(opts: TerminalOptions = {}) {
     this.#opts = { ...opts };
@@ -83,6 +84,11 @@ export class Terminal {
   }
 
   /** 마지막으로 발행된 프레임. 렌더러가 붙기 전에도 읽을 수 있다. */
+  /**
+   * 마지막 프레임(셀 포함). **`worker: false` 에서만 유효하다** — 워커 모드에서는 셀이 워커
+   * 메모리에 있고 동기로 읽을 방법이 없어(SharedArrayBuffer 를 쓰지 않는다) 항상 `null` 이다.
+   * 화면 내용이 필요하면 `snapshot()` 을, 갱신 알림만 필요하면 `onRender` 를 쓴다.
+   */
   get frame(): FrameData | null {
     return this.#frame;
   }
@@ -228,6 +234,7 @@ export class Terminal {
       return;
     }
     worker = backend;
+    backend.onRendered?.((meta) => this.#render.emit(meta));
     this.#backend = backend;
   }
 
@@ -281,7 +288,12 @@ export class Terminal {
         break;
       case "render":
         this.#frame = e.frame;
-        this.#render.emit(e.frame);
+        this.#render.emit({
+          size: e.frame.size,
+          cursor: e.frame.cursor,
+          selection: e.frame.selection,
+          scroll: e.frame.scroll,
+        });
         break;
     }
   }
@@ -378,8 +390,39 @@ export class Terminal {
     this.#backend?.setCursorShape(shape);
   }
 
+  /**
+   * 옵션을 바꾼다. **할 수 있는 것은 실제로 적용한다** — 격자는 `resize()` 로, 폰트는 받아서
+   * 등록하고 격자를 다시 잰다.
+   *
+   * `worker` 와 `wasmUrl` 만 바꿀 수 없다. 둘 다 이미 만들어진 워커·wasm 인스턴스를 갈아야 해서
+   * 사실상 재생성이고, 그러면 화면과 스크롤백이 사라진다 — 조용히 버리지 않고 알린다.
+   */
   setOptions(opts: Partial<TerminalOptions>): void {
+    const immutable = (["worker", "wasmUrl"] as const).filter((k) => opts[k] !== undefined);
+    if (immutable.length > 0) {
+      console.warn(
+        `maru-term: ${immutable.join(", ")} 은 열 때 정해진다 — 바꾸려면 새 Terminal 을 만들어라`,
+      );
+    }
     this.#opts = { ...this.#opts, ...opts };
+    // 격자를 명시했으면 그대로 맞춘다(컨테이너 추종은 그 순간 꺼진다 — 사용자가 정한 값이 이긴다).
+    if (opts.cols !== undefined || opts.rows !== undefined) {
+      this.#resizeObserver?.disconnect();
+      this.#resizeObserver = null;
+      // **열기 전이면 `#size` 만 고쳐 둔다.** 백엔드가 아직 없어 `resize()` 는 던진다 —
+      // 래퍼는 `open()` 보다 먼저 `update()` 로 옵션을 넘길 수 있다(React 의 첫 렌더).
+      const next = { cols: opts.cols ?? this.#size.cols, rows: opts.rows ?? this.#size.rows };
+      if (this.#backend) this.resize(next.cols, next.rows);
+      else this.#size = next;
+    }
+    // 폰트는 나중에도 켤 수 있다 — 받아서 등록한 뒤 격자를 다시 재고 그린다.
+    if (opts.loadFont === "jetendard" || opts.fontUrl !== undefined) {
+      void loadBundledFont(this.#opts.fontUrl).then(() => {
+        if (this.#disposed || !this.#dom) return;
+        this.#dom?.setOptions(this.#attachOptions());
+        this.#dom?.fit();
+      });
+    }
     this.#applyOptions();
     if (
       this.#dom &&
@@ -387,7 +430,8 @@ export class Terminal {
         opts.fontSize ||
         opts.lineHeight ||
         opts.theme ||
-        opts.ligatures !== undefined)
+        opts.ligatures !== undefined ||
+        opts.cursorShape !== undefined)
     ) {
       this.#dom.setOptions(this.#attachOptions());
       (this.#backend as WorkerBackend | null)?.setRenderOptions?.({
@@ -440,7 +484,14 @@ export class Terminal {
   onFallback(cb: Listener<FallbackReason>): Disposable {
     return this.#fallback.on(cb);
   }
-  onRender(cb: Listener<FrameData>): Disposable {
+  /**
+   * 한 프레임이 그려졌다. **셀은 오지 않는다**(`FrameMeta`) — 워커 모드에서 매 프레임 셀
+   * 버퍼를 왕복시키면(4K 에서 66 MB/s) 렌더를 워커로 옮긴 이유가 사라진다. 셀이 필요하면
+   * `snapshot()` 으로 그때 가져간다.
+   *
+   * 두 모드에서 모두 온다. 구독자가 없으면 워커는 아무것도 보내지 않는다.
+   */
+  onRender(cb: Listener<FrameMeta>): Disposable {
     return this.#render.on(cb);
   }
 

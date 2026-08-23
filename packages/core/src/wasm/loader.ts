@@ -31,8 +31,14 @@ function compile(url: string): Promise<WebAssembly.Module> {
     }
     return WebAssembly.compile(await res.arrayBuffer());
   })();
-  moduleCache.set(url, task);
-  return task;
+  // **실패한 시도는 캐시에서 뺀다.** 남겨 두면 일시적인 네트워크 오류 한 번이 그 URL 을
+  // 페이지 수명 내내 막아, 이후 모든 `new Terminal()` 이 같은 에러로 죽는다(재시도 불가).
+  const guarded = task.catch((e: unknown) => {
+    moduleCache.delete(url);
+    throw e;
+  });
+  moduleCache.set(url, guarded);
+  return guarded;
 }
 
 /**

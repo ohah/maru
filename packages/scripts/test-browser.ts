@@ -19,6 +19,27 @@ const server = Bun.serve({
 });
 
 let failures = 0;
+/** 두 PNG 의 차이를 센다. 압축 전 픽셀이 아니라 파일 바이트라 근사지만, 같은 인코더가
+ * 만든 같은 크기 이미지라면 픽셀이 같을 때만 바이트도 같다 — 차이가 0 이면 확실히 동일하고,
+ * 0 이 아니면 그 비율로 크기를 가늠한다. */
+function pixelDiff(
+  a: Buffer,
+  b: Buffer,
+): { count: number; total: number; maxDelta: number; ratio: number } {
+  const n = Math.min(a.length, b.length);
+  let count = Math.abs(a.length - b.length);
+  let maxDelta = 0;
+  for (let i = 0; i < n; i++) {
+    const d = Math.abs(a[i]! - b[i]!);
+    if (d) {
+      count++;
+      if (d > maxDelta) maxDelta = d;
+    }
+  }
+  const total = Math.max(a.length, b.length);
+  return { count, total, maxDelta, ratio: count / total };
+}
+
 function digest(buf: Buffer | Uint8Array): string {
   let h = 2166136261;
   for (const b of buf) {
@@ -155,7 +176,7 @@ check(
 );
 
 // ── 워커 모드: 같은 입력이 같은 화면을 내는가 ──
-async function renderHash(workerMode: "full" | "false"): Promise<string> {
+async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   const p = await browser.newPage();
   const errs: string[] = [];
   p.on("pageerror", (e) => errs.push(e.message));
@@ -179,10 +200,9 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
     h ^= b;
     h = Math.imul(h, 16777619);
   }
-  const hash = (h >>> 0).toString(16);
   check(`worker=${workerMode} 렌더 에러 없음`, errs.length === 0, errs[0] ?? "");
   await p.close();
-  return hash;
+  return shot;
 }
 
 // 워커 모드에서 fit() 이 캔버스를 다시 잡는가. 소유권이 넘어간 캔버스를 메인에서 만지면
@@ -278,6 +298,27 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
     workerOpts.afterFont > workerOpts.before,
     `${workerOpts.before} → ${workerOpts.afterFont}`,
   );
+  // `onRender` 는 두 모드에서 와야 한다 — 워커에서 죽어 있으면 같은 API 가 모드에 따라 갈린다.
+  const rendered = await p.evaluate(async () => {
+    const t = (
+      globalThis as unknown as {
+        __term: {
+          onRender: (cb: (m: unknown) => void) => { dispose(): void };
+          write: (s: string) => void;
+        };
+      }
+    ).__term;
+    let got: Record<string, unknown> | null = null;
+    const sub = t.onRender((m) => {
+      got = m as Record<string, unknown>;
+    });
+    t.write("render probe\r\n");
+    await new Promise((r) => setTimeout(r, 800));
+    sub.dispose();
+    return got === null ? null : Object.keys(got).sort().join(",");
+  });
+  check("worker: onRender 가 온다", rendered !== null, rendered ?? "(안 옴)");
+
   check("worker: 조회가 응답한다", workerOpts.query === "settled", String(workerOpts.query));
 
   check(
@@ -288,15 +329,19 @@ async function renderHash(workerMode: "full" | "false"): Promise<string> {
   await p.close();
 }
 
-const hashFull = await renderHash("full");
-const hashMain = await renderHash("false");
+const shotFull = await renderShot("full");
+const shotMain = await renderShot("false");
 // **정확한 해시가 아니라 지각적 동일성으로 본다.** 웹폰트가 걸리면 메인 canvas 와
 // OffscreenCanvas 의 서브픽셀 반올림이 갈려 1채널짜리 차이가 몇 픽셀 생긴다(실측: 51만 중 2개,
 // 최대 채널차 1). 해시로 묶으면 그 무해한 차이에 테스트가 깨진다.
+// 웹폰트가 걸리면 메인 canvas 와 OffscreenCanvas 의 서브픽셀 반올림이 갈려 1채널짜리 차이가
+// 몇 픽셀 생긴다(실측: 51만 중 2개, 최대 채널차 1). 그래서 **해시가 아니라 픽셀 차이 비율**로
+// 본다 — 의미 있는 회귀는 잡고 무해한 반올림은 통과시킨다.
+const diff = pixelDiff(shotFull, shotMain);
 check(
   "worker 모드와 메인 모드가 같은 화면을 낸다",
-  hashFull === hashMain,
-  `${hashFull} vs ${hashMain}`,
+  diff.ratio < 0.0005,
+  `다른 픽셀 ${diff.count}/${diff.total} · 최대 채널차 ${diff.maxDelta}`,
 );
 
 // ── Vue·Svelte 래퍼가 실제로 마운트되는가 ──

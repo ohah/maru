@@ -42,6 +42,16 @@ let metrics: import("../render/types").Metrics | null = null;
 function redraw(): void {
   if (lastFrame && opts) {
     renderer.draw(lastFrame, { theme: opts.theme, ligatures: opts.ligatures, preedit, blinkOn });
+    // 셀은 빼고 요약만 올린다 — 앱의 `onRender` 가 워커 모드에서도 살아 있어야 한다.
+    post({
+      t: "rendered",
+      meta: {
+        size: lastFrame.size,
+        cursor: lastFrame.cursor,
+        selection: lastFrame.selection,
+        scroll: lastFrame.scroll,
+      },
+    });
   }
 }
 

@@ -7,7 +7,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 도구 설치/선택: `mise install`
 - Zig 버전 확인: `zig version`
 - mise가 선택한 Zig 확인: `mise current zig`
-- Bun 버전 확인: `mise current bun` (`web/` 파일 패널 패키지는 정확히 1.3.11)
+- Bun 버전 확인: `mise current bun`. `.mise.toml` 이 단일 출처다(현재 1.4.0) — `web/` 과 `packages/` 가 같은 툴체인을 쓴다.
 
 테스트된 Zig 버전은 정확히 `0.16.0`이다(`.mise.toml`, `build.zig.zon`의 `minimum_zig_version`). 0.16 개발 주기에서 `std.Io`(I/O 인터페이스), Writer/Reader, process 진입 API가 크게 바뀌었으므로, 같은 `0.16.0`이라도 다른 스냅샷/커밋에서는 빌드가 깨질 수 있다. 빌드가 std API 불일치로 실패하면 먼저 `mise current zig`로 정확한 버전을 확인한다.
 

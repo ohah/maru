@@ -55,6 +55,19 @@ pub const GlyphRecord = struct {
     font_name: [128]u8 = @splat(0),
 };
 
+/// 굵기. **숫자는 CSS 축**(400 = regular)이라 그대로 DirectWrite `DWRITE_FONT_WEIGHT` 다.
+///
+/// `u32` 가 아니라 enum 인 이유: 전에는 `u32` 였고, 호출부가 CoreText 브리지의 기호값(regular = 0,
+/// bold = 1)을 넣었다. DirectWrite 는 0 을 거절하고 그 실패가 `ShapeFailed` 로 접혀 **그 run 만
+/// 조용히 사라졌다** — 소스 컨트롤 화면에서 요약 숫자와 파일 행의 디렉터리 꼬리가 안 보이는데
+/// 측정 숫자는 전부 초록이었다(§2m.28). 범위를 검사하는 테스트로는 **호출부가 안 걸린다**(그 테스트는
+/// 이 함수만 본다). enum 이면 기호값이 애초에 컴파일이 안 된다.
+pub const Weight = enum(u32) {
+    regular = 400,
+    medium = 500,
+    semibold = 600,
+};
+
 pub const Request = struct {
     /// UTF-8. 빈 문자열이면 결과도 비어 있다.
     text: []const u8,
@@ -63,7 +76,7 @@ pub const Request = struct {
     /// config `font.fallback`(쉼표 구분).
     fallback_csv: []const u8,
     size_px: f32,
-    weight: u32 = 400,
+    weight: Weight = .regular,
     /// 0 이면 안 자른다.
     max_width_px: f32 = 0,
     /// `false` = 뒤를 자른다(`…` 뒤). `true` = 앞을 자른다.

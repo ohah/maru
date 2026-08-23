@@ -1267,6 +1267,18 @@ pub fn emptyDrawList(allocator: std.mem.Allocator, glyph_count: usize) !renderer
     };
 }
 
+/// 타이포그래피 role → **이음매 굵기**. `weight()` 의 0/1 은 CoreText 브리지 전용 기호값이라
+/// 서로 바꿔 쓰면 안 된다 — 이름이 비슷해 실제로 섞였고, 이제 타입이 다르므로 안 섞인다.
+fn seamWeight(role: chrome.ui.typography.ChromeTextRole) maru.text_shaper.Weight {
+    return switch (chrome.ui.typography.token(role).weight) {
+        .regular => .regular,
+        .medium => .medium,
+        .semibold => .semibold,
+    };
+}
+
+/// **CoreText 브리지 전용 기호값**(0 = regular, 1 = bold trait). 이름이 짧아 이음매 쪽과 헷갈리기
+/// 쉬우니 위 `cssWeight` 와 나란히 둔다.
 fn weight(role: chrome.ui.typography.ChromeTextRole) u32 {
     return switch (chrome.ui.typography.token(role).weight) {
         .regular => 0,
@@ -1426,7 +1438,11 @@ fn shapeViaSeam(
         .family = face.family,
         .fallback_csv = face.fallback,
         .size_px = @floatCast(scaled_size),
-        .weight = weight(run.role),
+        // **이음매의 weight 는 CSS 축(100~900)이다** — `weight()` 가 내는 0/1 은 CoreText 브리지의
+        // 기호값이라 여기 넣으면 안 된다. DirectWrite 는 0 을 거절하고, 그 실패가
+        // `CoreTextChromeTextShapeFailed` 로 접혀 **그 run 만 조용히 사라진다**(실측: 요약 숫자와
+        // 파일 행의 디렉터리 꼬리가 안 나왔다).
+        .weight = seamWeight(run.role),
         .max_width_px = @floatFromInt(run.max_width_px),
         .anchor_tail = run.anchor == .tail,
     }, records) catch return error.CoreTextChromeTextShapeFailed;
@@ -1638,4 +1654,17 @@ test "chrome text shaping reuses one face across roles instead of rebuilding it 
     try std.testing.expect(same_role.median_ns > 0);
     try std.testing.expect(varied_role.median_ns > 0);
     try std.testing.expect(after_overflow.median_ns > 0);
+}
+
+test "role 마다 이음매 굵기가 있다 — 표가 늘면 여기서 걸린다" {
+    // 진짜 방어는 타입이다(`Weight` enum — 기호값 0 은 컴파일이 안 된다). 이 테스트가 보는 것은
+    // **표가 늘어났을 때 여기가 같이 늘었는가** 하나뿐이다.
+    for (std.enums.values(chrome.ui.typography.ChromeTextRole)) |role| {
+        const want: maru.text_shaper.Weight = switch (chrome.ui.typography.token(role).weight) {
+            .regular => .regular,
+            .medium => .medium,
+            .semibold => .semibold,
+        };
+        try std.testing.expectEqual(want, seamWeight(role));
+    }
 }

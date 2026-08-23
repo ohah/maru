@@ -614,7 +614,7 @@ pub const Shaper = struct {
         var fmt_raw: ?*IDWriteTextFormat = null;
         const create_format: *const fn (*IDWriteFactory2, [*:0]const u16, ?*anyopaque, UINT, UINT, UINT, f32, [*:0]const u16, *?*IDWriteTextFormat) callconv(abi.winapi) HRESULT =
             @ptrCast(@alignCast(self.factory.vtable.head[15]));
-        try check(create_format(self.factory, @ptrCast(&primary_w), format_collection, req.weight, 0, 5, req.size_px, locale, &fmt_raw), error.FormatFailed);
+        try check(create_format(self.factory, @ptrCast(&primary_w), format_collection, @intFromEnum(req.weight), 0, 5, req.size_px, locale, &fmt_raw), error.FormatFailed);
         const fmt = fmt_raw orelse return error.FormatFailed;
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(fmt)));
 

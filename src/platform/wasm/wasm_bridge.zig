@@ -225,8 +225,15 @@ export fn vt_view_offset(h: *anyopaque) u32 {
     return @intCast(core.view_offset);
 }
 /// 스크롤백에 쌓인 행 수 = `view_offset` 의 최대값.
+///
+/// **지연된 재-wrap 을 먼저 끝낸다.** 폭이 바뀌면 스크롤백 행 수가 달라지는데 그 재-wrap 은
+/// 지연된다(`screen.rewrap_pending`). `scrollbackLen()` 은 그걸 강제하지 않으므로 리사이즈
+/// 직후에는 옛 폭 기준 행 수가 나온다 — 40→20 열에서 27 행이 57 행이 되는데 30 을 보고했다
+/// (실측). 그 값으로 `scrollToTop` 이 델타를 잡으면 절반만 올라간다. `scrollViewport` 는
+/// 이미 같은 이유로 진입할 때 재-wrap 을 끝낸다.
 export fn vt_scrollback_len(h: *anyopaque) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    core.scrollViewport(0); // 재-wrap 만 유발한다 — 델타 0 이라 위치도 dirty 도 안 바뀐다
     return @intCast(core.scrollbackLen());
 }
 /// 화면을 지운다(⌘K). 반환 1은 **셸에 form feed(^L)를 보내야 한다**는 뜻이다 —

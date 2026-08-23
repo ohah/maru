@@ -2764,6 +2764,39 @@ macOS `coretext_raster.zig` 도 이제 그 함수를 쓴다.
 **소비자는 다음 슬라이스다.** 이 절은 길을 열었을 뿐 아직 아무 표면도 그 길로 안 간다 — 그것을
 "된다" 고 말할 수 없는 상태라는 뜻이다. 소스 컨트롤 표면(W8.4⒝)이 첫 소비자로 이어진다.
 
+**실제로 돌려 보니 글자가 하나도 안 나왔다.** 단위 테스트는 다 초록이었고, 스모크 숫자도
+`branch_drawn=true names_matched=5/5 row_hits=5/5 atlas_region_uploads=42` 로 전부 성공이라고 했다.
+화면에는 아이콘·배지·밑줄만 있었다.
+
+**보고서 한 줄이 범인이었다** — `renderer_glyph_raster_zero_ink_count=37`(업로드 42 중). 래스터라이저가
+빈 비트맵을 냈다.
+
+**두 폰트 id 체계가 달랐다.** `resolveArtifact` 는 `font_id = registry.intern(postscript_name)` 로 붙이는데
+Windows 래스터라이저는 `fontIdForFace` 인코딩(`face_font_id_base + index`)을 기대한다. 그래서
+`faceIndexFromFontId` 가 `null` 을 냈고, 호출부가 그것을 **"잉크 없는 글자"** 로 접었다. 아이콘만 보인
+이유도 여기 있다 — 아이콘은 `font_id = 0` 에 합성 경로라 이 분기를 안 탄다.
+
+고친 것 둘:
+
+- **이름으로 face 를 찾는 길**을 냈다. `Rasterizer` 가 열린 face 마다 이름을 기억하고
+  (`faceIndexForName`), `NeutralRasterizer` 가 `FontIdentityRegistry` 를 들고 id → 이름 → face 로 간다.
+  macOS 가 native 래스터라이저에 PostScript 이름을 직접 넘기는 것의 Windows 짝이다.
+- **조용한 zero-ink 를 없앴다.** face 를 못 찾은 것은 "잉크가 없는 글자" 가 아니라 오류다
+  (`RasterizerFailed` → `error_skip` 으로 센다). 그렇게 접혀 있어서 **빈 화면이 초록으로 보고**됐다.
+
+고친 뒤: `zero_ink 37 → 1`, `error_skip=0`, 그리고 화면에 탭 바·섹션·파일 목록·브랜치 줄이 제대로
+나온다. **셀 격자판에 있던 빈 행도 없다** — 자유 픽셀 배치라 24px 행이 그대로 선다.
+
+> **"컴파일된다 ≠ 돈다" 를 또 밟았다.** 이번엔 한 단계 더 나쁜 모양이었다 — **판정까지 초록인데
+> 화면이 비어 있었다.** 스모크가 그리는 것을 안 보고 숫자만 봤으면 그대로 머지됐을 것이고, 사용자가
+> *"실제 실행까지 해보신 걸까요"* 라고 묻지 않았으면 못 찾았다.
+
+**남은 것 하나(보고).** 파일 행의 **디렉터리 꼬리**(`docs/`·`src/`)가 안 그려진다. 자리는 좁혔다 —
+`prepareRequest` 는 그 run 을 넉넉한 예산(630px)으로 담고 있고, `resolveArtifact` 가 **이어 붙인 run 의
+누적 폭**으로 다시 재 그 글리프를 버린다(그 자리 주석: *"잘리는 편이 옆 요소를 덮는 것보다 낫다"*).
+그 계산이 왜 630px 예산에서 걸리는지는 다음 슬라이스가 잰다 — 셀 격자판에서는 나왔으므로 **measured
+경로 고유의 문제**다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

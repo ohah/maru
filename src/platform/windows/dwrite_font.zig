@@ -500,6 +500,12 @@ pub const Rasterizer = struct {
     /// **셰이핑 다리(§2m.13)가 이것을 layout 에 넘긴다** — 그쪽은 이름으로만 폰트를 찾는다.
     bundled: ?*IDWriteFontCollection = null,
     face_count: usize = 0,
+    /// 열린 face 마다의 **이름**. measured 텍스트가 폰트를 `FontIdentityRegistry` 의 이름으로
+    /// 가리키므로(`resolveArtifact` 가 `intern(postscript_name)` 한다), 그 이름을 face 로 되돌리려면
+    /// 여기 있어야 한다. 이름이 없으면 `faceIndexForName` 이 늘 실패하고, 그 실패가 조용한 zero-ink 로
+    /// 접혀 **화면에 글자가 하나도 안 나온다**(실측으로 그렇게 됐다).
+    face_names: [max_faces][64]u8 = @splat(@splat(0)),
+    face_name_len: [max_faces]usize = @splat(0),
     /// 실제로 고른 주 폰트 이름(진단·보고용). `family_name_buf`를 가리킨다.
     family: []const u8,
     family_name_buf: [128]u8 = undefined,
@@ -512,6 +518,26 @@ pub const Rasterizer = struct {
     /// 이 값 없이는 `cellMetricsFrom` 테스트가 무엇을 흉내 내는지 확인할 수 없다.
     design: DesignMetrics = .{},
     allocator: std.mem.Allocator,
+
+    fn rememberFaceName(self: *Rasterizer, index: usize, name: []const u8) void {
+        const n = @min(name.len, self.face_names[index].len);
+        @memcpy(self.face_names[index][0..n], name[0..n]);
+        self.face_name_len[index] = n;
+    }
+
+    /// 이름으로 열린 face 를 찾는다. **measured 텍스트가 쓰는 길이다** — 그쪽은 폰트를
+    /// `FontIdentityRegistry` 의 이름으로 가리키지 `fontIdForFace` 인코딩으로 가리키지 않는다.
+    ///
+    /// 대소문자를 무시한다 — DirectWrite 가 돌려주는 가족 이름과 config·티어에 적힌 이름이 늘 같은
+    /// 표기는 아니다(`fallbackCandidates` 도 같은 이유로 그렇게 비교한다).
+    pub fn faceIndexForName(self: *const Rasterizer, name: []const u8) ?usize {
+        if (name.len == 0) return null;
+        for (0..self.face_count) |i| {
+            const have = self.face_names[i][0..self.face_name_len[i]];
+            if (std.ascii.eqlIgnoreCase(have, name)) return i;
+        }
+        return null;
+    }
 
     pub const DesignMetrics = struct {
         upem: u16 = 0,
@@ -777,6 +803,7 @@ pub const Rasterizer = struct {
         for (candidates) |name| {
             if (resolveFaceAnywhere(collection.?, self.bundled, name, true)) |f| {
                 self.faces[0] = f;
+                self.rememberFaceName(0, name);
                 self.face_count = 1;
                 chosen = name;
                 break;
@@ -790,6 +817,7 @@ pub const Rasterizer = struct {
             if (self.face_count == max_faces) break;
             if (resolveFaceAnywhere(collection.?, self.bundled, name, false)) |f| {
                 self.faces[self.face_count] = f;
+                self.rememberFaceName(self.face_count, name);
                 self.face_count += 1;
             }
         }

@@ -200,8 +200,16 @@ pub const Host = struct {
         };
         errdefer frame.deinit(allocator);
 
-        // **아틀라스가 커지면 파이프라인 텍스처도 따라가야 한다.** 안 그러면 UV 가 옛 크기 기준이라
-        // 글자가 엉뚱한 자리를 가리킨다.
+        try self.syncAtlas();
+        return .{ .frame = frame, .region_uploads = self.uploadAtlasRegions(frame) };
+    }
+
+    /// **아틀라스가 커지면 파이프라인 텍스처도 따라가야 한다.** 안 그러면 UV 가 옛 크기 기준이라
+    /// 글자가 엉뚱한 자리를 가리킨다.
+    ///
+    /// `prepare` 밖으로 낸 이유는 **measured 텍스트가 프레임을 다른 길로 만들기 때문**이다
+    /// (`buildFrameFromGlyphRunListWithRasterizer` — §2m.27). 그쪽도 이 둘은 똑같이 해야 한다.
+    pub fn syncAtlas(self: *Host) !void {
         const now_w = self.renderer_state.atlas.config.atlas_width_px;
         const now_h = self.renderer_state.atlas.config.atlas_height_px;
         if (now_w != self.atlas_w or now_h != self.atlas_h) {
@@ -209,15 +217,18 @@ pub const Host = struct {
             self.atlas_w = now_w;
             self.atlas_h = now_h;
         }
+    }
 
-        var region_uploads: usize = 0;
+    /// 이번 프레임이 새로 구운 글리프를 아틀라스 텍스처에 올린다. **올린 영역 수**를 준다.
+    pub fn uploadAtlasRegions(self: *Host, frame: maru.renderer.RenderFrame) usize {
+        var n: usize = 0;
         const rf = frame.glyph_raster_frame;
         for (rf.uploads) |up| {
             const bytes = rf.pixels[up.bytes_offset..][0..up.byte_count];
             self.pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch continue;
-            region_uploads += 1;
+            n += 1;
         }
-        return .{ .frame = frame, .region_uploads = region_uploads };
+        return n;
     }
 
     /// 프레임의 글리프를 셀 배열 **뒤에 잇는다.** 배경 쿼드를 앞에 넣고 싶으면 부르기 전에 넣는다 —

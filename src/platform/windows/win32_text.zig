@@ -89,10 +89,35 @@ pub const NeutralRasterizer = struct {
     font_size_pt: f32 = 0,
     /// 창 배율(밀리). 논리 pt → device px 로 바꿀 때 곱한다.
     scale_milli: u32 = 1000,
+    /// measured 텍스트가 쓰는 폰트 이름 표. **없으면 그 경로가 통째로 빈 화면이 된다** — 아래
+    /// `faceFor` 의 doc 참고.
+    registry: ?*const renderer.FontIdentityRegistry = null,
 
     /// 슬롯 하나가 최대로 필요한 스크래치. `cell_w`는 **두 칸 글자를 포함한** 최대 슬롯 폭이어야 한다.
     pub fn scratchSizeFor(cell_w: u32, cell_h: u32) usize {
         return dwrite_font.Rasterizer.scratchSize(cell_w, cell_h);
+    }
+
+    /// `font_id` 를 face 로 되돌린다. **두 체계가 들어온다.**
+    ///
+    /// - 터미널 경로: `fontIdForFace` 가 만든 인코딩(= `face_font_id_base + index`).
+    /// - **measured 크롬 경로**: `resolveArtifact` 가 `FontIdentityRegistry.intern(postscript_name)`
+    ///   으로 붙인 **작은 정수**다. 그 체계는 face 인덱스와 아무 관계가 없다.
+    ///
+    /// 후자를 몰라서 `faceIndexFromFontId` 가 `null` 을 냈고, 호출부가 그것을 **"잉크 없는 글자"** 로
+    /// 접어 화면에 글자가 하나도 안 나왔다(실측: `zero_ink 37 / upload 42`, 보이는 것은 아이콘뿐).
+    /// 통계는 전부 초록이었다 — `error_skip=0` 이고 `zero_ink` 만 늘었기 때문이다.
+    ///
+    /// **이제 못 찾으면 `RasterizerFailed` 다.** 잉크가 없는 글자와 폰트를 못 찾은 것은 다른
+    /// 사실이고, 뒤엣것을 앞엣것으로 접으면 빈 화면이 정상으로 보고된다.
+    fn faceFor(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId) ?usize {
+        if (faceIndexFromFontId(font_id)) |i| {
+            if (i < self.raster.face_count) return i;
+            return null;
+        }
+        const reg = self.registry orelse return null;
+        const identity = reg.get(font_id) orelse return null;
+        return self.raster.faceIndexForName(identity.postscript_name);
     }
 
     pub fn rasterize(
@@ -114,7 +139,9 @@ pub const NeutralRasterizer = struct {
         }
 
         // 셰이퍼가 정한 결정을 **그대로** 쓴다. 코드포인트로 다시 풀지 않는다(§ 위 doc).
-        const face_index = faceIndexFromFontId(request.run.font_id) orelse return .{ .non_clear_pixels = 0 };
+        // **못 찾으면 오류다**(`error_skip` 으로 센다) — 잉크 없는 글자와 폰트를 못 찾은 것은
+        // 다른 사실이고, 뒤엣것을 앞엣것으로 접으면 빈 화면이 정상으로 보고된다.
+        const face_index = self.faceFor(request.run.font_id) orelse return error.RasterizerFailed;
         if (request.run.glyph_id == 0) return .{ .non_clear_pixels = 0 }; // 셰이퍼가 "없다"고 한 칸이다.
         const glyph_id: u16 = std.math.cast(u16, request.run.glyph_id) orelse return error.InvalidGlyphIndex;
 

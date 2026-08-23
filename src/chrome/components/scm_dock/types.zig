@@ -165,7 +165,7 @@ pub const CommitItem = struct {
 pub const TurnItem = struct {
     /// 목록 안 자리(0 = 진행 중). 클릭 intent가 이것을 싣고 host가 같은 스냅샷에서 다시 찾는다.
     index: u32 = 0,
-    /// 사람이 읽을 이름(`진행 중`·`마지막 턴`·`3턴 전`). **host가 만든다** — 세는 규칙이 화면 문구다.
+    /// 사람이 읽을 이름(`마지막 턴 이후`·`마지막 턴`·`3턴 전`). **host가 만든다** — 세는 규칙이 화면 문구다.
     title: []const u8,
     /// 그 턴을 돌린 에이전트(`claude`·`codex`). 모르면 빈 문자열이고 그 자리는 비운다.
     agent: []const u8 = "",
@@ -173,7 +173,8 @@ pub const TurnItem = struct {
     when: []const u8 = "",
     selected: bool = false,
     expanded: bool = false,
-    /// 진행 중인 턴인가. 오른쪽이 **작업트리**라 계속 변한다는 사실을 화면이 말한다.
+    /// 아직 턴으로 굳지 않은 줄인가(맨 위 한 줄). 오른쪽이 **작업트리**라 계속 변한다.
+    /// **에이전트 실행 상태가 아니다** — 링에 스냅샷이 있으면 늘 선다.
     live: bool = false,
 };
 

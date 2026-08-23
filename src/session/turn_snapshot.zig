@@ -125,12 +125,23 @@ pub const Ring = struct {
         return out[0..n];
     }
 
-    /// 링에 든 **서로 다른 세션 수**. 1이면 화면이 세션을 구분해 말할 필요가 없다.
+    /// `head` 로 쓰일 수 있는 스냅샷 수. 링이 N개면 완료된 턴은 N−1개이므로 가장 오래된 하나는 빠진다
+    /// (`timeline` 의 `back + 1 < self.len` 과 같은 경계다 — 그쪽이 바뀌면 여기도 바뀐다).
+    fn visibleHeads(self: *const Ring) usize {
+        return if (self.len == 0) 0 else self.len - 1;
+    }
+
+    /// **목록에 실제로 서는** 턴들의 서로 다른 세션 수. 1 이하면 화면이 세션을 구분해 말할 필요가 없다.
+    ///
+    /// ⚠️ **링 전체를 세지 않는다**(2026-08-23 적대적 검증 5회차). 가장 오래된 스냅샷은 짝이 될 이전
+    /// 스냅샷이 없어 `head` 로 쓰이지 못하고 `base` 로만 들어간다 — 즉 그 세션의 턴 줄은 화면에 없다.
+    /// 링 전체를 세면 링 `[A1, B1, B2]` 에서 답이 2가 되어 화면에는 B 줄만 있는데 `#2` 가 붙고 **`#1` 은
+    /// 목록 어디에도 없다.** 존재하지 않는 세션을 가리키는 번호는 번호가 없느니만 못하다.
     pub fn sessionCount(self: *const Ring) usize {
         var seen: [capacity]u64 = undefined;
         var n: usize = 0;
         var i: usize = 0;
-        while (i < self.len) : (i += 1) {
+        while (i < self.visibleHeads()) : (i += 1) {
             const id = (self.nth(i) orelse break).surface_id;
             var dup = false;
             for (seen[0..n]) |s| {
@@ -150,12 +161,15 @@ pub const Ring = struct {
     /// 번호가 통째로 바뀐다 — 화면에서 `#1` 이던 세션이 다음 턴에 `#2` 가 되면 그 번호는 아무것도
     /// 가리키지 못한다. `surface_id` 는 세션이 사는 동안 안 변하므로 그 순서가 훨씬 안정적이다.
     /// (그 세션이 링에서 완전히 사라지면 뒤 번호가 당겨진다 — 그때는 그 세션 줄도 함께 사라진 뒤다.)
+    ///
+    /// 세는 범위는 `sessionCount` 와 **같아야 한다** — 한쪽만 링 전체를 보면 «둘이라고 해 놓고 번호는
+    /// 셋» 같은 어긋남이 난다.
     pub fn sessionOrdinal(self: *const Ring, surface_id: u64) usize {
         var smaller: usize = 0;
         var seen: [capacity]u64 = undefined;
         var n: usize = 0;
         var i: usize = 0;
-        while (i < self.len) : (i += 1) {
+        while (i < self.visibleHeads()) : (i += 1) {
             const id = (self.nth(i) orelse break).surface_id;
             var dup = false;
             for (seen[0..n]) |s| {
@@ -355,6 +369,7 @@ test "타임라인: 세션이 하나면 `N턴 전`이 링 순서와 같다(회�
 
 test "세션 순번: id 오름차순이라 링이 밀려도 안 바뀐다" {
     var ring: Ring = .{};
+    ring.push("a0", 20, 50, 1); // 가장 오래된 것은 base 로만 쓰여 세는 범위 밖이다
     ring.push("a1", 20, 100, 1);
     ring.push("b1", 7, 200, 2);
     ring.push("a2", 20, 300, 1);
@@ -375,8 +390,34 @@ test "세션 순번: 세션이 하나면 1이고 개수도 1이다(화면은 표
     var ring: Ring = .{};
     ring.push("s1", 42, 100, 1);
     ring.push("s2", 42, 200, 1);
+    ring.push("s3", 42, 300, 1);
     try std.testing.expectEqual(@as(usize, 1), ring.sessionCount());
     try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(42));
+}
+
+test "세션 순번: 화면에 줄이 없는 세션은 세지 않는다 (적대적 검증 5회차)" {
+    // 링 `[A1, B1, B2]` — A1 은 짝이 될 이전 스냅샷이 없어 `head` 로 못 서고 `base` 로만 들어간다.
+    // 즉 목록에 A 의 턴 줄은 **없다**. 링 전체를 세면 답이 2가 되어 B 줄에 `#2` 가 붙고 `#1` 은
+    // 어디에도 없는 상태가 된다 — 존재하지 않는 세션을 가리키는 번호다.
+    var ring: Ring = .{};
+    ring.push("a1", 3, 100, 1); // A
+    ring.push("b1", 9, 200, 2); // B
+    ring.push("b2", 9, 300, 2); // B
+
+    var buf: [8]Ring.TimelineRow = undefined;
+    const rows = ring.timeline(&buf);
+    // 완료된 턴 둘 다 head 가 B 다 — 화면에 서는 세션은 하나뿐이다.
+    try std.testing.expectEqual(@as(u64, 9), rows[1].surface_id);
+    try std.testing.expectEqual(@as(u64, 9), rows[2].surface_id);
+
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionCount()); // 2가 아니다
+    try std.testing.expectEqual(@as(usize, 1), ring.sessionOrdinal(9));
+}
+
+test "세션 순번: 스냅샷이 하나뿐이면 셀 턴이 없다(진행 중만 있다)" {
+    var ring: Ring = .{};
+    ring.push("only", 5, 100, 1);
+    try std.testing.expectEqual(@as(usize, 0), ring.sessionCount());
 }
 
 test "세션 순번: 링이 비면 개수 0(순번을 물어도 터지지 않는다)" {

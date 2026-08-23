@@ -516,7 +516,12 @@ const Table = struct {
     scm_commit_no_files: [:0]const u8,
     /// 에이전트 탭: 이번 실행에서 관측한 턴이 없다. **오류가 아니다**(링은 메모리·창 로컬이다).
     scm_no_turns: [:0]const u8,
-    /// 에이전트 탭: 아직 끝나지 않은 턴(오른쪽이 작업트리라 계속 변한다).
+    /// 에이전트 탭: 마지막 스냅샷 이후 작업트리에 생긴 변경(오른쪽이 작업트리라 계속 변한다).
+    ///
+    /// ⚠️ **에이전트 상태가 아니다.** 이 줄은 링에 스냅샷이 하나라도 있으면 **늘 선다** — 에이전트가
+    /// 놀고 있어도, 사용자가 에디터로 고친 것만 있어도 선다. 예전 문구가 `진행 중` 이라 «에이전트가
+    /// 지금 돌고 있다» 로 읽혔고, 실제로 그렇게 오해됐다(사용자 지적 2026-08-23). 진짜 실행 상태는
+    /// 사이드바 배지가 말한다.
     scm_turn_live: [:0]const u8,
     /// 에이전트 탭: 직전에 끝난 턴.
     scm_turn_last: [:0]const u8,
@@ -974,7 +979,7 @@ const en: Table = .{
     .scm_commit_files_truncated = "This commit's file list was truncated",
     .scm_commit_no_files = "This commit changed no files",
     .scm_no_turns = "No agent turns observed in this run",
-    .scm_turn_live = "In progress",
+    .scm_turn_live = "Since last turn",
     .scm_turn_last = "Last turn",
     .scm_turn_back_suffix = " turns ago",
     .scm_turn_files_failed = "Could not read this turn's files",
@@ -1517,7 +1522,7 @@ const ko: Table = .{
     .scm_commit_files_truncated = "이 커밋의 파일 목록이 잘렸습니다",
     .scm_commit_no_files = "이 커밋이 바꾼 파일이 없습니다",
     .scm_no_turns = "이번 실행에서 관측한 에이전트 턴이 없습니다",
-    .scm_turn_live = "진행 중",
+    .scm_turn_live = "마지막 턴 이후",
     .scm_turn_last = "마지막 턴",
     .scm_turn_back_suffix = "턴 전",
     .scm_turn_files_failed = "이 턴의 파일을 읽지 못했습니다",

@@ -651,7 +651,7 @@ fn timelineRowKey(row: maru.session.turn_snapshot.Ring.TimelineRow, buf: []u8) ?
     return std.fmt.bufPrint(buf, "{s} {s}", .{ row.base.oid(), head.oid() }) catch null;
 }
 
-/// 턴 줄의 제목. **세는 규칙이 곧 화면 문구다** — `진행 중`·`마지막 턴`·`N턴 전`.
+/// 턴 줄의 제목. **세는 규칙이 곧 화면 문구다** — `마지막 턴 이후`·`마지막 턴`·`N턴 전`.
 fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
     if (live) return maru.i18n.t(.scm_turn_live);
     if (back == 1) return maru.i18n.t(.scm_turn_last);

@@ -36,16 +36,36 @@ pub const Buffers = struct {
 
 pub const ViewError = ui_paint.PaintError || error{ InsufficientOpBuffer, InsufficientRunBuffer, InsufficientTextBuffer };
 
-/// 행 하나가 쓰는 op 최대 개수(가이드 선 + chevron + 아이콘 + 라벨 + 상태).
-pub const max_ops_per_row: usize = @as(usize, max_guide_depth) + 4;
+/// 행 하나가 쓰는 op 최대 개수. **`row` 가 내는 것을 그대로 센다** — 여기서 하나라도 빠지면
+/// 호출자가 잡은 버퍼가 모자라고, 그 결과는 "그 행만 덜 그려짐" 이 아니라 **`view` 전체 실패 →
+/// 트리가 빈 화면**이다(적대적 검증에서 최악 조합 5행으로 재현했다).
+///
+/// 예전 값은 `max_guide_depth + 4` 였다. 밴드·포커스 막대가 `ui_paint` 에서 이 파일로 넘어왔는데
+/// (FT2) 그 둘을 안 세서 행당 하나가 모자랐다 — 제품에서 실제로 도달하는 조합은 마침 딱 맞아
+/// 안 터졌지만, DTO 가 허용하는 조합(폴더인데 dirty)에서는 터진다.
+pub const max_ops_per_row: usize =
+    1 + // 상태 밴드(선택·활성·호버)
+    1 + // 포커스 accent 막대
+    @as(usize, max_guide_depth) + // 들여쓰기 가이드 선
+    1 + // chevron 또는 스캔 중 표시
+    1 + // 종류 아이콘
+    1 + // 라벨
+    1; // dirty·conflict 점
 
-/// 호출자가 잡아야 할 버퍼 크기.
-pub fn bufferSizes(row_count: usize) struct { ops: usize, runs: usize, text_bytes: usize } {
-    // paint가 내는 밴드 quad는 행마다 최대 하나다(`build`가 선택·호버 행만 card로 낸다).
+/// 호출자가 잡아야 할 버퍼 크기. **행을 받는다** — 글자 예산을 추정하지 않기 위해서다.
+///
+/// 예전에는 행당 512 바이트로 잡았다. 라벨은 파일 시스템에서 오는 값이라 그 추정이 언제 깨지는지
+/// 우리가 정하지 못하고, 깨지면 `emit` 이 `InsufficientTextBuffer` 를 올려 **그 라벨 하나가 아니라
+/// `view` 전체가 실패한다**(트리가 빈 화면). 실제 길이를 더하면 그 실패 모드가 사라진다.
+pub fn bufferSizes(rows: []const types.Row) struct { ops: usize, runs: usize, text_bytes: usize } {
+    var label_bytes: usize = 0;
+    for (rows) |row| label_bytes +|= row.label.len;
     return .{
-        .ops = row_count * (max_ops_per_row + 1) + 2,
-        .runs = row_count * 3 + 2,
-        .text_bytes = row_count * 512 + 64,
+        .ops = rows.len * max_ops_per_row + 2,
+        // 행당 run 셋: chevron · 종류 아이콘 · 라벨. `max_ops_per_row` 와 같은 규율로 **세어서** 적는다.
+        .runs = rows.len * 3 + 2,
+        // 라벨 실제 길이 + 행당 아이콘 두 개의 UTF-8(각 최대 4바이트).
+        .text_bytes = label_bytes +| rows.len * 8 + 64,
     };
 }
 
@@ -355,6 +375,8 @@ const Harness = struct {
             .actions = &self.actions,
         });
         const tk = testTokens();
+        // Harness 는 넉넉한 고정 버퍼를 쓴다 — 예산 자체를 재는 것은 아래 "최악 조합" 테스트의 몫이고,
+        // 여기서 예산을 쓰면 두 관심사가 한 테스트에 섞인다.
         return view(props, frame, .{}, &tk, .{ .ops = &self.ops, .runs = &self.runs, .text_bytes = &self.text_bytes });
     }
 };
@@ -597,4 +619,84 @@ test "호버는 InteractionState 로만 들어온다" {
     for (hovered.ops) |op| if (op == .quad) {
         try testing.expectEqual(tokens.ColorRole.row_hover_bg, op.quad.fill_role);
     };
+}
+
+// **DTO 가 허용하는 최악 조합이 예산 안에 드는가.** `bufferSizes` 는 호출자가 믿고 쓰는 값이라,
+// 한 행이 그보다 많이 내면 `view` 가 통째로 실패하고 **도크가 빈 화면이 된다**(SCM 도크가 같은 함정을
+// 두 번 밟았다). 그래서 "실제로 안 나오는 조합" 이 아니라 **타입이 허용하는 조합**으로 잰다.
+test "최악 조합이 여러 행이어도 예산 안에 든다" {
+    var h = Harness{};
+    // **한 행만 재면 못 잡는다.** 예산은 행당 상수인데 최악 행이 그보다 하나 더 내면, 행 수가 늘수록
+    // 차이가 쌓여 어느 순간 통째로 실패한다 — 그 임계를 넘기려면 여러 행이 필요하다.
+    const worst = types.Row{
+        .kind = .directory,
+        .label = "worst-case",
+        .depth = max_guide_depth + 3, // 가이드 상한까지
+        .expandable = true,
+        .expanded = true,
+        .active = true,
+        .dirty = true,
+        .external_change = true,
+        .icon_kind = @intFromEnum(file_tree_icon.IconKind.code),
+        .selected = true,
+    };
+    const rows = [_]types.Row{ worst, worst, worst, worst, worst };
+    const props = types.Props{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows, .selection_focused = true };
+    const frame = try build_mod.build(props, .{
+        .nodes = &h.nodes,
+        .entries = &h.entries,
+        .layout_items = &h.items,
+        .flex_scratch = &h.flex,
+        .child_rects = &h.rects,
+        .actions = &h.actions,
+    });
+    const tk = testTokens();
+    const budget = bufferSizes(&rows);
+    // 호출자가 **정확히 예산만큼** 잡았을 때 성공해야 한다. 넉넉히 잡아 통과하면 아무것도 판정 못 한다.
+    const ops = try testing.allocator.alloc(draw.Op, budget.ops);
+    defer testing.allocator.free(ops);
+    const runs = try testing.allocator.alloc(draw.Run, budget.runs);
+    defer testing.allocator.free(runs);
+    const text_bytes = try testing.allocator.alloc(u8, budget.text_bytes);
+    defer testing.allocator.free(text_bytes);
+    const painted = try view(props, frame, .{ .hovered = build_mod.NodeIds.row(0) }, &tk, .{ .ops = ops, .runs = runs, .text_bytes = text_bytes });
+    try testing.expect(painted.ops.len <= budget.ops);
+}
+
+// **라벨 길이를 추정하지 않는다.** 예전 예산은 행당 512 바이트 고정이라, 그보다 긴 라벨 하나가
+// `InsufficientTextBuffer` 를 올려 **트리 전체**를 빈 화면으로 만들 수 있었다. 라벨은 파일 시스템에서
+// 오는 값이라 우리가 상한을 정할 자리가 아니다.
+test "아주 긴 라벨도 예산 안에서 그려진다" {
+    var long_label: [4096]u8 = undefined;
+    @memset(&long_label, 'a');
+    const rows = [_]types.Row{
+        .{ .kind = .file, .label = &long_label, .icon_kind = @intFromEnum(file_tree_icon.IconKind.code) },
+        .{ .kind = .file, .label = &long_label, .icon_kind = @intFromEnum(file_tree_icon.IconKind.code) },
+    };
+    var h = Harness{};
+    const props = types.Props{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows };
+    const frame = try build_mod.build(props, .{
+        .nodes = &h.nodes,
+        .entries = &h.entries,
+        .layout_items = &h.items,
+        .flex_scratch = &h.flex,
+        .child_rects = &h.rects,
+        .actions = &h.actions,
+    });
+    const tk = testTokens();
+    const budget = bufferSizes(&rows);
+    const ops = try testing.allocator.alloc(draw.Op, budget.ops);
+    defer testing.allocator.free(ops);
+    const runs = try testing.allocator.alloc(draw.Run, budget.runs);
+    defer testing.allocator.free(runs);
+    const text_bytes = try testing.allocator.alloc(u8, budget.text_bytes);
+    defer testing.allocator.free(text_bytes);
+    const painted = try view(props, frame, .{}, &tk, .{ .ops = ops, .runs = runs, .text_bytes = text_bytes });
+    // 두 행의 라벨이 **잘리지 않고** 실렸다 — 예산이 실제 길이를 따라갔다는 뜻이다.
+    var labels: usize = 0;
+    for (painted.ops) |op| if (op == .text and op.text.placement == .origin) {
+        try testing.expectEqual(long_label.len, op.text.runs[0].text.len);
+        labels += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), labels);
 }

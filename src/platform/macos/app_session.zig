@@ -37532,6 +37532,20 @@ test "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 
     }
     try std.testing.expect(compared > 8); // 실제로 행 위를 여러 번 지났다
 
+    // **도크 밖은 행이 아니다.** 옛 산술 경로는 `pointInRect(tree_rect)` 로 먼저 걸렀는데, 발행 경로는
+    // 그 가드를 published clip 에 맡긴다 — 둘이 같은 답인지 네 방향에서 본다(한 방향만 보면 반쪽
+    // 판정도 통과한다).
+    const outside = [_][2]f64{
+        .{ x, @floatFromInt(tree.y -| 8) }, // 위
+        .{ x, @floatFromInt(tree.y + tree.h + 8) }, // 아래
+        .{ @floatFromInt(tree.x -| 8), @floatFromInt(tree.y + 4) }, // 왼쪽(터미널 쪽)
+        .{ @floatFromInt(tree.x + tree.w + 8), @floatFromInt(tree.y + 4) }, // 오른쪽
+    };
+    for (outside) |point| {
+        try std.testing.expect(file_panel_ops.fileTreeRowAt(session, point[0], point[1]) == null);
+        try std.testing.expect(file_tree_dock_ops.fileTreeRowAtPublished(session, point[0], point[1]) == null);
+    }
+
     // ⑵ **down 은 열지 않는다.** 여는 것은 up 이고, 그 up 은 action 표(세대 검증)를 지난다.
     const row_y: f64 = @floatFromInt(tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) * 3 + 2);
     const before_selection = file_panel_ops.selectedFileTreeRow(session);

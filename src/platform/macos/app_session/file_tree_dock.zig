@@ -213,7 +213,7 @@ pub fn collectFileTreeDock(
 
     // 예산 산술은 **방출하는 쪽(component)**이 소유한다 — 여기서 세면 view가 op을 하나 더할 때마다
     // 조용히 낡고, 그 증상은 트리 전체가 빈 화면이다.
-    const budget = component.view.bufferSizes(props.rows.len);
+    const budget = component.view.bufferSizes(props.rows);
     const tokens = self.buildChromeTokens();
     const draws = component.view.view(props, frame, self.file_tree_interaction, &tokens, .{
         .ops = arena.alloc(chrome.draw.Op, budget.ops) catch return,

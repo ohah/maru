@@ -1096,6 +1096,13 @@ pub export fn maru_mobile_control_open_failed() void {
     control_client.openFailed();
 }
 
+/// host 가 **원격 명령이 그냥 끝났다**고 알린다(계약 §4a). `code` 는 그 종료 코드다.
+///
+/// 시한을 기다리는 것과 다르다 — 답할 것이 이미 죽었으므로 화면이 **고칠 자리**를 말할 수 있다.
+pub export fn maru_mobile_control_note_exit(code: u32) void {
+    control_client.commandFailed(code);
+}
+
 /// 컨트롤 축 상태(0=hello 대기, 1=선다, 2=껐다).
 pub export fn maru_mobile_control_state() u32 {
     return switch (control_client.state) {
@@ -1114,6 +1121,7 @@ pub export fn maru_mobile_control_off_reason() u32 {
         .protocol_mismatch => 3,
         .frame_too_large => 4,
         .open_failed => 5,
+        .command_failed => 6,
     };
 }
 
@@ -3982,6 +3990,14 @@ pub fn remoteRowCenter(index: usize) ?struct { x: f32, y: f32 } {
 
 var remote_row0: SetRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
 
+var remote_off_msg: [160]u8 = undefined;
+var remote_off_msg_len: usize = 0;
+
+/// 축이 꺼졌을 때 **화면에 실제로 그린 문구**. 판정용.
+pub fn remoteOffMessage() []const u8 {
+    return remote_off_msg[0..remote_off_msg_len];
+}
+
 fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
     // **여는 판정은 그리는 자리에서 한다.** 화면 전환은 여러 경로로 일어나므로 그 전부에
     // 갈고리를 달면 하나를 빠뜨린다 — 여기는 목록을 실제로 그리는 유일한 자리다.
@@ -3992,15 +4008,28 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
 
     if (control_client.state == .off) {
         // 껐다 — **왜 껐는지**를 말한다. 사용자가 고칠 자리가 이유마다 다르다.
-        const msg = switch (control_client.off_reason) {
+        var failed_buf: [128]u8 = undefined;
+        const msg: []const u8 = switch (control_client.off_reason) {
             .hello_timeout => maru.i18n.tIn(.ko, .mob_control_off_timeout),
             .too_much_noise => maru.i18n.tIn(.ko, .mob_control_off_noise),
             .protocol_mismatch => maru.i18n.tIn(.ko, .mob_control_off_protocol),
             .frame_too_large => maru.i18n.tIn(.ko, .mob_control_off_frame),
             .open_failed => maru.i18n.tIn(.ko, .mob_control_off_open),
+            // 127 은 셸이 "그런 명령이 없다" 로 쓰는 값이다(계약 §4a) — 그 자리는 경로다.
+            .command_failed => if (control_client.exit_status == 127)
+                maru.i18n.tIn(.ko, .mob_control_off_missing)
+            else
+                std.fmt.bufPrint(&failed_buf, "{s} ({d})", .{
+                    maru.i18n.tIn(.ko, .mob_control_off_failed),
+                    control_client.exit_status,
+                }) catch maru.i18n.tIn(.ko, .mob_control_off_failed),
             .none => maru.i18n.tIn(.ko, .mob_sessions_none),
         };
         pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        // **그린 문구 그대로**를 남긴다 — 이유가 갈렸다는 것만 재면 사용자가 읽는 말이 뒤바뀌어도
+        // 초록이다(같은 함정을 렌더 쪽에서 이미 겪었다).
+        remote_off_msg_len = @min(msg.len, remote_off_msg.len);
+        @memcpy(remote_off_msg[0..remote_off_msg_len], msg[0..remote_off_msg_len]);
         remote_shown = .off;
         return;
     }

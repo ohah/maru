@@ -2487,7 +2487,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/mobile_bridge_contract.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "mobile_bridge", .module = mobile_bridge_mod }},
+            // 화면 문구는 `maru.i18n` 이 단일 출처다 — 테스트가 문자열을 다시 적으면 원장이
+            // 바뀌어도 초록이라, 같은 표를 읽어 대조한다.
+            .imports = &.{
+                .{ .name = "mobile_bridge", .module = mobile_bridge_mod },
+                .{ .name = "maru", .module = maru_mod },
+            },
         }),
     });
     // 키 id 표는 헤더가 단일 출처다. 한쪽만 고치면 host 가 모르는 id 를 보내고 키가 조용히

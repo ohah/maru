@@ -5,6 +5,8 @@
 //! 잡느라 오래 걸린 것들이라, 값이 싼 자리로 내려 둔다.
 const std = @import("std");
 const bridge = @import("mobile_bridge");
+/// 화면 문구의 단일 출처.
+const maru = @import("maru");
 /// 서버 목록의 타입은 config 쪽이 소유한다 — 테스트가 목록을 직접 만들 때 쓴다.
 const mobile_config = bridge.mobile_config;
 /// 헤더를 C 로 읽어 그대로 부른다 — 정규식 게이트가 못 보는 **인자 타입**을 컴파일이 잡는다.
@@ -4721,6 +4723,21 @@ test "시한을 넘기면 이유가 남는다" {
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_off_reason()); // HELLO_TIMEOUT
 }
 
+test "명령이 그냥 끝나면 ABI 가 그 이유를 낸다" {
+    bridge.maru_mobile_control_reset();
+    bridge.maru_mobile_control_note_exit(127);
+    try std.testing.expectEqual(@as(u32, 2), bridge.maru_mobile_control_state()); // OFF
+    try std.testing.expectEqual(@as(u32, 6), bridge.maru_mobile_control_off_reason()); // COMMAND_FAILED
+
+    // 이미 선 축이 닫힌 것은 정상이다 — 받아 둔 목록을 오류로 덮지 않는다.
+    bridge.maru_mobile_control_reset();
+    _ = feedControl(hello_wire);
+    _ = feedControl("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[{\"id\":{\"surface_id\":7}}]}\n");
+    bridge.maru_mobile_control_note_exit(0);
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_state()); // READY
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_control_session_count());
+}
+
 test "프로토콜이 다르면 그 이유로 꺼진다" {
     bridge.maru_mobile_control_reset();
     _ = feedControl("{\"jsonrpc\":\"2.0\",\"method\":\"hello\",\"params\":{\"protocol\":\"other.v9\"}}\n");
@@ -4837,6 +4854,38 @@ test "이미 선 축은 열기 실패로 무너지지 않는다" {
     bridge.maru_mobile_control_open_failed();
     advanceFrame(402, 874, 16);
     try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+}
+
+test "127 은 '경로를 적어라' 로, 다른 코드는 그 코드와 함께 화면에 뜬다" {
+    // 셸이 "그런 명령이 없다" 로 쓰는 값(127)에서만 고칠 자리가 **경로**다. 뭉뚱그려 "답이
+    // 없다" 로 적으면, 실제로 우리가 두 번 오진했던 그 화면이 그대로 남는다.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    bridge.maru_mobile_control_note_exit(127);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.off, bridge.remoteSessionsShown());
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_control_off_missing),
+        bridge.remoteOffMessage(),
+    );
+
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    bridge.maru_mobile_control_note_exit(3);
+    advanceFrame(402, 874, 16);
+    const shown = bridge.remoteOffMessage();
+    try std.testing.expect(std.mem.startsWith(u8, shown, maru.i18n.tIn(.ko, .mob_control_off_failed)));
+    try std.testing.expect(std.mem.endsWith(u8, shown, "(3)"));
+
+    // 시한으로 꺼진 것과 **다른 말**이어야 한다.
+    bridge.maru_mobile_control_reset();
+    gotoSessionsScreen();
+    bridge.maru_mobile_control_timeout();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqualStrings(
+        maru.i18n.tIn(.ko, .mob_control_off_timeout),
+        bridge.remoteOffMessage(),
+    );
     bridge.maru_mobile_control_reset();
 }
 

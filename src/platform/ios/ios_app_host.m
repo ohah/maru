@@ -1354,6 +1354,14 @@ static void driveControlChannel(void) {
         gControlOpenMs = 0;
     }
 
+    // **명령이 그냥 끝났으면 시한을 기다리지 않는다.** 답할 것이 이미 죽었고, 종료 코드는
+    // 사용자가 고칠 자리를 가른다(계약 §4a: 127 이면 그 기계에 `maru` 가 없다).
+    unsigned int control_exit = 0;
+    if (gControlOpenMs != 0 && maru_ssh_pump_control_exit_status(&control_exit) == 0) {
+        maru_mobile_control_note_exit(control_exit);
+        gControlOpenMs = 0;
+    }
+
     if (gControlOpenMs != 0 && maru_mobile_control_state() == MARU_MOBILE_CONTROL_WAITING &&
         CACurrentMediaTime() * 1000.0 - gControlOpenMs > 5000) {
         maru_mobile_control_timeout();

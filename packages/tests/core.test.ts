@@ -403,3 +403,18 @@ test("DECSCUSR 로 커서 모양이 바뀐다 (vim 삽입 모드)", async () => 
   expect(await shapeOf()).toBe("underline");
   term.dispose();
 });
+
+test("휠은 버튼 64/65 로 나간다 (less·tmux copy-mode)", async () => {
+  // less --mouse 와 tmux(mouse on)가 이걸로 스크롤한다. 실제 PTY 로 확인했고, 여기서는
+  // 인코딩만 결정적으로 지킨다.
+  const term = await makeTerminal();
+  term.write("\x1b[?1000h\x1b[?1006h");
+  await settle();
+  const out: string[] = [];
+  term.onData((b) => out.push(new TextDecoder().decode(b)));
+  term.mouse({ button: 64, col: 2, row: 1, pressed: true, motion: false, mods: 0 }); // 위로
+  term.mouse({ button: 65, col: 2, row: 1, pressed: true, motion: false, mods: 0 }); // 아래로
+  await settle();
+  expect(out.join("")).toBe("\x1b[<64;3;2M\x1b[<65;3;2M");
+  term.dispose();
+});

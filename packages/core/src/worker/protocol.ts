@@ -23,6 +23,9 @@ export type ToWorker =
   | { t: "resize"; cols: number; rows: number }
   | { t: "scroll"; deltaUp: number }
   | { t: "scrollBottom" }
+  | { t: "scrollTop" }
+  | { t: "scrollToLine"; line: number }
+  | { t: "clear" }
   | {
       t: "sel";
       op: "start" | "extend" | "word" | "line" | "all" | "clear";

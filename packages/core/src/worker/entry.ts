@@ -123,6 +123,15 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       case "scrollBottom":
         backend?.scrollToBottom();
         return;
+      case "scrollTop":
+        backend?.scrollToTop();
+        return;
+      case "scrollToLine":
+        backend?.scrollToLine(msg.line);
+        return;
+      case "clear":
+        backend?.clear();
+        return;
       case "sel": {
         const b = backend;
         if (!b) return;

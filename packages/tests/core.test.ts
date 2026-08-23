@@ -117,6 +117,119 @@ test("블록 선택은 start 직후에 켜야 유효하다", async () => {
   term.dispose();
 });
 
+test("스크롤 위치는 65535행을 넘어도 정확하다", async () => {
+  // 예전 브리지는 `(offset << 16) | len` 하나로 실어 보내며 각 필드를 0xffff 로 잘랐다.
+  // 70000 행에서 길이가 4464 로 보고돼 스크롤바가 6% 만 그려졌고, 절대 행 스크롤은 아예
+  // 불가능했다(`scrollback: 100000` 은 실제로 쓰는 설정이다).
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.setOptions({ scrollback: 70000 });
+  for (let i = 0; i < 70050; i++) term.write("x\r\n");
+  await settle();
+
+  const len = term.frame!.scroll.length;
+  expect(len).toBe(70000);
+  expect(len).toBeGreaterThan(0xffff); // 옛 인코딩이었다면 여기서 4464 였다
+
+  term.scrollToTop();
+  await settle();
+  expect(term.frame!.scroll.offset).toBe(len); // 맨 위 = 최대 offset
+  term.dispose();
+});
+
+test("scrollToLine은 절대 행을 뷰포트 첫 줄에 둔다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  for (let i = 0; i < 120; i++) term.write(`line ${i}\r\n`);
+  await settle();
+  const len = term.frame!.scroll.length;
+
+  term.scrollToLine(10);
+  await settle();
+  // offset 은 바닥 기준이라 방향이 반대다 — 절대 행 10 을 보려면 len-10 만큼 올라가야 한다.
+  expect(term.frame!.scroll.offset).toBe(len - 10);
+
+  term.scrollToLine(0);
+  await settle();
+  expect(term.frame!.scroll.offset).toBe(len);
+  term.dispose();
+});
+
+test("scrollLines/scrollPages는 휠 방향(양수=아래)을 따른다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  for (let i = 0; i < 60; i++) term.write(`line ${i}\r\n`);
+  await settle();
+
+  term.scrollToTop();
+  await settle();
+  const top = term.frame!.scroll.offset;
+
+  term.scrollLines(5); // 아래로 5행 → offset 감소
+  await settle();
+  expect(term.frame!.scroll.offset).toBe(top - 5);
+
+  term.scrollPages(1); // 아래로 rows(4)행
+  await settle();
+  expect(term.frame!.scroll.offset).toBe(top - 9);
+  term.dispose();
+});
+
+test("reset(RIS)은 화면과 스크롤백을 비운다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  for (let i = 0; i < 30; i++) term.write(`line ${i}\r\n`);
+  term.write("\x1b[31mred");
+  await settle();
+  expect(term.frame!.scroll.length).toBeGreaterThan(0);
+
+  term.reset();
+  await settle();
+  expect(term.frame!.scroll.length).toBe(0);
+  const snap = await term.snapshot();
+  expect(rowText(snap.cells, snap.size.cols, 0).trim()).toBe("");
+  term.dispose();
+});
+
+test("clear는 스크롤백을 비우고, 프롬프트 상태에서만 ^L을 흘린다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const out: number[] = [];
+  term.onData((b) => out.push(...b));
+
+  for (let i = 0; i < 30; i++) term.write(`line ${i}\r\n`);
+  await settle();
+  expect(term.frame!.scroll.length).toBeGreaterThan(0);
+
+  // 셸 통합이 없는 상태 — 커서 모델을 건드리면 안 되므로 ^L 을 보내지 않는다.
+  term.clear();
+  await settle();
+  expect(term.frame!.scroll.length).toBe(0);
+  expect(out).toEqual([]);
+
+  // OSC 133 으로 프롬프트를 선언하면 셸이 다시 그려야 하므로 ^L 이 나간다.
+  term.write("\x1b]133;A\x07$ ");
+  await settle();
+  term.clear();
+  await settle();
+  expect(out).toEqual([0x0c]);
+  term.dispose();
+});
+
+test("alt screen에서 clear는 무동작이다", async () => {
+  // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
+  // 계약 §7 의 세 번째 조항.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const out: number[] = [];
+  term.onData((b) => out.push(...b));
+
+  term.write("\x1b[?1049h"); // 대체 화면 진입
+  term.write("alt content");
+  await settle();
+
+  term.clear();
+  await settle();
+  const snap = await term.snapshot();
+  expect(rowText(snap.cells, snap.size.cols, 0)).toBe("alt content");
+  expect(out).toEqual([]); // ^L 도 안 나간다
+  term.dispose();
+});
+
 test("스크롤백을 넘기면 뷰포트가 과거를 가리킨다", async () => {
   const term = await makeTerminal({ cols: 20, rows: 4 });
   for (let i = 0; i < 12; i++) term.write(`line ${i}\r\n`);

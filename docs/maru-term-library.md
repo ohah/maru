@@ -218,7 +218,6 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 | 검색 | `findMatches`·`matchViewportSpan` | xterm.js 의 SearchAddon 에 해당 |
 | 클립보드(OSC 52) | `clipboardReadPending`·`pendingClipboardWrite` | 이벤트 채널 설계가 필요하다 |
 | 화면 직렬화 | `dumpUtf`·`dumpRecentTextUtf` | SerializeAddon 에 해당 |
-| 리셋 | `clearScreen`·`fullReset`·`resetInputModes` | `reset` 이 먹지 않는다 |
 | 셸 통합(OSC 7·133) | `currentCwd`·`shellEvents`·`cursorIsAtPrompt` | 프롬프트 인식·cwd 추적 |
 | 알림(OSC 9·777) | `pendingNotification` | |
 | 이미지 | `buildImageViews`·`buildPlacementViews` | 렌더러가 픽셀을 다뤄야 한다 |
@@ -226,12 +225,28 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 링크 **자동 감지**는 libc 를 요구하므로 넣지 않는다(§8, [wasm 이식성](wasm-portability.md) §2). OSC 8
 명시 링크만 지원한다.
 
+### 화면·스크롤 제어
+
+| 메서드 | 동작 |
+|---|---|
+| `reset()` | 하드 리셋. `ESC c` 를 흘려 파서의 RIS 경로를 탄다 — 앱이 보낸 RIS 와 완전히 같다 |
+| `clear()` | 화면을 지운다. 아래 계약을 따른다 |
+| `scrollToTop()` / `scrollToBottom()` | 스크롤백 양 끝 |
+| `scrollToLine(line)` | 절대 행(0 = 스크롤백 최상단)을 뷰포트 첫 줄에 |
+| `scrollLines(n)` / `scrollPages(n)` | 상대 이동. **양수가 아래** — 휠 방향이다(`scroll()` 은 위가 양수인 코어 방향이라 반대다) |
+
+`clear()` 는 xterm.js 와 시맨틱이 다르다 — **본체 ⌘K 와 같은 계약**이다:
+
+- **셸 통합(OSC 133)이 있고 프롬프트 상태**: 화면 전체 + 스크롤백을 비우고 커서를 홈에 둔 뒤
+  `\x0c`(^L)를 `onData` 로 흘린다. 호스트가 그걸 PTY 에 써야 셸이 프롬프트를 맨 위에 다시 그린다.
+- **그 밖(비통합·명령 실행 중)**: 스크롤백과 커서 위 행만 비우고 커서를 옮기지 않는다. 셸의
+  readline 모델과 어긋나지 않기 위해서다. ^L 도 보내지 않는다.
+- **alt screen**: 무동작. 화면은 앱의 것이다(`:clear` 는 앱에 맡긴다).
+
 **API 표면도 좁다.** xterm.js 의 `Terminal` 과 대조하면 기능 애드온 말고도 이만큼이 없다:
 
 | 없는 것 | 쓰임 |
 |---|---|
-| `reset`·`clear` | `reset` 명령, 화면 비우기 |
-| `scrollToTop`·`scrollToLine`·`scrollPages` | 스크롤 제어(맨 아래로만 있다) |
 | `onCursorMove`·`onScroll`·`onSelectionChange` | 앱이 상태를 따라가야 할 때(복사 버튼·미니맵 등) |
 | `onKey`·`onBinary`·`onLineFeed`·`onWriteParsed` | 입력·출력 훅 |
 | `attachCustomKeyEventHandler` | 앱 단축키가 터미널보다 먼저 키를 잡아야 할 때 |

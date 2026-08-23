@@ -2543,11 +2543,8 @@ fn submitRowWrite(self: *AppSession, ref: component.ids.RowRef) void {
         .section, .more, .notice => return,
     };
     // 모델이 이미 판정한 것을 다시 판정하지 않는다 — 충돌 행은 여기서 `.none`이라 아무 일도 일어나지 않는다.
-    const kind: git_write_command.Kind = switch (row.action) {
-        .stage => .stage,
-        .unstage => if (model.head.unborn) .unstage_unborn else .unstage,
-        .none => return,
-    };
+    // 규칙은 **중립이 소유한다**(`git_write_command.kindForRow`) — Windows 표면도 같은 것을 쓴다.
+    const kind = git_write_command.kindForRow(row.action, model.head.unborn) orelse return;
     const paths = [_][]const u8{row.path};
     if (!submitWrite(self, repo, kind, &paths)) return;
 
@@ -2627,10 +2624,7 @@ fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
         .staged => scm_view.Section.staged,
         .changes => scm_view.Section.changes,
     };
-    const kind: git_write_command.Kind = switch (target) {
-        .staged => if (model.head.unborn) .unstage_all_unborn else .unstage_all,
-        .changes => .stage_all,
-    };
+    const kind = git_write_command.kindForSection(target, model.head.unborn);
     // `_all` 변종은 경로를 받지 않는다. **그래서 화면에 안 보이는 파일까지 든다** — 그것이 "모두"의 뜻이고,
     // 10행 상한에 걸려 접힌 파일도 사용자가 기대하는 대상이다.
     _ = submitWrite(self, repo, kind, &.{});

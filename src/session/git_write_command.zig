@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const path_shape = @import("../path_shape.zig");
+const scm_view = @import("scm_view.zig");
 
 /// 쓰기 명령의 종류. **unborn(첫 커밋 전) 변종이 따로 있다** — HEAD가 없으면 `restore`가 실패하므로 §2가
 /// `rm --cached`를 대신 쓰라고 정했다. 어느 쪽인지는 호출자가 head 상태로 고르고, 이 모듈은 고르지 않는다
@@ -686,4 +687,60 @@ test "배치: 개수와 바이트 **둘 다**로 자르고, 큰 경로 하나는
     try testing.expectEqual(@as(usize, 1), first);
     try testing.expectEqual(@as(usize, 2), batchEnd(&two, first));
     try testing.expectEqual(@as(usize, 2), batchEnd(&two, 2)); // 끝에서 부르면 그대로
+}
+
+// ── 행·섹션이 무슨 명령을 원하는가 ──────────────────────────────────────────────────────────
+//
+// **`unborn` 특례가 둘 다에 있다.** 첫 커밋 전에는 `HEAD` 가 없어 `restore --staged` 가 못 돈다 —
+// `rm --cached` 여야 한다. 이 판정을 호출자가 각자 적으면 한쪽만 그 특례를 갖고, 증상은 **첫 커밋
+// 전 저장소에서만** 언스테이지가 안 되는 것이라 눈에 잘 안 띈다. macOS 와 Windows 가 같은 화면을
+// 쓰므로 여기 한 곳에 둔다.
+
+/// 파일 행 하나가 원하는 명령. **`null` 은 "아무 일도 없다"** 이지 오류가 아니다 — 충돌 행은 모델이
+/// 이미 `.none` 으로 판정해 둔다(`git add` 가 충돌을 "해결됨" 으로 표시하므로 그 행에 동작을 붙이면
+/// 사용자가 의도하지 않은 해결이 일어난다).
+pub fn kindForRow(action: scm_view.RowAction, unborn: bool) ?Kind {
+    return switch (action) {
+        .stage => .stage,
+        .unstage => if (unborn) .unstage_unborn else .unstage,
+        .none => null,
+    };
+}
+
+/// 섹션 머리 줄의 일괄 명령. `_all` 변종은 경로를 받지 않는다 — **화면에 안 보이는 파일까지 든다**
+/// 는 뜻이고, 그것이 "모두" 다.
+pub fn kindForSection(section: scm_view.Section, unborn: bool) Kind {
+    return switch (section) {
+        .staged => if (unborn) .unstage_all_unborn else .unstage_all,
+        .changes => .stage_all,
+    };
+}
+
+test "행: 스테이지·언스테이지·충돌" {
+    try testing.expectEqual(Kind.stage, kindForRow(.stage, false).?);
+    try testing.expectEqual(Kind.unstage, kindForRow(.unstage, false).?);
+    // **첫 커밋 전에는 `restore --staged` 가 못 돈다** — `HEAD` 가 없다.
+    try testing.expectEqual(Kind.unstage_unborn, kindForRow(.unstage, true).?);
+    // 스테이지는 unborn 에서도 같다(`add` 는 HEAD 를 안 본다).
+    try testing.expectEqual(Kind.stage, kindForRow(.stage, true).?);
+    // 충돌 행은 아무 일도 없다.
+    try testing.expectEqual(@as(?Kind, null), kindForRow(.none, false));
+    try testing.expectEqual(@as(?Kind, null), kindForRow(.none, true));
+}
+
+test "섹션: 일괄 명령도 unborn 특례를 탄다" {
+    try testing.expectEqual(Kind.stage_all, kindForSection(.changes, false));
+    try testing.expectEqual(Kind.stage_all, kindForSection(.changes, true));
+    try testing.expectEqual(Kind.unstage_all, kindForSection(.staged, false));
+    try testing.expectEqual(Kind.unstage_all_unborn, kindForSection(.staged, true));
+}
+
+test "이 넷은 경로를 안 받는다 — 조립이 거부한다" {
+    // `kindForSection` 이 내는 것과 `takesPaths` 가 서로 어긋나면 조립이 실패한다. 그 짝을 고정한다.
+    try testing.expect(!kindForSection(.changes, false).takesPaths());
+    try testing.expect(!kindForSection(.staged, false).takesPaths());
+    try testing.expect(!kindForSection(.staged, true).takesPaths());
+    // 행 명령은 반대로 **받아야** 한다.
+    try testing.expect(kindForRow(.stage, false).?.takesPaths());
+    try testing.expect(kindForRow(.unstage, true).?.takesPaths());
 }

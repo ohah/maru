@@ -126,6 +126,10 @@ fn dispatch(
         try runWin32ScmDrawSmoke(io, allocator, stdout, stderr);
         return;
     }
+    if (std.mem.eql(u8, command, "win32-scm-write-smoke")) {
+        try runWin32ScmWriteSmoke(io, allocator, stdout, stderr);
+        return;
+    }
 
     if (std.mem.eql(u8, command, "win32-file-tree-draw-smoke")) {
         try runWin32FileTreeDrawSmoke(io, allocator, stdout, stderr);
@@ -3649,20 +3653,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     };
 
     // **색은 리터럴이다**(위 doc).
-    const tokens = maru.chrome.Tokens.rich(.{
-        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
-        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
-        .foreground = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
-        .sidebar_background = .{ .r = 0x18, .g = 0x1D, .b = 0x28 },
-        .sidebar_foreground = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
-        .sidebar_active = .{ .r = 0x2A, .g = 0x33, .b = 0x44 },
-        .search_match = .{ .r = 20, .g = 120, .b = 255 },
-        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
-        .selection = .{ .r = 0x3A, .g = 0x5F, .b = 0xCD },
-        .cursor = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
-        .terminal_background = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
-        .accent = .{ .r = 20, .g = 120, .b = 255 },
-    });
+    const tokens = scmSmokeTokens();
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
         .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
@@ -4174,6 +4165,25 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.flush();
 }
 
+/// 소스 컨트롤 스모크 둘이 나눠 쓰는 색 표. **두 벌로 두면 화면 비교가 무의미해진다** — 그리기
+/// 스모크와 쓰기 스모크가 다른 색으로 그리면 지문도 스크린샷도 견줄 수 없다.
+fn scmSmokeTokens() maru.chrome.Tokens {
+    return maru.chrome.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .sidebar_background = .{ .r = 0x18, .g = 0x1D, .b = 0x28 },
+        .sidebar_foreground = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
+        .sidebar_active = .{ .r = 0x2A, .g = 0x33, .b = 0x44 },
+        .search_match = .{ .r = 20, .g = 120, .b = 255 },
+        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
+        .selection = .{ .r = 0x3A, .g = 0x5F, .b = 0xCD },
+        .cursor = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+        .terminal_background = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+        .accent = .{ .r = 20, .g = 120, .b = 255 },
+    });
+}
+
 /// `maru win32-scm-draw-smoke` — W8.4⒝⒞. **소스 컨트롤 표면이 Windows 화면에 뜨고 눌린다.**
 ///
 /// §2m.6(파일 트리)·§2m.21(편집기)이 세운 모양 그대로다: fixture 를 안 만들고 **저장소 자신**의 git
@@ -4599,4 +4609,323 @@ fn countFileItems(items: []const maru.chrome.components.scm_dock.types.Item) usi
         else => {},
     };
     return n;
+}
+
+/// `maru win32-scm-write-smoke` — W8.4⒞2. **스테이지·언스테이지가 진짜 git 을 움직인다.**
+///
+/// ## 사용자의 작업트리를 절대 안 건드린다
+///
+/// 이것이 이 명령이 `win32-scm-draw-smoke` 와 갈린 **유일한 이유**다. 그리기 스모크는 저장소
+/// 자신의 상태를 읽기만 하므로 cwd 에서 돌아도 되지만, 쓰기는 `git add` 를 실제로 실행한다 —
+/// 사용자의 index 를 바꾸는 것은 스모크가 할 일이 아니다. 그래서 **자기 임시 저장소를 짓고**
+/// 거기서만 쓴다(`<캐시>/scm-write-smoke/`, `user_paths.cacheBaseFor` 가 정한 자리).
+///
+/// ## 두 저장소를 본다
+///
+/// **unborn(첫 커밋 전) 저장소가 판정의 절반이다.** 거기서는 `HEAD` 가 없어 `restore --staged`
+/// 가 못 돌고 `rm --cached` 여야 한다 — `git_write_command.kindForRow` 의 그 특례가 실제로
+/// 필요한 유일한 자리이고, 보통 저장소만 재면 **그 분기가 한 번도 안 밟힌다.**
+fn runWin32ScmWriteSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    if (@import("builtin").os.tag != .windows) {
+        try stderr.writeAll("maru win32-scm-write-smoke: Windows only\n");
+        try stderr.flush();
+        return error.UnknownCommand;
+    }
+    const component = maru.chrome.components.scm_dock;
+
+    var loaded = try maru.config.loader.loadDefault(io, allocator);
+    defer loaded.deinit();
+    const cfg = loaded.config;
+
+    // **Windows 에서 `locate` 는 `null` 이다**(그 함수 doc) — `CreateProcessW` 가 `PATH` 를 스스로
+    // 찾으므로 이름 그대로 넘긴다. 다른 스모크도 같다.
+    var git_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&git_exe_buf) orelse "git";
+
+    var host = draw_host.Host.open(allocator, cfg, .{
+        .title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W8.4 source control write)"),
+    }) catch {
+        try draw_host.reportSetupFailure(stderr, "win32-scm-write-smoke");
+        return error.UnknownCommand;
+    };
+    defer host.close();
+
+    const tokens = scmSmokeTokens();
+    try stdout.writeAll("maru.win32-scm-write-smoke.v1\n");
+    try stdout.print("git={s}\n", .{git_exe});
+
+    var total_fail: usize = 0;
+    for ([_]bool{ false, true }) |unborn| {
+        const repo = try makeScratchRepo(io, allocator, git_exe, unborn);
+        defer allocator.free(repo);
+        total_fail += try runScmWriteCase(io, allocator, stdout, stderr, &host, cfg, &tokens, git_exe, repo, unborn, component);
+    }
+    try stdout.print("cases_failed={d}\n", .{total_fail});
+    try stdout.flush();
+    if (total_fail != 0) return error.UnknownCommand;
+}
+
+/// 한 저장소에 대해 스테이지 → 언스테이지를 돌리고 판정한다. **실패 수**를 준다.
+fn runScmWriteCase(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    host: *draw_host.Host,
+    cfg: anytype,
+    tokens: *const maru.chrome.Tokens,
+    git_exe: []const u8,
+    repo: []const u8,
+    unborn: bool,
+    comptime component: type,
+) !usize {
+    const label = if (unborn) "unborn" else "normal";
+    var status = try readRepoStatus(io, allocator, repo);
+    defer allocator.free(status);
+
+    var state = scm_surface.State{};
+    var opts = scm_surface.Options{
+        .status_text = status,
+        .font_family = cfg.font.family,
+        .font_fallback = cfg.font.fallback,
+        .font_size_pt = cfg.font.size,
+        .tokens = tokens,
+    };
+    var built = scm_surface.build(allocator, host, &state, opts) catch {
+        try stderr.print("maru win32-scm-write-smoke[{s}]: build failed\n", .{label});
+        return 1;
+    };
+    defer built.deinit();
+
+    const staged_before = countRowsIn(built.model, .staged);
+    const changes_before = countRowsIn(built.model, .changes);
+    try host.drawFrame(built.cells, 0xFF1E2430);
+
+    // ── ⑴ 행의 `+` 를 눌러 **스테이지** ──────────────────────────────────────────────────────
+    var stage_ran = false;
+    var stage_kind: []const u8 = "-";
+    {
+        const hit = actionCenterFor(&built, .changes, component) orelse {
+            try stdout.print("[{s}] stage=unjudgeable reason=no_changes_row\n", .{label});
+            return 1;
+        };
+        host.window.postSyntheticMouse(.left_down, hit.x, hit.y);
+        host.window.postSyntheticMouse(.left_up, hit.x, hit.y);
+        const intent = pumpForIntent(host, &built, &state) orelse {
+            try stdout.print("[{s}] stage=unjudgeable reason=no_intent\n", .{label});
+            return 1;
+        };
+        const write = scm_surface.writeFor(&built, intent) orelse {
+            try stdout.print("[{s}] stage=unjudgeable reason=no_write intent={s}\n", .{ label, @tagName(intent) });
+            return 1;
+        };
+        stage_kind = @tagName(write.kind);
+        stage_ran = try applyWrite(allocator, git_exe, repo, write, stderr, label);
+        if (!stage_ran) return 1;
+        allocator.free(status);
+        status = try readRepoStatus(io, allocator, repo);
+        opts.status_text = status;
+        // **목록이 통째로 바뀌었다** — 포인터 상태를 버린다(§2m.29 가 남긴 위험).
+        state.invalidateTree();
+        const next = scm_surface.build(allocator, host, &state, opts) catch return 1;
+        built.deinit();
+        built = next;
+        try host.drawFrame(built.cells, 0xFF1E2430);
+    }
+    const staged_mid = countRowsIn(built.model, .staged);
+    const changes_mid = countRowsIn(built.model, .changes);
+
+    // ── ⑵ 스테이지된 행의 `−` 를 눌러 **언스테이지** ─────────────────────────────────────────
+    var unstage_kind: []const u8 = "-";
+    {
+        const hit = actionCenterFor(&built, .staged, component) orelse {
+            try stdout.print("[{s}] unstage=unjudgeable reason=no_staged_row\n", .{label});
+            return 1;
+        };
+        host.window.postSyntheticMouse(.left_down, hit.x, hit.y);
+        host.window.postSyntheticMouse(.left_up, hit.x, hit.y);
+        const intent = pumpForIntent(host, &built, &state) orelse {
+            try stdout.print("[{s}] unstage=unjudgeable reason=no_intent\n", .{label});
+            return 1;
+        };
+        const write = scm_surface.writeFor(&built, intent) orelse {
+            try stdout.print("[{s}] unstage=unjudgeable reason=no_write\n", .{label});
+            return 1;
+        };
+        unstage_kind = @tagName(write.kind);
+        if (!try applyWrite(allocator, git_exe, repo, write, stderr, label)) return 1;
+        allocator.free(status);
+        status = try readRepoStatus(io, allocator, repo);
+        opts.status_text = status;
+        state.invalidateTree();
+        const next = scm_surface.build(allocator, host, &state, opts) catch return 1;
+        built.deinit();
+        built = next;
+        try host.drawFrame(built.cells, 0xFF1E2430);
+    }
+    const staged_after = countRowsIn(built.model, .staged);
+    const changes_after = countRowsIn(built.model, .changes);
+
+    // ── 판정 ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // **화면 숫자가 아니라 git 이 바뀌었는지를 본다** — 모델은 매번 `git status` 원문에서 다시
+    // 서므로, 아래 수치는 저장소의 진짜 상태다.
+    const staged_ok = staged_mid == staged_before + 1 and changes_mid == changes_before - 1;
+    const restored_ok = staged_after == staged_before and changes_after == changes_before;
+    try stdout.print(
+        "[{s}] stage_kind={s} unstage_kind={s} staged={d}->{d}->{d} changes={d}->{d}->{d} staged_ok={} restored_ok={}\n",
+        .{ label, stage_kind, unstage_kind, staged_before, staged_mid, staged_after, changes_before, changes_mid, changes_after, staged_ok, restored_ok },
+    );
+    return @intFromBool(!(staged_ok and restored_ok));
+}
+
+/// 쓰기 하나를 **동기로** 돌린다. 스모크는 프레임을 기다릴 이유가 없으므로 백그라운드 슬롯을 안 쓴다
+/// (`runWriteSync` 는 제품이 쓰는 것과 같은 조립·환경을 지난다 — Windows 갈래는 §2m.9 의 캡처 러너).
+fn applyWrite(
+    allocator: std.mem.Allocator,
+    git_exe: []const u8,
+    repo: []const u8,
+    write: scm_surface.Write,
+    stderr: *std.Io.Writer,
+    label: []const u8,
+) !bool {
+    var one: [1][]const u8 = undefined;
+    const paths: []const []const u8 = if (write.path) |p| blk: {
+        one[0] = p;
+        break :blk one[0..1];
+    } else &.{};
+    const out = git_backend_mod.runWriteSync(allocator, write.kind, git_exe, repo, paths, null) catch |err| {
+        try stderr.print("maru win32-scm-write-smoke[{s}]: {s} failed({s})\n", .{ label, @tagName(write.kind), @errorName(err) });
+        return false;
+    };
+    defer out.deinit(allocator);
+    if (!out.ok()) {
+        try stderr.print("maru win32-scm-write-smoke[{s}]: {s} exit={d} stderr={s}\n", .{ label, @tagName(write.kind), out.exit_code, out.stderr_bytes });
+        return false;
+    }
+    return true;
+}
+
+/// 창 큐를 몇 번 돌려 **intent 하나**를 얻는다. 합성 메시지는 큐에 있으므로 곧 나온다.
+fn pumpForIntent(host: *draw_host.Host, built: *const scm_surface.Built, state: *scm_surface.State) ?maru.chrome.components.scm_dock.ids.Intent {
+    var spins: usize = 0;
+    while (spins < 32) : (spins += 1) {
+        const events = host.poll() catch return null;
+        for (events) |ev| switch (ev) {
+            .mouse => |m| {
+                const phase: maru.chrome.ui.interaction.UiPointerPhase = switch (m.kind) {
+                    .moved => .move,
+                    .left_down => .down,
+                    .left_up => .up,
+                    else => continue,
+                };
+                if (scm_surface.pointer(built, state, phase, @floatFromInt(m.x_px), @floatFromInt(m.y_px)).intent) |intent| return intent;
+            },
+            else => {},
+        };
+    }
+    return null;
+}
+
+/// 그 섹션의 **첫 파일 행의 동작 버튼**(`+`/`−`) 한가운데.
+fn actionCenterFor(
+    built: *const scm_surface.Built,
+    section: maru.session.scm_view.Section,
+    comptime component: type,
+) ?struct { x: i32, y: i32 } {
+    for (built.model.rows, 0..) |row, i| {
+        const file = switch (row) {
+            .file => |f| f,
+            else => continue,
+        };
+        if (file.section != section) continue;
+        const slot = built.frame.tree.find(component.build.NodeIds.itemAction(i)) orelse continue;
+        const rect = built.frame.tree.entries[slot].rect;
+        if (rect.width <= 0 or rect.height <= 0) continue;
+        return .{ .x = @intFromFloat(rect.x + rect.width / 2), .y = @intFromFloat(rect.y + rect.height / 2) };
+    }
+    return null;
+}
+
+fn countRowsIn(model: maru.session.scm_view.Model, section: maru.session.scm_view.Section) usize {
+    var n: usize = 0;
+    for (model.rows) |row| switch (row) {
+        .file => |f| if (f.section == section) {
+            n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+/// 제품 진입점으로 `git status` 를 읽는다(`win32-scm-draw-smoke` 와 같은 길). 원문을 **복사해** 준다 —
+/// 백엔드 결과는 워커 할당기 소유라 수명이 다르다.
+fn readRepoStatus(io: std.Io, allocator: std.mem.Allocator, repo: []const u8) ![]u8 {
+    var backend = try git_backend_mod.Backend.init(io);
+    defer backend.deinit();
+    if (!backend.submitRepoStatus("git", repo, 1)) return error.UnknownCommand;
+    var rounds: usize = 0;
+    while (rounds < 6000) : (rounds += 1) {
+        if (backend.takeRepoStatusResult()) |taken| {
+            var result = taken;
+            defer result.deinit(git_backend_mod.worker_allocator);
+            if (!result.ok) return error.UnknownCommand;
+            return allocator.dupe(u8, result.text);
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    return error.UnknownCommand;
+}
+
+/// 임시 저장소를 짓는다. **매번 처음부터** — 남은 상태가 판정을 흐리면 안 된다.
+///
+/// `unborn` 이면 커밋을 안 만든다: 그 저장소에서는 `HEAD` 가 없어 언스테이지가 `rm --cached` 로
+/// 가야 하고, 그 분기는 여기서만 밟힌다.
+fn makeScratchRepo(io: std.Io, allocator: std.mem.Allocator, git_exe: []const u8, unborn: bool) ![]u8 {
+    // **`%LOCALAPPDATA%\maru\` 아래다**(user_paths §5.3) — 우리가 소유한 자리라 지웠다 다시 만들어도
+    // 남의 것을 건드리지 않는다. 구분자는 입구에서 정규화한다(계약 §5 규칙 1).
+    const xdg = maru.os_env.allocValue(allocator, "XDG_CACHE_HOME");
+    defer if (xdg) |v| allocator.free(v);
+    const lad = maru.os_env.allocValue(allocator, "LOCALAPPDATA");
+    defer if (lad) |v| allocator.free(v);
+    const base = maru.user_paths.cacheBaseFor(@import("builtin").os.tag, xdg, lad) orelse return error.UnknownCommand;
+    const native = try std.fmt.allocPrint(allocator, "{s}/maru/scm-write-smoke/{s}", .{ base, if (unborn) "unborn" else "normal" });
+    defer allocator.free(native);
+    const repo = try maru.path_shape.normalizeSeparators(allocator, native);
+    errdefer allocator.free(repo);
+
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, repo) catch {};
+    // 부모부터 만든다 — `createDir` 은 한 단계씩이다(이미 있으면 넘어간다).
+    var cut: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, repo, cut + 1, '/')) |slash| : (cut = slash) {
+        cwd.createDir(io, repo[0..slash], .default_dir) catch {};
+    }
+    try cwd.createDir(io, repo, .default_dir);
+
+    try runSetup(allocator, git_exe, repo, &.{ git_exe, "init", "-q" });
+    try runSetup(allocator, git_exe, repo, &.{ git_exe, "config", "user.email", "smoke@maru.test" });
+    try runSetup(allocator, git_exe, repo, &.{ git_exe, "config", "user.name", "maru smoke" });
+
+    // 파일 셋. 보통 저장소는 커밋해 두고 다시 고쳐 **변경 사항** 셋을 만든다.
+    for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try writeScratchFile(io, repo, name, "base\n");
+    if (!unborn) {
+        try runSetup(allocator, git_exe, repo, &.{ git_exe, "add", "-A" });
+        try runSetup(allocator, git_exe, repo, &.{ git_exe, "commit", "-q", "-m", "base" });
+        for ([_][]const u8{ "a.txt", "b.txt", "c.txt" }) |name| try writeScratchFile(io, repo, name, "changed\n");
+    }
+    return repo;
+}
+
+fn writeScratchFile(io: std.Io, repo: []const u8, name: []const u8, body: []const u8) !void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ repo, name });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body });
+}
+
+fn runSetup(allocator: std.mem.Allocator, git_exe: []const u8, repo: []const u8, argv: []const []const u8) !void {
+    _ = git_exe;
+    var out = try maru.win32_process.capture(allocator, argv, repo, .stdout_only, &.{}, &.{}, 64 * 1024);
+    defer out.deinit(allocator);
+    if (out.exit_code != 0) return error.UnknownCommand;
 }

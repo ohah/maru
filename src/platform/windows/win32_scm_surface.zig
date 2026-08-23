@@ -42,6 +42,7 @@ const d3d11_cells = maru.d3d11_cells;
 const system_text = @import("../macos/chrome/system_text.zig");
 
 const scm_view = maru.session.scm_view;
+const git_write_command = maru.session.git_write_command;
 const component = maru.chrome.components.scm_dock;
 const interaction = maru.chrome.ui.interaction;
 
@@ -59,6 +60,17 @@ pub const State = struct {
     /// 표가 프레임 밖으로 나가는 순간(스크롤 가상화·비동기 갱신) 그 판정이 **저절로 켜지게**
     /// 하기 위해서다. macOS 는 호스트가 표를 따로 들고 있어 이미 켜져 있다.
     generation: u64 = 1,
+
+    /// **목록이 통째로 바뀌었다**(git 쓰기·비동기 갱신). 포인터 상태를 버리고 세대를 올린다.
+    ///
+    /// 안 버리면 `hovered` 가 사라졌거나 **다른 뜻이 된 node id** 를 가리킨다 — id 는
+    /// `NodeIds.item(i)` 라 인덱스가 밀리면 같은 번호가 다른 행이다. macOS 는 같은 자리에서
+    /// `if (replaced) capture = null` 을 한다(§2m.29 가 남긴 위험 항목).
+    pub fn invalidateTree(self: *State) void {
+        self.interaction = .{};
+        self.selected = null;
+        self.generation += 1;
+    }
 
     /// intent 를 상태에 적용한다. **바뀌었으면 `true`** — 호출자가 그때만 다시 그린다.
     ///
@@ -92,6 +104,41 @@ pub const State = struct {
         }
     }
 };
+
+/// 눌린 것이 **git 을 쓰는 일**일 때, 무엇을 어떻게 쓸지.
+///
+/// `State.apply` 가 안 하는 이유: 이것은 상태 변경이 아니라 **바깥 세계에 대한 요청**이다. 한
+/// 함수에 섞으면 "적용했다" 가 두 가지 뜻을 갖고, 실패를 어디서 다루는지가 흐려진다.
+pub const Write = struct {
+    kind: git_write_command.Kind,
+    /// 행 명령이면 그 경로 하나. `_all` 변종은 경로를 안 받으므로 `null` 이다.
+    ///
+    /// **`built` 의 arena 를 가리킨다** — 다시 짓기 **전에** 쓰거나 복사해야 한다.
+    path: ?[]const u8,
+};
+
+/// intent 하나를 git 명령으로 옮긴다. **모델을 다시 조회한다** — intent 가 든 것은 인덱스뿐이고
+/// 그 사이 목록이 갱신됐을 수 있다(macOS `submitRowWrite` 와 같은 규율).
+///
+/// 규칙 자체(`unborn` 특례 포함)는 중립이 소유한다 — `git_write_command.kindForRow`·`kindForSection`.
+pub fn writeFor(built: *const Built, intent: component.ids.Intent) ?Write {
+    switch (intent) {
+        .row_action => |ref| {
+            if (ref.model_index >= built.model.rows.len) return null;
+            const row = switch (built.model.rows[ref.model_index]) {
+                .file => |f| f,
+                else => return null,
+            };
+            const kind = git_write_command.kindForRow(row.action, built.model.head.unborn) orelse return null;
+            return .{ .kind = kind, .path = row.path };
+        },
+        .section_action => |ref| return .{
+            .kind = git_write_command.kindForSection(sectionOf(ref.section), built.model.head.unborn),
+            .path = null,
+        },
+        else => return null,
+    }
+}
 
 /// component 의 섹션 값을 모델 축으로 되돌린다. `scm_items.sectionOf` 의 역이고, 두 값 집합이
 /// 갈리면 이 switch 가 컴파일에서 걸린다.
@@ -386,4 +433,22 @@ test "이 슬라이스 밖의 intent 는 false 를 낸다 — 조용히 삼키�
     // 상태는 하나도 안 움직였다.
     try testing.expectEqual(@as(u64, 1), state.generation);
     try testing.expectEqual(@as(?usize, null), state.selected);
+}
+
+test "목록이 바뀌면 포인터 상태를 버린다 — id 가 밀리기 때문" {
+    var state = State{ .selected = 4 };
+    state.interaction = .{ .hovered = 0x5343_1008, .focused = 0x5343_1008 };
+    const g0 = state.generation;
+    state.invalidateTree();
+    try testing.expectEqual(@as(?u64, null), state.interaction.hovered);
+    try testing.expectEqual(@as(?u64, null), state.interaction.focused);
+    try testing.expectEqual(@as(?usize, null), state.selected);
+    try testing.expectEqual(g0 + 1, state.generation);
+}
+
+test "접힘 상태는 목록이 바뀌어도 남는다 — 사용자가 접어 둔 것이다" {
+    var state = State{};
+    _ = state.apply(.{ .toggle_section = .staged });
+    state.invalidateTree();
+    try testing.expect(state.collapsed[@intFromEnum(scm_view.Section.staged)]);
 }

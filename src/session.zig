@@ -141,6 +141,8 @@ pub const editor = struct {
     pub const diff_state = @import("session/editor/diff_state.zig");
     pub const intraline = @import("session/editor/intraline.zig");
     pub const fold = @import("session/editor/fold.zig");
+    /// 문서 내 검색의 일치 계산(§5.1) — 순수 함수라 여기 산다. 오버레이 UI는 chrome이 이미 갖고 있다.
+    pub const find = @import("session/editor/find.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

@@ -121,6 +121,12 @@ pub const Props = struct {
     /// 선택은 문서 전체 offset인데 그것을 줄로 자르는 것은 제품의 일이다 — 컴포넌트는 어느 줄이
     /// 문서 몇 번째 byte에서 시작하는지 모른다.
     selection_marks: ?[]const []const Mark = null,
+    /// **검색 결과**(§5.1). `selection_marks`와 같은 축(논리 줄)이고, 한 줄에 여러 개가 설 수 있다 —
+    /// 선택은 이어진 하나라 줄마다 최대 하나였지만 매치는 그렇지 않다.
+    search_marks: ?[]const []const Mark = null,
+    /// 그 중 **지금 보고 있는 매치**. `search_marks` 안에 이미 들어 있고 이것은 어느 것인지만
+    /// 가리킨다 — 따로 담으면 두 목록이 어긋날 수 있고, 그러면 색이 둘인 매치나 색이 없는 매치가 난다.
+    search_current: ?CurrentMatch = null,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -174,6 +180,11 @@ pub const Props = struct {
 /// 그 호출자가 cluster 경계로 정한다 — 여기서는 이미 정해진 범위를 열로 옮겨 칠하기만 한다.
 pub const Mark = struct { start: u32, len: u32 };
 
+/// 지금 네비게이션이 가리키는 검색 결과 — 줄(논리 줄 축)과 그 줄 안 시작 byte.
+///
+/// `Mark`를 쓰지 않는 이유: 길이는 이미 `search_marks` 쪽에 있고, 여기 또 두면 둘이 다를 수 있다.
+pub const CurrentMatch = struct { line: u32, start: u32 };
+
 /// 비교 본문에서 한 줄이 무엇인가. **`none`은 색을 칠하지 않는다** — context와, 짝을 맞추려 넣은 빈
 /// 행이 여기 든다(빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
 pub const RowBand = enum { none, added, removed };
@@ -189,6 +200,13 @@ pub const selection_alpha: u8 = 115; // ≈45%
 /// **바뀐 글자**의 세기(§3.5 "줄 전체에 옅은 색을 깔고 바뀐 글자만 진하게"). 줄 배경 위에 한 겹 더
 /// 얹으므로 그 차이가 곧 "이 글자가 달라졌다"는 신호다(CM6 `diff-theme.ts`가 34%를 쓴 그 자리다).
 pub const mark_alpha: u8 = 87; // ≈34%
+
+/// 검색 결과 강조. 색 자체가 검색용(`search_match`)이라 선택처럼 진하게 얹지 않아도 눈에 띄고,
+/// **글자를 읽을 수 있어야** 다음 매치인지 판단할 수 있다 — 그래서 선택(45%)보다 옅다.
+pub const search_alpha: u8 = 92; // ≈36%
+/// 현재 매치는 **더 진하다**. 같은 세기면 여럿 중 어느 것이 현재인지 색상만으로 구분해야 하는데,
+/// 테마에 따라 두 색이 가까울 수 있다(사용자 테마는 우리가 못 고른다).
+pub const search_current_alpha: u8 = 153; // ≈60%
 /// 좌측 색 띠의 세기와 두께. **색만으로 구분하지 않기 위한 장치다**(editor-surface-dock.md §3.5) —
 /// 색각 이상에서 초록/빨강이 같아 보여도 띠의 유무와 위치가 남는다.
 pub const strip_alpha: u8 = 153; // ≈60%
@@ -536,6 +554,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **선택은 밴드 뒤에 얹는다** — diff 줄 배경 위에 선택이 보여야지 그 반대면 선택한 줄이
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
     const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
+    // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
+    // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
+    const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops ..], scratch.count_scratch);
 
     const sw = scrollbar.build(.{
         .content = .{
@@ -551,7 +572,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .first_visual_row = first_visual,
         .cell_h_px = props.cell_h_px,
         .metrics = props.metrics,
-    }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops ..]);
+    }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops + find_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
     // **본문 아래 거터에 선다.** 호출자가 그 자리를 이미 비워 두었다(`showsHorizontalBar`로 물어
@@ -569,7 +590,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .first_col = props.first_col,
             .cell_w_px = props.cell_w_px,
             .metrics = props.metrics,
-        }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops + sw.ops ..])
+        }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops + find_ops + sw.ops ..])
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
 
@@ -577,7 +598,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + hw.ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + hw.ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
@@ -715,6 +736,63 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
             .role = .selection,
             .alpha = selection_alpha,
         }, out[n..], scratch_cols);
+    }
+    return n;
+}
+
+/// **검색 결과**를 그린다(§5.1). 선택과 같은 축·같은 열 계산을 쓰고 색과 세기만 다르다.
+///
+/// **현재 매치만 갈라 다른 색으로 그린다.** 갈라 두 배열로 받지 않는 이유는 어긋남이다 — 목록이
+/// 둘이면 한쪽에만 있는 매치(색이 없다)나 양쪽에 있는 매치(두 번 칠해 더 진하다)가 날 수 있고,
+/// 둘 다 "검색이 이상하다"로 보인다. 하나에서 골라내면 그 상태가 표현 불가능하다.
+fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+    const rows = props.search_marks orelse return 0;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n >= out.len) break;
+        const idx = props.first_line + v.line;
+        if (idx >= rows.len or idx >= props.lines.len) continue;
+        const marks = rows[idx];
+        if (marks.len == 0) continue;
+        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
+        const paint = RowMarkPaint{
+            .line = props.lines[idx],
+            .row_start_col = v.start_col,
+            .y = y,
+            .marks = marks,
+            .role = .search_match,
+            .alpha = search_alpha,
+        };
+
+        // 현재 매치가 이 줄에 있나. 없으면 한 번에 그린다 — 대부분의 줄이 이쪽이다.
+        const cur: ?usize = blk: {
+            const c = props.search_current orelse break :blk null;
+            if (c.line != idx) break :blk null;
+            for (marks, 0..) |m, k| {
+                if (m.start == c.start) break :blk k;
+            }
+            break :blk null;
+        };
+        const k = cur orelse {
+            n += paintRowMarks(props, layout, paint, out[n..], scratch_cols);
+            continue;
+        };
+
+        // **셋으로 나눠 같은 함수를 세 번 부른다.** 열 계산이 한 곳에 있어야 한다는 규칙(§4.1c)이
+        // 여기서도 그대로다 — 현재 매치만 따로 계산하면 그 하나가 7칸 밀리는 전례를 반복한다.
+        var p_before = paint;
+        p_before.marks = marks[0..k];
+        if (p_before.marks.len > 0) n += paintRowMarks(props, layout, p_before, out[n..], scratch_cols);
+
+        var p_cur = paint;
+        p_cur.marks = marks[k .. k + 1];
+        p_cur.role = .search_match_current;
+        p_cur.alpha = search_current_alpha;
+        if (n < out.len) n += paintRowMarks(props, layout, p_cur, out[n..], scratch_cols);
+
+        var p_after = paint;
+        p_after.marks = marks[k + 1 ..];
+        if (p_after.marks.len > 0 and n < out.len) n += paintRowMarks(props, layout, p_after, out[n..], scratch_cols);
     }
     return n;
 }

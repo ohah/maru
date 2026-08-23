@@ -61,6 +61,7 @@ fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
         .editor_wrap_stale_scroll,
         .editor_real_file,
         .editor_selection,
+        .editor_find,
         .editor_diff_selection,
         .editor_diff,
         .editor_diff_scrolled,
@@ -93,6 +94,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_wrap_stale_scroll,
         .editor_real_file,
         .editor_selection,
+        .editor_find,
         .editor_diff_selection,
         .editor_diff,
         .editor_diff_scrolled,
@@ -772,6 +774,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-wrap")) return .editor_wrap;
     if (std.mem.eql(u8, raw, "editor-hscroll")) return .editor_hscroll;
     if (std.mem.eql(u8, raw, "editor-folded")) return .editor_folded;
+    if (std.mem.eql(u8, raw, "editor-find")) return .editor_find;
     if (std.mem.eql(u8, raw, "editor-wrap-scrolled")) return .editor_wrap_scrolled;
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
@@ -831,6 +834,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_wrap => "editor-wrap",
         .editor_hscroll => "editor-hscroll",
         .editor_folded => "editor-folded",
+        .editor_find => "editor-find",
         .editor_wrap_scrolled => "editor-wrap-scrolled",
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
         .editor_real_file => "editor-real-file",
@@ -863,8 +867,12 @@ fn labTokens() chrome.Tokens {
         .diff_removed = .{ .r = 205, .g = 90, .b = 90 },
         .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
         .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
-        .search_match = .{ .r = 1, .g = 2, .b = 3 },
-        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        // **검색 강조도 실제 계열 값을 준다** — 바로 아래 선택·커서와 같은 이유이고, 그 주석이
+        // 경고한 상태를 이 색이 실제로 겪었다: 편집기 검색이 붙기 전까지 여기는 근사-검정 자리표시자
+        // (1,2,3)였고, 붙이고 첫 캡처에서 강조가 **바탕과 구별되지 않았다**. 값은 제품 기본 테마의
+        // `search_match`/`search_match_current`(config/theme.zig의 `#554a1a`/`#997722`)다.
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
         // **선택·커서는 실제 계열 값을 준다.** 아래 accent와 같은 이유다: 커밋 상자 시나리오가 이 둘을
         // 실제로 그리는데(선택 밴드·caret), 근사-검정 자리표시자를 그대로 두면 골든이 "그렸다"고
         // 통과하면서 화면에는 아무것도 안 보인다 — 밴드가 사라지는 회귀와 픽셀이 구별되지 않는다.

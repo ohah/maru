@@ -167,6 +167,10 @@ pub fn buildPaneOps(
     row_cache: ?*chrome_editor.frame.RowCache,
     /// 논리 줄마다의 **선택 범위**(§4.1g). `null`이면 선택이 없거나 caret뿐이다.
     selection_marks: ?[]const []const chrome_editor.frame.Mark,
+    /// 논리 줄마다의 **검색 결과**(§5.1)와 그 중 현재 매치. `null`이면 검색이 닫혀 있거나
+    /// 이 Term이 검색 대상이 아니다(활성이 아닌 pane — 그쪽까지 칠하면 어디를 검색 중인지 흐려진다).
+    search_marks: ?[]const []const chrome_editor.frame.Mark,
+    search_current: ?chrome_editor.frame.CurrentMatch,
     wrap: bool,
     /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
     /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
@@ -186,7 +190,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current },
         .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -825,10 +829,30 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     };
 
     const pane_rect: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
+
+    // **검색 결과는 검색 중인 그 문서에만 칠한다**(§5.1). 열려 있는 편집기가 여럿이면 나머지에도
+    // 같은 색이 깔리는데, 그러면 Enter가 어디로 갈지 화면이 말해 주지 못한다 — 터미널 쪽이
+    // 활성 surface의 매치만 클립하는 것과 같은 규칙이다.
+    const find_marks: ?[]const []const chrome_editor.frame.Mark = blk: {
+        if (!isFindTarget(self, term)) break :blk null;
+        // **닫은 채 ⌘G로 오가는 중이면 현재 매치만 그린다** — 스크롤백이 같은 자리에서 같은
+        // 판정을 한다(`collectFindViewSpans`의 `if (find.open)`). 닫아 둔 검색의 나머지 강조까지
+        // 남으면 "닫았는데 화면이 그대로"가 된다.
+        const all = self.editor_find_matches.items;
+        if (self.chrome_host.find.open) break :blk buildFindMarks(self, term, all);
+        const cur = self.chrome_host.find.current;
+        if (cur >= all.len) break :blk null;
+        break :blk buildFindMarks(self, term, all[cur .. cur + 1]);
+    };
+    const find_current: ?chrome_editor.frame.CurrentMatch = blk: {
+        if (find_marks == null) break :blk null;
+        const vm = currentVisibleMatch(self, term) orelse break :blk null;
+        break :blk .{ .line = vm.row, .start = vm.start };
+    };
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -845,7 +869,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -1589,6 +1613,176 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
         if (to <= from) continue;
         buf[i] = .{ .start = @intCast(from), .len = @intCast(to - from) };
         rows[i] = buf[i .. i + 1];
+    }
+    return rows;
+}
+
+/// 현재 검색 매치가 **보이게** 한다 — 접혀 있으면 펴고, 화면 밖이면 굴린다(§5.1 네비게이션).
+///
+/// **이미 보이면 아무것도 하지 않는다.** 타이핑마다 재검색이 돌므로(증분 검색) 매번 화면을 옮기면
+/// 글자 하나 지울 때마다 본문이 튄다. VSCode도 화면 안 매치로는 뷰를 움직이지 않는다.
+pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
+    const idx = self.chrome_host.find.current;
+    if (idx >= self.editor_find_matches.items.len) return;
+    const doc_line = self.editor_find_matches.items[idx].line;
+
+    // **먼저 편다.** 접힌 채로 보이는 줄을 찾으면 그 줄이 없어 아무 데도 못 간다.
+    revealFoldedLine(self, term, doc_line);
+
+    const row = visibleRowOfDocLine(term, doc_line) orelse return; // 폈는데도 없다 — 그릴 것이 없다
+    // **렌더가 굳힌 행 수를 쓴다**(§4.1g ② — 스냅숏의 경계). pane 사각을 여기서 다시 구하면
+    // 마지막 프레임과 다른 값이 나올 수 있고, 그러면 "보인다"는 판정이 화면과 갈린다.
+    const rows = term.rt.editor_hit_rows_len;
+    if (rows == 0) { // 아직 한 프레임도 안 그렸다 — 맨 위에 둔다
+        term.rt.editor_first_line = row;
+        self.metal_dirty = true;
+        return;
+    }
+    const top = term.rt.editor_first_line;
+    // **랩이 켜져 있으면 이 판정이 근사다** — 행 수는 시각 행인데 `first_line`은 논리 줄이라,
+    // 랩된 줄이 많으면 아래쪽 몇 줄을 "보인다"고 잘못 셀 수 있다. 그 경우의 대가는 이미 화면에
+    // 있는 매치로 안 굴러가는 것뿐이고(사용자는 강조로 그것을 본다), 반대 방향으로 틀리면
+    // 매번 튄다 — 틀릴 때 덜 나쁜 쪽으로 근사한다.
+    if (row >= top and row < top + rows) return;
+
+    // 화면 **가운데쯤**에 둔다. 맨 위에 두면 다음 매치가 어디로 이어지는지 안 보이고, Find 오버레이가
+    // 활성 pane 위쪽 한 줄을 덮으므로 위에 붙은 매치는 가려진다(스크롤백 쪽이 같은 이유로 가운데다).
+    term.rt.editor_first_line = row -| rows / 2;
+    self.metal_dirty = true;
+}
+
+/// `doc_line`을 숨기고 있는 접힘을 전부 편다(중첩이면 여러 겹). 숨어 있지 않으면 무동작.
+///
+/// **한 번만 다시 만든다.** 겹마다 `toggleFoldHead`를 부르면 그때마다 보이는 줄 배열을 다시 만들고
+/// 보던 자리를 되돌리는데, 여기서는 곧바로 다른 자리로 갈 것이라 그 일이 통째로 버려진다.
+fn revealFoldedLine(self: *AppSession, term: *Term, doc_line: u32) void {
+    if (term.rt.editor_folded_len == 0) return;
+    if (foldsUnavailable(term)) return;
+    const buf = term.rt.editor_folded_buf;
+    const prev_len = term.rt.editor_folded_len;
+    // **되돌릴 자리를 만들고 나서 고친다.** 아래 압축은 `buf`를 제자리에서 덮으므로, 먼저 베끼지
+    // 않으면 되돌릴 것이 이미 사라진 뒤다(`toggleFoldHead`가 같은 순서인 이유다).
+    @memcpy(term.rt.editor_folded_prev[0..prev_len], buf[0..prev_len]);
+
+    var kept: usize = 0;
+    for (term.rt.editor_folded_prev[0..prev_len]) |head| {
+        const covers = for (term.rt.editor_fold_ranges) |r| {
+            if (r.head == head) break doc_line >= r.first_hidden and doc_line <= r.last_hidden;
+        } else false;
+        if (covers) continue; // 이 접힘이 그 줄을 숨긴다 — 뺀다
+        buf[kept] = head;
+        kept += 1;
+    }
+    if (kept == prev_len) return; // 숨긴 것이 없었다 — 압축이 제자리 복사라 `buf`도 그대로다
+
+    term.rt.editor_folded_len = kept;
+    rebuildVisible(self, term) catch {
+        @memcpy(buf[0..prev_len], term.rt.editor_folded_prev[0..prev_len]);
+        term.rt.editor_folded_len = prev_len;
+        return;
+    };
+    self.metal_dirty = true;
+}
+
+/// 이 Term이 지금 ⌘F가 검색하고 있는 문서인가.
+///
+/// **id로 묻는다.** 매치 목록은 계산한 시점의 활성 편집기 것이고(`editor_find_source`), 그 뒤에
+/// pane이 바뀌었을 수 있다 — "활성인가"로 물으면 아직 다시 계산하지 않은 프레임에서 **남의 문서
+/// 좌표를 이 문서에 칠한다**. 목록과 함께 실려 온 출처와 대조하면 그 한 프레임이 없다.
+pub fn isFindTarget(self: *AppSession, term: *const Term) bool {
+    if (!(self.chrome_host.find.open or self.find_nav)) return false;
+    if (self.editor_find_source == 0) return false;
+    return self.editor_find_source == term.surfaceId();
+}
+
+/// 검색 결과 하나를 **보이는 줄 축**으로 옮긴 것 — 그 축에 없으면(접혀 숨었다) `null`.
+///
+/// **길이는 담지 않는다.** 부르는 쪽이 필요한 것은 *어느 자리가 현재인가*뿐이고(`frame.CurrentMatch`),
+/// 길이는 이미 `search_marks` 쪽에 있다 — 두 곳에 두면 둘이 다를 수 있다.
+pub const VisibleMatch = struct { row: u32, start: u32 };
+
+/// 문서 줄 → 보이는 줄. 접힘이 없으면 그대로다.
+///
+/// **훑는다.** 보이는 줄 배열은 문서 순서라 이분 탐색도 되지만, 부르는 자리가 프레임당 한 번
+/// (현재 매치 하나)이라 그 복잡도를 지불할 이유가 없다.
+fn visibleRowOfDocLine(term: *const Term, doc_line: u32) ?u32 {
+    const numbers = term.rt.editor_visible_numbers;
+    if (term.rt.editor_visible_lines.len == 0 or numbers.len == 0) {
+        // **문서 밖은 없는 것으로 답한다.** 매치 목록이 다른 문서의 것일 수 있다 — 편집기를 닫고
+        // 다른 것을 열면 목록은 다음 재검색까지 남는다(`editor_find_source`가 그것을 막지만,
+        // 그 표식을 안 보는 경로가 생겨도 여기서 문서 밖으로 굴러가지 않는다).
+        return if (doc_line < term.rt.editor_lines.len) doc_line else null;
+    }
+    for (numbers, 0..) |n, i| {
+        const num = n orelse continue;
+        if (num - 1 == doc_line) return @intCast(i);
+    }
+    return null; // 접혀 숨었다
+}
+
+/// 현재 매치를 **보이는 줄 축**으로 옮긴다(렌더가 색을 가르는 데 쓴다).
+pub fn currentVisibleMatch(self: *AppSession, term: *Term) ?VisibleMatch {
+    const idx = self.chrome_host.find.current;
+    if (idx >= self.editor_find_matches.items.len) return null;
+    const m = self.editor_find_matches.items[idx];
+    const row = visibleRowOfDocLine(term, m.line) orelse return null;
+    return .{ .row = row, .start = m.start };
+}
+
+/// 검색 결과(§5.1)를 **보이는 줄별 byte 범위**로 자른다 — `buildSelectionMarks`와 같은 일이고
+/// 저장소 규칙만 다르다.
+///
+/// **줄당 하나를 전제하지 않는다.** 선택 쪽은 `buf[i..i+1]`로 잘라 주는데, 그 구조가 성립하는
+/// 이유는 선택이 이어진 하나여서다. 매치는 한 줄에 여럿이라 같은 저장소에 얹으면 **둘째부터
+/// 조용히 사라진다** — 이 슬라이스가 존재하는 이유가 그 구분이다.
+///
+/// **매치는 문서 줄 순서로 정렬돼 있다**(`find.findMatches`가 훑는 순서). 그래서 보이는 줄을
+/// 훑으며 매치 커서를 함께 밀면 한 번의 통과로 끝난다 — 줄마다 다시 찾으면 접힌 큰 문서에서
+/// 곱으로 붙는다.
+///
+/// **목록을 인자로 받는다.** ⌘G로 오버레이를 닫은 채 오갈 때는 **현재 매치만** 그려야 하는데
+/// (스크롤백 쪽이 `if (find.open)`으로 나머지를 빼는 그 규칙), 목록을 통째로 읽으면 그 구분을
+/// 이 함수 안에서 또 해야 한다 — 부르는 쪽이 슬라이스를 좁히면 규칙이 한 곳에만 남는다.
+fn buildFindMarks(self: *AppSession, term: *Term, matches: []const maru.session.editor.find.Match) ?[]const []const chrome_editor.frame.Mark {
+    if (matches.len == 0) return null;
+    const numbers = term.rt.editor_visible_numbers;
+    const visible = term.rt.editor_visible_lines;
+    const folded = visible.len > 0 and numbers.len > 0;
+    const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
+    if (lines_len == 0) return null;
+
+    if (term.rt.editor_find_marks.len < lines_len) {
+        const grown = self.allocator.alloc([]const chrome_editor.frame.Mark, lines_len) catch return null;
+        if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
+        term.rt.editor_find_marks = grown;
+    }
+    if (term.rt.editor_find_mark_buf.len < matches.len) {
+        const grown = self.allocator.alloc(chrome_editor.frame.Mark, matches.len) catch return null;
+        if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
+        term.rt.editor_find_mark_buf = grown;
+    }
+    const rows = term.rt.editor_find_marks[0..lines_len];
+    const buf = term.rt.editor_find_mark_buf;
+    @memset(rows, &.{});
+
+    // 보이는 줄을 문서 순서로 훑으며 매치 커서를 민다. 접힘이 켜져 있어도 보이는 줄의 문서 번호는
+    // 오름차순이라(숨은 줄을 건너뛸 뿐) 커서를 되돌릴 일이 없다.
+    var mi: usize = 0;
+    var w: usize = 0;
+    for (0..lines_len) |i| {
+        const doc_line: u32 = if (folded) blk: {
+            if (i >= numbers.len) continue;
+            break :blk (numbers[i] orelse continue) - 1;
+        } else @intCast(i);
+        // 이 줄보다 앞선 매치는 숨은 줄의 것이다 — 건너뛴다.
+        while (mi < matches.len and matches[mi].line < doc_line) mi += 1;
+        const from = w;
+        while (mi < matches.len and matches[mi].line == doc_line) : (mi += 1) {
+            if (w >= buf.len) break;
+            buf[w] = .{ .start = matches[mi].start, .len = matches[mi].len };
+            w += 1;
+        }
+        if (w > from) rows[i] = buf[from..w];
     }
     return rows;
 }
@@ -2638,6 +2832,11 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_selection_marks = &.{};
     term.rt.editor_selection_mark_buf = &.{};
     term.rt.editor_selection = null;
+
+    if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
+    if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
+    term.rt.editor_find_marks = &.{};
+    term.rt.editor_find_mark_buf = &.{};
 }
 
 fn dropFoldState(self: *AppSession, term: *Term) void {
@@ -8752,4 +8951,209 @@ test "CUR1 상태바 커서 위치: 그래핌 1-based이고 탭은 한 글자다
     term.rt.editor_diff = .{ .requested_ms = 0 };
     defer term.rt.editor_diff = null;
     try testing.expectEqual(@as(?@TypeOf(cursorPosition(term).?), null), cursorPosition(term));
+}
+
+test "EM1 한 줄에 매치가 여럿이면 마크도 여럿 선다 (§5.1)" {
+    // **이 슬라이스가 존재하는 이유를 재는 판정자다.** 선택 마크 저장소는 줄당 하나이고
+    // (`editor_selection_mark_buf`는 줄 수만큼 잡아 `buf[i..i+1]`로 자른다), 그 위에 검색을 얹으면
+    // 매치 리스트는 셋인데 화면에는 하나만 선다 — **카운터가 맞으므로 조용하다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "m.txt", .data = "row row row\nnone here\nrow\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "m.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "row", &fx.session.editor_find_matches);
+    try testing.expectEqual(@as(usize, 4), fx.session.editor_find_matches.items.len);
+
+    const rows = buildFindMarks(fx.session, term, fx.session.editor_find_matches.items) orelse return error.NoMarks;
+    try testing.expectEqual(@as(usize, 3), rows[0].len); // 첫 줄에 셋 — 하나면 저장소가 줄당 하나다
+    try testing.expectEqual(@as(u32, 0), rows[0][0].start);
+    try testing.expectEqual(@as(u32, 4), rows[0][1].start);
+    try testing.expectEqual(@as(u32, 8), rows[0][2].start);
+    try testing.expectEqual(@as(usize, 0), rows[1].len); // 매치 없는 줄은 빈 슬라이스
+    try testing.expectEqual(@as(usize, 1), rows[2].len);
+}
+
+test "EM2 접혀 있으면 마크가 보이는 줄 축으로 선다 (§4.1f × §5.1)" {
+    // 문서 줄 축으로 만들면 접힘이 켜지는 순간 **화면이 조용히 거짓말한다** — 선택 마크가 겪은
+    // 그 자리이고(`buildSelectionMarks` doc의 실측), 축이 둘인 한 같은 함정이 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 들여쓰기로 접을 블록을 만든다. `target`은 **블록 밖 마지막 줄**에 둔다 — 접으면 그 줄이
+    // 위로 당겨져 보이는 줄 번호가 문서 줄 번호와 갈린다.
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "f.txt", .data = "head\n    a\n    b\n    c\ntarget\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "f.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "target", &fx.session.editor_find_matches);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+    try testing.expectEqual(@as(u32, 4), fx.session.editor_find_matches.items[0].line); // 문서 줄 축
+
+    // 펼친 상태: 보이는 줄도 4다(두 축이 같아 아직 아무것도 판정되지 않는다).
+    {
+        const rows = buildFindMarks(fx.session, term, fx.session.editor_find_matches.items) orelse return error.NoMarks;
+        try testing.expectEqual(@as(usize, 1), rows[4].len);
+    }
+
+    // 접는다 — `head` 아래 세 줄이 숨어 `target`이 **보이는 줄 1번**이 된다.
+    // (보이는 줄은 셋이다: `head`·`target`·끝 개행이 만든 빈 줄.)
+    try testing.expect(foldAll(fx.session));
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_visible_lines.len);
+    const rows = buildFindMarks(fx.session, term, fx.session.editor_find_matches.items) orelse return error.NoMarks;
+    try testing.expectEqual(@as(usize, 0), rows[0].len);
+    try testing.expectEqual(@as(usize, 1), rows[1].len); // 문서 줄 축이면 여기가 비고 화면에 띠가 없다
+    try testing.expectEqual(@as(u32, 0), rows[1][0].start);
+}
+
+test "EM3 접혀 숨은 매치로 가면 펴고 나서 간다 (§5.1 네비게이션)" {
+    // 펴지 않으면 "다음 매치"가 **아무 데도 안 가는 것처럼** 보인다 — 카운터만 올라가고 화면은
+    // 그대로다. 그 상태가 이 슬라이스가 고치려는 부류(조용히 잘못 동작한다)와 같다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "r.txt", .data = "head\n    a\n    needle\n    c\ntail\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "r.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try testing.expect(foldAll(fx.session));
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_visible_lines.len); // head·tail·끝 빈 줄 — needle이 숨었다
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_find_matches.items.len);
+    try testing.expect(buildFindMarks(fx.session, term, fx.session.editor_find_matches.items).?[0].len == 0); // 숨은 동안에는 그릴 것이 없다
+
+    fx.session.chrome_host.find.current = 0;
+    revealCurrentFindMatch(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len); // 폈다
+    const vm = currentVisibleMatch(fx.session, term) orelse return error.NotVisible;
+    try testing.expectEqual(@as(u32, 2), vm.row);
+    try testing.expectEqual(@as(u32, 4), vm.start); // "    needle"의 들여쓰기 뒤
+}
+
+test "EM4 이미 보이는 매치로는 화면을 움직이지 않는다" {
+    // 증분 검색이라 타이핑마다 이 경로가 돈다 — 매번 굴리면 글자 하나 지울 때마다 본문이 튄다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..200) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
+    try doc.appendSlice(allocator, "needle at the end\n");
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "s.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "s.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    const rows_drawn = term.rt.editor_hit_rows_len;
+    try testing.expect(rows_drawn > 2); // 판정이 성립할 만큼은 그렸다
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "needle", &fx.session.editor_find_matches);
+    fx.session.chrome_host.find.current = 0;
+
+    // 화면 **밖**이다 — 굴러가고, 매치가 가운데쯤 온다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    revealCurrentFindMatch(fx.session, term);
+    const after = term.rt.editor_first_line;
+    try testing.expectEqual(@as(usize, 200 - rows_drawn / 2), after);
+
+    // 이제 화면 **안**이다 — 다시 불러도 그대로여야 한다.
+    revealCurrentFindMatch(fx.session, term);
+    try testing.expectEqual(after, term.rt.editor_first_line);
+}
+
+test "EM5 검색 대상이 아닌 편집기에는 강조가 안 선다" {
+    // 편집기가 여럿 열려 있을 때 전부에 같은 색이 깔리면 Enter가 어디로 갈지 화면이 말해 주지
+    // 못한다. **id로 판정한다** — "활성인가"로 물으면 pane을 옮긴 다음 프레임이 남의 문서 좌표를
+    // 이 문서에 칠한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+
+    fx.session.chrome_host.find.open = true;
+    try testing.expect(!isFindTarget(fx.session, term)); // 출처가 없다 — 아직 아무것도 안 찾았다
+
+    fx.session.editor_find_source = term.surfaceId();
+    try testing.expect(isFindTarget(fx.session, term));
+
+    fx.session.editor_find_source = term.surfaceId() + 1; // 다른 편집기의 매치다
+    try testing.expect(!isFindTarget(fx.session, term));
+
+    fx.session.editor_find_source = term.surfaceId();
+    fx.session.chrome_host.find.open = false;
+    fx.session.find_nav = false;
+    try testing.expect(!isFindTarget(fx.session, term)); // 닫혀 있으면 안 그린다
+}
+
+test "EM6 닫은 채 ⌘G로 오가면 현재 매치만 그린다" {
+    // 스크롤백은 `collectFindViewSpans`에서 `if (find.open)`으로 나머지를 뺀다. 편집기가 그 규칙을
+    // 안 따르면 **닫았는데 화면이 그대로**다 — 같은 오버레이가 pane 종류에 따라 다르게 행동한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "g.txt", .data = "row row\nrow\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "g.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "row", &fx.session.editor_find_matches);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_find_matches.items.len);
+    fx.session.editor_find_source = term.surfaceId();
+
+    // 열려 있으면 셋 다 — 첫 줄에 둘, 둘째 줄에 하나.
+    fx.session.chrome_host.find.open = true;
+    fx.session.chrome_host.find.current = 2;
+    {
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+        const rows = term.rt.editor_find_marks;
+        try testing.expectEqual(@as(usize, 2), rows[0].len);
+        try testing.expectEqual(@as(usize, 1), rows[1].len);
+    }
+
+    // 닫힌 채 네비 중이면 **현재 하나**만. 현재는 둘째 줄의 것이라 첫 줄이 비어야 한다.
+    fx.session.chrome_host.find.open = false;
+    fx.session.find_nav = true;
+    {
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+        const rows = term.rt.editor_find_marks;
+        try testing.expectEqual(@as(usize, 0), rows[0].len);
+        try testing.expectEqual(@as(usize, 1), rows[1].len);
+    }
 }

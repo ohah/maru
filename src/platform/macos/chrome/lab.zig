@@ -170,6 +170,11 @@ pub const ScenarioId = enum {
     /// gutter를 침범하지 않는지가 단위 테스트로 안 보이는 부분이다 — 열을 셀 폭으로 환산해 놓는
     /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다(강조가 7칸 밀린 §4.1c 전례).
     editor_selection,
+    /// N2 §5.1 — **문서 내 검색 결과.** 한 줄에 매치가 **여럿** 서고, 그 중 하나만 다른 색인지를
+    /// 픽셀로 본다. 단위 테스트가 못 보는 것이 그 둘이다: 마크 저장소가 줄당 하나였다면 둘째
+    /// 매치가 조용히 사라지고(리스트는 여전히 셋이라 카운터는 맞다), 현재 매치를 가르는 코드가
+    /// 어긋나면 색이 둘인 매치나 색이 없는 매치가 난다 — 둘 다 화면에서만 드러난다.
+    editor_find,
     /// N1 §4.1g "비교 뷰" — **좌우 두 열 중 한 쪽만** 선택 띠가 서는지 픽셀로 본다. 계약이
     /// *"좌우를 걸치는 선택은 만들지 않는다"*로 정한 것이 화면에서 어떻게 보이는가이고, 짝맞춤
     /// 빈 행(왼쪽 3행)에 띠가 어떻게 서는지도 여기서만 드러난다 — 그 행은 그 자리에 줄이 **없다**.
@@ -269,7 +274,7 @@ pub fn buildFrame(
         .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -335,6 +340,38 @@ const editor_selection_marks = [_][]const chrome.components.editor_view.frame.Ma
     &editor_selection_marks_none,
     &editor_selection_marks_none,
 };
+
+/// `editor_find` 픽스처. 검색어는 `row`이고, **둘째 줄에 넷**이 든다 — 한 줄 여러 매치가 이
+/// 슬라이스의 이유라 그것이 화면 가운데 있어야 한다.
+const editor_find_lines = [_][]const u8{
+    "fn paint(self: *View) void {",
+    "    for (row) |row| self.row(row);",
+    "    // 위 줄에 매치가 넷이다 — 현재는 그 중 하나뿐",
+    "}",
+    "",
+    "// 여기 row 하나 더 — 다른 줄에도 선다",
+};
+
+/// 줄별 검색 결과. `editor_selection`과 같은 축이고 **줄당 개수만 다르다**.
+const editor_find_marks_row1 = [_]chrome.components.editor_view.frame.Mark{
+    .{ .start = 9, .len = 3 }, // for (row)
+    .{ .start = 15, .len = 3 }, // |row|
+    .{ .start = 25, .len = 3 }, // self.row(
+    .{ .start = 29, .len = 3 }, // (row)
+};
+const editor_find_marks_row5 = [_]chrome.components.editor_view.frame.Mark{.{ .start = 10, .len = 3 }}; // `여기`가 3 byte씩이다
+const editor_find_marks_none = [_]chrome.components.editor_view.frame.Mark{};
+const editor_find_marks = [_][]const chrome.components.editor_view.frame.Mark{
+    &editor_find_marks_none,
+    &editor_find_marks_row1,
+    &editor_find_marks_none,
+    &editor_find_marks_none,
+    &editor_find_marks_none,
+    &editor_find_marks_row5,
+};
+/// 현재 매치는 **둘째 줄의 둘째 것**이다. 첫 것을 고르면 "앞에서 자른 것"과 구분이 안 되고,
+/// 마지막을 고르면 "뒤에서 자른 것"과 구분이 안 된다 — 가운데여야 셋으로 가르는 코드가 판정된다.
+const editor_find_current: chrome.components.editor_view.frame.CurrentMatch = .{ .line = 1, .start = 15 };
 
 const editor_fixture_lines = [_][]const u8{
     // 8칸마다 `|`인 자. **격자 배치의 회귀 가드다** — 격자면 파이프 간격이 정확히 cell_w의
@@ -520,6 +557,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => &editor_wrap_lines,
         .editor_folded => &editor_folded_lines,
         .editor_selection => &editor_selection_lines,
+        .editor_find => &editor_find_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -637,6 +675,8 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .line_numbers = if (scenario.id == .editor_folded) &editor_folded_numbers else null,
         .folds = if (scenario.id == .editor_folded) &editor_folded_marks else null,
         .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
+        .search_marks = if (scenario.id == .editor_find) &editor_find_marks else null,
+        .search_current = if (scenario.id == .editor_find) editor_find_current else null,
         // **가로 스크롤 시나리오만 막대를 세운다.** 값은 손으로 적지 않고 fixture에서 센다 —
         // 제품이 여는 경로에서 세는 그 값과 같은 계산이어야 캡처가 제품을 예고한다(§4.1a).
         .content_max_cols = hscroll_max_cols,
@@ -890,7 +930,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

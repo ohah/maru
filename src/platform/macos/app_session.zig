@@ -1736,6 +1736,16 @@ const TermRuntime = struct {
     editor_selection_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
     /// 위 배열이 가리키는 실제 저장소. 줄마다 범위가 **하나**뿐이라(선택은 연속이다) 줄 수만큼이면 된다.
     editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
+    /// **검색 결과**를 줄별 범위로 자른 것(§5.1). `editor_selection_marks`와 자리도 축도 같고
+    /// **저장소 크기만 다르다** — 선택은 이어진 하나라 줄마다 최대 하나지만, 매치는 한 줄에
+    /// 여럿이다. 그 하나 때문에 선택 저장소를 재사용하지 않는다(`buf[i..i+1]`로 자르는 그 구조가
+    /// 애초에 줄당 하나를 전제한다 — 얹으면 둘째 매치부터 조용히 사라진다).
+    ///
+    /// **보이는 줄 축이다**(접힘 반영). 렌더가 받는 배열이 그것이고, 문서 줄 축으로 만들면
+    /// 접힘이 켜지는 순간 강조가 엉뚱한 줄에 선다(`buildSelectionMarks`가 겪은 그 자리다).
+    editor_find_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
+    /// 위 배열이 가리키는 실제 저장소 — **매치 수만큼** 잡는다.
+    editor_find_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
     /// 비교 뷰의 **선택**(§4.1g "비교 뷰"). 단일 편집기의 `editor_selection`과 자리는 같고 축이
     /// 다르다 — 이쪽은 문서 offset이 아니라 `(행, 행 안 byte)`다.
     ///
@@ -3943,6 +3953,15 @@ pub const AppSession = struct {
     // 리스트만 session이 소유한다 — terminal.Match라 chrome으로 못 옮긴다(중립 경계). 검색은 코어(findMatches)가
     // 채우고(recomputeFind), tick이 뷰포트로 클립해 하이라이트한다. 현재 매치 인덱스는 chrome_host.find.current.
     find_matches: std.ArrayList(terminal.Match) = .empty,
+    // 네이티브 편집기 문서 검색(§5.1)의 매치 리스트. 위 `find_matches`와 **자리는 같고 축이 다르다** —
+    // 스크롤백은 절대 (행, 열)이고 이쪽은 (문서 줄, 줄 안 byte)다. 둘을 한 배열로 합치지 않는 이유가
+    // 그 축이다: 좌표계가 다른 값을 한 목록에 담으면 읽는 쪽마다 어느 쪽인지 물어야 하고, 그 질문을
+    // 빠뜨린 자리가 곧 결함이 된다. 대신 **한 번에 하나만 비어 있지 않다**(활성 Term이 하나다).
+    editor_find_matches: std.ArrayList(maru.session.editor.find.Match) = .empty,
+    // 위 매치들이 **어느 Term의 것인가**(그 Term의 surface id, 0 = 없음). 활성 편집기가 바뀌면
+    // 매치는 남의 문서 것이 되므로 다시 계산해야 하는데, 그 사실을 알 방법이 이것뿐이다 —
+    // Term 포인터를 들면 그 Term이 닫힐 때 대롱거린다(id는 비재사용이라 그럴 일이 없다).
+    editor_find_source: u64 = 0,
     // tick마다 활성 surface의 매치를 뷰포트 span으로 클립해 담는 재사용 버퍼(cell_colors.search_matches로 넘긴다).
     // 매 frame 새로 채우되 capacity는 재사용한다 — 스크롤·출력에 따라 뷰 안 매치가 바뀌므로 캐시하지 않는다.
     find_view_spans: std.ArrayList(terminal.SelectionSpan) = .empty,
@@ -9762,7 +9781,12 @@ pub const AppSession = struct {
     fn dispatchChromeAction(self: *AppSession, action: chrome.host.HostAction) void {
         switch (action) {
             .none => {}, // notice dismiss 등 — session 부수효과 없음(컴포넌트가 닫음)
-            .find_close => self.find_matches.clearRetainingCapacity(), // find.hide는 컴포넌트가 이미 — 하이라이트만 정리
+            // find.hide는 컴포넌트가 이미 — 하이라이트만 정리. **목록이 둘이라 둘 다 비운다**:
+            // 편집기 쪽을 남기면 Esc로 닫아도 문서에 강조가 남는다(`toggleFind`와 같은 짝).
+            .find_close => {
+                self.find_matches.clearRetainingCapacity();
+                find_ops.clearEditorFind(self);
+            },
             // 웹 탭이면 페이지의 다음/이전 매치로(같은 조작, 다른 대상). 방향은 컴포넌트가 기록한 nav_forward —
             // 페이지 모드는 매치 리스트가 없어 `current`가 안 움직이므로 그것으로는 방향을 알 수 없다.
             .find_navigated => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0)
@@ -15072,7 +15096,15 @@ pub const AppSession = struct {
             // **열림 여부로 게이트하지 않는다**: 닫힌 동안 탭이 바뀌면 대상이 굳어, 다시 열자마자 그리는 첫
             // 프레임이 지난 탭의 모드로 나간다(R6 실측 — 터미널인데 카운터가 통째로 비었다).
             const web_target = web_ops.activeWebSurfaceIdAnyKind(self) != 0;
-            const want: chrome.components.find.Target = if (web_target) .page else .scrollback;
+            // **셋으로 갈린다**(§5.1). 편집기는 매치 리스트가 있으므로 카운터는 스크롤백과 같지만,
+            // 검색하는 **자리**가 다르다 — 편집기 Term의 코어는 1×1 sentinel이라 그쪽으로 보내면
+            // 조용히 매치 0이다(이 값이 갈리기 전까지 실제로 그랬다).
+            const want: chrome.components.find.Target = if (web_target)
+                .page
+            else if (find_ops.activeTermIsEditor(self))
+                .editor
+            else
+                .scrollback;
             if (self.chrome_host.find.target != want) {
                 self.chrome_host.find.target = want;
                 self.chrome_host.find.page_found = null; // 대상이 바뀌면 지난 답은 이 화면 것이 아니다
@@ -15082,7 +15114,9 @@ pub const AppSession = struct {
                 // 단, **하이라이트를 실제로 그리는 상태**에서만 재검색한다. `recomputeFind`는 `scrollToCurrentMatch`
                 // 까지 부르므로, 닫아 둔 find(=하이라이트도 안 그린다, find_active 게이트)에서 이걸 돌리면 탭
                 // 복귀만으로 화면이 첫 매치로 점프한다(R7 실측). 닫힌 동안에는 되살릴 하이라이트도 없다.
-                if (want == .scrollback and (self.chrome_host.find.open or self.find_nav)) self.recomputeFind();
+                // **`.page`가 아니면 다시 찾는다.** 스크롤백↔편집기도 대상이 바뀐 것이고, 두 목록이
+                // 따로 살므로 새 대상 쪽을 채우지 않으면 검색어만 남고 강조·카운터가 죽는다(R5와 같은 결).
+                if (want != .page and (self.chrome_host.find.open or self.find_nav)) self.recomputeFind();
                 self.metal_dirty = true;
             }
         }
@@ -18649,6 +18683,7 @@ pub const AppSession = struct {
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
+        self.editor_find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         self.remote_find_spans.deinit(self.allocator); // §6c host-backed 검색 캐시
         self.remote_find_pending.deinit(self.allocator); // 같은 캐시의 수신 버퍼(view_offset 대조 후 swap 승격)
@@ -35320,6 +35355,125 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
     try std.testing.expect(session.chrome_host.find.open);
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(!session.chrome_host.find.open);
+}
+
+test "EF1 편집기 pane의 ⌘F는 **문서**를 검색한다 (§5.1)" {
+    // **없던 기능을 더하는 것이 아니라 조용히 틀린 것을 고친다.** 편집기 Term의 코어는 1×1
+    // sentinel이고(`createEditorTerm`) 텍스트는 `rt.editor_lines`에 있다 — 그런데 ⌘F는 갈래 없이
+    // `activeSurface().core`를 검색했다. 그래서 편집기에서 ⌘F를 누르고 아무 단어나 쳐도 **늘 0/0**이었다.
+    //
+    // 이 판정자는 **종단**이다: 키 이벤트 → chrome 라우팅 → `query_changed` → `recomputeFind`.
+    // 그 사이 어느 한 곳만 재면 배선을 지워도 초록이 남는다(탭 폭 슬라이스가 그 형태로 한 번 틀렸다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    // `MARUFIND`가 **한 줄에 둘, 다른 줄에 하나** — 줄당 여러 매치가 목록에도 서는지 함께 본다.
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "MARUFIND one MARUFIND\nplain\ntwo MARUFIND three\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    try std.testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len); // 끝 개행이 만든 빈 줄까지
+
+    // **대상이 갈린다.** tick이 `find.target`을 세우고, 그 값이 `.scrollback`으로 남으면 아래 검색이
+    // sentinel 코어로 간다 — 이 단언이 그 갈림을 잰다.
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.Target.editor, session.chrome_host.find.target);
+
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 3), session.chrome_host.find.match_count); // 카운터 동기화
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+    try std.testing.expectEqual(term.surfaceId(), session.editor_find_source);
+    // **스크롤백 목록은 안 건드린다** — 둘이 따로 살고, 섞이면 렌더가 남의 좌표를 클립한다.
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
+
+    // 매치 좌표가 **문서 축**이다(줄, 줄 안 byte). 스크롤백 축이면 여기서 갈린다.
+    try std.testing.expectEqual(@as(u32, 0), session.editor_find_matches.items[0].line);
+    try std.testing.expectEqual(@as(u32, 0), session.editor_find_matches.items[0].start);
+    try std.testing.expectEqual(@as(u32, 0), session.editor_find_matches.items[1].line);
+    try std.testing.expectEqual(@as(u32, 13), session.editor_find_matches.items[1].start);
+    try std.testing.expectEqual(@as(u32, 2), session.editor_find_matches.items[2].line);
+
+    // Enter=다음, Shift+Enter=이전(wrap) — 스크롤백과 같은 키·같은 컴포넌트다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.current);
+
+    // 한 글자 지우면 부분일치라 매치가 그대로다(증분 검색이 도는지).
+    _ = try session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+
+    // **닫으면 강조가 멈춘다** — 목록 둘 중 편집기 쪽만 비우면 남은 쪽이 계속 그린다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
+}
+
+test "EF2 편집기에서 터미널로 돌아오면 편집기 매치를 버린다" {
+    // 목록이 둘이라 **대상이 바뀔 때 지난 쪽을 비우는 자리**가 필요하다. 안 비우면 터미널 pane
+    // 위에서 편집기 매치가 살아 있고, 그 좌표는 이 화면 것이 아니다(웹 전환이 같은 이유로
+    // `find_matches`를 비운다 — R5 실측).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "MARUFIND here\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.editor_find_matches.items.len);
+
+    // **먼저 한 프레임을 돌려 대상을 굳힌다.** tick이 `target`을 세우는데, 그 재검색은 **값이 바뀔
+    // 때만** 돈다 — 이 tick을 빼면 target이 기본값 `.scrollback`에 머물러 아래 전환이 "변화 없음"이
+    // 되고, 판정자가 **아무것도 재지 않으면서 초록**이 된다(초판이 실제로 그랬다).
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.Target.editor, session.chrome_host.find.target);
+
+    // 터미널 Term으로 돌아간다(편집기를 열기 전 것이 0번이다).
+    session.focusTerm(0);
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.Target.scrollback, session.chrome_host.find.target);
+    try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
 }
 
 test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보존 검색어 재검색·타이핑이 종료)" {

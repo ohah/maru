@@ -106,7 +106,10 @@ const inventory = [_]Entry{
     // Lab은 골든 캡처용 합성 입력만 소유하고, 그 안의 한국어는 **그려지는 내용 자체**다 — 한글이
     // 두 칸으로 서는지·선택 띠가 어디까지 오는지를 픽셀로 보려면 한국어 문자열이 있어야 한다.
     // 16번째는 `editor_selection` 시나리오의 "선택 밖" 줄이다(띠가 거기까지 오면 안 된다는 대조군).
-    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 16 },
+    // 17·18번째는 `editor_find` 시나리오의 두 줄이다 — 하나는 "매치가 넷"임을 캡처를 보는 사람에게
+    // 말해 주는 대조군 주석이고, 다른 하나는 **한글 앞에 선 매치**다(멀티바이트 앞뒤에서 강조 열이
+    // 밀리지 않는지는 한국어 줄이 있어야 픽셀로 보인다).
+    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 18 },
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 2 },
     .{ .path = "src/platform/macos/control_server.zig", .count = 1 },
     .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 9 },
@@ -207,7 +210,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 181;
+const header_total = 183;
 const header_config_total = 53;
 
 comptime {

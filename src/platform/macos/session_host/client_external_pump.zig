@@ -1648,6 +1648,22 @@ pub const AccessError = error{
 pub const ScreenConsumeError =
     AccessError || external_inbox_ledger.ScreenRetirementError || error{TransactionBusy};
 
+/// Transport-neutral view returned only through the external product facade. The raw Client and
+/// ledger remain private members of `ExternalPumpStorage`; the stable owner adapter projects this
+/// value into `RemoteAttachment.AttachmentBatchView` without exporting either owner address.
+pub const ExternalAttachmentBatchView = struct {
+    is_snapshot: bool,
+    stream_id: u64,
+    recovery_key: ?external_recovery_types.Key,
+    bytes: []const u8,
+};
+
+/// Exact transport-facing aliases keep the final product owner from importing or naming the
+/// ledger module. They expose no owner pointer and create no second mutation authority.
+pub const AttachmentToken = external_inbox_ledger.Token;
+pub const AttachmentInvariantError = external_inbox_ledger.InvariantError;
+pub const LiveScreenPayloadView = external_inbox_ledger.PayloadView;
+
 pub const max_rx_resident_bytes: usize =
     protocol.max_binary_chunk + protocol.header_size;
 pub const max_guarded_admit_quarantine_bytes: usize =
@@ -3365,6 +3381,40 @@ pub const testing = if (builtin.is_test) struct {
     pub fn bufferedParserBytes(storage: *const ExternalPumpStorage) ?usize {
         const client = if (storage.owned_client) |*owned| owned else return null;
         return client.parser.bufferedBytes();
+    }
+
+    pub fn hasClientObject(storage: *const ExternalPumpStorage) bool {
+        return storage.owned_client != null;
+    }
+
+    pub fn attachmentLeaseHeld(storage: *const ExternalPumpStorage) bool {
+        return storage.attachment_lease != null;
+    }
+
+    pub fn parserBytesEqual(
+        storage: *const ExternalPumpStorage,
+        expected: []const u8,
+    ) bool {
+        const client = if (storage.owned_client) |*owned| owned else return false;
+        return std.mem.eql(
+            u8,
+            expected,
+            client.parser.buf.items[client.parser.head..],
+        );
+    }
+
+    pub fn attachmentCapabilitiesEqual(
+        storage: *const ExternalPumpStorage,
+        expected: client_mod.AttachmentCapabilities,
+    ) bool {
+        const client = if (storage.owned_client) |*owned| owned else return false;
+        return std.meta.eql(expected, client.attachment_capabilities);
+    }
+
+    pub fn requestIdState(
+        storage: *const ExternalPumpStorage,
+    ) ?client_pump.RequestIdState {
+        return storage.owner_request_ids;
     }
 
     /// Excludes the event-authority destination because a revoke must update that owner before
@@ -9244,6 +9294,10 @@ pub const ExternalPumpStorage = struct {
     prepared_adoption: PreparedExternalAdoption = .{},
     client_cleanup_take: client_mod.ExternalAdoptionTake = .{},
     committed_screen: client_external_adoption.CommittedScreenBacklog = .{},
+    /// The sole charged token currently borrowed by the bound `RemoteAttachment`. This is owner
+    /// state, not a callback lease: storage teardown must refuse while it is present so the Client
+    /// object and ledger outlive attachment cleanup even after connection poison.
+    attachment_lease: ?external_inbox_ledger.Token = null,
     live_partial: LivePartialBatch = .none,
     live_screen: LiveScreenBacklog = .{},
     completed_control: CompletedControlOwner = .none,
@@ -21296,10 +21350,25 @@ pub const ExternalPumpStorage = struct {
         self: *ExternalPumpStorage,
         ordinal: usize,
     ) ScreenConsumeError!void {
+        return self.consumeScreenRetainedBound(ordinal, false);
+    }
+
+    fn consumeScreenRetainedBound(
+        self: *ExternalPumpStorage,
+        ordinal: usize,
+        allow_terminal_attachment_cleanup: bool,
+    ) ScreenConsumeError!void {
         if (active_external_operation_addr != 0) return error.TransactionBusy;
         active_external_operation_addr = @intFromPtr(self);
         defer active_external_operation_addr = 0;
-        try self.requireActive();
+        if (allow_terminal_attachment_cleanup) {
+            if (self.saved_self_addr != @intFromPtr(self)) return error.MovedStorage;
+            if (self.lifecycle != .live) return error.NotActive;
+            switch (self.semantic_state) {
+                .active, .terminal => {},
+                else => return error.NotActive,
+            }
+        } else try self.requireActive();
         const screen = &self.committed_screen;
         const ledger = &self.inbox_ledger;
         if (!screen.isCommitted(self) or
@@ -21329,6 +21398,136 @@ pub const ExternalPumpStorage = struct {
         self.screen_pending_summary.generation += 1;
         self.screen_pending_summary.digest =
             screenPendingSummaryDigest(self.screen_pending_summary);
+    }
+
+    /// Returns the first complete inherited screen batch still charged to the stable ledger.
+    /// Partial parser state deliberately stays pump-owned until the ordinary RX transaction turns
+    /// it into a complete batch; it is never exposed as an attachment lease.
+    pub fn nextAttachmentBatch(
+        self: *ExternalPumpStorage,
+        stream_id: u64,
+    ) client_mod.ClientError!?external_inbox_ledger.Token {
+        self.requireActive() catch |err| return switch (err) {
+            error.TransactionBusy => error.AdminBusy,
+            error.Terminal, error.Empty, error.NotActive, error.MovedStorage => error.ConnectionClosed,
+            else => error.ProtocolError,
+        };
+        if (stream_id == 0 or stream_id != self.evidence_snapshot.stream_id or
+            !self.screenPendingSummaryValid() or
+            !self.committed_screen.isCommitted(self))
+            return error.ProtocolError;
+        if (self.attachment_lease != null) return error.AdminBusy;
+        const screen = &self.committed_screen;
+        const transfer = screen.primary.transfer;
+        for (transfer.tokens, transfer.copies, 0..) |token, copy, ordinal| {
+            if (screen.released.isSet(ordinal)) continue;
+            switch (copy.semantic) {
+                .completed => |semantic| {
+                    if (semantic.stream_id != stream_id) return error.ProtocolError;
+                    self.attachment_lease = token;
+                    return token;
+                },
+                .frame, .partial => {},
+            }
+        }
+        return null;
+    }
+
+    /// Borrows bytes behind a charged token without exposing the ledger itself.
+    pub fn borrowAttachmentBatch(
+        self: *ExternalPumpStorage,
+        token: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!ExternalAttachmentBatchView {
+        self.requireActive() catch return error.InvariantFailure;
+        if (self.attachment_lease == null or
+            !std.meta.eql(self.attachment_lease.?, token))
+            return error.InvariantFailure;
+        if (!self.screenPendingSummaryValid() or
+            !self.committed_screen.isCommitted(self))
+            return error.InvariantFailure;
+        const screen = &self.committed_screen;
+        const transfer = screen.primary.transfer;
+        for (transfer.tokens, transfer.copies, 0..) |candidate, copy, ordinal| {
+            if (!std.meta.eql(candidate, token)) continue;
+            if (screen.released.isSet(ordinal)) return error.InvariantFailure;
+            const completed = switch (copy.semantic) {
+                .completed => |semantic| semantic,
+                .frame, .partial => return error.InvariantFailure,
+            };
+            const borrowed = try self.inbox_ledger.borrow(token, .completed);
+            const observed = switch (borrowed.semantic) {
+                .completed => |semantic| semantic,
+                else => return error.InvariantFailure,
+            };
+            if (completed.stream_id != observed.stream_id or
+                completed.is_snapshot != observed.is_snapshot)
+                return error.InvariantFailure;
+            const recovery_key = switch (observed.recovery_intent) {
+                .none => null,
+                .host, .client => blk: {
+                    const identity = switch (observed.provenance) {
+                        .untracked => return error.InvariantFailure,
+                        .external => |range| range.identity,
+                    };
+                    break :blk observed.recovery_intent.key(
+                        identity.attach_instance_id,
+                        token.generation,
+                    ) orelse return error.InvariantFailure;
+                },
+            };
+            return .{
+                .is_snapshot = observed.is_snapshot,
+                .stream_id = observed.stream_id,
+                .recovery_key = recovery_key,
+                .bytes = borrowed.bytes,
+            };
+        }
+        return error.InvariantFailure;
+    }
+
+    /// Retires exactly the charged token selected by `nextAttachmentBatch` through the existing
+    /// screen-retirement transaction; no second ledger release implementation is introduced.
+    pub fn releaseAttachmentBatch(
+        self: *ExternalPumpStorage,
+        token: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!void {
+        if (self.attachment_lease == null or
+            !std.meta.eql(self.attachment_lease.?, token))
+            return error.InvariantFailure;
+        if (!self.committed_screen.isCommitted(self)) return error.InvariantFailure;
+        for (self.committed_screen.primary.transfer.tokens, 0..) |candidate, ordinal| {
+            if (!std.meta.eql(candidate, token)) continue;
+            self.consumeScreenRetainedBound(ordinal, true) catch
+                return error.InvariantFailure;
+            self.attachment_lease = null;
+            return;
+        }
+        return error.InvariantFailure;
+    }
+
+    pub fn dropAttachmentStream(self: *ExternalPumpStorage, stream_id: u64) void {
+        while (self.nextAttachmentBatch(stream_id) catch null) |token| {
+            self.releaseAttachmentBatch(token) catch {
+                self.failAttachment(.attachment_cleanup_failed);
+                return;
+            };
+        }
+    }
+
+    pub fn failAttachment(
+        self: *ExternalPumpStorage,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) void {
+        if (self.saved_self_addr != @intFromPtr(self) or self.lifecycle != .live) return;
+        // The external owner, not `Client.poison`, owns final cleanup after adoption. Mutating the
+        // committed Client independently would invalidate the sealed cleanup take and quarantine
+        // otherwise recoverable storage. Latch the connection-fatal semantic here; teardown closes
+        // the same Client only after the attachment returns its charged token.
+        _ = reason;
+        self.semantic_state = .{ .terminal = .{
+            .reason = .invariant_failure,
+            .fd_disposition = .owner_cleanup,
+        } };
     }
 
     pub fn prepareAdoption(
@@ -22572,6 +22771,7 @@ pub const ExternalPumpStorage = struct {
             .constructing, .normalizing, .adoption_preparing, .tearing_down => return .transaction_busy,
             .adopting, .live => {},
         }
+        if (self.attachment_lease != null) return .transaction_busy;
         if (self.callback_quarantine_pending) {
             storage_claim_owned = false;
             self.quarantinePublishedStorageAfterCallbackDrift();
@@ -23342,6 +23542,7 @@ comptime {
         prepared_adoption: PreparedExternalAdoption,
         client_cleanup_take: client_mod.ExternalAdoptionTake,
         committed_screen: client_external_adoption.CommittedScreenBacklog,
+        attachment_lease: ?external_inbox_ledger.Token,
         live_partial: LivePartialBatch,
         live_screen: LiveScreenBacklog,
         completed_control: CompletedControlOwner,

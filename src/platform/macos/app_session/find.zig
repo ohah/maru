@@ -85,16 +85,26 @@ pub fn clearEditorFind(self: *AppSession) void {
     self.editor_find_source = 0;
 }
 
-/// **매치 목록 둘을 함께 비운다.** 검색 하이라이트를 멈춰야 하는 자리는 전부 이것을 부른다.
+/// **검색 하이라이트를 멈춘다** — 매치 목록 둘과 ⌘G 닫힘-네비 세션까지.
 ///
 /// **왜 헬퍼인가.** 목록이 둘이라는 사실이 호출자마다 흩어지면 반드시 한쪽만 비우는 자리가
-/// 남는다 — 실제로 남았다. 초판은 `toggleFind`와 `.find_close` 둘만 짝을 맞췄고, **같은 성질의
-/// 나머지 세 자리**(커맨드 팔레트·설정 화면·모달 정리)는 `find_matches`만 비웠다. 터미널에서는
-/// 목록이 비어 증상이 안 보이지만, 편집기는 `find_nav`가 살아 있어 **오버레이가 사라졌는데
-/// 강조가 남았다**(적대적 검증 2026-08-23).
+/// 남는다 — 실제로 남았다. 초판은 `toggleFind`와 `.find_close` 둘만 짝을 맞췄고, 같은 성질의
+/// 나머지 자리들(커맨드 팔레트·설정 화면·모달 정리·인라인 rename)은 `find_matches`만 비웠다.
+/// 터미널에서는 목록이 비어 증상이 안 보이지만, 편집기는 `find_nav`가 살아 있어 **오버레이가
+/// 사라졌는데 강조가 남았다**(적대적 검증 2026-08-23).
+///
+/// **`find_nav`까지 내리는 것이 핵심이다.** 목록만 비우면 tick의 출처 대조가 `find_nav` 참을
+/// 보고 **한 프레임 뒤에 되살린다** — 게다가 `recomputeFind`가 `current = 0`으로 리셋하고
+/// `scrollToCurrentMatch`까지 부르므로 **편집기가 팔레트 뒤에서 맨 위로 튄다**(2라운드 검증이
+/// 283 → 0을 실측). 1라운드 R7이 잡았던 실패가 그 문으로 다시 열렸던 것이다.
+///
+/// **부르는 자리의 규칙**: 오버레이를 `hide()`하는 곳은 전부 이것을 함께 부른다. `toggleFind`도
+/// 예외가 아니다 — 그 함수가 두 줄을 손으로 펴 두었던 것이 "흩어지면 안 된다"는 이 헬퍼의
+/// 이유를 스스로 어긴 자리였다.
 pub fn clearAllFindMatches(self: *AppSession) void {
     self.find_matches.clearRetainingCapacity();
     clearEditorFind(self);
+    self.find_nav = false;
 }
 
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
@@ -102,9 +112,7 @@ pub fn clearAllFindMatches(self: *AppSession) void {
 pub fn toggleFind(self: *AppSession) void {
     if (self.chrome_host.find.open) {
         self.chrome_host.find.hide();
-        self.find_matches.clearRetainingCapacity(); // 닫힘 — 하이라이트 중단
-        clearEditorFind(self); // 편집기 쪽도 같이. 목록이 둘이라 한쪽만 비우면 강조가 남는다
-        self.find_nav = false; // ⌘G 닫힘-네비 세션도 종료
+        clearAllFindMatches(self); // 닫힘 — 목록 둘 + ⌘G 닫힘-네비 세션까지 한 곳에서
     } else {
         // alt screen(vim/less/Claude/Codex)에서도 연다 — alt에선 findMatches가 현재 화면만 검색해 매치를
         // 하이라이트한다(스크롤백 매치 제외, 스크롤 네비는 무의미·무동작). 과거엔 iTerm2 관례로 막았으나,

@@ -1074,6 +1074,10 @@ pub fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
 /// 활성 워크스페이스/pane/Term으로 고른다(또는 PR4/PR5 클릭 대상).
 pub fn startRename(self: *AppSession, target: RenameTarget) void {
     self.chrome_host.find.hide(); // rename은 별도 모달 — 열려 있던 오버레이를 닫는다(배타적)
+    // **하이라이트도 멎어야 한다.** `hide()`는 오버레이만 지운다 — ⌘G 닫힘-네비 중이면
+    // `find_nav`가 살아 있어 강조가 그대로 남는다(적대적 검증 2026-08-23 2라운드가 이 네 번째
+    // 자리를 찾았다. 앞의 셋을 모으면서 여기를 빠뜨렸다).
+    find_ops.clearAllFindMatches(self);
     self.chrome_host.palette.hide();
     self.rename_input.clear();
     // 현재 custom_name으로 시드(owned 문자열을 query에 복사) — 없으면 빈 편집기. auto title은 시드하지 않는다

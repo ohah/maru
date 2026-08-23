@@ -1818,6 +1818,18 @@ const TermRuntime = struct {
         /// 폭 0은 *"접기 칸이 없다"*(`features.folding = false`)이고, 그때 hit-test가 아무것도 안 받는다.
         fold_left_px: u32 = 0,
         fold_width_px: u32 = 0,
+        /// 그 프레임이 그릴 때의 **세로 위치**(줄, 조각). 이 스냅숏이 **지금 화면을 설명하는지**를
+        /// 묻는 열쇠다 — 값이 지금 `editor_first_line`/`editor_first_piece`와 다르면 그 사이에
+        /// 누군가 굴렸고, 그러면 `editor_hit_lines`는 **다른 화면의 목록**이다.
+        ///
+        /// **이 필드가 없어서 회귀가 났다**(적대적 검증 2026-08-23 2라운드). 검색 네비게이션의
+        /// "이미 보이나" 판정이 스냅숏만 읽도록 바뀌면서, 한 프레임 안에 Enter가 두 번 오면
+        /// **두 번째가 방금 자기가 한 스크롤을 못 보고** "보인다"고 답했다 — 카운터만 오르고
+        /// 화면은 그대로. 옛 코드는 `first_line`을 라이브로 읽어 그 경우를 맞혔다.
+        top_line: usize = 0,
+        top_piece: u32 = 0,
+        /// 위 둘이 **한 번이라도 채워졌나**. 기본값 `(0, 0)`은 "맨 위를 그렸다"와 구별되지 않는다.
+        drawn: bool = false,
     } = .{},
     /// 렌더가 쓸 **탭 폭**. 기본값은 `frame.default_tab_width` 하나에서 온다(여기 숫자를 다시 쓰면
     /// 그것이 두 번째 출처가 된다 — 2차 적대적 검증이 그 부류를 잡았다).
@@ -10514,8 +10526,7 @@ pub const AppSession = struct {
                 // (sendCommittedText 주석), 이 .terminal_input 경로엔 Option+글자 같은 meta chord만 .char로 도달한다.
                 // 그걸 숨김으로 치면 "단축키엔 안 숨김" 의도가 뒤집힌다(code-review max — 실제 타이핑은 IME 경로).
                 if (self.find_nav) { // 셸에 타이핑 재개 = 검색 종료 — 닫힘-네비 하이라이트 해제
-                    self.find_nav = false;
-                    find_ops.clearAllFindMatches(self); // 목록은 둘이다
+                    find_ops.clearAllFindMatches(self); // 목록 둘 + `find_nav`까지 한 곳에서
                     self.metal_dirty = true; // 현재-매치 하이라이트가 한 프레임 남지 않게(다른 clear 사이트와 일관)
                 }
                 // 타이핑하면 남은 텍스트 선택도 해제한다(`input.selection-clear-on-typing`, 기본 true).
@@ -35578,9 +35589,16 @@ test "EF3 편집기에서 편집기로 옮기면 대상이 따라온다 — targ
     try std.testing.expectEqual(term_b.surfaceId(), session.editor_find_source);
     try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.match_count);
 
-    // **가만히 있으면 다시 계산하지 않는다** — 매 tick 재검색하면 정지 화면이 계속 깨어난다.
-    session.metal_dirty = false;
-    _ = try session.tick();
+    // **가만히 있으면 프레임을 새로 만들지 않는다** — 매 tick 재검색하면 정지 화면이 계속 깨어난다.
+    //
+    // **`metal_dirty`로는 못 잰다.** tick이 그것을 소비해 늘 false로 되돌리므로 대입도 단언도
+    // 죽은 코드가 된다 — 초판이 그랬고, 게이트를 `if (true)`로 바꿔도 초록이었다(2라운드 적대적
+    // 검증. **이 커밋이 잡았다고 자랑한 바로 그 형태가 새 판정자에 그대로 있었다**).
+    // 대신 **프레임 세대**를 두 tick 비교한다 — 재검색이 돌면 `metal_dirty`가 서고 그 tick이
+    // 프레임을 새로 만들어 세대가 는다.
+    const gen_before = (try session.tick()).metal_generation;
+    const gen_after = (try session.tick()).metal_generation;
+    try std.testing.expectEqual(gen_before, gen_after);
     try std.testing.expectEqual(term_b.surfaceId(), session.editor_find_source);
 }
 
@@ -35619,6 +35637,57 @@ test "EF4 팔레트를 열면 편집기 강조도 멎는다 — 목록이 둘이
     // ⌘⇧P — 배타적이라 find를 닫는다. 편집기 목록도 함께 비워야 한다.
     session.dispatchAppAction(.toggle_command_palette);
     try std.testing.expect(!session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
+}
+
+test "EF5 웹으로 옮기면 편집기 매치를 버린다 — 렌더는 활성 pane만 도는 것이 아니다" {
+    // **살아 있던 뮤턴트를 닫는다**(2라운드 적대적 검증 N4). tick 대조 블록에서 `clearEditorFind`
+    // 만 지워도 아무도 못 잡았다 — `want_source != 0`인 경로는 뒤이은 `recomputeFind`가 목록을
+    // 새로 채워 등가이기 때문이다. **새는 자리는 `want_source == 0`인데 위쪽 target 블록이
+    // 재검색을 건너뛰는 경우**, 즉 `.page`로 갈 때다.
+    //
+    // 그 자리가 실제로 문제인 이유: 렌더는 **모든 leaf**를 돌아 `appendPaneFrame`을 부른다.
+    // split 옆의 편집기는 활성이 아니어도 계속 그려지므로, 목록이 남으면 **오버레이는 페이지를
+    // 검색 중인데 옆 편집기가 옛 검색어 강조를 계속 그린다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "MARUFIND here\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 1), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(chrome.components.find.Target.editor, session.chrome_host.find.target);
+
+    // 같은 pane에 web Term을 만들어 활성화한다 — 편집기는 **여전히 그려지는 leaf**다.
+    const web = try web_ops.createWebTerm(session, .browser);
+    const pane = pane_ops.activePane(session);
+    try pane.terms.append(allocator, web);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
+    _ = try session.tick();
+
+    try std.testing.expectEqual(chrome.components.find.Target.page, session.chrome_host.find.target);
     try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
     try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
 }
@@ -35806,6 +35875,12 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.sidebar_search_active = false;
     session.focus_owner = .workspace; // inputFocus가 file-tree owner를 읽음([[devsession-undefined-test-field-trap]])
     session.find_matches = .empty; // toggleFind/showNotice가 clearRetainingCapacity 호출
+    // **검색 목록은 둘이다**(§5.1). `clearAllFindMatches`가 편집기 쪽도 비우므로 이 필드가
+    // undefined면 `0xaaaa…`를 역참조해 **세그폴트**가 난다 — 실제로 났고, `FAIL`만 찾던 눈이
+    // "Segmentation fault"를 놓쳐 한 커밋이 그대로 밀렸다([[devsession-undefined-test-field-trap]]).
+    session.editor_find_matches = .empty;
+    session.editor_find_source = 0;
+    session.find_nav = false; // `clearAllFindMatches`가 내린다 — undefined면 그 대입이 의미를 잃는다
     session.palette_filtered = .empty; // togglePalette→recomputePalette가 채운다
     session.pending_confirm = .none; // showNotice→cancelPendingClose가 읽음([[devsession-undefined-test-field-trap]])
     session.metal_dirty = false;
@@ -35814,6 +35889,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     defer {
         session.chrome_host.deinit(std.testing.allocator);
         session.find_matches.deinit(std.testing.allocator);
+        session.editor_find_matches.deinit(std.testing.allocator);
         session.palette_filtered.deinit(std.testing.allocator);
     }
 

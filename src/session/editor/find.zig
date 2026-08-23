@@ -168,24 +168,28 @@ test "FND3: 대소문자를 무시한다 — 터미널과 같은 규칙" {
     // ASCII만이 아니다. 터미널 검색이 덮는 블록(Latin-1·Greek·Cyrillic)이 여기서도 같아야
     // "같은 검색어인데 pane에 따라 다르다"가 안 생긴다.
     const lines = [_][]const u8{ "Hello World", "ÉCOLE", "ΑΒΓ", "ПРИВЕТ" };
-    var a = try collect(&lines, "hello");
-    defer a.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 1), a.items.len);
 
-    var b = try collect(&lines, "école");
-    defer b.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 1), b.items.len);
-    try testing.expectEqual(@as(u32, 1), b.items[0].line);
-    try testing.expectEqual(@as(u32, 0), b.items[0].start);
-    try testing.expectEqual(@as(u32, "ÉCOLE".len), b.items[0].len); // 폴딩이 byte 길이를 보존한다
+    // **양방향으로 잰다.** 소문자 검색어만 넣으면 **haystack만 접어도** 전부 통과한다 —
+    // 실제로 그 뮤턴트가 이 판정자를 뚫고 살아남았다(2라운드 적대적 검증). 사용자로 치면
+    // "찾기 상자에 `HELLO`를 치면 아무것도 안 나온다"가 L2 판정자 열 개를 그대로 지나간다.
+    const lower = [_][]const u8{ "hello", "école", "αβγ", "привет" };
+    const upper = [_][]const u8{ "HELLO", "ÉCOLE", "ΑΒΓ", "ПРИВЕТ" };
+    for (lower, upper, 0..) |lo, up, line| {
+        var a = try collect(&lines, lo);
+        defer a.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), a.items.len);
+        try testing.expectEqual(@as(u32, @intCast(line)), a.items[0].line);
 
-    var c = try collect(&lines, "αβγ");
-    defer c.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 1), c.items.len);
+        var b = try collect(&lines, up); // ← 이쪽이 needle 축을 잰다
+        defer b.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), b.items.len);
+        try testing.expectEqual(@as(u32, @intCast(line)), b.items[0].line);
+    }
 
-    var d = try collect(&lines, "привет");
-    defer d.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 1), d.items.len);
+    // 폴딩이 **byte 길이를 보존**한다(덮는 블록이 전부 같은 인코딩 길이라서) — 그 사실도 못 박는다.
+    var e = try collect(&lines, "école");
+    defer e.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, "ÉCOLE".len), e.items[0].len);
 }
 
 test "FND4: 줄 번호와 줄 안 offset이 각자 축을 지킨다" {

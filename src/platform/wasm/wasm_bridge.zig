@@ -214,12 +214,28 @@ export fn vt_scroll_bottom(h: *anyopaque) void {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
     core.scrollToBottom();
 }
-/// (view_offset << 16) | min(scrollbackLen, 0xffff)
-export fn vt_scroll_state(h: *anyopaque) u32 {
+/// 뷰포트가 바닥에서 위로 올라간 행 수. 0이면 활성 화면을 보고 있다.
+///
+/// 예전에는 `vt_scroll_state` 하나가 `(offset << 16) | len` 으로 둘을 실어 보냈는데, 각 필드가
+/// 0xffff 로 잘려 **스크롤백이 65535 행을 넘으면 위치가 어긋났다**(`scrollback: 100000` 은
+/// 실제로 쓰는 설정이다 — `docs/wasm-portability.md` §5.2 가 63.94MB 로 측정한 그 값이다).
+/// 절대 행으로 스크롤하는 API(`scrollToLine`)가 이 값으로 델타를 계산하므로 정밀해야 한다.
+export fn vt_view_offset(h: *anyopaque) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
-    const off: u32 = @intCast(@min(core.view_offset, 0xffff));
-    const len: u32 = @intCast(@min(core.scrollbackLen(), 0xffff));
-    return (off << 16) | len;
+    return @intCast(core.view_offset);
+}
+/// 스크롤백에 쌓인 행 수 = `view_offset` 의 최대값.
+export fn vt_scrollback_len(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return @intCast(core.scrollbackLen());
+}
+/// 화면을 지운다(⌘K). 반환 1은 **셸에 form feed(^L)를 보내야 한다**는 뜻이다 —
+/// OSC 133 프롬프트 상태에서만 전체를 비우고 커서를 홈으로 두므로, 셸이 프롬프트를 맨 위에
+/// 다시 그려야 화면이 완성된다(`src/platform/macos/app_session.zig` 의 `.clear_screen` 과 같은 계약).
+/// alt screen·비프롬프트에서는 0 — 커서를 안 옮기고 스크롤백과 커서 위 행만 비운다.
+export fn vt_clear(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return if (core.clearScreen()) 1 else 0;
 }
 
 // ── 키 인코딩 ─────────────────────────────────────────────

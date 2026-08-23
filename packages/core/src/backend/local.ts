@@ -13,6 +13,7 @@ import {
   type MouseReport,
   modsOf,
   type SelectionSpan,
+  type ShellEvent,
 } from "./types";
 
 const CURSOR_SHAPES: CursorShape[] = ["block", "underline", "bar"];
@@ -382,6 +383,76 @@ export class LocalBackend implements Backend {
       }
     }
     if (this.#w.vt_take_bell(this.#h) === 1) this.#cb?.({ type: "bell" });
+    this.#drainOsc();
+  }
+
+  /**
+   * OSC 로 들어온 요청을 알리고 비운다. **라이브러리는 클립보드도 알림도 직접 만지지 않는다** —
+   * 브라우저에서 임의의 셸 스크립트가 사용자 클립보드를 읽거나 덮어쓸 수 있으면 안 되므로,
+   * 정책은 소비자가 정한다(계약 §7).
+   */
+  #drainOsc(): void {
+    const clipLen = this.#w.vt_clipboard_write_len(this.#h);
+    if (clipLen > 0) {
+      // 최대 16 MB 라 코어 버퍼를 그대로 읽는다 — 복사는 소비자가 문자열을 만들 때 한 번만.
+      const text = decoder.decode(
+        new Uint8Array(this.#w.memory.buffer, this.#w.vt_clipboard_write_ptr(this.#h), clipLen),
+      );
+      this.#w.vt_clear_clipboard_write(this.#h);
+      this.#cb?.({ type: "clipboard-write", text });
+    }
+    if (this.#w.vt_take_clipboard_rejected(this.#h) === 1) {
+      this.#cb?.({ type: "clipboard-rejected" });
+    }
+    if (this.#w.vt_clipboard_read_pending(this.#h) === 1) {
+      const n = this.#w.vt_clipboard_read_target(this.#h);
+      const target = decoder.decode(this.#read(this.#w.link_ptr(), n));
+      this.#w.vt_clear_clipboard_read(this.#h); // 알린 뒤 비운다 — 다음 tick 에 또 트리거되면 안 된다
+      this.#cb?.({ type: "clipboard-read", target });
+    }
+    // **부호에 주의한다.** wasm `i32` 는 JS 에서 부호 있는 수로 온다 — `0xffff_ffff` 는 `-1` 로
+    // 도착하므로 그냥 비교하면 "알림 없음"이 늘 통과해 버린다. 그러면 titleLen 이 65535 가 돼
+    // `link_buf`(2048) 를 넘어 읽고 빈 문자열 알림이 매 write 마다 나간다(실제로 그랬다).
+    const note = this.#w.vt_notification(this.#h) >>> 0;
+    if (note !== 0xffffffff) {
+      const titleLen = note >>> 16;
+      const bodyLen = note & 0xffff;
+      const buf = this.#read(this.#w.link_ptr(), titleLen + bodyLen);
+      const title = decoder.decode(buf.subarray(0, titleLen));
+      const body = decoder.decode(buf.subarray(titleLen));
+      this.#w.vt_clear_notification(this.#h);
+      this.#cb?.({ type: "notification", title, body });
+    }
+    const evCount = this.#w.vt_take_shell_events(this.#h);
+    if (evCount > 0) {
+      const raw = new Uint32Array(this.#w.memory.buffer, this.#w.match_ptr(), evCount * 4);
+      for (let i = 0; i < evCount; i++) {
+        const kind = raw[i * 4];
+        const row = raw[i * 4 + 1];
+        const rawExit = raw[i * 4 + 2];
+        const ev: ShellEvent =
+          kind === 0
+            ? { kind: "prompt-start", row }
+            : kind === 1
+              ? { kind: "input-start", row }
+              : kind === 2
+                ? { kind: "command-start", row }
+                : kind === 3
+                  ? { kind: "command-end", row, exit: rawExit === 0xffffffff ? null : rawExit | 0 }
+                  : { kind: "cwd-changed" };
+        this.#cb?.({ type: "shell", event: ev });
+        // cwd 는 사건이 아니라 상태다 — 값은 `currentCwd()` 가 권위이므로 그때 읽는다.
+        if (ev.kind === "cwd-changed") {
+          const n = this.#w.vt_cwd(this.#h);
+          this.#cb?.({ type: "cwd", cwd: decoder.decode(this.#read(this.#w.link_ptr(), n)) });
+        }
+      }
+    }
+  }
+
+  cursorAtPrompt(): Promise<boolean> {
+    if (this.#disposed) return Promise.resolve(false);
+    return Promise.resolve(this.#w.vt_cursor_at_prompt(this.#h) === 1);
   }
 
   /** 프레임 발행을 마이크로태스크로 접는다 — 한 tick에 write가 여러 번 와도 한 번만 그린다. */

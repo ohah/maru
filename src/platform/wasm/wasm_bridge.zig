@@ -257,6 +257,126 @@ export fn vt_clear(h: *anyopaque) u32 {
     return if (core.clearScreen()) 1 else 0;
 }
 
+// ── OSC 사건 ──────────────────────────────────────────────
+//
+// 코어는 OS 를 직접 만지지 않는다 — 클립보드·알림을 **대기 상태로 쌓아 두고** 소비자가
+// 정책을 확인한 뒤 drain 한다(`docs/maru-term-library.md` §7). 브라우저에서는 그 정책이
+// 특히 중요하다: 임의의 셸 스크립트가 사용자 클립보드에 쓰거나 읽을 수 있으면 안 된다.
+// 그래서 라이브러리는 **알리기만 하고 아무것도 자동으로 하지 않는다**.
+//
+// 클립보드는 최대 16 MB 라 복사하지 않고 **코어 버퍼를 그대로 가리킨다** — JS 가 선형
+// 메모리를 직접 읽고 clear 를 부른다. 그 사이 코어를 건드리면 안 된다(동기 구간).
+
+/// OSC 52 쓰기 요청의 바이트. 없으면 길이 0. 읽은 뒤 `vt_clear_clipboard_write`.
+export fn vt_clipboard_write_ptr(h: *anyopaque) [*]const u8 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return core.pendingClipboardWrite().ptr;
+}
+export fn vt_clipboard_write_len(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return @intCast(core.pendingClipboardWrite().len);
+}
+export fn vt_clear_clipboard_write(h: *anyopaque) void {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    core.clearClipboardWrite();
+}
+/// 상한(16 MB) 초과로 거부됐는지 1회성으로 가져온다 — 무음 실패 대신 이유를 보여주기 위해서다.
+export fn vt_take_clipboard_rejected(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return if (core.takeClipboardWriteRejected()) 1 else 0;
+}
+
+/// OSC 52 읽기(`?`) 요청이 대기 중인가. 응답은 소비자가 만들어 `sendText` 로 보낸다 —
+/// 코어에 응답 경로를 두지 않는다(정책 판단이 밖에 있어야 하므로).
+export fn vt_clipboard_read_pending(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return if (core.clipboardReadPending()) 1 else 0;
+}
+/// 그 요청의 target(Pc). `link_ptr()` 에 담고 길이를 돌려준다(짧다 — `c`/`p` 같은 한두 글자).
+export fn vt_clipboard_read_target(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const t = core.clipboardReadTarget();
+    const n = @min(t.len, link_buf.len);
+    @memcpy(link_buf[0..n], t[0..n]);
+    return @intCast(n);
+}
+export fn vt_clear_clipboard_read(h: *anyopaque) void {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    core.clearClipboardRead();
+}
+
+/// OSC 9/777 알림. title 과 body 를 `link_ptr()` 에 이어 담고 `(title_len << 16) | body_len`
+/// 을 돌려준다. 대기 중이 아니면 0xffff_ffff.
+export fn vt_notification(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const n = core.pendingNotification() orelse return 0xffff_ffff;
+    const t = @min(n.title.len, link_buf.len);
+    @memcpy(link_buf[0..t], n.title[0..t]);
+    const b = @min(n.body.len, link_buf.len - t);
+    @memcpy(link_buf[t .. t + b], n.body[0..b]);
+    return (@as(u32, @intCast(t)) << 16) | @as(u32, @intCast(b));
+}
+export fn vt_clear_notification(h: *anyopaque) void {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    core.clearNotification();
+}
+
+/// OSC 7 현재 디렉터리(URI 의 경로 부분). `link_ptr()` 에 담고 길이를 돌려준다.
+export fn vt_cwd(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const c = core.currentCwd();
+    const n = @min(c.len, link_buf.len);
+    @memcpy(link_buf[0..n], c[0..n]);
+    return @intCast(n);
+}
+
+/// OSC 133 셸 사건을 drain 한다. `match_ptr()` 에 한 건당 u32 셋
+/// `[kind, row, exit]` 를 담고 개수를 돌려준다 — kind 는 0=prompt_start 1=input_start
+/// 2=command_start 3=command_end 4=cwd_changed, exit 은 command_end 에서만 유효하고
+/// 없으면 0xffff_ffff.
+export fn vt_take_shell_events(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const evs = core.shellEvents();
+    const n = @min(evs.len, max_matches);
+    for (evs[0..n], 0..) |e, i| {
+        const base = i * 4;
+        switch (e) {
+            .prompt_start => |row| {
+                match_buf[base] = 0;
+                match_buf[base + 1] = row;
+                match_buf[base + 2] = 0xffff_ffff;
+            },
+            .input_start => |row| {
+                match_buf[base] = 1;
+                match_buf[base + 1] = row;
+                match_buf[base + 2] = 0xffff_ffff;
+            },
+            .command_start => |row| {
+                match_buf[base] = 2;
+                match_buf[base + 1] = row;
+                match_buf[base + 2] = 0xffff_ffff;
+            },
+            .command_end => |ce| {
+                match_buf[base] = 3;
+                match_buf[base + 1] = ce.row;
+                match_buf[base + 2] = if (ce.exit) |x| @bitCast(@as(i32, x)) else 0xffff_ffff;
+            },
+            .cwd_changed => {
+                match_buf[base] = 4;
+                match_buf[base + 1] = 0;
+                match_buf[base + 2] = 0xffff_ffff;
+            },
+        }
+    }
+    core.clearShellEvents();
+    return @intCast(n);
+}
+/// 커서가 프롬프트에 있는가(셸 통합이 없으면 보수적으로 false — "실행 중"으로 본다).
+export fn vt_cursor_at_prompt(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return if (core.cursorIsAtPrompt()) 1 else 0;
+}
+
 // ── 검색 ──────────────────────────────────────────────────
 /// `input_ptr()` 에 needle(UTF-8)을 쓰고 길이를 넘긴다. **반환은 총 매치 수**이고, 버퍼에는
 /// 앞의 `matches_cap()` 건까지만 담긴다 — UI 가 "1/2371" 처럼 총량을 보여줄 수 있어야 한다.

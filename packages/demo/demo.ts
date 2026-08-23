@@ -367,6 +367,29 @@ $("bench").addEventListener("click", async () => {
   $("stat").textContent = `${((400 * chunk.length) / ms / 1000).toFixed(1)} MB/s`;
 });
 
+// ── OSC 사건 ───────────────────────────────────────────────
+// **라이브러리는 아무것도 자동으로 하지 않는다.** 클립보드에 쓸지, 알림을 띄울지는 여기서
+// 정한다 — 터미널에서 도는 아무 프로그램이나 사용자 클립보드를 덮어쓸 수 있으면 안 된다.
+const oscLog: string[] = [];
+function logOsc(line: string): void {
+  oscLog.unshift(line);
+  oscLog.length = Math.min(oscLog.length, 4);
+  $("osc-log").textContent = oscLog.join(" · ");
+}
+term.onClipboardWrite((text) => {
+  const allow = $<HTMLInputElement>("o-clip").checked;
+  logOsc(`복사 요청 ${text.length}자 ${allow ? "(허용)" : "(무시)"}`);
+  if (allow) void navigator.clipboard?.writeText(text).catch(() => logOsc("복사 실패"));
+});
+term.onClipboardRejected(() => logOsc("복사 거부 — 16MB 초과"));
+// 읽기에는 답하지 않는다. 답하면 앱이 사용자 클립보드를 가져갈 수 있다.
+term.onClipboardRead((target) => logOsc(`읽기 요청(${target}) — 무시`));
+term.onNotification((n) => logOsc(`알림: ${n.title} ${n.body}`.trim()));
+term.onCwdChange((cwd) => logOsc(`cwd → ${cwd}`));
+term.onShellEvent((e) => {
+  if (e.kind === "command-end") logOsc(`명령 끝 (exit ${e.exit ?? "?"})`);
+});
+
 // ── 검색 ───────────────────────────────────────────────────
 // 매치 좌표는 절대 행이라 스크롤해도 유효하다. `findNext` 가 화면에 올리고 선택까지 한다.
 const fq = $<HTMLInputElement>("f-q");

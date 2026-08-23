@@ -389,6 +389,112 @@ test("findNext/findPrevious는 순회하고 끝에서 돈다", async () => {
   term.dispose();
 });
 
+test("OSC 52 쓰기는 알리기만 하고 아무것도 하지 않는다", async () => {
+  // 임의의 셸 스크립트가 사용자 클립보드를 덮어쓸 수 있으면 안 된다 — 정책은 소비자 몫이다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const got: string[] = [];
+  term.onClipboardWrite((t) => got.push(t));
+
+  // `btoa` 는 Latin-1 만 받는다 — OSC 52 는 UTF-8 바이트의 base64 이므로 먼저 인코딩한다.
+  const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
+
+  term.write(`\x1b]52;c;${b64("복사할 것")}\x07`);
+  await settle();
+  expect(got).toEqual(["복사할 것"]); // 한글이 깨지지 않는다
+
+  // **drain 했는지가 핵심이다.** 안 비우면 무관한 write 마다 같은 요청이 다시 올라온다
+  // (덮어쓰기라 값만 보면 구별되지 않아, 되풀이 여부로 봐야 한다).
+  term.write("무관한 출력");
+  await settle();
+  expect(got).toHaveLength(1);
+
+  term.write(`\x1b]52;c;${b64("second")}\x07`);
+  await settle();
+  expect(got).toEqual(["복사할 것", "second"]);
+  term.dispose();
+});
+
+test("OSC 52 읽기 요청은 target과 함께 알린다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const got: string[] = [];
+  term.onClipboardRead((t) => got.push(t));
+
+  term.write("\x1b]52;c;?\x07");
+  await settle();
+  expect(got).toEqual(["c"]);
+
+  // 알린 뒤 비웠으므로 다음 프레임에 또 오지 않는다.
+  term.write("x");
+  await settle();
+  expect(got).toHaveLength(1);
+  term.dispose();
+});
+
+test("OSC 9 알림이 title/body로 온다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const got: { title: string; body: string }[] = [];
+  term.onNotification((n) => got.push(n));
+
+  // **알림이 없을 때 아무것도 오면 안 된다.** wasm i32 는 JS 에서 부호 있는 수로 오므로
+  // "없음" 표식(0xffff_ffff)이 -1 로 도착한다 — 그냥 비교하면 매 write 마다 빈 알림이 나간다.
+  term.write("평범한 출력");
+  await settle();
+  expect(got).toHaveLength(0);
+
+  term.write("\x1b]9;빌드 끝\x07");
+  await settle();
+  expect(got).toHaveLength(1);
+  expect(got[0].title + got[0].body).toContain("빌드 끝");
+
+  term.write("또 평범한 출력");
+  await settle();
+  expect(got).toHaveLength(1); // drain 했으므로 되풀이되지 않는다
+  term.dispose();
+});
+
+test("OSC 7이 cwd 변경을 알린다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const got: string[] = [];
+  term.onCwdChange((c) => got.push(c));
+
+  term.write("\x1b]7;file://host/Users/me/work\x07");
+  await settle();
+  expect(got.at(-1)).toBe("/Users/me/work");
+  term.dispose();
+});
+
+test("OSC 133이 셸 진행과 종료 코드를 알린다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  const got: string[] = [];
+  let exit: number | null | undefined;
+  term.onShellEvent((e) => {
+    got.push(e.kind);
+    if (e.kind === "command-end") exit = e.exit;
+  });
+
+  term.write("\x1b]133;A\x07$ ");
+  term.write("\x1b]133;B\x07ls");
+  term.write("\x1b]133;C\x07\r\nout\r\n");
+  term.write("\x1b]133;D;3\x07");
+  await settle();
+
+  expect(got).toEqual(["prompt-start", "input-start", "command-start", "command-end"]);
+  expect(exit).toBe(3); // 종료 코드가 실려 온다
+  term.dispose();
+});
+
+test("cursorAtPrompt는 셸 통합이 없으면 보수적으로 false다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("no integration");
+  await settle();
+  expect(await term.cursorAtPrompt()).toBe(false); // 확인 없이 닫는 것보다 낫다
+
+  term.write("\x1b]133;A\x07$ ");
+  await settle();
+  expect(await term.cursorAtPrompt()).toBe(true);
+  term.dispose();
+});
+
 test("alt screen에서 clear는 무동작이다", async () => {
   // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
   // 계약 §7 의 세 번째 조항.

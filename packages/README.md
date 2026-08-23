@@ -128,7 +128,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 클립보드(OSC 52)·화면 직렬화·이미지·마커/장식
+- **없는 것**: 화면 직렬화·이미지·마커/장식
 - **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
@@ -144,6 +144,24 @@ term.scrollToLine(120);    // 절대 행(0 = 스크롤백 최상단)을 첫 줄�
 term.scrollLines(3);       // 양수가 아래 — 휠 방향
 term.scrollPages(-1);
 ```
+
+### OSC 사건 — 정책은 앱이 정한다
+
+```ts
+term.onClipboardWrite((text) => {          // OSC 52 — 라이브러리는 쓰지 않는다
+  if (trusted) void navigator.clipboard.writeText(text);
+});
+term.onClipboardRead(() => {});            // 답하지 않는 것이 기본
+term.onNotification(({ title, body }) => new Notification(title, { body }));
+term.onCwdChange((cwd) => (tabLabel.textContent = cwd));
+term.onShellEvent((e) => {
+  if (e.kind === "command-end") console.log("exit", e.exit);
+});
+await term.cursorAtPrompt();               // 명령이 도는 중인지 — 닫기 확인용
+```
+
+**라이브러리는 클립보드에 쓰지도, 알림을 띄우지도 않는다.** 터미널에서 도는 아무 프로그램이나
+사용자 클립보드를 덮어쓰거나 읽어 갈 수 있으면 안 되므로, 그 판단은 앱이 한다.
 
 ### 검색
 

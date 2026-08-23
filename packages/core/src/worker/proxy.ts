@@ -202,6 +202,9 @@ export class WorkerBackend implements Backend {
   selectionText(): Promise<string | null> {
     return this.#query("selectionText");
   }
+  cursorAtPrompt(): Promise<boolean> {
+    return this.#query("cursorAtPrompt");
+  }
   find(needle: string): Promise<FindResult> {
     // 매치 배열은 구조적 복제로 온다 — 검색은 사용자 행동당 한 번이라 프레임과 달리 왕복이 싸다.
     return this.#query("find", needle);

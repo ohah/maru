@@ -36,7 +36,7 @@ pub fn wideIconPredicate(widen_icons: bool) ?text_layout.WideIconFn {
 /// `text_layout`(L3)이 renderer를 import할 수 없어(경계 가드) predicate로 주입한다. advance(cellWidth)는 1이지만
 /// 1칸(~8px)에 다운스케일하면 octocat·폴더 실루엣이 뭉개져 안 보였다(사용자 피드백) — 에이전트 gutter 아이콘
 /// (별도 셀 width 2)과 같은 ~16px로 통일. `isRegisteredIcon`이 u32를 받아 얇게 감싼다.
-pub fn wideIconGlyph(cp: u21) bool {
+fn wideIconGlyph(cp: u21) bool {
     return renderer.icon_glyph.isRegisteredIcon(cp);
 }
 
@@ -73,7 +73,7 @@ pub fn appendEllipsizedTitle(
 /// `grapheme_offset/count`로 가리킨다 — 터미널 `buildDrawList`가 `snapshot.graphemes`로 하는 것과 같은 모양이고,
 /// 셰이퍼가 base 뒤에 풀을 붙여 CoreText로 한 글리프를 만든다. 정규화는 하지 않는다(원본 코드포인트 그대로).
 /// 분절·폭·한도 판정은 여기 없다 — cluster의 바이트 범위와 열·폭은 계획이 이미 정했다.
-pub fn appendCluster(
+fn appendCluster(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),
     pool: *std.ArrayList(u32),

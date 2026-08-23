@@ -33,6 +33,17 @@ const posixWalk = @import("posix_walk.zig").posixWalk;
 /// 번역 대상 레이어 — 여기서는 표시 문자열이 **키로** 가야 한다(§7.2).
 const roots = [_][]const u8{ "src/chrome", "src/session", "src/platform/macos", "src/platform/mobile", "src/config" };
 
+/// 뿌리 **밖에 있는데 표시 문자열을 그리는** 파일. 디렉터리로는 못 덮는 자리를 파일 단위로 덮는다.
+///
+/// `src/platform/cell_text.zig` 가 그 예다 — macOS·Windows 가 공유하는 셀 투영이라 `platform/macos` 도
+/// `platform/mobile` 도 아닌 `src/platform/` 바로 아래 산다. 그런데 이 파일은 `i18n.t(...)` 로 최근 파일
+/// 헤더·빈 트리 안내를 그린다. 뿌리에 안 들면 **표시 문자열을 그리는 파일이 방어 밖**이 되고, 그 사실은
+/// 파일을 옮긴 그 순간 조용히 생긴다(FT3 이동에서 실제로 그랬다 — 적대적 검증이 잡았다).
+///
+/// `src/platform` 전체를 뿌리로 넣지 않는 이유: Windows·wasm 어댑터가 진단·usage 문자열을 한국어로
+/// 들고 있어(실측 170건 이상) 이 게이트의 범위가 통째로 달라진다. 그것은 별도 판단이다.
+const extra_files = [_][]const u8{"src/platform/cell_text.zig"};
+
 /// **영어 고정 표면**(계약 §7.1) — CLI 는 스크립트가 파싱하고 이슈에 붙여 넣는 출력이라 언어를 고르지
 /// 않는다. 그래서 여기서는 키가 아니라 **영어 문장**이 정답이고, 한국어 리터럴은 곧 위반이다.
 ///
@@ -334,6 +345,26 @@ test "번역 대상 레이어의 한국어 리터럴은 원장보다 늘지 않�
             scanned += 1;
             if (!reportIfDrifted(path, try countSource(allocator, source))) failed = true;
         }
+    }
+
+    // 뿌리 밖의 표시 문자열 파일(위 `extra_files`). 없어졌으면 **조용히 넘어가지 않는다** — 목록이
+    // 실제와 어긋나면 이 게이트가 안 보는 자리를 본다고 거짓말하게 된다.
+    for (extra_files) |path| {
+        const source = std.Io.Dir.cwd().readFileAllocOptions(
+            std.testing.io,
+            path,
+            allocator,
+            .limited(8 * 1024 * 1024),
+            .of(u8),
+            0,
+        ) catch {
+            failed = true;
+            std.debug.print("표시 문자열 대상 {s} 를 못 찾았다 — 옮겨졌거나 사라졌다. 목록을 고쳐라.\n", .{path});
+            continue;
+        };
+        defer allocator.free(source);
+        scanned += 1;
+        if (!reportIfDrifted(path, try countSource(allocator, source))) failed = true;
     }
 
     // 영어 고정 표면(§7.1)도 같은 원장으로 본다 — 규칙은 다르지만(키가 아니라 영어) **한국어가 늘면

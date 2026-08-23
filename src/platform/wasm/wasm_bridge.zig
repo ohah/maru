@@ -34,6 +34,11 @@ var input_buf: [1 << 20]u8 = undefined;
 /// 아래쪽 행이 영영 빈 채로 그려졌다.
 var cell_buf: [512 * 128 * 20]u8 = undefined;
 var glyph_buf: [64 * 64 * 4]u8 = undefined;
+/// 검색 매치. 한 건이 `[startRow, startCol, endRow, endCol]` u32 넷이다. **4096 건** —
+/// 그 이상은 사람이 훑을 수 있는 양이 아니고, 총 개수는 따로 돌려주므로 UI 는 "N+ 건"을
+/// 표시할 수 있다.
+var match_buf: [max_matches * 4]u32 = undefined;
+const max_matches = 4096;
 
 export fn input_ptr() [*]u8 {
     return &input_buf;
@@ -54,6 +59,13 @@ export fn cells_cap() u32 {
 }
 export fn glyph_ptr() [*]u8 {
     return &glyph_buf;
+}
+export fn match_ptr() [*]u8 {
+    return @ptrCast(&match_buf);
+}
+/// 버퍼가 담을 수 있는 매치 수. `vt_find` 의 반환(총 개수)이 이걸 넘으면 앞의 이만큼만 있다.
+export fn matches_cap() u32 {
+    return max_matches;
 }
 export fn mem_bytes() u32 {
     return @intCast(@wasmMemorySize(0) * 65536);
@@ -243,6 +255,28 @@ export fn vt_scrollback_len(h: *anyopaque) u32 {
 export fn vt_clear(h: *anyopaque) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
     return if (core.clearScreen()) 1 else 0;
+}
+
+// ── 검색 ──────────────────────────────────────────────────
+/// `input_ptr()` 에 needle(UTF-8)을 쓰고 길이를 넘긴다. **반환은 총 매치 수**이고, 버퍼에는
+/// 앞의 `matches_cap()` 건까지만 담긴다 — UI 가 "1/2371" 처럼 총량을 보여줄 수 있어야 한다.
+///
+/// 좌표는 **절대 행**이다(0 = 스크롤백 최상단). 뷰포트 좌표가 아니라서 스크롤해도 유효하고,
+/// `vt_scroll` 로 해당 행에 가져다 놓으면 그대로 선택할 수 있다.
+export fn vt_find(h: *anyopaque, needle_len: u32) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const n = @min(needle_len, input_buf.len);
+    var list: std.ArrayList(terminal.types.Match) = .empty;
+    defer list.deinit(alloc);
+    core.findMatches(alloc, input_buf[0..n], &list) catch return 0; // OOM 이면 매치 없음
+    const kept = @min(list.items.len, max_matches);
+    for (list.items[0..kept], 0..) |m, i| {
+        match_buf[i * 4 + 0] = @intCast(m.start.row);
+        match_buf[i * 4 + 1] = m.start.col;
+        match_buf[i * 4 + 2] = @intCast(m.end.row);
+        match_buf[i * 4 + 3] = m.end.col;
+    }
+    return @intCast(list.items.len);
 }
 
 // ── 키 인코딩 ─────────────────────────────────────────────

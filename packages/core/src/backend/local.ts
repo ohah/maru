@@ -6,8 +6,10 @@ import type { Cell, CursorShape, CursorState, KeyInput, Size, Snapshot, Theme } 
 import {
   type Backend,
   type BackendEvent,
+  type FindResult,
   type FrameData,
   KeyKind,
+  type Match,
   type MouseReport,
   modsOf,
   type SelectionSpan,
@@ -304,6 +306,25 @@ export class LocalBackend implements Backend {
       });
     }
     return Promise.resolve({ size: frame.size, cursor: frame.cursor, cells });
+  }
+
+  find(needle: string): Promise<FindResult> {
+    if (this.#disposed || needle.length === 0) return Promise.resolve({ matches: [], total: 0 });
+    const n = this.#stage(encoder.encode(needle));
+    const total = this.#w.vt_find(this.#h, n);
+    const kept = Math.min(total, this.#w.matches_cap());
+    // u32 뷰로 읽는다 — 한 건이 넷이다. 버퍼는 다음 호출에서 덮이므로 여기서 복사한다.
+    const raw = new Uint32Array(this.#w.memory.buffer, this.#w.match_ptr(), kept * 4);
+    const matches: Match[] = [];
+    for (let i = 0; i < kept; i++) {
+      matches.push({
+        startRow: raw[i * 4],
+        startCol: raw[i * 4 + 1],
+        endRow: raw[i * 4 + 2],
+        endCol: raw[i * 4 + 3],
+      });
+    }
+    return Promise.resolve({ matches, total });
   }
 
   selectionText(): Promise<string | null> {

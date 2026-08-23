@@ -46,7 +46,8 @@
 | ~~**F1**~~ | PTY 를 WebSocket 으로 물려 vim·tmux·htop 을 띄운다 | **완료** — 아래 기록 |
 | ~~**F2**~~ | `reset`·`clear`·스크롤 제어(`scrollToTop`/`scrollToLine`) | **완료** — 아래 기록 |
 | ~~**F3**~~ | 상태 이벤트 — `onCursorMove`·`onScroll`·`onSelectionChange` | **완료** — 아래 기록 |
-| **F4** | 검색(`findMatches`) + `registerMarker`/`registerDecoration` | 검색 하이라이트를 그리려면 마커/장식이 함께 있어야 한다 |
+| ~~**F4a**~~ | 검색(`findMatches`·`findNext`·`findPrevious`) | **완료** — 아래 기록 |
+| **F4b** | `registerMarker`/`registerDecoration` | 검색은 선택으로 칠하므로 급하지 않다. 여러 매치를 동시에 칠하거나 주석을 얹을 때 필요하다 |
 | **F5** | 클립보드(OSC 52)·알림(OSC 9/777)·셸 통합(OSC 7/133) | 각각 이벤트 채널 설계가 필요하다 |
 | **F6** | 화면 직렬화(`dumpUtf`)·`attachCustomKeyEventHandler` | |
 | **F7** | 이미지(Kitty graphics) | 렌더러가 픽셀을 다뤄야 해 가장 무겁다 |
@@ -108,6 +109,15 @@
   wasm 은 linear memory 가 분리돼 코어 상태를 볼 수 없다. 게다가 Zig 가 도달 불가 코드를
   이미 지운다 — 실측으로 뗄 것이 프로시저럴 글리프 18.7 KB(gzip 6.1 KB)뿐이고 그건
   차별점이라 뺄 수 없다. 무거운 기능(Kitty PNG 디코더)은 **wasm 변종 + `wasmUrl`** 로 간다.
+
+- **F4a: "검색 하이라이트를 그리려면 마커/장식이 함께 있어야 한다"는 틀렸다.** `findNext` 가
+  매치를 **선택**하면 기존 선택 렌더가 그대로 칠한다 — 마커 없이 동작한다. 장식이 필요한 것은
+  **여러 매치를 동시에** 칠할 때뿐이라 F4b 로 미룬다.
+- **검색이 wasm 을 2.8 KB(gzip 1.1 KB) 늘렸다.** 애드온 판정(계약 §8)의 근거가 하나 더 늘었다 —
+  기능 하나가 이 정도면 뗄 이유가 없다.
+- **좌표계가 갈린다.** 매치는 **절대 행**, 선택 API 는 **뷰포트 행**이다. 처음에 절대 행을 그대로
+  `selectStart` 에 넘겼고, 스크롤백 깊은 매치에서 엉뚱한 줄이 잡혔다. `findNext` 안에서 변환한다 —
+  훼손 테스트로 그 변환이 실제로 필요함을 확인했다.
 
 ## 선행 조건
 

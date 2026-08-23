@@ -442,6 +442,34 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
     for (const x of subs) x.dispose();
     return { cursor, scroll, selCount: sel.length, lastSelNull: sel.at(-1) === null };
   });
+  // 검색은 조회라 워커 왕복이다 — 매치 배열이 구조적 복제로 제대로 건너오는지 본다.
+  const found = await p.evaluate(async () => {
+    const t = (
+      globalThis as unknown as {
+        __term: {
+          write: (s: string) => void;
+          findMatches: (n: string) => Promise<{ matches: unknown[]; total: number }>;
+          findNext: (n: string) => Promise<boolean>;
+          selectionText: () => Promise<string | null>;
+        };
+      }
+    ).__term;
+    t.write("\r\nfindme once\r\n");
+    await new Promise((r) => setTimeout(r, 300));
+    const r = await t.findMatches("findme");
+    const hit = await t.findNext("findme");
+    await new Promise((r) => setTimeout(r, 300));
+    const sel = await t.selectionText();
+    const none = await t.findMatches("zzzznope");
+    return { total: r.total, hit, sel, none: none.total };
+  });
+  check("worker: findMatches 가 매치를 돌려준다", found.total >= 1, `${found.total}건`);
+  check(
+    "worker: findNext 가 그 글자를 선택한다",
+    found.hit && found.sel === "findme",
+    String(found.sel),
+  );
+  check("worker: 없는 것은 0 건", found.none === 0, String(found.none));
   check("worker: onCursorMove 가 온다", evs.cursor > 0, `${evs.cursor}회`);
   check("worker: onScroll 이 온다", evs.scroll > 0, `${evs.scroll}회`);
   check(

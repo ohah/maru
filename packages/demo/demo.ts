@@ -367,6 +367,32 @@ $("bench").addEventListener("click", async () => {
   $("stat").textContent = `${((400 * chunk.length) / ms / 1000).toFixed(1)} MB/s`;
 });
 
+// ── 검색 ───────────────────────────────────────────────────
+// 매치 좌표는 절대 행이라 스크롤해도 유효하다. `findNext` 가 화면에 올리고 선택까지 한다.
+const fq = $<HTMLInputElement>("f-q");
+async function findStat(): Promise<void> {
+  const q = fq.value;
+  if (!q) {
+    $("f-stat").textContent = "";
+    return;
+  }
+  const { matches, total } = await term.findMatches(q);
+  $("f-stat").textContent =
+    total === 0
+      ? "없음"
+      : total > matches.length
+        ? `${total}건 (앞 ${matches.length}건만)`
+        : `${total}건`;
+}
+fq.addEventListener("input", () => void findStat());
+$("f-next").addEventListener("click", () => void term.findNext(fq.value).then(findStat));
+$("f-prev").addEventListener("click", () => void term.findPrevious(fq.value).then(findStat));
+fq.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  void (e.shiftKey ? term.findPrevious(fq.value) : term.findNext(fq.value)).then(findStat);
+});
+
 // ── 제어 API ───────────────────────────────────────────────
 // 라이브러리가 내는 화면·스크롤 제어를 그대로 눌러 본다. `clear()` 는 셸 통합 여부에 따라
 // 동작이 갈리므로(계약 §7) 가짜 셸/진짜 PTY 둘 다에서 눌러 보면 차이가 보인다.

@@ -215,7 +215,6 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 
 | 기능 | 코어의 구현 | 비고 |
 |---|---|---|
-| 검색 | `findMatches`·`matchViewportSpan` | xterm.js 의 SearchAddon 에 해당 |
 | 클립보드(OSC 52) | `clipboardReadPending`·`pendingClipboardWrite` | 이벤트 채널 설계가 필요하다 |
 | 화면 직렬화 | `dumpUtf`·`dumpRecentTextUtf` | SerializeAddon 에 해당 |
 | 셸 통합(OSC 7·133) | `currentCwd`·`shellEvents`·`cursorIsAtPrompt` | 프롬프트 인식·cwd 추적 |
@@ -234,6 +233,22 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 | `scrollToTop()` / `scrollToBottom()` | 스크롤백 양 끝 |
 | `scrollToLine(line)` | 절대 행(0 = 스크롤백 최상단)을 뷰포트 첫 줄에 |
 | `scrollLines(n)` / `scrollPages(n)` | 상대 이동. **양수가 아래** — 휠 방향이다(`scroll()` 은 위가 양수인 코어 방향이라 반대다) |
+
+### 검색
+
+| 메서드 | 반환 |
+|---|---|
+| `findMatches(needle)` | `{ matches, total }` — 좌표는 **절대 행**(0 = 스크롤백 최상단) |
+| `findNext(needle)` / `findPrevious(needle)` | `boolean` — 매치를 화면에 올리고 선택한다 |
+
+- **스크롤백까지 전부 훑는다.** 대소문자를 구분하고 정규식은 지원하지 않는다(코어가 코드포인트
+  단위로 비교하므로 grapheme cluster 와 soft-wrap 이음이 자동으로 풀린다).
+- **`total` 이 `matches.length` 보다 클 수 있다.** 버퍼가 4096 건까지라서다 — 그 이상은 사람이
+  훑을 양이 아니지만 총량은 알아야 "1/5000" 을 보여줄 수 있다.
+- **하이라이트는 선택으로 그린다.** `findNext` 가 매치를 선택하므로 기존 선택 렌더가 그대로
+  쓰인다 — 마커·장식이 없어도 동작한다. 여러 매치를 동시에 칠하려면 그때 장식이 필요하다.
+- 좌표계 주의: 매치는 **절대 행**이고 선택 API 는 **뷰포트 행**이다. `findNext` 가 안에서
+  변환한다(직접 `selectStart` 로 넘기면 스크롤백 깊은 매치가 엉뚱한 줄을 잡는다).
 
 ### 상태 이벤트
 
@@ -266,7 +281,7 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 |---|---|
 | `onKey`·`onBinary`·`onLineFeed`·`onWriteParsed` | 입력·출력 훅 |
 | `attachCustomKeyEventHandler` | 앱 단축키가 터미널보다 먼저 키를 잡아야 할 때 |
-| `registerMarker`·`registerDecoration` | 검색 하이라이트·주석 같은 확장의 기반 |
+| `registerMarker`·`registerDecoration` | 주석 같은 확장의 기반(검색 하이라이트는 선택으로 그린다) |
 | `hasSelection`·`getSelectionPosition`·`select`·`selectLines` | 선택 조회·프로그래밍 선택 |
 | `registerLinkProvider` | 커스텀 링크 규칙 |
 | `input`·`writeln`·`refresh` | 편의 |

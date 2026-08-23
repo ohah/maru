@@ -190,7 +190,9 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
               ? await b.snapshot()
               : msg.kind === "selectionText"
                 ? await b.selectionText()
-                : await b.linkAt(...(msg.arg as [number, number]));
+                : msg.kind === "find"
+                  ? await b.find(msg.arg as string)
+                  : await b.linkAt(...(msg.arg as [number, number]));
         post({ t: "reply", id: msg.id, value });
         return;
       }

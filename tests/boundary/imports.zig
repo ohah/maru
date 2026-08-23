@@ -764,6 +764,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = "src/platform/macos/session_host/external_attach.zig", .enclosing_fn = "enterExternalMode" },
             .{ .path = "src/platform/macos/session_host/external_attach_evidence.zig", .enclosing_fn = "init" },
             .{ .path = "src/platform/macos/session_host/external_pump_owner.zig", .enclosing_fn = "exerciseD3SocketpairRevokePosition" },
+            .{ .path = "src/platform/macos/session_host/external_pump_owner.zig", .enclosing_container = "P5c3c2b3PreparedFixture", .enclosing_fn = "initWithAllocator" },
             .{ .path = slot_path, .enclosing_container = "<root>", .enclosing_fn = "enterExternalMode" },
         },
     }};

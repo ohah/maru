@@ -7731,9 +7731,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           out-of-order slot reuse, generation exhaustion, stale-copy/double-release, 조기 finish,
           caller ownership 보존, failed-release terminal retain/retry와 release-before-drop charged cleanup을
           Debug/ReleaseFast `test-session-host` 및 전체
-          `mise run check`로 검증했다. 따라서 ledger 완료 표시는 2b1에 해당하고 이어진 2b2a pure
-          state/parser/boundary와 2b2b stable storage/inline physical cap까지 구현 완료했다. 2b2c~2b3의
-          inherited adoption/dynamic physical cap/final product owner gate는 아직 계획 상태다.
+          `mise run check`로 검증했다. 2b1 ledger 뒤의 2b2a pure state/parser/boundary와 2b2b stable
+          storage/inline physical cap, 2b2c inherited adoption/dynamic physical cap, 2b3 final product owner는
+          아래 단계별 계약을 따른다.
 
         - **P5c3c-2b2 — Client external pump core**:
           이 단계는 한 mega-PR이 아니라 아래 **열네 merge gate**다. 앞 gate의 Debug/ReleaseFast/경계 검증이
@@ -14631,6 +14631,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `Client`나 ledger를 따로 borrow/export하지 않고 generic callback을
           `ExternalPumpFacade`의 단일 opaque `*ExternalPumpStorage` borrow로 전달한다. read/borrow/release/
           mark/drop/fail-closed가 모두 이 경계를 쓰며 `RemoteAttachment`에는 facade 타입을 노출하지 않는다.
+          storage는 이 경계가 대여한 charged token 하나를 `attachment_lease` exact member로 seal하며,
+          release 전 중복 read와 storage teardown을 typed busy로 거부한다. 이 member는 raw Client/ledger pointer나
+          별도 payload owner가 아니고 기존 ledger token의 attachment-held 상태만 나타낸다.
           attachment가 charged lease를 가진 채 socket이 poison되어도 storage 안의 Client **object**와 ledger는
           attachment cleanup까지 살아 있다. product teardown은 attachment가 가진 lease/drop을 먼저 storage
           release 경계로 반환한 뒤, 위 aggregate-scratch 단일 출처의 **ledger release/drain/finish → metadata →
@@ -14640,6 +14643,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           inherited state를 adopt하고 one pump/control/teardown을 수행한다. moved owner, source 재사용, bind/append/
           apply OOM, timeout/revoke 중 fail-close, attachment-held lease 상태의 Client 선종료 시도를 Debug/ReleaseFast에서
           검증한다. 3b integrated loop가 이 same owner를 실제 consumer로 확장하며 임시 public harness API는 만들지 않는다.
+          allocator callback이 adoption 중 source를 선결속하는 TOCTOU는 final move 직전 재검증으로 typed
+          reject하고 source 또는 owner 한쪽만 exact cleanup한다. 실제 raw TTY loop의 첫 제품 consumer는
+          3a/3b가 소유한다.
       전환 직전 parser partial/pending frame과 request ID/capability가 byte-for-byte 보존되는 fixture를 둔다.
     - **P5c3c-3 — raw TTY loop/cleanup**은 두 merge slice다.
       - **P5c3c-3a — tty output/chord primitives**: dedicated tty output open/identity transaction과 detach chord,

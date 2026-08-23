@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+extern "c" fn usleep(usec: c_uint) c_int;
 
 const ProductRxOrderEvent = if (builtin.is_test) enum {
     recv_bytes,
@@ -145,12 +146,993 @@ const client_mod = @import("client.zig");
 const compatibility = @import("compatibility.zig");
 const external_attach = @import("external_attach.zig");
 const external_attach_evidence = @import("external_attach_evidence.zig");
-const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const external_rx_intent = @import("external_rx_intent.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
+const screen_stream = @import("screen_stream.zig");
+
+const OwnerLifecycle = enum(u8) {
+    empty,
+    constructing,
+    live,
+    tearing_down,
+    dead,
+};
+
+pub const InitError = error{
+    DestinationNotEmpty,
+    InvalidAlias,
+    InvalidPrepared,
+    OutOfMemory,
+    StorageRejected,
+    AdoptionRejected,
+};
+
+pub const TeardownResult = enum {
+    cleaned,
+    cleaned_with_invariant,
+    already_dead,
+    moved,
+    busy,
+    quarantined,
+};
+
+pub const PollHintResult = union(enum) {
+    hint: client_pump.PollHint,
+    moved_or_stale,
+};
+
+/// Stable callback object embedded in `ExternalPumpOwner`.
+///
+/// The callback context never points at a movable `Client` or ledger. Every callback first proves
+/// the adapter and owner final addresses, then borrows only the owner's single storage member.
+const ExternalAttachmentAdapter = struct {
+    saved_self_addr: usize = 0,
+    owner_addr: usize = 0,
+
+    fn valid(self: *const ExternalAttachmentAdapter) bool {
+        if (self.saved_self_addr != @intFromPtr(self) or self.owner_addr == 0)
+            return false;
+        const owner: *const ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        return owner.addressValid() and
+            (owner.lifecycle == .live or owner.lifecycle == .tearing_down) and
+            @intFromPtr(&owner.adapter) == @intFromPtr(self);
+    }
+
+    fn readBatch(
+        raw: *anyopaque,
+        stream_id: u64,
+    ) client_mod.ClientError!?remote_attachment.AttachmentBatchLease {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return error.ConnectionClosed;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        return if (try owner.storage.nextAttachmentBatch(stream_id)) |token|
+            .{ .charged = token }
+        else
+            null;
+    }
+
+    fn borrowCharged(
+        raw: *anyopaque,
+        token: client_external_pump.AttachmentToken,
+    ) client_external_pump.AttachmentInvariantError!remote_attachment.AttachmentBatchView {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return error.InvariantFailure;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        const view = try owner.storage.borrowAttachmentBatch(token);
+        return .{
+            .is_snapshot = view.is_snapshot,
+            .stream_id = view.stream_id,
+            .recovery_key = view.recovery_key,
+            .bytes = view.bytes,
+        };
+    }
+
+    fn releaseCharged(
+        raw: *anyopaque,
+        token: client_external_pump.AttachmentToken,
+    ) client_external_pump.AttachmentInvariantError!void {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return error.InvariantFailure;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        try owner.storage.releaseAttachmentBatch(token);
+    }
+
+    fn preflightBatchAuthority(
+        raw: *anyopaque,
+        stream_id: u64,
+        is_snapshot: bool,
+        key: ?external_recovery_types.Key,
+    ) external_recovery_types.BatchAuthority {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return .stale_invariant;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        return owner.storage.preflightBatchAuthority(stream_id, is_snapshot, key);
+    }
+
+    fn markResyncApplied(
+        raw: *anyopaque,
+        stream_id: u64,
+        key: external_recovery_types.Key,
+    ) remote_attachment.MarkResyncAppliedResult {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return .stale_invariant;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        return owner.storage.markResyncApplied(stream_id, key);
+    }
+
+    fn dropStream(raw: *anyopaque, stream_id: u64) void {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        owner.storage.dropAttachmentStream(stream_id);
+    }
+
+    fn failClosed(raw: *anyopaque, reason: @import("client_poison.zig").ConnectionReason) void {
+        const self: *ExternalAttachmentAdapter = @ptrCast(@alignCast(raw));
+        if (!self.valid()) return;
+        const owner: *ExternalPumpOwner = @ptrFromInt(self.owner_addr);
+        owner.storage.failAttachment(reason);
+    }
+
+    fn interface(self: *ExternalAttachmentAdapter) remote_attachment.AttachmentTransport {
+        return .{
+            .context = self,
+            .read_batch = readBatch,
+            .borrow_charged = borrowCharged,
+            .release_charged = releaseCharged,
+            .preflight_batch_authority = preflightBatchAuthority,
+            .mark_resync_applied = markResyncApplied,
+            .drop_stream = dropStream,
+            .fail_closed = failClosed,
+        };
+    }
+};
+
+/// Non-movable product owner that consumes exactly one `external_attach.Prepared` in place.
+///
+/// Keeping storage, attachment, transport context and cleanup scratch in this one final-address
+/// object removes the pointer-recovery window that existed between the completed 2b2 scaffold and
+/// the later raw TTY loop. Public methods reject copied or moved owners in ReleaseFast as well.
+pub const ExternalPumpOwner = struct {
+    saved_self_addr: usize = 0,
+    lifecycle: OwnerLifecycle = .empty,
+    storage: client_external_pump.ExternalPumpStorage = .{},
+    attachment: remote_attachment.RemoteAttachment = undefined,
+    adapter: ExternalAttachmentAdapter = .{},
+    cleanup_scratch: client_external_pump.ExternalPumpCleanupScratch = .{},
+    rx_scratch: client_external_pump.ExternalRxTurnScratch = .{},
+
+    fn addressValid(self: *const ExternalPumpOwner) bool {
+        const owner_addr = @intFromPtr(self);
+        const owner_end = std.math.add(
+            usize,
+            owner_addr,
+            @sizeOf(ExternalPumpOwner),
+        ) catch return false;
+        const storage_addr = @intFromPtr(&self.storage);
+        const attachment_addr = @intFromPtr(&self.attachment);
+        const adapter_addr = @intFromPtr(&self.adapter);
+        const cleanup_addr = @intFromPtr(&self.cleanup_scratch);
+        const rx_addr = @intFromPtr(&self.rx_scratch);
+        return self.saved_self_addr == owner_addr and
+            storage_addr == owner_addr + @offsetOf(ExternalPumpOwner, "storage") and
+            attachment_addr == owner_addr + @offsetOf(ExternalPumpOwner, "attachment") and
+            adapter_addr == owner_addr + @offsetOf(ExternalPumpOwner, "adapter") and
+            cleanup_addr == owner_addr + @offsetOf(ExternalPumpOwner, "cleanup_scratch") and
+            rx_addr == owner_addr + @offsetOf(ExternalPumpOwner, "rx_scratch") and
+            cleanup_addr + @sizeOf(client_external_pump.ExternalPumpCleanupScratch) <= owner_end and
+            rx_addr + @sizeOf(client_external_pump.ExternalRxTurnScratch) <= owner_end and
+            !rangesOverlap(
+                cleanup_addr,
+                @sizeOf(client_external_pump.ExternalPumpCleanupScratch),
+                storage_addr,
+                @sizeOf(client_external_pump.ExternalPumpStorage),
+            ) and
+            !rangesOverlap(
+                cleanup_addr,
+                @sizeOf(client_external_pump.ExternalPumpCleanupScratch),
+                attachment_addr,
+                @sizeOf(remote_attachment.RemoteAttachment),
+            ) and
+            !rangesOverlap(
+                cleanup_addr,
+                @sizeOf(client_external_pump.ExternalPumpCleanupScratch),
+                adapter_addr,
+                @sizeOf(ExternalAttachmentAdapter),
+            ) and
+            self.storage.saved_self_addr == storage_addr and
+            self.cleanup_scratch.saved_self_addr == cleanup_addr and
+            self.rx_scratch.saved_self_addr == rx_addr and
+            self.adapter.saved_self_addr == @intFromPtr(&self.adapter) and
+            self.adapter.owner_addr == @intFromPtr(self);
+    }
+
+    pub fn initInPlace(
+        out: *ExternalPumpOwner,
+        prepared: *external_attach.Prepared,
+    ) InitError!void {
+        if (rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(ExternalPumpOwner),
+            @intFromPtr(prepared),
+            @sizeOf(external_attach.Prepared),
+        )) return error.InvalidAlias;
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty)
+            return error.DestinationNotEmpty;
+        if (prepared.attach_instance_id == 0 or
+            prepared.client.attach_instance_id != prepared.attach_instance_id or
+            !preparedAttachmentCanonical(&prepared.attachment))
+            return error.InvalidPrepared;
+
+        const attachment_allocator = prepared.attachment.allocator;
+        const attachment_state = prepared.attachment.state;
+
+        out.saved_self_addr = @intFromPtr(out);
+        out.lifecycle = .constructing;
+        out.adapter = .{
+            .saved_self_addr = @intFromPtr(&out.adapter),
+            .owner_addr = @intFromPtr(out),
+        };
+        if (!client_external_pump.ExternalPumpCleanupScratch.initInPlace(
+            &out.cleanup_scratch,
+        ) or !client_external_pump.ExternalRxTurnScratch.initInPlace(&out.rx_scratch)) {
+            out.* = .{};
+            return error.InvalidPrepared;
+        }
+
+        var evidence: client_external_pump.PreparedAdoptionEvidence = .{};
+        var evidence_owned = true;
+        defer if (evidence_owned) evidence.deinit();
+        external_attach_evidence.prepareInPlace(&evidence, prepared) catch |err| {
+            out.* = .{};
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.InvalidAlias => error.InvalidAlias,
+                error.InvalidEvidence => error.InvalidPrepared,
+            };
+        };
+        switch (client_external_pump.ExternalPumpStorage.initInPlace(
+            &out.storage,
+            &prepared.client,
+            &evidence,
+        )) {
+            .initialized => evidence_owned = false,
+            .failed => |failure| {
+                out.* = .{};
+                return if (failure.reason == .out_of_memory)
+                    error.OutOfMemory
+                else
+                    error.StorageRejected;
+            },
+        }
+        switch (out.storage.prepareAdoption(1, &out.cleanup_scratch)) {
+            .prepared_adopted => {},
+            .retryable_preserved => |reason| {
+                _ = out.storage.teardown(&out.cleanup_scratch);
+                out.lifecycle = .dead;
+                return switch (reason) {
+                    .out_of_memory => error.OutOfMemory,
+                    .transaction_busy => error.AdoptionRejected,
+                };
+            },
+            .recovery_committed, .terminal_latched => {
+                _ = out.storage.teardown(&out.cleanup_scratch);
+                out.lifecycle = .dead;
+                return error.AdoptionRejected;
+            },
+        }
+        if (out.storage.commitAdoption() != .adopted) {
+            _ = out.storage.teardown(&out.cleanup_scratch);
+            out.lifecycle = .dead;
+            return error.AdoptionRejected;
+        }
+
+        // Allocation callbacks ran while adopting the Client. Revalidate the still-source-owned
+        // attachment immediately before its no-fail move/bind suffix so a callback cannot turn
+        // the initial transport-null check into an `AlreadyBound` unreachable or smuggle mutable
+        // attachment ownership into the final owner.
+        if (!preparedAttachmentMatches(
+            &prepared.attachment,
+            attachment_allocator,
+            attachment_state,
+        )) {
+            _ = out.storage.teardown(&out.cleanup_scratch);
+            out.lifecycle = .dead;
+            return error.AdoptionRejected;
+        }
+        out.attachment = prepared.attachment;
+        out.lifecycle = .live;
+        out.attachment.bindTransport(out.adapter.interface()) catch unreachable;
+        // Keep the consumed source deterministically rejectable and safe to deinit. The Client
+        // move already published its own tombstone; reconstruct only an empty, non-owning
+        // attachment shell instead of leaving caller-visible undefined bytes.
+        prepared.attach_instance_id = 0;
+        prepared.attachment = remote_attachment.RemoteAttachment.init(
+            attachment_allocator,
+            attachment_state,
+        );
+        prepared.initial_metadata = .unavailable;
+    }
+
+    pub fn pump(
+        self: *ExternalPumpOwner,
+        turn: client_pump.TurnInput,
+        buffered: *const client_external_pump.BufferedRxOps,
+    ) client_pump.TurnResult {
+        if (!self.addressValid() or self.lifecycle != .live) {
+            return .{ .terminal = .{
+                .reason = .invariant_failure,
+                .fd_disposition = .owner_cleanup,
+            } };
+        }
+        const hint = self.storage.pollHint();
+        if (hint.next_deadline_ns) |deadline| {
+            if (turn.now_ns >= deadline) {
+                self.storage.failAttachment(.read_timeout);
+                return .{ .terminal = .{
+                    .reason = .deadline_exceeded,
+                    .fd_disposition = .owner_cleanup,
+                } };
+            }
+        }
+        return pumpRx(
+            &self.storage,
+            turn,
+            buffered,
+            &self.rx_scratch,
+        );
+    }
+
+    pub fn admitControl(
+        self: *ExternalPumpOwner,
+        spec: client_external_pump.ControlAdmissionSpec,
+        now_ns: i128,
+    ) client_external_pump.ControlAdmissionResult {
+        if (!self.addressValid() or self.lifecycle != .live)
+            return .{ .terminal = .invariant_failure };
+        return self.storage.admitControl(spec, now_ns);
+    }
+
+    pub fn pollHint(self: *const ExternalPumpOwner) PollHintResult {
+        if (!self.addressValid() or self.lifecycle != .live)
+            return .moved_or_stale;
+        return .{ .hint = self.storage.pollHint() };
+    }
+
+    pub fn teardown(self: *ExternalPumpOwner) TeardownResult {
+        if (self.saved_self_addr == 0 and self.lifecycle == .empty)
+            return .already_dead;
+        if (!self.addressValid()) return .moved;
+        if (self.lifecycle == .dead) return .already_dead;
+        if (self.lifecycle != .live) return .busy;
+        self.lifecycle = .tearing_down;
+        // RemoteAttachment releases every held charged lease and drops its stream before the
+        // storage begins ledger final-zero and Client committed cleanup.
+        self.attachment.deinit();
+        const result = self.storage.teardown(&self.cleanup_scratch);
+        self.lifecycle = .dead;
+        return switch (result) {
+            .cleaned => .cleaned,
+            .cleaned_with_invariant => .cleaned_with_invariant,
+            .already_dead => .already_dead,
+            .moved_storage => .moved,
+            .transaction_busy => .busy,
+            .quarantined => .quarantined,
+        };
+    }
+};
+
+fn preparedAttachmentCanonical(attachment: *const remote_attachment.RemoteAttachment) bool {
+    // A real attach already owns its initial screen. Binding is the only attachment field this
+    // composition step creates, so null transport is the exact precondition here; screen/queue
+    // ownership remains with the source until the final no-fail move.
+    return attachment.transport == null;
+}
+
+fn preparedAttachmentMatches(
+    attachment: *const remote_attachment.RemoteAttachment,
+    allocator: std.mem.Allocator,
+    state: remote_attachment.State,
+) bool {
+    return preparedAttachmentCanonical(attachment) and
+        attachment.allocator.ptr == allocator.ptr and
+        attachment.allocator.vtable == allocator.vtable and
+        std.meta.eql(attachment.state, state);
+}
+
+fn rangesOverlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) bool {
+    if (a_len == 0 or b_len == 0) return false;
+    const a_end = @addWithOverflow(a_start, a_len);
+    const b_end = @addWithOverflow(b_start, b_len);
+    if (a_end[1] != 0 or b_end[1] != 0) return true;
+    return a_start < b_end[0] and b_start < a_end[0];
+}
+
+test "p5c3c-2b3 owner rejects a moved final-address copy in every build mode" {
+    var owner: ExternalPumpOwner = .{};
+    owner.saved_self_addr = @intFromPtr(&owner);
+    owner.lifecycle = .live;
+    owner.adapter = .{
+        .saved_self_addr = @intFromPtr(&owner.adapter),
+        .owner_addr = @intFromPtr(&owner),
+    };
+
+    var moved = owner;
+    const result = moved.pump(.{
+        .readable = false,
+        .writable = false,
+        .now_ns = 1,
+    }, &.{
+        .context = undefined,
+        .context_len = 0,
+        .apply_live_screen = struct {
+            fn call(
+                _: *anyopaque,
+                _: client_external_pump.LiveScreenPayloadView,
+            ) client_external_pump.LiveScreenApplyResult {
+                return .applied;
+            }
+        }.call,
+    });
+    try std.testing.expectEqual(client_pump.TerminalReason.invariant_failure, result.terminal.?.reason);
+    try std.testing.expectEqual(TeardownResult.moved, moved.teardown());
+}
+
+const P5c3c2b3PreparedFixture = struct {
+    prepared: external_attach.Prepared,
+    peer_fd: c.fd_t,
+
+    fn init(instance_id: u64) !P5c3c2b3PreparedFixture {
+        return initWithAllocator(instance_id, std.testing.allocator);
+    }
+
+    fn initWithAllocator(
+        instance_id: u64,
+        allocator: std.mem.Allocator,
+    ) !P5c3c2b3PreparedFixture {
+        var fds: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+        );
+        var client: client_mod.Client = .{
+            .allocator = allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+            .attach_instance_id = instance_id,
+            .connection_profile = .cli_attach,
+            .compatibility_profile = compatibility.profileForMajor(protocol.version_major).?,
+            .attachment_capabilities = .{
+                .peer_attach_generation = true,
+                .negotiated_controller_transfer = true,
+            },
+        };
+        errdefer {
+            client.deinit();
+            _ = c.close(fds[1]);
+        }
+        try client.enterExternalMode();
+        return .{
+            .prepared = .{
+                .attach_instance_id = instance_id,
+                .client = client,
+                .attachment = remote_attachment.RemoteAttachment.init(
+                    allocator,
+                    .{
+                        .runtime_id = 0xaa,
+                        .stream_id = 7,
+                        .role = .controller,
+                        .controller_generation = 3,
+                    },
+                ),
+                .initial_metadata = runtime_metadata_wire.InitialMetadataSeed.unsupported,
+            },
+            .peer_fd = fds[1],
+        };
+    }
+
+    fn initWithBatch(instance_id: u64, bytes: []const u8) !P5c3c2b3PreparedFixture {
+        return initWithBatchAllocator(
+            instance_id,
+            bytes,
+            false,
+            std.testing.allocator,
+        );
+    }
+
+    fn initWithBatchAllocator(
+        instance_id: u64,
+        bytes: []const u8,
+        is_snapshot: bool,
+        allocator: std.mem.Allocator,
+    ) !P5c3c2b3PreparedFixture {
+        var fixture = try initWithAllocator(instance_id, allocator);
+        errdefer fixture.deinit();
+        const owned = try allocator.dupe(u8, bytes);
+        errdefer allocator.free(owned);
+        try fixture.prepared.client.pending_batches.append(
+            allocator,
+            .{
+                .is_snapshot = is_snapshot,
+                .stream_id = fixture.prepared.attachment.state.stream_id,
+                .bytes = owned,
+                .allocator = allocator,
+            },
+        );
+        fixture.prepared.client.pending_batch_bytes = owned.len;
+        return fixture;
+    }
+
+    fn deinit(self: *P5c3c2b3PreparedFixture) void {
+        self.prepared.deinit();
+        if (self.peer_fd >= 0) _ = c.close(self.peer_fd);
+        self.peer_fd = -1;
+    }
+};
+
+const P5c3c2b3BindDriftAllocator = struct {
+    parent: std.mem.Allocator,
+    target: ?*remote_attachment.RemoteAttachment = null,
+    replacement: ?remote_attachment.AttachmentTransport = null,
+    armed: bool = false,
+    fired: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.armed and !self.fired) {
+            self.fired = true;
+            self.target.?.transport = self.replacement.?;
+        }
+        return self.parent.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.parent.rawResize(memory, alignment, new_len, return_address);
+    }
+
+    fn remap(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.parent.rawRemap(memory, alignment, new_len, return_address);
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.parent.rawFree(memory, alignment, return_address);
+    }
+};
+
+test "p5c3c-2b3 final owner consumes prepared once and binds only its stable adapter" {
+    var fixture = try P5c3c2b3PreparedFixture.init(0x2b3);
+    defer fixture.deinit();
+    var owner: ExternalPumpOwner = .{};
+
+    fixture.prepared.attachment.transport = owner.adapter.interface();
+    try std.testing.expectError(
+        error.InvalidPrepared,
+        owner.initInPlace(&fixture.prepared),
+    );
+    try std.testing.expectEqual(OwnerLifecycle.empty, owner.lifecycle);
+    fixture.prepared.attachment.transport = null;
+
+    try owner.initInPlace(&fixture.prepared);
+    try std.testing.expectEqual(@as(u64, 0), fixture.prepared.attach_instance_id);
+    try std.testing.expectEqual(@intFromPtr(&owner.adapter), @intFromPtr(
+        owner.attachment.transport.?.context,
+    ));
+    try std.testing.expect(owner.addressValid());
+
+    var second: ExternalPumpOwner = .{};
+    try std.testing.expectError(
+        error.InvalidPrepared,
+        second.initInPlace(&fixture.prepared),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+    try std.testing.expectEqual(TeardownResult.already_dead, owner.teardown());
+
+    var drift_allocator = P5c3c2b3BindDriftAllocator{
+        .parent = std.testing.allocator,
+    };
+    var drift_fixture = try P5c3c2b3PreparedFixture.initWithAllocator(
+        0x2b31,
+        drift_allocator.allocator(),
+    );
+    defer drift_fixture.deinit();
+    var drift_owner: ExternalPumpOwner = .{};
+    drift_allocator.target = &drift_fixture.prepared.attachment;
+    drift_allocator.replacement = drift_owner.adapter.interface();
+    drift_allocator.armed = true;
+    try std.testing.expectError(
+        error.AdoptionRejected,
+        drift_owner.initInPlace(&drift_fixture.prepared),
+    );
+    try std.testing.expect(drift_allocator.fired);
+    drift_fixture.prepared.attachment.transport = null;
+    try std.testing.expectEqual(TeardownResult.already_dead, drift_owner.teardown());
+}
+
+test "p5c3c-2b3 attachment-held charged lease blocks storage teardown until release" {
+    var fixture = try P5c3c2b3PreparedFixture.initWithBatch(0x2b4, "batch");
+    defer fixture.deinit();
+    var owner: ExternalPumpOwner = .{};
+    try owner.initInPlace(&fixture.prepared);
+    defer _ = owner.teardown();
+
+    const transport = owner.attachment.transport.?;
+    const lease = (try transport.read_batch(transport.context, 7)).?;
+    const token = switch (lease) {
+        .charged => |charged| charged,
+        else => return error.TestUnexpectedResult,
+    };
+    const borrow = transport.borrow_charged.?;
+    const view = try borrow(transport.context, token);
+    try std.testing.expectEqualStrings("batch", view.bytes);
+    try std.testing.expectEqual(
+        client_external_pump.TeardownResult.transaction_busy,
+        owner.storage.teardown(&owner.cleanup_scratch),
+    );
+    try transport.release_charged.?(transport.context, token);
+    try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+}
+
+test "p5c3c-2b3 poison preserves Client and ledger until attachment-first cleanup" {
+    var fixture = try P5c3c2b3PreparedFixture.initWithBatch(0x2b5, "poisoned-batch");
+    defer fixture.deinit();
+    var owner: ExternalPumpOwner = .{};
+    try owner.initInPlace(&fixture.prepared);
+    defer _ = owner.teardown();
+
+    const transport = owner.attachment.transport.?;
+    const lease = (try transport.read_batch(transport.context, 7)).?;
+    try owner.attachment.pending_batches.append(std.testing.allocator, lease);
+    transport.fail_closed(transport.context, .transport_read_failure);
+    try std.testing.expect(client_external_pump.testing.hasClientObject(&owner.storage));
+    try std.testing.expect(client_external_pump.testing.attachmentLeaseHeld(&owner.storage));
+    try std.testing.expectEqual(
+        client_external_pump.TeardownResult.transaction_busy,
+        owner.storage.teardown(&owner.cleanup_scratch),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+}
+
+test "p5c3c-2b3 actual external attach prepare drives one owner pump control and teardown" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const daemon = @import("daemon.zig");
+    const discovery = @import("discovery.zig");
+    const host_connect = @import("host_connect.zig");
+    const host_manifest = @import("host_manifest.zig");
+    const short_endpoint = @import("short_endpoint.zig");
+    const allocator = std.testing.allocator;
+    const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0x2b3;
+    var base_buf: [192]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(
+        &base_buf,
+        "/tmp/maru-external-owner-2b3-{d}",
+        .{c.getpid()},
+    );
+    std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
+    _ = c.mkdir(base.ptr, 0o700);
+    var session_buf: [256]u8 = undefined;
+    const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
+    try short_endpoint.prepareCurrentUserNamespace();
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        daemon.runSessionHostWithIdentity(
+            std.heap.page_allocator,
+            std.testing.io,
+            session_dir,
+            endpoint,
+            host_id,
+        ) catch {};
+        c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        host_manifest.removeEmptyHostDirectories(session_dir, host_id);
+        std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
+    }
+
+    var admin = blk: {
+        var attempt: usize = 0;
+        // `mise run check` intentionally runs several process-heavy suites in parallel. Host
+        // startup is test orchestration rather than a product attach phase, so give the child a
+        // bounded 15-second readiness window while the product calls below retain their own exact
+        // five-second phase deadlines.
+        while (attempt < 750) : (attempt += 1) {
+            switch (host_connect.connectExistingHost(allocator, base, host_id)) {
+                .connected => |client| break :blk client,
+                .failed => {},
+            }
+            _ = usleep(20_000);
+        }
+        return error.TestUnexpectedResult;
+    };
+    defer admin.deinit();
+    const spawn = try admin.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}",
+    );
+    defer allocator.free(spawn);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, spawn, .{});
+    defer parsed.deinit();
+    const runtime_id = try std.fmt.parseInt(
+        u128,
+        parsed.value.object.get("result").?.object.get("runtime_id").?.string,
+        16,
+    );
+
+    const prepared_result = external_attach.prepare(
+        allocator,
+        std.testing.io,
+        base,
+        .{ .runtime_id = runtime_id, .intent = .default_controller },
+    );
+    var prepared = switch (prepared_result) {
+        .prepared => |value| value,
+        .failed => return error.TestUnexpectedResult,
+    };
+    defer prepared.deinit();
+    var owner: ExternalPumpOwner = .{};
+    try owner.initInPlace(&prepared);
+    defer _ = owner.teardown();
+
+    const Apply = struct {
+        fn call(
+            _: *anyopaque,
+            _: client_external_pump.LiveScreenPayloadView,
+        ) client_external_pump.LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var marker: u8 = 0;
+    const turn = owner.pump(.{
+        .readable = false,
+        .writable = false,
+        .now_ns = 10,
+    }, &.{
+        .context = &marker,
+        .context_len = @sizeOf(u8),
+        .apply_live_screen = Apply.call,
+    });
+    try std.testing.expect(turn.terminal == null);
+    try std.testing.expect(client_external_pump.testing.clearInitialFence(&owner.storage));
+    const admitted = owner.admitControl(.{
+        .request = .{ .resize = .{
+            .stream_id = owner.attachment.state.stream_id,
+            .cols = 40,
+            .rows = 10,
+            .client_sequence = 1,
+        } },
+        .expected_controller_generation = owner.attachment.state.controller_generation,
+    }, 20);
+    try std.testing.expect(admitted == .admitted);
+    try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+}
+
+test "p5c3c-2b3 parser request id and capability state survive owner transition byte exact" {
+    var fixture = try P5c3c2b3PreparedFixture.init(0x2b6);
+    defer fixture.deinit();
+    const partial = [_]u8{ 0x4d, 0x52, 0x53, 0x48, 0x00, 0x01, 0x02 };
+    try fixture.prepared.client.parser.push(&partial);
+    fixture.prepared.client.next_request_id = 91;
+    const capabilities = fixture.prepared.client.attachment_capabilities;
+
+    var owner: ExternalPumpOwner = .{};
+    try owner.initInPlace(&fixture.prepared);
+    defer _ = owner.teardown();
+    try std.testing.expect(client_external_pump.testing.parserBytesEqual(
+        &owner.storage,
+        &partial,
+    ));
+    try std.testing.expect(client_external_pump.testing.attachmentCapabilitiesEqual(
+        &owner.storage,
+        capabilities,
+    ));
+    try std.testing.expectEqual(
+        client_pump.RequestIdState{ .available = 91 },
+        client_external_pump.testing.requestIdState(&owner.storage).?,
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+}
+
+fn checkP5c3c2b3OwnerAllocationFailure(allocator: std.mem.Allocator) !void {
+    var fixture = try P5c3c2b3PreparedFixture.initWithAllocator(0x2b7, allocator);
+    defer fixture.deinit();
+    var owner: ExternalPumpOwner = .{};
+    owner.initInPlace(&fixture.prepared) catch |err| {
+        _ = owner.teardown();
+        return err;
+    };
+    try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+}
+
+test "p5c3c-2b3 allocation fail index cleans exactly source or final owner" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkP5c3c2b3OwnerAllocationFailure,
+        .{},
+    );
+}
+
+test "p5c3c-2b3 owner pump fail-closes revoke and control timeout" {
+    const Apply = struct {
+        fn call(
+            _: *anyopaque,
+            _: client_external_pump.LiveScreenPayloadView,
+        ) client_external_pump.LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var marker: u8 = 0;
+    const buffered = client_external_pump.BufferedRxOps{
+        .context = &marker,
+        .context_len = @sizeOf(u8),
+        .apply_live_screen = Apply.call,
+    };
+
+    {
+        var fixture = try P5c3c2b3PreparedFixture.init(0x2b8);
+        defer fixture.deinit();
+        var owner: ExternalPumpOwner = .{};
+        try owner.initInPlace(&fixture.prepared);
+        defer _ = owner.teardown();
+        try std.testing.expect(client_external_pump.testing.clearInitialFence(&owner.storage));
+        const revoke = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .event, .stream_id = 7 },
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        );
+        defer std.testing.allocator.free(revoke);
+        try writeAllFd(fixture.peer_fd, revoke);
+        const result = owner.pump(.{
+            .readable = true,
+            .writable = false,
+            .now_ns = 1,
+        }, &buffered);
+        try std.testing.expectEqual(client_pump.TerminalReason.revoked, result.terminal.?.reason);
+        try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+    }
+
+    {
+        var fixture = try P5c3c2b3PreparedFixture.init(0x2b9);
+        defer fixture.deinit();
+        var owner: ExternalPumpOwner = .{};
+        try owner.initInPlace(&fixture.prepared);
+        defer _ = owner.teardown();
+        try std.testing.expect(client_external_pump.testing.clearInitialFence(&owner.storage));
+        const admitted = owner.admitControl(.{
+            .request = .{ .resize = .{
+                .stream_id = 7,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
+            .expected_controller_generation = 3,
+        }, 1);
+        try std.testing.expect(admitted == .admitted);
+        const first = owner.pump(.{
+            .readable = false,
+            .writable = false,
+            .now_ns = 2,
+        }, &buffered);
+        try std.testing.expect(first.terminal == null);
+        const deadline = switch (owner.pollHint()) {
+            .hint => |hint| hint.next_deadline_ns orelse return error.TestUnexpectedResult,
+            .moved_or_stale => return error.TestUnexpectedResult,
+        };
+        const expired = owner.pump(.{
+            .readable = false,
+            .writable = true,
+            .now_ns = deadline + 1,
+        }, &buffered);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.deadline_exceeded,
+            expired.terminal.?.reason,
+        );
+        try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+    }
+}
+
+fn writeAllFd(fd: c.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const written = c.send(fd, bytes[offset..].ptr, bytes.len - offset, 0);
+        if (written < 0) return error.TestUnexpectedResult;
+        if (written == 0) return error.TestUnexpectedResult;
+        offset += @intCast(written);
+    }
+}
+
+fn p5c3c2b3Snapshot(allocator: std.mem.Allocator) ![]u8 {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&bytes, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = " ", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&bytes, allocator, row);
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "p5c3c-2b3 attachment append and apply OOM release stable charged owner" {
+    inline for (.{ false, true }) |fail_apply| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = failing.allocator();
+        const snapshot = try p5c3c2b3Snapshot(allocator);
+        defer allocator.free(snapshot);
+        var fixture = try P5c3c2b3PreparedFixture.initWithBatchAllocator(
+            if (fail_apply) 0x2bb else 0x2ba,
+            snapshot,
+            true,
+            allocator,
+        );
+        defer fixture.deinit();
+        var owner: ExternalPumpOwner = .{};
+        try owner.initInPlace(&fixture.prepared);
+        defer _ = owner.teardown();
+        try owner.attachment.initScreen(screen_stream.codec_version);
+        if (fail_apply)
+            try owner.attachment.pending_batches.ensureTotalCapacityPrecise(allocator, 1);
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectError(
+            error.OutOfMemory,
+            owner.attachment.pumpScreen(std.testing.io),
+        );
+        try std.testing.expect(owner.storage.attachment_lease == null);
+        try std.testing.expectEqual(TeardownResult.cleaned, owner.teardown());
+    }
+}
 
 fn createRxScratchForTest() !*client_external_pump.ExternalRxTurnScratch {
     const scratch =
@@ -180,7 +1162,7 @@ fn exerciseD3SocketpairRevokePosition(
 
         fn run(
             raw: *anyopaque,
-            _: external_inbox_ledger.PayloadView,
+            _: client_external_pump.LiveScreenPayloadView,
         ) client_external_pump.LiveScreenApplyResult {
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (self.order) |order| order.record(.apply_live_screen);
@@ -642,7 +1624,7 @@ test "d2c product owner maps readiness to POSIX RX before any writable work" {
 
         fn run(
             raw: *anyopaque,
-            view: external_inbox_ledger.PayloadView,
+            view: client_external_pump.LiveScreenPayloadView,
         ) client_external_pump.LiveScreenApplyResult {
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (self.order) |order| order.record(.apply_live_screen);
@@ -1099,7 +2081,7 @@ test "d2c product owner terminalizes a non-socket descriptor and replays without
 
         fn run(
             raw: *anyopaque,
-            _: external_inbox_ledger.PayloadView,
+            _: client_external_pump.LiveScreenPayloadView,
         ) client_external_pump.LiveScreenApplyResult {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.calls += 1;

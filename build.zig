@@ -9443,6 +9443,38 @@ pub fn build(b: *std.Build) void {
         session_host_f3e_step.dependOn(&run_external_pump_f3e_tests.step);
         session_host_f3e_step.dependOn(&run_session_host_f3e_sentinel.step);
 
+        const external_pump_2b3_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/external_pump_owner.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"p5c3c-2b3"},
+        });
+        const run_external_pump_2b3_tests = b.addRunArtifact(external_pump_2b3_tests);
+        run_external_pump_2b3_tests.addArg("--maru-expect-tests=9");
+        run_external_pump_2b3_tests.setCwd(b.path("."));
+        const session_host_2b3_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-2b3-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2b3_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_session_host_2b3_sentinel = b.addRunArtifact(session_host_2b3_sentinel);
+        run_session_host_2b3_sentinel.setCwd(b.path("."));
+        const session_host_2b3_step = b.step(
+            "test-session-host-2b3",
+            "Run the P5c3c-2b3 stable external product owner evidence gate",
+        );
+        session_host_2b3_step.dependOn(&run_external_pump_2b3_tests.step);
+        session_host_2b3_step.dependOn(&run_session_host_2b3_sentinel.step);
+
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

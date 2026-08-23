@@ -442,6 +442,72 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
     for (const x of subs) x.dispose();
     return { cursor, scroll, selCount: sel.length, lastSelNull: sel.at(-1) === null };
   });
+  // **커스텀 키 핸들러는 DOM 이벤트라 여기서만 볼 수 있다.** false 를 돌려주면 터미널이 그 키를
+  // 완전히 무시해야 한다 — 기본 바인딩(⌘A 전체선택)도 안 타야 한다.
+  const custom = await p.evaluate(async () => {
+    const t = (
+      globalThis as unknown as {
+        __term: {
+          write: (s: string) => void;
+          hasSelection: () => boolean;
+          selectClear: () => void;
+          attachCustomKeyEventHandler: (h: ((ev: KeyboardEvent) => boolean) | null) => void;
+          onData: (cb: (b: Uint8Array) => void) => { dispose(): void };
+        };
+      }
+    ).__term;
+    const wait = () => new Promise((r) => setTimeout(r, 200));
+    const ime = document.querySelector("textarea") as HTMLTextAreaElement;
+    const press = (init: KeyboardEventInit) =>
+      ime.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+
+    t.write("some text here");
+    await wait();
+
+    // 핸들러 없이는 ⌘A 가 전체 선택을 한다(기준선).
+    t.selectClear();
+    press({ key: "a", metaKey: true });
+    await wait();
+    const withoutHandler = t.hasSelection();
+
+    // false 를 돌려주면 같은 키가 아무 일도 하면 안 된다.
+    t.selectClear();
+    await wait();
+    t.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "a"));
+    press({ key: "a", metaKey: true });
+    await wait();
+    const blocked = t.hasSelection();
+
+    // 일반 키는 여전히 코어 인코딩을 타야 한다.
+    const seen: number[] = [];
+    const sub = t.onData((b) => seen.push(...b));
+    press({ key: "x" });
+    await wait();
+    const passthrough = seen.length > 0;
+
+    // null 로 해제하면 원래대로.
+    t.attachCustomKeyEventHandler(null);
+    t.selectClear();
+    await wait();
+    press({ key: "a", metaKey: true });
+    await wait();
+    const restored = t.hasSelection();
+    sub.dispose();
+    return { withoutHandler, blocked, passthrough, restored };
+  });
+  check(
+    "worker: 핸들러 없이는 ⌘A 가 전체 선택한다",
+    custom.withoutHandler,
+    String(custom.withoutHandler),
+  );
+  check(
+    "worker: 커스텀 핸들러가 false 면 키가 완전히 무시된다",
+    !custom.blocked,
+    String(custom.blocked),
+  );
+  check("worker: 막지 않은 키는 그대로 인코딩된다", custom.passthrough, String(custom.passthrough));
+  check("worker: null 로 해제하면 원래대로", custom.restored, String(custom.restored));
+
   // OSC 사건은 워커에서 `event` 채널로 실려 온다. 클립보드·알림은 **알리기만** 해야 한다 —
   // 라이브러리가 자동으로 쓰면 임의의 셸 스크립트가 사용자 클립보드를 덮어쓸 수 있다.
   const osc = await p.evaluate(async () => {
@@ -513,6 +579,13 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
     String(found.sel),
   );
   check("worker: 없는 것은 0 건", found.none === 0, String(found.none));
+
+  const ser = await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: { serialize: () => Promise<string> } }).__term;
+    const text = await t.serialize();
+    return { has: text.includes("findme"), esc: text.includes("\x1b") };
+  });
+  check("worker: serialize 가 화면 평문을 돌려준다", ser.has && !ser.esc, `esc=${ser.esc}`);
   check("worker: onCursorMove 가 온다", evs.cursor > 0, `${evs.cursor}회`);
   check("worker: onScroll 이 온다", evs.scroll > 0, `${evs.scroll}회`);
   check(

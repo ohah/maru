@@ -38,6 +38,15 @@ export interface AttachOptions {
   cellsCap?: number;
   /** 프로시저럴 글리프 공급자. 없으면 폰트로만 그린다. */
   glyphs?: GlyphSource | null;
+  /**
+   * 키가 터미널에 닿기 전에 앱이 먼저 본다. `false` 를 돌려주면 터미널은 그 키를 **완전히
+   * 무시한다**(기본 바인딩도, 코어 인코딩도 타지 않는다). 앱 단축키가 터미널보다 우선해야 할 때.
+   *
+   * **IME 조합 정리 뒤에 불린다** — 조합 중 `Cmd` 조합이 오면 라이브러리가 먼저 조합을
+   * 취소하고(그러지 않으면 조합 글자가 화면에 남는다) 그다음 이 핸들러를 부른다. 조합 자체를
+   * 가로채고 싶으면 `ev.isComposing` 을 보고 판단한다.
+   */
+  customKeyHandler?: ((ev: KeyboardEvent) => boolean) | null;
   fontFamily?: string;
   fontSize?: number;
   lineHeight?: number;
@@ -229,6 +238,8 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
       ime.value = "";
       opts.onPreedit?.("");
     }
+    // 앱이 먼저 본다. 조합 정리 뒤이므로 여기서 false 를 받아도 조합이 남지 않는다.
+    if (opts.customKeyHandler?.(ev) === false) return;
     if (ev.metaKey && ev.key === "a") {
       term.selectAll();
       redraw();

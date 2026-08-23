@@ -194,7 +194,9 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
                   ? await b.find(msg.arg as string)
                   : msg.kind === "cursorAtPrompt"
                     ? await b.cursorAtPrompt()
-                    : await b.linkAt(...(msg.arg as [number, number]));
+                    : msg.kind === "serialize"
+                      ? await b.serialize()
+                      : await b.linkAt(...(msg.arg as [number, number]));
         post({ t: "reply", id: msg.id, value });
         return;
       }

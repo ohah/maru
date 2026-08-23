@@ -215,7 +215,6 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 
 | 기능 | 코어의 구현 | 비고 |
 |---|---|---|
-| 화면 직렬화 | `dumpUtf`·`dumpRecentTextUtf` | SerializeAddon 에 해당 |
 | 이미지 | `buildImageViews`·`buildPlacementViews` | 렌더러가 픽셀을 다뤄야 한다 |
 
 링크 **자동 감지**는 libc 를 요구하므로 넣지 않는다(§8, [wasm 이식성](wasm-portability.md) §2). OSC 8
@@ -279,6 +278,37 @@ term.onClipboardRead((target) => {
 - 좌표계 주의: 매치는 **절대 행**이고 선택 API 는 **뷰포트 행**이다. `findNext` 가 안에서
   변환한다(직접 `selectStart` 로 넘기면 스크롤백 깊은 매치가 엉뚱한 줄을 잡는다).
 
+### 선택 조회·프로그래밍 선택
+
+| 메서드 | 비고 |
+|---|---|
+| `hasSelection()` | **동기다.** 복사 버튼의 `disabled` 를 이벤트 핸들러 안에서 바로 정해야 한다 |
+| `getSelectionPosition()` | 뷰포트 좌표. 없으면 `null` |
+| `select(row, col, length)` | 한 행 안에서 |
+| `selectLines(start, end)` | 행 통째로 |
+
+**동기 조회 둘은 마지막 프레임의 값**이다(`#prevMeta`). 워커 모드에서도 왕복 없이 답하는 대신
+**한 프레임 뒤처질 수 있다** — 선택 직후 같은 tick 에 물으면 이전 상태가 나온다. 정확한 값이
+필요하면 `onSelectionChange` 를 구독한다.
+
+### 키 가로채기
+
+```ts
+term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "k")); // ⌘K 는 앱이
+term.attachCustomKeyEventHandler(null);                                    // 해제
+```
+
+`false` 를 돌려주면 터미널이 그 키를 **완전히 무시한다** — 기본 바인딩(§5.1)도, 코어 인코딩도
+타지 않는다. **IME 조합 정리 뒤에 불린다**: 조합 중 `Cmd` 조합이 오면 라이브러리가 먼저 조합을
+취소하고(그러지 않으면 조합 글자가 화면에 남는다) 그다음 핸들러를 부른다. 조합 자체를
+가로채려면 `ev.isComposing` 을 본다. 키는 언제나 메인 스레드가 잡으므로 두 워커 모드에서 같다.
+
+### 화면 직렬화
+
+`serialize()` 는 화면을 평문으로 뜬다. **스타일·색은 버린다** — 코어 `dumpUtf8` 이 "렌더러가
+아니다"라는 계약이라 xterm.js SerializeAddon 처럼 SGR 을 복원하지 않는다. 테스트 단언이나 버그
+리포트 첨부용이다.
+
 ### 상태 이벤트
 
 | 이벤트 | 인자 | 언제 |
@@ -308,12 +338,18 @@ term.onClipboardRead((target) => {
 
 | 없는 것 | 쓰임 |
 |---|---|
-| `onKey`·`onBinary`·`onLineFeed`·`onWriteParsed` | 입력·출력 훅 |
-| `attachCustomKeyEventHandler` | 앱 단축키가 터미널보다 먼저 키를 잡아야 할 때 |
 | `registerMarker`·`registerDecoration` | 주석 같은 확장의 기반(검색 하이라이트는 선택으로 그린다) |
-| `hasSelection`·`getSelectionPosition`·`select`·`selectLines` | 선택 조회·프로그래밍 선택 |
 | `registerLinkProvider` | 커스텀 링크 규칙 |
-| `input`·`writeln`·`refresh` | 편의 |
+
+**넣지 않기로 한 것**도 있다 — xterm.js 에 있지만 여기서는 성립하지 않거나 이미 다른 것이 덮는다.
+
+| xterm.js | 왜 넣지 않나 |
+|---|---|
+| `onLineFeed` | **코어에 그 훅이 없다.** 프레임에서 파생하면 한 프레임에 접힌 여러 LF 를 구별할 수 없어 부정확해진다 — 없는 것보다 나쁘다 |
+| `onWriteParsed` | `write()` 가 동기라 **호출 직후가 곧 그 시점**이다 |
+| `onBinary` | `onData` 가 이미 `Uint8Array` 다 |
+| `input(data)` | `sendText()` 가 같은 일을 한다 |
+| `refresh(start, end)` | 렌더가 dirty 기반이라 행 범위를 받을 자리가 없다. 강제 재렌더가 필요한 경우(폰트 로드 등)는 내부에서 처리한다 |
 
 `blur` 는 `focus(false)` 로 덮는다. `registerCharacterJoiner`(리가처 커스텀)와 `loadAddon` 은
 설계가 달라 그대로 옮길 것이 아니다 — 리가처는 코어가 판정하고, 애드온 개념을 둘지는 미정이다.

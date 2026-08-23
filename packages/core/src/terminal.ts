@@ -91,6 +91,7 @@ export class Terminal {
   readonly #selectionChange = new Emitter<FrameMeta["selection"]>();
   /** 직전 프레임 — 상태 이벤트는 여기서 파생한다(셀은 없으므로 들고 있어도 가볍다). */
   #prevMeta: FrameMeta | null = null;
+  #customKey: ((ev: KeyboardEvent) => boolean) | null = null;
 
   constructor(opts: TerminalOptions = {}) {
     this.#opts = { ...opts };
@@ -209,8 +210,28 @@ export class Terminal {
       lineHeight: this.#opts.lineHeight ?? 1.22,
       ligatures: this.#opts.ligatures ?? true,
       theme: this.#opts.theme ?? DEFAULT_THEME,
+      // 함수를 그대로 넘기지 않고 지금 값을 읽는 클로저로 감싼다 — `attachCustomKeyEventHandler`
+      // 를 `open()` 뒤에 불러도 먹어야 한다(붙일 때 null 이면 영영 안 불렸다).
+      customKeyHandler: (ev: KeyboardEvent) => this.#customKey?.(ev) ?? true,
       render,
     };
+  }
+
+  /**
+   * 키가 터미널에 닿기 전에 앱이 먼저 본다. `false` 를 돌려주면 터미널은 그 키를 완전히
+   * 무시한다 — 기본 바인딩도, 코어 인코딩도 타지 않는다. `null` 로 해제한다.
+   *
+   * ```ts
+   * term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "k")); // ⌘K 는 앱이
+   * ```
+   *
+   * **IME 조합 정리 뒤에 불린다** — 조합 중 `Cmd` 조합이 오면 라이브러리가 먼저 조합을
+   * 취소한다(그러지 않으면 조합 글자가 화면에 남는다). 조합 자체를 가로채려면
+   * `ev.isComposing` 을 보고 판단한다. 두 워커 모드에서 똑같이 동작한다 — 키는 언제나
+   * 메인 스레드가 잡는다.
+   */
+  attachCustomKeyEventHandler(handler: ((ev: KeyboardEvent) => boolean) | null): void {
+    this.#customKey = handler;
   }
 
   /** 코어와 렌더를 모두 워커에 두고, 메인은 입력만 잡는다. */
@@ -533,6 +554,47 @@ export class Terminal {
     this.selectStart(m.startRow - top, m.startCol);
     this.selectExtend(m.endRow - top, m.endCol);
     return true;
+  }
+
+  /**
+   * 선택이 있는가. **동기다** — 복사 버튼의 disabled 를 이벤트 핸들러 안에서 바로 정해야 한다.
+   * 마지막 프레임의 값이라 워커 모드에서도 왕복 없이 답한다(한 프레임 뒤처질 수 있다).
+   */
+  hasSelection(): boolean {
+    return this.#prevMeta?.selection != null;
+  }
+  /** 선택 범위(뷰포트 좌표). 없으면 `null`. `hasSelection` 과 같은 프레임을 본다. */
+  getSelectionPosition(): FrameMeta["selection"] {
+    return this.#prevMeta?.selection ?? null;
+  }
+  /** 한 행 안에서 `col` 부터 `length` 칸을 선택한다(xterm.js `select` 와 같은 인자). */
+  select(row: number, col: number, length: number): void {
+    if (length <= 0) return;
+    const b = this.#need();
+    b.selectStart(row, col, false);
+    b.selectExtend(row, col + length - 1); // 코어의 선택은 끝 칸을 포함한다
+  }
+  /** `start` 행부터 `end` 행까지 통째로 선택한다. */
+  selectLines(start: number, end: number): void {
+    const b = this.#need();
+    const [a, z] = start <= end ? [start, end] : [end, start];
+    b.selectStart(a, 0, false);
+    b.selectExtend(z, Math.max(0, this.#size.cols - 1));
+  }
+
+  /**
+   * 화면을 평문으로 뜬다. **스타일·색은 버린다** — 코어 `dumpUtf8` 이 "렌더러가 아니다"라는
+   * 계약이라, xterm.js SerializeAddon 처럼 SGR 을 복원하지 않는다. 화면에 무엇이 쓰여 있는지
+   * 확인하는 용도다(테스트 단언·버그 리포트 첨부).
+   */
+  serialize(): Promise<string> {
+    return this.#need().serialize();
+  }
+
+  /** `write(data + "\r\n")`. */
+  writeln(data: string | Uint8Array): void {
+    this.write(data);
+    this.write("\r\n");
   }
 
   selectStart(row: number, col: number, block = false): void {

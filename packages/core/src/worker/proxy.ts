@@ -202,6 +202,9 @@ export class WorkerBackend implements Backend {
   selectionText(): Promise<string | null> {
     return this.#query("selectionText");
   }
+  serialize(): Promise<string> {
+    return this.#query("serialize");
+  }
   cursorAtPrompt(): Promise<boolean> {
     return this.#query("cursorAtPrompt");
   }

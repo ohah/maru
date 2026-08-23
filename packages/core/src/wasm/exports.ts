@@ -70,6 +70,9 @@ export interface WasmExports {
   vt_take_shell_events(h: number): number;
   vt_cursor_at_prompt(h: number): number;
 
+  /** 화면을 평문으로 떠서 `cells_ptr()` 에 담고 바이트 수 반환. */
+  vt_serialize(h: number): number;
+
   /** `input_ptr()` 의 needle 로 검색. **반환은 총 매치 수**, 버퍼엔 `matches_cap()` 건까지. */
   vt_find(h: number, needleLen: number): number;
   /** 매치 버퍼 — 한 건이 `[startRow, startCol, endRow, endCol]` u32 넷. */

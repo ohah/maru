@@ -128,7 +128,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 화면 직렬화·이미지·마커/장식
+- **없는 것**: 이미지·마커/장식·커스텀 링크 규칙
 - **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
@@ -143,6 +143,17 @@ term.scrollToBottom();
 term.scrollToLine(120);    // 절대 행(0 = 스크롤백 최상단)을 첫 줄에
 term.scrollLines(3);       // 양수가 아래 — 휠 방향
 term.scrollPages(-1);
+```
+
+### 선택·키 가로채기·직렬화
+
+```ts
+copyBtn.disabled = !term.hasSelection();       // 동기 — 핸들러 안에서 바로
+term.select(0, 2, 3);                          // 0행 2열부터 3칸
+term.selectLines(0, 5);
+
+term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "k")); // ⌘K 는 앱이
+await term.serialize();                        // 화면을 평문으로(스타일은 버린다)
 ```
 
 ### OSC 사건 — 정책은 앱이 정한다

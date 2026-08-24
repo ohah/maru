@@ -449,6 +449,11 @@ const Writer = struct {
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const provider_cols = plannedCols(provider, 24);
+        // **셀 폭은 실제 advance 의 내림이다** — measured 텍스트는 셀에 스냅되지 않으므로 이 곱은 열마다
+        // 조금씩 모자란다(기본 JetBrains Mono 14pt: advance 8.4, 셀 8). SCM 파일 행에서는 같은 산술이
+        // 이름과 경로 꼬리를 붙여 버렸다(`scm_dock/view.zig` 의 `measureBudget` 주석이 그 실측을 소유).
+        // 여기서는 아래 `xs` 여백이 그 부족분(제공자 이름 길이 × 1px 미만)보다 커서 아직 겹치지 않는다 —
+        // provider 라벨이 길어지거나 자간이 더 넓은 face 가 오면 같은 결함이 난다.
         const provider_width = @as(u32, provider_cols) * cw;
         const metadata_inset = metrics.card_inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
         const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));

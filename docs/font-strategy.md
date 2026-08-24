@@ -277,6 +277,13 @@ measured 경로도 `font.family`(+`font.fallback` cascade)를 쓴다. 근거는 
 동시에 보인다**는 것이다. 도크가 시스템 UI face(SF)로, 바로 옆 사이드바가 사용자 monospace로
 그려지면 사용자가 고른 폰트를 앱이 절반만 따르는 셈이 된다(사용자 결정 2026-08-08).
 
+**시각 골든도 이 face 로 찍는다.** Chrome Lab 의 도크 시나리오는 2026-08-24 까지 빈 face(system UI,
+비례)로 그렸고, 그래서 커밋된 도크 골든이 전부 **제품이 쓰지 않는 폰트**의 그림이었다 — 라벨의
+advance·말줄임·겹침 축을 하나도 지키지 못했다. face 를 이 절의 결정과 맞추자 실제로 결함이 하나
+드러났다(SCM 파일 행에서 이름과 경로 꼬리가 붙었다 — `scm_dock/view.zig` 의 `measureBudget` 주석이
+그 실측과 수정을 소유한다). 판정자가 제품과 다른 폰트로 그리면 그 판정자는 그 축에 대해 **없는 것과
+같다**.
+
 **이 결정이 바꾸지 않는 것 — Chrome scale의 독립성은 그대로다.**
 
 - `chrome/ui/typography.zig`의 role→pt/weight 토큰은 `font.size`와 무관하게 고정이다.

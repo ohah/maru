@@ -3173,8 +3173,12 @@ pub export fn maru_mobile_atlas_text_px() u32 {
 
 /// 굽는 크기가 바뀌면 **등록부를 비운다** — 그래야 다음 프레임부터 놓친 글자로 올라와 새 크기로
 /// 다시 구워진다. 슬롯 자체는 host 가 덮어쓰므로 여기서 지우는 것은 "어느 글자가 어디 있나" 뿐이다.
+///
+/// **이제 폰트 설정으로는 안 돈다.** 굽는 크기가 셀에서만 파생되므로(`atlas_text_px`), 여기가
+/// 걸리는 것은 host 가 셀 기하를 다르게 넘길 때뿐이다 — 두 플랫폼의 아틀라스가 다를 수 있어
+/// 경로 자체는 남긴다. 이름이 "text size" 였을 때는 설정을 따라간다는 잘못된 신호였다.
 var atlas_baked_px: u32 = 0;
-fn resetAtlasIfTextSizeChanged() void {
+fn resetAtlasIfBakeSizeChanged() void {
     const px = maru_mobile_atlas_text_px();
     if (px == atlas_baked_px) return;
     atlas_baked_px = px;
@@ -5937,7 +5941,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
     // 아틀라스 축출의 시간축. **벽시계(`time_ms`)가 아니라 프레임 순번**이다 — 축출이 판정해야
     // 하는 것은 "몇 초 전"이 아니라 "이번 프레임에 쓰였나"이고, 시계는 테스트에서 멈출 수 있다.
     frame_seq +%= 1;
-    resetAtlasIfTextSizeChanged();
+    resetAtlasIfBakeSizeChanged();
     stepSetFling();
     stepBodyFling();
     if (term_core) |*core| checkLongPress(core);

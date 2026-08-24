@@ -15150,6 +15150,17 @@ pub const AppSession = struct {
                             // 가짜 OID 를 심으면 `git diff` 가 실패해 `N개 파일` 요약이 영영 안 뜬다 — 그 줄을
                             // 캡처로 확인할 방법이 없어진다. 앱이 스스로 `rev-parse` 를 부르지 않는 이유는 그것이
                             // 비동기 배관이라 캡처 시점에 결과가 없기 때문이다(스크립트가 구해서 넘긴다).
+                            //
+                            // ⚠️ **스크립트가 커밋 tree(`HEAD~n^{tree}`)를 빌리는 것은 헤드리스 편의다.**
+                            // 캡처 하니스에는 에이전트가 없어 진짜 턴 스냅샷을 만들 수 없으므로 이미 있는 tree 를
+                            // 쓴다. **제품은 커밋과 무관하다** — `captureTurnSnapshot` 은 임시 index 로
+                            // `read-tree HEAD → add -A → write-tree` 를 돌려 **작업트리**를 굳히므로 커밋하지 않은
+                            // 변경이 그대로 잡힌다(계약 §2.4 가 커밋 0회·스테이징 0회로 실증했고, 그 경로는
+                            // 「턴 스냅샷이 링에 실리고…」 통합 테스트가 실제로 돌린다). tree 는 «그 시점 파일들의
+                            // 내용 스냅샷» 이라 어느 쪽으로 만들었든 diff 계산은 같다 — 그래서 이 빌림이 성립한다.
+                            //
+                            // 캡처 방식 전환(계약 §4.4) 뒤에는 tree 개념이 사라지므로 **이 게이트와 요약 배관이
+                            // 함께 걷힌다** — 그때 파일 수는 우리가 든 그림자 사본에서 바로 나온다.
                             var trees_it: ?std.mem.SplitIterator(u8, .scalar) = if (std.c.getenv("MARU_FORCE_SCM_TURN_TREES")) |raw_trees|
                                 std.mem.splitScalar(u8, std.mem.span(raw_trees), ',')
                             else

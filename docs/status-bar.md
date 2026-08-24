@@ -740,6 +740,9 @@ MARU_FORCE_SCM_TURNS=<n>       # 턴 스냅샷 n개를 심는다. 링은 «이�
 MARU_FORCE_SCM_TURN_TREES=<oid>,<oid>,…  # 그 스냅샷에 **진짜 tree**를 쓴다(오래된 것부터). 가짜 OID 면 `git diff` 가 실패해
                                # `N개 파일` 요약이 영영 안 뜬다 — 앱이 스스로 `rev-parse` 를 부르지 않는 이유는 그것이 비동기라
                                # 캡처 시점에 결과가 없기 때문이다(스크립트가 `git rev-parse HEAD~n^{tree}` 로 구해 넘긴다)
+                               # ⚠️ 커밋 tree 를 빌리는 것은 **헤드리스 편의**다(에이전트가 없어 진짜 스냅샷을 못 만든다).
+                               # 제품은 커밋과 무관하다 — 임시 index 로 작업트리를 `write-tree` 하므로 **커밋하지 않은 변경이
+                               # 그대로 잡힌다**(agent-turn-changes.md §2.4 가 커밋 0회로 실증)
 MARU_FORCE_SCM_TURNS_MISSED=<n> # 「기록하지 못한 턴 N개」 줄을 세운다 — 실제로는 다른 세션의 캡처와 겹쳐야 나는 값이라
                                # 헤드리스로는 재현할 방법이 없다
 MARU_FORCE_SIDEBAR_CARDS=<n>   # 워크스페이스 카드 n개 — 사이드바가 뷰포트를 넘치게(경계를 만든다)

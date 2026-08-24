@@ -14815,7 +14815,34 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
        cleanup 전 runtime·PTY child 생존을 먼저 관측한다.
 - **P5d — SSH packaging/smoke**: PATH와 signed artifact에서 `ssh -t host maru attach ...`가 같은 protocol client를
   실행하는 packaging을 고정하고 localhost sshd smoke를 추가한다. runner에 sshd prerequisite가 없으면 이 slice는
-  미완료다.
+  미완료다. 완료 증거는 아래 세 gate를 모두 요구한다.
+  1. **bundle/PATH:** `macos-app-bundle`이 만든 `Maru.app/Contents/MacOS/maru`가 regular executable이고 symlink가 아니며,
+     bundle을 inside-out 서명한 뒤에도 `codesign --verify --strict --deep`와 CLI 자체의 strict 검증이 모두 성공해야 한다.
+     격리 HOME의 `maru install-cli`가 `~/.local/bin/maru`를 이 exact bundle CLI로 연결하고, login shell이나 저장소 CWD에
+     기대지 않는 최소 원격 PATH(`~/.local/bin:/usr/bin:/bin`)에서 `command -v maru`와 `maru --help`가 같은 inode 대상과
+     public `attach` help를 보여야 한다. PATH 앞에 동명 가짜 실행파일을 둔 행은 그 가짜가 실행됨을 명시적으로 관측해
+     smoke가 절대경로를 몰래 사용하지 않음을 증명하고 실패 행으로 닫는다.
+  2. **localhost sshd product PTY:** harness 소유 임시 host/client key와 고포트 `/usr/sbin/sshd`를 사용하고 사용자
+     `~/.ssh`, known_hosts, Remote Login 설정을 읽거나 수정하지 않는다. 독립 `openpty`에서 제품 `/usr/bin/ssh -tt`를
+     실행해 원격 명령 `env PATH=<isolated-bin> maru attach <runtime-id>`를 그대로 통과시킨다. current 제품 daemon의 실제
+     host-owned PTY runtime에 initial marker가 보이고, SSH PTY 입력이 runtime에 exact once 도달하며, detach chord 뒤
+     ssh/client는 0으로 끝나되 runtime과 child PID는 살아 있어야 한다. 같은 경로의 두 번째 SSH attach가 이전 marker를
+     다시 보고, fixture cleanup에서만 explicit terminate한다. observer는 입력·resize 0, takeover는 기존 P5b3 CAS/revoke
+     의미를 그대로 사용한다. 직접 bundle CLI exec, test-only attach 호출, 일반 `ssh localhost` 설정 재사용은 증거가 아니다.
+  3. **signed release artifact:** Developer ID 경로는 `.app` 안의 GUI·CLI·helper가 동일 TeamIdentifier이고 CLI와 app 모두
+     hardened runtime 서명인지, universal이면 CLI도 `arm64+x86_64`인지 확인한 뒤 위 SSH smoke를 **추출된 artifact의 CLI**로
+     다시 실행한다. 자격증명이 없는 PR에서는 ad-hoc bundle gate를 실행하되 이 release 행을 skip/pass로 세탁하지 않고
+     `not_provisioned`로 기록한다. release workflow의 provisioned runner에서 이 행이 green이 되기 전에는 P5d 완료나
+     signed 배포 호환을 주장하지 않는다. 어느 gate든 timeout artifact에 sshd/ssh/host/runtime PID, 선택된 `maru` 절대경로,
+     signature kind·identifier·TeamIdentifier, child/fd/socket 정산을 남기며 모든 harness-owned process를 유계 reap한다.
+
+  현재 구현은 `zig build test-session-host-p5d -Doptimize=Debug -j1`이 ad-hoc `Maru.app`의 bundle/PATH gate와
+  harness-owned localhost sshd 제품 PTY gate를 실행한다. `tools/session-host/p5d_ssh_smoke.sh`는 사용자 SSH 상태를
+  읽지 않고 임시 key/config/known-host policy만 사용하며, 기존 P5c3d 제품 오라클을 `MARU_SESSION_HOST_ATTACH_EXE`의
+  `/usr/bin/ssh -tt` 경로로 다시 구동한다. 배포 스크립트는 Developer ID inside-out 서명 직후
+  `test-session-host-p5d-artifact`를 실행해 동일 TeamIdentifier·hardened runtime·universal CLI를 확인하고 같은 SSH
+  제품 gate를 재실행한다. 자격증명 없는 ad-hoc 경로에 `MARU_P5D_REQUIRE_DEVELOPER_ID=1`을 주면 authority 검사에서
+  fail-close하며, 실제 provisioned release workflow green 전까지 P5d 상태는 부분 구현이다.
 
 P5a1→P5d는 각각 이전 slice gate를 재실행하는 독립 PR이며 한 PR에서 묶어 완료 처리하지 않는다.
 

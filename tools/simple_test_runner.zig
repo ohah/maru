@@ -24,20 +24,35 @@ var log_err_count: std.atomic.Value(usize) = .init(0);
 var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
-fn expectedTestCount(args: std.process.Args) ?usize {
+fn optionValue(args: std.process.Args, prefix: []const u8) ?usize {
     // windows/wasi는 인자 이터레이션 모델이 달라 이 옵션을 읽지 않는다. `comptime if (...) return null;`로 쓰면
     // 조건이 참인 타깃(=windows)에서 "comptime에 return 불가"로 **컴파일이 깨진다** — macOS에선 조건이 거짓이라
     // 본문이 평가되지 않아 드러나지 않던 Windows 전용 결함이었다. 조건이 comptime-known이라 평범한 if로도 폴딩된다.
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return null;
     var iterator = std.process.Args.Iterator.init(args);
     _ = iterator.next();
-    const prefix = "--maru-expect-tests=";
     while (iterator.next()) |arg_z| {
         const arg: []const u8 = arg_z;
         if (!std.mem.startsWith(u8, arg, prefix)) continue;
         return std.fmt.parseInt(usize, arg[prefix.len..], 10) catch std.process.exit(1);
     }
     return null;
+}
+
+/// 이 바이너리에 **컴파일된** 테스트 수(필터가 몇 개를 골랐는가).
+fn expectedTestCount(args: std.process.Args) ?usize {
+    return optionValue(args, "--maru-expect-tests=");
+}
+
+/// 실제로 **통과한** 테스트 수. `--maru-expect-tests` 와 다른 질문에 답한다 —
+/// 그쪽은 「골라졌는가」이고 이쪽은 「돌았는가」다.
+///
+/// **왜 둘 다 필요한가**: `error.SkipZigTest` 로 나간 행도 컴파일된 수에는 든다. 그래서 env 로 건너뛰는
+/// 행(프로세스 전역을 흔들어 aggregate 에서 빼는 부류)이 있는 게이트에서는, 그 env 가 실수로 켜지면
+/// **증거가 0 인데 초록**이 된다. 그 실패 모드는 「없어진 것」과 「원래 없던 것」을 구분할 수 없어 가장
+/// 나쁘다 — 그래서 개수를 세는 쪽으로 답한다.
+fn expectedPassedCount(args: std.process.Args) ?usize {
+    return optionValue(args, "--maru-expect-passed=");
 }
 
 pub fn main(init: std.process.Init.Minimal) void {
@@ -129,6 +144,17 @@ pub fn main(init: std.process.Init.Minimal) void {
     if (logged_errors != 0) std.debug.print("{d} errors were logged.\n", .{logged_errors});
     if (leaked_count != 0) std.debug.print("{d} tests leaked memory.\n", .{leaked_count});
     if (failed_count != 0 or leaked_count != 0 or logged_errors != 0) std.process.exit(1);
+    // **돌았는지도 센다.** 위 실패 판정은 SKIP 을 통과로 흘려보내므로, 그것만으로는 «증거가 만들어졌는가»
+    // 에 답하지 못한다(`expectedPassedCount` 주석).
+    if (expectedPassedCount(init.args)) |expected_passed| {
+        if (passed_count != expected_passed) {
+            std.debug.print(
+                "focused test evidence mismatch: expected {d} passed, got {d} passed / {d} skipped\n",
+                .{ expected_passed, passed_count, skipped_count },
+            );
+            std.process.exit(1);
+        }
+    }
     // 모든 test-local defer와 progress 정산 뒤에는 C runtime 종료 hook이
     // aggregate의 검증 결과를 다시 바꾸지 못하도록 확정된 status를 게시한다.
     switch (builtin.os.tag) {

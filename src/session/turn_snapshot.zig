@@ -51,6 +51,12 @@ pub const Ring = struct {
     /// 어긋나 **내용이 틀린 턴**이 되고, 그것은 없는 것보다 나쁘다. 대신 **몇 개를 놓쳤는지 화면이
     /// 말한다**(한계를 숨기지 않는다 — project-rules.md).
     missed: u32 = 0,
+    /// **이 세션의 이전 기록이 축출로 사라졌다.** 밀려난 세션이 턴을 더 돌려 맵에 다시 들어오면 링이
+    /// 빈 채로 새로 서는데, 그 사실을 여기 싣지 않으면 화면은 새 턴 몇 개를 **전부인 것처럼** 보인다.
+    ///
+    /// `missed` 와 같은 규율이다 — 그쪽이 「목록이 비어 있든 아니든 말한다」인 것과 같은 이유로, 이 값도
+    /// 목록이 찬 뒤까지 남는다. 한 번 서면 그 세션이 사는 동안 안 내린다(되찾은 기록이 없으므로).
+    history_evicted: bool = false,
     /// 다음에 덮어쓸 자리(가득 찼을 때).
     next: usize = 0,
 
@@ -232,7 +238,7 @@ pub const RingMap = struct {
 
     /// 밀려난 세션의 **신원만** 담는 자리. 링은 담지 않는다 — 기록을 되살릴 수는 없고, 되살릴 수 없다는
     /// 사실을 말할 수만 있다.
-    pub const Id = struct {
+    const Id = struct {
         buf: [max_session_id_len]u8 = undefined,
         len: usize = 0,
 
@@ -265,7 +271,10 @@ pub const RingMap = struct {
             // **저장소가 바뀌었으면 그 세션의 링만 비운다.** 경로가 상한을 넘어 기억하지 못한 경우
             // (`repo_len == 0`)는 비교할 근거가 없으므로 건드리지 않는다.
             if (e.repo_len != 0 and repo.len != 0 and !std.mem.eql(u8, e.repoPath(), repo)) {
-                e.ring = .{};
+                // 링은 비우되 **밀렸다는 사실은 남긴다** — 그 손실은 저장소와 무관하고, 여기서 지우면
+                // `cd` 한 번에 화면이 다시 조용해진다.
+                const evicted_before = e.ring.history_evicted;
+                e.ring = .{ .history_evicted = evicted_before };
                 e.repo_len = 0;
             }
             if (e.repo_len == 0) setRepo(e, repo);
@@ -274,12 +283,14 @@ pub const RingMap = struct {
         const slot = self.victim();
         // **덮기 전에** 자취를 남긴다 — 슬롯을 덮고 나면 그 세션이 여기 있었다는 사실을 아는 자리가 없다.
         if (slot.used != 0) self.noteEvicted(slot.sessionId());
+        // 전에 밀렸던 신원이 다시 들어왔다 — 자취는 **지우고 그 사실은 링으로 옮긴다**. 자취를 남겨 두면
+        // 화면이 「밀려났다」와 「지금 여기 있다」를 동시에 말하고, 그냥 지우면 새 턴이 쌓인 뒤 잃은
+        // 기록을 **영영 말하지 못한다**(`Ring.history_evicted`).
+        const returning = self.forgetEvicted(session_id);
         slot.* = .{ .id_len = session_id.len, .used = self.tick };
         @memcpy(slot.id[0..session_id.len], session_id);
         setRepo(slot, repo);
-        // 전에 밀렸던 신원이 다시 들어왔다 — 자취를 지운다. 남겨 두면 화면이 「밀려났다」와 「지금 여기
-        // 있다」를 동시에 말한다.
-        self.forgetEvicted(session_id);
+        slot.ring.history_evicted = returning;
         return &slot.ring;
     }
 
@@ -369,10 +380,11 @@ pub const RingMap = struct {
         self.evicted_next = (self.evicted_next + 1) % max_evicted;
     }
 
-    /// 그 신원이 다시 들어왔다 — 자취를 지운다.
-    fn forgetEvicted(self: *RingMap, session_id: []const u8) void {
-        const i = self.evictedIndex(session_id) orelse return;
+    /// 그 신원의 자취를 지우고 **있었는지**를 답한다. 호출자가 그 사실을 새 링으로 옮긴다.
+    fn forgetEvicted(self: *RingMap, session_id: []const u8) bool {
+        const i = self.evictedIndex(session_id) orelse return false;
         self.evicted[i].len = 0;
+        return true;
     }
 
     fn evictedIndex(self: *const RingMap, session_id: []const u8) ?usize {
@@ -692,9 +704,37 @@ test "세션 맵: 밀렸던 세션이 다시 들어오면 자취를 지운다" {
     _ = map.ringFor("newcomer", "/repo").?; // `s0` 이 밀린다
     try std.testing.expect(map.wasEvicted("s0"));
 
-    _ = map.ringFor("s0", "/repo").?; // 그 세션이 턴을 하나 더 돌렸다
+    const back = map.ringFor("s0", "/repo").?; // 그 세션이 턴을 하나 더 돌렸다
     try std.testing.expect(map.find("s0") != null);
     try std.testing.expect(!map.wasEvicted("s0")); // 「밀려났다」와 「지금 여기 있다」를 동시에 말하지 않는다
+    // **자취는 지우되 사실은 링으로 옮긴다.** 안 옮기면 새 턴이 쌓인 뒤 잃은 기록을 영영 말하지 못한다.
+    try std.testing.expect(back.history_evicted);
+
+    back.push("tree", 1, 100, 1); // 목록이 다시 차도 그 사실은 안 내린다
+    try std.testing.expect(map.find("s0").?.history_evicted);
+}
+
+test "세션 맵: 한 번도 안 밀린 세션의 링은 «밀렸다» 고 말하지 않는다" {
+    var map: RingMap = .{};
+    const fresh = map.ringFor("only", "/repo").?;
+    try std.testing.expect(!fresh.history_evicted);
+}
+
+test "세션 맵: 저장소를 옮겨 링을 비워도 «밀렸다» 는 남는다" {
+    var map: RingMap = .{};
+    var i: usize = 0;
+    while (i < max_sessions) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        _ = map.ringFor(std.fmt.bufPrint(&buf, "s{d}", .{i}) catch unreachable, "/repo").?;
+    }
+    _ = map.ringFor("newcomer", "/repo").?; // `s0` 이 밀린다
+    const back = map.ringFor("s0", "/repo").?;
+    back.push("tree", 1, 100, 1);
+    try std.testing.expect(back.history_evicted);
+
+    const moved = map.ringFor("s0", "/other").?; // 그 세션이 `cd` 했다
+    try std.testing.expectEqual(@as(usize, 0), moved.len); // 링은 비운다(기존 계약)
+    try std.testing.expect(moved.history_evicted); // 손실은 저장소와 무관하다 — `cd` 로 조용해지지 않는다
 }
 
 test "세션 맵: 자취도 상한이 있다(가장 오래된 자취부터 잊는다)" {

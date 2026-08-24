@@ -59000,6 +59000,45 @@ test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)
     // 세션이 하나면 에이전트 자리에 번호가 붙지 않는다(구분할 것이 없다).
 }
 
+test "에이전트 탭: 밀려난 세션은 «관측한 턴이 없다» 가 아니라 «밀려났다» 고 말한다" {
+    // 맵 상한을 넘겨 버려진 세션에 「이번 실행에서 관측한 턴이 없다」고 하면, **있었던 기록을 없었던
+    // 것처럼** 만든다(적대적 검증 5회차). `/clear` 가 새 신원을 발급하므로 흔한 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+    scm_dock_ops.selectScmTab(session, .agent);
+    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1); // 활성 Term 에 신원을 심고 턴 하나
+
+    // 다른 세션 신원으로 맵을 채워 활성 세션을 밀어낸다.
+    var i: usize = 0;
+    while (i < maru.session.turn_snapshot.max_sessions) : (i += 1) {
+        var buf: [16]u8 = undefined;
+        _ = session.turn_rings.ringFor(std.fmt.bufPrint(&buf, "other-{d}", .{i}) catch unreachable, "").?;
+    }
+    try std.testing.expect(session.turn_rings.find(test_turn_session) == null);
+
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_turns_evicted), projection.items[0].notice);
+    }
+
+    // **돌아온 뒤에도 말한다.** 새 턴이 목록을 채우면 그 몇 개가 전부인 것처럼 보이기 때문이다
+    // (`Ring.history_evicted` — `missed` 와 같은 규율).
+    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
+    {
+        const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_turns_evicted), projection.items[0].notice);
+        try std.testing.expect(projection.items.len > 1); // 고지가 목록을 **대신하지 않는다**
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_turn_live), projection.items[1].turn.title);
+    }
+}
+
 test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 온다 (P5)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

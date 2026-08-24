@@ -47,27 +47,22 @@ const cell_height_px: u32 = 16;
 /// **fallback을 제품 기본값에서 가져온다.** Lab이 자체 상수를 들면 캡처가 제품을 예고하지 못한다 —
 /// 실제로 이 함수가 빈 face를 넘기던 동안 모든 편집기 캡처가 비례 폰트 렌더였고, 그 위에서 세운
 /// 가설들이 틀렸다. `FontConfig{}`의 기본값을 그대로 읽어 단일 출처를 유지한다.
-fn editorFaceFor(id: lab.ScenarioId, variant: FontVariant) system_text.Face {
-    return switch (id) {
-        .editor_gutter,
-        .editor_scrolled,
-        .editor_font_large,
-        .editor_hazard,
-        .editor_wide_glyph,
-        .editor_wrap,
-        .editor_hscroll,
-        .editor_folded,
-        .editor_wrap_scrolled,
-        .editor_wrap_stale_scroll,
-        .editor_real_file,
-        .editor_selection,
-        .editor_find,
-        .editor_diff_selection,
-        .editor_diff,
-        .editor_diff_scrolled,
-        => .{ .family = variant.family(), .fallback = (maru.config.theme.FontConfig{}).fallback },
-        else => .{},
-    };
+/// 이 시나리오가 measured chrome 텍스트를 그릴 face.
+///
+/// **모든 시나리오가 같은 답을 쓴다 — 번들 등폭 폰트다.** measured chrome text 의 face 단일 출처는
+/// [font-strategy.md](../../../docs/font-strategy.md) "Chrome 텍스트 face" 이고, 그 절은 도크도
+/// `font.family`(사용자 폰트)를 쓴다고 정한다(사용자 결정 2026-08-08 — 도크가 시스템 UI face 인데
+/// 옆 사이드바가 사용자 monospace 면 앱이 폰트 설정을 절반만 따르는 셈이다). 세 도크의 배선이 실제로
+/// 그렇다(`file_tree_dock`·`scm_dock`·`agent_dock` 이 모두 `self.appearance.font.family` 를 넘긴다).
+///
+/// **2026-08-24 까지 도크 시나리오만 빈 face(system UI, 비례)였다.** 그래서 커밋된 도크 골든이 전부
+/// 제품이 쓰지 않는 폰트로 찍혀 있었고, 라벨의 advance·말줄임·겹침 축을 **하나도 증언하지 못했다**.
+/// 제품 캡처(등폭)와 Lab 캡처(비례)를 나란히 놓고서야 드러났다. 이 함수가 그 간극을 닫는다.
+///
+/// 번들 TTF 라 설치 환경에 흔들리지 않고, 기본 설정의 family 와도 같다(`config.theme` 의 기본값이
+/// "JetBrains Mono" 다) — 즉 이 face 가 곧 **기본 설정 사용자가 보는 화면**이다.
+fn faceFor(variant: FontVariant) system_text.Face {
+    return .{ .family = variant.family(), .fallback = (maru.config.theme.FontConfig{}).fallback };
 }
 
 /// 이 시나리오의 배경 quad가 실릴 합성 층.
@@ -457,24 +452,11 @@ pub fn main(init: std.process.Init) !void {
         frame.draws.ops,
         &tokens,
         cell.w,
-        // **편집기 시나리오는 등폭 face를 명시한다.** 빈 face(system UI)는 등폭이 아니라
-        // advance가 글자마다 다르고(실측 5.95~8.29px) 코드 리거처도 없다 — 그 상태의 캡처는
-        // 제품 편집기를 예고하지 못한다. 저장소에 번들된 폰트라 설치 환경에 흔들리지 않는다.
+        // **모든 시나리오가 등폭 face를 쓴다**(제품과 같은 `font.family` — `faceFor` 주석이 근거를
+        // 소유한다). 빈 face(system UI)는 등폭이 아니라 advance가 글자마다 다르고(실측 5.95~8.29px)
+        // 코드 리거처도 없다 — 그 상태의 캡처는 제품을 예고하지 못한다.
         //
-        // 도크 시나리오는 빈 face(system UI)를 유지한다 — 커밋된 골든이 전부 그 전제로 잡혀 있다.
-        //
-        // **그런데 제품은 그렇게 그리지 않는다.** measured chrome text 의 face 단일 출처는
-        // docs/font-strategy.md "Chrome 텍스트 face" 이고, 그 절은 도크도 `font.family`(사용자
-        // 폰트)를 쓴다고 정한다(사용자 결정 2026-08-08 — 도크가 SF 인데 옆 사이드바가 monospace 면
-        // 폰트 설정을 절반만 따르는 셈이다). 세 도크의 배선이 실제로 그렇다(`file_tree_dock`·
-        // `scm_dock`·`agent_dock` 이 모두 `self.appearance.font.family` 를 넘긴다).
-        //
-        // 그래서 **도크 골든은 face 축을 증언하지 못한다** — 라벨의 advance·말줄임·clip 이 제품의
-        // 등폭 face 에서 어떻게 되는지는 이 캡처가 보여 주는 그림과 다르다. 옛 주석은 여기가 맞다고
-        // 적고 있었는데 그것은 위 단일 출처와 반대였다(2026-08-24 확인 — 제품 캡처는 등폭, Lab 은
-        // 비례였다). 이 간극을 닫으려면 도크 시나리오의 face 를 번들 폰트로 바꾸고 **모든 도크
-        // 골든을 다시 떠야** 하므로 별도 슬라이스다.
-        editorFaceFor(scenario_id, font_variant),
+        faceFor(font_variant),
         // Lab fixture는 1× 논리 스케일로 고정한다(viewport·cell 크기가 그 전제로 잡혀 있다).
         1000,
     );

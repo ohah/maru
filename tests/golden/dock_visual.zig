@@ -200,10 +200,8 @@ const cases = [_]Case{
     //
     // 트리 폭은 260(제품 도크 폭)이고 행 높이는 26 이다 — crop 의 y 는 그 배수다.
     //
-    // **face 는 제품과 다르다.** Lab 의 도크 시나리오는 빈 face(system UI, 비례)로 그리는데 제품 도크는
-    // 사용자 `font.family`(보통 등폭)를 쓴다(docs/font-strategy.md "Chrome 텍스트 face"). 그래서 아래
-    // crop 들이 고정하는 것은 **배치·색·상태**이고, 라벨의 advance·말줄임 같은 face 축은 아니다.
-    // 그 간극은 모든 도크 골든이 함께 갖고 있다(`chrome_lab_smoke.zig` 의 face 주석이 소유).
+    // face 는 이제 제품과 같다(번들 등폭 — `chrome_lab_smoke.zig` 의 `faceFor`). 그 전에는 도크만 비례
+    // UI face 였고, 그래서 이 골든들이 라벨의 advance·말줄임·겹침을 **하나도 증언하지 못했다**.
     .{
         .name = "file-tree-selection-band",
         .capture = "file-tree-rows.ppm",

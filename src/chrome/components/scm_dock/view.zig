@@ -863,11 +863,26 @@ const Writer = struct {
         }
     }
 
-    /// 글자 하나의 대략 폭. **정확한 advance는 backend가 안다** — 여기서는 경로를 이름 뒤에 놓기 위한
-    /// 보수적 추정만 하고, 겹치면 backend의 `max_width_px` 예산이 자른다.
+    /// 글자 하나의 대략 폭. **정확한 advance는 backend가 안다** — 여기서는 무언가를 그 글자 **뒤에**
+    /// 놓기 위한 보수적 상한만 낸다.
+    ///
+    /// **열당 1px 을 더한다.** `cell_width_px` 는 실제 advance 의 **내림**이다(정수 셀 격자 — 예: 기본
+    /// JetBrains Mono 14pt 는 8.4px 인데 셀은 8 이다). 그런데 measured chrome 텍스트는 셀에 스냅되지 않고
+    /// 그 8.4px 로 그려지므로, `cols * cell` 은 **모자란다** — 열이 늘수록 벌어져서 파일 행에서는 이름과
+    /// 경로 꼬리 사이의 틈이 0 이 됐다(`staged.zigsrc/session/` 처럼 붙어 읽힌다). 옛 주석은 이 값을
+    /// "보수적"이라고 적었는데 방향이 반대였고, Lab 이 도크를 **비례 폰트**로 그리던 동안에는 추정이
+    /// 남아돌아 골든에도 안 보였다(2026-08-24, face 를 제품과 맞추면서 드러났다).
+    ///
+    /// `cell = floor(advance)` 이므로 `advance < cell + 1` 이고, 열당 1px 상한은 **어떤 등폭 face 에서도**
+    /// 겹치지 않는다. 과잉 확보는 열당 최대 1px 이다(10 글자면 6px 남짓 — 틈이 조금 넓어질 뿐이다).
+    /// 정확한 값을 쓰려면 backend 가 실제 advance 를 넘겨야 하는데, 지금 ABI(`CellMetricsResult`)는 정수
+    /// 셀만 준다 — 그 확장은 별도 슬라이스다.
+    ///
+    /// **caret·선택 기하(`colWidth`)에는 이 보정을 넣지 않는다.** 그쪽은 플랫폼 배치와 **같은 자**를
+    /// 써야 글자 위에 정확히 앉는다 — 여기 상한을 그쪽에 쓰면 커서가 글자에서 밀린다.
     fn measureBudget(self: *Writer, source: []const u8) f32 {
         const cols = text_layout.displayCols(source, null);
-        return @floatFromInt(cols * self.cell_width_px);
+        return @floatFromInt(cols * (self.cell_width_px + 1));
     }
 
     /// 행 안의 한 줄. **행 높이 안에서 세로 중앙**이다 — 목록 rect처럼 큰 상자에서 부르면 글자가

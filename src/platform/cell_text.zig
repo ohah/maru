@@ -10,9 +10,11 @@
 //! CoreText를 한 번도 안 부르고 `src/main.zig`의 **Windows 스모크**가 그 macOS 파일을 직접 import하고
 //! 있었다. macOS 제품 트리가 typed component로 옮겨 간 뒤(FT1·FT2) 그 파일에 남을 이유가 사라졌다.
 //!
-//! **지금 소비자**: `maru win32-file-tree-draw-smoke`(Windows에서 행을 픽셀까지 내리는 유일한 경로).
-//! macOS는 이 투영을 쓰지 않는다 — 그 사실을 `tests/boundary/imports.zig`가 센다. `appendEllipsizedTitle`
-//! 은 `coretext_frame_builder`가 계속 쓰므로(탭·사이드바·상태바 등 23곳) 여기서 pub으로 낸다.
+//! **지금 소비자**: Windows다. 제품 터미널이 도크 트리를 이것으로 그리고(W8.7a2 — `runWin32Terminal` →
+//! `rebuildDockAll` → `buildDockTreeFrame`), 같은 투영을 `maru win32-file-tree-draw-smoke`가 픽셀까지
+//! 확인한다. macOS는 이 투영을 쓰지 않는다 — 그 사실을 `tests/boundary/imports.zig`가 센다.
+//! `appendEllipsizedTitle`은 `coretext_frame_builder`가 계속 쓰므로(탭·사이드바·상태바 등 23곳) 여기서
+//! pub으로 낸다.
 
 // **모듈 안쪽 파일이라 상대 경로로 든다.** `maru.zig` 가 이 파일을 내보내므로 `@import("maru")` 는
 // 자기 자신을 부르는 꼴이 된다(모듈 안에서는 그 이름이 없다).
@@ -121,11 +123,11 @@ pub const FileTreeSelectionPaint = struct {
     foreground: terminal.Color,
 };
 
-/// 파일 탐색기 행의 **셀 격자 투영 — 지금은 Windows 스모크 하나만 쓴다**(FT3).
+/// 파일 탐색기 행의 **셀 격자 투영 — Windows 의 렌더 경로다**(FT3).
 ///
-/// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 이 함수가 남아 있는 이유는 하나다:
-/// `maru win32-file-tree-draw-smoke` 가 Windows 에서 행을 픽셀까지 내리는 유일한 경로이고, Windows 에는
-/// `ChromeDraw` 를 셀로 낮추는 층이 아직 없다.
+/// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 이 함수가 남아 있는 이유는 **Windows 제품이
+/// 도크 트리를 이것으로 그리기 때문**이다(W8.7a2). Windows 에는 `ChromeDraw` 를 셀로 낮추는 층이 아직
+/// 없어 컴포넌트 경로를 못 탄다 — 그 층이 생기기 전까지 이것이 그 플랫폼의 유일한 길이다.
 ///
 /// **왜 중립 모듈로 못 옮기는가**(FT3 에서 실제로 시도하고 접은 이유 — 계획 문서 §4 FT3):
 /// 이 투영은 `chrome`(분류·말줄임 규칙)과 `renderer`(DrawCell)를 **함께** 필요로 하는데,

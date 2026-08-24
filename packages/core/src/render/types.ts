@@ -20,6 +20,11 @@ export interface RenderOptions {
   preedit?: string;
   /** 커서 깜빡임의 현재 위상. false면 커서를 그리지 않는다. */
   blinkOn?: boolean;
+  /**
+   * 이 프레임에 얹을 장식(뷰포트 좌표로 이미 접혀 있다). 배경은 셀 배경 **뒤**, 선택 **앞**에
+   * 깔린다 — 선택이 장식을 덮어야 사용자가 지금 무엇을 잡았는지 헷갈리지 않는다.
+   */
+  decorations?: import("../decoration").DecorationSpan[];
 }
 
 /** 코어가 계산해 주는 글리프 커버리지. 폰트 없이 셀을 꽉 채우는 선을 얻는다. */

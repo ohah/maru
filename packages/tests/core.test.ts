@@ -628,6 +628,73 @@ test("writeln은 CRLF를 붙인다", async () => {
   term.dispose();
 });
 
+test("마커는 스크롤백이 버려지는 만큼 따라 내려온다", async () => {
+  // 절대 행은 스크롤백이 가득 차면 앞으로 밀린다 — 같은 줄이 10행이었다가 7행이 된다(실측).
+  // 코어는 selection 을 스스로 보정하지만 라이브러리가 든 좌표는 그럴 수 없다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.setOptions({ scrollback: 30 });
+  for (let i = 0; i < 10; i++) term.write(`pad ${i}\r\n`);
+  term.write("KEEPME\r\n");
+  await settle();
+
+  const at = (await term.findMatches("KEEPME")).matches[0]!.startRow;
+  const marker = term.registerMarker(at);
+  expect(marker.row).toBe(at);
+
+  for (let i = 0; i < 25; i++) term.write(`more ${i}\r\n`);
+  await settle();
+
+  const now = (await term.findMatches("KEEPME")).matches[0]!.startRow;
+  expect(now).toBeLessThan(at); // 실제로 밀렸다
+  expect(marker.row).toBe(now); // 마커가 따라왔다
+  term.dispose();
+});
+
+test("가리키던 줄이 버려지면 마커와 장식이 함께 사라진다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.setOptions({ scrollback: 10 });
+  term.write("GONE\r\n");
+  await settle();
+
+  const marker = term.registerMarker(0);
+  const deco = term.registerDecoration({ marker, backgroundColor: 0xff0000 })!;
+  expect(deco).not.toBeNull();
+  let disposed = false;
+  marker.onDispose(() => {
+    disposed = true;
+  });
+
+  for (let i = 0; i < 40; i++) term.write(`push ${i}\r\n`);
+  await settle();
+
+  expect(disposed).toBe(true);
+  expect(marker.isDisposed).toBe(true);
+  expect(marker.row).toBe(-1); // 없어진 줄을 계속 가리키지 않는다
+  expect(deco.isDisposed).toBe(true); // 장식도 함께
+  term.dispose();
+});
+
+test("registerMarker는 인자가 없으면 커서 줄을 가리킨다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  for (let i = 0; i < 6; i++) term.write(`line ${i}\r\n`);
+  await settle();
+
+  const f = term.frame!;
+  const cursorAbs = f.scroll.length - f.scroll.offset + f.cursor.row;
+  expect(term.registerMarker().row).toBe(cursorAbs);
+  term.dispose();
+});
+
+test("마커가 없으면 장식을 만들 수 없다", async () => {
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.write("x");
+  await settle();
+  const marker = term.registerMarker(0);
+  marker.dispose();
+  expect(term.registerDecoration({ marker, backgroundColor: 0x00ff00 })).toBeNull();
+  term.dispose();
+});
+
 test("alt screen에서 clear는 무동작이다", async () => {
   // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
   // 계약 §7 의 세 번째 조항.

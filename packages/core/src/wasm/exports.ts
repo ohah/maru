@@ -50,6 +50,8 @@ export interface WasmExports {
   vt_view_offset(h: number): number;
   /** 스크롤백에 쌓인 행 수 = `vt_view_offset` 의 최대값. */
   vt_scrollback_len(h: number): number;
+  /** 버려진 행의 누적 수. 마커가 절대 행을 보정하는 데 쓴다. */
+  vt_evicted_total(h: number): number;
   /** 화면을 지운다. 반환 1은 셸에 `\x0c`(^L)를 보내야 한다는 뜻. */
   vt_clear(h: number): number;
 

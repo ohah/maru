@@ -1,5 +1,11 @@
 import { LocalBackend } from "./backend/local";
 import type { FindResult, ShellEvent } from "./backend/types";
+import {
+  type Decoration,
+  type DecorationOptions,
+  DecorationStore,
+  type Marker,
+} from "./decoration";
 import type { GlyphSource } from "./render/types";
 import { loadBundledFont } from "./font";
 import { attachDom, type DomHost } from "./dom/attach";
@@ -92,6 +98,8 @@ export class Terminal {
   /** 직전 프레임 — 상태 이벤트는 여기서 파생한다(셀은 없으므로 들고 있어도 가볍다). */
   #prevMeta: FrameMeta | null = null;
   #customKey: ((ev: KeyboardEvent) => boolean) | null = null;
+  readonly #decorations = new DecorationStore();
+  #decorationsWired = false;
 
   constructor(opts: TerminalOptions = {}) {
     this.#opts = { ...opts };
@@ -360,6 +368,7 @@ export class Terminal {
           cursor: e.frame.cursor,
           selection: e.frame.selection,
           scroll: e.frame.scroll,
+          evicted: e.frame.evicted,
         });
         break;
     }
@@ -377,6 +386,9 @@ export class Terminal {
   #publishFrame(meta: FrameMeta): void {
     const prev = this.#prevMeta;
     this.#prevMeta = meta;
+    // **마커를 먼저 보정한다.** 버려진 줄만큼 당기지 않으면 장식이 엉뚱한 줄에 그려진다.
+    this.#decorations.sync(meta.evicted);
+    this.#pushDecorations(meta);
     if (prev) {
       // **위치만 본다.** shape·visible 은 깜빡임으로 매 프레임 토글되므로 이동으로 오해하면 안 된다.
       if (prev.cursor.row !== meta.cursor.row || prev.cursor.col !== meta.cursor.col) {
@@ -390,6 +402,50 @@ export class Terminal {
       }
     }
     this.#render.emit(meta);
+  }
+
+  /** 이 프레임에 걸리는 장식을 렌더 소유자에게 넘긴다(두 모드 모두). */
+  #pushDecorations(meta: FrameMeta): void {
+    const spans = this.#decorations.spansFor(meta.scroll, meta.size.cols, meta.size.rows);
+    this.#dom?.setDecorations?.(spans);
+    (this.#backend as { setDecorations?: (s: unknown[]) => void } | null)?.setDecorations?.(spans);
+  }
+
+  /**
+   * 버퍼의 한 줄을 가리키는 안정적인 참조를 만든다. 인자는 **절대 행**(0 = 스크롤백 최상단)
+   * 이고, 생략하면 커서가 있는 줄이다.
+   *
+   * 스크롤백이 가득 차 그 줄이 버려지면 마커는 **스스로 dispose 된다**.
+   */
+  registerMarker(row?: number): Marker {
+    const m = this.#prevMeta;
+    const abs = row ?? (m ? m.scroll.length - m.scroll.offset + m.cursor.row : this.#size.rows - 1);
+    return this.#decorations.createMarker(Math.max(0, Math.trunc(abs)));
+  }
+
+  /**
+   * 마커 줄에 색을 얹는다. 마커가 사라지면 장식도 함께 사라진다.
+   *
+   * **DOM element 를 주지 않는다** — 렌더가 워커에 있을 수 있고, 검색 하이라이트처럼 수천 개가
+   * 되는 용도가 주력이라 노드마다 DOM 을 만들면 감당이 안 된다. 커스텀 UI 가 필요하면
+   * `onRender` 로 자기 오버레이를 그린다.
+   */
+  registerDecoration(opts: DecorationOptions): Decoration | null {
+    if (!this.#decorationsWired) {
+      // 장식이 사라지면 화면에서도 걷는다 — 안 그러면 dispose 한 하이라이트가 남는다.
+      this.#decorations.onChange(() => this.#refreshDecorations());
+      this.#decorationsWired = true;
+    }
+    const d = this.#decorations.createDecoration(opts);
+    // **등록 직후 한 번 밀어 준다.** 프레임 발행 때만 보내면 다음 출력이 있을 때까지 화면에
+    // 나타나지 않는다 — 조용한 지연이라 "장식이 안 된다"로 보인다(실측: 메인 모드에서 0px).
+    if (d && this.#prevMeta) this.#pushDecorations(this.#prevMeta);
+    return d;
+  }
+
+  /** 장식을 지우고 화면에서도 즉시 걷는다. `Decoration.dispose()` 와 짝이다. */
+  #refreshDecorations(): void {
+    if (this.#prevMeta) this.#pushDecorations(this.#prevMeta);
   }
 
   #need(): Backend {
@@ -819,6 +875,7 @@ export class Terminal {
     this.#resizeObserver = null;
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#decorations.dispose();
     this.#dom?.dispose();
     this.#dom = null;
     this.#backend?.dispose();

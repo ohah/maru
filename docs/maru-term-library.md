@@ -270,6 +270,27 @@ term.onClipboardRead((target) => {
   받는다. `0xffff_ffff` 를 "없음"으로 쓰면 그건 `@bitCast(@as(i32, -1))` 과 같은 비트라
   **종료 코드 -1 이 "없음"으로 보고된다**(실측). 값 공간과 표식 공간이 겹치면 언젠가 부딪힌다.
 
+### 마커와 장식
+
+```ts
+const marker = term.registerMarker(absRow);   // 생략하면 커서 줄
+term.registerDecoration({ marker, x, width, backgroundColor: 0xffd700, opacity: 0.35 });
+```
+
+**마커는 버려진 줄만큼 따라 내려온다.** 절대 행은 스크롤백이 가득 차 오래된 줄이 버려질 때
+앞으로 밀린다 — 같은 줄이 10행이었다가 7행이 된다(실측). 코어는 selection·kitty placement 를
+스스로 보정하지만 라이브러리가 든 좌표는 그럴 수 없어, 프레임이 싣는 `evicted`(버려진 행의
+누적 수)로 보정한다. **가리키던 줄이 버려지면 마커는 스스로 dispose 되고**(그때 `row` 는 -1),
+그 마커에 달린 장식도 함께 사라진다.
+
+**DOM element 를 주지 않는다** — xterm.js 는 장식마다 `<div>` 를 얹어 소비자가 스타일링하게
+하지만 여기서는 두 가지가 막는다: (1) 렌더가 워커에 있을 수 있어 DOM 을 만질 수 없고,
+(2) 검색 하이라이트처럼 **수천 개**가 되는 용도가 주력이라 노드마다 DOM 을 만들면 감당이 안 된다.
+대신 색을 받아 **렌더러가 칠한다**. 커스텀 UI 가 필요하면 `onRender` 로 자기 오버레이를 그린다.
+
+장식 배경은 **셀 배경 위·선택 아래**에 깔린다 — 선택이 장식을 덮어야 사용자가 지금 무엇을
+잡았는지 헷갈리지 않는다. 전경색을 주면 그 셀만 글자 색이 바뀌고, run 은 색이 키라 자연히 끊긴다.
+
 ### 검색
 
 | 메서드 | 반환 |
@@ -361,7 +382,6 @@ term.attachCustomKeyEventHandler(null);                                    // �
 
 | 없는 것 | 쓰임 |
 |---|---|
-| `registerMarker`·`registerDecoration` | 주석 같은 확장의 기반(검색 하이라이트는 선택으로 그린다) |
 | `registerLinkProvider` | 커스텀 링크 규칙 |
 
 **넣지 않기로 한 것**도 있다 — xterm.js 에 있지만 여기서는 성립하지 않거나 이미 다른 것이 덮는다.

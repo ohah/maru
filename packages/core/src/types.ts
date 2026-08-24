@@ -34,6 +34,8 @@ export interface FrameMeta {
   cursor: CursorState;
   selection: { startRow: number; startCol: number; endRow: number; endCol: number } | null;
   scroll: { offset: number; length: number };
+  /** 버려진 행의 누적 수 — 마커 보정용(`FrameData` 와 같은 값). */
+  evicted: number;
 }
 
 export interface TerminalOptions {

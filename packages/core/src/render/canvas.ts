@@ -175,6 +175,16 @@ export class CanvasRenderer implements Renderer {
       }
     }
 
+    // ── 패스 1a': 장식 (배경 위·선택 아래) ──
+    // **선택보다 아래**다 — 선택이 장식을 덮어야 사용자가 지금 무엇을 잡았는지 헷갈리지 않는다.
+    if (opts.decorations?.length) {
+      for (const d of opts.decorations) {
+        if (d.backgroundColor === undefined) continue;
+        ctx.fillStyle = withAlpha(`#${d.backgroundColor.toString(16).padStart(6, "0")}`, d.opacity);
+        ctx.fillRect(X(d.x), d.row * ch, X(d.x + d.width) - X(d.x), ch);
+      }
+    }
+
     // ── 패스 1b: 선택 오버레이 (배경 위·글자 아래) ──
     if (frame.selection) {
       ctx.fillStyle = withAlpha(selBg, 0.55);
@@ -214,6 +224,15 @@ export class CanvasRenderer implements Renderer {
         const y = r * ch;
         let color = resolveColor(cell.fg, this.#palette, fg) ?? fg;
         if (cell.flags & CellFlag.reverse) color = resolveColor(cell.bg, this.#palette, bg) ?? bg;
+        // 장식이 전경색을 지정했으면 그 셀만 색을 바꾼다 — run 은 색이 키라 자연히 끊긴다.
+        if (opts.decorations?.length) {
+          for (const d of opts.decorations) {
+            if (d.foregroundColor === undefined || d.row !== r) continue;
+            if (c < d.x || c >= d.x + d.width) continue;
+            color = `#${d.foregroundColor.toString(16).padStart(6, "0")}`;
+            break;
+          }
+        }
 
         // 장식은 run과 무관하게 셀 단위로
         const cellPx = X(c + w) - x;

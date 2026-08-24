@@ -26,6 +26,7 @@ export type ToWorker =
   | { t: "scrollTop" }
   | { t: "scrollToLine"; line: number }
   | { t: "clear" }
+  | { t: "decorations"; spans: import("../decoration").DecorationSpan[] }
   | {
       t: "sel";
       op: "start" | "extend" | "word" | "line" | "all" | "clear";

@@ -46,6 +46,11 @@ export interface FrameData {
   selection: SelectionSpan | null;
   scroll: { offset: number; length: number };
   /**
+   * 스크롤백에서 버려진 행의 누적 수. **마커가 절대 행을 보정하는 데 쓴다** — 코어는
+   * selection 을 스스로 보정하지만 라이브러리가 들고 있는 좌표는 그럴 수 없다.
+   */
+  evicted: number;
+  /**
    * `vt_modes` 비트. 마우스 추적 여부를 **동기로** 알아야 해서 프레임에 싣는다 — 워커 모드에서
    * 조회는 비동기라 mousedown 안에서 물을 수 없다.
    *

@@ -347,10 +347,12 @@ pub fn drainGitStatus(self: *AppSession) void {
                     // 진행 상태를 다시 읽으면 그 사이 다음 턴이 시작된 경우 **옛 스냅샷에 새 턴 키**가
                     // 붙는다(계약 §3.1 이 시각 대신 키를 쓰라고 한 이유가 그런 어긋남이다).
                     .turn_key = self.turn_snapshot_key[0..self.turn_snapshot_key_len],
+                    .title = self.turn_snapshot_title[0..self.turn_snapshot_title_len],
                 });
             }
         }
         self.turn_snapshot_key_len = 0;
+        self.turn_snapshot_title_len = 0;
         if (self.turn_snapshot_session) |sid| self.allocator.free(sid);
         self.turn_snapshot_session = null;
         if (self.turn_snapshot_repo) |path| self.allocator.free(path);

@@ -4800,6 +4800,10 @@ pub const AppSession = struct {
     /// 에 **세 번째 dupe 실패 분기**를 만들지 않고 `deinit` 에 해제할 것도 안 늘린다.
     turn_snapshot_key: [maru.session.turn_snapshot.max_turn_key_len]u8 = undefined,
     turn_snapshot_key_len: usize = 0,
+    /// 도는 스냅샷 요청의 **턴 제목**(AT2). 키와 같은 이유로 요청 시점에 붙든다 — 수확 때 대화 캐시를
+    /// 다시 읽으면 그 사이 다음 턴이 응답을 덮어 **옛 스냅샷에 새 턴의 제목**이 붙는다.
+    turn_snapshot_title: [maru.session.turn_snapshot.max_turn_title_len]u8 = undefined,
+    turn_snapshot_title_len: usize = 0,
     /// **직전에 본 에이전트 세션**(owned). 목록·클릭이 «활성 세션» 을 물을 때 활성 Term 에 에이전트가
     /// 없으면 이 값으로 답한다.
     ///
@@ -62984,7 +62988,7 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     // 통했다. 이제 그 id 의 Term 에서 신원을 찾으므로 **없는 id 를 넘기면 조용히 아무것도 안 찍힌다.**
     const turn_sid = tab_ops.activeTab(session).panes.items[0].terms.items[0].surfaceId();
     seedTurnIdentity(session, turn_sid);
-    agent_ops.captureTurnSnapshot(session, turn_sid, "p-turn-1");
+    agent_ops.captureTurnSnapshot(session, turn_sid, .{ .key = "p-turn-1", .title = "다 했습니다" });
     var spins: usize = 0;
     while (spins < 500 and seededTurnRingLen(session) == 0) : (spins += 1) {
         git_ops.drainGitStatus(session);
@@ -62997,6 +63001,24 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     // 요청 시점에 붙들려(`turn_snapshot_key`) 백엔드 왕복을 건너 수확 자리까지 살아 오는지를 본다 —
     // 배관에서 끊기면 순수 층은 여전히 green 이라 여기서만 드러난다.
     try std.testing.expectEqualStrings("p-turn-1", seededTurnRing(session).?.latest().?.turnKey());
+    // 제목도 같은 붙들기 자리를 지나 링까지 온다(AT2).
+    try std.testing.expectEqualStrings("다 했습니다", seededTurnRing(session).?.latest().?.titleText());
+
+    // **세션 base 에는 직전 턴의 키가 붙지 않는다.** `Progress.reset()` 이 턴 키를 일부러 남기므로
+    // (같은 턴의 다음 이벤트가 «키가 바뀌었다» 로 읽히면 안 된다) 캡처 자리가 그것을 그대로 넘기면
+    // base 에 옛 키가 실린다 — `/clear` 뒤라면 **옛 세션의 키가 새 세션 base 에** 붙는다.
+    git_backend_mod.testWriteFile(repo, "base.txt", "b\n") catch return error.SkipZigTest;
+    agent_ops.captureTurnSnapshot(session, turn_sid, .{}); // base 가 넘기는 값과 같다
+    spins = 0;
+    while (spins < 500 and seededTurnRingLen(session) < 2) : (spins += 1) {
+        git_ops.drainGitStatus(session);
+        var ts2: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts2, null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), seededTurnRingLen(session));
+    try std.testing.expectEqual(@as(usize, 0), seededTurnRing(session).?.latest().?.turnKey().len);
+    // 제목도 마찬가지다 — base 는 턴이 아니므로 직전 턴의 응답을 물려받지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), seededTurnRing(session).?.latest().?.titleText().len);
 
     // 그 뒤 파일을 고치면 목록의 턴 범위에 **그 파일만** 나온다(스냅샷 시점에 이미 있던 것은 안 나온다).
     git_backend_mod.testWriteFile(repo, "kept.txt", "v2\n") catch return error.SkipZigTest;
@@ -63102,7 +63124,7 @@ test "턴 스냅샷: 세션 신원이 없으면 링을 만들지 않는다 (AT0 
     defer session.deinit();
 
     // **신원을 심지 않는다.** 그 밖의 조건은 앞 테스트와 같다.
-    agent_ops.captureTurnSnapshot(session, 1, "");
+    agent_ops.captureTurnSnapshot(session, 1, .{});
 
     // 링 자체가 만들어지지 않는다 — 빈 링이 생기는 것도 아니다(키가 없으므로 자리도 없다).
     try std.testing.expect(session.turn_rings.find(test_turn_session) == null);

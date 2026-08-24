@@ -58,9 +58,33 @@ const tab_ops = @import("tab.zig");
 /// 제품 빌드에서는 `comptime` 으로 사라진다(배타 카운터와 같은 규약).
 pub var test_turn_snapshot_calls: usize = 0;
 
-/// `turn_key` 는 그 턴의 식별자(계약 §3.1). 관측 모드와 세션 base 는 빈 값을 넘긴다 — 전자는 알 길이
-/// 없고 후자는 계약상 턴이 아니다(`Snapshot.turn` 주석).
-pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, turn_key: []const u8) void {
+/// 이 캡처에 실을 **턴 키**. 턴이 끝났을 때만 있다.
+///
+/// ⚠️ **`progress.turnKey()` 를 그대로 넘기면 안 된다.** `Progress.reset()` 은 턴 키를 **일부러 남기는데**
+/// (그 자체는 옳다 — 같은 턴의 다음 이벤트가 «키가 바뀌었다» 로 읽히면 매 이벤트마다 리셋이 돈다), 그래서
+/// `SessionStart` 만 온 배치에서도 **직전 턴의 키**가 남아 있다. 그걸 base 에 실으면 계약이 「턴이 아니다」
+/// 라고 정한 스냅샷에 턴 키가 붙고, `/clear` 뒤라면 **옛 세션의 키가 새 세션 base 에** 붙는다 — AT3 귀속이
+/// 거기에 옛 턴 기록을 매단다.
+fn turnFactsForCapture(term: *Term, turn_ended: bool) TurnFacts {
+    if (!turn_ended) return .{};
+    return .{
+        .key = term.agent_hook_progress.turnKey(),
+        // 그 턴의 마지막 응답. `applyHookEvent` 가 `.stop`·`.stop_failure` 에서 이미 눕혀 담아 두었다
+        // (`hookConversationText` — 이스케이프 해제 + 경계 정리 + 개행 눕히기). 여기서 다시 만들지 않는다.
+        .title = term.agent_transcript.reply(),
+    };
+}
+
+/// 이 캡처에 실을 **그 턴의 사실들**. 세션 base 와 관측 모드는 빈 값이다 — 전자는 계약상 턴이 아니고
+/// 후자는 그 축을 알 길이 없다(`Snapshot.turn`·`Snapshot.title` 주석).
+pub const TurnFacts = struct {
+    /// 턴 식별자(계약 §3.1).
+    key: []const u8 = "",
+    /// 턴 제목(AT2).
+    title: []const u8 = "",
+};
+
+pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts) void {
     if (builtin.is_test) test_turn_snapshot_calls += 1;
     // **테스트에서는 세기만 하고 실제 작업은 하지 않는다.**
     //
@@ -115,8 +139,13 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, turn_key: []const
     self.turn_snapshot_repo = owned_repo;
     // **상한을 넘는 키는 안 담는다(자르지 않는다)** — 순수 층 `Ring.push` 와 같은 규율이고, 잘린 키는
     // AT3 귀속에서 남의 턴과 거짓으로 일치한다. 여기서도 거르면 링까지 안 간다.
-    self.turn_snapshot_key_len = if (turn_key.len > 0 and turn_key.len <= self.turn_snapshot_key.len) turn_key.len else 0;
-    if (self.turn_snapshot_key_len > 0) @memcpy(self.turn_snapshot_key[0..turn_key.len], turn_key);
+    self.turn_snapshot_key_len = if (facts.key.len > 0 and facts.key.len <= self.turn_snapshot_key.len) facts.key.len else 0;
+    if (self.turn_snapshot_key_len > 0) @memcpy(self.turn_snapshot_key[0..facts.key.len], facts.key);
+    // **제목은 반대로 자른다**(키는 신원이라 자르면 거짓 일치, 제목은 산문이라 앞부분이 쓸모 있다).
+    // 경계는 순수 층 규칙을 그대로 빌린다 — 여기서 다시 적으면 두 자리가 갈린다.
+    const title = maru.session.agent_transcript.clampUtf8(facts.title, self.turn_snapshot_title.len);
+    self.turn_snapshot_title_len = title.len;
+    if (title.len > 0) @memcpy(self.turn_snapshot_title[0..title.len], title);
 }
 
 /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
@@ -1411,7 +1440,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // 전이를 만드는데 **그 이벤트의 `turn_key` 는 codex 에서 자식의 것**이다(계약 §2 실측). `advance` 는
     // lead 이벤트에서만 키를 채택하므로 `progress.turnKey()` 가 언제나 lead 의 현재 키다 — 알림 본문이
     // 「자식이 아니라 lead 의 것이어야 한다」로 이미 판정된 것과 같은 함정, 같은 답이다.
-    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), term.agent_hook_progress.turnKey());
+    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), turnFactsForCapture(term, turn_ended));
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
@@ -1702,7 +1731,7 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         }
         // 회전본에도 **같은 규율**을 건다 — 여기만 빠지면 회전된 로그에 든 `SessionStart` 의 base 를 잃고,
         // 그 세션의 첫 턴이 영영 안 뜬다.
-        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), term.agent_hook_progress.turnKey());
+        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), turnFactsForCapture(term, rotated_turn_end));
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }
@@ -1854,7 +1883,7 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     if (maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current))) {
         // **관측 모드에는 턴 키가 없다** — 그 축은 훅 payload 만 가진 것이라(계약 §3.1) 화면 관측으로는
         // 알 길이 없다. 빈 키는 「모른다」이고, AT3 는 그런 항목에 provider 기록을 붙이지 않는다.
-        captureTurnSnapshot(self, term.surfaceId(), "");
+        captureTurnSnapshot(self, term.surfaceId(), .{});
     }
     if (current != previous) {
         if (displayed) self.metal_dirty = true;

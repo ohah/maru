@@ -14812,7 +14812,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     3. `hostile-lifecycle`: pre-raw와 live loop의 phase deadline, byte drip/backpressure/partial wire, malformed wire,
        signal/revoke, allocator fail-index, timeout artifact, fd/status-flag/process cleanup과 ledger final-zero를 결정적
        clock 및 실제 process fixture로 닫는다. 각 실제 단계는 5초 absolute deadline과 timeout artifact를 가지며,
-       cleanup 전 runtime·PTY child 생존을 먼저 관측한다.
+       cleanup 전 runtime·PTY child 생존을 먼저 관측한다. completed-control의 host-immediate suffix 뒤 local resize나
+       retained stdin이 남으면 다음 kernel snapshot은 0ms로 수행해 새 signal/revoke/readiness를 먼저 관측한 뒤 local
+       work를 다시 선택한다. 이미 소비한 immediate hint로 무기한 poll하거나 kernel snapshot 없이 local work를 앞세우면
+       실패다.
 - **P5d — SSH packaging/smoke**: PATH와 signed artifact에서 `ssh -t host maru attach ...`가 같은 protocol client를
   실행하는 packaging을 고정하고 localhost sshd smoke를 추가한다. runner에 sshd prerequisite가 없으면 이 slice는
   미완료다. 완료 증거는 아래 세 gate를 모두 요구한다.
@@ -14836,10 +14839,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
      signed 배포 호환을 주장하지 않는다. 어느 gate든 timeout artifact에 sshd/ssh/host/runtime PID, 선택된 `maru` 절대경로,
      signature kind·identifier·TeamIdentifier, child/fd/socket 정산을 남기며 모든 harness-owned process를 유계 reap한다.
 
-  현재 구현은 `zig build test-session-host-p5d -Doptimize=Debug -j1`이 ad-hoc `Maru.app`의 bundle/PATH gate와
+  현재 구현은 `zig build test-session-host-p5d -Doptimize=ReleaseFast -j1`이 ad-hoc `Maru.app`의 bundle/PATH gate와
   harness-owned localhost sshd 제품 PTY gate를 실행한다. `tools/session-host/p5d_ssh_smoke.sh`는 사용자 SSH 상태를
   읽지 않고 임시 key/config/known-host policy만 사용하며, 기존 P5c3d 제품 오라클을 `MARU_SESSION_HOST_ATTACH_EXE`의
-  `/usr/bin/ssh -tt` 경로로 다시 구동한다. 배포 스크립트는 Developer ID inside-out 서명 직후
+  `/usr/bin/ssh -tt` 경로로 다시 구동한다. required CI `session host bundled CLI macOS`는 이 ReleaseFast 제품 gate를
+  Debug 전수 스위트와 별도 20분 job으로 병렬 실행해 한쪽의 시간 예산이 다른 gate를 취소하지 않게 한다.
+  배포 스크립트는 Developer ID inside-out 서명 직후
   `test-session-host-p5d-artifact`를 실행해 동일 TeamIdentifier·hardened runtime·universal CLI를 확인하고 같은 SSH
   제품 gate를 재실행한다. 자격증명 없는 ad-hoc 경로에 `MARU_P5D_REQUIRE_DEVELOPER_ID=1`을 주면 authority 검사에서
   fail-close하며, 실제 provisioned release workflow green 전까지 P5d 상태는 부분 구현이다.

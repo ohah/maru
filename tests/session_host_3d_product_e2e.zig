@@ -309,7 +309,9 @@ const PtyAttach = struct {
     fn readReady(self: *PtyAttach, timeout_ms: c_int) !bool {
         var fds = [_]posix.pollfd{.{ .fd = self.master, .events = posix.POLL.IN, .revents = 0 }};
         _ = posix.poll(&fds, timeout_ms) catch return error.PollFailed;
-        if (fds[0].revents & posix.POLL.IN == 0) return false;
+        // A PTY may report POLLHUP together with unread final stderr after the child exits.
+        // Attempt the read in either case so failure diagnostics are not discarded at teardown.
+        if (fds[0].revents & (posix.POLL.IN | posix.POLL.HUP) == 0) return false;
         if (self.used == self.output.len) return error.OutputOverflow;
         const count = c.read(self.master, self.output[self.used..].ptr, self.output.len - self.used);
         if (count > 0) {
@@ -648,7 +650,14 @@ fn waitForFileBytesWhilePumping(
         // on the child-side oracle so the test itself cannot manufacture output backpressure that
         // starves the lower-priority stdin turn.
         _ = try attachment.readReady(10);
-        if (try attachment.tryWait()) |_| return error.ChildExitedEarly;
+        if (try attachment.tryWait()) |status| {
+            while (try attachment.readReady(0)) {}
+            std.debug.print(
+                "p5c3d attachment exited before PTY input oracle: pid={d} status={d} expected={s} output={any}\n",
+                .{ attachment.pid, status, expected, attachment.bytes() },
+            );
+            return error.ChildExitedEarly;
+        }
     }
     return error.PtyInputOracleTimeout;
 }

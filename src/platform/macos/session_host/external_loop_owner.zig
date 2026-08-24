@@ -969,6 +969,7 @@ pub const IntegratedStackOwner = struct {
 
         while (true) {
             const now_ns = monotonicNowNs() catch return self.failRun(error.ClockFailed);
+            var force_nonblocking_snapshot = false;
             if (self.cleanup) |state| {
                 const cleanup_result = self.driveCleanup(now_ns, io);
                 switch (cleanup_result) {
@@ -1051,6 +1052,18 @@ pub const IntegratedStackOwner = struct {
                 // loop that can starve external readiness forever.
                 const execution_tag = std.meta.activeTag(execution);
                 if (execution_tag != .idle and execution_tag != .host_immediate) continue;
+                force_nonblocking_snapshot =
+                    external_loop_policy.postImmediatePollMustBeNonblocking(
+                        if (execution_tag == .host_immediate)
+                            .host_immediate
+                        else
+                            .poll_wait,
+                        .{
+                            .resize = self.pending_resize,
+                            .retained_stdin = self.pending_forward_len != 0 or
+                                self.stdin_head != self.stdin_len,
+                        },
+                    );
             }
 
             self.refreshPollInterests() catch
@@ -1060,8 +1073,11 @@ pub const IntegratedStackOwner = struct {
                     state.plan.global_deadline_ns
             else
                 null;
-            const timeout_ms = self.pollTimeoutMs(now_ns, cleanup_deadline) catch
-                return self.failRun(error.ClockFailed);
+            const timeout_ms = if (force_nonblocking_snapshot)
+                @as(c_int, 0)
+            else
+                self.pollTimeoutMs(now_ns, cleanup_deadline) catch
+                    return self.failRun(error.ClockFailed);
             _ = posix.poll(&self.pre_raw.poll_fds, timeout_ms) catch
                 return self.failRun(error.PollFailed);
         }

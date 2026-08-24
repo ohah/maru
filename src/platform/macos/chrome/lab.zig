@@ -16,6 +16,7 @@ const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
 const scm_dock = chrome.components.scm_dock;
 const archive_detail = chrome.components.archive_detail;
+const file_tree = chrome.components.file_tree;
 
 /// A three-card dock specimen emits component text (five runs per card), header/search controls,
 /// and generic tree paint. Both the unit fixture and the product Metal smoke must use this one
@@ -63,6 +64,17 @@ pub const ScenarioId = enum {
     /// 아무것도 자르지 않고, 행의 칠과 글자가 위쪽 고정 chrome(탭 줄·요약 줄) 위에 그려진다
     /// (사용자 캡처 2026-08-21). 스크롤이 없는 `scm_rows` 로는 그 상태를 만들 수 없다.
     scm_scrolled,
+    /// 파일 탐색기 **행 목록**. 이 도크에는 Lab 시나리오도 시각 골든도 없었다 — FT1 이 행을 셀 격자에서
+    /// typed component 로 옮기면서 밀도·아이콘·들여쓰기 안내선·상태 점을 전부 새로 그렸는데, 그 픽셀을
+    /// 보는 자동 판정자는 하나도 없었다(계획 문서 §6 이 그 한계를 적어 두고 있다). 실제로 그 단계에서
+    /// **draw 예산이 모자라 트리가 통째로 비는** 결함이 났고(밴드·포커스 막대를 세지 않은
+    /// `max_ops_per_row`), 한 행 픽스처는 통과하는데 다섯 행이 빈 화면이었다 — SCM 도크가 #2196 에서
+    /// 겪은 것과 같은 종류다. 한 캡처에 종류 아이콘·안내선·선택 밴드·dirty 점·무시된 행의 흐림이 든다.
+    file_tree_rows,
+    /// 같은 목록에서 **행 하나에 호버**한 상태. 호버 밴드는 포인터가 있을 때만 그려지는 계약이라
+    /// (`bandRole` — 선택보다 약한 색) 이 시나리오가 없으면 그 색과 자리를 아무도 못 본다. 선택 밴드와
+    /// **구별되는지**가 이 캡처의 관심사다 — 둘이 같은 색이면 사용자는 무엇을 고른 상태인지 알 수 없다.
+    file_tree_row_hover,
     /// 세션 기록 헤더의 **정렬 토글에 호버**한 상태. 이 토글은 `.ghost`라 평소에는 label만 보이고 면·테두리가
     /// 없다 — 즉 **호버·pressed 때만 존재하는 그림**이고, 그 그림을 보던 골든이 하나도 없었다. 실제로
     /// 목록 행용 hover 토큰(활성보다 밝게 잡은 색)이 그대로 깔려 작은 pill 하나만 튀는 상태가 사용자
@@ -216,6 +228,8 @@ pub const FrameBuffers = struct {
     detail_actions: []archive_detail.ids.Entry = &.{},
     scm_nodes: []chrome.ui.tree.UiNode = &.{},
     scm_actions: []scm_dock.ids.Entry = &.{},
+    file_tree_nodes: []chrome.ui.tree.UiNode = &.{},
+    file_tree_actions: []file_tree.ids.Entry = &.{},
     text_runs: []chrome.draw.Run,
     text_bytes: []u8,
     /// 오버레이 컴포넌트(`context_menu`)는 op 를 **arena 에 append** 한다 — 도크처럼 고정 슬라이스에
@@ -247,6 +261,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
+        .file_tree_rows, .file_tree_row_hover => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -869,7 +884,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .file_tree_rows, .file_tree_row_hover, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -965,6 +980,70 @@ const scm_scroll_fixture_content_h_px: u32 = 900;
 
 const context_menu_fixture_anchor_x: i32 = 24;
 const context_menu_fixture_anchor_y: i32 = 24;
+
+/// 파일 탐색기 행 목록 하나를 **제품과 같은 build → view** 로 낸다.
+///
+/// 픽스처가 노리는 상태는 골든이 실제로 회귀를 잡을 수 있는 것들이다: 깊이가 다른 행(안내선 개수),
+/// 종류가 다른 아이콘(색), 선택된 행과 호버한 행(밴드 두 색), dirty 점, 무시된 행의 흐림, 그리고
+/// 접힌 폴더와 펼친 폴더의 chevron 방향. 한 화면에 다 담아야 crop 하나로 여러 계약을 보는 것이
+/// 아니라 **crop 을 나눠** 각 계약을 따로 지목할 수 있다(`tests/golden/dock_visual.zig` 의 관례).
+fn buildFileTreeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const K = chrome.file_tree_icon.IconKind;
+    const rows = [_]file_tree.types.Row{
+        // 루트 줄 — 깊이 0, 안내선이 없어야 한다.
+        .{ .kind = .root, .label = "maru3", .depth = 0, .expandable = true, .expanded = true, .icon_kind = @intFromEnum(K.folder), .model_index = 0 },
+        // 펼친 폴더와 접힌 폴더 — chevron 방향이 서로 달라야 한다.
+        .{ .kind = .directory, .label = "src", .depth = 1, .expandable = true, .expanded = true, .icon_kind = @intFromEnum(K.folder), .model_index = 1 },
+        .{ .kind = .file, .label = "main.zig", .depth = 2, .icon_kind = @intFromEnum(K.code), .model_index = 2 },
+        // **선택된 행.** 밴드가 가장 진하고 글자가 surface 전경으로 올라온다.
+        .{ .kind = .file, .label = "app_session.zig", .depth = 2, .icon_kind = @intFromEnum(K.code), .active = true, .selected = true, .model_index = 3 },
+        // dirty 점이 오른쪽 슬롯에 선다(라벨과 겹치면 그 결함은 픽셀로만 보인다).
+        .{ .kind = .file, .label = "renderer.zig", .depth = 2, .icon_kind = @intFromEnum(K.code), .dirty = true, .model_index = 4 },
+        // 무시된 행 — 한 단 흐린 전경이다(색 위계가 뒤집히면 이 캡처가 잡는다).
+        .{ .kind = .directory, .label = "zig-out", .depth = 1, .expandable = true, .ignored = true, .icon_kind = @intFromEnum(K.folder), .model_index = 5 },
+        .{ .kind = .directory, .label = "docs", .depth = 1, .expandable = true, .icon_kind = @intFromEnum(K.folder), .model_index = 6 },
+        .{ .kind = .file, .label = "README.md", .depth = 1, .icon_kind = @intFromEnum(K.document), .model_index = 7 },
+    };
+    const props = file_tree.types.Props{
+        // **제품 도크 폭을 쓴다**(Lab 캡처 폭 480 이 아니라). 트리는 사이드바 도크 안에 살고 라벨은
+        // 그 폭에서 말줄임된다 — 480 으로 그리면 말줄임이 한 번도 안 걸려 그 계약을 골든이 못 본다.
+        .viewport_px = .{ .width = 260, .height = scenario.viewport_px.height },
+        .scale_milli = 1000,
+        .snapshot_generation = 1,
+        .rows = &rows,
+        .selection_focused = true,
+        .origin_shift_px = 0,
+    };
+    const sizes = file_tree.build.bufferSizes(rows.len);
+    if (sizes.nodes > buffers.file_tree_nodes.len or sizes.entries > buffers.entries.len or
+        sizes.actions > buffers.file_tree_actions.len) return error.LabBufferTooSmall;
+    const frame = try file_tree.build.build(props, .{
+        .nodes = buffers.file_tree_nodes[0..sizes.nodes],
+        .entries = buffers.entries[0..sizes.entries],
+        .layout_items = buffers.items[0..sizes.entries],
+        .flex_scratch = buffers.flex_scratch[0..sizes.entries],
+        .child_rects = buffers.child_rects[0..sizes.entries],
+        .actions = buffers.file_tree_actions[0..sizes.actions],
+    });
+    // 호버는 포인터가 있을 때만 나오는 그림이라 상태를 직접 세운다(SCM 도크와 같은 이유).
+    // **선택된 행이 아닌 행**을 호버한다 — 두 밴드가 같은 행에 겹치면 색이 구별되는지 볼 수 없다.
+    const state: chrome.ui.interaction.InteractionState = switch (scenario.id) {
+        .file_tree_row_hover => .{ .hovered = file_tree.build.NodeIds.row(4) },
+        else => .{},
+    };
+    // **host 와 같은 예산으로 그린다** — Lab 버퍼는 넉넉해서 통째로 넘기면 `bufferSizes` 가 낡아도
+    // 캡처는 멀쩡하고 제품만 빈 트리가 된다. FT1 에서 실제로 그 조합이 났다(한 행은 통과, 다섯 행은
+    // 빈 화면). 예산을 지나게 하면 그 어긋남이 스모크에서 먼저 걸린다.
+    const budget = file_tree.view.bufferSizes(&rows);
+    if (budget.ops > buffers.ops.len or budget.runs > buffers.text_runs.len or budget.text_bytes > buffers.text_bytes.len)
+        return error.LabBufferTooSmall;
+    const draws = try file_tree.view.view(props, frame, state, tokens, .{
+        .ops = buffers.ops[0..budget.ops],
+        .runs = buffers.text_runs[0..budget.runs],
+        .text_bytes = buffers.text_bytes[0..budget.text_bytes],
+    });
+    return .{ .tree = frame.tree, .draws = draws };
+}
 
 fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
     const items = [_]scm_dock.types.Item{

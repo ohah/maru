@@ -71,6 +71,15 @@ export interface DomHost {
   setOptions(opts: Partial<AttachOptions>): void;
   /** 요소 크기에 맞춰 cols/rows를 다시 계산한다. */
   fit(): void;
+  /**
+   * **소유권을 넘기기 직전에** backing store 를 격자에 맞춘다(워커 모드 전용).
+   *
+   * `transferControlToOffscreen()` 뒤에는 메인이 `width`/`height` 를 못 쓰므로 `sizeCanvas` 가
+   * 워커 모드에서 backing 을 건드리지 않는데, 그 결과 **기본값 300×150 인 채로 넘어간다**.
+   * 워커가 resize 메시지를 받아 다시 잡을 때까지 CSS 크기로 늘어나 흐릿하게 보인다(실측:
+   * `open()` resolve 뒤 4프레임·22ms). 넘기기 전에 한 번 잡아 그 구간을 없앤다.
+   */
+  presizeBacking(): void;
   redraw(): void;
   dispose(): void;
 }
@@ -189,6 +198,13 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     ctx2d?.setTransform(1, 0, 0, 1, 0, 0);
     ctx2d?.scale(dpr, dpr);
     renderer.attach(canvas, metrics);
+  }
+
+  /** `DomHost.presizeBacking` 의 본체 — 계약은 그 선언을 본다. */
+  function presizeBacking(): void {
+    const { cols, rows } = term.size;
+    canvas.width = Math.ceil(Math.ceil(cols * metrics.cellWidth) * dpr);
+    canvas.height = rows * metrics.cellHeight * dpr;
   }
 
   function redraw(): void {
@@ -449,6 +465,7 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     get metrics() {
       return metrics;
     },
+    presizeBacking,
     setOptions(next) {
       options = { ...options, ...next };
       metrics = measureMetrics({ ...options, devicePixelRatio: dpr });

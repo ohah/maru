@@ -133,6 +133,11 @@ interface Renderer { /* 픽셀 소유 */ attach, draw }
 - **프로시저럴 글리프는 폰트보다 먼저 시도한다.** 박스·블록·파워라인·브라유·모자이크는 셀을 꽉 채워야 선이 이어지는데, 폰트가 그리면 advance 가 셀 폭과 달라 가운데 정렬되고 양옆에 틈이 생긴다(표의 가로선이 끊겨 보인다). 코어가 셀 크기를 받아 커버리지를 계산하므로 폰트가 무엇이든 이음매가 맞고, **Nerd Font 가 없는 브라우저에서도 파워라인이 나온다**.
   - **어떤 코드포인트를 덮는지는 코어가 정한다** — `renderer.isSynthesizedCodepoint` / `renderer.synthesizeGlyph` 가 합성 dispatch 의 단일 출처다. 범위를 JS 나 wasm 브리지에 복제하면 계열이 늘 때마다 어긋난다(실제로 `box_glyph` 만 부르다가 블록·파워라인·브라유를 통째로 놓쳤다).
 
+**워커 모드에서는 캔버스를 넘기기 전에 backing store 를 잡는다.** `transferControlToOffscreen()`
+뒤에는 메인이 `width`/`height` 를 못 쓰므로, 넘기기 전이 유일한 기회다. 안 잡으면 기본값
+300×150 인 채로 넘어가고 워커가 resize 메시지를 받아 다시 잡을 때까지 CSS 크기로 늘어나
+흐릿하다 — 실측으로 `open()` 이 resolve 된 뒤 4프레임(22 ms) 동안 그랬다.
+
 ## 5.1 폰트
 
 **기본 체인은 리가처 폰트를 앞에 둔다.** 맨 앞은 본체의 `font.family` 기본값(`JetBrains Mono`)이고, 그다음이 같은 폰트의 Nerd 패치본, 이어서 다른 리가처 폰트, 마지막이 리가처 없는 표준 고정폭이다. 리가처 구현 피처는 폰트마다 다르다 — JetBrains Mono 는 `liga` 가 아니라 `calt` 를 쓴다(GSUB 확인). Canvas 는 둘 다 적용하므로 렌더러가 따로 할 일은 없다.

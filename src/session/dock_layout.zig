@@ -254,6 +254,46 @@ pub fn defaultRightPtForView(view: dock_panel.View) u32 {
     };
 }
 
+/// 포인터 하나가 **어느 영역의 것인가**. 순수 판정이라 창도 OS도 모른다.
+///
+/// **왜 여기인가**: 판정의 근거가 `Geometry` 뿐이고, 그것을 만드는 자리가 여기다. 호출자마다
+/// `x >= dock.x and …` 를 적으면 경계 한 픽셀이 각자 달라진다 — 디바이더는 **잡기 띠**(grab band)라
+/// 눈에 보이는 선보다 넓고, 그 사실을 아는 곳이 여기 하나여야 한다.
+///
+/// **순서가 계약이다**: 디바이더를 **먼저** 본다. 잡기 띠는 터미널·도크와 겹치므로, 나중에 보면
+/// 겹친 폭만큼 영영 못 잡는다.
+pub const Region = enum {
+    /// 어느 영역도 아니다(상태바·타이틀바 띠·창 밖).
+    none,
+    terminal,
+    /// 도크 안이지만 뷰 스위처 바다.
+    view_bar,
+    /// 도크의 본문(파일 트리·소스 컨트롤…).
+    dock_content,
+    /// 도크 폭을 바꾸는 잡기 띠.
+    divider,
+};
+
+pub fn regionAt(geom: Geometry, x_px: f64, y_px: f64) Region {
+    if (contains(geom.divider, x_px, y_px)) return .divider;
+    if (contains(geom.view_bar, x_px, y_px)) return .view_bar;
+    if (contains(geom.tree_content, x_px, y_px)) return .dock_content;
+    // **도크 안이지만 본문도 스위처도 아닌 자리**(여백)는 도크가 먹는다 — 터미널로 흘리면 도크
+    // 여백을 눌렀을 때 셸에 선택이 생긴다.
+    if (contains(geom.dock, x_px, y_px)) return .dock_content;
+    if (contains(geom.terminal, x_px, y_px)) return .terminal;
+    return .none;
+}
+
+fn contains(r: Rect, x_px: f64, y_px: f64) bool {
+    if (r.w == 0 or r.h == 0) return false;
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    return x_px >= x0 and y_px >= y0 and
+        x_px < x0 + @as(f64, @floatFromInt(r.w)) and
+        y_px < y0 + @as(f64, @floatFromInt(r.h));
+}
+
 pub fn compute(in: Input) Geometry {
     // 상태바는 **창 전폭**(사이드바 아래까지)이라 `available` 밖에 산다. 그래서 창 높이에서 **먼저** 깎고,
     // 아래 모든 기하가 그 짧아진 높이(`usable_h`)에서 파생되게 한다 — terminal·dock·divider·조기 반환이
@@ -774,4 +814,79 @@ test "dock divider grab band rounds logical points up at fractional backing scal
     try std.testing.expectEqual(@as(u32, 13), dividerGrabBandPx(1250));
     try std.testing.expectEqual(@as(u32, 15), dividerGrabBandPx(1500));
     try std.testing.expectEqual(@as(u32, 20), dividerGrabBandPx(2000));
+}
+
+const region_testing = std.testing;
+
+fn regionFixture() Geometry {
+    return compute(.{
+        .backing_width_px = 1000,
+        .backing_height_px = 600,
+        .sidebar_width_px = 0,
+        .titlebar_height_px = 0,
+        .cell_width_px = 9,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = dividerGrabBandPx(1000),
+        .side = .right,
+        .size_pt = 0,
+        .visible = true,
+        .view = .explorer,
+        .view_bar_px = 38,
+        .status_bar_px = 0,
+    });
+}
+
+test "regionAt: 터미널·디바이더·도크가 갈린다" {
+    const g = regionFixture();
+    try region_testing.expectEqual(Region.terminal, regionAt(g, 10, 10));
+    try region_testing.expectEqual(Region.divider, regionAt(g, @floatFromInt(g.divider.x + g.divider.w / 2), 10));
+    try region_testing.expectEqual(Region.dock_content, regionAt(g, @floatFromInt(g.dock.x + 5), @floatFromInt(g.tree_content.y + 5)));
+}
+
+test "regionAt: 디바이더를 먼저 본다 — 잡기 띠가 이웃과 겹친다" {
+    const g = regionFixture();
+    // 잡기 띠는 눈에 보이는 선보다 넓다. 그 안의 점은 이웃 사각형에도 들 수 있는데, **디바이더가
+    // 이긴다** — 안 그러면 겹친 폭만큼 막대를 영영 못 잡는다.
+    var x = g.divider.x;
+    while (x < g.divider.x + g.divider.w) : (x += 1) {
+        try region_testing.expectEqual(Region.divider, regionAt(g, @floatFromInt(x), 100));
+    }
+}
+
+test "regionAt: 도크 여백도 도크가 먹는다 — 터미널로 안 흘린다" {
+    const g = regionFixture();
+    // 뷰 스위처 바 위(도크 안, 본문 밖)를 눌러도 터미널이 아니다.
+    const y: f64 = @floatFromInt(g.dock.y + 1);
+    const r = regionAt(g, @floatFromInt(g.dock.x + 1), y);
+    try region_testing.expect(r == .view_bar or r == .dock_content);
+}
+
+test "regionAt: 도크가 없으면 전부 터미널이다" {
+    const g = compute(.{
+        .backing_width_px = 200, // 도크 최소 폭보다 좁다 → 도크가 사라진다
+        .backing_height_px = 600,
+        .sidebar_width_px = 0,
+        .titlebar_height_px = 0,
+        .cell_width_px = 9,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = dividerGrabBandPx(1000),
+        .side = .right,
+        .size_pt = 0,
+        .visible = true,
+        .view = .explorer,
+        .view_bar_px = 38,
+        .status_bar_px = 0,
+    });
+    try region_testing.expectEqual(@as(u32, 0), g.dock.w);
+    try region_testing.expectEqual(Region.terminal, regionAt(g, 100, 100));
+    try region_testing.expectEqual(Region.terminal, regionAt(g, 199, 599));
+}
+
+test "regionAt: 창 밖은 none 이다" {
+    const g = regionFixture();
+    try region_testing.expectEqual(Region.none, regionAt(g, -1, 100));
+    try region_testing.expectEqual(Region.none, regionAt(g, 100, -1));
+    try region_testing.expectEqual(Region.none, regionAt(g, 5000, 100));
 }

@@ -3178,6 +3178,79 @@ fallback_glyphs=0 replacement_glyphs=0 raster_skipped=0
 불러 저장소 루트에 떨군 백업 파일이고, `git add -A` 가 그것을 §2m.31 커밋에 함께 실어 보냈다.
 지웠다. **화면을 보는 것이 판정의 일부**라는 것이 여기서 또 나왔다.
 
+### 2m.34 입력이 갈린다 — 포인터는 사각형으로 (W8.7b, 실측 2026-08-24)
+
+도크가 눌린다. 계약이 §2m.31 에 적어 둔 두 실패가 여기서 갈린다 — **터미널에 갈 것이 도크로 새면
+셸이 먹통이 되고, 반대면 도크가 죽은 컨트롤이 된다.**
+
+**판정을 중립으로 냈다** — `session/dock_layout.regionAt(geom, x, y) Region`. 근거가 `Geometry`
+뿐이고 그것을 만드는 자리가 거기다. 호출자마다 `x >= dock.x` 를 적으면 경계 한 픽셀이 갈리는데,
+디바이더는 **잡기 띠**라 눈에 보이는 선보다 넓다는 사실을 아는 곳이 하나여야 한다.
+
+규칙 둘을 그 함수가 소유한다:
+
+- **디바이더를 먼저 본다.** 잡기 띠는 터미널·도크와 겹치므로 나중에 보면 겹친 폭만큼 영영 못 잡는다.
+- **도크 여백도 도크가 먹는다.** 터미널로 흘리면 도크 빈 자리를 눌렀을 때 셸에 선택이 생긴다.
+
+**macOS 에는 이 함수가 없었다** — 그쪽은 판정이 `app_session` 의 제스처 소유자 기계
+(`PointerGestureOwner.dock_outer_divider`)에 녹아 있다. 그래서 이것은 옮겨 온 것이 아니라 **새로
+낸 중립 함수**이고, macOS 가 나중에 쓸 수 있다.
+
+**드래그 중에는 안 가른다.** 터미널에서 시작한 선택이 도크 위를 지나갈 때 영역이 바뀌면 그 순간
+선택이 끊긴다 — 제스처는 **시작한 곳이 끝까지 소유한다.**
+
+**실측**(합성 클릭 둘 — 도크에 한 번, 터미널에 한 번):
+
+```text
+dock_pointer_events=2 dock_row_clicks=1 dock_last_row=2
+selections_at_term_click=0 dock_clicks_at_term_click=1 selections_final=1 dock_clicks_final=1
+```
+
+`selections_at_term_click=0` 이 **도크 클릭이 셸로 안 샜다**는 뜻이고, `dock_clicks_final` 이
+`dock_clicks_at_term_click` 과 같은 것이 **터미널 클릭이 도크로 안 샜다**는 뜻이다.
+
+**뮤턴트 둘 다 갈린다:**
+
+| 뮤턴트 | 결과 |
+|---|---|
+| 도크 이벤트를 터미널로 흘린다(`continue` 제거) | `selections_at_term_click=1`(셸에 선택이 생겼다), `dock_row_clicks=0` |
+| 전부 터미널로 보낸다 | `dock_pointer_events=0 dock_row_clicks=0` |
+| 원본 | `selections_at_term_click=0 dock_row_clicks=1` |
+
+**행 판정도 중립이 소유한다** — `session/file_tree_layout.rowAtLocalY`. §2m.6 이 그리는 데 쓴 것과
+같은 축이라 그린 자리와 눌리는 자리가 갈리지 않는다.
+
+**키보드는 아직 전부 터미널이다.** 도크에 글자를 넣을 자리가 없다(소스 컨트롤의 커밋 상자가 첫
+소비자가 된다 — ⒞ 이후). 포커스 축을 지금 만들면 소비자 없는 기계다.
+
+### 2m.33 크롬 색이 테마를 안 탄다 (인지된 부채, 실측 2026-08-24)
+
+**터미널은 테마를 탄다. 크롬(도크·트리·소스 컨트롤)은 안 탄다.** 사용자 질문("테마 적용은 아직인
+거죠?", 2026-08-24)에 답하며 픽셀로 쟀다 — `$MARU_CONFIG` 로 `theme.background = #402018` 을 준
+채 띄우고 화면에서 색을 읽었다:
+
+| 영역 | 샘플 픽셀 | 판정 |
+|---|---|---|
+| 터미널 배경 | `R=64 G=32 B=24` = **`#402018`** | 테마 적용됨 |
+| 도크 배경 | `R=24 G=29 B=40` = `#181D28` | **리터럴** |
+
+터미널 쪽은 `config.appearance.resolve` 가 팔레트·전경·배경·커서 모양을 풀고 창을 지우는 색까지
+테마 배경이다. 크롬 쪽에는 색 리터럴이 **네 자리**에 있다 — 도크 배경·디바이더(`rebuildDockCells`),
+트리 전경 둘(`buildDockTreeFrame`), 소스 컨트롤 스모크의 `scmSmokeTokens()` 열두 개.
+
+**구조적인 이유가 있다.** 테마 → `chrome.Tokens` 변환이 **macOS `app_session.zig` 안**에 있다
+(`Tokens.rich(tc)` 앞의 열댓 필드 매핑). Windows 에서 그것을 부를 수 없어 표면을 세울 때마다 색을
+손으로 적었다. 즉 이것은 "아직 안 한 일" 이라기보다 [layering-and-portability.md](layering-and-portability.md) §3.4
+가 말한 **그 빚**이다 — 두 플랫폼이 공유해야 할 것이 macOS 파일에 갇혀 있다.
+
+**빼낼 자리는 이미 정해져 있다**: `appearance.ResolvedAppearance` 는 `src/config/` 에 있고
+`chrome.Tokens` 는 중립이므로, 그 사이 함수는 최상위 잎이다(`scm_items.zig` 와 같은 자리·같은
+이유). macOS 도 그 함수를 쓰게 하면 **두 화면이 같은 색**이라는 것이 테스트로 고정된다.
+
+**사용자 판단(2026-08-24): 인지된 부채로 둔다.** 지금 고치지 않는다 — W8.7⒝⒞ 를 먼저 한다.
+그 둘이 표면을 더 붙이면 리터럴 자리가 늘어난다는 것을 알고 미룬다. **여기 적어 두는 것이 그
+"알고 미룬다" 의 실체다.**
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

@@ -18248,35 +18248,9 @@ pub const AppSession = struct {
     /// Rgb만 뽑아 넘기고, **역할→색 매핑은 chrome.tokens.Tokens.tui가 단일 출처로 소유**한다(2nd 백엔드·rich도
     /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
     pub fn buildChromeTokens(self: *const AppSession) chrome.Tokens {
-        const t = self.appearance.theme;
-        // 한 번만 부른다 — 이 함수는 프레임 경로에 있고, 파생 계산(휘도·대비 바닥)이 호출마다 돈다.
-        const diff_colors = maru.session.syntax_theme.diffFromTheme(t);
-        const tc = chrome.tokens.ThemeColors{
-            .foreground = t.foreground,
-            .sidebar_background = t.sidebar_background,
-            .terminal_background = t.background, // 편집기 뷰가 터미널과 같은 바탕을 쓰도록(§4.1b)
-            .sidebar_foreground = t.sidebar_foreground,
-            .sidebar_active = t.sidebar_active,
-            .search_match = t.search_match,
-            .search_match_current = t.search_match_current,
-            .selection = t.selection,
-            .cursor = t.cursor,
-            .accent = t.accent, // 테마-구동 accent(탭/포커스 언더바·활성 카드 막대·세팅 강조) — 프리셋별 시그니처 색
-            // 비교 밴드 색은 **웹과 같은 함수**에서 온다(`syntax_theme.diffFromTheme`) — CM6 화면이 CSS
-            // 변수로 받던 그 값이라, 두 화면이 같은 초록·빨강을 쓴다(§7).
-            .diff_added = diff_colors.added,
-            .diff_removed = diff_colors.removed,
-        };
-        // rich 토큰셋: 기반 팔레트(`Tokens.base`) 위에 sidebar_active-공유 role(divider/focus_accent 등)을 분리 색으로
-        // 얹는다(C4a). 옛 `chrome.theme` 축이 여기서 base/rich를 갈랐는데, tui 룩을 제거해 갈래가 하나다.
-        var tk = chrome.tokens.Tokens.rich(tc);
-        // TS1: 활성 탭 룩 축(chrome.tab-style) — config enum을 chrome 중립 토큰으로 매핑(색이 ThemeColors로 흐르는 것과 동형, §7).
-        tk.space.tab_active_style = switch (self.appearance.chrome_tab_style) {
-            .connected => .connected,
-            .underline => .underline,
-            .pill => .pill,
-        };
-        return tk;
+        // 투영은 **중립이 소유한다**(`maru.chrome_theme.tokensFor`) — Windows 크롬도 같은 것을 쓴다.
+        // 두 곳에서 정하면 "어느 테마 색이 어느 역할로 가는가" 가 갈려 두 화면 색이 달라진다.
+        return maru.chrome_theme.tokensFor(self.appearance);
     }
 
     /// 일반 오버레이 lowering: chrome 컴포넌트가 낸 ChromeDraw ops(fill/border/text)를 셀 그리드로 rasterize한다

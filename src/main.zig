@@ -2557,6 +2557,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (cand) |pt| if (pt != dock_size_pt) {
                             dock_size_pt = pt;
                             geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
+                            // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
+                            // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
+                            // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
+                            // 1254px, 터미널이 35 열로 쪼그라들었다). macOS 가 같은 자리에서
+                            // `sizePtForEffectiveWidth` 로 되쓰는 이유다.
+                            dock_size_pt = maru.session.dock_layout.sizePtForEffectiveWidth(geom.dock_size_px, 0, 1000);
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 loop.resizeActiveSurface(size) catch {};
@@ -3049,6 +3055,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 터미널 클릭은 도크 카운터를 안 올렸다.
     if (divider_judgeable) {
         const cols_now = if (app_window.active()) |a| a.core.size.cols else 0;
+        // **저장값과 화면이 갈리면 안 된다** — 갈린 채 창을 키우면 도크가 새 공간을 다 먹는다.
+        try stdout.print("stored_pt={d} shown_w={d} in_sync={}\n", .{ dock_size_pt, geom.dock.w, dock_size_pt == geom.dock.w });
         try stdout.print("divider_grabs={d} divider_moves={d} dock_w={d}->{d} grid_cols={d}->{d}\n", .{
             divider_grabs,
             divider_moves,

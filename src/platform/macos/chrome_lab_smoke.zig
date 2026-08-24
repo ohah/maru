@@ -108,6 +108,9 @@ fn cellSizeFor(id: lab.ScenarioId) struct { w: u32, h: u32 } {
     return switch (id) {
         // 1.5배. 기존 시나리오는 기본값을 유지해야 커밋된 골든이 그대로 통한다.
         .editor_font_large => .{ .w = 12, .h = 24 },
+        // `font.size` 12 상당: 폰트 px 는 `cell.h / 1.25` 라 높이 15 가 12pt 다. **폭과 높이를 함께**
+        // 줄여야 제품에 있는 조합이 된다(셀은 폰트 크기에서 나온다) — 폭만 줄이면 판정이 거짓이 된다.
+        .scm_small_font => .{ .w = 7, .h = 15 },
         else => .{ .w = cell_width_px, .h = cell_height_px },
     };
 }
@@ -359,6 +362,7 @@ pub fn main(init: std.process.Init) !void {
         .cell_w_px = @intCast(cellSizeFor(scenario_id).w),
         .cell_h_px = @intCast(cellSizeFor(scenario_id).h),
         .font_px = fontPxFor(scenario_id),
+        .advance_milli_per_point = advanceMilliPerPoint(font_variant, fontPxFor(scenario_id)),
         .lines = real_file_lines,
     }, &tokens, .{
         .entries = &entries,
@@ -749,6 +753,26 @@ fn fontVariantFromValue(value: []const u8) ?FontVariant {
 ///
 /// 등록 실패는 무시한다 — 여기서 필요한 것은 **fallback 후보를 프로세스에 존재하게** 만드는 것뿐이고,
 /// primary 등록 실패는 `registerLabFont`가 별도로 에러를 낸다.
+/// 이 시나리오가 그릴 face 의 **포인트당 advance**(× 1000).
+///
+/// 제품은 native 메트릭의 `advance_milli_px` 로 이 값을 만든다(`app_session/scm_dock.zig`). Lab 이
+/// 대신 자기 **합성 셀**에서 비율을 뽑으면 산술이 갈리고, 실제로 작은 셀 조합에서 예약이 2px 모자랐다
+/// (82px 대 84px) — 그러면 캡처가 제품을 예고하지 못한다. 그래서 같은 출처에서 잰다.
+///
+/// 못 재면 0 을 준다 — 컴포넌트가 셀 기반 추정으로 물러나고, 그 경로도 여전히 겹치지 않는다.
+fn advanceMilliPerPoint(variant: FontVariant, font_px: u16) u32 {
+    if (font_px == 0) return 0;
+    var metrics: coretext_bridge.CellMetricsResult = .{};
+    coretext_bridge.maru_macos_coretext_font_cell_metrics(
+        variant.family().ptr,
+        variant.family().len,
+        @floatFromInt(font_px),
+        &metrics,
+    );
+    if (metrics.status != 0 or metrics.advance_milli_px == 0) return 0;
+    return metrics.advance_milli_px / font_px;
+}
+
 fn registerRemainingBundledFonts(primary: FontVariant) void {
     inline for (comptime std.enums.values(FontVariant)) |variant| {
         // primary 는 `registerLabFont` 가 Regular 를 이미 등록했다 — 나머지 **구성원**(bold·italic)은
@@ -817,6 +841,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-row-hover")) return .scm_row_hover;
     if (std.mem.eql(u8, raw, "scm-repo-hover")) return .scm_repo_hover;
     if (std.mem.eql(u8, raw, "scm-scrolled")) return .scm_scrolled;
+    if (std.mem.eql(u8, raw, "scm-small-font")) return .scm_small_font;
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
     if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
     if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
@@ -834,6 +859,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_row_hover => "scm-row-hover",
         .scm_repo_hover => "scm-repo-hover",
         .scm_scrolled => "scm-scrolled",
+        .scm_small_font => "scm-small-font",
         .scm_commit_edit => "scm-commit-edit",
         .file_tree_rows => "file-tree-rows",
         .file_tree_row_hover => "file-tree-row-hover",

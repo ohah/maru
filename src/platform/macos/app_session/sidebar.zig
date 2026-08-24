@@ -2841,6 +2841,10 @@ pub fn refreshCellMetrics(self: *AppSession) void {
         if (metrics.status == 0 and metrics.cell_width_px > 0 and metrics.cell_height_px > 0) {
             self.cell_width_px = metrics.cell_width_px;
             self.cell_height_px = metrics.cell_height_px;
+            // **소수까지 남긴다.** 격자·atlas 는 위 정수 cell 을 그대로 쓰고, chrome 텍스트처럼 role 이
+            // 정한 다른 크기로 그리는 소비자는 이 값으로 비율을 낸다 — 정수만 쓰면 최대 0.5px 이
+            // 버려지고, 그 손실이 이어 그리는 글자를 겹치게 했다(scm_dock `measureRun`).
+            self.glyph_advance_milli_px = metrics.advance_milli_px;
         }
     }
     // line-height(행간)·letter-spacing(자간) config를 적용한다 — native/fallback이 base cell 크기를 정한 '직후',

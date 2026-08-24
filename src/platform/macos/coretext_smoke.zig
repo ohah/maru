@@ -1881,6 +1881,45 @@ fn bilinearUpscaleRgba(
     return dst;
 }
 
+// **native 가 advance 의 소수를 실제로 돌려주는가.**
+//
+// `cell_width_px` 는 그 advance 를 반올림한 값이라 최대 0.5px 을 버린다. 격자·atlas 는 그 정수를 쓰지만,
+// chrome 텍스트는 role 이 정한 **다른 크기**로 그려지므로 비율이 필요하고, 정수로 비율을 내면 열이
+// 늘수록 어긋나 글자가 겹쳤다(`scm_dock/view.zig` 의 `measureRun`). 그래서 소수를 함께 받는다.
+//
+// 이 판정자가 없으면 native 가 그 필드를 안 채워도(0) Zig 쪽은 조용히 옛 근사로 물러나고, 겹침이
+// 돌아오는 것을 아무도 못 본다 — ABI 가드는 **크기와 offset** 만 보지 값이 오는지는 안 본다.
+test "cell 메트릭은 advance 의 소수까지 돌려준다(정수 cell 은 그 반올림이다)" {
+    const appearance = try config.resolveAppearance(.{});
+    var metrics: coretext_bridge.CellMetricsResult = .{};
+    coretext_bridge.maru_macos_coretext_font_cell_metrics(
+        appearance.font.family.ptr,
+        appearance.font.family.len,
+        appearance.font.size,
+        &metrics,
+    );
+    if (metrics.status != 0) return error.SkipZigTest; // 폰트를 못 잡는 환경(CI 컨테이너 등)은 건너뛴다
+    try std.testing.expect(metrics.cell_width_px > 0);
+    // 값이 온다 — 0 이면 소비자가 옛 근사로 조용히 물러난다.
+    try std.testing.expect(metrics.advance_milli_px > 0);
+    // 그리고 **정수 cell 은 그 반올림이다**(둘이 다른 것을 재고 있으면 비율이 엉뚱해진다).
+    const exact_px = @as(f64, @floatFromInt(metrics.advance_milli_px)) / 1000.0;
+    const rounded = @round(exact_px);
+    try std.testing.expectEqual(@as(u32, @intFromFloat(rounded)), metrics.cell_width_px);
+    // 등폭 face 의 advance 는 크기에 비례한다 — 두 배 크기에서 두 배가 나오는지로 그 전제를 고정한다.
+    var doubled: coretext_bridge.CellMetricsResult = .{};
+    coretext_bridge.maru_macos_coretext_font_cell_metrics(
+        appearance.font.family.ptr,
+        appearance.font.family.len,
+        appearance.font.size * 2,
+        &doubled,
+    );
+    if (doubled.status == 0) {
+        const ratio = @as(f64, @floatFromInt(doubled.advance_milli_px)) / @as(f64, @floatFromInt(metrics.advance_milli_px));
+        try std.testing.expect(ratio > 1.98 and ratio < 2.02);
+    }
+}
+
 test "글리프 목표크기 직접 래스터가 1.7× 확대보다 선명하다(partial-alpha 비율) — slot-stretch 폐기 근거" {
     // S2 자동 회귀 측정(방어): 헤더 아이콘 ◧(U+25E7)을 ① 목표 px로 직접 native 래스터 vs ② 셀 크기로
     // 래스터 후 1.7× bilinear 확대(현재 GPU slot-stretch의 CPU 모사)했을 때 anti-alias 번짐(partial)

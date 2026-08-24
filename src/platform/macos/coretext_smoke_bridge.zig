@@ -22,6 +22,10 @@ pub const CellMetricsResult = extern struct {
     cell_height_px: u32 = 0,
     ascent_px: u32 = 0,
     descent_px: u32 = 0,
+    /// advance 의 **소수까지**(× 1000). `cell_width_px` 는 이 값을 반올림한 것이라 최대 0.5px 을 버린다.
+    /// 격자·atlas 는 정수 cell 을 그대로 쓰고, **비율이 필요한 소비자**(chrome 텍스트의 자리 계산)가
+    /// 이 값을 쓴다 — 그 손실이 실제로 글자를 겹치게 했다.
+    advance_milli_px: u32 = 0,
 };
 
 pub extern fn maru_macos_coretext_font_cell_metrics(
@@ -140,12 +144,12 @@ pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
 ) void;
 
 test "CellMetricsResult matches the native C ABI layout" {
-    // coretext_smoke.m의 MaruCoreTextCellMetrics(int32 status + uint32 4개 = 20B)와 layout이
+    // coretext_smoke.m의 MaruCoreTextCellMetrics(int32 status + uint32 5개 = 24B)와 layout이
     // 어긋나면 app session(app_session.zig)이 cell 메트릭을 엉뚱한 offset에서 읽어 atlas
     // slot과 화면 cell 크기가 조용히 깨진다. native struct가 단일 출처이고, 한쪽을 바꾸면 다른
     // 쪽도 함께 바꿔야 한다 — NativeGlyphRasterResult ABI 가드(coretext_raster.zig)처럼 크기를
     // 컴파일 타임 계약으로 고정해 드리프트를 빌드에서 잡는다.
-    try std.testing.expectEqual(@as(usize, 20), @sizeOf(CellMetricsResult));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(CellMetricsResult));
     // status(int32)와 width/height/ascent/descent(uint32)는 모두 4바이트라 @sizeOf만으로는 필드
     // reorder(예: status↔cell_width_px — 에러코드와 픽셀 폭이 뒤바뀌어도 크기는 같다)를 못 잡는다.
     // #540의 CommandEntry @offsetOf 가드와 동형으로 각 필드 offset도 native struct 순서에 고정한다.
@@ -154,4 +158,5 @@ test "CellMetricsResult matches the native C ABI layout" {
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(CellMetricsResult, "cell_height_px"));
     try std.testing.expectEqual(@as(usize, 12), @offsetOf(CellMetricsResult, "ascent_px"));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(CellMetricsResult, "descent_px"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(CellMetricsResult, "advance_milli_px"));
 }

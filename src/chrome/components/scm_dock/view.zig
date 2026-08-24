@@ -566,7 +566,7 @@ const Writer = struct {
         else
             tabTitle(tab);
 
-        const label_w = self.measureBudget(label);
+        const label_w = self.measureBudget(label, .control); // 아래 `emit` 이 쓰는 role
         // 칸 안에서 가운데. 라벨이 칸보다 넓으면 왼쪽에 붙이고 칸 폭으로 자른다 — 가운데에 두면 잘린
         // 글자가 **양쪽** 이웃으로 넘친다.
         const fits = label_w <= rect.rect.width;
@@ -659,7 +659,7 @@ const Writer = struct {
             const label = if (repo.failed) repoFailedLabel() else repoPendingLabel();
             if (actions_left_x == null) {
                 try self.trailing(rect, label, .muted_fg, .supporting, right_inset);
-                const budget = self.measureBudget(label) + @as(f32, @floatFromInt(m.gap + right_inset));
+                const budget = self.measureBudget(label, .supporting) + @as(f32, @floatFromInt(m.gap + right_inset));
                 try self.lineWithin(rect, name_x - rect.rect.x, rect.rect.x + rect.rect.width - budget, repo.name, .surface_fg, .control, true);
             } else {
                 try self.lineWithin(rect, name_x - rect.rect.x, right_limit, repo.name, .surface_fg, .control, true);
@@ -678,7 +678,7 @@ const Writer = struct {
         var branch_width: f32 = 0;
         // 호버 중에는 브랜치도 안 그린다 — 아이콘 띠가 그 자리를 쓴다(위 설명).
         if (repo.branch.len > 0 and actions_left_x == null) {
-            const w = self.measureBudget(repo.branch);
+            const w = self.measureBudget(repo.branch, .supporting);
             const line_h: f32 = @floatFromInt(typography.lineHeightPx(.supporting, scale));
             const x = right_edge - w;
             if (x > name_x + @as(f32, @floatFromInt(m.gap)) and rect.rect.height >= line_h) {
@@ -825,7 +825,7 @@ const Writer = struct {
             try self.trailing(rect, "bin", .muted_fg, .supporting, right_inset);
         } else if (file.has_delta) {
             try self.trailing(rect, delta_removed, .git_deleted_fg, .supporting, right_inset);
-            right_inset += @intFromFloat(self.measureBudget(delta_removed));
+            right_inset += @intFromFloat(self.measureBudget(delta_removed, .supporting));
             right_inset += m.gap;
             try self.trailing(rect, delta_added, .git_added_fg, .supporting, right_inset);
         }
@@ -840,9 +840,9 @@ const Writer = struct {
         // 둘 중 하나로만 예산을 잡으면 포인터를 스칠 때마다 말줄임 지점이 움직여 **이름이 늘었다 줄었다
         // 한다**(적대적 검증에서 잡혔다). 둘 중 큰 쪽을 항상 비워 두면 화면이 조용하다.
         const delta_occupied: f32 = if (file.binary)
-            self.measureBudget("bin") + @as(f32, @floatFromInt(m.gap))
+            self.measureBudget("bin", .supporting) + @as(f32, @floatFromInt(m.gap))
         else if (file.has_delta)
-            self.measureBudget(delta_removed) + self.measureBudget(delta_added) + @as(f32, @floatFromInt(m.gap * 2))
+            self.measureBudget(delta_removed, .supporting) + self.measureBudget(delta_added, .supporting) + @as(f32, @floatFromInt(m.gap * 2))
         else
             0;
         const action_occupied: f32 = if (file.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
@@ -875,8 +875,9 @@ const Writer = struct {
     ///
     /// `cell = floor(advance)` 이므로 `advance < cell + 1` 이고, 열당 1px 상한은 **어떤 등폭 face 에서도**
     /// 겹치지 않는다. 과잉 확보는 열당 최대 1px 이다(10 글자면 6px 남짓 — 틈이 조금 넓어질 뿐이다).
-    /// 정확한 값을 쓰려면 backend 가 실제 advance 를 넘겨야 하는데, 지금 ABI(`CellMetricsResult`)는 정수
-    /// 셀만 준다 — 그 확장은 별도 슬라이스다.
+    /// backend 는 이제 advance 의 **소수까지** 준다(`CellMetricsResult.advance_milli_px`) — 그래서
+    /// `measureRun` 의 비율에는 반올림 근사가 없다. 이 상한은 그 값을 못 받은 호출부(단위 테스트·구형
+    /// 배선)의 물러설 자리로만 남는다.
     ///
     /// **caret·선택 기하(`colWidth`)에는 이 보정을 넣지 않는다.** 그쪽은 플랫폼 배치와 **같은 자**를
     /// 써야 글자 위에 정확히 앉는다 — 여기 상한을 그쪽에 쓰면 커서가 글자에서 밀린다.
@@ -894,9 +895,10 @@ const Writer = struct {
     /// 이름과 경로 꼬리가 다시 붙었다). 그래서 **런을 이어 붙이는 자리**는 이 함수를 쓴다.
     ///
     /// 비율을 모르면(props 기본값 0) 옛 추정으로 물러난다 — 그래야 값을 안 넘기는 호출부가 조용히
-    /// 0 폭을 받지 않는다.
+    /// 0 폭을 받지 않는다. 제품 배선은 native 메트릭의 **소수까지 온 advance** 로 그 비율을 만든다
+    /// (`app_session/scm_dock.zig` 의 `advanceMilliPerPoint`) — 정수 셀에서 뽑던 근사는 사라졌다.
     fn measureRun(self: *Writer, source: []const u8, role: typography.ChromeTextRole) f32 {
-        if (self.props.advance_milli_per_point == 0) return self.measureBudget(source);
+        if (self.props.advance_milli_per_point == 0) return self.measureBudgetCells(source);
         const cols = text_layout.displayCols(source, null);
         const point_size: u32 = typography.token(role).point_size;
         // **총합에서 한 번만 올린다.** 열마다 올리면 10 글자에서 10px 까지 과잉 확보돼, 틈이 계약보다
@@ -907,7 +909,16 @@ const Writer = struct {
         return @floatFromInt(total_px);
     }
 
-    fn measureBudget(self: *Writer, source: []const u8) f32 {
+    fn measureBudget(self: *Writer, source: []const u8, role: typography.ChromeTextRole) f32 {
+        // 비율을 받았으면 **정확한 값**을 쓴다 — 옛 상한(`cell + 1`)은 셀이 role 보다 작을 때만 여유였고,
+        // 반대(터미널이 크고 role 이 작을 때)로는 넉넉히 잡아 글자가 **필요보다 일찍 잘렸다**(기본 설정:
+        // 예약 9px 대 실제 `supporting` 7.2px — 세 글자짜리 증감 하나에 5px 이 남았다).
+        return self.measureRun(source, role);
+    }
+
+    /// 비율을 못 받은 호출부의 물러설 자리. 셀은 실제 advance 의 반올림이라 열당 최대 1px 이 모자랄 수
+    /// 있어 그만큼 더 잡는다 — 모자란 쪽으로 틀리면 글자가 겹친다.
+    fn measureBudgetCells(self: *Writer, source: []const u8) f32 {
         const cols = text_layout.displayCols(source, null);
         return @floatFromInt(cols * (self.cell_width_px + 1));
     }
@@ -1084,7 +1095,7 @@ const Writer = struct {
         // ── 첫 줄: ref 칩 + 제목.
         var left = rect.rect.x + inset;
         if (commit.ref.len > 0) {
-            const w = self.measureBudget(commit.ref);
+            const w = self.measureBudget(commit.ref, .supporting);
             if (left + w < rect.rect.x + rect.rect.width - inset) {
                 // 지금 체크아웃된 브랜치만 강조색이다 — 나머지 ref는 상태 진술이라 흐리다.
                 try self.emit(
@@ -1110,7 +1121,7 @@ const Writer = struct {
         if (commit.ref_more > 0) {
             var buf: [8]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "+{d}", .{commit.ref_more}) catch "";
-            const w = self.measureBudget(text);
+            const w = self.measureBudget(text, .supporting);
             const min_subject: f32 = @floatFromInt(m.commit_subject_min_cols * @max(self.cell_width_px, 1));
             if (text.len > 0 and left + w + gap + min_subject <= title_right) {
                 try self.emit(
@@ -1145,19 +1156,19 @@ const Writer = struct {
         const sub_y = rect.rect.y + pad_y + title_h;
         var right = rect.rect.x + rect.rect.width - inset;
         if (commit.short_oid.len > 0) {
-            const w = self.measureBudget(commit.short_oid);
+            const w = self.measureBudget(commit.short_oid, .supporting);
             try self.emitAt(right - w, sub_y, commit.short_oid, .muted_fg, .supporting);
             right -= w + gap;
         }
         if (commit.when.len > 0) {
-            const w = self.measureBudget(commit.when);
+            const w = self.measureBudget(commit.when, .supporting);
             if (right - w > rect.rect.x + inset) {
                 try self.emitAt(right - w, sub_y, commit.when, .muted_fg, .supporting);
                 right -= w + gap;
             }
         }
         if (commit.author.len > 0) {
-            const w = self.measureBudget(commit.author);
+            const w = self.measureBudget(commit.author, .supporting);
             const x = rect.rect.x + inset;
             if (x + w < right) try self.emitAt(x, sub_y, commit.author, .muted_fg, .supporting);
         }
@@ -1182,7 +1193,7 @@ const Writer = struct {
         // 자리가 없다. 제목이 먼저이므로 요약이 안 들어가면 요약을 뺀다 — 제목을 밀어내지 않는다.
         var title_right = right;
         if (turn.summary.len > 0) {
-            const w = self.measureBudget(turn.summary);
+            const w = self.measureBudget(turn.summary, .supporting);
             if (title_right - w > left) {
                 try self.emitAt(title_right - w, rect.rect.y + pad_y, turn.summary, .muted_fg, .supporting);
                 title_right -= w + gap;
@@ -1208,13 +1219,13 @@ const Writer = struct {
         const sub_y = rect.rect.y + pad_y + title_h;
         var sub_right = right;
         if (turn.when.len > 0) {
-            const w = self.measureBudget(turn.when);
+            const w = self.measureBudget(turn.when, .supporting);
             if (sub_right - w > left) {
                 try self.emitAt(sub_right - w, sub_y, turn.when, .muted_fg, .supporting);
                 sub_right -= w + gap;
             }
         }
-        if (turn.agent.len > 0 and left + self.measureBudget(turn.agent) < sub_right) {
+        if (turn.agent.len > 0 and left + self.measureBudget(turn.agent, .supporting) < sub_right) {
             try self.emitAt(left, sub_y, turn.agent, .muted_fg, .supporting);
         }
     }
@@ -1246,7 +1257,7 @@ const Writer = struct {
         role: tokens.ColorRole,
         text_role: typography.ChromeTextRole,
     ) ViewError!void {
-        const w = self.measureBudget(text);
+        const w = self.measureBudget(text, text_role);
         try self.emit(x, y, text, self.colsFor(w), role, text_role, false, @intFromFloat(@max(w, 0)), .origin);
     }
 
@@ -1352,7 +1363,7 @@ const Writer = struct {
     fn trailing(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, right_inset: u32) ViewError!void {
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
         if (rect.rect.height < line_h or rect.rect.width <= 0) return;
-        const width = self.measureBudget(source);
+        const width = self.measureBudget(source, text_role);
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset)) - width;
         if (x < rect.rect.x) return;
         try self.emit(
@@ -1373,7 +1384,7 @@ const Writer = struct {
     fn trailingWidth(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, right_inset: u32) ViewError!u32 {
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)));
         if (rect.rect.height < line_h or rect.rect.width <= 0) return 0;
-        const width = self.measureBudget(source);
+        const width = self.measureBudget(source, text_role);
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(right_inset)) - width;
         if (x < rect.rect.x) return 0;
         try self.emit(

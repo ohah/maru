@@ -3901,6 +3901,60 @@ sidebar_header_h=19 header_glyphs=4 header_outside=0 header_routed=4/4 header_ok
 > **아이콘이 작다(보고).** macOS 는 헤더 PUA 아이콘을 **1.7×** 로 굽는데 Windows 는 그 확대 경로를
 > 아직 안 밟았다(§2m.37 ⑶ 이 예고한 그대로다). 자리는 맞고 크기만 다르다 — 별개 슬라이스다.
 
+### 2m.47 macOS 제품 경로를 Windows 에서 타입 검사한다 (2026-08-25)
+
+§2m.46 을 올리자 CI 가 **세 번째로** 같은 뿌리에서 빨강이었다.
+
+```text
+src/platform/macos/app_session/sidebar.zig:2418:86: error: expected type 'u32', found 'usize'
+```
+
+공유 함수의 인자를 `u32` 로 뒀는데 macOS 호출부가 `notification_unread: usize` 를 넘겼다. 값이 아니라
+**개수**이므로 공유 쪽을 `usize` 로 넓혔다.
+
+## 세 번이면 뿌리를 막는다
+
+| | 언제 | 무엇 | 로컬에서 잡혔나 |
+|---|---|---|---|
+| ⑴ | §2m.39 | 상대 import → `file exists in modules 'maru' and 'root'` | ✗ |
+| ⑵ | §2m.45 | 함수를 옮기며 별칭 누락 → **중간 커밋 둘이 파싱 불가** | ✗(CI 가 잡았다) |
+| ⑶ | §2m.46 | 공유 인자 `u32` vs 호출부 `usize` | ✗ |
+
+원인은 하나다 — **Windows `zig build` 는 `src/platform/macos/**` 를 컴파일조차 하지 않는다.**
+
+§2m.45 가 찾은 `tools/ci/per-commit-boundaries.sh` 는 ⑵ 를 잡지만 `zig ast-check` 라 **파싱까지만**
+본다. ⑶ 은 타입이라 그 그물을 그냥 통과한다.
+
+## 링크 없이 의미 분석만 돌리면 SDK 가 필요 없다
+
+`tools/check-macos-typecheck.sh` 를 만들었다. CI 의 `file explorer macOS product path` 잡이 컴파일하는
+것과 **같은 루트**(`app_host_abi.zig`)를 이렇게 태운다:
+
+```sh
+zig test -fno-emit-bin --test-no-exec -target aarch64-macos …
+```
+
+바이너리를 안 내니 macOS SDK 도 프레임워크도 필요 없고 `.m` 은 애초에 안 건드린다. **셋 다 로컬에서
+재현된다**(실측):
+
+| 뮤턴트 | 이 도구가 내는 것 |
+|---|---|
+| 공유 인자를 `u32` 로 되돌린다 | `sidebar.zig:2418 … expected type 'u32', found 'usize'` — **CI 와 같은 줄** |
+| `buildSidebarDrawList` 별칭 제거 | `coretext_frame_builder.zig:1411 … use of undeclared identifier` |
+| 고친 트리 | `OK` |
+
+**루트를 `test` 로 잡는 이유**: Zig 는 지연 분석이라 아무도 안 부르는 코드는 안 본다. 테스트가 그
+파일의 판정자들을 참조해 분석 범위가 넓어진다.
+
+## 한계 — 이것이 macOS 러너를 대체하지 않는다
+
+- **링크는 안 본다.** ObjC 심볼 누락은 진짜 러너만 잡는다.
+- `build_options` 를 스크립트가 흉내 낸다. `build.zig` 가 옵션을 늘리면 `no member named …` 로
+  **시끄럽게** 실패한다 — 조용히 통과하지 않으므로 그때 맞추면 된다.
+- **게이트에 안 걸었다.** `mise run check` 도 CI 도 안 부른다 — 그것은 결정이라 사용자 몫이다.
+  지금은 **macOS 파일을 건드린 슬라이스가 푸시 전에 손으로 돌리는 도구**다(§2m.45 의 커밋별 게이트와
+  같은 자리).
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

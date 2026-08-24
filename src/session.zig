@@ -151,6 +151,9 @@ pub const editor = struct {
     /// N2: 한 번의 편집을 값으로 만든다(§3.3 — 여러 range를 담고 selection을 같은 연산에서 민다).
     /// 스택·그룹핑은 시계와 입력 사건을 읽어야 해서 여기 없다.
     pub const delta = @import("session/editor/delta.zig");
+    /// N2: "다음 일치 추가"가 커서를 놓을 자리(§9.1). 대소문자를 가리고 씨앗이 낱말이면 경계를
+    /// 본다 — `find`(⌘F)와 일부러 다른 규칙이고, 그 근거는 모듈 머리말이 든다.
+    pub const occurrence = @import("session/editor/occurrence.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

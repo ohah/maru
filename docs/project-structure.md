@@ -144,7 +144,7 @@ src/
                         예전에는 이 둘이 `main.zig`에 있었고 그래서 허브가 1,442줄이었다 — 접착을 여기로 모으면 "cli/는 순수"와
                         "main은 얇은 디스패처"가 **동시에** 성립한다
   session/              L2 세션 코어(OS-중립·app/pty/platform import 0, check-boundaries 강제): 세션 모델(Model·Tab·Pane·surface·split_tree·workspace·dock_panel·core_command)과 **컨트롤 플레인/이동성 골격** — surface_id(M0a), window_membership(M0b), window_graph(M1), live_surface_registry(M2a generic), control_plane(1a JSON-RPC/ndjson), control_surface(1c Surface DTO·scope 응답), control_dispatch(1d read-only 라우터), layout/input math·ime·keyhint. platform이 런타임 타입을 넣어 인스턴스화한다. **`ssh/` 는 이 층 안의 sans-io SSH 프로토콜 코어**(패킷·와이어·버전 교환·KEXINIT·KEX·암호·전송 루프·호스트키·`known_hosts`·인증·개인키) — 소켓·파일·시계를 모르고 할당은 주입받는다. 모바일 브리지가 OS 호출 0 이라 데스크톱과 모바일이 **같은 프로토콜 코드**를 써야 하기 때문이고, `tests/boundary/ssh_sans_io.zig` 가 그것을 강제한다(단일 출처: docs/ssh-client.md)
-    editor/             네이티브 편집기의 L2 코어 — document(버퍼·편집), line_index(줄 색인), selection, fold(들여쓰기 접힘 층), find(문서 안 일치 계산 — 순수), buffer(편집 가능한 내용 — persistent rope), delta(한 번의 편집 + selection 매핑 + 역연산), diff·diff_state·intraline(줄 안 차이), open(열기 판정). 시각 매핑과 렌더는 chrome/components/editor_view/와 platform이 맡는다
+    editor/             네이티브 편집기의 L2 코어 — document(버퍼·편집), line_index(줄 색인), selection, fold(들여쓰기 접힘 층), find(문서 안 일치 계산 — 순수), buffer(편집 가능한 내용 — persistent rope), delta(한 번의 편집 + selection 매핑 + 역연산), occurrence(다음 일치 추가 — 멀티커서 자리), diff·diff_state·intraline(줄 안 차이), open(열기 판정). 시각 매핑과 렌더는 chrome/components/editor_view/와 platform이 맡는다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config
   pty/                  PTY backend, spawn request, process handle
   terminal/             parser, screen, cursor, scrollback, key/mouse encoding

@@ -44,6 +44,10 @@ export interface AttachOptions {
   cellsCap?: number;
   /** 프로시저럴 글리프 공급자. 없으면 폰트로만 그린다. */
   glyphs?: GlyphSource | null;
+  /** 보조기술이 읽을 이름. 한 페이지에 터미널이 여럿이면 구별되게 준다. */
+  ariaLabel?: string;
+  /** 스크린 리더 모드. 켜면 바뀐 줄이 라이브 리전으로 읽힌다(비용이 있어 기본 꺼짐). */
+  screenReaderMode?: boolean;
   /**
    * 키가 터미널에 닿기 전에 앱이 먼저 본다. `false` 를 돌려주면 터미널은 그 키를 **완전히
    * 무시한다**(기본 바인딩도, 코어 인코딩도 타지 않는다). 앱 단축키가 터미널보다 우선해야 할 때.
@@ -88,6 +92,8 @@ export interface DomHost {
   presizeBacking(): void;
   /** 이 프레임에 그릴 장식. 메인이 그리는 모드에서만 의미가 있다(워커 모드는 백엔드로 간다). */
   setDecorations(spans: DecorationSpan[]): void;
+  /** 스크린 리더가 읽을 줄을 라이브 리전에 추가한다. */
+  announce(lines: string[]): void;
   redraw(): void;
   dispose(): void;
 }
@@ -153,8 +159,43 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   } satisfies Partial<CSSStyleDeclaration>);
   ime.autocapitalize = "off";
   ime.spellcheck = false;
+
+  // ── 접근성 ────────────────────────────────────────────────
+  // **캔버스는 보조기술이 읽을 수 없다.** 픽셀뿐이라 스크린 리더에게는 빈 요소와 같다. 그래서
+  // 캔버스를 접근성 트리에서 빼고(`aria-hidden`), **이미 포커스를 받는 textarea 를 앵커로 삼는다** —
+  // 사용자가 Tab 으로 도달하는 곳도, 키를 받는 곳도 거기다.
+  canvas.setAttribute("aria-hidden", "true");
+  canvas.tabIndex = -1; // 포커스는 textarea 가 받는다(캔버스로 가면 키가 안 먹는다)
+  ime.setAttribute("role", "textbox");
+  ime.setAttribute("aria-multiline", "true");
+  ime.setAttribute("aria-label", opts.ariaLabel ?? "터미널");
+  // 브라우저가 값 없는 textarea 를 "비어 있음"으로 읽지 않도록 설명을 붙인다.
+  ime.setAttribute("aria-roledescription", "터미널");
+
+  /**
+   * 스크린 리더가 읽을 라이브 리전. **`screenReaderMode` 일 때만 내용이 들어간다** — 매 프레임
+   * 화면을 텍스트로 뽑아 비교해야 해서 비용이 있고, 켜지 않은 사용자에게 물릴 이유가 없다.
+   *
+   * 시각적으로 숨기되 접근성 트리에는 남긴다(`display:none` 이면 읽히지 않는다).
+   */
+  const live = document.createElement("div");
+  live.setAttribute("aria-live", "polite");
+  live.setAttribute("aria-atomic", "false");
+  Object.assign(live.style, {
+    position: "absolute",
+    width: "1px",
+    height: "1px",
+    margin: "-1px",
+    padding: "0",
+    border: "0",
+    overflow: "hidden",
+    clip: "rect(0 0 0 0)",
+    clipPath: "inset(50%)",
+    whiteSpace: "nowrap",
+  } satisfies Partial<CSSStyleDeclaration>);
+
   if (getComputedStyle(el).position === "static") el.style.position = "relative";
-  el.append(canvas, ime);
+  el.append(canvas, ime, live);
 
   const doRender = opts.render !== false;
   const renderer = doRender ? new CanvasRenderer() : null;
@@ -244,15 +285,16 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     }, BLINK_MS) as unknown as number;
   }
 
-  function cellOf(ev: MouseEvent): [number, number] {
+  function cellOfPoint(clientX: number, clientY: number): [number, number] {
     const r = canvas.getBoundingClientRect();
-    const row = Math.floor((ev.clientY - r.top) / metrics.cellHeight);
-    const col = Math.floor((ev.clientX - r.left) / metrics.cellWidth);
+    const row = Math.floor((clientY - r.top) / metrics.cellHeight);
+    const col = Math.floor((clientX - r.left) / metrics.cellWidth);
     return [
       Math.max(0, Math.min(term.size.rows - 1, row)),
       Math.max(0, Math.min(term.size.cols - 1, col)),
     ];
   }
+  const cellOf = (ev: MouseEvent): [number, number] => cellOfPoint(ev.clientX, ev.clientY);
 
   // ── 이벤트 ───────────────────────────────────────────────
   const onKeyDown = (ev: KeyboardEvent) => {
@@ -458,6 +500,88 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     term.scroll(Math.sign(-ev.deltaY) * 3);
   };
 
+  // ── 터치 ──────────────────────────────────────────────────
+  //
+  // **브라우저의 마우스 에뮬레이션에 기대지 않는다.** `touchend` 뒤에 오는 합성 `mousedown` 은
+  // 300ms 늦고 좌표가 어긋나며, 무엇보다 **드래그를 선택으로 오해한다** — 손가락으로 화면을
+  // 밀면 스크롤을 기대하지 텍스트가 잡히길 기대하지 않는다. 그래서 터치를 직접 다루고 합성
+  // 이벤트는 `preventDefault` 로 막는다.
+  //
+  // 뜻은 셋이다: **탭**(포커스 — 소프트 키보드), **세로 드래그**(스크롤), **길게 누르기**(선택).
+  const TOUCH_SLOP_PX = 10; // 이만큼 움직이면 탭이 아니라 드래그다
+  const LONG_PRESS_MS = 500;
+  let touch: {
+    id: number;
+    x: number;
+    y: number;
+    startY: number;
+    moved: boolean;
+    selecting: boolean;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  const onTouchStart = (ev: TouchEvent) => {
+    if (mouseGrabbed(ev as unknown as MouseEvent)) return; // 앱이 마우스를 잡았으면 그쪽 규약이다
+    if (ev.touches.length !== 1) return; // 두 손가락은 브라우저 확대/스크롤에 맡긴다
+    const t = ev.touches[0]!;
+    touch = {
+      id: t.identifier,
+      x: t.clientX,
+      y: t.clientY,
+      startY: t.clientY,
+      moved: false,
+      selecting: false,
+      timer: globalThis.setTimeout(() => {
+        // 길게 누르면 그 자리의 단어를 잡는다 — 모바일에서 드래그로 선택하기는 어렵다.
+        if (!touch || touch.moved) return;
+        touch.selecting = true;
+        const [row, col] = cellOfPoint(touch.x, touch.y);
+        term.selectWord(row, col);
+        redraw();
+      }, LONG_PRESS_MS),
+    };
+  };
+
+  const onTouchMove = (ev: TouchEvent) => {
+    if (!touch) return;
+    const t = [...ev.touches].find((x) => x.identifier === touch!.id);
+    if (!t) return;
+    const dy = t.clientY - touch.y;
+    if (!touch.moved && Math.hypot(t.clientX - touch.x, t.clientY - touch.startY) > TOUCH_SLOP_PX) {
+      touch.moved = true;
+      clearTimeout(touch.timer);
+    }
+    if (touch.selecting) {
+      const [row, col] = cellOfPoint(t.clientX, t.clientY);
+      term.selectExtend(row, col);
+      redraw();
+    } else if (touch.moved) {
+      // **위로 밀면 과거로 간다** — 종이를 밀어 올리는 감각이고, 네이티브 터미널도 그렇다.
+      const rows = dy / metrics.cellHeight;
+      if (Math.abs(rows) >= 1) {
+        term.scroll(Math.trunc(rows));
+        touch.y = t.clientY;
+      }
+    }
+    ev.preventDefault(); // 페이지가 함께 스크롤되면 화면이 통째로 움직인다
+  };
+
+  const onTouchEnd = (ev: TouchEvent) => {
+    if (!touch) return;
+    clearTimeout(touch.timer);
+    if (!touch.moved && !touch.selecting) {
+      // 탭 — 소프트 키보드를 띄운다. 커서를 옮기지는 않는다(셸이 커서를 소유한다).
+      ime.focus();
+      ev.preventDefault(); // 합성 mousedown 이 선택을 시작하지 않게
+    }
+    touch = null;
+  };
+
+  canvas.addEventListener("touchstart", onTouchStart, { passive: true });
+  canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+  canvas.addEventListener("touchend", onTouchEnd);
+  canvas.addEventListener("touchcancel", onTouchEnd);
+
   canvas.addEventListener("mousedown", onMouseDown);
   canvas.addEventListener("mousemove", onMouseMove);
   canvas.addEventListener("click", onClick);
@@ -491,6 +615,20 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     setDecorations(spans) {
       decorations = spans;
       redraw();
+    },
+    /**
+     * 스크린 리더에게 읽힐 줄을 밀어 넣는다. **바뀐 줄만** 온다 — 화면 전체를 매번 읽으면
+     * 사용자가 출력 하나마다 24 줄을 듣는다.
+     */
+    announce(lines) {
+      if (lines.length === 0) return;
+      for (const text of lines) {
+        const p = document.createElement("div");
+        p.textContent = text;
+        live.append(p);
+      }
+      // 라이브 리전이 무한히 자라면 DOM 이 부풀고 일부 리더가 전체를 다시 읽는다.
+      while (live.childElementCount > 40) live.firstElementChild?.remove();
     },
     setOptions(next) {
       options = { ...options, ...next };
@@ -529,6 +667,11 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
       renderSub.dispose();
       canvas.removeEventListener("mousedown", onMouseDown);
       canvas.removeEventListener("mousemove", onMouseMove);
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("touchmove", onTouchMove);
+      canvas.removeEventListener("touchend", onTouchEnd);
+      canvas.removeEventListener("touchcancel", onTouchEnd);
+      if (touch) clearTimeout(touch.timer);
       canvas.removeEventListener("click", onClick);
       canvas.removeEventListener("wheel", onWheel);
       globalThis.removeEventListener("mouseup", onMouseUp);

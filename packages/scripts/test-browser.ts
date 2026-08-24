@@ -763,6 +763,197 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   );
 }
 
+// **터치.** 브라우저의 마우스 에뮬레이션에 기대지 않고 직접 다루므로, 세 가지 뜻(탭·드래그·
+// 길게 누르기)이 각각 제 일을 하는지 본다. 실기기는 못 쓰지만 이벤트 경로는 여기서 덮인다.
+{
+  const p = await browser.newPage();
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/worker.html?worker=false`);
+  await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+    timeout: 15_000,
+  });
+  const r = await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = (ms = 250) => new Promise((res) => setTimeout(res, ms));
+    t.reset();
+    await wait();
+    t.setOptions({ scrollback: 500 });
+    await wait();
+    for (let i = 0; i < 60; i++) t.write(`row ${i} word\r\n`);
+    await wait();
+
+    const cv = document.querySelector("canvas") as HTMLCanvasElement;
+    const box = cv.getBoundingClientRect();
+    // `TouchEvent` 는 진짜 `Touch` 인스턴스를 요구한다 — 평범한 객체는 거절당한다.
+    const pt = (x: number, y: number) =>
+      new Touch({ identifier: 1, target: cv, clientX: x, clientY: y });
+    const fire = (type: string, touches: Touch[]) =>
+      cv.dispatchEvent(
+        new TouchEvent(type, { touches, changedTouches: touches, bubbles: true, cancelable: true }),
+      );
+
+    const cx = box.left + box.width / 2;
+    const cy = box.top + box.height / 2;
+
+    // 1) 탭 — 포커스가 textarea 로 간다(소프트 키보드).
+    (document.activeElement as HTMLElement | null)?.blur();
+    fire("touchstart", [pt(cx, cy)]);
+    await wait(50);
+    fire("touchend", []);
+    await wait();
+    const focused = document.activeElement?.tagName ?? "";
+
+    // 1b) 미세하게 떨린 탭 — 슬롭 안이면 여전히 탭이다(손가락은 완벽히 멈추지 않는다).
+    (document.activeElement as HTMLElement | null)?.blur();
+    fire("touchstart", [pt(cx, cy)]);
+    fire("touchmove", [pt(cx + 3, cy + 2)]); // 슬롭(10px) 안
+    await wait(50);
+    fire("touchend", []);
+    await wait();
+    const focusedAfterJitter = document.activeElement?.tagName ?? "";
+
+    // 2) 세로 드래그 — 스크롤한다(선택이 아니라).
+    const before = { off: 0 };
+    await new Promise<void>((res) => {
+      const sub = t.onRender((m: any) => {
+        before.off = m.scroll.offset;
+        sub.dispose();
+        res();
+      });
+      t.write("");
+    });
+    fire("touchstart", [pt(cx, cy)]);
+    for (let i = 1; i <= 6; i++) fire("touchmove", [pt(cx, cy + i * 20)]); // 아래로 민다 = 과거로
+    fire("touchend", []);
+    await wait();
+    let afterDrag = before.off;
+    await new Promise<void>((res) => {
+      const sub = t.onRender((m: any) => {
+        afterDrag = m.scroll.offset;
+        sub.dispose();
+        res();
+      });
+      t.write("");
+    });
+    const selAfterDrag = await t.selectionText();
+
+    // 3) 길게 누르기 — 단어를 잡는다.
+    t.selectClear();
+    t.scrollToBottom();
+    await wait();
+    fire("touchstart", [pt(box.left + 4, box.top + 4)]);
+    await wait(700); // LONG_PRESS_MS 를 넘긴다
+    fire("touchend", []);
+    await wait();
+    const selAfterHold = await t.selectionText();
+
+    return {
+      focused,
+      focusedAfterJitter,
+      beforeOff: before.off,
+      afterDrag,
+      selAfterDrag,
+      selAfterHold,
+    };
+  });
+  check("터치: 탭이 입력 포커스를 준다", r.focused === "TEXTAREA", r.focused);
+  check("터치: 떨림은 탭으로 본다", r.focusedAfterJitter === "TEXTAREA", r.focusedAfterJitter);
+  check(
+    "터치: 세로 드래그가 스크롤한다",
+    r.afterDrag > r.beforeOff,
+    `${r.beforeOff} → ${r.afterDrag}`,
+  );
+  check("터치: 드래그는 선택하지 않는다", r.selAfterDrag === null, JSON.stringify(r.selAfterDrag));
+  check(
+    "터치: 길게 누르면 단어를 잡는다",
+    (r.selAfterHold ?? "").length > 0,
+    JSON.stringify(r.selAfterHold),
+  );
+  check("터치: 에러 없음", errs.length === 0, errs[0] ?? "");
+  await p.close();
+}
+
+// **접근성.** 캔버스는 보조기술이 읽을 수 없으므로 트리에서 빼고 textarea 를 앵커로 삼는다.
+// 스크린 리더 모드에서는 바뀐 줄이 라이브 리전에 들어가야 한다.
+for (const [mode, sr] of [
+  ["full", "1"],
+  ["false", "1"],
+  ["full", "0"],
+] as const) {
+  const p = await browser.newPage();
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/a11y.html?worker=${mode}&sr=${sr}`);
+  await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+    timeout: 15_000,
+  });
+  const r = await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = () => new Promise((res) => setTimeout(res, 300));
+    const host = document.getElementById("host")!;
+    const cv = host.querySelector("canvas")!;
+    const ta = host.querySelector("textarea")!;
+    const live = host.querySelector("[aria-live]");
+
+    t.write("first line\r\n");
+    await wait();
+    const afterFirst = live?.textContent ?? "";
+    t.write("second line\r\n");
+    await wait();
+    const afterSecond = live?.textContent ?? "";
+
+    return {
+      canvasHidden: cv.getAttribute("aria-hidden"),
+      canvasTabIndex: cv.tabIndex,
+      taRole: ta.getAttribute("role"),
+      taLabel: ta.getAttribute("aria-label"),
+      liveExists: live !== null,
+      livePolite: live?.getAttribute("aria-live") ?? null,
+      afterFirst,
+      afterSecond,
+      // 라이브 리전이 시각적으로 숨겨졌는가(읽히되 보이지 않아야 한다).
+      liveW: live ? Math.round(live.getBoundingClientRect().width) : -1,
+    };
+  });
+  const tag = `a11y(${mode}${sr === "1" ? "·SR" : ""})`;
+  check(
+    `${tag}: 캔버스가 접근성 트리에서 빠진다`,
+    r.canvasHidden === "true" && r.canvasTabIndex === -1,
+    `${r.canvasHidden}/${r.canvasTabIndex}`,
+  );
+  check(
+    `${tag}: textarea 가 앵커다`,
+    r.taRole === "textbox" && r.taLabel === "테스트 터미널",
+    `${r.taRole}/${r.taLabel}`,
+  );
+  check(
+    `${tag}: 라이브 리전이 있고 숨겨져 있다`,
+    r.liveExists && r.livePolite === "polite" && r.liveW <= 1,
+    `${r.livePolite} w=${r.liveW}`,
+  );
+  if (sr === "1") {
+    check(
+      `${tag}: 새 줄이 읽힌다`,
+      r.afterFirst.includes("first line"),
+      JSON.stringify(r.afterFirst).slice(0, 60),
+    );
+    check(
+      `${tag}: 바뀐 줄만 더해진다`,
+      r.afterSecond.includes("second line") && r.afterSecond.split("first line").length === 2,
+      JSON.stringify(r.afterSecond).slice(0, 80),
+    );
+  } else {
+    check(
+      `${tag}: 끄면 아무것도 안 읽힌다`,
+      r.afterSecond === "",
+      JSON.stringify(r.afterSecond).slice(0, 40),
+    );
+  }
+  check(`${tag}: 에러 없음`, errs.length === 0, errs[0] ?? "");
+  await p.close();
+}
+
 // **링크 provider 가 실제 마우스와 이어지는가.** 모델은 bun test 가 덮지만, hover 커서와 클릭
 // 활성화는 DOM 이벤트라 여기서만 볼 수 있다.
 for (const mode of ["full", "false"] as const) {

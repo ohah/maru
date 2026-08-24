@@ -101,6 +101,9 @@ export class Terminal {
   #customKey: ((ev: KeyboardEvent) => boolean) | null = null;
   readonly #decorations = new DecorationStore();
   readonly #links = new LinkRegistry();
+  /** 스크린 리더에게 이미 읽힌 줄. 바뀐 것만 새로 읽히게 하려고 들고 있다. */
+  #srLines: string[] = [];
+  #srPending = false;
   #decorationsWired = false;
 
   constructor(opts: TerminalOptions = {}) {
@@ -179,6 +182,10 @@ export class Terminal {
       const local = this.#backend as { glyphSource?: () => GlyphSource } | null;
       this.#dom = attachDom(el, this, {
         ...this.#attachOptions(),
+        // **DOM 전용 옵션은 여기서만 붙인다** — `#attachOptions()` 는 워커 렌더 옵션으로도
+        // 쓰이는데 거기에는 접근성 개념이 없다(워커는 DOM 을 만지지 않는다).
+        ariaLabel: this.#opts.ariaLabel,
+        screenReaderMode: this.#opts.screenReaderMode,
         glyphs: local?.glyphSource?.() ?? null,
         onFontZoom: (d) => this.#fontZoom(d),
         // 워커 경로에만 있던 배선이다. 없으면 조합 텍스트가 화면에 들어가지 않는다.
@@ -250,6 +257,8 @@ export class Terminal {
     // 캔버스를 먼저 만들어야 소유권을 넘길 수 있다. DOM 계층은 렌더를 하지 않는다.
     const dom = attachDom(el, this, {
       ...this.#attachOptions(false),
+      ariaLabel: this.#opts.ariaLabel,
+      screenReaderMode: this.#opts.screenReaderMode,
       onPreedit: (text) => this.#emitPreedit(text),
       onFontZoom: (d) => this.#fontZoom(d),
       // **지역 변수로 잡는다.** 이 콜백은 `attachDom` 안의 타이머에서 불리는데, 거기서
@@ -392,6 +401,7 @@ export class Terminal {
     // **마커를 먼저 보정한다.** 버려진 줄만큼 당기지 않으면 장식이 엉뚱한 줄에 그려진다.
     this.#decorations.sync(meta.evicted, meta.pushed);
     this.#links.invalidate(); // 화면이 바뀌었으니 줄 텍스트를 다시 뽑아야 한다
+    this.#announceChanges();
     this.#pushDecorations(meta);
     if (prev) {
       // **위치만 본다.** shape·visible 은 깜빡임으로 매 프레임 토글되므로 이동으로 오해하면 안 된다.
@@ -450,6 +460,35 @@ export class Terminal {
   /** 장식을 지우고 화면에서도 즉시 걷는다. `Decoration.dispose()` 와 짝이다. */
   #refreshDecorations(): void {
     if (this.#prevMeta) this.#pushDecorations(this.#prevMeta);
+  }
+
+  /**
+   * 바뀐 줄을 스크린 리더에게 읽힌다.
+   *
+   * **화면 전체를 매번 읽으면 안 된다** — 출력 하나마다 24 줄을 듣게 된다. 직전 화면과 비교해
+   * 달라진 줄만 보낸다. 대량 출력에서는 프레임이 마이크로태스크로 접히므로 여기도 자연히
+   * 뭉쳐 나간다.
+   *
+   * `serialize()` 는 워커 모드에서 왕복이라 **모드가 켜졌을 때만** 부른다.
+   */
+  #announceChanges(): void {
+    if (!this.#opts.screenReaderMode || this.#srPending || this.#disposed) return;
+    this.#srPending = true;
+    void this.serialize()
+      .then((text) => {
+        this.#srPending = false;
+        if (this.#disposed) return;
+        const now = text.split("\n").map((l) => l.trimEnd());
+        const changed: string[] = [];
+        for (let i = 0; i < now.length; i++) {
+          if (now[i] !== this.#srLines[i] && now[i] !== "") changed.push(now[i]);
+        }
+        this.#srLines = now;
+        if (changed.length > 0) this.#dom?.announce?.(changed);
+      })
+      .catch(() => {
+        this.#srPending = false; // 터미널이 사라졌다 — 읽을 것도 없다
+      });
   }
 
   #need(): Backend {

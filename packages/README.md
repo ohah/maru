@@ -129,7 +129,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
 - **없는 것**: 이미지(Kitty graphics)
-- **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
+- **검증 안 된 것**: 실기기 터치(합성 이벤트로 경로는 덮었다), 실제 스크린 리더
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
 
@@ -155,6 +155,19 @@ term.selectLines(0, 5);
 term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "k")); // ⌘K 는 앱이
 await term.serialize();                        // 화면을 평문으로(스타일은 버린다)
 ```
+
+### 접근성과 터치
+
+```ts
+new Terminal({ screenReaderMode: true, ariaLabel: "빌드 로그" });
+```
+
+캔버스는 보조기술이 읽을 수 없어 접근성 트리에서 빼고, 포커스를 받는 textarea 를 앵커로
+씁니다. `screenReaderMode` 를 켜면 **바뀐 줄**이 라이브 리전으로 읽힙니다(기본은 꺼짐 — 프레임
+마다 텍스트를 비교하는 비용이 있습니다).
+
+터치는 **탭**(입력 포커스) · **세로 드래그**(스크롤) · **길게 누르기**(단어 선택)로 해석합니다.
+브라우저의 마우스 에뮬레이션은 드래그를 선택으로 오해하므로 쓰지 않습니다.
 
 ### 링크 규칙
 

@@ -809,6 +809,64 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   // **"떴다" 로는 부족하다** — 빈 캔버스도 만들어지기는 한다. 실제로 그려졌는지 픽셀로 본다.
   check("데모: 화면이 실제로 그려진다", r.lit > 1000, `${r.lit}/${r.total}px`);
   check("데모: 사이드바 컨트롤이 다 있다", r.controls === 8, `${r.controls}/8`);
+
+  // **조합 글자가 두 번 보이면 안 된다.** 라이브러리가 오버레이로 그리고 뒤 셀을 밀어 주므로
+  // (계약 §5) 소비자가 또 끼워 넣으면 `한글한글` 이 된다 — 데모가 실제로 그랬다.
+  const ime = await p.evaluate(async () => {
+    const ta = document.querySelector("#host textarea") as HTMLTextAreaElement;
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    ta.focus();
+    ta.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    ta.value = "한글";
+    ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "한글", bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    // **코어 버퍼**를 본다 — 오버레이는 여기 없어야 정상이다(렌더러만 그린다).
+    const text: string = await t.serialize();
+    const line = text.split("\n").find((l) => l.includes("한")) ?? "";
+    return { line: line.trimEnd(), count: (line.match(/한/g) ?? []).length };
+  });
+  check(
+    "데모: IME 조합이 화면 버퍼에 들어가지 않는다",
+    ime.count === 0,
+    `"${ime.line}" (${ime.count}회)`,
+  );
+
+  // **조합 중 Cmd 조합이 글자 순서를 뒤집으면 안 된다.** 확정 글자는 코어(워커일 수 있다)를
+  // 거쳐 나오고 바인딩은 메인에서 곧바로 나가므로, 둘을 함께 보내면 커서가 먼저 움직여
+  // "무" + 조합"야" 가 `야무` 가 된다(실측). 조합 중 Cmd 는 확정에만 쓴다.
+  const swap = await p.evaluate(async () => {
+    const ta = document.querySelector("#host textarea") as HTMLTextAreaElement;
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = (ms = 200) => new Promise((r) => setTimeout(r, ms));
+    t.reset();
+    await wait();
+    ta.focus();
+    ta.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "무", bubbles: true }));
+    ta.dispatchEvent(new CompositionEvent("compositionend", { data: "무", bubbles: true }));
+    await wait();
+    ta.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "야", bubbles: true }));
+    await wait();
+    ta.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowLeft",
+        metaKey: true,
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    ta.dispatchEvent(new CompositionEvent("compositionend", { data: "야", bubbles: true }));
+    await wait(400);
+    const text: string = await t.serialize();
+    return (text.split("\n").find((l) => l.includes("무") || l.includes("야")) ?? "").trimEnd();
+  });
+  check(
+    "데모: 조합 중 Cmd 조합이 글자를 뒤집지 않는다",
+    swap.includes("무야") && !swap.includes("야무"),
+    JSON.stringify(swap),
+  );
   await p.close();
 }
 

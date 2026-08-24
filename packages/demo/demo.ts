@@ -38,19 +38,19 @@ const PROMPT = "\x1b[38;5;114m➜\x1b[0m \x1b[38;5;39m~\x1b[0m ";
 let line = "";
 let pos = 0;
 let history: string[] = [];
-let preedit = ""; // IME 조합 중인 텍스트 — 이 셸이 직접 줄에 끼워 그린다
 let histIdx = -1;
 
 /**
  * 편집 줄을 통째로 다시 그린다(readline 과 같은 방식) — 커서 앞뒤 삽입·삭제가 한 경로가 된다.
- * IME 조합 중이면 marked text 를 **끼워 넣어** 코어가 뒤 텍스트를 밀게 한다. 화면에 덮어
- * 그리기만 하면 커서 뒤 글자가 가려진다.
+ *
+ * **조합 중인 글자는 여기서 그리지 않는다.** 라이브러리가 오버레이로 그리고 뒤 셀을 밀어
+ * 주므로(계약 §5), 셸이 또 끼워 넣으면 같은 글자가 두 번 보인다 — 실제로 `한글한글` 이 됐다.
  */
 async function redraw() {
   const gs = graphemes(line);
   const before = gs.slice(0, pos).join("");
   const after = gs.slice(pos).join("");
-  term.write("\r\x1b[K" + PROMPT + before + preedit + after);
+  term.write("\r\x1b[K" + PROMPT + before + after);
   const back = after ? await term.measureCells(after) : 0;
   if (back) term.write(`\x1b[${back}D`);
 }
@@ -266,12 +266,6 @@ async function mount() {
   const usePty = $<HTMLSelectElement>("o-source").value === "pty";
   if (!usePty) {
     term.onData(onBytes);
-    // 조합을 이 셸이 그린다고 알린다 — 구독하면 라이브러리는 화면에 넣지 않는다.
-    // **PTY 모드에서는 구독하지 않는다** — 줄을 다시 그리는 건 진짜 셸(readline)의 일이다.
-    term.onPreedit((text) => {
-      preedit = text;
-      void redraw();
-    });
   }
   term.onFallback((r) => console.warn("워커 폴백:", r));
   await term.open($("host"));

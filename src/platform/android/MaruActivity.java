@@ -120,6 +120,33 @@ public class MaruActivity extends android.app.NativeActivity {
         /// 그 콜백에는 **글자가 실려 오지 않는다** — 무엇을 확정할지는 받는 쪽이 기억하고 있어야
         /// 한다. 안 들고 있으면 확정된 글자가 통째로 사라진다.
         private String composing = "";
+        /// **이번 조합에서 이미 내보낸 앞부분.** 조합 문자열은 자랄 때마다 **처음부터 통째로**
+        /// 다시 온다(`가` → `가나` → `가나다`). 앞부분을 보낸 뒤 그 사실을 안 들고 있으면 다음
+        /// 호출에서 같은 글자를 또 보내 **`가가나`** 가 된다.
+        private String sent = "";
+
+        /// 원격이 들고 있는 이번 조합의 앞부분을 `target` 과 **같게 맞춘다.**
+        ///
+        /// 조합은 자라기만 하지 않는다 — 백스페이스나 후보 선택으로 **줄고 갈아치워진다.** 늘어난
+        /// 것만 보내고 줄어든 것을 안 지우면, 이미 나간 글자가 원격에 남은 채 다음 입력에서 처음부터
+        /// 다시 나가 **지울수록 늘어난다**(기기 실측: `가나다` 를 지우니 `가나다아 가나다 가나당`).
+        ///
+        /// 공통 접두사까지는 그대로 두고, **넘치는 만큼 지우고 모자라는 만큼 보낸다.** 지우는 것은
+        /// 백스페이스 키다 — 터미널에는 "앞의 n글자를 지워라" 가 없고 그 자리를 셸·TUI 가 해석한다.
+        private void reconcileSent(String target) {
+            int common = 0;
+            final int lim = Math.min(sent.length(), target.length());
+            while (common < lim && sent.charAt(common) == target.charAt(common)) common++;
+            // **코드포인트 경계로 되돌린다** — 서로게이트 쌍 가운데서 끊으면 반쪽 글자가 남는다.
+            if (common > 0 && common < sent.length()
+                    && Character.isLowSurrogate(sent.charAt(common))) common--;
+            if (common < sent.length()) {
+                final int del = sent.codePointCount(common, sent.length());
+                for (int i = 0; i < del; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL, 0, 0);
+            }
+            if (common < target.length()) nativeCommit(target.substring(common));
+            sent = target;
+        }
 
         /// **ASCII 만으로 된 조합인가.** 터미널에서 영문 예측 입력은 방해다 — 누른 글자는 그
         /// 자리에서 나가야 하고, 확정을 기다릴 이유가 없다. 조합이 필요한 것은 자모가 모여
@@ -153,9 +180,13 @@ public class MaruActivity extends android.app.NativeActivity {
             // **`sendKeyEvent` 를 대신 통과시키는 방법은 안 된다** — 그 글자가 키로 한 번 나가고,
             // 나중에 조합이 확정되며 `commitText` 로 **또** 나가 중복이 된다.
             if (!next.isEmpty() && (nativeArmedMods() != 0 || isAsciiOnly(next))) {
+                // **이미 내보낸 앞부분은 빼고 넘긴다** — 안 빼면 그 글자가 두 번 나간다.
+                String t = next;
+                if (!sent.isEmpty() && t.startsWith(sent)) t = t.substring(sent.length());
                 composing = "";
+                sent = ""; // 아래 `restartInput` 이 조합을 끊는다 — 접두사도 함께 버린다
                 nativeComposing("");
-                nativeCommit(next);
+                if (!t.isEmpty()) nativeCommit(t);
                 // **IME 의 조합도 끊는다.** 우리가 가로채 커밋해도 프레임워크의 Editable 은 여전히
                 // 조합 중이라, 다음 글자가 **이어붙는다** — `Ctrl+B` 뒤에 `m` 을 치면 tmux 로
                 // 가야 할 `m` 이 `bm` 조합으로 쌓여 한 덩어리로 왔다(기기 실측: `commit_bytes=3`).
@@ -163,7 +194,23 @@ public class MaruActivity extends android.app.NativeActivity {
                 restartInput();
                 return true;
             }
-            composing = next;
+            // **완성된 글자는 조합이 끝나기를 기다리지 않는다.**
+            //
+            // 한글은 **한 음절씩** 조합된다 — 조합 문자열이 두 글자가 됐다는 것은 앞 글자가 더는
+            // 안 바뀐다는 뜻이다(`가나` 의 `가` 에는 받침이 붙을 수 없다). 그런데 지금까지는
+            // `commitText`·`finishComposingText` 가 올 때까지 **한 글자도 안 내보냈다**.
+            //
+            // 터미널에서 그 기다림은 그냥 늦는 것이 아니다. 원격의 TUI(claude·codex)는 **자기가
+            // 받은 글자로** 자동완성과 선입력을 계산하는데, preedit 은 우리 화면에만 있어 그쪽은
+            // 아무것도 못 본다 — 다 치고 확정한 뒤에야 한꺼번에 도착한다(사용자 보고: "자동완성이나
+            // 선입력이 망가진다"). macOS 터미널이 그렇듯 **완성되는 대로** 보낸다.
+            //
+            // **마지막 한 글자만 조합으로 남긴다** — 그것만이 아직 바뀔 수 있다. 나머지는 원격의
+            // 것이고, 그 상태를 맞추는 일은 `reconcileSent` 가 한다(줄어드는 경우까지 거기서 본다).
+            final int n = next.length();
+            final int last = n > 0 ? next.offsetByCodePoints(n, -1) : 0;
+            reconcileSent(next.substring(0, last));
+            composing = next.substring(last);
             nativeComposing(composing);
             return true;
         }
@@ -176,7 +223,8 @@ public class MaruActivity extends android.app.NativeActivity {
             // 그때 친 글자가 통째로 없어졌다.
             final String done = composing;
             composing = "";
-            nativeComposing("");   // 조합이 끝났다 — 겉치레를 지운다
+            sent = "";             // 조합이 끝났다 — 다음 조합은 처음부터 센다
+            nativeComposing("");   // 겉치레를 지운다
             if (!done.isEmpty()) nativeCommit(done);
             return true;
         }
@@ -185,9 +233,14 @@ public class MaruActivity extends android.app.NativeActivity {
         public boolean commitText(CharSequence text, int newCursorPosition) {
             // **조합을 먼저 비운다.** 이 호출 자체가 확정이므로, 안 비우면 뒤따라오는
             // `finishComposingText` 가 같은 글자를 **한 번 더** 넣는다(IME 마다 순서가 다르다).
+            String t = text == null ? "" : text.toString();
+            // **이미 내보낸 앞부분은 빼고 넘긴다.** 확정 문자열은 조합 전체로 오는데, 그중 앞부분은
+            // `setComposingText` 에서 이미 나갔다 — 안 빼면 그 글자들이 두 번 나간다.
+            if (!sent.isEmpty() && t.startsWith(sent)) t = t.substring(sent.length());
             composing = "";
+            sent = "";
             nativeComposing("");
-            nativeCommit(text == null ? "" : text.toString());
+            nativeCommit(t);
             return true;
         }
 

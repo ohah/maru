@@ -58,7 +58,9 @@ const tab_ops = @import("tab.zig");
 /// 제품 빌드에서는 `comptime` 으로 사라진다(배타 카운터와 같은 규약).
 pub var test_turn_snapshot_calls: usize = 0;
 
-pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
+/// `turn_key` 는 그 턴의 식별자(계약 §3.1). 관측 모드와 세션 base 는 빈 값을 넘긴다 — 전자는 알 길이
+/// 없고 후자는 계약상 턴이 아니다(`Snapshot.turn` 주석).
+pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, turn_key: []const u8) void {
     if (builtin.is_test) test_turn_snapshot_calls += 1;
     // **테스트에서는 세기만 하고 실제 작업은 하지 않는다.**
     //
@@ -111,6 +113,10 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
     if (self.turn_snapshot_repo) |old_repo| self.allocator.free(old_repo);
     self.turn_snapshot_session = owned;
     self.turn_snapshot_repo = owned_repo;
+    // **상한을 넘는 키는 안 담는다(자르지 않는다)** — 순수 층 `Ring.push` 와 같은 규율이고, 잘린 키는
+    // AT3 귀속에서 남의 턴과 거짓으로 일치한다. 여기서도 거르면 링까지 안 간다.
+    self.turn_snapshot_key_len = if (turn_key.len > 0 and turn_key.len <= self.turn_snapshot_key.len) turn_key.len else 0;
+    if (self.turn_snapshot_key_len > 0) @memcpy(self.turn_snapshot_key[0..turn_key.len], turn_key);
 }
 
 /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
@@ -1401,7 +1407,11 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // **사유가 둘이어도 한 번이다.** 세션 base(턴 0)와 턴 끝이 한 배치에 함께 와도(첫 프롬프트가 곧바로
     // 끝난 경우) 작업트리가 같으므로 두 번 찍을 이유가 없다. 배치를 건너 겹치는 경우는 순수 층의
     // 「같은 tree 가 연달아 오면 넣지 않는다」가 흡수한다(계약 §3 이 정한 안전망).
-    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId());
+    // **키는 `ev.turn_key` 가 아니라 진행 상태에서 읽는다.** 자식이 남은 턴은 마지막 `SubagentStop` 이
+    // 전이를 만드는데 **그 이벤트의 `turn_key` 는 codex 에서 자식의 것**이다(계약 §2 실측). `advance` 는
+    // lead 이벤트에서만 키를 채택하므로 `progress.turnKey()` 가 언제나 lead 의 현재 키다 — 알림 본문이
+    // 「자식이 아니라 lead 의 것이어야 한다」로 이미 판정된 것과 같은 함정, 같은 답이다.
+    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), term.agent_hook_progress.turnKey());
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
@@ -1692,7 +1702,7 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         }
         // 회전본에도 **같은 규율**을 건다 — 여기만 빠지면 회전된 로그에 든 `SessionStart` 의 base 를 잃고,
         // 그 세션의 첫 턴이 영영 안 뜬다.
-        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId());
+        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), term.agent_hook_progress.turnKey());
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }
@@ -1842,7 +1852,9 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     term.agent_state = current;
     // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
     if (maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current))) {
-        captureTurnSnapshot(self, term.surfaceId());
+        // **관측 모드에는 턴 키가 없다** — 그 축은 훅 payload 만 가진 것이라(계약 §3.1) 화면 관측으로는
+        // 알 길이 없다. 빈 키는 「모른다」이고, AT3 는 그런 항목에 provider 기록을 붙이지 않는다.
+        captureTurnSnapshot(self, term.surfaceId(), "");
     }
     if (current != previous) {
         if (displayed) self.metal_dirty = true;

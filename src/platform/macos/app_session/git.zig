@@ -338,14 +338,19 @@ pub fn drainGitStatus(self: *AppSession) void {
             // 워크트리로 옮겼을 때 멀쩡한 링을 «저장소가 바뀌었다» 로 비운다(적대적 검증 3회차).
             const repo = self.turn_snapshot_repo orelse "";
             if (self.turn_rings.ringFor(identity, repo)) |ring| {
-                ring.push(
-                    snapshot.tree,
-                    snapshot.surface_id,
-                    captured_s,
-                    @intFromEnum(agentKindForSurface(self, snapshot.surface_id)),
-                );
+                ring.push(.{
+                    .tree = snapshot.tree,
+                    .surface_id = snapshot.surface_id,
+                    .captured_s = captured_s,
+                    .agent_kind = @intFromEnum(agentKindForSurface(self, snapshot.surface_id)),
+                    // **요청할 때 붙들어 둔 턴 키**를 쓴다 — 신원·저장소와 같은 이유다. 여기서 Term 의
+                    // 진행 상태를 다시 읽으면 그 사이 다음 턴이 시작된 경우 **옛 스냅샷에 새 턴 키**가
+                    // 붙는다(계약 §3.1 이 시각 대신 키를 쓰라고 한 이유가 그런 어긋남이다).
+                    .turn_key = self.turn_snapshot_key[0..self.turn_snapshot_key_len],
+                });
             }
         }
+        self.turn_snapshot_key_len = 0;
         if (self.turn_snapshot_session) |sid| self.allocator.free(sid);
         self.turn_snapshot_session = null;
         if (self.turn_snapshot_repo) |path| self.allocator.free(path);

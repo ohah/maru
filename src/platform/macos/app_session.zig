@@ -30436,11 +30436,12 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var cwd_buf: [4096]u8 = undefined;
-    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
-    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
-    const root = try std.fs.path.join(a, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path });
-    defer a.free(root);
+    // **cwd 를 추측하지 않는다.** `<cwd>/.zig-cache/tmp/<sub>` 로 조립하면 그 테스트는 «빌드 스텝이 cwd 를
+    // 세워 주는가» 에 매달린다(그 값을 세우는 스텝과 안 세우는 스텝이 실제로 둘 다 있다). 디렉터리 핸들에서
+    // 실제 경로를 받으면 어느 스텝에서 돌든 같다 — 자식 셸의 리다이렉션 대상이라 정확해야 한다.
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
 
     // **환경을 격리한다.** `AppSession.init` 은 provider 설정 파일을 재조정하고 캐시에 로그 칸을 만든다 —
     // 격리를 잊으면 그 대상이 **개발자의 진짜 `~/.claude/settings.json` 과 캐시**다(이웃 훅 테스트들이 같은
@@ -30451,6 +30452,23 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
     defer a.free(cache);
     const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
     defer a.free(config);
+    // **바꾼 env 를 되돌린다.** 이 테스트는 tmp 를 가리키게 해 놓고 그 tmp 를 **지우고 나간다** — 되돌리지
+    // 않으면 뒤 테스트들이 «없는 디렉터리» 를 HOME/캐시로 물려받는다. 그 피해는 조용하다: 자기 env 를 안
+    // 세우는 테스트(턴 스냅샷 계열)가 캡처에 실패해 «링이 안 채워진다» 로만 나타난다.
+    const prev_home = std.c.getenv("HOME");
+    const prev_cache = std.c.getenv("XDG_CACHE_HOME");
+    const prev_config = std.c.getenv("MARU_CONFIG");
+    defer {
+        if (prev_home) |v| {
+            _ = setenv("HOME", v, 1);
+        } else _ = unsetenv("HOME");
+        if (prev_cache) |v| {
+            _ = setenv("XDG_CACHE_HOME", v, 1);
+        } else _ = unsetenv("XDG_CACHE_HOME");
+        if (prev_config) |v| {
+            _ = setenv("MARU_CONFIG", v, 1);
+        } else _ = unsetenv("MARU_CONFIG");
+    }
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));

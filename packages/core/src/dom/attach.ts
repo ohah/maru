@@ -302,22 +302,24 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     // 조합 중인 키는 IME 가 가진다. **단 Cmd 조합은 예외** — macOS 관례상 앱의 것이고,
     // 그대로 흘리면 Cmd+Delete 로 줄을 지워도 조합 텍스트가 화면에 남는다.
     if (inIme && !ev.metaKey) return;
-    // **조합 중에 온 `Cmd` 조합은 조합을 확정시키고 거기서 끝난다.** 키 자체는 보내지 않는다.
+    // **조합 중에 온 `Cmd` 조합은 조합을 확정시킨다.** 다만 그때 **기본 바인딩은 보내지 않는다**
+    // (아래 `imeEnded` 가 그 자리에서 멈춘다).
     //
-    // 보내면 순서가 뒤집힌다 — 확정 글자는 `term.key()` 로 **코어(워커일 수 있다)를 거쳐**
-    // 나오는데 바인딩은 `sendText` 로 **메인에서 곧바로** 나가므로, 커서가 먼저 움직이고 글자가
-    // 그 뒤에 들어간다. 실측: "무" 확정 + "야" 조합 중 `Cmd+←` → **`야무`**. 한 tick 미뤄도
-    // 워커 왕복이 더 느려 소용이 없다.
+    // 보내면 순서가 뒤집히기 때문이다 — 확정 글자는 `term.key()` 로 **코어(워커일 수 있다)를
+    // 거쳐** 나오는데 바인딩은 `sendText` 로 **메인에서 곧바로** 나가므로, 커서가 먼저 움직이고
+    // 글자가 그 뒤에 들어간다. 실측: "무" 확정 + "야" 조합 중 `Cmd+←` → **`야무`**. 한 tick
+    // 미뤄도 워커 왕복이 더 느려 소용이 없다. macOS 네이티브 앱들도 조합 중 명령키를 확정에
+    // 쓴다 — 사용자는 한 번 더 누르면 된다.
     //
-    // macOS 네이티브 앱들도 조합 중 명령키를 "조합 확정" 으로 쓴다 — 사용자는 한 번 더 누르면
-    // 된다. 조합이 남은 채로 커서가 움직이는 것보다 예측 가능하다.
-    if (inIme && ev.metaKey) {
+    // **여기서 통째로 막지는 않는다.** 선택·복사·폰트 크기·앱 단축키(`customKeyHandler`)는
+    // 바이트를 보내지 않으므로 순서 문제가 없다. 막으면 조합 중에 ⌘C 가 안 먹고 앱이 키를
+    // 먼저 볼 수도 없게 된다(계약 §7 이 약속한 것을 어긴다).
+    const imeEnded = inIme && ev.metaKey;
+    if (imeEnded) {
       composing = false;
       preedit = "";
       // `ime.value` 는 비우지 않는다 — 브라우저가 확정 텍스트를 그대로 흘려보내야 한다.
       opts.onPreedit?.("");
-      ev.preventDefault();
-      return;
     }
     // 앱이 먼저 본다. 조합 정리 뒤이므로 여기서 false 를 받아도 조합이 남지 않는다.
     if (opts.customKeyHandler?.(ev) === false) return;
@@ -339,9 +341,10 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
       if (ev.key !== bind.key) continue;
       if (!!bind.meta !== ev.metaKey || !!bind.alt !== ev.altKey) continue;
       if (ev.ctrlKey || ev.shiftKey) continue; // 수식자가 더 붙으면 다른 조합이다
+      ev.preventDefault();
+      if (imeEnded) return; // 조합만 확정하고 바이트는 보내지 않는다 — 위 주석 참고
       term.scrollToBottom();
       term.sendText(bind.send);
-      ev.preventDefault();
       return;
     }
     // 폰트 크기 — 본체의 increase/decrease/reset_font_size 와 같은 조합이다.

@@ -220,7 +220,8 @@ keep-alive 를 켠 터미널은 host 가 자식을 띄우고 그 자식이 GUI �
   아무도 안 만들어 훅이 조용히 나간다(그래서 주인 없는 로그도 안 생긴다).
 - **AH7-3a(완료 2026-08-24) — host 가 자기 칸을 만들고 치운다.** `session_host/agent_hook_logs.zig` 가
   네 수명을 갖는다: 칸 생성(0700, daemon 시작·spawn 마다), runtime 종료 시 그 로그+회전본 회수, daemon
-  정상 종료 시 자기 칸 회수, daemon 시작 시 **죽은 host 칸** sweep(판정은 manifest). base 경로는 env 를
+  정상 종료 시 자기 칸 회수, daemon 시작 시 **죽은 host 칸** sweep(판정은 칸이 스스로 적는 `owner.pid` — manifest 는 업그레이드 경로에서만 생겨 새 host 에는 없다).
+  base 경로는 env 를
   **한 곳에서만** 읽어(`resolveCacheBase`) manager 에 인자로 넘긴다 — 테스트가 프로세스 전역 env 를 흔들지
   않게. 검증은 실 fork PTY 수명 테스트 + 뮤테이션 4개(만들자마자 지우기·안 만들기·회수 안 하기·권한 0755).
 - **AH7-3b — GUI 가 그 칸을 읽는다.** 재접속한 GUI 가 workspace 의 `runtime-handle`(host_id:runtime_id)로

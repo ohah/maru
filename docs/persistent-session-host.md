@@ -308,6 +308,14 @@ runtime 종료 뒤 기존 handle        -> ended (자동 respawn/resume 없음)
 재접속 때 45→3으로 바뀌며, child 환경은 실행 중 교체할 수 없기 때문이다. runtime identity를 현재 GUI surface binding으로
 resolve하는 control-plane rebinding이 구현되기 전에는 persistent Term 내부의 self selector 연속성을 지원한다고 세지 않는다.
 
+**구현 상태(2026-08-24) ✅ — 에이전트 훅 신원은 예외다.** 같은 이유(«GUI process-local 값은 재접속을 못 넘는다»)
+때문에 훅 로그 경로도 이 child 밖에 있었는데, 그쪽은 **host 가 자기 신원을 실어** 해결했다 —
+`MARU_HOOK_INSTANCE=host_<32 hex host_id>` 와 `MARU_HOOK_PANE=<32 hex runtime_id>` 다. 둘 다 재실행·업그레이드를
+넘어 살아 있는 이름이라(그래서 pid 가 아니다) child 환경을 교체할 필요가 없다.
+`runtime_id` 는 그래서 **spawn 전에** 발급된다(자식 env 는 spawn 시점에 굳는다). 계약은
+[에이전트 훅 통합](agent-hooks.md) §4 가 소유한다. ⚠️ 이것이 `MARU_PANE_ID`(control-plane self selector)를
+대신하지는 않는다 — 두 값은 갈라진 변수이고, selector 연속성은 위 문단대로 여전히 미지원이다.
+
 ## 5. 다중 Workspace 연결 모델
 
 tmux의 session/window/pane 계층으로 Maru workspace를 번역하지 않는다. 각 terminal Term 슬롯이 독립

@@ -890,7 +890,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(allocator, std.testing.io, &registry);
+    manager.init(allocator, std.testing.io, &registry, null);
     defer manager.deinit();
     const runtime_ops = manager.runtimeOps();
     const runtime_id = try runtime_ops.spawn(runtime_ops.ctx, .{

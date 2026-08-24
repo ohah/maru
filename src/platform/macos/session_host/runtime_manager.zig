@@ -228,12 +228,19 @@ pub const RuntimeManager = struct {
     /// `runtime.clipboard_write`로 가져간다. read는 target(Pc)만 짧아 관측에 함께 싣는다.
     clipboards: std.AutoHashMapUnmanaged(RuntimeHandle, ClipboardState) = .empty,
     output_wake: ?OutputWake = null,
-    /// 훅 로그 경로의 인스턴스 칸으로 쓸 `host_id`(daemon 이 `setHookInstanceHost` 로 심는다). null 이면
+    /// 훅 로그 경로의 인스턴스 칸으로 쓸 `host_id`(`init` 이 받는다 — 제품 경로가 잊을 수 없게). null 이면
     /// 자식에 훅 신원을 싣지 않는다 — fail-closed.
     hook_instance_host: ?u128 = null,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
-    pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry) void {
+    /// `hook_instance_host` 는 **이 host 의 `host_id`** 다 — spawn 이 자식에게 훅 로그 경로의 인스턴스 칸으로
+    /// 실어 준다(docs/agent-hooks.md §4). `null` 이면 훅 신원을 아예 안 싣는다(fail-closed).
+    ///
+    /// **왜 인자인가**: 예전에는 `setHookInstanceHost` 를 따로 부르게 했는데, 업그레이드 후계자 경로
+    /// (`restore_activation`)가 그 호출을 빠뜨려 **업그레이드 뒤 새 자식이 훅 신원을 못 받는** 결함이 났다.
+    /// 증상은 「그 터미널만 관측 모드로 조용히 강등」이라 알아채기 어렵다. 인자로 만들면 새 제품 경로가
+    /// 생겨도 컴파일이 그 결정을 강제한다(테스트는 `null` 을 명시해 «훅 없는 host» 를 뜻한다).
+    pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry, hook_instance_host: ?u128) void {
         self.allocator = allocator;
         self.io = io;
         self.live_registry = LiveRegistry.init(allocator);
@@ -249,17 +256,7 @@ pub const RuntimeManager = struct {
         self.bell_counts = .empty;
         self.clipboards = .empty;
         self.output_wake = null;
-        self.hook_instance_host = null;
-    }
-
-    /// 이 host 의 `host_id` 를 알려 준다(daemon 이 bind 직후 한 번). spawn 이 자식에게 **훅 로그 경로의
-    /// 인스턴스 칸**으로 실어 준다 — 그 값이 없으면 host-backed 터미널은 훅 파일을 안 만들고 관측 모드로
-    /// 산다(fail-closed, docs/agent-hooks.md §4).
-    ///
-    /// **manager 가 host_id 를 스스로 만들지 않는다.** 그 값의 소유자는 daemon(manifest·소켓 경로와 같은
-    /// 신원)이고, 여기서 따로 발급하면 두 신원이 갈린다.
-    pub fn setHookInstanceHost(self: *RuntimeManager, host_id: u128) void {
-        self.hook_instance_host = host_id;
+        self.hook_instance_host = hook_instance_host;
     }
 
     /// Product daemon/restore calls this before any runtime exists. Tests that do not exercise the
@@ -1865,7 +1862,7 @@ test "runtime manager: output wake is nonblocking CLOEXEC and coalesces queue pu
     var host_registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
     defer host_registry.deinit();
     var manager: RuntimeManager = undefined;
-    manager.init(std.testing.allocator, std.testing.io, &host_registry);
+    manager.init(std.testing.allocator, std.testing.io, &host_registry, null);
     defer manager.deinit();
     try manager.enableOutputWake();
 
@@ -1951,7 +1948,7 @@ test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminat
     defer host_registry.deinit();
 
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2002,11 +1999,9 @@ test "runtime manager: host 가 자식에게 심는 훅 신원이 GUI 가 읽을
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
-    defer mgr.deinit();
-
     const host_id: u128 = 0xa11ce_0000_0000_0000_0000_0000_0000_0f;
-    mgr.setHookInstanceHost(host_id);
+    mgr.init(allocator, std.testing.io, &host_registry, host_id);
+    defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
@@ -2072,8 +2067,8 @@ test "runtime manager: host_id 를 모르면 훅 신원을 싣지 않는다 — 
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
-    defer mgr.deinit(); // setHookInstanceHost 를 부르지 않는다 — daemon 배선 전 상태.
+    mgr.init(allocator, std.testing.io, &host_registry, null); // host 신원 없음 — 훅을 못 싣는 상태
+    defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
@@ -2106,7 +2101,7 @@ test "runtime manager: daemon budget rejection happens before backend allocation
     defer count_registry.deinit();
     _ = try count_registry.register(1, 80, 24);
     var count_manager: RuntimeManager = undefined;
-    count_manager.init(allocator, std.testing.io, &count_registry);
+    count_manager.init(allocator, std.testing.io, &count_registry, null);
     defer count_manager.deinit();
     const count_ops = count_manager.runtimeOps();
     try std.testing.expectError(
@@ -2124,7 +2119,7 @@ test "runtime manager: daemon budget rejection happens before backend allocation
     defer grid_registry.deinit();
     _ = try grid_registry.register(1, 80, 24);
     var grid_manager: RuntimeManager = undefined;
-    grid_manager.init(allocator, std.testing.io, &grid_registry);
+    grid_manager.init(allocator, std.testing.io, &grid_registry, null);
     defer grid_manager.deinit();
     const grid_ops = grid_manager.runtimeOps();
     try std.testing.expectError(
@@ -2142,7 +2137,7 @@ test "runtime manager: owner drain reaps an exited runtime with zero GUI attachm
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2167,7 +2162,7 @@ test "runtime manager: U2 quiesce encodes and resumes the same live PTY without 
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2203,7 +2198,7 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     var source_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer source_registry.deinit();
     var source: RuntimeManager = undefined;
-    source.init(allocator, std.testing.io, &source_registry);
+    source.init(allocator, std.testing.io, &source_registry, null);
     defer source.deinit();
     const source_ops = source.runtimeOps();
     const runtime_id = try source_ops.spawn(source_ops.ctx, .{
@@ -2248,7 +2243,7 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     var target_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer target_registry.deinit();
     var target: RuntimeManager = undefined;
-    target.init(allocator, std.testing.io, &target_registry);
+    target.init(allocator, std.testing.io, &target_registry, null);
     defer target.deinit();
     try target.enableOutputWake();
     var graph = try target.prepareRestoredGraph(&decoded);
@@ -2309,7 +2304,7 @@ test "runtime manager: second restored runtime failure rolls back the entire non
     var source_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer source_registry.deinit();
     var source: RuntimeManager = undefined;
-    source.init(allocator, std.testing.io, &source_registry);
+    source.init(allocator, std.testing.io, &source_registry, null);
     defer source.deinit();
     const source_ops = source.runtimeOps();
     var runtime_ids: [2]u128 = undefined;
@@ -2367,7 +2362,7 @@ test "runtime manager: second restored runtime failure rolls back the entire non
     var target_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer target_registry.deinit();
     var target: RuntimeManager = undefined;
-    target.init(allocator, std.testing.io, &target_registry);
+    target.init(allocator, std.testing.io, &target_registry, null);
     defer target.deinit();
     try std.testing.expectError(error.DuplicateRuntime, target.prepareRestoredGraph(&decoded));
     try std.testing.expectEqual(@as(usize, 0), target_registry.count());
@@ -2395,7 +2390,7 @@ test "runtime manager: empty restored graph commits and releases without fallibl
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var manager: RuntimeManager = undefined;
-    manager.init(allocator, std.testing.io, &host_registry);
+    manager.init(allocator, std.testing.io, &host_registry, null);
     defer manager.deinit();
     var host: handoff_codec.HostState = .{
         .allocator = allocator,
@@ -2422,7 +2417,7 @@ test "runtime manager: resize backend failure fail-stops runtime and releases da
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var manager: RuntimeManager = undefined;
-    manager.init(allocator, std.testing.io, &host_registry);
+    manager.init(allocator, std.testing.io, &host_registry, null);
     defer manager.deinit();
     const ops = manager.runtimeOps();
     const runtime_id = try ops.spawn(ops.ctx, .{
@@ -2463,7 +2458,7 @@ test "runtime manager: exhausted restored handle cursor rejects spawn before cre
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var manager: RuntimeManager = undefined;
-    manager.init(allocator, std.testing.io, &host_registry);
+    manager.init(allocator, std.testing.io, &host_registry, null);
     defer manager.deinit();
     manager.next_handle = std.math.maxInt(RuntimeHandle);
     const ops = manager.runtimeOps();
@@ -2483,7 +2478,7 @@ test "runtime manager: resume joins every reached reader before reopening a two-
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2510,7 +2505,7 @@ test "runtime manager: U2 quiesce refuses attached runtimes without pausing thei
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2529,7 +2524,7 @@ test "runtime manager: U2 pause reaches a safe frontier under continuous PTY out
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
     const ops = mgr.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{
@@ -2555,7 +2550,7 @@ test "runtime manager: child exit while quiesced aborts without consuming status
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2608,7 +2603,7 @@ test "runtime manager: owner drain consumes a quiesced read error exactly once a
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2638,7 +2633,7 @@ test "runtime manager: initial config is applied before fast first output reache
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     var palette: core_command_wire.Command.Palette = .{null} ** 16;
@@ -2689,7 +2684,7 @@ test "runtime manager: writeInput and resize reach a real runtime through Runtim
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2716,7 +2711,7 @@ test "runtime manager: bounded core config commands reach the real host reader c
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2780,7 +2775,7 @@ test "runtime manager: focus report is written back to the real PTY by the host 
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2827,7 +2822,7 @@ test "runtime manager: snapshot projects the runtime's live screen through Runti
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2860,7 +2855,7 @@ test "runtime manager: find는 span을 계산한 기준 view_offset을 응답에
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2916,7 +2911,7 @@ test "runtime manager: link_at extracts a URL from the host core and honors clie
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2960,7 +2955,7 @@ test "runtime manager: observation exports host-owned cwd title ssh and semantic
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();
@@ -2995,7 +2990,7 @@ test "runtime manager: empty argv is rejected before allocating a handle" {
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
-    mgr.init(allocator, std.testing.io, &host_registry);
+    mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();

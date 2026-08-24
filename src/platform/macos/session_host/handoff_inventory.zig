@@ -686,6 +686,11 @@ pub const runtime_manager_groups = [_]Group{
             // The successor re-derives this from its own invocation host_id, which upgrade validation forces to
             // equal the predecessor's, so the agent-hook instance segment it stamps on new children keeps the
             // same name across exec. Serializing it would add a second source for one identity.
+            //
+            // That re-derivation is enforced, not assumed: RuntimeManager.init takes the id as an argument, so a
+            // restore path cannot construct a manager without deciding it. The first version of this comment was
+            // written before that was true -- restore_activation built its manager without the id, and every child
+            // spawned after an upgrade silently lost its hook identity. Adversarial review caught it.
             "hook_instance_host",
         },
         .why = "the self-referential manager graph and process-local output self-pipe are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook instance host id is re-derived from the invocation that upgrade validation already pins to the same host_id",

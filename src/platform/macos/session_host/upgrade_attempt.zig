@@ -255,7 +255,7 @@ test "U2 coordinator deadline rollback reopens admission and keeps runtime usabl
     var registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
     defer registry.deinit();
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(std.testing.allocator, std.testing.io, &registry);
+    manager.init(std.testing.allocator, std.testing.io, &registry, null);
     defer manager.deinit();
     const ops = manager.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 20, .rows = 4 });
@@ -298,7 +298,7 @@ test "U2 coordinator returns a validated host artifact and explicit resume resto
     var registry = reg.TerminalRuntimeRegistry.init(std.testing.allocator);
     defer registry.deinit();
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(std.testing.allocator, std.testing.io, &registry);
+    manager.init(std.testing.allocator, std.testing.io, &registry, null);
     defer manager.deinit();
     const ops = manager.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 20, .rows = 4 });

@@ -2102,6 +2102,9 @@ fn rebuildSidebarCells(
     header_frame_slot: *?maru.renderer.RenderFrame,
     /// 헤더가 실제로 차지한 높이(px). 카드가 그만큼 내려가고, 히트테스트도 같은 값을 봐야 한다.
     header_h_out: *u32,
+    /// 아이콘 밴드 높이 — `headerHit` 이 이 값으로 아이콘 사각형을 잡는다. 판정이 헤더 높이를
+    /// 대신 넣으면 엉뚱한 y 를 찌른다(실측: `header_routed=0/4`).
+    header_icon_band_out: *u32,
     /// **헤더 전용 카운터.** 카드와 섞으면 어느 쪽이 샜는지 못 가린다 — 판정이 그만큼 무뎌진다.
     header_glyphs: *usize,
     header_outside: *usize,
@@ -2113,6 +2116,7 @@ fn rebuildSidebarCells(
     glyphs.* = 0;
     outside.* = 0;
     header_h_out.* = 0;
+    header_icon_band_out.* = 0;
     header_glyphs.* = 0;
     header_outside.* = 0;
     if (sidebar_w == 0) return;
@@ -2161,6 +2165,7 @@ fn rebuildSidebarCells(
         header_frame_slot,
     );
     header_h_out.* = header_h;
+    header_icon_band_out.* = if (header_h == 0) 0 else cell_h *| 2;
 
     // 카드 하나 — 지금 세션. **줄 수를 여기서 정하고 그 값으로 높이를 얻는다**(그 필드 doc: 호스트가
     // 렌더에 쓰는 줄 수와 같은 값을 실어야 클릭 좌표가 안 갈린다).
@@ -2303,6 +2308,11 @@ fn appendSidebarHeaderCells(
     frame_slot: *?maru.renderer.RenderFrame,
 ) !u32 {
     drawn.clear();
+    // **macOS 와 같은 비율이다.** 헤더 3 줄 = 아이콘 밴드 2 줄 + 검색 줄 1 줄. 아이콘을 1.7× 로
+    // 굽는 이상 한 줄짜리 밴드로는 넘친다(실측: `header_outside=4`) — macOS 가 헤더를 셀 높이 ×3 으로
+    // 두는 이유가 이것이다.
+    const icon_band_px: u32 = cell_h *| 2;
+    const header_h: u32 = cell_h *| 3;
     if (frame_slot.*) |*old| {
         old.deinit(allocator);
         frame_slot.* = null;
@@ -2315,18 +2325,46 @@ fn appendSidebarHeaderCells(
     // 모듈에 있으므로** 그 수만 넘기면 그날 바로 뜬다.
     const drew = cell_text.appendSidebarHeaderIcons(allocator, &cells, cols, fg, 0) catch return 0;
     if (!drew) return 0;
+    // **검색 줄도 그린다.** `headerHit` 이 아래 밴드를 `.search` 로 판정하므로 안 그리면
+    // "그린 것 = 눌리는 것" 이 깨진다. 입력 모델은 아직 없어 placeholder 까지다.
+    const muted_rgb = tk.get(.muted_fg);
+    cell_text.appendSidebarSearchRow(allocator, &cells, 1, cols, .{ .rgb = .{ .r = muted_rgb.r, .g = muted_rgb.g, .b = muted_rgb.b } }) catch {};
     // **글리프가 실제로 앉은 열**을 여기서 집는다(정체는 codepoint 가 준다). 아래 판정이 이것을
     // `headerHit` 에 되먹인다 — 그러면 그리기 쪽만 어긋나도 잡힌다.
-    for (cells.items) |c| drawn.append(.{ .col = c.col, .codepoint = c.codepoint });
+    for (cells.items) |c| if (cell_text.isSidebarHeaderIcon(c.codepoint)) drawn.append(.{ .col = c.col, .codepoint = c.codepoint });
 
     const list = maru.renderer.DrawList{
-        .size = .{ .cols = cols, .rows = 1 },
+        .size = .{ .cols = cols, .rows = 2 },
         .cursor = .{ .row = 0, .col = 0 },
         .dirty = null,
         .cells = try cells.toOwnedSlice(allocator),
         .overlays = try allocator.alloc(maru.renderer.DrawOverlay, 0),
     };
-    const frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, builder.shaper, builder.rasterizer) catch {
+    // ── 아이콘을 셀보다 크게 굽는다 (1.7×) ─────────────────────────────────────────────────
+    //
+    // **셀 크기로 굽고 GPU 에서 늘리면 흐려진다.** 그래서 아틀라스 슬롯을 목표 픽셀로 키워 **그
+    // 크기로 직접 래스터**한다 — 1.7× 텍스처가 1.7× quad 에 1:1 로 들어간다. 배율은
+    // `chrome.ui.icon` 이, 대상 목록은 `cell_text.isSidebarHeaderIcon` 이 소유한다(macOS 와 한 곳).
+    //
+    // 셰이핑과 래스터 사이를 가르는 이음매는 **중립이 이미 준다**(`buildGlyphRunList` →
+    // `buildFrameFromGlyphRunListWithRasterizer`) — macOS 가 `shapeOnly` 로 쓰는 그 자리다.
+    var glyph_runs = maru.renderer.glyph_layout.buildGlyphRunList(allocator, list, renderer_state.text_config, builder.shaper) catch {
+        var l = list;
+        l.deinit(allocator);
+        return 0;
+    };
+    defer glyph_runs.deinit(allocator);
+    const icon_scale = maru.chrome.ui.icon;
+    const rw: u16 = @intCast(@min(icon_scale.cellRasterExtentPx(cell_w), @as(u32, std.math.maxInt(u16))));
+    const rh: u16 = @intCast(@min(icon_scale.cellRasterExtentPx(cell_h), @as(u32, std.math.maxInt(u16))));
+    if (rw > 0 and rh > 0) {
+        for (glyph_runs.glyphs) |*g| {
+            if (!cell_text.isSidebarHeaderIcon(g.codepoint)) continue;
+            g.cache_key.raster_width_px = rw;
+            g.cache_key.raster_height_px = rh;
+        }
+    }
+    const frame = renderer_state.buildFrameFromGlyphRunListWithRasterizer(allocator, list, glyph_runs, builder.rasterizer) catch {
         var l = list;
         l.deinit(allocator);
         return 0;
@@ -2345,25 +2383,63 @@ fn appendSidebarHeaderCells(
     defer allocator.free(native);
     const x1: f32 = @floatFromInt(sidebar_w);
     const y0: f32 = @floatFromInt(top_y);
-    const y1: f32 = @floatFromInt(top_y + cell_h);
+    const y1: f32 = @floatFromInt(top_y + header_h);
     try out.ensureUnusedCapacity(allocator, native.len);
     for (native) |n| {
         var c = n;
         // 헤더는 **한 줄**이라 행이 0 이고, 세로 자리는 `origin_y` 하나로 정해진다(카드처럼 슬롯
         // 인코딩을 쓰지 않는다).
+        // **줄마다 자리가 다르다.** 아이콘 줄은 **아이콘 밴드 안에서 세로 중앙**이어야 1.7× 글리프가
+        // 밴드를 안 넘친다(`headerHit` 이 `icon_top = (search_top - ch) / 2` 로 클릭 사각형을 잡는
+        // 그 자리와 같다). 검색 줄은 그 밴드 바로 아래다.
+        const is_icon_row = c.row == 0;
+        c.origin_y = top_y + if (is_icon_row) (icon_band_px -| cell_h) / 2 else icon_band_px;
         c.row = 0;
-        c.origin_y = top_y;
-        const cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        var cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        // **quad 도 같은 배율로 키운다** — 텍스처만 키우면 1.7× 그림이 1칸에 눌려 들어간다. 중심을
+        // 고정한 채 넓힌다(열은 그대로라 히트테스트와 안 갈린다).
+        if (std.math.cast(u21, c.codepoint)) |cp| if (cell_text.isSidebarHeaderIcon(cp)) {
+            // **한 셀을 키운다 — 그 글리프가 몇 칸을 차지하든.** 종은 EAW 2칸이라 quad 가 2셀인데,
+            // 아틀라스 슬롯은 한 셀 ×1.7 로 구웠다. 그대로 곱하면 가로만 3.4셀이 되어 **찌그러진다**
+            // (실측: 종이 납작한 아치로 보였다). macOS 도 2칸 위에 1.7셀 폭으로 그린다 — 중심은
+            // 원래 칸들의 한가운데(그쪽의 `-0.5 nudge`와 같은 자리).
+            const scale = @as(f32, @floatFromInt(icon_scale.cell_raster_scale_milli)) / 1000.0;
+            const sw = @as(f32, @floatFromInt(cell_w)) * scale;
+            const sh = @as(f32, @floatFromInt(cell_h)) * scale;
+            const cx = cell.rect[0] + cell.rect[2] / 2;
+            const cy = cell.rect[1] + cell.rect[3] / 2;
+            cell.rect[0] = cx - sw / 2;
+            cell.rect[1] = cy - sh / 2;
+            cell.rect[2] = sw;
+            cell.rect[3] = sh;
+        };
+        // **구운 크기와 그린 크기를 함께 싣는다** — 둘 중 하나만 커도 흐려지는데, 개수·자리 판정은
+        // 그것을 못 본다.
+        if (std.math.cast(u21, c.codepoint)) |cp| {
+            for (drawn.items[0..drawn.len]) |*g| {
+                if (g.codepoint != cp) continue;
+                g.atlas_h = c.atlas_height_px;
+                g.quad_h = cell.rect[3];
+            }
+        }
         if (cell.rect[0] < 0 or cell.rect[0] + cell.rect[2] > x1 or
             cell.rect[1] < y0 or cell.rect[1] + cell.rect[3] > y1) outside.* += 1;
         glyphs.* += 1;
         out.appendAssumeCapacity(cell);
     }
-    return cell_h;
+    return header_h;
 }
 
 /// 헤더에 실제로 그려진 아이콘 하나 — **정체는 codepoint, 자리는 열**이다.
-const DrawnHeaderIcon = struct { col: u16, codepoint: u21 };
+const DrawnHeaderIcon = struct {
+    col: u16,
+    codepoint: u21,
+    /// 아틀라스에 **구워진** 높이(px). 셀보다 커야 1.7× quad 에 1:1 로 들어간다 — 셀 크기로 굽고
+    /// 늘리면 흐려진다(그것을 숫자로 잡는 유일한 자리).
+    atlas_h: u32 = 0,
+    /// 화면에 **그려진** 높이(px). 슬롯만 키우고 quad 를 안 키우면 1.7× 그림이 한 칸에 눌린다.
+    quad_h: f32 = 0,
+};
 
 /// 그려진 것들의 작은 고정 목록. 할당을 안 하려고 배열로 둔다(판정 전용이고 넷을 넘길 일이 없다).
 const DrawnHeaderIcons = struct {
@@ -2915,6 +2991,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sidebar_header_frame: ?maru.renderer.RenderFrame = null;
     // 헤더가 차지한 높이 — 히트테스트가 같은 값을 봐야 그린 자리와 눌리는 자리가 안 갈린다.
     var sidebar_header_h: u32 = 0;
+    var sidebar_header_icon_band: u32 = 0;
     var sidebar_header_glyphs: usize = 0;
     var sidebar_header_outside: usize = 0;
     var sidebar_header_drawn: DrawnHeaderIcons = .{};
@@ -2930,7 +3007,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .lines = if (dock_root != null) 2 else 1,
     };
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_glyphs, &sidebar_header_outside, &sidebar_header_drawn);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_glyphs, &sidebar_header_outside, &sidebar_header_drawn);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -3216,7 +3293,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_glyphs, &sidebar_header_outside, &sidebar_header_drawn) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_glyphs, &sidebar_header_outside, &sidebar_header_drawn) catch {};
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -3943,15 +4020,36 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             else
                 continue; // 배지 숫자 같은 비-아이콘 셀은 이 판정의 대상이 아니다
             const x: f64 = (@as(f64, @floatFromInt(g.col)) + 0.5) * @as(f64, @floatFromInt(cell_w));
-            const y: f64 = @as(f64, @floatFromInt(sidebar_header_h)) * 0.5;
-            if (sb_h.headerHit(x, y, sidebar_w, cell_w, cell_h, sidebar_header_h, sidebar_header_h) == want) routed += 1;
+            // **아이콘 줄의 중앙을 찌른다** — 헤더 한복판은 이제 검색 밴드다.
+            const y: f64 = @as(f64, @floatFromInt(sidebar_header_icon_band)) * 0.5;
+            if (sb_h.headerHit(x, y, sidebar_w, cell_w, cell_h, sidebar_header_h, sidebar_header_icon_band) == want) routed += 1;
         }
-        try stdout.print("sidebar_header_h={d} header_glyphs={d} header_outside={d} header_routed={d}/4 header_ok={}\n", .{
+        // **검색 밴드도 잰다** — 그 줄을 그렸으니 눌려야 한다(안 그렸으면 `.search` 가 나오면 안 된다).
+        const search_y: f64 = @as(f64, @floatFromInt(sidebar_header_icon_band + sidebar_header_h)) * 0.5;
+        const search_ok = sb_h.headerHit(
+            @as(f64, @floatFromInt(sidebar_w)) * 0.5,
+            search_y,
+            sidebar_w,
+            cell_w,
+            cell_h,
             sidebar_header_h,
+            sidebar_header_icon_band,
+        ) == .search;
+        // **선명한가**를 숫자로 본다. 구운 높이(아틀라스)와 그린 높이(quad)가 **둘 다** 셀보다 커야
+        // 1.7× 텍스처가 1.7× 사각형에 1:1 로 들어간다 — 하나만 크면 늘리거나 눌러서 흐려진다.
+        var sharp: usize = 0;
+        for (sidebar_header_drawn.slice()) |g| {
+            if (g.atlas_h > cell_h and g.quad_h > @as(f32, @floatFromInt(cell_h))) sharp += 1;
+        }
+        try stdout.print("sidebar_header_h={d} icon_band={d} header_glyphs={d} header_outside={d} header_routed={d}/4 search_hit={} icons_sharp={d}/4 header_ok={}\n", .{
+            sidebar_header_h,
+            sidebar_header_icon_band,
             sidebar_header_glyphs,
             sidebar_header_outside,
             routed,
-            sidebar_header_glyphs == 4 and sidebar_header_outside == 0 and routed == 4,
+            search_ok,
+            sharp,
+            sidebar_header_glyphs == 11 and sidebar_header_outside == 0 and routed == 4 and search_ok and sharp == 4,
         });
     } else {
         // **판정 불가와 실패를 가른다** — 폭이 좁아 헤더를 안 그린 것을 0 으로만 적으면 고장으로 읽힌다.

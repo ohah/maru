@@ -1101,3 +1101,87 @@ test "안 읽은 알림이 있으면 배지 숫자가 종 옆에 붙고, 10 이�
     try std.testing.expect(try appendSidebarHeaderIcons(allocator, &cells, 20, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } }, 42));
     try std.testing.expectEqual(@as(u21, '9'), cells.items[1].codepoint);
 }
+
+/// 검색 줄 배치 — 🔍 왼쪽 패딩 한 칸, 글자는 그 뒤 세 칸부터(🔍 는 EAW 2칸 + 공백 1칸).
+pub const sidebar_search_icon_col: u16 = 1;
+pub const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3;
+
+/// 헤더 **검색 줄**의 셀 — 🔍 와 placeholder.
+///
+/// **입력 모델이 아직 없다**(Windows). 그래서 여기가 내는 것은 "검색이 여기 있다" 는 표시뿐이고,
+/// 커서·IME·입력 텍스트는 그 모델이 붙는 날 이 함수 위에 얹힌다. 그래도 **그리는 것이 중요하다** —
+/// `headerHit` 이 이 밴드를 `.search` 로 판정하므로, 안 그리면 "그린 것 = 눌리는 것" 이 깨진다.
+pub fn appendSidebarSearchRow(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(renderer.DrawCell),
+    row: u16,
+    cols: u16,
+    muted: terminal.Color,
+) !void {
+    if (cols < sidebar_header_min_cols) return;
+    try cells.append(allocator, .{ .row = row, .col = sidebar_search_icon_col, .codepoint = icons.codepoint(.search), .width = 2, .style = .{ .foreground = muted } });
+    const placeholder = "Search";
+    var col: u16 = sidebar_search_text_col;
+    for (placeholder) |ch| {
+        if (col >= cols) break;
+        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+        col += 1;
+    }
+}
+
+/// 헤더 아이콘 줄에서 **셀보다 크게 굽는** 등록 아이콘인가.
+///
+/// 배율 자체는 `chrome.ui.icon.cell_raster_scale_milli`(1.7×)가 소유하고, **어떤 글리프에 적용하는가**
+/// 를 여기서 정한다. 두 플랫폼이 같은 목록을 봐야 한다 — macOS 는 목록을 안에 적어 두고 있었고,
+/// Windows 가 그것을 복사하면 넷이 다섯이 되는 날 한쪽만 흐려진다.
+///
+/// **터미널 내용의 같은 글리프는 안 키운다** — 호출자가 헤더 프레임에서만 부른다(그것이 계약이다).
+pub fn isSidebarHeaderIcon(cp: u21) bool {
+    return cp == icons.codepoint(.gear) or
+        cp == icons.codepoint(.plus) or
+        cp == icons.codepoint(.bell) or
+        cp == icons.codepoint(.sidebar_collapse);
+}
+
+test "헤더에서 키우는 아이콘은 그 넷뿐이다" {
+    try std.testing.expect(isSidebarHeaderIcon(icons.codepoint(.gear)));
+    try std.testing.expect(isSidebarHeaderIcon(icons.codepoint(.plus)));
+    try std.testing.expect(isSidebarHeaderIcon(icons.codepoint(.bell)));
+    try std.testing.expect(isSidebarHeaderIcon(sidebar_toggle_codepoint));
+    // 파일 트리 아이콘은 셀 크기 그대로다 — 키우면 트리 줄 간격을 넘친다.
+    try std.testing.expect(!isSidebarHeaderIcon(icons.codepoint(.folder)));
+    try std.testing.expect(!isSidebarHeaderIcon('a'));
+}
+
+test "그 넷이 실제로 헤더가 그리는 글리프와 같다" {
+    // **동어반복을 피한다**: 목록을 손으로 적는 대신 `appendSidebarHeaderIcons` 가 낸 셀을 훑는다 —
+    // 헤더에 아이콘이 하나 늘면 이 테스트가 먼저 깨진다.
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    try std.testing.expect(try appendSidebarHeaderIcons(allocator, &cells, 20, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } }, 0));
+    for (cells.items) |c| try std.testing.expect(isSidebarHeaderIcon(c.codepoint));
+}
+
+test "검색 줄은 🔍 와 placeholder 를 낸다 — 밴드가 .search 라 안 그리면 계약이 깨진다" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    const muted: terminal.Color = .{ .rgb = .{ .r = 9, .g = 9, .b = 9 } };
+    try appendSidebarSearchRow(allocator, &cells, 1, 20, muted);
+    try std.testing.expectEqual(icons.codepoint(.search), cells.items[0].codepoint);
+    try std.testing.expectEqual(sidebar_search_icon_col, cells.items[0].col);
+    try std.testing.expectEqual(@as(u21, 'S'), cells.items[1].codepoint);
+    try std.testing.expectEqual(sidebar_search_text_col, cells.items[1].col);
+    for (cells.items) |c| try std.testing.expectEqual(@as(u16, 1), c.row);
+    // 🔍 는 아이콘 확대 대상이 **아니다** — 검색 줄은 한 셀 줄이라 키우면 넘친다.
+    try std.testing.expect(!isSidebarHeaderIcon(icons.codepoint(.search)));
+}
+
+test "좁으면 검색 줄도 안 낸다 — 아이콘 줄과 같은 문턱" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    try appendSidebarSearchRow(allocator, &cells, 1, sidebar_header_min_cols - 1, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } });
+    try std.testing.expectEqual(@as(usize, 0), cells.items.len);
+}

@@ -495,8 +495,9 @@ pub fn appendBellFlashQuad(self: *AppSession) void {
 /// 배지 좌단(≈(bell_col+1.65)·cw)이 종 우측 모서리에 ~0.2cw만 겹쳐 iOS식 코너 배지가 된다(실측: 종 우측끝 95px,
 /// 배지 93..107px). 종을 코너 크기로 줄여도 이 값이 그대로 맞다(좁아진 종 = 모서리가 안쪽으로 0.85cw 와도 반지름이 흡수).
 /// appendBellAndBadge(셀)와 appendNotificationBadge(quad)의 단일 출처라 둘이 어긋나지 않는다.
+/// **정의는 공유 모듈**(`cell_text.notificationBadgeCol`) — 그리기와 히트테스트가 같은 열을 봐야 한다.
 pub fn notificationBadgeCol(bell_col: u16) u16 {
-    return bell_col + 2;
+    return maru.cell_text.notificationBadgeCol(bell_col);
 }
 
 pub fn appendNotificationBadge(self: *AppSession) void {

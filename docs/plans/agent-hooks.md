@@ -54,7 +54,11 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 **끄면 지운다**(계약 §5): 게이트가 꺼져 있으면 같은 read-modify-write 를 `Intent.uninstall` 로 타고,
 codex 는 `config.toml` 의 우리 신뢰 블록까지 거둔 뒤 남는 것이 없으면 파일째 지워 설치 전 상태로 돌린다.
 
-남은 것은 statusLine 훅 제거다.
+**statusLine 훅 제거 ✅ 완료(2026-08-21).** `app_session/agent.zig` 의 `removeAgentStatuslineHook` 은
+이제 **되돌리는 일만** 한다 — 설치 경로가 없고, 우리 것이면 원본 명령을 `statusLine` 에 복원한 뒤 우리
+스크립트·마커를 거둔다. 사용자가 그 사이 직접 바꿨으면 settings 는 그대로 두고 우리 파일만 치운다.
+그 훅이 하던 일(payload 에서 `session_id` 를 뽑아 pane 파일에 적기)은 `SessionStart` 가 상위집합으로
+대신한다. **AH2 에 남은 일은 없다.**
 
 
 - Claude `~/.claude/settings.json`, Codex `~/.codex/hooks.json`에 계약 §2 세트를 등록한다. Codex는
@@ -73,8 +77,8 @@ codex 는 `config.toml` 의 우리 신뢰 블록까지 거둔 뒤 남는 것이 
   이벤트 이름이 snake_case인 trust 키와 파일 위치뿐이다.
 - `hooks`는 배열 항목이므로 **표식 기반 추가·선별 제거**다(감싸기가 아니다). 사용자 항목은 순서까지 보존한다.
 - atomic write + `flock` 직렬화. config 게이트로 끄면 흔적까지 지우고 관측 모드로 복귀한다.
-- **statusLine 훅을 제거한다** — `SessionStart`가 그 역할의 상위집합이고, 관측 모드용으로도 남기지
-  않는다(계약 §5).
+- **statusLine 훅을 제거한다**(✅ 2026-08-21) — `SessionStart`가 그 역할의 상위집합이고, 관측 모드용으로도
+  남기지 않는다(계약 §5).
 - **과거 표식(`MARU_AGENT_MAP_HOOK_V2`) 항목은 건드리지 않는다**(계약 §5, P1 «자동 정리하지 않는다»).
 - 검증: 사용자 훅이 이미 있는 파일에서 순서·내용 보존, 설치·제거·재설치 멱등성, 게이트 off 시 완전 제거,
   **과거 표식 항목이 그대로 남는지**,

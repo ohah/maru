@@ -701,6 +701,9 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
         // 쓰고 있는 로그가 사라졌다**(그 프로세스의 Term 들은 커서 기준을 잃는다). 우리 것이면 지운다
         // (지난 실행의 잔재이거나 우리가 방금 만든 빈 칸이다 — 어느 쪽이든 큐를 비우고 시작한다).
         if (entry.kind == .directory) {
+            // **host 가 소유하는 칸(`host_<hex>`)은 우리 것이 아니다**(계약 §4 — 각 소유자가 자기 칸을
+            // 만들고 치운다). 숫자 파싱이 그것을 이미 거르지만, 그 사실이 «우연» 이 아니라 계약이라는 것을
+            // 여기 적어 둔다 — 이 필터를 넓히는 변경은 **살아 있는 host 의 로그를 지운다.**
             const pid = std.fmt.parseInt(i32, entry.name, 10) catch continue; // 숫자 이름만 우리 것이다
             const ours = pid == @as(i32, @intCast(std.c.getpid()));
             if (!ours and instanceAlive(pid)) continue; // 남이 살아 있다 — 그 칸은 그 인스턴스 것이다
@@ -1297,8 +1300,22 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // **회전을 크기만으로 판정하지 않는다.** 같은 크기로 갈린 파일이 있으면 옛 오프셋으로 새 내용을 읽어
     // 줄 가운데부터 파싱한다. inode 를 함께 본다.
     const same_file = st.inode == term.agent_hook_cursor_inode;
+    const first_read = term.agent_hook_cursor_inode == 0;
     term.agent_hook_cursor_inode = st.inode;
     _ = term.agent_hook_cursor.resetIfRotated(st.size, same_file);
+
+    // **부재 중 쌓인 것을 처음부터 재생하지 않는다**(계약 §4). 회전은 GUI 소비에 묶여 있어 keep-alive 로
+    // GUI 를 끈 사이엔 아무도 돌리지 않는다 — 재접속한 창이 그 파일을 앞에서부터 읽으면 몇 시간 전 턴을
+    // tick 마다 되짚고, 그 사이 알림이 줄줄이 나간다. 첫 읽기에서 창 하나만큼만 남기고 건너뛴다.
+    // 창 크기는 «한 tick 이 실제로 닿을 수 있는 만큼» 이다. tick 상한이 이벤트 개수라(`max_events_per_tick`)
+    // 창을 그 개수 × 줄 상한으로 잡으면, 짧은 줄이 수만 개인 파일에서 **꼬리에 영영 못 닿는다**(앞에서부터
+    // 64 개씩 되짚는다 — 처음에 그렇게 짰다가 테스트가 잡았다). 줄 상한의 두 배면 부분 줄 하나를 버려도
+    // 완전한 줄이 반드시 하나는 남고, 남는 것은 **가장 최근** 이벤트다.
+    const backlog_window: u64 = maru.session.agent_hook_event.max_line_bytes * 2;
+    if (first_read and st.size > term.agent_hook_cursor.offset + backlog_window) {
+        term.agent_hook_cursor.offset = st.size - backlog_window;
+        term.agent_hook_backlog_catchup = true;
+    }
 
     if (st.size <= term.agent_hook_cursor.offset) return; // 새 내용이 없다
 
@@ -1332,6 +1349,15 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
             "hook batch: count={d} dropped={d} recovered={d} more={}",
             .{ batch.count, batch.dropped, batch.recovered, batch.more },
         );
+    }
+    // **backlog 는 상태만 세우고 알리지 않는다**(계약 §4). 그 이벤트는 창이 없던 시간의 것이라 «지금 막
+    // 일어난 일» 이 아니다 — 재접속하자마자 몇 시간 전 턴의 «완료» 가 뜨면 그것은 거짓말이다. 배지·대화
+    // 줄은 그대로 두어 **지금 상태**는 옳게 선다.
+    if (term.agent_hook_backlog_catchup) {
+        term.agent_hook_notice.clear();
+        // **따라잡기가 끝나는 순간**(더 읽을 것이 없다)부터 다시 알린다. 그 뒤의 이벤트는 창이 열린 채
+        // 일어난 «지금» 이다.
+        if (!batch.more) term.agent_hook_backlog_catchup = false;
     }
     // **배치당 한 번만 찍는다** — 배치 안의 이벤트는 모두 같은 작업트리를 본다(위 `applyHookEvent`).
     if (turn_ended) captureTurnSnapshot(self, term.surfaceId());
@@ -1639,18 +1665,63 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
 
 /// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<인스턴스>/<pane>.ndjson`). 훅 커맨드가 적는 그 이름이다.
 ///
+/// **소유자에 따라 두 이름이 있다**(계약 §4): GUI 가 띄운 자식은 `<pid>/<surface_id>`, host 가 띄운 자식은
+/// `host_<hex host_id>/<hex runtime_id>`. 만드는 곳은 계약 모듈 하나이고 여기서는 어느 쪽인지만 고른다.
+///
 /// `pub` 인 이유는 **테스트가 이 함수를 직접 물어야 하기 때문**이다. 「훅이 받는 이름 = 여기서 만드는 이름」은
 /// 두 프로세스에 걸친 계약이라, 테스트가 경로를 스스로 조립하면 그 이음매를 한 번도 안 건넌다(그렇게 쓰인
 /// 기존 테스트는 두 이름이 갈려도 초록이다 — 실제 증상은 «훅은 도는데 이벤트가 0» 이다).
 pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
+    const hook_command = maru.session.agent_hook_command;
+    if (hostOwnedHookIdentity(term)) |owned| {
+        // **observer 는 읽지 않는다**(계약 §4). 이 로그는 «소비 즉시 비우는 큐» 라, 한 runtime 에 붙은 두
+        // 창이 같은 파일을 tail 하면 **서로가 필요한 이벤트를 먹고** 회전·삭제는 먼저 한 쪽이 이긴다.
+        // 두 번째 controller 는 host 가 조용히 observer 로 강등하므로(persistent-session-host.md §9) 그
+        // 창은 여기서 null 을 받아 **관측 모드로 산다** — §1 «한 Term 의 소스는 정확히 하나» 와 같은 결이다.
+        // ⚠️ 이 가지는 이 저장소의 자동 게이트로 못 밟는다 — 한 runtime 에 **두 client** 를 붙여야 하고
+        // (그래야 host 가 두 번째를 observer 로 강등한다) 그것은 실 fork host + AppSession 둘을 엮는
+        // OS-E2E 다. 뮤테이션에서 이 줄만 지워도 초록인 것이 그 증거다.
+        if (owned.observer) return null;
+        const base = sessionCacheBase(a) orelse return null;
+        var inst_buf: [hook_command.instance_token_max]u8 = undefined;
+        const inst = hook_command.formatHostInstance(&inst_buf, owned.host_id);
+        var pane_buf: [hook_command.pane_token_max]u8 = undefined;
+        const pane = hook_command.formatRuntimePane(&pane_buf, owned.runtime_id);
+        return std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}.ndjson", .{
+            base,
+            hook_command.log_dir_rel,
+            inst,
+            pane,
+        }) catch null;
+    }
     // **인스턴스 칸을 지난다** — 훅이 쓰는 이름과 같아야 한다(계약 §4). 이 둘이 갈리면 그 Term 은 자기
     // 이벤트를 못 읽고, 같은 숫자를 가진 **다른 인스턴스**의 이벤트를 읽는다.
     const dir = agentHookInstanceDir(a) orelse return null;
-    // pane 칸 이름도 **계약 모듈이 만든다**(문자열 조립을 여기서 되풀이하지 않는다 — host 가 소유하는
-    // Term 은 같은 자리에 `runtime_id` 를 쓰므로, 그 분기가 오면 이 한 줄만 갈린다).
-    var pane_buf: [maru.session.agent_hook_command.pane_token_max]u8 = undefined;
-    const pane = maru.session.agent_hook_command.formatSurfacePane(&pane_buf, term.surfaceId());
+    var pane_buf: [hook_command.pane_token_max]u8 = undefined;
+    const pane = hook_command.formatSurfacePane(&pane_buf, term.surfaceId());
     return std.fmt.allocPrint(a, "{s}/{s}.ndjson", .{ dir, pane }) catch null;
+}
+
+/// host 가 소유하는 Term 인가 — 그렇다면 그 칸을 짓는 두 값과 «우리가 controller 인가» 를 함께 돌려준다.
+///
+/// 셋이 한 번에 나오는 이유: 셋 다 같은 원격 backend 조회에서 나오고, 하나라도 없으면 그 Term 의 훅 경로를
+/// 지을 수 없다(그러면 GUI 소유 규칙으로 떨어지는 것이 아니라 **훅이 없는 것**이다 — 이 Term 의 자식은
+/// host 가 띄웠으므로 GUI 칸에는 애초에 아무것도 안 쓴다).
+fn hostOwnedHookIdentity(term: *Term) ?struct { host_id: u128, runtime_id: u128, observer: bool } {
+    if (!is_macos) return null;
+    // ⚠️ **실효 가드는 아래 registry 조회다** — handle 은 앱 전역 유일이라 원격이 아닌 Term 은 그 표에
+    // 없어 어차피 null 이 된다. 이 줄은 의도를 적는 자리이고, 그래서 이 줄만 지워도 테스트는 초록이다
+    // (뮤테이션으로 확인). 그래도 남기는 이유는 «원격이 아니면 애초에 묻지 않는다» 가 이 함수의 계약이라서다.
+    if (term.surface.remote == null) return null;
+    const remote = if (app_session_mod.app_remote_backend) |*backend| backend else return null;
+    const rid_hex = remote.runtimeIdFor(term.rt.handle) orelse return null;
+    const host_id = remote.runtimeHostId(term.rt.handle) orelse return null;
+    const runtime_id = std.fmt.parseInt(u128, &rid_hex, 16) catch return null;
+    return .{
+        .host_id = host_id,
+        .runtime_id = runtime_id,
+        .observer = remote.attachedAsObserver(term.rt.handle),
+    };
 }
 
 /// 어느 Term이든 에이전트가 돌고 있는가 — 활동 시각 재렌더 게이트. 전-Term 순회지만 필드 읽기뿐이라 20초에

@@ -745,6 +745,10 @@ MARU_FORCE_SCM_TURN_TREES=<oid>,<oid>,…  # 그 스냅샷에 **진짜 tree**를
                                # 그대로 잡힌다**(agent-turn-changes.md §2.4 가 커밋 0회로 실증)
 MARU_FORCE_SCM_TURNS_MISSED=<n> # 「기록하지 못한 턴 N개」 줄을 세운다 — 실제로는 다른 세션의 캡처와 겹쳐야 나는 값이라
                                # 헤드리스로는 재현할 방법이 없다
+MARU_FORCE_SCM_TURNS_EVICTED=1 # 「최근 세션에 밀려 이전 턴 기록이 사라졌습니다」 줄을 세운다 — 같은 이유로 헤드리스에서
+                               # 못 만든다(서로 다른 세션 신원 아홉이 맵을 넘겨야 하고 신원은 provider 훅이 발급한다).
+                               # `MARU_FORCE_SCM_TURNS` 값이 화면을 가른다: n>0 이면 **목록이 찬 채로** 고지가 함께 서고
+                               # (그 줄이 목록을 대신하지 않는다는 계약), n=0 이면 빈 목록의 「이유」 자리에 대신 선다
 MARU_FORCE_SIDEBAR_CARDS=<n>   # 워크스페이스 카드 n개 — 사이드바가 뷰포트를 넘치게(경계를 만든다)
 MARU_FORCE_SIDEBAR_HOVER=edge  # 뷰포트 바닥에 걸친 카드에 호버 밴드(§5.3의 quad 클립을 겨냥)
 MARU_FORCE_SIDEBAR_SCROLL=max  # 사이드바를 끝까지 굴려 둔 상태(상단 클립 분기를 켠다)

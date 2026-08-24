@@ -267,6 +267,12 @@ pub const runtime_manager = if (builtin.os.tag == .macos)
     @import("session_host/runtime_manager.zig")
 else
     struct {};
+// agent_hook_logs(AH7-3a)는 host 가 **자기 소유** 훅 로그 칸을 만들고 치운다(docs/agent-hooks.md §4).
+// `maru` 의 계약 모듈에서 이름을 받아 오고 macOS syscall(mkdir/unlink/rmdir/fstatat)을 쓰므로 같은 규율로 gate 한다.
+pub const agent_hook_logs = if (builtin.os.tag == .macos)
+    @import("session_host/agent_hook_logs.zig")
+else
+    struct {};
 // handoff_inventory(U0)는 실행 중 host upgrade의 owner-field 누락을 compile-time에 막는다. 실제 codec/exec가 아니라
 // TerminalCore/PTY/live runtime owner 필드를 serialized/reconstructed/must_be_empty로 전수 분류하는 gate다.
 pub const handoff_inventory = if (builtin.os.tag == .macos)

@@ -32,6 +32,7 @@ const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("screen_stream.zig");
 const protocol = @import("protocol.zig");
 const handoff_codec = @import("handoff_codec.zig");
+const agent_hook_logs = @import("agent_hook_logs.zig");
 
 comptime {
     if (@import("protocol.zig").max_inventory_runtimes != maru.session.workspace.max_runtime_bindings)
@@ -201,6 +202,16 @@ fn hexDecodeInto(hex: []const u8, out: []u8) usize {
 /// host가 소유하는 실 terminal runtime 표. `RuntimeOps`를 통해 server.zig가 이걸 구동한다. self-referential이라
 /// **in-place `init`**을 쓴다(caller가 `var m: RuntimeManager = undefined; m.init(...)`) — backend가 아래 두 registry의
 /// 안정 주소를 캡처하므로 init 후 매니저를 이동하면 안 된다.
+/// host 가 소유하는 훅 로그 칸의 신원 — **id 와 경로는 함께여야 뜻이 있다**(id 만으로는 어디에 만들지
+/// 모르고, 경로만으로는 이름을 못 짓는다). base 를 env 에서 읽지 않고 daemon 이 정해 넘기는 이유는
+/// `agent_hook_logs` 의 머리말이 소유한다.
+pub const HookIdentity = struct {
+    host_id: u128,
+    /// `<cache>/maru` — 이 아래에 `agent-turn-events/host_<hex>/` 를 만든다. 호출자 소유이고 manager 보다
+    /// 오래 살아야 한다(daemon 이 그 수명을 갖는다).
+    log_base: []const u8,
+};
+
 pub const RuntimeManager = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -228,19 +239,20 @@ pub const RuntimeManager = struct {
     /// `runtime.clipboard_write`로 가져간다. read는 target(Pc)만 짧아 관측에 함께 싣는다.
     clipboards: std.AutoHashMapUnmanaged(RuntimeHandle, ClipboardState) = .empty,
     output_wake: ?OutputWake = null,
-    /// 훅 로그 경로의 인스턴스 칸으로 쓸 `host_id`(`init` 이 받는다 — 제품 경로가 잊을 수 없게). null 이면
-    /// 자식에 훅 신원을 싣지 않는다 — fail-closed.
-    hook_instance_host: ?u128 = null,
+    /// 훅 로그의 host 신원(`init` 이 받는다 — 제품 경로가 잊을 수 없게). null 이면 자식에 훅 신원을
+    /// 싣지 않고 칸도 만들지 않는다 — fail-closed.
+    hook_identity: ?HookIdentity = null,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
-    /// `hook_instance_host` 는 **이 host 의 `host_id`** 다 — spawn 이 자식에게 훅 로그 경로의 인스턴스 칸으로
-    /// 실어 준다(docs/agent-hooks.md §4). `null` 이면 훅 신원을 아예 안 싣는다(fail-closed).
+    /// `hook_identity` 는 **이 host 의 `host_id` 와 훅 로그 base 경로**다 — spawn 이 자식에게 훅 로그
+    /// 경로의 두 칸을 실어 주고, 그 칸을 만들어 둔다(docs/agent-hooks.md §4). `null` 이면 훅 신원을 아예
+    /// 안 싣고 칸도 안 만든다(fail-closed — 훅은 디렉터리를 만들지 않으므로 그 자식의 훅은 조용히 나간다).
     ///
     /// **왜 인자인가**: 예전에는 `setHookInstanceHost` 를 따로 부르게 했는데, 업그레이드 후계자 경로
     /// (`restore_activation`)가 그 호출을 빠뜨려 **업그레이드 뒤 새 자식이 훅 신원을 못 받는** 결함이 났다.
     /// 증상은 「그 터미널만 관측 모드로 조용히 강등」이라 알아채기 어렵다. 인자로 만들면 새 제품 경로가
     /// 생겨도 컴파일이 그 결정을 강제한다(테스트는 `null` 을 명시해 «훅 없는 host» 를 뜻한다).
-    pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry, hook_instance_host: ?u128) void {
+    pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry, hook_identity: ?HookIdentity) void {
         self.allocator = allocator;
         self.io = io;
         self.live_registry = LiveRegistry.init(allocator);
@@ -256,7 +268,8 @@ pub const RuntimeManager = struct {
         self.bell_counts = .empty;
         self.clipboards = .empty;
         self.output_wake = null;
-        self.hook_instance_host = hook_instance_host;
+        self.hook_identity = hook_identity;
+        if (hook_identity) |identity| agent_hook_logs.ensureInstanceDir(identity.log_base, identity.host_id);
     }
 
     /// Product daemon/restore calls this before any runtime exists. Tests that do not exercise the
@@ -1630,14 +1643,18 @@ pub const RuntimeManager = struct {
         const hook_command = maru.session.agent_hook_command;
         var hook_instance_buf: [hook_command.instance_token_max]u8 = undefined;
         var hook_pane_buf: [hook_command.pane_token_max]u8 = undefined;
-        const hook_instance: ?[]const u8 = if (self.hook_instance_host) |host_id|
-            hook_command.formatHostInstance(&hook_instance_buf, host_id)
+        const hook_instance: ?[]const u8 = if (self.hook_identity) |identity|
+            hook_command.formatHostInstance(&hook_instance_buf, identity.host_id)
         else
             null;
-        const hook_pane: ?[]const u8 = if (self.hook_instance_host != null)
+        const hook_pane: ?[]const u8 = if (self.hook_identity != null)
             hook_command.formatRuntimePane(&hook_pane_buf, runtime_id)
         else
             null; // 인스턴스 칸이 없으면 pane 칸만 실어도 훅은 경로를 못 만든다 — 둘을 함께 다룬다.
+        // **칸이 없으면 훅은 조용히 나간다**(계약 §4.1 — 훅은 mkdir 하지 않는다). init 에서 한 번 만들지만
+        // 그 사이 사용자가 캐시를 비웠을 수 있어 spawn 마다 확인한다(이미 있으면 EEXIST 로 no-op).
+        if (self.hook_identity) |identity|
+            agent_hook_logs.ensureInstanceDir(identity.log_base, identity.host_id);
 
         const be = self.backend_impl.backend();
         const size = maru.terminal.Size{ .cols = params.cols, .rows = params.rows };
@@ -1705,6 +1722,10 @@ pub const RuntimeManager = struct {
     /// handle을 되읽어 backend 수명을 끝내고(closeAndDetach → remove), registry에서 뗀다.
     fn terminateRuntime(self: *RuntimeManager, runtime_id: u128) void {
         const entry = self.host_registry.get(runtime_id) orelse return; // 없는 id — 멱등 no-op.
+        // 그 이름(`runtime_id`)은 다시 쓰이지 않으므로 남기면 아무도 읽지 않는 파일이 쌓인다. GUI 는 이
+        // 칸의 소유자가 아니라 정리하지 않는다(docs/agent-hooks.md §4).
+        if (self.hook_identity) |identity|
+            agent_hook_logs.removeRuntimeLog(identity.log_base, identity.host_id, runtime_id);
         const slot = entry.runtime orelse {
             self.host_registry.unregister(runtime_id); // handle 미기록(비정상) — registry만 정리.
             return;
@@ -2042,6 +2063,80 @@ test "runtime manager: host 가 자식에게 심는 훅 신원이 GUI 가 읽을
     try std.testing.expect(hook_command.instance_token_class.accepts(
         hook_command.formatHostInstance(&instance_buf, host_id),
     ));
+}
+
+test "runtime manager: 훅 로그 칸을 만들고, runtime 이 끝나면 그 파일을 거둔다" {
+    // 훅은 **디렉터리를 만들지 않는다**(계약 §4.1). 그래서 이 칸이 없으면 host-backed 자식의 훅은 매번
+    // 조용히 나가고 파일도 안 남긴다 — 즉 이 칸의 존재가 곧 «그 pane 의 훅 on/off» 다. 그리고 그 이름은
+    // `runtime_id` 라 다시 쓰이지 않으므로, 종료 때 거두지 않으면 아무도 읽지 않는 파일이 쌓인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buf);
+    const cache_base = base_buf[0..base_len];
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    const host_id: u128 = 0xfeed_0000_0000_0000_0000_0000_0000_01;
+    mgr.init(allocator, std.testing.io, &host_registry, .{ .host_id = host_id, .log_base = cache_base });
+    defer mgr.deinit();
+
+    // ① init 이 칸을 만든다 — **살아 있는 동안 계속** 있어야 한다(시작 직후 지워 버리는 회귀를 잡는다).
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const inst_dir = try agent_hook_logs.instanceDirPathIn(&dir_buf, cache_base, host_id);
+    var st: posix.Stat = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.fstatat(posix.AT.FDCWD, inst_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW));
+    try std.testing.expect(posix.S.ISDIR(st.mode));
+    // payload 에는 소스와 셸 명령 원문이 실린다(계약 §7) — 칸이 넓으면 이름만으로도 무엇이 도는지 샌다.
+    try std.testing.expectEqual(@as(u32, 0o700), st.mode & 0o777);
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", "exit 0" }, .cwd = null, .cols = 40, .rows = 10 });
+
+    // ② 훅이 적을 자리에 파일을 놓는다(훅 대신 우리가 놓는다 — 여기서 보려는 것은 **수명**이다).
+    var log_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const log_path = try agent_hook_logs.runtimeLogPathIn(&log_buf, cache_base, host_id, rid);
+    {
+        const fd = c.open(log_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+        try std.testing.expect(fd >= 0);
+        _ = c.close(fd);
+    }
+    try std.testing.expectEqual(@as(c_int, 0), c.fstatat(posix.AT.FDCWD, log_path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW));
+
+    // ③ terminate 가 그 파일을 거둔다. 칸 자체는 남는다 — 다른 runtime 이 아직 쓴다.
+    ops.terminate(ops.ctx, rid);
+    try std.testing.expect(c.fstatat(posix.AT.FDCWD, log_path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
+    try std.testing.expectEqual(@as(c_int, 0), c.fstatat(posix.AT.FDCWD, inst_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW));
+}
+
+test "runtime manager: 훅 신원이 없으면 칸도 안 만든다 — fail-closed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buf);
+    const cache_base = base_buf[0..base_len];
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    // 로그 디렉터리 자체가 없어야 한다 — 신원이 없으면 그 자식의 훅은 어차피 아무것도 못 쓴다.
+    var log_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const log_dir = try std.fmt.bufPrintZ(&log_dir_buf, "{s}/{s}", .{
+        cache_base,
+        maru.session.agent_hook_command.log_dir_rel,
+    });
+    var st: posix.Stat = undefined;
+    try std.testing.expect(c.fstatat(posix.AT.FDCWD, log_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
 }
 
 test "runtime manager: host_id 를 모르면 훅 신원을 싣지 않는다 — fail-closed" {

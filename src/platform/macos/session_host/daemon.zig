@@ -23,6 +23,7 @@ const upgrade = @import("upgrade_coordinator.zig");
 const discovery = @import("discovery.zig");
 const owner_lease = @import("owner_lease.zig");
 const host_manifest = @import("host_manifest.zig");
+const agent_hook_logs = @import("agent_hook_logs.zig");
 const screen_stream = @import("screen_stream.zig");
 const short_endpoint = @import("short_endpoint.zig");
 const protocol = @import("protocol.zig");
@@ -464,9 +465,23 @@ fn runSessionHostImpl(
     // (`upgrade_bootstrap` 이 불일치를 거부한다) 그 칸의 이름이 exec 을 넘어 유지된다 — pid 로 지으면
     // 후계자가 «죽은 인스턴스» 로 보여 살아 있는 runtime 의 로그를 정리가 거둔다.
     const host_id = exact_host_id orelse newHostId();
+    // 훅 로그 base 는 manager 보다 오래 살아야 한다(칸을 거두는 아래 defer 도 이 값을 쓴다) — 그래서
+    // manager 보다 **먼저** 등록해 LIFO 로 가장 나중에 풀리게 한다.
+    const hook_log_base = agent_hook_logs.resolveCacheBase(allocator);
+    defer if (hook_log_base) |base| allocator.free(base);
+    // **함수 스코프여야 한다.** 이것을 `if (hook_log_base) |base| { … defer … }` 안에 두면 그 블록이
+    // 끝나는 즉시 돌아 **방금 만든 칸을 시작하자마자 지운다**(그러면 그 host 의 훅은 영영 안 돈다).
+    // 등록 순서가 곧 해제 순서의 역이라, base 해제(위)보다 뒤·manager 해제(아래)보다 앞에 둔다.
+    defer if (hook_log_base) |base| agent_hook_logs.removeInstanceDir(base, host_id);
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(allocator, io, &registry, host_id);
+    manager.init(allocator, io, &registry, if (hook_log_base) |base| .{
+        .host_id = host_id,
+        .log_base = base,
+    } else null);
     defer manager.deinit();
+    // 죽은 host 가 남긴 칸을 거둔다(SIGKILL 로 아래 정리가 못 돈 경우의 안전망). 살아 있는 남의 칸은
+    // manifest 로 가려 남긴다 — GUI 는 이 질문에 답할 수 없어 이 정리가 host 쪽에 있다.
+    if (hook_log_base) |base| agent_hook_logs.sweepDeadHostDirs(io, base, dir_path, host_id);
     manager.enableOutputWake() catch return error.ManifestFailed;
     if (fixture_probe != null) manager.enableOutputMetrics();
     var socket_dir_buf: [112]u8 = undefined;

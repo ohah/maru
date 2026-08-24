@@ -11,6 +11,7 @@ const entrypoint = @import("entrypoint.zig");
 const code_signature = @import("code_signature.zig");
 const host_authority = @import("host_authority.zig");
 const host_manifest = @import("host_manifest.zig");
+const agent_hook_logs = @import("agent_hook_logs.zig");
 const owner_lease = @import("owner_lease.zig");
 const protocol = @import("protocol.zig");
 const reg = @import("registry.zig");
@@ -143,7 +144,14 @@ fn activateValidated(
     // `MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE` 없이 살아, 그 터미널의 훅이 영영 조용히 나간다(관측 모드로
     // 강등, 신호 없음). `invocation.host_id` 는 검증이 선임자와 같도록 강제한 값이라(§upgrade) 칸 이름이
     // exec 을 넘어 유지된다 — 그것이 pid 대신 host_id 를 쓰는 이유다(docs/agent-hooks.md §4).
-    manager.init(allocator, io, &registry, invocation.host_id);
+    // 훅 로그 base 는 manager 보다 오래 살아야 한다 — 아래 `defer manager.deinit()` 보다 **먼저** 등록해
+    // LIFO 로 나중에 풀리게 한다.
+    const hook_log_base = agent_hook_logs.resolveCacheBase(allocator);
+    defer if (hook_log_base) |base| allocator.free(base);
+    manager.init(allocator, io, &registry, if (hook_log_base) |base| .{
+        .host_id = invocation.host_id,
+        .log_base = base,
+    } else null);
     defer manager.deinit();
     manager.enableOutputWake() catch return error.RestoreFailed;
     var graph = try manager.prepareRestoredGraph(&validated.state.host);

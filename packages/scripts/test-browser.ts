@@ -763,6 +763,78 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   );
 }
 
+// **링크 provider 가 실제 마우스와 이어지는가.** 모델은 bun test 가 덮지만, hover 커서와 클릭
+// 활성화는 DOM 이벤트라 여기서만 볼 수 있다.
+for (const mode of ["full", "false"] as const) {
+  const p = await browser.newPage();
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/worker.html?worker=${mode}`);
+  await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+    timeout: 15_000,
+  });
+  const r = await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = () => new Promise((res) => setTimeout(res, 250));
+    t.reset();
+    await wait();
+    t.write("open src/foo.ts:42 now\r\n");
+    await wait();
+
+    const activated: string[] = [];
+    const hovered: string[] = [];
+    t.registerLinkProvider({
+      provideLinks(_row: number, text: string) {
+        const m = /src\/\S+:\d+/.exec(text);
+        if (!m) return null;
+        return [
+          {
+            startCol: m.index,
+            endCol: m.index + m[0].length - 1,
+            text: m[0],
+            activate: () => activated.push(m[0]),
+            hover: () => hovered.push(m[0]),
+          },
+        ];
+      },
+    });
+
+    const cv = document.querySelector("canvas") as HTMLCanvasElement;
+    const box = cv.getBoundingClientRect();
+    const cellW = box.width / t.size.cols;
+    const cellH = box.height / t.size.rows;
+    const at = (col: number, row: number) => ({
+      clientX: box.left + col * cellW + cellW / 2,
+      clientY: box.top + row * cellH + cellH / 2,
+      bubbles: true,
+    });
+
+    // "src/foo.ts:42" 는 5열부터다("open " 다음).
+    cv.dispatchEvent(new MouseEvent("mousemove", at(8, 0)));
+    await wait();
+    const cursorOnLink = cv.style.cursor;
+
+    cv.dispatchEvent(new MouseEvent("click", at(8, 0)));
+    await wait();
+
+    cv.dispatchEvent(new MouseEvent("mousemove", at(1, 0))); // "open" 위 — 링크 아님
+    await wait();
+    const cursorOffLink = cv.style.cursor;
+
+    return { cursorOnLink, cursorOffLink, activated, hovered };
+  });
+  check(`링크(${mode}): hover 하면 포인터 커서`, r.cursorOnLink === "pointer", r.cursorOnLink);
+  check(`링크(${mode}): 링크 밖이면 기본 커서`, r.cursorOffLink === "default", r.cursorOffLink);
+  check(
+    `링크(${mode}): 클릭이 activate 를 부른다`,
+    r.activated.length === 1 && r.activated[0] === "src/foo.ts:42",
+    JSON.stringify(r.activated),
+  );
+  check(`링크(${mode}): hover 콜백이 온다`, r.hovered.length >= 1, JSON.stringify(r.hovered));
+  check(`링크(${mode}): 에러 없음`, errs.length === 0, errs[0] ?? "");
+  await p.close();
+}
+
 // **장식이 실제로 픽셀에 나타나는가.** 모델(마커 좌표)은 bun test 가 덮지만, 렌더러가 그걸
 // 그리는지는 캔버스를 봐야 안다. 두 모드에서 모두 본다 — 워커는 프로토콜로 실어 보내므로
 // 경로가 다르다.

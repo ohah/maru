@@ -1,5 +1,6 @@
 import { LocalBackend } from "./backend/local";
 import type { FindResult, ShellEvent } from "./backend/types";
+import { LinkRegistry, type LinkProvider, type TerminalLink } from "./link";
 import {
   type Decoration,
   type DecorationOptions,
@@ -99,6 +100,7 @@ export class Terminal {
   #prevMeta: FrameMeta | null = null;
   #customKey: ((ev: KeyboardEvent) => boolean) | null = null;
   readonly #decorations = new DecorationStore();
+  readonly #links = new LinkRegistry();
   #decorationsWired = false;
 
   constructor(opts: TerminalOptions = {}) {
@@ -389,6 +391,7 @@ export class Terminal {
     this.#prevMeta = meta;
     // **마커를 먼저 보정한다.** 버려진 줄만큼 당기지 않으면 장식이 엉뚱한 줄에 그려진다.
     this.#decorations.sync(meta.evicted, meta.pushed);
+    this.#links.invalidate(); // 화면이 바뀌었으니 줄 텍스트를 다시 뽑아야 한다
     this.#pushDecorations(meta);
     if (prev) {
       // **위치만 본다.** shape·visible 은 깜빡임으로 매 프레임 토글되므로 이동으로 오해하면 안 된다.
@@ -769,6 +772,33 @@ export class Terminal {
   }
   linkAt(row: number, col: number): Promise<string | null> {
     return this.#need().linkAt(row, col);
+  }
+
+  /**
+   * 화면 텍스트에서 **앱이 정의한 규칙**으로 링크를 찾게 한다. 스택 트레이스의 `파일:줄` 을
+   * 에디터로 열거나, `#1234` 를 이슈로 보내는 용도다.
+   *
+   * **URL 자동 감지도 이걸로 한다.** 코어의 자동 감지는 libc 를 요구해 wasm 에 없으므로(§8),
+   * `https?://\S+` 를 찾는 provider 를 소비자가 넣으면 같은 결과가 된다.
+   *
+   * OSC 8 명시 링크가 **먼저**다 — 앱이 직접 선언한 것을 규칙이 덮으면 안 된다. provider 가
+   * 여럿이면 먼저 등록한 쪽이 이긴다.
+   */
+  registerLinkProvider(provider: LinkProvider): Disposable {
+    return this.#links.register(provider);
+  }
+
+  /**
+   * `(row, col)` 에 걸리는 링크를 OSC 8 → provider 순으로 찾는다. DOM 층이 hover·클릭에서 쓴다.
+   *
+   * OSC 8 은 URI 문자열만 있으므로 `activate` 가 없는 형태로 감싼다 — 소비자가 `onLinkActivate`
+   * 로 받는다(기존 동작).
+   */
+  async resolveLink(row: number, col: number): Promise<TerminalLink | { uri: string } | null> {
+    const uri = await this.linkAt(row, col);
+    if (uri) return { uri };
+    if (this.#links.empty) return null;
+    return this.#links.linkAt(row, col, () => this.serialize());
   }
 
   // ── 이벤트 ───────────────────────────────────────────────

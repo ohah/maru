@@ -128,7 +128,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 이미지·커스텀 링크 규칙
+- **없는 것**: 이미지(Kitty graphics)
 - **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
@@ -155,6 +155,24 @@ term.selectLines(0, 5);
 term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "k")); // ⌘K 는 앱이
 await term.serialize();                        // 화면을 평문으로(스타일은 버린다)
 ```
+
+### 링크 규칙
+
+```ts
+term.registerLinkProvider({
+  provideLinks(row, text) {                      // text 는 그 줄 전체
+    const m = /https?:\/\/\S+/.exec(text);
+    return m ? [{
+      startCol: m.index, endCol: m.index + m[0].length - 1, text: m[0],
+      activate: () => open(m[0], "_blank"),
+    }] : null;
+  },
+});
+```
+
+스택 트레이스의 `파일:줄` 을 에디터로 보내거나 `#1234` 를 이슈로 여는 데 씁니다. **URL 자동
+감지도 이걸로 합니다** — 코어의 감지는 libc 를 요구해 wasm 에 없지만, 정규식 한 줄이면 같은
+결과입니다. OSC 8 로 앱이 직접 선언한 링크가 규칙보다 우선합니다.
 
 ### 마커와 장식
 

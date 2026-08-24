@@ -367,6 +367,30 @@ $("bench").addEventListener("click", async () => {
   $("stat").textContent = `${((400 * chunk.length) / ms / 1000).toFixed(1)} MB/s`;
 });
 
+// ── 링크 규칙 ──────────────────────────────────────────────
+// **자동 URL 감지를 이걸로 한다.** 코어의 자동 감지는 libc 를 요구해 wasm 에 없다(계약 §8) —
+// 규칙을 소비자가 넣으면 같은 결과가 된다. 스택 트레이스의 `파일:줄` 도 함께 잡는다.
+term.registerLinkProvider({
+  provideLinks(_row, text) {
+    const out = [];
+    for (const re of [/https?:\/\/[^\s"'<>)\]]+/g, /(?:\.{0,2}\/)?[\w./-]+\.\w+:\d+(?::\d+)?/g]) {
+      for (const m of text.matchAll(re)) {
+        const at = m.index ?? 0;
+        out.push({
+          startCol: at,
+          endCol: at + m[0].length - 1,
+          text: m[0],
+          activate: () => {
+            if (m[0].startsWith("http")) globalThis.open(m[0], "_blank", "noopener");
+            else logOsc(`파일 열기 요청: ${m[0]}`); // 실제 앱이라면 에디터로 보낸다
+          },
+        });
+      }
+    }
+    return out.length > 0 ? out : null;
+  },
+});
+
 // ── 키 가로채기 · 직렬화 ───────────────────────────────────
 // `false` 를 돌려주면 터미널이 그 키를 완전히 무시한다 — 앱 단축키가 터미널보다 우선해야 할 때.
 $<HTMLInputElement>("o-hook").addEventListener("change", (e) => {

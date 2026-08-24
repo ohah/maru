@@ -735,6 +735,113 @@ test("마커가 없으면 장식을 만들 수 없다", async () => {
   term.dispose();
 });
 
+test("링크 provider가 화면 텍스트에서 규칙을 찾는다", async () => {
+  const term = await makeTerminal({ cols: 40, rows: 4 });
+  term.write("see src/foo.ts:42:10 for details\r\n");
+  await settle();
+
+  let gotRow = -1;
+  let gotText = "";
+  term.registerLinkProvider({
+    provideLinks(row, text) {
+      gotRow = row;
+      gotText = text;
+      const m = /src\/\S+\.ts:\d+:\d+/.exec(text);
+      if (!m) return null;
+      return [
+        {
+          startCol: m.index,
+          endCol: m.index + m[0].length - 1,
+          text: m[0],
+          activate() {},
+        },
+      ];
+    },
+  });
+
+  const hit = await term.resolveLink(0, 6); // "src/..." 안
+  expect(hit).not.toBeNull();
+  expect((hit as { text: string }).text).toBe("src/foo.ts:42:10");
+  expect(gotRow).toBe(0);
+  expect(gotText).toContain("see src/foo.ts:42:10"); // 줄 텍스트를 함께 받는다
+
+  expect(await term.resolveLink(0, 0)).toBeNull(); // 범위 밖("see")
+  expect(await term.resolveLink(3, 6)).toBeNull(); // 빈 줄
+  term.dispose();
+});
+
+test("OSC 8 명시 링크가 provider보다 먼저다", async () => {
+  // 앱이 직접 선언한 링크를 규칙이 덮으면 안 된다.
+  const term = await makeTerminal({ cols: 40, rows: 4 });
+  term.write("\x1b]8;;https://explicit.example\x1b\\LINK\x1b]8;;\x1b\\ rest\r\n");
+  await settle();
+
+  let providerCalled = false;
+  term.registerLinkProvider({
+    provideLinks(_row, text) {
+      providerCalled = true;
+      return [{ startCol: 0, endCol: text.length - 1, text, activate() {} }];
+    },
+  });
+
+  const hit = await term.resolveLink(0, 1); // "LINK" 안 — OSC 8 영역
+  expect(hit).toEqual({ uri: "https://explicit.example" });
+  expect(providerCalled).toBe(false); // OSC 8 이 잡히면 provider 를 부르지도 않는다
+
+  const other = await term.resolveLink(0, 7); // OSC 8 밖 — 여기서는 provider 가 답한다
+  expect((other as { text: string }).text).toContain("LINK");
+  expect(providerCalled).toBe(true);
+  term.dispose();
+});
+
+test("provider를 해제하면 더 이상 불리지 않는다", async () => {
+  const term = await makeTerminal({ cols: 40, rows: 4 });
+  term.write("target here\r\n");
+  await settle();
+
+  let calls = 0;
+  const sub = term.registerLinkProvider({
+    provideLinks(_row, text) {
+      calls++;
+      return [{ startCol: 0, endCol: text.length - 1, text, activate() {} }];
+    },
+  });
+
+  expect(await term.resolveLink(0, 2)).not.toBeNull();
+  expect(calls).toBe(1);
+
+  sub.dispose();
+  expect(await term.resolveLink(0, 2)).toBeNull();
+  expect(calls).toBe(1); // 해제 뒤에는 안 불린다
+  term.dispose();
+});
+
+test("줄 텍스트는 프레임이 바뀔 때만 다시 뽑는다", async () => {
+  // hover 는 포인터가 움직일 때마다 오므로 매번 직렬화하면 비싸다.
+  const term = await makeTerminal({ cols: 40, rows: 4 });
+  term.write("alpha beta\r\n");
+  await settle();
+
+  const seen: string[] = [];
+  term.registerLinkProvider({
+    provideLinks(_row, text) {
+      seen.push(text.trim());
+      return null;
+    },
+  });
+
+  await term.resolveLink(0, 1);
+  await term.resolveLink(0, 5); // 같은 프레임 · 다른 열 → 텍스트를 다시 안 뽑는다
+  expect(seen).toHaveLength(2); // provider 는 열마다 불리지만
+  expect(seen[0]).toBe(seen[1]); // 같은 텍스트다
+
+  term.write("gamma\r\n"); // 화면이 바뀌었다
+  await settle();
+  await term.resolveLink(1, 1);
+  expect(seen.at(-1)).toBe("gamma"); // 새 텍스트를 뽑았다
+  term.dispose();
+});
+
 test("alt screen에서 clear는 무동작이다", async () => {
   // 대체 화면은 앱의 것이다 — vim 안에서 ⌘K 가 화면을 지우면 앱의 그리기 모델과 어긋난다.
   // 계약 §7 의 세 번째 조항.

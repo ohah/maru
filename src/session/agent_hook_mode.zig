@@ -1689,6 +1689,22 @@ test "자식 이벤트와 빈 값은 신원을 싣지 않는다" {
     try std.testing.expect(!carriesSessionIdentity(.{ .kind = .unknown }));
 }
 
+test "SessionStart 뒤에도 턴 키가 남는다 — 그래서 base 에 그대로 실으면 안 된다" {
+    // `reset()` 이 키를 남기는 것은 **옳다**(같은 턴의 다음 이벤트가 «키가 바뀌었다» 로 읽히면 매번
+    // 리셋이 돈다). 그 성질을 여기서 못 박아, 소비자가 그것을 모른 채 «지금 키» 로 쓰는 것을 막는다 —
+    // 실제로 그 실수가 base 스냅샷에 직전 턴의 키를 실었다(2026-08-25).
+    var p: Progress = .{};
+    var prompt: event.Event = .{ .kind = .user_prompt_submit };
+    prompt.turn_key = "p-1";
+    _ = advance(&p, .unknown, prompt);
+    try std.testing.expectEqualStrings("p-1", p.turnKey());
+
+    _ = advance(&p, .running, .{ .kind = .session_start });
+    // 진행 상태는 지워졌는데 **키는 남는다**.
+    try std.testing.expectEqual(@as(usize, 0), p.childCount());
+    try std.testing.expectEqualStrings("p-1", p.turnKey());
+}
+
 test "세션 base 는 «돌고 있지 않을 때» 의 SessionStart 다" {
     const start: event.Event = .{ .kind = .session_start };
     // cold start · `/clear` 직후 · 승인 대기 중 resume — 셋 다 base 다.

@@ -10,6 +10,8 @@
 //! 40바이트짜리 이름이라 몇 개를 들고 있어도 싸다 — 대신 개수를 못 박아 상한을 코드에 둔다.
 
 const std = @import("std");
+/// 같은 L2 순수 층이다 — 제목을 UTF-8 경계에서 자르는 규칙을 여기서 다시 적지 않는다(`clampUtf8`).
+const agent_transcript = @import("agent_transcript.zig");
 
 /// 보관할 턴 스냅샷 수. 리뷰는 보통 "직전 턴"을 보지만, 에이전트가 연달아 여러 턴을 돌린 뒤 훑는 경우가 있어
 /// 몇 개는 남긴다. 넘으면 가장 오래된 것부터 버린다(그 시점 tree는 git GC 대상이 되므로 붙들지 않는다).
@@ -24,6 +26,13 @@ pub const max_oid_len: usize = 64;
 /// 안 담기는」 구간이 조용히 생긴다. 실측(2026-08-24, 훅 로그 5,221 이벤트)에서는 양 provider 모두
 /// **36바이트 UUID** 였고, 여유는 세션 신원(`max_session_id_len`)과 같은 근거로 둔다.
 pub const max_turn_key_len: usize = 64;
+
+/// 턴 제목(그 턴의 `last_assistant_message`)의 상한.
+///
+/// **`agent_transcript.max_text_bytes`(512)보다 작게 잡는다.** 이 값은 `Snapshot` 안의 고정 배열이고
+/// 스냅샷은 세션당 `capacity`개 × 세션 `max_sessions`개로 **64벌 복제된다** — 512로 잡으면 그것만 32 KiB다.
+/// 제목은 목록 한 줄에 서는 라벨이라 화면이 어차피 자른다(기본 도크 폭이 좁다). 128 = 한글 42자쯤이다.
+pub const max_turn_title_len: usize = 128;
 
 pub const Snapshot = struct {
     /// `git write-tree` 결과. 이 tree가 그 턴이 끝난 순간의 작업트리다.
@@ -55,6 +64,17 @@ pub const Snapshot = struct {
     /// **상한 초과**(아래 `push` — 자르면 남의 턴과 거짓으로 일치한다).
     turn: [max_turn_key_len]u8 = undefined,
     turn_len: usize = 0,
+    /// 그 턴의 **제목** — provider 가 준 마지막 응답(`Stop.last_assistant_message`, 양 provider 공통).
+    ///
+    /// ⚠️ **턴 키와 정반대 규율이다: 넘치면 자른다.** 키는 신원이라 자르면 남의 턴과 **거짓으로 일치**하지만,
+    /// 제목은 사람이 읽는 산문이라 잘린 앞부분이 여전히 쓸모 있다 — 없는 것보다 낫다. 자를 때 UTF-8 경계를
+    /// 지킨다(쪼개면 렌더가 U+FFFD 를 뿌린다).
+    ///
+    /// **아직 화면 소비자가 없다**(AT2 는 싣기까지다). `TurnItem` 에는 이 값을 놓을 자리가 없고, 자리를
+    /// 만드는 것은 목록 레이아웃 변경이라 별도 작업이다 — 그때까지 이 필드는 **저장만 된다**. 「화면이
+    /// 쓴다」로 적지 않는 이유가 그것이다(그런 현재형이 없는 배관을 있다고 읽히게 만든다).
+    title: [max_turn_title_len]u8 = undefined,
+    title_len: usize = 0,
 
     pub fn oid(self: *const Snapshot) []const u8 {
         return self.tree[0..self.tree_len];
@@ -62,6 +82,10 @@ pub const Snapshot = struct {
 
     pub fn turnKey(self: *const Snapshot) []const u8 {
         return self.turn[0..self.turn_len];
+    }
+
+    pub fn titleText(self: *const Snapshot) []const u8 {
+        return self.title[0..self.title_len];
     }
 };
 
@@ -92,6 +116,8 @@ pub const Ring = struct {
         agent_kind: u8 = 0,
         /// 없으면 빈 값 — 세션 base·관측 모드가 그렇다(`Snapshot.turn` 주석).
         turn_key: []const u8 = "",
+        /// 그 턴의 마지막 응답. **넘치면 잘려 담긴다**(`Snapshot.title` 주석 — 키와 반대 규율).
+        title: []const u8 = "",
     };
 
     /// 스냅샷을 넣는다. **같은 tree가 연달아 오면 넣지 않는다** — 에이전트가 파일을 안 건드린 턴까지 쌓으면
@@ -118,6 +144,13 @@ pub const Ring = struct {
         if (args.turn_key.len > 0 and args.turn_key.len <= max_turn_key_len) {
             @memcpy(entry.turn[0..args.turn_key.len], args.turn_key);
             entry.turn_len = args.turn_key.len;
+        }
+        // **제목은 반대로 자른다**(`Snapshot.title` 주석). 산문이라 앞부분이 여전히 쓸모 있고, UTF-8
+        // 경계를 지켜야 렌더가 U+FFFD 를 안 뿌린다.
+        const title = agent_transcript.clampUtf8(args.title, max_turn_title_len);
+        if (title.len > 0) {
+            @memcpy(entry.title[0..title.len], title);
+            entry.title_len = title.len;
         }
         @memcpy(entry.tree[0..tree_oid.len], tree_oid);
         self.items[self.next] = entry;
@@ -583,6 +616,44 @@ test "턴 키: 같은 tree 연속은 키가 달라도 스킵이다" {
     ring.push(.{ .tree = "same", .surface_id = 1, .turn_key = "p-2" });
     try std.testing.expectEqual(@as(usize, 1), ring.len);
     try std.testing.expectEqualStrings("p-1", ring.latest().?.turnKey());
+}
+
+test "턴 제목: 실은 값이 그대로 되읽힌다" {
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .title = "다 했습니다" });
+    try std.testing.expectEqualStrings("다 했습니다", ring.latest().?.titleText());
+}
+
+test "턴 제목: 없으면 빈 값이다" {
+    // base·관측 모드·제목 없는 턴 — 셋 다 빈 값이고 「모른다」로 같게 읽힌다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1 });
+    try std.testing.expectEqual(@as(usize, 0), ring.latest().?.titleText().len);
+}
+
+test "턴 제목: 넘치면 자른다 — 키와 반대 규율이다" {
+    // 키는 신원이라 자르면 남의 턴과 거짓으로 일치하지만, 제목은 산문이라 앞부분이 여전히 쓸모 있다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .title = "z" ** (max_turn_title_len + 10) });
+    try std.testing.expectEqual(max_turn_title_len, ring.latest().?.titleText().len);
+}
+
+test "턴 제목: 비ASCII 를 잘라도 UTF-8 경계를 안 쪼갠다" {
+    // 쪼개면 렌더가 U+FFFD 를 뿌린다. 한글은 3바이트라 상한이 3의 배수가 아니면 반드시 경계에 걸린다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .title = "가" ** 100 });
+    const got = ring.latest().?.titleText();
+    try std.testing.expect(got.len <= max_turn_title_len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(got)); // ← 경계가 안 쪼개졌다
+    try std.testing.expectEqual(@as(usize, 0), got.len % 3); // 한글만 들었으니 3의 배수여야 한다
+}
+
+test "턴 제목: 개행이 든 값도 그대로 담는다(눕히는 것은 표시 층의 일이다)" {
+    // 순수 층은 **저장**만 한다 — 훅 payload 를 사람이 읽는 꼴로 눕히는 것은 platform 의
+    // `hookConversationText` 가 이미 하는 일이고, 그 규칙을 여기에 복사하면 출처가 둘이 된다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .title = "첫 줄\n둘째 줄" });
+    try std.testing.expectEqualStrings("첫 줄\n둘째 줄", ring.latest().?.titleText());
 }
 
 test "타임라인: 링이 비면 행도 없다(오류가 아니다)" {

@@ -15146,12 +15146,26 @@ pub const AppSession = struct {
                         if (self.turn_rings.ringFor(demo_session, repo)) |ring| {
                             const count = std.fmt.parseInt(usize, std.mem.span(raw_count), 10) catch 3;
                             const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+                            // MARU_FORCE_SCM_TURN_TREES=<oid>,<oid>,… — **진짜 tree** 를 밖에서 받는다(오래된 것부터).
+                            // 가짜 OID 를 심으면 `git diff` 가 실패해 `N개 파일` 요약이 영영 안 뜬다 — 그 줄을
+                            // 캡처로 확인할 방법이 없어진다. 앱이 스스로 `rev-parse` 를 부르지 않는 이유는 그것이
+                            // 비동기 배관이라 캡처 시점에 결과가 없기 때문이다(스크립트가 구해서 넘긴다).
+                            var trees_it: ?std.mem.SplitIterator(u8, .scalar) = if (std.c.getenv("MARU_FORCE_SCM_TURN_TREES")) |raw_trees|
+                                std.mem.splitScalar(u8, std.mem.span(raw_trees), ',')
+                            else
+                                null;
                             var i: usize = 0;
                             while (i < count) : (i += 1) {
                                 var oid_buf: [16]u8 = undefined;
-                                const oid = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
+                                const fallback = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
+                                const oid = if (trees_it) |*it| (it.next() orelse fallback) else fallback;
                                 // 종류만 번갈아 심는다 — 한 링은 한 세션이므로 `surface_id` 는 하나다.
                                 ring.push(oid, 1, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                            }
+                            // MARU_FORCE_SCM_TURNS_MISSED=<n> — 「기록하지 못한 턴」 줄을 세운다. 실제로는
+                            // 다른 세션의 캡처와 겹쳐야 나는 값이라 헤드리스로는 재현할 방법이 없다.
+                            if (std.c.getenv("MARU_FORCE_SCM_TURNS_MISSED")) |raw_missed| {
+                                ring.missed = std.fmt.parseInt(u32, std.mem.span(raw_missed), 10) catch 0;
                             }
                         }
                     }

@@ -734,6 +734,14 @@ MARU_FORCE_SCM_FETCH=1         # 그 저장소에 원격 갱신(fetch --prune)�
 MARU_FORCE_SCM_MENU=1          # 브랜치 줄 `∨`의 보조 메뉴(push·pull 주입·기준 고르기)를 연 상태 — 메뉴는 클릭으로만 열린다(P6b)
 MARU_FORCE_SCM_BASE_MENU=1     # 그 메뉴에서 "기준 브랜치 고르기"까지 눌러 **기준 목록**을 연 상태(§3.5). 목록 읽기가 비동기라 메뉴는 두 tick 뒤에 뜬다
 MARU_FORCE_SCM_COMMIT_WHEEL=<n> # 커밋 상자를 휠로 n틱 굴린 상태(음수면 위로) — 휠은 하니스가 못 내는 포인터 입력이다
+MARU_FORCE_SCM_TAB=agent       # 에이전트 탭을 고른 상태 — 탭 전환은 클릭으로만 일어난다(P4)
+MARU_FORCE_SCM_TURNS=<n>       # 턴 스냅샷 n개를 심는다. 링은 «이번 실행에서 관측한 것»이라 헤드리스에는 비어 있고,
+                               # AT0 이후로는 **세션 신원**도 함께 심는다(링의 키가 provider 세션 id 이므로 신원 없이는 목록을 못 찾는다)
+MARU_FORCE_SCM_TURN_TREES=<oid>,<oid>,…  # 그 스냅샷에 **진짜 tree**를 쓴다(오래된 것부터). 가짜 OID 면 `git diff` 가 실패해
+                               # `N개 파일` 요약이 영영 안 뜬다 — 앱이 스스로 `rev-parse` 를 부르지 않는 이유는 그것이 비동기라
+                               # 캡처 시점에 결과가 없기 때문이다(스크립트가 `git rev-parse HEAD~n^{tree}` 로 구해 넘긴다)
+MARU_FORCE_SCM_TURNS_MISSED=<n> # 「기록하지 못한 턴 N개」 줄을 세운다 — 실제로는 다른 세션의 캡처와 겹쳐야 나는 값이라
+                               # 헤드리스로는 재현할 방법이 없다
 MARU_FORCE_SIDEBAR_CARDS=<n>   # 워크스페이스 카드 n개 — 사이드바가 뷰포트를 넘치게(경계를 만든다)
 MARU_FORCE_SIDEBAR_HOVER=edge  # 뷰포트 바닥에 걸친 카드에 호버 밴드(§5.3의 quad 클립을 겨냥)
 MARU_FORCE_SIDEBAR_SCROLL=max  # 사이드바를 끝까지 굴려 둔 상태(상단 클립 분기를 켠다)

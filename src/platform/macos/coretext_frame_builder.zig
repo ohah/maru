@@ -1,5 +1,5 @@
 const std = @import("std");
-const sidebar_glyph_rows = @import("../../sidebar_glyph_rows.zig");
+const sidebar_glyph_rows = maru.sidebar_glyph_rows; // **배럴로 든다** — 이 파일은 모듈 루트가 `platform/macos` 인 아티팩트(chrome-lab-smoke)에서도 컴파일되므로 상대 경로면 같은 파일이 두 모듈에 들어간다
 const maru = @import("maru");
 const app = maru.app;
 const config = maru.config;

@@ -411,9 +411,16 @@ pub fn createTerm(
     const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
     var req = request;
     req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
-    // 훅 로그의 인스턴스 칸(docs/agent-hooks.md §4). `surface.id` 는 **프로세스마다 1 부터**라 maru 를 두 개
-    // 띄우면 두 인스턴스의 첫 pane 이 같은 파일 이름을 갖는다 — 이 값이 그 이름공간을 가른다.
-    req.hook_instance = agent_ops.hookInstanceId();
+    // 훅 로그 경로의 두 칸(docs/agent-hooks.md §4). 인스턴스 칸은 `surface.id` 가 **프로세스마다 1 부터**라
+    // maru 를 두 개 띄우면 두 인스턴스의 첫 pane 이 같은 파일 이름을 갖는 문제를 가른다. pane 칸은
+    // control-plane selector(`MARU_PANE_ID`)와 **갈라진 변수**다 — 같은 값(surface.id)을 싣지만 의미가 다르고,
+    // host 가 소유하는 자식은 여기에 `runtime_id` 를 싣는다(그 자식은 GUI 보다 오래 산다).
+    //
+    // 버퍼는 이 함수 스택에 둔다 — env 는 아래 `be.spawn` 안에서 굳으므로 그 호출까지만 살아 있으면 된다.
+    var hook_instance_buf: [maru.session.agent_hook_command.instance_token_max]u8 = undefined;
+    var hook_pane_buf: [maru.session.agent_hook_command.pane_token_max]u8 = undefined;
+    req.hook_instance = agent_ops.hookInstanceToken(&hook_instance_buf);
+    req.hook_pane = maru.session.agent_hook_command.formatSurfacePane(&hook_pane_buf, id);
     // P2 seam(docs/persistent-session-host.md §13 P2): terminal runtime 계약 backend로 spawn한다. backend가 앱 전역
     // registry의 `LiveSurface` 번들 슬롯 생성 + live PTY spawn(live_pty.init) + surface init을 한 단위로(내부 2-pass
     // 부분-init 정리 포함) 수행하고, GUI에는 복구 가능한 *Surface와 opaque handle(id)만 준다 — GUI는 `*LivePtySession`을

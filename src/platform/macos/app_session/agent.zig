@@ -622,11 +622,19 @@ pub fn hookInstanceId() u64 {
     return @intCast(std.c.getpid());
 }
 
+/// 이 프로세스가 소유하는 훅 인스턴스 칸의 **이름**. 값 자체는 pid 지만 문자열 모양은 계약 모듈이 정한다 —
+/// host 소유 칸(`host_<hex>`)과 한 이름공간을 쓰므로 두 모양을 한곳에서 봐야 «어느 방법으로 살아 있는지
+/// 묻는가» 가 갈리지 않는다(docs/agent-hooks.md §4).
+pub fn hookInstanceToken(buf: *[maru.session.agent_hook_command.instance_token_max]u8) []const u8 {
+    return maru.session.agent_hook_command.formatGuiInstance(buf, @intCast(hookInstanceId()));
+}
+
 /// 이 인스턴스의 훅 로그 칸(`<로그 디렉터리>/<인스턴스>`). 훅이 파일을 만드는 자리이자, 우리가 읽고
 /// 종료할 때 지우는 자리다.
 fn agentHookInstanceDir(a: std.mem.Allocator) ?[:0]const u8 {
     const dir = agentHookLogDir(a) orelse return null;
-    return std.fmt.allocPrintSentinel(a, "{s}/{d}", .{ dir, hookInstanceId() }, 0) catch null;
+    var token_buf: [maru.session.agent_hook_command.instance_token_max]u8 = undefined;
+    return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, hookInstanceToken(&token_buf) }, 0) catch null;
 }
 
 /// 이 프로세스가 훅 로그를 이미 정리했는가(위 «프로세스에 한 번» 규칙). 테스트는 한 바이너리에서 세션을
@@ -1629,12 +1637,16 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
     return .{ .kind = kind, .body = body };
 }
 
-/// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<surface_id>.ndjson`). 훅 커맨드가 적는 그 이름이다.
+/// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<인스턴스>/<pane>.ndjson`). 훅 커맨드가 적는 그 이름이다.
 fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
     // **인스턴스 칸을 지난다** — 훅이 쓰는 이름과 같아야 한다(계약 §4). 이 둘이 갈리면 그 Term 은 자기
     // 이벤트를 못 읽고, 같은 숫자를 가진 **다른 인스턴스**의 이벤트를 읽는다.
     const dir = agentHookInstanceDir(a) orelse return null;
-    return std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ dir, term.surfaceId() }) catch null;
+    // pane 칸 이름도 **계약 모듈이 만든다**(문자열 조립을 여기서 되풀이하지 않는다 — host 가 소유하는
+    // Term 은 같은 자리에 `runtime_id` 를 쓰므로, 그 분기가 오면 이 한 줄만 갈린다).
+    var pane_buf: [maru.session.agent_hook_command.pane_token_max]u8 = undefined;
+    const pane = maru.session.agent_hook_command.formatSurfacePane(&pane_buf, term.surfaceId());
+    return std.fmt.allocPrint(a, "{s}/{s}.ndjson", .{ dir, pane }) catch null;
 }
 
 /// 어느 Term이든 에이전트가 돌고 있는가 — 활동 시각 재렌더 게이트. 전-Term 순회지만 필드 읽기뿐이라 20초에

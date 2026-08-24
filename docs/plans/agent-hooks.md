@@ -196,6 +196,24 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 - ⚠️ 남는 한계: 이 값은 우리가 `sh` 를 띄워 잰 것이고 provider 가 자기 프로세스에서 fork·exec 하는
   경로는 다를 수 있다. 그 차이는 spawn 비용 자체의 차이이지 우리 스크립트 몫이 아니다.
 
+### AH7 — host-backed(keep-alive) 터미널의 훅 모드
+
+keep-alive 를 켠 터미널은 host 가 자식을 띄우고 그 자식이 GUI 보다 오래 산다. AH1 의 채널은 GUI 소유
+신원만 실을 수 있어 그 pane 이 **관측 모드로 강등**된다 — 기본값을 켠 지금, keep-alive 를 주력으로 쓰면
+훅 모드가 무력화된다.
+
+- **AH7-1(완료 2026-08-24) — 계약에 자리를 만든다.** 훅 경로가 control-plane selector 와 갈라진 자기 변수
+  (`MARU_HOOK_PANE`)를 갖고, 두 칸의 모양이 소유자별로 정해졌다(계약 §4 표): GUI 는 `pid`/`surface_id`,
+  host 는 `host_<32 hex host_id>`/`<32 hex runtime_id>`. 만드는 곳은 계약 모듈 하나이고, 셸 가드의 문자
+  클래스와 maru 쪽 판정이 한 상수에서 나온다. **동작 변화는 없다** — GUI 소유 로그의 파일 배치는 그대로다.
+- **AH7-2 — host 가 자기 신원으로 채운다.** host 가 spawn 할 때 두 칸을 자기 `host_id`·그 runtime 의
+  `runtime_id` 로 채운다. ⚠️ `runtime_id` 는 지금 **spawn 뒤에** 발급되므로(`runtime_manager.spawnRuntime`)
+  그 순서를 먼저 바꿔야 한다 — 자식 env 는 spawn 시점에 굳는다.
+- **AH7-3 — GUI 가 그 칸을 읽는다.** 재접속한 GUI 가 workspace 의 `runtime-handle`(host_id:runtime_id)로
+  같은 이름을 다시 계산해 tail 한다. 시작 시 정리는 «살아 있는가» 를 소유자별로 묻는다(pid → `getpgid`,
+  `host_<hex>` → manifest·소켓). GUI 부재 중 쌓인 backlog 를 어디까지 재생할지도 이 단계가 정한다
+  (상태는 세우고 **알림은 억제**하는 쪽이 기본 — 몇 시간 전 턴의 알림이 한꺼번에 뜨면 안 된다).
+
 ## 2. 순서와 의존
 
 ```
@@ -203,6 +221,7 @@ AH1 전달 채널 ─┬─ AH2 설치·제거 ─ AH3 모드 판정 ─┬─ A
                │                                  └─ AH5 알림
                └─ AT1 턴 경계(turn-changes 계획)
 AH6 측정은 AH1~AH2 직후부터 상시
+AH7 host-backed ─ AH7-1 계약 ─ AH7-2 host 주입 ─ AH7-3 GUI 읽기·정리
 ```
 
 AH1~AH3까지가 인프라이고, AH4·AH5·AT1이 그 위의 소비자다. **AH3 없이 AH4를 켜면 두 모드가 섞인다** —

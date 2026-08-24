@@ -999,6 +999,21 @@ pub fn applyForcedScmTab(self: *AppSession) void {
                         if (std.c.getenv("MARU_FORCE_SCM_TURNS_MISSED")) |raw_missed| {
                             ring.missed = std.fmt.parseInt(u32, std.mem.span(raw_missed), 10) catch 0;
                         }
+                        // MARU_FORCE_SCM_TURNS_EVICTED=1 — 「최근 세션에 밀려 이전 턴 기록이 사라졌습니다」
+                        // 줄을 세운다. `_MISSED` 와 같은 성격이고 이유도 같다: 실제로 이 값이 서려면 **서로
+                        // 다른 세션 신원 아홉**이 맵을 넘겨야 하는데, 신원은 provider 훅이 발급하므로 에이전트
+                        // 없는 헤드리스에서는 만들 방법이 없다.
+                        //
+                        // `MARU_FORCE_SCM_TURNS` 값에 따라 **두 화면**이 나온다(문구는 같은 자리에 선다):
+                        //   n>0 → 목록이 찬 채로 고지가 함께 선다(그 줄이 목록을 대신하지 않는다는 계약)
+                        //   n=0 → 빈 목록의 «이유» 자리에 고지가 대신 선다
+                        //
+                        // ⚠️ **링이 아예 없는 경로(`RingMap.wasEvicted`)는 여기로 못 온다** — 그쪽은 밀린 뒤
+                        // 아직 안 돌아온 세션이고, 이 게이트는 링을 세워야 하는 자리에 있다. 그 분기는 단위
+                        // test 가 본다(`app_session.test.에이전트 탭: 밀려난 세션은 …`).
+                        if (std.c.getenv("MARU_FORCE_SCM_TURNS_EVICTED") != null) {
+                            ring.history_evicted = true;
+                        }
                     }
                 }
             }

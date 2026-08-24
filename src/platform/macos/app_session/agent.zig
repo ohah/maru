@@ -1370,8 +1370,10 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const had_reply = term.agent_transcript.owned.reply().len > 0;
     var conversation_changed = false;
     var turn_ended = false;
+    var base_opened = false;
     for (events[0..batch.count]) |ev| {
         const applied = applyHookEvent(self, term, ev);
+        if (applied.base) base_opened = true;
         if (applied.conversation) conversation_changed = true;
         if (applied.turn_end) turn_ended = true;
         // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
@@ -1395,7 +1397,11 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
         if (!batch.more) term.agent_hook_backlog_catchup = false;
     }
     // **배치당 한 번만 찍는다** — 배치 안의 이벤트는 모두 같은 작업트리를 본다(위 `applyHookEvent`).
-    if (turn_ended) captureTurnSnapshot(self, term.surfaceId());
+    //
+    // **사유가 둘이어도 한 번이다.** 세션 base(턴 0)와 턴 끝이 한 배치에 함께 와도(첫 프롬프트가 곧바로
+    // 끝난 경우) 작업트리가 같으므로 두 번 찍을 이유가 없다. 배치를 건너 겹치는 경우는 순수 층의
+    // 「같은 tree 가 연달아 오면 넣지 않는다」가 흡수한다(계약 §3 이 정한 안전망).
+    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId());
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
@@ -1425,6 +1431,12 @@ const Applied = struct {
     conversation: bool = false,
     /// 이 이벤트로 턴이 끝났다.
     turn_end: bool = false,
+    /// 이 이벤트가 **세션 base(턴 0)** 를 연다(`opensSessionBase`).
+    ///
+    /// `turn_end` 와 **섞지 않는다** — 두 사실의 이름이 다르고, 알림 억제(`suppressesNotice`)가 이미 그
+    /// 둘을 가르고 있다(`SessionStart` 는 배지를 바꾸되 알림은 안 낸다). 둘은 상호배타라 한 이벤트가
+    /// 동시에 세우지 못하지만, **한 배치 안에서는 함께** 참이 될 수 있다(다른 이벤트로).
+    base: bool = false,
 };
 
 /// 훅 payload 의 문자열을 **사람이 보는 형태로** 푼다(계약 §4).
@@ -1496,6 +1508,10 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // 모두 **같은 작업트리**를 보므로 여러 번 찍어도 나오는 tree 가 같다 — 비용만 늘고 얻는 것이 없다.
     // 호출자가 배치 끝에서 한 번 찍는다.
     const turn_end = maru.session.turn_snapshot.isTurnEnd(turnStateOf(prev_state), turnStateOf(term.agent_state));
+    // **세션 base(턴 0)** — 타임라인은 스냅샷 **두 개**라야 완료 턴 하나를 낸다. base 가 없으면 그 세션의
+    // 첫 턴이 화면에 아예 안 뜬다(두 번째 턴이 끝나야 보인다). `previous == .running` 인 `SessionStart`
+    // 는 위 `turn_end` 가 이미 잡으므로 여기서 빠진다 — 둘은 상호배타다(`opensSessionBase` 주석의 표).
+    const base = mode_mod.opensSessionBase(prev_state, ev);
 
     // **알림은 전이에 붙는다**(계약 §6). 같은 턴에서 `Stop` 이 여러 번 와도 상태가 이미 `idle` 이라
     // 전이가 없어 두 번 울리지 않는다 — 「턴 단위 1회」를 따로 세지 않아도 성립한다.
@@ -1559,18 +1575,18 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
             term.agent_transcript.owned.setPrompt(hookConversationText(&text_buf, &text_scratch, ev.text));
             // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
             term.agent_transcript.owned.setReply("");
-            return .{ .conversation = true, .turn_end = turn_end };
+            return .{ .conversation = true, .turn_end = turn_end, .base = base };
         },
         // **오류 사유도 마지막 응답이다.** provider 가 `StopFailure` 의 `last_assistant_message` 로
         // 사유를 준다(실측). 저장하지 않으면 사이드바 대화 줄이 오류 턴만 비고, 자식이 남아 알림이
         // 늦게 나가는 경우엔 그 본문마저 잃는다(위 `.done` 분기가 이 값을 쓴다).
         .stop, .stop_failure => if (ev.text.len > 0) {
             term.agent_transcript.owned.setReply(hookConversationText(&text_buf, &text_scratch, ev.text));
-            return .{ .conversation = true, .turn_end = turn_end };
+            return .{ .conversation = true, .turn_end = turn_end, .base = base };
         },
         else => {},
     }
-    return .{ .turn_end = turn_end };
+    return .{ .turn_end = turn_end, .base = base };
 }
 
 /// 종료할 때 **이 세션이 소유한 pane 의** 이벤트 로그를 지운다(계약 §4.2).
@@ -1668,10 +1684,15 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
     while (true) {
         const batch = cursor.take(text, &events);
         var rotated_turn_end = false;
+        var rotated_base = false;
         for (events[0..batch.count]) |ev| {
-            if (applyHookEvent(self, term, ev).turn_end) rotated_turn_end = true;
+            const applied = applyHookEvent(self, term, ev);
+            if (applied.turn_end) rotated_turn_end = true;
+            if (applied.base) rotated_base = true;
         }
-        if (rotated_turn_end) captureTurnSnapshot(self, term.surfaceId());
+        // 회전본에도 **같은 규율**을 건다 — 여기만 빠지면 회전된 로그에 든 `SessionStart` 의 base 를 잃고,
+        // 그 세션의 첫 턴이 영영 안 뜬다.
+        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId());
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }

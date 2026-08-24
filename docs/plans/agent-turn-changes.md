@@ -59,17 +59,39 @@
 영속화가 **가능해질 뿐**이고, 실제 저장은 캡처 전환(§4.4) 뒤에 온다(참조 없는 tree는 `gc` 대상이라 tree OID를
 저장해 봐야 나중에 객체가 없다).
 
-### AT1 — 훅을 턴 경계 트리거로
+### AT1 — 훅을 턴 경계 트리거로 ✅ 완료 (2026-08-25)
 
 - **선행: [훅 통합 계획](agent-hooks.md) AH1~AH3.** 전달 채널·설치·모드 판정은 그쪽이 소유한다.
-- 이 단계가 하는 일은 이벤트를 **턴 경계로 해석**하는 것뿐이다: `SessionStart`→턴 0 스냅샷,
-  `Stop`(단 `stop_hook_active` 무시)→턴 종료 스냅샷. 스냅샷 생성 코드는 건드리지 않는다(§6.1 메커니즘,
-  수확 지점은 `app_session/git.zig`의 `takeSnapshotResult`).
-- 턴 식별자(`prompt_id`/`turn_id`)를 링 항목에 싣는다 — AT3 귀속이 이 키에 의존한다(계약 §3.1).
+
+⚠️ **이 절의 초판은 이미 된 일을 남은 일로 적고 있었다.** 몸통(이벤트를 턴 경계로 해석하는 것)은 AH3·AH4가
+훅 모드를 세우면서 **함께 왔다** — `applyHookEvent`가 훅 전이에 `turn_snapshot.isTurnEnd`를 태우고,
+`pollAgentHookEvents`·`drainRotatedAgentHookLog`가 **배치당 한 번** `captureTurnSnapshot`을 부른다.
+`stop_hook_active` 재진입 가드는 `agent_hook_mode.next`에, 「한 Term에 한 소스」는 `pollAgentConsumer`의
+배타 분기에 이미 있었고 `test_hook_calls`·`test_observe_calls`가 그것을 지킨다.
+
+실제로 이 단계가 닫은 것은 셋이고, **첫째는 계약 이행이 아니라 결함**이었다.
+
+- **훅 모드에 신원 소스가 없었다.** `app_session/git.zig`의 `sessionIdentityFor` 주석이 「`applyHookEvent`가
+  payload의 `session_id`로 채워 둔다」고 **약속하고 있었는데 그 배관이 없었다**. 신원을 채우는
+  `refreshAgentSessionIdentity`의 유일한 호출자가 `.observe` 분기 전용이라, 훅 모드의 링은 관측 시절 캐시나
+  `/clear` 뒤의 낡은 신원에 붙거나 아예 서지 않았다. `applyHookEvent` 맨 앞에서 lead 이벤트의 `session_id`를
+  채택한다(`agent_hook_mode.carriesSessionIdentity`).
+- **`SessionStart`→턴 0 base 스냅샷이 없었다.** cold start는 `unknown → idle`이라 `isTurnEnd`가 거짓이다.
+  타임라인은 스냅샷 **둘**이라야 완료 턴 하나를 내므로, base가 없으면 그 세션의 **첫 턴이 안 떴다**.
+  `agent_hook_mode.opensSessionBase`가 열고, `isTurnEnd`와 **상호배타**다(`previous != .running` — 턴 중간
+  resume은 이미 턴 끝으로 찍힌다).
+- **턴 식별자를 링에 싣는다**(계약 §3.1). `Snapshot.turn`/`turnKey()`. 키는 `ev.turn_key`가 아니라
+  **`Progress.turnKey()`** 에서 읽는다 — 자식이 남은 턴은 `SubagentStop`이 전이를 만드는데 codex에서 그
+  이벤트의 키는 자식 것이다.
+
 - 관측 경로(`isTurnEnd`)는 관측 모드에서 그대로 남는다. 두 경로가 같은 링으로 수렴하되 **한 Term에서
-  동시에 돌지는 않는다**(모드가 하나다).
-- 검증: 이벤트→경계 해석 단위 테스트, `stop_hook_active` 무시, 턴 식별자 왕복, 모드별로 한 소스만
-  링을 채우는지.
+  동시에 돌지는 않는다**(모드가 하나다). 관측 모드는 턴 키를 **빈 값**으로 넘긴다(그 축은 훅 payload만 갖는다).
+- 검증: 순수 층(`opensSessionBase` 표·`isTurnEnd`와의 **상호배타 전수**·턴 키 왕복·상한 초과는 담지 않음),
+  배관(payload로 신원이 서는지·자식은 안 옮기는지·base가 찍히는지·턴 중간 `SessionStart`가 두 번 안 찍는지),
+  링까지의 왕복(`turnKey()`가 백엔드 왕복을 건너 수확 자리까지 오는지).
+- **뮤테이션으로 닫았다.** 첫 판의 판정자는 「신원 채택이 `applyHookEvent` 맨 앞이어야 한다」를 안 지켰다 —
+  호출을 `switch` 뒤로 옮긴 뮤턴트가 판정자 넷을 전부 통과했다(그 switch는 `.stop`에서 early return 하므로
+  대화를 싣는 이벤트에서 채택이 아예 안 돈다). 그 자리를 재는 test를 넣고 red→green을 확인했다.
 
 ### AT2 — 턴 제목
 

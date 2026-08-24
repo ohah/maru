@@ -155,7 +155,19 @@ git diff --name-status 7d70f81a 7cc31cc1  →  M docs/…  A docs/turn2-probe.md
 3. 헤드리스 1회 실행(`claude -p …` / `codex exec … --dangerously-bypass-hook-trust`). **편집 도구와 셸 편집을
    각각 1회씩** 시킨다.
 4. 덤프에서 §2.2 표의 필드가 그대로인지 대조하고, 셸 편집이 여전히 payload에 안 나오는지 확인한다.
-5. **원복한다.**
+5. **`session_id`와 턴 키가 여전히 실리는지 센다**(AT1이 그 둘에 기댄다 — 신원 채택과 §3.1 귀속 키).
+   테스트는 합성 JSON을 쓰므로 **provider가 실제로 무엇을 싣는가는 CI가 볼 수 없는 축**이다. 이미 쌓인
+   훅 로그가 있으면 그것으로 재는 편이 빠르다 — **payload 내용은 열지 말고 키의 유무·길이만** 센다(§7).
+
+   2026-08-24 실측(이 개발 머신, 5,221 이벤트): `session_id`는 provider·이벤트 종류 무관하게 **100%**
+   실렸고 양쪽 다 **36바이트 UUID**, 이스케이프 0이었다. 턴 키도 같다. `Stop` 233개 중 `stop_hook_active`가
+   참인 것은 **0개**였다(그 가드는 아직 실측으로 밟힌 적이 없다).
+
+   ⚠️ 같은 실측이 문서 오류 하나를 드러냈다 — [훅 통합](agent-hooks.md) §3.1이 「`SessionStart`·`SessionEnd`
+   에는 [턴 키가] 없다」고 단정하는데 claude `SessionStart` **29개 중 3개**가 `prompt_id`를 실었다(턴 중간
+   resume·압축으로 보인다). AT1의 base 판정은 `previous != .running`으로 그 경우를 이미 가르므로 동작에는
+   영향이 없다.
+6. **원복한다.**
 
 ### 2.6 스냅샷 비용 — `write-tree`는 값싸지 않다 (2026-08-23 실측)
 

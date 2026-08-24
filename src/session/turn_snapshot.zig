@@ -65,6 +65,8 @@ pub const Snapshot = struct {
     turn: [max_turn_key_len]u8 = undefined,
     turn_len: usize = 0,
     /// 그 턴의 **제목** — provider 가 준 마지막 응답(`Stop.last_assistant_message`, 양 provider 공통).
+    /// **오류로 끝난 턴은 그 사유가 제목이다**(`StopFailure` 도 같은 자리를 쓴다) — 그 턴이 마지막으로 한
+    /// 말이 사유이므로 맞다.
     ///
     /// ⚠️ **턴 키와 정반대 규율이다: 넘치면 자른다.** 키는 신원이라 자르면 남의 턴과 **거짓으로 일치**하지만,
     /// 제목은 사람이 읽는 산문이라 잘린 앞부분이 여전히 쓸모 있다 — 없는 것보다 낫다. 자를 때 UTF-8 경계를

@@ -71,6 +71,19 @@ fn turnFactsForCapture(term: *Term, turn_ended: bool) TurnFacts {
         .key = term.agent_hook_progress.turnKey(),
         // 그 턴의 마지막 응답. `applyHookEvent` 가 `.stop`·`.stop_failure` 에서 이미 눕혀 담아 두었다
         // (`hookConversationText` — 이스케이프 해제 + 경계 정리 + 개행 눕히기). 여기서 다시 만들지 않는다.
+        //
+        // ⚠️ **이 값이 «이번 턴의 것» 이라는 보장은 여기 없다.** 그것은 `.user_prompt_submit` 분기가 새 턴
+        // 시작에 `setReply("")` 로 지워 주기 때문에 성립한다 — **두 분기에 걸친 암묵 의존**이다. 그 지우기가
+        // `if (ev.text.len > 0)` 안에 있으므로, 프롬프트가 비면 안 지워지고 그때 `Stop` 의 응답도 비면
+        // **직전 턴의 제목이 이번 턴에 붙는다**(세션 base 가 옛 키를 물려받던 것과 같은 모양이다).
+        //
+        // 실측(2026-08-25, 이 기계의 훅 로그)에서는 `Stop`/`StopFailure` 의 `last_assistant_message` 가
+        // 346/346, `UserPromptSubmit` 의 `prompt` 가 386/386 으로 **둘 다 100%** 라 지금은 안 밟힌다.
+        // 그래서 가드를 더하지 않는다 — 대신 그 의존을 여기 적어, `setReply("")` 를 옮기거나 그 가드를
+        // 바꾸는 사람이 이 자리를 함께 보게 한다.
+        //
+        // **오류로 끝난 턴은 그 사유가 제목이 된다**(`.stop_failure` 도 같은 분기다). 그 턴이 마지막으로
+        // 한 말이 사유이므로 맞다.
         .title = term.agent_transcript.reply(),
     };
 }

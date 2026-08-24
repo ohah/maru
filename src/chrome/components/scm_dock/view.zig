@@ -899,10 +899,12 @@ const Writer = struct {
         if (self.props.advance_milli_per_point == 0) return self.measureBudget(source);
         const cols = text_layout.displayCols(source, null);
         const point_size: u32 = typography.token(role).point_size;
-        const milli = self.props.advance_milli_per_point * point_size;
-        // **올림**이다 — 셀이 정수라 비율 자체에 반올림 오차가 있고, 모자란 쪽으로 틀리면 글자가 겹친다.
-        const advance_px = (milli + 999) / 1000;
-        return @floatFromInt(cols * advance_px);
+        // **총합에서 한 번만 올린다.** 열마다 올리면 10 글자에서 10px 까지 과잉 확보돼, 틈이 계약보다
+        // 넓어진다 — 그것은 겹침의 반대 방향 오류일 뿐 같은 종류의 부정확이다. 올림 자체는 남긴다:
+        // 셀이 정수라 비율에 반올림 오차가 있고, 모자란 쪽으로 틀리면 글자가 겹친다.
+        const total_milli = @as(u64, cols) * @as(u64, self.props.advance_milli_per_point) * point_size;
+        const total_px = (total_milli + 999) / 1000;
+        return @floatFromInt(total_px);
     }
 
     fn measureBudget(self: *Writer, source: []const u8) f32 {
@@ -1718,8 +1720,8 @@ test "이름 뒤 경로는 role 크기로 자리를 잡는다(작은 셀에서�
     // 옛 상한(`cols * (cell + 1)`)은 **모자랐다** — 이 판정자가 무엇을 막는지 값으로 남긴다.
     const old_bound = @as(f32, @floatFromInt(name.len * (cell_px + 1)));
     try testing.expect(old_bound < drawn);
-    // 그렇다고 한없이 넉넉하지도 않다(틈이 벌어지면 그것대로 읽기 나쁘다) — 열당 1px 이내다.
-    try testing.expect(reserved - drawn <= @as(f32, @floatFromInt(name.len)));
+    // 그렇다고 넉넉하지도 않다(틈이 벌어지면 그것대로 읽기 나쁘다) — **총합 올림**이라 1px 미만이다.
+    try testing.expect(reserved - drawn < 1.0);
 }
 
 test "행 글자와 요약·브랜치가 한 번에 나온다" {

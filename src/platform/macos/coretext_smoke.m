@@ -435,6 +435,12 @@ typedef struct {
     uint32_t cell_height_px;
     uint32_t ascent_px;
     uint32_t descent_px;
+    // advance의 **소수까지**(× 1000). cell_width_px는 이 값을 lround한 것이라 최대 0.5px을 버린다.
+    // 그 손실이 chrome 텍스트에서 눈에 보이는 결함이 됐다: chrome은 role이 정한 고정 크기(예:
+    // list_row 14pt)로 그리는데 자리 계산은 정수 cell로 해서, 이어 그리는 글자가 앞 글자를 파고들었다
+    // (`scm_dock/view.zig`의 `measureRun` 주석이 그 실측을 소유한다). 정수 cell은 격자·atlas가
+    // 그대로 쓰고, 비율이 필요한 소비자는 이 값을 쓴다.
+    uint32_t advance_milli_px;
 } MaruCoreTextCellMetrics;
 
 // 모노스페이스 cell 메트릭(advance 폭 × line-height)을 device 픽셀로 돌려준다. font_size_px는
@@ -455,6 +461,7 @@ void maru_macos_coretext_font_cell_metrics(
         result->cell_height_px = 0;
         result->ascent_px = 0;
         result->descent_px = 0;
+        result->advance_milli_px = 0;
 
         uint32_t matched = 0;
         CTFontRef font = maru_create_primary_font(
@@ -490,6 +497,7 @@ void maru_macos_coretext_font_cell_metrics(
         }
 
         result->cell_width_px = (uint32_t)lround((double)advance);
+        result->advance_milli_px = (uint32_t)lround((double)advance * 1000.0);
         result->cell_height_px = (uint32_t)lround((double)line_height);
         result->ascent_px = (uint32_t)lround((double)ascent);
         result->descent_px = (uint32_t)lround((double)descent);

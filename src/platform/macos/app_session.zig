@@ -4163,6 +4163,11 @@ pub const AppSession = struct {
     // 메트릭 조회 전/실패 시 font_size_px × device_scale 정사각으로 대체한다(둘 다).
     cell_width_px: u32 = 0,
     glyph_cell_width_px: u32 = 0,
+    /// face 의 advance **소수까지**(device px × 1000, 자간 보정 전). native 메트릭이 준다.
+    /// 정수 `cell_width_px` 는 이 값을 반올림한 것이라 최대 0.5px 을 버리는데, chrome 텍스트는 role 이
+    /// 정한 **다른 크기**로 그려지므로 그 손실이 열마다 쌓여 글자를 겹치게 한다. 0 이면 native 메트릭을
+    /// 못 받은 것이고, 그때는 정수 cell 에서 비율을 낸다.
+    glyph_advance_milli_px: u32 = 0,
     cell_height_px: u32 = 0,
     // chrome 최소화 세션인가(quick terminal minimal). true면 paneBarHeightPx가 0(탭 바 끔)이고 refreshCellMetrics가
     // 사이드바 폭을 0으로 강제 — 터미널 그리드만 그린다. 사이드바 폭 0이면 사이드바 가장자리 hit-test(xOnSidebarEdge)도

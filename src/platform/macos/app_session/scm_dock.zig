@@ -1080,9 +1080,16 @@ fn relativeTime(self: *AppSession, arena: std.mem.Allocator, delta_s: i64) []con
 fn advanceMilliPerPoint(self: *const AppSession) u32 {
     const point_size = self.appearance.font.size;
     if (!(point_size > 0)) return 0;
-    const natural: f32 = @floatFromInt(if (self.glyph_cell_width_px != 0) self.glyph_cell_width_px else self.cell_width_px);
-    if (!(natural > 0)) return 0;
-    const milli = natural * 1000.0 / point_size;
+    // **소수까지 온 advance 를 먼저 쓴다.** 정수 cell 로 비율을 내면 반올림(최대 0.5px)이 그대로 비율에
+    // 실려, 열이 늘수록 다시 어긋난다 — 그 근사를 없애려고 native 메트릭에 이 값을 더했다.
+    const milli_px: f32 = if (self.glyph_advance_milli_px != 0)
+        @floatFromInt(self.glyph_advance_milli_px)
+    else if (self.glyph_cell_width_px != 0)
+        @as(f32, @floatFromInt(self.glyph_cell_width_px)) * 1000.0
+    else
+        @as(f32, @floatFromInt(self.cell_width_px)) * 1000.0;
+    if (!(milli_px > 0)) return 0;
+    const milli = milli_px / point_size;
     if (!(milli > 0)) return 0;
     return @intFromFloat(@round(milli));
 }

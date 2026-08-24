@@ -148,10 +148,6 @@ pub const terminal_core_groups = [_]Group{
             "ambiguous_wide",
             "emoji_wide",
             "view_offset",
-            // 단조 증가 카운터라 이어져야 의미가 있다 — 바깥 소비자가 두 시점의 **차이**로
-            // 자기 절대 행 좌표를 보정한다(코어 밖 마커). 0 으로 되돌리면 그 델타가 음수가 돼
-            // 보정이 통째로 건너뛴다.
-            "evicted_total",
             "selection_anchor",
             "selection_head",
             "selection_block",

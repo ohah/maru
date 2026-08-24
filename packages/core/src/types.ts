@@ -36,6 +36,8 @@ export interface FrameMeta {
   scroll: { offset: number; length: number };
   /** 버려진 행의 누적 수 — 마커 보정용(`FrameData` 와 같은 값). */
   evicted: number;
+  /** push 된 행의 누적 수 — 줄어들면 버퍼가 리셋됐다. */
+  pushed: number;
 }
 
 export interface TerminalOptions {

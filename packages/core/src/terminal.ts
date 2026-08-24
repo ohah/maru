@@ -369,6 +369,7 @@ export class Terminal {
           selection: e.frame.selection,
           scroll: e.frame.scroll,
           evicted: e.frame.evicted,
+          pushed: e.frame.pushed,
         });
         break;
     }
@@ -387,7 +388,7 @@ export class Terminal {
     const prev = this.#prevMeta;
     this.#prevMeta = meta;
     // **마커를 먼저 보정한다.** 버려진 줄만큼 당기지 않으면 장식이 엉뚱한 줄에 그려진다.
-    this.#decorations.sync(meta.evicted);
+    this.#decorations.sync(meta.evicted, meta.pushed);
     this.#pushDecorations(meta);
     if (prev) {
       // **위치만 본다.** shape·visible 은 깜빡임으로 매 프레임 토글되므로 이동으로 오해하면 안 된다.

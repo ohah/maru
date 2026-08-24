@@ -237,10 +237,26 @@ export fn vt_view_offset(h: *anyopaque) u32 {
     return @intCast(core.view_offset);
 }
 /// 스크롤백에서 버려진 행의 **누적** 수. 마커처럼 절대 행을 오래 들고 있는 쪽이 두 시점의
-/// 차이만큼 자기 좌표를 당겨야 한다 — 코어는 selection·kitty 만 스스로 보정한다.
+/// 차이만큼 자기 좌표를 당겨야 한다 — 코어는 selection·kitty placement 만 스스로 보정한다.
+///
+/// **코어에 새 카운터를 만들지 않는다.** `Scrollback.evicted_abs` 가 이미 그 값이고, 두 eviction
+/// 경로(ring 이 가득 찬 push·`setCap` 트림)가 모두 `evictOldest` 를 지나므로 하나로 충분하다.
+///
+/// **alt 중에도 primary 의 값을 본다.** alt 는 스크롤백이 없어(`sb.count==0`) 자기 카운터가 0 인데,
+/// 그걸 그대로 내보내면 alt 진입에서 0 으로 떨어졌다가 복귀에서 되튀어 마커가 두 번 잘못 밀린다.
+/// 마커가 사는 좌표계는 언제나 primary 스크롤백이다.
 export fn vt_evicted_total(h: *anyopaque) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
-    return @intCast(core.evictedTotal());
+    const sb = if (core.alt_active) &core.saved_screen.sb else &core.screen.sb;
+    return @intCast(sb.evicted_abs);
+}
+/// 지금까지 스크롤백에 push 된 행의 누적 수(primary 기준). **줄어들면 버퍼가 리셋된 것이다** —
+/// `clear()`·RIS 가 `sb.clear()` 로 카운터를 함께 0 으로 되돌리므로 evict 델타만으로는 알 수 없다
+/// (둘 다 0 → 0). `scrollbackLen + evicted` 로 파생하면 alt 에서 length 가 0 이라 오판한다.
+export fn vt_pushed_total(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    const sb = if (core.alt_active) &core.saved_screen.sb else &core.screen.sb;
+    return @intCast(sb.pushed_abs);
 }
 /// 스크롤백에 쌓인 행 수 = `view_offset` 의 최대값.
 ///

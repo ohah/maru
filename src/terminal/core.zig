@@ -350,12 +350,6 @@ pub const TerminalCore = struct {
     // 스크롤백(과거)이 보이고 활성 화면 아랫부분은 가려진다. 과거를 보는 중 새 출력이 scroll되면
     // 같은 내용을 계속 보도록 함께 올린다(scroll-lock).
     view_offset: usize = 0,
-    // 스크롤백에서 버려진 행의 **누적** 수. 절대 행 좌표를 오래 들고 있는 바깥 소비자
-    // (wasm 브리지의 마커 등)가 자기 좌표를 보정하려면 "얼마나 밀렸는지"를 알아야 한다 —
-    // 코어는 selection·kitty placement 를 스스로 보정하지만(shiftCoordsForEviction), 코어 밖에
-    // 사는 좌표는 그럴 수 없다. drain 이 아니라 단조 증가로 두어 소비자가 여럿이어도 각자
-    // 델타를 잴 수 있게 한다. 포화 덧셈이라 오버플로하지 않는다.
-    evicted_total: usize = 0,
     // 마우스 드래그 선택(anchor=누른 곳, head=현재 끝). 절대 행 좌표라 스크롤해도 내용을 따라간다.
     // 스크롤백 eviction(가득 찬 ring)·재-wrap·clear 때 보정/해제된다.
     selection_anchor: ?types.SelectionPoint = null,
@@ -1351,14 +1345,8 @@ pub const TerminalCore = struct {
     /// (eviction은 ring-full이라 count 불변 → 불필요).
     /// screen.pushScrollback(eviction)이 cross-file 호출 — pub.
     pub fn shiftCoordsForEviction(self: *TerminalCore, n: usize) void {
-        self.evicted_total +|= n; // 코어 밖 좌표(마커 등)가 보정에 쓴다 — 필드 주석 참고
         selection.shiftSelectionForEviction(self, n);
         kitty.shiftPlacementsForEviction(self, n);
-    }
-
-    /// 버려진 행의 누적 수. 두 시점의 차이가 그 사이 밀린 양이다.
-    pub fn evictedTotal(self: *const TerminalCore) usize {
-        return self.evicted_total;
     }
 
     /// 현재 뷰포트에 보이는 선택 범위(렌더용). 본문: selection.selectionViewportSpan.

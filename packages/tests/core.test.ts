@@ -674,6 +674,46 @@ test("가리키던 줄이 버려지면 마커와 장식이 함께 사라진다",
   term.dispose();
 });
 
+test("스크롤백을 비우면 마커가 무효화된다", async () => {
+  // `clear()`·RIS 는 `sb.clear()` 로 evict 카운터까지 0 으로 되돌린다. 마커가 가리키던 줄이
+  // 전부 사라졌으므로 무효화해야 한다 — 코어가 같은 자리에서 selection 을 해제하는 것과 같다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.setOptions({ scrollback: 50 });
+  for (let i = 0; i < 20; i++) term.write(`line ${i}\r\n`);
+  await settle();
+
+  const marker = term.registerMarker(3);
+  expect(marker.isDisposed).toBe(false);
+
+  term.reset(); // RIS — 화면과 스크롤백을 비운다
+  await settle();
+  expect(marker.isDisposed).toBe(true);
+  term.dispose();
+});
+
+test("alt screen을 오가도 마커가 흔들리지 않는다", async () => {
+  // alt 는 스크롤백이 없어 자기 evict 카운터가 0 이다. 그대로 내보내면 진입에서 0 으로
+  // 떨어졌다가 복귀에서 되튀어 마커가 두 번 잘못 밀린다 — 브리지가 primary 값을 본다.
+  const term = await makeTerminal({ cols: 20, rows: 4 });
+  term.setOptions({ scrollback: 50 });
+  for (let i = 0; i < 20; i++) term.write(`line ${i}\r\n`);
+  await settle();
+
+  const marker = term.registerMarker(5);
+  const before = marker.row;
+
+  term.write("\x1b[?1049h"); // alt 진입
+  term.write("alt content");
+  await settle();
+  expect(marker.isDisposed).toBe(false);
+  expect(marker.row).toBe(before);
+
+  term.write("\x1b[?1049l"); // 복귀
+  await settle();
+  expect(marker.row).toBe(before);
+  term.dispose();
+});
+
 test("registerMarker는 인자가 없으면 커서 줄을 가리킨다", async () => {
   const term = await makeTerminal({ cols: 20, rows: 4 });
   for (let i = 0; i < 6; i++) term.write(`line ${i}\r\n`);

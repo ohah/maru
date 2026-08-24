@@ -61,6 +61,8 @@ export class DecorationStore {
   #markers = new Set<MarkerImpl>();
   #decorations = new Set<DecorationImpl>();
   #lastEvicted = 0;
+  /** `length + evicted` = 지금까지 스크롤백에 push 된 행 수. 줄어들면 버퍼가 리셋됐다는 뜻. */
+  #lastPushed = 0;
   /** 목록이 바뀌면 알린다 — 소유자가 화면을 다시 밀어야 한다(지운 장식이 남으면 안 된다). */
   #onChange: (() => void) | null = null;
 
@@ -86,12 +88,28 @@ export class DecorationStore {
     return d;
   }
 
-  /** 프레임의 `evicted` 로 마커 좌표를 당긴다. 버려진 줄의 마커는 dispose 된다. */
-  sync(evicted: number): void {
+  /**
+   * 프레임의 `evicted` 로 마커 좌표를 당긴다. 버려진 줄의 마커는 dispose 된다.
+   *
+   * **카운터가 되돌아가면 스크롤백이 통째로 비워졌다는 뜻이다**(`clear()`·RIS 가 `sb.clear()` 를
+   * 부르며 `evicted_abs` 를 0 으로 되돌린다). 그때는 마커가 가리키던 줄이 전부 사라졌으므로
+   * 무효화한다 — 코어가 같은 자리에서 selection 을 해제하는 것과 같은 판단이다.
+   */
+  sync(evicted: number, pushed: number): void {
+    // **push 총량이 줄면 버퍼가 리셋된 것이다.** `clear()`·RIS 는 `sb.clear()` 로 두 카운터를
+    // 함께 0 으로 되돌리므로 evict 델타만으로는 알 수 없다(둘 다 0 → 0).
+    const reset = pushed < this.#lastPushed;
+    this.#lastPushed = pushed;
+
     const delta = evicted - this.#lastEvicted;
     this.#lastEvicted = evicted;
-    if (delta <= 0) return;
-    for (const m of [...this.#markers]) m.shift(delta);
+
+    if (reset) {
+      // 가리키던 줄이 전부 사라졌다 — 코어가 같은 자리에서 selection 을 해제하는 것과 같다.
+      for (const m of [...this.#markers]) m.dispose();
+      return;
+    }
+    if (delta > 0) for (const m of [...this.#markers]) m.shift(delta);
   }
 
   /** 뷰포트에 걸리는 장식만 뷰포트 좌표로 접어 돌려준다. */

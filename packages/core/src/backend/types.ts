@@ -50,6 +50,8 @@ export interface FrameData {
    * selection 을 스스로 보정하지만 라이브러리가 들고 있는 좌표는 그럴 수 없다.
    */
   evicted: number;
+  /** push 된 행의 누적 수. **줄어들면 버퍼가 리셋된 것**이라 마커를 무효화해야 한다. */
+  pushed: number;
   /**
    * `vt_modes` 비트. 마우스 추적 여부를 **동기로** 알아야 해서 프레임에 싣는다 — 워커 모드에서
    * 조회는 비동기라 mousedown 안에서 물을 수 없다.

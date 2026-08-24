@@ -207,7 +207,15 @@ pub fn buildGlyphRunList(
             .style = cell.style,
             .cache_key = .{
                 .font_id = shaped.font_id,
-                .glyph_id = shaped.glyph_id,
+                // **합성 글리프(`glyph_id == 0`)는 codepoint 로 키잉한다.** 폰트가 없는 글자
+                // (box-drawing·블록·PUA 합성 아이콘)는 전부 `font_id = 0, glyph_id = 0` 으로 와서,
+                // 그대로 키를 만들면 **서로 다른 아이콘이 한 아틀라스 슬롯을 공유한다.**
+                //
+                // `shaped_records.zig` 의 measured 경로는 이 규칙을 이미 지키고 그 테스트가 명시한다
+                // ("font_id=0·glyph_id=0을 공유하니 cache_key를 codepoint로 키잉해 충돌을 막아야
+                // 한다"). **이 셀 격자 경로만 빠져 있었다** — 실측으로 도크 뷰 바의 아이콘 셋 중
+                // 둘이 같은 슬롯(57)을 받아 `file_code` 자리에 `git_branch` 가 나왔다.
+                .glyph_id = if (shaped.glyph_id == 0) @as(GlyphId, @intCast(cell.codepoint)) else shaped.glyph_id,
                 .font_size_px = config.font_size_px,
                 .device_scale = config.device_scale,
                 // slot 폭 기준 cell 폭: 합성/notdef(glyph_id==0)은 grid advance(셀폭·타일링), 폰트 글리프는 자연폭(자간 무관).
@@ -232,6 +240,32 @@ pub fn buildGlyphRunList(
         .fallback_count = fallback_count,
         .replacement_count = replacement_count,
     };
+}
+
+test "합성 글리프는 codepoint 로 키잉된다 — 아이콘 셋이 한 슬롯을 공유하면 안 된다" {
+    // **셀 격자 경로에 이 규칙이 빠져 있었다.** measured 경로(`shaped_records`)는 지키고 그 테스트가
+    // 명시하는데 여기만 빠져서, 도크 뷰 바의 PUA 합성 아이콘 셋 중 둘이 같은 아틀라스 슬롯을 받아
+    // `file_code` 자리에 `git_branch` 가 나왔다(실측 2026-08-25).
+    const Fake = struct {
+        fn shape(_: @This(), _: draw_list.DrawCell) ShapeResult {
+            return .{ .font_id = 0, .glyph_id = 0 }; // 폰트에 없는 글자 — 합성으로 간다
+        }
+    };
+    var cells = [_]draw_list.DrawCell{
+        .{ .row = 0, .col = 0, .codepoint = 0xF000A, .width = 1, .style = .{} },
+        .{ .row = 0, .col = 1, .codepoint = 0xF0001, .width = 1, .style = .{} },
+        .{ .row = 0, .col = 2, .codepoint = 0xF000F, .width = 1, .style = .{} },
+    };
+    const list = draw_list.DrawList{ .size = .{ .cols = 3, .rows = 1 }, .cells = &cells, .cursor = .{}, .dirty = null, .overlays = &.{} };
+    var runs = try buildGlyphRunList(std.testing.allocator, list, .{}, Fake{});
+    defer runs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), runs.glyphs.len);
+    // 셋 다 **다른** 캐시 키여야 한다.
+    try std.testing.expectEqual(@as(GlyphId, 0xF000A), runs.glyphs[0].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(GlyphId, 0xF0001), runs.glyphs[1].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(GlyphId, 0xF000F), runs.glyphs[2].cache_key.glyph_id);
+    // 그리고 **run 의 glyph_id 는 0 그대로**다 — 래스터라이저가 그것으로 합성 분기를 탄다.
+    try std.testing.expectEqual(@as(GlyphId, 0), runs.glyphs[0].glyph_id);
 }
 
 pub fn rasterStyleFlags(style: terminal.Style) RasterStyleFlags {

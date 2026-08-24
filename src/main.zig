@@ -1891,11 +1891,12 @@ fn rebuildDockAll(
     frame_slot: *?maru.renderer.RenderFrame,
     /// 지금 도크가 보이는 것. **뷰마다 다른 표면**을 그린다(W8.7c2).
     view: maru.session.dock_panel.View,
+    tk: *const maru.chrome.Tokens,
     /// 소스 컨트롤 뷰가 쓰는 것들. `status` 가 비어 있으면 그 뷰는 아무것도 안 그린다.
     scm: ScmDockInputs,
 ) !void {
-    try rebuildDockCells(allocator, out, geom);
-    appendViewBarCells(allocator, out, geom, cell_w, view) catch {};
+    try rebuildDockCells(allocator, out, geom, tk);
+    appendViewBarCells(allocator, out, geom, cell_w, view, tk) catch {};
     if (view != .explorer) {
         if (frame_slot.*) |*old_frame| {
             old_frame.deinit(allocator);
@@ -1978,6 +1979,7 @@ fn rebuildSidebarCells(
     cell_h: u32,
     /// 카드에 실을 것들 — 지금 세션 하나. 슬라이스라 호출자가 수명을 안다.
     card: SidebarCard,
+    tk: *const maru.chrome.Tokens,
     renderer_state: *maru.renderer.RendererState,
     builder: win32_terminal.FrameBuilder,
     pipeline: *d3d11_cells.CellPipeline,
@@ -1998,7 +2000,7 @@ fn rebuildSidebarCells(
         0,
         @floatFromInt(sidebar_w),
         @floatFromInt(h),
-        d3d11_cells.colorFromArgb(0xFF141922),
+        cellColor(tk, .surface_bg),
         .{ 0, 0, 0, 0 },
     ));
 
@@ -2018,7 +2020,7 @@ fn rebuildSidebarCells(
         @floatFromInt(top),
         @floatFromInt(sidebar_w),
         @floatFromInt(card_h),
-        d3d11_cells.colorFromArgb(0xFF232A38),
+        cellColor(tk, .tab_active_bg),
         .{ 0, 0, 0, 0 },
     ));
     // 활성 카드의 **좌측 앰버 막대**(chrome-strategy.md U1) — 어느 세션이 활성인지의 신호다.
@@ -2027,7 +2029,7 @@ fn rebuildSidebarCells(
         @floatFromInt(top),
         3,
         @floatFromInt(card_h),
-        d3d11_cells.colorFromArgb(0xFFDDA15E),
+        cellColor(tk, .accent_bar),
         .{ 0, 0, 0, 0 },
     ));
 
@@ -2041,7 +2043,8 @@ fn rebuildSidebarCells(
     }
     // **글자를 앰버 막대만큼 들여쓴다.** 안 하면 첫 글자가 막대에 잘린다(실측). 값은 chrome
     // 토큰이 소유한다(`space.card_gap_px` + `accent_bar_width_px`) — macOS 가 쓰는 그 산식이다.
-    const sp = scmSmokeTokens().space; // 색은 안 쓰고 spacing 만 본다 — 토큰 조립을 두 벌로 두지 않는다
+    // **spacing 은 색과 무관하다** — 기본 토큰셋에서 읽는다(테마가 간격을 바꾸지 않는다).
+    const sp = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors)).space;
     const indent_cols: u16 = @intCast((@as(u32, sp.card_gap_px) + @as(u32, sp.accent_bar_width_px) + cell_w - 1) / cell_w);
     const cols: u16 = @intCast(sidebar_w / cell_w);
     if (cols < indent_cols + 4) return;
@@ -2140,6 +2143,7 @@ fn appendViewBarCells(
     geom: maru.session.dock_layout.Geometry,
     cell_w: u32,
     view: maru.session.dock_panel.View,
+    tk: *const maru.chrome.Tokens,
 ) !void {
     const bar = geom.view_bar;
     if (bar.w == 0 or bar.h == 0) return;
@@ -2153,7 +2157,7 @@ fn appendViewBarCells(
             @floatFromInt(r.y),
             @floatFromInt(r.w),
             @floatFromInt(r.h),
-            d3d11_cells.colorFromArgb(if (active) 0xFF2A3344 else 0xFF202634),
+            cellColor(tk, if (active) .tab_active_bg else .inset_bg),
             .{ 0, 0, 0, 0 },
         ));
     }
@@ -2218,6 +2222,7 @@ fn rebuildDockCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
     geom: maru.session.dock_layout.Geometry,
+    tk: *const maru.chrome.Tokens,
 ) !void {
     out.clearRetainingCapacity();
     if (geom.dock.w == 0 or geom.dock.h == 0) return;
@@ -2226,7 +2231,7 @@ fn rebuildDockCells(
         @floatFromInt(geom.dock.y),
         @floatFromInt(geom.dock.w),
         @floatFromInt(geom.dock.h),
-        d3d11_cells.colorFromArgb(0xFF181D28),
+        cellColor(tk, .surface_bg),
         .{ 0, 0, 0, 0 },
     ));
     if (geom.divider.w != 0 and geom.divider.h != 0) {
@@ -2235,7 +2240,7 @@ fn rebuildDockCells(
             @floatFromInt(geom.divider.y),
             @floatFromInt(geom.divider.w),
             @floatFromInt(geom.divider.h),
-            d3d11_cells.colorFromArgb(0xFF2A3344),
+            cellColor(tk, .divider),
             .{ 0, 0, 0, 0 },
         ));
     }
@@ -2534,7 +2539,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var scm_state = scm_surface.State{};
     var scm_built: ?scm_surface.Built = null;
     defer if (scm_built) |*b| b.deinit();
-    const scm_tokens = scmSmokeTokens();
+    const scm_tokens = chromeTokensFor(cfg);
     const scm_opts = scm_surface.Options{
         .status_text = scm_status,
         .font_family = cfg.font.family,
@@ -2542,6 +2547,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .font_size_pt = cfg.font.size,
         .tokens = &scm_tokens,
     };
+
+    // **크롬 색은 테마에서 온다**(§2m.33 이 적어 둔 부채를 갚는다). macOS 와 같은 함수를 지난다.
+    const chrome_tokens = chromeTokensFor(cfg);
 
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     var sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
@@ -2557,13 +2565,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .folder = if (dock_root) |r| std.fs.path.basename(r) else "",
         .lines = if (dock_root != null) 2 else 1,
     };
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
     var dock_tree_frame: ?maru.renderer.RenderFrame = null;
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -2800,10 +2808,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
@@ -2915,7 +2923,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 loop.resizeActiveSurface(size) catch {};
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                 dock_rebuild_failures += 1;
                             };
                             divider_moves += 1;
@@ -2955,7 +2963,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         loop.resizeActiveSurface(size) catch {};
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                         dock_rebuild_failures += 1;
                                     };
                                 };
@@ -2986,7 +2994,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                     dock_rebuild_failures += 1;
                                 };
                                 scm_dock_redraws += 1;
@@ -3338,7 +3346,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -4700,7 +4708,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     };
 
     // **색은 리터럴이다**(위 doc).
-    const tokens = scmSmokeTokens();
+    const tokens = chromeTokensFor(cfg);
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
         .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
@@ -5212,23 +5220,23 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     try stdout.flush();
 }
 
-/// 소스 컨트롤 스모크 둘이 나눠 쓰는 색 표. **두 벌로 두면 화면 비교가 무의미해진다** — 그리기
-/// 스모크와 쓰기 스모크가 다른 색으로 그리면 지문도 스크린샷도 견줄 수 없다.
-fn scmSmokeTokens() maru.chrome.Tokens {
-    return maru.chrome.Tokens.rich(.{
-        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
-        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
-        .foreground = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
-        .sidebar_background = .{ .r = 0x18, .g = 0x1D, .b = 0x28 },
-        .sidebar_foreground = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
-        .sidebar_active = .{ .r = 0x2A, .g = 0x33, .b = 0x44 },
-        .search_match = .{ .r = 20, .g = 120, .b = 255 },
-        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
-        .selection = .{ .r = 0x3A, .g = 0x5F, .b = 0xCD },
-        .cursor = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
-        .terminal_background = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
-        .accent = .{ .r = 20, .g = 120, .b = 255 },
-    });
+/// chrome 역할 하나를 D3D11 셀 색으로. **불투명하게 만든다** — chrome 토큰은 알파를 안 싣고,
+/// 배경 면은 알파 0 이면 아무것도 안 그려진다(셰이더가 `bg.a` 로 판정한다).
+fn cellColor(tk: *const maru.chrome.Tokens, role: maru.chrome.tokens.ColorRole) [4]f32 {
+    const c = tk.get(role);
+    return d3d11_cells.colorFromArgb(0xFF000000 |
+        (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b));
+}
+
+/// 크롬 표면들이 쓰는 색 표 — **테마에서 온다**(`maru.chrome_theme.tokensFor`).
+///
+/// 전에는 여기 색 리터럴 열두 개가 박혀 있었다. 그래서 화면에서 **터미널만 테마를 따르고** 크롬은
+/// 안 따랐다(실측: 터미널 `#101010` vs 도크 `#181D28` — §2m.33 의 인지된 부채). 이제 macOS 와
+/// **같은 함수**를 지난다.
+fn chromeTokensFor(cfg: anytype) maru.chrome.Tokens {
+    const appearance = maru.config.appearance.resolve(cfg) catch
+        return maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
+    return maru.chrome_theme.tokensFor(appearance);
 }
 
 /// `maru win32-scm-draw-smoke` — W8.4⒝⒞. **소스 컨트롤 표면이 Windows 화면에 뜨고 눌린다.**
@@ -5697,7 +5705,7 @@ fn runWin32ScmWriteSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.
     };
     defer host.close();
 
-    const tokens = scmSmokeTokens();
+    const tokens = chromeTokensFor(cfg);
     try stdout.writeAll("maru.win32-scm-write-smoke.v1\n");
     try stdout.print("git={s}\n", .{git_exe});
 

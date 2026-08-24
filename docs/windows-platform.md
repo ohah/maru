@@ -3700,6 +3700,108 @@ grid_follows_term_rect=true grid=68x29 want=68x29
 > **띠를 켜자 사이드바 카드가 잘렸다.** 카드가 `y=0` 부터 시작해 띠에 먹혔다 — 사이드바 헤더가 아직
 > 없으므로(⒞) 내용이 띠 **아래**에서 시작해야 한다. 밴드·글자를 함께 `workspace.y` 만큼 내렸다.
 
+### 2m.44 적대적 검증 3 회 — 판정 셋이 죽어 있었다 (2026-08-25)
+
+W8.8⒝ 를 올린 뒤 세 바퀴 돌렸다. **결함 넷, 그중 셋은 "화면은 멀쩡한데 판정이 아무것도 안 지키는"
+부류다.** 하나는 재현되지 않아 보고만 한다.
+
+## ⑴ 침범 판정이 띠 셀을 함께 세고 있었다 — 영원히 0 이 아니다
+
+`term_cells_in_dock` 과 `term_cells_before_rect` 는 §2m.31 이 "이 슬라이스의 진짜 위험" 이라고 적은
+판정이다. 그런데 둘 다 **15600** 이었다. 원인은 그리는 순서다:
+
+```text
+sidebar → dock → [term_first] 터미널 → 띠(맨 위)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ cells.items[term_first..] 는 띠까지 훑는다
+```
+
+띠는 창 폭을 가로지르고 `y=0` 에서 시작하므로 **두 조건을 항상 만족한다**. 26 셀 × 600 프레임 =
+15600 — 두 수가 똑같았던 이유다. `term_last` 를 찍어 구간을 닫았다.
+
+| | `term_cells_in_dock` | `term_cells_before_rect` |
+|---|---|---|
+| 고치기 전(원본) | 15600 | 15600 |
+| 고친 뒤 원본 | **0** | **0** |
+| 원점을 `0,0` 으로 두는 뮤턴트 | 0 | **425768** |
+
+## ⑵ 캡션 버튼을 아무도 안 눌렀다
+
+`caption_clicks=0` 이 판정처럼 찍히는데 스모크는 그 자리를 클릭하지 않았다 — **0 은 "버튼이 죽었다"
+와 구별이 안 된다.** 최대화 버튼을 눌러 상태가 뒤집히는지, 다시 눌러 돌아오는지 잰다.
+
+**최소화는 창을 숨겨 이후 판정이 못 돌고, 닫기는 루프를 끝낸다** — 최대화가 유일하게 판정 가능한
+버튼이다. 그리고 **동어반복을 피한다**: 내가 보낸 좌표를 되읽는 것이 아니라 OS 의 `IsZoomed` 를 읽는다.
+
+```text
+caption_clicks=2 caption_max_before=false after=true restored=false caption_toggle_ok=true
+```
+
+`toggleMaximize` 를 무동작으로 만든 뮤턴트: `after=false caption_toggle_ok=false` — 그런데
+**`caption_clicks` 는 2 로 그대로다.** 옛 숫자가 왜 속 빈 것이었는지의 증명이다.
+
+## ⑶ 프레임리스가 걸렸는지, 히트테스트가 배선됐는지를 아무도 안 봤다
+
+가장 큰 구멍이다. 두 뮤턴트를 넣었더니 **유닛 3445 개와 스모크 판정 전부가 초록이었다**:
+
+| 뮤턴트 | 실제로 벌어지는 일 | 그때 판정 |
+|---|---|---|
+| `WM_NCCALCSIZE` 처리 삭제 | 네이티브 캡션이 돌아오고 우리 버튼이 **그 아래** 그려진다 | 전부 초록(`swapchain_px` 만 984×601 로 조용히 바뀜) |
+| `hitTestFrame` 호출 삭제 | 창을 **끌 수도 늘릴 수도 없다** | 전부 초록 |
+
+순수 테스트 5 개는 **함수**를 재고 **배선**은 안 잰다. 그래서 OS 에게 직접 묻는 판정 둘을 만들었다:
+
+- `clientCoversWindow()` — `GetWindowRect` 와 `GetClientRect` 의 크기가 같은가. 프레임리스가 실제로
+  걸렸을 때만 참이다.
+- `probeHitTest()` — 진짜 wndproc 에 `WM_NCHITTEST` 를 보내고 답을 읽는다. 띠의 빈 곳은 `HTCAPTION`,
+  버튼 자리와 띠 아래는 `HTCLIENT`.
+
+```text
+frameless_covers_window=true nchittest_strip=2 nchittest_button=1 nchittest_below=1 frameless_wiring_ok=true
+```
+
+**둘이 서로 다른 실패를 잡는다** — 이것이 판정이 겹치지 않는다는 증거다:
+
+| 뮤턴트 | `frameless_covers_window` | `nchittest_strip` |
+|---|---|---|
+| `WM_NCCALCSIZE` 삭제 | **false** | 2(정상) |
+| `hitTestFrame` 삭제 | true | **1**(HTCLIENT — 안 끌린다) |
+
+> **한계**: `probeHitTest` 는 같은 스레드에서 보내므로 **USER32 가 우리 wndproc 로 보내는 것까지만**
+> 증명한다. OS 가 실제 마우스에 그 값을 존중하는지는 사람이 본다.
+
+## ⑷ 재현되지 않은 것 — `titlebar_cells=27`
+
+복원했는데 27 이라 "최대화 표식(사각형 둘)이 남았나" 를 의심했다. **아니다** — 최대화 표식은 +4 인데
+차이는 +1 이었다. 포인터를 띠 밖으로 옮기니 **26** 이다. 27 의 +1 은 **호버 배경 셀**이고, 클릭 직후
+포인터가 그 버튼 위에 있으므로 옳은 그림이다.
+
+## 하네스 자신이 두 번 속 비었다
+
+이 세션에서 반복해 걸린 함정이라 적어 둔다.
+
+1. **`zig build test` 의 exit code 를 판정에 썼다.** 이 머신에서는 그것이 **항상 1** 이다(아래).
+   그대로 뒀으면 **모든 뮤턴트가 "잡혔다" 로 보였다.**
+2. 요약 줄을 `tail -1` 로 집었는데 테스트 바이너리가 셋이라 엉뚱한 것을 읽었고, `FAIL` 을 세는 grep 이
+   테스트 **이름** 속 `OPEN_FAILURE`·`CHANNEL_FAILURE` 를 세고 있었다.
+
+고친 규칙: **요약 줄을 전부 모아 `failed` 를 합산**하고, 실제 실패는 줄 첫머리 `FAIL (` 로만 센다.
+
+## 보고 — Windows 에서 `zig build test` 는 항상 exit 1 이다
+
+`tools/check-agent-hook-command.sh` 가 로그 파일 모드를 `rw-------` 로 요구하는데 NTFS 에는 POSIX
+모드 비트가 없어 `umask 022` 가 `rw-r--r--` 를 낸다.
+
+```text
+FAIL: 로그 파일 권한이 rw------- 여야 하는데 rw-r--r-- 다(umask 가 빠졌다)
+```
+
+- **이 브랜치가 만든 것이 아니다** — `tools/` 는 안 건드렸고, 변경을 stash 해도 그대로 실패한다.
+- **고치지 않는다.** 그 게이트는 control-plane 보안 계약(로그 0600)이고, Windows 에서 통과시키려면
+  게이트를 약하게 만들어야 한다. `check-targets` 가 macOS 아티팩트를 안 짓는 것과 **같은 종류의
+  플랫폼 공백**이라 함께 보고한다.
+- **유닛 스위트는 초록이다**(3445 / 25 / 6, `failed` 합 0). 앞으로 이 저장소에서 Windows 게이트를
+  적을 때는 **exit code 가 아니라 요약 줄**을 근거로 적는다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

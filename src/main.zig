@@ -2741,6 +2741,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer titlebar_cells.deinit(allocator);
     var caption_hover: ?usize = null;
     var caption_clicks: usize = 0;
+    // 캡션 버튼 **동작** 판정(W8.8⒝). `caption_clicks` 만으로는 속 빈다 — 스모크가 그 자리를 아예
+    // 안 눌러서 0 이었고, 0 은 "버튼이 죽었다" 와 구별이 안 된다.
+    var caption_judgeable = false;
+    var caption_max_before = false;
+    var caption_max_after = false;
+    var caption_max_restored = true;
+    // **프레임리스가 실제로 걸렸는가**(W8.8⒝). `WM_NCCALCSIZE` 처리를 통째로 지워도 기존 판정이
+    // 하나도 안 움직였다 — 네이티브 캡션이 돌아오고 우리 버튼이 그 아래 그려지는 상태인데도.
+    var frameless_covers = false;
+    // **띠 히트테스트가 배선돼 있는가.** `hitTestFrame` 호출을 지워도 순수 테스트 5 개와 스모크가
+    // 전부 초록이었다(창을 못 끌고 못 늘리는 상태인데). 진짜 wndproc 에 물어본다.
+    var nchittest_strip: isize = 0;
+    var nchittest_button: isize = 0;
+    var nchittest_below: isize = 0;
 
     var sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer sidebar_cells.deinit(allocator);
@@ -2967,6 +2981,44 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     else => {},
                 };
             }
+        }
+        // ── 캡션 버튼 판정 (W8.8⒝) ─────────────────────────────────────────────────────────
+        //
+        // **버튼을 진짜 누른다.** 최대화(가운데)를 눌러 창 상태가 뒤집히는지 보고, 다시 눌러
+        // 되돌린다. 최소화는 창을 숨겨 이후 판정이 못 돌고 닫기는 루프를 끝내므로 **최대화가
+        // 유일하게 판정 가능한 버튼**이다. `ShowWindowAsync` 라 상태가 몇 스핀 뒤에 온다.
+        if (spins == 250 and titlebar_px != 0) {
+            caption_judgeable = true;
+            caption_max_before = window.isMaximized();
+            const r = captionButtonRects(client_w, titlebar_px, caption_btn_w)[1];
+            const cx: i32 = @intCast(r.x + r.w / 2);
+            const cy: i32 = @intCast(r.y + r.h / 2);
+            window.postSyntheticMouse(.left_down, cx, cy);
+            window.postSyntheticMouse(.left_up, cx, cy);
+        }
+        if (spins == 330 and caption_judgeable) {
+            caption_max_after = window.isMaximized();
+            // **지금 폭으로 다시 잰다** — 최대화로 클라이언트가 넓어졌으므로 옛 사각형을 쓰면
+            // 화면 한복판을 누르게 된다.
+            const r = captionButtonRects(client_w, titlebar_px, caption_btn_w)[1];
+            const cx: i32 = @intCast(r.x + r.w / 2);
+            const cy: i32 = @intCast(r.y + r.h / 2);
+            window.postSyntheticMouse(.left_down, cx, cy);
+            window.postSyntheticMouse(.left_up, cx, cy);
+        }
+        if (spins == 410 and caption_judgeable) caption_max_restored = window.isMaximized();
+        // ── 프레임리스 배선 판정 (W8.8⒝) ───────────────────────────────────────────────────
+        //
+        // 복원이 끝난 뒤 잰다 — 최대화 중에는 창 사각형이 화면 작업영역이라 값이 흔들린다.
+        if (spins == 450 and titlebar_px != 0) {
+            frameless_covers = window.clientCoversWindow();
+            const wr = window.windowRect();
+            const border: i32 = 8; // 모서리 규칙에 안 걸리게 충분히 안쪽에서 찌른다
+            // 띠의 **빈 곳**(왼쪽) → 캡션, 캡션 **버튼 자리** → 클라이언트, 띠 **아래** → 클라이언트.
+            const mid_x: i32 = wr.left + @divTrunc(@as(i32, @intCast(client_w)), 2);
+            nchittest_strip = window.probeHitTest(mid_x, wr.top + border + 4);
+            nchittest_button = window.probeHitTest(wr.right - 10, wr.top + border + 4);
+            nchittest_below = window.probeHitTest(mid_x, wr.top + @as(i32, @intCast(titlebar_px)) + 20);
         }
         if (spins == 120) {
             selections_before_term_click = selections;
@@ -3623,6 +3675,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         cells.appendSliceAssumeCapacity(dock_cells.items);
         const term_first = cells.items.len;
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+        // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
+        // 폭을 가로지르고 `y=0` 에서 시작하므로 **두 판정이 영원히 0 이 아니게 되어 죽는다**
+        // (실측: 둘 다 15600 = 띠 26 셀 × 600 프레임).
+        const term_last = cells.items.len;
         // **띠는 맨 위다** — 터미널·도크 위에 얹혀야 캡션 버튼이 안 가려진다.
         cells.appendSlice(allocator, titlebar_cells.items) catch {};
         last_cells = cells.items.len;
@@ -3634,7 +3690,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const dock_x0: f32 = if (geom.dock.w != 0) @floatFromInt(geom.dock.x) else std.math.floatMax(f32);
             const term_x0: f32 = @floatFromInt(geom.terminal.x);
             const term_y0: f32 = @floatFromInt(geom.terminal.y);
-            for (cells.items[term_first..]) |c| {
+            for (cells.items[term_first..term_last]) |c| {
                 if (c.rect[0] + c.rect[2] > dock_x0) term_cells_in_dock += 1;
                 // 가장자리 글자 조각을 쫓는다 — 사각형 **왼쪽·위**로 삐져나간 셀이 있나.
                 if (c.rect[0] < term_x0 or c.rect[1] < term_y0) term_cells_before_rect += 1;
@@ -3678,6 +3734,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
     // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
     try stdout.print("titlebar_px={d} caption_btn_w={d} caption_clicks={d} titlebar_cells={d}\n", .{ titlebar_px, caption_btn_w, caption_clicks, titlebar_cells.items.len });
+    if (caption_judgeable) {
+        // **동어반복이 아니다**: 내가 보낸 좌표를 되읽는 것이 아니라 **OS 의 창 상태**
+        // (`IsZoomed`)를 읽는다. 히트테스트·라우팅·`toggleMaximize` 가 전부 이어져야 뒤집힌다.
+        try stdout.print("caption_max_before={} after={} restored={} caption_toggle_ok={}\n", .{
+            caption_max_before,
+            caption_max_after,
+            caption_max_restored,
+            !caption_max_before and caption_max_after and !caption_max_restored,
+        });
+    } else {
+        try stdout.print("caption_toggle=unjudgeable reason=no_titlebar\n", .{});
+    }
+    if (titlebar_px != 0) {
+        // **OS 에게 직접 묻는 두 판정.** 위 캡션 판정은 우리 클라이언트 좌표 안에서만 돌아서
+        // 프레임리스가 풀려도 초록이었다 — 여기가 그 구멍을 막는다.
+        // `HTCAPTION=2`, `HTCLIENT=1`.
+        try stdout.print("frameless_covers_window={} nchittest_strip={d} nchittest_button={d} nchittest_below={d} frameless_wiring_ok={}\n", .{
+            frameless_covers,
+            nchittest_strip,
+            nchittest_button,
+            nchittest_below,
+            frameless_covers and nchittest_strip == 2 and nchittest_button == 1 and nchittest_below == 1,
+        });
+    }
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, geom.terminal.x });
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
     if (dock_click_judgeable) {

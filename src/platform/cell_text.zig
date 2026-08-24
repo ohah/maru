@@ -140,6 +140,37 @@ pub const FileTreeSelectionPaint = struct {
 /// 공용 투영 층으로 빼는 별도 슬라이스다. 그 전에 지우면 Windows 가 화면에서 트리를 잃는다.
 ///
 /// 그동안 이 함수가 **macOS 로 다시 새지 않게** `tests/boundary/imports.zig` 가 소비자를 센다.
+/// 파일 트리 행에 **아이콘 종류를 채운다**. 순수 함수 — 행 슬라이스만 본다.
+///
+/// **왜 공유 모듈인가**: 분류 규칙은 chrome(`file_tree_icon.classify`)이 소유하고 행 모델은
+/// session(`file_tree.Row`)이 소유하는데 **그 둘은 서로를 import 할 수 없다.** 이 파일은 이미
+/// 둘 다 보는 자리이고(트리 투영이 여기 산다), 그래서 여기가 집이다.
+///
+/// **여기 없던 동안 Windows 트리에 아이콘이 하나도 없었다.** 이 함수가
+/// `platform/macos/app_session/file_panel.zig` 안에 있어 Windows 가 못 불렀고, 모든 행이
+/// `icon_kind = 0`(none)이라 셰브런만 그려졌다 — 화면을 macOS 와 견주기 전에는 "원래 그런 모양"
+/// 으로 보였다(실측 2026-08-25).
+pub fn classifyFileTreeRows(rows: []file_tree.Row) void {
+    for (rows) |*row| switch (row.*) {
+        .recent_header => |*v| {
+            v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_header, "", !v.collapsed));
+        },
+        .recent_file => |*v| {
+            v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_file, v.label, false));
+        },
+        .root => |*v| {
+            v.icon_kind = @intFromEnum(file_tree_icon.classify(.root, v.label, v.expanded));
+        },
+        .directory => |*v| {
+            v.icon_kind = @intFromEnum(file_tree_icon.classify(.directory, v.label, v.expanded));
+        },
+        .file => |*v| {
+            v.icon_kind = @intFromEnum(file_tree_icon.classify(.file, v.label, false));
+        },
+        .empty => {},
+    };
+}
+
 pub fn buildFileTreeDrawList(
     allocator: std.mem.Allocator,
     rows: []const file_tree.Row,

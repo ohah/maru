@@ -20500,6 +20500,17 @@ pub const ExternalPumpStorage = struct {
                     // Until that consumer runs, it remains backpressure and must never mint D2 TX
                     // authority from a projection that intentionally forgave the response owner.
                     result.authority_clear = self.controlSemanticAuthorityClear();
+                    const tx_pending = if (self.owned_client) |*owned| switch (owned.io_mode) {
+                        .external => |*state| state.external_tx.items.len != 0,
+                        .blocking => false,
+                    } else false;
+                    if (result.authority_clear and tx_pending) {
+                        // This completed-control evidence has been retired and cannot mint a D2
+                        // TX permit. Preserve the frame and self-wake a fresh general drain turn;
+                        // only that turn may issue write authority.
+                        result.authority_clear = false;
+                        result.immediate_rx = true;
+                    }
                 } else switch (self.prepareAuthorityUnderHeldLease(
                     &lease,
                     scratch,
@@ -28163,23 +28174,22 @@ fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
     );
 }
 
-test "f3c0 f3c1 typed control response is consumed by same-turn product orchestration" {
+test "f3c0 f3c1 completed control defers pending TX to a fresh authority turn" {
     const Probe = struct {
+        var wire: []const u8 = &.{};
+        var exposed_len: usize = 0;
+        var offset: usize = 0;
+
         fn read(
-            raw: *anyopaque,
-            fd: posix.fd_t,
+            _: *anyopaque,
+            _: posix.fd_t,
             buffer: []u8,
         ) client_external_rx_read.RxReadOutcome {
-            const use_posix: *bool = @ptrCast(@alignCast(raw));
-            if (!use_posix.*) return .would_block;
-            const rc = c.recv(fd, buffer.ptr, buffer.len, posix.MSG.DONTWAIT);
-            if (rc > 0) return .{ .bytes = @intCast(rc) };
-            if (rc == 0) return .eof;
-            return switch (posix.errno(rc)) {
-                .INTR => .interrupted,
-                .AGAIN => .would_block,
-                else => .socket_error,
-            };
+            if (offset >= exposed_len) return .would_block;
+            const count = @min(buffer.len, exposed_len - offset);
+            @memcpy(buffer[0..count], wire[offset..][0..count]);
+            offset += count;
+            return .{ .bytes = count };
         }
 
         fn apply(
@@ -28264,7 +28274,15 @@ test "f3c0 f3c1 typed control response is consumed by same-turn product orchestr
     defer std.testing.allocator.destroy(scratch);
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
-    var read_probe = false;
+    Probe.wire = &.{};
+    Probe.exposed_len = 0;
+    Probe.offset = 0;
+    defer {
+        Probe.wire = &.{};
+        Probe.exposed_len = 0;
+        Probe.offset = 0;
+    }
+    var read_probe: u8 = 0;
     var apply_probe: u8 = 0;
     const ops = RxTurnOps{
         .buffered = .{
@@ -28307,23 +28325,41 @@ test "f3c0 f3c1 typed control response is consumed by same-turn product orchestr
         "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
     );
     defer std.testing.allocator.free(response_wire);
-    try std.testing.expectEqual(
-        @as(isize, @intCast(response_wire.len)),
-        c.send(
-            fixture.peer_fd,
-            response_wire.ptr,
-            response_wire.len,
-            0,
-        ),
+    const response_split = response_wire.len / 2;
+    try std.testing.expect(response_split > protocol.header_size);
+    Probe.wire = response_wire;
+    Probe.exposed_len = response_split;
+    try std.testing.expect(storage.settleRxTurnForSiblingOperation(scratch));
+    try std.testing.expect(storage.admitTx(.{
+        .kind = .input_bytes,
+        .stream_id = valid_evidence.stream_id,
+        .payload = "queued-after-resize",
+        .request_policy = .zero,
+    }, 102) == .admitted);
+    try std.testing.expectEqual(@as(usize, 1), external.external_tx.items.len);
+    const partial_response_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 103 },
+        &ops,
+        scratch,
     );
-    read_probe = true;
+    try std.testing.expectEqual(
+        @as(?client_pump.ExternalPumpTerminal, null),
+        partial_response_turn.terminal,
+    );
+    try std.testing.expect(!partial_response_turn.authority_clear);
+    try std.testing.expectEqual(@as(usize, 0), partial_response_turn.tx_frames);
+    try std.testing.expectEqual(@as(usize, 1), external.external_tx.items.len);
+    Probe.exposed_len = response_wire.len;
     const response_turn = storage.pumpRxTurn(
-        .{ .readable = true, .writable = false, .now_ns = 103 },
+        .{ .readable = true, .writable = true, .now_ns = 104 },
         &ops,
         scratch,
     );
     try std.testing.expect(response_turn.terminal == null);
-    try std.testing.expect(response_turn.authority_clear);
+    try std.testing.expect(!response_turn.authority_clear);
+    try std.testing.expect(response_turn.immediate_rx);
+    try std.testing.expectEqual(@as(usize, 0), response_turn.tx_frames);
+    try std.testing.expectEqual(@as(usize, 1), external.external_tx.items.len);
     try std.testing.expectEqual(RxDrainEvidenceLifecycle.empty, scratch.drain_evidence.lifecycle);
     try std.testing.expect(storage.completed_control == .none);
     try std.testing.expect(storage.control_correlation.state == .idle);
@@ -28333,13 +28369,30 @@ test "f3c0 f3c1 typed control response is consumed by same-turn product orchestr
     try std.testing.expectEqual(@as(u64, 2), storage.owner_resize.current.event.resize_generation);
     try std.testing.expectEqual(ExternalRxTurnScratchLifecycle.ready, scratch.lifecycle);
     try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
-    const inherited_turn = storage.pumpRxTurn(
-        .{ .readable = true, .writable = true, .now_ns = 104 },
+    try std.testing.expect(storage.settleRxTurnForSiblingOperation(scratch));
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(&cleanup_scratch));
+    try std.testing.expectEqual(
+        CliOwnerProjectionResult.applied,
+        storage.consumeCliOwnerProjection(&cleanup_scratch),
+    );
+    const fresh_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 105 },
         &ops,
         scratch,
     );
-    try std.testing.expect(inherited_turn.terminal == null);
-    try std.testing.expectEqual(@as(usize, 0), inherited_turn.tx_frames);
+    try std.testing.expect(fresh_turn.terminal == null);
+    try std.testing.expect(fresh_turn.authority_clear);
+    try std.testing.expect(fresh_turn.write_interest);
+    try std.testing.expectEqual(@as(usize, 0), fresh_turn.tx_frames);
+    const tx_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 106 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(tx_turn.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), tx_turn.tx_frames);
+    try std.testing.expectEqual(@as(usize, 0), external.external_tx.items.len);
     try std.testing.expect(storage.completed_control == .none);
     try std.testing.expect(storage.control_correlation.state == .idle);
     try std.testing.expect(storage.owner_resize == .current);

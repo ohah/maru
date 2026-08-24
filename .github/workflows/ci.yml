@@ -332,8 +332,6 @@ jobs:
             zig-v2-${{ runner.os }}-sessionhost-debug-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=Debug
-      - name: Verify bundled CLI over harness-owned localhost OpenSSH
-        run: zig build test-session-host-p5d -Doptimize=ReleaseFast -j1
       - name: 저장 전에 캐시를 예산 안으로 줄인다
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: sh tools/ci/prune-zig-cache.sh 3072
@@ -345,6 +343,38 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+
+  # P5d는 ReleaseFast 앱 번들과 localhost OpenSSH 제품 E2E를 다시 컴파일한다. Debug 전수 스위트 뒤에
+  # 직렬로 붙이면 콜드 macOS runner에서 20분 job 상한을 넘겨 성공한 앞 단계까지 cancelled로 잃는다.
+  # 별도 required job으로 병렬 실행해 두 gate의 실패/시간 예산을 독립적으로 판정한다.
+  session-host-bundled-cli-macos:
+    name: session host bundled CLI macOS
+    needs: changes
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          restore-keys: |
+            zig-v2-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-sessionhost-releasefast-
+      - name: Install web bundle dependencies for the signed CLI fixture
+        run: bun install --cwd web --frozen-lockfile
+      - name: Verify bundled CLI over harness-owned localhost OpenSSH
+        run: zig build test-session-host-p5d -Doptimize=ReleaseFast -j1
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)

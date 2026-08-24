@@ -101,6 +101,14 @@ pub fn selectAction(ready: TurnReadiness) Action {
     return .poll_wait;
 }
 
+/// A completed semantic suffix has already consumed its self-wake. If lower-priority owner-local
+/// work remains, take exactly one nonblocking kernel snapshot before selecting it so a concurrent
+/// signal/revoke/readiness edge keeps priority without stranding the local work in an unbounded
+/// poll.
+pub fn postImmediatePollMustBeNonblocking(action: Action, ready: TurnReadiness) bool {
+    return action == .host_immediate and (ready.resize or ready.retained_stdin);
+}
+
 pub const CleanupCause = enum {
     local_detach,
     signal,
@@ -218,6 +226,17 @@ test "p5c3c-3b turn priority gives one ready stdin turn before immediate host wo
     try std.testing.expectEqual(Action.host_immediate, selectAction(retained));
     retained.host_immediate = false;
     try std.testing.expectEqual(Action.stdin_rx, selectAction(retained));
+
+    try std.testing.expect(postImmediatePollMustBeNonblocking(.host_immediate, .{
+        .resize = true,
+    }));
+    try std.testing.expect(postImmediatePollMustBeNonblocking(.host_immediate, .{
+        .retained_stdin = true,
+    }));
+    try std.testing.expect(!postImmediatePollMustBeNonblocking(.host_rx, .{
+        .resize = true,
+    }));
+    try std.testing.expect(!postImmediatePollMustBeNonblocking(.host_immediate, .{}));
 }
 
 test "p5c3c-3b normal cleanup appends detach only without in-flight wire authority" {

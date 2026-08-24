@@ -10898,13 +10898,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let fileHTMLDataStoreIsolated = wp.map {
                 $0.filePanelKind != 2 || $0.webView.configuration.websiteDataStore !== MaruWebPanelView.browserDataStore
             } ?? false
-            let fileViewerUnderPageBackground = wp.map { panel in
-                guard panel.filePanelKind == 1 else { return false }
+            let fileViewerUnderPageBackground: Bool
+            if let panel = wp, panel.filePanelKind == 1 {
                 if #available(macOS 12.0, *) {
+                    // Keep the availability check and property access in the same lexical scope.
+                    // Swift does not carry this refinement into Optional.map or the appearance callback
+                    // when compiling for the supported macOS 11 deployment target.
+                    let underPageBackgroundColor = panel.webView.underPageBackgroundColor
                     var matches = false
                     panel.webView.effectiveAppearance.performAsCurrentDrawingAppearance {
                         guard
-                            let actual = panel.webView.underPageBackgroundColor?.usingColorSpace(.sRGB),
+                            let actual = underPageBackgroundColor?.usingColorSpace(.sRGB),
                             let expected = NSColor.textBackgroundColor.usingColorSpace(.sRGB)
                         else { return }
                         let tolerance = CGFloat(1.0 / 255.0)
@@ -10913,10 +10917,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             && abs(actual.blueComponent - expected.blueComponent) <= tolerance
                             && abs(actual.alphaComponent - expected.alphaComponent) <= tolerance
                     }
-                    return matches
+                    fileViewerUnderPageBackground = matches
+                } else {
+                    fileViewerUnderPageBackground = false
                 }
-                return false
-            } ?? false
+            } else {
+                fileViewerUnderPageBackground = false
+            }
             // Phase 7e-1a: browser 패널 nav 상태 왕복 검증 — Swift KVO 관측값(navUrl)과 Zig 저장 getter 결과가
             // 5d fixture의 data: URL로 채워지는지(url KVO → tick push(set_web_nav_state) → Zig 저장 → web_nav_url_at
             // 왕복). 세션 핸들=activeSurface.appSession, out 버퍼 4096. len>0이면 문자열, 아니면 "pending"(아직 push 전).

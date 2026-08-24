@@ -60,6 +60,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
 | `session host macOS (Debug)` | ci.yml `session-host-macos-debug` | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
+| `session host bundled CLI macOS` | ci.yml `session-host-bundled-cli-macos` | `code` 변경 PR(macos-15). ReleaseFast 앱 번들/PATH와 harness-owned localhost OpenSSH의 public `maru attach` 제품 E2E. Debug 전수 스위트와 병렬 실행해 각 20분 상한을 독립 판정. |
 | `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
 | `web build and security fixtures` | web.yml `check` | `web` 변경 PR. web build·보안 fixture. |
 

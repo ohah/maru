@@ -1088,8 +1088,15 @@ pub fn applyForcedBranchMenu(self: *AppSession) void {
 /// 클릭과 **같은 경로**(`openDockTo`)를 태우므로, 저장소 판정·목록 읽기·안내 문구는 전부 제품
 /// tick이 그대로 정한다.
 ///
-/// tick 에서 `applyForcedScmTab` **뒤**에 부른다 — 옮기기 전 순서가 그랬고, 뒤따르는
-/// `scm_dock_ops.pump*` 들이 이 tick 의 뷰를 보기 때문에 자리를 바꾸면 첫 프레임이 달라진다.
+/// tick 에서 뒤따르는 `scm_dock_ops.pump*` **앞**에 부른다 — `pumpScmLog`·`pumpTurnSummaries` 가
+/// `dock.view != .source_control` 에서 곧바로 나가므로, 뒤로 밀면 목록 읽기가 한 tick 늦는다. **이것이
+/// 이 자리가 못 박는 유일한 순서다.**
+///
+/// 바로 앞의 `applyForcedScmTab` 과의 상대 순서는 **옮기기 전 자리를 그대로 둔 것**일 뿐, 확인된 제약이
+/// 없다 — `selectScmTab` 은 `dock.view` 를 읽지 않고, `openDockTo` 는 `scm_tab` 을 읽지 않는다
+/// (`shouldRefreshArchiveOnPresent` 가 `.agent_sessions` 에서만 참이다). 둘이 스치는 자리는 하나다:
+/// `selectScmTab` → `forgetScrollExtent` 가 재는 뷰포트 높이가 `dockGeometry` 를 거쳐 `dock.view` 와
+/// `presented` 를 본다. 그 값은 같은 프레임의 투영(`rememberScrollExtent`)이 덮으므로 화면에 남지 않는다.
 pub fn applyForcedScmView(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_SCM") == null) return;
     if (self.dock.view == .source_control) return;
@@ -1100,7 +1107,8 @@ pub fn applyForcedScmView(self: *AppSession) void {
 ///
 /// `applyForcedBranchMenu`와 같은 목적·같은 규율이다. **열릴 때까지 재시도한다**: 값은 두 번째
 /// 표본부터 생기고 항목도 그때 서므로 첫 tick에는 앵커가 없다. 가짜 행을 심지 않는다 — 실제
-/// 표본으로 열린다. tick 에서 `pollResourceUsage` **뒤**에 불러야 그 표본을 본다.
+/// 표본으로 열린다. tick 에서 `pollResourceUsage` **뒤**에 둔 것은 그 tick 의 표본을 곧바로 보기
+/// 위해서다 — 앞에 두면 한 tick 늦을 뿐, 열릴 때까지 재시도하므로 결과는 같다.
 pub fn applyForcedResourceMenu(self: *AppSession) void {
     if (self.resource_menu_open) return;
     if (std.c.getenv("MARU_FORCE_RESOURCE_MENU") == null) return;

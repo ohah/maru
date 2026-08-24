@@ -57,6 +57,15 @@ export interface TerminalOptions {
   theme?: Theme;
   cursorShape?: CursorShape;
   scrollback?: number;
+  /** 보조기술이 읽을 이름. 한 페이지에 터미널이 여럿이면 구별되게 준다. */
+  ariaLabel?: string;
+  /**
+   * 스크린 리더 모드. 켜면 바뀐 줄이 라이브 리전으로 읽힌다.
+   *
+   * **기본은 꺼짐**이다 — 프레임마다 화면을 텍스트로 뽑아 비교해야 하고(워커 모드에서는 왕복),
+   * 쓰지 않는 사용자에게 그 비용을 물릴 이유가 없다. 앱이 사용자 설정으로 켠다.
+   */
+  screenReaderMode?: boolean;
   /** East Asian Width Ambiguous를 2셀로 볼지. **레이아웃이 통째로 갈린다.** */
   ambiguousWide?: boolean;
   /** 리가처를 살리는 ASCII run 병합. 끄면 셀 단위로 그린다. */

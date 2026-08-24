@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term — 접근성 픽스처</title>
+<body style="margin: 0; background: #0d1117">
+  <div id="host" style="width: 600px; height: 320px"></div>
+  <script type="module">
+    import { Terminal } from "/core/dist/index.js";
+    const sr = new URLSearchParams(location.search).get("sr") === "1";
+    const term = new Terminal({
+      cols: 40,
+      rows: 10,
+      wasmUrl: "/core/wasm/maru-vt.wasm",
+      worker: new URLSearchParams(location.search).get("worker") === "false" ? false : "full",
+      screenReaderMode: sr,
+      ariaLabel: "테스트 터미널",
+    });
+    await term.open(document.getElementById("host"));
+    globalThis.__term = term;
+    globalThis.__ready = true;
+  </script>
+</body>

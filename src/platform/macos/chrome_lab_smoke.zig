@@ -134,6 +134,48 @@ const FontVariant = enum {
         };
     }
 
+    /// 이 family 의 **번들 구성원 전부**(Regular·Bold·Italic·BoldItalic 중 저장소에 있는 것).
+    ///
+    /// **왜 Regular 만으로는 안 되는가**: 제품은 `ATSApplicationFontsPath` 로 `Contents/Resources/Fonts`
+    /// 의 `.ttf` 를 **전부** 등록한다. Lab 이 Regular 하나만 등록하면 굵은 글씨(도크 제목·섹션 이름)를
+    /// 그릴 때 진짜 bold 가 프로세스에 없어 CoreText 가 합성하거나 다른 face 로 흐른다 — 그런데 그
+    /// 결과가 **기기마다 다르다**: 개발기에 JetBrains Mono 가 설치돼 있으면 설치본 Bold 가 잡히고,
+    /// 러너에는 없어서 안 잡힌다. 실측(2026-08-24)으로 같은 커밋의 캡처가 CI 와 개발기에서
+    /// `distinct_font_faces` 2 대 3 이었고, 도크 한글 제목의 획 굵기가 달라 crop 하나가 2,313 픽셀까지
+    /// 벌어졌다. 골든은 그 차이를 회귀로 읽는다.
+    fn assetMembers(self: FontVariant) []const []const u8 {
+        return switch (self) {
+            .jetbrains_mono => &.{
+                "assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf",
+                "assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf",
+                "assets/fonts/JetBrainsMono/JetBrainsMono-Italic.ttf",
+                "assets/fonts/JetBrainsMono/JetBrainsMono-BoldItalic.ttf",
+            },
+            .jetendard => &.{
+                "assets/fonts/Jetendard/Jetendard-Regular.ttf",
+                "assets/fonts/Jetendard/Jetendard-Bold.ttf",
+                "assets/fonts/Jetendard/Jetendard-Italic.ttf",
+                "assets/fonts/Jetendard/Jetendard-BoldItalic.ttf",
+            },
+            .fira_code => &.{
+                "assets/fonts/FiraCode/FiraCode-Regular.ttf",
+                "assets/fonts/FiraCode/FiraCode-Bold.ttf",
+            },
+            .cascadia_code => &.{
+                "assets/fonts/CascadiaCode/CascadiaCode-Regular.ttf",
+                "assets/fonts/CascadiaCode/CascadiaCode-Bold.ttf",
+                "assets/fonts/CascadiaCode/CascadiaCode-Italic.ttf",
+                "assets/fonts/CascadiaCode/CascadiaCode-BoldItalic.ttf",
+            },
+            .hack => &.{
+                "assets/fonts/Hack/Hack-Regular.ttf",
+                "assets/fonts/Hack/Hack-Bold.ttf",
+                "assets/fonts/Hack/Hack-Italic.ttf",
+                "assets/fonts/Hack/Hack-BoldItalic.ttf",
+            },
+        };
+    }
+
     fn assetPath(self: FontVariant) []const u8 {
         return switch (self) {
             .jetbrains_mono => "assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf",
@@ -709,20 +751,27 @@ fn fontVariantFromValue(value: []const u8) ?FontVariant {
 /// primary 등록 실패는 `registerLabFont`가 별도로 에러를 낸다.
 fn registerRemainingBundledFonts(primary: FontVariant) void {
     inline for (comptime std.enums.values(FontVariant)) |variant| {
-        if (variant != primary) {
+        // primary 는 `registerLabFont` 가 Regular 를 이미 등록했다 — 나머지 **구성원**(bold·italic)은
+        // 여기서 마저 등록한다(`assetMembers` 주석: 굵은 글씨가 기기마다 달라진 실측).
+        for (variant.assetMembers(), 0..) |member, index| {
+            if (variant == primary and index == 0) continue;
             var scratch: [128]u8 = undefined;
-            _ = registerLabFont(variant, &scratch) catch {};
+            _ = registerLabFontPath(member, variant.family(), &scratch) catch {};
         }
     }
 }
 
 fn registerLabFont(variant: FontVariant, postscript_name_out: []u8) ![]const u8 {
+    return registerLabFontPath(variant.assetPath(), variant.family(), postscript_name_out);
+}
+
+fn registerLabFontPath(asset_path: []const u8, family: []const u8, postscript_name_out: []u8) ![]const u8 {
     if (postscript_name_out.len < 2) return error.ChromeLabFontPostscriptNameBufferTooSmall;
     const status = coretext_bridge.maru_macos_coretext_lab_register_font(
-        variant.assetPath().ptr,
-        variant.assetPath().len,
-        variant.family().ptr,
-        variant.family().len,
+        asset_path.ptr,
+        asset_path.len,
+        family.ptr,
+        family.len,
         postscript_name_out.ptr,
         postscript_name_out.len,
     );

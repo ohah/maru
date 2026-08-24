@@ -176,6 +176,12 @@ const Writer = struct {
             const planned = Writer.plannedCols(part, budget, false); // `emit` 과 같은 값
             try self.emit(pen_x, y, part, budget, role, false);
             used_cols += planned;
+            // **여기에는 `cell + 1` 상한을 쓰지 않는다.** 셀 폭이 실제 advance 의 내림이라 이 전진은
+            // 열마다 조금 모자라고(그 분석은 `scm_dock/view.zig` 의 `measureBudget` 이 소유), 다른
+            // 자리에서는 그 부족분이 뒤 글자를 파고들어 결함이 됐다. 그런데 이 함수는 조각들을 **한
+            // 문장으로 이어** 그리는 것이 계약이다(위 주석) — 상한으로 넉넉히 잡으면 스피너와 라벨
+            // 사이에 **없어야 할 틈**이 생긴다. 지금 조각은 1 글자(스피너)와 공백뿐이라 누적 오차가
+            // 1px 미만이므로, 정확한 해법(backend 가 실제 advance 를 주는 것)이 올 때까지 그대로 둔다.
             pen_x += @as(f32, @floatFromInt(@as(u32, planned) * cw));
         }
     }

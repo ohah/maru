@@ -449,12 +449,13 @@ const Writer = struct {
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const provider_cols = plannedCols(provider, 24);
-        // **셀 폭은 실제 advance 의 내림이다** — measured 텍스트는 셀에 스냅되지 않으므로 이 곱은 열마다
-        // 조금씩 모자란다(기본 JetBrains Mono 14pt: advance 8.4, 셀 8). SCM 파일 행에서는 같은 산술이
-        // 이름과 경로 꼬리를 붙여 버렸다(`scm_dock/view.zig` 의 `measureBudget` 주석이 그 실측을 소유).
-        // 여기서는 아래 `xs` 여백이 그 부족분(제공자 이름 길이 × 1px 미만)보다 커서 아직 겹치지 않는다 —
-        // provider 라벨이 길어지거나 자간이 더 넓은 face 가 오면 같은 결함이 난다.
-        const provider_width = @as(u32, provider_cols) * cw;
+        // **셀 폭은 실제 advance 의 내림이라 열당 1px 을 더한다.** measured 텍스트는 셀에 스냅되지 않으므로
+        // `cols * cell` 은 열마다 조금씩 모자라고(기본 JetBrains Mono 14pt: advance 8.4, 셀 8), 그 뒤에
+        // 놓는 메타 글자가 provider 이름을 파고든다. SCM 파일 행에서는 같은 산술이 이름과 경로 꼬리를
+        // 실제로 붙여 버렸다(`scm_dock/view.zig` 의 `measureBudget` 주석이 그 실측과 상한 증명을 소유).
+        // 여기서는 아래 `xs` 여백 덕에 아직 겹치지 않았지만, 여백이 부족분을 가리고 있었을 뿐 산술은
+        // 같은 것이라 같은 상한을 쓴다 — provider 가 길어지거나 자간이 넓은 face 가 와도 견딘다.
+        const provider_width = @as(u32, provider_cols) * (cw + 1);
         const metadata_inset = metrics.card_inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
         const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));
         const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_metadata_y));

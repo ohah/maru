@@ -35,9 +35,20 @@ pub const ScrollbackConfig = struct {
 /// 적용된다. 굽는 크기가 이 값을 따라가므로(M10d-2) 너무 키우면 아틀라스가 커진다.
 pub const FontConfig = struct {
     size: u32 = 22,
+    /// 줄 높이를 글자 크기의 **백분율**로. 100 이면 `size` 그대로(예전 동작).
+    ///
+    /// **왜 배수가 아니라 백분율인가**: 이 config 는 값이 전부 정수다(`valueOf`/`setValue` 가
+    /// `i64`). 데스크톱은 `font.line-height = 1.2` 처럼 배수를 쓰는데 뜻은 같다 — 여기서는
+    /// 120 이 그것이다.
+    ///
+    /// **이 손잡이가 없으면 글자 크기와 화면 밀도가 한 몸이다.** `size` 를 키우면 줄 높이가
+    /// 그만큼 커져 보이는 줄 수가 반드시 준다 — 폰에서는 그 대가가 크다(사용자 요청: 폰트를
+    /// 유지하면서 더 보고 싶다). 낮추면 글자는 그대로 두고 줄만 늘릴 수 있다.
+    line_height: u32 = 100,
 
     pub const schema = .{
         .size = theme.Meta{ .doc = .cfg_font_size, .range = .{ 12, 40 }, .widget = .number },
+        .line_height = theme.Meta{ .doc = .cfg_mob_font_line_height, .range = .{ 60, 200 }, .widget = .number },
     };
 };
 

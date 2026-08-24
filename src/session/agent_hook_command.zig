@@ -161,6 +161,13 @@ pub fn build(
     // maru 가 주입하는 값은 언제나 surface.id(숫자)이므로(`pty/macos.zig`), 그 밖의 모양이면 우리 세션이
     // 아니라고 보고 나간다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
     try out.appendSlice(allocator, "case \"$MARU_PANE_ID\" in ''|*[!0-9]*) exit 0 ;; esac; ");
+    // **인스턴스 식별자도 같은 규율로 검증한다.** 로그 디렉터리는 사용자 캐시 하나뿐이라 **maru 를 두 개
+    // 띄우면 두 인스턴스가 같은 디렉터리를 쓴다.** 그런데 `surface_id` 는 프로세스마다 1 부터 발급되므로
+    // (`SurfaceIdAllocator`) 두 인스턴스의 첫 pane 이 **같은 파일 이름**을 갖는다 — 서로의 이벤트를 읽고,
+    // 시작 시 정리가 남의 살아 있는 로그를 지운다. 그래서 파일 이름 앞에 인스턴스 칸을 하나 둔다.
+    // 값은 maru 가 주입하는 자기 pid 라 숫자이고, 그 밖의 모양이면 우리 세션이 아니라고 보고 나간다
+    // (경로 탈출 방어는 pane 식별자와 같은 이유·같은 방법이다).
+    try out.appendSlice(allocator, "case \"$MARU_HOOK_INSTANCE\" in ''|*[!0-9]*) exit 0 ;; esac; ");
     // **상한을 넘겨도 «무엇이었는지» 는 살린다**(2026-08-21 실사용에서 실제로 넘겼다 — codex payload 하나).
     //
     // 예전에는 이름까지 버리고 `__oversized__` 하나만 남겼다. 그런데 `Stop` 은 최종 답변 전문
@@ -193,8 +200,10 @@ pub fn build(
     }
     try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> ", .{provider});
     try appendQuoted(out, allocator, log_dir_abs);
-    // 파일명은 pane 식별자다 — 따옴표 밖에서 확장해야 값이 들어간다.
-    try out.appendSlice(allocator, "\"/$MARU_PANE_ID.ndjson\"; } 2>/dev/null; exit 0 ");
+    // 경로는 `<로그 디렉터리>/<인스턴스>/<pane>.ndjson` 이다 — 따옴표 밖에서 확장해야 값이 들어간다.
+    // 인스턴스 칸이 있어야 maru 를 여러 개 띄워도 이름이 안 겹친다(위 가드 주석). 디렉터리는 maru 가
+    // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
+    try out.appendSlice(allocator, "\"/$MARU_HOOK_INSTANCE/$MARU_PANE_ID.ndjson\"; } 2>/dev/null; exit 0 ");
     try out.appendSlice(allocator, marker_comment);
 }
 

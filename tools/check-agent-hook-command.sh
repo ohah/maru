@@ -20,7 +20,10 @@ fail_early() { echo "FAIL: $1" >&2; exit 1; }
 work=$(mktemp -d "${TMPDIR:-/tmp}/maru-hook-cmd.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 logdir="$work/events"
-mkdir -p "$logdir"
+# 커맨드는 `<base>/<인스턴스>/<pane>.ndjson` 에 쓴다 — maru 를 두 개 띄워도 이름이 안 겹치게 하는 칸이다.
+inst=42
+evdir="$logdir/$inst"
+mkdir -p "$evdir"
 
 # golden 이 낡지 않았는지 본다 — 빌더의 표식 버전이 올라가면 fixture 도 함께 갱신돼야 한다.
 # (파일 대 파일 비교를 zig 쪽에서 못 하는 것은 `@embedFile` 이 패키지 경로 밖을 못 읽기 때문이다.
@@ -49,6 +52,8 @@ ev_names=$(sed -n 's/^[[:space:]]*\.{ \.name = "\([A-Za-z]*\)".*/\1/p' "$src" | 
 for ev_name in $ev_names; do
   grep -q "\"$ev_name\"" "$golden" || fail_early "golden 이 낡았다 — 세트의 '$ev_name' 이 fixture 에 없다"
 done
+# 인스턴스 칸도 앵커다 — 빠지면 두 maru 인스턴스가 같은 파일 이름을 쓰던 시절로 조용히 되돌아간다.
+grep -q 'MARU_HOOK_INSTANCE' "$golden" || fail_early "golden 이 낡았다 — 인스턴스 가드/경로가 fixture 에 없다"
 
 cmd=$(sed "s|__LOG_DIR__|$logdir|g" "$golden")
 
@@ -61,49 +66,49 @@ pass() { checks=$((checks + 1)); echo "  ok  $1"; }
 payload='{"hook_event_name":"Stop","session_id":"s1","last_assistant_message":"끝"}'
 
 echo "1) pane 식별자가 있으면 한 줄로 append 한다"
-printf '%s\n' "$payload" | env MARU_PANE_ID=7 /bin/sh -c "$cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
-[ -f "$logdir/7.ndjson" ] || fail "로그 파일이 생기지 않았다"
-[ "$(wc -l < "$logdir/7.ndjson")" -eq 1 ] || fail "줄이 하나가 아니다"
-grep -q "^claude	{" "$logdir/7.ndjson" || fail "provider 표식과 payload 사이가 탭이 아니다"
-grep -q '"hook_event_name":"Stop"' "$logdir/7.ndjson" || fail "payload 가 그대로 실리지 않았다"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=7 /bin/sh -c "$cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
+[ -f "$evdir/7.ndjson" ] || fail "로그 파일이 생기지 않았다"
+[ "$(wc -l < "$evdir/7.ndjson")" -eq 1 ] || fail "줄이 하나가 아니다"
+grep -q "^claude	{" "$evdir/7.ndjson" || fail "provider 표식과 payload 사이가 탭이 아니다"
+grep -q '"hook_event_name":"Stop"' "$evdir/7.ndjson" || fail "payload 가 그대로 실리지 않았다"
 pass "append 형식"
 
 echo "1b) 로그 파일 권한이 0600 이다 — payload 에 소스와 명령 원문이 실린다"
 # **넉넉한 umask 에서 돌린다.** 기본 umask 가 이미 077 인 환경에서 돌리면 커맨드에 `umask` 가 없어도
 # 통과해 검사가 아무것도 증명하지 못한다(같은 함정을 동시 append 검사에서 한 번 겪었다).
-rm -f "$logdir/9.ndjson"
-printf '%s\n' "$payload" | env MARU_PANE_ID=9 /bin/sh -c "umask 022; $cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
-mode=$(ls -l "$logdir/9.ndjson" | cut -c2-10)
+rm -f "$evdir/9.ndjson"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=9 /bin/sh -c "umask 022; $cmd" || fail "정상 경로가 0 으로 끝나지 않았다"
+mode=$(ls -l "$evdir/9.ndjson" | cut -c2-10)
 [ "$mode" = "rw-------" ] || fail "로그 파일 권한이 rw------- 여야 하는데 $mode 다(umask 가 빠졌다)"
-rm -f "$logdir/9.ndjson"
+rm -f "$evdir/9.ndjson"
 pass "로그 파일 권한(넉넉한 umask 에서도 0600)"
 
 echo "2) pane 식별자가 없으면 아무것도 쓰지 않고 0 으로 끝난다"
-printf '%s\n' "$payload" | env -u MARU_PANE_ID /bin/sh -c "$cmd" || fail "가드 경로가 0 으로 끝나지 않았다"
-[ "$(ls "$logdir" | wc -l)" -eq 1 ] || fail "maru 밖 세션이 파일을 남겼다"
+printf '%s\n' "$payload" | env -u MARU_PANE_ID MARU_HOOK_INSTANCE=$inst /bin/sh -c "$cmd" || fail "가드 경로가 0 으로 끝나지 않았다"
+[ "$(ls "$evdir" | wc -l)" -eq 1 ] || fail "maru 밖 세션이 파일을 남겼다"
 pass "가드 경로"
 
 echo "3) stdin 을 끝까지 삼킨다 — 안 그러면 provider 파이프가 막힌다"
 # 여러 줄을 밀어 넣고 쓰기 쪽이 SIGPIPE 로 죽지 않는지 본다.
 big=$(awk 'BEGIN { for (i = 0; i < 400; i++) printf "line-%d\n", i }')
-printf '%s\n%s\n' "$payload" "$big" | env MARU_PANE_ID=8 /bin/sh -c "$cmd" || fail "stdin 드레인 중 실패했다"
-[ "$(wc -l < "$logdir/8.ndjson")" -eq 1 ] || fail "첫 줄만 기록해야 한다"
+printf '%s\n%s\n' "$payload" "$big" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=8 /bin/sh -c "$cmd" || fail "stdin 드레인 중 실패했다"
+[ "$(wc -l < "$evdir/8.ndjson")" -eq 1 ] || fail "첫 줄만 기록해야 한다"
 pass "stdin 드레인"
 
 echo "4) 상한을 넘긴 payload 는 접히되 **이름은 살아남는다** — 턴 끝을 잃으면 배지가 안 풀린다"
 huge=$(awk 'BEGIN { printf "{\"hook_event_name\":\"Stop\",\"x\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"}" }')
-printf '%s\n' "$huge" | env MARU_PANE_ID=9 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+printf '%s\n' "$huge" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=9 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
 # **이름이 살아야 한다.** `Stop` 은 최종 답변 전문을 실어 상한을 넘길 수 있는데(실사용에서 codex payload
 # 하나가 실제로 넘겼다), 이름까지 버리면 그 턴의 끝을 못 보고 배지가 «진행 중» 에 멈춘다.
-grep -q '"hook_event_name":"Stop"' "$logdir/9.ndjson" || fail "상한을 넘겼다고 이름까지 버렸다"
-if grep -q '__oversized__' "$logdir/9.ndjson"; then fail "이름을 알 수 있는데 표식으로 접었다"; fi
-[ "$(wc -c < "$logdir/9.ndjson")" -lt 200 ] || fail "상한을 넘긴 원문이 그대로 실렸다"
+grep -q '"hook_event_name":"Stop"' "$evdir/9.ndjson" || fail "상한을 넘겼다고 이름까지 버렸다"
+if grep -q '__oversized__' "$evdir/9.ndjson"; then fail "이름을 알 수 있는데 표식으로 접었다"; fi
+[ "$(wc -c < "$evdir/9.ndjson")" -lt 200 ] || fail "상한을 넘긴 원문이 그대로 실렸다"
 pass "상한 접기(이름 보존)"
 
 echo "4b) 이름을 모르면 표식으로 접는다 — 모르는 것을 지어내지 않는다"
 huge2=$(awk 'BEGIN { printf "{\"hook_event_name\":\"NoSuchEvent\",\"x\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"}" }')
-printf '%s\n' "$huge2" | env MARU_PANE_ID=11 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
-grep -q '__oversized__' "$logdir/11.ndjson" || fail "모르는 이름인데 표식이 없다"
+printf '%s\n' "$huge2" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=11 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+grep -q '__oversized__' "$evdir/11.ndjson" || fail "모르는 이름인데 표식이 없다"
 pass "상한 접기(미지 이름)"
 
 echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
@@ -112,23 +117,34 @@ echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
 # 잡았다. 훅의 stderr 는 provider 화면으로 간다.
 rm -rf "$logdir"
 err="$work/stderr.txt"
-printf '%s\n' "$payload" | env MARU_PANE_ID=7 /bin/sh -c "$cmd" 2>"$err" || fail "디렉터리가 없을 때 0 이 아니었다"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=7 /bin/sh -c "$cmd" 2>"$err" || fail "디렉터리가 없을 때 0 이 아니었다"
 [ ! -s "$err" ] || fail "디렉터리가 없을 때 stderr 가 샜다: $(cat "$err")"
-mkdir -p "$logdir"
+mkdir -p "$evdir"
 pass "디렉터리 부재(조용함 포함)"
 
 echo "5b) pane 식별자가 숫자가 아니면 로그 디렉터리 밖에 쓰지 않는다"
 # 검증이 없을 때 이 입력이 실제로 디렉터리 밖에 파일을 만들었다(실측).
 escape_dir="$work/outside"
 rm -rf "$escape_dir" "$logdir"
-mkdir -p "$escape_dir" "$logdir"
-printf '%s\n' "$payload" | env MARU_PANE_ID='../outside/pwned' /bin/sh -c "$cmd" || fail "탈출 입력에서 0 이 아니었다"
+mkdir -p "$escape_dir" "$evdir"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID='../outside/pwned' /bin/sh -c "$cmd" || fail "탈출 입력에서 0 이 아니었다"
 [ ! -e "$escape_dir/pwned.ndjson" ] || fail "로그 디렉터리 밖에 파일이 생겼다"
-printf '%s\n' "$payload" | env MARU_PANE_ID='7; rm -rf /' /bin/sh -c "$cmd" || fail "주입 입력에서 0 이 아니었다"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID='7; rm -rf /' /bin/sh -c "$cmd" || fail "주입 입력에서 0 이 아니었다"
 # **앞 단계의 부작용에 기대지 않는다** — 5)가 디렉터리를 지웠다 만든 덕에 비어 있었을 뿐이라, 그쪽을 고치면
 # 여기가 조용히 깨진다. 이 검사가 필요한 상태를 스스로 만든다.
-[ "$(ls "$logdir" | wc -l | tr -d ' ')" -eq 0 ] || fail "예상 밖 파일이 생겼다: $(ls "$logdir")"
+[ "$(ls "$evdir" | wc -l | tr -d ' ')" -eq 0 ] || fail "예상 밖 파일이 생겼다: $(ls "$evdir")"
 pass "pane 식별자 검증"
+
+echo "5c) 인스턴스 식별자도 같은 규율로 막는다 — 두 maru 가 서로의 로그를 물지 않게"
+# 인스턴스 칸이 비면 아무것도 쓰지 않는다(maru 밖 세션과 같은 취급).
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE MARU_PANE_ID=7 /bin/sh -c "$cmd" || fail "인스턴스 부재에서 0 이 아니었다"
+[ "$(ls "$evdir" | wc -l | tr -d ' ')" -eq 0 ] || fail "인스턴스 없이 파일이 생겼다: $(ls "$evdir")"
+# 그리고 그 값으로도 경로를 벗어날 수 없다.
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE='../outside' MARU_PANE_ID=pwned /bin/sh -c "$cmd" || fail "탈출 입력에서 0 이 아니었다"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE='../outside' MARU_PANE_ID=7 /bin/sh -c "$cmd" || fail "탈출 입력에서 0 이 아니었다"
+[ ! -e "$escape_dir/7.ndjson" ] || fail "인스턴스 칸으로 디렉터리 밖에 파일이 생겼다"
+[ "$(ls "$evdir" | wc -l | tr -d ' ')" -eq 0 ] || fail "탈출 입력이 파일을 남겼다: $(ls "$evdir")"
+pass "인스턴스 식별자 검증"
 
 echo "6) 동시 append 가 이벤트를 잃지도, 파일을 자르지도 않는다"
 # **«줄이 안 깨진다»고 단언하지 않는다.** 실측(2026-08-20)에서 24개 동시 쓰기의 인터리브는 **간헐적**이었다 —
@@ -146,15 +162,15 @@ runs=24
 expect_bytes=$(( (6 + 1 + fat_size + 1) * runs ))
 i=0
 while [ "$i" -lt "$runs" ]; do
-  printf '%s\n' "$fat" | env MARU_PANE_ID=11 /bin/sh -c "$cmd" &
+  printf '%s\n' "$fat" | env MARU_HOOK_INSTANCE=$inst MARU_PANE_ID=11 /bin/sh -c "$cmd" &
   i=$((i + 1))
 done
 wait
-lines=$(wc -l < "$logdir/11.ndjson" | tr -d ' ')
-bytes=$(wc -c < "$logdir/11.ndjson" | tr -d ' ')
+lines=$(wc -l < "$evdir/11.ndjson" | tr -d ' ')
+bytes=$(wc -c < "$evdir/11.ndjson" | tr -d ' ')
 [ "$lines" -eq "$runs" ] || fail "개행이 $runs 개여야 하는데 $lines 개다(이벤트를 잃었다)"
 [ "$bytes" -eq "$expect_bytes" ] || fail "바이트가 $expect_bytes 여야 하는데 $bytes 다(파일이 잘렸다)"
-intact=$(grep -c '^claude	{.*}$' "$logdir/11.ndjson" 2>/dev/null || true)
+intact=$(grep -c '^claude	{.*}$' "$evdir/11.ndjson" 2>/dev/null || true)
 pass "동시 append(줄당 $fat_size B x $runs, 온전한 줄 $intact/$runs)"
 
 echo "OK: 훅 커맨드가 실제 셸에서 계약 $checks 개를 지킨다"

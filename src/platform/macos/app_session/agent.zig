@@ -609,6 +609,26 @@ fn agentHookLogDir(a: std.mem.Allocator) ?[:0]const u8 {
     return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ base, maru.session.agent_hook_command.log_dir_rel }, 0) catch null;
 }
 
+/// 이 **프로세스**를 가리키는 훅 로그 인스턴스 식별자(현재 pid).
+///
+/// **왜 필요한가**(계약 §4): 로그 디렉터리는 사용자 캐시 하나뿐인데 `surface.id` 는 프로세스마다 1 부터
+/// 발급된다(`SurfaceIdAllocator`). 그래서 maru 를 두 개 띄우면 두 인스턴스의 첫 pane 이 **같은 파일 이름**을
+/// 갖는다 — 서로의 이벤트를 읽고, 시작 시 정리가 남의 살아 있는 로그를 지운다. 이 값이 그 이름공간을 가른다.
+///
+/// **pid 를 쓰는 이유**: 살아 있는지 물어볼 수 있는 유일한 값이다(`kill(pid, 0)`). 시작 시 정리가 «남의
+/// 인스턴스 디렉터리를 지워도 되는가» 를 그것으로 판정한다 — 무작위 id 였다면 그 질문에 답할 수 없어
+/// 옛 정리처럼 «전부 지운다» 로 돌아가야 한다.
+pub fn hookInstanceId() u64 {
+    return @intCast(std.c.getpid());
+}
+
+/// 이 인스턴스의 훅 로그 칸(`<로그 디렉터리>/<인스턴스>`). 훅이 파일을 만드는 자리이자, 우리가 읽고
+/// 종료할 때 지우는 자리다.
+fn agentHookInstanceDir(a: std.mem.Allocator) ?[:0]const u8 {
+    const dir = agentHookLogDir(a) orelse return null;
+    return std.fmt.allocPrintSentinel(a, "{s}/{d}", .{ dir, hookInstanceId() }, 0) catch null;
+}
+
 /// 이 프로세스가 훅 로그를 이미 정리했는가(위 «프로세스에 한 번» 규칙). 테스트는 한 바이너리에서 세션을
 /// 여러 번 만들므로 정리 경로를 보려면 이 값을 되돌린다.
 pub var hook_logs_cleaned = false;
@@ -665,8 +685,20 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
 
     // **훑고 나서 지운다.** 순회 중에 지우면 readdir이 뒤 항목을 건너뛸 수 있어 매번 몇 개씩 남는다.
     var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
+    var doomed_dirs: std.ArrayListUnmanaged([]const u8) = .empty;
     var it = dir.iterate();
     while (it.next(self.io) catch return) |entry| {
+        // **인스턴스 칸은 살아 있는지 물어보고 지운다**(계약 §4). 이름이 pid 라 `kill(pid, 0)` 으로 답할 수
+        // 있다 — 예전에는 디렉터리를 통째로 훑어 지워서, **두 번째 maru 를 켜는 것만으로 첫 번째가 지금
+        // 쓰고 있는 로그가 사라졌다**(그 프로세스의 Term 들은 커서 기준을 잃는다). 우리 것이면 지운다
+        // (지난 실행의 잔재이거나 우리가 방금 만든 빈 칸이다 — 어느 쪽이든 큐를 비우고 시작한다).
+        if (entry.kind == .directory) {
+            const pid = std.fmt.parseInt(i32, entry.name, 10) catch continue; // 숫자 이름만 우리 것이다
+            const ours = pid == @as(i32, @intCast(std.c.getpid()));
+            if (!ours and instanceAlive(pid)) continue; // 남이 살아 있다 — 그 칸은 그 인스턴스 것이다
+            doomed_dirs.append(a, a.dupe(u8, entry.name) catch return) catch return;
+            continue;
+        }
         if (entry.kind != .file) continue;
         // **우리가 만든 이름만 지운다** — pane 식별자(숫자) + `.ndjson`. 남이 이 디렉터리에 무엇을 두었든
         // 그것까지 치우는 것은 우리 일이 아니다.
@@ -687,6 +719,38 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
         doomed.append(a, a.dupe(u8, entry.name) catch return) catch return;
     }
     for (doomed.items) |name| dir.deleteFile(self.io, name) catch {};
+    for (doomed_dirs.items) |name| {
+        const sub = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ log_dir, name }, 0) catch continue;
+        var sub_handle = std.Io.Dir.openDirAbsolute(self.io, sub, .{ .iterate = true }) catch continue;
+        var sub_doomed: std.ArrayListUnmanaged([]const u8) = .empty;
+        var sub_it = sub_handle.iterate();
+        while (sub_it.next(self.io) catch break) |sub_entry| {
+            if (sub_entry.kind != .file) continue;
+            sub_doomed.append(a, a.dupe(u8, sub_entry.name) catch break) catch break;
+        }
+        for (sub_doomed.items) |sub_name| sub_handle.deleteFile(self.io, sub_name) catch {};
+        sub_handle.close(self.io);
+        std.Io.Dir.deleteDirAbsolute(self.io, sub) catch {};
+    }
+}
+
+/// 그 pid 의 프로세스가 아직 사는가. 시작 시 정리가 «남의 인스턴스 칸을 지워도 되는가» 를 이것으로 묻는다.
+///
+/// `ESRCH` 만 «죽었다» 로 읽는다 — `EPERM`(다른 사용자의 프로세스)은 **살아 있다는 뜻**이므로 남긴다.
+/// ⚠️ pid 는 재사용되므로 «죽은 maru 의 pid 를 다른 프로그램이 물려받은» 경우 그 칸이 남는다. 그때는 그
+/// 프로그램이 끝난 뒤 다음 실행이 거둔다 — 살아 있는 남의 로그를 지우는 쪽보다 이 방향이 낫다.
+/// Zig 0.16 `std.c` 가 노출하지 않는 것(메모리: syscall 미노출 목록) — 직접 선언한다.
+const posix_ext = struct {
+    extern "c" fn getpgid(pid: std.c.pid_t) std.c.pid_t;
+};
+
+fn instanceAlive(pid: i32) bool {
+    // `kill(pid, 0)` 대신 `getpgid` 로 존재만 묻는다 — macOS 의 `kill` 시그니처가 signal **열거**를 요구해
+    // 0 을 넘길 수 없다. 판정 규율은 같다: `ESRCH` 만 «죽었다» 이고, 권한 거부 등 나머지는 **살아 있다** 는
+    // 뜻이므로 보수적으로 남긴다.
+    const rc = posix_ext.getpgid(pid);
+    if (rc >= 0) return true;
+    return std.posix.errno(rc) != .SRCH;
 }
 
 /// provider 훅을 config(`sidebar.agent-hooks`)에 맞춰 claude `settings.json`에 설치한다. 앱 시작 시 한 번,
@@ -761,6 +825,12 @@ fn reconcileProviderHooks(
         const base_z = std.fmt.allocPrintSentinel(a, "{s}", .{cache_base}, 0) catch return;
         _ = std.c.mkdir(base_z.ptr, 0o700);
         _ = std.c.mkdir(log_dir.ptr, 0o700); // 이미 있으면 EEXIST — 그대로 진행한다
+        // **인스턴스 칸도 우리가 만든다.** 훅은 `mkdir` 을 부르지 않으므로(계약 §4.1) 이 자리가 없으면
+        // 훅이 조용히 아무것도 안 적는다 — 이벤트 0 인 채로 도는, 진단하기 가장 나쁜 상태다.
+        if (agentHookInstanceDir(a)) |inst_dir| {
+            _ = std.c.mkdir(inst_dir.ptr, 0o700);
+            _ = std.c.chmod(inst_dir.ptr, 0o700);
+        }
         // **이미 있던 디렉터리도 좁힌다.** `mkdir`은 EEXIST면 권한을 손대지 않으므로, 옛 버전이나 넉넉한 umask가
         // 만들어 둔 `0755` 디렉터리가 그대로 남는다. 우리가 만든 자리이니 우리가 맞춘다(파일 쪽은 훅의 `umask`).
         _ = std.c.chmod(log_dir.ptr, 0o700);
@@ -1439,18 +1509,21 @@ pub fn cleanupOwnedAgentHookLogs(self: *AppSession) void {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const dir = agentHookLogDir(a) orelse return;
-    for (self.tabs.items) |tab| {
-        for (tab.panes.items) |pane| {
-            for (pane.terms.items) |term| {
-                const base = std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ dir, term.surfaceId() }) catch continue;
-                std.Io.Dir.cwd().deleteFile(self.io, base) catch {};
-                // 회전 도중 죽은 흔적도 함께 거둔다.
-                const rotated = std.fmt.allocPrint(a, "{s}{s}", .{ base, event.rotated_suffix }) catch continue;
-                std.Io.Dir.cwd().deleteFile(self.io, rotated) catch {};
-            }
-        }
+    const dir = agentHookInstanceDir(a) orelse return;
+    // **인스턴스 칸을 통째로 거둔다.** 예전에는 살아 있는 Term 의 `surface_id` 이름만 지웠는데, 그러면
+    // 이미 닫힌 Term 의 파일과 회전 흔적이 남았다. 이 칸은 **이 프로세스만** 쓰므로(이름이 pid) 통째로
+    // 지우는 것이 안전하고, 계약 §4.2 의 «소비 즉시 비우는 큐» 와도 맞는다.
+    _ = event; // 회전 접미도 아래 통짜 삭제에 함께 걸린다.
+    var handle = std.Io.Dir.openDirAbsolute(self.io, dir, .{ .iterate = true }) catch return;
+    defer handle.close(self.io);
+    var doomed: std.ArrayListUnmanaged([]const u8) = .empty;
+    var it = handle.iterate();
+    while (it.next(self.io) catch return) |entry| {
+        if (entry.kind != .file) continue;
+        doomed.append(a, a.dupe(u8, entry.name) catch return) catch return;
     }
+    for (doomed.items) |name| handle.deleteFile(self.io, name) catch {};
+    std.Io.Dir.deleteDirAbsolute(self.io, dir) catch {};
 }
 
 /// 이벤트 로그를 회전한다(계약 §4.2). **순서가 계약이다** — 네 단계 중 셋째를 빼면 회전할 때마다 마지막
@@ -1558,7 +1631,9 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
 
 /// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<surface_id>.ndjson`). 훅 커맨드가 적는 그 이름이다.
 fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
-    const dir = agentHookLogDir(a) orelse return null;
+    // **인스턴스 칸을 지난다** — 훅이 쓰는 이름과 같아야 한다(계약 §4). 이 둘이 갈리면 그 Term 은 자기
+    // 이벤트를 못 읽고, 같은 숫자를 가진 **다른 인스턴스**의 이벤트를 읽는다.
+    const dir = agentHookInstanceDir(a) orelse return null;
     return std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ dir, term.surfaceId() }) catch null;
 }
 

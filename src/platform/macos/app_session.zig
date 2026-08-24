@@ -19607,7 +19607,8 @@ test "hook mode runs exactly one source and takes over notifications" {
     term.agent_kind = .claude;
 
     // 훅 로그를 놓고 한 번 소비해 훅 모드로 만든다(파일이 생겨야 훅 모드다 — 계약 §1.2).
-    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}", .{hook_command.log_dir_rel});
+    // 로그 경로에는 **인스턴스 칸**이 있다(계약 §4) — maru 를 두 개 띄워도 이름이 안 겹치게 하는 자리다.
+    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
     defer a.free(events_dir);
     try tmp.dir.createDirPath(io, events_dir);
     const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
@@ -19903,7 +19904,8 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    영영 빈 배지를 본다(관측도 안 도니까).
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
-    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}", .{hook_command.log_dir_rel});
+    // 로그 경로에는 **인스턴스 칸**이 있다(계약 §4) — maru 를 두 개 띄워도 이름이 안 겹치게 하는 자리다.
+    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
     defer a.free(events_dir);
     try tmp.dir.createDirPath(io, events_dir);
     const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
@@ -20415,6 +20417,51 @@ test "hook mode fills state and conversation from the event log, and only then" 
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state); // 아직 턴 끝이 아니다
         try std.testing.expect(notification_ops.pendingNotification(&session) == null);
+    }
+
+    // ⑮f **다른 maru 인스턴스의 로그를 읽지 않는다**(계약 §4). 로그 디렉터리는 사용자 캐시 하나뿐인데
+    //    `surface.id` 는 **프로세스마다 1 부터** 발급되므로, 인스턴스 칸이 없던 시절에는 두 maru 의 첫 pane 이
+    //    같은 파일 이름을 갖고 **서로의 이벤트를 읽었다**(그리고 시작 시 정리가 남의 살아 있는 로그를 지웠다).
+    //    같은 `surface_id` 로 남의 칸에 이벤트를 놓고, 우리 Term 이 그것을 안 무는지 본다.
+    {
+        term.agent_hook_progress = .{};
+        term.agent_state = .unknown;
+        term.agent_hook_cursor = .{};
+        term.agent_hook_cursor_inode = 0;
+        term.agent_hook_notice.clear();
+        term.agent_transcript.reset();
+
+        // 우리 칸은 비운다(우리 것은 없다).
+        try tmp.dir.deleteFile(io, log_rel);
+        const foreign =
+            "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"남의 인스턴스 프롬프트\"}\n" ++
+            "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"남의 인스턴스 응답\"}\n";
+
+        // ⓐ **인스턴스 칸이 없던 시절의 자리**(`<base>/<surface_id>.ndjson`). 그 시절엔 두 인스턴스가 이
+        //    한 파일을 공유했다 — 이 자리를 다시 읽기 시작하면 그때의 오독이 그대로 돌아온다. 판정자가
+        //    실제로 무는 자리라, 인스턴스 칸을 되돌리는 뮤테이션이 여기서 빨개진다.
+        const base_dir = try std.fmt.allocPrint(a, "cache/maru/{s}", .{hook_command.log_dir_rel});
+        defer a.free(base_dir);
+        const shared_log = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ base_dir, term.surfaceId() });
+        defer a.free(shared_log);
+        try tmp.dir.writeFile(io, .{ .sub_path = shared_log, .data = foreign });
+
+        // ⓑ 남의 인스턴스 칸(pid 가 다르다) — 검색 범위가 넓어지는 변경도 여기서 걸린다.
+        const other_dir = try std.fmt.allocPrint(a, "{s}/{d}", .{ base_dir, agent_ops.hookInstanceId() + 1 });
+        defer a.free(other_dir);
+        try tmp.dir.createDirPath(io, other_dir);
+        const other_log = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ other_dir, term.surfaceId() });
+        defer a.free(other_log);
+        try tmp.dir.writeFile(io, .{ .sub_path = other_log, .data = foreign });
+
+        term.agent_hook_log_present = false;
+        agent_ops.pollAgentConsumer(&session, term, false, true);
+        // 우리 칸에 파일이 없으므로 훅 모드로 들어가지 않는다(관측 모드로 남는다).
+        try std.testing.expect(!term.agent_hook_log_present);
+        try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+        // 그리고 남의 대화가 이 Term 에 붙지 않는다.
+        try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.owned.reply().len);
+        try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.prompt(), "남의 인스턴스") == null);
     }
 
     // ⑯ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.

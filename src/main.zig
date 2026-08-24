@@ -2088,8 +2088,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 자기 산수로 다시 나누면 두 플랫폼의 도크 폭·디바이더 두께가 조용히 갈린다.
     // 도크 상태. **⒞ 슬라이스가 이 둘을 움직인다**(디바이더 드래그·숨기기) — 지금은 고정이다.
     const dock_visible = true;
-    const dock_size_pt: u32 = 0; // 0 = 뷰가 정한 기본 폭
-    var geom = dockGeometryFor(initial.width_px, initial.height_px, cell_w, cell_h, dock_visible, dock_size_pt);
+    // **⒞ 가 이것을 움직인다** — 디바이더를 끌면 폭이 바뀐다. 0 은 "뷰가 정한 기본 폭" 센티널이다.
+    var dock_size_pt: u32 = 0;
+    // **지금 클라이언트 크기.** 디바이더 드래그가 기하를 다시 계산할 때 이 값이 필요하다 —
+    // `initial` 은 시작 값이라 창을 키운 뒤 쓰면 도크가 옛 창 기준으로 선다.
+    var client_w = initial.width_px;
+    var client_h = initial.height_px;
+    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -2234,6 +2239,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_rows_drawn: u16 = 0;
     var dock_click_judgeable = false;
     var dock_click_target_row: usize = 0;
+    var divider_drag: ?f64 = null;
+    var divider_grabs: usize = 0;
+    var divider_moves: usize = 0;
+    var divider_judgeable = false;
+    var dock_w_before_drag: u32 = 0;
+    var grid_cols_before_drag: u16 = 0;
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -2395,6 +2406,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, dx, dy);
             }
         }
+        // ── 디바이더 드래그 판정 (W8.7c) ────────────────────────────────────────────────────
+        //
+        // 잡기 띠 한가운데를 누르고 **왼쪽으로 40px** 끈 뒤 뗀다. 도크가 그만큼 넓어져야 하고,
+        // 터미널 격자는 그만큼 좁아져야 한다.
+        if (spins == 90 and geom.divider.w != 0) {
+            divider_judgeable = true;
+            dock_w_before_drag = geom.dock.w;
+            grid_cols_before_drag = if (app_window.active()) |a| a.core.size.cols else 0;
+            const gx: i32 = @intCast(geom.divider.x + geom.divider.w / 2);
+            window.postSyntheticMouse(.left_down, gx, 200);
+            window.postSyntheticMouse(.moved, gx - 40, 200);
+            window.postSyntheticMouse(.left_up, gx - 40, 200);
+        }
         if (spins == 120) {
             selections_before_term_click = selections;
             dock_clicks_before_term_click = dock_row_clicks;
@@ -2407,7 +2431,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             .resized => |r| {
                 try present.resize(r.width_px, r.height_px);
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
-                geom = dockGeometryFor(r.width_px, r.height_px, cell_w, cell_h, dock_visible, dock_size_pt);
+                client_w = r.width_px;
+                client_h = r.height_px;
+                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     loop.resizeActiveSurface(size) catch {};
@@ -2513,10 +2539,45 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // **드래그 중에는 안 가른다.** 터미널에서 시작한 선택이 도크 위를 지나갈 때
                 // 영역이 바뀌면 그 순간 선택이 끊긴다 — 제스처는 시작한 곳이 끝까지 소유한다.
+                // ── 디바이더 드래그 (W8.7c) ─────────────────────────────────────────────
+                //
+                // **영역 판정보다 먼저다.** 끌다 보면 포인터가 잡기 띠를 벗어나는데, 그때 영역으로
+                // 다시 가르면 막대를 놓치고 터미널에 선택이 생긴다 — 제스처는 시작한 곳이 소유한다.
+                if (divider_drag) |off| {
+                    if (m.kind == .left_up or m.kind == .capture_lost) {
+                        divider_drag = null;
+                    } else if (m.kind == .moved) {
+                        const cand = maru.session.dock_layout.sizePtForPointer(
+                            geom,
+                            .right,
+                            @as(f64, @floatFromInt(m.x_px)) + off,
+                            @floatFromInt(m.y_px),
+                            1000,
+                        );
+                        if (cand) |pt| if (pt != dock_size_pt) {
+                            dock_size_pt = pt;
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
+                            // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
+                            if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
+                                loop.resizeActiveSurface(size) catch {};
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {
+                                dock_rebuild_failures += 1;
+                            };
+                            divider_moves += 1;
+                        };
+                    }
+                    continue;
+                }
+
                 const region = if (dragging)
                     maru.session.dock_layout.Region.terminal
                 else
                     maru.session.dock_layout.regionAt(geom, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                if (region == .divider and m.kind == .left_down) {
+                    divider_drag = maru.session.dock_layout.grabOffsetPx(geom, .right, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                    divider_grabs += 1;
+                    continue;
+                }
                 if (region != .terminal and m.kind != .capture_lost) {
                     dock_pointer_events += 1;
                     if (m.kind == .left_up) {
@@ -2986,6 +3047,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     // **서로 안 샌다**: 도크 클릭 뒤에도 셸 선택은 그대로였고(그 시점 값이 `selections_before_term_click`),
     // 터미널 클릭은 도크 카운터를 안 올렸다.
+    if (divider_judgeable) {
+        const cols_now = if (app_window.active()) |a| a.core.size.cols else 0;
+        try stdout.print("divider_grabs={d} divider_moves={d} dock_w={d}->{d} grid_cols={d}->{d}\n", .{
+            divider_grabs,
+            divider_moves,
+            dock_w_before_drag,
+            geom.dock.w,
+            grid_cols_before_drag,
+            cols_now,
+        });
+    } else {
+        try stdout.print("divider=unjudgeable reason=no_divider\n", .{});
+    }
     try stdout.print("selections_at_term_click={d} dock_clicks_at_term_click={d} selections_final={d} dock_clicks_final={d}\n", .{
         selections_before_term_click,
         dock_clicks_before_term_click,

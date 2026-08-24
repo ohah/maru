@@ -429,6 +429,20 @@ pub fn sizePtForEffectiveWidth(width_px: u32, min_px: u32, scale_milli: u32) u32
     return @intCast(@min(rounded, std.math.maxInt(u32)));
 }
 
+/// 잡기 띠의 **어느 지점에서 시작했든** `포인터 이동량 == 디바이더 이동량`이 되게 하는 보정.
+///
+/// `sizePtForPointer(g, side, x + grabOffsetPx(g, side, x, y), y, scale)` 가 **누른 순간의 크기를
+/// 그대로** 내도록 맞춘 값이다. 이 보정이 없으면 첫 이동에서 잡기 띠 폭만큼 막대가 튄다.
+///
+/// **부호가 함정이라 여기 둔다.** `sizePtForPointer` 의 짝이고, 아래 왕복 테스트가 그 둘을 함께
+/// 고정한다 — 각자 적으면 한쪽 부호만 틀려도 "끌면 반대로 간다" 가 된다.
+pub fn grabOffsetPx(g: Geometry, side: dock_panel.Side, x_px: f64, y_px: f64) f64 {
+    return switch (side) {
+        .right => @as(f64, @floatFromInt(g.dock.x)) - x_px,
+        .bottom => @as(f64, @floatFromInt(g.dock.y)) - y_px,
+    };
+}
+
 pub fn sizePtForPointer(g: Geometry, side: dock_panel.Side, x_px: f64, y_px: f64, scale_milli: u32) ?u32 {
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const raw: f64 = switch (side) {
@@ -889,4 +903,29 @@ test "regionAt: 창 밖은 none 이다" {
     try region_testing.expectEqual(Region.none, regionAt(g, -1, 100));
     try region_testing.expectEqual(Region.none, regionAt(g, 100, -1));
     try region_testing.expectEqual(Region.none, regionAt(g, 5000, 100));
+}
+
+test "grabOffsetPx: 잡기 띠 어디를 눌러도 누른 순간 크기가 안 바뀐다" {
+    const g = regionFixture();
+    const want_pt = sizePtForEffectiveWidth(g.dock.w, 0, 1000);
+    var x = g.divider.x;
+    while (x < g.divider.x + g.divider.w) : (x += 1) {
+        const px: f64 = @floatFromInt(x);
+        const off = grabOffsetPx(g, .right, px, 100);
+        const got = sizePtForPointer(g, .right, px + off, 100, 1000).?;
+        try region_testing.expectEqual(want_pt, got);
+    }
+}
+
+test "grabOffsetPx: 왼쪽으로 끌면 도크가 넓어진다 — 부호" {
+    const g = regionFixture();
+    const start: f64 = @floatFromInt(g.divider.x + g.divider.w / 2);
+    const off = grabOffsetPx(g, .right, start, 100);
+    const at_start = sizePtForPointer(g, .right, start + off, 100, 1000).?;
+    // 왼쪽(더 작은 x)으로 20px 끌면 도크가 20pt 넓어진다.
+    const moved = sizePtForPointer(g, .right, start - 20 + off, 100, 1000).?;
+    try region_testing.expectEqual(at_start + 20, moved);
+    // 오른쪽으로 끌면 좁아진다.
+    const shrunk = sizePtForPointer(g, .right, start + 20 + off, 100, 1000).?;
+    try region_testing.expectEqual(at_start - 20, shrunk);
 }

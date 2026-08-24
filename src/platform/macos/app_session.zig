@@ -30310,6 +30310,13 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
     // 그래서 제품 funnel(`createTerm`)로 **진짜 자식**을 띄워 자식이 자기 env 를 적게 하고, 그 바이트를
     // 리더의 경로(`agentHookLogPath`)와 대조한다. 자식은 maru 코드를 한 줄도 안 지난다.
     if (!is_macos) return error.SkipZigTest;
+    // **집계 스위트에서는 건너뛴다.** 이 행은 실제 자식을 spawn 하고 `HOME`/`XDG_CACHE_HOME` 을 tmp 로 바꾼
+    // 뒤 그 tmp 를 지운다 — 수천 개가 프로세스 전역 상태를 공유하는 aggregate 에서는 그 흔들림이 **무관한
+    // 테스트**를 깨뜨린다(실측: 턴 스냅샷 둘이 «링이 안 채워진다» 로, 그 다음엔 file_panel 이 누수로 죽었다).
+    // 증거는 `test-provider-session-removal` 이 **별도 프로세스**에서 그대로 돌린다 — 같은 규율의 선례가
+    // 이 파일에 이미 있다(C3-3b6 fresh-process 행).
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 

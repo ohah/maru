@@ -1072,6 +1072,21 @@ fn relativeTime(self: *AppSession, arena: std.mem.Allocator, delta_s: i64) []con
     return arena.dupe(u8, maru.i18n.format(&buf, maru.i18n.t(.ad_time_years), &.{.{ .d = @intCast(@divFloor(months, 12)) }})) catch "";
 }
 
+/// 등폭 face 의 **포인트당 advance**(device px × 1000 / 논리 pt).
+///
+/// chrome 텍스트는 role 이 정한 고정 point size 로 그려지는데 셀 폭은 사용자 `font.size` 에서 온다.
+/// 그 둘이 벌어지면 셀 기반 추정이 열마다 모자라고, 이어 그리는 글자가 앞 글자를 파고든다(실측:
+/// `font.size` 12 상당에서 SCM 파일 행의 이름과 경로 꼬리가 붙었다). 비율을 넘겨 컴포넌트가 환산한다.
+fn advanceMilliPerPoint(self: *const AppSession) u32 {
+    const point_size = self.appearance.font.size;
+    if (!(point_size > 0)) return 0;
+    const natural: f32 = @floatFromInt(if (self.glyph_cell_width_px != 0) self.glyph_cell_width_px else self.cell_width_px);
+    if (!(natural > 0)) return 0;
+    const milli = natural * 1000.0 / point_size;
+    if (!(milli > 0)) return 0;
+    return @intFromFloat(@round(milli));
+}
+
 /// 편집기의 선택을 DTO 값으로 옮긴다. 값 집합이 갈리면 여기서 컴파일로 걸린다.
 fn selectionOf(sel: ?text_field.TextField.Selection) ?component.types.Selection {
     const s = sel orelse return null;
@@ -1093,6 +1108,11 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
         },
         .scale_milli = scmDockScaleMilli(self),
         .cell_width_px = self.cell_width_px,
+        // **face 의 포인트당 advance.** 자연 글리프 폭(자간 보정 전)을 터미널 point size 로 나눈 값이다 —
+        // 등폭 face 라 advance 는 크기에 비례하므로, 컴포넌트가 role 크기로 곱하면 실제 폭이 나온다.
+        // 자간이 든 `cell_width_px` 가 아니라 `glyph_cell_width_px` 를 쓰는 이유: 자간은 **셀 배치 step**
+        // 을 좁히는 값이지 글리프가 실제로 차지하는 폭이 아니다(그 구분은 `applyFontSpacing` 이 소유).
+        .advance_milli_per_point = advanceMilliPerPoint(self),
         .snapshot_generation = self.scm_dock_snapshot_generation,
         .active_tab = self.scm_tab, // 어느 탭이 활성인지는 세션이 든다(P4)
         // 히스토리에서 `+N -N`은 작업트리의 숫자라 커밋 목록과 관계가 없다 — 0으로 두면 틀린 진술이다.

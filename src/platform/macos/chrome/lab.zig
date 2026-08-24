@@ -1125,6 +1125,10 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // scm_dock은 `UiRect`(원점 포함)를 받는다 — Lab 시나리오는 크기만 들고 원점은 0,0이다.
         .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },
         .cell_width_px = scenario.cell_w_px,
+        // 제품과 같은 입력을 준다(`app_session/scm_dock.zig` 의 `advanceMilliPerPoint`) — Lab 의 셀과
+        // 폰트 크기 관계에서 뽑는다. 이 값이 없으면 컴포넌트가 셀 기반 추정으로 물러나고, 그러면 캡처가
+        // **제품이 쓰는 산술을 예고하지 못한다**.
+        .advance_milli_per_point = if (scenario.font_px == 0) 0 else @intCast(@as(u32, scenario.cell_w_px) * 1000 / scenario.font_px),
         .snapshot_generation = 1,
         .items = &items,
         .branch = "feat/lab-fixture",

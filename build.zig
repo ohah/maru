@@ -369,6 +369,7 @@ pub fn build(b: *std.Build) void {
         win32_clipboard_smoke_step.dependOn(&win32_clipboard_smoke_cmd.step);
     }
 
+    var macos_app_bundle_command: ?*std.Build.Step = null;
     if (target.result.os.tag == .macos) {
         const macos_swift_target = swiftMacOSTarget(b, target.result);
 
@@ -1749,6 +1750,7 @@ pub fn build(b: *std.Build) void {
 
         const macos_app_bundle_step = b.step("macos-app-bundle", "Package the macOS app shell as a HiDPI .app bundle");
         macos_app_bundle_step.dependOn(&macos_app_bundle.step);
+        macos_app_bundle_command = &macos_app_bundle.step;
 
         // macos-dmg: 서명·공증·staple까지 끝낸 배포용 .dmg를 한 번에 만든다.
         // 비밀값(앱 전용 암호)은 build.zig·리포에 절대 두지 않는다. 공증 자격증명은 notarytool
@@ -9776,6 +9778,44 @@ pub fn build(b: *std.Build) void {
         run_session_host_3d_product_e2e_tests.expectExitCode(0);
         run_session_host_3d_product_e2e_tests.setCwd(b.path("."));
         session_host_3d_step.dependOn(&run_session_host_3d_product_e2e_tests.step);
+
+        const session_host_p5d_step = b.step(
+            "test-session-host-p5d",
+            "Run the P5d bundle PATH and localhost OpenSSH product gate",
+        );
+        session_host_p5d_step.dependOn(session_host_3d_step);
+        const run_session_host_p5d = b.addSystemCommand(&.{
+            "sh",
+            "tools/session-host/p5d_ssh_smoke.sh",
+            "zig-out/Maru.app/Contents/MacOS/maru",
+        });
+        run_session_host_p5d.addArtifactArg(session_host_3d_product_e2e_tests);
+        run_session_host_p5d.expectExitCode(0);
+        run_session_host_p5d.setCwd(b.path("."));
+        run_session_host_p5d.step.dependOn(
+            macos_app_bundle_command orelse @panic("P5d requires a macOS app bundle"),
+        );
+        run_session_host_p5d.step.dependOn(session_host_3d_step);
+        session_host_p5d_step.dependOn(&run_session_host_p5d.step);
+
+        const session_host_p5d_artifact_step = b.step(
+            "test-session-host-p5d-artifact",
+            "Run P5d against -Dp5d-artifact-cli without rebuilding that artifact",
+        );
+        const p5d_artifact_cli = b.option(
+            []const u8,
+            "p5d-artifact-cli",
+            "Path to a prebuilt signed Maru.app CLI for the P5d release gate",
+        ) orelse "";
+        const run_session_host_p5d_artifact = b.addSystemCommand(&.{
+            "sh",
+            "tools/session-host/p5d_ssh_smoke.sh",
+            p5d_artifact_cli,
+        });
+        run_session_host_p5d_artifact.addArtifactArg(session_host_3d_product_e2e_tests);
+        run_session_host_p5d_artifact.expectExitCode(0);
+        run_session_host_p5d_artifact.setCwd(b.path("."));
+        session_host_p5d_artifact_step.dependOn(&run_session_host_p5d_artifact.step);
 
         // 제품 E2E가 wire 성공만으로 PTY input 전달을 오인하지 않도록, 같은 gate에서
         // RuntimeOps -> 실제 reader write queue -> 실제 PTY child echo 경계도 직접 고정한다.

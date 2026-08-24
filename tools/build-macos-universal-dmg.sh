@@ -86,6 +86,11 @@ codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app/Contents/
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$app"
 codesign --verify --strict --deep "$app"
 
+echo "==> P5d signed artifact PATH + localhost SSH gate"
+MARU_P5D_REQUIRE_DEVELOPER_ID=1 \
+"$ZIG" build test-session-host-p5d-artifact \
+	-Dp5d-artifact-cli="$app/Contents/MacOS/maru" -Doptimize=ReleaseFast -j1
+
 echo "==> notarize .app + staple (티켓을 .app에 부착 — dmg에서 꺼내 복사해도 Gatekeeper 통과)"
 ditto -c -k --keepParent "$app" "$work/app.zip"
 xcrun notarytool submit "$work/app.zip" --keychain-profile "$PROFILE" --wait

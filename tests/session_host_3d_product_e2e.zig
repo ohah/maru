@@ -24,6 +24,16 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     const allocator = std.testing.allocator;
     const product = try allocator.dupeZ(u8, std.mem.span(raw_product));
     defer allocator.free(product);
+    // P5d runs the same product oracle through a harness-owned OpenSSH wrapper. Keeping the
+    // daemon executable separate prevents the SSH gate from replacing the host with a test double.
+    const raw_attach = c.getenv("MARU_SESSION_HOST_ATTACH_EXE") orelse raw_product;
+    const attach_product = try allocator.dupeZ(u8, std.mem.span(raw_attach));
+    defer allocator.free(attach_product);
+    const verify_local_termios = std.mem.eql(
+        u8,
+        std.mem.span(raw_attach),
+        std.mem.span(raw_product),
+    );
 
     var nonce: u64 = 0;
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
@@ -77,38 +87,43 @@ test "p5c3d current product owns controller observer takeover detach and reattac
         host_pid,
         children_before[0..children_before_len],
     );
+    var failure_stage: []const u8 = "runtime-ready";
+    errdefer std.debug.print(
+        "p5c3d product failure: stage={s} host_pid={d} runtime_pid={d} runtime_id={s}\n",
+        .{ failure_stage, host_pid, runtime_pid, runtime_id },
+    );
 
-    // 같은 제품 host/PTY의 표준 GUI stream 경로를 control oracle로 먼저 통과시킨다.
-    // 이 경로가 통과하고 아래 public CLI 경로만 실패하면 server RuntimeOps나 PTY writer가
-    // 아니라 external raw-TTY/socket pump 경계의 결함임을 제품 프로세스 증거로 가를 수 있다.
-    var direct = try connectExact(allocator, base, host_id);
-    defer direct.deinit();
-    const direct_attach_params = try std.fmt.allocPrint(
+    // `runtime.spawn` admits the child before its first PTY burst is necessarily reduced into
+    // TerminalCore. A read-only stream plus canonical `runtime.find` gives the fixture a product
+    // readiness fence without taking controller authority or sleeping for scheduler luck.
+    var readiness = try connectExact(allocator, base, host_id);
+    defer readiness.deinit();
+    const readiness_attach_params = try std.fmt.allocPrint(
         allocator,
-        "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}",
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"observer\"}}",
         .{runtime_id},
     );
-    defer allocator.free(direct_attach_params);
-    const direct_attach = try direct.call("runtime.attach", direct_attach_params);
-    defer allocator.free(direct_attach);
-    const direct_stream = session_host.client.extractU64Field(
-        direct_attach,
+    defer allocator.free(readiness_attach_params);
+    const readiness_attach = try readiness.call("runtime.attach", readiness_attach_params);
+    defer allocator.free(readiness_attach);
+    const readiness_stream = session_host.client.extractU64Field(
+        readiness_attach,
         "\"stream_id\":",
-    ) orelse return error.DirectStreamMissing;
-    const direct_snapshot = try direct.readSnapshot(direct_stream);
-    allocator.free(direct_snapshot);
-    try direct.sendInput(direct_stream, "P5C3D_DIRECT\r");
-    try waitForFileBytes(input_probe, "P5C3D_DIRECT\r");
-    var direct_detach_buf: [64]u8 = undefined;
-    const direct_detach_params = try std.fmt.bufPrint(
-        &direct_detach_buf,
+    ) orelse return error.ReadinessStreamMissing;
+    const readiness_snapshot = try readiness.readSnapshot(readiness_stream);
+    allocator.free(readiness_snapshot);
+    try waitForStreamText(&readiness, readiness_stream, "50354333445f5245414459");
+    var readiness_detach_buf: [64]u8 = undefined;
+    const readiness_detach_params = try std.fmt.bufPrint(
+        &readiness_detach_buf,
         "{{\"stream_id\":{d}}}",
-        .{direct_stream},
+        .{readiness_stream},
     );
-    const direct_detach = try direct.call("runtime.detach", direct_detach_params);
-    allocator.free(direct_detach);
+    const readiness_detach = try readiness.call("runtime.detach", readiness_detach_params);
+    allocator.free(readiness_detach);
 
-    var controller = try PtyAttach.spawn(allocator, product, xdg, &runtime_id, .controller);
+    failure_stage = "controller";
+    var controller = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
     defer controller.deinit();
     errdefer std.debug.print(
         "p5c3d product controller failure: pid={d} status={any} output={any}\n",
@@ -116,13 +131,18 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     );
     try controller.waitFor("P5C3D_READY");
     try controller.write("P5C3D_INPUT\r");
-    var stdin_probe = [_]posix.pollfd{.{
-        .fd = controller.slave,
-        .events = posix.POLL.IN,
-        .revents = 0,
-    }};
-    _ = try posix.poll(&stdin_probe, 100);
-    try std.testing.expect(stdin_probe[0].revents & posix.POLL.IN != 0);
+    if (std.mem.eql(u8, std.mem.span(raw_attach), std.mem.span(raw_product))) {
+        // The direct child may leave the just-written byte readable on its local slave. OpenSSH
+        // intentionally consumes it before forwarding, so P5d uses the stronger PTY-side exact
+        // byte oracle below instead of requiring an implementation-specific intermediate state.
+        var stdin_probe = [_]posix.pollfd{.{
+            .fd = controller.slave,
+            .events = posix.POLL.IN,
+            .revents = 0,
+        }};
+        _ = try posix.poll(&stdin_probe, 100);
+        try std.testing.expect(stdin_probe[0].revents & posix.POLL.IN != 0);
+    }
     try waitForFileBytesWhilePumping(input_probe, "P5C3D_INPUT\r", &controller);
     try controller.waitFor("P5C3D_INPUT");
     try controller.resize(100, 30);
@@ -136,13 +156,14 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     );
     try controller.detach();
     try std.testing.expectEqual(@as(c_int, 0), try controller.waitExit());
-    try controller.expectRestoredAnsiAndTermios();
+    try controller.expectRestoredAnsiAndTermios(verify_local_termios);
     try expectRuntimeAlive(host_pid, runtime_pid);
 
-    var observer = try PtyAttach.spawn(allocator, product, xdg, &runtime_id, .observer);
+    failure_stage = "observer";
+    var observer = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .observer);
     defer observer.deinit();
     try observer.waitFor("P5C3D_INPUT");
-    var sibling = try PtyAttach.spawn(allocator, product, xdg, &runtime_id, .controller);
+    var sibling = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
     defer sibling.deinit();
     try sibling.waitFor("P5C3D_INPUT");
     try sibling.write("P5C3D_SIBLING\r");
@@ -158,33 +179,36 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     try std.testing.expect(std.mem.indexOf(u8, sibling.bytes(), "OBSERVER_INJECTION") == null);
     try observer.detach();
     try std.testing.expectEqual(@as(c_int, 0), try observer.waitExit());
-    try observer.expectRestoredAnsiAndTermios();
+    try observer.expectRestoredAnsiAndTermios(verify_local_termios);
     try sibling.detach();
     try std.testing.expectEqual(@as(c_int, 0), try sibling.waitExit());
-    try sibling.expectRestoredAnsiAndTermios();
+    try sibling.expectRestoredAnsiAndTermios(verify_local_termios);
 
-    var old_controller = try PtyAttach.spawn(allocator, product, xdg, &runtime_id, .controller);
+    failure_stage = "takeover";
+    var old_controller = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
     defer old_controller.deinit();
     try old_controller.waitFor("P5C3D_SIBLING");
-    var takeover = try PtyAttach.spawn(allocator, product, xdg, &runtime_id, .takeover);
+    var takeover = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .takeover);
     defer takeover.deinit();
     try takeover.waitFor("P5C3D_SIBLING");
     try std.testing.expectEqual(@as(c_int, 4), try old_controller.waitExit());
-    try old_controller.expectRestoredAnsiAndTermios();
+    try old_controller.expectRestoredAnsiAndTermios(verify_local_termios);
     try takeover.write("P5C3D_TAKEOVER\r");
     try takeover.waitFor("P5C3D_TAKEOVER");
     try takeover.detach();
     try std.testing.expectEqual(@as(c_int, 0), try takeover.waitExit());
-    try takeover.expectRestoredAnsiAndTermios();
+    try takeover.expectRestoredAnsiAndTermios(verify_local_termios);
 
-    var reattach = try PtyAttach.spawn(allocator, product, xdg, &runtime_id, .controller);
+    failure_stage = "reattach";
+    var reattach = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
     defer reattach.deinit();
     try reattach.waitFor("P5C3D_TAKEOVER");
     try reattach.detach();
     try std.testing.expectEqual(@as(c_int, 0), try reattach.waitExit());
-    try reattach.expectRestoredAnsiAndTermios();
+    try reattach.expectRestoredAnsiAndTermios(verify_local_termios);
     try expectRuntimeAlive(host_pid, runtime_pid);
 
+    failure_stage = "cleanup";
     const terminate_params = try std.fmt.allocPrint(
         allocator,
         "{{\"runtime_id\":\"{s}\"}}",
@@ -301,7 +325,13 @@ const PtyAttach = struct {
         while (monotonicNow() - started < phase_ns) {
             if (containsVisibleText(self.bytes(), needle)) return;
             _ = try self.readReady(20);
-            if (try self.tryWait()) |_| return error.ChildExitedEarly;
+            if (try self.tryWait()) |status| {
+                std.debug.print(
+                    "p5c3d attachment exited before marker: pid={d} status={d} marker={s} output={any}\n",
+                    .{ self.pid, status, needle, self.bytes() },
+                );
+                return error.ChildExitedEarly;
+            }
         }
         return error.MarkerTimeout;
     }
@@ -358,14 +388,19 @@ const PtyAttach = struct {
         return error.ChildExitTimeout;
     }
 
-    fn expectRestoredAnsiAndTermios(self: *PtyAttach) !void {
+    fn expectRestoredAnsiAndTermios(self: *PtyAttach, verify_local_termios: bool) !void {
         var after: c.termios = undefined;
         if (c.tcgetattr(self.slave, &after) != 0) return error.TermiosFailed;
-        try std.testing.expectEqualSlices(
-            u8,
-            std.mem.asBytes(&self.before),
-            std.mem.asBytes(&after),
-        );
+        // Direct `maru attach` owns this PTY and must restore every byte. P5d inserts the system
+        // OpenSSH client, which owns and may normalize its local PTY flags; Maru still has to emit
+        // its exact leave sequence and restore the remote PTY before SSH exits.
+        if (verify_local_termios) {
+            try std.testing.expectEqualSlices(
+                u8,
+                std.mem.asBytes(&self.before),
+                std.mem.asBytes(&after),
+            );
+        }
         try expectAnsiOracle(self.bytes());
     }
 };
@@ -469,6 +504,28 @@ fn waitForRuntimeSize(
         _ = usleep(10_000);
     }
     return error.ResizeTimeout;
+}
+
+fn waitForStreamText(
+    client: *session_host.client.Client,
+    stream_id: u64,
+    query_hex: []const u8,
+) !void {
+    const started = monotonicNow();
+    while (monotonicNow() - started < phase_ns) {
+        var params_buf: [160]u8 = undefined;
+        const params = try std.fmt.bufPrint(
+            &params_buf,
+            "{{\"stream_id\":{d},\"q\":\"{s}\",\"scroll\":false}}",
+            .{ stream_id, query_hex },
+        );
+        const response = try client.call("runtime.find", params);
+        const count = session_host.client.extractU64Field(response, "\"count\":") orelse 0;
+        client.allocator.free(response);
+        if (count > 0) return;
+        _ = usleep(10_000);
+    }
+    return error.RuntimeReadyTimeout;
 }
 
 fn waitForRuntimeSizeWhilePumping(

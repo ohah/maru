@@ -1243,6 +1243,17 @@ for (const mode of ["full", "false"] as const) {
   check(`장식(${mode}): 화면이 바뀐다`, r.diff > 0, `${r.diff}px`);
   check(`장식(${mode}): 지정한 색이 실제로 칠해진다`, r.red > 100, `빨강 ${r.red}px`);
   check(`장식(${mode}): dispose 하면 화면에서 걷힌다`, r.gone === 0, `남은 빨강 ${r.gone}px`);
+  // **가만히 두면 그리지 않아야 한다.** 장식을 매 프레임 워커로 보내면 받는 쪽이 다시 그리고
+  // 그 프레임이 또 돌아와 끝나지 않는 루프가 된다 — 실측으로 초당 1638 프레임이었다.
+  const idle = await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    let n = 0;
+    const sub = t.onRender(() => n++);
+    await new Promise((r) => setTimeout(r, 1500));
+    sub.dispose();
+    return n;
+  });
+  check(`장식(${mode}): 유휴 상태에서 계속 그리지 않는다`, idle < 20, `1.5초에 ${idle}프레임`);
   check(`장식(${mode}): 에러 없음`, errs.length === 0, errs[0] ?? "");
   await p.close();
 }

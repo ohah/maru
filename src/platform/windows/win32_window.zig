@@ -271,6 +271,7 @@ extern "user32" fn TranslateMessage(*const MSG) callconv(abi.winapi) i32;
 extern "user32" fn DispatchMessageW(*const MSG) callconv(abi.winapi) LRESULT;
 extern "user32" fn ShowWindow(HWND, i32) callconv(abi.winapi) i32;
 extern "user32" fn GetClientRect(HWND, *RECT) callconv(abi.winapi) i32;
+extern "user32" fn SendMessageW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
 extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(abi.winapi) ?HCURSOR;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(abi.winapi) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(abi.winapi) isize;
@@ -635,6 +636,39 @@ pub const Window = struct {
         // 띠 안 — 오른쪽 끝의 캡션 버튼 자리만 우리가 받는다.
         if (self.caption_buttons_px != 0 and screen_x >= rect.right - @as(i32, @intCast(self.caption_buttons_px))) return HTCLIENT;
         return HTCAPTION;
+    }
+
+    /// **클라이언트가 창 전체를 덮는가** — 프레임리스가 실제로 걸렸는지의 유일한 관측점.
+    ///
+    /// `hitTestFrame` 순수 테스트도, 스모크의 캡션 판정도 이것을 못 본다: `WM_NCCALCSIZE` 처리를
+    /// 통째로 지워도 **전부 초록이었다**(실측 — 네이티브 캡션이 돌아오고 우리 버튼이 그 아래에
+    /// 그려지는데 판정이 하나도 안 움직였다). 그래서 OS 에게 직접 묻는다.
+    pub fn clientCoversWindow(self: *const Window) bool {
+        var wr: RECT = undefined;
+        var cr: RECT = undefined;
+        if (GetWindowRect(self.hwnd, &wr) == 0 or GetClientRect(self.hwnd, &cr) == 0) return false;
+        return (wr.right - wr.left) == (cr.right - cr.left) and (wr.bottom - wr.top) == (cr.bottom - cr.top);
+    }
+
+    /// **진짜 wndproc 에 `WM_NCHITTEST` 를 물어본다** — 배선 판정용이다.
+    ///
+    /// `hitTestFrame` 을 직접 부르면 함수만 재고 **배선은 안 잰다**: 그 호출을 지워도 순수 테스트
+    /// 5 개와 스모크 판정 전부가 초록이었다(실측). 창을 끌 수도 늘릴 수도 없게 되는데 말이다.
+    ///
+    /// **한계**: 같은 스레드에서 부르므로 USER32 가 우리 wndproc 로 보내는 것까지만 증명한다 —
+    /// OS 가 실제 마우스에 대해 이 값을 존중하는지는 사람이 본다(§2m.43).
+    pub fn probeHitTest(self: *Window, screen_x: i32, screen_y: i32) LRESULT {
+        // `postSyntheticMouse` 와 **같은 포장**이다 — 부호 있는 16 비트 둘.
+        const lo: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen_x))));
+        const hi: u32 = @as(u16, @bitCast(@as(i16, @truncate(screen_y))));
+        return SendMessageW(self.hwnd, WM_NCHITTEST, 0, @intCast(lo | (hi << 16)));
+    }
+
+    /// 창의 화면 사각형 — 판정이 띠 좌표를 화면 좌표로 옮길 때 쓴다.
+    pub fn windowRect(self: *const Window) RECT {
+        var r: RECT = undefined;
+        if (GetWindowRect(self.hwnd, &r) == 0) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        return r;
     }
 
     /// **합성 마우스 메시지를 자기 큐에 넣는다** — 판정용이다.

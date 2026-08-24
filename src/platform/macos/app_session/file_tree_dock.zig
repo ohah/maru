@@ -316,6 +316,7 @@ fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content
     self.file_tree_published_scroll_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
     self.file_tree_published_rows = self.file_tree_rows.items.len;
     self.file_tree_published_generation = self.file_tree_projection_generation;
+    self.file_tree_published_content = .{ .x = content.x, .y = content.y, .w = content.w, .h = content.h };
 }
 
 /// 누르고 있던 행과 호버를 **놓는다**. 창이 비활성될 때처럼 "이 트리에 더는 손이 없다"가 확실한 자리용.
@@ -360,8 +361,16 @@ fn ensureFreshHitTree(self: *AppSession) void {
         self.file_tree_published_rows == self.file_tree_rows.items.len and
         // 행 **수**가 같아도 목록이 바뀔 수 있다(watcher 가 이름을 갈고, 폴더 하나를 접고 다른 하나를
         // 편다). 그 판정은 투영 세대가 이미 소유하고 있으니 여기서 그것도 본다.
-        self.file_tree_published_generation == self.file_tree_projection_generation) return;
+        self.file_tree_published_generation == self.file_tree_projection_generation and
+        // **기하도 본다.** 창·사이드바·도크 폭이 바뀌면 목록은 그대로인데 rect 가 통째로 움직인다 —
+        // 위 셋 중 어느 것도 그 변화를 못 본다. 다음 paint 전에 온 포인터가 옛 자리로 행을 고르지
+        // 않도록, 발행이 본 사각형과 지금 사각형을 견준다.
+        geometryEql(self.file_tree_published_content, dock_ops.dockGeometry(self).tree_content)) return;
     publishFileTreeHitTree(self);
+}
+
+fn geometryEql(published: @TypeOf(@as(AppSession, undefined).file_tree_published_content), now: anytype) bool {
+    return published.x == now.x and published.y == now.y and published.w == now.w and published.h == now.h;
 }
 
 /// 포인터 한 건을 발행된 tree 에 흘린다. 반환값은 **손을 뗐을 때의 intent** 다.

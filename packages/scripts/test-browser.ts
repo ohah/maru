@@ -763,6 +763,50 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   );
 }
 
+// **능력 감지와 폴백.** 구형 브라우저를 받아 오는 대신 전역을 지워 같은 분기를 밟는다 —
+// 폴백은 `typeof Worker`·`typeof OffscreenCanvas` 하나로 결정되므로 이 편이 싸고 **결정적**이다
+// (실제 Safari 는 버전이 오르면 그 경로를 더는 밟지 못한다).
+for (const [kill, want] of [
+  [null, null],
+  ["OffscreenCanvas", "no-offscreen-canvas"],
+  ["Worker", "no-worker"],
+] as const) {
+  const p = await browser.newPage();
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  if (kill) await p.addInitScript(`delete globalThis.${kill};`);
+  await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/auto-worker.html`);
+  await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+    timeout: 15_000,
+  });
+  const r = await p.evaluate(() => {
+    const at = (globalThis as { __atOpen?: { backing: string; css: string } }).__atOpen;
+    return {
+      fallback: (globalThis as { __fallback?: string | null }).__fallback ?? null,
+      err: (globalThis as { __err?: string }).__err ?? null,
+      // **픽스처가 `open()` 직후 굳혀 둔 값**이다. 여기서 캔버스를 다시 읽으면 그 사이 워커가
+      // 크기를 잡아 버려 결함이 숨는다(훼손 테스트로 확인했다).
+      backing: at?.backing ?? "없음",
+      css: at?.css ?? "없음",
+    };
+  });
+  const label = kill ? `${kill} 없음` : "정상";
+  check(
+    `폴백: ${label} → ${want ?? "워커 유지"}`,
+    r.fallback === want && !r.err,
+    `${r.fallback} ${r.err ?? ""}`,
+  );
+  // **`open()` 이 resolve 된 시점에 backing 이 CSS 와 맞아야 한다.** 워커 모드에서는 캔버스를
+  // 넘기기 전에 잡지 않으면 기본값 300×150 인 채로 넘어가 몇 프레임 흐릿하다(실측 22ms).
+  check(
+    `폴백: ${label} → open 직후 backing==css`,
+    r.backing !== "없음" && r.backing === r.css, // "없음 vs 없음"도 일치라 값 유무를 먼저 본다
+    `${r.backing} vs ${r.css}`,
+  );
+  check(`폴백: ${label} → 에러 없음`, errs.length === 0, errs[0] ?? "");
+  await p.close();
+}
+
 const shotFull = await renderShot("full");
 const shotMain = await renderShot("false");
 // **정확한 해시가 아니라 지각적 동일성으로 본다.** 웹폰트가 걸리면 메인 canvas 와

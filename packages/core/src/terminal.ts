@@ -249,6 +249,10 @@ export class Terminal {
       onResizeCanvas: (cols, rows) => this.#backend?.resize(cols, rows),
     });
     this.#dom = dom;
+    // **넘기기 전에 backing 을 잡는다.** 안 하면 기본값 300×150 인 채로 넘어가고, 워커가
+    // resize 메시지를 받아 다시 잡을 때까지 CSS 크기로 늘어나 흐릿하다(실측: `open()` resolve
+    // 뒤 4프레임·22ms). 넘긴 뒤에는 메인이 `width`/`height` 를 못 쓰므로 여기가 유일한 기회다.
+    dom.presizeBacking();
     const offscreen = dom.canvas.transferControlToOffscreen();
     const backend = await WorkerBackend.create(
       offscreen,

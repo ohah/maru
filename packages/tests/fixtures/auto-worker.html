@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>maru-term — 능력 감지 픽스처</title>
+<!--
+  **`worker` 를 명시하지 않는다.** worker.html 은 늘 `worker: "full" | false` 를 주므로
+  능력 감지 분기(`canUseWorker`)를 지나가지 않는다 — 폴백 경로가 한 번도 밟히지 않았다.
+  이 픽스처는 그 분기를 밟게 두고, 검사 쪽에서 `OffscreenCanvas`/`Worker` 를 지워 구형
+  브라우저(Safari 16.4 미만 등)를 흉내 낸다. **실제 그 브라우저가 없어도 같은 코드 경로다.**
+-->
+<body style="margin: 0; background: #0d1117">
+  <div id="host" style="width: 600px; height: 320px"></div>
+  <script type="module">
+    import { Terminal } from "/core/dist/index.js";
+    const term = new Terminal({ cols: 60, rows: 20, wasmUrl: "/core/wasm/maru-vt.wasm" });
+    globalThis.__fallback = null;
+    term.onFallback((r) => {
+      globalThis.__fallback = r;
+    });
+    try {
+      await term.open(document.getElementById("host"));
+      // **`open()` 이 resolve 된 그 순간의 값을 여기서 굳힌다.** 바깥에서 나중에 읽으면 그 사이
+      // 워커가 크기를 잡아 버려 결함이 숨는다(훼손으로 확인했다 — 왕복 한 번이면 늦다).
+      const cv = document.querySelector("canvas");
+      const rect = cv.getBoundingClientRect();
+      globalThis.__atOpen = {
+        backing: `${cv.width}x${cv.height}`,
+        css: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+      };
+      globalThis.__term = term;
+      globalThis.__ready = true;
+    } catch (e) {
+      globalThis.__err = String(e);
+      globalThis.__ready = true;
+    }
+  </script>
+</body>

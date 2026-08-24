@@ -1231,6 +1231,7 @@ pub fn build(b: *std.Build) void {
             "host 가 만드는 칸과 GUI 가 읽는 칸이 같은 경로다 — 두 모듈이 같은 이름을 짓는다",
             "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 GUI 가 띄웠다",
             "부재 중 쌓인 로그는 상태만 세우고 알리지 않는다 — 재접속이 옛 알림을 쏟지 않게",
+            "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨드에서 온다",
             "agent hooks stay out of provider files while the gate is off",
             "statusline hook is removed on startup — the wrapped original comes back and our files go",
             "statusline removal leaves someone else's statusLine alone",
@@ -1242,12 +1243,12 @@ pub fn build(b: *std.Build) void {
     run_provider_no_mutation_tests.setCwd(b.path("."));
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
     // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
-    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 20 = 위 필터 15개 + 이름 없는 test 블록 5개.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=20");
+    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 21 = 위 필터 16개 + 이름 없는 test 블록 5개.
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=21");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이
     // 된다. 통과 수를 함께 못박아 「돌았는가」를 센다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-passed=20");
+    run_provider_no_mutation_tests.addArg("--maru-expect-passed=21");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

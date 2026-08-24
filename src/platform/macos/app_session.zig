@@ -30707,6 +30707,150 @@ fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
     return term;
 }
 
+// AH7 통합 스모크 — keep-alive Term 의 **배지·대화 줄이 진짜 훅에서 오는지**를 끝까지 돈다. 조각은 각각
+// 봤지만(자식 env·칸 생성·이름 규칙·리더 분기) 그 다섯이 이어지는 것은 아무도 안 봤고, 하나만 어긋나도
+// 증상은 «빈 배지» 하나다. 여기서는 실 fork host 가 띄운 자식이 **maru 가 provider 설정에 심는 그 커맨드**
+// 를 돌리고, 그 파일을 GUI 리더가 찾아 소비한다.
+test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨드에서 온다" {
+    // **집계 스위트에서는 건너뛴다.** 실 host 를 fork 하고 `XDG_CACHE_HOME` 을 갈아 끼우는 행이라, 수천 개가
+    // 프로세스 전역을 공유하는 aggregate 에서는 그 흔들림이 무관한 테스트로 옮겨 간다(그 사고를 이미 겪었다).
+    // 증거는 `test-provider-session-removal` 이 **별도 프로세스**에서 그대로 돌리고, 통과 수 가드가 그 행이
+    // 조용히 빠지는 것을 막는다.
+    if (std.c.getenv("MARU_APP_HOST_FRESH_PROCESS_TESTS_AGGREGATE_SKIP") != null)
+        return error.SkipZigTest;
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const hook_command = maru.session.agent_hook_command;
+
+        // **캐시 base 를 격리한다.** host 는 이 프로세스에서 fork 되므로 env 를 그대로 물려받는다 —
+        // 그래서 host 와 GUI 가 같은 base 를 본다(제품에서도 GUI 가 host 를 띄우며 물려주는 그 관계다).
+        var cache_tmp = std.testing.tmpDir(.{});
+        defer cache_tmp.cleanup();
+        var cache_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cache_root = cache_buf[0..try cache_tmp.dir.realPath(io, &cache_buf)];
+        const cache_z = try std.fmt.allocPrintSentinel(allocator, "{s}", .{cache_root}, 0);
+        defer allocator.free(cache_z);
+        const prev_cache = std.c.getenv("XDG_CACHE_HOME");
+        _ = setenv("XDG_CACHE_HOME", cache_z.ptr, 1);
+        defer {
+            if (prev_cache) |v| {
+                _ = setenv("XDG_CACHE_HOME", v, 1);
+            } else {
+                _ = unsetenv("XDG_CACHE_HOME");
+            }
+        }
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-ah7-app-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        defer {
+            _ = std.c.kill(child, std.posix.SIG.TERM);
+            var status: c_int = undefined;
+            _ = std.c.waitpid(child, &status, 0);
+            _ = std.c.unlink(socket.ptr);
+            var lpb: [224]u8 = undefined;
+            if (session_host.discovery.lockPathIn(&lpb, dir)) |q| _ = std.c.unlink(q.ptr) else |_| {}
+            _ = std.c.rmdir(dir.ptr);
+            _ = std.c.rmdir(base.ptr);
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
+                var probe = cl;
+                probe.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+
+        const client = session_host.host_connect.connectOrLaunch(allocator, "/unused-maru-helper", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        app_remote_client = client;
+        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(allocator, io, &app_remote_client.?, session.runtime);
+        defer {
+            host_connect_failed = false;
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_client) |*cl| {
+                cl.deinit();
+                app_remote_client = null;
+            }
+        }
+        app_keep_alive_after_quit = true;
+        defer app_keep_alive_after_quit = false;
+
+        // **자식이 돌릴 훅 커맨드**를 파일로 둔다 — provider 가 설정 항목으로 실행하는 그 문자열 그대로다.
+        // (한 줄 안에 감싸면 끝의 표식 주석이 닫는 괄호를 먹는다 — 실측으로 확인했다.)
+        const log_dir = try std.fmt.allocPrint(allocator, "{s}/maru/{s}", .{ cache_root, hook_command.log_dir_rel });
+        defer allocator.free(log_dir);
+        var cmd: std.ArrayListUnmanaged(u8) = .empty;
+        defer cmd.deinit(allocator);
+        try hook_command.build(&cmd, allocator, "claude", log_dir);
+        const script_path = try std.fmt.allocPrintSentinel(allocator, "{s}/hook.sh", .{cache_root}, 0);
+        defer allocator.free(script_path);
+        {
+            const fd = std.c.open(script_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o700));
+            try std.testing.expect(fd >= 0);
+            _ = std.c.write(fd, cmd.items.ptr, cmd.items.len);
+            _ = std.c.write(fd, "\n", 1);
+            _ = std.c.close(fd);
+        }
+        const payload = "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"훅에서 온 답\"}";
+        const child_script = try std.fmt.allocPrint(
+            allocator,
+            "printf '%s\\n' '{s}' | /bin/sh '{s}'; exec cat",
+            .{ payload, script_path },
+        );
+        defer allocator.free(child_script);
+
+        const term = try term_ops.createTerm(session, .{
+            .command = "/bin/sh",
+            .args = &.{ "-c", child_script },
+        }, .{ .cols = 40, .rows = 10 }, 16, "hook", "/bin/sh");
+        defer term_ops.destroyTerm(session, term);
+        try std.testing.expect(term.surface.remote != null); // host-backed 여야 이 테스트가 뜻이 있다
+        term.agent_kind = .claude;
+
+        // GUI 리더가 그 파일을 찾아 소비한다 — **경로를 테스트가 조립하지 않는다.**
+        var consumed = false;
+        var tick: usize = 0;
+        while (tick < 300 and !consumed) : (tick += 1) {
+            agent_ops.pollAgentHookEvents(session, term, false);
+            consumed = std.mem.eql(u8, term.agent_transcript.owned.reply(), "훅에서 온 답");
+            if (!consumed) _ = usleep(10 * 1000);
+        }
+
+        try std.testing.expect(term.agent_hook_log_present); // 훅 모드로 들어갔다
+        try std.testing.expect(consumed); // 대화 줄이 훅 payload 에서 왔다
+        try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state); // Stop → 완료
+    }
+}
+
 // P3-e3 통합 스모크 — keep-alive AppSession가 새 Term을 **host-backed backend**로 실제 spawn하고, 입력이 host를 거쳐
 // 화면에 반영되며, teardown이 in-process/원격 Term과 원격 backend/연결을 누수·크래시 없이 회수하는지 고정한다. 이 경로
 // (createTerm→backendForNew→원격 spawn, backendFor(term) 라우팅, deinit 원격 회수)는 부품 스모크(remote_term_backend·

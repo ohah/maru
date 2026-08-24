@@ -1790,7 +1790,7 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     var saw_no_dock = false;
     var w: u32 = 40;
     while (w <= 1600) : (w += 37) {
-        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0);
+        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0);
         // 창을 넘지 않는다.
         try std.testing.expect(g.terminal.x + g.terminal.w <= w);
         try std.testing.expect(g.dock.x + g.dock.w <= w);
@@ -1968,6 +1968,110 @@ fn rebuildDockAll(
     appendViewBarCells(allocator, out, geom, cell_w, cell_h, view, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, uploaded, view_bar_frame) catch {};
 }
 
+/// 상단 띠 전체 — 배경 + 캡션 버튼.
+fn rebuildTitlebarCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    client_w: u32,
+    titlebar_px: u32,
+    btn_w: u32,
+    hovered: ?usize,
+    maximized: bool,
+    tk: *const maru.chrome.Tokens,
+) !void {
+    out.clearRetainingCapacity();
+    if (titlebar_px == 0) return;
+    try out.append(allocator, d3d11_cells.solidCell(
+        0,
+        0,
+        @floatFromInt(client_w),
+        @floatFromInt(titlebar_px),
+        cellColor(tk, .surface_bg),
+        .{ 0, 0, 0, 0 },
+    ));
+    try appendCaptionButtons(allocator, out, client_w, titlebar_px, btn_w, hovered, maximized, tk);
+}
+
+/// 캡션 버튼 셋(─ ☐ ✕)의 자리. **Windows 관례대로 오른쪽 끝**, 닫기가 가장 오른쪽이다.
+///
+/// 폭·높이를 셀에서 유도하므로 폰트가 커지면 버튼도 함께 커진다(§2m.37 의 결정 ⑷).
+fn captionButtonRects(client_w: u32, titlebar_px: u32, btn_w: u32) [3]maru.session.split_tree.Rect {
+    const y: u32 = 0;
+    const h = titlebar_px;
+    const right = client_w;
+    return .{
+        .{ .x = right -| btn_w * 3, .y = y, .w = btn_w, .h = h }, // ─ 최소화
+        .{ .x = right -| btn_w * 2, .y = y, .w = btn_w, .h = h }, // ☐ 최대화/복원
+        .{ .x = right -| btn_w, .y = y, .w = btn_w, .h = h }, // ✕ 닫기
+    };
+}
+
+/// 캡션 버튼을 그린다. **아이콘이 아니라 선이다** — 최소화·최대화·닫기는 등록 아이콘 자산이 없고,
+/// Windows 관례의 그 모양(가로선·사각형·엑스)은 셀 몇 개로 정확히 낼 수 있다.
+///
+/// **닫기만 호버에서 빨강**이다(Windows 11 관례). 나머지는 은은한 면만 깔린다.
+fn appendCaptionButtons(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    client_w: u32,
+    titlebar_px: u32,
+    btn_w: u32,
+    hovered: ?usize,
+    maximized: bool,
+    tk: *const maru.chrome.Tokens,
+) !void {
+    if (titlebar_px == 0 or btn_w == 0) return;
+    const rects = captionButtonRects(client_w, titlebar_px, btn_w);
+    const fg = tk.get(.surface_fg);
+    for (rects, 0..) |r, i| {
+        if (hovered) |hv| if (hv == i) {
+            const hover_argb: u32 = if (i == 2) 0xFFC42B1C else blk: {
+                const c = tk.get(.tab_hover_bg);
+                break :blk 0xFF000000 | (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | c.b;
+            };
+            try out.append(allocator, d3d11_cells.solidCell(
+                @floatFromInt(r.x),
+                @floatFromInt(r.y),
+                @floatFromInt(r.w),
+                @floatFromInt(r.h),
+                d3d11_cells.colorFromArgb(hover_argb),
+                .{ 0, 0, 0, 0 },
+            ));
+        };
+        // 글리프 색은 닫기 호버일 때만 흰색으로 뒤집는다(빨강 위 대비).
+        const ink = if (hovered != null and hovered.? == i and i == 2)
+            d3d11_cells.colorFromArgb(0xFFFFFFFF)
+        else
+            d3d11_cells.colorFromArgb(0xFF000000 | (@as(u32, fg.r) << 16) | (@as(u32, fg.g) << 8) | fg.b);
+        const cx = r.x + r.w / 2;
+        const cy = r.y + r.h / 2;
+        const s: u32 = 5; // 표식 반폭 — 관례상 10px 안팎이다
+        switch (i) {
+            0 => try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(cx -| s), @floatFromInt(cy), @floatFromInt(s * 2), 1, ink, .{ 0, 0, 0, 0 })),
+            1 => {
+                // 최대화면 **겹친 사각형 둘**(복원), 아니면 사각형 하나. 테두리는 선 넷으로 낸다.
+                try appendRectOutline(allocator, out, cx -| s, cy -| s, s * 2, s * 2, ink);
+                if (maximized) try appendRectOutline(allocator, out, cx -| s + 3, cy -| s - 3, s * 2, s * 2, ink);
+            },
+            else => {
+                // ✕ — 대각선은 셀로 못 그리니 짧은 가로 조각을 계단으로 쌓는다.
+                var k: u32 = 0;
+                while (k < s * 2) : (k += 1) {
+                    try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(cx -| s + k), @floatFromInt(cy -| s + k), 1, 1, ink, .{ 0, 0, 0, 0 }));
+                    try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(cx -| s + k), @floatFromInt(cy + s - k), 1, 1, ink, .{ 0, 0, 0, 0 }));
+                }
+            },
+        }
+    }
+}
+
+fn appendRectOutline(allocator: std.mem.Allocator, out: *std.ArrayList(d3d11_cells.Cell), x: u32, y: u32, w: u32, h: u32, ink: [4]f32) !void {
+    try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y), @floatFromInt(w), 1, ink, .{ 0, 0, 0, 0 }));
+    try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y + h - 1), @floatFromInt(w), 1, ink, .{ 0, 0, 0, 0 }));
+    try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x), @floatFromInt(y), 1, @floatFromInt(h), ink, .{ 0, 0, 0, 0 }));
+    try out.append(allocator, d3d11_cells.solidCell(@floatFromInt(x + w - 1), @floatFromInt(y), 1, @floatFromInt(h), ink, .{ 0, 0, 0, 0 }));
+}
+
 /// 왼쪽 사이드바를 채우는 셀 — **배경 띠와 세션 카드**(W8.8⒜1).
 ///
 /// **기하는 중립이 소유한다**(`chrome/components/sidebar.zig` 의 `Metrics`·`cardHeight`·`rowTop`).
@@ -2000,10 +2104,13 @@ fn rebuildSidebarCells(
     glyphs.* = 0;
     outside.* = 0;
     if (sidebar_w == 0) return;
-    const h = geom.workspace.h + geom.workspace.y; // 사이드바는 타이틀바 띠 위까지 전체 높이다
+    // **띠 아래에서 시작한다.** 사이드바 헤더가 아직 없으므로(⒞) 띠는 캡션 버튼만 쓰고, 카드가
+    // 그 위로 올라가면 글자가 잘린다(실측: 프레임리스로 바꾸자 이름줄이 띠에 먹혔다).
+    const top_y = geom.workspace.y;
+    const h = geom.workspace.h;
     try out.append(allocator, d3d11_cells.solidCell(
         0,
-        0,
+        @floatFromInt(top_y),
         @floatFromInt(sidebar_w),
         @floatFromInt(h),
         cellColor(tk, .surface_bg),
@@ -2019,7 +2126,7 @@ fn rebuildSidebarCells(
     // "host 가 렌더에 쓰는 줄 수와 같은 값을 실어야 한다").
     const lines: u8 = card.lines;
     const card_h = sb.cardHeight(lines, m);
-    const top = m.content_pad_v;
+    const top = top_y + m.content_pad_v;
     if (top + card_h > h) return;
     try out.append(allocator, d3d11_cells.solidCell(
         0,
@@ -2097,6 +2204,8 @@ fn rebuildSidebarCells(
     // 한 파일에 있어 갈리지 않는다. macOS 도 같은 함수를 쓴다.
     const rows = [_]maru.chrome.components.sidebar.Row{.{ .card = .{ .tab = 0, .label = card.name, .active = true, .lines = @intCast(card.lines) } }};
     maru.sidebar_glyph_rows.fillOriginY(allocator, native, &rows, m);
+    // `fillOriginY` 는 **content 상대**다(목록 위 여백부터). 띠만큼 통째로 내린다 — 밴드와 같은 기준.
+    for (native) |*n| n.origin_y +|= top_y;
     try out.ensureUnusedCapacity(allocator, native.len);
     // **판정은 카드 밴드 기준이다.** 사이드바 사각형으로 재면 속 빈다 — 글자가 카드 밖으로 나가도
     // 띠 안이라 0 이 나온다(실측: 행 인코딩을 안 지운 뮤턴트가 그렇게 통과했다).
@@ -2320,13 +2429,15 @@ fn dockGeometryFor(
     view: maru.session.dock_panel.View,
     /// 왼쪽 사이드바 폭(px). 0 이면 사이드바가 없다 — `compute` 가 작업영역을 그만큼만 민다.
     sidebar_width_px: u32,
+    /// 상단 드래그 띠 높이(px). 프레임리스 창이 캡션을 지운 만큼 작업영역을 아래로 들인다.
+    titlebar_px: u32,
 ) maru.session.dock_layout.Geometry {
     const dock_layout = maru.session.dock_layout;
     return dock_layout.compute(.{
         .backing_width_px = width_px,
         .backing_height_px = height_px,
         .sidebar_width_px = sidebar_width_px,
-        .titlebar_height_px = 0,
+        .titlebar_height_px = titlebar_px,
         .cell_width_px = cell_w,
         .cell_height_px = cell_h,
         .scale_milli = 1000,
@@ -2426,9 +2537,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const sidebar_w: u32 = cfg.sidebar.width_pt;
     // **지금 클라이언트 크기.** 디바이더 드래그가 기하를 다시 계산할 때 이 값이 필요하다 —
     // `initial` 은 시작 값이라 창을 키운 뒤 쓰면 도크가 옛 창 기준으로 선다.
+    // ── 프레임리스 창 (W8.8⒝) ───────────────────────────────────────────────────────────────
+    //
+    // **Windows 관례를 따른다**(§2m.37 의 결정): 캡션 버튼 ─ ☐ ✕ 를 띠 **오른쪽 끝**에 우리가
+    // 그리고, 나머지 빈 곳은 `HTCAPTION` 이라 OS 가 끌어 준다(더블클릭 최대화·Aero Snap 포함).
+    //
+    // 띠 높이는 **셀에서 유도한다** — 하드코딩하면 폰트를 키웠을 때 버튼만 안 따라온다.
+    const titlebar_px: u32 = @max(cell_h * 2, 32);
+    const caption_btn_w: u32 = @max(cell_w * 5, 46);
+    const caption_buttons_px: u32 = caption_btn_w * 3;
+    window.setFrameless(titlebar_px, caption_buttons_px);
+
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
+    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -2614,6 +2736,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const chrome_tokens = chromeTokensFor(cfg);
 
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
+    // 상단 띠(배경 + 캡션 버튼). 호버가 바뀌면 다시 만든다.
+    var titlebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer titlebar_cells.deinit(allocator);
+    var caption_hover: ?usize = null;
+    var caption_clicks: usize = 0;
+
     var sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer sidebar_cells.deinit(allocator);
     var sidebar_frame: ?maru.renderer.RenderFrame = null;
@@ -2627,6 +2755,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .folder = if (dock_root) |r| std.fs.path.basename(r) else "",
         .lines = if (dock_root != null) 2 else 1,
     };
+    try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
     try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
@@ -2853,7 +2982,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
                 client_h = r.height_px;
-                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
+                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     loop.resizeActiveSurface(size) catch {};
@@ -2876,6 +3005,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     dock_rebuild_failures += 1;
                 };
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame) catch {};
+                rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
@@ -2952,6 +3082,34 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
+                // ── 캡션 버튼 (W8.8⒝) ──────────────────────────────────────────────────
+                //
+                // **띠 위는 영역 판정보다 먼저 본다.** `regionAt` 은 띠를 모르므로(작업영역 기준)
+                // 여기서 안 가로채면 캡션 버튼 클릭이 터미널 선택이 된다.
+                if (titlebar_px != 0 and m.y_px >= 0 and m.y_px < @as(i32, @intCast(titlebar_px))) {
+                    const rects = captionButtonRects(client_w, titlebar_px, caption_btn_w);
+                    var hit: ?usize = null;
+                    for (rects, 0..) |r, i| {
+                        if (m.x_px >= @as(i32, @intCast(r.x)) and m.x_px < @as(i32, @intCast(r.x + r.w))) hit = i;
+                    }
+                    if (hit != caption_hover) {
+                        caption_hover = hit;
+                        rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                    }
+                    if (m.kind == .left_up) if (hit) |i| {
+                        caption_clicks += 1;
+                        switch (i) {
+                            0 => window.minimize(),
+                            1 => window.toggleMaximize(),
+                            else => close_requested = true,
+                        }
+                    };
+                    continue;
+                } else if (caption_hover != null) {
+                    caption_hover = null;
+                    rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                }
+
                 // ── 어느 영역의 포인터인가 (W8.7b) ──────────────────────────────────────
                 //
                 // **판정은 중립이 소유한다**(`dock_layout.regionAt`) — 잡기 띠가 이웃과 겹치는
@@ -2977,7 +3135,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         );
                         if (cand) |pt| if (pt != dock_size_pt) {
                             dock_size_pt = pt;
-                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                             // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
                             // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
                             // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
@@ -3024,7 +3182,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     dock_view = next_view;
                                     view_switches += 1;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
-                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
+                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         loop.resizeActiveSurface(size) catch {};
                                     rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
@@ -3459,12 +3617,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
 
         cells.clearRetainingCapacity();
-        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len);
+        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
         cells.appendSliceAssumeCapacity(sidebar_cells.items);
         cells.appendSliceAssumeCapacity(dock_cells.items);
         const term_first = cells.items.len;
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+        // **띠는 맨 위다** — 터미널·도크 위에 얹혀야 캡션 버튼이 안 가려진다.
+        cells.appendSlice(allocator, titlebar_cells.items) catch {};
         last_cells = cells.items.len;
 
         // **터미널 셀이 도크 사각형에 들어가면 안 된다**(§2m.31 의 진짜 위험). 격자를 창 폭에서
@@ -3517,6 +3677,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **사이드바 판정**(W8.8⒜1). `term_cells_before_rect` 가 사이드바 침범을 잡는다 — 터미널
     // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
     // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
+    try stdout.print("titlebar_px={d} caption_btn_w={d} caption_clicks={d} titlebar_cells={d}\n", .{ titlebar_px, caption_btn_w, caption_clicks, titlebar_cells.items.len });
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, geom.terminal.x });
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
     if (dock_click_judgeable) {

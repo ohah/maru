@@ -3802,6 +3802,45 @@ FAIL: 로그 파일 권한이 rw------- 여야 하는데 rw-r--r-- 다(umask 가
 - **유닛 스위트는 초록이다**(3445 / 25 / 6, `failed` 합 0). 앞으로 이 저장소에서 Windows 게이트를
   적을 때는 **exit code 가 아니라 요약 줄**을 근거로 적는다.
 
+### 2m.45 Windows 로컬 초록이 중간 커밋 둘을 깨 놓고 있었다 (2026-08-25)
+
+§2m.44 를 올린 뒤 CI 의 **`중간 커밋도 경계 게이트를 통과하는가`** 가 빨강이었다. 팁은 초록인데
+중간 커밋 둘(`b4e9de56`·`c6f59b26`)이 **파싱 자체가 안 됐다**.
+
+```text
+FAIL b4e9de56 — src/platform/macos/coretext_frame_builder.zig 가 파싱되지 않는다
+     error: use of undeclared identifier 'buildSidebarDrawList'
+```
+
+**§2m.39 가 `buildSidebarDrawList` 를 공유 모듈로 옮기면서 그 파일의 별칭 줄을 안 넣었다.** 같은
+파일의 단위 테스트 26 곳이 여전히 옛 이름을 부르고 있었고, 별칭은 두 커밋 뒤(`a4ca0ea1`)에야 붙었다.
+
+## 왜 Windows 에서 안 보였나 — 이미 보고한 그 공백이다
+
+`coretext_frame_builder.zig` 는 **macOS 전용 파일이라 Windows `zig build` 가 컴파일하지 않는다.**
+§2m.39 가 "`check-targets` 가 macOS 전용 아티팩트를 안 짓는다" 고 보고해 둔 공백이 **이번엔 팁이
+아니라 히스토리를 깼다.** 같은 뿌리에서 두 번째다.
+
+## 로컬에서 미리 돌릴 수 있다 — 빌드를 안 한다
+
+이것이 이번에 배운 실용적인 것이다. 그 CI 스텝은 `git` 과 `zig ast-check` 만 쓴다:
+
+```sh
+sh tools/ci/per-commit-boundaries.sh "$(git merge-base main HEAD)" "$(git rev-parse HEAD)"
+```
+
+**Windows 에서도 macOS 전용 파일의 파싱 실패를 잡는다** — 컴파일이 아니라 파싱이라 타깃을 안 탄다.
+Windows 에서 macOS 파일을 옮기는 슬라이스는 **푸시 전에 이것을 돌린다.**
+
+## 히스토리를 고쳤다 — 팁은 한 바이트도 안 바뀌었다
+
+별칭은 **옮긴 커밋이 가졌어야 할 줄**이므로 거기로 넣고 나머지를 그 위에 다시 얹었다.
+
+```text
+git diff backup/w8-pre-fixup HEAD   # 출력 없음 — 팁 내용 동일
+sh tools/ci/per-commit-boundaries.sh …   # FAIL 없음(커밋 8 개)
+```
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

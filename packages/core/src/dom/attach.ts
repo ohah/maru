@@ -27,6 +27,11 @@ export interface DomTarget {
   selectClear(): void;
   selectionText(): Promise<string | null>;
   linkAt(row: number, col: number): Promise<string | null>;
+  /** OSC 8 → 등록된 provider 순으로 링크를 찾는다. `uri` 만 있으면 OSC 8 이다. */
+  resolveLink(
+    row: number,
+    col: number,
+  ): Promise<import("../link").TerminalLink | { uri: string } | null>;
   onRender(cb: (m: import("../types").FrameMeta) => void): { dispose(): void };
   readonly frame: FrameData | null;
   readonly size: { cols: number; rows: number };
@@ -165,6 +170,7 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   let clickTimer = 0;
   let lastCell: [number, number] = [-9, -9];
   let hoverLink = 0;
+  let hovered: import("../link").TerminalLink | { uri: string } | null = null;
   /** 앱이 마우스를 잡고 있는가(DECSET 1000/1002/1003). Shift 를 누르면 선택이 우선한다. */
   const mouseGrabbed = (ev: MouseEvent): boolean => term.modes >> 8 !== 0 && !ev.shiftKey;
   /** DOM 버튼 번호를 xterm 관례로 옮긴다(좌 0 · 중 1 · 우 2). */
@@ -392,12 +398,18 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     // `.catch` 가 필요하다 — `WorkerBackend.dispose()` 는 in-flight 조회를 일부러 reject 하므로,
     // 포인터를 캔버스에 둔 채 언마운트하면 미처리 거부가 되어 Vite/Next 에러 오버레이가 뜬다.
     void term
-      .linkAt(row, col)
-      .then((uri) => {
-        const next = uri ? 1 : 0;
+      .resolveLink(row, col)
+      .then((link) => {
+        // provider 링크는 hover/leave 콜백을 갖는다 — 툴팁 같은 것을 소비자가 붙일 수 있다.
+        if (link !== hovered) {
+          if (hovered && "leave" in hovered) hovered.leave?.();
+          hovered = link;
+          if (link && "hover" in link) link.hover?.(ev);
+        }
+        const next = link ? 1 : 0;
         if (next !== hoverLink) {
           hoverLink = next;
-          canvas.style.cursor = uri ? "pointer" : "default";
+          canvas.style.cursor = link ? "pointer" : "default";
         }
       })
       .catch(() => {
@@ -417,9 +429,13 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     if (!hoverLink) return;
     const [row, col] = cellOf(ev);
     void term
-      .linkAt(row, col)
-      .then((uri) => {
-        if (uri) globalThis.open(uri, "_blank", "noopener");
+      .resolveLink(row, col)
+      .then((link) => {
+        if (!link) return;
+        // provider 링크는 소비자가 무엇을 할지 정한다(에디터 열기 등). OSC 8 은 URI 뿐이라
+        // 라이브러리가 새 탭으로 연다 — 앱이 선언한 링크의 기존 동작이다.
+        if ("activate" in link) link.activate(ev);
+        else globalThis.open(link.uri, "_blank", "noopener");
       })
       .catch(() => {});
   };

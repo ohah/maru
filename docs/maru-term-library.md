@@ -222,8 +222,9 @@ Alacritty 대조 오라클(`external oracles` CI)이 검증한 그 파서다. EA
 |---|---|---|
 | 이미지 | `buildImageViews`·`buildPlacementViews` | 렌더러가 픽셀을 다뤄야 한다 |
 
-링크 **자동 감지**는 libc 를 요구하므로 넣지 않는다(§8, [wasm 이식성](wasm-portability.md) §2). OSC 8
-명시 링크만 지원한다.
+링크 **자동 감지**는 libc 를 요구하므로 코어에서 넣지 않는다(§8, [wasm 이식성](wasm-portability.md) §2).
+OSC 8 명시 링크를 지원하고, 그 밖의 규칙은 `registerLinkProvider` 로 소비자가 넣는다 — URL 감지도
+정규식 한 줄이면 된다(아래).
 
 ### 화면·스크롤 제어
 
@@ -269,6 +270,38 @@ term.onClipboardRead((target) => {
 - **"없음"을 값으로 표현하지 않는다.** `command-end` 의 종료 코드는 유무를 **별도 칸**으로
   받는다. `0xffff_ffff` 를 "없음"으로 쓰면 그건 `@bitCast(@as(i32, -1))` 과 같은 비트라
   **종료 코드 -1 이 "없음"으로 보고된다**(실측). 값 공간과 표식 공간이 겹치면 언젠가 부딪힌다.
+
+### 링크 규칙
+
+```ts
+term.registerLinkProvider({
+  provideLinks(row, text) {                    // row 는 뷰포트 행, text 는 그 줄 전체
+    const m = /https?:\/\/\S+/.exec(text);
+    if (!m) return null;
+    return [{
+      startCol: m.index,
+      endCol: m.index + m[0].length - 1,       // 포함
+      text: m[0],
+      activate: (ev) => open(m[0], "_blank"),
+      hover: (ev) => {},                       // 선택 — 툴팁 등
+      leave: () => {},
+    }];
+  },
+});
+```
+
+**줄 텍스트를 함께 준다.** xterm.js 는 행 번호만 주고 provider 가 `buffer` API 로 꺼내지만,
+여기서는 코어가 워커에 있을 수 있어 그 API 를 동기로 열 수 없다. 라이브러리가 한 번 뽑아
+넘기므로 provider 는 정규식만 돌리면 된다.
+
+- **OSC 8 이 먼저다.** 앱이 직접 선언한 링크를 규칙이 덮으면 안 된다 — OSC 8 이 잡히면
+  provider 를 부르지도 않는다. provider 가 여럿이면 먼저 등록한 쪽이 이긴다.
+- **줄 텍스트는 프레임이 바뀔 때만 다시 뽑는다.** hover 는 포인터가 움직일 때마다 오므로
+  (초당 수십 번) 매번 직렬화하면 비싸다. 같은 셀에 대한 되풀이 조회도 캐시한다.
+- **활성화는 소비자 몫이다.** OSC 8 은 URI 뿐이라 라이브러리가 새 탭으로 열지만, provider
+  링크는 `activate` 가 무엇을 할지 정한다(에디터 열기·이슈 이동 등).
+- **자동 URL 감지를 이걸로 한다.** 코어의 감지는 libc 를 요구해 wasm 에 없다 — 규칙을 넣으면
+  같은 결과가 되고, 무엇을 링크로 볼지는 앱이 정하는 편이 낫다.
 
 ### 마커와 장식
 
@@ -380,9 +413,8 @@ term.attachCustomKeyEventHandler(null);                                    // �
 
 **API 표면도 좁다.** xterm.js 의 `Terminal` 과 대조하면 기능 애드온 말고도 이만큼이 없다:
 
-| 없는 것 | 쓰임 |
-|---|---|
-| `registerLinkProvider` | 커스텀 링크 규칙 |
+**xterm.js 의 `Terminal` 공개 타입과 대조해 뽑았던 격차는 이제 없다.** 남은 것은 아래 "넣지
+않기로 한 것" 뿐이다.
 
 **넣지 않기로 한 것**도 있다 — xterm.js 에 있지만 여기서는 성립하지 않거나 이미 다른 것이 덮는다.
 

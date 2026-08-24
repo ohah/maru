@@ -4,8 +4,10 @@ import { LinkRegistry, type LinkProvider, type TerminalLink } from "./link";
 import {
   type Decoration,
   type DecorationOptions,
+  type DecorationSpan,
   DecorationStore,
   type Marker,
+  sameSpans,
 } from "./decoration";
 import type { GlyphSource } from "./render/types";
 import { loadBundledFont } from "./font";
@@ -106,7 +108,7 @@ export class Terminal {
   #srPending = false;
   #decorationsWired = false;
   /** 직전에 보낸 장식 목록의 지문. 바뀌었을 때만 다시 보낸다 — 아래 `#pushDecorations` 참고. */
-  #lastSpans = "";
+  #lastSpans: DecorationSpan[] = [];
 
   constructor(opts: TerminalOptions = {}) {
     this.#opts = { ...opts };
@@ -424,22 +426,13 @@ export class Terminal {
   #pushDecorations(meta: FrameMeta): void {
     // **장식을 안 쓰면 아무 일도 하지 않는다.** 대부분의 소비자가 여기다 — `spansFor` 는 매
     // 프레임 전체 목록을 훑으므로(O(장식 수)) 0 개일 때 그것마저 건너뛴다.
-    if (this.#decorations.size.decorations === 0 && this.#lastSpans === "") return;
+    if (this.#decorations.size.decorations === 0 && this.#lastSpans.length === 0) return;
     const spans = this.#decorations.spansFor(meta.scroll, meta.size.cols, meta.size.rows);
     // **바뀌었을 때만 보낸다.** 매 프레임 보내면 받는 쪽이 그때마다 다시 그리고, 그 프레임이
     // 다시 여기로 와 **끝나지 않는 루프**가 된다 — 장식이 하나도 없어도 빈 배열이 오갔다.
     // 실측: 아무 입력 없이 초당 1638 프레임, postMessage 4882 건에 2.8 초.
-    const key =
-      spans.length === 0
-        ? ""
-        : spans
-            .map(
-              (s) =>
-                `${s.row},${s.x},${s.width},${s.backgroundColor},${s.foregroundColor},${s.opacity}`,
-            )
-            .join("|");
-    if (key === this.#lastSpans) return;
-    this.#lastSpans = key;
+    if (sameSpans(spans, this.#lastSpans)) return;
+    this.#lastSpans = spans;
     this.#dom?.setDecorations?.(spans);
     (this.#backend as { setDecorations?: (s: unknown[]) => void } | null)?.setDecorations?.(spans);
   }

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { sameSpans } from "../core/src/decoration";
 import { loadWasm, makeTerminal, rowText, settle } from "./support";
 
 test("VT 출력이 셀 격자에 들어간다", async () => {
@@ -840,6 +841,36 @@ test("줄 텍스트는 프레임이 바뀔 때만 다시 뽑는다", async () =>
   await term.resolveLink(1, 1);
   expect(seen.at(-1)).toBe("gamma"); // 새 텍스트를 뽑았다
   term.dispose();
+});
+
+test("sameSpans는 장식의 모든 필드를 본다", () => {
+  // **보내는 쪽과 받는 쪽이 이 하나를 함께 쓴다.** 비교를 복사해 두면 `DecorationSpan` 에
+  // 필드가 늘 때 한쪽을 빠뜨려 조용히 "같다" 고 판단하고, 그러면 장식이 반영되지 않는다 —
+  // 무한 루프보다 찾기 어렵다. 필드가 늘면 이 테스트가 먼저 깨져야 한다.
+  const base = {
+    row: 1,
+    x: 2,
+    width: 3,
+    backgroundColor: 0xff0000,
+    foregroundColor: 0x00ff00,
+    opacity: 0.4,
+  };
+  expect(sameSpans([], [])).toBe(true);
+  expect(sameSpans([base], [{ ...base }])).toBe(true);
+  expect(sameSpans([base], [])).toBe(false);
+  expect(sameSpans([], [base])).toBe(false);
+
+  // 필드 하나씩 바꿔 본다 — `DecorationSpan` 의 모든 키를 덮는다.
+  const keys = Object.keys(base) as (keyof typeof base)[];
+  expect(keys).toHaveLength(6); // 필드가 늘면 여기서 먼저 걸린다
+  for (const k of keys) {
+    const changed = { ...base, [k]: k === "opacity" ? 0.9 : 99 };
+    expect(sameSpans([base], [changed])).toBe(false);
+  }
+
+  // undefined 와 값도 구별한다(색은 선택 항목이다).
+  expect(sameSpans([base], [{ ...base, backgroundColor: undefined }])).toBe(false);
+  expect(sameSpans([base], [{ ...base, foregroundColor: undefined }])).toBe(false);
 });
 
 test("alt screen에서 clear는 무동작이다", async () => {

@@ -3955,6 +3955,65 @@ zig test -fno-emit-bin --test-no-exec -target aarch64-macos …
   지금은 **macOS 파일을 건드린 슬라이스가 푸시 전에 손으로 돌리는 도구**다(§2m.45 의 커밋별 게이트와
   같은 자리).
 
+### 2m.48 헤더 아이콘을 1.7× 로 굽는다 — 헤더가 세 줄이 된 이유 (실측 2026-08-25)
+
+§2m.46 이 "아이콘이 macOS 보다 작다" 고 보고했다. 그것을 갚는다.
+
+## 왜 GPU 확대가 아니라 **크게 굽기**인가
+
+`chrome.ui.icon` 이 이미 그 이유를 적어 뒀다 — 셀 크기로 굽고 확대하면 partial-alpha 가 ~0.69,
+목표 px 로 직접 래스터하면 ~0.33 이다(흐림의 척도). 그래서 **아틀라스 슬롯을 목표 픽셀로 키워 그
+크기로 굽고**, quad 도 같은 배율로 키워 1:1 로 넣는다.
+
+배율은 `chrome.ui.icon.cell_raster_scale_milli`(1700)가 소유하고, **어떤 글리프에 적용하는가**는
+`cell_text.isSidebarHeaderIcon` 이 소유한다 — macOS 는 그 목록을 자기 안에 적어 두고 있었다.
+
+## 이음매는 중립이 이미 준다
+
+```text
+buildGlyphRunList → (여기서 raster_*_px 를 키운다) → buildFrameFromGlyphRunListWithRasterizer
+```
+
+macOS 가 `shapeOnly` 로 쓰는 그 자리다. Windows 도 같은 두 함수를 쓴다.
+
+## 헤더가 세 줄이 됐다 — 판정이 시켰다
+
+한 줄짜리 헤더에 1.7× 를 넣자 **`header_outside=4`** 가 났다(32px 글리프가 19px 밴드를 넘친다).
+macOS 가 헤더를 셀 높이 **×3** 으로 두는 이유가 이것이다:
+
+| 밴드 | 높이 | 무엇 |
+|---|---|---|
+| 아이콘 | `cell_h × 2` | 1.7× 글리프가 세로 중앙에 들어간다 |
+| 검색 | `cell_h × 1` | 🔍 + placeholder |
+
+`headerHit` 이 `icon_top = (search_top − ch) / 2` 로 클릭 사각형을 잡으므로, **아이콘 밴드가 한 줄보다
+커야** 그 계산에 여유가 생긴다. 그리고 아래 밴드는 `.search` 로 판정되므로 **검색 줄을 그려야 한다** —
+안 그리면 "그린 것 = 눌리는 것" 이 깨진다(입력 모델은 아직 없어 placeholder 까지다).
+
+## 종이 찌그러졌다 — 칸 수와 배율을 곱하면 안 된다
+
+종은 EAW **2칸**이라 quad 가 2셀인데 아틀라스 슬롯은 한 셀 ×1.7 로 구웠다. 그대로 곱했더니 가로만
+3.4셀이 되어 **납작한 아치**로 보였다. **한 셀을 키운다 — 그 글리프가 몇 칸을 차지하든.** 중심은 원래
+칸들의 한가운데다(macOS 의 `-0.5 nudge` 와 같은 자리).
+
+## 판정 — "선명한가" 를 숫자로 잰다
+
+개수도 자리도 맞는데 흐린 경우가 있다. 그래서 **구운 높이(아틀라스)와 그린 높이(quad)를 함께** 싣고
+둘 다 셀보다 큰지 본다.
+
+```text
+sidebar_header_h=57 icon_band=38 header_glyphs=11 header_outside=0 header_routed=4/4
+search_hit=true icons_sharp=4/4 header_ok=true
+```
+
+| 뮤턴트 | `icons_sharp` |
+|---|---|
+| 슬롯 확대 제거(셀 크기로 굽는다) | **0/4** |
+| quad 확대 제거(1.7× 그림이 한 칸에 눌린다) | **0/4** |
+
+> **둘을 구별하지는 못한다** — 어느 쪽이 빠져도 `0/4` 다. 판정의 질문이 "선명한가" 하나라 그렇고,
+> 원인은 사람이 코드에서 가른다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

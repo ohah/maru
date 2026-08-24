@@ -41,7 +41,7 @@ fn validateArtifact(artifact: Artifact) !void {
     if (!std.mem.eql(u8, artifact.schema, "maru.session-host-cr6e-recovery-baseline-macos.v1") or
         !std.mem.eql(u8, artifact.build_mode, "ReleaseFast") or
         artifact.iteration_count != iteration_count or artifact.iterations.len != iteration_count or
-        artifact.host_id_hex.len != 32)
+        !isCanonicalHostId(artifact.host_id_hex))
         return error.InvalidIdentity;
     var previous_exit: u64 = 0;
     for (artifact.iterations, 0..) |row, index| {
@@ -63,7 +63,13 @@ fn validateArtifact(artifact: Artifact) !void {
         return error.CleanupIncomplete;
 }
 
-fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
+fn isCanonicalHostId(text: []const u8) bool {
+    if (text.len != 32) return false;
+    for (text) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
+}
+
+pub fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var parsed = std.json.parseFromSlice(Artifact, allocator, bytes, .{
         .duplicate_field_behavior = .@"error",
         .ignore_unknown_fields = false,
@@ -103,6 +109,24 @@ test "CR6e-a2 validator rejects marker duplication projection and cleanup residu
     artifact = validFixture(&rows);
     artifact.daemon_reaped = false;
     try std.testing.expectError(error.CleanupIncomplete, validateArtifact(artifact));
+}
+
+test "CR6e-a2 validator rejects noncanonical host identity and overlapping iterations" {
+    var rows = fixtureRows();
+    var artifact = validFixture(&rows);
+    artifact.host_id_hex = "0000000000000000000000000000000G";
+    try std.testing.expectError(error.InvalidIdentity, validateArtifact(artifact));
+
+    rows = fixtureRows();
+    artifact = validFixture(&rows);
+    rows[2].harness_launch_ns = rows[1].harness_exit_ns;
+    rows[2].swift_launch_ns = rows[2].harness_launch_ns;
+    rows[2].row_ns = rows[2].swift_launch_ns + 1;
+    rows[2].click_ns = rows[2].row_ns + 1;
+    rows[2].remote_visible_ns = rows[2].click_ns + 1;
+    rows[2].summary_ns = rows[2].remote_visible_ns;
+    rows[2].harness_exit_ns = rows[2].summary_ns;
+    try std.testing.expectError(error.TimestampOrder, validateArtifact(artifact));
 }
 
 fn fixtureRows() [iteration_count]Iteration {

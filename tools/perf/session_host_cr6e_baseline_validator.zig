@@ -104,7 +104,7 @@ fn validateTime(scenario: Scenario) !void {
         return error.DeadlineDrift;
 }
 
-fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
+pub fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var parsed = std.json.parseFromSlice(Artifact, allocator, bytes, .{
         .duplicate_field_behavior = .@"error",
         .ignore_unknown_fields = false,

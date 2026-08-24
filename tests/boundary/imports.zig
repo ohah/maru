@@ -7254,17 +7254,19 @@ test "recovery integration contract keeps future ledger generation out of contro
     try std.testing.expect(std.mem.count(u8, pump, ".snapshot_in_flight =>") >= 4);
 }
 
-// 파일 탐색기 **셀 투영은 공유 모듈에 살고, 소비자는 Windows 스모크 하나뿐이다**(FT3).
+// 파일 탐색기 **셀 투영은 공유 모듈에 살고, 쓰는 쪽은 Windows 뿐이다**(FT3).
 //
-// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 그런데 이 투영은 지울 수 없다 — Windows 가
-// 행을 픽셀까지 내리는 유일한 경로다(W8.2 ⒝). 지울 수 없다면 **어디에 사는지**와 **누가 쓰는지**를
-// 세는 것이 남은 방어다.
+// macOS 제품 트리는 typed component 가 그린다(FT1·FT2). 이 투영이 남아 있는 이유는 **Windows 제품이
+// 그것으로 도크 트리를 그리기 때문**이다(W8.7a2). 이 게이트를 처음 쓸 때는 소비자가 스모크 하나였고
+// "언젠가 지운다" 가 목표였는데, 그 사이 Windows 가 제품 화면을 그 위에 올렸다 — 이제 **삭제 대상이
+// 아니라 한 플랫폼의 렌더 경로**다. 그래서 세는 것은 "언제 지울까" 가 아니라 **어디에 사는지**와
+// **macOS 가 되돌아오지 않는가** 다.
 //
 // ⑴ `platform/cell_text.zig`(macOS·Windows 공유 L4)가 정의를 소유한다. `platform/macos` 로 되돌아가면
 //    `src/main.zig` 가 다시 macOS 파일을 import 하게 되고, 그게 이 이동이 없앤 층 냄새다.
 // ⑵ macOS 제품·스모크에는 호출이 0 이다. 되돌아오면 렌더 경로가 둘이 되고 그 둘은 조용히 갈린다
 //    (FT1 이 정확히 그 상태를 정리했다 — "렌더가 그 창을 쓴다" 단언이 죽은 경로를 보고 있었다).
-test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 스모크만 쓴다" {
+test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 만 쓴다" {
     const allocator = std.testing.allocator;
     const shared = try readZigFileZ(allocator, "src/platform/cell_text.zig");
     defer allocator.free(shared);

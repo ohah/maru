@@ -2560,6 +2560,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break :scan;
                 dock_tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch break :scan;
                 dock_tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, &dock_rows) catch break :scan;
+                // **아이콘 종류를 채운다** — 안 채우면 모든 행이 `icon_kind = 0`(none)이라 셰브런만
+                // 그려진다(실측). 분류는 공유 모듈이 소유한다(macOS 도 같은 함수를 쓴다).
+                cell_text.classifyFileTreeRows(dock_rows.items);
                 dock_scan_ok = true;
                 break;
             }

@@ -3632,6 +3632,26 @@ glyphs (glyph_id==0) and key cache by codepoint"*. **셀 격자 경로(`glyph_la
 > `dock_cells_outside=0`), DrawList 도 맞았다. **아이콘을 확대해 보고서야** 셋 중 둘이 같다는 것이
 > 보였다.
 
+### 2m.42 파일 트리에 아이콘이 하나도 없었다 (실측 2026-08-25)
+
+§2m.32 에서 "도크에 파일 트리가 뜬다" 고 적었고 실제로 떴다. **그런데 아이콘이 하나도 없었다** —
+셰브런과 이름만 그려졌다. 화면을 macOS 와 견주기 전에는 "원래 그런 모양" 으로 보였다.
+
+**원인은 또 macOS 에 갇힌 중립 함수였다.** 행에 아이콘 종류를 채우는 `classifyFileTreeRows` 가
+`platform/macos/app_session/file_panel.zig` 안에 있었다 — 중립 타입(`[]file_tree.Row`)만 다루는 순수
+함수인데 Windows 가 못 부른다. 그래서 모든 행이 `icon_kind = 0`(none)이었고, 투영은 아이콘을 낼
+준비가 돼 있었는데 **낼 종류가 없었다.**
+
+공유 모듈(`platform/cell_text.zig`)로 옮겼다 — 분류 규칙은 chrome(`file_tree_icon.classify`)이,
+행 모델은 session 이 소유하는데 그 둘은 서로를 import 할 수 없고, 이 파일은 이미 둘 다 보는
+자리다(트리 투영이 여기 산다). macOS 의 계측 래퍼는 남고 분류만 위임한다.
+
+고친 뒤 아이콘이 **의미별로** 나온다 — `maru` 열린 폴더, `assets` 이미지 폴더, `src` 소스 폴더,
+나머지 일반 폴더. 분류 표는 chrome 이 소유하므로 두 플랫폼이 같은 그림을 낸다.
+
+> **이것도 화면을 봐야 보였다.** §2m.32 의 판정은 전부 초록이었다(`dock_cells_outside=0`,
+> `dock_rows_drawn=21`) — 그 숫자들은 "아이콘이 있는가" 를 아예 안 묻는다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

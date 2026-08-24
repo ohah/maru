@@ -2729,46 +2729,16 @@ pub fn confirmFileTreeDelete(self: *AppSession) void {
 }
 
 pub fn classifyFileTreeRowsCounted(rows: []file_tree.Row, counters: ?*FileTreePerfCounters) void {
-    for (rows) |*row| switch (row.*) {
-        .recent_header => |*v| {
-            if (counters) |value| {
-                value.row_visits += 1;
-                value.classifier_calls += 1;
-            }
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_header, "", !v.collapsed));
-        },
-        .recent_file => |*v| {
-            if (counters) |value| {
-                value.row_visits += 1;
-                value.classifier_calls += 1;
-            }
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_file, v.label, false));
-        },
-        .root => |*v| {
-            if (counters) |value| {
-                value.row_visits += 1;
-                value.classifier_calls += 1;
-            }
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.root, v.label, v.expanded));
-        },
-        .directory => |*v| {
-            if (counters) |value| {
-                value.row_visits += 1;
-                value.classifier_calls += 1;
-            }
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.directory, v.label, v.expanded));
-        },
-        .file => |*v| {
-            if (counters) |value| {
-                value.row_visits += 1;
-                value.classifier_calls += 1;
-            }
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.file, v.label, false));
-        },
-        .empty => {
-            if (counters) |value| value.row_visits += 1;
-        },
-    };
+    // **분류 자체는 공유 모듈이 소유한다**(`cell_text.classifyFileTreeRows`) — Windows 트리도 같은
+    // 것을 쓴다. 여기 남는 것은 계측뿐이다.
+    if (counters) |value| {
+        value.row_visits += rows.len;
+        // `.empty` 행은 분류를 안 탄다 — 그 하나만 빼고 센다(옛 per-row 계측과 같은 수).
+        for (rows) |row| if (row != .empty) {
+            value.classifier_calls += 1;
+        };
+    }
+    maru.cell_text.classifyFileTreeRows(rows);
 }
 
 /// 절대 경로의 부모를 root fd부터 component별 openat(NO_FOLLOW)으로 걷는다. 이후 원본 검사·temp 생성·commit은

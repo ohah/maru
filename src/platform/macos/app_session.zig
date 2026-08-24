@@ -37930,6 +37930,15 @@ test "file tree: 발행이 낡으면 다시 내고, 다시 낼 수 없으면 짚
     // 그릴 수 있는 상태라면 **다시 내서** 맞춘다 — 클릭을 잃지 않는다.
     try std.testing.expectEqual(target, file_tree_dock_ops.fileTreeRowAtPublished(session, x, y));
     try std.testing.expectEqual(session.file_tree_projection_generation, session.file_tree_published_generation);
+    // 질의가 아니라 **클릭 경로**로도 고정한다. 다시 내지 않으면 발행된 액션이 옛 세대를 들고 있어
+    // `table.resolve` 가 전부 거른다 — 즉 재투영과 다음 paint 사이에 온 클릭이 조용히 죽는다.
+    // 그 상태는 사용자에게 "가끔 클릭이 안 먹는" 것으로 보인다.
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, y);
+    const revived = file_tree_dock_ops.fileTreeDockPointer(session, .up, x, y) orelse
+        return error.FileTreeClickDiedAfterProjectionBump;
+    switch (revived) {
+        .activate_row => |index| try std.testing.expectEqual(target, index),
+    }
 
     // 이제 **다시 낼 수 없는** 프레임: 기하가 아직 0 이면 `prepare` 가 null 을 주고 옛 entries 가 남는다.
     // 그 발행은 사라진 행을 가리킬 수 있으므로 좌표 판정이 아무것도 주지 않아야 한다.

@@ -146,6 +146,9 @@ pub const editor = struct {
     /// N2: 편집 가능한 텍스트 버퍼(§3.0 — persistent rope). `document`가 파일 *속성*을 든다면
     /// 이쪽은 *내용*을 들고, 스냅숏이 §2.1의 워커 분리를 가능하게 하는 성질이다.
     pub const buffer = @import("session/editor/buffer.zig");
+    /// N2: 한 번의 편집을 값으로 만든다(§3.3 — 여러 range를 담고 selection을 같은 연산에서 민다).
+    /// 스택·그룹핑은 시계와 입력 사건을 읽어야 해서 여기 없다.
+    pub const delta = @import("session/editor/delta.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

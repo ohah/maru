@@ -297,6 +297,7 @@ const Table = struct {
     // `cfg_font_size`) — 그래야 어느 설정의 설명인지 키만 보고 안다.
     cfg_font_size: [:0]const u8,
     cfg_font_line_height: [:0]const u8,
+    cfg_mob_font_line_height: [:0]const u8,
     cfg_font_letter_spacing: [:0]const u8,
     cfg_font_family: [:0]const u8,
     cfg_font_fallback: [:0]const u8,
@@ -1164,6 +1165,7 @@ const en: Table = .{
     .scm_staged = "Staged changes",
     .cfg_font_size = "Font size (pt)",
     .cfg_font_line_height = "Line height multiplier",
+    .cfg_mob_font_line_height = "Line height (%, 100 = font size)",
     .cfg_font_letter_spacing = "Letter spacing (logical pt, negative allowed)",
     .cfg_font_family = "Font family (inner spaces preserved)",
     .cfg_font_fallback = "Fallback fonts (comma separated)",
@@ -1713,6 +1715,7 @@ const ko: Table = .{
     .scm_staged = "스테이지된 변경",
     .cfg_font_size = "폰트 크기(pt)",
     .cfg_font_line_height = "행간 배수",
+    .cfg_mob_font_line_height = "줄 높이(%, 100=글자 크기)",
     .cfg_font_letter_spacing = "자간(논리 pt, 음수 허용)",
     .cfg_font_family = "폰트 패밀리(내부 공백 보존)",
     .cfg_font_fallback = "폴백 폰트(쉼표 구분)",

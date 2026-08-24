@@ -2716,7 +2716,9 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
     // 원리상 붙을 수 없었다.
     // **줄 높이는 config 가 정한다**(M10d). 예전에는 22 로 박혀 있어 글자 크기를 못 바꿨다 —
     // 모바일에서는 이 값이 곧 `font.size` 다(아틀라스 셀 기하가 고정이라 브리지가 직접 정한다).
-    const line_h: i32 = @intCast(cfg().font.size);
+    // **줄 높이는 글자 크기와 다른 손잡이다.** 백분율 100 이면 예전과 같다(= `font.size`).
+    // 낮추면 글자는 그대로 두고 줄만 늘어난다 — 폰에서 그 한 줄이 비싸다.
+    const line_h: i32 = @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
     const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
     const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
     // **여기에 chrome 라벨 크기가 있었다.** 본문 격자를 그리는 함수가 그것을 든 이유는 조합 중
@@ -3149,8 +3151,24 @@ var atlas_cell_h: u32 = 32;
 /// 글자를 구우면 이웃 슬롯을 침범한다 — 어센더·디센더 여유로 셀 높이의 0.7 을 상한으로 둔다
 /// (지금 값 22/32 가 그 비율이다).
 pub export fn maru_mobile_atlas_text_px() u32 {
-    const cap: u32 = @intFromFloat(@as(f32, @floatFromInt(atlas_cell_h)) * 0.7);
-    return @min(cfg().font.size, @max(1, cap));
+    // **셀에 맞춰 굽는다 — 설정 글자 크기를 따라가지 않는다.**
+    //
+    // 예전에는 `min(font.size, cell_h*0.7)` 이라 **설정값이 굽는 크기이자 축소 계수**였다.
+    // 화면 글자는 `굽는 크기 x (line_h / cell_h)` 이므로 그 둘이 곱해져, `font.size = 19` 면
+    // 화면에는 `19 x 19/32 = 11.3px` 로 나왔다 — **설정값의 60%**다. 게다가 곱이라 크기를
+    // 올리면 글자가 제곱에 가깝게 커졌다(16→19 는 19% 인데 글자는 41% 커진다).
+    //
+    // 굽는 크기를 셀에 못박으면 화면 글자가 `line_h` 에 **정비례**한다. 셀 세로의 41% 였던
+    // 여백도 줄어 같은 줄 높이에서 글자가 커진다 — **줄 수는 그대로다.**
+    //
+    // **7/10 인 이유**: baseline 은 host 가 셀 하단에서 8px 위에 둔다(`CH - 8`). 한글은 ascent
+    // 가 em 에 가까워 그보다 크게 구우면 **위가 깎인다** — 26(13/16)으로 올렸다가 기기에서
+    // 잘리는 것을 봤다. 예전 캡(`cell_h * 0.7`)이 바로 그 한계선이었고, 바뀐 것은 **그 값을
+    // 설정에서 떼어 고정한 것**이다: 예전에는 `min(font.size, 22)` 라 설정이 작으면 굽는 크기도
+    // 같이 작아져 화면 글자가 두 번 줄었다.
+    //
+    // 굽는 쪽과 이 값이 갈리면 글자가 상자를 넘는다 — 바꿀 때는 host 의 baseline 과 같이 본다.
+    return @max(1, atlas_cell_h * 7 / 10);
 }
 
 /// 굽는 크기가 바뀌면 **등록부를 비운다** — 그래야 다음 프레임부터 놓친 글자로 올라와 새 크기로

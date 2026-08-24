@@ -20,6 +20,32 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 이 설정은 fuzz server protocol을 대체하지 않는다. Maru의 기본 test graph에는 fuzz test가 없으며, fuzz를 도입하면 server-mode runner 지원을 별도 gate로 추가해야 한다.
 - Zig를 올리거나 upstream IPC 경로를 재검증할 때는 custom runner를 제거한 상태의 `zig build test`와 CI를 먼저 green으로 만든 뒤에만 이 우회를 삭제한다.
 
+### 파일 하나만 돌린다 (개발 루프 전용)
+
+방금 고친 파일의 test만 보고 싶을 때 `zig build test` 전체를 돌리지 않는다. **`zig test <파일>`로 그 파일의 test 만 따로 컴파일·실행할 수 있다.**
+
+```sh
+zig test src/session/agent_hook_command.zig
+```
+
+실측(2026-08-22)이 이 절을 쓰게 만든 이유다. `src/session/agent_hook_command.zig`는 480줄에 test 16개인데 **전용 gate가 없다** — `check-agent-hook-command`는 실제 셸을 때리는 별개 통합 스크립트이지 이 test들을 돌리는 것이 아니다. 그래서 그 16개를 보는 유일한 방법이 전체 실행이었다.
+
+| 방법 | 실측 |
+|---|---|
+| `zig test src/session/agent_hook_command.zig` | **6.5초**, `All 56 tests passed.` (import한 `agent_hook_event.zig` 포함) |
+| `zig build test` | **20분+ 출력 0바이트**. 완주하지 못했고 `.zig-cache`가 디스크를 채워 중단했다 |
+
+**어디까지 되는가.** 전이적으로 상위 디렉터리(`../`) import이 없어야 한다 — Zig는 root 파일의 디렉터리를 module 경로로 잡으므로 `../`가 하나라도 끼면 `error: import of file outside module path`로 멈춘다. test를 가진 466개 중 직접 `../` import이 없는 후보가 **346개**이고, 그 후보에서 5개마다 하나씩 뽑은 표본 70개를 실제로 컴파일해 보면:
+
+| 구획 | 표본 | 단독 컴파일 가능 |
+|---|---:|---:|
+| `src/platform/` 밖 | 29 | **26 (90%)** |
+| `src/platform/` 아래 | 41 | 17 (41%) |
+
+즉 **`src/platform/` 밖이면 대개 그냥 된다.** `platform/macos/session_host` 계열은 절반 이하이지만, 그쪽은 이미 focused gate가 촘촘하다(`test-session-host-*`). 이 절이 메우는 것은 **gate가 없는 주변부 파일**이다.
+
+⚠️ **gate 증거로 쓰지 않는다.** 이 경로는 위의 `tools/simple_test_runner.zig`가 아니라 Zig 기본 runner로 돌아서 판정 기준(테스트별 누수·error log·exit code)이 같지 않고, 의존 artifact 범위도 다르다. 아래 `--test-filter` 경고와 같은 이유다 — 빠른 확인용이고, PR 증거는 `mise run check`나 해당 focused gate가 만든다.
+
 ## 빌드와 테스트
 
 - 영속 세션 호스트 P5c3c-3a1 TTY output/chord/deadline 집중 gate: `zig build test-session-host-3a1` (P5c3c-2b3을 상속하고 OS-neutral detach chord·stdout progress와 macOS 전용 final-address `DedicatedOutput`을 각각 Debug·ReleaseFast 3개, boundary 1개와 executable test-name sentinel로 검증한다. 전용 output은 `ttyname_r(stdout)` 경로를 `O_WRONLY|O_NOCTTY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW`로 다시 열고 open 전후 stdout 및 새 fd의 character-device/`st_rdev`, inherited stdout status flags 불변을 확인한다. path/flags/세 fstat/open/identity 실패 주입은 publication 0과 새 fd exact close를, 실제 `openpty`는 별도 open-file-description·nonblocking·close-on-exec·stdout flags 불변·전용 fd만 close를 고정한다. 이 gate의 product caller는 exact 0이며 pre-raw owner와 raw commit은 3a2 전에는 구현됐다고 보지 않는다.)

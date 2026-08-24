@@ -117,6 +117,7 @@ static void recreateVulkan(struct android_app *app);
 static void drainConfigWrite(struct android_app *app);
 static void syncInputKind(void);
 static void raiseKeyboardIfAsked(void);
+static void hideKeyboardIfAsked(void);
 static void disconnectIfAsked(void);
 static void startSshIfAsked(void);
 static void dispatchKey(int32_t key_code, int32_t meta, int unicode);
@@ -754,6 +755,7 @@ static void drawFrame(void) {
     if (g_app) drainConfigWrite(g_app);
     syncInputKind(); // 입력 대상이 바뀌면 키보드도 바꾼다
     raiseKeyboardIfAsked();
+    hideKeyboardIfAsked();
     disconnectIfAsked();
     startSshIfAsked(); // 붙어 달라는 요청이 있으면 여기서 시작한다
     drainPassword(); // 사용자가 친 비밀번호를 펌프로 넘긴다
@@ -1269,8 +1271,15 @@ Java_dev_maru_MaruActivity_nativeKeyboardHeight(JNIEnv *env, jclass cls, jint px
     (void)env;
     (void)cls;
     if (g.keyboard_px == (int)px) return;
+    const int was = g.keyboard_px;
     g.keyboard_px = (int)px;
     LOGI("MARU_KEYBOARD height=%d", (int)px);
+    // **사라졌으면 코어에 알린다.** 판단은 코어가 한다(§3) — host 는 "없어졌다" 는 사실만 넘긴다.
+    if (was > 0 && px == 0) {
+        pthread_mutex_lock(&g_bridge_lock);
+        maru_mobile_keyboard_hidden();
+        pthread_mutex_unlock(&g_bridge_lock);
+    }
 }
 
 /// 하단 시스템 바가 차지하는 높이(px). Java `ImeInsets` 가 inset 이 바뀔 때마다 넘긴다.
@@ -1335,6 +1344,21 @@ static void raiseKeyboardIfAsked(void) {
     if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
     (*vm)->DetachCurrentThread(vm);
     LOGI("MARU_INPUT keyboard_raised");
+}
+
+/// 키보드를 내려 달라는 요청을 실행한다(올리는 쪽과 대칭).
+static void hideKeyboardIfAsked(void) {
+    pthread_mutex_lock(&g_bridge_lock);
+    unsigned int want = maru_mobile_take_keyboard_hide();
+    pthread_mutex_unlock(&g_bridge_lock);
+    if (!want || !g_activity_cls || !g_app) return;
+    JNIEnv *env = NULL;
+    JavaVM *vm = g_app->activity->vm;
+    if ((*vm)->AttachCurrentThread(vm, &env, NULL) != 0) return;
+    jmethodID m = (*env)->GetStaticMethodID(env, g_activity_cls, "hideKeyboard", "()V");
+    if (m) (*env)->CallStaticVoidMethod(env, g_activity_cls, m);
+    (*vm)->DetachCurrentThread(vm);
+    LOGI("MARU_INPUT keyboard_hidden");
 }
 
 /// 끊어 달라는 요청을 실행한다. **펌프만 세운다** — 화면은 상태가 바뀌는 것을 보고 저절로

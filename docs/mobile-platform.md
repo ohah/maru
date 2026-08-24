@@ -171,6 +171,8 @@ LOAD 정렬이 전부 `0x1000` 이었고 4KB 기기가 "ELF 정렬 검사 실패
 | 플랫폼 → 코어 | 호스트키 승인(사용자가 답한 뒤) | `maru_mobile_ssh_accept_host_key(h)` |
 | 플랫폼 → 코어 | **난수**(OS 난수를 채워 준다) | `maru_mobile_ssh_open(..., entropy, ...)` |
 | 플랫폼 → 코어 | 원격 출력을 화면에 넣는다 | `maru_mobile_term_write(bytes, len)` |
+| 코어 → 플랫폼 | **키보드를 내려 달라**(올리는 쪽과 대칭) | `maru_mobile_take_keyboard_hide()` |
+| 플랫폼 → 코어 | 키보드가 사라졌다 — 편집 중이었으면 확정한다 | `maru_mobile_keyboard_hidden()` |
 | 플랫폼 → 코어 | 입력 목적지(로컬 코어 / 원격) | `maru_mobile_set_input_sink(sink)` |
 | 코어 → 플랫폼 | 원격으로 보낼 입력 바이트 | `maru_mobile_take_input(out, cap)` |
 | 코어 → 플랫폼 | 원격에 돌려보낼 답(DSR·DA) | `maru_mobile_take_response(out, cap)` |
@@ -658,6 +660,13 @@ Enter 한 번이다).
 - **이스케이프 시퀀스는 타이핑이 아니다** — 눌러 둔 수정자를 안 먹는다. 먹게 두면 `\x1b[2J`
   같은 것이 Ctrl 을 가져가고, ESC 는 문자 키 표에 없어 **그 바이트가 조용히 사라진다**.
 - 눌러 둔 상태는 **화면에 보인다** — 안 보이면 왜 제어문자가 나가는지 알 수 없다.
+
+**숫자 패드는 `sendKeyEvent` 필터를 안 건다.** 위의 중복 방지("소프트 키보드의 글자는
+`commitText` 가 이미 보냈다")는 **조합하는 키보드의 이야기**다. `TYPE_CLASS_NUMBER` 는 숫자를
+`commitText` 로 보내지 않고 키 이벤트로만 보내므로(§3.1 이 이미 적어 둔 사실), 막으면 **대신
+보내 줄 사람이 없어 통째로 사라진다** — 설정의 숫자 줄에 아무것도 못 쳤다(기기 실측). 엔터가
+사라졌던 것과 같은 모양이고, 그때 좁힌 기준("인쇄 가능한가")은 제어문자만 갈랐지 이 자리까지는
+못 갈랐다. 판별은 `maru_mobile_input_kind()` 로 한다 — 그 값이 이미 키보드 종류를 고르고 있다.
 
 **조합할지 말지는 문자 종류로 가른다 — 수정자 유무가 아니다.** 삼성 키보드는 영문도 조합으로
 넘긴다(`setComposingText`). 그러면 글자가 preedit 으로 화면에만 떠 있고 `commitText` 는 확정될

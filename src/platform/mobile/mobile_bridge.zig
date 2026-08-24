@@ -495,6 +495,22 @@ pub export fn maru_mobile_input_kind() u32 {
     return if (set_items[i].field.kind == .number) 1 else 2;
 }
 
+/// **키보드가 사라졌다**고 host 가 알린다. 편집 중이었으면 **확정하고 거둔다.**
+///
+/// 키보드 없이 편집만 남으면 **칠 수 없는 편집 중**이 된다 — 줄은 캐럿을 달고 입력 대상인
+/// 척하는데 글자가 들어갈 길이 없다. 사용자에게는 무엇을 해도 반응이 없는 화면이다.
+///
+/// **뒤로가기로는 못 잡는다.** Android 는 키보드가 떠 있으면 back 을 키보드가 먹어 앱까지
+/// 안 온다(기기 실측: 사용자가 뒤로가기로 닫았는데 `edit` 이 그대로 남았다). 그래서 키보드가
+/// 사라진 **사실 자체**를 신호로 쓴다.
+///
+/// **확정이지 취소가 아니다.** 바깥을 눌러 닫는 자리도 확정이고(§5.6 — iOS 숫자 패드에는
+/// Return 이 없다), 아무것도 안 쳤으면 확정해도 값이 안 바뀐다.
+pub export fn maru_mobile_keyboard_hidden() void {
+    if (set_edit == null) return;
+    commitTextEdit(); // 숫자 줄도 이 자리가 받는다(줄 종류는 안에서 가른다)
+}
+
 /// **키보드를 올려 달라는 요청.** 한 번 가져가면 사라진다(복사와 같은 규율).
 ///
 /// 우리는 시작할 때부터 입력 대상을 잡고 있어(iOS first responder · Android showSoftInput) 그
@@ -505,6 +521,33 @@ pub export fn maru_mobile_take_keyboard_raise() u32 {
     if (!kb_raise_req) return 0;
     kb_raise_req = false;
     return 1;
+}
+
+/// **키보드를 내려 달라는 요청.** 올리는 것과 대칭이고 규율도 같다(한 번 가져가면 사라진다).
+var kb_hide_req: bool = false;
+pub export fn maru_mobile_take_keyboard_hide() u32 {
+    if (!kb_hide_req) return 0;
+    kb_hide_req = false;
+    return 1;
+}
+
+/// 화면이 바뀌었다 — **이 화면에 키보드가 필요한지** 다시 본다.
+///
+/// 앱은 시작부터 입력 대상을 잡고 키보드를 유지한다(터미널이 주 용도라 그렇게 정했다). 그런데
+/// 그 상태로 다른 화면에 가면 **쓸 데가 없는 키보드가 화면 절반을 먹는다** — 목록에서 세션을
+/// 고르려는데 절반이 자판이다(사용자 요청).
+///
+/// **터미널과 비밀번호는 올린다.** 둘 다 들어가자마자 치는 자리다. "그대로 둔다" 로는 부족한데,
+/// 앞 화면에서 내려가 있었으면 **내려간 채로 들어오기** 때문이다(기기 실측: 비밀번호를 물으면서
+/// 자판이 없었다). 이미 떠 있으면 올리라는 요청은 아무 일도 안 한다.
+///
+/// 나머지 화면은 **누르면 올라온다**(설정 줄·서버 칸이 `kb_raise_req` 를 세운다). 미리 띄워 둘
+/// 이유가 없고, 띄워 두면 목록을 고르는데 화면 절반이 자판이다.
+fn syncKeyboardForScreen() void {
+    switch (screenTop()) {
+        .terminal, .password => kb_raise_req = true,
+        else => kb_hide_req = true,
+    }
 }
 
 /// 친 글자를 편집 중인 숫자 칸에 넣는다. **숫자만 받는다** — host 가 숫자 패드를 띄우지만
@@ -3848,11 +3891,13 @@ fn navPush(s: Screen) void {
     if (nav_len >= nav.len) return;
     nav[nav_len] = s;
     nav_len += 1;
+    syncKeyboardForScreen();
 }
 
 /// 한 장 뺀다. **뿌리는 안 뺀다** — 스택이 비면 그릴 화면이 없다.
 fn navPop() void {
     if (nav_len > 1) nav_len -= 1;
+    syncKeyboardForScreen();
 }
 
 /// 행 높이. **한 셀(22)이 아니라 손가락(44)이다** — 목록에서는 "작게 그리고 넓게 받는다"
@@ -3907,6 +3952,10 @@ var set_list: SetRect = .{}; // 목록이 보이는 창(헤더 아래) — 클�
 /// 손으로 갖고 있었는데(`set_fling` + 프레임당 0.92) 같은 규칙이 키바에도 따로 있었다 — 두 번째
 /// 소비처가 생긴 이상 규칙을 한곳에 둔다(계획 U1).
 var set_sa: scroll_area.State = .{};
+/// 편집 줄을 **어느 창 높이에 맞춰 뒀는지**. 같은 조합이면 다시 안 건드린다 — 매 프레임
+/// 끌어당기면 편집 중 스크롤이 죽는다.
+var set_reveal: ?struct { idx: usize, win_h: f32 } = null;
+
 /// 이번 짚음이 **관성을 세운 것**인가. 그렇다면 행을 안 누른다.
 var set_touch: scroll_area.Touch = .{};
 var set_max_scroll: f32 = 0;
@@ -4936,6 +4985,43 @@ fn drawSettings(win: SetRect, tk: *const tokens.Tokens) void {
     set_max_scroll = @max(0, content - set_list.h);
     set_sa.clamp(@intFromFloat(@max(0, set_max_scroll)));
 
+    // **치고 있는 줄은 늘 보이게 끌어당긴다.** 소프트 키보드가 올라오면 host 가 그만큼 가용
+    // 높이를 줄여 목록 창이 짧아지고(그래서 `set_max_scroll` 은 저절로 커진다 — 손으로 밀면
+    // 닿는다), **스크롤 위치는 그대로**라 방금 누른 줄이 키보드 뒤로 들어갔다. 키보드는 떴는데
+    // 어디에 쓰이는지 안 보이는, 이 화면이 이미 한 번 겪은 상태다(기기 실측: 글자 크기 줄을
+    // 눌렀더니 숫자 패드는 떴고 그 줄은 사라졌다).
+    //
+    // **탭한 그 순간에 한 번 계산하면 빗나간다** — 그때는 키보드가 아직 안 올라와 창이 크다.
+    // 매 프레임 재되, 이미 보이면 아무것도 안 한다. 그러면 키보드가 오르내려 창 높이가 바뀔
+    // 때도 저절로 따라온다.
+    if (set_edit) |ei| reveal: {
+        // **한 번 맞춰 놓고는 손을 뗀다.** 매 프레임 끌어당기면 편집 중에 사용자가 목록을
+        // 밀어도 즉시 되돌아가 **스크롤이 죽은 것처럼 보인다**(기기 실측: "한 번 수정을 거치고
+        // 나면 스크롤이 안 된다"). 편집 중에도 다른 줄을 보고 싶을 수 있다.
+        //
+        // 다시 맞추는 때는 **창 높이가 바뀔 때**다 — 키보드가 오르내리면 보이는 범위가 달라져
+        // 방금 맞춘 자리가 다시 어긋난다. 탭한 순간에 한 번만 계산하면 그때는 키보드가 아직
+        // 안 올라와 창이 커서 빗나간다.
+        const same = if (set_reveal) |r| r.idx == ei and r.win_h == set_list.h else false;
+        if (same) break :reveal;
+        set_reveal = .{ .idx = ei, .win_h = set_list.h };
+
+        var top: f32 = 0;
+        for (0..ei) |k| top += setItemH(k);
+        const h = setItemH(ei);
+        const cur: f32 = @floatFromInt(set_sa.offset_y_px);
+        // 줄이 창 아래로 잘리지 않으려면 이만큼은 내려야 하고, 붙임 헤더에 가리지 않으려면
+        // 이보다 더 내리면 안 된다. **창이 줄보다 작으면 위쪽을 살린다** — 값의 시작이 보이는
+        // 편이 끝만 보이는 것보다 낫다(순서상 아래 조건이 덮는다).
+        var want = cur;
+        if (want < top + h - set_list.h) want = top + h - set_list.h;
+        if (want > top - set_header_h) want = top - set_header_h;
+        if (want != cur) _ = set_sa.scrollByPx(
+            @intFromFloat(want - cur),
+            @intFromFloat(@max(0, set_max_scroll)),
+        );
+    } else set_reveal = null;
+
     // 스크롤 위치에 걸린 섹션을 **먼저** 정한다. 붙임 헤더가 있으면 그만큼 목록 창이 좁아지고,
     // 그 좁아진 창이 **그리기와 히트의 공통 기준**이 되어야 한다 — 안 그러면 헤더 밑에 숨은
     // 행이 rect 를 그대로 갖고 있어 **안 보이는데 눌린다**(키바에서 고친 그 결함과 같은 모양).
@@ -5624,6 +5710,17 @@ pub export fn maru_mobile_pop_screen() u32 {
         wipePassword();
         password_prompt = false;
         navPop();
+        return 1;
+    }
+    if (set_edit != null and screenTop() == .settings) {
+        // **설정 줄도 같다** — 뒤로가기가 먼저 편집을 거둔다. 안 거두면 화면을 나가도 그 줄이
+        // 편집 중으로 남아, 다시 들어왔을 때 **목록이 그 줄에 붙들린다**(치는 줄은 보이게
+        // 끌어당기므로 스크롤이 죽은 것처럼 보인다 — 기기 실측).
+        //
+        // **확정이 아니라 취소다.** 뒤로가기는 "그만두겠다" 는 뜻이고, 바깥을 눌러 확정하는
+        // 자리는 따로 있다(§5.6).
+        set_edit = null;
+        set_edit_len = 0;
         return 1;
     }
     if (edit_target == .server_field) {

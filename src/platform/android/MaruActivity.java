@@ -241,7 +241,19 @@ public class MaruActivity extends android.app.NativeActivity {
             // `commitText` 로 온다(위 `finishComposingText` 의 실측: 삼성 키보드에서 스페이스로
             // 확정할 때 `commitText` 로 공백이 왔다). 안 막으면 다른 글자와 똑같이 **두 칸**이 된다.
             final boolean printable = uch >= 0x20 && uch != 0x7F;
-            if (from_soft && printable && !modified) return true;
+            // **숫자 패드는 이 필터를 안 건다.** `TYPE_CLASS_NUMBER` 키보드는 숫자를
+            // `commitText` 로 보내지 않고 **키 이벤트로만** 보낸다(mobile-platform.md §3.1 이
+            // 이미 적어 둔 사실이다). 그러니 여기서 막으면 **대신 보내 줄 사람이 없어 통째로
+            // 사라진다** — 엔터가 사라졌던 것과 같은 모양이고, 그때 좁힌 기준("인쇄 가능한가")은
+            // 제어문자만 갈랐지 이 자리까지는 못 갈랐다.
+            //
+            // 기기 실측: 설정의 글자 크기 줄을 눌러 숫자 패드가 떴는데 **숫자가 하나도 안
+            // 들어갔다**. 키보드는 보이는데 아무것도 안 써지는, 이 앱이 이미 두 번 겪은 상태다.
+            //
+            // 중복 걱정이 없는 이유: 숫자 패드에는 **조합이 없다**(`setComposingText` 도 안 온다).
+            // 두 콜백이 같은 글자를 나르는 것은 조합하는 키보드의 일이다.
+            final boolean numeric_pad = nativeInputKind() == 1;
+            if (from_soft && printable && !modified && !numeric_pad) return true;
             nativeKey(event.getKeyCode(), event.getMetaState(), uch);
             return true;
         }
@@ -268,6 +280,23 @@ public class MaruActivity extends android.app.NativeActivity {
                 if (imm != null && a.input != null) {
                     a.input.requestFocus();
                     imm.showSoftInput(a.input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                }
+            }
+        });
+    }
+
+    /** 네이티브가 부른다 — 키보드를 **내린다**. 앱은 터미널을 위해 늘 띄워 두는데, 그대로 다른
+     *  화면에 가면 쓸 데가 없는 자판이 화면 절반을 먹는다. 올리는 쪽과 같은 자리에 둔다. */
+    public static void hideKeyboard() {
+        final MaruActivity a = current;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                a.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+                if (imm != null && a.input != null) {
+                    imm.hideSoftInputFromWindow(a.input.getWindowToken(), 0);
                 }
             }
         });

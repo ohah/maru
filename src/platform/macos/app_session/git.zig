@@ -755,7 +755,8 @@ pub fn activeTurnLatestOid(self: *AppSession) []const u8 {
 
 /// 그 surface 의 **provider 세션 신원**(없으면 빈 슬라이스). 링의 키다(§6.1 AT0).
 ///
-/// 훅 모드에서는 `applyHookEvent` 가 payload 의 `session_id` 로 채워 두므로 턴이 끝나는 순간 이미 있다.
+/// 훅 모드에서는 `applyHookEvent` → `adoptHookSessionIdentity` 가 payload 의 `session_id` 로 채워 두므로
+/// 턴이 끝나는 순간 이미 있다(AT1).
 /// 관측 모드에서는 자식 프로세스 env 폴링에 기대는데 그 창을 대부분 놓치므로(1초 폴링 ↔ 짧은 도구)
 /// 비어 있는 것이 정상이다 — 그때는 링을 만들지 않는다.
 pub fn sessionIdentityFor(self: *AppSession, surface_id: u64) []const u8 {

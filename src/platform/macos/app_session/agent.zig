@@ -1120,6 +1120,41 @@ pub fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
     self.metal_dirty = true;
 }
 
+/// 훅 payload 가 밝힌 **세션 신원**을 채택한다(AT1).
+///
+/// 위 `refreshAgentSessionIdentity` 와 **같은 채택 절차**이고 다른 것은 값의 출처뿐이다 — 그쪽은 자식
+/// 프로세스 env 를 «샘플» 하고(짧은 도구는 그 창을 대부분 놓친다), 이쪽은 provider 자신의 진술을 읽는다.
+/// 두 값이 갈리면 **payload 가 이긴다**.
+///
+/// **이 배관은 `git.zig` 의 `sessionIdentityFor` 주석이 이미 약속하던 것**인데 실제로는 없었다. 그래서
+/// 훅 모드의 링이 빈 신원(→ `captureTurnSnapshot` 이 그대로 조기 반환)이나 `/clear` 뒤의 **낡은 신원**에
+/// 붙었다.
+fn adoptHookSessionIdentity(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+    const tr = maru.session.agent_transcript;
+    if (!maru.session.agent_hook_mode.carriesSessionIdentity(ev)) return;
+    // **이스케이프를 푼 뒤 상한을 잰다** — 한 자리에서 해야 «풀고 나서 길어지는» 값이 안 샌다. 버퍼가
+    // 상한보다 하나 큰 이유가 그것이다: 넘치는 값이 상한에 딱 맞게 잘려 **통과해 버리는** 것을 막는다.
+    //
+    // 표시 경로(`hookDisplayText`)는 쓰지 않는다 — 그쪽은 UTF-8 경계로 자르는데, 키를 자르면 조용히
+    // **다른 키**가 된다.
+    var buf: [tr.max_identity_bytes + 1]u8 = undefined;
+    const value = maru.session.agent_hook_event.decodeInto(&buf, ev.session_id);
+    // **상한을 넘으면 채택하지 않는다(자르지 않는다).** `Cache.setIdentity` 는 `@min` 으로 자르는데
+    // `RingMap.ringFor` 는 그 길이를 정상 키로 받는다 — 앞부분을 공유하는 **서로 다른 두 세션의 링이
+    // 말없이 병합된다**. 순수 층의 `RingMap.setRepo`(「못 담으면 아예 기억하지 않는다」)를 문 앞에 세운다.
+    //
+    // 실측(2026-08-24, 이 기계의 훅 로그 5,221 이벤트)에서는 `session_id` 가 **전부 36바이트 UUID** 라
+    // 이 가지가 밟힌 적이 없다. 그럼에도 남기는 이유는 밟혔을 때의 오염이 **조용하기** 때문이다.
+    if (value.len == 0 or value.len > tr.max_identity_bytes) return;
+    const cache = &term.agent_transcript;
+    if (std.mem.eql(u8, cache.identity(), value)) return;
+    // 신원이 바뀌었다 = 다른 세션이다(`/clear`). 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다 —
+    // 관측 경로와 **같은 판단**이다.
+    cache.reset();
+    cache.setIdentity(value);
+    self.metal_dirty = true;
+}
+
 /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
 /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
 pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
@@ -1425,6 +1460,16 @@ fn hookConversationText(buf: []u8, scratch: []u8, raw: []const u8) []const u8 {
 
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
+    // **맨 앞이어야 한다.** 신원이 갈리면 `cache.reset()` 이 `owned` 를 비우는데, 이 함수 아래쪽이
+    // `owned.setPrompt`/`setReply` 를 쓰고 `.done` 분기가 `owned.reply()` 를 읽는다 — 뒤에 두면 방금
+    // 저장한 대화를 스스로 지운다.
+    // **맨 앞이어야 한다.** 뒤로 옮기면 두 겹으로 깨지고, **먼저 걸리는 것은 ⑵ 다**(뮤테이션으로 확인 —
+    // 함수 끝으로 옮기니 `Stop` 의 신원 채택이 통째로 사라졌다):
+    //   ⑴ 신원이 갈리면 `cache.reset()` 이 `owned` 를 비우는데 대화 저장이 아래쪽이다.
+    //   ⑵ 그 switch 는 `.stop`·`.user_prompt_submit` 에서 **early return** 한다 — 대화를 싣는 바로 그
+    //      이벤트에서 채택이 **아예 안 돈다**.
+    // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
+    adoptHookSessionIdentity(self, term, ev);
     const prev_state = term.agent_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지
     // 않으면서도 마지막 자식이 끝날 때 배지가 풀린다(계약 §2).

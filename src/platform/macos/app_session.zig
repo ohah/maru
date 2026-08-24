@@ -19892,6 +19892,82 @@ test "hook mode runs exactly one source and takes over notifications" {
     const ok = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
     try std.testing.expect(std.mem.indexOf(u8, ok.title, maru.i18n.t(.agent_hook_notice_done)) != null);
     try std.testing.expect(std.mem.indexOf(u8, ok.body, "다 했습니다") != null);
+
+    // ── ⑦ **신원은 payload 가 정한다**(AT1) ────────────────────────────────────────────────
+    // 훅 모드에는 신원을 갱신할 다른 자리가 **없다** — `refreshAgentSessionIdentity` 는 `.observe`
+    // 분기 전용이다(§1.3 배타). 이것이 없으면 링이 빈 신원이나 `/clear` 뒤의 낡은 신원에 붙는다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    // `reset()` 은 **신원을 안 지운다**(그건 provider 가 밝힌 사실이라 매핑과 수명이 다르다) — 이 블록이
+    // «빈 신원에서 시작한다» 를 보려면 신원 자체를 따로 비워야 한다.
+    term.agent_transcript.reset();
+    term.agent_transcript.setIdentity("");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"11111111-1111-4111-8111-111111111111\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+    // **캡처가 실제로 읽는 자리까지 이어 본다.** `identity()` 는 중간 필드일 뿐이고, `captureTurnSnapshot`
+    // 이 링의 키로 쓰는 것은 `sessionIdentityFor` 다 — 그 둘이 이어져 있어야 「훅 모드에서 링이 선다」가
+    // 성립한다. (링이 실제로 서는 것까지는 실제 git 저장소가 필요해 별도 통합 test 가 본다.)
+    try std.testing.expectEqualStrings(
+        "11111111-1111-4111-8111-111111111111",
+        git_ops.sessionIdentityFor(&session, term.surfaceId()),
+    );
+
+    // **자식은 부모의 신원을 옮기지 않는다**(계약 §2) — codex 자식이 자기 축을 싣고 온다는 실측이 근거다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a5\",\"session_id\":\"99999999-9999-4999-8999-999999999999\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+
+    // **상한을 넘는 id 는 채택하지 않는다 — 자르지 않는다.** `Cache.setIdentity` 는 `@min` 으로 자르는데
+    // `RingMap.ringFor` 는 그 길이를 정상 키로 받으므로, 앞부분을 공유하는 서로 다른 두 세션의 링이
+    // **말없이 병합된다**. 실측(2026-08-24)에서는 전부 36바이트 UUID 라 이 가지가 밟힌 적이 없다 —
+    // 그럼에도 재는 이유는 밟혔을 때의 오염이 조용하기 때문이다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"" ++ ("x" ** 65) ++ "\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+
+    // **`/clear` 는 새 id 를 발급한다** — 그 순간 신원이 갈리고 옛 대화 매핑은 버린다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"22222222-2222-4222-8222-222222222222\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("22222222-2222-4222-8222-222222222222", term.agent_transcript.identity());
+
+    // **신원 채택이 그 이벤트의 대화를 지우면 안 된다** — 채택이 `applyHookEvent` 맨 앞이어야 하는 이유가
+    // 이것이고, 그 정당화에 판정자가 없으면 다음 사람이 호출을 옮긴다(적대적 검증 — 실제로 내 첫 판에
+    // 이 test 가 없었다).
+    //
+    // 두 겹으로 깨진다: ⑴ `cache.reset()` 이 `owned` 를 비우는데 대화 저장이 **아래쪽**이고,
+    // ⑵ 그 switch 는 `.stop`·`.user_prompt_submit` 에서 **early return** 하므로 뒤로 옮기면 대화를 싣는
+    // 바로 그 이벤트들에서 채택이 **아예 안 돈다**.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    term.agent_transcript.owned.setReply("");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"33333333-3333-4333-8333-333333333333\",\"last_assistant_message\":\"새 세션의 답\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("33333333-3333-4333-8333-333333333333", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("새 세션의 답", term.agent_transcript.reply());
 }
 
 test "hook mode fills state and conversation from the event log, and only then" {

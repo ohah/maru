@@ -315,6 +315,17 @@ fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content
     // 이 발행이 **무엇을 보고 만들어졌는지** 남긴다. 포인터 입구가 이 값으로 신선도를 판정한다.
     self.file_tree_published_scroll_px = file_panel_ops.fileTreeEffectiveScrollPx(self);
     self.file_tree_published_rows = self.file_tree_rows.items.len;
+    self.file_tree_published_generation = self.file_tree_projection_generation;
+}
+
+/// 누르고 있던 행과 호버를 **놓는다**. 창이 비활성될 때처럼 "이 트리에 더는 손이 없다"가 확실한 자리용.
+///
+/// capture 만 지우면 밴드가 켜진 채 남는다 — 호버도 같이 놓고, 그림이 바뀌므로 dirty 를 세운다.
+pub fn releaseFileTreePointer(self: *AppSession) void {
+    const had_hover = self.file_tree_interaction.hovered != null;
+    self.file_tree_interaction.capture = null;
+    self.file_tree_interaction.hovered = null;
+    if (had_hover) self.metal_dirty = true;
 }
 
 fn frameEql(
@@ -346,7 +357,10 @@ fn frameEql(
 /// 바뀐 때만 낸다.
 fn ensureFreshHitTree(self: *AppSession) void {
     if (self.file_tree_published_scroll_px == file_panel_ops.fileTreeEffectiveScrollPx(self) and
-        self.file_tree_published_rows == self.file_tree_rows.items.len) return;
+        self.file_tree_published_rows == self.file_tree_rows.items.len and
+        // 행 **수**가 같아도 목록이 바뀔 수 있다(watcher 가 이름을 갈고, 폴더 하나를 접고 다른 하나를
+        // 편다). 그 판정은 투영 세대가 이미 소유하고 있으니 여기서 그것도 본다.
+        self.file_tree_published_generation == self.file_tree_projection_generation) return;
     publishFileTreeHitTree(self);
 }
 
@@ -367,11 +381,24 @@ pub fn fileTreeDockPointer(
         file_panel_ops.clearFileTreeHover(self);
         return null;
     };
-    const tree_view = chrome.ui.tree.UiRectTree{ .entries = self.file_tree_entries.items };
+    // **세대를 양쪽에 싣는다.** `ensureFreshHitTree` 가 맞춰 주는 것이 정상 경로지만 발행은 실패할 수
+    // 있다(`prepare` 가 null, 또는 저장소 확보 실패 — 그때는 옛 entries 가 남는다). 그 프레임의 좌표
+    // 판정은 사라진 행을 짚을 수 있으므로, 낡은 스냅샷에서는 **capture·호버도 세우지 않고** 돌아간다
+    // (`chrome.ui.interaction` 의 게이트는 tree 와 event 양쪽 세대가 0 이 아닐 때만 문다).
+    const tree_view = chrome.ui.tree.UiRectTree{
+        .entries = self.file_tree_entries.items,
+        .generation = self.file_tree_published_generation,
+    };
     const dispatched = chrome.ui.interaction.dispatch(
         &self.file_tree_interaction,
         tree_view,
-        .{ .phase = phase, .x_px = x_px, .y_px = y_px, .timestamp_ns = 0 },
+        .{
+            .phase = phase,
+            .x_px = x_px,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .generation = self.file_tree_projection_generation,
+        },
     ) catch return null;
     for (dispatched.dirty.ids) |id| {
         if (id != null) {
@@ -403,6 +430,9 @@ pub fn fileTreeRowAtPublished(self: *AppSession, x_px: f64, y_px: f64) ?usize {
     if (self.dock.view != .explorer or !dock_ops.dockVisible(self)) return null;
     ensureFreshHitTree(self);
     if (dock_ops.dockListScrollbarGeometry(self)) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
+    // `hitAction` 에는 세대 게이트가 없다(좌표 질의라 상태를 안 만진다). 그래서 **여기서 판정한다** —
+    // 클릭 경로가 낡은 발행을 거부하는데 우클릭이 같은 발행으로 행을 집으면, 두 소비자가 또 갈린다.
+    if (self.file_tree_published_generation != self.file_tree_projection_generation) return null;
     const tree_view = chrome.ui.tree.UiRectTree{ .entries = self.file_tree_entries.items };
     const hit = chrome.ui.interaction.hitAction(tree_view, x_px, y_px) orelse return null;
     for (self.file_tree_actions.items) |candidate| {

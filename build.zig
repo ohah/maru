@@ -1201,16 +1201,20 @@ pub fn build(b: *std.Build) void {
             "file tree: 발행된 인덱스가 낡아도 범위를 넘지 않는다",
             // 스크롤과 그리기 사이에 온 포인터가 보이는 행을 가리키는지.
             "file tree: 스크롤 직후의 포인터도 보이는 행을 가리킨다",
+            // CIM §9 ②: 발행 세대가 갈리면 다시 내고, 다시 낼 수 없으면 아무 행도 짚지 않는지.
+            "file tree: 발행이 낡으면 다시 내고, 다시 낼 수 없으면 짚지 않는다",
+            // CIM §9 ①: 창 비활성이 pointer capture 를 놓는지.
+            "file tree: 창이 비활성되면 누르고 있던 행을 놓는다",
         },
     });
     const run_macos_file_explorer_perf_tests = b.addRunArtifact(macos_file_explorer_perf_tests);
     run_macos_file_explorer_perf_tests.setCwd(b.path("."));
     // 이름 필터는 매치가 0개여도 러너가 "All 0 tests passed."로 exit 0이라, 판정자 이름이 바뀌거나
     // 다른 파일로 옮겨가면 게이트가 **초록인 채로** 죽는다(실제로 위 SV2-0 판정자가 그렇게 빠져 있었다).
-    // 컴파일된 test 수를 못 박아 그 사고를 실패로 바꾼다. 7 = 위 필터 2개 + 이 모듈 그래프의
+    // 컴파일된 test 수를 못 박아 그 사고를 실패로 바꾼다. 12 = 위 필터 7개 + 이 모듈 그래프의
     // 이름 없는 test 블록 5개(app_host_abi·app_session·session_host×2·control_socket).
     // 숫자가 틀렸다고 나오면 먼저 **어느 판정자가 빠졌는지** 확인하고, 정당한 증감일 때만 갱신한다.
-    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=10");
+    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=12");
     const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
     test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
 

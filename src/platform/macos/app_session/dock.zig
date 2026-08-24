@@ -649,12 +649,8 @@ pub fn cancelPendingDockFocus(self: *AppSession) void {
 }
 
 pub fn dockViewForSlot(index: usize) ?dock_panel.View {
-    return switch (index) {
-        0 => .explorer,
-        1 => .source_control,
-        2 => .agent_sessions,
-        else => null,
-    };
+    // 순서는 **enum 자신이 소유한다**(`dock_panel.View.forSlot`) — Windows 뷰 바도 같은 것을 쓴다.
+    return dock_panel.View.forSlot(index);
 }
 
 /// 행 텍스트와 하이라이트 밴드가 쓸 수 있는 폭. 컨테이너가 gutter를 **상시** 떼어 놓으므로

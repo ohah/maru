@@ -46,6 +46,10 @@ const git_write_command = maru.session.git_write_command;
 const component = maru.chrome.components.scm_dock;
 const interaction = maru.chrome.ui.interaction;
 
+/// 표면을 그리는 데 필요한 호스트 조각들 — **정의는 `win32_draw_host` 가 소유한다**(그쪽이
+/// `maru` 모듈이라 두 소비자가 다 볼 수 있다).
+pub const Ctx = draw_host.SurfaceCtx;
+
 /// 눌러서 바뀌는 것 전부. **모델이 아니다** — 모델은 git 출력에서 매번 다시 세운다.
 pub const State = struct {
     collapsed: [scm_view.section_count]bool = @splat(false),
@@ -185,7 +189,7 @@ pub const Options = struct {
 /// 하고, 그 둘이 갈리는 것이 조용한 오답의 씨앗이다(§2m.27 의 `cellFromGpuGlyph` 와 같은 규율).
 pub fn build(
     parent: std.mem.Allocator,
-    host: *draw_host.Host,
+    ctx: Ctx,
     state: *const State,
     opts: Options,
 ) !Built {
@@ -193,8 +197,8 @@ pub fn build(
     errdefer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const view_w = host.initial.width_px;
-    const view_h = host.initial.height_px;
+    const view_w = ctx.viewport_w;
+    const view_h = ctx.viewport_h;
 
     // ── git 출력 → 모델 ──────────────────────────────────────────────────────────────────────
     const rows_buf = try a.alloc(scm_view.Row, 256);
@@ -221,7 +225,7 @@ pub fn build(
     const bs = component.build.bufferSizes(items);
     const props = component.types.Props{
         .viewport_px = .{ .x = 0, .y = 0, .width = @floatFromInt(view_w), .height = @floatFromInt(view_h) },
-        .cell_width_px = host.cell_w,
+        .cell_width_px = ctx.cell_w,
         .items = items,
         .branch = model.head.branch orelse "",
         .ahead = model.head.ahead,
@@ -248,18 +252,18 @@ pub fn build(
     }) catch return error.ViewFailed;
 
     // ── ChromeDraw → 화면 (measured 경로 — §2m.27) ───────────────────────────────────────────
-    var request = try system_text.prepareRequest(a, 1, draws.ops, opts.tokens, host.cell_w, .{
+    var request = try system_text.prepareRequest(a, 1, draws.ops, opts.tokens, ctx.cell_w, .{
         .family = opts.font_family,
         .fallback = opts.font_fallback,
     });
     const unresolved = try system_text.shapeRequest(a, &request, 1000);
-    const artifact = try system_text.resolveArtifact(a, &host.renderer_state.font_registry, unresolved);
+    const artifact = try system_text.resolveArtifact(a, &ctx.renderer_state.font_registry, unresolved);
 
     const shape_surface = try system_text.emptyDrawList(a, artifact.records.len);
     var layout_cfg = maru.renderer.textConfigFromFontSize(opts.font_size_pt, 1);
-    layout_cfg.cell_width_px = @intCast(host.cell_w);
-    layout_cfg.glyph_cell_width_px = @intCast(host.cell_w);
-    layout_cfg.cell_height_px = @intCast(host.cell_h);
+    layout_cfg.cell_width_px = @intCast(ctx.cell_w);
+    layout_cfg.glyph_cell_width_px = @intCast(ctx.cell_w);
+    layout_cfg.cell_height_px = @intCast(ctx.cell_h);
     const shaped = try maru.renderer.buildGlyphRunListFromShapedRecordsWithSurface(
         a,
         artifact.records,
@@ -274,24 +278,25 @@ pub fn build(
 
     // **래스터라이저에 이름 표를 준다** — measured 텍스트의 `font_id` 는 레지스트리 id 라 이것 없이는
     // face 를 못 찾고, 그러면 글자가 하나도 안 그려진다(§2m.27 실측).
-    var measured_rasterizer = host.rasterizer;
-    measured_rasterizer.registry = &host.renderer_state.font_registry;
-    const render_frame = try host.renderer_state.buildFrameFromGlyphRunListWithRasterizer(
+    var measured_rasterizer = ctx.rasterizer;
+    measured_rasterizer.registry = &ctx.renderer_state.font_registry;
+    const render_frame = try ctx.renderer_state.buildFrameFromGlyphRunListWithRasterizer(
         a,
         shape_surface,
         shaped.runs,
         measured_rasterizer,
     );
-    try host.syncAtlas();
-    const uploads = host.uploadAtlasRegions(render_frame);
+    // **짓는 자리에서 곧바로 올린다** — 업로드 목록은 프레임과 함께 사라진다(§2m.32).
+    try draw_host.syncAtlasTexture(ctx.pipeline, ctx.renderer_state, ctx.atlas_w, ctx.atlas_h);
+    const uploads = draw_host.uploadFrameRegions(ctx.pipeline, render_frame);
 
     // ── 셀 ───────────────────────────────────────────────────────────────────────────────────
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     const counted = try draw_host.appendChromeOps(a, draws.ops, opts.tokens, view_w, view_h, &cells);
     var gpu_glyphs: std.ArrayList(maru.renderer.metal_frame.GpuGlyph) = .empty;
-    try artifact.appendGpuGlyphs(a, render_frame, host.renderer_state.atlas.config, 0, 0, null, 0, &gpu_glyphs);
+    try artifact.appendGpuGlyphs(a, render_frame, ctx.renderer_state.atlas.config, 0, 0, null, 0, &gpu_glyphs);
     for (gpu_glyphs.items) |g| {
-        try cells.append(a, win32_terminal.cellFromGpuGlyph(g, host.atlas_w, host.atlas_h));
+        try cells.append(a, win32_terminal.cellFromGpuGlyph(g, ctx.atlas_w.*, ctx.atlas_h.*));
     }
 
     // ── 판정용 글자 ──────────────────────────────────────────────────────────────────────────
@@ -318,7 +323,7 @@ pub fn build(
         .ops_fill = counted.fill,
         .ops_dropped = counted.dropped,
         .atlas_region_uploads = uploads,
-        .stats = maru.renderer.renderFrameStats(render_frame, host.renderer_state.atlas.entryCount()),
+        .stats = maru.renderer.renderFrameStats(render_frame, ctx.renderer_state.atlas.entryCount()),
     };
 }
 

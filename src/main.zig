@@ -1790,7 +1790,7 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     var saw_no_dock = false;
     var w: u32 = 40;
     while (w <= 1600) : (w += 37) {
-        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0);
+        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer);
         // 창을 넘지 않는다.
         try std.testing.expect(g.terminal.x + g.terminal.w <= w);
         try std.testing.expect(g.dock.x + g.dock.w <= w);
@@ -1889,8 +1889,22 @@ fn rebuildDockAll(
     outside: *usize,
     drawn: *u16,
     frame_slot: *?maru.renderer.RenderFrame,
+    /// 지금 도크가 보이는 것. **뷰마다 다른 표면**을 그린다(W8.7c2).
+    view: maru.session.dock_panel.View,
+    /// 소스 컨트롤 뷰가 쓰는 것들. `status` 가 비어 있으면 그 뷰는 아무것도 안 그린다.
+    scm: ScmDockInputs,
 ) !void {
     try rebuildDockCells(allocator, out, geom);
+    appendViewBarCells(allocator, out, geom, cell_w, view) catch {};
+    if (view != .explorer) {
+        if (frame_slot.*) |*old_frame| {
+            old_frame.deinit(allocator);
+            frame_slot.* = null;
+        }
+        drawn.* = 0;
+        if (view == .source_control) try appendScmDockCells(allocator, out, geom, renderer_state, builder, cell_w, cell_h, pipeline, atlas_w, atlas_h, uploaded, scm);
+        return;
+    }
     if (frame_slot.*) |*old| {
         old.deinit(allocator);
         frame_slot.* = null;
@@ -1947,6 +1961,96 @@ fn rebuildDockAll(
     }
 }
 
+/// 소스 컨트롤 뷰가 그리는 데 필요한 것들.
+const ScmDockInputs = struct {
+    status: []const u8,
+    state: *scm_surface.State,
+    opts: scm_surface.Options,
+    /// 마지막으로 지은 표면. **히트테스트가 이것을 본다** — 그리기와 누르기가 같은 tree 를 써야
+    /// 누른 자리와 열리는 자리가 안 갈린다.
+    built: *?scm_surface.Built,
+};
+
+/// 뷰 스위처 바 — **칸 세 개와 지금 뷰의 강조**. 아이콘은 아직 안 그린다(⒞3) — 칸이 눌리고 내용이
+/// 바뀌는 것이 이 슬라이스의 판정이고, 아이콘은 그 위에 얹는 별개의 배선이다.
+///
+/// **칸 기하는 중립이 소유한다**(`dock_view_bar.slotRect`) — 여기서 다시 나누면 그린 자리와 눌리는
+/// 자리의 주인이 둘이 된다.
+fn appendViewBarCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    geom: maru.session.dock_layout.Geometry,
+    cell_w: u32,
+    view: maru.session.dock_panel.View,
+) !void {
+    const bar = geom.view_bar;
+    if (bar.w == 0 or bar.h == 0) return;
+    const bar_rect = maru.chrome.components.dock_view_bar.Rect{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h };
+    var i: usize = 0;
+    while (i < maru.chrome.components.dock_view_bar.slot_count) : (i += 1) {
+        const r = maru.chrome.components.dock_view_bar.slotRect(bar_rect, cell_w, i) orelse continue;
+        const active = i == view.slot();
+        try out.append(allocator, d3d11_cells.solidCell(
+            @floatFromInt(r.x),
+            @floatFromInt(r.y),
+            @floatFromInt(r.w),
+            @floatFromInt(r.h),
+            d3d11_cells.colorFromArgb(if (active) 0xFF2A3344 else 0xFF202634),
+            .{ 0, 0, 0, 0 },
+        ));
+    }
+}
+
+/// 소스 컨트롤 표면을 도크 자리에 그린다.
+///
+/// **표면은 자기 뷰포트 원점(0,0) 기준으로 셀을 낸다** — 스모크에서는 그것이 창 전체였다. 도크
+/// 안에 놓으려면 여기서 **평행이동**한다. 표면 안쪽을 도크 좌표로 만들지 않는 이유는, 그러면 그
+/// 모듈이 "내가 창 어디에 있는가" 를 알아야 하고 그 값이 두 곳에서 관리된다.
+fn appendScmDockCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    geom: maru.session.dock_layout.Geometry,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    cell_w: u32,
+    cell_h: u32,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    uploaded: *usize,
+    scm: ScmDockInputs,
+) !void {
+    const area = geom.tree_content;
+    if (scm.status.len == 0 or area.w == 0 or area.h == 0) return;
+    var rasterizer = builder.rasterizer;
+    rasterizer.registry = &renderer_state.font_registry;
+    const built = scm_surface.build(allocator, .{
+        .renderer_state = renderer_state,
+        .rasterizer = rasterizer,
+        .pipeline = pipeline,
+        .atlas_w = atlas_w,
+        .atlas_h = atlas_h,
+        .cell_w = cell_w,
+        .cell_h = cell_h,
+        .viewport_w = area.w,
+        .viewport_h = area.h,
+    }, scm.state, scm.opts) catch return;
+    // **버리지 않고 슬롯에 둔다** — 이 표면의 히트테스트는 `Built` 안의 published tree 를 본다.
+    // 버리면 화면에는 그려지는데 **눌리지 않는** 죽은 컨트롤이 된다(§2m.31 이 이름 붙인 실패).
+    if (scm.built.*) |*old_built| old_built.deinit();
+    scm.built.* = built;
+    uploaded.* += built.atlas_region_uploads;
+    const dx: f32 = @floatFromInt(area.x);
+    const dy: f32 = @floatFromInt(area.y);
+    try out.ensureUnusedCapacity(allocator, built.cells.len);
+    for (built.cells) |c| {
+        var moved = c;
+        moved.rect[0] += dx;
+        moved.rect[1] += dy;
+        out.appendAssumeCapacity(moved);
+    }
+}
+
 /// 도크 자리를 채우는 셀 — **배경과 디바이더**. W8.7a 는 여기까지다(파일 트리는 ⒜2 — 그것은
 /// 터미널과 **아틀라스를 나눠 써야** 하므로 별개의 배선이다).
 ///
@@ -1991,6 +2095,7 @@ fn dockGeometryFor(
     cell_h: u32,
     visible: bool,
     size_pt: u32,
+    view: maru.session.dock_panel.View,
 ) maru.session.dock_layout.Geometry {
     const dock_layout = maru.session.dock_layout;
     return dock_layout.compute(.{
@@ -2005,7 +2110,7 @@ fn dockGeometryFor(
         .side = .right,
         .size_pt = size_pt,
         .visible = visible,
-        .view = .explorer,
+        .view = view,
         .view_bar_px = cell_h * 2,
         .status_bar_px = 0,
     });
@@ -2090,11 +2195,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const dock_visible = true;
     // **⒞ 가 이것을 움직인다** — 디바이더를 끌면 폭이 바뀐다. 0 은 "뷰가 정한 기본 폭" 센티널이다.
     var dock_size_pt: u32 = 0;
+    // 도크가 지금 무엇을 보이는가. 뷰 바의 칸을 누르면 바뀐다(W8.7c2).
+    var dock_view: maru.session.dock_panel.View = .explorer;
     // **지금 클라이언트 크기.** 디바이더 드래그가 기하를 다시 계산할 때 이 값이 필요하다 —
     // `initial` 은 시작 값이라 창을 키운 뒤 쓰면 도크가 옛 창 기준으로 선다.
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
+    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -2242,15 +2349,43 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var divider_drag: ?f64 = null;
     var divider_grabs: usize = 0;
     var divider_moves: usize = 0;
+    var view_switches: usize = 0;
+    var scm_dock_intents: usize = 0;
+    var scm_dock_redraws: usize = 0;
+    var scm_click_judgeable = false;
+    var view_judgeable = false;
+    var dock_digest_before_switch: u64 = 0;
+    var dock_cells_before_switch: usize = 0;
     var divider_judgeable = false;
     var dock_w_before_drag: u32 = 0;
     var grid_cols_before_drag: u16 = 0;
+    // ── 소스 컨트롤 뷰가 쓸 것들 (W8.7c2) ───────────────────────────────────────────────────
+    //
+    // **git 은 한 번만 읽는다.** 뷰를 켤 때마다 다시 읽으면 전환이 느려지고, 이 슬라이스의 판정은
+    // "뷰가 바뀌면 다른 표면이 그려지는가" 지 "목록이 최신인가" 가 아니다(갱신은 이후 슬라이스).
+    var scm_status: []u8 = &.{};
+    defer if (scm_status.len != 0) allocator.free(scm_status);
+    if (dock_root) |repo| {
+        scm_status = readRepoStatus(io, allocator, repo) catch &.{};
+    }
+    var scm_state = scm_surface.State{};
+    var scm_built: ?scm_surface.Built = null;
+    defer if (scm_built) |*b| b.deinit();
+    const scm_tokens = scmSmokeTokens();
+    const scm_opts = scm_surface.Options{
+        .status_text = scm_status,
+        .font_family = cfg.font.family,
+        .font_fallback = cfg.font.fallback,
+        .font_size_pt = cfg.font.size,
+        .tokens = &scm_tokens,
+    };
+
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
     var dock_tree_frame: ?maru.renderer.RenderFrame = null;
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -2419,6 +2554,41 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, gx - 40, 200);
             window.postSyntheticMouse(.left_up, gx - 40, 200);
         }
+        // ── 뷰 전환 판정 (W8.7c2) ──────────────────────────────────────────────────────────
+        //
+        // 뷰 바의 **두 번째 칸**(소스 컨트롤)을 눌러 도크 그림이 실제로 달라지는지 본다. 개수만
+        // 세면 "전환했다" 가 헛일이어도 초록이라, **셀 지문**을 견준다.
+        if (spins == 150 and geom.view_bar.w != 0) {
+            const bar = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
+            if (maru.chrome.components.dock_view_bar.slotRect(bar, cell_w, 1)) |r| {
+                view_judgeable = true;
+                dock_digest_before_switch = d3d11_cells.cellsDigest(dock_cells.items);
+                dock_cells_before_switch = dock_cells.items.len;
+                const vx: i32 = @intCast(r.x + r.w / 2);
+                const vy: i32 = @intCast(r.y + r.h / 2);
+                window.postSyntheticMouse(.left_down, vx, vy);
+                window.postSyntheticMouse(.left_up, vx, vy);
+            }
+        }
+        // 전환 뒤 **소스 컨트롤 행을 눌러 본다** — 뷰가 바뀌었는데 안 눌리면 죽은 컨트롤이다.
+        if (spins == 200 and dock_view == .source_control) {
+            if (scm_built) |*b| {
+                const component = maru.chrome.components.scm_dock;
+                for (b.items, 0..) |item, i| switch (item) {
+                    .file => {
+                        const slot = b.frame.tree.find(component.build.NodeIds.item(i)) orelse break;
+                        const rect = b.frame.tree.entries[slot].rect;
+                        scm_click_judgeable = true;
+                        const sx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(rect.x + rect.width / 2)));
+                        const sy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(rect.y + rect.height / 2)));
+                        window.postSyntheticMouse(.left_down, sx, sy);
+                        window.postSyntheticMouse(.left_up, sx, sy);
+                        break;
+                    },
+                    else => {},
+                };
+            }
+        }
         if (spins == 120) {
             selections_before_term_click = selections;
             dock_clicks_before_term_click = dock_row_clicks;
@@ -2433,7 +2603,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
                 client_h = r.height_px;
-                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
+                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     loop.resizeActiveSurface(size) catch {};
@@ -2452,7 +2622,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
             },
@@ -2556,7 +2726,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         );
                         if (cand) |pt| if (pt != dock_size_pt) {
                             dock_size_pt = pt;
-                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt);
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
                             // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
                             // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
                             // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
@@ -2566,7 +2736,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 loop.resizeActiveSurface(size) catch {};
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                 dock_rebuild_failures += 1;
                             };
                             divider_moves += 1;
@@ -2586,6 +2756,65 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
                 if (region != .terminal and m.kind != .capture_lost) {
                     dock_pointer_events += 1;
+                    // ── 뷰 바: 칸을 누르면 도크 내용이 바뀐다 (W8.7c2) ──────────────────
+                    //
+                    // **칸 기하도 슬롯 순서도 중립이 소유한다** — `dock_view_bar.slotAtPoint` 와
+                    // `dock_panel.View.forSlot`. 여기서 다시 나누면 그린 칸과 눌리는 칸이 갈린다.
+                    if (region == .view_bar and m.kind == .left_up) {
+                        const bar = maru.chrome.components.dock_view_bar.Rect{
+                            .x = geom.view_bar.x,
+                            .y = geom.view_bar.y,
+                            .w = geom.view_bar.w,
+                            .h = geom.view_bar.h,
+                        };
+                        if (m.x_px >= 0 and m.y_px >= 0) {
+                            if (maru.chrome.components.dock_view_bar.slotAtPoint(bar, cell_w, @intCast(m.x_px), @intCast(m.y_px))) |slot| {
+                                if (maru.session.dock_panel.View.forSlot(slot)) |next_view| if (next_view != dock_view) {
+                                    dock_view = next_view;
+                                    view_switches += 1;
+                                    // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
+                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
+                                    if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
+                                        loop.resizeActiveSurface(size) catch {};
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                        dock_rebuild_failures += 1;
+                                    };
+                                };
+                            }
+                        }
+                        continue;
+                    }
+                    // ── 소스 컨트롤 뷰의 포인터 (W8.7c2) ────────────────────────────────
+                    //
+                    // **표면이 자기 좌표로 판정한다** — `Built` 의 tree 는 뷰포트 원점(0,0) 기준이라
+                    // 도크 원점을 빼고 넘긴다. 그리기에서 더한 것과 **같은 값**이다.
+                    if (dock_view == .source_control and region == .dock_content) {
+                        if (scm_built) |*b| {
+                            const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.tree_content.x));
+                            const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
+                            const phase: maru.chrome.ui.interaction.UiPointerPhase = switch (m.kind) {
+                                .moved => .move,
+                                .left_down => .down,
+                                .left_up => .up,
+                                else => continue,
+                            };
+                            const routed = scm_surface.pointer(b, &scm_state, phase, lx, ly);
+                            var changed = routed.dirty;
+                            if (routed.intent) |intent| {
+                                if (scm_state.apply(intent)) {
+                                    changed = true;
+                                    scm_dock_intents += 1;
+                                }
+                            }
+                            if (changed) {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                    dock_rebuild_failures += 1;
+                                };
+                                scm_dock_redraws += 1;
+                            }
+                        }
+                        continue;
+                    }
                     if (m.kind == .left_up) {
                         // **행 판정도 중립이 소유한다**(`file_tree_layout.rowAtLocalY`).
                         const local_y = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
@@ -2930,7 +3159,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -3053,6 +3282,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     // **서로 안 샌다**: 도크 클릭 뒤에도 셸 선택은 그대로였고(그 시점 값이 `selections_before_term_click`),
     // 터미널 클릭은 도크 카운터를 안 올렸다.
+    if (view_judgeable) {
+        const after = d3d11_cells.cellsDigest(dock_cells.items);
+        if (scm_click_judgeable) {
+            try stdout.print("scm_dock_intents={d} scm_dock_redraws={d} scm_selected={?d}\n", .{ scm_dock_intents, scm_dock_redraws, scm_state.selected });
+        } else {
+            try stdout.print("scm_dock_click=unjudgeable reason=no_file_row\n", .{});
+        }
+        try stdout.print("view_switches={d} dock_view={s} dock_cells={d}->{d} dock_picture_changed={}\n", .{
+            view_switches,
+            @tagName(dock_view),
+            dock_cells_before_switch,
+            dock_cells.items.len,
+            after != dock_digest_before_switch,
+        });
+    } else {
+        try stdout.print("view_switch=unjudgeable reason=no_view_bar\n", .{});
+    }
     if (divider_judgeable) {
         const cols_now = if (app_window.active()) |a| a.core.size.cols else 0;
         // **저장값과 화면이 갈리면 안 된다** — 갈린 채 창을 키우면 도크가 새 공간을 다 먹는다.
@@ -4896,7 +5142,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     };
 
     var state = scm_surface.State{};
-    var built = scm_surface.build(allocator, &host, &state, opts) catch |err| {
+    var built = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch |err| {
         try stderr.print("maru win32-scm-draw-smoke: build failed({s})\n", .{@errorName(err)});
         try stderr.flush();
         return error.UnknownCommand;
@@ -4989,7 +5235,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
             toggled = state.apply(intent);
             if (!toggled) break :find_hit;
 
-            var next = scm_surface.build(allocator, &host, &state, opts) catch break :find_hit;
+            var next = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch break :find_hit;
             built.deinit();
             built = next;
             rebuilds += 1;
@@ -4999,7 +5245,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
             const again = scm_surface.click(&built, &state, cx, cy) orelse break :find_hit;
             if (again != .toggle_section) break :find_hit;
             _ = state.apply(again);
-            next = scm_surface.build(allocator, &host, &state, opts) catch break :find_hit;
+            next = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch break :find_hit;
             built.deinit();
             built = next;
             rebuilds += 1;
@@ -5044,7 +5290,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
                 },
             };
             select_applied = state.apply(intent);
-            const next = scm_surface.build(allocator, &host, &state, opts) catch break :sel;
+            const next = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch break :sel;
             built.deinit();
             built = next;
             rebuilds += 1;
@@ -5055,7 +5301,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
             {
                 var probe = state;
                 probe.selected = null;
-                if (scm_surface.build(allocator, &host, &probe, opts)) |*without| {
+                if (scm_surface.build(allocator, host.surfaceCtx(), &probe, opts)) |*without| {
                     var w = without.*;
                     select_changed_picture = d3d11_cells.cellsDigest(w.cells) != with_selection;
                     w.deinit();
@@ -5084,7 +5330,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
     // **상태를 씻고 다시 짓는다.** 안 그러면 ⒞1 이 남긴 호버가 그대로라 "마우스를 올렸다" 가
     // 무변화로 읽힌다 — 실측으로 첫 이동이 `dirty=false` 였다.
     state = .{};
-    if (scm_surface.build(allocator, &host, &state, opts)) |fresh| {
+    if (scm_surface.build(allocator, host.surfaceCtx(), &state, opts)) |fresh| {
         built.deinit();
         built = fresh;
     } else |_| {}
@@ -5172,7 +5418,7 @@ fn runWin32ScmDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.I
                 // 그리기여도 초록이 된다 — 컴포넌트가 그 노드에 호버 상태를 안 그릴 수도 있다.
                 const before_digest = d3d11_cells.cellsDigest(built.cells);
                 const t0 = std.Io.Clock.awake.now(io).nanoseconds;
-                const next = scm_surface.build(allocator, &host, &state, opts) catch continue;
+                const next = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch continue;
                 const dt: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds - t0);
                 rebuild_ns_total += dt;
                 if (dt > rebuild_ns_max) rebuild_ns_max = dt;
@@ -5308,7 +5554,7 @@ fn runScmWriteCase(
         .font_size_pt = cfg.font.size,
         .tokens = tokens,
     };
-    var built = scm_surface.build(allocator, host, &state, opts) catch {
+    var built = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch {
         try stderr.print("maru win32-scm-write-smoke[{s}]: build failed\n", .{label});
         return 1;
     };
@@ -5344,7 +5590,7 @@ fn runScmWriteCase(
         opts.status_text = status;
         // **목록이 통째로 바뀌었다** — 포인터 상태를 버린다(§2m.29 가 남긴 위험).
         state.invalidateTree();
-        const next = scm_surface.build(allocator, host, &state, opts) catch return 1;
+        const next = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch return 1;
         built.deinit();
         built = next;
         try host.drawFrame(built.cells, 0xFF1E2430);
@@ -5375,7 +5621,7 @@ fn runScmWriteCase(
         status = try readRepoStatus(io, allocator, repo);
         opts.status_text = status;
         state.invalidateTree();
-        const next = scm_surface.build(allocator, host, &state, opts) catch return 1;
+        const next = scm_surface.build(allocator, host.surfaceCtx(), &state, opts) catch return 1;
         built.deinit();
         built = next;
         try host.drawFrame(built.cells, 0xFF1E2430);

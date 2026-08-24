@@ -24,6 +24,12 @@ export class CanvasRenderer implements Renderer {
   #metrics: Metrics | null = null;
   #palette: string[] = buildPalette();
   #themeKey = "";
+  /**
+   * 직전에 본 테마 **객체**. 참조가 같으면 내용도 같으므로 키를 만들 필요가 없다 —
+   * 소비자가 보통 같은 객체를 계속 넘기는데(테마 목록에서 고른 것), 그때마다 palette 를
+   * join 하면 **매 프레임 256 개 문자열을 잇는 셈**이다. 참조가 달라졌을 때만 키로 확인한다.
+   */
+  #themeRef: Theme | null = null;
   #glyphs: GlyphSource | null = null;
   /**
    * 커버리지를 색칠해 둔 캐시. **키에 색이 들어가므로 글리프 수가 아니라 색 수만큼 늘어난다** —
@@ -119,10 +125,15 @@ export class CanvasRenderer implements Renderer {
     if (!ctx || !m) return;
 
     const theme = opts.theme;
-    const key = themeKey(theme);
-    if (key !== this.#themeKey) {
-      this.#palette = buildPalette(theme);
-      this.#themeKey = key;
+    // 참조가 같으면 아무것도 하지 않는다(흔한 경우). 다르면 그때만 내용을 비교한다 —
+    // 새 객체지만 내용이 같은 경우(테마를 다시 파싱해 넘기는 소비자)에도 palette 를 지킨다.
+    if (theme !== this.#themeRef) {
+      this.#themeRef = theme;
+      const key = themeKey(theme);
+      if (key !== this.#themeKey) {
+        this.#palette = buildPalette(theme);
+        this.#themeKey = key;
+      }
     }
 
     const bg = hex(theme.background);

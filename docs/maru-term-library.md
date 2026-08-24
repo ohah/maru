@@ -149,6 +149,12 @@ interface Renderer { /* 픽셀 소유 */ attach, draw }
 - **폰트는 격자를 재기 전에 등록돼야 한다.** 나중에 로드하면 셀 크기가 폴백 폰트 기준으로 굳는다.
 - **워커에서도 따로 등록한다.** OffscreenCanvas 가 보는 폰트 집합은 워커의 것이라(`self.fonts`) 메인에서 등록한 face 가 거기 없다. 메인은 `document.fonts`, 워커는 `self.fonts` — `globalThis.fonts` 만 보면 메인에서 조용히 아무 일도 일어나지 않는다.
 
+**조합 중에 온 `Cmd` 조합은 조합을 확정시키고 거기서 끝난다** — 키 자체는 보내지 않는다.
+보내면 순서가 뒤집힌다: 확정 글자는 `key()` 로 **코어(워커일 수 있다)를 거쳐** 나오는데
+바인딩은 `sendText` 로 **메인에서 곧바로** 나가므로, 커서가 먼저 움직이고 글자가 그 뒤에
+들어간다(실측: "무" 확정 + "야" 조합 중 `Cmd+←` → `야무`). 한 tick 미뤄도 워커 왕복이 더 느려
+소용이 없다. macOS 네이티브 앱들도 조합 중 명령키를 확정에 쓴다 — 사용자는 한 번 더 누르면 된다.
+
 ## 5.2 기본 키바인딩
 
 코어의 키 인코딩은 `Cmd+Backspace`를 평범한 `Backspace`와 구분하지 않는다(둘 다 `\x7f`). macOS 줄 편집 관례를 셸 시퀀스로 옮기는 층이 따로 필요하고, 그 표는 **maru 본체와 같아야 한다** — `src/config/keybinding.zig`의 `default_terminal_bindings`가 단일 출처이고 Ghostty 기본 keybind 와도 동작이 같다.

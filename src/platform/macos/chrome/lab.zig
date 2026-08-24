@@ -64,6 +64,16 @@ pub const ScenarioId = enum {
     /// 아무것도 자르지 않고, 행의 칠과 글자가 위쪽 고정 chrome(탭 줄·요약 줄) 위에 그려진다
     /// (사용자 캡처 2026-08-21). 스크롤이 없는 `scm_rows` 로는 그 상태를 만들 수 없다.
     scm_scrolled,
+    /// 같은 목록을 **작은 터미널 폰트**(`font.size` 12 상당)로 그린 상태.
+    ///
+    /// 이 축에는 골든이 하나도 없었고, 그 사이 결함이 두 번 지나갔다. chrome 텍스트는 role 이 정한
+    /// **고정 크기**(`list_row` 14pt)로 그려지는데 자리 계산은 터미널 셀에서 나온다 — 둘은 의도적으로
+    /// 독립이라 사용자가 폰트를 줄이면 벌어진다. 셀 8 하나만 보던 골든은 그 상태를 **전혀 못 봤고**,
+    /// 실측으로 셀 7 에서 이름과 경로 꼬리가 붙었다(`staged.zigsrc/session/`).
+    ///
+    /// 셀 폭과 높이를 **함께** 줄인다 — 폭만 줄이면 제품에 없는 조합이 되어(셀은 폰트 크기에서 나온다)
+    /// 판정이 거짓이 된다. 실제로 그 잘못된 픽스처로 한 번 오판했다.
+    scm_small_font,
     /// 파일 탐색기 **행 목록**. 이 도크에는 Lab 시나리오도 시각 골든도 없었다 — FT1 이 행을 셀 격자에서
     /// typed component 로 옮기면서 밀도·아이콘·들여쓰기 안내선·상태 점을 전부 새로 그렸는데, 그 픽셀을
     /// 보는 자동 판정자는 하나도 없었다(계획 문서 §6 이 그 한계를 적어 두고 있다). 실제로 그 단계에서
@@ -211,6 +221,10 @@ pub const Scenario = struct {
     /// (`chrome_lab_smoke.fontPxFor`). 그 근사가 픽스처 쪽에 있는 것이 요점이다 — 백엔드는
     /// 폰트 크기를 그대로 받고 역산을 모른다.
     font_px: u16 = 13,
+    /// face 의 **포인트당 advance**(× 1000). 하네스가 native 메트릭에서 재서 넣는다 — Lab 이 자기
+    /// 합성 셀에서 비율을 만들면 제품과 다른 산술이 되고, 실제로 작은 셀 조합에서 2px 이 모자랐다
+    /// (예약 82px 대 실제 84px). 제품은 `advance_milli_px` 로 정확한 값을 쓰므로 Lab 도 같은 출처를 쓴다.
+    advance_milli_per_point: u32 = 0,
     /// 그릴 줄들. **`null`이면 시나리오가 자기 픽스처를 고른다** — 기존 시나리오는 전부 그쪽이라
     /// 캡처가 바이트 그대로다.
     ///
@@ -271,7 +285,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font => buildScmFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
@@ -930,7 +944,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1125,10 +1139,10 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // scm_dock은 `UiRect`(원점 포함)를 받는다 — Lab 시나리오는 크기만 들고 원점은 0,0이다.
         .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },
         .cell_width_px = scenario.cell_w_px,
-        // 제품과 같은 입력을 준다(`app_session/scm_dock.zig` 의 `advanceMilliPerPoint`) — Lab 의 셀과
-        // 폰트 크기 관계에서 뽑는다. 이 값이 없으면 컴포넌트가 셀 기반 추정으로 물러나고, 그러면 캡처가
-        // **제품이 쓰는 산술을 예고하지 못한다**.
-        .advance_milli_per_point = if (scenario.font_px == 0) 0 else @intCast(@as(u32, scenario.cell_w_px) * 1000 / scenario.font_px),
+        // 제품과 같은 입력을 준다(`app_session/scm_dock.zig` 의 `advanceMilliPerPoint`). 하네스가
+        // **native 메트릭에서 실제 face 를 재서** 넣는다 — 합성 셀에서 비율을 만들면 제품과 다른 산술이
+        // 되고, 작은 셀 조합에서 실제로 2px 이 모자랐다(예약 82px 대 실제 84px).
+        .advance_milli_per_point = scenario.advance_milli_per_point,
         .snapshot_generation = 1,
         .items = &items,
         .branch = "feat/lab-fixture",

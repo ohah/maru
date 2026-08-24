@@ -19823,6 +19823,41 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
 
+    // ── ⑤b **세션이 시작되면 base(턴 0)를 찍는다**(AT1) ───────────────────────────────────
+    // 타임라인은 「턴 K = 스냅샷[K+1] ↔ 스냅샷[K]」라 스냅샷이 하나면 완료된 턴이 **0개**다. base 가
+    // 없으면 그 세션의 **첫 턴이 화면에 아예 안 뜬다** — 두 번째 턴이 끝나야 보인다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_turn_snapshot_calls = 0;
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"44444444-4444-4444-8444-444444444444\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+
+    // **돌고 있을 때의 `SessionStart` 는 base 가 아니다 — 그리고 두 번 찍지 않는다.**
+    // resume·컨텍스트 압축이 턴 중간에 `SessionStart` 를 만드는데, 그 전이(`running → idle`)는 이미
+    // «턴 끝» 으로 찍힌다. 그 자리를 base 로도 세면 **한 이벤트가 두 사유**를 만들어 셈이 갈린다.
+    // `opensSessionBase` 의 `previous != .running` 한 줄이 그것을 막고, 이 단언이 그 줄을 지킨다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_turn_snapshot_calls = 0;
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"44444444-4444-4444-8444-444444444444\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+
+    // 배치에 base 와 턴 끝이 **함께** 와도 한 번이다(첫 프롬프트가 곧바로 끝난 세션).
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.test_turn_snapshot_calls = 0;
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"44444444-4444-4444-8444-444444444444\"}\n" ++ "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n" });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+
     // ── ⑥ **자식이 만든 턴 끝의 알림 본문은 lead 의 것이다** ───────────────────────────────
     // lead 가 먼저 끝나고 자식이 남으면 턴 끝 전이는 마지막 `SubagentStop` 에서 일어난다. 그 이벤트의
     // `last_assistant_message` 는 **자식의 응답**이다(실측 `"from-child"`) — 그것을 그대로 실으면
@@ -19968,6 +20003,35 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqualStrings("33333333-3333-4333-8333-333333333333", term.agent_transcript.identity());
     try std.testing.expectEqualStrings("새 세션의 답", term.agent_transcript.reply());
+}
+
+test "세션 base 와 턴 끝은 한 이벤트가 동시에 만들지 못한다 (AT1)" {
+    // **이 배타성이 `SessionStart` 를 두 번 찍지 않게 하는 유일한 근거**다. 「겹치지 않는다」를 산문으로
+    // 두면 다음 사람이 `opensSessionBase` 의 `previous != .running` 을 «불필요한 가드» 로 읽고 지운다 —
+    // 그러면 turn-중간 resume 이 base 와 턴 끝을 동시에 세운다. 그래서 **값으로** 남긴다.
+    //
+    // 두 술어를 실제 제품 함수로 부른다(규칙을 여기서 다시 적지 않는다 — 그러면 단일 출처가 깨진다).
+    const hook_mode = maru.session.agent_hook_mode;
+    const turn_snapshot = maru.session.turn_snapshot;
+    const states = [_]maru.session.agent_observer.State{ .unknown, .running, .blocked, .idle };
+    for (states) |prev| {
+        for ([_]maru.session.agent_hook_event.Kind{ .session_start, .stop, .user_prompt_submit, .pre_tool_use, .notification }) |kind| {
+            const ev: maru.session.agent_hook_event.Event = .{ .kind = kind };
+            const now = hook_mode.next(prev, ev);
+            const ends = turn_snapshot.isTurnEnd(AppSession.turnStateOf(prev), AppSession.turnStateOf(now));
+            const opens = hook_mode.opensSessionBase(prev, ev);
+            try std.testing.expect(!(ends and opens));
+        }
+    }
+
+    // 그리고 **둘 다 실제로 일어나는** 값들이다 — 위 단언이 「둘 다 늘 거짓」이라는 항진명제로 통과하지
+    // 않게 각각 참이 되는 자리를 하나씩 못 박는다(적대적 검증: 그 함정을 이 저장소가 이미 겪었다).
+    const start: maru.session.agent_hook_event.Event = .{ .kind = .session_start };
+    try std.testing.expect(hook_mode.opensSessionBase(.unknown, start)); // cold start = base
+    try std.testing.expect(turn_snapshot.isTurnEnd( // 턴 중간 resume = 턴 끝
+        AppSession.turnStateOf(.running),
+        AppSession.turnStateOf(hook_mode.next(.running, start)),
+    ));
 }
 
 test "hook mode fills state and conversation from the event log, and only then" {

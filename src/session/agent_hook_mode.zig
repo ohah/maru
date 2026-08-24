@@ -408,6 +408,28 @@ pub fn suppressesNotice(ev: event.Event) bool {
     return ev.kind == .session_start;
 }
 
+/// 이 이벤트가 **세션 base 스냅샷(턴 0)** 을 열어야 하나(AT1 — 계약 §3 표의 `SessionStart` 행).
+///
+/// 타임라인은 「턴 K = 스냅샷[K+1] ↔ 스냅샷[K]」라 **스냅샷이 하나면 완료된 턴이 0개**다. base 가 없으면
+/// 그 세션의 **첫 턴이 화면에 아예 안 뜬다** — 두 번째 턴이 끝나야 첫 턴이 보인다.
+///
+/// **`isTurnEnd` 와 상호배타다.** `previous == .running` 이면 `SessionStart` 는 `running → idle` 전이를
+/// 만들어 **이미 턴 끝으로 찍힌다**(resume·컨텍스트 압축이 그렇다). 그 자리를 base 로도 세면 한 이벤트가
+/// 두 사유를 만들어 셈이 갈린다. 그래서 여기서 `running` 을 뺀다 — 그 한 줄이 「지금도 찍히는 것」과
+/// 「새로 찍는 것」을 정확히 가르고, 그 배타성을 test 가 값으로 못 박는다.
+///
+/// | previous | isTurnEnd | opensSessionBase |
+/// | --- | --- | --- |
+/// | `running` | 참 | 거짓 (턴 끝이다) |
+/// | `idle`·`blocked`·`unknown` | 거짓 | 참 (cold start·`/clear` 직후·승인 대기 중 resume) |
+///
+/// **자식은 세션을 열지 않는다**(`agent_id`).
+pub fn opensSessionBase(previous: State, ev: event.Event) bool {
+    if (ev.agent_id.len != 0) return false;
+    if (ev.kind != .session_start) return false;
+    return previous != .running;
+}
+
 /// 이 이벤트가 **그 Term 의 세션 신원**을 싣고 오나(AT1 — 링의 키다, 계약 §6.1).
 ///
 /// 훅 모드에는 신원을 갱신할 다른 자리가 **없다**. 관측 모드가 쓰는 자식 env 폴링
@@ -1665,4 +1687,21 @@ test "자식 이벤트와 빈 값은 신원을 싣지 않는다" {
     // 빈 값은 «모른다» 이지 «지워라» 가 아니다 — 아는 신원을 이 경로로 날리지 않는다.
     try std.testing.expect(!carriesSessionIdentity(.{ .kind = .stop, .session_id = "" }));
     try std.testing.expect(!carriesSessionIdentity(.{ .kind = .unknown }));
+}
+
+test "세션 base 는 «돌고 있지 않을 때» 의 SessionStart 다" {
+    const start: event.Event = .{ .kind = .session_start };
+    // cold start · `/clear` 직후 · 승인 대기 중 resume — 셋 다 base 다.
+    try std.testing.expect(opensSessionBase(.unknown, start));
+    try std.testing.expect(opensSessionBase(.idle, start));
+    try std.testing.expect(opensSessionBase(.blocked, start));
+    // **돌고 있으면 base 가 아니다** — 그 전이는 이미 «턴 끝» 으로 찍힌다(resume·컨텍스트 압축).
+    try std.testing.expect(!opensSessionBase(.running, start));
+
+    // 다른 이벤트는 세션을 열지 않는다.
+    for ([_]event.Kind{ .stop, .user_prompt_submit, .pre_tool_use, .notification }) |k| {
+        try std.testing.expect(!opensSessionBase(.unknown, .{ .kind = k }));
+    }
+    // 자식은 세션을 열지 않는다.
+    try std.testing.expect(!opensSessionBase(.unknown, .{ .kind = .session_start, .agent_id = "a5" }));
 }

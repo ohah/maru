@@ -242,6 +242,10 @@ pub const default_terminal_bindings = [_]TerminalBinding{
 /// Cmd-무시 fallthrough. Cmd+Shift+]/[(다음/이전 탭)은 Shift+문자가 layout마다 달라(`]`→`}`) 별도
 /// 처리가 필요해 탭바 UI(클릭 전환)와 함께 후속에서 추가한다.
 pub const default_app_bindings = [_]AppBinding{
+    // Cmd+Ctrl+D: 편집기에서 다음 일치에 커서 추가(VSCode ⌘D). **임시 chord다** — §9.1이 확정한
+    // 것은 `⌘D`이지만 편집기 포커스 컨텍스트가 서야 터미널의 pane split과 갈라 쓸 수 있다.
+    // 자세한 근거는 `action.zig`의 `add_next_occurrence`가 든다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .control = true }, .key = .{ .char = 'D' } }, .action = .add_next_occurrence },
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).

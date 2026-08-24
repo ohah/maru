@@ -438,7 +438,7 @@ pub fn editorMeta(term: *const Term) struct { path: ?[]const u8, read_only: bool
     }
     return .{
         .path = if (term.rt.editor_path) |p| p else null,
-        .read_only = if (term.rt.editor_doc) |d| d.file.doc.read_only else false,
+        .read_only = if (term.rt.editor_doc) |d| d.file.read_only else false,
     };
 }
 

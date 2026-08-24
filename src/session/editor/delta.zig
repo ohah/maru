@@ -147,13 +147,25 @@ pub fn apply(
     }
 
     // ③ **뒤에서부터** 버퍼를 고친다 — 앞쪽 offset이 아직 안 밀렸으므로 그대로 쓸 수 있다.
-    var i = d.changes.len;
-    while (i > 0) {
-        i -= 1;
-        const c = d.changes[i];
-        if (c.end > c.start) _ = try buf.delete(c.start, c.end);
-        if (c.text.len > 0) _ = try buf.insert(c.start, c.text);
+    //
+    // **변경이 여럿이면 중간에 실패할 수 있다.** 그때 일부만 적용된 채 두면 문서가 사용자가 요청한
+    // 적 없는 상태가 되고, 역연산은 그 상태를 되돌리지 못한다(전부 적용됐다고 가정하고 만든 좌표다).
+    // 그래서 편집 전 판을 `O(1)`로 떠 두었다가 되돌린다 — persistent rope라 **할당 없이** 된다.
+    // 적대적 검증(2026-08-24)이 이 자리를 열어 뒀던 것을 반증했다.
+    var snap = buf.snapshot();
+    var need_rollback = true;
+    errdefer if (need_rollback) buf.restore(snap);
+    {
+        var i = d.changes.len;
+        while (i > 0) {
+            i -= 1;
+            const c = d.changes[i];
+            if (c.end > c.start) _ = try buf.delete(c.start, c.end);
+            if (c.text.len > 0) _ = try buf.insert(c.start, c.text);
+        }
     }
+    need_rollback = false;
+    snap.deinit();
 
     // ④ selection을 민다. **버퍼가 다 바뀐 뒤 한 번에** — 중간 상태가 새어 나가지 않는다(§3.3).
     for (selections.items) |*s| {
@@ -171,6 +183,11 @@ pub fn apply(
     selections.column = null;
 
     allocator.free(removed);
+
+    // **역연산도 delta다 — 같은 불변식을 만족해야 한다.** 정렬·비겹침이 성립하는 것은 증명할 수
+    // 있지만(입력이 정렬·비겹침이고 shift가 누적이라 새 시작점이 앞 것의 끝 이상이다), 증명을
+    // 적어 두는 것과 확인하는 것은 다르다. 이 단언이 그 증명을 **실행 중에** 다시 본다.
+    std.debug.assert((Delta{ .changes = inverse_changes }).isWellFormed());
     return .{ .allocator = allocator, .changes = inverse_changes };
 }
 
@@ -454,4 +471,41 @@ test "DLT11: 무작위 delta 300번을 배열 모델과 대조하고 매번 되�
         var again = try apply(testing.allocator, &buf, back.delta(), &sels);
         defer again.deinit();
     }
+}
+
+test "DLT12: 변경이 여럿일 때 중간에 실패해도 버퍼가 반쯤 바뀌지 않는다" {
+    // **이 판정자는 적대적 검증이 세그폴트를 낸 자리에서 나왔다.** 그때는 소유권 규약이 어긋나
+    // 이중 해제였고(buffer.zig에서 고쳤다), 고친 뒤에도 **일부만 적용된 채 남는** 문제가 남았다 —
+    // 역연산은 전부 적용됐다고 가정한 좌표라 그 상태를 되돌리지 못한다.
+    const original = "aaaa bbbb cccc dddd eeee";
+    var idx: usize = 0;
+    var failures: usize = 0;
+    while (idx < 90) : (idx += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = idx });
+        const a = failing.allocator();
+
+        var buf = buffer.Buffer.init(a, original) catch continue;
+        defer buf.deinit();
+
+        var items = [_]selection.Selection{selection.Selection.at(0)};
+        var sels = selection.Selections.init(&items, 0);
+
+        const changes = [_]Change{
+            .{ .start = 0, .end = 4, .text = "X" },
+            .{ .start = 5, .end = 9, .text = "YY" },
+            .{ .start = 10, .end = 14, .text = "ZZZ" },
+        };
+        if (apply(a, &buf, .{ .changes = &changes }, &sels)) |inv| {
+            var done = inv;
+            done.deinit();
+        } else |_| {
+            failures += 1;
+            const after = buf.copyAll(testing.allocator) catch continue;
+            defer testing.allocator.free(after);
+            try testing.expectEqualStrings(original, after);
+            // selection도 안 밀렸다 — 매핑은 버퍼가 다 바뀐 뒤에만 돈다.
+            try testing.expectEqual(@as(usize, 0), sels.items[0].focus);
+        }
+    }
+    try testing.expect(failures > 0); // 실패를 못 만들었으면 아무것도 판정하지 않은 것이다
 }

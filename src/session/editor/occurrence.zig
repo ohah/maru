@@ -44,12 +44,18 @@ pub const Range = struct {
 ///
 /// **이미 고른 자리를 건너뛴다.** 안 건너뛰면 같은 자리에 커서가 겹쳐 쌓이고, 그 상태로 타이핑하면
 /// 한 글자가 두 번 들어간다.
+/// **`selections`는 문서 순서로 정렬돼 있어야 한다.** 이미 고른 자리를 이분 탐색으로 거르기
+/// 때문이고, 그 전제가 없으면 비용이 일치 수 × 커서 수로 곱해진다(위 `alreadySelected` 참고).
+/// 정렬은 호출자가 맞춘다 — 제품은 커서를 추가 순서로 들고 있어서 그 자리에서 한 번 정렬한다.
 pub fn nextOccurrence(
     content: []const u8,
     selections: []const selection.Selection,
     primary: usize,
 ) ?Range {
     if (selections.len == 0 or primary >= selections.len) return null;
+    if (std.debug.runtime_safety) {
+        for (selections[1..], 0..) |s, i| std.debug.assert(s.start() >= selections[i].start());
+    }
     const seed = selections[primary];
 
     // ① 아무것도 안 골랐으면 커서 밑 낱말을 고른다. **그 자체가 "다음 일치"다** — 커서 하나에서
@@ -69,8 +75,12 @@ pub fn nextOccurrence(
 
     // ② 이미 고른 것 중 **가장 뒤**부터 찾는다. 그래야 누를 때마다 아래로 내려간다 —
     //    primary 뒤부터 찾으면 커서를 여럿 놓은 뒤 순서가 뒤엉킨다.
+    //
+    // **문서 길이로 조인다.** 씨앗만 범위를 검사하고 나머지는 안 봤는데, 낡은 offset을 든
+    // selection 하나가 `content[0..from]`을 범위 밖으로 만들어 **패닉했다**(적대적 검증 2026-08-25:
+    // `index 99, len 11`). 편집·재로드로 문서가 짧아지면 실제로 생기는 상태다.
     var from: usize = 0;
-    for (selections) |s| from = @max(from, s.end());
+    for (selections) |s| from = @max(from, @min(s.end(), content.len));
 
     if (scan(content, needle, from, content.len, whole_word, selections)) |r| return r;
     // ③ 문서 끝까지 없으면 처음으로 돌아간다(VSCode도 감는다).
@@ -108,9 +118,27 @@ fn seedIsWord(content: []const u8, lo: usize, hi: usize) bool {
     return w.lo == lo and w.hi == hi;
 }
 
+/// 이 범위가 이미 골라져 있는가. **selections가 문서 순서라고 보고 이분 탐색한다.**
+///
+/// 선형으로 훑으면 일치 수와 커서 수가 곱해진다. 실측(ReleaseFast, "전부 고른 뒤 한 번 더 누르기"):
+///
+/// | 일치 수 | 선형 | 이분 |
+/// |---|---|---|
+/// | 500 | 310µs | 62µs |
+/// | 1000 | 1081µs | 132µs |
+/// | 2000 | 2754µs | **275µs** |
+///
+/// **곡선이 2차식에서 선형으로 바뀌는 것이 요점이다.** 선형 판은 상한(`max_cursors` 10,000)에서
+/// 한 번 누르는 데 수십 ms가 되어 화면이 멈춘 것처럼 보인다. 전부 고르는 데 드는 총합도
+/// 7085 → 2444µs로 줄었다.
 fn alreadySelected(selections: []const selection.Selection, r: Range) bool {
-    for (selections) |s| {
-        if (s.start() == r.start and s.end() == r.end) return true;
+    var lo: usize = 0;
+    var hi: usize = selections.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const s = selections[mid].start();
+        if (s == r.start) return selections[mid].end() == r.end;
+        if (s < r.start) lo = mid + 1 else hi = mid;
     }
     return false;
 }
@@ -234,6 +262,17 @@ test "OCC13: 문서 끝을 넘는 selection은 null — 편집 뒤 낡은 offset
     const content = "abc";
     var stale = [_]selection.Selection{selection.Selection.fromPoints(2, 99)};
     try testing.expectEqual(@as(?Range, null), nextOccurrence(content, &stale, 0));
+
+    // **씨앗이 아닌 것도 조여야 한다.** 이 판정자는 처음에 씨앗만 봤고, 그 사이로 낡은 offset을 든
+    // 두 번째 selection이 들어와 `index 99, len 11`로 패닉했다(적대적 검증). 씨앗은 멀쩡한데
+    // 탐색 시작점이 배열 전체의 최대값이라 그쪽이 범위를 넘긴 것이다.
+    const doc = "foo bar foo";
+    var mixed = [_]selection.Selection{
+        selection.Selection.fromPoints(0, 3),
+        selection.Selection.fromPoints(50, 99),
+    };
+    const r = nextOccurrence(doc, &mixed, 0).?;
+    try testing.expectEqual(@as(usize, 8), r.start); // 죽지 않고 두 번째 foo를 답한다
 }
 
 test "OCC14: 멀티바이트 문서에서도 byte 축으로 정확히 답한다" {

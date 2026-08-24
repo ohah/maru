@@ -1731,10 +1731,28 @@ const TermRuntime = struct {
     /// 렌더가 아니라 **입력이 세운다**. 렌더는 이 값을 읽어 띠를 그릴 뿐이고, 다음 프레임이 덮지
     /// 않는다 — `editor_hit_*`(렌더가 굳히는 스냅숏)와 방향이 반대다.
     editor_selection: ?maru.session.editor.selection.Selection = null,
+    /// **커서를 여럿 놓았을 때 primary 말고 나머지**(§3.2 멀티 selection · §9.1 "다음 일치 추가").
+    ///
+    /// **왜 `editor_selection`을 배열로 바꾸지 않았나**: 그 필드는 포인터 제스처가 실시간으로 쓰는
+    /// 자리다(클릭·드래그·더블/트리플). 그것을 배열로 바꾸면 제스처 경로 전부가 "몇 번째를
+    /// 고치는가"를 들고 다녀야 하는데, 마우스는 **언제나 primary 하나만** 움직인다(§3.2a가 열 선택
+    /// 원본을 단수로 둔 것과 같은 근거 — 마우스가 하나다). 그래서 primary는 제자리에 두고 나머지를
+    /// 옆에 둔다.
+    ///
+    /// **읽는 쪽이 둘을 합쳐 본다.** `forEachSelection`이 그 유일한 통로이고, 직접 읽으면 커서
+    /// 하나만 보이는 결함이 조용히 생긴다 — 마크·복사가 그 통로를 쓴다.
+    ///
+    /// **문서 순서로 정렬돼 있지 않다**(추가된 순서다). 정렬이 필요한 소비처(복사 — §3.4)가
+    /// 그 자리에서 정렬한다.
+    editor_extra_selections: []maru.session.editor.selection.Selection = &.{},
     /// 위 선택을 **줄별 byte 범위**로 자른 것(렌더가 요구하는 축). 화면 밖 줄은 빈 슬라이스다.
     /// 문서 줄 수만큼 한 번 잡고 재사용한다 — `editor_hit_rows`와 같은 관례다.
     editor_selection_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
-    /// 위 배열이 가리키는 실제 저장소. 줄마다 범위가 **하나**뿐이라(선택은 연속이다) 줄 수만큼이면 된다.
+    /// 위 배열이 가리키는 실제 저장소.
+    ///
+    /// **커서가 여럿이면 한 줄에 범위가 여럿 선다.** 선택 하나였을 때는 줄마다 최대 하나라 줄 수만큼
+    /// 잡으면 됐지만, 멀티커서는 같은 줄에 여러 개가 놓인다 — `editor_find_mark_buf`가 매치를 담느라
+    /// 이미 겪은 자리와 같다. 그래서 크기는 **줄 수가 아니라 실제 범위 수**로 잡는다.
     editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
     /// **검색 결과**를 줄별 범위로 자른 것(§5.1). `editor_selection_marks`와 자리도 축도 같고
     /// **저장소 크기만 다르다** — 선택은 이어진 하나라 줄마다 최대 하나지만, 매치는 한 줄에
@@ -8415,6 +8433,10 @@ pub const AppSession = struct {
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
+            .add_next_occurrence => _ = editor_ops.addNextOccurrence(
+                self,
+                pane_ops.activePane(self).activeTerm(),
+            ),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).
@@ -17853,7 +17875,7 @@ pub const AppSession = struct {
                     if (rn < max_status_bar_right_items) {
                         // `none`(줄바꿈이 하나도 없는 파일)은 **말하지 않는다** — 그때 "LF"라고 적으면
                         // 파일에 없는 사실을 단정하는 것이고, 저장이 되돌릴 값도 없다.
-                        const eol: ?[]const u8 = switch (doc.file.doc.format.dominant_ending) {
+                        const eol: ?[]const u8 = switch (doc.file.format.dominant_ending) {
                             .lf => "LF",
                             .crlf => "CRLF",
                             .none => null,

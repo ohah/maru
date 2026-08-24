@@ -141,20 +141,24 @@ pub fn build(allocator: std.mem.Allocator, bytes: []const u8) !LineIndex {
     var lines: std.ArrayList(Line) = .empty;
     errdefer lines.deinit(allocator);
 
+    // **줄 수를 먼저 세어 한 번에 잡는다.** 세는 비용(SIMD 한 번)보다 증설 비용이 컸다 — 실측에서
+    // 이 예약이 나머지 절반을 걷어냈다. `+ 1`은 마지막 줄바꿈 뒤의 줄(문서가 비었으면 그 한 줄)이다.
+    try lines.ensureTotalCapacityPrecise(allocator, std.mem.count(u8, bytes, "\n") + 1);
+
+    // **줄바꿈을 하나씩 세지 않고 건너뛰며 찾는다.** byte 단위 루프는 편집마다 문서 전체를 다시
+    // 훑는 경로에서 지배적이었다 — 실측(ReleaseFast, 1 MiB) 편집 1회 1178µs 중 대부분이 여기였고,
+    // rope 편집(94µs)·평탄화(141µs)보다 한 자릿수 컸다. `indexOfScalarPos`는 같은 답을 벡터 폭으로
+    // 낸다. **CRLF 판정과 경계 규칙은 그대로다**(아래 검사 순서가 옛 루프와 같다).
     var start: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (bytes[i] == '\n') {
-            // 앞 byte가 `\r`이면 CRLF 한 덩어리다. 첫 byte(i == 0)에는 앞이 없으므로 검사 순서가 중요하다.
-            const is_crlf = i > start and bytes[i - 1] == '\r';
-            try lines.append(allocator, .{
-                .start = start,
-                .end_with_ending = i + 1,
-                .ending = if (is_crlf) .crlf else .lf,
-            });
-            start = i + 1;
-        }
-        i += 1;
+    while (std.mem.indexOfScalarPos(u8, bytes, start, '\n')) |i| {
+        // 앞 byte가 `\r`이면 CRLF 한 덩어리다. 줄 첫 byte에는 앞이 없으므로 `i > start`가 먼저다.
+        const is_crlf = i > start and bytes[i - 1] == '\r';
+        try lines.append(allocator, .{
+            .start = start,
+            .end_with_ending = i + 1,
+            .ending = if (is_crlf) .crlf else .lf,
+        });
+        start = i + 1;
     }
 
     // 마지막 줄바꿈 뒤에 남은 것 — 또는 문서가 비었을 때의 그 한 줄.

@@ -209,6 +209,19 @@ fn hostIdFromToken(name: []const u8) ?u128 {
 /// 비대칭이기 때문이다 — 죽은 칸을 남기면 다음 실행이 거두지만, 산 칸을 지우면 그 host 의 훅이 그 자리에서
 /// 죽는다.
 fn segmentOwnerAlive(segment_dir: [:0]const u8) bool {
+    // **우리 것이 아닌 모양이면 손대지 않는다.** 심링크나 남의 uid 로 바뀐 자리를 지우면 우리가 남의
+    // 파일을 지우는 도구가 된다(socket_server 가 소켓에 대해 하는 «위장 방어» 와 같은 결). `deleteTree` 는
+    // 심링크를 따라 **대상의 내용**을 지울 수 있어 대가가 크다.
+    //
+    // ⚠️ **이 가지는 테스트로 못 밟는다** — 호출부가 이미 `entry.kind != .directory` 로 심링크를 거르고,
+    // 남의 uid 디렉터리를 우리 0700 캐시 안에 만들려면 root 가 필요하다. 뮤테이션에서 이 줄만 지워도
+    // 초록인 것이 그 증거다. 그래도 남기는 이유는 **삭제 경로의 마지막 방어**이기 때문이다(반복자가
+    // `DT_UNKNOWN` 을 주는 파일시스템처럼 앞 가드가 약해지는 경우가 실재한다).
+    if (!ownedDirectory(segment_dir)) return true;
+    // **막 손댄 칸은 남긴다.** 마커가 아직 우리 pid 로 안 바뀐 창이 있다 — 업그레이드 직후 후계자의 칸에는
+    // 죽은 선임자의 pid 가 적혀 있고(이름은 host_id 라 그대로), 그 사이에 **다른** host 가 sweep 하면
+    // 살아 있는 칸을 지운다. 죽은 칸은 어차피 다음 실행이 거두므로 늦게 거두는 쪽이 안전하다.
+    if (recentlyTouched(segment_dir)) return true;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ segment_dir, owner_marker_name }) catch return true;
     const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
@@ -225,6 +238,7 @@ fn segmentOwnerAlive(segment_dir: [:0]const u8) bool {
 /// 칸 안에 주인을 적는다(0600). 이미 있으면 덮어쓴다 — 업그레이드로 프로세스가 바뀌면 그 후계자가
 /// 자기 pid 로 갱신한다(칸 **이름**은 host_id 라 그대로다).
 fn writeOwnerMarker(segment_dir: [:0]const u8) void {
+    if (!ownedDirectory(segment_dir)) return; // 우리 칸이 아닌 자리에 우리 신원을 적지 않는다
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ segment_dir, owner_marker_name }) catch return;
     const fd = c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
@@ -235,6 +249,27 @@ fn writeOwnerMarker(segment_dir: [:0]const u8) void {
     _ = c.write(fd, text.ptr, text.len);
 }
 
+/// 그 경로가 **우리 uid 의 실제 디렉터리**인가(심링크는 따라가지 않는다).
+fn ownedDirectory(path: [:0]const u8) bool {
+    var st: posix.Stat = undefined;
+    if (c.fstatat(posix.AT.FDCWD, path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0) return false;
+    return posix.S.ISDIR(st.mode) and st.uid == c.getuid();
+}
+
+/// 최근에 손댄 칸인가(위 유예). 시각을 못 읽으면 «최근» 으로 답한다 — 모르면 남긴다.
+fn recentlyTouched(path: [:0]const u8) bool {
+    var st: posix.Stat = undefined;
+    if (c.fstatat(posix.AT.FDCWD, path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0) return true;
+    var now: c.timespec = undefined;
+    if (c.clock_gettime(.REALTIME, &now) != 0) return true; // 시각을 모르면 남긴다
+    const age = @as(i64, @intCast(now.sec)) - @as(i64, @intCast(st.mtimespec.sec));
+    return age < sweep_grace_seconds;
+}
+
+/// 죽은 것으로 판정하기 전에 두는 유예(초). 짧으면 위 창을 못 덮고, 길면 죽은 칸이 그만큼 남는다 —
+/// 남는 쪽 대가가 작아서(다음 실행이 거둔다) 넉넉히 잡는다.
+const sweep_grace_seconds: i64 = 60;
+
 /// 주인 마커 파일 이름. `<32 hex>.ndjson` 과 겹치지 않는 이름이라 로그 리더가 이것을 이벤트 파일로
 /// 오인하지 않는다(GUI 는 `.ndjson` 만 읽는다).
 const owner_marker_name = "owner.pid";
@@ -243,6 +278,15 @@ const owner_marker_name = "owner.pid";
 extern "c" fn getpgid(pid: c.pid_t) c.pid_t;
 
 const testing = std.testing;
+
+/// 테스트가 «유예를 넘긴 칸» 을 만들 때 쓴다 — 60초를 실제로 기다리지 않기 위해서다.
+fn testAgeSegment(path: [:0]const u8, seconds: i64) void {
+    var now: c.timespec = undefined;
+    if (c.clock_gettime(.REALTIME, &now) != 0) return;
+    const past: c.timeval = .{ .sec = @intCast(@as(i64, @intCast(now.sec)) - seconds), .usec = 0 };
+    var times = [2]c.timeval{ past, past };
+    _ = c.utimes(path.ptr, &times);
+}
 
 test "칸 이름은 계약 모듈이 만드는 이름과 정확히 같다" {
     // 이 파일이 접두나 폭을 손으로 적기 시작하면 GUI 가 읽는 이름과 갈린다 — 그 갈림의 증상은
@@ -305,6 +349,7 @@ test "sweep 은 주인이 살아 있는 칸을 남기고 죽은 칸만 거둔다
         _ = c.write(fd, text.ptr, text.len);
         _ = c.close(fd);
         try testing.expect(getpgid(999999) < 0); // 전제 확인 — 그 pid 가 실제로 없다
+        testAgeSegment(seg, sweep_grace_seconds * 2); // 유예를 넘긴 «오래된» 칸으로 만든다
     }
     // **우리 칸에는 죽은 pid 를 적어 둔다** — 업그레이드 직후 후계자의 칸이 그 상태다(마커는 아직
     // 선임자의 pid). 이름으로 먼저 걸러야 자기 칸을 안 지운다.
@@ -318,12 +363,14 @@ test "sweep 은 주인이 살아 있는 칸을 남기고 죽은 칸만 거둔다
         _ = c.write(fd, text.ptr, text.len);
         _ = c.close(fd);
     }
-    // 마커 없는 남: 갓 만들어져 아직 안 적힌 칸을 흉내 낸다(지우면 안 된다).
+    // 마커 없는 남: 주인을 알 수 없는 칸이다(지우면 안 된다). **유예 밖으로 늙혀** 「모르면 남긴다」
+    // 규칙만 남긴다 — 늙히지 않으면 유예가 먼저 걸러 이 규칙이 시험되지 않는다(뮤테이션이 그것을 잡았다).
     {
         const seg = try instanceDirPathIn(&buf, cache_base, unmarked_other);
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{seg});
         _ = c.unlink(path.ptr);
+        testAgeSegment(seg, sweep_grace_seconds * 2);
     }
 
     sweepDeadHostDirs(io, cache_base, own);
@@ -369,6 +416,9 @@ test "죽은 칸은 안에 파일이 남아 있어도 거둔다" {
         const text = "999999\n";
         _ = c.write(mfd, text.ptr, text.len);
         _ = c.close(mfd);
+        var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const seg = try instanceDirPathIn(&seg_buf, cache_base, dead);
+        testAgeSegment(seg, sweep_grace_seconds * 2);
     }
 
     sweepDeadHostDirs(io, cache_base, 0x11);
@@ -377,4 +427,75 @@ test "죽은 칸은 안에 파일이 남아 있어도 거둔다" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const dead_dir = try instanceDirPathIn(&buf, cache_base, dead);
     try testing.expect(c.fstatat(posix.AT.FDCWD, dead_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
+}
+
+test "주인이 죽어도 방금 손댄 칸은 남긴다 — 업그레이드 직후 창을 덮는다" {
+    // 후계자의 칸에는 **죽은 선임자의 pid** 가 잠시 남아 있다(이름은 host_id 라 그대로). 그 창에 다른
+    // host 가 sweep 하면 살아 있는 칸을 지운다 — 그래서 «막 손댄 칸» 은 pid 와 무관하게 남긴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    const cache_base = try std.fmt.allocPrint(testing.allocator, "{s}/cache/maru", .{root});
+    defer testing.allocator.free(cache_base);
+
+    const fresh_dead: u128 = 0x66;
+    ensureInstanceDir(io, cache_base, fresh_dead);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const seg = try instanceDirPathIn(&buf, cache_base, fresh_dead);
+    {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const marker = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{seg});
+        const fd = c.open(marker.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+        try testing.expect(fd >= 0);
+        const text = "999999\n"; // 죽은 pid
+        _ = c.write(fd, text.ptr, text.len);
+        _ = c.close(fd);
+    }
+    // mtime 은 방금이다(유예 안) — 그러므로 남아야 한다.
+    sweepDeadHostDirs(io, cache_base, 0x11);
+    var st: posix.Stat = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.fstatat(posix.AT.FDCWD, seg.ptr, &st, posix.AT.SYMLINK_NOFOLLOW));
+
+    // 같은 칸을 유예 밖으로 늙히면 그때는 거둔다 — 「영영 안 지운다」가 아니라 「늦게 지운다」다.
+    testAgeSegment(seg, sweep_grace_seconds * 2);
+    sweepDeadHostDirs(io, cache_base, 0x11);
+    try testing.expect(c.fstatat(posix.AT.FDCWD, seg.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
+}
+
+test "심링크로 바꿔친 칸에는 우리 신원을 적지 않는다" {
+    // 같은 uid 라도 그 자리가 **우리가 만든 디렉터리가 아니면** 손대지 않는다. 적으면 남의 디렉터리에
+    // 우리 파일을 만드는 것이고, 그 자리를 나중에 우리 것으로 알고 지우면 남의 파일을 지운다
+    // (socket_server 가 소켓에 대해 하는 «위장 방어» 와 같은 결).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    const cache_base = try std.fmt.allocPrint(testing.allocator, "{s}/cache/maru", .{root});
+    defer testing.allocator.free(cache_base);
+
+    // 먼저 정상 경로로 상위를 만들어 두고(다른 host_id 로), 그 다음 우리 칸 자리를 심링크로 선점한다.
+    ensureInstanceDir(io, cache_base, 0x1);
+    const victim = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/victim", .{root}, 0);
+    defer testing.allocator.free(victim);
+    try testing.expectEqual(@as(c_int, 0), c.mkdir(victim.ptr, 0o700));
+
+    const target: u128 = 0x77;
+    var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const seg = try instanceDirPathIn(&seg_buf, cache_base, target);
+    try testing.expectEqual(@as(c_int, 0), c.symlink(victim.ptr, seg.ptr));
+
+    ensureInstanceDir(io, cache_base, target);
+
+    // 심링크가 가리키는 곳에 우리 신원이 생기면 안 된다.
+    var marker_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const marker = try std.fmt.bufPrintZ(&marker_buf, "{s}/owner.pid", .{victim});
+    var st: posix.Stat = undefined;
+    try testing.expect(c.fstatat(posix.AT.FDCWD, marker.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
 }

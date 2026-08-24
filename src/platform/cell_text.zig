@@ -1000,7 +1000,7 @@ pub fn appendSidebarBellAndBadge(
     cells: *std.ArrayList(renderer.DrawCell),
     bell_col: u16,
     fg: terminal.Color,
-    unread: u32,
+    unread: usize,
     round_badge: bool,
 ) !void {
     try cells.append(allocator, .{ .row = 0, .col = bell_col, .codepoint = icons.codepoint(.bell), .width = 2, .style = .{ .foreground = fg } });
@@ -1034,7 +1034,7 @@ pub fn appendSidebarHeaderIcons(
     cells: *std.ArrayList(renderer.DrawCell),
     cols: u16,
     fg: terminal.Color,
-    unread: u32,
+    unread: usize,
 ) !bool {
     if (cols < sidebar_header_min_cols) return false;
     const sb = chrome.components.sidebar;

@@ -45,6 +45,10 @@ const session_host_admin_cli = if (builtin.os.tag == .macos)
     @import("platform/macos/session_host/admin_cli.zig")
 else
     struct {};
+const session_host_attach_cli = if (builtin.os.tag == .macos)
+    @import("platform/macos/session_host/external_attach_cli.zig")
+else
+    struct {};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -222,6 +226,11 @@ fn dispatch(
 
     if (std.mem.eql(u8, command, "runtime")) {
         try runPersistentReadCli(io, allocator, &args, stdout, stderr, .runtime);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "attach")) {
+        try runAttachCli(io, allocator, &args, stdout, stderr);
         return;
     }
 
@@ -3689,6 +3698,51 @@ fn persistentCliExit(
     std.process.exit(@intFromEnum(code));
 }
 
+fn runAttachCli(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |item| allocator.free(item);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |arg| try collected.append(allocator, try allocator.dupe(u8, arg));
+
+    const command = maru.cli.attach.parse(collected.items) catch |err| {
+        try stderr.print("maru attach: {s}\n\n", .{@errorName(err)});
+        try stderr.writeAll(maru.cli.attach.help);
+        return attachCliExit(stdout, stderr, .usage);
+    };
+    switch (command) {
+        .help => {
+            try stdout.writeAll(maru.cli.attach.help);
+            try stdout.flush();
+        },
+        .attach => |request| {
+            if (builtin.os.tag != .macos) {
+                try stderr.writeAll("maru: persistent session attach is unsupported on this platform\n");
+                return attachCliExit(stdout, stderr, .unsupported);
+            }
+            const code = try session_host_attach_cli.runRequest(io, allocator, request, stderr);
+            return attachCliExit(stdout, stderr, code);
+        },
+    }
+}
+
+fn attachCliExit(
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    code: maru.cli.attach.ExitCode,
+) noreturn {
+    stderr.flush() catch {};
+    stdout.flush() catch {};
+    std.process.exit(@intFromEnum(code));
+}
+
 fn runSessionCli(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -3815,6 +3869,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru runtime list [--json]
         \\  maru runtime get <32-lower-hex-runtime-id> [--json]
         \\  maru runtime end <32-lower-hex-runtime-id> [--yes]
+        \\  maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>
         \\  maru trace anonymize <input.trace> [output.trace]
         \\
         \\commands:
@@ -3840,6 +3895,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  session    read-only metadata for a single surface (`session get <id>`, `session --help`)
         \\  host       inspect the existing persistent session host without starting one (`host --help`)
         \\  runtime    inspect or explicitly end persistent runtimes without starting a host (`runtime --help`)
+        \\  attach     attach this terminal to an existing persistent runtime (`attach --help`)
         \\  browser    control a web surface (navigate/get-url/exec/get-cookies; asks for confirmation) (`browser --help`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\

@@ -239,7 +239,12 @@ fn correlateExternalTxCompletions(
         if (matched or completion.kind != .request or completion.stream_id != 0 or
             completion.wire_len != in_flight.wire_len)
             return false;
-        next = switch (client_control_correlation.observeProgress(
+        // Detach is a best-effort terminal notification: once the complete request frame has
+        // reached the kernel, cleanup must not wait for a response that the closing client will
+        // never consume. Other controls retain their strict response correlation.
+        next = if (in_flight.kind == .detach)
+            .idle
+        else switch (client_control_correlation.observeProgress(
             in_flight,
             .response_wait,
             completion.request_id,
@@ -9495,7 +9500,6 @@ pub const ExternalPumpStorage = struct {
         completed: *const CompletedControlState,
     ) bool {
         if (!ownerAuthorityValid(self) or
-            self.owner_authority.current.role != .controller or
             self.owner_authority.current.flow != .clear)
             return false;
         const generation = switch (self.owner_authority.current.generation) {
@@ -9507,9 +9511,12 @@ pub const ExternalPumpStorage = struct {
             !completed.expectation.isCanonical())
             return false;
         return switch (completed.expectation) {
-            .resize => self.semantic_state == .active and
+            .resize => self.owner_authority.current.role == .controller and
+                self.semantic_state == .active and
                 self.semantic_state.active == .valid,
             .resync => |expected| blk: {
+                if (self.owner_authority.current.role != .controller)
+                    break :blk false;
                 if (expected.owner_incarnation != self.owner_incarnation or
                     expected.origin != .client)
                     break :blk false;
@@ -9525,6 +9532,8 @@ pub const ExternalPumpStorage = struct {
                     else => false,
                 };
             },
+            .detach => self.semantic_state == .active and
+                self.semantic_state.active == .valid,
         };
     }
 
@@ -9743,6 +9752,14 @@ pub const ExternalPumpStorage = struct {
                     };
                     break :decode .resync_ack;
                 },
+                // Cleanup closes immediately after the request frame is fully sent, so a detach
+                // response can only be observed through a hostile/racing extra RX turn. Treat it
+                // as a terminal acknowledgement instead of publishing reusable control state.
+                .detach => return self.publishControlSemanticTerminalPreparation(
+                    lease,
+                    scratch,
+                    .runtime_ended,
+                ),
             }
         };
 
@@ -15950,12 +15967,15 @@ pub const ExternalPumpStorage = struct {
             const control_kind: client_pump.ControlKind = switch (spec.request) {
                 .resize => .resize,
                 .resync => .resync,
+                .detach => .detach,
             };
             const target_stream_id = switch (spec.request) {
                 .resize => |request| request.stream_id,
                 .resync => |request| request.stream_id,
+                .detach => |request| request.stream_id,
             };
-            if (authority.role != .controller or authority.flow != .clear or
+            if ((control_kind != .detach and authority.role != .controller) or
+                authority.flow != .clear or
                 target_stream_id != self.evidence_snapshot.stream_id or
                 spec.expected_controller_generation != generation)
             {
@@ -15997,6 +16017,10 @@ pub const ExternalPumpStorage = struct {
                         result = .backpressure;
                         break :control;
                     },
+                },
+                .detach => if (active != .valid) {
+                    result = .backpressure;
+                    break :control;
                 },
             }
             const client = if (self.owned_client) |*owned| owned else break :control;
@@ -17851,6 +17875,28 @@ pub const ExternalPumpStorage = struct {
             );
     }
 
+    /// Retires the previous pump turn before a sibling public operation advances the operation
+    /// generation. A finished drain proves the state at the end of that turn, but it is not a
+    /// capability that may survive a later TX admission or even a read-only leased projection.
+    /// Keeping this transition beside the evidence validator prevents each outer caller from
+    /// inventing a weaker way to clear the scratch.
+    pub fn settleRxTurnForSiblingOperation(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        if (active_external_operation_addr != 0 or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .ready)
+            return false;
+        return switch (scratch.drain_evidence.lifecycle) {
+            .empty => rxDrainEvidencePristine(&scratch.drain_evidence),
+            .finished => self.resetFinishedRxDrainEvidence(scratch),
+            else => false,
+        };
+    }
+
     /// Runs only the closed buffered parser and aggregate mechanics. The caller retains inherited
     /// blocker ordering, readiness policy, terminal publication, and scheduling.
     fn traverseAndCommitBufferedUnderHeldLease(
@@ -19656,6 +19702,7 @@ pub const ExternalPumpStorage = struct {
                         aggregate,
                     ) != .consumed_resync_cleaned) return false;
                 },
+                .detach => return false,
             },
         }
         if (!self.retireCommittedControlDrainEvidence(lease, scratch))
@@ -19729,6 +19776,8 @@ pub const ExternalPumpStorage = struct {
             .current => |current| current,
             .empty => return null,
         };
+        const terminal_detach_only = authority.role == .observer and
+            self.observerDetachTxIsSoleFrame(state);
         const semantic_active = switch (self.semantic_state) {
             .active => true,
             else => false,
@@ -19769,9 +19818,36 @@ pub const ExternalPumpStorage = struct {
             .semantic_active = semantic_active,
             .reentry_clear = !self.operation_reentry_latched,
             .attachment_role = authority.role,
+            .terminal_detach_only = terminal_detach_only,
             .authority_flow = authority.flow,
             .owner_authority_seal_digest = self.owner_authority_seal.digest,
             .authority_generation = authority.generation,
+        };
+    }
+
+    /// Observer authority remains read-only except for its own terminal detach. The exception is
+    /// minted only when the sealed correlation and the entire TX queue agree that exactly one
+    /// canonical detach request is queued or partially written.
+    fn observerDetachTxIsSoleFrame(
+        self: *const ExternalPumpStorage,
+        state: *const client_external_mode.State,
+    ) bool {
+        if (state.external_tx.items.len != 1 or !controlCorrelationValid(self))
+            return false;
+        const control = switch (self.control_correlation.state) {
+            .in_flight => |value| value,
+            .idle, .completed, .terminal => return false,
+        };
+        if (control.kind != .detach or control.expectation != .detach)
+            return false;
+        return switch (client_external_tx.requestFrameProgress(
+            state,
+            control.request_id,
+            control.wire_len,
+        )) {
+            .queued => control.progress == .queued,
+            .partial => control.progress == .partial,
+            .missing, .invalid => false,
         };
     }
 
@@ -20933,6 +21009,188 @@ pub const ExternalPumpStorage = struct {
             else
                 control.next_deadline_ns,
         };
+    }
+
+    pub const CleanupWireAuthority = enum {
+        none,
+        offset_zero,
+        control_in_flight,
+        partial_frame,
+        response_wait,
+    };
+
+    pub const CleanupWireProjection = union(enum) {
+        authority: CleanupWireAuthority,
+        busy,
+        terminal: client_pump.TerminalReason,
+        invalid,
+    };
+
+    /// Projects only the wire fact required by the outer cleanup policy while holding the same
+    /// whole-turn lease as RX/TX. Queue descriptors, Client storage, and request correlation never
+    /// escape this mechanics owner.
+    pub fn projectCleanupWireAuthority(
+        self: *ExternalPumpStorage,
+    ) CleanupWireProjection {
+        var lease: ExternalWholeTurnLease = .{};
+        var scratch: [1]u8 = undefined;
+        self.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&scratch),
+            scratch.len,
+        ) catch |err| return switch (err) {
+            error.TransactionBusy => .busy,
+            error.Terminal => .{ .terminal = self.snapshotTerminalReason() },
+            else => .invalid,
+        };
+
+        var result: CleanupWireProjection = blk: {
+            if (!controlCorrelationValid(self)) break :blk .invalid;
+            const client = if (self.owned_client) |*owned| owned else break :blk .invalid;
+            const external = switch (client.io_mode) {
+                .external => |*state| state,
+                .blocking => break :blk .invalid,
+            };
+            if (!client_external_tx.pollHint(external).valid) break :blk .invalid;
+
+            switch (self.control_correlation.state) {
+                .in_flight => |control| switch (control.progress) {
+                    .response_wait => break :blk .{ .authority = .response_wait },
+                    // A control remains semantically in flight whether the kernel has accepted
+                    // zero or some bytes. Cleanup must never append detach behind it.
+                    .queued, .partial => break :blk .{ .authority = .control_in_flight },
+                },
+                .terminal => break :blk .invalid,
+                .idle, .completed => {},
+            }
+
+            var has_zero = false;
+            for (external.external_tx.items) |frame| {
+                if (frame.offset >= frame.bytes.len) break :blk .invalid;
+                if (frame.offset != 0) break :blk .{ .authority = .partial_frame };
+                has_zero = true;
+            }
+            break :blk .{ .authority = if (has_zero) .offset_zero else .none };
+        };
+        if (self.releaseWholeTurnLease(&lease) != .released)
+            result = .invalid;
+        return result;
+    }
+
+    pub const CleanupCancelResult = enum {
+        cancelled,
+        busy,
+        uncancellable,
+        terminal,
+        invalid,
+        quarantined,
+    };
+
+    /// Cancels only offset-zero input frames for this attachment. Control frames and any frame
+    /// with a kernel-visible prefix are deliberately uncancellable, matching the 3b fail-close
+    /// rule. The full prepared/commit/cleanup graph stays behind the mechanics boundary.
+    pub fn cancelOffsetZeroInputForCleanup(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        now_ns: i128,
+    ) CleanupCancelResult {
+        if (scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .ready or scratch.turn_generation == 0 or
+            !std.mem.allEqual(u8, &scratch.tx_cancellation.bytes, 0) or
+            !std.mem.allEqual(u8, &scratch.tx_cancellation_permit.bytes, 0) or
+            !std.mem.allEqual(u8, &scratch.tx_cancellation_cleanup.bytes, 0))
+            return .busy;
+        var lease: ExternalWholeTurnLease = .{};
+        self.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(scratch),
+            @sizeOf(ExternalRxTurnScratch),
+        ) catch |err| return switch (err) {
+            error.TransactionBusy => .busy,
+            error.Terminal => .terminal,
+            else => .invalid,
+        };
+        scratch.lifecycle = .busy;
+
+        var result: CleanupCancelResult = blk: {
+            if (!controlCorrelationValid(self) or self.control_correlation.state != .idle)
+                break :blk .uncancellable;
+            const client = if (self.owned_client) |*owned| owned else break :blk .invalid;
+            const external = switch (client.io_mode) {
+                .external => |*state| state,
+                .blocking => break :blk .invalid,
+            };
+            const binding = makeTxOwnerBinding(
+                self,
+                client,
+                external,
+                &lease,
+                @intFromPtr(scratch),
+                @sizeOf(ExternalRxTurnScratch),
+                @intFromPtr(&scratch.tx_cancellation),
+                @sizeOf(client_external_tx.PreparedTxCancellation),
+                .cancel_turn,
+            );
+            switch (client_external_tx.prepareCancellationFromExternalPump(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+                binding,
+                .{ .stream_id = self.evidence_snapshot.stream_id },
+                now_ns,
+            )) {
+                .prepared => {},
+                .uncancellable => break :blk .uncancellable,
+                .invalid => break :blk .invalid,
+            }
+            if (!client_external_tx.validatePreparedCancellation(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                external,
+                binding,
+            )) break :blk .invalid;
+            if (!client_external_tx.consumePreparedCancellationUnderHeldLease(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+                binding,
+            )) break :blk .invalid;
+            switch (client_external_tx.finishCancellationCleanup(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+                binding,
+            )) {
+                .cleaned => {},
+                .invalid => break :blk .invalid,
+                .quarantined => break :blk .quarantined,
+            }
+            if (!client_external_tx.resetCancellationGraphForNextTurn(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+                binding,
+            )) break :blk .invalid;
+            break :blk .cancelled;
+        };
+        scratch.lifecycle = .ready;
+        if (self.releaseWholeTurnLease(&lease) != .released)
+            result = .quarantined;
+        return result;
     }
 
     /// Runs the semantic prefix of the mandatory fresh-clock zero-readiness turn. RX remains a
@@ -29367,6 +29625,9 @@ test "f3c1 actual resize and resync responses prepare typed pairs" {
                     .recovery_epoch = 9,
                 },
             } },
+            // Terminal detach retires correlation when its frame is sent and never prepares a
+            // response pair, so it is outside this resize/resync response-only fixture.
+            .detach => unreachable,
         };
         const result = try prepareF3c1ActualResponse(
             &storage,
@@ -29397,6 +29658,7 @@ test "f3c1 actual resize and resync responses prepare typed pairs" {
         switch (case.request_kind) {
             .resize => try std.testing.expect(scratch.control_semantic_verdict.value == .resize),
             .resync => try std.testing.expect(scratch.control_semantic_verdict.value == .resync_ack),
+            .detach => unreachable,
         }
         try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
     }

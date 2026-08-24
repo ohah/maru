@@ -1,25 +1,47 @@
-//! P5c3c-3a2 composition and dormant-product boundary.
+//! P5c3c-3b integrated-owner dependency and caller boundary.
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
-test "p5c3c-3a2 pre-raw owner is consumed only by the 3b integrated owner" {
+test "p5c3c-3b boundary keeps one integrated owner and exactly one product CLI caller" {
     const allocator = std.testing.allocator;
-    const owner = try read(allocator, "src/platform/macos/session_host/external_pump_owner.zig");
+    const owner = try read(allocator, "src/platform/macos/session_host/external_loop_owner.zig");
     defer allocator.free(owner);
-    const product = owner[0 .. std.mem.indexOf(u8, owner, "\ntest \"") orelse owner.len];
-    try std.testing.expectEqual(@as(usize, 1), count(product, "pub const PreRawOwner = struct"));
-    try std.testing.expectEqual(@as(usize, 1), count(product, "RawTty.enterPrepared"));
-    try std.testing.expectEqual(@as(usize, 3), count(product, "external_ansi.enter_bytes"));
-    try std.testing.expectEqual(@as(usize, 3), count(product, "external_ansi.leave_bytes"));
-    try std.testing.expectEqual(@as(usize, 0), try countProductIdentifierExcept(
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub const IntegratedStackOwner = struct"));
+    try std.testing.expectEqual(@as(usize, 0), count(owner, "@import(\"client.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, ".pump.admitTx("));
+    try std.testing.expectEqual(@as(usize, 1), try countProductIdentifierExcept(
         allocator,
-        "PreRawOwner",
+        "IntegratedStackOwner",
         &.{
-            "platform/macos/session_host/external_pump_owner.zig",
+            "platform/macos/session_host.zig",
             "platform/macos/session_host/external_loop_owner.zig",
         },
     ));
+    const caller = try read(
+        allocator,
+        "src/platform/macos/session_host/external_attach_cli.zig",
+    );
+    defer allocator.free(caller);
+    try std.testing.expectEqual(@as(usize, 1), count(caller, "IntegratedStackOwner"));
+    try std.testing.expectEqual(@as(usize, 1), count(caller, "external_attach.prepare("));
+    try std.testing.expectEqual(@as(usize, 1), count(caller, ".prepareInPlace("));
+    try std.testing.expectEqual(@as(usize, 1), count(caller, ".commit()"));
+    try std.testing.expectEqual(@as(usize, 1), count(caller, ".run(io)"));
+    const main = try read(allocator, "src/main.zig");
+    defer allocator.free(main);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(main, "std.mem.eql(u8, command, \"attach\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(main, "session_host_attach_cli.runRequest("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(main, "maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>"),
+    );
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

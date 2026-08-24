@@ -195,6 +195,16 @@ pub const PollHintResult = union(enum) {
     moved_or_stale,
 };
 
+pub const LiveScreenPayloadView = client_external_pump.LiveScreenPayloadView;
+pub const LiveScreenApplyResult = client_external_pump.LiveScreenApplyResult;
+pub const LiveScreenApplyFn = *const fn (
+    context: *anyopaque,
+    view: LiveScreenPayloadView,
+) LiveScreenApplyResult;
+pub const CleanupWireAuthority = client_external_pump.ExternalPumpStorage.CleanupWireAuthority;
+pub const CleanupWireProjection = client_external_pump.ExternalPumpStorage.CleanupWireProjection;
+pub const CleanupCancelResult = client_external_pump.ExternalPumpStorage.CleanupCancelResult;
+
 /// Stable callback object embedded in `ExternalPumpOwner`.
 ///
 /// The callback context never points at a movable `Client` or ledger. Every callback first proves
@@ -497,6 +507,23 @@ pub const ExternalPumpOwner = struct {
         );
     }
 
+    /// Typed screen-apply facade for the integrated loop. The mechanics module and its buffered
+    /// operation DTO stay private to this final owner boundary.
+    pub fn pumpApplying(
+        self: *ExternalPumpOwner,
+        turn: client_pump.TurnInput,
+        context: *anyopaque,
+        context_len: usize,
+        apply: LiveScreenApplyFn,
+    ) client_pump.TurnResult {
+        const buffered = client_external_pump.BufferedRxOps{
+            .context = context,
+            .context_len = context_len,
+            .apply_live_screen = apply,
+        };
+        return self.pump(turn, &buffered);
+    }
+
     pub fn admitControl(
         self: *ExternalPumpOwner,
         spec: client_external_pump.ControlAdmissionSpec,
@@ -504,13 +531,77 @@ pub const ExternalPumpOwner = struct {
     ) client_external_pump.ControlAdmissionResult {
         if (!self.addressValid() or self.lifecycle != .live)
             return .{ .terminal = .invariant_failure };
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch))
+            return .{ .terminal = .invariant_failure };
         return self.storage.admitControl(spec, now_ns);
+    }
+
+    /// Narrow TX admission used by the 3b loop after its chord/role reducer has authorized bytes.
+    /// Raw Client and queue storage remain inaccessible to the orchestration layer.
+    pub fn admitTx(
+        self: *ExternalPumpOwner,
+        spec: client_external_pump.TxAdmissionSpec,
+        now_ns: i128,
+    ) client_external_pump.TxAdmissionResult {
+        if (!self.addressValid() or self.lifecycle != .live)
+            return .{ .terminal = .invariant_failure };
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch))
+            return .{ .terminal = .invariant_failure };
+        return self.storage.admitTx(spec, now_ns);
+    }
+
+    /// Admits the one best-effort terminal detach request used by the 3b cleanup state machine.
+    /// The public loop supplies no JSON and cannot accidentally invent a second detach vocabulary.
+    pub fn admitDetach(
+        self: *ExternalPumpOwner,
+        now_ns: i128,
+    ) client_external_pump.ControlAdmissionResult {
+        if (!self.addressValid() or self.lifecycle != .live)
+            return .{ .terminal = .invariant_failure };
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch))
+            return .{ .terminal = .invariant_failure };
+        return self.storage.admitControl(.{
+            .request = .{ .detach = .{
+                .stream_id = self.attachment.state.stream_id,
+            } },
+            .expected_controller_generation = self.attachment.state.controller_generation,
+        }, now_ns);
     }
 
     pub fn pollHint(self: *const ExternalPumpOwner) PollHintResult {
         if (!self.addressValid() or self.lifecycle != .live)
             return .moved_or_stale;
         return .{ .hint = self.storage.pollHint() };
+    }
+
+    pub fn projectCleanupWireAuthority(
+        self: *ExternalPumpOwner,
+    ) CleanupWireProjection {
+        if (!self.addressValid() or self.lifecycle != .live) return .invalid;
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch))
+            return .invalid;
+        return self.storage.projectCleanupWireAuthority();
+    }
+
+    pub fn cancelOffsetZeroInputForCleanup(
+        self: *ExternalPumpOwner,
+        now_ns: i128,
+    ) CleanupCancelResult {
+        if (!self.addressValid() or self.lifecycle != .live) return .invalid;
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch))
+            return .invalid;
+        return self.storage.cancelOffsetZeroInputForCleanup(&self.rx_scratch, now_ns);
+    }
+
+    /// Latches a terminal connection result after an outer synchronous apply callback returns.
+    /// Calling this from inside the callback would violate the whole-turn lease, so 3b invokes it
+    /// only after `pump` has released that lease.
+    pub fn latchAttachmentFailure(
+        self: *ExternalPumpOwner,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) void {
+        if (!self.addressValid() or self.lifecycle != .live) return;
+        self.storage.failAttachment(reason);
     }
 
     fn socketPollFd(self: *const ExternalPumpOwner) ?c.fd_t {
@@ -725,6 +816,22 @@ pub const PreRawOwner = struct {
     }
 
     pub fn teardown(self: *PreRawOwner) PreRawTeardownResult {
+        return self.teardownInternal(null);
+    }
+
+    /// Uses the ordinary ownership cleanup graph, then replays the termination signal only after
+    /// the original dispositions and mask are restored and every local owner is closed.
+    pub fn teardownAndForwardSignal(
+        self: *PreRawOwner,
+        signal: posix.SIG,
+    ) PreRawTeardownResult {
+        return self.teardownInternal(signal);
+    }
+
+    fn teardownInternal(
+        self: *PreRawOwner,
+        forward_signal: ?posix.SIG,
+    ) PreRawTeardownResult {
         if (self.saved_self_addr == 0 and self.lifecycle == .empty) return .already_dead;
         if (!self.addressValid()) return .moved;
         if (self.lifecycle == .dead) return .already_dead;
@@ -771,6 +878,7 @@ pub const PreRawOwner = struct {
             self.output_initialized = false;
         }
         self.lifecycle = .dead;
+        if (forward_signal) |signal| _ = c.kill(c.getpid(), signal);
         return terminal_result;
     }
 
@@ -1029,6 +1137,25 @@ fn p5c3c3a2PreparedFixture(instance_id: u64) !P5c3c2b3PreparedFixture {
     try fixture.prepared.attachment.initScreen(screen_stream.codec_version);
     return fixture;
 }
+
+/// Test-only constructor shared with the 3b aggregate's actual-PTY composition tests. Product
+/// builds expose an empty namespace and therefore cannot construct synthetic prepared authority.
+pub const testing = if (builtin.is_test) struct {
+    pub const PreparedFixture = P5c3c2b3PreparedFixture;
+    pub const AuthorityEvent = client_external_pump.testing.AuthorityEvent;
+
+    pub fn preparedFixture(instance_id: u64) !PreparedFixture {
+        return p5c3c3a2PreparedFixture(instance_id);
+    }
+
+    pub fn deinitPreparedFixture(fixture: *PreparedFixture) void {
+        fixture.deinit();
+    }
+
+    pub fn clearInitialFence(owner: *ExternalPumpOwner) bool {
+        return client_external_pump.testing.clearInitialFence(&owner.storage);
+    }
+} else struct {};
 
 fn readExactPty(fd: c.fd_t, destination: []u8) !void {
     var offset: usize = 0;

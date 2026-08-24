@@ -63,6 +63,7 @@ pub const Seed = struct {
     semantic_active: bool,
     reentry_clear: bool,
     attachment_role: AttachmentRole,
+    terminal_detach_only: bool,
     authority_flow: OwnerAuthorityFlow,
     owner_authority_seal_digest: external_owner_seal.Digest,
     authority_generation: AuthorityGeneration,
@@ -103,6 +104,7 @@ comptime {
         "semantic_active",
         "reentry_clear",
         "attachment_role",
+        "terminal_detach_only",
         "authority_flow",
         "owner_authority_seal_digest",
         "authority_generation",
@@ -354,7 +356,9 @@ fn validSeedShape(
 }
 
 fn eligible(seed: Seed) bool {
-    if (seed.attachment_role != .controller or
+    const role_eligible = seed.attachment_role == .controller or
+        (seed.attachment_role == .observer and seed.terminal_detach_only);
+    if (!role_eligible or
         seed.authority_flow != .clear or
         seed.final_parser_readiness != .empty or
         !seed.final_blockers_clear or
@@ -488,6 +492,7 @@ fn zeroSeed() Seed {
         .semantic_active = false,
         .reentry_clear = false,
         .attachment_role = .observer,
+        .terminal_detach_only = false,
         .authority_flow = .initial_fence,
         .owner_authority_seal_digest = zero_digest,
         .authority_generation = .untracked,
@@ -530,6 +535,7 @@ fn testSeed(
         .semantic_active = true,
         .reentry_clear = true,
         .attachment_role = .controller,
+        .terminal_detach_only = false,
         .authority_flow = .clear,
         .owner_authority_seal_digest = filledDigest(0xa8),
         .authority_generation = .{ .tracked = 8 },
@@ -571,6 +577,7 @@ const SeedDrift = enum {
     semantic_active,
     reentry_clear,
     attachment_role,
+    terminal_detach_only,
     authority_flow,
     owner_authority_seal_digest,
     authority_generation,
@@ -631,6 +638,7 @@ fn driftSeed(seed: *Seed, field: SeedDrift) void {
         .semantic_active => seed.semantic_active = !seed.semantic_active,
         .reentry_clear => seed.reentry_clear = !seed.reentry_clear,
         .attachment_role => seed.attachment_role = .observer,
+        .terminal_detach_only => seed.terminal_detach_only = !seed.terminal_detach_only,
         .authority_flow => seed.authority_flow = .initial_fence,
         .owner_authority_seal_digest => seed.owner_authority_seal_digest =
             filledDigest(0xc8),
@@ -669,6 +677,24 @@ test "ineligible seed and occupied destinations mutate nothing" {
     );
     try std.testing.expectEqualDeep(before, permit);
     try std.testing.expectEqualDeep(FrozenCleanupSeed{}, cleanup);
+}
+
+test "observer authority is eligible only for one sealed terminal detach" {
+    var permit = PreparedAuthorityPermit{};
+    var cleanup = FrozenCleanupSeed{};
+    var seed = testSeed(&permit, &cleanup);
+    seed.attachment_role = .observer;
+    try std.testing.expectEqual(
+        PrepareResult.ineligible,
+        prepare(&permit, &cleanup, seed),
+    );
+    seed.terminal_detach_only = true;
+    try std.testing.expectEqual(
+        PrepareResult.prepared,
+        prepare(&permit, &cleanup, seed),
+    );
+    try std.testing.expectEqual(AbortResult.aborted, abort(&permit, seed));
+    try std.testing.expect(resetSpent(&permit, &cleanup, seed));
 }
 
 test "stale copied and cross-generation permits cannot mutate" {

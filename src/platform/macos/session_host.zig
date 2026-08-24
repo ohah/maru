@@ -218,6 +218,8 @@ else
     struct {};
 pub const external_detach_chord = @import("session_host/external_detach_chord.zig");
 pub const external_stdout_progress = @import("session_host/external_stdout_progress.zig");
+pub const external_loop_policy = @import("session_host/external_loop_policy.zig");
+pub const external_loop_owner = @import("session_host/external_loop_owner.zig");
 pub const external_tty_output = if (builtin.os.tag == .macos)
     @import("session_host/external_tty_output.zig")
 else

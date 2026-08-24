@@ -384,6 +384,32 @@ pub const RemoteAttachment = struct {
         return self.pumpScreenInternal(io, accounting);
     }
 
+    /// Applies the synchronous immutable live-batch borrow produced by `ExternalPumpStorage`.
+    /// The pump remains the lease/retirement owner; this method owns only the already-validated
+    /// screen mutation, avoiding a second transport read or a duplicate demux path.
+    pub fn applyExternalLiveScreen(
+        self: *RemoteAttachment,
+        view: external_inbox_ledger.PayloadView,
+        io: std.Io,
+    ) (screen_assembler.ApplyError || error{ OutOfMemory, InvalidAuthority })!void {
+        if (view.phase != .completed) return error.InvalidAuthority;
+        const completed = switch (view.semantic) {
+            .completed => |value| value,
+            else => return error.InvalidAuthority,
+        };
+        if (completed.stream_id != self.state.stream_id) return error.InvalidAuthority;
+        switch (completed.recovery_intent) {
+            .none => {},
+            .host, .client => return error.InvalidAuthority,
+        }
+        const screen = &(self.screen orelse return error.InvalidAuthority);
+        if (completed.is_snapshot) {
+            try screen.applySnapshot(view.bytes, io);
+        } else {
+            try screen.applyDelta(view.bytes, io);
+        }
+    }
+
     fn pumpScreenInternal(
         self: *RemoteAttachment,
         io: std.Io,
@@ -1549,6 +1575,29 @@ fn testSnapshot(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(row);
     try screen_stream.appendRecord(&bytes, allocator, row);
     return bytes.toOwnedSlice(allocator);
+}
+
+test "p5c3c-3b external live screen borrow applies through the attachment screen owner" {
+    const allocator = std.testing.allocator;
+    const snapshot = try testSnapshot(allocator);
+    defer allocator.free(snapshot);
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 3,
+    });
+    defer attachment.deinit();
+    try attachment.initScreen(screen_stream.codec_version);
+    try attachment.applyExternalLiveScreen(.{
+        .phase = .completed,
+        .semantic = .{ .completed = .{
+            .stream_id = 7,
+            .is_snapshot = true,
+        } },
+        .bytes = snapshot,
+    }, std.testing.io);
+    try std.testing.expectEqual(@as(u64, 1), attachment.screen.?.assembler.generation);
 }
 
 test "CR4a catchup apply leaf는 byte cap 마지막 batch를 화면 apply 전에 회수한다" {

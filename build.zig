@@ -9595,6 +9595,81 @@ pub fn build(b: *std.Build) void {
         session_host_3a2_step.dependOn(&run_session_host_3a2_boundary_tests.step);
         boundary_step.dependOn(&run_session_host_3a2_boundary_tests.step);
 
+        const session_host_3b_step = b.step(
+            "test-session-host-3b",
+            "Run the P5c3c-3b integrated external attach loop gate",
+        );
+        session_host_3b_step.dependOn(session_host_3a2_step);
+        inline for ([_]struct { path: []const u8, name: []const u8, count: usize, imports_maru: bool }{
+            .{
+                .path = "src/platform/macos/session_host/external_loop_policy.zig",
+                .name = "policy",
+                .count = 7,
+                .imports_maru = false,
+            },
+            .{
+                .path = "src/platform/macos/session_host/external_loop_owner.zig",
+                .name = "owner",
+                // Imported RemoteAttachment contributes one screen-apply test and the integrated
+                // owner deliberately consumes all seven policy tests from the same module graph.
+                .count = 17,
+                .imports_maru = true,
+            },
+            .{
+                .path = "src/platform/macos/session_host/external_attach_cli.zig",
+                .name = "product-cli",
+                // Zig collects the product adapter's own mapping test plus the seven reachable
+                // 3b policy tests. The owner artifact above independently locks the full 17.
+                .count = 8,
+                .imports_maru = true,
+            },
+        }) |fixture| {
+            for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+                const tests = addProjectTest(b, .{
+                    .name = b.fmt("maru-session-host-3b-{s}-{s}", .{ fixture.name, @tagName(mode) }),
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path(fixture.path),
+                        .target = target,
+                        .optimize = mode,
+                        .link_libc = fixture.imports_maru,
+                        .imports = if (fixture.imports_maru)
+                            &.{.{ .name = "maru", .module = maru_mod }}
+                        else
+                            &.{},
+                    }),
+                    .filters = &.{"p5c3c-3b"},
+                });
+                const run_tests = b.addRunArtifact(tests);
+                run_tests.addArg(b.fmt("--maru-expect-tests={d}", .{fixture.count}));
+                run_tests.setCwd(b.path("."));
+                session_host_3b_step.dependOn(&run_tests.step);
+            }
+        }
+        const session_host_3b_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-3b-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3b_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_session_host_3b_sentinel = b.addRunArtifact(session_host_3b_sentinel);
+        run_session_host_3b_sentinel.setCwd(b.path("."));
+        session_host_3b_step.dependOn(&run_session_host_3b_sentinel.step);
+        const session_host_3b_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3b_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"p5c3c-3b boundary"},
+        });
+        const run_session_host_3b_boundary_tests = b.addRunArtifact(session_host_3b_boundary_tests);
+        run_session_host_3b_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3b_boundary_tests.setCwd(b.path("."));
+        session_host_3b_step.dependOn(&run_session_host_3b_boundary_tests.step);
+        boundary_step.dependOn(&run_session_host_3b_boundary_tests.step);
+
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

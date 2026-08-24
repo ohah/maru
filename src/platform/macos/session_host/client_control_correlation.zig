@@ -78,6 +78,7 @@ pub fn prepareAdmission(
         !expectation.isCanonical() or switch (expectation) {
         .resize => kind != .resize,
         .resync => kind != .resync,
+        .detach => kind != .detach,
     })
         return .invalid;
     const deadline_ns = std.math.add(i128, now_ns, timeout_ns) catch

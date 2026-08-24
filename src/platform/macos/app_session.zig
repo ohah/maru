@@ -30302,6 +30302,101 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
     try s2.runtime.writeInput(sid2, .{ .bytes = "" }); // s2는 생존 — 공유 표가 s1 close에 파괴되지 않았다
 }
 
+test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리킨다 — 제품 spawn 으로 건넌다" {
+    // **이 테스트만 이음매를 건넌다.** 다른 훅 테스트는 자기가 만든 경로에 파일을 쓰고 그 경로를 읽으므로,
+    // maru 가 자식에게 심는 이름과 리더가 읽는 이름이 갈려도 전부 초록이다. 그 갈림의 증상은 «훅은 도는데
+    // 이벤트가 0» 이고, 계약(docs/agent-hooks.md §4)이 막으려는 실패가 바로 그것이다.
+    //
+    // 그래서 제품 funnel(`createTerm`)로 **진짜 자식**을 띄워 자식이 자기 env 를 적게 하고, 그 바이트를
+    // 리더의 경로(`agentHookLogPath`)와 대조한다. 자식은 maru 코드를 한 줄도 안 지난다.
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const root = try std.fs.path.join(a, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path });
+    defer a.free(root);
+
+    // **환경을 격리한다.** `AppSession.init` 은 provider 설정 파일을 재조정하고 캐시에 로그 칸을 만든다 —
+    // 격리를 잊으면 그 대상이 **개발자의 진짜 `~/.claude/settings.json` 과 캐시**다(이웃 훅 테스트들이 같은
+    // 이유로 같은 격리를 한다. 실제로 그 사고가 한 번 났다).
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+
+    const result_path = try std.fs.path.join(a, &.{ root, "seam" });
+    defer a.free(result_path);
+    const script = try std.fmt.allocPrint(
+        a,
+        "printf '%s/%s' \"$MARU_HOOK_INSTANCE\" \"$MARU_HOOK_PANE\" > '{s}'; exec cat",
+        .{result_path},
+    );
+    defer a.free(script);
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = try term_ops.createTerm(
+        &session,
+        .{ .command = "/bin/sh", .args = &.{ "-c", script } },
+        .{ .cols = 20, .rows = 5 },
+        16,
+        "seam",
+        "/bin/sh",
+    );
+    {
+        // **errdefer 를 append 에만 건다.** 함수 스코프에 두면 append 뒤 어떤 실패든 여기서 한 번,
+        // `session.deinit` 에서 또 한 번 파괴해 double-free 로 죽는다 — 뮤테이션이 그 segfault 로 잡아냈다
+        // (단언 실패여야 할 자리가 크래시면 무엇이 깨졌는지 못 읽는다).
+        errdefer term_ops.destroyTerm(&session, term);
+        try session.tabs.items[0].panes.items[0].terms.append(session.allocator, term);
+    }
+
+    var observed: ?[]u8 = null;
+    defer if (observed) |bytes| a.free(bytes);
+    var attempts: usize = 0;
+    while (attempts < 200) : (attempts += 1) {
+        if (tmp.dir.readFileAlloc(io, "seam", a, .limited(4096)) catch null) |bytes| {
+            if (std.mem.indexOfScalar(u8, bytes, '/') != null) {
+                observed = bytes;
+                break;
+            }
+            a.free(bytes);
+        }
+        _ = usleep(10 * 1000);
+    }
+    const child_env = observed orelse return error.TestUnexpectedResult;
+
+    // 리더가 읽을 경로의 **마지막 두 칸**이 자식이 받은 두 값과 같아야 한다.
+    // `agentHookLogPath` 는 중간 문자열을 그대로 두는 **arena 용** 함수다(제품 호출부가 전부 arena 다) —
+    // testing allocator 를 그냥 넘기면 그 중간값이 누수로 잡힌다.
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const read_path = agent_ops.agentHookLogPath(arena_state.allocator(), term) orelse
+        return error.TestUnexpectedResult;
+    const expected = try std.fmt.allocPrint(arena_state.allocator(), "/{s}.ndjson", .{child_env});
+    try std.testing.expect(std.mem.endsWith(u8, read_path, expected));
+}
+
 fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
     app_keep_alive_after_quit = true;
     session.loaded_config.config.session.keep_alive_after_quit = true;

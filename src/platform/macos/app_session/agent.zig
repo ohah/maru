@@ -1638,7 +1638,11 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
 }
 
 /// 그 pane 의 이벤트 로그 경로(`<로그 디렉터리>/<인스턴스>/<pane>.ndjson`). 훅 커맨드가 적는 그 이름이다.
-fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
+///
+/// `pub` 인 이유는 **테스트가 이 함수를 직접 물어야 하기 때문**이다. 「훅이 받는 이름 = 여기서 만드는 이름」은
+/// 두 프로세스에 걸친 계약이라, 테스트가 경로를 스스로 조립하면 그 이음매를 한 번도 안 건넌다(그렇게 쓰인
+/// 기존 테스트는 두 이름이 갈려도 초록이다 — 실제 증상은 «훅은 도는데 이벤트가 0» 이다).
+pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
     // **인스턴스 칸을 지난다** — 훅이 쓰는 이름과 같아야 한다(계약 §4). 이 둘이 갈리면 그 Term 은 자기
     // 이벤트를 못 읽고, 같은 숫자를 가진 **다른 인스턴스**의 이벤트를 읽는다.
     const dir = agentHookInstanceDir(a) orelse return null;

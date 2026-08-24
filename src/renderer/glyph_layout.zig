@@ -1,4 +1,5 @@
 const std = @import("std");
+const icons = @import("../icons.zig");
 const draw_list = @import("draw_list.zig");
 const terminal = @import("../terminal.zig");
 
@@ -251,19 +252,23 @@ test "합성 글리프는 codepoint 로 키잉된다 — 아이콘 셋이 한 �
             return .{ .font_id = 0, .glyph_id = 0 }; // 폰트에 없는 글자 — 합성으로 간다
         }
     };
+    // **리터럴을 안 쓴다** — 등록 아이콘은 이름으로 고른다(경계 게이트가 강제한다).
+    const folder_cp = icons.codepoint(.folder);
+    const git_cp = icons.codepoint(.git_branch);
+    const code_cp = icons.codepoint(.file_code);
     var cells = [_]draw_list.DrawCell{
-        .{ .row = 0, .col = 0, .codepoint = 0xF000A, .width = 1, .style = .{} },
-        .{ .row = 0, .col = 1, .codepoint = 0xF0001, .width = 1, .style = .{} },
-        .{ .row = 0, .col = 2, .codepoint = 0xF000F, .width = 1, .style = .{} },
+        .{ .row = 0, .col = 0, .codepoint = folder_cp, .width = 1, .style = .{} },
+        .{ .row = 0, .col = 1, .codepoint = git_cp, .width = 1, .style = .{} },
+        .{ .row = 0, .col = 2, .codepoint = code_cp, .width = 1, .style = .{} },
     };
     const list = draw_list.DrawList{ .size = .{ .cols = 3, .rows = 1 }, .cells = &cells, .cursor = .{}, .dirty = null, .overlays = &.{} };
     var runs = try buildGlyphRunList(std.testing.allocator, list, .{}, Fake{});
     defer runs.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), runs.glyphs.len);
     // 셋 다 **다른** 캐시 키여야 한다.
-    try std.testing.expectEqual(@as(GlyphId, 0xF000A), runs.glyphs[0].cache_key.glyph_id);
-    try std.testing.expectEqual(@as(GlyphId, 0xF0001), runs.glyphs[1].cache_key.glyph_id);
-    try std.testing.expectEqual(@as(GlyphId, 0xF000F), runs.glyphs[2].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(GlyphId, @intCast(folder_cp)), runs.glyphs[0].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(GlyphId, @intCast(git_cp)), runs.glyphs[1].cache_key.glyph_id);
+    try std.testing.expectEqual(@as(GlyphId, @intCast(code_cp)), runs.glyphs[2].cache_key.glyph_id);
     // 그리고 **run 의 glyph_id 는 0 그대로**다 — 래스터라이저가 그것으로 합성 분기를 탄다.
     try std.testing.expectEqual(@as(GlyphId, 0), runs.glyphs[0].glyph_id);
 }

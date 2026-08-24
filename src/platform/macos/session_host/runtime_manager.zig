@@ -2146,6 +2146,94 @@ test "runtime manager: 훅 신원이 없으면 칸도 안 만든다 — fail-clo
     try std.testing.expect(c.fstatat(posix.AT.FDCWD, log_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
 }
 
+test "runtime manager: 실 자식이 **진짜 훅 커맨드**를 돌리면 우리 칸에 이벤트가 남는다" {
+    // **이것이 host 쪽 사슬의 끝이다.** 자식 env(AH7-2) → 칸 생성(AH7-3a) → 이름 규칙(AH7-3b) 은 각각
+    // 봤지만, 그 셋이 이어져 «훅이 실제로 파일을 남기는가» 는 아무도 안 봤다. 여기서는 maru 가 provider
+    // 설정에 심는 **바로 그 커맨드 문자열**을 자식이 실행한다 — 우리가 흉내 낸 스크립트가 아니다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const hook_command = maru.session.agent_hook_command;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buf);
+    const cache_base = base_buf[0..base_len];
+
+    // 훅이 쓸 로그 디렉터리(계약 §4.1 — 훅은 mkdir 을 안 한다). 커맨드에는 **절대 경로**가 박힌다.
+    const log_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cache_base, hook_command.log_dir_rel });
+    defer allocator.free(log_dir);
+    var cmd: std.ArrayListUnmanaged(u8) = .empty;
+    defer cmd.deinit(allocator);
+    try hook_command.build(&cmd, allocator, "claude", log_dir);
+
+    // 자식은 payload 를 stdin 으로 흘려 그 커맨드를 돌린다(provider 가 하는 그대로 — 계약 §4.1).
+    //
+    // ⚠️ **커맨드를 한 줄 안에 감싸면 안 된다.** 끝이 표식 주석(`# MARU_HOOK_V3 …`)이라 `{ … ; }` 로 싸면
+    // **닫는 괄호가 주석에 먹혀** 셸이 syntax error 로 죽는다(실측: `unexpected end of file`). 실제 provider
+    // 는 이 문자열을 설정의 한 항목으로 그대로 실행하므로 그 함정이 없다 — 그러니 테스트도 파일에 그대로
+    // 두고 실행해 **제품과 같은 모양**으로 돌린다.
+    const hook_script_path = try std.fmt.allocPrint(allocator, "{s}/hook.sh", .{cache_base});
+    defer allocator.free(hook_script_path);
+    {
+        const zpath = try allocator.dupeZ(u8, hook_script_path);
+        defer allocator.free(zpath);
+        const fd = c.open(zpath.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o700));
+        try std.testing.expect(fd >= 0);
+        _ = c.write(fd, cmd.items.ptr, cmd.items.len);
+        _ = c.write(fd, "\n", 1);
+        _ = c.close(fd);
+    }
+    const payload = "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"끝났다\"}";
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "printf '%s\\n' '{s}' | /bin/sh '{s}'; exit 0",
+        .{ payload, hook_script_path },
+    );
+    defer allocator.free(script);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    const host_id: u128 = 0xf00d_0000_0000_0000_0000_0000_0000_09;
+    mgr.init(allocator, std.testing.io, &host_registry, .{ .host_id = host_id, .log_base = cache_base });
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+
+    // 그 자식이 남긴 파일은 **GUI 가 읽을 바로 그 이름**이어야 한다.
+    var log_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const log_path = try agent_hook_logs.runtimeLogPathIn(&log_buf, cache_base, host_id, rid);
+
+    var body: ?[]u8 = null;
+    defer if (body) |bytes| allocator.free(bytes);
+    var attempts: usize = 0;
+    while (attempts < 300) : (attempts += 1) {
+        if (std.Io.Dir.cwd().readFileAlloc(std.testing.io, log_path, allocator, .limited(64 * 1024)) catch null) |bytes| {
+            if (std.mem.indexOfScalar(u8, bytes, '\n') != null) {
+                body = bytes;
+                break;
+            }
+            allocator.free(bytes);
+        }
+        _ = usleep(10 * 1000);
+    }
+    const line = body orelse return error.TestUnexpectedResult;
+
+    // 파서가 그 줄을 **턴 끝**으로 읽어야 한다 — 파일만 생기고 파싱이 안 되면 배지는 그대로 멈춘다.
+    const event = maru.session.agent_hook_event;
+    const parsed = event.parseLine(std.mem.trimEnd(u8, line, "\n")) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(event.Kind.stop, parsed.kind);
+    try std.testing.expectEqualStrings("claude", parsed.provider);
+
+    // 그리고 그 파일 권한은 0600 이어야 한다(계약 §7 — payload 에 소스와 명령 원문이 실린다).
+    var st: posix.Stat = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.fstatat(posix.AT.FDCWD, log_path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW));
+    try std.testing.expectEqual(@as(u32, 0o600), st.mode & 0o777);
+}
+
 test "runtime manager: host_id 를 모르면 훅 신원을 싣지 않는다 — fail-closed" {
     // 인스턴스 칸이 없으면 훅은 경로를 만들 수 없다. 그때 pane 칸만 실으면 «반쪽 신원» 이 남아, 나중에
     // 인스턴스 칸이 생겼을 때 어느 자리에 쓰였는지 알 수 없다. 그래서 둘을 함께 다룬다.

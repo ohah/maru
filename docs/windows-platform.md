@@ -3392,13 +3392,38 @@ var app_window: AppWindow = .{ .tabs = &tab_ptrs };   // 탭 하나
 사이드바는 **세션 카드 목록**이다 — 카드마다 이름·git 브랜치·폴더(cwd), 그 아래 pane·에이전트 줄.
 도크는 반대였다: 파일 트리도 git 상태도 **모델이 이미 있었고** 그리기만 붙이면 됐다.
 
-**⑵ 헤더가 macOS 창 모양에 묶여 있다.** 사이드바 상단은 검색바 + 아이콘 넷(◧ 접기 / ⚙ 뷰 옵션 /
-＋ 새 워크스페이스 / 🔔 알림)이고, 그 띠는 **신호등 자리를 비우도록** 설계돼 있다
-(chrome-strategy.md U4·U5). Windows 는 네이티브 타이틀바를 쓴다(§2b) — **비울 자리가 없다.**
-그러므로 헤더 배치는 옮기는 일이 아니라 **결정**이다.
+**⑵ 창 프레임을 지우는 조각이 Windows 에 없다.** macOS 는 **이미 프레임리스**다 —
+`titlebarAppearsTransparent` + `titleVisibility=.hidden` + `.fullSizeContentView` 로 네이티브
+타이틀바를 숨기고 신호등만 남긴 뒤 그 영역에 maru chrome 을 그린다(chrome-strategy.md U4·U5,
+macos-app-host-boundary.md). Electron 의 `-webkit-app-region: drag` 에 해당하는 것도 이미 있다 —
+`isWindowDragRegion` 이 "여기가 드래그 영역인가" 를 판정하고 플랫폼은 `performDrag`·`zoom` 만
+부른다.
 
-**⑶ 아이콘 경로.** 그 넷은 PUA 합성 아이콘(`renderer/icon_glyph.zig`)이고 macOS 렌더러가 1.7× 로
-굽는다. Windows 는 그 확대 경로를 아직 안 밟았다.
+Windows 창은 지금 `WS_OVERLAPPEDWINDOW`(네이티브 캡션)다. **그것은 결정이 아니라 W7.1 이 거기서
+멈춘 자리**다 — §2b 는 창의 몫을 "만들고, 펌프하고, 중립 이벤트로 바꾼다" 셋으로 적었을 뿐
+데코레이션을 정하지 않았다. layering-and-portability.md §2 는 오히려 반대를 적어 뒀다:
+
+> 이식 시 타깃별로 새로 짜는 건 **"신호등을 남기는 창 chrome" 한 조각뿐**이고, 그 위에 그려지는
+> 헤더는 **같은 L3 코드가 투영된다.**
+
+**Windows 쪽 대응물은 `WM_NCHITTEST` 에서 `HTCAPTION` 을 돌려주는 것**이다. 그러면 드래그·더블클릭
+최대화·Aero Snap 을 **OS 가 해 준다** — 우리가 `performDrag` 를 흉내낼 필요가 없다. 프레임 자체는
+`WM_NCCALCSIZE` 로 캡션 높이를 0 으로 만들어 지운다.
+
+**진짜 남는 차이는 하나다 — 버튼이 반대쪽에 있다.** macOS 는 신호등이 **왼쪽**이라 그 자리를 비우고
+아이콘을 오른쪽에 몰았다. Windows 는 최소화·최대화·닫기가 **오른쪽**이고, 프레임을 지우면 그 셋을
+**우리가 그려야 한다.** 즉 비는 자리가 macOS 와 **미러**다. 사이드바 헤더 아이콘 줄의 배치가 그만큼
+달라진다 — 이것이 ⒝ 의 실제 내용이고, "헤더를 새로 설계한다" 가 아니라 **"어느 끝이 비는가" 하나**다.
+
+**⑶ 아이콘 경로.** 헤더 아이콘 넷은 PUA 합성 아이콘(`renderer/icon_glyph.zig`)이고 macOS 렌더러가
+1.7× 로 굽는다. Windows 는 그 확대 경로를 아직 안 밟았다. 캡션 버튼(─ ☐ ✕)도 같은 길로 갈지, 선을
+직접 그릴지는 ⒝ 와 함께 본다.
+
+**문서와 코드가 갈려 있다(보고).** layering-and-portability.md §2 는 `isWindowDragRegion` 을
+**L3 chrome** 이라고 적었는데, 실제 구현은 `platform/macos/app_session/workspace.zig` 에 있고
+`AppSession` 을 받는다. 안에서 부르는 판정들(`sidebar.headerHit`·`inSidebar`)은 중립이지만 **조립이
+macOS 안**이다. Windows 가 같은 규칙을 쓰려면 그 조립을 중립으로 빼야 한다 — §3.4 가 말한 부류의
+빚이고, ⒝ 를 할 때 함께 본다.
 
 ## 이미 중립인 것
 
@@ -3415,8 +3440,11 @@ var app_window: AppWindow = .{ .tabs = &tab_ptrs };   // 탭 하나
   하나(이름·브랜치·폴더)를 그린다. 히트테스트는 중립 함수를 그대로 부른다. **판정**: 터미널 격자가
   사각형을 따라 좁아지고(§2m.31 과 같은 불변식), 카드 클릭이 터미널로 안 샌다(§2m.34 와 같은
   양방향 누수 판정).
-- **W8.8⒝ — 헤더.** **선결 결정**: Windows 에는 신호등이 없으니 아이콘 줄을 어디에 둘지. §2b(창)와
-  함께 본다. 결정 전에는 착수하지 않는다.
+- **W8.8⒝ — 프레임리스 창과 헤더.** `WM_NCCALCSIZE` 로 캡션을 지우고, `WM_NCHITTEST` 가
+  드래그 영역에서 `HTCAPTION` 을 돌려준다. 캡션 버튼 셋을 우리가 그린다. **선결 결정 하나**:
+  버튼이 오른쪽이라 비는 자리가 macOS 와 미러인데, 헤더 아이콘 줄을 **거울로 뒤집을지** 아니면
+  macOS 와 **같은 자리에 두고** 캡션 버튼을 그 바깥에 둘지. 그리고 `isWindowDragRegion` 의 조립을
+  중립으로 빼는 일이 여기 붙는다.
 - **W8.8⒞ — 여러 세션·탭.** `AppWindow.tabs` 를 실제로 늘리는 일 — 세션 모델 배선이 선행이고
   사이드바보다 큰 축이다.
 

@@ -466,6 +466,10 @@ fn runSessionHostImpl(
     if (fixture_probe != null) manager.enableOutputMetrics();
 
     const host_id = exact_host_id orelse newHostId();
+    // 훅 로그 경로의 인스턴스 칸을 host 신원으로 심는다(docs/agent-hooks.md §4). 업그레이드로 프로세스가
+    // 바뀌어도 `host_id` 는 물려받으므로(`upgrade_bootstrap` 이 불일치를 거부한다) 그 칸의 이름이 유지된다 —
+    // pid 로 지으면 후계자가 «죽은 인스턴스» 로 보여 살아 있는 runtime 의 로그를 정리가 거둔다.
+    manager.setHookInstanceHost(host_id);
     var socket_dir_buf: [112]u8 = undefined;
     const bind_dir = if (exact_host_id != null)
         short_endpoint.socketDirPathIn(&socket_dir_buf, c.getuid()) catch return error.ManifestFailed

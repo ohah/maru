@@ -206,9 +206,13 @@ keep-alive 를 켠 터미널은 host 가 자식을 띄우고 그 자식이 GUI �
   (`MARU_HOOK_PANE`)를 갖고, 두 칸의 모양이 소유자별로 정해졌다(계약 §4 표): GUI 는 `pid`/`surface_id`,
   host 는 `host_<32 hex host_id>`/`<32 hex runtime_id>`. 만드는 곳은 계약 모듈 하나이고, 셸 가드의 문자
   클래스와 maru 쪽 판정이 한 상수에서 나온다. **동작 변화는 없다** — GUI 소유 로그의 파일 배치는 그대로다.
-- **AH7-2 — host 가 자기 신원으로 채운다.** host 가 spawn 할 때 두 칸을 자기 `host_id`·그 runtime 의
-  `runtime_id` 로 채운다. ⚠️ `runtime_id` 는 지금 **spawn 뒤에** 발급되므로(`runtime_manager.spawnRuntime`)
-  그 순서를 먼저 바꿔야 한다 — 자식 env 는 spawn 시점에 굳는다.
+- **AH7-2(완료 2026-08-24) — host 가 자기 신원으로 채운다.** `runtime_manager` 가 `host_id`(daemon 이
+  `setHookInstanceHost` 로 심는다)와 그 runtime 의 `runtime_id` 로 두 칸을 채워 spawn 한다. 선결 문제였던
+  발급 순서를 바꿨다 — `runtime_id` 를 spawn **전에** 뽑고(자식 env 는 spawn 시점에 굳는다) 등록은 그대로
+  spawn 성공 뒤에 **그 값으로** 한다. 검증은 실 fork PTY 다: 자식이 자기 `$MARU_HOOK_INSTANCE`/
+  `$MARU_HOOK_PANE` 을 파일에 적게 하고 계약 모듈이 만드는 이름과 대조한다(뮤테이션 4개 — 등록에서 다시
+  뽑기·두 칸 각각 누락·host_id 없이 pane 만 싣기). ⚠️ 이 단계만으로는 훅이 돌지 않는다 — 그 디렉터리를
+  아무도 안 만들어 훅이 조용히 나간다(그래서 주인 없는 로그도 안 생긴다).
 - **AH7-3 — GUI 가 그 칸을 읽는다.** 재접속한 GUI 가 workspace 의 `runtime-handle`(host_id:runtime_id)로
   같은 이름을 다시 계산해 tail 한다. 시작 시 정리는 «살아 있는가» 를 소유자별로 묻는다(pid → `getpgid`,
   `host_<hex>` → manifest·소켓). GUI 부재 중 쌓인 backlog 를 어디까지 재생할지도 이 단계가 정한다

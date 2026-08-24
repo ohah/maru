@@ -281,10 +281,24 @@ const Writer = struct {
 ///
 /// 세기 계단이 곧 의미다: 선택(지금 고른 것) > 활성(열려 있는 파일) > 호버(지나가는 중). 둘이 같은
 /// 값이면 그 구분이 화면에서 사라진다.
+/// 상태 밴드의 색. **선택이 가장 진하고 호버는 그보다 약하다** — 계획 문서 §3 시각 계약의
+/// "호버: 선택과 같은 형상, **약한 배경**" 이 그 줄이다.
+///
+/// **`row_hover_bg` 를 쓰지 않는다.** 그 role 의 계약은 "활성 밴드 **위에 겹쳐도** 구분되게 활성보다
+/// 한 단계 밝다" 이고, 그것은 활성과 호버가 동시에 성립하는 카드 목록(AI 세션 도크)을 위한 값이다.
+/// 이 컴포넌트는 위 if 사슬이 **선택·활성·호버를 배타로** 가르므로 겹침이 없고, 그 값을 쓰면 호버한
+/// 행이 **선택한 행보다 밝아진다** — 사용자가 무엇을 고른 상태인지 화면에서 잃는다. Lab 캡처로 실측
+/// 했다(픽스처 테마에서 선택 rgb 80 대 호버 rgb 140). 옛 셀 경로에서 이 뒤집힘이 안 보였던 이유는
+/// 선택이 **accent 색 면**이었기 때문이고(FT1 이 그것을 회색 밴드 + 2px accent 막대로 바꿨다 —
+/// `types.Metrics.focus_bar_w`), 그 순간부터 밝기 순서가 신호가 됐다.
+///
+/// **활성(열린 파일)은 호버와 같은 약한 단을 쓴다.** 스펙의 밴드 상태는 둘(선택·호버)이고, 열린
+/// 파일은 자기만의 신호를 이미 갖는다 — 라벨이 `surface_fg` 로 올라가는 유일한 행이다(`labelRole`).
+/// 그래서 약한 단을 나눠 쓰는 것이 정보를 잃지 않고, 세 단을 12% 안에 밀어 넣어 셋 다 구별 못 하게
+/// 되는 것보다 낫다(rich 팔레트: hover 88 · press 94 · active 100).
 fn bandRole(r: types.Row, hovered: bool) ?tokens.ColorRole {
     if (r.selected) return .tab_active_bg;
-    if (r.active) return .tab_hover_bg;
-    if (hovered) return .row_hover_bg;
+    if (r.active or hovered) return .tab_hover_bg;
     return null;
 }
 
@@ -617,8 +631,34 @@ test "호버는 InteractionState 로만 들어온다" {
     const hovered = try view(props, frame, .{ .hovered = build_mod.NodeIds.row(0) }, &tk, .{ .ops = &h2.ops, .runs = &h2.runs, .text_bytes = &h2.text_bytes });
     try testing.expectEqual(@as(usize, 1), countQuad(hovered.ops));
     for (hovered.ops) |op| if (op == .quad) {
-        try testing.expectEqual(tokens.ColorRole.row_hover_bg, op.quad.fill_role);
+        try testing.expectEqual(tokens.ColorRole.tab_hover_bg, op.quad.fill_role);
     };
+}
+
+// **호버 밴드는 선택 밴드보다 약해야 한다**(계획 §3 — "호버: 약한 배경"). role 이름만 보는 단언은 이
+// 뒤집힘을 못 잡는다: `row_hover_bg` 는 이름이 "호버"인데 값이 활성보다 **밝다**(그 role 의 계약이
+// 그렇다 — 겹침용이다). 그래서 **값으로** 잰다. 실제로 FT1 이 이 상태였고, Lab 캡처를 눈으로 보고서야
+// 드러났다(선택 rgb 80 대 호버 rgb 140).
+test "호버 밴드는 선택 밴드보다 배경에 가깝다" {
+    const rich = testTokens();
+    const bg = rich.palette.get(.surface_bg);
+    const selected = rich.palette.get(bandRole(.{ .kind = .file, .label = "a", .icon_kind = 0, .selected = true }, false).?);
+    const hover = rich.palette.get(bandRole(.{ .kind = .file, .label = "a", .icon_kind = 0 }, true).?);
+    // 셋이 한 방향으로 서야 한다: 배경 < 호버 < 선택.
+    try testing.expect(dist(bg, hover) > 0); // 호버가 보인다
+    try testing.expect(dist(bg, hover) < dist(bg, selected)); // 그리고 선택보다 약하다
+    // 활성(열린 파일)도 선택을 넘지 않는다.
+    const active = rich.palette.get(bandRole(.{ .kind = .file, .label = "a", .icon_kind = 0, .active = true }, false).?);
+    try testing.expect(dist(bg, active) <= dist(bg, selected));
+}
+
+fn dist(a: anytype, b: @TypeOf(a)) u32 {
+    const d = struct {
+        fn f(x: u8, y: u8) u32 {
+            return if (x > y) @as(u32, x - y) else @as(u32, y - x);
+        }
+    }.f;
+    return d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b);
 }
 
 // **DTO 가 허용하는 최악 조합이 예산 안에 드는가.** `bufferSizes` 는 호출자가 믿고 쓰는 값이라,

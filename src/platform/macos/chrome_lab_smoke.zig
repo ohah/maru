@@ -258,6 +258,9 @@ pub fn main(init: std.process.Init) !void {
     // 탭 칸 3 + 고정 chrome 4 + 여유.
     var scm_nodes: [48]chrome.ui.tree.UiNode = undefined;
     var scm_actions: [40]chrome.components.scm_dock.ids.Entry = undefined;
+    // 파일 탐색기: 행 8 + 목록 + 루트. 행마다 노드 하나다(밴드·아이콘·라벨은 `view` 가 직접 낸다).
+    var file_tree_nodes: [16]chrome.ui.tree.UiNode = undefined;
+    var file_tree_actions: [12]chrome.components.file_tree.ids.Entry = undefined;
     var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     // SB1 §5.2: 사이드바 배경 strip이 상태바 위에서 끊기는지 **픽셀로** 보는 시나리오에서만 값을 싣는다.
@@ -330,6 +333,8 @@ pub fn main(init: std.process.Init) !void {
         .detail_actions = &detail_actions,
         .scm_nodes = &scm_nodes,
         .scm_actions = &scm_actions,
+        .file_tree_nodes = &file_tree_nodes,
+        .file_tree_actions = &file_tree_actions,
         .text_runs = &text_runs,
         .text_bytes = &text_bytes,
         // 오버레이 시나리오만 쓴다 — 나머지는 고정 슬라이스에 채우므로 이 값을 안 본다.
@@ -768,6 +773,8 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-repo-hover")) return .scm_repo_hover;
     if (std.mem.eql(u8, raw, "scm-scrolled")) return .scm_scrolled;
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
+    if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
+    if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
     if (std.mem.eql(u8, raw, "sort-toggle-hover")) return .sort_toggle_hover;
     if (std.mem.eql(u8, raw, "sort-toggle-pressed")) return .sort_toggle_pressed;
     if (std.mem.eql(u8, raw, "context-menu-checked")) return .context_menu_checked;
@@ -782,6 +789,8 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_repo_hover => "scm-repo-hover",
         .scm_scrolled => "scm-scrolled",
         .scm_commit_edit => "scm-commit-edit",
+        .file_tree_rows => "file-tree-rows",
+        .file_tree_row_hover => "file-tree-row-hover",
         .sort_toggle_hover => "sort-toggle-hover",
         .sort_toggle_pressed => "sort-toggle-pressed",
         .context_menu_checked => "context-menu-checked",

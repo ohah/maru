@@ -38,6 +38,31 @@ export interface Decoration extends Disposable {
   readonly isDisposed: boolean;
 }
 
+/**
+ * 두 장식 목록이 같은가. **보내는 쪽과 받는 쪽이 이 하나를 함께 쓴다** — 장식은 매 프레임
+ * 만들어지므로 같으면 보내지도 그리지도 않아야 하는데(안 그러면 무한 루프다), 비교를 두 곳에
+ * 복사해 두면 `DecorationSpan` 에 필드가 늘 때 한쪽을 빠뜨려 **조용히 "같다" 고 판단한다**.
+ * 그건 루프보다 찾기 어렵다.
+ */
+export function sameSpans(a: readonly DecorationSpan[], b: readonly DecorationSpan[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (
+      x.row !== y.row ||
+      x.x !== y.x ||
+      x.width !== y.width ||
+      x.backgroundColor !== y.backgroundColor ||
+      x.foregroundColor !== y.foregroundColor ||
+      x.opacity !== y.opacity
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** 렌더러가 한 프레임에 그릴 장식(뷰포트 좌표로 접힌 것). */
 export interface DecorationSpan {
   row: number;

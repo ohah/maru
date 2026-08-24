@@ -6,6 +6,7 @@
  */
 import { loadBundledFont } from "../font";
 import { LocalBackend } from "../backend/local";
+import { type DecorationSpan, sameSpans } from "../decoration";
 import { CanvasRenderer } from "../render/canvas";
 import { measureMetrics } from "../render/metrics";
 import type { FromWorker, ToWorker, WorkerRenderOptions } from "./protocol";
@@ -14,7 +15,7 @@ let backend: LocalBackend | null = null;
 const renderer = new CanvasRenderer();
 /** 워커도 같은 규칙으로 박스 드로잉을 그린다 — 모드 간 화면이 같아야 한다. */
 let opts: WorkerRenderOptions | null = null;
-let decorations: import("../decoration").DecorationSpan[] = [];
+let decorations: DecorationSpan[] = [];
 let preedit = "";
 let blinkOn = true;
 /** 마지막으로 잡은 격자. 폰트가 바뀌면 이 크기로 backing 을 다시 잡는다. */
@@ -141,29 +142,15 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       case "clear":
         backend?.clear();
         return;
-      case "decorations": {
+      case "decorations":
         // **받는 쪽에서도 막는다.** 보내는 쪽(`Terminal#pushDecorations`)이 이미 바뀔 때만
         // 보내지만, 거기가 뚫리면 곧바로 무한 루프가 된다 — 다시 그리면 `rendered` 가 나가고
-        // 그 프레임이 또 장식을 실어 온다(실측: 초당 1638 프레임). 한 겹으로 두지 않는다.
-        const next = msg.spans;
-        const same =
-          next.length === decorations.length &&
-          next.every((s, i) => {
-            const o = decorations[i]!;
-            return (
-              s.row === o.row &&
-              s.x === o.x &&
-              s.width === o.width &&
-              s.backgroundColor === o.backgroundColor &&
-              s.foregroundColor === o.foregroundColor &&
-              s.opacity === o.opacity
-            );
-          });
-        if (same) return;
-        decorations = next;
+        // 그 프레임이 또 장식을 실어 온다(실측: 초당 1638 프레임). **비교는 양쪽이 같은
+        // 함수를 쓴다** — 복사해 두면 필드가 늘 때 한쪽을 빠뜨려 조용히 "같다" 고 판단한다.
+        if (sameSpans(msg.spans, decorations)) return;
+        decorations = msg.spans;
         redraw();
         return;
-      }
       case "sel": {
         const b = backend;
         if (!b) return;

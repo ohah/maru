@@ -28,6 +28,7 @@ const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
 const pane_ops = @import("pane.zig");
 const find_ops = @import("find.zig");
+const git_ops = @import("git.zig"); // applyForcedScmTab 이 저장소 루트를 찾을 때 쓴다
 
 /// 시각 확인 디버그 훅 — MARU_OPEN_SETTINGS env가 설정됐고 surface가 준비됐으면 세팅 화면을 한 번 자동으로 연다.
 /// 스크린샷 하니스(MARU_SCREENSHOT)가 입력 없이 모달 상태를 캡처하도록(self-verify). env 미설정이면 무동작 —
@@ -919,6 +920,100 @@ pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
 /// 상자 높이·목록 뷰포트는 전부 제품 tick이 정한다.
 ///
 /// **한 번만 넣는다.** 매 tick 넣으면 같은 글자가 무한히 쌓인다 — 포커스 플래그가 그 가드다.
+/// 캡처 전용: 소스 컨트롤 도크의 **탭·턴 목록·펼친 커밋**을 강제한다(env 미설정이면 무동작).
+///
+/// `app_session.zig` 의 tick 안에 인라인으로 있던 것을 옮겼다 — 이 모듈이 존재하는 이유가 정확히
+/// «제품 경로를 읽는 사람이 디버그 스캐폴딩을 지나지 않게» 이고, 그 블록은 턴 하니스가 커지면서
+/// 40줄을 넘었다(적대적 검증에서 잡혔다).
+pub fn applyForcedScmTab(self: *AppSession) void {
+    // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
+    // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).
+    if (std.c.getenv("MARU_FORCE_SCM_TAB")) |raw| {
+        const spec = std.mem.span(raw);
+        const tab: chrome.components.scm_dock.types.Tab = if (std.mem.eql(u8, spec, "history"))
+            .history
+        else if (std.mem.eql(u8, spec, "agent"))
+            .agent
+        else
+            .changes;
+        scm_dock_ops.selectScmTab(self, tab);
+        // MARU_FORCE_SCM_COMMIT_EXPAND=<n> — 그 자리의 커밋을 펼친 것처럼 만든다(P4b). 펼치기는
+        // 클릭으로만 일어나므로 포인터 없는 캡처 하니스에서는 그 화면을 얻을 방법이 없다.
+        // MARU_FORCE_SCM_TURNS=<n> — 관측한 턴이 없는 하니스에서 타임라인을 찍기 위해 스냅샷을
+        // n개 심는다(P5). 링은 **이번 실행에서 관측한 것**이라 헤드리스에는 비어 있다.
+        //
+        // **AT0 이후로는 신원도 함께 심는다.** 링의 키가 provider 세션 id 이고 화면은 «활성 세션의
+        // 링» 을 그리므로, 신원 없이 링만 채우면 그 목록을 찾을 수 없다. 캡처 하니스에는 진짜
+        // 에이전트가 없으므로 활성 Term 에 데모 신원을 붙이고 같은 키로 링을 만든다.
+        if (tab == .agent) {
+            if (std.c.getenv("MARU_FORCE_SCM_TURNS")) |raw_count| {
+                const demo_session = "maru-demo-session";
+                if (self.turn_rings.find(demo_session) == null) {
+                    if (self.surface_initialized) {
+                        const active_id = term_ops.activeSurface(self).id;
+                        outer: for (self.tabs.items) |tab_item| {
+                            for (tab_item.panes.items) |pane| {
+                                for (pane.terms.items) |term| {
+                                    if (term.surface.id != active_id) continue;
+                                    term.agent_transcript.setIdentity(demo_session);
+                                    break :outer;
+                                }
+                            }
+                        }
+                    }
+                    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse "");
+                    // `orelse return` 을 쓰지 않는다 — 여기서 나가면 그 프레임의 나머지 tick 작업이 통째로 스킵된다.
+                    if (self.turn_rings.ringFor(demo_session, repo)) |ring| {
+                        const count = std.fmt.parseInt(usize, std.mem.span(raw_count), 10) catch 3;
+                        const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+                        // MARU_FORCE_SCM_TURN_TREES=<oid>,<oid>,… — **진짜 tree** 를 밖에서 받는다(오래된 것부터).
+                        // 가짜 OID 를 심으면 `git diff` 가 실패해 `N개 파일` 요약이 영영 안 뜬다 — 그 줄을
+                        // 캡처로 확인할 방법이 없어진다. 앱이 스스로 `rev-parse` 를 부르지 않는 이유는 그것이
+                        // 비동기 배관이라 캡처 시점에 결과가 없기 때문이다(스크립트가 구해서 넘긴다).
+                        //
+                        // ⚠️ **스크립트가 커밋 tree(`HEAD~n^{tree}`)를 빌리는 것은 헤드리스 편의다.**
+                        // 캡처 하니스에는 에이전트가 없어 진짜 턴 스냅샷을 만들 수 없으므로 이미 있는 tree 를
+                        // 쓴다. **제품은 커밋과 무관하다** — `captureTurnSnapshot` 은 임시 index 로
+                        // `read-tree HEAD → add -A → write-tree` 를 돌려 **작업트리**를 굳히므로 커밋하지 않은
+                        // 변경이 그대로 잡힌다(계약 §2.4 가 커밋 0회·스테이징 0회로 실증했고, 그 경로는
+                        // 「턴 스냅샷이 링에 실리고…」 통합 테스트가 실제로 돌린다). tree 는 «그 시점 파일들의
+                        // 내용 스냅샷» 이라 어느 쪽으로 만들었든 diff 계산은 같다 — 그래서 이 빌림이 성립한다.
+                        //
+                        // 캡처 방식 전환(계약 §4.4) 뒤에는 tree 개념이 사라지므로 **이 게이트와 요약 배관이
+                        // 함께 걷힌다** — 그때 파일 수는 우리가 든 그림자 사본에서 바로 나온다.
+                        var trees_it: ?std.mem.SplitIterator(u8, .scalar) = if (std.c.getenv("MARU_FORCE_SCM_TURN_TREES")) |raw_trees|
+                            std.mem.splitScalar(u8, std.mem.span(raw_trees), ',')
+                        else
+                            null;
+                        var i: usize = 0;
+                        while (i < count) : (i += 1) {
+                            var oid_buf: [16]u8 = undefined;
+                            const fallback = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
+                            const oid = if (trees_it) |*it| (it.next() orelse fallback) else fallback;
+                            // 종류만 번갈아 심는다 — 한 링은 한 세션이므로 `surface_id` 는 하나다.
+                            ring.push(oid, 1, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                        }
+                        // MARU_FORCE_SCM_TURNS_MISSED=<n> — 「기록하지 못한 턴」 줄을 세운다. 실제로는
+                        // 다른 세션의 캡처와 겹쳐야 나는 값이라 헤드리스로는 재현할 방법이 없다.
+                        if (std.c.getenv("MARU_FORCE_SCM_TURNS_MISSED")) |raw_missed| {
+                            ring.missed = std.fmt.parseInt(u32, std.mem.span(raw_missed), 10) catch 0;
+                        }
+                    }
+                }
+            }
+        }
+        if (tab == .history) {
+            if (std.c.getenv("MARU_FORCE_SCM_COMMIT_EXPAND")) |raw_index| {
+                if (self.scm_expanded_commit == null) {
+                    const index = std.fmt.parseInt(u32, std.mem.span(raw_index), 10) catch 0;
+                    scm_dock_ops.applyScmDockIntent(self, .{ .select_commit = index });
+                }
+            }
+        }
+    }
+}
+
 pub fn applyForcedCommitMessage(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_SCM_COMMIT") orelse return;
     if (self.dock.view != .source_control) return;

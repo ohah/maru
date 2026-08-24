@@ -136,14 +136,17 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 우리 서술과 일치)는 것도, `turn_id` 를 준다는 것도(턴 키), `model` 은 codex 에만 있다는 것도 그 스키마가
 직접 말한다. `SubagentStop` 은 `agent_id` 를 **옵션이 아닌 문자열**로 싣는다.
 
+아래 「쓰는 곳」은 **지금 제품이 실제로 소비하는 것**이다. 아직 안 쓰는 것은 «(AT*)»로 어느 단계가
+가져오는지 적는다 — 이 표를 미래형과 섞어 적어 두었더니 **없는 배관을 있다고 읽게** 만들었다(2026-08-25 정정).
+
 | 이벤트 | matcher | codex | 쓰는 곳 |
 | --- | --- | --- | --- |
-| `SessionStart` | — | ✅ | 턴 0 스냅샷, 세션 신원(`session_id`·`transcript_path`) |
+| `SessionStart` | — | ✅ | 턴 0 스냅샷(`opensSessionBase`), 세션 신원(`session_id`). `transcript_path`는 **파싱만** 한다 — 훅 모드는 transcript 파일을 아예 안 읽는 것이 설계다 |
 | `UserPromptSubmit` | — | ✅ | 턴 시작, `working` 진입, 턴 식별자 |
-| `Stop` | — | ✅ | 턴 종료 스냅샷, 턴 제목(`last_assistant_message`), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다) |
+| `Stop` | — | ✅ | 턴 종료 스냅샷, 마지막 응답(`last_assistant_message` → 사이드바 대화 줄), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다). **링 항목의 턴 제목은 (AT2)** — `Snapshot`에 아직 제목 슬롯이 없다 |
 | `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. ⚠️ **미검증** — 헤드리스에서 권한 거부가 실제로 일어났는데도 이 이벤트도 `PermissionDenied`도 발화하지 않았다(§8-6) |
-| `PreToolUse` | `*` | ✅ | 진행 중 세부 **및 AI 소행 경로**·도구 구간 시작. **두 provider의 payload 모양이 다르다 — §2.1** |
-| `PostToolUse` | **`Bash`/`exec`만** | 미검증 | **셸 도구 구간 종료**(§3.1 예외 — 병렬 도구 호출에서 «다음 `Pre`»가 끝을 못 준다). 쓰는 것은 `tool_use_id`와 «끝났다»는 사실뿐 |
+| `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). **AI 소행 경로(`file_path`)는 (AT3)** — 파싱만 하고 소비자가 없다. **도구 구간 시작은 (AT3b)** — `tool_use_id`가 파서에 아직 없다. **두 provider의 payload 모양이 다르다 — §2.1** |
+| `PostToolUse` | **(AT3b) `Bash`/`exec`만** | 미검증 | **아직 걸지 않는다** — 세트에 없고 test가 그 부재를 단언한다. AT3b가 셸 브래킷과 함께 되돌린다(§3.1 예외) |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
 | `SubagentStop` | — | ✅ | 자식이 끝났다. **마지막** 자식이 끝나고 lead 도 끝났으면 그때가 턴 끝이다 |
 | `Notification` | — | ❌ **없다** | **입력 대기 판정**(`notification_type` — §6 표). `PermissionRequest`가 발화하지 않는 환경에서 그 배지의 유일한 소스다 |
@@ -536,7 +539,13 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
 필요한 경로는 `PreToolUse(Edit).tool_input.file_path`에 있고 그쪽은 1 KB 미만이다. 그래서 `PostToolUse`를
 **세트에서 뺀다.** 얻는 것: 발화 절반, 상한 절단 문제 소멸, `originalFile`이 로그에 남지 않아 평문 노출 축소.
 
-> ⚠️ **예외 — `Bash`/`exec`에는 건다**(2026-08-23, [턴 변경분](agent-turn-changes.md) A21). 위 근거는
+> ⚠️ **예외 — `Bash`/`exec`에는 건다**(2026-08-23 결정, [턴 변경분](agent-turn-changes.md) A21).
+> **아직 걸지 않는다 — 이 되돌림은 [AT3b](plans/agent-turn-changes.md)가 가져온다.** 지금 세트
+> (`agent_hook_command.claude_events`·`codex_events`)에는 `PostToolUse`가 **없고**, 같은 파일의 test가
+> 그 부재를 단언한다. 파서에도 `Kind.post_tool_use`와 `tool_use_id`가 아직 없다. 아래는 그때 무엇을
+> 어떤 근거로 되돌릴지의 기록이다.
+>
+> 위 근거는
 > `tool_response.originalFile`의 크기이고 **그 필드는 편집 도구에만 있다.** Bash payload는
 > `{stdout, stderr, interrupted, isImage, noOutputExpected}`로 실측 최대 18,187 B라 상한 안이다.
 >
@@ -1014,7 +1023,8 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 5. 훅은 claude·codex에만 있다. 다른 에이전트는 항상 관측 모드다.
 5a. **MCP·커스텀 도구가 고친 파일은 소행 확정에서 빠진다.** `tool_input` 스키마가 도구마다 달라 경로를
    일반적으로 뽑을 수 없다(도구별 키 맵을 유지하는 길도 있으나 v1 범위 밖). tree 비교가 잡으므로
-   유실은 아니고 `· 턴 중 변경`으로 강등된다.
+   유실은 아니고 **(AT4)** 의 3분류에서 `· 턴 중 변경`으로 강등될 것이다 — 그 배지는 아직 없다(지금
+   에이전트 탭은 턴별 **파일 수**만 말한다).
 5b. **모델 이름은 훅만으로 얻을 수 없다.** Codex payload에는 `model`이 있으나 Claude에는 `SessionStart`·`Stop`
    어디에도 없다(실측). 사이드바에 모델을 보여야 하면 transcript나 관측 경로에서 따로 얻어야 한다.
 6. **`PermissionRequest`·`Notification`은 헤드리스에서 오지 않는다 — 대화형에서는 둘 다 온다**

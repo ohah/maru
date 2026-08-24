@@ -38,7 +38,7 @@ pub const Commit = struct {
     /// author 시각(UNIX 초). 파싱 실패면 0이고, 그때 화면은 상대시각 자리를 비운다 —
     /// **0을 "1970년"으로 그리지 않는다**(모르는 것을 아는 척하지 않는다).
     timestamp: i64 = 0,
-    /// `%D` 원문. 칩으로 쪼개는 것은 `refIterator`가 한다.
+    /// `%D` 원문. 칩으로 쪼개는 것은 `refs()`(→ `RefIterator`)가 한다.
     refs: []const u8 = "",
     subject: []const u8 = "",
 

@@ -228,6 +228,9 @@ pub const RuntimeManager = struct {
     /// `runtime.clipboard_write`로 가져간다. read는 target(Pc)만 짧아 관측에 함께 싣는다.
     clipboards: std.AutoHashMapUnmanaged(RuntimeHandle, ClipboardState) = .empty,
     output_wake: ?OutputWake = null,
+    /// 훅 로그 경로의 인스턴스 칸으로 쓸 `host_id`(daemon 이 `setHookInstanceHost` 로 심는다). null 이면
+    /// 자식에 훅 신원을 싣지 않는다 — fail-closed.
+    hook_instance_host: ?u128 = null,
 
     /// self-referential 필드를 안정 주소로 세운다. caller가 준 `*RuntimeManager` 슬롯을 채운다(반환 이동 없음).
     pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry) void {
@@ -246,6 +249,17 @@ pub const RuntimeManager = struct {
         self.bell_counts = .empty;
         self.clipboards = .empty;
         self.output_wake = null;
+        self.hook_instance_host = null;
+    }
+
+    /// 이 host 의 `host_id` 를 알려 준다(daemon 이 bind 직후 한 번). spawn 이 자식에게 **훅 로그 경로의
+    /// 인스턴스 칸**으로 실어 준다 — 그 값이 없으면 host-backed 터미널은 훅 파일을 안 만들고 관측 모드로
+    /// 산다(fail-closed, docs/agent-hooks.md §4).
+    ///
+    /// **manager 가 host_id 를 스스로 만들지 않는다.** 그 값의 소유자는 daemon(manifest·소켓 경로와 같은
+    /// 신원)이고, 여기서 따로 발급하면 두 신원이 갈린다.
+    pub fn setHookInstanceHost(self: *RuntimeManager, host_id: u128) void {
+        self.hook_instance_host = host_id;
     }
 
     /// Product daemon/restore calls this before any runtime exists. Tests that do not exercise the
@@ -1597,6 +1611,37 @@ pub const RuntimeManager = struct {
         if (self.next_handle == std.math.maxInt(RuntimeHandle))
             return error.IdSpaceExhausted;
         const handle = self.next_handle;
+        // **runtime_id 를 spawn 보다 먼저 발급한다.** 자식 env 는 spawn 시점에 굳으므로, 훅 로그의 pane 칸
+        // (=`runtime_id`)을 실으려면 이 순서여야 한다. 등록은 여전히 spawn **성공 뒤**다 — 실패한 spawn 이
+        // registry 에 자리를 남기면 재접속 조회가 없는 runtime 을 가리킨다.
+        //
+        // 충돌은 128-bit 무작위라 사실상 불가능하지만, 등록 전에 한 번 물어 방어한다(옛 코드의 8회 재시도
+        // 루프가 하던 일 — 다만 그때는 spawn 뒤였으므로 재시도가 공짜였고, 지금은 자식이 이미 그 값을
+        // 들고 있으므로 «다시 뽑기» 가 성립하지 않는다. 그래서 뽑기 전에 비어 있음을 확인한다).
+        var runtime_id = newRuntimeId();
+        var mint_attempts: usize = 0;
+        while (self.host_registry.get(runtime_id) != null) : (mint_attempts += 1) {
+            if (mint_attempts >= 8) return error.IdSpaceExhausted; // 도달 불가
+            runtime_id = newRuntimeId();
+        }
+
+        // 훅 로그 경로의 두 칸(docs/agent-hooks.md §4). 모양의 단일 출처는 계약 모듈이다 — host 가 심는
+        // 이름과 GUI 가 읽는 이름이 갈리면 그 Term 은 자기 이벤트를 못 읽는다.
+        //
+        // ⚠️ 버퍼는 이 함수 스택에 둔다. `be.spawn` 안에서 env 가 owned 사본으로 굳으므로 그 호출까지만
+        // 살아 있으면 된다(`PtySession.spawn` → `EnvStorage`).
+        const hook_command = maru.session.agent_hook_command;
+        var hook_instance_buf: [hook_command.instance_token_max]u8 = undefined;
+        var hook_pane_buf: [hook_command.pane_token_max]u8 = undefined;
+        const hook_instance: ?[]const u8 = if (self.hook_instance_host) |host_id|
+            hook_command.formatHostInstance(&hook_instance_buf, host_id)
+        else
+            null;
+        const hook_pane: ?[]const u8 = if (self.hook_instance_host != null)
+            hook_command.formatRuntimePane(&hook_pane_buf, runtime_id)
+        else
+            null; // 인스턴스 칸이 없으면 pane 칸만 실어도 훅은 경로를 못 만든다 — 둘을 함께 다룬다.
+
         const be = self.backend_impl.backend();
         const size = maru.terminal.Size{ .cols = params.cols, .rows = params.rows };
         const args: []const []const u8 = if (params.argv.len > 1) params.argv[1..] else &.{};
@@ -1619,6 +1664,8 @@ pub const RuntimeManager = struct {
                 .shell_integration = if (params.shell_integration_dir) |dir| .{ .assets_dir = dir } else null,
                 .ssh_integration_bin = params.ssh_integration_bin,
                 .pane_id = params.pane_id,
+                .hook_instance = hook_instance,
+                .hook_pane = hook_pane,
                 .size = size,
             },
             .size = size,
@@ -1649,19 +1696,12 @@ pub const RuntimeManager = struct {
         }
         _ = try be.attach(handle, true); // backend가 initial_config를 적용한 뒤 reader 시작 — 첫 output부터 host 설정 사용.
 
-        // 무작위 runtime_id를 발급해 host registry에 등록한다. 충돌은 사실상 불가능하지만 방어적으로 재시도한다.
-        var attempts: usize = 0;
-        while (attempts < 8) : (attempts += 1) {
-            const rid = newRuntimeId();
-            const entry = self.host_registry.register(rid, params.cols, params.rows) catch |err| switch (err) {
-                error.DuplicateRuntime => continue,
-                else => return err,
-            };
-            entry.runtime = @ptrFromInt(handle); // opaque 슬롯에 handle 보관(그 목적: 실 runtime handle). handle>=1이라 non-null.
-            self.next_handle += 1;
-            return rid;
-        }
-        return error.IdSpaceExhausted; // 8회 연속 128-bit 충돌 — 도달 불가.
+        // **위에서 뽑아 자식에게 실어 보낸 그 id** 로 등록한다. 여기서 다시 뽑으면 자식 env 의 pane 칸과
+        // 갈려, 그 터미널은 자기 훅 로그를 영영 못 읽는다.
+        const entry = try self.host_registry.register(runtime_id, params.cols, params.rows);
+        entry.runtime = @ptrFromInt(handle); // opaque 슬롯에 handle 보관(그 목적: 실 runtime handle). handle>=1이라 non-null.
+        self.next_handle += 1;
+        return runtime_id;
     }
 
     /// runtime을 종료한다(§8 `runtime end`). 멱등 — 없는 id/handle 미기록은 무시한다. registry entry의 opaque 슬롯에서
@@ -1935,6 +1975,124 @@ test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminat
     try std.testing.expectEqual(@as(usize, 0), host_registry.liveGridCells());
     // 두 번째 terminate는 no-op(없는 id 무시) — 멱등.
     ops.terminate(ops.ctx, rid);
+}
+
+test "runtime manager: host 가 자식에게 심는 훅 신원이 GUI 가 읽을 이름과 정확히 같다" {
+    // 이 테스트가 AH7 의 매듭이다(docs/agent-hooks.md §4). host 가 띄운 자식의 env 에 실제로 들어간 값을
+    // **자식이 스스로 적게** 해서 읽고, 계약 모듈이 만드는 이름과 대조한다. 두 이름이 갈리면 그 터미널은
+    // 훅 파일을 «만들되» GUI 가 못 찾는 자리에 만든다 — 훅은 도는데 이벤트가 0 인 최악의 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const result_path = try std.fs.path.join(allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path, "hook_env" });
+    defer allocator.free(result_path);
+    // 자식이 자기 env 를 그대로 적는다. maru 코드를 한 줄도 안 지나므로 «주입됐다» 의 증거가 된다.
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "printf '%s|%s' \"$MARU_HOOK_INSTANCE\" \"$MARU_HOOK_PANE\" > '{s}'; exit 0",
+        .{result_path},
+    );
+    defer allocator.free(script);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit();
+
+    const host_id: u128 = 0xa11ce_0000_0000_0000_0000_0000_0000_0f;
+    mgr.setHookInstanceHost(host_id);
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+
+    const hook_command = maru.session.agent_hook_command;
+    var instance_buf: [hook_command.instance_token_max]u8 = undefined;
+    var pane_buf: [hook_command.pane_token_max]u8 = undefined;
+    const expected = try std.fmt.allocPrint(allocator, "{s}|{s}", .{
+        hook_command.formatHostInstance(&instance_buf, host_id),
+        hook_command.formatRuntimePane(&pane_buf, rid),
+    });
+    defer allocator.free(expected);
+
+    var observed: ?[]u8 = null;
+    defer if (observed) |bytes| allocator.free(bytes);
+    var attempts: usize = 0;
+    while (attempts < 200) : (attempts += 1) {
+        if (tmp.dir.readFileAlloc(std.testing.io, "hook_env", allocator, .limited(4096)) catch null) |bytes| {
+            if (bytes.len > 0) {
+                observed = bytes;
+                break;
+            }
+            allocator.free(bytes);
+        }
+        _ = usleep(10 * 1000);
+    }
+    try std.testing.expectEqualStrings(expected, observed orelse return error.TestUnexpectedResult);
+
+    // **pane 칸은 등록된 runtime_id 와 같은 값이어야 한다.** spawn 전에 뽑아 자식에게 실은 뒤 등록에서
+    // 다시 뽑으면 여기서 갈린다(그 회귀가 이 슬라이스의 유일한 위험이다).
+    try std.testing.expect(host_registry.get(rid) != null);
+    var pane_check: [hook_command.pane_token_max]u8 = undefined;
+    const pane_token = hook_command.formatRuntimePane(&pane_check, rid);
+    try std.testing.expect(std.mem.endsWith(u8, observed.?, pane_token));
+    // 그리고 그 이름은 커맨드의 가드를 통과해야 한다 — 통과 못하면 훅이 조용히 나간다.
+    try std.testing.expect(hook_command.pane_token_class.accepts(pane_token));
+    try std.testing.expect(hook_command.instance_token_class.accepts(
+        hook_command.formatHostInstance(&instance_buf, host_id),
+    ));
+}
+
+test "runtime manager: host_id 를 모르면 훅 신원을 싣지 않는다 — fail-closed" {
+    // 인스턴스 칸이 없으면 훅은 경로를 만들 수 없다. 그때 pane 칸만 실으면 «반쪽 신원» 이 남아, 나중에
+    // 인스턴스 칸이 생겼을 때 어느 자리에 쓰였는지 알 수 없다. 그래서 둘을 함께 다룬다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const result_path = try std.fs.path.join(allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path, "hook_env" });
+    defer allocator.free(result_path);
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "printf 'i=[%s] p=[%s] done' \"$MARU_HOOK_INSTANCE\" \"$MARU_HOOK_PANE\" > '{s}'; exit 0",
+        .{result_path},
+    );
+    defer allocator.free(script);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry);
+    defer mgr.deinit(); // setHookInstanceHost 를 부르지 않는다 — daemon 배선 전 상태.
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+
+    var observed: ?[]u8 = null;
+    defer if (observed) |bytes| allocator.free(bytes);
+    var attempts: usize = 0;
+    while (attempts < 200) : (attempts += 1) {
+        if (tmp.dir.readFileAlloc(std.testing.io, "hook_env", allocator, .limited(4096)) catch null) |bytes| {
+            if (std.mem.endsWith(u8, bytes, "done")) {
+                observed = bytes;
+                break;
+            }
+            allocator.free(bytes);
+        }
+        _ = usleep(10 * 1000);
+    }
+    try std.testing.expectEqualStrings("i=[] p=[] done", observed orelse return error.TestUnexpectedResult);
 }
 
 test "runtime manager: daemon budget rejection happens before backend allocation" {

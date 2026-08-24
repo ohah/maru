@@ -1974,9 +1974,23 @@ fn rebuildSidebarCells(
     out: *std.ArrayList(d3d11_cells.Cell),
     geom: maru.session.dock_layout.Geometry,
     sidebar_w: u32,
+    cell_w: u32,
     cell_h: u32,
+    /// 카드에 실을 것들 — 지금 세션 하나. 슬라이스라 호출자가 수명을 안다.
+    card: SidebarCard,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    uploaded: *usize,
+    glyphs: *usize,
+    outside: *usize,
+    frame_slot: *?maru.renderer.RenderFrame,
 ) !void {
     out.clearRetainingCapacity();
+    glyphs.* = 0;
+    outside.* = 0;
     if (sidebar_w == 0) return;
     const h = geom.workspace.h + geom.workspace.y; // 사이드바는 타이틀바 띠 위까지 전체 높이다
     try out.append(allocator, d3d11_cells.solidCell(
@@ -1992,7 +2006,10 @@ fn rebuildSidebarCells(
     // 렌더에 쓰는 줄 수와 같은 값을 실어야 클릭 좌표가 안 갈린다).
     const sb = maru.chrome.components.sidebar;
     const m = sb.Metrics.init(cell_h, cell_h);
-    const lines: u8 = 1;
+    // **카드가 실제로 그리는 줄 수를 쓴다.** 1 로 박아 두면 밴드가 글자보다 짧아져 둘째 줄이 밖으로
+    // 나간다(판정 `sidebar_cells_outside` 가 4 를 냈다 — 그 필드 doc 이 예고한 그대로다:
+    // "host 가 렌더에 쓰는 줄 수와 같은 값을 실어야 한다").
+    const lines: u8 = card.lines;
     const card_h = sb.cardHeight(lines, m);
     const top = m.content_pad_v;
     if (top + card_h > h) return;
@@ -2013,7 +2030,94 @@ fn rebuildSidebarCells(
         d3d11_cells.colorFromArgb(0xFFDDA15E),
         .{ 0, 0, 0, 0 },
     ));
+
+    // ── 카드 글자 (W8.8⒜2) ──────────────────────────────────────────────────────────────────
+    //
+    // **투영은 이미 있다** — `coretext_frame_builder.buildSidebarDrawList`(이름과 달리 본문에
+    // CoreText 참조 0). 이름·브랜치·폴더를 한 카드로 합성한다.
+    if (frame_slot.*) |*old_frame| {
+        old_frame.deinit(allocator);
+        frame_slot.* = null;
+    }
+    // **글자를 앰버 막대만큼 들여쓴다.** 안 하면 첫 글자가 막대에 잘린다(실측). 값은 chrome
+    // 토큰이 소유한다(`space.card_gap_px` + `accent_bar_width_px`) — macOS 가 쓰는 그 산식이다.
+    const sp = scmSmokeTokens().space; // 색은 안 쓰고 spacing 만 본다 — 토큰 조립을 두 벌로 두지 않는다
+    const indent_cols: u16 = @intCast((@as(u32, sp.card_gap_px) + @as(u32, sp.accent_bar_width_px) + cell_w - 1) / cell_w);
+    const cols: u16 = @intCast(sidebar_w / cell_w);
+    if (cols < indent_cols + 4) return;
+    const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 } };
+    const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    var names = [_][]const u8{card.name};
+    var branches = [_][]const u8{card.branch};
+    var paths = [_][]const u8{card.folder};
+    const empty: []const []const u8 = &.{};
+    const list = cell_text.buildSidebarDrawList(
+        allocator,
+        &names,
+        &branches,
+        &paths,
+        empty,
+        &.{},
+        &.{},
+        &.{},
+        cols -| indent_cols,
+        fg,
+        &.{},
+        empty,
+        null,
+        0,
+        active_fg,
+        null,
+    ) catch return;
+    const frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, builder.shaper, builder.rasterizer) catch {
+        var l = list;
+        l.deinit(allocator);
+        return;
+    };
+    frame_slot.* = frame;
+    try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
+    uploaded.* += draw_host.uploadFrameRegions(pipeline, frame);
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
+        .default_bg = .{ .r = 0x14, .g = 0x19, .b = 0x22 },
+    };
+    const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
+    defer allocator.free(native);
+    // **세로 자리는 중립이 정한다**(`sidebar_glyph_rows.fillOriginY`) — 접는 규칙(`sidebarGlyphRow`)과
+    // 한 파일에 있어 갈리지 않는다. macOS 도 같은 함수를 쓴다.
+    const rows = [_]maru.chrome.components.sidebar.Row{.{ .card = .{ .tab = 0, .label = card.name, .active = true, .lines = @intCast(card.lines) } }};
+    maru.sidebar_glyph_rows.fillOriginY(allocator, native, &rows, m);
+    try out.ensureUnusedCapacity(allocator, native.len);
+    // **판정은 카드 밴드 기준이다.** 사이드바 사각형으로 재면 속 빈다 — 글자가 카드 밖으로 나가도
+    // 띠 안이라 0 이 나온다(실측: 행 인코딩을 안 지운 뮤턴트가 그렇게 통과했다).
+    const x1: f32 = @floatFromInt(sidebar_w);
+    const band_y0: f32 = @floatFromInt(top);
+    const band_y1: f32 = @floatFromInt(top + card_h);
+    for (native) |n| {
+        var c = n;
+        // **행 번호를 0 으로 만든다.** `cellFromNative` 는 `origin_y + row*cell_h` 로 자리를 만드는데,
+        // 사이드바 셀의 `row` 는 격자 행이 아니라 **슬롯·줄 인코딩**이다(`sidebar_glyph_rows`).
+        // 안 지우면 그 인코딩이 픽셀로 곱해져 글자가 카드 한참 아래에 그려진다(실측: 카드 밴드가
+        // y=14~58 인데 글자가 y=189·229 였다). `fillOriginY` 가 이미 최종 y 를 넣어 뒀다.
+        c.row = 0;
+        c.col +|= indent_cols;
+        const cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        // **글자가 사이드바 사각형을 벗어나면 안 된다** — 벗어나면 터미널 위에 얹힌다.
+        if (cell.rect[0] < 0 or cell.rect[0] + cell.rect[2] > x1 or
+            cell.rect[1] < band_y0 or cell.rect[1] + cell.rect[3] > band_y1) outside.* += 1;
+        glyphs.* += 1;
+        out.appendAssumeCapacity(cell);
+    }
 }
+
+/// 사이드바 카드 한 장이 싣는 것. 빈 문자열이면 그 줄을 안 그린다(`buildSidebarDrawList` 의 계약).
+const SidebarCard = struct {
+    name: []const u8,
+    branch: []const u8 = "",
+    folder: []const u8 = "",
+    lines: u8 = 1,
+};
 
 /// 소스 컨트롤 뷰가 그리는 데 필요한 것들.
 const ScmDockInputs = struct {
@@ -2442,7 +2546,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     var sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer sidebar_cells.deinit(allocator);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_h);
+    var sidebar_frame: ?maru.renderer.RenderFrame = null;
+    defer if (sidebar_frame) |*f| f.deinit(allocator);
+    var sidebar_uploads: usize = 0;
+    var sidebar_glyphs: usize = 0;
+    var sidebar_outside: usize = 0;
+    const sidebar_card = SidebarCard{
+        .name = surfaces[0].title,
+        .branch = "",
+        .folder = if (dock_root) |r| std.fs.path.basename(r) else "",
+        .lines = if (dock_root != null) 2 else 1,
+    };
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -2688,7 +2803,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_h) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
@@ -3330,7 +3445,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **사이드바 판정**(W8.8⒜1). `term_cells_before_rect` 가 사이드바 침범을 잡는다 — 터미널
     // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
     // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
-    try stdout.print("sidebar_w={d} sidebar_cells={d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, geom.terminal.x });
+    try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, geom.terminal.x });
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
     if (dock_click_judgeable) {
         // **동어반복을 피한다**: 누른 자리가 그 행이라는 것만 보면 내가 만든 좌표를 내가 되읽는

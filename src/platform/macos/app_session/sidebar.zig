@@ -2393,30 +2393,9 @@ pub fn sidebarBlockHeight(line_count: u32, ch: u32) u32 {
 /// 카드=slot_h·헤더=header_row_h) — rowTop의 헤더·스크롤 제외분. 블록중앙은 그 row 높이(rowHeight; 헤더=header_row_h·
 /// 카드=slot_h)로 잡아 헤더 한 줄이 얇은 밴드 안에서 세로 중앙에 온다. 밴드/배경 셀(slot_id==0)은 손대지 않는다(row 인덱스·별도 기하).
 pub fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.NativeMetalCell, rows: []const chrome.components.sidebar.Row, m: chrome.components.sidebar.Metrics) void {
-    const ch = m.line_h;
-    if (cells.len == 0 or ch == 0) return;
-    const base = coretext_frame_builder.sidebar_line_base; // 32 — sidebarGlyphRow 인코딩 단일 출처
-    var content_tops: std.ArrayList(u32) = .empty;
-    defer content_tops.deinit(allocator);
-    // **목록 위 여백에서 시작한다** — `rowTop`(밴드·hit-test·caret이 쓰는 기준)이 content_pad_v를 더하므로
-    // 여기서 0부터 누적하면 글자만 여백 위로 올라가 **밴드가 글자보다 한 줄 아래로 밀린다**(사용자 제보).
-    // 세 좌표계(밴드·글자·클릭)가 같은 기준을 써야 "보이는 곳 = 눌리는 곳"이 성립한다.
-    var acc: u32 = m.content_pad_v;
-    for (rows) |row| {
-        content_tops.append(allocator, acc) catch return; // 카드·헤더 모두 한 엔트리(slot=row 인덱스). OOM: 이 프레임 skip
-        acc +|= chrome.components.sidebar.rowHeight(row, m); // 카드=줄 수 기반·헤더=header_row_h
-    }
-    for (cells) |*c| {
-        if (c.slot_id == 0) continue; // 밴드/배경 셀 — 자체 경로(row 인덱스)
-        const slot: usize = c.row / base;
-        if (slot >= content_tops.items.len) continue; // 방어 — 매핑 밖(비정상)이면 건너뜀
-        const rem = c.row % base;
-        const line_count: u32 = rem / 4;
-        const line_index: u32 = rem % 4;
-        const row_h = chrome.components.sidebar.rowHeight(rows[slot], m); // 이 row의 실제 높이(헤더=얇은 줄)
-        const block_off: u32 = (row_h -| sidebarBlockHeight(line_count, ch)) / 2; // renameCaretRect와 같은 정수 블록중앙(정합)
-        c.origin_y = content_tops.items[slot] +| block_off +| line_index *| m.line_step; // 줄 스텝=ch+여유(촘촘함 완화)
-    }
+    // 규칙은 **중립이 소유한다**(`sidebar_glyph_rows.fillOriginY`) — 접는 쪽(`sidebarGlyphRow`)과
+    // 한 파일에 있어야 갈리지 않고, Windows 사이드바도 같은 것을 쓴다.
+    maru.sidebar_glyph_rows.fillOriginY(allocator, cells, rows, m);
 }
 
 /// 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) frame을 만든다.

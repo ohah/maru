@@ -1011,16 +1011,33 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 9. **관측 모드의 대화 줄이 다시 빈다.** statusLine 훅을 제거하면서(§5) 세션 신원을 자식 env 로만 얻는다.
    도구를 한 번도 안 쓰는 세션은 그 값을 못 얻어 사이드바 대화 줄이 빈다. 훅 모드를 켜면 채워지지만 그
    게이트는 **기본이 켜짐이라**(2026-08-22) 대부분의 사용자는 채워진 쪽을 본다 — 끈 사용자에게만 남는 손해다.
-10. **codex 의 «오류로 끝난 턴» 은 여전히 열려 있다.** codex 에는 `StopFailure` 가 없다(§2 실측).
-   `codex exec`에 없는 모델을 줘 오류를 유발해 봤더니 `SessionStart` → `UserPromptSubmit` 뒤 `Stop` 이
-   오지 않았다. **그러나 이것을 «codex 는 오류 턴에 `Stop` 을 안 보낸다» 로 읽으면 안 된다** — `exec` 는
-   한 번 쓰고 끝나는 모드라 그 오류에 **프로세스째 죽었고**, 실제로 `SessionEnd`(`reason: "other"`)가
-   그 뒤에 왔다(정상 턴에서도 `Stop` 다음에 온다 — 세션이 끝나므로). maru 의 pane 은 **대화형** codex 를
-   돌리고 거기서는 오류가 나도 세션이 안 끝나므로, **세션 중 오류에 `Stop` 이 오는지가 진짜 미검증
-   항목이다.** 안 온다면 그 pane 의 배지가 다음 프롬프트까지 «진행 중» 에 멈춘다.
-   `SessionEnd` 를 세트에 넣어 메우는 길은 **택하지 않았다** — 그 이벤트는 세션이 끝날 때만 오고,
-   대화형에서 세션이 끝나는 시점이면 `agent_kind` 판정이 이미 에이전트 없음으로 넘어간다.
+10. **codex 의 오류 턴은 훅으로 알 수 없다 — 미검증이 아니라 확정된 한계다**(2026-08-22 종결). codex 에는
+   `StopFailure` 가 없고(§2), **오류로 끝난 턴에는 `Stop` 도 오지 않는다.**
 
+   실측: `codex exec` 에 없는 모델을 줘 400 을 만들면 `SessionStart` → `UserPromptSubmit` 뒤 아무것도 안
+   온다. 앞선 조사는 여기서 «`exec` 는 프로세스째 죽으니 대화형은 다를 수 있다» 로 열어 두었는데, **공개
+   소스가 그 여지를 지운다**(`codex-rs/core/src/session/turn.rs`):
+
+       let error = err.to_codex_protocol_error();
+       sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone()).await;
+       return Ok(None);              // ← 여기서 나간다
+       …
+       let stop_outcome = run_turn_stop_hooks(   // ← 오류 경로는 여기까지 못 온다
+
+   오류 경로가 **stop 훅을 부르기 전에 반환**한다. 그 자리는 `exec` 전용이 아니라 **공용 턴 기계**라
+   대화형도 같다. 그리고 `emit_turn_error_lifecycle` 이 가는 곳은 훅이 아니라 **extension API**
+   (`turn_lifecycle_contributors` → `on_turn_error`)다 — 훅 채널에는 그 사실이 아예 노출되지 않는다.
+
+   **결과**: 오류로 끝난 codex 턴은 그 pane 의 배지를 «진행 중» 에 남긴다. 다음 턴이 정상 종료할 때 풀린다.
+   사용자가 그 사이 아무것도 안 하면 배지가 그동안 거짓말을 한다.
+
+   **메울 방법이 없다.** `SessionEnd` 를 세트에 넣는 길은 택하지 않았다 — 세션이 끝날 때만 오므로
+   대화형의 «세션은 살아 있고 턴만 실패한» 경우를 못 잡고(그때는 `agent_kind` 판정이 이미 에이전트 없음으로
+   넘어간다), 세트를 늘리면 codex 가 사용자에게 재승인을 요구한다(§2.1). 화면을 읽어 메우는 길은 계약 §1 이
+   금지한다 — 한 Term 의 소스는 하나다.
+
+   **즉시 회피책은 `sidebar.agent-hooks` 를 끄는 것**이고, 그러면 그 Term 이 관측 모드로 돌아가 화면에서
+   오류를 읽는다. 닫으려면 codex 가 그 경로에 훅을 하나 내어 주어야 한다.
 11. **셸 백그라운드 작업이 도는 동안 배지는 그 사실을 말하지 않는다**(2026-08-23, 의도된 대가).
    `Stop` 이 `background_tasks` 에 `running` 인 셸 작업을 싣고 와도 상태는 «대기» 로 간다 — 그 축에는 푸는
    이벤트가 없어 붙잡으면 그 pane 의 완료 알림이 통째로 막히기 때문이다(§2·§8). 그래서 사용자는 «턴은

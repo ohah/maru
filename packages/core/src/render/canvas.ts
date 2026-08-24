@@ -133,6 +133,11 @@ export class CanvasRenderer implements Renderer {
       if (key !== this.#themeKey) {
         this.#palette = buildPalette(theme);
         this.#themeKey = key;
+        // **스탬프 키에 색이 들어간다** — 테마가 바뀌면 들고 있던 것이 전부 죽은 캐시다.
+        // 버리지 않으면 4096 개가 FIFO 로 천천히 밀려나는 동안 새 색은 매번 미스이고, 그
+        // 사이 OffscreenCanvas(= GPU 텍스처)를 그만큼 점유한다. `setMetrics` 가 격자가 바뀔 때
+        // 같은 일을 한다.
+        this.#stamps.clear();
       }
     }
 

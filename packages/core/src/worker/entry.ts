@@ -141,10 +141,29 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       case "clear":
         backend?.clear();
         return;
-      case "decorations":
-        decorations = msg.spans;
+      case "decorations": {
+        // **받는 쪽에서도 막는다.** 보내는 쪽(`Terminal#pushDecorations`)이 이미 바뀔 때만
+        // 보내지만, 거기가 뚫리면 곧바로 무한 루프가 된다 — 다시 그리면 `rendered` 가 나가고
+        // 그 프레임이 또 장식을 실어 온다(실측: 초당 1638 프레임). 한 겹으로 두지 않는다.
+        const next = msg.spans;
+        const same =
+          next.length === decorations.length &&
+          next.every((s, i) => {
+            const o = decorations[i]!;
+            return (
+              s.row === o.row &&
+              s.x === o.x &&
+              s.width === o.width &&
+              s.backgroundColor === o.backgroundColor &&
+              s.foregroundColor === o.foregroundColor &&
+              s.opacity === o.opacity
+            );
+          });
+        if (same) return;
+        decorations = next;
         redraw();
         return;
+      }
       case "sel": {
         const b = backend;
         if (!b) return;

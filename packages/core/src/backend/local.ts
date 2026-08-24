@@ -510,6 +510,7 @@ export class LocalBackend implements Backend {
         length: this.#w.vt_scrollback_len(this.#h),
       },
       evicted: this.#w.vt_evicted_total(this.#h),
+      pushed: this.#w.vt_pushed_total(this.#h),
       modes: this.#w.vt_modes(this.#h),
     };
   }

@@ -58,6 +58,7 @@ function redraw(): void {
         selection: lastFrame.selection,
         scroll: lastFrame.scroll,
         evicted: lastFrame.evicted,
+        pushed: lastFrame.pushed,
       },
     });
   }

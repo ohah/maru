@@ -9675,6 +9675,138 @@ pub fn build(b: *std.Build) void {
         session_host_3b_step.dependOn(&run_session_host_3b_boundary_tests.step);
         boundary_step.dependOn(&run_session_host_3b_boundary_tests.step);
 
+        const session_host_3d_step = b.step(
+            "test-session-host-3d",
+            "Run the P5c3d built-product compatibility and PTY E2E gate",
+        );
+        session_host_3d_step.dependOn(session_host_3b_step);
+        const session_host_3d_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3d_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"p5c3d compatibility fixture"},
+        });
+        const run_session_host_3d_boundary_tests = b.addRunArtifact(
+            session_host_3d_boundary_tests,
+        );
+        run_session_host_3d_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3d_boundary_tests.setCwd(b.path("."));
+        session_host_3d_step.dependOn(&run_session_host_3d_boundary_tests.step);
+        boundary_step.dependOn(&run_session_host_3d_boundary_tests.step);
+
+        const session_host_pre_p5b3_fixture = b.addExecutable(.{
+            .name = "maru-session-host-pre-p5b3-v2",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/fixtures/session_host_pre_p5b3_v2.zig",
+                ),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        const session_host_3d_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const session_host_3d_e2e_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3d_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "session_host",
+                    .module = session_host_3d_mod,
+                }},
+            }),
+            .filters = &.{"p5c3d frozen same-major host"},
+        });
+        const run_session_host_3d_e2e_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_session_host_3d_e2e_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_session_host_3d_e2e_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRE_P5B3_EXE=",
+            session_host_pre_p5b3_fixture,
+        );
+        run_session_host_3d_e2e_tests.addArtifactArg(session_host_3d_e2e_tests);
+        run_session_host_3d_e2e_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3d_e2e_tests.expectExitCode(0);
+        run_session_host_3d_e2e_tests.setCwd(b.path("."));
+        session_host_3d_step.dependOn(&run_session_host_3d_e2e_tests.step);
+
+        const session_host_3d_product_e2e_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_3d_product_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "session_host",
+                    .module = session_host_3d_mod,
+                }},
+            }),
+            .filters = &.{"p5c3d current product"},
+        });
+        const run_session_host_3d_product_e2e_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_session_host_3d_product_e2e_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_session_host_3d_product_e2e_tests.addArtifactArg(
+            session_host_3d_product_e2e_tests,
+        );
+        run_session_host_3d_product_e2e_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3d_product_e2e_tests.expectExitCode(0);
+        run_session_host_3d_product_e2e_tests.setCwd(b.path("."));
+        session_host_3d_step.dependOn(&run_session_host_3d_product_e2e_tests.step);
+
+        // 제품 E2E가 wire 성공만으로 PTY input 전달을 오인하지 않도록, 같은 gate에서
+        // RuntimeOps -> 실제 reader write queue -> 실제 PTY child echo 경계도 직접 고정한다.
+        const session_host_3d_runtime_input_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"runtime manager: writeInput and resize reach a real runtime through RuntimeOps"},
+        });
+        const run_session_host_3d_runtime_input_tests = b.addRunArtifact(
+            session_host_3d_runtime_input_tests,
+        );
+        // Barrel의 compile guards 두 개와 선택한 runtime test 하나가 실행된다.
+        run_session_host_3d_runtime_input_tests.addArg("--maru-expect-tests=3");
+        run_session_host_3d_runtime_input_tests.setCwd(b.path("."));
+        session_host_3d_step.dependOn(&run_session_host_3d_runtime_input_tests.step);
+
+        const session_host_3d_empty_metadata_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/external_event_materialization.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"p5c3d backing-free metadata abort"},
+        });
+        const run_session_host_3d_empty_metadata_tests = b.addRunArtifact(
+            session_host_3d_empty_metadata_tests,
+        );
+        run_session_host_3d_empty_metadata_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3d_empty_metadata_tests.setCwd(b.path("."));
+        session_host_3d_step.dependOn(&run_session_host_3d_empty_metadata_tests.step);
+
         const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

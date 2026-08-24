@@ -533,6 +533,20 @@ fn metadataTagMatches(
 }
 
 pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;
+
+/// A generation-less same-major peer can still acknowledge the stream-local detach that ends
+/// this client's view. Resize and resync mutate shared runtime authority, so they continue to
+/// require the tracked generation negotiated by controller-transfer capable peers.
+fn controlGenerationMatches(
+    kind: client_pump.ControlKind,
+    authority: AuthorityGeneration,
+    expected: u64,
+) bool {
+    return switch (authority) {
+        .tracked => |generation| expected == generation,
+        .untracked => kind == .detach and expected == 0,
+    };
+}
 pub const f3c1_contract_version: u16 = 2;
 pub const integration_2b2e_contract_version: u16 = 2;
 pub const f3c2_contract_version: u16 = 1;
@@ -1457,6 +1471,36 @@ const ProjectOwnerEventResult = enum {
     dead,
     terminal_latched,
 };
+
+pub const CliOwnerProjectionResult = enum {
+    applied,
+    none,
+    retry,
+    terminal,
+};
+
+pub const CliOwnerProjectionReadiness = enum {
+    pending,
+    none,
+    retry,
+    terminal,
+};
+
+fn selectCliOwnerProjectionReadiness(
+    committed_screen_count: usize,
+    live_partial_pending: bool,
+    owner_event_pending: bool,
+    live_screen_pending: bool,
+    response_pending: bool,
+) CliOwnerProjectionReadiness {
+    if (committed_screen_count != 0 or live_partial_pending) return .retry;
+    // Owner events are the semantic predecessor for a resize/control pair. Once they are already
+    // materialized, retire one before a live screen FIFO head; otherwise RX waits on the event
+    // while this sibling consumer waits on the screen and both spin forever.
+    if (owner_event_pending) return .pending;
+    if (live_screen_pending or response_pending) return .retry;
+    return .none;
+}
 
 const OwnerEventKind = enum { resized, metadata };
 
@@ -9502,11 +9546,11 @@ pub const ExternalPumpStorage = struct {
         if (!ownerAuthorityValid(self) or
             self.owner_authority.current.flow != .clear)
             return false;
-        const generation = switch (self.owner_authority.current.generation) {
-            .tracked => |value| value,
-            .untracked => return false,
-        };
-        if (generation != completed.expected_controller_generation or
+        if (!controlGenerationMatches(
+            completed.control_kind,
+            self.owner_authority.current.generation,
+            completed.expected_controller_generation,
+        ) or
             completed.target_stream_id != self.evidence_snapshot.stream_id or
             !completed.expectation.isCanonical())
             return false;
@@ -11874,7 +11918,9 @@ pub const ExternalPumpStorage = struct {
             &aggregate.screen_proofs,
             &aggregate.neutral_payloads,
             &aggregate.intent_commit,
-        ) catch return .rejected;
+        ) catch {
+            return .rejected;
+        };
         aggregate.digest = preparedRxAggregateDigest(aggregate);
         if (proof_count != aggregate.intent_commit.proof_count)
             return .invalid_state;
@@ -11885,7 +11931,9 @@ pub const ExternalPumpStorage = struct {
                 return .invalid_state;
             self.inbox_ledger.finishLiveBatch(
                 &aggregate.live_batch,
-            ) catch return .rejected;
+            ) catch {
+                return .rejected;
+            };
             aggregate.digest = preparedRxAggregateDigest(aggregate);
             self.inbox_ledger.prepareLiveCommit(
                 &aggregate.live_batch,
@@ -11895,7 +11943,9 @@ pub const ExternalPumpStorage = struct {
                 @intFromPtr(self),
                 aggregate.turn_generation,
                 &aggregate.live_commit,
-            ) catch return .rejected;
+            ) catch {
+                return .rejected;
+            };
             aggregate.digest = preparedRxAggregateDigest(aggregate);
             if (!self.inbox_ledger.validatePreparedLiveCommit(
                 &aggregate.live_batch,
@@ -15960,10 +16010,6 @@ pub const ExternalPumpStorage = struct {
                 .current => |authority| authority,
                 .empty => break :control,
             };
-            const generation = switch (authority.generation) {
-                .tracked => |generation| generation,
-                .untracked => break :control,
-            };
             const control_kind: client_pump.ControlKind = switch (spec.request) {
                 .resize => .resize,
                 .resync => .resync,
@@ -15977,7 +16023,11 @@ pub const ExternalPumpStorage = struct {
             if ((control_kind != .detach and authority.role != .controller) or
                 authority.flow != .clear or
                 target_stream_id != self.evidence_snapshot.stream_id or
-                spec.expected_controller_generation != generation)
+                !controlGenerationMatches(
+                    control_kind,
+                    authority.generation,
+                    spec.expected_controller_generation,
+                ))
             {
                 terminal_reason = .protocol_error;
                 break :control;
@@ -17924,11 +17974,16 @@ pub const ExternalPumpStorage = struct {
         };
         const payload_guard = payload_guard_owner.ops();
         const intent_result = if (scratch.traversal.intent.lifecycle == .empty)
-            self.createIntentScratch(
-                &scratch.traversal.intent,
-                client.parser.allocator,
-                authority_ops,
-            )
+            if (client_external_rx_turn.Scratch.prepareForIntentCreation(
+                &scratch.traversal,
+            ))
+                self.createIntentScratch(
+                    &scratch.traversal.intent,
+                    client.parser.allocator,
+                    authority_ops,
+                )
+            else
+                external_rx_intent.CreateResult.authority_drift
         else switch (external_rx_intent.resetForNextTurn(
             &scratch.traversal.intent,
             authority_ops,
@@ -17941,7 +17996,7 @@ pub const ExternalPumpStorage = struct {
                 external_rx_intent.CreateResult.authority_drift,
             .invalid_state => external_rx_intent.CreateResult.authority_drift,
         };
-        if (intent_result != .allocated)
+        if (intent_result != .allocated) {
             return .{ .terminal = .{
                 .reason = if (intent_result == .out_of_memory)
                     .resource_exhausted
@@ -17950,6 +18005,7 @@ pub const ExternalPumpStorage = struct {
                 .rx_bytes = 0,
                 .rx_frames = 0,
             } };
+        }
 
         const partial = if (live_partial_pending)
             self.validatedPartialContinuation() orelse {
@@ -18971,7 +19027,6 @@ pub const ExternalPumpStorage = struct {
             .owner_inventory_generation = final_owner_snapshot.inventory_generation,
             .owner_snapshot_digest = final_owner_snapshot.digest,
         };
-
         var socket_rx_drained = false;
         var drain_prepared = false;
         var would_block_disposition: client_external_rx_read.StoppedDisposition =
@@ -19170,16 +19225,18 @@ pub const ExternalPumpStorage = struct {
                 if (!self.consumedRxDrainEvidenceCurrent(
                     lease,
                     scratch,
-                ))
+                )) {
                     break :blk self.invalidRxPreparationResult(summary);
+                }
                 recordRxDrainTestEvent(.published);
                 recordRxDrainTestEvent(.decide);
                 const result = self.policyResultFromRxSummary(summary, true);
-                if (!finishRxDrainEvidence(scratch))
+                if (!finishRxDrainEvidence(scratch)) {
                     break :blk self.terminalizePublishedRxResult(
                         result,
                         .invariant_failure,
                     );
+                }
                 break :blk result;
             },
         };
@@ -21443,6 +21500,65 @@ pub const ExternalPumpStorage = struct {
         }
     }
 
+    /// The raw attach CLI renders only screen batches. Metadata and host-side resize notifications
+    /// still have to be consumed, otherwise they remain inherited pump blockers and can starve
+    /// stdin/TX forever. This product adapter acknowledges exactly one already-validated owner
+    /// event without exposing its borrowed backing or inventing a second event representation.
+    pub fn consumeCliOwnerProjection(
+        self: *ExternalPumpStorage,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) CliOwnerProjectionResult {
+        const Context = struct {
+            fn project(_: *anyopaque, view: OwnerEventView) ProjectionDecision {
+                std.mem.doNotOptimizeAway(view);
+                return .applied;
+            }
+        };
+        var context: u8 = 0;
+        return switch (self.projectOwnerEventInternal(.{
+            .context = &context,
+            .context_len = @sizeOf(u8),
+            .project = Context.project,
+        }, cleanup_scratch)) {
+            .applied => .applied,
+            .none => .none,
+            .retry_preserved, .transaction_busy => .retry,
+            .fenced, .moved, .not_active, .dead, .terminal_latched => .terminal,
+        };
+    }
+
+    /// Chooses the one sibling projection that may run after an RX turn. Committed/partial screen
+    /// authority cannot be crossed; an already-materialized metadata/resize event precedes an
+    /// adjacent live-screen FIFO head; a screen-only or response-only owner returns to the pump.
+    pub fn cliOwnerProjectionReadiness(
+        self: *const ExternalPumpStorage,
+    ) CliOwnerProjectionReadiness {
+        if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
+            return .terminal;
+        if (active_external_operation_addr != 0) return .retry;
+        if (self.lifecycle != .live or self.semantic_state != .active or
+            self.semantic_state.active != .valid or
+            !ownerIncarnationValid(self) or !ownerAuthorityValid(self) or
+            !ownerResizeValid(self) or !self.metadataPendingSummaryValid())
+            return .terminal;
+        if (self.owner_authority.current.flow == .initial_fence) return .retry;
+        const live = self.liveOwnerBlockerProjection() orelse return .terminal;
+        const resize_pending = switch (self.owner_resize) {
+            .none => false,
+            .current => |current| current.pending,
+        };
+        // A control response and its owner event can arrive in either wire order. The event is
+        // itself the inherited blocker that prevents the response drain, so response_pending may
+        // not veto this adjacent owner transaction or the pair deadlocks forever.
+        return selectCliOwnerProjectionReadiness(
+            self.screen_pending_summary.retained_count,
+            live.partial_pending,
+            resize_pending or self.metadata_pending_summary.pending,
+            live.screen_pending,
+            live.response_pending,
+        );
+    }
+
     fn selectMetadataEvent(
         self: *ExternalPumpStorage,
         summary: external_event_materialization.MetadataStateSummary,
@@ -22720,6 +22836,30 @@ pub const ExternalPumpStorage = struct {
     ) CommitAdoptionResult {
         var recorder: NoopCommitRecorder = .{};
         return self.commitAdoptionWithRecorder(NoopCommitRecorder, &recorder);
+    }
+
+    /// Completes the final-address adoption fence after the already-decoded initial snapshot and
+    /// its `RemoteAttachment` have both moved into the same product owner. Until this exact point,
+    /// input and control admission remain forbidden even though storage adoption is committed.
+    pub fn commitBoundInitialAttachment(self: *ExternalPumpStorage, stream_id: u64) bool {
+        if (active_external_operation_addr != 0 or
+            self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
+            self.semantic_state != .active or
+            self.semantic_state.active != .valid or
+            stream_id == 0 or stream_id != self.evidence_snapshot.stream_id or
+            !ownerAuthorityValid(self))
+            return false;
+        active_external_operation_addr = @intFromPtr(self);
+        defer active_external_operation_addr = 0;
+        const authority = switch (self.owner_authority) {
+            .current => |*value| value,
+            .empty => return false,
+        };
+        if (authority.flow != .initial_fence) return false;
+        authority.flow = .clear;
+        bindOwnerAuthority(self);
+        return ownerAuthorityValid(self);
     }
 
     fn commitAdoptionWithRecorder(
@@ -37739,6 +37879,21 @@ test "c3c-3b projection callback reentry stays transaction busy" {
     try std.testing.expect(storage.owner_resize.current.pending);
 }
 
+test "p5c3d materialized owner event precedes an adjacent live screen without crossing partial state" {
+    try std.testing.expectEqual(
+        CliOwnerProjectionReadiness.pending,
+        selectCliOwnerProjectionReadiness(0, false, true, true, true),
+    );
+    try std.testing.expectEqual(
+        CliOwnerProjectionReadiness.retry,
+        selectCliOwnerProjectionReadiness(0, true, true, true, false),
+    );
+    try std.testing.expectEqual(
+        CliOwnerProjectionReadiness.retry,
+        selectCliOwnerProjectionReadiness(0, false, false, true, false),
+    );
+}
+
 test "c3c-3b unread scratch work arrays are overwritten before teardown reads them" {
     const Probe = struct {
         scratch: *ExternalPumpCleanupScratch,
@@ -39623,6 +39778,16 @@ test "external pump retries the same storage at every adoption allocation index"
         try std.testing.expect(storage.prepared_adoption.validate(&storage));
         if (fail_offset > 128) return error.TestUnexpectedResult;
     }
+}
+
+test "generation-less authority permits only zero-generation detach control" {
+    try std.testing.expect(controlGenerationMatches(.detach, .untracked, 0));
+    try std.testing.expect(!controlGenerationMatches(.detach, .untracked, 1));
+    try std.testing.expect(!controlGenerationMatches(.resize, .untracked, 0));
+    try std.testing.expect(!controlGenerationMatches(.resync, .untracked, 0));
+    try std.testing.expect(controlGenerationMatches(.detach, .{ .tracked = 7 }, 7));
+    try std.testing.expect(controlGenerationMatches(.resize, .{ .tracked = 7 }, 7));
+    try std.testing.expect(!controlGenerationMatches(.resize, .{ .tracked = 7 }, 0));
 }
 
 test "external pump authority seed permits only verified frozen untracked controller" {

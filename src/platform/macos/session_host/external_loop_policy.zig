@@ -60,6 +60,7 @@ pub const Action = enum {
     host_rx,
     chord_deadline,
     socket_tx,
+    host_immediate,
     stdout_tx,
     resize,
     stdin_rx,
@@ -73,8 +74,12 @@ pub const TurnReadiness = struct {
     host_rx: bool = false,
     chord_deadline: bool = false,
     socket_tx: bool = false,
+    /// Owner-internal work (for example a completed control response) that no longer has a
+    /// corresponding socket readiness edge but must run before lower-priority local work.
+    host_immediate: bool = false,
     stdout_tx: bool = false,
     resize: bool = false,
+    retained_stdin: bool = false,
     stdin_rx: bool = false,
 };
 
@@ -84,7 +89,14 @@ pub fn selectAction(ready: TurnReadiness) Action {
     if (ready.chord_deadline) return .chord_deadline;
     if (ready.socket_tx) return .socket_tx;
     if (ready.stdout_tx) return .stdout_tx;
+    // An immediate semantic suffix can remain armed while a just-completed resize response is
+    // paired with its owner event. Consume one already-polled stdin turn first so the local
+    // detach chord cannot be starved. The loop clears that readiness snapshot before re-entry,
+    // therefore ordinary input cannot continuously outrun the host suffix.
+    if (ready.host_immediate and ready.stdin_rx) return .stdin_rx;
+    if (ready.host_immediate) return .host_immediate;
     if (ready.resize) return .resize;
+    if (ready.retained_stdin) return .stdin_rx;
     if (ready.stdin_rx) return .stdin_rx;
     return .poll_wait;
 }
@@ -163,12 +175,13 @@ pub fn planCleanup(
     };
 }
 
-test "p5c3c-3b turn priority is signal host chord socket stdout resize stdin" {
+test "p5c3c-3b turn priority gives one ready stdin turn before immediate host work" {
     const all = TurnReadiness{
         .termination_signal = true,
         .host_rx = true,
         .chord_deadline = true,
         .socket_tx = true,
+        .host_immediate = true,
         .stdout_tx = true,
         .resize = true,
         .stdin_rx = true,
@@ -185,11 +198,26 @@ test "p5c3c-3b turn priority is signal host chord socket stdout resize stdin" {
     remaining.socket_tx = false;
     try std.testing.expectEqual(Action.stdout_tx, selectAction(remaining));
     remaining.stdout_tx = false;
-    try std.testing.expectEqual(Action.resize, selectAction(remaining));
-    remaining.resize = false;
     try std.testing.expectEqual(Action.stdin_rx, selectAction(remaining));
     remaining.stdin_rx = false;
+    try std.testing.expectEqual(Action.host_immediate, selectAction(remaining));
+    remaining.host_immediate = false;
+    try std.testing.expectEqual(Action.resize, selectAction(remaining));
+    remaining.resize = false;
     try std.testing.expectEqual(Action.poll_wait, selectAction(remaining));
+
+    // Without an immediate host suffix, the established resize-before-stdin ordering remains.
+    var ordinary = TurnReadiness{ .resize = true, .stdin_rx = true };
+    try std.testing.expectEqual(Action.resize, selectAction(ordinary));
+    ordinary.resize = false;
+    try std.testing.expectEqual(Action.stdin_rx, selectAction(ordinary));
+
+    // Retained bytes are a scheduler-owned wake after control backpressure clears; they do not
+    // masquerade as a fresh kernel-readiness bit while immediate host work is still armed.
+    var retained = TurnReadiness{ .host_immediate = true, .retained_stdin = true };
+    try std.testing.expectEqual(Action.host_immediate, selectAction(retained));
+    retained.host_immediate = false;
+    try std.testing.expectEqual(Action.stdin_rx, selectAction(retained));
 }
 
 test "p5c3c-3b normal cleanup appends detach only without in-flight wire authority" {

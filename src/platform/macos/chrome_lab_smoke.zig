@@ -775,6 +775,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
     if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
     if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
+    if (std.mem.eql(u8, raw, "file-tree-scrolled")) return .file_tree_scrolled;
     if (std.mem.eql(u8, raw, "sort-toggle-hover")) return .sort_toggle_hover;
     if (std.mem.eql(u8, raw, "sort-toggle-pressed")) return .sort_toggle_pressed;
     if (std.mem.eql(u8, raw, "context-menu-checked")) return .context_menu_checked;
@@ -791,6 +792,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_commit_edit => "scm-commit-edit",
         .file_tree_rows => "file-tree-rows",
         .file_tree_row_hover => "file-tree-row-hover",
+        .file_tree_scrolled => "file-tree-scrolled",
         .sort_toggle_hover => "sort-toggle-hover",
         .sort_toggle_pressed => "sort-toggle-pressed",
         .context_menu_checked => "context-menu-checked",

@@ -3591,6 +3591,48 @@ test "격자 크기는 코어가 답한다" {
     try std.testing.expect(bridge.maru_mobile_term_cols() != cols or bridge.maru_mobile_term_rows() != rows);
 }
 
+// **글자 크기와 줄 높이는 다른 손잡이다.** 하나로 두면 글자를 키울 때 보이는 줄이 반드시 줄어,
+// 폰에서 그 한 줄을 잃는다(사용자 요청). `line-height` 를 낮추면 글자는 그대로 두고 줄만 는다.
+test "줄 높이를 낮추면 같은 창에 줄이 더 들어간다" {
+    endAnyGesture();
+    const base = "font.size = 20\n";
+    bridge.maru_mobile_load_config(base, base.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const rows_100 = bridge.maru_mobile_term_rows();
+
+    // 같은 글자 크기, 줄 높이만 70% — 줄이 늘어야 한다.
+    const tight = "font.size = 20\nfont.line-height = 70\n";
+    bridge.maru_mobile_load_config(tight, tight.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    const rows_70 = bridge.maru_mobile_term_rows();
+    try std.testing.expect(rows_70 > rows_100);
+
+    // **폭은 안 건드린다** — 줄 높이는 세로만의 일이다. 열까지 변하면 원격이 믿는 폭이 흔들린다.
+    const cols_70 = bridge.maru_mobile_term_cols();
+    bridge.maru_mobile_load_config(base, base.len);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    try std.testing.expect(bridge.maru_mobile_term_cols() != cols_70);
+
+    bridge.maru_mobile_load_config("", 0);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **굽는 크기는 설정을 안 따라간다.** 예전에는 `min(font.size, 22)` 라 설정값이 굽는 크기이자
+// 축소 계수여서 **두 번 곱해졌다** — `font.size` 를 19% 올리면 화면 글자가 41% 커졌다.
+test "굽는 크기는 폰트 설정이 아니라 셀이 정한다" {
+    const small = "font.size = 12\n";
+    bridge.maru_mobile_load_config(small, small.len);
+    const px_small = bridge.maru_mobile_atlas_text_px();
+
+    const big = "font.size = 40\n";
+    bridge.maru_mobile_load_config(big, big.len);
+    try std.testing.expectEqual(px_small, bridge.maru_mobile_atlas_text_px());
+
+    bridge.maru_mobile_load_config("", 0);
+    bridge.maru_mobile_clear_error();
+}
+
 // ── 입력 목적지(S9-3) ───────────────────────────────────────────────────────
 
 test "기본은 로컬 코어다" {

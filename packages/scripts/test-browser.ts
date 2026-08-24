@@ -867,6 +867,65 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
     swap.includes("무야") && !swap.includes("야무"),
     JSON.stringify(swap),
   );
+
+  // **바이트를 보내는 경로만 막아야 한다.** 조합 중이라고 ⌘ 조합을 통째로 삼키면 ⌘C 가 안 먹고
+  // 앱이 키를 먼저 볼 수도 없다(계약 §7). 로컬 동작은 순서 문제가 없으므로 그대로 돈다.
+  const imeCmd = await p.evaluate(async () => {
+    const ta = document.querySelector("#host textarea") as HTMLTextAreaElement;
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = (ms = 250) => new Promise((r) => setTimeout(r, ms));
+    t.reset();
+    await wait();
+    t.write("some text here\r\n");
+    await wait();
+    ta.focus();
+    const compose = () => {
+      ta.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "야", bubbles: true }));
+    };
+    const press = (key: string) =>
+      ta.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key,
+          metaKey: true,
+          isComposing: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+    t.selectClear();
+    await wait();
+    compose();
+    await wait();
+    press("a");
+    await wait();
+    const selectAll = t.hasSelection();
+
+    let sawKey = false;
+    t.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+      if (ev.key === "k") sawKey = true;
+      return true;
+    });
+    compose();
+    await wait();
+    press("k");
+    await wait();
+    t.attachCustomKeyEventHandler(null);
+
+    const bytes: number[] = [];
+    const sub = t.onData((x: Uint8Array) => bytes.push(...x));
+    compose();
+    await wait();
+    press("ArrowLeft");
+    await wait();
+    sub.dispose();
+
+    return { selectAll, sawKey, sentBinding: bytes.includes(1) };
+  });
+  check("데모: 조합 중에도 ⌘A 가 동작한다", imeCmd.selectAll, String(imeCmd.selectAll));
+  check("데모: 조합 중에도 앱 단축키가 먼저 본다", imeCmd.sawKey, String(imeCmd.sawKey));
+  check("데모: 조합 중 바인딩 바이트는 안 나간다", !imeCmd.sentBinding, String(imeCmd.sentBinding));
   await p.close();
 }
 

@@ -24,6 +24,7 @@ const terminal = @import("../terminal.zig");
 const chrome = @import("../chrome.zig");
 const text_layout = chrome.text_layout;
 const file_tree_icon = chrome.file_tree_icon;
+const dock_view_bar = chrome.components.dock_view_bar;
 const file_tree = @import("../session.zig").file_tree;
 const icons = @import("../icons.zig");
 const sidebar_glyph_rows = @import("../sidebar_glyph_rows.zig");
@@ -860,6 +861,71 @@ pub fn buildSidebarDrawList(
         .dirty = .{ .start_row = 0, .end_row = max_row },
         .cells = try cells.toOwnedSlice(allocator),
         .grapheme_pool = owned_pool,
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
+/// Artifact의 우측 독립 탐색기 제목 행. 실제 tree rows와 별도 draw list라 스크롤·클릭 인덱스에 섞이지 않는다.
+/// 도크 뷰 스위처 한 행(docs/file-explorer.md §3.5). 슬롯마다 아이콘 1셀을 그리고 현재 뷰만 강조색을 쓴다.
+/// 새 아이콘 자산을 만들지 않고 기존 `IconKind`(folder·git)를 재사용한다 — 합성 glyph 파이프라인·라이선스 기록을
+/// 건드리지 않기 위해서다. 슬롯 자리는 chrome의 `dock_view_bar`가 계산한 것과 **같은 셀 수**를 쓴다.
+pub fn buildDockViewBarDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    rows: u16,
+    active_index: usize,
+    active_fg: terminal.Color,
+    muted_fg: terminal.Color,
+    /// 바 오른쪽 끝 동작 버튼의 glyph(없으면 빈 슬라이스). **어떤 동작인지는 호출자가 안다** — 렌더는
+    /// codepoint 만 받는다(뷰 슬롯이 chrome 기하를 그대로 쓰는 것과 같은 결). 자리는 `dock_view_bar.actionRect`
+    /// 가 계산한 것과 **같은 셀 수**라, 그린 자리와 눌리는 자리가 갈라지지 않는다.
+    action_glyphs: []const u21,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    const kinds = [_]file_tree_icon.IconKind{ .folder, .git, .code };
+    const slot_cols: u16 = @intCast(dock_view_bar.slot_cols);
+    for (kinds, 0..) |kind, index| {
+        // 아이콘은 슬롯 안 좌측 여백 뒤에 **2칸으로** 놓는다. 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로
+        // (icon_glyph.fillCoverage: side = min(w, h)) 2칸이면 1칸일 때보다 또렷하고 크다 — 사이드바 에이전트
+        // 아이콘이 같은 이유로 이미 `width = 2`다. 슬롯이 화면 밖이면 그리지 않는다.
+        const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| @as(u16, @intCast(dock_view_bar.icon_col_offset));
+        if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
+        const cp = file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
+        try cells.append(allocator, .{
+            // 밴드 가운데 행. 글리프는 행을 넘지 못하므로 세로 중앙은 홀수 행 밴드에서만 정확하다.
+            .row = @max(rows, 1) / 2,
+            .col = col,
+            .codepoint = cp,
+            .width = @intCast(dock_view_bar.icon_cols),
+            .style = .{ .foreground = if (index == active_index) active_fg else muted_fg, .bold = index == active_index },
+        });
+    }
+    // 동작 버튼의 시작 열은 **chrome 기하가 준다**(hit-test 가 쓰는 것과 같은 함수). 뷰 슬롯과 겹치는
+    // 폭이면 null 이라 하나도 그리지 않는다 — 좁은 도크에서 뷰 전환을 먼저 지키는 정책이 그 함수 하나에만 있다.
+    if (dock_view_bar.actionStartCol(cols, action_glyphs.len)) |start_col| {
+        const actions_start: u16 = @intCast(start_col);
+        for (action_glyphs, 0..) |cp, index| {
+            const col: u16 = actions_start +| @as(u16, @intCast(index)) *| slot_cols +|
+                @as(u16, @intCast(dock_view_bar.icon_col_offset));
+            if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
+            try cells.append(allocator, .{
+                .row = @max(rows, 1) / 2,
+                .col = col,
+                .codepoint = cp,
+                .width = @intCast(dock_view_bar.icon_cols),
+                // 동작은 **뷰가 아니다** — 활성 개념이 없으므로 항상 muted 로 두고, 호버 배경만 session 이
+                // 얹는다(뷰 슬롯의 활성 강조와 헷갈리면 지금 어느 뷰인지 읽기 어려워진다).
+                .style = .{ .foreground = muted_fg },
+            });
+        }
+    }
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = @max(rows, 1) },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = @max(rows, 1) -| 1 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try allocator.alloc(u32, 0),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }

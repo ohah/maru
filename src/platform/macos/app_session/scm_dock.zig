@@ -515,6 +515,15 @@ fn activeTurnRing(self: *AppSession) ?*const maru.session.turn_snapshot.Ring {
     return self.turn_rings.find(identity);
 }
 
+/// 활성 세션의 링이 **밀려나서** 없나. 맵이 최근 세션 신원 몇 개까지만 들기 때문에 생기는 일이고
+/// (`turn_snapshot.max_sessions` — `/clear` 도 새 신원을 만든다), 그때 「관측한 턴이 없다」고 말하면
+/// 있었던 기록을 없었던 것처럼 만든다. **목록이 빌 때만** 묻는다.
+fn activeTurnRingEvicted(self: *AppSession) bool {
+    const identity = git_ops.activeOrLastSessionIdentity(self);
+    if (identity.len == 0) return false;
+    return self.turn_rings.wasEvicted(identity);
+}
+
 /// 활성 Term 에 **에이전트는 붙어 있는데 신원이 없나**. 그 조합이 곧 «훅 모드가 아니다» 다(§6.1).
 fn agentPresentWithoutIdentity(self: *AppSession) bool {
     if (!self.surface_initialized) return false;
@@ -574,8 +583,13 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         // **빈 이유를 구별해 말한다**(적대적 검증 2회차). 관측 모드에서는 이 목록이 영영 안 서는데
         // «이번 실행에서 관측한 턴이 없다» 는 곧 뜰 것처럼 읽혀 고장으로 보인다. 에이전트는 붙어 있는데
         // 신원이 없다 = 훅이 없다는 뜻이므로(계약 §6.1) 그때는 무엇을 해야 하는지 말한다.
+        //
+        // **밀려난 것도 «없다» 가 아니다**(적대적 검증 5회차). 맵 상한을 넘겨 그 세션이 버려졌으면 기록은
+        // 있었는데 사라진 것이라, 같은 문구로 말하면 화면이 없던 일로 만든다.
         items[n] = .{ .notice = if (agentPresentWithoutIdentity(self))
             maru.i18n.t(.scm_turns_need_hooks)
+        else if (activeTurnRingEvicted(self))
+            maru.i18n.t(.scm_turns_evicted)
         else
             maru.i18n.t(.scm_no_turns) };
         n += 1;

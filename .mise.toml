@@ -269,6 +269,13 @@ run = "zig build perf"
 description = "Format Zig sources"
 run = "zig fmt build.zig src tests tools"
 
+[tasks.test-verdict]
+# `zig build test` 로그를 **빠짐없이** 판정한다 — `grep FAIL`은 크래시를 놓친다(러너가 그것을
+# `Segmentation fault`로 찍는다). 실제로 그렇게 세그폴트가 한 커밋에 실려 밀렸다(2026-08-23).
+# `N/N`은 완주일 뿐 통과가 아니므로 정식 게이트는 `check`다 — 이건 로그를 읽는 눈이다.
+description = "Verdict a `zig build test` log (crashes, leaks, incomplete runs)"
+run = "sh tools/test-verdict.sh"
+
 [tasks.fmt-check]
 description = "Check Zig formatting without modifying files"
 run = "zig fmt --check build.zig src tests tools"

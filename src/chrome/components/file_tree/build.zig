@@ -139,8 +139,11 @@ fn rowNode(id: u64, m: types.Metrics, action: ?tree.UiAction) tree.UiNode {
     };
     // **모든 행이 card 다**(FT2). 예전에는 밴드가 필요한 행만 card 로 올렸는데, 그러면 나머지 행에
     // action 을 달 수 없어 히트테스트가 published tree 밖에 남는다(`container` 는 action 을 안 든다).
-    // 쉬는 상태의 면은 `surface_bg` — 도크 배경과 **같은 role** 이라 눈에는 없는 것과 같고, 호버는
-    // `paint_style.resolveCard` 가 `row_hover_bg` 로 덮는다(그 판정의 주인이 하나가 된다).
+    // **면은 여기서 내지 않는다**(`opacity = 0`). 행의 밴드는 `view` 가 직접 그린다 — 좌우로 들여
+    // 둥글게 깎으므로 노드 rect 와 모양이 다르고, 색 판정도 거기(`view.bandRole`)가 소유한다.
+    // 그래서 `paint_style` 의 상태 해석(`row_hover_bg`)은 이 행에 닿지 않는다. 이 구분이 중요한 이유:
+    // `row_hover_bg` 는 "활성 위에 겹쳐도 보이게 활성보다 밝다"가 계약이라 이 목록에 쓰면 호버가
+    // 선택보다 밝아진다(실제로 그 상태였다 — `view.bandRole` 주석의 Lab 실측).
     return tree.card(.{
         .id = id,
         .style = style,

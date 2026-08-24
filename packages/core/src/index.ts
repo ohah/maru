@@ -4,6 +4,7 @@ export { LocalBackend } from "./backend/local";
 export { instantiate as instantiateWasm, defaultWasmUrl } from "./wasm/loader";
 export { CELL_STRIDE, CellFlag } from "./wasm/exports";
 export { CanvasRenderer } from "./render/canvas";
+export type { Decoration, DecorationOptions, DecorationSpan, Marker } from "./decoration";
 export { DEFAULT_FONT, measureMetrics } from "./render/metrics";
 export { buildPalette, hex, withAlpha } from "./render/palette";
 export { attachDom } from "./dom/attach";

@@ -2,6 +2,7 @@ import type { FrameData } from "../backend/types";
 import { CanvasRenderer } from "../render/canvas";
 import { DEFAULT_FONT, measureMetrics } from "../render/metrics";
 import type { Metrics, GlyphSource } from "../render/types";
+import type { DecorationSpan } from "../decoration";
 import type { Theme } from "../types";
 import { toKeyInput } from "./keymap";
 
@@ -80,6 +81,8 @@ export interface DomHost {
    * `open()` resolve 뒤 4프레임·22ms). 넘기기 전에 한 번 잡아 그 구간을 없앤다.
    */
   presizeBacking(): void;
+  /** 이 프레임에 그릴 장식. 메인이 그리는 모드에서만 의미가 있다(워커 모드는 백엔드로 간다). */
+  setDecorations(spans: DecorationSpan[]): void;
   redraw(): void;
   dispose(): void;
 }
@@ -200,6 +203,8 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
     renderer.attach(canvas, metrics);
   }
 
+  let decorations: DecorationSpan[] = [];
+
   /** `DomHost.presizeBacking` 의 본체 — 계약은 그 선언을 본다. */
   function presizeBacking(): void {
     const { cols, rows } = term.size;
@@ -216,6 +221,7 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
         ligatures: options.ligatures,
         preedit,
         blinkOn,
+        decorations,
       });
   }
 
@@ -466,6 +472,10 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
       return metrics;
     },
     presizeBacking,
+    setDecorations(spans) {
+      decorations = spans;
+      redraw();
+    },
     setOptions(next) {
       options = { ...options, ...next };
       metrics = measureMetrics({ ...options, devicePixelRatio: dpr });

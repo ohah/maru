@@ -236,6 +236,12 @@ export fn vt_view_offset(h: *anyopaque) u32 {
     const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
     return @intCast(core.view_offset);
 }
+/// 스크롤백에서 버려진 행의 **누적** 수. 마커처럼 절대 행을 오래 들고 있는 쪽이 두 시점의
+/// 차이만큼 자기 좌표를 당겨야 한다 — 코어는 selection·kitty 만 스스로 보정한다.
+export fn vt_evicted_total(h: *anyopaque) u32 {
+    const core: *terminal.TerminalCore = @ptrCast(@alignCast(h));
+    return @intCast(core.evictedTotal());
+}
 /// 스크롤백에 쌓인 행 수 = `view_offset` 의 최대값.
 ///
 /// **지연된 재-wrap 을 먼저 끝낸다.** 폭이 바뀌면 스크롤백 행 수가 달라지는데 그 재-wrap 은

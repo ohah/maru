@@ -1,4 +1,5 @@
 import type { Backend, BackendEvent, FindResult, FrameData, MouseReport } from "../backend/types";
+import type { DecorationSpan } from "../decoration";
 import type { FrameMeta } from "../types";
 import type { CursorShape, KeyInput, Size, Snapshot, Theme } from "../types";
 import type { FromWorker, ToWorker, WorkerRenderOptions } from "./protocol";
@@ -146,6 +147,10 @@ export class WorkerBackend implements Backend {
     this.#send({ t: "scrollToLine", line });
   }
 
+  setDecorations(spans: DecorationSpan[]): void {
+    // 장식은 사용자 행동당 몇 번이라 프레임과 달리 왕복이 싸다.
+    this.#send({ t: "decorations", spans });
+  }
   clear(): void {
     // ^L 이 필요한지는 워커 안 코어만 안다 — 판단도 거기서 하고, 필요하면 `data` 이벤트로
     // 돌아온다(이미 프록시되는 채널이다).

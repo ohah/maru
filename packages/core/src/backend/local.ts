@@ -509,6 +509,7 @@ export class LocalBackend implements Backend {
         offset: this.#w.vt_view_offset(this.#h),
         length: this.#w.vt_scrollback_len(this.#h),
       },
+      evicted: this.#w.vt_evicted_total(this.#h),
       modes: this.#w.vt_modes(this.#h),
     };
   }

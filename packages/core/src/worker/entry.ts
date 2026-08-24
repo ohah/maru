@@ -14,6 +14,7 @@ let backend: LocalBackend | null = null;
 const renderer = new CanvasRenderer();
 /** 워커도 같은 규칙으로 박스 드로잉을 그린다 — 모드 간 화면이 같아야 한다. */
 let opts: WorkerRenderOptions | null = null;
+let decorations: import("../decoration").DecorationSpan[] = [];
 let preedit = "";
 let blinkOn = true;
 /** 마지막으로 잡은 격자. 폰트가 바뀌면 이 크기로 backing 을 다시 잡는다. */
@@ -41,7 +42,13 @@ let metrics: import("../render/types").Metrics | null = null;
 
 function redraw(): void {
   if (lastFrame && opts) {
-    renderer.draw(lastFrame, { theme: opts.theme, ligatures: opts.ligatures, preedit, blinkOn });
+    renderer.draw(lastFrame, {
+      theme: opts.theme,
+      ligatures: opts.ligatures,
+      preedit,
+      blinkOn,
+      decorations,
+    });
     // 셀은 빼고 요약만 올린다 — 앱의 `onRender` 가 워커 모드에서도 살아 있어야 한다.
     post({
       t: "rendered",
@@ -50,6 +57,7 @@ function redraw(): void {
         cursor: lastFrame.cursor,
         selection: lastFrame.selection,
         scroll: lastFrame.scroll,
+        evicted: lastFrame.evicted,
       },
     });
   }
@@ -131,6 +139,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         return;
       case "clear":
         backend?.clear();
+        return;
+      case "decorations":
+        decorations = msg.spans;
+        redraw();
         return;
       case "sel": {
         const b = backend;

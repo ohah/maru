@@ -128,7 +128,7 @@ term.setTheme(parseGhosttyTheme(await (await fetch("/themes/Nord")).text())!);
 **파싱·화면·입력의 정확도는 본체와 같다** — libvterm·Alacritty 대조 오라클을 통과한 코어를
 그대로 쓴다. 다만 그 위의 편의 기능과 API 표면은 아직 좁다.
 
-- **없는 것**: 이미지·마커/장식·커스텀 링크 규칙
+- **없는 것**: 이미지·커스텀 링크 규칙
 - **검증 안 된 것**: Safari/Firefox, 모바일 터치, 접근성
 - **검증한 것**: 실제 TUI — nvim·htop·tmux·less 를 진짜 PTY 로 띄워 대체 화면·mouse
   tracking·스크롤 영역·리사이즈를 확인했다(`bun run demo` 의 "진짜 PTY" 모드)
@@ -155,6 +155,22 @@ term.selectLines(0, 5);
 term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && ev.key === "k")); // ⌘K 는 앱이
 await term.serialize();                        // 화면을 평문으로(스타일은 버린다)
 ```
+
+### 마커와 장식
+
+```ts
+const { matches } = await term.findMatches("error");
+for (const m of matches) {
+  const marker = term.registerMarker(m.startRow);           // 줄을 가리키는 안정적 참조
+  term.registerDecoration({
+    marker, x: m.startCol, width: m.endCol - m.startCol + 1,
+    backgroundColor: 0xffd700, opacity: 0.35,
+  });
+}
+```
+
+스크롤백이 가득 차 그 줄이 버려지면 **마커와 장식이 함께 사라집니다**. 절대 행이 밀리는 것도
+알아서 따라갑니다.
 
 ### OSC 사건 — 정책은 앱이 정한다
 

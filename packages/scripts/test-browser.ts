@@ -763,6 +763,61 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
   );
 }
 
+// **장식이 실제로 픽셀에 나타나는가.** 모델(마커 좌표)은 bun test 가 덮지만, 렌더러가 그걸
+// 그리는지는 캔버스를 봐야 안다. 두 모드에서 모두 본다 — 워커는 프로토콜로 실어 보내므로
+// 경로가 다르다.
+for (const mode of ["full", "false"] as const) {
+  const p = await browser.newPage();
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  await p.goto(`http://127.0.0.1:${PORT}/tests/fixtures/worker.html?worker=${mode}`);
+  await p.waitForFunction(() => (globalThis as { __ready?: boolean }).__ready === true, {
+    timeout: 15_000,
+  });
+  const r = await p.evaluate(async () => {
+    const t = (globalThis as unknown as { __term: Record<string, any> }).__term;
+    const wait = () => new Promise((res) => setTimeout(res, 300));
+    t.reset();
+    await wait();
+    t.write("row0\r\nrow1\r\nrow2\r\n");
+    await wait();
+    const shot = () => {
+      const cv = document.querySelector("canvas") as HTMLCanvasElement;
+      // 워커 모드에서는 메인이 2d 컨텍스트를 못 얻는다 — 화면을 다시 그려 픽셀을 읽는다.
+      const tmp = document.createElement("canvas");
+      tmp.width = cv.width;
+      tmp.height = cv.height;
+      const c = tmp.getContext("2d")!;
+      c.drawImage(cv, 0, 0);
+      return c.getImageData(0, 0, cv.width, Math.min(60, cv.height)).data;
+    };
+    const countRed = (d: Uint8ClampedArray) => {
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] < 60 && d[i + 2] < 60) n++;
+      return n;
+    };
+    const before = shot();
+    const marker = t.registerMarker(1); // 두 번째 줄
+    const deco = t.registerDecoration({ marker, backgroundColor: 0xff0000, opacity: 1 });
+    await wait();
+    const after = shot();
+    let diff = 0;
+    for (let i = 0; i < before.length; i += 4) {
+      if (before[i] !== after[i] || before[i + 1] !== after[i + 1]) diff++;
+    }
+    // 지우면 화면에서도 걷혀야 한다 — 남으면 dispose 한 하이라이트가 계속 보인다.
+    deco.dispose();
+    await wait();
+    const gone = countRed(shot());
+    return { diff, red: countRed(after), gone };
+  });
+  check(`장식(${mode}): 화면이 바뀐다`, r.diff > 0, `${r.diff}px`);
+  check(`장식(${mode}): 지정한 색이 실제로 칠해진다`, r.red > 100, `빨강 ${r.red}px`);
+  check(`장식(${mode}): dispose 하면 화면에서 걷힌다`, r.gone === 0, `남은 빨강 ${r.gone}px`);
+  check(`장식(${mode}): 에러 없음`, errs.length === 0, errs[0] ?? "");
+  await p.close();
+}
+
 // **능력 감지와 폴백.** 구형 브라우저를 받아 오는 대신 전역을 지워 같은 분기를 밟는다 —
 // 폴백은 `typeof Worker`·`typeof OffscreenCanvas` 하나로 결정되므로 이 편이 싸고 **결정적**이다
 // (실제 Safari 는 버전이 오르면 그 경로를 더는 밟지 못한다).

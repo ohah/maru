@@ -427,7 +427,27 @@ async function findStat(): Promise<void> {
         ? `${total}건 (앞 ${matches.length}건만)`
         : `${total}건`;
 }
-fq.addEventListener("input", () => void findStat());
+// **장식의 실제 용도** — 매치를 전부 칠한다. `findNext` 의 선택은 하나만 보여 주지만
+// 장식은 여러 개를 동시에 얹을 수 있다(그게 F4b 를 나눈 이유다).
+let hi: { dispose(): void }[] = [];
+async function highlightAll(): Promise<void> {
+  for (const d of hi.splice(0)) d.dispose();
+  const q = fq.value;
+  if (!q) return;
+  const { matches } = await term.findMatches(q);
+  for (const m of matches.slice(0, 500)) {
+    const marker = term.registerMarker(m.startRow);
+    const d = term.registerDecoration({
+      marker,
+      x: m.startCol,
+      width: Math.max(1, m.endCol - m.startCol + 1),
+      backgroundColor: 0xffd700,
+      opacity: 0.35,
+    });
+    if (d) hi.push(d);
+  }
+}
+fq.addEventListener("input", () => void findStat().then(highlightAll));
 $("f-next").addEventListener("click", () => void term.findNext(fq.value).then(findStat));
 $("f-prev").addEventListener("click", () => void term.findPrevious(fq.value).then(findStat));
 fq.addEventListener("keydown", (e) => {

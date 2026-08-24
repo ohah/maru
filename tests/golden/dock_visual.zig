@@ -49,6 +49,44 @@ const golden_root = "tests/fixtures/golden/dock";
 /// 훨씬 큰 차이라 감도를 잃지 않는다.
 const channel_tolerance: u8 = 2;
 
+/// **안티에일리어싱 잡음 예산.** 채널 오차 2 로도 못 덮는 차이가 남는데, 그 전부가 회귀는 아니다 —
+/// 같은 face 의 같은 글자를 **같은 자리에** 그려도 macOS 판이 다르면 커버리지가 조금씩 다르다.
+///
+/// 실측(2026-08-24): 도크 시나리오를 제품 face(등폭)로 바꾸자 CI 러너와 개발기의 `scm-rows` 캡처가
+/// 갈렸다 — 안내 문구 끝의 **말줄임표 한 글자**에서 `20 픽셀, 최대 채널 차이 31`. 픽셀 좌표와 모양은
+/// 양쪽이 같았고 커버리지 값만 달랐다(예: 34 대 48). 즉 배치가 아니라 래스터라이저 차이다.
+///
+/// 그래서 두 축을 나눈다: **적은 픽셀이 조금 다르면** 잡음이고, **픽셀이 많거나 크게 다르면** 회귀다.
+///  · 라벨이 사라지거나 밴드 색이 바뀌면 crop 의 수백~수천 픽셀이 움직인다(개수에서 걸린다).
+///  · 점·막대처럼 작은 것이 사라지면 배경과의 대비가 커서 채널 차이가 64 를 넘는다(세기에서 걸린다).
+/// 두 문을 동시에 통과하는 것은 글자 가장자리의 커버리지뿐이다.
+const aa_noise_max_delta: u8 = 64;
+
+/// crop 면적의 0.25%. 작은 crop 은 하한 8 픽셀을 준다 — 그보다 적은 예산은 글자 한 획의 가장자리도
+/// 못 덮어서 잡음을 계속 실패로 만든다.
+fn aaNoiseBudget(width: u32, height: u32) u32 {
+    const area = @as(u64, width) * @as(u64, height);
+    return @max(8, @as(u32, @intCast(area / 400)));
+}
+
+/// 이 차이를 "래스터라이저 잡음"으로 볼 것인가.
+fn isAntialiasNoise(differing_pixels: usize, max_channel_delta: u8, width: u32, height: u32) bool {
+    return differing_pixels <= @as(usize, aaNoiseBudget(width, height)) and max_channel_delta <= aa_noise_max_delta;
+}
+
+test "잡음 예산은 적고 옅은 차이만 통과시킨다" {
+    // 실측 사례: 480x69 crop 에서 20 픽셀·최대 31 → 통과해야 한다.
+    try std.testing.expect(isAntialiasNoise(20, 31, 480, 69));
+    // 같은 crop 에서 픽셀이 많으면 회귀다(라벨 소실·밴드 색 변화가 그 모양이다).
+    try std.testing.expect(!isAntialiasNoise(200, 31, 480, 69));
+    // 픽셀이 적어도 **크게** 다르면 회귀다(작은 점·막대가 사라진 모양).
+    try std.testing.expect(!isAntialiasNoise(20, 120, 480, 69));
+    // 작은 crop 의 하한. 30x26 이면 면적 780 이라 0.25% 는 1 인데, 하한 8 을 쓴다.
+    try std.testing.expectEqual(@as(u32, 8), aaNoiseBudget(30, 26));
+    // 큰 crop 은 면적에 비례한다.
+    try std.testing.expectEqual(@as(u32, 82), aaNoiseBudget(480, 69));
+}
+
 const Case = struct {
     name: []const u8,
     capture: []const u8,
@@ -754,6 +792,17 @@ test "session dock visual golden" {
             std.debug.print("golden 크기가 캡처와 다르다: {s} — {s}\n", .{ case.name, @errorName(err) });
             return err;
         };
+        if (diff.differing_pixels != 0 and
+            isAntialiasNoise(diff.differing_pixels, diff.max_channel_delta, golden.width, golden.height))
+        {
+            // 조용히 넘기지 않는다 — 잡음이 늘어나는 것 자체가 신호일 수 있으므로 로그에 남긴다.
+            std.debug.print(
+                "골든 잡음 허용: {s} — 다른 픽셀 {d}개(예산 {d}), 최대 채널 차이 {d}\n",
+                .{ case.name, diff.differing_pixels, aaNoiseBudget(golden.width, golden.height), diff.max_channel_delta },
+            );
+            checked += 1;
+            continue;
+        }
         if (diff.differing_pixels != 0) {
             std.debug.print(
                 "시각 회귀: {s}\n  계약: {s}\n  다른 픽셀 {d}개, 최대 채널 차이 {d}, 처음 어긋난 곳 ({d},{d})\n  갱신이 의도라면 MARU_UPDATE_GOLDEN=1로 다시 만들고 **눈으로 확인**하라\n",

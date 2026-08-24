@@ -237,6 +237,19 @@ pub const Props = struct {
     /// 그 배지를 피해 앉아야 하는 일괄 동작 버튼의 자리는 `build`가 정한다. 둘이 갈리면 버튼이 배지 위로
     /// 올라오고, 배지는 paint 전용이라 **숫자를 눌렀는데 그룹 전체가 스테이지된다**(실측으로 그랬다).
     cell_width_px: u32 = 8,
+    /// **face 의 포인트당 advance**(device px × 1000 / 논리 pt). platform 이 채운다.
+    ///
+    /// 왜 필요한가: `cell_width_px` 는 **터미널 폰트 크기**의 글자 폭인데, chrome 텍스트는 role 이 정한
+    /// **고정 point size**(`list_row` 14pt)로 그려진다. 둘은 의도적으로 독립이라(typography 헤더 계약)
+    /// 사용자가 `font.size` 를 12 로 두면 셀은 7px 인데 14pt 글자는 8.4px 로 나간다 — 열마다 1.4px 씩
+    /// 모자란다. 그 값으로 다음 런의 자리를 잡으면 앞 글자를 파고든다(실측: `font.size` 12 상당에서
+    /// `staged.zigsrc/session/` 처럼 붙었다). 셀 반올림만 덮는 `cell + 1` 상한으로는 못 막는다.
+    ///
+    /// 등폭 face 에서 advance 는 point size 에 비례하므로 이 비율 하나면 어떤 role 이든 환산된다:
+    /// `advance(role) = ceil(advance_milli_per_point * pointSize(role) / 1000)`.
+    ///
+    /// 0 이면 "모른다"는 뜻이고, 그때는 옛 셀 기반 추정으로 물러난다(단위 테스트·구형 호출부).
+    advance_milli_per_point: u32 = 0,
     /// 이 tree를 만든 스냅샷 세대. action 표가 이 값으로 stale 클릭을 거부한다.
     snapshot_generation: u64 = 1,
     /// **가상화된 창**이다 — 화면에 보이는 만큼만 platform이 잘라 준다.

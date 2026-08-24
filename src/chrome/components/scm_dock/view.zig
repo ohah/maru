@@ -224,7 +224,7 @@ pub fn view(
         var removed_buf: [24]u8 = undefined;
         const removed = std.fmt.bufPrint(&removed_buf, "-{d}", .{props.summary.removed}) catch "";
         const gap: f32 = @floatFromInt(m.inset_x + m.gap);
-        try writer.line(rect, gap + writer.measureBudget(added), removed, .git_deleted_fg, .supporting, false);
+        try writer.line(rect, gap + writer.measureRun(added, .supporting), removed, .git_deleted_fg, .supporting, false);
     }
 
     // ── 목록. 스크롤 영역 안이므로 backend가 "스크롤은 순수 평행이동"임을 쓸 수 있게 표시한다.
@@ -317,9 +317,9 @@ pub fn view(
             // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
             // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
             if (props.unpushed) {
-                const name_w = writer.measureBudget(props.branch);
+                const name_w = writer.measureRun(props.branch, .control); // 위 `line` 이 쓰는 role
                 const dot_x = branch_x + name_w + @as(f32, @floatFromInt(m.gap));
-                const dot_w = writer.measureBudget(unpushed_dot);
+                const dot_w = writer.measureRun(unpushed_dot, .supporting);
                 // 오른쪽 묶음(↑↓·칩)을 침범하지 않을 때만 그린다 — 겹치면 둘 다 못 읽는다.
                 if (dot_x + dot_w < rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x))) {
                     try writer.line(rect, dot_x, unpushed_dot, .accent_bar, .supporting, false);
@@ -855,7 +855,7 @@ const Writer = struct {
         // 여야 "제목 아래 항목들"로 읽힌다(예전에는 둘 다 굵어 층이 없었다).
         try self.lineWithin(rect, inset, text_end, file.name, if (file.selected) .focus_accent else .list_secondary_fg, .list_row, false);
         if (file.dir.len > 0) {
-            const name_px = self.measureBudget(file.name);
+            const name_px = self.measureRun(file.name, .list_row); // 위 `lineWithin` 이 쓰는 role
             // 경로 꼬리는 이름보다 **한 단 더** 물러난다. 예전 `muted_fg`(밝기 207)는 이름이 쓰던
             // `surface_fg` 보다는 흐렸지만, 이름이 `list_secondary_fg`(169)로 내려오면 **꼬리가 더 밝아진다**
             // — 파일 탐색기에서 같은 역전을 실제로 겪었다(무시된 행이 기본 행보다 밝았다).
@@ -880,6 +880,31 @@ const Writer = struct {
     ///
     /// **caret·선택 기하(`colWidth`)에는 이 보정을 넣지 않는다.** 그쪽은 플랫폼 배치와 **같은 자**를
     /// 써야 글자 위에 정확히 앉는다 — 여기 상한을 그쪽에 쓰면 커서가 글자에서 밀린다.
+    ///
+    /// **이 상한이 덮지 못하는 것**: 셀은 터미널 폰트 크기의 글자 폭이고 chrome 텍스트는 role 크기로
+    /// 그려진다 — 둘이 벌어지면(`font.size` 12 대 `list_row` 14pt) 부족분이 1px 을 넘는다. 그래서 **런을
+    /// 이어 붙이는 자리는 `measureRun`** 을 쓴다. 여기 남은 소비자는 오른쪽 예약(증감·상태 문자 자리)이라
+    /// 과소 추정이 겹침이 아니라 여유 부족으로만 나타나고, 그 자리 글자는 대부분 `supporting`(12pt)이라
+    /// 터미널 크기와 가까워 오차도 작다.
+    /// **다음 런을 이 글자 뒤에 놓기 위한 폭.** 위 `measureBudget` 과 달리 role 의 실제 크기로 환산한다.
+    ///
+    /// `measureBudget` 의 상한(`cell + 1`)이 덮는 것은 셀의 **반올림 오차**뿐이다. 그런데 chrome 텍스트는
+    /// 터미널 크기가 아니라 role 크기(`list_row` 14pt)로 그려지고 둘은 독립이라, 사용자가 `font.size` 를
+    /// 12 로 두면 셀 7px 대 실제 8.4px 로 **열당 1.4px** 이 모자란다 — 상한을 넘는다(실측으로 그 크기에서
+    /// 이름과 경로 꼬리가 다시 붙었다). 그래서 **런을 이어 붙이는 자리**는 이 함수를 쓴다.
+    ///
+    /// 비율을 모르면(props 기본값 0) 옛 추정으로 물러난다 — 그래야 값을 안 넘기는 호출부가 조용히
+    /// 0 폭을 받지 않는다.
+    fn measureRun(self: *Writer, source: []const u8, role: typography.ChromeTextRole) f32 {
+        if (self.props.advance_milli_per_point == 0) return self.measureBudget(source);
+        const cols = text_layout.displayCols(source, null);
+        const point_size: u32 = typography.token(role).point_size;
+        const milli = self.props.advance_milli_per_point * point_size;
+        // **올림**이다 — 셀이 정수라 비율 자체에 반올림 오차가 있고, 모자란 쪽으로 틀리면 글자가 겹친다.
+        const advance_px = (milli + 999) / 1000;
+        return @floatFromInt(cols * advance_px);
+    }
+
     fn measureBudget(self: *Writer, source: []const u8) f32 {
         const cols = text_layout.displayCols(source, null);
         return @floatFromInt(cols * (self.cell_width_px + 1));
@@ -1658,6 +1683,43 @@ fn renderFixture(storage: *TestStorage, state: interaction.InteractionState, ite
         .actions = &storage.actions,
     });
     return viewBudgeted(storage, props, frame, state);
+}
+
+// **작은 터미널 폰트에서도 경로 꼬리가 이름을 파고들지 않는가.**
+//
+// 이 판정자가 없던 동안 `cell + 1` 상한이 "어떤 등폭 face 에서도 안전하다"고 적혀 있었는데 거짓이었다:
+// 상한이 덮는 것은 셀의 반올림이고, 진짜 간극은 **터미널 크기(셀)와 role 크기(14pt)의 차이**다.
+// 실측으로 셀 7px(사용자 `font.size` 12 상당)에서 `staged.zigsrc/session/` 처럼 붙었다.
+test "이름 뒤 경로는 role 크기로 자리를 잡는다(작은 셀에서도 겹치지 않는다)" {
+    const cell_px: u32 = 7; // font.size 12 상당
+    const font_pt: u32 = 12;
+    const advance_milli = cell_px * 1000 / font_pt; // 583 — face 의 포인트당 advance
+    var writer = Writer{
+        .props = .{
+            .viewport_px = .{ .x = 0, .y = 0, .width = 480, .height = 320 },
+            .cell_width_px = cell_px,
+            .advance_milli_per_point = advance_milli,
+            .snapshot_generation = 1,
+            .items = &.{},
+        },
+        .ops = &.{},
+        .runs = &.{},
+        .text_bytes = &.{},
+        .op_count = 0,
+        .cell_width_px = cell_px,
+        .state = .{},
+        .tokens_ref = &testTokens(),
+    };
+    const name = "staged.zig"; // 10 열
+    const reserved = writer.measureRun(name, .list_row);
+    // 실제로 그려지는 폭: 14pt × (advance/pt). 예약이 그보다 작으면 다음 런이 글자를 파고든다.
+    const drawn = @as(f32, @floatFromInt(name.len)) * (@as(f32, @floatFromInt(advance_milli)) * 14.0 / 1000.0);
+    try testing.expect(reserved >= drawn);
+    // 옛 상한(`cols * (cell + 1)`)은 **모자랐다** — 이 판정자가 무엇을 막는지 값으로 남긴다.
+    const old_bound = @as(f32, @floatFromInt(name.len * (cell_px + 1)));
+    try testing.expect(old_bound < drawn);
+    // 그렇다고 한없이 넉넉하지도 않다(틈이 벌어지면 그것대로 읽기 나쁘다) — 열당 1px 이내다.
+    try testing.expect(reserved - drawn <= @as(f32, @floatFromInt(name.len)));
 }
 
 test "행 글자와 요약·브랜치가 한 번에 나온다" {

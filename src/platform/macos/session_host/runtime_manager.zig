@@ -2199,6 +2199,18 @@ test "runtime manager: 실 자식이 **진짜 훅 커맨드**를 돌리면 우�
     mgr.init(allocator, std.testing.io, &host_registry, .{ .host_id = host_id, .log_base = cache_base });
     defer mgr.deinit();
 
+    // **사용자가 캐시를 비운 상태를 만든다.** `init` 이 만든 칸을 지우고 spawn 한다 — spawn 마다 칸을
+    // 확인하지 않으면 그 자식의 훅은 조용히 나가고 파일이 안 생긴다(훅은 mkdir 을 안 한다). 이 한 줄이
+    // 없으면 「init 이 이미 만들었으니 됐다」로 보여 그 호출이 시험되지 않는다(뮤테이션이 그것을 잡았다).
+    {
+        var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const seg = try agent_hook_logs.instanceDirPathIn(&seg_buf, cache_base, host_id);
+        var marker_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const marker = try std.fmt.bufPrintZ(&marker_buf, "{s}/owner.pid", .{seg});
+        _ = c.unlink(marker.ptr);
+        try std.testing.expectEqual(@as(c_int, 0), c.rmdir(seg.ptr));
+    }
+
     const ops = mgr.runtimeOps();
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
     defer ops.terminate(ops.ctx, rid);
@@ -2209,8 +2221,10 @@ test "runtime manager: 실 자식이 **진짜 훅 커맨드**를 돌리면 우�
 
     var body: ?[]u8 = null;
     defer if (body) |bytes| allocator.free(bytes);
+    // CI 러너는 이 왕복(실 host + forkpty + 셸 + 훅)이 느리다. 상한을 넉넉히 둔다 — 이 테스트가 간헐로
+    // 빨개지면 그것이 곧 게이트 신뢰를 깎는다.
     var attempts: usize = 0;
-    while (attempts < 300) : (attempts += 1) {
+    while (attempts < 1000) : (attempts += 1) {
         if (std.Io.Dir.cwd().readFileAlloc(std.testing.io, log_path, allocator, .limited(64 * 1024)) catch null) |bytes| {
             if (std.mem.indexOfScalar(u8, bytes, '\n') != null) {
                 body = bytes;

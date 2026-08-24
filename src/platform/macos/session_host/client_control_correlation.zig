@@ -18,6 +18,11 @@ pub const Target = struct {
     pub fn isCanonical(self: Target) bool {
         return self.stream_id != 0 and self.controller_generation != 0;
     }
+
+    pub fn isCanonicalFor(self: Target, kind: ControlKind) bool {
+        return self.stream_id != 0 and
+            (self.controller_generation != 0 or kind == .detach);
+    }
 };
 
 pub const Progress = enum {
@@ -74,7 +79,7 @@ pub fn prepareAdmission(
         .in_flight, .completed => return .backpressure,
         .terminal => return .invalid,
     }
-    if (!target.isCanonical() or request_id == 0 or wire_len == 0 or
+    if (!target.isCanonicalFor(kind) or request_id == 0 or wire_len == 0 or
         !expectation.isCanonical() or switch (expectation) {
         .resize => kind != .resize,
         .resync => kind != .resync,
@@ -218,6 +223,37 @@ test "control correlation admits only one outstanding request without wrapping d
         prepareAdmission(.idle, .resize, test_resize_expectation, target, 1, 80, std.math.maxInt(i128)) ==
             .deadline_overflow,
     );
+}
+
+test "control correlation permits zero generation only for detach" {
+    const untracked = Target{ .stream_id = 7, .controller_generation = 0 };
+    try std.testing.expect(prepareAdmission(
+        .idle,
+        .detach,
+        .detach,
+        untracked,
+        1,
+        64,
+        1,
+    ) == .admitted);
+    try std.testing.expect(prepareAdmission(
+        .idle,
+        .resize,
+        test_resize_expectation,
+        untracked,
+        1,
+        64,
+        1,
+    ) == .invalid);
+    try std.testing.expect(prepareAdmission(
+        .idle,
+        .resync,
+        test_resync_expectation,
+        untracked,
+        1,
+        64,
+        1,
+    ) == .invalid);
 }
 
 test "control correlation accepts response only after exact completion and before deadline" {

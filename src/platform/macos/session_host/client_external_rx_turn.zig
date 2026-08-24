@@ -51,6 +51,14 @@ pub const Scratch = struct {
         return true;
     }
 
+    /// An empty intent can mean either the pristine first turn or a prior no-intent turn whose
+    /// intent was aborted while this traversal scratch was closed. Normalize both states before
+    /// the caller creates the next intent handle so wire batching cannot choose the lifecycle.
+    pub fn prepareForIntentCreation(out: *Scratch) bool {
+        if (scratchControlValid(out, .ready)) return true;
+        return resetForNextTurn(out);
+    }
+
     pub fn closedForOuterTurn(out: *const Scratch) bool {
         const lifecycle_closed =
             scratchControlValid(out, .ready) or
@@ -274,12 +282,13 @@ fn closeFailure(
 /// A terminal return has already closed the intent handle. A staged return leaves the handle as
 /// the caller's sole sealed owner for aggregate commit.
 pub fn traverseBuffered(input: Input) Result {
-    if (!scratchControlValid(input.scratch, .ready))
+    if (!scratchControlValid(input.scratch, .ready)) {
         return .{ .terminal = .{
             .reason = .invariant_failure,
             .rx_bytes = 0,
             .rx_frames = 0,
         } };
+    }
     input.scratch.lifecycle = .busy;
     input.scratch.digest = scratchDigest(input.scratch);
     var guard_owner = MandatoryPayloadGuard{
@@ -303,12 +312,9 @@ pub fn traverseBuffered(input: Input) Result {
         const readiness = client_external_mode.parserReadiness(
             input.state,
             input.parser,
-        ) catch return closeFailure(
-            input,
-            .invariant_failure,
-            rx_bytes,
-            rx_frames,
-        );
+        ) catch {
+            return closeFailure(input, .invariant_failure, rx_bytes, rx_frames);
+        };
         final_readiness = readiness;
         if (readiness != .complete_or_error) break;
         input.scratch.parse = .{};
@@ -317,17 +323,14 @@ pub fn traverseBuffered(input: Input) Result {
             input.parser,
             &input.scratch.parse,
             mandatory_guard,
-        ) catch |err| return closeFailure(
-            input,
-            switch (err) {
+        ) catch |err| {
+            return closeFailure(input, switch (err) {
                 error.Protocol => .protocol_error,
                 error.OutOfMemory => .resource_exhausted,
                 error.AllocationQuarantined => .allocation_quarantined,
                 else => .invariant_failure,
-            },
-            rx_bytes,
-            rx_frames,
-        );
+            }, rx_bytes, rx_frames);
+        };
         if (input.parser_progress) |progress| {
             if (!progress.refresh(progress.context)) {
                 switch (outcome) {
@@ -502,3 +505,23 @@ pub const testing = if (builtin.is_test) struct {
         );
     }
 } else struct {};
+
+test "p5c3d no-intent closed traversal is reusable before a new intent is created" {
+    var scratch: Scratch = .{};
+    try std.testing.expect(Scratch.initInPlace(&scratch));
+    const first_generation = scratch.generation;
+
+    scratch.lifecycle = .busy;
+    scratch.digest = scratchDigest(&scratch);
+    try std.testing.expect(closeScratch(&scratch));
+    try std.testing.expectEqual(
+        external_rx_intent.ExternalRxIntentHandle{},
+        scratch.intent,
+    );
+
+    try std.testing.expect(Scratch.prepareForIntentCreation(&scratch));
+    try std.testing.expectEqual(first_generation + 1, scratch.generation);
+    try std.testing.expect(scratchControlValid(&scratch, .ready));
+    try std.testing.expect(Scratch.prepareForIntentCreation(&scratch));
+    try std.testing.expectEqual(first_generation + 1, scratch.generation);
+}

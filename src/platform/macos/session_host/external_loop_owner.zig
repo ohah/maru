@@ -85,6 +85,10 @@ pub const IntegratedStackOwner = struct {
     local: IntegratedLocalState = undefined,
     stdout_progress: ?external_stdout_progress.Progress = null,
     socket_write_interest: bool = false,
+    /// A pump turn can publish owner-local work after consuming the last kernel readiness edge.
+    /// Preserve that exact result until the next pump revalidates and clears it; `pollHint()` owns
+    /// protocol deadlines/TX, while this latch owns the cross-turn scheduler handoff.
+    host_immediate_interest: bool = false,
     stdin_interest: bool = true,
     pending_resize: bool = false,
     pending_resize_request: ?external_resize.Request = null,
@@ -193,7 +197,7 @@ pub const IntegratedStackOwner = struct {
             progress.deadline() catch return error.DeadlineOverflow
         else
             null;
-        return external_loop_policy.pollTimeoutMs(now_ns, .{
+        const timeout = external_loop_policy.pollTimeoutMs(now_ns, .{
             .chord_ns = chord_deadline,
             .control_ns = pump_hint.next_deadline_ns,
             .io_ns = stdout_deadline,
@@ -202,6 +206,13 @@ pub const IntegratedStackOwner = struct {
             error.InvalidClock => error.InvalidClock,
             error.InvalidDeadline => error.InvalidDeadline,
         };
+        // A semantic self-wake still takes one kernel snapshot so revoke/signal/stdin readiness
+        // cannot be starved, but that snapshot must never sleep behind owner-local work.
+        return applyImmediatePollWake(
+            timeout,
+            self.host_immediate_interest,
+            pump_hint.immediate,
+        );
     }
 
     pub const CleanupWireResult = union(enum) {
@@ -249,15 +260,22 @@ pub const IntegratedStackOwner = struct {
         const fds = &self.pre_raw.poll_fds;
         const chord_deadline = self.local.chord.nextDeadline() catch
             return error.DeadlineOverflow;
+        const pump_hint = switch (self.pre_raw.pump.pollHint()) {
+            .hint => |hint| hint,
+            .moved_or_stale => return error.Moved,
+        };
         return external_loop_policy.selectAction(.{
             .termination_signal = pollInputOrTerminal(fds[3].revents),
             .host_rx = pollInputOrTerminal(fds[1].revents),
             .chord_deadline = if (chord_deadline) |deadline| now_ns >= deadline else false,
             .socket_tx = self.socket_write_interest and
                 fds[1].revents & posix.POLL.OUT != 0,
+            .host_immediate = self.host_immediate_interest or pump_hint.immediate,
             .stdout_tx = self.pre_raw.repaint.current != null and
                 fds[2].revents & posix.POLL.OUT != 0,
             .resize = self.pending_resize,
+            .retained_stdin = self.pending_forward_len != 0 or
+                self.stdin_head != self.stdin_len,
             .stdin_rx = self.stdin_interest and fds[0].revents & posix.POLL.IN != 0,
         });
     }
@@ -266,6 +284,7 @@ pub const IntegratedStackOwner = struct {
         idle,
         signal: SignalResult,
         pump: client_pump.TurnResult,
+        host_immediate: client_pump.TurnResult,
         chord: InputResult,
         stdout: StdoutResult,
         resize: ResizeResult,
@@ -311,6 +330,11 @@ pub const IntegratedStackOwner = struct {
                 .writable = true,
                 .now_ns = now_ns,
             }, io) },
+            .host_immediate => .{ .host_immediate = self.executePumpAction(.{
+                .readable = true,
+                .writable = false,
+                .now_ns = now_ns,
+            }, io) },
             .stdout_tx => .{ .stdout = self.flushStdout(now_ns) },
             .resize => .{ .resize = self.applyPendingResize(now_ns) },
             .stdin_rx => .{ .stdin = self.drainStdin(now_ns) },
@@ -331,6 +355,7 @@ pub const IntegratedStackOwner = struct {
             .host_rx => self.pre_raw.poll_fds[1].revents = 0,
             .socket_tx => self.pre_raw.poll_fds[1].revents &=
                 ~@as(i16, posix.POLL.OUT),
+            .host_immediate => {},
             .stdout_tx => self.pre_raw.poll_fds[2].revents = 0,
             .stdin_rx => self.pre_raw.poll_fds[0].revents = 0,
             .chord_deadline, .resize, .poll_wait => {},
@@ -342,18 +367,28 @@ pub const IntegratedStackOwner = struct {
         turn: client_pump.TurnInput,
         io: std.Io,
     ) client_pump.TurnResult {
-        const result = self.pumpHost(turn, io);
-        // Poll interest is loop-owned state, not a hint the public caller should remember to copy.
-        // Publishing it in the same action suffix prevents stale POLLOUT interest from spinning and
-        // prevents a newly queued immediate frame from sleeping indefinitely.
-        self.notePumpResult(result);
-        return result;
+        // `pumpHost` owns poll-interest publication for both direct callers and loop actions.
+        return self.pumpHost(turn, io);
     }
 
     pub fn notePumpResult(self: *IntegratedStackOwner, result: client_pump.TurnResult) void {
         if (self.saved_self_addr != @intFromPtr(self) or self.lifecycle != .live) return;
-        self.socket_write_interest = result.write_interest or result.immediate_tx;
-        if (result.terminal != null) self.stdin_interest = false;
+        if (result.terminal != null) {
+            self.socket_write_interest = false;
+            self.host_immediate_interest = false;
+            self.stdin_interest = false;
+            return;
+        }
+        self.host_immediate_interest = result.inherited_work_ready or
+            result.immediate_rx;
+        // `write_interest=false` is authoritative only after the pump proved the RX/control
+        // frontier clear. While inherited screen/metadata work blocks that proof, clearing an
+        // already-armed POLLOUT loses the only wake for an admitted input frame. Preserve the
+        // prior interest until a clear turn can inspect the actual TX queue.
+        if (result.authority_clear)
+            self.socket_write_interest = result.write_interest or result.immediate_tx
+        else if (result.immediate_tx)
+            self.socket_write_interest = true;
     }
 
     pub const SignalResult = union(enum) {
@@ -409,7 +444,7 @@ pub const IntegratedStackOwner = struct {
             };
         }
         const value = self.pending_resize_request.?;
-        return switch (self.pre_raw.pump.admitControl(.{
+        const admission = self.pre_raw.pump.admitControl(.{
             .request = .{ .resize = .{
                 .stream_id = self.pre_raw.pump.attachment.state.stream_id,
                 .cols = value.size.cols,
@@ -417,7 +452,8 @@ pub const IntegratedStackOwner = struct {
                 .client_sequence = value.client_sequence,
             } },
             .expected_controller_generation = self.pre_raw.pump.attachment.state.controller_generation,
-        }, now_ns)) {
+        }, now_ns);
+        return switch (admission) {
             .admitted => result: {
                 self.pending_resize = false;
                 self.pending_resize_request = null;
@@ -645,6 +681,63 @@ pub const IntegratedStackOwner = struct {
             @sizeOf(ApplyContext),
             ApplyContext.apply,
         );
+        // Every live return path, including a committed-screen retry or terminal, publishes the
+        // loop-owned poll interests exactly once.
+        defer self.notePumpResult(result);
+        if (result.terminal == null and result.inherited_work_ready) {
+            // Live screen work is consumed by `pumpApplying`, while aggregate-committed screen
+            // batches retain their existing charged `RemoteAttachment` lease path. Drain at most
+            // one before metadata/resize so every inherited owner has one bounded scheduler.
+            switch (self.pre_raw.pump.pumpCommittedScreen(io)) {
+                .idle => {},
+                .retry => return result,
+                .terminal => |reason| {
+                    result.terminal = .{
+                        .reason = reason,
+                        .fd_disposition = .owner_cleanup,
+                    };
+                    return result;
+                },
+                .applied => |source| {
+                    const sequence = self.pre_raw.next_projection_sequence;
+                    if (sequence == std.math.maxInt(u64)) {
+                        result.terminal = .{
+                            .reason = .resource_exhausted,
+                            .fd_disposition = .owner_cleanup,
+                        };
+                        return result;
+                    }
+                    self.pre_raw.repaint.replaceLatest(
+                        source,
+                        .{
+                            .cols = self.local.terminal_size.cols,
+                            .rows = self.local.terminal_size.rows,
+                        },
+                        io,
+                        sequence,
+                    ) catch |err| {
+                        result.terminal = .{
+                            .reason = if (err == error.OutOfMemory)
+                                .resource_exhausted
+                            else
+                                .protocol_error,
+                            .fd_disposition = .owner_cleanup,
+                        };
+                        return result;
+                    };
+                    self.pre_raw.next_projection_sequence = sequence + 1;
+                    return result;
+                },
+            }
+            // Metadata/resize use the adjacent owner projection transaction.
+            switch (self.pre_raw.pump.consumeCliOwnerProjection()) {
+                .applied, .none, .retry => {},
+                .terminal => result.terminal = .{
+                    .reason = .invariant_failure,
+                    .fd_disposition = .owner_cleanup,
+                },
+            }
+        }
         if (context.failure) |reason| {
             self.pre_raw.pump.latchAttachmentFailure(switch (reason) {
                 .resource_exhausted => client_poison.ConnectionReason.local_resource_exhausted,
@@ -656,7 +749,6 @@ pub const IntegratedStackOwner = struct {
                 .fd_disposition = .owner_cleanup,
             };
         }
-        self.notePumpResult(result);
         return result;
     }
 
@@ -731,7 +823,8 @@ pub const IntegratedStackOwner = struct {
     pub const BeginCleanupResult = union(enum) {
         begun: external_loop_policy.CleanupPlan,
         busy,
-        terminal: client_pump.TerminalReason,
+        projection_terminal: client_pump.TerminalReason,
+        detach_terminal: client_pump.TerminalReason,
         invalid,
     };
 
@@ -755,7 +848,7 @@ pub const IntegratedStackOwner = struct {
             switch (self.projectCleanupWireAuthority()) {
                 .authority => |authority| authority,
                 .busy => return .busy,
-                .terminal => |reason| return .{ .terminal = reason },
+                .terminal => |reason| return .{ .projection_terminal = reason },
                 .invalid => return .invalid,
             }
         else
@@ -785,7 +878,7 @@ pub const IntegratedStackOwner = struct {
                 plan.fail_close_socket = true;
                 plan.detach_repaint_deadline_ns = null;
             },
-            .terminal => |reason| return .{ .terminal = reason },
+            .terminal => |reason| return .{ .detach_terminal = reason },
         };
         self.cleanup = .{ .cause = cause, .plan = plan, .signal = signal };
         return .{ .begun = plan };
@@ -853,7 +946,14 @@ pub const IntegratedStackOwner = struct {
         InvalidLifecycle,
         ClockFailed,
         PollFailed,
-        CleanupFailed,
+        CleanupDriveInvalid,
+        ReadyActionFailed,
+        CleanupProjectionTerminal,
+        CleanupDetachProtocolError,
+        CleanupDetachInvariantFailure,
+        CleanupDetachOtherTerminal,
+        CleanupStartInvalid,
+        PollPlanFailed,
     };
 
     /// Owns the actual POSIX poll loop after raw commit. Every action returns to the top for a
@@ -878,18 +978,22 @@ pub const IntegratedStackOwner = struct {
                         .teardown = teardown_result,
                     },
                     .pending => {},
-                    .invalid => return self.failRun(error.CleanupFailed),
+                    .invalid => return self.failRun(error.CleanupDriveInvalid),
                 }
             } else {
                 const execution = self.executeReadyAction(now_ns, io) catch
-                    return self.failRun(error.CleanupFailed);
+                    return self.failRun(error.ReadyActionFailed);
                 const cleanup_cause: ?external_loop_policy.CleanupCause = switch (execution) {
                     .idle => null,
                     .signal => |signal_result| switch (signal_result) {
                         .idle, .resize_pending => null,
                         .terminate => |signal| cause: {
-                            if (!self.startCleanup(.signal, signal, now_ns))
-                                return self.failRun(error.CleanupFailed);
+                            switch (self.startCleanup(.signal, signal, now_ns)) {
+                                .started => {},
+                                .projection_terminal => return self.failRun(error.CleanupProjectionTerminal),
+                                .detach_terminal => |reason| return self.failRun(detachTerminalError(reason)),
+                                .invalid => return self.failRun(error.CleanupStartInvalid),
+                            }
                             break :cause .signal;
                         },
                         .terminal => |reason| cause: {
@@ -897,7 +1001,7 @@ pub const IntegratedStackOwner = struct {
                             break :cause terminalCleanupCause(reason);
                         },
                     },
-                    .pump => |turn| if (turn.terminal) |terminal| cause: {
+                    .pump, .host_immediate => |turn| if (turn.terminal) |terminal| cause: {
                         terminal_reason = terminal.reason;
                         break :cause terminalCleanupCause(terminal.reason);
                     } else null,
@@ -933,16 +1037,24 @@ pub const IntegratedStackOwner = struct {
                     },
                 };
                 if (cleanup_cause) |cause| {
-                    if (self.cleanup == null and
-                        !self.startCleanup(cause, null, now_ns))
-                        return self.failRun(error.CleanupFailed);
+                    if (self.cleanup == null) switch (self.startCleanup(cause, null, now_ns)) {
+                        .started => {},
+                        .projection_terminal => return self.failRun(error.CleanupProjectionTerminal),
+                        .detach_terminal => |reason| return self.failRun(detachTerminalError(reason)),
+                        .invalid => return self.failRun(error.CleanupStartInvalid),
+                    };
                     continue;
                 }
-                if (execution != .idle) continue;
+                // A self-woken semantic suffix must not prevent the kernel poll snapshot from
+                // observing a newly arrived detach chord, revoke, or termination signal. Its
+                // immediate hint makes this poll nonblocking, preserving progress without a busy
+                // loop that can starve external readiness forever.
+                const execution_tag = std.meta.activeTag(execution);
+                if (execution_tag != .idle and execution_tag != .host_immediate) continue;
             }
 
             self.refreshPollInterests() catch
-                return self.failRun(error.CleanupFailed);
+                return self.failRun(error.PollPlanFailed);
             const cleanup_deadline = if (self.cleanup) |state|
                 state.plan.detach_repaint_deadline_ns orelse
                     state.plan.global_deadline_ns
@@ -955,16 +1067,33 @@ pub const IntegratedStackOwner = struct {
         }
     }
 
+    const StartCleanupResult = union(enum) {
+        started,
+        projection_terminal: client_pump.TerminalReason,
+        detach_terminal: client_pump.TerminalReason,
+        invalid,
+    };
+
     fn startCleanup(
         self: *IntegratedStackOwner,
         cause: external_loop_policy.CleanupCause,
         signal: ?posix.SIG,
         now_ns: i128,
-    ) bool {
+    ) StartCleanupResult {
         return switch (self.beginCleanup(cause, signal, now_ns)) {
-            .begun => true,
-            .busy => self.cleanup != null,
-            .terminal, .invalid => false,
+            .begun => .started,
+            .busy => if (self.cleanup != null) .started else .invalid,
+            .projection_terminal => |reason| .{ .projection_terminal = reason },
+            .detach_terminal => |reason| .{ .detach_terminal = reason },
+            .invalid => .invalid,
+        };
+    }
+
+    fn detachTerminalError(reason: client_pump.TerminalReason) RunError {
+        return switch (reason) {
+            .protocol_error => error.CleanupDetachProtocolError,
+            .invariant_failure => error.CleanupDetachInvariantFailure,
+            else => error.CleanupDetachOtherTerminal,
         };
     }
 
@@ -1021,6 +1150,14 @@ pub const IntegratedStackOwner = struct {
     }
 };
 
+fn applyImmediatePollWake(
+    validated_timeout_ms: c_int,
+    host_immediate_interest: bool,
+    pump_immediate: bool,
+) c_int {
+    return if (host_immediate_interest or pump_immediate) 0 else validated_timeout_ms;
+}
+
 fn pollInputOrTerminal(revents: i16) bool {
     return revents & (posix.POLL.IN | posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0;
 }
@@ -1047,6 +1184,46 @@ fn monotonicNowNs() error{ClockFailed}!i128 {
             return error.ClockFailed,
         nanos,
     ) catch return error.ClockFailed;
+}
+
+test "p5c3d pump result preserves admitted TX interest until authority is clear" {
+    var owner: IntegratedStackOwner = .{};
+    owner.saved_self_addr = @intFromPtr(&owner);
+    owner.lifecycle = .live;
+    owner.socket_write_interest = true;
+
+    // Inherited screen work does not inspect the TX queue. Its default false must not erase the
+    // only POLLOUT wake for an already admitted key byte.
+    owner.notePumpResult(.{ .authority_clear = false });
+    try std.testing.expect(owner.socket_write_interest);
+    try std.testing.expect(!owner.host_immediate_interest);
+
+    // Kernel readiness may be fully consumed by the same turn that publishes a live screen owner.
+    // The scheduler must retain that semantic wake until a later pump proves the owner clear.
+    owner.notePumpResult(.{ .inherited_work_ready = true });
+    try std.testing.expect(owner.host_immediate_interest);
+    owner.notePumpResult(.{ .immediate_rx = true });
+    try std.testing.expect(owner.host_immediate_interest);
+
+    // A clear frontier makes the pump's queue projection authoritative.
+    owner.notePumpResult(.{ .authority_clear = true, .write_interest = false });
+    try std.testing.expect(!owner.socket_write_interest);
+    try std.testing.expect(!owner.host_immediate_interest);
+
+    owner.socket_write_interest = true;
+    owner.notePumpResult(.{ .terminal = .{
+        .reason = .socket_error,
+        .fd_disposition = .owner_cleanup,
+    } });
+    try std.testing.expect(!owner.socket_write_interest);
+    try std.testing.expect(!owner.host_immediate_interest);
+    try std.testing.expect(!owner.stdin_interest);
+}
+
+test "p5c3d semantic self-wake converts an otherwise blocking poll to a kernel snapshot" {
+    try std.testing.expectEqual(@as(c_int, 0), applyImmediatePollWake(-1, true, false));
+    try std.testing.expectEqual(@as(c_int, 0), applyImmediatePollWake(50, false, true));
+    try std.testing.expectEqual(@as(c_int, -1), applyImmediatePollWake(-1, false, false));
 }
 
 test "p5c3c-3b local stack binds chord and resize to one immutable initial role" {
@@ -1155,7 +1332,6 @@ test "p5c3c-3b actual openpty integrated owner commits raw and restores exact AN
             slave,
         ) catch c._exit(121);
         owner.commit() catch c._exit(122);
-        if (!external_pump_owner.testing.clearInitialFence(&owner.pre_raw.pump)) c._exit(165);
         switch (owner.projectCleanupWireAuthority()) {
             .authority => |authority| if (authority != .none) c._exit(167),
             else => c._exit(168),
@@ -1398,7 +1574,6 @@ test "p5c3c-3b actual openpty stdin reaches one MRSH input frame without byte lo
             slave,
         ) catch c._exit(171);
         owner.commit() catch c._exit(172);
-        if (!external_pump_owner.testing.clearInitialFence(&owner.pre_raw.pump)) c._exit(173);
         const ready = [1]u8{1};
         if (c.write(ready_pipe[1], &ready, ready.len) != ready.len) c._exit(174);
         _ = c.close(ready_pipe[1]);
@@ -1542,8 +1717,6 @@ test "p5c3c-3b actual poll loop suppresses observer input and detaches with rest
             slave,
         ) catch c._exit(230);
         owner.commit() catch c._exit(231);
-        if (!external_pump_owner.testing.clearInitialFence(&owner.pre_raw.pump))
-            c._exit(232);
         const result = owner.run(std.testing.io) catch c._exit(233);
         if (result.cause != .local_detach or result.terminal_reason != null or
             result.teardown != .cleaned) c._exit(234);
@@ -1636,8 +1809,6 @@ test "p5c3c-3b actual poll loop restores tty before forwarding termination signa
             slave,
         ) catch c._exit(240);
         owner.commit() catch c._exit(241);
-        if (!external_pump_owner.testing.clearInitialFence(&owner.pre_raw.pump))
-            c._exit(242);
         _ = owner.run(std.testing.io) catch c._exit(243);
         c._exit(244);
     }
@@ -1687,8 +1858,6 @@ test "p5c3c-3b offset-zero cleanup cancellation retires queued input before deta
     var owner: external_pump_owner.ExternalPumpOwner = .{};
     try owner.initInPlace(&fixture.prepared);
     defer _ = owner.teardown();
-    try std.testing.expect(external_pump_owner.testing.clearInitialFence(&owner));
-
     try std.testing.expect(owner.admitTx(.{
         .kind = .input_bytes,
         .stream_id = owner.attachment.state.stream_id,

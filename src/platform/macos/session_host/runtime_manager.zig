@@ -2690,11 +2690,27 @@ test "runtime manager: writeInput and resize reach a real runtime through Runtim
     const ops = mgr.runtimeOps();
     // cat은 입력 EOF까지 살아 있어 writeInput/resize를 적용할 실 runtime을 준다.
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 40, .rows = 10 });
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
 
     // writeInput/resize가 실 backend에 에러 없이 위임된다(실제 화면 반영은 e2d stream이 검증). 매니저 resizeOp는 backend
     // 적용만 하고 canonical(registry) 갱신은 server.dispatchResize의 몫이라, 여기선 backend 위임 성공만 본다.
     try ops.write_input(ops.ctx, rid, "hello\n");
     try ops.resize(ops.ctx, rid, 100, 30);
+
+    var saw_echo = false;
+    var attempts: usize = 0;
+    while (attempts < 300 and !saw_echo) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        const text = surface.core.dumpRecentTextUtf8(allocator, 10, 4096) catch null;
+        surface.unlockCore(std.testing.io);
+        if (text) |owned| {
+            saw_echo = std.mem.indexOf(u8, owned, "hello") != null;
+            allocator.free(owned);
+        }
+        if (!saw_echo) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(saw_echo);
 
     // 없는 runtime_id는 RuntimeNotFound(다른 runtime으로 새지 않는다).
     try std.testing.expectError(error.RuntimeNotFound, ops.write_input(ops.ctx, 0xDEADBEEF, "x"));

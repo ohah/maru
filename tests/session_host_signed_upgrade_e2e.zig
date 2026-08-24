@@ -427,9 +427,12 @@ fn peerPid(fd: c.fd_t) !c.pid_t {
 
 fn listChildren(parent: c.pid_t, buffer: *[64]c.pid_t) usize {
     @memset(buffer, 0);
-    const bytes = proc_listchildpids(parent, buffer, @intCast(@sizeOf(@TypeOf(buffer.*))));
-    if (bytes <= 0) return 0;
-    return @min(buffer.len, @as(usize, @intCast(bytes)) / @sizeOf(c.pid_t));
+    // libproc returns a PID count here, not the number of bytes written. Keep
+    // this oracle aligned with the product process-tree walker so one live PTY
+    // child cannot be mistaken for zero children during an upgrade.
+    const count = proc_listchildpids(parent, buffer, @intCast(@sizeOf(@TypeOf(buffer.*))));
+    if (count <= 0) return 0;
+    return @min(buffer.len, @as(usize, @intCast(count)));
 }
 
 fn waitForNewChild(parent: c.pid_t, before: []const c.pid_t) !c.pid_t {

@@ -14798,6 +14798,21 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
     포함한다. timeout artifact에는 phase·last progress·child/host/runtime identity와 bounded queue counters를 남기고
     모든 subprocess/fd/socket/PTY를 `SIGKILL`+exact reap한다. runtime/child 생존을 단언한 뒤 fixture cleanup에서만
     explicit terminate하고 subscription/attachment/reactor ledger 0을 단언한다.
+
+    P5c3d의 구현과 검증은 아래 세 내부 gate를 순서대로 합성한다. 이 gate는 별도 완료 slice가 아니며 세 gate와
+    기존 P5c3c-3b 회귀가 모두 green인 하나의 PR에서만 P5c3d를 완료로 판정한다.
+    1. `compatibility-fixture`: controller transfer 도입 직전의 MRSH v2 source revision과 source SHA-256,
+       기대 compatibility fingerprint를 hermetic build input으로 고정한다. fixture를 실제 실행해 observer attach/detach,
+       takeover wire request 0, 기존 controller input 지속과 resolver fail-closed 행렬을 증명한다. fixture가 current
+       product module을 import해 구동되는 test double이거나 provenance/hash만 검사하고 프로세스를 실행하지 않으면
+       이 gate는 실패다.
+    2. `product-pty`: built `maru`, 실제 host/runtime와 독립 `openpty` attach child를 구동해 controller/observer/
+       takeover/detach/reattach, resize와 runtime·child 생존을 증명한다. exact ANSI byte oracle과 ANSI state model은
+       PTY byte capture와 독립 판정자이며 서로를 대신하지 않는다.
+    3. `hostile-lifecycle`: pre-raw와 live loop의 phase deadline, byte drip/backpressure/partial wire, malformed wire,
+       signal/revoke, allocator fail-index, timeout artifact, fd/status-flag/process cleanup과 ledger final-zero를 결정적
+       clock 및 실제 process fixture로 닫는다. 각 실제 단계는 5초 absolute deadline과 timeout artifact를 가지며,
+       cleanup 전 runtime·PTY child 생존을 먼저 관측한다.
 - **P5d — SSH packaging/smoke**: PATH와 signed artifact에서 `ssh -t host maru attach ...`가 같은 protocol client를
   실행하는 packaging을 고정하고 localhost sshd smoke를 추가한다. runner에 sshd prerequisite가 없으면 이 slice는
   미완료다.

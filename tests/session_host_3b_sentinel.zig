@@ -9,7 +9,7 @@ pub fn main() !void {
         .{
             .path = "src/platform/macos/session_host/external_loop_policy.zig",
             .names = &.{
-                "p5c3c-3b turn priority is signal host chord socket stdout resize stdin",
+                "p5c3c-3b turn priority gives one ready stdin turn before immediate host work",
                 "p5c3c-3b normal cleanup appends detach only without in-flight wire authority",
                 "p5c3c-3b signal revoke and error discard work and bound leave to one hundred milliseconds",
                 "p5c3c-3b cleanup deadline overflow is rejected before a plan is minted",

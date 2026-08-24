@@ -257,34 +257,37 @@ pub fn prepareLiveMetadataAbort(
         !external_owner_cleanup.isPristine(cleanup_output) or
         !preparedOwnedMetadataAbortPristine(out))
         return false;
-    const backing = owner.logical.?.backing orelse return false;
-    if (rangesOverlap(
-        @intFromPtr(out),
-        @sizeOf(PreparedOwnedMetadataAbort),
-        @intFromPtr(cleanup_output),
-        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
-    ) or rangesOverlap(
-        @intFromPtr(out),
-        @sizeOf(PreparedOwnedMetadataAbort),
-        @intFromPtr(backing.ptr),
-        backing.len,
-    ) or rangesOverlap(
-        @intFromPtr(cleanup_output),
-        @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
-        @intFromPtr(backing.ptr),
-        backing.len,
-    ))
-        return false;
+    const dto = &owner.logical.?;
+    const backing = dto.backing;
+    if (backing) |bytes| {
+        if (rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedOwnedMetadataAbort),
+            @intFromPtr(cleanup_output),
+            @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+        ) or rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedOwnedMetadataAbort),
+            @intFromPtr(bytes.ptr),
+            bytes.len,
+        ) or rangesOverlap(
+            @intFromPtr(cleanup_output),
+            @sizeOf(external_owner_cleanup.FrozenOwnerCleanupDescriptor),
+            @intFromPtr(bytes.ptr),
+            bytes.len,
+        )) return false;
+    }
+    const backing_bytes: []const u8 = if (backing) |bytes| bytes else &.{};
     out.* = .{
         .saved_self_addr = @intFromPtr(out),
         .owner_addr = @intFromPtr(owner),
         .cleanup_output_addr = @intFromPtr(cleanup_output),
-        .allocator = owner.logical.?.allocator,
-        .allocator_ptr_addr = @intFromPtr(owner.logical.?.allocator.ptr),
-        .allocator_vtable_addr = @intFromPtr(owner.logical.?.allocator.vtable),
-        .backing_addr = @intFromPtr(backing.ptr),
-        .backing_len = backing.len,
-        .content_digest = external_owner_cleanup.contentDigest(backing),
+        .allocator = dto.allocator,
+        .allocator_ptr_addr = @intFromPtr(dto.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(dto.allocator.vtable),
+        .backing_addr = if (backing) |bytes| @intFromPtr(bytes.ptr) else 0,
+        .backing_len = backing_bytes.len,
+        .content_digest = external_owner_cleanup.contentDigest(backing_bytes),
         .lifecycle = .prepared,
         .digest = undefined,
     };
@@ -308,19 +311,20 @@ pub fn validateLiveMetadataAbort(
             &preparedOwnedMetadataAbortDigest(prepared),
         ) or !external_owner_cleanup.isPristine(cleanup_output))
         return false;
-    const backing = owner.logical.?.backing orelse return false;
+    const backing = owner.logical.?.backing;
+    const backing_bytes: []const u8 = if (backing) |bytes| bytes else &.{};
     return @intFromPtr(prepared.allocator.ptr) ==
         prepared.allocator_ptr_addr and
         @intFromPtr(prepared.allocator.vtable) ==
             prepared.allocator_vtable_addr and
         prepared.allocator_ptr_addr == @intFromPtr(owner.logical.?.allocator.ptr) and
         prepared.allocator_vtable_addr == @intFromPtr(owner.logical.?.allocator.vtable) and
-        prepared.backing_addr == @intFromPtr(backing.ptr) and
-        prepared.backing_len == backing.len and
+        prepared.backing_addr == (if (backing) |bytes| @intFromPtr(bytes.ptr) else 0) and
+        prepared.backing_len == backing_bytes.len and
         std.mem.eql(
             u8,
             &prepared.content_digest,
-            &external_owner_cleanup.contentDigest(backing),
+            &external_owner_cleanup.contentDigest(backing_bytes),
         );
 }
 
@@ -330,7 +334,9 @@ pub fn commitLiveMetadataAbortUnchecked(
     prepared: *PreparedOwnedMetadataAbort,
 ) void {
     const allocator = prepared.allocator;
-    const backing =
+    const backing: ?[]u8 = if (prepared.backing_len == 0)
+        null
+    else
         @as([*]u8, @ptrFromInt(prepared.backing_addr))[0..prepared.backing_len];
     owner.logical = null;
     owner.cleanup = null;
@@ -338,10 +344,10 @@ pub fn commitLiveMetadataAbortUnchecked(
     owner.cleanup_seal = null;
     owner.candidate = null;
     owner.lifecycle = .aborted_tombstone;
-    external_owner_cleanup.freezeOwnedSliceFromSealUnchecked(
+    if (backing) |bytes| external_owner_cleanup.freezeOwnedSliceFromSealUnchecked(
         cleanup_output,
         allocator,
-        backing,
+        bytes,
         prepared.content_digest,
     );
     prepared.lifecycle = .consumed;
@@ -3577,4 +3583,40 @@ fn testMetadataCandidate() !runtime_event_reducer.MetadataCandidate {
         .semantic_digest = .{ .event = metadata.semantic_digest },
         .proof = .{ .event = accepted },
     };
+}
+
+test "p5c3d backing-free metadata abort is a sealed no-op cleanup" {
+    const payload =
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{\"cwd\":\"\",\"window_title\":\"\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":false,\"observer_generation\":1,\"title_generation\":2,\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null,\"processes\":[]}}";
+    const accepted = switch (runtime_event_wire.preflightEvent(payload, .{})) {
+        .accepted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const metadata = switch (accepted.event) {
+        .metadata => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const candidate = runtime_event_reducer.MetadataCandidate{
+        .origin = .{ .event = 0 },
+        .raw_digest = accepted.raw_digest,
+        .semantic_digest = .{ .event = metadata.semantic_digest },
+        .proof = .{ .event = accepted },
+    };
+    var owner: PreparedOwnedMetadata = .{};
+    try prepareExactEventOwnedMetadata(
+        &owner,
+        std.testing.allocator,
+        payload,
+        .{ .runtime_id = 1, .stream_id = 2 },
+        candidate,
+    );
+    try std.testing.expect(owner.logical.?.backing == null);
+    var cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{};
+    var abort: PreparedOwnedMetadataAbort = .{};
+    try std.testing.expect(prepareLiveMetadataAbort(&owner, &cleanup, &abort));
+    try std.testing.expect(validateLiveMetadataAbort(&owner, &cleanup, &abort));
+    commitLiveMetadataAbortUnchecked(&owner, &cleanup, &abort);
+    try std.testing.expect(owner.lifecycle == .aborted_tombstone);
+    try std.testing.expect(external_owner_cleanup.isPristine(&cleanup));
+    try std.testing.expect(abort.lifecycle == .consumed);
 }

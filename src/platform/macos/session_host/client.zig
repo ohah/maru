@@ -17039,9 +17039,12 @@ test "client deadline call closes a blocking socket when response stalls" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
+    // The oracle is the stalled response read, not whether allocation and request publication fit
+    // inside a scheduler-sensitive 10 ms window in the large aggregate suite. Leave enough phase
+    // budget to reach the read on loaded CI, then require the same bounded timeout cause.
     const deadline = try client_deadline.AbsoluteDeadline.after(
         std.testing.io,
-        10 * std.time.ns_per_ms,
+        std.time.ns_per_s,
     );
     try std.testing.expectError(
         error.DeadlineExceeded,

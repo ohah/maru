@@ -159,6 +159,7 @@ const external_rx_intent = @import("external_rx_intent.zig");
 const external_tty = @import("external_tty.zig");
 const external_tty_output = @import("external_tty_output.zig");
 const framing = @import("framing.zig");
+const maru = @import("maru");
 const protocol = @import("protocol.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
@@ -204,6 +205,14 @@ pub const LiveScreenApplyFn = *const fn (
 pub const CleanupWireAuthority = client_external_pump.ExternalPumpStorage.CleanupWireAuthority;
 pub const CleanupWireProjection = client_external_pump.ExternalPumpStorage.CleanupWireProjection;
 pub const CleanupCancelResult = client_external_pump.ExternalPumpStorage.CleanupCancelResult;
+pub const CliOwnerProjectionResult = client_external_pump.CliOwnerProjectionResult;
+
+pub const CommittedScreenPumpResult = union(enum) {
+    idle,
+    applied: maru.session.surface.ScreenSource,
+    retry,
+    terminal: client_pump.TerminalReason,
+};
 
 /// Stable callback object embedded in `ExternalPumpOwner`.
 ///
@@ -476,6 +485,10 @@ pub const ExternalPumpOwner = struct {
             attachment_state,
         );
         prepared.initial_metadata = .unavailable;
+        if (!out.storage.commitBoundInitialAttachment(out.attachment.streamId())) {
+            _ = out.teardown();
+            return error.AdoptionRejected;
+        }
     }
 
     pub fn pump(
@@ -522,6 +535,53 @@ pub const ExternalPumpOwner = struct {
             .apply_live_screen = apply,
         };
         return self.pump(turn, &buffered);
+    }
+
+    /// Raw CLI does not surface title/cwd/process metadata, but it must retire those validated
+    /// owner events so they cannot remain a permanent inherited pump blocker.
+    pub fn consumeCliOwnerProjection(self: *ExternalPumpOwner) CliOwnerProjectionResult {
+        if (!self.addressValid() or self.lifecycle != .live) return .terminal;
+        switch (self.storage.cliOwnerProjectionReadiness()) {
+            .none => return .none,
+            .retry => return .retry,
+            .terminal => return .terminal,
+            .pending => {},
+        }
+        if (!self.storage.settleRxTurnForSiblingOperation(&self.rx_scratch)) return .terminal;
+        return self.storage.consumeCliOwnerProjection(&self.cleanup_scratch);
+    }
+
+    /// Drains exactly one charged screen batch through the existing `RemoteAttachment` lease and
+    /// returns a synchronous source borrow for the outer ANSI projector. The caller must consume
+    /// the source before invoking any other owner operation.
+    pub fn pumpCommittedScreen(
+        self: *ExternalPumpOwner,
+        io: std.Io,
+    ) CommittedScreenPumpResult {
+        if (!self.addressValid() or self.lifecycle != .live)
+            return .{ .terminal = .invariant_failure };
+        const outcome = self.attachment.pumpScreen(io) catch |err| {
+            const reason: client_pump.TerminalReason = switch (err) {
+                error.OutOfMemory => .resource_exhausted,
+                error.ConnectionClosed => .eof,
+                else => .protocol_error,
+            };
+            self.storage.failAttachment(switch (reason) {
+                .resource_exhausted => .local_resource_exhausted,
+                .eof => .connection_eof,
+                else => .frame_malformed,
+            });
+            return .{ .terminal = reason };
+        };
+        return switch (outcome) {
+            .idle => .idle,
+            .recovery_commit_pending => .retry,
+            .terminal => .{ .terminal = .protocol_error },
+            .applied => blk: {
+                const screen = if (self.attachment.screen) |*value| value else return .{ .terminal = .invariant_failure };
+                break :blk .{ .applied = screen.screenSource() };
+            },
+        };
     }
 
     pub fn admitControl(
@@ -1886,7 +1946,6 @@ test "p5c3c-2b3 actual external attach prepare drives one owner pump control and
         .apply_live_screen = Apply.call,
     });
     try std.testing.expect(turn.terminal == null);
-    try std.testing.expect(client_external_pump.testing.clearInitialFence(&owner.storage));
     const admitted = owner.admitControl(.{
         .request = .{ .resize = .{
             .stream_id = owner.attachment.state.stream_id,
@@ -1967,7 +2026,6 @@ test "p5c3c-2b3 owner pump fail-closes revoke and control timeout" {
         var owner: ExternalPumpOwner = .{};
         try owner.initInPlace(&fixture.prepared);
         defer _ = owner.teardown();
-        try std.testing.expect(client_external_pump.testing.clearInitialFence(&owner.storage));
         const revoke = try framing.encodeFrame(
             std.testing.allocator,
             .{ .kind = .event, .stream_id = 7 },
@@ -1990,7 +2048,6 @@ test "p5c3c-2b3 owner pump fail-closes revoke and control timeout" {
         var owner: ExternalPumpOwner = .{};
         try owner.initInPlace(&fixture.prepared);
         defer _ = owner.teardown();
-        try std.testing.expect(client_external_pump.testing.clearInitialFence(&owner.storage));
         const admitted = owner.admitControl(.{
             .request = .{ .resize = .{
                 .stream_id = 7,

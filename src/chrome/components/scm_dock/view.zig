@@ -853,9 +853,20 @@ const Writer = struct {
         //
         // 이름이 굵지 않은 것도 그 위계의 일부다 — 섹션 제목이 `control` + bold 로 남으므로, 행이 regular
         // 여야 "제목 아래 항목들"로 읽힌다(예전에는 둘 다 굵어 층이 없었다).
-        try self.lineWithin(rect, inset, text_end, file.name, if (file.selected) .focus_accent else .list_secondary_fg, .list_row, false);
+        // **꼬리가 붙는 행에서는 이름을 자기 예약만큼으로 자른다.** 예약과 이름의 끝이 같은 수에서
+        // 나와야 face 와 무관하게 겹치지 않는다 — `measureRun` 은 "열 수 × primary face advance" 라서
+        // **폴백 face 가 더 넓으면 모자란다**. 실측: 이름이 `🔥🔥🔥🔥.zig` 면 이모지 advance 가 2 칸
+        // 예약(1.2 em)을 넘어 `.zigsrc/session/` 처럼 붙었다(적대적 검증 2026-08-25). 자르면 그 상태가
+        // **겹침이 아니라 말줄임**으로 나온다 — 읽을 수 있고, 무엇이 잘렸는지도 보인다.
+        //
+        // ASCII 처럼 primary face 만 쓰는 이름은 예약이 실제 폭 이상이라(올림) 아무것도 잘리지 않는다.
+        const name_px = if (file.dir.len > 0) self.measureRun(file.name, .list_row) else 0;
+        const name_end = if (file.dir.len > 0)
+            @min(text_end, rect.rect.x + inset + name_px)
+        else
+            text_end;
+        try self.lineWithin(rect, inset, name_end, file.name, if (file.selected) .focus_accent else .list_secondary_fg, .list_row, false);
         if (file.dir.len > 0) {
-            const name_px = self.measureRun(file.name, .list_row); // 위 `lineWithin` 이 쓰는 role
             // 경로 꼬리는 이름보다 **한 단 더** 물러난다. 예전 `muted_fg`(밝기 207)는 이름이 쓰던
             // `surface_fg` 보다는 흐렸지만, 이름이 `list_secondary_fg`(169)로 내려오면 **꼬리가 더 밝아진다**
             // — 파일 탐색기에서 같은 역전을 실제로 겪었다(무시된 행이 기본 행보다 밝았다).
@@ -2524,21 +2535,47 @@ test "그룹 제목도 호버로 예산이 튀지 않는다" {
     try testing.expectEqual(x.max_width_px, y.max_width_px);
 }
 
+// **이름의 끝과 경로 꼬리의 시작이 같은 수에서 나오는가.**
+//
+// `measureRun` 은 "열 수 × primary face advance" 다. 그런데 measured chrome 경로는 x 를 셀에 스냅하지
+// 않고 글자마다 **실제 advance** 로 나아가므로(`system_text` 헤더), 폴백 face 가 더 넓으면 그 예약이
+// 모자란다 — 실측으로 이름이 `🔥🔥🔥🔥.zig` 일 때 이모지 advance 가 2 칸 예약(1.2 em)을 넘어
+// `.zigsrc/session/` 처럼 붙었다. 예약만큼으로 이름을 자르면 그 상태가 **겹침이 아니라 말줄임**이 된다.
+//
+// 값으로 재는 이유: 픽셀 골든은 이 조합(이모지 이름)을 담고 있지 않고, 담더라도 폰트 설치에 흔들린다.
+test "경로 꼬리는 이름의 예산이 끝나는 자리에서 시작한다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{ .name = "widename.zig", .dir = "src/session/", .status = .modified, .letter = 'M', .action = .stage } },
+    };
+    const ops = try renderFixture(&storage, .{}, &items);
+    const name = findExactText(ops, "widename.zig") orelse return error.MissingName;
+    const dir = findExactText(ops, "src/session/") orelse return error.MissingDir;
+    const name_budget = name.max_width_px orelse return error.MissingNameBudget;
+    // 꼬리는 이름 예산이 끝난 **뒤**에서 시작한다 — 그래야 이름이 예산을 다 써도 겹칠 자리가 없다.
+    try testing.expect(dir.origin.x >= name.origin.x + @as(i32, @intCast(name_budget)));
+}
+
 test "동작이 없는 행은 그 자리를 비워 두지 않는다(충돌 행은 이름이 더 길다)" {
     // 충돌 행은 동작이 없다(`git add`가 "해결됨"으로 표시하므로). 그런데도 버튼 자리를 비우면
     // **누를 수 없는 것 때문에 이름이 짧아진다** — 화면이 거짓말을 하는 자리다.
     var a: TestStorage = .{};
     var b: TestStorage = .{};
+    // **이름이 길어야 이 계약이 판정된다.** 꼬리가 붙는 행에서 이름 예산은 `min(남은 폭, 이름 예약)`
+    // 이라(겹침 방지 — 위 `name_end` 주석), 짧은 이름은 어느 쪽이든 자기 폭이 예산이 되어 두 경우가
+    // 같아진다. 이 판정자가 보려는 것은 "**누를 수 없는 것 때문에 이름이 짧아지는가**" 이므로, 남은
+    // 폭이 실제로 제약이 되는 길이를 쓴다.
+    const long_name = "a_very_long_source_file_name_that_needs_all_the_room.zig";
     const with_action = [_]types.Item{
-        .{ .file = .{ .name = "a.zig", .dir = "src/", .status = .modified, .letter = 'M', .action = .stage } },
+        .{ .file = .{ .name = long_name, .dir = "src/", .status = .modified, .letter = 'M', .action = .stage } },
     };
     const no_action = [_]types.Item{
-        .{ .file = .{ .name = "a.zig", .dir = "src/", .status = .conflicted, .letter = 'U', .action = .none } },
+        .{ .file = .{ .name = long_name, .dir = "src/", .status = .conflicted, .letter = 'U', .action = .none } },
     };
     const acted = try renderFixture(&a, .{}, &with_action);
     const plain = try renderFixture(&b, .{}, &no_action);
-    const wa = (findExactText(acted, "a.zig") orelse return error.MissingName).max_width_px orelse 0;
-    const wb = (findExactText(plain, "a.zig") orelse return error.MissingName).max_width_px orelse 0;
+    const wa = (findExactText(acted, long_name) orelse return error.MissingName).max_width_px orelse 0;
+    const wb = (findExactText(plain, long_name) orelse return error.MissingName).max_width_px orelse 0;
     try testing.expect(wb > wa);
 }
 

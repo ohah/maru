@@ -4645,6 +4645,12 @@ pub const AppSession = struct {
     /// 가리킬 수 있어, 포인터 입구가 이 값을 tree 스냅샷에 실어 `chrome.ui.interaction` 의 세대
     /// 게이트가 실제로 물게 한다(그 게이트는 양쪽이 0 이 아닐 때만 동작한다).
     file_tree_published_generation: u64 = 0,
+    /// 발행이 본 **도크 기하**(트리 content 사각형). 세대·스크롤·행 수 어디에도 안 걸리는 축이다 —
+    /// 창 크기나 사이드바·도크 폭이 바뀌면 rect 는 통째로 움직이는데 목록은 그대로다. 그 사이에 온
+    /// 포인터는 **바뀌기 전 기하**로 행을 고른다. AI 세션 도크는 같은 이유로 resize 에서 capture 를
+    /// 놓는다(`app_session.zig` 의 그 자리 주석: "published rect tree still describes pre-resize
+    /// geometry until the next paint"). 트리는 놓는 대신 **다시 발행**한다 — 클릭을 잃지 않는다.
+    file_tree_published_content: struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 } = .{},
     scm_dock_snapshot_generation: u64 = 1,
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
@@ -39109,6 +39115,64 @@ test "file tree: 발행이 낡으면 다시 내고, 다시 낼 수 없으면 짚
     try std.testing.expectEqual(@as(?chrome.components.file_tree.ids.Intent, null), file_tree_dock_ops.fileTreeDockPointer(session, .down, x, y));
     try std.testing.expect(session.file_tree_interaction.capture == null);
     try std.testing.expectEqual(@as(?chrome.components.file_tree.ids.Intent, null), file_tree_dock_ops.fileTreeDockPointer(session, .up, x, y));
+}
+
+// **크기가 바뀐 뒤 그리기 전에 온 포인터도 보이는 행을 가리키는가.**
+//
+// 발행은 그리기 경로가 하므로 resize 와 다음 paint 사이에는 **바뀌기 전 기하**가 남는다. 스크롤·행
+// 수·투영 세대 어느 것도 이 축을 보지 않는다 — 목록은 그대로이고 사각형만 움직이기 때문이다. AI 세션
+// 도크는 같은 이유로 그 자리에서 capture 를 놓는다("published rect tree still describes pre-resize
+// geometry until the next paint"). 트리는 놓는 대신 다시 발행해서 클릭을 잃지 않는다.
+test "file tree: 창 크기가 바뀌어도 포인터는 지금 기하로 행을 고른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..10) |index| {
+        const path = try std.fmt.allocPrint(allocator, "/repo/r{d}.zig", .{index});
+        errdefer allocator.free(path);
+        try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = path,
+            .label = path[6..],
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+    defer for (session.file_tree_rows.items) |row| allocator.free(row.file.path);
+    file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+
+    const before = dock_ops.dockGeometry(session).tree_content;
+    // **다시 그리지 않고** 창만 줄인다 — 도크는 오른쪽에 붙어 있으므로 트리 사각형이 통째로 움직인다.
+    _ = try session.resize(1100, 900, 1000);
+    const after = dock_ops.dockGeometry(session).tree_content;
+    // 전제: 기하가 실제로 움직였다(안 움직이면 이 테스트가 아무것도 판정하지 않는다).
+    try std.testing.expect(after.x != before.x or after.w != before.w);
+
+    // 지금 기하 기준으로 두 번째 행을 짚는다.
+    const x: f64 = @floatFromInt(after.x + after.w / 2);
+    const y: f64 = @floatFromInt(after.y + file_tree_dock_ops.fileTreeRowHeightPx(session) + 4);
+    const arith = file_panel_ops.fileTreeRowAt(session, x, y);
+    try std.testing.expect(arith != null);
+    try std.testing.expectEqual(arith, file_tree_dock_ops.fileTreeRowAtPublished(session, x, y));
+
+    // 누르는 경로도 같은 답이어야 한다 — 질의만 맞고 intent 가 옛 rect 를 보면 다른 파일이 열린다.
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, y);
+    const intent = file_tree_dock_ops.fileTreeDockPointer(session, .up, x, y) orelse
+        return error.FileTreeResizedPointerProducedNoIntent;
+    switch (intent) {
+        .activate_row => |index| try std.testing.expectEqual(arith.?, index),
+    }
 }
 
 test "file tree: 창이 비활성되면 누르고 있던 행을 놓는다" {

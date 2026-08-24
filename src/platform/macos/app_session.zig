@@ -4566,6 +4566,12 @@ pub const AppSession = struct {
     /// (적대적 검증에서 휠 10행 뒤 발행이 2행을 가리키는 것을 재현했다).
     file_tree_published_scroll_px: u32 = 0,
     file_tree_published_rows: usize = 0,
+    /// 발행이 **어느 투영 세대를 보고** 만들어졌는지. 보통은 위 두 값과 함께 다시 발행해 맞추지만,
+    /// 발행은 실패할 수 있다(arena 할당, 기하가 아직 0인 프레임 — `prepare` 가 null 을 준다). 그때는
+    /// 옛 entries 가 그대로 남으므로 이 값이 **지금 세대와 갈린다**. 그 상태의 좌표 판정은 사라진 행을
+    /// 가리킬 수 있어, 포인터 입구가 이 값을 tree 스냅샷에 실어 `chrome.ui.interaction` 의 세대
+    /// 게이트가 실제로 물게 한다(그 게이트는 양쪽이 0 이 아닐 때만 동작한다).
+    file_tree_published_generation: u64 = 0,
     scm_dock_snapshot_generation: u64 = 1,
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
@@ -10594,7 +10600,14 @@ pub const AppSession = struct {
 
     pub fn focusChanged(self: *AppSession, gained: bool) void {
         self.window_focused = gained; // OSC 전면 표시와 커서 렌더에서 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
-        if (!gained) self.cancelPointerGesture();
+        if (!gained) {
+            self.cancelPointerGesture();
+            // 창을 떠나면 **누르고 있던 행도 놓는다**(CIM §9 조건 ①). `cancelPointerGesture` 는 옛
+            // 포인터 소유권만 되돌리고 typed component 의 capture 는 모른다 — 그대로 두면 다른 앱에서
+            // 손을 뗀 뒤 돌아와 올린 mouse-up 이 그 사이 바뀐 목록에서 행을 연다. AI 세션 도크가
+            // resize 에서 같은 이유로 capture 를 놓는다(app_session.zig 의 그 자리 주석).
+            file_tree_dock_ops.releaseFileTreePointer(self);
+        }
         // 포커스 변화는 PTY와 무관한 시각 변화다(cursor.unfocused가 window_focused로 커서 모드를 정한다) — frame 빌드가
         // metal_dirty 게이트(idle tick은 빌드 생략) 뒤에 있어 여기서 dirty를 안 세우면 출력 없는 셸에선 Cmd+Tab 후에도
         // 채운 커서가 그대로 남는다(focus reporting 꺼진 평범한 셸은 PTY 응답도 없어 dirty가 안 선다). 포커스 전환은
@@ -37865,6 +37878,112 @@ test "file tree: 스크롤 직후의 포인터도 보이는 행을 가리킨다"
     switch (intent) {
         .activate_row => |index| try std.testing.expectEqual(after_arith.?, index),
     }
+}
+
+// CIM §9 조건 ①·② 의 증거 — 파일 트리 소비자.
+//
+// ①은 "window deactivate 에서 capture 가 놓인다", ②는 "draw·hit-test 가 **같은 발행 세대**를 쓴다"다.
+// 세대는 이미 intent 표가 검증하지만(`table.resolve`) 그것은 **행을 여는 순간**만 본다. 낡은 발행 위에서
+// capture·호버가 서고 우클릭이 행을 집는 것은 그 게이트 밖이었다.
+test "file tree: 발행이 낡으면 다시 내고, 다시 낼 수 없으면 짚지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..12) |index| {
+        const path = try std.fmt.allocPrint(allocator, "/repo/g{d}.zig", .{index});
+        errdefer allocator.free(path);
+        try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = path,
+            .label = path[6..],
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+    defer for (session.file_tree_rows.items) |row| allocator.free(row.file.path);
+    file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+    // 발행은 자기가 본 세대를 남긴다 — 이게 0 이면 아래 게이트 전체가 조용히 꺼진다.
+    try std.testing.expectEqual(session.file_tree_projection_generation, session.file_tree_published_generation);
+    try std.testing.expect(session.file_tree_published_generation != 0);
+
+    const tree = dock_ops.dockGeometry(session).tree_content;
+    const x: f64 = @floatFromInt(tree.x + tree.w / 2);
+    const y: f64 = @floatFromInt(tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) * 3 + 4);
+    const target = file_tree_dock_ops.fileTreeRowAtPublished(session, x, y) orelse
+        return error.FileTreeGenerationFixtureMissedRow;
+
+    // 행 **수는 그대로** 두고 세대만 올린다(watcher 가 이름을 갈거나 한 폴더를 접고 다른 하나를 편 모양).
+    // 스크롤·행 수 비교만 하던 신선도 판정은 이 변화를 못 보고 낡은 발행을 그대로 썼다.
+    file_panel_ops.advanceFileTreeProjectionGeneration(session);
+    try std.testing.expect(session.file_tree_published_generation != session.file_tree_projection_generation);
+    // 그릴 수 있는 상태라면 **다시 내서** 맞춘다 — 클릭을 잃지 않는다.
+    try std.testing.expectEqual(target, file_tree_dock_ops.fileTreeRowAtPublished(session, x, y));
+    try std.testing.expectEqual(session.file_tree_projection_generation, session.file_tree_published_generation);
+
+    // 이제 **다시 낼 수 없는** 프레임: 기하가 아직 0 이면 `prepare` 가 null 을 주고 옛 entries 가 남는다.
+    // 그 발행은 사라진 행을 가리킬 수 있으므로 좌표 판정이 아무것도 주지 않아야 한다.
+    file_panel_ops.advanceFileTreeProjectionGeneration(session);
+    const saved_cell_w = session.cell_width_px;
+    session.cell_width_px = 0;
+    defer session.cell_width_px = saved_cell_w;
+    try std.testing.expectEqual(@as(?usize, null), file_tree_dock_ops.fileTreeRowAtPublished(session, x, y));
+    // 누르는 경로도 같은 답이다 — 그리고 낡은 스냅샷에는 **capture 를 세우지 않는다**.
+    try std.testing.expectEqual(@as(?chrome.components.file_tree.ids.Intent, null), file_tree_dock_ops.fileTreeDockPointer(session, .down, x, y));
+    try std.testing.expect(session.file_tree_interaction.capture == null);
+    try std.testing.expectEqual(@as(?chrome.components.file_tree.ids.Intent, null), file_tree_dock_ops.fileTreeDockPointer(session, .up, x, y));
+}
+
+test "file tree: 창이 비활성되면 누르고 있던 행을 놓는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.append(allocator, .{ .file = .{
+        .path = "/repo/src/main.zig",
+        .label = "main.zig",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } });
+    file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+    file_tree_dock_ops.publishFileTreeHitTree(session);
+
+    const tree = dock_ops.dockGeometry(session).tree_content;
+    const x: f64 = @floatFromInt(tree.x + tree.w / 2);
+    const y: f64 = @floatFromInt(tree.y + 4);
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .move, x, y);
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, y);
+    // 전제: 실제로 잡았다(안 잡혔으면 아래 단언이 아무것도 판정하지 않는다).
+    try std.testing.expect(session.file_tree_interaction.capture != null);
+    try std.testing.expect(session.file_tree_interaction.hovered != null);
+
+    session.focusChanged(false);
+    try std.testing.expect(session.file_tree_interaction.capture == null);
+    try std.testing.expect(session.file_tree_interaction.hovered == null);
+
+    // 돌아와 손을 떼도 **행이 열리지 않는다** — 잡은 것을 놓았으므로 up 은 결정할 것이 없다.
+    session.focusChanged(true);
+    try std.testing.expectEqual(@as(?chrome.components.file_tree.ids.Intent, null), file_tree_dock_ops.fileTreeDockPointer(session, .up, x, y));
 }
 
 test "file tree production hot paths emit bounded counter artifact" {

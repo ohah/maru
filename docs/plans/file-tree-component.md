@@ -270,8 +270,10 @@ flowchart TD
 - 한 단계가 화면에 나온 것만으로 이관 완료로 적지 않는다. [chrome-interaction-migration.md §9](../chrome-interaction-migration.md)의
   공통 조건(capture cancel 증거·같은 published generation·키보드 동등 경로·stale target 거부 E2E)을
   모두 만족해야 한다.
-- 셀 경로(`buildFileTreeDrawList`)가 남아 있는 동안에는 **두 렌더 경로가 공존**한다. 그 상태를
-  "이관됨"으로 적지 않는다.
+- ~~셀 경로(`buildFileTreeDrawList`)가 남아 있는 동안에는 **두 렌더 경로가 공존**한다.~~ 이 줄은
+  사실과 달라졌다(FT3): 두 경로는 **플랫폼별로 하나씩**이다 — macOS 제품은 typed component 가,
+  Windows 제품은 `platform/cell_text.zig` 의 셀 투영이 그린다. 한 플랫폼에서 둘이 공존하지 않는지는
+  `tests/boundary/imports.zig` 가 소비자를 세어 지킨다.
 - 드래그앤드롭(트리 안에서 파일 이동)은 이 계획 범위 밖이다. 지금도 없고, 만들려면 CIM의
   `ReorderableList` capability 위에서 별도 슬라이스로 연다.
 
@@ -282,3 +284,4 @@ flowchart TD
 | FT1 — 컴포넌트 골격과 행 렌더 | **완료**(같은 PR) |
 | FT2 — 상호작용 이관 | **완료** |
 | FT3 — 셀 투영을 공유 모듈로 이동 + 소비자 잠금 | **완료** — 아래 §4 FT3 참조 |
+| FT-CIM9 — §9 공통 조건 항목별 확정 | **완료** — 창 비활성 capture 해제와 발행 세대 게이트를 채웠다. 남은 하나(typed semantic descriptor)는 `chrome/ui` 에 계약이 없어서이며 별도 슬라이스다. 항목별 상태는 [CIM §9.1](../chrome-interaction-migration.md#91-파일-탐색기-행의-9-조건별-상태)이 소유 |

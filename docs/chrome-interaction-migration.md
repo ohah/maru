@@ -64,7 +64,7 @@ rewrite의 근거로 삼지 않는다.
 | 주소창 selection drag (`address_selection`) | `AppSession` caret/selection | 이관하지 않는다 — [텍스트 필드 에디터](text-field-editor.md) 범위 | caret/selection 편집 모델, IME, first responder |
 | `components/sidebar.zig` | workspace/group/agent row geometry·hit-test·밴드 view·헤더 hit-test | `ReorderableList`를 쓰는 Sidebar composite | group collapse, reorder preview, pin/group invariants, 헤더 아이콘(◧/⚙/+/🔔) 영역, 검색 blur가 키 포커스를 터미널로 되돌리는 규율 |
 | ~~`components/file_tree_scrollbar.zig`~~ (SV2b에서 삭제) | scrollbar geometry/track/thumb math | [`ScrollArea`](scroll-area.md) — 이관 완료 | thumb drag, track click, projection/root generation mismatch cancel |
-| 파일 탐색기 **행** — **FT1·FT2 이관 완료**(렌더·히트테스트·호버) | ~~터미널 셀 격자 draw list와 `AppSession`의 행 인덱스 히트테스트~~ → `chrome/ui` typed tree + `interaction.dispatch` | 남은 것은 FT3(셀 경로 제거)뿐이며 단계와 시각 계약은 [파일 탐색기 트리 컴포넌트 이관 계획](plans/file-tree-component.md)이 소유 | ignored dimming·아이콘 종류색과 선택 대비색·dirty/conflict 슬롯·최근 파일 헤더·빈 placeholder·부분 행 clip·Page 키의 "온전히 보이는 행"·자동 reveal 뒤 스크롤 앵커. **셀 경로는 Windows도 쓴다**(`maru win32-file-tree-draw-smoke`) — 대체를 정하기 전에 지우지 않는다 |
+| 파일 탐색기 **행** — **FT1·FT2·FT3 이관 완료**(렌더·히트테스트·호버·경로 격리) | ~~터미널 셀 격자 draw list와 `AppSession`의 행 인덱스 히트테스트~~ → `chrome/ui` typed tree + `interaction.dispatch` | 단계와 시각 계약은 [파일 탐색기 트리 컴포넌트 이관 계획](plans/file-tree-component.md)이 소유. §9 공통 조건의 항목별 상태는 아래 [9.1](#91-파일-탐색기-행의-9-조건별-상태)이 소유한다 | ignored dimming·아이콘 종류색과 선택 대비색·dirty/conflict 슬롯·최근 파일 헤더·빈 placeholder·부분 행 clip·Page 키의 "온전히 보이는 행"·자동 reveal 뒤 스크롤 앵커. **셀 경로는 삭제 대상이 아니다** — `platform/cell_text.zig`로 격리했고 Windows 제품 렌더가 그것을 쓴다(`tests/boundary/imports.zig`가 소비자를 센다) |
 | terminal scrollbar | `AppSession` viewport mutation | 별도 판단(터미널 viewport는 [`ScrollArea`](scroll-area.md) 범위 밖) | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
 | Session Dock | typed tree + action table + pixel scroll + 검색 필드(query·IME preedit 입력 owner) | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker, `/`·필드 클릭 활성화와 Escape 해제, marked text가 필드·native 후보창에만 보이고 commit된 query만 목록을 필터하는 규율, 256 byte 절단, 검색 키·IME가 재스캔·stat·정렬을 일으키지 않고 terminal PTY로 새지 않음 |
 | `components/context_menu.zig` | anchor clamp·행 geometry·hit-test(`menuRect`/`itemAt`)를 컴포넌트가 직접 계산. 색은 tokens, 그리기는 `draw` 계약을 쓰지만 **`ui/` 계층은 안 쓴다**(tree·interaction·paint 미사용) | `Menu` composite(위 dropdown 행과 같은 목적지) | 항목 라벨을 platform이 주입하고 실행도 platform이 하는 분리, backing 안으로의 anchor clamp(특히 **하단 클램프** — 상태바 위 앵커가 여기 의존한다), 우클릭 소비자 전부(워크스페이스 카드·파일 트리·터미널 본문·view options)의 인덱스 기반 분기 |
@@ -452,6 +452,25 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
   보류 사유와 제품 UI의 제한 표시
 - 실제 host effect가 stale target을 거부하는 E2E
 - 기존 제품 동작을 바꾸는 경우 사용자 승인과 문서/fixture 갱신
+
+### 9.1 파일 탐색기 행의 §9 조건별 상태
+
+FT1·FT2·FT3이 끝난 뒤 위 다섯 조건을 **코드에서 하나씩 확인한 결과**다. 문서만 보고 "남았다"고
+적으면 그것이 또 drift이므로, 각 줄은 판정자 이름을 함께 든다. 판정자가 없는 줄은 "없다"고 적는다.
+
+| 조건 | 상태 | 근거 |
+| --- | --- | --- |
+| capture cancel — snapshot swap | 충족 | `publishFileTreeFrame`의 `replaced` 판정이 rect·intent가 달라진 발행마다 capture를 놓는다. `test "file tree pointer: published rect 와 창 산술이 같고, …"` |
+| capture cancel — window deactivate | 충족 | `focusChanged(false)` → `releaseFileTreePointer`. 옛 `cancelPointerGesture`는 typed capture를 모른다. `test "file tree: 창이 비활성되면 누르고 있던 행을 놓는다"` |
+| capture cancel — surface removal | 해당 없음 | 트리 행은 external surface를 갖지 않는다(행은 `chrome` 페인트만 낸다). 도크가 닫히거나 view가 explorer를 떠나면 포인터 입구가 첫 줄에서 돌아가므로 그 발행으로는 아무 것도 결정되지 않는다 |
+| draw/hit-test가 같은 published generation | 충족 | 그리기와 발행이 **한 번의 `prepare`**를 공유한다. 발행이 본 세대를 `file_tree_published_generation`에 남기고, 포인터 입구가 그것을 tree 스냅샷과 event 양쪽에 실어 `interaction.dispatch`의 세대 게이트를 무장한다. 세대가 갈리면 다시 발행하고, **다시 낼 수 없는 프레임**(기하 0·할당 실패)에서는 capture도 세우지 않는다. `test "file tree: 발행이 낡으면 다시 내고, 다시 낼 수 없으면 짚지 않는다"` |
+| keyboard-only 동등 action | 충족 | 포인터와 무관한 경로다 — `resolveFileTree` → `handleFileTreeDefaultKey`(app binding 우선, 그다음 표준 tree key) |
+| typed semantic descriptor(role/name/state/value) | **없다** | 저장소 어느 chrome component에도 semantic descriptor 계약이 없다(`chrome/ui/`에 role/name/state 타입이 존재하지 않는다). 파일 트리만의 결손이 아니라 **아직 시작하지 않은 계약**이므로, 파일 트리 PR에 끼워 넣지 않고 `ui/`에 계약을 여는 별도 슬라이스로 다룬다. 그때까지 제품에는 접근성 제한 표시가 없다 — 이 사실을 release-ready 근거로 바꾸지 않는다 |
+| host effect가 stale target을 거부 | 충족 | 방어가 셋이다: intent 표의 세대 검증(`table.resolve`), 질의·클릭 두 소비자의 범위 검사, `applyFileTreeIntent`의 **재조회**. `test "file tree: 발행된 인덱스가 낡아도 범위를 넘지 않는다"`(실측 `index 20, len 3` 크래시를 고정한 자리) |
+| 제품 동작 변경의 승인·문서 갱신 | 충족 | 행 밀도·타이포 변경은 사용자 승인 뒤 진행했고 계획 문서와 [파일 탐색기](file-explorer.md) §3이 계약을 소유한다 |
+
+즉 파일 탐색기 행은 **typed semantic descriptor 하나만 미충족**이고, 그것은 consumer의 문제가 아니라
+`chrome/ui`에 계약이 없는 문제다.
 
 VoiceOver/IME/first-responder 전이는 headless pointer fixture만으로 증명할 수 없다. 이를 건드리는
 consumer PR은 native host E2E 또는 명시된 수동 검증 절차와 결과를 남긴다. 테스트가 아직 없는 경우

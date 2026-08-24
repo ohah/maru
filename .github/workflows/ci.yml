@@ -332,6 +332,8 @@ jobs:
             zig-v2-${{ runner.os }}-sessionhost-debug-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=Debug
+      - name: Verify bundled CLI over harness-owned localhost OpenSSH
+        run: zig build test-session-host-p5d -Doptimize=ReleaseFast -j1
       - name: 저장 전에 캐시를 예산 안으로 줄인다
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: sh tools/ci/prune-zig-cache.sh 3072

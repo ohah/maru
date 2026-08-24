@@ -1949,7 +1949,10 @@ pub fn parserAuthoritySealStructurallyValid(
         seal.version != parser_seal_version or seal.seal_addr == 0 or
         seal.parser_addr == 0 or seal.identity.attach_instance_id == 0 or
         seal.identity.destination_slot_addr == 0 or
-        seal.destination_slot_len == 0 or seal.allocator_ptr_addr == 0 or
+        seal.destination_slot_len == 0 or
+        // `Allocator.ptr` is opaque and may legitimately be address zero when the vtable needs
+        // no context (the process GPA does this in optimized builds). Its exact value is still
+        // sealed and compared with the live parser; only the callable vtable must be non-null.
         seal.allocator_vtable_addr == 0 or seal.expected_major == 0 or
         seal.items_len > seal.capacity or seal.head > seal.items_len or
         seal.buffer_start_absolute > seal.rx_absolute_next or
@@ -4234,6 +4237,48 @@ test "max readable rejects a parser that already fills its sealed resident cap" 
     try std.testing.expect(
         maxReadable(&state, &parser, resident_cap, 0) == .counter_exhausted,
     );
+}
+
+test "parser authority seal permits a context-free allocator" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var normalized: framing.PreparedNormalizeExact = .{};
+    defer normalized.deinit();
+    try parser.prepareNormalizeExact(&normalized, 8);
+    var destination_slot: usize = 0;
+    var prepared: PreparedRxBind = .{};
+    defer prepared.deinit();
+    try prepareRxBind(
+        &state,
+        13,
+        &normalized,
+        8,
+        @intFromPtr(&destination_slot),
+        @sizeOf(usize),
+        &prepared,
+    );
+    try std.testing.expectEqual(
+        framing.NormalizeCommitOutcome.committed,
+        parser.commitPreparedNormalizeExact(&normalized),
+    );
+    commitPreparedRxBind(
+        &state,
+        &parser,
+        &prepared,
+        @intFromPtr(&destination_slot),
+        @sizeOf(usize),
+    );
+
+    var context_free = state.rx_provenance.parser_seal;
+    context_free.allocator_ptr_addr = 0;
+    context_free.digest = parserSealDigest(&context_free);
+    try std.testing.expect(parserAuthoritySealStructurallyValid(&context_free));
+
+    context_free.allocator_vtable_addr = 0;
+    context_free.digest = parserSealDigest(&context_free);
+    try std.testing.expect(!parserAuthoritySealStructurallyValid(&context_free));
 }
 
 fn bindParserForTest(

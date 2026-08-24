@@ -14,6 +14,29 @@ pub const View = enum {
     source_control,
     agent_sessions,
 
+    /// 뷰 스위처 바의 **슬롯 순서**. 화면 왼쪽부터 이 차례다.
+    ///
+    /// **여기 두는 이유**: 슬롯 기하는 chrome(`dock_view_bar`)이 소유하지만 그 슬롯이 **무슨 뷰인가**
+    /// 는 이 enum 의 성질이고, chrome 은 session 을 import 할 수 없다. 호출자마다 `0 => .explorer`
+    /// 를 적으면 뷰를 하나 더할 때 한 곳만 고쳐져 **바의 두 번째 칸이 다른 화면을 연다.**
+    pub fn forSlot(index: usize) ?View {
+        return switch (index) {
+            0 => .explorer,
+            1 => .source_control,
+            2 => .agent_sessions,
+            else => null,
+        };
+    }
+
+    /// `forSlot` 의 역. 지금 뷰의 칸을 강조할 때 쓴다.
+    pub fn slot(self: View) usize {
+        return switch (self) {
+            .explorer => 0,
+            .source_control => 1,
+            .agent_sessions => 2,
+        };
+    }
+
     /// workspace 텍스트 → 뷰. 모르는 이름은 null이고 호출자가 기본값으로 clamp한다.
     pub fn parse(name: []const u8) ?View {
         inline for (@typeInfo(View).@"enum".fields) |field| {
@@ -437,4 +460,21 @@ test "dock panel: restore rejects a persisted HTML editor mode" {
     var entry_ids: EntryIdAllocator = .{};
     const entries = [_]PersistedEntry{.{ .path = "/tmp/a.html", .kind = .html, .mode = .source_edit, .active = true }};
     try std.testing.expectError(error.InvalidPersistedState, DockPanel.restore(std.testing.allocator, &entry_ids, .{ .entries = &entries }));
+}
+
+test "슬롯 순서: forSlot 과 slot 이 서로의 역이다" {
+    // **모든 뷰가 칸을 갖고, 칸마다 뷰가 하나다.** 뷰를 더하면 여기서 걸린다 — 그때 바의 칸 수
+    // (`chrome.components.dock_view_bar.slot_count`)도 함께 봐야 한다.
+    for (std.enums.values(View)) |v| {
+        try std.testing.expectEqual(v, View.forSlot(v.slot()).?);
+    }
+    var seen = [_]bool{false} ** @typeInfo(View).@"enum".fields.len;
+    var i: usize = 0;
+    while (i < seen.len) : (i += 1) {
+        const v = View.forSlot(i) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(!seen[@intFromEnum(v)]); // 두 칸이 같은 뷰를 가리키지 않는다
+        seen[@intFromEnum(v)] = true;
+    }
+    // 칸 수를 넘으면 없다.
+    try std.testing.expectEqual(@as(?View, null), View.forSlot(seen.len));
 }

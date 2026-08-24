@@ -57,6 +57,27 @@ pub const Options = struct {
     height_px: i32 = 620,
 };
 
+/// 표면을 그리는 데 필요한 **호스트 조각들**.
+///
+/// `draw_host.Host` 를 통째로 받지 않는 이유: 합성된 앱 루프(§2m.31~)는 자기 창·스왑체인·
+/// 파이프라인을 직접 들고 있어 `Host` 를 안 쓴다. 그쪽도 같은 표면을 그려야 하므로, **쓰는 것만**
+/// 받는다. `Host.surfaceCtx()` 가 스모크 쪽 짝이다.
+pub const SurfaceCtx = struct {
+    renderer_state: *renderer.RendererState,
+    /// 측정 텍스트용 래스터라이저. `registry` 는 여기서 채운다(안 채우면 face 를 못 찾아 글자가
+    /// 하나도 안 그려진다 — §2m.27 실측).
+    rasterizer: win32_text.NeutralRasterizer,
+    pipeline: *d3d11_cells.CellPipeline,
+    /// **포인터다** — 아틀라스가 커지면 이 값이 함께 움직여야 다음 프레임의 UV 가 맞는다.
+    atlas_w: *u32,
+    atlas_h: *u32,
+    cell_w: u32,
+    cell_h: u32,
+    /// 이 표면이 차지하는 사각형의 크기(px). 창 전체가 아니라 **도크 자리**일 수 있다.
+    viewport_w: u32,
+    viewport_h: u32,
+};
+
 pub const Host = struct {
     allocator: std.mem.Allocator,
     /// **넷 다 포인터다** — `create` 가 힙에 세워 준다. 그래서 `Host` 를 값으로 옮겨도 안을 가리키는
@@ -212,25 +233,12 @@ pub const Host = struct {
     /// `prepare` 밖으로 낸 이유는 **measured 텍스트가 프레임을 다른 길로 만들기 때문**이다
     /// (`buildFrameFromGlyphRunListWithRasterizer` — §2m.27). 그쪽도 이 둘은 똑같이 해야 한다.
     pub fn syncAtlas(self: *Host) !void {
-        const now_w = self.renderer_state.atlas.config.atlas_width_px;
-        const now_h = self.renderer_state.atlas.config.atlas_height_px;
-        if (now_w != self.atlas_w or now_h != self.atlas_h) {
-            try self.pipeline.resizeAtlas(now_w, now_h);
-            self.atlas_w = now_w;
-            self.atlas_h = now_h;
-        }
+        try syncAtlasTexture(self.pipeline, &self.renderer_state, &self.atlas_w, &self.atlas_h);
     }
 
     /// 이번 프레임이 새로 구운 글리프를 아틀라스 텍스처에 올린다. **올린 영역 수**를 준다.
     pub fn uploadAtlasRegions(self: *Host, frame: maru.renderer.RenderFrame) usize {
-        var n: usize = 0;
-        const rf = frame.glyph_raster_frame;
-        for (rf.uploads) |up| {
-            const bytes = rf.pixels[up.bytes_offset..][0..up.byte_count];
-            self.pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch continue;
-            n += 1;
-        }
-        return n;
+        return uploadFrameRegions(self.pipeline, frame);
     }
 
     /// 프레임의 글리프를 셀 배열 **뒤에 잇는다.** 배경 쿼드를 앞에 넣고 싶으면 부르기 전에 넣는다 —
@@ -270,6 +278,24 @@ pub const Host = struct {
         try cells.ensureUnusedCapacity(allocator, native.len);
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, self.cell_w, self.cell_h, self.atlas_w, self.atlas_h));
         return native.len;
+    }
+
+    /// 표면 모듈이 쓰는 조각들만 모아 준다(`win32_scm_surface.Ctx`). **창 전체를 뷰포트로 준다** —
+    /// 스모크는 표면 하나만 띄우기 때문이다. 합성된 앱은 도크 사각형을 직접 채운다.
+    /// 표면 모듈이 쓰는 조각들만 모아 준다. **창 전체를 뷰포트로 준다** — 스모크는 표면 하나만
+    /// 띄우기 때문이다. 합성된 앱은 도크 사각형을 직접 채운다.
+    pub fn surfaceCtx(self: *Host) SurfaceCtx {
+        return .{
+            .renderer_state = &self.renderer_state,
+            .rasterizer = self.rasterizer,
+            .pipeline = self.pipeline,
+            .atlas_w = &self.atlas_w,
+            .atlas_h = &self.atlas_h,
+            .cell_w = self.cell_w,
+            .cell_h = self.cell_h,
+            .viewport_w = self.initial.width_px,
+            .viewport_h = self.initial.height_px,
+        };
     }
 
     /// 이번 프레임의 창 이벤트. **스왑체인 크기 맞추기는 여기서 한다** — 그것을 호출자마다
@@ -349,6 +375,43 @@ pub fn reportSetupFailure(stderr: *std.Io.Writer, command: []const u8) !void {
         },
     }
     try stderr.flush();
+}
+
+/// **아틀라스가 커졌으면 파이프라인 텍스처를 맞춘다.** 안 그러면 UV 가 옛 크기 기준이라 글자가
+/// 엉뚱한 자리를 가리킨다.
+///
+/// `Host` 밖으로 낸 이유는 **호스트 없이 그리는 자리가 생겼기 때문**이다 — 합성된 앱 루프
+/// (§2m.31~)는 자기 창·스왑체인·파이프라인을 직접 들고 있어 `Host` 를 안 쓴다. 규칙을 두 벌로
+/// 두면 한쪽만 고쳐진다.
+pub fn syncAtlasTexture(
+    pipeline: *d3d11_cells.CellPipeline,
+    renderer_state: *renderer.RendererState,
+    atlas_w: *u32,
+    atlas_h: *u32,
+) !void {
+    const now_w = renderer_state.atlas.config.atlas_width_px;
+    const now_h = renderer_state.atlas.config.atlas_height_px;
+    if (now_w != atlas_w.* or now_h != atlas_h.*) {
+        try pipeline.resizeAtlas(now_w, now_h);
+        atlas_w.* = now_w;
+        atlas_h.* = now_h;
+    }
+}
+
+/// 프레임이 새로 구운 글리프를 텍스처에 올린다. **올린 영역 수**를 준다.
+///
+/// **프레임을 버리기 전에 불러야 한다.** 업로드 목록은 그 프레임과 함께 사라지고, 아틀라스 CPU
+/// 캐시는 그 글리프를 "이미 있다" 고 판단하므로 **다른 프레임도 다시 안 올린다** — 실측으로 그렇게
+/// 도크와 터미널 글자가 함께 깨졌다(§2m.32).
+pub fn uploadFrameRegions(pipeline: *d3d11_cells.CellPipeline, frame: renderer.RenderFrame) usize {
+    var n: usize = 0;
+    const rf = frame.glyph_raster_frame;
+    for (rf.uploads) |up| {
+        const bytes = rf.pixels[up.bytes_offset..][0..up.byte_count];
+        pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch continue;
+        n += 1;
+    }
+    return n;
 }
 
 /// `chrome.draw.Op` 목록을 셀로 내린다 — **단색 사각 먼저, 글리프 나중**(그리는 순서가 곧 z 순서).

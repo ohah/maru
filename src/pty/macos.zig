@@ -648,7 +648,7 @@ pub const PtySession = struct {
 
         // 중립 계약의 `shell_integration`(파일 갈래)을 이 백엔드의 메커니즘 이름(`zdotdir` = zsh `ZDOTDIR`)으로
         // 넘긴다 — 매핑이 백엔드 몫이라는 계약 그대로다(docs/windows-platform.md §4.2).
-        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id);
+        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -1433,11 +1433,11 @@ const EnvStorage = struct {
         };
     }
 
-    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !EnvStorage {
-        return initWithParentSnapshot(allocator, env, null, env_overrides, term, zdotdir, ssh_integration_bin, pane_id);
+    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?u64) !EnvStorage {
+        return initWithParentSnapshot(allocator, env, null, env_overrides, term, zdotdir, ssh_integration_bin, pane_id, hook_instance);
     }
 
-    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64) !EnvStorage {
+    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?u64) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -1469,6 +1469,13 @@ const EnvStorage = struct {
         // control-plane selector는 사용자가 env.*로 덮어쓸 수 없는 내부 예약 키다.
         if (pane_id) |pid| {
             const value = try std.fmt.allocPrint(allocator, "MARU_PANE_ID={d}", .{pid});
+            defer allocator.free(value);
+            try upsertEnv(allocator, &entries, value);
+        }
+        // 훅 로그의 인스턴스 칸도 같은 부류다 — null 이면 주입하지 않고, 그러면 훅이 조용히 나간다
+        // (fail-closed: 값이 유효하지 않은 경로에서 남의 인스턴스 디렉터리에 쓰지 않는다).
+        if (hook_instance) |inst| {
+            const value = try std.fmt.allocPrint(allocator, "MARU_HOOK_INSTANCE={d}", .{inst});
             defer allocator.free(value);
             try upsertEnv(allocator, &entries, value);
         }
@@ -1601,7 +1608,11 @@ const EnvStorage = struct {
     }
 
     fn isPaneSelectorEntry(entry: []const u8) bool {
-        return std.mem.startsWith(u8, entry, "MARU_PANE_ID=");
+        // **둘 다 내부 예약 키다.** `MARU_PANE_ID` 는 control-plane self selector이고,
+        // `MARU_HOOK_INSTANCE` 는 에이전트 훅 로그의 인스턴스 칸이다(docs/agent-hooks.md §4). 부모에게서
+        // 상속된 값이 남으면 **다른 인스턴스·다른 pane 의 로그에 쓰게** 되므로 같은 규율로 떨군다.
+        return std.mem.startsWith(u8, entry, "MARU_PANE_ID=") or
+            std.mem.startsWith(u8, entry, "MARU_HOOK_INSTANCE=");
     }
 
     /// 바깥 터미널 멀티플렉서가 자기 pane 안 프로세스에만 세우는 신원 변수인가. maru가 그 안에서 실행됐어도
@@ -2126,7 +2137,7 @@ test "validateRequest rejects requests that cannot produce a reliable PTY" {
 }
 
 test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru's values" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
     defer storage.deinit();
 
     var term_count: usize = 0;
@@ -2166,7 +2177,7 @@ test "EnvStorage forces TERM_PROGRAM to ghostty (알림 식별 — 부모 값 �
     defer _ = unsetenv("TERM_PROGRAM");
     defer _ = unsetenv("TERM_PROGRAM_VERSION");
 
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
     defer storage.deinit();
 
     var tp_count: usize = 0;
@@ -2198,7 +2209,7 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
         _ = unsetenv("CLICOLOR_FORCE");
         _ = unsetenv("FORCE_COLOR");
     }
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     var i: usize = 0;
@@ -2221,7 +2232,7 @@ test "EnvStorage strips the outer multiplexer identity (TMUX/TMUX_PANE)" {
         _ = unsetenv("TMUX");
         _ = unsetenv("TMUX_PANE");
     }
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     var i: usize = 0;
@@ -2233,14 +2244,14 @@ test "EnvStorage strips the outer multiplexer identity (TMUX/TMUX_PANE)" {
     try std.testing.expect(i >= 2); // 나머지 부모 env는 그대로 물려받았다
 
     // **명시 env는 그대로 통과한다** — 호출자가 준 env는 상속 오염이 아니라 의도된 값이다(기존 계약 보존).
-    var explicit = try EnvStorage.init(std.testing.allocator, &.{"TMUX=explicit"}, &.{}, "xterm-256color", null, null, null);
+    var explicit = try EnvStorage.init(std.testing.allocator, &.{"TMUX=explicit"}, &.{}, "xterm-256color", null, null, null, null);
     defer explicit.deinit();
     try std.testing.expectEqualStrings("TMUX=explicit", std.mem.span(explicit.envpPtr()[0].?));
 }
 
 test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
     // 명시 env면 term 인자는 무시된다(테스트가 완전한 env를 직접 준다).
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, &.{}, "xterm-ghostty", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, &.{}, "xterm-ghostty", null, null, null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
@@ -2274,6 +2285,7 @@ test "EnvStorage parent snapshot preserves caller environment while applying Mar
         null,
         null,
         null,
+        null,
     );
     defer storage.deinit();
     try std.testing.expectEqualStrings("fresh", envValueCount(&storage, "MARU_TEST_GUI_ENV=").last.?);
@@ -2292,6 +2304,7 @@ test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" 
         null,
         null,
         null,
+        null,
     );
     defer omitted.deinit();
     try std.testing.expectEqualStrings("1", envValueCount(&omitted, "KEEP=").last.?);
@@ -2306,15 +2319,70 @@ test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" 
         null,
         null,
         42,
+        null,
     );
     defer injected.deinit();
     try std.testing.expectEqual(@as(usize, 1), envValueCount(&injected, "MARU_PANE_ID=").count);
     try std.testing.expectEqualStrings("42", envValueCount(&injected, "MARU_PANE_ID=").last.?);
 }
 
+test "EnvStorage treats MARU_HOOK_INSTANCE as reserved — 상속·override 로 남의 인스턴스에 못 쓴다" {
+    // 훅 로그 경로의 인스턴스 칸이다(docs/agent-hooks.md §4). 부모에게서 상속되거나 사용자 override 로
+    // 들어오면 **다른 maru 인스턴스의 디렉터리에 쓰게** 되므로 `MARU_PANE_ID` 와 같은 규율로 다룬다.
+    var omitted = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{ "KEEP=1", "MARU_HOOK_INSTANCE=111" },
+        null,
+        &.{"MARU_HOOK_INSTANCE=222"},
+        "ignored",
+        null,
+        null,
+        null,
+        null,
+    );
+    defer omitted.deinit();
+    try std.testing.expectEqualStrings("1", envValueCount(&omitted, "KEEP=").last.?);
+    // null 이면 **아무 값도 남지 않는다** — fail-closed(훅이 조용히 나간다).
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&omitted, "MARU_HOOK_INSTANCE=").count);
+
+    var injected = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{"MARU_HOOK_INSTANCE=111"},
+        null,
+        &.{"MARU_HOOK_INSTANCE=222"},
+        "ignored",
+        null,
+        null,
+        null,
+        4242,
+    );
+    defer injected.deinit();
+    const inst = envValueCount(&injected, "MARU_HOOK_INSTANCE=");
+    try std.testing.expectEqual(@as(usize, 1), inst.count); // 중복 없이 한 번
+    try std.testing.expectEqualStrings("4242", inst.last.?); // 우리 값이 이긴다
+}
+
+test "부모의 MARU_HOOK_INSTANCE 는 상속 경로에서도 떨어진다" {
+    // maru 안에서 maru 를 띄우는 경우(중첩) 부모 값이 살아 있으면 자식이 **부모 인스턴스의** 로그에 쓴다.
+    var storage = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{},
+        &.{ "MARU_HOOK_INSTANCE=999", "KEEP=1" },
+        &.{},
+        "xterm-256color",
+        null,
+        null,
+        null,
+        null,
+    );
+    defer storage.deinit();
+    try std.testing.expectEqualStrings("1", envValueCount(&storage, "KEEP=").last.?);
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_HOOK_INSTANCE=").count);
+}
+
 test "EnvStorage env_overrides: 새 KEY는 추가, 기존 KEY(maru TERM)는 덮어쓴다 (부모 상속 위 upsert)" {
     // 부모 상속 경로(env=&.{}) + 사용자 override. FOO는 새 키라 추가, TERM은 maru가 먼저 넣은 값을 사용자가 덮어쓴다.
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{ "FOO=bar", "TERM=screen-256color" }, "xterm-256color", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{ "FOO=bar", "TERM=screen-256color" }, "xterm-256color", null, null, null, null);
     defer storage.deinit();
 
     const foo = envValueCount(&storage, "FOO=");
@@ -2327,7 +2395,7 @@ test "EnvStorage env_overrides: 새 KEY는 추가, 기존 KEY(maru TERM)는 덮�
 }
 
 test "EnvStorage env_overrides: 명시 env 위에도 upsert (KEY 덮어쓰기·추가, 중복 없음)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{ "A=1", "B=2" }, &.{ "B=3", "C=4" }, "xterm-ghostty", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{ "A=1", "B=2" }, &.{ "B=3", "C=4" }, "xterm-ghostty", null, null, null, null);
     defer storage.deinit();
     try std.testing.expectEqual(@as(usize, 1), envValueCount(&storage, "A=").count);
     try std.testing.expectEqualStrings("1", envValueCount(&storage, "A=").last.?);
@@ -2375,7 +2443,7 @@ test "MacosLogin.build: 셸 경로·인자를 작은따옴표로 감싸 공백·
 }
 
 test "EnvStorage empty env uses the supplied TERM (configurable)" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-ghostty", null, null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-ghostty", null, null, null, null);
     defer storage.deinit();
     var found = false;
     const envp = storage.envpPtr();
@@ -2387,7 +2455,7 @@ test "EnvStorage empty env uses the supplied TERM (configurable)" {
 }
 
 test "EnvStorage injects ZDOTDIR for shell integration and preserves the old one" {
-    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", "/cache/maru/zsh", null, null);
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", "/cache/maru/zsh", null, null, null);
     defer storage.deinit();
     var saw_zdotdir = false;
     const envp = storage.envpPtr();
@@ -2402,7 +2470,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     // opt-in on: 통합 .zshenv가 ssh를 maru ssh로 라우팅하도록 두 키를 모두 주입한다(바이너리 경로 +
     // 게이트 플래그). 둘 중 하나라도 빠지면 .zshenv가 함수를 정의하지 않아 라우팅이 조용히 안 된다.
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, "/Applications/Maru.app/Contents/MacOS/maru", null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, "/Applications/Maru.app/Contents/MacOS/maru", null, null);
         defer storage.deinit();
         var saw_bin = false;
         var saw_flag = false;
@@ -2418,7 +2486,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
     }
     // opt-in off(기본): 두 키 모두 없어야 한다 — 평범한 ssh가 그대로 동작(graceful).
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var i: usize = 0;
@@ -2432,7 +2500,7 @@ test "EnvStorage injects MARU_BIN + MARU_SSH_INTEGRATION only when ssh routing i
 
 test "EnvStorage keeps MARU_PANE_ID as the surface selector" {
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, 42);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, 42, null);
         defer storage.deinit();
         var saw_pane = false;
         const envp = storage.envpPtr();
@@ -2453,6 +2521,7 @@ test "EnvStorage keeps MARU_PANE_ID as the surface selector" {
             null,
             null,
             42,
+            null,
         );
         defer storage.deinit();
         var pane_count: usize = 0;
@@ -2469,7 +2538,7 @@ test "EnvStorage keeps MARU_PANE_ID as the surface selector" {
     }
     // selector가 null이면 관련 env가 없다.
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var i: usize = 0;
@@ -2494,7 +2563,7 @@ test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
 
     // 부모 base만 선택하면 일반 키처럼 그대로 상속된다.
     {
-        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null);
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
         defer storage.deinit();
         const got = envValueCount(&storage, "MARU_AGENT_MAPPING_ID=");
         try std.testing.expectEqual(@as(usize, 1), got.count);
@@ -2507,6 +2576,7 @@ test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
             &.{},
             &.{"MARU_AGENT_MAPPING_ID=override-value"},
             "xterm-256color",
+            null,
             null,
             null,
             null,
@@ -2526,6 +2596,7 @@ test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
             null,
             null,
             null,
+            null,
         );
         defer storage.deinit();
         const got = envValueCount(&storage, "MARU_AGENT_MAPPING_ID=");
@@ -2540,6 +2611,7 @@ test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
             &.{ "FOO=ok", "MARU_AGENT_MAPPING_ID=explicit-value" },
             &.{"MARU_AGENT_MAPPING_ID=override-value"},
             "xterm-256color",
+            null,
             null,
             null,
             null,

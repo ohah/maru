@@ -411,6 +411,9 @@ pub fn createTerm(
     const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
     var req = request;
     req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
+    // 훅 로그의 인스턴스 칸(docs/agent-hooks.md §4). `surface.id` 는 **프로세스마다 1 부터**라 maru 를 두 개
+    // 띄우면 두 인스턴스의 첫 pane 이 같은 파일 이름을 갖는다 — 이 값이 그 이름공간을 가른다.
+    req.hook_instance = agent_ops.hookInstanceId();
     // P2 seam(docs/persistent-session-host.md §13 P2): terminal runtime 계약 backend로 spawn한다. backend가 앱 전역
     // registry의 `LiveSurface` 번들 슬롯 생성 + live PTY spawn(live_pty.init) + surface init을 한 단위로(내부 2-pass
     // 부분-init 정리 포함) 수행하고, GUI에는 복구 가능한 *Surface와 opaque handle(id)만 준다 — GUI는 `*LivePtySession`을

@@ -442,6 +442,17 @@ pub const SpawnRequest = struct {
     ssh_integration_bin: ?[]const u8 = null,
     // 컨트롤 플레인 self selector인 surface.id. 셸에 MARU_PANE_ID=<surface.id>로 주입한다.
     pane_id: ?u64 = null,
+    /// 이 GUI **프로세스**를 가리키는 값(현재 pid). 셸에 `MARU_HOOK_INSTANCE=<이 값>`으로 주입하고,
+    /// 에이전트 훅이 로그 경로의 인스턴스 칸으로 쓴다(docs/agent-hooks.md §4).
+    ///
+    /// **왜 pane_id 로는 부족한가**: 훅 로그 디렉터리는 사용자 캐시 하나뿐인데 `surface.id` 는 **프로세스마다
+    /// 1 부터** 발급된다(`SurfaceIdAllocator`). 그래서 maru 를 두 개 띄우면 두 인스턴스의 첫 pane 이 같은
+    /// 파일 이름을 갖고, 서로의 이벤트를 읽거나 시작 시 정리가 남의 살아 있는 로그를 지운다. 이 칸이 그
+    /// 이름공간을 가른다.
+    ///
+    /// null 이면 주입하지 않는다 — 그러면 훅은 조용히 나가고 로그를 안 남긴다(fail-closed). 영속 세션
+    /// 호스트 경로가 그 상태다(그 자식은 GUI 프로세스가 아니라 host 가 띄우므로 값이 유효하지 않다).
+    hook_instance: ?u64 = null,
     size: terminal.Size = terminal.Size.default,
 };
 

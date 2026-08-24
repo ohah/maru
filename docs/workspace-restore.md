@@ -235,6 +235,9 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 - checkpoint coordinator는 `committed(generation)|stale|capture_failed|write_failed`를 반환한다. background 실패는
   dirty를 유지하고 bounded backoff를 쓰며, final Quit은 AppKit `terminateLater`에서 mutation freeze 또는
   captured generation=current를 확인한 뒤 성공 때만 reply/detach한다.
+  순수 reducer의 exact event/effect·세대·재시도·notice coalescing·final Quit 계약과 시간 정책의 소유권은
+  [영속 터미널 세션 호스트](persistent-session-host.md#p4--일반-window-default-readinessbackground-알림)의
+  「C1 순수 coordinator 계약」을 단일 출처로 둔다.
 
 ### quick terminal 제외 계약
 

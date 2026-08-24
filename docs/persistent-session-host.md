@@ -6868,6 +6868,30 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   generation이 current임을 확인하고, checkpoint 성공 뒤에만 `NSApp.reply(true)`와 detach를 수행한다. 실패하면
   `cancelAcceptedAppQuit` + `reply(false)`로 Quit을 취소하고 이전 완전본을 보존한다. 전원 손실·host crash
   durability는 주장하지 않는다.
+
+  **C1 순수 coordinator 계약:** L2 `session.workspace_checkpoint`가 checkpoint 세대와 실행 순서를 소유한다.
+  이 모듈은 allocator·파일·AppKit·시계를 import하지 않고, caller가 읽은 monotonic `now`와
+  `Policy { debounce_ns, retry_initial_ns, retry_max_ns }`를 입력으로 받는다. 세 시간은 모두 0보다 크고
+  `retry_initial_ns <= retry_max_ns`여야 한다. 제품 시간값 선택은 C3 wiring의 책임이며 C1이 숨은 기본값을
+  만들지 않는다.
+  - `mutation(now)`은 세대를 단조 증가시키고 `now + debounce_ns`에 background capture를 예약한다. 이미 capture/write가
+    진행 중이어도 새 세대를 덮어쓰지 않으며, 완료 시 captured 세대와 current 세대를 비교해 `stale`로 판정한다.
+  - `tick(now)`은 dirty이고 idle이며 due에 도달했을 때만 `capture(generation, background)` 효과를 한 번 낸다.
+    capture 성공 시점에 같은 세대가 current일 때만 `write` 효과로 전이하고, 이미 stale이면 write 0으로 끝낸다.
+    current였던 write가 진행되는 동안 mutation이 생겨 완료 시 stale이 된 경우에도 current dirty와 그 debounce
+    예약을 유지한다. write 성공만 dirty를 지울 수 있다.
+  - background `capture_failed|write_failed`는 dirty를 유지하고 `retry_initial_ns`부터 두 배씩
+    `retry_max_ns`에서 포화되는 재시도를 예약한다. 연속 실패 epoch에서는 typed notice 효과를 정확히 한 번만 내고,
+    current 세대 commit 뒤에야 새 failure epoch가 시작될 수 있다.
+  - `quit_requested(now)`은 mutation을 freeze하고 진행 중 background 결과를 기다리지 않는다. coordinator가 idle이면
+    current 세대의 `capture(generation, final_quit)`을 즉시 시작하며, 진행 중이면 그 작업이 끝난 다음 current 세대의
+    final capture를 시작한다. final write의 `committed(current)`만 `reply_and_detach`를 낸다. final capture/write 실패는
+    dirty를 유지하고 freeze를 풀며 `cancel_quit`을 내고 background bounded retry를 예약한다. freeze 중 mutation은
+    typed `mutation_frozen`으로 거부되어 state를 바꾸지 않는다. 따라서 C1에는 `NSApp.reply`나 detach를 직접 부르는
+    경로가 없다.
+  - capture/write completion은 현재 in-flight kind와 세대가 exact match해야 한다. 복제·늦은·순서가 뒤집힌 completion은
+    typed `unexpected_completion`으로 거부하고 state를 바꾸지 않는다. 세대 증가와 `now + duration`, backoff 두 배가
+    overflow하면 포화시키지 않고 typed `overflow`로 fail-before-mutation한다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
   않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다

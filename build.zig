@@ -9142,6 +9142,45 @@ pub fn build(b: *std.Build) void {
 
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
+    const workspace_checkpoint_step = b.step(
+        "test-workspace-checkpoint-coordinator",
+        "P4 C1 pure workspace checkpoint generation and Quit ordering gates",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |checkpoint_optimize| {
+        const checkpoint_mod = b.createModule(.{
+            .root_source_file = b.path("src/session/workspace_checkpoint.zig"),
+            .target = target,
+            .optimize = checkpoint_optimize,
+        });
+        const checkpoint_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/workspace_checkpoint_coordinator.zig"),
+                .target = target,
+                .optimize = checkpoint_optimize,
+                .imports = &.{.{ .name = "workspace_checkpoint", .module = checkpoint_mod }},
+            }),
+            .filters = &.{"P4 C1"},
+        });
+        const run_checkpoint_tests = b.addRunArtifact(checkpoint_tests);
+        run_checkpoint_tests.addArg("--maru-expect-tests=11");
+        run_checkpoint_tests.setCwd(b.path("."));
+        workspace_checkpoint_step.dependOn(&run_checkpoint_tests.step);
+        test_step.dependOn(&run_checkpoint_tests.step);
+
+        const checkpoint_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/workspace_checkpoint_boundary.zig"),
+                .target = target,
+                .optimize = checkpoint_optimize,
+            }),
+            .filters = &.{"P4 C1 경계는"},
+        });
+        const run_checkpoint_boundary_tests = b.addRunArtifact(checkpoint_boundary_tests);
+        run_checkpoint_boundary_tests.addArg("--maru-expect-tests=1");
+        run_checkpoint_boundary_tests.setCwd(b.path("."));
+        workspace_checkpoint_step.dependOn(&run_checkpoint_boundary_tests.step);
+        if (checkpoint_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_boundary_tests.step);
+    }
     if (target.result.os.tag == .macos) {
         // The d2d authority proof is a pure leaf with its own hostile lifecycle matrix. Compile it
         // independently so pump reachability cannot accidentally become the only test root.

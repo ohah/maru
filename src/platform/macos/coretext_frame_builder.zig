@@ -1,4 +1,5 @@
 const std = @import("std");
+const sidebar_glyph_rows = @import("../../sidebar_glyph_rows.zig");
 const maru = @import("maru");
 const app = maru.app;
 const config = maru.config;
@@ -252,34 +253,19 @@ pub const ShapedPane = struct {
     }
 };
 
-/// 닫기(✕) 아이콘 코드포인트(U+2715 MULTIPLICATION X). 호버 슬롯 우측에 그린다.
-pub const sidebar_close_glyph: u21 = 0x2715;
+pub const sidebar_close_glyph = cell_text.sidebar_close_glyph; // 그리기와 함께 산다
+/// 사이드바 카드 투영 — **정의는 공유 모듈이 소유한다**(`platform/cell_text.zig`). 이름과 달리
+/// CoreText 를 안 부르고, Windows 사이드바가 같은 함수를 쓴다(FT3 와 같은 이유). 여기 별칭이 남는
+/// 것은 macOS 호출부와 이 파일의 단위 테스트가 계속 이 이름을 쓰기 때문이다.
+pub const buildSidebarDrawList = cell_text.buildSidebarDrawList;
 
-/// 고정(pin) 표시 glyph(U+1F4CC ROUND PUSHPIN). 고정된 워크스페이스 카드 이름줄 **우측 끝**에 그린다 — 선두가
-/// 아니다. 선두 칼럼은 동작/활성 마커(·/*)를 위해 비워둔다(핀이 그 표시를 가리지 않게 — 사용자 요청). 📌는 컬러
-/// 이모지라 외형(빨간 핀)이 cell fg와 무관하다(스타일 색은 영향 없음). 옛 설계는 이름 prefix("📌 ")로 선두에 박았다.
-pub const sidebar_pin_glyph: u21 = 0x1F4CC;
+pub const sidebar_pin_glyph = cell_text.sidebar_pin_glyph; // 그리기와 함께 산다 — 공유 모듈이 소유(FT3 와 같은 이유)
 
-/// `buildSidebarDrawList`의 아이콘 배열(`agents`·`inline_icons`) **공용 센티널** — 자리만 잡고 글리프는
-/// 안 그린다. 아이콘 자산이 없는 일반 터미널 행이 쓴다: 0으로 두면 **그 행만** 라벨이 아이콘 폭만큼 왼쪽으로
-/// 튀어 같은 목록 안에서 좌단이 어긋난다(gutter·인라인 양쪽에서 실측). 공백(U+0020)을 쓰는 이유는
-/// "그릴 것이 없다"가 값 자체로 읽히기 때문이고, 실제 방출은 건너뛴다.
-pub const icon_slot_reserve: u21 = ' ';
+pub const icon_slot_reserve = cell_text.icon_slot_reserve; // 그리기와 함께 산다
 
-/// 세션 목록 행(= `inline_icons`를 쓰는 행)의 **행 전체 들여쓰기**(칸). 카드 하위 목록이라는 위계를 보이게 한다 —
-/// 0이면 카드와 목록이 같은 좌단에서 시작해 "카드 아래 펼쳐진 목록"으로 안 읽혔다(사용자 피드백).
-/// 아이콘이 이 열에 오고 이름 본문은 여기서 `icon_cols`만큼 더 간다. 보조줄은 호출자가 같은 자리에 맞춘다.
-pub const session_row_indent_cols: u16 = 1;
+pub const session_row_indent_cols = cell_text.session_row_indent_cols; // 그리기와 함께 산다 — 공유 모듈이 소유(FT3 와 같은 이유)
 
-/// gutter 아이콘이 있는 행의 **텍스트 시작 열**(아이콘 2칸 + 간격 1칸). 빌더가 이름줄을 이만큼 밀어 아이콘과
-/// 겹치지 않게 한다.
-///
-/// **pub인 이유**: 이름줄 안의 열 좌표를 만드는 쪽이 이 폭을 알아야 한다. 사이드바 running 배지가 그렇다 —
-/// 조립이 기록한 색 구간(`BadgeSpan`)과 색칠 루프가 보는 `c.col`이 같은 좌표계여야 하는데, 배지가 사는
-/// `sessions` 토글 행은 삼각(▼)을 gutter에 실어 텍스트가 이만큼 밀린다. 그 폭을 여기서 파생하지 않고 3을
-/// 따로 적으면 두 값이 조용히 어긋나 **색만 밀리는** 결함이 된다(실제로 그렇게 어긋났다 — 두 종류가 동시에
-/// 도는 화면에서만 드러났다).
-pub const sidebar_row_icon_cols: u16 = 3;
+pub const sidebar_row_icon_cols = cell_text.sidebar_row_icon_cols; // 그리기와 함께 산다 — 공유 모듈이 소유(FT3 와 같은 이유)
 
 /// 주소창 **편집 밴드**를 `text_field.fieldLayout`(L3 단일 레이아웃 소스, docs/text-field-editor.md §3)로 셀 방출한다.
 /// fieldLayout이 준 run(pre/preedit/post)·가로 스크롤·lead/tail "…"를 [nav_end, cols) 창에 클립해 깐다. caret은
@@ -353,9 +339,10 @@ pub fn paneTabAreaCols(bar_cols: u16) u16 {
 /// (`app_session/sidebar.zig`의 `sidebar_slot_height_ratio_milli` — 값은 그쪽이 소유한다. 여기 숫자를 적어 두면
 /// 그 상수가 바뀔 때 같이 안 바뀐다. 실제로 4.6×에서 5.2×로 커진 뒤 이 주석만 4600으로 남아 있었다).
 /// applySidebarGlyphPyTop이 base 32·×4를 decode에 쓰므로, 이 값을 바꾸면 아래 "인코딩 값 고정" 테스트가 깨져 동기 수정을 강제한다.
-pub const sidebar_line_base: u16 = 32;
+pub const sidebar_line_base: u16 = sidebar_glyph_rows.line_base;
 pub fn sidebarGlyphRow(slot: usize, line_index: u16, line_count: u16) u16 {
-    return @as(u16, @intCast(slot)) *| sidebar_line_base +| line_count *| 4 +| line_index;
+    // 규칙은 **중립이 소유한다**(`sidebar_glyph_rows`) — 푸는 쪽과 한 파일에 있어야 갈리지 않는다.
+    return sidebar_glyph_rows.encode(slot, line_index, line_count);
 }
 
 test "sidebarGlyphRow 인코딩 값 고정 (slot*32 + line_count*4 + line_index ↔ Zig applySidebarGlyphPyTop 디코더 결합)" {
@@ -379,228 +366,6 @@ test "sidebarGlyphRow 인코딩 값 고정 (slot*32 + line_count*4 + line_index 
         try std.testing.expectEqual(c.count, (row % 32) / 4);
         try std.testing.expectEqual(c.idx, (row % 32) % 4);
     }
-}
-
-/// 탭별 카드를 1~4줄로 합성한다: line0=이름(동작/활성 마커 ·/* 는 호출자가 이름 prefix로 붙임), 이어서 branches[i]·
-/// paths[i]·statuses[i](각 있으면)를 한 줄씩. ""인 보조줄은 건너뛰어 줄 수가 줄고 남은 줄이 위로 당겨진다. `agents[i]`가
-/// 0이 아니면 그 코드포인트(✶ claude/◆ codex)를 **슬롯 세로 중앙(count=1)·col 0·width 2(2칸)** 아이콘으로 따로 그리고,
-/// 텍스트 줄은 그만큼(icon_cols=3) 우측으로 들여 아이콘이 줄 수와 무관하게 워크스페이스 가운데에 보이게 한다. `pinned[i]`면
-/// 📌(sidebar_pin_glyph)를 이름줄 **우측 끝**에 그린다 — 선두가 아니라(선두는 마커 전용, 핀이 동작 표시를 안 가리게 —
-/// 사용자 요청). 같은 행에 닫기 ✕(close_row)가 오면 그 왼쪽에 둔다. 세로 위치는 sidebarGlyphRow로 인코딩(렌더러가
-/// 슬롯 안 블록 중앙 정렬). cols 넘으면 "…" 말줄임(핀이 있으면 이름은 핀 앞에서 자른다). 이름줄 전경색은 `fg`(활성 탭
-/// active_fg+bold), 보조줄은 `fg`(흐림). 깨진 UTF-8은 U+FFFD. `close_row`면 그 슬롯 이름줄 우측 안쪽에 닫기 ✕ 1개. 순수
-/// 함수라 OS 무관 단위 테스트.
-pub fn buildSidebarDrawList(
-    allocator: std.mem.Allocator,
-    names: []const []const u8,
-    branches: []const []const u8,
-    paths: []const []const u8,
-    statuses: []const []const u8,
-    agents: []const u21,
-    /// inline_icons[i]=그 슬롯 **이름줄 선두**에 2칸으로 그릴 아이콘(0=없음). `agents`(왼쪽 독립 gutter)와
-    /// **배타적으로** 쓴다 — gutter는 아이콘 하나 때문에 행의 **모든 줄**에서 3칸을 뺏고, 세로 중앙에 놓여
-    /// 줄 수가 다른 행끼리 열을 이루지도 못한다(사용자 피드백). 세션 목록 행이 이 인라인 경로를 쓰고,
-    /// 접기 토글 삼각(▶/▼)만 gutter에 남는다 — 그건 텍스트 줄에 두면 1칸이라 "눌러야 할 토글"로 안 읽혔다.
-    ///
-    /// **문자열에 섞지 않고 별도 셀로 내는 이유**: 이름줄은 `widen_icons=false`다(제목에 우연히 섞인 등록 PUA가
-    /// 2칸으로 커지는 걸 막는 규칙). 아이콘을 이름 문자열 앞에 붙이면 그 규칙에 걸려 1칸으로 쪼그라든다 —
-    /// 예전에 "깃 아이콘이 너무 작다"고 받은 그 현상이다. 핀(📌)과 같은 방식으로 셀을 따로 낸다.
-    ///
-    /// `icon_slot_reserve`는 **자리만 잡고 아무것도 안 그린다**. 아이콘 자산이 없는 일반 터미널 행이 쓴다 —
-    /// 0으로 두면 그 행만 이름이 3칸 왼쪽에서 시작해 같은 목록 안에서 라벨 좌단이 들쭉날쭉해진다.
-    inline_icons: []const u21,
-    pinned: []const bool, // pinned[i]=true면 그 슬롯 이름줄 우측 끝에 📌(빈 슬라이스=핀 없음)
-    cols: u16,
-    fg: terminal.Color,
-    close_rows: []const bool, // close_rows[i]=true면 그 row 우측에 닫기 ✕(호버 전용이 아니라 **행별 고정 표시**)
-    ages: []const []const u8, // ages[i]=마지막 활동 상대 시각("5m"·"now", 빈 슬라이스=표시 안 함) — 이름줄 우측, ✕ 왼쪽
-    plus_row: ?usize,
-    active_row: ?usize,
-    active_fg: terminal.Color,
-    editing_row: ?usize, // rename 중인 슬롯(워크스페이스 카드·그룹 헤더). 그 슬롯 **이름줄(j==0)만** tail 앵커로 그려 caret(끝)을 유지한다.
-) !renderer.DrawList {
-    var cells: std.ArrayList(renderer.DrawCell) = .empty;
-    errdefer cells.deinit(allocator);
-    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
-    errdefer pool.deinit(allocator);
-
-    const style: terminal.Style = .{ .foreground = fg };
-    const icon_cols: u16 = sidebar_row_icon_cols;
-    var max_row: u16 = 0;
-    for (names, 0..) |name, i| {
-        if (i > @as(usize, std.math.maxInt(u16)) / sidebar_line_base) break; // slot*32+…가 u16 한도 안에 들게
-        // 에이전트 아이콘: 슬롯 세로 중앙(count=1) col 0에 따로 — 3줄 블록과 무관하게 워크스페이스 가운데 고정.
-        // 텍스트 줄은 아이콘이 있으면 icon_cols만큼 우측에서 시작(아이콘과 안 겹치게).
-        const agent_cp: u21 = if (i < agents.len) agents[i] else 0;
-        const inline_cp0: u21 = if (i < inline_icons.len) inline_icons[i] else 0;
-        // 인라인 아이콘이 있는 행 = 카드 **하위 목록**이므로 행 전체를 `session_row_indent_cols`만큼 들여쓴다
-        // (사용자 요청 — 카드와 목록의 위계가 안 보였다). gutter 행은 종전대로 아이콘 자리만큼만 민다.
-        const text_col: u16 = if (agent_cp != 0) icon_cols else if (inline_cp0 != 0) session_row_indent_cols else 0;
-        if (agent_cp != 0 and agent_cp != icon_slot_reserve) {
-            const icon_row = sidebarGlyphRow(i, 0, 1);
-            try cells.append(allocator, .{ .row = icon_row, .col = 0, .codepoint = agent_cp, .width = 2, .style = style });
-            max_row = @max(max_row, icon_row);
-        }
-        // 이름줄 선두 아이콘(gutter의 대안 — 위 `inline_icons` 문서 참조). 아이콘은 `text_col`에 놓고 **이름줄만**
-        // 그만큼 밀어, 보조줄(폴더·브랜치·응답)은 3칸을 그대로 쓴다. gutter처럼 모든 줄을 밀지 않는 것이 요점이다.
-        const inline_cp: u21 = inline_cp0;
-        const name_text_col: u16 = if (inline_cp != 0) text_col +| icon_cols else text_col;
-        // 이 탭의 줄 모으기: 이름(항상) + 브랜치(있으면) + 경로(있으면) + 상태(에이전트면). 순서대로 line_index
-        // 0,1,2,3을 부여. 빈 보조줄("")은 건너뛰어 1~4줄이 된다.
-        // widen[j]: 그 줄이 maru가 아이콘을 박는 보조줄(branch/folder)이면 true → 등록 아이콘을 2칸 렌더. 이름줄·
-        // 상태줄(사용자/에이전트 텍스트)은 false라, 거기에 우연히 등록 PUA cp(Nerd Fonts MDI 등)가 와도 폭이 안 커진다
-        // (rename caret 예약 renameDisplayWidth는 1칸 셈 — 일치 유지). branches/paths만 widen, 나머지 false.
-        var lines: [4][]const u8 = undefined;
-        var line_widen: [4]bool = undefined;
-        var n: u16 = 0;
-        lines[n] = name;
-        line_widen[n] = false;
-        n += 1;
-        if (i < branches.len and branches[i].len > 0) {
-            lines[n] = branches[i];
-            line_widen[n] = true; // 브랜치줄 octocat
-            n += 1;
-        }
-        if (i < paths.len and paths[i].len > 0) {
-            lines[n] = paths[i];
-            line_widen[n] = true; // 폴더줄 folder 아이콘
-            n += 1;
-        }
-        if (i < statuses.len and statuses[i].len > 0) {
-            lines[n] = statuses[i];
-            line_widen[n] = false;
-            n += 1;
-        }
-        const active = active_row != null and active_row.? == i;
-        // 고정 핀(📌): 이름줄(line 0) **우측 끝**에 둔다 — 선두 칼럼은 동작/활성 마커(·/*, 호출자가 이름 prefix로 붙임)
-        // 전용이라 핀이 그걸 가리지 않게(사용자 요청). 핀은 width 2 + 컬러 이모지(빨간 핀, style.fg 무관)다. **cols-1은
-        // 우측 패딩 1칸으로 예약**돼 있으므로(아래 end_col 주석: glyph_pad가 마지막 칸을 ~0.5칸 우측으로 밀어 경계 넘침),
-        // 핀의 오른쪽 끝이 cols-2가 되도록 비호버는 pin_col=cols-3(→ cols-3,2 차지·cols-1 패딩 보존)에 둔다. 호버 슬롯이면
-        // 닫기 ✕가 cols-2(width 1)에 오므로 핀은 그 왼쪽 pin_col=cols-5(→ cols-5,4·cols-3 gap·cols-2 ✕·cols-1 패딩)에.
-        // 폭이 좁아 핀이 text_col을 침범하면 생략(degrade).
-        const pinned_here = i < pinned.len and pinned[i];
-        const close_here = i < close_rows.len and close_rows[i];
-        // ✕ 열은 chrome이 단일 출처(`close_col_from_end`)이고 핀은 그 기준으로 자리를 잡는다 — 리터럴을 따로
-        // 두면 ✕만 옮겨졌을 때 핀이 그 위에 겹친다.
-        const close_from_end = sidebar_component.close_col_from_end;
-        const pin_col: u16 = if (close_here) (cols -| (close_from_end + 3)) else (cols -| close_from_end);
-        const draw_pin = pinned_here and cols >= 2 and pin_col > text_col;
-        const name_row = sidebarGlyphRow(i, 0, n); // 이름줄(line 0) — j==0 줄과 핀이 공유(중복 계산 제거)
-        // 활동 시각은 이름줄 우측(✕ 왼쪽)에 고정 폭으로 앉는다. 폭이 0이면 자리를 잡지 않아 제목이 끝까지 간다.
-        const age_text: []const u8 = if (i < ages.len) ages[i] else "";
-        const age_cols: u16 = @intCast(@min(age_text.len, @as(usize, sidebar_component.relative_age_cols)));
-        var j: u16 = 0;
-        while (j < n) : (j += 1) {
-            const row = if (j == 0) name_row else sidebarGlyphRow(i, j, n);
-            // 이름줄(j==0)만 활성 강조(active_fg+bold), 보조줄(브랜치·경로·상태)은 흐린 fg. bold는 셰이퍼가 bold face 선택.
-            const row_style: terminal.Style = if (active and j == 0) .{ .foreground = active_fg, .bold = true } else style;
-            // OSC 0/2(신뢰 불가)라 깨진 UTF-8은 U+FFFD, 폭 넘으면 "…" 말줄임(appendEllipsizedTitle 단일 출처).
-            // **우측 패딩 1칸 예약(cols-1)**: 카드 글리프는 렌더러가 glyph_pad(=cw×0.5)만큼 오른쪽으로 미는데,
-            // end_col=cols면 마지막 칸이 사이드바 경계를 반 칸 넘쳐 말줄임/텍스트가 경계에 붙어 답답했다(사용자
-            // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 glyph_pad와 균형이 맞는다.
-            // 핀이 있는 이름줄(j==0)은 핀 앞(pin_col)에서 잘라 긴 이름이 핀을 덮지 않게 한다(✕는 호버 전용이라 종전대로 overpaint).
-            // ✕가 **고정 표시**로 바뀌었으므로 제목도 그 왼쪽에서 멈춰야 한다 — 예전엔 호버 순간에만 겹쳤지만 이제
-            // 긴 이름·경로의 말줄임표 위에 ✕가 영구히 덧그려진다(code-review max). ✕는 cols-3이라 제목은 cols-4까지.
-            const close_limit: u16 = if (close_here) (cols -| 4) else (cols -| 1);
-            // 활동 시각이 있으면 이름줄 제목은 그 **왼쪽**에서 멈춘다(시각 폭 + 간격 1칸). 안 그러면 긴 제목의
-            // 말줄임표 위에 시각이 덧그려져 둘 다 못 읽는다 — ✕에서 겪은 것과 같은 문제다.
-            //
-            // 예약은 실제 글자 수가 아니라 **고정 폭**(relative_age_cols)으로 잡는다. 실제 폭을 쓰면 `5m`인 행과
-            // `12m`인 행의 제목이 서로 다른 col에서 잘려, 폭 상한을 둔 이유(잘리는 지점이 행마다 흔들리지 않게)가
-            // 무효가 된다(code-review max).
-            const age_limit: u16 = if (j == 0 and age_cols > 0) close_limit -| (sidebar_component.relative_age_cols + 1) else close_limit;
-            const end_col: u16 = if (j == 0 and draw_pin) @min(pin_col, age_limit) else age_limit;
-            // rename 중인 슬롯의 **이름줄(j==0)만** tail 앵커 — 긴 이름을 칠 때 선두를 "…"로 자르고 끝(caret)을 보여준다(탭·pane과 같은 규칙).
-            // 보조줄(브랜치·경로·상태)은 rename 중 숨겨지므로 j>0은 늘 head다(편집 중엔 이름줄만 남는다).
-            const line_anchor: text_layout.Anchor = if (j == 0 and editing_row != null and editing_row.? == i) .tail else .head;
-            _ = try appendEllipsizedTitle(allocator, &cells, &pool, lines[j], row, if (j == 0) name_text_col else text_col, end_col, row_style, line_widen[j], line_anchor);
-            max_row = @max(max_row, row);
-        }
-        // 이름줄 선두 아이콘 셀. 색은 `style`(브랜드 색칠 루프가 codepoint로 다시 집는다) — 활성 행의
-        // active_fg+bold는 **글자에만** 적용한다(아이콘을 bold로 만들면 셰이퍼가 다른 face를 고른다).
-        // 이름줄이 아이콘조차 못 담는 폭이면 생략한다(핀의 degrade와 같은 규율).
-        if (inline_cp != 0 and inline_cp != icon_slot_reserve and name_text_col <= cols) {
-            try cells.append(allocator, .{ .row = name_row, .col = text_col, .codepoint = inline_cp, .width = 2, .style = style });
-            max_row = @max(max_row, name_row);
-        }
-        // 핀 글리프: 이름줄(name_row, n줄 블록 중앙) 우측. 컬러 이모지라 style.fg와 무관(빨간 핀 고정).
-        if (draw_pin) {
-            try cells.append(allocator, .{ .row = name_row, .col = pin_col, .codepoint = sidebar_pin_glyph, .width = 2, .style = style });
-            max_row = @max(max_row, name_row);
-        }
-        // 활동 시각: 이름줄 우측 정렬. 보조줄이 아니라 이름줄에 두는 이유는 그 행이 "무엇을/언제"를 한 줄로 답해야
-        // 하기 때문이다. 색은 보조줄과 같은 흐린 fg — 제목과 경쟁하면 안 된다.
-        if (age_cols > 0) {
-            // 핀이 있으면 그 **왼쪽**에 둔다. 예전엔 핀을 전혀 고려하지 않아 둘이 같은 칸에 덧그려질 수 있었다 —
-            // 지금 호출부는 그런 행을 만들지 않지만(에이전트 행은 pins=false) 공개 draw-list API의 계약이므로
-            // 여기서 지킨다(code-review max). 우측 정렬이라 고정 폭 슬롯의 오른쪽 끝에 붙인다.
-            const age_right: u16 = if (draw_pin)
-                pin_col -| 1
-            else if (close_here) (cols -| 4) else (cols -| 1);
-            const age_start: u16 = age_right -| age_cols;
-            var ac: u16 = 0;
-            var au = std.unicode.Utf8View.initUnchecked(age_text).iterator();
-            while (au.nextCodepoint()) |cp| {
-                if (ac >= age_cols) break;
-                try cells.append(allocator, .{ .row = name_row, .col = age_start + ac, .codepoint = cp, .width = 1, .style = style });
-                ac += 1;
-            }
-            max_row = @max(max_row, name_row);
-        }
-    }
-
-    // 닫기 ✕ 아이콘: `close_rows[i]`인 **모든 행** 우측 안쪽 col에 glyph 1개(호버 전용이 아니라 고정 표시 —
-    // 사용자 요청). cols가 2칸 이상일 때만(우측 여백
-    // 확보). 제목이 길어 같은 col에 겹치면 painter 순서로 ✕가 위에 그려진다(긴 제목 자름은 후속).
-    for (close_rows, 0..) |want_close, cr| {
-        if (want_close and cr < names.len and cr <= @as(usize, std.math.maxInt(u16)) / sidebar_line_base and cols >= 2) {
-            // ✕는 그 슬롯 이름줄(line 0)에. 슬롯 줄 수(이름+브랜치?+경로?+상태?)로 인코딩해 블록 중앙 정렬과 일치시킨다.
-            var n: u16 = 1;
-            if (cr < branches.len and branches[cr].len > 0) n += 1;
-            if (cr < paths.len and paths[cr].len > 0) n += 1;
-            if (cr < statuses.len and statuses[cr].len > 0) n += 1;
-            const x_row = sidebarGlyphRow(cr, 0, n);
-            try cells.append(allocator, .{
-                .row = x_row,
-                // 열 위치는 chrome `close_col_from_end` 단일 출처다. hit-test(`sidebar.closeButton`)가 같은
-                // 값에서 x 구간을 내므로 "보이는 칸 = 눌리는 칸"이 구조적으로 보장된다.
-                .col = cols -| sidebar_component.close_col_from_end,
-                .codepoint = sidebar_close_glyph,
-                .width = 1,
-                .style = style,
-            });
-            max_row = @max(max_row, x_row);
-        }
-    }
-
-    // 사이드바 하단 "+"(새 워크스페이스) 버튼 — 탭 목록 아래 슬롯(plus_row, 보통 탭 개수) 중앙(1줄)에 '+' glyph 1개를
-    // 가로 중앙에 그린다. 렌더러가 사이드바 셀을 슬롯 높이로 배치하므로 마지막 탭 슬롯 아래에 놓인다.
-    if (plus_row) |pr| {
-        if (pr <= @as(usize, std.math.maxInt(u16)) / sidebar_line_base) {
-            const prow = sidebarGlyphRow(pr, 0, 1); // "+" 슬롯 중앙(1줄)
-            try cells.append(allocator, .{
-                .row = prow,
-                .col = cols / 2, // 가로 중앙
-                .codepoint = '+',
-                .width = 1,
-                .style = style,
-            });
-            max_row = @max(max_row, prow);
-        }
-    }
-
-    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
-    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
-    const owned_pool = try pool.toOwnedSlice(allocator);
-    errdefer allocator.free(owned_pool);
-    return .{
-        .size = .{ .cols = cols, .rows = max_row + 1 },
-        .cursor = .{ .row = 0, .col = 0, .visible = false },
-        .dirty = .{ .start_row = 0, .end_row = max_row },
-        .cells = try cells.toOwnedSlice(allocator),
-        .grapheme_pool = owned_pool,
-        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
-    };
 }
 
 /// per-pane 가로 탭 바의 제목 glyph DrawList를 합성한다 — 사이드바(세로, 행=탭)와 달리 **모든 탭을
@@ -1741,12 +1506,12 @@ test "buildSidebarDrawList lays tab titles into per-row draw cells, truncating t
 
     // 보조줄 없음(branches/paths 빈) → 각 탭 1줄(line_count=1, 슬롯 중앙). size.rows = 마지막 행 + 1.
     try std.testing.expectEqual(@as(u16, 10), draw_list.size.cols);
-    try std.testing.expectEqual(sidebarGlyphRow(1, 0, 1) + 1, draw_list.size.rows);
+    try std.testing.expectEqual(sidebar_glyph_rows.encode(1, 0, 1) + 1, draw_list.size.rows);
     try std.testing.expectEqual(@as(usize, 6), draw_list.cells.len); // "zsh"(3) + "vim"(3)
     try std.testing.expectEqual(sidebarGlyphRow(0, 0, 1), draw_list.cells[0].row);
     try std.testing.expectEqual(@as(u16, 0), draw_list.cells[0].col);
     try std.testing.expectEqual(@as(u21, 'z'), draw_list.cells[0].codepoint);
-    try std.testing.expectEqual(sidebarGlyphRow(1, 0, 1), draw_list.cells[3].row); // 둘째 탭(slot 1)
+    try std.testing.expectEqual(sidebar_glyph_rows.encode(1, 0, 1), draw_list.cells[3].row); // 둘째 탭(slot 1)
     try std.testing.expectEqual(@as(u21, 'v'), draw_list.cells[3].codepoint);
     // UI 텍스트라 커서/overlay 없음.
     try std.testing.expect(!draw_list.cursor.visible);
@@ -1772,7 +1537,7 @@ test "buildSidebarDrawList multi-line card: name/branch/path stack; empty aux li
         if (c.codepoint == 'a' and c.row == sidebarGlyphRow(0, 0, 3)) name0 = true; // "maru"의 a
         if (c.codepoint == 0x251C and c.row == sidebarGlyphRow(0, 1, 3)) branch1 = true; // ├ 브랜치줄
         if (c.codepoint == '~' and c.row == sidebarGlyphRow(0, 2, 3)) path2 = true; // 경로줄
-        if (c.codepoint == 'd' and c.row == sidebarGlyphRow(1, 0, 1)) tab1 = true; // 1줄 탭
+        if (c.codepoint == 'd' and c.row == sidebar_glyph_rows.encode(1, 0, 1)) tab1 = true; // 1줄 탭
     }
     try std.testing.expect(name0);
     try std.testing.expect(branch1);
@@ -1863,10 +1628,10 @@ test "buildSidebarDrawList inline_icons: name line only shifts; aux lines keep f
     try std.testing.expect(aux_unshifted);
 
     // (4) reserve 행: 글리프 셀은 안 나오지만 이름은 같은 열에서 시작한다(라벨 좌단 정렬).
-    for (dl.cells) |c| try std.testing.expect(c.codepoint != icon_slot_reserve or c.row != sidebarGlyphRow(1, 0, 1));
+    for (dl.cells) |c| try std.testing.expect(c.codepoint != icon_slot_reserve or c.row != sidebar_glyph_rows.encode(1, 0, 1));
     var reserved_shifted = false;
     for (dl.cells) |c| {
-        if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) {
+        if (c.codepoint == 'z' and c.row == sidebar_glyph_rows.encode(1, 0, 1)) {
             try std.testing.expectEqual(ind + 3, c.col);
             reserved_shifted = true;
         }
@@ -1890,7 +1655,7 @@ test "buildSidebarDrawList icon_slot_reserve: icon-less rows keep the same label
         var z_col: ?u16 = null;
         for (dl.cells) |c| {
             if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 0, 1)) m_col = c.col;
-            if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) z_col = c.col;
+            if (c.codepoint == 'z' and c.row == sidebar_glyph_rows.encode(1, 0, 1)) z_col = c.col;
             // 센티널은 글리프를 내지 않는다.
             try std.testing.expect(c.codepoint != icon_slot_reserve);
         }
@@ -1906,7 +1671,7 @@ test "buildSidebarDrawList icon_slot_reserve: icon-less rows keep the same label
         var z_col: ?u16 = null;
         for (dl.cells) |c| {
             if (c.codepoint == 'm' and c.row == sidebarGlyphRow(0, 0, 1)) m_col = c.col;
-            if (c.codepoint == 'z' and c.row == sidebarGlyphRow(1, 0, 1)) z_col = c.col;
+            if (c.codepoint == 'z' and c.row == sidebar_glyph_rows.encode(1, 0, 1)) z_col = c.col;
             try std.testing.expect(c.codepoint != icon_slot_reserve);
         }
         try std.testing.expectEqual(m_col, z_col);
@@ -2496,7 +2261,7 @@ test "buildSidebarDrawList truncates to cols and advances wide glyphs by two col
     var row1_i: usize = 0;
     for (draw_list.cells) |c| {
         if (c.row == sidebarGlyphRow(0, 0, 1)) row0 += 1;
-        if (c.row == sidebarGlyphRow(1, 0, 1) and row1_i < 2) {
+        if (c.row == sidebar_glyph_rows.encode(1, 0, 1) and row1_i < 2) {
             row1_cols[row1_i] = c.col;
             row1_i += 1;
         }
@@ -2692,7 +2457,7 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
         var dl = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]u21{}, &[_]bool{}, 10, dim, &.{}, &.{}, null, 1, bright, null);
         defer dl.deinit(allocator);
         for (dl.cells) |c| {
-            const active = c.row == sidebarGlyphRow(1, 0, 1); // slot 1(활성) 1줄 행
+            const active = c.row == sidebar_glyph_rows.encode(1, 0, 1); // slot 1(활성) 1줄 행
 
             try std.testing.expectEqual(if (active) bright else dim, c.style.foreground);
             try std.testing.expectEqual(active, c.style.bold);
@@ -2830,7 +2595,7 @@ test "buildSidebarDrawList: close_rows로 지정한 행 우측에 닫기 ✕(우
     for (hovered.cells) |c| {
         if (c.codepoint == sidebar_close_glyph) {
             close_count += 1;
-            try std.testing.expectEqual(sidebarGlyphRow(1, 0, 1), c.row);
+            try std.testing.expectEqual(sidebar_glyph_rows.encode(1, 0, 1), c.row);
             try std.testing.expectEqual(@as(u16, 7), c.col); // cols(10) - 3(우측 두 칸 여백)
         }
     }
@@ -2951,7 +2716,7 @@ test "buildSidebarDrawList draws a '+' button row below the tabs when plus_row i
     // plus_row=null이면 "+" 없음, rows = 마지막 탭(slot 1, single) 행 + 1.
     var no_plus = try buildSidebarDrawList(allocator, &titles, &[_][]const u8{}, &[_][]const u8{}, &[_][]const u8{}, &[_]u21{}, &[_]u21{}, &[_]bool{}, 10, .default, &.{}, &.{}, null, null, .default, null);
     defer no_plus.deinit(allocator);
-    try std.testing.expectEqual(sidebarGlyphRow(1, 0, 1) + 1, no_plus.size.rows);
+    try std.testing.expectEqual(sidebar_glyph_rows.encode(1, 0, 1) + 1, no_plus.size.rows);
     for (no_plus.cells) |c| try std.testing.expect(c.codepoint != '+');
 }
 

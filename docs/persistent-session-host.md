@@ -51,11 +51,18 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다.
 > 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
 > `runtime-handle + runtime-state="ended"`를 owned 상태로 반복 저장하고, 두 번째 이후 재실행에서 host
-> probe·attach·새 셸 spawn 0을 자동 gate로 고정하는 durable tombstone이다. incremental checkpoint, 외부
-> `maru attach` CLI, 다중 app **process**(현재 daemon serial), mouse/resize/observation RPC와 delta push의 완전한 async bounded
-> socket event-loop 통합, GUI 부재 시 OS 배너, **host-backed echo 지연 제거(이벤트 기반
-> push — §perf, 백로그)**, **기본값 `true` 전환** 등은 **후속/백로그**다. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료
-> 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
+> probe·attach·새 셸 spawn 0을 자동 gate로 고정하는 durable tombstone이다.
+>
+> **후속/백로그**(2026-08-24 코드 대조로 정리): incremental checkpoint, GUI 부재 시 OS 배너, **기본값 `true`
+> 전환**. 이 문서는 그 목표 상태를 함께 기술한다 — **구현 완료 여부는 각 절의 "구현 상태" 표식으로
+> 구분한다**(표식 없는 서술은 목표 설계).
+>
+> ✅ **옛 목록에 남아 있던 셋은 이미 구현됐다**(그대로 둔 탓에 실제로 오독이 났다 — 이미 닫힌 항목을 남은
+> 블로커로 세어 우선순위를 잘못 매겼다): host-backed **echo 지연 제거**(reader→self-pipe→poll owner wake — §perf),
+> 외부 **`maru attach` CLI**(`cli/attach.zig`), **다중 app process**(§P5a1 이 이미 「T0b2b 가 serial serve
+> loop 를 listener+32-client single-owner poll reactor 로 교체했다」고 적어 두었고, 아래 §P3-e3-4d 에 실측을
+> 더했다). RPC·delta push 의 async 통합은 그 리액터가 listener·client·wake fd 를 한 poll 집합에서 처리하는
+> 데까지 왔고, «완전한» 범위(mouse/resize/observation 전부)는 절별 표식을 따른다.
 
 ## 1. 결론
 
@@ -360,10 +367,16 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
 - **구현 상태(P3-e3-4d) ✅**: 위 "앱 전역 connection 하나 공유"는 구현됐다 — 원격 backend/연결이 `AppSession`(창) 필드가
   아니라 **모듈-전역**(app process당 하나, `app_runtime` 옆)이라 창을 여러 개 열어도 연결·backend를 공유한다(첫 창이 세우고
   이후 창은 재사용; 창 close는 그 창의 원격 Term만 회수하고 공유 backend는 안 닫는다 — `routing`/`live_registry`와 동일).
-  창별로 연결하던 초기 배선은 두 번째 창이 handshake 타임아웃→in-process 폴백하는 버그였다(전역화로 해소). **단 현재 daemon은
-  serial serve**(한 connection을 그 client 수명 내내 처리)라, 아래 "두 GUI **process** 동시 실행"은 아직 미지원이다 — 두 번째
-  app process는 handshake 타임아웃 후 notice를 예약하고 in-process로 폴백한다. 그래서 keep-alive opt-in 단계의
-  **지원 구성은 단일 app instance**(창/Workspace는 몇 개든 무방)다.
+  창별로 연결하던 초기 배선은 두 번째 창이 handshake 타임아웃→in-process 폴백하는 버그였다(전역화로 해소).
+
+  ✅ **daemon 은 더 이상 serial 이 아니다**(2026-08-24 정정). 근거가 둘이다 — ⑴ **문서 자신**: §P5a1 이
+  「T0b2b 가 이미 serial serve loop 를 listener+32-client single-owner poll reactor 로 교체했다」고 적어 두었다
+  (즉 이 문단은 그때부터 §P5a1 과 모순이었다). ⑵ **실측**: 실 fork host 에 client 를 **둘 붙여** 각각 runtime
+  을 띄웠고 둘째 연결의 handshake 도 통과했다. 코드에서도 `acceptAllowed` 가 `active_count < max_clients`(32)
+  로 판정한다.
+  ⚠️ 다만 확인한 것은 **daemon 층**이다. 두 GUI process 가 같은 runtime 집합을 어떻게 나눠 갖는지(소유권·
+  lease·workspace 바인딩)는 별개 축이고, 그 서술은 §P4 lifetime lease 절이 소유한다. 「지원 구성은 단일 app
+  instance」라는 옛 결론은 그 축이 정리되기 전까지의 **운영 권고**로만 읽는다.
 - host 연결 실패는 조용히 폴백하지 않고 **실패 단계와 사유를 함께** 알린다. 단계는 `exe_path`(형제 `maru` 경로 부재)·
   `cache_base`(캐시 base 부재)·`connect`(`connectOrLaunchDetailed` 실패, 이때만 `FailureReason` 동반)·`adapter`(연결 후
   adapter/pool/backend 구성 실패)·`runtime_death`(실행 중 host 연결 사망)로 구분하고, `stage=…[ reason=…]` 한 줄을

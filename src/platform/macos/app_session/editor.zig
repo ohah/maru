@@ -899,16 +899,34 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     }
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
-    // **낡은 스냅숏으로 놓았던 검색 자리를 여기서 다시 잡는다**(그 필드 doc). 이 시점이면
-    // 스냅숏도 시각 행 수도 이 프레임의 것이다. 두 번 돌지 않는다 — 다시 잡을 때는 신선하므로
-    // 플래그가 다시 서지 않는다.
-    if (term.rt.editor_find_reveal_pending) {
-        term.rt.editor_find_reveal_pending = false;
-        revealCurrentFindMatch(self, term);
-    }
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
     term.rt.editor_max_top_line = pf.max_top_line;
     term.rt.editor_max_top_piece = pf.max_top_piece;
+
+    // **낡은 스냅숏으로 놓았던 검색 자리를 여기서 다시 잡는다**(그 필드 doc). 이 시점이면
+    // 스냅숏도 시각 행 수도 이 프레임의 것이다.
+    //
+    // **파생값 대입보다 뒤여야 한다.** 재조준이 접힘을 펴면 `invalidateFoldDerived`가
+    // `total_visual_rows`·`max_top_*`를 0으로 버리는데, 앞에 두면 위 세 줄이 **더 이상 없는
+    // 배치의 값으로 그것을 되살린다**(적대적 검증 2026-08-24 실측: `total_visual=0`인데
+    // `max_top=87`). 그 뒤 막대 드래그는 `max_top_line`만 보고 clamp하므로 없는 자리로 간다.
+    //
+    // **이 순서를 재는 판정자는 없다.** 세 번 시도해 세 번 다 픽스처가 그 상태를 못 만들었고
+    // (재조준을 앞으로 되돌린 뮤턴트가 매번 살아남았다), **판정 안 하는 판정자를 두느니 공백을
+    // 적기로 했다.** 이 슬라이스가 반복한 잘못이 그 반대였다 — 재는 척하는 판정자를 두는 것.
+    // 근거는 실측 하나(위 수치)와 구조뿐이다: 무효화가 대입보다 먼저 나야 살아남는다.
+    //
+    // **비교 Term에서는 안 돈다.** 그쪽 꼬리는 `storeDiffHitRows`가 `editor_diff_hit_*`만 세우고
+    // `editor_hit_geom`을 안 건드리므로, 여기서 신선도를 물으면 **비교 이전 배치의 스냅숏**을
+    // 근거로 삼는다. 오늘은 `isFindTarget`이 막아 무해하지만 그 가드 하나에 걸쳐 두지 않는다.
+    if (term.rt.editor_find_reveal_pending and term.rt.editor_diff == null) {
+        term.rt.editor_find_reveal_pending = false;
+        revealCurrentFindMatch(self, term);
+        // **`metal_dirty`만으로는 부족하다** — 같은 tick 뒤쪽의 소거가 그것을 삼킨다(그 자리 doc).
+        // 이 축은 소거를 지나 살아남아 다음 tick이 새 자리를 그리게 한다. 이것이 없으면 자리는
+        // 맞고 화면은 옛 자리에 멈춘다(적대적 검증 2026-08-24 실측: tick 12번을 더 돌려도).
+        self.reproject_after_frame = true;
+    }
     // **막대 기하를 창 좌표로 옮겨 싣는다.** 컴포넌트는 pane 상대(원점 0,0)로 그리고 포인터는 창
     // 좌표로 오므로, 같은 축에서 비교하지 않으면 보이는 자리와 잡히는 자리가 갈린다. 여백(`inset`)은
     // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
@@ -1684,9 +1702,12 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     // **스냅숏이 이 화면을 설명하는가.** 세로 위치만 묻던 초판은 위치를 안 바꾸면서 배치를
     // 바꾸는 것들(접힘·랩·탭 폭·폰트 크기)을 못 봤다 — 그 창에서 다시 "이미 보인다"고 답했다.
     // 아래 값들은 전부 **여기서 라이브로 다시 읽을 수 있는 것**이라 대조가 성립한다.
+    // **`geom.drawn`은 안 본다.** 위 `rows == 0` 조기 반환이 이미 "한 번도 안 그렸다"를 걸러
+    // 낸다(`storeHitRows`가 `drawn`과 `editor_hit_rows_len`을 한 단위로 세우고 실패 경로는
+    // 행 수를 0으로 남긴다). 대조식에 넣어 두었더니 **뮤턴트가 살아남았고**, 그것은 판정자가
+    // 없다는 뜻이 아니라 **그 항이 아무 일도 안 한다**는 뜻이었다(적대적 검증 2026-08-24).
     const geom = term.rt.editor_hit_geom;
-    const snapshot_is_current = geom.drawn and
-        geom.top_line == term.rt.editor_first_line and
+    const snapshot_is_current = geom.top_line == term.rt.editor_first_line and
         geom.top_piece == term.rt.editor_first_piece and
         geom.visible_len == editorLines(term).len and
         geom.wrap == (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) and
@@ -1716,7 +1737,16 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     // 못 올려 **두 번 눌러야 보였다**(적대적 검증 2026-08-24).
     //
     // 다음 프레임이 **둘 다** 이 배치의 값으로 갱신하므로 그 끝에서 다시 잡으면 정확하다.
-    // 원격 find가 `remote_find_scroll_pending`으로 쓰는 그 패턴이고, 사용자에게는 한 틱이다.
+    // 원격 find가 `remote_find_scroll_pending`으로 쓰는 그 패턴이다.
+    //
+    // **최대 두 번 돈다.** 재조준이 접힘을 펴면 보이는 줄 수가 그 자리에서 또 바뀌어 신선도
+    // 대조가 다시 어긋나고 한 번 더 예약된다 — 그때는 펼 것이 없어 거기서 멈춘다(적대적 검증
+    // 2026-08-24가 실측했고, 랩·접힘·긴 줄 조합 다섯을 8프레임씩 돌려 **진동은 없음**을 확인했다).
+    // 초판 주석은 "두 번 돌지 않는다"고 적었는데 그것이 틀렸다.
+    //
+    // **비용은 프레임 하나다** — 재조준이 도는 그 프레임은 이미 옛 자리로 그려졌고, 새 자리는
+    // 그다음 프레임이 그린다. 그 프레임을 **예약하는 것까지가 이 장치의 일이다**(`reproject_after_frame`):
+    // `metal_dirty`만 세우면 같은 tick의 소거가 삼켜 **자리는 맞고 화면은 안 바뀐다**.
     //
     // **여기서 추측을 더 잘하려 하지 않는다.** "낡았을 때는 맨 위 가까이" 같은 특례를 넣어 봤지만
     // 재조준이 어차피 바로잡으므로 **아무 판정자도 그 특례를 재지 못했다** — 장치가 둘이면
@@ -2954,6 +2984,9 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
     term.rt.editor_find_marks = &.{};
     term.rt.editor_find_mark_buf = &.{};
+    // **예약도 Term과 함께 사라진다.** `drawn` 필드 doc이 적은 규율("한 단위로 세우고 한 단위로
+    // 지운다")의 예외를 그 규율을 적은 커밋이 만들어 두었다(적대적 검증 2026-08-24).
+    term.rt.editor_find_reveal_pending = false;
 }
 
 fn dropFoldState(self: *AppSession, term: *Term) void {
@@ -9558,6 +9591,14 @@ test "EM12 조각 축 스냅숏 낡음도 잡는다 — 긴 줄 안을 굴린 �
     // ⑴ `drawnDocLines`가 **낡은 스냅숏**의 값이라 기대값이 제품과 같은 실수를 공유했고,
     // ⑵ 여유가 3줄뿐이라 픽스처가 조금만 달라지면 아무것도 안 재게 된다(적대적 검증 2026-08-24).
     // 바로 앞줄이 스스로 넣은 `first_piece = 0`을 다시 재던 단언도 공허해서 걷어냈다.
+    // **먼저 "굴렀는가"를 잰다.** `shown`만 보면 **지난 프레임의 배열이 남아 있어** 아무것도 안
+    // 해도 참이 된다 — 실측으로 이 판정자는 프레임을 **0개** 그려도 초록이었다(적대적 검증
+    // 2026-08-24, 뮤턴트 R4b). 5라운드가 "자기가 넣은 값을 다시 잰다"며 위치 단언을 걷어내면서
+    // **4라운드가 닫은 조각 축 구멍(P4)을 다시 열었다.**
+    //
+    // 자기참조를 피하려고 **부등식**만 쓴다: 조각 축이 낡았으니 자리는 반드시 30보다 위로 간다.
+    try testing.expect(term.rt.editor_first_line < 30);
+
     // 프레임 둘 — 첫 프레임이 스냅숏을 갱신하고 재조준이 돌며, 둘째가 그 자리를 그린다(EM13 참조).
     for (0..2) |_| {
         var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
@@ -9618,11 +9659,22 @@ test "EM13 배치가 바뀌면 스냅숏을 안 믿는다 — 랩을 켜고 프�
     // 첫 Enter가 매치를 못 올렸고 **두 번 눌러야 보였다**(적대적 검증 2026-08-24 실측).
     //
     // **프레임을 둘 그린다.** 첫 프레임이 스냅숏과 `editor_total_visual_rows`를 이 배치의 값으로
-    // 갱신하고 그 끝에서 재조준이 돌며(`editor_find_reveal_pending`), 둘째 프레임이 그 자리를
-    // 그린다. 제품에서는 `metal_dirty`가 두 tick을 이어 주므로 사용자에게 한 틱으로 보인다.
-    for (0..2) |_| {
+    // 갱신하고 그 끝에서 재조준이 돌며(`editor_find_reveal_pending`), 둘째 프레임이 그 자리를 그린다.
+    //
+    // **여기는 그 두 프레임이 실제로 온다고 가정한다** — 그 가정(재조준이 다음 프레임을 예약하는가)은
+    // 이 판정자가 원리적으로 못 잰다. `PaneFixture`는 경량이라 `tick()`이 렌더 경로를 안 타고,
+    // `appendPaneFrame`을 직접 부르는 판정자는 **그 함수 바깥의 배선을 못 본다**. 실제로 그
+    // 배선이 끊겨 있었고(같은 tick의 `metal_dirty` 소거가 삼켰다) 이 판정자는 초록이었다
+    // (적대적 검증 2026-08-24). **그 축은 `EF8`이 제품 `tick()`으로 잰다** — 단위 판정자를 둘 때는
+    // 같은 축을 종단으로 한 번 더 재는 짝을 세운다.
+    for (0..2) |i| {
         var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
         after.dl.deinit(allocator);
+        // **첫 프레임 뒤에는 예약이 소진돼 있어야 한다.** 재조준이 `storeHitRows` **앞**에 있으면
+        // 그 프레임이 그린 자리와 굳힌 행 배열이 갈리고(픽셀은 7..23인데 장부는 16..32) 예약이
+        // 다시 선다 — 그 상태를 아무도 안 재고 있었다(적대적 검증 2026-08-24, 뮤턴트 R3).
+        // 이 픽스처에는 접힘이 없으므로 재조준은 한 번이면 끝난다(접히면 최대 두 번 — 그 doc).
+        if (i == 0) try testing.expect(!term.rt.editor_find_reveal_pending);
     }
     const shown = for (term.rt.editor_hit_lines[0..term.rt.editor_hit_rows_len]) |dl| {
         if (dl == target) break true;
@@ -9701,4 +9753,66 @@ test "EM14 신선도 대조의 **모든 축**이 하중을 진다 — 하나만 
             try testing.expect(term.rt.editor_first_line > 0);
         }
     }
+}
+
+test "[측정] 검색 강조가 프레임마다 문서 전체를 훑는 비용" {
+    // **§5.1이 "아직 측정하지 않았다"고 적어 둔 값이다.** `buildFindMarks`는 dirty 게이트 없이
+    // 매 프레임 돌아 **보이는 줄 전체 × 매치 전체**를 쓴다(`buildSelectionMarks`도 같은 모양이라
+    // 둘이 함께 돈다). 매치 수에 상한을 안 둔 결정의 대가가 저장소만이 아니라 **프레임 시간**에도
+    // 붙는데, 그것을 「한계」가 메모리로만 적고 있었다.
+    //
+    // **판정은 시간이 아니라 마크 수로 한다**(이 파일의 가로 휠 측정과 같은 규율 — 시간은 러너
+    // 부하와 구분이 안 된다). 재는 것: 프레임 하나가 채우는 마크가 **매치 수에 비례**하는지,
+    // 그리고 화면에 그릴 수 있는 수와 얼마나 벌어지는지. 시간은 출력만 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    // 흔한 글자가 잔뜩인 문서 — 사용자가 `e`를 치는 상황이다.
+    for (0..20_000) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "    const value{d} = fetch();\n", .{i}));
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "big.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "big.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    try maru.session.editor.find.findMatches(allocator, term.rt.editor_lines, "e", &fx.session.editor_find_matches);
+    const matches = fx.session.editor_find_matches.items.len;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+
+    var drawn0 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn0.dl.deinit(allocator);
+    const rows = term.rt.editor_hit_rows_len;
+
+    // 프레임 다섯 — 정지 상태인데도 매 프레임 다시 훑는다는 사실을 시간으로 보인다.
+    const t0 = std.Io.Clock.awake.now(fx.session.io).nanoseconds;
+    for (0..5) |_| {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const t1 = std.Io.Clock.awake.now(fx.session.io).nanoseconds;
+
+    // 화면에 그릴 수 있는 마크 수(행 × 본문 폭 상한)와 실제로 채운 수를 견준다.
+    var filled: usize = 0;
+    for (term.rt.editor_find_marks) |r| filled += r.len;
+    std.debug.print(
+        "\n[측정] {d}줄 문서 · 매치 {d}개 · 그린 행 {d}개: 프레임 5개 {d}ms, 채운 마크 {d}개 (버퍼 {d}개)\n",
+        .{ term.rt.editor_lines.len, matches, rows, @divFloor(t1 - t0, std.time.ns_per_ms), filled, term.rt.editor_find_mark_buf.len },
+    );
+
+    // **판정: 채우는 마크가 매치 수에 비례한다.** 화면에 그릴 수 있는 것은 수십인데 수만을 채운다 —
+    // 뷰포트 창으로 좁히면 사라지는 비용이고, 그 개선은 선택 마크와 **함께** 해야 한다(§5.1).
+    // 이 선은 **재앙 감지선**이다: 매치의 절반 이상을 채우면 뷰포트 최적화가 안 들어온 것이다.
+    try testing.expect(filled > matches / 2);
+    // 그리고 버퍼는 문서 전체 매치 수만큼 잡혀 있다(그 필드 doc이 적은 대가).
+    try testing.expect(term.rt.editor_find_mark_buf.len >= matches);
 }

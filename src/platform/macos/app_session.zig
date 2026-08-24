@@ -1847,9 +1847,10 @@ const TermRuntime = struct {
         wrap: bool = false,
         /// 위 값들이 **한 번이라도 채워졌나**. 기본값은 "맨 위를 그렸다"와 구별되지 않는다.
         ///
-        /// **이것은 배치 입력이 아니다** — `storeHitRows`가 `editor_hit_rows_len`과 한 단위로
-        /// 세우고 `releaseEditorTerm`이 한 단위로 지우므로 "그린 적 없음"과 "행 0"이 같이 간다.
-        /// 대조식에 남긴 것은 기본값 `(0,0)`이 "맨 위를 그렸다"와 겹치지 않게 하려는 것뿐이다.
+        /// **신선도 대조에는 안 쓴다** — `storeHitRows`가 이것과 `editor_hit_rows_len`을 한 단위로
+        /// 세우므로 "그린 적 없음"은 `rows == 0`이 이미 걸러 낸다. 대조식에 넣었더니 뮤턴트가
+        /// 살아남았고, 그것은 그 항이 **아무 일도 안 했다**는 뜻이었다(적대적 검증 2026-08-24).
+        /// 필드 자체는 남긴다 — 진단과 앞으로의 판정자가 "이 스냅숏이 실물인가"를 물을 자리다.
         drawn: bool = false,
     } = .{},
     /// 렌더가 쓸 **탭 폭**. 기본값은 `frame.default_tab_width` 하나에서 온다(여기 숫자를 다시 쓰면
@@ -4317,6 +4318,16 @@ pub const AppSession = struct {
     // repack 좌표가 GPU 텍스처에 미반영된다. 이 플래그는 shouldProjectFrame이 sync hold를 우회해 다음 tick에 반드시
     // full 투영(atlas 정합)하도록 강제한다 — full replace 성공 시 해제. metal_dirty만으론 sync hold가 막아 부족하다.
     force_reproject: bool = false,
+    /// **프레임을 만드는 동안** "한 번 더 그려 달라"고 예약된 상태.
+    ///
+    /// `metal_dirty`를 그 자리에서 세우면 같은 tick의 소거가 삼킨다(그 소거 자리의 doc). 그런데
+    /// 그 소거는 self-heal 경로들이 기대는 규율이라 옮길 수 없다 — 그래서 **프레임 안에서 온
+    /// 요청만** 이 축으로 따로 들고 나가 소거 뒤에 다시 세운다.
+    ///
+    /// 지금 쓰는 곳은 검색 재조준 하나다(`editor_find_reveal_pending` — 낡은 스냅숏으로 놓았던
+    /// 자리를 그 프레임의 값으로 다시 잡는다). `force_reproject`를 못 쓰는 이유도 같다: 그것도
+    /// 같은 줄에서 함께 내려간다.
+    reproject_after_frame: bool = false,
     // 이번 tick의 배치(placeAndDistribute)가 할당 실패로 **아무 frame도 못 만든** 상태. 활성 Term이 터미널이면
     // `active_failed`가 이미 replace를 막지만, web이면 그 가드가 비어 있어(터미널 frame이 원래 없다) 사이드바
     // 제목·헤더 아이콘·탭 제목·도크 텍스트가 전부 사라진 프레임이 커밋됐다 — quad만 남아 한 프레임 깜빡였다.
@@ -16547,7 +16558,24 @@ pub const AppSession = struct {
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
                     self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                     sidebar_ops.applySidebarGlyphPyTop(self); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
-                    self.metal_dirty = false;
+                    // **프레임을 만드는 동안 예약된 재투영은 이 소거가 삼키면 안 된다.**
+                    //
+                    // `appendPaneFrame`은 프레임을 다 만든 뒤 검색 재조준을 돌 수 있고(§5.1 —
+                    // 낡은 스냅숏으로 놓았던 자리를 그 프레임의 값으로 다시 잡는다), 그때 세운
+                    // `metal_dirty`가 **같은 tick의 이 줄에 지워져** 새 자리가 영영 안 그려졌다.
+                    // 실측: 자리는 22로 맞는데 화면은 tick 12번을 더 돌려도 옛 자리였고, 손으로
+                    // dirty를 세우자 즉시 보였다(적대적 검증 2026-08-24).
+                    //
+                    // **`metal_dirty`를 게이트에서 미리 소진하지 않는 이유**: 위쪽 self-heal 경로들
+                    // (`placement_failed`·`active_failed`)이 *"replace를 스킵하면 dirty가 유지돼
+                    // 다음 tick에 재빌드된다"*에 기대고 있다. 그 규율을 건드리지 않으려면 소거는
+                    // 여기 남기고, **프레임 안에서 온 요청만 따로 살린다.**
+                    if (self.reproject_after_frame) {
+                        self.reproject_after_frame = false;
+                        self.metal_dirty = true; // 다음 tick이 새 자리를 그린다
+                    } else {
+                        self.metal_dirty = false;
+                    }
                     self.force_reproject = false; // [A] full 투영이 atlas를 GPU에 정합했으므로 강제 재투영 요구 해제(code-review [0])
                     // last_rendered_view_offset은 위(os-tag 블록 직후)에서 빌드 성공/실패 무관하게 이미 기록했다
                     // (성공=render-time, 실패=gate-time 폴백). 여기서 다시 쓰지 않는다.
@@ -35781,9 +35809,12 @@ test "EF6 ⌘G 네비 중 팔레트를 열면 tick이 강조를 되살리지 않
     session.dispatchAppAction(.toggle_command_palette);
     _ = try session.tick();
 
+    // **뷰 단언을 맨 앞에 둔다.** 뒤에 두면 목록 단언이 **먼저** 터져, 이 판정자의 이름
+    // (*"플래그가 아니라 행동을 잰다"*)이 실제로는 목록만 재는 상태가 된다 — 도달하는 유일한
+    // 제품 뮤턴트에서 앞 단언이 먼저 발화한다(적대적 검증 2026-08-24, 뮤턴트 R9/R10).
+    try std.testing.expectEqual(before, term.rt.editor_first_line); // 뷰가 안 튄다
     try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len); // 안 되살아난다
     try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
-    try std.testing.expectEqual(before, term.rt.editor_first_line); // 그리고 뷰가 안 튄다
 }
 
 test "EF7 ⌘F를 다시 열면 빈 상자에 옛 강조가 안 남는다 — `show()`도 목록을 비운다" {
@@ -35836,10 +35867,187 @@ test "EF7 ⌘F를 다시 열면 빈 상자에 옛 강조가 안 남는다 — `s
     try std.testing.expect(session.chrome_host.find.open);
     try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.query.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
-    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len); // 터미널 쪽도 같은 결함이었다
+    // **이 줄은 공허하다** — 활성 pane이 편집기라 터미널 목록은 전후로 0이다(적대적 검증
+    // 2026-08-24, 뮤턴트 R7b/R8이 각각 증명했다). 그래도 두는 이유는 **두 목록이 함께 비는 것이
+    // 계약**이어서다. 터미널 축을 실제로 재는 것은 아래 `EF9`다.
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
     try std.testing.expect(!session.find_nav);
     // 그리고 렌더가 그 Term을 검색 대상으로 안 본다 — 마크가 실제로 안 그려진다는 뜻이다.
     try std.testing.expect(!editor_ops.isFindTarget(session, term));
+}
+
+test "EF8 낡은 스냅숏으로 놓은 자리는 **다음 프레임이 예약된다** — tick을 타야 보이는 배선" {
+    // **6라운드가 찾은 차단 결함이다**(적대적 검증 2026-08-24). 5라운드가 만든 재조준은 자리를
+    // 옳게 다시 잡았지만 **그 자리를 그릴 프레임을 못 불렀다**: 재조준이 세운 `metal_dirty`를
+    // 같은 tick 뒤쪽 소거가 지웠고(그 자리 doc), 다음 tick은 투영을 건너뛰었다. 실측으로
+    // **자리는 맞는데 tick 12번을 더 돌려도 화면은 옛 자리**였고, 손으로 dirty를 세우자 즉시 보였다.
+    //
+    // **`EM13`은 이것을 원리적으로 못 잰다** — `appendPaneFrame`을 직접 부르므로 그 함수 **바깥의**
+    // 배선을 안 지난다. `EM*` 열넷이 전부 그 형태였고, 그래서 이 결함이 한 커밋을 지나 밀렸다.
+    // 여기서는 **제품 `tick()`만** 쓴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    // 랩을 켜면 보이는 줄이 확 줄도록 **긴 줄**로 채운다.
+    for (0..60) |i| {
+        var buf: [400]u8 = undefined;
+        const filler = "wrap me " ** 20;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
+    }
+    try doc.appendSlice(allocator, "MARUFIND far below\n");
+    try dir.dir.writeFile(io, .{ .sub_path = "w.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "w.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+
+    // 랩을 끈 채 한 프레임 — 스냅숏이 그 배치로 굳는다.
+    term.rt.editor_wrap = false;
+    _ = try session.tick();
+    try std.testing.expect(term.rt.editor_hit_rows_len > 0); // 렌더 경로를 실제로 탔다
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expect(session.editor_find_matches.items.len > 0);
+
+    // **랩을 켠다 — 프레임 없이.** 세로 위치는 그대로다(토글이 일부러 안 건드린다).
+    term.rt.editor_wrap = true;
+    term.rt.editor_first_line = 0;
+    session.chrome_host.find.current = 0;
+
+    // Enter로 아래쪽 매치를 부른다 — 낡은 스냅숏이라 재조준이 예약돼야 한다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
+    try std.testing.expect(term.rt.editor_find_reveal_pending);
+
+    // 그 프레임이 재조준을 돌리고 **다음 프레임을 예약한다**. 예약이 없으면 자리는 맞고 화면이 멈춘다.
+    _ = try session.tick();
+    try std.testing.expect(!term.rt.editor_find_reveal_pending); // 소진됐다
+    try std.testing.expect(session.metal_dirty); // **다음 프레임이 예약됐다** — 이 줄이 그 결함을 잡는다
+    try std.testing.expect(!session.reproject_after_frame); // 한 번 쓰고 소진된다
+
+    // 그리고 그 다음 프레임이 매치를 실제로 그린다.
+    _ = try session.tick();
+    const target = session.editor_find_matches.items[session.chrome_host.find.current].line;
+    const shown = for (term.rt.editor_hit_lines[0..term.rt.editor_hit_rows_len]) |dl| {
+        if (dl == target) break true;
+    } else false;
+    try std.testing.expect(shown);
+}
+
+test "EF9 터미널에서도 ⌘F를 다시 열면 옛 강조가 안 남는다 — `show()` 규칙의 나머지 절반" {
+    // **`EF7`의 터미널 단언이 공허했다**(적대적 검증 2026-08-24, 뮤턴트 R7b). 그쪽은 활성 pane이
+    // 편집기라 `find_matches`가 전후로 0이다 — 그래서 여는 갈래가 **편집기 쪽만** 비우도록
+    // 바꿔도 저장소가 전부 초록이었다. `show()`가 검색어를 비우는 것은 pane 종류와 무관하므로
+    // **터미널에도 같은 결함이 있었다**: 빈 상자에 옛 강조.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    try term_ops.activeSurface(session).core.write("MARUFIND one\r\ntwo MARUFIND three");
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 2), session.find_matches.items.len);
+
+    // 닫고 ⌘G로 닫힘-네비를 연다 — 목록이 되살아나고 `find_nav`가 선다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(session.find_nav);
+    try std.testing.expect(session.find_matches.items.len > 0);
+
+    // **다시 ⌘F.** 상자가 비었으니 강조도 없어야 한다.
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
+    try std.testing.expect(!session.find_nav);
+}
+
+test "EF10 모달이 강조를 멎게 해도 ⌘G는 이어진다 — `find_nav`를 내리는 대가의 크기" {
+    // **이것이 트레이드오프의 크기를 재는 판정자다.** `clearAllFindMatches`가 `find_nav`를 내리는
+    // 탓에 **비동기 토스트·확인 모달**(`showNotice`/`showConfirm` 호출자 66곳이 전부
+    // `dismissMessageOverlays`를 지난다)이 ⌘G 세션을 끝낸다. 4라운드 검증이 그것을 지적했다.
+    //
+    // **반대로 하면 더 나쁘다** — 실험으로 확인했다: `find_nav`를 안 내리면 다음 tick이 목록을
+    // 되살리고 `current`를 0으로 리셋해 **뷰가 맨 위로 튄다**(`EF6`이 `expected 276, found 0`으로
+    // 잡는다). 1라운드 R7이 잡았던 그 실패다.
+    //
+    // 그래서 남는 질문은 **"⌘G 세션이 끝나면 사용자가 무엇을 잃는가"**이고, 답은 **강조뿐**이다:
+    // 검색어와 현재 위치는 `clearAllFindMatches`가 안 건드리므로 다음 ⌘G가 그 자리에서 이어간다.
+    // 이 판정자가 그 사실을 고정한다 — 그것이 깨지면 트레이드오프의 크기가 달라진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "MARUFIND a\nMARUFIND b\nMARUFIND c\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+
+    // 둘째 매치로 옮기고 닫는다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+
+    // **비동기 토스트가 뜬다** — ⌘G 세션이 끝나고 강조가 멎는다(그것이 이 설계의 대가다).
+    session.showNotice("something happened");
+    try std.testing.expect(!session.find_nav);
+    try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
+
+    // **그러나 검색어와 위치는 살아 있다.** ⌘G가 그 자리에서 이어간다 — 처음으로 안 돌아간다.
+    try std.testing.expectEqual(@as(usize, 8), session.chrome_host.find.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.find.current);
+    session.dispatchAppAction(.find_next);
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len); // 다시 찾았다
+    try std.testing.expectEqual(@as(usize, 2), session.chrome_host.find.current); // 1 → 2, 0이 아니다
+    try std.testing.expect(session.find_nav);
 }
 
 test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보존 검색어 재검색·타이핑이 종료)" {
@@ -65478,4 +65686,73 @@ test "CR6b stalled host row action은 single absolute deadline 뒤 topology와 p
 
 test "CR6b attach construction OOM은 topology와 projection 및 기존 runtime을 보존한다" {
     return runCr6RecoveredSessionRealHostFixture(.attach_oom);
+}
+
+test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재조준이 정지 상태를 깨우지 않는다" {
+    // **누적 수정의 상호작용을 재는 판정자다**(사용자 요청 2026-08-24: *"수정하면서 또 다른 버그를
+    // 만든 건 아닌지"*). 걱정한 것 둘:
+    //
+    // ⑴ `snapshot_is_current`가 여덟 축을 대조하는데 `clampScrollToGeometry`가 `first_line`을
+    //    바꾸면 스냅숏과 어긋난다 → **매 Enter가 "낡음"으로 판정돼 재조준을 예약**하고, 그러면
+    //    검색 중 프레임이 두 배가 되는가?
+    // ⑵ `reproject_after_frame`이 `metal_dirty`를 되살리는 자리는 `placement_failed`·
+    //    `active_failed` self-heal과 같은 블록이다 → **무한 재투영**이 나는가?
+    //
+    // 판정은 **프레임 세대**로 한다(시간은 러너 부하와 안 갈린다 — 이 저장소의 측정 규율).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..600) |i| {
+        var buf: [48]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d} MARUFIND here\n", .{i}));
+    }
+    try dir.dir.writeFile(io, .{ .sub_path = "n.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "n.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 600), session.editor_find_matches.items.len);
+
+    // **Enter 열 번.** 매번 tick 하나로 그린다 — 재조준이 예약되면 그 tick의 `metal_dirty`가 남는다.
+    var reserved: usize = 0;
+    for (0..10) |_| {
+        _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+        _ = try session.tick();
+        if (session.metal_dirty) reserved += 1;
+    }
+
+    // **그다음 정지 상태.** 아무 입력 없이 tick을 열 번 — 세대가 멈춰야 한다.
+    var gens: [11]u32 = undefined;
+    for (&gens) |*g| g.* = (try session.tick()).metal_generation;
+
+    std.debug.print(
+        "\n[측정] Enter 10회 중 재조준 예약 {d}회 · 정지 tick 10회의 세대 {d} → {d}\n",
+        .{ reserved, gens[0], gens[gens.len - 1] },
+    );
+
+    // ⑴ **매 Enter가 재조준을 예약하지는 않는다.** 절반을 넘으면 clamp가 스냅숏을 계속 흔든다는 뜻이다.
+    try std.testing.expect(reserved <= 5);
+    // ⑵ **정지 상태에서 세대가 멈춘다.** 무한 재투영이면 이 값이 계속 는다.
+    try std.testing.expectEqual(gens[1], gens[gens.len - 1]);
 }

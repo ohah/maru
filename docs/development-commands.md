@@ -46,6 +46,16 @@ zig test src/session/agent_hook_command.zig
 
 ⚠️ **gate 증거로 쓰지 않는다.** 이 경로는 위의 `tools/simple_test_runner.zig`가 아니라 Zig 기본 runner로 돌아서 판정 기준(테스트별 누수·error log·exit code)이 같지 않고, 의존 artifact 범위도 다르다. 아래 `--test-filter` 경고와 같은 이유다 — 빠른 확인용이고, PR 증거는 `mise run check`나 해당 focused gate가 만든다.
 
+**테스트 로그는 `grep FAIL`로 판정하지 않는다.** 러너는 크래시를 `FAIL`로 안 찍고 `Segmentation fault`로 찍으며, 그때 **그 바이너리 자신의 요약줄이 없다** — 실제로 그렇게 세그폴트가 한 커밋에 실려 밀렸다(2026-08-23, 편집기 ⌘F 슬라이스). 대신:
+
+```
+zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
+```
+
+`tools/test-verdict.sh`가 러너의 비-0 종료 경로 전부(`failed`·`leaked`·`errors were logged`·focused-selection)와 빌드 실패·컴파일 오류·OOM kill을 보고, **진행 번호가 총계에 못 닿은 바이너리**를 따로 짚는다(크래시는 그렇게 드러난다). 실패가 있으면 0이 아닌 코드로 끝나므로 `&&`로 이어 쓸 수 있다.
+
+**`N/N`은 완주일 뿐 통과가 아니다** — 실패한 테스트도 진행 번호를 올린다. 통과 여부는 러너 요약줄(`All N tests passed.` / `N passed; M skipped; K failed.`)이 말하고, 정식 게이트는 `mise run check`다.
+
 ## 빌드와 테스트
 
 - 영속 세션 호스트 P5c3c-3a1 TTY output/chord/deadline 집중 gate: `zig build test-session-host-3a1` (P5c3c-2b3을 상속하고 OS-neutral detach chord·stdout progress와 macOS 전용 final-address `DedicatedOutput`을 각각 Debug·ReleaseFast 3개, boundary 1개와 executable test-name sentinel로 검증한다. 전용 output은 `ttyname_r(stdout)` 경로를 `O_WRONLY|O_NOCTTY|O_CLOEXEC|O_NONBLOCK|O_NOFOLLOW`로 다시 열고 open 전후 stdout 및 새 fd의 character-device/`st_rdev`, inherited stdout status flags 불변을 확인한다. path/flags/세 fstat/open/identity 실패 주입은 publication 0과 새 fd exact close를, 실제 `openpty`는 별도 open-file-description·nonblocking·close-on-exec·stdout flags 불변·전용 fd만 close를 고정한다. 이 gate의 product caller는 exact 0이며 pre-raw owner와 raw commit은 3a2 전에는 구현됐다고 보지 않는다.)

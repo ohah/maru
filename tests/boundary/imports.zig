@@ -6198,7 +6198,9 @@ test "d2c S3-D drain evidence is one-shot and has one scheduling publication" {
         .{ "consumeRxDrainEvidence", 2 },
         .{ "abortRxDrainEvidence", 3 },
         .{ "finishRxDrainEvidence", 5 },
-        .{ "resetFinishedRxDrainEvidence", 2 },
+        // The integrated loop adds one sibling-operation settlement edge. It retires only a
+        // completed RX turn before control/TX admission; it cannot reset active drain evidence.
+        .{ "resetFinishedRxDrainEvidence", 3 },
     }) |entry| {
         const helper = entry[0];
         const expected_occurrences: usize = entry[1];
@@ -6692,7 +6694,9 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             ),
         );
         try std.testing.expectEqual(
-            @as(usize, 4),
+            // Terminal detach is the fifth reviewed frame family beside input/resize/resync and
+            // the existing control path. It uses the same sealed progress ledger.
+            @as(usize, 5),
             std.mem.count(
                 u8,
                 product_source,
@@ -6993,8 +6997,10 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             "consumePreparedCancellationUnderHeldLease(",
         ),
     );
+    // The second reviewed consumer is normal 3b cleanup's offset-zero input cancellation. Both
+    // paths share the same held-lease final check; neither exposes the unchecked commit.
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         std.mem.count(
             u8,
             mechanics_source,

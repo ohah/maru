@@ -3,7 +3,7 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
-test "p5c3c-3a1 primitives keep neutral leaves portable and admit only the 3a2 caller" {
+test "p5c3c-3a1 primitives keep neutral leaves portable and admit only 3a2 or its 3b owner" {
     const allocator = std.testing.allocator;
     const chord = try read(allocator, "src/platform/macos/session_host/external_detach_chord.zig");
     defer allocator.free(chord);
@@ -29,17 +29,25 @@ test "p5c3c-3a1 primitives keep neutral leaves portable and admit only the 3a2 c
         &.{
             "platform/macos/session_host.zig",
             "platform/macos/session_host/external_tty_output.zig",
+            "platform/macos/session_host/external_loop_owner.zig",
+            "platform/macos/session_host/external_attach_cli.zig",
         },
     ));
     try std.testing.expectEqual(@as(usize, 0), try countProductIdentifierExcept(
         allocator,
         "external_detach_chord",
-        &.{"platform/macos/session_host.zig"},
+        &.{
+            "platform/macos/session_host.zig",
+            "platform/macos/session_host/external_loop_owner.zig",
+        },
     ));
     try std.testing.expectEqual(@as(usize, 0), try countProductIdentifierExcept(
         allocator,
         "external_stdout_progress",
-        &.{"platform/macos/session_host.zig"},
+        &.{
+            "platform/macos/session_host.zig",
+            "platform/macos/session_host/external_loop_owner.zig",
+        },
     ));
 }
 

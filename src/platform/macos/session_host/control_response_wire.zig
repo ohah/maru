@@ -20,15 +20,19 @@ pub const ResyncRequest = struct {
     recovery_authority: recovery.ControlAuthority,
 };
 
+pub const DetachRequest = struct { stream_id: u64 };
+
 pub const WireRequest = union(enum) {
     resize: ResizeRequest,
     resync: struct { stream_id: u64 },
+    detach: DetachRequest,
 
     pub fn isCanonical(self: WireRequest) bool {
         return switch (self) {
             .resize => |value| value.stream_id != 0 and value.cols >= 2 and
                 value.rows >= 1 and value.client_sequence != 0,
             .resync => |value| value.stream_id != 0,
+            .detach => |value| value.stream_id != 0,
         };
     }
 };
@@ -36,12 +40,14 @@ pub const WireRequest = union(enum) {
 pub const ControlRequest = union(enum) {
     resize: ResizeRequest,
     resync: ResyncRequest,
+    detach: DetachRequest,
 
     pub fn isCanonical(self: ControlRequest) bool {
         return switch (self) {
             .resize => |value| value.stream_id != 0 and value.cols >= 2 and
                 value.rows >= 1 and value.client_sequence != 0,
             .resync => |value| value.stream_id != 0 and value.recovery_authority.isCanonical(),
+            .detach => |value| value.stream_id != 0,
         };
     }
 };
@@ -49,11 +55,13 @@ pub const ControlRequest = union(enum) {
 pub const ControlExpectation = union(enum) {
     resize: struct { client_sequence: u64 },
     resync: recovery.ControlAuthority,
+    detach,
 
     pub fn isCanonical(self: ControlExpectation) bool {
         return switch (self) {
             .resize => |value| value.client_sequence != 0,
             .resync => |key| key.isCanonical(),
+            .detach => true,
         };
     }
 };
@@ -75,6 +83,7 @@ pub fn expectationDigest(expectation: ControlExpectation) [32]u8 {
             }
             hasher.update(&.{@intFromEnum(authority.origin)});
         },
+        .detach => {},
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -111,6 +120,14 @@ pub fn encodeParams(buffer: []u8, request: WireRequest) EncodeError!EncodedParam
                 .{value.stream_id},
             ) catch return error.BufferTooSmall,
         },
+        .detach => |value| .{
+            .method = "runtime.detach",
+            .params = std.fmt.bufPrint(
+                buffer,
+                "{{\"stream_id\":{d}}}",
+                .{value.stream_id},
+            ) catch return error.BufferTooSmall,
+        },
     };
 }
 
@@ -119,14 +136,17 @@ pub fn encodeRequest(buffer: []u8, request: ControlRequest) EncodeError!EncodedR
     const wire: WireRequest = switch (request) {
         .resize => |value| .{ .resize = value },
         .resync => |value| .{ .resync = .{ .stream_id = value.stream_id } },
+        .detach => |value| .{ .detach = value },
     };
     const expectation: ControlExpectation = switch (request) {
         .resize => |value| .{ .resize = .{ .client_sequence = value.client_sequence } },
         .resync => |value| .{ .resync = value.recovery_authority },
+        .detach => .detach,
     };
     const prefix = switch (wire) {
         .resize => "{\"method\":\"runtime.resize\",\"params\":",
         .resync => "{\"method\":\"runtime.resync\",\"params\":",
+        .detach => "{\"method\":\"runtime.detach\",\"params\":",
     };
     if (buffer.len <= prefix.len) return error.BufferTooSmall;
     @memcpy(buffer[0..prefix.len], prefix);
@@ -188,7 +208,7 @@ pub fn decodeResizeResponse(
 ) ResponseError!ResizeReply {
     const expected_sequence = switch (expectation) {
         .resize => |value| value.client_sequence,
-        .resync => return error.Malformed,
+        .resync, .detach => return error.Malformed,
     };
     if (expected_sequence == 0) return error.Malformed;
     var parsed = try parseRoot(allocator, payload);
@@ -258,7 +278,7 @@ pub fn decodeResyncResponse(
     expectation: ControlExpectation,
 ) ResponseError!void {
     switch (expectation) {
-        .resize => return error.Malformed,
+        .resize, .detach => return error.Malformed,
         .resync => |authority| if (!authority.isCanonical()) return error.Malformed,
     }
     return decodeResyncEnvelope(allocator, payload);

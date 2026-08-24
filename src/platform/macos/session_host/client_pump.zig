@@ -120,6 +120,7 @@ pub const ClientRecoveryPhase = union(enum) {
 pub const ControlKind = enum {
     resize,
     resync,
+    detach,
 };
 
 pub const AuthorityState = union(enum) {

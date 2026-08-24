@@ -2318,6 +2318,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var right_click_pastes: usize = 0;
     var right_click_menus_unimplemented: usize = 0;
     var capture_losses: usize = 0;
+    var dock_pointer_events: usize = 0;
+    var dock_row_clicks: usize = 0;
+    var dock_last_row: ?usize = null;
+    var selections_before_term_click: usize = 0;
+    var dock_clicks_before_term_click: usize = 0;
     // Alt 를 meta 로 쓸지 — **사용자 config 에서 온다**. 기본 `true` 다(Alt+B/F 가 readline 단어 이동).
     const option_as_meta = cfg.input.option_as_meta;
     // 우클릭 동작 — **사용자 config 에서 온다**(W7.5). 기본값은 `paste` 다(PuTTY/X11 식, 사용자 결정).
@@ -2362,8 +2367,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **각본을 보내지 않는다.** 이 스모크는 사람이 타이핑하는 자리다 — fixture 각본은 `exit`으로 끝나서
     // 셸이 죽고, 그 뒤 키는 죽은 PTY 에 쓰인다(실측: keys_to_shell=16 인데 화면에 안 나왔다).
     // 각본으로 끝내는 검증은 `win32-frame-smoke`(W7.2c-1)가 한다.
+    // ── 라우팅 판정 (W8.7b) ─────────────────────────────────────────────────────────────────
+    //
+    // 사람 없이 잰다: **도크에 한 번, 터미널에 한 번** 합성 클릭을 넣고 서로의 카운터가 안 움직이는지
+    // 본다. 계약이 적어 둔 두 실패가 여기서 갈린다 — 터미널에 갈 것이 도크로 새면 셸이 먹통이 되고,
+    // 반대면 도크가 죽은 컨트롤이 된다.
     var spins: usize = 0;
     while ((max_spins == null or spins < max_spins.?) and !window.quit_requested and !close_requested) : (spins += 1) {
+        if (spins == 60 and geom.dock.w != 0) {
+            const dx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const dy: i32 = @intCast(geom.tree_content.y + cell_h * 2 + cell_h / 2);
+            window.postSyntheticMouse(.left_down, dx, dy);
+            window.postSyntheticMouse(.left_up, dx, dy);
+        }
+        if (spins == 120) {
+            selections_before_term_click = selections;
+            dock_clicks_before_term_click = dock_row_clicks;
+            const tx: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const ty: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            window.postSyntheticMouse(.left_down, tx, ty);
+            window.postSyntheticMouse(.left_up, tx, ty);
+        }
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
                 try present.resize(r.width_px, r.height_px);
@@ -2465,6 +2489,34 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             .mouse => |m| {
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
+
+                // ── 어느 영역의 포인터인가 (W8.7b) ──────────────────────────────────────
+                //
+                // **판정은 중립이 소유한다**(`dock_layout.regionAt`) — 잡기 띠가 이웃과 겹치는
+                // 규칙까지 거기 한 곳에 있다. 여기서 `x >= dock.x` 를 적으면 경계 한 픽셀이
+                // macOS 와 갈린다.
+                //
+                // **드래그 중에는 안 가른다.** 터미널에서 시작한 선택이 도크 위를 지나갈 때
+                // 영역이 바뀌면 그 순간 선택이 끊긴다 — 제스처는 시작한 곳이 끝까지 소유한다.
+                const region = if (dragging)
+                    maru.session.dock_layout.Region.terminal
+                else
+                    maru.session.dock_layout.regionAt(geom, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
+                if (region != .terminal and m.kind != .capture_lost) {
+                    dock_pointer_events += 1;
+                    if (m.kind == .left_up) {
+                        // **행 판정도 중립이 소유한다**(`file_tree_layout.rowAtLocalY`).
+                        const local_y = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
+                        if (region == .dock_content and local_y >= 0) {
+                            if (maru.session.file_tree_layout.rowAtLocalY(cell_h, 0, local_y, dock_rows.items.len)) |row| {
+                                dock_row_clicks += 1;
+                                dock_last_row = row;
+                            }
+                        }
+                    }
+                    // **터미널로 안 흘린다.** 흘리면 도크를 눌렀는데 셸에 선택이 생긴다.
+                    continue;
+                }
 
                 // **캡처를 뺏겼으면 드래그만 끝낸다.** 버튼을 뗀 자리를 모르므로 선택을 건드리면
                 // 안 된다 — 좌표 없이 확장하면 선택이 좌상단까지 끌려간다.
@@ -2898,6 +2950,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 부차 판정: 그려진 셀이 도크 사각형을 침범했나(원점을 안 찍었거나 클립이 없을 때 잡힌다).
     try stdout.print("term_cells_in_dock={d} term_cells_before_rect={d} dock_cells={d}\n", .{ term_cells_in_dock, term_cells_before_rect, dock_cells.items.len });
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside });
+    try stdout.print("dock_pointer_events={d} dock_row_clicks={d} dock_last_row={?d}\n", .{ dock_pointer_events, dock_row_clicks, dock_last_row });
+    // **서로 안 샌다**: 도크 클릭 뒤에도 셸 선택은 그대로였고(그 시점 값이 `selections_before_term_click`),
+    // 터미널 클릭은 도크 카운터를 안 올렸다.
+    try stdout.print("selections_at_term_click={d} dock_clicks_at_term_click={d} selections_final={d} dock_clicks_final={d}\n", .{
+        selections_before_term_click,
+        dock_clicks_before_term_click,
+        selections,
+        dock_row_clicks,
+    });
     const live_grid = if (app_window.active()) |a| a.core.size else maru.terminal.Size{ .cols = 0, .rows = 0 };
     try stdout.print("resizes={d} grid_mismatches={d} dock_rebuild_failures={d} final_grid={d}x{d} final_term_rect={d}x{d}\n", .{
         resizes,

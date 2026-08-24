@@ -523,6 +523,10 @@ const Table = struct {
     /// 턴이 끝나면 그 요청이 거절되고 그 턴은 영영 안 찍힌다. 재시도하지 않는 대신(스냅샷 시점이 어긋나
     /// 내용이 틀린 턴이 된다) **몇 개를 놓쳤는지 말한다** — 한계를 숨기지 않는다.
     scm_turns_missed: [:0]const u8,
+    /// 에이전트 탭: **그 세션의 링이 밀려났다.** 링 맵은 최근 세션 신원 몇 개까지만 들고, 넘으면 가장 오래
+    /// 안 쓴 세션부터 버린다(`turn_snapshot.max_sessions`). 이 줄이 없으면 화면은 「밀려났다」를
+    /// 「이번 실행에서 관측한 턴이 없다」로 말해, 있었던 기록을 없었던 것처럼 만든다.
+    scm_turns_evicted: [:0]const u8,
     /// 에이전트 탭: 마지막 스냅샷 이후 작업트리에 생긴 변경(오른쪽이 작업트리라 계속 변한다).
     ///
     /// ⚠️ **에이전트 상태가 아니다.** 이 줄은 링에 스냅샷이 하나라도 있으면 **늘 선다** — 에이전트가
@@ -993,6 +997,7 @@ const en: Table = .{
     .scm_no_turns = "No agent turns observed in this run",
     .scm_turns_need_hooks = "Agent turns need hooks enabled",
     .scm_turns_missed = "{0} turns were not recorded",
+    .scm_turns_evicted = "This session's turns were dropped for newer sessions",
     .scm_turn_live = "Since last turn",
     .scm_turn_last = "Last turn",
     .scm_turn_back_suffix = " turns ago",
@@ -1541,6 +1546,7 @@ const ko: Table = .{
     .scm_no_turns = "이번 실행에서 관측한 에이전트 턴이 없습니다",
     .scm_turns_need_hooks = "에이전트 훅을 켜야 턴이 기록됩니다",
     .scm_turns_missed = "기록하지 못한 턴 {0}개",
+    .scm_turns_evicted = "최근 세션에 밀려 이 세션의 턴 기록이 사라졌습니다",
     .scm_turn_live = "마지막 턴 이후",
     .scm_turn_last = "마지막 턴",
     .scm_turn_back_suffix = "턴 전",

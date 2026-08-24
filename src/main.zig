@@ -1807,6 +1807,131 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     try std.testing.expect(saw_dock and saw_no_dock);
 }
 
+/// 도크 자리에 그릴 **파일 트리 프레임**(W8.7a2). 도크가 없으면 `null` 이다.
+///
+/// **터미널과 같은 `RendererState` 를 지난다** — 그래야 아틀라스 슬롯이 안 충돌한다. 두 프레임이
+/// 각자 아틀라스를 들면 같은 텍스처를 서로 덮어써 글자가 다른 글자로 나온다(§2m.6 이 부분 업로드에서
+/// 적어 둔 것과 같은 부류의 오답이다).
+///
+/// **격자는 `tree_content` 사각형에서 나온다** — 터미널이 자기 사각형에서 격자를 얻는 것과 같은
+/// 규율이다(§2m.31 ⒜1). 창에서 유도하면 트리가 도크보다 넓다고 믿어 이름이 잘리지 않는다.
+fn buildDockTreeFrame(
+    allocator: std.mem.Allocator,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    rows: []const maru.session.file_tree.Row,
+    geom: maru.session.dock_layout.Geometry,
+    cell_w: u32,
+    cell_h: u32,
+) !?maru.renderer.RenderFrame {
+    const area = geom.tree_content;
+    if (area.w < cell_w or area.h < cell_h) return null;
+    const cols: u16 = @intCast(area.w / cell_w);
+    const rows_visible: u16 = @intCast(@min(rows.len, area.h / cell_h));
+    if (cols == 0 or rows_visible == 0) return null;
+
+    const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 } };
+    const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    var list = try cell_text.buildFileTreeDrawList(
+        allocator,
+        rows,
+        null,
+        0,
+        rows_visible,
+        cols,
+        fg,
+        active_fg,
+        null,
+        null,
+        null,
+    );
+    // **DrawList 소유권은 프레임으로 넘어간다** — 실패했을 때만 우리가 해제한다(§2m.6 이 double
+    // free 로 배운 자리).
+    return renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, builder.shaper, builder.rasterizer) catch |err| {
+        list.deinit(allocator);
+        return err;
+    };
+}
+
+/// 도크 자리 전부를 다시 만든다 — 배경·디바이더·**파일 트리 글자**. 새 트리 프레임을
+/// `frame_slot` 에 넣고 옛 것을 해제한다.
+///
+/// 호출자는 이 뒤에 그 프레임의 **글리프 영역을 아틀라스에 올려야** 한다. 여기서 올리지 않는 이유는
+/// 파이프라인이 이 함수 밖에 있고, 아틀라스가 커졌을 때 텍스처를 다시 만드는 순서(먼저 resize,
+/// 그 다음 upload)를 호출자가 이미 알고 있기 때문이다.
+fn rebuildDockAll(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    geom: maru.session.dock_layout.Geometry,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    rows: []const maru.session.file_tree.Row,
+    cell_w: u32,
+    cell_h: u32,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    uploaded: *usize,
+    outside: *usize,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !void {
+    try rebuildDockCells(allocator, out, geom);
+    if (frame_slot.*) |*old| {
+        old.deinit(allocator);
+        frame_slot.* = null;
+    }
+    if (rows.len == 0) return;
+    const built = (try buildDockTreeFrame(allocator, renderer_state, builder, rows, geom, cell_w, cell_h)) orelse return;
+    frame_slot.* = built;
+
+    // **업로드는 여기서, 지금 한다.** 프레임의 업로드 목록은 **그 프레임과 함께 사라진다** — 올리기
+    // 전에 다시 지으면 그 글리프는 영영 GPU 에 안 간다. 그리고 아틀라스 캐시는 터미널과 **공유**라
+    // 그 뒤로는 "이미 있다" 고 판단해 터미널도 다시 안 올린다: 실측으로 **터미널 글자까지 깨졌다**
+    // (첫 프레임 `uploads=53` → 시작 직후 리사이즈가 그것을 버리고 `uploads=0` 인 프레임으로 교체).
+    const now_w = renderer_state.atlas.config.atlas_width_px;
+    const now_h = renderer_state.atlas.config.atlas_height_px;
+    if (now_w != atlas_w.* or now_h != atlas_h.*) {
+        try pipeline.resizeAtlas(now_w, now_h);
+        atlas_w.* = now_w;
+        atlas_h.* = now_h;
+    }
+    const trf = built.glyph_raster_frame;
+    for (trf.uploads) |up| {
+        const bytes = trf.pixels[up.bytes_offset..][0..up.byte_count];
+        pipeline.uploadAtlasRegion(up.slot.x_px, up.slot.y_px, up.slot.width_px, up.slot.height_px, bytes, up.bytes_per_row) catch continue;
+        uploaded.* += 1;
+    }
+
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 },
+        .default_bg = .{ .r = 0x18, .g = 0x1D, .b = 0x28 },
+    };
+    const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
+        allocator,
+        built.glyph_quad_frame,
+        built.draw_list.cells,
+        colors,
+    );
+    defer allocator.free(native);
+    // **여기서는 원점이 실제로 일을 한다** — 도크는 창 오른쪽이라 `tree_content.x` 가 0 이 아니다
+    // (터미널 쪽에서는 그 배선이 아직 안 밟힌다 — §2m.31).
+    maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.tree_content.x, geom.tree_content.y);
+    try out.ensureUnusedCapacity(allocator, native.len);
+    const x0: f32 = @floatFromInt(geom.tree_content.x);
+    const y0: f32 = @floatFromInt(geom.tree_content.y);
+    const x1: f32 = @floatFromInt(geom.tree_content.x + geom.tree_content.w);
+    const y1: f32 = @floatFromInt(geom.tree_content.y + geom.tree_content.h);
+    for (native) |n| {
+        const cell = win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        // **트리 글자가 도크 사각형을 벗어나면 안 된다.** 여기서 원점을 안 찍으면 글자가 창 왼쪽
+        // 위에서 시작해 **터미널 위에** 얹힌다 — 터미널 쪽과 달리 이 판정은 실제로 발동한다
+        // (`tree_content.x` 가 0 이 아니다).
+        if (cell.rect[0] < x0 or cell.rect[1] < y0 or
+            cell.rect[0] + cell.rect[2] > x1 or cell.rect[1] + cell.rect[3] > y1) outside.* += 1;
+        out.appendAssumeCapacity(cell);
+    }
+}
+
 /// 도크 자리를 채우는 셀 — **배경과 디바이더**. W8.7a 는 여기까지다(파일 트리는 ⒜2 — 그것은
 /// 터미널과 **아틀라스를 나눠 써야** 하므로 별개의 배선이다).
 ///
@@ -2033,10 +2158,70 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     };
     defer pipeline.destroy();
 
+    // ── 도크 내용: 파일 트리 (W8.7a2) ───────────────────────────────────────────────────────
+    //
+    // **스캔은 한 번, 프레임은 기하·아틀라스가 바뀔 때 다시.** 트리 내용은 안 변하지만 프레임의
+    // 아틀라스 UV 는 아틀라스가 커지면 무효가 된다 — 그때 다시 안 지으면 도크 글자가 엉뚱한
+    // 글리프로 바뀐다.
+    var dock_tree = maru.session.file_tree.Tree.init(allocator);
+    defer dock_tree.deinit();
+    var dock_rows: std.ArrayList(maru.session.file_tree.Row) = .empty;
+    defer dock_rows.deinit(allocator);
+    var dock_root: ?[]u8 = null;
+    defer if (dock_root) |r| allocator.free(r);
+    // **스캔 실패는 치명적이지 않다** — 도크가 비고 터미널은 그대로 돈다. 앱을 못 띄울 이유가 아니다.
+    var dock_scan_ok = false;
+    scan: {
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root_native = root_buf[0..(std.Io.Dir.cwd().realPath(io, &root_buf) catch break :scan)];
+        const root_path = maru.path_shape.normalizeSeparators(allocator, root_native) catch break :scan;
+        dock_root = root_path;
+        dock_tree.replaceExplicitRoots(&.{root_path}) catch break :scan;
+
+        var backend = file_tree_backend.Backend.init(allocator, io) catch break :scan;
+        defer backend.deinit();
+        var validated = (file_tree_backend.validateRootSnapshot(allocator, io, root_path) catch break :scan) orelse break :scan;
+        var validated_owned = true;
+        defer if (validated_owned) validated.deinit(allocator, io);
+        const validated_dir = validated.dir orelse break :scan;
+        validated.dir = null;
+        const owned = allocator.dupe(u8, root_path) catch break :scan;
+        if (!backend.submitValidatedRootScan(owned, 0, validated_dir)) {
+            allocator.free(owned);
+            validated_dir.close(io);
+            break :scan;
+        }
+        validated.deinit(allocator, io);
+        validated_owned = false;
+
+        var scan_rounds: usize = 0;
+        while (scan_rounds < 4000) : (scan_rounds += 1) {
+            if (backend.takeResult()) |taken| {
+                var result = taken;
+                defer result.deinit(allocator, io);
+                if (!result.ok) break :scan;
+                var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+                defer inputs.deinit(allocator);
+                for (result.entries.items) |e|
+                    inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break :scan;
+                dock_tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch break :scan;
+                dock_tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, &dock_rows) catch break :scan;
+                dock_scan_ok = true;
+                break;
+            }
+            io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    var dock_rebuild_failures: usize = 0;
+    var dock_region_uploads: usize = 0;
+    var dock_cells_outside: usize = 0;
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
-    try rebuildDockCells(allocator, &dock_cells, geom);
+    var dock_tree_frame: ?maru.renderer.RenderFrame = null;
+    defer if (dock_tree_frame) |*f| f.deinit(allocator);
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_tree_frame) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -2163,7 +2348,6 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var term_cells_before_rect: usize = 0;
     var resizes: usize = 0;
     var grid_mismatches: usize = 0;
-    var dock_rebuild_failures: usize = 0;
     var close_requested = false;
     var ended = false;
     // **각본을 보내지 않는다.** 이 스모크는 사람이 타이핑하는 자리다 — fixture 각본은 `exit`으로 끝나서
@@ -2194,7 +2378,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockCells(allocator, &dock_cells, geom) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_tree_frame) catch {
                     dock_rebuild_failures += 1;
                 };
             },
@@ -2599,6 +2783,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_w = now_w;
             atlas_h = now_h;
             atlas_resizes += 1;
+            // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
+            // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_tree_frame) catch {
+                dock_rebuild_failures += 1;
+            };
         }
 
         // ⑵ 이 프레임의 새 글리프만 올린다.
@@ -2699,6 +2888,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     });
     // 부차 판정: 그려진 셀이 도크 사각형을 침범했나(원점을 안 찍었거나 클립이 없을 때 잡힌다).
     try stdout.print("term_cells_in_dock={d} term_cells_before_rect={d} dock_cells={d}\n", .{ term_cells_in_dock, term_cells_before_rect, dock_cells.items.len });
+    try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside });
     const live_grid = if (app_window.active()) |a| a.core.size else maru.terminal.Size{ .cols = 0, .rows = 0 };
     try stdout.print("resizes={d} grid_mismatches={d} dock_rebuild_failures={d} final_grid={d}x{d} final_term_rect={d}x{d}\n", .{
         resizes,

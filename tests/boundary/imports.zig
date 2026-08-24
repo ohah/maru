@@ -7283,9 +7283,14 @@ test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 스모�
     // 그리고 Windows 스모크는 macOS 파일이 아니라 공유 모듈을 든다.
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(main_source, "platform/macos/coretext_frame_builder.zig"));
 
-    // ⑵ Windows 스모크가 **실제로 쓴다** — 0 이 되면 함수를 지울 수 있다는 뜻이므로 이 게이트도 함께
+    // ⑵ Windows 가 **실제로 쓴다** — 0 이 되면 함수를 지울 수 있다는 뜻이므로 이 게이트도 함께
     //    없애야 한다(그 판단을 사람이 하도록 여기서 실패시킨다).
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(main_source, "buildFileTreeDrawList("));
+    //
+    //    **둘인 이유**: ⑴ `win32-file-tree-draw-smoke`(§2m.6 — 표면 하나만 창에 띄운다)와
+    //    ⑵ `win32-terminal` 의 도크(§2m.31 ⒜2 — 터미널 옆에 트리를 그린다). 두 자리가 **다른 것을
+    //    판정한다**: 앞은 투영 자체가 맞는가, 뒤는 그것이 도크 사각형 안에 서는가. 합치면 한쪽이
+    //    사라진다. 이 수를 올릴 때는 여기에 그 자리가 무엇을 재는지 적는다.
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(main_source, "buildFileTreeDrawList("));
     // macOS 제품·스모크에는 호출이 없다(주석 언급은 여는 괄호가 없어 안 세진다).
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(smoke, "buildFileTreeDrawList("));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "buildFileTreeDrawList("));

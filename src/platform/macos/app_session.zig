@@ -4781,6 +4781,14 @@ pub const AppSession = struct {
     /// 그 값이 바뀌어 있고, 그러면 `ringFor` 가 «저장소가 바뀌었다» 로 판정해 **멀쩡한 링을 비우고**
     /// 옛 저장소의 tree 를 새 저장소 링에 넣는다. `SnapshotResult` 는 tree 와 surface_id 만 실어 온다.
     turn_snapshot_repo: ?[]u8 = null,
+    /// 도는 스냅샷 요청의 **턴 식별자**(계약 §3.1). 위 둘과 같은 이유로 **요청 시점에** 붙들어 둔다 —
+    /// 수확 때 Term 의 진행 상태를 다시 읽으면 그 사이 다음 턴이 시작된 경우 옛 스냅샷에 새 키가 붙는다.
+    ///
+    /// **`?[]u8` 이 아니라 고정 버퍼인 이유**: 이웃 둘이 힙인 것은 길이가 무계이기 때문이고(저장소 경로는
+    /// `max_path_bytes`), 턴 키는 `max_turn_key_len` 으로 못 박혀 있다. 고정 버퍼는 `captureTurnSnapshot`
+    /// 에 **세 번째 dupe 실패 분기**를 만들지 않고 `deinit` 에 해제할 것도 안 늘린다.
+    turn_snapshot_key: [maru.session.turn_snapshot.max_turn_key_len]u8 = undefined,
+    turn_snapshot_key_len: usize = 0,
     /// **직전에 본 에이전트 세션**(owned). 목록·클릭이 «활성 세션» 을 물을 때 활성 Term 에 에이전트가
     /// 없으면 이 값으로 답한다.
     ///
@@ -60258,8 +60266,8 @@ test "에이전트 탭: 턴 타임라인이 서고 진행 중이 맨 위다 (P5)
     }
 
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(session.io).nanoseconds, std.time.ns_per_s));
-    testTurnRing(session).push("aaaaaaa1111", 1, now_s - 7200, 1); // claude
-    testTurnRing(session).push("bbbbbbb2222", 1, now_s - 10, 2); // codex — 방금 끝난 턴이라 오늘 시각이다
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = now_s - 7200, .agent_kind = 1 }); // claude
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = now_s - 10, .agent_kind = 2 }); // codex — 방금 끝난 턴이라 오늘 시각이다
 
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     try std.testing.expectEqual(@as(usize, 2), projection.items.len); // 진행 중 + 턴 하나
@@ -60291,7 +60299,7 @@ test "에이전트 탭: 밀려난 세션은 «관측한 턴이 없다» 가 아�
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1); // 활성 Term 에 신원을 심고 턴 하나
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 }); // 활성 Term 에 신원을 심고 턴 하나
 
     // 다른 세션 신원으로 맵을 채워 활성 세션을 밀어낸다.
     var i: usize = 0;
@@ -60308,7 +60316,7 @@ test "에이전트 탭: 밀려난 세션은 «관측한 턴이 없다» 가 아�
 
     // **돌아온 뒤에도 말한다.** 새 턴이 목록을 채우면 그 몇 개가 전부인 것처럼 보이기 때문이다
     // (`Ring.history_evicted` — `missed` 와 같은 규율).
-    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
     {
         const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
         try std.testing.expectEqualStrings(maru.i18n.t(.scm_turns_evicted), projection.items[0].notice);
@@ -60328,8 +60336,8 @@ test "에이전트 탭: 턴을 펼치면 그 턴이 바꾼 파일이 아래에 �
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
-    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
 
     // 완료된 턴(자리 1)을 펼친다.
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
@@ -60359,12 +60367,12 @@ test "에이전트 탭: 새 턴이 들어와도 펼친 줄이 바뀌지 않는�
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
-    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 }); // 마지막 턴
 
     // 새 턴이 들어온다 — 그 줄은 이제 자리 2다.
-    testTurnRing(session).push("ccccccc3333", 1, 300, 2);
+    testTurnRing(session).push(.{ .tree = "ccccccc3333", .surface_id = 1, .captured_s = 300, .agent_kind = 2 });
     const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
     var expanded_count: usize = 0;
     for (projection.items) |item| switch (item) {
@@ -60423,8 +60431,8 @@ test "펼친 항목의 파일만 그린다 — 탭을 오가도 남의 파일이
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
-    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
-    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
 
     // 턴을 펼쳐 두고,
     scm_dock_ops.selectScmTab(session, .agent);
@@ -60592,8 +60600,8 @@ test "에이전트 탭: 턴 파일 클릭은 **턴 비교**를 연다 (P5 적대
     const arena = arena_state.allocator();
     try openScmDockWithCommitBox(session, allocator, arena);
     scm_dock_ops.selectScmTab(session, .agent);
-    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
-    testTurnRing(session).push("bbbbbbb2222", 1, 200, 1);
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
     scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
     session.scm_commit_files_oid = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
     session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/a.zig\n");
@@ -60645,7 +60653,7 @@ test "에이전트 탭: 진행 중인 턴은 tree 둘로 읽지 않는다 (P5)" 
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
     scm_dock_ops.selectScmTab(session, .agent);
-    testTurnRing(session).push("aaaaaaa1111", 1, 100, 1);
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
 
     // **진행 중 줄은 변경 사항 탭으로 보낸다** — tree 둘로 읽을 수 없어 펼칠 것이 없는데, 아무 일도
     // 안 하면 죽은 컨트롤이 된다. 그 줄이 가리키는 목록은 실제로 그 탭이 보여 준다.
@@ -62787,7 +62795,7 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     // 통했다. 이제 그 id 의 Term 에서 신원을 찾으므로 **없는 id 를 넘기면 조용히 아무것도 안 찍힌다.**
     const turn_sid = tab_ops.activeTab(session).panes.items[0].terms.items[0].surfaceId();
     seedTurnIdentity(session, turn_sid);
-    agent_ops.captureTurnSnapshot(session, turn_sid);
+    agent_ops.captureTurnSnapshot(session, turn_sid, "p-turn-1");
     var spins: usize = 0;
     while (spins < 500 and seededTurnRingLen(session) == 0) : (spins += 1) {
         git_ops.drainGitStatus(session);
@@ -62796,6 +62804,10 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     }
     try std.testing.expect(seededTurnRingLen(session) == 1);
     try std.testing.expect(seededTurnRing(session).?.latest().?.oid().len >= 40); // tree OID
+    // **턴 키가 링까지 왕복한다**(계약 §3.1). 순수 층 test 는 `Ring.push` 만 보고, 이 단언은 그 값이
+    // 요청 시점에 붙들려(`turn_snapshot_key`) 백엔드 왕복을 건너 수확 자리까지 살아 오는지를 본다 —
+    // 배관에서 끊기면 순수 층은 여전히 green 이라 여기서만 드러난다.
+    try std.testing.expectEqualStrings("p-turn-1", seededTurnRing(session).?.latest().?.turnKey());
 
     // 그 뒤 파일을 고치면 목록의 턴 범위에 **그 파일만** 나온다(스냅샷 시점에 이미 있던 것은 안 나온다).
     git_backend_mod.testWriteFile(repo, "kept.txt", "v2\n") catch return error.SkipZigTest;
@@ -62901,7 +62913,7 @@ test "턴 스냅샷: 세션 신원이 없으면 링을 만들지 않는다 (AT0 
     defer session.deinit();
 
     // **신원을 심지 않는다.** 그 밖의 조건은 앞 테스트와 같다.
-    agent_ops.captureTurnSnapshot(session, 1);
+    agent_ops.captureTurnSnapshot(session, 1, "");
 
     // 링 자체가 만들어지지 않는다 — 빈 링이 생기는 것도 아니다(키가 없으므로 자리도 없다).
     try std.testing.expect(session.turn_rings.find(test_turn_session) == null);

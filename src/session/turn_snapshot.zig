@@ -18,6 +18,13 @@ pub const capacity: usize = 8;
 /// git object id 문자열 길이(sha1 40 / sha256 64 모두 담게).
 pub const max_oid_len: usize = 64;
 
+/// 턴 식별자 문자열의 상한(claude `prompt_id` / codex `turn_id`).
+///
+/// **`agent_hook_mode.Progress.turn_buf` 와 같은 값이어야 한다.** 갈리면 「그쪽에는 담겼는데 이쪽에는
+/// 안 담기는」 구간이 조용히 생긴다. 실측(2026-08-24, 훅 로그 5,221 이벤트)에서는 양 provider 모두
+/// **36바이트 UUID** 였고, 여유는 세션 신원(`max_session_id_len`)과 같은 근거로 둔다.
+pub const max_turn_key_len: usize = 64;
+
 pub const Snapshot = struct {
     /// `git write-tree` 결과. 이 tree가 그 턴이 끝난 순간의 작업트리다.
     tree: [max_oid_len]u8 = undefined,
@@ -36,9 +43,25 @@ pub const Snapshot = struct {
     /// 위 값을 실제로 읽었는가. **0(바꾼 것 없음)과 «아직 모름»은 다른 사실이라** 플래그로 가른다 —
     /// 하나로 합치면 읽기 전 화면이 `0개 파일` 이라고 거짓을 말한다.
     files_known: bool = false,
+    /// 그 턴의 **식별자**(claude `prompt_id` / codex `turn_id` — 파서가 같은 자리에 담는다).
+    ///
+    /// AT3 의 「AI 소행 확정」이 provider 기록의 턴을 링의 **몇 번 항목**에 붙일지 잇는 **유일한 안정
+    /// 키**다(계약 §3.1). 시각(`captured_s`)으로 맞추면 tick 지연·재진입 `Stop` 에서 어긋난다.
+    ///
+    /// **빈 값 = 「이 스냅샷에는 턴 키가 없다」.** 별도 플래그를 두지 않는다 — `changed_files` 가
+    /// `files_known` 을 따로 든 것은 「0」과 「모름」이 다른 사실이라서인데, 턴 키는 **빈 키가 곧 모름**
+    /// 이다(provider 가 빈 키를 주지 않는다). 플래그를 더하면 두 값이 어긋날 상태만 공짜로 생긴다.
+    /// 그런 스냅샷은 셋이다: **세션 base**(계약상 턴이 아니다) · **관측 모드**(키를 알 길이 없다) ·
+    /// **상한 초과**(아래 `push` — 자르면 남의 턴과 거짓으로 일치한다).
+    turn: [max_turn_key_len]u8 = undefined,
+    turn_len: usize = 0,
 
     pub fn oid(self: *const Snapshot) []const u8 {
         return self.tree[0..self.tree_len];
+    }
+
+    pub fn turnKey(self: *const Snapshot) []const u8 {
+        return self.turn[0..self.turn_len];
     }
 };
 
@@ -60,19 +83,42 @@ pub const Ring = struct {
     /// 다음에 덮어쓸 자리(가득 찼을 때).
     next: usize = 0,
 
+    /// `push` 의 인자. **위치 인자가 아니라 이름으로 받는다** — `push("a1", 1, 100, 1)` 은 읽는 사람이
+    /// `100` 과 `1` 이 무엇인지 알 수 없고, 다음 값(AT2 의 턴 제목)이 붙을 때마다 호출부가 또 흔들린다.
+    pub const Push = struct {
+        tree: []const u8,
+        surface_id: u64 = 0,
+        captured_s: i64 = 0,
+        agent_kind: u8 = 0,
+        /// 없으면 빈 값 — 세션 base·관측 모드가 그렇다(`Snapshot.turn` 주석).
+        turn_key: []const u8 = "",
+    };
+
     /// 스냅샷을 넣는다. **같은 tree가 연달아 오면 넣지 않는다** — 에이전트가 파일을 안 건드린 턴까지 쌓으면
     /// "마지막 턴"이 빈 비교가 되어 사용자가 "왜 아무것도 없지"를 겪는다.
-    pub fn push(self: *Ring, tree_oid: []const u8, surface_id: u64, captured_s: i64, agent_kind: u8) void {
+    ///
+    /// ⚠️ **턴 키는 그 판정에 넣지 않는다.** 키까지 보면 파일을 안 건드린 턴이 «다른 턴» 이라 다시 쌓여
+    /// 위 규칙이 막으려던 **빈 비교 행**이 돌아온다. 대가는 「내용 변화가 없는 턴의 키는 링에 안 남는다」
+    /// 인데, 비교할 diff 가 없는 턴이라 AT3 가 붙일 것도 없다.
+    pub fn push(self: *Ring, args: Push) void {
+        const tree_oid = args.tree;
         if (tree_oid.len == 0 or tree_oid.len > max_oid_len) return;
         if (self.latest()) |last| {
             if (std.mem.eql(u8, last.oid(), tree_oid)) return;
         }
         var entry: Snapshot = .{
-            .surface_id = surface_id,
+            .surface_id = args.surface_id,
             .tree_len = tree_oid.len,
-            .captured_s = captured_s,
-            .agent_kind = agent_kind,
+            .captured_s = args.captured_s,
+            .agent_kind = args.agent_kind,
         };
+        // **상한을 넘는 키는 담지 않는다(자르지 않는다).** 잘린 키는 AT3 귀속에서 **남의 턴과 거짓으로
+        // 일치한다** — `RingMap.setRepo` 의 「못 담으면 아예 기억하지 않는다」와 같은 규율이다. 다만
+        // repo 와 달리 스냅샷 본체(tree)는 여전히 가치가 있으므로 push 자체를 거절하지는 않는다.
+        if (args.turn_key.len > 0 and args.turn_key.len <= max_turn_key_len) {
+            @memcpy(entry.turn[0..args.turn_key.len], args.turn_key);
+            entry.turn_len = args.turn_key.len;
+        }
         @memcpy(entry.tree[0..tree_oid.len], tree_oid);
         self.items[self.next] = entry;
         self.next = (self.next + 1) % capacity;
@@ -435,8 +481,8 @@ test "링은 최근 것부터 되짚고 상한을 넘으면 오래된 것을 버
     try testing.expect(ring.latest() == null);
     try testing.expect(ring.nth(0) == null);
 
-    ring.push("aaa1", 1, 0, 0);
-    ring.push("bbb2", 1, 0, 0);
+    ring.push(.{ .tree = "aaa1", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
+    ring.push(.{ .tree = "bbb2", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
     try testing.expectEqualStrings("bbb2", ring.latest().?.oid());
     try testing.expectEqualStrings("aaa1", ring.nth(1).?.oid());
     try testing.expect(ring.nth(2) == null); // 없는 턴을 0번째로 접지 않는다
@@ -444,7 +490,7 @@ test "링은 최근 것부터 되짚고 상한을 넘으면 오래된 것을 버
     // 상한을 넘겨 채우면 가장 오래된 것부터 사라진다.
     for (0..capacity + 3) |i| {
         var buf: [8]u8 = undefined;
-        ring.push(std.fmt.bufPrint(&buf, "t{d}", .{i}) catch unreachable, 2, 0, 0);
+        ring.push(.{ .tree = std.fmt.bufPrint(&buf, "t{d}", .{i}) catch unreachable, .surface_id = 2 });
     }
     try testing.expectEqual(capacity, ring.len);
     try testing.expectEqualStrings("t10", ring.latest().?.oid());
@@ -453,28 +499,28 @@ test "링은 최근 것부터 되짚고 상한을 넘으면 오래된 것을 버
 
 test "같은 tree가 연달아 오면 넣지 않는다(빈 비교를 만들지 않으려고)" {
     var ring: Ring = .{};
-    ring.push("same", 1, 0, 0);
-    ring.push("same", 1, 0, 0);
+    ring.push(.{ .tree = "same", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
+    ring.push(.{ .tree = "same", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
     try testing.expectEqual(@as(usize, 1), ring.len);
     // 다른 tree가 오면 정상적으로 쌓이고, 그 뒤 같은 값이 또 와도 안 쌓인다.
-    ring.push("other", 1, 0, 0);
-    ring.push("other", 1, 0, 0);
+    ring.push(.{ .tree = "other", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
+    ring.push(.{ .tree = "other", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
     try testing.expectEqual(@as(usize, 2), ring.len);
 }
 
 test "빈 oid나 너무 긴 oid는 무시한다" {
     var ring: Ring = .{};
-    ring.push("", 1, 0, 0);
-    ring.push("x" ** (max_oid_len + 1), 1, 0, 0);
+    ring.push(.{ .tree = "", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
+    ring.push(.{ .tree = "x" ** (max_oid_len + 1), .surface_id = 1 });
     try testing.expectEqual(@as(usize, 0), ring.len);
 }
 
 test "타임라인: 진행 중이 맨 위이고 완료된 턴은 N−1개다" {
     // 가장 오래된 스냅샷은 짝이 될 이전 스냅샷이 없다 — 그 턴을 "전부 새로 생김"으로 그리면 거짓말이다.
     var ring: Ring = .{};
-    ring.push("aaaa111", 1, 100, 0);
-    ring.push("bbbb222", 1, 200, 0);
-    ring.push("cccc333", 2, 300, 1);
+    ring.push(.{ .tree = "aaaa111", .surface_id = 1, .captured_s = 100, .agent_kind = 0 });
+    ring.push(.{ .tree = "bbbb222", .surface_id = 1, .captured_s = 200, .agent_kind = 0 });
+    ring.push(.{ .tree = "cccc333", .surface_id = 2, .captured_s = 300, .agent_kind = 1 });
 
     var buf: [8]Ring.TimelineRow = undefined;
     const rows = ring.timeline(&buf);
@@ -500,11 +546,43 @@ test "타임라인: 진행 중이 맨 위이고 완료된 턴은 N−1개다" {
 
 test "타임라인: 스냅샷이 하나면 완료된 턴이 없다(진행 중만)" {
     var ring: Ring = .{};
-    ring.push("aaaa111", 1, 100, 0);
+    ring.push(.{ .tree = "aaaa111", .surface_id = 1, .captured_s = 100, .agent_kind = 0 });
     var buf: [8]Ring.TimelineRow = undefined;
     const rows = ring.timeline(&buf);
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expect(rows[0].head == null);
+}
+
+test "턴 키: 실은 값이 그대로 되읽힌다" {
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .captured_s = 100, .turn_key = "p-123" });
+    try std.testing.expectEqualStrings("p-123", ring.latest().?.turnKey());
+}
+
+test "턴 키: 없으면 빈 값이다(플래그를 두지 않는다)" {
+    // 세션 base·관측 모드가 그렇다 — 빈 키가 곧 「모른다」다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1 });
+    try std.testing.expectEqual(@as(usize, 0), ring.latest().?.turnKey().len);
+}
+
+test "턴 키: 상한을 넘으면 담지 않는다 — 자르지 않는다" {
+    // ⚠️ **길이가 0 인 것을 단언해야 한다.** 「뭔가 담겼다」만 보면 `@min` 으로 자르는 구현도 통과하는데,
+    // 잘린 키는 AT3 귀속에서 **남의 턴과 거짓으로 일치한다**(그게 이 규칙의 존재 이유다).
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .turn_key = "k" ** (max_turn_key_len + 1) });
+    try std.testing.expectEqual(@as(usize, 1), ring.len); // 스냅샷 자체는 들어간다(tree 는 여전히 값지다)
+    try std.testing.expectEqual(@as(usize, 0), ring.latest().?.turnKey().len);
+}
+
+test "턴 키: 같은 tree 연속은 키가 달라도 스킵이다" {
+    // 키를 dedup 판정에 넣으면 파일을 안 건드린 턴이 «다른 턴» 이라 다시 쌓여, 그 규칙이 막으려던
+    // **빈 비교 행**이 돌아온다. 그 결정을 값으로 못 박는다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "same", .surface_id = 1, .turn_key = "p-1" });
+    ring.push(.{ .tree = "same", .surface_id = 1, .turn_key = "p-2" });
+    try std.testing.expectEqual(@as(usize, 1), ring.len);
+    try std.testing.expectEqualStrings("p-1", ring.latest().?.turnKey());
 }
 
 test "타임라인: 링이 비면 행도 없다(오류가 아니다)" {
@@ -520,7 +598,7 @@ test "타임라인: 상한을 넘겨도 out 크기까지만 채운다" {
     while (i < capacity) : (i += 1) {
         var oid_buf: [8]u8 = undefined;
         const oid_str = std.fmt.bufPrint(&oid_buf, "tree{d:0>3}", .{i}) catch unreachable;
-        ring.push(oid_str, 1, @intCast(i), 0);
+        ring.push(.{ .tree = oid_str, .surface_id = 1, .captured_s = @intCast(i) });
     }
     var small: [3]Ring.TimelineRow = undefined;
     try std.testing.expectEqual(@as(usize, 3), ring.timeline(&small).len);
@@ -530,11 +608,11 @@ test "타임라인: `N턴 전`은 그 세션 기준이다(남의 턴이 숫자�
     // 같은 저장소를 세션 둘이 번갈아 쓰는 상황. 링 전역으로 세면 A 의 두 번째 턴이 «3턴 전» 이 되는데,
     // 그 사용자에게 그것은 자기 2턴 전이다 — 화면 문구가 곧 이 값이라 전역으로 세면 화면이 거짓을 말한다.
     var ring: Ring = .{};
-    ring.push("a1", 1, 100, 1); // A
-    ring.push("b1", 2, 200, 2); // B
-    ring.push("a2", 1, 300, 1); // A
-    ring.push("b2", 2, 400, 2); // B
-    ring.push("a3", 1, 500, 1); // A
+    ring.push(.{ .tree = "a1", .surface_id = 1, .captured_s = 100, .agent_kind = 1 }); // A
+    ring.push(.{ .tree = "b1", .surface_id = 2, .captured_s = 200, .agent_kind = 2 }); // B
+    ring.push(.{ .tree = "a2", .surface_id = 1, .captured_s = 300, .agent_kind = 1 }); // A
+    ring.push(.{ .tree = "b2", .surface_id = 2, .captured_s = 400, .agent_kind = 2 }); // B
+    ring.push(.{ .tree = "a3", .surface_id = 1, .captured_s = 500, .agent_kind = 1 }); // A
 
     var buf: [8]Ring.TimelineRow = undefined;
     const rows = ring.timeline(&buf);
@@ -561,9 +639,9 @@ test "타임라인: `N턴 전`은 그 세션 기준이다(남의 턴이 숫자�
 
 test "타임라인: 세션이 하나면 `N턴 전`이 링 순서와 같다(회귀 없음)" {
     var ring: Ring = .{};
-    ring.push("s1", 7, 100, 1);
-    ring.push("s2", 7, 200, 1);
-    ring.push("s3", 7, 300, 1);
+    ring.push(.{ .tree = "s1", .surface_id = 7, .captured_s = 100, .agent_kind = 1 });
+    ring.push(.{ .tree = "s2", .surface_id = 7, .captured_s = 200, .agent_kind = 1 });
+    ring.push(.{ .tree = "s3", .surface_id = 7, .captured_s = 300, .agent_kind = 1 });
 
     var buf: [8]Ring.TimelineRow = undefined;
     const rows = ring.timeline(&buf);
@@ -574,9 +652,9 @@ test "타임라인: 세션이 하나면 `N턴 전`이 링 순서와 같다(회�
 
 test "턴 파일 수: 모르는 턴을 최신부터 하나씩 주고, 채우면 다음으로 넘어간다" {
     var ring: Ring = .{};
-    ring.push("t1", 1, 100, 1);
-    ring.push("t2", 1, 200, 1);
-    ring.push("t3", 1, 300, 1);
+    ring.push(.{ .tree = "t1", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    ring.push(.{ .tree = "t2", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
+    ring.push(.{ .tree = "t3", .surface_id = 1, .captured_s = 300, .agent_kind = 1 });
 
     // 최신 턴(head=t3)이 먼저다 — 사용자가 보는 순서.
     const first = ring.nextUnknownFiles().?;
@@ -597,8 +675,8 @@ test "턴 파일 수: 모르는 턴을 최신부터 하나씩 주고, 채우면 
 
 test "턴 파일 수: tree OID 로 찾아 적는다(결과가 늦게 와도 남의 턴을 안 건드린다)" {
     var ring: Ring = .{};
-    ring.push("aaa", 1, 100, 1);
-    ring.push("bbb", 1, 200, 1);
+    ring.push(.{ .tree = "aaa", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    ring.push(.{ .tree = "bbb", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
 
     // 링에 없는 tree 로 오면 조용히 버린다 — 그 턴은 이미 화면에 없다.
     ring.markFiles("zzz", 9);
@@ -618,7 +696,7 @@ test "세션 맵: 같은 id 는 같은 링을 주고, 새 id 는 새 링을 만�
     try std.testing.expectEqual(@as(usize, 0), map.len());
 
     const a = map.ringFor("sess-a", "/repo").?;
-    a.push("t1", 1, 100, 1);
+    a.push(.{ .tree = "t1", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
     const a_again = map.ringFor("sess-a", "/repo").?;
     try std.testing.expectEqual(@as(usize, 1), a_again.len); // 같은 링이다
     try std.testing.expectEqual(@as(usize, 1), map.len());
@@ -671,7 +749,7 @@ test "세션 맵: 밀려난 자리는 옛 링을 물려주지 않는다" {
     while (i < max_sessions) : (i += 1) {
         var buf: [8]u8 = undefined;
         const r = map.ringFor(std.fmt.bufPrint(&buf, "s{d}", .{i}) catch unreachable, "/repo").?;
-        r.push("tree", 1, 100, 1); // 전부 스냅샷 하나씩
+        r.push(.{ .tree = "tree", .surface_id = 1, .captured_s = 100, .agent_kind = 1 }); // 전부 스냅샷 하나씩
     }
     const fresh = map.ringFor("newcomer", "/repo").?;
     try std.testing.expectEqual(@as(usize, 0), fresh.len); // 옛 세션의 턴이 새 세션에 붙지 않는다
@@ -683,7 +761,7 @@ test "세션 맵: 밀려난 세션은 «밀려났다» 고 말한다(«원래 �
     while (i < max_sessions) : (i += 1) {
         var buf: [8]u8 = undefined;
         const r = map.ringFor(std.fmt.bufPrint(&buf, "s{d}", .{i}) catch unreachable, "/repo").?;
-        r.push("tree", 1, 100, 1);
+        r.push(.{ .tree = "tree", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
     }
     _ = map.ringFor("newcomer", "/repo").?; // `s0` 이 밀린다
 
@@ -710,7 +788,7 @@ test "세션 맵: 밀렸던 세션이 다시 들어오면 자취를 지운다" {
     // **자취는 지우되 사실은 링으로 옮긴다.** 안 옮기면 새 턴이 쌓인 뒤 잃은 기록을 영영 말하지 못한다.
     try std.testing.expect(back.history_evicted);
 
-    back.push("tree", 1, 100, 1); // 목록이 다시 차도 그 사실은 안 내린다
+    back.push(.{ .tree = "tree", .surface_id = 1, .captured_s = 100, .agent_kind = 1 }); // 목록이 다시 차도 그 사실은 안 내린다
     try std.testing.expect(map.find("s0").?.history_evicted);
 }
 
@@ -729,7 +807,7 @@ test "세션 맵: 저장소를 옮겨 링을 비워도 «밀렸다» 는 남는�
     }
     _ = map.ringFor("newcomer", "/repo").?; // `s0` 이 밀린다
     const back = map.ringFor("s0", "/repo").?;
-    back.push("tree", 1, 100, 1);
+    back.push(.{ .tree = "tree", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
     try std.testing.expect(back.history_evicted);
 
     const moved = map.ringFor("s0", "/other").?; // 그 세션이 `cd` 했다
@@ -760,9 +838,9 @@ test "세션 맵: 자취도 상한이 있다(가장 오래된 자취부터 잊�
 test "세션 맵: 그 세션이 저장소를 옮기면 그 링만 비운다(다른 세션은 그대로)" {
     var map: RingMap = .{};
     const a = map.ringFor("sess-a", "/repo/one").?;
-    a.push("t1", 1, 100, 1);
+    a.push(.{ .tree = "t1", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
     const b = map.ringFor("sess-b", "/repo/one").?;
-    b.push("t2", 2, 200, 1);
+    b.push(.{ .tree = "t2", .surface_id = 2, .captured_s = 200, .agent_kind = 1 });
 
     // A 가 다른 저장소로 옮겼다 — 그 tree 로 비교하면 전부 삭제로 보인다.
     const a2 = map.ringFor("sess-a", "/repo/two").?;
@@ -771,7 +849,7 @@ test "세션 맵: 그 세션이 저장소를 옮기면 그 링만 비운다(다�
     try std.testing.expectEqual(@as(usize, 1), map.find("sess-b").?.len);
 
     // 같은 저장소로 다시 물으면 비우지 않는다.
-    a2.push("t3", 1, 300, 1);
+    a2.push(.{ .tree = "t3", .surface_id = 1, .captured_s = 300, .agent_kind = 1 });
     const a3 = map.ringFor("sess-a", "/repo/two").?;
     try std.testing.expectEqual(@as(usize, 1), a3.len);
 }
@@ -780,7 +858,7 @@ test "세션 맵: 저장소 경로가 상한을 넘으면 기억하지 않고 �
     var map: RingMap = .{};
     var long: [max_repo_len + 1]u8 = @splat('p');
     const r = map.ringFor("sess", &long).?;
-    r.push("t1", 1, 100, 1);
+    r.push(.{ .tree = "t1", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
     // 기억하지 못했으므로 «바뀌었다» 를 판정할 근거가 없다 — 잘라 담아 남의 저장소를 같다고 보는 것보다 낫다.
     const again = map.ringFor("sess", "/other").?;
     try std.testing.expectEqual(@as(usize, 1), again.len);

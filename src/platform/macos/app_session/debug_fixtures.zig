@@ -992,7 +992,14 @@ pub fn applyForcedScmTab(self: *AppSession) void {
                             const fallback = std.fmt.bufPrint(&oid_buf, "{d:0>10}ab", .{i}) catch continue;
                             const oid = if (trees_it) |*it| (it.next() orelse fallback) else fallback;
                             // 종류만 번갈아 심는다 — 한 링은 한 세션이므로 `surface_id` 는 하나다.
-                            ring.push(oid, 1, now_s - @as(i64, @intCast((count - i) * 900)), if (i % 2 == 0) 1 else 2);
+                            ring.push(.{
+                                .tree = oid,
+                                .surface_id = 1,
+                                .captured_s = now_s - @as(i64, @intCast((count - i) * 900)),
+                                .agent_kind = if (i % 2 == 0) 1 else 2,
+                                // 턴 키는 심지 않는다 — 하니스에는 provider 훅이 없어 **모르는 것**이고,
+                                // 가짜 키를 심으면 AT3 귀속이 그 항목에 없는 기록을 붙이려 든다.
+                            });
                         }
                         // MARU_FORCE_SCM_TURNS_MISSED=<n> — 「기록하지 못한 턴」 줄을 세운다. 실제로는
                         // 다른 세션의 캡처와 겹쳐야 나는 값이라 헤드리스로는 재현할 방법이 없다.

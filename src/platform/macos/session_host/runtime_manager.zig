@@ -269,7 +269,7 @@ pub const RuntimeManager = struct {
         self.clipboards = .empty;
         self.output_wake = null;
         self.hook_identity = hook_identity;
-        if (hook_identity) |identity| agent_hook_logs.ensureInstanceDir(identity.log_base, identity.host_id);
+        if (hook_identity) |identity| agent_hook_logs.ensureInstanceDir(io, identity.log_base, identity.host_id);
     }
 
     /// Product daemon/restore calls this before any runtime exists. Tests that do not exercise the
@@ -1654,7 +1654,7 @@ pub const RuntimeManager = struct {
         // **칸이 없으면 훅은 조용히 나간다**(계약 §4.1 — 훅은 mkdir 하지 않는다). init 에서 한 번 만들지만
         // 그 사이 사용자가 캐시를 비웠을 수 있어 spawn 마다 확인한다(이미 있으면 EEXIST 로 no-op).
         if (self.hook_identity) |identity|
-            agent_hook_logs.ensureInstanceDir(identity.log_base, identity.host_id);
+            agent_hook_logs.ensureInstanceDir(self.io, identity.log_base, identity.host_id);
 
         const be = self.backend_impl.backend();
         const size = maru.terminal.Size{ .cols = params.cols, .rows = params.rows };

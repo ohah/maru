@@ -75,6 +75,12 @@ pub const ScenarioId = enum {
     /// (`bandRole` — 선택보다 약한 색) 이 시나리오가 없으면 그 색과 자리를 아무도 못 본다. 선택 밴드와
     /// **구별되는지**가 이 캡처의 관심사다 — 둘이 같은 색이면 사용자는 무엇을 고른 상태인지 알 수 없다.
     file_tree_row_hover,
+    /// 같은 목록을 **스크롤한** 상태. 가상화는 창의 첫 항목을 음수 origin 으로 올려 두므로 그 행의
+    /// rect 는 목록 뷰포트 **위쪽까지** 이어진다. 그 rect 를 clip 으로 그대로 실으면 clip 이 뷰포트보다
+    /// 커져 아무것도 자르지 않고, 반쯤 걸친 행의 밴드·글자가 위쪽 고정 chrome 위에 그려진다 — SCM
+    /// 도크에서 정확히 그 결함이 사용자 캡처로 드러났고(`scm_scrolled` 가 그때 생겼다), 트리도 같은
+    /// 창 산술을 쓴다. 스크롤이 없는 `file_tree_rows` 로는 이 상태를 만들 수 없다.
+    file_tree_scrolled,
     /// 세션 기록 헤더의 **정렬 토글에 호버**한 상태. 이 토글은 `.ghost`라 평소에는 label만 보이고 면·테두리가
     /// 없다 — 즉 **호버·pressed 때만 존재하는 그림**이고, 그 그림을 보던 골든이 하나도 없었다. 실제로
     /// 목록 행용 hover 토큰(활성보다 밝게 잡은 색)이 그대로 깔려 작은 pill 하나만 튀는 상태가 사용자
@@ -261,7 +267,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit => buildScmFrame(scenario, tokens, buffers),
-        .file_tree_rows, .file_tree_row_hover => buildFileTreeFrame(scenario, tokens, buffers),
+        .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
@@ -884,7 +890,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .file_tree_rows, .file_tree_row_hover, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1012,7 +1018,10 @@ fn buildFileTreeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
         .snapshot_generation = 1,
         .rows = &rows,
         .selection_focused = true,
-        .origin_shift_px = 0,
+        // **행 높이의 배수가 아닌 값**이다. 배수면 첫 행이 통째로 밀려 나가 "반쯤 걸친 행"이 없고,
+        // 그러면 이 시나리오가 clip 을 증언하지 못한다(내 판정자가 같은 함정을 한 번 밟았다 —
+        // 스크롤을 정확히 10 행만큼 줘서 단언이 아무것도 안 보던 적이 있다).
+        .origin_shift_px = if (scenario.id == .file_tree_scrolled) 11 else 0,
     };
     const sizes = file_tree.build.bufferSizes(rows.len);
     if (sizes.nodes > buffers.file_tree_nodes.len or sizes.entries > buffers.entries.len or

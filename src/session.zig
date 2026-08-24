@@ -143,6 +143,9 @@ pub const editor = struct {
     pub const fold = @import("session/editor/fold.zig");
     /// 문서 내 검색의 일치 계산(§5.1) — 순수 함수라 여기 산다. 오버레이 UI는 chrome이 이미 갖고 있다.
     pub const find = @import("session/editor/find.zig");
+    /// N2: 편집 가능한 텍스트 버퍼(§3.0 — persistent rope). `document`가 파일 *속성*을 든다면
+    /// 이쪽은 *내용*을 들고, 스냅숏이 §2.1의 워커 분리를 가능하게 하는 성질이다.
+    pub const buffer = @import("session/editor/buffer.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

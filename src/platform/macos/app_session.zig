@@ -30543,6 +30543,161 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
     try std.testing.expect(std.mem.endsWith(u8, read_path, expected));
 }
 
+test "부재 중 쌓인 로그는 상태만 세우고 알리지 않는다 — 재접속이 옛 알림을 쏟지 않게" {
+    // keep-alive 로 GUI 를 끈 사이엔 **아무도 회전시키지 않는다**(회전은 소비에 묶여 있다). 재접속한 창이
+    // 그 파일을 앞에서부터 읽으면 몇 시간 전 턴을 tick 마다 되짚고 그 사이 알림이 줄줄이 나간다 —
+    // 「방금 끝났습니다」가 거짓말이 되는 자리다. 창 하나만큼만 남기고 건너뛰되 **배지·대화 줄은 세운다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    const hook_command = maru.session.agent_hook_command;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "cache");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.agent_kind = .claude;
+
+    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{
+        hook_command.log_dir_rel,
+        agent_ops.hookInstanceId(),
+    });
+    defer a.free(events_dir);
+    try tmp.dir.createDirPath(io, events_dir);
+    const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
+    defer a.free(log_rel);
+
+    // **창보다 큰 backlog 를 만든다.** 앞쪽에 «옛 턴» 을 두고, 뒤에 지금 상태를 둔다. 사이는 무해한
+    // 이벤트로 채워 크기만 넘긴다(payload 를 크게 만들지 않는다 — 상한을 넘기면 그 줄이 접힌다).
+    const event_mod = maru.session.agent_hook_event;
+    const window: usize = event_mod.max_line_bytes * 2; // 제품과 같은 창(`agent.zig` 의 backlog_window)
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(a);
+    try buffer.appendSlice(a, "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s1\"}\n");
+    try buffer.appendSlice(a, "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"옛 질문\"}\n");
+    try buffer.appendSlice(a, "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"옛 응답\"}\n");
+    const filler = "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n";
+    // 창의 **여러 배**를 채운다 — 앞에서부터 읽으면 꼬리에 못 닿는다는 것이 이 테스트의 요점이다.
+    while (buffer.items.len < window * 8) try buffer.appendSlice(a, filler);
+    // **건너뛴 뒤에도 읽히는 구간에 «알림을 만드는» 이벤트를 둔다.** 필러(`PreToolUse`)는 알림을 안 만들어,
+    // 이것이 없으면 「따라잡는 동안 안 알린다」가 시험되지 않는다(뮤테이션이 그 공백을 잡았다).
+    try buffer.appendSlice(a, "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"창 안의 옛 응답\"}\n");
+    for (0..8) |_| try buffer.appendSlice(a, filler);
+    // 꼬리: 지금 도는 턴.
+    try buffer.appendSlice(a, "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"지금 질문\"}\n");
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = buffer.items });
+
+    // **제품처럼 여러 tick 을 돈다.** tick 상한은 이벤트 개수라 짧은 줄이 많으면 한 번에 못 따라잡는다 —
+    // 그 사실 자체가 이 계약의 이유다(2번째 tick 부터 옛 알림이 새면 안 된다).
+    var ticks: usize = 0;
+    while (ticks < 200) : (ticks += 1) {
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        if (std.mem.eql(u8, term.agent_transcript.owned.prompt(), "지금 질문")) break;
+    }
+
+    // ① 상태는 선다 — 꼬리의 프롬프트가 그 Term 을 «진행 중» 으로 만든다.
+    try std.testing.expect(term.agent_hook_log_present);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqualStrings("지금 질문", term.agent_transcript.owned.prompt());
+    // ② 그런데 **알림은 없다.** 건너뛴 구간의 옛 «완료» 가 지금 뜨면 그것은 거짓말이다.
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+    // ③ **몇 tick 만에 따라잡았는가** 가 곧 «건너뛰었는가» 다. 건너뛰지 않으면 파일 전체(창의 여덟 배)를
+    //    64 이벤트씩 되짚어 tick 이 수십~수백 번 든다 — 그 회귀를 이 상한이 잡는다(뮤테이션으로 확인).
+    try std.testing.expect(ticks < 40);
+    try std.testing.expect(term.agent_hook_cursor.offset > buffer.items.len - window);
+}
+
+test "host 가 만드는 칸과 GUI 가 읽는 칸이 같은 경로다 — 두 모듈이 같은 이름을 짓는다" {
+    // 이것이 AH7-3b 의 이음매다. host 는 `session_host/agent_hook_logs` 로 칸을 만들고, GUI 는
+    // `app_session/agent` 로 그 안의 파일을 읽는다 — **두 모듈이 서로를 모른다.** 이름을 각자 조립하는
+    // 순간 그 Term 은 자기 이벤트를 영영 못 읽고(«훅은 도는데 이벤트가 0»), 그 증상은 조용하다.
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const hook_command = maru.session.agent_hook_command;
+    const host_logs = session_host.agent_hook_logs;
+
+    const host_id: u128 = 0xbeef_0000_0000_0000_0000_0000_0000_02;
+    const runtime_id: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+    const base = "/tmp/maru-hook-seam/maru";
+
+    // host 쪽 — 그 host 가 실제로 만드는 파일 경로.
+    var host_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const host_path = try host_logs.runtimeLogPathIn(&host_buf, base, host_id, runtime_id);
+
+    // GUI 쪽 — `agentHookLogPath` 의 host 분기가 짓는 것과 같은 규칙(같은 계약 모듈 함수 둘).
+    var inst_buf: [hook_command.instance_token_max]u8 = undefined;
+    var pane_buf: [hook_command.pane_token_max]u8 = undefined;
+    const gui_path = try std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}.ndjson", .{
+        base,
+        hook_command.log_dir_rel,
+        hook_command.formatHostInstance(&inst_buf, host_id),
+        hook_command.formatRuntimePane(&pane_buf, runtime_id),
+    });
+    defer a.free(gui_path);
+
+    try std.testing.expectEqualStrings(host_path, gui_path);
+}
+
+test "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 GUI 가 띄웠다" {
+    // host 분기가 «원격이 아닌 Term» 까지 삼키면 그 Term 은 아무도 안 쓰는 파일을 읽게 된다(빈 화면).
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = pane_ops.activePane(&session).activeTerm();
+    try std.testing.expect(term.surface.remote == null); // 전제: in-process Term
+
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const path = agent_ops.agentHookLogPath(arena_state.allocator(), term) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, path, maru.session.agent_hook_command.host_instance_prefix) == null);
+    // 그리고 그 이름은 이 프로세스의 칸이다.
+    var inst_buf: [maru.session.agent_hook_command.instance_token_max]u8 = undefined;
+    const own = agent_ops.hookInstanceToken(&inst_buf);
+    const needle = try std.fmt.allocPrint(a, "/{s}/", .{own});
+    defer a.free(needle);
+    try std.testing.expect(std.mem.indexOf(u8, path, needle) != null);
+}
+
 fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
     app_keep_alive_after_quit = true;
     session.loaded_config.config.session.keep_alive_after_quit = true;

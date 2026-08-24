@@ -108,6 +108,11 @@ pub fn Model(comptime Rt: type) type {
             /// 커서가 읽고 있는 파일의 inode. **회전을 크기만으로 판정하면 놓친다** — 같은 크기로 갈린
             /// 파일이 있으면 옛 오프셋으로 새 내용을 읽어 줄 가운데부터 파싱한다(`resetIfRotated` 계약).
             agent_hook_cursor_inode: u64 = 0,
+            /// 부재 중 쌓인 로그를 **따라잡는 중**인가(docs/agent-hooks.md §4). 그동안의 이벤트는 창이
+            /// 없던 시간의 것이라 상태만 세우고 **알리지 않는다** — 재접속하자마자 몇 시간 전 턴의 «완료»
+            /// 가 뜨면 거짓말이다. 첫 tick 만 막으면 안 된다: tick 상한은 이벤트 **개수**라 짧은 줄이 많은
+            /// 파일은 여러 tick 에 걸쳐 따라잡고, 그 2번째 tick 부터 옛 알림이 새어 나간다.
+            agent_hook_backlog_catchup: bool = false,
             /// 아직 띄우지 않은 훅 알림(계약 §6). 전이에서 예약하고 드레인 루프가 꺼내 간다 — 고정 크기라
             /// 힙을 잡지 않는다.
             agent_hook_notice: agent_hook_mode.PendingNotice = .{},

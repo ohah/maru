@@ -459,17 +459,16 @@ fn runSessionHostImpl(
     defer registry.deinit();
 
     // 실 runtime 소유자(app InProcessTermBackend 재사용). registry를 함께 참조해 spawn이 재접속 조회 대상으로 등록한다.
+    // **host_id 를 manager 보다 먼저 정한다.** 그 값이 spawn 이 자식에게 실을 훅 로그 인스턴스 칸이라
+    // `init` 이 요구한다(docs/agent-hooks.md §4). 업그레이드로 프로세스가 바뀌어도 `host_id` 는 물려받으므로
+    // (`upgrade_bootstrap` 이 불일치를 거부한다) 그 칸의 이름이 exec 을 넘어 유지된다 — pid 로 지으면
+    // 후계자가 «죽은 인스턴스» 로 보여 살아 있는 runtime 의 로그를 정리가 거둔다.
+    const host_id = exact_host_id orelse newHostId();
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(allocator, io, &registry);
+    manager.init(allocator, io, &registry, host_id);
     defer manager.deinit();
     manager.enableOutputWake() catch return error.ManifestFailed;
     if (fixture_probe != null) manager.enableOutputMetrics();
-
-    const host_id = exact_host_id orelse newHostId();
-    // 훅 로그 경로의 인스턴스 칸을 host 신원으로 심는다(docs/agent-hooks.md §4). 업그레이드로 프로세스가
-    // 바뀌어도 `host_id` 는 물려받으므로(`upgrade_bootstrap` 이 불일치를 거부한다) 그 칸의 이름이 유지된다 —
-    // pid 로 지으면 후계자가 «죽은 인스턴스» 로 보여 살아 있는 runtime 의 로그를 정리가 거둔다.
-    manager.setHookInstanceHost(host_id);
     var socket_dir_buf: [112]u8 = undefined;
     const bind_dir = if (exact_host_id != null)
         short_endpoint.socketDirPathIn(&socket_dir_buf, c.getuid()) catch return error.ManifestFailed

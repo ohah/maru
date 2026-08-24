@@ -139,7 +139,11 @@ fn activateValidated(
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(allocator, io, &registry);
+    // **업그레이드 후계자도 훅 신원을 심는다.** 여기서 빠뜨리면 업그레이드 뒤 새로 뜨는 자식만
+    // `MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE` 없이 살아, 그 터미널의 훅이 영영 조용히 나간다(관측 모드로
+    // 강등, 신호 없음). `invocation.host_id` 는 검증이 선임자와 같도록 강제한 값이라(§upgrade) 칸 이름이
+    // exec 을 넘어 유지된다 — 그것이 pid 대신 host_id 를 쓰는 이유다(docs/agent-hooks.md §4).
+    manager.init(allocator, io, &registry, invocation.host_id);
     defer manager.deinit();
     manager.enableOutputWake() catch return error.RestoreFailed;
     var graph = try manager.prepareRestoredGraph(&validated.state.host);

@@ -21,8 +21,9 @@ tail 커서). 단위 40개 + 실제 셸 게이트 `zig build check-agent-hook-co
 넉넉한 umask에서 확인하는 것을 AH2a에서 더했다). **로그를 읽는 쪽은 아직 없다**(회전·정리는 AH3).
 
 
-- 훅 스크립트: stdin 전량 소비 → pane 식별자 확인 → `<cache>/maru/agent-turn-events/<surface_id>.ndjson`에
-  **한 줄 append** → `exit 0`. **백그라운드 서브셸로 분리하지 않는다** — 실측에서 오히려 2 ms 느렸다
+- 훅 스크립트: stdin 전량 소비 → 경로 두 칸 확인 → `<cache>/maru/agent-turn-events/<인스턴스>/<pane>.ndjson`에
+  **한 줄 append** → `exit 0`. (AH1 당시에는 칸이 없어 `<surface_id>.ndjson` 하나였다 — 인스턴스 칸은
+  2026-08-24 에, 소유자별 pane 칸은 AH7-1 에 들어왔다. 지금 모양의 단일 출처는 계약 §4 다.) **백그라운드 서브셸로 분리하지 않는다** — 실측에서 오히려 2 ms 느렸다
   (계약 §3). 비용의 대부분은 `sh` spawn이라 스크립트로 줄일 수 있는 것이 없다.
 - 훅 항목에 **`timeout`을 명시**한다(계약 §4.1). 값과 근거는 `agent_hook_command.timeout_seconds` 가 소유한다.
 - **커맨드는 인라인**이다(계약 §4.1) — 스크립트 파일을 두지 않는다. 우리 항목 식별은 커맨드 안의 표식.

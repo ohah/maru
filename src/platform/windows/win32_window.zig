@@ -208,6 +208,25 @@ const WM_IME_COMPOSITION: UINT = 0x010F;
 /// 문자 경로가 그대로 받고, 확정 처리를 두 곳에 두지 않는다.
 const GCS_COMPSTR: UINT = 0x0008;
 const WM_CLOSE: UINT = 0x0010;
+const swp_framechanged: UINT = 0x0020 | 0x0002 | 0x0001 | 0x0004; // FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
+const sw_minimize: i32 = 6;
+const sw_maximize: i32 = 3;
+const sw_restore: i32 = 9;
+const WM_NCCALCSIZE: UINT = 0x0083;
+const WM_NCHITTEST: UINT = 0x0084;
+// `WM_NCHITTEST` 반환값. 창이 프레임을 안 그려도 **OS 가 이 값들로 드래그·리사이즈·더블클릭
+// 최대화를 대신 해 준다** — Electron 의 `-webkit-app-region: drag` 가 하는 일을 Win32 에서는
+// `HTCAPTION` 하나가 한다.
+const HTCLIENT: LRESULT = 1;
+const HTCAPTION: LRESULT = 2;
+const HTLEFT: LRESULT = 10;
+const HTRIGHT: LRESULT = 11;
+const HTTOP: LRESULT = 12;
+const HTTOPLEFT: LRESULT = 13;
+const HTTOPRIGHT: LRESULT = 14;
+const HTBOTTOM: LRESULT = 15;
+const HTBOTTOMLEFT: LRESULT = 16;
+const HTBOTTOMRIGHT: LRESULT = 17;
 const WM_QUIT: UINT = 0x0012;
 const WM_PAINT: UINT = 0x000F;
 
@@ -243,6 +262,10 @@ extern "user32" fn DefWindowProcW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winap
 extern "user32" fn DestroyWindow(HWND) callconv(abi.winapi) i32;
 extern "user32" fn PostQuitMessage(i32) callconv(abi.winapi) void;
 extern "user32" fn PostMessageW(?HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) i32;
+extern "user32" fn GetWindowRect(HWND, *RECT) callconv(abi.winapi) i32;
+extern "user32" fn SetWindowPos(?HWND, ?HWND, i32, i32, i32, i32, UINT) callconv(abi.winapi) i32;
+extern "user32" fn ShowWindowAsync(HWND, i32) callconv(abi.winapi) i32;
+extern "user32" fn IsZoomed(HWND) callconv(abi.winapi) i32;
 extern "user32" fn PeekMessageW(*MSG, ?HWND, UINT, UINT, UINT) callconv(abi.winapi) i32;
 extern "user32" fn TranslateMessage(*const MSG) callconv(abi.winapi) i32;
 extern "user32" fn DispatchMessageW(*const MSG) callconv(abi.winapi) LRESULT;
@@ -365,6 +388,15 @@ pub const EventQueue = struct {
 /// OS가 재진입시켜 부르는데(모달 resize 루프 등) 그 안에서 앱 정책을 돌리면 재진입이 앱까지 번진다.
 pub const Window = struct {
     hwnd: HWND,
+    /// **프레임리스 창의 드래그 띠 높이**(클라이언트 px). 0 이면 네이티브 캡션을 그대로 쓴다.
+    ///
+    /// 이 값이 0 이 아니면 `WM_NCCALCSIZE` 가 캡션을 지우고, 띠 안의 빈 곳에서 `WM_NCHITTEST` 가
+    /// `HTCAPTION` 을 낸다 — 드래그·더블클릭 최대화·Aero Snap 을 OS 가 해 준다.
+    titlebar_strip_px: u32 = 0,
+    /// 띠 안에서 **우리가 클릭을 받는** 폭(오른쪽 끝, 캡션 버튼 자리). 그만큼은 `HTCLIENT` 다.
+    caption_buttons_px: u32 = 0,
+    /// 리사이즈 테두리 두께(px). 프레임을 지우면 OS 테두리가 없어지므로 우리가 폭을 정한다.
+    resize_border_px: u32 = 6,
     present: PresentTarget = .{},
     /// `WndProc`이 채우고 `poll`이 넘긴다. 창 하나당 하나라 락이 필요 없다(같은 스레드에서만 돈다).
     ///
@@ -551,6 +583,60 @@ pub const Window = struct {
     ///
     /// 호출자가 매 프레임 불러도 된다 — 값이 같으면 IME 가 무시한다. 실패는 삼킨다(후보창 위치가
     /// 기본값으로 남을 뿐 조합 자체는 동작한다).
+    /// **프레임을 지운다.** `strip_px` 는 드래그 띠 높이, `buttons_px` 는 그 띠 오른쪽에서 우리가
+    /// 클릭을 받을 폭(캡션 버튼 자리)이다. 0 이면 네이티브 캡션으로 되돌아간다.
+    ///
+    /// `SetWindowPos(SWP_FRAMECHANGED)` 를 불러야 `WM_NCCALCSIZE` 가 **즉시** 다시 돈다 — 안 부르면
+    /// 다음 크기 변경까지 옛 프레임이 남는다.
+    pub fn setFrameless(self: *Window, strip_px: u32, buttons_px: u32) void {
+        self.titlebar_strip_px = strip_px;
+        self.caption_buttons_px = buttons_px;
+        _ = SetWindowPos(self.hwnd, null, 0, 0, 0, 0, swp_framechanged);
+    }
+
+    /// 최소화·최대화/복원·닫기. **창이 정책을 정하지 않는다** — 호출자가 캡션 버튼을 눌렀다고 판단해
+    /// 부른다(그리기와 히트테스트가 호출자에 있는 것과 같은 분담).
+    pub fn minimize(self: *Window) void {
+        _ = ShowWindowAsync(self.hwnd, sw_minimize);
+    }
+
+    pub fn toggleMaximize(self: *Window) void {
+        _ = ShowWindowAsync(self.hwnd, if (IsZoomed(self.hwnd) != 0) sw_restore else sw_maximize);
+    }
+
+    pub fn isMaximized(self: *const Window) bool {
+        return IsZoomed(self.hwnd) != 0;
+    }
+
+    /// 프레임리스 창의 비클라이언트 판정. **순수 산술이라 창 없이 테스트한다.**
+    ///
+    /// 순서가 계약이다: **모서리·테두리를 먼저** 본다. 띠를 먼저 보면 상단 테두리가 통째로
+    /// `HTCAPTION` 이 되어 **위쪽으로 리사이즈를 못 한다.**
+    ///
+    /// 캡션 버튼 자리는 `HTCLIENT` 다 — 우리가 그 클릭을 받아 최소화·최대화·닫기를 한다. 안 그러면
+    /// OS 가 그 자리를 드래그로 먹어 버튼이 안 눌린다.
+    pub fn hitTestFrame(self: *const Window, rect: RECT, screen_x: i32, screen_y: i32) LRESULT {
+        const border: i32 = @intCast(@max(4, self.resize_border_px));
+        const left = screen_x < rect.left + border;
+        const right = screen_x >= rect.right - border;
+        const top = screen_y < rect.top + border;
+        const bottom = screen_y >= rect.bottom - border;
+        if (top and left) return HTTOPLEFT;
+        if (top and right) return HTTOPRIGHT;
+        if (bottom and left) return HTBOTTOMLEFT;
+        if (bottom and right) return HTBOTTOMRIGHT;
+        if (top) return HTTOP;
+        if (bottom) return HTBOTTOM;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+
+        const local_y = screen_y - rect.top;
+        if (local_y >= @as(i32, @intCast(self.titlebar_strip_px))) return HTCLIENT;
+        // 띠 안 — 오른쪽 끝의 캡션 버튼 자리만 우리가 받는다.
+        if (self.caption_buttons_px != 0 and screen_x >= rect.right - @as(i32, @intCast(self.caption_buttons_px))) return HTCLIENT;
+        return HTCAPTION;
+    }
+
     /// **합성 마우스 메시지를 자기 큐에 넣는다** — 판정용이다.
     ///
     /// 표면 스모크가 "눌러서 무언가 바뀌는가" 를 사람 없이 재려면 창이 실제로 받는 메시지가
@@ -722,6 +808,27 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
     }
     const self = windowFrom(hwnd);
     switch (msg) {
+        // ── 프레임리스 창 (W8.8⒝) ────────────────────────────────────────────────────────
+        //
+        // **`wparam == TRUE` 일 때 0 을 돌려주면 클라이언트가 창 전체를 덮는다** — 캡션이 사라진다.
+        // 사각형을 안 건드리므로 리사이즈 테두리도 함께 사라지고, 그 자리는 아래 `WM_NCHITTEST` 가
+        // 되살린다. macOS 가 `titlebarAppearsTransparent` + `.fullSizeContentView` 로 하는 것과
+        // 같은 자리다(§2m.37).
+        WM_NCCALCSIZE => {
+            const strip = if (self) |w| w.titlebar_strip_px else 0;
+            if (strip == 0 or wparam == 0) return DefWindowProcW(hwnd, msg, wparam, lparam);
+            return 0;
+        },
+        WM_NCHITTEST => {
+            const w = self orelse return DefWindowProcW(hwnd, msg, wparam, lparam);
+            if (w.titlebar_strip_px == 0) return DefWindowProcW(hwnd, msg, wparam, lparam);
+            var rect: RECT = undefined;
+            if (GetWindowRect(hwnd, &rect) == 0) return HTCLIENT;
+            const raw: u32 = @bitCast(@as(i32, @truncate(lparam)));
+            const sx: i32 = @as(i16, @bitCast(@as(u16, @truncate(raw))));
+            const sy: i32 = @as(i16, @bitCast(@as(u16, @truncate(raw >> 16))));
+            return w.hitTestFrame(rect, sx, sy);
+        },
         WM_SIZE => {
             if (self) |w| {
                 // lParam 하위/상위 16비트가 클라이언트 폭·높이다. 최소화하면 0이 오므로 그대로 싣고
@@ -837,6 +944,57 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
 }
 
 const testing = std.testing;
+
+fn framelessFixture() Window {
+    return .{ .hwnd = undefined, .allocator = testing.allocator, .titlebar_strip_px = 40, .caption_buttons_px = 138, .resize_border_px = 6 };
+}
+
+test "프레임리스: 모서리·테두리를 띠보다 먼저 본다" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const w = framelessFixture();
+    const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
+    // **띠를 먼저 보면 위쪽 리사이즈를 영영 못 한다** — 상단 6px 가 통째로 HTCAPTION 이 된다.
+    try testing.expectEqual(HTTOPLEFT, w.hitTestFrame(r, 101, 101));
+    try testing.expectEqual(HTTOP, w.hitTestFrame(r, 600, 102));
+    try testing.expectEqual(HTTOPRIGHT, w.hitTestFrame(r, 1099, 101));
+    try testing.expectEqual(HTLEFT, w.hitTestFrame(r, 102, 400));
+    try testing.expectEqual(HTRIGHT, w.hitTestFrame(r, 1098, 400));
+    try testing.expectEqual(HTBOTTOM, w.hitTestFrame(r, 600, 699));
+}
+
+test "프레임리스: 띠의 빈 곳은 HTCAPTION — OS 가 끌어 준다" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const w = framelessFixture();
+    const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
+    try testing.expectEqual(HTCAPTION, w.hitTestFrame(r, 400, 120));
+}
+
+test "프레임리스: 캡션 버튼 자리는 HTCLIENT — 우리가 받는다" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    // 그 자리를 HTCAPTION 으로 두면 OS 가 드래그로 먹어 **버튼이 안 눌린다.**
+    const w = framelessFixture();
+    const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 1050, 120)); // 오른쪽 138px 안
+    try testing.expectEqual(HTCAPTION, w.hitTestFrame(r, 950, 120)); // 그 바깥
+}
+
+test "프레임리스: 띠 아래는 전부 HTCLIENT" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const w = framelessFixture();
+    const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 400, 141));
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 1050, 400));
+}
+
+test "띠가 0 이면 프레임리스가 아니다 — 판정도 안 탄다" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    var w = framelessFixture();
+    w.titlebar_strip_px = 0;
+    const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
+    // 띠가 없으면 띠 판정이 안 도는 것이 계약이다(wndProc 이 DefWindowProc 으로 보낸다).
+    // 이 함수만 보면 테두리 판정은 그대로 돌고 나머지는 HTCLIENT 다.
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 400, 120));
+}
 
 // 순수 변환은 **모든 타깃에서** 돈다 — Windows 러너가 없어도 이 규칙이 지켜진다.
 test "cellsForClient: 0 메트릭은 null, 아주 작은 창도 최소 1x1" {

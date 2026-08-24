@@ -960,3 +960,144 @@ pub fn buildDockViewBarDrawList(
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
+
+// ── 사이드바 헤더 아이콘 줄 (W8.8⒝) ─────────────────────────────────────────────────────────
+//
+// **왜 옮겼나.** 이 줄은 `platform/macos/app_session/sidebar.zig` 안에 있었고 `*AppSession` 을
+// 받았지만, 실제로 보는 것은 **`cols` 와 색과 안 읽은 알림 수** 셋뿐이다 — macOS 창 모양에도,
+// CoreText 에도 안 매인다. Windows 가 같은 줄을 그리려면 옮기는 것 말고 방법이 없다(경계 게이트가
+// `main.zig` → `platform/macos/**` 를 0 회로 강제한다). §2m.39·FT3 와 같은 이사다.
+//
+// **자리는 뒤집지 않는다**(§2m.37 ⒝ 결정). macOS 는 신호등이 사이드바 헤더 **안**이라 아이콘이
+// 오른쪽으로 밀렸고, Windows 는 캡션 버튼이 **타이틀바 띠** 오른쪽 끝이라 사이드바와 안 겹친다 —
+// 그래서 아이콘 줄은 **양쪽 다 헤더 오른쪽 끝**이다. 열 번호는 `chrome.components.sidebar` 의
+// `headerIconCol` 이 단일 출처로 소유한다(히트테스트와 같은 값).
+
+/// 사이드바 접기 토글 글리프 — 헤더와 접힘 토글이 공유한다.
+pub const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse);
+
+/// 알림 배지 숫자가 앉는 열. 종 글리프가 2칸(EAW)이라 `bell_col + 2` 다.
+pub fn notificationBadgeCol(bell_col: u16) u16 {
+    return bell_col + 2;
+}
+
+/// 헤더가 아이콘 줄을 낼 수 있는 최소 폭(칸). 검색 줄 + 우측 아이콘 넷(종·◧·⚙·＋, 3칸 간격)이
+/// 들어가야 한다 — `sidebar.headerHit` 의 `cols < 13` 과 같은 값이다.
+pub const sidebar_header_min_cols: u16 = 13;
+
+/// 종 글리프가 앉는 열. `headerIconCol` 이 안 가진 값이라 여기서 소유한다 — 종은 2칸 이모지고,
+/// 배지(`bell+2`)와 ◧(`cols-8`) 사이에 한 칸을 띄우려고 `cols-12` 다.
+pub fn sidebarBellCol(cols: u16) u16 {
+    return cols -| 12;
+}
+
+/// 종과 배지를 셀로 낸다.
+///
+/// **빨강 원은 여기서 안 그린다** — 그것은 GPU quad 라 표면마다 경로가 다르다. 여기서 내는 것은
+/// 원 위에 올라갈 **흰 숫자**뿐이다(`round_badge`). 접힘 타이틀바는 원이 없으므로 빨강 텍스트 배지다.
+pub fn appendSidebarBellAndBadge(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(renderer.DrawCell),
+    bell_col: u16,
+    fg: terminal.Color,
+    unread: u32,
+    round_badge: bool,
+) !void {
+    try cells.append(allocator, .{ .row = 0, .col = bell_col, .codepoint = icons.codepoint(.bell), .width = 2, .style = .{ .foreground = fg } });
+    if (unread == 0) return;
+    if (round_badge) {
+        // 원형 1칸 제약상 1~9 는 숫자, 10 개 이상은 '9' 로 cap 한다(2칸 "9+" 는 종 우측 ◧ 때문에 자리가 없다).
+        const white: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+        const digit: u21 = '0' + @as(u21, @intCast(@min(unread, 9)));
+        try cells.append(allocator, .{ .row = 0, .col = notificationBadgeCol(bell_col), .codepoint = digit, .style = .{ .foreground = white } });
+    } else {
+        const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
+        if (unread > 9) {
+            try cells.append(allocator, .{ .row = 0, .col = bell_col -| 2, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
+            try cells.append(allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+        } else {
+            try cells.append(allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '0' + @as(u21, @intCast(unread)), .style = .{ .foreground = badge_rgb } });
+        }
+    }
+}
+
+/// 헤더 아이콘 줄의 셀 — 종 · 사이드바 접기(◧) · view options(⚙) · 새 워크스페이스(＋).
+///
+/// `cols` 가 최소 폭 미만이면 **아무것도 안 낸다**(`null`) — 잘린 아이콘이 반쯤 걸치느니 안 그리는
+/// 편이 낫고, `headerHit` 도 그 폭에서는 `none` 을 낸다(두 규칙이 같은 값을 봐야 한다).
+///
+/// 아이콘 색은 호버와 무관하게 항상 `fg` 다 — 호버 강조는 배경 quad 가 맡는다. 예전에 호버 아이콘을
+/// `sidebar_active` 로 재색칠했다가, 그 색이 밝은 전경이 아니라 **어두운 밴드색**인 테마에서 아이콘이
+/// 오히려 어두워졌다(사용자 피드백).
+pub fn appendSidebarHeaderIcons(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(renderer.DrawCell),
+    cols: u16,
+    fg: terminal.Color,
+    unread: u32,
+) !bool {
+    if (cols < sidebar_header_min_cols) return false;
+    const sb = chrome.components.sidebar;
+    try appendSidebarBellAndBadge(allocator, cells, sidebarBellCol(cols), fg, unread, true);
+    try cells.append(allocator, .{ .row = 0, .col = @intCast(sb.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+    try cells.append(allocator, .{ .row = 0, .col = @intCast(sb.headerIconCol(.view_options, cols)), .codepoint = icons.codepoint(.gear), .style = .{ .foreground = fg } });
+    try cells.append(allocator, .{ .row = 0, .col = @intCast(sb.headerIconCol(.new_workspace, cols)), .codepoint = icons.codepoint(.plus), .style = .{ .foreground = fg } });
+    return true;
+}
+
+test "헤더 아이콘 넷이 오른쪽 끝에 순서대로 앉는다" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    const fg: terminal.Color = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } };
+    try std.testing.expect(try appendSidebarHeaderIcons(allocator, &cells, 20, fg, 0));
+    // 종 → ◧ → ⚙ → ＋ 순으로 **왼쪽에서 오른쪽**. 뒤집히면 Windows 화면이 macOS 와 갈린다.
+    var cols_seen: [4]u16 = undefined;
+    for (cells.items, 0..) |c, i| cols_seen[i] = c.col;
+    try std.testing.expectEqual(@as(usize, 4), cells.items.len);
+    try std.testing.expect(cols_seen[0] < cols_seen[1]);
+    try std.testing.expect(cols_seen[1] < cols_seen[2]);
+    try std.testing.expect(cols_seen[2] < cols_seen[3]);
+    // 마지막(＋)이 오른쪽 끝 한 칸을 비운다 — `headerIconCol` 이 정한 규칙.
+    try std.testing.expectEqual(@as(u16, 20 - 2), cols_seen[3]);
+}
+
+test "열은 히트테스트와 같은 출처를 쓴다 — 그린 자리가 눌리는 자리다" {
+    const allocator = std.testing.allocator;
+    const sb = chrome.components.sidebar;
+    const cw: u32 = 8;
+    const ch: u32 = 16;
+    const cols: u16 = 24;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    try std.testing.expect(try appendSidebarHeaderIcons(allocator, &cells, cols, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } }, 0));
+    // **동어반복이 아니다**: 셀을 그린 열의 픽셀 중앙을 `headerHit` 에 넣어 그 아이콘의 영역이
+    // 나오는지 본다 — 그리기와 히트테스트가 갈리면 여기서 갈린다.
+    const want = [_]sb.HeaderRegion{ .notifications, .toggle_sidebar, .view_options, .new_workspace };
+    for (cells.items, 0..) |c, i| {
+        const x: f64 = (@as(f64, @floatFromInt(c.col)) + 0.5) * @as(f64, @floatFromInt(cw));
+        const got = sb.headerHit(x, @as(f64, @floatFromInt(ch)) * 0.5, cols * cw, cw, ch, ch * 2, ch);
+        try std.testing.expectEqual(want[i], got);
+    }
+}
+
+test "폭이 모자라면 아무것도 안 낸다 — headerHit 과 같은 문턱" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    try std.testing.expect(!try appendSidebarHeaderIcons(allocator, &cells, sidebar_header_min_cols - 1, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } }, 0));
+    try std.testing.expectEqual(@as(usize, 0), cells.items.len);
+}
+
+test "안 읽은 알림이 있으면 배지 숫자가 종 옆에 붙고, 10 이상은 9 로 cap 된다" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    try std.testing.expect(try appendSidebarHeaderIcons(allocator, &cells, 20, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } }, 3));
+    try std.testing.expectEqual(@as(usize, 5), cells.items.len);
+    try std.testing.expectEqual(@as(u21, '3'), cells.items[1].codepoint);
+    try std.testing.expectEqual(notificationBadgeCol(sidebarBellCol(20)), cells.items[1].col);
+    cells.clearRetainingCapacity();
+    try std.testing.expect(try appendSidebarHeaderIcons(allocator, &cells, 20, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } }, 42));
+    try std.testing.expectEqual(@as(u21, '9'), cells.items[1].codepoint);
+}

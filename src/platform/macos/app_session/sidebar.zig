@@ -28,6 +28,9 @@ const dock_list_scrollbar_width_px = app_session_mod.dock_list_scrollbar_width_p
 const spinner_wave = app_session_mod.spinner_wave;
 const git_ops = @import("git.zig");
 const notification_ops = @import("notification.zig");
+// 헤더 아이콘 줄의 **정의는 공유 모듈이 소유한다**(`platform/cell_text.zig`) — Windows 사이드바가
+// 같은 줄을 그린다(W8.8⒝). 여기는 `AppSession` 에서 필드를 꺼내 넘기는 껍질만 남는다.
+const cell_text = maru.cell_text;
 const workspace_ops = @import("workspace.zig");
 const settings_ops = @import("settings.zig");
 const scroll_ops = @import("scroll.zig");
@@ -2408,28 +2411,11 @@ pub fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.
 /// 드리프트하지 않는다. 배지는 안 읽은 알림이 있을 때만 종 한 칸 왼쪽부터: 1~9는 숫자 1칸(`bell_col-1`), 10개 이상은
 /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
 /// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
+/// 종과 배지 — **정의는 공유 모듈이 소유한다**(`cell_text.appendSidebarBellAndBadge`). 여기는
+/// `AppSession` 에서 안 읽은 수를 꺼내 넘기는 껍질이다. 빨강 원 quad 는 `appendNotificationBadge` 가
+/// 따로 그린다(표면마다 경로가 다르다).
 pub fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.DrawCell), bell_col: u16, fg: terminal.Color, round_badge: bool) !void {
-    try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = icons.codepoint(.bell), .width = 2, .style = .{ .foreground = fg } });
-    if (self.notification_unread == 0) return;
-    if (round_badge) {
-        // 펼침 헤더: 종 **우상단** 빨강 원형 배지(iOS/macOS식). 빨강 원은 GPU quad(appendNotificationBadge, layer 4 —
-        // 헤더 글리프 '뒤')가 그리고, 여기선 그 원 위에 올라갈 **흰 숫자**만 셀로 둔다(같은 col=bell_col+2 단일 출처 —
-        // notificationBadgeCol). 원형 1칸 제약상 1~9는 숫자, 10개 이상은 '9'로 cap한다(2칸 "9+"는 종 우측에 ◧가 붙어
-        // 자리가 없다 — docs/notifications.md §3). 배경은 default(투명)라 원 quad가 비친다.
-        const white: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-        const digit: u21 = '0' + @as(u21, @intCast(@min(self.notification_unread, 9)));
-        try cells.append(self.allocator, .{ .row = 0, .col = notificationBadgeCol(bell_col), .codepoint = digit, .style = .{ .foreground = white } });
-    } else {
-        // 접힘 타이틀바: 종 **좌측** 빨강 텍스트 배지(기존 유지). 접힘 헤더는 터미널 위에 그려져 layer 4 quad가 터미널
-        // 셀에 가리므로(원형 quad 부적합) 텍스트 배지로 둔다. 1~9는 숫자 1칸, 10개 이상은 "9+" 2칸.
-        const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
-        if (self.notification_unread > 9) {
-            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 2, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
-            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
-        } else {
-            try cells.append(self.allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '0' + @as(u21, @intCast(self.notification_unread)), .style = .{ .foreground = badge_rgb } });
-        }
-    }
+    try cell_text.appendSidebarBellAndBadge(self.allocator, cells, bell_col, fg, self.notification_unread, round_badge);
 }
 
 /// 사이드바 헤더 glyph의 DrawList(접힘이면 좌상단 토글 — buildCollapsedToggleDrawList 위임; 조건 미달이면 null).
@@ -2472,12 +2458,9 @@ pub fn buildSidebarHeaderDrawList(self: *AppSession, part: HeaderPart) !?rendere
     // 종 글리프는 🔔(U+1F514) — 🔍(검색)과 같은 이모지 경로(CoreText fallback). 글리프·색·배지 규칙은 appendBellAndBadge가
     // 접힘 토글과 공유(접힘은 좌측 텍스트 배지 — round_badge=false). 1~9 숫자·10+ "9" cap은 원형 1칸 제약(docs §3).
     // 아이콘 glyph col은 sidebar.headerIconCol 단일 출처(배지·hit-test와 공유 — 종은 2칸 이모지라 별도 cols-12).
-    const sb_icon = chrome.components.sidebar;
     if (part == .icons) {
-        try appendBellAndBadge(self, &cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = icons.codepoint(.gear), .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = icons.codepoint(.plus), .style = .{ .foreground = fg } });
+        // **공유 모듈이 그린다** — 종·◧·⚙·＋ 의 열과 배지 규칙은 `cell_text` 가 단일 출처로 소유한다.
+        _ = try cell_text.appendSidebarHeaderIcons(self.allocator, &cells, cols, fg, self.notification_unread);
         return renderer.DrawList{
             .size = .{ .cols = cols, .rows = 1 },
             .cursor = .{ .row = 0, .col = 0 },
@@ -2631,7 +2614,9 @@ pub const sidebar_min_pt: u32 = 120; // 너무 좁으면 제목/✕가 안 보�
 
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(등록 PUA `sidebar_collapse` — 좌측 절반 채운 사각형 = 왼쪽 패널, 옛 ◧ U+25E7 대체). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
-pub const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
+/// maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
+/// **정의는 공유 모듈**(`cell_text`) — Windows 헤더가 같은 글리프를 쓴다.
+pub const sidebar_toggle_codepoint: u21 = cell_text.sidebar_toggle_codepoint;
 
 pub const sidebar_search_text_col: u16 = sidebar_search_icon_col + 3; // 🔍(2칸)+공백(1) 뒤 = 입력/caret 시작 col(=4)
 

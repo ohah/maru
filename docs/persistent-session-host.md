@@ -5822,7 +5822,9 @@ actual-AppKit recovery 행 100개를 실행한다. recovery는 batch마다 같�
 batch 사이에는 daemon/runtime을 새로 만든다. 모든 stalled 행은 absolute deadline 이내 typed failure, deadline 뒤 attempt/wait 0이어야 하고,
 recovery 행은 marker exact 1, runtime 생존, controller/observer 0을 매 iteration 증명한다. 최종 validator는 fd·child·socket·
 manifest·host-owned artifact 0과 RSS/CPU/latency cap을 함께 판정한다. 측정 환경이 계약과 다르면 성공으로 세지 않고
-`environment_mismatch`로 fail-closed한다. CR6e-b가 통과하기 전 자동 reconnect 제품 설정 배선과 default-on 주장은 금지한다.
+`environment_mismatch`로 fail-closed한다. 최종 pair/soak 판정은 a1/a2 standalone strict-schema·identity·시간 순서·cleanup
+validator를 먼저 그대로 재실행한 뒤 hard cap을 적용하며, 그보다 약한 복제 판정으로 raw artifact를 통과시키지 않는다.
+CR6e-b가 통과하기 전 자동 reconnect 제품 설정 배선과 default-on 주장은 금지한다.
 
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고

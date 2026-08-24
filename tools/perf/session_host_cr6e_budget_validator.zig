@@ -1,6 +1,8 @@
 //! CR6e-b hard-budget validator for one paired transport/AppKit batch on the pinned runner.
 
 const std = @import("std");
+const baseline_validator = @import("session_host_cr6e_baseline_validator.zig");
+const recovery_validator = @import("session_host_cr6e_recovery_validator.zig");
 
 const expected_os_release = "25.5.0";
 const expected_machine_model = "Mac16,9";
@@ -141,6 +143,10 @@ fn parseStrict(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8
 }
 
 pub fn validatePairBytes(allocator: std.mem.Allocator, transport_bytes: []const u8, recovery_bytes: []const u8) !void {
+    // The final soak pass must not become a weaker second implementation of the raw artifact
+    // contracts. Re-run both standalone semantic validators before applying runner-specific caps.
+    try baseline_validator.validateBytes(allocator, transport_bytes);
+    try recovery_validator.validateBytes(allocator, recovery_bytes);
     var transport = try parseStrict(TransportArtifact, allocator, transport_bytes);
     defer transport.deinit();
     var recovery = try parseStrict(RecoveryArtifact, allocator, recovery_bytes);

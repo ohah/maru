@@ -134,7 +134,7 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 | AppKit harness 전체 | ≤1,500ms |
 | AppKit identity/cleanup | Swift-returned iteration exact match, before/after capture exact 1쌍, marker exact 1, runtime 생존, controller/observer 0, FD delta 0, child/socket/host artifact residue 0 |
 
-`mise run session-host-cr6e-budget`은 한 pair를 판정한다. `mise run session-host-cr6e-soak`은 20 batch를 고정해 stalled transport 40행과 실제 AppKit recovery 100회를 실행하고 모든 raw pair를 마지막에 다시 전수 검증한다. 이 gate는 로그인된 WindowServer가 필요한 opt-in 제품 검증이므로 기본 `mise run check`와 hosted CI에 넣지 않는다. 대신 validator의 strict schema·환경 drift·budget overshoot·고정 batch-count 테스트는 `check-boundaries`에 포함한다.
+`mise run session-host-cr6e-budget`은 한 pair를 판정한다. `mise run session-host-cr6e-soak`은 20 batch를 고정해 stalled transport 40행과 실제 AppKit recovery 100회를 실행하고 모든 raw pair를 마지막에 다시 전수 검증한다. 마지막 전수 판정도 a1/a2 standalone validator를 먼저 재사용해 canonical host identity, iteration 간 비중첩 시간 순서, deadline/cleanup 계약을 다시 확인한 뒤 hard cap을 적용한다. 이 gate는 로그인된 WindowServer가 필요한 opt-in 제품 검증이므로 기본 `mise run check`와 hosted CI에 넣지 않는다. 대신 validator의 strict schema·환경 drift·budget overshoot·고정 batch-count 테스트는 `check-boundaries`에 포함한다.
 
 ## CR6f 영속 세션 호스트 output wake 예산
 

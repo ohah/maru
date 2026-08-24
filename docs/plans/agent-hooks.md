@@ -218,10 +218,16 @@ keep-alive 를 켠 터미널은 host 가 자식을 띄우고 그 자식이 GUI �
   `$MARU_HOOK_PANE` 을 파일에 적게 하고 계약 모듈이 만드는 이름과 대조한다(뮤테이션 4개 — 등록에서 다시
   뽑기·두 칸 각각 누락·host_id 없이 pane 만 싣기). ⚠️ 이 단계만으로는 훅이 돌지 않는다 — 그 디렉터리를
   아무도 안 만들어 훅이 조용히 나간다(그래서 주인 없는 로그도 안 생긴다).
-- **AH7-3 — GUI 가 그 칸을 읽는다.** 재접속한 GUI 가 workspace 의 `runtime-handle`(host_id:runtime_id)로
-  같은 이름을 다시 계산해 tail 한다. 시작 시 정리는 «살아 있는가» 를 소유자별로 묻는다(pid → `getpgid`,
-  `host_<hex>` → manifest·소켓). GUI 부재 중 쌓인 backlog 를 어디까지 재생할지도 이 단계가 정한다
-  (상태는 세우고 **알림은 억제**하는 쪽이 기본 — 몇 시간 전 턴의 알림이 한꺼번에 뜨면 안 된다).
+- **AH7-3a(완료 2026-08-24) — host 가 자기 칸을 만들고 치운다.** `session_host/agent_hook_logs.zig` 가
+  네 수명을 갖는다: 칸 생성(0700, daemon 시작·spawn 마다), runtime 종료 시 그 로그+회전본 회수, daemon
+  정상 종료 시 자기 칸 회수, daemon 시작 시 **죽은 host 칸** sweep(판정은 manifest). base 경로는 env 를
+  **한 곳에서만** 읽어(`resolveCacheBase`) manager 에 인자로 넘긴다 — 테스트가 프로세스 전역 env 를 흔들지
+  않게. 검증은 실 fork PTY 수명 테스트 + 뮤테이션 4개(만들자마자 지우기·안 만들기·회수 안 하기·권한 0755).
+- **AH7-3b — GUI 가 그 칸을 읽는다.** 재접속한 GUI 가 workspace 의 `runtime-handle`(host_id:runtime_id)로
+  같은 이름을 다시 계산해 tail 한다. GUI 의 시작 시 정리는 **host 칸을 건드리지 않는다**(이미 숫자 이름만
+  거둔다 — 그 «우연» 을 «명시» 로 바꾼다). 이 단계가 정할 것 둘은 계약 §4 가 소유한다: ⑴ 한 runtime 에
+  창이 둘이면 **controller 만 읽고 observer 는 관측 모드**, ⑵ 부재 중 커진 파일은 재접속 시 **tail 로
+  건너뛴다**. 알림은 backlog 에서 **억제**한다(몇 시간 전 턴의 알림이 한꺼번에 뜨면 안 된다).
 
 ## 2. 순서와 의존
 

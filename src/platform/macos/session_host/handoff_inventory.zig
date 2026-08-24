@@ -691,9 +691,9 @@ pub const runtime_manager_groups = [_]Group{
             // restore path cannot construct a manager without deciding it. The first version of this comment was
             // written before that was true -- restore_activation built its manager without the id, and every child
             // spawned after an upgrade silently lost its hook identity. Adversarial review caught it.
-            "hook_instance_host",
+            "hook_identity",
         },
-        .why = "the self-referential manager graph and process-local output self-pipe are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook instance host id is re-derived from the invocation that upgrade validation already pins to the same host_id",
+        .why = "the self-referential manager graph and process-local output self-pipe are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
     },
 };
 

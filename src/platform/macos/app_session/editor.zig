@@ -899,6 +899,13 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     }
     // 스크롤 입력이 읽을 값을 여기서 싣는다 — 접힘을 아는 것은 렌더뿐이다.
     term.rt.editor_total_visual_rows = pf.total_visual_rows;
+    // **낡은 스냅숏으로 놓았던 검색 자리를 여기서 다시 잡는다**(그 필드 doc). 이 시점이면
+    // 스냅숏도 시각 행 수도 이 프레임의 것이다. 두 번 돌지 않는다 — 다시 잡을 때는 신선하므로
+    // 플래그가 다시 서지 않는다.
+    if (term.rt.editor_find_reveal_pending) {
+        term.rt.editor_find_reveal_pending = false;
+        revealCurrentFindMatch(self, term);
+    }
     // **스크롤 상한도 렌더만 안다**(§4.1d) — 입력이 이것을 읽어 clamp한다.
     term.rt.editor_max_top_line = pf.max_top_line;
     term.rt.editor_max_top_piece = pf.max_top_piece;
@@ -1698,7 +1705,23 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     //
     // **논리 줄 수로 나눈다 — 시각 행 수가 아니다.** 랩에서 한 줄이 세 행을 먹으면 시각 행의
     // 절반은 논리 줄 여럿을 지나쳐, 매치를 가운데가 아니라 **화면 아래로 밀어낸다**.
+    //
     setEditorTop(self, term, row -| drawnDocLines(term) / 2);
+
+    // **낡은 채로 놓았으면 다음 프레임 뒤에 한 번 더 잡는다.**
+    //
+    // 낡았다고 판정한 목록에서 나온 줄 수(`drawnDocLines`)로 가운데를 잡는 것은 추측이고,
+    // 게다가 `clampScrollToGeometry`가 쓰는 `editor_total_visual_rows`도 같은 이유로 낡아
+    // **방금 놓은 자리를 되돌린다**(실측: 31 → 7). 그래서 랩을 켠 직후 첫 Enter가 매치를 화면에
+    // 못 올려 **두 번 눌러야 보였다**(적대적 검증 2026-08-24).
+    //
+    // 다음 프레임이 **둘 다** 이 배치의 값으로 갱신하므로 그 끝에서 다시 잡으면 정확하다.
+    // 원격 find가 `remote_find_scroll_pending`으로 쓰는 그 패턴이고, 사용자에게는 한 틱이다.
+    //
+    // **여기서 추측을 더 잘하려 하지 않는다.** "낡았을 때는 맨 위 가까이" 같은 특례를 넣어 봤지만
+    // 재조준이 어차피 바로잡으므로 **아무 판정자도 그 특례를 재지 못했다** — 장치가 둘이면
+    // 하나는 반드시 검증 밖에 남는다.
+    if (!snapshot_is_current) term.rt.editor_find_reveal_pending = true;
 }
 
 /// 마지막 프레임이 그린 **문서 줄 수**(시각 행 수가 아니다).
@@ -9529,9 +9552,21 @@ test "EM12 조각 축 스냅숏 낡음도 잡는다 — 긴 줄 안을 굴린 �
     fx.session.chrome_host.find.open = true;
     fx.session.editor_find_source = term.surfaceId();
     revealCurrentFindMatch(fx.session, term);
-    // 조각 축을 보면 "낡았다"고 판정해 다시 자리를 잡는다.
-    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_piece);
-    try testing.expectEqual(@as(usize, 30 -| drawnDocLines(term) / 2), term.rt.editor_first_line);
+
+    // **"매치가 실제로 그려지는가"로 잰다 — 좌표를 다시 계산해 대조하지 않는다.**
+    // 초판은 `expectEqual(30 -| drawnDocLines/2, first_line)`을 썼는데 둘이 나빴다:
+    // ⑴ `drawnDocLines`가 **낡은 스냅숏**의 값이라 기대값이 제품과 같은 실수를 공유했고,
+    // ⑵ 여유가 3줄뿐이라 픽스처가 조금만 달라지면 아무것도 안 재게 된다(적대적 검증 2026-08-24).
+    // 바로 앞줄이 스스로 넣은 `first_piece = 0`을 다시 재던 단언도 공허해서 걷어냈다.
+    // 프레임 둘 — 첫 프레임이 스냅숏을 갱신하고 재조준이 돌며, 둘째가 그 자리를 그린다(EM13 참조).
+    for (0..2) |_| {
+        var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        after.dl.deinit(allocator);
+    }
+    const shown = for (term.rt.editor_hit_lines[0..term.rt.editor_hit_rows_len]) |dl| {
+        if (dl == 30) break true;
+    } else false;
+    try testing.expect(shown);
 }
 
 test "EM13 배치가 바뀌면 스냅숏을 안 믿는다 — 랩을 켜고 프레임 없이 Enter" {
@@ -9577,4 +9612,93 @@ test "EM13 배치가 바뀌면 스냅숏을 안 믿는다 — 랩을 켜고 프�
     revealCurrentFindMatch(fx.session, term);
     // 낡은 목록을 믿으면 "보인다"며 0에 남는다.
     try testing.expect(term.rt.editor_first_line > 0);
+
+    // **그리고 실제로 보여야 한다.** `> 0`만 보면 *굴러갔지만 여전히 화면 밖*인 상태를 통과시킨다 —
+    // 실제로 그랬다: 낡았다고 옳게 판정해 놓고 **그 낡은 목록에서 나온 줄 수로** 가운데를 잡아
+    // 첫 Enter가 매치를 못 올렸고 **두 번 눌러야 보였다**(적대적 검증 2026-08-24 실측).
+    //
+    // **프레임을 둘 그린다.** 첫 프레임이 스냅숏과 `editor_total_visual_rows`를 이 배치의 값으로
+    // 갱신하고 그 끝에서 재조준이 돌며(`editor_find_reveal_pending`), 둘째 프레임이 그 자리를
+    // 그린다. 제품에서는 `metal_dirty`가 두 tick을 이어 주므로 사용자에게 한 틱으로 보인다.
+    for (0..2) |_| {
+        var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        after.dl.deinit(allocator);
+    }
+    const shown = for (term.rt.editor_hit_lines[0..term.rt.editor_hit_rows_len]) |dl| {
+        if (dl == target) break true;
+    } else false;
+    try testing.expect(shown);
+}
+
+test "EM14 신선도 대조의 **모든 축**이 하중을 진다 — 하나만 바꿔도 낡음이다" {
+    // **3라운드가 대조 항목을 다섯 늘리면서 넷을 무판정으로 남겼다**(적대적 검증 2026-08-24가
+    // 하나씩 빼서 확인: `visible_len`·`tab_width`·`cell_w_px`·`cell_h_px`를 지워도 33개가 전부
+    // 초록이었다). *"판정 안 하던 판정자 셋"*을 닫는다고 적은 커밋이 **같은 자리에 새 무판정
+    // 축을 넷 열었다.**
+    //
+    // `EM12`(조각)·`EM13`(랩)이 축 하나씩을 잡으므로, 여기서는 **나머지 축을 한 표로** 잡는다 —
+    // 축마다 판정자를 따로 세우면 다음에 축이 늘 때 또 빠뜨린다.
+    //
+    // 형태: 매치가 **화면 안**에 있는 상태로 한 프레임 그린다(그래서 "안 굴러간다"가 기준선이다)
+    // → 축 하나만 라이브로 바꾼다 → 이제 굴러가야 한다(무엇이 보이는지 모르니까).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    const Axis = enum { none, visible_len, tab_width, cell_w, cell_h };
+    for ([_]Axis{ .none, .visible_len, .tab_width, .cell_w, .cell_h }) |axis| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        var doc: std.ArrayList(u8) = .empty;
+        defer doc.deinit(allocator);
+        // 접을 블록이 있어야 `visible_len` 축을 움직일 수 있다.
+        for (0..120) |i| {
+            var buf: [64]u8 = undefined;
+            try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "head {d}\n    body\n", .{i}));
+        }
+        try fx.dir.dir.writeFile(io, .{ .sub_path = "ax.txt", .data = doc.items });
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+        const path = try std.fs.path.join(allocator, &.{ root, "ax.txt" });
+        defer allocator.free(path);
+        const term = try openPathInActivePane(fx.session, path);
+
+        // **`visible_len` 축만 프레임 *전에* 세운다.** 접었다 펴면 값이 원래대로 돌아와 대조가
+        // 안 갈린다 — 검증자의 재현대로 **접은 채 그리고 나서** 펴야 그 축이 움직인다.
+        if (axis == .visible_len) try testing.expect(foldAll(fx.session));
+
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+        const rows = term.rt.editor_hit_rows_len;
+        try testing.expect(rows > 4);
+
+        // 매치를 **화면 맨 아래쯤**에 둔다 — 굴러가면 값이 확실히 바뀌는 자리다.
+        const target: u32 = term.rt.editor_hit_lines[rows - 1];
+        try fx.session.editor_find_matches.append(allocator, .{ .line = target, .start = 0, .len = 1 });
+        fx.session.chrome_host.find.current = 0;
+        fx.session.chrome_host.find.open = true;
+        fx.session.editor_find_source = term.surfaceId();
+
+        switch (axis) {
+            .none => {},
+            // **편다** — `first_line`은 안 움직이고(펴기는 앵커를 지킨다) 보이는 줄 수만 바뀐다.
+            // 그 필드 doc이 접힘을 **먼저** 이름 대 놓고 랩 절반만 판정자를 세웠던 자리다.
+            .visible_len => {
+                try testing.expect(unfoldAll(fx.session));
+                term.rt.editor_first_line = term.rt.editor_hit_geom.top_line; // 위치 축은 고정
+            },
+            .tab_width => term.rt.editor_tab_width = term.rt.editor_tab_width + 1, // config reload가 하는 일
+            .cell_w => fx.session.cell_width_px += 1, // 폰트 크기 변경
+            .cell_h => fx.session.cell_height_px += 1,
+        }
+
+        revealCurrentFindMatch(fx.session, term);
+        if (axis == .none) {
+            // 기준선: 스냅숏이 신선하고 매치가 화면 안이라 **안 움직인다**.
+            try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+        } else {
+            // 축 하나만 달라져도 그 목록은 이 화면 것이 아니다 — 무엇이 보이는지 모르니 굴린다.
+            try testing.expect(term.rt.editor_first_line > 0);
+        }
+    }
 }

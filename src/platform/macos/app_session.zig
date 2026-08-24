@@ -1743,6 +1743,13 @@ const TermRuntime = struct {
     ///
     /// **보이는 줄 축이다**(접힘 반영). 렌더가 받는 배열이 그것이고, 문서 줄 축으로 만들면
     /// 접힘이 켜지는 순간 강조가 엉뚱한 줄에 선다(`buildSelectionMarks`가 겪은 그 자리다).
+    /// 검색 매치로 자리를 잡았는데 **그때 스냅숏이 낡아** 제대로 놓았는지 모르는 상태.
+    ///
+    /// 그 경우 다음 프레임이 두 가지를 바로잡는다: 스냅숏이 신선해지고, `clampScrollToGeometry`가
+    /// 쓰는 `editor_total_visual_rows`도 그 프레임의 값이 된다. **그 뒤에 한 번 더 자리를 잡아야
+    /// 한다** — 안 그러면 랩을 켠 직후 첫 Enter가 매치를 화면에 못 올려 **두 번 눌러야 보인다**
+    /// (적대적 검증 2026-08-24 실측). 원격 find가 `remote_find_scroll_pending`으로 쓰는 그 패턴이다.
+    editor_find_reveal_pending: bool = false,
     editor_find_marks: [][]const chrome.components.editor_view.frame.Mark = &.{},
     /// 위 배열이 가리키는 실제 저장소 — **매치 수만큼** 잡는다.
     ///
@@ -1839,6 +1846,10 @@ const TermRuntime = struct {
         visible_len: usize = 0,
         wrap: bool = false,
         /// 위 값들이 **한 번이라도 채워졌나**. 기본값은 "맨 위를 그렸다"와 구별되지 않는다.
+        ///
+        /// **이것은 배치 입력이 아니다** — `storeHitRows`가 `editor_hit_rows_len`과 한 단위로
+        /// 세우고 `releaseEditorTerm`이 한 단위로 지우므로 "그린 적 없음"과 "행 0"이 같이 간다.
+        /// 대조식에 남긴 것은 기본값 `(0,0)`이 "맨 위를 그렸다"와 겹치지 않게 하려는 것뿐이다.
         drawn: bool = false,
     } = .{},
     /// 렌더가 쓸 **탭 폭**. 기본값은 `frame.default_tab_width` 하나에서 온다(여기 숫자를 다시 쓰면
@@ -35756,7 +35767,15 @@ test "EF6 ⌘G 네비 중 팔레트를 열면 tick이 강조를 되살리지 않
     session.dispatchAppAction(.find_next);
     try std.testing.expect(session.find_nav);
     try std.testing.expect(session.editor_find_matches.items.len > 0);
+
+    // **한 번 더 쳐서 아래쪽 매치로 간다.** 이 줄이 없으면 아래 "뷰가 안 튄다"가 **공허하다** —
+    // 첫 ⌘G는 `current`를 감아 **문서 줄 0**으로 가므로 `before == 0`이고, 회귀(`recomputeFind`가
+    // `current = 0`으로 리셋)도 0으로 가서 `expectEqual(0, 0)`이 된다(적대적 검증 2026-08-24가
+    // 프로브로 실측: `scrolled=276 before=0 after=0`).
+    session.dispatchAppAction(.find_next);
+    _ = try session.tick();
     const before = term.rt.editor_first_line;
+    try std.testing.expect(before > 0); // 전제 — 깨지면 아래 단언이 아무것도 안 잰다
 
     // 팔레트를 연다. 그리고 **한 프레임 더 돈다** — 되살아나는 것은 tick이다.
     session.dispatchAppAction(.toggle_command_palette);
@@ -35765,6 +35784,62 @@ test "EF6 ⌘G 네비 중 팔레트를 열면 tick이 강조를 되살리지 않
     try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len); // 안 되살아난다
     try std.testing.expectEqual(@as(u64, 0), session.editor_find_source);
     try std.testing.expectEqual(before, term.rt.editor_first_line); // 그리고 뷰가 안 튄다
+}
+
+test "EF7 ⌘F를 다시 열면 빈 상자에 옛 강조가 안 남는다 — `show()`도 목록을 비운다" {
+    // **4라운드가 고친 결함이 완전 무판정이었다**(적대적 검증 2026-08-24, 뮤턴트 Q10). `toggleFind`의
+    // 여는 갈래에서 `clearAllFindMatches`를 지워도 **저장소 3,857개가 전부 초록**이었고, 프로브는
+    // 그 나쁜 상태가 그대로 재현됨을 보였다:
+    //
+    //   원본  : open=true query_len=0 match_count=0 editor_matches=0 find_nav=false
+    //   뮤턴트: open=true query_len=0 match_count=0 editor_matches=2 find_nav=true
+    //
+    // `show()`가 컴포넌트 상태(검색어·카운터)만 비우고 목록은 세션 소유라 안 건드리기 때문이다 —
+    // **카운터는 0을 말하면서 화면엔 매치가 다 칠해져 있는** 상태다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "MARUFIND one MARUFIND\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+
+    // 닫고 ⌘G로 닫힘-네비를 연다 — 목록이 되살아나고 `find_nav`가 선다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    session.dispatchAppAction(.find_next);
+    try std.testing.expect(session.find_nav);
+    try std.testing.expect(session.editor_find_matches.items.len > 0);
+
+    // **다시 ⌘F.** `show()`가 검색어를 비우므로 상자는 비었다 — 그러면 강조도 없어야 한다.
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.editor_find_matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len); // 터미널 쪽도 같은 결함이었다
+    try std.testing.expect(!session.find_nav);
+    // 그리고 렌더가 그 Term을 검색 대상으로 안 본다 — 마크가 실제로 안 그려진다는 뜻이다.
+    try std.testing.expect(!editor_ops.isFindTarget(session, term));
 }
 
 test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보존 검색어 재검색·타이핑이 종료)" {

@@ -95,7 +95,11 @@ pub const Event = struct {
     notice_text: []const u8 = "",
     /// `tool_input.description` — 사람이 읽는 도구 설명. 진행 중 배지가 쓴다(명령 원문은 길고 민감해 쓰지 않는다).
     tool_description: []const u8 = "",
-    /// `tool_input.file_path` — 편집 도구가 만지는 경로. AI 소행 확정이 쓴다.
+    /// `tool_input.file_path` — 편집 도구가 만지는 경로. **AI 소행 확정(AT3)이 쓸 값이고, 지금은 파싱만
+    /// 한다** — 제품 소비자가 아직 없다.
+    ///
+    /// 이 줄이 「쓴다」라고 현재형이던 것을 고쳤다(2026-08-25). 형제 필드(`tool_description`·`text`)는
+    /// 실제로 소비자가 있어, 같은 어투가 이 필드에도 배관이 있다고 읽히게 했다.
     ///
     /// **Claude 에만 있다.** Codex 의 `tool_input` 은 `command` 하나뿐이고 경로는 그 안의 패치 텍스트에
     /// 들어 있다(실측 2026-08-20). Codex 경로는 `patchPaths` 로 훑는다.

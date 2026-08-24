@@ -153,6 +153,9 @@ pub const editor = struct {
     /// N2: "다음 일치 추가"가 커서를 놓을 자리(§9.1). 대소문자를 가리고 씨앗이 낱말이면 경계를
     /// 본다 — `find`(⌘F)와 일부러 다른 규칙이고, 그 근거는 모듈 머리말이 든다.
     pub const occurrence = @import("session/editor/occurrence.zig");
+    /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
+    /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
+    pub const edit_doc = @import("session/editor/edit_doc.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

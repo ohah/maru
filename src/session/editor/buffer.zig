@@ -213,7 +213,14 @@ fn rebuildBalanced(allocator: std.mem.Allocator, node: *Node) !*Node {
     try stack.append(allocator, node);
     while (stack.pop()) |n| {
         switch (n.kind) {
-            .leaf => try leaves.append(allocator, retain(n)),
+            .leaf => {
+                // **`append(retain(n))`으로 적으면 안 된다** — append가 실패하면 그 참조가 샌다.
+                const held = retain(n);
+                leaves.append(allocator, held) catch |err| {
+                    release(allocator, held);
+                    return err;
+                };
+            },
             .branch => |b| {
                 try stack.append(allocator, b.right);
                 try stack.append(allocator, b.left);
@@ -221,36 +228,48 @@ fn rebuildBalanced(allocator: std.mem.Allocator, node: *Node) !*Node {
         }
     }
 
-    if (leaves.items.len == 0) return error.EmptyTree;
+    // **가지에는 잎이 반드시 있다** — 잎이 아닌 노드는 자식 둘을 갖고 모든 경로가 잎에서 끝난다.
+    // 오류로 두면 도달할 수 없는 값이 `insert`·`delete`를 거쳐 **모든 호출자의 오류 집합**에
+    // 얹히고, 그것을 받는 쪽이 있을 수 없는 분기를 짓게 된다.
+    std.debug.assert(leaves.items.len > 0);
+    return foldBalanced(allocator, &leaves);
+}
 
-    // 아래에서 위로 짝지어 올린다 — 잎 수에 선형이고 깊이가 ⌈log2⌉가 된다.
-    var level: std.ArrayList(*Node) = .empty;
-    defer {
-        for (level.items) |n| release(allocator, n);
-        level.deinit(allocator);
-    }
-    try level.appendSlice(allocator, leaves.items);
-    leaves.clearRetainingCapacity(); // 소유가 level로 넘어갔다
+/// 잎 배열을 **제자리에서** 아래에서 위로 접어 균형 트리를 만든다.
+///
+/// **소유를 인덱스로 가른다.** 앞선 판은 층마다 새 배열을 만들고 `defer`로 통째로 놓았는데, 그
+/// `defer`가 **이미 `newBranch`가 가져간 노드까지 다시 놓아** 이중 해제였다(적대적 검증 2026-08-24).
+/// 제자리로 접으면 소비한 구간과 안 만진 구간이 인덱스로 나뉘어 그 혼동이 생기지 않고, 층마다
+/// 배열을 새로 잡지 않으므로 **실패할 수 있는 자리도 `newBranch` 하나로 줄어든다.**
+///
+/// 성공하면 `level`은 비고(소유가 결과로 넘어간다), 실패해도 비운다(안에서 전부 놓는다) — 어느
+/// 쪽이든 호출자의 `defer`가 두 번 놓지 않는다.
+fn foldBalanced(allocator: std.mem.Allocator, level: *std.ArrayList(*Node)) !*Node {
+    std.debug.assert(level.items.len > 0);
 
     while (level.items.len > 1) {
-        var next: std.ArrayList(*Node) = .empty;
-        errdefer {
-            for (next.items) |n| release(allocator, n);
-            next.deinit(allocator);
+        var write: usize = 0;
+        var read: usize = 0;
+        while (read + 1 < level.items.len) : (read += 2) {
+            const branch = newBranch(allocator, level.items[read], level.items[read + 1]) catch |err| {
+                // `newBranch`가 자기 인자 둘은 놓았다. 앞서 접어 둔 것과 아직 안 만진 것을 놓는다.
+                for (level.items[0..write]) |n| release(allocator, n);
+                for (level.items[read + 2 ..]) |n| release(allocator, n);
+                level.clearRetainingCapacity();
+                return err;
+            };
+            level.items[write] = branch;
+            write += 1;
         }
-        var i: usize = 0;
-        while (i + 1 < level.items.len) : (i += 2) {
-            const branch = try newBranch(allocator, level.items[i], level.items[i + 1]);
-            try next.append(allocator, branch);
+        if (read < level.items.len) {
+            level.items[write] = level.items[read];
+            write += 1;
         }
-        if (i < level.items.len) try next.append(allocator, level.items[i]);
-        level.clearRetainingCapacity();
-        level.deinit(allocator);
-        level = next;
+        level.shrinkRetainingCapacity(write);
     }
 
     const root = level.items[0];
-    level.clearRetainingCapacity(); // 소유가 호출자로 넘어갔다
+    level.clearRetainingCapacity();
     return root;
 }
 
@@ -268,6 +287,14 @@ fn concat(allocator: std.mem.Allocator, left: *Node, right: *Node) !*Node {
         return left;
     }
 
+    // **이 아래로는 실패해도 입력 둘을 놓는다**(위 규약). `errdefer`로 적어 두면 새 분기를 더할 때
+    // 놓기를 잊을 수 없다 — 잊은 판이 실제로 이중 해제와 세그폴트를 냈다(적대적 검증 2026-08-24).
+    var owned = true;
+    errdefer if (owned) {
+        release(allocator, left);
+        release(allocator, right);
+    };
+
     if (left.isLeaf() and right.isLeaf() and left.bytes + right.bytes <= leaf_max) {
         const joined = try newLeafJoined(allocator, left.kind.leaf, right.kind.leaf);
         release(allocator, left);
@@ -279,6 +306,8 @@ fn concat(allocator: std.mem.Allocator, left: *Node, right: *Node) !*Node {
         const lb = left.kind.branch;
         if (lb.right.isLeaf() and lb.right.bytes + right.bytes <= leaf_max) {
             const joined = try newLeafJoined(allocator, lb.right.kind.leaf, right.kind.leaf);
+            // `newBranch`는 실패하면 **자기 인자 둘**을 놓는다. `left`·`right`는 아직 우리 것이므로
+            // 위 `errdefer`가 그쪽을 맡는다 — 둘을 섞으면 이중 해제다.
             const merged = try newBranch(allocator, retain(lb.left), joined);
             release(allocator, left);
             release(allocator, right);
@@ -297,15 +326,15 @@ fn concat(allocator: std.mem.Allocator, left: *Node, right: *Node) !*Node {
         }
     }
 
+    // `newBranch`가 실패하면 그 안에서 `left`·`right`를 놓으므로 위 `errdefer`를 끈다.
+    owned = false;
+
     const branch = try newBranch(allocator, left, right);
     if (branch.depth <= rebalance_depth) return branch;
 
-    const balanced = rebuildBalanced(allocator, branch) catch |err| {
-        // 다시 세우지 못하면 **깊은 채로 둔다** — 깊이는 성능 문제이지 정확성 문제가 아니고,
-        // 여기서 실패를 올리면 할당 실패 하나가 편집 자체를 거절하게 된다.
-        if (err == error.OutOfMemory) return branch;
-        return err;
-    };
+    // 다시 세우지 못하면 **깊은 채로 둔다** — 깊이는 성능 문제이지 정확성 문제가 아니고, 여기서
+    // 실패를 올리면 할당 실패 하나가 편집 자체를 거절하게 된다.
+    const balanced = rebuildBalanced(allocator, branch) catch return branch;
     release(allocator, branch);
     return balanced;
 }
@@ -316,12 +345,19 @@ const Split = struct { left: *Node, right: *Node };
 fn splitNode(allocator: std.mem.Allocator, node: *Node, offset: usize) !Split {
     std.debug.assert(offset <= node.bytes);
 
+    // **실패해도 `node`를 놓는다**(위 규약). 성공 경로는 아래에서 명시로 놓거나 결과에 실어 보내므로
+    // 이 `errdefer`가 걸리지 않는다.
+    var owned = true;
+    errdefer if (owned) release(allocator, node);
+
     if (offset == 0) {
         const empty = try newLeaf(allocator, "");
+        owned = false; // 결과에 실어 보낸다
         return .{ .left = empty, .right = node };
     }
     if (offset == node.bytes) {
         const empty = try newLeaf(allocator, "");
+        owned = false; // 결과에 실어 보낸다
         return .{ .left = node, .right = empty };
     }
 
@@ -331,26 +367,24 @@ fn splitNode(allocator: std.mem.Allocator, node: *Node, offset: usize) !Split {
             errdefer release(allocator, l);
             const r = try newLeaf(allocator, bytes[offset..]);
             release(allocator, node);
+            owned = false;
             return .{ .left = l, .right = r };
         },
         .branch => |b| {
             if (offset < b.left.bytes) {
                 const sub = try splitNode(allocator, retain(b.left), offset);
-                errdefer {
-                    release(allocator, sub.left);
-                    release(allocator, sub.right);
-                }
+                // `concat`이 `sub.right`를 가져간다(실패해도). 남는 것은 `sub.left`뿐이다.
+                errdefer release(allocator, sub.left);
                 const right = try concat(allocator, sub.right, retain(b.right));
                 release(allocator, node);
+                owned = false;
                 return .{ .left = sub.left, .right = right };
             }
             const sub = try splitNode(allocator, retain(b.right), offset - b.left.bytes);
-            errdefer {
-                release(allocator, sub.left);
-                release(allocator, sub.right);
-            }
+            errdefer release(allocator, sub.right);
             const left = try concat(allocator, retain(b.left), sub.left);
             release(allocator, node);
+            owned = false;
             return .{ .left = left, .right = sub.right };
         },
     }
@@ -415,6 +449,19 @@ pub const Buffer = struct {
         return .{ .allocator = self.allocator, .root = retain(self.root) };
     }
 
+    /// 스냅숏이 붙든 판으로 되돌린다.
+    ///
+    /// **할당하지 않는다** — 참조를 맞바꿀 뿐이다. 이 성질이 이 함수의 존재 이유다: 되돌리기가
+    /// 필요한 자리는 대개 **할당이 실패한 직후**이고, 거기서 또 할당하면 되돌리기 자체가 실패한다.
+    /// rope가 persistent라서 공짜로 얻는 것이고(옛 노드가 그대로 살아 있다), 슬라이스 하나였다면
+    /// 편집 전 내용을 통째로 복사해 두어야 했다.
+    ///
+    /// **스냅숏을 가져간다** — 되돌린 뒤 `deinit`을 부르면 이중 해제다.
+    pub fn restore(self: *Buffer, snap: Snapshot) void {
+        release(self.allocator, self.root);
+        self.root = snap.root;
+    }
+
     /// `offset`에 `text`를 넣는다.
     ///
     /// **실패하면 문서가 그대로다.** 새 루트를 다 만든 뒤에 갈아 끼우므로 중간에 실패해도 옛 판이
@@ -424,18 +471,24 @@ pub const Buffer = struct {
         if (text.len == 0) return .{ .start = offset, .removed = 0, .inserted = 0 };
 
         const parts = try splitNode(self.allocator, retain(self.root), offset);
-        var left = parts.left;
-        var right = parts.right;
-        errdefer {
-            release(self.allocator, left);
-            release(self.allocator, right);
-        }
+        const left0 = parts.left;
+        const right = parts.right;
 
-        const mid = try buildFrom(self.allocator, text);
-        left = try concat(self.allocator, left, mid);
+        // **`x = undefined` + 살아 있는 `errdefer`를 쓰지 않는다.** 그 조합이 세그폴트를 냈다 —
+        // 소유가 넘어간 뒤에도 `errdefer`가 그 변수를 읽어 쓰레기 포인터를 놓는다(적대적 검증).
+        // 대신 넘긴 것과 아직 든 것을 이름으로 가른다.
+        const mid = buildFrom(self.allocator, text) catch |err| {
+            release(self.allocator, left0);
+            release(self.allocator, right);
+            return err;
+        };
+        // `concat`은 실패해도 `left0`·`mid`를 가져간다. 남은 것은 `right`뿐이다.
+        const left = concat(self.allocator, left0, mid) catch |err| {
+            release(self.allocator, right);
+            return err;
+        };
+        // 이 `concat`이 실패하면 둘 다 그쪽이 놓는다 — 여기서 더 놓을 것이 없다.
         const root = try concat(self.allocator, left, right);
-        left = undefined;
-        right = undefined;
 
         release(self.allocator, self.root);
         self.root = root;
@@ -449,22 +502,16 @@ pub const Buffer = struct {
         if (start == end) return .{ .start = start, .removed = 0, .inserted = 0 };
 
         const first = try splitNode(self.allocator, retain(self.root), start);
-        var left = first.left;
-        var rest = first.right;
-        errdefer {
+        const left = first.left;
+
+        // `splitNode`는 실패해도 `first.right`를 가져간다 — 남은 것은 `left`뿐이다.
+        const second = splitNode(self.allocator, first.right, end - start) catch |err| {
             release(self.allocator, left);
-            release(self.allocator, rest);
-        }
-
-        const second = try splitNode(self.allocator, rest, end - start);
-        rest = undefined;
-        release(self.allocator, second.left);
-        var tail = second.right;
-        errdefer release(self.allocator, tail);
-
-        const root = try concat(self.allocator, left, tail);
-        left = undefined;
-        tail = undefined;
+            return err;
+        };
+        release(self.allocator, second.left); // 지워지는 구간
+        // 이 `concat`이 실패하면 `left`·`second.right` 둘 다 그쪽이 놓는다.
+        const root = try concat(self.allocator, left, second.right);
 
         release(self.allocator, self.root);
         self.root = root;
@@ -517,36 +564,15 @@ fn buildFrom(allocator: std.mem.Allocator, bytes: []const u8) !*Node {
     var i: usize = 0;
     while (i < bytes.len) : (i += leaf_max) {
         const end = @min(i + leaf_max, bytes.len);
-        try leaves.append(allocator, try newLeaf(allocator, bytes[i..end]));
+        // `append(try newLeaf(...))`로 적으면 append 실패 시 그 잎이 샌다 — 실측으로 확인했다.
+        const leaf = try newLeaf(allocator, bytes[i..end]);
+        leaves.append(allocator, leaf) catch |err| {
+            release(allocator, leaf);
+            return err;
+        };
     }
 
-    var level: std.ArrayList(*Node) = .empty;
-    defer {
-        for (level.items) |n| release(allocator, n);
-        level.deinit(allocator);
-    }
-    try level.appendSlice(allocator, leaves.items);
-    leaves.clearRetainingCapacity();
-
-    while (level.items.len > 1) {
-        var next: std.ArrayList(*Node) = .empty;
-        errdefer {
-            for (next.items) |n| release(allocator, n);
-            next.deinit(allocator);
-        }
-        var j: usize = 0;
-        while (j + 1 < level.items.len) : (j += 2) {
-            try next.append(allocator, try newBranch(allocator, level.items[j], level.items[j + 1]));
-        }
-        if (j < level.items.len) try next.append(allocator, level.items[j]);
-        level.clearRetainingCapacity();
-        level.deinit(allocator);
-        level = next;
-    }
-
-    const root = level.items[0];
-    level.clearRetainingCapacity();
-    return root;
+    return foldBalanced(allocator, &leaves);
 }
 
 fn copyRangeOf(root: *Node, allocator: std.mem.Allocator, start: usize, end: usize) ![]u8 {
@@ -873,6 +899,111 @@ test "BUF12: 잎 상한을 넘는 삽입도 한 덩어리로 남지 않는다" {
     const all = try buf.copyAll(testing.allocator);
     defer testing.allocator.free(all);
     try testing.expectEqualSlices(u8, chunk, all);
+}
+
+fn refChurn(node: *Node, allocator: std.mem.Allocator, rounds: usize) void {
+    var i: usize = 0;
+    while (i < rounds) : (i += 1) {
+        const held = retain(node);
+        release(allocator, held);
+    }
+}
+
+test "BUF18: 참조 수가 스레드 경합에서 어긋나지 않는다 (§2.1 워커 분리의 전제)" {
+    // **처음 쓴 스레드 판정자는 판정하지 못했다.** 워커가 스냅숏을 하나씩 들고 읽기만 하는 모양은
+    // retain/release가 겹치는 창이 너무 좁아, 참조 수를 **비원자로 바꾼 뮤턴트가 3회 모두
+    // 통과**했다(적대적 검증 2026-08-25). "찢어짐 0건"은 안전하다는 증거가 아니라 그 워크로드에서
+    // 경합이 안 드러났다는 뜻이었다.
+    //
+    // 그래서 여기서는 **같은 노드**에 대고 여러 스레드가 retain/release를 고빈도로 친다. 원자적이지
+    // 않으면 증감이 유실돼 마지막 참조 수가 1이 아니고, 그것은 조기 해제(세그폴트)나 누수가 된다.
+    const allocator = testing.allocator;
+    var buf = try Buffer.init(allocator, "shared node under contention");
+    defer buf.deinit();
+
+    const node = buf.root;
+    const before = node.refs.load(.acquire);
+
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, refChurn, .{ node, allocator, 50_000 });
+    refChurn(node, allocator, 50_000);
+    for (&threads) |*t| t.join();
+
+    // 20만 번 오갔지만 순증감이 0이므로 참조 수는 그대로여야 한다.
+    try testing.expectEqual(before, node.refs.load(.acquire));
+
+    // 그리고 문서가 멀쩡하다 — 조기 해제됐다면 여기서 죽거나 쓰레기가 나온다.
+    const all = try buf.copyAll(allocator);
+    defer allocator.free(all);
+    try testing.expectEqualStrings("shared node under contention", all);
+}
+
+test "BUF17: 스냅숏으로 되돌리면 편집 전 판이 그대로 온다 — 할당 없이" {
+    var buf = try Buffer.init(testing.allocator, "original content here");
+    defer buf.deinit();
+
+    const snap = buf.snapshot();
+    _ = try buf.insert(8, " MORE");
+    _ = try buf.delete(0, 8);
+
+    const edited = try buf.copyAll(testing.allocator);
+    defer testing.allocator.free(edited);
+    try testing.expectEqualStrings(" MORE content here", edited);
+
+    // **되돌리기는 실패할 수 없다** — 오류 집합이 없다는 것이 곧 그 계약이다.
+    buf.restore(snap);
+
+    const back = try buf.copyAll(testing.allocator);
+    defer testing.allocator.free(back);
+    try testing.expectEqualStrings("original content here", back);
+}
+
+test "BUF15: 할당이 어디서 실패해도 죽지 않고 문서가 그대로다" {
+    // **BUF1~14가 이 축을 하나도 안 봤다.** 적대적 검증이 여기서 세그폴트를 찾았다 —
+    // `concat`이 어떤 실패 경로에서는 입력을 놓고 어떤 경로에서는 안 놓는데 호출자가 `errdefer`로
+    // 또 놓았고, `x = undefined` 뒤에도 그 `errdefer`가 살아 있어 쓰레기 포인터를 놓았다.
+    //
+    // 이 판정자는 **실패 지점을 하나씩 밀며** ⑴ 죽지 않는가 ⑵ 실패했으면 내용이 편집 전 그대로인가
+    // ⑶ 새지 않는가(`FailingAllocator`가 뒤에서 검사한다)를 본다.
+    const original = "aaaa bbbb cccc dddd eeee";
+    var idx: usize = 0;
+    while (idx < 80) : (idx += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = idx });
+        const a = failing.allocator();
+
+        var buf = Buffer.init(a, original) catch continue;
+        defer buf.deinit();
+
+        if (buf.insert(10, "INSERTED TEXT HERE")) |_| {} else |_| {
+            const after = buf.copyAll(testing.allocator) catch continue;
+            defer testing.allocator.free(after);
+            try testing.expectEqualStrings(original, after);
+        }
+        if (buf.delete(2, 9)) |_| {} else |_| {}
+    }
+}
+
+test "BUF16: 잎을 여럿 거치는 편집도 실패 지점 전부에서 안전하다" {
+    // 잎 하나에 들어가는 문서는 `concat`의 합치기 규칙만 타고 **가지 분할·재구축 경로를 안 밟는다**.
+    // 실패 주입이 그 경로를 덮으려면 문서가 잎 상한을 넘어야 한다.
+    const big = try testing.allocator.alloc(u8, leaf_max * 6);
+    defer testing.allocator.free(big);
+    @memset(big, 'q');
+
+    var idx: usize = 0;
+    while (idx < 120) : (idx += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = idx });
+        const a = failing.allocator();
+
+        var buf = Buffer.init(a, big) catch continue;
+        defer buf.deinit();
+
+        const before = buf.byteLen();
+        if (buf.insert(leaf_max * 3, "MIDDLE")) |_| {} else |_| {
+            try testing.expectEqual(before, buf.byteLen());
+        }
+        if (buf.delete(leaf_max, leaf_max * 2)) |_| {} else |_| {}
+    }
 }
 
 test "BUF13: 부분 복사가 경계를 정확히 집는다" {

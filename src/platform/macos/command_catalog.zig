@@ -88,6 +88,7 @@ pub const entries = [_]Entry{
     .{ .action = .toggle_find, .key = "toggle_find", .title = "Find" },
     .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
+    .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
     .{ .action = .fold_all, .key = "fold_all", .title = "Editor: Fold All" },
     .{ .action = .unfold_all, .key = "unfold_all", .title = "Editor: Unfold All" },
     .{ .action = .fold_level_1, .key = "fold_level_1", .title = "Editor: Fold Level 1" },

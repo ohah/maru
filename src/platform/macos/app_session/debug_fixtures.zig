@@ -886,7 +886,7 @@ pub fn applyForcedEditorCaret(self: *AppSession) void {
     // 보여주는 값이 요청한 값과 같다.
     var off = line.start;
     var col: usize = 1;
-    const text = doc.file.doc.content[line.start..line.contentEnd()];
+    const text = doc.file.content[line.start..line.contentEnd()];
     var i: usize = 0;
     while (col < want_col and i < text.len) {
         i = maru.grapheme.clusterEnd(text, i);

@@ -26,6 +26,7 @@ const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
 const editor_selection = maru.session.editor.selection;
+const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
 const settings_ops = @import("settings.zig");
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
@@ -59,15 +60,16 @@ pub const OpenFileError = error{
 };
 
 pub const Opened = struct {
-    /// 할당한 버퍼 **전체**. 문서는 그 앞부분(실제로 읽은 만큼)을 빌려 쓰므로 문서보다 오래 살아야
-    /// 한다. 파일이 `stat`과 read 사이에 줄어들면 뒤에 안 쓰는 꼬리가 남는데, `free`가 원래 크기를
-    /// 요구하므로 잘라 들 수 없다 — **파일 내용으로 쓰지 말 것**(문서를 통해 읽어야 한다).
-    bytes: []u8,
-    file: editor.open.OpenFile,
+    /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
+    ///
+    /// **`bytes` 필드가 없어졌다.** 읽기 전용이던 동안에는 문서가 읽기 버퍼를 빌려 썼고 그래서 그
+    /// 버퍼가 문서보다 오래 살아야 했다. 이제 문서가 자기 내용을 들므로 읽기 버퍼는 `openPath`가
+    /// 끝나면 놓는다 — 파일이 `stat`과 read 사이에 줄어들어 생기던 "안 쓰는 꼬리"도 함께 사라진다.
+    file: editor.edit_doc.EditableFile,
 
     pub fn deinit(self: *Opened, allocator: std.mem.Allocator) void {
+        _ = allocator;
         self.file.deinit();
-        allocator.free(self.bytes);
     }
 };
 
@@ -84,7 +86,11 @@ pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Open
     // **빈 파일도 연다.** `alloc(0)`은 빈 슬라이스를 주고, `document.open`이 그것을 한 줄짜리
     // 문서로 해석한다 — 새 파일을 만들자마자 여는 흐름이 그렇게 생긴다.
     const buf = allocator.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
-    errdefer allocator.free(buf);
+    // **읽기 버퍼는 이 함수 안에서만 산다**(문서가 내용을 소유하게 된 뒤로 — N2). 성공하든 실패하든
+    // 여기서 놓으므로 `defer`다. 앞서 `errdefer`와 `defer`가 **둘 다** 걸려 있어 오류 경로에서
+    // 두 번 놓았고 세그폴트가 났다(적대적 검증 2026-08-25) — 읽기 전용이던 시절 문서가 이 버퍼를
+    // 빌려 쓰던 흔적이 `errdefer` 쪽이다.
+    defer allocator.free(buf);
     // **짧게 읽히면 그만큼만 문서가 된다.** `readPositionalAll`은 EOF에서 조용히 멈추므로(`amt == 0`
     // 이면 break) 파일이 `stat`과 여기 사이에 줄어들면 `n < size`가 되고, 우리는 그 시점의 실제
     // 내용을 여는 셈이라 화면은 거짓을 보이지 않는다.
@@ -94,11 +100,11 @@ pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Open
     // 않는다(없는 계약을 여기서 지어내지 않는다).
     const n = file.readPositionalAll(io, buf, 0) catch return error.Unreadable;
 
-    const opened = editor.open.open(allocator, buf[0..n], !isWritable(path)) catch |e| switch (e) {
+    const opened = editor.edit_doc.EditableFile.init(allocator, buf[0..n], !isWritable(path)) catch |e| switch (e) {
         error.NotUtf8 => return error.NotUtf8,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    return .{ .bytes = buf, .file = opened };
+    return .{ .file = opened };
 }
 
 /// 이 경로에 쓸 수 있는가. **여는 것을 막는 판정이 아니라 표시할 값**이다.
@@ -295,7 +301,7 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
     if (term.rt.editor_diff != null) return null;
     const sel = term.rt.editor_selection orelse return null;
     const doc = term.rt.editor_doc orelse return null;
-    const off = @min(sel.focus, doc.file.doc.content.len);
+    const off = @min(sel.focus, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);
     const line = doc.file.lines.line(line_idx) orelse return null;
 
@@ -304,7 +310,7 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
     // `line_index.offsetInLine`이 같은 clamp를 같은 이유로 지킨다.
     const end = @min(off, line.contentEnd());
     std.debug.assert(end >= line.start); // lineAt이 off를 담는 줄을 주고 contentEnd >= start다
-    const text = doc.file.doc.content[line.start..end];
+    const text = doc.file.content[line.start..end];
 
     // 줄 머리에서 caret까지 **클러스터를 센다** — 상한까지만.
     var col: usize = 1;
@@ -1579,17 +1585,164 @@ fn widthDragActive(self: *const AppSession) bool {
 pub fn copySelection(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
-    const sel = term.rt.editor_selection orelse return false;
     const doc = term.rt.editor_doc orelse return false;
-    const lo = sel.start();
-    const hi = sel.end();
-    if (hi <= lo) return false; // caret뿐이다
-    const bytes = doc.file.doc.content;
-    if (lo >= bytes.len) return false;
-    const slice = bytes[lo..@min(hi, bytes.len)];
-    const captured = self.allocator.dupe(u8, slice) catch return false; // OOM이면 복사 안 함(선택 보존)
+    const bytes = doc.file.content;
+
+    // **커서가 여럿이면 조각도 여럿이다**(§3.4). 시스템 클립보드에는 **문서 순서로 줄바꿈 연결**해
+    // 넣는다 — 다른 앱이 붙여넣을 때 자연스러우라고 그 절이 정한 규칙이다.
+    //
+    // **조각 경계는 아직 기억하지 않는다.** §3.4는 그것을 앱 안에 함께 두라고 하지만, 그 값을 쓰는
+    // 곳은 **붙여넣기 분배**뿐이고 붙여넣기는 편집 연산이라 이 슬라이스 밖이다. 지금 기억해 두면
+    // 읽는 사람이 없는 상태가 되고, 포맷 version(§3.4)도 소비처 없이 정하게 된다.
+    var iter = selections(term);
+    if (iter.count() == 0) return false;
+
+    var ranges: std.ArrayList(occurrence.Range) = .empty;
+    defer ranges.deinit(self.allocator);
+    while (iter.next()) |sel| {
+        const lo = sel.start();
+        const hi = @min(sel.end(), bytes.len);
+        if (hi <= lo or lo >= bytes.len) continue; // caret뿐이거나 낡은 offset이다
+        ranges.append(self.allocator, .{ .start = lo, .end = hi }) catch return false;
+    }
+    if (ranges.items.len == 0) return false;
+
+    std.mem.sort(occurrence.Range, ranges.items, {}, struct {
+        fn lessThan(_: void, a: occurrence.Range, b: occurrence.Range) bool {
+            return a.start < b.start;
+        }
+    }.lessThan);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    for (ranges.items, 0..) |r, i| {
+        if (i > 0) out.append(self.allocator, '\n') catch return false;
+        out.appendSlice(self.allocator, bytes[r.start..r.end]) catch return false;
+    }
+
+    const captured = out.toOwnedSlice(self.allocator) catch return false; // OOM이면 복사 안 함(선택 보존)
     if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
     self.chrome_clipboard_write = captured;
+    return true;
+}
+
+/// primary와 나머지 커서를 **합쳐 보는 유일한 통로**(§3.2 멀티 selection).
+///
+/// `editor_selection`만 읽으면 커서가 여럿일 때 **하나만 보인다** — 그 결함은 화면에서 조용하다
+/// (띠가 하나만 서고, 복사가 한 조각만 담는다). 그래서 소비처가 직접 두 필드를 읽지 않고 여기를 쓴다.
+///
+/// **primary가 먼저 나온다.** 문서 순서가 필요한 소비처(복사 — §3.4)는 받아서 정렬한다.
+pub const SelectionIter = struct {
+    primary: ?editor_selection.Selection,
+    extras: []const editor_selection.Selection,
+    i: usize = 0,
+
+    pub fn next(self: *SelectionIter) ?editor_selection.Selection {
+        const p = self.primary orelse return null;
+        if (self.i == 0) {
+            self.i = 1;
+            return p;
+        }
+        if (self.i - 1 >= self.extras.len) return null;
+        const s = self.extras[self.i - 1];
+        self.i += 1;
+        return s;
+    }
+
+    pub fn count(self: SelectionIter) usize {
+        if (self.primary == null) return 0;
+        return 1 + self.extras.len;
+    }
+};
+
+/// 이 Term의 커서 전부.
+pub fn selections(term: *Term) SelectionIter {
+    return .{ .primary = term.rt.editor_selection, .extras = term.rt.editor_extra_selections };
+}
+
+/// primary 말고 나머지를 버린다. **커서를 새로 놓는 모든 경로가 부른다** — 클릭 한 번이 멀티커서를
+/// 정리하지 않으면 사용자는 커서를 없앨 방법이 없다(VSCode도 클릭으로 정리한다).
+pub fn clearExtraSelections(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_extra_selections.len == 0) return;
+    self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = &.{};
+}
+
+/// **다음 일치를 찾아 커서를 하나 더 놓는다**(§9.1 — VSCode `⌘D`. 지금 chord는 `⌘⌃D`다).
+///
+/// 새로 놓은 것이 **primary가 된다** — 다음에 또 누르면 그 다음 일치로 이어져야 하고, 화면이
+/// 따라가는 기준도 방금 놓은 자리다. 그래서 옛 primary는 나머지 쪽으로 내려간다.
+pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g) — 이 슬라이스 밖
+    const doc = term.rt.editor_doc orelse return false;
+
+    var buf: std.ArrayList(editor_selection.Selection) = .empty;
+    defer buf.deinit(self.allocator);
+
+    // **고른 것이 없으면 아무 일도 하지 않는다.** 앞선 판은 `Selection.at(0)`을 씨앗으로 삼아
+    // 문서 **첫 낱말**을 조용히 골랐다 — 사용자가 있지도 않은 커서 자리를 짐작당하는 셈이다.
+    // caret이 서면(N2 다음 조각) 그때 "커서 밑 낱말"이 정당한 씨앗이 되고, `occurrence`는 이미
+    // 그 경우를 답한다(OCC1). 그때까지는 거절이 맞다.
+    const seed = term.rt.editor_selection orelse return false;
+
+    // **커서 수에 상한이 있다**(`selection.max_cursors`). 그 상수는 "검색 '모두 선택'이 입력을
+    // 멈추지 않게" 하려고 이미 서 있었는데 이 경로가 그것을 안 봤다 — 흔한 글자에서 키를 누르고
+    // 있으면 커서가 끝없이 늘고, 마크 저장소와 훑기 비용이 그 수에 비례한다.
+    if (term.rt.editor_extra_selections.len + 1 >= editor_selection.max_cursors) return false;
+
+    buf.append(self.allocator, seed) catch return false;
+    buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return false;
+
+    // **`nextOccurrence`는 문서 순서를 요구한다**(이미 고른 자리를 이분 탐색으로 거른다).
+    // 커서는 추가 순서로 들고 있으므로 여기서 한 번 맞춘다 — primary가 어디로 가든 상관없다.
+    // 씨앗은 값으로 이미 떠 뒀다.
+    std.mem.sort(editor_selection.Selection, buf.items, {}, struct {
+        fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
+            return a.start() < b.start();
+        }
+    }.lessThan);
+    const seed_index = for (buf.items, 0..) |s, i| {
+        if (s.start() == seed.start() and s.end() == seed.end()) break i;
+    } else 0;
+
+    const found = maru.session.editor.occurrence.nextOccurrence(
+        doc.file.content,
+        buf.items,
+        seed_index,
+    ) orelse return false;
+
+    // **caret에서 시작하면 커서가 늘지 않는다 — 낱말이 그 caret을 대신한다.**
+    // 옛 판은 caret을 나머지로 내려 커서가 둘이 됐는데, 그 중 하나는 길이 0이라 **화면에 안 보이는데
+    // 타이핑은 거기로도 간다.** VSCode도 첫 `⌘D`는 커서를 늘리지 않고 낱말을 잡을 뿐이다.
+    // (`occurrence`가 caret 씨앗에 낱말을 답하는 것이 그 첫 걸음이고 — OCC1 — 여기가 그 짝이다.)
+    if (seed.len() > 0) {
+        // 옛 primary를 나머지로 내리고 새 자리를 primary로 세운다.
+        const grown = self.allocator.alloc(
+            editor_selection.Selection,
+            term.rt.editor_extra_selections.len + 1,
+        ) catch return false;
+        @memcpy(grown[0..term.rt.editor_extra_selections.len], term.rt.editor_extra_selections);
+        grown[grown.len - 1] = seed;
+        if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_extra_selections = grown;
+    }
+
+    // **`kind`는 잡은 단위를 말한다 — 짐작으로 `.word`를 붙이지 않는다.** 그 값은 이어지는 드래그가
+    // 무엇으로 늘어날지를 정하므로(§3.2 anchor가 점이 아니라 범위인 이유), 낱말이 아닌 조각을
+    // `.word`라 적으면 드래그가 없는 단위로 늘어난다. `occurrence`가 낱말 경계를 봤는지 여부와
+    // 같은 판정을 여기서도 쓴다.
+    const found_is_word = blk: {
+        const w = editor_selection.wordRangeAt(doc.file.content, found.start);
+        break :blk w.lo == found.start and w.hi == found.end;
+    };
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(
+        found.start,
+        found.end,
+        found.end,
+        if (found_is_word) .word else .match,
+    );
+    self.metal_dirty = true;
     return true;
 }
 
@@ -1602,8 +1755,8 @@ pub fn copySelection(self: *AppSession) bool {
 /// 렌더가 건너뛴다. 못 잡으면 선택이 안 그려질 뿐 다른 것은 그대로다(그리는 것은 곁가지이고, 선택
 /// 자체는 `editor_selection`이 들고 있다).
 fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_editor.frame.Mark {
-    const sel = term.rt.editor_selection orelse return null;
-    if (sel.len() == 0) return null; // caret뿐 — 그릴 띠가 없다
+    var iter = selections(term);
+    if (iter.count() == 0) return null;
     const doc = term.rt.editor_doc orelse return null;
     // **렌더가 보는 축으로 만든다.** 접혀 있으면 렌더가 받는 배열은 `editor_visible_lines`(보이는 줄)
     // 이고 `paintSelection`은 그 축의 인덱스로 읽는다 — 문서 줄 축으로 만들면 접힘이 켜지는 순간
@@ -1614,9 +1767,79 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
     const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
     if (lines_len == 0) return null;
 
-    if (term.rt.editor_selection_marks.len < lines_len) {
+    // **문서 순서로 정렬한다.** 렌더는 한 줄의 마크가 오름차순이라고 단언하고
+    // (`content.columnsAtOffsets`), 커서 순서로 채우면 primary가 맨 앞에 와서 같은 줄에서
+    // `12, 0, 6` 같은 배열이 나간다 — MC2가 그 패닉으로 이 결함을 잡았다.
+    // 정렬은 아래 **병합 훑기**의 전제이기도 하다.
+    // **해제는 잡은 길이 그대로 해야 한다.** 처음엔 `ordered = ordered[0..n]`으로 줄여 놓고
+    // `defer free(ordered)`가 그 줄어든 슬라이스를 놓게 적었는데, 그것은 원래 할당과 길이가 달라
+    // **잘못된 해제**다. 잡은 것(`storage`)과 쓰는 것(`ordered`)을 이름으로 가른다.
+    // **흔한 경우에는 할당하지 않는다.** 이 함수는 프레임마다 돌고 커서는 대개 몇 개다 —
+    // 하나짜리 선택에 힙을 왕복시킬 이유가 없다. 넘치면 그때만 잡는다.
+    var stack_storage: [8]editor_selection.Selection = undefined;
+    const heap_storage: ?[]editor_selection.Selection = if (iter.count() <= stack_storage.len)
+        null
+    else
+        self.allocator.alloc(editor_selection.Selection, iter.count()) catch return null;
+    defer if (heap_storage) |h| self.allocator.free(h);
+    const storage = heap_storage orelse stack_storage[0..iter.count()];
+    const ordered = blk: {
+        var n: usize = 0;
+        while (iter.next()) |sel| {
+            if (sel.len() == 0) continue; // caret뿐 — 그릴 띠가 없다
+            storage[n] = sel;
+            n += 1;
+        }
+        if (n == 0) return null;
+        const used = storage[0..n];
+        std.mem.sort(editor_selection.Selection, used, {}, struct {
+            fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
+                return a.start() < b.start();
+            }
+        }.lessThan);
+        break :blk used;
+    };
+
+    // **줄마다 커서 전부를 훑지 않는다.** 앞선 판이 그렇게 해서 비용이 `줄 수 × 커서 수`였고,
+    // 저장소도 같은 곱(1000커서·2만 줄이면 160 MB)을 잡았다.
+    //
+    // 줄과 selection이 **둘 다 문서 순서**이므로 함께 걸으면 된다. 각 줄에서 이미 지나간 selection은
+    // 버리고(`first`), 겹치는 것만 본다 — 전체가 `O(줄 + 커서 + 마크)`다.
+    //
+    // **실측**(ReleaseFast, 2만 줄, 같은 하네스에서 두 방식을 나란히 — 둘의 답이 같은 것도 함께 확인):
+    //
+    // | 커서 | 옛 훑기 | 병합 훑기 |
+    // |---|---|---|
+    // | 1 | 7µs | **10µs** |
+    // | 10 | 66µs | 26µs |
+    // | 200 | 1309µs | 30µs |
+    // | 1000 | 6559µs | 32µs |
+    //
+    // **커서 하나에서는 오히려 느리다**(+43%) — 줄마다 포인터를 건사하는 몫이 붙기 때문이고,
+    // 그것이 가장 흔한 경우다. 그럼에도 바꾼 이유는 **최악이 사라지기 때문**이다: 옛 방식은 커서가
+    // 늘수록 선형으로 나빠져 1000개에서 프레임 예산의 40%를 먹었고, 새 방식은 거기서도 평평하다.
+    // 3µs는 60fps 예산의 0.02%라 그 대가로 낼 만하다 — **재고 나서 한 판단이다.**
+    // **줄별 개수를 배열로 들지 않는다.** 처음엔 `counts`를 프레임마다 잡았는데(2만 줄이면 80 KB
+    // 할당·해제가 매 프레임), 아래 채우기가 어차피 같은 걸음을 다시 걸으므로 **총합만 있으면 된다** —
+    // 줄별 슬라이스는 채우면서 `row_start..at`으로 잘라내면 나온다.
+    var total: usize = 0;
+    {
+        var first: usize = 0;
+        for (0..lines_len) |i| {
+            const line = visibleDocLine(doc, numbers, visible, i) orelse continue;
+            while (first < ordered.len and ordered[first].end() <= line.start) first += 1;
+            var k = first;
+            while (k < ordered.len and ordered[k].start() < line.contentEnd()) : (k += 1) {
+                if (markRangeInLine(ordered[k], line) == null) continue;
+                total += 1;
+            }
+        }
+    }
+    if (total == 0) return null;
+
+    if (term.rt.editor_selection_marks.len < lines_len or term.rt.editor_selection_mark_buf.len < total) {
         const grown_rows = self.allocator.alloc([]const chrome_editor.frame.Mark, lines_len) catch return null;
-        const grown_buf = self.allocator.alloc(chrome_editor.frame.Mark, lines_len) catch {
+        const grown_buf = self.allocator.alloc(chrome_editor.frame.Mark, total) catch {
             self.allocator.free(grown_rows);
             return null;
         };
@@ -1626,27 +1849,53 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
         term.rt.editor_selection_mark_buf = grown_buf;
     }
     const rows = term.rt.editor_selection_marks[0..lines_len];
-    const buf = term.rt.editor_selection_mark_buf[0..lines_len];
+    const buf = term.rt.editor_selection_mark_buf[0..total];
     @memset(rows, &.{});
 
-    const lo = sel.start();
-    const hi = sel.end();
+    var at: usize = 0;
+    var first: usize = 0;
     for (0..lines_len) |i| {
-        // 보이는 줄 → 원본 문서 줄. 번호 표는 1-based이고, 표에 없는 자리는 그릴 수 없다.
-        const doc_line: usize = if (visible.len > 0 and numbers.len > 0) blk: {
-            if (i >= numbers.len) continue;
-            break :blk (numbers[i] orelse continue) - 1;
-        } else i;
-        const line = doc.file.lines.line(doc_line) orelse continue;
-        const line_end = line.contentEnd();
-        if (line_end <= lo or line.start >= hi) continue; // 이 줄은 선택 밖
-        const from = if (lo > line.start) lo - line.start else 0;
-        const to = @min(hi, line_end) - line.start;
-        if (to <= from) continue;
-        buf[i] = .{ .start = @intCast(from), .len = @intCast(to - from) };
-        rows[i] = buf[i .. i + 1];
+        const line = visibleDocLine(doc, numbers, visible, i) orelse continue;
+        while (first < ordered.len and ordered[first].end() <= line.start) first += 1;
+        const row_start = at;
+        var k = first;
+        while (k < ordered.len and ordered[k].start() < line.contentEnd()) : (k += 1) {
+            const m = markRangeInLine(ordered[k], line) orelse continue;
+            buf[at] = m;
+            at += 1;
+        }
+        rows[i] = buf[row_start..at];
     }
     return rows;
+}
+
+/// 보이는 줄 인덱스 → 원본 문서 줄. 번호 표는 1-based이고, 표에 없는 자리는 그릴 수 없다.
+fn visibleDocLine(
+    doc: Opened,
+    numbers: []const ?u32,
+    visible: []const []const u8,
+    i: usize,
+) ?maru.session.editor.line_index.Line {
+    const doc_line: usize = if (visible.len > 0 and numbers.len > 0) blk: {
+        if (i >= numbers.len) return null;
+        break :blk (numbers[i] orelse return null) - 1;
+    } else i;
+    return doc.file.lines.line(doc_line);
+}
+
+/// 선택이 이 줄에서 차지하는 **줄 안 범위**. 겹치지 않으면 null.
+fn markRangeInLine(
+    sel: editor_selection.Selection,
+    line: maru.session.editor.line_index.Line,
+) ?chrome_editor.frame.Mark {
+    const lo = sel.start();
+    const hi = sel.end();
+    const line_end = line.contentEnd();
+    if (line_end <= lo or line.start >= hi) return null;
+    const from = if (lo > line.start) lo - line.start else 0;
+    const to = @min(hi, line_end) - line.start;
+    if (to <= from) return null;
+    return .{ .start = @intCast(from), .len = @intCast(to - from) };
 }
 
 /// 현재 검색 매치가 **보이게** 한다 — 접혀 있으면 펴고, 화면 밖이면 굴린다(§5.1 네비게이션).
@@ -1958,6 +2207,8 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
+    // 클릭 한 번이 멀티커서를 정리한다 — 안 그러면 사용자가 커서를 없앨 방법이 없다(§9.1).
+    clearExtraSelections(self, term);
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
@@ -2087,7 +2338,7 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
                 // 글자 단위로 늘면 잡은 단어의 반쪽이 남아 사용자가 본 것과 어긋난다.
                 const at: editor_selection.RowPos = .{ .row = hit.row, .byte = hit.byte };
                 ds.sel.focus = switch (ds.sel.kind) {
-                    .simple => at,
+                    .simple, .match => at,
                     .word, .line => blk: {
                         const st = owner.term.rt.editor_diff orelse break :blk at;
                         const texts = if (owner.side == .right) st.right_texts else st.left_texts;
@@ -2101,7 +2352,7 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
                                 const r = editor_selection.wordRangeAt(text, hit.byte);
                                 break :w if (forward) r.hi else r.lo;
                             },
-                            .simple => unreachable,
+                            .simple, .match => unreachable, // 바깥 switch가 이미 갈랐다
                         };
                         break :blk .{ .row = hit.row, .byte = edge };
                     },
@@ -2292,7 +2543,7 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
         const line = doc.file.lines.line(li) orelse return false;
         break :blk .{ .lo = line.start, .hi = line.contentEnd(), .kind = .line };
     } else blk: {
-        const w = editor_selection.wordRangeAt(doc.file.doc.content, off);
+        const w = editor_selection.wordRangeAt(doc.file.content, off);
         break :blk .{ .lo = w.lo, .hi = w.hi, .kind = .word };
     };
 
@@ -2301,6 +2552,7 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // (안전 빌드는 panic, ReleaseFast는 확장 단위를 모르는 `.line`이 남는다 — 그 assert가 막으려던
     // 바로 그 상태다). 빈 줄에 caret을 두는 것이 옳다: 고를 것이 없다.
     const kind = if (range.lo == range.hi) editor_selection.AnchorKind.simple else range.kind;
+    clearExtraSelections(self, term);
     term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, kind);
     // **드래그를 이어서 arm한다** — 더블클릭 후 끌면 단어 단위로 늘어난다. 뗌이 소유권을 놓는다.
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
@@ -2338,10 +2590,11 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
                 // 통째로, 트리플클릭 뒤 끌면 줄이 통째로 들어온다 — 글자 단위로 늘면 잡은 단어의
                 // 반쪽이 남아 사용자가 본 것과 어긋난다.
                 sel.focus = switch (sel.kind) {
-                    .simple => off,
+                    // `.match`(일치로 잡은 범위)는 잡은 단위가 없으므로 글자 단위로 는다 — `.simple`과 같다.
+                    .simple, .match => off,
                     .word => blk: {
                         const doc = owner.term.rt.editor_doc orelse break :blk off;
-                        const w = editor_selection.wordRangeAt(doc.file.doc.content, off);
+                        const w = editor_selection.wordRangeAt(doc.file.content, off);
                         // 앞으로 끌면 그 단어의 **끝**, 뒤로 끌면 **시작**까지 삼킨다.
                         break :blk if (off >= sel.anchorHi()) w.hi else w.lo;
                     },
@@ -2979,6 +3232,9 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_selection_marks = &.{};
     term.rt.editor_selection_mark_buf = &.{};
     term.rt.editor_selection = null;
+    // **나머지 커서도 같은 단위다.** 여기 빼먹으면 문서가 바뀐 뒤에도 옛 offset을 든 커서가 남아
+    // 렌더가 없는 줄을 집는다 — 비교 뷰 선택이 `invalidate` 목록에서 빠져 패닉했던 그 자리다.
+    clearExtraSelections(self, term);
 
     if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
@@ -3599,7 +3855,7 @@ test "쓸 수 없는 파일도 열리고 읽기 전용으로 표시된다" {
 
     var opened = try openPath(io, testing.allocator, path);
     defer opened.deinit(testing.allocator);
-    try testing.expect(opened.file.doc.read_only); // ⑵ 표시된다
+    try testing.expect(opened.file.read_only); // ⑵ 표시된다
     try testing.expectEqualStrings("locked", opened.file.lineText(0).?); // ⑴ 그래도 열린다
 }
 
@@ -3617,7 +3873,7 @@ test "쓸 수 있는 파일은 읽기 전용이 아니다 — 대조군" {
 
     var opened = try openPath(io, testing.allocator, path);
     defer opened.deinit(testing.allocator);
-    try testing.expect(!opened.file.doc.read_only);
+    try testing.expect(!opened.file.read_only);
 }
 
 test "여러 줄 파일의 줄 내용이 줄바꿈 없이 나온다" {
@@ -3638,7 +3894,7 @@ test "여러 줄 파일의 줄 내용이 줄바꿈 없이 나온다" {
     try testing.expectEqualStrings("const a = 1;", opened.file.lineText(0).?);
     try testing.expectEqualStrings("const 한글 = 2;", opened.file.lineText(1).?);
     try testing.expectEqualStrings("\tconst c = 3;", opened.file.lineText(2).?); // 탭은 전개 전이다
-    try testing.expect(opened.file.doc.format.mixed_endings);
+    try testing.expect(opened.file.format.mixed_endings);
 }
 
 // ── N1.5 c: 좌우 두 열 ───────────────────────────────────────────────────────────────────────
@@ -8747,6 +9003,337 @@ test "SEL3 선택이 화면에 띠로 서고, 복사가 문서 원본을 뜬다 
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(6);
     try testing.expect(!copySelection(fx.session));
     try testing.expectEqual(@as(usize, 0), fx.session.chrome_clipboard_write.len);
+}
+
+test "MC1 다음 일치 추가가 커서를 늘리고, 띠가 전부 서고, 복사가 문서 순서로 잇는다 (§9.1·§3.4)" {
+    // **커서가 늘어도 화면과 클립보드가 하나만 알면 결함이 조용하다** — 띠가 하나만 서거나 복사가
+    // 한 조각만 담아도 아무도 실패하지 않는다. 그래서 셋을 한 자리에서 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "mc.txt", .data = "foo bar\nbaz foo\nfoo end\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "mc.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 첫 줄의 "foo"(0..3)를 골라 둔다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 3, 3, .word);
+
+    // ⑴ 한 번 누르면 둘째 "foo"(12..15)가 primary가 되고 옛 primary가 나머지로 내려간다.
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 12), term.rt.editor_selection.?.start());
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections[0].start());
+
+    // ⑵ 또 누르면 셋째(16..19)까지 — **가장 뒤부터 찾으므로** 아래로 내려간다.
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 16), term.rt.editor_selection.?.start());
+
+    // ⑶ 띠가 **셋 다** 선다. 줄마다 하나씩이므로 줄별 마크 수가 1·1·1이다.
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d.dl.deinit(allocator);
+    }
+    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    try testing.expectEqual(@as(usize, 1), marks[0].len);
+    try testing.expectEqual(@as(u32, 0), marks[0][0].start);
+    try testing.expectEqual(@as(usize, 1), marks[1].len);
+    try testing.expectEqual(@as(u32, 4), marks[1][0].start); // "baz " 뒤
+    try testing.expectEqual(@as(usize, 1), marks[2].len);
+    try testing.expectEqual(@as(u32, 0), marks[2][0].start);
+
+    // ⑷ 복사는 **문서 순서**로 줄바꿈 연결한다(§3.4). primary가 마지막이지만 순서는 문서를 따른다.
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("foo\nfoo\nfoo", fx.session.chrome_clipboard_write);
+
+    // ⑸ 전부 골랐으면 더 늘지 않는다 — 같은 자리에 커서가 겹쳐 쌓이면 타이핑이 두 번 들어간다.
+    try testing.expect(!addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // ⑹ 클릭 한 번이 정리한다 — 없으면 사용자가 커서를 없앨 방법이 없다.
+    clearExtraSelections(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+}
+
+test "MC6 caret에서 누르면 커서가 늘지 않고 낱말이 잡힌다 (§9.1)" {
+    // **보이지 않는 커서를 만들지 않는다.** 옛 판은 caret을 나머지로 내려 커서가 둘이 됐고, 그 중
+    // 길이 0짜리는 띠가 없어 화면에 안 나타나는데 타이핑은 거기로도 간다 — 사용자가 못 보는 자리에
+    // 글자가 들어가는 종류의 결함이다. 클릭 뒤 `⌘⌃D`가 정확히 이 경로다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "caret.txt", .data = "alpha beta\nalpha gamma\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "caret.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 클릭한 것과 같은 상태 — caret 하나(길이 0).
+    term.rt.editor_selection = editor_selection.Selection.at(2); // "alpha" 안
+    try testing.expect(addNextOccurrence(fx.session, term));
+
+    // ⑴ 커서가 **늘지 않았다**.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    // ⑵ 그 자리 낱말이 잡혔다.
+    const sel = term.rt.editor_selection.?;
+    try testing.expectEqual(@as(usize, 0), sel.start());
+    try testing.expectEqual(@as(usize, 5), sel.end());
+
+    // ⑶ 한 번 더 누르면 그때부터 늘어난다.
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.start()); // 둘째 줄 alpha
+}
+
+test "MC5 접힌 문서에서도 커서 띠가 보이는 줄 축으로 선다 (§4.1f × §9.1)" {
+    // **멀티커서와 접힘이 만나는 자리는 한 번도 판정된 적이 없다.** 마크는 *보이는 줄* 축인데
+    // 커서는 문서 offset이라, 접히는 순간 둘이 어긋나면 화면이 조용히 거짓말한다 — 선택 하나였을
+    // 때 실측으로 겪은 그 자리다(보이는 줄의 띠가 사라지고 숨긴 줄이 엉뚱한 행에 섰다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 들여쓰기로 접을 수 있는 문서 — 바깥 줄에 `target`이 둘, 안쪽(접히면 숨는 줄)에 하나.
+    const text =
+        "target one\n" ++
+        "    hidden target\n" ++
+        "    hidden two\n" ++
+        "target two\n";
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "fold.txt", .data = text });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "fold.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // "target" 셋을 전부 고른다(문서 축).
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 6, 6, .word);
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d.dl.deinit(allocator);
+    }
+    {
+        const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+        var drawn: usize = 0;
+        for (marks) |row| drawn += row.len;
+        try testing.expectEqual(@as(usize, 3), drawn); // 펼친 상태에선 셋 다 보인다
+    }
+
+    // 접는다 — 안쪽 줄이 화면에서 사라진다.
+    try testing.expect(foldAll(fx.session));
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d.dl.deinit(allocator);
+    }
+    const folded_lines = editorLines(term).len;
+    try testing.expect(folded_lines < 4); // 실제로 접혔나 — 안 접혔으면 아래 판정이 공허하다
+
+    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    try testing.expectEqual(folded_lines, marks.len); // 보이는 줄 축이다
+    var drawn: usize = 0;
+    for (marks, 0..) |row, i| {
+        drawn += row.len;
+        // 각 띠가 **그 줄 안**에 들어간다 — 축이 어긋나면 여기서 범위를 넘는다.
+        const line_text = editorLines(term)[i];
+        for (row) |m| try testing.expect(m.start + m.len <= line_text.len);
+    }
+    // 숨은 줄의 커서는 그려지지 않는다.
+    try testing.expectEqual(@as(usize, 2), drawn);
+}
+
+test "MC4 병합 훑기가 줄마다 전부 훑던 방식과 같은 답을 낸다 (차분)" {
+    // **최적화는 답을 바꾸지 않아야 한다.** `line_index`를 벡터화할 때 옛 구현과 3000건을 대조한
+    // 것이 가장 강한 증거였고, 여기서도 같은 방법을 쓴다 — 순진한 `줄 × 커서` 훑기를 이 판정자
+    // 안에 그대로 두고 무작위 배치에서 결과를 맞춘다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const rand = prng.random();
+    var l: usize = 0;
+    while (l < 60) : (l += 1) {
+        const width = 1 + rand.uintLessThan(usize, 30);
+        var c: usize = 0;
+        while (c < width) : (c += 1) try doc.append(allocator, 'a' + @as(u8, @intCast(rand.uintLessThan(u8, 26))));
+        try doc.append(allocator, '\n');
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "diff.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "diff.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        d.dl.deinit(allocator);
+    }
+
+    var round: usize = 0;
+    while (round < 60) : (round += 1) {
+        // 무작위 선택 1~6개를 문서 순서로 만든다(겹치지 않게).
+        const want = 1 + rand.uintLessThan(usize, 6);
+        var picked: std.ArrayList(editor_selection.Selection) = .empty;
+        defer picked.deinit(allocator);
+        var cursor: usize = 0;
+        var k: usize = 0;
+        while (k < want and cursor < doc.items.len) : (k += 1) {
+            const gap = rand.uintLessThan(usize, 40);
+            const lo = cursor + gap;
+            if (lo >= doc.items.len) break;
+            const span = 1 + rand.uintLessThan(usize, 50); // 줄을 걸치기도 한다
+            const hi = @min(lo + span, doc.items.len);
+            if (hi <= lo) break;
+            try picked.append(allocator, editor_selection.Selection.fromPoints(lo, hi));
+            cursor = hi + 1;
+        }
+        if (picked.items.len == 0) continue;
+
+        clearExtraSelections(fx.session, term);
+        term.rt.editor_selection = picked.items[picked.items.len - 1];
+        if (picked.items.len > 1) {
+            const extras = try fx.session.allocator.alloc(editor_selection.Selection, picked.items.len - 1);
+            @memcpy(extras, picked.items[0 .. picked.items.len - 1]);
+            term.rt.editor_extra_selections = extras;
+        }
+
+        const marks = buildSelectionMarks(fx.session, term) orelse continue;
+
+        // ── 순진한 기준 구현: 줄마다 커서 전부를 훑는다 ──
+        const docf = term.rt.editor_doc.?;
+        const lines_len = if (term.rt.editor_visible_lines.len > 0)
+            term.rt.editor_visible_lines.len
+        else
+            term.rt.editor_lines.len;
+        for (0..lines_len) |i| {
+            const line = docf.file.lines.line(i) orelse continue;
+            var expect_count: usize = 0;
+            var last_start: u32 = 0;
+            for (picked.items) |sel| {
+                const lo = sel.start();
+                const hi = sel.end();
+                const line_end = line.contentEnd();
+                if (line_end <= lo or line.start >= hi) continue;
+                const from: u32 = @intCast(if (lo > line.start) lo - line.start else 0);
+                const to: u32 = @intCast(@min(hi, line_end) - line.start);
+                if (to <= from) continue;
+                // 순진한 쪽도 문서 순서로 돌므로 start가 단조 증가한다.
+                try testing.expect(expect_count == 0 or from >= last_start);
+                try testing.expect(expect_count < marks[i].len);
+                try testing.expectEqual(from, marks[i][expect_count].start);
+                try testing.expectEqual(to - from, marks[i][expect_count].len);
+                last_start = from;
+                expect_count += 1;
+            }
+            try testing.expectEqual(expect_count, marks[i].len);
+        }
+    }
+}
+
+test "MC3 마크 저장소가 커서 수에 곱해지지 않는다 (§9.1 — 실측이 만든 판정자)" {
+    // **앞선 판은 저장소를 `줄 수 × 커서 수`로 잡았다.** 2만 줄에 커서 1000개면 160 MB이고,
+    // 훑는 비용도 같은 곱이라 실측 11ms/프레임이었다(나오는 마크는 1000개인데 2천만 번을 돌았다).
+    //
+    // 시간으로 게이트를 세우면 기계마다 빨개지므로 **저장소 크기**로 잰다 — 그 값은 결정적이고,
+    // 곱셈으로 잡는 구현에서는 반드시 어긋난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    var n: usize = 0;
+    while (n < 400) : (n += 1) try doc.appendSlice(allocator, "aa bb cc dd\n");
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "many.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "many.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    var added: usize = 0;
+    while (added < 30) : (added += 1) {
+        if (!addNextOccurrence(fx.session, term)) break;
+    }
+    const cursors = term.rt.editor_extra_selections.len + 1;
+    try testing.expect(cursors >= 20); // 판정할 만큼 커서가 늘었나
+
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d.dl.deinit(allocator);
+    }
+    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+
+    var drawn: usize = 0;
+    for (marks) |row| drawn += row.len;
+    try testing.expectEqual(cursors, drawn); // 커서 하나가 띠 하나(전부 한 줄 안이다)
+
+    // **저장소가 실제 마크 수만큼이다.** 곱셈으로 잡으면 401 × 21 = 8421 이상이 된다.
+    try testing.expectEqual(drawn, term.rt.editor_selection_mark_buf.len);
+    try testing.expect(term.rt.editor_selection_mark_buf.len < doc.items.len);
+}
+
+test "MC2 같은 줄에 커서가 여럿이면 그 줄에 띠도 여럿 선다 (§9.1)" {
+    // **선택 하나였을 때의 가정("줄마다 최대 하나")이 여기서 깨진다.** 저장소를 줄 수만큼 잡으면
+    // 두 번째 띠가 버퍼를 넘거나 첫 번째를 덮어쓴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "one.txt", .data = "ab cd ab cd ab\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "one.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    try testing.expect(addNextOccurrence(fx.session, term)); // 6..8
+    try testing.expect(addNextOccurrence(fx.session, term)); // 12..14
+
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer d.dl.deinit(allocator);
+    }
+    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    // **한 줄에 셋이다.**
+    try testing.expectEqual(@as(usize, 3), marks[0].len);
+    var starts: [3]u32 = undefined;
+    for (marks[0], 0..) |m, i| starts[i] = m.start;
+    std.mem.sort(u32, &starts, {}, std.sort.asc(u32));
+    try testing.expectEqualSlices(u32, &.{ 0, 6, 12 }, &starts);
+
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("ab\nab\nab", fx.session.chrome_clipboard_write);
 }
 
 test "SEL4 더블클릭은 단어를, 트리플클릭은 줄을 잡고, 이어지는 드래그가 그 단위로 는다 (§4.1g)" {

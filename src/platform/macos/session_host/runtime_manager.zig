@@ -2021,7 +2021,14 @@ test "runtime manager: host 가 자식에게 심는 훅 신원이 GUI 가 읽을
     defer host_registry.deinit();
     var mgr: RuntimeManager = undefined;
     const host_id: u128 = 0xa11ce_0000_0000_0000_0000_0000_0000_0f;
-    mgr.init(allocator, std.testing.io, &host_registry, host_id);
+    // 로그 base 는 이 테스트의 tmp 다 — 여기서 보려는 것은 **자식 env 에 실린 이름**이지 파일이 아니지만,
+    // 신원은 «id + base» 가 함께여야 성립한다(그 묶음이 반쪽 상태를 타입에서 없앤다).
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(std.testing.io, &base_buf);
+    mgr.init(allocator, std.testing.io, &host_registry, .{
+        .host_id = host_id,
+        .log_base = base_buf[0..base_len],
+    });
     defer mgr.deinit();
 
     const ops = mgr.runtimeOps();

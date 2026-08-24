@@ -1790,7 +1790,7 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     var saw_no_dock = false;
     var w: u32 = 40;
     while (w <= 1600) : (w += 37) {
-        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer);
+        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0);
         // 창을 넘지 않는다.
         try std.testing.expect(g.terminal.x + g.terminal.w <= w);
         try std.testing.expect(g.dock.x + g.dock.w <= w);
@@ -1961,6 +1961,60 @@ fn rebuildDockAll(
     }
 }
 
+/// 왼쪽 사이드바를 채우는 셀 — **배경 띠와 세션 카드**(W8.8⒜1).
+///
+/// **기하는 중립이 소유한다**(`chrome/components/sidebar.zig` 의 `Metrics`·`cardHeight`·`rowTop`).
+/// 여기서 다시 곱하면 그린 자리와 눌리는 자리의 주인이 둘이 된다 — 이 세션에서 §2m.34 가 그 실패를
+/// 이미 한 번 겪었다.
+///
+/// **글자는 아직 없다**(⒜2). 카드 밴드와 좌측 앰버 막대까지가 ⒜1 이고, 판정은 "창이 셋으로 갈리고
+/// 터미널이 사이드바를 안 침범하는가" 다.
+fn rebuildSidebarCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    geom: maru.session.dock_layout.Geometry,
+    sidebar_w: u32,
+    cell_h: u32,
+) !void {
+    out.clearRetainingCapacity();
+    if (sidebar_w == 0) return;
+    const h = geom.workspace.h + geom.workspace.y; // 사이드바는 타이틀바 띠 위까지 전체 높이다
+    try out.append(allocator, d3d11_cells.solidCell(
+        0,
+        0,
+        @floatFromInt(sidebar_w),
+        @floatFromInt(h),
+        d3d11_cells.colorFromArgb(0xFF141922),
+        .{ 0, 0, 0, 0 },
+    ));
+
+    // 카드 하나 — 지금 세션. **줄 수를 여기서 정하고 그 값으로 높이를 얻는다**(그 필드 doc: 호스트가
+    // 렌더에 쓰는 줄 수와 같은 값을 실어야 클릭 좌표가 안 갈린다).
+    const sb = maru.chrome.components.sidebar;
+    const m = sb.Metrics.init(cell_h, cell_h);
+    const lines: u8 = 1;
+    const card_h = sb.cardHeight(lines, m);
+    const top = m.content_pad_v;
+    if (top + card_h > h) return;
+    try out.append(allocator, d3d11_cells.solidCell(
+        0,
+        @floatFromInt(top),
+        @floatFromInt(sidebar_w),
+        @floatFromInt(card_h),
+        d3d11_cells.colorFromArgb(0xFF232A38),
+        .{ 0, 0, 0, 0 },
+    ));
+    // 활성 카드의 **좌측 앰버 막대**(chrome-strategy.md U1) — 어느 세션이 활성인지의 신호다.
+    try out.append(allocator, d3d11_cells.solidCell(
+        0,
+        @floatFromInt(top),
+        3,
+        @floatFromInt(card_h),
+        d3d11_cells.colorFromArgb(0xFFDDA15E),
+        .{ 0, 0, 0, 0 },
+    ));
+}
+
 /// 소스 컨트롤 뷰가 그리는 데 필요한 것들.
 const ScmDockInputs = struct {
     status: []const u8,
@@ -2086,8 +2140,8 @@ fn rebuildDockCells(
 /// 창 하나를 **터미널과 도크로 가르는** 기하. 계산은 중립이 하고(`session/dock_layout.compute`)
 /// 여기서는 Windows 가 아는 값(창 크기·셀 크기)만 채운다.
 ///
-/// **사이드바와 타이틀바 띠는 0 이다** — Windows 는 네이티브 타이틀바를 쓰고(§2b) 사이드바는 아직
-/// 없다. 그 둘이 생기면 여기 두 값만 바뀐다.
+/// **타이틀바 띠는 아직 0 이다** — 창이 네이티브 캡션을 쓴다(W8.8⒝ 가 프레임리스로 바꾼다).
+/// 사이드바 폭은 이제 호출자가 준다(W8.8⒜).
 fn dockGeometryFor(
     width_px: u32,
     height_px: u32,
@@ -2096,12 +2150,14 @@ fn dockGeometryFor(
     visible: bool,
     size_pt: u32,
     view: maru.session.dock_panel.View,
+    /// 왼쪽 사이드바 폭(px). 0 이면 사이드바가 없다 — `compute` 가 작업영역을 그만큼만 민다.
+    sidebar_width_px: u32,
 ) maru.session.dock_layout.Geometry {
     const dock_layout = maru.session.dock_layout;
     return dock_layout.compute(.{
         .backing_width_px = width_px,
         .backing_height_px = height_px,
-        .sidebar_width_px = 0,
+        .sidebar_width_px = sidebar_width_px,
         .titlebar_height_px = 0,
         .cell_width_px = cell_w,
         .cell_height_px = cell_h,
@@ -2197,11 +2253,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_size_pt: u32 = 0;
     // 도크가 지금 무엇을 보이는가. 뷰 바의 칸을 누르면 바뀐다(W8.7c2).
     var dock_view: maru.session.dock_panel.View = .explorer;
+    // **사이드바 폭은 config 가 정한다**(`sidebar.width`, pt). 배율이 1 이라 pt 가 곧 px 다 —
+    // 포트 전체에 DPI 인지가 없다(§2m.35 의 한계와 같은 축).
+    const sidebar_w: u32 = cfg.sidebar.width_pt;
     // **지금 클라이언트 크기.** 디바이더 드래그가 기하를 다시 계산할 때 이 값이 필요하다 —
     // `initial` 은 시작 값이라 창을 키운 뒤 쓰면 도크가 옛 창 기준으로 선다.
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
+    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -2381,6 +2440,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     };
 
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
+    var sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer sidebar_cells.deinit(allocator);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_h);
+
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
     var dock_tree_frame: ?maru.renderer.RenderFrame = null;
@@ -2603,7 +2666,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
                 client_h = r.height_px;
-                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
+                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     loop.resizeActiveSurface(size) catch {};
@@ -2625,6 +2688,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_h) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
@@ -2726,7 +2790,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         );
                         if (cand) |pt| if (pt != dock_size_pt) {
                             dock_size_pt = pt;
-                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
                             // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
                             // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
                             // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
@@ -2773,7 +2837,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     dock_view = next_view;
                                     view_switches += 1;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
-                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view);
+                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         loop.resizeActiveSurface(size) catch {};
                                     rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
@@ -3208,8 +3272,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
 
         cells.clearRetainingCapacity();
-        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len);
-        // **도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 도크 배경에 덮이면 안 된다.
+        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len);
+        // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
+        cells.appendSliceAssumeCapacity(sidebar_cells.items);
         cells.appendSliceAssumeCapacity(dock_cells.items);
         const term_first = cells.items.len;
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
@@ -3262,6 +3327,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     });
     // 부차 판정: 그려진 셀이 도크 사각형을 침범했나(원점을 안 찍었거나 클립이 없을 때 잡힌다).
     try stdout.print("term_cells_in_dock={d} term_cells_before_rect={d} dock_cells={d}\n", .{ term_cells_in_dock, term_cells_before_rect, dock_cells.items.len });
+    // **사이드바 판정**(W8.8⒜1). `term_cells_before_rect` 가 사이드바 침범을 잡는다 — 터미널
+    // 사각형이 이제 `x=180` 에서 시작하므로, 원점을 안 찍으면 그 수가 0 이 아니다(§2m.31 이
+    // "검증 안 됐다" 고 적어 둔 배선이 여기서 처음 발동한다).
+    try stdout.print("sidebar_w={d} sidebar_cells={d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, geom.terminal.x });
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
     if (dock_click_judgeable) {
         // **동어반복을 피한다**: 누른 자리가 그 행이라는 것만 보면 내가 만든 좌표를 내가 되읽는

@@ -14184,7 +14184,8 @@ pub const AppSession = struct {
     ///
     /// **열 때 행 집합과 순서를 정하고 닫힐 때까지 얼린다.** 무거운 순으로 정렬하는데 갱신마다 다시 정렬하면
     /// 누르려던 줄이 손가락 밑에서 다른 탭이 되고, `context_menu.show()`를 다시 부르면 선택도 0으로 튕긴다.
-    fn openResourceMenu(self: *AppSession) void {
+    /// 캡처 하니스(`debug_fixtures.applyForcedResourceMenu`)도 부르므로 `pub` 이다.
+    pub fn openResourceMenu(self: *AppSession) void {
         if (self.resource_rows_len == 0) {
             self.showNoticeKey(.app_no_measured_terminal);
             return;
@@ -14257,7 +14258,8 @@ pub const AppSession = struct {
     ///
     /// 1개면 바로 점프한다(알림 클릭과 **같은** `activateSurfaceById` 경로). 2개 이상이면 항목에 앵커한
     /// 팝오버로 고르게 한다 — 리소스 팝오버와 같은 기계다.
-    fn openAgentMenu(self: *AppSession, blocked: bool) void {
+    /// 캡처 하니스(`debug_fixtures.applyForcedAgentMenu`)도 부르므로 `pub` 이다.
+    pub fn openAgentMenu(self: *AppSession, blocked: bool) void {
         const want: maru.session.agent_observer.State = if (blocked) .blocked else .running;
 
         // 후보를 **탭 순서 그대로** 모은다. 실행 중 목록은 이 순서가 곧 최종 순서다(§4: 훑는 목록이라
@@ -15090,25 +15092,9 @@ pub const AppSession = struct {
             if (self.web_find_pending == null and !already and q.len > 0)
                 web_ops.submitWebFind(self, false);
         }
-        // MARU_FORCE_BRANCH_MENU=1 — 상태바 브랜치 항목을 누른 것처럼 목록을 요청해 헤드리스로 찍는다.
-        // **열릴 때까지 재시도한다**: 저장소 판정이 cwd 관측(OSC 7)에 달려 있어 첫 tick에는 아직 없다.
-        // 가짜 목록을 심지 않는다 — 실제 `for-each-ref` 결과로 열린다(requestBranchMenu가 연타를 막는다).
-        if (!self.branch_menu_open and std.c.getenv("MARU_FORCE_BRANCH_MENU") != null) {
-            // 브랜치 항목이 **선 뒤에만** 요청한다 — 그 전에는 저장소 판정이 실패해 오류 알림이 화면에 남는다.
-            for (self.statusBarTree().entries) |e| {
-                if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
-                settings_ops.requestBranchMenu(self, .switch_branch);
-                break;
-            }
-        }
-        // MARU_FORCE_SCM=1 — 도크를 소스 컨트롤 뷰로 열어 둔 것처럼 만들어 헤드리스로 찍는다. 뷰 전환의 유일한
-        // 진입점이 스위처 아이콘 **클릭**이라 스크린샷 하니스로는 도달할 수 없다(입력 자동화는 겹친 남의 창을
-        // 누를 위험이 있어 검증 수단으로 쓰지 않는다). 상태를 심지 않고 사용자 클릭과 **같은 경로**
-        // (`openDockTo`)를 태우므로, 저장소 판정·목록 읽기·안내 문구는 전부 제품 tick이 그대로 정한다.
+        debug_fixtures.applyForcedBranchMenu(self); // 캡처 전용: 브랜치 목록은 상태바 클릭으로만 열린다
         debug_fixtures.applyForcedScmTab(self); // 캡처 전용: 탭·턴·펼침을 강제한다(env 미설정이면 무동작)
-        if (std.c.getenv("MARU_FORCE_SCM") != null and self.dock.view != .source_control) {
-            dock_ops.openDockTo(self, .source_control);
-        }
+        debug_fixtures.applyForcedScmView(self); // 캡처 전용: 도크를 소스 컨트롤 뷰로 연다(뒤의 pump 들이 그 뷰를 본다)
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
@@ -15133,28 +15119,8 @@ pub const AppSession = struct {
         scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b·P5 공용 슬롯)
         scm_dock_ops.pumpTurnSummaries(self); // 턴 줄의 `N개 파일`을 하나씩 채운다(같은 슬롯을 쓴다)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
-        // MARU_FORCE_RESOURCE_MENU=1 — 리소스 항목을 누른 것처럼 팝오버를 열어 헤드리스로 찍는다
-        // (MARU_FORCE_BRANCH_MENU와 같은 목적·같은 규율). **열릴 때까지 재시도한다**: 값은 두 번째 표본부터
-        // 생기고 항목도 그때 서므로 첫 tick에는 앵커가 없다. 가짜 행을 심지 않는다 — 실제 표본으로 열린다.
-        if (!self.resource_menu_open and std.c.getenv("MARU_FORCE_RESOURCE_MENU") != null) {
-            for (self.statusBarTree().entries) |e| {
-                if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
-                self.openResourceMenu();
-                break;
-            }
-        }
-        // MARU_FORCE_AGENT_MENU=running|blocked — 에이전트 개수 항목을 누른 것처럼 팝오버를 연다(§4).
-        // 같은 규율: 가짜 행을 심지 않고 **항목이 실제로 선 뒤에만** 진짜 경로(`openAgentMenu`)로 연다.
-        if (!self.agent_menu_open) blk: {
-            const raw = std.c.getenv("MARU_FORCE_AGENT_MENU") orelse break :blk;
-            const want_blocked = std.mem.eql(u8, std.mem.span(raw), "blocked");
-            const want_id: chrome.components.status_bar.ItemId = if (want_blocked) .blocked_agents else .running_agents;
-            for (self.statusBarTree().entries) |e| {
-                if (e.id != @intFromEnum(want_id)) continue;
-                self.openAgentMenu(want_blocked);
-                break;
-            }
-        }
+        debug_fixtures.applyForcedResourceMenu(self); // 캡처 전용: 리소스 팝오버 — 위 표본이 선 뒤라야 한다
+        debug_fixtures.applyForcedAgentMenu(self); // 캡처 전용: 에이전트 개수 팝오버(running|blocked)
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
     }
 

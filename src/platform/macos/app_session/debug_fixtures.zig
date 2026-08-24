@@ -1066,6 +1066,66 @@ pub fn applyForcedCommitWheel(self: *AppSession) void {
     self.debug_commit_wheel_done = true;
 }
 
+/// 상태바 브랜치 목록을 연 상태를 캡처한다(`MARU_FORCE_BRANCH_MENU=1`).
+///
+/// **열릴 때까지 재시도한다**: 저장소 판정이 cwd 관측(OSC 7)에 달려 있어 첫 tick에는 아직 없다.
+/// 가짜 목록을 심지 않는다 — 실제 `for-each-ref` 결과로 열린다(`requestBranchMenu`가 연타를 막는다).
+/// 브랜치 항목이 **선 뒤에만** 요청한다 — 그 전에는 저장소 판정이 실패해 오류 알림이 화면에 남는다.
+pub fn applyForcedBranchMenu(self: *AppSession) void {
+    if (self.branch_menu_open) return;
+    if (std.c.getenv("MARU_FORCE_BRANCH_MENU") == null) return;
+    for (self.statusBarTree().entries) |e| {
+        if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
+        settings_ops.requestBranchMenu(self, .switch_branch);
+        break;
+    }
+}
+
+/// 도크를 소스 컨트롤 뷰로 열어 둔 것처럼 만든다(`MARU_FORCE_SCM=1`).
+///
+/// 뷰 전환의 유일한 진입점이 스위처 아이콘 **클릭**이라 스크린샷 하니스로는 도달할 수 없다(입력
+/// 자동화는 겹친 남의 창을 누를 위험이 있어 검증 수단으로 쓰지 않는다). 상태를 심지 않고 사용자
+/// 클릭과 **같은 경로**(`openDockTo`)를 태우므로, 저장소 판정·목록 읽기·안내 문구는 전부 제품
+/// tick이 그대로 정한다.
+///
+/// tick 에서 `applyForcedScmTab` **뒤**에 부른다 — 옮기기 전 순서가 그랬고, 뒤따르는
+/// `scm_dock_ops.pump*` 들이 이 tick 의 뷰를 보기 때문에 자리를 바꾸면 첫 프레임이 달라진다.
+pub fn applyForcedScmView(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_SCM") == null) return;
+    if (self.dock.view == .source_control) return;
+    dock_ops.openDockTo(self, .source_control);
+}
+
+/// 상태바 리소스 팝오버를 연 상태를 캡처한다(`MARU_FORCE_RESOURCE_MENU=1`).
+///
+/// `applyForcedBranchMenu`와 같은 목적·같은 규율이다. **열릴 때까지 재시도한다**: 값은 두 번째
+/// 표본부터 생기고 항목도 그때 서므로 첫 tick에는 앵커가 없다. 가짜 행을 심지 않는다 — 실제
+/// 표본으로 열린다. tick 에서 `pollResourceUsage` **뒤**에 불러야 그 표본을 본다.
+pub fn applyForcedResourceMenu(self: *AppSession) void {
+    if (self.resource_menu_open) return;
+    if (std.c.getenv("MARU_FORCE_RESOURCE_MENU") == null) return;
+    for (self.statusBarTree().entries) |e| {
+        if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
+        self.openResourceMenu();
+        break;
+    }
+}
+
+/// 에이전트 개수 팝오버를 연 상태를 캡처한다(`MARU_FORCE_AGENT_MENU=running|blocked`).
+///
+/// 같은 규율: 가짜 행을 심지 않고 **항목이 실제로 선 뒤에만** 진짜 경로(`openAgentMenu`)로 연다.
+pub fn applyForcedAgentMenu(self: *AppSession) void {
+    if (self.agent_menu_open) return;
+    const raw = std.c.getenv("MARU_FORCE_AGENT_MENU") orelse return;
+    const want_blocked = std.mem.eql(u8, std.mem.span(raw), "blocked");
+    const want_id: chrome.components.status_bar.ItemId = if (want_blocked) .blocked_agents else .running_agents;
+    for (self.statusBarTree().entries) |e| {
+        if (e.id != @intFromEnum(want_id)) continue;
+        self.openAgentMenu(want_blocked);
+        break;
+    }
+}
+
 pub fn applyForcedRemoteMenu(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_SCM_MENU") == null) return;
     if (self.dock.view != .source_control) return;

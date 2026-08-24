@@ -65,7 +65,7 @@ L3는 L2 캐시를 **복사하지 않고 읽는다** — chrome이 session을 pr
 | 필요한 것 | 처리 | 근거 |
 |---|---|---|
 | 컨텍스트 메뉴 | **재활용** `chrome/components/context_menu.zig` | §8.1 |
-| 검색 오버레이 | **확장** `find.zig` — `Target` enum에 값 하나 추가 | §5.1(이미 `{scrollback, page}`로 갈린다) |
+| 검색 오버레이 | **확장했다**(2026-08-23) `find.zig` — `Target`이 `{scrollback, page, editor}`가 됐다. 일치 계산은 오버레이가 아니라 L2 `session/editor/find.zig`가 하고, 대소문자 규칙은 터미널과 **같은 `foldCase`**를 쓴다 | §5.1 |
 | **자동완성 팝업** | **재활용** `dropdown.zig`의 팝업 부분(`State`/`viewPopup`/`handle`/`itemAt`) | §8의 공통 규칙 넷(앵커·화면 clamp·↑↓/Enter 키 가로채기·modal 오버레이 규율)을 **이미 전부 갖고 있다** |
 | 스크롤바 | **재활용** `ui/scroll_area.zig`(`ScrollbarMetrics`·`ScrollbarGeometry`·`Drag`) | §4 뷰포트 |
 | 상태바 항목 | **확장** `status_bar.zig` — `ItemId` 추가 | §2.2 |

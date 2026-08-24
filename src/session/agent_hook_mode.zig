@@ -408,6 +408,23 @@ pub fn suppressesNotice(ev: event.Event) bool {
     return ev.kind == .session_start;
 }
 
+/// 이 이벤트가 **그 Term 의 세션 신원**을 싣고 오나(AT1 — 링의 키다, 계약 §6.1).
+///
+/// 훅 모드에는 신원을 갱신할 다른 자리가 **없다**. 관측 모드가 쓰는 자식 env 폴링
+/// (`refreshAgentSessionIdentity`)은 `.observe` 분기 전용이고, 그 폴링을 걷어낸 것이 훅 모드가 주는
+/// 이득의 절반이다(§1.1). provider 가 payload 로 직접 말해 주므로 추론할 이유가 없다.
+///
+/// ⚠️ **`marksTurnProgress` 를 재사용하지 않는다.** 그쪽이 `Notification` 을 빼는 이유는 「알림은 턴
+/// 진행의 증거가 아니다」인데 **신원은 턴 진행이 아니다**. claude 알림은 공통 payload 라 lead 의
+/// `session_id` 를 그대로 싣는다(2026-08-24 실측 — 알림 176개 전부 실었다). 같은 규칙의 두 모양이
+/// 아니라 **다른 규칙 둘**이라, 이름을 따로 둔다.
+///
+/// **자식은 부모의 신원을 옮기지 않는다**(`agent_id` — 계약 §2 의 규율).
+pub fn carriesSessionIdentity(ev: event.Event) bool {
+    if (ev.agent_id.len != 0) return false;
+    return ev.session_id.len != 0;
+}
+
 /// 주의 알림을 **바로 띄우지 않는 시간**(계약 §6 — 자동 승인으로 곧 해소되는 요청이 있다).
 /// 배지는 즉시 바뀌고 배너만 늦는다 — 시각 상태와 OS 배너의 타이밍을 분리한다.
 pub const attention_debounce_ms: u64 = 1200;
@@ -1625,4 +1642,27 @@ test "지난 턴의 알림이 늦게 와도 이번 턴의 자식 셈을 지우�
     late.turn_key = "turn-1";
     state = advance(&progress, state, late);
     try testing.expectEqual(@as(usize, 1), progress.childCount()); // 셈은 살아 있어야 한다
+}
+
+test "신원은 모든 lead 이벤트가 싣는다 — 알림도 포함이다(턴 진행 규칙과 다른 규칙이다)" {
+    // 실측(2026-08-24, 훅 로그 5,221 이벤트): `session_id` 는 provider·종류 무관하게 100% 실렸다.
+    // 그래서 채택을 특정 이벤트에 묶지 않는다 — maru 가 세션 중간에 붙어 첫 이벤트가 `PreToolUse` 여도
+    // 신원이 선다.
+    var ev: event.Event = .{ .kind = .notification, .session_id = "S1" };
+    try std.testing.expect(carriesSessionIdentity(ev));
+    // ⚠️ 여기가 `marksTurnProgress` 와 갈리는 자리다 — 그쪽은 알림을 뺀다(턴 진행의 증거가 아니라서).
+    try std.testing.expect(!marksTurnProgress(ev));
+
+    ev = .{ .kind = .pre_tool_use, .session_id = "S1" };
+    try std.testing.expect(carriesSessionIdentity(ev));
+    ev = .{ .kind = .session_start, .session_id = "S1" };
+    try std.testing.expect(carriesSessionIdentity(ev));
+}
+
+test "자식 이벤트와 빈 값은 신원을 싣지 않는다" {
+    // 자식은 부모의 신원을 옮기지 않는다(계약 §2). codex 자식이 자기 축을 싣고 온다는 실측이 근거다.
+    try std.testing.expect(!carriesSessionIdentity(.{ .kind = .stop, .session_id = "OTHER", .agent_id = "a5" }));
+    // 빈 값은 «모른다» 이지 «지워라» 가 아니다 — 아는 신원을 이 경로로 날리지 않는다.
+    try std.testing.expect(!carriesSessionIdentity(.{ .kind = .stop, .session_id = "" }));
+    try std.testing.expect(!carriesSessionIdentity(.{ .kind = .unknown }));
 }

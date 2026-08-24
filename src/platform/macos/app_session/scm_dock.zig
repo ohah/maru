@@ -517,7 +517,8 @@ fn activeTurnRing(self: *AppSession) ?*const maru.session.turn_snapshot.Ring {
 
 /// 활성 세션의 링이 **밀려나서** 없나. 맵이 최근 세션 신원 몇 개까지만 들기 때문에 생기는 일이고
 /// (`turn_snapshot.max_sessions` — `/clear` 도 새 신원을 만든다), 그때 「관측한 턴이 없다」고 말하면
-/// 있었던 기록을 없었던 것처럼 만든다. **목록이 빌 때만** 묻는다.
+/// 있었던 기록을 없었던 것처럼 만든다. **링이 아예 없을 때만** 묻는다 — 링이 다시 섰으면 그쪽이
+/// `history_evicted` 로 답한다(맵의 자취는 그때 지워진다).
 fn activeTurnRingEvicted(self: *AppSession) bool {
     const identity = git_ops.activeOrLastSessionIdentity(self);
     if (identity.len == 0) return false;
@@ -564,10 +565,15 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // **놓친 턴은 목록이 비어 있든 아니든 말한다** — 그 사실이 목록의 완전성을 좌우한다.
     const missed = if (active_ring) |ring| ring.missed else 0;
     const missed_rows: usize = if (missed > 0) 1 else 0;
+    // **밀려난 기록도 목록이 비어 있든 아니든 말한다** — 바로 위와 같은 이유다. 링이 다시 섰으면 그 링이
+    // 그 사실을 들고 있고(`history_evicted`), 아직 안 돌아왔으면 맵의 자취가 답한다.
+    const evicted = if (active_ring) |ring| ring.history_evicted else activeTurnRingEvicted(self);
+    // 목록이 비면 **아래 «빈 이유» 가 이 말을 대신한다** — 같은 사실을 두 줄로 내지 않는다.
+    const evicted_rows: usize = if (evicted and rows.len > 0) 1 else 0;
     // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — 쓰기는 변경 사항 탭에서 걸지만 **결과는 탭을
     // 따라온다**).
     const action_rows: usize = if (self.scm_write_error != null) 1 else 0;
-    const items = arena.alloc(component.types.Item, rows.len + notice_rows + missed_rows + action_rows + file_rows) catch return null;
+    const items = arena.alloc(component.types.Item, rows.len + notice_rows + missed_rows + evicted_rows + action_rows + file_rows) catch return null;
     var n: usize = 0;
     if (self.scm_write_error) |err| {
         items[n] = .{ .notice = err };
@@ -579,6 +585,10 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         items[n] = .{ .notice = arena.dupe(u8, text) catch "" };
         n += 1;
     }
+    if (evicted_rows > 0 and n < items.len) {
+        items[n] = .{ .notice = maru.i18n.t(.scm_turns_evicted) };
+        n += 1;
+    }
     if (rows.len == 0) {
         // **빈 이유를 구별해 말한다**(적대적 검증 2회차). 관측 모드에서는 이 목록이 영영 안 서는데
         // «이번 실행에서 관측한 턴이 없다» 는 곧 뜰 것처럼 읽혀 고장으로 보인다. 에이전트는 붙어 있는데
@@ -588,7 +598,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         // 있었는데 사라진 것이라, 같은 문구로 말하면 화면이 없던 일로 만든다.
         items[n] = .{ .notice = if (agentPresentWithoutIdentity(self))
             maru.i18n.t(.scm_turns_need_hooks)
-        else if (activeTurnRingEvicted(self))
+        else if (evicted)
             maru.i18n.t(.scm_turns_evicted)
         else
             maru.i18n.t(.scm_no_turns) };

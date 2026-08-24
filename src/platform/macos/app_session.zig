@@ -15119,7 +15119,7 @@ pub const AppSession = struct {
         scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b·P5 공용 슬롯)
         scm_dock_ops.pumpTurnSummaries(self); // 턴 줄의 `N개 파일`을 하나씩 채운다(같은 슬롯을 쓴다)
         self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
-        debug_fixtures.applyForcedResourceMenu(self); // 캡처 전용: 리소스 팝오버 — 위 표본이 선 뒤라야 한다
+        debug_fixtures.applyForcedResourceMenu(self); // 캡처 전용: 리소스 팝오버 — 위 표본을 곧바로 보게 뒤에 둔다
         debug_fixtures.applyForcedAgentMenu(self); // 캡처 전용: 에이전트 개수 팝오버(running|blocked)
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
     }

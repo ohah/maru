@@ -1832,11 +1832,16 @@ fn buildDockTreeFrame(
     geom: maru.session.dock_layout.Geometry,
     cell_w: u32,
     cell_h: u32,
+    /// **실제로 그린 행 수.** 히트테스트가 이 값을 써야 한다 — `rows.len` 을 쓰면 안 그린 행이
+    /// 눌린다(실측: 110 행짜리 디렉터리에서 도크 맨 아래를 누르면 그리지 않은 29 행이 나왔다).
+    drawn: *u16,
 ) !?maru.renderer.RenderFrame {
+    drawn.* = 0;
     const area = geom.tree_content;
     if (area.w < cell_w or area.h < cell_h) return null;
     const cols: u16 = @intCast(area.w / cell_w);
     const rows_visible: u16 = @intCast(@min(rows.len, area.h / cell_h));
+    drawn.* = rows_visible;
     if (cols == 0 or rows_visible == 0) return null;
 
     const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 } };
@@ -1882,6 +1887,7 @@ fn rebuildDockAll(
     atlas_h: *u32,
     uploaded: *usize,
     outside: *usize,
+    drawn: *u16,
     frame_slot: *?maru.renderer.RenderFrame,
 ) !void {
     try rebuildDockCells(allocator, out, geom);
@@ -1890,7 +1896,7 @@ fn rebuildDockAll(
         frame_slot.* = null;
     }
     if (rows.len == 0) return;
-    const built = (try buildDockTreeFrame(allocator, renderer_state, builder, rows, geom, cell_w, cell_h)) orelse return;
+    const built = (try buildDockTreeFrame(allocator, renderer_state, builder, rows, geom, cell_w, cell_h, drawn)) orelse return;
     frame_slot.* = built;
 
     // **업로드는 여기서, 지금 한다.** 프레임의 업로드 목록은 **그 프레임과 함께 사라진다** — 올리기
@@ -2225,12 +2231,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_rebuild_failures: usize = 0;
     var dock_region_uploads: usize = 0;
     var dock_cells_outside: usize = 0;
+    var dock_rows_drawn: u16 = 0;
+    var dock_click_judgeable = false;
+    var dock_click_target_row: usize = 0;
     // 도크 자리의 셀. **기하가 바뀔 때만** 다시 만든다 — 정적인 것에 매 프레임 값을 치르지 않는다.
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
     var dock_tree_frame: ?maru.renderer.RenderFrame = null;
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_tree_frame) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -2374,11 +2383,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 반대면 도크가 죽은 컨트롤이 된다.
     var spins: usize = 0;
     while ((max_spins == null or spins < max_spins.?) and !window.quit_requested and !close_requested) : (spins += 1) {
-        if (spins == 60 and geom.dock.w != 0) {
-            const dx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
-            const dy: i32 = @intCast(geom.tree_content.y + cell_h * 2 + cell_h / 2);
-            window.postSyntheticMouse(.left_down, dx, dy);
-            window.postSyntheticMouse(.left_up, dx, dy);
+        if (spins == 60) {
+            // **판정 불가와 실패를 가른다.** 창이 좁아 도크가 없으면 누를 것이 없는데, 그것을
+            // `dock_row_clicks=0` 으로만 적으면 고장난 것처럼 읽힌다(이 세션에서 다섯 번째다).
+            if (geom.dock.w != 0 and dock_rows_drawn > 2) {
+                dock_click_judgeable = true;
+                dock_click_target_row = 2;
+                const dx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const dy: i32 = @intCast(geom.tree_content.y + cell_h * 2 + cell_h / 2);
+                window.postSyntheticMouse(.left_down, dx, dy);
+                window.postSyntheticMouse(.left_up, dx, dy);
+            }
         }
         if (spins == 120) {
             selections_before_term_click = selections;
@@ -2411,7 +2426,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_tree_frame) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {
                     dock_rebuild_failures += 1;
                 };
             },
@@ -2508,7 +2523,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         // **행 판정도 중립이 소유한다**(`file_tree_layout.rowAtLocalY`).
                         const local_y = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
                         if (region == .dock_content and local_y >= 0) {
-                            if (maru.session.file_tree_layout.rowAtLocalY(cell_h, 0, local_y, dock_rows.items.len)) |row| {
+                            // **그린 행 수를 쓴다** — `dock_rows.items.len` 을 쓰면 안 그린 행이 눌린다(적대적 검증
+                            // 실측: 110 행짜리 디렉터리에서 도크 맨 아래가 그리지 않은 29 행을 냈다).
+                            if (maru.session.file_tree_layout.rowAtLocalY(cell_h, 0, local_y, dock_rows_drawn)) |row| {
                                 dock_row_clicks += 1;
                                 dock_last_row = row;
                             }
@@ -2846,7 +2863,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_tree_frame) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -2949,8 +2966,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     });
     // 부차 판정: 그려진 셀이 도크 사각형을 침범했나(원점을 안 찍었거나 클립이 없을 때 잡힌다).
     try stdout.print("term_cells_in_dock={d} term_cells_before_rect={d} dock_cells={d}\n", .{ term_cells_in_dock, term_cells_before_rect, dock_cells.items.len });
-    try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside });
-    try stdout.print("dock_pointer_events={d} dock_row_clicks={d} dock_last_row={?d}\n", .{ dock_pointer_events, dock_row_clicks, dock_last_row });
+    try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
+    if (dock_click_judgeable) {
+        // **동어반복을 피한다**: 누른 자리가 그 행이라는 것만 보면 내가 만든 좌표를 내가 되읽는
+        // 것이다. 그 행의 **이름**을 모델에서 꺼내 함께 적어, 화면에 뜬 목록과 대조할 수 있게 한다.
+        const name: []const u8 = if (dock_last_row) |r| blk: {
+            if (r >= dock_rows.items.len) break :blk "<out-of-range>";
+            break :blk switch (dock_rows.items[r]) {
+                .root => |x| x.label,
+                .directory => |x| x.label,
+                .file, .recent_file => |x| x.label,
+                .recent_header => "<recent-header>",
+                .empty => "<empty>",
+            };
+        } else "<none>";
+        try stdout.print("dock_pointer_events={d} dock_row_clicks={d} dock_last_row={?d} want_row={d} row_name={s}\n", .{ dock_pointer_events, dock_row_clicks, dock_last_row, dock_click_target_row, name });
+    } else {
+        try stdout.print("dock_click=unjudgeable reason=no_dock_or_too_few_rows dock_pointer_events={d}\n", .{dock_pointer_events});
+    }
     // **서로 안 샌다**: 도크 클릭 뒤에도 셸 선택은 그대로였고(그 시점 값이 `selections_before_term_click`),
     // 터미널 클릭은 도크 카운터를 안 올렸다.
     try stdout.print("selections_at_term_click={d} dock_clicks_at_term_click={d} selections_final={d} dock_clicks_final={d}\n", .{

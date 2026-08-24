@@ -19,6 +19,17 @@ const seg = new Intl.Segmenter("ko", { granularity: "grapheme" });
 const graphemes = (s: string): string[] => [...seg.segment(s)].map((g) => g.segment);
 
 let term!: TerminalT;
+
+/**
+ * **`term` 은 `mount()` 안에서 만들어진다.** 톱레벨에서 곧바로 구독하면 그 시점에 `undefined`
+ * 라 스크립트가 통째로 죽는다(실제로 그래서 화면이 안 떴다). 여기 모아 두고 마운트 뒤에 건다 —
+ * 워커 모드를 바꾸면 터미널이 새로 만들어지므로 **그때마다** 다시 걸어야 한다.
+ */
+const wiring: ((t: TerminalT) => void)[] = [];
+function whenTerm(fn: (t: TerminalT) => void): void {
+  wiring.push(fn);
+  if (term) fn(term);
+}
 let allThemes: Record<string, Theme> = { ...PRESETS };
 
 /* ── 가짜 셸 ─────────────────────────────────────────────────────────────
@@ -264,6 +275,7 @@ async function mount() {
   }
   term.onFallback((r) => console.warn("워커 폴백:", r));
   await term.open($("host"));
+  for (const fn of wiring) fn(term); // 새 인스턴스에 구독을 다시 건다
   if (usePty) connectPty();
   else {
     term.write(BANNER);
@@ -370,26 +382,28 @@ $("bench").addEventListener("click", async () => {
 // ── 링크 규칙 ──────────────────────────────────────────────
 // **자동 URL 감지를 이걸로 한다.** 코어의 자동 감지는 libc 를 요구해 wasm 에 없다(계약 §8) —
 // 규칙을 소비자가 넣으면 같은 결과가 된다. 스택 트레이스의 `파일:줄` 도 함께 잡는다.
-term.registerLinkProvider({
-  provideLinks(_row, text) {
-    const out = [];
-    for (const re of [/https?:\/\/[^\s"'<>)\]]+/g, /(?:\.{0,2}\/)?[\w./-]+\.\w+:\d+(?::\d+)?/g]) {
-      for (const m of text.matchAll(re)) {
-        const at = m.index ?? 0;
-        out.push({
-          startCol: at,
-          endCol: at + m[0].length - 1,
-          text: m[0],
-          activate: () => {
-            if (m[0].startsWith("http")) globalThis.open(m[0], "_blank", "noopener");
-            else logOsc(`파일 열기 요청: ${m[0]}`); // 실제 앱이라면 에디터로 보낸다
-          },
-        });
+whenTerm((t) =>
+  t.registerLinkProvider({
+    provideLinks(_row, text) {
+      const out = [];
+      for (const re of [/https?:\/\/[^\s"'<>)\]]+/g, /(?:\.{0,2}\/)?[\w./-]+\.\w+:\d+(?::\d+)?/g]) {
+        for (const m of text.matchAll(re)) {
+          const at = m.index ?? 0;
+          out.push({
+            startCol: at,
+            endCol: at + m[0].length - 1,
+            text: m[0],
+            activate: () => {
+              if (m[0].startsWith("http")) globalThis.open(m[0], "_blank", "noopener");
+              else logOsc(`파일 열기 요청: ${m[0]}`); // 실제 앱이라면 에디터로 보낸다
+            },
+          });
+        }
       }
-    }
-    return out.length > 0 ? out : null;
-  },
-});
+      return out.length > 0 ? out : null;
+    },
+  }),
+);
 
 // ── 키 가로채기 · 직렬화 ───────────────────────────────────
 // `false` 를 돌려주면 터미널이 그 키를 완전히 무시한다 — 앱 단축키가 터미널보다 우선해야 할 때.
@@ -420,18 +434,20 @@ function logOsc(line: string): void {
   oscLog.length = Math.min(oscLog.length, 4);
   $("osc-log").textContent = oscLog.join(" · ");
 }
-term.onClipboardWrite((text) => {
-  const allow = $<HTMLInputElement>("o-clip").checked;
-  logOsc(`복사 요청 ${text.length}자 ${allow ? "(허용)" : "(무시)"}`);
-  if (allow) void navigator.clipboard?.writeText(text).catch(() => logOsc("복사 실패"));
-});
-term.onClipboardRejected(() => logOsc("복사 거부 — 16MB 초과"));
-// 읽기에는 답하지 않는다. 답하면 앱이 사용자 클립보드를 가져갈 수 있다.
-term.onClipboardRead((target) => logOsc(`읽기 요청(${target}) — 무시`));
-term.onNotification((n) => logOsc(`알림: ${n.title} ${n.body}`.trim()));
-term.onCwdChange((cwd) => logOsc(`cwd → ${cwd}`));
-term.onShellEvent((e) => {
-  if (e.kind === "command-end") logOsc(`명령 끝 (exit ${e.exit ?? "?"})`);
+whenTerm((t) => {
+  t.onClipboardWrite((text) => {
+    const allow = $<HTMLInputElement>("o-clip").checked;
+    logOsc(`복사 요청 ${text.length}자 ${allow ? "(허용)" : "(무시)"}`);
+    if (allow) void navigator.clipboard?.writeText(text).catch(() => logOsc("복사 실패"));
+  });
+  t.onClipboardRejected(() => logOsc("복사 거부 — 16MB 초과"));
+  // 읽기에는 답하지 않는다. 답하면 앱이 사용자 클립보드를 가져갈 수 있다.
+  t.onClipboardRead((target) => logOsc(`읽기 요청(${target}) — 무시`));
+  t.onNotification((n) => logOsc(`알림: ${n.title} ${n.body}`.trim()));
+  t.onCwdChange((cwd) => logOsc(`cwd → ${cwd}`));
+  t.onShellEvent((e) => {
+    if (e.kind === "command-end") logOsc(`명령 끝 (exit ${e.exit ?? "?"})`);
+  });
 });
 
 // ── 검색 ───────────────────────────────────────────────────
@@ -497,10 +513,12 @@ lineSlider.addEventListener("input", () => {
   term.scrollToLine(n);
 });
 // 슬라이더 범위는 스크롤백이 자라는 대로 따라간다.
-term.onRender((m) => {
-  const len = m.scroll.length;
-  if (Number(lineSlider.max) !== len) lineSlider.max = String(len);
-});
+whenTerm((t) =>
+  t.onRender((m) => {
+    const len = m.scroll.length;
+    if (Number(lineSlider.max) !== len) lineSlider.max = String(len);
+  }),
+);
 
 /**
  * 진짜 PTY 에 붙는다. **이게 라이브러리가 실제로 쓰이는 형태다** — `onData` 로 나온 바이트를

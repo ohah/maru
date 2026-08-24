@@ -11,9 +11,16 @@ const PORT = 8899;
 
 const server = Bun.serve({
   port: PORT,
-  fetch(req) {
+  async fetch(req) {
     const path = new URL(req.url).pathname;
     const file = path === "/" ? "tests/fixtures/harness.html" : path.slice(1);
+    // 데모는 TypeScript 로 둔다(라이브러리 API 의 첫 소비자라 타입 검사를 받아야 한다) —
+    // `serve-demo.ts` 와 같은 이유로 여기서도 옮겨 준다. 그러지 않으면 데모 스모크를 못 돈다.
+    if (file.endsWith(".ts")) {
+      const src = await Bun.file(ROOT + file).text();
+      const js = new Bun.Transpiler({ loader: "ts", target: "browser" }).transformSync(src);
+      return new Response(js, { headers: { "content-type": "text/javascript; charset=utf-8" } });
+    }
     return new Response(Bun.file(ROOT + file));
   },
 });
@@ -761,6 +768,48 @@ async function renderShot(workerMode: "full" | "false"): Promise<Buffer> {
       (a.cells as number) === 6,
     JSON.stringify(a),
   );
+}
+
+// **데모 스모크.** 데모는 라이브러리의 첫 소비자인데 지금까지 "뜨는지" 를 아무도 보지 않았다 —
+// 타입 검사만 통과하면 됐다. 실제로 구독을 톱레벨에 두는 바람에 `term` 이 `undefined` 인 채로
+// 불려 **스크립트가 통째로 죽고 화면이 안 뜨는** 일이 있었다(타입상으로는 멀쩡했다).
+{
+  const p = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const errs: string[] = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  p.on("console", (m) => {
+    if (m.type() === "error") errs.push(m.text());
+  });
+  await p.goto(`http://127.0.0.1:${PORT}/demo/index.html`, { waitUntil: "networkidle" });
+  await p.waitForTimeout(1500);
+  const r = await p.evaluate(() => {
+    const cv = document.querySelector("#host canvas") as HTMLCanvasElement | null;
+    if (!cv) return { canvas: false, lit: 0, total: 0, controls: 0 };
+    // 워커 모드에서는 메인이 2d 컨텍스트를 못 얻는다 — 복사해서 픽셀을 읽는다.
+    const tmp = document.createElement("canvas");
+    tmp.width = cv.width;
+    tmp.height = cv.height;
+    tmp.getContext("2d")!.drawImage(cv, 0, 0);
+    const d = tmp.getContext("2d")!.getImageData(0, 0, cv.width, Math.min(200, cv.height)).data;
+    let lit = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i]! > 40 || d[i + 1]! > 40 || d[i + 2]! > 40) lit++;
+    }
+    // 사이드바 컨트롤이 다 배선됐는지 — 하나라도 없으면 `$()` 가 던져 스크립트가 죽는다.
+    const ids = ["f-q", "c-clear", "c-reset", "c-top", "o-hook", "c-dump", "o-clip", "osc-log"];
+    return {
+      canvas: true,
+      lit,
+      total: d.length / 4,
+      controls: ids.filter((id) => document.getElementById(id)).length,
+    };
+  });
+  check("데모: 스크립트 에러 없이 뜬다", errs.length === 0, errs[0]?.slice(0, 70) ?? "");
+  check("데모: 캔버스가 만들어진다", r.canvas, String(r.canvas));
+  // **"떴다" 로는 부족하다** — 빈 캔버스도 만들어지기는 한다. 실제로 그려졌는지 픽셀로 본다.
+  check("데모: 화면이 실제로 그려진다", r.lit > 1000, `${r.lit}/${r.total}px`);
+  check("데모: 사이드바 컨트롤이 다 있다", r.controls === 8, `${r.controls}/8`);
+  await p.close();
 }
 
 // **터치.** 브라우저의 마우스 에뮬레이션에 기대지 않고 직접 다루므로, 세 가지 뜻(탭·드래그·

@@ -30760,11 +30760,12 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
             _ = std.c.kill(child, std.posix.SIG.TERM);
             var status: c_int = undefined;
             _ = std.c.waitpid(child, &status, 0);
-            _ = std.c.unlink(socket.ptr);
-            var lpb: [224]u8 = undefined;
-            if (session_host.discovery.lockPathIn(&lpb, dir)) |q| _ = std.c.unlink(q.ptr) else |_| {}
-            _ = std.c.rmdir(dir.ptr);
-            _ = std.c.rmdir(base.ptr);
+            // **통째로 지운다.** host 는 lock·incident 디렉터리를 남기므로 `rmdir` 두 번으로는 못 지우고,
+            // 그러면 이 픽스처가 실행마다 `/tmp/maru-…-<pid>` 를 하나씩 쌓는다(실측: 이미 쌓여 있었다).
+            // pid 는 재사용되므로 그 잔재는 다음 실행의 픽스처와 이름이 겹칠 수도 있다.
+            std.Io.Dir.cwd().deleteTree(io, base) catch {
+                _ = std.c.rmdir(base.ptr);
+            };
         }
 
         var up = false;
@@ -30837,9 +30838,10 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
         term.agent_kind = .claude;
 
         // GUI 리더가 그 파일을 찾아 소비한다 — **경로를 테스트가 조립하지 않는다.**
+        // CI 러너는 이 왕복(실 host + forkpty + 셸 + 훅 + 리더)이 느리다 — 상한을 넉넉히 둔다.
         var consumed = false;
         var tick: usize = 0;
-        while (tick < 300 and !consumed) : (tick += 1) {
+        while (tick < 1000 and !consumed) : (tick += 1) {
             agent_ops.pollAgentHookEvents(session, term, false);
             consumed = std.mem.eql(u8, term.agent_transcript.owned.reply(), "훅에서 온 답");
             if (!consumed) _ = usleep(10 * 1000);

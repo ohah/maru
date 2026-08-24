@@ -110,6 +110,9 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 37, .name = "ambiguous_wide" },
     .{ .tag = 38, .name = "emoji_wide" },
     .{ .tag = 39, .name = "view_offset" },
+    // **새 태그를 쓴다**(기존 번호를 건드리면 옛 host 가 만든 상태를 못 읽는다). 단조 증가
+    // 카운터라 이어져야 의미가 있다 — 바깥 소비자가 두 시점의 차이로 절대 행을 보정한다.
+    .{ .tag = 91, .name = "evicted_total" },
     .{ .tag = 40, .name = "selection_anchor" },
     .{ .tag = 41, .name = "selection_head" },
     .{ .tag = 42, .name = "selection_block" },

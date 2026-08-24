@@ -4345,22 +4345,32 @@ fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnReque
     // MARU_PANE_ID는 GUI process-local surface id라 재실행 후 같은 persistent child 안에서 stale selector가 된다.
     // runtime↔새 surface rebinding 프로토콜 전에는 주입하지 않아 잘못된 다른 pane을 self로 선택하는 것보다 fail-closed한다.
     request.pane_id = null;
-    // **훅 로그 인스턴스 칸도 같이 뗀다**(docs/agent-hooks.md §4). 그 값은 **GUI 프로세스**를 가리키는데
-    // 이 자식은 host 가 띄우고 GUI 보다 오래 산다 — 실으면 재실행 뒤 남의(또는 죽은) 인스턴스 칸에 쓴다.
-    // 떼면 훅이 조용히 나가 아무것도 안 남긴다(fail-closed). host-backed 터미널이 훅 모드를 쓰려면 GUI 가
-    // 재접속 뒤에도 아는 신원이 필요하고, 그건 별도 슬라이스다.
+    // **훅 로그 경로의 두 칸도 같이 뗀다**(docs/agent-hooks.md §4). GUI 가 채운 값은 **GUI 프로세스**와
+    // 그 프로세스의 surface 번호를 가리키는데, 이 자식은 host 가 띄우고 GUI 보다 오래 산다 — 실으면 재실행
+    // 뒤 남의(또는 죽은) 칸에 쓴다. 떼면 훅이 조용히 나가 아무것도 안 남긴다(fail-closed).
+    //
+    // 여기서 뗀 자리는 **host 가 자기 신원으로 다시 채운다**(`formatHostInstance`/`formatRuntimePane` —
+    // host_id 와 runtime_id 는 GUI 재실행을 넘어 살아 있는 유일한 이름이다). 그 배선은 host 쪽 슬라이스다.
     request.hook_instance = null;
+    request.hook_pane = null;
     return request;
 }
 
 test "persistent spawn omits process-local MARU_PANE_ID without mutating local fallback request" {
-    const local: maru.pty.SpawnRequest = .{ .command = "/bin/zsh", .pane_id = 42, .hook_instance = 4242 };
+    const local: maru.pty.SpawnRequest = .{
+        .command = "/bin/zsh",
+        .pane_id = 42,
+        .hook_instance = "4242",
+        .hook_pane = "42",
+    };
     const persistent = persistentSpawnRequest(local);
     try std.testing.expectEqual(@as(?u64, 42), local.pane_id);
     try std.testing.expectEqual(@as(?u64, null), persistent.pane_id);
-    // 훅 인스턴스 칸도 같이 떨어진다 — 남기면 재실행 뒤 남의 칸에 쓴다.
-    try std.testing.expectEqual(@as(?u64, 4242), local.hook_instance);
-    try std.testing.expectEqual(@as(?u64, null), persistent.hook_instance);
+    // 훅 경로의 두 칸도 같이 떨어진다 — 남기면 재실행 뒤 남의 칸에 쓴다.
+    try std.testing.expectEqualStrings("4242", local.hook_instance.?);
+    try std.testing.expectEqualStrings("42", local.hook_pane.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), persistent.hook_instance);
+    try std.testing.expectEqual(@as(?[]const u8, null), persistent.hook_pane);
 }
 
 /// vtable 직접 호출과 SurfaceRuntime의 PtyIo 호출이 공유하는 paste 정책점. Client의 연결별 pending frame + DONTWAIT

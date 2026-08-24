@@ -47,6 +47,123 @@ pub const timeout_seconds: u32 = 2;
 /// `mkdir` 이 실패하는 경우를 훅 안에서 처리할 방법도 없다).
 pub const log_dir_rel = "agent-turn-events";
 
+/// 훅에 신원을 넘기는 예약 환경변수 둘. **control-plane 의 `MARU_PANE_ID` 와 갈라 둔다.**
+///
+/// 예전에는 pane 칸으로 `MARU_PANE_ID` 를 그대로 썼다. 그 값은 control-plane `auth.self` selector 이고
+/// **GUI process-local surface id** 라, host 가 띄운 자식에는 실을 수 없다(GUI 가 재실행되면 그 번호는
+/// 남의 pane 을 가리킨다 — 그래서 `persistentSpawnRequest` 가 fail-closed 로 떼어 낸다). 한 변수가 두 일을
+/// 하는 동안은 «훅 신원» 을 host 소유 값으로 바꾸는 것이 곧 «selector 를 거짓말하게 만드는 것» 이었다.
+///
+/// 그래서 훅은 자기 변수를 갖는다. `MARU_PANE_ID` 는 selector 로만 남고, 훅 경로는 이 둘만 본다 —
+/// 소유자가 GUI 든 host 든 **같은 규칙으로** 채워지는 칸이다(계약 §4).
+pub const instance_env = "MARU_HOOK_INSTANCE";
+pub const pane_env = "MARU_HOOK_PANE";
+
+/// 경로 한 칸에 허용되는 글자를 **한 곳에서** 정한다.
+///
+/// 이 값 하나가 셸 가드의 문자 클래스(`case … in *[!…]*`)와 maru 쪽 판정(`accepts`)을 **함께** 만든다.
+/// 두 곳에 손으로 적으면 «커맨드는 거부하는데 maru 는 통과시키는»(또는 반대) 드리프트가 조용히 생기고,
+/// 그 증상은 «훅은 도는데 이벤트가 0» — 진단하기 가장 나쁜 상태다(계약 §4.1).
+pub const TokenClass = struct {
+    /// 허용 구간(양끝 포함). 셸 bracket expression 의 `a-z` 와 같은 뜻이다.
+    ranges: []const [2]u8,
+    /// 구간으로 표현하기 어색한 낱글자.
+    extra: []const u8 = "",
+
+    /// 이 칸에 써도 되는 값인가. **빈 값은 거부한다** — 빈 칸은 경로를 `//` 로 접어 상위 디렉터리에 쓴다.
+    pub fn accepts(self: TokenClass, token: []const u8) bool {
+        if (token.len == 0) return false;
+        next_char: for (token) |ch| {
+            for (self.ranges) |range| {
+                if (ch >= range[0] and ch <= range[1]) continue :next_char;
+            }
+            for (self.extra) |allowed| {
+                if (ch == allowed) continue :next_char;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /// 셸 bracket expression 안에 그대로 들어가는 글자 목록.
+    ///
+    /// ⚠️ **구간을 `a-z` 로 적지 않고 낱글자로 펼친다.** 셸의 bracket «범위» 는 로케일 collation 순서를
+    /// 따르므로 `[!0-9a-z_]` 이 **대문자를 통과시킨다** — 실측(2026-08-24):
+    ///
+    /// ```text
+    /// C            : 범위표기=reject  낱글자열거=reject
+    /// en_US.UTF-8  : 범위표기=accept  낱글자열거=reject
+    /// ko_KR.UTF-8  : 범위표기=accept  낱글자열거=reject
+    /// ```
+    ///
+    /// 즉 사용자 로케일에서 가드가 조용히 느슨해진다(옛 `[!0-9]` 는 글자가 없어 이 함정 밖이었다 — 클래스를
+    /// 넓히면서 생긴 위험이고, 셸 게이트가 머지 전에 잡았다). 훅은 `LC_ALL` 을 정할 수 없다(provider 가 주는
+    /// 환경에서 돈다). 그래서 **표기 자체를 로케일에 무관하게** 만든다.
+    pub fn shellClass(comptime self: TokenClass) []const u8 {
+        comptime {
+            var rendered: []const u8 = "";
+            for (self.ranges) |range| {
+                var ch = range[0];
+                while (ch <= range[1]) : (ch += 1) rendered = rendered ++ &[_]u8{ch};
+            }
+            return rendered ++ self.extra;
+        }
+    }
+};
+
+/// pane 칸의 허용 글자. 십진 `surface_id`(GUI 소유)와 32 hex `runtime_id`(host 소유)를 함께 받으므로
+/// hex 글자까지 든다.
+pub const pane_token_class: TokenClass = .{ .ranges = &.{ .{ '0', '9' }, .{ 'a', 'f' } } };
+
+/// 인스턴스 칸의 허용 글자. host 소유 칸은 `host_` 접두를 달아 **사람이 캐시 디렉터리를 봐도** 누가
+/// 소유자인지 읽히게 하므로 소문자와 `_` 까지 든다.
+///
+/// ⚠️ **지키는 성질은 «숫자만» 이 아니라 «경로를 벗어나지 못한다» 다.** 화이트리스트에 `/` 와 `.` 가 없는
+/// 것이 그 성질을 보장한다(실측 2026-08-20: 검증이 없을 때 `../outside/pwned` 가 로그 디렉터리 밖에 파일을
+/// 만들었다). 글자 범위를 넓히는 변경은 그 둘이 여전히 빠져 있는지만 확인하면 된다.
+pub const instance_token_class: TokenClass = .{ .ranges = &.{ .{ '0', '9' }, .{ 'a', 'z' } }, .extra = "_" };
+
+/// host 가 소유하는 인스턴스 칸의 접두.
+pub const host_instance_prefix = "host_";
+
+/// 인스턴스/pane 칸 문자열 버퍼 크기. u128 hex 32 자(+접두)가 최대다.
+pub const instance_token_max = host_instance_prefix.len + 32;
+pub const pane_token_max = 32;
+
+/// GUI 프로세스가 소유하는 인스턴스 칸 — 그 프로세스의 pid.
+///
+/// **pid 인 이유는 «살아 있는가» 를 물을 수 있어서다**(계약 §4). 시작 시 정리가 남의 칸을 지워도 되는지
+/// `getpgid` 로 판정한다.
+pub fn formatGuiInstance(buf: *[instance_token_max]u8, pid: u32) []const u8 {
+    // u32 십진은 10 자라 버퍼(37)를 넘길 수 없다.
+    return std.fmt.bufPrint(buf, "{d}", .{pid}) catch unreachable;
+}
+
+/// host 가 소유하는 인스턴스 칸 — `host_<32 hex host_id>`.
+///
+/// **pid 가 아니라 `host_id` 인 이유**: host 는 업그레이드로 **프로세스가 바뀌어도 같은 host** 다
+/// (`upgrade_bootstrap` 이 `invocation.host_id != state.host.host_id` 를 거부한다 — 후계자가 같은 id 를
+/// 물려받는다). pid 로 이름을 지으면 업그레이드 뒤 그 칸이 «죽은 인스턴스» 로 보여, **살아 있는 runtime 의
+/// 로그를 정리가 거둔다.** host_id 는 그 교체를 넘어 살아남는 유일한 소유자 키다.
+pub fn formatHostInstance(buf: *[instance_token_max]u8, host_id: u128) []const u8 {
+    return std.fmt.bufPrint(buf, host_instance_prefix ++ "{x:0>32}", .{host_id}) catch unreachable;
+}
+
+/// GUI 프로세스가 소유하는 pane 칸 — process-local `surface_id`(십진). 파일 이름은 예전과 같다.
+pub fn formatSurfacePane(buf: *[pane_token_max]u8, surface_id: u64) []const u8 {
+    // u64 십진은 20 자라 버퍼(32)를 넘길 수 없다.
+    return std.fmt.bufPrint(buf, "{d}", .{surface_id}) catch unreachable;
+}
+
+/// host 가 소유하는 pane 칸 — `runtime_id`(32 hex).
+///
+/// **`surface_id` 가 아니라 `runtime_id` 인 이유**: 그 자식은 GUI 보다 오래 살고, GUI 가 재실행된 뒤에도
+/// 자기 로그를 알아볼 수 있어야 한다. workspace 가 이미 `runtime-handle`(host_id:runtime_id)을 저장하므로
+/// 재접속한 GUI 는 **새로 저장할 것 없이** 그 이름을 다시 계산한다.
+pub fn formatRuntimePane(buf: *[pane_token_max]u8, runtime_id: u128) []const u8 {
+    return std.fmt.bufPrint(buf, "{x:0>32}", .{runtime_id}) catch unreachable;
+}
+
 /// 우리가 거는 이벤트(계약 §2). **한 번에 확정한다** — Codex는 나중에 늘리면 사용자에게 재승인을 요구한다.
 pub const Event = struct {
     name: []const u8,
@@ -164,18 +281,24 @@ pub fn build(
     // `umask` 는 셸 내장이라 프로세스가 늘지 않는다.
     try out.appendSlice(allocator, "umask 077; ");
     try out.appendSlice(allocator, "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ");
-    // **pane 식별자를 숫자로 검증한다.** 그 값이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 —
-    // `MARU_PANE_ID='../outside/pwned'` 로 로그 디렉터리 **밖에** 파일이 만들어지는 것을 실측으로 확인했다.
-    // maru 가 주입하는 값은 언제나 surface.id(숫자)이므로(`pty/macos.zig`), 그 밖의 모양이면 우리 세션이
-    // 아니라고 보고 나간다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
-    try out.appendSlice(allocator, "case \"$MARU_PANE_ID\" in ''|*[!0-9]*) exit 0 ;; esac; ");
+    // **pane 칸을 화이트리스트로 검증한다.** 그 값이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 —
+    // 실측(2026-08-20)에서 `../outside/pwned` 가 로그 디렉터리 **밖에** 파일을 만들었다. 지키는 성질은
+    // «숫자만» 이 아니라 «`/` 와 `.` 가 없다» 이고, 클래스가 그것을 보장한다. 문자 클래스는 `pane_token_class`
+    // 에서 렌더한다 — 여기 손으로 적으면 maru 쪽 판정과 갈린다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
+    try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+        pane_env,
+        comptime pane_token_class.shellClass(),
+    });
     // **인스턴스 식별자도 같은 규율로 검증한다.** 로그 디렉터리는 사용자 캐시 하나뿐이라 **maru 를 두 개
     // 띄우면 두 인스턴스가 같은 디렉터리를 쓴다.** 그런데 `surface_id` 는 프로세스마다 1 부터 발급되므로
     // (`SurfaceIdAllocator`) 두 인스턴스의 첫 pane 이 **같은 파일 이름**을 갖는다 — 서로의 이벤트를 읽고,
     // 시작 시 정리가 남의 살아 있는 로그를 지운다. 그래서 파일 이름 앞에 인스턴스 칸을 하나 둔다.
-    // 값은 maru 가 주입하는 자기 pid 라 숫자이고, 그 밖의 모양이면 우리 세션이 아니라고 보고 나간다
-    // (경로 탈출 방어는 pane 식별자와 같은 이유·같은 방법이다).
-    try out.appendSlice(allocator, "case \"$MARU_HOOK_INSTANCE\" in ''|*[!0-9]*) exit 0 ;; esac; ");
+    // 값은 GUI 소유면 그 pid, host 소유면 `host_<hex host_id>` 다(`formatGuiInstance`/`formatHostInstance`).
+    // 그 밖의 모양이면 우리 세션이 아니라고 보고 나간다 — 경로 탈출 방어는 pane 칸과 같은 이유·같은 방법이다.
+    try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+        instance_env,
+        comptime instance_token_class.shellClass(),
+    });
     // **상한을 넘겨도 «무엇이었는지» 는 살린다**(2026-08-21 실사용에서 실제로 넘겼다 — codex payload 하나).
     //
     // 예전에는 이름까지 버리고 `__oversized__` 하나만 남겼다. 그런데 `Stop` 은 최종 답변 전문
@@ -211,7 +334,7 @@ pub fn build(
     // 경로는 `<로그 디렉터리>/<인스턴스>/<pane>.ndjson` 이다 — 따옴표 밖에서 확장해야 값이 들어간다.
     // 인스턴스 칸이 있어야 maru 를 여러 개 띄워도 이름이 안 겹친다(위 가드 주석). 디렉터리는 maru 가
     // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
-    try out.appendSlice(allocator, "\"/$MARU_HOOK_INSTANCE/$MARU_PANE_ID.ndjson\"; } 2>/dev/null; exit 0 ");
+    try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
     try out.appendSlice(allocator, marker_comment);
 }
 
@@ -242,15 +365,96 @@ fn buildAlloc(provider: []const u8, dir: []const u8) ![]u8 {
     return out.toOwnedSlice(testing.allocator);
 }
 
-test "pane 식별자가 숫자가 아니면 나간다 — 그 값이 파일명이 되므로 경로를 벗어날 수 있다" {
-    // 실측: 검증이 없을 때 `MARU_PANE_ID='../outside/pwned'` 가 로그 디렉터리 밖에 파일을 만들었다.
+test "두 칸 모두 파일에 쓰기 전에 검증한다 — 그 값이 그대로 파일명이 되므로" {
+    // 실측: 검증이 없을 때 `../outside/pwned` 가 로그 디렉터리 밖에 파일을 만들었다.
     const cmd = try buildAlloc("claude", "/tmp/ev");
     defer testing.allocator.free(cmd);
-    try testing.expect(std.mem.indexOf(u8, cmd, "*[!0-9]*") != null);
-    // 검증이 파일에 쓰기 **전에** 와야 한다.
-    const guard = std.mem.indexOf(u8, cmd, "*[!0-9]*").?;
     const write = std.mem.indexOf(u8, cmd, "printf").?;
-    try testing.expect(guard < write);
+    for ([_][]const u8{ pane_env, instance_env }) |name| {
+        const guard = std.mem.indexOf(u8, cmd, name) orelse return error.GuardMissing;
+        try testing.expect(guard < write);
+    }
+}
+
+test "셸 가드의 문자 클래스는 maru 쪽 판정과 같은 값에서 나온다" {
+    // 두 곳에 손으로 적으면 «커맨드는 거부하는데 maru 는 통과시키는» 드리프트가 조용히 생긴다. 렌더된
+    // 클래스가 커맨드 안에 그대로 있는지 본다 — 그러면 한 상수를 고치는 것으로 양쪽이 함께 움직인다.
+    const cmd = try buildAlloc("claude", "/tmp/ev");
+    defer testing.allocator.free(cmd);
+    try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime pane_token_class.shellClass() ++ "]*") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime instance_token_class.shellClass() ++ "]*") != null);
+}
+
+test "셸 클래스는 범위 표기를 쓰지 않는다 — 범위는 로케일을 탄다" {
+    // 실측(2026-08-24): `[!0-9a-z_]` 는 en_US.UTF-8·ko_KR.UTF-8 에서 `HOST_AA` 를 **통과시킨다**(범위가
+    // collation 순서를 따르므로). 낱글자로 펼치면 어느 로케일에서도 거부한다. 훅은 provider 가 주는
+    // 환경에서 돌아 `LC_ALL` 을 정할 수 없으므로, 표기 자체가 로케일에 무관해야 한다.
+    inline for (.{ pane_token_class, instance_token_class }) |class| {
+        const rendered = comptime class.shellClass();
+        try testing.expect(std.mem.indexOfScalar(u8, rendered, '-') == null);
+    }
+    // 펼친 결과가 실제로 그 구간을 전부 담는지 — 빠뜨리면 우리가 만든 이름이 우리 가드에 걸린다.
+    const pane = comptime pane_token_class.shellClass();
+    try testing.expectEqualStrings("0123456789abcdef", pane);
+}
+
+test "경로 탈출은 두 칸 모두에서 막힌다 — 화이트리스트에 `/` 와 `.` 가 없다" {
+    for ([_]TokenClass{ pane_token_class, instance_token_class }) |class| {
+        try testing.expect(!class.accepts("")); // 빈 칸은 경로를 `//` 로 접는다
+        try testing.expect(!class.accepts(".."));
+        try testing.expect(!class.accepts("../outside/pwned"));
+        try testing.expect(!class.accepts("1/2"));
+        try testing.expect(!class.accepts("1.2"));
+        try testing.expect(!class.accepts("~"));
+        try testing.expect(!class.accepts("$(id)"));
+        try testing.expect(!class.accepts("a\nb"));
+    }
+}
+
+test "maru 가 만드는 네 가지 칸 이름은 모두 자기 가드를 통과한다" {
+    // 이 단언이 «host 가 심는 이름 = 커맨드가 받는 이름» 의 첫 매듭이다. 포매터가 클래스 밖 글자를 쓰면
+    // 훅은 도는데 이벤트가 0 인 상태가 되고, 그것은 진단하기 가장 나쁜 실패다.
+    var ibuf: [instance_token_max]u8 = undefined;
+    var pbuf: [pane_token_max]u8 = undefined;
+
+    try testing.expect(instance_token_class.accepts(formatGuiInstance(&ibuf, 1)));
+    try testing.expect(instance_token_class.accepts(formatGuiInstance(&ibuf, std.math.maxInt(u32))));
+    try testing.expect(instance_token_class.accepts(formatHostInstance(&ibuf, 0)));
+    try testing.expect(instance_token_class.accepts(formatHostInstance(&ibuf, std.math.maxInt(u128))));
+    try testing.expect(pane_token_class.accepts(formatSurfacePane(&pbuf, 1)));
+    try testing.expect(pane_token_class.accepts(formatSurfacePane(&pbuf, std.math.maxInt(u64))));
+    try testing.expect(pane_token_class.accepts(formatRuntimePane(&pbuf, 0)));
+    try testing.expect(pane_token_class.accepts(formatRuntimePane(&pbuf, std.math.maxInt(u128))));
+}
+
+test "인스턴스 칸은 소유자가 이름에서 읽힌다 — GUI 는 pid, host 는 host_<hex>" {
+    // 사람이 캐시 디렉터리를 봤을 때 누구 것인지 알아야 하고, 시작 시 정리도 그 모양으로 «어느 방법으로
+    // 살아 있는지 묻는가» 를 가른다(pid → getpgid, host_<hex> → manifest).
+    var ibuf: [instance_token_max]u8 = undefined;
+    try testing.expectEqualStrings("4242", formatGuiInstance(&ibuf, 4242));
+    try testing.expectEqualStrings(
+        "host_000000000000000000000000000000ff",
+        formatHostInstance(&ibuf, 0xff),
+    );
+    // GUI 칸은 접두를 달지 않는다 — 두 이름공간이 섞이면 정리가 잘못된 질문을 한다.
+    try testing.expect(!std.mem.startsWith(u8, formatGuiInstance(&ibuf, 4242), host_instance_prefix));
+}
+
+test "pane 칸은 host 소유일 때 32 hex 로 고정 폭이다 — 앞자리 0 을 잃으면 다른 파일이 된다" {
+    var pbuf: [pane_token_max]u8 = undefined;
+    const pane = formatRuntimePane(&pbuf, 0x1);
+    try testing.expectEqual(@as(usize, 32), pane.len);
+    try testing.expectEqualStrings("00000000000000000000000000000001", pane);
+}
+
+test "훅 경로는 control-plane selector 를 더 이상 참조하지 않는다" {
+    // `MARU_PANE_ID` 는 GUI process-local surface id 이고 host 가 띄운 자식에는 실을 수 없다. 훅이 그 값을
+    // 계속 보면 host-backed 터미널은 영원히 훅 모드 밖에 남는다 — 그래서 커맨드에서 그 이름을 떼어 낸다.
+    const cmd = try buildAlloc("claude", "/tmp/ev");
+    defer testing.allocator.free(cmd);
+    try testing.expect(std.mem.indexOf(u8, cmd, "MARU_PANE_ID") == null);
+    try testing.expect(std.mem.indexOf(u8, cmd, pane_env) != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, instance_env) != null);
 }
 
 test "커맨드는 추가 프로세스를 하나도 띄우지 않는다" {
@@ -271,7 +475,7 @@ test "stdin을 먼저 받고 나머지를 드레인한 뒤에야 가드가 온�
     defer testing.allocator.free(cmd);
     const read_at = std.mem.indexOf(u8, cmd, "read -r mh_p").?;
     const drain_at = std.mem.indexOf(u8, cmd, "while IFS= read -r mh_x").?;
-    const guard_at = std.mem.indexOf(u8, cmd, "case \"$MARU_PANE_ID\" in").?;
+    const guard_at = std.mem.indexOf(u8, cmd, "case \"$" ++ pane_env ++ "\" in").?;
     try testing.expect(read_at < drain_at);
     try testing.expect(drain_at < guard_at);
 }

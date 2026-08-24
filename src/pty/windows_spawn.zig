@@ -127,15 +127,19 @@ fn isWellFormedEntry(entry: []const u8) bool {
 fn isDroppedParentEntry(entry: []const u8) bool {
     const drop = [_][]const u8{
         // 아래에서 우리 값으로 다시 넣는다(중복 키를 남기지 않기 위해 부모 것을 먼저 뺀다).
-        "TERM",     "COLORTERM",      "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+        "TERM",               "COLORTERM",      "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
         // 부모(런처·상위 터미널)의 terminfo DB를 가리키면 우리 TERM을 엉뚱한 곳에서 찾는다.
         "TERMINFO",
         // 런처·CI가 남긴 색 강제 override. maru는 색 capability를 TERM/COLORTERM으로만 알린다.
-        "CLICOLOR_FORCE", "FORCE_COLOR",
+                  "CLICOLOR_FORCE", "FORCE_COLOR",
         // 컨트롤 플레인 self selector — 부모 값을 물려받으면 다른 surface를 자기로 오인한다.
          "MARU_PANE_ID",
+        // 에이전트 훅 로그 경로의 두 칸(docs/agent-hooks.md §4). Windows 는 아직 이 값을 **주입하지 않지만**
+        // (인라인 훅이 셸로 실행되는지 미확인 — 계약 §4.1), 부모에게서 상속된 값이 남으면 자식이 **부모
+        // 인스턴스·부모 pane 의 로그 파일에** append 한다. 주입 없이도 떨구는 것은 그래서다.
+        "MARU_HOOK_INSTANCE", "MARU_HOOK_PANE",
         // 바깥 멀티플렉서의 신원. maru가 spawn하는 셸은 그 pane이 **아니다**.
-        "TMUX",     "TMUX_PANE",
+        "TMUX",         "TMUX_PANE",
     };
     for (drop) |key| if (envKeyIs(entry, key)) return true;
     return false;
@@ -386,9 +390,11 @@ test "envKey: '='로 시작하는 Windows 드라이브 항목은 키가 없다" 
 test "buildEnvEntries: 부모를 물려받되 오염 항목은 떨구고 우리 값을 넣는다" {
     const a = std.testing.allocator;
     const parent = [_][]const u8{
-        "PATH=C:\\Windows",     "TERM=dumb",          "COLORTERM=8bit",  "TERMINFO=C:\\other",
-        "TERM_PROGRAM=WezTerm", "FORCE_COLOR=1",      "MARU_PANE_ID=99", "TMUX=/tmp/x,1,0",
+        "PATH=C:\\Windows",     "TERM=dumb",          "COLORTERM=8bit",        "TERMINFO=C:\\other",
+        "TERM_PROGRAM=WezTerm", "FORCE_COLOR=1",      "MARU_PANE_ID=99",       "TMUX=/tmp/x,1,0",
         "TMUX_PANE=%3",         "HOME=C:\\Users\\me",
+        // 훅 로그 경로의 두 칸도 상속되면 안 된다 — 남으면 자식이 부모 pane 의 로그에 append 한다.
+        "MARU_HOOK_INSTANCE=99", "MARU_HOOK_PANE=99",
         "=C:=C:\\work", // 드라이브별 cwd — 그대로 상속돼야 한다
     };
     const entries = try buildEnvEntries(a, .{ .parent_env = &parent, .term = "xterm-256color" });
@@ -399,7 +405,7 @@ test "buildEnvEntries: 부모를 물려받되 오염 항목은 떨구고 우리 
     try expectEnv(entries, "TERM", "xterm-256color");
     try expectEnv(entries, "COLORTERM", "truecolor");
     try expectEnv(entries, "TERM_PROGRAM", "ghostty");
-    for ([_][]const u8{ "TERMINFO", "FORCE_COLOR", "MARU_PANE_ID", "TMUX", "TMUX_PANE" }) |key|
+    for ([_][]const u8{ "TERMINFO", "FORCE_COLOR", "MARU_PANE_ID", "MARU_HOOK_INSTANCE", "MARU_HOOK_PANE", "TMUX", "TMUX_PANE" }) |key|
         try std.testing.expect(findEnv(entries, key) == null);
     try std.testing.expect(hasExact(entries, "=C:=C:\\work"));
 }

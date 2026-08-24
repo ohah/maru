@@ -648,7 +648,7 @@ pub const PtySession = struct {
 
         // 중립 계약의 `shell_integration`(파일 갈래)을 이 백엔드의 메커니즘 이름(`zdotdir` = zsh `ZDOTDIR`)으로
         // 넘긴다 — 매핑이 백엔드 몫이라는 계약 그대로다(docs/windows-platform.md §4.2).
-        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance);
+        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance, request.hook_pane);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size);
@@ -1433,11 +1433,13 @@ const EnvStorage = struct {
         };
     }
 
-    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?u64) !EnvStorage {
-        return initWithParentSnapshot(allocator, env, null, env_overrides, term, zdotdir, ssh_integration_bin, pane_id, hook_instance);
+    /// 훅 pane 칸 없이 부르는 얇은 래퍼(테스트·부모 스냅샷이 없는 경로). 제품 spawn 은
+    /// `initWithParentSnapshot` 을 직접 부른다 — 훅 경로의 두 칸이 함께 실리는 곳은 거기다.
+    fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8) !EnvStorage {
+        return initWithParentSnapshot(allocator, env, null, env_overrides, term, zdotdir, ssh_integration_bin, pane_id, hook_instance, null);
     }
 
-    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?u64) !EnvStorage {
+    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8, hook_pane: ?[]const u8) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -1472,12 +1474,27 @@ const EnvStorage = struct {
             defer allocator.free(value);
             try upsertEnv(allocator, &entries, value);
         }
-        // 훅 로그의 인스턴스 칸도 같은 부류다 — null 이면 주입하지 않고, 그러면 훅이 조용히 나간다
+        // 훅 로그 경로의 두 칸도 같은 부류다 — null 이면 주입하지 않고, 그러면 훅이 조용히 나간다
         // (fail-closed: 값이 유효하지 않은 경로에서 남의 인스턴스 디렉터리에 쓰지 않는다).
-        if (hook_instance) |inst| {
-            const value = try std.fmt.allocPrint(allocator, "MARU_HOOK_INSTANCE={d}", .{inst});
-            defer allocator.free(value);
-            try upsertEnv(allocator, &entries, value);
+        //
+        // **여기서 한 번 더 검사한다.** 모양의 단일 출처는 계약 모듈(`agent_hook_command`)이지만, 이 env 를
+        // 쓰는 것이 **실제로 파일이 만들어지는 자리**다(훅이 `<로그>/<인스턴스>/<pane>.ndjson` 에 append 한다).
+        // 그래서 이 층은 모양 전체를 다시 판정하지 않고 **경로를 벗어나지 못한다는 성질 하나**만 지킨다 —
+        // 같은 규칙의 복사가 아니라 다른 일을 하는 가드다(실측 2026-08-20: 검증이 없을 때 `../outside/pwned`
+        // 가 로그 디렉터리 밖에 파일을 만들었다).
+        if (hook_instance) |token| {
+            if (isSafePathSegment(token)) {
+                const value = try std.fmt.allocPrint(allocator, "MARU_HOOK_INSTANCE={s}", .{token});
+                defer allocator.free(value);
+                try upsertEnv(allocator, &entries, value);
+            }
+        }
+        if (hook_pane) |token| {
+            if (isSafePathSegment(token)) {
+                const value = try std.fmt.allocPrint(allocator, "MARU_HOOK_PANE={s}", .{token});
+                defer allocator.free(value);
+                try upsertEnv(allocator, &entries, value);
+            }
         }
 
         return materialize(allocator, &entries);
@@ -1608,11 +1625,26 @@ const EnvStorage = struct {
     }
 
     fn isPaneSelectorEntry(entry: []const u8) bool {
-        // **둘 다 내부 예약 키다.** `MARU_PANE_ID` 는 control-plane self selector이고,
-        // `MARU_HOOK_INSTANCE` 는 에이전트 훅 로그의 인스턴스 칸이다(docs/agent-hooks.md §4). 부모에게서
-        // 상속된 값이 남으면 **다른 인스턴스·다른 pane 의 로그에 쓰게** 되므로 같은 규율로 떨군다.
+        // **셋 다 내부 예약 키다.** `MARU_PANE_ID` 는 control-plane self selector이고,
+        // `MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE` 은 에이전트 훅 로그 경로의 두 칸이다(docs/agent-hooks.md §4).
+        // 부모에게서 상속된 값이 남으면 **다른 인스턴스·다른 pane 의 로그에 쓰게** 되므로 같은 규율로 떨군다.
         return std.mem.startsWith(u8, entry, "MARU_PANE_ID=") or
-            std.mem.startsWith(u8, entry, "MARU_HOOK_INSTANCE=");
+            std.mem.startsWith(u8, entry, "MARU_HOOK_INSTANCE=") or
+            std.mem.startsWith(u8, entry, "MARU_HOOK_PANE=");
+    }
+
+    /// 훅 로그 경로의 한 칸으로 써도 안전한가 — **지키는 성질은 «그 값이 로그 디렉터리를 벗어나지
+    /// 못한다»** 뿐이다(모양의 단일 출처는 `session.agent_hook_command` 의 TokenClass 다).
+    ///
+    /// `/` 는 칸을 쪼개고 `.` 는 `..` 로 상위로 올라가며, `=` 는 env 항목 자체를 쪼갠다. 빈 값은 경로를
+    /// `//` 로 접어 인스턴스 칸 없이 상위 디렉터리에 쓰게 만든다.
+    fn isSafePathSegment(token: []const u8) bool {
+        if (token.len == 0) return false;
+        for (token) |ch| switch (ch) {
+            '/', '.', '=', 0 => return false,
+            else => {},
+        };
+        return true;
     }
 
     /// 바깥 터미널 멀티플렉서가 자기 pane 안 프로세스에만 세우는 신원 변수인가. maru가 그 안에서 실행됐어도
@@ -2286,6 +2318,7 @@ test "EnvStorage parent snapshot preserves caller environment while applying Mar
         null,
         null,
         null,
+        null,
     );
     defer storage.deinit();
     try std.testing.expectEqualStrings("fresh", envValueCount(&storage, "MARU_TEST_GUI_ENV=").last.?);
@@ -2305,6 +2338,7 @@ test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" 
         null,
         null,
         null,
+        null,
     );
     defer omitted.deinit();
     try std.testing.expectEqualStrings("1", envValueCount(&omitted, "KEEP=").last.?);
@@ -2319,6 +2353,7 @@ test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" 
         null,
         null,
         42,
+        null,
         null,
     );
     defer injected.deinit();
@@ -2339,6 +2374,7 @@ test "EnvStorage treats MARU_HOOK_INSTANCE as reserved — 상속·override 로 
         null,
         null,
         null,
+        null,
     );
     defer omitted.deinit();
     try std.testing.expectEqualStrings("1", envValueCount(&omitted, "KEEP=").last.?);
@@ -2354,12 +2390,94 @@ test "EnvStorage treats MARU_HOOK_INSTANCE as reserved — 상속·override 로 
         null,
         null,
         null,
-        4242,
+        "4242",
+        null,
     );
     defer injected.deinit();
     const inst = envValueCount(&injected, "MARU_HOOK_INSTANCE=");
     try std.testing.expectEqual(@as(usize, 1), inst.count); // 중복 없이 한 번
     try std.testing.expectEqualStrings("4242", inst.last.?); // 우리 값이 이긴다
+}
+
+test "EnvStorage 는 MARU_HOOK_PANE 도 예약 키로 다룬다 — 남의 pane 로그에 못 쓴다" {
+    // 훅 로그 경로의 pane 칸이다(docs/agent-hooks.md §4). `MARU_PANE_ID`(control-plane selector)와 **갈라진**
+    // 변수지만 규율은 같다 — 상속·override 로 들어온 값이 남으면 자식이 **남의 pane 파일에** append 한다.
+    var omitted = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{ "KEEP=1", "MARU_HOOK_PANE=111" },
+        &.{"MARU_HOOK_PANE=222"},
+        &.{"MARU_HOOK_PANE=333"},
+        "ignored",
+        null,
+        null,
+        null,
+        null,
+        null,
+    );
+    defer omitted.deinit();
+    try std.testing.expectEqualStrings("1", envValueCount(&omitted, "KEEP=").last.?);
+    // null 이면 아무 값도 남지 않는다 — fail-closed(훅이 조용히 나간다).
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&omitted, "MARU_HOOK_PANE=").count);
+
+    var injected = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{"MARU_HOOK_PANE=111"},
+        &.{"MARU_HOOK_PANE=222"},
+        &.{"MARU_HOOK_PANE=333"},
+        "ignored",
+        null,
+        null,
+        null,
+        "host_0000000000000000000000000000000a",
+        "0000000000000000000000000000002a",
+    );
+    defer injected.deinit();
+    const pane = envValueCount(&injected, "MARU_HOOK_PANE=");
+    try std.testing.expectEqual(@as(usize, 1), pane.count); // 중복 없이 한 번
+    try std.testing.expectEqualStrings("0000000000000000000000000000002a", pane.last.?);
+    // host 소유 인스턴스 칸도 그대로 실린다 — 이 층은 모양을 다시 만들지 않고 받은 토큰을 쓴다.
+    const inst = envValueCount(&injected, "MARU_HOOK_INSTANCE=");
+    try std.testing.expectEqual(@as(usize, 1), inst.count);
+    try std.testing.expectEqualStrings("host_0000000000000000000000000000000a", inst.last.?);
+}
+
+test "경로를 벗어나는 훅 토큰은 주입하지 않는다 — 이 층이 실제로 파일이 생기는 자리다" {
+    // 모양의 단일 출처는 계약 모듈(`session.agent_hook_command`)이지만, **파일이 실제로 만들어지는 것은**
+    // 이 env 를 받은 훅이다. 그래서 여기서는 모양 전체가 아니라 «로그 디렉터리를 벗어나지 못한다» 는
+    // 성질만 다시 지킨다. 실측(2026-08-20): 검증이 없을 때 `../outside/pwned` 가 밖에 파일을 만들었다.
+    for ([_][]const u8{ "..", "../outside/pwned", "a/b", "a.b", "", "a=b" }) |bad| {
+        var storage = try EnvStorage.initWithParentSnapshot(
+            std.testing.allocator,
+            &.{},
+            null,
+            &.{},
+            "ignored",
+            null,
+            null,
+            null,
+            bad,
+            bad,
+        );
+        defer storage.deinit();
+        try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_HOOK_INSTANCE=").count);
+        try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_HOOK_PANE=").count);
+    }
+    // 나쁜 칸 하나가 좋은 칸을 끌어내리지 않는다 — 그러면 훅은 경로를 다 못 만들어 조용히 나간다(fail-closed).
+    var partial = try EnvStorage.initWithParentSnapshot(
+        std.testing.allocator,
+        &.{},
+        null,
+        &.{},
+        "ignored",
+        null,
+        null,
+        null,
+        "4242",
+        "../pwned",
+    );
+    defer partial.deinit();
+    try std.testing.expectEqualStrings("4242", envValueCount(&partial, "MARU_HOOK_INSTANCE=").last.?);
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&partial, "MARU_HOOK_PANE=").count);
 }
 
 test "부모의 MARU_HOOK_INSTANCE 는 상속 경로에서도 떨어진다" {
@@ -2370,6 +2488,7 @@ test "부모의 MARU_HOOK_INSTANCE 는 상속 경로에서도 떨어진다" {
         &.{ "MARU_HOOK_INSTANCE=999", "KEEP=1" },
         &.{},
         "xterm-256color",
+        null,
         null,
         null,
         null,

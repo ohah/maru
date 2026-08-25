@@ -87,6 +87,11 @@ pub const Metrics = struct {
     corner_radius: u16,
     /// 들여쓰기 가이드 선의 두께.
     guide_w: u32,
+    /// **이름이 반드시 갖는 최소 폭.** 이 값 아래로는 다른 것을 버려서라도 라벨을 지킨다(`rowLayout`).
+    ///
+    /// pt 로 두는 것이 맞다 — 라벨은 role 이 정한 **고정 14pt** 라 사용자 터미널 폰트와 무관하다.
+    /// 80pt 는 14pt 등폭에서 대략 9~10 자다(파일명 앞부분과 확장자 일부가 보이는 최소치).
+    label_floor: u32,
     /// 라벨 한 줄의 line box. 세로 중앙 정렬의 기준이다.
     label_line_h: u32,
     /// 포커스된 선택 행 **왼쪽 끝의 accent 막대** 두께.
@@ -111,6 +116,7 @@ pub const Metrics = struct {
             .state_slot_w = spacing.pointsPx(14, scale),
             .corner_radius = @intCast(@min(spacing.pointsPx(6, scale), std.math.maxInt(u16))),
             .guide_w = @max(spacing.pointsPx(1, scale), 1),
+            .label_floor = spacing.pointsPx(80, scale),
             .label_line_h = typography.lineHeightPx(.list_row, scale),
             .focus_bar_w = @max(spacing.pointsPx(2, scale), 1),
         };
@@ -118,20 +124,79 @@ pub const Metrics = struct {
 
     /// 행 안에서 **라벨이 시작하는 x**(행 rect 기준 로컬). 그리기와 폭 예산이 같은 값을 써야 하므로
     /// 두 곳에서 다시 더하지 않는다.
-    pub fn labelLocalX(self: Metrics, depth: u16) u32 {
-        return self.contentLocalX(depth) +| self.chevron_extent +| self.chevron_gap +|
-            self.icon_extent +| self.icon_gap;
+    /// 라벨이 시작하는 x. **사다리를 거친 값이다** — 좁으면 들여쓰기·chevron 이 먼저 줄어든 뒤의 자리다.
+    pub fn labelLocalX(self: Metrics, row_w: u32, depth: u16) u32 {
+        return self.rowLayout(row_w, depth, false).label_x;
     }
 
     /// 행 안에서 **chevron이 시작하는 x**(행 rect 기준 로컬).
-    pub fn contentLocalX(self: Metrics, depth: u16) u32 {
-        return self.row_pad_x +| (self.indent_w *| depth);
+    /// 이 폭에서 행이 실제로 쓰는 기하. **"이름은 마지막까지 남는다"** 는 규칙 하나를 값으로 옮긴 것이다.
+    ///
+    /// 예전에는 들여쓰기가 무한히 자라고 라벨이 그 나머지를 받았다. 그래서 좁은 도크(하한 120pt)에서
+    /// depth 4 면 라벨 폭이 0 이 되고, `view` 가 그 자리를 **조용히 건너뛰어 이름이 통째로 사라졌다** —
+    /// 즉 가장 먼저 버려야 할 것(들여쓰기·장식)이 아니라 **가장 지켜야 할 것**을 먼저 버리고 있었다.
+    ///
+    /// 순서는 넓음 → 좁음으로 이렇다: **들여쓰기 → 상태 슬롯 → chevron**. 그 아래는 못 버린다
+    /// (좌우 패딩 + 종류 아이콘 + 아이콘 여백) — 아이콘까지 버리면 무엇의 행인지 알 수 없다.
+    ///
+    /// **결정은 폭만 본다.** 깊이나 dirty 여부로 갈리면 행마다 x 가 달라져 목록이 들쭉날쭉해지고,
+    /// 스크롤로 보이는 행이 바뀔 때마다 흔들린다. 그래서 상태 슬롯은 **항상 있다고 치고**(최악) 자리를
+    /// 계산하고, 실제로 그릴지는 행이 정한다.
+    pub const RowLayout = struct {
+        /// 이 폭에서 쓰는 한 단 들여쓰기. 0 이면 트리가 평평해진다(가이드 선도 그리지 않는다).
+        indent_w: u32,
+        /// 들여쓰기가 자라는 상한. 이보다 깊은 행은 같은 x 를 쓴다.
+        indent_depth_cap: u16,
+        show_chevron: bool,
+        show_state: bool,
+        content_x: u32,
+        icon_x: u32,
+        label_x: u32,
+        label_w: u32,
+    };
+
+    pub fn rowLayout(self: Metrics, row_w: u32, depth: u16, has_state: bool) RowLayout {
+        const chevron_span = self.chevron_extent +| self.chevron_gap;
+        const irreducible = self.row_pad_x *| 2 +| self.icon_extent +| self.icon_gap;
+        const budget = row_w -| irreducible;
+
+        // 사다리 — 상태 슬롯은 최악(항상 예약)으로 친다(위 주석: 결정은 폭만 본다).
+        var show_state = true;
+        var show_chevron = true;
+        var reserved = chevron_span +| self.state_slot_w;
+        if (budget < self.label_floor +| reserved) {
+            show_state = false;
+            reserved = chevron_span;
+        }
+        if (budget < self.label_floor +| reserved) {
+            show_chevron = false;
+            reserved = 0;
+        }
+
+        const room = budget -| self.label_floor -| reserved;
+        const cap: u16 = if (self.indent_w == 0) 0 else @intCast(@min(room / self.indent_w, @as(u32, std.math.maxInt(u16))));
+        const indent_w: u32 = if (cap == 0) 0 else self.indent_w;
+        const levels = @min(depth, cap);
+
+        const content_x = self.row_pad_x +| (indent_w *| levels);
+        const icon_x = content_x +| (if (show_chevron) chevron_span else 0);
+        const label_x = icon_x +| self.icon_extent +| self.icon_gap;
+        const right = self.row_pad_x +| (if (show_state and has_state) self.state_slot_w else 0);
+        return .{
+            .indent_w = indent_w,
+            .indent_depth_cap = cap,
+            .show_chevron = show_chevron,
+            .show_state = show_state,
+            .content_x = content_x,
+            .icon_x = icon_x,
+            .label_x = label_x,
+            .label_w = row_w -| label_x -| right,
+        };
     }
 
-    /// 라벨이 쓸 수 있는 폭. 상태 슬롯과 오른쪽 패딩을 뺀 나머지이고, 남지 않으면 0이다.
+    /// 라벨이 쓸 수 있는 폭. **사다리가 정한다** — 좁으면 다른 것이 먼저 줄어든 뒤의 나머지다.
     pub fn labelWidthPx(self: Metrics, row_w: u32, depth: u16, has_state: bool) u32 {
-        const right = self.row_pad_x +| (if (has_state) self.state_slot_w else 0);
-        return row_w -| self.labelLocalX(depth) -| right;
+        return self.rowLayout(row_w, depth, has_state).label_w;
     }
 };
 
@@ -154,9 +219,50 @@ test "Metrics: backing scale 은 한 번만 곱해진다" {
     try std.testing.expectEqual(one.row_h, Metrics.resolve(0).row_h);
 }
 
+// **"이름은 마지막까지 남는다"** — 사다리가 실제로 그 순서를 지키는가.
+//
+// 예전에는 들여쓰기가 무한히 자라 좁은 도크(하한 120pt)의 depth 4 행에서 라벨 폭이 0 이 됐고, `view` 가
+// 그 자리를 조용히 건너뛰어 **이름이 통째로 사라졌다**(Lab 캡처로 확인). 즉 가장 지켜야 할 것을 가장
+// 먼저 버리고 있었다. 이 판정자는 그 순서를 값으로 고정한다.
+test "Metrics: 좁아지면 들여쓰기·상태·chevron 순으로 버리고 이름은 남긴다" {
+    const m = Metrics.resolve(1000);
+
+    // ⑴ 넓으면 아무것도 안 버린다.
+    const wide = m.rowLayout(400, 3, true);
+    try std.testing.expect(wide.show_chevron and wide.show_state);
+    try std.testing.expectEqual(m.indent_w, wide.indent_w);
+    try std.testing.expect(wide.indent_depth_cap >= 3);
+
+    // ⑵ 도크 하한(120pt)에서도 **어느 깊이든** 이름이 바닥 이상을 받는다.
+    for ([_]u16{ 0, 4, 8, 20 }) |depth| {
+        const narrow = m.rowLayout(120, depth, true);
+        try std.testing.expect(narrow.label_w >= m.label_floor);
+    }
+
+    // ⑶ 버리는 **순서**: 들여쓰기가 먼저 0 이 되고, 그 다음 상태 슬롯, 마지막이 chevron 이다.
+    var width: u32 = 400;
+    var indent_zero_at: u32 = 0;
+    var state_off_at: u32 = 0;
+    var chevron_off_at: u32 = 0;
+    while (width > 40) : (width -= 1) {
+        const l = m.rowLayout(width, 8, true);
+        if (indent_zero_at == 0 and l.indent_w == 0) indent_zero_at = width;
+        if (state_off_at == 0 and !l.show_state) state_off_at = width;
+        if (chevron_off_at == 0 and !l.show_chevron) chevron_off_at = width;
+    }
+    try std.testing.expect(indent_zero_at > state_off_at); // 들여쓰기가 먼저 사라진다
+    try std.testing.expect(state_off_at > chevron_off_at); // 그 다음이 상태 슬롯
+
+    // ⑷ 못 버리는 것: 아이콘과 좌우 패딩은 어느 폭에서도 자리를 지킨다.
+    const tiny = m.rowLayout(60, 5, true);
+    try std.testing.expectEqual(m.row_pad_x, tiny.content_x);
+    try std.testing.expectEqual(m.row_pad_x +| m.icon_extent +| m.icon_gap, tiny.label_x);
+}
+
 test "Metrics: 라벨 x 는 depth 마다 한 단씩 밀리고 폭 예산은 상태 슬롯을 뺀다" {
     const m = Metrics.resolve(1000);
-    try std.testing.expectEqual(m.labelLocalX(0) + m.indent_w, m.labelLocalX(1));
+    // 넓은 폭에서는 사다리가 아무것도 버리지 않으므로 depth 한 단이 그대로 들여쓰기 한 단이다.
+    try std.testing.expectEqual(m.labelLocalX(400, 0) + m.indent_w, m.labelLocalX(400, 1));
     const wide = m.labelWidthPx(300, 0, false);
     const with_state = m.labelWidthPx(300, 0, true);
     try std.testing.expectEqual(wide - m.state_slot_w, with_state);

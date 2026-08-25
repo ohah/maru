@@ -110,6 +110,9 @@ const Writer = struct {
         const m = self.metrics;
         const rect = entry.rect;
         const clip: ?draw.Rect = if (entry.effective_clip) |c| rectOf(c) else null;
+        // **이 폭에서 무엇을 버리는지 한 번 정하고 모두가 그 값을 쓴다**(`Metrics.rowLayout`).
+        // 밴드·선·chevron·아이콘·라벨·상태 점이 각자 계산하면 좁은 폭에서 서로 어긋난다.
+        const row_layout = m.rowLayout(@intFromFloat(@max(@floor(entry.rect.width), 0)), r.depth, r.dirty or r.external_change);
         const x0: i32 = @intFromFloat(@floor(rect.x));
         const y0: i32 = @intFromFloat(@floor(rect.y));
         const w_px: u32 = @intFromFloat(@max(@floor(rect.width), 0));
@@ -147,16 +150,18 @@ const Writer = struct {
         // ── 들여쓰기 가이드 선 ────────────────────────────────────────────────────────────────
         // depth 축이 선으로 보여야 깊은 트리에서 부모를 눈으로 따라갈 수 있다. 선은 **자기 depth보다
         // 얕은 단**마다 하나씩이고, 행의 위아래로 이어져 세로로 연결돼 보인다.
+        // **선은 사다리가 정한 들여쓰기를 쓴다.** 평평해진 폭(`indent_w == 0`)에서는 선이 모두 같은 x 에
+        // 겹쳐 한 줄로 보이므로 아예 그리지 않는다 — 깊이를 말하지 못하는 선은 잉크만 쓴다.
         var level: u16 = 0;
-        while (level < @min(r.depth, max_guide_depth)) : (level += 1) {
-            const gx = x0 + @as(i32, @intCast(m.row_pad_x +| (m.indent_w *| level) +| m.chevron_extent / 2));
+        while (row_layout.indent_w != 0 and level < @min(@min(r.depth, row_layout.indent_depth_cap), max_guide_depth)) : (level += 1) {
+            const gx = x0 + @as(i32, @intCast(m.row_pad_x +| (row_layout.indent_w *| level) +| m.chevron_extent / 2));
             try self.fill(.{ .x = gx, .y = y0, .w = m.guide_w, .h = m.row_h }, .divider, 0x80, clip);
         }
 
         // ── disclosure chevron ──────────────────────────────────────────────────────────────
-        const content_x = x0 + @as(i32, @intCast(m.contentLocalX(r.depth)));
+        const content_x = x0 + @as(i32, @intCast(row_layout.content_x));
         const icon_y = y0 + @as(i32, @intCast((m.row_h -| m.icon_extent) / 2));
-        if (r.expandable) {
+        if (r.expandable and row_layout.show_chevron) {
             const cy = y0 + @as(i32, @intCast((m.row_h -| m.chevron_extent) / 2));
             if (r.loading) {
                 // **아직 스캔 중이다.** 옛 셀 경로는 이 자리에 `~`를 찍었는데, 컴포넌트로 옮기며 그 표시가
@@ -178,7 +183,7 @@ const Writer = struct {
         }
 
         // ── 종류 아이콘 ─────────────────────────────────────────────────────────────────────
-        const icon_x = content_x + @as(i32, @intCast(m.chevron_extent +| m.chevron_gap));
+        const icon_x = x0 + @as(i32, @intCast(row_layout.icon_x));
         if (file_tree_icon.codepointFromRaw(r.icon_kind)) |cp| {
             // 아이콘 종류색은 **선택·무시 행에서 죽는다.** 선택은 accent 위 대비색을 따라야 읽히고,
             // 무시된 행은 통째로 물러나야 한다 — 거기만 색이 살아 있으면 오히려 더 눈에 띈다.
@@ -191,10 +196,10 @@ const Writer = struct {
         }
 
         // ── 라벨 ────────────────────────────────────────────────────────────────────────────
-        const has_state = r.dirty or r.external_change;
-        const label_w = m.labelWidthPx(w_px, r.depth, has_state);
+        const has_state = (r.dirty or r.external_change) and row_layout.show_state;
+        const label_w = row_layout.label_w;
         if (label_w > 0 and r.label.len > 0) {
-            const label_x = x0 + @as(i32, @intCast(m.labelLocalX(r.depth)));
+            const label_x = x0 + @as(i32, @intCast(row_layout.label_x));
             const label_y = y0 + @as(i32, @intCast((m.row_h -| m.label_line_h) / 2));
             try self.text(label_x, label_y, r.label, labelRole(r), label_w, isEmphasized(r), clip);
         }

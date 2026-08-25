@@ -397,6 +397,8 @@ pub const Window = struct {
     titlebar_strip_px: u32 = 0,
     /// 띠 안에서 **우리가 클릭을 받는** 폭(오른쪽 끝, 캡션 버튼 자리). 그만큼은 `HTCLIENT` 다.
     caption_buttons_px: u32 = 0,
+    /// 띠 왼쪽 끝에서 **우리가 받는** 폭(사이드바 헤더 아이콘 줄). `caption_buttons_px` 의 짝이다.
+    titlebar_client_left_px: u32 = 0,
     /// 리사이즈 테두리 두께(px). 프레임을 지우면 OS 테두리가 없어지므로 우리가 폭을 정한다.
     resize_border_px: u32 = 6,
     present: PresentTarget = .{},
@@ -590,9 +592,12 @@ pub const Window = struct {
     ///
     /// `SetWindowPos(SWP_FRAMECHANGED)` 를 불러야 `WM_NCCALCSIZE` 가 **즉시** 다시 돈다 — 안 부르면
     /// 다음 크기 변경까지 옛 프레임이 남는다.
-    pub fn setFrameless(self: *Window, strip_px: u32, buttons_px: u32) void {
+    /// `client_left_px` 는 띠 **왼쪽 끝에서 우리가 받는 폭**이다(사이드바 헤더의 아이콘 줄).
+    /// 0 이면 띠 왼쪽 전부가 창 드래그다.
+    pub fn setFrameless(self: *Window, strip_px: u32, buttons_px: u32, client_left_px: u32) void {
         self.titlebar_strip_px = strip_px;
         self.caption_buttons_px = buttons_px;
+        self.titlebar_client_left_px = client_left_px;
         _ = SetWindowPos(self.hwnd, null, 0, 0, 0, 0, swp_framechanged);
     }
 
@@ -634,8 +639,14 @@ pub const Window = struct {
 
         const local_y = screen_y - rect.top;
         if (local_y >= @as(i32, @intCast(self.titlebar_strip_px))) return HTCLIENT;
-        // 띠 안 — 오른쪽 끝의 캡션 버튼 자리만 우리가 받는다.
+        // 띠 안 — 양 끝을 우리가 받는다.
+        //
+        // **오른쪽**은 캡션 버튼(─ ☐ ✕). **왼쪽**은 사이드바 헤더의 아이콘 줄이다 — macOS 가
+        // 신호등 자리를 비워 두고 아이콘을 오른쪽에 몬 것과 같은 띠이고, Windows 는 버튼이
+        // 반대쪽이라 왼쪽이 비어 있다. 안 도려내면 **아이콘이 그려지는데 눌리지 않는다** — OS 가
+        // 그 자리를 창 드래그로 먹는다. 그 사이(가운데)는 그대로 `HTCAPTION` 이라 OS 가 끌어 준다.
         if (self.caption_buttons_px != 0 and screen_x >= rect.right - @as(i32, @intCast(self.caption_buttons_px))) return HTCLIENT;
+        if (self.titlebar_client_left_px != 0 and screen_x < rect.left + @as(i32, @intCast(self.titlebar_client_left_px))) return HTCLIENT;
         return HTCAPTION;
     }
 
@@ -1005,7 +1016,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
 const testing = std.testing;
 
 fn framelessFixture() Window {
-    return .{ .hwnd = undefined, .allocator = testing.allocator, .titlebar_strip_px = 40, .caption_buttons_px = 138, .resize_border_px = 6 };
+    return .{ .hwnd = undefined, .allocator = testing.allocator, .titlebar_strip_px = 40, .caption_buttons_px = 138, .titlebar_client_left_px = 180, .resize_border_px = 6 };
 }
 
 test "프레임리스: 모서리·테두리를 띠보다 먼저 본다" {
@@ -1026,6 +1037,22 @@ test "프레임리스: 띠의 빈 곳은 HTCAPTION — OS 가 끌어 준다" {
     const w = framelessFixture();
     const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
     try testing.expectEqual(HTCAPTION, w.hitTestFrame(r, 400, 120));
+}
+
+test "프레임리스: 띠의 **양 끝**을 우리가 받는다 — 왼쪽은 사이드바 헤더 아이콘 줄" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const w = framelessFixture();
+    const r = RECT{ .left = 100, .top = 100, .right = 1100, .bottom = 700 };
+    // 왼쪽 180px 는 사이드바다 — 그 자리가 `HTCAPTION` 이면 **아이콘이 그려지는데 안 눌린다**
+    // (OS 가 창 드래그로 먹는다). 테두리(6px)보다 안쪽부터가 우리 몫이다.
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 110, 120));
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 279, 120));
+    // 경계 한 픽셀: 180 부터는 다시 창 드래그다.
+    try testing.expectEqual(HTCAPTION, w.hitTestFrame(r, 280, 120));
+    // 오른쪽 끝은 여전히 캡션 버튼 자리다.
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 1090, 120));
+    // **띠 아래는 왼쪽이든 오른쪽이든 클라이언트다** — 이 규칙이 띠 안에서만 산다.
+    try testing.expectEqual(HTCLIENT, w.hitTestFrame(r, 110, 200));
 }
 
 test "프레임리스: 캡션 버튼 자리는 HTCLIENT — 우리가 받는다" {

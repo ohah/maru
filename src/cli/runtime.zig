@@ -222,7 +222,24 @@ pub const RuntimeMeta = struct {
     resize_generation: u64,
     has_controller: bool,
     observer_count: usize,
+    /// window title(§8). **자기 자리에 복사해 든다** — `Result.deinit` 은 목록 배열만 풀고
+    /// `runtime_get` 갈래는 아무것도 안 풀어서, 소유 포인터를 들면 그쪽에서 샌다.
+    /// 상한을 넘으면 UTF-8 경계에서 자른다(host 도 같은 상한으로 자르지만, 그 값을 믿지 않는다).
+    title: [host_protocol.max_title_bytes]u8 = @splat(0),
+    title_len: usize = 0,
+
+    pub fn titleText(self: *const RuntimeMeta) []const u8 {
+        return self.title[0..self.title_len];
+    }
 };
+
+/// 상한 안으로 자르되 UTF-8 경계를 지킨다 — 바이트로 자르면 깨진 시퀀스를 화면에 그린다.
+fn clampTitleBytes(text: []const u8) []const u8 {
+    if (text.len <= host_protocol.max_title_bytes) return text;
+    var end = host_protocol.max_title_bytes;
+    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
+    return text[0..end];
+}
 
 pub const Result = union(enum) {
     host_status: HostStatus,
@@ -372,6 +389,8 @@ fn decodeRuntimeList(allocator: std.mem.Allocator, value: std.json.Value) Decode
         resize_generation: u64,
         has_controller: bool,
         observer_count: usize,
+        /// 구 host 는 안 싣는다 — optional 이라 없어도 파싱된다(§8).
+        title: ?[]const u8 = null,
     };
     const Wire = struct { result: struct { runtimes: []WireMeta } };
     var parsed = std.json.parseFromValue(Wire, allocator, value, .{
@@ -413,6 +432,8 @@ fn decodeRuntimeGet(
             resize_generation: u64,
             has_controller: bool,
             observer_count: usize,
+            /// 구 host 는 안 싣는다 — optional 이라 없어도 파싱된다(§8).
+            title: ?[]const u8 = null,
         },
     };
     var parsed = std.json.parseFromValue(Wire, allocator, value, .{
@@ -426,7 +447,7 @@ fn decodeRuntimeGet(
 }
 
 fn decodeRuntimeMeta(wire: anytype) ?RuntimeMeta {
-    return .{
+    var meta: RuntimeMeta = .{
         .runtime_id = copyCanonicalId(wire.runtime_id) orelse return null,
         .cols = wire.cols,
         .rows = wire.rows,
@@ -434,6 +455,13 @@ fn decodeRuntimeMeta(wire: anytype) ?RuntimeMeta {
         .has_controller = wire.has_controller,
         .observer_count = wire.observer_count,
     };
+    // **없어도 정상이다**(§8 — optional). 구 host 는 이 필드를 아예 안 싣는다.
+    if (wire.title) |raw| {
+        const text = clampTitleBytes(raw);
+        @memcpy(meta.title[0..text.len], text);
+        meta.title_len = text.len;
+    }
+    return meta;
 }
 
 fn copyCanonicalId(text: []const u8) ?[32]u8 {
@@ -471,7 +499,7 @@ pub fn render(result: Result, output: Output, writer: *std.Io.Writer) !void {
 
 fn renderRuntimeLine(item: RuntimeMeta, writer: *std.Io.Writer) !void {
     try writer.print(
-        "{s}  {d}x{d}  controller={s}  observers={d}  resize-generation={d}\n",
+        "{s}  {d}x{d}  controller={s}  observers={d}  resize-generation={d}",
         .{
             &item.runtime_id,
             item.cols,
@@ -481,6 +509,9 @@ fn renderRuntimeLine(item: RuntimeMeta, writer: *std.Io.Writer) !void {
             item.resize_generation,
         },
     );
+    // **없으면 자리도 안 만든다** — 빈 `title=` 을 적으면 "제목이 빈 세션" 으로 읽힌다.
+    if (item.title_len > 0) try writer.print("  title={s}", .{item.titleText()});
+    try writer.writeAll("\n");
 }
 
 fn renderJson(result: Result, writer: *std.Io.Writer) !void {
@@ -513,14 +544,28 @@ fn renderJson(result: Result, writer: *std.Io.Writer) !void {
 
 fn writeRuntimeJson(item: RuntimeMeta, writer: *std.Io.Writer) !void {
     var json: std.json.Stringify = .{ .writer = writer, .options = .{} };
-    try json.write(.{
-        .runtime_id = &item.runtime_id,
-        .cols = item.cols,
-        .rows = item.rows,
-        .resize_generation = item.resize_generation,
-        .has_controller = item.has_controller,
-        .observer_count = item.observer_count,
-    });
+    // **없으면 키도 안 낸다** — `"title":""` 은 "제목이 빈 세션" 이라는 다른 말이고, 소비자가
+    // 그것을 값으로 읽는다(폰 목록이 빈 줄을 그린다).
+    if (item.title_len > 0) {
+        try json.write(.{
+            .runtime_id = &item.runtime_id,
+            .cols = item.cols,
+            .rows = item.rows,
+            .resize_generation = item.resize_generation,
+            .has_controller = item.has_controller,
+            .observer_count = item.observer_count,
+            .title = item.titleText(),
+        });
+    } else {
+        try json.write(.{
+            .runtime_id = &item.runtime_id,
+            .cols = item.cols,
+            .rows = item.rows,
+            .resize_generation = item.resize_generation,
+            .has_controller = item.has_controller,
+            .observer_count = item.observer_count,
+        });
+    }
 }
 
 test "runtime CLI parser exposes only implemented read commands and canonical IDs" {
@@ -565,6 +610,52 @@ test "runtime CLI decodes, sorts, and renders stable text and JSON DTOs" {
         "{\"runtimes\":[{\"runtime_id\":\"000000000000000000000000000000aa\",\"cols\":80,\"rows\":24,\"resize_generation\":1,\"has_controller\":true,\"observer_count\":0},{\"runtime_id\":\"000000000000000000000000000000bb\",\"cols\":132,\"rows\":43,\"resize_generation\":2,\"has_controller\":false,\"observer_count\":1}]}\n",
         out.written(),
     );
+}
+
+test "title 은 있을 때만 실리고, 없는 응답도 그대로 읽힌다" {
+    // **구 host 는 이 필드를 아예 안 싣는다**(§8 optional). 그때 목록이 통째로 안 읽히면
+    // 새 CLI 가 옛 host 를 못 보게 된다 — wire major 를 안 올린 이유가 이것이다.
+    const payload =
+        \\{"result":{"runtimes":[{"runtime_id":"000000000000000000000000000000aa","cols":80,"rows":24,"resize_generation":1,"has_controller":true,"observer_count":0,"title":"zsh — maru"},{"runtime_id":"000000000000000000000000000000bb","cols":132,"rows":43,"resize_generation":2,"has_controller":false,"observer_count":1}]}}
+    ;
+    var remote: ?RemoteError = null;
+    var result = try decodeResponse(std.testing.allocator, .{ .runtime_list = .json }, payload, null, &remote);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("zsh — maru", result.runtime_list[0].titleText());
+    // 없는 쪽은 **빈 문자열이 아니라 길이 0** 이고, 그래서 화면에도 JSON 에도 자리를 안 만든다.
+    try std.testing.expectEqual(@as(usize, 0), result.runtime_list[1].title_len);
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try render(result, .json, &out.writer);
+    // 있는 쪽만 키가 있다 — 빈 `"title":""` 를 실으면 소비자가 "제목이 빈 세션" 으로 읽는다.
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"title\":\"zsh — maru\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"title\":\"\"") == null);
+
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    try render(result, .text, &text.writer);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "title=zsh — maru") != null);
+    // 제목 없는 줄에는 `title=` 자체가 없다.
+    var lines = std.mem.splitScalar(u8, text.written(), '\n');
+    _ = lines.next();
+    const second = lines.next().?;
+    try std.testing.expect(std.mem.indexOf(u8, second, "title=") == null);
+}
+
+test "긴 title 은 UTF-8 경계에서 잘린다 — 깨진 시퀀스를 그리지 않는다" {
+    // host 도 같은 상한으로 자르지만 **그 값을 믿지 않는다** — wire 는 원격이 만든 것이다.
+    // 바이트로 자르면 마지막 글자가 반쪽이 되어 화면에 깨진 글자가 뜬다.
+    const one = "한"; // 3바이트
+    var long: [host_protocol.max_title_bytes + 12]u8 = undefined;
+    var i: usize = 0;
+    while (i + one.len <= long.len) : (i += one.len) @memcpy(long[i..][0..one.len], one);
+    const clamped = clampTitleBytes(long[0..i]);
+    try std.testing.expect(clamped.len <= host_protocol.max_title_bytes);
+    try std.testing.expectEqual(@as(usize, 0), clamped.len % one.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(clamped));
+    // 상한 이하는 그대로 둔다.
+    try std.testing.expectEqualStrings("zsh", clampTitleBytes("zsh"));
 }
 
 test "runtime CLI renders exact host get and empty-list text snapshots" {

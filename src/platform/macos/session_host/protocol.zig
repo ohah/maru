@@ -34,6 +34,8 @@ pub const version_major: u16 = 2;
 /// Wire-only 모듈은 platform-import-0을 유지한다. `runtime_manager`의 compile-time boundary gate가 이 값을
 /// `session.workspace.max_runtime_bindings`와 같게 고정해 partial restore cap drift를 막는다.
 pub const max_inventory_runtimes: usize = @import("maru").session.host_protocol.max_inventory_runtimes;
+/// title wire 상한(§8). 단일 출처는 `host_protocol` 이다 — server 와 CLI 가 같은 값을 본다.
+pub const max_title_bytes: usize = @import("maru").session.host_protocol.max_title_bytes;
 pub const max_inventory_page_runtimes: usize = 256;
 pub const max_inventory_pages: usize =
     (max_inventory_runtimes + max_inventory_page_runtimes - 1) / max_inventory_page_runtimes;

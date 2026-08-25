@@ -5,6 +5,9 @@ const std = @import("std");
 
 pub const max_inventory_runtimes: usize = 4096;
 pub const max_control_json: usize = 256 * 1024;
+/// `runtime.list`/`runtime.get` 이 싣는 window title 의 상한(§8). 원격이 정하는 임의 길이 문자열을
+/// 그대로 실으면 inventory 응답 하나가 프레임 예산을 흔든다. **자를 때는 UTF-8 경계를 지킨다.**
+pub const max_title_bytes: usize = 128;
 
 pub const ErrorCode = enum {
     host_unavailable,

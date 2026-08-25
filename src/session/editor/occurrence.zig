@@ -53,8 +53,16 @@ pub fn nextOccurrence(
     primary: usize,
 ) ?Range {
     if (selections.len == 0 or primary >= selections.len) return null;
-    if (std.debug.runtime_safety) {
-        for (selections[1..], 0..) |s, i| std.debug.assert(s.start() >= selections[i].start());
+    // **정렬 여부를 실제로 본다 — 단언에 맡기지 않는다.** `runtime_safety`는 ReleaseFast에서 꺼져
+    // 있어, 정렬 안 된 배열이 오면 이분 탐색이 "이미 고른 자리"를 못 찾고 **같은 자리에 커서를
+    // 겹쳐 쌓는다**(그 상태로 타이핑하면 한 글자가 두 번 들어간다). 검사는 커서 수에 선형이고
+    // 커서는 상한이 만 개라, 한 번 누를 때 드는 비용으로는 무시할 수 있다.
+    var sorted = true;
+    for (selections[1..], 0..) |s, i| {
+        if (s.start() < selections[i].start()) {
+            sorted = false;
+            break;
+        }
     }
     const seed = selections[primary];
 
@@ -82,9 +90,9 @@ pub fn nextOccurrence(
     var from: usize = 0;
     for (selections) |s| from = @max(from, @min(s.end(), content.len));
 
-    if (scan(content, needle, from, content.len, whole_word, selections)) |r| return r;
+    if (scan(content, needle, from, content.len, whole_word, selections, sorted)) |r| return r;
     // ③ 문서 끝까지 없으면 처음으로 돌아간다(VSCode도 감는다).
-    return scan(content, needle, 0, from, whole_word, selections);
+    return scan(content, needle, 0, from, whole_word, selections, sorted);
 }
 
 /// `[from, limit)` 안에서 아직 안 고른 일치를 찾는다.
@@ -95,6 +103,7 @@ fn scan(
     limit: usize,
     whole_word: bool,
     selections: []const selection.Selection,
+    sorted: bool,
 ) ?Range {
     if (needle.len == 0 or from >= limit) return null;
     var i = from;
@@ -102,7 +111,7 @@ fn scan(
         const at = std.mem.indexOfPos(u8, content[0..limit], i, needle) orelse return null;
         if (at + needle.len > limit) return null;
         const r = Range{ .start = at, .end = at + needle.len };
-        if ((!whole_word or seedIsWord(content, r.start, r.end)) and !alreadySelected(selections, r)) {
+        if ((!whole_word or seedIsWord(content, r.start, r.end)) and !alreadySelected(selections, r, sorted)) {
             return r;
         }
         i = at + 1;
@@ -131,7 +140,14 @@ fn seedIsWord(content: []const u8, lo: usize, hi: usize) bool {
 /// **곡선이 2차식에서 선형으로 바뀌는 것이 요점이다.** 선형 판은 상한(`max_cursors` 10,000)에서
 /// 한 번 누르는 데 수십 ms가 되어 화면이 멈춘 것처럼 보인다. 전부 고르는 데 드는 총합도
 /// 7085 → 2444µs로 줄었다.
-fn alreadySelected(selections: []const selection.Selection, r: Range) bool {
+fn alreadySelected(selections: []const selection.Selection, r: Range, sorted: bool) bool {
+    if (!sorted) {
+        // 정렬이 안 왔으면 **선형으로라도 정확히** 답한다 — 틀린 답보다 느린 답이 낫다.
+        for (selections) |s| {
+            if (s.start() == r.start and s.end() == r.end) return true;
+        }
+        return false;
+    }
     var lo: usize = 0;
     var hi: usize = selections.len;
     while (lo < hi) {
@@ -281,4 +297,45 @@ test "OCC14: 멀티바이트 문서에서도 byte 축으로 정확히 답한다"
     const r = nextOccurrence(content, &sels, 0).?;
     try testing.expectEqualStrings("한글", content[r.start..r.end]);
     try testing.expectEqual(@as(usize, 12), r.start);
+}
+
+test "OCC15: 정렬 안 된 커서 배열이 와도 이미 고른 자리를 다시 고르지 않는다" {
+    // **전제를 단언으로만 지키면 출하 빌드에서 사라진다.** `runtime_safety`가 꺼진 채 정렬 안 된
+    // 배열이 오면 이분 탐색이 "이미 고름"을 못 찾고 같은 자리를 또 준다 — 커서가 겹쳐 쌓이고
+    // 그 상태로 타이핑하면 한 글자가 두 번 들어간다. 그래서 정렬 여부를 실제로 보고 갈라 쓴다.
+    //
+    // 이 판정자는 **정렬·역순·뒤섞임 셋 다** 같은 답을 내는지 본다.
+    const content = "foo bar foo baz foo qux foo";
+    const sorted = [_]selection.Selection{
+        selection.Selection.fromPoints(0, 3),
+        selection.Selection.fromPoints(8, 11),
+        selection.Selection.fromPoints(16, 19),
+    };
+    var reversed = [_]selection.Selection{
+        selection.Selection.fromPoints(16, 19),
+        selection.Selection.fromPoints(8, 11),
+        selection.Selection.fromPoints(0, 3),
+    };
+    var shuffled = [_]selection.Selection{
+        selection.Selection.fromPoints(8, 11),
+        selection.Selection.fromPoints(16, 19),
+        selection.Selection.fromPoints(0, 3),
+    };
+
+    var s2 = sorted;
+    const want = nextOccurrence(content, &s2, 0).?;
+    try testing.expectEqual(@as(usize, 24), want.start); // 넷째 foo
+
+    // 씨앗이 같은 것을 가리키도록 primary 인덱스를 맞춘다.
+    const a = nextOccurrence(content, &reversed, 2).?; // reversed[2] == (0,3)
+    const b = nextOccurrence(content, &shuffled, 2).?; // shuffled[2] == (0,3)
+    try testing.expectEqual(want.start, a.start);
+    try testing.expectEqual(want.start, b.start);
+
+    // **이미 고른 자리를 준 것이 아니다.**
+    for ([_]Range{ a, b }) |r| {
+        for (sorted) |sel| {
+            try testing.expect(!(sel.start() == r.start and sel.end() == r.end));
+        }
+    }
 }

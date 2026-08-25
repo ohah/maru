@@ -116,8 +116,12 @@ pub fn apply(
     d: Delta,
     selections: *selection.Selections,
 ) !Inverse {
-    std.debug.assert(d.isWellFormed());
-    if (d.changes.len > 0) std.debug.assert(d.changes[d.changes.len - 1].end <= buf.byteLen());
+    // **단언이 아니라 오류다.** `std.debug.assert`는 ReleaseFast에서 사라져 Debug는 패닉하고
+    // 출하 빌드는 조용히 망가진다 — 적대적 검증이 범위 밖 delta가 ReleaseFast에서 `OutOfMemory`라는
+    // 엉뚱한 이유로 막히는 것을 실측했다. §3.3의 undo 스택은 delta를 오래 들고 있고 그 사이 외부
+    // 재로드로 문서가 짧아질 수 있으므로, 이것은 이론적인 경우가 아니다.
+    if (!d.isWellFormed()) return error.MalformedDelta;
+    if (d.changes.len > 0 and d.changes[d.changes.len - 1].end > buf.byteLen()) return error.OutOfRange;
 
     // ① 지워질 내용을 **먼저 전부** 뜬다. 버퍼를 고치기 시작하면 읽을 수 없다.
     var removed = try allocator.alloc([]u8, d.changes.len);
@@ -508,4 +512,29 @@ test "DLT12: 변경이 여럿일 때 중간에 실패해도 버퍼가 반쯤 바
         }
     }
     try testing.expect(failures > 0); // 실패를 못 만들었으면 아무것도 판정하지 않은 것이다
+}
+
+test "DLT13: 문서 밖이거나 겹치는 delta는 오류로 거절한다 (두 빌드 모드에서 같게)" {
+    var buf = try buffer.Buffer.init(testing.allocator, "0123456789");
+    defer buf.deinit();
+    var items = [_]selection.Selection{selection.Selection.at(0)};
+    var sels = selection.Selections.init(&items, 0);
+
+    const past_end = [_]Change{.{ .start = 8, .end = 20, .text = "x" }};
+    try testing.expectError(error.OutOfRange, apply(testing.allocator, &buf, .{ .changes = &past_end }, &sels));
+
+    const overlapping = [_]Change{
+        .{ .start = 0, .end = 5, .text = "a" },
+        .{ .start = 3, .end = 7, .text = "b" },
+    };
+    try testing.expectError(error.MalformedDelta, apply(testing.allocator, &buf, .{ .changes = &overlapping }, &sels));
+
+    const reversed = [_]Change{.{ .start = 7, .end = 3, .text = "" }};
+    try testing.expectError(error.MalformedDelta, apply(testing.allocator, &buf, .{ .changes = &reversed }, &sels));
+
+    // 거절했으면 문서도 selection도 그대로다.
+    const all = try buf.copyAll(testing.allocator);
+    defer testing.allocator.free(all);
+    try testing.expectEqualStrings("0123456789", all);
+    try testing.expectEqual(@as(usize, 0), sels.items[0].focus);
 }

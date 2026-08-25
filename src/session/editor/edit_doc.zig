@@ -35,6 +35,21 @@
 //! **Debug에서는 50배 느리다**(256 KiB에서 8.5ms). 위 수는 전부 ReleaseFast이며, 제품이 도는
 //! 모드가 그쪽이다.
 //!
+//! ### 메모리는 문서를 두 벌 든다 — 실측
+//!
+//! | | 읽기 전용(`open.zig`) | 편집 가능 | 원문 대비 |
+//! |---|---|---|---|
+//! | 64 KiB 문서 | 38 KiB | 172 KiB | **2.7배** |
+//! | 1 MiB 문서 | 614 KiB | 2758 KiB | **2.7배** |
+//!
+//! 읽기 전용이 원문보다 작은 것은 **bytes를 빌리기 때문**이다(줄 인덱스만 잡는다). 편집 가능은
+//! rope 잎 한 벌 + 평탄화 한 벌 + 줄 인덱스라 원문의 약 2.7배가 된다.
+//!
+//! **이것은 위 평탄화 결정의 대가이고, 파일 상한과 곱해진다** — `read_limit_bytes`가 64 MiB이므로
+//! 한 파일이 약 170 MB를 쓸 수 있다. 줄이는 길은 정해져 있다: 소비처를 트리 위로 옮겨 평탄화 벌을
+//! 없애면 한 벌 + 인덱스가 된다. **그 슬라이스 전에는 이 수를 알고 있는 것이 최선이고, 몰랐다면
+//! 큰 파일에서 이유 없이 메모리가 튀는 것으로 보였을 것이다.**
+//!
 //! ## `line_index`가 남는 이유
 //!
 //! 트리는 줄 **수**와 줄 **시작**을 `O(log n)`에 답하지만 줄별 `LineEnding`(§3.5 원본 보존)은
@@ -119,11 +134,15 @@ pub const EditableFile = struct {
     ///
     /// **읽기 전용 문서는 거절한다.** 쓸 수 없는 파일도 열지만(§3.5 "보는 것은 되어야 한다") 고칠
     /// 수는 없고, 여기서 막지 않으면 화면만 바뀌고 저장이 실패해 사용자가 편집을 잃는다.
+    ///
+    /// **문서 밖이거나 형태가 틀린 delta도 거절한다**(`OutOfRange`·`MalformedDelta`) — `delta.apply`가
+    /// 그것을 단언이 아니라 오류로 답하므로 여기 오류 집합에도 그대로 실린다. 단언에 맡기면
+    /// 출하 빌드(ReleaseFast)에서 사라져 조용히 망가진다.
     pub fn apply(
         self: *EditableFile,
         d: delta.Delta,
         selections: *selection.Selections,
-    ) (error{ReadOnly} || std.mem.Allocator.Error)!delta.Inverse {
+    ) (error{ ReadOnly, OutOfRange, MalformedDelta } || std.mem.Allocator.Error)!delta.Inverse {
         if (self.read_only) return error.ReadOnly;
 
         // **편집 전 판을 떠 둔다.** 아래 파생 축 재구축이 실패하면 버퍼만 앞서 나가는데, 그러면
@@ -349,7 +368,11 @@ test "EDOC8: 평탄화 축이 버퍼와 갈리지 않는다 — 무작위 편집
 
     for (0..200) |_| {
         const at = rand.uintAtMost(usize, f.content.len);
-        const texts = [_][]const u8{ "z", "\n", "abc", "한" };
+        // **`\r\n`을 섞는다.** 이것이 없으면 아래 줄별 대조가 CRLF 경로를 아예 안 밟는다 —
+        // 실제로 CRLF 판정을 죽인 뮤턴트가 이 판정자를 통과했다(적대적 검증 2026-08-25).
+        // 무작위 삽입이 `\r\n` 쌍을 가르기도 하는데, 그것도 정당한 입력이다(홀로 남은 `\r`은
+        // 줄바꿈이 아니다).
+        const texts = [_][]const u8{ "z", "\n", "abc", "한", "\r\n", "\r" };
         const changes = [_]delta.Change{.{
             .start = at,
             .end = at,
@@ -363,6 +386,25 @@ test "EDOC8: 평탄화 축이 버퍼와 갈리지 않는다 — 무작위 편집
         defer testing.allocator.free(truth);
         try testing.expectEqualStrings(truth, f.content);
         try testing.expectEqual(std.mem.count(u8, truth, "\n") + 1, f.lineCount());
+
+        // **줄별 텍스트까지 본다.** 내용과 줄 수가 맞아도 경계가 한 칸 밀리면 화면에 그려지는
+        // 줄이 통째로 어긋나는데, 위 둘만으로는 그것이 안 잡힌다 — 실제로 `lineText`가 렌더에
+        // 넘기는 값이라 여기가 화면과 가장 가깝다. 기준은 순진한 분할이다.
+        {
+            var line_no: usize = 0;
+            var cursor: usize = 0;
+            while (line_no < f.lineCount()) : (line_no += 1) {
+                const nl = std.mem.indexOfScalarPos(u8, truth, cursor, '\n');
+                const raw_end = nl orelse truth.len;
+                // 줄바꿈 앞의 `\r`은 줄 내용이 아니다(CRLF 한 덩어리).
+                const end = if (nl != null and raw_end > cursor and truth[raw_end - 1] == '\r')
+                    raw_end - 1
+                else
+                    raw_end;
+                try testing.expectEqualStrings(truth[cursor..end], f.lineText(line_no).?);
+                cursor = raw_end + 1;
+            }
+        }
     }
 }
 
@@ -413,4 +455,42 @@ test "EDOC9: 할당이 어디서 실패해도 정본과 평탄화 축이 갈리�
     }
     // **실패를 한 번도 못 만들었으면 이 판정자는 아무것도 판정하지 않은 것이다.**
     try testing.expect(failures > 0);
+}
+
+test "EDOC10: 되돌리기가 selection을 제자리로 돌린다 (범위 안이 아니라 제자리)" {
+    // **EDOC9는 "문서 밖을 가리키지 않는다"만 본다.** 그것은 0으로 뭉개도 통과한다 — 되돌린 뒤
+    // 커서가 문서 처음으로 다 모여도 "범위 안"이기 때문이다. 사용자에게는 편집이 취소됐는데
+    // 커서가 엉뚱한 데 있는 상태이고, 다음 타이핑이 거기로 간다.
+    //
+    // 그래서 여기서는 **편집 전 값과 정확히 같은지** 본다. 지워진 구간 안을 가리키던 커서는
+    // 접히므로 그것만 예외로 둔다(§3.3 — 접는 것이 계약이다).
+    const original = "alpha beta gamma delta\nsecond line here\n";
+    var f = try EditableFile.init(testing.allocator, original, false);
+    defer f.deinit();
+
+    // 편집 구간 **밖**의 커서들 — 되돌리면 정확히 제자리여야 한다.
+    var items = [_]selection.Selection{
+        selection.Selection.at(0),
+        selection.Selection.fromPoints(23, 29), // "second"
+        selection.Selection.at(38),
+    };
+    var sels = selection.Selections.init(&items, 0);
+    const before = items;
+
+    const changes = [_]delta.Change{.{ .start = 6, .end = 10, .text = "BETA!!" }};
+    var inv = try f.apply(.{ .changes = &changes }, &sels);
+    defer inv.deinit();
+
+    // 편집이 실제로 커서를 밀었다 — 안 밀렸으면 아래 판정이 공허하다.
+    try testing.expect(sels.items[1].anchor_start != before[1].anchor_start);
+
+    var back = try f.apply(inv.delta(), &sels);
+    defer back.deinit();
+
+    try testing.expectEqualStrings(original, f.content);
+    for (sels.items, 0..) |s, i| {
+        try testing.expectEqual(before[i].anchor_start, s.anchor_start);
+        try testing.expectEqual(before[i].anchor_end, s.anchor_end);
+        try testing.expectEqual(before[i].focus, s.focus);
+    }
 }

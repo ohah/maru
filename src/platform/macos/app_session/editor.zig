@@ -14,6 +14,7 @@ const maru = @import("maru");
 const editor = maru.session.editor;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const command_catalog = @import("../command_catalog.zig");
 const Term = app_session_mod.Term;
 const Pane = app_session_mod.Pane;
 const pane_ops = @import("pane.zig");
@@ -1582,6 +1583,18 @@ fn widthDragActive(self: *const AppSession) bool {
 ///
 /// **문서 원본에서 뜬다** — 화면에 그린 것(`editor_lines`)이 아니라 `editor_doc`의 byte다. 둘은
 /// §3.8 표기(`<U+202E>`)와 초장문 줄 축소에서 갈리고, 사용자가 붙여넣기를 기대하는 것은 **원본**이다.
+///
+/// **계약과 다른 자리 하나 — caret만 있을 때**(적대적 검증 2026-08-25에 드러났다).
+/// [문서 모델](../../../../docs/native-editor-document-model.md) §3.4는 *"선택 없이 복사하면 caret이
+/// 있는 줄 전체를 담고, 그 사실을 함께 기억한다"*고 정하는데 여기서는 **거절한다**(`false`).
+///
+/// 지금 그렇게 두는 이유: 그 규칙의 나머지 절반이 *"그렇게 담긴 것을 붙여넣으면 caret 위치가
+/// 아니라 **줄 단위로** 삽입한다"*이고, 그것을 지키려면 "빈 선택에서 온 것인가" 플래그를 함께
+/// 들어야 한다. **그 플래그를 읽는 유일한 소비처가 붙여넣기이고, 붙여넣기는 편집 연산이라 아직
+/// 없다.** 줄만 담고 플래그를 안 들면 나중 붙여넣기가 줄 중간에 끼워 넣어 §3.4가 경고한 그대로
+/// 줄이 깨진다.
+///
+/// 그래서 이 자리는 **빈칸이지 결정이 아니다** — 붙여넣기 슬라이스가 둘을 함께 세운다.
 pub fn copySelection(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
@@ -9059,6 +9072,158 @@ test "MC1 다음 일치 추가가 커서를 늘리고, 띠가 전부 서고, 복
     // ⑹ 클릭 한 번이 정리한다 — 없으면 사용자가 커서를 없앨 방법이 없다.
     clearExtraSelections(fx.session, term);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+}
+
+test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체를 통과한다 (§9.1)" {
+    // **판정자 여섯이 전부 `addNextOccurrence`를 직접 부른다.** 그래서 그 함수가 아무리 옳아도
+    // **키를 눌렀을 때 거기 도달하는지는 아무도 안 본다** — chord 등록, 액션 해석, 디스패치 중
+    // 하나만 빠져도 기능이 없는 것과 같은데 판정자는 전부 초록이다. ⌘F 슬라이스가 같은 구조적
+    // 구멍을 겪었고(EM* 판정자가 `appendPaneFrame`을 직접 불러 배선을 못 봤다), 그 교훈이 여기다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "wire.txt", .data = "alpha beta\nalpha gamma\nalpha delta\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "wire.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // ⑴ **chord가 액션으로 해석된다** — 기본 바인딩 표에 실제로 실려 있는가.
+    {
+        const resolver = fx.session.loaded_config.keyBindingResolver();
+        var enc: [maru.terminal.input.encoded_key_buffer_len]u8 = undefined;
+        const event = maru.terminal.KeyEvent{
+            .key = .{ .char = 'D' },
+            .modifiers = .{ .command = true, .control = true },
+        };
+        const resolved = try resolver.resolve(event, &enc, .{});
+        switch (resolved) {
+            .app_action => |a| try testing.expectEqual(maru.config.action.Action.add_next_occurrence, a),
+            else => return error.ChordNotWired,
+        }
+    }
+
+    // ⑵ **디스패치가 그 액션을 편집기로 보낸다** — 함수를 직접 부르지 않는다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 5, 5, .word);
+    fx.session.dispatchAppAction(.add_next_occurrence);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.start());
+
+    fx.session.dispatchAppAction(.add_next_occurrence);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // ⑶ **팔레트에도 있다** — 키를 뺏긴 사용자가 명령으로 부를 수 있어야 한다.
+    var found = false;
+    for (command_catalog.entries) |e| {
+        if (e.action == .add_next_occurrence) found = true;
+    }
+    try testing.expect(found);
+}
+
+test "MC7 편집기 기능을 섞어 돌려도 불변식이 깨지지 않는다 (상호작용 퍼즈)" {
+    // **판정자 하나하나는 기능을 하나씩 잰다 — 섞이는 자리는 아무도 안 본다.** 접힘이 켜진 채
+    // 커서를 늘리고, 스크롤한 뒤 복사하고, 다시 펴는 식의 순서는 조합이 폭발해 손으로 못 적는다.
+    // 그래서 무작위로 섞되 **매 걸음 불변식을 본다**: 죽지 않는가 · 띠가 줄 안에 있는가 ·
+    // 띠 수가 커서 수를 넘지 않는가 · 커서가 문서 밖을 가리키지 않는가.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    var l: usize = 0;
+    while (l < 120) : (l += 1) {
+        // 들여쓰기를 섞어 접힘이 실제로 생기게 한다.
+        if (l % 4 == 1 or l % 4 == 2) try doc.appendSlice(allocator, "    ");
+        try doc.appendSlice(allocator, "target value here\n");
+    }
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "fuzz.txt", .data = doc.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "fuzz.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // **씨앗 하나로 통과한 것은 그 씨앗에서만 통과한 것이다.** 퍼즈는 순서를 흔드는 것이 목적인데
+    // 고정 씨앗 하나는 순서를 **하나만** 본다 — 여럿을 돌려야 조합이 실제로 흔들린다.
+    // (무작위 씨앗은 쓰지 않는다: 실패가 재현되지 않으면 고칠 수 없다.)
+    for ([_]u64{ 0xF0221, 0xBEEF, 0x1234, 0xC0DE, 0x5EED }) |seed| {
+        try fuzzRound(fx.session, term, fx.leaf_rect, doc.items, seed);
+    }
+}
+
+fn fuzzRound(
+    session: *AppSession,
+    term: *Term,
+    fx_leaf: maru.session.SplitRect,
+    doc_bytes: []const u8,
+    seed: u64,
+) !void {
+    const allocator = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var step: usize = 0;
+    while (step < 400) : (step += 1) {
+        switch (rand.uintLessThan(u8, 7)) {
+            0 => { // 커서를 놓는다(클릭과 같은 상태)
+                const off = rand.uintLessThan(usize, doc_bytes.len);
+                clearExtraSelections(session, term);
+                term.rt.editor_selection = editor_selection.Selection.at(off);
+            },
+            1, 2 => _ = addNextOccurrence(session, term), // 커서를 늘린다
+            3 => _ = foldAll(session),
+            4 => _ = unfoldAll(session),
+            5 => { // 굴린다
+                const line = rand.uintLessThan(usize, 100);
+                setEditorTop(session, term, line);
+            },
+            else => _ = copySelection(session), // 복사
+        }
+
+        // 프레임을 만든다 — 여기서 죽으면 그 조합이 결함이다.
+        var d = appendPaneFrame(session, fx_leaf, term) orelse continue;
+        d.dl.deinit(allocator);
+
+        // ── 불변식 ──
+        const docf = term.rt.editor_doc orelse continue;
+        var iter = selections(term);
+        const cursor_count = iter.count();
+        while (iter.next()) |sel| {
+            try testing.expect(sel.start() <= docf.file.content.len);
+            try testing.expect(sel.end() <= docf.file.content.len);
+        }
+        try testing.expect(cursor_count <= editor_selection.max_cursors);
+
+        if (buildSelectionMarks(session, term)) |marks| {
+            const lines = editorLines(term);
+            try testing.expectEqual(lines.len, marks.len); // 보이는 줄 축이다
+            var drawn: usize = 0;
+            for (marks, 0..) |row, i| {
+                drawn += row.len;
+                var prev: u32 = 0;
+                for (row, 0..) |m, k| {
+                    // 띠가 그 줄 안에 있다.
+                    try testing.expect(m.start + m.len <= lines[i].len);
+                    try testing.expect(m.len > 0);
+                    // 한 줄 안에서 오름차순이다(렌더가 단언하는 것).
+                    if (k > 0) try testing.expect(m.start >= prev);
+                    prev = m.start;
+                }
+            }
+            // **띠 수가 커서 수를 넘지 않는다** — 넘으면 같은 커서를 여러 번 그린 것이다.
+            // (커서 하나가 여러 줄에 걸치면 띠가 여럿이므로 상한은 커서 수 × 보이는 줄 수지만,
+            //  이 문서는 줄을 걸치는 선택을 만들지 않으므로 커서 수가 상한이다.)
+            try testing.expect(drawn <= cursor_count);
+        }
+    }
 }
 
 test "MC6 caret에서 누르면 커서가 늘지 않고 낱말이 잡힌다 (§9.1)" {

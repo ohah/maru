@@ -642,7 +642,18 @@ pub const FindRequest = struct {
     }
 };
 pub const SelectKind = enum(u8) { word, line };
-pub const SelectRequest = struct { kind: SelectKind, row: u16, col: u16 };
+pub const SelectRequest = struct {
+    kind: SelectKind,
+    row: u16,
+    col: u16,
+    separators: [64]u8 = [_]u8{0} ** 64,
+    separators_len: u8 = 0,
+
+    pub fn bytes(self: *const SelectRequest) ?[]const u8 {
+        if (self.separators_len > self.separators.len) return null;
+        return self.separators[0..self.separators_len];
+    }
+};
 
 /// Closed mirror of the host core-command wire. It deliberately contains no method string,
 /// encoded JSON, stream id, allocator, or process-local pointer.
@@ -672,7 +683,7 @@ const RawFindRequest = extern struct {
     current: u32,
     scroll: u8,
 };
-const RawSelectRequest = extern struct { kind: u8, row: u16, col: u16 };
+const RawSelectRequest = extern struct { kind: u8, row: u16, col: u16, separators: [64]u8, separators_len: u8 };
 const RawMouseReportRequest = extern struct {
     button: u8,
     col: u16,
@@ -753,6 +764,8 @@ pub const RuntimeRequest = extern struct {
             .kind = @intFromEnum(value.kind),
             .row = value.row,
             .col = value.col,
+            .separators = value.separators,
+            .separators_len = value.separators_len,
         } } };
     }
     pub fn coreCommand(value: CoreCommandRequest) RuntimeRequest {
@@ -824,7 +837,14 @@ pub const RuntimeRequest = extern struct {
                     @intFromEnum(SelectKind.line) => .line,
                     else => break :blk null,
                 };
-                break :blk .{ .select_op = .{ .kind = kind, .row = value.row, .col = value.col } };
+                if (value.separators_len > value.separators.len) break :blk null;
+                break :blk .{ .select_op = .{
+                    .kind = kind,
+                    .row = value.row,
+                    .col = value.col,
+                    .separators = value.separators,
+                    .separators_len = value.separators_len,
+                } };
             },
             @intFromEnum(RuntimeRequestTag.core_command) => .{
                 .core_command = runtime_control_types.decodeRawCoreCommand(&self.payload.core_command) orelse return null,
@@ -1094,6 +1114,18 @@ test "CR3a-2c3b find scroll is the sole role-sensitive family discriminator" {
     try std.testing.expectEqual(RequestFamily.bound_controller_mutation, mutated.family());
     try std.testing.expectEqual(RuntimeRequestTag.find, std.meta.activeTag(observed));
     try std.testing.expectEqual(RuntimeRequestTag.find, std.meta.activeTag(mutated));
+}
+
+test "CR3a-2c3b select request owns bounded word separators across raw decode" {
+    var select: SelectRequest = .{ .kind = .word, .row = 1, .col = 2 };
+    @memcpy(select.separators[0..4], "./\xc2\xb7");
+    select.separators_len = 4;
+    const decoded = RuntimeRequest.selectOp(select).decode().?.select_op;
+    try std.testing.expectEqualStrings("./\xc2\xb7", decoded.bytes().?);
+
+    var malformed = RuntimeRequest.selectOp(select);
+    malformed.payload.select_op.separators_len = 65;
+    try std.testing.expectEqual(@as(?ValidatedRuntimeRequest, null), malformed.decode());
 }
 
 test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {

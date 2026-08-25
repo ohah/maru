@@ -213,6 +213,22 @@ fn hexDecodeInto(hex: []const u8, out: []u8) usize {
     return n;
 }
 
+fn decodeWordSeparators(hex: []const u8, out: *[64]u8) ?[]const u8 {
+    if (hex.len > out.len * 2 or hex.len % 2 != 0) return null;
+    const decoded = out[0..hexDecodeInto(hex, out)];
+    if (decoded.len * 2 != hex.len or !std.unicode.utf8ValidateSlice(decoded)) return null;
+    return decoded;
+}
+
+test "word separator wire decoder is bounded strict hex and valid UTF-8" {
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("./\xc2\xb7", decodeWordSeparators("2e2fc2b7", &out).?);
+    try std.testing.expect(decodeWordSeparators("2", &out) == null);
+    try std.testing.expect(decodeWordSeparators("zz", &out) == null);
+    try std.testing.expect(decodeWordSeparators("ff", &out) == null);
+    try std.testing.expect(decodeWordSeparators("00" ** 65, &out) == null);
+}
+
 /// host가 소유하는 실 terminal runtime 표. `RuntimeOps`를 통해 server.zig가 이걸 구동한다. self-referential이라
 /// **in-place `init`**을 쓴다(caller가 `var m: RuntimeManager = undefined; m.init(...)`) — backend가 아래 두 registry의
 /// 안정 주소를 캡처하므로 init 후 매니저를 이동하면 안 된다.
@@ -1743,15 +1759,18 @@ pub const RuntimeManager = struct {
     /// 단어/줄 선택(§6b-2): host가 **콘텐츠를 아는 자기 core**로 경계를 계산해(`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택
     /// span을 JSON으로 준다. 빈 client placeholder는 경계를 모르므로 host가 계산(선택 의미론 host 단일 출처). span만 계산해
     /// 돌려주고 host core 선택은 원복(transient — client가 그 span을 placeholder에 적용해 하이라이트, 복사는 #6b-1 selected_text).
-    /// 구분자(word-separators) forwarding은 후속 — 기본 "" (공백 경계, config 기본값과 일치). 미지원 op·빈 선택은 `{sel:false}`.
-    fn selectOpOp(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8 {
+    /// word op의 separators_hex는 64-byte strict hex/UTF-8로 닫고 현재 config 값을 그대로 적용한다.
+    /// 필드가 없는 구 client는 빈 구분자(공백 경계)로 호환된다. 미지원 op·빈 선택은 `{sel:false}`.
+    fn selectOpOp(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, separators_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         if (std.mem.eql(u8, op, "word")) {
-            surface.core.selectWordAt(row, col, ""); // 기본 공백 경계(구분자 forwarding 후속).
+            var separators_buf: [64]u8 = undefined;
+            const separators = decodeWordSeparators(separators_hex, &separators_buf) orelse return error.InvalidRequest;
+            surface.core.selectWordAt(row, col, separators);
         } else if (std.mem.eql(u8, op, "line")) {
             surface.core.selectLineAt(row);
         } else {

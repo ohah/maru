@@ -551,6 +551,12 @@ const Table = struct {
     /// 옆의 `scm_turn_file_count` 와 **다른 질문의 답**이다 — 그쪽은 작업트리 전체가 바뀐 수라
     /// 셸 편집·사용자·다른 세션이 섞이고, 이쪽은 세션별로 확정된 수다.
     scm_turn_edited_count: [:0]const u8,
+    /// 펼친 턴의 파일 행 **뒤**에 서는 고지(계약 §5). 그 턴에 셸 도구를 부른 횟수를 말한다.
+    ///
+    /// **커버리지가 아니라 귀속을 말한다.** tree 가 셸 편집도 잡으므로 그 파일들은 목록에 이미 `·` 로
+    /// 떠 있다 — 모르는 것은 「그 N개 중 무엇이 어느 파일을 고쳤는가」다. (계약 §5 의 예시 문구는
+    /// **캡처만 남는 세계**를 그린 것이라 커버리지 어투다.)
+    scm_turn_shell_notice: [:0]const u8,
     /// 에이전트 탭: 그 턴의 파일 목록을 읽지 못했다.
     scm_turn_files_failed: [:0]const u8,
     /// 에이전트 탭: 그 턴이 바꾼 파일이 없다.
@@ -1015,6 +1021,7 @@ const en: Table = .{
     .scm_turn_back_suffix = " turns ago",
     .scm_turn_file_count = "{0} files",
     .scm_turn_edited_count = "✎ AI edits {0}",
+    .scm_turn_shell_notice = "⚠ {0} shell commands — their edits cannot be attributed to the agent",
     .scm_turn_files_failed = "Could not read this turn's files",
     .scm_turn_no_files = "This turn changed no files",
     .ad_no_model = "No model info",
@@ -1568,6 +1575,7 @@ const ko: Table = .{
     .scm_turn_back_suffix = "턴 전",
     .scm_turn_file_count = "{0}개 파일",
     .scm_turn_edited_count = "✎ AI 편집 {0}",
+    .scm_turn_shell_notice = "⚠ 셸 명령 {0}개 — 그 편집은 에이전트 소행으로 확정할 수 없습니다",
     .scm_turn_files_failed = "이 턴의 파일을 읽지 못했습니다",
     .scm_turn_no_files = "이 턴이 바꾼 파일이 없습니다",
     .ad_no_model = "모델 정보 없음",

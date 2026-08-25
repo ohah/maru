@@ -161,6 +161,18 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     const identity = term.agent_transcript.identity();
     if (identity.len == 0) return;
 
+    // **셸은 경로를 안 준다 — 셀 수만 있다**(계약 §2.3: provider 구현이 그 필드를 아예 안 만든다).
+    // 그 수가 목록의 `·` 가 왜 있는지를 말하는 유일한 근거다(계약 §5 고지 줄).
+    //
+    // **위 게이트 넷을 그대로 지난 뒤**에 센다 — 자식·backlog·회전본·신원 없음. 게이트를 공유하지 않으면
+    // 「창이 없던 시간의 셸 명령」이 지금 턴에 세어져 고지가 거짓 수를 말한다.
+    //
+    // 저장소 루트 판정보다 **앞**이다: 세는 데는 루트가 필요 없다.
+    if (std.mem.eql(u8, ev.tool_name, "Bash") or std.mem.eql(u8, ev.tool_name, "exec")) {
+        self.turn_captures.noteShellCall(identity);
+        return;
+    }
+
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
 

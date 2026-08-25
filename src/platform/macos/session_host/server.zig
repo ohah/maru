@@ -303,7 +303,7 @@ pub const MouseReport = struct {
 
 /// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
 /// 시작/끝 셀 좌표와 block(직사각형) 여부. host가 `selectionStart/Extend`로 자기 core에 적용(뷰포트→abs는 host view_offset 기준).
-pub const SelectSpan = struct { sr: u16, sc: u16, er: u16, ec: u16, block: bool, all: bool = false };
+pub const SelectSpan = struct { sr: u16, sc: u16, er: u16, ec: u16, block: bool, all: bool = false, authoritative: bool = false };
 
 /// `RuntimeOps.delta` 결과. `send`/`new_base`는 caller 소유이고 **항상 별개 버퍼**다(둘 다 free해도 안전). `send.len==0`이면
 /// 변화 없음(아무것도 안 보냄). `is_snapshot`이면 `send`가 fresh snapshot(snapshot_chunk로, client가 화면을 교체), 아니면
@@ -2270,7 +2270,8 @@ pub const Connection = struct {
     fn dispatchSelectedText(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
         const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = sub.runtime_id;
         const span = SelectSpan{
             .sr = intField(p, "sr") orelse 0,
             .sc = intField(p, "sc") orelse 0,
@@ -2278,7 +2279,12 @@ pub const Connection = struct {
             .ec = intField(p, "ec") orelse 0,
             .block = boolField(p, "block"),
             .all = optionalBoolField(p, "all") orelse return self.replyError(request_id, .invalid_request),
+            .authoritative = optionalBoolField(p, "authoritative") orelse return self.replyError(request_id, .invalid_request),
         };
+        if ((span.all or span.authoritative) and !reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id),
+            reg.Capability.input,
+        )) return self.replyError(request_id, .unauthorized);
         const body = if (self.runtime_ops) |ops|
             ops.selected_text(ops.ctx, runtime_id, span, self.allocator) catch return self.replyError(request_id, .internal)
         else
@@ -2336,7 +2342,12 @@ pub const Connection = struct {
         const row = intField(p, "row") orelse 0;
         const col = intField(p, "col") orelse 0;
         const separators_hex = strField(p, "separators_hex") orelse "";
-        const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
+        const sub = self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request);
+        const runtime_id = sub.runtime_id;
+        if (!reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(runtime_id, sub.subscription_id),
+            reg.Capability.input,
+        )) return self.replyError(request_id, .unauthorized);
         const body = if (self.runtime_ops) |ops|
             ops.select_op(ops.ctx, runtime_id, op, row, col, separators_hex, self.allocator) catch return self.replyError(request_id, .internal)
         else
@@ -2925,7 +2936,7 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
-        var capability_buf: [21][]const u8 = undefined;
+        var capability_buf: [22][]const u8 = undefined;
         const capabilities = self.helloCapabilities(&capability_buf);
         if (!self.host_status.manifest_capable) {
             return self.stringify(.{
@@ -2960,10 +2971,10 @@ pub const Connection = struct {
         });
     }
 
-    fn helloCapabilities(self: *const Connection, buf: *[21][]const u8) []const []const u8 {
+    fn helloCapabilities(self: *const Connection, buf: *[22][]const u8) []const []const u8 {
         var count: usize = 0;
         const append = struct {
-            fn one(target: *[21][]const u8, index: *usize, value: []const u8) void {
+            fn one(target: *[22][]const u8, index: *usize, value: []const u8) void {
                 target[index.*] = value;
                 index.* += 1;
             }
@@ -2986,6 +2997,7 @@ pub const Connection = struct {
         append(buf, &count, "runtime_core_command_v1");
         append(buf, &count, "runtime_clear_screen_v1");
         append(buf, &count, "runtime_selected_text_v1");
+        append(buf, &count, "runtime_selection_state_v1");
         append(buf, &count, "runtime_link_at_v1");
         append(buf, &count, "runtime_clipboard_v1");
         if (self.runtime_ops != null and self.subscription_identity != null) {
@@ -3693,6 +3705,7 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_core_command_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_clear_screen_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_selected_text_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_selection_state_v1\"") != null);
 }
 
 test "CR4a host capability는 typed hello와 pending prepare만 허용한다" {
@@ -6841,6 +6854,23 @@ test "server: product connections isolate same local stream through global subsc
     defer if (mouse.frame) |frame| frame.deinit(allocator);
     try testing.expect(std.mem.indexOf(u8, mouse.frame.?.payload, "unauthorized") != null);
     try testing.expect(fake.last_mouse_report == null);
+
+    // observer는 자기 projection의 viewport span 복사만 가능하다. host 권위 선택/전체 scrollback과
+    // 선택 mutation은 controller input capability 없이는 읽거나 바꿀 수 없다.
+    {
+        const response = try feedJson(&observer, .request, 5, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":1,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":1,\"block\":false}}");
+        defer if (response.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, response.frame.?.payload, "PICKED") != null);
+    }
+    inline for (.{
+        "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":1,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":1,\"block\":false,\"all\":true}}",
+        "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":1,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":1,\"block\":false,\"authoritative\":true}}",
+        "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":1,\"op\":\"all\"}}",
+    }, 6..) |payload, request_id| {
+        const response = try feedJson(&observer, .request, request_id, payload);
+        defer if (response.frame) |frame| frame.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, response.frame.?.payload, "unauthorized") != null);
+    }
 
     observer.deinit();
     try testing.expectEqual(@as(usize, 1), identities.count());

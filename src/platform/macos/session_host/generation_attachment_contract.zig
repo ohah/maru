@@ -568,20 +568,20 @@ pub fn requestFamilyForTag(tag: RuntimeRequestTag) RequestFamily {
     return switch (tag) {
         .spawn_full => .connection_only_denied,
         .attach_controller, .attach_observer => .attach_only,
-        .observation, .selected_text, .link_at, .find, .select_op => .bound_observation,
-        .resize, .clipboard_write, .core_command, .report_mouse, .notification => .bound_controller_mutation,
+        .observation, .selected_text, .link_at, .find => .bound_observation,
+        .resize, .clipboard_write, .select_op, .core_command, .report_mouse, .notification => .bound_controller_mutation,
         .terminate, .detach => .bound_terminal,
     };
 }
 
-/// Most request tags have one static family. Find is the single reviewed
-/// exception: its typed `scroll` discriminator promotes observation to a
-/// controller mutation. Canonical authority stores the derived family, so
-/// validators must admit both reviewed find outcomes without re-reading the
+/// Most request tags have one static family. Find scroll and selected-text
+/// all/authoritative are the two reviewed typed discriminators that promote
+/// observation to controller mutation. Canonical authority stores the derived family, so
+/// validators must admit both reviewed outcomes without re-reading the
 /// request payload.
 pub fn requestFamilyAllowed(tag: RuntimeRequestTag, family: RequestFamily) bool {
     if (!runtimeRequestTagRawValid(&tag) or !requestFamilyRawValid(&family)) return false;
-    return if (tag == .find)
+    return if (tag == .find or tag == .selected_text)
         family == .bound_observation or family == .bound_controller_mutation
     else
         requestFamilyForTag(tag) == family;
@@ -620,6 +620,7 @@ pub const SelectedTextRequest = struct {
     end_col: u64,
     block: bool,
     all: bool = false,
+    authoritative: bool = false,
 };
 
 pub const LinkAtRequest = extern struct { row: u16, col: u16, scopes: u8 };
@@ -678,6 +679,7 @@ const RawSelectedTextRequest = extern struct {
     end_col: u64,
     block: u8,
     all: u8,
+    authoritative: u8,
 };
 const RawFindRequest = extern struct {
     query: [256]u8,
@@ -746,6 +748,7 @@ pub const RuntimeRequest = extern struct {
             .end_col = value.end_col,
             .block = @intFromBool(value.block),
             .all = @intFromBool(value.all),
+            .authoritative = @intFromBool(value.authoritative),
         } } };
     }
     pub fn linkAt(value: LinkAtRequest) RuntimeRequest {
@@ -812,7 +815,7 @@ pub const RuntimeRequest = extern struct {
             @intFromEnum(RuntimeRequestTag.observation) => .observation,
             @intFromEnum(RuntimeRequestTag.selected_text) => blk: {
                 const value = self.payload.selected_text;
-                if (value.block > 1 or value.all > 1) break :blk null;
+                if (value.block > 1 or value.all > 1 or value.authoritative > 1) break :blk null;
                 break :blk .{ .selected_text = .{
                     .start_row = value.start_row,
                     .start_col = value.start_col,
@@ -820,6 +823,7 @@ pub const RuntimeRequest = extern struct {
                     .end_col = value.end_col,
                     .block = value.block == 1,
                     .all = value.all == 1,
+                    .authoritative = value.authoritative == 1,
                 } };
             },
             @intFromEnum(RuntimeRequestTag.link_at) => .{ .link_at = self.payload.link_at },
@@ -896,6 +900,7 @@ pub const ValidatedRuntimeRequest = union(RuntimeRequestTag) {
     pub fn family(self: @This()) RequestFamily {
         return switch (self) {
             .find => |value| if (value.scroll) .bound_controller_mutation else .bound_observation,
+            .selected_text => |value| if (value.all or value.authoritative) .bound_controller_mutation else .bound_observation,
             else => requestFamilyForTag(std.meta.activeTag(self)),
         };
     }
@@ -917,6 +922,7 @@ pub const GenerationCapabilities = struct {
     runtime_core_command: bool,
     runtime_link_at: bool,
     runtime_selected_text: bool,
+    runtime_selection_state: bool,
 };
 
 comptime {
@@ -934,6 +940,7 @@ comptime {
         runtime_core_command: bool,
         runtime_link_at: bool,
         runtime_selected_text: bool,
+        runtime_selection_state: bool,
     };
     const actual = std.meta.fields(GenerationCapabilities);
     const expected = std.meta.fields(Expected);
@@ -1086,7 +1093,7 @@ test "CR3a-2c3b every request tag has one closed request family" {
         .bound_observation,
         .bound_controller_mutation,
         .bound_observation,
-        .bound_observation,
+        .bound_controller_mutation,
         .bound_controller_mutation,
         .bound_controller_mutation,
         .bound_controller_mutation,
@@ -1098,10 +1105,10 @@ test "CR3a-2c3b every request tag has one closed request family" {
         try std.testing.expectEqual(family, requestFamilyForTag(tag));
 }
 
-test "CR3a-2c3b canonical family admission has one role-sensitive exception" {
+test "CR3a-2c3b canonical family admission has two role-sensitive exceptions" {
     inline for (std.enums.values(RuntimeRequestTag)) |tag| {
         inline for (std.enums.values(RequestFamily)) |family| {
-            const expected = if (tag == .find)
+            const expected = if (tag == .find or tag == .selected_text)
                 family == .bound_observation or family == .bound_controller_mutation
             else
                 family == requestFamilyForTag(tag);
@@ -1110,7 +1117,7 @@ test "CR3a-2c3b canonical family admission has one role-sensitive exception" {
     }
 }
 
-test "CR3a-2c3b find scroll is the sole role-sensitive family discriminator" {
+test "CR3a-2c3b find scroll is a role-sensitive family discriminator" {
     const observe = RuntimeRequest.find(FindRequest.init("needle", 3, false).?);
     const mutate = RuntimeRequest.find(FindRequest.init("needle", 3, true).?);
     const observed = observe.decode().?;
@@ -1119,6 +1126,17 @@ test "CR3a-2c3b find scroll is the sole role-sensitive family discriminator" {
     try std.testing.expectEqual(RequestFamily.bound_controller_mutation, mutated.family());
     try std.testing.expectEqual(RuntimeRequestTag.find, std.meta.activeTag(observed));
     try std.testing.expectEqual(RuntimeRequestTag.find, std.meta.activeTag(mutated));
+}
+
+test "CR3a-2c3b authoritative selected text promotes to controller mutation" {
+    const plain: SelectedTextRequest = .{ .start_row = 0, .start_col = 0, .end_row = 0, .end_col = 1, .block = false };
+    var promoted = plain;
+    try std.testing.expectEqual(RequestFamily.bound_observation, RuntimeRequest.selectedText(plain).decode().?.family());
+    promoted.all = true;
+    try std.testing.expectEqual(RequestFamily.bound_controller_mutation, RuntimeRequest.selectedText(promoted).decode().?.family());
+    promoted.all = false;
+    promoted.authoritative = true;
+    try std.testing.expectEqual(RequestFamily.bound_controller_mutation, RuntimeRequest.selectedText(promoted).decode().?.family());
 }
 
 test "CR3a-2c3b select request owns bounded word separators across raw decode" {
@@ -1146,6 +1164,18 @@ test "CR3a-2c3b selected text request keeps select-all discriminator closed" {
     try std.testing.expect(decoded.all);
     try std.testing.expectEqual(@as(u64, 70_000), decoded.start_row);
     request.payload.selected_text.all = 2;
+    try std.testing.expect(request.decode() == null);
+
+    request = RuntimeRequest.selectedText(.{
+        .start_row = 1,
+        .start_col = 2,
+        .end_row = 3,
+        .end_col = 4,
+        .block = false,
+        .authoritative = true,
+    });
+    try std.testing.expect(request.decode().?.selected_text.authoritative);
+    request.payload.selected_text.authoritative = 2;
     try std.testing.expect(request.decode() == null);
 }
 
@@ -1206,7 +1236,8 @@ test "CR3a-2c3c control raw discriminators fail closed before semantic reads" {
         nested.payload.core_command.tag = @intCast(raw);
         if (nested.decode() != null) valid_nested += 1;
     }
-    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len), valid_nested);
+    // selection_scroll_and_extend의 zeroed delta는 semantic invalid이므로 raw tag sweep 한 건은 fail-closed다.
+    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len - 1), valid_nested);
 
     const dedicated = RuntimeControl.scrollToBottom().decode().?;
     try std.testing.expectEqual(RuntimeControlTag.scroll_to_bottom, std.meta.activeTag(dedicated));

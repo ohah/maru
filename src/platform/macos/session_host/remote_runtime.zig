@@ -2678,6 +2678,7 @@ pub const RemoteRuntime = struct {
     // client placeholder는 현재 viewport highlight만 표현한다. Select All 의도는 별도 비트로 소유해
     // copy 때 host의 권위 scrollback 전체에서 selectAll→extractSelection을 원자 실행한다.
     selection_all: bool = false,
+    selection_host_authoritative: bool = false,
 
     /// Stable shell의 실제 `GenerationSlot.currentPayload()`만 current generation을 결정한다.
     fn currentGeneration(self: *RemoteRuntime) *RemoteGeneration {
@@ -3503,6 +3504,7 @@ pub const RemoteRuntime = struct {
                     .runtime_core_command = client.runtime_core_command_v1,
                     .runtime_link_at = client.runtime_link_at_v1,
                     .runtime_selected_text = client.runtime_selected_text_v1,
+                    .runtime_selection_state = client.runtime_selection_state_v1,
                 };
             },
             .generation => |adapter| adapter.generationCapabilities(),
@@ -3617,6 +3619,7 @@ pub const RemoteRuntime = struct {
         self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
         self.selection_all = false;
+        self.selection_host_authoritative = false;
         try self.initializePendingEventOwner();
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
@@ -3714,6 +3717,7 @@ pub const RemoteRuntime = struct {
         self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
         self.selection_all = false;
+        self.selection_host_authoritative = false;
         try self.initializePendingEventOwner();
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
@@ -5811,9 +5815,10 @@ pub const RemoteRuntime = struct {
     /// 보이는 선택을 추출한다. 반환 텍스트는 caller 소유(빈 선택/오류면 null). `block`은 std.fmt가 true/false로 찍어 유효 JSON.
     pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
         try self.admitRuntimeOperation();
-        if (!self.connectionCapabilities().runtime_selected_text) return self.selectedTextFromProjection(span);
-        var buf: [176]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{},\"all\":{}}}", .{ self.currentGeneration().attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block, self.selection_all }) catch return error.OutOfMemory;
+        if (!self.connectionCapabilities().runtime_selected_text or self.attachedAsObserver())
+            return self.selectedTextFromProjection(span);
+        var buf: [208]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{},\"all\":{},\"authoritative\":{}}}", .{ self.currentGeneration().attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block, self.selection_all, self.selection_host_authoritative }) catch return error.OutOfMemory;
         var output: ?[]u8 = null;
         try self.callDecoded(
             generation_contract.RuntimeRequest.selectedText(.{
@@ -5823,6 +5828,7 @@ pub const RemoteRuntime = struct {
                 .end_col = span.end.col,
                 .block = span.block,
                 .all = self.selection_all,
+                .authoritative = self.selection_host_authoritative,
             }),
             "runtime.selected_text",
             params,
@@ -6167,6 +6173,8 @@ pub const RemoteRuntime = struct {
             applySelectResponse,
         );
         if (kind == .all) self.selection_all = output.viewport != null;
+        if (self.connectionCapabilities().runtime_selection_state and output.viewport != null)
+            self.selection_host_authoritative = true;
         return output.viewport;
     }
 
@@ -6229,6 +6237,27 @@ pub const RemoteRuntime = struct {
 
     pub fn clearSelectAllIntent(self: *RemoteRuntime) void {
         self.selection_all = false;
+    }
+
+    pub fn supportsSelectionState(self: *const RemoteRuntime) bool {
+        return self.connectionCapabilities().runtime_selection_state;
+    }
+
+    pub fn mirrorSelectionCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
+        if (!self.connectionCapabilities().runtime_selection_state) return;
+        switch (command) {
+            .selection_start, .selection_extend, .selection_extend_or_collapse, .selection_scroll_and_extend => {
+                try self.queueCoreCommand(command);
+                self.selection_host_authoritative = true;
+                self.selection_all = false;
+            },
+            .selection_clear => {
+                try self.queueCoreCommand(command);
+                self.selection_host_authoritative = false;
+                self.selection_all = false;
+            },
+            else => return error.ProtocolError,
+        }
     }
 
     /// host-authoritative core command를 strict bounded codec으로 보낸다. 구 host는 scroll 4종만 이해하므로 capability가
@@ -7497,6 +7526,11 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
         .{ .jump_to_prompt = -1 },
         .clear_screen,
         .reset_input_modes,
+        .{ .selection_start = .{ .row = 1, .col = 2, .block = true } },
+        .{ .selection_extend = .{ .row = 3, .col = 4 } },
+        .{ .selection_extend_or_collapse = .{ .row = 5, .col = 6 } },
+        .{ .selection_scroll_and_extend = .{ .row = 0, .col = 7, .delta = 1 } },
+        .selection_clear,
     };
     const expected = [_]generation_contract.CoreCommandRequest{
         .{ .scroll = -1 },
@@ -7525,6 +7559,11 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
         .{ .jump_to_prompt = -1 },
         .clear_screen,
         .reset_input_modes,
+        .{ .selection_start = .{ .row = 1, .col = 2, .block = true } },
+        .{ .selection_extend = .{ .row = 3, .col = 4 } },
+        .{ .selection_extend_or_collapse = .{ .row = 5, .col = 6 } },
+        .{ .selection_scroll_and_extend = .{ .row = 0, .col = 7, .delta = 1 } },
+        .selection_clear,
     };
     try testing.expectEqual(
         @as(usize, @typeInfo(core_command_wire.Command).@"union".fields.len),

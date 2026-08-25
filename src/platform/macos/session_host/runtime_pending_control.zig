@@ -57,6 +57,11 @@ pub fn projectCoreCommand(command: core_command_wire.Command) control_types.Core
         .jump_to_prompt => |v| .{ .jump_to_prompt = v },
         .clear_screen => .clear_screen,
         .reset_input_modes => .reset_input_modes,
+        .selection_start => |v| .{ .selection_start = .{ .row = v.row, .col = v.col, .block = v.block } },
+        .selection_extend => |v| .{ .selection_extend = .{ .row = v.row, .col = v.col } },
+        .selection_extend_or_collapse => |v| .{ .selection_extend_or_collapse = .{ .row = v.row, .col = v.col } },
+        .selection_scroll_and_extend => |v| .{ .selection_scroll_and_extend = .{ .row = v.row, .col = v.col, .delta = v.delta } },
+        .selection_clear => .selection_clear,
     };
 }
 
@@ -86,6 +91,11 @@ pub fn toCoreCommand(command: control_types.CoreCommandRequest) core_command_wir
         .jump_to_prompt => |v| .{ .jump_to_prompt = v },
         .clear_screen => .clear_screen,
         .reset_input_modes => .reset_input_modes,
+        .selection_start => |v| .{ .selection_start = .{ .row = v.row, .col = v.col, .block = v.block } },
+        .selection_extend => |v| .{ .selection_extend = .{ .row = v.row, .col = v.col } },
+        .selection_extend_or_collapse => |v| .{ .selection_extend_or_collapse = .{ .row = v.row, .col = v.col } },
+        .selection_scroll_and_extend => |v| .{ .selection_scroll_and_extend = .{ .row = v.row, .col = v.col, .delta = v.delta } },
+        .selection_clear => .selection_clear,
     };
 }
 

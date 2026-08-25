@@ -32,6 +32,11 @@ pub const CoreCommandRequest = union(enum) {
     jump_to_prompt: i8,
     reset_input_modes,
     clear_screen,
+    selection_start: struct { row: u16, col: u16, block: bool },
+    selection_extend: struct { row: u16, col: u16 },
+    selection_extend_or_collapse: struct { row: u16, col: u16 },
+    selection_scroll_and_extend: struct { row: u16, col: u16, delta: i8 },
+    selection_clear,
 };
 
 pub const RawOptionalU32 = extern struct { present: u8, value: u32 };
@@ -57,6 +62,8 @@ pub const RawCorePayload = extern union {
     shape: u8,
     runtime_config: RawRuntimeConfig,
     direction: i8,
+    selection: extern struct { row: u16, col: u16, block: u8 },
+    selection_scroll: extern struct { row: u16, col: u16, delta: i8 },
 };
 pub const RawCoreCommand = extern struct { tag: u8, payload: RawCorePayload };
 pub const RuntimeControlTag = enum(u8) { scroll_to_bottom, core_command };
@@ -192,6 +199,23 @@ pub fn encodeRawCoreCommandInto(out: *RawCoreCommand, value: CoreCommandRequest)
         },
         .clear_screen => out.tag = @intFromEnum(Tag.clear_screen),
         .reset_input_modes => out.tag = @intFromEnum(Tag.reset_input_modes),
+        .selection_start => |v| {
+            out.tag = @intFromEnum(Tag.selection_start);
+            out.payload.selection = .{ .row = v.row, .col = v.col, .block = @intFromBool(v.block) };
+        },
+        .selection_extend => |v| {
+            out.tag = @intFromEnum(Tag.selection_extend);
+            out.payload.selection = .{ .row = v.row, .col = v.col, .block = 0 };
+        },
+        .selection_extend_or_collapse => |v| {
+            out.tag = @intFromEnum(Tag.selection_extend_or_collapse);
+            out.payload.selection = .{ .row = v.row, .col = v.col, .block = 0 };
+        },
+        .selection_scroll_and_extend => |v| {
+            out.tag = @intFromEnum(Tag.selection_scroll_and_extend);
+            out.payload.selection_scroll = .{ .row = v.row, .col = v.col, .delta = v.delta };
+        },
+        .selection_clear => out.tag = @intFromEnum(Tag.selection_clear),
     }
 }
 
@@ -234,6 +258,25 @@ pub fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
         @intFromEnum(Tag.jump_to_prompt) => .{ .jump_to_prompt = raw.payload.direction },
         @intFromEnum(Tag.clear_screen) => .clear_screen,
         @intFromEnum(Tag.reset_input_modes) => .reset_input_modes,
+        @intFromEnum(Tag.selection_start) => if (raw.payload.selection.block <= 1) .{ .selection_start = .{
+            .row = raw.payload.selection.row,
+            .col = raw.payload.selection.col,
+            .block = raw.payload.selection.block == 1,
+        } } else null,
+        @intFromEnum(Tag.selection_extend) => .{ .selection_extend = .{
+            .row = raw.payload.selection.row,
+            .col = raw.payload.selection.col,
+        } },
+        @intFromEnum(Tag.selection_extend_or_collapse) => .{ .selection_extend_or_collapse = .{
+            .row = raw.payload.selection.row,
+            .col = raw.payload.selection.col,
+        } },
+        @intFromEnum(Tag.selection_scroll_and_extend) => if (raw.payload.selection_scroll.delta == -1 or raw.payload.selection_scroll.delta == 1) .{ .selection_scroll_and_extend = .{
+            .row = raw.payload.selection_scroll.row,
+            .col = raw.payload.selection_scroll.col,
+            .delta = raw.payload.selection_scroll.delta,
+        } } else null,
+        @intFromEnum(Tag.selection_clear) => .selection_clear,
         else => null,
     };
 }
@@ -253,7 +296,8 @@ test "C3-3b2b3 integration runtime control raw discriminators fail closed and en
         nested.payload.core_command.tag = @intCast(raw);
         if (nested.decode() != null) valid_nested += 1;
     }
-    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len), valid_nested);
+    // selection_scroll_and_extend의 zeroed delta는 semantic invalid이므로 raw tag sweep 한 건은 fail-closed다.
+    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len - 1), valid_nested);
 
     const zeroed = RuntimeControl.coreCommand(.scroll_to_bottom);
     const bytes = std.mem.asBytes(&zeroed);

@@ -1032,6 +1032,15 @@ test "셰이퍼: 말줄임이 글리프를 줄인다" {
     std.debug.print("\n  SHAPE 안 자름={d} 자름={d}\n", .{ full.count, cut.count });
     try std.testing.expect(cut.count < full.count);
 
+    // **자른 런의 글리프가 서로 겹치면 안 된다.** 개수만 보면 속 빈다 — 자리가 뒤로 안 가고 앞으로
+    // 되감기면 글자가 포개져 읽을 수 없다(제품 캡처 2026-08-25: 브랜치 이름이 그렇게 뭉갰다).
+    // 말줄임 부호가 별도 런으로 오므로 **런이 여럿일 때 x 가 되감기는지**가 진짜 위험이다.
+    var prev_end: f32 = -1e9;
+    for (out[0..cut.count]) |g| {
+        try std.testing.expect(g.x_px + 0.5 >= prev_end);
+        prev_end = g.x_px + g.advance_px;
+    }
+
     // **앞을 자르는 것은 아직 없다 — 조용히 뒤를 자르지 않는다.**
     try std.testing.expectError(error.UnsupportedHeadTrim, sh.shape(.{
         .text = "Wi->l 100% tail.zig",

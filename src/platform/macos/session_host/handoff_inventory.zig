@@ -676,12 +676,14 @@ pub const runtime_manager_groups = [_]Group{
             "backend_impl",
             "host_registry",
             "foreground_cache",
+            "observation_caches",
             "bell_counts",
             "clipboards",
             "observed_reaped_children",
             "observed_last_child_exit_status",
             "output_metrics_enabled",
             "observed_output_bytes",
+            "observation_materializations",
             "output_wake",
             // The successor re-derives this from its own invocation host_id, which upgrade validation forces to
             // equal the predecessor's, so the agent-hook instance segment it stamps on new children keeps the
@@ -693,7 +695,7 @@ pub const runtime_manager_groups = [_]Group{
             // spawned after an upgrade silently lost its hook identity. Adversarial review caught it.
             "hook_identity",
         },
-        .why = "the self-referential manager graph and process-local output self-pipe are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
+        .why = "the self-referential manager graph, process-local output self-pipe, and derived canonical observation caches are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
     },
 };
 

@@ -104,12 +104,21 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 
 **행 렌더는 typed component다(FT1).** 행의 기하·페인트는 `src/chrome/components/file_tree/`(`types`·`build`·`view`)가 소유하고, 제품 배선은 `app_session/file_tree_dock.zig`가 Session Dock·SCM Dock과 **같은 순서**(투영 → props → build → view → paint)로 한다. 그래서 **행 높이가 터미널 셀에서 떨어져 나왔다** — `types.Metrics`가 logical pt를 backing scale로 한 번 환산하며, 그 값의 단일 소비 지점이 `file_tree_dock.fileTreeRowHeightPx`다(창 산술·히트테스트·스크롤 상한·reveal이 전부 그 함수를 지난다). 라벨은 measured CoreText 경로로 `list_row` role(14pt)로 그리고, 등록 PUA 아이콘만 셀 draw list로 간다. 선택·활성·호버 밴드는 컴포넌트가 낸 카드 rect를 `ui_paint`가 그리며, 포커스된 선택은 accent **막대**로 표시한다(면을 accent로 칠하면 이 층에 "accent 위 전경" role이 없어 글자가 안 읽힌다). **히트테스트도 그 tree를 본다(FT2).** 행은 `opacity = 0`인 card로 발행돼 **누르는 자리가 곧 그린 자리**이고, 포인터는 `chrome.ui.interaction.dispatch`를 지나 action 표(세대 검증)로 풀린다 — 여는 것은 `up`이며, 그 사이 투영이 바뀌면 세대가 안 맞아 거부되고 tree가 교체되면 capture가 풀린다. 호버의 주인도 `InteractionState` 하나다. 밴드가 좌우로 들어가 보이는 것은 `view`가 그리기 때문이고 **행의 히트 rect는 전폭**이다(여백을 컨테이너에서 떼면 그 여백이 클릭 사각지대가 된다). 좌표→행 산술(`file_tree_layout.rowAtLocalY`)은 Windows chrome 낮추기가 계속 쓰므로 남아 있고, 두 답이 같은지는 제품-path 테스트가 창 전체를 훑어 대조한다. 아래 셀 열 서술은 **Windows가 쓰는 셀 경로**의 것이다 — 그 투영은 macOS 파일이 아니라 `src/platform/cell_text.zig`(macOS·Windows 공유 L4)가 소유하고, macOS에는 호출이 하나도 없다. Windows는 제품 도크 트리를 그것으로 그리고(W8.7a2) 같은 투영을 스모크가 픽셀까지 확인한다. 정의 위치와 호출 수를 `tests/boundary/imports.zig`가 센다(FT3). 함수가 사라지는 것은 Windows가 `ChromeDraw` 낮추기를 갖고 컴포넌트 경로로 갈아탈 때이며, 그 판단은 [단계 계획](plans/file-tree-component.md)의 FT3가 소유한다.
 
-**행 상태 밴드의 세기 순서**: 배경 < 호버·활성 < 선택. 선택만 `tab_active_bg`를 쓰고 나머지 상태는 한 단
-약한 `tab_hover_bg`를 쓴다(`view.bandRole`). **`row_hover_bg`는 이 목록에서 쓰지 않는다** — 그 role 은
-"활성 밴드 위에 겹쳐도 구분되게 활성보다 밝다"가 계약이라 카드 목록용이고, 상태가 배타인 이 트리에서는
-호버가 선택보다 밝아져 무엇을 고른 상태인지 사라진다(Chrome Lab 캡처 실측: 선택 rgb 80 대 호버 140).
-열린 파일은 밴드 대신 **라벨이 `surface_fg`로 올라가는 유일한 행**이라는 신호를 갖는다. 이 순서는 값
-테스트(`chrome/components/file_tree/view.zig`)와 시각 골든(`file-tree-hover-weaker-than-selection`)이 함께 지킨다.
+**밴드는 둘뿐이다 — 선택과 호버.** 선택은 `tab_active_bg`(+ 포커스면 왼쪽 accent 막대), 호버는 한 단
+약한 `tab_hover_bg`다(`view.bandRole`). 즉 **켜진 밴드는 언제나 "포인터가 여기"거나 "이 행을 골랐다"**이다.
+
+- **`row_hover_bg`는 이 목록에서 쓰지 않는다.** 그 role 은 "활성 밴드 위에 겹쳐도 구분되게 활성보다
+  밝다"가 계약이라 카드 목록용이고, 상태가 배타인 이 트리에서는 호버가 선택보다 밝아져 무엇을 고른
+  상태인지 사라진다(Chrome Lab 실측: 선택 rgb 80 대 호버 140).
+- **열린 파일에는 밴드가 없다.** 한때 호버와 같은 `tab_hover_bg`를 나눠 썼는데, 그러면 켜진 밴드가
+  "포인터가 여기"인지 "이 파일이 열려 있다"인지 구별되지 않는다(실측: 두 행이 같은 밝기 68). 신호가
+  빠진 것이 아니라 **거짓**이었다. 색을 하나 더 만들어 가르는 길은 닫혀 있다 — rich 팔레트의 상호작용
+  단계는 배경 10 위에서 88·94·100 이라 그 사이는 읽히지 않는다(`tokens.zig`의 `control_press_bg` 주석).
+  그래서 빼서 푼다. 열린 파일은 **라벨이 `surface_fg`로 올라가는 유일한 행**이라는 신호를 그대로 갖고,
+  덕분에 열린 파일도 호버에 반응한다.
+
+이 계약은 값 테스트(`chrome/components/file_tree/view.zig` — 세기 순서·활성 무밴드·호버 반응)와 시각
+골든(`file-tree-hover-weaker-than-selection`)이 함께 지킨다.
 
 **스크롤바·아이콘(같은 tree snapshot 소비)**: 목록이 viewport를 넘을 때만 tree content 우측에 track/thumb이 나온다. 그 둘은 `chrome/ui/tree.zig`의 **`scrollArea` 선언 하나**가 내는 entry이고(소스 컨트롤 뷰도 같은 선언·같은 발행 저장소를 쓴다 — 도크 뷰는 한 번에 하나만 보이므로 `dockListScroll()`이 사각형과 좌표계만 갈아끼운다), 그리기는 공용 `ui_paint` → `chrome_draw_lowering`이 한다 — 기하를 render·hover·track click·drag가 각자 계산하지 않고 **발행된 그 rect를 되읽는다**. L4 `AppSession`은 fade timer와 down 시점 domain 신원만 소유하고, 드래그 수명(잡은 지점·기하 고정·tick coalescing)은 `scroll_area.Drag`가 갖는다. resize/root 교체/rebuild가 generation 또는 기하를 무효화하면 drag를 취소한다. track이 놓일 자리는 컨테이너가 자기 폭에서 떼는 **픽셀 gutter**이고 스크롤바 유무와 무관하게 상시 예약되므로, 행 텍스트도 하이라이트 밴드도 그 안으로 넘어오지 않고 목록이 reflow하지 않는다. 중립 `src/chrome/file_tree_icon.zig`은 row projection 때 각 materialized row당 최대 한 번, filesystem/MIME 조회 없이 basename/extension을 ASCII-insensitive semantic `IconKind`로 분류하고 renderer/platform은 저장된 kind를 coverage PUA로만 lower한다. 폴더 open/closed와 source/test/docs/assets/config/dependency/output 이름군, 주요 개발 언어·web·data/config·git·image/document/archive/package 파일군, generic fallback을 제공한다. 아이콘은 모두 theme foreground 단색이고 focused selection에서는 contrast foreground를 쓴다. disclosure/icon/label 열과 우측 dirty/conflict slot은 겹치지 않는다. **행 아이콘은 2칸으로 그린다** — 합성 아이콘은 슬롯의 짧은 변에 맞춰 그려지므로(`icon_glyph.fillCoverage`) 칸 수가 곧 크기이고, 1칸이면 셀 폭(~8px)까지 줄어 실루엣이 뭉개진다. 사이드바 보조줄(`wideIconGlyph`)·도크 뷰 바(`dock_view_bar.icon_cols`)가 같은 이유로 이미 2칸이라, 트리만 1칸이던 동안에는 같은 화면에서 트리 아이콘만 절반 크기였다(사용자 보고 2026-08-22). 아이콘이 슬롯을 꽉 채우므로 라벨은 `icon_col + 3`(아이콘 2칸 + 간격 1칸)에서 시작한다 — 사이드바 `sidebar_row_icon_cols = 3`·소스 컨트롤 파일 행과 같은 규약이고, 간격이 없으면 아이콘이 첫 글자에 붙어 한 글리프처럼 읽힌다. 두 번째 칸이 dirty/conflict slot을 침범하는 좁은 폭에서만 1칸으로 접는다. 제품-path artifact는 row projection 방문≤16,384, row당 classify≤1, pointer/frame당 geometry build≤1, allocation과 dock layout rebuild 0, 스크롤바 quad≤2(track+thumb)를 실제 counter로 검증한다. filesystem/MIME·worker·lock·CoreText 부재는 숫자 0인 척하는 sentinel을 두지 않고 중립 모듈 import 경계와 코드 검토 대상으로 명시한다. 상세 hard gate는 [performance-budget.md](performance-budget.md#파일-탐색기-scrollbaricon-예산)가 소유한다. 기존 Octicons 자산으로 표현할 수 없는 SVG를 추가하면 exact name/version/source/license를 `third-party-licenses.md`에 기록하고 generator의 manifest/hash/`--check`가 coverage/C/Zig registry drift를 실패시킨 뒤에만 포함한다.
 

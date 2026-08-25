@@ -1227,7 +1227,7 @@ pub fn build(b: *std.Build) void {
             "provider files remain unchanged across AppSession.init when the statusline hook is off",
             "agent hooks install into the claude hooks array and leave user entries untouched",
             "agent hooks install into codex and record trust without touching existing entries",
-            "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 않는다",
+            "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린다",
             "turning the agent hooks gate off removes what we installed and nothing else",
             "hook mode fills state and conversation from the event log, and only then",
             "hook mode runs exactly one source and takes over notifications",

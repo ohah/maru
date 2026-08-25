@@ -3925,6 +3925,10 @@ pub const AppSession = struct {
     /// 덮지 않으므로(무한 승인 프롬프트 방지) 이 상태는 사용자가 codex에서 승인해야 풀린다 — 그래서
     /// **알린다**. 알리지 않으면 "훅을 켰는데 배지가 화면을 따라간다"만 남는다(조용한 폴백 금지).
     agent_hook_trust_stale: u32 = 0,
+    /// 낡아 있던 신뢰 값을 우리가 **고친** 훅 수(계약 §2.1 의 갱신 경로). 조용히 고치지 않고 알린다 —
+    /// 사용자 홈의 파일을 우리가 손댄 것이고, 그 결과 codex 의 동작이 달라지기 때문이다(다음 실행부터
+    /// 훅이 다시 돈다). 값 하나당 시도는 한 번뿐이라 이 수가 매번 오르지는 않는다.
+    agent_hook_trust_refreshed: u32 = 0,
     /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
     /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
     ended_placeholder_notice_pending: u32 = 0,
@@ -7129,10 +7133,19 @@ pub const AppSession = struct {
     /// **고치는 법까지 문장에 싣는다.** 우리는 남의 신뢰 값을 덮지 않으므로 이 상태를 코드로 풀 수 없고,
     /// 사용자가 codex를 열어 승인해야 한다. 원인만 말하고 방법을 안 주면 사용자가 할 수 있는 일이 없다.
     fn showPendingAgentHookTrustNotice(self: *AppSession) void {
-        if (self.agent_hook_trust_stale == 0) return;
-        const count = self.agent_hook_trust_stale;
+        // **못 고친 쪽이 먼저다.** 둘이 같은 tick 에 잡히면(일부는 고치고 일부는 이미 시도해 봤을 때)
+        // 사용자가 할 일이 남은 쪽을 보여야 한다 — 「고쳤습니다」만 뜨면 안 도는 훅이 남은 것을 모른다.
+        const stale = self.agent_hook_trust_stale;
+        const refreshed = self.agent_hook_trust_refreshed;
         self.agent_hook_trust_stale = 0;
-        self.showNoticeFmt(.app_agent_hook_trust_stale, &.{.{ .d = @intCast(count) }});
+        self.agent_hook_trust_refreshed = 0;
+        if (stale != 0) {
+            self.showNoticeFmt(.app_agent_hook_trust_stale, &.{.{ .d = @intCast(stale) }});
+            return;
+        }
+        if (refreshed != 0) {
+            self.showNoticeFmt(.app_agent_hook_trust_refreshed, &.{.{ .d = @intCast(refreshed) }});
+        }
     }
 
     /// §7 종료 placeholder가 하나 이상 복원됐음을 첫 tick에 알린다(host connect notice와 같은 self-gate 패턴 — 복원은
@@ -21078,7 +21091,7 @@ test "agent hooks install into codex and record trust without touching existing 
 //
 // 알리지 않으면 사용자에게 남는 정보는 «훅을 켰는데 배지가 여전히 화면을 따라간다» 뿐이다. 2026-08-25 에
 // 실제로 그 상태였고(V3 훅 7개가 전부 `modified`), 무엇이 잘못됐는지 알려 주는 표면이 아무 데도 없었다.
-test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 않는다" {
+test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린다" {
     agent_ops.test_allow_provider_writes = true;
     defer agent_ops.test_allow_provider_writes = false;
 
@@ -21128,7 +21141,8 @@ test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 �
         first.deinit();
     }
 
-    // ② 커맨드가 바뀐 뒤를 흉내 낸다: 값만 낡게 만든다(키·자리는 그대로 — 그것이 이 결함의 모양이다).
+    // ② 커맨드가 바뀐 뒤를 흉내 낸다: 값도, 우리가 남긴 `tried=` 기록도 **옛 값**이 된다(그게 실제 모양이다 —
+    //    커맨드가 바뀌면 우리 해시가 달라지고 파일에 남은 둘은 그대로다). 키·자리는 안 건드린다.
     const installed = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
     defer a.free(installed);
     var stale_text: std.ArrayListUnmanaged(u8) = .empty;
@@ -21136,17 +21150,18 @@ test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 �
     var replaced: usize = 0;
     var rest: []const u8 = installed;
     while (std.mem.indexOf(u8, rest, "sha256:")) |at| {
-        const value_end = std.mem.indexOfScalarPos(u8, rest, at, '"') orelse break;
+        const value_end = std.mem.indexOfAnyPos(u8, rest, at, "\"\n") orelse break;
         try stale_text.appendSlice(a, rest[0..at]);
         try stale_text.appendSlice(a, "sha256:staaale");
         rest = rest[value_end..];
         replaced += 1;
     }
     try stale_text.appendSlice(a, rest);
-    try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), replaced); // 세트 전부를 낡게 했다
+    // 항목마다 값 한 번 + `tried=` 한 번이다.
+    try std.testing.expectEqual(@as(usize, hook_command.codex_events.len * 2), replaced);
     try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = stale_text.items });
 
-    // ③ 다시 뜬다. 훅 파일은 그대로이므로 설치는 «할 것 없음» 이고, 그 경로에서 어긋남이 보여야 한다.
+    // ③ 다시 뜬다. 훅 파일은 그대로라 설치는 «할 것 없음» 이고, 그 경로에서 **고친다**.
     var session: AppSession = undefined;
     try session.init(io, a, .{
         .abi_version = abi_version,
@@ -21157,40 +21172,60 @@ test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 �
     });
     defer session.deinit();
 
-    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
-
-    // **덮지 않았다** — 낡은 값이 그대로다(정책 §2.1). 덮으면 사용자가 승인한 값과 매번 싸운다.
-    const after = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
-    defer a.free(after);
-    try std.testing.expectEqualStrings(stale_text.items, after);
-
-    // ④ **아직 알리기 전에** 고쳐지면 세었던 수가 내려가야 한다. 사용자가 codex 에서 승인하면 codex 가
-    // **같은 커맨드로** 값을 다시 계산해 적으므로 우리 값과 같아진다 — 그 값은 «지금 어긋난 개수» 이지
-    // «어긋난 적이 있다» 가 아니다. latch 로 두면 멀쩡해진 뒤에 거짓 알림이 뜬다.
-    //
-    // **순서가 이 판정의 전부다.** 알린 뒤에 확인하면 그때는 이미 0 이라 latch 를 못 본다(실제로 그렇게
-    // 썼다가 뮤테이션이 «안 잡힘» 으로 드러났다).
-    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
-    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = installed });
-    agent_ops.reconcileAgentHooks(&session);
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_refreshed);
     try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale);
 
-    // ⑤ 다시 낡게 만들고, 이번엔 **tick 이 실제로 부르는 경로**로 알림까지 확인한다. `showPending…` 을
-    // 직접 부르면 「세는 것」만 보고 «그 함수가 tick 에 걸려 있는가» 는 못 본다 — 그 구멍이 예전에 원격
-    // 화면을 통째로 안 그리게 만든 적이 있다(렌더 입력만 보고 실제 게이트는 안 봤다).
-    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = stale_text.items });
-    agent_ops.reconcileAgentHooks(&session);
-    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+    // **갱신은 설치가 쓰는 바이트와 같은 것을 돌려놓는다.** 제자리 수술이 줄 하나만 갈아 끼우고 나머지는
+    // 원문 그대로 흘려보낸다는 뜻이다 — 여기가 어긋나면 사용자 파일이 조금씩 변형된다.
+    const healed = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(healed);
+    try std.testing.expectEqualStrings(installed, healed);
 
+    // 고친 것도 **알린다** — 사용자 홈의 파일을 우리가 손댔고 그 결과 codex 동작이 달라진다.
     session.update_started = true; // 첫 tick 의 새 버전 백그라운드 체크는 네트워크라 테스트에서 끈다.
     try std.testing.expect(!session.chrome_host.notice.open);
     session.runFramePreHousekeeping();
     try std.testing.expect(session.chrome_host.notice.open);
-    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale); // 한 번 띄우고 끈다(매 tick 반복 금지)
-    // 그 tick 이 파일을 건드리지도 않았다.
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_refreshed);
+
+    // ④ **무한 프롬프트 차단기.** 사용자가 codex 에서 승인하면 codex 가 **자기 값**을 적는다 — 우리 값이
+    //    틀렸다면 그 모양이 된다(값은 남의 것, `tried=` 는 우리가 마지막에 쓴 것). 그때 또 쓰면 매 실행
+    //    승인 프롬프트가 뜨는 루프가 된다. 값 하나당 시도는 한 번뿐이어야 한다.
+    var reverted: std.ArrayListUnmanaged(u8) = .empty;
+    defer reverted.deinit(a);
+    var reverts: usize = 0;
+    var tail: []const u8 = healed;
+    const value_prefix = "trusted_hash = \"";
+    while (std.mem.indexOf(u8, tail, value_prefix)) |at| {
+        const from = at + value_prefix.len;
+        const end = std.mem.indexOfScalarPos(u8, tail, from, '"') orelse break;
+        try reverted.appendSlice(a, tail[0..from]);
+        try reverted.appendSlice(a, "sha256:codexwroteit");
+        tail = tail[end..];
+        reverts += 1;
+    }
+    try reverted.appendSlice(a, tail);
+    try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), reverts); // 값만 되돌렸다
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = reverted.items });
+
+    agent_ops.reconcileAgentHooks(&session);
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_refreshed); // 다시 쓰지 않았다
+
+    // **되돌아온 값을 안 건드렸다** — 이 단언이 곧 「무한 루프가 아니다」의 증거다.
+    const after_revert = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(after_revert);
+    try std.testing.expectEqualStrings(reverted.items, after_revert);
+
+    // ⑤ 그때는 **사용자가 할 일**을 알린다(고쳤다는 알림이 아니라). tick 이 실제로 부르는 경로로 확인한다 —
+    //    `showPending…` 을 직접 부르면 그 함수가 tick 에 걸려 있는지는 못 본다.
+    session.dismissMessageOverlays();
+    session.runFramePreHousekeeping();
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale); // 한 번 띄우고 끈다
     const after_tick = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
     defer a.free(after_tick);
-    try std.testing.expectEqualStrings(stale_text.items, after_tick);
+    try std.testing.expectEqualStrings(reverted.items, after_tick);
 }
 
 test "agent hooks stay out of provider files while the gate is off" {

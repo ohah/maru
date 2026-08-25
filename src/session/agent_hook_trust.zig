@@ -185,16 +185,148 @@ pub fn storedHash(config_text: []const u8, key: []const u8) ?[]const u8 {
             continue;
         }
         if (!in_table) continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        // **이름을 통째로 비교한다.** `startsWith` 로 보면 `trusted_hash_algo` 같은 이웃 키가 통과해
-        // 그 값을 우리 값으로 읽는다 — 그러면 멀쩡한 설정에 「어긋났다」 경고가 뜬다(거짓 경고).
-        if (!std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), "trusted_hash")) continue;
-        const rest = std.mem.trim(u8, line[eq + 1 ..], " \t");
-        if (rest.len < 2 or rest[0] != '"') continue;
-        const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
-        return rest[1..end];
+        if (trustedHashValue(line)) |v| return v;
     }
     return null;
+}
+
+/// 이 줄이 `trusted_hash = "…"` 이면 그 값. 아니면 `null`.
+///
+/// **이름을 통째로 비교한다.** `startsWith` 로 보면 `trusted_hash_algo` 같은 이웃 키가 통과해 그 값을
+/// 우리 값으로 읽는다 — 그러면 멀쩡한 설정에 「어긋났다」 경고가 뜬다(거짓 경고).
+fn trustedHashValue(trimmed_line: []const u8) ?[]const u8 {
+    const eq = std.mem.indexOfScalar(u8, trimmed_line, '=') orelse return null;
+    if (!std.mem.eql(u8, std.mem.trim(u8, trimmed_line[0..eq], " \t"), "trusted_hash")) return null;
+    const rest = std.mem.trim(u8, trimmed_line[eq + 1 ..], " \t");
+    if (rest.len < 2 or rest[0] != '"') return null;
+    const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
+    return rest[1..end];
+}
+
+/// 표식 줄에 값을 적을 때 쓰는 접두. `# MARU_HOOK_V3 tried=sha256:…`
+///
+/// **이 한 조각이 「무한 승인 프롬프트」를 구조로 막는다**(계약 §2.1). 갱신은 값 하나당 **한 번**만 한다 —
+/// 우리가 써 넣은 값을 여기 남겨 두고, 다음에 또 어긋나 있는데 그 값이 **지금 쓰려는 것과 같으면** 이미
+/// 써 봤고 누군가 되돌렸다는 뜻이므로 다시 쓰지 않는다. 우리 공식이 틀린 경우가 정확히 그 모양이고,
+/// 그때 사용자는 승인 프롬프트를 **한 번만** 본다.
+pub const tried_prefix = " tried=";
+
+/// 이 키의 테이블 **바로 앞 표식 줄**에 적힌 «우리가 시도했던 값». 없으면 `null`.
+pub fn triedHash(config_text: []const u8, key: []const u8) ?[]const u8 {
+    var last_marker: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, config_text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] == '#') {
+            last_marker = if (std.mem.indexOf(u8, line, command.marker) != null) line else null;
+            continue;
+        }
+        if (line[0] != '[') continue;
+        if (!isStateHeaderFor(line, key)) {
+            last_marker = null; // 남의 테이블을 지났다 — 그 앞의 표식은 이 키의 것이 아니다
+            continue;
+        }
+        const marker_line = last_marker orelse return null;
+        const at = std.mem.indexOf(u8, marker_line, tried_prefix) orelse return null;
+        const value = std.mem.trim(u8, marker_line[at + tried_prefix.len ..], " \t");
+        return if (value.len == 0) null else value;
+    }
+    return null;
+}
+
+/// 이미 있는 항목의 값을 **제자리에서** 갈아 끼운다(계약 §2.1 의 갱신 경로). 성공하면 `true`.
+///
+/// **덧붙이지 않는다.** 같은 테이블을 두 번 적으면 TOML 이 깨져 codex 가 `config.toml` **전체**를 못 읽는다 —
+/// 훅이 아니라 사용자의 설정이 통째로 죽는다(이 파일의 첫 번째 규칙). 그래서 갱신은 값 한 줄만 바꾼다.
+///
+/// 표식 줄도 함께 맞춘다. 없으면(= codex 가 사용자 승인으로 적은 항목) **새로 넣는다** — 그 항목은 우리
+/// 훅의 것이고, 우리가 값을 손댄 이상 누가 손댔는지 파일에 보여야 한다. 그 줄에 `tried=` 로 이번에 쓴 값을
+/// 남겨 다음 판단의 근거로 삼는다.
+///
+/// 못 찾으면(테이블이 없거나 값 줄이 없으면) `false` 를 주고 **아무것도 안 바꾼다** — 호출부는 그때 쓰지
+/// 않고 사용자에게 알리는 쪽으로 간다.
+pub fn rewriteTrustEntry(
+    out: *std.ArrayListUnmanaged(u8),
+    a: std.mem.Allocator,
+    config_text: []const u8,
+    key: []const u8,
+    hash: []const u8,
+) !bool {
+    var in_target = false;
+    var found_table = false;
+    var wrote_value = false;
+    var marker_done = false;
+    // 표식 줄은 헤더 **앞**에 오므로 판단을 미룬다 — 대상 헤더가 뒤따르면 갈아 끼우고, 아니면 원문
+    // 그대로 내보낸다. 그 사이의 **빈 줄은 투명하게 넘긴다**: 손으로 편집한 파일에서 표식과 헤더 사이가
+    // 벌어져 있으면, 안 그럴 경우 옛 표식을 흘려보낸 뒤 새것을 또 넣어 **표식이 둘**이 된다.
+    var pending_marker: ?[]const u8 = null;
+    var pending_blanks: usize = 0;
+    var first = true;
+
+    var lines = std.mem.splitScalar(u8, config_text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const is_marker = line.len != 0 and line[0] == '#' and
+            std.mem.indexOf(u8, line, command.marker) != null;
+        const is_header = line.len != 0 and line[0] == '[';
+        const is_target_header = is_header and isStateHeaderFor(line, key);
+
+        if (pending_marker != null and line.len == 0) {
+            pending_blanks += 1;
+            continue;
+        }
+        if (pending_marker) |m| {
+            pending_marker = null;
+            if (is_target_header) {
+                try emitLine(out, a, &first, null);
+                try out.print(a, "# {s}{s}{s}", .{ command.marker, tried_prefix, hash });
+                marker_done = true;
+            } else {
+                try emitLine(out, a, &first, m);
+            }
+            while (pending_blanks != 0) : (pending_blanks -= 1) try emitLine(out, a, &first, "");
+        }
+
+        if (is_marker) {
+            pending_marker = raw;
+            continue;
+        }
+        if (is_header) {
+            if (is_target_header) {
+                found_table = true;
+                in_target = true;
+                if (!marker_done) {
+                    try emitLine(out, a, &first, null);
+                    try out.print(a, "# {s}{s}{s}", .{ command.marker, tried_prefix, hash });
+                    marker_done = true;
+                }
+            } else in_target = false;
+            try emitLine(out, a, &first, raw);
+            continue;
+        }
+        if (in_target and !wrote_value and trustedHashValue(line) != null) {
+            try emitLine(out, a, &first, null);
+            try out.print(a, "trusted_hash = \"{s}\"", .{hash});
+            wrote_value = true;
+            continue;
+        }
+        try emitLine(out, a, &first, raw);
+    }
+    if (pending_marker) |m| {
+        try emitLine(out, a, &first, m);
+        while (pending_blanks != 0) : (pending_blanks -= 1) try emitLine(out, a, &first, "");
+    }
+
+    return found_table and wrote_value;
+}
+
+/// 줄 사이 `\n` 만 넣는다(마지막 줄 뒤에는 안 넣는다) — 원문 바이트를 그대로 되살리기 위해서다.
+/// `line` 이 `null` 이면 구분자만 넣고 내용은 호출부가 이어 쓴다.
+fn emitLine(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, first: *bool, line: ?[]const u8) !void {
+    if (!first.*) try out.append(a, '\n');
+    first.* = false;
+    if (line) |l| try out.appendSlice(a, l);
 }
 
 /// `[hooks.state."<키>"]` 인가. **따옴표 안을 통째로 비교한다** — 키에 `.` 와 `:` 가 들어가서
@@ -220,7 +352,15 @@ pub fn appendTrustEntry(
 ) !void {
     if (config_text.len != 0 and config_text[config_text.len - 1] != '\n') try out.append(a, '\n');
     // 사람이 열어 봤을 때 **누가 넣었는지** 보이게 한다. 훅 커맨드의 표식과 같은 역할이다.
-    try out.print(a, "\n# {s}\n[hooks.state.\"{s}\"]\ntrusted_hash = \"{s}\"\n", .{ command.marker, key, hash });
+    // `tried=` 로 **이번에 쓴 값**을 함께 남긴다 — 갱신 경로(`rewriteTrustEntry`)와 같은 형식이라야
+    // 「이 값은 이미 써 봤다」 판단이 첫 설치분에도 성립한다.
+    try out.print(a, "\n# {s}{s}{s}\n[hooks.state.\"{s}\"]\ntrusted_hash = \"{s}\"\n", .{
+        command.marker,
+        tried_prefix,
+        hash,
+        key,
+        hash,
+    });
 }
 
 /// 우리 표식이 붙은 신뢰 블록을 거둔다. **표식이 유일한 기준이다** — 사용자가 직접 승인해 codex 가 적은
@@ -618,6 +758,104 @@ test "키가 다른 키의 부분 문자열이어도 섞이지 않는다" {
 
     try testing.expectEqualStrings("sha256:short", storedHash(text.items, "/h.json:stop:0:0").?);
     try testing.expectEqualStrings("sha256:long", storedHash(text.items, "/h.json:stop:0:00").?);
+}
+
+test "갱신은 값 한 줄만 바꾼다 — 테이블을 새로 만들지 않는다" {
+    const a = testing.allocator;
+    const key = "/h.json:stop:1:0";
+    // codex 가 사용자 승인으로 적은 모양(우리 표식이 없다) + 앞뒤에 사용자 내용.
+    const before = "model = \"gpt-5\"\n\n[hooks.state.\"" ++ key ++ "\"]\ntrusted_hash = \"sha256:old\"\n\n[tui]\nx = 1\n";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try rewriteTrustEntry(&out, a, before, key, "sha256:new"));
+
+    try testing.expectEqualStrings("sha256:new", storedHash(out.items, key).?);
+    // **테이블은 하나뿐이다** — 둘이 되면 TOML 이 깨져 codex 가 파일 전체를 못 읽는다.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "[hooks.state.\"" ++ key ++ "\"]"));
+    // 남의 내용은 그대로다.
+    try testing.expect(std.mem.indexOf(u8, out.items, "model = \"gpt-5\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "[tui]") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "x = 1") != null);
+    // 우리가 손댔다는 표식과 «이번에 쓴 값» 이 남는다.
+    try testing.expectEqualStrings("sha256:new", triedHash(out.items, key).?);
+}
+
+test "이미 우리 표식이 있으면 그 줄을 갈아 끼운다 — 표식이 쌓이지 않는다" {
+    const a = testing.allocator;
+    const key = "/h.json:stop:1:0";
+    var before: std.ArrayListUnmanaged(u8) = .empty;
+    defer before.deinit(a);
+    try appendTrustEntry(&before, a, before.items, key, "sha256:first");
+    try testing.expectEqualStrings("sha256:first", triedHash(before.items, key).?);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try rewriteTrustEntry(&out, a, before.items, key, "sha256:second"));
+    try testing.expectEqualStrings("sha256:second", storedHash(out.items, key).?);
+    try testing.expectEqualStrings("sha256:second", triedHash(out.items, key).?);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, command.marker));
+}
+
+test "표식과 헤더 사이가 벌어져 있어도 표식이 둘이 되지 않는다" {
+    const a = testing.allocator;
+    const key = "/h.json:stop:1:0";
+    // 손으로 편집한 파일의 모양. 빈 줄을 투명하게 넘기지 않으면 옛 표식을 흘려보낸 뒤 새것을 또 넣는다.
+    const before = "# " ++ command.marker ++ " tried=sha256:old\n\n[hooks.state.\"" ++ key ++ "\"]\ntrusted_hash = \"sha256:old\"\n";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(try rewriteTrustEntry(&out, a, before, key, "sha256:new"));
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, command.marker));
+    try testing.expectEqualStrings("sha256:new", storedHash(out.items, key).?);
+    try testing.expectEqualStrings("sha256:new", triedHash(out.items, key).?);
+    // 벌어져 있던 빈 줄은 그대로 남는다(사용자 파일의 모양을 우리가 정리하지 않는다).
+    try testing.expect(std.mem.indexOf(u8, out.items, "\n\n[hooks.state.") != null);
+}
+
+test "대상이 없으면 아무것도 안 바꾼다 — 호출부가 알리는 쪽으로 간다" {
+    const a = testing.allocator;
+    const before = "model = \"gpt-5\"\n\n[tui]\nx = 1\n";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    try testing.expect(!try rewriteTrustEntry(&out, a, before, "/h.json:stop:1:0", "sha256:new"));
+
+    // 값 줄이 없는 테이블도 «못 했다» 다 — 헤더만 있는데 성공이라고 하면 호출부가 안 알린다.
+    var out2: std.ArrayListUnmanaged(u8) = .empty;
+    defer out2.deinit(a);
+    const headerless = "[hooks.state.\"/h.json:stop:1:0\"]\n\n[tui]\nx = 1\n";
+    try testing.expect(!try rewriteTrustEntry(&out2, a, headerless, "/h.json:stop:1:0", "sha256:new"));
+}
+
+test "남의 테이블 앞 표식을 이 키의 것으로 읽지 않는다" {
+    const a = testing.allocator;
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    defer text.deinit(a);
+    try appendTrustEntry(&text, a, text.items, "/h.json:stop:0:0", "sha256:aaa");
+    // 우리 블록 뒤에 **표식 없는** 남의 테이블이 온다 — 그 키에는 시도 기록이 없어야 한다.
+    try text.appendSlice(a, "\n[hooks.state.\"/h.json:stop:1:0\"]\ntrusted_hash = \"sha256:bbb\"\n");
+
+    try testing.expectEqualStrings("sha256:aaa", triedHash(text.items, "/h.json:stop:0:0").?);
+    try testing.expect(triedHash(text.items, "/h.json:stop:1:0") == null);
+}
+
+test "갱신해도 껐다 켜면 원래 바이트로 돌아온다" {
+    const a = testing.allocator;
+    const key = "/h.json:stop:1:0";
+    const user = "model = \"gpt-5\"\n";
+    var installed: std.ArrayListUnmanaged(u8) = .empty;
+    defer installed.deinit(a);
+    try installed.appendSlice(a, user);
+    try appendTrustEntry(&installed, a, installed.items, key, "sha256:first");
+
+    var refreshed: std.ArrayListUnmanaged(u8) = .empty;
+    defer refreshed.deinit(a);
+    try testing.expect(try rewriteTrustEntry(&refreshed, a, installed.items, key, "sha256:second"));
+
+    // 갱신은 우리 블록의 모양을 안 바꾼다 — 제거가 그 모양을 근거로 삼기 때문이다.
+    var removed: std.ArrayListUnmanaged(u8) = .empty;
+    defer removed.deinit(a);
+    try testing.expect(try removeTrustEntries(&removed, a, refreshed.items));
+    try testing.expectEqualStrings(user, removed.items);
 }
 
 test "이웃 키를 우리 키로 오인하지 않는다 — 접두가 같은 이름이 먼저 와도" {

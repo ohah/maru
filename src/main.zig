@@ -1788,6 +1788,19 @@ fn applyCoreConfig(
 
 const smoke_spin_cap: usize = 720;
 
+test "판정용 앞부분: 안 잘린 문자열은 그대로, 잘리면 글자 경계에서" {
+    const t = std.testing;
+    // **안 잘렸으면 손대지 않는다.** 세 바이트짜리 한글 제목이 통째로 사라지던 자리다 — 남는 것이
+    // 0 이면 `needle.len >= 3` 에 걸려 **그려졌는데도 안 세어진다**.
+    try t.expectEqualStrings("네", codepointPrefix("네", 8));
+    try t.expectEqualStrings("abc", codepointPrefix("abc", 8));
+    // 잘릴 때는 글자 경계로 물러난다 — 반쪽 글자가 남으면 어떤 문자열에서도 못 찾는다.
+    try t.expectEqualStrings("마루 ", codepointPrefix("마루 프로젝트", 8));
+    try t.expectEqualStrings("resume-b", codepointPrefix("resume-background-agent", 8));
+    // 첫 글자부터 경계를 넘으면 빈 값 — 호출부가 `>= 3` 으로 거른다.
+    try t.expectEqualStrings("", codepointPrefix("마", 2));
+}
+
 test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹치지 않는다" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     const cell_w: u32 = 9;
@@ -2819,9 +2832,13 @@ fn toggleTreeRow(
 /// UTF-8 경계에서 자른 앞부분. **바이트로 자르면 반쪽 글자가 남아** 어떤 문자열에서도 못 찾는다 —
 /// 한글·이모지 제목이 전부 "안 그려졌다" 로 보인다.
 fn codepointPrefix(s: []const u8, max_bytes: usize) []const u8 {
-    var end = @min(s.len, max_bytes);
+    // **안 잘렸으면 손대지 않는다.** 잘 만들어진 문자열은 마지막 바이트가 이어지는 바이트인 것이
+    // 정상인데(한글·이모지가 그렇다), 그것을 잘린 것으로 보고 벗기면 **멀쩡한 끝 글자가 사라진다** —
+    // 세 바이트짜리 한글 제목이면 남는 것이 0 이라 아예 안 세어진다.
+    if (s.len <= max_bytes) return s;
+    var end = max_bytes;
     while (end > 0 and (s[end - 1] & 0xC0) == 0x80) end -= 1;
-    if (end > 0 and end < s.len and (s[end - 1] & 0x80) != 0) end -= 1;
+    if (end > 0 and (s[end - 1] & 0x80) != 0) end -= 1;
     return s[0..end];
 }
 

@@ -4619,6 +4619,23 @@ agent_scan_kb=43214 agent_keep_kb=7 agent_ok=true
 | `faceFor` 순서를 되돌린다 | 회귀 테스트 `expected 1, found 0` |
 | 이름 조회가 늘 빗나가게 한다 | `agent_raster_err 0 → 122 ok=false` |
 
+## 이력이 없는 기계는 실패가 아니다
+
+카드가 0 인 이유가 **"이 기계에 이력이 없다"** 인지 **"훑기가 깨졌다"** 인지 갈라 두지 않으면,
+provider 를 안 쓰는 기계에서 스모크가 **거짓 실패**를 낸다 — 그리고 그 실패를 무시하기 시작하면
+진짜 회귀도 같이 묻힌다. `agent_list` 가 그 사실을 말한다(`ok` · `no_history` · `no_home` ·
+`scan_failed`).
+
+```text
+$ HOME=<빈 폴더> maru win32-terminal-smoke
+agent_items=0 agent_cards=0 agent_titles_drawn=0 agent_list=no_history agent_ok=true
+```
+
+> **그렇게 갈랐더니 구멍이 하나 생겼다.** `titles_drawn == cards` 만 보면 **0 == 0 이 참**이라
+> 목록을 표면에 안 넘기는 퇴행이 그대로 통과한다 — 실측으로 그 뮤턴트가 이 자리를 빠져나갔다.
+> **목록이 있다고 말했으면 카드가 있어야 한다**는 조건을 함께 건다. 판정을 너그럽게 만들 때마다
+> 그 너그러움이 어디까지 번지는지 다시 재야 한다.
+
 **둘은 서로를 못 본다.** 마지막 뮤턴트에서 `agent_titles_drawn` 은 **11 그대로**였다 —
 그 값은 셰이핑 결과(`artifact.records` 의 코드포인트)를 보므로 **굽기 실패를 못 본다**. 거꾸로
 `agent_raster_err` 는 세 번째 결함을 못 봤다(잘못된 face 라도 굽기는 성공한다). 그래서 **둘 다** 낸다.

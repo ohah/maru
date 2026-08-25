@@ -3635,6 +3635,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
+    // **이력이 없는 기계는 실패가 아니다.** 카드가 0 인 이유가 "이 기계에 이력이 없다" 인지
+    // "훑기가 깨졌다" 인지 갈라 두지 않으면, provider 를 안 쓰는 기계에서 스모크가 **거짓 실패**를
+    // 낸다 — 그리고 그 실패를 무시하기 시작하면 진짜 회귀도 같이 묻힌다(§2m.44 의 그 교훈).
+    var agent_list_reason: []const u8 = "";
     {
         // **홈은 중립이 정한다**(`user_paths.homeDirFor`) — Windows 는 `HOME` 이 없어 `%USERPROFILE%`
         // 로 간다. 여기서 손으로 고르면 그 규칙이 두 곳이 된다(그 함수 doc 이 왜 이렇게 되는지 적어 뒀다).
@@ -3645,9 +3649,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (maru.user_paths.homeDirFor(@import("builtin").os.tag, home_env, up_env)) |home| {
             var scan_arena = std.heap.ArenaAllocator.init(allocator);
             defer scan_arena.deinit();
-            buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch {};
+            buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch {
+                agent_list_reason = "scan_failed";
+            };
+            if (agent_items.items.len == 0 and agent_list_reason.len == 0) agent_list_reason = "no_history";
             agent_scan_kb = scan_arena.queryCapacity() / 1024;
-        }
+        } else agent_list_reason = "no_home";
     }
     const scm_tokens = chromeTokensFor(cfg);
     const agent_opts = agent_surface.Options{
@@ -5430,7 +5437,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     if (agent_judgeable) {
         // **개수만 세면 속 빈다** — 조립이 실패해도 셀이 0 이고, 목록이 비어도 0 에 가깝다.
         // 그래서 **글자가 나왔는가**를 함께 본다: 헤더·검색·빈 안내는 목록과 무관하게 그려진다.
-        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_items={d} agent_groups={d} agent_cards={d} agent_titles_drawn={d} agent_raster_err={d} agent_scan_kb={d} agent_keep_kb={d} agent_slot=({d},{d}) agent_ok={}\n", .{
+        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_items={d} agent_groups={d} agent_cards={d} agent_titles_drawn={d} agent_list={s} agent_raster_err={d} agent_scan_kb={d} agent_keep_kb={d} agent_slot=({d},{d}) agent_ok={}\n", .{
             agent_view_reached,
             agent_ops,
             agent_ops_dropped,
@@ -5440,13 +5447,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             agent_groups,
             agent_cards,
             agent_titles_drawn,
+            if (agent_list_reason.len == 0) "ok" else agent_list_reason,
             agent_raster_err,
             agent_scan_kb,
             agent_keep_kb,
             agent_slot_x,
             agent_slot_y,
             agent_view_reached and agent_ops > 0 and agent_cells > 0 and agent_glyph_bytes > 0 and
-                agent_cards > 0 and agent_titles_drawn > 0 and
+                // **목록이 있다고 말했으면 카드가 있어야 한다.** `titles_drawn == cards` 만
+                // 보면 0 == 0 이 참이라, 목록을 표면에 안 넘기는 퇴행이 그대로 통과한다(실측:
+                // 그 뮤턴트가 이 자리를 빠져나갔다). 이력이 없는 기계는 `agent_list` 가 그
+                // 사실을 말하므로 그때만 0 을 받아들인다.
+                (agent_list_reason.len != 0 or agent_cards > 0) and
+                agent_titles_drawn == agent_cards and
                 // **1 MB 경계.** 남는 것은 카드 수에 비례하지(카드당 문자열 몇 개) 이력 크기에
                 // 비례하지 않는다 — 실측 카드 11 장에 7 KB 다. 수백 장이어도 이 안이고, arena 를
                 // 도로 합치면 **43 MB** 로 튄다(뮤턴트 실측). 그 사이에 경계를 둔다.

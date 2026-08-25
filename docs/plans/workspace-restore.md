@@ -46,6 +46,32 @@ TDD 방식:
 - **R4b 로드 + 멀티 창(Swift) — 완료**: 시작 시 저장된 workspace를 복원해 restore가 end-to-end로 닫힌다(저장 R5 → 로드 R4b). ABI `maru_macos_app_session_apply_workspace`(버전 37→38 — 헤더+한 창 텍스트를 parse[R2]해 세션에 `applyWorkspaceWindow`[R4a] 적용; parse 실패=invalid_config·apply 실패=create_failed·best-effort). Swift `restoreWorkspace()`가 `applicationDidFinishLaunching`에서 startAppSession '뒤'에: `loadWorkspaceBlocks`(파일 읽어 헤더 검증 후 `window ` 라인 경계로 창 블록 분할) → 첫 블록은 primary에 `applyWorkspaceBlock`(헤더 붙여 ABI), 나머지 블록마다 `createTerminalWindow(applyingBlock:)`(W2 팩토리를 블록 적용 가능하게 리팩터). 저장 없음·헤더 불일치·복원 off(`MARU_NO_WORKSPACE_RESTORE` env — config 토글은 후속)·smoke·빈 블록이면 기본 단일 창 유지. 검증: 헤드리스(복원 text → `parse` → `applyWorkspaceWindow` → capture가 단일 탭·split vertical ratio 300·pane 2·active 일치) + ABI 계약(38) + swift-check + app-smoke(smoke는 복원·저장 둘 다 끔) + 전체 게이트. 실제 복원(⌘Q 후 재실행에 레이아웃·cwd 되살아남)은 앱 수동.
 - **R6 보안 가드 + 없는 cwd graceful — 완료**: ① **민감 데이터 미저장 가드**: serialize 텍스트에 `env=`/`fd=`/`pid=`/`last-observed` 라인이 없음을 단언 — 모델이 그런 필드를 안 가져 live 핸들·env·last_observed_command가 저장 텍스트에 절대 안 샌다(workspace-restore.md 정책; 누가 그런 필드를 추가하면 깨져서 위반을 잡는 회귀 가드). cwd는 path라 정상 저장(redaction 대상은 env, path 아님). ② **없는 cwd graceful**: `usableRestoreCwd`가 존재하는 절대 디렉터리(libc `access` X_OK = chdir 가능)일 때만 그 cwd를 spawn에 쓰고, 없으면 null → 기본 cwd로 spawn해 **surface를 잃지 않는다**(잘못된 cwd면 자식 chdir이 `_exit(126)`이라 미리 확인 안 하면 복원 셸이 즉시 죽어 reap된다). 검증: `usableRestoreCwd` 단위(존재/없음/빈값/상대경로 — 크로스플랫폼) + macOS 통합(없는 cwd 모델 apply → 실패 없이 탭·surface 복원) + 민감 데이터 가드 + 전체 게이트. **이로써 9단계 Workspace restore(R1~R6)가 닫힌다.** 후속: config 토글(env disable 현재 env-var), 부분 복구 artifact(한 surface 실패 시 이유 기록), startup_recipe/env allowlist(정책 재확인 후), repo별 workspace.
 
+### incremental checkpoint (R7 — 계약은 [persistent-session-host.md](../persistent-session-host.md) §P4)
+
+R5 는 **정상 종료 시점 한 번**만 저장한다(`saveWorkspace()` 호출부가 하나다). 그래서 강제 종료·크래시면
+배치가 마지막 정상 종료 때 것으로 남고, keep-alive 를 켠 경우엔 그 사이 만든 runtime 이 manifest 에 안 실린다.
+「incremental manifest checkpoint 가 없어 최신 layout 자동 재연결은 아직 완료 계약이 아니다」(§2)가 이 상태다.
+
+순수 층은 이미 둘 다 있다 — P4 C1 coordinator(dirty 세대·debounce/retry·final Quit)와 C2 원자적 발행 leaf.
+**dirty 신호까지 배선됐고**(P4 C3-1), 남은 것은 구동이다.
+
+- **R7-0 게이트 — 이것이 먼저다.** 복원이 끝나기 전·종료가 시작된 뒤에는 checkpoint 를 돌리지 않는다.
+  🔴 복원은 창을 차례로 만들므로, 그 중간에 저장이 뛰면 **아직 안 만들어진 창이 빠진 스냅샷**을 쓴다 —
+  기존 가드(캡처 실패 시 전체 포기·유일성 검증)는 「아직 없는 창」을 못 막는다. 즉 게이트가 없으면 이
+  기능이 지키려던 것을 이 기능이 부순다. 선례가 이미 있다(`tickAppSession()`이 deferred 세션을 건너뛴다).
+- **R7-1 `TerminationWindowPolicy` 전제 확장.** 그 판정은 「종료 경로는 창을 먼저 숨기므로 `isKeyWindow`가
+  전부 false」를 전제로 쓰였다. 세션 중에는 우연히 맞는데, 우연히 맞는 것은 계약이 아니다 — 전제를 넓혀
+  명시하고 판정자로 고정한다.
+- **R7-2 구동 + 완료 보고(한 슬라이스).** Swift 가 tick 에서 coordinator 에게 묻고, 「지금 저장」이면
+  **기존 `saveWorkspace()` 를 그대로** 부른다(저장 로직 무변경 → 회귀 위험 최소, 사용자 값은 즉시).
+  ⚠️ 성패 반환을 **함께** 해야 한다 — 지금은 `Void` 에 오류를 삼켜 `writeCompleted` 에 넘길 값이 없고,
+  그러면 coordinator 가 디바운서로만 쓰인다(그럴 거면 타이머면 된다).
+- **R7-3 비용 실측 → 디바운스 주기 확정.** 한 번의 저장은 창 전부 직렬화 + 전체 스냅샷 재파싱 + 쓰기다.
+  **재기 전에는 주기를 숫자로 못 박지 않는다.**
+- **후속(지금 아님)**: 정책·쓰기를 Zig 로 이관(플랫폼마다 다시 짜면 아까운 것은 「조립」이 아니라 **정책** —
+  전체 포기·검증 순서·`.bak`), 원자적 교체 seam(POSIX `rename` vs Windows `ReplaceFile`)은 **Windows 가 실제로
+  필요할 때**. 지금 옮기면 POSIX 전용 «공용» 모듈이 된다.
+
 ## 10단계: Plugin/Wasm
 
 목표:

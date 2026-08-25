@@ -2203,3 +2203,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `foo`만 선택·복사함을 검증한다.
 - **남은 gate:** additive field를 모르는 same-major 구 host는 기본 공백 경계로 degraded된다.
   frozen 구 binary 재접속 행은 아직 별도 자동 gate가 아니다.
+
+### 영속 host 전체 선택
+
+- **상태: 구현.** host-backed `select_all`은 빈 placeholder가 아니라 host의 권위 `TerminalCore.selectAll`을
+  실행한다. client는 viewport highlight와 별도로 전체 선택 의도를 소유하고, 이후 복사는 additive `all` 모드로
+  host lock 아래 `selectAll → extractSelection → clear`를 원자 실행한다.
+- **자동 검증:** `test-session-host`가 typed request의 `all` discriminator fail-close, server additive field
+  routing과 transient host selection clear, 실제 host의 viewport보다 긴 scrollback 전체 선택·복사를 검증한다.
+- **호환 한계:** `all` op를 모르는 same-major 구 host는 `{sel:false}`를 반환해 새 client가 절대 좌표를
+  추측하지 않고 현재 viewport 선택으로만 degraded된다. frozen 구 binary 재접속 행은 별도 자동 gate가 아니다.

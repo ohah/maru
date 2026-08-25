@@ -46,7 +46,7 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > barrier가 `기존 input → core command → 새 input`의 순서를 보존한다. scrolled
 > `imeBegin`은 응답 없는 async scroll frame만 admission하며 동기 RPC로 fallback하지 않는다.
 > focus report와 설정·prompt core command는 host reader까지 전달되고, 일반 key의 DECCKM/DECKPAM/kitty keyboard 인코딩은
-> runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll·Reset/Clear 등 input-mode/command
+> runtime observation override로 host 모드대로 인코딩된다(P3-e4c-4). 단 선택 autoscroll 등 input-mode/command
 > parity 전체가 완료됐다는 뜻은 아니다.
 > `keep-alive-after-quit` 토글은 **설정 GUI(workspace 섹션)에도 노출**된다. 기본값은 아직 `false`(opt-in)다.
 > 영구 부재 runtime의 per-Term 종료 placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
@@ -6833,7 +6833,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
   - **P3-e4c(AppSession consumers) ✅**: sidebar/search/git, auto title·cwd 상속, at-prompt/close/control collector,
     Claude/Codex observer, SSH drop/paste upload와 alt-screen PageUp/wheel 특례가 공용 runtime observation만 읽도록
     옮긴다. 이 범위의 metadata에는 placeholder `surface.core` 직접 읽기를 금지한다. 일반 key의 DECCKM/DECKPAM/kitty
-    keyboard 인코딩은 P3-e4c-4에서 완료했고(관측 override), 선택 autoscroll·전체 선택은 아직 이 완료 범위가 아니다.
+    keyboard 인코딩은 P3-e4c-4에서 완료했고(관측 override), 선택 autoscroll은 아직 이 완료 범위가 아니다.
   - **P3-e4c-2(IME marked text parity) ✅**: marked text는 host core command나 protocol state가 아니라 각 GUI
     `Surface`의 client-local `PreeditOverlay`가 소유한다. 로컬/host-backed base snapshot에 공통 합성기를 적용하고,
     host snapshot/delta의 canonical grid는 바꾸지 않는다. 최신 delta마다 다시 합성하며 clear하면 최신 base가 즉시
@@ -6898,7 +6898,11 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     scroll 4종만 보내고 새 command는 unknown RPC를 시험하지 않는 degraded no-op이다. 선택 highlight는 attachment-local이다.
     최신 host의 선택 콘텐츠는 `runtime_selected_text_v1` host RPC가 SSOT이며, capability 없는 같은-major 구 host만 현재
     viewport projection에서 단일 행·block을 정확히, multi-row 선형은 화면 행마다 개행하는 degraded 복사를 한다.
-    `scroll_and_extend`·viewport 전체 선택 parity는 후속이다. 더블클릭 `select_word`는 client가
+    `scroll_and_extend` parity는 후속이다. 전체 선택은 host가 `selectAll`을 실행해 현재 viewport highlight를 반환하고,
+    client가 별도 `select_all` 의도를 selection owner에 보존한다. 복사 때 `runtime.selected_text`의 additive `all` 모드가
+    host lock 아래 `selectAll → extractSelection → clear`를 원자 실행하므로 scrollback eviction/reflow 뒤에도 낡은 절대
+    좌표를 재사용하지 않는다. `all` op를 모르는 same-major 구 host는 응답 선택이 없으므로 기존 placeholder의
+    현재 viewport 전체 선택으로만 degraded되며, 새 client가 절대 좌표를 추측하지 않는다. 더블클릭 `select_word`는 client가
     현재 `input.word-separators`를 UTF-8 경계에서 64 byte로 제한해 hex로 싣고, host가 strict 길이·hex·UTF-8
     검증 후 권위 core의 `selectWordAt`에 그 값을 전달한다. pointer/slice를 세대 경계에 넘기지 않고
     `SelectRequest` 고정 버퍼가 요청 의미를 소유한다. 이 additive field를 모르는 same-major 구 host는 무시해
@@ -6964,7 +6968,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     focus `CSI I` PTY write까지 자동 검증한다. 일반 key의 DECCKM/DECKPAM/kitty 인코딩 parity는 P3-e4c-4에서 완료했다. 남은
     input parity gate에서 Reset Terminal은 host 소유 core 적용까지 닫혔고, Clear Screen도 같은 core-command reader
     순서축에서 권위 core clear와 조건부 `^L` 주입을 함께 닫았다. 남은 축은 고빈도 1003 hover, selection
-    autoscroll·전체 선택이다. 사용자 word separator는 bounded request·host 권위 선택·구 host
+    autoscroll이다. 전체 선택은 host 권위 추출 의도와 client-local viewport highlight를 분리해 완료했다. 사용자 word separator는 bounded request·host 권위 선택·구 host
     additive-field degradation을 자동 검증한다. cwd/SSH destination/raw process argv는
     trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local

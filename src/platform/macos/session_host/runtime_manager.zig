@@ -1659,12 +1659,19 @@ pub const RuntimeManager = struct {
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
-        surface.core.selectionStart(span.sr, span.sc);
-        if (span.block) surface.core.setSelectionBlock(true);
-        surface.core.selectionExtend(span.er, span.ec);
-        const extracted = surface.core.extractSelection(allocator) catch null;
+        const extracted = blk: {
+            if (span.all) {
+                surface.core.selectAll();
+            } else {
+                surface.core.selectionStart(span.sr, span.sc);
+                if (span.block) surface.core.setSelectionBlock(true);
+                surface.core.selectionExtend(span.er, span.ec);
+            }
+            const value = surface.core.extractSelection(allocator) catch null;
+            surface.core.selectionClear(); // transient — host core 선택 원복.
+            break :blk value;
+        };
         defer if (extracted) |e| allocator.free(e);
-        surface.core.selectionClear(); // transient — host core 선택 원복.
         const text: []const u8 = extracted orelse "";
         var out: std.Io.Writer.Allocating = .init(allocator);
         defer out.deinit();
@@ -1756,7 +1763,7 @@ pub const RuntimeManager = struct {
         };
     }
 
-    /// 단어/줄 선택(§6b-2): host가 **콘텐츠를 아는 자기 core**로 경계를 계산해(`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택
+    /// 단어/줄/전체 선택(§6b-2): host가 **콘텐츠를 아는 자기 core**로 경계를 계산해 결과 뷰포트 선택
     /// span을 JSON으로 준다. 빈 client placeholder는 경계를 모르므로 host가 계산(선택 의미론 host 단일 출처). span만 계산해
     /// 돌려주고 host core 선택은 원복(transient — client가 그 span을 placeholder에 적용해 하이라이트, 복사는 #6b-1 selected_text).
     /// word op의 separators_hex는 64-byte strict hex/UTF-8로 닫고 현재 config 값을 그대로 적용한다.
@@ -1773,6 +1780,8 @@ pub const RuntimeManager = struct {
             surface.core.selectWordAt(row, col, separators);
         } else if (std.mem.eql(u8, op, "line")) {
             surface.core.selectLineAt(row);
+        } else if (std.mem.eql(u8, op, "all")) {
+            surface.core.selectAll();
         } else {
             return allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory;
         }

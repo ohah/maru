@@ -12,7 +12,7 @@
 //!
 //! metadata observation(cwd/title/SSH/foreground process/mode/size)은 host full-state event+fresh barrier로 읽는다.
 //! focus/config/prompt command는 `runtime_core_command_v1`로 host reader에 보내며, 일반 key의
-//! DECCKM/DECKPAM/kitty mode와 selection autoscroll/전체 선택 parity는 후속 gate다. macOS 전용(client·Surface·app 계약).
+//! DECCKM/DECKPAM/kitty mode와 selection autoscroll parity는 후속 gate다. macOS 전용(client·Surface·app 계약).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -4285,20 +4285,35 @@ pub const RemoteTermBackend = struct {
             // §6b-1 드래그 선택: 하이라이트 span은 client 좌표라 **placeholder core에 적용해 즉시** 반영한다(렌더가 이미
             // surface.core.selectionViewportSpan을 읽음 — 새 렌더 배선/span-push 불요, 왕복 지연 없음). 복사(콘텐츠 연산)는
             // app_session.copyText가 이 span을 host로 보내 host의 extractSelection으로 한다(선택 의미론=host 단일 출처).
-            // 콘텐츠 인지 경계(word/line)는 빈 placeholder에선 부정확하므로 host가 계산한다. scroll_and_extend(autoscroll
-            // 드래그)도 후속. select_all은 placeholder 뷰포트 전체 선택 → 보이는 화면 복사(host가 스크롤백까지는 후속).
+            // 콘텐츠 인지 경계(word/line/all)는 빈 placeholder에선 부정확하므로 host가 계산한다. scroll_and_extend(autoscroll
+            // 드래그)만 후속이다.
             // select_clear도 같은 분류다 — 하이라이트가 placeholder에 있으니 해제도 placeholder에서 한다(host 왕복 불요).
-            .select_start, .select_extend, .select_extend_or_collapse, .select_all, .select_clear => _ = core_command.apply(&rr.surface.core, cmd),
+            .select_start, .select_extend, .select_extend_or_collapse, .select_clear => {
+                rr.clearSelectAllIntent();
+                _ = core_command.apply(&rr.surface.core, cmd);
+            },
+            .select_all => {
+                rr.clearSelectAllIntent();
+                if (rr.selectContentAware("all", 0, 0, "") catch null) |span| {
+                    rr.surface.core.selectionStart(span.start.row, span.start.col);
+                    rr.surface.core.selectionExtend(span.end.row, span.end.col);
+                } else {
+                    // same-major 구 host는 all op를 모르므로 현재 viewport 선택으로만 안전하게 degraded된다.
+                    _ = core_command.apply(&rr.surface.core, cmd);
+                }
+            },
             // §6b-2 단어/줄 선택: 콘텐츠 인지 경계는 빈 placeholder가 모르므로 **host가 계산해 span을 돌려준다**(selectContentAware).
             // word는 CoreCommand에 복사된 현재 config separator까지 bounded request에 복사해 reload 수명과 wire 수명을 분리한다.
             // 그 span을 placeholder에 적용해 하이라이트(렌더가 selectionViewportSpan을 읽음). 복사는 #6b-1이 그 span으로 host 추출.
             .select_word => |s| {
+                rr.clearSelectAllIntent();
                 if (rr.selectContentAware("word", s.row, s.col, s.separators[0..s.sep_len]) catch null) |span| {
                     rr.surface.core.selectionStart(span.start.row, span.start.col);
                     rr.surface.core.selectionExtend(span.end.row, span.end.col);
                 }
             },
             .select_line => |row| {
+                rr.clearSelectAllIntent();
                 if (rr.selectContentAware("line", row, 0, "") catch null) |span| {
                     rr.surface.core.selectionStart(span.start.row, span.start.col);
                     rr.surface.core.selectionExtend(span.end.row, span.end.col);

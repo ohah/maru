@@ -31,6 +31,7 @@ pub const CoreCommandRequest = union(enum) {
     },
     jump_to_prompt: i8,
     reset_input_modes,
+    clear_screen,
 };
 
 pub const RawOptionalU32 = extern struct { present: u8, value: u32 };
@@ -189,6 +190,7 @@ pub fn encodeRawCoreCommandInto(out: *RawCoreCommand, value: CoreCommandRequest)
             out.tag = @intFromEnum(Tag.jump_to_prompt);
             out.payload.direction = v;
         },
+        .clear_screen => out.tag = @intFromEnum(Tag.clear_screen),
         .reset_input_modes => out.tag = @intFromEnum(Tag.reset_input_modes),
     }
 }
@@ -230,6 +232,7 @@ pub fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
             } };
         },
         @intFromEnum(Tag.jump_to_prompt) => .{ .jump_to_prompt = raw.payload.direction },
+        @intFromEnum(Tag.clear_screen) => .clear_screen,
         @intFromEnum(Tag.reset_input_modes) => .reset_input_modes,
         else => null,
     };

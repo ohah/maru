@@ -2011,6 +2011,7 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
             },
         },
         .jump_to_prompt => |direction| .{ .jump_to_prompt = direction },
+        .clear_screen => .clear_screen,
         .reset_input_modes => .reset_input_modes,
     };
 }
@@ -3244,6 +3245,75 @@ test "runtime manager: focus report is written back to the real PTY by the host 
         const result = tmp.dir.readFileAlloc(std.testing.io, "focus.hex", allocator, .limited(4096)) catch null;
         if (result) |bytes| {
             saw_ordered_bytes = std.mem.indexOf(u8, bytes, "411b5b4942") != null;
+            allocator.free(bytes);
+        }
+        if (!saw_ordered_bytes) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(saw_ordered_bytes);
+}
+
+test "runtime manager: clear and reset commands reach the authoritative host reader" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [4096]u8 = undefined;
+    _ = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
+    const result_path = try std.fs.path.join(allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path, "clear.hex" });
+    defer allocator.free(result_path);
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "stty raw -echo; printf '\\033]133;A\\033\\\\prompt\\033[?1004h\\033[?1003h'; dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \\n' > '{s}'",
+        .{result_path},
+    );
+    defer allocator.free(script);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    var ready = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !ready) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        ready = surface.core.cursorIsAtPrompt() and surface.core.focus_events and surface.core.mouse_tracking == .any;
+        surface.unlockCore(std.testing.io);
+        if (!ready) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(ready);
+
+    // A 이전 fence 뒤 clear가 권위 prompt를 보고 ^L을 만들고, B는 그 뒤에 와야 한다.
+    try ops.write_input(ops.ctx, rid, "A");
+    try ops.core_command(ops.ctx, rid, .clear_screen);
+    try ops.write_input(ops.ctx, rid, "B");
+    try ops.core_command(ops.ctx, rid, .reset_input_modes);
+
+    var reset_applied = false;
+    attempts = 0;
+    while (attempts < 200 and !reset_applied) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        reset_applied = !surface.core.focus_events and surface.core.mouse_tracking == .none;
+        surface.unlockCore(std.testing.io);
+        if (!reset_applied) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(reset_applied);
+
+    var saw_ordered_bytes = false;
+    attempts = 0;
+    while (attempts < 200 and !saw_ordered_bytes) : (attempts += 1) {
+        const result = tmp.dir.readFileAlloc(std.testing.io, "clear.hex", allocator, .limited(4096)) catch null;
+        if (result) |bytes| {
+            saw_ordered_bytes = std.mem.indexOf(u8, bytes, "410c42") != null;
             allocator.free(bytes);
         }
         if (!saw_ordered_bytes) _ = usleep(10 * 1000);

@@ -1767,7 +1767,7 @@ fn applyCoreConfig(
     cell_w: u32,
     cell_h: u32,
 ) void {
-    maru.session.core_command.apply(core, .{
+    _ = maru.session.core_command.apply(core, .{
         .set_runtime_config = .{
             .max_scrollback = cfg.scrollback.lines,
             .ambiguous_wide = cfg.ambiguous_width == .wide,

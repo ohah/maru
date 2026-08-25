@@ -662,6 +662,10 @@ pub const HostAdapter = struct {
         return self.slot.logicalClientConst().runtime_inventory_v1;
     }
 
+    pub fn supportsClearScreen(self: *const HostAdapter) bool {
+        return self.slot.logicalClientConst().runtime_clear_screen_v1;
+    }
+
     /// host.info/runtime.list/host.upgrade.*처럼 screen codec과 독립된 control RPC.
     pub fn call(self: *HostAdapter, method: []const u8, params_json: ?[]const u8) client_mod.ClientError![]u8 {
         return self.slot.callCurrent(self.slot.connectionGeneration(), method, params_json);

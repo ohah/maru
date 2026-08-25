@@ -4517,6 +4517,9 @@ pub const RemoteRuntime = struct {
     pub fn queueCoreCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
+        // core-command v1은 이미 배포된 닫힌 집합이다. clear를 그 bit 아래 암묵 확장하면 current GUI가 N-1 host에
+        // unknown op를 보내 연결을 fail-close한다. 전용 capability가 없으면 안전한 degraded no-op이다.
+        if (command == .clear_screen and !self.connectionSupportsClearScreen()) return;
         switch (self.currentGeneration().attachment) {
             .legacy => if (!self.legacyConnection().runtime_core_command_v1) {
                 if (command.isLegacyScroll()) return self.sendCoreCommandBlocking(command);
@@ -4545,6 +4548,13 @@ pub const RemoteRuntime = struct {
         });
         self.input_batches.next_sequence = sequence;
         _ = try self.pumpQueuedInput();
+    }
+
+    fn connectionSupportsClearScreen(self: *const RemoteRuntime) bool {
+        return switch (self.currentGenerationConst().connection) {
+            .legacy => |client| client.runtime_clear_screen_v1,
+            .generation => |adapter| adapter.supportsClearScreen(),
+        };
     }
 
     const max_direct_input_bytes: usize = 64 * 1024;
@@ -6159,7 +6169,11 @@ pub const RemoteRuntime = struct {
     pub fn sendCoreCommandBlocking(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
-        if (!shouldSendCoreCommand(self.connectionCapabilities().runtime_core_command, command)) return;
+        if (!shouldSendCoreCommand(
+            self.connectionCapabilities().runtime_core_command,
+            self.connectionSupportsClearScreen(),
+            command,
+        )) return;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
         try self.beginStableMutation(&mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
@@ -6659,7 +6673,8 @@ fn decodeResyncReply(
     };
 }
 
-fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wire.Command) bool {
+fn shouldSendCoreCommand(runtime_core_command_v1: bool, runtime_clear_screen_v1: bool, command: core_command_wire.Command) bool {
+    if (command == .clear_screen) return runtime_core_command_v1 and runtime_clear_screen_v1;
     return runtime_core_command_v1 or command.isLegacyScroll();
 }
 
@@ -7381,10 +7396,12 @@ test "remote runtime fails the shared connection on an immediately consumed fore
 }
 
 test "remote runtime: extended core commands require capability while legacy scroll remains compatible" {
-    try std.testing.expect(shouldSendCoreCommand(false, .{ .scroll = 1 }));
-    try std.testing.expect(!shouldSendCoreCommand(false, .{ .report_focus = true }));
-    try std.testing.expect(!shouldSendCoreCommand(false, .{ .set_max_scrollback = 1000 }));
-    try std.testing.expect(shouldSendCoreCommand(true, .{ .report_focus = false }));
+    try std.testing.expect(shouldSendCoreCommand(false, false, .{ .scroll = 1 }));
+    try std.testing.expect(!shouldSendCoreCommand(false, false, .{ .report_focus = true }));
+    try std.testing.expect(!shouldSendCoreCommand(false, false, .{ .set_max_scrollback = 1000 }));
+    try std.testing.expect(shouldSendCoreCommand(true, false, .{ .report_focus = false }));
+    try std.testing.expect(!shouldSendCoreCommand(true, false, .clear_screen));
+    try std.testing.expect(shouldSendCoreCommand(true, true, .clear_screen));
 }
 
 test "CR3a-2c3c C2 projects every product core command into the closed generation control" {
@@ -7411,6 +7428,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             .cursor_shape = 1,
         } },
         .{ .jump_to_prompt = -1 },
+        .clear_screen,
         .reset_input_modes,
     };
     const expected = [_]generation_contract.CoreCommandRequest{
@@ -7438,6 +7456,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             .cursor_shape = 1,
         } },
         .{ .jump_to_prompt = -1 },
+        .clear_screen,
         .reset_input_modes,
     };
     try testing.expectEqual(

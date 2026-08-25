@@ -5105,6 +5105,7 @@ fn encodeGenerationCoreCommand(
             .cursor_shape = v.cursor_shape,
         }),
         .jump_to_prompt => |direction| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "jump_to_prompt", .direction = direction }),
+        .clear_screen => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "clear_screen" }),
         .reset_input_modes => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "reset_input_modes" }),
     };
 }
@@ -5151,6 +5152,7 @@ pub fn sendGenerationControl(
         },
         .core_command => |command| {
             if (!node.client.runtime_core_command_v1) return error.Unsupported;
+            if (command == .clear_screen and !node.client.runtime_clear_screen_v1) return error.Unsupported;
             var params: [4096]u8 = undefined;
             const encoded = encodeGenerationCoreCommand(&params, request.bound_stream_id, command) orelse
                 return error.ResourceExhausted;
@@ -5219,6 +5221,7 @@ pub fn sendGenerationControlNonBlocking(
         },
         .core_command => |command| blk: {
             if (!node.client.runtime_core_command_v1) return error.Unsupported;
+            if (command == .clear_screen and !node.client.runtime_clear_screen_v1) return error.Unsupported;
             var params: [4096]u8 = undefined;
             const encoded = encodeGenerationCoreCommand(&params, request.bound_stream_id, command) orelse
                 return error.ResourceExhausted;
@@ -5358,6 +5361,7 @@ test "CR3a-2c3c every valid core command fits the bounded canonical encoder" {
             .cursor_shape = std.math.maxInt(u8),
         } },
         .{ .jump_to_prompt = std.math.maxInt(i8) },
+        .clear_screen,
         .reset_input_modes,
     };
     try std.testing.expectEqual(

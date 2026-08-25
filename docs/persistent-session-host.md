@@ -6958,8 +6958,10 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     lifecycle request의 fail-always allocator OOM→EOF cleanup fallback을 자동 검증한다.
     focus/config/prompt의 backend-neutral core-command 경로는 bounded codec·controller auth·실 host reader core 적용과
     focus `CSI I` PTY write까지 자동 검증한다. 일반 key의 DECCKM/DECKPAM/kitty 인코딩 parity는 P3-e4c-4에서 완료했다. 남은
-    input parity gate는 Reset Terminal/Clear Screen의 host 소유 core 적용, 고빈도 1003 hover, selection autoscroll·전체
-    선택·사용자 word separator다. cwd/SSH destination/raw process argv는 trace와 실패 artifact에 남기지 않는다.
+    input parity gate에서 Reset Terminal은 host 소유 core 적용까지 닫혔고, Clear Screen도 같은 core-command reader
+    순서축에서 권위 core clear와 조건부 `^L` 주입을 함께 닫았다. 남은 축은 고빈도 1003 hover, selection
+    autoscroll·전체 선택·사용자 word separator다. cwd/SSH destination/raw process argv는
+    trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
     socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
 

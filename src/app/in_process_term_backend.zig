@@ -156,7 +156,7 @@ pub const InProcessTermBackend = struct {
         // reader가 시작되기 전의 원자적 bootstrap snapshot만 backend 계약으로 받는다. caller가 spawn 뒤 필드를 하나씩
         // 바꾸는 동안 child 첫 출력이 기본값으로 parse되는 race를 막고, 원격 host와 같은 first-output 의미론을 지킨다.
         // scrollback arena처럼 wire snapshot에 없는 client 메모리 정책은 계속 caller가 attach 전에 적용한다.
-        if (params.initial_config) |config| core_command.apply(&slot.terminal.surface.core, .{ .set_runtime_config = config });
+        if (params.initial_config) |config| _ = core_command.apply(&slot.terminal.surface.core, .{ .set_runtime_config = config });
         return &slot.terminal.surface;
     }
 

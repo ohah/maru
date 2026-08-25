@@ -55,6 +55,7 @@ pub fn projectCoreCommand(command: core_command_wire.Command) control_types.Core
             .cursor_shape = v.cursor_shape,
         } },
         .jump_to_prompt => |v| .{ .jump_to_prompt = v },
+        .clear_screen => .clear_screen,
         .reset_input_modes => .reset_input_modes,
     };
 }
@@ -83,6 +84,7 @@ pub fn toCoreCommand(command: control_types.CoreCommandRequest) core_command_wir
             .cursor_shape = v.cursor_shape,
         } },
         .jump_to_prompt => |v| .{ .jump_to_prompt = v },
+        .clear_screen => .clear_screen,
         .reset_input_modes => .reset_input_modes,
     };
 }

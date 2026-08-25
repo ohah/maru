@@ -1275,6 +1275,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ExternalCatchupBarrierPolicy" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "validateExternalSourceOwnerRangesWithPolicy" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "runtime_catchup_barrier_v1" },
+                // Clear는 이미 배포된 core-command v1을 암묵 확장하지 않는 별도 N-1 협상 bit이다.
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "runtime_clear_screen_v1" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "pending_catchup_barriers" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferCatchupBarrierFrame" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "preflightExternalAdoptionDestinationWithScratchPolicy" },
@@ -2853,7 +2855,8 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         .{ .name = "async_scroll_to_bottom_v1", .count = 2 },
         .{ .name = "notification_stream_auth_v1", .count = 1 },
         .{ .name = "runtime_clipboard_v1", .count = 1 },
-        .{ .name = "runtime_core_command_v1", .count = 5 },
+        .{ .name = "runtime_core_command_v1", .count = 6 },
+        .{ .name = "runtime_clear_screen_v1", .count = 3 },
         .{ .name = "runtime_link_at_v1", .count = 1 },
         .{ .name = "runtime_selected_text_v1", .count = 1 },
     };

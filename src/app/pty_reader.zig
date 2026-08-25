@@ -848,7 +848,8 @@ pub const PtyReader = struct {
                 var applied = false;
                 while (cq.popReady(consumed_input)) |entry| {
                     core.owner_dbg.lock(mutex, self.io);
-                    core_command.apply(core, entry.cmd);
+                    const effect = core_command.apply(core, entry.cmd);
+                    if (effect.send_form_feed) appendResponseBounded(self.allocator, out_buf, out_head.*, "\x0c");
                     const reply = core.pendingResponse();
                     if (reply.len > 0) {
                         appendResponseBounded(self.allocator, out_buf, out_head.*, reply);

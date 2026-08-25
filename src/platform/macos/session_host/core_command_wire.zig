@@ -27,6 +27,8 @@ pub const Command = union(enum) {
     jump_to_prompt: i8,
     /// 비파괴 입력 모드 리셋(⌘⇧R). 인자 없는 명령이라 op 이름만 실린다.
     reset_input_modes,
+    /// 권위 core의 clear 분기와 조건부 form-feed를 host reader가 함께 소유한다. 기존 raw tag 보존을 위해 끝에 추가한다.
+    clear_screen,
 
     pub const CellMetrics = struct {
         width: u32,
@@ -113,6 +115,10 @@ pub fn encodeParams(allocator: std.mem.Allocator, stream_id: u64, command: Comma
             .op = "jump_to_prompt",
             .direction = direction,
         }),
+        .clear_screen => stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "clear_screen",
+        }),
         .reset_input_modes => stringify(allocator, .{
             .stream_id = stream_id,
             .op = "reset_input_modes",
@@ -174,6 +180,7 @@ pub fn decodeParams(params: std.json.ObjectMap) ?Command {
     if (std.mem.eql(u8, op, "set_runtime_config")) {
         return .{ .set_runtime_config = decodeRuntimeConfig(params) orelse return null };
     }
+    if (std.mem.eql(u8, op, "clear_screen")) return .clear_screen;
     if (std.mem.eql(u8, op, "reset_input_modes")) return .reset_input_modes;
     if (std.mem.eql(u8, op, "jump_to_prompt")) {
         const direction = i64Field(params, "direction") orelse return null;

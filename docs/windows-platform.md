@@ -2593,7 +2593,8 @@ macOS 도 그것을 굳혀 뒀다가 clamp 에 쓴다(`app_session/editor.zig` �
 | 문서 | 결과 |
 |---|---|
 | 3 줄(창보다 짧다) | 정상. `max_top = 0` 이라 스크롤이 없고 상한 판정 둘 다 성립 |
-| CRLF | 정상. `` 을 벗겨 2 줄 × 23 자 = 42 셀 |
+| CRLF | 정상. `
+` 을 벗겨 2 줄 × 23 자 = 42 셀 |
 | **빈 파일** | 크래시는 없다. **그런데 보고가 거짓말을 했다** |
 
 빈 파일은 `scroll_script=0/6 clamp_top=false clamp_bottom=false` 로 나왔다 — 스크롤이 깨진 것처럼
@@ -4529,6 +4530,116 @@ agent_view=true agent_ops=15 agent_ops_dropped=6 agent_cells=47 agent_glyph_byte
 뷰 바 셋째 칸을 실제 마우스로 눌러 화면을 찍으려 했는데 **좌표를 못 맞췄다**(여러 x 로 시도했지만
 계속 소스 컨트롤이 열렸다). 스모크의 합성 클릭은 중립 `slotRect` 가 준 자리를 쓰므로 확실하다 —
 이 슬라이스의 증거는 **위 수치와 뮤턴트**이고, 캡처는 없다. 적어 둔다.
+
+### 2m.57 목록이 들어온다 — 그리고 한글이 두부였다 (W8.5b⒝, 실측 2026-08-25)
+
+§2m.56 이 표면을 세웠고 목록은 비어 있었다. 이 슬라이스가 provider 이력(JSONL)을 훑어 카드로
+넣는다. **세 결함이 이 길에서 차례로 드러났고, 셋 다 서로 다른 관측점이 필요했다.**
+
+## ⑴ Windows 에서 첫 읽기가 프로세스를 죽였다
+
+`agent_session_archive_backend` 가 Windows 에서 처음 돌자 그 자리에서 패닉했다.
+
+```text
+thread panic: reached unreachable code
+  Threaded.zig: .PENDING => unreachable, // unrecoverable: wrong File nonblocking flag
+  agent_session_archive_backend.zig:775  file.readPositional(io, &.{&buf}, offset)
+```
+
+**std 가 핸들 모드와 플래그를 어긋나게 준다.** `dirOpenFileWindows` 는 `follow_symlinks = false`
+일 때 `NtCreateFile` 을 `.IO = .ASYNCHRONOUS` 로 부르면서도, 두 return 모두
+`.flags = .{ .nonblocking = false }` 를 돌려준다(zig 0.16.0 `std/Io/Threaded.zig:5033` 과 그 함수의
+끝). 그러면 `readFilePositionalWindows` 가 **동기 분기**로 가고, 비동기 핸들이 낸 `PENDING` 을
+`unreachable` 로 받는다. 같은 함수의 **비동기 분기는 `PENDING` 을 제대로 기다린다.**
+
+고침은 **실제 핸들 모드에 플래그를 맞추는 것**이다(Windows 에서만). `follow_symlinks` 를 켜서 동기
+핸들을 받는 길도 있지만, 그 플래그는 **바로 아래 inode·device 대조와 한 쌍**이라(심링크를
+갈아끼워 다른 파일을 읽히는 것을 막는다) 택하지 않았다.
+
+> 처음에는 "디렉터리를 열었나" 로 의심해 `allow_directory = false` 를 넣었다. **패닉은 그대로였다**
+> — 그 플래그는 남겼지만(후보는 파일이어야 한다) 원인이 아니었다.
+
+## ⑵ 문자열이 전부 `0xAA` 였다 — arena 라도 `free` 는 덮는다
+
+패닉이 사라지자 카드가 11 장 생겼는데 **제목이 하나도 안 그려졌다**. 첫 세 바이트를 찍어 보니
+`170 170 170` — `0xAA`, 안전 빌드의 `undefined` 채움값이고 UTF-8 로 성립조차 안 하는 값이다.
+
+`title`·`summary`·`model`·`label` 은 전부 `res`/`projection` 안의 메모리를 가리키는 **슬라이스**인데,
+그 둘을 함수 끝에서 `deinit` 했다. arena 라 **메모리는 살아 있지만** `Allocator.free` 가 안전
+빌드에서 해제한 자리를 `undefined` 로 덮으므로 내용이 통째로 사라진다. 고침은 **복사**다.
+
+## ⑶ 한글이 `.notdef` 상자였다 — 두 font id 체계의 값 범위가 겹친다
+
+복사를 하자 제목이 그려졌다. 그런데 **화면에서는 한글이 전부 두부(□)** 였다 — 그리고 이것을
+**어떤 수치도 잡지 못했다**: `glyph_raster_error_skip_count=0`, 잉크도 나오므로 `zero_ink` 도 안
+움직인다. **캡처가 유일한 관측점이었다.**
+
+추적은 이렇게 갈렸다.
+
+| 물음 | 답 |
+|---|---|
+| 셰이퍼가 한글 face 를 찾았나 | 찾았다 — `cp=47560 font_id=2 gid=15812 name=Jetendard` |
+| 그 `font_id` 가 run 목록까지 살아 오나 | 온다 — `RUN gid=15812 font_id=2` |
+| 래스터라이저가 그 id 로 face 를 찾나 | **`font_id=2` 로는 한 번도 안 불렸다** |
+
+`win32_text.faceFor` 가 두 체계를 순서로 갈랐다 — 터미널 인코딩(`face_font_id_base` = **2** 부터)을
+먼저 보고, 실패하면 레지스트리를 봤다. 그런데 **`FontIdentityRegistry` 의 id 는 1 부터 하나씩
+늘어난다.** 그래서 measured 크롬의 **두 번째 face 부터** 터미널 id 로 잘못 읽혔다 — 폴백 face(id 2)가
+`2 - 2 = 0`, 즉 **주 폰트**가 되어, 폴백에서 나온 글리프 번호를 주 폰트에서 굽는다. 결과가
+`.notdef` 상자다. ASCII 는 주 폰트가 셰이핑했으니 번호가 맞아 **멀쩡히 보였다.**
+
+**한 래스터라이저는 한 체계만 쓴다.** measured 경로는 `registry` 를 채운 **복사본**으로만 그리고
+(`main.zig` 의 두 자리), 터미널은 그것을 안 채운다. 그래서 `registry` 의 유무가 **어느 체계인지를
+가르는 유일한 사실**이고, 고침은 그것을 먼저 보는 것이다.
+
+> **이 결함은 §2m.56 에도 있었지만 안 보였다** — 그때 도크에 있던 글자가 전부 ASCII 였다. 목록
+> 데이터가 들어오면서 처음으로 한글이 크롬에 그려졌고, 그때 드러났다. **SCM·파일 트리도 같은
+> 경로**라 한글 경로명·브랜치명에서 같은 일이 났을 것이다.
+
+판정은 수치가 아니라 **어느 face 로 가는가**를 본다(새 회귀 테스트). 뮤턴트로 순서를 되돌리면
+`expected 1, found 0` — 정확히 "주 폰트로 갔다" 는 그 값이다.
+
+## 판정 — 항목 수는 속 빈다, 글자를 본다
+
+셀·바이트 수는 목록이 비어도 0 이 아니다(헤더·검색 줄·빈 안내). 그래서 **카드 제목이 그려진
+코드포인트 안에 있는지**를 센다. 제목은 폭에 맞춰 말줄임되므로 **앞 8 바이트만** 찾는다 — 12
+바이트로 잡았더니 11 글자에서 잘린 ASCII 제목 하나를 **그려졌는데도 못 찾았다**.
+
+```text
+agent_items=14 agent_groups=3 agent_cards=11 agent_titles_drawn=11
+agent_scan_kb=43214 agent_keep_kb=7 agent_ok=true
+```
+
+| 뮤턴트 | 무엇이 움직이나 |
+|---|---|
+| 목록을 표면에 안 넘긴다(**옛 동작**) | `cells 391→47 cards=0 titles=0 ok=false` |
+| 문자열 복사를 뺀다 | `items=14` 그대로인데 **`titles_drawn=0` ok=false** |
+| `nonblocking` 보정을 되돌린다 | **패닉** |
+| arena 를 도로 하나로 합친다 | `keep_kb 7 → 43235` |
+| `faceFor` 순서를 되돌린다 | 회귀 테스트 `expected 1, found 0` |
+
+**둘째 뮤턴트가 핵심이다** — 항목이 14 개인데 글자가 0 이니, 이 판정은 항목을 되읽는 동어반복이
+아니다.
+
+## arena 가 둘이다 — 42 MB 를 끝까지 들고 있었다
+
+처음에는 arena 하나에 스캔 결과와 항목을 같이 담았다. 실측 **44 MB** 가 앱 수명 내내 남았다 —
+카드 열한 장의 짧은 문자열 때문에. 백엔드가 64 KiB 스트리밍으로 바꾼 이유가 바로 그 상주
+메모리인데(그 함수 doc), 호출자가 arena 하나로 도로 되살리는 꼴이었다.
+
+**훑는 동안 나오는 것은 그 자리에서 버리고**(`scan_arena`) 항목이 가리키는 문자열만 앱 수명
+arena 로 복사한다 — `43214 KB` 를 훑고 버려 **7 KB** 가 남는다. 그 둘이 갈라져 있는 것은 눈에
+안 보이는 성질이라 **판정으로 낸다**(`agent_scan_kb`·`agent_keep_kb`, 1 MB 경계).
+
+## 한계
+
+- **시작 스캔이 메인 스레드를 잡는다.** 74 개 JSONL 에서 창이 처음 그려지기까지 눈에 띄게 걸린다
+  — 캡처를 찍을 때 정착 시간을 6 초로 올려야 했다. 비동기로 옮기려면 "결과가 오면 다시 그린다" 는
+  배선이 필요하다(§2m.55 가 트리 펼치기에서 같은 것을 보고했다).
+- **갱신이 없다** — 시작에 한 번 훑는다.
+- **카드 클릭이 아직 아무 일도 안 한다**(intent 적용은 별개).
+- **11 장 중 한 장이 화면 밖이다** — 640px 창에서 목록이 도크보다 길다. 스크롤은 안 붙였다.
+
 
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 

@@ -7068,6 +7068,31 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     기존 `.bak`은 current UID regular `0600`일 때만 보존하며 symlink/non-regular/wrong-mode는 Quit을 취소한다.
     명시적 `Quit and End All Sessions`는 runtime admin shutdown 완료 뒤에도 같은 final checkpoint를 시도하지만,
     실패 시 orphan runtime을 남기지 않도록 종료를 계속하는 유일한 예외다.
+  - **E1 event wake:** 검증 매트릭스의 `CR6f output-wake`가 이 순서 항목의 구현 이름이다. PTY reader의 성공
+    publication은 daemon-global nonblocking wake fd를 coalesce하고, 단일 poll owner가 runtime queue를 drain한 뒤
+    기존 producer sweep을 즉시 예약한다. idle polling이나 client별 wake owner를 새로 만들지 않는다.
+  - **E2 runtime-shared observation cache:** 같은 runtime을 보는 controller와 observer마다 core lock·foreground
+    process 조회·full-state 직렬화를 반복하지 않는다. runtime owner가 canonical observation 하나와 checked-monotonic
+    `change_token`을 소유하고 subscription은 이 token을 자기 delivery revision으로 투영한다. cache token은 wire revision이
+    아니며 client 수에 따라 증가하지 않는다.
+    - **E2a cache transaction:** platform leaf는 socket·subscription·cadence·`TerminalCore`를 모르고 canonical bytes와
+      token만 소유한다. 동일 bytes는 allocation과 token 증가가 0이다. 변경은 독립 소유 bytes를 먼저 준비하고 current
+      token과 exact match할 때만 bytes+token을 원자적으로 교체한다. OOM·token overflow·stale prepared commit은 이전
+      cache를 byte-for-byte 보존하며 prepared allocation은 caller가 명시적으로 폐기한다. unpublished와 published-empty는
+      구분하고, caller가 정한 0보다 큰 byte cap을 넘는 candidate는 allocation 전에 거부한다.
+      cache는 자기 allocator와 final address를 소유하며 replacement prepared 값은 그 owner 주소에 결속된다. 다른 cache나
+      다른 allocator로 commit/free하는 경로는 없다. outstanding prepared count가 0이 아니면 deinit은 typed busy로
+      cache를 보존하며, commit 또는 explicit discard만 그 count를 exact once 줄인다.
+    - **E2b product wiring:** `RuntimeManager`만 core/foreground/소비형 BEL·OSC 52를 runtime당 한 번 materialize한다.
+      attach, periodic producer, user-action fresh observation은 cache view를 공유하되 fresh barrier는 마지막 core mutation을
+      건너뛰지 않는다. server는 검증·canonicalization을 마친 cache bytes를 metadata JSON 값으로 직접 감싸고 다시 parse하거나
+      client마다 같은 observation을 stringify하지 않는다. subscription별 response/event queue admission이 성공한 뒤에만 각자의 delivery revision/base를
+      전진시키며, 느리거나 OOM인 한 client가 cache나 sibling delivery authority를 바꾸지 않는다. runtime terminate와
+      same-PID upgrade restore는 cache owner를 exact once 회수·재구성한다.
+    - **E2c product/performance gate:** 1·10·100 runtime과 controller+slow observer 조합에서 runtime materialization 횟수가
+      subscription 수가 아니라 source change 수에 결속됨을 artifact로 남긴다. idle CPU/allocation, output→healthy-client
+      latency, core-lock hold와 RSS의 hard cap은 `performance-budget.md`가 소유한다. E2a만으로 E2 또는 P4 완료를
+      주장하지 않는다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
   않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다
@@ -7123,7 +7148,7 @@ Notification Center
 제품 file E2E 미완) → R2b inventory reconciliation/Recovered Sessions →
 R3 `ScreenInbox`/R4 deferred resync →
 T0 single-connection `ConnectionSlot` → C1 pure checkpoint coordinator/C2 file adapter failure injection/C3 dirty wiring/
-C4 AppKit terminate handshake → E1 event wake/E2 observation cache → parity micro-PR → N1 journal/N2 sink/N3 cold route →
+C4 AppKit terminate handshake → E1 event wake(`CR6f`) → E2a cache transaction/E2b product wiring/E2c perf → parity micro-PR → N1 journal/N2 sink/N3 cold route →
 G1 loader provenance/G2 explicit override materialization·retention/G3 default flip 순이다. 각 slice는 한 invariant
 owner와 red→green gate를 갖고,
 G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는다.

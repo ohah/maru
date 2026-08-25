@@ -208,7 +208,11 @@ pub const EditableFile = struct {
     /// 자기가 무엇을 바꿨는지 알 수 없다. 그래서 되돌리는 것이 셋이다:
     ///
     /// - **BOM** — 있었으면 다시 붙인다(문서 offset 0은 BOM 뒤였다).
-    /// - **끝 개행** — 임의로 더하거나 지우지 않는다. 있었으면 있게, 없었으면 없게.
+    /// - **끝 개행** — 임의로 더하거나 지우지 않는다. **그 말은 "원래대로 강제한다"가 아니다.**
+    ///   초판이 그렇게 읽어 원본 상태로 맞췄는데, 그러면 **사용자 편집이 조용히 되돌아간다**:
+    ///   끝 개행이 없던 파일에 Enter를 치면 떼고, 있던 파일에서 지우면 도로 붙였다(적대적 검증
+    ///   2026-08-25). §3.5가 막으려는 것은 **편집기가 제멋대로** 더하거나 지우는 것이고,
+    ///   편집한 뒤 내용의 진실은 `content`다.
     /// - **줄바꿈** — **건드리지 않는다.** `content`가 이미 원본의 `\r\n`을 그대로 들고 있고,
     ///   편집으로 새로 들어간 줄만 `\n`이다. 섞인 파일을 한 쪽으로 통일하면 **안 건드린 줄까지
     ///   diff에 뜬다**(`mixed_endings`가 그 유혹을 막으려고 사실로 남아 있다).
@@ -218,24 +222,12 @@ pub const EditableFile = struct {
     /// 그 표시를 만들지 않으므로 **CRLF 파일에 새 줄을 넣으면 그 줄만 LF다.** 아는 대가이고,
     /// 그 표시를 만드는 것은 편집 연산 쪽 슬라이스다.
     pub fn saveBytes(self: EditableFile, allocator: std.mem.Allocator) ![]u8 {
+        // **내용은 그대로 쓴다.** 끝 개행을 원본 상태로 맞추던 분기를 걷어냈다 — 그것이
+        // 사용자 편집을 되돌렸다(위 주석). BOM만 파일 속성이라 되붙인다.
         const bom = if (self.format.has_bom) document.utf8_bom else "";
-        var body = self.content;
-        // 끝 개행을 원본에 맞춘다.
-        var extra: []const u8 = "";
-        if (self.format.ends_with_newline) {
-            if (body.len == 0 or body[body.len - 1] != '\n') {
-                extra = if (self.format.dominant_ending == .crlf) "\r\n" else "\n";
-            }
-        } else if (body.len > 0 and body[body.len - 1] == '\n') {
-            // 없던 끝 개행이 생겼다 — 뗀다. `\r\n`이면 둘 다 뗀다.
-            body = body[0 .. body.len - 1];
-            if (body.len > 0 and body[body.len - 1] == '\r') body = body[0 .. body.len - 1];
-        }
-
-        const out = try allocator.alloc(u8, bom.len + body.len + extra.len);
+        const out = try allocator.alloc(u8, bom.len + self.content.len);
         @memcpy(out[0..bom.len], bom);
-        @memcpy(out[bom.len..][0..body.len], body);
-        @memcpy(out[bom.len + body.len ..][0..extra.len], extra);
+        @memcpy(out[bom.len..], self.content);
         return out;
     }
 
@@ -548,6 +540,10 @@ test "EDOC11: 저장 bytes가 연 그대로의 파일 속성을 되돌린다 (§
     }
 
     // ⑵ 끝 개행이 없던 파일은 없는 채로 남는다 — 임의로 더하지 않는다.
+    //
+    // **이 판정자는 끝 개행 결함을 못 잡는다** — 편집하지 않고 저장하므로 "원본대로 강제"와
+    // "내용 그대로"가 같은 답을 낸다. 결함은 **사용자가 그것을 건드렸을 때만** 나타나고,
+    // 그 축은 `EDOC12`가 잰다(적대적 검증 2026-08-25).
     {
         var f = try EditableFile.init(a, "no trailing", false);
         defer f.deinit();
@@ -579,5 +575,51 @@ test "EDOC11: 저장 bytes가 연 그대로의 파일 속성을 되돌린다 (§
         defer a.free(out);
         // BOM 유지 · 기존 CRLF 유지 · 끝 개행 없음 유지.
         try testing.expectEqualStrings(document.utf8_bom ++ "X\r\ny", out);
+    }
+}
+
+test "EDOC12: 저장이 사용자의 끝 개행 편집을 되돌리지 않는다 (§3.5)" {
+    // **§3.5의 "임의로 더하거나 지우지 않는다"는 "원래대로 강제한다"가 아니다.**
+    // 초판이 그렇게 읽어 원본 상태로 맞췄고, 그래서 사용자가 친 Enter가 저장에서 조용히
+    // 사라졌다 — 되돌릴 방법이 undo뿐인 종류이고, 저장했으니 사용자는 눈치채지 못한다.
+    const a = testing.allocator;
+
+    // ⑴ 끝 개행이 **없던** 파일에 사용자가 하나 넣는다 → 남아야 한다.
+    {
+        var f = try EditableFile.init(a, "no newline", false);
+        defer f.deinit();
+        var items = [_]selection.Selection{selection.Selection.at(10)};
+        var sels = selection.Selections.init(&items, 0);
+        const changes = [_]delta.Change{.{ .start = 10, .end = 10, .text = "\n" }};
+        var inv = try f.apply(.{ .changes = &changes }, &sels);
+        defer inv.deinit();
+
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        try testing.expectEqualStrings("no newline\n", out);
+    }
+
+    // ⑵ 끝 개행이 **있던** 파일에서 사용자가 지운다 → 없어야 한다.
+    {
+        var f = try EditableFile.init(a, "has newline\n", false);
+        defer f.deinit();
+        var items = [_]selection.Selection{selection.Selection.at(12)};
+        var sels = selection.Selections.init(&items, 0);
+        const changes = [_]delta.Change{.{ .start = 11, .end = 12, .text = "" }};
+        var inv = try f.apply(.{ .changes = &changes }, &sels);
+        defer inv.deinit();
+
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        try testing.expectEqualStrings("has newline", out);
+    }
+
+    // ⑶ 안 건드리면 그대로다 — 편집기가 **제멋대로** 더하거나 지우지 않는다(§3.5의 본뜻).
+    {
+        var f = try EditableFile.init(a, "untouched", false);
+        defer f.deinit();
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        try testing.expectEqualStrings("untouched", out);
     }
 }

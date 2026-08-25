@@ -7025,9 +7025,10 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     best-effort 제거하고 이전 `workspace.v1`을 byte-for-byte 유지한다. commit 뒤 결과는 새 전체 bytes다. 빈 snapshot은
     upstream capture 오류로 보고 filesystem mutation 전에 거부한다.
   - 결과는 `committed`, `invalid_snapshot`, `open_parent_failed`, `remove_stale_failed`, `create_temp_failed`,
-    `chmod_failed`, `write_failed`, `close_failed`, `replace_failed`의 typed 값이다. C3 caller는 이를 C1
-    `writeCompleted`로 투영한다. C2는 실패를 `try?`로 삼키거나
-    background 성공으로 추측하지 않으며, backup 생성·notice·retry·Quit reply/detach를 수행하지 않는다.
+    `chmod_failed`, `write_failed`, `close_failed`, `replace_failed`, C4 final 전용 `backup_failed`의 typed 값이다. C3 caller는 이를 C1
+    `writeCompleted`로 투영한다. C2는 실패를 `try?`로 삼키거나 background 성공으로 추측하지 않으며,
+    일반 `publish`는 backup을 만들지 않는다. C4의 `publishFinal(preserve_previous=true)`만 고정 `.bak` create-once를
+    수행하고 notice·retry·Quit reply/detach는 여전히 상위 owner에 둔다.
   - 전원 손실 durability를 주장하지 않으므로 file/directory `fsync`는 넣지 않는다. 대신 각 syscall fail-index와
     multi-write prefix, rename 직전/직후 child `SIGKILL` process fixture에서 최종 leaf가 이전 또는 새 **완전본**뿐임을
     검증한다. crash가 남긴 temp는 다음 publish가 회수하며 final leaf와 temp를 동시에 조립해 읽는 recovery는 없다.
@@ -7039,7 +7040,7 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     모델 mutation과 caller-owned monotonic clock 사이의 change token이다. restore/default-window 구성 전에는 arm하지
     않고, 저장본 없는 최초 baseline은 caller가 명시적으로 dirty arm한다. worker completion 전에 revision을 먼저
     동기화해 write 중 변경을 stale 판정에 포함한다. overflow는 sticky integrity failure다. 이 owner는 파일·AppKit·
-    DispatchQueue를 import하지 않는다. Debug·ReleaseFast `test-workspace-checkpoint-product` runtime 6개와
+    DispatchQueue를 import하지 않는다. Debug·ReleaseFast `test-workspace-checkpoint-product` runtime 8개와
     product/source-order boundary 2개·mutation inventory boundary 2개가 이 계약을 고정한다.
   - **C3b committed mutation inventory:** manifest-visible transaction의 성공 commit 뒤에만 revision을 올린다. topology/order,
     rename/color/group/pin, active tab/pane/Term, file/browser persisted state, dock/explicit Explorer roots/SCM base,
@@ -7051,9 +7052,22 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     스레드에서 캡처·semantic validation하고, 독립 소유 immutable bytes만 단일 background C2 writer에 넘긴다.
     completion은 메인 스레드에서 exact C1 request에 정산한다. capture/write 실패는 모든 일반 창 상태표시줄에
     성공 commit 전까지 지속한다. restore incomplete 실행은 background overwrite를 막고
-    C4 final checkpoint가 secure `.bak` 보존 뒤 게시한다. C4 전 정상 Quit은 writer를 quiesce한 뒤 기존
-    `saveWorkspace`를 한 번만 실행한다. 시작값은 debounce 500ms, retry 1s→30s이며 1·10·100 runtime 성능 gate 전에는
+    C4 final checkpoint가 secure `.bak` 보존 뒤 게시한다. 시작값은 debounce 500ms, retry 1s→30s이며 1·10·100 runtime 성능 gate 전에는
     영구 성능 계약으로 확정하지 않는다.
+  - **C4 AppKit terminate handshake:** 사용자 Quit 승인 뒤 AppKit의 `.terminateLater` 보류를 유지한 채 C1
+    `quitRequested`로 mutation 세대를 동기화하고 final capture를 즉시 시작한다. 보류 중 새 persisted mutation은
+    generation을 올리며 stale capture/write completion은 detach하지 않고 current generation을 다시 캡처한다. background write가 이미 진행
+    중이면 그 completion 뒤 current generation final capture를 시작한다. final capture와 C2 publication은 C3와 같은
+    main-capture/serial-writer/main-completion 경계를 쓰며, current generation commit의 `reply_and_detach`에서만
+    `NSApp.reply(true)` 또는 인앱 종료를 진행한다. `applicationWillTerminate`는 legacy `saveWorkspace`를 실행하지 않는다.
+  - final capture·validation·write·secure backup 중 하나라도 실패하면 C1 `cancel_quit`가 final 보류를 풀고,
+    host는 accepted app-quit latch를 취소한 뒤 deferred AppKit request에 `NSApp.reply(false)`를 정확히 한 번 보낸다.
+    기존 complete `workspace.v1`은 유지되고 상태표시줄 실패 notice와 dirty retry 상태가 남는다. restore-incomplete
+    실행은 background overwrite를 계속 막되 final writer가 현재 UID의 regular source를 no-follow로 열고
+    `workspace.v1.bak`을 `O_EXCL|O_NOFOLLOW`, mode `0600`으로 한 번만 만든 뒤 canonical manifest를 게시한다.
+    기존 `.bak`은 current UID regular `0600`일 때만 보존하며 symlink/non-regular/wrong-mode는 Quit을 취소한다.
+    명시적 `Quit and End All Sessions`는 runtime admin shutdown 완료 뒤에도 같은 final checkpoint를 시도하지만,
+    실패 시 orphan runtime을 남기지 않도록 종료를 계속하는 유일한 예외다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
   않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다

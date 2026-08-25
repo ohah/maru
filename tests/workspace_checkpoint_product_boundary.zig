@@ -34,11 +34,24 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
         "maru_macos_workspace_checkpoint_write_completed",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, swift, needle) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "workspaceCheckpointWriter.async"));
-    try std.testing.expect(std.mem.indexOf(u8, swift, "workspaceCheckpointWriter.sync {}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "workspaceCheckpointWriter.sync {}") == null);
     try std.testing.expect(std.mem.indexOf(u8, swift, "captureWorkspaceSnapshot(useTerminationKeyWindow: false, publishedOnly: true)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, swift, "captureWorkspaceSnapshot(useTerminationKeyWindow: true, publishedOnly: false)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "private func saveWorkspace()") == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi, "workspace_checkpoint_file.publish(path"));
     try std.testing.expect(std.mem.indexOf(u8, swift, "!workspaceRestoreIncomplete") != null);
+
+    for ([_][]const u8{
+        "maru_macos_workspace_checkpoint_quit_requested",
+        "MARU_WORKSPACE_CHECKPOINT_EFFECT_CANCEL_QUIT",
+        "MARU_WORKSPACE_CHECKPOINT_EFFECT_REPLY_AND_DETACH",
+        "maru_macos_workspace_checkpoint_publish_final",
+        "workspaceFinalQuitAllowsFailure = maru_macos_app_quit_end_all() != 0",
+        "if workspaceFinalQuitAllowsFailure",
+        "if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty",
+        "workspaceFinalQuitApproved = true",
+        "NSApp.reply(toApplicationShouldTerminate: false)",
+        "NSApp.reply(toApplicationShouldTerminate: true)",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, swift, needle) != null);
 
     const writer_start = std.mem.indexOf(u8, swift, "workspaceCheckpointWriter.async") orelse return error.MissingWriter;
     const writer_end = std.mem.indexOfPos(u8, swift, writer_start, "DispatchQueue.main.async") orelse return error.MissingMainCompletion;

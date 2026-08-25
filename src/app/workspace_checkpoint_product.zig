@@ -10,7 +10,6 @@ const checkpoint = @import("../session/workspace_checkpoint.zig");
 pub const SyncResult = union(enum) {
     unchanged,
     changed,
-    frozen,
 };
 
 /// 관측/행동 테스트용 분류다. debounce와 publication 정책은 kind를 해석하지 않으며 C1 generation은 계속 하나다.
@@ -61,12 +60,9 @@ pub const State = struct {
         if (!self.armed or self.change_revision == self.observed_revision) return .unchanged;
         if (self.integrity_failed) return error.IntegrityFailure;
         var coordinator = &(self.coordinator orelse return error.NotArmed);
-        coordinator.mutation(now_ns) catch |err| switch (err) {
-            error.MutationFrozen => return .frozen,
-            else => {
-                self.integrity_failed = true;
-                return err;
-            },
+        coordinator.mutation(now_ns) catch |err| {
+            self.integrity_failed = true;
+            return err;
         };
         self.observed_revision = self.change_revision;
         return .changed;
@@ -76,6 +72,13 @@ pub const State = struct {
         _ = try self.syncChanges(now_ns);
         if (!self.armed or self.integrity_failed) return .none;
         return self.coordinator.?.tick(now_ns);
+    }
+
+    /// AppKit의 terminateLater 보류가 시작된 뒤 현재 세대의 final capture를 즉시 요청한다.
+    pub fn quitRequested(self: *State, now_ns: u64) !checkpoint.Effect {
+        _ = try self.syncChanges(now_ns);
+        if (!self.armed or self.integrity_failed) return error.IntegrityFailure;
+        return self.coordinator.?.quitRequested(now_ns);
     }
 
     pub fn captureCompleted(self: *State, generation: u64, succeeded: bool, now_ns: u64) !checkpoint.Completion {

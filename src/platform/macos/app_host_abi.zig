@@ -111,8 +111,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v171 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 171), abi_version);
+test "ABI v172 final Quit checkpoint values match the C header" {
+    try std.testing.expectEqual(@as(u32, 172), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -349,11 +349,11 @@ test "CR0b Swift transcript lexer는 escaped multiline delimiter와 raw string e
     try std.testing.expect(!swiftCodeAt(raw, after_raw));
 }
 
-test "Swift workspace checkpoint validates the assembled manifest before backup or write" {
+test "P4 C4 Swift final Quit validates before secure publish and never legacy-saves in willTerminate" {
     const source = @embedFile("MaruAppHost.swift");
     const capture_start = std.mem.indexOf(u8, source, "private func captureWorkspaceSnapshot(useTerminationKeyWindow: Bool, publishedOnly: Bool)") orelse
         return error.MissingWorkspaceCapture;
-    const capture_end = std.mem.indexOfPos(u8, source, capture_start, "\n    private func saveWorkspace()") orelse
+    const capture_end = std.mem.indexOfPos(u8, source, capture_start, "\n    private func shutdownAppSession") orelse
         return error.MissingWorkspaceCaptureEnd;
     const capture = source[capture_start..capture_end];
     const assemble = std.mem.indexOf(u8, capture, "let snapshot = MARU_WORKSPACE_HEADER") orelse
@@ -365,21 +365,18 @@ test "Swift workspace checkpoint validates the assembled manifest before backup 
     try std.testing.expect(assemble < validate);
     try std.testing.expect(validate < count_gate);
 
-    const save_start = capture_end + 1;
-    const save_end = std.mem.indexOfPos(u8, source, save_start, "\n    private func shutdownAppSession") orelse
-        return error.MissingSaveWorkspaceEnd;
-    const save = source[save_start..save_end];
-    const captured = std.mem.indexOf(u8, save, "captureWorkspaceSnapshot(useTerminationKeyWindow: true, publishedOnly: false)") orelse
-        return error.MissingWorkspaceCaptureCall;
-    const create_directory = std.mem.indexOf(u8, save, "createDirectory") orelse
-        return error.MissingWorkspaceDirectoryCreate;
-    const backup = std.mem.indexOf(u8, save, "backupWorkspaceCheckpoint") orelse
-        return error.MissingWorkspaceBackup;
-    const write = std.mem.indexOf(u8, save, "write(to: url, options: .atomic)") orelse
-        return error.MissingWorkspaceWrite;
-    try std.testing.expect(captured < create_directory);
-    try std.testing.expect(captured < backup);
-    try std.testing.expect(captured < write);
+    try std.testing.expect(std.mem.indexOf(u8, source, "private func saveWorkspace()") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "backupWorkspaceCheckpoint") == null);
+    const will_start = std.mem.indexOf(u8, source, "func applicationWillTerminate(_ notification: Notification)") orelse
+        return error.MissingApplicationWillTerminate;
+    const will_end = std.mem.indexOfPos(u8, source, will_start, "\n    func applicationShouldTerminateAfterLastWindowClosed") orelse
+        return error.MissingApplicationWillTerminateEnd;
+    const will_terminate = source[will_start..will_end];
+    try std.testing.expect(std.mem.indexOf(u8, will_terminate, "workspaceCheckpointWriter.sync") == null);
+    try std.testing.expect(std.mem.indexOf(u8, will_terminate, "saveWorkspace") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "maru_macos_workspace_checkpoint_publish_final") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "MARU_WORKSPACE_CHECKPOINT_EFFECT_REPLY_AND_DETACH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "MARU_WORKSPACE_CHECKPOINT_EFFECT_CANCEL_QUIT") != null);
 }
 
 test "P4 C3c checkpoint ABI drives one app-global capture and write generation" {
@@ -411,6 +408,26 @@ test "P4 C3c checkpoint ABI drives one app-global capture and write generation" 
     ));
     try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_EFFECT_NONE), effect.kind);
     try std.testing.expect(!session_mod.app_runtime.workspace_checkpoint.isDirty());
+}
+
+test "P4 C4 checkpoint ABI exposes final capture cancel and detach effects" {
+    const saved = session_mod.app_runtime.workspace_checkpoint;
+    session_mod.app_runtime.workspace_checkpoint = .{};
+    defer session_mod.app_runtime.workspace_checkpoint = saved;
+
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_arm(1));
+    var effect: c.MaruWorkspaceCheckpointEffect = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_quit_requested(1, &effect));
+    try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE), effect.kind);
+    try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_REASON_FINAL_QUIT), effect.reason);
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_capture_completed(effect.generation, 0, 2, &effect));
+    try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_EFFECT_CANCEL_QUIT), effect.kind);
+
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_quit_requested(3, &effect));
+    const generation = effect.generation;
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_capture_completed(generation, 1, 3, &effect));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_write_completed(generation, 1, 3, &effect));
+    try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_EFFECT_REPLY_AND_DETACH), effect.kind);
 }
 
 test "ABI file panel mode, key route, and asset role values match the C header" {
@@ -2267,7 +2284,15 @@ fn writeWorkspaceCheckpointEffect(
     const request = switch (effect) {
         .capture => |request| request,
         .write => |request| request,
-        else => return,
+        .cancel_quit => {
+            out.kind = c.MARU_WORKSPACE_CHECKPOINT_EFFECT_CANCEL_QUIT;
+            return;
+        },
+        .reply_and_detach => {
+            out.kind = c.MARU_WORKSPACE_CHECKPOINT_EFFECT_REPLY_AND_DETACH;
+            return;
+        },
+        .none => return,
     };
     out.generation = request.generation;
     out.kind = switch (effect) {
@@ -2305,6 +2330,10 @@ pub export fn maru_macos_app_session_disable_workspace_checkpoint_mutations(sess
     app_session.workspace_checkpoint_mutations_enabled = false;
 }
 
+pub export fn maru_macos_app_quit_end_all() u32 {
+    return @intFromBool(session_mod.appQuitEndAll());
+}
+
 pub export fn maru_macos_workspace_checkpoint_mark_cross_window_commit() void {
     session_mod.app_runtime.workspace_checkpoint.markChanged(.topology) catch {};
 }
@@ -2329,6 +2358,19 @@ pub export fn maru_macos_workspace_checkpoint_tick(
     clearWorkspaceCheckpointEffect(out);
     if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);
     const effect = session_mod.app_runtime.workspace_checkpoint.tick(now_ns) catch return @intFromEnum(Status.tick_failed);
+    writeWorkspaceCheckpointEffect(effect, null, out);
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_workspace_checkpoint_quit_requested(
+    now_ns: u64,
+    out_effect: ?*c.MaruWorkspaceCheckpointEffect,
+) c_int {
+    const out = out_effect orelse return @intFromEnum(Status.null_out);
+    clearWorkspaceCheckpointEffect(out);
+    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);
+    const effect = session_mod.app_runtime.workspace_checkpoint.quitRequested(now_ns) catch
+        return @intFromEnum(Status.tick_failed);
     writeWorkspaceCheckpointEffect(effect, null, out);
     return @intFromEnum(Status.ok);
 }
@@ -2379,6 +2421,29 @@ pub export fn maru_macos_workspace_checkpoint_publish(
     path_buf[parent_path_len] = 0;
     const path: [:0]const u8 = path_buf[0..parent_path_len :0];
     return @intFromEnum(workspace_checkpoint_file.publish(path, bytes_ptr[0..snapshot_len]));
+}
+
+pub export fn maru_macos_workspace_checkpoint_publish_final(
+    parent_path: ?[*]const u8,
+    parent_path_len: usize,
+    snapshot: ?[*]const u8,
+    snapshot_len: usize,
+    preserve_previous: u32,
+) u32 {
+    const path_ptr = parent_path orelse return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+    const bytes_ptr = snapshot orelse return @intFromEnum(workspace_checkpoint_file.Result.invalid_snapshot);
+    if (parent_path_len == 0 or parent_path_len > std.fs.max_path_bytes or
+        std.mem.indexOfScalar(u8, path_ptr[0..parent_path_len], 0) != null)
+        return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+    var path_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    @memcpy(path_buf[0..parent_path_len], path_ptr[0..parent_path_len]);
+    path_buf[parent_path_len] = 0;
+    const path: [:0]const u8 = path_buf[0..parent_path_len :0];
+    return @intFromEnum(workspace_checkpoint_file.publishFinal(
+        path,
+        bytes_ptr[0..snapshot_len],
+        preserve_previous != 0,
+    ));
 }
 
 // 현재 sidebar 토글(show-branch/show-folder)을 반영한 갱신 config 텍스트를 직렬화해 돌려준다 — Swift가

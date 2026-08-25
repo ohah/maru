@@ -71,7 +71,6 @@ pub const Coordinator = struct {
     notice_emitted: bool = false,
     operation: Operation = .idle,
     quit_pending: bool = false,
-    mutations_frozen: bool = false,
 
     pub fn init(policy: Policy) !Coordinator {
         try policy.validate();
@@ -86,8 +85,6 @@ pub const Coordinator = struct {
     }
 
     pub fn mutation(self: *Coordinator, now_ns: u64) !void {
-        if (self.mutations_frozen) return error.MutationFrozen;
-
         // 두 산술을 모두 먼저 끝내야 overflow가 state 일부만 바꾸지 않는다.
         const next_generation = std.math.add(u64, self.generation, 1) catch return error.Overflow;
         const next_due = std.math.add(u64, now_ns, self.policy.debounce_ns) catch return error.Overflow;
@@ -104,7 +101,6 @@ pub const Coordinator = struct {
     pub fn quitRequested(self: *Coordinator, _: u64) !Effect {
         if (self.quit_pending) return error.QuitAlreadyPending;
         self.quit_pending = true;
-        self.mutations_frozen = true;
         if (self.operation == .idle) return self.startCapture(.final_quit);
         return .none;
     }
@@ -149,8 +145,9 @@ pub const Coordinator = struct {
         }
 
         if (request.reason == .final_quit) {
-            // freeze 때문에 final 세대가 stale일 수 없다. 그래도 손상된 caller가 성공 효과를 얻지 못하게 닫는다.
-            if (generation != self.generation) return error.UnexpectedCompletion;
+            // final capture/write 중 persisted mutation이 생기면 stale bytes로 detach하지 않고 최신 세대를 다시 캡처한다.
+            if (generation != self.generation)
+                return .{ .result = result, .effect = self.startCapture(.final_quit) };
             self.quit_pending = false;
             return .{ .result = result, .effect = .reply_and_detach };
         }
@@ -182,7 +179,6 @@ pub const Coordinator = struct {
 
         if (request.reason == .final_quit) {
             self.quit_pending = false;
-            self.mutations_frozen = false;
             self.due_at_ns = retry_due;
             self.retry_delay_ns = next_delay;
             return .{ .result = result, .effect = .cancel_quit, .notice = notice };

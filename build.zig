@@ -9205,10 +9205,10 @@ pub fn build(b: *std.Build) void {
                 .optimize = checkpoint_product_optimize,
                 .imports = &.{.{ .name = "maru", .module = checkpoint_product_maru_mod }},
             }),
-            .filters = &.{"P4 C3a"},
+            .filters = &.{"P4 C"},
         });
         const run_checkpoint_product_tests = b.addRunArtifact(checkpoint_product_tests);
-        run_checkpoint_product_tests.addArg("--maru-expect-tests=6");
+        run_checkpoint_product_tests.addArg("--maru-expect-tests=8");
         run_checkpoint_product_tests.setCwd(b.path("."));
         workspace_checkpoint_product_step.dependOn(&run_checkpoint_product_tests.step);
         test_step.dependOn(&run_checkpoint_product_tests.step);
@@ -9255,10 +9255,10 @@ pub fn build(b: *std.Build) void {
                     .optimize = checkpoint_file_optimize,
                     .imports = &.{.{ .name = "workspace_checkpoint_file", .module = checkpoint_file_mod }},
                 }),
-                .filters = &.{"P4 C2"},
+                .filters = &.{"P4 C"},
             });
             const run_checkpoint_file_tests = b.addRunArtifact(checkpoint_file_tests);
-            run_checkpoint_file_tests.addArg("--maru-expect-tests=6");
+            run_checkpoint_file_tests.addArg("--maru-expect-tests=8");
             run_checkpoint_file_tests.setCwd(b.path("."));
             workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
             test_step.dependOn(&run_checkpoint_file_tests.step);

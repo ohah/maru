@@ -221,7 +221,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 171;
+pub const abi_version: u32 = 172;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2806,6 +2806,10 @@ var app_quit_keep_alive: bool = false;
 // app_quitting과 함께 켜진다 → deinit이 host-backed Term을 detach(생존)가 아니라 **terminate**(runtime 종료)한다. keep-alive
 // 기본 quit은 detach(생존), 이 alternate만 명시적으로 다 끝낸다. app_quitting과 짝으로 리셋한다.
 var app_quit_end_all: bool = false;
+
+pub fn appQuitEndAll() bool {
+    return app_quit_end_all;
+}
 
 pub fn setAppKeepAlivePolicy(value: bool) void {
     app_keep_alive_after_quit = value;

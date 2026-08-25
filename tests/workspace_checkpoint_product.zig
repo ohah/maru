@@ -70,6 +70,29 @@ test "P4 C3a arm과 completion의 복제 순서를 fail closed한다" {
     try std.testing.expectError(error.UnexpectedCompletion, state.writeCompleted(1, true, 10));
 }
 
+test "P4 C4 Quit 요청은 관측되지 않은 mutation을 동기화하고 final capture를 즉시 낸다" {
+    var state: product.State = .{};
+    try state.arm(policy, false);
+    try state.markChanged(.window_frame);
+    const effect = try state.quitRequested(7);
+    try expectCapture(effect, 1);
+    switch (effect.capture.reason) {
+        .final_quit => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "P4 C4 final 실패 뒤 mutation forwarding을 다시 받는다" {
+    var state: product.State = .{};
+    try state.arm(policy, true);
+    const capture = try state.quitRequested(1);
+    try expectCapture(capture, 1);
+    const completion = try state.captureCompleted(1, false, 2);
+    try std.testing.expectEqual(checkpoint.Effect.cancel_quit, completion.effect);
+    try state.markChanged(.selection);
+    try std.testing.expectEqual(product.SyncResult.changed, try state.syncChanges(3));
+}
+
 fn expectCapture(effect: checkpoint.Effect, generation: u64) !void {
     switch (effect) {
         .capture => |request| try std.testing.expectEqual(generation, request.generation),

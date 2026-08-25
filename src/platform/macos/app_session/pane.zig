@@ -713,7 +713,8 @@ pub fn flushPaneTabTitles(
         const dl = chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return;
         // dest가 `.sidebar_search`인 것은 이름과 달리 "origin 0,0 · clip 없음"이라는 배치 규약을 고른 것이다
         // (op origin이 이미 창 절대 좌표라 여기서 더 옮길 것이 없다). 이름은 measured dest를 정리할 때 함께 손본다.
-        self.collectMeasuredTextFromCache(collected, dl, cache, builder, .{ .sidebar_search = .{
+        // 뷰포트 `null` 은 **고른 답이다** — 이 글자는 스크롤 목록이 아니라 고정 밴드에 앉는다(위 규약).
+        self.collectMeasuredTextFromCache(collected, dl, cache, builder, null, .{ .sidebar_search = .{
             .origin_x = 0,
             .origin_y = 0,
             .colors = .{ .default_fg = self.appearance.theme.foreground },

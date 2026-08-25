@@ -17485,6 +17485,12 @@ pub const AppSession = struct {
         origin_x: u32,
         origin_y: u32,
         colors: metal_frame.CellColors,
+        /// 이 배치의 글자·셀을 자를 사각형(backing 좌표).
+        ///
+        /// **measured 글자 경로는 이 필드를 직접 적지 않는다** — `collectMeasuredTextFromCache` 의
+        /// `text_viewport` 인자가 찍는다. 리터럴에도 적을 수 있게 두면 출처가 둘이 되고, 기본값이
+        /// 있으므로 **빠뜨려도 컴파일된다**(그래서 도크 둘이 오래 안 잘리고 있었다 — 그 함수의 머리말).
+        /// 모달 overlay 는 자기 raster 의 clip op 에서 받아 다른 경로로 채운다.
         clip_rect: ?metal_frame.ClipPx = null,
         /// 캐시된 measured 아티팩트를 이번 프레임 스크롤 위치로 옮기는 평행이동량(px). 스크롤 소속
         /// glyph에만 적용된다.
@@ -17567,17 +17573,38 @@ pub const AppSession = struct {
 
     /// B1 rich Chrome cache hit. `shapeFromRecords` duplicates only per-frame renderer run
     /// ownership; it does not call CoreText or wait for a font worker.
+    /// measured chrome 글자를 이번 프레임의 수집 목록에 싣는다.
+    ///
+    /// **`text_viewport` 에는 기본값이 없다.** 그 값이 `PanePlacement.clip_rect` 의 기본값(`null`)으로
+    /// 조용히 빠질 수 있던 동안, 도크 셋 중 둘이 실제로 빠뜨렸다 — SCM·파일 트리 목록의 라벨이 아무
+    /// 데서도 안 잘려 반쯤 스크롤된 첫 행이 목록 위 고정 chrome 위에 그려졌다(2026-08-25).
+    ///
+    /// 왜 여기가 그 자리인가: tree 의 `effective_clip` 은 **quad 만** 자르고, measured 글자는 이
+    /// 함수가 싣는 사각형으로만 잘린다(`docs/scroll-area.md` §5.1). 즉 이 인자를 빠뜨리는 것과
+    /// "글자를 안 자른다"는 같은 말이다. 인자로 세워 두면 **잊는 것이 불가능**하고, `null` 은
+    /// 소비처가 명시적으로 고른 답이 된다(스크롤 목록이 아닌 표면 — 사이드바 검색 줄 등).
+    ///
+    /// 자를 사각형의 **산출은 컴포넌트가 소유한다**(`…build.scrollTextViewport`). host 가 다시 쓰면
+    /// 제품과 Lab 이 갈려 골든이 제품과 다른 그림을 증명한다.
     pub fn collectMeasuredTextFromCache(
         self: *AppSession,
         collected: *std.ArrayList(CollectedPane),
         dl: renderer.DrawList,
         cache: *const MeasuredTextCache,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
+        text_viewport: ?metal_frame.ClipPx,
         dest: CollectDest,
     ) void {
+        // 목적지가 배치를 들고 있으면 뷰포트는 **이 인자 하나가 정한다**. 리터럴에도 적을 수 있게 두면
+        // 출처가 둘이 되고, 목적지가 둘인 소비처가 한쪽만 적는 날이 온다.
+        var stamped = dest;
+        switch (stamped) {
+            .sidebar_search, .overlay, .pane, .dock_toggle, .status_bar, .floating, .sticky => |*placement| placement.clip_rect = text_viewport,
+            .sidebar, .sidebar_header, .active => {},
+        }
         const pane = builder.shapeFromRecords(self.allocator, dl, cache.records) catch return;
         var p = pane;
-        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .measured_text = .{ .records = cache.records, .placements = cache.placements } }) catch {
+        collected.append(self.allocator, .{ .pane = p, .dest = stamped, .builder = builder, .measured_text = .{ .records = cache.records, .placements = cache.placements } }) catch {
             p.deinit(self.allocator);
         };
     }

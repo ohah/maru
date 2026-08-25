@@ -1358,11 +1358,11 @@ pub fn collectScmDock(
                 app_session_mod.chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return,
                 cache,
                 builder,
+                scroll_clip,
                 .{ .pane = .{
                     .origin_x = content.x,
                     .origin_y = content.y,
                     .colors = colors,
-                    .clip_rect = scroll_clip,
                     .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
                 } },
             );

@@ -1256,6 +1256,8 @@ pub const Config = struct {
     /// 대화형 셸 프로그램·인자 override. loader가 `shell.command`/`shell.args` 키로 파싱. 기본은 빈 command
     /// (= resolveInteractiveShell 폴백)이라 미설정 시 현행 동작과 동일.
     shell: ShellConfig = .{},
+    /// `maru ssh` 세션의 끊김 감지·자동 재접속 설정. loader가 `ssh.*` 키로 파싱.
+    ssh: SshConfig = .{},
 
     // 최상위 스칼라(Config 직속 — sub-struct가 아니라 namespace가 없으므로 Meta.key로 전체 키를 명시한다, CS-2b).
     // window.padding-x/y(alias)·env(동적)·sub-struct(font/theme/…)는 schema에 안 넣는다 — 각각 loader 명시 핸들러/하위 schema.
@@ -1422,6 +1424,37 @@ pub const ShellIntegrationConfig = struct {
 
     pub const schema = .{ // namespace shell-integration(dashed). 키: shell-integration.ssh
         .ssh = Meta{ .doc = .cfg_shellint_ssh, .widget = .toggle, .section = .terminal },
+    };
+};
+
+/// `maru ssh` 세션의 **끊김 감지와 자동 재접속** 설정.
+///
+/// 왜 여기 있나: ssh 는 연결이 죽어도 **로컬 프로세스가 OS TCP 타임아웃까지 살아 있다**. 그동안
+/// 화면은 멀쩡한데 입력만 안 먹으므로 사용자는 앱이 멈춘 줄 안다. `ServerAliveInterval` 이 그 시점을
+/// 앞당기고, 앞당겨진 종료를 래퍼가 받아 재접속한다 — 둘은 한 기능의 앞뒤다(docs/ssh-integration.md §10).
+///
+/// **왜 `~/.ssh/config` 에 맡기지 않고 config 필드를 두나**: ssh 는 커맨드라인 `-o` 가 설정 파일보다
+/// 우선이라, 래퍼가 값을 고정해 붙이면 사용자가 자기 `~/.ssh/config` 에 적어 둔 값을 **말없이 덮는다**.
+/// 그 탈출구가 `server-alive-interval = 0` 이다 — 0 이면 `-o` 를 아예 안 붙여 사용자 설정이 그대로 산다.
+pub const SshConfig = struct {
+    /// `maru ssh` 세션에 붙일 `ServerAliveInterval`(초). 기본 15 — `server-alive-count-max` 기본 3 과
+    /// 곱해 **45 초 안에** 죽은 연결을 감지한다. **0 이면 `-o` 를 안 붙인다**(사용자 `~/.ssh/config` 존중).
+    /// 상한 3600 은 ssh 값 자체의 상한이 아니라 "한 시간을 넘겨 기다릴 이유가 없다" 는 이 기능의 상한이다.
+    server_alive_interval: u32 = 15,
+    /// 응답 없는 keepalive 를 몇 번까지 견딜지(`ServerAliveCountMax`). 기본 3. `server-alive-interval`
+    /// 이 0 이면 이 값도 안 쓰인다. 최소 1 — 0 은 ssh 에서 "즉시 끊어라" 라 오작동에 가깝다.
+    server_alive_count_max: u32 = 3,
+    /// 세션이 끊겼을 때(ssh exit 255) 자동으로 다시 붙을지. 기본 true.
+    ///
+    /// **재접속은 새 세션이다** — SSH 에 재개(resume)가 없으므로 끊긴 시점의 원격 셸·실행 중이던 CLI 는
+    /// 돌아오지 않는다(docs/ssh-client.md §4.1). 원격에 상태를 남기는 것(세션 호스트·tmux)이 있을 때만
+    /// 이어진다. 그래도 기본 on 인 이유는, 그 경우조차 **다시 붙는 일을 사람이 하지 않아도 되기** 때문이다.
+    reconnect: bool = true,
+
+    pub const schema = .{ // namespace ssh. 키: ssh.server-alive-interval / ssh.server-alive-count-max / ssh.reconnect
+        .server_alive_interval = Meta{ .doc = .cfg_ssh_server_alive_interval, .range = .{ 0, 3600 }, .widget = .number, .section = .terminal },
+        .server_alive_count_max = Meta{ .doc = .cfg_ssh_server_alive_count_max, .range = .{ 1, 10 }, .widget = .number, .section = .terminal },
+        .reconnect = Meta{ .doc = .cfg_ssh_reconnect, .widget = .toggle, .section = .terminal },
     };
 };
 

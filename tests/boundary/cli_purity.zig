@@ -23,8 +23,9 @@
 // **0건 규칙을 전역으로 세울 수 없는 이유**는 두 가지이고 재고가 그 둘을 구분한다.
 //   - `control_client.zig`·`browser/run.zig`·`control_relay.zig`: **의도된 예외**. 이 파일들의
 //     존재 이유가 접착이다.
-//   - `ssh.zig`: **테스트 전용 헬퍼**. `expectNotifyLifecycle`이 fork/pipe로 셸 스크립트의 신호 수명을
-//     실측하는데, top-level `fn`이라 `test` 블록 마스크에 걸리지 않는다. 제품 경로는 순수하다.
+//   - `ssh.zig`: **테스트 전용 헬퍼**. `spawnShell`/`drainShell`과 그 호출자(`expectNotifyLifecycle`이
+//     신호 수명을, `runSessionLoop`이 재접속 루프를 실제 `/bin/sh`로 실측한다)가 top-level `fn`이라
+//     `test` 블록 마스크에 걸리지 않는다. 제품 경로는 순수하다.
 //
 // **이 게이트가 막지 못하는 것 — 정직하게.**
 //   - 예외 파일 **안에서** impure가 늘어나는 것은 못 본다. 개수를 고정하면 정상적인 리팩터마다 재고가
@@ -79,8 +80,8 @@ const inventory = [_]Entry{
     },
     .{
         .path = "ssh.zig",
-        .expect = .{ .exact = 20 },
-        .why = "테스트 전용 fork/pipe 헬퍼(expectNotifyLifecycle)가 top-level fn이라 test 마스크에 안 걸린다. 제품 경로는 순수하다.",
+        .expect = .{ .exact = 24 },
+        .why = "테스트 전용 fork/pipe 헬퍼(spawnShell·drainShell과 그 호출자 expectNotifyLifecycle·runSessionLoop)가 top-level fn이라 test 마스크에 안 걸린다. 제품 경로는 순수하다. 20→24는 재접속 루프를 실제 /bin/sh로 돌리는 하네스가 붙은 몫이고, fork 절차 자체는 spawnShell 하나로 합쳐 뒀다(따로 들면 33이었다).",
     },
 };
 

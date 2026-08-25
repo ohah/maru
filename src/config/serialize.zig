@@ -131,6 +131,10 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.scrollback.lines = 5000;
     cfg.bell.audible = false;
     cfg.shell_integration.ssh = true;
+    // 셋 다 기본과 다른 값으로 — 기본값 누수로 통과하는 가짜 green 방지(위 sidebar.width와 같은 규율).
+    cfg.ssh.server_alive_interval = 30;
+    cfg.ssh.server_alive_count_max = 5;
+    cfg.ssh.reconnect = false;
     cfg.sidebar.show_branch = false;
     cfg.sidebar.show_folder = false;
     cfg.sidebar.width_pt = 250; // 기본 180과 다른 값 — u32 키(sidebar.width) round-trip 대칭 강제(기본값 누수 가짜 green 방지)
@@ -192,6 +196,9 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(@as(u32, 5000), got.scrollback.lines);
     try std.testing.expectEqual(false, got.bell.audible);
     try std.testing.expectEqual(true, got.shell_integration.ssh);
+    try std.testing.expectEqual(@as(u32, 30), got.ssh.server_alive_interval);
+    try std.testing.expectEqual(@as(u32, 5), got.ssh.server_alive_count_max);
+    try std.testing.expectEqual(false, got.ssh.reconnect);
     try std.testing.expectEqual(false, got.sidebar.show_branch);
     try std.testing.expectEqual(false, got.sidebar.show_folder);
     try std.testing.expectEqual(@as(u32, 250), got.sidebar.width_pt);

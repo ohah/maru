@@ -2656,6 +2656,44 @@ test "parse: shell-integration.ssh (opt-in, default off, forgiving)" {
     }
 }
 
+test "parse: ssh.* (maru ssh 끊김 감지·재접속) 기본값·범위·forgiving" {
+    {
+        var p = try parse(std.testing.allocator, ""); // 미설정 = 45초 안에 감지 + 자동 재접속
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 15), p.config.ssh.server_alive_interval);
+        try std.testing.expectEqual(@as(u32, 3), p.config.ssh.server_alive_count_max);
+        try std.testing.expectEqual(true, p.config.ssh.reconnect);
+    }
+    {
+        var p = try parse(std.testing.allocator, "ssh.server-alive-interval = 30\nssh.server-alive-count-max = 5\nssh.reconnect = false\n");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 30), p.config.ssh.server_alive_interval);
+        try std.testing.expectEqual(@as(u32, 5), p.config.ssh.server_alive_count_max);
+        try std.testing.expectEqual(false, p.config.ssh.reconnect);
+    }
+    {
+        // **0은 유효값이다** — "keepalive를 붙이지 마라"는 뜻이고, 그것이 사용자 `~/.ssh/config`를
+        // 존중하는 유일한 탈출구다(커맨드라인 `-o`가 설정 파일보다 우선이므로).
+        var p = try parse(std.testing.allocator, "ssh.server-alive-interval = 0\n");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 0), p.config.ssh.server_alive_interval);
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len);
+    }
+    {
+        var p = try parse(std.testing.allocator, "ssh.server-alive-interval = 99999\n"); // 범위 밖 → 기본값 + 진단
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 15), p.config.ssh.server_alive_interval);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+    {
+        // count-max 하한은 1이다 — ssh에서 0은 "즉시 끊어라"라 오작동에 가깝다.
+        var p = try parse(std.testing.allocator, "ssh.server-alive-count-max = 0\n");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(u32, 3), p.config.ssh.server_alive_count_max);
+        try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
+    }
+}
+
 test "parse: quick-terminal options (height/auto-hide/screen) with defaults and forgiving" {
     {
         // 기본값.

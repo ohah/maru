@@ -198,7 +198,7 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "ssh")) {
-        try runSsh(allocator, &args, stderr);
+        try runSsh(io, allocator, &args, stderr);
         return;
     }
 
@@ -5740,7 +5740,8 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
 
 /// 호스트 OS가 아직 못 하는 CLI 기능. 어느 것이 왜 막혀 있는지를 **한 곳에** 둔다.
 const HostGatedFeature = enum {
-    /// `maru ssh` — `/bin/sh -c <래퍼 스크립트>`를 execve해 원격에 terminfo를 심고 ssh로 프로세스를 교체한다.
+    /// `maru ssh` — `/bin/sh -c <래퍼 스크립트>`를 execve해 원격에 terminfo를 심고 그 셸이 ssh 세션을 돈다
+    /// (끊기면 다시 붙어야 해서 **셸이 남는다** — ssh로 프로세스를 교체하면 다시 붙을 주체가 없다).
     /// Windows에는 `/bin/sh`가 없고 `environ` 심볼도 msvcrt에 없어 **링크가 깨진다**(실측:
     /// `lld-link: undefined symbol: environ`).
     ssh,
@@ -5811,7 +5812,7 @@ fn runControl(
     }
 }
 
-fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
+fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     // Windows 미지원(백로그 W9) — 이유는 `HostGatedFeature.ssh`. 여기서 접지 않으면 W2의 목표(Windows에서
     // maru가 빌드된다)가 성립하지 않는다. comptime 참이라 아래 POSIX 본문은 의미 분석되지 않는다(실측 확인).
     if (gate_ssh) |reason| {
@@ -5852,7 +5853,22 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
     };
     defer if (ctl.len > 0) allocator.free(ctl);
 
-    const argv = try maru.cli.ssh.buildArgv(allocator, parsed, ctl);
+    // 세션 수명 정책(keepalive·재접속)은 config `ssh.*`가 소유한다. **config를 못 읽어도 접속은 된다** —
+    // 그때는 스키마 기본값과 같은 `SessionOpts` 기본값으로 간다(설정 파일이 없는 새 사용자와 같은 자리).
+    // 여기서 읽는 이유는 이 값이 wrapper 스크립트의 인자이고, 스크립트는 execve 뒤에 config를 못 읽기 때문이다.
+    var session_opts: maru.cli.ssh.SessionOpts = .{};
+    if (maru.config.loader.loadDefault(io, allocator)) |loaded_config| {
+        var loaded = loaded_config;
+        defer loaded.deinit();
+        session_opts = .{
+            .server_alive_interval = loaded.config.ssh.server_alive_interval,
+            .server_alive_count_max = loaded.config.ssh.server_alive_count_max,
+            .reconnect = loaded.config.ssh.reconnect,
+        };
+    } else |_| {}
+
+    var scratch: maru.cli.ssh.ArgvScratch = .{};
+    const argv = try maru.cli.ssh.buildArgv(allocator, parsed, ctl, session_opts, &scratch);
     defer allocator.free(argv);
 
     // execve용 null-terminated C argv(pty/macos.zig ArgvStorage와 같은 패턴). alloc은 미초기화
@@ -5871,8 +5887,9 @@ fn runSsh(allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !
     defer allocator.free(c_argv);
     for (c_strings, 0..) |s, i| c_argv[i] = s.ptr;
 
-    // 현재 환경을 상속해 `/bin/sh -c <script>`를 exec한다 — 성공하면 이 프로세스가 sh→ssh로 대체된다
-    // (SSH_AUTH_SOCK 등 그대로 흐른다. TERM은 스크립트가 ssh `-o SetEnv`로 정한다). 돌아오면 실패다.
+    // 현재 환경을 상속해 `/bin/sh -c <script>`를 exec한다 — 성공하면 이 프로세스가 그 셸이 되고, 셸이
+    // ssh를 자식으로 돌리며 끊기면 다시 붙는다(docs/ssh-integration.md §10). 돌아오면 실패다.
+    // (SSH_AUTH_SOCK 등 환경은 그대로 흐른다. TERM은 스크립트가 `env`로 정한다.)
     _ = std.c.execve("/bin/sh", c_argv, @ptrCast(std.c.environ));
     try stderr.writeAll("maru ssh: failed to exec /bin/sh\n");
     try stderr.flush();

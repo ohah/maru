@@ -120,7 +120,7 @@ term = xterm-ghostty
 >
 > ```sh
 > maru install-cli              # maru 바이너리를 ~/.local/bin/maru에 symlink(셸에서 maru를 쓰려면 한 번)
-> maru ssh <host>               # 원격에 xterm-maru 설치 후 exec ssh
+> maru ssh <host>               # 원격에 xterm-maru 설치 후 ssh 세션(끊기면 자동 재접속 — 아래 `ssh.*`)
 > maru ssh --terminfo-only <host>   # 설치만(세션 없음) — ssh 래핑을 원치 않을 때
 > ```
 >
@@ -255,3 +255,31 @@ shell-integration.ssh = true    # 평범한 ssh를 maru ssh로 자동 라우팅 
 > **범위/우회**: zsh 통합이 켜진 대화형 셸에서만 적용된다(통합이 없으면 함수가 정의되지 않는다). 한 번만
 > 평범한 ssh로 가려면 `command ssh ...` 또는 `\ssh ...`. `maru ssh`와 동일하게 **대화형 세션용**이라
 > `ssh host cmd`(원격 command)는 terminfo 설치를 건너뛰고 `xterm-256color`로 연결한다.
+
+### `maru ssh` 끊김 감지와 재접속 (`ssh.*`)
+
+```
+ssh.server-alive-interval = 15   # keepalive 간격(초). 0이면 -o를 안 붙인다 (기본 15)
+ssh.server-alive-count-max = 3   # 응답 없는 keepalive 몇 번까지 견딜지 (기본 3)
+ssh.reconnect = true             # 끊기면(ssh exit 255) 자동으로 다시 붙기 (기본 true)
+```
+
+**`maru ssh`로 연 세션에만 적용된다.** 평범한 `ssh`는 건드리지 않는다(그쪽은 `~/.ssh/config`가 소유한다).
+설계와 판단 근거는 [ssh-integration.md §10](ssh-integration.md#10-끊김-감지와-자동-재접속-maru-ssh)이 소유한다.
+
+**왜 config 필드인가.** ssh는 커맨드라인 `-o`가 설정 파일보다 우선이라, 래퍼가 값을 고정해 붙이면 사용자가
+`~/.ssh/config`에 적어 둔 `ServerAliveInterval`을 **말없이 덮는다**. `ssh.server-alive-interval = 0`이 그
+탈출구다 — 0이면 `-o`를 아예 안 붙여 사용자 설정이 그대로 산다.
+
+기본값 15 × 3 = **45초 안에** 죽은 연결을 감지한다. 이 값이 없으면(=0으로 끄고 `~/.ssh/config`에도 없으면)
+와이파이가 끊겨도 로컬 `ssh`는 OS의 TCP 타임아웃까지 살아 있어서, 화면은 멀쩡한데 입력만 안 먹는 상태가
+수 분 이상 간다.
+
+> **재접속은 새 세션이다.** SSH에 재개(resume)가 없어 끊긴 시점의 원격 셸과 거기서 돌던 CLI는 돌아오지
+> 않는다. 원격에 상태를 남기는 것(원격 세션 호스트·tmux)이 있을 때만 이어진다. `ssh.reconnect`가 없애는
+> 것은 **다시 붙는 수고**이지 세션의 소실이 아니다.
+
+재접속은 exit 255(ssh 자신의 연결 오류)에만 걸리고, 1→2→4→8→16→30초로 늘어나는 백오프로 다시 시도한다.
+대기 중 **Enter를 누르면 즉시** 다시 시도하고(bash·tty에서), **Ctrl-C면 중단**한다. 원격 command를 붙인
+호출(`maru ssh host ls`)은 자동 재실행 대상이 아니며, 접속 자체가 안 되는 호스트(2초를 못 넘긴 세션이
+3연속)는 포기한다.

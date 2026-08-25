@@ -29,7 +29,7 @@ Maru는 시작 시 사용자 설정 파일을 읽어 폰트·색·커서를 적�
 |---|---|
 | [텍스트와 테마](configuration-text.md) | `theme.preset` 프리셋, `text.ambiguous-width`, `text.emoji-width` |
 | [입력과 키바인딩](configuration-input.md) | `input.page-keys`, `input.shift-enter`, `input.ime-enter`, `keybind` |
-| [셸과 환경](configuration-shell.md) | `workspace.*`, `term`, `env.<KEY>`, `shell.*`, `shell-integration.ssh` |
+| [셸과 환경](configuration-shell.md) | `workspace.*`, `term`, `env.<KEY>`, `shell.*`, `shell-integration.ssh`, `ssh.*` |
 
 ## 위치
 
@@ -244,6 +244,9 @@ file-panel.external-link-target = in-app
 | `sidebar.width` | 정수(120~480) | `180` | 세로 사이드바 폭(논리 pt, DPI 스케일). 사이드바 우측 경계를 드래그하면 이 키에 양방향 반영(드래그 종료 시 앱→config 파일 atomic write, 주석 보존). 범위 밖/비정수는 무시(기본 유지). 런타임은 헤더 아이콘(신호등·⚙ 등)이 겹치지 않게 폰트 크기에 비례한 **동적 하한**으로 다시 끌어올릴 수 있어, 작은 값을 저장해도 실제 폭은 그 하한 이상이 된다 |
 | `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
 | `shell-integration.ssh` | `true`\|`false` | `false` | 평범한 `ssh`를 `maru ssh`로 라우팅해 원격에 `xterm-maru` terminfo를 전파할지(opt-in). 기본 off(다운그레이드로 원격 안 깨짐). [셸 통합 ssh 라우팅](configuration-shell.md#셸-통합-ssh-라우팅-shell-integrationssh) 참조 |
+| `ssh.server-alive-interval` | 정수(0~3600) | `15` | `maru ssh` 세션에 붙일 `ServerAliveInterval`(초). `server-alive-count-max`와 곱해 **45초 안에** 죽은 연결을 감지한다. **`0`이면 `-o`를 아예 안 붙인다** — ssh는 커맨드라인 `-o`가 설정 파일보다 우선이라, 값을 고정해 붙이면 사용자 `~/.ssh/config`의 `ServerAlive*`를 말없이 덮기 때문이다. 평범한 `ssh`는 건드리지 않는다. [끊김 감지와 재접속](configuration-shell.md#maru-ssh-끊김-감지와-재접속-ssh) 참조 |
+| `ssh.server-alive-count-max` | 정수(1~10) | `3` | 응답 없는 keepalive를 몇 번까지 견딜지(`ServerAliveCountMax`). `server-alive-interval`이 `0`이면 안 쓰인다. 하한이 1인 이유는 ssh에서 0이 "즉시 끊어라"라 오작동에 가깝기 때문이다 |
+| `ssh.reconnect` | `true`\|`false` | `true` | `maru ssh` 세션이 끊기면(ssh exit 255) 자동으로 다시 붙을지. 1→2→4→8→16→30초 백오프, 대기 중 Enter로 즉시·Ctrl-C로 중단. 원격 command를 붙인 호출(`maru ssh host ls`)과 접속 자체가 안 되는 호스트는 대상이 아니다. **재접속은 새 세션이다** — SSH에 재개가 없어 끊긴 시점의 원격 셸은 돌아오지 않는다(원격 세션 호스트·tmux가 있을 때만 이어진다) |
 | `env.<KEY>` | 문자열 | (없음) | 새 셸에 주입할 환경변수(`env.EDITOR = nvim`처럼 여러 줄). 부모 상속 env + maru override(TERM 등) **위에 upsert** — 같은 KEY면 덮어쓰고 없으면 추가("부모 + 사용자"). 단 control-plane selector `MARU_PANE_ID`는 spawn 값이 최종 우선한다. 값은 양끝만 trim(내부 공백 보존), 빈 값 허용. 빈 KEY(`env. =`)는 무시. 새로 여는 셸에만 적용(reload는 기존 셸 env 안 바꿈). 아래 참조 |
 | `shell.command` | 경로 | (없음) | 대화형 셸 실행 파일 경로(절대경로). 비어 있으면(기본) `$MARU_INTERACTIVE_SHELL`→`$SHELL`→`/bin/sh` 순으로 자동 결정(현행). 새로 여는 셸에만 적용. 아래 참조 |
 | `shell.args` | 문자열 | POSIX `-i` / **Windows 없음** | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. **기본값이 OS 마다 다르다** — POSIX 의 `/bin/sh` 는 `-i` 가 있어야 대화형으로 서지만 Windows 의 pwsh·cmd 는 콘솔에 붙는 순간 이미 대화형이고, PowerShell 5.1 은 `-i` 를 `-InputFormat` 축약으로 읽어 **셸이 안 뜬다**. 아래 참조 |

@@ -292,13 +292,20 @@ const Writer = struct {
 /// 선택이 **accent 색 면**이었기 때문이고(FT1 이 그것을 회색 밴드 + 2px accent 막대로 바꿨다 —
 /// `types.Metrics.focus_bar_w`), 그 순간부터 밝기 순서가 신호가 됐다.
 ///
-/// **활성(열린 파일)은 호버와 같은 약한 단을 쓴다.** 스펙의 밴드 상태는 둘(선택·호버)이고, 열린
-/// 파일은 자기만의 신호를 이미 갖는다 — 라벨이 `surface_fg` 로 올라가는 유일한 행이다(`labelRole`).
-/// 그래서 약한 단을 나눠 쓰는 것이 정보를 잃지 않고, 세 단을 12% 안에 밀어 넣어 셋 다 구별 못 하게
-/// 되는 것보다 낫다(rich 팔레트: hover 88 · press 94 · active 100).
+/// **활성(열린 파일)에는 밴드를 주지 않는다.** 한때 호버와 **같은 색**을 나눠 썼는데, 그러면 켜진
+/// 밴드가 "포인터가 여기"인지 "이 파일이 열려 있다"인지 화면에서 구별되지 않는다 — 적대적 검증에서
+/// 두 행이 같은 밝기(68)로 켜진 캡처를 확인했다. 신호가 **빠진** 것이 아니라 **거짓**이었던 셈이다.
+///
+/// 색을 하나 더 만들어 가르는 길은 닫혀 있다: rich 팔레트의 상호작용 단계는 배경 10 위에서
+/// 88 · 94 · 100 이라 그 사이에 넣어도 읽히지 않는다(그 실측은 `tokens.zig` 의 `control_press_bg`
+/// 주석이 소유한다). 그래서 **빼서** 푼다 — 켜진 밴드는 언제나 "포인터가 여기"다.
+///
+/// 열린 파일은 자기 신호를 그대로 갖는다: 라벨이 `surface_fg` 로 올라가는 **유일한 행**이다
+/// (`labelRole`). 계획 문서 §3 의 시각 계약도 밴드 상태를 선택·호버 **둘로만** 적고 있다 — 활성 밴드는
+/// 그 표에 없던 것이고, 이 함수가 표에 맞춰졌다.
 fn bandRole(r: types.Row, hovered: bool) ?tokens.ColorRole {
     if (r.selected) return .tab_active_bg;
-    if (r.active or hovered) return .tab_hover_bg;
+    if (hovered) return .tab_hover_bg;
     return null;
 }
 
@@ -639,6 +646,35 @@ test "호버는 InteractionState 로만 들어온다" {
 // 뒤집힘을 못 잡는다: `row_hover_bg` 는 이름이 "호버"인데 값이 활성보다 **밝다**(그 role 의 계약이
 // 그렇다 — 겹침용이다). 그래서 **값으로** 잰다. 실제로 FT1 이 이 상태였고, Lab 캡처를 눈으로 보고서야
 // 드러났다(선택 rgb 80 대 호버 rgb 140).
+// **켜진 밴드는 언제나 "포인터가 여기"다.**
+//
+// 활성이 호버와 같은 색을 나눠 쓰던 동안에는 열린 파일이 늘 켜져 있어, 사용자가 포인터 자리를 화면에서
+// 알 수 없었다(적대적 검증 실측: 두 행이 같은 밝기 68). 밴드를 하나로 줄인 뒤에는 그 모호함이 없어야
+// 하고, 그 덕에 **열린 파일도 호버에 반응한다** — 예전에는 이미 켜져 있어 아무 변화가 없었다.
+test "열린 파일은 밴드가 없다가 호버할 때만 켜진다" {
+    const rows = [_]types.Row{.{ .kind = .file, .label = "open.zig", .icon_kind = 0, .active = true }};
+    var idle_h = Harness{};
+    const idle = try idle_h.run(&rows);
+    try testing.expectEqual(@as(usize, 0), countQuad(idle.ops));
+
+    var hov = Harness{};
+    const props = types.Props{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows };
+    const frame = try build_mod.build(props, .{
+        .nodes = &hov.nodes,
+        .entries = &hov.entries,
+        .layout_items = &hov.items,
+        .flex_scratch = &hov.flex,
+        .child_rects = &hov.rects,
+        .actions = &hov.actions,
+    });
+    const tk = testTokens();
+    const painted = try view(props, frame, .{ .hovered = build_mod.NodeIds.row(0) }, &tk, .{ .ops = &hov.ops, .runs = &hov.runs, .text_bytes = &hov.text_bytes });
+    try testing.expectEqual(@as(usize, 1), countQuad(painted.ops));
+    for (painted.ops) |op| if (op == .quad) {
+        try testing.expectEqual(tokens.ColorRole.tab_hover_bg, op.quad.fill_role);
+    };
+}
+
 test "호버 밴드는 선택 밴드보다 배경에 가깝다" {
     const rich = testTokens();
     const bg = rich.palette.get(.surface_bg);
@@ -647,9 +683,12 @@ test "호버 밴드는 선택 밴드보다 배경에 가깝다" {
     // 셋이 한 방향으로 서야 한다: 배경 < 호버 < 선택.
     try testing.expect(dist(bg, hover) > 0); // 호버가 보인다
     try testing.expect(dist(bg, hover) < dist(bg, selected)); // 그리고 선택보다 약하다
-    // 활성(열린 파일)도 선택을 넘지 않는다.
-    const active = rich.palette.get(bandRole(.{ .kind = .file, .label = "a", .icon_kind = 0, .active = true }, false).?);
-    try testing.expect(dist(bg, active) <= dist(bg, selected));
+    // **열린 파일에는 밴드가 없다.** 있으면 그 색이 곧 호버 색이라(위 함수 주석의 실측) 켜진 밴드가
+    // 포인터 자리를 거짓으로 말한다.
+    try testing.expect(bandRole(.{ .kind = .file, .label = "a", .icon_kind = 0, .active = true }, false) == null);
+    // 그래도 열린 파일은 구별된다 — 라벨이 올라가는 유일한 행이다.
+    try testing.expectEqual(tokens.ColorRole.surface_fg, labelRole(.{ .kind = .file, .label = "a", .icon_kind = 0, .active = true }));
+    try testing.expectEqual(tokens.ColorRole.list_secondary_fg, labelRole(.{ .kind = .file, .label = "a", .icon_kind = 0 }));
 }
 
 fn dist(a: anytype, b: @TypeOf(a)) u32 {

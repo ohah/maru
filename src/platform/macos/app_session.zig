@@ -3920,6 +3920,11 @@ pub const AppSession = struct {
     /// attach가 controller를 못 얻고 observer로 강등된 Term이 있다(§9). 다음 tick에 한 번 알린다 — 알리지
     /// 않으면 사용자는 화면만 갱신되고 입력이 전부 무시되는 터미널을 이유도 모른 채 쓰게 된다.
     observer_attach_notice_pending: bool = false,
+    /// codex `config.toml`에 적힌 신뢰 값이 우리 커맨드의 값과 **다른** 훅 수(계약 §2.1). 커맨드를 고치면
+    /// 키는 그대로인데 값만 낡고, codex는 그 훅을 `modified`로 보고 **실행하지 않는다**. 우리는 남의 값을
+    /// 덮지 않으므로(무한 승인 프롬프트 방지) 이 상태는 사용자가 codex에서 승인해야 풀린다 — 그래서
+    /// **알린다**. 알리지 않으면 "훅을 켰는데 배지가 화면을 따라간다"만 남는다(조용한 폴백 금지).
+    agent_hook_trust_stale: u32 = 0,
     /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
     /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
     ended_placeholder_notice_pending: u32 = 0,
@@ -7117,6 +7122,17 @@ pub const AppSession = struct {
             host_connect_failure_error,
         );
         self.showNoticeFmt(.app_host_connect_failed, &.{.{ .s = detail }});
+    }
+
+    /// codex 훅의 신뢰 값이 낡아 **그 훅이 돌지 않는** 상태를 첫 tick에 한 번 알린다(계약 §2.1).
+    ///
+    /// **고치는 법까지 문장에 싣는다.** 우리는 남의 신뢰 값을 덮지 않으므로 이 상태를 코드로 풀 수 없고,
+    /// 사용자가 codex를 열어 승인해야 한다. 원인만 말하고 방법을 안 주면 사용자가 할 수 있는 일이 없다.
+    fn showPendingAgentHookTrustNotice(self: *AppSession) void {
+        if (self.agent_hook_trust_stale == 0) return;
+        const count = self.agent_hook_trust_stale;
+        self.agent_hook_trust_stale = 0;
+        self.showNoticeFmt(.app_agent_hook_trust_stale, &.{.{ .d = @intCast(count) }});
     }
 
     /// §7 종료 placeholder가 하나 이상 복원됐음을 첫 tick에 알린다(host connect notice와 같은 self-gate 패턴 — 복원은
@@ -15114,6 +15130,7 @@ pub const AppSession = struct {
             self.startUpdateCheck();
         }
         self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
+        self.showPendingAgentHookTrustNotice(); // 계약 §2.1: codex 신뢰 값이 낡아 훅이 안 도는 상태를 알린다.
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
         scroll_ops.applyDragAutoscroll(self); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
@@ -21052,6 +21069,106 @@ test "agent hooks install into codex and record trust without touching existing 
         defer a.free(hooks_twice);
         try std.testing.expectEqualStrings(hooks_after, hooks_twice);
     }
+}
+
+// 계약 §2.1 — codex 는 `config.toml` 의 값이 그 훅의 현재 내용과 다르면 **그 훅을 실행하지 않는다**
+// (`hooks/list` 의 `trustStatus` 가 `modified`). 키는 항목의 **자리**로 만들어져 커맨드를 고쳐도 그대로라,
+// 커맨드가 바뀐 뒤에는 «키는 있고 값만 낡은» 상태가 남는다. 우리는 남의 값을 덮지 않으므로(무한 승인
+// 프롬프트 방지) 그 상태는 사용자가 codex 에서 승인해야 풀린다 — 그래서 **알린다**.
+//
+// 알리지 않으면 사용자에게 남는 정보는 «훅을 켰는데 배지가 여전히 화면을 따라간다» 뿐이다. 2026-08-25 에
+// 실제로 그 상태였고(V3 훅 7개가 전부 `modified`), 무엇이 잘못됐는지 알려 주는 표면이 아무 데도 없었다.
+test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 않는다" {
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "cache");
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = "model = \"gpt-5\"\n" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    // ① 한 번 설치한다 — 이 시점의 값은 **맞다**(설치가 방금 계산한 값이다).
+    {
+        var first: AppSession = undefined;
+        try first.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        // 갓 설치한 자리는 어긋남이 아니다 — 여기서 세면 매 설치가 경고를 띄운다.
+        try std.testing.expectEqual(@as(u32, 0), first.agent_hook_trust_stale);
+        first.deinit();
+    }
+
+    // ② 커맨드가 바뀐 뒤를 흉내 낸다: 값만 낡게 만든다(키·자리는 그대로 — 그것이 이 결함의 모양이다).
+    const installed = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(installed);
+    var stale_text: std.ArrayListUnmanaged(u8) = .empty;
+    defer stale_text.deinit(a);
+    var replaced: usize = 0;
+    var rest: []const u8 = installed;
+    while (std.mem.indexOf(u8, rest, "sha256:")) |at| {
+        const value_end = std.mem.indexOfScalarPos(u8, rest, at, '"') orelse break;
+        try stale_text.appendSlice(a, rest[0..at]);
+        try stale_text.appendSlice(a, "sha256:staaale");
+        rest = rest[value_end..];
+        replaced += 1;
+    }
+    try stale_text.appendSlice(a, rest);
+    try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), replaced); // 세트 전부를 낡게 했다
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = stale_text.items });
+
+    // ③ 다시 뜬다. 훅 파일은 그대로이므로 설치는 «할 것 없음» 이고, 그 경로에서 어긋남이 보여야 한다.
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+
+    // **덮지 않았다** — 낡은 값이 그대로다(정책 §2.1). 덮으면 사용자가 승인한 값과 매번 싸운다.
+    const after = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(after);
+    try std.testing.expectEqualStrings(stale_text.items, after);
+
+    // ④ tick 이 부르는 그 함수가 사용자에게 한 번 띄우고 끈다.
+    try std.testing.expect(!session.chrome_host.notice.open);
+    session.showPendingAgentHookTrustNotice();
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale);
 }
 
 test "agent hooks stay out of provider files while the gate is off" {

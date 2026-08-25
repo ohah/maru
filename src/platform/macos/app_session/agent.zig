@@ -1150,6 +1150,7 @@ fn ensureCodexTrust(
     defer out.deinit(a);
     out.appendSlice(a, before) catch return;
     var added: usize = 0;
+    var stale: u32 = 0;
     for (slots[0..found]) |placement| {
         const entry = trust.forEvent(placement.json_name) orelse continue;
         // matcher 는 **세트가 정한 값**이다(파일에 적힌 값이 아니라) — 우리가 넣은 항목이므로 같다.
@@ -1161,14 +1162,29 @@ fn ensureCodexTrust(
         var key: std.ArrayListUnmanaged(u8) = .empty;
         defer key.deinit(a);
         trust.appendKey(&key, a, hooks_real, entry, placement.group_index, placement.handler_index) catch return;
-        if (trust.hasTrustEntry(out.items, key.items)) continue; // 이미 있다 — 건드리지 않는다
 
         var hash: std.ArrayListUnmanaged(u8) = .empty;
         defer hash.deinit(a);
         trust.appendHash(&hash, a, entry, cmd, hook_command.timeout_seconds, matcher) catch return;
+
+        if (trust.hasTrustEntry(out.items, key.items)) {
+            // 이미 있다 — **값은 안 건드린다**(위 주석의 정책). 다만 **다르면 그 훅은 안 돈다**:
+            // 키는 항목의 자리로 만들어져 커맨드가 바뀌어도 그대로이므로, 커맨드를 고친 뒤에는 키가
+            // 있는 채로 값만 낡는다. codex 는 그것을 `modified` 로 보고 실행하지 않는다(계약 §2.1).
+            // 조용히 관측 모드로 떨어지면 사용자는 «훅을 켰는데 아무 일도 안 일어난다» 만 본다 —
+            // keep-alive 실패에 쓰는 규율과 같다(조용한 폴백 금지). 세어 두고 tick 이 한 번 알린다.
+            if (trust.storedHash(out.items, key.items)) |stored| {
+                // 못 읽으면(`null`) 세지 않는다 — 모르는 것을 어긋남으로 세면 거짓 경고가 된다.
+                if (!std.mem.eql(u8, stored, hash.items)) stale += 1;
+            }
+            continue;
+        }
+
         trust.appendTrustEntry(&out, a, out.items, key.items, hash.items) catch return;
         added += 1;
     }
+    // 쓰기 성패와 무관하게 알린다 — 어긋남은 «쓸 것이 없어서» 안 쓰는 경로에서 생긴다.
+    if (stale != 0) self.agent_hook_trust_stale = stale;
     if (added == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
 
     // **compare-and-swap.** 훅 파일 락이 인스턴스 사이를 대부분 직렬화하지만, 훅 파일이 **아직 없을 때는**

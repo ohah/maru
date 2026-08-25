@@ -184,6 +184,7 @@ const Table = struct {
 
     // ── 분기·보간형 notice (I3a 슬라이스 4) ──
     app_host_connect_failed: [:0]const u8,
+    app_agent_hook_trust_stale: [:0]const u8,
     app_ended_placeholder: [:0]const u8,
     app_recovered_session_failed: [:0]const u8,
     app_shell_died_startup: [:0]const u8,
@@ -859,6 +860,7 @@ const en: Table = .{
     .term_remote_clipboard_too_large = "The remote session's clipboard copy was too large to deliver (about {0}KB max).",
 
     .app_host_connect_failed = "Could not connect to the persistent session host ({0}). Terminals in this session will not persist (they close with the app).",
+    .app_agent_hook_trust_stale = "Codex has not approved {0} of maru's hooks, so they will not run — agent status falls back to reading the screen. Start codex once and choose \"Trust all and continue\".",
     .app_ended_placeholder = "{0} previous sessions had already ended, so those slots are empty — the layout was restored.",
     .app_recovered_session_failed = "Could not recover this session. Refresh the session list and try again.",
     .app_shell_died_startup = "The shell exited abnormally right after start ({0}). Press Enter to retry, or check shell.command and shell.args in Settings (⌘,).",
@@ -1408,6 +1410,7 @@ const ko: Table = .{
     .term_remote_clipboard_too_large = "원격 세션의 클립보드 복사가 너무 커서 전달되지 않았습니다(최대 약 {0}KB).",
 
     .app_host_connect_failed = "영속 세션 host에 연결하지 못했습니다({0}). 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).",
+    .app_agent_hook_trust_stale = "codex가 maru 훅 {0}개를 승인하지 않아 실행되지 않습니다 — 에이전트 상태를 화면 관측으로 대신합니다. codex를 한 번 실행해 \"Trust all and continue\"를 고르세요.",
     .app_ended_placeholder = "이전 세션 {0}개가 이미 종료돼 해당 자리는 비어 있습니다 — 레이아웃은 복원했습니다.",
     .app_recovered_session_failed = "이 세션을 복구하지 못했습니다. 세션 목록을 새로 고친 뒤 다시 시도하세요.",
     .app_shell_died_startup = "셸이 시작 직후 비정상 종료됐습니다 ({0}). ⏎ 다시 시도 · ⌘, 설정에서 shell.command·shell.args 확인.",

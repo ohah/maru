@@ -164,6 +164,47 @@ pub fn hasTrustEntry(config_text: []const u8, key: []const u8) bool {
     return std.mem.indexOf(u8, config_text, key) != null;
 }
 
+/// 이 키의 테이블에 **적혀 있는** `trusted_hash` 값. 없거나 모양을 못 읽으면 `null`.
+///
+/// `hasTrustEntry` 와 갈라 두는 이유: 그쪽은 «키가 있나» 만 본다. 키는 **항목의 자리**(경로·이벤트·인덱스)로
+/// 만들어지므로 **커맨드가 바뀌어도 그대로**다. 그래서 커맨드를 고치면 키는 있고 값만 낡는데, 그 상태를
+/// codex 는 `modified` 로 보고 **그 훅을 실행하지 않는다**(2026-08-25 실측 — `hooks/list` 의 `trustStatus`
+/// 가 `modified`, TUI 는 "hooks won't run" 이라고 적는다). 값을 꺼내야 그 어긋남이 보인다.
+///
+/// **못 읽으면 `null` 이다 — «다르다» 가 아니다.** 이 값을 쓰는 쪽은 어긋남을 사용자에게 알리므로,
+/// 파싱을 실패한 것을 어긋남으로 세면 멀쩡한 설정에 거짓 경고가 뜬다.
+pub fn storedHash(config_text: []const u8, key: []const u8) ?[]const u8 {
+    var in_table = false;
+    var lines = std.mem.splitScalar(u8, config_text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        if (line[0] == '[') {
+            // 다른 테이블이 시작되면 우리 테이블은 끝난 것이다.
+            in_table = isStateHeaderFor(line, key);
+            continue;
+        }
+        if (!in_table) continue;
+        if (!std.mem.startsWith(u8, line, "trusted_hash")) continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const rest = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        if (rest.len < 2 or rest[0] != '"') continue;
+        const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
+        return rest[1..end];
+    }
+    return null;
+}
+
+/// `[hooks.state."<키>"]` 인가. **따옴표 안을 통째로 비교한다** — 키에 `.` 와 `:` 가 들어가서
+/// 부분 일치로 보면 `…:0:0` 이 `…:0:0` 을 담은 다른 키와 섞인다.
+fn isStateHeaderFor(line: []const u8, key: []const u8) bool {
+    const prefix = "[hooks.state.\"";
+    if (!std.mem.startsWith(u8, line, prefix)) return false;
+    const rest = line[prefix.len..];
+    if (!std.mem.endsWith(u8, rest, "\"]")) return false;
+    return std.mem.eql(u8, rest[0 .. rest.len - 2], key);
+}
+
 /// 파일 끝에 붙일 신뢰 항목. **덮어쓰지 않고 붙이기만 한다**(계약 §2.1 — 키가 비어 있을 때만 쓴다).
 ///
 /// 앞에 개행을 넣을지는 원본이 개행으로 끝나는지에 달렸다. 그것을 안 보면 마지막 줄에 헤더가 이어 붙어
@@ -535,4 +576,54 @@ test "표식 뒤에 다른 테이블이 붙어 있어도 그 테이블은 살아
     try testing.expect(std.mem.indexOf(u8, out.items, "sha256:ours") == null);
     try testing.expect(std.mem.indexOf(u8, out.items, "[other.table]") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "value = 1") != null);
+}
+
+test "적힌 값을 꺼낸다 — 키만 보면 «있다» 인데 값이 낡은 자리를 가른다" {
+    const a = testing.allocator;
+    var installed: std.ArrayListUnmanaged(u8) = .empty;
+    defer installed.deinit(a);
+    try appendTrustEntry(&installed, a, installed.items, "/h.json:stop:1:0", "sha256:old");
+
+    // 이것이 이 함수가 존재하는 이유다: 키는 **자리**로 만들어져 커맨드가 바뀌어도 그대로다.
+    try testing.expect(hasTrustEntry(installed.items, "/h.json:stop:1:0"));
+    try testing.expectEqualStrings("sha256:old", storedHash(installed.items, "/h.json:stop:1:0").?);
+
+    // 없는 키는 null — «다르다» 와 갈라야 한다(호출부가 그것으로 경고를 낸다).
+    try testing.expect(storedHash(installed.items, "/h.json:stop:0:0") == null);
+}
+
+test "다른 테이블의 값을 우리 것으로 읽지 않는다" {
+    const a = testing.allocator;
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    defer text.deinit(a);
+    try appendTrustEntry(&text, a, text.items, "/h.json:stop:0:0", "sha256:aaa");
+    try appendTrustEntry(&text, a, text.items, "/h.json:stop:1:0", "sha256:bbb");
+    // 우리 테이블 뒤에 사용자 테이블이 이어져도 그 값이 새어 들어오면 안 된다.
+    try text.appendSlice(a, "\n[tui]\ntrusted_hash = \"sha256:not-ours\"\n");
+
+    try testing.expectEqualStrings("sha256:aaa", storedHash(text.items, "/h.json:stop:0:0").?);
+    try testing.expectEqualStrings("sha256:bbb", storedHash(text.items, "/h.json:stop:1:0").?);
+    try testing.expect(storedHash(text.items, "/h.json:pre_tool_use:0:0") == null);
+}
+
+test "키가 다른 키의 부분 문자열이어도 섞이지 않는다" {
+    const a = testing.allocator;
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    defer text.deinit(a);
+    // `…:0:0` 은 `…:0:00` 의 부분 문자열이다. 헤더를 통째로 비교하지 않으면 앞의 값을 돌려준다.
+    try appendTrustEntry(&text, a, text.items, "/h.json:stop:0:00", "sha256:long");
+    try appendTrustEntry(&text, a, text.items, "/h.json:stop:0:0", "sha256:short");
+
+    try testing.expectEqualStrings("sha256:short", storedHash(text.items, "/h.json:stop:0:0").?);
+    try testing.expectEqualStrings("sha256:long", storedHash(text.items, "/h.json:stop:0:00").?);
+}
+
+test "모양을 못 읽으면 null 이다 — 거짓 경고를 만들지 않는다" {
+    const key = "/h.json:stop:0:0";
+    // 값이 따옴표로 안 닫혔다.
+    try testing.expect(storedHash("[hooks.state.\"" ++ key ++ "\"]\ntrusted_hash = \"unterminated\n", key) == null);
+    // 키 문자열이 **주석에만** 있다 — `hasTrustEntry` 는 true 를 주지만 적힌 값은 없다.
+    const only_comment = "# " ++ key ++ " 는 예전에 여기 있었다\n[tui]\nx = 1\n";
+    try testing.expect(hasTrustEntry(only_comment, key));
+    try testing.expect(storedHash(only_comment, key) == null);
 }

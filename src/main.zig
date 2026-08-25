@@ -2742,6 +2742,57 @@ fn refreshSidebarCards(
     }
 }
 
+/// 트리 행 하나를 펼치거나 접는다 — **행 클릭이 하는 일**.
+///
+/// **트리는 lazy 다**(`toggleDirectory` 의 doc): 사용자가 펼친 그 순간에 읽는다. 그래서 여기서 스캔
+/// 요청을 백엔드로 보내고 결과가 올 때까지 짧게 기다린 뒤 행을 다시 짓는다.
+///
+/// **기다림에 상한을 둔다.** 디스크가 느리거나 권한이 없으면 결과가 안 오는데, 무한히 기다리면 창이
+/// 통째로 멈춘다 — 그때는 접힌 그대로 두고 다음 프레임으로 넘어간다(트리는 다음 클릭에 다시 시도한다).
+///
+/// 돌려주는 값: 행 목록이 바뀌었나(= 다시 그려야 하나).
+fn toggleTreeRow(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    tree: *maru.session.file_tree.Tree,
+    backend: ?*file_tree_backend.Backend,
+    rows: *std.ArrayList(maru.session.file_tree.Row),
+    root_path: []const u8,
+    path: []const u8,
+) bool {
+    _ = tree.toggleDirectory(path) catch return false;
+
+    // 펼치면서 예약된 스캔이 있으면 그것부터 돌린다. 접는 쪽은 요청이 없어 바로 아래로 간다.
+    if (backend) |b| {
+        while (tree.takeScanRequest()) |req| {
+            if (!b.submit(req, 0)) {
+                allocator.free(req);
+                break;
+            }
+        }
+        var rounds: usize = 0;
+        while (rounds < 400) : (rounds += 1) {
+            if (b.takeResult()) |taken| {
+                var result = taken;
+                defer result.deinit(allocator, io);
+                if (!result.ok) break;
+                var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+                defer inputs.deinit(allocator);
+                for (result.entries.items) |e|
+                    inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break;
+                tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch break;
+                break;
+            }
+            io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch return false;
+    // **아이콘 종류를 다시 채운다** — 새 행에는 분류가 안 들어 있다(§2m.42 가 그 실패를 겪었다).
+    cell_text.classifyFileTreeRows(rows.items);
+    return true;
+}
+
 /// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
 /// 줄 수에서 나오므로 두 곳에서 따로 만들면 `slotAt` 의 누적이 밴드와 어긋난다.
 fn sidebarRowsFor(
@@ -3300,6 +3351,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer if (dock_root) |r| allocator.free(r);
     // **스캔 실패는 치명적이지 않다** — 도크가 비고 터미널은 그대로 돈다. 앱을 못 띄울 이유가 아니다.
     var dock_scan_ok = false;
+    // **백엔드는 앱이 사는 동안 산다.** 예전에는 이 블록 안에서 만들고 바로 버렸는데, 그러면 시작
+    // 스캔만 되고 **런타임에 폴더를 펼칠 수가 없다**(트리가 lazy 라 펼칠 때 그때 읽는다).
+    var tree_backend: ?file_tree_backend.Backend = file_tree_backend.Backend.init(allocator, io) catch null;
+    defer if (tree_backend) |*b| b.deinit();
     scan: {
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root_native = root_buf[0..(std.Io.Dir.cwd().realPath(io, &root_buf) catch break :scan)];
@@ -3307,8 +3362,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         dock_root = root_path;
         dock_tree.replaceExplicitRoots(&.{root_path}) catch break :scan;
 
-        var backend = file_tree_backend.Backend.init(allocator, io) catch break :scan;
-        defer backend.deinit();
+        const backend = if (tree_backend) |*b| b else break :scan;
         var validated = (file_tree_backend.validateRootSnapshot(allocator, io, root_path) catch break :scan) orelse break :scan;
         var validated_owned = true;
         defer if (validated_owned) validated.deinit(allocator, io);
@@ -3583,6 +3637,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var capture_losses: usize = 0;
     var dock_pointer_events: usize = 0;
     var dock_row_clicks: usize = 0;
+    var dock_row_toggles: usize = 0;
+    var expand_judgeable = false;
+    var expand_row: usize = 0;
+    var expand_rows_before: usize = 0;
+    var expand_rows_after: usize = 0;
+    var expand_rows_collapsed: usize = 0;
+    var dock_click_answer: ?usize = null;
+    var dock_click_name_buf: [64]u8 = undefined;
+    var dock_click_name_len: usize = 0;
     var dock_last_row: ?usize = null;
     var selections_before_term_click: usize = 0;
     var dock_clicks_before_term_click: usize = 0;
@@ -3739,6 +3802,54 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **탐색기 뷰일 때 굴려야 한다.** spin 150 에 소스 컨트롤로 바뀌므로 그 앞이다 — 처음에
         // 430 에 뒀더니 **보이지도 않는 트리**를 굴리고 클릭은 죽은 경로로 갔다(`clicked_row` 가
         // spin 60 의 옛 값 그대로였다).
+        // ── 폴더 펼치기 판정 ───────────────────────────────────────────────────────────────
+        //
+        // **행 수가 늘었다가 돌아와야 한다.** 개수만 세면 속 빈다 — 누른 것이 파일이어도 클릭은
+        // 세어진다. 그래서 **디렉터리 행을 골라** 누르고 목록 길이를 견준다.
+        if (spins == 40 and dock_view == .explorer and geom.tree_content.w != 0) {
+            for (dock_rows.items, 0..) |r, i| switch (r) {
+                .directory => |dir| {
+                    if (dir.expanded) continue;
+                    expand_judgeable = true;
+                    expand_row = i;
+                    expand_rows_before = dock_rows.items.len;
+                    const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                    const ey: i32 = @intCast(geom.tree_content.y + cell_h * @as(u32, @intCast(i)) + cell_h / 2);
+                    window.postSyntheticMouse(.left_down, ex, ey);
+                    window.postSyntheticMouse(.left_up, ex, ey);
+                    break;
+                },
+                else => {},
+            };
+        }
+        if (spins == 55 and expand_judgeable) expand_rows_after = dock_rows.items.len;
+        // **행 클릭 판정의 답을 먼저 챙긴다** — 아래 접기 클릭이 같은 변수를 덮는다(도크 스크롤과
+        // 사이드바에서 같은 일을 두 번 겪었다).
+        if (spins == 65) {
+            dock_click_answer = dock_last_row;
+            // **이름도 그때 것을 챙긴다.** 끝 상태에서 읽으면 그 사이 펼치기·접기로 목록이 바뀌어
+            // **누른 적 없는 줄의 이름**을 적게 된다(대조하라고 넣은 값이 대조를 방해한다).
+            if (dock_last_row) |r| if (r < dock_rows.items.len) {
+                const nm: []const u8 = switch (dock_rows.items[r]) {
+                    .root => |x| x.label,
+                    .directory => |x| x.label,
+                    .file, .recent_file => |x| x.label,
+                    .recent_header => "<recent-header>",
+                    .empty => "<empty>",
+                };
+                const n2 = @min(nm.len, dock_click_name_buf.len);
+                @memcpy(dock_click_name_buf[0..n2], nm[0..n2]);
+                dock_click_name_len = n2;
+            };
+        }
+        if (spins == 70 and expand_judgeable) {
+            // 같은 줄을 다시 눌러 **접힌다**. 펼친 뒤 그 줄은 자리가 그대로다(그 위 행이 안 늘었다).
+            const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const ey: i32 = @intCast(geom.tree_content.y + cell_h * @as(u32, @intCast(expand_row)) + cell_h / 2);
+            window.postSyntheticMouse(.left_down, ex, ey);
+            window.postSyntheticMouse(.left_up, ex, ey);
+        }
+        if (spins == 85 and expand_judgeable) expand_rows_collapsed = dock_rows.items.len;
         if (spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
             dock_rows.items.len *| cell_h > geom.tree_content.h)
         {
@@ -4312,6 +4423,28 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             if (maru.session.file_tree_layout.rowAtLocalY(cell_h, dock_scroll_px, local_y, dock_rows.items.len)) |row| {
                                 dock_row_clicks += 1;
                                 dock_last_row = row;
+                                // ── 폴더를 누르면 펼쳐진다 ──────────────────────────────
+                                //
+                                // **셰브런이 그려져 있으면 눌려야 한다.** 그전에는 세기만 해서,
+                                // 펼칠 수 있어 보이는 줄이 죽은 컨트롤이었다(사용자 보고).
+                                // 경로는 **행이 들고 있다** — 여기서 다시 만들지 않는다.
+                                if (row < dock_rows.items.len) {
+                                    const toggle_path: ?[]const u8 = switch (dock_rows.items[row]) {
+                                        .directory => |dir| dir.path,
+                                        .root => |r| r.path,
+                                        else => null,
+                                    };
+                                    if (toggle_path) |tp| if (dock_root) |rp| {
+                                        // **경로가 행 메모리를 가리킨다.** `buildRows` 가 그 목록을
+                                        // 다시 지으면서 해제하므로, 넘기기 전에 복사한다.
+                                        const owned_path = allocator.dupe(u8, tp) catch continue;
+                                        defer allocator.free(owned_path);
+                                        if (toggleTreeRow(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, rp, owned_path)) {
+                                            dock_row_toggles += 1;
+                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+                                        }
+                                    };
+                                }
                             }
                         }
                     }
@@ -5035,6 +5168,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("view_bar=unjudgeable reason=no_glyphs h={d}\n", .{geom.view_bar.h});
     }
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
+    if (expand_judgeable) {
+        // **동어반복이 아니다**: 토글 횟수를 되읽는 것이 아니라 **행 목록의 길이**를 본다 — 펼치면
+        // 자식이 들어와 늘고, 접으면 되돌아온다. 그 사이에 스캔·행 재구성이 전부 일어나야 한다.
+        try stdout.print("expand_row={d} rows_before={d} rows_after={d} rows_collapsed={d} toggles={d} expand_ok={}\n", .{
+            expand_row,
+            expand_rows_before,
+            expand_rows_after,
+            expand_rows_collapsed,
+            dock_row_toggles,
+            expand_rows_after > expand_rows_before and expand_rows_collapsed == expand_rows_before and dock_row_toggles >= 2,
+        });
+    } else {
+        try stdout.print("expand=unjudgeable reason=no_collapsed_directory rows={d}\n", .{dock_rows.items.len});
+    }
     if (dock_scroll_judgeable) {
         // **동어반복이 아니다**: 스크롤 값을 되읽는 것이 아니라, 뷰포트 맨 위를 `rowAtLocalY` 에
         // 넣어 나온 행이 `drawWindow` 가 **실제로 그린 첫 행**과 같은지 본다. 두 함수는 서로를
@@ -5072,7 +5219,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     if (dock_click_judgeable) {
         // **동어반복을 피한다**: 누른 자리가 그 행이라는 것만 보면 내가 만든 좌표를 내가 되읽는
         // 것이다. 그 행의 **이름**을 모델에서 꺼내 함께 적어, 화면에 뜬 목록과 대조할 수 있게 한다.
-        const name: []const u8 = if (dock_last_row) |r| blk: {
+        const name: []const u8 = if (dock_click_name_len > 0) dock_click_name_buf[0..dock_click_name_len] else if (dock_last_row) |r| blk: {
             if (r >= dock_rows.items.len) break :blk "<out-of-range>";
             break :blk switch (dock_rows.items[r]) {
                 .root => |x| x.label,
@@ -5082,7 +5229,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 .empty => "<empty>",
             };
         } else "<none>";
-        try stdout.print("dock_pointer_events={d} dock_row_clicks={d} dock_last_row={?d} want_row={d} row_name={s}\n", .{ dock_pointer_events, dock_row_clicks, dock_last_row, dock_click_target_row, name });
+        try stdout.print("dock_pointer_events={d} dock_row_clicks={d} dock_last_row={?d} want_row={d} row_name={s}\n", .{ dock_pointer_events, dock_row_clicks, dock_click_answer, dock_click_target_row, name });
     } else {
         try stdout.print("dock_click=unjudgeable reason=no_dock_or_too_few_rows dock_pointer_events={d}\n", .{dock_pointer_events});
     }

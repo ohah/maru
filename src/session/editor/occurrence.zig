@@ -301,40 +301,37 @@ test "OCC14: 멀티바이트 문서에서도 byte 축으로 정확히 답한다"
 
 test "OCC15: 정렬 안 된 커서 배열이 와도 이미 고른 자리를 다시 고르지 않는다" {
     // **전제를 단언으로만 지키면 출하 빌드에서 사라진다.** `runtime_safety`가 꺼진 채 정렬 안 된
-    // 배열이 오면 이분 탐색이 "이미 고름"을 못 찾고 같은 자리를 또 준다 — 커서가 겹쳐 쌓이고
-    // 그 상태로 타이핑하면 한 글자가 두 번 들어간다. 그래서 정렬 여부를 실제로 보고 갈라 쓴다.
+    // 배열이 오면 이분 탐색이 "이미 고름"을 못 찾아 **같은 자리에 커서를 겹쳐 쌓는다**(그 상태로
+    // 타이핑하면 한 글자가 두 번 들어간다). 그래서 정렬 여부를 실제로 보고 갈라 쓴다.
     //
-    // 이 판정자는 **정렬·역순·뒤섞임 셋 다** 같은 답을 내는지 본다.
-    const content = "foo bar foo baz foo qux foo";
-    const sorted = [_]selection.Selection{
+    // **배치가 판정의 전부다.** 처음 쓴 판정자는 골라 둔 것 **뒤에** 안 고른 일치가 있어서, 탐색이
+    // 이미 고른 자리를 만나기 전에 답을 찾았다 — 이분 탐색이 틀려도 결과가 같았고 정렬 판정을
+    // 무력화한 뮤턴트가 **생존했다**(적대적 검증 2026-08-25). 지금은 **감아 돌 때 고른 것을 먼저
+    // 만나도록** 둔다: 마지막 일치까지 골라 두면 앞으로 갈 곳이 없어 처음으로 감고, 거기서
+    // "이미 고름"을 못 보면 **골라 둔 자리를 다시 답한다.**
+    const content = "foo bar foo baz foo qux foo"; // 0, 8, 16, 24
+    const picked = [_]selection.Selection{
         selection.Selection.fromPoints(0, 3),
-        selection.Selection.fromPoints(8, 11),
         selection.Selection.fromPoints(16, 19),
+        selection.Selection.fromPoints(24, 27),
     };
-    var reversed = [_]selection.Selection{
-        selection.Selection.fromPoints(16, 19),
-        selection.Selection.fromPoints(8, 11),
-        selection.Selection.fromPoints(0, 3),
-    };
-    var shuffled = [_]selection.Selection{
-        selection.Selection.fromPoints(8, 11),
-        selection.Selection.fromPoints(16, 19),
-        selection.Selection.fromPoints(0, 3),
-    };
+    var sorted_arr = picked;
+    var reversed = [_]selection.Selection{ picked[2], picked[1], picked[0] };
+    var shuffled = [_]selection.Selection{ picked[1], picked[2], picked[0] };
 
-    var s2 = sorted;
-    const want = nextOccurrence(content, &s2, 0).?;
-    try testing.expectEqual(@as(usize, 24), want.start); // 넷째 foo
+    // 정렬된 배열의 답: 감아서 0(고름)·8(안 고름) → **8**이다.
+    const want = nextOccurrence(content, &sorted_arr, 0).?;
+    try testing.expectEqual(@as(usize, 8), want.start);
 
-    // 씨앗이 같은 것을 가리키도록 primary 인덱스를 맞춘다.
-    const a = nextOccurrence(content, &reversed, 2).?; // reversed[2] == (0,3)
-    const b = nextOccurrence(content, &shuffled, 2).?; // shuffled[2] == (0,3)
+    // 씨앗이 같은 것을 가리키도록 primary 인덱스를 맞춘다((0,3)의 자리).
+    const a = nextOccurrence(content, &reversed, 2).?;
+    const b = nextOccurrence(content, &shuffled, 2).?;
     try testing.expectEqual(want.start, a.start);
     try testing.expectEqual(want.start, b.start);
 
     // **이미 고른 자리를 준 것이 아니다.**
     for ([_]Range{ a, b }) |r| {
-        for (sorted) |sel| {
+        for (picked) |sel| {
             try testing.expect(!(sel.start() == r.start and sel.end() == r.end));
         }
     }

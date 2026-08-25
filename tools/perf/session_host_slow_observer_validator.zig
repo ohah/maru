@@ -7,7 +7,7 @@
 const std = @import("std");
 const connection_slot = @import("connection_slot");
 
-const schema_name = "maru.session-host-slow-observer-macos.v1";
+const schema_name = "maru.session-host-slow-observer-macos.v2";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -21,6 +21,7 @@ const idle_wake_observation_min_ns: u64 = 250 * std.time.ns_per_ms;
 pub const idle_cpu_total_cap_ns: u64 = 25 * std.time.ns_per_ms;
 pub const output_wake_median_cap_ns: u64 = 10 * std.time.ns_per_ms;
 pub const output_wake_tail_cap_ns: u64 = 20 * std.time.ns_per_ms;
+pub const observation_core_lock_hold_cap_ns: u64 = 25 * std.time.ns_per_ms;
 const baseline_sample_count: usize = 10;
 const pressure_sample_count_min: usize = 20;
 const pressure_sample_count_max: usize = 4096;
@@ -127,6 +128,13 @@ const Artifact = struct {
     idle_cpu_before: IdleCpuSample,
     idle_cpu_after: IdleCpuSample,
     idle_cpu_total_delta_ns: u64,
+    observation_materializations: u64,
+    observation_core_lock_acquisitions: u64,
+    observation_core_lock_hold_total_ns: u64,
+    observation_core_lock_hold_max_ns: u64,
+    idle_observation_materialization_delta: u64,
+    idle_observation_core_lock_acquisition_delta: u64,
+    idle_observation_core_lock_hold_delta_ns: u64,
     active_wake_notify_delta: u64,
     active_wake_published_delta: u64,
     active_wake_coalesced_delta: u64,
@@ -307,6 +315,19 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
         artifact.stale_admission_count != 0)
     {
         return error.InvalidRoleCount;
+    }
+    if (artifact.observation_materializations == 0 or
+        artifact.observation_core_lock_acquisitions !=
+            try checkedMul(artifact.observation_materializations, 3) or
+        artifact.observation_core_lock_hold_total_ns <
+            artifact.observation_core_lock_hold_max_ns or
+        artifact.observation_core_lock_hold_max_ns >
+            observation_core_lock_hold_cap_ns or
+        artifact.idle_observation_materialization_delta != 0 or
+        artifact.idle_observation_core_lock_acquisition_delta != 0 or
+        artifact.idle_observation_core_lock_hold_delta_ns != 0)
+    {
+        return error.InvalidObservationEvidence;
     }
     if (artifact.slow_connection_id == 0 or
         artifact.slow_connection_id != artifact.first_stall_connection_id)
@@ -704,6 +725,13 @@ fn goodArtifact() Artifact {
             .system_time_ns = 52_000_000,
         },
         .idle_cpu_total_delta_ns = 7_000_000,
+        .observation_materializations = 4,
+        .observation_core_lock_acquisitions = 12,
+        .observation_core_lock_hold_total_ns = 800_000,
+        .observation_core_lock_hold_max_ns = 300_000,
+        .idle_observation_materialization_delta = 0,
+        .idle_observation_core_lock_acquisition_delta = 0,
+        .idle_observation_core_lock_hold_delta_ns = 0,
         .active_wake_notify_delta = wake_sample_count,
         .active_wake_published_delta = wake_sample_count,
         .active_wake_coalesced_delta = 0,
@@ -774,6 +802,65 @@ test "valid typed artifact passes after raw RSS recomputation" {
     try validateBytes(testing.allocator, bytes);
 }
 
+test "observation evidence fails closed on absent materialization and lock mismatch" {
+    var artifact = goodArtifact();
+    artifact.observation_materializations = 0;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.observation_core_lock_acquisitions -= 1;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.observation_core_lock_hold_total_ns =
+        artifact.observation_core_lock_hold_max_ns - 1;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "idle observation evidence rejects every product-owned work delta" {
+    var artifact = goodArtifact();
+    artifact.idle_observation_materialization_delta = 1;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.idle_observation_core_lock_acquisition_delta = 1;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    artifact = goodArtifact();
+    artifact.idle_observation_core_lock_hold_delta_ns = 1;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "observation core lock hold hard cap rejects cap plus one" {
+    var artifact = goodArtifact();
+    artifact.observation_core_lock_hold_max_ns =
+        observation_core_lock_hold_cap_ns + 1;
+    artifact.observation_core_lock_hold_total_ns =
+        artifact.observation_core_lock_hold_max_ns;
+    try testing.expectError(
+        error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
 test "unknown duplicate and missing keys fail exact schema parsing" {
     const bytes = try stringifyArtifact(testing.allocator, goodArtifact());
     defer testing.allocator.free(bytes);
@@ -795,7 +882,7 @@ test "unknown duplicate and missing keys fail exact schema parsing" {
     try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, duplicate));
 
     const missing =
-        \\{"schema":"maru.session-host-slow-observer-macos.v1"}
+        \\{"schema":"maru.session-host-slow-observer-macos.v2"}
     ;
     try testing.expectError(error.InvalidJsonSchema, validateBytes(testing.allocator, missing));
 }

@@ -765,7 +765,7 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
         _ = c.unlink(socket_path.ptr);
         var incidents_buf: [320]u8 = undefined;
         if (std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{dir_path})) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     const fd = waitConnect(socket_path, 3000) orelse {
@@ -812,7 +812,7 @@ test "daemon: competing host is rejected before it can unlink the live owner soc
         if (discovery.ownerLockPathIn(&owner_buf, dir_path)) |path| _ = c.unlink(path.ptr) else |_| {}
         var incidents_buf: [320]u8 = undefined;
         if (std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{dir_path})) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
     const first = waitConnect(socket_path, 3000) orelse return error.TestUnexpectedResult;
     _ = c.close(first);

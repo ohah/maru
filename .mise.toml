@@ -113,6 +113,10 @@ run = "zig build macos-app-instance-lease-smoke"
 description = "Run the macOS AppSession file-explorer performance artifact gate"
 run = "zig build test-macos-file-explorer-perf"
 
+[tasks.clean-tmp-fixtures]
+description = "Remove /tmp session-host fixture leftovers whose owner pid is gone (local hygiene; CI runners are fresh)"
+run = "sh tools/clean-tmp-fixtures.sh"
+
 [tasks.test-provider-session-removal]
 description = "Verify provider continuity removal on the macOS product path"
 run = "zig build test-provider-session-removal"

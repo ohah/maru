@@ -5480,7 +5480,7 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         var hosts_buf: [640]u8 = undefined;
         if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
         _ = c.rmdir(dir.ptr);
-        _ = c.rmdir(base.ptr);
+        std.Io.Dir.cwd().deleteTree(io, base) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     // SocketServer binds before the daemon finishes manifest/rollback preparation. A plain
@@ -6167,7 +6167,7 @@ fn cleanupCr4cPublicationProofLossArtifacts(child_pid: c.pid_t) void {
     var hosts_buf: [640]u8 = undefined;
     if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
     _ = c.rmdir(dir.ptr);
-    _ = c.rmdir(base.ptr);
+    std.Io.Dir.cwd().deleteTree(testing.io, base) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
 }
 
 test "CR4c C2 publication suffix authority drift는 actual host job에서 proof loss로 종료한다" {
@@ -6271,7 +6271,7 @@ test "CR4a actual issuer job은 replacement OOM을 forward failed로 봉인한�
         var hosts_buf: [640]u8 = undefined;
         if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
         _ = c.rmdir(dir.ptr);
-        _ = c.rmdir(base.ptr);
+        std.Io.Dir.cwd().deleteTree(io, base) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var initial: client_mod.Client = blk: {
@@ -6368,7 +6368,7 @@ test "CR4a actual issuer job은 allocator fail-index 단계별 forward 경계와
         var hosts_buf: [640]u8 = undefined;
         if (host_manifest.hostsRootPathIn(&hosts_buf, dir)) |path| _ = c.rmdir(path.ptr) else |_| {}
         _ = c.rmdir(dir.ptr);
-        _ = c.rmdir(base.ptr);
+        std.Io.Dir.cwd().deleteTree(io, base) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var saw_connect_oom = false;
@@ -6913,7 +6913,7 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var client_value: client_mod.Client = blk: {

@@ -623,6 +623,8 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 else
                     "",
                 .summary = if (head) |snap| turnSummary(arena, snap, editedCountFor(self, snap)) else "",
+                // **무엇을 했는지**(AT2). 링에는 AT2 부터 실려 있었는데 화면에 올 자리가 없었다.
+                .reply = if (head) |snap| snap.titleText() else "",
                 .selected = keyMatches(self.scm_selected_turn, row),
                 .expanded = keyMatches(self.scm_expanded_turn, row),
                 .live = live,
@@ -662,6 +664,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .letter = entry.letter,
                     .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
                     .from_turn = true, // 이 줄을 누르면 `스냅샷 ↔ 스냅샷`이 열린다(커밋과 다른 비교다)
+                    .origin = turnFileOrigin(self, head, entry.path),
                 },
             };
             n += 1;
@@ -724,6 +727,34 @@ fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
 /// «읽었다»로 표시한다 — `applyTurnSummary`). «바꾼 것이 없다»와 «못 읽었다»를 한 글자로 구분할 수
 /// 없으니 둘 다 조용히 비운다. 실제로 아무것도 안 바꾼 턴은 링이 이미 걸러 낸다(같은 tree 연속이면
 /// push 하지 않는다).
+/// 그 파일을 **누가** 바꿨나(계약 §4.2). 목록은 tree 가 만들고 근거는 캡처가 붙인다 — 그 둘을 잇는
+/// 유일한 자리다.
+///
+/// ⚠️ **경로의 모양이 다르다.** 훅은 **절대경로**를 주고(실측 610/610) `git diff --name-status` 는
+/// **저장소 상대경로**를 준다. 정규화 없이 맞대면 **하나도 안 맞아 전부 `.turn_change` 로 떨어지는데**,
+/// 「배지가 뜬다」만 보는 테스트는 그것을 통과시킨다. 아래 테스트는 **편집한 파일이 `.ai_edit` 인지**를
+/// 직접 잰다.
+///
+/// 「캡처에 있는데 편집 도구 소행이 아님」은 `.turn_change` 다 — `Read` 로 열어 두고 셸로 고친 경우가
+/// 그것이고, 그 판정은 `Entry.editedByAgent` 한 자리에 있다.
+fn turnFileOrigin(
+    self: *AppSession,
+    head: ?*const maru.session.turn_snapshot.Snapshot,
+    rel_path: []const u8,
+) chrome.components.scm_dock.types.TurnFileOrigin {
+    const snap = head orelse return .unknown;
+    if (snap.capture_id == 0) return .unknown;
+    const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return .unknown;
+    const repo = self.git_repo orelse return .unknown;
+    for (turn.entries.items) |entry| {
+        const entry_rel = maru.session.repo_path.displayRelative(entry.path, repo);
+        if (!std.mem.eql(u8, entry_rel, rel_path)) continue;
+        return if (entry.editedByAgent()) .ai_edit else .turn_change;
+    }
+    // 캡처가 있는 턴인데 이 파일이 없다 = 편집 도구가 안 만졌다(셸·사용자·다른 세션).
+    return .turn_change;
+}
+
 /// 그 스냅샷이 가리키는 사본에서 **에이전트 편집 도구가 실제로 바꾼 파일 수**. 없으면 0.
 ///
 /// `turnSummary` 밖에 두는 이유: 그 함수는 세션 없이 값으로 검증되어야 한다(아래 테스트).
@@ -3994,6 +4025,62 @@ test "턴 요약: 모르거나 0이면 자리를 비운다(실패한 턴도 0으
     // **캡처가 없으면 `✎` 를 안 붙인다** — «✎ 0» 은 «에이전트가 아무것도 안 했다» 로 읽히는데
     // 우리가 아는 것은 «편집 도구로는 안 했다» 뿐이다.
     try std.testing.expect(std.mem.indexOf(u8, text, "✎") == null);
+}
+
+// [AT3 §4.2] **배지 join 의 핵심 위험은 경로 모양이다.** 훅은 절대경로를(실측 610/610), `git diff
+// --name-status` 는 저장소 상대경로를 준다. 정규화가 없으면 **하나도 안 맞아 전부 `.turn_change`** 로
+// 떨어지는데 「배지가 뜬다」만 보는 테스트는 그것을 통과시킨다 — 그래서 **`.ai_edit` 인지**를 직접 잰다.
+test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 파일로 맞는다" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, "/repo");
+
+    // 편집 도구가 고친 파일 하나, 읽기만 한 파일 하나 — 둘 다 내용이 달라졌다.
+    const gpa = session.allocator;
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S1", "/repo/src/edited.zig", .edit, .{ .text = try gpa.dupe(u8, "before") }));
+    session.turn_captures.noteAfter(gpa, "S1", "/repo/src/edited.zig", .{ .text = try gpa.dupe(u8, "after") });
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S1", "/repo/src/shell.zig", .read, .{ .text = try gpa.dupe(u8, "before") }));
+    session.turn_captures.noteAfter(gpa, "S1", "/repo/src/shell.zig", .{ .text = try gpa.dupe(u8, "after") });
+    const id = session.turn_captures.seal(gpa, "S1");
+    try std.testing.expect(id != 0);
+
+    var snap: maru.session.turn_snapshot.Snapshot = .{ .capture_id = id };
+
+    // 목록이 주는 것은 **저장소 상대경로**다.
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.ai_edit,
+        turnFileOrigin(session, &snap, "src/edited.zig"),
+    );
+    // 읽기만 한 파일은 내용이 달라졌어도 **편집 도구 소행이 아니다**.
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
+        turnFileOrigin(session, &snap, "src/shell.zig"),
+    );
+    // 캡처에 없는 파일도 마찬가지다.
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
+        turnFileOrigin(session, &snap, "src/never_touched.zig"),
+    );
+    // **캡처가 없는 턴은 `.unknown`** 이다 — 「셸이 고쳤다」와 「우리가 못 봤다」를 가른다.
+    var no_capture: maru.session.turn_snapshot.Snapshot = .{};
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.unknown,
+        turnFileOrigin(session, &no_capture, "src/edited.zig"),
+    );
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.unknown,
+        turnFileOrigin(session, null, "src/edited.zig"),
+    );
 }
 
 test "턴 요약: 캡처가 센 편집 수를 tree 의 수와 **나란히** 말한다" {

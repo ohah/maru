@@ -6710,6 +6710,30 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   `maru`의 discovery→start lock→detached exec→hidden-command dispatch→hello→`host.info`는 product-path process smoke로
   검증한다(macOS 전용). 이 product-path smoke는 orphan 정리를 위한 one-shot host이므로 영속 생존·GUI 재접속 자체를
   증명하지 않으며, 그 범위는 client 쪽(P3-e)의 host-backed backend/재접속 테스트가 맡는다.
+
+  **상태 파이프 — `execv` 성패를 부모가 즉시 안다(2026-08-25).** double-fork 는 손자를 orphan 으로 만들므로
+  부모에게는 `waitpid` 할 자식이 없다. 그래서 `execv` 가 실패해도 **부모는 알 방법이 아예 없었고**, 호출부가
+  재시도 예산(`connect_attempts` 150 × `connect_delay_ms` 20ms)을 통째로 문 뒤에야 `startup_timeout` 으로
+  끝냈다. **실측 4123 ms** — 파일은 있는데 실행이 안 되는 상태(부분 설치·격리된 바이너리)로 재현했다.
+
+  이제 부모가 파이프를 하나 만들어 쓰기 끝에 `FD_CLOEXEC` 를 걸고 손자에게 넘긴다. **exec 이 성공하면**
+  커널이 그 fd 를 닫아 부모가 **EOF** 를 보고, **실패하면** 손자가 그 파이프에 `errno` 를 적고 죽어 부모가
+  이유까지 받는다(표준 관용구 — `posix_spawn` 구현들이 내부에서 쓰는 것과 같다). **같은 조건 재측정: 5 ms,
+  사유도 `startup_timeout` 이 아니라 `launch_failed`** 로 정확해졌다. 콜드런치 자체는 그대로다(중앙값 110 ms).
+
+  ⚠️ **`closeInheritedFds` 가 이 설계의 함정이다.** 손자는 exec 직전에 fd 3 부터 전부 닫는다(GUI socket·PTY
+  master 누수 방지, §11). 그 자리에서 상태 파이프까지 닫으면 통로가 사라지므로 **그 fd 만 예외**로 뺀다.
+  파이프를 못 만들면 예전처럼 «띄우고 잊는다» 로 돈다 — 진단이 없을 뿐 회귀는 아니다.
+
+  ⚠️ **이것은 exec 성공까지만 본다.** 그 뒤 `ManifestFailed`·`OwnerLeaseFailed` 로 죽는 경우(캐시 디렉터리가
+  남의 uid·읽기 전용 FS·디스크 가득참)는 CLOEXEC 로 fd 가 이미 닫혀 여전히 안 보이고, 그때는 재시도 예산을
+  다 문다. 닫으려면 daemon 이 **CLOEXEC 아닌 fd** 를 물고 있다가 bind 성공 시 닫아야 하고, fd 번호는 argv 가
+  아니라 **env** 로 넘겨야 한다(`entrypoint.parse` 가 인자 개수를 정확히 세므로 업그레이드 중 옛 바이너리가
+  `InvalidInvocation` 으로 죽는다). 그 단계는 아직 하지 않았다.
+
+  **콜드런치 비용도 함께 재 뒀다(ReleaseFast, 페이지 캐시 더운 상태)**: 콜드(host 를 띄워야 함) **중앙값
+  104~110 ms**(74~188), 웜(이미 떠 있음) 7~27 ms. 그 차이가 「띄우고 부팅하는 몫」이다. ⚠️ Debug 빌드로 재면
+  클라이언트 쪽이 ~6 배 느려 620 ms 로 나온다 — 제품 값이 아니다. OS 부팅 직후(콜드 페이지 캐시)는 안 재 봤다.
 P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
 
 - **P3-e1(client hello/RPC) ✅**: `session_host/client.zig`에 GUI/CLI 측 client를 구현했다 — host socket에 connect, hello로

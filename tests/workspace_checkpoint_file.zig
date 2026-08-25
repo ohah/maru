@@ -239,3 +239,33 @@ test "P4 C2 SIGKILL after rename leaves only the new complete manifest" {
     try std.testing.expectEqualStrings("new-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, ".workspace.v1.tmp", .{}));
 }
+
+test "P4 C4 final publisher creates secure backup once before replacing current" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "old-complete" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publishFinal(parent, "new-complete", true));
+    var read_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("old-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+    try std.testing.expectEqualStrings("new-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    const backup_stat = try tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{});
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(backup_stat.permissions.toMode() & 0o777)));
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publishFinal(parent, "newer", true));
+    try std.testing.expectEqualStrings("old-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+}
+
+test "P4 C4 hostile backup leaf fails closed and preserves current" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "old-complete" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "victim", .data = "victim" });
+    try tmp.dir.symLink(std.testing.io, "victim", "workspace.v1.bak", .{});
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    try std.testing.expectEqual(checkpoint_file.Result.backup_failed, checkpoint_file.publishFinal(parent, "new", true));
+    var read_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("old-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    try std.testing.expectEqualStrings("victim", try readLeaf(&tmp, "victim", &read_buf));
+}

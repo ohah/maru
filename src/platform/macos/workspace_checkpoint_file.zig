@@ -21,6 +21,7 @@ pub const Result = enum(u8) {
     write_failed,
     close_failed,
     replace_failed,
+    backup_failed,
 };
 
 const PublishPhase = enum(u8) { temp_closed, replaced };
@@ -64,6 +65,78 @@ fn publishUsing(backend: anytype, snapshot: []const u8) Result {
 /// 고를 수 없고 위 고정 두 이름만 쓴다.
 pub fn publish(parent_path: [:0]const u8, snapshot: []const u8) Result {
     return publishObserved(parent_path, snapshot, .{});
+}
+
+/// Restore-incomplete 실행의 final Quit 전용 경로. 기존 완전본이 있으면 같은 secure parent descriptor 안에서
+/// create-once `.bak`을 만든 뒤에만 canonical leaf를 교체한다. 기존 `.bak`은 검증 후 그대로 보존한다.
+pub fn publishFinal(parent_path: [:0]const u8, snapshot: []const u8, preserve_previous: bool) Result {
+    if (snapshot.len == 0) return .invalid_snapshot;
+    if (preserve_previous and ensureBackup(parent_path) != .committed) return .backup_failed;
+    return publish(parent_path, snapshot);
+}
+
+const backup_leaf: [:0]const u8 = "workspace.v1.bak";
+
+fn ensureBackup(parent_path: [:0]const u8) Result {
+    const parent_fd = c.open(parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (parent_fd < 0) return .backup_failed;
+    defer _ = c.close(parent_fd);
+    var parent_stat: posix.Stat = undefined;
+    if (c.fstat(parent_fd, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode) or parent_stat.uid != c.getuid())
+        return .backup_failed;
+
+    const source_fd = c.openat(parent_fd, final_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (source_fd < 0) return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
+    defer _ = c.close(source_fd);
+    var source_stat: posix.Stat = undefined;
+    if (c.fstat(source_fd, &source_stat) != 0 or !posix.S.ISREG(source_stat.mode) or source_stat.uid != c.getuid())
+        return .backup_failed;
+
+    var backup_fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
+    if (backup_fd < 0) {
+        if (posix.errno(-1) != .EXIST) return .backup_failed;
+        const existing_fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (existing_fd < 0) return .backup_failed;
+        defer _ = c.close(existing_fd);
+        var existing_stat: posix.Stat = undefined;
+        if (c.fstat(existing_fd, &existing_stat) != 0 or !posix.S.ISREG(existing_stat.mode) or
+            existing_stat.uid != c.getuid() or existing_stat.mode & 0o777 != 0o600) return .backup_failed;
+        return .committed;
+    }
+    var keep_backup = false;
+    defer {
+        if (backup_fd >= 0) _ = c.close(backup_fd);
+        if (!keep_backup) _ = c.unlinkat(parent_fd, backup_leaf.ptr, 0);
+    }
+    if (c.fchmod(backup_fd, 0o600) != 0) return .backup_failed;
+    var buffer: [16 * 1024]u8 = undefined;
+    while (true) {
+        const read_count = c.read(source_fd, &buffer, buffer.len);
+        if (read_count < 0) {
+            if (posix.errno(-1) == .INTR) continue;
+            return .backup_failed;
+        }
+        if (read_count == 0) break;
+        var offset: usize = 0;
+        const count: usize = @intCast(read_count);
+        while (offset < count) {
+            const written = c.write(backup_fd, buffer[offset..count].ptr, count - offset);
+            if (written < 0) {
+                if (posix.errno(-1) == .INTR) continue;
+                return .backup_failed;
+            }
+            if (written == 0) return .backup_failed;
+            offset += @intCast(written);
+        }
+    }
+    var backup_stat: posix.Stat = undefined;
+    if (c.fstat(backup_fd, &backup_stat) != 0 or !posix.S.ISREG(backup_stat.mode) or
+        backup_stat.uid != c.getuid() or backup_stat.mode & 0o777 != 0o600) return .backup_failed;
+    const closing_fd = backup_fd;
+    backup_fd = -1;
+    if (c.close(closing_fd) != 0) return .backup_failed;
+    keep_backup = true;
+    return .committed;
 }
 
 fn publishObserved(parent_path: [:0]const u8, snapshot: []const u8, observer: PublishObserver) Result {

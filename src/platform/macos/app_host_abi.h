@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 171u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 172u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -86,6 +86,8 @@
 #define MARU_WORKSPACE_CHECKPOINT_EFFECT_NONE 0u
 #define MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE 1u
 #define MARU_WORKSPACE_CHECKPOINT_EFFECT_WRITE 2u
+#define MARU_WORKSPACE_CHECKPOINT_EFFECT_CANCEL_QUIT 3u
+#define MARU_WORKSPACE_CHECKPOINT_EFFECT_REPLY_AND_DETACH 4u
 #define MARU_WORKSPACE_CHECKPOINT_REASON_BACKGROUND 0u
 #define MARU_WORKSPACE_CHECKPOINT_REASON_FINAL_QUIT 1u
 #define MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE 0u
@@ -1253,6 +1255,8 @@ int32_t maru_macos_app_session_serialize_workspace(
 void maru_macos_app_session_set_workspace_checkpoint_failure(MaruAppHostSession *session, uint32_t failure);
 void maru_macos_app_session_enable_workspace_checkpoint_mutations(MaruAppHostSession *session);
 void maru_macos_app_session_disable_workspace_checkpoint_mutations(MaruAppHostSession *session);
+/* accepted quit이 명시적 destructive "Quit and End All Sessions"인지 반환한다. */
+uint32_t maru_macos_app_quit_end_all(void);
 
 /* P4 C3 app-global checkpoint coordinator effect. generation은 capture부터 background write completion까지
    같은 immutable snapshot을 식별한다. notice는 같은 연속 실패 epoch의 첫 실패에만 nonzero다. */
@@ -1271,6 +1275,7 @@ void maru_macos_workspace_checkpoint_mark_window_inventory(void);
 void maru_macos_workspace_checkpoint_mark_window_frame(void);
 void maru_macos_workspace_checkpoint_mark_active_window(void);
 int32_t maru_macos_workspace_checkpoint_tick(uint64_t now_ns, MaruWorkspaceCheckpointEffect *out_effect);
+int32_t maru_macos_workspace_checkpoint_quit_requested(uint64_t now_ns, MaruWorkspaceCheckpointEffect *out_effect);
 int32_t maru_macos_workspace_checkpoint_capture_completed(
     uint64_t generation,
     uint32_t succeeded,
@@ -1291,6 +1296,15 @@ uint32_t maru_macos_workspace_checkpoint_publish(
     size_t parent_path_len,
     const uint8_t *snapshot,
     size_t snapshot_len
+);
+/* C4 final Quit publisher. preserve_previous!=0이면 기존 complete manifest를 secure create-once .bak으로
+   보존하는 데 성공한 뒤에만 새 snapshot을 게시한다. */
+uint32_t maru_macos_workspace_checkpoint_publish_final(
+    const uint8_t *parent_path,
+    size_t parent_path_len,
+    const uint8_t *snapshot,
+    size_t snapshot_len,
+    uint32_t preserve_previous
 );
 
 /* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 활성(key) 창의 인덱스를 준다(M3e). Swift가 복원 loop 뒤

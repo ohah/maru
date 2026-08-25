@@ -73,19 +73,27 @@ test "P4 C1 background failures retain dirty use capped backoff and coalesce not
     try std.testing.expectEqual(checkpoint.Failure.capture_failed, new_epoch.notice.?);
 }
 
-test "P4 C1 final quit freezes mutation and only current commit replies and detaches" {
+test "P4 C1 final quit recaptures mutation and only current commit replies and detaches" {
     var coordinator = try checkpoint.Coordinator.init(policy);
     try coordinator.mutation(0);
     try expectCapture(try coordinator.quitRequested(1), 1, .final_quit);
-    try std.testing.expectError(error.MutationFrozen, coordinator.mutation(2));
-    try expectWrite((try coordinator.captureCompleted(1, true, 2)).effect, 1, .final_quit);
+    try coordinator.mutation(2);
+    const stale_capture = try coordinator.captureCompleted(1, true, 2);
+    try std.testing.expectEqual(checkpoint.Result{ .stale = 1 }, stale_capture.result.?);
+    try expectCapture(stale_capture.effect, 2, .final_quit);
+    try expectWrite((try coordinator.captureCompleted(2, true, 2)).effect, 2, .final_quit);
+    try coordinator.mutation(3);
+    const stale_write = try coordinator.writeCompleted(2, true, 3);
+    try std.testing.expectEqual(checkpoint.Result{ .stale = 2 }, stale_write.result.?);
+    try expectCapture(stale_write.effect, 3, .final_quit);
+    try expectWrite((try coordinator.captureCompleted(3, true, 3)).effect, 3, .final_quit);
 
-    const committed = try coordinator.writeCompleted(1, true, 3);
-    try std.testing.expectEqual(checkpoint.Result{ .committed = 1 }, committed.result.?);
+    const committed = try coordinator.writeCompleted(3, true, 3);
+    try std.testing.expectEqual(checkpoint.Result{ .committed = 3 }, committed.result.?);
     try std.testing.expectEqual(checkpoint.Effect.reply_and_detach, committed.effect);
 }
 
-test "P4 C1 final failure cancels quit unfreezes mutations and schedules background retry" {
+test "P4 C1 final failure cancels quit and schedules background retry" {
     var coordinator = try checkpoint.Coordinator.init(policy);
     try coordinator.mutation(0);
     try expectCapture(try coordinator.quitRequested(1), 1, .final_quit);
@@ -135,7 +143,7 @@ test "P4 C1 background failure during accepted quit starts a fresh final capture
     try std.testing.expectEqual(checkpoint.Result.capture_failed, failed.result.?);
     try std.testing.expectEqual(checkpoint.Failure.capture_failed, failed.notice.?);
     try expectCapture(failed.effect, 1, .final_quit);
-    try std.testing.expectError(error.MutationFrozen, coordinator.mutation(13));
+    try coordinator.mutation(13);
 }
 
 test "P4 C1 final write failure cancels quit without publishing detach" {

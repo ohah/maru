@@ -3836,6 +3836,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var workspaceCheckpointActiveWindow: ObjectIdentifier?
     private var workspaceCheckpointFrames: [ObjectIdentifier: NSRect] = [:]
     private var workspaceCheckpointMoveTasks: [ObjectIdentifier: DispatchWorkItem] = [:]
+    private var workspaceFinalQuitPending = false
+    private weak var workspaceFinalQuitSurface: TerminalSurface?
+    private var workspaceFinalQuitWasDeferred = false
+    private var workspaceFinalQuitAllowsFailure = false
+    private var workspaceFinalQuitApproved = false
     // FP10c1: 앱 전역 Zig mermaid_queue action을 실행할 유일한 native adapter. Mermaid fence admission과
     // frame-tick pump는 FP10c2의 pending-work/perf gate 전까지 배선하지 않는다.
     private let mermaidRenderCoordinator = MermaidRenderCoordinator()
@@ -4456,7 +4461,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         _ = sender
         if smokeMode { return .terminateNow } // smoke 자동 종료는 무인이라 모달에 막히면 hang
-        if bypassQuitConfirm { return .terminateNow } // 앱-전역 파일 보호+종료 확인 preflight 완료 — 재확인 안 함
+        if bypassQuitConfirm {
+            // 확인 생략 토큰은 checkpoint 생략 토큰이 아니다. 마지막 창/SessionEnded처럼 모달을 이미 통과했거나
+            // 필요 없는 종료도 C4 final commit을 거친다. final success 뒤 재진입만 terminateNow다.
+            if workspaceFinalQuitApproved || !workspaceCheckpointArmed || windows.isEmpty { return .terminateNow }
+            quitConfirmPending = true
+            beginFinalWorkspaceCheckpoint(surface: activeSurface, deferredAppKitQuit: true)
+            return .terminateLater
+        }
         if quitConfirmPending { return .terminateLater } // 이미 모달이 떠 결정 대기 중 — 중복 요청 무시
         // frame-loop tick이 아직 안 도는 런치 초기 에러(tickTimer==nil)거나 세션이 없으면, 모달을 띄워도 결정이
         // 돌아올 수 없으므로 즉시 종료한다. 일반 창이 0개여도 hidden quick은 살아 있을 수 있으므로 activeSurface를
@@ -4569,12 +4581,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 controlServerStarted = false
             }
         })
-        // workspace를 '정상 종료'에 저장한다 — applicationWillTerminate는 크래시에선 안 불리므로(자동 충족),
-        // 마지막 정상 세션만 디스크에 남는다(다음 실행이 그걸 복원, R4). shutdown '전에'(세션이 아직 살아 있을 때).
-        // C3 background C2 writer와 구 Quit writer가 같은 canonical leaf를 동시에 교체하지 않게 먼저
-        // serial queue를 drain한다. worker는 main completion을 기다리지 않으므로 main-thread sync와 deadlock하지 않는다.
-        workspaceCheckpointWriter.sync {}
-        terminationTiming.record(.saveWorkspace, elapsedNs: measureElapsedNs { saveWorkspace() })
+        // C4가 terminateLater 보류 중 final generation을 C2로 commit한 뒤에만 reply(true)한다. 여기서는
+        // 세션 teardown 뒤의 구형 best-effort writer를 다시 실행하지 않는다(이전 완전본 역행/이중 writer 방지).
         workspaceCheckpointArmed = false
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
@@ -6602,14 +6610,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
                 return
             }
-            if quitConfirmPending {
-                quitConfirmPending = false
-                bypassQuitConfirm = true // reply(true)가 부를 후속 terminate 경로에서 재확인 방지
-                NSApp.reply(toApplicationShouldTerminate: true)
-            } else {
-                bypassQuitConfirm = true // 이미 인앱 모달에서 종료 확정 — terminate 경로가 재확인하지 않게
-                NSApp.terminate(nil)
-            }
+            beginFinalWorkspaceCheckpoint(surface: activeSurface, deferredAppKitQuit: quitConfirmPending)
         case 2: // cancelled — 종료 취소, 앱 유지
             if quitConfirmPending {
                 quitConfirmPending = false
@@ -10671,23 +10672,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return Int32(r)
     }
 
-    /// 복원이 불완전했던 실행에서 **덮어쓰기 직전에 마지막 완전본을 한 번 남긴다**(`workspace.v1.bak`).
-    ///
-    /// v144는 이 상황에서 저장을 통째로 막았는데(`guard !workspaceRestoreIncomplete`), 그 래치는 해제 경로가 없고
-    /// 저장을 막으니 stale 파일이 그대로 남아 **다음 실행이 같은 drop을 다시 만든다** — 자기영속 루프다. 그동안
-    /// 사용자가 만든 창·탭·split·pane rename·창 위치는 매 종료마다 조용히 사라진다. 즉 무기한 차단은 데이터
-    /// 손실 방지가 아니라 데이터 손실 그 자체가 된다(code-review). 대신 잃을 뻔한 상태를 파일로 남기고 정상
-    /// 저장해 루프를 끊는다. 이미 `.bak`이 있으면 덮지 않는다 — 연속으로 불완전한 실행이 이어질 때 가장 완전한
-    /// 첫 사본이 밀려나지 않게(복구는 사용자가 .bak을 workspace.v1로 되돌리면 된다).
-    private func backupWorkspaceCheckpoint(_ url: URL) {
-        let backup = url.appendingPathExtension("bak")
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path), !fm.fileExists(atPath: backup.path) else { return }
-        try? fm.copyItem(at: url, to: backup)
-    }
-
+    /// Restore-incomplete 실행도 mutation generation은 추적하되 background publication만 막는다. 그래야 C4 final
+    /// Quit이 secure `.bak` 보존 뒤 현재 전체 모델을 게시해 다음 실행의 자기영속 restore drop을 끊을 수 있다.
     private func armWorkspaceCheckpoint(initialDirty: Bool) {
-        guard !workspaceCheckpointArmed, !smokeMode, !workspaceRestoreIncomplete else { return }
+        guard !workspaceCheckpointArmed, !smokeMode else { return }
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
         // staged Window가 하나라도 남아 있으면 아무 세션도 publish하지 않는다. 일부만 enable한 뒤
         // arm 실패/조기 return하면 배경 inventory와 mutation forwarding의 transaction 경계가 갈린다.
@@ -10718,7 +10706,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func driveWorkspaceCheckpoint() {
-        guard workspaceCheckpointArmed else { return }
+        guard workspaceCheckpointArmed, !workspaceRestoreIncomplete || workspaceFinalQuitPending else { return }
         var effect = MaruWorkspaceCheckpointEffect()
         let now = DispatchTime.now().uptimeNanoseconds
         guard maru_macos_workspace_checkpoint_tick(now, &effect) == Self.statusOK else {
@@ -10774,15 +10762,26 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             let parent = Data(workspaceURL.deletingLastPathComponent().path.utf8)
             let generation = effect.generation
+            let preservePrevious = workspaceRestoreIncomplete
             workspaceCheckpointWriter.async { [weak self] in
                 let result = parent.withUnsafeBytes { parentRaw in
                     snapshot.withUnsafeBytes { snapshotRaw in
-                        maru_macos_workspace_checkpoint_publish(
-                            parentRaw.bindMemory(to: UInt8.self).baseAddress,
-                            parentRaw.count,
-                            snapshotRaw.bindMemory(to: UInt8.self).baseAddress,
-                            snapshotRaw.count
-                        )
+                        if effect.reason == UInt32(MARU_WORKSPACE_CHECKPOINT_REASON_FINAL_QUIT) {
+                            maru_macos_workspace_checkpoint_publish_final(
+                                parentRaw.bindMemory(to: UInt8.self).baseAddress,
+                                parentRaw.count,
+                                snapshotRaw.bindMemory(to: UInt8.self).baseAddress,
+                                snapshotRaw.count,
+                                preservePrevious ? 1 : 0
+                            )
+                        } else {
+                            maru_macos_workspace_checkpoint_publish(
+                                parentRaw.bindMemory(to: UInt8.self).baseAddress,
+                                parentRaw.count,
+                                snapshotRaw.bindMemory(to: UInt8.self).baseAddress,
+                                snapshotRaw.count
+                            )
+                        }
                     }
                 }
                 DispatchQueue.main.async { [weak self] in
@@ -10805,7 +10804,70 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
             }
         default:
-            break
+            if effect.kind == UInt32(MARU_WORKSPACE_CHECKPOINT_EFFECT_CANCEL_QUIT) {
+                cancelFinalWorkspaceCheckpoint()
+            } else if effect.kind == UInt32(MARU_WORKSPACE_CHECKPOINT_EFFECT_REPLY_AND_DETACH) {
+                finishFinalWorkspaceCheckpoint()
+            }
+        }
+    }
+
+    private func beginFinalWorkspaceCheckpoint(surface: TerminalSurface?, deferredAppKitQuit: Bool) {
+        guard !workspaceFinalQuitPending else { return }
+        guard workspaceCheckpointArmed, !windows.isEmpty else {
+            bypassQuitConfirm = true
+            if deferredAppKitQuit {
+                quitConfirmPending = false
+                NSApp.reply(toApplicationShouldTerminate: true)
+            } else { NSApp.terminate(nil) }
+            return
+        }
+        workspaceFinalQuitPending = true
+        workspaceFinalQuitSurface = surface
+        workspaceFinalQuitWasDeferred = deferredAppKitQuit
+        workspaceFinalQuitAllowsFailure = maru_macos_app_quit_end_all() != 0
+        var effect = MaruWorkspaceCheckpointEffect()
+        guard maru_macos_workspace_checkpoint_quit_requested(DispatchTime.now().uptimeNanoseconds, &effect) == Self.statusOK else {
+            setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_CAPTURE_FAILED))
+            cancelFinalWorkspaceCheckpoint()
+            return
+        }
+        handleWorkspaceCheckpointEffect(effect, snapshot: nil)
+    }
+
+    private func cancelFinalWorkspaceCheckpoint() {
+        guard workspaceFinalQuitPending else { return }
+        if workspaceFinalQuitAllowsFailure {
+            finishFinalWorkspaceCheckpoint()
+            return
+        }
+        workspaceFinalQuitPending = false
+        if let session = workspaceFinalQuitSurface?.appSession {
+            maru_macos_app_session_cancel_app_quit(session)
+        }
+        workspaceFinalQuitSurface = nil
+        bypassQuitConfirm = false
+        if workspaceFinalQuitWasDeferred {
+            quitConfirmPending = false
+            NSApp.reply(toApplicationShouldTerminate: false)
+        }
+        workspaceFinalQuitWasDeferred = false
+        workspaceFinalQuitAllowsFailure = false
+    }
+
+    private func finishFinalWorkspaceCheckpoint() {
+        guard workspaceFinalQuitPending else { return }
+        workspaceFinalQuitPending = false
+        workspaceFinalQuitSurface = nil
+        workspaceFinalQuitAllowsFailure = false
+        workspaceFinalQuitApproved = true
+        bypassQuitConfirm = true
+        if workspaceFinalQuitWasDeferred {
+            workspaceFinalQuitWasDeferred = false
+            quitConfirmPending = false
+            NSApp.reply(toApplicationShouldTerminate: true)
+        } else {
+            NSApp.terminate(nil)
         }
     }
 
@@ -10874,15 +10936,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         guard validatedWindowCount == blockCount else { return nil }
         return Data(snapshot.utf8)
-    }
-
-    private func saveWorkspace() {
-        guard let snapshot = captureWorkspaceSnapshot(useTerminationKeyWindow: true, publishedOnly: false), let url = workspaceFileURL else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // 이번 실행의 복원이 무언가를 버렸으면(도크 entry·explorer root·§7 묘비로 잃은 runtime handle) 덮어쓰기 전에
-        // 마지막 완전본을 .bak으로 보존한다. 저장 자체는 막지 않는다(위 함수 주석의 자기영속 루프).
-        if workspaceRestoreIncomplete { backupWorkspaceCheckpoint(url) }
-        try? snapshot.write(to: url, options: .atomic)
     }
 
     private func shutdownAppSession(preserveWebPanelsFor summarySurface: TerminalSurface? = nil) {

@@ -863,8 +863,12 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
 > (`group-pill-clipped-edge` — 스크롤 상단에 걸린 pill의 잘린 변이 직선인지). 이관 전에는 Lab이
 > `chrome_draw_lowering.RichTextArtifact`(셀 격자 + 오프셋, clip 없음)를 써서 그 case를 넣었다가 제거해야
 > 했다. 이관 실효성은 clip을 끄고 재캡처해 확인했다(`partial-scroll-cards` 1460픽셀,
-> `group-pill-clipped-edge` 71픽셀 차이로 실패). 남는 간극은 pane 합성(터미널과의 레이어 순서·pane
-> 오프셋)이고 그건 archive 스모크의 몫이다.
+> `group-pill-clipped-edge` 71픽셀 차이로 실패). pane 합성의 **세로 축은 2026-08-24에 닫혔다**
+> (`dock-over-status-bar` — 도크 뷰포트를 상태바 높이만큼 줄이고 그 아래 under 층에 띠를 심는다.
+> 골든 둘: 도크가 그 뷰포트 안에서 끝나는가, 스크롤된 목록의 잘린 첫 행이 위쪽 고정 chrome 을
+> 침범하지 않는가). **아래쪽 clip 은 이 축으로 잴 수 없다** — 목록이 가상화라 뷰포트 아래로 넘치는
+> 행을 만들지 않아, clip 을 꺼도 그 아래는 안 변한다(적대적 검증 2026-08-25). 남는 간극은 **가로
+> 축**이다(터미널 pane 과의 오프셋·레이어 순서) — Lab 의 텍스트 경로가 pane 원점을 못 받는다.
 > ⚠️ 한계: 캡처가 없으면 skip한다(스모크를 안 돌린 환경/플랫폼). 그리고 골든은 **관심 영역만** 보므로 그
 > 사각형 밖 회귀는 여전히 못 잡는다 — 새 시각 계약을 만들 때 case를 함께 추가해야 한다.
 

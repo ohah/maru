@@ -1754,6 +1754,26 @@ const TermRuntime = struct {
     /// 잡으면 됐지만, 멀티커서는 같은 줄에 여러 개가 놓인다 — `editor_find_mark_buf`가 매치를 담느라
     /// 이미 겪은 자리와 같다. 그래서 크기는 **줄 수가 아니라 실제 범위 수**로 잡는다.
     editor_selection_mark_buf: []chrome.components.editor_view.frame.Mark = &.{},
+    /// 커서 자리를 **보이는 줄별**로 자른 것(줄 안 byte offset). 띠와 자리도 축도 같고, 길이 0이라
+    /// `Mark`로 못 쓰는 것만 다르다.
+    editor_caret_rows: [][]const u32 = &.{},
+    /// 위 배열이 가리키는 저장소. 커서 하나가 한 자리이므로 **커서 수**만큼이면 된다.
+    editor_caret_buf: []u32 = &.{},
+    /// **undo 스택**(§3.3 — 선형. undo tree는 UI 비용 대비 이득이 작아 채택하지 않는다).
+    ///
+    /// 항목마다 **묶음 번호**를 단다. §3.3이 "연속 타이핑은 하나로 묶는다"고 했는데 두 delta를
+    /// 실제로 **합치면** 좌표를 다시 계산해야 하고 그 산술이 틀릴 여지가 크다 — 번호가 같은 것을
+    /// 연속으로 꺼내면 같은 결과를 얻으면서 delta는 손대지 않는다.
+    editor_undo: []editor_ops.UndoEntry = &.{},
+    editor_undo_len: usize = 0,
+    /// redo 스택. **새 편집은 이것을 버린다**(§3.3).
+    editor_redo: []editor_ops.UndoEntry = &.{},
+    editor_redo_len: usize = 0,
+    /// 지금 쌓고 있는 묶음 번호.
+    editor_edit_group: u32 = 0,
+    /// 마지막 편집의 종류와 시각(ms) — 묶음을 끊을지 판정한다.
+    editor_last_edit_kind: editor_ops.EditKind = .none,
+    editor_last_edit_ms: u64 = 0,
     /// **검색 결과**를 줄별 범위로 자른 것(§5.1). `editor_selection_marks`와 자리도 축도 같고
     /// **저장소 크기만 다르다** — 선택은 이어진 하나라 줄마다 최대 하나지만, 매치는 한 줄에
     /// 여럿이다. 그 하나 때문에 선택 저장소를 재사용하지 않는다(`buf[i..i+1]`로 자르는 그 구조가
@@ -8437,6 +8457,9 @@ pub const AppSession = struct {
                 self,
                 pane_ops.activePane(self).activeTerm(),
             ),
+            .editor_undo => _ = editor_ops.undoEdit(self, pane_ops.activePane(self).activeTerm()),
+            .editor_redo => _ = editor_ops.redoEdit(self, pane_ops.activePane(self).activeTerm()),
+            .editor_save => _ = editor_ops.saveDocument(self, pane_ops.activePane(self).activeTerm()),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).
@@ -10644,6 +10667,29 @@ pub const AppSession = struct {
             // → held 창에서도 앱 단축키로 복구가 된다. (write하는 터미널 입력만 죽은 surface에서 걸러진다.)
             return input_ops.keyIgnored(self);
         };
+        // **편집기 Term이면 편집 키가 PTY로 가지 않는다**(N2 — §3.2 "문자 단위 삭제").
+        //
+        // 평범한 글자는 여기 오지 않는다 — macOS가 `NSTextInputClient` 확정으로 보내므로
+        // `sendCommittedText`가 그 자리다. 여기 오는 것은 **Backspace·Delete·Enter** 같은 편집 키다.
+        //
+        // **해석 뒤에 둔다.** 앞에 두면 사용자가 편집기 포커스에서 건 앱 단축키(⌘⌃D 등)가 먹지
+        // 않는다 — `result`가 `.app_action`이면 이 분기에 아예 안 온다.
+        if (result == .terminal_input) {
+            const active = pane_ops.activePane(self).activeTerm();
+            if (active.kind == .editor and active.rt.editor_diff == null) {
+                const handled = switch (key_event.key) {
+                    .backspace => editor_ops.deleteText(self, active, true),
+                    .delete => editor_ops.deleteText(self, active, false),
+                    .enter => editor_ops.insertText(self, active, "\n"),
+                    .tab => editor_ops.insertText(self, active, "\t"),
+                    else => false,
+                };
+                if (handled) {
+                    self.metal_dirty = true;
+                    return input_ops.keyConsumedByApp(self); // 편집기가 삼켰다
+                }
+            }
+        }
         switch (result) {
             .terminal_input => |terminal_input| {
                 self.total_terminal_input_events += 1;

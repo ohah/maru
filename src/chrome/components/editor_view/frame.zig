@@ -132,6 +132,19 @@ pub const Props = struct {
     /// 그 중 **지금 보고 있는 매치**. `search_marks` 안에 이미 들어 있고 이것은 어느 것인지만
     /// 가리킨다 — 따로 담으면 두 목록이 어긋날 수 있고, 그러면 색이 둘인 매치나 색이 없는 매치가 난다.
     search_current: ?CurrentMatch = null,
+    /// **커서 자리** — 보이는 줄마다 그 줄 안 byte offset들(오름차순).
+    ///
+    /// `selection_marks`와 **같은 축·같은 모양**이다(줄별, 줄 안 offset). 길이 0인 위치라 마크로
+    /// 표현할 수 없어 따로 든다 — 마크의 `len`을 0으로 두면 `paintRowMarks`가 그리는 사각이
+    /// 폭 0이 되어 보이지 않는다.
+    ///
+    /// **byte로 받고 열은 여기서 구한다.** 제품이 픽셀을 계산해 넘기면 hit-test와 다른 산술이
+    /// 두 곳에 생긴다 — §5.4가 *"view와 hitTest가 하나의 픽셀-레이아웃 소스를 공유한다"*를 MUST로
+    /// 둔 자리이고, 이 슬라이스가 실제로 그 두 번째 출처를 지었다가 걷어냈다.
+    carets: ?[]const []const u32 = null,
+    /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다 —
+    /// rename·검색 caret이 쓰는 값과 같은 것이라 **깜빡임 위상이 화면 안에서 하나다.**
+    caret_visible: bool = true,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -595,6 +608,12 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
     const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
 
+    // **커서는 검색 위, 막대 앞이다.** 위 예약과 같은 이유로 막대 몫을 남기고, 커서도 줄당 개수에
+    // 상한이 없으므로(만 개까지) 남은 자리 안에서만 그린다 — `paintCarets`가 넘으면 자른다.
+    const caret_base = find_base + find_ops;
+    const caret_room = (scratch.ops.len -| caret_base) -| scrollbar_reserve_ops;
+    const caret_ops = paintCarets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[caret_base..][0..caret_room]);
+
     const sw = scrollbar.build(.{
         .content = .{
             .x = @floatFromInt(props.rect.x),
@@ -609,7 +628,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .first_visual_row = first_visual,
         .cell_h_px = props.cell_h_px,
         .metrics = props.metrics,
-    }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops + find_ops ..]);
+    }, scratch.ops[caret_base + caret_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
     // **본문 아래 거터에 선다.** 호출자가 그 자리를 이미 비워 두었다(`showsHorizontalBar`로 물어
@@ -627,7 +646,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .first_col = props.first_col,
             .cell_w_px = props.cell_w_px,
             .metrics = props.metrics,
-        }, scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + sel_ops + find_ops + sw.ops ..])
+        }, scratch.ops[caret_base + caret_ops + sw.ops ..])
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
 
@@ -635,7 +654,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + hw.ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + caret_ops + hw.ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
@@ -775,6 +794,69 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
         }, out[n..], scratch_cols);
     }
     return n;
+}
+
+/// **커서**를 그린다(§3.2 — 커서는 배열이다).
+///
+/// **선택·검색보다 위다.** 커서는 "지금 타이핑이 어디로 가는가"를 말하는 유일한 표시라, 무엇에
+/// 가려지면 사용자가 자기 입력이 어디로 갈지 모른다. 그래서 조립에서 마지막 본문 층이다.
+///
+/// **폭은 한 셀이 아니라 2px 막대다.** 셀 폭으로 그리면 CJK 위에서 절반만 덮고 탭 위에서 반쪽에
+/// 서는데, 그보다 근본적으로 **커서는 글자 사이에 있는 것**이라 글자 폭을 가질 이유가 없다.
+/// (블록 커서는 overtype 모드의 표현이고 그 모드가 아직 없다.)
+///
+/// **줄당 개수에 상한이 없는 둘째 층이다** — 검색 강조가 첫째다. 커서가 만 개까지 갈 수 있으므로
+/// (`selection.max_cursors`) 예산을 다 먹으면 뒤에 오는 스크롤바가 통째로 안 그려지고, 그때
+/// `scrollbar.build`는 기하를 그대로 반환해 **"안 보이는데 드래그는 되는"** 상태가 된다.
+/// 그래서 호출자가 남겨 준 몫(`out`) 안에서만 그리고 넘으면 **조용히 자른다** — 커서 몇 개가
+/// 안 보이는 것이 막대가 사라지는 것보다 낫다.
+/// **`scratch_cols`를 받지 않는다.** 띠·검색은 한 줄에서 여러 offset을 한꺼번에 열로 옮기느라
+/// 임시 배열이 필요하지만, 커서는 한 자리씩이라 그럴 것이 없다 — 안 쓰는 인자를 "대칭이니까"
+/// 받아 두면 읽는 사람이 그것이 쓰인다고 믿는다.
+fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+    if (!props.caret_visible) return 0;
+    const rows = props.carets orelse return 0;
+
+    var n: usize = 0;
+    for (visual, 0..) |row, i| {
+        if (row.line >= rows.len) continue;
+        const offsets = rows[row.line];
+        if (offsets.len == 0) continue;
+        const line = if (row.line < props.lines.len) props.lines[row.line] else continue;
+
+        // **행의 y는 `visual` 배열 인덱스로 센다** — `paintSelection`이 쓰는 것과 같은 산술이다.
+        // `row.screen_row`가 아닌 이유는 그 값이 이 배열의 인덱스와 다를 수 있어서다.
+        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
+        for (offsets) |off| {
+            if (n >= out.len) return n; // 예산 끝 — 막대 몫을 지킨다
+            const col = columnOfOffset(line, props.tab_width, off, row.start_col + layout.content.width);
+            if (col < row.start_col) continue; // 이 행보다 앞이다(랩)
+            const on_screen = col - row.start_col;
+            if (on_screen >= layout.content.width) continue; // 이 행보다 뒤다
+            const x = props.rect.x +
+                @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px));
+            // **불투명하게 그린다.** 띠·검색은 글자를 읽어야 해서 알파로 얹지만, 커서는 그 자리에
+            // 글자가 없다(글자 **사이**다) — 반투명하게 두면 배경색이 비쳐 흐릿한 막대가 된다.
+            out[n] = .{ .quad = .{
+                .rect = .{ .x = x, .y = y, .w = caret_width_px, .h = props.cell_h_px },
+                .fill_role = .cursor,
+            } };
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// 커서 막대 폭(px). **셀 폭과 무관한 상수다** — 폰트를 키워도 커서가 뚱뚱해지지 않는다.
+pub const caret_width_px: u32 = 2;
+
+/// 줄 안 byte offset이 몇 열인가. `columnsAtOffsets`를 하나짜리로 부르는 얇은 감쌈이다 —
+/// **열 계산을 여기서 다시 짜지 않는다**(§5.4: 하나의 픽셀-레이아웃 소스).
+fn columnOfOffset(line: []const u8, tab_width: u16, offset: u32, stop_col: u32) u32 {
+    var one = [_]u32{offset};
+    var out = [_]u32{0};
+    content.columnsAtOffsets(line, tab_width, &one, &out, stop_col);
+    return out[0];
 }
 
 /// **검색 결과**를 그린다(§5.1). 선택과 같은 축·같은 열 계산을 쓰고 색과 세기만 다르다.
@@ -2249,6 +2331,154 @@ test "랩된 줄의 이어진 조각에도 글자 강조가 선다 — 오래 �
         if (op.quad.rect.y >= 16) found_on_second_row = true;
     }
     try testing.expect(found_on_second_row);
+}
+
+test "CRT1 커서 수만큼 막대가 서고, blink가 꺼지면 하나도 안 선다 (§3.2)" {
+    // **커서가 여럿인데 하나만 그려도 화면은 "커서가 있다"로 보인다** — 그 상태에서 타이핑하면
+    // 안 보이는 자리에도 글자가 들어간다. 그래서 **수를 센다**(대입이면 중복·누락을 못 잡는다는
+    // 것을 `SRCH1`이 뮤턴트로 확인했다).
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    const lines = [_][]const u8{"abc def ghi"};
+    const row_carets = [_]u32{ 0, 4, 8 };
+    const carets = [_][]const u32{&row_carets};
+    const total_cols: u16 = 40;
+
+    for ([_]bool{ true, false }) |visible| {
+        const w = build(.{
+            .lines = &lines,
+            .first_line = 0,
+            .total_lines = 1,
+            .carets = &carets,
+            .caret_visible = visible,
+            .visible_rows = 2,
+            .wrap = false,
+            .tab_width = default_tab_width,
+            .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 32 },
+            .cell_w_px = 8,
+            .cell_h_px = 16,
+            .font_px = 16,
+            .total_cols = total_cols,
+            .scrollbar_gutter_px = 0,
+            .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+        }, .{
+            .ops = &ops,
+            .text_bytes = &text,
+            .runs = &runs,
+            .content_rows = &content_rows,
+            .visual_rows = &visual_rows,
+            .gutter_rows = &gutter_rows,
+            .row_counts = &counts,
+            .count_scratch = &count_scratch,
+        });
+
+        var n: usize = 0;
+        var xs: [8]i32 = undefined;
+        for (ops[0..w.ops]) |op| {
+            if (op != .quad) continue;
+            if (op.quad.fill_role != .cursor) continue;
+            if (n < xs.len) xs[n] = op.quad.rect.x;
+            n += 1;
+        }
+        if (!visible) {
+            // **blink가 꺼지면 하나도 없다** — 안 사라지면 커서가 아니라 그냥 막대다.
+            try std.testing.expectEqual(@as(usize, 0), n);
+            continue;
+        }
+        try std.testing.expectEqual(@as(usize, 3), n);
+        // 셋이 서로 다른 자리다(한 자리에 겹쳐 그리면 수는 맞고 화면은 틀린다).
+        try std.testing.expect(xs[0] != xs[1] and xs[1] != xs[2]);
+        // 열 간격이 셀 폭의 배수다 — 0·4·8열이므로 32px 간격이다.
+        try std.testing.expectEqual(@as(i32, 32), xs[1] - xs[0]);
+        try std.testing.expectEqual(@as(i32, 32), xs[2] - xs[1]);
+        // **폭은 셀 폭이 아니라 막대 폭이다.**
+        for (ops[0..w.ops]) |op| {
+            if (op == .quad and op.quad.fill_role == .cursor) {
+                try std.testing.expectEqual(caret_width_px, op.quad.rect.w);
+                try std.testing.expectEqual(@as(u32, 16), op.quad.rect.h); // 셀 높이
+            }
+        }
+    }
+}
+
+test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제로 작동하는가)" {
+    // **예약을 뒀다와 예약이 작동한다는 다르다.** 커서는 줄당 개수에 상한이 없는 둘째 층이라
+    // (검색이 첫째) 예산을 다 먹으면 뒤에 오는 막대가 통째로 안 그려지고, 그때 `scrollbar.build`는
+    // op이 0이어도 **기하를 그대로 반환**해 "안 보이는데 드래그는 되는" 상태가 된다.
+    //
+    // op 배열을 **커서가 넘칠 만큼만** 준다. 처음엔 64로 줬는데 그러면 앞 층들(배경·본문·gutter·
+    // 밴드·선택)이 먼저 다 먹어 막대가 굶었고 — 그것은 **이 슬라이스가 만든 상태가 아니라**
+    // 위 주석이 "기존 상태"라 적어 둔 무예약 층들의 문제다 — 판정자가 엉뚱한 것을 재고 있었다.
+    // 앞 층이 들어가고 **커서만 넘치는** 크기여야 예약이 실제로 판정된다.
+    var ops: [256]draw.Op = undefined;
+    var text: [4096]u8 = undefined;
+    var runs: [256]draw.Run = undefined;
+    var content_rows: [64]content.Row = undefined;
+    var visual_rows: [64]visual_map.VisualRow = undefined;
+    var gutter_rows: [64]gutter.Row = undefined;
+    var counts: [64]u32 = undefined;
+    var count_scratch: [1024]u8 = undefined;
+
+    // **막대가 실제로 설 조건을 만든다.** 처음엔 한 줄짜리 문서에 `content_max_cols`도 없이 줬는데,
+    // 그러면 세로는 문서가 다 들어가서, 가로는 `showsHorizontalBar`가 `content_max_cols`를 요구해서
+    // **둘 다 애초에 안 그려진다** — 판정자가 "굶었다"와 "원래 없다"를 구분하지 못했다(실측:
+    // 예약으로 남은 자리 2칸이 멀쩡히 비어 있는데 `bar_n == 0`이었다).
+    const lines = [_][]const u8{ "x" ** 400, "y" ** 400, "z" ** 400, "w" ** 400 };
+    var many: [400]u32 = undefined;
+    for (&many, 0..) |*c, i| c.* = @intCast(i);
+    const carets = [_][]const u32{ &many, &.{}, &.{}, &.{} };
+
+    const total_cols: u16 = 40;
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 4,
+        .carets = &carets,
+        .caret_visible = true,
+        .content_max_cols = 400, // 가로 막대가 서는 조건
+        .visible_rows = 2, // 4줄 중 2줄만 보인다 — 세로 막대가 서는 조건
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 32 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 400, // 가로가 넘쳐 **가로 막대도** 선다
+        // **막대가 설 자리를 준다.** gutter가 0이면 `scrollbarGeometry`가 `null`을 내 막대가
+        // 아예 안 그려진다 — 실측으로 확인했다(자리 2칸이 남았는데도 thumb이 0이었다).
+        .scrollbar_gutter_px = 12,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    // 커서가 잘렸다 — 그것이 이 판정자가 만들려는 상태다.
+    var caret_n: usize = 0;
+    var bar_n: usize = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        // `switch` prong은 comptime 값을 요구하는데 `thumb_role`은 다른 모듈의 상수라 여기서는
+        // `if`가 맞다 — 값을 여기 베껴 적으면 그것이 두 번째 출처가 된다.
+        if (op.quad.fill_role == .cursor) caret_n += 1;
+        if (op.quad.fill_role == scrollbar.thumb_role) bar_n += 1;
+    }
+    try std.testing.expect(caret_n < many.len); // 실제로 잘렸나 — 아니면 판정이 공허하다
+    // **막대는 그려졌다.** 굶었다면 여기서 0이고, 화면에 없는데 드래그는 되는 상태가 된다.
+    try std.testing.expect(bar_n > 0);
 }
 
 test "SRCH1 검색 결과는 두 색으로 선다 — 현재 매치 하나만 다르다 (§5.1)" {

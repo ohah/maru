@@ -202,6 +202,43 @@ pub const EditableFile = struct {
         inverse.deinit();
     }
 
+    /// **디스크에 쓸 bytes를 만든다** — 연 그대로의 파일 속성을 되돌린다(§3.5).
+    ///
+    /// 편집기가 파일을 열었다 저장하기만 해도 내용이 달라지면 **diff가 통째로 물들고** 사용자는
+    /// 자기가 무엇을 바꿨는지 알 수 없다. 그래서 되돌리는 것이 셋이다:
+    ///
+    /// - **BOM** — 있었으면 다시 붙인다(문서 offset 0은 BOM 뒤였다).
+    /// - **끝 개행** — 임의로 더하거나 지우지 않는다. 있었으면 있게, 없었으면 없게.
+    /// - **줄바꿈** — **건드리지 않는다.** `content`가 이미 원본의 `\r\n`을 그대로 들고 있고,
+    ///   편집으로 새로 들어간 줄만 `\n`이다. 섞인 파일을 한 쪽으로 통일하면 **안 건드린 줄까지
+    ///   diff에 뜬다**(`mixed_endings`가 그 유혹을 막으려고 사실로 남아 있다).
+    ///
+    /// **새 줄에 `dominant_ending`을 쓰지 않는다 — 아직.** §3.5는 *"새로 삽입되는 줄에만"* 그것을
+    /// 쓰라고 하는데, 그러려면 편집이 "이 줄바꿈은 내가 넣은 것"을 표시해야 한다. 지금 편집 층은
+    /// 그 표시를 만들지 않으므로 **CRLF 파일에 새 줄을 넣으면 그 줄만 LF다.** 아는 대가이고,
+    /// 그 표시를 만드는 것은 편집 연산 쪽 슬라이스다.
+    pub fn saveBytes(self: EditableFile, allocator: std.mem.Allocator) ![]u8 {
+        const bom = if (self.format.has_bom) document.utf8_bom else "";
+        var body = self.content;
+        // 끝 개행을 원본에 맞춘다.
+        var extra: []const u8 = "";
+        if (self.format.ends_with_newline) {
+            if (body.len == 0 or body[body.len - 1] != '\n') {
+                extra = if (self.format.dominant_ending == .crlf) "\r\n" else "\n";
+            }
+        } else if (body.len > 0 and body[body.len - 1] == '\n') {
+            // 없던 끝 개행이 생겼다 — 뗀다. `\r\n`이면 둘 다 뗀다.
+            body = body[0 .. body.len - 1];
+            if (body.len > 0 and body[body.len - 1] == '\r') body = body[0 .. body.len - 1];
+        }
+
+        const out = try allocator.alloc(u8, bom.len + body.len + extra.len);
+        @memcpy(out[0..bom.len], bom);
+        @memcpy(out[bom.len..][0..body.len], body);
+        @memcpy(out[bom.len + body.len ..][0..extra.len], extra);
+        return out;
+    }
+
     /// 지금 내용을 붙든 읽기 전용 판(§2.1 워커로 건너간다). `O(1)`이다.
     pub fn snapshot(self: EditableFile) buffer.Snapshot {
         return self.buf.snapshot();
@@ -492,5 +529,55 @@ test "EDOC10: 되돌리기가 selection을 제자리로 돌린다 (범위 안이
         try testing.expectEqual(before[i].anchor_start, s.anchor_start);
         try testing.expectEqual(before[i].anchor_end, s.anchor_end);
         try testing.expectEqual(before[i].focus, s.focus);
+    }
+}
+
+test "EDOC11: 저장 bytes가 연 그대로의 파일 속성을 되돌린다 (§3.5)" {
+    // **열었다 저장하기만 해도 내용이 달라지면 diff가 통째로 물든다.** 사용자는 자기가 무엇을
+    // 바꿨는지 알 수 없게 되고, 그것이 §3.5가 "원문을 바꾸지 않는다"를 첫 문장으로 둔 이유다.
+    const a = testing.allocator;
+
+    // ⑴ BOM이 있던 파일은 BOM이 돌아온다.
+    {
+        var f = try EditableFile.init(a, document.utf8_bom ++ "hello\n", false);
+        defer f.deinit();
+        try testing.expectEqualStrings("hello\n", f.content); // 문서 offset 0은 BOM 뒤다
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        try testing.expectEqualStrings(document.utf8_bom ++ "hello\n", out);
+    }
+
+    // ⑵ 끝 개행이 없던 파일은 없는 채로 남는다 — 임의로 더하지 않는다.
+    {
+        var f = try EditableFile.init(a, "no trailing", false);
+        defer f.deinit();
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        try testing.expectEqualStrings("no trailing", out);
+    }
+
+    // ⑶ CRLF 파일은 기존 줄의 `\r\n`이 그대로다 — 정규화하지 않는다.
+    {
+        var f = try EditableFile.init(a, "a\r\nb\r\n", false);
+        defer f.deinit();
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        try testing.expectEqualStrings("a\r\nb\r\n", out);
+    }
+
+    // ⑷ 편집한 뒤에도 속성이 살아 있다.
+    {
+        var f = try EditableFile.init(a, document.utf8_bom ++ "x\r\ny", false);
+        defer f.deinit();
+        var items = [_]selection.Selection{selection.Selection.at(0)};
+        var sels = selection.Selections.init(&items, 0);
+        const changes = [_]delta.Change{.{ .start = 0, .end = 1, .text = "X" }};
+        var inv = try f.apply(.{ .changes = &changes }, &sels);
+        defer inv.deinit();
+
+        const out = try f.saveBytes(a);
+        defer a.free(out);
+        // BOM 유지 · 기존 CRLF 유지 · 끝 개행 없음 유지.
+        try testing.expectEqualStrings(document.utf8_bom ++ "X\r\ny", out);
     }
 }

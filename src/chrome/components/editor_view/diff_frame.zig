@@ -191,6 +191,11 @@ pub const Shared = struct {
     /// 같은 시각 행에서 시작해야 같은 줄이 같은 높이에 선다.
     first_piece: u32 = 0,
     wrap: bool = false,
+    /// 커서 자리(줄별 byte offset)와 지금 그릴 순간인가. **비교 뷰는 안 쓴다** — 좌우 두 문서라
+    /// 커서가 어느 쪽 것인지 판정이 선행하고(§4.1g "비교 뷰"), 그 판정은 아직 없다. 단일 편집기가
+    /// 이 구조를 함께 쓰므로 자리만 뚫어 둔다.
+    carets: ?[]const []const u32 = null,
+    caret_visible: bool = true,
     /// **기본값이 없다 — 호출자가 반드시 넘긴다.** 기본값을 두면 그것이 두 번째 출처가 되고,
     /// "렌더가 쓰는 값"을 참조하는 쪽(hit-test)이 조용히 갈린다. 두 번 그렇게 갈렸다: 2차 적대적
     /// 검증은 이 자리가 `4`를 하드코딩해 `frame.default_tab_width`를 바꿔도 렌더가 안 따라오는 것을
@@ -244,6 +249,8 @@ pub fn buildSide(
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,
         .wrap = shared.wrap,
+        .carets = shared.carets,
+        .caret_visible = shared.caret_visible,
         .tab_width = shared.tab_width,
         .rect = rect,
         .background_rect = background,

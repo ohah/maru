@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 170u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 171u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -83,6 +83,15 @@
 /* workspace 저장 포맷 헤더(첫 줄). Zig(app.workspace.header)·Swift(저장/로드/적용)가 같은 문자열을 써야
    하므로 ABI 버전과 같은 방식으로 여기서 단일 출처화한다 — Zig 크로스체크 테스트가 동기화를 강제한다. */
 #define MARU_WORKSPACE_HEADER "maru.workspace.v1"
+#define MARU_WORKSPACE_CHECKPOINT_EFFECT_NONE 0u
+#define MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE 1u
+#define MARU_WORKSPACE_CHECKPOINT_EFFECT_WRITE 2u
+#define MARU_WORKSPACE_CHECKPOINT_REASON_BACKGROUND 0u
+#define MARU_WORKSPACE_CHECKPOINT_REASON_FINAL_QUIT 1u
+#define MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE 0u
+#define MARU_WORKSPACE_CHECKPOINT_NOTICE_CAPTURE_FAILED 1u
+#define MARU_WORKSPACE_CHECKPOINT_NOTICE_WRITE_FAILED 2u
+#define MARU_WORKSPACE_CHECKPOINT_PUBLISH_COMMITTED 0u
 
 /* Status는 "치명적 세션 fault"와 "이 한 event만 거부됨"을 구분한다. Swift host는
    per-event 거부(KeyFailed/ResizeFailed)나 정상 종료(SessionEnded)를 앱 전체를 죽이는
@@ -1239,6 +1248,49 @@ int32_t maru_macos_app_session_serialize_workspace(
     int32_t frame_y,
     int32_t frame_w,
     int32_t frame_h
+);
+/* 앱 전역 checkpoint 연속 실패를 이 창의 비모달 status bar에 투영한다. 0=clear, 1=capture, 2=write. */
+void maru_macos_app_session_set_workspace_checkpoint_failure(MaruAppHostSession *session, uint32_t failure);
+void maru_macos_app_session_enable_workspace_checkpoint_mutations(MaruAppHostSession *session);
+void maru_macos_app_session_disable_workspace_checkpoint_mutations(MaruAppHostSession *session);
+
+/* P4 C3 app-global checkpoint coordinator effect. generation은 capture부터 background write completion까지
+   같은 immutable snapshot을 식별한다. notice는 같은 연속 실패 epoch의 첫 실패에만 nonzero다. */
+typedef struct MaruWorkspaceCheckpointEffect {
+    uint64_t generation;
+    uint32_t kind;
+    uint32_t reason;
+    uint32_t notice;
+} MaruWorkspaceCheckpointEffect;
+
+/* Restore/default construction 뒤 main thread에서 한 번 arm한다. 초기 저장본이 없으면 initial_dirty=1로
+   baseline checkpoint를 예약한다. 모든 coordinator 호출은 AppKit main thread 소유다. */
+int32_t maru_macos_workspace_checkpoint_arm(uint32_t initial_dirty);
+void maru_macos_workspace_checkpoint_mark_cross_window_commit(void);
+void maru_macos_workspace_checkpoint_mark_window_inventory(void);
+void maru_macos_workspace_checkpoint_mark_window_frame(void);
+void maru_macos_workspace_checkpoint_mark_active_window(void);
+int32_t maru_macos_workspace_checkpoint_tick(uint64_t now_ns, MaruWorkspaceCheckpointEffect *out_effect);
+int32_t maru_macos_workspace_checkpoint_capture_completed(
+    uint64_t generation,
+    uint32_t succeeded,
+    uint64_t now_ns,
+    MaruWorkspaceCheckpointEffect *out_effect
+);
+int32_t maru_macos_workspace_checkpoint_write_completed(
+    uint64_t generation,
+    uint32_t succeeded,
+    uint64_t now_ns,
+    MaruWorkspaceCheckpointEffect *out_effect
+);
+
+/* C2 secure atomic publisher. parent_path는 canonical workspace.v1의 parent UTF-8 bytes이며 leaf 선택권은
+   caller에게 주지 않는다. background serial queue에서 호출할 수 있고 반환은 WorkspaceCheckpointFile.Result 값이다. */
+uint32_t maru_macos_workspace_checkpoint_publish(
+    const uint8_t *parent_path,
+    size_t parent_path_len,
+    const uint8_t *snapshot,
+    size_t snapshot_len
 );
 
 /* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 활성(key) 창의 인덱스를 준다(M3e). Swift가 복원 loop 뒤

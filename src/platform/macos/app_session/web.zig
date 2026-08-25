@@ -343,6 +343,7 @@ pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can
         self.allocator.free(dup); // 맵 성장 OOM: dup 회수 후 미갱신
         return;
     };
+    var persisted_url_changed = false;
     if (gop.found_existing) {
         // 값이 실제로 바뀐 tick에만 재렌더 요청 — 주소창 밴드(url)·nav 버튼 활성색(can_go_*)이 이 상태를 소비하므로,
         // 링크 이동으로 URL/히스토리가 바뀌면 metal_dirty를 세워야 주소창이 갱신된다("이동해도 주소 안 바뀜" 수정).
@@ -350,12 +351,19 @@ pub fn setWebNavState(self: *AppSession, surface_id: u64, can_go_back: bool, can
         const changed = gop.value_ptr.can_go_back != can_go_back or
             gop.value_ptr.can_go_forward != can_go_forward or
             !std.mem.eql(u8, gop.value_ptr.url, url);
+        persisted_url_changed = !std.mem.eql(u8, gop.value_ptr.url, url);
         self.allocator.free(gop.value_ptr.url); // 옛 url 해제 후 교체
         if (changed) self.metal_dirty = true;
     } else {
         self.metal_dirty = true; // 새 상태 = 첫 주소 표시 → 재렌더
+        persisted_url_changed = url.len > 0;
     }
     gop.value_ptr.* = .{ .can_go_back = can_go_back, .can_go_forward = can_go_forward, .url = dup };
+    if (persisted_url_changed and app_session_mod.app_runtime.workspace_checkpoint.armed and term_ops.findTermWhere(self, surface_id, struct {
+        fn pred(id: u64, term: *Term) bool {
+            return term.surfaceId() == id and isBrowserTerm(term);
+        }
+    }.pred) != null) self.workspaceChanged(.persisted_surface);
 }
 
 /// Phase 7e-1a: surface_id의 저장된 nav 상태(없으면 null). 반환 url 슬라이스는 맵 소유로 다음 mutation까지 유효

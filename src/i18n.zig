@@ -721,6 +721,8 @@ const Table = struct {
 
     // ── 작업공간 복원 (I3f) ──
     ws_restore_incomplete: [:0]const u8,
+    ws_checkpoint_capture_failed: [:0]const u8,
+    ws_checkpoint_write_failed: [:0]const u8,
 
     // ── 브라우저 권한 확인 (리뷰 후속) ──
     // **로그인 토큰 접근을 묻는 문장이다.** 영어 UI 아래 한국어 동의문이 뜨면 사용자가 무엇을
@@ -1156,6 +1158,8 @@ const en: Table = .{
     .mob_conn_failed = "Could not connect",
     .mob_appearance = "Appearance",
     .ws_restore_incomplete = "The saved workspace was only partially restored — on quit the previous checkpoint is kept as workspace.v1.bak before saving.",
+    .ws_checkpoint_capture_failed = "Workspace checkpoint capture failed",
+    .ws_checkpoint_write_failed = "Workspace checkpoint save failed",
     .grant_scope_storage = "read and write this site's cookies and storage (including login tokens)",
     .grant_scope_control = "control this browser (navigate, click, type, read)",
     .grant_prompt = "An agent wants to {0}. Target: {1}. Allow?",
@@ -1713,6 +1717,8 @@ const ko: Table = .{
     .mob_conn_failed = "연결하지 못했습니다",
     .mob_appearance = "모양",
     .ws_restore_incomplete = "저장된 작업 공간을 일부만 복원했습니다 — 종료 시 이전 체크포인트를 workspace.v1.bak으로 남기고 저장합니다.",
+    .ws_checkpoint_capture_failed = "작업 공간 체크포인트 캡처에 실패했습니다",
+    .ws_checkpoint_write_failed = "작업 공간 체크포인트 저장에 실패했습니다",
     .grant_scope_storage = "이 사이트의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
     .grant_scope_control = "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
     .grant_prompt = "에이전트가 {0} 합니다. 대상: {1}. 허용하시겠습니까?",

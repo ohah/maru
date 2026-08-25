@@ -148,6 +148,9 @@ pub const ItemId = enum(u64) {
     /// 슬롯 index로 되짚으므로, 항목만 늘리고 id를 빠뜨리면 인덱스가 밀려 "누른 것과 실행된 것"이 갈린다.
     /// 클릭이 나중에 붙어도 이 이유는 그대로다.
     resource = 6,
+    /// 앱 전역 workspace checkpoint가 연속 실패 중일 때 모든 일반 창에 남는 비모달 경고.
+    /// 우측 배열의 첫 항목으로 조립해 좁은 창에서도 가장 오래 보존한다.
+    workspace_checkpoint_failure = 11,
 };
 
 /// **우측 묶음에 실릴 수 있는 항목 전부** — `ItemId`에서 좌측 전용을 뺀 것.

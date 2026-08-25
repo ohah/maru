@@ -110,6 +110,7 @@ pub fn toggleFilePanelDockSide(self: *AppSession) void {
     self.last_resize_size = null;
     self.file_tree_rows_dirty = true;
     self.metal_dirty = true;
+    self.workspaceChanged(.dock);
 }
 
 pub fn fileTreeMutationTarget(row: file_tree.Row) ?file_tree_mutation.Target {
@@ -653,6 +654,7 @@ pub fn updateFileTree(self: *AppSession) !void {
                 }
                 result.validated_dir = null; // first scan worker now owns the descriptor capability.
                 commitFileTreeCandidate(self, &candidate, &candidate_rows);
+                if (!pending.auto) self.workspaceChanged(.explorer_roots);
                 // **자동 전환이 커밋되면 그 cwd로 한 번 더 reveal한다.** 전환은 비동기라 요청 시점엔 새 root가
                 // 없었고, 그때의 reveal은 거절됐다. 여기서 재시도하지 않으면 `~/repo/src/deep`에서 `cd` 했을 때
                 // 트리가 `repo`에 접힌 채로 멈춘다. **one-shot이라 루프가 되지 않는다** — 새 root가 realpath로
@@ -1216,6 +1218,7 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
         self.last_resize_size = null;
     }
     self.metal_dirty = true;
+    if (opened.created) self.workspaceChanged(.persisted_surface);
     return .opened;
 }
 
@@ -1570,6 +1573,7 @@ pub fn closeFilePanelSurfaceNow(self: *AppSession, surface_id: u64) bool {
     }
     self.file_tree_rows_dirty = true;
     self.metal_dirty = true;
+    self.workspaceChanged(.persisted_surface);
     return true;
 }
 
@@ -1789,6 +1793,8 @@ pub fn restoredPaneHasPath(self: *AppSession, pane: *Pane, path: []const u8) boo
 
 pub fn activateFilePanelDockControl(self: *AppSession) void {
     const action = filePanelDockControlAction(self) orelse return;
+    const old_presented = self.dock.presented;
+    const old_collapsed = self.dock.collapsed;
     // A collapsed right dock has no consumer for archive work.  Withdraw the current
     // generation before changing geometry so reopening can request a fresh snapshot.
     if (action == .collapse and self.dock.view == .agent_sessions) agent_dock.cancelAgentSessionArchive(self);
@@ -1807,6 +1813,8 @@ pub fn activateFilePanelDockControl(self: *AppSession) void {
     pane_ops.recomputeActivePaneRect(self);
     self.last_resize_size = null;
     self.metal_dirty = true;
+    if (old_presented != self.dock.presented or old_collapsed != self.dock.collapsed)
+        self.workspaceChanged(.dock);
 }
 
 pub fn reportFileTreeRootOutcome(self: *AppSession, outcome: FileTreeRootOutcome, message: ?maru.i18n.Key) void {
@@ -2861,6 +2869,7 @@ pub fn setFilePanelMode(self: *AppSession, entry: *dock_panel.Entry, mode: dock_
     entry.mode = mode;
     self.file_panel_mode_pending = entry.surface_id;
     self.file_tree_rows_dirty = true;
+    self.workspaceChanged(.persisted_surface);
 }
 
 pub fn updateFileTreeMutations(self: *AppSession) void {
@@ -3376,6 +3385,7 @@ pub fn removeFileTreeRoot(self: *AppSession, path: []const u8) void {
     reportFileTreeRootOutcome(self, .committed_remove, null);
     self.file_tree_scroll.reset();
     self.metal_dirty = true;
+    self.workspaceChanged(.explorer_roots);
 }
 
 /// surface_id로 파일 entry를 찾는다(창 전체).

@@ -3657,6 +3657,8 @@ final class TerminalSurface {
     var window: NSWindow?
     var appSession: OpaquePointer?
     var metalRenderer: OpaquePointer?
+    // construction/restore가 성공해 app-global checkpoint inventory에 들어간 normal Window인가.
+    var workspaceCheckpointPublished = false
 
     // 데스크톱 알림 클릭 라우팅용 창(세션) 식별 토큰. surface.id는 M0a 이후 앱 전역으로 유일하지만(창 간
     // 중복 없음 — docs/window-surface-mobility.md §8), 알림 userInfo에 (token, surface_id) 쌍을 실어 token으로
@@ -3828,6 +3830,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // restore 중 어느 saved Window라도 apply하지 못했으면 이번 실행의 default/fallback 창으로 마지막 완전
     // checkpoint를 덮지 않는다. 사용자가 새로 저장할 명시 UX가 생기기 전에는 데이터 보존을 우선한다.
     private var workspaceRestoreIncomplete = false
+    private let workspaceCheckpointWriter = DispatchQueue(label: "dev.maru.workspace-checkpoint", qos: .utility)
+    private var workspaceCheckpointArmed = false
+    private var workspaceCheckpointFailureNotice: UInt32 = UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE)
+    private var workspaceCheckpointActiveWindow: ObjectIdentifier?
+    private var workspaceCheckpointFrames: [ObjectIdentifier: NSRect] = [:]
+    private var workspaceCheckpointMoveTasks: [ObjectIdentifier: DispatchWorkItem] = [:]
     // FP10c1: 앱 전역 Zig mermaid_queue action을 실행할 유일한 native adapter. Mermaid fence admission과
     // frame-tick pump는 FP10c2의 pending-work/perf gate 전까지 배선하지 않는다.
     private let mermaidRenderCoordinator = MermaidRenderCoordinator()
@@ -4414,6 +4422,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             agentSessionArchiveSmokeDriver = AgentSessionArchiveSmokeDriver(scenario: scenario)
         }
+        let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0
+        armWorkspaceCheckpoint(initialDirty: checkpointInitialDirty)
         startFrameLoopTicks()
 
         // 세션 컨트롤 플레인 라이브 서버(A2b): 앱 전역 소켓 + accept 스레드를 띄운다. 이 뒤로 tickAppSession이 매
@@ -4561,7 +4571,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         })
         // workspace를 '정상 종료'에 저장한다 — applicationWillTerminate는 크래시에선 안 불리므로(자동 충족),
         // 마지막 정상 세션만 디스크에 남는다(다음 실행이 그걸 복원, R4). shutdown '전에'(세션이 아직 살아 있을 때).
+        // C3 background C2 writer와 구 Quit writer가 같은 canonical leaf를 동시에 교체하지 않게 먼저
+        // serial queue를 drain한다. worker는 main completion을 기다리지 않으므로 main-thread sync와 deadlock하지 않는다.
+        workspaceCheckpointWriter.sync {}
         terminationTiming.record(.saveWorkspace, elapsedNs: measureElapsedNs { saveWorkspace() })
+        workspaceCheckpointArmed = false
         // 종료 중에는 추가 tick을 돌리지 않는다. tick은 session_ended에서 NSApp.terminate를
         // 부르므로, 여기서 다시 tick하면 재진입 terminate가 된다. 마지막 counter는
         // shutdownAppSession의 close()가 summary에 담는다.
@@ -4650,12 +4664,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if metalTerminalView?.inLiveResize == true { return }
             resizeAppSessionFromWindow()
         }
+        // green-button zoom·프로그램적 resize는 live-resize 종료 콜백이 없을 수 있다. 드래그 중만 보류하고
+        // 나머지는 actual frame dedup 경계로 즉시 기록한다.
+        if surface.view?.inLiveResize != true, let window = notification.object as? NSWindow {
+            markWorkspaceCheckpointFrameIfChanged(window)
+        }
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
         // 창 포커스 획득 → 그 창 surface에 focus reporting(DECSET 1004 켜졌으면 CSI I). 멀티 창에서 그 창만(notification.object).
-        guard let surface = surfaceForWindow(notification.object as? NSWindow), let session = surface.appSession else { return }
+        guard let window = notification.object as? NSWindow,
+              let surface = surfaceForWindow(window), let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 1)
+        if workspaceCheckpointArmed && surface.workspaceCheckpointPublished {
+            let identity = ObjectIdentifier(window)
+            if workspaceCheckpointActiveWindow != identity {
+                workspaceCheckpointActiveWindow = identity
+                maru_macos_workspace_checkpoint_mark_active_window()
+            }
+        }
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -4738,6 +4765,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             metalTerminalView?.updateDrawableSize()
             resizeAppSessionFromWindow()
         }
+        if let window = notification.object as? NSWindow { markWorkspaceCheckpointFrameIfChanged(window) }
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard workspaceCheckpointArmed, let window = notification.object as? NSWindow,
+              surfaceForWindow(window) != nil else { return }
+        let identity = ObjectIdentifier(window)
+        workspaceCheckpointMoveTasks[identity]?.cancel()
+        let task = DispatchWorkItem { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.workspaceCheckpointMoveTasks.removeValue(forKey: identity)
+            self.markWorkspaceCheckpointFrameIfChanged(window)
+        }
+        workspaceCheckpointMoveTasks[identity] = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: task)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        if let window = notification.object as? NSWindow { markWorkspaceCheckpointFrameIfChanged(window) }
     }
 
     private func validateZigBoundary() -> Bool {
@@ -5458,6 +5504,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             focusTerminalView(window)
             setupMetalRenderer()
             guard createSessionForActiveSurface(smokeMode: false, deferInitialSurface: ws != nil) else { return }
+            if workspaceCheckpointFailureNotice != UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE),
+               let session = surface.appSession {
+                maru_macos_app_session_set_workspace_checkpoint_failure(session, workspaceCheckpointFailureNotice)
+            }
             if let ws {
                 // 복원 적용 실패인데 default 셸 창을 성공으로 등록하면 persistent runtime 단절을 숨기고 다음 Quit에서
                 // 원래 checkpoint까지 덮는다. 실패 창은 즉시 teardown하고 caller가 incomplete로 기록한다.
@@ -5481,6 +5531,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.window?.close()
             surface.window = nil
             return nil
+        }
+        if workspaceCheckpointArmed, let session = surface.appSession {
+            surface.workspaceCheckpointPublished = true
+            maru_macos_app_session_enable_workspace_checkpoint_mutations(session)
+            if let window = surface.window {
+                workspaceCheckpointFrames[ObjectIdentifier(window)] = window.frame
+                if window.isKeyWindow { workspaceCheckpointActiveWindow = ObjectIdentifier(window) }
+            }
+            maru_macos_workspace_checkpoint_mark_window_inventory()
         }
         return surface
     }
@@ -5590,6 +5649,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 저장 파일이 이 경로로 떨어지는데, 이를 '손상' 모달로 알리면 업데이트 후 첫 실행마다 키를 막는 중앙
             // 팝업이 떠 UX가 나쁘다(복원 불가는 사용자 잘못이 아니다). 저장본은 종료 시 saveWorkspace가 새 포맷으로
             // 덮어쓸 때까지 보존된다(self-heal). 빈 workspace(count==0)와 동일하게 조용히 기본 창으로 시작한다.
+            workspaceRestoreIncomplete = true
             return true
         }
         guard count > 0 else { return true } // 0=빈 workspace → 기본 단일 창(알림 없음)
@@ -5679,10 +5739,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 한 일반 창의 세션·렌더러를 닫고(요약은 surface.latestFrameSummary에 남긴다) 컬렉션에서 뺀다. NSWindow는
     /// 건드리지 않는다 — windowWillClose는 이미 닫히는 중이고, 그 외 경로(tick 셸 종료·팩토리 실패)는 호출자가
     /// delegate를 끊고 window를 닫는다(재진입 없이). 앱 quit에선 shutdownAppSession이 남은 창마다 순회 호출.
-    private func teardownWindowSurface(_ surface: TerminalSurface, preserveWebPanelsForSummary: Bool = false) {
+    private func teardownWindowSurface(
+        _ surface: TerminalSurface,
+        preserveWebPanelsForSummary: Bool = false,
+        checkpointRemovalAlreadyCovered: Bool = false
+    ) {
+        let removedPublishedWindow = workspaceCheckpointArmed && surface.workspaceCheckpointPublished && !checkpointRemovalAlreadyCovered
+        let removedWindowIdentity = surface.window.map(ObjectIdentifier.init)
         if !preserveWebPanelsForSummary { teardownWebPanels(surface) }
         surface.fileTreeWatcher.stop()
         if let session = surface.appSession {
+            // Window removal의 app-global commit 하나만 dirty로 센다. session close 내부 teardown은
+            // manifest에서 사라질 모델의 정리일 뿐 별도 사용자 mutation이 아니다.
+            maru_macos_app_session_disable_workspace_checkpoint_mutations(session)
             var summary = MaruAppHostFrameSummary()
             let status = maru_macos_app_session_close(session, &summary)
             surface.appSessionStatus = status
@@ -5695,6 +5764,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             surface.metalRenderer = nil
         }
         windows.removeAll { $0 === surface }
+        if let identity = removedWindowIdentity {
+            workspaceCheckpointFrames.removeValue(forKey: identity)
+            workspaceCheckpointMoveTasks.removeValue(forKey: identity)?.cancel()
+        }
+        if removedPublishedWindow { maru_macos_workspace_checkpoint_mark_window_inventory() }
     }
 
     /// 창 전체 teardown은 다음 web-surface transition tick이 없으므로, 살아 있는 panel을 여기서 명시적으로 종료한다.
@@ -5723,7 +5797,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// 셸 종료/fault로 한 창을 닫는다(tick 경로). 마지막 일반 창이면 앱 종료(정리·요약은 applicationWillTerminate —
     /// 원래 단일 창 동작 보존), 아니면 그 창만 정리하고 닫는다(앱은 계속).
-    private func closeWindowOrQuit(_ surface: TerminalSurface) {
+    private func closeWindowOrQuit(_ surface: TerminalSurface, checkpointRemovalAlreadyCovered: Bool = false) {
         // tick 결과 판정과 실제 teardown 사이에도 predicate를 다시 읽는다. 현재 source가 보호 대상이면 다중 창 여부와
         // 무관하게 이 surface 자체를 없애면 안 된다(다른 protected quick을 찾는 앱-전역 검사만으로는 부족).
         if holdProtectedSurfaceAfterTickFailure(surface) { return }
@@ -5731,7 +5805,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if blockGlobalTerminationForProtectedFilePanels() {
                 // 종료된 마지막 일반 세션만 정리하고 protected quick session은 살린다. windows가 비어도 아래 tick은
                 // quick을 계속 구동하며, quick이 해소·종료된 뒤에만 앱 종료를 다시 시도한다.
-                teardownWindowSurface(surface)
+                teardownWindowSurface(surface, checkpointRemovalAlreadyCovered: checkpointRemovalAlreadyCovered)
                 surface.window?.delegate = nil
                 surface.window?.close()
                 surface.window = nil
@@ -5746,7 +5820,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             smokeTimer = nil
             NSApp.terminate(nil)
         } else {
-            teardownWindowSurface(surface)
+            teardownWindowSurface(surface, checkpointRemovalAlreadyCovered: checkpointRemovalAlreadyCovered)
             surface.window?.delegate = nil // close가 windowWillClose를 다시 부르지 않게
             surface.window?.close()
             surface.window = nil
@@ -6499,6 +6573,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainMenuDirty() // 커맨드 카탈로그가 재빌드됐으면(rebind/unbind·reload·reset 확정) 메뉴바 keyEquivalent 다시 빌드.
             drainFilePanelZoom() // 폰트 크기(⌘+/−·config)가 바뀌었으면 열린 파일 패널 콘텐츠(편집기·프리뷰·HTML/PDF)를 같은 배율로 재적용(§2.3).
             drainQuitDecision(summary) // Cmd+Q 종료 확인 모달이 확정/취소됐으면 NSApp.reply로 종료를 진행/취소한다.
+            driveWorkspaceCheckpoint()
         }
         return status
     }
@@ -8172,8 +8247,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         dst.window?.makeKeyAndOrderFront(nil)
         withSurface(dst) { _ = renderTick() } // 이동된 워크스페이스 즉시 repaint(다음 timer tick 안 기다림)
         if result.source_window_closed == 1 {
-            closeWindowOrQuit(src)
+            closeWindowOrQuit(src, checkpointRemovalAlreadyCovered: true)
         }
+        maru_macos_workspace_checkpoint_mark_cross_window_commit()
     }
 
     /// "Merge Window Into ▸ <창>" 선택 — 키(소스) 창의 모든 워크스페이스를 대상 창으로 병합한다.
@@ -10610,25 +10686,149 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         try? fm.copyItem(at: url, to: backup)
     }
 
-    private func saveWorkspace() {
-        guard !smokeMode, !windows.isEmpty else { return }
+    private func armWorkspaceCheckpoint(initialDirty: Bool) {
+        guard !workspaceCheckpointArmed, !smokeMode, !workspaceRestoreIncomplete else { return }
+        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
+        // staged Window가 하나라도 남아 있으면 아무 세션도 publish하지 않는다. 일부만 enable한 뒤
+        // arm 실패/조기 return하면 배경 inventory와 mutation forwarding의 transaction 경계가 갈린다.
+        guard windows.allSatisfy({ $0.appSession != nil }) else { return }
+        guard maru_macos_workspace_checkpoint_arm(initialDirty ? 1 : 0) == Self.statusOK else { return }
+        workspaceCheckpointArmed = true
+        for surface in windows {
+            guard let session = surface.appSession else { preconditionFailure("preflighted session disappeared") }
+            surface.workspaceCheckpointPublished = true
+            maru_macos_app_session_enable_workspace_checkpoint_mutations(session)
+        }
+        if let key = windows.first(where: { $0.window?.isKeyWindow == true })?.window {
+            workspaceCheckpointActiveWindow = ObjectIdentifier(key)
+        }
+        workspaceCheckpointFrames = Dictionary(uniqueKeysWithValues: windows.compactMap { surface in
+            surface.window.map { (ObjectIdentifier($0), $0.frame) }
+        })
+    }
+
+    private func markWorkspaceCheckpointFrameIfChanged(_ window: NSWindow) {
+        guard workspaceCheckpointArmed,
+              windows.contains(where: { $0.window === window && $0.workspaceCheckpointPublished }),
+              !window.styleMask.contains(.fullScreen) else { return }
+        let identity = ObjectIdentifier(window)
+        guard workspaceCheckpointFrames[identity] != window.frame else { return }
+        workspaceCheckpointFrames[identity] = window.frame
+        maru_macos_workspace_checkpoint_mark_window_frame()
+    }
+
+    private func driveWorkspaceCheckpoint() {
+        guard workspaceCheckpointArmed else { return }
+        var effect = MaruWorkspaceCheckpointEffect()
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard maru_macos_workspace_checkpoint_tick(now, &effect) == Self.statusOK else {
+            setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_CAPTURE_FAILED))
+            return
+        }
+        handleWorkspaceCheckpointEffect(effect, snapshot: nil)
+    }
+
+    private func setWorkspaceCheckpointFailure(_ failure: UInt32) {
+        guard workspaceCheckpointFailureNotice != failure else { return }
+        workspaceCheckpointFailureNotice = failure
+        for surface in windows {
+            if let session = surface.appSession {
+                maru_macos_app_session_set_workspace_checkpoint_failure(session, failure)
+            }
+        }
+    }
+
+    private func handleWorkspaceCheckpointEffect(_ effect: MaruWorkspaceCheckpointEffect, snapshot: Data?) {
+        if effect.notice != UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE) {
+            setWorkspaceCheckpointFailure(effect.notice)
+        }
+        switch effect.kind {
+        case UInt32(MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE):
+            let captured = captureWorkspaceSnapshot(useTerminationKeyWindow: false, publishedOnly: true)
+            var next = MaruWorkspaceCheckpointEffect()
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard maru_macos_workspace_checkpoint_capture_completed(
+                effect.generation,
+                captured == nil ? 0 : 1,
+                now,
+                &next
+            ) == Self.statusOK else {
+                setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_CAPTURE_FAILED))
+                return
+            }
+            handleWorkspaceCheckpointEffect(next, snapshot: captured)
+        case UInt32(MARU_WORKSPACE_CHECKPOINT_EFFECT_WRITE):
+            guard let snapshot, let workspaceURL = workspaceFileURL else {
+                var next = MaruWorkspaceCheckpointEffect()
+                guard maru_macos_workspace_checkpoint_write_completed(
+                    effect.generation,
+                    0,
+                    DispatchTime.now().uptimeNanoseconds,
+                    &next
+                ) == Self.statusOK else {
+                    setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_WRITE_FAILED))
+                    return
+                }
+                handleWorkspaceCheckpointEffect(next, snapshot: nil)
+                return
+            }
+            let parent = Data(workspaceURL.deletingLastPathComponent().path.utf8)
+            let generation = effect.generation
+            workspaceCheckpointWriter.async { [weak self] in
+                let result = parent.withUnsafeBytes { parentRaw in
+                    snapshot.withUnsafeBytes { snapshotRaw in
+                        maru_macos_workspace_checkpoint_publish(
+                            parentRaw.bindMemory(to: UInt8.self).baseAddress,
+                            parentRaw.count,
+                            snapshotRaw.bindMemory(to: UInt8.self).baseAddress,
+                            snapshotRaw.count
+                        )
+                    }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    var next = MaruWorkspaceCheckpointEffect()
+                    let committed = result == UInt32(MARU_WORKSPACE_CHECKPOINT_PUBLISH_COMMITTED)
+                    guard maru_macos_workspace_checkpoint_write_completed(
+                        generation,
+                        committed ? 1 : 0,
+                        DispatchTime.now().uptimeNanoseconds,
+                        &next
+                    ) == Self.statusOK else {
+                        self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_WRITE_FAILED))
+                        return
+                    }
+                    if committed {
+                        self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE))
+                    }
+                    self.handleWorkspaceCheckpointEffect(next, snapshot: nil)
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    private func captureWorkspaceSnapshot(useTerminationKeyWindow: Bool, publishedOnly: Bool) -> Data? {
+        let checkpointWindows = publishedOnly ? windows.filter(\.workspaceCheckpointPublished) : windows
+        guard !smokeMode, !checkpointWindows.isEmpty else { return nil }
         // 복원을 끈 사용자(MARU_NO_WORKSPACE_RESTORE)는 저장도 막는다 — 안 그러면 복원 안 한 기본 단일 창이 종료 시
         // 저장 파일을 덮어써 사용자가 보존하려던 멀티 창 레이아웃이 사라진다(데이터 손실). 플래그=persistence 자체 off.
-        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return }
+        guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return nil }
         var blocks = ""
         var blockCount: Int64 = 0
         // 저장 시점 key(활성) 창을 active-window=1 마커로 기록한다 — 재시작 복원이 그 창을 다시 focus(M3e).
         // 최대 하나의 창만 isKeyWindow라 마커도 최대 하나. 옵션-키라 비활성 창은 키가 생략된다(옛 파일 flat 동일).
         // 종료 경로는 정리 전에 창을 숨겨(체감 지연 제거) 이 시점 `isKeyWindow`가 이미 전부 false이므로, 숨기기
         // 직전에 붙잡아 둔 창을 우선 본다(판정 규칙과 그 이유는 `TerminationWindowPolicy`).
-        let capturedKeyIndex = terminationKeyWindow.flatMap { captured in
-            windows.firstIndex(where: { $0.window === captured })
+        let capturedKeyIndex = (useTerminationKeyWindow ? terminationKeyWindow : nil).flatMap { captured in
+            checkpointWindows.firstIndex(where: { $0.window === captured })
         }
-        let currentKeyIndex = windows.firstIndex(where: { $0.window?.isKeyWindow == true })
-        for (windowIndex, surface) in windows.enumerated() {
+        let currentKeyIndex = checkpointWindows.firstIndex(where: { $0.window?.isKeyWindow == true })
+        for (windowIndex, surface) in checkpointWindows.enumerated() {
             // workspace.v1은 모든 normal Window가 한 atomic snapshot이다. 한 창이라도 캡처할 수 없으면 성공한 창만으로
             // 기존 완전본을 덮어쓰지 않는다(다음 실행에서 실패 창이 영구 삭제되는 partial checkpoint 방지).
-            guard let session = surface.appSession else { return }
+            guard let session = surface.appSession else { return nil }
             let isActive: UInt32 = TerminationWindowPolicy.isActive(
                 index: windowIndex,
                 capturedKeyIndex: capturedKeyIndex,
@@ -10659,11 +10859,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             var ptr: UnsafePointer<UInt8>? = nil
             var len: size_t = 0
             guard maru_macos_app_session_serialize_workspace(session, &ptr, &len, isActive, hasFrame, fx, fy, fw, fh) == Self.statusOK,
-                  let bytes = ptr, len > 0 else { return } // 하나라도 실패하면 이전 전체 checkpoint 보존
+                  let bytes = ptr, len > 0 else { return nil } // 하나라도 실패하면 이전 전체 checkpoint 보존
             blocks += String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
             blockCount += 1
         }
-        guard !blocks.isEmpty, let url = workspaceFileURL else { return }
+        guard !blocks.isEmpty else { return nil }
         let snapshot = MARU_WORKSPACE_HEADER + "\n" + blocks
         // R2a: per-window writer만으로는 창을 가로지른 runtime-handle 중복을 볼 수 없다. 실제 publish할 전체 문자열을
         // Zig parser/semantic validator에 다시 넣어, 어떤 파일 write/backup보다 먼저 global owner uniqueness를 확인한다.
@@ -10672,12 +10872,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let validatedWindowCount = snapshotBytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
         }
-        guard validatedWindowCount == blockCount else { return }
+        guard validatedWindowCount == blockCount else { return nil }
+        return Data(snapshot.utf8)
+    }
+
+    private func saveWorkspace() {
+        guard let snapshot = captureWorkspaceSnapshot(useTerminationKeyWindow: true, publishedOnly: false), let url = workspaceFileURL else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         // 이번 실행의 복원이 무언가를 버렸으면(도크 entry·explorer root·§7 묘비로 잃은 runtime handle) 덮어쓰기 전에
         // 마지막 완전본을 .bak으로 보존한다. 저장 자체는 막지 않는다(위 함수 주석의 자기영속 루프).
         if workspaceRestoreIncomplete { backupWorkspaceCheckpoint(url) }
-        try? snapshot.data(using: .utf8)?.write(to: url, options: .atomic)
+        try? snapshot.write(to: url, options: .atomic)
     }
 
     private func shutdownAppSession(preserveWebPanelsFor summarySurface: TerminalSurface? = nil) {

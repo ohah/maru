@@ -114,12 +114,14 @@ pub fn setDockToggleHovered(self: *AppSession, hovered: bool) void {
 /// `setDockView`가 조기 반환하므로 그쪽 resize 경로도 안 탄다. 기존 opener
 /// (`activateFilePanelDockControl`)가 하는 후속과 같은 것을 한다.
 pub fn openDockTo(self: *AppSession, view: dock_panel.View) void {
+    const persisted_changed = !self.dock.presented or self.dock.collapsed or self.dock.view != view;
     self.dock.presented = true;
     self.dock.collapsed = false;
     enterDockView(self, view);
     for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
     pane_ops.recomputeActivePaneRect(self);
     self.last_resize_size = null;
+    if (persisted_changed) self.workspaceChanged(.dock);
 }
 
 /// 탐색기 스크롤바를 **공용 paint 경로**로 그린다(SV2b). 발행된 tree를 `ui_paint`가 quad op으로
@@ -502,6 +504,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
         self.last_resize_size = null;
     }
     self.metal_dirty = true;
+    self.workspaceChanged(.dock);
 }
 
 /// A cold app starts with its dock hidden.  The fixture must enter through the same titlebar
@@ -616,6 +619,7 @@ pub fn setDockSizeFromPointer(self: *AppSession, x_px: f64, y_px: f64) void {
     pane_ops.recomputeActivePaneRect(self);
     self.last_resize_size = null;
     self.metal_dirty = true;
+    self.workspaceChanged(.dock);
 }
 
 /// 소스 컨트롤 쪽 setter. 탐색기의 `setFileTreeScrollOffsetPx`와 같은 계약이다 — 상한은 스크롤바

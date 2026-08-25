@@ -216,10 +216,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
+// 171: P4 C3 adds the app-global workspace checkpoint effect, mutation forwarding, secure
+// background publication, and persistent status-bar failure projection ABI.
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 170;
+pub const abi_version: u32 = 171;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3054,6 +3056,13 @@ pub const ScmPending = struct {
 pub const notice_message_cap: usize = 512;
 
 pub const AppSession = struct {
+    /// P4 C3b manifest-visible transaction의 성공 꼬리에서만 호출한다. 제품 owner가 아직 arm되지 않은 restore/build
+    /// 단계는 의도적으로 no-op이며, overflow는 owner의 sticky integrity failure로 남아 후속 publish를 막는다.
+    pub fn workspaceChanged(self: *AppSession, kind: maru.app.workspace_checkpoint_product.ChangeKind) void {
+        if (!self.workspace_checkpoint_mutations_enabled) return;
+        app_runtime.workspace_checkpoint.markChanged(kind) catch {};
+    }
+
     /// 본문 분리: app_session/file_panel.zig. ABI가 직접 부르므로 진입만 남긴다.
     pub fn beginFilePanelDocument(self: *AppSession, surface_id: u64, document_id: u64) FilePanelWriteError!u64 {
         return file_panel_ops.beginFilePanelDocument(self, surface_id, document_id);
@@ -3643,6 +3652,8 @@ pub const AppSession = struct {
         target.app_window.tabs = target.surface_ptrs.items;
         workspace_ops.advanceSessionHostWindowGraph(target);
         term_ops.finishInitialSurface(target);
+        // exact pane-slot이 live runtime으로 교체되고 tombstone 소유권까지 끝난 뒤의 제품 commit.
+        target.workspaceChanged(.runtime_binding);
         if (location.tab_index == target.app_window.active_tab) pane_ops.recomputeActivePaneRect(target);
         sidebar_ops.rebuildSidebar(target) catch {};
         target.metal_dirty = true;
@@ -4442,6 +4453,11 @@ pub const AppSession = struct {
     status_bar_generation: u64 = 0,
     /// 지금 포인터가 얹힌 항목. 없으면 null. hover 배경 quad와 클릭 대상이 이 하나를 공유한다.
     status_bar_hovered: ?chrome.components.status_bar.ItemId = null,
+    /// 앱 전역 checkpoint 연속 실패 상태. host가 모든 일반 창에 같은 값을 주입한다.
+    /// 0=정상, 1=capture, 2=write. 성공 commit 전까지 유지해 toast처럼 사라지지 않는다.
+    workspace_checkpoint_failure: u32 = 0,
+    /// host가 이 세션을 normal Window inventory에 성공 publish한 뒤에만 true다.
+    workspace_checkpoint_mutations_enabled: bool = false,
     // 직전에 그린 활성 surface의 view_offset(스크롤백 탐색 위치). synchronized output(2026) hold가 스크롤
     // 리페인트를 막지 않게 하고(shouldProjectFrame), 스크롤이 reader 위임이라 metal_dirty가 누락돼도 view_offset
     // 변화만으로 투영을 강제하는 기준이다. 투영 경로마다 그 프레임이 실제로 그린 render-time offset으로 갱신(빌드
@@ -6475,6 +6491,7 @@ pub const AppSession = struct {
         self.app_window.tabs = self.surface_ptrs.items;
         pane_ops.recomputeActivePaneRect(self);
         self.metal_dirty = true;
+        self.workspaceChanged(.runtime_binding);
     }
 
     /// **새 Term을 어느 backend로 spawn할지**(P3-e3). 원격 backend가 세워져 있으면(keep-alive+연결 성공) 그것, 아니면
@@ -17851,6 +17868,22 @@ pub const AppSession = struct {
         defer for (right_frames[0..rn]) |*maybe| {
             if (maybe.*) |*dl| dl.deinit(self.allocator);
         };
+        // checkpoint 실패는 데이터 보존 경고라 우측 최우선이다. 성공 commit 전까지 필드가 유지되므로
+        // 프레임이 바뀌어도 사라지지 않는 비모달 상태다.
+        const checkpoint_failure_text: ?[]const u8 = switch (self.workspace_checkpoint_failure) {
+            1 => maru.i18n.t(.ws_checkpoint_capture_failed),
+            2 => maru.i18n.t(.ws_checkpoint_write_failed),
+            else => null,
+        };
+        if (checkpoint_failure_text) |text| {
+            const danger: terminal.Color = .{ .rgb = self.appearance.theme.palette[1] orelse self.appearance.theme.accent };
+            if (self.buildStatusBarItem(null, text, bar_cols, danger, danger, .plain)) |dl| {
+                right_frames[rn] = dl;
+                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                right_ids[rn] = .workspace_checkpoint_failure;
+                rn += 1;
+            }
+        }
         // 우측 배열은 **앞이 더 오른쪽**이다(compute가 오른쪽 끝에서 왼쪽으로 쌓는다). 시급한 순서로 놓는다:
         // blocked(사람을 기다림) → running(알아서 굴러감) → 알림(누적 카운터).
         //
@@ -18046,6 +18079,15 @@ pub const AppSession = struct {
         }
     }
 
+    pub fn setWorkspaceCheckpointFailure(self: *AppSession, failure: u32) void {
+        const normalized: u32 = if (failure <= 2) failure else 2;
+        if (self.workspace_checkpoint_failure == normalized) return;
+        self.workspace_checkpoint_failure = normalized;
+        // chrome_dirty의 부분 투영은 sidebar 전용이다. status bar draw/hit tree를 교체하려면
+        // 전체 Metal frame을 다시 조립해야 하므로 metal_dirty를 세운다.
+        self.metal_dirty = true;
+    }
+
     /// 항목 하나를 DrawList로. 텍스트 상한은 바 폭의 1/3 — 한 항목이 바를 독차지하지 않게 하고 우측 자리를
     /// 남긴다(S3d 이후). 실패는 null(그 항목만 빠지고 나머지는 그대로 선다).
     /// 항목 텍스트의 성격. **기본값을 두지 않는다** — 새 항목을 더할 때 잘리는 방식을 고르게 강제한다.
@@ -18169,7 +18211,7 @@ pub const AppSession = struct {
             .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
             // 편집기 넷은 **표시 전용**이다. 열 대상이 없다 — 읽기 전용을 눌러 편집을 켜는 길은 N2가
             // 만들고(그 전에 누르면 아무 일도 안 일어난다), 저하·줄바꿈은 상태 진술이지 컨트롤이 아니다.
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor => {},
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure => {},
         }
         self.metal_dirty = true;
     }
@@ -18183,7 +18225,7 @@ pub const AppSession = struct {
             .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
             // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
             // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor => false,
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure => false,
         };
     }
 
@@ -31295,6 +31337,51 @@ test "setWebNavState: 값이 바뀔 때만 metal_dirty (링크 이동 주소창 
     session.metal_dirty = false;
     web_ops.setWebNavState(&session, 7, false, false, "https://b/");
     try std.testing.expect(session.metal_dirty);
+}
+
+test "P4 C3b browser URL만 persisted mutation이고 history availability는 volatile이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const saved_checkpoint = app_runtime.workspace_checkpoint;
+    app_runtime.workspace_checkpoint = .{};
+    defer app_runtime.workspace_checkpoint = saved_checkpoint;
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const surface_id = try pane_ops.appendWebTermInActivePane(session, .browser);
+    session.workspace_checkpoint_mutations_enabled = true;
+    try app_runtime.workspace_checkpoint.arm(.{
+        .debounce_ns = 500_000_000,
+        .retry_initial_ns = 1_000_000_000,
+        .retry_max_ns = 30_000_000_000,
+    }, false);
+
+    web_ops.setWebNavState(session, surface_id, false, false, "https://example.test/a");
+    try std.testing.expectEqual(@as(u64, 1), app_runtime.workspace_checkpoint.change_revision);
+    web_ops.setWebNavState(session, surface_id, true, false, "https://example.test/a");
+    try std.testing.expectEqual(@as(u64, 1), app_runtime.workspace_checkpoint.change_revision);
+    web_ops.setWebNavState(session, surface_id, true, false, "https://example.test/b");
+    try std.testing.expectEqual(@as(u64, 2), app_runtime.workspace_checkpoint.change_revision);
+}
+
+test "P4 C3b staged Window construction mutation은 publish enable 전 revision을 만들지 않는다" {
+    const saved_checkpoint = app_runtime.workspace_checkpoint;
+    app_runtime.workspace_checkpoint = .{};
+    defer app_runtime.workspace_checkpoint = saved_checkpoint;
+    try app_runtime.workspace_checkpoint.arm(.{
+        .debounce_ns = 500_000_000,
+        .retry_initial_ns = 1_000_000_000,
+        .retry_max_ns = 30_000_000_000,
+    }, false);
+
+    var session: AppSession = undefined;
+    session.workspace_checkpoint_mutations_enabled = false;
+    session.workspaceChanged(.topology);
+    try std.testing.expectEqual(@as(u64, 0), app_runtime.workspace_checkpoint.change_revision);
+    session.workspace_checkpoint_mutations_enabled = true;
+    session.workspaceChanged(.topology);
+    try std.testing.expectEqual(@as(u64, 1), app_runtime.workspace_checkpoint.change_revision);
 }
 
 test "setHoveredNavButton: surface_id·버튼이 바뀔 때만 metal_dirty (dedup, 7e-4 헤드리스)" {
@@ -54401,6 +54488,48 @@ test "SB1: status-bar.show=false면 바가 사라지고 작업영역이 그만�
     try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx());
     try std.testing.expectEqual(@as(usize, 0), session.statusBarTree().entries.len); // 안 보이면 눌리지도 않는다
     try std.testing.expectEqual(term_h_on + bar_h, session.termRect().h); // 먹었던 높이가 그대로 돌아온다
+}
+
+test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 commit 성공 신호로 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 사용자 config와 무관하게 이 테스트가 소유하는 status-bar 전제를 고정한다.
+    session.loaded_config.config.status_bar.show = true;
+    _ = try session.resize(1200, 700, 1000);
+
+    session.setWorkspaceCheckpointFailure(2);
+    _ = try session.tick();
+    const failure_id = @intFromEnum(chrome.components.status_bar.ItemId.workspace_checkpoint_failure);
+    var seen = false;
+    for (session.statusBarTree().entries) |entry| if (entry.id == failure_id) {
+        seen = true;
+        break;
+    };
+    try std.testing.expect(seen);
+
+    // 별도 frame에서도 host가 상태를 다시 주입하지 않아도 유지된다.
+    session.chrome_dirty = true;
+    _ = try session.tick();
+    seen = false;
+    for (session.statusBarTree().entries) |entry| if (entry.id == failure_id) {
+        seen = true;
+        break;
+    };
+    try std.testing.expect(seen);
+
+    session.setWorkspaceCheckpointFailure(0);
+    _ = try session.tick();
+    for (session.statusBarTree().entries) |entry| try std.testing.expect(entry.id != failure_id);
 }
 
 // SB1: **quick terminal(chrome_minimal)에는 상태바가 서지 않는다.** 이 모드는 chrome을 의도적으로

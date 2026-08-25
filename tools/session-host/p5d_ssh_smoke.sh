@@ -193,11 +193,12 @@ for arg in "\$@"; do
 		*) echo "p5d: rejected attach argument" >&2; exit 64 ;;
 	esac
 done
-remote_xdg=\${XDG_CACHE_HOME:?}
+# registry 는 캐시가 아니라 전용 자리다 — 그 격리를 원격 CLI 까지 그대로 나른다.
+remote_root=\${MARU_SESSION_HOST_ROOT:?}
 exec '$SSH' -tt -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes \
 	-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
 	-i '$RUN_DIR/clientkey' -p '$PORT' '$USER_NAME@127.0.0.1' \
-	env 'HOME=$HOME_DIR' "XDG_CACHE_HOME=\$remote_xdg" 'PATH=$MIN_PATH' maru "\$@"
+	env 'HOME=$HOME_DIR' "MARU_SESSION_HOST_ROOT=\$remote_root" 'PATH=$MIN_PATH' maru "\$@"
 EOF
 chmod 700 "$WRAPPER"
 

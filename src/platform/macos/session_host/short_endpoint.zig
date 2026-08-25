@@ -21,6 +21,28 @@ pub fn userRootPathIn(buf: []u8, uid: posix.uid_t) error{NoSpaceLeft}![:0]u8 {
     return std.fmt.bufPrintZ(buf, "/tmp/maru-{d}", .{uid});
 }
 
+/// registry 를 다른 자리로 돌리는 **테스트 격리 전용** 변수. 제품에서는 아무도 안 쓴다.
+///
+/// **왜 전용 이름인가.** 예전에는 테스트가 `XDG_CACHE_HOME` 으로 이 격리를 했는데(host spawn·
+/// attach 게이트 전부), 제품 앱은 그것을 안 보고 `/tmp/maru-<uid>` 를 썼다 — 그래서 **게이트는
+/// 초록인데 제품에서는 CLI 가 앱이 띄운 host 를 한 번도 못 찾았다**. `XDG_CACHE_HOME` 을 그대로
+/// override 로 인정하면 그 변수를 실제로 설정해 둔 사용자에게서 같은 사고가 조건부로 되살아난다.
+/// 캐시는 캐시고, registry 는 registry다.
+pub const root_override_env = "MARU_SESSION_HOST_ROOT";
+
+/// 이 사용자의 **런타임 base**. manifest·lock·socket 이 함께 사는 자리이고, **캐시가 아니다**
+/// (계약 §10 — 캐시는 언제든 지워지는 데이터인데 manifest 는 지우는 순간 살아 있는 세션을 전부
+/// 잃게 만든다). 앱(host 를 띄우는 쪽)과 CLI(`runtime`·`attach`)가 **같은 이 함수**를 봐야
+/// 한다 — 갈리면 CLI 가 앱이 띄운 host 를 못 찾는다(실제로 그랬다).
+pub fn currentUserRootPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
+    if (std.c.getenv(root_override_env)) |value| {
+        const span = std.mem.span(value);
+        // 빈 값은 미설정과 같다(셸 `${VAR:-}` 관례) — 빈 경로로 registry 를 열면 무엇이든 될 수 있다.
+        if (span.len > 0) return std.fmt.bufPrintZ(buf, "{s}", .{span});
+    }
+    return userRootPathIn(buf, std.c.getuid());
+}
+
 pub fn socketDirPathIn(buf: []u8, uid: posix.uid_t) error{NoSpaceLeft}![:0]u8 {
     return std.fmt.bufPrintZ(buf, "/tmp/maru-{d}/sh", .{uid});
 }

@@ -163,7 +163,7 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     };
     resolved.deinit();
 
-    const observer = runProductAttach(product, xdg, runtime_text, .observer) catch |err| {
+    const observer = runProductAttach(product, base, runtime_text, .observer) catch |err| {
         const diagnostic = try readFile(allocator, report_path, 64 * 1024);
         defer allocator.free(diagnostic);
         std.debug.print("p5c3d observer failed: {s}; report={s}\n", .{ @errorName(err), diagnostic });
@@ -182,7 +182,7 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
         std.mem.asBytes(&observer.after),
     );
 
-    const takeover = try runProductAttach(product, xdg, runtime_text, .takeover);
+    const takeover = try runProductAttach(product, base, runtime_text, .takeover);
     try std.testing.expectEqual(@as(c_int, 5), takeover.exit_code);
     try legacy.sendInput(1, "after");
     try waitForCount(report_path, "input\n", 2);
@@ -195,7 +195,7 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
 const AttachMode = enum { observer, takeover };
 const AttachResult = struct { exit_code: c_int, saw_marker: bool, before: c.termios, after: c.termios };
 
-fn runProductAttach(product: []const u8, xdg: [:0]const u8, runtime_id: [:0]const u8, mode: AttachMode) !AttachResult {
+fn runProductAttach(product: []const u8, session_host_root: [:0]const u8, runtime_id: [:0]const u8, mode: AttachMode) !AttachResult {
     var master: c.fd_t = -1;
     var slave: c.fd_t = -1;
     if (openpty(&master, &slave, null, null, null) != 0) return error.OpenPtyFailed;
@@ -209,7 +209,7 @@ fn runProductAttach(product: []const u8, xdg: [:0]const u8, runtime_id: [:0]cons
     var before: c.termios = undefined;
     if (c.tcgetattr(slave, &before) != 0) return error.TermiosFailed;
     var env_buf: [320]u8 = undefined;
-    const env_arg = try std.fmt.bufPrintZ(&env_buf, "XDG_CACHE_HOME={s}", .{xdg});
+    const env_arg = try std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root});
     var product_buf: [1024]u8 = undefined;
     const product_z = try std.fmt.bufPrintZ(&product_buf, "{s}", .{product});
     const child = c.fork();

@@ -7,6 +7,7 @@
 const std = @import("std");
 const attach_cli = @import("maru").cli.attach;
 const runtime_cli = @import("maru").cli.runtime;
+const short_endpoint = @import("short_endpoint.zig");
 const client_pump = @import("client_pump.zig");
 const external_attach = @import("external_attach.zig");
 const external_loop_owner = @import("external_loop_owner.zig");
@@ -32,13 +33,14 @@ pub fn runRequest(
         return .denied;
     };
 
-    const xdg = if (c.getenv("XDG_CACHE_HOME")) |value| std.mem.span(value) else null;
-    const home = if (c.getenv("HOME")) |value| std.mem.span(value) else null;
-    const base = (try runtime_cli.cacheBase(allocator, xdg, home)) orelse {
+    // **캐시가 아니라 런타임 base 다**(계약 §10). 앱이 host 를 그 자리에 등록하므로 CLI 도 같은
+    // 자리를 봐야 한다 — `XDG_CACHE_HOME`/`~/.cache` 를 보던 때는 앱이 띄운 host 를 **한 번도
+    // 못 찾았다**(`absent`). 경로의 단일 출처는 `short_endpoint` 다.
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base: []const u8 = short_endpoint.currentUserRootPathIn(&base_buf) catch {
         try stderr.writeAll("maru attach: persistent session host is unavailable\n");
         return .host_unavailable;
     };
-    defer allocator.free(base);
 
     var prepared = switch (external_attach.prepare(allocator, io, base, request)) {
         .prepared => |value| value,

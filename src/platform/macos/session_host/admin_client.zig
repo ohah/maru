@@ -320,20 +320,20 @@ fn collectProductProcess(
 fn runProductCli(
     allocator: std.mem.Allocator,
     product_exe: [:0]const u8,
-    xdg_cache_home: [:0]const u8,
+    session_host_root: [:0]const u8,
     args: []const [:0]const u8,
 ) !ProductResult {
-    return runProductCliInput(allocator, product_exe, xdg_cache_home, args);
+    return runProductCliInput(allocator, product_exe, session_host_root, args);
 }
 
 fn runProductCliTtyInput(
     allocator: std.mem.Allocator,
     product_exe: [:0]const u8,
-    xdg_cache_home: [:0]const u8,
+    session_host_root: [:0]const u8,
     args: []const [:0]const u8,
     input: []const u8,
 ) !ProductResult {
-    var process = try startControlledProductCli(allocator, product_exe, xdg_cache_home, args);
+    var process = try startControlledProductCli(allocator, product_exe, session_host_root, args);
     defer process.cleanup(std.testing.io);
     var offset: usize = 0;
     while (offset < input.len) {
@@ -350,7 +350,7 @@ fn runProductCliTtyInput(
 fn runProductCliInput(
     allocator: std.mem.Allocator,
     product_exe: [:0]const u8,
-    xdg_cache_home: [:0]const u8,
+    session_host_root: [:0]const u8,
     args: []const [:0]const u8,
 ) !ProductResult {
     var pipes_transferred = false;
@@ -370,8 +370,8 @@ fn runProductCliInput(
     };
     const env_arg = try std.fmt.allocPrintSentinel(
         allocator,
-        "XDG_CACHE_HOME={s}",
-        .{xdg_cache_home},
+        "MARU_SESSION_HOST_ROOT={s}",
+        .{session_host_root},
         0,
     );
     defer allocator.free(env_arg);
@@ -408,7 +408,7 @@ fn runProductCliInput(
 fn startControlledProductCli(
     allocator: std.mem.Allocator,
     product_exe: [:0]const u8,
-    xdg_cache_home: [:0]const u8,
+    session_host_root: [:0]const u8,
     args: []const [:0]const u8,
 ) !ControlledProductCli {
     var master: c.fd_t = -1;
@@ -430,8 +430,8 @@ fn startControlledProductCli(
     }
     const env_arg = try std.fmt.allocPrintSentinel(
         allocator,
-        "XDG_CACHE_HOME={s}",
-        .{xdg_cache_home},
+        "MARU_SESSION_HOST_ROOT={s}",
+        .{session_host_root},
         0,
     );
     defer allocator.free(env_arg);
@@ -509,7 +509,7 @@ fn finishControlledProductCli(
 
 fn spawnProductHost(
     product_exe: [*:0]const u8,
-    xdg: [:0]const u8,
+    session_host_root: [:0]const u8,
     session_dir: [:0]const u8,
     socket_path: [:0]const u8,
     host_text: [:0]const u8,
@@ -518,7 +518,7 @@ fn spawnProductHost(
     if (child < 0) return error.TestUnexpectedResult;
     if (child == 0) {
         var env_buf: [256]u8 = undefined;
-        const env_arg = std.fmt.bufPrintZ(&env_buf, "XDG_CACHE_HOME={s}", .{xdg}) catch c._exit(127);
+        const env_arg = std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root}) catch c._exit(127);
         const argv = [_:null]?[*:0]const u8{
             "env",
             "-u",
@@ -620,6 +620,8 @@ test "product read CLI connects to an existing daemon without spawning and emits
     const nonce = (nonce_raw & (std.math.maxInt(u64) >> 1)) | 1;
     const host_id = (pid_bits << 64) | nonce;
     var xdg_buf: [224]u8 = undefined;
+    // registry 를 이 프로세스만의 자리로 돌린다 — 안 그러면 테스트가 **사용자의 진짜 세션**과
+    // 같은 registry 를 쓴다(base 가 uid 로 고정이라 그렇다).
     const xdg = try std.fmt.bufPrintZ(
         &xdg_buf,
         "/tmp/maru-admin-cli-{d}-{x}",
@@ -641,7 +643,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var absent = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer absent.deinit(allocator);
@@ -660,7 +662,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var denied = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer denied.deinit(allocator);
@@ -672,7 +674,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var usage = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", "aabb" },
     );
     defer usage.deinit(allocator);
@@ -683,7 +685,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var non_tty_end = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", "000000000000000000000000000000aa" },
     );
     defer non_tty_end.deinit(allocator);
@@ -691,7 +693,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     try std.testing.expectEqual(@as(usize, 0), non_tty_end.stdout.len);
     try std.testing.expect(std.mem.indexOf(u8, non_tty_end.stderr, "usage:") != null);
 
-    const child = try spawnProductHost(product_raw, xdg, session_dir, socket_path, host_text);
+    const child = try spawnProductHost(product_raw, base, session_dir, socket_path, host_text);
     var child_active = true;
     defer {
         if (child_active) {
@@ -729,7 +731,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var status_result = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer status_result.deinit(allocator);
@@ -756,7 +758,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     const second_host_text = try std.fmt.bufPrintZ(&second_host_buf, "{x:0>32}", .{second_host_id});
     const second_child = try spawnProductHost(
         product_raw,
-        xdg,
+        base,
         session_dir,
         second_socket,
         second_host_text,
@@ -772,7 +774,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var ambiguous = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer ambiguous.deinit(allocator);
@@ -789,7 +791,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var busy_result = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer busy_result.deinit(allocator);
@@ -815,7 +817,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var list_result = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "list", "--json" },
     );
     defer list_result.deinit(allocator);
@@ -832,7 +834,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var list_text = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "list" },
     );
     defer list_text.deinit(allocator);
@@ -849,7 +851,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var get_result = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", runtime_id, "--json" },
     );
     defer get_result.deinit(allocator);
@@ -866,7 +868,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var missing_result = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", "ffffffffffffffffffffffffffffffff", "--json" },
     );
     defer missing_result.deinit(allocator);
@@ -877,7 +879,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var with_gui = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer with_gui.deinit(allocator);
@@ -889,7 +891,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var after_gui = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "host", "status", "--json" },
     );
     defer after_gui.deinit(allocator);
@@ -910,7 +912,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var ended = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", ended_runtime_id, "--yes" },
     );
     defer ended.deinit(allocator);
@@ -923,7 +925,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var ended_missing = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", ended_runtime_id, "--json" },
     );
     defer ended_missing.deinit(allocator);
@@ -931,7 +933,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var sibling_still_live = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", runtime_id, "--json" },
     );
     defer sibling_still_live.deinit(allocator);
@@ -959,7 +961,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var declined = try runProductCliTtyInput(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", interactive_runtime_id },
         "n\n",
     );
@@ -976,7 +978,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var after_decline = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", interactive_runtime_id, "--json" },
     );
     defer after_decline.deinit(allocator);
@@ -985,7 +987,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var confirmed = try runProductCliTtyInput(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", interactive_runtime_id },
         "yes\n",
     );
@@ -1030,7 +1032,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var observer_ended = try runProductCliTtyInput(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", observer_runtime_id },
         "y\n",
     );
@@ -1056,7 +1058,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var eof_process = try startControlledProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", eof_runtime_id },
     );
     defer eof_process.cleanup(std.testing.io);
@@ -1078,7 +1080,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var after_eof = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", eof_runtime_id, "--json" },
     );
     defer after_eof.deinit(allocator);
@@ -1098,7 +1100,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var race_process = try startControlledProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", race_runtime_id },
     );
     defer race_process.cleanup(std.testing.io);
@@ -1134,7 +1136,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var swap_process = try startControlledProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "end", runtime_id },
     );
     defer swap_process.cleanup(std.testing.io);
@@ -1158,7 +1160,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     );
     const replacement_child = try spawnProductHost(
         product_raw,
-        xdg,
+        base,
         session_dir,
         replacement_socket,
         replacement_host_text,
@@ -1193,7 +1195,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var replacement_still_live = try runProductCli(
         allocator,
         product_z,
-        xdg,
+        base,
         &.{ "runtime", "get", replacement_runtime_id, "--json" },
     );
     defer replacement_still_live.deinit(allocator);

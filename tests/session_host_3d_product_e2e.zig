@@ -123,7 +123,7 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     allocator.free(readiness_detach);
 
     failure_stage = "controller";
-    var controller = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
+    var controller = try PtyAttach.spawn(allocator, attach_product, base, &runtime_id, .controller);
     defer controller.deinit();
     errdefer std.debug.print(
         "p5c3d product controller failure: pid={d} status={any} output={any}\n",
@@ -160,10 +160,10 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     try expectRuntimeAlive(host_pid, runtime_pid);
 
     failure_stage = "observer";
-    var observer = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .observer);
+    var observer = try PtyAttach.spawn(allocator, attach_product, base, &runtime_id, .observer);
     defer observer.deinit();
     try observer.waitFor("P5C3D_INPUT");
-    var sibling = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
+    var sibling = try PtyAttach.spawn(allocator, attach_product, base, &runtime_id, .controller);
     defer sibling.deinit();
     try sibling.waitFor("P5C3D_INPUT");
     try sibling.write("P5C3D_SIBLING\r");
@@ -185,10 +185,10 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     try sibling.expectRestoredAnsiAndTermios(verify_local_termios);
 
     failure_stage = "takeover";
-    var old_controller = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
+    var old_controller = try PtyAttach.spawn(allocator, attach_product, base, &runtime_id, .controller);
     defer old_controller.deinit();
     try old_controller.waitFor("P5C3D_SIBLING");
-    var takeover = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .takeover);
+    var takeover = try PtyAttach.spawn(allocator, attach_product, base, &runtime_id, .takeover);
     defer takeover.deinit();
     try takeover.waitFor("P5C3D_SIBLING");
     try std.testing.expectEqual(@as(c_int, 4), try old_controller.waitExit());
@@ -200,7 +200,7 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     try takeover.expectRestoredAnsiAndTermios(verify_local_termios);
 
     failure_stage = "reattach";
-    var reattach = try PtyAttach.spawn(allocator, attach_product, xdg, &runtime_id, .controller);
+    var reattach = try PtyAttach.spawn(allocator, attach_product, base, &runtime_id, .controller);
     defer reattach.deinit();
     try reattach.waitFor("P5C3D_TAKEOVER");
     try reattach.detach();
@@ -241,7 +241,7 @@ const PtyAttach = struct {
     fn spawn(
         allocator: std.mem.Allocator,
         product: [:0]const u8,
-        xdg: [:0]const u8,
+        session_host_root: [:0]const u8,
         runtime_id: *const [32]u8,
         mode: AttachMode,
     ) !PtyAttach {
@@ -259,7 +259,7 @@ const PtyAttach = struct {
         const output = try allocator.alloc(u8, 512 * 1024);
         errdefer allocator.free(output);
         var env_buf: [320]u8 = undefined;
-        const env_arg = try std.fmt.bufPrintZ(&env_buf, "XDG_CACHE_HOME={s}", .{xdg});
+        const env_arg = try std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root});
         var runtime_buf: [33]u8 = undefined;
         const runtime_z = try std.fmt.bufPrintZ(&runtime_buf, "{s}", .{runtime_id});
         const pid = c.fork();

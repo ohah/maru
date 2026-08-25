@@ -749,15 +749,25 @@ const Writer = struct {
             .label_role = count_role,
         });
 
-        // 제목은 **배지 왼쪽에서 멈춘다.** 폭을 안 줄이면 긴 제목이 배지 밑으로 파고든다.
+        // **좁으면 배지·동작 자리를 먼저 내려놓는다**(파일 행과 같은 사다리 — `fileRowLadder`).
+        // 그러지 않으면 제목이 `…` 하나로 사라진다(Lab 실측: 폭 104pt 에서 "스테이지된 변경"이 통째로
+        // 없어졌다). 섹션 제목은 그 아래 행들이 **무엇의 목록인지**를 말하는 유일한 글자라, 개수보다
+        // 먼저 지켜야 한다 — 개수는 목록을 세면 알 수 있지만 이름은 그렇지 않다.
         const title_x = rect.rect.x + @as(f32, @floatFromInt(m.iconColumnX())); // 같은 아이콘 열
+        const title_floor = self.nameFloorPx();
+        const pill_span: f32 = if (pill) |p| (rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(p.box.x))) else 0;
+        const action_span: f32 = if (section.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
+        const bare_end = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
+        const show_pill = pill != null and (bare_end - pill_span - action_span - title_x) >= title_floor;
+        const show_action_reserve = section.action != .none and
+            (bare_end - (if (show_pill) pill_span else 0) - action_span - title_x) >= title_floor;
         // 제목은 **오른쪽에 있는 것 전부**를 비켜선다: 배지, 그리고 그 왼쪽의 일괄 동작 버튼.
         // 배지만 기준으로 삼으면 그 사이에 앉은 버튼 위로 긴 제목이 그려진다(적대적 검증에서 잡혔다).
-        const action_reserve: f32 = if (section.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
-        const title_end: f32 = (if (pill) |p|
-            @as(f32, @floatFromInt(p.box.x)) - @as(f32, @floatFromInt(m.gap))
+        const action_reserve: f32 = if (show_action_reserve) action_span else 0;
+        const title_end: f32 = (if (show_pill)
+            @as(f32, @floatFromInt(pill.?.box.x)) - @as(f32, @floatFromInt(m.gap))
         else
-            rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x))) - action_reserve;
+            bare_end) - action_reserve;
         const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
         if (rect.rect.height >= line_h and title_end > title_x) {
             const width = title_end - title_x;
@@ -774,6 +784,8 @@ const Writer = struct {
             );
         }
 
+        // 사다리가 배지를 내려놓았으면 그리지도 않는다 — 예산만 비우고 그리면 제목 위에 겹친다.
+        if (!show_pill) return;
         const placed = pill orelse return;
         // **채운 칩**이다(테두리만 있는 상자가 아니다 — 속이 빈 사각형으로 보였다). 색은 테마 accent
         // (`accent_bar`)이고 숫자는 `surface_bg`다: accent는 "사이드바 배경 위 글자로 읽히는 색"으로
@@ -790,10 +802,99 @@ const Writer = struct {
     }
 
     /// 파일 행: `아이콘 · 이름 · 흐린 경로 … +N -N · 상태 문자`. 폭이 좁아지면 **경로가 먼저** 줄어든다.
+    /// 파일 행이 이 폭에서 무엇을 남기는가. **"이름은 마지막까지 남는다"** — 파일 탐색기와 같은 규칙이고
+    /// (`file_tree/types.zig` 의 `rowLayout`), 이 뷰의 순서는 이렇다:
+    ///
+    ///   ① disclosure 열(파일 행에는 화살표가 없다 — 그룹 아래로 들여쓰는 장식일 뿐이다)
+    ///   ② 증감 수(`+12 -0`·`bin`)
+    ///   ③ 동작 버튼 자리(호버해야 보이는 것이라, 누르려면 폭을 넓히면 된다)
+    ///   ④ 상태 문자(`M`·`U`)
+    ///   — 못 버림: 좌우 패딩 · 종류 아이콘 · 이름
+    ///
+    /// 이 사다리가 없을 때 도크 하한(폭 104pt = 도크 120 − 스크롤 거터 16)에서 **이름이 통째로 사라지고**
+    /// 증감이 아이콘 위에 겹쳐 그려졌다(Lab 캡처 실측 2026-08-25). 예산이 음수가 되면 `lineWithin` 이
+    /// 조용히 아무것도 안 그리기 때문이다 — 가장 지켜야 할 것을 가장 먼저 버리고 있었다.
+    ///
+    /// **결정은 폭과 그 행이 실제로 그릴 것만 본다.** 호버 여부로 갈리면 포인터를 스칠 때마다 이름이
+    /// 늘었다 줄었다 한다(그 규율은 아래 `occupied` 주석이 이미 소유한다).
+    const FileRowLadder = struct {
+        show_indent: bool,
+        show_delta: bool,
+        show_action_slot: bool,
+        show_status: bool,
+        name_x: f32,
+        text_end: f32,
+    };
+
+    fn fileRowLadder(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics, delta_w: f32, action_w: f32) FileRowLadder {
+        const row_w = rect.rect.width;
+        const icon_span: f32 = @floatFromInt(m.icon_extent + m.gap);
+        const pad: f32 = @floatFromInt(m.inset_x);
+        const indent: f32 = @floatFromInt(m.disclosure_extent + m.gap);
+        const status: f32 = @floatFromInt(m.status_extent + m.gap);
+        const floor = self.nameFloorPx();
+
+        var show_indent = true;
+        var show_delta = delta_w > 0;
+        var show_action = action_w > 0;
+        var show_status = true;
+
+        // 남는 이름 폭 = 행 − 왼쪽(패딩 + 들여쓰기? + 아이콘) − 오른쪽(패딩 + 상태? + 증감/동작 자리)
+        const remaining = struct {
+            fn f(w: f32, p: f32, ind: f32, icon_w: f32, st: f32, occ: f32, i: bool, s: bool) f32 {
+                return w - (p + (if (i) ind else 0) + icon_w) - (p + (if (s) st else 0) + occ);
+            }
+        }.f;
+        var occupied = @max(if (show_delta) delta_w else 0, if (show_action) action_w else 0);
+        if (remaining(row_w, pad, indent, icon_span, status, occupied, show_indent, show_status) < floor) show_indent = false;
+        if (remaining(row_w, pad, indent, icon_span, status, occupied, show_indent, show_status) < floor) {
+            show_delta = false;
+            occupied = if (show_action) action_w else 0;
+        }
+        if (remaining(row_w, pad, indent, icon_span, status, occupied, show_indent, show_status) < floor) {
+            show_action = false;
+            occupied = 0;
+        }
+        if (remaining(row_w, pad, indent, icon_span, status, occupied, show_indent, show_status) < floor) show_status = false;
+
+        const left = pad + (if (show_indent) indent else 0);
+        const right = pad + (if (show_status) status else 0) + occupied;
+        return .{
+            .show_indent = show_indent,
+            .show_delta = show_delta,
+            .show_action_slot = show_action,
+            .show_status = show_status,
+            .name_x = left + icon_span,
+            .text_end = rect.rect.x + row_w - right,
+        };
+    }
+
+    /// 이름에게 주려는 최소 폭 — **보장이 아니라 목표**다(파일 탐색기의 `label_floor` 와 같은 값·같은
+    /// 성격). 다 버려도 모자라면 이름이 남은 것을 전부 받는다. 도크 하한에서는 목표에 못 미친다.
+    fn nameFloorPx(self: *Writer) f32 {
+        _ = self;
+        return 80;
+    }
+
     fn fileRow(self: *Writer, rect: tree.RectEntry, file: types.FileItem, m: types.DockMetrics) ViewError!void {
         // 이름은 **아이콘 폭만큼 더** 들어간다. 그룹 헤더의 화살표 자리(`disclosure_extent`)만 비우면
         // 아이콘이 이름 위에 겹쳐 그려진다(제품 캡처에서 실제로 그랬다 — 슬롯 폭과 gap은 다른 값이다).
-        const inset: f32 = @floatFromInt(m.iconColumnX() + m.icon_extent + m.gap);
+        // 증감·동작이 **실제로 차지할 폭**을 먼저 재고, 그것으로 사다리를 돌린다(무엇을 버릴지 정한다).
+        var pre_removed_buf: [16]u8 = undefined;
+        var pre_added_buf: [16]u8 = undefined;
+        const pre_removed: []const u8 = if (file.has_delta) (std.fmt.bufPrint(&pre_removed_buf, "-{d}", .{file.removed}) catch "") else "";
+        const pre_added: []const u8 = if (file.has_delta) (std.fmt.bufPrint(&pre_added_buf, "+{d}", .{file.added}) catch "") else "";
+        const delta_w: f32 = if (file.binary)
+            self.measureBudget("bin", .supporting) + @as(f32, @floatFromInt(m.gap))
+        else if (file.has_delta)
+            self.measureBudget(pre_removed, .supporting) + self.measureBudget(pre_added, .supporting) + @as(f32, @floatFromInt(m.gap * 2))
+        else
+            0;
+        const action_w: f32 = if (file.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
+        const ladder = self.fileRowLadder(rect, m, delta_w, action_w);
+
+        const inset: f32 = ladder.name_x;
+        const icon_x: f32 = @floatFromInt(if (ladder.show_indent) m.iconColumnX() else m.inset_x);
         // **종류 아이콘은 탐색기와 같은 분류기**를 쓴다 — 같은 파일이 두 화면에서 다른 아이콘이면 안 된다.
         if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
             var glyph_buf: [4]u8 = undefined;
@@ -801,11 +902,11 @@ const Writer = struct {
             // 아이콘은 **자기 라벨과 같은 단**이다. `muted_fg`(밝기 207)를 쓰던 동안 아이콘이 이름
             // (169)보다 밝아, 목록을 훑는 눈이 종류 표시에 먼저 걸렸다 — 파일 탐색기가 같은 이유로
             // 아이콘과 라벨을 한 위계로 묶는다.
-            if (len > 0) try self.icon(rect, @floatFromInt(m.iconColumnX()), glyph_buf[0..len], m.icon_extent, .list_secondary_fg);
+            if (len > 0) try self.icon(rect, icon_x, glyph_buf[0..len], m.icon_extent, .list_secondary_fg);
         }
         // 상태 문자는 오른쪽 끝(VS Code 배치). 색은 종류가 정하고, 글자는 그대로 그린다.
         var letter_buf: [1]u8 = .{file.letter};
-        try self.trailing(rect, letter_buf[0..], statusRole(file.status), .control, m.inset_x);
+        if (ladder.show_status) try self.trailing(rect, letter_buf[0..], statusRole(file.status), .control, m.inset_x);
 
         // **호버한 행은 증감을 비운다.** 그 자리에 동작 버튼이 앉기 때문이다(VS Code도 호버하면 숫자가
         // 사라지고 아이콘이 뜬다). 안 비우면 글자가 버튼 quad 위에 겹쳐 그려진다 — 증감은 writer가
@@ -818,8 +919,10 @@ const Writer = struct {
         const delta_removed: []const u8 = if (file.has_delta) (std.fmt.bufPrint(&removed_buf, "-{d}", .{file.removed}) catch "") else "";
         const delta_added: []const u8 = if (file.has_delta) (std.fmt.bufPrint(&added_buf, "+{d}", .{file.added}) catch "") else "";
 
-        var right_inset = m.inset_x + m.status_extent + m.gap;
-        if (hovered_row) {
+        var right_inset = m.inset_x + (if (ladder.show_status) m.status_extent + m.gap else 0);
+        if (!ladder.show_delta) {
+            // 사다리가 증감을 내려놓았다(좁아서 이름이 먼저다).
+        } else if (hovered_row) {
             // 아무것도 그리지 않는다(위 주석).
         } else if (file.binary) {
             try self.trailing(rect, "bin", .muted_fg, .supporting, right_inset);
@@ -835,19 +938,12 @@ const Writer = struct {
         // **오른쪽 자리를 비켜선다.** 이름·경로는 `trailing` 항목들보다 **나중에** 그려지므로, 예산이 행
         // 오른쪽 끝까지 열려 있으면 긴 경로가 증감·상태 문자를 덮는다(적대적 검증에서 잡혔다 —
         // 그리는 순서가 곧 z축이다).
-        const right_used: f32 = @floatFromInt(m.inset_x + m.status_extent + m.gap);
+
         // **호버 여부와 무관하게 같은 폭을 비운다.** 그 자리를 증감이 쓰다가 호버하면 버튼이 쓰는데,
         // 둘 중 하나로만 예산을 잡으면 포인터를 스칠 때마다 말줄임 지점이 움직여 **이름이 늘었다 줄었다
         // 한다**(적대적 검증에서 잡혔다). 둘 중 큰 쪽을 항상 비워 두면 화면이 조용하다.
-        const delta_occupied: f32 = if (file.binary)
-            self.measureBudget("bin", .supporting) + @as(f32, @floatFromInt(m.gap))
-        else if (file.has_delta)
-            self.measureBudget(delta_removed, .supporting) + self.measureBudget(delta_added, .supporting) + @as(f32, @floatFromInt(m.gap * 2))
-        else
-            0;
-        const action_occupied: f32 = if (file.action != .none) @floatFromInt(m.action_extent + m.gap) else 0;
-        const occupied = @max(delta_occupied, action_occupied);
-        const text_end = rect.rect.x + rect.rect.width - right_used - occupied;
+        // 예약 폭은 **사다리가 이미 계산했다** — 여기서 다시 재면 두 값이 갈린다.
+        const text_end = ladder.text_end;
         // **목록 행 타이포**(`list_row` 14pt regular)와 **전경 위계**를 파일 탐색기와 맞춘다. 같은 도크
         // 컬럼에서 뷰만 바꿨는데 글자 크기·밝기가 달라지면 그 자체가 두 화면처럼 읽힌다.
         //
@@ -2451,9 +2547,43 @@ test "파일 이름·경로는 증감·상태 문자 자리를 침범하지 않�
     try testing.expect(dir.origin.x + @as(i32, @intCast(budget)) <= removed.origin.x);
 }
 
-test "좁은 도크에서 오른쪽 자리가 폭을 다 먹으면 이름을 아예 그리지 않는다" {
-    // 예산이 음수가 되면 `colsFor`가 1로 clamp해 **한 글자가 증감 위에 그려질** 수 있다. 그릴 자리가
-    // 없으면 아무것도 안 그리는 것이 맞다(잘린 한 글자는 정보가 아니라 잡음이다).
+// 섹션 제목도 같은 규칙을 따른다 — **개수 배지보다 제목이 먼저다.**
+//
+// 배지가 자리를 먼저 먹던 동안 도크 하한(폭 104pt)에서 "스테이지된 변경"이 `…` 하나로 사라졌다
+// (Lab 캡처 실측). 개수는 목록을 세면 알 수 있지만, 그 아래 행들이 **무엇의 목록인지**는 제목만이 말한다.
+test "좁은 도크에서는 개수 배지가 사라지고 섹션 제목이 남는다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .section = .{ .section = .staged, .count = 3, .collapsed = false, .action = .unstage } },
+    };
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 104, .height = 200 },
+        .items = &items,
+        .branch = "main",
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    const draws = try viewBudgeted(&storage, props, frame, .{});
+    const title = findExactText(draws, sectionTitle(.staged)) orelse return error.MissingTitle;
+    try testing.expect((title.max_width_px orelse 0) > 0);
+    // 배지는 그리지 않는다 — 예산만 비우고 그리면 제목 위에 겹친다.
+    try testing.expect(findExactText(draws, "3") == null);
+}
+
+test "좁은 도크에서는 오른쪽 자리가 먼저 사라지고 이름이 남는다" {
+    // **계약이 뒤집혔다(2026-08-25).** 예전에는 오른쪽(증감·상태·동작)이 폭을 다 먹으면 이름을 아예 안
+    // 그렸다 — 예산이 음수가 되면 `lineWithin` 이 조용히 건너뛰기 때문이다. 그 결과 도크 하한에서 SCM
+    // 행이 **아이콘과 숫자만 남고 파일 이름이 사라졌다**(Lab 캡처 실측).
+    //
+    // 이제는 사다리가 뒤집는다: 들여쓰기 → 증감 → 동작 자리 → 상태 문자 순으로 버리고 이름을 지킨다
+    // (`fileRowLadder`). 그러니 이 판정자가 재는 것은 "이름이 없는가"가 아니라 **"이름이 남고 오른쪽이
+    // 사라졌는가"**, 그리고 둘 다 그려지는 폭에서는 여전히 **겹치지 않는가**이다.
     var storage: TestStorage = .{};
     const items = [_]types.Item{
         .{ .file = .{
@@ -2481,12 +2611,31 @@ test "좁은 도크에서 오른쪽 자리가 폭을 다 먹으면 이름을 아
         .actions = &storage.actions,
     });
     const draws = try viewBudgeted(&storage, props, frame, .{});
-    // 이름이 나오더라도 증감 왼쪽에서 끝나야 한다(안 나오는 것도 정답이다).
-    if (findExactText(draws, "a.zig")) |name| {
-        const removed = findExactText(draws, "-999999") orelse return error.MissingDelta;
-        const budget = name.max_width_px orelse return error.MissingBudget;
-        try testing.expect(name.origin.x + @as(i32, @intCast(budget)) <= removed.origin.x);
-    }
+    // ⑴ 이 폭에서는 **이름이 살아 있고** 증감은 내려놓았다.
+    const name = findExactText(draws, "a.zig") orelse return error.MissingName;
+    try testing.expect(findExactText(draws, "-999999") == null);
+    try testing.expect((name.max_width_px orelse 0) > 0);
+
+    // ⑵ 둘 다 들어가는 폭에서는 여전히 겹치지 않는다(사다리가 아무것도 안 버리는 구간).
+    var wide_storage: TestStorage = .{};
+    const wide_props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 480, .height = 200 },
+        .items = &items,
+        .branch = "main",
+    };
+    const wide_frame = try build.build(wide_props, .{
+        .nodes = &wide_storage.nodes,
+        .entries = &wide_storage.entries,
+        .layout_items = &wide_storage.layout_items,
+        .flex_scratch = &wide_storage.flex_scratch,
+        .child_rects = &wide_storage.child_rects,
+        .actions = &wide_storage.actions,
+    });
+    const wide_draws = try viewBudgeted(&wide_storage, wide_props, wide_frame, .{});
+    const wide_name = findExactText(wide_draws, "a.zig") orelse return error.MissingName;
+    const removed = findExactText(wide_draws, "-999999") orelse return error.MissingDelta;
+    const budget = wide_name.max_width_px orelse return error.MissingBudget;
+    try testing.expect(wide_name.origin.x + @as(i32, @intCast(budget)) <= removed.origin.x);
 }
 
 test "호버해도 이름 예산이 늘거나 줄어 글자가 튀지 않는다" {

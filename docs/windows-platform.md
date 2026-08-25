@@ -4559,6 +4559,15 @@ thread panic: reached unreachable code
 > 처음에는 "디렉터리를 열었나" 로 의심해 `allow_directory = false` 를 넣었다. **패닉은 그대로였다**
 > — 그 플래그는 남겼지만(후보는 파일이어야 한다) 원인이 아니었다.
 
+**같은 함정이 하나 더 있다 — 고치지 않고 적어 둔다.**
+`agent_session_archive_detail_backend.zig:192` 가 같은 짝을 쓴다(`openFile(follow_symlinks = false)`
+→ `readPositionalAll`). **Windows 가 아직 그 경로에 안 닿아**(상세 보기가 배선 전이다) 재 볼 수가
+없고, 재지 못한 고침은 넣지 않는다. 그 뷰를 Windows 로 올릴 때 이 항목이 먼저다.
+
+`follow_symlinks` 를 **안 넘기는** 자리는 안전하다 — `std.Io.Dir.OpenFileOptions` 의 기본값이
+`true` 라 동기 핸들을 받는다(`session/agent_transcript.zig:422` 가 그렇다). 저장소에서 위험한
+짝은 이 둘뿐이다(실측: `readPositional` 호출 열 곳을 전부 봤다).
+
 ## ⑵ 문자열이 전부 `0xAA` 였다 — arena 라도 `free` 는 덮는다
 
 패닉이 사라지자 카드가 11 장 생겼는데 **제목이 하나도 안 그려졌다**. 첫 세 바이트를 찍어 보니

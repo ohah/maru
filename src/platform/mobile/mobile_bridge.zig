@@ -2104,12 +2104,19 @@ fn drawConnBanner(tk: *const tokens.Tokens) void {
     // 로그로만 남기면 무엇을 고쳐야 하는지 알 길이 없다. 붙은 뒤에는 아무 말도 안 한다.
     term_banner_h = 0;
     if (connectionMessage()) |msg| {
-        const bh: f32 = 30;
         const by = term_bar_rect.y + term_bar_rect.h;
+        // **접힌 줄 수를 먼저 센다** — 배경을 글보다 먼저 그려야 하는데, 높이는 글이 정한다.
+        // 안 세고 30 으로 두면 두 줄짜리 안내가 배경 밖으로 나가 본문 위에 맨몸으로 얹힌다.
+        const font: i32 = 14;
+        const max_w = @as(i32, @intFromFloat(term_bar_rect.w - 2 * set_pad_x));
+        const rows = wrappedLineCount(msg, max_w, font);
+        const line_h: i32 = font + @divTrunc(font, 4);
+        const bh: f32 = @max(30.0, @as(f32, @floatFromInt(@as(i32, @intCast(rows)) * line_h)) + 16.0);
         push(.{ .x = @intFromFloat(term_bar_rect.x), .y = @intFromFloat(by), .w = @intFromFloat(term_bar_rect.w), .h = @intFromFloat(bh) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
         // 실패는 강조색, 진행 중은 흐린 색 — 같은 자리에 두되 **읽는 무게가 다르다**.
         const role: tokens.ColorRole = if (conn_err_len > 0) .accent_bar else .muted_fg;
-        pushText(msg, @intFromFloat(term_bar_rect.x + set_pad_x), @intFromFloat(by + (bh - 14) / 2), 14, tk.get(role));
+        const text_h = @as(f32, @floatFromInt(@as(i32, @intCast(rows)) * line_h));
+        _ = pushTextWrapped(msg, @intFromFloat(term_bar_rect.x + set_pad_x), @intFromFloat(by + (bh - text_h) / 2), max_w, font, tk.get(role));
         term_banner_h = bh;
     }
 }
@@ -3544,6 +3551,83 @@ fn styleBits(s: terminal.types.Style) u32 {
 /// `pushText` 가 그릴 폭. **가운데 정렬은 이 값으로 해야 한다** — 글자 수 × 근사치로 재면
 /// 화살표(`↑`)처럼 advance 가 다른 글자에서 눈에 띄게 왼쪽으로 쏠린다(화면으로 확인).
 /// 진행 규칙(0폭 건너뛰기·폰트 advance·폴백)을 `pushText` 와 **그대로 공유**한다.
+/// 최대 폭 안에서 **줄을 접어 가며** 그린다. 돌려주는 것은 **그린 줄 수**다 — 부르는 쪽이 그
+/// 값으로 배경과 다음 요소의 자리를 잡아야 한다.
+///
+/// **왜 필요한가.** `pushText` 는 폭을 안 보고 펜을 끝까지 민다 — 긴 문구는 화면 밖으로 나가
+/// **그냥 잘린다**(줄임표도 없다). 영어 안내문이 그 선을 넘었고(최장 74칸, 목록 창은 62칸),
+/// 기존 문구도 이미 넘고 있었다. 잘려서 못 읽는 것보다 두 줄이 낫다.
+///
+/// **끊는 자리는 공백이 먼저다.** 단어 가운데를 자르면 읽기가 크게 나빠진다. 다만 한글에는
+/// 단어 사이 공백이 드물어 그것만 고집하면 한 줄도 못 접는다 — 그때는 **넘치는 자리에서**
+/// 자른다(CJK 조판 관례가 그렇다).
+///
+/// **한 글자도 못 넣는 폭이면 한 글자는 넣고 넘긴다.** 안 그러면 무한히 줄만 늘어난다.
+/// 같은 규칙으로 **줄 수만** 센다(안 그린다). 배경은 글보다 먼저 그려야 하는데 높이는 글이
+/// 정하므로, 부르는 쪽이 이것으로 자리를 잡는다. **`pushTextWrapped` 와 같은 자리에서 갈라야**
+/// 배경과 글이 어긋나지 않는다 — 두 벌로 두면 한쪽만 고쳐진다.
+/// 접힌 줄 수(테스트용). **그리는 자리와 같은 함수를 묻는다** — 따로 세면 그 둘이 갈린다.
+pub fn wrappedLineCountForTest(text: []const u8, max_w: i32, font_px: i32) u32 {
+    return wrappedLineCount(text, max_w, font_px);
+}
+
+fn wrappedLineCount(text: []const u8, max_w: i32, font_px: i32) u32 {
+    return wrapLines(text, max_w, font_px, null, 0, 0);
+}
+
+fn pushTextWrapped(text: []const u8, x: i32, y: i32, max_w: i32, font_px: i32, col: color.Rgb) u32 {
+    return wrapLines(text, max_w, font_px, col, x, y);
+}
+
+/// 접기의 **단일 출처**. `col` 이 없으면 세기만 한다 — 그리라는 신호를 따로 받지 않는다.
+/// 두 인자로 나누면 "색은 줬는데 안 그린다" 같은 조합이 생기고, 그 조합이 뜻하는 바를 아무도
+/// 안 정해 둔다.
+///
+/// **폭은 매 글자마다 줄 처음부터 다시 잰다**(`textWidth`) — 글자 수의 제곱이다. 여기 오는
+/// 것은 배너·목록의 한 문장(길어야 100자 남짓)이고, 누적 폭을 들고 다니면 폴백 advance 와
+/// 양폭 판정을 이 자리에서 **한 번 더** 구현하게 된다(그 둘이 갈리면 배경과 글이 어긋난다).
+/// 문단을 접을 일이 생기면 그때 `textWidth` 를 증분으로 바꾼다.
+fn wrapLines(text: []const u8, max_w: i32, font_px: i32, col: ?color.Rgb, x: i32, y: i32) u32 {
+    if (max_w <= 0) return 0;
+    const line_h: i32 = font_px + @divTrunc(font_px, 4); // 줄 사이를 조금 벌린다(글자가 붙어 보인다)
+    var view = std.unicode.Utf8View.init(text) catch {
+        setLastError("text_bad_utf8");
+        return 0;
+    };
+    var lines: u32 = 0;
+    var line_start: usize = 0; // 지금 줄이 시작한 바이트
+    var last_space: ?usize = null; // 이 줄에서 마지막으로 본 공백의 **다음** 바이트
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        const end = it.i; // 이 글자를 **포함한** 끝
+        if (cp == ' ') last_space = end;
+        if (textWidth(text[line_start..end], font_px) <= max_w) continue;
+        // 넘쳤다 — 어디서 끊을지 고른다.
+        const cut = blk: {
+            if (last_space) |sp| if (sp > line_start) break :blk sp;
+            // 공백이 없거나 줄 첫 글자다 — 이 글자 앞에서 끊되, 그러면 빈 줄이 되는 경우
+            // (한 글자도 안 들어가는 폭)에는 한 글자를 넣고 넘긴다.
+            // **`catch 1` 은 삼키는 것이 아니다.** 여기 오는 `cp` 는 `Utf8View` 가 이미 검증해
+            // 내놓은 코드포인트라 실패할 수 없다 — 그래도 1 을 쓰는 것은 **한 바이트 뒤로**
+            // 물러나 진행을 보장하려는 것이고, 잘못돼도 줄이 한 칸 일찍 접힐 뿐 멈추지 않는다.
+            const cp_len: usize = std.unicode.utf8CodepointSequenceLength(cp) catch 1;
+            const before = end - cp_len;
+            break :blk if (before > line_start) before else end;
+        };
+        if (col) |c| pushText(text[line_start..cut], x, y + @as(i32, @intCast(lines)) * line_h, font_px, c);
+        lines += 1;
+        line_start = cut;
+        // 접은 자리의 공백은 다음 줄 앞에 안 남긴다.
+        while (line_start < text.len and text[line_start] == ' ') line_start += 1;
+        last_space = null;
+    }
+    if (line_start < text.len) {
+        if (col) |c| pushText(text[line_start..], x, y + @as(i32, @intCast(lines)) * line_h, font_px, c);
+        lines += 1;
+    }
+    return lines;
+}
+
 fn textWidth(text: []const u8, font_px: i32) i32 {
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
     const half_w = @as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5;
@@ -4239,7 +4323,7 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
     // (같은 사실을 두 곳에서 말하면 갈린다).
     if (conn_state != 11) { // MARU_SSH_STATE_READY 가 아니면 축이 설 자리가 없다
         const msg = connectionMessage() orelse maru.i18n.tIn(.ko, .mob_sessions_loading);
-        pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        _ = pushTextWrapped(msg, @intFromFloat(win.x + 16), @intFromFloat(y + 10), @as(i32, @intFromFloat(win.w - 32)), 15, tk.get(.muted_fg));
         remote_off_msg_len = @min(msg.len, remote_off_msg.len);
         @memcpy(remote_off_msg[0..remote_off_msg_len], msg[0..remote_off_msg_len]);
         remote_shown = .off;
@@ -4265,7 +4349,10 @@ fn drawRemoteSessions(win: SetRect, tk: *const tokens.Tokens, top: f32) void {
                 }) catch maru.i18n.tIn(.ko, .mob_control_off_failed),
             .none => maru.i18n.tIn(.ko, .mob_sessions_none),
         };
-        pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(y + (row_h - 15) / 2), 15, tk.get(.muted_fg));
+        // **접어 그린다** — 축이 꺼진 이유는 무엇을 고치라는 말이라 잘리면 쓸모가 없다.
+        // 이 자리는 메시지를 그리고 바로 돌아가므로(아래 세션 행이 안 그려진다) 줄이 늘어도
+        // 겹칠 것이 없다.
+        _ = pushTextWrapped(msg, @intFromFloat(win.x + 16), @intFromFloat(y + 10), @as(i32, @intFromFloat(win.w - 32)), 15, tk.get(.muted_fg));
         // **그린 문구 그대로**를 남긴다 — 이유가 갈렸다는 것만 재면 사용자가 읽는 말이 뒤바뀌어도
         // 초록이다(같은 함정을 렌더 쪽에서 이미 겪었다).
         remote_off_msg_len = @min(msg.len, remote_off_msg.len);

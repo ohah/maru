@@ -3633,6 +3633,44 @@ test "굽는 크기는 폰트 설정이 아니라 셀이 정한다" {
     bridge.maru_mobile_clear_error();
 }
 
+// **긴 안내는 잘리는 대신 접힌다.** `pushText` 는 폭을 안 보고 펜을 끝까지 밀어, 화면을 넘는
+// 글은 줄임표도 없이 그냥 사라졌다 — 영어 안내문이 그 선을 넘었고(최장 74칸, 목록 창은 62칸)
+// 바뀌기 전 문구도 이미 넘고 있었다. 무엇을 고치라는 말이 잘리면 쓸모가 없다.
+test "폭을 넘는 글은 여러 줄로 접힌다" {
+    const font: i32 = 15;
+    const one = "짧다";
+    // 넉넉한 폭에서는 한 줄이다 — 접는 규칙이 멀쩡한 글까지 쪼개면 안 된다.
+    try std.testing.expectEqual(@as(u32, 1), bridge.wrappedLineCountForTest(one, 400, font));
+
+    // 같은 글을 좁은 폭에 넣으면 줄이 는다.
+    const wide = "서버가 응답하지 않습니다. maru가 실행 중인지 확인해 주세요";
+    const narrow = bridge.wrappedLineCountForTest(wide, 120, font);
+    const roomy = bridge.wrappedLineCountForTest(wide, 400, font);
+    try std.testing.expect(narrow > roomy);
+
+    // **한 글자도 안 들어가는 폭에서도 끝난다** — 안 그러면 줄만 무한히 는다.
+    const tiny = bridge.wrappedLineCountForTest(wide, 1, font);
+    try std.testing.expect(tiny > 0);
+    try std.testing.expect(tiny < 200);
+
+    // 빈 글은 줄이 없다 — 배경만 그리고 마는 자리가 생기면 안 된다.
+    try std.testing.expectEqual(@as(u32, 0), bridge.wrappedLineCountForTest("", 400, font));
+}
+
+// **끊는 자리는 공백이 먼저다.** 단어 가운데를 자르면 읽기가 크게 나빠진다 — 다만 한글에는
+// 단어 사이 공백이 드물어 그것만 고집하면 한 줄도 못 접는다.
+test "공백이 있으면 거기서 접고, 없으면 넘치는 자리에서 접는다" {
+    const font: i32 = 15;
+    // 공백으로 갈리는 영어: 폭을 반으로 줄이면 두 줄 안쪽이다(단어 단위로 접힌다).
+    const en = "The server is not responding";
+    const full = bridge.wrappedLineCountForTest(en, 400, font);
+    try std.testing.expectEqual(@as(u32, 1), full);
+
+    // 공백이 없는 긴 한글도 접힌다 — 공백만 찾다 못 접으면 그대로 잘려 나간다.
+    const ko = "서버가응답하지않습니다확인해주세요";
+    try std.testing.expect(bridge.wrappedLineCountForTest(ko, 80, font) > 1);
+}
+
 // ── 입력 목적지(S9-3) ───────────────────────────────────────────────────────
 
 test "기본은 로컬 코어다" {

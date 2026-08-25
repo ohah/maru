@@ -659,8 +659,16 @@ pub fn main(init: std.process.Init) !void {
     // 제품(app_session)과 같은 스크롤 뷰포트를 넘긴다: published tree의 `content` 사각형이다.
     // 이게 있어야 반쯤 걸친 카드의 글자가 **잘린 그대로** 캡처돼, 골든이 클리핑 계약까지 본다.
     // Lab은 dock을 프레임 원점에 그리므로 pane 오프셋 없이 그 사각형이 곧 backing 좌표다.
+    //
+    // **컴포넌트마다 자기 헬퍼를 쓴다.** 예전에는 Session Dock 헬퍼 하나만 불렀는데, 그 헬퍼는 자기
+    // `NodeIds.content`(다른 id 공간)를 찾으므로 SCM·파일 트리 시나리오에서는 늘 null 이었다 — 그 두
+    // 도크의 캡처는 **글자가 하나도 안 잘린 그림**이었고, 제품도 같은 배선이 빠져 있었다(2026-08-25).
     const scroll_clip: ?renderer.metal_frame.ClipPx = blk: {
-        const rect = chrome.components.session_dock.build.scrollTextViewport(frame.tree) orelse break :blk null;
+        const rect = (switch (scenario_id) {
+            .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
+            .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
+            else => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+        }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
             .y = @intFromFloat(@max(rect.y, 0)),

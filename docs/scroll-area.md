@@ -503,6 +503,25 @@ published entry이고, clip도 `build`가 같은 자리에서 싣는다(§4 — 
 이 규율의 검증은 "스켈레톤이 잘린다"가 아니라 **"컨테이너 안에서 나온 quad에 clip이 없을 수 없다"** 를
 고정하는 쪽이어야 한다. 전자는 그 한 컴포넌트만 지키고, 후자는 앞으로 추가될 장식 quad까지 지킨다.
 
+### 5.1 tree 의 clip 은 **글자를 안 자른다** (2026-08-25)
+
+위 문장들은 전부 **quad** 이야기다. measured CoreText 경로의 글자는 `effective_clip` 을 지나지 않는다 —
+host 가 `PanePlacement.clip_rect` 로 넘긴 사각형을 보고 `system_text.appendGpuGlyphs` 가 glyph 마다
+자른다(`draw.zig` 의 `scroll_clipped` 계약). **컴포넌트가 `scroll_clipped = true` 를 달아도, host 가 그
+사각형을 안 넘기면 아무 데도 안 잘린다.**
+
+그 상태가 실제로 두 도크에 있었다. `collectScmDock`·`collectFileTreeDock` 이 `.pane` 에 `clip_rect` 를
+싣지 않아, **반쯤 스크롤된 첫 행의 라벨이 목록 위 고정 chrome(SCM 요약 줄·트리 위 뷰 바) 위에
+그려졌다.** 사용자가 골든 캡처에서 지적해 드러났다(그전까지 아무 판정자도 말하지 않았다 — 아래).
+
+그래서 **스크롤 영역을 가진 컴포넌트는 자기 `scrollTextViewport` 를 낸다**(`session_dock`·`scm_dock`·
+`file_tree`). host 는 그 값을 pane 원점만큼 옮겨 싣는다. 산출을 host 가 다시 쓰지 않는 이유는 위와 같다.
+
+**왜 골든이 침묵했나.** 그 자리를 보던 골든(`scm-scrolled-row-stops-at-list-viewport`)의 계약문은
+*"스크롤로 밀린 행은 … 그 경계에서 잘린다"* 였는데 crop 이 잡은 것은 **개수 알약(quad)** 이었다. quad 는
+제대로 잘리고 있었으므로 골든은 초록이었고, 같은 행의 **글자**는 아무도 안 보고 있었다. 계약문이 "행"
+이라 적고 실제로는 그 행의 한 종류만 볼 때 생기는 일이다.
+
 ## 6. drag 수명 — tick이 소비하고, tree 교체를 견딘다
 
 pointer move는 tick보다 훨씬 자주 온다. 매 move마다 offset을 적용하면 한 프레임 안에서 같은 재투영을

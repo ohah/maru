@@ -53,6 +53,18 @@ pub fn bufferSizes(row_count: usize) struct { nodes: usize, entries: usize, acti
     return .{ .nodes = row_count + 2, .entries = row_count + 2, .actions = row_count };
 }
 
+/// 행 **글자**를 자를 뷰포트 — published tree 의 root(스크롤 영역) 사각형이다.
+///
+/// quad 는 `effective_clip` 으로 잘리는데 measured 글자는 host 가 이 사각형을 넘겨야 잘린다. 안 넘기면
+/// 반쯤 스크롤된 첫 행의 라벨이 트리 위쪽 고정 chrome 위에 그려진다(2026-08-25 — SCM 도크에서 같은
+/// 결함을 캡처로 잡았고, 이 도크도 같은 배선이 빠져 있었다).
+pub fn scrollTextViewport(published: tree.UiRectTree) ?layout.UiRect {
+    const index = published.find(NodeIds.root) orelse return null;
+    const rect = published.entries[index].rect;
+    if (rect.width <= 0 or rect.height <= 0) return null;
+    return rect;
+}
+
 pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const m = types.Metrics.resolve(props.scale_milli);
     const sizes = bufferSizes(props.rows.len);
@@ -95,7 +107,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const list_slice = buffers.nodes[props.rows.len .. props.rows.len + 1];
 
     // root는 **자기 크기를 `root_size`로 받는다**(도크 스크롤 tree와 같은 이유로 outer style을 주지
-    // 않는다). 가상화로 위로 밀린 몫은 음수 origin으로 주고, 위·아래로 삐져나온 행은 이 clip이 자른다.
+    // 않는다). 가상화로 위로 밀린 몫은 음수 origin으로 주고, 위·아래로 삐져나온 행의 **quad**는 이 clip이 자른다.
+    // **글자는 이 clip이 못 자른다** — measured CoreText 경로는 host 가 넘긴 뷰포트로 glyph마다
+    // 자르므로(draw.zig `scroll_clipped` 계약), 그 사각형은 아래 `scrollTextViewport`가 낸다.
     const root = tree.scrollArea(.{
         .id = NodeIds.root,
         .scroll = .{
@@ -279,6 +293,18 @@ test "가상화: 첫 행이 위로 밀리면 그만큼 올라가고 root 가 자
     const frame = try testBuild(.{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows, .origin_shift_px = shift }, &nodes, &entries, &items, &flex, &rects);
     const first = frame.tree.entries[frame.tree.find(NodeIds.row(0)).?];
     try testing.expectEqual(-@as(f32, @floatFromInt(shift)), first.rect.y);
-    // 위로 삐져나온 행은 clip을 들고 있어야 한다 — 없으면 도크 헤더 위로 글자가 샌다.
+    // 위로 삐져나온 행은 clip을 들고 있어야 한다 — 없으면 도크 헤더 위로 행의 **칠**이 샌다.
     try testing.expect(first.effective_clip != null);
+    // **글자는 그 clip 이 못 자른다.** measured CoreText 경로는 host 가 넘긴 뷰포트로 glyph 마다
+    // 자르므로(draw.zig `scroll_clipped`), 그 사각형을 컴포넌트가 낼 수 있어야 한다. 이 단언이
+    // 없던 동안 두 도크(SCM·파일 트리)가 그 값을 아무도 안 넘겨 라벨이 위쪽 chrome 위에 그려졌다.
+    const text_viewport = scrollTextViewport(frame.tree) orelse return error.NoTextViewport;
+    const root_rect = frame.tree.entries[frame.tree.find(NodeIds.root).?].rect;
+    try testing.expectEqual(root_rect, text_viewport);
+}
+
+test "글자 뷰포트는 root 가 없으면 null 이다(빈 tree 에서 지어내지 않는다)" {
+    var entries: [1]tree.RectEntry = undefined;
+    const empty: tree.UiRectTree = .{ .entries = entries[0..0], .generation = 0 };
+    try testing.expect(scrollTextViewport(empty) == null);
 }

@@ -1236,6 +1236,18 @@ pub fn collectScmDock(
 
     const scale = scmDockScaleMilli(self);
     const scroll_origin_y_px = props.content_first_item_origin_y_px;
+    // 목록 글자를 자를 뷰포트. **quad 는 tree 의 `effective_clip` 이 자르지만 measured 글자는 이 값이
+    // 없으면 아무 데도 안 잘린다** — 그 상태에서 반쯤 스크롤된 첫 행의 라벨이 요약 줄 위에 그려졌다
+    // (2026-08-25 사용자가 골든 캡처에서 지적). 사각형의 출처는 컴포넌트 하나다(`build`).
+    const scroll_clip: ?metal_frame.ClipPx = blk: {
+        const rect = component.build.scrollTextViewport(frame.tree) orelse break :blk null;
+        break :blk .{
+            .x = content.x +| @as(u32, @intFromFloat(@max(rect.x, 0))),
+            .y = content.y +| @as(u32, @intFromFloat(@max(rect.y, 0))),
+            .w = @intFromFloat(@max(rect.width, 0)),
+            .h = @intFromFloat(@max(rect.height, 0)),
+        };
+    };
     const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
         draws.ops,
         &tokens,
@@ -1260,6 +1272,7 @@ pub fn collectScmDock(
                     .origin_x = content.x,
                     .origin_y = content.y,
                     .colors = colors,
+                    .clip_rect = scroll_clip,
                     .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
                 } },
             );

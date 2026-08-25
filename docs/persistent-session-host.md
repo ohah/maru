@@ -7095,10 +7095,15 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
       attach는 100ms 이내 current cache를 재사용하고, `runtime.observation` barrier는 항상 `.fresh`로 재materialize한다.
       canonical bytes는 `beginWriteRaw` 경로로 envelope에 직접 삽입하며, 제품 구현자는 검증과 canonicalization을 수행하는
       `RuntimeManager.cachedObservationOp` 하나로 고정한다.
-    - **E2c product/performance gate:** 1·10·100 runtime과 controller+slow observer 조합에서 runtime materialization 횟수가
-      subscription 수가 아니라 source change 수에 결속됨을 artifact로 남긴다. idle CPU/allocation, output→healthy-client
-      latency, core-lock hold와 RSS의 hard cap은 `performance-budget.md`가 소유한다. E2a·E2b만으로 E2 또는 P4 완료를
-      주장하지 않는다.
+    - **E2c product/performance gate:** cadence는 관측 기회일 뿐 source change가 아니다. runtime owner는 lock-free
+      `observer_generation`·`title_generation`과 고정 배열 foreground 표본을 이전 cache source와 비교하고, 동일 source면
+      새 cadence에서도 core lock·owned field copy·canonical JSON·cache transaction을 모두 건너뛴다. foreground의 500ms
+      OS poll은 고정 배열에서 pid/name/pgid를 먼저 비교하므로 poll 자체가 materialization을 만들지 않는다. 같은 sweep의
+      controller+slow observer는 첫 view를 공유하고, 늦은 옛 epoch는 source preflight도 실행하지 않는다.
+      1·10·100 runtime 제품 fixture는 최초 sweep의 materialization이 runtime 수와 정확히 같고, 둘째 consumer·다음 idle
+      sweep의 증분은 0이며, runtime 하나의 source change 뒤 증분은 정확히 1임을 고정한다. 별도 macOS artifact는 idle
+      CPU/allocation, output→healthy-client latency, core-lock hold와 RSS를 남기며 hard cap은 `performance-budget.md`가
+      소유한다. 이 artifact와 cap 판정 전에는 E2 또는 P4 완료를 주장하지 않는다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
   않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다

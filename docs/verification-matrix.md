@@ -2144,7 +2144,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller wire로 보내 healthy client의 exact delta marker까지 측정한 raw artifact와 `performance-budget.md` hard cap이 없으면
   구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 빠른 제품 gate는 250ms idle wake delta 0과 CPU
   cap, 7 active marker의 notifier/write/drain 증가를 소유하며, 장시간 idle soak는 CR6f 이후 운영 soak 범위로 남긴다.
-- **P4 E2 runtime-shared observation cache: 부분 구현(E2a·E2b).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
+- **P4 E2 runtime-shared observation cache: 부분 구현(E2a·E2b·E2c source gate).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
   E2a의 `runtime_observation_cache.Cache`는 canonical bytes와 checked-monotonic change token을 소유하고, 동일 bytes의
   allocation/token 증가 0, changed prepare→exact-token commit, stale prepared 거부, OOM·token overflow 때 이전 bytes/token
   무변경과 explicit discard, unpublished/published-empty 구분, caller-owned byte cap의 allocation 전 거부를 Debug·ReleaseFast로
@@ -2153,8 +2153,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   E2b는 heap-pinned runtime별 cache owner, same cadence epoch materialization 1회, attach current cache와 user-action fresh
   barrier, canonical JSON raw embedding, subscription별 token/revision queue-admission commit을 제품 경로에 연결한다. runtime
   terminate는 cache를 exact once 회수하고 same-PID upgrade는 파생 cache를 명시 재구성한다. subscription은 canonical bytes를
-  복제하지 않아 slow/OOM client의 delivery 상태가 cache와 sibling을 소유하지 않는다. E2c의 1·10·100 runtime
-  product/performance artifact와 hard cap 판정은 아직 미구현이다.
+  복제하지 않아 slow/OOM client의 delivery 상태가 cache와 sibling을 소유하지 않는다. E2c source gate는 lock-free core
+  generation과 cache 생성 뒤 steady-state allocation-free foreground identity 비교로 idle cadence materialization을 0으로 만들고, 실제 `/bin/cat`
+  runtime 1·10·100개에서 consumer 2회·idle next epoch가 runtime당 최초 1회만 materialize하며 runtime 하나 변경 뒤 정확히
+  1회만 증가함을 ReleaseFast로 고정한다. controller+slow observer macOS raw artifact의 CPU/allocation·healthy latency·
+  core-lock hold·RSS hard cap 판정은 아직 미구현이다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

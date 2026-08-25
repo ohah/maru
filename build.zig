@@ -3186,6 +3186,35 @@ pub fn build(b: *std.Build) void {
     run_session_host_e2b_boundary_tests.setCwd(b.path("."));
     session_host_e2b_step.dependOn(&run_session_host_e2b_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e2b_boundary_tests.step);
+    const session_host_e2c_step = b.step(
+        "test-session-host-e2c",
+        "Verify P4 E2c observation source-change scaling at 1, 10, and 100 runtimes",
+    );
+    const session_host_e2c_manager_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"P4 E2c"},
+    });
+    const run_session_host_e2c_manager_tests = b.addRunArtifact(session_host_e2c_manager_tests);
+    run_session_host_e2c_manager_tests.addArg("--maru-expect-tests=1");
+    session_host_e2c_step.dependOn(&run_session_host_e2c_manager_tests.step);
+    const session_host_e2c_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_e2c_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P4 E2c source change"},
+    });
+    const run_session_host_e2c_boundary_tests = b.addRunArtifact(session_host_e2c_boundary_tests);
+    run_session_host_e2c_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_e2c_boundary_tests.setCwd(b.path("."));
+    session_host_e2c_step.dependOn(&run_session_host_e2c_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_e2c_boundary_tests.step);
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

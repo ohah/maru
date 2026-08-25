@@ -431,9 +431,24 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
   coordinator(`session/workspace_checkpoint.zig`)의 `mutation()` 을 부르고, 위 목록의 진입점(`createTab`·
   `closeTab`·`moveTab`·`detachTabForMove`·`moveWorkspaceToSession`)이 그것을 부른다. coordinator 는 **앱
   전역**이다 — manifest 는 여러 창의 블록을 한 파일로 모은 것이라 창마다 두면 같은 파일을 두 번 쓴다.
-  ⚠️ **구동은 아직이다**: `tick`/capture/write 를 누가 모는지, 그리고 지금 Swift 가 하는 조립·쓰기를 Zig 로
-  옮길지는 정하지 않았다(그 결정을 미루려고 이 슬라이스는 `mutation` 만 부른다). 즉 **dirty 는 서지만 파일은
+  ⚠️ **구동은 아직이다**: `tick`/capture/write 를 이 슬라이스는 몰지 않는다. 즉 **dirty 는 서지만 파일은
   아직 정상 종료 시점에만 쓰인다** — 강제 종료 뒤 최신 layout 자동 재연결은 여전히 완료 계약이 아니다(§2).
+
+**쓰기 소유자는 Zig 다(2026-08-25 확정).** 지금은 Swift 가 창을 돌며 창별 블록을 ABI 로 받아 헤더 아래로
+이어 붙이고 파일에 쓴다. 그 조립·쓰기를 플랫폼에 두면 **Windows·Linux 가 같은 것을 다시 짜야 한다** — 그리고
+그건 「어느 창이 있었나」를 파일로 옮기는, 플랫폼과 무관한 일이다. 직렬화(`session/workspace.zig`)가 이미
+공용 Zig 인 것과 같은 이유로 조립·쓰기도 Zig 가 갖는다.
+
+**그래도 플랫폼에 남는 것이 있다 — 둘을 갈라 둔다.**
+
+- **창 관리자 사실은 플랫폼이 준다**: 어느 창이 key 인가(`is_active`), 창 frame(`win-x/y/w/h`). 이것은
+  AppKit·Win32 가 아는 값이라 Zig 가 계산할 수 없다. 지금처럼 **밀어 넣는** 방향을 유지한다.
+- **원자적 교체 원시연산은 플랫폼마다 다르다**: 현재 C2 leaf(`platform/macos/workspace_checkpoint_file.zig`)는
+  POSIX `rename` 이다. Windows 는 `ReplaceFile` 계열이라 같은 계약(같은 디렉터리 temp → 원자적 교체)을
+  **플랫폼 seam 뒤에** 둬야 한다. 지금 그 파일이 `platform/macos/` 아래인 것은 그 seam 이 아직 없다는 뜻이다.
+
+**선결 하나**: Zig 가 조립하려면 **살아 있는 창 목록**이 필요한데, 지금은 개수(`live_app_sessions`)만 센다.
+목록은 세는 그 자리(init/deinit)에서 함께 유지하면 된다 — 그 배선이 다음 슬라이스의 첫 단계다.
   회귀 gate 는 `test-provider-session-removal` 의 「P4: 배치를 바꾸는 사건이 checkpoint dirty 를 세운다」이며,
   한 사건은 제품 경로로 태우고 나머지는 **소스로** 못 박는다(함수마다 UI 를 만들다 깨지면 판정자가 «배선» 이
   아니라 «픽스처» 를 재게 된다). ⚠️ 그 소스 판정은 **줄 단위**로 본다 — 글자만 찾으면 주석 처리된 호출도

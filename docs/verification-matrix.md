@@ -2192,3 +2192,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - 새 코드가 `project-structure.md`의 facade/책임 폴더 규칙과 `layering-and-portability.md`의 L2/L4 경계를 지키는가? `main.zig`, Swift, `app_session.zig`에 새 정책·순수 로직을 넣지 않았는가?
 - hot path, queue, lock, allocation/copy, thread hop, I/O, frame tick에 새 부담을 만들었는가? 만들었다면 어떤 예산·stress·artifact로 확인했는가?
 - 한계가 새로 드러났다면 PR 설명과 사용자 보고에 적었는가?
+
+### 영속 host 사용자 단어 구분자
+
+- **상태: 구현.** host-backed 더블클릭은 client의 현재 `input.word-separators`를 UTF-8 경계
+  64 byte 이하의 pointer-free `SelectRequest`에 복사하고 hex wire로 보낸다. host는 길이·hex·UTF-8을
+  strict 검증한 뒤 권위 `TerminalCore.selectWordAt`에 전달한다.
+- **자동 검증:** `test-session-host`가 fixed request/raw decode, 64-byte cap, odd/invalid hex, invalid UTF-8,
+  server field routing을 검증한다. fresh-process 독립 host E2E가 `foo.bar`에 구분자 `.`를 적용해
+  `foo`만 선택·복사함을 검증한다.
+- **남은 gate:** additive field를 모르는 same-major 구 host는 기본 공백 경계로 degraded된다.
+  frozen 구 binary 재접속 행은 아직 별도 자동 gate가 아니다.

@@ -6125,23 +6125,34 @@ pub const RemoteRuntime = struct {
     /// 단어/줄 선택(§6b-2): host가 콘텐츠를 아는 자기 core로 경계를 계산하게 하고(`selectWordAt`/`selectLineAt`) 결과 뷰포트
     /// 선택 span을 받는다(빈 placeholder는 경계를 모른다 = 선택 의미론 host 단일 출처). caller는 이 span을 placeholder에 적용해
     /// 하이라이트한다(복사는 #6b-1 selectedText가 그 span으로 host 추출). `op`는 고정 리터럴("word"/"line"). 선택 없으면 null.
-    pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16) client_mod.ClientError!?terminal.SelectionSpan {
+    pub fn selectContentAware(self: *RemoteRuntime, op: []const u8, row: u16, col: u16, separators: []const u8) client_mod.ClientError!?terminal.SelectionSpan {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
         try self.beginStableMutation(&mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
-        var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d}}}", .{ self.currentGeneration().attachment.streamId(), op, row, col }) catch return error.OutOfMemory;
+        if (separators.len > 64 or !std.unicode.utf8ValidateSlice(separators)) return error.ProtocolError;
+        var separators_hex: [128]u8 = undefined;
+        const hex_chars = "0123456789abcdef";
+        for (separators, 0..) |byte, index| {
+            separators_hex[index * 2] = hex_chars[byte >> 4];
+            separators_hex[index * 2 + 1] = hex_chars[byte & 0xf];
+        }
+        const separators_hex_len = separators.len * 2;
+        var buf: [256]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"op\":\"{s}\",\"row\":{d},\"col\":{d},\"separators_hex\":\"{s}\"}}", .{ self.currentGeneration().attachment.streamId(), op, row, col, separators_hex[0..separators_hex_len] }) catch return error.OutOfMemory;
         const kind: generation_contract.SelectKind = if (std.mem.eql(u8, op, "word"))
             .word
         else if (std.mem.eql(u8, op, "line"))
             .line
         else
             return error.ProtocolError;
+        var request: generation_contract.SelectRequest = .{ .kind = kind, .row = row, .col = col };
+        @memcpy(request.separators[0..separators.len], separators);
+        request.separators_len = @intCast(separators.len);
         var output: ?terminal.SelectionSpan = null;
         try self.callDecoded(
-            generation_contract.RuntimeRequest.selectOp(.{ .kind = kind, .row = row, .col = col }),
+            generation_contract.RuntimeRequest.selectOp(request),
             "runtime.select_op",
             params,
             &output,
@@ -14163,7 +14174,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
             defer spans.deinit(runtime.allocator);
             _ = try runtime.find("x", 0, false, &spans);
         },
-        .select_op => _ = try runtime.selectContentAware("word", 0, 0),
+        .select_op => _ = try runtime.selectContentAware("word", 0, 0, ""),
         .core_command => try runtime.sendCoreCommandBlocking(.scroll_to_bottom),
         .report_mouse => try runtime.sendMouseReport(.{
             .button = 0,
@@ -17504,8 +17515,8 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
     defer rr.deinit();
     const surface = rr.surfacePtr();
 
-    // "foo bar"를 입력 → cat echo → host core row0. RemoteScreen 반영까지 pump.
-    try rr.sendInput("foo bar\n");
+    // "foo.bar baz"를 입력 → cat echo → host core row0. RemoteScreen 반영까지 pump.
+    try rr.sendInput("foo.bar baz\n");
     var ready = false;
     var attempts: usize = 0;
     while (attempts < 200 and !ready) : (attempts += 1) {
@@ -17517,8 +17528,9 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
     }
     try testing.expect(ready);
 
-    // (0,0)의 **단어** = "foo"를 host가 경계 계산 → span. 그 span으로 텍스트를 뽑으면 "foo".
-    const word_span = (try rr.selectContentAware("word", 0, 0)) orelse {
+    // (0,0)의 **단어** = "foo"를 host가 사용자 구분자 '.'로 경계 계산 → span. 빈 구분자면
+    // "foo.bar"가 잡히므로, 이 단언은 config 값이 client→wire→host core 전체를 통과했음을 증명한다.
+    const word_span = (try rr.selectContentAware("word", 0, 0, ".")) orelse {
         try testing.expect(false);
         return;
     };
@@ -17528,10 +17540,10 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
         return;
     };
     defer allocator.free(word);
-    try testing.expectEqualStrings("foo", word); // host가 공백 경계로 단어를 잡았다(빈 placeholder는 못 함).
+    try testing.expectEqualStrings("foo", word); // host가 client의 '.' 경계로 단어를 잡았다(빈 placeholder는 못 함).
 
-    // **줄** 선택 = row0 전체 "foo bar".
-    const line_span = (try rr.selectContentAware("line", 0, 0)) orelse {
+    // **줄** 선택 = row0 전체 "foo.bar baz".
+    const line_span = (try rr.selectContentAware("line", 0, 0, "")) orelse {
         try testing.expect(false);
         return;
     };
@@ -17540,7 +17552,7 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
         return;
     };
     defer allocator.free(line);
-    try testing.expectEqualStrings("foo bar", line); // 줄 전체(host 계산).
+    try testing.expectEqualStrings("foo.bar baz", line); // 줄 전체(host 계산).
 }
 
 // code-review #6c end-to-end — 원격 검색. 빈 client placeholder는 검색을 못 하므로 host가 자기 core(콘텐츠·스크롤백)에서

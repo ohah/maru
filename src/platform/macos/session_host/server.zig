@@ -246,7 +246,7 @@ pub const RuntimeOps = struct {
     /// §6b-2 단어/줄 선택: client가 (op, row, col)을 보내면 host가 **콘텐츠를 아는 자기 core**로 경계를 계산해
     /// (`selectWordAt`/`selectLineAt`) 그 뷰포트 선택 span을 JSON으로 돌려준다(client는 그 span을 placeholder에 적용해
     /// 하이라이트). 빈 placeholder는 단어/줄 경계를 모르므로 host가 계산 = 선택 의미론 host 단일 출처. codec 순수라 op는 문자열.
-    select_op: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8,
+    select_op: *const fn (ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, separators_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8,
     /// §6c 원격 검색: client가 보낸 검색어(hex — 임의 텍스트라 escape 회피)로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서
     /// `findMatches`(로컬과 같은 함수)로 매치를 찾고, 보이는 매치를 `matchViewportSpan`으로 클립해 JSON `{count, cur:[...], spans:[...]}`로
     /// 준다. count=전체 매치 수, spans=보이는 **비현재** 매치의 flat 좌표, cur=현재 매치(index `cur_index`)의 뷰포트 span(안 보이면 `[]`).
@@ -2334,9 +2334,10 @@ pub const Connection = struct {
         const op = strField(p, "op") orelse return self.replyError(request_id, .invalid_request);
         const row = intField(p, "row") orelse 0;
         const col = intField(p, "col") orelse 0;
+        const separators_hex = strField(p, "separators_hex") orelse "";
         const runtime_id = (self.attachments.get(stream) orelse return self.replyError(request_id, .invalid_request)).runtime_id;
         const body = if (self.runtime_ops) |ops|
-            ops.select_op(ops.ctx, runtime_id, op, row, col, self.allocator) catch return self.replyError(request_id, .internal)
+            ops.select_op(ops.ctx, runtime_id, op, row, col, separators_hex, self.allocator) catch return self.replyError(request_id, .internal)
         else
             (self.allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory);
         defer self.allocator.free(body);
@@ -4599,6 +4600,8 @@ pub const FakeRuntimeOps = struct {
     last_select_op_len: usize = 0,
     last_select_op_row: u16 = 0,
     last_select_op_col: u16 = 0,
+    last_select_separators_hex: [128]u8 = undefined,
+    last_select_separators_hex_len: usize = 0,
     last_find_query_hex: [64]u8 = undefined,
     last_find_query_hex_len: usize = 0,
     last_find_cur: u32 = 0,
@@ -4796,7 +4799,7 @@ pub const FakeRuntimeOps = struct {
         return allocator.dupe(u8, "{\"text\":\"https://example.com/x\",\"kind\":0}");
     }
     /// 받은 (op,row,col)을 기록하고 고정 span을 준다 — server 라우팅·파싱 검증(실 경계 계산은 runtime_manager smoke).
-    fn selectOpFn(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, allocator: std.mem.Allocator) anyerror![]u8 {
+    fn selectOpFn(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, separators_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
         const n = @min(op.len, self.last_select_op.len);
@@ -4804,6 +4807,9 @@ pub const FakeRuntimeOps = struct {
         self.last_select_op_len = n;
         self.last_select_op_row = row;
         self.last_select_op_col = col;
+        const separators_n = @min(separators_hex.len, self.last_select_separators_hex.len);
+        @memcpy(self.last_select_separators_hex[0..separators_n], separators_hex[0..separators_n]);
+        self.last_select_separators_hex_len = separators_n;
         return allocator.dupe(u8, "{\"sel\":true,\"sr\":0,\"sc\":1,\"er\":0,\"ec\":3,\"block\":false}");
     }
     /// 받은 검색어(hex)/cur/scroll을 기록하고 고정 결과(2 매치, cur span 1 + 비현재 span 1)를 준다 — server 라우팅·파싱 검증.
@@ -7233,7 +7239,7 @@ test "server: runtime.select_op routes word/line op to RuntimeOps and returns sp
     }
     // word(row1,col2) → RuntimeOps.select_op으로 라우팅 + fake span을 응답에 담는다.
     {
-        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":1,\"op\":\"word\",\"row\":1,\"col\":2}}");
+        const r = try feedJson(&conn, .request, 3, "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":1,\"op\":\"word\",\"row\":1,\"col\":2,\"separators_hex\":\"2e\"}}");
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"sel\":true") != null);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"ec\":3") != null);
@@ -7241,6 +7247,7 @@ test "server: runtime.select_op routes word/line op to RuntimeOps and returns sp
     try testing.expectEqualStrings("word", fake.last_select_op[0..fake.last_select_op_len]);
     try testing.expectEqual(@as(u16, 1), fake.last_select_op_row);
     try testing.expectEqual(@as(u16, 2), fake.last_select_op_col);
+    try testing.expectEqualStrings("2e", fake.last_select_separators_hex[0..fake.last_select_separators_hex_len]);
 
     // 모르는 stream_id → invalid_request.
     {

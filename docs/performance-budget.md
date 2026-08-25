@@ -162,6 +162,28 @@ delta 1 이상이어야 하므로 우연히 20ms cadence에 걸린 빠른 표본
 상수·이 절을 함께 갱신한다. wake counter와 idle CPU 표본까지 더한 뒤의 5회 연속 실행도 median 2.8~3.1ms, 전체 max
 8.7ms, idle wake delta 0, idle CPU delta 0.071~0.088ms였다. 250ms는 빠른 제품 gate이지 장시간 idle soak를 대체하지 않는다.
 
+## P4 E2 runtime-shared observation cache 예산
+
+`test-session-host-e2c`의 ReleaseFast 제품 fixture는 실제 `/bin/cat` runtime 1·10·100개에서 최초
+materialization을 각각 정확히 1·10·100회, 같은 sweep의 둘째 consumer와 다음 idle cadence의 증분을 0회,
+runtime 하나의 source generation 변경 뒤 증분을 정확히 1회로 판정한다. materialization마다 core lock 획득은
+BEL·clipboard·screen의 정확히 3회여야 한다. 이 호출 수 판정은 하드웨어 속도와 무관하며 client 수나 idle cadence가
+제품 작업량을 다시 늘리는 구조 회귀를 잡는다.
+
+`session-host-slow-observer-macos.json` v2는 별도 ReleaseFast host의 실제 controller·slow observer·healthy
+observer 제품 경로에서 누적 materialization, core-lock 획득 수, lock hold total/max와 250ms idle 전후 증분을
+남긴다. validator는 누적 획득 수가 `materializations * 3`과 정확히 같은지, idle 구간의 materialization·lock
+획득·lock hold 증분이 모두 0인지 판정한다. observation-owned heap copy·canonical JSON·cache transaction은
+materialization 안에서만 열리므로 idle materialization 0이 이 경계의 allocation opportunity 0을 구조적으로
+증명한다. 전체 프로세스 allocator 호출 수를 대신 주장하지 않는다.
+
+개별 core-lock hold max hard cap은 **25ms**다. timestamp를 lock 획득 직후와 unlock 직전에 읽는 실제 hold 정의의
+로컬 5회 실측 max는 0.209~0.375µs였다. 이 벽시계에는 lock을 쥔 host thread의 OS preemption도 포함되므로 통상값의
+4~5배를 쓰면 구조가 아니라 scheduler를 판정한다. 호출 수·idle 증분이 일상적인 구조 회귀를 기계 독립적으로 잡고,
+25ms는 lock 아래 blocking I/O나 장시간 작업 유입만 잡는 재앙 감지선이다. idle CPU **25ms**, healthy delivery median **10ms**/tail **20ms**, RSS analytic cap은
+같은 artifact의 기존 CR6f·slow-observer 판정을 그대로 공유한다. lock cap, 구조 counter, raw RSS/CPU/latency 중
+하나라도 없거나 불일치하면 exact-schema validator가 fail-closed한다.
+
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
 [control-plane-protocol.md §4.4](control-plane-protocol.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.

@@ -22,7 +22,7 @@ pub const ReportKind = enum(u8) {
 
 pub const CommandPacket = extern struct {
     magic: u32 = 0x4d525343, // MRSC
-    version: u16 = 1,
+    version: u16 = 2,
     length: u16 = @sizeOf(CommandPacket),
     sequence: u64,
     action: u8,
@@ -33,7 +33,7 @@ pub const CommandPacket = extern struct {
     }
 
     pub fn command(self: CommandPacket) ?Command {
-        if (self.magic != 0x4d525343 or self.version != 1 or
+        if (self.magic != 0x4d525343 or self.version != 2 or
             self.length != @sizeOf(CommandPacket) or self.sequence == 0 or
             !std.mem.allEqual(u8, &self.reserved, 0)) return null;
         return std.enums.fromInt(Command, self.action);
@@ -42,7 +42,7 @@ pub const CommandPacket = extern struct {
 
 pub const Report = extern struct {
     magic: u32 = 0x4d525350, // MRSP
-    version: u16 = 1,
+    version: u16 = 2,
     length: u16 = @sizeOf(Report),
     sequence: u64,
     kind: u8,
@@ -77,6 +77,10 @@ pub const Report = extern struct {
     reaped_children: u64,
     last_child_exit_status: i32,
     exit_reserved: u32 = 0,
+    observation_materializations: u64,
+    observation_core_lock_acquisitions: u64,
+    observation_core_lock_hold_total_ns: u64,
+    observation_core_lock_hold_max_ns: u64,
 
     pub fn from(
         sequence: u64,
@@ -85,6 +89,7 @@ pub const Report = extern struct {
         pty_output_bytes: u64,
         output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
+        observation: session_host.runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
     ) Report {
         const a = telemetry.accounting;
         return .{
@@ -119,13 +124,17 @@ pub const Report = extern struct {
             .live_child_pid = child_exit.live_child_pid,
             .reaped_children = child_exit.reaped_children,
             .last_child_exit_status = child_exit.last_exit_status,
+            .observation_materializations = observation.materializations,
+            .observation_core_lock_acquisitions = observation.core_lock_acquisitions,
+            .observation_core_lock_hold_total_ns = observation.core_lock_hold_total_ns,
+            .observation_core_lock_hold_max_ns = observation.core_lock_hold_max_ns,
         };
     }
 
     pub fn valid(self: Report) bool {
         const parsed_kind = std.enums.fromInt(ReportKind, self.kind) orelse return false;
         _ = parsed_kind;
-        return self.magic == 0x4d525350 and self.version == 1 and
+        return self.magic == 0x4d525350 and self.version == 2 and
             self.length == @sizeOf(Report) and self.sequence != 0 and
             std.mem.allEqual(u8, &self.reserved, 0) and self.exit_reserved == 0;
     }
@@ -202,6 +211,11 @@ test "report rejects every framing field corruption" {
         .live_child_pid = 0,
         .reaped_children = 0,
         .last_exit_status = -1,
+    }, .{
+        .materializations = 0,
+        .core_lock_acquisitions = 0,
+        .core_lock_hold_total_ns = 0,
+        .core_lock_hold_max_ns = 0,
     });
     try std.testing.expect(valid.valid());
 
@@ -262,6 +276,11 @@ test "exact packet decodes and exact plus one datagram is rejected" {
         .live_child_pid = 0,
         .reaped_children = 0,
         .last_exit_status = -1,
+    }, .{
+        .materializations = 0,
+        .core_lock_acquisitions = 0,
+        .core_lock_hold_total_ns = 0,
+        .core_lock_hold_max_ns = 0,
     });
     try std.testing.expectEqual(
         ReportKind.stop_ack,

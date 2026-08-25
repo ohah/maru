@@ -19,7 +19,7 @@ extern "c" fn getdtablesize() c_int;
 extern "c" fn arc4random_buf(buffer: *anyopaque, length: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
 
-const schema_name = "maru.session-host-slow-observer-macos.v1";
+const schema_name = "maru.session-host-slow-observer-macos.v2";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -123,6 +123,13 @@ const Artifact = struct {
     idle_cpu_before: IdleCpuSample,
     idle_cpu_after: IdleCpuSample,
     idle_cpu_total_delta_ns: u64,
+    observation_materializations: u64,
+    observation_core_lock_acquisitions: u64,
+    observation_core_lock_hold_total_ns: u64,
+    observation_core_lock_hold_max_ns: u64,
+    idle_observation_materialization_delta: u64,
+    idle_observation_core_lock_acquisition_delta: u64,
+    idle_observation_core_lock_hold_delta_ns: u64,
     active_wake_notify_delta: u64,
     active_wake_published_delta: u64,
     active_wake_coalesced_delta: u64,
@@ -796,6 +803,13 @@ pub fn main(init: std.process.Init) !void {
         .idle_cpu_after = idle_cpu_after,
         .idle_cpu_total_delta_ns = (idle_cpu_after.user_time_ns - idle_cpu_before.user_time_ns) +
             (idle_cpu_after.system_time_ns - idle_cpu_before.system_time_ns),
+        .observation_materializations = final_report.observation_materializations,
+        .observation_core_lock_acquisitions = final_report.observation_core_lock_acquisitions,
+        .observation_core_lock_hold_total_ns = final_report.observation_core_lock_hold_total_ns,
+        .observation_core_lock_hold_max_ns = final_report.observation_core_lock_hold_max_ns,
+        .idle_observation_materialization_delta = idle_wake_after.observation_materializations - idle_wake_before.observation_materializations,
+        .idle_observation_core_lock_acquisition_delta = idle_wake_after.observation_core_lock_acquisitions - idle_wake_before.observation_core_lock_acquisitions,
+        .idle_observation_core_lock_hold_delta_ns = idle_wake_after.observation_core_lock_hold_total_ns - idle_wake_before.observation_core_lock_hold_total_ns,
         .active_wake_notify_delta = active_wake_after.output_wake_notify_attempts - idle_wake_after.output_wake_notify_attempts,
         .active_wake_published_delta = active_wake_after.output_wake_published_writes - idle_wake_after.output_wake_published_writes,
         .active_wake_coalesced_delta = active_wake_after.output_wake_coalesced_writes - idle_wake_after.output_wake_coalesced_writes,

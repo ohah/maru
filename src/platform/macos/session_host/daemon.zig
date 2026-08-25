@@ -61,6 +61,7 @@ pub const FixtureProbe = struct {
         pty_output_bytes: u64,
         output_wake: runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: runtime_manager.RuntimeManager.ChildExitEvidence,
+        observation: runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
     ) FixtureAction,
 };
 
@@ -483,7 +484,10 @@ fn runSessionHostImpl(
     // manifest 로 가려 남긴다 — GUI 는 이 질문에 답할 수 없어 이 정리가 host 쪽에 있다.
     if (hook_log_base) |base| agent_hook_logs.sweepDeadHostDirs(io, base, host_id);
     manager.enableOutputWake() catch return error.ManifestFailed;
-    if (fixture_probe != null) manager.enableOutputMetrics();
+    if (fixture_probe != null) {
+        manager.enableOutputMetrics();
+        manager.fixtureEnableObservationPerformanceEvidence();
+    }
     var socket_dir_buf: [112]u8 = undefined;
     const bind_dir = if (exact_host_id != null)
         short_endpoint.socketDirPathIn(&socket_dir_buf, c.getuid()) catch return error.ManifestFailed
@@ -698,6 +702,7 @@ fn runSessionHostImpl(
                 manager.totalPtyOutputBytes(),
                 manager.fixtureOutputWakeEvidence(),
                 manager.fixtureChildExitEvidence(),
+                manager.fixtureObservationPerformanceEvidence(),
             )) {
                 .continue_serving => {},
                 .reset_stall => fd_owner.resetFixtureStallTelemetry(),

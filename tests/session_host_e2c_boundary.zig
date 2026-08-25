@@ -16,6 +16,18 @@ test "P4 E2c source change preflight stays lock free and steady state foreground
     try std.testing.expectEqual(@as(usize, 0), count(manager, "allocator.alloc(ForegroundProcessName"));
     try std.testing.expectEqual(@as(usize, 1), count(manager, "P4 E2c observation materialization follows runtime source changes at 1 10 100 scale"));
     try std.testing.expectEqual(@as(usize, 1), count(manager, "pub const ObservationPerformanceEvidence = struct"));
+    try std.testing.expectEqual(@as(usize, 2), count(
+        manager,
+        "surface.lockCore(self.io);\n            const lock_started_at_ns",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        manager,
+        "surface.lockCore(self.io);\n        const lock_started_at_ns",
+    ));
+    try std.testing.expectEqual(@as(usize, 0), count(
+        manager,
+        "const lock_started_at_ns = if (self.observation_metrics_enabled)\n                std.Io.Clock.awake.now(self.io).nanoseconds\n            else\n                0;\n            surface.lockCore(self.io);",
+    ));
     try std.testing.expectEqual(@as(usize, 1), count(inventory, "\"observation_core_lock_hold_total_ns\""));
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-e2c\""));
 }

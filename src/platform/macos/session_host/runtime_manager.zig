@@ -1252,11 +1252,11 @@ pub const RuntimeManager = struct {
         const bell_gop = try self.bell_counts.getOrPut(self.allocator, handle);
         if (!bell_gop.found_existing) bell_gop.value_ptr.* = 0;
         {
+            surface.lockCore(self.io);
             const lock_started_at_ns = if (self.observation_metrics_enabled)
                 std.Io.Clock.awake.now(self.io).nanoseconds
             else
                 0;
-            surface.lockCore(self.io);
             defer {
                 self.recordObservationCoreLockHold(lock_started_at_ns);
                 surface.unlockCore(self.io);
@@ -1272,11 +1272,11 @@ pub const RuntimeManager = struct {
         if (!clip_gop.found_existing) clip_gop.value_ptr.* = .{};
         const clip = clip_gop.value_ptr;
         {
+            surface.lockCore(self.io);
             const lock_started_at_ns = if (self.observation_metrics_enabled)
                 std.Io.Clock.awake.now(self.io).nanoseconds
             else
                 0;
-            surface.lockCore(self.io);
             defer {
                 self.recordObservationCoreLockHold(lock_started_at_ns);
                 surface.unlockCore(self.io);
@@ -1320,11 +1320,11 @@ pub const RuntimeManager = struct {
             process_names_initialized += 1;
         }
 
+        surface.lockCore(self.io);
         const lock_started_at_ns = if (self.observation_metrics_enabled)
             std.Io.Clock.awake.now(self.io).nanoseconds
         else
             0;
-        surface.lockCore(self.io);
         defer {
             self.recordObservationCoreLockHold(lock_started_at_ns);
             surface.unlockCore(self.io);

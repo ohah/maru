@@ -2144,7 +2144,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller wire로 보내 healthy client의 exact delta marker까지 측정한 raw artifact와 `performance-budget.md` hard cap이 없으면
   구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 빠른 제품 gate는 250ms idle wake delta 0과 CPU
   cap, 7 active marker의 notifier/write/drain 증가를 소유하며, 장시간 idle soak는 CR6f 이후 운영 soak 범위로 남긴다.
-- **P4 E2 runtime-shared observation cache: 부분 구현(E2a·E2b·E2c source gate).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
+- **P4 E2 runtime-shared observation cache: 구현(E2a·E2b·E2c artifact/cap gate).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
   E2a의 `runtime_observation_cache.Cache`는 canonical bytes와 checked-monotonic change token을 소유하고, 동일 bytes의
   allocation/token 증가 0, changed prepare→exact-token commit, stale prepared 거부, OOM·token overflow 때 이전 bytes/token
   무변경과 explicit discard, unpublished/published-empty 구분, caller-owned byte cap의 allocation 전 거부를 Debug·ReleaseFast로
@@ -2156,8 +2156,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   복제하지 않아 slow/OOM client의 delivery 상태가 cache와 sibling을 소유하지 않는다. E2c source gate는 lock-free core
   generation과 cache 생성 뒤 steady-state allocation-free foreground identity 비교로 idle cadence materialization을 0으로 만들고, 실제 `/bin/cat`
   runtime 1·10·100개에서 consumer 2회·idle next epoch가 runtime당 최초 1회만 materialize하며 runtime 하나 변경 뒤 정확히
-  1회만 증가함을 ReleaseFast로 고정한다. controller+slow observer macOS raw artifact의 CPU/allocation·healthy latency·
-  core-lock hold·RSS hard cap 판정은 아직 미구현이다.
+  1회만 증가함을 ReleaseFast로 고정한다. private probe v2를 쓰는 controller+slow observer macOS raw artifact는
+  누적 materialization·core-lock 획득/hold와 250ms idle 전후 증분을 기록한다. exact-schema validator는 lock 획득
+  `materializations * 3`, idle materialization/lock/allocation opportunity 0, 개별 lock hold 25ms와 기존 idle CPU 25ms,
+  healthy latency median 10ms/tail 20ms, raw-sample RSS analytic cap을 함께 판정한다. E2 완료는 P4 전체 완료를 뜻하지 않는다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

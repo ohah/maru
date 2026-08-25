@@ -158,69 +158,69 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     // scroll → 과거로 스크롤(view_offset>0), scroll_to_bottom → 바닥 복귀(view_offset==0)
     var i: usize = 0;
     while (i < 20) : (i += 1) try core.write("line\r\n");
-    apply(&core, .{ .scroll = 5 });
+    _ = apply(&core, .{ .scroll = 5 });
     try std.testing.expect(core.viewOffset() > 0);
-    apply(&core, .scroll_to_bottom);
+    _ = apply(&core, .scroll_to_bottom);
     try std.testing.expectEqual(@as(usize, 0), core.viewOffset());
 
     // report_mouse → mouse_tracking 켜면 코어가 SGR/x10 리포트 응답 생성
     core.mouse_tracking = .normal;
-    apply(&core, .{ .report_mouse = .{ .button = 0, .col = 1, .row = 1, .x_px = 0, .y_px = 0, .pressed = true, .motion = false, .mods = 0 } });
+    _ = apply(&core, .{ .report_mouse = .{ .button = 0, .col = 1, .row = 1, .x_px = 0, .y_px = 0, .pressed = true, .motion = false, .mods = 0 } });
     try std.testing.expect(core.pendingResponse().len > 0);
     core.clearResponse();
-    apply(&core, .{ .report_focus = false }); // 응답 유무는 focus-reporting 모드 의존 — 호출 경로 무크래시만 검증
+    _ = apply(&core, .{ .report_focus = false }); // 응답 유무는 focus-reporting 모드 의존 — 호출 경로 무크래시만 검증
 
     // config 값 명령(set_max_scrollback / set_cell_metrics / set_config_palette)
-    apply(&core, .{ .set_max_scrollback = 500 });
+    _ = apply(&core, .{ .set_max_scrollback = 500 });
     try std.testing.expectEqual(@as(usize, 500), core.maxScrollback());
-    apply(&core, .{ .set_ambiguous_wide = true }); // text.ambiguous-width reload — 라이브 코어 폭 재적용
+    _ = apply(&core, .{ .set_ambiguous_wide = true }); // text.ambiguous-width reload — 라이브 코어 폭 재적용
     try std.testing.expect(core.ambiguous_wide);
-    apply(&core, .{ .set_ambiguous_wide = false });
+    _ = apply(&core, .{ .set_ambiguous_wide = false });
     try std.testing.expect(!core.ambiguous_wide);
-    apply(&core, .{ .set_emoji_wide = false }); // text.emoji-width reload — 라이브 코어 이모지 폭 재적용
+    _ = apply(&core, .{ .set_emoji_wide = false }); // text.emoji-width reload — 라이브 코어 이모지 폭 재적용
     try std.testing.expect(!core.emoji_wide);
-    apply(&core, .{ .set_emoji_wide = true });
+    _ = apply(&core, .{ .set_emoji_wide = true });
     try std.testing.expect(core.emoji_wide);
-    apply(&core, .{ .set_cell_metrics = .{ .width = 8, .height = 16 } });
-    apply(&core, .{ .set_default_colors = .{
+    _ = apply(&core, .{ .set_cell_metrics = .{ .width = 8, .height = 16 } });
+    _ = apply(&core, .{ .set_default_colors = .{
         .foreground = .{ .r = 0x11, .g = 0x22, .b = 0x33 },
         .background = .{ .r = 0x44, .g = 0x55, .b = 0x66 },
     } });
     var palette: [16]?terminal.Rgb = .{null} ** 16;
     palette[1] = .{ .r = 10, .g = 20, .b = 30 };
-    apply(&core, .{ .set_config_palette = palette });
+    _ = apply(&core, .{ .set_config_palette = palette });
     try std.testing.expect(core.config_palette[1] != null);
 
     // P3-4 scroll·선택(full (a)) — 코어 상태 변화 검증
-    apply(&core, .scroll_to_bottom); // 바닥에서 선택 좌표 일관
-    apply(&core, .select_all);
+    _ = apply(&core, .scroll_to_bottom); // 바닥에서 선택 좌표 일관
+    _ = apply(&core, .select_all);
     try std.testing.expect(core.selection_anchor != null);
     // select_clear가 ⌘A 선택을 실제로 지운다 — 마우스 리포팅 pane/타이핑에서 하이라이트가 영구히 남던
     // 결함의 유일한 해제 경로라 여기서 고정한다(선택 없을 때 재적용해도 no-op이어야 한다).
-    apply(&core, .select_clear);
+    _ = apply(&core, .select_clear);
     try std.testing.expect(core.selection_anchor == null);
-    apply(&core, .select_clear);
+    _ = apply(&core, .select_clear);
     try std.testing.expect(core.selection_anchor == null);
-    apply(&core, .select_all); // 이후 검증이 선택 있는 상태를 전제하므로 되돌린다
-    apply(&core, .{ .jump_to_prompt = -1 }); // OSC 133 없으면 no-op — 무크래시 경로
-    apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } }); // 새 선택이 이전을 대체
-    apply(&core, .{ .select_extend = .{ .row = 1, .col = 2 } });
+    _ = apply(&core, .select_all); // 이후 검증이 선택 있는 상태를 전제하므로 되돌린다
+    _ = apply(&core, .{ .jump_to_prompt = -1 }); // OSC 133 없으면 no-op — 무크래시 경로
+    _ = apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } }); // 새 선택이 이전을 대체
+    _ = apply(&core, .{ .select_extend = .{ .row = 1, .col = 2 } });
     try std.testing.expect(core.selection_anchor != null);
     // 같은 위치로 extend → anchor==head → collapse(clear): read-after-write를 apply가 원자 실행
-    apply(&core, .{ .select_extend_or_collapse = .{ .row = 0, .col = 0 } });
+    _ = apply(&core, .{ .select_extend_or_collapse = .{ .row = 0, .col = 0 } });
     try std.testing.expect(core.selection_anchor == null);
     // scroll_to_abs / scroll_to_offset / scroll_and_extend / select_word / select_line: 무크래시 경로
-    apply(&core, .{ .scroll_to_abs = 0 });
-    apply(&core, .{ .scroll_to_offset = 0 });
-    apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } });
-    apply(&core, .{ .scroll_and_extend = .{ .delta = 0, .row = 1, .col = 1 } });
+    _ = apply(&core, .{ .scroll_to_abs = 0 });
+    _ = apply(&core, .{ .scroll_to_offset = 0 });
+    _ = apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } });
+    _ = apply(&core, .{ .scroll_and_extend = .{ .delta = 0, .row = 1, .col = 1 } });
     // select_word가 separators 페이로드를 selectWordAt(row, col, separators[0..sep_len])로 전달함을 고정(F2-8 — 무크래시
     // + 분할 정확성은 core.zig "double-click with word-separators" 테스트가 별도로 본다). sep_len=0/>0 둘 다 경로 통과.
-    apply(&core, .{ .select_word = .{ .row = 0, .col = 0 } }); // sep_len 기본 0 → 공백만 경계
+    _ = apply(&core, .{ .select_word = .{ .row = 0, .col = 0 } }); // sep_len 기본 0 → 공백만 경계
     var sw_cmd: CoreCommand = .{ .select_word = .{ .row = 0, .col = 0, .sep_len = 1 } };
     sw_cmd.select_word.separators[0] = ':';
-    apply(&core, sw_cmd); // sep_len=1(":") → 구분자 경로
-    apply(&core, .{ .select_line = 0 });
+    _ = apply(&core, sw_cmd); // sep_len=1(":") → 구분자 경로
+    _ = apply(&core, .{ .select_line = 0 });
 }
 
 test "core_command.apply: clear effect follows authoritative prompt and alt state" {

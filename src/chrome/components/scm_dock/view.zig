@@ -537,6 +537,17 @@ fn clipRectOf(entry: tree.RectEntry) ?draw.Rect {
 }
 
 /// 상태 문자의 색. **모양(글자)과 함께** 쓰는 보조 신호라 색만으로 구분하지 않는다(§3.5.2).
+/// 배지 글리프. **글자가 아니라 기호인 이유**: 파일 행은 이름이 주인이라 낱말이 들어갈 폭이 없다.
+/// 뜻은 계약 §4.2 가 정하고(`✎ AI 편집`·`· 턴 중 변경`) 여기서는 그 첫 글자만 쓴다.
+fn originMark(origin: types.TurnFileOrigin) ?[]const u8 {
+    return switch (origin) {
+        // 근거가 없으면 **아무것도 그리지 않는다** — 「모른다」를 기호로 지어내면 「셸이 고쳤다」와 섞인다.
+        .unknown => null,
+        .ai_edit => "✎",
+        .turn_change => "·",
+    };
+}
+
 fn statusRole(status: types.StatusKind) tokens.ColorRole {
     return switch (status) {
         .modified => .git_modified_fg,
@@ -1350,8 +1361,29 @@ const Writer = struct {
                 sub_right -= w + gap;
             }
         }
+        var sub_left = left;
         if (turn.agent.len > 0 and left + self.measureBudget(turn.agent, .supporting) < sub_right) {
             try self.emitAt(left, sub_y, turn.agent, .muted_fg, .supporting);
+            sub_left += self.measureBudget(turn.agent, .supporting) + gap;
+        }
+        // **무엇을 했는지**(AT2). 에이전트 이름 뒤 남은 폭에만 넣고 **넘치면 안 그린다** — 위치 이름
+        // (`마지막 턴`)이 그 줄이 어느 턴인지를 말하므로, 자리가 없을 때 밀어낼 것은 이쪽이다.
+        //
+        // ⚠️ **`lineWithin` 을 쓰지 않는다.** 그것은 **행 세로 중앙**에 그리는 한 줄짜리 도우미라, 두 줄
+        // 행의 아랫줄에 쓰면 제목 줄 위에 겹쳐 그린다(적대적 검증에서 그렇게 짰다가 잡았다). 이 줄은
+        // `sub_y` 가 정한다.
+        if (turn.reply.len > 0 and sub_right > sub_left) {
+            try self.emit(
+                sub_left,
+                sub_y,
+                turn.reply,
+                self.colsFor(sub_right - sub_left),
+                .muted_fg,
+                .supporting,
+                false,
+                @intFromFloat(@max(sub_right - sub_left, 0)),
+                .origin,
+            );
         }
     }
 
@@ -1368,7 +1400,22 @@ const Writer = struct {
         var letter_buf: [1]u8 = .{file.letter};
         try self.trailing(rect, letter_buf[0..], statusRole(file.status), .supporting, m.inset_x);
         const name_x = indent + @as(f32, @floatFromInt(m.icon_extent + m.gap));
-        const right = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
+        var right = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
+        // **누가 바꿨나**(계약 §4.2). 상태 글자 **왼쪽**에 선다 — 그 둘은 다른 축이라(무엇이 일어났나 /
+        // 누가 했나) 한 자리에 겹칠 수 없다. `.unknown` 은 **아무것도 안 그린다**: 근거가 없다는 것과
+        // 「셸이 고쳤다」는 다른 사실이라, 없는 근거를 기호로 지어내지 않는다.
+        if (originMark(file.origin)) |mark| {
+            const w = self.measureBudget(mark, .supporting);
+            if (right - w > name_x) {
+                try self.emitAt(right - w, rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(typography.lineHeightPx(.supporting, effectiveScale(self.props.scale_milli))))) / 2, mark, switch (file.origin) {
+                    // 본문 색이다 — 흐린 `·` 와 **대비가 나야** 두 근거가 갈려 보인다. 새 역할을 만들지
+                    // 않는다(테마마다 두 곳을 고치게 된다 — `statusRole` 과 같은 규율).
+                    .ai_edit => .surface_fg,
+                    else => .muted_fg,
+                }, .supporting);
+                right -= w + @as(f32, @floatFromInt(m.gap));
+            }
+        }
         // 위 변경 파일 행과 **같은 목록 행 타이포**다(한 화면에서 두 목록이 다른 크기면 안 된다).
         try self.lineWithin(rect, name_x - rect.rect.x, right, file.name, .list_secondary_fg, .list_row, false);
     }
@@ -2561,6 +2608,67 @@ test "그룹 제목은 일괄 동작 버튼 밑으로 파고들지 않는다" {
     const budget = title.max_width_px orelse return error.MissingBudget;
     // 제목의 폭 예산이 버튼 **왼쪽 끝**을 넘지 않아야 한다.
     try testing.expect(title.origin.x + @as(i32, @intCast(budget)) <= @as(i32, @intFromFloat(action.x)));
+}
+
+// [AT3 §4.2] 배지는 **상태 문자 왼쪽**에 서고 이름을 밀어낸다 — 두 축(무엇이 일어났나 / 누가 했나)이
+// 한 자리에 겹치면 어느 쪽도 못 읽는다.
+test "턴 파일 배지는 상태 문자와 겹치지 않고 이름보다 오른쪽이다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit_file = .{
+            .name = "edited.zig",
+            .status = .modified,
+            .letter = 'M',
+            .from_turn = true,
+            .origin = .ai_edit,
+        } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const mark = findExactText(draws, "✎") orelse return error.MissingBadge;
+    const letter = findExactText(draws, "M") orelse return error.MissingStatus;
+    const name = findText(draws, "edited.zig") orelse return error.MissingName;
+    // 배지 < 상태 문자 (배지가 왼쪽)
+    try testing.expect(mark.origin.x < letter.origin.x);
+    // 이름 < 배지 (이름이 더 왼쪽)
+    try testing.expect(name.origin.x < mark.origin.x);
+    // 이름의 폭 예산이 배지를 침범하지 않는다.
+    const budget = name.max_width_px orelse return error.MissingBudget;
+    try testing.expect(name.origin.x + @as(i32, @intCast(budget)) <= mark.origin.x);
+}
+
+// **근거가 없으면 아무것도 그리지 않는다.** 「모른다」를 기호로 지어내면 「셸이 고쳤다」와 섞인다.
+test "턴 파일 배지: 캡처가 없는 턴에는 기호가 없다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit_file = .{ .name = "x.zig", .status = .modified, .letter = 'M', .from_turn = true, .origin = .unknown } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findExactText(draws, "✎") == null);
+    try testing.expect(findExactText(draws, "·") == null);
+    // 대조군: 상태 문자는 그대로 있다(배지를 뺀 것이지 행을 죽인 것이 아니다).
+    try testing.expect(findExactText(draws, "M") != null);
+}
+
+// [AT2] 턴 줄의 응답은 **아랫줄**에 선다 — `lineWithin`(행 중앙)으로 그리면 제목 줄에 겹친다.
+test "턴 줄의 응답 제목은 제목 줄이 아니라 아랫줄에 그려진다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .turn = .{
+            .title = "마지막 턴",
+            .agent = "claude",
+            .when = "방금",
+            .reply = "테스트를 고쳤습니다",
+        } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const title = findText(draws, "마지막 턴") orelse return error.MissingTitle;
+    const reply = findText(draws, "테스트를 고쳤습니다") orelse return error.MissingReply;
+    const agent = findText(draws, "claude") orelse return error.MissingAgent;
+    // **제목보다 아래**여야 한다 — 같은 y 면 겹쳐 그린 것이다.
+    try testing.expect(reply.origin.y > title.origin.y);
+    // 에이전트 이름과 **같은 줄**이고 그 오른쪽이다.
+    try testing.expectEqual(agent.origin.y, reply.origin.y);
+    try testing.expect(reply.origin.x > agent.origin.x);
 }
 
 test "파일 이름·경로는 증감·상태 문자 자리를 침범하지 않는다" {

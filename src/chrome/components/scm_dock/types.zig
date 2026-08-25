@@ -515,6 +515,23 @@ pub const DockMetrics = struct {
     ///
     /// **화살표와 아이콘 사이에 `gap`을 둔다**(사용자 지적 2026-08-19). 그전에는 화살표 칸이 끝나는
     /// 자리에 아이콘이 바로 붙어(간격 0) 둘이 한 덩어리로 보였다 — 이름 앞에만 간격이 있었다.
+    /// 이름에게 주려는 최소 폭 — **목표이지 보장이 아니다**(파일 탐색기의 `label_floor` 와 같은 값·성격).
+    pub const name_floor_px: f32 = 80;
+
+    /// 이 폭에서 **행 동작 버튼이 들어갈 자리가 있는가.**
+    ///
+    /// `build`(노드를 만드는 쪽)와 `view`(자리를 비우는 쪽)가 **같은 답**을 써야 한다. view 만 자리를
+    /// 안 비우면 버튼 노드는 그대로 남아 호버할 때 **이름 위에 그려진다** — 사다리를 view 에만 넣었다가
+    /// 적대적 검증에서 잡힌 구멍이다.
+    ///
+    /// 사다리에서 동작은 증감 **다음**이라, 이 판정 시점에는 증감이 이미 없다 — 그래서 측정값 없이
+    /// 순수 기하만으로 답할 수 있다.
+    pub fn rowActionFits(self: DockMetrics, row_w: f32) bool {
+        const left: f32 = @floatFromInt(self.inset_x + self.icon_extent + self.gap);
+        const right: f32 = @floatFromInt(self.inset_x + self.status_extent + self.gap + self.action_extent + self.gap);
+        return row_w - left - right >= name_floor_px;
+    }
+
     pub fn iconColumnX(self: DockMetrics) u32 {
         return self.inset_x + self.disclosure_extent + self.gap;
     }

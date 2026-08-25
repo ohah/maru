@@ -65,7 +65,39 @@ pub var test_turn_snapshot_calls: usize = 0;
 /// `SessionStart` 만 온 배치에서도 **직전 턴의 키**가 남아 있다. 그걸 base 에 실으면 계약이 「턴이 아니다」
 /// 라고 정한 스냅샷에 턴 키가 붙고, `/clear` 뒤라면 **옛 세션의 키가 새 세션 base 에** 붙는다 — AT3 귀속이
 /// 거기에 옛 턴 기록을 매단다.
-fn turnFactsForCapture(term: *Term, turn_ended: bool) TurnFacts {
+/// 한 배치가 모으는 **턴 사실들**. 값을 **지역 버퍼에 복사해서** 든다.
+///
+/// ⚠️ **배치 끝에서 `term` 을 다시 읽으면 안 된다.** 한 tick 의 배치에 `Stop(p-1)` 다음
+/// `UserPromptSubmit(p-2)` 가 함께 올 수 있고(사용자가 곧바로 다음 프롬프트를 넣으면 그렇다), 그때
+/// `progress.turnKey()` 는 이미 **다음 턴의 키**이며 `reply()` 는 그 프롬프트가 지워 **비어 있다**.
+/// 그대로 실으면 턴 1의 스냅샷에 턴 2의 키가 붙는다 — 계약 §3.1 이 「시각으로 맞추면 tick 지연에서
+/// 어긋난다」며 키를 도입한 바로 그 어긋남이다.
+///
+/// **턴이 끝나는 그 순간** 굳히고, 한 배치에 턴 끝이 여럿이면 **마지막 것이 이긴다**(스냅샷도 하나다).
+const BatchTurnFacts = struct {
+    key_buf: [maru.session.turn_snapshot.max_turn_key_len]u8 = undefined,
+    key_len: usize = 0,
+    title_buf: [maru.session.turn_snapshot.max_turn_title_len]u8 = undefined,
+    title_len: usize = 0,
+
+    fn captureFrom(self: *BatchTurnFacts, term: *Term) void {
+        const key = term.agent_hook_progress.turnKey();
+        self.key_len = if (key.len <= self.key_buf.len) key.len else 0;
+        if (self.key_len > 0) @memcpy(self.key_buf[0..key.len], key);
+        const title = maru.session.agent_transcript.clampUtf8(term.agent_transcript.reply(), self.title_buf.len);
+        self.title_len = title.len;
+        if (title.len > 0) @memcpy(self.title_buf[0..title.len], title);
+    }
+
+    fn facts(self: *const BatchTurnFacts) TurnFacts {
+        return .{ .key = self.key_buf[0..self.key_len], .title = self.title_buf[0..self.title_len] };
+    }
+};
+
+/// **테스트가 직접 물 수 있게 `pub` 이다.** base 가 옛 턴의 키를 물려받지 않는다는 가드는 이 함수 안에만
+/// 있는데, 통합 test 는 `captureTurnSnapshot` 을 직접 불러 이 자리를 **지나지 않는다** — 그러면 가드를
+/// 지운 뮤턴트가 판정자를 전부 통과한다(AT1 에서 같은 실패를 한 번 겪었다).
+pub fn turnFactsForCapture(term: *Term, turn_ended: bool) TurnFacts {
     if (!turn_ended) return .{};
     return .{
         .key = term.agent_hook_progress.turnKey(),
@@ -97,8 +129,23 @@ pub const TurnFacts = struct {
     title: []const u8 = "",
 };
 
+/// 테스트 전용 — **마지막 캡처에 넘어간 턴 사실**. `test_turn_snapshot_calls` 와 같은 규약이고 같은 이유다:
+/// 이 함수는 git 저장소가 없으면 조용히 돌아가므로 **링(결과)으로는 「무엇을 넘겼나」를 볼 수 없다.**
+/// 넘긴 값 자체를 기록해야 「배치 안에서 다음 턴이 시작돼도 끝난 턴의 사실을 든다」를 잴 수 있다.
+pub var test_last_turn_key: [maru.session.turn_snapshot.max_turn_key_len]u8 = undefined;
+pub var test_last_turn_key_len: usize = 0;
+pub var test_last_turn_title: [maru.session.turn_snapshot.max_turn_title_len]u8 = undefined;
+pub var test_last_turn_title_len: usize = 0;
+
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts) void {
-    if (builtin.is_test) test_turn_snapshot_calls += 1;
+    if (builtin.is_test) {
+        test_turn_snapshot_calls += 1;
+        // **게이트보다 먼저 기록한다** — 저장소가 없어도 「무엇을 넘겼나」는 사실이다.
+        test_last_turn_key_len = @min(facts.key.len, test_last_turn_key.len);
+        @memcpy(test_last_turn_key[0..test_last_turn_key_len], facts.key[0..test_last_turn_key_len]);
+        test_last_turn_title_len = @min(facts.title.len, test_last_turn_title.len);
+        @memcpy(test_last_turn_title[0..test_last_turn_title_len], facts.title[0..test_last_turn_title_len]);
+    }
     // **테스트에서는 세기만 하고 실제 작업은 하지 않는다.**
     //
     // 아래 `submitSnapshot` 은 detached worker 에 job 을 넘기고 그 해제를 **그 스레드가** 한다. 테스트는
@@ -1419,9 +1466,13 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     var conversation_changed = false;
     var turn_ended = false;
     var base_opened = false;
+    var batch_facts: BatchTurnFacts = .{};
     for (events[0..batch.count]) |ev| {
         const applied = applyHookEvent(self, term, ev);
         if (applied.base) base_opened = true;
+        // **턴이 끝나는 그 순간** 사실을 굳힌다(`BatchTurnFacts` 주석 — 배치 끝에서 읽으면 다음 턴의
+        // 키·빈 제목이 실린다).
+        if (applied.turn_end) batch_facts.captureFrom(term);
         if (applied.conversation) conversation_changed = true;
         if (applied.turn_end) turn_ended = true;
         // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
@@ -1453,7 +1504,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // 전이를 만드는데 **그 이벤트의 `turn_key` 는 codex 에서 자식의 것**이다(계약 §2 실측). `advance` 는
     // lead 이벤트에서만 키를 채택하므로 `progress.turnKey()` 가 언제나 lead 의 현재 키다 — 알림 본문이
     // 「자식이 아니라 lead 의 것이어야 한다」로 이미 판정된 것과 같은 함정, 같은 답이다.
-    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), turnFactsForCapture(term, turn_ended));
+    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), if (turn_ended) batch_facts.facts() else .{});
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
@@ -1737,14 +1788,18 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         const batch = cursor.take(text, &events);
         var rotated_turn_end = false;
         var rotated_base = false;
+        var rotated_facts: BatchTurnFacts = .{};
         for (events[0..batch.count]) |ev| {
             const applied = applyHookEvent(self, term, ev);
-            if (applied.turn_end) rotated_turn_end = true;
+            if (applied.turn_end) {
+                rotated_turn_end = true;
+                rotated_facts.captureFrom(term); // 회전본도 같은 규율이다
+            }
             if (applied.base) rotated_base = true;
         }
         // 회전본에도 **같은 규율**을 건다 — 여기만 빠지면 회전된 로그에 든 `SessionStart` 의 base 를 잃고,
         // 그 세션의 첫 턴이 영영 안 뜬다.
-        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), turnFactsForCapture(term, rotated_turn_end));
+        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), if (rotated_turn_end) rotated_facts.facts() else .{});
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }

@@ -427,6 +427,17 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
 살아 있고 GUI만 비정상 종료한 경우**의 layout orphan을 줄이는 다음 계약만 추가한다.
 
 - workspace 생성/삭제, split, Term 이동/닫기, cross-window 이동, runtime bind 변경은 manifest dirty를 세운다.
+  **구현 상태(2026-08-25): 그 신호까지 배선됐다.** `app_session.noteWorkspaceMutation()` 이 P4 C1 순수
+  coordinator(`session/workspace_checkpoint.zig`)의 `mutation()` 을 부르고, 위 목록의 진입점(`createTab`·
+  `closeTab`·`moveTab`·`detachTabForMove`·`moveWorkspaceToSession`)이 그것을 부른다. coordinator 는 **앱
+  전역**이다 — manifest 는 여러 창의 블록을 한 파일로 모은 것이라 창마다 두면 같은 파일을 두 번 쓴다.
+  ⚠️ **구동은 아직이다**: `tick`/capture/write 를 누가 모는지, 그리고 지금 Swift 가 하는 조립·쓰기를 Zig 로
+  옮길지는 정하지 않았다(그 결정을 미루려고 이 슬라이스는 `mutation` 만 부른다). 즉 **dirty 는 서지만 파일은
+  아직 정상 종료 시점에만 쓰인다** — 강제 종료 뒤 최신 layout 자동 재연결은 여전히 완료 계약이 아니다(§2).
+  회귀 gate 는 `test-provider-session-removal` 의 「P4: 배치를 바꾸는 사건이 checkpoint dirty 를 세운다」이며,
+  한 사건은 제품 경로로 태우고 나머지는 **소스로** 못 박는다(함수마다 UI 를 만들다 깨지면 판정자가 «배선» 이
+  아니라 «픽스처» 를 재게 된다). ⚠️ 그 소스 판정은 **줄 단위**로 본다 — 글자만 찾으면 주석 처리된 호출도
+  통과한다(실제로 그렇게 썼다가 뮤테이션이 «안 잡힘» 으로 드러났다).
 - dirty manifest는 짧게 debounce한 뒤 같은 디렉터리의 temp write + atomic replace로 전체 파일을 교체한다. 전원 손실
   durability를 주장하지 않으므로 file/directory `fsync`와 별도 journal DB는 이 단계의 선결이 아니다.
 - 구조 mutation과 GUI process 종료가 경합하면 이전 또는 새 완전본만 읽고 반쪽 파일은 사용하지 않는다.

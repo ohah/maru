@@ -3583,10 +3583,12 @@ fn pushTextWrapped(text: []const u8, x: i32, y: i32, max_w: i32, font_px: i32, c
 /// 두 인자로 나누면 "색은 줬는데 안 그린다" 같은 조합이 생기고, 그 조합이 뜻하는 바를 아무도
 /// 안 정해 둔다.
 ///
-/// **폭은 매 글자마다 줄 처음부터 다시 잰다**(`textWidth`) — 글자 수의 제곱이다. 여기 오는
-/// 것은 배너·목록의 한 문장(길어야 100자 남짓)이고, 누적 폭을 들고 다니면 폴백 advance 와
-/// 양폭 판정을 이 자리에서 **한 번 더** 구현하게 된다(그 둘이 갈리면 배경과 글이 어긋난다).
-/// 문단을 접을 일이 생기면 그때 `textWidth` 를 증분으로 바꾼다.
+/// **폭은 누적한다** — 글자마다 `glyphAdvance` 를 한 번씩만 더한다. 처음에는 매 글자마다
+/// `textWidth` 로 줄 전체를 다시 재서 글자 수의 제곱이었고, 그 자리에 *"누적하면 폴백 advance 와
+/// 양폭 판정을 한 번 더 구현하게 된다"* 고 적어 뒀다 — **틀린 말이었다.** 한 글자 폭을 함수로
+/// 빼면 두 곳이 같은 것을 부르므로 갈릴 일이 없다.
+///
+/// 접은 뒤에는 **되감은 구간만** 다시 잰다(`cut..end`, 마지막 단어 정도라 짧다).
 fn wrapLines(text: []const u8, max_w: i32, font_px: i32, col: ?color.Rgb, x: i32, y: i32) u32 {
     if (max_w <= 0) return 0;
     const line_h: i32 = font_px + @divTrunc(font_px, 4); // 줄 사이를 조금 벌린다(글자가 붙어 보인다)
@@ -3597,11 +3599,13 @@ fn wrapLines(text: []const u8, max_w: i32, font_px: i32, col: ?color.Rgb, x: i32
     var lines: u32 = 0;
     var line_start: usize = 0; // 지금 줄이 시작한 바이트
     var last_space: ?usize = null; // 이 줄에서 마지막으로 본 공백의 **다음** 바이트
+    var w: i32 = 0; // 지금 줄에 쌓인 폭
     var it = view.iterator();
     while (it.nextCodepoint()) |cp| {
         const end = it.i; // 이 글자를 **포함한** 끝
         if (cp == ' ') last_space = end;
-        if (textWidth(text[line_start..end], font_px) <= max_w) continue;
+        w += glyphAdvance(cp, font_px);
+        if (w <= max_w) continue;
         // 넘쳤다 — 어디서 끊을지 고른다.
         const cut = blk: {
             if (last_space) |sp| if (sp > line_start) break :blk sp;
@@ -3620,6 +3624,9 @@ fn wrapLines(text: []const u8, max_w: i32, font_px: i32, col: ?color.Rgb, x: i32
         // 접은 자리의 공백은 다음 줄 앞에 안 남긴다.
         while (line_start < text.len and text[line_start] == ' ') line_start += 1;
         last_space = null;
+        // **넘긴 만큼만 다시 잰다.** 접은 자리(`line_start`)부터 지금 글자까지가 다음 줄의
+        // 시작이다 — `line_start` 가 `end` 를 넘어서는 경우(이 글자에서 끊었다)는 빈 줄이라 0.
+        w = if (line_start < end) textWidth(text[line_start..end], font_px) else 0;
     }
     if (line_start < text.len) {
         if (col) |c| pushText(text[line_start..], x, y + @as(i32, @intCast(lines)) * line_h, font_px, c);
@@ -3628,9 +3635,25 @@ fn wrapLines(text: []const u8, max_w: i32, font_px: i32, col: ?color.Rgb, x: i32
     return lines;
 }
 
-fn textWidth(text: []const u8, font_px: i32) i32 {
+/// 글자 **하나**가 펜을 미는 거리. `textWidth` 와 `wrapLines` 가 **같은 이것을 부른다** —
+/// 한쪽이 자기 셈을 들면 그 둘이 갈리고, 갈리면 배경과 글이 어긋난다(접기가 막으려는 사고다).
+///
+/// **폴백 폭도 `pushText` 와 같이 폭을 본다.** 여기만 반칸으로 두면 아직 안 구운 한글이 든 값이
+/// 절반 폭으로 재져 **우측 정렬이 여백 밖으로 밀린다**(다음 프레임에 글리프가 구워지며 제자리로
+/// 돌아와 더 눈에 띈다).
+fn glyphAdvance(cp: u21, font_px: i32) i32 {
+    // 0폭 format 문자는 펜을 안 민다 — 폴백 advance 를 태우면 보이지 않는 글자가 자간을 벌린다.
+    if (isZeroWidthFormat(cp)) return 0;
     const scale = @as(f32, @floatFromInt(font_px)) / @as(f32, @floatFromInt(atlas_cell_h));
     const half_w = @as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5;
+    const draw_w: i32 = @intFromFloat(if (maru.width.cellWidth(cp) == 2) half_w * 2 else half_w);
+    return if (atlasCell(&.{cp}, 0)) |c|
+        @as(i32, @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale))
+    else
+        @divTrunc(draw_w, 2);
+}
+
+fn textWidth(text: []const u8, font_px: i32) i32 {
     var w: i32 = 0;
     // **조용히 0 을 답하지 않는다**(§5). 여기서 실패하면 그 글은 폭이 0 이라 자리를 안 차지하고,
     // 바로 아래 `pushText` 도 같은 이유로 아무것도 안 그려 **글이 통째로 사라진 것처럼** 보인다.
@@ -3640,18 +3663,7 @@ fn textWidth(text: []const u8, font_px: i32) i32 {
         return 0;
     };
     var it = view.iterator();
-    while (it.nextCodepoint()) |cp| {
-        if (isZeroWidthFormat(cp)) continue;
-        const cell = atlasCell(&.{cp}, 0);
-        // **폴백 폭도 `pushText` 와 같이 폭을 본다.** 여기만 반칸으로 두면 아직 안 구운
-        // 한글이 든 값이 절반 폭으로 재져 **우측 정렬이 여백 밖으로 밀린다**(다음 프레임에
-        // 글리프가 구워지며 제자리로 돌아와 더 눈에 띈다).
-        const draw_w: i32 = @intFromFloat(if (maru.width.cellWidth(cp) == 2) half_w * 2 else half_w);
-        w += if (cell) |c|
-            @as(i32, @intFromFloat(@as(f32, @floatFromInt(c.adv)) * scale))
-        else
-            @divTrunc(draw_w, 2);
-    }
+    while (it.nextCodepoint()) |cp| w += glyphAdvance(cp, font_px);
     return w;
 }
 

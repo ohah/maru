@@ -292,12 +292,12 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
      대신 Ghostty는 **모른다고 말할 수 있게** 한다: 빈 OSC 7(`OSC 7 ;`)을 pwd 리셋으로 받아, macOS proxy icon을
      낡은 값으로 그리는 대신 **숨긴다**(`stream_handler.zig` `reportPwd`). 터미널이 추측하지 않는 설계다.
 
-     같은 계열 중 커널을 함께 쓰는 곳은 있다 — Orca(`references/orca` @ `e4c278eb`)는 `resolve-split-cwd.ts`에서
-     **확인된 OSC 7 → 커널(`/proc` 또는 `lsof`) → 확인 안 된(재생된) OSC 7 → worktree 루트** 4단으로 내려간다.
-     동기도 같다("shells that never emit OSC 7 — **agent TUIs**, minimal sh"). 다만 그건 "새 split을 어디서
-     시작할까"라 **반드시 답이 있어야 하는** 질문이고, 우리 폴더줄은 "모른다"가 유효한 답인 질문이라 그대로
-     베끼면 안 된다. 비용도 다르다 — Orca는 macOS에서 `lsof` 서브프로세스(100~500 ms)라 split 순간에만 묻고,
-     우리 `proc_pidinfo`는 0.78 µs라 상시 축에 넣을 수 있다.
+     같은 계열 중 커널을 함께 쓰는 구현도 있다 — **확인된 OSC 7 → 커널(`/proc` 또는 `lsof`) → 확인 안 된
+     (재생된) OSC 7 → worktree 루트** 4단으로 내려가는 방식이다. 동기는 같다(OSC 7 을 영영 안 내보내는 셸 —
+     **agent TUI**, minimal sh). 다만 그건 "새 split을 어디서 시작할까"라 **반드시 답이 있어야 하는** 질문이고,
+     우리 폴더줄은 "모른다"가 유효한 답인 질문이라 그 방식을 그대로 옮기면 안 된다. 비용도 다르다 — 그런
+     구현은 macOS에서 `lsof` 서브프로세스(100~500 ms)라 split 순간에만 물을 수 있고, 우리 `proc_pidinfo`는
+     0.78 µs라 상시 축에 넣을 수 있다.
    - **누구의 cwd를 묻는가**: foreground process group의 **leader가 아닌 구성원 → leader → 세션의 child** 순이다.
      `PGID를 그대로 PID로 쓰면 안 된다` — 제품 spawn은 `/usr/bin/login`이 wrapper로 남고 실제 셸이 같은 그룹의
      child로 돌아서, leader만 조회하면 **wrapper의 cwd(홈 등)** 를 읽고 저장소가 통째로 틀린다(적대적 검증에서

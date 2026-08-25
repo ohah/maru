@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 172u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 173u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1178,6 +1178,52 @@ void maru_macos_app_session_fail_file_panel_close_unlock(MaruAppHostSession *ses
    path outputs return required length without consuming when out==NULL or cap is short. */
 uint32_t maru_macos_app_session_take_file_tree_watch_reset(MaruAppHostSession *session);
 size_t maru_macos_app_session_take_file_tree_watch_root(MaruAppHostSession *session, uint8_t *out, size_t cap);
+/* ABI v173: 접근성 서술자. Zig 는 **뜻**만 싣고(role/state/집합 위치), NSAccessibility 어휘로의 번역과
+   좌표계 뒤집기는 Swift 어댑터가 소유한다(docs/chrome-interaction-migration.md §3).
+
+   레코드는 발행 시점에 굳힌 스냅숏에서 온다 — 발행된 tree 를 직접 읽으면 라벨이 해제된 메모리다.
+   라벨·값은 별도 함수로 복사해 간다(포인터를 struct 에 담으면 수명이 받는 쪽에서 불분명해진다). */
+enum {
+    MARU_APP_HOST_A11Y_ROLE_BUTTON = 0,
+    MARU_APP_HOST_A11Y_ROLE_TREE_ITEM = 1,
+    MARU_APP_HOST_A11Y_ROLE_LIST_ITEM = 2,
+    MARU_APP_HOST_A11Y_ROLE_TAB = 3,
+    MARU_APP_HOST_A11Y_ROLE_SCROLL_VIEW = 4,
+    MARU_APP_HOST_A11Y_ROLE_TEXT = 5,
+    MARU_APP_HOST_A11Y_ROLE_GROUP = 6,
+};
+enum {
+    MARU_APP_HOST_A11Y_FLAG_ENABLED = 1u << 0,
+    MARU_APP_HOST_A11Y_FLAG_SELECTED = 1u << 1,
+    MARU_APP_HOST_A11Y_FLAG_FOCUSABLE = 1u << 2,
+    /* 이 줄에 펼침이라는 개념이 있나. 없으면 아래 EXPANDED 는 뜻이 없다 — 스크린 리더가
+       "접힘"으로 읽지 않게 둘을 가른다. */
+    MARU_APP_HOST_A11Y_FLAG_EXPANDABLE = 1u << 3,
+    MARU_APP_HOST_A11Y_FLAG_EXPANDED = 1u << 4,
+};
+typedef struct {
+    /* 창 좌표(backing px, 좌상단 원점). AppKit 좌하단 원점으로의 뒤집기는 Swift 가 한다. */
+    float x;
+    float y;
+    float width;
+    float height;
+    uint32_t role;
+    uint32_t flags;
+    uint32_t level;
+    uint32_t position_in_set;
+    uint32_t set_size;
+    uint64_t action_id;
+    uint32_t label_offset;
+    uint32_t label_len;
+    uint32_t value_offset;
+    uint32_t value_len;
+} MaruAppHostAccessibilityElement;
+
+uint32_t maru_macos_app_session_accessibility_count(MaruAppHostSession *session);
+int32_t maru_macos_app_session_accessibility_element(MaruAppHostSession *session, uint32_t index, MaruAppHostAccessibilityElement *out_element);
+size_t maru_macos_app_session_accessibility_label(MaruAppHostSession *session, uint32_t index, uint8_t *out, size_t capacity);
+size_t maru_macos_app_session_accessibility_value(MaruAppHostSession *session, uint32_t index, uint8_t *out, size_t capacity);
+
 void maru_macos_app_session_file_tree_changed(MaruAppHostSession *session, const uint8_t *bytes, size_t len);
 uint64_t maru_macos_app_session_take_file_tree_reload_action(MaruAppHostSession *session, uint32_t *conflict_out);
 size_t maru_macos_app_session_take_file_tree_external_open(MaruAppHostSession *session, uint8_t *out, size_t cap);

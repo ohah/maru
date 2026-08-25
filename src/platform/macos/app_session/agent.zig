@@ -1211,8 +1211,13 @@ fn ensureCodexTrust(
     // **0 도 그대로 쓴다(latch 금지).** `if (stale != 0)` 로 두면 한 번 세워진 수가 안 내려가서, 사용자가
     // codex 에서 승인해 값이 맞아진 뒤에 이 함수가 다시 돌아도(설정 적용 등) 옛 수가 남아 **거짓 알림**이
     // 뜬다. 이 값은 «지금 어긋난 개수» 이지 «어긋난 적이 있다» 가 아니다.
-    self.agent_hook_trust_stale = stale;
-    self.agent_hook_trust_refreshed = refreshed;
+    //
+    // **«고쳤다» 는 쓴 뒤에야 참이다.** 아래 CAS 는 다른 인스턴스가 끼어들면 쓰기를 건너뛰고, 쓰기 자체도
+    // 실패할 수 있다. 그 전에 세워 두면 **아무것도 안 고쳤는데 「고쳤습니다」** 가 뜬다. 그리고 그때 그
+    // 훅들은 여전히 안 도는 상태이므로, 쓰기 전에는 **고치려던 것까지 «어긋남» 으로** 센다 — 사용자에게
+    // 갈 말은 「고쳤다」가 아니라 「codex 에서 승인하라」다.
+    self.agent_hook_trust_stale = stale + refreshed;
+    self.agent_hook_trust_refreshed = 0;
     if (added == 0 and refreshed == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
 
     // **compare-and-swap.** 훅 파일 락이 인스턴스 사이를 대부분 직렬화하지만, 훅 파일이 **아직 없을 때는**
@@ -1227,6 +1232,9 @@ fn ensureCodexTrust(
     if (!std.mem.eql(u8, before, now)) return; // 그 사이 누가 고쳤다 — 다음 기회에 맞춘다
 
     writeExecutableFile(self.io, config_path, out.items, false) catch return;
+    // 여기까지 왔으면 파일에 실제로 들어갔다 — 그제서야 «고쳤다» 다.
+    self.agent_hook_trust_stale = stale;
+    self.agent_hook_trust_refreshed = refreshed;
     // **새로 만든 파일은 좁힌다.** 기존 파일이면 `writeExecutableFile` 이 권한을 승계하므로 손대지 않는다
     // (사용자가 일부러 넓혀 둔 것을 우리가 되돌릴 이유가 없다). 없던 파일은 umask 를 타므로 우리가 정한다.
     if (before.len == 0) {

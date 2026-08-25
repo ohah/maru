@@ -21228,6 +21228,98 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
     try std.testing.expectEqualStrings(reverted.items, after_tick);
 }
 
+// 계약 §2.1 — 갱신은 **파일에 실제로 들어간 뒤에야** «고쳤다» 다. CAS 가 다른 인스턴스에 밀리거나 쓰기가
+// 실패하면 아무것도 안 고쳐진 것이고, 그때 그 훅들은 **여전히 안 돈다**. 그 상태에서 「고쳤습니다」가 뜨면
+// 두 번 틀린다 — 하지 않은 일을 했다고 말하고, 사용자가 해야 할 일(codex 에서 승인)을 안 알려 준다.
+//
+// CAS 경쟁은 단일 프로세스로 못 만든다. 쓰기 실패는 만들 수 있다 — 디렉터리를 읽기 전용으로 두면 원자적
+// 교체(rename)가 실패한다. 같은 분기이므로 이 판정자가 그 계약을 대표한다.
+test "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다" {
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = false;
+
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "cache");
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = "model = \"gpt-5\"\n" });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    { // 한 번 설치해 두고
+        var first: AppSession = undefined;
+        try first.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        first.deinit();
+    }
+
+    // 값을 낡게 만든다(커맨드가 바뀐 뒤의 모양).
+    const installed = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(installed);
+    var stale_text: std.ArrayListUnmanaged(u8) = .empty;
+    defer stale_text.deinit(a);
+    var rest: []const u8 = installed;
+    while (std.mem.indexOf(u8, rest, "sha256:")) |at| {
+        const value_end = std.mem.indexOfAnyPos(u8, rest, at, "\"\n") orelse break;
+        try stale_text.appendSlice(a, rest[0..at]);
+        try stale_text.appendSlice(a, "sha256:staaale");
+        rest = rest[value_end..];
+    }
+    try stale_text.appendSlice(a, rest);
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = stale_text.items });
+
+    // **쓰기를 막는다** — 디렉터리가 읽기 전용이면 원자적 교체가 실패한다.
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(codex.ptr, 0o555));
+    defer _ = std.c.chmod(codex.ptr, 0o755); // tmp 정리가 지울 수 있게 되돌린다
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 못 고쳤으니 «고쳤다» 가 아니고, 사용자가 할 일이 남았으니 **어긋남으로** 센다.
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_refreshed);
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+
+    // 파일도 그대로다.
+    const after = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(after);
+    try std.testing.expectEqualStrings(stale_text.items, after);
+}
+
 test "agent hooks stay out of provider files while the gate is off" {
     if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
     // 기본값이 `false`라는 계약을 **제품 경로에서** 못 박는다. 위 hook-off fixture는 상태줄 키만 끄므로,

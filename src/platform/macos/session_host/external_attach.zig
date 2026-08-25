@@ -100,7 +100,8 @@ fn prepareWithTransition(
     defer if (client_owned) client.deinit();
 
     const requested_mode: remote_attachment.Mode = switch (request.intent) {
-        .read_only, .take_over => .observer,
+        // `--stream` 도 observer 다 — 입력·resize 를 안 보내므로 남의 조종을 안 건드린다(§8).
+        .read_only, .take_over, .stream => .observer,
         .default_controller => .controller,
     };
     const attach_phase = attach_phase_deadline.PhaseDeadline.start(io, .attach_snapshot) catch

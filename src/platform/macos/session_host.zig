@@ -402,6 +402,10 @@ test {
     _ = @import("session_host/generation_batch_registry.zig");
     _ = @import("session_host/generation_transport.zig");
     _ = @import("session_host/generation_attachment.zig");
+    // `--stream` 의 프레이밍과 왕복을 재는 test 가 여기 있다. barrel 이 안 끌면 그 test 는
+    // **어느 스위트에서도 안 돈다** — 같은 함정을 S11-1 에서 한 번 겪었다(변이가 SURVIVED 로
+    // 나와 스위트를 잘못 골랐음을 알았다).
+    if (builtin.os.tag == .macos) _ = @import("session_host/external_attach_cli.zig");
     comptime {
         if (@import("session_host/executed_response.zig").max_owned_response_bytes !=
             protocol.max_control_json)

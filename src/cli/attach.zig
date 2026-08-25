@@ -21,6 +21,9 @@ pub const Intent = enum {
     default_controller,
     read_only,
     take_over,
+    /// 화면 레코드 스트림을 stdout 으로 흘린다(§8). observer 로 붙고 **ANSI 로 그리지 않는다** —
+    /// 소비자가 터미널이 아니라 다른 maru 라서, 자를 이유도 폭을 두 번 해석할 이유도 없다.
+    stream,
 };
 
 pub const Request = struct {
@@ -43,9 +46,11 @@ pub const ParseError = error{
 };
 
 pub const help =
-    \\usage: maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>
+    \\usage: maru attach [--read-only | --take-over | --stream] <32-lower-hex-runtime-id>
     \\
     \\Attach this terminal to an existing persistent runtime without starting a host.
+    \\
+    \\  --stream  observe and write the screen record stream to stdout instead of drawing it.
     \\
 ;
 
@@ -104,8 +109,15 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     var intent: Intent = .default_controller;
     var option_seen = false;
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--read-only") or std.mem.eql(u8, arg, "--take-over")) {
-            const next: Intent = if (std.mem.eql(u8, arg, "--read-only")) .read_only else .take_over;
+        if (std.mem.eql(u8, arg, "--read-only") or std.mem.eql(u8, arg, "--take-over") or
+            std.mem.eql(u8, arg, "--stream"))
+        {
+            const next: Intent = if (std.mem.eql(u8, arg, "--read-only"))
+                .read_only
+            else if (std.mem.eql(u8, arg, "--take-over"))
+                .take_over
+            else
+                .stream;
             if (option_seen) {
                 if (intent == next) return error.DuplicateOption;
                 return error.ConflictingOptions;

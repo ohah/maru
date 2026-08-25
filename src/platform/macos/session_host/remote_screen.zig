@@ -290,9 +290,21 @@ fn runStyle(run: Run) terminal.Style {
 /// 스레딩: delta를 받는 쪽(client read)과 렌더 쪽이 다른 스레드라, 자체 `mutex`로 apply와 render를 직렬화한다(로컬
 /// `core_mutex`와 동형 역할 — 단 core가 아니라 조립 화면 캐시라 owner-추적 없이 단순 std.Io.Mutex). `render_snapshot`이
 /// 돌려주는 slice는 `grid`를 alias하므로 caller(Surface)가 `lock`/`unlock` 안에서 읽고 복사한다.
+/// 흘려보내는 덩어리의 종류. 소비자가 "처음부터 다시" 와 "이어서" 를 갈라야 한다.
+pub const ScreenByteKind = enum(u8) { snapshot = 0, delta = 1 };
+
+/// 레코드 원본을 받아가는 자리(`maru attach --stream`). **화면 상태는 그대로 유지된다** —
+/// 흘리는 것은 부수 효과이고, 안 적용하면 다음 delta 의 base 가 어긋난다(§8).
+pub const ScreenByteSink = struct {
+    ctx: *anyopaque,
+    write: *const fn (ctx: *anyopaque, bytes: []const u8, kind: ScreenByteKind) void,
+};
+
 pub const RemoteScreen = struct {
     allocator: std.mem.Allocator,
     assembler: screen_assembler.ScreenAssembler,
+    /// 기본은 없음 — 기존 경로는 이 필드를 모른 채 그대로 돈다.
+    byte_sink: ?ScreenByteSink = null,
     grid: CellGrid, // 현재 조립 상태를 편 cell 격자(apply마다 재구축, render가 읽음).
     // hello_ack capability가 없는 구 live host는 mode bit 0을 "live bottom"으로 신뢰할 수 없다.
     // attach를 소유한 RemoteRuntime이 협상 결과를 주입한다. 직접/현재 프로토콜 테스트는 true가 기본이다.
@@ -328,6 +340,7 @@ pub const RemoteScreen = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         errdefer self.rebuildOrEmpty(); // 리뷰 #2: apply가 이미지 free 후 에러나면 옛 grid가 freed 픽셀을 빌려 UAF — 실패해도 grid를 현재 조립기로 재구축.
+        self.emitBytes(bytes, .snapshot);
         try self.assembler.applySnapshot(bytes);
         try self.rebuildGrid();
     }
@@ -352,8 +365,28 @@ pub const RemoteScreen = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         errdefer self.rebuildOrEmpty(); // 리뷰 #2: 위와 동형(delta가 putImage로 옛 픽셀 free 후 손상 record면 dangling).
+        self.emitBytes(bytes, .delta);
         try self.assembler.applyDelta(bytes);
         try self.rebuildGrid();
+    }
+
+    /// 지금 조립 상태를 **snapshot 레코드 스트림으로 다시 직렬화**한다(`--stream` 의 첫 덩어리).
+    /// caller 가 소유한다. 락 아래에서 만든다 — 그리는 쪽과 같은 규칙이다.
+    pub fn snapshotBytes(self: *RemoteScreen, allocator: std.mem.Allocator, io: std.Io) screen_stream.DecodeError![]u8 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.assembler.toSnapshot(allocator);
+    }
+
+    /// **레코드 원본을 그대로 넘겨보는 자리**(`maru attach --stream`, §8). 여기 하나만 두는 이유는
+    /// apply 호출처가 다섯 곳이라 그쪽에 심으면 하나를 빠뜨리기 때문이다 — 초기 snapshot 도 같은
+    /// 경로로 온다. sink 가 없으면(기본) 아무 일도 안 한다.
+    ///
+    /// **적용보다 먼저 부른다.** 조립이 실패해도 소비자는 그 바이트를 봐야 같은 실패를 자기 쪽에서
+    /// 재현할 수 있고, 성공한 것만 흘리면 두 조립기의 상태가 조용히 갈린다.
+    fn emitBytes(self: *RemoteScreen, bytes: []const u8, kind: ScreenByteKind) void {
+        const sink = self.byte_sink orelse return;
+        sink.write(sink.ctx, bytes, kind);
     }
 
     /// Publishes a fully assembled recovery snapshot without exposing its fallible construction.

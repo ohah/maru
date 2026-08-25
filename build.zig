@@ -9188,6 +9188,59 @@ pub fn build(b: *std.Build) void {
         "test-workspace-checkpoint-file-adapter",
         "P4 C2 workspace checkpoint atomic file publication gates",
     );
+    const workspace_checkpoint_product_step = b.step(
+        "test-workspace-checkpoint-product",
+        "P4 C3a app-global workspace checkpoint product owner gates",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |checkpoint_product_optimize| {
+        const checkpoint_product_maru_mod = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = checkpoint_product_optimize,
+        });
+        const checkpoint_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/workspace_checkpoint_product.zig"),
+                .target = target,
+                .optimize = checkpoint_product_optimize,
+                .imports = &.{.{ .name = "maru", .module = checkpoint_product_maru_mod }},
+            }),
+            .filters = &.{"P4 C3a"},
+        });
+        const run_checkpoint_product_tests = b.addRunArtifact(checkpoint_product_tests);
+        run_checkpoint_product_tests.addArg("--maru-expect-tests=6");
+        run_checkpoint_product_tests.setCwd(b.path("."));
+        workspace_checkpoint_product_step.dependOn(&run_checkpoint_product_tests.step);
+        test_step.dependOn(&run_checkpoint_product_tests.step);
+
+        const checkpoint_product_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/workspace_checkpoint_product_boundary.zig"),
+                .target = target,
+                .optimize = checkpoint_product_optimize,
+            }),
+            .filters = &.{"P4 C3"},
+        });
+        const run_checkpoint_product_boundary_tests = b.addRunArtifact(checkpoint_product_boundary_tests);
+        run_checkpoint_product_boundary_tests.addArg("--maru-expect-tests=2");
+        run_checkpoint_product_boundary_tests.setCwd(b.path("."));
+        workspace_checkpoint_product_step.dependOn(&run_checkpoint_product_boundary_tests.step);
+        if (checkpoint_product_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_product_boundary_tests.step);
+
+        const checkpoint_mutation_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/workspace_checkpoint_mutation_boundary.zig"),
+                .target = target,
+                .optimize = checkpoint_product_optimize,
+            }),
+            .filters = &.{"P4 C3b"},
+        });
+        const run_checkpoint_mutation_boundary_tests = b.addRunArtifact(checkpoint_mutation_boundary_tests);
+        run_checkpoint_mutation_boundary_tests.addArg("--maru-expect-tests=2");
+        run_checkpoint_mutation_boundary_tests.setCwd(b.path("."));
+        workspace_checkpoint_product_step.dependOn(&run_checkpoint_mutation_boundary_tests.step);
+        if (checkpoint_product_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_mutation_boundary_tests.step);
+    }
     if (target.result.os.tag == .macos) {
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |checkpoint_file_optimize| {
             const checkpoint_file_mod = b.createModule(.{

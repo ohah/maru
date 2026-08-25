@@ -229,6 +229,11 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
   debounce 뒤 같은 디렉터리 temp write·atomic replace로 전체 manifest를 교체한다. GUI process 비정상 종료와 경합해도
   이전 또는 새 완전본 중 하나만 남겨야 하며, 창별로 따로 publish하지 않는다. 전원 손실 durability와 file/directory
   `fsync`는 비목표다.
+- 위 목록은 topology 예시이지 전체 dirty inventory가 아니다. 영속 사용자 의도인 order/color, active tab/pane/Term,
+  file/browser persisted state, dock 표시·view, explicit Explorer root, SCM base와 runtime ended tombstone도 포함한다.
+  반면 checkpoint 때 최신 값을 함께 캡처하는 OSC title·cwd·prompt·agent·Git 관측 갱신은 자체 dirty를 만들지 않는다.
+  창 frame은 move/live-resize 종료/fullscreen 종료에, active Window는 마지막 key normal Window identity가 실제로 바뀔
+  때만 dirty다. quick focus나 앱 비활성화로 그 identity를 지우지 않는다.
 - background checkpoint 실패는 마지막 완전본을 유지하고 typed notice를 지속한다. 정상 Quit의 마지막 checkpoint가
   실패하면 detach 전에 Quit을 취소한다. runtime을 종료하고 나가는 유일한 예외는 사용자가 명시한
   `Quit and End All Sessions`다.

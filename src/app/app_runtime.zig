@@ -24,6 +24,7 @@ const live_surface_registry = @import("../session/live_surface_registry.zig");
 const mermaid_coordinator = @import("../session/mermaid_coordinator.zig");
 const runtime_mod = @import("runtime.zig");
 const live_pty = @import("live_pty.zig");
+const workspace_checkpoint_product = @import("workspace_checkpoint_product.zig");
 
 /// 앱 인스턴스 전역 런타임 자원 묶음(§8A.2 채택안). 세 필드는 전부 창보다 오래 사는 앱 전역 수명이라, 각 필드의
 /// bookkeeping(카운터·entries 배열·links 배열 + registry가 소유하는 각 런타임 heap 슬롯)은 프로세스 전역
@@ -51,6 +52,10 @@ pub const AppRuntime = struct {
     /// FP10c1 Mermaid helper의 앱 전역 정책 소유자. platform은 여기서 나온 bounded action만 실행하고
     /// admission/coalesce/deadline/failure latch를 다시 판단하지 않는다(docs/file-panel-dock-ui.md §3).
     mermaid_queue: mermaid_coordinator.MermaidCoordinatorState = .{},
+
+    /// P4 C3: 모든 Window보다 오래 사는 workspace checkpoint 제품 owner. 파일/AppKit/clock은 소유하지 않고
+    /// manifest-visible change token을 C1의 유일한 publication generation으로 접어 넣는다.
+    workspace_checkpoint: workspace_checkpoint_product.State = .{},
 };
 
 /// M3d cross-window 이동 **트랜잭션 seam**(§8A.2·§8A.3) — AppRuntime coordinator가 소유하는 이동 ops. §8A.2가 못박은

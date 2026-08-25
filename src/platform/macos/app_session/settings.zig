@@ -1106,6 +1106,17 @@ pub fn commitRename(self: *AppSession) void {
         if (file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, text)) closeRename(self);
         return;
     }
+    const old_name: []const u8 = switch (target) {
+        .workspace => |t| t.custom_name orelse "",
+        .pane => |p| p.custom_name orelse "",
+        .term => |t| t.surface.custom_name orelse "",
+        .group => |t| t.group_start orelse "",
+        .file_tree => unreachable,
+    };
+    if (std.mem.eql(u8, old_name, text)) {
+        closeRename(self);
+        return;
+    }
     // 빈 텍스트(의도적 삭제) → null. 비어있지 않은데 dupe가 OOM이면 **기존 이름을 보존**하고 편집기만 닫는다 —
     // catch null로 흡수하면 OOM과 '빈 이름'을 구분 못 해 입력한 이름이 통째로 사라진다(기존 이름까지 free).
     const new_name: ?[]const u8 = if (text.len == 0) null else (self.allocator.dupe(u8, text) catch {
@@ -1135,6 +1146,7 @@ pub fn commitRename(self: *AppSession) void {
         .file_tree => unreachable,
     }
     closeRename(self);
+    self.workspaceChanged(.naming);
 }
 
 /// rename 편집기를 닫는다(취소·커밋 공통 종료) — 입력을 비우고 rename을 null로. custom_name은 안 건드린다

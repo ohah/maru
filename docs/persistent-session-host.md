@@ -7031,6 +7031,29 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   - 전원 손실 durability를 주장하지 않으므로 file/directory `fsync`는 넣지 않는다. 대신 각 syscall fail-index와
     multi-write prefix, rename 직전/직후 child `SIGKILL` process fixture에서 최종 leaf가 이전 또는 새 **완전본**뿐임을
     검증한다. crash가 남긴 temp는 다음 publish가 회수하며 final leaf와 temp를 동시에 조립해 읽는 recovery는 없다.
+
+  **C3 제품 wiring 계약:** C3는 C3a app-global owner → C3b committed mutation inventory → C3c AppKit
+  capture/background publication 순서로 연다.
+  - **C3a app-global owner:** L4 `app.workspace_checkpoint_product.State` 하나가 모든 Window보다 오래 살며 checked-monotonic
+    change revision을 C1의 유일한 checkpoint generation으로 접는다. revision은 publication 권위가 아니라 시계 없는
+    모델 mutation과 caller-owned monotonic clock 사이의 change token이다. restore/default-window 구성 전에는 arm하지
+    않고, 저장본 없는 최초 baseline은 caller가 명시적으로 dirty arm한다. worker completion 전에 revision을 먼저
+    동기화해 write 중 변경을 stale 판정에 포함한다. overflow는 sticky integrity failure다. 이 owner는 파일·AppKit·
+    DispatchQueue를 import하지 않는다. Debug·ReleaseFast `test-workspace-checkpoint-product` runtime 6개와
+    product/source-order boundary 2개·mutation inventory boundary 2개가 이 계약을 고정한다.
+  - **C3b committed mutation inventory:** manifest-visible transaction의 성공 commit 뒤에만 revision을 올린다. topology/order,
+    rename/color/group/pin, active tab/pane/Term, file/browser persisted state, dock/explicit Explorer roots/SCM base,
+    runtime binding/ended tombstone가 대상이다. 실패/no-op과 OSC title/cwd/prompt/agent/Git 관측 갱신은 mutation 0이다.
+    cross-window 이동은 Zig tree와 Swift Window membership이 모두 commit된 뒤 정확히 한 번 올린다.
+    새 Window는 construction/restore 중 staged 상태로 두어 snapshot과 dirty forwarding에서 모두 제외하고, 성공
+    publication 뒤에만 둘을 함께 연다. recovered ended slot의 live runtime 교체도 exact slot publication 뒤에 기록한다.
+  - **C3c capture와 publication:** AppKit은 마지막 active normal Window와 live-resize 종료 frame을 포함한 전체 Window snapshot을 메인
+    스레드에서 캡처·semantic validation하고, 독립 소유 immutable bytes만 단일 background C2 writer에 넘긴다.
+    completion은 메인 스레드에서 exact C1 request에 정산한다. capture/write 실패는 모든 일반 창 상태표시줄에
+    성공 commit 전까지 지속한다. restore incomplete 실행은 background overwrite를 막고
+    C4 final checkpoint가 secure `.bak` 보존 뒤 게시한다. C4 전 정상 Quit은 writer를 quiesce한 뒤 기존
+    `saveWorkspace`를 한 번만 실행한다. 시작값은 debounce 500ms, retry 1s→30s이며 1·10·100 runtime 성능 gate 전에는
+    영구 성능 계약으로 확정하지 않는다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
   않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다

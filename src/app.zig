@@ -1,4 +1,5 @@
 pub const app_runtime = @import("app/app_runtime.zig");
+pub const workspace_checkpoint_product = @import("app/workspace_checkpoint_product.zig");
 pub const artifact_io = @import("app/artifact_io.zig");
 pub const headless_demo = @import("app/headless_demo.zig");
 /// 데모·스모크 fixture 명령의 OS 갈래(단일 출처). 배럴에 걸어야 그 테스트가 모든 타깃에서 돈다.

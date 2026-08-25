@@ -435,6 +435,7 @@ pub fn createTab(
     // 탭 집합/활성이 바뀌었으니 사이드바 셀을 다시 만든다. 실패는 탭 생성을 무르지 않고(탭은 이미
     // 완성·append됨) 빈 사이드바로 degrade한다 — 여기서 try면 errdefer가 멀쩡한 탭을 헐어버린다.
     sidebar_ops.rebuildSidebar(self) catch {};
+    self.workspaceChanged(.topology);
     return tab;
 }
 
@@ -455,6 +456,7 @@ pub fn switchTab(self: *AppSession, index: usize) bool {
     self.metal_dirty = true;
     pane_ops.recomputeActivePaneRect(self); // 새 탭의 활성 panel rect로 좌표 origin 갱신
     sidebar_ops.rebuildSidebar(self) catch {}; // 활성 탭이 바뀌었으니 하이라이트 밴드를 새 행으로 옮긴다
+    if (index != prev_tab) self.workspaceChanged(.selection);
     return true;
 }
 
@@ -578,6 +580,7 @@ pub fn closeTab(self: *AppSession, index: usize) void {
     self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 — normalize 뒤, 마커 승계로 subtree 재구성 반영)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
 }
 
 /// window close graph가 모든 runtime을 backend에서 `removed`까지 수렴시킨 뒤에만 호출한다. 마지막 탭도 일반
@@ -803,6 +806,7 @@ pub fn moveTab(self: *AppSession, from: usize, raw_to: usize) usize {
     self.app_window.active_tab = adjustActiveForMove(self.app_window.active_tab, from, to);
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.ordering);
     return to;
 }
 
@@ -998,6 +1002,7 @@ pub fn beginGroupForTab(self: *AppSession, tab: *Tab, kind: GroupCreateKind, bre
     self.clearStaleLocalPins(); // 위생(GL §13.7): 마커 전이·top_level break로 leaf 아니게 된 카드의 stale local_pinned 클리어(고아 📌 방지)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
 }
 
 /// 워크스페이스가 속한 그룹을 푼다(ungroup) — 그 탭 위(자기 포함)에서 가장 가까운 group_start 마커를 제거한다
@@ -1046,6 +1051,7 @@ pub fn ungroupTab(self: *AppSession, tab: *Tab) void {
     self.clearStaleLocalPins(); // 위생(GL §13.7): 그룹 밖 top-level로 나간 옛 멤버의 stale local_pinned 클리어(고아 📌 방지)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // ungroup 후 프리픽스·정렬 불변식(toggleGroupPin과 동형)
 }
 
@@ -1131,6 +1137,7 @@ pub fn removeFromGroupForTab(self: *AppSession, tab: *Tab) void {
     self.clearStaleLocalPins(); // 위생(GL §13.7): 빠진 카드=top-level → stale local_pinned 클리어(고아 📌 방지)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
 }
 
 /// 그룹 멤버 카드를 **제자리에서** 최상위 섬으로 승격한다(promote-in-place — 우클릭 "여기서 최상위로 분리", §14.5·§14.7).
@@ -1151,6 +1158,7 @@ pub fn promoteTabToTopLevelInPlace(self: *AppSession, tab: *Tab) void {
     self.clearStaleLocalPins(); // 위생(GL §13.7): top-level 전이한 카드의 stale local_pinned 클리어(고아 📌 방지)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
 }
 
 /// 워크스페이스가 속한 그룹에 공통 색을 지정한다(SG5-2 — 우클릭 "그룹 색: …"). 그 탭 위(자기 포함)에서 가장 가까운
@@ -1164,9 +1172,11 @@ pub fn setGroupColorForTab(self: *AppSession, tab: *Tab, color: u32) void {
         break;
     };
     const mi = enclosingGroupMarkerIndex(self, idx orelse return) orelse return; // 최상위 카드 → no-op(색 얹을 그룹 없음)
+    if (self.tabs.items[mi].group_color == color) return;
     self.tabs.items[mi].group_color = color; // 그룹 시작 마커에만 색 저장(소속 카드는 위치 파생)
     sidebar_ops.rebuildSidebar(self) catch {}; // 헤더 밴드 tint·소속 카드 막대 즉시 반영
     self.metal_dirty = true;
+    self.workspaceChanged(.appearance);
 }
 
 /// 워크스페이스가 속한 그룹의 이름을 인라인 편집한다(rename_group — 헤더 더블클릭·팔레트·우클릭). 그 탭 위(자기 포함)
@@ -1780,6 +1790,7 @@ pub fn moveGroupNesting(self: *AppSession, m: usize, insert_before: usize, targe
     if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
         sidebar_ops.rebuildSidebar(self) catch {};
         self.metal_dirty = true;
+        self.workspaceChanged(.ordering);
     }
     return .{ .marker = nm, .changed = changed };
 }
@@ -1796,6 +1807,7 @@ pub fn moveGroupSibling(self: *AppSession, m: usize, insert_before: usize) Group
     if (changed) { // 이동 or depth 변경 → 프레임당 정확히 1회 rebuild
         sidebar_ops.rebuildSidebar(self) catch {};
         self.metal_dirty = true;
+        self.workspaceChanged(.ordering);
     }
     return .{ .marker = nm, .changed = changed };
 }
@@ -2109,6 +2121,7 @@ pub fn togglePin(self: *AppSession, tab: *Tab) void {
     // "from==to 안전망"이 metal_dirty라던 주석을 정정).
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.appearance);
 }
 
 pub fn cardPinRole(self: *AppSession, tab: *const Tab) CardPinRole {
@@ -2420,6 +2433,7 @@ pub fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
     self.floatLocalPinsAllGroups(); // 그룹-로컬 pin 재float(GL §13.4 배선 (3) — 항상 stablePartitionPinned 뒤, keystone 보존)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.appearance);
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
 }
 
@@ -2442,6 +2456,7 @@ pub fn toggleLocalPin(self: *AppSession, member: *Tab) void {
     stablePartitionSubtree(self, mi); // subtree-로컬 float(마커 직후) — 배선 표준 순서 (3)단계와 동형(여긴 전역 축 불변이라 (1)(2) 불요)
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
+    self.workspaceChanged(.appearance);
 }
 
 // --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---

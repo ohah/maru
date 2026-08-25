@@ -212,6 +212,7 @@ pub fn focusTerm(self: *AppSession, term_index: usize) void {
     self.file_tree_rows_dirty = true; // 활성 파일이 바뀌었을 수 있다 — 트리 활성 마커 갱신
     pane_ops.recomputeActivePaneRect(self);
     self.metal_dirty = true;
+    self.workspaceChanged(.selection);
 }
 
 /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘⌥]/⌘⌥[). Term이 1개면 무동작.

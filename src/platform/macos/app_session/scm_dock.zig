@@ -1991,12 +1991,17 @@ pub fn rememberScmBase(self: *AppSession, repo: []const u8, ref: ?[]const u8) bo
         self.allocator.free(self.scm_base_entries[at].base);
         self.scm_base_len -= 1;
         if (at != self.scm_base_len) self.scm_base_entries[at] = self.scm_base_entries[self.scm_base_len];
+        self.workspaceChanged(.scm_base);
         return true;
+    }
+    if (index) |at| {
+        if (std.mem.eql(u8, self.scm_base_entries[at].base, ref.?)) return true;
     }
     const name = self.allocator.dupe(u8, ref.?) catch return false;
     if (index) |at| {
         self.allocator.free(self.scm_base_entries[at].base);
         self.scm_base_entries[at].base = name;
+        self.workspaceChanged(.scm_base);
         return true;
     }
     if (self.scm_base_len == self.scm_base_entries.len) {
@@ -2009,6 +2014,7 @@ pub fn rememberScmBase(self: *AppSession, repo: []const u8, ref: ?[]const u8) bo
     };
     self.scm_base_entries[self.scm_base_len] = .{ .repo = repo_copy, .base = name };
     self.scm_base_len += 1;
+    self.workspaceChanged(.scm_base);
     return true;
 }
 

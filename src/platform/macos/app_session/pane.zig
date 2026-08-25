@@ -218,6 +218,7 @@ pub fn applyPendingDividerResize(self: *AppSession) void {
     resizeActiveTabPanes(self) catch {};
     recomputeActivePaneRect(self);
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
 }
 
 pub fn paneLabelCols(pane: *const Pane, bar_cols: u32) u32 {
@@ -885,6 +886,7 @@ pub fn newTermInActivePane(self: *AppSession) !void {
     errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
+    self.workspaceChanged(.topology);
 }
 
 /// 활성 panel을 direction으로 둘로 나눈다(사실상 표준 멀티플렉서 split 동작 참고 — 코드 미참고). 활성 panel의
@@ -961,6 +963,7 @@ pub fn splitActivePane(self: *AppSession, direction: maru.session.SplitDirection
     //    frame_loop pump 재바인딩 + 활성 panel rect 재계산 + metal_dirty를 한 곳에서 한다. 탭 인덱스는
     //    그대로라 사이드바 갱신은 불요.
     focusPane(self, tab.panes.items.len - 1);
+    self.workspaceChanged(.topology);
 }
 
 /// 활성 탭의 divider를 capture가 볼 수 있는 tree로 다시 발행한다 — CIM2.
@@ -1149,6 +1152,7 @@ pub fn focusPane(self: *AppSession, pane_index: usize) void {
     self.app_window.tabs = self.surface_ptrs.items;
     recomputeActivePaneRect(self);
     self.metal_dirty = true;
+    self.workspaceChanged(.selection);
 }
 
 /// new_workspace 드롭 하이라이트 표시 슬롯 — promotePaneToNewWorkspace가 새(비고정) 탭을 **비고정 리전의 첫 group_start
@@ -1219,6 +1223,7 @@ pub fn closeActivePane(self: *AppSession) void {
     // 닫은 Pane·해제된 split 노드를 가리키던 호버·divider 포인터는 위 destroyPane이 invalidateForFreedPane
     // (S1 chokepoint)으로 이미 비웠다 — 여기서 따로 리셋하지 않는다.
     self.metal_dirty = true;
+    self.workspaceChanged(.topology);
 }
 
 pub fn dividerBandPt(self: *const AppSession, content: maru.session.SplitRect, target: web_panel_layout.RectF64, edge: web_panel_layout.DividerEdge) f64 {

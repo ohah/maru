@@ -1832,6 +1832,13 @@ fn buildDockTreeFrame(
     geom: maru.session.dock_layout.Geometry,
     cell_w: u32,
     cell_h: u32,
+    /// 콘텐츠가 위로 밀린 양(px). 0 이면 맨 위다.
+    scroll_px: u32,
+    /// 첫 행이 뷰포트 위로 밀려 나간 픽셀 — 렌더가 원점을 그만큼 **올려** 그린다.
+    shift_out: *u32,
+    /// **실제로 그린 첫 행.** 판정이 `drawWindow` 를 다시 부르면 그리기 쪽만 어긋나도 안 잡힌다
+    /// (실측: 그리기에 스크롤을 안 주는 뮤턴트가 그 판정을 통과했다).
+    start_out: *usize,
     /// **실제로 그린 행 수.** 히트테스트가 이 값을 써야 한다 — `rows.len` 을 쓰면 안 그린 행이
     /// 눌린다(실측: 110 행짜리 디렉터리에서 도크 맨 아래를 누르면 그리지 않은 29 행이 나왔다).
     drawn: *u16,
@@ -1840,9 +1847,14 @@ fn buildDockTreeFrame(
     const area = geom.tree_content;
     if (area.w < cell_w or area.h < cell_h) return null;
     const cols: u16 = @intCast(area.w / cell_w);
-    const rows_visible: u16 = @intCast(@min(rows.len, area.h / cell_h));
-    drawn.* = rows_visible;
-    if (cols == 0 or rows_visible == 0) return null;
+    // **어느 행을 그릴지는 중립이 정한다**(`file_tree_layout.drawWindow`) — 히트테스트
+    // (`rowAtLocalY`)와 짝이라 그린 행과 눌리는 행이 안 갈린다. 여기서 다시 나누면 부분만 보이는
+    // 첫 행에서 어긋난다(그 함수 doc 이 왜 올림인지까지 적어 뒀다).
+    const win = maru.session.file_tree_layout.drawWindow(cell_h, scroll_px, area.h, rows.len);
+    drawn.* = win.count;
+    shift_out.* = win.origin_shift_px;
+    start_out.* = win.start;
+    if (cols == 0 or win.count == 0) return null;
 
     const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 } };
     const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
@@ -1850,8 +1862,8 @@ fn buildDockTreeFrame(
         allocator,
         rows,
         null,
-        0,
-        rows_visible,
+        win.start,
+        win.count,
         cols,
         fg,
         active_fg,
@@ -1887,6 +1899,13 @@ fn rebuildDockAll(
     atlas_h: *u32,
     uploaded: *usize,
     outside: *usize,
+    /// 트리가 위로 밀린 양(px)과 그 나머지(첫 행이 잘린 픽셀 — 렌더가 원점을 그만큼 올린다).
+    scroll_px: u32,
+    shift_out: *u32,
+    start_out: *usize,
+    /// 트리 글자 중 **가장 위 픽셀**. 부분 스크롤(`shift`)을 실제로 적용했는지의 유일한 관측점 —
+    /// 안 하면 스크롤이 행 단위로 툭툭 끊기는데 개수·행 판정은 전부 초록이다(실측).
+    top_px_out: *?f32,
     drawn: *u16,
     frame_slot: *?maru.renderer.RenderFrame,
     /// 지금 도크가 보이는 것. **뷰마다 다른 표면**을 그린다(W8.7c2).
@@ -1915,7 +1934,7 @@ fn rebuildDockAll(
         frame_slot.* = null;
     }
     if (rows.len == 0) return;
-    const built = (try buildDockTreeFrame(allocator, renderer_state, builder, rows, geom, cell_w, cell_h, drawn)) orelse return;
+    const built = (try buildDockTreeFrame(allocator, renderer_state, builder, rows, geom, cell_w, cell_h, scroll_px, shift_out, start_out, drawn)) orelse return;
     frame_slot.* = built;
 
     // **업로드는 여기서, 지금 한다.** 프레임의 업로드 목록은 **그 프레임과 함께 사라진다** — 올리기
@@ -1951,17 +1970,36 @@ fn rebuildDockAll(
     // (터미널 쪽에서는 그 배선이 아직 안 밟힌다 — §2m.31).
     maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.tree_content.x, geom.tree_content.y);
     try out.ensureUnusedCapacity(allocator, native.len);
+    // **첫 행이 잘린 만큼 위로 올린다.** `drawWindow` 가 뷰포트를 덮으려고 한 줄 더 주고 그 나머지를
+    // `origin_shift_px` 로 알려 준다 — 안 올리면 스크롤이 **행 단위로만** 움직여 툭툭 끊긴다.
+    const shift_f: f32 = @floatFromInt(shift_out.*);
+    top_px_out.* = null;
     const x0: f32 = @floatFromInt(geom.tree_content.x);
     const y0: f32 = @floatFromInt(geom.tree_content.y);
     const x1: f32 = @floatFromInt(geom.tree_content.x + geom.tree_content.w);
     const y1: f32 = @floatFromInt(geom.tree_content.y + geom.tree_content.h);
     for (native) |n| {
-        const cell = win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        var cell = win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        cell.rect[1] -= shift_f;
+        // **뷰포트 위아래로 반쯤 걸친 행은 정상이다.** `drawWindow` 는 바닥에 배경 띠가 남지 않게
+        // 일부러 한 줄 더 주고(그 함수 doc 이 "올림이어야 한다" 고 적어 뒀다), 첫 행은 `shift` 만큼
+        // 위로 밀린다. 그 둘을 `outside` 로 세면 스크롤만 해도 판정이 빨개진다(실측: 48 행 트리에서
+        // 40 — 마지막 한 행의 글자 수 그대로였다). **좌우 두 변과 완전히 벗어난 셀은 그대로 잰다.**
+        const spans_top = cell.rect[1] < y0 and cell.rect[1] + cell.rect[3] > y0;
+        const spans_bottom = cell.rect[1] < y1 and cell.rect[1] + cell.rect[3] > y1;
+        if ((spans_top or spans_bottom) and cell.rect[0] >= x0 and cell.rect[0] + cell.rect[2] <= x1) {
+            if (top_px_out.* == null or cell.rect[1] < top_px_out.*.?) top_px_out.* = cell.rect[1];
+            out.appendAssumeCapacity(cell);
+            continue;
+        }
+        // 완전히 아래로 나간 행은 **그리지 않는다** — 도크 밖이라 그릴 이유가 없다.
+        if (cell.rect[1] >= y1) continue;
         // **트리 글자가 도크 사각형을 벗어나면 안 된다.** 여기서 원점을 안 찍으면 글자가 창 왼쪽
         // 위에서 시작해 **터미널 위에** 얹힌다 — 터미널 쪽과 달리 이 판정은 실제로 발동한다
         // (`tree_content.x` 가 0 이 아니다).
         if (cell.rect[0] < x0 or cell.rect[1] < y0 or
             cell.rect[0] + cell.rect[2] > x1 or cell.rect[1] + cell.rect[3] > y1) outside.* += 1;
+        if (top_px_out.* == null or cell.rect[1] < top_px_out.*.?) top_px_out.* = cell.rect[1];
         out.appendAssumeCapacity(cell);
     }
     // 위 주석과 같은 이유로 **내용 뒤에** 굽는다.
@@ -3236,6 +3274,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_region_uploads: usize = 0;
     var dock_cells_outside: usize = 0;
     var dock_rows_drawn: u16 = 0;
+    // ── 도크 스크롤 (W8.7) ──────────────────────────────────────────────────────────────────
+    // 콘텐츠가 위로 밀린 양. **그리기(`drawWindow`)와 히트테스트(`rowAtLocalY`)가 같은 값을 본다** —
+    // 두 곳에서 따로 세면 부분만 보이는 첫 행에서 그린 행과 눌리는 행이 갈린다.
+    var dock_scroll_px: u32 = 0;
+    var dock_scroll_shift: u32 = 0;
+    var dock_draw_start: usize = 0;
+    var dock_tree_top_px: ?f32 = null;
+    var dock_scrolls: usize = 0;
     var dock_click_judgeable = false;
     var dock_click_target_row: usize = 0;
     var divider_drag: ?f64 = null;
@@ -3324,6 +3370,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var session_spawn_failures: usize = 0;
     var tab_switches: usize = 0;
     var switch_judgeable = false;
+    var dock_scroll_judgeable = false;
+    var dock_scroll_click_sent = false;
+    var dock_row_before_scroll_click: ?usize = null;
+    var dock_scroll_clicked_row: ?usize = null;
     var active_before_switch: usize = 0;
     var grid_digest_before_switch: u64 = 0;
     var grid_digest_after_switch: u64 = 0;
@@ -3349,7 +3399,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var view_bar_frame: ?maru.renderer.RenderFrame = null;
     defer if (view_bar_frame) |*f| f.deinit(allocator);
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -3585,6 +3635,41 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **카드 한복판과 헤더 아이콘 하나를 실제로 누른다.** 그리고 판정은 내가 보낸 좌표를
         // 되읽지 않는다 — 누른 y 는 **그려진 카드 밴드**에서 나오고, 답은 중립 `slotAt` 이 낸다.
+        // ── 도크 스크롤 판정 (W8.7) ────────────────────────────────────────────────────────
+        //
+        // **굴린 뒤에도 "그린 것 = 눌리는 것" 인가.** 트리 한복판에서 아래로 굴리고, 뷰포트 맨 위
+        // 픽셀을 눌러 **그 자리에 실제로 그려진 행**이 나오는지 본다.
+        // **넘치는지를 본다, 행 수가 아니라.** 뷰포트가 콘텐츠보다 크면 굴릴 것이 없고, 그때
+        // `dock_scrolls=0` 은 고장이 아니라 **정상**이다(첫 판에서 행 수로 가드해 그것을 실패로
+        // 읽었다).
+        // **탐색기 뷰일 때 굴려야 한다.** spin 150 에 소스 컨트롤로 바뀌므로 그 앞이다 — 처음에
+        // 430 에 뒀더니 **보이지도 않는 트리**를 굴리고 클릭은 죽은 경로로 갔다(`clicked_row` 가
+        // spin 60 의 옛 값 그대로였다).
+        if (spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
+            dock_rows.items.len *| cell_h > geom.tree_content.h)
+        {
+            dock_scroll_judgeable = true;
+            const wx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, -3); // 아래로 세 눈금
+        }
+        // **굴린 뒤 뷰포트 맨 위를 진짜로 누른다.** 판정이 `rowAtLocalY` 를 직접 다시 부르면
+        // **배선이 아니라 재구현**을 재는 꼴이라, 히트테스트에서 스크롤을 빼는 뮤턴트가 그대로
+        // 통과했다(실측). 이제 답은 그 호출부가 낸다.
+        // **두 판정이 각자 자기 클릭을 읽어야 한다.** 이 클릭이 `dock_last_row` 를 덮으면 앞선
+        // 행 클릭 판정(`want_row=2`)이 엉뚱한 값을 보고 실패한다 — 실측으로 그렇게 됐다.
+        if (spins == 115 and dock_scroll_judgeable) {
+            dock_row_before_scroll_click = dock_last_row;
+            const cx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const cy: i32 = @intCast(geom.tree_content.y + 1);
+            window.postSyntheticMouse(.left_down, cx, cy);
+            window.postSyntheticMouse(.left_up, cx, cy);
+            dock_scroll_click_sent = true;
+        }
+        if (spins == 130 and dock_scroll_click_sent) {
+            dock_scroll_clicked_row = dock_last_row;
+            dock_last_row = dock_row_before_scroll_click; // 앞선 판정에 그 클릭의 답을 돌려준다
+        }
         if (spins == 470 and sidebar_w != 0 and sidebar_header_h != 0) {
             sidebar_judgeable = true;
             const m_sb = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
@@ -3703,7 +3788,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
@@ -3847,7 +3932,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 resizeAllSessions(&runtime, sessions.items, size, io);
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                 dock_rebuild_failures += 1;
                             };
                             divider_moves += 1;
@@ -3947,6 +4032,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     continue;
                 }
+                // ── 도크 스크롤 (W8.7) ──────────────────────────────────────────────────
+                //
+                // **포인터가 있는 영역이 굴러간다.** 활성 뷰가 아니라 **가리키는 곳**이 기준이다 —
+                // 그것이 이 저장소의 다른 영역 판정(`regionAt`)과 같은 규칙이고, 마우스를 도크에
+                // 두고 굴렸는데 터미널이 굴러가면 놀란다.
+                if (region == .dock_content and m.kind == .wheel) {
+                    const notches = wheel_acc.feed(m.wheel_delta);
+                    if (notches != 0) {
+                        const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
+                        // **상한은 콘텐츠가 정한다.** 넘겨 굴리면 빈 바닥이 보이고, 못 굴리면 마지막
+                        // 행에 못 닿는다.
+                        const content_h: u32 = @intCast(dock_rows.items.len *| cell_h);
+                        const max_scroll: u32 = content_h -| geom.tree_content.h;
+                        const delta: i64 = @as(i64, lines) * @as(i64, @intCast(cell_h));
+                        const next: i64 = @as(i64, dock_scroll_px) - delta;
+                        const clamped: u32 = @intCast(std.math.clamp(next, 0, @as(i64, max_scroll)));
+                        if (clamped != dock_scroll_px) {
+                            dock_scroll_px = clamped;
+                            dock_scrolls += 1;
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+                        }
+                    }
+                    continue;
+                }
                 if (region != .terminal and m.kind != .capture_lost) {
                     dock_pointer_events += 1;
                     // ── 뷰 바: 칸을 누르면 도크 내용이 바뀐다 (W8.7c2) ──────────────────
@@ -3969,7 +4078,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                         dock_rebuild_failures += 1;
                                     };
                                 };
@@ -4000,7 +4109,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                     dock_rebuild_failures += 1;
                                 };
                                 scm_dock_redraws += 1;
@@ -4014,7 +4123,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (region == .dock_content and local_y >= 0) {
                             // **그린 행 수를 쓴다** — `dock_rows.items.len` 을 쓰면 안 그린 행이 눌린다(적대적 검증
                             // 실측: 110 행짜리 디렉터리에서 도크 맨 아래가 그리지 않은 29 행을 냈다).
-                            if (maru.session.file_tree_layout.rowAtLocalY(cell_h, 0, local_y, dock_rows_drawn)) |row| {
+                            if (maru.session.file_tree_layout.rowAtLocalY(cell_h, dock_scroll_px, local_y, dock_rows.items.len)) |row| {
                                 dock_row_clicks += 1;
                                 dock_last_row = row;
                             }
@@ -4370,7 +4479,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -4674,6 +4783,40 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     }
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
+    if (dock_scroll_judgeable) {
+        // **동어반복이 아니다**: 스크롤 값을 되읽는 것이 아니라, 뷰포트 맨 위를 `rowAtLocalY` 에
+        // 넣어 나온 행이 `drawWindow` 가 **실제로 그린 첫 행**과 같은지 본다. 두 함수는 서로를
+        // 안 부르고, 하나만 어긋나면 여기서 갈린다.
+        // **그린 첫 행**은 `drawWindow` 가, **눌린 행**은 실제 클릭이 지나간 호출부가 낸다.
+        // 둘은 서로를 안 부른다 — 하나만 어긋나면 여기서 갈린다.
+        // **셋이 서로 다른 곳에서 온다.** 그린 첫 행은 **빌더가 실제로 쓴 값**(`dock_draw_start`),
+        // 눌린 행은 클릭이 지나간 호출부, 상한은 콘텐츠 높이다. 어느 하나를 판정이 다시 계산하면
+        // 그쪽 배선이 끊겨도 안 잡힌다 — 이 판정이 두 번 그렇게 속았다.
+        const content_h: u32 = @intCast(dock_rows.items.len *| cell_h);
+        const max_scroll: u32 = content_h -| geom.tree_content.h;
+        const within = dock_scroll_px <= max_scroll;
+        // **부분 스크롤이 픽셀로 갔는가.** 첫 행은 뷰포트 위로 `shift` 만큼 밀려야 한다 — 안 밀면
+        // 스크롤이 행 단위로만 움직인다(그때도 개수·행 판정은 전부 초록이었다).
+        const want_top: f32 = @as(f32, @floatFromInt(geom.tree_content.y)) - @as(f32, @floatFromInt(dock_scroll_shift));
+        const shift_applied = dock_tree_top_px != null and @abs(dock_tree_top_px.? - want_top) < 1.0;
+        try stdout.print("dock_scrolls={d} dock_scroll_px={d}/{d} dock_shift={d} draw_start={d} clicked_row={?d} within_max={} shift_applied={} dock_scroll_ok={}\n", .{
+            dock_scrolls,
+            dock_scroll_px,
+            max_scroll,
+            dock_scroll_shift,
+            dock_draw_start,
+            dock_scroll_clicked_row,
+            within,
+            shift_applied,
+            dock_scrolls > 0 and dock_scroll_px > 0 and dock_scroll_click_sent and within and shift_applied and
+                dock_scroll_clicked_row != null and dock_scroll_clicked_row.? == dock_draw_start,
+        });
+    } else {
+        // **판정 불가 사유가 맞아야 한다.** 굴릴 것이 없는 것과 도크가 없는 것은 다른 사실이다.
+        const content_h: u32 = @intCast(dock_rows.items.len *| cell_h);
+        const why: []const u8 = if (geom.tree_content.w == 0) "no_dock" else "content_fits";
+        try stdout.print("dock_scroll=unjudgeable reason={s} rows={d} content_h={d} viewport_h={d}\n", .{ why, dock_rows.items.len, content_h, geom.tree_content.h });
+    }
     if (dock_click_judgeable) {
         // **동어반복을 피한다**: 누른 자리가 그 행이라는 것만 보면 내가 만든 좌표를 내가 되읽는
         // 것이다. 그 행의 **이름**을 모델에서 꺼내 함께 적어, 화면에 뜬 목록과 대조할 수 있게 한다.

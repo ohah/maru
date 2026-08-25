@@ -246,6 +246,7 @@ extern "user32" fn SetCapture(HWND) callconv(abi.winapi) ?HWND;
 extern "user32" fn ReleaseCapture() callconv(abi.winapi) i32;
 /// 화면 좌표를 클라이언트 좌표로. **휠만 화면 기준으로 오므로** 그 자리에서만 쓴다.
 extern "user32" fn ScreenToClient(HWND, *POINT) callconv(abi.winapi) i32;
+extern "user32" fn ClientToScreen(HWND, *POINT) callconv(abi.winapi) i32;
 
 const WS_OVERLAPPEDWINDOW: DWORD = 0x00CF0000;
 const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
@@ -683,16 +684,40 @@ pub const Window = struct {
     /// **한계**: OS 입력 스택(캡처·연타 타이밍·모디파이어 키 상태)은 안 밟는다. W7.4c 가 IME 에서
     /// 받아들인 것과 같은 한계다.
     pub fn postSyntheticMouse(self: *Window, kind: MouseEvent.Kind, x_px: i32, y_px: i32) void {
+        self.postSyntheticMouseWheel(kind, x_px, y_px, 0);
+    }
+
+    /// 휠까지 보낸다. `notches` 는 눈금 수(+위, −아래) — 0 이면 휠이 아닌 종류로 취급한다.
+    ///
+    /// **휠은 `lParam` 이 화면 좌표다**(다른 마우스 메시지는 클라이언트 좌표). 창이 그 차이를 이미
+    /// 흡수하므로(`WM_MOUSEWHEEL` 처리에서 `ScreenToClient`) 여기서는 창이 기대하는 그대로 넣는다 —
+    /// 판정이 클라이언트 좌표로 찌를 수 있게 화면 좌표로 올려 보낸다.
+    pub fn postSyntheticMouseWheel(self: *Window, kind: MouseEvent.Kind, x_px: i32, y_px: i32, notches: i32) void {
         const msg: UINT = switch (kind) {
             .moved => WM_MOUSEMOVE,
             .left_down => WM_LBUTTONDOWN,
             .left_up => WM_LBUTTONUP,
+            .wheel => WM_MOUSEWHEEL,
             else => return,
         };
+        var x = x_px;
+        var y = y_px;
+        if (msg == WM_MOUSEWHEEL) {
+            var pt = POINT{ .x = x_px, .y = y_px };
+            if (ClientToScreen(self.hwnd, &pt) != 0) {
+                x = pt.x;
+                y = pt.y;
+            }
+        }
         // lParam 은 **부호 있는 16 비트 둘**이다. 음수를 그냥 넣으면 상위 절반을 침범한다.
-        const lo: u32 = @as(u16, @bitCast(@as(i16, @truncate(x_px))));
-        const hi: u32 = @as(u16, @bitCast(@as(i16, @truncate(y_px))));
-        _ = PostMessageW(self.hwnd, msg, 0, @intCast(lo | (hi << 16)));
+        const lo: u32 = @as(u16, @bitCast(@as(i16, @truncate(x))));
+        const hi: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
+        // 휠 델타는 wParam **상위 16 비트**다(한 눈금 = 120).
+        const wparam: WPARAM = if (msg == WM_MOUSEWHEEL)
+            @as(WPARAM, @as(u32, @bitCast(@as(i32, notches) * 120)) << 16 >> 16 << 16)
+        else
+            0;
+        _ = PostMessageW(self.hwnd, msg, wparam, @intCast(lo | (hi << 16)));
     }
 
     pub fn setImeCaret(self: *Window, row: u16, col: u16, cell_w: u32, cell_h: u32) void {

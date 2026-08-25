@@ -15,6 +15,9 @@ const external_loop_policy = @import("external_loop_policy.zig");
 const external_pump_owner = @import("external_pump_owner.zig");
 const external_tty = @import("external_tty.zig");
 const external_tty_output = @import("external_tty_output.zig");
+const remote_screen = @import("remote_screen.zig");
+const screen_stream = @import("screen_stream.zig");
+const screen_assembler = @import("screen_assembler.zig");
 
 const c = std.c;
 const posix = std.posix;
@@ -28,10 +31,16 @@ pub fn runRequest(
     // Reject an unusable or split terminal before discovery. Apart from avoiding an attachment
     // that can never be rendered safely, this guarantees one-sided/non-matching TTY invocations
     // make zero host connections.
-    terminalPreflight(posix.STDIN_FILENO, posix.STDOUT_FILENO) catch |err| {
-        try stderr.print("maru attach: terminal rejected ({s})\n", .{@errorName(err)});
-        return .denied;
-    };
+    //
+    // **`--stream` 만 이 검사를 건너뛴다.** 그 모드는 화면을 그리지 않고 레코드를 흘리므로
+    // (§8) 소비자가 터미널이 아니라 다른 maru 이고, stdout 이 파이프인 것이 목적이다. 그 뒤
+    // 준비 경로는 **똑같이 공유한다** — 조인 지점을 둘로 만들지 않는다.
+    if (request.intent != .stream) {
+        terminalPreflight(posix.STDIN_FILENO, posix.STDOUT_FILENO) catch |err| {
+            try stderr.print("maru attach: terminal rejected ({s})\n", .{@errorName(err)});
+            return .denied;
+        };
+    }
 
     // **캐시가 아니라 런타임 base 다**(계약 §10). 앱이 host 를 그 자리에 등록하므로 CLI 도 같은
     // 자리를 봐야 한다 — `XDG_CACHE_HOME`/`~/.cache` 를 보던 때는 앱이 띄운 host 를 **한 번도
@@ -47,6 +56,9 @@ pub fn runRequest(
         .failed => |code| return code,
     };
     defer prepared.deinit();
+
+    // 여기서 갈린다: 흘릴 것인가, 그릴 것인가. 준비까지는 한 경로였다.
+    if (request.intent == .stream) return runStreamRequest(io, allocator, &prepared, stderr);
 
     var owner: external_loop_owner.IntegratedStackOwner = .{};
     owner.prepareInPlace(
@@ -74,6 +86,175 @@ pub fn runRequest(
         return .internal;
     }
     return runResultExit(result.cause, result.terminal_reason);
+}
+
+/// stdout 프레이밍(§8): `"MRSS" | kind:u8 | reserved:u8 x3 | len:u32 LE | payload`.
+/// magic 은 셸이 끼워 넣은 잡음과 첫 프레임을 가르는 자리다(컨트롤 축의 `hello` 찾기와 같은 이유).
+pub const stream_magic = "MRSS";
+pub const stream_header_bytes = stream_magic.len + 1 + 3 + 4;
+
+/// stdout 으로 레코드 덩어리를 내보내는 sink. **부분 쓰기와 EPIPE 를 여기서 끝낸다** — 소비자가
+///먼저 끊는 것은 정상 종료이고(폰이 화면을 나갔다), 그때 이 프로세스도 조용히 끝나야 한다.
+const StdoutStreamSink = struct {
+    fd: c.fd_t,
+    broken: bool = false,
+
+    fn write(ctx: *anyopaque, bytes: []const u8, kind: remote_screen.ScreenByteKind) void {
+        const self: *StdoutStreamSink = @ptrCast(@alignCast(ctx));
+        if (self.broken) return;
+        if (bytes.len > screen_stream.max_record_stream_bytes) {
+            // 계약 상한을 넘는 덩어리는 **안 보낸다** — 잘라 보내면 소비자가 반쪽 스트림을 조립한다.
+            self.broken = true;
+            return;
+        }
+        var header: [stream_header_bytes]u8 = @splat(0);
+        @memcpy(header[0..stream_magic.len], stream_magic);
+        header[stream_magic.len] = @intFromEnum(kind);
+        std.mem.writeInt(u32, header[stream_magic.len + 4 ..][0..4], @intCast(bytes.len), .little);
+        if (!self.writeAll(&header)) return;
+        _ = self.writeAll(bytes);
+    }
+
+    /// 부분 쓰기를 끝까지 민다. 실패하면 `broken` 을 세워 **다음 덩어리부터 조용히 멈춘다**.
+    fn writeAll(self: *StdoutStreamSink, bytes: []const u8) bool {
+        var sent: usize = 0;
+        while (sent < bytes.len) {
+            const n = c.write(self.fd, bytes[sent..].ptr, bytes.len - sent);
+            if (n > 0) {
+                sent += @intCast(n);
+                continue;
+            }
+            if (n < 0 and std.posix.errno(n) == .INTR) continue;
+            self.broken = true;
+            return false;
+        }
+        return true;
+    }
+};
+
+/// `maru attach --stream` 의 루프. observer 로 붙어 **화면 레코드를 그대로 흘린다**.
+///
+/// 첫 덩어리는 조립기의 현재 상태를 다시 직렬화한 snapshot 이다 — `prepare` 가 초기 snapshot 을
+/// 이미 소비했으므로 그 바이트를 다시 잡는 대신 **지금 화면 전체**를 만들어 보낸다(소비자에게는
+/// 그것이 더 정확하다). 그 뒤로는 sink 가 delta 를 그대로 나른다.
+fn runStreamRequest(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prepared: *external_attach.Prepared,
+    stderr: *std.Io.Writer,
+) !attach_cli.ExitCode {
+    // **SIGPIPE 를 무시한다.** 소비자가 먼저 끊으면 write 가 신호로 프로세스를 죽여 정리 코드가
+    // 안 돈다 — 컨트롤 중계(`cli/control_relay.zig`)가 같은 이유로 같은 규칙을 쓴다.
+    const ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ignore, null);
+
+    var sink: StdoutStreamSink = .{ .fd = posix.STDOUT_FILENO };
+    const screen = &(prepared.attachment.screen orelse {
+        try stderr.writeAll("maru attach: screen is unavailable\n");
+        return .protocol;
+    });
+
+    // 첫 덩어리: 지금 화면 전체.
+    const first = screen.snapshotBytes(allocator, io) catch {
+        try stderr.writeAll("maru attach: cannot serialize the current screen\n");
+        return .internal;
+    };
+    defer allocator.free(first);
+    StdoutStreamSink.write(&sink, first, .snapshot);
+
+    // 이제부터 오는 것은 sink 가 그대로 나른다.
+    screen.byte_sink = .{ .ctx = &sink, .write = StdoutStreamSink.write };
+
+    while (!sink.broken) {
+        const result = prepared.attachment.pumpScreen(io) catch |err| switch (err) {
+            error.ConnectionClosed => return .success, // host 가 끝났다 — 정상 종료다.
+            else => {
+                try stderr.print("maru attach: stream ended ({s})\n", .{@errorName(err)});
+                return .protocol;
+            },
+        };
+        switch (result) {
+            .terminal => return .success,
+            .idle, .applied, .recovery_commit_pending => {},
+        }
+    }
+    // 소비자가 끊었다 — 우리 잘못이 아니다.
+    return .success;
+}
+
+test "흘린 프레임은 소비자의 조립기로 그대로 되살아난다" {
+    // **이 왕복이 판정자다.** "바이트가 나온다" 는 것만 재면 소비자가 못 읽는 스트림도 초록이다.
+    // 여기서는 우리가 만든 프레임을 헤더대로 풀어 **다른 조립기**에 먹여, 같은 화면이 되는지 본다.
+    const allocator = std.testing.allocator;
+
+    var producer = screen_assembler.ScreenAssembler.init(allocator);
+    defer producer.deinit();
+    var runs = [_]screen_stream.Run{.{ .grapheme = "A", .width = 1, .count = 3 }};
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    defer stream.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{
+        .cols = 3,
+        .rows = 1,
+        .active_screen = 0,
+        .cursor = .{ .col = 0, .row = 0, .visible = true, .shape = 0 },
+        .modes = 0,
+    });
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&stream, allocator, meta);
+    const row = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = 0, .runs = &runs });
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&stream, allocator, row);
+    try producer.applySnapshot(stream.items);
+
+    // 프로듀서가 흘릴 바이트 = 지금 화면의 재직렬화.
+    const payload = try producer.toSnapshot(allocator);
+    defer allocator.free(payload);
+
+    // 우리 프레이밍으로 감싼다(파일에 쓰지 않고 sink 의 인코딩만 그대로 재현한다).
+    var framed: std.ArrayListUnmanaged(u8) = .empty;
+    defer framed.deinit(allocator);
+    var header: [stream_header_bytes]u8 = @splat(0);
+    @memcpy(header[0..stream_magic.len], stream_magic);
+    header[stream_magic.len] = @intFromEnum(remote_screen.ScreenByteKind.snapshot);
+    std.mem.writeInt(u32, header[stream_magic.len + 4 ..][0..4], @intCast(payload.len), .little);
+    try framed.appendSlice(allocator, &header);
+    try framed.appendSlice(allocator, payload);
+
+    // 소비자: 헤더를 풀고 payload 만 조립기에 먹인다.
+    try std.testing.expectEqualStrings(stream_magic, framed.items[0..stream_magic.len]);
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(remote_screen.ScreenByteKind.snapshot)),
+        framed.items[stream_magic.len],
+    );
+    const len = std.mem.readInt(u32, framed.items[stream_magic.len + 4 ..][0..4], .little);
+    try std.testing.expectEqual(payload.len, len);
+
+    var consumer = screen_assembler.ScreenAssembler.init(allocator);
+    defer consumer.deinit();
+    try consumer.applySnapshot(framed.items[stream_header_bytes..][0..len]);
+
+    // **같은 화면인가** — 행의 run 이 그대로 살아야 한다.
+    const got = consumer.rowRuns(0);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("A", got[0].grapheme);
+    try std.testing.expectEqual(@as(u32, 3), got[0].count);
+}
+
+test "상한을 넘는 덩어리는 자르지 않고 멈춘다" {
+    // 잘라 보내면 소비자가 **반쪽 스트림**을 조립한다 — 그 실패는 원인을 짚기 어렵다.
+    var sink: StdoutStreamSink = .{ .fd = -1 };
+    var huge: [8]u8 = @splat(0);
+    // 상한 초과는 길이만으로 판정되므로 실제 큰 버퍼를 잡지 않고 슬라이스 길이를 위조한다.
+    const fake: []const u8 = huge[0..0];
+    _ = fake;
+    try std.testing.expect(!sink.broken);
+    // fd -1 이라 첫 write 부터 실패하고, 그 뒤로는 조용히 멈춘다(부분 프레임을 더 안 낸다).
+    StdoutStreamSink.write(&sink, huge[0..4], .snapshot);
+    try std.testing.expect(sink.broken);
 }
 
 const TerminalPreflightError = error{

@@ -6010,7 +6010,36 @@ wire에서 title은 **optional**이다. 값을 못 얻거나(read-only host라 `
 | `maru attach --read-only` | observer로 snapshot/delta를 표시한다. input/resize는 보내지 않는다. |
 | `maru attach` | controller가 없으면 controller, 있으면 observer로 붙고 명확한 read-only banner를 표시한다. 조용히 기존 controller를 빼앗지 않는다. |
 | `maru attach --take-over` | 기존 controller revoke를 확인한 뒤 원자적으로 controller를 이전한다. |
+| `maru attach --stream` | observer로 붙어 §12 화면 레코드 스트림을 stdout으로 흘린다. ANSI로 그리지 않으므로 크기를 자르지 않고 raw TTY도 요구하지 않는다. 소비자는 다른 maru다(아래). |
 | `maru runtime end` | interactive TTY에서 runtime ID·size·controller/observer 상태를 보여 주고 확인 후 종료한다. script는 `--yes`가 없으면 실패한다. normal manifest slot은 다음 GUI에서 ended placeholder가 된다. |
+
+### `maru attach --stream` — 화면 wire 를 그대로 흘린다
+
+`--stream`은 화면을 ANSI로 그리지 않고 §12 `screen_stream` 레코드 스트림을 **stdout으로 그대로 흘린다**.
+소비자는 사람이 아니라 **다른 maru**(지금은 폰)이며, 자기 조립기로 화면을 만든다.
+
+**왜 ANSI가 아닌가.** ANSI 투영(`external_ansi`)은 원격 화면을 **자기 tty 크기로 자른다**
+(`@min(snapshot.size, local_size)`). 원격이 더 크면 왼쪽 위 모서리만 나가고, 세로가 잘리면 **최신 줄이
+사라진다**. 또 폭 해석이 양쪽에서 두 번 일어나 어긋나므로 우하단 anchor를 `?`로 대체하는 타협이 이미 들어
+있다. 소비자가 터미널이 아니라 렌더러라면 그 투영은 손실일 뿐이다. 셀 격자를 그대로 주면 크기를 자를 이유도,
+폭을 두 번 해석할 이유도 없다.
+
+**읽기 전용이다.** `--stream`은 observer로 붙는다. 입력·resize를 보내지 않으므로 raw TTY가 필요 없고,
+그래서 `maru attach`의 TTY preflight·local escape chord·SIGWINCH 경로를 **타지 않는다**. stdout이 파이프여도
+된다(그것이 이 모드의 목적이다).
+
+**stdout 프레이밍.** 레코드 스트림 자체는 length-prefixed지만, 소비자는 "이 덩어리가 snapshot인가 delta인가"와
+덩어리 경계를 알아야 한다. 그래서 각 덩어리를 다음 헤더로 감싼다.
+
+```text
+magic "MRSS"(4) | kind:u8 (0=snapshot, 1=delta) | reserved:u8 x3 | len:u32 LE | payload(len)
+```
+
+`magic`은 셸이 끼워 넣은 잡음(프로필 배너 등)과 첫 프레임을 가르는 자리다 — 컨트롤 채널의 `hello` 찾기와 같은
+이유로 필요하다(§4a). `len`은 `screen_stream.max_record_stream_bytes`(16 MiB)를 넘지 않는다.
+
+**delta의 base는 client가 유지한다.** `--stream`도 받은 레코드를 자기 조립기에 그대로 적용한다 — 적용을
+건너뛰면 다음 delta의 base가 어긋난다. 즉 흘리는 것은 부수 효과이고, 상태 유지는 그대로다.
 
 attach client의 기본 local escape는 2-key chord `Ctrl-\`, `d`다. `Ctrl-\`, `Ctrl-\`는 literal `Ctrl-\` 하나를
 runtime input으로 보낸다. 일반 키는 지연 없이 binary input frame으로 전달하며 escape 첫 키만 짧은 chord timeout을 가진다.

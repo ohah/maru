@@ -154,9 +154,32 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 이식 시 재사용). `src/session/` 은 **안 된다**: `git_backend.zig` 가 `maru.win32_process`(platform)를
 쓰는데 session 은 platform import 가 금지다(`tests/boundary/imports.zig`).
 
-**시점: W8(Windows 포팅)이 끝난 뒤 독립 PR.** 기능이 하나도 안 바뀌는 4,400 줄짜리 순수 이동이라,
-진행 중인 포팅 diff 와 겹치면 리뷰가 둘 다 어려워진다. 뒤로 미뤄도 새로 쌓이는 빚은 주석 한 줄씩이다
-(사용자 합의 2026-08-23).
+#### 그런데 "순수 이동" 이 아니었다 (실측 2026-08-25, W8 이 끝난 뒤 실제로 해 봄)
+
+위 문단은 **시점: W8 이 끝난 뒤 독립 PR — 기능이 하나도 안 바뀌는 4,400 줄짜리 순수 이동**이라고
+적어 두었다. W8 이 끝나 실제로 옮겨 보니 **그 전제가 틀렸다.** 이 파일들을 `platform/macos` 에
+묶어 두는 것은 **폴더가 아니라 모듈 그래프**다.
+
+옮기자마자 네 가지가 차례로 나왔다(전부 실측).
+
+| 무엇이 | 왜 |
+|---|---|
+| `app_session.zig` 가 `../../app/…` 를 못 읽는다 | 그 파일은 **모듈 루트가 `platform/macos` 안**인 아티팩트에서도 컴파일된다 — 위는 모듈 밖이다(`import of file outside module path`). |
+| 배럴(`src/maru.zig`)로 우회하면 **wasm 이 깨진다** | `src/maru.zig` 는 wasm(freestanding, **libc 없음**)·모바일의 **모듈 루트이기도 하다**. `git_backend.zig` 의 `std.c` 호출 **63 개**가 그때 따라 들어간다 — `check-targets` 가 그 자리에서 실패한다. |
+| 배럴에 걸면 그 파일의 `@import("maru")` 가 자기 자신이 된다 | `no module named 'maru' available within module 'maru'`. `maru_mod.addImport("maru", maru_mod)` 같은 **자기 의존 배선**이 새로 필요하다(`build.zig` 와 `tools/check-macos-typecheck.sh` 양쪽). |
+| `git_backend.zig` 가 **셋째 파일을 끌고 온다** | `safe_open.zig`(64 줄)를 쓰는데 그것을 `platform/macos/capture_file.zig` 도 쓴다. 남겨 두고 상대 경로로 가리키면 같은 파일이 `maru` 와 `root` 두 모듈에 걸린다. |
+
+즉 옮기는 일은 **파일 이동이 아니라 빌드 그래프 변경**이다 — macOS 아티팩트에 새 모듈을 주입하거나
+(두 번째 배럴), 배럴을 타깃별로 가르거나 해야 한다. **둘 다 이 절이 폴더를 안 만든 것과 같은 종류의
+결정**이라 조용히 고를 일이 아니다.
+
+**결정(사용자 2026-08-25): 옮기지 않는다. 이 실측을 적어 두는 것으로 갚는다.** 위 표의 "옮길 수
+있다" 판정은 **네이티브 참조만 본 것**이었고, 그 기준은 필요조건이지 충분조건이 아니다 — 다음에
+같은 물음이 나오면 **모듈 그래프부터** 본다. 새로 쌓이는 빚은 여전히 주석 한 줄씩이다.
+
+> **기준 자체는 살아 있다.** 2026-08-25 에 `platform/macos/agent_session_archive_backend.zig`
+> (1,218 줄)가 `main.zig` 의 소비자가 되어 같은 부류에 새로 들어왔고, 같은 기준으로 재면 네이티브
+> 참조가 **0** 이다. 표를 늘리지 않는 이유는 위와 같다.
 
 
 ## 4. 렌더 백엔드 + 호스트 이식 (검증된 현실)

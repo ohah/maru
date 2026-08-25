@@ -7,6 +7,9 @@
 const layout = @import("chrome/ui/layout.zig");
 const style = @import("chrome/ui/style.zig");
 const tree = @import("chrome/ui/tree.zig");
+// 접근성 서술자 계약(CIM §3). 여기 없으면 그 파일의 테스트가 어디서도 안 돈다 — 탭 바·SCM 도크가
+// 이 목록에 온 이유와 같다.
+const ui_semantics = @import("chrome/ui/semantics.zig");
 const ui_button = @import("chrome/ui/button.zig");
 const ui_badge = @import("chrome/ui/badge.zig");
 const interaction = @import("chrome/ui/interaction.zig");

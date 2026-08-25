@@ -17,6 +17,7 @@ pub const ui = struct {
     pub const layout = @import("chrome/ui/layout.zig");
     pub const style = @import("chrome/ui/style.zig");
     pub const typography = @import("chrome/ui/typography.zig");
+    pub const semantics = @import("chrome/ui/semantics.zig"); // 접근성 서술자 계약(role/label/state) 단일 출처 — docs/chrome-interaction-migration.md §3
     pub const tree = @import("chrome/ui/tree.zig");
     pub const interaction = @import("chrome/ui/interaction.zig");
     pub const intent_table = @import("chrome/ui/intent_table.zig");

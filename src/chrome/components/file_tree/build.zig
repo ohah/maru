@@ -81,7 +81,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         else
             table.append(props.snapshot_generation, .{ .activate_row = row.model_index }, true) catch
                 return error.InsufficientActionBuffer;
-        node.* = rowNode(NodeIds.row(index), m, action);
+        node.* = rowNode(NodeIds.row(index), m, action, rowSemantics(row, props.total_rows));
     }
 
     // 목록 컨테이너가 **좌우 여백을 소유한다.** 행마다 margin을 주면 선택 밴드가 있는 행과 없는 행의
@@ -142,7 +142,35 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 /// 그래서 `opacity = 0` 이고, 이 컴포넌트의 `view` 는 `ui_paint` 를 태우지 않는다. 그래도 이 선언을
 /// 남기는 이유는 다른 소비자가 이 tree 를 그리려 들 때 **"여기엔 그릴 것이 없다"** 가 값으로 보여야
 /// 하기 때문이다. 상태(선택·활성·호버)는 `view` 의 `bandRole` 이 소유한다.
-fn rowNode(id: u64, m: types.Metrics, action: ?tree.UiAction) tree.UiNode {
+/// 행 하나의 접근성 서술자(CIM §3 — `chrome/ui/semantics.zig`).
+///
+/// **라벨은 번역하지 않는다.** 파일·폴더 이름은 사용자 데이터라 번역하면 그 줄이 가리키는 대상이
+/// 달라진다. 지역화가 필요한 문구(빈 자리 안내)는 host 가 이미 `i18n` 을 지나 `label` 에 담아 넘긴다 —
+/// 컴포넌트가 여기서 다시 만들면 화면 글자와 읽히는 글자가 갈린다.
+///
+/// **`expanded` 는 펼칠 수 있는 행에만 싣는다.** 파일 행에 `false` 를 실으면 스크린 리더가 "접힘"이라고
+/// 읽어 열 수 있는 것처럼 들린다(`null` 과 `false` 를 가르는 이유 — 계약 파일 주석).
+fn rowSemantics(row: types.Row, total_rows: u32) tree.Semantics {
+    return .{
+        // 빈 자리 행은 항목이 아니라 안내문이다 — 누를 것이 없으므로 `text` 다.
+        .role = if (row.kind == .empty) .text else .tree_item,
+        .label = row.label,
+        .enabled = row.kind != .empty,
+        .selected = row.selected,
+        .expanded = if (row.expandable) row.expanded else null,
+        // 트리 자신이 포커스를 들고 화살표로 줄을 옮긴다(§keyboard) — 줄 하나하나가 탭 순서에
+        // 들어가지는 않는다. 그 사실을 그대로 적는다.
+        .focusable = false,
+        // depth 는 0-based 이고 서술자의 level 은 1-based 다(0 = "트리가 아니다").
+        .level = @as(u32, row.depth) +| 1,
+        // 창 안 인덱스가 아니라 **도메인 인덱스**를 쓴다. 가상화된 창의 자리를 실으면 스크롤할 때마다
+        // 같은 행의 번호가 바뀐다.
+        .position_in_set = if (total_rows == 0) 0 else @as(u32, @intCast(@min(row.model_index +| 1, std.math.maxInt(u32)))),
+        .set_size = total_rows,
+    };
+}
+
+fn rowNode(id: u64, m: types.Metrics, action: ?tree.UiAction, semantics: tree.Semantics) tree.UiNode {
     const style: layout.UiStyle = .{
         .width = .{ .percent = 1 },
         .height = .{ .px = @floatFromInt(m.row_h) },
@@ -161,6 +189,7 @@ fn rowNode(id: u64, m: types.Metrics, action: ?tree.UiAction) tree.UiNode {
     return tree.card(.{
         .id = id,
         .style = style,
+        .semantics = semantics,
         .variant = .surface,
         .paint = .{
             .opacity = 0,
@@ -307,4 +336,71 @@ test "글자 뷰포트는 root 가 없으면 null 이다(빈 tree 에서 지어�
     var entries: [1]tree.RectEntry = undefined;
     const empty: tree.UiRectTree = .{ .entries = entries[0..0], .generation = 0 };
     try testing.expect(scrollTextViewport(empty) == null);
+}
+
+test "행이 접근성 서술자를 낸다 — 역할·이름·펼침·집합 위치" {
+    // CIM §3: interactive node 는 **같은 스냅숏에** role/label/state 를 낸다. 이 테스트가 없으면
+    // 서술자가 조용히 비어도(또는 창 인덱스를 실어도) 아무 데서도 안 드러난다.
+    const rows = [_]types.Row{
+        .{ .kind = .directory, .label = "src", .icon_kind = 0, .depth = 0, .expandable = true, .expanded = true, .model_index = 40 },
+        .{ .kind = .file, .label = "main.zig", .icon_kind = 0, .depth = 1, .selected = true, .model_index = 41 },
+    };
+    var nodes: [8]tree.UiNode = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+    var items: [8]layout.Item = undefined;
+    var flex: [8]layout.FlexScratch = undefined;
+    var rects: [8]layout.UiRect = undefined;
+    const frame = try testBuild(.{
+        .viewport_px = .{ .width = 300, .height = 200 },
+        .rows = &rows,
+        .total_rows = 400,
+    }, &nodes, &entries, &items, &flex, &rects);
+
+    const dir = frame.tree.entries[frame.tree.find(NodeIds.row(0)).?].semantics orelse return error.MissingSemantics;
+    try testing.expectEqual(tree.SemanticRole.tree_item, dir.role);
+    try testing.expectEqualStrings("src", dir.label);
+    try testing.expectEqual(@as(?bool, true), dir.expanded);
+    try testing.expectEqual(@as(u32, 1), dir.level);
+    // **도메인 인덱스**를 싣는다 — 창 안 인덱스(0)를 실으면 스크롤할 때마다 번호가 바뀐다.
+    try testing.expectEqual(@as(u32, 41), dir.position_in_set);
+    try testing.expectEqual(@as(u32, 400), dir.set_size);
+    try testing.expect(!dir.selected);
+
+    const file = frame.tree.entries[frame.tree.find(NodeIds.row(1)).?].semantics orelse return error.MissingSemantics;
+    try testing.expectEqualStrings("main.zig", file.label);
+    // 파일 행에는 펼침 개념이 **없다**(false 가 아니다 — 열 수 있는 것처럼 읽히지 않게).
+    try testing.expectEqual(@as(?bool, null), file.expanded);
+    try testing.expectEqual(@as(u32, 2), file.level);
+    try testing.expect(file.selected);
+}
+
+test "빈 자리 행은 항목이 아니라 안내문이고 누를 수 없다" {
+    const rows = [_]types.Row{.{ .kind = .empty, .label = "폴더를 여세요", .icon_kind = 0 }};
+    var nodes: [8]tree.UiNode = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+    var items: [8]layout.Item = undefined;
+    var flex: [8]layout.FlexScratch = undefined;
+    var rects: [8]layout.UiRect = undefined;
+    const frame = try testBuild(.{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows }, &nodes, &entries, &items, &flex, &rects);
+    const entry = frame.tree.entries[frame.tree.find(NodeIds.row(0)).?];
+    const s = entry.semantics orelse return error.MissingSemantics;
+    try testing.expectEqual(tree.SemanticRole.text, s.role);
+    try testing.expect(!s.enabled);
+    // 누를 수 없다는 사실이 **action 의 부재**와 서술자에서 같은 말을 해야 한다.
+    try testing.expect(entry.action == null);
+}
+
+test "전체 행 수를 모르면 집합 정보를 지어내지 않는다" {
+    // host 가 아직 총계를 못 넘기는 프레임에서 `set_size = 1` 같은 값을 지어내면 스크린 리더가
+    // "1 / 1" 이라고 **틀린 사실**을 읽는다. 0 은 "안 읽는다"이다.
+    const rows = [_]types.Row{.{ .kind = .file, .label = "a", .icon_kind = 0, .model_index = 7 }};
+    var nodes: [8]tree.UiNode = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+    var items: [8]layout.Item = undefined;
+    var flex: [8]layout.FlexScratch = undefined;
+    var rects: [8]layout.UiRect = undefined;
+    const frame = try testBuild(.{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows }, &nodes, &entries, &items, &flex, &rects);
+    const s = frame.tree.entries[frame.tree.find(NodeIds.row(0)).?].semantics orelse return error.MissingSemantics;
+    try testing.expectEqual(@as(u32, 0), s.set_size);
+    try testing.expectEqual(@as(u32, 0), s.position_in_set);
 }

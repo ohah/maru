@@ -10,6 +10,11 @@ const std = @import("std");
 const layout = @import("layout.zig");
 const ui_style = @import("style.zig");
 const scroll_area = @import("scroll_area.zig");
+const ui_semantics = @import("semantics.zig");
+
+/// 접근성 서술자 — 계약은 `ui/semantics.zig` 가 소유한다(CIM §3).
+pub const Semantics = ui_semantics.Semantics;
+pub const SemanticRole = ui_semantics.Role;
 
 pub const UiId = u64;
 pub const UiActionId = u64;
@@ -52,6 +57,9 @@ pub const CardOptions = struct {
     direction: layout.Direction = .column,
     justify: layout.Justify = .start,
     align_items: layout.Align = .stretch,
+    /// 이 면의 접근성 서술자(CIM §3 — `ui/semantics.zig`). 안 주면 이 node 는 접근성에 아무 말도
+    /// 하지 않는다.
+    semantics: ?Semantics = null,
     overflow: layout.Overflow = .visible,
 };
 
@@ -82,6 +90,9 @@ pub const ButtonOptions = struct {
     overflow: layout.Overflow = .visible,
     /// 이 면 위의 커서 모양. 기본 `auto`는 "할 말이 없다"이고, 그때는 host의 상위 규칙이 정한다.
     cursor: CursorHint = .auto,
+    /// 이 면의 접근성 서술자(CIM §3 — `ui/semantics.zig`). 안 주면 이 node 는 접근성에 아무 말도
+    /// 하지 않는다.
+    semantics: ?Semantics = null,
     leading_icon: ?LeadingIconProps = null,
 };
 
@@ -197,6 +208,10 @@ pub const UiNode = struct {
     style: layout.UiStyle = .{},
     props: NodeProps,
     children: []const UiNode = &.{},
+    /// 이 node 의 접근성 서술자(CIM §3). **interactive node 는 이것을 낸다** — `action` 만으로는
+    /// 역할·이름·상태를 말할 수 없다. `null` 은 "아직 안 낸다"이고, 그런 consumer 는 접근성 이관을
+    /// 완료라고 표시할 수 없다. 계약은 `ui/semantics.zig` 가 소유한다.
+    semantics: ?Semantics = null,
 
     pub fn kind(self: UiNode) NodeKind {
         return switch (self.props) {
@@ -257,6 +272,7 @@ pub fn card(options: CardOptions, children: []const UiNode) UiNode {
             .overflow = options.overflow,
         } },
         .children = children,
+        .semantics = options.semantics,
     };
 }
 
@@ -286,6 +302,7 @@ pub fn button(options: ButtonOptions) UiNode {
             .overflow = options.overflow,
             .leading_icon = options.leading_icon,
         } },
+        .semantics = options.semantics,
     };
 }
 
@@ -332,6 +349,12 @@ pub const RectEntry = struct {
     /// 평탄화된 snapshot을 interaction이 쓰는 같은 rect/action과 함께 소비하므로, 뒤따르는 host/Metal
     /// 단계가 도메인 state에서 variant를 다시 찾아낼 수 없다.
     visual: VisualProps = .none,
+    /// 이 면의 접근성 서술자(CIM §3). `cursor` 와 같은 이유로 여기 있다 — **발행된 스냅숏이 그 사실의
+    /// 단일 출처**여야 host 가 도메인 state 에서 역할·이름을 다시 추론하지 않는다. 그 추론은 화면과
+    /// 조용히 갈린다.
+    ///
+    /// 문자열은 빌려온 것이고 생명은 이 tree 와 같다(`ui/semantics.zig`).
+    semantics: ?Semantics = null,
 };
 
 /// entries는 preorder라 parent는 항상 child보다 먼저 나온다. direct child 탐색에는
@@ -469,6 +492,7 @@ const BuildState = struct {
             .action = actionFor(node),
             .cursor = cursorFor(node),
             .visual = visualFor(node),
+            .semantics = node.semantics,
         };
         self.entry_count += 1;
 

@@ -150,6 +150,7 @@ pub const Client = struct {
     control_admission_fail_once: bool = false,
     producer_streams: []u64 = &.{},
     producer_sweep_cursor: usize = 0,
+    producer_observation_epoch_ns: u64 = 0,
     pressure_reclaim_available: bool = false,
     projection_global_unavailable: bool = false,
     process_identity: ?process_seal_service.ReadyIdentity = null,
@@ -373,6 +374,7 @@ pub const Client = struct {
         };
         std.mem.sort(u64, self.producer_streams, {}, std.sort.asc(u64));
         self.producer_sweep_cursor = 0;
+        self.producer_observation_epoch_ns = now_ns;
         if (self.producer_streams.len == 0) return 1;
 
         const slot = self.reactor.get(self.admission) catch return 1;
@@ -600,7 +602,11 @@ pub const Client = struct {
             if (!(slot.beginResyncAttempt(tracker, now_ns) catch
                 return self.beginClose(.socket_error))) return;
         }
-        var maybe_output = self.connection.collectOutputForLocalStreamAt(stream, now_ns) catch |err| {
+        var maybe_output = self.connection.collectOutputForLocalStreamAtEpoch(
+            stream,
+            now_ns,
+            self.producer_observation_epoch_ns,
+        ) catch |err| {
             switch (err) {
                 error.ProjectionBudgetUnavailable => {
                     if (self.projection_global_unavailable) {
@@ -1949,7 +1955,7 @@ test "product attach admission failure and EOF release retained projection autho
         try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
         const observed = client.connection.attachments.get(1).?;
         try testing.expectEqual(
-            observed.base.?.len + observed.observation_base.?.len,
+            observed.base.?.len,
             try slot.retainedBaseBytes(tracker),
         );
         client.peerBroken();
@@ -2677,8 +2683,7 @@ test "missing runtime converges attachment identity tracker and queued screen in
     const slot = try reactor.get(client.admission);
     const tracker = client.trackers.get(1).?;
     const attached = client.connection.attachments.get(1).?;
-    const attached_retained = attached.base.?.len +
-        (if (attached.observation_base) |base| base.len else 0);
+    const attached_retained = attached.base.?.len;
     try testing.expectEqual(
         attached_retained,
         try slot.retainedBaseBytes(tracker),
@@ -2847,8 +2852,7 @@ test "subscription pressure emits one control notice and recovers with an atomic
     }
     try testing.expectEqual(@as(usize, 4), recovered_chunks);
     const recovered = client.connection.attachments.get(1).?;
-    const recovered_retained = recovered.base.?.len +
-        (if (recovered.observation_base) |base| base.len else 0);
+    const recovered_retained = recovered.base.?.len;
     try testing.expectEqual(
         recovered_retained,
         try slot.retainedBaseBytes(tracker),
@@ -3177,8 +3181,8 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
         client.connection.attachments.get(2).?.observation_revision,
     );
     try testing.expectEqual(
-        @as(?[]u8, null),
-        client.connection.attachments.get(2).?.observation_base,
+        @as(?u64, null),
+        client.connection.attachments.get(2).?.observation_token,
     );
 
     const first_attempt = observation_failure_at + slot_mod.resync_retry_backoff_ns;
@@ -3197,8 +3201,8 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
         client.connection.attachments.get(2).?.observation_revision,
     );
     try testing.expectEqual(
-        @as(?[]u8, null),
-        client.connection.attachments.get(2).?.observation_base,
+        @as(?u64, null),
+        client.connection.attachments.get(2).?.observation_token,
     );
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_base_bytes);
     try testing.expectEqual(@as(usize, 0), reactor.budget.prepared_reclaim_bytes);

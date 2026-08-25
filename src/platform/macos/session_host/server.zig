@@ -140,7 +140,28 @@ pub const RuntimeObservation = struct {
     }
 };
 
-fn observationWireValid(observation: RuntimeObservation) bool {
+pub const CachedRuntimeObservation = struct {
+    canonical_json: []const u8,
+    change_token: u64,
+};
+
+pub const ObservationRequest = union(enum) {
+    current,
+    cadence_epoch: u64,
+    fresh,
+};
+
+const RawCanonicalObservation = struct {
+    bytes: []const u8,
+
+    pub fn jsonStringify(self: RawCanonicalObservation, js: anytype) !void {
+        try js.beginWriteRaw();
+        try js.writer.writeAll(self.bytes);
+        js.endWriteRaw();
+    }
+};
+
+pub fn observationWireValid(observation: RuntimeObservation) bool {
     if (observation.mouse_tracking_mode > 4 or
         observation.processes.len > runtime_metadata_wire.max_process_entries or
         !std.unicode.utf8ValidateSlice(observation.cwd) or
@@ -168,6 +189,18 @@ fn observationWireValid(observation: RuntimeObservation) bool {
         aggregate = std.math.add(usize, aggregate, process.name.len) catch return false;
     }
     return aggregate <= protocol.max_control_json;
+}
+
+pub fn canonicalizeObservation(
+    allocator: std.mem.Allocator,
+    observation: RuntimeObservation,
+) error{ InvalidObservation, OutOfMemory }![]u8 {
+    if (!observationWireValid(observation)) return error.InvalidObservation;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    js.write(observation) catch return error.OutOfMemory;
+    return allocator.dupe(u8, out.written()) catch error.OutOfMemory;
 }
 
 /// host의 실 runtime 소유(spawn/terminate)를 dispatch가 위임하는 vtable(`runtime.PtyIo` 선례, layering-and-portability.md
@@ -222,6 +255,13 @@ pub const RuntimeOps = struct {
     /// host 실제 core/PTY의 cwd/title/semantic/OSC5379/foreground를 한 번에 owned copy한다. screen snapshot과 분리된
     /// attach/event full-state이며 public runtime.list/get에는 노출하지 않는다.
     observation: *const fn (ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation,
+    /// Subscription delivery path. Returned canonical JSON is borrowed from the runtime-global
+    /// cache and remains valid until the next call that refreshes the same runtime.
+    cached_observation: *const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+        request: ObservationRequest,
+    ) anyerror!CachedRuntimeObservation,
     /// host-backed 마우스 리포팅(§ 입력 패리티): client가 마우스 이벤트를 보내면 host가 **자기 core의 mouse_tracking/
     /// mouse_format**으로 SGR/x10 리포트를 인코딩해 PTY로 흘린다(로컬 reader가 report_mouse core command를 적용 후
     /// pendingResponse를 흘리는 것과 동형 — 인코딩 모드가 host에만 있으므로 host가 인코딩·주입한다). codec 순수라
@@ -533,7 +573,7 @@ pub const CollectedOutput = struct {
     next_screen_generation: ?u64 = null,
     prepared_catchup: ?PreparedCatchupBatch = null,
     clear_resync: bool = false,
-    next_observation_base: ?[]u8 = null,
+    next_observation_token: ?u64 = null,
     next_observation_revision: ?u64 = null,
     previous_observation_ticks: u8,
     base_reservation: ?connection_slot.BaseReservation = null,
@@ -563,9 +603,7 @@ pub const CollectedOutput = struct {
         const next_screen_len = if (self.replace_base)
             if (self.next_base) |base| base.len else 0
         else if (sub.base) |base| base.len else 0;
-        const next_observation_len = if (self.next_observation_base) |base|
-            base.len
-        else if (sub.observation_base) |base| base.len else 0;
+        const next_observation_len: usize = 0;
         const retained_len = std.math.add(
             usize,
             next_screen_len,
@@ -594,10 +632,9 @@ pub const CollectedOutput = struct {
             sub.awaiting_resync_ack = false;
         }
         sub.unpublished_controller_generation = null;
-        if (self.next_observation_base) |next| {
-            if (sub.observation_base) |old| connection.allocator.free(old);
-            sub.observation_base = next;
-            self.next_observation_base = null;
+        if (self.next_observation_token) |next| {
+            sub.observation_token = next;
+            self.next_observation_token = null;
             sub.observation_revision = self.next_observation_revision.?;
         }
         self.finishFrames();
@@ -621,7 +658,6 @@ pub const CollectedOutput = struct {
             self.base_reservation = null;
         }
         if (self.next_base) |owned| self.allocator.free(owned);
-        if (self.next_observation_base) |owned| self.allocator.free(owned);
         self.finishFrames();
         self.finished = true;
     }
@@ -684,7 +720,7 @@ pub const Connection = struct {
         base: ?[]u8 = null,
         resync_pending: bool = false,
         awaiting_resync_ack: bool = false,
-        observation_base: ?[]u8 = null,
+        observation_token: ?u64 = null,
         observation_revision: u64 = 0,
         observation_ticks: u8 = 0,
         /// Non-null only while a newly acquired controller attach is unpublished. rollbackAttach
@@ -727,7 +763,6 @@ pub const Connection = struct {
             if (self.projection_budget) |budget|
                 budget.release(budget.ctx, e.key_ptr.*);
             if (e.value_ptr.base) |b| self.allocator.free(b);
-            if (e.value_ptr.observation_base) |b| self.allocator.free(b);
         }
         if (self.subscription_identity) |identity|
             _ = identity.table.revokeConnection(identity.connection);
@@ -824,9 +859,8 @@ pub const Connection = struct {
         for (list.items) |frame| self.allocator.free(frame);
         list.deinit(self.allocator);
         if (output.next_base) |bytes| self.allocator.free(bytes);
-        if (output.next_observation_base) |bytes| self.allocator.free(bytes);
         output.next_base = null;
-        output.next_observation_base = null;
+        output.next_observation_token = null;
     }
 
     /// Canonical per-stream ownership release shared by explicit detach, attach rollback, and
@@ -845,7 +879,6 @@ pub const Connection = struct {
             .stream_id = stream,
         }) catch {};
         if (sub.base) |bytes| self.allocator.free(bytes);
-        if (sub.observation_base) |bytes| self.allocator.free(bytes);
         return true;
     }
 
@@ -1312,19 +1345,19 @@ pub const Connection = struct {
         if (self.projection_budget != null)
             return self.dispatchPreparedObservation(request_id, stream, ops, sub);
 
-        var observation = ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch |err| switch (err) {
+        const observation = ops.cached_observation(ops.ctx, sub.runtime_id, .fresh) catch |err| switch (err) {
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            error.InvalidObservation,
+            error.ObservationTokenExhausted,
+            error.ObservationTransactionCorrupt,
+            => {
+                self.state = .closed;
+                return .close;
+            },
             else => return self.replyError(request_id, .internal),
         };
-        defer observation.deinit(self.allocator);
-        if (!observationWireValid(observation)) {
-            self.state = .closed;
-            return .close;
-        }
-        const canonical = self.stringify(observation) catch return error.OutOfMemory;
-        var canonical_owned = true;
-        defer if (canonical_owned) self.allocator.free(canonical);
-        const changed = if (sub.observation_base) |old| !std.mem.eql(u8, old, canonical) else true;
+        const canonical = observation.canonical_json;
+        const changed = sub.observation_token != observation.change_token;
         const revision = if (changed)
             std.math.add(u64, sub.observation_revision, 1) catch {
                 self.state = .closed;
@@ -1334,7 +1367,7 @@ pub const Connection = struct {
             sub.observation_revision;
         const body = try self.stringify(.{ .result = .{
             .metadata_revision = revision,
-            .metadata = observation,
+            .metadata = RawCanonicalObservation{ .bytes = canonical },
         } });
         defer self.allocator.free(body);
         const action = try self.replyResult(request_id, body);
@@ -1342,10 +1375,8 @@ pub const Connection = struct {
         // response frame까지 소유한 뒤에만 server base를 전진시킨다. 이 전 OOM이면 다음 periodic event가 같은 변화를
         // 다시 보낼 수 있어 client cache가 영구 누락되지 않는다.
         if (changed) {
-            if (sub.observation_base) |old| self.allocator.free(old);
-            sub.observation_base = canonical;
+            sub.observation_token = observation.change_token;
             sub.observation_revision = revision;
-            canonical_owned = false;
         }
         return action;
     }
@@ -1372,22 +1403,19 @@ pub const Connection = struct {
         var transferred = false;
         defer if (!transferred) output.rollback(self);
 
-        var observation = ops.observation(ops.ctx, sub.runtime_id, self.allocator) catch |err| switch (err) {
+        const observation = ops.cached_observation(ops.ctx, sub.runtime_id, .fresh) catch |err| switch (err) {
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
+            error.InvalidObservation,
+            error.ObservationTokenExhausted,
+            error.ObservationTransactionCorrupt,
+            => {
+                self.state = .closed;
+                return .close;
+            },
             else => return self.replyError(request_id, .internal),
         };
-        defer observation.deinit(self.allocator);
-        if (!observationWireValid(observation)) {
-            self.state = .closed;
-            return .close;
-        }
-        const canonical = self.stringify(observation) catch return error.OutOfMemory;
-        var canonical_owned = true;
-        defer if (canonical_owned) self.allocator.free(canonical);
-        const changed = if (sub.observation_base) |old|
-            !std.mem.eql(u8, old, canonical)
-        else
-            true;
+        const canonical = observation.canonical_json;
+        const changed = sub.observation_token != observation.change_token;
         const revision = if (changed)
             std.math.add(u64, sub.observation_revision, 1) catch {
                 self.state = .closed;
@@ -1397,7 +1425,7 @@ pub const Connection = struct {
             sub.observation_revision;
         const body = try self.stringify(.{ .result = .{
             .metadata_revision = revision,
-            .metadata = observation,
+            .metadata = RawCanonicalObservation{ .bytes = canonical },
         } });
         defer self.allocator.free(body);
         const reply = self.encode(.response, request_id, 0, body) catch |err| switch (err) {
@@ -1406,9 +1434,8 @@ pub const Connection = struct {
         };
         if (!changed) return .{ .reply = reply };
 
-        output.next_observation_base = canonical;
+        output.next_observation_token = observation.change_token;
         output.next_observation_revision = revision;
-        canonical_owned = false;
         transferred = true;
         return .{ .prepared_reply = .{ .reply = reply, .output = output } };
     }
@@ -1714,32 +1741,32 @@ pub const Connection = struct {
         // attach 응답에 **현재 full metadata**를 함께 싣는다. response 뒤 snapshot만 온다는 기존 client 순서를 깨지 않으면서,
         // 재접속 GUI가 새 OSC를 기다리지 않고 cwd/title/SSH/agent 정보를 첫 frame 전에 복구한다. observation 실패는 화면
         // attach를 깨지 않고 null(unavailable)로 둔다. public runtime.list/get redaction과는 별도 observe-capability 경로다.
-        var initial_observation: ?RuntimeObservation = null;
-        defer if (initial_observation) |*obs| obs.deinit(self.allocator);
+        var initial_observation: ?RawCanonicalObservation = null;
         if (self.runtime_metadata_v1) if (self.runtime_ops) |ops| {
-            initial_observation = ops.observation(ops.ctx, id.?, self.allocator) catch null;
-            if (initial_observation) |obs| {
-                if (!observationWireValid(obs)) {
+            const cached = ops.cached_observation(ops.ctx, id.?, .current) catch |err| switch (err) {
+                error.InvalidObservation,
+                error.ObservationTokenExhausted,
+                error.ObservationTransactionCorrupt,
+                => {
                     self.rollbackAttach(stream);
                     self.state = .closed;
                     return .close;
-                }
-                const canonical = self.stringify(obs) catch null;
-                if (canonical) |bytes| {
-                    if (self.attachments.getPtr(stream)) |sub| {
-                        if (prepared_product) {
-                            prepared_output.next_observation_base = bytes;
-                            prepared_output.next_observation_revision = 1;
-                        } else {
-                            sub.observation_base = bytes;
-                            sub.observation_revision = 1;
-                        }
-                    } else self.allocator.free(bytes);
-                } else {
-                    // response revision과 subscription base를 원자적으로 세운다. canonical을 소유하지 못했는데 rev1
-                    // metadata를 보내면 다음 성공 event도 rev1이라 client가 duplicate로 버린다.
-                    initial_observation.?.deinit(self.allocator);
-                    initial_observation = null;
+                },
+                else => null,
+            };
+            initial_observation = if (cached) |view|
+                .{ .bytes = view.canonical_json }
+            else
+                null;
+            if (cached) |view| {
+                if (self.attachments.getPtr(stream)) |sub| {
+                    if (prepared_product) {
+                        prepared_output.next_observation_token = view.change_token;
+                        prepared_output.next_observation_revision = 1;
+                    } else {
+                        sub.observation_token = view.change_token;
+                        sub.observation_revision = 1;
+                    }
                 }
             }
         };
@@ -2586,6 +2613,15 @@ pub const Connection = struct {
         stream: subscription_identity.LocalStreamId,
         now_ns: u64,
     ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
+        return self.collectOutputForLocalStreamAtEpoch(stream, now_ns, now_ns);
+    }
+
+    pub fn collectOutputForLocalStreamAtEpoch(
+        self: *Connection,
+        stream: subscription_identity.LocalStreamId,
+        now_ns: u64,
+        observation_epoch_ns: u64,
+    ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
         const ops = self.runtime_ops orelse return null;
         const sub = self.attachments.getPtr(stream) orelse return null;
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -2613,10 +2649,10 @@ pub const Connection = struct {
             (sub.observation_ticks >= 5 or ops.observation_urgent(ops.ctx, sub.runtime_id)))
         {
             sub.observation_ticks = 0;
-            const maybe_observation = ops.observation(
+            const maybe_observation = ops.cached_observation(
                 ops.ctx,
                 sub.runtime_id,
-                self.allocator,
+                .{ .cadence_epoch = observation_epoch_ns },
             ) catch |err| switch (err) {
                 error.RuntimeNotFound => {
                     if (!self.runtimeMissing(stream)) return error.OutOfMemory;
@@ -2624,24 +2660,20 @@ pub const Connection = struct {
                     self.endMissingRuntime(stream);
                     return null;
                 },
-                error.TransientObservationUnavailable => null,
-                else => return error.OutOfMemory,
-            };
-            if (maybe_observation) |obs_value| {
-                var obs = obs_value;
-                defer obs.deinit(self.allocator);
-                if (!observationWireValid(obs)) {
+                error.InvalidObservation,
+                error.ObservationTokenExhausted,
+                error.ObservationTransactionCorrupt,
+                => {
                     self.state = .closed;
                     output.rollback(self);
                     return null;
-                }
-                const current = try self.stringify(obs);
-                var current_owned = true;
-                errdefer if (current_owned) self.allocator.free(current);
-                const changed = if (sub.observation_base) |old|
-                    !std.mem.eql(u8, old, current)
-                else
-                    true;
+                },
+                error.TransientObservationUnavailable => null,
+                else => return error.OutOfMemory,
+            };
+            if (maybe_observation) |obs| {
+                const current = obs.canonical_json;
+                const changed = sub.observation_token != obs.change_token;
                 if (changed) {
                     const next_revision = std.math.add(
                         u64,
@@ -2649,15 +2681,13 @@ pub const Connection = struct {
                         1,
                     ) catch {
                         self.state = .closed;
-                        self.allocator.free(current);
-                        current_owned = false;
                         output.rollback(self);
                         return null;
                     };
                     const event_body = try self.stringify(.{
                         .event = "runtime.metadata",
                         .metadata_revision = next_revision,
-                        .metadata = obs,
+                        .metadata = RawCanonicalObservation{ .bytes = current },
                     });
                     defer self.allocator.free(event_body);
                     const frame = self.encodeWithFlags(
@@ -2670,8 +2700,6 @@ pub const Connection = struct {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.PayloadTooLarge => {
                             self.state = .closed;
-                            self.allocator.free(current);
-                            current_owned = false;
                             output.rollback(self);
                             return null;
                         },
@@ -2680,12 +2708,8 @@ pub const Connection = struct {
                         self.allocator.free(frame);
                         return error.OutOfMemory;
                     };
-                    output.next_observation_base = current;
-                    current_owned = false;
+                    output.next_observation_token = obs.change_token;
                     output.next_observation_revision = next_revision;
-                } else {
-                    self.allocator.free(current);
-                    current_owned = false;
                 }
             }
         }
@@ -2694,8 +2718,8 @@ pub const Connection = struct {
             // Invalidation releases both screen and metadata delivery authority. A metadata-capable
             // client must therefore receive a fresh prefix in the same atomic recovery batch; a
             // transient observation/encoding miss cannot be committed as snapshot-only recovery.
-            if (self.runtime_metadata_v1 and sub.observation_base == null and
-                output.next_observation_base == null)
+            if (self.runtime_metadata_v1 and sub.observation_token == null and
+                output.next_observation_token == null)
             {
                 self.discardPreparedOutput(&list, &output);
                 sub.observation_ticks = output.previous_observation_ticks;
@@ -2809,7 +2833,7 @@ pub const Connection = struct {
         }
 
         if (list.items.len == 0 and !output.replace_base and
-            output.next_observation_base == null)
+            output.next_observation_token == null)
         {
             output.rollback(self);
             return null;
@@ -2852,10 +2876,7 @@ pub const Connection = struct {
             self.allocator.free(old);
             sub.base = null;
         }
-        if (sub.observation_base) |old| {
-            self.allocator.free(old);
-            sub.observation_base = null;
-        }
+        sub.observation_token = null;
     }
 
     pub fn resyncPending(
@@ -4594,6 +4615,12 @@ pub const FakeRuntimeOps = struct {
     snapshot_permanent_failure: bool = false,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
+    observation_calls: usize = 0,
+    cached_observation_len: usize = 0,
+    cached_observation_token: u64 = 0,
+    cached_observation_version: u8 = 0,
+    cached_observation_epoch: ?u64 = null,
+    cached_observation_valid: bool = false,
     notification_calls: usize = 0,
     notification_commit_calls: usize = 0,
     runtime_missing: bool = false,
@@ -4791,6 +4818,7 @@ pub const FakeRuntimeOps = struct {
     fn observationFn(ctx: *anyopaque, runtime_id: u128, allocator: std.mem.Allocator) anyerror!RuntimeObservation {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
+        self.observation_calls += 1;
         if (self.runtime_missing or self.observation_missing) return error.RuntimeNotFound;
         if (self.observation_fail_count != 0) {
             self.observation_fail_count -= 1;
@@ -4876,8 +4904,52 @@ pub const FakeRuntimeOps = struct {
             .processes = processes,
         };
     }
+    threadlocal var cached_observation_bytes: [protocol.max_control_json]u8 = undefined;
+
+    fn cachedObservationFn(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        request: ObservationRequest,
+    ) anyerror!CachedRuntimeObservation {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        const refresh = switch (request) {
+            .fresh => true,
+            .current => !self.cached_observation_valid,
+            .cadence_epoch => |epoch| !self.cached_observation_valid or
+                self.cached_observation_epoch == null or
+                epoch > self.cached_observation_epoch.?,
+        };
+        if (!refresh) return .{
+            .canonical_json = cached_observation_bytes[0..self.cached_observation_len],
+            .change_token = self.cached_observation_token,
+        };
+        var observation = try observationFn(ctx, runtime_id, testing.allocator);
+        defer observation.deinit(testing.allocator);
+        const canonical = try canonicalizeObservation(testing.allocator, observation);
+        defer testing.allocator.free(canonical);
+        if (canonical.len > cached_observation_bytes.len) return error.InvalidObservation;
+        @memcpy(cached_observation_bytes[0..canonical.len], canonical);
+        if (!self.cached_observation_valid or self.cached_observation_version != self.observation_version)
+            self.cached_observation_token = std.math.add(u64, self.cached_observation_token, 1) catch
+                return error.ObservationTokenExhausted;
+        self.cached_observation_len = canonical.len;
+        self.cached_observation_version = self.observation_version;
+        self.cached_observation_valid = true;
+        switch (request) {
+            .cadence_epoch => |epoch| {
+                if (self.cached_observation_epoch == null or epoch > self.cached_observation_epoch.?)
+                    self.cached_observation_epoch = epoch;
+            },
+            else => {},
+        }
+        return .{
+            .canonical_json = cached_observation_bytes[0..canonical.len],
+            .change_token = self.cached_observation_token,
+        };
+    }
+
     pub fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
     }
 };
 
@@ -5802,8 +5874,7 @@ test "server: metadata revision exhaustion closes without emit or base mutation 
         }
     }
     const sub = exhausted.attachments.getPtr(1).?;
-    const old_base = try allocator.dupe(u8, sub.observation_base.?);
-    defer allocator.free(old_base);
+    const old_token = sub.observation_token.?;
     sub.observation_revision = std.math.maxInt(u64);
     fake.observation_version = 1;
     sub.observation_ticks = 4;
@@ -5811,7 +5882,7 @@ test "server: metadata revision exhaustion closes without emit or base mutation 
     try testing.expect((try exhausted.collectOutputForLocalStream(1)) == null);
     try testing.expectEqual(Connection.State.closed, exhausted.state);
     try testing.expectEqual(std.math.maxInt(u64), sub.observation_revision);
-    try testing.expectEqualStrings(old_base, sub.observation_base.?);
+    try testing.expectEqual(old_token, sub.observation_token.?);
 
     var fresh_fake: FakeRuntimeOps = .{};
     var fresh = Connection.init(allocator, 2, &registry);
@@ -5907,8 +5978,7 @@ test "server: direct and prepared metadata barriers fail-close revision exhausti
         }
     }
     const direct_sub = direct.attachments.getPtr(1).?;
-    const direct_base = try allocator.dupe(u8, direct_sub.observation_base.?);
-    defer allocator.free(direct_base);
+    const direct_token = direct_sub.observation_token.?;
     direct_sub.observation_revision = std.math.maxInt(u64);
     const unchanged = try feedJson(
         &direct,
@@ -5934,7 +6004,7 @@ test "server: direct and prepared metadata barriers fail-close revision exhausti
     try testing.expectEqualStrings("close", direct_result.action);
     try testing.expect(direct_result.frame == null);
     try testing.expectEqual(std.math.maxInt(u64), direct_sub.observation_revision);
-    try testing.expectEqualStrings(direct_base, direct_sub.observation_base.?);
+    try testing.expectEqual(direct_token, direct_sub.observation_token.?);
 
     var prepared_fake: FakeRuntimeOps = .{};
     var prepared = Connection.init(allocator, 2, &registry);
@@ -5960,8 +6030,7 @@ test "server: direct and prepared metadata barriers fail-close revision exhausti
         }
     }
     const prepared_sub = prepared.attachments.getPtr(1).?;
-    const prepared_base = try allocator.dupe(u8, prepared_sub.observation_base.?);
-    defer allocator.free(prepared_base);
+    const prepared_token = prepared_sub.observation_token.?;
     prepared_sub.observation_revision = std.math.maxInt(u64);
     prepared_fake.observation_version = 1;
     var budget: AcceptBudget = .{};
@@ -5984,7 +6053,7 @@ test "server: direct and prepared metadata barriers fail-close revision exhausti
     try testing.expectEqual(@as(usize, 1), budget.rollback_calls);
     try testing.expectEqual(@as(usize, 0), budget.commit_calls);
     try testing.expectEqual(std.math.maxInt(u64), prepared_sub.observation_revision);
-    try testing.expectEqualStrings(prepared_base, prepared_sub.observation_base.?);
+    try testing.expectEqual(prepared_token, prepared_sub.observation_token.?);
 }
 
 test "server: 벨·OSC 52가 대기 중이면 관측 주기를 기다리지 않고 즉시 push한다" {

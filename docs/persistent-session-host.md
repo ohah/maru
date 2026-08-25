@@ -7086,12 +7086,18 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     - **E2b product wiring:** `RuntimeManager`만 core/foreground/소비형 BEL·OSC 52를 runtime당 한 번 materialize한다.
       attach, periodic producer, user-action fresh observation은 cache view를 공유하되 fresh barrier는 마지막 core mutation을
       건너뛰지 않는다. server는 검증·canonicalization을 마친 cache bytes를 metadata JSON 값으로 직접 감싸고 다시 parse하거나
-      client마다 같은 observation을 stringify하지 않는다. subscription별 response/event queue admission이 성공한 뒤에만 각자의 delivery revision/base를
+      client마다 같은 observation을 stringify하지 않는다. subscription별 response/event queue admission이 성공한 뒤에만 각자의 delivery revision/token을
       전진시키며, 느리거나 OOM인 한 client가 cache나 sibling delivery authority를 바꾸지 않는다. runtime terminate와
       same-PID upgrade restore는 cache owner를 exact once 회수·재구성한다.
+      구현에서는 heap-pinned `ObservationCacheRecord`를 runtime handle별로 소유하고, 각 `Client`가 sweep 시작 때 보존한
+      daemon cadence monotonic epoch가 같은 producer sweep은 첫 호출만 materialize한다. 늦게 끝난 옛 sweep의 작은 epoch는
+      cache를 되감지 않는다. subscription은 canonical bytes 사본 대신 cache `change_token`만 보관한다.
+      attach는 100ms 이내 current cache를 재사용하고, `runtime.observation` barrier는 항상 `.fresh`로 재materialize한다.
+      canonical bytes는 `beginWriteRaw` 경로로 envelope에 직접 삽입하며, 제품 구현자는 검증과 canonicalization을 수행하는
+      `RuntimeManager.cachedObservationOp` 하나로 고정한다.
     - **E2c product/performance gate:** 1·10·100 runtime과 controller+slow observer 조합에서 runtime materialization 횟수가
       subscription 수가 아니라 source change 수에 결속됨을 artifact로 남긴다. idle CPU/allocation, output→healthy-client
-      latency, core-lock hold와 RSS의 hard cap은 `performance-budget.md`가 소유한다. E2a만으로 E2 또는 P4 완료를
+      latency, core-lock hold와 RSS의 hard cap은 `performance-budget.md`가 소유한다. E2a·E2b만으로 E2 또는 P4 완료를
       주장하지 않는다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지

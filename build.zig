@@ -3155,6 +3155,37 @@ pub fn build(b: *std.Build) void {
     run_session_host_e2a_boundary_tests.setCwd(b.path("."));
     session_host_e2a_step.dependOn(&run_session_host_e2a_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e2a_boundary_tests.step);
+    const session_host_e2b_step = b.step(
+        "test-session-host-e2b",
+        "Verify P4 E2b runtime-shared observation cache product wiring",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e2b_optimize| {
+        const session_host_e2b_manager_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = e2b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 E2b"},
+        });
+        const run_session_host_e2b_manager_tests = b.addRunArtifact(session_host_e2b_manager_tests);
+        run_session_host_e2b_manager_tests.addArg("--maru-expect-tests=1");
+        session_host_e2b_step.dependOn(&run_session_host_e2b_manager_tests.step);
+    }
+    const session_host_e2b_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_e2b_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P4 E2b product"},
+    });
+    const run_session_host_e2b_boundary_tests = b.addRunArtifact(session_host_e2b_boundary_tests);
+    run_session_host_e2b_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_e2b_boundary_tests.setCwd(b.path("."));
+    session_host_e2b_step.dependOn(&run_session_host_e2b_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_e2b_boundary_tests.step);
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

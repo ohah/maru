@@ -1823,7 +1823,7 @@ test "poll owner backs off when one observer reclaim is insufficient for base re
     const attachment_before = healthy_client.connection.attachments.get(1).?;
     const base_bytes_before = try testing.allocator.dupe(u8, attachment_before.base.?);
     defer testing.allocator.free(base_bytes_before);
-    try testing.expect(attachment_before.observation_base == null);
+    try testing.expect(attachment_before.observation_token == null);
     const observation_revision_before = attachment_before.observation_revision;
     const observation_ticks_before = attachment_before.observation_ticks;
     const delta_before = fake_runtime.delta_calls;
@@ -1857,7 +1857,7 @@ test "poll owner backs off when one observer reclaim is insufficient for base re
     try testing.expectEqual(screen_before, try healthy_slot.screenResidentBytes(healthy_tracker));
     const attachment_after = healthy_client.connection.attachments.get(1).?;
     try testing.expectEqualSlices(u8, base_bytes_before, attachment_after.base.?);
-    try testing.expect(attachment_after.observation_base == null);
+    try testing.expect(attachment_after.observation_token == null);
     try testing.expectEqual(observation_revision_before, attachment_after.observation_revision);
     try testing.expectEqual(observation_ticks_before, attachment_after.observation_ticks);
     try testing.expectEqual(@as(usize, 0), try healthy_slot.preparedBaseBytes(healthy_tracker));
@@ -1931,7 +1931,7 @@ test "poll owner backs off when one observer reclaim is insufficient for base re
     try testing.expectEqual(screen_before, try healthy_slot.screenResidentBytes(healthy_tracker));
     const attachment_exact = healthy_client.connection.attachments.get(1).?;
     try testing.expectEqualSlices(u8, base_bytes_before, attachment_exact.base.?);
-    try testing.expect(attachment_exact.observation_base == null);
+    try testing.expect(attachment_exact.observation_token == null);
     try testing.expectEqual(observation_revision_before, attachment_exact.observation_revision);
     try testing.expectEqual(observation_ticks_before, attachment_exact.observation_ticks);
     try testing.expectEqual(@as(usize, 0), try healthy_slot.preparedBaseBytes(healthy_tracker));
@@ -2082,7 +2082,7 @@ test "poll owner rolls back a batch when one reclaim is insufficient and retries
     const attachment_before = requester_client.connection.attachments.get(1).?;
     const base_before = try testing.allocator.dupe(u8, attachment_before.base.?);
     defer testing.allocator.free(base_before);
-    try testing.expect(attachment_before.observation_base == null);
+    try testing.expect(attachment_before.observation_token == null);
     const retained_before = try requester_slot.retainedBaseBytes(requester_tracker);
     const pending_before = requester_slot.pending_bytes;
     const chunks_before = requester_slot.chunk_len;
@@ -2152,7 +2152,7 @@ test "poll owner rolls back a batch when one reclaim is insufficient and retries
     try testing.expectEqual(screen_before, try requester_slot.screenResidentBytes(requester_tracker));
     const attachment_failed = requester_client.connection.attachments.get(1).?;
     try testing.expectEqualSlices(u8, base_before, attachment_failed.base.?);
-    try testing.expect(attachment_failed.observation_base == null);
+    try testing.expect(attachment_failed.observation_token == null);
     try testing.expectEqual(revision_before, attachment_failed.observation_revision);
     try testing.expectEqual(ticks_before, attachment_failed.observation_ticks);
     try testing.expectEqual(@as(usize, 0), try requester_slot.preparedBaseBytes(requester_tracker));

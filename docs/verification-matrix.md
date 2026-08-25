@@ -2144,14 +2144,17 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller wire로 보내 healthy client의 exact delta marker까지 측정한 raw artifact와 `performance-budget.md` hard cap이 없으면
   구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 빠른 제품 gate는 250ms idle wake delta 0과 CPU
   cap, 7 active marker의 notifier/write/drain 증가를 소유하며, 장시간 idle soak는 CR6f 이후 운영 soak 범위로 남긴다.
-- **P4 E2 runtime-shared observation cache: 부분 구현(E2a).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
+- **P4 E2 runtime-shared observation cache: 부분 구현(E2a·E2b).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
   E2a의 `runtime_observation_cache.Cache`는 canonical bytes와 checked-monotonic change token을 소유하고, 동일 bytes의
   allocation/token 증가 0, changed prepare→exact-token commit, stale prepared 거부, OOM·token overflow 때 이전 bytes/token
   무변경과 explicit discard, unpublished/published-empty 구분, caller-owned byte cap의 allocation 전 거부를 Debug·ReleaseFast로
   고정한다. cache-owned allocator와 final-address owner binding은 cross-cache commit 및 allocator-mismatch free를 막는다.
   outstanding prepared count는 commit/discard에서만 exact once 감소하고 nonzero deinit은 상태를 보존한 채 거부한다.
-  E2b의 `RuntimeManager` materialization 및 attach/periodic/fresh
-  producer 공유, terminate/upgrade cleanup과 E2c의 1·10·100 runtime product/performance artifact는 아직 미구현이다.
+  E2b는 heap-pinned runtime별 cache owner, same cadence epoch materialization 1회, attach current cache와 user-action fresh
+  barrier, canonical JSON raw embedding, subscription별 token/revision queue-admission commit을 제품 경로에 연결한다. runtime
+  terminate는 cache를 exact once 회수하고 same-PID upgrade는 파생 cache를 명시 재구성한다. subscription은 canonical bytes를
+  복제하지 않아 slow/OOM client의 delivery 상태가 cache와 sibling을 소유하지 않는다. E2c의 1·10·100 runtime
+  product/performance artifact와 hard cap 판정은 아직 미구현이다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

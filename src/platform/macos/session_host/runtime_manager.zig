@@ -33,6 +33,7 @@ const screen_stream = @import("screen_stream.zig");
 const protocol = @import("protocol.zig");
 const handoff_codec = @import("handoff_codec.zig");
 const agent_hook_logs = @import("agent_hook_logs.zig");
+const runtime_observation_cache = @import("runtime_observation_cache.zig");
 
 comptime {
     if (@import("protocol.zig").max_inventory_runtimes != maru.session.workspace.max_runtime_bindings)
@@ -183,6 +184,17 @@ const ForegroundCache = struct {
     refreshed_at_ns: i128 = 0,
 };
 
+const ObservationCacheRecord = struct {
+    cache: runtime_observation_cache.Cache,
+    refreshed_at_ns: i128 = 0,
+    cadence_epoch: ?u64 = null,
+
+    fn deinit(self: *ObservationCacheRecord, allocator: std.mem.Allocator) void {
+        self.cache.deinit() catch @panic("runtime observation cache retained a prepared value");
+        allocator.destroy(self);
+    }
+};
+
 // macOS libc CSPRNG(std.posix 미노출 — 이 파일은 macOS 전용). runtime_id 발급용.
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -225,11 +237,15 @@ pub const RuntimeManager = struct {
     observed_last_child_exit_status: i32 = -1,
     output_metrics_enabled: bool = false,
     observed_output_bytes: std.atomic.Value(u64) = .init(0),
+    observation_materializations: u64 = 0,
     /// 다음 in-process handle. 1부터 발급한다 — 0은 opaque 슬롯의 null과 겹치므로 handle로 쓰지 않는다.
     next_handle: RuntimeHandle = 1,
     /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
     /// cwd/title/OSC 상태는 계속 100ms full-state로 읽고, 비싼 foreground syscall 결과만 공유 cache한다.
     foreground_cache: std.AutoHashMapUnmanaged(RuntimeHandle, ForegroundCache) = .empty,
+    /// Heap-pinned runtime-global canonical metadata. Hash-map growth moves only pointers, never a
+    /// cache owner while a prepared transaction or borrowed view exists.
+    observation_caches: std.AutoHashMapUnmanaged(RuntimeHandle, *ObservationCacheRecord) = .empty,
     /// runtime별 BEL 누적 횟수. core의 `takeBell()`은 **소비형 bool**이라 관측(full-state, "이전과 같으면 미전송")에
     /// 그대로 실으면 true→true 전이를 잃어 둘째 벨을 놓친다. 그래서 host가 drain할 때마다 여기서 단조 증가시키고,
     /// client는 마지막에 본 값과의 **차이**로 울릴지 정한다(로컬이 bool을 소비하는 것과 결과 동일).
@@ -263,8 +279,10 @@ pub const RuntimeManager = struct {
         self.observed_last_child_exit_status = -1;
         self.output_metrics_enabled = false;
         self.observed_output_bytes = .init(0);
+        self.observation_materializations = 0;
         self.next_handle = 1;
         self.foreground_cache = .empty;
+        self.observation_caches = .empty;
         self.bell_counts = .empty;
         self.clipboards = .empty;
         self.output_wake = null;
@@ -309,11 +327,20 @@ pub const RuntimeManager = struct {
         };
     }
 
+    pub fn fixtureObservationMaterializations(self: *const RuntimeManager) u64 {
+        return self.observation_materializations;
+    }
+
     /// 소유 registry를 해제한다. **호출 전 모든 runtime이 terminate돼 있어야** 한다(reader join·슬롯 회수가 terminate에서
     /// 일어난다) — 남은 runtime이 있으면 reader 스레드가 join되지 않은 채 슬롯이 사라진다. graceful 종료 경로(§6)가 붙기
     /// 전까지 host는 SIGTERM으로 내려가 OS가 자식·스레드를 회수하므로 이 deinit은 clean-return 경로용이다.
     pub fn deinit(self: *RuntimeManager) void {
         self.foreground_cache.deinit(self.allocator);
+        {
+            var it = self.observation_caches.valueIterator();
+            while (it.next()) |record| record.*.deinit(self.allocator);
+            self.observation_caches.deinit(self.allocator);
+        }
         self.bell_counts.deinit(self.allocator);
         {
             var it = self.clipboards.valueIterator();
@@ -328,7 +355,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -1278,6 +1305,73 @@ pub const RuntimeManager = struct {
         return result;
     }
 
+    fn cachedObservationOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        request: server.ObservationRequest,
+    ) anyerror!server.CachedRuntimeObservation {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
+        const gop = try self.observation_caches.getOrPut(self.allocator, handle);
+        if (!gop.found_existing) {
+            errdefer _ = self.observation_caches.remove(handle);
+            const record = self.allocator.create(ObservationCacheRecord) catch {
+                return error.OutOfMemory;
+            };
+            errdefer self.allocator.destroy(record);
+            record.* = .{
+                .cache = try runtime_observation_cache.Cache.init(
+                    self.allocator,
+                    protocol.max_control_json,
+                ),
+            };
+            gop.value_ptr.* = record;
+        }
+        const record = gop.value_ptr.*;
+        const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        const refresh = switch (request) {
+            .fresh => true,
+            .current => record.cache.view() == null or
+                now_ns < record.refreshed_at_ns or
+                now_ns - record.refreshed_at_ns >= 100 * std.time.ns_per_ms,
+            .cadence_epoch => |epoch| record.cache.view() == null or
+                record.cadence_epoch == null or
+                epoch > record.cadence_epoch.?,
+        };
+        if (refresh) {
+            const next_materialization_count = self.observation_materializations +| 1;
+            var observation = try observationOp(self, runtime_id, self.allocator);
+            defer observation.deinit(self.allocator);
+            const canonical = server.canonicalizeObservation(self.allocator, observation) catch |err| switch (err) {
+                error.InvalidObservation => return error.InvalidObservation,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            defer self.allocator.free(canonical);
+            var prepared = record.cache.prepare(canonical) catch |err| switch (err) {
+                error.CandidateTooLarge => return error.InvalidObservation,
+                error.ChangeTokenExhausted => return error.ObservationTokenExhausted,
+                error.TooManyPrepared => return error.ObservationTransactionCorrupt,
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            var settled = false;
+            defer if (!settled) prepared.discard();
+            _ = record.cache.commit(&prepared) catch
+                return error.ObservationTransactionCorrupt;
+            settled = true;
+            self.observation_materializations = next_materialization_count;
+            record.refreshed_at_ns = now_ns;
+            switch (request) {
+                .cadence_epoch => |epoch| {
+                    if (record.cadence_epoch == null or epoch > record.cadence_epoch.?)
+                        record.cadence_epoch = epoch;
+                },
+                else => {},
+            }
+        }
+        const view = record.cache.view() orelse return error.TransientObservationUnavailable;
+        return .{ .canonical_json = view.bytes, .change_token = view.change_token };
+    }
+
     /// runtime의 현재 화면을 screen_stream 레코드 스트림으로 투영한다(§12, P3-e2d). reader 스레드가 core를 쓰므로
     /// **core_mutex를 잡은 채** 투영하고(투영이 grapheme·색을 소유 버퍼로 복사), 반환된 소유 바이트만 unlock 뒤 caller가
     /// snapshot_chunk로 나눠 보낸다(io-render-threading.md — snapshot 슬라이스는 core alias라 lock 밖으로 새면 안 됨).
@@ -1737,6 +1831,8 @@ pub const RuntimeManager = struct {
         if (be.remove(handle) != .removed)
             @panic("runtime manager teardown lost its runtime"); // reader join → surface/live_pty 번들 deinit → 슬롯 회수.
         _ = self.foreground_cache.remove(handle);
+        if (self.observation_caches.fetchRemove(handle)) |kv|
+            kv.value.deinit(self.allocator);
         _ = self.bell_counts.remove(handle);
         // 클립보드 텍스트는 최대 160 KiB라 닫힌 runtime마다 남기면 영속 데몬 메모리가 단조 증가한다(버퍼도 해제).
         if (self.clipboards.fetchRemove(handle)) |kv| {
@@ -3169,7 +3265,7 @@ test "runtime manager: link_at extracts a URL from the host core and honors clie
     try std.testing.expectError(error.RuntimeNotFound, ops.link_at(ops.ctx, 0xDEADBEEF, 0, 0, full_bits, allocator));
 }
 
-test "runtime manager: observation exports host-owned cwd title ssh and semantic metadata" {
+test "P4 E2b runtime manager shares one canonical observation per cadence epoch" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -3202,6 +3298,20 @@ test "runtime manager: observation exports host-owned cwd title ssh and semantic
     try std.testing.expectEqualStrings("user@workbox", observation.ssh_remote_dest.?);
     try std.testing.expectEqual(@as(u8, @intFromEnum(terminal.SemanticPrompt.command)), observation.semantic_state);
     try std.testing.expect(observation.foreground_available);
+
+    const first_cached = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });
+    try std.testing.expect(std.mem.indexOf(u8, first_cached.canonical_json, "metadata-title") != null);
+    try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
+    const sibling_cached = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });
+    try std.testing.expectEqual(first_cached.change_token, sibling_cached.change_token);
+    try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
+    const next_epoch = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 101 });
+    try std.testing.expectEqual(first_cached.change_token, next_epoch.change_token);
+    try std.testing.expectEqual(@as(u64, 2), mgr.fixtureObservationMaterializations());
+    _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 99 });
+    try std.testing.expectEqual(@as(u64, 2), mgr.fixtureObservationMaterializations());
+    _ = try ops.cached_observation(ops.ctx, rid, .fresh);
+    try std.testing.expectEqual(@as(u64, 3), mgr.fixtureObservationMaterializations());
 }
 
 test "runtime manager: empty argv is rejected before allocating a handle" {

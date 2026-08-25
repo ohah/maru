@@ -52,6 +52,19 @@ fn wideIconGlyph(cp: u21) bool {
 /// end_col<=start_col이면 무동작. 깨진 UTF-8 U+FFFD, wide 2칸. 사이드바 제목·pane 탭 바 제목·pane 라벨·rename 편집기가
 /// 공유하는 잘림 규칙의 단일 출처라 잘림 표시가 일관된다. **다음 빈 col**(제목/말줄임 뒤)을 돌려줘, 호출자가 그 뒤를
 /// 배경으로 채우는(솔리드 박스) 식으로 이어 그릴 수 있다. 글자만 추가하고 빈 칸은 채우지 않는다(중복 셀 없음). 순수(out append만).
+/// 글자가 먹는 **칸 수**를 cluster 경로로 잰다. 그리는 쪽(`appendEllipsizedTitle`)과 **같은 플래너**를
+/// 쓰므로 잰 폭과 그린 폭이 갈릴 수 없다 — 코드포인트를 손으로 세면 결합 문자·이모지 ZWJ 에서 어긋나고
+/// (`docs/grapheme-clustering.md` §3.1b 가 금지하는 그 직접 디코드다), 그 어긋남은 **폭을 재는 쪽에서만**
+/// 나서 화면에서는 글자가 잘린 것처럼 보인다.
+///
+/// 상한을 안 준다 — 자를지는 호출자가 자기 사각형을 알고 정한다(상태바 계약 §3: *"배치는 글자를
+/// 자르지 않는다"*).
+pub fn titleCols(title: []const u8, widen_icons: bool) u16 {
+    var layout = text_layout.plan(title, 0, std.math.maxInt(u16), .head, wideIconPredicate(widen_icons));
+    while (layout.next()) |_| {}
+    return layout.endCol();
+}
+
 pub fn appendEllipsizedTitle(
     allocator: std.mem.Allocator,
     cells: *std.ArrayList(renderer.DrawCell),

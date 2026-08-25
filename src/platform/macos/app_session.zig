@@ -817,18 +817,21 @@ pub const scm_row_capacity: usize = 128;
 /// 200인 이유: 한 화면이 20행 남짓이라 열 번을 스크롤해도 남고, `git log`가 그 정도는 밀리초 단위로
 /// 낸다. 무제한으로 두면 오래된 저장소에서 수십 MB가 한 번에 온다.
 pub const scm_log_limit_initial: u32 = 200;
-const status_bar_height_pt: u32 = 22;
+// **치수는 중립 잎이 소유한다**(`maru.status_bar_metrics`). 여기 있던 동안 Windows 가 볼 수 없었고,
+// 베끼면 "바 높이" 가 두 곳이 되어 한쪽만 고칠 때 두 OS 의 작업영역이 갈린다(그 파일 헤더가 근거).
+const status_bar_metrics = maru.status_bar_metrics;
+const status_bar_height_pt: u32 = status_bar_metrics.height_pt;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
-const status_bar_edge_pad_pt: u32 = 8;
-const status_bar_gap_pt: u32 = 12;
+const status_bar_edge_pad_pt: u32 = status_bar_metrics.edge_pad_pt;
+const status_bar_gap_pt: u32 = status_bar_metrics.gap_pt;
 /// 상태바 **상단 경계선** 두께(논리 pt). 배경 띠 **안쪽 맨 위**에 그으므로 `dock_layout`이 깎아 둔
 /// 높이는 그대로다 — 선을 추가한다고 작업영역이 줄지 않는다.
-const status_bar_border_pt: u32 = 1;
+const status_bar_border_pt: u32 = status_bar_metrics.border_pt;
 /// 호버 배경이 항목 좌우로 넓어지는 여백(논리 pt, 한쪽). 글자에 딱 붙은 배경은 답답해 보인다.
 /// **항목 간격(gap)보다 두 배 이상 작아야** 이웃 호버끼리 겹치지 않는다(4×2 < 12).
-const status_bar_item_pad_pt: u32 = 4;
+const status_bar_item_pad_pt: u32 = status_bar_metrics.item_pad_pt;
 /// 상태바 텍스트 위아래 여백(논리 pt, 한쪽). 바 높이가 이 값으로 텍스트 행에서 파생된다 — 아래 참고.
-const status_bar_v_pad_pt: u32 = 4;
+const status_bar_v_pad_pt: u32 = status_bar_metrics.v_pad_pt;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한.
@@ -5959,9 +5962,7 @@ pub const AppSession = struct {
         //
         // 그래도 **하한은 폰트 독립**이라 작은 폰트에서 바가 실처럼 얇아지지 않는다 — 도크 view bar가 폰트
         // 파생만으로 오르내리던 회귀(실측 53px↔80px)를 피한 이유가 그 하한이다.
-        const floor_px = layout_math.ptToPx(status_bar_height_pt, self.scale_milli);
-        const text_px = self.cell_height_px +| (2 * layout_math.ptToPx(status_bar_v_pad_pt, self.scale_milli));
-        return @max(floor_px, text_px);
+        return status_bar_metrics.heightPx(self.cell_height_px, self.scale_milli);
     }
 
     pub fn pointerGestureIs(self: *const AppSession, comptime tag: std.meta.Tag(PointerGestureOwner)) bool {

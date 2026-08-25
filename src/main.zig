@@ -1809,7 +1809,7 @@ test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹�
     var saw_no_dock = false;
     var w: u32 = 40;
     while (w <= 1600) : (w += 37) {
-        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0);
+        const g = dockGeometryFor(w, 640, cell_w, cell_h, true, 0, .explorer, 0, 0, 0);
         // 창을 넘지 않는다.
         try std.testing.expect(g.terminal.x + g.terminal.w <= w);
         try std.testing.expect(g.dock.x + g.dock.w <= w);
@@ -2765,6 +2765,9 @@ fn activeGridDigest(io: std.Io, app_window: *maru.session.window.AppWindow) u64 
 /// 장만 그려졌다). 나머지는 목록에 있지만 화면에 없고 누를 수도 없다. 그것을 조용히 두지 않으려고
 /// 스모크가 `cards_visible` 을 함께 낸다 — 사이드바 스크롤이 붙으면 사라지는 한계다
 /// (`slotAt` 은 이미 `scroll_offset_px` 를 받는다. 지금은 0 을 넘긴다).
+/// 상태바가 한 프레임에 담는 항목 상한. 지금 Windows 가 낼 수 있는 것은 좌측 둘(브랜치·경로)이다.
+const max_status_bar_items: usize = 4;
+
 const max_win_sessions: usize = 16;
 
 /// 세션 목록 → 카드 목록. **세션이 늘거나 줄면 다시 부른다** — 안 부르면 사이드바가 옛 목록을 그린다.
@@ -2951,6 +2954,262 @@ fn buildAgentItems(
         },
     };
     return "";
+}
+
+/// 상태바 항목 하나 — **아이콘(선택) + 글자**. 정체는 중립 `ItemId` 가 갖는다(슬롯 인덱스를 id 로
+/// 쓰면 항목 하나가 사라질 때 남은 것의 id 가 밀려 눌린 것과 실행된 것이 갈린다 — 그 enum 의 doc).
+const StatusBarItem = struct {
+    id: maru.chrome.components.status_bar.ItemId,
+    /// 0 이면 아이콘 없는 항목이다(계약 §4 의 커서 위치·읽기 전용 같은 것들).
+    icon: u21 = 0,
+    text: []const u8,
+};
+
+/// 항목이 먹는 **셀 칸 수**. 아이콘과 글자 사이에 한 칸을 둔다.
+///
+/// **왜 셀로 재나 — 계약은 px 라고 했다.** 그 계약이 막으려는 것은 *폰트 폭을 추측하는 것*이다
+/// (그 컴포넌트 헤더: "글꼴·CJK 폭을 여기서 추측하지 않는다"). Windows 의 크롬 글자는 지금 전부
+/// **터미널 폰트를 셀 격자에 얹어** 그린다(`cell_text` + 터미널 프레임 빌더) — 그 격자에서 한 글자의
+/// 폭은 `width.cellWidth` 가 **정확히** 정하지 추측이 아니다. 한글이 두 칸인 것도 그 함수가 안다.
+///
+/// **이 근거는 경로에 묶여 있다.** 상태바 글자를 measured 크롬 텍스트(§2m.27)로 옮기는 날, 폭의
+/// 출처도 그쪽으로 함께 옮겨야 한다 — 그때 이 함수를 그대로 두면 비례 폰트 폭을 셀로 어림하게 된다.
+fn statusBarItemCols(item: StatusBarItem) u32 {
+    var cols: u32 = 0;
+    if (item.icon != 0) cols += @as(u32, maru.width.cellWidth(item.icon)) + 1;
+    // **그리는 쪽과 같은 플래너로 잰다**(`cell_text.titleCols`). 코드포인트를 손으로 세면 결합
+    // 문자·이모지 ZWJ 에서 어긋나고, 그 어긋남은 폭을 재는 쪽에서만 나서 화면에서는 글자가 잘린
+    // 것처럼 보인다 — `docs/grapheme-clustering.md` §3.1b 가 그 직접 디코드를 금지하고 경계 게이트가
+    // 실제로 잡았다(실측 2026-08-26).
+    cols += cell_text.titleCols(item.text, false);
+    return cols;
+}
+
+/// 창 바닥 상태표시줄(W8.9). 배경 띠 + 상단 경계선 + 놓인 항목들.
+///
+/// **자리는 중립이 정한다**(`chrome.components.status_bar.compute`) — 좌/우 어느 쪽부터 채우는지,
+/// 부딪히면 무엇을 먼저 버리는지가 전부 거기 있다. 여기서 산수를 하면 macOS 와 다른 순서로 버린다.
+///
+/// **항목마다 프레임이 하나다.** 계약이 그렇게 정했다(§3: 항목은 각자 자기 frame 을 갖고 절대 px
+/// origin 에 놓인다). 한 프레임에 몰아 담고 열로 자리를 잡으면 px 로 계산된 자리가 **셀 격자로
+/// 스냅되어** 계산과 화면이 갈린다(간격 12px 는 셀 폭 8 의 배수가 아니다).
+fn appendStatusBarCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    bar: maru.session.split_tree.Rect,
+    cell_w: u32,
+    cell_h: u32,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    uploaded: *usize,
+    items: []const StatusBarItem,
+    frames: []?maru.renderer.RenderFrame,
+    dropped_out: *usize,
+    placed_out: *usize,
+    outside_out: *usize,
+) !void {
+    dropped_out.* = 0;
+    placed_out.* = 0;
+    outside_out.* = 0;
+    for (frames) |*f| if (f.*) |*old| {
+        old.deinit(allocator);
+        f.* = null;
+    };
+    if (bar.w == 0 or bar.h == 0) return;
+
+    // 배경 띠. **항상 선다** — 도크·사이드바 상태와 무관하다(계약 §2).
+    try out.append(allocator, d3d11_cells.solidCell(
+        @floatFromInt(bar.x),
+        @floatFromInt(bar.y),
+        @floatFromInt(bar.w),
+        @floatFromInt(bar.h),
+        cellColor(tk, .surface_bg),
+        .{ 0, 0, 0, 0 },
+    ));
+    // **경계선은 띠 안쪽 맨 위**에 긋는다 — 밖에 그으면 작업영역을 한 줄 더 먹는다(그 상수의 doc).
+    const border_px = @max(1, maru.session.layout_math.ptToPx(maru.status_bar_metrics.border_pt, 1000));
+    try out.append(allocator, d3d11_cells.solidCell(
+        @floatFromInt(bar.x),
+        @floatFromInt(bar.y),
+        @floatFromInt(bar.w),
+        @floatFromInt(@min(border_px, bar.h)),
+        cellColor(tk, .divider),
+        .{ 0, 0, 0, 0 },
+    ));
+
+    if (items.len == 0 or cell_w == 0 or cell_h == 0) return;
+    var widths: [max_status_bar_items]u32 = undefined;
+    const n = @min(items.len, widths.len);
+    for (items[0..n], 0..) |item, i| widths[i] = statusBarItemCols(item) *| cell_w;
+
+    var left_slots: [max_status_bar_items]maru.chrome.components.status_bar.Slot = undefined;
+    var right_slots: [1]maru.chrome.components.status_bar.Slot = undefined;
+    const placed = maru.chrome.components.status_bar.compute(
+        maru.status_bar_metrics.metricsFor(bar.x, bar.y, bar.w, bar.h, 1000),
+        widths[0..n],
+        &.{},
+        &left_slots,
+        &right_slots,
+    );
+    dropped_out.* = placed.dropped;
+
+    // **글자는 띠 안에서 세로 중앙**이다. 바 높이가 셀보다 크게 유도되므로(그 잎의 `heightPx`)
+    // 이 뺄셈이 0 으로 포화되지 않는다 — 포화되면 글자가 창 밖으로 넘친다.
+    const text_y = bar.y + (bar.h -| cell_h) / 2;
+    const fg_rgb = tk.get(.surface_fg);
+    const fg: maru.terminal.Color = .{ .rgb = .{ .r = fg_rgb.r, .g = fg_rgb.g, .b = fg_rgb.b } };
+    var natives: [max_status_bar_items]?[]maru.renderer.metal_frame.NativeMetalCell = @splat(null);
+    var origins: [max_status_bar_items]u32 = @splat(0);
+
+    for (placed.left, 0..) |slot, si| {
+        if (si >= frames.len or slot.index >= n) continue;
+        const item = items[slot.index];
+        var cells: std.ArrayList(maru.renderer.DrawCell) = .empty;
+        defer cells.deinit(allocator);
+        // **grapheme 풀**. cluster 의 base 뒤 코드포인트(결합 악센트·NFD 한글 V/T·VS16)가 여기 실린다 —
+        // 없으면 그 글자들이 조용히 사라진다(§3.1a CG1).
+        var pool: std.ArrayList(u32) = .empty;
+        defer pool.deinit(allocator);
+        const style: maru.terminal.Style = .{ .foreground = fg };
+        var col: u16 = 0;
+        if (item.icon != 0) {
+            try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = item.icon, .style = style, .width = maru.width.cellWidth(item.icon) });
+            col += @as(u16, maru.width.cellWidth(item.icon)) + 1;
+        }
+        // **자르지 않는다** — 상한을 항목 폭 그대로 준다. 자를지는 배치가 이미 정했다(자리를 못
+        // 얻은 항목은 통째로 빠진다, 계약 §3).
+        col = cell_text.appendEllipsizedTitle(allocator, &cells, &pool, item.text, 0, col, std.math.maxInt(u16), style, false, .head) catch col;
+        if (cells.items.len == 0) continue;
+        const list = maru.renderer.DrawList{
+            .size = .{ .cols = col, .rows = 1 },
+            .cursor = .{ .row = 0, .col = 0 },
+            .dirty = null,
+            .cells = try cells.toOwnedSlice(allocator),
+            .overlays = try allocator.alloc(maru.renderer.DrawOverlay, 0),
+            .grapheme_pool = try pool.toOwnedSlice(allocator),
+        };
+        const glyph_runs = maru.renderer.glyph_layout.buildGlyphRunList(allocator, list, renderer_state.text_config, builder.shaper) catch {
+            var l = list;
+            l.deinit(allocator);
+            continue;
+        };
+        const frame = renderer_state.buildFrameFromGlyphRunListWithRasterizer(allocator, list, glyph_runs, builder.rasterizer) catch {
+            var l = list;
+            l.deinit(allocator);
+            continue;
+        };
+        frames[si] = frame;
+        // **짓는 자리에서 곧바로 올린다**(§2m.32) — 업로드 목록은 프레임과 함께 죽는다.
+        try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
+        uploaded.* += draw_host.uploadFrameRegions(pipeline, frame);
+
+        const colors = maru.renderer.metal_frame.CellColors{
+            .default_fg = .{ .r = fg_rgb.r, .g = fg_rgb.g, .b = fg_rgb.b },
+            .default_bg = .{ .r = 0, .g = 0, .b = 0 },
+        };
+        natives[si] = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
+        origins[si] = slot.x;
+        placed_out.* += 1;
+    }
+
+    // **UV 는 마지막 업로드 뒤에 잡는다.** 항목마다 아틀라스를 올리는데 뒤 항목이 아틀라스를 **키우면**
+    // 앞 항목의 UV 가 옛 크기로 계산돼 있어 화면에서 사라진다 — 실측 2026-08-26: 브랜치 이름
+    // `feat/w8-status-bar` 가 `fea` 세 글자만 남았다(이미 구워져 있던 글리프만 살아남았다).
+    // 사이드바가 프레임 **하나**라 못 겪던 실패다.
+    for (natives, origins) |maybe_native, ox| {
+        const native = maybe_native orelse continue;
+        defer allocator.free(native);
+        try out.ensureUnusedCapacity(allocator, native.len);
+        for (native) |src| {
+            var c = src;
+            // **계산된 px 자리에 그대로 놓는다** — 열은 항목 **안에서**의 자리이고, 항목의 자리는
+            // `origin_x` 다. 열로 자리를 잡으면 격자에 스냅돼 계산과 갈린다.
+            c.origin_x = ox;
+            c.origin_y = text_y;
+            c.row = 0;
+            const cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
+            if (cell.rect[0] < @as(f32, @floatFromInt(bar.x)) or
+                cell.rect[0] + cell.rect[2] > @as(f32, @floatFromInt(bar.x + bar.w)) or
+                cell.rect[1] < @as(f32, @floatFromInt(bar.y)) or
+                cell.rect[1] + cell.rect[3] > @as(f32, @floatFromInt(bar.y + bar.h))) outside_out.* += 1;
+            out.appendAssumeCapacity(cell);
+        }
+    }
+}
+
+/// 지금 낼 수 있는 상태바 항목들. **좌측 둘뿐이다** — 우측(에이전트 개수·알림·커서 위치)은 그
+/// 모델이 Windows 앱에 아직 없다(계약 §4 의 표에서 그 줄들이 "0이면 항목 없음" 인 것과 같은 결과다).
+///
+/// **빈 항목은 안 넣는다.** repo 밖이면 브랜치 줄이 없고 cwd 가 없으면 경로 줄이 없다 — 그것이
+/// 계약이고, 빈 문자열을 넣으면 폭 0 짜리 항목이 `dropped` 로 세어져 "폭이 모자랐다" 로 읽힌다.
+fn buildStatusBarItems(
+    out: []StatusBarItem,
+    scm_status: []const u8,
+    cwd: ?[]const u8,
+    home: ?[]const u8,
+    cwd_buf: []u8,
+) []const StatusBarItem {
+    var n: usize = 0;
+    const icons = maru.icons;
+    if (maru.session.git_status.parseHead(scm_status).branch) |b| {
+        if (b.len != 0 and n < out.len) {
+            out[n] = .{ .id = .git_branch, .icon = icons.codepoint(.git_branch), .text = b };
+            n += 1;
+        }
+    }
+    if (cwd) |c| {
+        if (c.len != 0 and n < out.len) {
+            out[n] = .{ .id = .cwd, .icon = icons.codepoint(.folder), .text = shortenHome(c, home, cwd_buf) };
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+/// `$HOME` 을 `~` 로 줄인다(계약 §4 의 `sidebarCwdPath` 규칙). 못 줄이면 원본을 그대로 돌려준다 —
+/// **버퍼가 모자라도 자르지 않는다**: 자르는 것은 텍스트 단계의 일이고, 여기서 자르면 폭 계산이
+/// 두 곳으로 갈린다(그 컴포넌트 §3).
+fn shortenHome(path: []const u8, home: ?[]const u8, buf: []u8) []const u8 {
+    const h = home orelse return path;
+    if (h.len == 0 or path.len < h.len) return path;
+    if (!std.mem.eql(u8, path[0..h.len], h)) return path;
+    const rest = path[h.len..];
+    if (rest.len != 0 and rest[0] != std.fs.path.sep and rest[0] != '/') return path;
+    if (1 + rest.len > buf.len) return path;
+    buf[0] = '~';
+    @memcpy(buf[1..][0..rest.len], rest);
+    return buf[0 .. 1 + rest.len];
+}
+
+/// 상태바를 다시 짓는다. **기하가 바뀌는 자리마다 부른다** — 자리를 안 갱신하면 창을 키운 뒤
+/// 옛 사각형에 남아 화면에서 사라진다(실측 2026-08-26).
+fn rebuildStatusBar(
+    a: std.mem.Allocator,
+    cells_out: *std.ArrayList(d3d11_cells.Cell),
+    bar: maru.session.split_tree.Rect,
+    cw: u32,
+    ch: u32,
+    tk: *const maru.chrome.Tokens,
+    rs: *maru.renderer.RendererState,
+    fb: win32_terminal.FrameBuilder,
+    pl: *d3d11_cells.CellPipeline,
+    aw: *u32,
+    ah: *u32,
+    up: *usize,
+    items: []const StatusBarItem,
+    frames: []?maru.renderer.RenderFrame,
+    dropped: *usize,
+    placed: *usize,
+    outside: *usize,
+    rebuilds: *usize,
+) void {
+    cells_out.clearRetainingCapacity();
+    appendStatusBarCells(a, cells_out, bar, cw, ch, tk, rs, fb, pl, aw, ah, up, items, frames, dropped, placed, outside) catch {};
+    rebuilds.* += 1;
 }
 
 /// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
@@ -3328,6 +3587,9 @@ fn dockGeometryFor(
     sidebar_width_px: u32,
     /// 상단 드래그 띠 높이(px). 프레임리스 창이 캡션을 지운 만큼 작업영역을 아래로 들인다.
     titlebar_px: u32,
+    /// 하단 상태표시줄 높이(px). **창 전폭**이라 작업영역 밖에 살고, `compute` 가 창 높이에서 **먼저**
+    /// 깎는다 — 그래서 이 값 하나로 터미널 행·도크·사이드바 뷰포트가 전부 함께 줄어든다(W8.9).
+    status_bar_px: u32,
 ) maru.session.dock_layout.Geometry {
     const dock_layout = maru.session.dock_layout;
     return dock_layout.compute(.{
@@ -3344,7 +3606,7 @@ fn dockGeometryFor(
         .visible = visible,
         .view = view,
         .view_bar_px = cell_h * 2,
-        .status_bar_px = 0,
+        .status_bar_px = status_bar_px,
     });
 }
 
@@ -3445,10 +3707,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const caption_buttons_px: u32 = caption_btn_w * 3;
     // **띠 왼쪽 사이드바 폭도 우리가 받는다** — 그 자리가 헤더의 아이콘 줄이다(§2m.37 의 모양).
     window.setFrameless(titlebar_px, caption_buttons_px, sidebar_w);
+    // ── 하단 상태표시줄 (W8.9) ──────────────────────────────────────────────────────────────
+    //
+    // **치수는 중립 잎이 정한다**(`status_bar_metrics`) — macOS 와 같은 함수다. 여기서 산수를 다시
+    // 적으면 같은 창의 두 OS 가 다른 높이를 쓰고, 그때 갈리는 것은 바 하나가 아니라 **터미널 행 수**다
+    // (그 높이가 작업영역을 깎는다).
+    //
+    // **끄는 판정만 여기 있다** — `status-bar.show` 는 config 이고 중립 잎은 config 를 모른다.
+    // 게이트가 이 한 자리라 끄면 작업영역·도크·사이드바가 전부 자동으로 되돌아온다(계약 §2).
+    const status_bar_px: u32 = if (cfg.status_bar.show) maru.status_bar_metrics.heightPx(cell_h, 1000) else 0;
 
     var client_w = initial.width_px;
     var client_h = initial.height_px;
-    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
+    var geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
 
     // **격자는 창이 아니라 터미널 사각형에서 나온다.** 창 폭으로 유도하면 셸이 그만큼 넓다고 믿어
     // 긴 줄이 도크 아래로 흘러 들어간다(그리는 자리는 잘려도 셸의 줄바꿈이 어긋난다).
@@ -3677,6 +3948,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 버린다**(`scan_arena`). 하나로 합치면 파싱 결과가 통째로 남는다: 실측 **44 MB** 를 카드
     // 열한 장의 짧은 문자열 때문에 끝까지 들고 있었다. 백엔드가 64 KiB 스트리밍으로 바꾼 이유가
     // 바로 그 상주 메모리인데(그 함수 doc), 호출자가 arena 하나로 도로 되살리는 꼴이었다.
+    // **홈은 한 번만 푼다** — 에이전트 이력 스캔과 상태바의 `~` 축약이 같은 값을 봐야 한다.
+    // 두 곳에서 따로 풀면 한쪽만 `HOME` 을 보고 다른 쪽이 `%USERPROFILE%` 를 보는 상태가 생긴다.
+    const home_env = maru.os_env.allocValue(allocator, "HOME");
+    defer if (home_env) |h| allocator.free(h);
+    const up_env = maru.os_env.allocValue(allocator, "USERPROFILE");
+    defer if (up_env) |u| allocator.free(u);
+    const home_dir = maru.user_paths.homeDirFor(@import("builtin").os.tag, home_env, up_env);
     var agent_arena = std.heap.ArenaAllocator.init(allocator);
     defer agent_arena.deinit();
     var agent_items: std.ArrayList(maru.chrome.components.session_dock.types.Item) = .empty;
@@ -3690,11 +3968,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     {
         // **홈은 중립이 정한다**(`user_paths.homeDirFor`) — Windows 는 `HOME` 이 없어 `%USERPROFILE%`
         // 로 간다. 여기서 손으로 고르면 그 규칙이 두 곳이 된다(그 함수 doc 이 왜 이렇게 되는지 적어 뒀다).
-        const home_env = maru.os_env.allocValue(allocator, "HOME");
-        defer if (home_env) |h| allocator.free(h);
-        const up_env = maru.os_env.allocValue(allocator, "USERPROFILE");
-        defer if (up_env) |u| allocator.free(u);
-        if (maru.user_paths.homeDirFor(@import("builtin").os.tag, home_env, up_env)) |home| {
+        if (home_dir) |home| {
             var scan_arena = std.heap.ArenaAllocator.init(allocator);
             defer scan_arena.deinit();
             agent_list_reason = buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch "scan_failed";
@@ -3724,6 +3998,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 상단 띠(배경 + 캡션 버튼). 호버가 바뀌면 다시 만든다.
     var titlebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer titlebar_cells.deinit(allocator);
+    // ── 하단 상태표시줄 셀 (W8.9) ───────────────────────────────────────────────────────────
+    var status_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
+    defer status_cells.deinit(allocator);
+    // **항목마다 프레임 하나**(계약 §3). 아틀라스 업로드가 프레임 수명에 묶여 있어 들고 있어야 한다.
+    var status_frames: [max_status_bar_items]?maru.renderer.RenderFrame = @splat(null);
+    defer for (&status_frames) |*f| if (f.*) |*fr| fr.deinit(allocator);
+    var status_dropped: usize = 0;
+    var status_placed: usize = 0;
+    var status_outside: usize = 0;
+    var status_uploads: usize = 0;
+    var status_items_buf: [max_status_bar_items]StatusBarItem = undefined;
+    // 경로는 `~` 로 줄여 담는다 — 그 축약이 계약 §4 의 규칙이다(`sidebarCwdPath`).
+    var status_cwd_buf: [512]u8 = undefined;
     var caption_hover: ?usize = null;
     var caption_clicks: usize = 0;
     // 캡션 버튼 **동작** 판정(W8.8⒝). `caption_clicks` 만으로는 속 빈다 — 스모크가 그 자리를 아예
@@ -3810,6 +4097,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer sidebar_cards.deinit(allocator);
     const folder_name: []const u8 = if (dock_root) |r| std.fs.path.basename(r) else "";
     try refreshSidebarCards(allocator, &sidebar_cards, sessions.items, folder_name);
+    // **기하가 바뀔 때마다 다시 짓는다.** 내용(브랜치·cwd)은 이 슬라이스에서 안 바뀌지만 **자리는
+    // 바뀐다** — 창을 키우면 바가 아래로 가고 폭이 넓어진다. 시작에 한 번만 지었더니 창이 커진 뒤
+    // 옛 자리(실측 y=574, w=984)에 남아 **화면에서 통째로 사라졌다**. 스모크는 자기 창 크기가
+    // 안 변해서 그 상태에서도 초록이었다 — 실기 캡처가 잡았다(2026-08-26).
+    const status_items = buildStatusBarItems(&status_items_buf, scm_status, dock_root, home_dir, &status_cwd_buf);
+    var status_rebuilds: usize = 0;
+    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
     try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y);
 
@@ -4363,7 +4657,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
                 client_w = r.width_px;
                 client_h = r.height_px;
-                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
+                geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+                rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     resizeAllSessions(&runtime, sessions.items, size, io);
@@ -4524,7 +4819,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         );
                         if (cand) |pt| if (pt != dock_size_pt) {
                             dock_size_pt = pt;
-                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
+                            geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
                             // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
                             // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
                             // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
@@ -4701,7 +4997,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     dock_view = next_view;
                                     view_switches += 1;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
-                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
+                                    geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
+                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
                                     rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
@@ -5188,6 +5485,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const term_last = cells.items.len;
         // **띠는 맨 위다** — 터미널·도크 위에 얹혀야 캡션 버튼이 안 가려진다.
         cells.appendSlice(allocator, titlebar_cells.items) catch {};
+        // **상태바도 맨 위다** — 창 전폭이라 터미널·도크 위에 얹힌다(그 아래가 이미 비워져 있다:
+        // `compute` 가 창 높이에서 먼저 깎았다).
+        cells.appendSlice(allocator, status_cells.items) catch {};
         last_cells = cells.items.len;
 
         // **터미널 셀이 도크 사각형에 들어가면 안 된다**(§2m.31 의 진짜 위험). 격자를 창 폭에서
@@ -5265,6 +5565,43 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             nchittest_sidebar_icon,
             frameless_covers and nchittest_strip == 2 and nchittest_button == 1 and nchittest_below == 1 and
                 nchittest_sidebar_icon == 1,
+        });
+    }
+    status_bar: {
+        // ── 하단 상태표시줄 (W8.9) ──────────────────────────────────────────────────────────
+        //
+        // **개수만 세면 속 빈다** — 배경 띠와 경계선은 항목이 하나도 없어도 그려진다. 그래서
+        // **글리프 셀이 몇 장인지**와 **띠 밖으로 나간 것이 있는지**를 함께 낸다.
+        //
+        // **높이는 되읽지 않는다.** `status_bar_px` 를 그대로 적으면 내가 넘긴 값을 되읽는 동어반복이라,
+        // 중립이 그것으로 무엇을 했는지는 안 보인다 — `geom.status_bar` 와 `geom.terminal` 을 낸다.
+        const bar = geom.status_bar;
+        // **끈 것은 실패가 아니다.** `status-bar.show = false` 는 사용자가 명시적으로 고른 상태이고
+        // (계약 §2: 되돌릴 길이 있어야 한다), 그때 바가 없는 것이 **옳은 동작**이다. 하나로 접으면
+        // 그 설정을 쓰는 기계에서 스모크가 거짓 실패를 낸다.
+        if (status_bar_px == 0) {
+            try stdout.print("status=unjudgeable reason=hidden_by_config term_bottom={d} client_h={d} reclaimed={}\n", .{
+                geom.terminal.y + geom.terminal.h,
+                client_h,
+                geom.terminal.y + geom.terminal.h == client_h,
+            });
+            break :status_bar;
+        }
+        const fits = bar.h == 0 or (bar.y + bar.h == client_h and bar.w == client_w);
+        try stdout.print("status_bar=({d},{d},{d},{d}) status_full_width={} status_above_bottom={} status_cells={d} status_placed={d} status_dropped={d} status_outside={d} term_bottom={d} status_ok={}\n", .{
+            bar.x,
+            bar.y,
+            bar.w,
+            bar.h,
+            bar.w == client_w,
+            fits,
+            status_cells.items.len,
+            status_placed,
+            status_dropped,
+            status_outside,
+            geom.terminal.y + geom.terminal.h,
+            bar.h > 0 and bar.w == client_w and fits and status_placed > 0 and status_outside == 0 and
+                geom.terminal.y + geom.terminal.h <= bar.y,
         });
     }
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} card_over_header={d} cards_visible={d}/{d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, sidebar_card_over_header, sidebar_cards_visible, sidebar_cards.items.len, geom.terminal.x });

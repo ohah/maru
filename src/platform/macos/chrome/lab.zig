@@ -74,6 +74,14 @@ pub const ScenarioId = enum {
     /// 셀 폭과 높이를 **함께** 줄인다 — 폭만 줄이면 제품에 없는 조합이 되어(셀은 폰트 크기에서 나온다)
     /// 판정이 거짓이 된다. 실제로 그 잘못된 픽스처로 한 번 오판했다.
     scm_small_font,
+    /// 도크 **아래에 상태바가 있는** 화면. 지금까지 Lab 은 컴포넌트를 프레임 원점에 **단독으로** 그려서
+    /// pane 합성(이웃과의 경계·레이어 순서)을 하나도 보지 못했다 — 그 간극은 이 파일의 헤더가 적어 두고
+    /// 있었고, 실제로 그 축의 결함은 **사용자 캡처로만** 드러났다(SCM 목록이 위쪽 고정 chrome 을 덮은
+    /// 2026-08-21 건).
+    ///
+    /// 이 시나리오는 그 축의 첫 조각이다: 도크 뷰포트를 상태바 높이만큼 **줄여** 세우고 그 아래에 띠를
+    /// 심는다. 목록이 자기 뷰포트에서 멈추지 않으면 띠를 덮어 골든이 빨개진다.
+    dock_over_status_bar,
     /// 파일 탐색기 **행 목록**. 이 도크에는 Lab 시나리오도 시각 골든도 없었다 — FT1 이 행을 셀 격자에서
     /// typed component 로 옮기면서 밀도·아이콘·들여쓰기 안내선·상태 점을 전부 새로 그렸는데, 그 픽셀을
     /// 보는 자동 판정자는 하나도 없었다(계획 문서 §6 이 그 한계를 적어 두고 있다). 실제로 그 단계에서
@@ -285,7 +293,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
@@ -944,7 +952,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1153,10 +1161,10 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // 스크롤 상태(가상화가 내는 그 형태): 창의 첫 항목을 음수 origin 으로 올려 **부분 가림**을 만든다.
         // 전부 밀어내면(offset 이 행 높이보다 크면) 그 행의 clip 면적이 0 이 되어 lowering 이 quad 를
         // 통째로 버리므로, "clip 이 위를 자르는가"를 증언하지 못한다 — 반쯤 걸친 행이 있어야 한다.
-        .scroll_offset_px = if (scenario.id == .scm_scrolled) scm_scroll_fixture_offset_px else 0,
-        .content_first_item_origin_y_px = if (scenario.id == .scm_scrolled) -@as(i32, scm_scroll_fixture_offset_px) else 0,
-        .content_h_px = if (scenario.id == .scm_scrolled) scm_scroll_fixture_content_h_px else 0,
-        .list_overflows = scenario.id == .scm_scrolled,
+        .scroll_offset_px = if (scenario.id == .scm_scrolled or scenario.id == .dock_over_status_bar) scm_scroll_fixture_offset_px else 0,
+        .content_first_item_origin_y_px = if (scenario.id == .scm_scrolled or scenario.id == .dock_over_status_bar) -@as(i32, scm_scroll_fixture_offset_px) else 0,
+        .content_h_px = if (scenario.id == .scm_scrolled or scenario.id == .dock_over_status_bar) scm_scroll_fixture_content_h_px else 0,
+        .list_overflows = scenario.id == .scm_scrolled or scenario.id == .dock_over_status_bar,
         .changed_file_count = 4,
         // 커밋 상자: 스테이지된 파일이 있으므로 버튼이 **켜진** 상태다(§7 — 실제 index 상태로만 정한다).
         // 두 상태(꺼짐/켜짐)를 한 캡처에 담을 수 없어, 켜진 쪽을 고른다 — 꺼짐은 단위 테스트가 본다.

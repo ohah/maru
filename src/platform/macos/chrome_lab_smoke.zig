@@ -308,7 +308,12 @@ pub fn main(init: std.process.Init) !void {
     // SB1 §5.2: 사이드바 배경 strip이 상태바 위에서 끊기는지 **픽셀로** 보는 시나리오에서만 값을 싣는다.
     // 나머지 시나리오는 0이라 기존 캡처와 바이트 동일하다.
     const sidebar_width_px: u32 = if (scenario_id == .sidebar_status_strip) 180 else 0;
-    const status_bar_height_px: u32 = if (scenario_id == .sidebar_status_strip) 26 else 0;
+    const status_bar_height_px: u32 = switch (scenario_id) {
+        .sidebar_status_strip => 26,
+        // pane 합성의 첫 축(§Lab 헤더의 "남는 간극") — 도크 아래에 상태바가 있는 화면.
+        .dock_over_status_bar => 26,
+        else => 0,
+    };
     // SB1 §5.3: 사이드바 표면을 자를 구간. 제품에서는 `sidebarScissorPx`가 뷰포트에서 뽑지만 Lab에는 사이드바
     // 셀이 없으므로 시나리오가 같은 계약의 값을 직접 준다 — `[헤더 아래, 창 높이 − 상태바)`.
     //
@@ -355,9 +360,15 @@ pub fn main(init: std.process.Init) !void {
         real_file_lines = rows;
     }
 
+    // **도크는 상태바 위에서 끝난다.** 제품에서 도크 높이는 창 높이에서 상태바를 뺀 값이고, Lab 이
+    // 프레임 전체를 주면 그 경계가 그림에 아예 없어 "목록이 상태바를 덮는가"를 물을 수 없다.
+    const component_viewport = chrome.ui.layout.UiSize{
+        .width = viewport.width,
+        .height = viewport.height - @as(f32, @floatFromInt(status_bar_height_px)),
+    };
     const frame = try lab.buildFrame(.{
         .id = scenario_id,
-        .viewport_px = viewport,
+        .viewport_px = component_viewport,
         .now_ns = 0,
         .cell_w_px = @intCast(cellSizeFor(scenario_id).w),
         .cell_h_px = @intCast(cellSizeFor(scenario_id).h),
@@ -394,6 +405,9 @@ pub fn main(init: std.process.Init) !void {
     // 그 값이 잘못되면 **이 캡처가 통째로 빈다**(실측: non-background 9,203 → 2,391).
     const quad_layer = labQuadLayer(scenario_id);
     chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads, quad_layer);
+    // **여기까지가 컴포넌트가 낸 quad 다.** 아래에서 하네스가 심는 이웃(사이드바 밴드·상태바 띠)은
+    // 컴포넌트 밖 표면이라 다른 층에 앉는다 — 그래서 층 불변식은 이 접두사에만 건다(아래 판정).
+    const component_quad_count = gpu_quads.items.len;
     // SB1 §5.3 — **뷰포트 바닥을 가로지르는 layer 0(under) quad.** 제품에서 이 자리에 오는 것은 카드 호버
     // 밴드다(rich 토큰에서 둥근 GPU quad로 내려간다). Lab은 `app_session`을 import하지 않아 그 밴드를 제품
     // 경로로 만들 수 없으므로, **같은 버킷·같은 기하**의 quad 하나를 하네스가 직접 심는다 — 골든이 보려는
@@ -405,6 +419,31 @@ pub fn main(init: std.process.Init) !void {
     // (§5.2)이 보는 자리를 밴드가 덮어 두 계약이 한 사각형에 섞인다 — 그러면 실패했을 때 strip이 샌 것인지
     // 밴드가 샌 것인지 사람이 캡처를 열어 봐야 안다. 절반만 덮으면 왼쪽은 밴드 경계, 오른쪽은 strip 경계를
     // 각자 순수하게 본다. 이 시나리오가 증명하는 것은 밴드의 폭이 아니라 **잘리는 y** 하나다.
+    if (scenario_id == .dock_over_status_bar) {
+        // 상태바 띠 — **도크 아래 이웃**이다. 도크가 자기 뷰포트에서 멈추지 않으면 목록 행이 이 띠를
+        // 덮고, crop 이 그것을 본다. 색은 배경·도크와 갈리게 한 단 밝힌다(세 톤이라야 경계가 보인다).
+        const base = tokens.palette.get(.surface_bg);
+        const lift = struct {
+            fn f(v: u8, by: u32) u32 {
+                return @min(@as(u32, v) + by, 255);
+            }
+        }.f;
+        const bar_bg: u32 = 0xFF00_0000 | (lift(base.r, 40) << 16) | (lift(base.g, 40) << 8) | lift(base.b, 40);
+        try gpu_quads.append(allocator, .{
+            .x = 0,
+            .y = viewport.height - @as(f32, @floatFromInt(status_bar_height_px)),
+            .w = viewport.width,
+            .h = @floatFromInt(status_bar_height_px),
+            .corner_radii = .{ 0, 0, 0, 0 },
+            .border_widths = .{ 0, 0, 0, 0 },
+            .fill_color0 = bar_bg,
+            .fill_color1 = bar_bg,
+            .border_color = 0,
+            .gradient_kind = 0,
+            .layer = 0, // under — 도크 quad 보다 아래. 목록이 새면 그 위에 그려져 띠가 가려진다.
+        });
+    }
+
     if (scenario_id == .sidebar_status_strip) {
         const floor_px = viewport.height - @as(f32, @floatFromInt(status_bar_height_px));
         const band_top = floor_px - 40.0;
@@ -467,12 +506,18 @@ pub fn main(init: std.process.Init) !void {
     // **측정은 늘 하고 면제는 게이트에만 건다.** 면제 시 측정을 건너뛰면 summary가 `true`로 나가
     // 사실과 달라진다 — 이 시나리오의 유일한 quad는 layer 0이다. JSON은 실측을 싣고, `success`만
     // 면제를 본다(그래야 리뷰어가 "면제된 시나리오가 무엇을 하고 있는지"를 캡처 없이 읽는다).
-    const quad_layer_exempt = scenario_id == .sidebar_status_strip;
+    // JSON 은 **전체** 실측을 싣는다(심은 것 포함) — 사람이 캡처를 볼 때 쓰는 값이다.
     var quad_layer_below_text = true;
     for (gpu_quads.items) |q| {
         if (!chrome_draw_lowering.isBelowText(q.layer)) quad_layer_below_text = false;
     }
-    const quad_layer_ok = quad_layer_below_text or quad_layer_exempt;
+    // **판정은 컴포넌트가 낸 quad 에만 건다.** 예전에는 시나리오 하나를 통째로 면제했는데(`sidebar_status_strip`),
+    // 그러면 그 시나리오에서는 컴포넌트 quad 가 엉뚱한 층에 가도 아무도 안 본다. 이웃을 심는 시나리오가
+    // 늘면(pane 합성 축) 면제도 함께 늘어 불변식이 조용히 비어 간다 — 접두사로 가르면 그럴 일이 없다.
+    var quad_layer_ok = true;
+    for (gpu_quads.items[0..component_quad_count]) |q| {
+        if (!chrome_draw_lowering.isBelowText(q.layer)) quad_layer_ok = false;
+    }
     const cell = cellSizeFor(scenario_id);
     const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell.w)));
     const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell.h)));
@@ -842,6 +887,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-repo-hover")) return .scm_repo_hover;
     if (std.mem.eql(u8, raw, "scm-scrolled")) return .scm_scrolled;
     if (std.mem.eql(u8, raw, "scm-small-font")) return .scm_small_font;
+    if (std.mem.eql(u8, raw, "dock-over-status-bar")) return .dock_over_status_bar;
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
     if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
     if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
@@ -860,6 +906,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_repo_hover => "scm-repo-hover",
         .scm_scrolled => "scm-scrolled",
         .scm_small_font => "scm-small-font",
+        .dock_over_status_bar => "dock-over-status-bar",
         .scm_commit_edit => "scm-commit-edit",
         .file_tree_rows => "file-tree-rows",
         .file_tree_row_hover => "file-tree-row-hover",

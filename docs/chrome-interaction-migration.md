@@ -470,18 +470,24 @@ FT1·FT2·FT3이 끝난 뒤 위 다섯 조건을 **코드에서 하나씩 확인
 | capture cancel — surface removal | 해당 없음 | 트리 행은 external surface를 갖지 않는다(행은 `chrome` 페인트만 낸다). 도크가 닫히거나 view가 explorer를 떠나면 포인터 입구가 첫 줄에서 돌아가므로 그 발행으로는 아무 것도 결정되지 않는다 |
 | draw/hit-test가 같은 published generation | 충족 | 그리기와 발행이 **한 번의 `prepare`**를 공유한다. 발행이 본 세대를 `file_tree_published_generation`에 남기고, 포인터 입구가 그것을 tree 스냅샷과 event 양쪽에 실어 `interaction.dispatch`의 세대 게이트를 무장한다. 세대가 갈리면 다시 발행하고, **다시 낼 수 없는 프레임**(기하 0·할당 실패)에서는 capture도 세우지 않는다. `test "file tree: 발행이 낡으면 다시 내고, 다시 낼 수 없으면 짚지 않는다"` |
 | keyboard-only 동등 action | 충족 | 포인터와 무관한 경로다 — `resolveFileTree` → `handleFileTreeDefaultKey`(app binding 우선, 그다음 표준 tree key) |
-| typed semantic descriptor(role/name/state/value) | **절반** — 계약과 생산자는 섰고 **읽는 쪽이 없다** | 계약은 `chrome/ui/semantics.zig`가 소유하고(`Role`·`Semantics`), `tree.UiNode`·`RectEntry`가 그것을 발행된 스냅숏에 실어 나른다(`cursor`·`visual`과 같은 자리·같은 이유). 파일 탐색기 행이 첫 생산자다 — 역할(`tree_item`/`text`)·라벨·`selected`·`expanded`(펼칠 수 있는 행만)·`level`·도메인 인덱스 기준 `position_in_set`/`set_size`를 낸다. 판정자: `chrome/components/file_tree/build.zig`의 세 테스트(서술자 내용, 빈 자리 행이 항목이 아님, 총계를 모르면 집합 정보를 **지어내지 않음**). **그러나 이 값을 읽는 host adapter가 없다** — Swift/ObjC 쪽에 `NSAccessibility` 배선이 저장소에 하나도 없으므로 **VoiceOver에는 여전히 아무것도 가지 않는다.** 그래서 이 조건은 **미충족**이고, 제품에 접근성 제한 표시가 없다는 사실도 그대로다 — 이 사실을 release-ready 근거로 바꾸지 않는다 |
+| typed semantic descriptor(role/name/state/value) | **배선 완료 · 수동 검증 대기** | 계약은 `chrome/ui/semantics.zig`가 소유하고(`Role`·`Semantics`), `tree.UiNode`·`RectEntry`가 그것을 발행된 스냅숏에 실어 나른다(`cursor`·`visual`과 같은 자리·같은 이유). 파일 탐색기 행이 첫 생산자다 — 역할(`tree_item`/`text`)·라벨·`selected`·`expanded`(펼칠 수 있는 행만)·`level`·도메인 인덱스 기준 `position_in_set`/`set_size`. host 로 나가는 창구는 `app_session/accessibility.zig`의 스냅숏과 ABI v172의 네 export이고, `NSAccessibility` 어휘로의 번역·좌표계 뒤집기는 **Swift adapter 하나**가 한다(`MaruAppHost.swift`의 `accessibilityElements(in:)`). 판정자: 컴포넌트 셋(서술자 내용, 빈 자리 행이 항목이 아님, 총계를 모르면 집합 정보를 **지어내지 않음**), 스냅숏 넷(서술자 없는 entry 제외, **라벨 복사 — 원본 해제 후에도 읽힘**, 펼침 두 비트, 재굳힘), 경계 하나(Zig 코드에 플랫폼 어휘 0건). **아직 남은 것은 VoiceOver 실측이다** — 낭독은 headless로 증명할 수 없고(이 문서 §9 마지막 문단), 그 결과가 나오기 전까지 이 조건을 충족으로 적지 않는다 |
 | host effect가 stale target을 거부 | 충족 | 방어가 셋이다: intent 표의 세대 검증(`table.resolve`), 질의·클릭 두 소비자의 범위 검사, `applyFileTreeIntent`의 **재조회**. `test "file tree: 발행된 인덱스가 낡아도 범위를 넘지 않는다"`(실측 `index 20, len 3` 크래시를 고정한 자리) |
 | 제품 동작 변경의 승인·문서 갱신 | 충족 | 행 밀도·타이포 변경은 사용자 승인 뒤 진행했고 계획 문서와 [파일 탐색기](file-explorer.md) §3이 계약을 소유한다 |
 
-즉 파일 탐색기 행은 **typed semantic descriptor 하나만 미충족**이다. 2026-08-25에 그 절반이 닫혔다 —
-`chrome/ui`에 계약이 없던 문제는 없어졌고(`ui/semantics.zig`), 파일 트리가 서술자를 낸다. 남은 절반은
-**읽는 쪽**이다: descriptor를 native accessibility element로 투영하는 Swift adapter가 아직 없다.
+즉 파일 탐색기 행은 **typed semantic descriptor 하나만 남았고**, 2026-08-25~26에 그 배선이 끝났다:
+계약(`ui/semantics.zig`) → 생산자(파일 트리 행) → 발행 스냅숏(`app_session/accessibility.zig`) →
+ABI v172 → Swift adapter. §3의 경계는 그대로다 — Zig는 `NSAccessibility` object나 delegate를 갖지 않고,
+투영은 adapter만 한다(그 경계를 `tests/boundary/imports.zig`가 코드 스캔으로 잠근다).
 
-그 순서가 뒤집히지 않게 적어 둔다 — **생산자만으로는 사용자에게 아무 일도 일어나지 않는다.** 화면을
-읽는 사람 입장에서 지금과 계약 이전은 구별되지 않으므로, 이 절반을 "접근성 지원"이라고 부르면 안 된다.
-adapter 슬라이스는 §3의 경계를 그대로 지킨다: Zig tree는 `NSAccessibility` object나 delegate를 갖지
-않고, 투영은 adapter만 한다.
+**그럼에도 이 조건은 아직 충족이 아니다.** 남은 것은 VoiceOver 실측이고, 그것은 headless fixture로
+증명할 수 없다(아래 문단). 배선이 다 됐다는 것과 스크린 리더가 실제로 옳게 읽는다는 것은 다른 사실이며,
+후자의 증거가 없는 동안 전자를 "접근성 지원"이라고 부르면 안 된다. 실측에서 확인할 것:
+
+- 탐색기 트리에 들어가면 **줄들이 하나씩** 읽히는가(뷰 전체가 그림 하나로 읽히지 않는가).
+- 각 줄의 이름이 화면 글자와 같은가(이름 변경 중인 줄 포함 — 그 라벨은 프레임 arena에서 왔다).
+- 폴더에서 펼침/접힘을 말하고, **파일에서는 그 말을 하지 않는가**(`expanded`가 `?bool`인 이유).
+- "N / M"의 M이 화면에 보이는 줄 수가 아니라 **트리 전체 줄 수**인가(가상화).
+- 스크롤한 뒤에도 읽히는 줄과 화면의 줄이 같은가.
 
 VoiceOver/IME/first-responder 전이는 headless pointer fixture만으로 증명할 수 없다. 이를 건드리는
 consumer PR은 native host E2E 또는 명시된 수동 검증 절차와 결과를 남긴다. 테스트가 아직 없는 경우

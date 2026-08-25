@@ -92,6 +92,7 @@ const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig"); // 소스 컨트롤 도크 component 배선(P1b)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
+pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
 const pane_ops = @import("app_session/pane.zig");
 const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
@@ -216,12 +217,15 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
+// 173: 접근성 서술자를 host 로 여는 네 export(count/element/label/value)와 새 extern struct
+// `accessibility.Element`. Swift 가 그 레코드를 **자기 스택에 잡고** Zig 가 채우므로, 낡은 host 와 새
+// Zig 가 짝지어지면 배치를 추측하는 대신 ABI 가드에서 실패해야 한다(166 이 같은 이유로 올라갔다).
 // 171: P4 C3 adds the app-global workspace checkpoint effect, mutation forwarding, secure
 // background publication, and persistent status-bar failure projection ABI.
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 172;
+pub const abi_version: u32 = 173;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -4753,6 +4757,9 @@ pub const AppSession = struct {
     /// 것이 이 셋의 존재 이유다 — 예전에는 렌더가 컴포넌트 rect 를 쓰고 히트테스트는 `rowAtLocalY` 로
     /// 따로 나눗셈을 했다(같은 답이어야 하는 두 산술).
     file_tree_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
+    /// 파일 탐색기 행의 접근성 스냅숏. **발행된 entry 를 그대로 host 에 주지 않는 이유**는 그 모듈의
+    /// 머리말이 소유한다(라벨이 빌려온 슬라이스라 프레임 밖에서는 해제돼 있다).
+    file_tree_accessibility: accessibility.Snapshot = .{},
     file_tree_actions: std.ArrayList(chrome.components.file_tree.ids.Entry) = .empty,
     file_tree_interaction: chrome.ui.interaction.InteractionState = .{},
     /// **발행 시점의 입력.** 포인터가 올 때 이 값이 지금과 다르면 발행이 낡은 것이고, 그 상태로
@@ -18866,6 +18873,7 @@ pub const AppSession = struct {
                 self.scm_dock_entries.deinit(self.allocator);
                 self.scm_dock_actions.deinit(self.allocator);
                 self.file_tree_entries.deinit(self.allocator);
+                self.file_tree_accessibility.deinit(self.allocator);
                 self.file_tree_actions.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
                 self.agent_session_dock_actions.deinit(self.allocator);

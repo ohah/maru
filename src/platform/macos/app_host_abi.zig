@@ -111,8 +111,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v172 final Quit checkpoint values match the C header" {
-    try std.testing.expectEqual(@as(u32, 172), abi_version);
+test "ABI v173 final Quit checkpoint values match the C header" {
+    try std.testing.expectEqual(@as(u32, 173), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -2036,6 +2036,70 @@ pub export fn maru_macos_app_session_take_file_tree_watch_root(
     const ptr = out.?;
     @memcpy(ptr[0..root.len], root);
     return root.len;
+}
+
+/// 파일 탐색기 행의 접근성 줄 수. 스크린 리더가 자기 리듬으로 묻는 **읽기 전용** 창구다.
+///
+/// 이 값과 아래 두 함수는 발행 시점에 굳힌 스냅숏만 본다 — 발행된 tree 를 그대로 읽으면 라벨이
+/// 해제된 메모리다(`app_session/accessibility.zig` 머리말).
+pub export fn maru_macos_app_session_accessibility_count(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return @intCast(app_session.file_tree_accessibility.elements.items.len);
+}
+
+/// 줄 하나를 읽는다. 라벨·값은 **뒤이은 두 함수**로 따로 가져간다 — extern struct 에 포인터를 담으면
+/// 그 포인터의 수명이 struct 를 받은 쪽에서 불분명해진다.
+///
+/// 범위를 벗어나면 `invalid_config` 다. host 가 세었던 수와 지금 수가 다를 수 있고(그 사이 발행이
+/// 일어난다), 그때 조용히 0 번째를 주면 **다른 줄을 읽은 줄 모르고 읽는다**.
+pub export fn maru_macos_app_session_accessibility_element(
+    session: ?*AppSession,
+    index: u32,
+    out_element: ?*session_mod.accessibility.Element,
+) c_int {
+    const out = out_element orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const elements = app_session.file_tree_accessibility.elements.items;
+    if (index >= elements.len) return @intFromEnum(Status.invalid_config);
+    out.* = elements[index];
+    return @intFromEnum(Status.ok);
+}
+
+/// 줄의 라벨을 host 버퍼로 복사하고 **필요한 바이트 수**를 돌려준다(0 = 없거나 범위 밖).
+///
+/// 버퍼가 모자라면 아무것도 안 쓰고 필요한 길이만 돌려준다 — 잘라 쓰면 UTF-8 경계 가운데가 잘려
+/// 스크린 리더가 깨진 글자를 읽는다.
+pub export fn maru_macos_app_session_accessibility_label(
+    session: ?*AppSession,
+    index: u32,
+    out: ?[*]u8,
+    capacity: usize,
+) usize {
+    const app_session = session orelse return 0;
+    if (index >= app_session.file_tree_accessibility.elements.items.len) return 0;
+    const label = app_session.file_tree_accessibility.label(index);
+    if (label.len == 0) return 0;
+    const ptr = out orelse return label.len;
+    if (capacity < label.len) return label.len;
+    @memcpy(ptr[0..label.len], label);
+    return label.len;
+}
+
+/// 같은 규약의 값(배지 숫자 등). 이름과 값을 **따로** 두는 이유는 `chrome/ui/semantics.zig` 가 소유한다.
+pub export fn maru_macos_app_session_accessibility_value(
+    session: ?*AppSession,
+    index: u32,
+    out: ?[*]u8,
+    capacity: usize,
+) usize {
+    const app_session = session orelse return 0;
+    if (index >= app_session.file_tree_accessibility.elements.items.len) return 0;
+    const value = app_session.file_tree_accessibility.value(index);
+    if (value.len == 0) return 0;
+    const ptr = out orelse return value.len;
+    if (capacity < value.len) return value.len;
+    @memcpy(ptr[0..value.len], value);
+    return value.len;
 }
 
 pub export fn maru_macos_app_session_file_tree_changed(

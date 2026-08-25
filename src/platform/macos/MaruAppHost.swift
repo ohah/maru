@@ -452,6 +452,18 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 쓰므로 콘텐츠 영역에선 창 이동을 막는다. 창 이동은 상단 신호등 타이틀바 영역(AppKit이 소유)에서만 한다.
     override var mouseDownCanMoveWindow: Bool { false }
 
+    // MARK: 접근성 — 이 뷰는 그림 하나가 아니라 **줄들의 묶음**이다.
+    //
+    // Zig 가 발행 스냅숏에 실은 서술자를 controller 가 native element 로 투영한다(CIM §3 — 투영은
+    // adapter 만 한다). 지금 서술자를 내는 것은 파일 탐색기 행뿐이고, 나머지 chrome 은 아직 없다.
+    override func isAccessibilityElement() -> Bool { return false }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { return .group }
+
+    override func accessibilityChildren() -> [Any]? {
+        return controller?.accessibilityElements(in: self)
+    }
+
     // 마우스 선택: raw 좌표만 backing 픽셀(좌상단 원점)로 바꿔 Zig에 넘긴다 — 셀 변환·선택 모델은
     // Zig가 소유한다(네이티브 최소화). NSView 좌표는 좌하단 원점이라 y를 뒤집는다.
     override func mouseDown(with event: NSEvent) {
@@ -6699,6 +6711,95 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // NSView 로컬 좌표(좌하단 원점)를 backing(device) 픽셀(좌상단 원점)로 환산한다 — Zig 좌표 규약.
     // scale·y 뒤집기 공식의 단일 출처(handleMouse·handleMouseMotion·updateHover 공용 — 규약이 바뀌면 여기만 고친다).
+    // MARK: - 접근성 어댑터 (CIM §3)
+    //
+    // **투영은 여기서만 한다.** Zig 는 뜻(role/label/state/집합 위치)만 싣고 `NSAccessibility` 어휘를
+    // 하나도 갖지 않는다 — 그 경계는 `tests/boundary/imports.zig` 가 잠근다. 이 함수가 하는 일은 셋이다:
+    // 역할 번역, 좌표계 뒤집기(Zig 는 좌상단 원점 backing px, AppKit 은 좌하단 원점 점), 그리고
+    // 라벨/값 복사.
+    //
+    // 매 질의마다 새로 만든다. 스크린 리더는 자기 리듬으로 묻고 그 사이 프레임이 여러 번 지나가므로,
+    // element 를 캐시하면 화면에 없는 줄을 읽게 된다. Zig 쪽 스냅숏이 이미 발행 시점에 굳어 있어
+    // 여기서 다시 굳힐 것이 없다.
+    @MainActor func accessibilityElements(in view: NSView) -> [Any] {
+        guard let session = appSession else { return [] }
+        let count = maru_macos_app_session_accessibility_count(session)
+        if count == 0 { return [] }
+        let scale = archiveSmokeRenderScale(window)
+        var elements: [Any] = []
+        elements.reserveCapacity(Int(count))
+        for index in 0..<count {
+            var record = MaruAppHostAccessibilityElement()
+            guard maru_macos_app_session_accessibility_element(session, index, &record) == 0 else { continue }
+
+            let element = NSAccessibilityElement()
+            element.setAccessibilityParent(view)
+            element.setAccessibilityRole(accessibilityRole(record.role))
+            element.setAccessibilityLabel(accessibilityString(session, index, isValue: false))
+            let value = accessibilityString(session, index, isValue: true)
+            if !value.isEmpty { element.setAccessibilityValue(value) }
+            element.setAccessibilityEnabled((record.flags & UInt32(MARU_APP_HOST_A11Y_FLAG_ENABLED)) != 0)
+            if (record.flags & UInt32(MARU_APP_HOST_A11Y_FLAG_SELECTED)) != 0 {
+                element.setAccessibilitySelected(true)
+            }
+            // **펼침은 개념이 있을 때만 싣는다.** 없는 줄에 `false` 를 실으면 VoiceOver 가 "접힘"이라고
+            // 읽어 열 수 있는 것처럼 들린다(Zig 가 두 비트로 가르는 이유 — chrome/ui/semantics.zig).
+            if (record.flags & UInt32(MARU_APP_HOST_A11Y_FLAG_EXPANDABLE)) != 0 {
+                element.setAccessibilityDisclosed((record.flags & UInt32(MARU_APP_HOST_A11Y_FLAG_EXPANDED)) != 0)
+            }
+            if record.level > 0 { element.setAccessibilityDisclosureLevel(Int(record.level) - 1) }
+            // 집합 정보 0 은 "모른다"라서 안 싣는다 — 지어내면 "1 / 1" 같은 틀린 사실을 읽는다.
+            if record.set_size > 0 {
+                element.setAccessibilityIndex(Int(record.position_in_set) - 1)
+            }
+
+            // 좌표: Zig 는 좌상단 원점 backing px, AppKit element frame 은 **화면 좌표(좌하단 원점 점)**다.
+            let widthPt = CGFloat(record.width) / scale
+            let heightPt = CGFloat(record.height) / scale
+            let localX = CGFloat(record.x) / scale
+            let localTop = CGFloat(record.y) / scale
+            let localRect = NSRect(x: localX, y: view.bounds.height - localTop - heightPt, width: widthPt, height: heightPt)
+            if let window = view.window {
+                element.setAccessibilityFrame(window.convertToScreen(view.convert(localRect, to: nil)))
+            } else {
+                element.setAccessibilityFrame(localRect)
+            }
+            elements.append(element)
+        }
+        return elements
+    }
+
+    /// 뜻 → `NSAccessibility.Role`. **여기가 유일한 번역 자리다.**
+    private func accessibilityRole(_ role: UInt32) -> NSAccessibility.Role {
+        switch Int(role) {
+        case MARU_APP_HOST_A11Y_ROLE_BUTTON: return .button
+        // 트리·목록의 줄은 둘 다 AXRow 다. 트리라는 사실은 disclosure level 이 말한다.
+        case MARU_APP_HOST_A11Y_ROLE_TREE_ITEM, MARU_APP_HOST_A11Y_ROLE_LIST_ITEM: return .row
+        case MARU_APP_HOST_A11Y_ROLE_TAB: return .radioButton
+        case MARU_APP_HOST_A11Y_ROLE_SCROLL_VIEW: return .scrollArea
+        case MARU_APP_HOST_A11Y_ROLE_TEXT: return .staticText
+        default: return .group
+        }
+    }
+
+    /// 라벨·값을 Zig 저장소에서 복사해 온다. 길이를 먼저 묻고 그 크기로만 받는다 — 잘라 받으면
+    /// UTF-8 경계 가운데가 잘려 리더가 깨진 글자를 읽는다(Zig 쪽이 모자란 버퍼에 아무것도 안 쓰는 이유).
+    private func accessibilityString(_ session: OpaquePointer, _ index: UInt32, isValue: Bool) -> String {
+        let needed = isValue
+            ? maru_macos_app_session_accessibility_value(session, index, nil, 0)
+            : maru_macos_app_session_accessibility_label(session, index, nil, 0)
+        if needed == 0 { return "" }
+        var bytes = [UInt8](repeating: 0, count: needed)
+        let written = bytes.withUnsafeMutableBufferPointer { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return isValue
+                ? maru_macos_app_session_accessibility_value(session, index, base, needed)
+                : maru_macos_app_session_accessibility_label(session, index, base, needed)
+        }
+        guard written == needed else { return "" }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     private func backingPx(_ local: NSPoint, in view: NSView) -> (x: Double, y: Double) {
         let scale = archiveSmokeRenderScale(window)
         return (Double(local.x * scale), Double((view.bounds.height - local.y) * scale))

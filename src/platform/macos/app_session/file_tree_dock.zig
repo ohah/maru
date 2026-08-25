@@ -333,6 +333,13 @@ fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content
     self.file_tree_published_rows = self.file_tree_rows.items.len;
     self.file_tree_published_generation = self.file_tree_projection_generation;
     self.file_tree_published_content = .{ .x = content.x, .y = content.y, .w = content.w, .h = content.h };
+    // 접근성 스냅숏도 **이 자리에서** 굳힌다 — 발행된 entry 와 같은 순간이어야 host 가 보는 줄과
+    // 화면의 줄이 같다. 라벨은 복사한다(그 이유는 `app_session/accessibility.zig` 머리말).
+    self.file_tree_accessibility.rebuild(
+        self.allocator,
+        self.file_tree_entries.items,
+        self.file_tree_published_generation,
+    );
 }
 
 /// 누르고 있던 행과 호버를 **놓는다**. 창이 비활성될 때처럼 "이 트리에 더는 손이 없다"가 확실한 자리용.

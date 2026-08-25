@@ -20175,6 +20175,52 @@ test "훅 캡처: 회전본의 도구 이벤트로는 before 를 뜨지 않는�
     try std.testing.expectEqualStrings("지금 내용\n", open.entries.items[0].before.text);
 }
 
+// [AT3 §4.4] **훅 payload 의 경로는 이스케이프가 남은 원문이다.** `agent_hook_event` 가 그 사실을 계약으로
+// 적어 뒀고(「화면에 올릴 때만 `decodeInto` 로 푼다」) AT1 의 신원 채택이 같은 함수를 쓴다. 안 풀면
+// 따옴표·비ASCII 가 든 경로에서 **조용히** 캡처를 잃는다.
+test "훅 캡처: 경로의 JSON 이스케이프를 푼다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    // 이름에 따옴표가 든 파일 — JSON 에서는 `\"` 로 실려 온다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "q\"uote.zig", .data = "따옴표\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-esc" });
+
+    // payload 원문 그대로 — 파서가 주는 값이 이 모양이다.
+    var raw_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const raw_path = try std.fmt.bufPrint(&raw_buf, "{s}/q\\\"uote.zig", .{root});
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-esc",
+        .tool_name = "Edit",
+        .file_path = raw_path,
+    });
+
+    const open = session.turn_captures.openTurn("S-esc") orelse return error.NoOpenTurn;
+    try std.testing.expectEqual(@as(usize, 1), open.entries.items.len);
+    // **내용이 실제로 읽혔는지**를 본다 — 안 푸는 구현은 `.unknown` 을 담고도 항목 수는 1이다.
+    try std.testing.expectEqualStrings("따옴표\n", open.entries.items[0].before.text);
+}
+
 // [AT3 §4.4] **Codex 패치의 상대경로도 잡는다.** 계약 §2.3.1 이 Codex 소스를 읽고 「경로는 패치에 쓰인
 // 철자 그대로이고 상대·절대가 섞일 수 있다」를 못 박았다. 상대경로를 그대로 넘기면 `underRoot` 이
 // 「루트 밖」으로 판정해 **조용히 캡처를 잃는다** — Codex 는 `apply_patch` 가 주 편집 경로라 그러면

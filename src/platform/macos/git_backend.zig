@@ -16,6 +16,7 @@ const git_write_command = maru.session.git_write_command;
 const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
+const safe_open = @import("safe_open.zig");
 
 /// **이 backend가 쓰는 유일한 allocator.** State·job·argv·결과 버퍼가 전부 여기서 나온다.
 ///
@@ -1402,44 +1403,10 @@ fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide)
 /// no-follow를 강제한다 — diff만 예외로 둘 이유가 없다.
 fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {
     if (!repo_path.isSafeRelative(rel_path)) return error.UnsafePath;
-    const fd = try openNoFollow(repo, rel_path);
+    const fd = try safe_open.openNoFollow(repo, rel_path);
     defer _ = std.c.close(fd);
     const bytes = try readAllFd(allocator, fd);
     return .{ .bytes = bytes, .truncated = bytes.len >= max_output_bytes };
-}
-
-/// 저장소 루트에서 시작해 경로 요소를 하나씩 `openat`으로 내려가며 연다. **각 단계가 `O_NOFOLLOW`**라 어느
-/// 요소든 symlink면 그 자리에서 실패한다(ELOOP). 마지막 요소만 파일로 연다.
-fn openNoFollow(repo: []const u8, rel_path: []const u8) !c_int {
-    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo_z = std.fmt.bufPrintZ(&repo_buf, "{s}", .{repo}) catch return error.PathTooLong;
-    // 루트 자체는 사용자가 연 폴더라 따라가도 된다(그 경로를 고른 것이 사용자다) — 그 **아래**부터 막는다.
-    var dir_fd = std.c.open(repo_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true });
-    if (dir_fd < 0) return error.OpenFailed;
-
-    var it = std.mem.splitScalar(u8, rel_path, '/');
-    var pending: ?[]const u8 = it.next();
-    while (pending) |segment| {
-        const next = it.next();
-        var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const seg_z = std.fmt.bufPrintZ(&seg_buf, "{s}", .{segment}) catch {
-            _ = std.c.close(dir_fd);
-            return error.PathTooLong;
-        };
-        const is_last = next == null;
-        const flags: std.c.O = if (is_last)
-            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }
-        else
-            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .DIRECTORY = true };
-        const opened = std.c.openat(dir_fd, seg_z.ptr, flags, @as(std.c.mode_t, 0));
-        _ = std.c.close(dir_fd);
-        if (opened < 0) return error.OpenFailed;
-        if (is_last) return opened;
-        dir_fd = opened;
-        pending = next;
-    }
-    _ = std.c.close(dir_fd);
-    return error.OpenFailed; // rel_path가 비어 있었다(isSafeRelative가 이미 막지만 경로를 열어 두지 않는다)
 }
 
 fn worker(job: *Job) void {

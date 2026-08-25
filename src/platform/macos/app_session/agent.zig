@@ -168,7 +168,9 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     // ⚠️ `patchPaths` 는 `tool_command` 를 훑으므로 **`apply_patch` 에만** 부른다 — 셸 이벤트에 부르면
     // 실행할 명령을 패치로 파싱한다.
     if (ev.file_path.len > 0) {
-        noteBeforePath(self, identity, root, ev.file_path, triggerForTool(ev.tool_name));
+        var decoded_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = decodeHookPath(&decoded_buf, ev.file_path) orelse return;
+        noteBeforePath(self, identity, root, path, triggerForTool(ev.tool_name));
         return;
     }
     if (!std.mem.eql(u8, ev.tool_name, "apply_patch")) return;
@@ -178,13 +180,31 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
         // 읽고 못 박았다). 상대경로를 그대로 넘기면 `underRoot` 이 «루트 밖» 으로 판정해 **조용히 캡처를
         // 잃는다.** 이 기계의 실측(42 이벤트·74 경로)은 전부 절대였지만, 계약이 섞인다고 적었으므로
         // 관측이 아니라 **계약**을 따른다.
+        var decoded_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = decodeHookPath(&decoded_buf, p) orelse continue;
         var joined: [std.fs.max_path_bytes]u8 = undefined;
-        const abs = if (maru.path_shape.isAbsolute(p))
-            p
+        const abs = if (maru.path_shape.isAbsolute(path))
+            path
         else
-            (std.fmt.bufPrint(&joined, "{s}/{s}", .{ root, p }) catch continue);
+            (std.fmt.bufPrint(&joined, "{s}/{s}", .{ root, path }) catch continue);
         noteBeforePath(self, identity, root, abs, .edit);
     }
+}
+
+/// 훅 payload 의 경로를 **이스케이프를 풀어** 돌려준다(못 담으면 null).
+///
+/// ⚠️ **payload 문자열은 원문이다** — `agent_hook_event` 가 「JSON 이스케이프가 남아 있는 원문이다.
+/// 화면에 올릴 때만 `decodeInto` 로 푼다」를 계약으로 적어 뒀고, AT1 의 `session_id` 채택이 같은 이유로
+/// 같은 함수를 쓴다. 이 기계 실측(661/661)은 이스케이프가 없었지만 **관측이 아니라 계약을 따른다** —
+/// 따옴표나 비ASCII 가 든 경로에서 조용히 깨지는 자리다.
+///
+/// **넘치면 아예 안 담는다(자르지 않는다).** 잘린 경로는 **다른 파일**을 가리킨다 — 없는 것보다 나쁘다.
+/// (`decodeInto` 는 `\uXXXX` 를 자리만 지키는 `?` 로 푼다. 그런 경로는 열리지 않아 «모름» 으로 떨어지는데,
+/// 원문 그대로 열어도 마찬가지라 잃는 것이 없다.)
+fn decodeHookPath(buf: []u8, raw: []const u8) ?[]const u8 {
+    if (raw.len == 0 or raw.len > buf.len) return null;
+    const decoded = maru.session.agent_hook_event.decodeInto(buf, raw);
+    return if (decoded.len == 0) null else decoded;
 }
 
 /// 그 도구가 **바꾸려고** 여는 것인가.

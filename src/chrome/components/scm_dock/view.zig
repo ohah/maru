@@ -827,12 +827,13 @@ const Writer = struct {
     };
 
     fn fileRowLadder(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics, delta_w: f32, action_w: f32) FileRowLadder {
+        _ = self;
         const row_w = rect.rect.width;
         const icon_span: f32 = @floatFromInt(m.icon_extent + m.gap);
         const pad: f32 = @floatFromInt(m.inset_x);
         const indent: f32 = @floatFromInt(m.disclosure_extent + m.gap);
         const status: f32 = @floatFromInt(m.status_extent + m.gap);
-        const floor = self.nameFloorPx();
+        const floor = types.DockMetrics.name_floor_px;
 
         var show_indent = true;
         var show_delta = delta_w > 0;
@@ -851,7 +852,8 @@ const Writer = struct {
             show_delta = false;
             occupied = if (show_action) action_w else 0;
         }
-        if (remaining(row_w, pad, indent, icon_span, status, occupied, show_indent, show_status) < floor) {
+        // **build 와 같은 함수로 판정한다** — 두 층이 갈리면 노드는 있는데 자리가 없는 상태가 된다.
+        if (show_action and !m.rowActionFits(row_w)) {
             show_action = false;
             occupied = 0;
         }
@@ -873,7 +875,7 @@ const Writer = struct {
     /// 성격). 다 버려도 모자라면 이름이 남은 것을 전부 받는다. 도크 하한에서는 목표에 못 미친다.
     fn nameFloorPx(self: *Writer) f32 {
         _ = self;
-        return 80;
+        return types.DockMetrics.name_floor_px;
     }
 
     fn fileRow(self: *Writer, rect: tree.RectEntry, file: types.FileItem, m: types.DockMetrics) ViewError!void {
@@ -2551,6 +2553,49 @@ test "파일 이름·경로는 증감·상태 문자 자리를 침범하지 않�
 //
 // 배지가 자리를 먼저 먹던 동안 도크 하한(폭 104pt)에서 "스테이지된 변경"이 `…` 하나로 사라졌다
 // (Lab 캡처 실측). 개수는 목록을 세면 알 수 있지만, 그 아래 행들이 **무엇의 목록인지**는 제목만이 말한다.
+// **동작 버튼은 노드가 만들어지는 쪽과 자리를 비우는 쪽이 같은 답을 써야 한다.**
+//
+// 사다리를 `view` 에만 넣었더니 `build` 는 버튼 노드를 그대로 만들었고, 좁은 폭에서 자리를 안 비운 채
+// 호버하면 버튼이 **이름 위에** 그려졌다(적대적 검증 2026-08-25). 그래서 판정을 `DockMetrics` 로 올려
+// 두 층이 같은 함수를 부른다.
+test "좁으면 행 동작 버튼 노드 자체가 안 만들어진다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .file = .{ .name = "a.zig", .dir = "src/", .status = .modified, .letter = 'M', .action = .stage } },
+    };
+    const narrow: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 104, .height = 200 },
+        .items = &items,
+        .branch = "main",
+    };
+    const narrow_frame = try build.build(narrow, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    try testing.expect(narrow_frame.tree.find(build.NodeIds.itemAction(0)) == null);
+
+    // 넓으면 그대로 있다 — 사다리는 좁을 때만 움직인다.
+    var wide_storage: TestStorage = .{};
+    const wide: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 480, .height = 200 },
+        .items = &items,
+        .branch = "main",
+    };
+    const wide_frame = try build.build(wide, .{
+        .nodes = &wide_storage.nodes,
+        .entries = &wide_storage.entries,
+        .layout_items = &wide_storage.layout_items,
+        .flex_scratch = &wide_storage.flex_scratch,
+        .child_rects = &wide_storage.child_rects,
+        .actions = &wide_storage.actions,
+    });
+    try testing.expect(wide_frame.tree.find(build.NodeIds.itemAction(0)) != null);
+}
+
 test "좁은 도크에서는 개수 배지가 사라지고 섹션 제목이 남는다" {
     var storage: TestStorage = .{};
     const items = [_]types.Item{

@@ -237,7 +237,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         // **동작 버튼은 호버 여부와 무관하게 선언한다.** `build`는 포인터 상태를 모르고(그건 `view`가
         // 받는다), 무엇보다 사용자는 **호버해야만** 누를 수 있으므로 히트 사각형이 항상 있어도 안전하다.
         // 반대로 호버할 때만 선언하면 tree가 포인터마다 달라져 히트테스트가 자기 자신을 쫓게 된다.
-        const action_nodes: []tree.UiNode = if (row_action != .none) blk: {
+        // **좁으면 동작 버튼을 아예 만들지 않는다.** 자리를 안 비운 채 노드만 남기면 호버할 때 버튼이
+        // 이름 위에 그려진다 — 그 판정은 `view` 와 **같은 함수**(`rowActionFits`)가 소유한다.
+        const action_fits = m.rowActionFits(props.viewport_px.width);
+        const action_nodes: []tree.UiNode = if (row_action != .none and action_fits) blk: {
             const slot = buffers.nodes[action_cursor .. action_cursor + 1];
             action_cursor += 1;
             const intent: ids.Intent = switch (item) {

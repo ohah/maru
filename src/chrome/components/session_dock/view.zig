@@ -143,7 +143,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // font zoom while the worker still owns actual glyph shaping and ellipsis.
                 try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, card_ladder.trailing_reserve_px);
                 if (card_ladder.show_summary) try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false, card_ladder.trailing_reserve_px);
-                if (card_ladder.show_metadata) try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider, card.metadata);
+                if (card_ladder.show_metadata) try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider, card.metadata, card_ladder.inset_x);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
@@ -495,9 +495,9 @@ const Writer = struct {
     /// 메타 줄은 `provider` 토큰과 그 뒤의 나머지 메타로 **두 번** 그린다. provider 만 색이 다르기
     /// 때문이다 — provider 는 `Provider.colorRole()`(토큰 층이 색을 소유), 나머지는 `muted_fg` 다.
     /// provider 를 값으로 받는 이유도 그것이다: label 과 색 역할을 같은 곳에서 꺼내야 둘이 어긋나지 않는다.
-    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: types.CardMetadata) ViewError!void {
+    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: types.CardMetadata, inset_x: u32) ViewError!void {
         const provider = provider_id.label();
-        try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, provider_id.colorRole(), .metadata, false, metrics.cardDisclosureReserve());
+        try self.textAtY(rect, inset_x, metrics.card_metadata_y, provider, provider_id.colorRole(), .metadata, false, metrics.cardDisclosureReserve());
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
@@ -509,7 +509,10 @@ const Writer = struct {
         // 여기서는 아래 `xs` 여백 덕에 아직 겹치지 않았지만, 여백이 부족분을 가리고 있었을 뿐 산술은
         // 같은 것이라 같은 상한을 쓴다 — provider 가 길어지거나 자간이 넓은 face 가 와도 견딘다.
         const provider_width = @as(u32, provider_cols) * (cw + 1);
-        const metadata_inset = metrics.card_inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
+        // **제목과 같은 여백에서 시작한다** — 사다리가 좁은 구간에서 여백을 줄이는데(16 → 8pt) 여기만
+        // 원래 값을 쓰면 메타 줄만 오른쪽으로 밀려 제목과 왼쪽 끝이 어긋난다(적대적 검증에서 잡았다:
+        // 카드 폭 104~119pt 구간이 정확히 그 조합이다).
+        const metadata_inset = inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
         const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));
         const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_metadata_y));
         // metadata는 카드에서 가장 오른쪽까지 뻗는 줄이라 chevron과 부딪히기 가장 쉽다. 제목·요약과

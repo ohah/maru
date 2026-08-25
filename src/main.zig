@@ -2827,17 +2827,24 @@ fn codepointPrefix(s: []const u8, max_bytes: usize) []const u8 {
 
 /// `scan` 은 **이 함수가 끝나면 버려지는** arena 다(훑는 동안 나오는 레코드·투영이 여기 쌓인다).
 /// `persist` 는 앱 수명 arena — `out` 의 항목이 가리키는 문자열만 이쪽으로 **복사**한다.
+/// 목록이 비는 이유 가운데 **그 기계의 사실**인 것들. 나머지(`scan_timeout` 등)는 결함이다.
+fn agentListBenign(reason: []const u8) bool {
+    return reason.len == 0 or
+        std.mem.eql(u8, reason, "no_history") or
+        std.mem.eql(u8, reason, "no_home");
+}
+
 fn buildAgentItems(
     scan: std.mem.Allocator,
     persist: std.mem.Allocator,
     io: std.Io,
     home: []const u8,
     out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
-) !void {
-    var backend = agent_archive_backend.Backend.init(scan, io) catch return;
+) ![]const u8 {
+    var backend = agent_archive_backend.Backend.init(scan, io) catch return "backend_init";
     defer backend.deinit();
     const home_owned = try scan.dupe(u8, home);
-    if (!backend.submit(home_owned, false)) return;
+    if (!backend.submit(home_owned, false)) return "submit_refused";
 
     // **상한을 둔다** — 이력이 크면 오래 걸리고, 시작에서 무한히 기다리면 창이 안 뜬다.
     var rounds: usize = 0;
@@ -2849,9 +2856,11 @@ fn buildAgentItems(
         }
         io.sleep(.fromMilliseconds(1), .awake) catch {};
     }
-    var res = result orelse return;
+    // **이유가 정확해야 한다.** 상한에 걸린 것과 이력이 없는 것은 다른 사실인데, 둘 다 "카드 0" 으로
+    // 끝난다 — 하나로 접으면 큰 이력을 가진 기계에서 "이력이 없다" 고 보고하게 된다.
+    var res = result orelse return "scan_timeout";
     defer res.deinit(scan);
-    if (res.records.items.len == 0) return;
+    if (res.records.items.len == 0) return "no_history";
 
     // ── 레코드 → 묶음(중립) ──────────────────────────────────────────────────────────────────
     const view_items = try scan.alloc(maru.session.agent_session_archive_view.Item, res.records.items.len);
@@ -2904,6 +2913,7 @@ fn buildAgentItems(
             } });
         },
     };
+    return "";
 }
 
 /// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
@@ -3649,10 +3659,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (maru.user_paths.homeDirFor(@import("builtin").os.tag, home_env, up_env)) |home| {
             var scan_arena = std.heap.ArenaAllocator.init(allocator);
             defer scan_arena.deinit();
-            buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch {
-                agent_list_reason = "scan_failed";
-            };
-            if (agent_items.items.len == 0 and agent_list_reason.len == 0) agent_list_reason = "no_history";
+            agent_list_reason = buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch "scan_failed";
             agent_scan_kb = scan_arena.queryCapacity() / 1024;
         } else agent_list_reason = "no_home";
     }
@@ -5457,7 +5464,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **목록이 있다고 말했으면 카드가 있어야 한다.** `titles_drawn == cards` 만
                 // 보면 0 == 0 이 참이라, 목록을 표면에 안 넘기는 퇴행이 그대로 통과한다(실측:
                 // 그 뮤턴트가 이 자리를 빠져나갔다). 이력이 없는 기계는 `agent_list` 가 그
-                // 사실을 말하므로 그때만 0 을 받아들인다.
+                // 사실을 말하므로 **그때만** 0 을 받아들인다.
+                //
+                // **그리고 모든 이유가 정상 상태는 아니다.** `no_history`·`no_home` 은 그 기계의
+                // 사실이지만 `scan_timeout`·`scan_failed` 는 **데이터 경로가 깨진 것**이다 — 둘을
+                // 한 덩어리로 봐주면 상한에 걸린 회귀가 초록으로 지나간다(실측: 상한을 0 으로
+                // 만든 뮤턴트가 `ok=true` 로 통과했다).
+                agentListBenign(agent_list_reason) and
                 (agent_list_reason.len != 0 or agent_cards > 0) and
                 agent_titles_drawn == agent_cards and
                 // **1 MB 경계.** 남는 것은 카드 수에 비례하지(카드당 문자열 몇 개) 이력 크기에

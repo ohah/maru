@@ -4623,8 +4623,13 @@ agent_scan_kb=43214 agent_keep_kb=7 agent_ok=true
 
 카드가 0 인 이유가 **"이 기계에 이력이 없다"** 인지 **"훑기가 깨졌다"** 인지 갈라 두지 않으면,
 provider 를 안 쓰는 기계에서 스모크가 **거짓 실패**를 낸다 — 그리고 그 실패를 무시하기 시작하면
-진짜 회귀도 같이 묻힌다. `agent_list` 가 그 사실을 말한다(`ok` · `no_history` · `no_home` ·
-`scan_failed`).
+진짜 회귀도 같이 묻힌다. `agent_list` 가 그 사실을 말한다.
+
+**이유가 정확해야 하고, 모든 이유가 정상 상태는 아니다.** 처음에는 "카드가 0 이면 `no_history`" 로
+접었는데, 그러면 **상한에 걸린 큰 이력**도 "이력이 없다" 가 된다. 그래서 `buildAgentItems` 가
+어디서 끝났는지를 그대로 돌려준다 — 그리고 그중 `no_history`·`no_home` 만 **그 기계의 사실**이고
+`scan_timeout`·`scan_failed`·`backend_init`·`submit_refused` 는 **데이터 경로가 깨진 것**이라
+`agent_ok` 를 떨어뜨린다(실측: 상한을 0 으로 만든 뮤턴트가 갈라 두기 전에는 초록으로 통과했다).
 
 ```text
 $ HOME=<빈 폴더> maru win32-terminal-smoke

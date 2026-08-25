@@ -268,10 +268,17 @@ pub const DockMetrics = struct {
     pub fn resolve(scale_milli: u32) DockMetrics {
         const scale = effectiveScale(scale_milli);
         const button = ButtonMetrics.resolve(scale_milli);
-        const card_inset = spacing.px(.md, scale);
+        // **카드 여백은 `sm`, 줄 간격은 `xxs`**(2026-08-25 밀도 조정). 기본 폭에서 카드가 102pt 라
+        // 700pt 도크에 6개뿐이었고, 그 높이의 **28pt 가 여백·간격**이었다(위아래 16 + 줄 사이 8 둘).
+        // 파일 탐색기가 행 높이를 고를 때 쓴 것과 같은 기준이다 — "넉넉한 30px 는 한 화면 행 수가 약
+        // 2/3 로 줄어 기각"(계획 문서 §3). 여기서는 반대 방향으로 같은 저울을 쓴다: 여백을 한 단
+        // 줄이면 카드가 102 → 86pt 가 되어 같은 높이에 **8개**가 들어온다.
+        //
+        // 값은 spacing 토큰으로 둔다 — 리터럴로 적으면 다음 조정에서 이 카드만 척도 밖으로 나간다.
+        const card_inset = spacing.px(.sm, scale);
         const card_title_y = card_inset;
-        const card_summary_y = saturatedAdd(saturatedAdd(card_title_y, typography.lineHeightPx(.card_heading, scale)), spacing.px(.xs, scale));
-        const card_metadata_y = saturatedAdd(saturatedAdd(card_summary_y, typography.lineHeightPx(.body, scale)), spacing.px(.xs, scale));
+        const card_summary_y = saturatedAdd(saturatedAdd(card_title_y, typography.lineHeightPx(.card_heading, scale)), spacing.px(.xxs, scale));
+        const card_metadata_y = saturatedAdd(saturatedAdd(card_summary_y, typography.lineHeightPx(.body, scale)), spacing.px(.xxs, scale));
         const detail_inset = spacing.px(.md, scale);
         const detail_heading_y = detail_inset;
         const detail_record_y = saturatedAdd(saturatedAdd(detail_heading_y, typography.lineHeightPx(.body, scale)), spacing.px(.xxs, scale));
@@ -296,7 +303,10 @@ pub const DockMetrics = struct {
             // 낮춘 뒤에도 112pt가 계산값(98px @1x)을 이겨 카드 안에 14px이 빈 여백으로 남았다 — 글자만 작아지고
             // 밀도는 그대로여서 어색했다. 계산값이 이기도록 낮춰 타이포 변화가 밀도에 그대로 반영되게 한다.
             // 그룹 행의 48pt 하한은 성격이 다르다(포인터 타깃 최소 크기)라서 건드리지 않는다.
-            .card_h = geometryPx(@max(spacing.pointsPx(96, scale), saturatedAdd(saturatedAdd(card_metadata_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)))),
+            // **하한도 함께 내린다**(2026-08-25). 여백·간격을 한 단 줄여 계산값이 86pt 가 됐는데 96pt
+            // 하한이 그것을 다시 이기면 위 문장이 경고하는 상태가 재현된다 — 여백만 줄고 밀도는 그대로다.
+            // 새 하한은 **포인터 타깃 최소**(48pt — 그룹 행·버튼과 같은 값)라 "왜 이 숫자인가"에 답이 있다.
+            .card_h = geometryPx(@max(spacing.pointsPx(48, scale), saturatedAdd(saturatedAdd(card_metadata_y, typography.lineHeightPx(.metadata, scale)), card_inset))),
             .expanded_detail_h = geometryPx(@max(spacing.pointsPx(256, scale), saturatedAdd(saturatedSub(saturatedAdd(detail_turn_y, saturatedMul(detail_turn_step, 3)), spacing.px(.sm, scale)), detail_inset))),
             .expanded_actions_h = button.minimum_height_px,
             .control_gap = geometryPx(spacing.px(.sm, scale)),
@@ -430,7 +440,10 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 48), m.group_h);
     // 카드 높이는 이제 하한이 아니라 role line box 합이 정한다(96pt 하한 < 98px 계산값). 그래서 이 값은
     // typography를 바꾸면 함께 움직이는 것이 정상이고, 그때 이 단언도 같이 갱신한다.
-    try std.testing.expectEqual(@as(u32, 98), m.card_h);
+    // 여백(md → sm)과 줄 간격(xs → xxs)을 한 단 줄여 98 → 86 이 됐다(2026-08-25 밀도 조정): 위아래 12 +
+    // 제목 20 + 4 + 요약 18 + 4 + 메타 16 = 86. typography 나 spacing 을 바꾸면 함께 움직이는 것이
+    // 정상이고, 그때 이 단언도 같이 갱신한다.
+    try std.testing.expectEqual(@as(u32, 86), m.card_h);
     try std.testing.expectEqual(@as(u32, 256), m.expanded_detail_h);
     try std.testing.expectEqual(@as(u32, 48), m.expanded_actions_h);
     try std.testing.expectEqual(@as(u32, 12), m.control_gap);

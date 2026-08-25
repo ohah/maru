@@ -6907,6 +6907,25 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   - capture/write completion은 현재 in-flight kind와 세대가 exact match해야 한다. 복제·늦은·순서가 뒤집힌 completion은
     typed `unexpected_completion`으로 거부하고 state를 바꾸지 않는다. 세대 증가와 `now + duration`, backoff 두 배가
     overflow하면 포화시키지 않고 typed `overflow`로 fail-before-mutation한다.
+
+  **C2 checkpoint file adapter 계약:** macOS L1 `platform.macos.workspace_checkpoint_file`은 C1의 `write` 효과가
+  건네는 **이미 캡처·직렬화·semantic validation을 마친 전체 manifest bytes 하나**만 게시한다. Window별 block,
+  generation, debounce, retry, notice, Quit/AppKit 판단은 이 어댑터가 알지 못한다. 제품 시간·랜덤 기본값도 만들지 않는다.
+  - caller가 만든 application-support `maru` parent directory를 `O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW`로 한 번 열고,
+    그 descriptor에 결속된 고정 leaf `workspace.v1`과 `.workspace.v1.tmp`만 `openat`/`renameat`으로 다룬다. temp는
+    `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, mode `0600`으로 만들고 `fchmod(0600)`을 재확인한다. 따라서 target symlink를
+    따라 쓰거나 경로를 다시 resolve하지 않으며, 다른 leaf를 caller 입력으로 받지 않는다.
+  - 이전 crash가 남긴 고정 temp는 새 temp 생성 전에 같은 parent descriptor에서 제거한다. full-write와 temp close가
+    성공한 뒤에만 같은 directory의 `renameat(temp, workspace.v1)`을 commit point로 사용한다. commit 전 실패는 temp를
+    best-effort 제거하고 이전 `workspace.v1`을 byte-for-byte 유지한다. commit 뒤 결과는 새 전체 bytes다. 빈 snapshot은
+    upstream capture 오류로 보고 filesystem mutation 전에 거부한다.
+  - 결과는 `committed`, `invalid_snapshot`, `open_parent_failed`, `remove_stale_failed`, `create_temp_failed`,
+    `chmod_failed`, `write_failed`, `close_failed`, `replace_failed`의 typed 값이다. C3 caller는 이를 C1
+    `writeCompleted`로 투영한다. C2는 실패를 `try?`로 삼키거나
+    background 성공으로 추측하지 않으며, backup 생성·notice·retry·Quit reply/detach를 수행하지 않는다.
+  - 전원 손실 durability를 주장하지 않으므로 file/directory `fsync`는 넣지 않는다. 대신 각 syscall fail-index와
+    multi-write prefix, rename 직전/직후 child `SIGKILL` process fixture에서 최종 leaf가 이전 또는 새 **완전본**뿐임을
+    검증한다. crash가 남긴 temp는 다음 publish가 회수하며 final leaf와 temp를 동시에 조립해 읽는 recovery는 없다.
 - **L0 app-instance lease를 다른 P4 slice보다 먼저 구현한다.** 정확한 lock path는 manifest sibling
   `~/Library/Application Support/maru/workspace.v1.lock`이며, atomic replace되는 `workspace.v1` inode 자체를 잠그지
   않는다. AppRuntime bootstrap은 첫 AppSession/config migration/config write/restore/persistent runtime spawn보다

@@ -21,6 +21,8 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
+const capture_file = @import("../capture_file.zig");
+const turn_capture = maru.session.turn_capture;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const writeExecutableFile = AppSession.writeExecutableFile;
 const resolveConfiguredShell = app_session_mod.resolveConfiguredShell;
@@ -137,6 +139,103 @@ pub var test_last_turn_key_len: usize = 0;
 pub var test_last_turn_title: [maru.session.turn_snapshot.max_turn_title_len]u8 = undefined;
 pub var test_last_turn_title_len: usize = 0;
 
+/// `PreToolUse` 가 경로를 실어 오면 **그 순간** 그림자 사본(before)을 뜬다(계약 §4.4).
+///
+/// **tick 안에서 동기로 읽는 근거는 성능이 아니라 정확성이다.** 우리가 이 이벤트를 보는 시점에 도구는
+/// **이미 돌고 있다**(계약 A13 — 훅의 이득은 놓침 제거이지 지연 제거가 아니다). 비동기 홉은 우리 읽기와
+/// 도구 쓰기 사이 창을 넓혀 **before 가 after 로 오염될 확률**을 올린다.
+///
+/// 캡처하지 않는 셋:
+///
+/// - **backlog 따라잡기 중** — 그 이벤트는 창이 없던 시간의 것이라 도구가 **이미 오래전에 끝났다.**
+///   지금 읽으면 **현재 내용을 끝난 턴의 before 로 이름 붙인다** — 없는 것보다 나쁘다. 알림을 억제하는
+///   것과 같은 자리·같은 근거다. 이 규칙이 「한 tick 에 64회 읽기」 최악도 함께 없앤다.
+/// - **자식(subagent) 이벤트** — lead 의 턴에 자식의 경로를 섞지 않는다(계약 §2 의 같은 규율).
+/// - **신원이 없을 때** — 귀속 못 할 바이트를 드는 것은 순수한 누수다(`captureTurnSnapshot` 과 같다).
+///
+/// 루트 밖·바이너리·상한 초과는 **거부가 아니라 접기**다 — 경로는 남고 내용만 없다(`capture_file`).
+fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+    if (ev.kind != .pre_tool_use) return;
+    if (ev.agent_id.len != 0) return; // 자식의 것
+    if (term.agent_hook_backlog_catchup) return;
+    const identity = term.agent_transcript.identity();
+    if (identity.len == 0) return;
+
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
+
+    // Claude 는 `tool_input.file_path` 하나, Codex 는 패치 텍스트 안에 여러 개다.
+    // ⚠️ `patchPaths` 는 `tool_command` 를 훑으므로 **`apply_patch` 에만** 부른다 — 셸 이벤트에 부르면
+    // 실행할 명령을 패치로 파싱한다.
+    if (ev.file_path.len > 0) {
+        noteBeforePath(self, identity, root, ev.file_path, triggerForTool(ev.tool_name));
+        return;
+    }
+    if (!std.mem.eql(u8, ev.tool_name, "apply_patch")) return;
+    var it = maru.session.agent_hook_event.patchPaths(ev);
+    while (it.next()) |p| noteBeforePath(self, identity, root, p, .edit);
+}
+
+/// 그 도구가 **바꾸려고** 여는 것인가.
+///
+/// ⚠️ **`Read` 를 편집으로 세면 화면이 거짓말을 한다.** 실측: 경로를 실은 `PreToolUse` 517건 중 `Read`
+/// 가 360건(70%)이다. 「캡처됐다」를 「편집됐다」로 읽으면 **읽기만 한 파일이 «AI 편집»으로 뜬다.**
+/// 모르는 도구는 `.read` 로 둔다 — 편집이라 단정하는 쪽이 거짓을 만든다.
+fn triggerForTool(tool_name: []const u8) turn_capture.Trigger {
+    if (std.mem.eql(u8, tool_name, "Edit")) return .edit;
+    if (std.mem.eql(u8, tool_name, "Write")) return .edit;
+    if (std.mem.eql(u8, tool_name, "NotebookEdit")) return .edit;
+    if (std.mem.eql(u8, tool_name, "apply_patch")) return .edit;
+    return .read;
+}
+
+fn noteBeforePath(
+    self: *AppSession,
+    identity: []const u8,
+    root: []const u8,
+    path: []const u8,
+    trigger: turn_capture.Trigger,
+) void {
+    // **이미 있으면 읽지도 않는다.** 「첫 캡처로 고정」은 저장 층의 규칙이지만, 여기서 먼저 걸러야
+    // 같은 파일을 여러 번 만지는 턴에서 **읽기가 도구 수만큼 는다**(순수 층은 읽은 뒤에야 버린다).
+    if (self.turn_captures.openTurn(identity)) |turn| {
+        if (turn.find(path)) |i| {
+            if (trigger == .edit) turn.entries.items[i].trigger = .edit;
+            return;
+        }
+    }
+    const side = capture_file.readSide(self.allocator, root, path);
+    _ = self.turn_captures.noteBefore(self.allocator, identity, path, trigger, side);
+}
+
+/// 턴이 끝나면 그 집합의 경로를 **다시 읽어** after 를 채우고 봉인한다. 반환값이 링에 실릴 `capture_id`.
+///
+/// **역시 tick 동기다.** 상한이 시간을 이미 묶는다 — 턴당 4 MiB·256 경로라 page cache 에서 최악 ~5 ms 다.
+/// 비교 대상이 결정적이다: 이 코드가 **걷어낼** `git write-tree` 가 같은 자리에서 **490 ms** 다(§2.6).
+/// 5 ms 를 위해 worker 를 들이면 `freeDiffContent` 가 실측으로 경고하는 할당자 갈림을 새로 만드는 순손실이다.
+fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
+    const turn = self.turn_captures.openTurn(identity) orelse return 0;
+    if (turn.entries.items.len == 0) return 0;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse "");
+    if (root.len != 0) {
+        // **인덱스로 훑어도 안전한 이유**: `noteAfter` 는 `after` 필드만 채우고 **항목을 추가하지 않는다**
+        // — 리스트가 재할당되지 않으므로 순회 중 길이·주소가 안 흔들린다. (경로 슬라이스는 항목이 소유하고
+        // 그 항목은 안 움직인다.)
+        //
+        // 인덱스를 알면서도 경로로 되짚는 `noteAfter` 를 거치는 이유는 **예산 판정이 그 안에 있기**
+        // 때문이다 — 여기서 직접 대입하면 상한이 두 자리로 갈린다.
+        var i: usize = 0;
+        while (i < turn.entries.items.len) : (i += 1) {
+            if (turn.entries.items[i].after != null) continue;
+            const path = turn.entries.items[i].path;
+            const side = capture_file.readSide(self.allocator, root, path);
+            self.turn_captures.noteAfter(self.allocator, identity, path, side);
+        }
+    }
+    return self.turn_captures.seal(self.allocator, identity);
+}
+
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts) void {
     if (builtin.is_test) {
         test_turn_snapshot_calls += 1;
@@ -146,6 +245,19 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts)
         test_last_turn_title_len = @min(facts.title.len, test_last_turn_title.len);
         @memcpy(test_last_turn_title[0..test_last_turn_title_len], facts.title[0..test_last_turn_title_len]);
     }
+    // **봉인은 git 보다 앞이다.** 그림자 사본은 이미 우리 손에 있고 git 을 한 번도 안 부른다 —
+    // 계약 §4.4 가 「git 없이도 된다」를 근거로 든 그 성질이다. 아래 게이트·저장소 판정 뒤에 두면
+    // ⑴ git 이 없는 워크스페이스에서 사본이 **통째로 안 만들어지고** ⑵ 백엔드가 거절할 때도 그렇다.
+    //
+    // 봉인해 두면 링에 못 실리는 경우에도 손해가 없다 — 그 id 는 고아가 되고 `Store.sweep` 이 곧
+    // 해제한다(도달성으로 두는 이유 넷 중 하나가 정확히 이 경로다).
+    const seal_identity = git_ops.sessionIdentityFor(self, surface_id);
+    // **봉인 전에 고아를 비운다.** 봉인 자리는 링이 가리킬 수 있는 최대 + 1 인데, 그 +1 은 «전부 살아
+    // 있는» 전이만 덮는 마지막 한 칸이다. 고아(거절된 턴·dedup 에 걸린 턴)를 먼저 치우지 않으면 그
+    // 한 칸이 고아로 채워져 **아직 가리켜지는 사본**이 밀려난다 — 그러면 그 턴의 `✎` 가 조용히 0이 된다.
+    git_ops.sweepTurnCaptures(self);
+    const capture_id = if (seal_identity.len == 0) 0 else sealTurnCapture(self, seal_identity);
+
     // **테스트에서는 세기만 하고 실제 작업은 하지 않는다.**
     //
     // 아래 `submitSnapshot` 은 detached worker 에 job 을 넘기고 그 해제를 **그 스레드가** 한다. 테스트는
@@ -197,6 +309,7 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts)
     if (self.turn_snapshot_repo) |old_repo| self.allocator.free(old_repo);
     self.turn_snapshot_session = owned;
     self.turn_snapshot_repo = owned_repo;
+    self.turn_snapshot_capture = capture_id;
     // **상한을 넘는 키는 안 담는다(자르지 않는다)** — 순수 층 `Ring.push` 와 같은 규율이고, 잘린 키는
     // AT3 귀속에서 남의 턴과 거짓으로 일치한다. 여기서도 거르면 링까지 안 간다.
     self.turn_snapshot_key_len = if (facts.key.len > 0 and facts.key.len <= self.turn_snapshot_key.len) facts.key.len else 0;
@@ -1297,6 +1410,13 @@ fn adoptHookSessionIdentity(self: *AppSession, term: *Term, ev: maru.session.age
     if (std.mem.eql(u8, cache.identity(), value)) return;
     // 신원이 바뀌었다 = 다른 세션이다(`/clear`). 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다 —
     // 관측 경로와 **같은 판단**이다.
+    //
+    // **진행 중 그림자 사본도 같은 이유로 버린다.** 그 턴은 영영 안 끝난다 — 봉인은 **새** 신원으로
+    // 오므로 옛 신원의 진행 중 자리는 아무도 안 닫는다. 안 버리면 ⑴ 그 바이트를 세션이 끝날 때까지 들고
+    // ⑵ 진행 중 자리가 8개뿐이라 `/clear` 를 여덟 번 하면 **캡처가 조용히 멈춘다**(새 세션이 자리를 못 얻어
+    // `noteBefore` 가 계속 실패한다). `cache.reset()` **전에** 불러야 한다 — 그 뒤에는 옛 신원 슬라이스가
+    // 무효다.
+    self.turn_captures.dropOpen(self.allocator, cache.identity());
     cache.reset();
     cache.setIdentity(value);
     self.metal_dirty = true;
@@ -1625,6 +1745,14 @@ fn hookConversationText(buf: []u8, scratch: []u8, raw: []const u8) []const u8 {
     return maru.session.agent_transcript.flatten(hookDisplayText(scratch, raw), buf);
 }
 
+/// 테스트 진입점. 제품은 배치 루프에서만 부르므로 **한 이벤트씩** 먹여 배선을 보려면 이 자리가 필요하다.
+/// (로그 파일을 거치면 파서·커서·회전까지 함께 도는데, 그 셋은 각자 테스트가 있고 여기서 보려는 것은
+/// **어떤 이벤트가 무엇을 트리거하는가** 뿐이다.)
+pub fn testApplyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
+    comptime std.debug.assert(builtin.is_test);
+    return applyHookEvent(self, term, ev);
+}
+
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
     // **맨 앞이어야 한다.** 신원이 갈리면 `cache.reset()` 이 `owned` 를 비우는데, 이 함수 아래쪽이
@@ -1637,6 +1765,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     //      이벤트에서 채택이 **아예 안 돈다**.
     // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
     adoptHookSessionIdentity(self, term, ev);
+    captureBeforeForEvent(self, term, ev);
     const prev_state = term.agent_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지
     // 않으면서도 마지막 자식이 끝날 때 배지가 풀린다(계약 §2).

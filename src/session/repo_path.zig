@@ -99,15 +99,34 @@ test "`..`를 포함하는 **이름**은 통과한다(세그먼트만 본다)" {
 /// 할당하지 않는다(입력의 부분 슬라이스다).
 pub fn displayRelative(path: []const u8, root: []const u8) []const u8 {
     if (root.len == 0 or path.len == 0) return path;
-    // 루트의 끝 구분자는 무시한다(`/a/b`와 `/a/b/`가 같은 뜻이다).
-    var r = root;
-    while (r.len > 1 and r[r.len - 1] == '/') r = r[0 .. r.len - 1];
-    if (path.len < r.len or !std.mem.eql(u8, path[0..r.len], r)) return path;
-    if (path.len == r.len) return std.fs.path.basename(path); // 루트 자신이면 이름만
-    if (path[r.len] != '/') return path; // 경계가 아니다 — `/a/proj` vs `/a/project`
+    const r = trimTrailingSlashes(root);
+    if (path.len == r.len and std.mem.eql(u8, path, r)) return std.fs.path.basename(path); // 루트 자신이면 이름만
+    if (!underRoot(path, root)) return path;
     var rest = path[r.len + 1 ..];
     while (rest.len > 0 and rest[0] == '/') rest = rest[1..]; // `//` 방어
     return if (rest.len == 0) std.fs.path.basename(path) else rest;
+}
+
+/// 그 경로가 루트 **아래**인가. 위 경계 규율의 **단일 출처**다 — `displayRelative` 도 이것을 쓴다.
+///
+/// **루트 자신은 아래가 아니다.** 「루트 안의 파일을 읽어도 되나」를 묻는 쪽(캡처)이 루트 자체를 파일로
+/// 열려 하면 안 되고, 표시 쪽은 그 경우를 따로(이름만) 다룬다 — 두 질문의 답이 다르므로 함수를 가른다.
+///
+/// 할당하지 않는다.
+pub fn underRoot(path: []const u8, root: []const u8) bool {
+    if (root.len == 0 or path.len == 0) return false;
+    const r = trimTrailingSlashes(root);
+    if (path.len <= r.len) return false;
+    if (!std.mem.eql(u8, path[0..r.len], r)) return false;
+    // **경계를 문자로 확인한다** — 이것이 없으면 `/a/proj`가 `/a/project/x`에 걸린다.
+    return path[r.len] == '/';
+}
+
+/// 루트의 끝 구분자는 무시한다(`/a/b`와 `/a/b/`가 같은 뜻이다).
+fn trimTrailingSlashes(root: []const u8) []const u8 {
+    var r = root;
+    while (r.len > 1 and r[r.len - 1] == '/') r = r[0 .. r.len - 1];
+    return r;
 }
 
 test "루트 아래면 그 아래만 남는다" {
@@ -120,6 +139,21 @@ test "루트 아래면 그 아래만 남는다" {
         "a.zig",
         displayRelative("/repo/a.zig", "/repo/"),
     );
+}
+
+test "underRoot: 경계를 문자로 본다 · 루트 자신은 아래가 아니다" {
+    try std.testing.expect(underRoot("/repo/src/a.zig", "/repo"));
+    try std.testing.expect(underRoot("/repo/a.zig", "/repo/"));
+    // **이 술어의 존재 이유**: 접두 비교만 하면 `/a/project/x` 가 `/a/proj` 아래로 보인다.
+    try std.testing.expect(!underRoot("/a/project/x", "/a/proj"));
+    try std.testing.expect(!underRoot("/other/x", "/repo"));
+    // 루트 자신은 «아래»가 아니다 — 캡처가 루트를 파일로 열려 하면 안 된다.
+    try std.testing.expect(!underRoot("/repo", "/repo"));
+    try std.testing.expect(!underRoot("/repo", "/repo/"));
+    try std.testing.expect(!underRoot("/repo/a.zig", ""));
+    try std.testing.expect(!underRoot("", "/repo"));
+    // 표시 쪽은 그 경우를 따로 다룬다(이름만) — 두 함수의 답이 갈리는 유일한 자리다.
+    try std.testing.expectEqualStrings("repo", displayRelative("/repo", "/repo"));
 }
 
 test "루트 밖이면 그대로 둔다 — 특히 접두만 같은 경로" {

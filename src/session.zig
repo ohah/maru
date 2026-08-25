@@ -96,6 +96,7 @@ pub const git_command = @import("session/git_command.zig"); // 읽기 전용 git
 pub const git_write_command = @import("session/git_write_command.zig"); // 쓰기 git argv·안전 술어(읽기와 환경·플래그가 갈린다 — 쓰기 문서 §1)
 pub const git_locate = @import("session/git_locate.zig");
 pub const turn_snapshot = @import("session/turn_snapshot.zig"); // 에이전트 턴 경계 스냅샷 정책(§6.1, 순수)
+pub const turn_capture = @import("session/turn_capture.zig"); // 턴이 만진 파일의 그림자 사본 보관 정책(§4.4, 순수)
 pub const repo_path = @import("session/repo_path.zig"); // 저장소 루트 안쪽 상대경로 판정(심층 방어 — 순수)
 pub const diff_payload = @import("session/diff_payload.zig"); // E1: diff 본문 페이로드 상한·binary 정책(순수) // git 실행 파일 후보 열거(설치 여부 판정 — shim 회피)
 pub const scm_view = @import("session/scm_view.zig"); // 도크 소스 컨트롤 뷰 행 모델(섹션·개수·증감)

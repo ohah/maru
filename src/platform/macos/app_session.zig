@@ -4822,8 +4822,16 @@ pub const AppSession = struct {
     ///
     /// 할당하지 않는다(고정 배열) — 세션 수 상한은 `turn_snapshot.max_sessions` 다.
     turn_rings: maru.session.turn_snapshot.RingMap = .{},
+    /// 그 링의 각 턴이 만진 파일의 **그림자 사본**(계약 §4.4). 링과는 `Snapshot.capture_id` 로 잇는다.
+    ///
+    /// **힙을 든다** — 이웃 `turn_rings` 가 고정 배열인 것은 스냅샷이 고정 크기이기 때문이고, 파일 내용은
+    /// 길이가 무계다. 해제는 `Store.sweep` 이 **도달성**으로 한다(`ring.push` 직후 한 자리에서).
+    turn_captures: maru.session.turn_capture.Store = .{},
     /// 턴 스냅샷용 임시 index 경로. **저장소 밖**이어야 한다(안에 두면 자기가 스냅샷에 잡힌다).
     turn_index_path: ?[]u8 = null,
+    /// 요청 시점에 봉인해 둔 캡처 id. `turn_snapshot_key` 와 **같은 자리·같은 이유**다(수확 때 다시
+    /// 만들면 그 사이 다음 턴이 시작돼 옛 스냅샷에 새 턴의 사본이 붙는다).
+    turn_snapshot_capture: u64 = 0,
     /// **지금 목록이 읽힌 저장소 루트.** 클릭 시 다시 구하면 안 된다 — 첫 diff가 열리는 순간 활성 Term이 웹
     /// Term이 되어 cwd 폴백이 빈 값을 보고 null이 된다(그래서 두 번째 행부터 안 열렸다). 목록과 그 목록에서 연
     /// 비교는 **같은 저장소**를 봐야 한다는 계약이기도 하다.
@@ -18546,6 +18554,8 @@ pub const AppSession = struct {
         self.git_repo = null;
         if (self.turn_index_path) |path| self.allocator.free(path);
         self.turn_index_path = null;
+        // 그림자 사본은 힙이다 — 링(고정 배열)과 달리 여기서 반드시 푼다.
+        self.turn_captures.deinit(self.allocator);
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
@@ -20024,6 +20034,191 @@ test "hook mode runs exactly one source and takes over notifications" {
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqualStrings("33333333-3333-4333-8333-333333333333", term.agent_transcript.identity());
     try std.testing.expectEqualStrings("새 세션의 답", term.agent_transcript.reply());
+}
+
+// [AT3 §4.4] **캡처 배선을 훅 로그로만 몬다**: `PreToolUse` 가 before 를 뜨고, 그 사이 파일이 바뀌고,
+// `Stop` 이 after 를 읽어 봉인한다. 순수 층(`turn_capture`)과 읽기(`capture_file`)는 각자 테스트가
+// 있으므로 여기서 보는 것은 **배선**이다 — 어떤 이벤트가 무엇을 트리거하는가.
+test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "edited.zig", .data = "before\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "read_only.zig", .data = "same\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+
+    var edited_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const edited_abs = try std.fmt.bufPrint(&edited_buf, "{s}/edited.zig", .{root});
+    var read_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const read_abs = try std.fmt.bufPrint(&read_buf, "{s}/read_only.zig", .{root});
+
+    // 신원을 payload 로 세운다(AT1) — 없으면 캡처가 아무것도 안 한다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-cap" });
+
+    // ① `Edit` 은 before 를 뜬다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-cap",
+        .tool_name = "Edit",
+        .file_path = edited_abs,
+    });
+    // ② `Read` 도 경로를 실어 오지만 **편집으로 세지 않는다**(실측: 경로 이벤트의 70%가 Read).
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-cap",
+        .tool_name = "Read",
+        .file_path = read_abs,
+    });
+    // ③ `Bash` 는 경로를 안 주므로 아무것도 안 는다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-cap",
+        .tool_name = "Bash",
+        .tool_command = "sed -i s/a/b/ x.txt",
+    });
+
+    {
+        const open = session.turn_captures.openTurn("S-cap") orelse return error.NoOpenTurn;
+        try std.testing.expectEqual(@as(usize, 2), open.entries.items.len); // Bash 는 안 는다
+        try std.testing.expectEqualStrings("before\n", open.entries.items[0].before.text);
+        try std.testing.expectEqual(maru.session.turn_capture.Trigger.edit, open.entries.items[0].trigger);
+        try std.testing.expectEqual(maru.session.turn_capture.Trigger.read, open.entries.items[1].trigger);
+    }
+
+    // 도구가 실제로 고친다(우리 before 는 이미 손에 있다).
+    try tmp.dir.writeFile(io, .{ .sub_path = "edited.zig", .data = "after!\n" });
+    // `Read` 한 파일도 셸이 고쳤다고 치자 — **그래도 `✎` 가 아니다**(편집 도구 소행이 아니므로).
+    try tmp.dir.writeFile(io, .{ .sub_path = "read_only.zig", .data = "changed by shell\n" });
+
+    // ④ 턴이 끝나면 after 를 읽어 봉인한다.
+    agent_ops.captureTurnSnapshot(session, term.surfaceId(), .{ .key = "p-1", .title = "끝" });
+
+    try std.testing.expect(session.turn_captures.openTurn("S-cap") == null); // 진행 중 자리는 비었다
+    const sealed = session.turn_captures.sealedTurn(1) orelse return error.NoSealedTurn;
+    try std.testing.expectEqual(@as(usize, 2), sealed.entries.items.len);
+    try std.testing.expectEqualStrings("after!\n", sealed.entries.items[0].after.?.text);
+    // **핵심 판정**: 편집 도구가 바꾼 것만 센다. 둘 다 내용이 달라졌는데 답은 1이다.
+    try std.testing.expectEqual(@as(u32, 1), sealed.editedCount());
+}
+
+// [AT3 §4.4] **backlog 따라잡기 중에는 캡처하지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 도구가
+// 이미 오래전에 끝났고, 지금 읽으면 **현재 내용을 끝난 턴의 before 로 이름 붙인다** — 없는 것보다 나쁘다.
+// [AT3 §4.4] **신원이 갈리면 진행 중 사본을 버린다.** 그 턴은 영영 안 끝난다 — 봉인은 새 신원으로 오므로
+// 옛 자리를 아무도 안 닫는다. 진행 중 자리가 8개뿐이라 안 버리면 `/clear` 여덟 번에 **캡처가 조용히 멈춘다.**
+test "훅 캡처: /clear 를 아홉 번 해도 캡처가 멈추지 않는다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "x\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/a.zig", .{root});
+
+    // 진행 중 자리(8개)보다 **많이** 세션을 갈아 치운다. 각 세션이 사본을 하나 뜨고 턴은 끝내지 않는다.
+    var sid_buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < 9) : (i += 1) {
+        const sid = try std.fmt.bufPrint(&sid_buf, "S-clear-{d}", .{i});
+        _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = sid });
+        _ = agent_ops.testApplyHookEvent(session, term, .{
+            .kind = .pre_tool_use,
+            .session_id = sid,
+            .tool_name = "Edit",
+            .file_path = abs,
+        });
+        // **매번 담겨야 한다.** 옛 자리를 안 버리는 구현은 아홉 번째에서 자리를 못 얻어 여기서 죽는다.
+        const open = session.turn_captures.openTurn(sid) orelse return error.CaptureStopped;
+        try std.testing.expectEqual(@as(usize, 1), open.entries.items.len);
+    }
+    // 그리고 **옛 세션의 자리는 남아 있지 않다** — 「자리는 비웠지만 바이트는 든다」 구현이 여기서 죽는다.
+    try std.testing.expect(session.turn_captures.openTurn("S-clear-0") == null);
+}
+
+test "훅 캡처: backlog 따라잡기 중에는 before 를 뜨지 않는다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "x\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/a.zig", .{root});
+
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-bl" });
+
+    term.agent_hook_backlog_catchup = true;
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-bl",
+        .tool_name = "Edit",
+        .file_path = abs,
+    });
+    try std.testing.expect(session.turn_captures.openTurn("S-bl") == null);
+
+    // **뒤 절반이 없으면 「영영 캡처 안 하는」 구현이 통과한다.**
+    term.agent_hook_backlog_catchup = false;
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-bl",
+        .tool_name = "Edit",
+        .file_path = abs,
+    });
+    const open = session.turn_captures.openTurn("S-bl") orelse return error.NoOpenTurn;
+    try std.testing.expectEqual(@as(usize, 1), open.entries.items.len);
 }
 
 test "세션 base 와 턴 끝은 한 이벤트가 동시에 만들지 못한다 (AT1)" {

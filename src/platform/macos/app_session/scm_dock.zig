@@ -622,7 +622,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     (if (snap.captured_s == 0) "" else turnTime(arena, snap.captured_s, now_s))
                 else
                     "",
-                .summary = if (head) |snap| turnSummary(arena, snap) else "",
+                .summary = if (head) |snap| turnSummary(arena, snap, editedCountFor(self, snap)) else "",
                 .selected = keyMatches(self.scm_selected_turn, row),
                 .expanded = keyMatches(self.scm_expanded_turn, row),
                 .live = live,
@@ -724,11 +724,42 @@ fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
 /// «읽었다»로 표시한다 — `applyTurnSummary`). «바꾼 것이 없다»와 «못 읽었다»를 한 글자로 구분할 수
 /// 없으니 둘 다 조용히 비운다. 실제로 아무것도 안 바꾼 턴은 링이 이미 걸러 낸다(같은 tree 연속이면
 /// push 하지 않는다).
-fn turnSummary(arena: std.mem.Allocator, snap: *const maru.session.turn_snapshot.Snapshot) []const u8 {
+/// 그 스냅샷이 가리키는 사본에서 **에이전트 편집 도구가 실제로 바꾼 파일 수**. 없으면 0.
+///
+/// `turnSummary` 밖에 두는 이유: 그 함수는 세션 없이 값으로 검증되어야 한다(아래 테스트).
+fn editedCountFor(self: *AppSession, snap: *const maru.session.turn_snapshot.Snapshot) u32 {
+    if (snap.capture_id == 0) return 0;
+    const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return 0;
+    return turn.editedCount();
+}
+
+fn turnSummary(
+    arena: std.mem.Allocator,
+    snap: *const maru.session.turn_snapshot.Snapshot,
+    edited: u32,
+) []const u8 {
     if (!snap.files_known or snap.changed_files == 0) return "";
     var buf: [32]u8 = undefined;
     const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turn_file_count), &.{.{ .d = @intCast(snap.changed_files) }});
-    return arena.dupe(u8, text) catch "";
+    // **두 소스가 한 줄에서 갈린다**(계약 §4.4-3). 왼쪽은 tree 가 세는 «그 턴 구간에 작업트리에서 바뀐
+    // 파일» 이라 셸 편집·사용자·다른 세션이 **원리적으로 섞이고**, 오른쪽은 캡처가 세는 «에이전트 편집
+    // 도구가 만졌고 실제로 내용이 달라진 파일» 이다. 둘의 차이가 곧 «내 것이 아닌 변경» 이다.
+    //
+    // ⚠️ **`Read` 를 여기 더하면 안 된다.** 경로를 실은 `PreToolUse` 의 70%가 `Read` 라(실측) 읽기만 한
+    // 파일이 «편집» 으로 뜬다. 판정은 `Entry.editedByAgent` 한 자리에 있다.
+    //
+    // 0이면 붙이지 않는다 — `files_known` 이 「0과 모름을 가른다」와 같은 규율이다. 캡처가 없는 턴
+    // (관측 모드·훅 없는 세션·셸 전용 턴)에서 «✎ 0» 은 «에이전트가 아무것도 안 했다» 로 읽히는데,
+    // 우리가 아는 것은 «편집 도구로는 아무것도 안 했다» 뿐이다.
+    if (edited == 0) return arena.dupe(u8, text) catch "";
+    // 문구는 계약 §4.2 의 배지 이름 그대로다(`✎ AI 편집`). 한글이 들어가는 것은 i18n 게이트의 요구이기도
+    // 하다 — 기호만 쓰면 「번역을 빠뜨리고 영어를 복사한 항목」으로 잡힌다(실제로 잡혔다).
+    var edited_buf: [48]u8 = undefined;
+    const edited_text = maru.i18n.format(&edited_buf, maru.i18n.t(.scm_turn_edited_count), &.{.{ .d = @intCast(edited) }});
+    var joined: [96]u8 = undefined;
+    const both = std.fmt.bufPrint(&joined, "{s} · {s}", .{ text, edited_text }) catch
+        return arena.dupe(u8, text) catch "";
+    return arena.dupe(u8, both) catch "";
 }
 
 /// 에이전트 종류 라벨(모르면 빈 문자열 — 그 자리를 비운다).
@@ -3948,16 +3979,36 @@ test "턴 요약: 모르거나 0이면 자리를 비운다(실패한 턴도 0으
 
     // 아직 안 읽었다 — `0개 파일` 이라고 말하면 거짓이다.
     var unknown: maru.session.turn_snapshot.Snapshot = .{};
-    try std.testing.expectEqualStrings("", turnSummary(a, &unknown));
+    try std.testing.expectEqualStrings("", turnSummary(a, &unknown, 0));
 
     // 읽었는데 0이다. 실패한 턴도 이 모양으로 오므로(무한 재요청을 막으려고 실패를 «읽었다»로 표시한다)
     // 둘을 가를 수 없어 둘 다 비운다.
     var zero: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 0 };
-    try std.testing.expectEqualStrings("", turnSummary(a, &zero));
+    try std.testing.expectEqualStrings("", turnSummary(a, &zero, 0));
 
     // 실제로 바꾼 것이 있으면 그 수를 말한다.
     var three: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 3 };
-    const text = turnSummary(a, &three);
+    const text = turnSummary(a, &three, 0);
     try std.testing.expect(text.len > 0);
     try std.testing.expect(std.mem.indexOfScalar(u8, text, '3') != null);
+    // **캡처가 없으면 `✎` 를 안 붙인다** — «✎ 0» 은 «에이전트가 아무것도 안 했다» 로 읽히는데
+    // 우리가 아는 것은 «편집 도구로는 안 했다» 뿐이다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "✎") == null);
+}
+
+test "턴 요약: 캡처가 센 편집 수를 tree 의 수와 **나란히** 말한다" {
+    var buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const a = fba.allocator();
+
+    var snap: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 12 };
+    const text = turnSummary(a, &snap, 3);
+    // 두 수가 **둘 다** 있어야 한다 — 한쪽이 다른 쪽을 대체하면 그 줄이 답하는 질문이 바뀐다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "12") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, '3') != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "✎") != null);
+
+    // **tree 가 0이면 캡처가 있어도 줄이 빈다** — 그 자리는 「못 읽었다」와 구분되지 않는다.
+    var zero: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 0 };
+    try std.testing.expectEqualStrings("", turnSummary(a, &zero, 5));
 }

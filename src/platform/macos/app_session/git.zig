@@ -334,11 +334,16 @@ pub fn drainGitStatus(self: *AppSession) void {
                     // 붙는다(계약 §3.1 이 시각 대신 키를 쓰라고 한 이유가 그런 어긋남이다).
                     .turn_key = self.turn_snapshot_key[0..self.turn_snapshot_key_len],
                     .title = self.turn_snapshot_title[0..self.turn_snapshot_title_len],
+                    // 같은 이유로 **요청할 때 봉인해 둔 캡처**를 쓴다.
+                    .capture_id = self.turn_snapshot_capture,
                 });
             }
         }
+        // **링이 바뀌는 유일한 tick 지점이 여기다** — 그래서 사본 정리도 여기 한 자리에 둔다.
+        sweepTurnCaptures(self);
         self.turn_snapshot_key_len = 0;
         self.turn_snapshot_title_len = 0;
+        self.turn_snapshot_capture = 0;
         if (self.turn_snapshot_session) |sid| self.allocator.free(sid);
         self.turn_snapshot_session = null;
         if (self.turn_snapshot_repo) |path| self.allocator.free(path);
@@ -736,6 +741,32 @@ pub fn activeOrLastSessionIdentity(self: *AppSession) []const u8 {
         }
     }
     return self.last_agent_session orelse "";
+}
+
+/// 어느 링에도 **가리켜지지 않는** 그림자 사본을 해제한다(계약 §4.4).
+///
+/// **「지우는 호출」로 두지 않는 이유**: 턴이 사라지는 길이 넷이고 호출 방식은 셋을 흘린다.
+/// ⑴ `Ring.push` 가 8칸을 넘겨 덮는다 ⑵ `RingMap.victim()` 이 세션을 통째로 밀어낸다
+/// ⑶ `ringFor` 가 저장소 전환에 링을 **대입 한 줄로** 갈아 끼운다(호출을 끼울 자리가 없다)
+/// ⑷ `push` 가 dedup 으로 거절한다(봉인·발급 **직후**라 그 순간 고아가 된다).
+///
+/// 넷을 질문 하나로 덮는다 — 「이 사본을 아직 가리키는 스냅샷이 있나」. 규모는 세션 8 × 링 8 = 64라
+/// 매 수확마다 돌려도 공짜다.
+pub fn sweepTurnCaptures(self: *AppSession) void {
+    var live: [maru.session.turn_snapshot.max_sessions * maru.session.turn_snapshot.capacity]u64 = undefined;
+    var n: usize = 0;
+    for (&self.turn_rings.entries) |*entry| {
+        if (entry.used == 0) continue;
+        var back: usize = 0;
+        while (back < entry.ring.len) : (back += 1) {
+            const snap = entry.ring.nth(back) orelse break;
+            if (snap.capture_id == 0) continue;
+            if (n == live.len) break;
+            live[n] = snap.capture_id;
+            n += 1;
+        }
+    }
+    self.turn_captures.sweep(self.allocator, live[0..n]);
 }
 
 /// 그 surface 의 **provider 세션 신원**(없으면 빈 슬라이스). 링의 키다(§6.1 AT0).

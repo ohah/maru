@@ -52,6 +52,19 @@ pub const Snapshot = struct {
     /// 위 값을 실제로 읽었는가. **0(바꾼 것 없음)과 «아직 모름»은 다른 사실이라** 플래그로 가른다 —
     /// 하나로 합치면 읽기 전 화면이 `0개 파일` 이라고 거짓을 말한다.
     files_known: bool = false,
+    /// 그 턴의 **그림자 사본**(`turn_capture.Store`)을 가리키는 id. `0` 은 없음이다.
+    ///
+    /// **턴 키(`turn`)를 이 용도로 쓰지 않는 이유**: 그 값은 비는 경우가 셋 명문화돼 있다(세션 base·
+    /// 관측 모드·상한 초과 — 아래 주석). 빈 키가 셋이면 키가 아니고, **빈 키끼리 충돌한다.**
+    ///
+    /// **포인터가 아니라 스칼라인 이유**: `Ring.push` 는 `items[next] = entry` 로 슬롯을 **값 대입**해
+    /// 덮는다. 여기에 소유 포인터를 넣으면 덮이는 슬롯의 포인터가 곧 누수다 — 그것이 이 모듈이 값 타입
+    /// 고정 배열인 이유이고, 그 성질을 깨지 않는 유일한 방법이 스칼라다. 해제는 `Store.sweep` 이
+    /// **도달성**으로 한다(링이 바뀌는 길이 넷이라 「지우는 호출」로는 셋이 샌다).
+    ///
+    /// `changed_files` 와 같은 이유로 **`head` 스냅샷에 싣는다** — 턴은 두 스냅샷의 쌍이고 그 오른쪽이
+    /// 턴의 신원이다.
+    capture_id: u64 = 0,
     /// 그 턴의 **식별자**(claude `prompt_id` / codex `turn_id` — 파서가 같은 자리에 담는다).
     ///
     /// AT3 의 「AI 소행 확정」이 provider 기록의 턴을 링의 **몇 번 항목**에 붙일지 잇는 **유일한 안정
@@ -120,6 +133,8 @@ pub const Ring = struct {
         turn_key: []const u8 = "",
         /// 그 턴의 마지막 응답. **넘치면 잘려 담긴다**(`Snapshot.title` 주석 — 키와 반대 규율).
         title: []const u8 = "",
+        /// 그 턴의 그림자 사본 id(`Snapshot.capture_id`). 없으면 0.
+        capture_id: u64 = 0,
     };
 
     /// 스냅샷을 넣는다. **같은 tree가 연달아 오면 넣지 않는다** — 에이전트가 파일을 안 건드린 턴까지 쌓으면
@@ -139,6 +154,7 @@ pub const Ring = struct {
             .tree_len = tree_oid.len,
             .captured_s = args.captured_s,
             .agent_kind = args.agent_kind,
+            .capture_id = args.capture_id,
         };
         // **상한을 넘는 키는 담지 않는다(자르지 않는다).** 잘린 키는 AT3 귀속에서 **남의 턴과 거짓으로
         // 일치한다** — `RingMap.setRepo` 의 「못 담으면 아예 기억하지 않는다」와 같은 규율이다. 다만
@@ -541,6 +557,39 @@ test "같은 tree가 연달아 오면 넣지 않는다(빈 비교를 만들지 �
     ring.push(.{ .tree = "other", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
     ring.push(.{ .tree = "other", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
     try testing.expectEqual(@as(usize, 2), ring.len);
+}
+
+test "capture_id 는 링을 왕복하고 축출·이동에도 밀리지 않는다" {
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1", .surface_id = 1, .capture_id = 7 });
+    ring.push(.{ .tree = "a2", .surface_id = 1, .capture_id = 9 });
+    try testing.expectEqual(@as(u64, 9), ring.latest().?.capture_id);
+    try testing.expectEqual(@as(u64, 7), ring.nth(1).?.capture_id);
+    // 링을 가득 채워 밀어내도 **남은 것의 값이 그대로**여야 한다(자리가 밀려도 신원은 안 밀린다).
+    var i: usize = 0;
+    while (i < capacity) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        ring.push(.{ .tree = std.fmt.bufPrint(&buf, "b{d}", .{i}) catch unreachable, .capture_id = 100 + i });
+    }
+    try testing.expectEqual(@as(u64, 100 + capacity - 1), ring.latest().?.capture_id);
+    try testing.expectEqual(@as(u64, 100), ring.nth(capacity - 1).?.capture_id);
+}
+
+test "capture_id 는 중복 억제 판정에 들어가지 않는다" {
+    // 턴 키와 **같은 이유**다(`push` 주석) — 판정에 넣으면 파일을 안 건드린 턴이 «다른 턴» 이라
+    // 다시 쌓여 그 규칙이 막으려던 **빈 비교 행**이 돌아온다.
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "same", .capture_id = 1 });
+    ring.push(.{ .tree = "same", .capture_id = 2 });
+    try testing.expectEqual(@as(usize, 1), ring.len);
+    // 그리고 **먼저 온 것이 남는다** — 뒤엣것으로 갈아치우는 구현이 여기서 죽는다.
+    try testing.expectEqual(@as(u64, 1), ring.latest().?.capture_id);
+}
+
+test "capture_id 가 없으면 0이다 — 없음과 0번을 가르지 않는다" {
+    var ring: Ring = .{};
+    ring.push(.{ .tree = "a1" });
+    try testing.expectEqual(@as(u64, 0), ring.latest().?.capture_id);
 }
 
 test "빈 oid나 너무 긴 oid는 무시한다" {

@@ -7304,6 +7304,77 @@ test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 만 쓴�
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "buildFileTreeDrawList("));
 }
 
+/// Zig **코드**에 플랫폼 접근성 어휘가 있으면 그 낱말을 돌려준다. 없으면 null.
+///
+/// **주석은 안 본다.** 이 경계가 막으려는 것은 "Zig 가 플랫폼 타입을 만지는 것"이지 "문서가 계약을
+/// 인용하는 것"이 아니다. 실제로 이 게이트의 첫 실행에서 유일한 위반이 `ui/semantics.zig` 의 머리말
+/// 이었다 — 계약 원문(*"Zig tree는 `NSAccessibility` object나 delegate를 보유하지 않는다"*)을 그대로
+/// 인용한 자리다. 인용을 금지하면 계약이 사는 파일이 계약을 못 적는다.
+///
+/// 그래서 `std.zig.Tokenizer` 로 훑고 주석 토큰(`doc_comment`·`container_doc_comment`)은 건너뛴다.
+/// 일반 주석(`//`)은 애초에 토큰이 아니다. 남는 것은 식별자·문자열·키워드 — 코드가 실제로 만지는 것뿐이다.
+fn platformAccessibilityVocabularyInCode(source: [:0]const u8, needles: []const []const u8) ?[]const u8 {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => break,
+            .doc_comment, .container_doc_comment => continue,
+            else => {},
+        }
+        const text = source[token.loc.start..token.loc.end];
+        for (needles) |needle| {
+            if (std.mem.indexOf(u8, text, needle) != null) return needle;
+        }
+    }
+    return null;
+}
+
+// 접근성 서술자는 **뜻만 담고 플랫폼 어휘를 담지 않는다**(CIM §3).
+//
+// > Swift adapter만 이 descriptor를 native accessibility element로 투영하고, Zig tree는
+// > `NSAccessibility` object나 delegate를 보유하지 않는다.
+//
+// 이 경계가 무너지는 방식은 하나다 — adapter 를 붙이는 날 "여기서 문자열 하나만 만들면 편한데"가
+// 되는 것이다. 그 한 줄이 들어오면 같은 사실(이 줄의 역할)의 주인이 둘이 되고, 둘은 조용히 갈린다.
+// Windows(UI Automation)·모바일이 같은 tree 를 쓸 수 없게 되는 것도 그 순간이다.
+//
+// 그래서 **Zig 어디에도** 플랫폼 접근성 어휘가 없어야 한다. adapter 가 오면 그 코드는 `.m`/Swift 에
+// 산다(이 스캔은 `.zig` 만 본다).
+test "Zig 는 플랫폼 접근성 어휘를 갖지 않는다 — 투영은 adapter 만 한다" {
+    const allocator = std.testing.allocator;
+    const platform_vocabulary = [_][]const u8{
+        "NSAccessibility",
+        "AXUIElement",
+        "isAccessibilityElement",
+        "accessibilityLabel",
+        // Windows 쪽 어휘도 같은 규율이다 — 지금 없고, 없는 채로 둔다.
+        "IRawElementProvider",
+        "UIA_",
+    };
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (platformAccessibilityVocabularyInCode(source, &platform_vocabulary)) |needle| {
+            std.debug.print("접근성 플랫폼 어휘가 Zig 코드에 들어왔다: {s} in {s}\n", .{ needle, path });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // 그리고 **뜻을 담은 계약은 실제로 있다** — 위 단언이 "파일이 없어서" 통과하는 상태를 막는다.
+    const contract = try readZigFileZ(allocator, "src/chrome/ui/semantics.zig");
+    defer allocator.free(contract);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(contract, "pub const Role = enum {"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(contract, "pub const Semantics = struct {"));
+}
+
 // 스크롤 목록을 그리는 host 는 **글자를 자를 뷰포트를 컴포넌트에서 받는다**.
 //
 // measured chrome 글자는 tree 의 `effective_clip` 이 안 자른다(그건 quad 만 자른다 —

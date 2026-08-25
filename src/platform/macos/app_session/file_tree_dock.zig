@@ -177,6 +177,9 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) ?Prepared {
         .rows = rows,
         .selection_focused = file_panel_ops.fileTreeFocused(self),
         .origin_shift_px = window.origin_shift_px,
+        // 접근성 서술자의 `set_size` — **창이 아니라 도메인 목록의 크기**다. `rows.len` 을 주면
+        // 스크린 리더가 400줄 트리를 늘 "N / 창크기" 로 읽는다(`chrome/ui/semantics.zig`).
+        .total_rows = @intCast(@min(self.file_tree_rows.items.len, std.math.maxInt(u32))),
     };
 
     const sizes = component.build.bufferSizes(rows.len);

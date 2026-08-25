@@ -19971,7 +19971,31 @@ test "hook mode runs exactly one source and takes over notifications" {
         git_ops.sessionIdentityFor(&session, term.surfaceId()),
     );
 
+    // ── ⑧ **한 배치에 다음 턴이 시작돼도 스냅샷은 «끝난 턴» 의 사실을 든다**(AT2 적대적 검증) ────────
+    // `Stop(p-1)` 다음 `UserPromptSubmit(p-2)` 가 한 tick 에 함께 올 수 있다(사용자가 곧바로 다음
+    // 프롬프트를 넣으면 그렇다). 배치 **끝**에서 진행 상태를 읽으면 그때 `turnKey()` 는 이미 `p-2` 이고
+    // `reply()` 는 그 프롬프트가 지워 **비어 있다** — 턴 1의 스냅샷에 턴 2의 키가 붙는다.
+    // 계약 §3.1 이 「시각으로 맞추면 tick 지연에서 어긋난다」며 키를 도입한 바로 그 어긋남이다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"p-1\",\"prompt\":\"첫 질문\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"prompt_id\":\"p-1\",\"last_assistant_message\":\"첫 답\"}\n" ++ "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"p-2\",\"prompt\":\"둘째 질문\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    // 배치가 끝난 지금 진행 상태는 **이미 다음 턴**이다 — 그것을 그대로 실으면 안 된다.
+    try std.testing.expectEqualStrings("p-2", term.agent_hook_progress.turnKey());
+    try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.reply().len);
+    // **그런데 스냅샷에 넘어간 것은 끝난 턴(`p-1`)의 사실이어야 한다.** 이것을 안 재면 「전제만 보고
+    // 결과는 안 보는」 test 가 된다 — 배치 끝에서 읽는 구현이 위 두 단언은 그대로 통과시킨다.
+    try std.testing.expectEqualStrings("p-1", agent_ops.test_last_turn_key[0..agent_ops.test_last_turn_key_len]);
+    try std.testing.expectEqualStrings("첫 답", agent_ops.test_last_turn_title[0..agent_ops.test_last_turn_title_len]);
+
     // **자식은 부모의 신원을 옮기지 않는다**(계약 §2) — codex 자식이 자기 축을 싣고 온다는 실측이 근거다.
+    term.agent_hook_progress = .{};
+    term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
     try tmp.dir.writeFile(io, .{
@@ -62894,6 +62918,23 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
     try std.testing.expectEqual(@as(usize, 0), seededTurnRing(session).?.latest().?.turnKey().len);
     // 제목도 마찬가지다 — base 는 턴이 아니므로 직전 턴의 응답을 물려받지 않는다.
     try std.testing.expectEqual(@as(usize, 0), seededTurnRing(session).?.latest().?.titleText().len);
+
+    // **가드를 직접 물어 본다.** 위 두 단언은 `captureTurnSnapshot` 을 빈 값으로 직접 부르므로
+    // `turnFactsForCapture` 의 가드를 **지나지 않는다** — 그 가드를 지운 뮤턴트가 통과한다(AT1 에서 같은
+    // 실패를 겪었다). `Progress.reset()` 이 턴 키를 일부러 남기므로, base 는 그 값을 **보고도** 빈 값을
+    // 내야 한다.
+    {
+        const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+        var prompt: maru.session.agent_hook_event.Event = .{ .kind = .user_prompt_submit };
+        prompt.turn_key = "p-live";
+        _ = maru.session.agent_hook_mode.advance(&term.agent_hook_progress, .unknown, prompt);
+        try std.testing.expectEqualStrings("p-live", term.agent_hook_progress.turnKey());
+        // 턴 끝이면 그 키를 싣고,
+        try std.testing.expectEqualStrings("p-live", agent_ops.turnFactsForCapture(term, true).key);
+        // base 면 **같은 진행 상태를 보고도** 비운다.
+        try std.testing.expectEqual(@as(usize, 0), agent_ops.turnFactsForCapture(term, false).key.len);
+        try std.testing.expectEqual(@as(usize, 0), agent_ops.turnFactsForCapture(term, false).title.len);
+    }
 
     // 그 뒤 파일을 고치면 목록의 턴 범위에 **그 파일만** 나온다(스냅샷 시점에 이미 있던 것은 안 나온다).
     git_backend_mod.testWriteFile(repo, "kept.txt", "v2\n") catch return error.SkipZigTest;

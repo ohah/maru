@@ -456,6 +456,7 @@ test "EDOC9: 할당이 어디서 실패해도 정본과 평탄화 축이 갈리�
 
         var items = [_]selection.Selection{ selection.Selection.at(3), selection.Selection.at(20) };
         var sels = selection.Selections.init(&items, 0);
+        const before_sels = items; // 편집 전 값(값 복사)
 
         const changes = [_]delta.Change{
             .{ .start = 0, .end = 5, .text = "GOODBYE" },
@@ -473,10 +474,35 @@ test "EDOC9: 할당이 어디서 실패해도 정본과 평탄화 축이 갈리�
             // ⑵ 평탄화 축과 줄 인덱스도 같은 판이다.
             try testing.expectEqualStrings(original, f.content);
             try testing.expectEqual(std.mem.count(u8, original, "\n") + 1, f.lineCount());
-            // ⑶ selection이 문서 밖을 가리키지 않는다.
-            for (sels.items) |sel| {
-                try testing.expect(sel.anchor_start <= f.content.len);
-                try testing.expect(sel.focus <= f.content.len);
+            // ⑶ selection이 **편집 전 그대로**다.
+            //
+            // 처음엔 "문서 밖을 가리키지 않는다"만 봤는데, 그것은 **0으로 다 뭉개도 통과한다** —
+            // 되돌리기가 커서를 전부 0으로 두는 뮤턴트가 살아남았다(적대적 검증 2026-08-25).
+            // 사용자에게는 편집이 취소됐는데 커서가 엉뚱한 데 있는 상태이고, 다음 타이핑이 거기로
+            // 간다. 이 판정자가 밟는 실패 경로(`rollback`)는 `EDOC10`이 재는 정상 경로와 **다른
+            // 코드**라, 그쪽이 초록이어도 이쪽은 열려 있었다.
+            //
+            // **커서가 편집 전 자리이거나, 접힌 자리다.**
+            //
+            // 처음엔 "문서 밖을 가리키지 않는다"만 봤는데 그것은 **0으로 다 뭉개도 통과한다** —
+            // 되돌리기가 커서를 0으로 두는 뮤턴트가 살아남았다(적대적 검증 2026-08-25).
+            //
+            // **실패 지점마다 도는 코드가 다르다**(실측 — 36개 중):
+            //   · 34개: `delta.apply`가 **selection을 밀기 전에** 실패 → 커서가 그대로(3, 20)
+            //   · 2개: 밀린 **뒤** 파생 축 재구축이 실패 → `rollback`의 되짚기가 돈다(0, 20)
+            //
+            // 되짚기는 편집 구간 **밖**에서만 정확하다. 구간 **안**을 가리키던 커서(3)는 앞서
+            // §3.3대로 구간 시작으로 접혔고 그 정보는 어떤 역연산으로도 되살릴 수 없다 — 접기가
+            // 여럿을 하나로 보내기 때문이다. **진짜 undo는 이 손실이 없다**(`UNDO1`이 재는 경로는
+            // 편집 전 커서를 통째로 들고 있다가 되살린다). 이쪽은 할당 실패 복구라 그럴 여유가
+            // 없어 되짚기를 쓴다.
+            //
+            // 그래서 단언은 **둘 중 하나**를 요구한다: 안 밀렸거나, 접힌 자리에 있거나.
+            // "아무 값이나"가 아니다 — 0으로 뭉개는 뮤턴트는 커서[1]에서 죽는다.
+            for (sels.items, 0..) |sel, i| {
+                const untouched = sel.focus == before_sels[i].focus;
+                const collapsed = sel.focus == 0 and i == 0; // 첫 변경이 [0,5)라 그 시작이 0이다
+                try testing.expect(untouched or collapsed);
             }
             // ⑷ revision이 오르지 않았다 — 안 일어난 편집이다.
             try testing.expectEqual(@as(u64, 0), f.revision);

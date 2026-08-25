@@ -3929,6 +3929,11 @@ pub const AppSession = struct {
     /// 사용자 홈의 파일을 우리가 손댄 것이고, 그 결과 codex 의 동작이 달라지기 때문이다(다음 실행부터
     /// 훅이 다시 돈다). 값 하나당 시도는 한 번뿐이라 이 수가 매번 오르지는 않는다.
     agent_hook_trust_refreshed: u32 = 0,
+    /// 우리가 쓴 직후 **누군가 다른 값을 써 넣은** 훅 수(계약 §2.1). 그 누군가는 거의 언제나 사용자 승인을
+    /// 받은 codex 이고, 그러면 파일의 값이 codex 의 정답이라 **훅은 정상으로 돈다** — 그래서 `stale`(안 돈다)과
+    /// 갈라 센다. 동시에 이 값이 **프로세스 없이 얻는 드리프트 증거**다: 같은 커맨드에 codex 가 우리와 다른
+    /// 값을 냈다는 뜻이다. 손으로 고친 경우도 같은 모양이라 단정하지 않고 확인을 청한다.
+    agent_hook_trust_diverged: u32 = 0,
     /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
     /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
     ended_placeholder_notice_pending: u32 = 0,
@@ -7145,10 +7150,17 @@ pub const AppSession = struct {
         // 사용자가 할 일이 남은 쪽을 보여야 한다 — 「고쳤습니다」만 뜨면 안 도는 훅이 남은 것을 모른다.
         const stale = self.agent_hook_trust_stale;
         const refreshed = self.agent_hook_trust_refreshed;
+        const diverged = self.agent_hook_trust_diverged;
         self.agent_hook_trust_stale = 0;
         self.agent_hook_trust_refreshed = 0;
+        self.agent_hook_trust_diverged = 0;
+        // 우선순위는 «사용자가 할 일이 확실한 것» 부터다: 안 도는 것 → 값이 갈린 것(확인 요청) → 고친 것.
         if (stale != 0) {
             self.showNoticeFmt(.app_agent_hook_trust_stale, &.{.{ .d = @intCast(stale) }});
+            return;
+        }
+        if (diverged != 0) {
+            self.showNoticeFmt(.app_agent_hook_trust_diverged, &.{.{ .d = @intCast(diverged) }});
             return;
         }
         if (refreshed != 0) {
@@ -21551,7 +21563,10 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
     try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = reverted.items });
 
     agent_ops.reconcileAgentHooks(&session);
-    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+    // **«안 돈다» 가 아니라 «갈렸다» 다.** 우리가 쓴 직후 누군가 다른 값을 넣었다는 뜻이고, 그 누군가가
+    // 승인을 받은 codex 라면 훅은 정상으로 돈다 — 그때 「승인하라」고 하면 방금 승인한 사람에게 거짓말이다.
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_diverged);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale);
     try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_refreshed); // 다시 쓰지 않았다
 
     // **되돌아온 값을 안 건드렸다** — 이 단언이 곧 「무한 루프가 아니다」의 증거다.
@@ -21564,7 +21579,14 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
     session.dismissMessageOverlays();
     session.runFramePreHousekeeping();
     try std.testing.expect(session.chrome_host.notice.open);
-    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale); // 한 번 띄우고 끈다
+    // **어느 문구가 떴는지까지 본다.** 개수만 세면 「안 돈다」 문구가 그대로 떠도 통과한다 — 이 슬라이스가
+    // 고치려는 것이 바로 그 문구다.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        session.chrome_host.notice.message,
+        maru.i18n.t(.app_agent_hook_trust_diverged)[0..12],
+    ) != null);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_diverged); // 한 번 띄우고 끈다
     const after_tick = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
     defer a.free(after_tick);
     try std.testing.expectEqualStrings(reverted.items, after_tick);

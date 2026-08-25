@@ -1296,6 +1296,7 @@ fn ensureCodexTrust(
     var added: usize = 0;
     var stale: u32 = 0;
     var refreshed: u32 = 0;
+    var diverged: u32 = 0;
     for (slots[0..found]) |placement| {
         const entry = trust.forEvent(placement.json_name) orelse continue;
         // matcher 는 **세트가 정한 값**이다(파일에 적힌 값이 아니라) — 우리가 넣은 항목이므로 같다.
@@ -1327,7 +1328,15 @@ fn ensureCodexTrust(
             // 무한 루프가 된다 — §2.1 이 값을 매겨 둔 바로 그 위험이다. 값 하나당 시도는 한 번뿐이다.
             if (trust.triedHash(out.items, key.items)) |tried| {
                 if (std.mem.eql(u8, tried, hash.items)) {
-                    stale += 1;
+                    // **이 상태는 «안 돈다» 가 아니다.** 우리가 쓴 직후 같은 커맨드에 대해 누군가 **다른 값**을
+                    // 써 넣었다는 뜻이고, 그 누군가는 거의 언제나 **사용자 승인을 받은 codex** 다. 그러면 파일의
+                    // 값이 codex 의 정답이므로 훅은 **정상으로 돌고 있다** — 그때 「승인하라」고 말하면 방금
+                    // 승인한 사람에게 거짓을 말하는 것이다.
+                    //
+                    // 동시에 이 자리가 **공짜 드리프트 감지기**다: 같은 커맨드에 대해 codex 가 우리와 다른 값을
+                    // 냈다는 확정 증거가 파일 안에 있다(프로세스를 하나도 안 띄우고 얻는다). 그래서 `stale` 과
+                    // 갈라 세고 문구도 갈라 준다 — 손으로 고친 경우도 같은 모양이라 **단정하지 않고 확인을 청한다**.
+                    diverged += 1;
                     continue;
                 }
             }
@@ -1362,6 +1371,8 @@ fn ensureCodexTrust(
     // 갈 말은 「고쳤다」가 아니라 「codex 에서 승인하라」다.
     self.agent_hook_trust_stale = stale + refreshed;
     self.agent_hook_trust_refreshed = 0;
+    // 관측이라 쓰기와 무관하다(쓰기 성패가 이 사실을 바꾸지 않는다).
+    self.agent_hook_trust_diverged = diverged;
     if (added == 0 and refreshed == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
 
     // **compare-and-swap.** 훅 파일 락이 인스턴스 사이를 대부분 직렬화하지만, 훅 파일이 **아직 없을 때는**

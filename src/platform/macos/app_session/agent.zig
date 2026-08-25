@@ -1184,7 +1184,11 @@ fn ensureCodexTrust(
         added += 1;
     }
     // 쓰기 성패와 무관하게 알린다 — 어긋남은 «쓸 것이 없어서» 안 쓰는 경로에서 생긴다.
-    if (stale != 0) self.agent_hook_trust_stale = stale;
+    //
+    // **0 도 그대로 쓴다(latch 금지).** `if (stale != 0)` 로 두면 한 번 세워진 수가 안 내려가서, 사용자가
+    // codex 에서 승인해 값이 맞아진 뒤에 이 함수가 다시 돌아도(설정 적용 등) 옛 수가 남아 **거짓 알림**이
+    // 뜬다. 이 값은 «지금 어긋난 개수» 이지 «어긋난 적이 있다» 가 아니다.
+    self.agent_hook_trust_stale = stale;
     if (added == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
 
     // **compare-and-swap.** 훅 파일 락이 인스턴스 사이를 대부분 직렬화하지만, 훅 파일이 **아직 없을 때는**

@@ -1780,7 +1780,7 @@ fn applyCoreConfig(
     });
 }
 
-const smoke_spin_cap: usize = 600;
+const smoke_spin_cap: usize = 720;
 
 test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹치지 않는다" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
@@ -2087,8 +2087,10 @@ fn rebuildSidebarCells(
     sidebar_w: u32,
     cell_w: u32,
     cell_h: u32,
-    /// 카드에 실을 것들 — 지금 세션 하나. 슬라이스라 호출자가 수명을 안다.
-    card: SidebarCard,
+    /// 카드에 실을 것들 — **세션 하나에 한 장**. 슬라이스라 호출자가 수명을 안다.
+    cards: []const SidebarCard,
+    /// 활성 세션의 카드 — 앰버 막대가 여기만 선다.
+    active_card: usize,
     tk: *const maru.chrome.Tokens,
     renderer_state: *maru.renderer.RendererState,
     builder: win32_terminal.FrameBuilder,
@@ -2189,38 +2191,50 @@ fn rebuildSidebarCells(
     // **카드가 실제로 그리는 줄 수를 쓴다.** 1 로 박아 두면 밴드가 글자보다 짧아져 둘째 줄이 밖으로
     // 나간다(판정 `sidebar_cells_outside` 가 4 를 냈다 — 그 필드 doc 이 예고한 그대로다:
     // "host 가 렌더에 쓰는 줄 수와 같은 값을 실어야 한다").
-    const lines: u8 = card.lines;
-    const card_h = sb.cardHeight(lines, m);
+    if (cards.len == 0) return;
     // **헤더 아래에서 시작한다** — `slotAt` 도 같은 `header_height_px` 를 받으므로 그린 자리와
-    // 눌리는 자리가 안 갈린다.
-    const top = top_y + header_h + m.content_pad_v;
+    // 눌리는 자리가 안 갈린다. 카드 높이를 **누적**하는 것도 `slotAt` 과 같은 규칙이다(카드마다
+    // 줄 수가 달라 고정 나눗셈을 못 쓴다).
+    const list_top = top_y + header_h + m.content_pad_v;
     // **그린 자리를 헤더 바닥과 견준다.** 계산에 쓴 값이 아니라 밴드가 실제로 앉은 y 다.
-    if (top < top_y + header_h) card_over_header.* += 1;
-    if (top + card_h > h) return;
-    // **가리키면 밝아진다.** 카드가 하나뿐이라 "선택" 은 눈에 안 보이지만(§2m.37 ⑴ — 보여 줄 세션이
-    // 하나다), 가리키는 것과 누르는 것은 보인다. 그림이 안 바뀌면 죽은 컨트롤과 구별이 안 된다.
-    const card_hovered = hover_slot != null and hover_slot.? == 0;
-    try out.append(allocator, d3d11_cells.solidCell(
-        0,
-        @floatFromInt(top),
-        @floatFromInt(sidebar_w),
-        @floatFromInt(card_h),
-        // **`row_hover_bg` 다, `tab_hover_bg` 가 아니다.** 토큰 문서가 그 함정을 이미 적어 뒀다 —
-        // `tab_hover_bg` 는 배경↔활성 **중간**이라 **활성 카드 위에서는 활성색보다 어두워 호버가
-        // 사라진다.** `row_hover_bg` 가 "활성 밴드 위에 겹쳐도 구분되게" 활성보다 한 단계 밝다.
-        cellColor(tk, if (card_hovered) .row_hover_bg else .tab_active_bg),
-        .{ 0, 0, 0, 0 },
-    ));
-    // 활성 카드의 **좌측 앰버 막대**(chrome-strategy.md U1) — 어느 세션이 활성인지의 신호다.
-    try out.append(allocator, d3d11_cells.solidCell(
-        0,
-        @floatFromInt(top),
-        3,
-        @floatFromInt(card_h),
-        cellColor(tk, .accent_bar),
-        .{ 0, 0, 0, 0 },
-    ));
-
+    if (list_top < top_y + header_h) card_over_header.* += 1;
+    // **밴드를 카드마다 그린다.** 활성은 진하고, 가리키면 밝아진다.
+    //
+    // **`row_hover_bg` 다, `tab_hover_bg` 가 아니다.** 토큰 문서가 그 함정을 이미 적어 뒀다 —
+    // `tab_hover_bg` 는 배경↔활성 **중간**이라 **활성 카드 위에서는 활성색보다 어두워 호버가
+    // 사라진다.** `row_hover_bg` 가 "활성 밴드 위에 겹쳐도 구분되게" 활성보다 한 단계 밝다.
+    var band_top = list_top;
+    var last_bottom = list_top;
+    for (cards, 0..) |c, i| {
+        const ch_i = sb.cardHeight(c.lines, m);
+        if (band_top + ch_i > top_y + h) break;
+        const hovered = hover_slot != null and hover_slot.? == i;
+        const is_active = i == active_card;
+        if (hovered or is_active) {
+            try out.append(allocator, d3d11_cells.solidCell(
+                0,
+                @floatFromInt(band_top),
+                @floatFromInt(sidebar_w),
+                @floatFromInt(ch_i),
+                cellColor(tk, if (hovered) .row_hover_bg else .tab_active_bg),
+                .{ 0, 0, 0, 0 },
+            ));
+        }
+        // 활성 카드의 **좌측 앰버 막대**(chrome-strategy.md U1) — 어느 세션이 활성인지의 신호다.
+        // **활성에만 선다**: 전부 그리면 "지금 어느 것" 이라는 질문에 답을 안 하는 셈이다.
+        if (is_active) {
+            try out.append(allocator, d3d11_cells.solidCell(
+                0,
+                @floatFromInt(band_top),
+                3,
+                @floatFromInt(ch_i),
+                cellColor(tk, .accent_bar),
+                .{ 0, 0, 0, 0 },
+            ));
+        }
+        band_top += ch_i;
+        last_bottom = band_top;
+    }
     // ── 카드 글자 (W8.8⒜2) ──────────────────────────────────────────────────────────────────
     //
     // **투영은 이미 있다** — `coretext_frame_builder.buildSidebarDrawList`(이름과 달리 본문에
@@ -2238,22 +2252,35 @@ fn rebuildSidebarCells(
     if (cols < indent_cols + 4) return;
     const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 } };
     const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    var names = [_][]const u8{card.name};
-    var branches = [_][]const u8{card.branch};
-    var paths = [_][]const u8{card.folder};
+    // **카드마다 한 항목.** `buildSidebarDrawList` 는 원래 목록을 받는 함수라 여기서 늘리는 것은
+    // 배열 셋뿐이다 — 투영 규칙은 그대로다.
+    const names = try allocator.alloc([]const u8, cards.len);
+    defer allocator.free(names);
+    const branches = try allocator.alloc([]const u8, cards.len);
+    defer allocator.free(branches);
+    const paths = try allocator.alloc([]const u8, cards.len);
+    defer allocator.free(paths);
+    const actives = try allocator.alloc(bool, cards.len);
+    defer allocator.free(actives);
+    for (cards, 0..) |c, i| {
+        names[i] = c.name;
+        branches[i] = c.branch;
+        paths[i] = c.folder;
+        actives[i] = i == active_card;
+    }
     const empty: []const []const u8 = &.{};
     const list = cell_text.buildSidebarDrawList(
         allocator,
-        &names,
-        &branches,
-        &paths,
+        names,
+        branches,
+        paths,
         empty,
         &.{},
         &.{},
         &.{},
         cols -| indent_cols,
         fg,
-        &.{},
+        actives,
         empty,
         null,
         0,
@@ -2277,8 +2304,10 @@ fn rebuildSidebarCells(
     defer allocator.free(native);
     // **세로 자리는 중립이 정한다**(`sidebar_glyph_rows.fillOriginY`) — 접는 규칙(`sidebarGlyphRow`)과
     // 한 파일에 있어 갈리지 않는다. macOS 도 같은 함수를 쓴다.
-    const rows = [_]maru.chrome.components.sidebar.Row{.{ .card = .{ .tab = 0, .label = card.name, .active = true, .lines = @intCast(card.lines) } }};
-    maru.sidebar_glyph_rows.fillOriginY(allocator, native, &rows, m);
+    const rows = try allocator.alloc(maru.chrome.components.sidebar.Row, cards.len);
+    defer allocator.free(rows);
+    for (cards, 0..) |c, i| rows[i] = .{ .card = .{ .tab = @intCast(i), .label = c.name, .active = i == active_card, .lines = @intCast(c.lines) } };
+    maru.sidebar_glyph_rows.fillOriginY(allocator, native, rows, m);
     // `fillOriginY` 는 **content 상대**다(목록 위 여백부터). 띠와 **헤더**만큼 통째로 내린다 —
     // 밴드와 같은 기준이어야 한다. 헤더를 빼먹었더니 판정이 바로 잡았다(`sidebar_cells_outside=13`).
     for (native) |*n| n.origin_y +|= top_y + header_h;
@@ -2286,8 +2315,9 @@ fn rebuildSidebarCells(
     // **판정은 카드 밴드 기준이다.** 사이드바 사각형으로 재면 속 빈다 — 글자가 카드 밖으로 나가도
     // 띠 안이라 0 이 나온다(실측: 행 인코딩을 안 지운 뮤턴트가 그렇게 통과했다).
     const x1: f32 = @floatFromInt(sidebar_w);
-    const band_y0: f32 = @floatFromInt(top);
-    const band_y1: f32 = @floatFromInt(top + card_h);
+    // **판정 기준은 목록 전체의 밴드 구간**이다 — 카드가 여럿이면 한 장짜리 사각형으로는 못 잰다.
+    const band_y0: f32 = @floatFromInt(list_top);
+    const band_y1: f32 = @floatFromInt(last_bottom);
     for (native) |n| {
         var c = n;
         // **행 번호를 0 으로 만든다.** `cellFromNative` 는 `origin_y + row*cell_h` 로 자리를 만드는데,
@@ -2526,6 +2556,170 @@ const DrawnHeaderIcons = struct {
         return self.items[0..self.len];
     }
 };
+
+/// 창 크기가 바뀌면 **모든 세션**의 격자와 PTY 를 함께 바꾼다.
+///
+/// **활성만 바꾸면 안 된다**: 배경 세션은 옛 격자를 들고 있다가 전환하는 순간 어긋난 화면을 낸다.
+/// 그 실패를 `sessions_wrong_size` 가 잰다(고치기 전 실측: 1).
+///
+/// 실패한 세션은 **건너뛴다** — 하나가 안 됐다고 나머지까지 옛 크기로 두면 더 나쁘다.
+fn resizeAllSessions(
+    runtime: *maru.app.SurfaceRuntime,
+    sessions: []const *WinSession,
+    size: maru.terminal.Size,
+    io: std.Io,
+) void {
+    for (sessions) |s| runtime.resize(s.surface.id, size, io) catch {};
+}
+
+/// 활성 표면의 격자 지문 — **화면이 어느 세션을 보고 있는지**의 증거.
+///
+/// 셀의 codepoint 를 섞는다. 두 셸이 각자 프롬프트를 찍으므로 다른 세션이면 값이 다르다.
+/// 표면 하나의 격자 지문과 잉크 셀 수.
+fn surfaceGridStats(io: std.Io, s: *maru.session.surface.Surface) struct { digest: u64, ink: usize } {
+    s.lockCore(io);
+    defer s.unlockCore(io);
+    var h: u64 = 1469598103934665603;
+    var ink: usize = 0;
+    for (s.core.screen.cells) |c| {
+        h ^= @as(u64, c.codepoint);
+        h *%= 1099511628211;
+        if (c.codepoint != 0 and c.codepoint != ' ') ink += 1;
+    }
+    return .{ .digest = h, .ink = ink };
+}
+
+fn activeGridDigest(io: std.Io, app_window: *maru.session.window.AppWindow) u64 {
+    const active = app_window.active() orelse return 0;
+    // **코어 락 아래에서 읽는다** — 리더 스레드가 같은 코어에 쓰고 있다(io-render-threading PR3).
+    // 래퍼를 쓴다: `core_mutex` 를 직접 잡는 것은 `check-boundaries` 가 막는다(재진입 검출을 우회한다).
+    active.lockCore(io);
+    defer active.unlockCore(io);
+    var h: u64 = 1469598103934665603;
+    for (active.core.screen.cells) |c| {
+        h ^= @as(u64, c.codepoint);
+        h *%= 1099511628211;
+    }
+    return h;
+}
+
+/// 한 창이 들 수 있는 세션 수의 상한.
+///
+/// **왜 상한을 두나**: ＋ 는 연타할 수 있고 세션마다 PTY·리더 스레드가 하나씩 붙는다. 사이드바가
+/// 그릴 수 있는 카드 수(`sidebarRowsFor` 의 버퍼)와도 맞춘다 — 그리지 못할 것을 만들면 목록에만
+/// 있고 화면에 없는 세션이 생긴다.
+const max_win_sessions: usize = 16;
+
+/// 세션 목록 → 카드 목록. **세션이 늘거나 줄면 다시 부른다** — 안 부르면 사이드바가 옛 목록을 그린다.
+fn refreshSidebarCards(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(SidebarCard),
+    sessions: []const *WinSession,
+    folder: []const u8,
+) !void {
+    out.clearRetainingCapacity();
+    try out.ensureTotalCapacity(allocator, sessions.len);
+    for (sessions) |s| {
+        out.appendAssumeCapacity(.{
+            .name = s.label(),
+            .branch = "",
+            .folder = folder,
+            .lines = if (folder.len > 0) 2 else 1,
+        });
+    }
+}
+
+/// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
+/// 줄 수에서 나오므로 두 곳에서 따로 만들면 `slotAt` 의 누적이 밴드와 어긋난다.
+fn sidebarRowsFor(
+    cards: []const SidebarCard,
+    active: usize,
+    buf: []maru.chrome.components.sidebar.Row,
+) []const maru.chrome.components.sidebar.Row {
+    const n = @min(cards.len, buf.len);
+    for (cards[0..n], 0..) |c, i| {
+        buf[i] = .{ .card = .{ .tab = @intCast(i), .label = c.name, .active = i == active, .lines = @intCast(c.lines) } };
+    }
+    return buf[0..n];
+}
+
+/// 창이 든 세션 하나 — **표면 · PTY · pump 한 벌**.
+///
+/// **왜 힙에 고정하나**: `AppWindow` 의 doc 이 그 이유를 소유한다 — `SurfaceRuntime` 이 `*Surface` 를
+/// 라우팅에 보관하고 리더 스레드가 `&reader` 를 잡으므로, 목록이 realloc 될 때 본체가 움직이면 그
+/// 포인터들이 dangling 된다. 그래서 목록은 `*WinSession` 만 든다.
+const WinSession = struct {
+    surface: maru.session.surface.Surface,
+    live: maru.app.LivePtySession,
+    pump: maru.app.RuntimeEventPump,
+    /// 사이드바 카드에 뜨는 이름. 세션이 소유한다(목록이 커져도 슬라이스가 살아 있어야 한다).
+    name: [24]u8,
+    name_len: usize,
+
+    const SpawnOptions = struct {
+        io: std.Io,
+        command: []const u8,
+        args: []const []const u8,
+        size: maru.terminal.Size,
+        cfg: maru.config.theme.Config,
+        appearance: maru.config.appearance.ResolvedAppearance,
+        cell_w: u32,
+        cell_h: u32,
+    };
+
+    fn label(self: *const WinSession) []const u8 {
+        return self.name[0..self.name_len];
+    }
+
+    fn destroy(self: *WinSession, allocator: std.mem.Allocator) void {
+        // **PTY 를 먼저 내린다** — 리더 스레드가 표면 코어를 잡고 있다.
+        self.live.deinit();
+        self.surface.deinit();
+        allocator.destroy(self);
+    }
+};
+
+/// 세션 하나를 띄워 목록·탭에 붙인다.
+///
+/// **탭 슬라이스를 다시 건다**(`app_window.tabs = tab_ptrs.items`) — `ArrayList` 가 realloc 되면 옛
+/// 슬라이스가 죽은 메모리를 가리킨다. 포인터가 가리키는 표면 본체는 힙에 고정이라 안전하다.
+fn spawnWinSession(
+    allocator: std.mem.Allocator,
+    sessions: *std.ArrayList(*WinSession),
+    tab_ptrs: *std.ArrayList(*maru.session.surface.Surface),
+    app_window: *maru.session.window.AppWindow,
+    runtime: *maru.app.SurfaceRuntime,
+    opts: WinSession.SpawnOptions,
+) !void {
+    const s = try allocator.create(WinSession);
+    errdefer allocator.destroy(s);
+
+    // **PTY id 는 겹치면 안 된다** — 라우팅이 그 값으로 세션을 가른다.
+    const pty_id: u32 = @intCast(10 + sessions.items.len);
+    s.surface = try maru.session.surface.Surface.init(allocator, @intCast(1 + sessions.items.len), opts.size);
+    errdefer s.surface.deinit();
+    s.surface.command = opts.command;
+
+    var buf: [24]u8 = undefined;
+    const written = std.fmt.bufPrint(&buf, "session {d}", .{sessions.items.len + 1}) catch "session";
+    s.name = buf;
+    s.name_len = written.len;
+    s.surface.title = s.label();
+
+    // **앱 수준 config 를 코어에 한 번에 건다** — 리더가 뜨기 전에. 값마다 명령을 따로 보내면 자식의
+    // 첫 출력이 그 사이에 끼어 옛 설정으로 파싱되는 자리가 생긴다.
+    applyCoreConfig(&s.surface.core, opts.cfg, opts.appearance, opts.cell_w, opts.cell_h);
+
+    try s.live.init(opts.io, allocator, pty_id, .{ .command = opts.command, .args = opts.args, .size = opts.size }, 16);
+    errdefer s.live.deinit();
+    _ = try s.live.attachSurface(runtime, &s.surface, true);
+    s.pump = s.live.pump(runtime);
+
+    try sessions.append(allocator, s);
+    errdefer _ = sessions.pop();
+    try tab_ptrs.append(allocator, &s.surface);
+    app_window.tabs = tab_ptrs.items;
+}
 
 /// 사이드바 카드 한 장이 싣는 것. 빈 문자열이면 그 줄을 안 그린다(`buildSidebarDrawList` 의 계약).
 const SidebarCard = struct {
@@ -2873,14 +3067,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 예전과 같다. POSIX fixture 의 `-i` 는 이 함수가 Windows 전용이라 여기 안 온다.
     const args = if (cfg.shell.args.len > 0) cfg.shell.args else script.args;
 
-    var live: maru.app.LivePtySession = undefined;
-    try live.init(io, allocator, 10, .{ .command = command, .args = args, .size = start }, 16);
-    defer live.deinit();
-
-    var surfaces = [_]maru.session.surface.Surface{try maru.session.surface.Surface.init(allocator, 1, start)};
-    defer surfaces[0].deinit();
-    surfaces[0].title = "win32 terminal";
-    surfaces[0].command = command;
+    // ── 세션 목록 (W8.8⒞) ───────────────────────────────────────────────────────────────────
+    //
+    // **표면과 PTY 는 힙에 고정한다.** `AppWindow` 의 doc 이 그 이유를 적어 뒀다 — `SurfaceRuntime`
+    // 이 `*Surface` 를 라우팅에 보관하고 리더 스레드가 `&reader` 를 잡으므로, 목록이 realloc 될 때
+    // 본체가 움직이면 그 포인터들이 dangling 된다. 목록에는 **포인터만** 모은다.
+    //
+    // **세션마다 PTY 하나다.** `LivePtySession` 은 링크를 하나만 든다(`self.link`). macOS 도 Term
+    // 마다 세션·pump 를 따로 들고 tick 이 **전부** 드레인한다 — 같은 모양을 쓴다.
+    var sessions: std.ArrayList(*WinSession) = .empty;
+    defer {
+        for (sessions.items) |s| s.destroy(allocator);
+        sessions.deinit(allocator);
+    }
+    var tab_ptrs: std.ArrayList(*maru.session.surface.Surface) = .empty;
+    defer tab_ptrs.deinit(allocator);
 
     // **앱 수준 config 를 코어에 한 번에 건다.** 스크롤백 길이·팔레트·기본 전경/배경·모호폭/이모지폭·
     // 커서 모양이 여기서 온다 — 예전에는 전부 코어 기본값이라 `scrollback.lines` 를 바꿔도 무동작이었다.
@@ -2891,16 +3092,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // **셀 크기도 함께 준다.** 코어가 링크 판정·마우스 좌표에 셀 크기를 쓰는데, 안 주면 기본값으로 굳어
     // 폰트를 키워도 그 계산만 옛 값을 본다.
-    applyCoreConfig(&surfaces[0].core, cfg, appearance, cell_w, cell_h);
-
-    var tab_ptrs = [_]*maru.session.surface.Surface{&surfaces[0]};
-    var app_window: maru.session.window.AppWindow = .{ .tabs = &tab_ptrs };
+    var app_window: maru.session.window.AppWindow = .{ .tabs = &.{} };
 
     var runtime = maru.app.SurfaceRuntime.init(allocator);
     defer runtime.deinit();
-    _ = try live.attachSurface(&runtime, &surfaces[0], true);
 
-    var pump = live.pump(&runtime);
+    // **`size` 는 spawn 시점에 덮어쓴다** — 여기 박아 두면 창을 키운 뒤 만든 세션이 **옛 격자**를
+    // 받는다(실측: `sessions_wrong_size=1`).
+    var spawn_opts = WinSession.SpawnOptions{
+        .io = io,
+        .command = command,
+        .args = args,
+        .size = start,
+        .cfg = cfg,
+        .appearance = appearance,
+        .cell_w = cell_w,
+        .cell_h = cell_h,
+    };
+    // 첫 세션. 실패하면 창을 띄울 이유가 없다.
+    try spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, spawn_opts);
+
+    // **pump 는 세션이 소유한다.** `AppFrameLoop` 는 pump 하나만 받으므로 그것을 첫 세션 것으로 두고
+    // **재바인딩하지 않는다** — macOS 가 같은 이유로 같은 짓을 한다(`frame_loop.pump` 주석). 매 tick 은
+    // `tickAfterDrainWithFrameBuilder` 로 들어가고, 드레인은 **우리가 전부** 돈다.
+    var pump = sessions.items[0].pump;
     // **폰트가 정한 셀 크기를 렌더러에 알려 준다.** 기본값(0)으로 두면 아틀라스가 슬롯 크기를 다른 값으로
     // 추정해 글리프가 아래에서 잘린다 — 실측으로 겪었다(베이스라인 17인데 슬롯이 그보다 낮았다).
     // `glyph_cell_width_px`는 자간과 무관한 자연폭이다. 지금은 자간이 0이라 grid advance와 같다.
@@ -3077,20 +3292,28 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sidebar_last_slot: ?usize = null;
     var sidebar_last_header: ?maru.chrome.components.sidebar.HeaderRegion = null;
     var sidebar_judgeable = false;
+    var session_spawns: usize = 0;
+    var session_spawn_failures: usize = 0;
+    var tab_switches: usize = 0;
+    var switch_judgeable = false;
+    var active_before_switch: usize = 0;
+    var grid_digest_before_switch: u64 = 0;
+    var grid_digest_after_switch: u64 = 0;
+    var active_matches_selected = false;
+    var background_ink: usize = 0;
     var sidebar_header_drawn: DrawnHeaderIcons = .{};
     defer if (sidebar_frame) |*f| f.deinit(allocator);
     defer if (sidebar_header_frame) |*f| f.deinit(allocator);
     var sidebar_uploads: usize = 0;
     var sidebar_glyphs: usize = 0;
     var sidebar_outside: usize = 0;
-    const sidebar_card = SidebarCard{
-        .name = surfaces[0].title,
-        .branch = "",
-        .folder = if (dock_root) |r| std.fs.path.basename(r) else "",
-        .lines = if (dock_root != null) 2 else 1,
-    };
+    // **카드는 세션 목록에서 나온다.** 하드코딩하면 세션이 늘어도 사이드바가 모른다.
+    var sidebar_cards: std.ArrayList(SidebarCard) = .empty;
+    defer sidebar_cards.deinit(allocator);
+    const folder_name: []const u8 = if (dock_root) |r| std.fs.path.basename(r) else "";
+    try refreshSidebarCards(allocator, &sidebar_cards, sessions.items, folder_name);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -3338,14 +3561,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             sidebar_judgeable = true;
             const m_sb = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const card_top = geom.sidebar.y + sidebar_header_h + m_sb.content_pad_v;
-            const card_mid: i32 = @intCast(card_top + maru.chrome.components.sidebar.cardHeight(sidebar_card.lines, m_sb) / 2);
+            const card_mid: i32 = @intCast(card_top + maru.chrome.components.sidebar.cardHeight(sidebar_cards.items[0].lines, m_sb) / 2);
             const cx: i32 = @intCast(sidebar_w / 2);
             window.postSyntheticMouse(.moved, cx, card_mid);
             window.postSyntheticMouse(.left_down, cx, card_mid);
             window.postSyntheticMouse(.left_up, cx, card_mid);
         }
+        if (spins == 490) {
+            maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = "MARK-ONE" }) catch {};
+        }
         if (spins == 500 and sidebar_w != 0 and sidebar_header_h != 0) {
             // 헤더의 **새 워크스페이스(＋)** 칸 — 오른쪽 끝이라 다른 칸과 안 겹친다.
+            //
+            // **먼저 첫 세션에 표시를 남긴다.** 두 셸이 같은 크기·같은 프롬프트면 화면이 **똑같아서**
+            // "지금 어느 세션을 보고 있나" 를 지문으로 못 가른다. 앞선 판에서 그것이 참으로 나온 것은
+            // 두 세션의 **격자 크기가 달랐기 때문**이었다 — 즉 그 증거는 버그에 기대고 있었다.
+            // 개행을 안 보내므로 아무것도 실행되지 않는다(스모크가 각본을 안 보내는 규칙 그대로).
             const hcols: u32 = sidebar_w / cell_w;
             const col = maru.chrome.components.sidebar.headerIconCol(.new_workspace, hcols);
             const hx: i32 = @intCast(col *| cell_w + cell_w / 2);
@@ -3353,6 +3584,53 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, hx, hy);
             window.postSyntheticMouse(.left_down, hx, hy);
             window.postSyntheticMouse(.left_up, hx, hy);
+        }
+        // ── 세션 전환 판정 (W8.8⒞) ─────────────────────────────────────────────────────────
+        //
+        // 위 `spins == 500` 이 ＋ 를 눌러 세션을 하나 만들고 **그것을 활성**으로 만들었다.
+        // 이제 **첫 카드**를 눌러 되돌아가는지 본다. 판정은 활성 탭 번호만 보지 않는다 —
+        // 그것은 내가 부른 `selectTab` 을 되읽는 동어반복이다. **터미널 격자의 지문**을 견준다.
+        if (spins == 530 and sessions.items.len > 1) {
+            switch_judgeable = true;
+            grid_digest_before_switch = activeGridDigest(io, &app_window);
+            active_before_switch = app_window.active_tab;
+            var rows_buf: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rws = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rows_buf);
+            const m_sw = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const y0 = maru.chrome.components.sidebar.rowTop(rws, 0, sidebar_header_h, m_sw, 0);
+            const cy: i32 = @intCast(geom.sidebar.y + @as(u32, @intCast(@max(0, y0))) + cell_h);
+            const cx: i32 = @intCast(sidebar_w / 2);
+            window.postSyntheticMouse(.moved, cx, cy);
+            window.postSyntheticMouse(.left_down, cx, cy);
+            window.postSyntheticMouse(.left_up, cx, cy);
+        }
+        // ── 세션이 둘일 때 창 크기를 바꾼다 (W8.8⒞) ────────────────────────────────────────
+        //
+        // **이것이 없으면 `sessions_wrong_size` 가 못 잰다.** 위 캡션 판정의 리사이즈는 전부
+        // spawn **앞**에서 일어나므로, 배경 세션만 옛 격자로 남는 실패를 밟을 자리가 없다
+        // (실측: 활성만 리사이즈하는 뮤턴트가 그 상태에서 살아남았다).
+        // **되돌아오지 않는 리사이즈여야 한다.** 최대화→복원 왕복은 크기가 제자리로 와서 배경
+        // 세션이 뒤처진 것을 덮는다(실측: 왕복으로는 뮤턴트가 살아남았다). 디바이더를 끌면
+        // 터미널 격자가 **그대로 좁아진 채** 남는다.
+        if (spins == 600 and sessions.items.len > 1 and geom.divider.w != 0) {
+            const gx: i32 = @intCast(geom.divider.x + geom.divider.w / 2);
+            window.postSyntheticMouse(.left_down, gx, 300);
+            window.postSyntheticMouse(.moved, gx - 60, 300);
+            window.postSyntheticMouse(.left_up, gx - 60, 300);
+        }
+        if (spins == 560 and switch_judgeable) {
+            grid_digest_after_switch = activeGridDigest(io, &app_window);
+            // **시간 비교는 혼입된다** — 셸이 계속 출력하므로 전환을 안 해도 지문이 바뀐다(실측:
+            // `selectTab` 을 막은 뮤턴트에서도 `grid_changed=true` 였다). 그래서 **활성 화면이
+            // 지금 어느 세션의 것인가**를 직접 본다: 활성 지문이 그 세션 것과 같고 **다른 세션과는
+            // 다른가**.
+            const sel = surfaceGridStats(io, &sessions.items[app_window.active_tab].surface);
+            const other_idx: usize = if (app_window.active_tab == 0) 1 else 0;
+            const other = surfaceGridStats(io, &sessions.items[other_idx].surface);
+            active_matches_selected = grid_digest_after_switch == sel.digest and sel.digest != other.digest;
+            // **배경 세션 화면이 살아 있는가.** 잉크 셀이 있으면 그 세션의 셸 출력이 코어에
+            // 적용된 것이다 — 리더 스레드가 한 일이다(pump 가 아니다, 위 주석).
+            background_ink = other.ink;
         }
         if (spins == 450 and titlebar_px != 0) {
             frameless_covers = window.clientCoversWindow();
@@ -3381,7 +3659,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
-                    loop.resizeActiveSurface(size) catch {};
+                    resizeAllSessions(&runtime, sessions.items, size, io);
                     // **리사이즈도 판정한다.** 여기가 없으면 불변식이 **첫 프레임에서만** 지켜진다 —
                     // `resizeActiveSurface` 가 실패하면(위 `catch {}`) 기하는 바뀌었는데 코어는 옛
                     // 격자로 남고, 화면은 그럴듯한 채로 셸의 줄바꿈만 어긋난다.
@@ -3400,7 +3678,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -3540,7 +3818,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             dock_size_pt = maru.session.dock_layout.sizePtForEffectiveWidth(geom.dock_size_px, 0, 1000);
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
-                                loop.resizeActiveSurface(size) catch {};
+                                resizeAllSessions(&runtime, sessions.items, size, io);
                             rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                 dock_rebuild_failures += 1;
                             };
@@ -3583,11 +3861,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         );
                         break :blk if (r == .none) null else r;
                     };
-                    const sb_rows = [_]maru.chrome.components.sidebar.Row{.{ .card = .{ .tab = 0, .label = sidebar_card.name, .active = true, .lines = @intCast(sidebar_card.lines) } }};
+                    // **그리는 쪽과 같은 행 목록을 쓴다** — 여기서 따로 만들면 카드 높이가 갈려
+                    // 그린 자리와 눌리는 자리가 어긋난다.
+                    var sb_rows_buf: [16]maru.chrome.components.sidebar.Row = undefined;
+                    const sb_rows = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &sb_rows_buf);
                     const next_slot = maru.chrome.components.sidebar.slotAt(
                         local_y,
                         sidebar_header_h,
-                        &sb_rows,
+                        sb_rows,
                         maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h),
                         0,
                     );
@@ -3595,15 +3876,45 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         sidebar_hover_header = next_header;
                         sidebar_hover_slot = next_slot;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
                     }
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
                             sidebar_header_clicks += 1;
                             sidebar_last_header = r;
+                            // ── ＋ 가 세션을 만든다 (W8.8⒞) ────────────────────────────
+                            //
+                            // **여기가 유일한 spawn 자리다.** 세션이 하나 늘면 카드 목록·탭
+                            // 슬라이스를 함께 다시 만들어야 한다 — 안 그러면 사이드바가 옛
+                            // 목록을 그리고 `slotAt` 이 없는 카드를 가리킨다.
+                            //
+                            // **실패해도 창은 산다.** PTY 를 못 띄우는 것(자식 프로세스 상한 등)은
+                            // 있을 수 있는 일이고, 그때 앱이 죽으면 이미 열린 세션까지 잃는다.
+                            if (r == .new_workspace and sessions.items.len < max_win_sessions) {
+                                // **지금 크기로 만든다.** 활성 표면의 격자가 창이 아는 최신 값이다.
+                                if (app_window.active()) |a| spawn_opts.size = a.core.size;
+                                if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, spawn_opts)) {
+                                    session_spawns += 1;
+                                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, folder_name) catch {};
+                                    // 새 세션을 **바로 활성으로** 만든다 — 만들고 안 보여 주면
+                                    // 눌린 것이 화면에 안 나타난다.
+                                    _ = app_window.selectTab(sessions.items.len - 1);
+                                    sidebar_redraws += 1;
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
+                                } else |_| {
+                                    session_spawn_failures += 1;
+                                }
+                            }
                         } else if (next_slot) |s| {
                             sidebar_card_clicks += 1;
                             sidebar_last_slot = s;
+                            // **카드를 누르면 그 세션으로 간다.** 판정은 중립이 소유한다
+                            // (`AppWindow.selectTab` — 범위 밖이면 false).
+                            if (s != app_window.active_tab and app_window.selectTab(s)) {
+                                tab_switches += 1;
+                                sidebar_redraws += 1;
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
+                            }
                         }
                     }
                     continue;
@@ -3629,7 +3940,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
-                                        loop.resizeActiveSurface(size) catch {};
+                                        resizeAllSessions(&runtime, sessions.items, size, io);
                                     rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                         dock_rebuild_failures += 1;
                                     };
@@ -3939,7 +4250,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             },
         };
 
-        var tick = try loop.tickWithFrameBuilder(builder);
+        // ── 세션 **전부**를 드레인한다 (W8.8⒞) ──────────────────────────────────────────────
+        //
+        // `AppFrameLoop.tickWithFrameBuilder` 는 자기 pump **하나만** 비운다. macOS 도 tick 이 모든
+        // Term pump 를 돈다 — 같은 모양으로, 우리가 드레인하고 요약만 넘긴다.
+        //
+        // **무엇을 위해서인지 정확히 적는다**(처음에 틀리게 적었다): `process_in_reader = true` 라
+        // **셸 출력은 리더 스레드가 코어에 직접 적용한다** — pump 를 안 비워도 배경 세션 화면은
+        // 채워진다(실측: 배경 pump 를 막은 뮤턴트에서 `background_ink` 가 그대로였다). pump 가
+        // 나르는 것은 **종료·read_error** 다. 안 비우면 배경 세션이 끝난 것을 아무도 못 보고 큐가
+        // 자란다.
+        //
+        // **요약은 활성 세션 것을 넘긴다.** 프레임을 만드는 것은 활성 표면 하나이고, 종료 판정도
+        // 그 세션의 것이어야 한다(다른 탭이 끝났다고 창을 닫으면 안 된다).
+        var active_drain: maru.app.RuntimePumpDrainSummary = .{};
+        for (sessions.items, 0..) |s, i| {
+            const ds = s.pump.drainAvailable() catch continue;
+            if (i == app_window.active_tab) active_drain = ds;
+        }
+        var tick = try loop.tickAfterDrainWithFrameBuilder(active_drain, builder);
         defer tick.deinit(allocator);
         counts.add(tick.frame.render_frame);
         if (tick.ended()) ended = true;
@@ -4179,12 +4508,49 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             sidebar_last_slot,
             sidebar_header_clicks,
             if (sidebar_last_header) |h| @tagName(h) else "none",
-            sidebar_card_clicks == 1 and sidebar_last_slot != null and sidebar_last_slot.? == 0 and
+            // **횟수를 못 박지 않는다** — ⒞ 의 전환 판정이 카드를 한 번 더 누른다. 이 판정이 묻는
+            // 것은 "눌리는가와 어느 슬롯인가" 이지 "몇 번 눌렀나" 가 아니다.
+            sidebar_card_clicks >= 1 and sidebar_last_slot != null and sidebar_last_slot.? == 0 and
                 sidebar_header_clicks == 1 and sidebar_last_header == .new_workspace and sidebar_redraws > 0 and
                 hoverIsBrighter(&chrome_tokens),
         });
     } else {
         try stdout.print("sidebar_click=unjudgeable reason=no_sidebar_or_header sidebar_w={d} header_h={d}\n", .{ sidebar_w, sidebar_header_h });
+    }
+    // **모든 세션이 지금 창 크기를 안다.** 활성만 리사이즈하면 배경 세션은 옛 격자를 들고 있다가
+    // 전환하는 순간 어긋난 화면을 낸다. 새로 만든 세션도 **그때의** 크기를 받아야 한다.
+    {
+        const want = if (app_window.active()) |a| a.core.size else start;
+        var wrong: usize = 0;
+        for (sessions.items) |s| {
+            const sz = s.surface.core.size;
+            if (sz.cols != want.cols or sz.rows != want.rows) wrong += 1;
+        }
+        try stdout.print("session_grid_want={d}x{d} sessions_wrong_size={d}\n", .{ want.cols, want.rows, wrong });
+    }
+    // ── 세션·전환 판정 (W8.8⒞) ──────────────────────────────────────────────────────────────
+    try stdout.print("sessions={d} spawns={d} spawn_failures={d} tab_switches={d} cards={d}\n", .{
+        sessions.items.len,
+        session_spawns,
+        session_spawn_failures,
+        tab_switches,
+        sidebar_cards.items.len,
+    });
+    if (switch_judgeable) {
+        // **동어반복을 피한다.** `active_tab` 이 바뀐 것만 보면 내가 부른 `selectTab` 을 되읽는
+        // 것이다. 두 세션의 셸이 각자 프롬프트를 찍으므로 **격자 지문**이 달라야 한다 — 그것이
+        // "화면이 실제로 그 세션을 보고 있다" 의 증거다.
+        try stdout.print("switch_before_tab={d} switch_after_tab={d} active_matches_selected={} background_ink={d} switch_ok={}\n", .{
+            active_before_switch,
+            app_window.active_tab,
+            active_matches_selected,
+            background_ink,
+            app_window.active_tab != active_before_switch and
+                active_matches_selected and background_ink > 0 and
+                sessions.items.len > 1,
+        });
+    } else {
+        try stdout.print("session_switch=unjudgeable reason=single_session sessions={d}\n", .{sessions.items.len});
     }
     // ── 사이드바 헤더 판정 (W8.8⒝) ─────────────────────────────────────────────────────────
     //
@@ -4347,7 +4713,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **설정이 코어까지 갔는지 값으로 본다.** 색은 화면으로 판정되지만 스크롤백 길이는 안 보인다 —
     // 안 세면 `scrollback.lines` 를 바꿔도 무동작인 것을 못 잡는다(예전이 그랬다).
     try stdout.print("config_runtime: scrollback_cap={d} palette_set={d} cursor_shape={s}\n", .{
-        surfaces[0].core.screen.sb.cap,
+        sessions.items[0].surface.core.screen.sb.cap,
         blk: {
             var n: usize = 0;
             for (appearance.theme.palette) |c| {

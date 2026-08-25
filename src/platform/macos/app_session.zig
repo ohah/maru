@@ -21164,11 +21164,18 @@ test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 �
     defer a.free(after);
     try std.testing.expectEqualStrings(stale_text.items, after);
 
-    // ④ tick 이 부르는 그 함수가 사용자에게 한 번 띄우고 끈다.
+    // ④ **tick 이 실제로 부르는 경로**로 확인한다 — `showPending…` 을 직접 부르면 「세는 것」만 보고
+    // «그 함수가 tick 에 걸려 있는가» 는 못 본다. 그 구멍이 예전에 원격 화면을 통째로 안 그리게 만든 적이
+    // 있다(렌더 입력만 검증하고 실제 게이트는 안 봤다). 그래서 `runFramePreHousekeeping` 을 그대로 부른다.
+    session.update_started = true; // 첫 tick 의 새 버전 백그라운드 체크는 네트워크라 테스트에서 끈다.
     try std.testing.expect(!session.chrome_host.notice.open);
-    session.showPendingAgentHookTrustNotice();
+    session.runFramePreHousekeeping();
     try std.testing.expect(session.chrome_host.notice.open);
-    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale); // 한 번 띄우고 끈다(매 tick 반복 금지)
+    // 그 tick 이 파일을 건드리지도 않았다.
+    const after_tick = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
+    defer a.free(after_tick);
+    try std.testing.expectEqualStrings(stale_text.items, after_tick);
 }
 
 test "agent hooks stay out of provider files while the gate is off" {

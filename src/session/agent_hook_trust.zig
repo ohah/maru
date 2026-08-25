@@ -858,6 +858,36 @@ test "갱신해도 껐다 켜면 원래 바이트로 돌아온다" {
     try testing.expectEqualStrings(user, removed.items);
 }
 
+test "표식 없던 항목을 고친 뒤 껐다 켜도 사용자 내용이 남는다" {
+    const a = testing.allocator;
+    const key = "/h.json:stop:1:0";
+    // codex 가 사용자 승인으로 적은 모양이다 — **우리 표식이 없고 앞뒤로 남의 테이블이 붙어 있다.**
+    // 갱신이 여기에 표식을 넣으므로, 그 뒤 «끄기» 가 남의 것을 함께 지우면 안 된다.
+    const before =
+        "model = \"gpt-5\"\n" ++
+        "\n[hooks.state]\n" ++
+        "\n[hooks.state.\"" ++ key ++ "\"]\ntrusted_hash = \"sha256:old\"\n" ++
+        "\n[tui]\nvalue = 1\n";
+
+    var refreshed: std.ArrayListUnmanaged(u8) = .empty;
+    defer refreshed.deinit(a);
+    try testing.expect(try rewriteTrustEntry(&refreshed, a, before, key, "sha256:new"));
+    try testing.expectEqualStrings("sha256:new", storedHash(refreshed.items, key).?);
+
+    var removed: std.ArrayListUnmanaged(u8) = .empty;
+    defer removed.deinit(a);
+    try testing.expect(try removeTrustEntries(&removed, a, refreshed.items));
+
+    // 우리 것만 사라지고 남의 것은 **내용도 순서도** 그대로다.
+    try testing.expect(std.mem.indexOf(u8, removed.items, key) == null);
+    try testing.expect(std.mem.indexOf(u8, removed.items, command.marker) == null);
+    const model_at = std.mem.indexOf(u8, removed.items, "model = \"gpt-5\"") orelse return error.TestUnexpectedResult;
+    const state_at = std.mem.indexOf(u8, removed.items, "[hooks.state]") orelse return error.TestUnexpectedResult;
+    const tui_at = std.mem.indexOf(u8, removed.items, "[tui]") orelse return error.TestUnexpectedResult;
+    try testing.expect(model_at < state_at and state_at < tui_at);
+    try testing.expect(std.mem.indexOf(u8, removed.items, "value = 1") != null);
+}
+
 test "이웃 키를 우리 키로 오인하지 않는다 — 접두가 같은 이름이 먼저 와도" {
     const key = "/h.json:stop:0:0";
     // 상대편이 필드를 하나 늘리면 이런 모양이 된다. 접두만 보면 **그 값을 우리 값으로 읽고**,

@@ -21164,9 +21164,24 @@ test "codex 신뢰 값이 낡으면 알린다 — 그리고 그 값을 덮지 �
     defer a.free(after);
     try std.testing.expectEqualStrings(stale_text.items, after);
 
-    // ④ **tick 이 실제로 부르는 경로**로 확인한다 — `showPending…` 을 직접 부르면 「세는 것」만 보고
-    // «그 함수가 tick 에 걸려 있는가» 는 못 본다. 그 구멍이 예전에 원격 화면을 통째로 안 그리게 만든 적이
-    // 있다(렌더 입력만 검증하고 실제 게이트는 안 봤다). 그래서 `runFramePreHousekeeping` 을 그대로 부른다.
+    // ④ **아직 알리기 전에** 고쳐지면 세었던 수가 내려가야 한다. 사용자가 codex 에서 승인하면 codex 가
+    // **같은 커맨드로** 값을 다시 계산해 적으므로 우리 값과 같아진다 — 그 값은 «지금 어긋난 개수» 이지
+    // «어긋난 적이 있다» 가 아니다. latch 로 두면 멀쩡해진 뒤에 거짓 알림이 뜬다.
+    //
+    // **순서가 이 판정의 전부다.** 알린 뒤에 확인하면 그때는 이미 0 이라 latch 를 못 본다(실제로 그렇게
+    // 썼다가 뮤테이션이 «안 잡힘» 으로 드러났다).
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = installed });
+    agent_ops.reconcileAgentHooks(&session);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_hook_trust_stale);
+
+    // ⑤ 다시 낡게 만들고, 이번엔 **tick 이 실제로 부르는 경로**로 알림까지 확인한다. `showPending…` 을
+    // 직접 부르면 「세는 것」만 보고 «그 함수가 tick 에 걸려 있는가» 는 못 본다 — 그 구멍이 예전에 원격
+    // 화면을 통째로 안 그리게 만든 적이 있다(렌더 입력만 보고 실제 게이트는 안 봤다).
+    try tmp.dir.writeFile(io, .{ .sub_path = "codex/config.toml", .data = stale_text.items });
+    agent_ops.reconcileAgentHooks(&session);
+    try std.testing.expectEqual(@as(u32, hook_command.codex_events.len), session.agent_hook_trust_stale);
+
     session.update_started = true; // 첫 tick 의 새 버전 백그라운드 체크는 네트워크라 테스트에서 끈다.
     try std.testing.expect(!session.chrome_host.notice.open);
     session.runFramePreHousekeeping();

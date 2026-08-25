@@ -728,7 +728,9 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
     // `follow_symlinks = false` 일 때 `NtCreateFile` 을 `.IO = .ASYNCHRONOUS` 로 부르면서도 언제나
     // `.flags = .{ .nonblocking = false }` 를 돌려준다(zig 0.16.0 `std/Io/Threaded.zig:5033` 과
     // 그 함수의 두 return). 그러면 `readFilePositionalWindows` 가 동기 분기로 가고, 비동기 핸들이
-    // 낸 `PENDING` 을 `unreachable` 로 받아 **프로세스가 죽는다** — 이 경로가 Windows 에서 처음
+    // 낸 `PENDING` 을 `unreachable` 로 받아 **프로세스가 죽는다**. 어느 값이 맞는지는 std 자신이
+    // 정해 뒀다 — `File.Flags.nonblocking` 의 doc 이 `true` 를 *"windows: opened with
+    // MODE.IO.ASYNCHRONOUS"* 로 정의한다. 즉 아래가 그 규약이고, 어긴 것은 반환값이다. 이 경로가 Windows 에서 처음
     // 돌자 그 자리에서 패닉했다(실측 2026-08-25). 그 함수의 비동기 분기는 `PENDING` 을 제대로
     // 기다리므로, **실제 핸들 모드에 플래그를 맞춰** 그쪽으로 보낸다. `follow_symlinks` 를 켜서
     // 동기 핸들을 받는 길도 있지만 그것은 위 대조를 무력화하므로 택하지 않는다.

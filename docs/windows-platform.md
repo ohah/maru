@@ -4552,6 +4552,10 @@ thread panic: reached unreachable code
 끝). 그러면 `readFilePositionalWindows` 가 **동기 분기**로 가고, 비동기 핸들이 낸 `PENDING` 을
 `unreachable` 로 받는다. 같은 함수의 **비동기 분기는 `PENDING` 을 제대로 기다린다.**
 
+**어느 값이 맞는지는 std 자신이 정해 뒀다.** `File.Flags.nonblocking` 의 doc 이 `true` 를
+*"windows: opened with MODE.IO.ASYNCHRONOUS"* 로 정의한다 — 그 핸들이 정확히 그렇게 열렸다.
+그러니 이것은 우회가 아니라 **그 구조체의 문서화된 불변식을 지키는 것**이고, 어긴 쪽은 반환값이다.
+
 고침은 **실제 핸들 모드에 플래그를 맞추는 것**이다(Windows 에서만). `follow_symlinks` 를 켜서 동기
 핸들을 받는 길도 있지만, 그 플래그는 **바로 아래 inode·device 대조와 한 쌍**이라(심링크를
 갈아끼워 다른 파일을 읽히는 것을 막는다) 택하지 않았다.

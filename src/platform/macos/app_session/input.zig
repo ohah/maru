@@ -30,6 +30,7 @@ const ImeCursorRect = app_session_mod.ImeCursorRect;
 const term_ops = @import("term.zig");
 const barMetrics = app_session_mod.barMetrics;
 const pane_ops = @import("pane.zig");
+const editor_ops = @import("editor.zig");
 const settings_ops = @import("settings.zig");
 const shouldReplayAfterCommit = AppSession.shouldReplayAfterCommit;
 const sidebar_ops = @import("sidebar.zig");
@@ -446,6 +447,22 @@ pub fn sendTextAsKeys(self: *AppSession, bytes: []const u8) void {
 /// 순서를 지킨다(다른 surface의 잔여와는 애초에 안 섞인다 — 옛 단일 FIFO는 서로 막고 섞였다).
 pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
     if (!self.surface_initialized or bytes.len == 0) return true;
+
+    // **편집기 Term이면 PTY가 아니라 문서로 간다**(N2 — §3.3).
+    //
+    // macOS는 평범한 글자를 `NSTextInputClient` 확정으로 보내므로 **타이핑의 실제 경로가 여기다** —
+    // `handleKeyEvent`에는 Option+글자 같은 meta chord만 도달한다(아래 `.terminal_input` 주석이 같은
+    // 사실을 적어 둔다). 그래서 편집기 분기를 키 경로에만 두면 **글자가 하나도 안 들어간다.**
+    //
+    // **IME 조합 중에는 여기 오지 않는다** — 조합이 끝나 확정된 것만 온다. 한글은 N3에서 붙는다.
+    {
+        const active = pane_ops.activePane(self).activeTerm();
+        if (active.kind == .editor) {
+            _ = editor_ops.insertText(self, active, bytes);
+            self.metal_dirty = true;
+            return true; // 편집기가 삼켰다 — PTY로 흘리지 않는다
+        }
+    }
     // imeBegin/첫 marked update가 고정한 대상이 있으면 그 surface로 보낸다. AppKit 콜백 사이에
     // 활성 pane/tab이 바뀌어도 확정 바이트가 새 터미널로 새지 않는다.
     const target_id = self.ime_terminal_target_id orelse term_ops.activeSurface(self).id;

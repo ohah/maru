@@ -139,6 +139,18 @@ pub const Action = union(enum) {
     // **터미널에서 pane split이 사라진다.** 그래서 아무도 안 쓰는 chord로 먼저 열어 두고, 포커스
     // 컨텍스트가 서는 슬라이스에서 `⌘D`로 옮긴다.
     add_next_occurrence,
+    // 편집기의 **되돌리기·다시 하기**(§3.3 — 선형 스택, 연속 타이핑은 한 묶음).
+    //
+    // **기본 chord가 없다** — `⌘Z`는 터미널·웹 편집기 컨텍스트가 이미 쓰고, 편집기 Term 컨텍스트가
+    // 서기 전에는 조건부로 양보할 자리가 없다(`copy_editor_selection`·`fold_all`과 같은 이유·같은
+    // N2 몫). 그때까지는 커맨드 팝업과 사용자 키바인딩으로 쓴다.
+    editor_undo,
+    editor_redo,
+    // 편집기 문서를 디스크에 쓴다(§3.5 — BOM·끝 개행을 연 그대로 되돌린다).
+    //
+    // **기본 chord가 없다** — `⌘S`는 파일 패널(CM6)이 이미 쓰고, 편집기 Term 컨텍스트가 서기
+    // 전에는 조건부로 양보할 자리가 없다(같은 N2 몫). 그때까지는 커맨드 팝업과 사용자 키바인딩.
+    editor_save,
     // 그 **중첩 레벨**의 블록만 접는다(VSCode `editor.foldLevelN`). 레벨 1이 문서 맨 바깥이다.
     // **셋까지만 낸다** — 커맨드 팝업 항목이 레벨마다 하나씩 늘고, 4단계보다 깊은 곳을 레벨로
     // 지목하는 일은 드물다(그 깊이는 전체 접기가 더 빠르다). VSCode는 7까지 두지만 그쪽은 chord로
@@ -220,6 +232,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;
+    if (std.mem.eql(u8, value, "editor_undo")) return .editor_undo;
+    if (std.mem.eql(u8, value, "editor_redo")) return .editor_redo;
+    if (std.mem.eql(u8, value, "editor_save")) return .editor_save;
     if (std.mem.eql(u8, value, "fold_all")) return .fold_all;
     if (std.mem.eql(u8, value, "unfold_all")) return .unfold_all;
     if (std.mem.eql(u8, value, "fold_level_1")) return .fold_level_1;

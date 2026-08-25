@@ -2509,3 +2509,53 @@ test "stepColumn 계측이 두 경로를 갈라 센다" {
     try std.testing.expect(slow_path_steps > 0);
     try std.testing.expect(slow_path_steps < total_steps);
 }
+
+test "왕복 불변식 ①: 보이는 offset은 왕복한다 — 실제 페인트 경로로 (§4.1g)" {
+    // **계약이 "지금 검증할 수 없다"고 적어 둔 불변식이다**(§4.1g: *"`caretRect`(정방향)는 아직
+    // 없다 — 커서가 생기는 N2의 일이고, 그래서 왕복 불변식 ①②는 지금 검증할 수 없다"*).
+    //
+    // **정방향을 새로 짓지 않는다.** `columnsAtOffsets`가 이미 "이 byte는 몇 열인가"를 답하고
+    // `paintRowMarks`가 그것으로 x를 낸다 — caret도 같은 길을 타야 §5.4의 "view와 hitTest가 하나의
+    // 픽셀-레이아웃 소스를 공유한다"가 지켜진다. 처음에 `caretSpan`이라는 정방향 함수를 따로
+    // 지었다가 **같은 걸음을 두 번 걷는 두 번째 출처**임을 깨닫고 걷어냈다.
+    //
+    // 왕복은 **정방향에서만** 성립한다: 가려지지 않은 offset은 화면에 자기 자리가 정확히 하나 있고
+    // 그 자리를 다시 물으면 자신이 나온다. 역방향은 clamp라 여럿이 하나로 간다(불변식 ③).
+    const cases = [_][]const u8{
+        "hello world",
+        "\ttabbed\ttext",
+        "한글과 ascii 섞임",
+        "emoji 🙂 mid",
+        "a\tb\tc",
+    };
+    const cell_w: u16 = 8;
+    for (cases) |bytes| {
+        for ([_]u16{ 2, 4, 8 }) |tab| {
+            const row_cols: u32 = 400; // 줄이 통째로 한 행에 들어간다
+            var off: u32 = 0;
+            while (off <= bytes.len) : (off += 1) {
+                // ① 정방향: byte → 열 → 픽셀 (paintRowMarks와 같은 산술)
+                var one = [_]u32{off};
+                var col_out = [_]u32{0};
+                content_columnsAtOffsets(bytes, tab, &one, &col_out, row_cols);
+                const x_px: i32 = @intCast(col_out[0] * cell_w);
+
+                // ② 역방향: 픽셀 → byte
+                const back = byteAtPoint(bytes, tab, 0, 0, 0, row_cols, x_px, cell_w);
+
+                // ③ 왕복: 되돌아온 offset의 열이 같아야 한다. **byte가 아니라 열로 비교한다** —
+                //    cluster 중간을 가리키는 offset은 같은 자리를 뜻하는 다른 byte로 접히고,
+                //    그것은 clamp가 아니라 §3.1의 offset이 byte 축이라서 생기는 동치다.
+                var back_one = [_]u32{@intCast(back)};
+                var back_col = [_]u32{0};
+                content_columnsAtOffsets(bytes, tab, &back_one, &back_col, row_cols);
+                try std.testing.expectEqual(col_out[0], back_col[0]);
+            }
+        }
+    }
+}
+
+/// 위 판정자가 쓰는 얇은 감쌈 — `columnsAtOffsets`는 `[]align(1)`을 받는다.
+fn content_columnsAtOffsets(bytes: []const u8, tab: u16, offsets: []u32, out: []u32, stop_col: u32) void {
+    columnsAtOffsets(bytes, tab, offsets, out, stop_col);
+}

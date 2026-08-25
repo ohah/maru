@@ -14,6 +14,7 @@ const maru = @import("maru");
 const editor = maru.session.editor;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
+const file_panel_ops = @import("file_panel.zig");
 const command_catalog = @import("../command_catalog.zig");
 const Term = app_session_mod.Term;
 const Pane = app_session_mod.Pane;
@@ -178,6 +179,10 @@ pub fn buildPaneOps(
     /// 이 Term이 검색 대상이 아니다(활성이 아닌 pane — 그쪽까지 칠하면 어디를 검색 중인지 흐려진다).
     search_marks: ?[]const []const chrome_editor.frame.Mark,
     search_current: ?chrome_editor.frame.CurrentMatch,
+    /// 논리 줄마다의 **커서 자리**(줄 안 byte offset, 오름차순). `null`이면 커서가 없다.
+    carets: ?[]const []const u32,
+    /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다.
+    caret_visible: bool,
     wrap: bool,
     /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
     /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
@@ -198,7 +203,7 @@ pub fn buildPaneOps(
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
         .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current },
-        .{ .first_line = first_line, .first_piece = first_piece, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
+        .{ .first_line = first_line, .first_piece = first_piece, .carets = carets, .caret_visible = caret_visible, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
         // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
@@ -866,7 +871,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -883,7 +888,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -1639,6 +1644,73 @@ pub fn copySelection(self: *AppSession) bool {
     return true;
 }
 
+/// 커서 자리를 **보이는 줄 축**으로 자른다 — `buildSelectionMarks`와 같은 축·같은 이유다.
+///
+/// **띠와 따로 만드는 이유**: 커서는 길이 0이라 `Mark`로 쓸 수 없고(폭 0 사각은 안 보인다),
+/// 선택이 있는 커서도 caret은 **focus 쪽 한 점**에 선다 — 띠의 끝과 같은 자리가 아닐 수 있다
+/// (뒤로 끌면 focus가 앞쪽이다).
+///
+/// 저장소는 `Term.rt`가 들고 재사용한다(프레임마다 잡지 않는다 — 마크가 그러듯).
+fn buildCaretRows(self: *AppSession, term: *Term) ?[]const []const u32 {
+    var iter = selections(term);
+    const cursor_count = iter.count();
+    if (cursor_count == 0) return null;
+    const doc = term.rt.editor_doc orelse return null;
+
+    const numbers = term.rt.editor_visible_numbers;
+    const visible = term.rt.editor_visible_lines;
+    const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
+    if (lines_len == 0) return null;
+
+    if (term.rt.editor_caret_rows.len < lines_len or term.rt.editor_caret_buf.len < cursor_count) {
+        const grown_rows = self.allocator.alloc([]const u32, lines_len) catch return null;
+        const grown_buf = self.allocator.alloc(u32, cursor_count) catch {
+            self.allocator.free(grown_rows);
+            return null;
+        };
+        if (term.rt.editor_caret_rows.len > 0) self.allocator.free(term.rt.editor_caret_rows);
+        if (term.rt.editor_caret_buf.len > 0) self.allocator.free(term.rt.editor_caret_buf);
+        term.rt.editor_caret_rows = grown_rows;
+        term.rt.editor_caret_buf = grown_buf;
+    }
+    const rows = term.rt.editor_caret_rows[0..lines_len];
+    const buf = term.rt.editor_caret_buf[0..cursor_count];
+    @memset(rows, &.{});
+
+    // **문서 순서로 모은다** — 렌더가 한 줄의 위치들이 오름차순이라고 보고(`columnsAtOffsets`가
+    // 그것을 단언한다), 커서 추가 순서로 채우면 그 계약이 깨진다. 띠 쪽에서 겪은 그 결함이다.
+    var focuses = buf;
+    var n: usize = 0;
+    while (iter.next()) |sel| {
+        focuses[n] = @intCast(@min(sel.focus, doc.file.content.len));
+        n += 1;
+    }
+    focuses = focuses[0..n];
+    std.mem.sort(u32, focuses, {}, std.sort.asc(u32));
+
+    // 줄과 커서가 둘 다 문서 순서이므로 함께 걷는다(띠와 같은 병합 훑기).
+    var first: usize = 0;
+    var at: usize = 0;
+    var any = false;
+    for (0..lines_len) |i| {
+        const line = visibleDocLine(doc, numbers, visible, i) orelse continue;
+        const line_end = line.contentEnd();
+        while (first < focuses.len and focuses[first] < line.start) first += 1;
+        const row_start = at;
+        var k = first;
+        while (k < focuses.len and focuses[k] <= line_end) : (k += 1) {
+            buf[at] = focuses[k] - @as(u32, @intCast(line.start));
+            at += 1;
+        }
+        if (at > row_start) {
+            rows[i] = buf[row_start..at];
+            any = true;
+        }
+    }
+    if (!any) return null;
+    return rows;
+}
+
 /// primary와 나머지 커서를 **합쳐 보는 유일한 통로**(§3.2 멀티 selection).
 ///
 /// `editor_selection`만 읽으면 커서가 여럿일 때 **하나만 보인다** — 그 결함은 화면에서 조용하다
@@ -1755,6 +1827,7 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
         found.end,
         if (found_is_word) .word else .match,
     );
+    breakUndoGroup(term); // 커서가 늘었다 — 다음 타이핑은 새 묶음이다(§3.3)
     self.metal_dirty = true;
     return true;
 }
@@ -2222,6 +2295,9 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) 
     const off = hitTestBody(term, x_px, y_px) orelse return false;
     // 클릭 한 번이 멀티커서를 정리한다 — 안 그러면 사용자가 커서를 없앨 방법이 없다(§9.1).
     clearExtraSelections(self, term);
+    // **커서가 편집 아닌 이유로 움직였다 — undo 묶음을 끊는다**(§3.3). 안 끊으면 클릭 뒤 친
+    // 글자를 되돌릴 때 클릭 **전** 타이핑까지 함께 사라진다.
+    breakUndoGroup(term);
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
     self.metal_dirty = true;
@@ -2566,6 +2642,7 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // 바로 그 상태다). 빈 줄에 caret을 두는 것이 옳다: 고를 것이 없다.
     const kind = if (range.lo == range.hi) editor_selection.AnchorKind.simple else range.kind;
     clearExtraSelections(self, term);
+    breakUndoGroup(term); // 위와 같은 이유(§3.3)
     term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, kind);
     // **드래그를 이어서 arm한다** — 더블클릭 후 끌면 단어 단위로 늘어난다. 뗌이 소유권을 놓는다.
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
@@ -3221,6 +3298,533 @@ pub fn setEditorTabWidth(self: *AppSession, term: *Term, tab_width: u8) void {
 /// 채 남고, 다음 `ensureFoldRanges`가 `folded_len`을 0으로 만들면 `unfoldAll`이 `folded_len == 0`을
 /// 보고 **거절해 숨은 줄을 영영 못 되찾는다**(`applyFold` doc이 2026-08-17에 막은 그 상태다 —
 /// 14차 실측: 8줄 문서에서 5줄이 숨은 채 `unfoldAll = false`).
+/// undo 스택 한 항목. **역연산과 그때의 커서를 함께 든다**(§3.3).
+///
+/// `Inverse`가 할당을 소유하므로 이 항목을 버릴 때는 **반드시 `deinit`** 한다 — 스택을 자르는
+/// 자리가 넷이라(새 편집이 redo를 버릴 때·상한을 넘을 때·Term이 죽을 때·문서를 다시 열 때)
+/// 한 곳만 빠뜨려도 샌다.
+pub const UndoEntry = struct {
+    inverse: maru.session.editor.delta.Inverse,
+    /// **편집 전** 커서들(문서 순서). §3.3: *"undo/redo는 텍스트뿐 아니라 그 시점의 selection
+    /// 배열 전체와 primary 인덱스를 되돌린다."*
+    sels_before: []editor_selection.Selection,
+    primary_before: usize,
+    /// 묶음 번호. **같은 번호는 한 번의 undo로 함께 돌아간다.**
+    group: u32,
+
+    pub fn deinit(self: *UndoEntry, allocator: std.mem.Allocator) void {
+        self.inverse.deinit();
+        allocator.free(self.sels_before);
+        self.* = undefined;
+    }
+};
+
+/// 마지막 편집의 종류. 종류가 바뀌면 묶음을 끊는다(§3.3).
+pub const EditKind = enum { none, insert, delete };
+
+/// 연속 타이핑으로 볼 시간 간격(ms). 이보다 벌어지면 묶음을 끊는다.
+///
+/// **재서 정한 값이 아니라 관례다** — VSCode·CM6가 비슷한 자리에 500ms 안팎을 쓴다. §10의
+/// 임계값 규율대로 사용자가 불편을 말하면 그때 고친다.
+const undo_group_gap_ms: u64 = 500;
+
+/// undo 스택 상한(항목 수). 넘으면 **가장 오래된 것부터** 버린다.
+///
+/// 무제한으로 두면 긴 세션에서 메모리가 누적된다 — §3.3이 delta를 고른 이유가 그것인데, 스택
+/// 자체에 상한이 없으면 같은 문제가 한 층 위에서 돌아온다.
+const undo_stack_limit: usize = 2048;
+
+/// **묶음을 끊는다** — 커서가 편집 아닌 이유로 움직였을 때 호출한다(클릭·다음 일치 추가).
+///
+/// 안 끊으면 "클릭해서 다른 곳에 커서를 두고 친 글자"가 앞의 타이핑과 한 묶음이 되어 undo 한 번에
+/// 둘 다 사라진다 — 사용자가 예측할 수 없다.
+pub fn breakUndoGroup(term: *Term) void {
+    term.rt.editor_last_edit_kind = .none;
+}
+
+/// 이번 편집이 앞의 것과 같은 묶음인가.
+fn sameUndoGroup(term: *Term, kind: EditKind, now_ms: u64) bool {
+    if (term.rt.editor_last_edit_kind != kind) return false;
+    if (kind == .none) return false;
+    return now_ms -| term.rt.editor_last_edit_ms <= undo_group_gap_ms;
+}
+
+/// 편집 하나를 undo 스택에 쌓는다. **`inverse`의 소유가 여기로 넘어온다.**
+fn pushUndo(
+    self: *AppSession,
+    term: *Term,
+    inverse: maru.session.editor.delta.Inverse,
+    sels_before: []editor_selection.Selection,
+    primary_before: usize,
+    kind: EditKind,
+) void {
+    var owned_inverse = inverse;
+    const now_ms = self.awakeMs();
+    if (!sameUndoGroup(term, kind, now_ms)) term.rt.editor_edit_group +%= 1;
+    term.rt.editor_last_edit_kind = kind;
+    term.rt.editor_last_edit_ms = now_ms;
+
+    // **새 편집은 redo를 버린다**(§3.3).
+    dropRedo(self, term);
+
+    const entry: UndoEntry = .{
+        .inverse = owned_inverse,
+        .sels_before = sels_before,
+        .primary_before = primary_before,
+        .group = term.rt.editor_edit_group,
+    };
+    if (!pushEntry(self, &term.rt.editor_undo, &term.rt.editor_undo_len, entry)) {
+        // 못 쌓으면 **되돌릴 수 없는 편집**이 된다. 그래도 편집 자체는 성사시킨다 —
+        // 여기서 편집을 취소하면 할당 실패 하나가 타이핑을 먹는다.
+        var e = entry;
+        e.deinit(self.allocator);
+        owned_inverse = undefined;
+    }
+}
+
+fn pushEntry(self: *AppSession, stack: *[]UndoEntry, len: *usize, entry: UndoEntry) bool {
+    if (len.* == stack.len) {
+        const next_cap = if (stack.len == 0) 16 else stack.len * 2;
+        const grown = self.allocator.realloc(stack.*, next_cap) catch return false;
+        stack.* = grown;
+    }
+    stack.*[len.*] = entry;
+    len.* += 1;
+
+    // 상한을 넘으면 **가장 오래된 것부터** 버린다.
+    if (len.* > undo_stack_limit) {
+        const drop = len.* - undo_stack_limit;
+        for (stack.*[0..drop]) |*e| e.deinit(self.allocator);
+        std.mem.copyForwards(UndoEntry, stack.*[0 .. len.* - drop], stack.*[drop..len.*]);
+        len.* -= drop;
+    }
+    return true;
+}
+
+fn dropRedo(self: *AppSession, term: *Term) void {
+    for (term.rt.editor_redo[0..term.rt.editor_redo_len]) |*e| e.deinit(self.allocator);
+    term.rt.editor_redo_len = 0;
+}
+
+/// undo·redo 스택을 통째로 놓는다(Term이 죽거나 문서를 다시 열 때).
+pub fn dropUndoState(self: *AppSession, term: *Term) void {
+    for (term.rt.editor_undo[0..term.rt.editor_undo_len]) |*e| e.deinit(self.allocator);
+    for (term.rt.editor_redo[0..term.rt.editor_redo_len]) |*e| e.deinit(self.allocator);
+    if (term.rt.editor_undo.len > 0) self.allocator.free(term.rt.editor_undo);
+    if (term.rt.editor_redo.len > 0) self.allocator.free(term.rt.editor_redo);
+    term.rt.editor_undo = &.{};
+    term.rt.editor_redo = &.{};
+    term.rt.editor_undo_len = 0;
+    term.rt.editor_redo_len = 0;
+    term.rt.editor_last_edit_kind = .none;
+}
+
+/// **되돌린다**(§3.3). 같은 묶음은 함께 돌아간다.
+pub fn undoEdit(self: *AppSession, term: *Term) bool {
+    return stepHistory(self, term, true);
+}
+
+/// **다시 한다**(§3.3).
+pub fn redoEdit(self: *AppSession, term: *Term) bool {
+    return stepHistory(self, term, false);
+}
+
+fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false;
+    if (term.rt.editor_doc == null) return false;
+
+    const from_len = if (is_undo) &term.rt.editor_undo_len else &term.rt.editor_redo_len;
+    if (from_len.* == 0) return false;
+    const from = if (is_undo) &term.rt.editor_undo else &term.rt.editor_redo;
+    const to = if (is_undo) &term.rt.editor_redo else &term.rt.editor_undo;
+    const to_len = if (is_undo) &term.rt.editor_redo_len else &term.rt.editor_undo_len;
+
+    const group = from.*[from_len.* - 1].group;
+    var restored: ?struct { items: []editor_selection.Selection, primary: usize } = null;
+    var did_any = false;
+
+    // **같은 묶음을 연속으로 꺼낸다** — 그것이 "연속 타이핑은 undo 하나"의 구현이다.
+    while (from_len.* > 0 and from.*[from_len.* - 1].group == group) {
+        from_len.* -= 1;
+        var entry = from.*[from_len.*];
+
+        // 되돌릴 때도 selection을 함께 민다 — `apply`가 그 계약이다.
+        var sels = selectionsForEdit(self, term) orelse {
+            entry.deinit(self.allocator);
+            continue;
+        };
+        const back = term.rt.editor_doc.?.file.apply(entry.inverse.delta(), &sels) catch {
+            self.allocator.free(sels.items);
+            entry.deinit(self.allocator);
+            continue;
+        };
+        self.allocator.free(sels.items);
+        did_any = true;
+
+        // 반대편 스택에 **같은 묶음 번호로** 쌓는다 — redo도 한 번에 돌아간다.
+        // 그때의 "편집 전 커서"는 지금 항목이 든 것이다.
+        if (restored) |r| self.allocator.free(r.items);
+        restored = .{ .items = entry.sels_before, .primary = entry.primary_before };
+
+        const mirror: UndoEntry = .{
+            .inverse = back,
+            .sels_before = self.allocator.dupe(editor_selection.Selection, entry.sels_before) catch &.{},
+            .primary_before = entry.primary_before,
+            .group = group,
+        };
+        if (!pushEntry(self, to, to_len, mirror)) {
+            var m = mirror;
+            m.deinit(self.allocator);
+        }
+        entry.inverse.deinit(); // `sels_before`는 위에서 `restored`가 가져갔다
+    }
+
+    if (!did_any) {
+        if (restored) |r| self.allocator.free(r.items);
+        return false;
+    }
+
+    // **커서를 그때로 돌린다**(§3.3). 열 선택 원본은 되살리지 않는다 — 진행 중인 제스처이지
+    // 문서 상태가 아니다.
+    if (restored) |r| {
+        defer self.allocator.free(r.items);
+        if (r.items.len > 0) {
+            term.rt.editor_selection = r.items[@min(r.primary, r.items.len - 1)];
+            clearExtraSelections(self, term);
+            if (r.items.len > 1) {
+                // **`catch &.{}`로 적으면 안 된다** — 빈 슬라이스 리터럴이 `[]const`라 타입이
+                // 그쪽으로 굳고 아래 채우기가 "상수에 대입"이 된다. 실패는 옵셔널로 받는다.
+                if (self.allocator.alloc(editor_selection.Selection, r.items.len - 1)) |extras| {
+                    var k: usize = 0;
+                    for (r.items, 0..) |sel, i| {
+                        if (i == r.primary) continue;
+                        extras[k] = sel;
+                        k += 1;
+                    }
+                    term.rt.editor_extra_selections = extras;
+                } else |_| {
+                    // 나머지 커서를 못 되살렸다 — primary 하나로 간다. 되돌리기 자체는 성사됐다.
+                }
+            }
+        }
+    }
+    breakUndoGroup(term); // 되돌린 뒤 친 글자는 새 묶음이다
+    refreshAfterEdit(self, term) catch {};
+    return true;
+}
+
+/// **편집기 문서를 디스크에 쓴다**(§3.5 — 원문을 바꾸지 않는다).
+///
+/// **쓰기 자체는 파일 패널 경로를 그대로 쓴다**(`writePinnedFilePanel`). 그쪽은 부모 디렉터리를
+/// 핀하고 temp↔leaf를 `RENAME_SWAP` 한 뒤 **양쪽 inode가 예상한 것인지 검증**하며, 검사 뒤 leaf가
+/// 교체됐으면 swap을 되돌려 경쟁 파일을 보존한다. 편집기가 그 경로를 다시 짜면 그 방어가 두 벌이
+/// 되고, 둘 중 하나만 고쳐지는 날이 온다.
+///
+/// **쓸 bytes는 L2가 만든다**(`saveBytes`) — BOM·끝 개행을 연 그대로 되돌리는 규칙이 그쪽에 있다.
+///
+/// **저장 뒤 문서를 다시 읽지 않는다.** 방금 쓴 것이 곧 문서이고, 다시 읽으면 그 사이 외부 변경을
+/// 조용히 삼킨다(§3.6의 외부 편집 감지는 별도 계약이다).
+pub fn saveDocument(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    const path = term.rt.editor_path orelse return false;
+
+    const bytes = doc.file.saveBytes(self.allocator) catch return false;
+    defer self.allocator.free(bytes);
+
+    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return false;
+    defer pinned.dir.close(self.io);
+
+    var original = pinned.dir.openFile(self.io, pinned.basename, .{ .mode = .read_only }) catch return false;
+    defer original.close(self.io);
+    const stat = original.stat(self.io) catch return false;
+
+    // **지금 디스크에 있는 것의 해시를 넘긴다.** 0을 넘겨 "검사를 건너뛴다"고 적었다가 실제
+    // 구현을 보니 **무조건 비교**한다 — 0이면 정상 파일이 늘 `ExternalConflict`가 된다.
+    // 그 검사가 막는 것은 *"temp를 쓰는 동안 남이 같은 inode를 in-place로 고쳤다"*이므로,
+    // 쓰기 직전에 읽은 값을 기준으로 두는 것이 맞다.
+    const expected = AppSession.stableOpenedFileHash(self.io, original, stat.inode) catch return false;
+
+    file_panel_ops.writePinnedFilePanel(
+        self.io,
+        pinned.dir,
+        pinned.basename,
+        original,
+        stat,
+        expected,
+        bytes,
+    ) catch return false;
+    return true;
+}
+
+/// **커서마다 텍스트를 넣는다** — 타이핑의 실제 진입점(§3.3).
+///
+/// **커서가 여럿이면 delta 하나에 range를 여럿 담는다.** §3.3이 *"한 번의 연산 = undo 하나"*를
+/// 자료구조 수준에서 보장하라고 한 것이 이것이고, 커서마다 따로 적용하면 첫 삽입이 뒤 커서를 밀어
+/// 두 번째가 엉뚱한 자리에 간다(그 매핑을 `delta.apply`가 같은 연산에서 한다).
+///
+/// **선택이 있으면 그것을 지우고 넣는다** — 타이핑이 선택을 대체하는 보편 동작이다.
+///
+/// 실패하면 **아무 일도 안 일어난다**: delta 층이 원자적이고(`OutOfRange`·`MalformedDelta`·OOM
+/// 전부 되돌린다), 파생 재구축이 실패해도 문서가 편집 전이다.
+///
+/// **역연산을 아직 어디에도 안 쌓는다** — undo 스택은 다음 조각이다. 지금은 받아서 버린다.
+pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
+    if (term.kind != .editor or text.len == 0) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 원본이 없다
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+
+    var iter = selections(term);
+    if (iter.count() == 0) return false;
+
+    // 커서를 문서 순서로 모은다 — delta가 정렬·비겹침을 요구한다.
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    while (iter.next()) |sel| {
+        const lo = @min(sel.start(), doc.file.content.len);
+        const hi = @min(sel.end(), doc.file.content.len);
+        ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = text }) catch return false;
+    }
+    std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
+        fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
+            return a.start < b.start;
+        }
+    }.lessThan);
+
+    // **겹치는 커서는 여기서 걸린다.** `mergeOverlapping`이 selection 단계에서 합치므로 정상
+    // 경로에서는 안 나오지만, 걸러 두지 않으면 `delta.apply`가 `MalformedDelta`로 거절하고
+    // 사용자에게는 "타이핑이 안 먹는다"로 보인다.
+    for (ranges.items, 0..) |c, i| {
+        if (i > 0 and c.start < ranges.items[i - 1].end) return false;
+    }
+
+    var sels = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(sels.items);
+
+    // **`term.rt`를 통해 부른다** — 위 `doc`은 값 복사라 그것에 대고 고치면 사본만 바뀐다.
+    // **편집 전 커서를 떠 둔다** — undo가 그것을 되살린다(§3.3).
+    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
+    const before_primary = sels.primary;
+
+    const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+        self.allocator.free(before);
+        return false;
+    };
+
+    // **친 커서는 넣은 글자 뒤로 간다 — 매핑에 맡기지 않는다.**
+    // `mapOffset`의 경계 규칙은 *"삽입 지점에 정확히 있는 offset은 밀지 않는다"*인데, 그것은
+    // **다른** 커서에는 맞지만 타이핑한 커서 자신에게는 틀리다(친 글자 앞에 남는다 — 실측으로
+    // EDIT1·EDIT5가 그것을 잡았다). 어디로 갈지는 매핑이 아니라 **편집 연산이 정한다.**
+    //
+    // 역연산의 각 range가 편집 **후** 좌표로 "새로 들어간 구간"을 가리키므로, 그 끝이 곧 커서 자리다
+    // (삭제는 길이가 0이라 시작 = 끝이고, 지운 자리에 커서가 선다).
+    for (inverse.changes, 0..) |ic, i| {
+        if (i < sels.items.len) sels.items[i] = editor_selection.Selection.at(ic.end);
+    }
+
+    pushUndo(self, term, inverse, before, before_primary, .insert);
+
+    writeBackSelections(self, term, sels);
+    refreshAfterEdit(self, term) catch {};
+    return true;
+}
+
+/// 제품의 커서들을 `Selections`(L2가 요구하는 모양)로 옮긴다. **문서 순서로 정렬해서** 준다 —
+/// `Selections.init`이 그것을 불변식으로 강제한다(편집을 뒤에서부터 적용하는 전제, §3.2).
+fn selectionsForEdit(self: *AppSession, term: *Term) ?maru.session.editor.selection.Selections {
+    var iter = selections(term);
+    const n = iter.count();
+    if (n == 0) return null;
+    const items = self.allocator.alloc(editor_selection.Selection, n) catch return null;
+    var i: usize = 0;
+    while (iter.next()) |sel| {
+        items[i] = sel;
+        i += 1;
+    }
+    std.mem.sort(editor_selection.Selection, items, {}, struct {
+        fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
+            return a.start() < b.start();
+        }
+    }.lessThan);
+    // primary는 **문서 순서에서 마지막**으로 둔다 — 타이핑 뒤 화면이 따라갈 기준이고, 그 자리가
+    // 사용자가 마지막으로 친 곳이다.
+    return editor_selection.Selections.init(items, n - 1);
+}
+
+/// 밀린 커서들을 제품 저장소로 되돌린다. **primary와 나머지를 다시 가른다.**
+fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor.selection.Selections) void {
+    term.rt.editor_selection = sels.primarySelection();
+    const extras_len = sels.items.len - 1;
+    if (extras_len == 0) {
+        clearExtraSelections(self, term);
+        return;
+    }
+    const grown = self.allocator.alloc(editor_selection.Selection, extras_len) catch {
+        clearExtraSelections(self, term);
+        return;
+    };
+    var k: usize = 0;
+    for (sels.items, 0..) |s, i| {
+        if (i == sels.primary) continue;
+        grown[k] = s;
+        k += 1;
+    }
+    if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = grown;
+}
+
+/// **커서마다 지운다** — Backspace·Delete(§3.2 "문자 단위 삭제").
+///
+/// 선택이 있으면 **그 선택을 지운다**(방향과 무관하다 — 사용자가 고른 것이 지울 대상이다).
+/// 선택이 없으면 caret 기준으로 앞(`backward`) 또는 뒤 한 **글자**를 지운다.
+///
+/// **byte가 아니라 글자다.** 한글·이모지는 여러 byte라 byte 하나만 지우면 **깨진 UTF-8이 남는다** —
+/// 그 상태는 화면에 §3.8 표기로 뜨고 저장하면 파일이 깨진다. `stepBack`/`stepForward`가 cluster
+/// 경계를 지킨다.
+///
+/// **지울 것이 없는 커서는 delta에서 뺀다**(문서 처음에서 Backspace). 빈 range를 넣으면
+/// `delta.apply`가 겹침으로 볼 수 있고, 무엇보다 "아무것도 안 지웠는데 undo가 하나 쌓인다".
+pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+
+    var iter = selections(term);
+    if (iter.count() == 0) return false;
+    const content = doc.file.content;
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    while (iter.next()) |sel| {
+        var lo = @min(sel.start(), content.len);
+        var hi = @min(sel.end(), content.len);
+        if (lo == hi) {
+            // caret뿐 — 한 글자를 무른다.
+            if (backward) {
+                if (lo == 0) continue; // 문서 처음: 지울 것이 없다
+                lo = prevCharBoundary(content, lo);
+            } else {
+                if (hi >= content.len) continue; // 문서 끝
+                hi = nextCharBoundary(content, hi);
+            }
+        }
+        if (lo >= hi) continue;
+        ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = "" }) catch return false;
+    }
+    if (ranges.items.len == 0) return false;
+
+    std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
+        fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
+            return a.start < b.start;
+        }
+    }.lessThan);
+    for (ranges.items, 0..) |c, i| {
+        if (i > 0 and c.start < ranges.items[i - 1].end) return false; // 겹침 — 호출자 결함
+    }
+
+    var sels = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(sels.items);
+
+    // **편집 전 커서를 떠 둔다** — undo가 그것을 되살린다(§3.3).
+    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
+    const before_primary = sels.primary;
+
+    const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+        self.allocator.free(before);
+        return false;
+    };
+
+    // **친 커서는 넣은 글자 뒤로 간다 — 매핑에 맡기지 않는다.**
+    // `mapOffset`의 경계 규칙은 *"삽입 지점에 정확히 있는 offset은 밀지 않는다"*인데, 그것은
+    // **다른** 커서에는 맞지만 타이핑한 커서 자신에게는 틀리다(친 글자 앞에 남는다 — 실측으로
+    // EDIT1·EDIT5가 그것을 잡았다). 어디로 갈지는 매핑이 아니라 **편집 연산이 정한다.**
+    //
+    // 역연산의 각 range가 편집 **후** 좌표로 "새로 들어간 구간"을 가리키므로, 그 끝이 곧 커서 자리다
+    // (삭제는 길이가 0이라 시작 = 끝이고, 지운 자리에 커서가 선다).
+    for (inverse.changes, 0..) |ic, i| {
+        if (i < sels.items.len) sels.items[i] = editor_selection.Selection.at(ic.end);
+    }
+
+    pushUndo(self, term, inverse, before, before_primary, .delete);
+
+    writeBackSelections(self, term, sels);
+    refreshAfterEdit(self, term) catch {};
+    return true;
+}
+
+/// `at` **앞** 글자의 시작 byte. UTF-8 이어지는 byte(`0b10xxxxxx`)를 건너뛴다.
+///
+/// **cluster가 아니라 code point 경계다.** 결합 문자(한글 NFD·이모지 ZWJ)는 여러 code point가
+/// 한 글자로 보이는데, 그것까지 한 번에 무르려면 §3.8의 cluster 규칙이 필요하다 — 그 규칙은
+/// `grapheme` 층이 소유하고 이 슬라이스 밖이다. **지금은 code point 단위이고, 깨진 UTF-8은
+/// 만들지 않는다**(그것이 이 함수가 막는 것이다).
+fn prevCharBoundary(bytes: []const u8, at: usize) usize {
+    var i = @min(at, bytes.len);
+    if (i == 0) return 0;
+    i -= 1;
+    while (i > 0 and (bytes[i] & 0xC0) == 0x80) i -= 1;
+    return i;
+}
+
+/// `at` **뒤** 글자의 끝 byte.
+fn nextCharBoundary(bytes: []const u8, at: usize) usize {
+    if (at >= bytes.len) return bytes.len;
+    const n = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return at + 1;
+    return @min(at + n, bytes.len);
+}
+
+/// **편집 뒤에 낡는 것을 전부 다시 세운다**(§3.3 — 편집은 문서를 바꾼다).
+///
+/// 편집은 접힘 토글·스크롤과 **버려야 할 것이 다르다**. 저 둘은 문서가 그대로라 줄 배열이 살아
+/// 있지만, 편집은 **줄 배열 자체가 문서 내용을 빌리는 슬라이스**라 내용이 바뀌면 통째로 낡는다 —
+/// 남겨 두면 렌더가 해제된 자리나 옛 경계를 읽는다.
+///
+/// 버리는 순서가 규칙이다:
+/// ⑴ 줄 배열을 다시 만든다(문서가 진실이다)
+/// ⑵ 접힘 층을 다시 센다 — 들여쓰기가 바뀌었을 수 있다
+/// ⑶ 보이는 줄을 다시 만든다(⑵에 달렸다)
+/// ⑷ 파생 수치를 버린다(`max_cols`·시각 행 수·행 캐시)
+/// ⑸ 렌더 스냅숏을 버린다 — **이것이 제일 중요하다.** `editor_hit_rows`·`editor_hit_geom`은
+///    "렌더가 굳힌 것"이고 클릭이 그것을 읽는데, 편집 뒤에도 남아 있으면 **클릭이 사라진 글자의
+///    자리를 답한다.** ⌘F 슬라이스가 같은 축에서 결함을 여럿 냈다.
+///
+/// **selection은 여기서 안 건드린다** — `delta.apply`가 이미 같은 연산에서 밀어 놓았다(§3.3).
+/// 여기서 또 손대면 그 매핑을 덮어쓴다.
+fn refreshAfterEdit(self: *AppSession, term: *Term) error{OutOfMemory}!void {
+    const doc = term.rt.editor_doc orelse return;
+
+    // ⑴ 줄 배열 — 줄 수가 바뀌었을 수 있으므로 다시 잡는다.
+    const n = doc.file.lineCount();
+    const lines = try self.allocator.alloc([]const u8, n);
+    for (0..n) |i| lines[i] = doc.file.lineText(i) orelse "";
+    if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
+    term.rt.editor_lines = lines;
+
+    // ⑵⑶ 접힘 층과 보이는 줄.
+    dropFoldState(self, term);
+    try ensureFoldRanges(self, term);
+    try rebuildVisible(self, term);
+
+    // ⑷ 파생 수치.
+    invalidateFoldDerived(self, term);
+
+    // ⑸ **렌더 스냅숏.** 다음 프레임이 다시 굳힐 때까지 클릭이 답할 것이 없어야 한다 —
+    // 옛 값을 남기는 것보다 "아직 없다"가 낫다(hit-test가 `len == 0`을 이미 그렇게 다룬다).
+    term.rt.editor_hit_rows_len = 0;
+    term.rt.editor_hit_geom = .{};
+
+    // 스크롤이 문서 끝을 넘었을 수 있다(줄이 지워졌다면).
+    if (term.rt.editor_first_line >= term.rt.editor_lines.len) {
+        setEditorTop(self, term, term.rt.editor_lines.len -| 1);
+    }
+    self.metal_dirty = true;
+}
+
 fn dropSelectionState(self: *AppSession, term: *Term) void {
     // 비교 뷰 선택도 함께 놓는다 — 같은 부류이고 같은 수명이다.
     if (term.rt.editor_diff_hit_rows_left.len > 0) self.allocator.free(term.rt.editor_diff_hit_rows_left);
@@ -3248,6 +3852,11 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     // **나머지 커서도 같은 단위다.** 여기 빼먹으면 문서가 바뀐 뒤에도 옛 offset을 든 커서가 남아
     // 렌더가 없는 줄을 집는다 — 비교 뷰 선택이 `invalidate` 목록에서 빠져 패닉했던 그 자리다.
     clearExtraSelections(self, term);
+    dropUndoState(self, term);
+    if (term.rt.editor_caret_rows.len > 0) self.allocator.free(term.rt.editor_caret_rows);
+    if (term.rt.editor_caret_buf.len > 0) self.allocator.free(term.rt.editor_caret_buf);
+    term.rt.editor_caret_rows = &.{};
+    term.rt.editor_caret_buf = &.{};
 
     if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
@@ -7426,7 +8035,6 @@ test "네이티브로 연 텍스트는 CM6 스냅샷을 기다리지 않는다 �
     // CM6가 없다 — 그대로 두면 **네이티브로 연 탭이 닫히지 않는다**. 브리지 술어를 kind에서 entry로
     // 올린 이유가 이것이다.
     const dock_panel = maru.session.dock_panel;
-    const file_panel_ops = @import("file_panel.zig");
 
     var path_buf = "x.txt".*;
     var entry: dock_panel.Entry = .{
@@ -9072,6 +9680,425 @@ test "MC1 다음 일치 추가가 커서를 늘리고, 띠가 전부 서고, 복
     // ⑹ 클릭 한 번이 정리한다 — 없으면 사용자가 커서를 없앨 방법이 없다.
     clearExtraSelections(fx.session, term);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+}
+
+test "EDIT1 타이핑이 문서에 들어간다 — 파생 상태까지 따라온다 (§3.3)" {
+    // **N2에서 처음으로 글자가 들어가는 자리다.** 그리고 편집은 접힘 토글·스크롤과 달리
+    // **줄 배열 자체가 낡는다**(그 배열은 문서 내용을 빌리는 슬라이스다) — 안 다시 세우면 렌더가
+    // 옛 경계를 읽는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "type.txt", .data = "alpha\nbeta\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "type.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // caret을 첫 줄 끝에 둔다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "!"));
+
+    // ⑴ 문서가 바뀌었다.
+    try testing.expectEqualStrings("alpha!\nbeta\n", term.rt.editor_doc.?.file.content);
+    // ⑵ **줄 배열이 따라왔다** — 안 따라오면 렌더가 옛 슬라이스를 그린다.
+    try testing.expectEqualStrings("alpha!", term.rt.editor_lines[0]);
+    // ⑶ 커서가 삽입 뒤로 밀렸다.
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+
+    // ⑷ 줄이 늘어나는 편집도 배열이 따라온다.
+    //
+    // **끝 개행 때문에 줄이 하나 더 있다**: `"alpha!\nbeta\n"`은 `"alpha!"`·`"beta"`·`""` 셋이다
+    // (§3.5 — 파일 끝 개행은 "빈 마지막 줄"로 보이고 거기 커서를 놓을 수 있어야 한다).
+    // 처음에 3을 기대했다가 실측이 4를 냈다 — **판정자가 틀렸고 코드가 맞았다.**
+    try testing.expect(insertText(fx.session, term, "\nmid"));
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_lines.len);
+    try testing.expectEqualStrings("mid", term.rt.editor_lines[1]);
+
+    // ⑸ 프레임이 죽지 않는다 — 파생 상태가 어긋나면 여기서 밟는다.
+    var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+    d.dl.deinit(allocator);
+}
+
+test "EDIT2 커서가 여럿이면 모든 자리에 들어가고 뒤 커서가 밀린다 (§3.3)" {
+    // **한 번의 타이핑 = delta 하나다.** 커서마다 따로 적용하면 첫 삽입이 뒤 커서를 밀어
+    // 두 번째가 엉뚱한 자리에 간다 — §3.3이 매핑을 같은 연산에 묶으라고 한 이유다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "multi.txt", .data = "aa bb aa cc aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "multi.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // "aa" 셋을 전부 고른다.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // 셋을 한꺼번에 바꾼다 — **선택이 있으면 타이핑이 그것을 대체한다.**
+    try testing.expect(insertText(fx.session, term, "XY"));
+    try testing.expectEqualStrings("XY bb XY cc XY\n", term.rt.editor_doc.?.file.content);
+
+    // 커서 셋이 각자 삽입 뒤에 선다.
+    var iter = selections(term);
+    var focuses: [3]usize = undefined;
+    var n: usize = 0;
+    while (iter.next()) |sel| {
+        if (n < focuses.len) focuses[n] = sel.focus;
+        n += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), n);
+    std.mem.sort(usize, &focuses, {}, std.sort.asc(usize));
+    try testing.expectEqualSlices(usize, &.{ 2, 8, 14 }, &focuses);
+}
+
+test "EDIT4 Backspace·Delete가 글자 단위로 지운다 — 깨진 UTF-8을 만들지 않는다 (§3.2)" {
+    // **byte 하나만 지우면 한글·이모지가 깨진다.** 그 상태는 화면에 §3.8 표기로 뜨고 저장하면
+    // 파일이 깨진다 — 되돌릴 방법이 undo뿐인 종류다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "del.txt", .data = "a한b\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "del.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // "한"(3 byte) 뒤에 caret을 두고 Backspace — **3 byte가 통째로** 빠져야 한다.
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(deleteText(fx.session, term, true));
+    try testing.expectEqualStrings("ab\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+
+    // Delete(앞으로)도 같은 규칙이다.
+    try testing.expect(deleteText(fx.session, term, false));
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+
+    // **문서 처음에서 Backspace는 아무 일도 안 한다** — 빈 편집이 쌓이면 undo가 헛돈다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(!deleteText(fx.session, term, true));
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+
+    // 선택이 있으면 **방향과 무관하게** 그 선택을 지운다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 1);
+    try testing.expect(deleteText(fx.session, term, false));
+    try testing.expectEqualStrings("\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EDIT5 Enter가 줄을 나누고 줄 배열이 따라온다 (§3.3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "enter.txt", .data = "abcdef\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "enter.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    const before_lines = term.rt.editor_lines.len;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "\n"));
+
+    try testing.expectEqualStrings("abc\ndef\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(before_lines + 1, term.rt.editor_lines.len);
+    try testing.expectEqualStrings("abc", term.rt.editor_lines[0]);
+    try testing.expectEqualStrings("def", term.rt.editor_lines[1]);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+/// UNDO 판정자들이 쓰는 픽스처 — 파일을 열고 caret을 놓는다.
+fn undoFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8, data: []const u8) !*Term {
+    const io = std.testing.io;
+    try fx.dir.dir.writeFile(io, .{ .sub_path = name, .data = data });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, name });
+    defer allocator.free(path);
+    return try openPathInActivePane(fx.session, path);
+}
+
+test "SAVE1 편집한 내용이 디스크에 실제로 남는다 (§3.5)" {
+    // **저장은 파일을 실제로 바꾸는 유일한 연산이다.** 다른 판정자는 메모리 상태만 보지만
+    // 여기서는 **디스크에서 다시 읽어** 확인한다 — 쓰기 경로가 조용히 실패하면 사용자는
+    // "저장했는데 없어졌다"를 겪고, 그것은 되돌릴 방법이 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "save1.txt", "alpha\nbeta\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, " EDITED"));
+    try testing.expect(saveDocument(fx.session, term));
+
+    const on_disk = try fx.dir.dir.readFileAlloc(io, "save1.txt", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings("alpha EDITED\nbeta\n", on_disk);
+
+    // 저장 뒤에도 문서가 그대로다 — 다시 읽지 않으므로 외부 변경을 조용히 삼키지 않는다.
+    try testing.expectEqualStrings("alpha EDITED\nbeta\n", term.rt.editor_doc.?.file.content);
+}
+
+test "SAVE2 연 그대로의 파일 속성이 디스크에 되돌아간다 (§3.5)" {
+    // **열었다 저장만 해도 내용이 달라지면 diff가 통째로 물든다.** `EDOC11`이 bytes 만드는 규칙을
+    // 재고, 여기서는 그 bytes가 **실제로 그렇게 쓰이는지**를 잰다 — 둘은 다른 축이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    // ⑴ BOM + CRLF + 끝 개행 없음.
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "save2.txt", "\xEF\xBB\xBFa\r\nb");
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, term, "X"));
+        try testing.expect(saveDocument(fx.session, term));
+
+        const on_disk = try fx.dir.dir.readFileAlloc(io, "save2.txt", allocator, .limited(4096));
+        defer allocator.free(on_disk);
+        // BOM 유지 · 기존 CRLF 유지 · 끝 개행 없음 유지.
+        try testing.expectEqualStrings("\xEF\xBB\xBFXa\r\nb", on_disk);
+    }
+
+    // ⑵ 끝 개행이 있던 파일은 있는 채로.
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "save3.txt", "keep\n");
+        term.rt.editor_selection = editor_selection.Selection.at(4);
+        try testing.expect(insertText(fx.session, term, "!"));
+        try testing.expect(saveDocument(fx.session, term));
+
+        const on_disk = try fx.dir.dir.readFileAlloc(io, "save3.txt", allocator, .limited(4096));
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("keep!\n", on_disk);
+    }
+}
+
+test "SAVE3 읽기 전용은 저장을 거절하고 파일을 건드리지 않는다 (§3.5)" {
+    // **거절이 조용하면 사용자는 저장된 줄 안다.** 실패를 알리는 것은 상태바 몫이고(§2.2),
+    // 여기서는 **파일이 안 바뀌는 것**만 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "save4.txt", "original\n");
+
+    // 편집을 먼저 하고(쓸 내용이 있게) 읽기 전용으로 만든다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "Z"));
+    term.rt.editor_doc.?.file.read_only = true;
+
+    try testing.expect(!saveDocument(fx.session, term));
+    const on_disk = try fx.dir.dir.readFileAlloc(io, "save4.txt", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings("original\n", on_disk); // 안 바뀌었다
+}
+
+test "UNDO1 되돌리면 문서와 커서가 편집 전으로 간다 (§3.3)" {
+    // **문서만 돌아오고 커서가 안 돌아오면 다음 타이핑이 엉뚱한 데 간다.** §3.3이 selection 배열
+    // 전체와 primary를 함께 되돌리라고 한 이유다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u1.txt", "hello\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, " world"));
+    try testing.expectEqualStrings("hello world\n", term.rt.editor_doc.?.file.content);
+
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("hello\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    // 줄 배열도 따라왔다 — 안 따라오면 렌더가 없는 글자를 그린다.
+    try testing.expectEqualStrings("hello", term.rt.editor_lines[0]);
+
+    // 더 되돌릴 것이 없으면 거절한다(빈 스택에서 죽지 않는다).
+    try testing.expect(!undoEdit(fx.session, term));
+}
+
+test "UNDO2 연속 타이핑은 한 묶음이라 undo 한 번에 함께 돌아간다 (§3.3)" {
+    // **묶음이 없으면 사용자가 글자 수만큼 눌러야 한다.** 반대로 과하게 묶으면 지운 적 없는 것이
+    // 사라진다 — 그래서 아래 UNDO3이 끊기는 쪽을 함께 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u2.txt", "x\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(insertText(fx.session, term, "a"));
+    try testing.expect(insertText(fx.session, term, "b"));
+    try testing.expect(insertText(fx.session, term, "c"));
+    try testing.expectEqualStrings("xabc\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번**에 셋 다 돌아간다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("x\n", term.rt.editor_doc.?.file.content);
+}
+
+test "UNDO3 커서가 움직이면 묶음이 끊긴다 — 클릭 전 타이핑은 남는다 (§3.3)" {
+    // **안 끊으면 클릭해서 다른 곳에 친 글자를 되돌릴 때 앞의 타이핑까지 사라진다.**
+    // 사용자가 예측할 수 없는 종류다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u3.txt", "AB\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(insertText(fx.session, term, "1"));
+
+    // 커서를 옮긴다 — 클릭이 하는 일과 같다.
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "2"));
+    try testing.expectEqualStrings("2A1B\n", term.rt.editor_doc.?.file.content);
+
+    // 첫 undo는 **뒤엣것만** 되돌린다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("A1B\n", term.rt.editor_doc.?.file.content);
+    // 두 번째가 앞엣것을 되돌린다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("AB\n", term.rt.editor_doc.?.file.content);
+}
+
+test "UNDO4 되돌린 것을 다시 할 수 있다 (§3.3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u4.txt", "base\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("base\n", term.rt.editor_doc.?.file.content);
+
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("base!\n", term.rt.editor_doc.?.file.content);
+    // 더 다시 할 것이 없으면 거절한다.
+    try testing.expect(!redoEdit(fx.session, term));
+}
+
+test "UNDO5 되돌린 뒤 새로 편집하면 redo가 버려진다 (§3.3)" {
+    // **안 버리면 존재한 적 없는 상태로 갈 수 있다** — 되돌리고 다른 것을 친 뒤 redo를 누르면
+    // 두 편집이 겹친 문서가 나온다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u5.txt", "seed\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(insertText(fx.session, term, "A"));
+    try testing.expect(undoEdit(fx.session, term));
+
+    breakUndoGroup(term);
+    try testing.expect(insertText(fx.session, term, "B"));
+    try testing.expectEqualStrings("seedB\n", term.rt.editor_doc.?.file.content);
+
+    // redo 스택이 비었다.
+    try testing.expect(!redoEdit(fx.session, term));
+    try testing.expectEqualStrings("seedB\n", term.rt.editor_doc.?.file.content);
+}
+
+test "UNDO6 멀티커서 편집은 undo 한 번에 전부 돌아간다 (§3.3)" {
+    // **§3.3: "멀티 selection의 동시 편집은 언제나 하나."** 커서마다 항목이 쌓이면 사용자가 커서
+    // 수만큼 눌러야 하고, 중간까지만 되돌린 상태는 **문서에 존재한 적 없는 상태**다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u6.txt", "aa bb aa cc aa\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    try testing.expect(insertText(fx.session, term, "ZZ"));
+    try testing.expectEqualStrings("ZZ bb ZZ cc ZZ\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번**에 셋 다 돌아간다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("aa bb aa cc aa\n", term.rt.editor_doc.?.file.content);
+
+    // 커서도 셋 그대로 돌아온다 — 편집 전 배열을 통째로 되살리는 것이 §3.3의 계약이다.
+    var iter = selections(term);
+    try testing.expectEqual(@as(usize, 3), iter.count());
+
+    // redo도 한 번에 간다.
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("ZZ bb ZZ cc ZZ\n", term.rt.editor_doc.?.file.content);
+}
+
+test "UNDO7 스택 상한을 넘겨도 죽지 않고 새지 않는다 (§3.3)" {
+    // **누수는 단언이 아니라 검출기가 잡는다** — `Inverse`가 할당을 소유하므로 스택을 자르는
+    // 자리에서 한 번만 빠뜨려도 샌다. 상한을 실제로 넘겨 그 경로를 밟는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u7.txt", "start\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    var i: usize = 0;
+    while (i < 2600) : (i += 1) { // 상한(2048)을 넘긴다
+        breakUndoGroup(term); // 항목마다 따로 쌓이게 한다
+        _ = insertText(fx.session, term, "z");
+    }
+    try testing.expect(term.rt.editor_undo_len <= 2048);
+    // 남은 것으로 되돌릴 수 있다(잘린 뒤에도 스택이 성립한다).
+    try testing.expect(undoEdit(fx.session, term));
+}
+
+test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3.5)" {
+    // **화면만 바뀌고 저장이 실패하면 사용자가 편집을 잃는다.** L2가 이미 거절하지만(EDOC6),
+    // 제품이 그 앞에서 막지 않으면 실패 경로가 사용자에게 "아무 일도 안 일어남"으로 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "ro.txt", .data = "locked\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ro.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    // 문서를 읽기 전용으로 만든다(권한 대신 상태를 직접 세운다 — 권한은 OS에 달렸다).
+    term.rt.editor_doc.?.file.read_only = true;
+    try testing.expect(!insertText(fx.session, term, "x"));
+    try testing.expectEqualStrings("locked\n", term.rt.editor_doc.?.file.content);
 }
 
 test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체를 통과한다 (§9.1)" {

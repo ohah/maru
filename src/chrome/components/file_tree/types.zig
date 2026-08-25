@@ -87,10 +87,16 @@ pub const Metrics = struct {
     corner_radius: u16,
     /// 들여쓰기 가이드 선의 두께.
     guide_w: u32,
-    /// **이름이 반드시 갖는 최소 폭.** 이 값 아래로는 다른 것을 버려서라도 라벨을 지킨다(`rowLayout`).
+    /// **이름에게 주려는 최소 폭 — 보장이 아니라 목표다.** 이 값을 채울 때까지 다른 것을 버리고
+    /// (`rowLayout`), 다 버려도 모자라면 라벨이 **남은 것을 전부** 받는다.
     ///
     /// pt 로 두는 것이 맞다 — 라벨은 role 이 정한 **고정 14pt** 라 사용자 터미널 폰트와 무관하다.
     /// 80pt 는 14pt 등폭에서 대략 9~10 자다(파일명 앞부분과 확장자 일부가 보이는 최소치).
+    ///
+    /// **도크 하한에서는 이 목표에 못 미친다.** 트리 행 폭은 도크 폭에서 스크롤 거터(8 + 8 = 16pt)를
+    /// 뺀 값이라, 도크 하한 120pt 면 행이 104pt 이고 사다리가 전부 버려도 라벨은 66pt(약 7~8 자)다.
+    /// 목표가 달성되는 것은 행 폭 118pt 부터(= 도크 134pt)다. 이 사실을 "바닥 보장"으로 적으면
+    /// 판정자가 제품이 주지 않는 폭을 재게 된다 — 실제로 그렇게 적혀 있었고 적대적 검증에서 드러났다.
     label_floor: u32,
     /// 라벨 한 줄의 line box. 세로 중앙 정렬의 기준이다.
     label_line_h: u32,
@@ -233,11 +239,24 @@ test "Metrics: 좁아지면 들여쓰기·상태·chevron 순으로 버리고 �
     try std.testing.expectEqual(m.indent_w, wide.indent_w);
     try std.testing.expect(wide.indent_depth_cap >= 3);
 
-    // ⑵ 도크 하한(120pt)에서도 **어느 깊이든** 이름이 바닥 이상을 받는다.
+    // ⑵ **제품이 실제로 주는 가장 좁은 행 폭**에서 무엇이 남는가.
+    //
+    // 트리 행 폭은 도크 폭이 아니다 — 스크롤 거터(8 + 8)를 뺀 값이다(`dockListTextWidthPx`). 도크
+    // 하한 120pt 면 행은 **104pt** 이고, 사다리가 전부 버려도 라벨 바닥(80pt)에는 못 미친다. 그러니
+    // 여기서 재는 것은 "바닥 이상"이 아니라 **남은 것을 전부 라벨이 받는가**이다. 예전에는 이 자리에
+    // 120 을 행 폭인 양 넣어 "어느 깊이든 바닥 이상"이 통과했다 — 제품이 주지 않는 폭이었다.
+    const narrowest_row_w: u32 = 120 - 16;
+    const irreducible = m.row_pad_x * 2 + m.icon_extent + m.icon_gap;
     for ([_]u16{ 0, 4, 8, 20 }) |depth| {
-        const narrow = m.rowLayout(120, depth, true);
-        try std.testing.expect(narrow.label_w >= m.label_floor);
+        const narrow = m.rowLayout(narrowest_row_w, depth, true);
+        try std.testing.expect(!narrow.show_chevron and !narrow.show_state);
+        try std.testing.expectEqual(@as(u32, 0), narrow.indent_w);
+        // 남은 것을 **전부** 라벨이 받는다(버릴 것을 다 버렸으니 더 줄 것이 없다).
+        try std.testing.expectEqual(narrowest_row_w - irreducible, narrow.label_w);
     }
+    // 목표가 달성되는 경계도 함께 고정한다 — 행 폭 118pt(= 도크 134pt)부터다.
+    try std.testing.expect(m.rowLayout(118, 20, true).label_w >= m.label_floor);
+    try std.testing.expect(m.rowLayout(117, 20, true).label_w < m.label_floor);
 
     // ⑶ 버리는 **순서**: 들여쓰기가 먼저 0 이 되고, 그 다음 상태 슬롯, 마지막이 chevron 이다.
     var width: u32 = 400;

@@ -5957,8 +5957,30 @@ maru runtime end <runtime-id> [--yes]
 | 명령 | 동작 |
 | --- | --- |
 | `maru host status` | host 존재, `host_id`, build/protocol/lifecycle, runtime/client 수를 진단한다. host를 새로 시작하지 않는다. |
-| `maru runtime list` | canonical runtime ID, size, resize generation, controller/observer 상태를 나열한다. P5a2에서는 짧은 ID 입력을 허용하지 않는다. |
-| `maru runtime get` | 단일 runtime metadata를 조회한다. output/scrollback은 출력하지 않는다. |
+| `maru runtime list` | canonical runtime ID, size, resize generation, controller/observer 상태, **window title**을 나열한다. P5a2에서는 짧은 ID 입력을 허용하지 않는다. |
+| `maru runtime get` | 단일 runtime metadata를 조회한다. output/scrollback은 출력하지 않는다. **title도 싣지 않는다**(아래). |
+
+**window title은 낸다 — cwd·command는 계속 가린다.** 이 둘을 가르는 기준은 "터미널 내용인가"가 아니라
+**"같은 UID에게 이미 보이는가"**다. `maru attach`는 같은 UID에게 화면 전체를 준다(§11 — v1 외부 attach는 host와
+동일 login UID만 허용). 그 사람에게 title을 가리는 것은 실질 보호가 아니라 **목록을 못 읽게 만드는 불편**일 뿐이다.
+runtime ID는 32-hex라 사람이 세션을 고를 단서가 되지 못하고, 그 때문에 "붙어 봐야 어느 세션인지 아는" 상태가 된다.
+
+cwd·command를 계속 가리는 이유는 다르다. 그 둘은 **화면에 없을 수 있는 정보**다 — 스크롤이 지나가 버린 명령줄이나
+현재 디렉터리는 attach로 보이지 않을 수 있으므로, 노출하면 attach가 주지 않는 것을 주는 셈이 된다. title은 그렇지
+않다: 터미널이 스스로 보고한 값이고 셸/프로그램이 화면 밖 정보를 title에 넣기로 했다면 그것은 그 프로그램의 선택이다.
+
+title은 **길이 상한**(`max_title_bytes`)을 넘으면 자른다. 원격이 정하는 임의 길이 문자열을 wire에 그대로 실으면
+inventory 응답 하나가 프레임 예산을 흔들 수 있다. 자를 때는 UTF-8 경계를 지킨다.
+
+**title은 `runtime.list`에만 싣고 `runtime.get`에는 싣지 않는다.** 비대칭이지만 근거가 있다 — `runtime.get`
+응답의 소비자는 사람이 아니라 기계다. `attach_product_resolver.decodeMembership`과 `recovered_session_adopt`가
+**필드 수를 정확히 6으로 요구하며 fail-close**한다(테스트 이름이 그 의도를 적고 있다: "accepts only exact runtime
+or exact absence envelope"). 그 strict 검사는 응답 드리프트·위조를 잡으려고 일부러 둔 방어이므로, 목록에 title을
+실으려고 그것을 느슨하게 만들지 않는다. 사람이 세션을 고르는 자리는 `runtime.list`다.
+
+wire에서 title은 **optional**이다. 값을 못 얻거나(read-only host라 `RuntimeOps`가 없다, observation 실패) 빈
+문자열이면 필드를 싣지 않는다. 구 client는 모르는 필드를 무시하고(`ignore_unknown_fields`), 새 client는 필드가
+없어도 파싱된다 — 그래서 이 추가는 wire major를 올리지 않는다.
 | `maru attach --read-only` | observer로 snapshot/delta를 표시한다. input/resize는 보내지 않는다. |
 | `maru attach` | controller가 없으면 controller, 있으면 observer로 붙고 명확한 read-only banner를 표시한다. 조용히 기존 controller를 빼앗지 않는다. |
 | `maru attach --take-over` | 기존 controller revoke를 확인한 뒤 원자적으로 controller를 이전한다. |
@@ -6431,6 +6453,10 @@ CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하�
 
 - socket directory는 user-only 0700, socket은 0600, peer credential same-uid 검증을 기본으로 한다.
 - `runtime_handle`은 secret이 아니므로 그것만으로 output/read/write를 허용하지 않는다.
+- **redaction의 기준은 "같은 UID에게 이미 보이는가"다.** `runtime.list`/`runtime.get`은 window title을 내고
+  cwd·command·output·scrollback은 계속 가린다(§8에 그 이유). 같은 UID는 `maru attach`로 화면 전체를 볼 수 있으므로
+  title을 가리는 것은 보호가 아니라 목록을 못 읽게 만드는 불편이다. 반대로 cwd·command는 화면에 없을 수 있어
+  노출하면 attach가 주지 않는 것을 주게 된다.
 - GUI 재접속은 app이 시작한 host/client capability로 인증한다.
 - v1 외부 `maru attach`는 host와 **동일 login UID만** 허용한다. SSH도 SSH 계정 인증 뒤 그 UID로 실행된 원격 CLI만
   host-local socket에 연결한다. 다른 Unix account, 공유 group socket, 초대 token, signed-client grant는 비범위이며 필요성이

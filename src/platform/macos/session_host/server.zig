@@ -2994,10 +2994,23 @@ pub const Connection = struct {
         return if (self.live_host_status) |status| status.* else self.host_status;
     }
 
+    /// `runtime.get` 은 **title 을 싣지 않는다.** 이 응답의 소비자는 사람이 아니라 기계다 —
+    /// `attach_product_resolver.decodeMembership` 과 `recovered_session_adopt` 가 **필드 수 6을
+    /// 정확히 요구하며 fail-close** 한다("accepts only exact … envelope"). 그 strict 방어는 응답
+    /// 드리프트를 잡으려고 일부러 그렇게 둔 것이라, 목록에 title 을 실으려고 그것을 느슨하게
+    /// 만들지 않는다. 사람이 세션을 고르는 자리는 `runtime.list` 다(§8).
     fn runtimeMetaJson(self: *Connection, entry: *reg.RuntimeEntry) HandleError![]u8 {
         const id_hex = try self.hex128(entry.id);
         defer self.allocator.free(id_hex);
         return self.stringify(.{ .result = runtimeMetaValue(id_hex, entry) });
+    }
+
+    /// title 하나를 위해 observation 을 뜬다. **실패는 title 없음으로 접는다** — 목록 조회가
+    /// 부가 정보 때문에 통째로 지면 안 된다(그 정보는 wire 에서 optional 이다).
+    /// read-only host(`runtime_ops == null`)는 아예 안 부른다.
+    fn observeForTitle(self: *Connection, runtime_id: u128) ?RuntimeObservation {
+        const ops = self.runtime_ops orelse return null;
+        return ops.observation(ops.ctx, runtime_id, self.allocator) catch null;
     }
 
     fn runtimeListJson(self: *Connection) HandleError![]u8 {
@@ -3006,11 +3019,18 @@ pub const Connection = struct {
         defer arena.deinit();
         const a = arena.allocator();
 
-        var list: std.ArrayListUnmanaged(RuntimeMetaWire) = .empty;
+        var list: std.ArrayListUnmanaged(RuntimeListEntry) = .empty;
         var it = self.registry.entries.valueIterator();
         while (it.next()) |entry_ptr| {
             const id_hex = std.fmt.allocPrint(a, "{x:0>32}", .{entry_ptr.*.id}) catch return error.OutOfMemory;
-            list.append(a, runtimeMetaValue(id_hex, entry_ptr.*)) catch return error.OutOfMemory;
+            // title 은 arena 로 복사해 든다 — observation 의 소유 버퍼는 이 걸음 끝에 풀린다.
+            var observation = self.observeForTitle(entry_ptr.*.id);
+            defer if (observation) |*o| o.deinit(self.allocator);
+            const title: ?[]const u8 = if (observation) |o|
+                (a.dupe(u8, clampTitle(o.window_title)) catch return error.OutOfMemory)
+            else
+                null;
+            list.append(a, runtimeListEntryValue(id_hex, entry_ptr.*, title)) catch return error.OutOfMemory;
         }
         return self.stringify(.{ .result = .{ .runtimes = list.items } });
     }
@@ -3080,7 +3100,12 @@ pub const Connection = struct {
     }
 };
 
-/// runtime metadata의 wire 표현(redacted — output/scrollback·cwd·command는 싣지 않는다, §11). hex id는 caller가 소유.
+/// runtime metadata의 wire 표현(redacted — output/scrollback·cwd·command는 싣지 않는다, §11).
+/// hex id 는 caller 가 소유.
+///
+/// **`runtime.get` 이 쓰는 정확히 6필드 모양이다.** 그 응답의 소비자는 기계이고
+/// (`attach_product_resolver.decodeMembership`·`recovered_session_adopt`) **필드 수 6을 정확히
+/// 요구하며 fail-close** 한다. 여기에 필드를 더하면 attach 와 recovery adopt 가 함께 진다.
 const RuntimeMetaWire = struct {
     runtime_id: []const u8,
     cols: u16,
@@ -3089,6 +3114,44 @@ const RuntimeMetaWire = struct {
     has_controller: bool,
     observer_count: usize,
 };
+
+/// `runtime.list` 전용 모양 — 위 6필드에 **title 하나**를 더한다(§8). 사람이 세션을 고르는 자리라
+/// 여기만 낸다.
+///
+/// **optional 을 안 쓴다.** `std.json.Stringify` 는 null optional 도 `"title":null` 로 내보내
+/// 필드 수를 늘린다 — 그러면 위 strict 소비자와 같은 함정을 목록에도 들이게 된다. 값이 없으면
+/// 아예 이 모양을 안 쓰고 `RuntimeMetaWire` 를 쓴다.
+const RuntimeMetaTitledWire = struct {
+    runtime_id: []const u8,
+    cols: u16,
+    rows: u16,
+    resize_generation: u64,
+    has_controller: bool,
+    observer_count: usize,
+    title: []const u8,
+};
+
+/// 목록 한 줄. title 이 있으면 7필드 모양, 없으면 6필드 모양으로 직렬화된다.
+const RuntimeListEntry = union(enum) {
+    plain: RuntimeMetaWire,
+    titled: RuntimeMetaTitledWire,
+
+    pub fn jsonStringify(self: RuntimeListEntry, js: anytype) !void {
+        switch (self) {
+            .plain => |value| try js.write(value),
+            .titled => |value| try js.write(value),
+        }
+    }
+};
+
+/// 상한 안으로 자르되 **UTF-8 경계를 지킨다** — 바이트로 자르면 깨진 시퀀스가 wire 로 나간다.
+fn clampTitle(title: []const u8) []const u8 {
+    if (title.len <= protocol.max_title_bytes) return title;
+    var end = protocol.max_title_bytes;
+    // continuation byte(10xxxxxx) 위에 서 있으면 그 문자의 시작까지 물러난다.
+    while (end > 0 and (title[end] & 0xC0) == 0x80) end -= 1;
+    return title[0..end];
+}
 
 fn runtimeMetaValue(id_hex: []const u8, entry: *reg.RuntimeEntry) RuntimeMetaWire {
     return .{
@@ -3099,6 +3162,24 @@ fn runtimeMetaValue(id_hex: []const u8, entry: *reg.RuntimeEntry) RuntimeMetaWir
         .has_controller = entry.controller != null,
         .observer_count = entry.observers.items.len,
     };
+}
+
+/// 목록 한 줄을 만든다. **빈 title 은 없는 것과 같다** — `"title":""` 은 "제목이 빈 세션" 이라는
+/// 다른 말이고 소비자가 그것을 값으로 읽는다.
+fn runtimeListEntryValue(id_hex: []const u8, entry: *reg.RuntimeEntry, title: ?[]const u8) RuntimeListEntry {
+    const plain = runtimeMetaValue(id_hex, entry);
+    const text = title orelse return .{ .plain = plain };
+    const clamped = clampTitle(text);
+    if (clamped.len == 0) return .{ .plain = plain };
+    return .{ .titled = .{
+        .runtime_id = plain.runtime_id,
+        .cols = plain.cols,
+        .rows = plain.rows,
+        .resize_generation = plain.resize_generation,
+        .has_controller = plain.has_controller,
+        .observer_count = plain.observer_count,
+        .title = clamped,
+    } };
 }
 
 fn intField(obj: std.json.ObjectMap, key: []const u8) ?u16 {
@@ -7096,6 +7177,39 @@ test "server: runtime.select_op routes word/line op to RuntimeOps and returns sp
         defer if (r.frame) |f| f.deinit(allocator);
         try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
     }
+}
+
+test "runtime.list 만 title 을 싣고, runtime.get 은 6필드를 지킨다" {
+    // **이 둘이 갈리는 데는 근거가 있다.** `runtime.get` 응답의 소비자는 기계이고
+    // (`attach_product_resolver.decodeMembership`·`recovered_session_adopt`) 필드 수 6을 정확히
+    // 요구하며 fail-close 한다. 실제로 title 을 get 에도 실었다가 attach 가 통째로 졌다.
+    var entry: reg.RuntimeEntry = .{ .id = 0xaa, .cols = 80, .rows = 24 };
+    defer entry.observers.deinit(std.testing.allocator);
+
+    // 목록: title 이 있으면 7필드.
+    const titled = runtimeListEntryValue("000000000000000000000000000000aa", &entry, "zsh — maru");
+    try std.testing.expect(titled == .titled);
+    try std.testing.expectEqualStrings("zsh — maru", titled.titled.title);
+
+    // **빈 title 은 없는 것과 같다** — `"title":""` 은 "제목이 빈 세션" 이라는 다른 말이다.
+    try std.testing.expect(runtimeListEntryValue("000000000000000000000000000000aa", &entry, "") == .plain);
+    try std.testing.expect(runtimeListEntryValue("000000000000000000000000000000aa", &entry, null) == .plain);
+
+    // get 모양은 6필드 그대로다. 필드를 세어 고정한다 — 늘면 attach 가 진다.
+    const meta = runtimeMetaValue("000000000000000000000000000000aa", &entry);
+    try std.testing.expectEqual(@as(usize, 6), @typeInfo(@TypeOf(meta)).@"struct".fields.len);
+}
+
+test "title 은 상한에서 UTF-8 경계로 잘린다" {
+    // 원격이 정하는 길이라 상한이 필요하고(§8), 바이트로 자르면 깨진 시퀀스가 wire 로 나간다.
+    const one = "한"; // 3바이트
+    var long: [protocol.max_title_bytes + 12]u8 = undefined;
+    var i: usize = 0;
+    while (i + one.len <= long.len) : (i += one.len) @memcpy(long[i..][0..one.len], one);
+    const clamped = clampTitle(long[0..i]);
+    try std.testing.expect(clamped.len <= protocol.max_title_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(clamped));
+    try std.testing.expectEqualStrings("zsh", clampTitle("zsh"));
 }
 
 test "server: runtime.find routes query(hex) to RuntimeOps and returns {count,spans} (§6c)" {

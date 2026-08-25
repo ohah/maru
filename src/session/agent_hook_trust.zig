@@ -185,8 +185,10 @@ pub fn storedHash(config_text: []const u8, key: []const u8) ?[]const u8 {
             continue;
         }
         if (!in_table) continue;
-        if (!std.mem.startsWith(u8, line, "trusted_hash")) continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        // **이름을 통째로 비교한다.** `startsWith` 로 보면 `trusted_hash_algo` 같은 이웃 키가 통과해
+        // 그 값을 우리 값으로 읽는다 — 그러면 멀쩡한 설정에 「어긋났다」 경고가 뜬다(거짓 경고).
+        if (!std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), "trusted_hash")) continue;
         const rest = std.mem.trim(u8, line[eq + 1 ..], " \t");
         if (rest.len < 2 or rest[0] != '"') continue;
         const end = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse continue;
@@ -616,6 +618,16 @@ test "키가 다른 키의 부분 문자열이어도 섞이지 않는다" {
 
     try testing.expectEqualStrings("sha256:short", storedHash(text.items, "/h.json:stop:0:0").?);
     try testing.expectEqualStrings("sha256:long", storedHash(text.items, "/h.json:stop:0:00").?);
+}
+
+test "이웃 키를 우리 키로 오인하지 않는다 — 접두가 같은 이름이 먼저 와도" {
+    const key = "/h.json:stop:0:0";
+    // 상대편이 필드를 하나 늘리면 이런 모양이 된다. 접두만 보면 **그 값을 우리 값으로 읽고**,
+    // 그 순간 멀쩡한 설정에 「어긋났다」 경고가 뜬다 — 세지 않기로 한 방향과 정반대다.
+    const text = "[hooks.state.\"" ++ key ++ "\"]\n" ++
+        "trusted_hash_algo = \"sha256\"\n" ++
+        "trusted_hash = \"sha256:real\"\n";
+    try testing.expectEqualStrings("sha256:real", storedHash(text, key).?);
 }
 
 test "모양을 못 읽으면 null 이다 — 거짓 경고를 만들지 않는다" {

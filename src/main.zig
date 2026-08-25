@@ -29,6 +29,8 @@ const draw_host = maru.win32_draw_host;
 /// `d3d11_cells.Cell` 같은 Windows 타입을 이름으로 쓰므로, 가드 없이 import 하면 다른 타깃에서
 /// 분석돼 깨진다(배럴의 Windows 항목들이 같은 이유로 `else struct {}` 다).
 const scm_surface = if (@import("builtin").os.tag == .windows) @import("platform/windows/win32_scm_surface.zig") else struct {};
+/// 같은 가드·같은 이유(W8.5b — 에이전트 세션 도크).
+const agent_surface = if (@import("builtin").os.tag == .windows) @import("platform/windows/win32_agent_surface.zig") else struct {};
 
 // **그 파일의 테스트를 실제로 돌린다.** 위 import 는 `runWin32ScmDrawSmoke` 안에서만 쓰이는데,
 // 테스트 아티팩트는 `main` 을 안 부르므로 그 함수가 분석되지 않아 **테스트가 한 줄도 안 돌았다**
@@ -36,6 +38,7 @@ const scm_surface = if (@import("builtin").os.tag == .windows) @import("platform
 // 같은 것을 밟았다.
 test {
     _ = scm_surface;
+    _ = agent_surface;
 }
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -1915,6 +1918,8 @@ fn rebuildDockAll(
     view_bar_glyph_top: *?f32,
     /// 소스 컨트롤 뷰가 쓰는 것들. `status` 가 비어 있으면 그 뷰는 아무것도 안 그린다.
     scm: ScmDockInputs,
+    /// 에이전트 세션 뷰가 쓰는 것들.
+    agent: AgentDockInputs,
 ) !void {
     try rebuildDockCells(allocator, out, geom, tk);
     if (view != .explorer) {
@@ -1924,6 +1929,9 @@ fn rebuildDockAll(
         }
         drawn.* = 0;
         if (view == .source_control) try appendScmDockCells(allocator, out, geom, renderer_state, builder, cell_w, cell_h, pipeline, atlas_w, atlas_h, uploaded, scm);
+        // **셋째 칸이 더 이상 빈 도크가 아니다**(W8.5b⒜). 목록은 아직 비어 있고 컴포넌트가 그 상태의
+        // 안내를 그린다 — "비었다" 와 "조립이 깨졌다" 는 다른 사실이라 판정이 그 둘을 가른다.
+        if (view == .agent_sessions) try appendAgentDockCells(allocator, out, geom, renderer_state, builder, cell_w, cell_h, pipeline, atlas_w, atlas_h, uploaded, agent);
         // **뷰 바는 내용 뒤에 굽는다.** 먼저 구우면 그 뒤 내용이 아틀라스를 키울 때 UV 가 낡아
         // **다른 글리프가 나온다**(실측: 폴더·git·code 자리에 git·폴더·git 이 떴다). §2m.32 가
         // "업로드 목록은 프레임과 함께 사라진다" 를 적었다면, 이것은 그 짝인 **UV 낡음**이다.
@@ -3019,6 +3027,60 @@ fn colorOf(tk: *const maru.chrome.Tokens, role: maru.chrome.tokens.ColorRole) ma
 /// **표면은 자기 뷰포트 원점(0,0) 기준으로 셀을 낸다** — 스모크에서는 그것이 창 전체였다. 도크
 /// 안에 놓으려면 여기서 **평행이동**한다. 표면 안쪽을 도크 좌표로 만들지 않는 이유는, 그러면 그
 /// 모듈이 "내가 창 어디에 있는가" 를 알아야 하고 그 값이 두 곳에서 관리된다.
+/// 에이전트 세션 도크를 도크 자리에 그린다(W8.5b⒜).
+///
+/// **SCM 과 같은 순서다** — `build` 가 조립을 소유하고 여기서는 원점만 옮겨 붙인다. `Built` 를
+/// 버리지 않고 슬롯에 두는 이유도 같다: 히트테스트가 그 안의 published tree 를 본다.
+fn appendAgentDockCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    geom: maru.session.dock_layout.Geometry,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    cell_w: u32,
+    cell_h: u32,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    uploaded: *usize,
+    agent: AgentDockInputs,
+) !void {
+    const area = geom.tree_content;
+    if (area.w == 0 or area.h == 0) return;
+    var rasterizer = builder.rasterizer;
+    rasterizer.registry = &renderer_state.font_registry;
+    const built = agent_surface.build(allocator, .{
+        .renderer_state = renderer_state,
+        .rasterizer = rasterizer,
+        .pipeline = pipeline,
+        .atlas_w = atlas_w,
+        .atlas_h = atlas_h,
+        .cell_w = cell_w,
+        .cell_h = cell_h,
+        .viewport_w = area.w,
+        .viewport_h = area.h,
+    }, agent.state, agent.opts) catch return;
+    if (agent.built.*) |*old_built| old_built.deinit();
+    agent.built.* = built;
+    uploaded.* += built.atlas_region_uploads;
+    const dx: f32 = @floatFromInt(area.x);
+    const dy: f32 = @floatFromInt(area.y);
+    try out.ensureUnusedCapacity(allocator, built.cells.len);
+    for (built.cells) |c| {
+        var moved = c;
+        moved.rect[0] += dx;
+        moved.rect[1] += dy;
+        out.appendAssumeCapacity(moved);
+    }
+}
+
+/// 에이전트 도크가 그리는 데 필요한 것들.
+const AgentDockInputs = struct {
+    state: *agent_surface.State,
+    opts: agent_surface.Options,
+    built: *?agent_surface.Built,
+};
+
 fn appendScmDockCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
@@ -3421,6 +3483,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var scm_dock_redraws: usize = 0;
     var scm_click_judgeable = false;
     var view_judgeable = false;
+    var agent_judgeable = false;
+    var agent_view_reached = false;
+    var agent_slot_x: u32 = 0;
+    var agent_slot_y: u32 = 0;
+    var agent_cells: usize = 0;
+    var agent_glyph_bytes: usize = 0;
+    var agent_ops: usize = 0;
+    var agent_ops_dropped: usize = 0;
     var dock_digest_before_switch: u64 = 0;
     var dock_cells_before_switch: usize = 0;
     var divider_judgeable = false;
@@ -3438,7 +3508,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var scm_state = scm_surface.State{};
     var scm_built: ?scm_surface.Built = null;
     defer if (scm_built) |*b| b.deinit();
+    // ── 에이전트 세션 도크 (W8.5b⒜) ────────────────────────────────────────────────────────
+    // 목록은 아직 비어 있다 — provider 이력을 훑는 데이터 경로는 별개 슬라이스다.
+    var agent_state = agent_surface.State{};
+    var agent_built: ?agent_surface.Built = null;
+    defer if (agent_built) |*b| b.deinit();
     const scm_tokens = chromeTokensFor(cfg);
+    const agent_opts = agent_surface.Options{
+        .font_family = cfg.font.family,
+        .font_fallback = cfg.font.fallback,
+        .font_size_pt = cfg.font.size,
+        .tokens = &scm_tokens,
+    };
     const scm_opts = scm_surface.Options{
         .status_text = scm_status,
         .font_family = cfg.font.family,
@@ -3547,7 +3628,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var view_bar_glyph_top: ?f32 = null;
     defer if (view_bar_frame) |*f| f.deinit(allocator);
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -3739,6 +3820,32 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 const vy: i32 = @intCast(r.y + r.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
                 window.postSyntheticMouse(.left_up, vx, vy);
+            }
+        }
+        // ── 에이전트 도크 판정 (W8.5b⒜) ────────────────────────────────────────────────────
+        //
+        // **뷰 바 셋째 칸을 눌러 연다.** 그 칸은 지금까지 **빈 도크**를 열었다 — 눌리는데 아무것도
+        // 안 그려졌다. 목록이 비어도 헤더·검색 줄·안내는 그려져야 한다: "비었다" 와 "조립이
+        // 깨졌다" 는 다른 사실이다.
+        if (spins == 260 and geom.view_bar.w != 0) {
+            const bar3 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
+            if (maru.chrome.components.dock_view_bar.slotRect(bar3, cell_w, 2)) |r3| {
+                agent_judgeable = true;
+                agent_slot_x = r3.x + r3.w / 2;
+                agent_slot_y = r3.y + r3.h / 2;
+                const ax: i32 = @intCast(r3.x + r3.w / 2);
+                const ay: i32 = @intCast(r3.y + r3.h / 2);
+                window.postSyntheticMouse(.left_down, ax, ay);
+                window.postSyntheticMouse(.left_up, ax, ay);
+            }
+        }
+        if (spins == 290 and agent_judgeable) {
+            agent_view_reached = dock_view == .agent_sessions;
+            if (agent_built) |*b| {
+                agent_cells = b.cells.len;
+                agent_glyph_bytes = b.text.len;
+                agent_ops = b.ops;
+                agent_ops_dropped = b.ops_dropped;
             }
         }
         // 전환 뒤 **소스 컨트롤 행을 눌러 본다** — 뷰가 바뀌었는데 안 눌리면 죽은 컨트롤이다.
@@ -4061,7 +4168,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                     dock_rebuild_failures += 1;
                 };
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
@@ -4205,7 +4312,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 resizeAllSessions(&runtime, sessions.items, size, io);
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                                 dock_rebuild_failures += 1;
                             };
                             divider_moves += 1;
@@ -4348,7 +4455,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (clamped != dock_scroll_px) {
                             dock_scroll_px = clamped;
                             dock_scrolls += 1;
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
                         }
                     }
                     continue;
@@ -4375,7 +4482,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                                         dock_rebuild_failures += 1;
                                     };
                                 };
@@ -4406,7 +4513,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                                     dock_rebuild_failures += 1;
                                 };
                                 scm_dock_redraws += 1;
@@ -4441,7 +4548,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         defer allocator.free(owned_path);
                                         if (toggleTreeRow(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, rp, owned_path)) {
                                             dock_row_toggles += 1;
-                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+                                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
                                         }
                                     };
                                 }
@@ -4798,7 +4905,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -5168,6 +5275,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("view_bar=unjudgeable reason=no_glyphs h={d}\n", .{geom.view_bar.h});
     }
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
+    if (agent_judgeable) {
+        // **개수만 세면 속 빈다** — 조립이 실패해도 셀이 0 이고, 목록이 비어도 0 에 가깝다.
+        // 그래서 **글자가 나왔는가**를 함께 본다: 헤더·검색·빈 안내는 목록과 무관하게 그려진다.
+        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_slot=({d},{d}) agent_ok={}\n", .{
+            agent_view_reached,
+            agent_ops,
+            agent_ops_dropped,
+            agent_cells,
+            agent_glyph_bytes,
+            agent_slot_x,
+            agent_slot_y,
+            agent_view_reached and agent_ops > 0 and agent_cells > 0 and agent_glyph_bytes > 0,
+        });
+    } else {
+        try stdout.print("agent=unjudgeable reason=no_view_bar\n", .{});
+    }
     if (expand_judgeable) {
         // **동어반복이 아니다**: 토글 횟수를 되읽는 것이 아니라 **행 목록의 길이**를 본다 — 펼치면
         // 자식이 들어와 늘고, 접으면 되돌아온다. 그 사이에 스캔·행 재구성이 전부 일어나야 한다.

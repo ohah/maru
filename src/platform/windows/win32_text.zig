@@ -111,13 +111,25 @@ pub const NeutralRasterizer = struct {
     /// **이제 못 찾으면 `RasterizerFailed` 다.** 잉크가 없는 글자와 폰트를 못 찾은 것은 다른
     /// 사실이고, 뒤엣것을 앞엣것으로 접으면 빈 화면이 정상으로 보고된다.
     fn faceFor(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId) ?usize {
+        // **두 체계의 값 범위가 겹친다.** 터미널 인코딩은 `face_font_id_base`(= 2)부터 시작하고
+        // 레지스트리 id 는 1 부터 하나씩 늘어난다 — 그래서 measured 크롬의 **두 번째 face 부터**
+        // 터미널 id 로 잘못 읽혔다. 폴백 face(id 2)가 `2 - 2 = 0`, 즉 **주 폰트**가 되어 폴백에서
+        // 나온 글리프 번호를 주 폰트에서 굽고, 화면에는 `.notdef` 상자가 떴다(실측 2026-08-25:
+        // 에이전트 도크의 한글 제목이 전부 두부였다. `error_skip=0` 이고 잉크도 나오므로 **어떤
+        // 통계도 안 움직였다** — 캡처가 유일한 관측점이었다).
+        //
+        // **한 래스터라이저는 한 체계만 쓴다.** measured 경로는 `registry` 를 채운 복사본으로만
+        // 그리고(`main.zig` 의 두 자리, `win32_draw_host.SurfaceCtx` 의 doc), 터미널은 그것을
+        // 안 채운다. 그래서 `registry` 의 유무가 **어느 체계인지를 가르는 유일한 사실**이다.
+        if (self.registry) |reg| {
+            const identity = reg.get(font_id) orelse return null;
+            return self.raster.faceIndexForName(identity.postscript_name);
+        }
         if (faceIndexFromFontId(font_id)) |i| {
             if (i < self.raster.face_count) return i;
             return null;
         }
-        const reg = self.registry orelse return null;
-        const identity = reg.get(font_id) orelse return null;
-        return self.raster.faceIndexForName(identity.postscript_name);
+        return null;
     }
 
     pub fn rasterize(
@@ -175,6 +187,43 @@ pub const NeutralRasterizer = struct {
 };
 
 const testing = std.testing;
+
+test "[회귀] measured font_id 는 터미널 인코딩과 값이 겹쳐도 이름으로 풀린다" {
+    // **두 체계의 값 범위가 겹친다**(`faceFor` doc). 레지스트리 id 는 1 부터 늘고 터미널 인코딩은
+    // `face_font_id_base`(= 2)부터라 **measured 의 두 번째 face 가 정확히 겹친다** — 산수로 풀면
+    // `2 - 2 = 0`, 즉 주 폰트가 되어 폴백 글리프 번호를 주 폰트에서 굽는다. 화면에는 `.notdef`
+    // 상자가 뜨는데 **잉크가 나오므로 `error_skip`·`zero_ink` 가 안 움직인다** — 실측에서 캡처만이
+    // 그것을 잡았다(§2m.57). 그래서 이 판정은 수치가 아니라 **어느 face 로 가는가**를 본다.
+    var registry = maru.renderer.FontIdentityRegistry.init(testing.allocator);
+    defer registry.deinit();
+    const primary = try registry.intern(.{ .postscript_name = "PrimaryMono" });
+    const korean = try registry.intern(.{ .postscript_name = "KoreanSans" });
+    try testing.expectEqual(face_font_id_base, korean);
+
+    var raster: dwrite_font.Rasterizer = .{
+        .factory = undefined,
+        .family = "PrimaryMono",
+        .em_size_px = 16,
+        .metrics = .{ .width_px = 8, .height_px = 16, .baseline_px = 12 },
+        .allocator = testing.allocator,
+    };
+    for ([_][]const u8{ "PrimaryMono", "KoreanSans" }, 0..) |name, i| {
+        @memcpy(raster.face_names[i][0..name.len], name);
+        raster.face_name_len[i] = name.len;
+    }
+    raster.face_count = 2;
+
+    var scratch: [1]u8 = undefined;
+    const measured: NeutralRasterizer = .{ .raster = &raster, .scratch = &scratch, .registry = &registry };
+    try testing.expectEqual(@as(?usize, 0), measured.faceFor(primary));
+    // **여기가 결함이었다.**
+    try testing.expectEqual(@as(?usize, 1), measured.faceFor(korean));
+
+    // 터미널 경로는 `registry` 가 없다 — 그쪽은 인코딩 그대로 읽어야 한다.
+    const term: NeutralRasterizer = .{ .raster = &raster, .scratch = &scratch };
+    try testing.expectEqual(@as(?usize, 0), term.faceFor(fontIdForFace(0)));
+    try testing.expectEqual(@as(?usize, 1), term.faceFor(fontIdForFace(1)));
+}
 
 test "font_id 매핑이 두 방향에서 맞물린다" {
     // face 인덱스 → font_id → face 인덱스가 제자리로 돌아와야 한다. 어긋나면 셰이퍼가 고른 폴백과

@@ -3598,6 +3598,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var agent_cards: usize = 0;
     var agent_groups: usize = 0;
     var agent_titles_drawn: usize = 0;
+    // **face 를 못 찾으면 이제 오류다**(`win32_text.faceFor`). 그것이 조용히 늘면 글자가 통째로
+    // 빠지는데 셀 수는 quad 가 채워 크게 안 움직인다 — 그래서 따로 센다.
+    var agent_raster_err: usize = 0;
     var agent_ops_dropped: usize = 0;
     var dock_digest_before_switch: u64 = 0;
     var dock_cells_before_switch: usize = 0;
@@ -3980,6 +3983,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 agent_glyph_bytes = b.text.len;
                 agent_ops = b.ops;
                 agent_ops_dropped = b.ops_dropped;
+                agent_raster_err = b.stats.glyph_raster_error_skip_count;
                 // **목록이 글자까지 갔는가.** 셀·바이트 수는 목록이 비어도 0 이 아니다 — 헤더·검색
                 // 줄·빈 안내가 그려진다. 그래서 **카드 제목이 그려진 코드포인트 안에 있는지** 본다.
                 // 제목은 폭에 맞춰 잘리므로 **앞부분만** 찾는다(잘림은 뒤에서 일어난다).
@@ -5426,7 +5430,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     if (agent_judgeable) {
         // **개수만 세면 속 빈다** — 조립이 실패해도 셀이 0 이고, 목록이 비어도 0 에 가깝다.
         // 그래서 **글자가 나왔는가**를 함께 본다: 헤더·검색·빈 안내는 목록과 무관하게 그려진다.
-        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_items={d} agent_groups={d} agent_cards={d} agent_titles_drawn={d} agent_scan_kb={d} agent_keep_kb={d} agent_slot=({d},{d}) agent_ok={}\n", .{
+        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_items={d} agent_groups={d} agent_cards={d} agent_titles_drawn={d} agent_raster_err={d} agent_scan_kb={d} agent_keep_kb={d} agent_slot=({d},{d}) agent_ok={}\n", .{
             agent_view_reached,
             agent_ops,
             agent_ops_dropped,
@@ -5436,6 +5440,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             agent_groups,
             agent_cards,
             agent_titles_drawn,
+            agent_raster_err,
             agent_scan_kb,
             agent_keep_kb,
             agent_slot_x,
@@ -5445,7 +5450,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // **1 MB 경계.** 남는 것은 카드 수에 비례하지(카드당 문자열 몇 개) 이력 크기에
                 // 비례하지 않는다 — 실측 카드 11 장에 7 KB 다. 수백 장이어도 이 안이고, arena 를
                 // 도로 합치면 **43 MB** 로 튄다(뮤턴트 실측). 그 사이에 경계를 둔다.
-                agent_keep_kb < 1024,
+                agent_keep_kb < 1024 and agent_raster_err == 0,
         });
     } else {
         try stdout.print("agent=unjudgeable reason=no_view_bar\n", .{});

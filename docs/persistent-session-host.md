@@ -6348,8 +6348,11 @@ GUI와 그것을 찾는 CLI(`maru runtime`·`maru attach`)가 **같은 함수**�
 `maru attach`가 **앱이 띄운 host를 한 번도 못 찾았다**(`absent`). 게이트는 초록이었다. 그 게이트가 registry를
 `XDG_CACHE_HOME`으로 격리했고 CLI가 마침 같은 변수를 보고 있어, 테스트 안에서만 두 값이 우연히 맞았기 때문이다.
 
-그래서 격리는 **전용 변수** `MARU_SESSION_HOST_ROOT`가 소유한다. 값이 있으면 그것이 곧 base다. 테스트 전용이며
-제품 경로는 설정하지 않는다. `XDG_CACHE_HOME`을 그대로 override로 인정하지 않는 이유는, 그 변수를 실제로 설정해
+그래서 격리는 **전용 변수** `MARU_SESSION_HOST_ROOT`가 소유한다. 값이 있으면 그것이 곧 base다(빈 값은 미설정과
+같게 다룬다 — 빈 경로로 registry를 열면 `/session-host`가 되어 무엇이든 될 수 있다). 테스트 전용이며
+제품 경로는 설정하지 않는다. **이 변수는 registry만 옮기고 socket은 옮기지 않는다** — endpoint는 uid로 고정이라
+위 "열쇠와 자물쇠를 한 디렉터리에" 불변식이 override 경로에서는 성립하지 않는다. 지금 소비자(테스트)는 socket
+경로를 따로 주입하므로 문제가 없으나, 이 문을 넓히려면 socket도 함께 옮겨야 한다. `XDG_CACHE_HOME`을 그대로 override로 인정하지 않는 이유는, 그 변수를 실제로 설정해
 둔 사용자 환경에서 같은 사고가 조건부로 되살아나기 때문이다 — 캐시는 캐시고 registry는 registry다.
 
 Unix socket은 macOS `sockaddr_un.sun_path`의

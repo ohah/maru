@@ -34,13 +34,29 @@ pub const root_override_env = "MARU_SESSION_HOST_ROOT";
 /// (계약 §10 — 캐시는 언제든 지워지는 데이터인데 manifest 는 지우는 순간 살아 있는 세션을 전부
 /// 잃게 만든다). 앱(host 를 띄우는 쪽)과 CLI(`runtime`·`attach`)가 **같은 이 함수**를 봐야
 /// 한다 — 갈리면 CLI 가 앱이 띄운 host 를 못 찾는다(실제로 그랬다).
+///
+/// **override 는 registry 만 옮긴다 — socket 은 안 옮긴다.** `currentSocketPathIn` 은 uid 로
+/// 고정이라, 격리한 registry 와 공용 socket 디렉터리가 갈린다. §10 이 "열쇠(manifest)와
+/// 자물쇠(socket)를 한 디렉터리에" 라고 한 불변식이 **이 경로에서는 성립하지 않는다**. 지금
+/// 소비자(테스트)는 socket 경로를 따로 주입하므로 문제가 없지만, 이 문을 제품에서 쓰려 한다면
+/// 그때는 socket 도 함께 옮겨야 한다.
 pub fn currentUserRootPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
-    if (std.c.getenv(root_override_env)) |value| {
-        const span = std.mem.span(value);
-        // 빈 값은 미설정과 같다(셸 `${VAR:-}` 관례) — 빈 경로로 registry 를 열면 무엇이든 될 수 있다.
-        if (span.len > 0) return std.fmt.bufPrintZ(buf, "{s}", .{span});
-    }
+    if (overrideRoot(if (std.c.getenv(root_override_env)) |v| std.mem.span(v) else null)) |root|
+        return std.fmt.bufPrintZ(buf, "{s}", .{root});
     return userRootPathIn(buf, std.c.getuid());
+}
+
+/// override 값의 해석. **빈 값은 미설정과 같다**(셸 `${VAR:-}` 관례) — 빈 경로로 registry 를
+/// 열면 `/session-host` 가 되어 무엇이든 될 수 있다. 순수 함수라 그 분기를 실제로 잰다.
+pub fn overrideRoot(value: ?[]const u8) ?[]const u8 {
+    const raw = value orelse return null;
+    return if (raw.len > 0) raw else null;
+}
+
+test "override 는 값이 있을 때만 base 를 바꾼다 — 빈 값은 미설정과 같다" {
+    try std.testing.expect(overrideRoot(null) == null);
+    try std.testing.expect(overrideRoot("") == null);
+    try std.testing.expectEqualStrings("/tmp/iso", overrideRoot("/tmp/iso").?);
 }
 
 pub fn socketDirPathIn(buf: []u8, uid: posix.uid_t) error{NoSpaceLeft}![:0]u8 {

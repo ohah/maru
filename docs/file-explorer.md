@@ -104,6 +104,17 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 
 **행 렌더는 typed component다(FT1).** 행의 기하·페인트는 `src/chrome/components/file_tree/`(`types`·`build`·`view`)가 소유하고, 제품 배선은 `app_session/file_tree_dock.zig`가 Session Dock·SCM Dock과 **같은 순서**(투영 → props → build → view → paint)로 한다. 그래서 **행 높이가 터미널 셀에서 떨어져 나왔다** — `types.Metrics`가 logical pt를 backing scale로 한 번 환산하며, 그 값의 단일 소비 지점이 `file_tree_dock.fileTreeRowHeightPx`다(창 산술·히트테스트·스크롤 상한·reveal이 전부 그 함수를 지난다). 라벨은 measured CoreText 경로로 `list_row` role(14pt)로 그리고, 등록 PUA 아이콘만 셀 draw list로 간다. 선택·활성·호버 밴드는 컴포넌트가 낸 카드 rect를 `ui_paint`가 그리며, 포커스된 선택은 accent **막대**로 표시한다(면을 accent로 칠하면 이 층에 "accent 위 전경" role이 없어 글자가 안 읽힌다). **히트테스트도 그 tree를 본다(FT2).** 행은 `opacity = 0`인 card로 발행돼 **누르는 자리가 곧 그린 자리**이고, 포인터는 `chrome.ui.interaction.dispatch`를 지나 action 표(세대 검증)로 풀린다 — 여는 것은 `up`이며, 그 사이 투영이 바뀌면 세대가 안 맞아 거부되고 tree가 교체되면 capture가 풀린다. 호버의 주인도 `InteractionState` 하나다. 밴드가 좌우로 들어가 보이는 것은 `view`가 그리기 때문이고 **행의 히트 rect는 전폭**이다(여백을 컨테이너에서 떼면 그 여백이 클릭 사각지대가 된다). 좌표→행 산술(`file_tree_layout.rowAtLocalY`)은 Windows chrome 낮추기가 계속 쓰므로 남아 있고, 두 답이 같은지는 제품-path 테스트가 창 전체를 훑어 대조한다. 아래 셀 열 서술은 **Windows가 쓰는 셀 경로**의 것이다 — 그 투영은 macOS 파일이 아니라 `src/platform/cell_text.zig`(macOS·Windows 공유 L4)가 소유하고, macOS에는 호출이 하나도 없다. Windows는 제품 도크 트리를 그것으로 그리고(W8.7a2) 같은 투영을 스모크가 픽셀까지 확인한다. 정의 위치와 호출 수를 `tests/boundary/imports.zig`가 센다(FT3). 함수가 사라지는 것은 Windows가 `ChromeDraw` 낮추기를 갖고 컴포넌트 경로로 갈아탈 때이며, 그 판단은 [단계 계획](plans/file-tree-component.md)의 FT3가 소유한다.
 
+**좁은 폭의 열화 규칙 — "이름은 마지막까지 남는다".** 행이 쓸 수 있는 폭이 줄면 **들여쓰기 → 상태 슬롯
+→ chevron** 순으로 버리고, 좌우 패딩과 종류 아이콘은 못 버린다(그것까지 버리면 무엇의 행인지 알 수 없다).
+라벨은 `label_floor`(80pt — role 이 정한 14pt 기준 약 9~10자) 아래로 내려가지 않는다. 결정은 **폭만
+본다**: 깊이나 dirty 여부로 갈리면 행마다 x 가 달라져 목록이 들쭉날쭉해지고 스크롤로 흔들린다. 그래서
+상태 슬롯은 항상 있다고 치고 자리를 잡고, 실제로 그릴지는 행이 정한다. 값의 소유자는
+`components/file_tree/types.zig`의 `Metrics.rowLayout` 하나이고, 밴드·안내선·chevron·아이콘·라벨·상태
+점이 전부 그것을 되읽는다 — 각자 계산하면 좁은 폭에서 서로 어긋난다.
+
+들여쓰기가 0 이 되면 안내선도 그리지 않는다(같은 x 에 겹쳐 한 줄로 보일 뿐이라 깊이를 말하지 못한다).
+즉 가장 좁은 구간에서 트리는 **평평한 목록**이 된다 — 깊이를 포기하고 이름을 지키는 것이 이 규칙의 선택이다.
+
 **밴드는 둘뿐이다 — 선택과 호버.** 선택은 `tab_active_bg`(+ 포커스면 왼쪽 accent 막대), 호버는 한 단
 약한 `tab_hover_bg`다(`view.bandRole`). 즉 **켜진 밴드는 언제나 "포인터가 여기"거나 "이 행을 골랐다"**이다.
 

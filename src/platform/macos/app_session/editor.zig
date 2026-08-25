@@ -9836,6 +9836,97 @@ fn undoFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8,
     return try openPathInActivePane(fx.session, path);
 }
 
+test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 같다 (상태 기계 퍼즈)" {
+    // **undo 스택은 상태 기계인데 판정자들은 각자 한 갈래씩만 걷는다.** 편집→undo→편집→redo처럼
+    // 섞이는 순서는 조합이 폭발해 손으로 못 적고, 거기서 어긋나면 사용자에게는 "되돌렸는데 이상한
+    // 글자가 남았다"로 보인다.
+    //
+    // **기준은 스택 두 개를 든 순진한 모델이다** — 내용 전체를 통째로 쌓는다. 제품은 delta를 쌓아
+    // 메모리를 아끼는데, 그 최적화가 답을 바꾸지 않아야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "fuzz_undo.txt", "seed\n");
+
+    var undo_model: std.ArrayList([]u8) = .empty;
+    defer {
+        for (undo_model.items) |x| allocator.free(x);
+        undo_model.deinit(allocator);
+    }
+    var redo_model: std.ArrayList([]u8) = .empty;
+    defer {
+        for (redo_model.items) |x| allocator.free(x);
+        redo_model.deinit(allocator);
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x5A1D);
+    const rand = prng.random();
+
+    var step: usize = 0;
+    while (step < 300) : (step += 1) {
+        const before = try allocator.dupe(u8, term.rt.editor_doc.?.file.content);
+        var keep_before = true;
+        defer if (keep_before) allocator.free(before);
+
+        switch (rand.uintLessThan(u8, 10)) {
+            0...4 => { // 타이핑
+                // **묶음을 매번 끊는다** — 안 끊으면 모델이 "편집 하나 = 스택 하나"를 못 맞춘다.
+                breakUndoGroup(term);
+                const at = rand.uintAtMost(usize, term.rt.editor_doc.?.file.content.len);
+                term.rt.editor_selection = editor_selection.Selection.at(at);
+                const texts = [_][]const u8{ "a", "bb", "\n", "한" };
+                if (insertText(fx.session, term, texts[rand.uintLessThan(usize, texts.len)])) {
+                    try undo_model.append(allocator, before);
+                    keep_before = false;
+                    for (redo_model.items) |x| allocator.free(x);
+                    redo_model.clearRetainingCapacity(); // 새 편집은 redo를 버린다
+                }
+            },
+            5, 6 => { // 지우기
+                breakUndoGroup(term);
+                const len = term.rt.editor_doc.?.file.content.len;
+                if (len > 0) {
+                    const at = 1 + rand.uintLessThan(usize, len);
+                    term.rt.editor_selection = editor_selection.Selection.at(at);
+                    if (deleteText(fx.session, term, true)) {
+                        try undo_model.append(allocator, before);
+                        keep_before = false;
+                        for (redo_model.items) |x| allocator.free(x);
+                        redo_model.clearRetainingCapacity();
+                    }
+                }
+            },
+            7, 8 => { // 되돌리기
+                const ok = undoEdit(fx.session, term);
+                try testing.expectEqual(undo_model.items.len > 0, ok);
+                if (ok) {
+                    const want = undo_model.pop().?;
+                    defer allocator.free(want);
+                    try testing.expectEqualStrings(want, term.rt.editor_doc.?.file.content);
+                    try redo_model.append(allocator, before);
+                    keep_before = false;
+                }
+            },
+            else => { // 다시 하기
+                const ok = redoEdit(fx.session, term);
+                try testing.expectEqual(redo_model.items.len > 0, ok);
+                if (ok) {
+                    const want = redo_model.pop().?;
+                    defer allocator.free(want);
+                    try testing.expectEqualStrings(want, term.rt.editor_doc.?.file.content);
+                    try undo_model.append(allocator, before);
+                    keep_before = false;
+                }
+            },
+        }
+
+        // 매 걸음 파생 상태가 성립한다 — 줄 배열이 문서와 같은 줄 수인가.
+        const doc = term.rt.editor_doc.?;
+        try testing.expectEqual(doc.file.lineCount(), term.rt.editor_lines.len);
+    }
+}
+
 test "SAVE1 편집한 내용이 디스크에 실제로 남는다 (§3.5)" {
     // **저장은 파일을 실제로 바꾸는 유일한 연산이다.** 다른 판정자는 메모리 상태만 보지만
     // 여기서는 **디스크에서 다시 읽어** 확인한다 — 쓰기 경로가 조용히 실패하면 사용자는

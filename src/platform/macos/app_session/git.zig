@@ -98,25 +98,11 @@ fn submitGitRead(self: *AppSession, repo: []const u8) void {
     };
     self.git_missing = false;
     self.git_request_seq += 1;
-    // **턴 스냅샷은 그것을 뜬 저장소에서만 유효하다.** 다른 저장소에 그 tree OID를 넘기면 `git diff <남의 tree>`가
-    // 그 저장소 안에서 해석돼 "이번 턴에 바뀐 것" 섹션이 엉뚱한 diff로 채워진다(같은 프로젝트의 다른 clone·
-    // worktree면 object DB에 그 tree가 실제로 있어 조용히 성공한다). `captureTurnSnapshot`이 링을 만들 때 같은
-    // 이유로 저장소를 대조하는데, **소비하는 쪽에도** 있어야 저장소를 바꾸는 모든 경로가 덮인다.
-    const snapshot = blk: {
-        // **활성 세션의 링**을 본다(AT0). 저장소 대조는 `RingMap` 이 세션마다 하므로(옮겼으면 그 링을
-        // 비운다) 여기서는 «그 세션이 지금 이 저장소를 보고 있나» 만 확인하면 된다.
-        const identity = activeOrLastSessionIdentity(self);
-        if (identity.len == 0) break :blk "";
-        const entry_repo = self.turn_rings.repoFor(identity);
-        if (entry_repo.len != 0 and !std.mem.eql(u8, entry_repo, repo)) break :blk "";
-        const ring = self.turn_rings.find(identity) orelse break :blk "";
-        break :blk if (ring.latest()) |snap| snap.oid() else "";
-    };
     // **비교 기준을 함께 넘긴다**(§3.5). 고른 것이 없으면 빈 값이고 그러면 `origin/HEAD`다 —
     // 이 하나가 ahead/behind·merge-base·브랜치 범위 셋의 왼쪽이라 여기서 갈리면 화면의 숫자와
     // 그 아래 목록이 서로 다른 질문의 답이 된다.
     const base = scm_dock_ops.scmBaseRefFor(self, repo);
-    if (self.git_backend.?.submit(git_exe, repo, snapshot, self.turnIndexPath() orelse "", base, self.git_request_seq)) {
+    if (self.git_backend.?.submit(git_exe, repo, base, self.git_request_seq)) {
         self.git_inflight = self.git_request_seq;
         // **여기서만 내린다**(§3.5). 고른 기준이 실제로 argv에 실린 자리가 여기이고, 위의 어느 이른
         // 반환이든 그 선택은 아직 화면에 닿지 않았다 — 그때 플래그를 내리면 조용히 잊는 것이다.
@@ -750,14 +736,6 @@ pub fn activeOrLastSessionIdentity(self: *AppSession) []const u8 {
         }
     }
     return self.last_agent_session orelse "";
-}
-
-/// 활성 세션 링의 **마지막 스냅샷 tree**(없으면 빈 슬라이스). `diff_base == .turn` 이 왼쪽으로 쓴다.
-pub fn activeTurnLatestOid(self: *AppSession) []const u8 {
-    const identity = activeOrLastSessionIdentity(self);
-    if (identity.len == 0) return "";
-    const ring = self.turn_rings.find(identity) orelse return "";
-    return if (ring.latest()) |snap| snap.oid() else "";
 }
 
 /// 그 surface 의 **provider 세션 신원**(없으면 빈 슬라이스). 링의 키다(§6.1 AT0).

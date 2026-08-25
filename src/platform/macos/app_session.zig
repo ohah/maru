@@ -9028,10 +9028,10 @@ pub const AppSession = struct {
             entry.diff_repo,
             entry.diff_rel_path,
             entry.diff_orig_rel_path,
-            // 왼쪽 트리/커밋: 브랜치 기준은 merge-base, 턴 기준은 마지막 스냅샷 tree. 둘 다 `<oid>:<경로>`로
-            // 읽으므로 같은 자리를 쓴다(목록을 읽을 때 함께 받아 둔 값이라 여기서 git을 또 부르지 않는다).
+            // 왼쪽 트리/커밋: 브랜치 기준은 merge-base, 커밋·턴 범위 기준은 그 비교가 든 rev. 셋 다
+            // `<oid>:<경로>`로 읽으므로 같은 자리를 쓴다(목록을 읽을 때 함께 받아 둔 값이라 여기서 git을
+            // 또 부르지 않는다).
             switch (entry.diff_base) {
-                .turn => git_ops.activeTurnLatestOid(self),
                 // 커밋 기준은 **그 비교가 든 커밋**이다(P4b) — 여기서 다시 구하면 그 사이 다른 커밋을
                 // 펼쳤을 때 남의 커밋을 읽는다.
                 .commit => entry.diff_commit_oid,
@@ -62955,9 +62955,15 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
     }
 }
 
-// [E1 §6.1] 턴 스냅샷 전 구간을 **실제 git**으로 돌린다: 스냅샷 요청 → 링 적재 → 목록이 그 기준으로 턴 범위를
-// 읽어 오기까지. 에이전트 감지 자체는 별도(agent_observer·turn_snapshot 단위 테스트)이고, 여기서는 그 뒤 배관을 본다.
-test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일을 읽어 온다" {
+// [E1 §6.1] 턴 스냅샷 전 구간을 **실제 git**으로 돌린다: 스냅샷 요청 → 링 적재 → base 가 직전 턴의 키·제목을
+// 물려받지 않는지까지. 에이전트 감지 자체는 별도(agent_observer·turn_snapshot 단위 테스트)이고, 여기서는 그 뒤
+// 배관을 본다.
+//
+// **한때 이 뒤에 «목록이 그 기준으로 턴 범위를 읽어 온다» 절반이 더 있었다**(2026-08-25 제거). 그쪽이 재던
+// `Result.turn_name_status` 는 상태 갱신 worker 가 채우기만 하고 **화면 소비자가 0** 이라, 그 배관과 함께 걷혔다.
+// 펼친 턴의 파일 목록은 그 경로가 아니라 `submitTurnFiles`(`Kind.turn_name_status`)가 답한다 — 이름이 비슷한
+// 다른 배관이다.
+test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 물려받지 않는다" {
     // **이 테스트는 턴 스냅샷을 실제로 찍겠다고 밝힌다.** 기본은 꺼짐이다 — 그 경로가 `git` 을 띄우고
     // detached worker 에 job 을 넘겨, 곧바로 `deinit` 하는 테스트에서 타이밍 누수를 낸다
     // (`test_allow_turn_snapshot`).
@@ -63060,24 +63066,6 @@ test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일
         try std.testing.expectEqual(@as(usize, 0), agent_ops.turnFactsForCapture(term, false).key.len);
         try std.testing.expectEqual(@as(usize, 0), agent_ops.turnFactsForCapture(term, false).title.len);
     }
-
-    // 그 뒤 파일을 고치면 목록의 턴 범위에 **그 파일만** 나온다(스냅샷 시점에 이미 있던 것은 안 나온다).
-    git_backend_mod.testWriteFile(repo, "kept.txt", "v2\n") catch return error.SkipZigTest;
-    git_backend_mod.testWriteFile(repo, "after.txt", "new\n") catch return error.SkipZigTest;
-    session.dock.view = .source_control;
-    git_ops.refreshGitStatus(session);
-    spins = 0;
-    while (spins < 500) : (spins += 1) {
-        git_ops.drainGitStatus(session);
-        if (session.git_result) |result| {
-            if (result.turn_name_status.len > 0) break;
-        }
-        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
-    }
-    const result = session.git_result orelse return error.NoListResult;
-    try std.testing.expect(std.mem.indexOf(u8, result.turn_name_status, "kept.txt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.turn_name_status, "after.txt") != null);
 }
 
 // [E1 §6.1] **트리거까지** 제품 경로로 몬다: 실제 claude 화면(실행 중 footer → 프롬프트 상자)을 term 코어에 흘려

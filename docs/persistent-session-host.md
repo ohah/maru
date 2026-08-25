@@ -6340,7 +6340,19 @@ monotonic `upgrade_epoch`, lifecycle(`ready/restoring/draining`) 상태를 가�
 다루는데, manifest는 **지우는 순간 살아 있는 세션을 전부 잃게 만드는** 데이터다. host 프로세스가 멀쩡히 남아 있어도
 자기를 가리키는 manifest가 없으면 discovery가 발견할 수 없어 모든 터미널이 조용히 in-process로 떨어진다(실제로 캐시를
 비운 뒤 그 사고가 났다). 열쇠(manifest)와 자물쇠(socket)를 한 디렉터리에 두면 "한쪽만 사라지는" 실패 모드가 성립하지
-않고, 재부팅 때 함께 사라지는 수명도 host 생존 범위와 정확히 맞는다. Unix socket은 macOS `sockaddr_un.sun_path`의
+않고, 재부팅 때 함께 사라지는 수명도 host 생존 범위와 정확히 맞는다.
+
+**이 자리를 계산하는 함수는 하나다**(`session_host/short_endpoint.zig`의 `currentUserRootPathIn`). host를 띄우는
+GUI와 그것을 찾는 CLI(`maru runtime`·`maru attach`)가 **같은 함수**를 봐야 한다. 둘이 갈린 적이 있다 — base를
+캐시 밖으로 옮길 때 GUI만 옮기고 CLI는 `XDG_CACHE_HOME`/`~/.cache` 계산을 그대로 두어, `maru runtime list`와
+`maru attach`가 **앱이 띄운 host를 한 번도 못 찾았다**(`absent`). 게이트는 초록이었다. 그 게이트가 registry를
+`XDG_CACHE_HOME`으로 격리했고 CLI가 마침 같은 변수를 보고 있어, 테스트 안에서만 두 값이 우연히 맞았기 때문이다.
+
+그래서 격리는 **전용 변수** `MARU_SESSION_HOST_ROOT`가 소유한다. 값이 있으면 그것이 곧 base다. 테스트 전용이며
+제품 경로는 설정하지 않는다. `XDG_CACHE_HOME`을 그대로 override로 인정하지 않는 이유는, 그 변수를 실제로 설정해
+둔 사용자 환경에서 같은 사고가 조건부로 되살아나기 때문이다 — 캐시는 캐시고 registry는 registry다.
+
+Unix socket은 macOS `sockaddr_un.sun_path`의
 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
 `/tmp/maru-<uid>/sh/<32-hex-host_id>.sock`으로 고정하고, per-UID directory를 mode `0700`으로 생성하기 전에 `lstat`으로
 symlink가 아니며 현재 UID 소유인지 검증한다. socket도 현재처럼 peer UID와 mode `0600`을 검증한다. 임의

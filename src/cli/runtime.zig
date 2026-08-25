@@ -153,14 +153,6 @@ pub fn confirmationAccepted(line: []const u8) bool {
     return std.ascii.eqlIgnoreCase(answer, "y") or std.ascii.eqlIgnoreCase(answer, "yes");
 }
 
-pub fn cacheBase(
-    allocator: std.mem.Allocator,
-    xdg_cache_home: ?[]const u8,
-    home: ?[]const u8,
-) std.mem.Allocator.Error!?[]u8 {
-    return cache_path.maruBaseAlloc(allocator, xdg_cache_home, home);
-}
-
 pub fn paramsJson(
     allocator: std.mem.Allocator,
     request: Request,
@@ -766,16 +758,6 @@ test "runtime CLI rejects conflicting envelopes and response identity drift" {
                 &remote,
             ),
         );
-}
-
-test "runtime CLI cache base matches the GUI session-host discovery root" {
-    const xdg = (try cacheBase(std.testing.allocator, "/tmp/cache/", "/home/me")).?;
-    defer std.testing.allocator.free(xdg);
-    try std.testing.expectEqualStrings("/tmp/cache/maru", xdg);
-    const home = (try cacheBase(std.testing.allocator, null, "/home/me/")).?;
-    defer std.testing.allocator.free(home);
-    try std.testing.expectEqualStrings("/home/me/.cache/maru", home);
-    try std.testing.expect((try cacheBase(std.testing.allocator, null, null)) == null);
 }
 
 test "runtime CLI response inventory bound is the shared protocol limit" {

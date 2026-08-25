@@ -7194,8 +7194,10 @@ pub const AppSession = struct {
     /// 보장한다(host·client 양쪽이 이미 호출한다).
     fn sessionHostRuntimeBase(a: std.mem.Allocator) ?[]const u8 {
         if (!is_macos) return null;
-        var buf: [64]u8 = undefined;
-        const path = session_host.short_endpoint.userRootPathIn(&buf, std.c.getuid()) catch return null;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        // **CLI 와 같은 함수여야 한다.** 여기서 따로 계산하던 때 `maru runtime list`·`maru attach`
+        // 가 앱이 띄운 host 를 한 번도 못 찾았다(그쪽은 캐시 경로를 봤다).
+        const path = session_host.short_endpoint.currentUserRootPathIn(&buf) catch return null;
         return a.dupe(u8, path) catch null;
     }
 
@@ -32760,6 +32762,35 @@ test "C3-3b6 AppSession은 app quit detach가 explicit terminate를 덮지 않�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// **CLI 와 GUI 가 같은 registry 를 본다.** 예전에는 이 주장을 `cli/runtime.zig` 의 테스트가 이름으로만
+// 걸어 두고("runtime CLI cache base matches the GUI session-host discovery root") **GUI 쪽 값을 한 번도
+// 안 봤다** — `cacheBase` 의 순수 계산만 재서, GUI 가 base 를 캐시 밖으로 옮긴 뒤에도 초록이었다. 그동안
+// `maru runtime list`·`maru attach` 는 앱이 띄운 host 를 **한 번도 못 찾았다**(실측: 앱이 띄운 host 가
+// `/tmp/maru-<uid>` 에 있는데 CLI 는 `~/.cache/maru` 를 뒤져 `absent`). 그래서 두 값을 **직접 맞대고**,
+// 계약이 정한 자리(캐시 밖 — §10)인지도 함께 잰다.
+test "CLI 와 GUI 가 같은 런타임 registry 를 본다 — 캐시 밖이다" {
+    if (!is_macos) return error.SkipZigTest;
+    const short_endpoint = session_host.short_endpoint;
+
+    var cli_buf: [64]u8 = undefined;
+    // CLI adapter(`admin_cli`·`external_attach_cli`)가 부르는 바로 그 함수다.
+    const cli_base = try short_endpoint.currentUserRootPathIn(&cli_buf);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gui_base = AppSession.sessionHostRuntimeBase(arena.allocator()) orelse
+        return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(gui_base, cli_base);
+    // **캐시 경로가 아니다**(§10) — 캐시는 언제든 지워지는데 manifest 는 지우는 순간 살아 있는
+    // 세션을 전부 잃게 만든다. 그 사고가 실제로 났고 그래서 base 가 옮겨졌다.
+    try std.testing.expect(std.mem.indexOf(u8, cli_base, ".cache") == null);
+    // socket 도 같은 자리 아래다 — 열쇠와 자물쇠가 갈리면 "한쪽만 사라지는" 실패가 성립한다.
+    var sock_buf: [128]u8 = undefined;
+    const sock_dir = try short_endpoint.socketDirPathIn(&sock_buf, std.c.getuid());
+    try std.testing.expect(std.mem.startsWith(u8, sock_dir, cli_base));
 }
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): host 연결이 실패하면 그 세션의 터미널은 앱을 끄는 순간

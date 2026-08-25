@@ -79,6 +79,9 @@ pub const CoreCommand = union(enum) {
     /// 좌표 무효화(resize reflow·alt 전환)뿐이라, 트래킹 TUI pane에선 클릭조차 안 먹혀 선택이 영구히 남았다.
     select_clear,
     jump_to_prompt: i8, // jumpToPrompt(dir) — OSC 133 프롬프트 블록 점프(Cmd+↑/↓), view_offset mutate
+    /// 화면 비우기(⌘K). 권위 core가 prompt/alt 여부를 판정해야 하므로 host-backed에서도 reader에 위임한다.
+    /// 반환된 `send_form_feed`는 reader가 core lock 밖의 PTY 출력 순서축에 붙인다.
+    clear_screen,
     /// 비파괴 입력 모드 리셋(Reset 메뉴 ⌘⇧R) — ssh 비정상 종료 등으로 남은 focus 1004·mouse·kitty keyboard 모드만
     /// 끈다. host-backed면 **실제 모드를 든 host core**에 적용돼야 하므로 명령으로 위임한다(client core는 빈
     /// placeholder라 거기서 리셋해 봐야 원격 앱은 계속 리포트를 보낸다).
@@ -88,7 +91,9 @@ pub const CoreCommand = union(enum) {
 /// 명령을 코어에 적용한다. **호출자가 코어 락(core_mutex)을 잡은 상태여야 한다** — reader는 `owner_dbg.lock`,
 /// non-interactive 직접 폴백은 `surface.lockCore`. 단일 mutator 계약상 적용은 한 스레드에서만 일어난다(§9.3).
 /// 응답을 만드는 명령(리포팅 — P3-3)은 적용 후 호출자가 `core.pendingResponse`를 PTY로 흘린다.
-pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
+pub const ApplyEffect = struct { send_form_feed: bool = false };
+
+pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) ApplyEffect {
     switch (cmd) {
         .scroll => |delta| core.scrollViewport(delta),
         .scroll_to_bottom => core.scrollToBottom(),
@@ -139,9 +144,11 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .select_line => |row| core.selectLineAt(row),
         .select_all => core.selectAll(),
         .select_clear => core.selectionClear(),
+        .clear_screen => return .{ .send_form_feed = core.clearScreen() },
         .reset_input_modes => core.resetInputModes(),
         .jump_to_prompt => |dir| _ = core.jumpToPrompt(dir), // bool 반환(스크롤됨)은 reader 렌더 트리거로 대체
     }
+    return .{};
 }
 
 test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 적용 로직)" {
@@ -214,4 +221,18 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     sw_cmd.select_word.separators[0] = ':';
     apply(&core, sw_cmd); // sep_len=1(":") → 구분자 경로
     apply(&core, .{ .select_line = 0 });
+}
+
+test "core_command.apply: clear effect follows authoritative prompt and alt state" {
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    try core.write("plain");
+    try std.testing.expect(!apply(&core, .clear_screen).send_form_feed);
+
+    try core.write("\x1b]133;A\x1b\\prompt");
+    try std.testing.expect(apply(&core, .clear_screen).send_form_feed);
+
+    try core.write("\x1b[?1049h");
+    try std.testing.expect(!apply(&core, .clear_screen).send_form_feed);
 }

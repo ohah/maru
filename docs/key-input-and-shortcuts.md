@@ -393,9 +393,14 @@ Ghostty 기본 keybind와 동작이 같다.
 | 그 외(통합 없음/명령 실행 중) | 위 둘 다 아님 | 스크롤백 + 커서 위 행만 비우고 현재 줄·커서 보존 | 안 보냄 — 커서를 안 옮겨 비통합 셸·실행 중 프로그램과 어긋나지 않게 한다 |
 
 경계: `TerminalCore.clearScreen`은 코어 상태(셀·스크롤백·커서)만 바꾸고 PTY로는 쓰지 않는다(L1 경계 —
-docs/io-render-threading.md). 대신 "form-feed를 보낼지"를 bool로 돌려주고, `app_session.dispatchAppAction`이
-코어 락 **밖**에서 `0x0C`를 PTY로 쓴다(블로킹 PTY 쓰기를 락 밖으로 — PR1/PR3 패턴). 프롬프트 분류는 셸
-통합(OSC 133)이 있을 때만 생기고, 그때만 셸 `^L`이 정상 동작하므로 프롬프트 분기와 form-feed가 일관된다.
+docs/io-render-threading.md). 대신 "form-feed를 보낼지"를 bool로 돌려준다. in-process runtime은 reader가 코어
+락 아래 이 결정을 얻고, 락 밖의 reader-owned PTY 출력 버퍼에 `0x0C`를 붙인다. host-backed runtime도 같은
+`clear_screen` core command를 host reader에 보내 **권위 core의 판정과 PTY 주입을 한 reader 순서축**에서 수행한다.
+GUI가 attachment placeholder를 지우거나 별도 `writeInput`을 보내면 host 화면이 다음 observation에 되살아나고
+명령과 `^L` 사이에 사용자 입력이 끼므로 금지한다. 프롬프트 분류는 셸 통합(OSC 133)이 있을 때만 생기고,
+그때만 셸 `^L`이 정상 동작하므로 프롬프트 분기와 form-feed가 일관된다. `runtime_clear_screen_v1`을 별도
+협상해 이 op를 모르는 N-1 host에는 보내지 않는다(그 연결에서는 안전한 degraded no-op; 재시작해 current host로
+올라오면 활성화). 기존 `runtime_core_command_v1` 집합을 암묵 확장해 구 host 연결을 끊지 않는다.
 
 **config**: 빌트인이라 사용자 config로 끄거나(`keybind = Cmd+K = unbind`) 다른 키로 옮길 수 있고
 (`keybind = Cmd+L = clear_screen`), `clear_screen`은 `parseAction`이 인식하므로 임의 chord에 묶을 수 있다.
@@ -411,15 +416,13 @@ keys(1)·keypad. **화면·스크롤백·커서는 보존**한다(`TerminalCore.
 (bash/fish 등 비zsh, 또는 ssh가 hang해 프롬프트가 아직 안 그려진 직후)를 위한 백업이다. 표준 `reset`은 화면·
 스크롤백까지 지우지만, Maru는 증상 원인(잔류 모드)만 끊어 작업 맥락을 보존한다.
 
-경계: Swift 메뉴 액션 → ABI `maru_macos_app_session_reset_input_modes` → `app_session.resetInputModes`(활성
-surface 코어 락 아래 `core.resetInputModes`). 입력 인코딩 상태만 바꿔 렌더에 영향이 없다(focusChanged와 같은
-PR3 패턴 — 코어 변경을 `core_mutex` 아래서 한다).
-
-현재 이 Reset Terminal 경계는 in-process runtime에서만 권위 core에 닿는다. host-backed runtime에서는 활성
-`surface.core`가 attachment placeholder이므로, reset 전용 host command가 추가되기 전까지 제품 동작 완료로 세지 않는다.
-반면 capability `runtime_core_command_v1`을 협상한 현재 host의 일반 창 포커스 변화는 응답 없는
-`core_command` stream frame으로 host reader queue에 전달된다. client control barrier와 host input-byte fence가
-`기존 입력 → report_focus/CSI I·O → 새 입력` 순서를 보존하며 AppKit main thread는 RPC response를 기다리지 않는다.
+경계: Swift 메뉴 액션 → ABI `maru_macos_app_session_reset_input_modes` → `app_session.resetInputModes`로 들어간다.
+in-process runtime은 활성 surface reader queue에, host-backed runtime은 `reset_input_modes` core command를 host
+reader queue에 넣어 각각 **권위 core**의 `resetInputModes`를 적용한다. 입력 인코딩 상태만 바꿔 렌더에 영향이
+없다. capability `runtime_core_command_v1`을 협상한 host에서는 응답 없는 stream frame이며, client control
+barrier와 host input-byte fence가 `기존 입력 → reset → 새 입력` 순서를 보존한다. AppKit main thread는 RPC
+response를 기다리지 않는다. 구 host가 capability를 광고하지 않으면 명령을 조용히 성공 처리하지 않고 해당
+세션을 host-backed로 여는 spawn 계약 자체가 거절돼 in-process fallback을 사용한다.
 
 ## 텍스트 선택의 해제 경계 (`⌘A` 이후)
 

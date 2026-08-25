@@ -2923,7 +2923,7 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
-        var capability_buf: [20][]const u8 = undefined;
+        var capability_buf: [21][]const u8 = undefined;
         const capabilities = self.helloCapabilities(&capability_buf);
         if (!self.host_status.manifest_capable) {
             return self.stringify(.{
@@ -2958,10 +2958,10 @@ pub const Connection = struct {
         });
     }
 
-    fn helloCapabilities(self: *const Connection, buf: *[20][]const u8) []const []const u8 {
+    fn helloCapabilities(self: *const Connection, buf: *[21][]const u8) []const []const u8 {
         var count: usize = 0;
         const append = struct {
-            fn one(target: *[20][]const u8, index: *usize, value: []const u8) void {
+            fn one(target: *[21][]const u8, index: *usize, value: []const u8) void {
                 target[index.*] = value;
                 index.* += 1;
             }
@@ -2982,6 +2982,7 @@ pub const Connection = struct {
         append(buf, &count, "screen_viewport_scrolled_v1");
         append(buf, &count, "async_scroll_to_bottom_v1");
         append(buf, &count, "runtime_core_command_v1");
+        append(buf, &count, "runtime_clear_screen_v1");
         append(buf, &count, "runtime_selected_text_v1");
         append(buf, &count, "runtime_link_at_v1");
         append(buf, &count, "runtime_clipboard_v1");
@@ -3680,6 +3681,7 @@ test "server: hello with overlapping version acks host_id and moves to ready" {
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"async_scroll_to_bottom_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_core_command_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_clear_screen_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"runtime_selected_text_v1\"") != null);
 }
 

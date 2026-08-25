@@ -8489,16 +8489,10 @@ pub const AppSession = struct {
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
                 self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .select_all, self.io) catch {};
             },
-            // 화면+스크롤백 비우기(⌘K). 코어 mutate(셀·스크롤백)는 락 아래(리더 경합 방지, docs/io-render-threading.md
-            // PR3). clearScreen이 "셸에 ^L을 보내 프롬프트를 다시 그릴지"를 돌려주면, form-feed는 락 밖에서 보낸다
-            // (writeInput은 블로킹 PTY 쓰기 — PR1 패턴). 프롬프트일 때만 true(alt 화면·비프롬프트면 안 보냄).
-            .clear_screen => {
-                const s = term_ops.activeSurface(self);
-                s.lockCore(self.io);
-                const send_form_feed = s.core.clearScreen();
-                s.unlockCore(self.io);
-                if (send_form_feed) self.runtime.writeInput(s.id, .{ .bytes = "\x0c" }) catch {};
-            },
+            // 화면+스크롤백 비우기(⌘K). host-backed의 surface.core는 placeholder이므로 local/remote 모두 runtime의
+            // reader queue로 위임한다. 권위 core의 prompt 판정과 조건부 ^L 주입을 같은 input fence에서 처리해야
+            // clear와 다음 사용자 입력 사이에 ^L이 끼거나 다음 observation이 지운 화면을 되살리지 않는다.
+            .clear_screen => self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .clear_screen, self.io) catch {},
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             .toggle_settings => settings_ops.toggleSettings(self),
@@ -10403,16 +10397,9 @@ pub const AppSession = struct {
     pub fn resetInputModes(self: *AppSession) void {
         if (!self.surface_initialized) return;
         const surface = term_ops.activeSurface(self);
-        // host-backed면 **실제 입력 모드를 든 host core**에 적용해야 한다 — client core는 빈 placeholder라 여기서
-        // 리셋해 봐야 원격 앱은 계속 mouse/focus 리포트를 보낸다(⌘⇧R이 원격에서 무동작이던 이유). 명령은 기존
-        // core_command 통로로 위임하고 reader가 input barrier 순서대로 적용한다.
-        if (surface.remote != null) {
-            self.runtime.enqueueCoreCommand(surface.id, .reset_input_modes, self.io) catch {};
-            return;
-        }
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        surface.core.resetInputModes();
+        // local/host-backed 모두 권위 reader에 위임한다. host-backed의 client core는 빈 placeholder이고, local도
+        // main thread 직접 mutate 대신 기존 input fence를 타야 `기존 입력 → reset → 새 입력` 순서가 보존된다.
+        self.runtime.enqueueCoreCommand(surface.id, .reset_input_modes, self.io) catch {};
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {

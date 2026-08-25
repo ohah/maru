@@ -130,16 +130,24 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                     find(frame.tree, build.NodeIds.cardHeader(index)) orelse return error.MissingRect
                 else
                     rect;
+                // **"제목은 마지막까지 남는다"** — 파일 탐색기·소스 컨트롤과 같은 규칙이다
+                // (`file_tree/types.zig` 의 `rowLayout`, `scm_dock/view.zig` 의 `fileRowLadder`).
+                // 카드가 좁아지면 **disclosure 예약 → 메타데이터 줄 → 요약 줄** 순으로 버린다.
+                //
+                // 이 사다리가 없을 때 도크 하한(폭 104pt)에서 카드가 **통째로 비었다** — chevron 하나만
+                // 남고 제목·요약·메타가 전부 사라졌다(Lab 캡처 실측 2026-08-25). `textAtY` 가 예산이
+                // 0 이하면 조용히 돌아가기 때문이고, disclosure 예약(48pt)이 그 폭을 먼저 먹었다.
+                const card_ladder = writer.cardLadder(card_rect, dock_metrics);
                 // Card y offsets are DockMetrics values, not 1/3/5 terminal rows. This keeps
                 // its three-line density and the disclosure hit rect stable across terminal
                 // font zoom while the worker still owns actual glyph shaping and ellipsis.
-                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, dock_metrics.cardDisclosureReserve());
-                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false, dock_metrics.cardDisclosureReserve());
-                try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider, card.metadata);
+                try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, card_ladder.trailing_reserve_px);
+                if (card_ladder.show_summary) try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false, card_ladder.trailing_reserve_px);
+                if (card_ladder.show_metadata) try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider, card.metadata);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
-                try writer.cardDisclosure(card_rect, dock_metrics);
+                if (card_ladder.show_disclosure) try writer.cardDisclosure(card_rect, dock_metrics);
                 if (card.expanded) |expanded| try writer.expanded(frame.tree, index, expanded);
             },
         }
@@ -424,6 +432,51 @@ const Writer = struct {
     /// `trailing_reserve_px`는 이 줄이 절대 침범하면 안 되는 우측 영역(카드의 disclosure slot 등)이다.
     /// 최종 ellipsis는 worker가 measured advance로 정하지만, 그 예산에서 이 폭을 미리 빼 두지 않으면
     /// 잘린 텍스트가 우측 affordance에 그대로 맞닿는다.
+    /// 카드가 이 폭에서 무엇을 남기는가. **제목이 불가침**이고, 좁아지면 이 순서로 버린다:
+    /// **disclosure 예약 → 메타데이터 줄 → 요약 줄**.
+    ///
+    /// 제목이 카드의 신원이다 — 요약은 제목을 풀어 쓴 것이고, 메타(개수·시각·모델)는 세면 알 수 있으며,
+    /// disclosure 는 카드 전체가 이미 하나의 action 이라 그 표시가 없어도 누를 수 있다.
+    const CardLadder = struct {
+        show_disclosure: bool,
+        show_summary: bool,
+        show_metadata: bool,
+        trailing_reserve_px: u32,
+        /// 좁은 구간에서는 카드 좌우 여백도 줄인다. 16pt 는 넉넉한 폭에서 카드를 카드답게 만드는 값인데,
+        /// 폭이 100pt 남짓이면 그 여백 둘이 제목보다 넓어진다 — 그때는 여백이 장식이고 제목이 내용이다.
+        inset_x: u32,
+    };
+
+    fn cardLadder(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) CardLadder {
+        const cw = self.props.cell_width_px;
+        const floor: f32 = 80; // 제목에게 주려는 최소 폭 — **목표이지 보장이 아니다**(탐색기와 같은 값)
+        const left: f32 = @floatFromInt(m.card_inset_x + cw);
+        const reserve: f32 = @floatFromInt(m.cardDisclosureReserve());
+        const with_reserve = rect.rect.width - left - reserve;
+        if (with_reserve >= floor) return .{
+            .show_disclosure = true,
+            .show_summary = true,
+            .show_metadata = true,
+            .trailing_reserve_px = m.cardDisclosureReserve(),
+            .inset_x = m.card_inset_x,
+        };
+        // disclosure 를 내려놓아도 제목이 바닥에 못 미치면 아래 두 줄까지 버린다 — 그 폭에서는 세 줄이
+        // 각자 `…` 하나로 끝나 카드가 잡음이 된다. 한 줄(제목)만 남기는 편이 읽힌다.
+        // 여백을 줄여도 되는지 먼저 본다 — 줄여서 바닥을 넘기면 그쪽이 낫다(제목이 더 보인다).
+        const tight_inset = spacing.px(.xs, effectiveScale(self.props.scale_milli));
+        const bare_wide = rect.rect.width - left - @as(f32, @floatFromInt(m.card_inset_x));
+        const bare_tight = rect.rect.width - @as(f32, @floatFromInt(tight_inset + cw)) - @as(f32, @floatFromInt(tight_inset));
+        const use_tight = bare_wide < floor;
+        const bare = if (use_tight) bare_tight else bare_wide;
+        return .{
+            .show_disclosure = false,
+            .show_summary = bare >= floor,
+            .show_metadata = bare >= floor,
+            .trailing_reserve_px = if (use_tight) tight_inset else m.card_inset_x,
+            .inset_x = if (use_tight) tight_inset else m.card_inset_x,
+        };
+    }
+
     fn textAtY(self: *Writer, rect: tree.RectEntry, inset_x: u32, offset_y: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, bold: bool, trailing_reserve_px: u32) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
@@ -864,6 +917,74 @@ fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
 // 예전 문구 `N개 표시 · 최근 500개`는 상한을 광고했지만, 실제로 목록을 자르는 것은 그 상한이 아니라
 // read budget이라 "500개 중 N개"가 사실과 달랐다. 그리고 scanner가 `partial`을 세고 있었는데도 그 값이
 // DTO에 없어 **잘렸다는 사실이 화면에 전혀 나타나지 않았다** — 사용자는 목록이 전부인 줄 알았다.
+// **"제목은 마지막까지 남는다"** — 카드 사다리(파일 탐색기·소스 컨트롤과 같은 규칙).
+//
+// 이 사다리가 없을 때 도크 하한(폭 104pt)에서 카드가 **통째로 비었다**: chevron 하나만 남고 제목·요약·
+// 메타가 전부 사라졌다(Lab 캡처 실측 2026-08-25). `textAtY` 가 예산 0 이하면 조용히 돌아가고,
+// disclosure 예약(48pt)이 그 폭을 먼저 먹었기 때문이다.
+fn cardLadderOps(width: u32, storage: *CardLadderStorage) ![]const draw.Op {
+    const props = types.Props{
+        .viewport_px = .{ .width = @floatFromInt(width), .height = 400 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .scale_milli = 1000,
+        .snapshot_generation = 1,
+        .displayed_count = 1,
+        .items = &.{
+            .{ .card = .{
+                .identity = 1,
+                .provider = .claude,
+                .title = "Notion document root cause",
+                .summary = "Check the original document",
+                .metadata = .{ .messages = "94 messages", .age = "3m ago", .model = "claude-opus-5" },
+            } },
+        },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.items,
+        .flex_scratch = &storage.flex,
+        .child_rects = &storage.rects,
+        .actions = &storage.actions,
+    });
+    const tk = fixtureTokens();
+    const draws = try view(props, frame, .{}, &tk, .{
+        .ops = &storage.ops,
+        .runs = &storage.runs,
+        .text_bytes = &storage.text_bytes,
+    });
+    return draws.ops;
+}
+
+const CardLadderStorage = struct {
+    nodes: [64]tree.UiNode = undefined,
+    entries: [64]tree.RectEntry = undefined,
+    items: [64]@import("../../ui/layout.zig").Item = undefined,
+    flex: [64]@import("../../ui/layout.zig").FlexScratch = undefined,
+    rects: [64]@import("../../ui/layout.zig").UiRect = undefined,
+    actions: [64]@import("ids.zig").Entry = undefined,
+    ops: [512]draw.Op = undefined,
+    runs: [512]draw.Run = undefined,
+    text_bytes: [4096]u8 = undefined,
+};
+
+test "좁은 카드는 disclosure·메타·요약을 버리고 제목을 남긴다" {
+    // ⑴ 넓으면 아무것도 안 버린다.
+    var wide_storage: CardLadderStorage = .{};
+    const wide = try cardLadderOps(480, &wide_storage);
+    try std.testing.expect(originYFor(wide, "Notion") != null);
+    try std.testing.expect(originYFor(wide, "Check") != null);
+    try std.testing.expect(originYFor(wide, "94 messages") != null);
+
+    // ⑵ 도크 하한 폭(104 = 도크 120 − 스크롤 거터 16)에서는 **제목만** 남는다 — 빈 카드가 아니다.
+    var narrow_storage: CardLadderStorage = .{};
+    const narrow = try cardLadderOps(104, &narrow_storage);
+    try std.testing.expect(originYFor(narrow, "Notion") != null);
+    try std.testing.expect(originYFor(narrow, "Check") == null);
+    try std.testing.expect(originYFor(narrow, "94 messages") == null);
+}
+
 test "SessionDock 헤더는 잘림과 분석 중을 개수와 분리해 말한다" {
     // 기대값이 한국어 문장이다 — 이 테스트가 재는 것은 **어느 분기가 어느 문구를 내는가**이고,
     // 그 의미는 문장으로 봐야 드러난다(키 비교는 동어반복이 된다). 언어를 명시 고정해 두면 기본값이

@@ -513,6 +513,28 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 - 영속 세션 호스트 2d3 callback/proof-loss gate: `zig build test-session-host-2d3`. 2d2를 상속하고 Debug·ReleaseFast에서 unique component 12개, stage별 전용 fresh-exec subprocess 3개, boundary 1개를 실행한다. pre-callback proof loss는 free 0, post-callback proof loss는 target free exact 1 뒤 공통 `fatalIntegrity(.proof_loss)` exit 86, callback reentry는 같은 Client mutation `Busy`와 독립 Client read 허용을 exact transcript로 검증한다.
 - 영속 세션 호스트 CR3a-2e actual attach parity gate: `zig build test-session-host-2e`. 2d3을 상속하고 generation attach의 binding·cleanup row·pin·batch adapter가 wire 전에 준비되는지, accepted stream이 allocation 없는 suffix로 exact once 결속되는지 검증한다. 최종 gate는 Debug·ReleaseFast마다 준비 계약 4개, actual socket 6개, rollback 4개, boundary 1개를 exact-count한다.
 
+### `/tmp` 픽스처 잔재를 거둔다 (로컬 위생)
+
+session host 픽스처는 `/tmp/maru-<이름>-<pid>` 를 만들고 그 안에 daemon 을 띄운다. daemon 이 owner lock·
+`incidents/`·manifest·소켓을 남기므로 **`rmdir` 로는 못 지우고** 그 자리가 실행마다 쌓인다.
+
+```sh
+mise run clean-tmp-fixtures            # 주인이 죽은 자리만 거둔다
+sh tools/clean-tmp-fixtures.sh --dry-run   # 지우기 전에 세어 본다
+```
+
+**왜 신경 쓰는가 — 디스크가 아니라 pid 재사용이다.** 이름이 pid 라, 같은 번호를 받은 다음 실행이 «이미
+채워진» 디렉터리에서 시작한다. 죽은 manifest 가 «살아 있는 host» 로 읽히거나 stale 소켓·lock 이 정리
+사슬을 다른 길로 보내고, 증상은 **코드와 무관해 보이는 간헐 실패**다(진짜 결함을 flake 로 넘기거나 그
+반대를 하기 쉽다).
+
+⚠️ **`/tmp/maru-<uid>`(예: `maru-501`)는 실 세션 host 의 루트다.** 그 스크립트는 이름이 숫자뿐인 자리와
+pid 를 읽을 수 없는 자리를 **건드리지 않는다** — 지우면 사용자의 살아 있는 keep-alive 세션이 통째로
+사라진다. 살아 있는 pid 의 자리도 남긴다(지금 돌고 있는 테스트일 수 있다).
+
+CI 러너는 매번 새 머신이라 이 명령이 필요 없다 — 개발 머신용이다. 실측(2026-08-25): 이 저장소를 개발하던
+머신에서 21,474 개를 거뒀다.
+
 ## 완료 전 확인
 
 코드나 빌드 설정을 바꾼 PR은 기본적으로 다음을 통과해야 한다.

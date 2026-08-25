@@ -24381,7 +24381,7 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     // Readiness polling is test setup only. The product connect itself gets one absolute budget
@@ -24496,8 +24496,8 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
         if (host_manifest_mod.hostsRootPathIn(&hosts_buf, dir_path)) |path|
             _ = c.rmdir(path.ptr)
         else |_| {}
-        _ = c.rmdir(dir_path.ptr);
-        _ = c.rmdir(base.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
+        std.Io.Dir.cwd().deleteTree(testing.io, base) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var gui: Client = blk: {
@@ -24658,7 +24658,7 @@ test "client: spawns, lists, and terminates a real runtime on a forked host over
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var client: Client = blk: {
@@ -24722,7 +24722,7 @@ test "client: sibling attachment converges after explicit terminate and natural 
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var first: Client = blk: {
@@ -24861,7 +24861,7 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var client: Client = blk: {
@@ -24953,7 +24953,7 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
-        _ = c.rmdir(dir_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
     var client: Client = blk: {

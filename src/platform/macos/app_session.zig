@@ -20278,6 +20278,84 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
 
 // [AT3 §4.4] **backlog 따라잡기 중에는 캡처하지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 도구가
 // 이미 오래전에 끝났고, 지금 읽으면 **현재 내용을 끝난 턴의 before 로 이름 붙인다** — 없는 것보다 나쁘다.
+// [AT4 §5] **셸 호출은 캡처와 같은 게이트를 지난다.** 게이트를 공유하지 않으면 「창이 없던 시간의 셸
+// 명령」이 지금 턴에 세어져 고지가 **거짓 수**를 말한다.
+test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.zig", .data = "x\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-sh" });
+
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "Bash",
+        .tool_command = "ls",
+    });
+    try std.testing.expectEqual(@as(u32, 1), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // **편집 도구로는 안 는다** — 그쪽은 경로를 주므로 사본이 근거다.
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/a.zig", .{root});
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "Edit",
+        .file_path = abs,
+    });
+    try std.testing.expectEqual(@as(u32, 1), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // **backlog 중에는 안 센다.**
+    term.agent_hook_backlog_catchup = true;
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "Bash",
+        .tool_command = "ls",
+    });
+    try std.testing.expectEqual(@as(u32, 1), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // **플래그를 내리면 다시 센다** — 뒤 절반이 없으면 「영영 안 세는」 구현이 통과한다.
+    term.agent_hook_backlog_catchup = false;
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "Bash",
+        .tool_command = "ls",
+    });
+    try std.testing.expectEqual(@as(u32, 2), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // 자식 이벤트로는 안 는다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .agent_id = "child-1",
+        .tool_name = "Bash",
+        .tool_command = "ls",
+    });
+    try std.testing.expectEqual(@as(u32, 2), session.turn_captures.openTurn("S-sh").?.shell_calls);
+}
+
 // [AT3 §4.4] **회전본의 `PreToolUse` 로는 before 를 뜨지 않는다.** 회전본은 이미 지나간 이벤트라 그 도구는
 // **이미 끝났다** — 지금 그 파일을 읽으면 「끝난 턴의 before」 자리에 **그 편집의 결과**가 들어가, 그 턴의
 // diff 가 자기 편집을 통째로 숨긴다. backlog 와 사유가 같아 같은 게이트를 쓴다.

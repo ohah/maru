@@ -673,6 +673,13 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             items[n] = .{ .notice = maru.i18n.t(.scm_turn_no_files) };
             n += 1;
         }
+        // **셸 고지는 파일 행 뒤에 선다**(계약 §5). 그 위 행들이 왜 `·` 인지를 여기서 말한다.
+        if (shellNoticeFor(self, arena, head)) |text| {
+            if (n < items.len) {
+                items[n] = .{ .notice = text };
+                n += 1;
+            }
+        }
     }
 
     const list_items = ScrollItems{ .items = items[0..n], .metrics = m };
@@ -727,6 +734,27 @@ fn turnTitle(arena: std.mem.Allocator, back: usize, live: bool) []const u8 {
 /// «읽었다»로 표시한다 — `applyTurnSummary`). «바꾼 것이 없다»와 «못 읽었다»를 한 글자로 구분할 수
 /// 없으니 둘 다 조용히 비운다. 실제로 아무것도 안 바꾼 턴은 링이 이미 걸러 낸다(같은 tree 연속이면
 /// push 하지 않는다).
+/// 그 턴의 셸 고지 한 줄(계약 §5). 없으면 null.
+///
+/// **두 경우에 줄이 없고, 그 둘은 다른 사실이다:**
+///
+/// - `shell_calls == 0` — 셸을 **안 썼다**(계약 §5: 「0이면 줄이 사라진다」).
+/// - 캡처가 없다(`capture_id == 0`) — 셸을 썼는지 **모른다**. 훅이 없으면 셀 방법이 없다.
+///   여기서 「0개」를 그리면 「셸을 안 썼다」는 **거짓**이 된다(`✎ 0` 을 안 그리는 것과 같은 규율).
+fn shellNoticeFor(
+    self: *AppSession,
+    arena: std.mem.Allocator,
+    head: ?*const maru.session.turn_snapshot.Snapshot,
+) ?[]const u8 {
+    const snap = head orelse return null;
+    if (snap.capture_id == 0) return null;
+    const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return null;
+    if (turn.shell_calls == 0) return null;
+    var buf: [128]u8 = undefined;
+    const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turn_shell_notice), &.{.{ .d = @intCast(turn.shell_calls) }});
+    return arena.dupe(u8, text) catch null;
+}
+
 /// 그 파일을 **누가** 바꿨나(계약 §4.2). 목록은 tree 가 만들고 근거는 캡처가 붙인다 — 그 둘을 잇는
 /// 유일한 자리다.
 ///
@@ -4038,6 +4066,50 @@ test "턴 요약: 모르거나 0이면 자리를 비운다(실패한 턴도 0으
     // **캡처가 없으면 `✎` 를 안 붙인다** — «✎ 0» 은 «에이전트가 아무것도 안 했다» 로 읽히는데
     // 우리가 아는 것은 «편집 도구로는 안 했다» 뿐이다.
     try std.testing.expect(std.mem.indexOf(u8, text, "✎") == null);
+}
+
+// [AT4 §5] 셸 고지는 **두 경우에 없고 그 둘은 다른 사실이다** — 「안 썼다」와 「모른다」.
+test "셸 고지: 썼으면 수를 말하고, 0이거나 모르면 줄이 없다" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const gpa = session.allocator;
+
+    // ① 셸을 썼다 — 수가 문구에 든다.
+    session.turn_captures.noteShellCall("S1");
+    session.turn_captures.noteShellCall("S1");
+    session.turn_captures.noteShellCall("S1");
+    const used = session.turn_captures.seal(gpa, "S1");
+    try std.testing.expect(used != 0);
+    var snap_used: maru.session.turn_snapshot.Snapshot = .{ .capture_id = used };
+    const text = shellNoticeFor(session, a, &snap_used) orelse return error.MissingNotice;
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, '3') != null);
+
+    // ② 캡처는 있는데 셸은 **안 썼다** — 줄이 없다(계약 §5).
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S2", "/r/a.zig", .edit, .empty));
+    const no_shell = session.turn_captures.seal(gpa, "S2");
+    try std.testing.expect(no_shell != 0);
+    var snap_no_shell: maru.session.turn_snapshot.Snapshot = .{ .capture_id = no_shell };
+    try std.testing.expect(shellNoticeFor(session, a, &snap_no_shell) == null);
+
+    // ③ **캡처가 없다 — 썼는지 «모른다».** 여기서 「0개」를 그리면 「안 썼다」는 거짓이 된다.
+    //    ②만 보는 테스트는 이 구현을 통과시킨다.
+    var snap_unknown: maru.session.turn_snapshot.Snapshot = .{};
+    try std.testing.expect(shellNoticeFor(session, a, &snap_unknown) == null);
+    try std.testing.expect(shellNoticeFor(session, a, null) == null);
 }
 
 // [AT3 §4.2] **배지 join 의 핵심 위험은 경로 모양이다.** 훅은 절대경로를(실측 610/610), `git diff

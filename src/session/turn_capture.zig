@@ -134,6 +134,15 @@ pub const Turn = struct {
     entries: std.ArrayList(Entry) = .empty,
     /// 지금 보관 중인 바이트 합(before + after).
     held: usize = 0,
+    /// 그 턴에 에이전트가 부른 **셸 도구 호출 수**(`Bash`·`exec`).
+    ///
+    /// 셸은 경로를 안 주므로(계약 §2.3 — provider 구현이 그 필드를 아예 안 만든다) 사본이 없다.
+    /// 그래서 이 수가 **목록의 `·` 가 왜 있는지**를 말하는 유일한 근거다 — 「그 턴에 셸 명령이 N개
+    /// 있었고, 그중 무엇이 어느 파일을 고쳤는지는 확정할 수 없다」.
+    ///
+    /// **경로 항목과 독립이다.** 셸만 쓴 턴은 `entries` 가 비어도 이 수가 있고, `seal` 이 그 경우도
+    /// 봉인한다(아래) — 고지가 **가장 필요한 자리**가 바로 그 턴이기 때문이다.
+    shell_calls: u32 = 0,
 
     pub fn deinit(self: *Turn, gpa: std.mem.Allocator) void {
         for (self.entries.items) |*e| {
@@ -151,6 +160,11 @@ pub const Turn = struct {
             if (std.mem.eql(u8, e.path, path)) return i;
         }
         return null;
+    }
+
+    /// 붙일 것이 하나라도 있나 — 경로든 셸 수든.
+    pub fn hasEvidence(self: *const Turn) bool {
+        return self.entries.items.len > 0 or self.shell_calls > 0;
     }
 
     /// **에이전트 편집 도구가 실제로 바꾼 파일 수.** 화면의 `✎ M` 이 이 값이다.
@@ -354,7 +368,14 @@ pub const Store = struct {
         turn.held += stored.heldBytes();
     }
 
-    /// 진행 중 턴을 봉인해 id 를 발급한다. **경로가 하나도 없으면 `0`**(붙일 것이 없는 턴이다).
+    /// 그 턴의 셸 도구 호출을 하나 센다. 경로가 없어도 진행 중 자리를 연다 — 셸만 쓴 턴도 봉인되어야
+    /// 고지가 뜬다(`Turn.shell_calls` 주석).
+    pub fn noteShellCall(self: *Store, session_id: []const u8) void {
+        const slot = self.openFor(session_id) orelse return;
+        slot.turn.shell_calls +|= 1;
+    }
+
+    /// 진행 중 턴을 봉인해 id 를 발급한다. **붙일 것이 하나도 없으면 `0`**(경로도 셸 수도 없는 턴).
     ///
     /// 봉인 자리가 없으면 **가장 오래된 것을 밀어낸다** — 그 자리는 sweep 이 곧 정리하지만, 정리
     /// 시점이 오기 전에 자리가 마를 수 있다(링은 세션당 8인데 우리는 전체 64다).
@@ -370,7 +391,10 @@ pub const Store = struct {
             slot.id_len = 0;
             slot.turn = .{};
         }
-        if (slot.turn.entries.items.len == 0) {
+        // **셸만 쓴 턴도 봉인한다.** 경로가 없다고 거절하면 고지가 **필요한 곳에서만 사라진다** —
+        // 파일 행이 전부 `·` 인 턴이야말로 「왜 그런지」를 말해 줄 것이 셸 수뿐이다. 대가는 없다:
+        // 경로가 없는 버킷은 힙을 한 바이트도 안 쓰고(카운터 하나), 고아가 되어도 sweep 이 공짜로 치운다.
+        if (!slot.turn.hasEvidence()) {
             slot.turn.deinit(gpa);
             return 0;
         }
@@ -593,6 +617,45 @@ test "빈 live 목록이면 봉인된 것이 전부 풀린다" {
     store.sweep(gpa, &.{});
     try testing.expect(store.sealedTurn(id) == null);
     try testing.expectEqual(@as(usize, 0), store.heldBytes());
+}
+
+test "셸 호출은 셀 때만 늘고 봉인 뒤에도 남는다" {
+    const gpa = testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(gpa);
+
+    // 안 세면 0이다.
+    try testing.expect(store.noteBefore(gpa, "S1", "/r/a.zig", .edit, .empty));
+    try testing.expectEqual(@as(u32, 0), store.openTurn("S1").?.shell_calls);
+
+    store.noteShellCall("S1");
+    store.noteShellCall("S1");
+    try testing.expectEqual(@as(u32, 2), store.openTurn("S1").?.shell_calls);
+
+    const id = store.seal(gpa, "S1");
+    try testing.expect(id != 0);
+    // **봉인 뒤에도 살아 있어야** 화면이 읽는다.
+    try testing.expectEqual(@as(u32, 2), store.sealedTurn(id).?.shell_calls);
+}
+
+test "셸만 쓴 턴도 봉인된다 — 그러나 아무것도 없는 턴은 여전히 0이다" {
+    const gpa = testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(gpa);
+
+    // 경로가 하나도 없다. **고지가 가장 필요한 자리**이므로 봉인되어야 한다.
+    store.noteShellCall("S-shell");
+    store.noteShellCall("S-shell");
+    store.noteShellCall("S-shell");
+    const id = store.seal(gpa, "S-shell");
+    try testing.expect(id != 0);
+    const sealed = store.sealedTurn(id) orelse return error.NoSealed;
+    try testing.expectEqual(@as(usize, 0), sealed.entries.items.len);
+    try testing.expectEqual(@as(u32, 3), sealed.shell_calls);
+
+    // **뒤 절반이 없으면 「무조건 봉인」 구현이 통과한다.** 붙일 것이 없는 턴은 여전히 0이어야 한다.
+    _ = store.openFor("S-empty");
+    try testing.expectEqual(@as(Id, 0), store.seal(gpa, "S-empty"));
 }
 
 test "봉인 자리가 꽉 차도 **살아 있는 사본**은 밀려나지 않는다" {

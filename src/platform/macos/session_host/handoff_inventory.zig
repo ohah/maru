@@ -684,6 +684,10 @@ pub const runtime_manager_groups = [_]Group{
             "output_metrics_enabled",
             "observed_output_bytes",
             "observation_materializations",
+            "observation_metrics_enabled",
+            "observation_core_lock_acquisitions",
+            "observation_core_lock_hold_total_ns",
+            "observation_core_lock_hold_max_ns",
             "output_wake",
             // The successor re-derives this from its own invocation host_id, which upgrade validation forces to
             // equal the predecessor's, so the agent-hook instance segment it stamps on new children keeps the

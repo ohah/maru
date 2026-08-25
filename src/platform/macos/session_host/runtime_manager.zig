@@ -188,6 +188,8 @@ const ObservationCacheRecord = struct {
     cache: runtime_observation_cache.Cache,
     refreshed_at_ns: i128 = 0,
     cadence_epoch: ?u64 = null,
+    observer_generation: u64 = 0,
+    title_generation: u32 = 0,
 
     fn deinit(self: *ObservationCacheRecord, allocator: std.mem.Allocator) void {
         self.cache.deinit() catch @panic("runtime observation cache retained a prepared value");
@@ -238,6 +240,10 @@ pub const RuntimeManager = struct {
     output_metrics_enabled: bool = false,
     observed_output_bytes: std.atomic.Value(u64) = .init(0),
     observation_materializations: u64 = 0,
+    observation_metrics_enabled: bool = false,
+    observation_core_lock_acquisitions: u64 = 0,
+    observation_core_lock_hold_total_ns: u64 = 0,
+    observation_core_lock_hold_max_ns: u64 = 0,
     /// 다음 in-process handle. 1부터 발급한다 — 0은 opaque 슬롯의 null과 겹치므로 handle로 쓰지 않는다.
     next_handle: RuntimeHandle = 1,
     /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
@@ -280,6 +286,10 @@ pub const RuntimeManager = struct {
         self.output_metrics_enabled = false;
         self.observed_output_bytes = .init(0);
         self.observation_materializations = 0;
+        self.observation_metrics_enabled = false;
+        self.observation_core_lock_acquisitions = 0;
+        self.observation_core_lock_hold_total_ns = 0;
+        self.observation_core_lock_hold_max_ns = 0;
         self.next_handle = 1;
         self.foreground_cache = .empty;
         self.observation_caches = .empty;
@@ -329,6 +339,42 @@ pub const RuntimeManager = struct {
 
     pub fn fixtureObservationMaterializations(self: *const RuntimeManager) u64 {
         return self.observation_materializations;
+    }
+
+    pub const ObservationPerformanceEvidence = struct {
+        materializations: u64,
+        core_lock_acquisitions: u64,
+        core_lock_hold_total_ns: u64,
+        core_lock_hold_max_ns: u64,
+    };
+
+    pub fn fixtureEnableObservationPerformanceEvidence(self: *RuntimeManager) void {
+        self.observation_metrics_enabled = true;
+        self.observation_materializations = 0;
+        self.observation_core_lock_acquisitions = 0;
+        self.observation_core_lock_hold_total_ns = 0;
+        self.observation_core_lock_hold_max_ns = 0;
+    }
+
+    pub fn fixtureObservationPerformanceEvidence(self: *const RuntimeManager) ObservationPerformanceEvidence {
+        return .{
+            .materializations = self.observation_materializations,
+            .core_lock_acquisitions = self.observation_core_lock_acquisitions,
+            .core_lock_hold_total_ns = self.observation_core_lock_hold_total_ns,
+            .core_lock_hold_max_ns = self.observation_core_lock_hold_max_ns,
+        };
+    }
+
+    fn recordObservationCoreLockHold(self: *RuntimeManager, started_at_ns: i128) void {
+        if (!self.observation_metrics_enabled) return;
+        const ended_at_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        const elapsed: u64 = if (ended_at_ns > started_at_ns)
+            @intCast(@min(ended_at_ns - started_at_ns, std.math.maxInt(u64)))
+        else
+            0;
+        self.observation_core_lock_acquisitions +|= 1;
+        self.observation_core_lock_hold_total_ns +|= elapsed;
+        self.observation_core_lock_hold_max_ns = @max(self.observation_core_lock_hold_max_ns, elapsed);
     }
 
     /// 소유 registry를 해제한다. **호출 전 모든 runtime이 terminate돼 있어야** 한다(reader join·슬롯 회수가 terminate에서
@@ -1200,15 +1246,21 @@ pub const RuntimeManager = struct {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
-        const be = self.backend_impl.backend();
 
         // BEL drain은 관측을 만드는 **모든 경로**(주기 push·RPC pull·attach)에서 일어나지만, takeBell이 소비형이라
         // 벨 1회당 카운터는 정확히 1 증가한다(중복 없음). 카운터는 단조 증가라 client가 delta로 판정한다.
         const bell_gop = try self.bell_counts.getOrPut(self.allocator, handle);
         if (!bell_gop.found_existing) bell_gop.value_ptr.* = 0;
         {
+            const lock_started_at_ns = if (self.observation_metrics_enabled)
+                std.Io.Clock.awake.now(self.io).nanoseconds
+            else
+                0;
             surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
+            defer {
+                self.recordObservationCoreLockHold(lock_started_at_ns);
+                surface.unlockCore(self.io);
+            }
             if (surface.core.takeBell()) bell_gop.value_ptr.* +%= 1;
         }
         const bell_count = bell_gop.value_ptr.*;
@@ -1220,8 +1272,15 @@ pub const RuntimeManager = struct {
         if (!clip_gop.found_existing) clip_gop.value_ptr.* = .{};
         const clip = clip_gop.value_ptr;
         {
+            const lock_started_at_ns = if (self.observation_metrics_enabled)
+                std.Io.Clock.awake.now(self.io).nanoseconds
+            else
+                0;
             surface.lockCore(self.io);
-            defer surface.unlockCore(self.io);
+            defer {
+                self.recordObservationCoreLockHold(lock_started_at_ns);
+                surface.unlockCore(self.io);
+            }
             const pending_write = surface.core.pendingClipboardWrite();
             if (pending_write.len > 0) {
                 clip.write_text.clearRetainingCapacity();
@@ -1244,15 +1303,10 @@ pub const RuntimeManager = struct {
             }
         }
 
-        const cache_gop = try self.foreground_cache.getOrPut(self.allocator, handle);
-        if (!cache_gop.found_existing) cache_gop.value_ptr.* = .{};
-        const foreground = cache_gop.value_ptr;
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
-        if (foreground.refreshed_at_ns == 0 or now_ns - foreground.refreshed_at_ns >= foreground_refresh_ns) {
-            foreground.count = be.foregroundProcessNames(handle, &foreground.names);
-            foreground.pgid = be.foregroundProcessGroup(handle);
-            foreground.refreshed_at_ns = now_ns;
-        }
+        _ = try self.refreshForegroundCache(handle, now_ns);
+        const foreground = self.foreground_cache.getPtr(handle) orelse
+            return error.TransientObservationUnavailable;
         const process_count = foreground.count;
         const foreground_pgid = foreground.pgid;
         const processes = try allocator.alloc(server.RuntimeObservation.Process, process_count);
@@ -1266,8 +1320,15 @@ pub const RuntimeManager = struct {
             process_names_initialized += 1;
         }
 
+        const lock_started_at_ns = if (self.observation_metrics_enabled)
+            std.Io.Clock.awake.now(self.io).nanoseconds
+        else
+            0;
         surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
+        defer {
+            self.recordObservationCoreLockHold(lock_started_at_ns);
+            surface.unlockCore(self.io);
+        }
         const core = &surface.core;
         const cwd = try allocator.dupe(u8, core.currentCwd());
         errdefer allocator.free(cwd);
@@ -1305,6 +1366,38 @@ pub const RuntimeManager = struct {
         return result;
     }
 
+    /// Refreshing the cheap fixed foreground cache is not itself an observation source change.
+    /// Compare the sampled process identity first so an idle 500ms poll does not force a core lock,
+    /// heap copies, canonical JSON serialization, or a cache transaction.
+    fn refreshForegroundCache(self: *RuntimeManager, handle: RuntimeHandle, now_ns: i128) !bool {
+        const gop = try self.foreground_cache.getOrPut(self.allocator, handle);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const foreground = gop.value_ptr;
+        const due = foreground.refreshed_at_ns == 0 or
+            now_ns < foreground.refreshed_at_ns or
+            now_ns - foreground.refreshed_at_ns >= foreground_refresh_ns;
+        if (!due) return false;
+
+        var names: [64]ForegroundProcessName = undefined;
+        const be = self.backend_impl.backend();
+        const count = be.foregroundProcessNames(handle, &names);
+        const pgid = be.foregroundProcessGroup(handle);
+        var changed = foreground.refreshed_at_ns == 0 or
+            foreground.count != count or foreground.pgid != pgid;
+        if (!changed) for (names[0..count], 0..) |name, index| {
+            const old = &foreground.names[index];
+            if (old.pid != name.pid or !std.mem.eql(u8, old.slice(), name.slice())) {
+                changed = true;
+                break;
+            }
+        };
+        @memcpy(foreground.names[0..count], names[0..count]);
+        foreground.count = count;
+        foreground.pgid = pgid;
+        foreground.refreshed_at_ns = now_ns;
+        return changed;
+    }
+
     fn cachedObservationOp(
         ctx: *anyopaque,
         runtime_id: u128,
@@ -1329,14 +1422,35 @@ pub const RuntimeManager = struct {
         }
         const record = gop.value_ptr.*;
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        const cadence_epoch_advanced = switch (request) {
+            .cadence_epoch => |epoch| record.cadence_epoch == null or epoch > record.cadence_epoch.?,
+            else => false,
+        };
+        // A cadence is only a sampling opportunity. It must not itself become a source change:
+        // otherwise N idle runtimes still take N core locks and serialize N observations every
+        // 100ms. TerminalCore publishes both generations atomically, so this preflight is lock-free.
+        // Foreground process identity is the sole non-core source and retains its independent 500ms
+        // refresh deadline. Equal/older epochs reuse the first view chosen for that producer sweep.
+        const may_sample_source = switch (request) {
+            .current => true,
+            .cadence_epoch => cadence_epoch_advanced,
+            .fresh => false,
+        };
+        var foreground_changed = false;
+        if (may_sample_source and record.cache.view() != null)
+            foreground_changed = try self.refreshForegroundCache(handle, now_ns);
+        const source_changed = may_sample_source and record.cache.view() != null and
+            (surface.core.observerGeneration() != record.observer_generation or
+                surface.core.title_generation.load(.monotonic) != record.title_generation or
+                foreground_changed);
         const refresh = switch (request) {
             .fresh => true,
             .current => record.cache.view() == null or
                 now_ns < record.refreshed_at_ns or
-                now_ns - record.refreshed_at_ns >= 100 * std.time.ns_per_ms,
-            .cadence_epoch => |epoch| record.cache.view() == null or
-                record.cadence_epoch == null or
-                epoch > record.cadence_epoch.?,
+                (now_ns - record.refreshed_at_ns >= 100 * std.time.ns_per_ms and
+                    source_changed),
+            .cadence_epoch => record.cache.view() == null or source_changed,
         };
         if (refresh) {
             const next_materialization_count = self.observation_materializations +| 1;
@@ -1360,6 +1474,8 @@ pub const RuntimeManager = struct {
             settled = true;
             self.observation_materializations = next_materialization_count;
             record.refreshed_at_ns = now_ns;
+            record.observer_generation = observation.observer_generation;
+            record.title_generation = observation.title_generation;
             switch (request) {
                 .cadence_epoch => |epoch| {
                     if (record.cadence_epoch == null or epoch > record.cadence_epoch.?)
@@ -1367,7 +1483,10 @@ pub const RuntimeManager = struct {
                 },
                 else => {},
             }
-        }
+        } else if (cadence_epoch_advanced) switch (request) {
+            .cadence_epoch => |epoch| record.cadence_epoch = epoch,
+            else => unreachable,
+        };
         const view = record.cache.view() orelse return error.TransientObservationUnavailable;
         return .{ .canonical_json = view.bytes, .change_token = view.change_token };
     }
@@ -3307,11 +3426,91 @@ test "P4 E2b runtime manager shares one canonical observation per cadence epoch"
     try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
     const next_epoch = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 101 });
     try std.testing.expectEqual(first_cached.change_token, next_epoch.change_token);
-    try std.testing.expectEqual(@as(u64, 2), mgr.fixtureObservationMaterializations());
+    try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
     _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 99 });
+    try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
+
+    surface.lockCore(std.testing.io);
+    surface.core.write("changed") catch |err| {
+        surface.unlockCore(std.testing.io);
+        return err;
+    };
+    surface.unlockCore(std.testing.io);
+    const changed_epoch = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 102 });
+    try std.testing.expect(changed_epoch.change_token != first_cached.change_token);
     try std.testing.expectEqual(@as(u64, 2), mgr.fixtureObservationMaterializations());
     _ = try ops.cached_observation(ops.ctx, rid, .fresh);
     try std.testing.expectEqual(@as(u64, 3), mgr.fixtureObservationMaterializations());
+}
+
+test "P4 E2c observation materialization follows runtime source changes at 1 10 100 scale" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 1, 10, 100 }) |runtime_count| {
+        var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+        var mgr: RuntimeManager = undefined;
+        mgr.init(allocator, std.testing.io, &host_registry, null);
+        const ops = mgr.runtimeOps();
+        var runtime_ids: [100]u128 = undefined;
+        var spawned: usize = 0;
+        errdefer {
+            while (spawned != 0) {
+                spawned -= 1;
+                ops.terminate(ops.ctx, runtime_ids[spawned]);
+            }
+            mgr.deinit();
+            host_registry.deinit();
+        }
+        while (spawned < runtime_count) : (spawned += 1) {
+            runtime_ids[spawned] = try ops.spawn(ops.ctx, .{
+                .argv = &.{"/bin/cat"},
+                .cwd = null,
+                .cols = 24,
+                .rows = 6,
+            });
+        }
+        mgr.fixtureEnableObservationPerformanceEvidence();
+
+        // Two product consumers in one sweep and the next idle sweep must still materialize once
+        // per runtime, not once per subscriber or once per cadence tick.
+        for (runtime_ids[0..runtime_count]) |rid| {
+            _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });
+            _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });
+            _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 101 });
+        }
+        try std.testing.expectEqual(@as(u64, @intCast(runtime_count)), mgr.fixtureObservationMaterializations());
+
+        // Exactly one changed runtime adds exactly one materialization on the following sweep.
+        const changed_handle = mgr.handleFor(runtime_ids[runtime_count - 1]) orelse
+            return error.TestUnexpectedResult;
+        const changed_surface = mgr.backend_impl.surfaceFor(changed_handle) orelse
+            return error.TestUnexpectedResult;
+        changed_surface.lockCore(std.testing.io);
+        changed_surface.core.write("source-change") catch |err| {
+            changed_surface.unlockCore(std.testing.io);
+            return err;
+        };
+        changed_surface.unlockCore(std.testing.io);
+        for (runtime_ids[0..runtime_count]) |rid|
+            _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 102 });
+        try std.testing.expectEqual(
+            @as(u64, @intCast(runtime_count + 1)),
+            mgr.fixtureObservationMaterializations(),
+        );
+        const evidence = mgr.fixtureObservationPerformanceEvidence();
+        try std.testing.expectEqual(
+            @as(u64, @intCast(3 * (runtime_count + 1))),
+            evidence.core_lock_acquisitions,
+        );
+        try std.testing.expect(evidence.core_lock_hold_total_ns >= evidence.core_lock_hold_max_ns);
+
+        while (spawned != 0) {
+            spawned -= 1;
+            ops.terminate(ops.ctx, runtime_ids[spawned]);
+        }
+        mgr.deinit();
+        host_registry.deinit();
+    }
 }
 
 test "runtime manager: empty argv is rejected before allocating a handle" {

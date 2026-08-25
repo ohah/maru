@@ -4093,6 +4093,72 @@ sidebar_header=unjudgeable reason=too_short cols=20 min_cols=13 avail_h=… need
 1.7× 슬롯이 §2m.41 의 함정(같은 codepoint 가 한 슬롯을 공유)을 되살릴 수 있는지 봤다. **아니다** —
 `GlyphCacheKey` 에 `raster_width_px`·`raster_height_px` 가 **이미 들어 있다**. 결함 아님으로 적어 둔다.
 
+### 2m.50 사이드바가 눌린다 — 그리고 토큰 문서가 적어 둔 함정에 그대로 빠졌다 (W8.8⒜3, 실측 2026-08-25)
+
+카드와 헤더 아이콘이 **눌리고 반응한다.** W8.8⒜3 이 닫힌다.
+
+## 중립이 사이드바를 영역으로 갖게 했다
+
+`dock_layout.Region` 에 **사이드바가 없었다.** 그래서 호출자가 `x < sidebar_width_px` 를 손으로 적어야
+했는데, 그러면 경계 한 픽셀이 플랫폼마다 갈린다 — 도크·디바이더가 이미 겪은 실패다.
+
+- `Geometry.sidebar` 신설. **작업영역에서 유도한다**(`sidebarOf(ws) = {0, ws.y, ws.x, ws.h}`) —
+  폭과 시작 y 를 두 곳에서 만들면 한쪽만 고칠 때 그린 자리와 눌리는 자리가 갈린다.
+- `Region.sidebar` 를 `regionAt` 이 **먼저** 본다.
+- 테스트 셋: 띠 아래에서 시작하고 작업영역과 안 겹친다 · 경계 한 픽셀(`179` 는 사이드바, `180` 은
+  터미널) · **도크를 접어도 사이드바는 남는다**.
+
+> 첫 판에서 조기 반환에만 넣고 본 갈래를 빠뜨렸더니 **테스트가 즉시 잡았다**(`expected 180, found 0`).
+
+## 그 안에서 어디인지는 chrome 이 답한다
+
+`headerHit`(헤더 밴드) → `slotAt`(카드 목록). Windows 는 **부르기만** 한다.
+
+## 함정 — 활성 카드의 호버에 `tab_hover_bg` 를 쓰면 안 된다
+
+호버 색으로 `tab_hover_bg` 를 골랐다. **스모크는 초록인데 화면이 그대로였다.**
+
+토큰 문서가 그 함정을 **이미 적어 두고 있었다**:
+
+> `tab_hover_bg`(배경↔활성 중간)를 쓰면 **활성 카드의 목록에서 활성색보다 어두워 호버가 사라지고**,
+> `tab_active_bg` 를 쓰면 활성색과 완전히 같아 역시 구분이 0이다.
+
+그 자리를 위해 있는 role 이 `row_hover_bg` 다 — "활성 밴드 위에 겹쳐도 구분되게" 활성보다 한 단계 밝다.
+
+```text
+tab_hover_bg → card_hover=#343434   (활성 #404040 보다 어둡다 — 사라진다)
+row_hover_bg → card_hover=#585858   (밝다 — 보인다)
+```
+
+## `sidebar_redraws` 만으로는 속 빈다
+
+**두 경우 모두 `sidebar_redraws=2` 였다.** 그 숫자는 "다시 그렸다" 만 말하지 **"보이게 달라졌다"** 는
+말하지 않는다. 그래서 토큰 문서의 규칙을 그대로 판정으로 만들었다 — **호버는 활성보다 밝다.** 두 값은
+테마가 주므로 내 코드를 되읽는 것이 아니고, 테마를 바꿔도 이 성질이 남아야 한다.
+
+## 실측
+
+```text
+sidebar_pointer_events=18 sidebar_redraws=4 card_clicks=1 last_slot=0
+header_clicks=1 last_header=new_workspace sidebar_click_ok=true
+card_active=#404040 card_hover=#585858 hover_is_brighter=true
+```
+
+**뮤턴트 넷이 각각 다른 신호에 잡힌다** — 판정들이 겹치지 않는다는 증거다:
+
+| 뮤턴트 | 무엇이 움직이나 |
+|---|---|
+| 사이드바 라우팅 제거 | `pointer_events=0` |
+| `slotAt` 에 헤더 높이를 안 준다 | `card_clicks=0 last_slot=null` — **헤더 클릭은 그대로 동작한다** |
+| hover 로 다시 안 그린다 | `redraws=0` — 클릭은 여전히 잡힌다(죽은 컨트롤과 산 컨트롤의 차이) |
+| `tab_hover_bg` 로 되돌린다 | `hover_is_brighter=false` — **`redraws` 는 2 로 그대로** |
+
+## 한계
+
+카드가 **한 장**이라 "선택" 은 눈에 안 보인다(§2m.37 ⑴ — 보여 줄 세션이 하나다). 이 슬라이스가 세운
+것은 **가리키는 것과 누르는 것이 보이고, 그 좌표가 중립 판정에 닿는다**는 것까지다. 헤더 아이콘 넷도
+같다 — 눌리는 것은 재지만 누르면 할 일(알림 패널·접기·설정·새 워크스페이스)은 각각 모델이 따로다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

@@ -2118,6 +2118,9 @@ fn rebuildSidebarCells(
     /// **그린 자리**를 그대로 싣는다 — 판정이 `headerIconCol` 을 다시 부르면 동어반복이 된다
     /// (실측: 열을 하나 옮긴 뮤턴트가 그 판정을 통과했다).
     header_drawn: *DrawnHeaderIcons,
+    /// 지금 가리키는 카드 · 헤더 영역. **그림이 바뀌어야 눌린 것이 보인다.**
+    hover_slot: ?usize,
+    hover_header: ?maru.chrome.components.sidebar.HeaderRegion,
 ) !void {
     out.clearRetainingCapacity();
     glyphs.* = 0;
@@ -2174,6 +2177,7 @@ fn rebuildSidebarCells(
         header_outside,
         header_drawn,
         header_frame_slot,
+        hover_header,
     );
     header_h_out.* = header_h;
     header_icon_band_out.* = if (header_h == 0) 0 else cell_h *| 2;
@@ -2193,12 +2197,18 @@ fn rebuildSidebarCells(
     // **그린 자리를 헤더 바닥과 견준다.** 계산에 쓴 값이 아니라 밴드가 실제로 앉은 y 다.
     if (top < top_y + header_h) card_over_header.* += 1;
     if (top + card_h > h) return;
+    // **가리키면 밝아진다.** 카드가 하나뿐이라 "선택" 은 눈에 안 보이지만(§2m.37 ⑴ — 보여 줄 세션이
+    // 하나다), 가리키는 것과 누르는 것은 보인다. 그림이 안 바뀌면 죽은 컨트롤과 구별이 안 된다.
+    const card_hovered = hover_slot != null and hover_slot.? == 0;
     try out.append(allocator, d3d11_cells.solidCell(
         0,
         @floatFromInt(top),
         @floatFromInt(sidebar_w),
         @floatFromInt(card_h),
-        cellColor(tk, .tab_active_bg),
+        // **`row_hover_bg` 다, `tab_hover_bg` 가 아니다.** 토큰 문서가 그 함정을 이미 적어 뒀다 —
+        // `tab_hover_bg` 는 배경↔활성 **중간**이라 **활성 카드 위에서는 활성색보다 어두워 호버가
+        // 사라진다.** `row_hover_bg` 가 "활성 밴드 위에 겹쳐도 구분되게" 활성보다 한 단계 밝다.
+        cellColor(tk, if (card_hovered) .row_hover_bg else .tab_active_bg),
         .{ 0, 0, 0, 0 },
     ));
     // 활성 카드의 **좌측 앰버 막대**(chrome-strategy.md U1) — 어느 세션이 활성인지의 신호다.
@@ -2324,6 +2334,7 @@ fn appendSidebarHeaderCells(
     outside: *usize,
     drawn: *DrawnHeaderIcons,
     frame_slot: *?maru.renderer.RenderFrame,
+    hover_header: ?maru.chrome.components.sidebar.HeaderRegion,
 ) !u32 {
     drawn.clear();
     // **macOS 와 같은 비율이다.** 헤더 3 줄 = 아이콘 밴드 2 줄 + 검색 줄 1 줄. 아이콘을 1.7× 로
@@ -2345,6 +2356,28 @@ fn appendSidebarHeaderCells(
     // 모듈에 있으므로** 그 수만 넘기면 그날 바로 뜬다.
     const drew = cell_text.appendSidebarHeaderIcons(allocator, &cells, cols, fg, 0) catch return 0;
     if (!drew) return 0;
+    // 가리킨 아이콘 뒤에 밝은 판을 깐다 — 아이콘 색은 안 바꾼다. 예전에 호버 아이콘을
+    // `sidebar_active` 로 재색칠했다가, 그 색이 밝은 전경이 아니라 **어두운 밴드색**인 테마에서
+    // 아이콘이 오히려 어두워졌다(공유 모듈 주석이 그 실패를 적어 뒀다).
+    if (hover_header) |hr| hover: {
+        const sb_h = maru.chrome.components.sidebar;
+        const hover_col: u32 = switch (hr) {
+            .toggle_sidebar => sb_h.headerIconCol(.toggle_sidebar, cols),
+            .view_options => sb_h.headerIconCol(.view_options, cols),
+            .new_workspace => sb_h.headerIconCol(.new_workspace, cols),
+            .notifications => cell_text.sidebarBellCol(cols),
+            .search, .none => break :hover,
+        };
+        const hb = tk.get(.tab_hover_bg);
+        try out.append(allocator, d3d11_cells.solidCell(
+            @floatFromInt(hover_col *| cell_w),
+            @floatFromInt(top_y + (icon_band_px -| cell_h) / 2),
+            @floatFromInt(cell_w *| 2),
+            @floatFromInt(cell_h),
+            d3d11_cells.colorFromArgb(0xFF000000 | (@as(u32, hb.r) << 16) | (@as(u32, hb.g) << 8) | hb.b),
+            .{ 0, 0, 0, 0 },
+        ));
+    }
     // **검색 줄도 그린다.** `headerHit` 이 아래 밴드를 `.search` 로 판정하므로 안 그리면
     // "그린 것 = 눌리는 것" 이 깨진다. 입력 모델은 아직 없어 placeholder 까지다.
     const muted_rgb = tk.get(.muted_fg);
@@ -2451,6 +2484,15 @@ fn appendSidebarHeaderCells(
         out.appendAssumeCapacity(cell);
     }
     return header_h;
+}
+
+/// 호버 밴드가 활성 밴드보다 **밝은가**. 토큰 문서가 정한 규칙이고, 어기면 호버가 화면에서 사라진다.
+fn hoverIsBrighter(tk: *const maru.chrome.Tokens) bool {
+    const a = tk.get(.tab_active_bg);
+    const h = tk.get(.row_hover_bg);
+    const la: u32 = @as(u32, a.r) * 299 + @as(u32, a.g) * 587 + @as(u32, a.b) * 114;
+    const lh: u32 = @as(u32, h.r) * 299 + @as(u32, h.g) * 587 + @as(u32, h.b) * 114;
+    return lh > la;
 }
 
 /// 헤더에 실제로 그려진 아이콘 하나 — **정체는 codepoint, 자리는 열**이다.
@@ -3023,6 +3065,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sidebar_header_search_glyphs: usize = 0;
     var sidebar_header_outside: usize = 0;
     var sidebar_card_over_header: usize = 0;
+    // ── 사이드바 입력 상태 (W8.8⒜3) ────────────────────────────────────────────────────────
+    // **hover 를 들고 다녀야 그림이 바뀐다.** 안 그러면 눌러도 화면이 그대로라 죽은 컨트롤과
+    // 구별이 안 된다 — 이 저장소가 SCM 표면에서 겪은 실패다(§2m.35).
+    var sidebar_hover_slot: ?usize = null;
+    var sidebar_hover_header: ?maru.chrome.components.sidebar.HeaderRegion = null;
+    var sidebar_pointer_events: usize = 0;
+    var sidebar_redraws: usize = 0;
+    var sidebar_card_clicks: usize = 0;
+    var sidebar_header_clicks: usize = 0;
+    var sidebar_last_slot: ?usize = null;
+    var sidebar_last_header: ?maru.chrome.components.sidebar.HeaderRegion = null;
+    var sidebar_judgeable = false;
     var sidebar_header_drawn: DrawnHeaderIcons = .{};
     defer if (sidebar_frame) |*f| f.deinit(allocator);
     defer if (sidebar_header_frame) |*f| f.deinit(allocator);
@@ -3036,7 +3090,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .lines = if (dock_root != null) 2 else 1,
     };
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -3276,6 +3330,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // ── 프레임리스 배선 판정 (W8.8⒝) ───────────────────────────────────────────────────
         //
         // 복원이 끝난 뒤 잰다 — 최대화 중에는 창 사각형이 화면 작업영역이라 값이 흔들린다.
+        // ── 사이드바 클릭 판정 (W8.8⒜3) ────────────────────────────────────────────────────
+        //
+        // **카드 한복판과 헤더 아이콘 하나를 실제로 누른다.** 그리고 판정은 내가 보낸 좌표를
+        // 되읽지 않는다 — 누른 y 는 **그려진 카드 밴드**에서 나오고, 답은 중립 `slotAt` 이 낸다.
+        if (spins == 470 and sidebar_w != 0 and sidebar_header_h != 0) {
+            sidebar_judgeable = true;
+            const m_sb = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const card_top = geom.sidebar.y + sidebar_header_h + m_sb.content_pad_v;
+            const card_mid: i32 = @intCast(card_top + maru.chrome.components.sidebar.cardHeight(sidebar_card.lines, m_sb) / 2);
+            const cx: i32 = @intCast(sidebar_w / 2);
+            window.postSyntheticMouse(.moved, cx, card_mid);
+            window.postSyntheticMouse(.left_down, cx, card_mid);
+            window.postSyntheticMouse(.left_up, cx, card_mid);
+        }
+        if (spins == 500 and sidebar_w != 0 and sidebar_header_h != 0) {
+            // 헤더의 **새 워크스페이스(＋)** 칸 — 오른쪽 끝이라 다른 칸과 안 겹친다.
+            const hcols: u32 = sidebar_w / cell_w;
+            const col = maru.chrome.components.sidebar.headerIconCol(.new_workspace, hcols);
+            const hx: i32 = @intCast(col *| cell_w + cell_w / 2);
+            const hy: i32 = @intCast(geom.sidebar.y + sidebar_header_icon_band / 2);
+            window.postSyntheticMouse(.moved, hx, hy);
+            window.postSyntheticMouse(.left_down, hx, hy);
+            window.postSyntheticMouse(.left_up, hx, hy);
+        }
         if (spins == 450 and titlebar_px != 0) {
             frameless_covers = window.clientCoversWindow();
             const wr = window.windowRect();
@@ -3322,7 +3400,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -3479,6 +3557,55 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (region == .divider and m.kind == .left_down) {
                     divider_drag = maru.session.dock_layout.grabOffsetPx(geom, .right, @floatFromInt(m.x_px), @floatFromInt(m.y_px));
                     divider_grabs += 1;
+                    continue;
+                }
+                // ── 사이드바: 헤더와 카드가 눌린다 (W8.8⒜3) ────────────────────────────
+                //
+                // **영역 판정도 그 안의 자리도 중립이 소유한다** — `dock_layout.regionAt` 이
+                // "사이드바냐" 를, `chrome.components.sidebar` 의 `headerHit`·`slotAt` 이 "그 안
+                // 어디냐" 를 가른다. 여기서 `x < sidebar_w` 를 손으로 적으면 경계 한 픽셀이
+                // macOS 와 갈린다(도크·디바이더가 이미 겪은 실패다).
+                //
+                // **누르는 것과 지금 가리키는 것을 함께 갱신한다** — hover 가 안 바뀌면 눌러도
+                // 화면이 그대로라 "죽은 컨트롤" 과 구별이 안 된다(§2m.35 가 그 실패를 겪었다).
+                if (region == .sidebar and m.kind != .capture_lost) {
+                    sidebar_pointer_events += 1;
+                    const local_y: f64 = @floatFromInt(m.y_px - @as(i32, @intCast(geom.sidebar.y)));
+                    const next_header: ?maru.chrome.components.sidebar.HeaderRegion = if (sidebar_header_h == 0) null else blk: {
+                        const r = maru.chrome.components.sidebar.headerHit(
+                            @floatFromInt(m.x_px),
+                            local_y,
+                            sidebar_w,
+                            cell_w,
+                            cell_h,
+                            sidebar_header_h,
+                            sidebar_header_icon_band,
+                        );
+                        break :blk if (r == .none) null else r;
+                    };
+                    const sb_rows = [_]maru.chrome.components.sidebar.Row{.{ .card = .{ .tab = 0, .label = sidebar_card.name, .active = true, .lines = @intCast(sidebar_card.lines) } }};
+                    const next_slot = maru.chrome.components.sidebar.slotAt(
+                        local_y,
+                        sidebar_header_h,
+                        &sb_rows,
+                        maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h),
+                        0,
+                    );
+                    if (next_header != sidebar_hover_header or next_slot != sidebar_hover_slot) {
+                        sidebar_hover_header = next_header;
+                        sidebar_hover_slot = next_slot;
+                        sidebar_redraws += 1;
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_card, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header) catch {};
+                    }
+                    if (m.kind == .left_up) {
+                        if (next_header) |r| {
+                            sidebar_header_clicks += 1;
+                            sidebar_last_header = r;
+                        } else if (next_slot) |s| {
+                            sidebar_card_clicks += 1;
+                            sidebar_last_slot = s;
+                        }
+                    }
                     continue;
                 }
                 if (region != .terminal and m.kind != .capture_lost) {
@@ -4025,6 +4152,40 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     }
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} card_over_header={d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, sidebar_card_over_header, geom.terminal.x });
+    {
+        // **"다시 그렸다" 와 "보이게 달라졌다" 는 다르다.** 처음에 `tab_hover_bg` 를 썼더니 스모크는
+        // `sidebar_redraws=2` 로 초록인데 화면은 그대로였다 — 그 role 은 배경↔활성 **중간**이라
+        // 활성 카드 위에서 **더 어둡다**(토큰 문서가 그 함정을 이미 적어 뒀고, 캡처가 그것을 확인했다).
+        //
+        // 규칙을 그대로 잰다: **호버는 활성보다 밝다.** 두 값은 테마가 주므로 내 코드를 되읽는 것이
+        // 아니다 — 테마를 바꿔도 이 성질이 남아야 한다.
+        const a = chrome_tokens.get(.tab_active_bg);
+        const hv = chrome_tokens.get(.row_hover_bg);
+        const lum_a: u32 = @as(u32, a.r) * 299 + @as(u32, a.g) * 587 + @as(u32, a.b) * 114;
+        const lum_h: u32 = @as(u32, hv.r) * 299 + @as(u32, hv.g) * 587 + @as(u32, hv.b) * 114;
+        try stdout.print("card_active=#{x:0>2}{x:0>2}{x:0>2} card_hover=#{x:0>2}{x:0>2}{x:0>2} hover_is_brighter={}\n", .{
+            a.r, a.g, a.b, hv.r, hv.g, hv.b, lum_h > lum_a,
+        });
+    }
+    if (sidebar_judgeable) {
+        // **동어반복이 아니다**: 카드 한복판을 누른 것은 맞지만, 그 y 를 슬롯으로 되돌리는 것은
+        // 중립 `slotAt` 이고 그것은 내 좌표를 모른다. 헤더 쪽도 마찬가지로 `headerHit` 이 답한다.
+        // 그리고 **hover 로 그림이 실제로 다시 그려졌는지**(`redraws`)를 함께 적는다 — 안 그러면
+        // "눌리긴 하는데 화면이 그대로" 를 못 가른다(§2m.35 가 겪은 실패).
+        try stdout.print("sidebar_pointer_events={d} sidebar_redraws={d} card_clicks={d} last_slot={?d} header_clicks={d} last_header={s} sidebar_click_ok={}\n", .{
+            sidebar_pointer_events,
+            sidebar_redraws,
+            sidebar_card_clicks,
+            sidebar_last_slot,
+            sidebar_header_clicks,
+            if (sidebar_last_header) |h| @tagName(h) else "none",
+            sidebar_card_clicks == 1 and sidebar_last_slot != null and sidebar_last_slot.? == 0 and
+                sidebar_header_clicks == 1 and sidebar_last_header == .new_workspace and sidebar_redraws > 0 and
+                hoverIsBrighter(&chrome_tokens),
+        });
+    } else {
+        try stdout.print("sidebar_click=unjudgeable reason=no_sidebar_or_header sidebar_w={d} header_h={d}\n", .{ sidebar_w, sidebar_header_h });
+    }
     // ── 사이드바 헤더 판정 (W8.8⒝) ─────────────────────────────────────────────────────────
     //
     // **개수만 세면 속 빈다** — 네 글리프가 다 나와도 자리가 틀리면 화면에서만 보인다(§2m.42 가

@@ -34,6 +34,14 @@ pub fn dividerGrabBandPx(scale_milli: u32) u32 {
 pub const Geometry = struct {
     /// 사이드바와 titlebar strip만 제외한 전체 작업영역. terminal·divider·dock의 합이며 전역 모달 중심의 권위다.
     workspace: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// 왼쪽 사이드바 띠 — **작업영역 왼쪽 밖**이다(`workspace.x` 가 이 폭만큼 밀려 있다).
+    ///
+    /// **왜 여기 있나**: 입력 라우팅이 "이 좌표가 어느 영역인가" 를 한 곳에서 물어야 하는데
+    /// (`regionAt`), 사이드바만 그 목록에 없어서 호출자가 `x < sidebar_width_px` 를 손으로 적어야
+    /// 했다. 그러면 경계 한 픽셀이 플랫폼마다 갈린다 — 도크·디바이더가 이미 겪은 실패다.
+    ///
+    /// 타이틀바 띠 **아래**에서 시작한다(띠는 창 전폭이고 캡션 버튼이 그것을 먹는다).
+    sidebar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -265,6 +273,9 @@ pub fn defaultRightPtForView(view: dock_panel.View) u32 {
 pub const Region = enum {
     /// 어느 영역도 아니다(상태바·타이틀바 띠·창 밖).
     none,
+    /// 왼쪽 사이드바 띠(헤더·카드 목록). 그 **안에서** 어디인지는 `chrome.components.sidebar` 의
+    /// `headerHit`·`slotAt` 이 가른다 — 여기는 "사이드바냐 아니냐" 까지다.
+    sidebar,
     terminal,
     /// 도크 안이지만 뷰 스위처 바다.
     view_bar,
@@ -275,6 +286,9 @@ pub const Region = enum {
 };
 
 pub fn regionAt(geom: Geometry, x_px: f64, y_px: f64) Region {
+    // **사이드바가 먼저다.** 작업영역 밖이라 아래 판정들과 겹치지 않지만, 순서를 적어 두는 편이
+    // 나중에 겹치는 자리(스크롤바·리사이즈 띠)가 생겼을 때 규칙이 분명하다.
+    if (contains(geom.sidebar, x_px, y_px)) return .sidebar;
     if (contains(geom.divider, x_px, y_px)) return .divider;
     if (contains(geom.view_bar, x_px, y_px)) return .view_bar;
     if (contains(geom.tree_content, x_px, y_px)) return .dock_content;
@@ -283,6 +297,14 @@ pub fn regionAt(geom: Geometry, x_px: f64, y_px: f64) Region {
     if (contains(geom.dock, x_px, y_px)) return .dock_content;
     if (contains(geom.terminal, x_px, y_px)) return .terminal;
     return .none;
+}
+
+/// 작업영역에서 **유도한** 사이드바 띠 — 그 왼쪽 전부, 같은 세로 범위.
+///
+/// 유도하는 이유: 폭·시작 y 를 두 곳에서 따로 만들면 한쪽만 고칠 때 **그린 자리와 눌리는 자리가
+/// 갈린다.** `workspace.x` 가 이미 "사이드바가 먹은 폭" 이므로 그 하나에서 전부 나온다.
+fn sidebarOf(ws: Rect) Rect {
+    return .{ .x = 0, .y = ws.y, .w = ws.x, .h = ws.h };
 }
 
 fn contains(r: Rect, x_px: f64, y_px: f64) bool {
@@ -307,7 +329,7 @@ pub fn compute(in: Input) Geometry {
         .w = in.backing_width_px -| in.sidebar_width_px,
         .h = usable_h -| in.titlebar_height_px,
     };
-    if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .terminal = available, .status_bar = status_bar };
+    if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .sidebar = sidebarOf(available), .terminal = available, .status_bar = status_bar };
 
     // 도크는 terminal과 **같은 `available`**에서 시작한다. 예전에는 right dock만 별도 기준선을 받아
     // terminal title strip이 커져도 제자리에 있었는데, 그러면 두 상단 바의 시작선이 갈린다 — 아래
@@ -331,7 +353,7 @@ pub fn compute(in: Input) Geometry {
             const min_terminal = @max(2 * in.cell_width_px, layout_math.ptToPx(320, scale));
             const max_dock = available.w -| divider -| min_terminal;
             const dock_w = @min(@max(requested_px, @min(min_dock, max_dock)), max_dock);
-            if (dock_w == 0) break :right .{ .workspace = available, .terminal = available, .status_bar = status_bar };
+            if (dock_w == 0) break :right .{ .workspace = available, .sidebar = sidebarOf(available), .terminal = available, .status_bar = status_bar };
             const term_w = available.w -| divider -| dock_w;
             const dock_x = available.x + term_w + divider;
             const dock = Rect{ .x = dock_x, .y = available.y, .w = dock_w, .h = available.h };
@@ -353,7 +375,7 @@ pub fn compute(in: Input) Geometry {
             const min_terminal = @max(2 * in.cell_height_px, layout_math.ptToPx(180, scale));
             const max_dock = available.h -| divider -| min_terminal;
             const dock_h = @min(@max(requested_px, @min(min_dock, max_dock)), max_dock);
-            if (dock_h == 0) break :bottom .{ .workspace = available, .terminal = available, .status_bar = status_bar };
+            if (dock_h == 0) break :bottom .{ .workspace = available, .sidebar = sidebarOf(available), .terminal = available, .status_bar = status_bar };
             const term_h = available.h -| divider -| dock_h;
             const dock_y = available.y + term_h + divider;
             const dock = Rect{ .x = available.x, .y = dock_y, .w = available.w, .h = dock_h };
@@ -387,6 +409,7 @@ fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, status_b
     const view_area_h = dock.h -| view_bar_h;
     return .{
         .workspace = workspace,
+        .sidebar = sidebarOf(workspace),
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
@@ -928,4 +951,72 @@ test "grabOffsetPx: 왼쪽으로 끌면 도크가 넓어진다 — 부호" {
     // 오른쪽으로 끌면 좁아진다.
     const shrunk = sizePtForPointer(g, .right, start + 20 + off, 100, 1000).?;
     try region_testing.expectEqual(at_start - 20, shrunk);
+}
+
+test "사이드바가 자기 영역을 갖는다 — 띠 아래, 작업영역 왼쪽" {
+    const g = compute(.{
+        .backing_width_px = 1000,
+        .backing_height_px = 640,
+        .sidebar_width_px = 180,
+        .titlebar_height_px = 38,
+        .cell_width_px = 8,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = 10,
+        .side = .right,
+        .size_pt = 220,
+        .visible = true,
+    });
+    try std.testing.expectEqual(@as(u32, 0), g.sidebar.x);
+    try std.testing.expectEqual(@as(u32, 180), g.sidebar.w);
+    // 띠 아래에서 시작한다 — 캡션 버튼이 그 위를 먹는다.
+    try std.testing.expectEqual(@as(u32, 38), g.sidebar.y);
+    // 작업영역과 **안 겹친다**: 사이드바 오른쪽 끝이 작업영역 왼쪽 끝이다.
+    try std.testing.expectEqual(g.sidebar.w, g.workspace.x);
+    try std.testing.expectEqual(g.workspace.y, g.sidebar.y);
+    try std.testing.expectEqual(g.workspace.h, g.sidebar.h);
+}
+
+test "regionAt: 사이드바·띠·터미널이 갈린다" {
+    const g = compute(.{
+        .backing_width_px = 1000,
+        .backing_height_px = 640,
+        .sidebar_width_px = 180,
+        .titlebar_height_px = 38,
+        .cell_width_px = 8,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = 10,
+        .side = .right,
+        .size_pt = 220,
+        .visible = true,
+    });
+    // 사이드바 안.
+    try std.testing.expectEqual(Region.sidebar, regionAt(g, 90, 300));
+    // 사이드바 **오른쪽 경계 바로 밖**은 터미널이다(경계 한 픽셀을 고정한다).
+    try std.testing.expectEqual(Region.sidebar, regionAt(g, 179, 300));
+    try std.testing.expectEqual(Region.terminal, regionAt(g, 180, 300));
+    // 타이틀바 띠는 사이드바가 아니다 — 캡션 버튼·창 드래그가 그 자리를 먹는다.
+    try std.testing.expectEqual(Region.none, regionAt(g, 90, 10));
+    try std.testing.expectEqual(Region.sidebar, regionAt(g, 90, 38));
+}
+
+test "도크를 접어도 사이드바는 남는다" {
+    const base = Input{
+        .backing_width_px = 1000,
+        .backing_height_px = 640,
+        .sidebar_width_px = 180,
+        .titlebar_height_px = 38,
+        .cell_width_px = 8,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = 10,
+        .side = .right,
+        .size_pt = 220,
+        .visible = false,
+    };
+    const g = compute(base);
+    // 도크가 없어도 띠는 그대로다 — 접기가 사이드바를 지우면 왼쪽이 통째로 사라진다.
+    try std.testing.expectEqual(@as(u32, 180), g.sidebar.w);
+    try std.testing.expectEqual(Region.sidebar, regionAt(g, 90, 300));
 }

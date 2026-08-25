@@ -467,7 +467,12 @@ pub const Buffer = struct {
     /// **실패하면 문서가 그대로다.** 새 루트를 다 만든 뒤에 갈아 끼우므로 중간에 실패해도 옛 판이
     /// 온전하다 — 편집이 반쯤 적용된 상태는 만들지 않는다.
     pub fn insert(self: *Buffer, offset: usize, text: []const u8) !Edit {
-        std.debug.assert(offset <= self.root.bytes);
+        // **단언이 아니라 오류다.** `std.debug.assert`는 ReleaseFast에서 사라지므로, 그것에만
+        // 기대면 **Debug에서는 패닉하고 출하 빌드에서는 조용히 망가진다.** 낡은 offset은 실제로
+        // 생긴다 — §3.3의 undo 스택은 delta를 오래 들고 있고, 그 사이 외부 재로드로 문서가 짧아질
+        // 수 있다. 적대적 검증(2026-08-25)이 ReleaseFast에서 범위 밖 delta가 `OutOfMemory`라는
+        // 엉뚱한 이유로 막히는 것을 보였다.
+        if (offset > self.root.bytes) return error.OutOfRange;
         if (text.len == 0) return .{ .start = offset, .removed = 0, .inserted = 0 };
 
         const parts = try splitNode(self.allocator, retain(self.root), offset);
@@ -497,8 +502,7 @@ pub const Buffer = struct {
 
     /// `[start, end)`를 지운다. 빈 범위는 아무것도 하지 않는다.
     pub fn delete(self: *Buffer, start: usize, end: usize) !Edit {
-        std.debug.assert(start <= end);
-        std.debug.assert(end <= self.root.bytes);
+        if (start > end or end > self.root.bytes) return error.OutOfRange; // 위 `insert`와 같은 이유
         if (start == end) return .{ .start = start, .removed = 0, .inserted = 0 };
 
         const first = try splitNode(self.allocator, retain(self.root), start);
@@ -936,6 +940,26 @@ test "BUF18: 참조 수가 스레드 경합에서 어긋나지 않는다 (§2.1 
     const all = try buf.copyAll(allocator);
     defer allocator.free(all);
     try testing.expectEqualStrings("shared node under contention", all);
+}
+
+test "BUF19: 문서 밖을 가리키는 편집은 오류로 거절한다 (단언이 아니라)" {
+    // **단언은 출하 빌드에서 사라진다.** 그것에만 기대면 Debug는 패닉하고 ReleaseFast는 조용히
+    // 망가지는데, 둘 다 "거절"이 아니다. 이 판정자는 **두 모드에서 같은 답**을 요구한다.
+    var buf = try Buffer.init(testing.allocator, "12345");
+    defer buf.deinit();
+
+    try testing.expectError(error.OutOfRange, buf.insert(6, "x"));
+    try testing.expectError(error.OutOfRange, buf.delete(0, 6));
+    try testing.expectError(error.OutOfRange, buf.delete(4, 2)); // 뒤집힌 범위
+
+    // 문서는 그대로다.
+    const all = try buf.copyAll(testing.allocator);
+    defer testing.allocator.free(all);
+    try testing.expectEqualStrings("12345", all);
+
+    // 경계는 유효하다 — 문서 끝에 붙이는 것은 정상이다.
+    _ = try buf.insert(5, "6");
+    try testing.expectEqual(@as(usize, 6), buf.byteLen());
 }
 
 test "BUF17: 스냅숏으로 되돌리면 편집 전 판이 그대로 온다 — 할당 없이" {

@@ -39,6 +39,21 @@ backing_height_px
 
 **또 다른 예외는 quick terminal(`chrome_minimal`)이다.** 그 모드는 chrome을 통째로 걷어낸다(`paneBarHeightPx`도 0을 돌려 탭 바를 끈다). 위 규칙이 막으려는 것은 **토글되는 상태**이지 세션 생성 시 고정되는 모드가 아니다 — 고정 모드는 프레임마다 바뀌지 않으니 grid가 출렁이지 않는다.
 
+## 2.1 치수는 중립 잎이 소유한다 (2026-08-26)
+
+위 표의 pt 상수와 높이 식은 `platform/macos/app_session.zig` 안에 있었다. **Windows 가 볼 수 없었고**,
+베끼면 "바 높이" 가 두 곳이 되어 한쪽만 고칠 때 두 OS 의 작업영역이 갈린다 — 그때 틀어지는 것은 바
+하나가 아니라 **터미널 행 수·도크·사이드바 뷰포트 전부**다(그 높이가 작업영역을 깎는다).
+
+**`src/status_bar_metrics.zig`** 로 옮겼다 — `heightPx(cell_height_px, scale_milli)` 와 `metricsFor(...)`
+그리고 여섯 상수. 입력이 `session/layout_math`(환산)이고 출력이 L3 `Metrics` 라 **어느 계층에도 안
+붙는다**: `chrome` 은 `session` import 가 금지이고, §3 의 컴포넌트도 *"이 모듈은 스케일을 모른다"* 고
+못 박아 뒀다. `chrome_theme.zig`·`scm_items.zig` 와 같은 부류다.
+
+**켜고 끄는 판정은 그 잎에 없다**(`status-bar.show`·quick terminal). 그 게이트를 넣으면 잎이 config 를
+알아야 하고, 0 으로 만드는 자리는 플랫폼마다 다르다 — macOS 는 `statusBarHeightPx`, Windows 는
+`status_bar_px` 를 정하는 한 줄이다. 게이트가 각 플랫폼에 **하나씩**이라는 성질은 그대로다.
+
 ## 3. 배치 규칙 (`chrome/components/status_bar.zig`)
 
 순수 모듈이다(AppKit/renderer/PTY 의존 0, 할당 0 — 호출자가 버퍼를 준다).

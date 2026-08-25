@@ -40,7 +40,13 @@ pub const Geometry = struct {
     /// (`regionAt`), 사이드바만 그 목록에 없어서 호출자가 `x < sidebar_width_px` 를 손으로 적어야
     /// 했다. 그러면 경계 한 픽셀이 플랫폼마다 갈린다 — 도크·디바이더가 이미 겪은 실패다.
     ///
-    /// 타이틀바 띠 **아래**에서 시작한다(띠는 창 전폭이고 캡션 버튼이 그것을 먹는다).
+    /// **창 맨 위에서 시작한다 — 타이틀바 띠를 포함한다.** 그 띠의 사이드바 폭만큼은 창 chrome 이
+    /// 아니라 **사이드바 헤더의 아이콘 줄**이다: macOS 는 그 자리에 신호등이 있어 아이콘을 오른쪽에
+    /// 몰았고(`sidebar.headerHit` 의 마지막 줄이 "줄0 좌측 = 네이티브 신호등 영역"), Windows 는
+    /// 캡션 버튼이 오른쪽 끝이라 그 자리가 비어 있다. 띠 아래에서 시작하게 두면 아이콘 줄과 창
+    /// 버튼이 **다른 줄에 놓여** 띠가 둘로 갈린다(사용자 지적 2026-08-25).
+    ///
+    /// 아래로는 작업영역 바닥까지다 — 상태바는 창 전폭이라 사이드바 밖이다.
     sidebar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -271,7 +277,7 @@ pub fn defaultRightPtForView(view: dock_panel.View) u32 {
 /// **순서가 계약이다**: 디바이더를 **먼저** 본다. 잡기 띠는 터미널·도크와 겹치므로, 나중에 보면
 /// 겹친 폭만큼 영영 못 잡는다.
 pub const Region = enum {
-    /// 어느 영역도 아니다(상태바·타이틀바 띠·창 밖).
+    /// 어느 영역도 아니다(상태바·타이틀바 띠의 **사이드바 밖 부분**·창 밖).
     none,
     /// 왼쪽 사이드바 띠(헤더·카드 목록). 그 **안에서** 어디인지는 `chrome.components.sidebar` 의
     /// `headerHit`·`slotAt` 이 가른다 — 여기는 "사이드바냐 아니냐" 까지다.
@@ -304,7 +310,7 @@ pub fn regionAt(geom: Geometry, x_px: f64, y_px: f64) Region {
 /// 유도하는 이유: 폭·시작 y 를 두 곳에서 따로 만들면 한쪽만 고칠 때 **그린 자리와 눌리는 자리가
 /// 갈린다.** `workspace.x` 가 이미 "사이드바가 먹은 폭" 이므로 그 하나에서 전부 나온다.
 fn sidebarOf(ws: Rect) Rect {
-    return .{ .x = 0, .y = ws.y, .w = ws.x, .h = ws.h };
+    return .{ .x = 0, .y = 0, .w = ws.x, .h = ws.y +| ws.h };
 }
 
 fn contains(r: Rect, x_px: f64, y_px: f64) bool {
@@ -953,7 +959,7 @@ test "grabOffsetPx: 왼쪽으로 끌면 도크가 넓어진다 — 부호" {
     try region_testing.expectEqual(at_start - 20, shrunk);
 }
 
-test "사이드바가 자기 영역을 갖는다 — 띠 아래, 작업영역 왼쪽" {
+test "사이드바가 자기 영역을 갖는다 — 띠를 포함해 창 맨 위부터, 작업영역 왼쪽" {
     const g = compute(.{
         .backing_width_px = 1000,
         .backing_height_px = 640,
@@ -969,12 +975,14 @@ test "사이드바가 자기 영역을 갖는다 — 띠 아래, 작업영역 �
     });
     try std.testing.expectEqual(@as(u32, 0), g.sidebar.x);
     try std.testing.expectEqual(@as(u32, 180), g.sidebar.w);
-    // 띠 아래에서 시작한다 — 캡션 버튼이 그 위를 먹는다.
-    try std.testing.expectEqual(@as(u32, 38), g.sidebar.y);
-    // 작업영역과 **안 겹친다**: 사이드바 오른쪽 끝이 작업영역 왼쪽 끝이다.
+    // **창 맨 위부터다 — 띠를 포함한다.** 그 자리가 헤더의 아이콘 줄이고, 창 버튼과 같은 줄에
+    // 서야 한다(사용자 지적 2026-08-25). 띠 아래에서 시작하면 줄이 둘로 갈린다.
+    try std.testing.expectEqual(@as(u32, 0), g.sidebar.y);
+    // 작업영역과 **가로로 안 겹친다**: 사이드바 오른쪽 끝이 작업영역 왼쪽 끝이다.
     try std.testing.expectEqual(g.sidebar.w, g.workspace.x);
-    try std.testing.expectEqual(g.workspace.y, g.sidebar.y);
-    try std.testing.expectEqual(g.workspace.h, g.sidebar.h);
+    // 세로로는 작업영역보다 **띠 높이만큼 길다**, 그리고 바닥은 같다(상태바 위).
+    try std.testing.expectEqual(g.workspace.y + g.workspace.h, g.sidebar.y + g.sidebar.h);
+    try std.testing.expectEqual(g.workspace.h + 38, g.sidebar.h);
 }
 
 test "regionAt: 사이드바·띠·터미널이 갈린다" {
@@ -996,9 +1004,12 @@ test "regionAt: 사이드바·띠·터미널이 갈린다" {
     // 사이드바 **오른쪽 경계 바로 밖**은 터미널이다(경계 한 픽셀을 고정한다).
     try std.testing.expectEqual(Region.sidebar, regionAt(g, 179, 300));
     try std.testing.expectEqual(Region.terminal, regionAt(g, 180, 300));
-    // 타이틀바 띠는 사이드바가 아니다 — 캡션 버튼·창 드래그가 그 자리를 먹는다.
-    try std.testing.expectEqual(Region.none, regionAt(g, 90, 10));
+    // **타이틀바 띠도 사이드바 폭 안이면 사이드바다.** 그 자리가 헤더의 아이콘 줄이라 창 버튼과
+    // 같은 줄에 선다 — 띠 아래에서 시작하게 두면 줄이 둘로 갈린다(사용자 지적 2026-08-25).
+    try std.testing.expectEqual(Region.sidebar, regionAt(g, 90, 10));
     try std.testing.expectEqual(Region.sidebar, regionAt(g, 90, 38));
+    // 사이드바 **밖**의 띠는 여전히 창 chrome 이다 — 캡션 버튼·드래그가 그 자리를 먹는다.
+    try std.testing.expectEqual(Region.none, regionAt(g, 400, 10));
 }
 
 test "도크를 접어도 사이드바는 남는다" {

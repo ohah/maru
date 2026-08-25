@@ -2036,6 +2036,12 @@ fn rebuildTitlebarCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
     client_w: u32,
+    /// **띠의 왼쪽 이만큼은 우리 것이 아니다** — 사이드바 헤더의 아이콘 줄이 그 자리를 그린다
+    /// (`dock_layout.sidebarOf`). 안 비우면 이 채움이 **나중에 그려져 아이콘을 덮는다**: 실측
+    /// 2026-08-25 에 아이콘이 통째로 사라졌고, 띠에 잉크가 하나도 안 남았다(`y 0..38` 전부 배경).
+    /// 히트테스트가 왼쪽을 도려내는 폭과 **같은 값**이어야 한다 — 갈리면 보이는 것과 눌리는 것이
+    /// 어긋난다.
+    sidebar_w: u32,
     titlebar_px: u32,
     btn_w: u32,
     hovered: ?usize,
@@ -2044,10 +2050,11 @@ fn rebuildTitlebarCells(
 ) !void {
     out.clearRetainingCapacity();
     if (titlebar_px == 0) return;
+    const fill_x = @min(sidebar_w, client_w);
     try out.append(allocator, d3d11_cells.solidCell(
+        @floatFromInt(fill_x),
         0,
-        0,
-        @floatFromInt(client_w),
+        @floatFromInt(client_w -| fill_x),
         @floatFromInt(titlebar_px),
         cellColor(tk, .surface_bg),
         .{ 0, 0, 0, 0 },
@@ -2147,6 +2154,8 @@ fn rebuildSidebarCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
     geom: maru.session.dock_layout.Geometry,
+    /// 창의 타이틀 띠 높이. 헤더의 아이콘 줄이 **그 띠 자체**다 — 창 버튼과 같은 줄에 서야 한다.
+    titlebar_px: u32,
     sidebar_w: u32,
     cell_w: u32,
     cell_h: u32,
@@ -2216,10 +2225,12 @@ fn rebuildSidebarCells(
     header_search_glyphs.* = 0;
     header_outside.* = 0;
     if (sidebar_w == 0) return;
-    // **띠 아래에서 시작한다.** 사이드바 헤더가 아직 없으므로(⒞) 띠는 캡션 버튼만 쓰고, 카드가
-    // 그 위로 올라가면 글자가 잘린다(실측: 프레임리스로 바꾸자 이름줄이 띠에 먹혔다).
-    const top_y = geom.workspace.y;
-    const h = geom.workspace.h;
+    // **사이드바 rect 에서 온다 — 작업영역이 아니다.** 둘은 이제 y 가 다르다: 사이드바는 창 맨
+    // 위부터고(타이틀 띠를 포함한다) 작업영역은 띠 아래부터다. 작업영역에서 가져오면 아이콘 줄이
+    // 띠 **아래**에 그려져 창 버튼과 다른 줄에 선다(실측 2026-08-25: 종 아이콘 잉크가 y 48–63,
+    // 최소화 선은 y 19 였다). 그린 자리와 눌리는 자리의 주인은 `dock_layout` 하나다.
+    const top_y = geom.sidebar.y;
+    const h = geom.sidebar.h;
     try out.append(allocator, d3d11_cells.solidCell(
         0,
         @floatFromInt(top_y),
@@ -2273,9 +2284,10 @@ fn rebuildSidebarCells(
         header_drawn,
         header_frame_slot,
         hover_header,
+        titlebar_px,
     );
     header_h_out.* = header_h;
-    header_icon_band_out.* = if (header_h == 0) 0 else cell_h *| 2;
+    header_icon_band_out.* = if (header_h == 0) 0 else titlebar_px;
 
     // 카드 하나 — 지금 세션. **줄 수를 여기서 정하고 그 값으로 높이를 얻는다**(그 필드 doc: 호스트가
     // 렌더에 쓰는 줄 수와 같은 값을 실어야 클릭 좌표가 안 갈린다).
@@ -2498,13 +2510,16 @@ fn appendSidebarHeaderCells(
     drawn: *DrawnHeaderIcons,
     frame_slot: *?maru.renderer.RenderFrame,
     hover_header: ?maru.chrome.components.sidebar.HeaderRegion,
+    /// 아이콘 줄이 쓰는 띠 높이. **창의 타이틀 띠와 같은 값**이다 — 그래야 아이콘이 최소화·최대화
+    /// 버튼과 같은 줄에 선다(사용자 지적 2026-08-25, `dock_layout.sidebarOf` 의 doc 이 근거를 갖는다).
+    /// 여기서 `cell_h * 2` 로 다시 유도하지 않는다: 창은 `max(cell_h * 2, 32)` 라 작은 폰트에서
+    /// 갈리고, 그러면 아이콘 줄만 띠 위로 떠 버린다.
+    icon_band_px: u32,
 ) !u32 {
     drawn.clear();
-    // **macOS 와 같은 비율이다.** 헤더 3 줄 = 아이콘 밴드 2 줄 + 검색 줄 1 줄. 아이콘을 1.7× 로
-    // 굽는 이상 한 줄짜리 밴드로는 넘친다(실측: `header_outside=4`) — macOS 가 헤더를 셀 높이 ×3 으로
-    // 두는 이유가 이것이다.
-    const icon_band_px: u32 = cell_h *| 2;
-    const header_h: u32 = cell_h *| 3;
+    // 헤더 = 아이콘 밴드(= 타이틀 띠) + 검색 줄 하나. 아이콘을 1.7× 로 굽는 이상 한 줄짜리 밴드로는
+    // 넘치는데(실측: `header_outside=4`), 띠가 이미 두 줄 이상이라 그 자리가 그대로 맞는다.
+    const header_h: u32 = icon_band_px +| cell_h;
     // 카드가 쓰는 규칙과 같다(`top + card_h > h` 면 안 그린다) — 반쯤 걸친 아이콘보다 없는 편이 낫다.
     if (header_h > avail_h) return 0;
     if (frame_slot.*) |*old| {
@@ -2639,6 +2654,7 @@ fn appendSidebarHeaderCells(
                 g.quad_h = cell.rect[3];
                 g.atlas_w = c.atlas_width_px;
                 g.quad_w = cell.rect[2];
+                g.quad_y = cell.rect[1];
             }
         }
         if (cell.rect[0] < 0 or cell.rect[0] + cell.rect[2] > x1 or
@@ -2671,6 +2687,10 @@ const DrawnHeaderIcon = struct {
     /// 칸 수까지 곱해 키우면 세로는 맞고 가로만 2배가 되는데, 그때도 높이 판정은 초록이었다(실측).
     atlas_w: u32 = 0,
     quad_w: f32 = 0,
+    /// 화면에 **그려진 세로 자리**. 아이콘 줄이 타이틀 띠 **안**에 있는지의 유일한 관측점이다 —
+    /// 개수·폭·높이 판정은 그것을 못 본다(실측 2026-08-25: 띠 아래에 그려지고 있는데 `header_ok`
+    /// 를 비롯한 판정이 **전부 초록**이었다. 픽셀을 세어 보고서야 드러났다).
+    quad_y: f32 = 0,
 };
 
 /// 그려진 것들의 작은 고정 목록. 할당을 안 하려고 배열로 둔다(판정 전용이고 넷을 넘길 일이 없다).
@@ -3423,7 +3443,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const titlebar_px: u32 = @max(cell_h * 2, 32);
     const caption_btn_w: u32 = @max(cell_w * 5, 46);
     const caption_buttons_px: u32 = caption_btn_w * 3;
-    window.setFrameless(titlebar_px, caption_buttons_px);
+    // **띠 왼쪽 사이드바 폭도 우리가 받는다** — 그 자리가 헤더의 아이콘 줄이다(§2m.37 의 모양).
+    window.setFrameless(titlebar_px, caption_buttons_px, sidebar_w);
 
     var client_w = initial.width_px;
     var client_h = initial.height_px;
@@ -3719,6 +3740,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var nchittest_strip: isize = 0;
     var nchittest_button: isize = 0;
     var nchittest_below: isize = 0;
+    // 띠 안, **사이드바 헤더 아이콘 자리**의 판정. `HTCAPTION` 이면 OS 가 드래그로 먹어 아이콘이
+    // 안 눌린다 — 그리고 그때 **다른 판정은 하나도 안 움직인다**(합성 클릭은 wndproc 를 안 탄다).
+    var nchittest_sidebar_icon: isize = 0;
 
     var sidebar_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer sidebar_cells.deinit(allocator);
@@ -3786,8 +3810,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer sidebar_cards.deinit(allocator);
     const folder_name: []const u8 = if (dock_root) |r| std.fs.path.basename(r) else "";
     try refreshSidebarCards(allocator, &sidebar_cards, sessions.items, folder_name);
-    try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y);
+    try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -4316,6 +4340,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             nchittest_strip = window.probeHitTest(mid_x, wr.top + border + 4);
             nchittest_button = window.probeHitTest(wr.right - 10, wr.top + border + 4);
             nchittest_below = window.probeHitTest(mid_x, wr.top + @as(i32, @intCast(titlebar_px)) + 20);
+            // **띠 안의 사이드바 폭**은 우리 몫이어야 한다 — 헤더 아이콘 줄이 거기 있다. 순수
+            // 테스트는 함수만 재고 **배선은 안 잰다**(그 doc 이 적어 둔 실패), 그래서 진짜 wndproc 에
+            // 묻는다. 실제로 그려진 아이콘 하나(＋)의 col 을 쓴다 — 손으로 고른 좌표면 아이콘이
+            // 옮겨가도 판정이 안 움직인다.
+            if (sidebar_w != 0 and cell_w != 0) {
+                const icol = maru.chrome.components.sidebar.headerIconCol(.new_workspace, sidebar_w / cell_w);
+                nchittest_sidebar_icon = window.probeHitTest(wr.left + @as(i32, @intCast(icol *| cell_w + cell_w / 2)), wr.top + border + 4);
+            }
         }
         if (spins == 120) {
             selections_before_term_click = selections;
@@ -4353,8 +4385,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
-                rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
             .close_requested => close_requested = true,
@@ -4433,9 +4465,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
 
                 // ── 캡션 버튼 (W8.8⒝) ──────────────────────────────────────────────────
                 //
-                // **띠 위는 영역 판정보다 먼저 본다.** `regionAt` 은 띠를 모르므로(작업영역 기준)
-                // 여기서 안 가로채면 캡션 버튼 클릭이 터미널 선택이 된다.
-                if (titlebar_px != 0 and m.y_px >= 0 and m.y_px < @as(i32, @intCast(titlebar_px))) {
+                // **띠 위는 영역 판정보다 먼저 본다.** 여기서 안 가로채면 캡션 버튼 클릭이
+                // 터미널 선택이 된다.
+                //
+                // **다만 사이드바 폭은 뺀다.** 띠의 그 부분은 창 chrome 이 아니라 **사이드바 헤더의
+                // 아이콘 줄**이다(`dock_layout.sidebarOf` 가 그렇게 정한다 — macOS 는 그 자리가
+                // 신호등이고 Windows 는 캡션 버튼이 반대쪽이라 비어 있다). 안 빼면 아이콘이
+                // 그려지는데 **안 눌린다**: 이 분기가 `continue` 로 삼켜 `regionAt` 까지 못 간다
+                // (실측 2026-08-25: 띠를 합치자마자 `header_clicks` 가 4 → 0 이 됐다).
+                if (titlebar_px != 0 and m.y_px >= 0 and m.y_px < @as(i32, @intCast(titlebar_px)) and
+                    m.x_px >= @as(i32, @intCast(sidebar_w)))
+                {
                     const rects = captionButtonRects(client_w, titlebar_px, caption_btn_w);
                     var hit: ?usize = null;
                     for (rects, 0..) |r, i| {
@@ -4443,7 +4483,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     if (hit != caption_hover) {
                         caption_hover = hit;
-                        rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                        rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                     }
                     if (m.kind == .left_up) if (hit) |i| {
                         caption_clicks += 1;
@@ -4456,7 +4496,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     continue;
                 } else if (caption_hover != null) {
                     caption_hover = null;
-                    rebuildTitlebarCells(allocator, &titlebar_cells, client_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                    rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                 }
 
                 // ── 어느 영역의 포인터인가 (W8.7b) ──────────────────────────────────────
@@ -4540,7 +4580,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             sidebar_scroll_px = clamped;
                             sidebar_scrolls += 1;
                             sidebar_redraws += 1;
-                            rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
                         }
                     }
                     continue;
@@ -4575,7 +4615,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         sidebar_hover_header = next_header;
                         sidebar_hover_slot = next_slot;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
                     }
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
@@ -4599,7 +4639,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 눌린 것이 화면에 안 나타난다.
                                     _ = app_window.selectTab(sessions.items.len - 1);
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
                                 } else |_| {
                                     session_spawn_failures += 1;
                                 }
@@ -4612,7 +4652,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             if (s != app_window.active_tab and app_window.selectTab(s)) {
                                 tab_switches += 1;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
                             }
                         }
                     }
@@ -5217,12 +5257,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **OS 에게 직접 묻는 두 판정.** 위 캡션 판정은 우리 클라이언트 좌표 안에서만 돌아서
         // 프레임리스가 풀려도 초록이었다 — 여기가 그 구멍을 막는다.
         // `HTCAPTION=2`, `HTCLIENT=1`.
-        try stdout.print("frameless_covers_window={} nchittest_strip={d} nchittest_button={d} nchittest_below={d} frameless_wiring_ok={}\n", .{
+        try stdout.print("frameless_covers_window={} nchittest_strip={d} nchittest_button={d} nchittest_below={d} nchittest_sidebar_icon={d} frameless_wiring_ok={}\n", .{
             frameless_covers,
             nchittest_strip,
             nchittest_button,
             nchittest_below,
-            frameless_covers and nchittest_strip == 2 and nchittest_button == 1 and nchittest_below == 1,
+            nchittest_sidebar_icon,
+            frameless_covers and nchittest_strip == 2 and nchittest_button == 1 and nchittest_below == 1 and
+                nchittest_sidebar_icon == 1,
         });
     }
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} card_over_header={d} cards_visible={d}/{d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, sidebar_card_over_header, sidebar_cards_visible, sidebar_cards.items.len, geom.terminal.x });
@@ -5400,6 +5442,28 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **가로세로 비가 같아야 한다.** 구운 그림과 그린 사각형의 종횡비가 다르면 늘어나거나
         // 눌려서 보인다 — 그것이 "찌그러진 종" 이었고, 높이만 보던 판정은 그때도 초록이었다.
         var undistorted: usize = 0;
+        // **아이콘 줄이 창 버튼과 같은 줄인가.** 이것만이 그것을 본다 — 띠 아래에 그려지고 있는
+        // 동안에도 위 판정들은 **전부 초록**이었다(개수·선명도·종횡비는 자리를 안 본다). 사용자가
+        // 화면에서 지적했고(2026-08-25), 그 뒤 픽셀을 세어 확인했다.
+        var in_strip: usize = 0;
+        // **그리고 그 위에 덮이지 않았는가.** 띠 채움은 사이드바 셀 **뒤에** 그려지므로, 전폭을
+        // 칠하면 아이콘이 통째로 사라진다 — 그런데 `icons_in_strip` 은 그것을 **못 본다**(그리기
+        // 목록을 보지 다 그린 픽셀을 안 본다). 실제로 그 결함이 났고 픽셀을 세어서야 드러났다.
+        // 그래서 **두 목록을 견준다**: 띠 채움 사각형과 아이콘 quad 가 겹치면 덮인 것이다.
+        var uncovered: usize = 0;
+        const fill: ?[4]f32 = if (titlebar_cells.items.len == 0) null else titlebar_cells.items[0].rect;
+        for (sidebar_header_drawn.slice()) |g| {
+            if (g.quad_h > 0 and g.quad_y >= 0 and g.quad_y + g.quad_h <= @as(f32, @floatFromInt(titlebar_px))) in_strip += 1;
+            if (g.quad_w <= 0 or g.quad_h <= 0) continue;
+            const gx: f32 = @floatFromInt(@as(u32, g.col) *| cell_w);
+            const f = fill orelse {
+                uncovered += 1;
+                continue;
+            };
+            const overlap = gx < f[0] + f[2] and gx + g.quad_w > f[0] and
+                g.quad_y < f[1] + f[3] and g.quad_y + g.quad_h > f[1];
+            if (!overlap) uncovered += 1;
+        }
         for (sidebar_header_drawn.slice()) |g| {
             if (g.atlas_h > cell_h and g.quad_h > @as(f32, @floatFromInt(cell_h))) sharp += 1;
             if (g.atlas_w == 0 or g.atlas_h == 0 or g.quad_h <= 0) continue;
@@ -5408,7 +5472,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 픽셀 반올림 여유. 두 배 벌어지는 찌그러짐과는 자릿수가 다르다.
             if (@abs(got - want) <= 0.15) undistorted += 1;
         }
-        try stdout.print("sidebar_header_h={d} icon_band={d} icon_glyphs={d} search_glyphs={d} header_outside={d} header_routed={d}/4 search_drawn_and_hit={} icons_sharp={d}/4 icons_undistorted={d}/4 header_ok={}\n", .{
+        try stdout.print("sidebar_header_h={d} icon_band={d} icon_glyphs={d} search_glyphs={d} header_outside={d} header_routed={d}/4 search_drawn_and_hit={} icons_sharp={d}/4 icons_undistorted={d}/4 icons_in_strip={d}/4 icons_uncovered={d}/4 header_ok={}\n", .{
             sidebar_header_h,
             sidebar_header_icon_band,
             sidebar_header_icon_glyphs,
@@ -5418,7 +5482,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             search_ok,
             sharp,
             undistorted,
-            sidebar_header_icon_glyphs == 4 and sidebar_header_outside == 0 and routed == 4 and search_ok and sharp == 4 and undistorted == 4,
+            in_strip,
+            uncovered,
+            sidebar_header_icon_glyphs == 4 and sidebar_header_outside == 0 and routed == 4 and search_ok and sharp == 4 and undistorted == 4 and in_strip == 4 and uncovered == 4,
         });
     } else {
         // **판정 불가와 실패를 가른다** — 헤더를 안 그린 것을 0 으로만 적으면 고장으로 읽힌다.

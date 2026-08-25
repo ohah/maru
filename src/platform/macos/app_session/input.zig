@@ -448,24 +448,25 @@ pub fn sendTextAsKeys(self: *AppSession, bytes: []const u8) void {
 pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
     if (!self.surface_initialized or bytes.len == 0) return true;
 
+    // imeBegin/첫 marked update가 고정한 대상이 있으면 그 surface로 보낸다. AppKit 콜백 사이에
+    // 활성 pane/tab이 바뀌어도 확정 바이트가 새 터미널로 새지 않는다.
+    const target_id = self.ime_terminal_target_id orelse term_ops.activeSurface(self).id;
+
     // **편집기 Term이면 PTY가 아니라 문서로 간다**(N2 — §3.3).
     //
     // macOS는 평범한 글자를 `NSTextInputClient` 확정으로 보내므로 **타이핑의 실제 경로가 여기다** —
     // `handleKeyEvent`에는 Option+글자 같은 meta chord만 도달한다(아래 `.terminal_input` 주석이 같은
     // 사실을 적어 둔다). 그래서 편집기 분기를 키 경로에만 두면 **글자가 하나도 안 들어간다.**
     //
-    // **IME 조합 중에는 여기 오지 않는다** — 조합이 끝나 확정된 것만 온다. 한글은 N3에서 붙는다.
-    {
-        const active = pane_ops.activePane(self).activeTerm();
-        if (active.kind == .editor) {
-            _ = editor_ops.insertText(self, active, bytes);
-            self.metal_dirty = true;
-            return true; // 편집기가 삼켰다 — PTY로 흘리지 않는다
-        }
+    // **판정은 활성 Term이 아니라 위에서 고른 대상으로 한다.** 처음에 `activePane().activeTerm()`을
+    // 봤는데, 그것은 바로 위 주석이 막으려는 바로 그 누출을 반대 방향으로 낸다 — 터미널에서 조합을
+    // 시작한 뒤 pane이 편집기로 바뀌면 **그 글자가 문서에 들어간다.** 고정의 요점은 "확정은 조합을
+    // 시작한 곳으로 간다"이고, 편집기도 그 규칙 안에 있어야 한다(적대적 검증 2026-08-25).
+    if (editorTermBySurfaceId(self, target_id)) |editor_term| {
+        _ = editor_ops.insertText(self, editor_term, bytes);
+        self.metal_dirty = true;
+        return true; // 편집기가 삼켰다 — PTY로 흘리지 않는다
     }
-    // imeBegin/첫 marked update가 고정한 대상이 있으면 그 surface로 보낸다. AppKit 콜백 사이에
-    // 활성 pane/tab이 바뀌어도 확정 바이트가 새 터미널로 새지 않는다.
-    const target_id = self.ime_terminal_target_id orelse term_ops.activeSurface(self).id;
     return sendCommittedTextTo(self, target_id, bytes);
 }
 
@@ -578,6 +579,20 @@ pub fn encodeImeReplayKeyTo(
 
 /// IME transaction이 pin한 terminal surface를 찾는다. id가 없거나 그 Term이 web이면 null이며
 /// 호출자는 새 active surface로 fallback하지 않는다.
+/// 이 surface를 든 **편집기 Term**. 터미널이거나 없으면 `null`.
+///
+/// `terminalSurfaceById`가 `kind != .terminal`을 걸러 내는 것과 짝이다 — 그쪽은 "터미널만",
+/// 이쪽은 "편집기만"이다. 둘을 한 함수로 합치면 호출자가 kind를 다시 물어야 하고, 그 물음이
+/// 빠지는 날 확정 바이트가 엉뚱한 Term으로 간다.
+fn editorTermBySurfaceId(self: *AppSession, id: u64) ?*Term {
+    const loc = term_ops.findTermWhere(self, id, struct {
+        fn pred(want: u64, term: *Term) bool {
+            return term.kind == .editor and term.surface.id == want;
+        }
+    }.pred) orelse return null;
+    return loc.pane.terms.items[loc.term_index];
+}
+
 pub fn imeTerminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {
     // 정상 입력 중인 target은 대부분 app_window.active와 같다. 이 fast path는 전체 Term 순회를
     // 피하고, 최소 fixture가 app_window만 세운 기존 IME 계약 테스트도 같은 제품 경로를 탄다.

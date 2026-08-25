@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+/// **중립 파일이 macOS 폴더에 있다**(`file_tree_backend`·`git_backend` 와 같은 부류 — layering §3.4 의
+/// 후속 행이 이사를 예약해 뒀다). 본문에 네이티브 참조가 0 이고 `home` 경로만 받는다.
+const agent_archive_backend = @import("platform/macos/agent_session_archive_backend.zig");
 const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라
 // 다른 타깃에서 의미 분석 자체가 되지 않는다(`cli/control_client.zig`의 게이트와 같은 원리).
@@ -2801,6 +2804,108 @@ fn toggleTreeRow(
     return true;
 }
 
+/// 에이전트 세션 이력을 한 번 훑어 **도크 항목**으로 만든다(W8.5b⒝).
+///
+/// **전 구간이 이미 중립이다** — 스캔은 `agent_session_archive_backend`(네이티브 참조 0, `home` 만
+/// 받는다), 묶기는 `agent_session_archive_view.build`, 항목 타입은 컴포넌트의 것이다. Windows 가
+/// 하는 일은 부르는 순서와 문자열 몇 개를 만드는 것뿐이다.
+///
+/// **arena 에 담는다.** 카드가 가리키는 제목·요약·메타 문자열은 프레임보다 오래 살아야 하고, 개별
+/// `free` 를 늘어놓으면 하나만 빠뜨려도 스캔마다 샌다.
+///
+/// macOS 의 `buildAgentSessionDockItems` 와 **모양이 겹치지만 지금 빼지 않는다** — 그쪽은 인라인
+/// 상세·focus-live·가상화 창을 함께 다루고 여기는 목록 전체를 한 번 만든다. 규칙이 실제로 둘이 되면
+/// 그때 뺀다(`scm_items.zig` 가 그렇게 나왔다).
+/// UTF-8 경계에서 자른 앞부분. **바이트로 자르면 반쪽 글자가 남아** 어떤 문자열에서도 못 찾는다 —
+/// 한글·이모지 제목이 전부 "안 그려졌다" 로 보인다.
+fn codepointPrefix(s: []const u8, max_bytes: usize) []const u8 {
+    var end = @min(s.len, max_bytes);
+    while (end > 0 and (s[end - 1] & 0xC0) == 0x80) end -= 1;
+    if (end > 0 and end < s.len and (s[end - 1] & 0x80) != 0) end -= 1;
+    return s[0..end];
+}
+
+/// `scan` 은 **이 함수가 끝나면 버려지는** arena 다(훑는 동안 나오는 레코드·투영이 여기 쌓인다).
+/// `persist` 는 앱 수명 arena — `out` 의 항목이 가리키는 문자열만 이쪽으로 **복사**한다.
+fn buildAgentItems(
+    scan: std.mem.Allocator,
+    persist: std.mem.Allocator,
+    io: std.Io,
+    home: []const u8,
+    out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
+) !void {
+    var backend = agent_archive_backend.Backend.init(scan, io) catch return;
+    defer backend.deinit();
+    const home_owned = try scan.dupe(u8, home);
+    if (!backend.submit(home_owned, false)) return;
+
+    // **상한을 둔다** — 이력이 크면 오래 걸리고, 시작에서 무한히 기다리면 창이 안 뜬다.
+    var rounds: usize = 0;
+    var result: ?agent_archive_backend.Result = null;
+    while (rounds < 3000) : (rounds += 1) {
+        if (backend.takeResult()) |taken| {
+            result = taken;
+            break;
+        }
+        io.sleep(.fromMilliseconds(1), .awake) catch {};
+    }
+    var res = result orelse return;
+    defer res.deinit(scan);
+    if (res.records.items.len == 0) return;
+
+    // ── 레코드 → 묶음(중립) ──────────────────────────────────────────────────────────────────
+    const view_items = try scan.alloc(maru.session.agent_session_archive_view.Item, res.records.items.len);
+    for (res.records.items, 0..) |rec, i| {
+        view_items[i] = .{ .record_index = i, .cwd = rec.parsed.cwd, .cwd_canonical = rec.parsed.cwd_canonical };
+    }
+    var projection = try maru.session.agent_session_archive_view.build(scan, view_items, &.{});
+    defer projection.deinit(scan);
+
+    const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
+    for (projection.entries.items) |entry| switch (entry) {
+        .group => |gi| {
+            const g = projection.groups.items[gi];
+            try out.append(persist, .{
+                .group = .{
+                    .identity = gi,
+                    // **문자열을 복사한다.** `label`·`title`·`summary`·`model` 은 전부 `res`/`projection`
+                    // 안의 메모리를 가리키는 슬라이스인데, 이 함수를 나가며 그 둘을 `deinit` 한다.
+                    // 안전 빌드의 `Allocator.free` 는 해제한 자리를 `undefined`(0xAA)로 덮으므로 —
+                    // `persist` 가 arena 라 메모리가 살아 있어도 — **내용이 통째로 0xAA 가 된다**(실측: 제목 첫
+                    // 세 바이트가 전부 170, UTF-8 로 성립조차 안 하는 값이라 그리는 쪽에서 조용히
+                    // 사라졌다). `persist` 는 이 함수보다 오래 사니 복사본이 화면 수명을 넘긴다.
+                    .label = try persist.dupe(u8, g.label),
+                    .count = @intCast(@min(g.count, std.math.maxInt(u16))),
+                    .collapsed = g.collapsed,
+                },
+            });
+        },
+        .card => |ri| {
+            if (ri >= res.records.items.len) continue;
+            const rec = res.records.items[ri];
+            const p = rec.parsed;
+            // **메타는 세그먼트다**(한 문장이 아니다) — 컴포넌트가 구분자와 색을 소유해 위계를 준다.
+            const messages = try std.fmt.allocPrint(persist, "{d}", .{p.message_count});
+            var age_buf: [24]u8 = undefined;
+            const age_src = maru.chrome.components.sidebar.formatRelativeAge(
+                @intCast(@max(0, @divTrunc(now_ns - @as(i128, agent_archive_backend.lastActivityNs(rec)), 1_000_000))),
+                &age_buf,
+            );
+            const age = try persist.dupe(u8, age_src);
+            try out.append(persist, .{ .card = .{
+                .identity = ri,
+                .provider = switch (p.provider) {
+                    .claude => .claude,
+                    .codex => .codex,
+                },
+                .title = try persist.dupe(u8, p.title),
+                .summary = try persist.dupe(u8, p.summary),
+                .metadata = .{ .messages = messages, .age = age, .model = try persist.dupe(u8, p.model) },
+            } });
+        },
+    };
+}
+
 /// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
 /// 줄 수에서 나오므로 두 곳에서 따로 만들면 `slotAt` 의 누적이 밴드와 어긋난다.
 fn sidebarRowsFor(
@@ -3490,6 +3595,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var agent_cells: usize = 0;
     var agent_glyph_bytes: usize = 0;
     var agent_ops: usize = 0;
+    var agent_cards: usize = 0;
+    var agent_groups: usize = 0;
+    var agent_titles_drawn: usize = 0;
     var agent_ops_dropped: usize = 0;
     var dock_digest_before_switch: u64 = 0;
     var dock_cells_before_switch: usize = 0;
@@ -3513,12 +3621,38 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var agent_state = agent_surface.State{};
     var agent_built: ?agent_surface.Built = null;
     defer if (agent_built) |*b| b.deinit();
+    // **목록을 한 번 훑는다**(W8.5b⒝). arena 가 **둘**이다 — 카드가 가리키는 문자열은 프레임보다
+    // 오래 살아야 하니 하나는 앱 수명(`agent_arena`)이고, **훑는 동안 나오는 것은 그 자리에서
+    // 버린다**(`scan_arena`). 하나로 합치면 파싱 결과가 통째로 남는다: 실측 **44 MB** 를 카드
+    // 열한 장의 짧은 문자열 때문에 끝까지 들고 있었다. 백엔드가 64 KiB 스트리밍으로 바꾼 이유가
+    // 바로 그 상주 메모리인데(그 함수 doc), 호출자가 arena 하나로 도로 되살리는 꼴이었다.
+    var agent_arena = std.heap.ArenaAllocator.init(allocator);
+    defer agent_arena.deinit();
+    var agent_items: std.ArrayList(maru.chrome.components.session_dock.types.Item) = .empty;
+    // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
+    // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
+    var agent_scan_kb: usize = 0;
+    {
+        // **홈은 중립이 정한다**(`user_paths.homeDirFor`) — Windows 는 `HOME` 이 없어 `%USERPROFILE%`
+        // 로 간다. 여기서 손으로 고르면 그 규칙이 두 곳이 된다(그 함수 doc 이 왜 이렇게 되는지 적어 뒀다).
+        const home_env = maru.os_env.allocValue(allocator, "HOME");
+        defer if (home_env) |h| allocator.free(h);
+        const up_env = maru.os_env.allocValue(allocator, "USERPROFILE");
+        defer if (up_env) |u| allocator.free(u);
+        if (maru.user_paths.homeDirFor(@import("builtin").os.tag, home_env, up_env)) |home| {
+            var scan_arena = std.heap.ArenaAllocator.init(allocator);
+            defer scan_arena.deinit();
+            buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch {};
+            agent_scan_kb = scan_arena.queryCapacity() / 1024;
+        }
+    }
     const scm_tokens = chromeTokensFor(cfg);
     const agent_opts = agent_surface.Options{
         .font_family = cfg.font.family,
         .font_fallback = cfg.font.fallback,
         .font_size_pt = cfg.font.size,
         .tokens = &scm_tokens,
+        .items = agent_items.items,
     };
     const scm_opts = scm_surface.Options{
         .status_text = scm_status,
@@ -3846,6 +3980,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 agent_glyph_bytes = b.text.len;
                 agent_ops = b.ops;
                 agent_ops_dropped = b.ops_dropped;
+                // **목록이 글자까지 갔는가.** 셀·바이트 수는 목록이 비어도 0 이 아니다 — 헤더·검색
+                // 줄·빈 안내가 그려진다. 그래서 **카드 제목이 그려진 코드포인트 안에 있는지** 본다.
+                // 제목은 폭에 맞춰 잘리므로 **앞부분만** 찾는다(잘림은 뒤에서 일어난다).
+                for (b.items) |it| switch (it) {
+                    .group => agent_groups += 1,
+                    .card => |c| {
+                        agent_cards += 1;
+                        // **8 바이트**다. 카드 제목은 도크 폭에 맞춰 말줄임되는데(실측: ASCII
+                        // 제목이 11 글자에서 잘렸다) 앞부분이 그보다 길면 **그려졌는데 못 찾는다**.
+                        const needle = codepointPrefix(c.title, 8);
+                        if (needle.len >= 3 and std.mem.indexOf(u8, b.text, needle) != null) agent_titles_drawn += 1;
+                    },
+                };
             }
         }
         // 전환 뒤 **소스 컨트롤 행을 눌러 본다** — 뷰가 바뀌었는데 안 눌리면 죽은 컨트롤이다.
@@ -5275,18 +5422,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("view_bar=unjudgeable reason=no_glyphs h={d}\n", .{geom.view_bar.h});
     }
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
+    const agent_keep_kb = agent_arena.queryCapacity() / 1024;
     if (agent_judgeable) {
         // **개수만 세면 속 빈다** — 조립이 실패해도 셀이 0 이고, 목록이 비어도 0 에 가깝다.
         // 그래서 **글자가 나왔는가**를 함께 본다: 헤더·검색·빈 안내는 목록과 무관하게 그려진다.
-        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_slot=({d},{d}) agent_ok={}\n", .{
+        try stdout.print("agent_view={} agent_ops={d} agent_ops_dropped={d} agent_cells={d} agent_glyph_bytes={d} agent_items={d} agent_groups={d} agent_cards={d} agent_titles_drawn={d} agent_scan_kb={d} agent_keep_kb={d} agent_slot=({d},{d}) agent_ok={}\n", .{
             agent_view_reached,
             agent_ops,
             agent_ops_dropped,
             agent_cells,
             agent_glyph_bytes,
+            agent_items.items.len,
+            agent_groups,
+            agent_cards,
+            agent_titles_drawn,
+            agent_scan_kb,
+            agent_keep_kb,
             agent_slot_x,
             agent_slot_y,
-            agent_view_reached and agent_ops > 0 and agent_cells > 0 and agent_glyph_bytes > 0,
+            agent_view_reached and agent_ops > 0 and agent_cells > 0 and agent_glyph_bytes > 0 and
+                agent_cards > 0 and agent_titles_drawn > 0 and
+                // **1 MB 경계.** 남는 것은 카드 수에 비례하지(카드당 문자열 몇 개) 이력 크기에
+                // 비례하지 않는다 — 실측 카드 11 장에 7 KB 다. 수백 장이어도 이 안이고, arena 를
+                // 도로 합치면 **43 MB** 로 튄다(뮤턴트 실측). 그 사이에 경계를 둔다.
+                agent_keep_kb < 1024,
         });
     } else {
         try stdout.print("agent=unjudgeable reason=no_view_bar\n", .{});

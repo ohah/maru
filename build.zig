@@ -9182,6 +9182,47 @@ pub fn build(b: *std.Build) void {
         workspace_checkpoint_step.dependOn(&run_checkpoint_boundary_tests.step);
         if (checkpoint_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_boundary_tests.step);
     }
+    const workspace_checkpoint_file_step = b.step(
+        "test-workspace-checkpoint-file-adapter",
+        "P4 C2 workspace checkpoint atomic file publication gates",
+    );
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |checkpoint_file_optimize| {
+            const checkpoint_file_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/workspace_checkpoint_file.zig"),
+                .target = target,
+                .optimize = checkpoint_file_optimize,
+            });
+            const checkpoint_file_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/workspace_checkpoint_file.zig"),
+                    .target = target,
+                    .optimize = checkpoint_file_optimize,
+                    .imports = &.{.{ .name = "workspace_checkpoint_file", .module = checkpoint_file_mod }},
+                }),
+                .filters = &.{"P4 C2"},
+            });
+            const run_checkpoint_file_tests = b.addRunArtifact(checkpoint_file_tests);
+            run_checkpoint_file_tests.addArg("--maru-expect-tests=6");
+            run_checkpoint_file_tests.setCwd(b.path("."));
+            workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
+            test_step.dependOn(&run_checkpoint_file_tests.step);
+
+            const checkpoint_file_boundary_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/workspace_checkpoint_file_boundary.zig"),
+                    .target = target,
+                    .optimize = checkpoint_file_optimize,
+                }),
+                .filters = &.{"P4 C2 경계는"},
+            });
+            const run_checkpoint_file_boundary_tests = b.addRunArtifact(checkpoint_file_boundary_tests);
+            run_checkpoint_file_boundary_tests.addArg("--maru-expect-tests=1");
+            run_checkpoint_file_boundary_tests.setCwd(b.path("."));
+            workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_boundary_tests.step);
+            if (checkpoint_file_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_file_boundary_tests.step);
+        }
+    }
     if (target.result.os.tag == .macos) {
         // The d2d authority proof is a pure leaf with its own hostile lifecycle matrix. Compile it
         // independently so pump reachability cannot accidentally become the only test root.

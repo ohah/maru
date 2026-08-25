@@ -2675,6 +2675,9 @@ pub const RemoteRuntime = struct {
     runtime_lifetime: runtime_lifetime_owner_mod.RuntimeLifetimeOwner,
     screen_source: *stable_screen_source.StableScreenSource,
     surface: Surface, // 원격-backed(surface.remote = attachment screen source). GUI가 이걸 렌더.
+    // client placeholder는 현재 viewport highlight만 표현한다. Select All 의도는 별도 비트로 소유해
+    // copy 때 host의 권위 scrollback 전체에서 selectAll→extractSelection을 원자 실행한다.
+    selection_all: bool = false,
 
     /// Stable shell의 실제 `GenerationSlot.currentPayload()`만 current generation을 결정한다.
     fn currentGeneration(self: *RemoteRuntime) *RemoteGeneration {
@@ -3613,6 +3616,7 @@ pub const RemoteRuntime = struct {
         self.shutdown_attempt_authority = .{};
         self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
+        self.selection_all = false;
         try self.initializePendingEventOwner();
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
@@ -3709,6 +3713,7 @@ pub const RemoteRuntime = struct {
         self.shutdown_attempt_authority = .{};
         self.shutdown_current_admin = .{};
         self.runtime_lifetime = .{};
+        self.selection_all = false;
         try self.initializePendingEventOwner();
         self.runtime_id_hex = runtime_id_hex;
         // terminate errdefer 없음(pre-existing runtime을 attach 실패로 죽이지 않는다).
@@ -5807,8 +5812,8 @@ pub const RemoteRuntime = struct {
     pub fn selectedText(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
         try self.admitRuntimeOperation();
         if (!self.connectionCapabilities().runtime_selected_text) return self.selectedTextFromProjection(span);
-        var buf: [160]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ self.currentGeneration().attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block }) catch return error.OutOfMemory;
+        var buf: [176]u8 = undefined;
+        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{},\"all\":{}}}", .{ self.currentGeneration().attachment.streamId(), span.start.row, span.start.col, span.end.row, span.end.col, span.block, self.selection_all }) catch return error.OutOfMemory;
         var output: ?[]u8 = null;
         try self.callDecoded(
             generation_contract.RuntimeRequest.selectedText(.{
@@ -5817,6 +5822,7 @@ pub const RemoteRuntime = struct {
                 .end_row = span.end.row,
                 .end_col = span.end.col,
                 .block = span.block,
+                .all = self.selection_all,
             }),
             "runtime.selected_text",
             params,
@@ -6145,12 +6151,14 @@ pub const RemoteRuntime = struct {
             .word
         else if (std.mem.eql(u8, op, "line"))
             .line
+        else if (std.mem.eql(u8, op, "all"))
+            .all
         else
             return error.ProtocolError;
         var request: generation_contract.SelectRequest = .{ .kind = kind, .row = row, .col = col };
         @memcpy(request.separators[0..separators.len], separators);
         request.separators_len = @intCast(separators.len);
-        var output: ?terminal.SelectionSpan = null;
+        var output: SelectDecodeOutput = .{};
         try self.callDecoded(
             generation_contract.RuntimeRequest.selectOp(request),
             "runtime.select_op",
@@ -6158,21 +6166,69 @@ pub const RemoteRuntime = struct {
             &output,
             applySelectResponse,
         );
-        return output;
+        if (kind == .all) self.selection_all = output.viewport != null;
+        return output.viewport;
     }
 
-    fn applySelectResponse(_: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
-        const output: *?terminal.SelectionSpan = @ptrCast(@alignCast(raw_output));
-        if (std.mem.indexOf(u8, bytes, "\"sel\":true") == null) return;
-        const sr = client_mod.extractU64Field(bytes, "\"sr\":") orelse return;
-        const sc = client_mod.extractU64Field(bytes, "\"sc\":") orelse return;
-        const er = client_mod.extractU64Field(bytes, "\"er\":") orelse return;
-        const ec = client_mod.extractU64Field(bytes, "\"ec\":") orelse return;
-        output.* = .{
-            .start = .{ .row = @intCast(sr), .col = @intCast(sc) },
-            .end = .{ .row = @intCast(er), .col = @intCast(ec) },
-            .block = std.mem.indexOf(u8, bytes, "\"block\":true") != null,
+    const SelectDecodeOutput = struct {
+        viewport: ?terminal.SelectionSpan = null,
+    };
+
+    fn applySelectResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *SelectDecodeOutput = @ptrCast(@alignCast(raw_output));
+        const Response = struct {
+            sel: bool,
+            sr: ?u16 = null,
+            sc: ?u16 = null,
+            er: ?u16 = null,
+            ec: ?u16 = null,
+            block: ?bool = null,
         };
+        const parsed = std.json.parseFromSlice(Response, runtime.allocator, bytes, .{
+            .ignore_unknown_fields = false,
+        }) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        defer parsed.deinit();
+        const response = parsed.value;
+        if (!response.sel) {
+            if (response.sr != null or response.sc != null or response.er != null or response.ec != null or response.block != null) {
+                runtime.poisonConnection(.peer_contract_violation);
+                return error.ProtocolError;
+            }
+            return;
+        }
+        const sr = response.sr orelse {
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        const sc = response.sc orelse {
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        const er = response.er orelse {
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        const ec = response.ec orelse {
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        const block = response.block orelse {
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        output.viewport = .{
+            .start = .{ .row = sr, .col = sc },
+            .end = .{ .row = er, .col = ec },
+            .block = block,
+        };
+    }
+
+    pub fn clearSelectAllIntent(self: *RemoteRuntime) void {
+        self.selection_all = false;
     }
 
     /// host-authoritative core command를 strict bounded codec으로 보낸다. 구 host는 scroll 4종만 이해하므로 capability가
@@ -17475,7 +17531,7 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
 // code-review #6b-2 end-to-end — 단어/줄 선택. 빈 client placeholder는 단어/줄 경계를 모르므로 host가 콘텐츠로 계산해
 // span을 돌려준다(selectContentAware → runtime.select_op). 그 span으로 selectedText를 부르면(=client가 placeholder에 적용 후
 // #6b-1 복사와 같은 경로) 그 단어/줄 텍스트가 나온다. 실 fork host로 왕복 고정. macOS opt-in.
-test "remote runtime: selectContentAware computes word/line boundaries on the host (§6b-2)" {
+test "remote runtime: selectContentAware computes word/line/all boundaries on the host (§6b-2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;
@@ -17553,6 +17609,27 @@ test "remote runtime: selectContentAware computes word/line boundaries on the ho
     };
     defer allocator.free(line);
     try testing.expectEqualStrings("foo.bar baz", line); // 줄 전체(host 계산).
+
+    // viewport(8행)보다 긴 내용을 만든 뒤 전체 선택한다. placeholder만 고르면 보이는 8행 밖 EARLY-00은
+    // 복사될 수 없으므로, 이 단언이 Cmd+A 의도→host selectAll→scrollback 추출 전체 경로를 증명한다.
+    try rr.sendInput("EARLY-00\nEARLY-01\nEARLY-02\nEARLY-03\nEARLY-04\nEARLY-05\nEARLY-06\nEARLY-07\nEARLY-08\nEARLY-09\nEARLY-10\nEARLY-11\n");
+    attempts = 0;
+    while (attempts < 150) : (attempts += 1) {
+        _ = rr.pumpDelta() catch break;
+        _ = usleep(20 * 1000);
+    }
+    const all_span = (try rr.selectContentAware("all", 0, 0, "")) orelse {
+        try testing.expect(false);
+        return;
+    };
+    try testing.expect(rr.selection_all);
+    const all_text = (try rr.selectedText(all_span)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer allocator.free(all_text);
+    try testing.expect(std.mem.indexOf(u8, all_text, "EARLY-00") != null);
+    try testing.expect(std.mem.indexOf(u8, all_text, "EARLY-11") != null);
 }
 
 // code-review #6c end-to-end — 원격 검색. 빈 client placeholder는 검색을 못 하므로 host가 자기 core(콘텐츠·스크롤백)에서

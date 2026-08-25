@@ -619,6 +619,7 @@ pub const SelectedTextRequest = struct {
     end_row: u64,
     end_col: u64,
     block: bool,
+    all: bool = false,
 };
 
 pub const LinkAtRequest = extern struct { row: u16, col: u16, scopes: u8 };
@@ -641,7 +642,7 @@ pub const FindRequest = struct {
         return self.query[0..self.query_len];
     }
 };
-pub const SelectKind = enum(u8) { word, line };
+pub const SelectKind = enum(u8) { word, line, all };
 pub const SelectRequest = struct {
     kind: SelectKind,
     row: u16,
@@ -676,6 +677,7 @@ const RawSelectedTextRequest = extern struct {
     end_row: u64,
     end_col: u64,
     block: u8,
+    all: u8,
 };
 const RawFindRequest = extern struct {
     query: [256]u8,
@@ -743,6 +745,7 @@ pub const RuntimeRequest = extern struct {
             .end_row = value.end_row,
             .end_col = value.end_col,
             .block = @intFromBool(value.block),
+            .all = @intFromBool(value.all),
         } } };
     }
     pub fn linkAt(value: LinkAtRequest) RuntimeRequest {
@@ -809,13 +812,14 @@ pub const RuntimeRequest = extern struct {
             @intFromEnum(RuntimeRequestTag.observation) => .observation,
             @intFromEnum(RuntimeRequestTag.selected_text) => blk: {
                 const value = self.payload.selected_text;
-                if (value.block > 1) break :blk null;
+                if (value.block > 1 or value.all > 1) break :blk null;
                 break :blk .{ .selected_text = .{
                     .start_row = value.start_row,
                     .start_col = value.start_col,
                     .end_row = value.end_row,
                     .end_col = value.end_col,
                     .block = value.block == 1,
+                    .all = value.all == 1,
                 } };
             },
             @intFromEnum(RuntimeRequestTag.link_at) => .{ .link_at = self.payload.link_at },
@@ -835,6 +839,7 @@ pub const RuntimeRequest = extern struct {
                 const kind: SelectKind = switch (value.kind) {
                     @intFromEnum(SelectKind.word) => .word,
                     @intFromEnum(SelectKind.line) => .line,
+                    @intFromEnum(SelectKind.all) => .all,
                     else => break :blk null,
                 };
                 if (value.separators_len > value.separators.len) break :blk null;
@@ -1126,6 +1131,22 @@ test "CR3a-2c3b select request owns bounded word separators across raw decode" {
     var malformed = RuntimeRequest.selectOp(select);
     malformed.payload.select_op.separators_len = 65;
     try std.testing.expectEqual(@as(?ValidatedRuntimeRequest, null), malformed.decode());
+}
+
+test "CR3a-2c3b selected text request keeps select-all discriminator closed" {
+    var request = RuntimeRequest.selectedText(.{
+        .start_row = 70_000,
+        .start_col = 2,
+        .end_row = 70_001,
+        .end_col = 4,
+        .block = false,
+        .all = true,
+    });
+    const decoded = request.decode().?.selected_text;
+    try std.testing.expect(decoded.all);
+    try std.testing.expectEqual(@as(u64, 70_000), decoded.start_row);
+    request.payload.selected_text.all = 2;
+    try std.testing.expect(request.decode() == null);
 }
 
 test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {

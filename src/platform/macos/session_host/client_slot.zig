@@ -5022,6 +5022,7 @@ fn encodeGenerationRequestParams(
             .er = v.end_row,
             .ec = v.end_col,
             .block = v.block,
+            .all = v.all,
         }),
         .link_at => |v| stringifyGenerationParams(out, .{
             .stream_id = stream_id,
@@ -5049,6 +5050,7 @@ fn encodeGenerationRequestParams(
             .op = switch (v.kind) {
                 .word => "word",
                 .line => "line",
+                .all => "all",
             },
             .row = v.row,
             .col = v.col,

@@ -303,7 +303,7 @@ pub const MouseReport = struct {
 
 /// §6b 원격 선택 복사용 뷰포트 선택 span(primitive — codec 순수 유지). client가 보고 있는 화면(host의 뷰포트) 기준
 /// 시작/끝 셀 좌표와 block(직사각형) 여부. host가 `selectionStart/Extend`로 자기 core에 적용(뷰포트→abs는 host view_offset 기준).
-pub const SelectSpan = struct { sr: u16, sc: u16, er: u16, ec: u16, block: bool };
+pub const SelectSpan = struct { sr: u16, sc: u16, er: u16, ec: u16, block: bool, all: bool = false };
 
 /// `RuntimeOps.delta` 결과. `send`/`new_base`는 caller 소유이고 **항상 별개 버퍼**다(둘 다 free해도 안전). `send.len==0`이면
 /// 변화 없음(아무것도 안 보냄). `is_snapshot`이면 `send`가 fresh snapshot(snapshot_chunk로, client가 화면을 교체), 아니면
@@ -2264,7 +2264,7 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
-    /// `runtime.selected_text`(§6b 원격 선택 복사): client가 보낸 뷰포트 선택 span을 host core에 적용해 `extractSelection`으로
+    /// `runtime.selected_text`(§6b 원격 선택 복사): client가 보낸 뷰포트 span 또는 additive 전체 선택 의도를 host core에 적용해 `extractSelection`으로
     /// 텍스트를 뽑아 `{text}`로 응답한다(host가 콘텐츠 소유 = 선택 의미론 단일 출처, client는 span만 보내고 host가 해석). 모르는
     /// stream_id는 invalid_request. read-only host면 빈 text. 추출 텍스트는 임의 바이트라 host가 실 JSON encoder로 escape한다.
     fn dispatchSelectedText(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
@@ -2277,6 +2277,7 @@ pub const Connection = struct {
             .er = intField(p, "er") orelse 0,
             .ec = intField(p, "ec") orelse 0,
             .block = boolField(p, "block"),
+            .all = optionalBoolField(p, "all") orelse return self.replyError(request_id, .invalid_request),
         };
         const body = if (self.runtime_ops) |ops|
             ops.selected_text(ops.ctx, runtime_id, span, self.allocator) catch return self.replyError(request_id, .internal)
@@ -2325,8 +2326,8 @@ pub const Connection = struct {
         return self.replyResult(request_id, body);
     }
 
-    /// `runtime.select_op`(§6b-2 단어/줄 선택): client가 보낸 (op, row, col)로 host가 콘텐츠 인지 경계를 계산해
-    /// (`selectWordAt`/`selectLineAt`) 결과 뷰포트 선택 span을 응답한다(client가 그 span을 placeholder에 적용해 하이라이트).
+    /// `runtime.select_op`(§6b-2 단어/줄/전체 선택): client가 보낸 (op, row, col)로 host가 콘텐츠 인지 경계를 계산해
+    /// (`selectWordAt`/`selectLineAt`/`selectAll`) 결과 뷰포트 선택 span을 응답한다(client가 그 span을 placeholder에 적용해 하이라이트).
     /// 모르는 stream_id는 invalid_request. read-only host는 `{sel:false}`. span은 primitive라 escape 불필요(정수/bool).
     fn dispatchSelectOp(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const p = params orelse return self.replyError(request_id, .invalid_request);
@@ -3226,6 +3227,14 @@ fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
     return switch (obj.get(key) orelse return false) {
         .bool => |b| b,
         else => false,
+    };
+}
+
+/// Additive bool은 부재만 legacy false로 허용하고, 존재하는데 bool이 아니면 schema 위반으로 거부한다.
+fn optionalBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
+    return switch (obj.get(key) orelse return false) {
+        .bool => |b| b,
+        else => null,
     };
 }
 
@@ -7208,6 +7217,21 @@ test "server: runtime.selected_text routes span to RuntimeOps and returns text (
     try testing.expect(fake.last_select_span.block);
     try testing.expectEqual(@as(u128, 0xAA), fake.selected_text_runtime);
 
+    // additive 전체 선택 의도는 기존 viewport 좌표와 별도로 라우팅된다.
+    {
+        const r = try feedJson(&conn, .request, 31, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":1,\"sr\":0,\"sc\":0,\"er\":7,\"ec\":79,\"block\":false,\"all\":true}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "PICKED") != null);
+    }
+    try testing.expect(fake.last_select_span.all);
+
+    // 필드 부재는 same-major legacy false지만, 존재하는 malformed 값은 조용히 viewport 모드로 낮추지 않는다.
+    {
+        const r = try feedJson(&conn, .request, 32, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":1,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":0,\"block\":false,\"all\":1}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "invalid_request") != null);
+    }
+
     // 모르는 stream_id → invalid_request.
     {
         const r = try feedJson(&conn, .request, 4, "{\"method\":\"runtime.selected_text\",\"params\":{\"stream_id\":99,\"sr\":0,\"sc\":0,\"er\":0,\"ec\":0,\"block\":false}}");
@@ -7248,6 +7272,14 @@ test "server: runtime.select_op routes word/line op to RuntimeOps and returns sp
     try testing.expectEqual(@as(u16, 1), fake.last_select_op_row);
     try testing.expectEqual(@as(u16, 2), fake.last_select_op_col);
     try testing.expectEqualStrings("2e", fake.last_select_separators_hex[0..fake.last_select_separators_hex_len]);
+
+    // all은 같은 RPC의 additive op이며 좌표를 추측하지 않고 RuntimeOps에 그대로 위임한다.
+    {
+        const r = try feedJson(&conn, .request, 31, "{\"method\":\"runtime.select_op\",\"params\":{\"stream_id\":1,\"op\":\"all\"}}");
+        defer if (r.frame) |f| f.deinit(allocator);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"sel\":true") != null);
+    }
+    try testing.expectEqualStrings("all", fake.last_select_op[0..fake.last_select_op_len]);
 
     // 모르는 stream_id → invalid_request.
     {

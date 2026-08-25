@@ -11,52 +11,7 @@ const maru = @import("maru");
 const repo_path = maru.session.repo_path;
 const diff_payload = maru.session.diff_payload;
 const turn_capture = maru.session.turn_capture;
-
-/// 저장소 루트에서 시작해 경로 요소를 하나씩 `openat`으로 내려가며 연다. **각 단계가 `O_NOFOLLOW`**라
-/// 어느 요소든 symlink면 그 자리에서 실패한다(ELOOP). 마지막 요소만 파일로 연다.
-///
-/// **마지막 요소만 막으면 안 되는 이유**: 중간 디렉터리가 링크면 저장소 밖이 열린다.
-///
-/// `error.NotFound` 를 따로 낸다 — 「그때 없었다」와 「못 읽었다」는 화면에서 다른 말이 되어야 한다
-/// (`Write` 로 새 파일을 만드는 흐름이 전자다).
-pub fn openNoFollow(root: []const u8, rel_path: []const u8) !c_int {
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_z = std.fmt.bufPrintZ(&root_buf, "{s}", .{root}) catch return error.PathTooLong;
-    // 루트 자체는 사용자가 연 폴더라 따라가도 된다(그 경로를 고른 것이 사용자다) — 그 **아래**부터 막는다.
-    var dir_fd = std.c.open(root_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true });
-    if (dir_fd < 0) return error.OpenFailed;
-
-    var it = std.mem.splitScalar(u8, rel_path, '/');
-    var pending: ?[]const u8 = it.next();
-    while (pending) |segment| {
-        const next = it.next();
-        var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const seg_z = std.fmt.bufPrintZ(&seg_buf, "{s}", .{segment}) catch {
-            _ = std.c.close(dir_fd);
-            return error.PathTooLong;
-        };
-        const is_last = next == null;
-        const flags: std.c.O = if (is_last)
-            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }
-        else
-            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .DIRECTORY = true };
-        const opened = std.c.openat(dir_fd, seg_z.ptr, flags, @as(std.c.mode_t, 0));
-        // **errno 를 close 전에 읽는다** — close 가 실패하면 errno 를 덮어써 «없다»가 «못 읽었다»로 바뀐다.
-        const err = std.c._errno().*;
-        _ = std.c.close(dir_fd);
-        if (opened < 0) {
-            return if (err == @intFromEnum(std.c.E.NOENT) or err == @intFromEnum(std.c.E.NOTDIR))
-                error.NotFound
-            else
-                error.OpenFailed;
-        }
-        if (is_last) return opened;
-        dir_fd = opened;
-        pending = next;
-    }
-    _ = std.c.close(dir_fd);
-    return error.OpenFailed; // rel_path가 비어 있었다(isSafeRelative가 이미 막지만 경로를 열어 두지 않는다)
-}
+const safe_open = @import("safe_open.zig");
 
 /// 그 경로의 **지금 내용**을 `Side` 로. 소유권은 호출자에게 넘어간다(`turn_capture` 가 가져간다).
 ///
@@ -75,11 +30,18 @@ pub fn readSide(gpa: std.mem.Allocator, root: []const u8, abs_path: []const u8) 
     const rel = repo_path.displayRelative(abs_path, root);
     if (!repo_path.isSafeRelative(rel)) return .{ .unknown = .unreadable };
 
-    const fd = openNoFollow(root, rel) catch |err| return switch (err) {
+    const fd = safe_open.openNoFollow(root, rel) catch |err| return switch (err) {
         error.NotFound => .absent,
         else => .{ .unknown = .unreadable },
     };
     defer _ = std.c.close(fd);
+
+    // **정규 파일만 사본을 뜬다.** 디렉터리·FIFO·소켓·장치는 「내용」이라는 것이 우리가 비교할 수 있는
+    // 뜻을 갖지 않는다. 위 `O_NONBLOCK` 이 여는 것을 막아 주지만 **여는 것과 읽는 것은 다른 판정**이라
+    // 여기서 한 번 더 가른다(FIFO 는 열려도 read 가 0을 내 «빈 파일» 로 둔갑한다).
+    var st: std.posix.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return .{ .unknown = .unreadable };
+    if (st.mode & std.posix.S.IFMT != std.posix.S.IFREG) return .{ .unknown = .unreadable };
 
     var kept: std.ArrayList(u8) = .empty;
     defer kept.deinit(gpa);
@@ -119,6 +81,9 @@ pub fn readSide(gpa: std.mem.Allocator, root: []const u8, abs_path: []const u8) 
 
 const testing = std.testing;
 const fixture_io = std.Io.Threaded.global_single_threaded.io();
+
+/// zig 0.16 의 `std.c` 에는 래퍼가 없다. libc 함수라 직접 선언한다(`control_socket.getpeereid` 와 같은 관례).
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 /// 임시 루트 하나에 파일을 놓고 `readSide` 를 부른다.
 const Fixture = struct {
@@ -241,6 +206,37 @@ test "readSide: 루트 밖은 내용을 읽지 않는다" {
     try testing.expectEqual(turn_capture.Unknown.outside_root, side.unknown);
 }
 
+test "readSide: FIFO 는 UI 를 붙잡지 않고 «모름» 으로 떨어진다" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const gpa = testing.allocator;
+
+    // 저장소 안의 named pipe. **쓰는 쪽이 없다** — `O_NONBLOCK` 없이 열면 `open` 이 여기서 영영 막히고,
+    // 캡처는 frame tick 안에서 도므로 그 순간 **UI 가 통째로 정지한다**(diff 의 worker 경로와 다른 점).
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/pipe", .{fx.root()});
+    var z_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_z = try std.fmt.bufPrintZ(&z_buf, "{s}", .{abs});
+    if (mkfifo(abs_z.ptr, 0o600) != 0) return error.SkipZigTest;
+
+    // 이 호출이 **돌아온다는 것 자체**가 판정의 절반이다(막히면 테스트가 타임아웃으로 죽는다).
+    var side = readSide(gpa, fx.root(), abs);
+    defer freeSideForTest(gpa, &side);
+    // 나머지 절반: FIFO 는 열려도 read 가 0을 내 **«빈 파일» 로 둔갑**할 수 있다 — `.empty` 가 아니라
+    // `.unknown` 이어야 한다. 「돌아왔다」만 보면 그 구현이 통과한다.
+    try testing.expectEqual(turn_capture.Unknown.unreadable, side.unknown);
+}
+
+test "readSide: 디렉터리도 «모름» 이다 — 내용이라는 것이 없다" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const gpa = testing.allocator;
+    fx.dir.dir.createDir(fixture_io, "sub", .default_dir) catch return error.SkipZigTest;
+    var side = try fx.read(gpa, "sub");
+    defer freeSideForTest(gpa, &side);
+    try testing.expectEqual(turn_capture.Unknown.unreadable, side.unknown);
+}
+
 test "readSide: `..` 로 루트를 빠져나가는 경로는 내용을 얻지 못한다" {
     var fx = try Fixture.init();
     defer fx.deinit();
@@ -267,4 +263,9 @@ test "readSide: 중간 디렉터리가 심링크면 대상 바이트를 얻지 �
     defer freeSideForTest(gpa, &side);
     // **「ok 가 아니다」만 보면 약하다** — 바이트를 얻지 못했음을 직접 잰다.
     try testing.expect(side != .text);
+    // ⚠️ **그리고 `absent` 여서도 안 된다.** 「막았다」를 「그때 없었다」로 적으면 그 파일이 다음 읽기에서
+    // **«새로 생겼다»** 로 둔갑한다 — 디렉터리 심링크는 `ENOTDIR` 을 내므로 그것을 «없음» 으로 접는
+    // 구현이 여기서 죽는다(실제로 그렇게 짰다가 `git_backend` 의 심링크 테스트에 잡혔다).
+    try testing.expect(side != .absent);
+    try testing.expectEqual(turn_capture.Unknown.unreadable, side.unknown);
 }

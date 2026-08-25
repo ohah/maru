@@ -7304,6 +7304,58 @@ test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 만 쓴�
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "buildFileTreeDrawList("));
 }
 
+// 스크롤 목록을 그리는 host 는 **글자를 자를 뷰포트를 컴포넌트에서 받는다**.
+//
+// measured chrome 글자는 tree 의 `effective_clip` 이 안 자른다(그건 quad 만 자른다 —
+// `docs/scroll-area.md` §5.1). 자르는 것은 host 가 `collectMeasuredTextFromCache` 에 넘긴
+// 사각형 하나뿐이고, 그 산출은 컴포넌트가 소유한다(`…build.scrollTextViewport`).
+//
+// 2026-08-25 이전에는 셋 중 **agent 도크만** 그 값을 넘겼다. SCM·파일 트리는 넘기지 않아 반쯤
+// 스크롤된 첫 행의 라벨이 목록 위 고정 chrome 위에 그려졌고, 그 상태를 아무 판정자도 말하지
+// 않았다(그 자리를 보던 골든은 crop 이 quad 를 잡고 있어 초록이었다). 인자를 필수로 만들어
+// **잊는 것**은 막았지만, `null` 을 고르는 것은 여전히 컴파일된다 — 이 게이트가 그쪽을 본다.
+//
+// 새 도크를 더하면 여기서 실패한다. 그때 할 일은 목록에 파일을 더하는 것이거나(스크롤 목록이면),
+// 왜 뷰포트가 없어도 되는지를 적는 것이다(고정 밴드면 — 사이드바 검색 줄이 그런 경우다).
+test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 넘긴다" {
+    const allocator = std.testing.allocator;
+
+    // 스크롤 목록을 그리는 도크 셋. 각자 자기 컴포넌트의 헬퍼를 부르고, 그 값을 수집 함수에 넘긴다.
+    const docks = [_][]const u8{
+        "src/platform/macos/app_session/scm_dock.zig",
+        "src/platform/macos/app_session/file_tree_dock.zig",
+        "src/platform/macos/app_session/agent_dock.zig",
+    };
+    for (docks) |path| {
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        // 산출을 host 가 다시 쓰지 않는다 — 컴포넌트 헬퍼를 부른다.
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "build.scrollTextViewport("));
+        // 그 값을 실제로 넘긴다. `null` 을 넘기면 이 이름이 안 보여 실패한다.
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "collectMeasuredTextFromCache("));
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "scroll_clip,"));
+    }
+
+    // **소비처 전수.** 위 셋 말고 이 함수를 부르는 곳은 사이드바 검색 줄 둘뿐이고, 그 둘은 고정
+    // 밴드라 뷰포트가 없다(`null` 을 명시한다). 새 소비처가 생기면 여기서 실패해 사람이 어느 쪽인지
+    // 정하게 된다.
+    const fixed_band = [_][]const u8{
+        "src/platform/macos/app_session/pane.zig",
+        "src/platform/macos/app_session/sidebar.zig",
+    };
+    for (fixed_band) |path| {
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "collectMeasuredTextFromCache(collected, dl, cache, builder, null,"));
+    }
+
+    // 그리고 **그 다섯 말고는 없다.** 수집 함수 자신이 사는 파일만 정의를 들고 있다.
+    const owner = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(owner);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner, "pub fn collectMeasuredTextFromCache("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(owner, "self.collectMeasuredTextFromCache("));
+}
+
 test "f3c1 semantic producer remains private with one f3d product callsite" {
     const allocator = std.testing.allocator;
     const pump = try readZigFileZ(

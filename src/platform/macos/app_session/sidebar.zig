@@ -2575,7 +2575,8 @@ pub fn collectSidebarSearchText(
     }
     if (self.sidebar_search_text_cache) |*cache| {
         const dl = chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return;
-        self.collectMeasuredTextFromCache(collected, dl, cache, builder, .{ .sidebar_search = .{
+        // 뷰포트 `null` 은 **고른 답이다** — 이 글자는 스크롤 목록이 아니라 고정 밴드에 앉는다(위 규약).
+        self.collectMeasuredTextFromCache(collected, dl, cache, builder, null, .{ .sidebar_search = .{
             .origin_x = 0,
             .origin_y = 0,
             .colors = .{ .default_fg = self.appearance.theme.foreground },

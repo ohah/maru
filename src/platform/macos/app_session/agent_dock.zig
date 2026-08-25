@@ -1408,11 +1408,10 @@ pub fn collectAgentSessionDock(
     if (!cache_hit) shapeAgentSessionDockRichText(self, draws.ops, &tokens, fingerprint, dock_scale_milli, scroll_origin_y_px);
     if (self.agent_session_dock_rich_text_cache) |*cache| {
         if (cache.fingerprint == fingerprint) {
-            self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
+            self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, scroll_clip, .{ .pane = .{
                 .origin_x = content.x,
                 .origin_y = content.y,
                 .colors = colors,
-                .clip_rect = scroll_clip,
                 .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
             } });
             self.collectShaped(collected, icon_dl, builder, .{ .pane = .{

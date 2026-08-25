@@ -44,24 +44,28 @@ for path in /tmp/maru-*; do
     *) kept_guard=$((kept_guard + 1)); continue ;;
   esac
 
-  # **뒤에서부터** 숫자뿐인 칸을 찾는다. 픽스처 이름이 세 모양이라 그렇다:
+  # **앞에서부터** 숫자뿐인 칸을 찾는다. 픽스처 이름이 네 모양이라 그렇다:
   #   maru-sh-spawn-1234                        (끝이 pid)
   #   maru-admin-cli-1234-<hex>                 (pid 뒤에 nonce)
   #   maru-upgrade-owner-1234-second-exec-fail  (pid 뒤에 설명 꼬리)
-  # 끝만 보면 뒤 둘을 놓친다(실측: 그 이름으로 570 개가 남아 있었다).
+  #   maru-cr6a2-launch-1234-0                  (pid 뒤에 **숫자** 인덱스)
   #
-  # ⚠️ 앞선 두 시도가 다 틀렸다 — `sed -E` 의 non-greedy(`*?`)는 **BSD sed 가 거부**하고(macOS 기본),
-  # `IFS` 분해는 호출 문맥에 따라 흔들렸다. 파라미터 확장만 쓰면 그 둘 다 피한다.
-  # 두 경우 모두 pid 를 «못 읽음» 으로 떨어져 **아무것도 안 지웠다** — 이 스크립트의 fail-safe 가
-  # 그 방향으로 설계돼 있어서다(모르면 남긴다).
+  # ⚠️ 네 번째가 함정이다. 뒤에서부터 훑으면 그 `0` 을 pid 로 읽고, `kill -0 0` 은 **프로세스 그룹** 질의라
+  # 언제나 성공한다 — 그 자리는 영영 안 지워진다. 그리고 꼬리가 `-2` 같은 값이면 반대로 «죽었다» 로 읽어
+  # **살아 있는 자리를 지운다.** 실측에서 `maru-cr6a2-launch-86495-0` 이 pid=0 으로 잡혔다.
+  #
+  # 앞에서부터 찾으면 네 모양이 모두 진짜 pid 를 가리킨다(앞쪽 칸은 `sh`·`cr6a2`·`admin-cli` 처럼 글자를
+  # 포함한다). 그리고 **pid 2 미만은 우리 것이 아니다** — 0 은 프로세스 그룹, 1 은 launchd 다.
   pid=""
   cand=$name
-  while [ "$cand" != "${cand%-*}" ]; do
-    last=${cand##*-}
-    case "$last" in
-      ''|*[!0-9]*) cand=${cand%-*} ;;
-      *) pid=$last; break ;;
+  while [ -n "$cand" ]; do
+    head=${cand%%-*}
+    case "$head" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$head" -ge 2 ] 2>/dev/null; then pid=$head; break; fi ;;
     esac
+    [ "$cand" = "${cand#*-}" ] && break
+    cand=${cand#*-}
   done
   case "$pid" in
     ''|*[!0-9]*) kept_guard=$((kept_guard + 1)); continue ;;   # pid 를 못 읽으면 남긴다

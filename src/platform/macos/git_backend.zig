@@ -124,8 +124,6 @@ pub const Result = struct {
     /// **선택이다**: 못 읽으면 원격이 없는 것으로 보고 버튼을 끈다(없는 것을 눌러 실패로 배우게 하지 않는다).
     remotes: []u8 = &.{},
     /// 마지막 턴 스냅샷 이후 바뀐 것(§6.1). 스냅샷이 없으면 빈 문자열이고 그 섹션은 안 나온다.
-    turn_name_status: []u8 = &.{},
-    turn_numstat: []u8 = &.{},
     /// 셋 다 정상 종료했는가. 하나라도 실패하면 부분 결과를 쓰지 않는다(섹션이 서로 다른 시점을 섞지 않게).
     ok: bool = false,
     /// 출력이 상한에 걸려 잘렸는가. 목록 끝에 그 사실을 표시한다.
@@ -145,8 +143,6 @@ pub const Result = struct {
         allocator.free(self.remotes);
         allocator.free(self.ahead_behind);
         allocator.free(self.default_base);
-        allocator.free(self.turn_name_status);
-        allocator.free(self.turn_numstat);
         self.* = .{};
     }
 };
@@ -211,9 +207,8 @@ const Job = struct {
     git_exe: []u8,
     repo: []u8,
     request_id: u64,
-    /// 목록 작업이 함께 읽을 턴 스냅샷(빈 값이면 그 섹션 없음).
+    /// 파일 목록 작업이 읽을 rev(커밋 OID 또는 턴 OID 쌍). 상태 갱신 작업은 쓰지 않는다.
     snapshot_tree: []u8 = &.{},
-    index_file: []u8 = &.{},
     /// diff 작업이면 읽을 대상(저장소 루트 기준 상대경로 + 비교 기준). 목록 갱신 작업이면 null이다.
     diff: ?DiffTarget = null,
     /// 히스토리 읽기가 요청한 커밋 수(P4). 다른 작업은 쓰지 않는다.
@@ -403,9 +398,6 @@ pub const Backend = struct {
         self: *Backend,
         git_exe: []const u8,
         repo: []const u8,
-        /// 마지막 턴 스냅샷 tree(없으면 빈 문자열 — 그러면 그 섹션을 아예 안 읽는다).
-        snapshot_tree: []const u8,
-        index_file: []const u8,
         /// 비교의 **기준**(빈 값이면 `origin/HEAD`). 세 명령이 이 하나를 쓴다(§3.5).
         base: []const u8,
         request_id: u64,
@@ -437,8 +429,6 @@ pub const Backend = struct {
             state.allocator.destroy(job);
             return self.abandon();
         };
-        job.snapshot_tree = state.allocator.dupe(u8, snapshot_tree) catch &.{};
-        job.index_file = state.allocator.dupe(u8, index_file) catch &.{};
         // **심층 방어이지 정책이 아니다.** 고른 기준을 거르는 자리는 호출자(고를 때·읽어 올 때)다 —
         // 여기서 조용히 기본값으로 돌아가면 사용자가 고른 기준 대신 **다른 질문의 답**이 화면에 뜬다.
         // 그래도 argv에 싣기 직전에 한 번 더 보는 이유는 이 값이 파일(workspace)을 거쳐 오기 때문이다
@@ -1214,25 +1204,6 @@ fn diffWorker(job: *Job) void {
     var truncated = false;
 
     // untracked는 비교 대상 자체가 없다 — 왼쪽을 읽지 않는다(읽으면 같은 경로가 추적 중일 때 엉뚱한 내용이 실린다).
-    if (target.base == .turn) {
-        // 턴 기준: 스냅샷 tree ↔ 작업트리. 왼쪽은 그 tree의 blob, 오른쪽은 지금 파일이다 — 스냅샷은 커밋이 아니라
-        // tree라 `<tree>:<경로>`로 읽는다(같은 `git show` 문법이다).
-        if (commitSide(state.allocator, job, target.merge_base)) |out| {
-            result.original = out.bytes;
-            if (out.truncated) truncated = true;
-            had_side = true;
-        } else |_| {}
-        if (worktreeSide(state.allocator, job.repo, target.rel_path)) |out| {
-            result.modified = out.bytes;
-            if (out.truncated) truncated = true;
-            had_side = true;
-        } else |_| {}
-        result.ok = had_side;
-        result.truncated = truncated;
-        finishDiff(state, job, target, result);
-        return;
-    }
-
     if (target.base == .turn_range) {
         // 턴 하나: 스냅샷 tree 둘. **양쪽 다 tree라** 작업트리를 읽지 않는다 — 그 턴의 결과가 지금
         // 파일 상태와 무관하게 고정된다(§3.5.4).
@@ -1298,7 +1269,7 @@ fn diffWorker(job: *Job) void {
             .staged, .conflict => .head,
             // `.commit`은 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
             // `.commit`·`.turn_range`는 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
-            .unstaged, .untracked, .branch, .turn, .commit, .turn_range => .index,
+            .unstaged, .untracked, .branch, .commit, .turn_range => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
@@ -1390,24 +1361,6 @@ pub fn takeTurnSnapshot(
     const oid = try allocator.dupe(u8, trimmed);
     allocator.free(written.bytes);
     return oid;
-}
-
-/// 스냅샷 이후 바뀐 것(`--name-status`/`--numstat`). 비교 시점의 작업트리를 같은 임시 index에 다시 반영한 뒤 본다 —
-/// 그래야 추적되지 않은 파일까지 들어온다.
-pub fn diffSinceSnapshot(
-    allocator: std.mem.Allocator,
-    git_exe: []const u8,
-    repo: []const u8,
-    index_file: []const u8,
-    tree_oid: []const u8,
-    kind: git_command.Kind,
-) ![]u8 {
-    const refreshed = try runWithEnv(allocator, .snapshot_read_tree, git_exe, repo, null, index_file);
-    allocator.free(refreshed.bytes);
-    const added = try runWithEnv(allocator, .snapshot_add, git_exe, repo, null, index_file);
-    allocator.free(added.bytes);
-    const out = try runWithEnv(allocator, kind, git_exe, repo, tree_oid, index_file);
-    return out.bytes;
 }
 
 /// 그 커밋의 blob(브랜치 섹션 왼쪽). rename이면 옛 경로를 읽는다 — 새 경로는 그 커밋에 없다.
@@ -1554,20 +1507,9 @@ fn worker(job: *Job) void {
             } else ok = false;
         }
     }
-    // 턴 범위는 스냅샷이 있을 때만 읽는다. **실패해도 목록을 깨지 않는다**(브랜치 섹션과 같은 규율).
-    if (ok and job.snapshot_tree.len > 0 and job.index_file.len > 0) {
-        if (diffSinceSnapshot(state.allocator, job.git_exe, job.repo, job.index_file, job.snapshot_tree, .snapshot_name_status)) |bytes| {
-            result.turn_name_status = bytes;
-        } else |_| {}
-        if (diffSinceSnapshot(state.allocator, job.git_exe, job.repo, job.index_file, job.snapshot_tree, .snapshot_numstat)) |bytes| {
-            result.turn_numstat = bytes;
-        } else |_| {}
-    }
     result.ok = ok;
     result.truncated = truncated;
     if (job.base.len > 0) state.allocator.free(job.base);
-    if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
-    if (job.index_file.len > 0) state.allocator.free(job.index_file);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -2183,7 +2125,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
-    try testing.expect(backend.submit(exe, repo, "", "", "", 7));
+    try testing.expect(backend.submit(exe, repo, "", 7));
 
     // git status는 큰 저장소에서 수백 ms 걸린다. 10초까지 기다린 뒤에도 없으면 배관이 끊긴 것으로 본다.
     var spins: usize = 0;
@@ -2270,7 +2212,7 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     defer backend.deinit();
 
     // 목록 읽기가 merge-base를 함께 준다 — 브랜치 섹션의 왼쪽이 그 커밋이다.
-    try testing.expect(backend.submit(exe, repo, "", "", "", 1));
+    try testing.expect(backend.submit(exe, repo, "", 1));
     var listed = waitForList(&backend) orelse return error.ListNeverCompleted;
     defer listed.deinit(worker_allocator);
     if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다
@@ -2488,20 +2430,6 @@ test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(en
     defer testing.allocator.free(status.bytes);
     try testing.expect(std.mem.indexOf(u8, status.bytes, "1 .M") != null);
     try testing.expect(std.mem.indexOf(u8, status.bytes, "? b.txt") != null);
-
-    // 스냅샷 직후에는 바뀐 게 없다.
-    const none = try diffSinceSnapshot(testing.allocator, exe, repo, index_file, snapshot, .snapshot_name_status);
-    defer testing.allocator.free(none);
-    try testing.expectEqualStrings("", std.mem.trim(u8, none, " \t\r\n"));
-
-    // 그 뒤 파일을 고치면 **그 파일만** 나온다(추적되지 않은 새 파일도 포함).
-    writeFileAt(repo, "a.txt", "v3\n") catch return error.SkipZigTest;
-    writeFileAt(repo, "c.txt", "later\n") catch return error.SkipZigTest;
-    const changed = try diffSinceSnapshot(testing.allocator, exe, repo, index_file, snapshot, .snapshot_name_status);
-    defer testing.allocator.free(changed);
-    try testing.expect(std.mem.indexOf(u8, changed, "a.txt") != null);
-    try testing.expect(std.mem.indexOf(u8, changed, "c.txt") != null);
-    try testing.expect(std.mem.indexOf(u8, changed, "b.txt") == null); // 스냅샷에 이미 있던 파일은 안 나온다
 }
 
 // ── 쓰기 end-to-end (실제 임시 저장소) ─────────────────────────────────────────

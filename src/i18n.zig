@@ -492,7 +492,6 @@ const Table = struct {
     /// diff 탭 라벨: 에이전트 타임라인의 완료된 턴 하나(`스냅샷 ↔ 스냅샷`).
     dock_turn: [:0]const u8,
     dock_conflict: [:0]const u8,
-    dock_last_turn: [:0]const u8,
     arch_untitled: [:0]const u8,
     arch_unknown_location: [:0]const u8,
     res_memory: [:0]const u8,
@@ -981,7 +980,6 @@ const en: Table = .{
     .dock_commit = "Commit",
     .dock_turn = "Turn",
     .dock_conflict = "Conflict",
-    .dock_last_turn = "Last turn",
     .arch_untitled = "Untitled session",
     .arch_unknown_location = "Unknown location",
     .res_memory = "Memory",
@@ -1531,7 +1529,6 @@ const ko: Table = .{
     .dock_commit = "커밋",
     .dock_turn = "턴",
     .dock_conflict = "충돌",
-    .dock_last_turn = "마지막 턴",
     .arch_untitled = "제목 없는 세션",
     .arch_unknown_location = "알 수 없는 위치",
     .res_memory = "메모리",

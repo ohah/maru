@@ -77,11 +77,6 @@ pub const Kind = enum {
     snapshot_add,
     /// 턴 스냅샷 ③: 그 index를 tree 하나로 굳힌다(`write-tree`). 이 tree OID가 "그 턴이 끝난 순간"이다.
     snapshot_write_tree,
-    /// 그 스냅샷 이후 바뀐 것: 임시 index(작업트리 반영본)와 스냅샷 tree를 비교한다.
-    /// **`--cached`인 이유**: 비교 대상이 작업트리가 아니라 방금 만든 index다(추적되지 않은 파일까지 포함하려면
-    /// index에 넣고 비교해야 한다 — 실측으로 확인).
-    snapshot_name_status,
-    snapshot_numstat,
     /// 로컬 브랜치 목록(`for-each-ref refs/heads/`). 상태바 브랜치 항목을 눌렀을 때 고를 목록이다.
     ///
     /// **왜 `branch --list`가 아닌가**: `branch`는 pager·색·컬럼을 타는 porcelain이라 출력이 설정과 터미널 폭에
@@ -549,22 +544,6 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "write-tree";
             n += 1;
         },
-        .snapshot_name_status, .snapshot_numstat => {
-            buf[n] = "diff";
-            n += 1;
-            buf[n] = "--cached";
-            n += 1;
-            buf[n] = if (kind == .snapshot_numstat) "--numstat" else "--name-status";
-            n += 1;
-            buf[n] = "--find-renames";
-            n += 1;
-            buf[n] = "--no-ext-diff";
-            n += 1;
-            buf[n] = "--no-textconv";
-            n += 1;
-            buf[n] = arg orelse ""; // 스냅샷 tree OID
-            n += 1;
-        },
         .remotes => {
             buf[n] = "remote";
             n += 1;
@@ -701,7 +680,7 @@ test "숫자를 내는 diff는 알고리즘을 못 박는다 — 사용자 설�
     // `histogram`을 켜 두면 같은 파일에 목록은 `+1756 -1696`, 본문은 `+250 -190`을 말한다(실측).
     // **둘 중 하나를 고쳐야 한다면 목록이다** — 본문 계산은 우리 것이고 설정을 따를 이유가 없다.
     var buf: [max_argv][]const u8 = undefined;
-    inline for (.{ Kind.numstat_staged, Kind.numstat_worktree, Kind.branch_numstat, Kind.snapshot_numstat }) |kind| {
+    inline for (.{ Kind.numstat_staged, Kind.numstat_worktree, Kind.branch_numstat }) |kind| {
         const argv = build(kind, "/usr/bin/git", "/repo", "deadbeef", &buf);
         try testing.expect(has(argv, "diff.algorithm=myers"));
     }
@@ -858,14 +837,6 @@ test "턴 스냅샷은 임시 index로만 돌고 작업트리를 건드리지 �
     try testing.expect(has(build(.snapshot_read_tree, "/usr/bin/git", "/repo", null, &buf), "read-tree"));
     try testing.expect(has(build(.snapshot_add, "/usr/bin/git", "/repo", null, &buf), "-A"));
     try testing.expect(has(build(.snapshot_write_tree, "/usr/bin/git", "/repo", null, &buf), "write-tree"));
-
-    // 비교는 **index ↔ 스냅샷 tree**다(`--cached`) — 작업트리와 직접 비교하면 추적되지 않은 파일이 빠진다.
-    const named = build(.snapshot_name_status, "/usr/bin/git", "/repo", "deadbeef", &buf);
-    try testing.expect(has(named, "--cached"));
-    try testing.expect(has(named, "--name-status"));
-    try testing.expect(has(named, "deadbeef"));
-    // 읽기 전용 계약은 여기에도 그대로 붙는다.
-    try testing.expect(has(named, "core.pager=cat"));
 }
 
 test "ahead/behind는 기본 브랜치 기준 삼점 rev-list다 (`@{u}`가 아니다)" {

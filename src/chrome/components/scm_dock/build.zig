@@ -128,6 +128,22 @@ pub const BufferSizes = struct {
 
 /// `build`가 이 items로 성공하는 데 필요한 최소 버퍼다. **이 산술은 build가 하는 것과 같으므로 호출처가
 /// 복제하면 안 된다** — 작게 잡으면 build가 실패하고, 호출처가 그 실패를 삼키면 도크가 통째로 멈춘다.
+/// 목록 **글자**를 자를 뷰포트 — published tree 의 `content` 사각형이다.
+///
+/// 이것이 없으면 measured CoreText 경로가 자를 사각형을 못 받는다. quad 는 `effective_clip` 으로
+/// 잘리는데 글자는 안 잘려서, **반쯤 스크롤된 첫 행의 라벨이 목록 위 고정 chrome(요약 줄) 위에
+/// 그려진다**(2026-08-25 사용자 지적 — 골든 캡처에서 발견). `view` 가 행 글자에 이미
+/// `scroll_clipped = true` 를 달아 두었으므로(draw.zig 계약) 빠져 있던 것은 **뷰포트뿐**이었다.
+///
+/// **host 마다 다시 계산하지 않는다** — 제품 host 와 Lab 이 갈리면 골든이 제품과 다른 그림을
+/// 증명한다(Session Dock 의 같은 헬퍼가 그 이유를 소유한다).
+pub fn scrollTextViewport(published: tree.UiRectTree) ?layout.UiRect {
+    const index = published.find(NodeIds.content) orelse return null;
+    const rect = published.entries[index].rect;
+    if (rect.width <= 0 or rect.height <= 0) return null;
+    return rect;
+}
+
 pub fn bufferSizes(items: []const types.Item) BufferSizes {
     var action_buttons: usize = 0;
     for (items) |item| if (actionOf(item) != .none) {
@@ -1348,4 +1364,40 @@ test "요약 줄을 끄면 자리도 없다(히스토리 탭 위에 빈 띠가 �
     const on_content = on.tree.entries[on.tree.find(NodeIds.content) orelse return error.MissingContent];
     const off_content = off.tree.entries[off.tree.find(NodeIds.content) orelse return error.MissingContent];
     try testing.expectEqual(on_content.rect.height + on_summary.rect.height, off_content.rect.height);
+}
+
+test "글자 뷰포트는 목록 사각형이고, 스크롤로 밀린 첫 행은 그 위로 나간다" {
+    // 이 둘이 함께 있어야 계약이 성립한다: 행이 뷰포트 **위로 나가는 상태**를 만들 수 있고(가상화),
+    // 그때 host 가 글자를 자를 사각형을 컴포넌트가 낼 수 있어야 한다.
+    //
+    // 이 값이 없던 동안 제품과 Lab 모두 measured 글자를 **아무 데도 안 잘랐고**, 반쯤 스크롤된 첫
+    // 행의 라벨이 요약 줄 위에 그려졌다(2026-08-25 사용자가 골든 캡처에서 지적). quad 는 tree 의
+    // `effective_clip` 이 자르고 있었기 때문에, 그 상태로도 알약을 보는 골든은 초록이었다.
+    var storage: Storage = .{};
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{
+            .{ .repo = .{ .index = 0, .name = "maru3", .branch = "main" } },
+            .{ .file = .{ .name = "a.zig", .dir = "", .status = .modified, .letter = 'M', .action = .none } },
+        },
+        .branch = "main",
+        .scroll_offset_px = 12,
+        .content_first_item_origin_y_px = -12,
+        .content_h_px = 900,
+        .list_overflows = true,
+    }, &storage);
+
+    const content = frame.tree.entries[frame.tree.find(NodeIds.content) orelse return error.MissingContent].rect;
+    const text_viewport = scrollTextViewport(frame.tree) orelse return error.NoTextViewport;
+    try testing.expectEqual(content, text_viewport);
+
+    // 첫 행은 뷰포트 위로 나간다 — 자를 것이 실제로 있다.
+    const first = frame.tree.entries[frame.tree.find(NodeIds.item(0)) orelse return error.MissingFirstRow].rect;
+    try testing.expect(first.y < content.y);
+}
+
+test "글자 뷰포트는 목록이 없으면 null 이다(빈 tree 에서 지어내지 않는다)" {
+    var entries: [1]tree.RectEntry = undefined;
+    const empty: tree.UiRectTree = .{ .entries = entries[0..0], .generation = 0 };
+    try testing.expect(scrollTextViewport(empty) == null);
 }

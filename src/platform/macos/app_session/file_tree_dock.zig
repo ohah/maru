@@ -234,6 +234,18 @@ pub fn collectFileTreeDock(
 
     const scale = props.scale_milli;
     const scroll_origin_y_px: i32 = -@as(i32, @intCast(@min(props.origin_shift_px, std.math.maxInt(i32))));
+    // 행 글자를 자를 뷰포트. **quad 는 tree 의 clip 이 자르지만 measured 글자는 이 값이 없으면 아무 데도
+    // 안 잘린다** — 반쯤 스크롤된 첫 행의 라벨이 트리 위 고정 chrome 위로 나온다(2026-08-25, SCM 도크에서
+    // 같은 결함을 캡처로 잡고 이쪽도 함께 배선했다). 사각형의 출처는 컴포넌트 하나다(`build`).
+    const scroll_clip: ?metal_frame.ClipPx = blk: {
+        const rect = component.build.scrollTextViewport(frame.tree) orelse break :blk null;
+        break :blk .{
+            .x = content.x +| @as(u32, @intFromFloat(@max(rect.x, 0))),
+            .y = content.y +| @as(u32, @intFromFloat(@max(rect.y, 0))),
+            .w = @intFromFloat(@max(rect.width, 0)),
+            .h = @intFromFloat(@max(rect.height, 0)),
+        };
+    };
     const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
         draws.ops,
         &tokens,
@@ -257,6 +269,7 @@ pub fn collectFileTreeDock(
                     .origin_x = content.x,
                     .origin_y = content.y,
                     .colors = colors,
+                    .clip_rect = scroll_clip,
                     .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
                 } },
             );

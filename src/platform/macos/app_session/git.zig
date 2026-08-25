@@ -753,8 +753,19 @@ pub fn activeOrLastSessionIdentity(self: *AppSession) []const u8 {
 /// 넷을 질문 하나로 덮는다 — 「이 사본을 아직 가리키는 스냅샷이 있나」. 규모는 세션 8 × 링 8 = 64라
 /// 매 수확마다 돌려도 공짜다.
 pub fn sweepTurnCaptures(self: *AppSession) void {
-    var live: [maru.session.turn_snapshot.max_sessions * maru.session.turn_snapshot.capacity]u64 = undefined;
+    var live: [maru.session.turn_snapshot.max_sessions * maru.session.turn_snapshot.capacity + 1]u64 = undefined;
     var n: usize = 0;
+    // ⚠️ **아직 링에 없지만 살아 있는 것이 하나 있다.** 봉인된 사본은 `submitSnapshot` 이 받아들여진 뒤
+    // **harvest 가 돌 때까지** 링에 안 들어간다(git worker 가 tree 를 뜨는 동안). 그 창에 다음 턴이
+    // 끝나면 sweep 이 **아직 쓸 사본을 해제**하고, 그 뒤 harvest 가 그 id 로 push 해도
+    // `sealedTurn` 이 null 이라 그 턴의 `✎` 와 셸 고지가 **조용히 사라진다.**
+    //
+    // 그래서 요청 중인 id 를 살아 있는 것으로 친다 — `turn_snapshot_session`·`_repo`·`_key` 를 요청
+    // 시점에 붙들어 두는 것과 **같은 규율**이다(수확 때 다시 만들지 않는다).
+    if (self.turn_snapshot_capture != 0) {
+        live[n] = self.turn_snapshot_capture;
+        n += 1;
+    }
     for (&self.turn_rings.entries) |*entry| {
         if (entry.used == 0) continue;
         var back: usize = 0;

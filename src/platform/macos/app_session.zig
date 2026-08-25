@@ -20265,11 +20265,14 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
     // `Read` 한 파일도 셸이 고쳤다고 치자 — **그래도 `✎` 가 아니다**(편집 도구 소행이 아니므로).
     try tmp.dir.writeFile(io, .{ .sub_path = "read_only.zig", .data = "changed by shell\n" });
 
-    // ④ 턴이 끝나면 after 를 읽어 봉인한다.
-    agent_ops.captureTurnSnapshot(session, term.surfaceId(), .{ .key = "p-1", .title = "끝" });
+    // ④ 턴이 끝나면 after 를 읽어 봉인한다. **봉인은 배치 루프가 `applied.turn_end` 에서 한다** —
+    // 배치 끝으로 밀면 다음 턴의 사본이 섞인다(아래 「배치 안에서 다음 턴」 테스트가 그것을 잰다).
+    const sealed_id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(sealed_id != 0);
+    agent_ops.captureTurnSnapshot(session, term.surfaceId(), .{ .key = "p-1", .title = "끝" }, sealed_id);
 
     try std.testing.expect(session.turn_captures.openTurn("S-cap") == null); // 진행 중 자리는 비었다
-    const sealed = session.turn_captures.sealedTurn(1) orelse return error.NoSealedTurn;
+    const sealed = session.turn_captures.sealedTurn(sealed_id) orelse return error.NoSealedTurn;
     try std.testing.expectEqual(@as(usize, 2), sealed.entries.items.len);
     try std.testing.expectEqualStrings("after!\n", sealed.entries.items[0].after.?.text);
     // **핵심 판정**: 편집 도구가 바꾼 것만 센다. 둘 다 내용이 달라졌는데 답은 1이다.
@@ -20278,6 +20281,161 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
 
 // [AT3 §4.4] **backlog 따라잡기 중에는 캡처하지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 도구가
 // 이미 오래전에 끝났고, 지금 읽으면 **현재 내용을 끝난 턴의 before 로 이름 붙인다** — 없는 것보다 나쁘다.
+// [AT3] **한 배치에 두 턴이 들어오면 사본이 섞이면 안 된다.** 봉인은 배치 끝에 한 번 도는데 캡처는
+// 이벤트마다 열린 버킷에 쓴다 — `Stop` 뒤에 온 다음 턴의 `PreToolUse` 가 **끝난 턴의 사본**에 들어가면
+// 그 턴의 `✎` 와 배지가 남의 편집을 센다. AT2 가 턴 키에서 고친 것과 **같은 모양의 결함**이다.
+test "훅 캡처: 배치 안에서 다음 턴이 시작돼도 사본이 안 섞인다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "first.zig", .data = "1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "second.zig", .data = "2\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+
+    var first_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const first = try std.fmt.bufPrint(&first_buf, "{s}/first.zig", .{root});
+    var second_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const second = try std.fmt.bufPrint(&second_buf, "{s}/second.zig", .{root});
+
+    // 한 배치에 **두 턴**: 턴1 의 편집 → 턴1 끝 → 턴2 시작 → 턴2 의 편집.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-mix" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-mix", .turn_key = "p-1" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-mix",
+        .tool_name = "Edit",
+        .file_path = first,
+    });
+    const applied_stop = agent_ops.testApplyHookEvent(session, term, .{ .kind = .stop, .session_id = "S-mix", .turn_key = "p-1" });
+    // ⚠️ **여기서 봉인한다** — 제품의 배치 루프가 `applied.turn_end` 에서 하는 그것이다. 아래 두
+    // 이벤트는 다음 턴의 것이라, 봉인이 배치 끝으로 밀리면 그것들이 이 사본에 섞인다.
+    try std.testing.expect(applied_stop.turn_end);
+    const sealed_id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(sealed_id != 0);
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-mix", .turn_key = "p-2" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-mix",
+        .tool_name = "Edit",
+        .file_path = second,
+    });
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-mix",
+        .tool_name = "Bash",
+        .tool_command = "ls",
+    });
+
+    // 배치 끝에 도는 스냅샷 요청(제품과 같은 순서 — 이미 봉인된 id 를 받는다).
+    agent_ops.captureTurnSnapshot(session, term.surfaceId(), .{ .key = "p-1", .title = "끝" }, sealed_id);
+
+    const sealed = session.turn_captures.sealedTurn(sealed_id) orelse return error.NoSealedTurn;
+    // **턴1 의 사본에는 턴1 의 파일만** 있어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), sealed.entries.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, sealed.entries.items[0].path, "first.zig"));
+    // 셸 수도 마찬가지다 — 다음 턴의 `Bash` 를 세면 고지가 거짓 수를 말한다.
+    try std.testing.expectEqual(@as(u32, 0), sealed.shell_calls);
+}
+
+// [AT0/AT1] **끝난 턴은 그 턴을 돌린 세션의 링에 실린다.** 배치 끝에 신원을 다시 조회하면 그 사이
+// `SessionStart(새 id)` 가 온 경우(`/clear`) **끝난 턴이 새 세션의 링에 붙는다** — 링 소유를 세션으로
+// 옮긴 AT0 이 막으려던 그것이다. 실측(2026-08-26): `Stop` 직후 677건 중 세션이 바뀐 `SessionStart` 1건.
+test "턴 스냅샷: 배치 안에서 신원이 갈려도 끝난 턴은 옛 세션에 남는다 (AT0)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-old" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-old", .turn_key = "p-1" });
+    const stopped = agent_ops.testApplyHookEvent(session, term, .{ .kind = .stop, .session_id = "S-old", .turn_key = "p-1" });
+    try std.testing.expect(stopped.turn_end);
+
+    // 제품의 배치 루프가 **여기서** 사실을 굳힌다.
+    var facts: agent_ops.BatchTurnFacts = .{};
+    facts.captureFrom(term);
+    try std.testing.expectEqualStrings("S-old", facts.facts().session);
+
+    // 그 뒤 같은 배치에서 `/clear` — 신원이 갈린다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-new" });
+    try std.testing.expectEqualStrings("S-new", term.agent_transcript.identity());
+
+    // 배치 끝의 캡처는 **굳혀 둔 신원**을 써야 한다 — 지금 신원을 쓰면 옛 턴이 새 세션에 붙는다.
+    agent_ops.test_turn_snapshot_calls = 0;
+    agent_ops.captureTurnSnapshot(session, term.surfaceId(), facts.facts(), 0);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+    // **굳혀 둔 신원으로 실으려 했는가** — 지금 신원(`S-new`)을 쓰면 옛 턴이 새 링으로 간 것이다.
+    try std.testing.expectEqualStrings(
+        "S-old",
+        agent_ops.test_last_turn_session[0..agent_ops.test_last_turn_session_len],
+    );
+}
+
+// [AT3] **요청 중인 사본은 sweep 이 안 건드린다.** 봉인된 사본은 `submitSnapshot` 뒤 **harvest 가 돌
+// 때까지** 링에 없다(git worker 가 tree 를 뜨는 동안). 그 창에 다음 턴이 끝나면 sweep 이 돌고, 그것이
+// 링만 보면 **아직 쓸 사본을 해제한다** — 그 뒤 harvest 가 push 해도 그 턴의 `✎` 와 고지가 조용히 사라진다.
+test "훅 캡처: 링에 실리기 전 요청 중인 사본을 sweep 이 지우지 않는다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const gpa = session.allocator;
+    // 턴 N 을 봉인하고 «제출됐다» 고 둔다 — 링에는 아직 없다(harvest 전).
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S-inflight", "/r/a.zig", .edit, .empty));
+    const in_flight = session.turn_captures.seal(gpa, "S-inflight");
+    try std.testing.expect(in_flight != 0);
+    session.turn_snapshot_capture = in_flight;
+
+    // 그 창에서 다음 턴이 끝나 sweep 이 돈다.
+    git_ops.sweepTurnCaptures(session);
+
+    // **아직 살아 있어야 한다** — 링만 보는 구현은 여기서 죽는다.
+    try std.testing.expect(session.turn_captures.sealedTurn(in_flight) != null);
+
+    // 그리고 요청이 끝나 그 값이 비면(harvest 가 push 하고 지운다) **그때는 정리된다** —
+    // 앞 절반만 보면 「아무것도 안 지우는」 구현이 통과한다.
+    session.turn_snapshot_capture = 0;
+    git_ops.sweepTurnCaptures(session);
+    try std.testing.expect(session.turn_captures.sealedTurn(in_flight) == null);
+}
+
 // [AT4 §5] **셸 호출은 캡처와 같은 게이트를 지난다.** 게이트를 공유하지 않으면 「창이 없던 시간의 셸
 // 명령」이 지금 턴에 세어져 고지가 **거짓 수**를 말한다.
 test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
@@ -20345,7 +20503,9 @@ test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
     });
     try std.testing.expectEqual(@as(u32, 2), session.turn_captures.openTurn("S-sh").?.shell_calls);
 
-    // 자식 이벤트로는 안 는다.
+    // **자식(서브에이전트)의 셸도 센다.** 계약의 「자식은 부모 **상태**를 안 옮긴다」는 배지·턴 셈의
+    // 규율이지 파일 귀속의 규율이 아니다 — 그 셸 명령이 속할 턴은 부모의 턴 말고 없다.
+    // 실측: 셸 호출의 15.6%가 자식의 것이라, 빼면 고지가 그만큼 적게 센다.
     _ = agent_ops.testApplyHookEvent(session, term, .{
         .kind = .pre_tool_use,
         .session_id = "S-sh",
@@ -20353,7 +20513,40 @@ test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
         .tool_name = "Bash",
         .tool_command = "ls",
     });
-    try std.testing.expectEqual(@as(u32, 2), session.turn_captures.openTurn("S-sh").?.shell_calls);
+    try std.testing.expectEqual(@as(u32, 3), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // **`Monitor` 도 셸 명령을 돌린다**(실측: 71/71 이 `tool_input.command` 를 싣는다). 빼면 고지가
+    // 실제보다 적은 수를 말한다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "Monitor",
+        .tool_command = "tail -f x.log",
+    });
+    try std.testing.expectEqual(@as(u32, 4), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // ⚠️ **그러나 「`command` 가 있으면 셸」로 넓히면 안 된다.** `apply_patch` 의 `command` 는 패치
+    // 텍스트다 — 그것을 셸로 세면 편집 도구 호출이 「확정할 수 없는 셸 명령」으로 둔갑한다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "apply_patch",
+        .tool_command = "*** Update File: none.zig\n",
+    });
+    try std.testing.expectEqual(@as(u32, 4), session.turn_captures.openTurn("S-sh").?.shell_calls);
+
+    // MCP 도구·`Agent` 도 셸이 아니다(원격 질의·서브에이전트라 로컬 파일을 안 만진다).
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "mcp__grafana__query_loki_logs",
+    });
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-sh",
+        .tool_name = "Agent",
+    });
+    try std.testing.expectEqual(@as(u32, 4), session.turn_captures.openTurn("S-sh").?.shell_calls);
 }
 
 // [AT3 §4.4] **회전본의 `PreToolUse` 로는 before 를 뜨지 않는다.** 회전본은 이미 지나간 이벤트라 그 도구는
@@ -61586,6 +61779,52 @@ test "펼친 항목의 파일만 그린다 — 탭을 오가도 남의 파일이
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_loading), projection.items[2].notice);
 }
 
+// [AT4 §5] **고지가 투영에 실제로 들어가는지**를 잰다. `shellNoticeFor` 만 보는 테스트는 그 줄이 항목
+// 예산에서 잘려도 통과한다 — 그리고 파일이 많은 턴이야말로 그 고지가 필요한 자리다.
+test "셸 고지가 펼친 턴의 파일 줄 뒤에 실제로 실린다 (AT4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try openScmDockWithCommitBox(session, allocator, arena);
+
+    // 셸을 쓴 턴을 봉인해 링에 싣는다.
+    const gpa = session.allocator;
+    session.turn_captures.noteShellCall(test_turn_session);
+    session.turn_captures.noteShellCall(test_turn_session);
+    const cap = session.turn_captures.seal(gpa, test_turn_session);
+    try std.testing.expect(cap != 0);
+
+    testTurnRing(session).push(.{ .tree = "aaaaaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    testTurnRing(session).push(.{ .tree = "bbbbbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1, .capture_id = cap });
+
+    scm_dock_ops.selectScmTab(session, .agent);
+    // `select_turn` 이 그 줄을 고르고 **펼치기까지** 한다(`toggleTurnExpanded`).
+    scm_dock_ops.applyScmDockIntent(session, .{ .select_turn = 1 });
+    try std.testing.expect(session.scm_expanded_turn != null);
+    // 그 턴의 파일 목록이 실려 있다고 하자.
+    session.scm_commit_files_oid = try allocator.dupe(u8, "aaaaaaa1111 bbbbbbb2222");
+    session.scm_commit_files_text = try allocator.dupe(u8, "M\tsrc/a.zig\nM\tsrc/b.zig\n");
+
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    var files: usize = 0;
+    var notice_after_files = false;
+    for (projection.items) |item| switch (item) {
+        .commit_file => files += 1,
+        .notice => |text| {
+            // **파일 뒤에** 와야 한다 — 앞에 오면 그 줄들이 왜 `·` 인지를 설명하기 전에 말하는 것이다.
+            if (std.mem.indexOfScalar(u8, text, '2') != null and files == 2) notice_after_files = true;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), files);
+    try std.testing.expect(notice_after_files);
+}
+
 test "커밋을 펼치면 턴 펼침이 접힌다(슬롯이 하나다) (P5 적대적 검증)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -63937,7 +64176,7 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
     // 통했다. 이제 그 id 의 Term 에서 신원을 찾으므로 **없는 id 를 넘기면 조용히 아무것도 안 찍힌다.**
     const turn_sid = tab_ops.activeTab(session).panes.items[0].terms.items[0].surfaceId();
     seedTurnIdentity(session, turn_sid);
-    agent_ops.captureTurnSnapshot(session, turn_sid, .{ .key = "p-turn-1", .title = "다 했습니다" });
+    agent_ops.captureTurnSnapshot(session, turn_sid, .{ .key = "p-turn-1", .title = "다 했습니다" }, 0);
     var spins: usize = 0;
     while (spins < 500 and seededTurnRingLen(session) == 0) : (spins += 1) {
         git_ops.drainGitStatus(session);
@@ -63957,7 +64196,7 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
     // (같은 턴의 다음 이벤트가 «키가 바뀌었다» 로 읽히면 안 된다) 캡처 자리가 그것을 그대로 넘기면
     // base 에 옛 키가 실린다 — `/clear` 뒤라면 **옛 세션의 키가 새 세션 base 에** 붙는다.
     git_backend_mod.testWriteFile(repo, "base.txt", "b\n") catch return error.SkipZigTest;
-    agent_ops.captureTurnSnapshot(session, turn_sid, .{}); // base 가 넘기는 값과 같다
+    agent_ops.captureTurnSnapshot(session, turn_sid, .{}, 0); // base 가 넘기는 값과 같다
     spins = 0;
     while (spins < 500 and seededTurnRingLen(session) < 2) : (spins += 1) {
         git_ops.drainGitStatus(session);
@@ -64072,7 +64311,7 @@ test "턴 스냅샷: 세션 신원이 없으면 링을 만들지 않는다 (AT0 
     defer session.deinit();
 
     // **신원을 심지 않는다.** 그 밖의 조건은 앞 테스트와 같다.
-    agent_ops.captureTurnSnapshot(session, 1, .{});
+    agent_ops.captureTurnSnapshot(session, 1, .{}, 0);
 
     // 링 자체가 만들어지지 않는다 — 빈 링이 생기는 것도 아니다(키가 없으므로 자리도 없다).
     try std.testing.expect(session.turn_rings.find(test_turn_session) == null);

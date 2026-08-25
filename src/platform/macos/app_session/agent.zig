@@ -76,13 +76,24 @@ pub var test_turn_snapshot_calls: usize = 0;
 /// 어긋난다」며 키를 도입한 바로 그 어긋남이다.
 ///
 /// **턴이 끝나는 그 순간** 굳히고, 한 배치에 턴 끝이 여럿이면 **마지막 것이 이긴다**(스냅샷도 하나다).
-const BatchTurnFacts = struct {
+/// **테스트가 직접 물 수 있게 `pub` 이다.** 「턴이 끝나는 순간 굳힌다」는 규율은 배치 루프 안에만 있는데,
+/// 통합 test 는 `captureTurnSnapshot` 을 직접 부르므로 그 자리를 지나지 않는다 — seam 이 없으면 그 규율을
+/// 지운 뮤턴트가 판정자를 전부 통과한다(AT1 이 같은 이유로 `turnFactsForCapture` 를 열었다).
+pub const BatchTurnFacts = struct {
     key_buf: [maru.session.turn_snapshot.max_turn_key_len]u8 = undefined,
     key_len: usize = 0,
     title_buf: [maru.session.turn_snapshot.max_turn_title_len]u8 = undefined,
     title_len: usize = 0,
+    /// **그 턴을 돌린 세션.** 키·제목과 같은 이유로 여기서 굳힌다 — 배치 끝에 다시 조회하면 그 사이
+    /// `SessionStart(새 id)` 가 와서 신원이 갈렸을 때 **끝난 턴이 새 세션의 링에 실린다**(AT0 이 막으려던
+    /// 그것). 실측(2026-08-26): `Stop` 직후 이벤트 677건 중 세션이 바뀐 `SessionStart` 가 1건.
+    session_buf: [maru.session.turn_snapshot.max_session_id_len]u8 = undefined,
+    session_len: usize = 0,
 
-    fn captureFrom(self: *BatchTurnFacts, term: *Term) void {
+    pub fn captureFrom(self: *BatchTurnFacts, term: *Term) void {
+        const sid = term.agent_transcript.identity();
+        self.session_len = if (sid.len <= self.session_buf.len) sid.len else 0;
+        if (self.session_len > 0) @memcpy(self.session_buf[0..sid.len], sid);
         const key = term.agent_hook_progress.turnKey();
         self.key_len = if (key.len <= self.key_buf.len) key.len else 0;
         if (self.key_len > 0) @memcpy(self.key_buf[0..key.len], key);
@@ -91,8 +102,12 @@ const BatchTurnFacts = struct {
         if (title.len > 0) @memcpy(self.title_buf[0..title.len], title);
     }
 
-    fn facts(self: *const BatchTurnFacts) TurnFacts {
-        return .{ .key = self.key_buf[0..self.key_len], .title = self.title_buf[0..self.title_len] };
+    pub fn facts(self: *const BatchTurnFacts) TurnFacts {
+        return .{
+            .key = self.key_buf[0..self.key_len],
+            .title = self.title_buf[0..self.title_len],
+            .session = self.session_buf[0..self.session_len],
+        };
     }
 };
 
@@ -129,6 +144,11 @@ pub const TurnFacts = struct {
     key: []const u8 = "",
     /// 턴 제목(AT2).
     title: []const u8 = "",
+    /// **그 턴을 돌린 세션**(비면 지금 신원을 쓴다 — base 가 그렇다).
+    ///
+    /// ⚠️ 키·제목과 같은 이유로 **턴이 끝나는 순간** 굳힌 값이다. 배치 끝에 다시 조회하면 그 사이
+    /// 신원이 갈렸을 때(`/clear`) **끝난 턴이 새 세션의 링에 실린다.**
+    session: []const u8 = "",
 };
 
 /// 테스트 전용 — **마지막 캡처에 넘어간 턴 사실**. `test_turn_snapshot_calls` 와 같은 규약이고 같은 이유다:
@@ -156,7 +176,13 @@ pub var test_last_turn_title_len: usize = 0;
 /// 루트 밖·바이너리·상한 초과는 **거부가 아니라 접기**다 — 경로는 남고 내용만 없다(`capture_file`).
 fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
     if (ev.kind != .pre_tool_use) return;
-    if (ev.agent_id.len != 0) return; // 자식의 것
+    // ⚠️ **자식(서브에이전트) 이벤트도 센다.** 계약이 말하는 「자식 이벤트는 **부모 상태**를 옮기지
+    // 않는다」는 배지·턴 셈의 규율이지 **파일 귀속**의 규율이 아니다 — 서브에이전트가 고친 파일도
+    // 「에이전트가 편집 도구로 고쳤다」이고, 그 일이 속할 턴은 부모의 턴 말고 없다(링에 자식의 턴이 없다).
+    //
+    // 처음에는 그 규율을 과잉 적용해 자식을 통째로 뺐다. 실측(2026-08-26)이 대가를 보여 줬다:
+    // **셸 호출의 15.6%(1,516/9,735)가 자식의 것**이라 고지가 그만큼 적게 셌고, 자식의 편집은
+    // `✎` 대신 `·` 로 떨어졌다.
     if (term.agent_hook_backlog_catchup) return;
     const identity = term.agent_transcript.identity();
     if (identity.len == 0) return;
@@ -168,7 +194,7 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     // 「창이 없던 시간의 셸 명령」이 지금 턴에 세어져 고지가 거짓 수를 말한다.
     //
     // 저장소 루트 판정보다 **앞**이다: 세는 데는 루트가 필요 없다.
-    if (std.mem.eql(u8, ev.tool_name, "Bash") or std.mem.eql(u8, ev.tool_name, "exec")) {
+    if (isShellTool(ev.tool_name)) {
         self.turn_captures.noteShellCall(identity);
         return;
     }
@@ -219,6 +245,24 @@ fn decodeHookPath(buf: []u8, raw: []const u8) ?[]const u8 {
     return if (decoded.len == 0) null else decoded;
 }
 
+/// 그 도구가 **셸 명령을 돌리는가** — 즉 파일을 고쳤을 수 있는데 우리는 그 경로를 모르는가.
+///
+/// ⚠️ **`Bash` 만 세면 적게 센다.** 실측(2026-08-26): `Monitor` 가 71건 전부 `tool_input.command` 를
+/// 싣는다 — 셸 명령을 돌리는 도구다. 그것을 빼면 고지가 **실제보다 적은 수**를 말하고, 그 수가 곧
+/// 「목록의 `·` 가 왜 있는지」의 답이므로 답이 약해진다.
+///
+/// ⚠️ **`apply_patch` 는 `command` 를 싣지만 셸이 아니다** — 그 값은 패치 텍스트다. 그래서 「`command`
+/// 가 있으면 셸」이라는 편한 규칙을 쓰지 않고 **이름을 명시한다.**
+///
+/// `exec` 는 계약이 codex 의 셸 이름으로 적어 둔 것인데 **이 기계 실측에서는 안 나왔다**(codex 도 `Bash`
+/// 를 쓴다 — 185건). 지우지 않는 이유는 계약이 그 이름을 말하기 때문이다 — 관측이 계약을 이기지 않는다.
+fn isShellTool(tool_name: []const u8) bool {
+    if (std.mem.eql(u8, tool_name, "Bash")) return true;
+    if (std.mem.eql(u8, tool_name, "exec")) return true;
+    if (std.mem.eql(u8, tool_name, "Monitor")) return true;
+    return false;
+}
+
 /// 그 도구가 **바꾸려고** 여는 것인가.
 ///
 /// ⚠️ **`Read` 를 편집으로 세면 화면이 거짓말을 한다.** 실측: 경로를 실은 `PreToolUse` 517건 중 `Read`
@@ -256,6 +300,21 @@ fn noteBeforePath(
 /// **역시 tick 동기다.** 상한이 시간을 이미 묶는다 — 턴당 4 MiB·256 경로라 page cache 에서 최악 ~5 ms 다.
 /// 비교 대상이 결정적이다: 이 코드가 **걷어낼** `git write-tree` 가 같은 자리에서 **490 ms** 다(§2.6).
 /// 5 ms 를 위해 worker 를 들이면 `freeDiffContent` 가 실측으로 경고하는 할당자 갈림을 새로 만드는 순손실이다.
+/// **턴이 끝나는 그 순간** 사본을 굳힌다. 배치 루프가 `applied.turn_end` 에서 부른다.
+///
+/// ⚠️ **배치 끝에서 봉인하면 사본이 섞인다.** 한 tick 이 최대 64 이벤트를 읽으므로 `Stop` 뒤에 다음 턴의
+/// `UserPromptSubmit`·`PreToolUse` 가 **같은 배치**에 올 수 있고, 캡처는 이벤트마다 열린 버킷에 쓴다 —
+/// 그러면 **다음 턴의 파일이 끝난 턴의 사본에** 들어가 그 턴의 `✎` 와 배지가 남의 편집을 센다.
+/// `BatchTurnFacts.captureFrom` 이 턴 키에서 같은 이유로 같은 자리에 있다(AT2 가 겪은 결함).
+pub fn sealTurnCaptureNow(self: *AppSession, term: *Term) turn_capture.Id {
+    const identity = term.agent_transcript.identity();
+    if (identity.len == 0) return 0;
+    // **봉인 전에 고아를 비운다** — 봉인 자리는 「링이 가리킬 수 있는 최대 + 1」이라 그 한 칸이 고아로
+    // 채워지면 아직 가리켜지는 사본이 밀려난다.
+    git_ops.sweepTurnCaptures(self);
+    return sealTurnCapture(self, identity);
+}
+
 fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
     const turn = self.turn_captures.openTurn(identity) orelse return 0;
     if (turn.entries.items.len == 0) return 0;
@@ -279,7 +338,20 @@ fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
     return self.turn_captures.seal(self.allocator, identity);
 }
 
-pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts) void {
+/// 그 턴의 작업트리를 tree 로 굳혀 링에 실을 준비를 한다(§6.1). 실제 적재는 수확부가 한다.
+///
+/// ⚠️ **`facts` 와 `capture_id` 는 «턴이 끝나는 그 순간» 의 값이어야 한다.** 호출자(배치 루프)가
+/// `applied.turn_end` 에서 `BatchTurnFacts.captureFrom` 과 `sealTurnCaptureNow` 로 굳혀 넘긴다.
+/// 여기서 다시 만들면 안 되는 이유가 셋이고 셋 다 실측으로 걸렸다:
+///
+/// - **턴 키·제목**: 한 배치에 다음 턴이 시작되면 옛 스냅샷에 새 턴의 키가 붙는다(AT2 가 겪었다).
+/// - **사본**: 캡처는 이벤트마다 열린 버킷에 쓰므로, 배치 끝에 봉인하면 **다음 턴의 파일이 끝난 턴의
+///   사본에** 들어간다(실측: `Stop` 직후 `PreToolUse` 6건).
+/// - **세션**: 그 사이 `SessionStart(새 id)` 가 오면 **끝난 턴이 새 세션의 링에** 실린다 — AT0 이
+///   막으려던 그것이다(실측: `Stop` 직후 677건 중 1건).
+///
+/// `capture_id == 0` 은 「사본 없음」이다(관측 모드·훅 없는 세션·붙일 것이 없던 턴).
+pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts, capture_id: turn_capture.Id) void {
     if (builtin.is_test) {
         test_turn_snapshot_calls += 1;
         // **게이트보다 먼저 기록한다** — 저장소가 없어도 「무엇을 넘겼나」는 사실이다.
@@ -287,6 +359,10 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts)
         @memcpy(test_last_turn_key[0..test_last_turn_key_len], facts.key[0..test_last_turn_key_len]);
         test_last_turn_title_len = @min(facts.title.len, test_last_turn_title.len);
         @memcpy(test_last_turn_title[0..test_last_turn_title_len], facts.title[0..test_last_turn_title_len]);
+        // **어느 세션에 실릴 것인가**도 사실이다 — 그 판정이 이 함수 안에 있으므로 결과(링)로는 못 본다.
+        const resolved = if (facts.session.len > 0) facts.session else git_ops.sessionIdentityFor(self, surface_id);
+        test_last_turn_session_len = @min(resolved.len, test_last_turn_session.len);
+        @memcpy(test_last_turn_session[0..test_last_turn_session_len], resolved[0..test_last_turn_session_len]);
     }
     // **봉인은 git 보다 앞이다.** 그림자 사본은 이미 우리 손에 있고 git 을 한 번도 안 부른다 —
     // 계약 §4.4 가 「git 없이도 된다」를 근거로 든 그 성질이다. 아래 게이트·저장소 판정 뒤에 두면
@@ -294,13 +370,6 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts)
     //
     // 봉인해 두면 링에 못 실리는 경우에도 손해가 없다 — 그 id 는 고아가 되고 `Store.sweep` 이 곧
     // 해제한다(도달성으로 두는 이유 넷 중 하나가 정확히 이 경로다).
-    const seal_identity = git_ops.sessionIdentityFor(self, surface_id);
-    // **봉인 전에 고아를 비운다.** 봉인 자리는 링이 가리킬 수 있는 최대 + 1 인데, 그 +1 은 «전부 살아
-    // 있는» 전이만 덮는 마지막 한 칸이다. 고아(거절된 턴·dedup 에 걸린 턴)를 먼저 치우지 않으면 그
-    // 한 칸이 고아로 채워져 **아직 가리켜지는 사본**이 밀려난다 — 그러면 그 턴의 `✎` 가 조용히 0이 된다.
-    git_ops.sweepTurnCaptures(self);
-    const capture_id = if (seal_identity.len == 0) 0 else sealTurnCapture(self, seal_identity);
-
     // **테스트에서는 세기만 하고 실제 작업은 하지 않는다.**
     //
     // 아래 `submitSnapshot` 은 detached worker 에 job 을 넘기고 그 해제를 **그 스레드가** 한다. 테스트는
@@ -315,7 +384,10 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts)
     if (builtin.is_test and !test_allow_turn_snapshot) return;
     // **신원이 없으면 찍지 않는다**(AT0 — 계약 §6.1 «훅 모드 전용»). 링에 넣을 키가 없는데 찍으면
     // git 프로세스만 공짜로 띄운다. 관측 모드에서 목록이 비는 것은 그래서이고, 오류가 아니다.
-    const identity = git_ops.sessionIdentityFor(self, surface_id);
+    // **턴이 끝나는 순간의 신원을 쓴다**(있으면). 여기서 다시 조회하면 그 사이 `SessionStart(새 id)` 가
+    // 온 배치에서 **끝난 턴이 새 세션의 링에 실린다** — AT0 이 막으려던 그것이다. base 는 그 순간이
+    // 따로 없으므로 지금 신원을 쓴다.
+    const identity = if (facts.session.len > 0) facts.session else git_ops.sessionIdentityFor(self, surface_id);
     if (identity.len == 0) return;
     // **턴을 찍었다는 것 자체가 그 세션이 활동했다는 뜻이다** — 그러니 여기서도 «직전에 본 세션» 을
     // 갱신한다. 화면 조회에만 맡기면, 사용자가 그 에이전트 Term 을 활성으로 한 번도 두지 않은 채
@@ -912,6 +984,9 @@ pub var test_allow_provider_writes = false;
 /// job 의 `create`·`dupe` 가 누수로 잡힌다 — 타이밍을 타서 **로컬은 통과하고 CI 만 빨개진다**(실제로
 /// 그렇게 났다). 링을 실제로 채우는지 보는 테스트만 켜고 돈다.
 pub var test_allow_turn_snapshot = false;
+/// 마지막 캡처가 **어느 세션에 실으려 했나**(테스트 전용). 게이트 앞에서 기록한다.
+pub var test_last_turn_session: [maru.session.turn_snapshot.max_session_id_len]u8 = undefined;
+pub var test_last_turn_session_len: usize = 0;
 
 /// 시작할 때 남아 있는 훅 이벤트 로그를 **읽지 않고 지운다**(docs/agent-hooks.md §4.2·§5).
 ///
@@ -1693,12 +1768,17 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     var turn_ended = false;
     var base_opened = false;
     var batch_facts: BatchTurnFacts = .{};
+    var batch_capture: turn_capture.Id = 0;
     for (events[0..batch.count]) |ev| {
         const applied = applyHookEvent(self, term, ev);
         if (applied.base) base_opened = true;
         // **턴이 끝나는 그 순간** 사실을 굳힌다(`BatchTurnFacts` 주석 — 배치 끝에서 읽으면 다음 턴의
         // 키·빈 제목이 실린다).
-        if (applied.turn_end) batch_facts.captureFrom(term);
+        // **턴이 끝나는 그 순간** 사실과 사본을 함께 굳힌다 — 배치 끝에서 하면 다음 턴의 것이 섞인다.
+        if (applied.turn_end) {
+            batch_facts.captureFrom(term);
+            batch_capture = sealTurnCaptureNow(self, term);
+        }
         if (applied.conversation) conversation_changed = true;
         if (applied.turn_end) turn_ended = true;
         // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
@@ -1730,7 +1810,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // 전이를 만드는데 **그 이벤트의 `turn_key` 는 codex 에서 자식의 것**이다(계약 §2 실측). `advance` 는
     // lead 이벤트에서만 키를 채택하므로 `progress.turnKey()` 가 언제나 lead 의 현재 키다 — 알림 본문이
     // 「자식이 아니라 lead 의 것이어야 한다」로 이미 판정된 것과 같은 함정, 같은 답이다.
-    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), if (turn_ended) batch_facts.facts() else .{});
+    if (turn_ended or base_opened) captureTurnSnapshot(self, term.surfaceId(), if (turn_ended) batch_facts.facts() else .{}, batch_capture);
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
@@ -2033,17 +2113,19 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         var rotated_turn_end = false;
         var rotated_base = false;
         var rotated_facts: BatchTurnFacts = .{};
+        var rotated_capture: turn_capture.Id = 0;
         for (events[0..batch.count]) |ev| {
             const applied = applyHookEvent(self, term, ev);
             if (applied.turn_end) {
                 rotated_turn_end = true;
+                rotated_capture = sealTurnCaptureNow(self, term);
                 rotated_facts.captureFrom(term); // 회전본도 같은 규율이다
             }
             if (applied.base) rotated_base = true;
         }
         // 회전본에도 **같은 규율**을 건다 — 여기만 빠지면 회전된 로그에 든 `SessionStart` 의 base 를 잃고,
         // 그 세션의 첫 턴이 영영 안 뜬다.
-        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), if (rotated_turn_end) rotated_facts.facts() else .{});
+        if (rotated_turn_end or rotated_base) captureTurnSnapshot(self, term.surfaceId(), if (rotated_turn_end) rotated_facts.facts() else .{}, rotated_capture);
         if (!batch.more or batch.advanced == 0) break; // `advanced == 0` = 더 나아가지 못한다(무한 루프 방지)
     }
 }
@@ -2195,7 +2277,8 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     if (maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current))) {
         // **관측 모드에는 턴 키가 없다** — 그 축은 훅 payload 만 가진 것이라(계약 §3.1) 화면 관측으로는
         // 알 길이 없다. 빈 키는 「모른다」이고, AT3 는 그런 항목에 provider 기록을 붙이지 않는다.
-        captureTurnSnapshot(self, term.surfaceId(), .{});
+        // 관측 모드에는 훅이 없어 사본이 없다(계약 §6) — 0을 넘긴다.
+        captureTurnSnapshot(self, term.surfaceId(), .{}, 0);
     }
     if (current != previous) {
         if (displayed) self.metal_dirty = true;

@@ -560,6 +560,10 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         while (files.next()) |_| file_rows += 1;
         if (file_rows == 0) file_rows = 1; // 읽는 중·실패·빈 턴을 한 줄로 말한다
         if (self.scm_commit_files_truncated) file_rows += 1;
+        // **셸 고지 한 줄**(AT4 §5). 여기서 안 세면 파일이 있는 턴에서 `n < items.len` 에 걸려
+        // **조용히 잘린다** — 그리고 파일이 많은 턴이야말로 그 고지가 필요한 자리다.
+        // 실제로 붙일지는 아래에서 정하므로 **넉넉히 하나**만 잡는다(안 붙으면 배열이 한 칸 남을 뿐이다).
+        file_rows += 1;
     }
     const notice_rows: usize = if (rows.len == 0) 1 else 0;
     // **놓친 턴은 목록이 비어 있든 아니든 말한다** — 그 사실이 목록의 완전성을 좌우한다.
@@ -750,7 +754,9 @@ fn shellNoticeFor(
     if (snap.capture_id == 0) return null;
     const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return null;
     if (turn.shell_calls == 0) return null;
-    var buf: [128]u8 = undefined;
+    // **여유를 크게 둔다.** `i18n.format` 은 넘치면 **바이트 단위로 자르므로** UTF-8 중간에서 끊겨
+    // U+FFFD 가 뜬다. 지금 한국어 문구가 ~110 B 라 128 로는 번역자가 몇 글자만 더해도 깨진다.
+    var buf: [256]u8 = undefined;
     const text = maru.i18n.format(&buf, maru.i18n.t(.scm_turn_shell_notice), &.{.{ .d = @intCast(turn.shell_calls) }});
     return arena.dupe(u8, text) catch null;
 }

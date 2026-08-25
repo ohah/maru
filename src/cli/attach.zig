@@ -231,10 +231,22 @@ test "attach help is exact and accepts only a standalone help option" {
         parse(&.{ "--help", "0000000000000000000000000000002a" }),
     );
     try std.testing.expectEqualStrings(
-        "usage: maru attach [--read-only | --take-over] <32-lower-hex-runtime-id>\n\n" ++
-            "Attach this terminal to an existing persistent runtime without starting a host.\n",
+        "usage: maru attach [--read-only | --take-over | --stream] <32-lower-hex-runtime-id>\n\n" ++
+            "Attach this terminal to an existing persistent runtime without starting a host.\n\n" ++
+            "  --stream  observe and write the screen record stream to stdout instead of drawing it.\n",
         help,
     );
+}
+
+test "--stream 은 다른 역할 옵션과 배타이고 중복도 거부한다" {
+    // 기존 셋과 **같은 규칙**을 타야 한다 — 새 옵션만 조용히 관대해지면 그 조합이 어떤 역할로
+    // 붙는지 사용자가 예측할 수 없다.
+    const id = "0000000000000000000000000000002a";
+    const parsed = try parse(&.{ "--stream", id });
+    try std.testing.expectEqual(Intent.stream, parsed.attach.intent);
+    try std.testing.expectError(error.DuplicateOption, parse(&.{ "--stream", "--stream", id }));
+    try std.testing.expectError(error.ConflictingOptions, parse(&.{ "--stream", "--read-only", id }));
+    try std.testing.expectError(error.ConflictingOptions, parse(&.{ "--take-over", "--stream", id }));
 }
 
 test "resolver reduction requires complete evidence and exactly one match" {

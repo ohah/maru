@@ -134,6 +134,13 @@ pub const StickyGroup = struct {
 pub const Props = struct {
     viewport_px: layout.UiSize,
     cell_width_px: u32,
+    /// face 의 **포인트당 advance**(device px × 1000 / 논리 pt). platform 이 채운다.
+    ///
+    /// 셀 폭은 **터미널 폰트 크기**의 글자 폭인데 카드 글자는 role 이 정한 크기(제목 14pt·메타 12pt)로
+    /// 그려진다. 셀로 재면 메타를 25% 넘게 과대평가해, 제목 줄에 함께 놓을 수 있는 것도 잘라 버린다
+    /// (실측: 기본 폭 640pt 에서 모델 이름이 `claude-o` 로 끊겼다). 이 비율의 근거는
+    /// `scm_dock/types.zig` 의 같은 필드가 소유한다.
+    advance_milli_per_point: u32 = 0,
     cell_height_px: u32,
     /// 논리 Dock point당 backing 픽셀을 해석한 값 — device backing scale에 host가 소유한 bounded
     /// SessionDockUiZoom을 합성한 것이다. semantic 컴포넌트는 이 값을 role line box를 잡는 데만 쓰고,
@@ -271,7 +278,10 @@ pub const DockMetrics = struct {
         const card_inset = spacing.px(.md, scale);
         const card_title_y = card_inset;
         const card_summary_y = saturatedAdd(saturatedAdd(card_title_y, typography.lineHeightPx(.card_heading, scale)), spacing.px(.xs, scale));
-        const card_metadata_y = saturatedAdd(saturatedAdd(card_summary_y, typography.lineHeightPx(.body, scale)), spacing.px(.xs, scale));
+        // **메타는 제목 줄 오른쪽에 앉는다**(2줄 카드 — 2026-08-25 사용자 결정). 자기 줄을 쓰던 동안
+        // 기본 폭(640pt)에서 제목 줄이 60%, 메타 줄이 44% 를 비운 채 세로로 쌓여 있었다(실측). 한 줄로
+        // 합치면 그 여백이 정보가 되고 카드가 102 → 78pt 로 낮아져 같은 높이에 33% 더 들어온다.
+        const card_metadata_y = card_title_y;
         const detail_inset = spacing.px(.md, scale);
         const detail_heading_y = detail_inset;
         const detail_record_y = saturatedAdd(saturatedAdd(detail_heading_y, typography.lineHeightPx(.body, scale)), spacing.px(.xxs, scale));
@@ -296,7 +306,7 @@ pub const DockMetrics = struct {
             // 낮춘 뒤에도 112pt가 계산값(98px @1x)을 이겨 카드 안에 14px이 빈 여백으로 남았다 — 글자만 작아지고
             // 밀도는 그대로여서 어색했다. 계산값이 이기도록 낮춰 타이포 변화가 밀도에 그대로 반영되게 한다.
             // 그룹 행의 48pt 하한은 성격이 다르다(포인터 타깃 최소 크기)라서 건드리지 않는다.
-            .card_h = geometryPx(@max(spacing.pointsPx(96, scale), saturatedAdd(saturatedAdd(card_metadata_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)))),
+            .card_h = geometryPx(saturatedAdd(saturatedAdd(card_summary_y, typography.lineHeightPx(.body, scale)), card_inset)),
             .expanded_detail_h = geometryPx(@max(spacing.pointsPx(256, scale), saturatedAdd(saturatedSub(saturatedAdd(detail_turn_y, saturatedMul(detail_turn_step, 3)), spacing.px(.sm, scale)), detail_inset))),
             .expanded_actions_h = button.minimum_height_px,
             .control_gap = geometryPx(spacing.px(.sm, scale)),
@@ -428,9 +438,10 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expect(m.scope_h > typography.lineHeightPx(.control, 1000));
     try std.testing.expectEqual(@as(u32, 48), m.search_h);
     try std.testing.expectEqual(@as(u32, 48), m.group_h);
-    // 카드 높이는 이제 하한이 아니라 role line box 합이 정한다(96pt 하한 < 98px 계산값). 그래서 이 값은
-    // typography를 바꾸면 함께 움직이는 것이 정상이고, 그때 이 단언도 같이 갱신한다.
-    try std.testing.expectEqual(@as(u32, 98), m.card_h);
+    // 카드 높이는 role line box 합이 정한다. **2줄 카드**(2026-08-25)로 바뀌며 메타 줄이 제목 줄로
+    // 올라가 그만큼 낮아졌다: 여백 16 + 제목 20 + 간격 8 + 요약 18 + 여백 16 = 78. typography 를 바꾸면
+    // 함께 움직이는 것이 정상이고, 그때 이 단언도 같이 갱신한다.
+    try std.testing.expectEqual(@as(u32, 78), m.card_h);
     try std.testing.expectEqual(@as(u32, 256), m.expanded_detail_h);
     try std.testing.expectEqual(@as(u32, 48), m.expanded_actions_h);
     try std.testing.expectEqual(@as(u32, 12), m.control_gap);
@@ -458,7 +469,8 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expect(m.headerFitsSortToggle(280));
     try std.testing.expect(!m.headerFitsSortToggle(279));
     try std.testing.expect(!m.headerFitsSortToggle(160));
-    try std.testing.expect(m.card_metadata_y < m.card_h);
+    // 메타는 제목 줄에 앉는다(2줄 카드) — 같은 y 다.
+    try std.testing.expectEqual(m.card_title_y, m.card_metadata_y);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
 }
 

@@ -1250,6 +1250,9 @@ pub fn agentSessionDockProps(
     return .{
         .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
         .cell_width_px = self.cell_width_px,
+        // 카드 글자는 role 크기(제목 14pt·메타 12pt)로 그려지는데 셀은 터미널 크기다 — 그 비율을
+        // 넘겨야 제목 줄에 메타를 함께 놓을지 정확히 잴 수 있다(같은 값의 소유자는 SCM 배선이다).
+        .advance_milli_per_point = app_session_mod.scm_dock_ops.advanceMilliPerPoint(self),
         .cell_height_px = self.cell_height_px,
         .scale_milli = dock_scale_milli,
         // Archive records are atomically swapped by the worker. Its scan generation is

@@ -1077,7 +1077,7 @@ fn relativeTime(self: *AppSession, arena: std.mem.Allocator, delta_s: i64) []con
 /// chrome 텍스트는 role 이 정한 고정 point size 로 그려지는데 셀 폭은 사용자 `font.size` 에서 온다.
 /// 그 둘이 벌어지면 셀 기반 추정이 열마다 모자라고, 이어 그리는 글자가 앞 글자를 파고든다(실측:
 /// `font.size` 12 상당에서 SCM 파일 행의 이름과 경로 꼬리가 붙었다). 비율을 넘겨 컴포넌트가 환산한다.
-fn advanceMilliPerPoint(self: *const AppSession) u32 {
+pub fn advanceMilliPerPoint(self: *const AppSession) u32 {
     const point_size = self.appearance.font.size;
     if (!(point_size > 0)) return 0;
     // **소수까지 온 advance 를 먼저 쓴다.** 정수 cell 로 비율을 내면 반올림(최대 0.5px)이 그대로 비율에

@@ -901,6 +901,9 @@ fn buildDockFrame(
 
     const dock_props = session_dock.types.Props{
         .viewport_px = scenario.viewport_px,
+        // 제품과 같은 입력(`app_session/agent_dock.zig`) — 없으면 컴포넌트가 셀 기반 상한으로 물러나
+        // 메타를 과대평가하고, 캡처가 제품이 쓰는 산술을 예고하지 못한다.
+        .advance_milli_per_point = scenario.advance_milli_per_point,
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 1,

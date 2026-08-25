@@ -138,12 +138,22 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // 남고 제목·요약·메타가 전부 사라졌다(Lab 캡처 실측 2026-08-25). `textAtY` 가 예산이
                 // 0 이하면 조용히 돌아가기 때문이고, disclosure 예약(48pt)이 그 폭을 먼저 먹었다.
                 const card_ladder = writer.cardLadder(card_rect, dock_metrics);
+                // **메타는 제목 줄 오른쪽에 앉는다**(2줄 카드). 폭을 먼저 재서 제목 예약에 더한다 —
+                // 그래야 긴 제목이 메타를 파고들지 않는다(자리와 그림이 같은 수에서 나온다).
+                // **제목이 먼저다.** 메타는 제목이 자기 폭을 가져간 **뒤 남는 만큼만** 쓴다 — 반대로
+                // 하면 메타가 짧은 제목까지 자른다(판정자 `saw_untruncated_title` 가 그 상태를 잡았다).
+                // 남는 자리가 provider 라벨도 못 담으면 메타를 통째로 내려놓는다.
+                const meta_fit = if (card_ladder.show_metadata)
+                    writer.cardMetaFit(card_rect, dock_metrics, card, card_ladder)
+                else
+                    Writer.MetaFit{ .width = 0, .level = .full };
+                const title_reserve = card_ladder.trailing_reserve_px + meta_fit.width;
                 // Card y offsets are DockMetrics values, not 1/3/5 terminal rows. This keeps
                 // its three-line density and the disclosure hit rect stable across terminal
                 // font zoom while the worker still owns actual glyph shaping and ellipsis.
-                try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, card_ladder.trailing_reserve_px);
+                try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, title_reserve);
                 if (card_ladder.show_summary) try writer.textAtY(card_rect, card_ladder.inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false, card_ladder.trailing_reserve_px);
-                if (card_ladder.show_metadata) try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider, card.metadata, card_ladder.inset_x);
+                if (meta_fit.width > 0) try writer.cardMetadataOnTitleRow(card_rect, dock_metrics, card.provider, card.metadata, meta_fit);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
@@ -495,34 +505,124 @@ const Writer = struct {
     /// 메타 줄은 `provider` 토큰과 그 뒤의 나머지 메타로 **두 번** 그린다. provider 만 색이 다르기
     /// 때문이다 — provider 는 `Provider.colorRole()`(토큰 층이 색을 소유), 나머지는 `muted_fg` 다.
     /// provider 를 값으로 받는 이유도 그것이다: label 과 색 역할을 같은 곳에서 꺼내야 둘이 어긋나지 않는다.
-    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: types.CardMetadata, inset_x: u32) ViewError!void {
-        const provider = provider_id.label();
-        try self.textAtY(rect, inset_x, metrics.card_metadata_y, provider, provider_id.colorRole(), .metadata, false, metrics.cardDisclosureReserve());
+    /// 제목이 자기 폭을 가져간 뒤 **메타에 남는 폭**. 0 이면 이 카드에서는 메타를 그리지 않는다.
+    ///
+    /// 순서가 핵심이다 — 메타를 먼저 예약하면 짧은 제목까지 잘린다. 제목은 카드의 신원이고 메타는
+    /// 그것을 설명하는 값이라, 좁아질 때 물러나는 쪽은 메타다(도크 전체의 사다리와 같은 규율).
+    /// 제목에게 주려는 최소 폭 — 목표이지 보장이 아니다(도크 세 뷰가 같은 값·같은 성격).
+    const card_title_floor_px: f32 = 80;
+
+    /// 제목이 자기 폭을 가져간 뒤 메타가 **몇 단계까지** 들어가는가.
+    ///
+    /// 순서가 핵심이다 — 메타를 먼저 예약하면 짧은 제목까지 잘린다(판정자 `saw_untruncated_title` 가 그
+    /// 상태를 잡았다). 제목은 카드의 신원이고 메타는 그것을 설명하는 값이라, 물러나는 쪽은 메타다.
+    /// 다만 **provider + 개수**까지는 지킨다 — 긴 제목이 "무엇이 얼마나 돌았는가"를 통째로 밀어내면
+    /// 카드가 제목만 남은 줄이 된다. 그 최소치를 위해서는 제목이 바닥(80pt)까지 줄어드는 것을 허용한다.
+    fn cardMetaFit(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics, card: types.Card, ladder: CardLadder) MetaFit {
+        const none = MetaFit{ .width = 0, .level = .full };
+        if (self.props.cell_width_px == 0) return none;
+        const title_w: f32 = @floatFromInt(self.colsPx(plannedCols(card.title, 512), .card_heading));
+        const gap: f32 = @floatFromInt(spacing.px(.sm, effectiveScale(self.props.scale_milli)));
+        const left: f32 = @floatFromInt(ladder.inset_x);
+        const reserve_edge = rect.rect.width - left - gap - @as(f32, @floatFromInt(m.cardDisclosureReserve()));
+        if (reserve_edge <= 0) return none;
+        const after_title = reserve_edge - title_w;
+
+        // **들어가는 단계 중 가장 많은 것**을 고른다 — 자르지 않고 통째로 내려놓는다.
+        for ([_]MetaLevel{ .full, .no_subagents, .no_model, .minimal }) |level| {
+            const w = self.cardMetaWidth(card.provider, card.metadata, level);
+            if (w == 0) continue;
+            const wf: f32 = @floatFromInt(w);
+            if (after_title >= wf) return .{ .width = w, .level = level };
+            // 마지막 단계는 제목을 바닥까지 줄여서라도 지킨다.
+            if (level == .minimal and reserve_edge - wf >= card_title_floor_px) return .{ .width = w, .level = level };
+        }
+        return none;
+    }
+
+    /// 열 수 → 픽셀. 비율을 받았으면 **role 크기로** 환산하고(정확), 아니면 셀 기반 상한으로 물러난다.
+    ///
+    /// 셀로 재면 12pt 메타를 25% 넘게 과대평가해, 제목 줄에 함께 놓을 수 있는 것도 못 놓는다.
+    fn colsPx(self: *Writer, cols: u32, role: typography.ChromeTextRole) u32 {
+        if (self.props.advance_milli_per_point == 0) return cols * (self.props.cell_width_px + 1);
+        const total = @as(u64, cols) * @as(u64, self.props.advance_milli_per_point) * typography.token(role).point_size;
+        return @intCast((total + 999) / 1000);
+    }
+
+    /// 메타가 담는 값의 **단계**. 좁아지면 뒤에서부터 **통째로** 내려놓는다 — 글자를 자르면
+    /// `claude-o` 처럼 잘린 이름이 남아 정보가 아니라 잡음이 된다(실측 캡처 2026-08-25).
+    const MetaLevel = enum(u8) { full, no_subagents, no_model, minimal };
+
+    const MetaFit = struct { width: u32, level: MetaLevel };
+
+    /// 이 단계가 담는 값들(그리는 순서 그대로).
+    fn metaSegmentsFor(metadata: types.CardMetadata, level: MetaLevel) [4][]const u8 {
+        return switch (level) {
+            .full => .{ metadata.messages, metadata.age, metadata.model, metadata.subagents },
+            .no_subagents => .{ metadata.messages, metadata.age, metadata.model, "" },
+            .no_model => .{ metadata.messages, metadata.age, "", "" },
+            .minimal => .{ metadata.messages, "", "", "" },
+        };
+    }
+
+    /// 메타 줄이 **제목 줄에서 차지할 폭**(오른쪽 정렬용). 0 이면 그릴 것이 없다.
+    ///
+    /// 열당 1px 을 더해 **보수적으로** 잡는다 — 셀 폭은 실제 advance 의 내림이라 모자란 쪽으로 틀리면
+    /// 메타가 제목 꼬리를 파고든다(그 분석은 `scm_dock/view.zig` 의 `measureBudget` 이 소유한다).
+    fn cardMetaWidth(self: *Writer, provider_id: types.Provider, metadata: types.CardMetadata, level: MetaLevel) u32 {
+        const cw = self.props.cell_width_px;
+        if (cw == 0) return 0;
+        var cols: u32 = 0;
+        var segments: u32 = 0;
+        for (metaSegmentsFor(metadata, level)) |segment| {
+            if (segment.len == 0) continue;
+            if (segments > 0) cols += plannedCols(" · ", 8);
+            cols += plannedCols(segment, 64);
+            segments += 1;
+        }
+        if (segments == 0) return 0;
+        // **그리는 것과 같은 산술이어야 한다.** provider 뒤 간격은 공백 한 글자가 아니라 `xs`(8pt)
+        // 여백이다 — 공백으로 어림하면 한 글자쯤 모자라 마지막 값이 잘린다(실측: `3m ago` → `3m a`).
+        const provider_px = self.colsPx(plannedCols(provider_id.label(), 24), .metadata);
+        const gap_px = spacing.px(.xs, effectiveScale(self.props.scale_milli));
+        return provider_px + gap_px + self.colsPx(cols, .metadata);
+    }
+
+    /// 메타를 **제목 줄 오른쪽 끝에** 그린다(2줄 카드 — 2026-08-25 사용자 결정).
+    ///
+    /// 예전에는 자기 줄을 따로 썼는데, 기본 폭(640pt)에서 제목 줄이 **60%**, 메타 줄이 **44%** 를 비운 채
+    /// 세로로 쌓여 있었다(실측). 둘을 한 줄에 놓으면 그 여백이 정보로 바뀌고 카드가 102 → 78pt 로 낮아져
+    /// 같은 높이에 세션이 33% 더 들어온다.
+    fn cardMetadataOnTitleRow(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider_id: types.Provider, metadata: types.CardMetadata, fit: MetaFit) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
-        if (cw == 0 or ch == 0) return;
+        if (cw == 0 or ch == 0 or fit.width == 0) return;
+        // 오른쪽 정렬 — chevron 자리를 비켜선다.
+        const group_x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(metrics.cardDisclosureReserve() + fit.width));
+        const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_title_y));
+        const provider = provider_id.label();
         const provider_cols = plannedCols(provider, 24);
-        // **셀 폭은 실제 advance 의 내림이라 열당 1px 을 더한다.** measured 텍스트는 셀에 스냅되지 않으므로
-        // `cols * cell` 은 열마다 조금씩 모자라고(기본 JetBrains Mono 14pt: advance 8.4, 셀 8), 그 뒤에
-        // 놓는 메타 글자가 provider 이름을 파고든다. SCM 파일 행에서는 같은 산술이 이름과 경로 꼬리를
-        // 실제로 붙여 버렸다(`scm_dock/view.zig` 의 `measureBudget` 주석이 그 실측과 상한 증명을 소유).
-        // 여기서는 아래 `xs` 여백 덕에 아직 겹치지 않았지만, 여백이 부족분을 가리고 있었을 뿐 산술은
-        // 같은 것이라 같은 상한을 쓴다 — provider 가 길어지거나 자간이 넓은 face 가 와도 견딘다.
-        const provider_width = @as(u32, provider_cols) * (cw + 1);
-        // **제목과 같은 여백에서 시작한다** — 사다리가 좁은 구간에서 여백을 줄이는데(16 → 8pt) 여기만
-        // 원래 값을 쓰면 메타 줄만 오른쪽으로 밀려 제목과 왼쪽 끝이 어긋난다(적대적 검증에서 잡았다:
-        // 카드 폭 104~119pt 구간이 정확히 그 조합이다).
-        const metadata_inset = inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
-        const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));
-        const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_metadata_y));
-        // metadata는 카드에서 가장 오른쪽까지 뻗는 줄이라 chevron과 부딪히기 가장 쉽다. 제목·요약과
-        // 정확히 같은 예약을 쓴다.
-        const available_px = rect.rect.width - @as(f32, @floatFromInt(metadata_inset + cw + metrics.cardDisclosureReserve()));
+        try self.emit(group_x, y, provider, provider_cols, .head, provider_id.colorRole(), .metadata, false, false);
+        const provider_width = self.colsPx(provider_cols, .metadata);
+        const x = group_x + @as(f32, @floatFromInt(provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli))));
+
+        // 메타는 오른쪽 정렬이라 자기 폭만 쓴다 — 남은 폭은 제목이 이미 가져갔다.
+        const available_px = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(metrics.cardDisclosureReserve())) - x;
         if (available_px <= 0) return;
-        const max_cols: u16 = @intFromFloat(@min(
-            @floor(available_px / @as(f32, @floatFromInt(cw))),
-            @as(f32, @floatFromInt(std.math.maxInt(u16))),
-        ));
+        // **예약한 만큼을 그대로 쓴다.** 예산을 `available_px / cell` 로 다시 만들면, 예약은 role 폭
+        // (12pt ≈ 7.4px)인데 나누는 쪽은 셀 폭(8px)이라 열 수가 모자라 마지막 값이 한 글자 잘린다
+        // (실측: `22h ago` → `22h ag`). 이 단계가 들어간다고 이미 판정했으므로 자를 이유가 없다.
+        var wanted_cols: u32 = 0;
+        {
+            var counted: u32 = 0;
+            for (metaSegmentsFor(metadata, fit.level)) |segment| {
+                if (segment.len == 0) continue;
+                if (counted > 0) wanted_cols += plannedCols(" · ", 8);
+                wanted_cols += plannedCols(segment, 64);
+                counted += 1;
+            }
+        }
+        const max_cols: u16 = @intCast(@min(wanted_cols, @as(u32, std.math.maxInt(u16))));
 
         // 세 값의 **위계**를 색으로 준다(§3): 개수는 본문색으로 먼저 읽히고, 시각은 muted 로 물러나며,
         // 모델은 카드 좌상단 provider 라벨과 **같은 색**이라 "무엇이 돌렸는가"가 한 색으로 묶인다.
@@ -540,8 +640,10 @@ const Writer = struct {
             .{ .text = metadata.model, .role = provider_id.colorRole() },
             .{ .text = metadata.subagents, .role = .muted_fg },
         };
-        for (ordered) |segment| {
-            if (segment.text.len == 0) continue;
+        // **단계가 정한 값만 그린다** — 폭을 잰 것과 그리는 것이 같은 목록이어야 한다.
+        const shown = metaSegmentsFor(metadata, fit.level);
+        for (ordered, 0..) |segment, idx| {
+            if (segment.text.len == 0 or shown[idx].len == 0) continue;
             if (segment_count > 0) {
                 segment_runs[segment_count] = .{ .text = " · ", .role = .muted_fg };
                 segment_count += 1;

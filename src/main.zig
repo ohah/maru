@@ -1912,6 +1912,7 @@ fn rebuildDockAll(
     view: maru.session.dock_panel.View,
     tk: *const maru.chrome.Tokens,
     view_bar_frame: *?maru.renderer.RenderFrame,
+    view_bar_glyph_top: *?f32,
     /// 소스 컨트롤 뷰가 쓰는 것들. `status` 가 비어 있으면 그 뷰는 아무것도 안 그린다.
     scm: ScmDockInputs,
 ) !void {
@@ -1926,7 +1927,7 @@ fn rebuildDockAll(
         // **뷰 바는 내용 뒤에 굽는다.** 먼저 구우면 그 뒤 내용이 아틀라스를 키울 때 UV 가 낡아
         // **다른 글리프가 나온다**(실측: 폴더·git·code 자리에 git·폴더·git 이 떴다). §2m.32 가
         // "업로드 목록은 프레임과 함께 사라진다" 를 적었다면, 이것은 그 짝인 **UV 낡음**이다.
-        appendViewBarCells(allocator, out, geom, cell_w, cell_h, view, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, uploaded, view_bar_frame) catch {};
+        appendViewBarCells(allocator, out, geom, cell_w, cell_h, view, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, uploaded, view_bar_frame, view_bar_glyph_top) catch {};
         return;
     }
     if (frame_slot.*) |*old| {
@@ -2003,7 +2004,7 @@ fn rebuildDockAll(
         out.appendAssumeCapacity(cell);
     }
     // 위 주석과 같은 이유로 **내용 뒤에** 굽는다.
-    appendViewBarCells(allocator, out, geom, cell_w, cell_h, view, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, uploaded, view_bar_frame) catch {};
+    appendViewBarCells(allocator, out, geom, cell_w, cell_h, view, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, uploaded, view_bar_frame, view_bar_glyph_top) catch {};
 }
 
 /// 상단 띠 전체 — 배경 + 캡션 버튼.
@@ -2882,6 +2883,9 @@ fn appendViewBarCells(
     atlas_h: *u32,
     uploaded: *usize,
     frame_slot: *?maru.renderer.RenderFrame,
+    /// 바 글리프의 **가장 위 픽셀**. 세로 중앙인지의 유일한 관측점 — 셀 행으로만 보면 짝수 줄 바에서
+    /// 아래로 쏠린 것을 못 본다(사용자 지적 2026-08-25).
+    glyph_top_out: *?f32,
 ) !void {
     const bar = geom.view_bar;
     if (bar.w == 0 or bar.h == 0) return;
@@ -2937,8 +2941,21 @@ fn appendViewBarCells(
     defer allocator.free(native);
     // 바는 도크 안이므로 그 원점으로 옮긴다.
     maru.renderer.metal_frame.setCellsPaneOrigin(native, bar.x, bar.y);
+    // **바 안에서 세로 중앙에 놓는다.** 중립은 셀 행으로 자리를 말하므로 `rows / 2` 가 최선인데,
+    // 바가 **짝수 줄**이면(여기는 2 줄) 그것이 **아래 줄**이 된다 — 아이콘이 바닥에 붙어 위 여백만
+    // 커 보인다(사용자 지적 2026-08-25). 반 줄은 격자로 못 적으므로 픽셀에서 잡는다. 사이드바
+    // 헤더가 1.7× 아이콘에 쓰는 그 방법과 같다.
+    const bar_mid_y: u32 = bar.y + (bar.h -| cell_h) / 2;
     try out.ensureUnusedCapacity(allocator, native.len);
-    for (native) |n| out.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w.*, atlas_h.*));
+    glyph_top_out.* = null;
+    for (native) |n| {
+        var c = n;
+        c.row = 0;
+        c.origin_y = bar_mid_y;
+        const cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
+        if (glyph_top_out.* == null or cell.rect[1] < glyph_top_out.*.?) glyph_top_out.* = cell.rect[1];
+        out.appendAssumeCapacity(cell);
+    }
 }
 
 /// chrome 역할 → 터미널 색(투영 함수들이 받는 타입).
@@ -3473,9 +3490,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     defer dock_cells.deinit(allocator);
     var dock_tree_frame: ?maru.renderer.RenderFrame = null;
     var view_bar_frame: ?maru.renderer.RenderFrame = null;
+    var view_bar_glyph_top: ?f32 = null;
     defer if (view_bar_frame) |*f| f.deinit(allocator);
     defer if (dock_tree_frame) |*f| f.deinit(allocator);
-    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
 
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer cells.deinit(allocator);
@@ -3932,7 +3950,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                 }
                 // **여기 실패는 세어서 보고한다.** 삼키면 도크 배경이 옛 자리에 남는다.
-                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                     dock_rebuild_failures += 1;
                 };
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
@@ -4076,7 +4094,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             // **터미널 격자도 따라간다** — 창 크기가 바뀐 것과 같은 일이다.
                             if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                 resizeAllSessions(&runtime, sessions.items, size, io);
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                 dock_rebuild_failures += 1;
                             };
                             divider_moves += 1;
@@ -4219,7 +4237,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (clamped != dock_scroll_px) {
                             dock_scroll_px = clamped;
                             dock_scrolls += 1;
-                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
+                            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {};
                         }
                     }
                     continue;
@@ -4246,7 +4264,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
-                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                         dock_rebuild_failures += 1;
                                     };
                                 };
@@ -4277,7 +4295,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 }
                             }
                             if (changed) {
-                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                                     dock_rebuild_failures += 1;
                                 };
                                 scm_dock_redraws += 1;
@@ -4647,7 +4665,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             atlas_resizes += 1;
             // **도크 프레임의 UV 가 옛 아틀라스 기준이다** — 다시 안 지으면 도크 글자가 엉뚱한
             // 글리프로 바뀐다(중립 쪽은 터미널 프레임만 무효화·재배치한다).
-            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }) catch {
                 dock_rebuild_failures += 1;
             };
         }
@@ -4998,6 +5016,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             geom.workspace.h,
             cell_h *| 3,
         });
+    }
+    // ── 뷰 바 아이콘 세로 정렬 (사용자 지적 2026-08-25) ────────────────────────────────────
+    //
+    // **셀 행으로만 보면 못 잡는다.** 중립은 자리를 행으로 말하고 `rows / 2` 가 최선인데, 바가
+    // **짝수 줄**이면 그것이 **아래 줄**이라 아이콘이 바닥에 붙는다. 반 줄은 격자로 못 적으므로
+    // 픽셀에서 잰다 — 글리프 위 여백과 아래 여백이 같아야 한다.
+    if (view_bar_glyph_top) |top| {
+        const want: f32 = @as(f32, @floatFromInt(geom.view_bar.y)) +
+            (@as(f32, @floatFromInt(geom.view_bar.h)) - @as(f32, @floatFromInt(cell_h))) / 2;
+        try stdout.print("view_bar_h={d} glyph_top={d:.0} want_top={d:.0} view_bar_centered={}\n", .{
+            geom.view_bar.h,
+            top,
+            want,
+            @abs(top - want) <= 1,
+        });
+    } else {
+        try stdout.print("view_bar=unjudgeable reason=no_glyphs h={d}\n", .{geom.view_bar.h});
     }
     try stdout.print("dock_scan_ok={} dock_rows={d} dock_region_uploads={d} dock_tree_frame={} dock_cells_outside={d} dock_rows_drawn={d}\n", .{ dock_scan_ok, dock_rows.items.len, dock_region_uploads, dock_tree_frame != null, dock_cells_outside, dock_rows_drawn });
     if (dock_scroll_judgeable) {

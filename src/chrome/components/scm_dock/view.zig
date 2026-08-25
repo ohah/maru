@@ -313,7 +313,16 @@ pub fn view(
             const rect = frame.tree.entries[index];
             try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, m.icon_extent, .muted_fg);
             const branch_x: f32 = @floatFromInt(m.iconColumnX()); // 아이콘 열과 같은 자리(단일 출처)
-            try writer.line(rect, branch_x, props.branch, .surface_fg, .control, true);
+            // **오른쪽 묶음을 먼저 그리고, 이름은 그 앞에서 끊는다.**
+            //
+            // 그 전에는 이름을 `line` 으로 rect **끝까지** 썼는데, 그 rect 는 `↑↓`·fetch 칩·`∨` 를 전부
+            // 품고 있어서 **긴 이름이 그 위로 올라탔다**(제품 캡처 2026-08-25: `feat/w8-sidebar-scroll`
+            // 위에 `↑` 가 겹쳐 둘 다 못 읽었다). 파일 행이 같은 실패를 먼저 겪었고 거기서 세운 규칙이
+            // 이것이다 — **자기 자리만큼만 쓰고 자른다.**
+            //
+            // **순서를 뒤집는 이유**: `↑↓` 는 오른쪽 정렬이라 폭을 재 봐야 왼쪽 끝을 안다. 이름을 먼저
+            // 그리면 그 자리를 알 수가 없다. 그리는 순서는 겹치지 않는 한 화면에 영향이 없다.
+            var branch_end: f32 = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
             // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
             // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
             if (props.unpushed) {
@@ -321,7 +330,7 @@ pub fn view(
                 const dot_x = branch_x + name_w + @as(f32, @floatFromInt(m.gap));
                 const dot_w = writer.measureRun(unpushed_dot, .supporting);
                 // 오른쪽 묶음(↑↓·칩)을 침범하지 않을 때만 그린다 — 겹치면 둘 다 못 읽는다.
-                if (dot_x + dot_w < rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x))) {
+                if (dot_x + dot_w < branch_end) {
                     try writer.line(rect, dot_x, unpushed_dot, .accent_bar, .supporting, false);
                 }
             }
@@ -342,6 +351,7 @@ pub fn view(
                     m.icon_extent,
                     if (props.remote_menu_enabled) .accent_bar else .muted_fg,
                 );
+                branch_end = @min(branch_end, menu_rect.rect.x);
             }
             if (frame.tree.find(build.NodeIds.fetch)) |fetch_index| {
                 const chip = frame.tree.entries[fetch_index];
@@ -362,6 +372,7 @@ pub fn view(
                 try writer.icon(chip, @max(glyph_x, 0), glyph, m.icon_extent, role);
                 // ahead/behind는 그 **묶음 전체**(칩 + `∨`)를 비켜 앉는다. 칩 폭만 빼면 `∨` 위에 겹친다.
                 const group_left = chip.rect.x;
+                branch_end = @min(branch_end, group_left);
                 const row_right = rect.rect.x + rect.rect.width;
                 fetch_right = @intFromFloat(@max(row_right - group_left, 0));
                 fetch_right += m.gap;
@@ -382,14 +393,19 @@ pub fn view(
                     .supporting,
                     fetch_right,
                 );
-                _ = try writer.trailingWidth(
+                const ahead_right = fetch_right + behind_w + m.gap;
+                const ahead_w = try writer.trailingWidth(
                     rect,
                     ahead_text,
                     if (props.ahead > 0) .git_added_fg else .muted_fg,
                     .supporting,
-                    fetch_right + behind_w + m.gap,
+                    ahead_right,
                 );
+                // **`↑↓` 도 오른쪽 묶음이다.** 이것을 빼먹어 이름 위에 `↑` 가 겹쳤다(제품 캡처).
+                branch_end = @min(branch_end, rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(ahead_right)) - @as(f32, @floatFromInt(ahead_w)));
             }
+            // ── 이름은 **맨 나중에**, 묶음이 정한 경계 안에서 ──────────────────────────────
+            try writer.lineWithin(rect, branch_x, branch_end - @as(f32, @floatFromInt(m.gap)), props.branch, .surface_fg, .control, true);
         }
     }
 
@@ -1785,6 +1801,28 @@ fn testTokens() tokens.Tokens {
         .terminal_background = .{ .r = 13, .g = 14, .b = 15 },
         .accent = .{ .r = 221, .g = 161, .b = 94 },
     });
+}
+
+/// `renderFixture` 와 같되 **브랜치 이름과 도크 폭**을 지정한다 — 긴 이름이 오른쪽 묶음을 침범하는지
+/// 보려면 그 둘을 흔들어야 한다.
+fn renderFixtureBranch(storage: *TestStorage, items: []const types.Item, branch: []const u8, width: f32) !draw.ChromeDraw {
+    const props: types.Props = .{
+        .viewport_px = .{ .x = 0, .y = 0, .width = width, .height = 400 },
+        .items = items,
+        .branch = branch,
+        .has_ab = true,
+        .ahead = 2,
+        .summary = .{ .added = 12, .removed = 3 },
+    };
+    const frame = try build.build(props, .{
+        .nodes = &storage.nodes,
+        .entries = &storage.entries,
+        .layout_items = &storage.layout_items,
+        .flex_scratch = &storage.flex_scratch,
+        .child_rects = &storage.child_rects,
+        .actions = &storage.actions,
+    });
+    return viewBudgeted(storage, props, frame, .{});
 }
 
 fn renderFixture(storage: *TestStorage, state: interaction.InteractionState, items: []const types.Item) !draw.ChromeDraw {
@@ -3217,4 +3255,57 @@ test "이름이 길면 이름이 먼저 잘린다(어느 저장소인지가 어�
     const name = findExactText(draws, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") orelse return error.MissingName;
     // 이름 예산은 브랜치 왼쪽에서 끝난다.
     try testing.expect(name.origin.x + @as(i32, @intCast(name.max_width_px.?)) <= branch.origin.x);
+}
+
+test "브랜치 줄: 긴 이름이 오른쪽 묶음(∨·fetch)을 침범하지 않는다 (사용자 지적 2026-08-25)" {
+    // 그전에는 이름을 rect **끝까지** 썼는데 그 rect 가 `∨`·fetch 칩까지 품고 있어서, 긴 이름이
+    // 그 위로 올라타 둘 다 못 읽었다(제품 캡처: `feat/w8-sidebar-scroll` 이 `∨` 와 붙었다).
+    // 파일 행이 같은 실패를 먼저 겪었고 거기서 세운 규칙이 이것이다 — **자기 자리만큼만 쓴다.**
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .repo = .{ .index = 0, .name = "maru", .branch = "main", .primary = true, .count = 1 } },
+    };
+    const long = "feat/w8-sidebar-scroll-and-then-some-more";
+    const draws = try renderFixtureBranch(&storage, &items, long, 220);
+
+    // **브랜치 줄로 한정한다.** `∨` 글리프는 저장소 머리 줄의 접힘 화살표와 **같은 자산**이라,
+    // 그냥 찾으면 왼쪽 끝의 그 화살표를 집는다(실측: x=8). 이름이 그려진 **같은 y** 의 것만 본다.
+    var name_right: i32 = 0;
+    var name_y: i32 = -1;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (!std.mem.startsWith(u8, run.text, "feat/")) continue;
+            const w: i32 = if (text.max_width_px) |mw| @intCast(mw) else 0;
+            name_right = @max(name_right, text.origin.x + w);
+            name_y = text.origin.y;
+        },
+        else => {},
+    };
+    var menu_left: i32 = std.math.maxInt(i32);
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (!std.mem.eql(u8, run.text, chevron_down_icon)) continue;
+            if (@abs(text.origin.y - name_y) > 8) continue; // 같은 줄만
+            menu_left = @min(menu_left, text.origin.x);
+        },
+        else => {},
+    };
+    // **`↑`/`↓` 도 오른쪽 묶음이다.** 처음 고칠 때 `∨`·칩만 보고 이것을 빼먹었고, 제품
+    // 화면에서는 `↑` 가 이름 **위에** 겹쳐 둘 다 못 읽었다(제품 캡처 2026-08-25).
+    var arrow_left: i32 = std.math.maxInt(i32);
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (!std.mem.startsWith(u8, run.text, "↑") and !std.mem.startsWith(u8, run.text, "↓")) continue;
+            if (@abs(text.origin.y - name_y) > 8) continue;
+            arrow_left = @min(arrow_left, text.origin.x);
+        },
+        else => {},
+    };
+
+    try testing.expect(name_right > 0); // 이름이 그려졌다
+    try testing.expect(menu_left != std.math.maxInt(i32)); // 그 줄에 `∨` 가 있다
+    try testing.expect(arrow_left != std.math.maxInt(i32)); // 그 줄에 `↑`/`↓` 가 있다
+    // **이름이 오른쪽 묶음 전부의 왼쪽에서 끝난다.**
+    try testing.expect(name_right <= menu_left);
+    try testing.expect(name_right <= arrow_left);
 }

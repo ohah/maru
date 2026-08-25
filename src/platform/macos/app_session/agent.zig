@@ -173,7 +173,18 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     }
     if (!std.mem.eql(u8, ev.tool_name, "apply_patch")) return;
     var it = maru.session.agent_hook_event.patchPaths(ev);
-    while (it.next()) |p| noteBeforePath(self, identity, root, p, .edit);
+    while (it.next()) |p| {
+        // ⚠️ **패치는 경로를 «쓰인 철자 그대로» 적는다 — 상대·절대가 섞인다**(계약 §2.3.1 이 Codex 소스를
+        // 읽고 못 박았다). 상대경로를 그대로 넘기면 `underRoot` 이 «루트 밖» 으로 판정해 **조용히 캡처를
+        // 잃는다.** 이 기계의 실측(42 이벤트·74 경로)은 전부 절대였지만, 계약이 섞인다고 적었으므로
+        // 관측이 아니라 **계약**을 따른다.
+        var joined: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = if (maru.path_shape.isAbsolute(p))
+            p
+        else
+            (std.fmt.bufPrint(&joined, "{s}/{s}", .{ root, p }) catch continue);
+        noteBeforePath(self, identity, root, abs, .edit);
+    }
 }
 
 /// 그 도구가 **바꾸려고** 여는 것인가.
@@ -1965,6 +1976,15 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
     // 다음 기회로 미루면 그 파일을 지울 수 없다.
     var cursor: event.Cursor = .{};
     var events: [event.max_events_per_tick]event.Event = undefined;
+    // **회전본은 backlog 와 같은 성질이다** — 이미 지나간 이벤트다. 그 `PreToolUse` 의 도구는 **이미
+    // 끝났으므로** 지금 그 파일을 읽으면 «끝난 턴의 before» 자리에 **현재 내용**(= 그 편집의 결과)이
+    // 들어간다. 그러면 그 턴의 diff 가 자기 편집을 통째로 숨긴다 — 없는 것보다 나쁘다.
+    //
+    // 알림 억제와 **같은 플래그**를 쓴다(사유가 같기 때문이다). 드레인이 끝나면 되돌린다 — 이 함수는
+    // tick 안에서 동기로 돌므로 그 사이 다른 경로가 이 플래그를 볼 일이 없다.
+    const restore_catchup = term.agent_hook_backlog_catchup;
+    term.agent_hook_backlog_catchup = true;
+    defer term.agent_hook_backlog_catchup = restore_catchup;
     while (true) {
         const batch = cursor.take(text, &events);
         var rotated_turn_end = false;

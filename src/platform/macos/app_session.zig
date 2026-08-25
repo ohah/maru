@@ -20154,6 +20154,105 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
 
 // [AT3 §4.4] **backlog 따라잡기 중에는 캡처하지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 도구가
 // 이미 오래전에 끝났고, 지금 읽으면 **현재 내용을 끝난 턴의 before 로 이름 붙인다** — 없는 것보다 나쁘다.
+// [AT3 §4.4] **회전본의 `PreToolUse` 로는 before 를 뜨지 않는다.** 회전본은 이미 지나간 이벤트라 그 도구는
+// **이미 끝났다** — 지금 그 파일을 읽으면 「끝난 턴의 before」 자리에 **그 편집의 결과**가 들어가, 그 턴의
+// diff 가 자기 편집을 통째로 숨긴다. backlog 와 사유가 같아 같은 게이트를 쓴다.
+test "훅 캡처: 회전본의 도구 이벤트로는 before 를 뜨지 않는다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "old.zig", .data = "이미 고쳐진 내용\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-rot" });
+
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/old.zig", .{root});
+    var log_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+    const log_line = try std.fmt.bufPrint(&log_buf, "claude\t{{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"S-rot\",\"tool_name\":\"Edit\",\"tool_input\":{{\"file_path\":\"{s}\"}}}}\n", .{abs});
+    try tmp.dir.writeFile(io, .{ .sub_path = "rotated.ndjson", .data = log_line });
+    var rot_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rotated = try std.fmt.bufPrint(&rot_buf, "{s}/rotated.ndjson", .{root});
+
+    agent_ops.drainRotatedAgentHookLogForTest(session, term, rotated);
+    // **사본이 없어야 한다.** 게이트를 지운 구현은 여기서 죽는다.
+    try std.testing.expect(session.turn_captures.openTurn("S-rot") == null);
+
+    // **그리고 그 뒤의 «지금» 이벤트는 다시 잡힌다** — 플래그를 되돌리지 않는 구현이 여기서 죽는다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "old.zig", .data = "지금 내용\n" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-rot",
+        .tool_name = "Edit",
+        .file_path = abs,
+    });
+    const open = session.turn_captures.openTurn("S-rot") orelse return error.CaptureStopped;
+    try std.testing.expectEqualStrings("지금 내용\n", open.entries.items[0].before.text);
+}
+
+// [AT3 §4.4] **Codex 패치의 상대경로도 잡는다.** 계약 §2.3.1 이 Codex 소스를 읽고 「경로는 패치에 쓰인
+// 철자 그대로이고 상대·절대가 섞일 수 있다」를 못 박았다. 상대경로를 그대로 넘기면 `underRoot` 이
+// 「루트 밖」으로 판정해 **조용히 캡처를 잃는다** — Codex 는 `apply_patch` 가 주 편집 경로라 그러면
+// 그 provider 의 `✎` 가 영영 0이 된다.
+test "훅 캡처: Codex 패치의 상대경로를 루트 기준으로 세운다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "rel.zig", .data = "before\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .codex;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-codex" });
+
+    // 패치 본문은 payload 안에서 줄바꿈이 `\n` 두 글자로 이스케이프돼 온다(파서 계약).
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-codex",
+        .tool_name = "apply_patch",
+        .tool_command = "*** Update File: rel.zig\\n@@\\n-before\\n+after\\n",
+    });
+
+    const open = session.turn_captures.openTurn("S-codex") orelse return error.NoOpenTurn;
+    try std.testing.expectEqual(@as(usize, 1), open.entries.items.len);
+    // **내용을 실제로 읽었는지**를 본다 — 상대경로를 그대로 넘기는 구현은 `.unknown = .outside_root` 를
+    // 담고도 항목 수는 1이라 「담겼다」만 보면 통과한다.
+    try std.testing.expectEqualStrings("before\n", open.entries.items[0].before.text);
+    try std.testing.expectEqual(maru.session.turn_capture.Trigger.edit, open.entries.items[0].trigger);
+}
+
 // [AT3 §4.4] **신원이 갈리면 진행 중 사본을 버린다.** 그 턴은 영영 안 끝난다 — 봉인은 새 신원으로 오므로
 // 옛 자리를 아무도 안 닫는다. 진행 중 자리가 8개뿐이라 안 버리면 `/clear` 여덟 번에 **캡처가 조용히 멈춘다.**
 test "훅 캡처: /clear 를 아홉 번 해도 캡처가 멈추지 않는다 (AT3)" {

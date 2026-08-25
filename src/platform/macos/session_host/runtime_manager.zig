@@ -1618,13 +1618,29 @@ pub const RuntimeManager = struct {
         return surface.core.clearNotificationIfGeneration(expected);
     }
 
-    /// 검증된 wire command를 내부 `CoreCommand`로 명시 변환해 host reader queue에 넣는다. focus가 만드는
-    /// `pendingResponse`와 config/viewport mutation을 dispatch thread가 직접 적용하지 않아, 로컬과 동일하게 reader가
-    /// core의 유일한 mutator이자 PTY response writer로 남는다.
+    /// 검증된 wire command를 내부 `CoreCommand`로 명시 변환한다. PTY 응답·parser/config를 건드리는 명령은 host reader
+    /// queue에 넣어 reader가 유일한 mutator/writer로 남는다. 반면 negotiated selection-state 명령은 PTY 응답을 만들지
+    /// 않는 presentation state이고, 뒤따르는 `selected_text(authoritative)`가 적용 완료 fence를 필요로 한다. 이 닫힌 다섯
+    /// 명령만 dispatch 순서대로 core lock 아래 적용해 RPC 응답 자체를 completion fence로 삼는다.
     fn coreCommandOp(ctx: *anyopaque, runtime_id: u128, wire_command: core_command_wire.Command) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const command = try coreCommandFromWire(wire_command);
+        switch (wire_command) {
+            .selection_start,
+            .selection_extend,
+            .selection_extend_or_collapse,
+            .selection_scroll_and_extend,
+            .selection_clear,
+            => {
+                const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+                surface.lockCore(self.io);
+                defer surface.unlockCore(self.io);
+                _ = core_command.apply(&surface.core, command);
+                return;
+            },
+            else => {},
+        }
         return self.backend_impl.backend().enqueueCoreCommand(handle, command, self.io);
     }
 
@@ -1650,8 +1666,9 @@ pub const RuntimeManager = struct {
 
     /// 원격 client가 보낸 뷰포트 선택 span을 host core에 적용해 텍스트를 뽑는다(§6b 원격 선택 복사). **로컬과 같은
     /// `extractSelection`** 을 재사용하므로 soft-wrap 이음·블록·스크롤백 걸친 선택까지 충실하다(선택 의미론 단일 출처). host
-    /// core의 선택은 평소 미사용(client가 렌더용 span 소유)이라 **core lock 아래 transient set-extract-clear**가 안전하다.
-    /// span의 뷰포트 좌표는 host의 현재 view_offset 기준으로 abs 변환된다(selectionStart/Extend가 내부에서). JSON `{text}`(임의
+    /// legacy viewport/all 요청은 core lock 아래 transient set-extract-clear하고, negotiated authoritative 요청은 앞선
+    /// selection-state fence가 남긴 host anchor/head를 변경 없이 추출한다. span의 뷰포트 좌표는 host의 현재 view_offset
+    /// 기준으로 abs 변환된다(selectionStart/Extend가 내부에서). JSON `{text}`(임의
     /// 바이트라 실 encoder로 escape). 추출 실패/빈 선택은 `{text:""}`.
     fn selectedTextOp(ctx: *anyopaque, runtime_id: u128, span: server.SelectSpan, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
@@ -1660,7 +1677,9 @@ pub const RuntimeManager = struct {
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         const extracted = blk: {
-            if (span.all) {
+            if (span.authoritative) {
+                break :blk surface.core.extractSelection(allocator) catch null;
+            } else if (span.all) {
                 surface.core.selectAll();
             } else {
                 surface.core.selectionStart(span.sr, span.sc);
@@ -1764,8 +1783,9 @@ pub const RuntimeManager = struct {
     }
 
     /// 단어/줄/전체 선택(§6b-2): host가 **콘텐츠를 아는 자기 core**로 경계를 계산해 결과 뷰포트 선택
-    /// span을 JSON으로 준다. 빈 client placeholder는 경계를 모르므로 host가 계산(선택 의미론 host 단일 출처). span만 계산해
-    /// 돌려주고 host core 선택은 원복(transient — client가 그 span을 placeholder에 적용해 하이라이트, 복사는 #6b-1 selected_text).
+    /// span을 JSON으로 준다. 빈 client placeholder는 경계를 모르므로 host가 계산(선택 의미론 host 단일 출처). 계산한
+    /// 선택은 host core에도 남겨 `runtime_selection_state_v1`의 후속 확장/권위 복사가 같은 anchor/head를 이어받는다.
+    /// client는 반환 span을 placeholder에 적용해 즉시 하이라이트한다.
     /// word op의 separators_hex는 64-byte strict hex/UTF-8로 닫고 현재 config 값을 그대로 적용한다.
     /// 필드가 없는 구 client는 빈 구분자(공백 경계)로 호환된다. 미지원 op·빈 선택은 `{sel:false}`.
     fn selectOpOp(ctx: *anyopaque, runtime_id: u128, op: []const u8, row: u16, col: u16, separators_hex: []const u8, allocator: std.mem.Allocator) anyerror![]u8 {
@@ -1786,7 +1806,6 @@ pub const RuntimeManager = struct {
             return allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory;
         }
         const maybe = surface.core.selectionViewportSpan();
-        surface.core.selectionClear(); // transient 원복.
         if (maybe) |sp| {
             return std.fmt.allocPrint(allocator, "{{\"sel\":true,\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ sp.start.row, sp.start.col, sp.end.row, sp.end.col, sp.block }) catch return error.OutOfMemory;
         }
@@ -2041,6 +2060,15 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
         .jump_to_prompt => |direction| .{ .jump_to_prompt = direction },
         .clear_screen => .clear_screen,
         .reset_input_modes => .reset_input_modes,
+        .selection_start => |point| .{ .select_start = .{
+            .row = point.row,
+            .col = point.col,
+            .block = point.block,
+        } },
+        .selection_extend => |point| .{ .select_extend = .{ .row = point.row, .col = point.col } },
+        .selection_extend_or_collapse => |point| .{ .select_extend_or_collapse = .{ .row = point.row, .col = point.col } },
+        .selection_scroll_and_extend => |step| .{ .scroll_and_extend = .{ .delta = step.delta, .row = step.row, .col = step.col } },
+        .selection_clear => .select_clear,
     };
 }
 
@@ -3216,6 +3244,51 @@ test "runtime manager: bounded core config commands reach the real host reader c
         if (!applied) _ = usleep(10 * 1000);
     }
     try std.testing.expect(applied);
+}
+
+test "runtime manager: host selection scroll-and-extend is fenced before authoritative copy" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const script = "i=0; while [ $i -lt 30 ]; do printf 'L%02d\\n' $i; i=$((i+1)); done; exec cat";
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 20, .rows = 5 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    var ready = false;
+    var attempts: usize = 0;
+    while (attempts < 300 and !ready) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        ready = surface.core.scrollbackLen() >= 20;
+        surface.unlockCore(std.testing.io);
+        if (!ready) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(ready);
+
+    // 각 RuntimeOps 응답은 이 selection presentation-state가 이미 core에 적용됐다는 fence다.
+    try ops.core_command(ops.ctx, rid, .{ .selection_start = .{ .row = 4, .col = 2, .block = false } });
+    try ops.core_command(ops.ctx, rid, .{ .selection_scroll_and_extend = .{ .row = 0, .col = 0, .delta = 1 } });
+    try ops.core_command(ops.ctx, rid, .{ .selection_scroll_and_extend = .{ .row = 0, .col = 0, .delta = 1 } });
+
+    const body = try ops.selected_text(ops.ctx, rid, .{
+        .sr = 0,
+        .sc = 0,
+        .er = 0,
+        .ec = 0,
+        .block = false,
+        .authoritative = true,
+    }, allocator);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "L") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
 }
 
 test "runtime manager: focus report is written back to the real PTY by the host reader" {

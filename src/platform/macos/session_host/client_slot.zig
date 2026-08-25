@@ -4978,6 +4978,7 @@ pub fn projectGenerationCapabilities(
         .runtime_core_command = node.client.runtime_core_command_v1,
         .runtime_link_at = node.client.runtime_link_at_v1,
         .runtime_selected_text = node.client.runtime_selected_text_v1,
+        .runtime_selection_state = node.client.runtime_selection_state_v1,
     };
 }
 
@@ -5023,6 +5024,7 @@ fn encodeGenerationRequestParams(
             .ec = v.end_col,
             .block = v.block,
             .all = v.all,
+            .authoritative = v.authoritative,
         }),
         .link_at => |v| stringifyGenerationParams(out, .{
             .stream_id = stream_id,
@@ -5109,6 +5111,11 @@ fn encodeGenerationCoreCommand(
         .jump_to_prompt => |direction| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "jump_to_prompt", .direction = direction }),
         .clear_screen => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "clear_screen" }),
         .reset_input_modes => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "reset_input_modes" }),
+        .selection_start => |v| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "selection_start", .row = v.row, .col = v.col, .block = v.block }),
+        .selection_extend => |v| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "selection_extend", .row = v.row, .col = v.col }),
+        .selection_extend_or_collapse => |v| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "selection_extend_or_collapse", .row = v.row, .col = v.col }),
+        .selection_scroll_and_extend => |v| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "selection_scroll_and_extend", .row = v.row, .col = v.col, .delta = v.delta }),
+        .selection_clear => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "selection_clear" }),
     };
 }
 
@@ -5365,6 +5372,11 @@ test "CR3a-2c3c every valid core command fits the bounded canonical encoder" {
         .{ .jump_to_prompt = std.math.maxInt(i8) },
         .clear_screen,
         .reset_input_modes,
+        .{ .selection_start = .{ .row = std.math.maxInt(u16), .col = std.math.maxInt(u16), .block = true } },
+        .{ .selection_extend = .{ .row = std.math.maxInt(u16), .col = std.math.maxInt(u16) } },
+        .{ .selection_extend_or_collapse = .{ .row = std.math.maxInt(u16), .col = std.math.maxInt(u16) } },
+        .{ .selection_scroll_and_extend = .{ .row = std.math.maxInt(u16), .col = std.math.maxInt(u16), .delta = -1 } },
+        .selection_clear,
     };
     try std.testing.expectEqual(
         @as(usize, @typeInfo(contract.CoreCommandRequest).@"union".fields.len),

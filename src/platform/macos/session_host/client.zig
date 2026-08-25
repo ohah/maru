@@ -2032,6 +2032,7 @@ const ExternalAdoptionSnapshot = struct {
     runtime_core_command_v1: bool,
     runtime_clear_screen_v1: bool,
     runtime_selected_text_v1: bool,
+    runtime_selection_state_v1: bool,
     notification_stream_auth_v1: bool,
     runtime_link_at_v1: bool,
     runtime_clipboard_v1: bool,
@@ -3611,6 +3612,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.runtime_core_command_v1);
         writer.writeBool(client.runtime_clear_screen_v1);
         writer.writeBool(client.runtime_selected_text_v1);
+        writer.writeBool(client.runtime_selection_state_v1);
         writer.writeBool(client.notification_stream_auth_v1);
         writer.writeBool(client.runtime_link_at_v1);
         writer.writeBool(client.runtime_clipboard_v1);
@@ -5467,6 +5469,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .runtime_core_command_v1 = self.runtime_core_command_v1,
         .runtime_clear_screen_v1 = self.runtime_clear_screen_v1,
         .runtime_selected_text_v1 = self.runtime_selected_text_v1,
+        .runtime_selection_state_v1 = self.runtime_selection_state_v1,
         .notification_stream_auth_v1 = self.notification_stream_auth_v1,
         .runtime_link_at_v1 = self.runtime_link_at_v1,
         .runtime_clipboard_v1 = self.runtime_clipboard_v1,
@@ -6678,6 +6681,9 @@ pub const Client = struct {
     /// host가 `runtime.selected_text`로 자기 TerminalCore에서 선택 의미론을 해석할 수 있는가. false인 구 host는
     /// 앱 업데이트보다 먼저 떠 계속 살아 있을 수 있으므로, client의 현재 화면 projection에서 보이는 선택만 추출한다.
     runtime_selected_text_v1: bool = false,
+    /// host가 controller의 selection start/extend/clear와 scroll_and_extend를 core-command FIFO에 미러링하고,
+    /// 뒤따르는 authoritative copy까지 권위 anchor/head를 보존하는가.
+    runtime_selection_state_v1: bool = false,
     /// host가 consumptive notification RPC를 exact attached stream으로 인가하는가. false인 same-major 구 host에는
     /// legacy runtime selector를 보내되, 새 host도 그 connection의 live controller만 fallback으로 허용한다.
     notification_stream_auth_v1: bool = false,
@@ -7079,6 +7085,10 @@ pub const Client = struct {
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
         self.runtime_clear_screen_v1 = payloadHasCapability(ack.payload, "runtime_clear_screen_v1");
         self.runtime_selected_text_v1 = payloadHasCapability(ack.payload, "runtime_selected_text_v1");
+        self.runtime_selection_state_v1 = payloadHasCapability(ack.payload, "runtime_selection_state_v1");
+        if (self.runtime_selection_state_v1 and
+            (!self.runtime_core_command_v1 or !self.runtime_selected_text_v1))
+            return error.HandshakeFailed;
         self.notification_stream_auth_v1 = payloadHasCapability(
             ack.payload,
             "notification_stream_auth_v1",
@@ -15309,6 +15319,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "runtime_core_command_v1",
     "runtime_clear_screen_v1",
     "runtime_selected_text_v1",
+    "runtime_selection_state_v1",
     "notification_stream_auth_v1",
     "runtime_link_at_v1",
     "runtime_clipboard_v1",
@@ -20385,7 +20396,7 @@ fn buildHelloMajorFeatures(
         "";
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"]}}",
         .{ wire_major, wire_major, client_kind, transfer_capability },
     );
 }
@@ -23043,8 +23054,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\xf1\x62\xa6\x84\x00\x7a\x69\xe1\x12\xb6\x74\x04\xb0\x9b\x80\x58" ++
-        "\xb3\xcf\x0e\x37\x8d\x51\xd6\xe8\xa1\x9c\x76\xab\x4b\x7b\xc3\xee";
+        "\x16\xf5\xbc\x3a\x8a\xd9\xd9\x1d\x37\xd0\xdc\x0e\xcd\x4b\x23\x25" ++
+        "\xd7\x1a\x6b\x9d\x08\x3d\x91\x77\xa7\xd3\xeb\x10\x61\xc7\xd0\x4a";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -24092,6 +24103,32 @@ test "finish hello keeps frozen N-1 metadata unsupported despite peer advertisem
     client.deinit();
 }
 
+test "finish hello rejects selection state without command and copy dependencies" {
+    const payload =
+        \\{"version":2,"host_id":"00000000000000000000000000000001","capabilities":["runtime_selection_state_v1"]}
+    ;
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    const ack: framing.Frame = .{
+        .header = .{ .kind = .hello_ack, .payload_len = payload.len },
+        .payload = @constCast(payload),
+    };
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        client.finishHello(
+            .cli_attach,
+            compatibility.profileForMajor(protocol.version_major).?,
+            ack,
+        ),
+    );
+    try std.testing.expect(client.connection_profile == null);
+}
+
 test "finish hello publishes profile provenance only after every validation succeeds" {
     var client = Client{
         .allocator = std.testing.allocator,
@@ -24313,6 +24350,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_core_command_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_clear_screen_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_selected_text_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_selection_state_v1\"") != null);
     const cli_hello = try buildHello(allocator, "cli");
     defer allocator.free(cli_hello);
     try testing.expect(std.mem.indexOf(u8, cli_hello, "\"controller_transfer_v1\"") != null);
@@ -24345,6 +24383,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     defer legacy_client.deinit();
     try testing.expect(!legacy_client.screen_viewport_scrolled_v1);
     try testing.expect(!legacy_client.runtime_selected_text_v1);
+    try testing.expect(!legacy_client.runtime_selection_state_v1);
     try testing.expect(!legacy_client.runtime_clear_screen_v1);
     try testing.expect(!legacy_client.notification_stream_auth_v1);
     try testing.expect(!legacy_client.attachment_capabilities.negotiated_controller_transfer);
@@ -24430,6 +24469,7 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
     try testing.expect(client.runtime_core_command_v1);
     try testing.expect(client.runtime_clear_screen_v1);
     try testing.expect(client.runtime_selected_text_v1);
+    try testing.expect(client.runtime_selection_state_v1);
     try testing.expect(client.notification_stream_auth_v1);
     try testing.expect(client.attachment_capabilities.peer_attach_generation);
     try testing.expect(client.attachment_capabilities.negotiated_controller_transfer);

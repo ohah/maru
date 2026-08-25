@@ -4285,12 +4285,27 @@ pub const RemoteTermBackend = struct {
             // §6b-1 드래그 선택: 하이라이트 span은 client 좌표라 **placeholder core에 적용해 즉시** 반영한다(렌더가 이미
             // surface.core.selectionViewportSpan을 읽음 — 새 렌더 배선/span-push 불요, 왕복 지연 없음). 복사(콘텐츠 연산)는
             // app_session.copyText가 이 span을 host로 보내 host의 extractSelection으로 한다(선택 의미론=host 단일 출처).
-            // 콘텐츠 인지 경계(word/line/all)는 빈 placeholder에선 부정확하므로 host가 계산한다. scroll_and_extend(autoscroll
-            // 드래그)만 후속이다.
-            // select_clear도 같은 분류다 — 하이라이트가 placeholder에 있으니 해제도 placeholder에서 한다(host 왕복 불요).
-            .select_start, .select_extend, .select_extend_or_collapse, .select_clear => {
+            // 콘텐츠 인지 경계(word/line/all)는 빈 placeholder에선 부정확하므로 host가 계산한다. negotiated selection-state는
+            // 같은 start/extend/clear를 응답 없는 FIFO로 host에도 미러링해 화면 밖 자동스크롤 선택을 보존한다.
+            .select_start => |point| {
                 rr.clearSelectAllIntent();
                 _ = core_command.apply(&rr.surface.core, cmd);
+                try rr.mirrorSelectionCommand(.{ .selection_start = .{ .row = point.row, .col = point.col, .block = point.block } });
+            },
+            .select_extend => |point| {
+                rr.clearSelectAllIntent();
+                _ = core_command.apply(&rr.surface.core, cmd);
+                try rr.mirrorSelectionCommand(.{ .selection_extend = .{ .row = point.row, .col = point.col } });
+            },
+            .select_extend_or_collapse => |point| {
+                rr.clearSelectAllIntent();
+                _ = core_command.apply(&rr.surface.core, cmd);
+                try rr.mirrorSelectionCommand(.{ .selection_extend_or_collapse = .{ .row = point.row, .col = point.col } });
+            },
+            .select_clear => {
+                rr.clearSelectAllIntent();
+                _ = core_command.apply(&rr.surface.core, cmd);
+                try rr.mirrorSelectionCommand(.selection_clear);
             },
             .select_all => {
                 rr.clearSelectAllIntent();
@@ -4319,9 +4334,18 @@ pub const RemoteTermBackend = struct {
                     rr.surface.core.selectionExtend(span.end.row, span.end.col);
                 }
             },
-            // host scroll과 client-local highlight를 한 transaction으로 묶는 wire가 아직 없어 별도 selection parity slice가
-            // 소유한다. 명시 분기로 남겨 새 command 누락과 구분한다.
-            .scroll_and_extend => {},
+            .scroll_and_extend => |step| {
+                // same-major 구 host는 권위 anchor/head를 소유하지 못한다. client만 스크롤하면 host viewport와
+                // 복사 좌표가 갈라지므로, capability가 없을 때는 종전처럼 전체 transaction을 no-op으로 낮춘다.
+                if (!rr.supportsSelectionState()) return;
+                const delta = std.math.cast(i8, step.delta) orelse return error.InvalidCommand;
+                _ = core_command.apply(&rr.surface.core, cmd);
+                try rr.mirrorSelectionCommand(.{ .selection_scroll_and_extend = .{
+                    .delta = delta,
+                    .row = step.row,
+                    .col = step.col,
+                } });
+            },
             // §입력 패리티: 마우스 리포트는 host core가 자기 mouse_tracking/format으로 인코딩·PTY 주입해야 하므로
             // (인코딩 모드가 host에만 있음) raw 이벤트를 host로 보낸다(방식 B). placeholder core에 적용하면 응답이
             // client PTY로 안 가고(빈 placeholder) 인코딩 모드도 없어 무효다.

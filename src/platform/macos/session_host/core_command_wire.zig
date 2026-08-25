@@ -8,7 +8,8 @@ pub const max_cell_metric_px: u32 = std.math.maxInt(u16); // 악성 u32가 후�
 ///
 /// `session.CoreCommand`를 JSON에 그대로 직렬화하지 않는 이유는 그 타입이 process-local slice와 `usize`를
 /// 포함하기 때문이다. wire는 길이와 정수 범위를 고정하고, GUI/host가 이 닫힌 명령 집합을 함께 사용한다.
-/// 선택처럼 client-local 투영과 host 콘텐츠 계산을 함께 요구하는 명령은 별도 RPC가 소유하므로 여기 넣지 않는다.
+/// 선택의 viewport highlight는 client-local이지만, 협상된 selection-state capability에서는 같은 명령을 host core에도
+/// FIFO로 미러링한다. 콘텐츠 경계 계산만 별도 `runtime.select_op` RPC가 소유한다.
 pub const Command = union(enum) {
     scroll: i64,
     scroll_to_bottom,
@@ -29,6 +30,11 @@ pub const Command = union(enum) {
     reset_input_modes,
     /// 권위 core의 clear 분기와 조건부 form-feed를 host reader가 함께 소유한다. 기존 raw tag 보존을 위해 끝에 추가한다.
     clear_screen,
+    selection_start: SelectionStart,
+    selection_extend: SelectionAt,
+    selection_extend_or_collapse: SelectionAt,
+    selection_scroll_and_extend: SelectionScroll,
+    selection_clear,
 
     pub const CellMetrics = struct {
         width: u32,
@@ -39,6 +45,9 @@ pub const Command = union(enum) {
         foreground: u32,
         background: u32,
     };
+    pub const SelectionAt = struct { row: u16, col: u16 };
+    pub const SelectionStart = struct { row: u16, col: u16, block: bool };
+    pub const SelectionScroll = struct { row: u16, col: u16, delta: i8 };
 
     /// ANSI 16색 config base. 값은 `0xRRGGBB`, null은 해당 index에 config override가 없다는 뜻이다.
     pub const Palette = [16]?u32;
@@ -123,6 +132,36 @@ pub fn encodeParams(allocator: std.mem.Allocator, stream_id: u64, command: Comma
             .stream_id = stream_id,
             .op = "reset_input_modes",
         }),
+        .selection_start => |point| stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "selection_start",
+            .row = point.row,
+            .col = point.col,
+            .block = point.block,
+        }),
+        .selection_extend => |point| stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "selection_extend",
+            .row = point.row,
+            .col = point.col,
+        }),
+        .selection_extend_or_collapse => |point| stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "selection_extend_or_collapse",
+            .row = point.row,
+            .col = point.col,
+        }),
+        .selection_scroll_and_extend => |step| stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "selection_scroll_and_extend",
+            .row = step.row,
+            .col = step.col,
+            .delta = step.delta,
+        }),
+        .selection_clear => stringify(allocator, .{
+            .stream_id = stream_id,
+            .op = "selection_clear",
+        }),
     };
 }
 
@@ -187,6 +226,35 @@ pub fn decodeParams(params: std.json.ObjectMap) ?Command {
         if (direction != -1 and direction != 1) return null;
         return .{ .jump_to_prompt = @intCast(direction) };
     }
+    if (std.mem.eql(u8, op, "selection_start")) {
+        return .{ .selection_start = .{
+            .row = u16Field(params, "row") orelse return null,
+            .col = u16Field(params, "col") orelse return null,
+            .block = boolField(params, "block") orelse return null,
+        } };
+    }
+    if (std.mem.eql(u8, op, "selection_extend")) {
+        return .{ .selection_extend = .{
+            .row = u16Field(params, "row") orelse return null,
+            .col = u16Field(params, "col") orelse return null,
+        } };
+    }
+    if (std.mem.eql(u8, op, "selection_extend_or_collapse")) {
+        return .{ .selection_extend_or_collapse = .{
+            .row = u16Field(params, "row") orelse return null,
+            .col = u16Field(params, "col") orelse return null,
+        } };
+    }
+    if (std.mem.eql(u8, op, "selection_scroll_and_extend")) {
+        const delta = i64Field(params, "delta") orelse return null;
+        if (delta != -1 and delta != 1) return null;
+        return .{ .selection_scroll_and_extend = .{
+            .row = u16Field(params, "row") orelse return null,
+            .col = u16Field(params, "col") orelse return null,
+            .delta = @intCast(delta),
+        } };
+    }
+    if (std.mem.eql(u8, op, "selection_clear")) return .selection_clear;
     return null;
 }
 
@@ -266,6 +334,11 @@ fn u32Field(params: std.json.ObjectMap, key: []const u8) ?u32 {
     return if (value <= std.math.maxInt(u32)) @intCast(value) else null;
 }
 
+fn u16Field(params: std.json.ObjectMap, key: []const u8) ?u16 {
+    const value = u64Field(params, key) orelse return null;
+    return if (value <= std.math.maxInt(u16)) @intCast(value) else null;
+}
+
 fn rgbField(params: std.json.ObjectMap, key: []const u8) ?u32 {
     const value = u32Field(params, key) orelse return null;
     return if (value <= 0xFF_FF_FF) value else null;
@@ -328,6 +401,11 @@ test "core command wire round-trips every bounded command" {
             .cursor_shape = 1,
         } },
         .{ .jump_to_prompt = -1 },
+        .{ .selection_start = .{ .row = 3, .col = 4, .block = true } },
+        .{ .selection_extend = .{ .row = 5, .col = 6 } },
+        .{ .selection_extend_or_collapse = .{ .row = 7, .col = 8 } },
+        .{ .selection_scroll_and_extend = .{ .row = 0, .col = 9, .delta = -1 } },
+        .selection_clear,
     };
     for (cases) |command| {
         const decoded = try decodeEncoded(allocator, 42, command);
@@ -356,6 +434,10 @@ test "core command wire rejects malformed bounded values without partial command
         "{\"op\":\"set_runtime_config\",\"lines\":1,\"ambiguous_wide\":true,\"emoji_wide\":true,\"palette\":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],\"foreground\":0,\"background\":0,\"cell_width\":8,\"cell_height\":16,\"cursor_shape\":3}",
         "{\"op\":\"set_runtime_config\",\"lines\":1,\"ambiguous_wide\":true,\"emoji_wide\":true,\"palette\":[null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null],\"foreground\":0,\"background\":0,\"cell_width\":8,\"cell_height\":16,\"cursor_shape\":\"bar\"}",
         "{\"op\":\"unknown\",\"arg\":1}",
+        "{\"op\":\"selection_start\",\"row\":65536,\"col\":0,\"block\":false}",
+        "{\"op\":\"selection_start\",\"row\":0,\"col\":0,\"block\":1}",
+        "{\"op\":\"selection_extend\",\"row\":-1,\"col\":0}",
+        "{\"op\":\"selection_scroll_and_extend\",\"row\":0,\"col\":0,\"delta\":0}",
     };
     for (malformed) |json| {
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});

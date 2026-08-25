@@ -4267,9 +4267,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    | `spawn_full` | `connection_only_denied` | attachment facade에서 항상 거부 | deny | deny | deny | `runtime.spawn_full` |
    | `attach_controller` | `attach_only` | reserved controller, entry/current stream 모두 0 | allow | allow | wrong destination | `runtime.attach` |
    | `observation` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.observation` |
-   | `selected_text` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.selected_text` |
+   | `selected_text` | `bound_observation` | bound controller/observer, exact nonzero stream; `all/authoritative`는 controller input 재검사 | allow | wrong destination | allow | `runtime.selected_text` |
    | `link_at` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.link_at` |
-   | `select_op` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.select_op` |
+   | `select_op` | `bound_controller_mutation` | bound live controller, exact nonzero stream; dispatcher input 재검사 | allow | wrong destination | allow | `runtime.select_op` |
    | `find(scroll=false)` | `bound_observation` | bound controller/observer, exact nonzero stream | allow | wrong destination | allow | `runtime.find` |
    | `find(scroll=true)` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.find` |
    | `resize` | `bound_controller_mutation` | bound live controller, exact nonzero stream | allow | wrong destination | allow | `runtime.resize` |
@@ -6347,6 +6347,17 @@ request_id:u64 | stream_id:u64 | payload_len:u32
   client viewport projection에서 **현재 보이는 선택만** 추출한다. 단일 행·block·wide/grapheme은 projection에서 정확히
   복원하지만, 구 screen wire에는 행별 soft-wrap bit가 없으므로 multi-row 선형 선택은 보이는 화면 행 사이에 개행을
   넣는다. 이는 구 host 전용 degraded 호환이며 host scrollback 전체를 client 의미론 출처로 복제하지 않는다.
+- `runtime_selection_state_v1`은 controller의 선택 anchor/head와 `scroll+extend`를 host 권위 core에 보존한다. client는
+  즉시 highlight를 위해 같은 명령을 placeholder에도 적용하지만, host에는 direct-input barrier가 붙은 최대 64개
+  control FIFO로 `selection_start/extend/extend_or_collapse/scroll_and_extend/clear`를 보낸다. AppKit main thread는
+  응답을 기다리지 않는다. host dispatcher는 이 다섯 presentation-state 명령만 core lock 아래 즉시 적용하고 RPC 응답을
+  completion fence로 삼는다. parser/config/PTY 응답 명령은 계속 reader 단일 소유다. 따라서 뒤따르는
+  `runtime.selected_text(authoritative=true)`는 화면 밖 anchor를 포함한 host 선택을 그대로 추출하며, FIFO flush와 동일 소켓
+  dispatch 순서, 뒤따르는 copy RPC 응답 fence 때문에 copy가 selection 적용을 추월하지 않는다. observer는 projection viewport 복사만 가능하고 `all`,
+  `authoritative`, `runtime.select_op`, selection core command는 input capability가 없어 `unauthorized`다. capability 없는
+  same-major 구 host에는 selection-state command를 보내지 않고 자동스크롤 전체 transaction을 종전 no-op으로 낮춘다.
+  이 capability는 `runtime_core_command_v1`과 `runtime_selected_text_v1`을 모두 전제로 하며, 둘 중 하나 없이 광고한
+  hello는 권위 상태를 오판하지 않도록 handshake에서 fail-close한다.
 - `runtime_link_at_v1`은 host가 `runtime.link_at`으로 자기 `TerminalCore.extractUrlAt`(추출 + cwd resolve + 존재 stat)을
   실행할 수 있음을 뜻한다. 링크를 **여는** 판정은 콘텐츠와 cwd, 그리고 파일이 실제로 있는 파일시스템을 가진 host가 SSOT다 —
   client가 자기 FS로 stat하면 host 쪽 경로를 잘못 판정한다. hover 밑줄은 이 RPC를 쓰지 않고 screen stream의 `link_spans`
@@ -6887,7 +6898,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     범위를 벗어난 값을 거부한다. 일반 명령은 kind 13의 응답 없는 `core_command` frame으로 보내며 client의 최대 64개
     control FIFO가 명령 시점의 input byte barrier를 함께 보존한다. socket backpressure 중에도 main thread는 response를
     기다리지 않고 frame-loop가 `input prefix → command → input suffix`를 이어 보낸다. host
-    `runtime_manager`는 dispatch thread에서 core를 직접 바꾸지 않고 내부 `CoreCommand`로 명시 변환해 reader queue에 넣는다.
+    `runtime_manager`는 일반 명령을 dispatch thread에서 직접 바꾸지 않고 내부 `CoreCommand`로 명시 변환해 reader queue에 넣는다.
     reader는 input queue 누적 byte fence에 도달한 명령만 적용하므로 DECSET 1004의 `CSI I/O`와 OSC query 응답도 prefix 뒤,
     suffix 앞에서 같은 단일 PTY writer가 기록한다. EOF/read/write 오류로 reader가 끝나면 input/command queue를 닫아
     blocked producer를 `QueueClosed`로 깨운다. 신규 spawn은 `runtime.spawn_full.runtime_config`의 scrollback/폭/palette/
@@ -6898,7 +6909,10 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     scroll 4종만 보내고 새 command는 unknown RPC를 시험하지 않는 degraded no-op이다. 선택 highlight는 attachment-local이다.
     최신 host의 선택 콘텐츠는 `runtime_selected_text_v1` host RPC가 SSOT이며, capability 없는 같은-major 구 host만 현재
     viewport projection에서 단일 행·block을 정확히, multi-row 선형은 화면 행마다 개행하는 degraded 복사를 한다.
-    `scroll_and_extend` parity는 후속이다. 전체 선택은 host가 `selectAll`을 실행해 현재 viewport highlight를 반환하고,
+    `runtime_selection_state_v1` host에서는 선택 시작/확장/해제와 `scroll_and_extend`를 같은 bounded control FIFO에 미러링한다.
+    자동스크롤은 client highlight에는 즉시 적용되고 host에서는 core lock 아래 scroll+extend 한 명령으로 원자 적용되며,
+    복사 RPC 전에 FIFO가 flush되므로 화면 밖 anchor까지 권위 선택이 보존된다. capability 없는 구 host에서는 host/client
+    viewport를 갈라놓지 않도록 자동스크롤 transaction을 no-op으로 낮춘다. 전체 선택은 host가 `selectAll`을 실행해 현재 viewport highlight를 반환하고,
     client가 별도 `select_all` 의도를 selection owner에 보존한다. 복사 때 `runtime.selected_text`의 additive `all` 모드가
     host lock 아래 `selectAll → extractSelection → clear`를 원자 실행하므로 scrollback eviction/reflow 뒤에도 낡은 절대
     좌표를 재사용하지 않는다. `all` op를 모르는 same-major 구 host는 응답 선택이 없으므로 기존 placeholder의

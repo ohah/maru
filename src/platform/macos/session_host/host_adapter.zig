@@ -655,6 +655,7 @@ pub const HostAdapter = struct {
             .runtime_core_command = client.runtime_core_command_v1,
             .runtime_link_at = client.runtime_link_at_v1,
             .runtime_selected_text = client.runtime_selected_text_v1,
+            .runtime_selection_state = client.runtime_selection_state_v1,
         };
     }
 

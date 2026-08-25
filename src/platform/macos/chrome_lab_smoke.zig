@@ -440,7 +440,11 @@ pub fn main(init: std.process.Init) !void {
             .fill_color1 = bar_bg,
             .border_color = 0,
             .gradient_kind = 0,
-            .layer = 0, // under — 도크 quad 보다 아래. 목록이 새면 그 위에 그려져 띠가 가려진다.
+            // under — 도크 quad 보다 아래. 도크가 이 자리에 **무엇이든** 그리면 띠 위에 얹혀 골든이 red 가
+            // 된다. **목록의 clip 은 여기서 못 본다**(적대적 검증 2026-08-25): 목록은 가상화라 뷰포트 아래로
+            // 넘치는 행을 애초에 만들지 않는다 — clip 을 꺼도 이 아래는 한 픽셀도 안 바뀐다. 새는 쪽은 위쪽
+            // 경계이고 골든 `dock-list-clips-at-viewport-top` 이 그것을 본다.
+            .layer = 0,
         });
     }
 

@@ -4617,6 +4617,11 @@ agent_scan_kb=43214 agent_keep_kb=7 agent_ok=true
 | `nonblocking` 보정을 되돌린다 | **패닉** |
 | arena 를 도로 하나로 합친다 | `keep_kb 7 → 43235` |
 | `faceFor` 순서를 되돌린다 | 회귀 테스트 `expected 1, found 0` |
+| 이름 조회가 늘 빗나가게 한다 | `agent_raster_err 0 → 122 ok=false` |
+
+**둘은 서로를 못 본다.** 마지막 뮤턴트에서 `agent_titles_drawn` 은 **11 그대로**였다 —
+그 값은 셰이핑 결과(`artifact.records` 의 코드포인트)를 보므로 **굽기 실패를 못 본다**. 거꾸로
+`agent_raster_err` 는 세 번째 결함을 못 봤다(잘못된 face 라도 굽기는 성공한다). 그래서 **둘 다** 낸다.
 
 **둘째 뮤턴트가 핵심이다** — 항목이 14 개인데 글자가 0 이니, 이 판정은 항목을 되읽는 동어반복이
 아니다.

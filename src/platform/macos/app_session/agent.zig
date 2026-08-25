@@ -1151,6 +1151,7 @@ fn ensureCodexTrust(
     out.appendSlice(a, before) catch return;
     var added: usize = 0;
     var stale: u32 = 0;
+    var refreshed: u32 = 0;
     for (slots[0..found]) |placement| {
         const entry = trust.forEvent(placement.json_name) orelse continue;
         // matcher 는 **세트가 정한 값**이다(파일에 적힌 값이 아니라) — 우리가 넣은 항목이므로 같다.
@@ -1168,15 +1169,37 @@ fn ensureCodexTrust(
         trust.appendHash(&hash, a, entry, cmd, hook_command.timeout_seconds, matcher) catch return;
 
         if (trust.hasTrustEntry(out.items, key.items)) {
-            // 이미 있다 — **값은 안 건드린다**(위 주석의 정책). 다만 **다르면 그 훅은 안 돈다**:
-            // 키는 항목의 자리로 만들어져 커맨드가 바뀌어도 그대로이므로, 커맨드를 고친 뒤에는 키가
-            // 있는 채로 값만 낡는다. codex 는 그것을 `modified` 로 보고 실행하지 않는다(계약 §2.1).
-            // 조용히 관측 모드로 떨어지면 사용자는 «훅을 켰는데 아무 일도 안 일어난다» 만 본다 —
-            // keep-alive 실패에 쓰는 규율과 같다(조용한 폴백 금지). 세어 두고 tick 이 한 번 알린다.
-            if (trust.storedHash(out.items, key.items)) |stored| {
-                // 못 읽으면(`null`) 세지 않는다 — 모르는 것을 어긋남으로 세면 거짓 경고가 된다.
-                if (!std.mem.eql(u8, stored, hash.items)) stale += 1;
+            // 이미 있다. 그런데 **값이 다르면 그 훅은 안 돈다**: 키는 항목의 자리로 만들어져 커맨드가
+            // 바뀌어도 그대로이므로, 커맨드를 고친 뒤에는 키가 있는 채로 값만 낡는다. codex 는 그것을
+            // `modified` 로 보고 실행하지 않는다(계약 §2.1).
+            //
+            // 못 읽으면(`null`) **아무것도 하지 않는다** — 모르는 것을 어긋남으로 세면 거짓 경고가 되고,
+            // 모르는 것을 덮으면 남의 값을 지운다.
+            const stored = trust.storedHash(out.items, key.items) orelse continue;
+            if (std.mem.eql(u8, stored, hash.items)) continue; // 멀쩡하다
+
+            // **이 값을 이미 써 봤으면 다시 안 쓴다.** 그때는 누군가(= 사용자 승인을 받은 codex) 우리 값을
+            // 되돌린 것이고, 그 모양이 곧 «우리 공식이 틀렸다» 다. 다시 쓰면 매 실행 승인 프롬프트가 뜨는
+            // 무한 루프가 된다 — §2.1 이 값을 매겨 둔 바로 그 위험이다. 값 하나당 시도는 한 번뿐이다.
+            if (trust.triedHash(out.items, key.items)) |tried| {
+                if (std.mem.eql(u8, tried, hash.items)) {
+                    stale += 1;
+                    continue;
+                }
             }
+
+            // 갱신한다 — **덧붙이지 않고 값 한 줄만** 바꾼다(같은 테이블을 두 번 적으면 codex 가
+            // `config.toml` 전체를 못 읽는다).
+            var next: std.ArrayListUnmanaged(u8) = .empty;
+            defer next.deinit(a);
+            const done = trust.rewriteTrustEntry(&next, a, out.items, key.items, hash.items) catch false;
+            if (!done) {
+                stale += 1; // 모양을 못 읽었다 — 손대지 않고 알린다
+                continue;
+            }
+            out.clearRetainingCapacity();
+            out.appendSlice(a, next.items) catch return;
+            refreshed += 1;
             continue;
         }
 
@@ -1189,7 +1212,8 @@ fn ensureCodexTrust(
     // codex 에서 승인해 값이 맞아진 뒤에 이 함수가 다시 돌아도(설정 적용 등) 옛 수가 남아 **거짓 알림**이
     // 뜬다. 이 값은 «지금 어긋난 개수» 이지 «어긋난 적이 있다» 가 아니다.
     self.agent_hook_trust_stale = stale;
-    if (added == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
+    self.agent_hook_trust_refreshed = refreshed;
+    if (added == 0 and refreshed == 0) return; // 쓸 것이 없으면 사용자 파일의 mtime 을 흔들지 않는다
 
     // **compare-and-swap.** 훅 파일 락이 인스턴스 사이를 대부분 직렬화하지만, 훅 파일이 **아직 없을 때는**
     // 잠글 것이 없어(그때는 만들지 않는다) 두 인스턴스가 동시에 여기 올 수 있다. 그대로 두면 둘 다

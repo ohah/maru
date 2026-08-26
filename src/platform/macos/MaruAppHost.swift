@@ -5862,6 +5862,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             // 마지막 창 → 앱 종료. 추가 tick이 재진입 terminate를 부르지 않게 타이머를 먼저 멈춘다(정리·요약은
             // applicationWillTerminate가 — primary가 살아 있어야 요약이 그 세션 기준. 원래 SessionEnded 경로의 안전장치).
+            //
+            // **이 종료는 흔적을 남긴다.** 여기는 확인 모달도 건너뛰고(`bypassQuitConfirm`) 크래시도 아니라,
+            // 사용자 눈에는 앱이 그냥 사라진 것으로 보인다. 2026-08-27 에 복구 세션을 누르자 앱이 조용히
+            // 종료됐는데 crash report·unified log·app.log 어디에도 단서가 없어, 이 경로에 도달했다는 사실조차
+            // 소스를 읽고 추론해야 했다. 마지막 창이 닫히는 것 자체는 정상이지만 **왜 마지막이 됐는지**는 남겨야 한다.
+            fputs("app: last window closed — terminating (windows=\(windows.count) token=\(surface.token) sessionNil=\(surface.appSession == nil))\n", stderr)
             bypassQuitConfirm = true // 창 닫기/세션 종료에 따른 종료 — applicationShouldTerminate가 재확인하지 않게
             tickTimer?.invalidate()
             tickTimer = nil
@@ -11031,14 +11037,39 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func driveWorkspaceCheckpoint() {
-        guard workspaceCheckpointArmed, !workspaceRestoreIncomplete || workspaceFinalQuitPending else { return }
+        guard workspaceCheckpointArmed else { return }
+        // 복원이 불완전한 실행에서는 **평상시 저장을 하지 않는다.** 화면에 일부만 복원된 상태를 그대로
+        // 커밋하면 저장 파일에서 나머지가 영구히 사라진다. 대신 종료 저장(`workspaceFinalQuitPending`)은
+        // 통과시키고, 그 경로가 아래 `preservePrevious` 로 마지막 완전본을 `workspace.v1.bak` 에 남긴 뒤
+        // 쓴다 — 이 둘이 한 쌍이다(ec5a6cf3 "gate quit on final checkpoint").
+        //
+        // 저장이 왜 안 됐는지는 지금까지 어디에도 남지 않아 "체크포인트 저장 실패" 한 문장만 보였다.
+        // tick 마다 불리므로 사유가 바뀔 때만 찍는다.
+        guard !workspaceRestoreIncomplete || workspaceFinalQuitPending else {
+            logWorkspaceCheckpointDiagnosticOnce("skipped: restore_incomplete latch is set (final-quit save still runs)")
+            return
+        }
         var effect = MaruWorkspaceCheckpointEffect()
         let now = DispatchTime.now().uptimeNanoseconds
         guard maru_macos_workspace_checkpoint_tick(now, &effect) == Self.statusOK else {
+            logWorkspaceCheckpointDiagnosticOnce("capture failed: checkpoint_tick returned non-OK")
             setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_CAPTURE_FAILED))
             return
         }
+        // 여기서 "ok" 를 찍지 않는다. tick 통과는 **저장이 아니라 통과**일 뿐이고, 정상 상태가 매 tick 찍히면
+        // 진단이 아니라 소음이다 — 실제로 `app.log` 가 28MB 까지 불어 4MB 캡을 무의미하게 만들었다.
+        // 남길 가치가 있는 것은 정상에서 벗어난 순간뿐이다.
         handleWorkspaceCheckpointEffect(effect, snapshot: nil)
+    }
+
+    /// checkpoint 진단의 마지막 사유. 같은 사유를 tick 마다 반복해 찍지 않는다.
+    private var workspaceCheckpointDiagnostic: String = ""
+
+    /// 사유가 바뀔 때만 stderr 로 남긴다. GUI 실행에서는 `<cache>/maru/app.log` 로 들어간다.
+    private func logWorkspaceCheckpointDiagnosticOnce(_ reason: String) {
+        guard workspaceCheckpointDiagnostic != reason else { return }
+        workspaceCheckpointDiagnostic = reason
+        fputs("workspace checkpoint: \(reason)\n", stderr)
     }
 
     private func setWorkspaceCheckpointFailure(_ failure: UInt32) {
@@ -11052,12 +11083,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func handleWorkspaceCheckpointEffect(_ effect: MaruWorkspaceCheckpointEffect, snapshot: Data?) {
+        // tick 이 OK 여도 파일이 안 바뀌는 구간이 여기다 — 실제 쓰기는 effect 를 따라가야 도달한다.
+        // 다만 **아무 일도 없는 tick**(kind=0·notice=0)은 남기지 않는다. 그게 대다수라 그대로 두면 로그가
+        // 정상 상태로 가득 차 정작 이상한 순간을 덮는다.
+        if effect.kind != 0 || effect.notice != UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE) {
+            logWorkspaceCheckpointDiagnosticOnce("effect kind=\(effect.kind) notice=\(effect.notice) reason=\(effect.reason) snapshot=\(snapshot?.count ?? -1)")
+        }
         if effect.notice != UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE) {
             setWorkspaceCheckpointFailure(effect.notice)
         }
         switch effect.kind {
         case UInt32(MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE):
             let captured = captureWorkspaceSnapshot(useTerminationKeyWindow: false, publishedOnly: true)
+            if captured == nil {
+                logWorkspaceCheckpointDiagnosticOnce("capture result=nil")
+            }
             var next = MaruWorkspaceCheckpointEffect()
             let now = DispatchTime.now().uptimeNanoseconds
             guard maru_macos_workspace_checkpoint_capture_completed(
@@ -11071,6 +11111,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             handleWorkspaceCheckpointEffect(next, snapshot: captured)
         case UInt32(MARU_WORKSPACE_CHECKPOINT_EFFECT_WRITE):
+            if snapshot == nil || workspaceFileURL == nil {
+                logWorkspaceCheckpointDiagnosticOnce("write blocked: snapshot_nil=\(snapshot == nil) url_nil=\(workspaceFileURL == nil)")
+            }
             guard let snapshot, let workspaceURL = workspaceFileURL else {
                 var next = MaruWorkspaceCheckpointEffect()
                 guard maru_macos_workspace_checkpoint_write_completed(
@@ -11088,6 +11131,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let parent = Data(workspaceURL.deletingLastPathComponent().path.utf8)
             let generation = effect.generation
             let preservePrevious = workspaceRestoreIncomplete
+            logWorkspaceCheckpointDiagnosticOnce("write dispatched: bytes=\(snapshot.count) preserve_previous=\(preservePrevious) reason=\(effect.reason)")
             workspaceCheckpointWriter.async { [weak self] in
                 let result = parent.withUnsafeBytes { parentRaw in
                     snapshot.withUnsafeBytes { snapshotRaw in
@@ -11152,7 +11196,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         workspaceFinalQuitWasDeferred = deferredAppKitQuit
         workspaceFinalQuitAllowsFailure = maru_macos_app_quit_end_all() != 0
         var effect = MaruWorkspaceCheckpointEffect()
-        guard maru_macos_workspace_checkpoint_quit_requested(DispatchTime.now().uptimeNanoseconds, &effect) == Self.statusOK else {
+        // 종료 저장이 실패하면 keep-alive 종료는 **취소된다**(allowsFailure=false). 사용자에게는
+        // "체크포인트 저장 실패"와 함께 앱이 안 닫히는 것으로만 보이고, 그 status 가 무엇이었는지는
+        // 지금까지 어디에도 남지 않았다. 이 한 줄이 그 마지막 공백이다 — 여기서 실패하면 평상시 저장도
+        // 이미 skip 상태라 manifest 가 영원히 갱신되지 않는다.
+        let finalStatus = maru_macos_workspace_checkpoint_quit_requested(DispatchTime.now().uptimeNanoseconds, &effect)
+        fputs("workspace checkpoint: final-quit requested status=\(finalStatus) allows_failure=\(workspaceFinalQuitAllowsFailure) restore_incomplete=\(workspaceRestoreIncomplete)\n", stderr)
+        guard finalStatus == Self.statusOK else {
             setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_CAPTURE_FAILED))
             cancelFinalWorkspaceCheckpoint()
             return
@@ -11162,6 +11212,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func cancelFinalWorkspaceCheckpoint() {
         guard workspaceFinalQuitPending else { return }
+        fputs("workspace checkpoint: final-quit cancelled (allows_failure=\(workspaceFinalQuitAllowsFailure))\n", stderr)
         if workspaceFinalQuitAllowsFailure {
             finishFinalWorkspaceCheckpoint()
             return
@@ -11182,6 +11233,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func finishFinalWorkspaceCheckpoint() {
         guard workspaceFinalQuitPending else { return }
+        fputs("workspace checkpoint: final-quit finished — quit proceeds\n", stderr)
         workspaceFinalQuitPending = false
         workspaceFinalQuitSurface = nil
         workspaceFinalQuitAllowsFailure = false

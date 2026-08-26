@@ -14805,9 +14805,23 @@ pub const Client = struct {
         return !self.unusable or self.ownership == .moved or self.first_poison_reason != null;
     }
 
+    /// poison 이 **어디서** 불렸는지 남긴다.
+    ///
+    /// `local_invariant_violation` 하나로 접히는 자리가 이 파일에만 74 곳이다. incident 는 결론(`reason`)과
+    /// 대략의 구역(`source_site`)만 담고 DTO 의 scalar 집합이 고정이라 호출 지점을 실을 자리가 없다.
+    /// 2026-08-27 실측: incident 22 건이 전부 `local_invariant_violation`·`client_read` 로 같아 74 곳 중
+    /// 어디인지 좁히지 못했다. 호출자 주소 한 개면 `atos`/`llvm-symbolizer` 로 그 자리를 곧장 짚는다.
+    ///
+    /// 판정에는 관여하지 않는다 — fail-closed 는 그대로이고 사유만 적는다.
+    fn logPoisonCallSite(reason: client_poison.ConnectionReason, ra: usize) void {
+        if (builtin.is_test) return;
+        std.log.err("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });
+    }
+
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
     /// 명시적으로 닫는 fail-closed fallback.
     pub fn poison(self: *Client, reason: client_poison.ConnectionReason) void {
+        logPoisonCallSite(reason, @returnAddress());
         // A checked allocator callback inside managed prepared execution cannot reacquire the
         // operation fence. It may only write the caller-final capture already sealed into that
         // lease; post-operation publication remains the sole Client/ring mutation owner.

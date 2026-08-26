@@ -4,6 +4,7 @@
 //! marker를 소비했을 때만 호출한다. 성공한 `exec`는 반환하지 않으며, 반환한 모든 경로는 같은 old runtime graph를
 //! 재개하거나 authority-poisoned terminal 상태를 기록한다.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const c = std.c;
 const entrypoint = @import("entrypoint.zig");
@@ -496,6 +497,22 @@ fn replaceAll(
     return true;
 }
 
+/// upgrade 가 **왜 되돌려졌는지** host 로그에 남긴다.
+///
+/// 이 파일에는 `std.log` 가 한 줄도 없었다. 그래서 `redirectStderrToHostLog` 가 만든
+/// `host-<id>.log` 가 **전부 0 바이트**였고, exec 가 실패해도 host 쪽에는 아무 흔적이 남지 않았다.
+/// 2026-08-27 실측: upgrade 가 manifest 를 새 build_id 로 갱신한 뒤 exec 에서 끊겨, 구 host 가
+/// **거짓 build_id 를 광고하는 상태로 굳었다**(실체는 옛 이미지). 그 결과 앱은 붙을 때마다
+/// `stale_manifest` 를 만나 새 host 를 띄웠고, 사용자 PTY 6 개를 쥔 구 host 는 고아가 됐다.
+/// 되돌림 사유 한 줄이 있었다면 exec 실패인지 target 문제인지 즉시 갈렸다.
+fn logUpgradeRollback(attempt_id: u128, reason: upgrade_wire.AttemptReason) void {
+    if (builtin.is_test) return;
+    std.log.err(
+        "session host upgrade rolled back: attempt={x:0>32} reason={s}",
+        .{ attempt_id, @tagName(reason) },
+    );
+}
+
 fn rollbackAuthority(
     ctx: Context,
     frozen: *upgrade_attempt.Frozen,
@@ -504,6 +521,7 @@ fn rollbackAuthority(
     reason: upgrade_wire.AttemptReason,
     deadline: upgrade_deadline.Deadline,
 ) Outcome {
+    logUpgradeRollback(attempt_id, reason);
     std.debug.assert(frozen.active);
     const actual = ctx.authority.snapshot(ctx.authority.ctx);
     if (expected_restoring.lifecycle != .restoring or

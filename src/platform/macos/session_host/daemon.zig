@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
+const startup_readiness = @import("startup_readiness.zig");
 const posix = std.posix;
 const socket_server = @import("socket_server.zig");
 const reg = @import("registry.zig");
@@ -143,7 +144,7 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null, null);
 }
 
 /// 별도 ReleaseFast fixture executable만 사용하는 entrypoint. ambient env나 public MRSH
@@ -155,7 +156,7 @@ pub fn runSessionHostForFixture(
     socket_path: [:0]const u8,
     probe: FixtureProbe,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe, null);
 }
 
 /// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
@@ -170,7 +171,23 @@ pub fn runSessionHostWithIdentity(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, null);
+}
+
+/// Fresh detached launch 전용 entrypoint. notifier는 startup 결과만 소유하며 accept loop 수명이나
+/// same-PID upgrade/restore handoff에는 참여하지 않는다.
+pub fn runSessionHostWithIdentityStartup(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+    notifier: *startup_readiness.Notifier,
+) RunError!void {
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier);
 }
 
 /// Process fixture entrypoint. It changes only the release-signer decision; staging, typed
@@ -187,7 +204,7 @@ pub fn runSessionHostWithIdentityTestAuthorizer(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null, null);
 }
 
 /// exec layout(연속 `exec_fd_set.max_slots`개 슬롯) + 최대 runtime의 PTY master/wake pipe + listener·lease 여유.
@@ -394,6 +411,7 @@ fn runSessionHostImpl(
     exact_host_id: ?u128,
     test_allow_any_upgrade_target: bool,
     fixture_probe: ?FixtureProbe,
+    startup_notifier: ?*startup_readiness.Notifier,
 ) RunError!void {
     // exec 업그레이드 layout을 확보할 수 있도록 가장 먼저 올린다. 이후 열리는 socket/PTY/lease fd가 상한에
     // 걸리지 않게 하려면 어떤 fd를 열기 전이어야 한다.
@@ -624,6 +642,9 @@ fn runSessionHostImpl(
         error.ProcessIdentityUnavailable => error.ProcessIdentityUnavailable,
     };
     defer fd_owner.deinit();
+    // 이 지점 이전에는 ready를 보내지 않는다. owner lease, incident owner, runtime manager, bound socket,
+    // ready manifest/authority와 실제 poll owner가 모두 살아 있어야 부모가 connect retry를 시작해도 된다.
+    if (startup_notifier) |notifier| notifier.ready();
     // 자연 종료 판정 상태. `served_any_runtime`이 없으면 **방금 뜬 host**(아직 GUI가 첫 runtime을 만들기 전)가
     // 곧바로 자기 자신을 종료해 버린다 — spawn한 GUI가 endpoint를 잃는다.
     var served_any_runtime = false;

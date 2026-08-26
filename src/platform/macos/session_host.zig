@@ -37,6 +37,10 @@
 const builtin = @import("builtin");
 
 pub const entrypoint = @import("session_host/entrypoint.zig");
+pub const startup_readiness = if (builtin.os.tag == .macos)
+    @import("session_host/startup_readiness.zig")
+else
+    struct {};
 pub const protocol = @import("session_host/protocol.zig");
 pub const framing = @import("session_host/framing.zig");
 pub const compatibility = @import("session_host/compatibility.zig");

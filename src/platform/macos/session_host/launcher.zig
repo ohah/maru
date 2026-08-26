@@ -15,8 +15,10 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const entrypoint = @import("entrypoint.zig");
+const short_endpoint = @import("short_endpoint.zig");
+const startup_readiness = @import("startup_readiness.zig");
 
-// execv는 std.c 미노출이라 직접 extern(현재 environ 상속). launcher는 macOS 전용이라 링크 대상이 libc다.
+// execv는 std.c 미노출이라 직접 extern(현재 environ 상속). readiness launch는 fork 전에 만든 envp로 std.c.execve를 쓴다.
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 // 상속 fd를 명시적으로 닫기 위한 descriptor table 크기(soft limit, macOS는 OPEN_MAX로 상한). std.c 미노출이라 extern.
 extern "c" fn getdtablesize() c_int;
@@ -28,7 +30,7 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 /// `maru <exe>`를 session host로 전환하는 hidden 서브커맨드 이름. main.zig dispatch와 이 launcher가 공유하는 단일 출처다.
 pub const subcommand = entrypoint.subcommand;
 
-pub const SpawnError = error{ ForkFailed, OutOfMemory, ExecFailed };
+pub const SpawnError = error{ ForkFailed, OutOfMemory, ExecFailed, StartupFailed };
 
 /// host helper의 argv를 조립한다(순수) —
 /// `[exe_path, "__session-host", session_dir, socket_path, 32-hex-host_id]`. exec에 넘길 NUL 종단 포인터
@@ -61,7 +63,7 @@ pub fn spawnSessionHostDetached(
     const host_hex = std.fmt.allocPrintSentinel(allocator, "{x:0>32}", .{host_id}, 0) catch
         return error.OutOfMemory;
     defer allocator.free(host_hex);
-    try spawnDetached(allocator, exe_path, &.{ subcommand, session_dir, socket_path, host_hex });
+    try spawnDetached(allocator, exe_path, &.{ subcommand, session_dir, socket_path, host_hex }, true);
 }
 
 /// Signed release E2E 전용 supervised launch. 제품과 같은 hidden command/stdio/fd 경계를 실행하지만
@@ -89,7 +91,7 @@ pub fn spawnSessionHostSupervisedForTest(
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {
         _ = c.setsid();
-        closeInheritedFds(null);
+        closeInheritedFds(null, null);
         redirectStdioToDevNull();
         clearSessionHostTestEnvironment();
         _ = execv(exe_path.ptr, @ptrCast(argv.ptr));
@@ -101,7 +103,12 @@ pub fn spawnSessionHostSupervisedForTest(
 /// `exe_path`를 `args`(NUL 종단 슬라이스들)로 **detached** 실행한다: double-fork로 손자를 부모와 독립시키고, setsid로
 /// 새 세션 리더가 되게 하며, std fd를 `/dev/null`로 돌려 부모 터미널에 묶이지 않게 한다. 부모는 중간 자식만 waitpid로
 /// reap하고 즉시 반환한다(손자는 orphan → init reap). exec 실패는 손자에서 `_exit(127)`로 끝난다.
-fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args: []const [:0]const u8) SpawnError!void {
+fn spawnDetached(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    args: []const [:0]const u8,
+    wait_for_daemon: bool,
+) SpawnError!void {
     if (builtin.os.tag != .macos) return error.ForkFailed;
 
     // exec argv: [exe_path, args..., null]. child가 exec 전에 쓰므로 부모 메모리라도 fork로 복제돼 안전하다.
@@ -119,15 +126,72 @@ fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args: []c
     // EOF 를 보고, **실패하면** 손자가 그 파이프에 `errno` 를 적고 죽어 부모가 이유까지 받는다.
     var status_fds: [2]c.fd_t = undefined;
     const have_pipe = pipe(&status_fds) == 0;
-    if (have_pipe) _ = fcntl(status_fds[1], c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
+    if (have_pipe and fcntl(status_fds[1], c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) < 0) {
+        _ = c.close(status_fds[0]);
+        _ = c.close(status_fds[1]);
+        return error.StartupFailed;
+    }
     // 파이프를 못 만들면 예전처럼 «띄우고 잊는다» 로 돈다 — 진단이 없을 뿐 회귀는 아니다.
     const write_fd: ?c.fd_t = if (have_pipe) status_fds[1] else null;
+
+    // exec 성공과 daemon 준비는 다른 사실이다. fresh host만 별도 Unix socketpair를 물려받아 owner lease,
+    // bind, ready manifest, poll owner가 모두 준비됐는지 한 바이트로 답한다. socket을 쓰는 이유는 parent가
+    // legacy timeout 뒤 닫아도 SO_NOSIGPIPE로 daemon process가 죽지 않게 하기 위해서다.
+    var ready_fds: [2]c.fd_t = undefined;
+    const have_ready = wait_for_daemon and
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &ready_fds) == 0;
+    if (wait_for_daemon and !have_ready) {
+        if (have_pipe) {
+            _ = c.close(status_fds[0]);
+            _ = c.close(status_fds[1]);
+        }
+        return error.StartupFailed;
+    }
+    if (have_ready) {
+        const enabled: c_int = 1;
+        if (c.setsockopt(
+            ready_fds[1],
+            posix.SOL.SOCKET,
+            posix.SO.NOSIGPIPE,
+            @ptrCast(&enabled),
+            @sizeOf(c_int),
+        ) != 0) {
+            if (have_pipe) {
+                _ = c.close(status_fds[0]);
+                _ = c.close(status_fds[1]);
+            }
+            _ = c.close(ready_fds[0]);
+            _ = c.close(ready_fds[1]);
+            return error.StartupFailed;
+        }
+    }
+    const ready_write_fd: ?c.fd_t = if (have_ready) ready_fds[1] else null;
+
+    // 다중 스레드 GUI의 fork child에서 setenv/allocator lock을 건드리지 않는다. readiness envp와 문자열은
+    // fork 전에 부모가 만들고, child는 async-signal-safe execve에 이미 완성된 포인터만 넘긴다.
+    var readiness_env: ?ReadinessEnvironment = null;
+    if (ready_write_fd) |fd| {
+        readiness_env = buildReadinessEnvironment(allocator, fd) catch {
+            if (have_pipe) {
+                _ = c.close(status_fds[0]);
+                _ = c.close(status_fds[1]);
+            }
+            _ = c.close(ready_fds[0]);
+            _ = c.close(ready_fds[1]);
+            return error.OutOfMemory;
+        };
+    }
+    defer if (readiness_env) |*env| env.deinit(allocator);
 
     const pid1 = c.fork();
     if (pid1 < 0) {
         if (have_pipe) {
             _ = c.close(status_fds[0]);
             _ = c.close(status_fds[1]);
+        }
+        if (have_ready) {
+            _ = c.close(ready_fds[0]);
+            _ = c.close(ready_fds[1]);
         }
         return error.ForkFailed;
     }
@@ -136,15 +200,24 @@ fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args: []c
         // orphan이 되어 controlling terminal을 다시 얻지 않는다(daemon 관용구).
         _ = c.setsid();
         const pid2 = c.fork();
-        if (pid2 < 0) std.c._exit(127);
+        if (pid2 < 0) {
+            if (write_fd) |fd| {
+                const byte = [_]u8{1};
+                _ = c.write(fd, &byte, 1);
+            }
+            std.c._exit(127);
+        }
         if (pid2 == 0) {
             // stdio 위 상속 fd(GUI socket·PTY master·control-plane·capability fd)를 exec 전에 모두 닫는다. fork는 부모
             // fd 테이블을 복제하고 exec는 CLOEXEC 아닌 fd를 그대로 넘기므로, 닫지 않으면 detached host가 GUI 자원을
             // 물려받아 fd 누수·정보 노출이 생긴다(§11). 그다음 0/1/2를 /dev/null로 돌린다(닫힌 3번을 재사용).
             // 상태 파이프만 남긴다 — 그 fd 는 exec 가 성공하면 CLOEXEC 로 저절로 닫힌다.
-            closeInheritedFds(write_fd);
+            closeInheritedFds(write_fd, ready_write_fd);
             redirectStdioToDevNull();
-            _ = execv(exe_path.ptr, @ptrCast(argv.ptr));
+            if (readiness_env) |env|
+                _ = c.execve(exe_path.ptr, @ptrCast(argv.ptr), @ptrCast(env.envp.ptr))
+            else
+                _ = execv(exe_path.ptr, @ptrCast(argv.ptr));
             // 여기 왔으면 exec 실패다. 이유를 한 바이트로 적어 보낸다(부모는 «왔다/안 왔다» 로 가른다).
             if (write_fd) |fd| {
                 const code: u8 = @truncate(@as(u32, @bitCast(std.c._errno().*)));
@@ -157,32 +230,98 @@ fn spawnDetached(allocator: std.mem.Allocator, exe_path: [:0]const u8, args: []c
     }
     // 부모(GUI): 쓰기 끝을 **먼저 닫는다**. 우리 사본이 열려 있으면 EOF 가 영영 안 온다.
     if (have_pipe) _ = c.close(status_fds[1]);
+    if (have_ready) _ = c.close(ready_fds[1]);
     // 중간 자식을 reap해 zombie를 안 남긴다. 손자(host)는 부모와 무관하게 산다. **reap 이 먼저다** — 중간 자식도
     // 쓰기 끝 사본을 갖고 있어, 그것이 사라지기 전에 읽으면 exec 가 성공했는데도 잠깐 막힌다.
     var status: c_int = undefined;
-    _ = c.waitpid(pid1, &status, 0);
+    while (true) {
+        const waited = c.waitpid(pid1, &status, 0);
+        if (waited >= 0) break;
+        if (posix.errno(waited) == .INTR) continue;
+        if (have_pipe) _ = c.close(status_fds[0]);
+        if (have_ready) _ = c.close(ready_fds[0]);
+        return error.StartupFailed;
+    }
 
-    if (!have_pipe) return;
-    defer _ = c.close(status_fds[0]);
-    var buf: [1]u8 = undefined;
-    const n = c.read(status_fds[0], &buf, buf.len);
-    // n == 0 → EOF → exec 성공(커널이 CLOEXEC 로 닫았다). n > 0 → 손자가 errno 를 적고 죽었다.
-    if (n > 0) return error.ExecFailed;
+    if (have_pipe) {
+        defer _ = c.close(status_fds[0]);
+        var buf: [1]u8 = undefined;
+        var n: isize = undefined;
+        while (true) {
+            n = c.read(status_fds[0], &buf, buf.len);
+            if (n >= 0 or posix.errno(n) != .INTR) break;
+        }
+        // n == 0 → EOF → exec 성공(커널이 CLOEXEC 로 닫았다). n > 0 → 손자가 실패 이유를 적고 죽었다.
+        if (n != 0) {
+            if (have_ready) _ = c.close(ready_fds[0]);
+            return error.ExecFailed;
+        }
+    }
+    if (have_ready) {
+        defer _ = c.close(ready_fds[0]);
+        switch (startup_readiness.awaitParent(ready_fds[0], startup_readiness.legacy_wait_ms)) {
+            .ready, .legacy_timeout => return,
+            .failed => return error.StartupFailed,
+        }
+    }
+}
+
+const ReadinessEnvironment = struct {
+    envp: []?[*:0]const u8,
+    entry: [:0]u8,
+
+    fn deinit(self: *ReadinessEnvironment, allocator: std.mem.Allocator) void {
+        allocator.free(self.entry);
+        allocator.free(self.envp);
+        self.* = undefined;
+    }
+};
+
+fn buildReadinessEnvironment(
+    allocator: std.mem.Allocator,
+    fd: c.fd_t,
+) error{OutOfMemory}!ReadinessEnvironment {
+    var inherited_count: usize = 0;
+    while (c.environ[inherited_count] != null) : (inherited_count += 1) {}
+    var envp = try allocator.alloc(?[*:0]const u8, inherited_count + 2);
+    errdefer allocator.free(envp);
+    const entry = try std.fmt.allocPrintSentinel(
+        allocator,
+        "{s}={d}",
+        .{ startup_readiness.env_name, fd },
+        0,
+    );
+    errdefer allocator.free(entry);
+
+    var written: usize = 0;
+    for (0..inherited_count) |index| {
+        const inherited = c.environ[index] orelse unreachable;
+        const text = std.mem.span(inherited);
+        if (std.mem.startsWith(u8, text, startup_readiness.env_name) and
+            text.len > startup_readiness.env_name.len and
+            text[startup_readiness.env_name.len] == '=') continue;
+        envp[written] = inherited;
+        written += 1;
+    }
+    envp[written] = entry.ptr;
+    @memset(envp[written + 1 ..], null);
+    return .{ .envp = envp, .entry = entry };
 }
 
 /// stdio(0·1·2) 위의 상속 fd를 모두 닫는다. CLOEXEC에 의존하지 않고 fd 3..getdtablesize()를 명시적으로 close해
 /// detached host가 부모(GUI) fd를 하나도 물려받지 않게 한다(best-effort — 이미 닫힌 fd의 close는 무해). redirect보다
 /// **먼저** 불러야 /dev/null redirect가 쓰는 fd 3이 곧바로 닫히지 않는다.
-fn closeInheritedFds(keep: ?c.fd_t) void {
+fn closeInheritedFds(keep_a: ?c.fd_t, keep_b: ?c.fd_t) void {
     const max_fd = getdtablesize();
     if (max_fd <= 3) return;
     var fd: c_int = 3;
     while (fd < max_fd) : (fd += 1) {
         // **상태 파이프만 예외다.** 그 fd 까지 닫으면 exec 실패를 부모에게 알릴 통로가 사라져,
         // 손자가 죽어도 부모는 재시도 예산을 통째로 물고서야 «안 떴다» 를 안다(실측 4123 ms).
-        if (keep) |k| {
+        if (keep_a) |k| {
             if (fd == k) continue;
         }
+        if (keep_b) |k| if (fd == k) continue;
         _ = c.close(fd);
     }
 }
@@ -239,6 +378,28 @@ test "launcher: sessionHostArgv includes exact session dir, socket, and host ide
     try testing.expectEqualStrings("0000000000000000000000000000aabb", argv[4]);
 }
 
+test "launcher: readiness envp is completed before fork and replaces ambient startup fd" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try testing.expect(startup_readiness.installEnvironment(99));
+    defer _ = unsetenv(startup_readiness.env_name.ptr);
+
+    var env = try buildReadinessEnvironment(testing.allocator, 17);
+    defer env.deinit(testing.allocator);
+    var matches: usize = 0;
+    for (env.envp) |entry_ptr| {
+        const entry = entry_ptr orelse continue;
+        const text = std.mem.span(entry);
+        if (std.mem.startsWith(u8, text, startup_readiness.env_name) and
+            text.len > startup_readiness.env_name.len and
+            text[startup_readiness.env_name.len] == '=')
+        {
+            matches += 1;
+            try testing.expectEqualStrings("MARU_SESSION_HOST_STARTUP_FD=17", text);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), matches);
+}
+
 test "launcher: signed E2E supervised child has an exact waitpid owner" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const pid = try spawnSessionHostSupervisedForTest(
@@ -264,7 +425,7 @@ test "launcher: spawnDetached runs a detached child without blocking the parent 
     var cmd_buf: [256]u8 = undefined;
     const cmd = std.fmt.bufPrintZ(&cmd_buf, "touch {s}", .{marker}) catch return error.SkipZigTest;
     const dash_c: [:0]const u8 = "-c";
-    try spawnDetached(allocator, "/bin/sh", &.{ dash_c, cmd });
+    try spawnDetached(allocator, "/bin/sh", &.{ dash_c, cmd }, false);
 
     // 손자가 marker를 만들 때까지 짧게 대기(부모는 손자를 reap하지 않으므로 파일 존재로 관찰).
     var attempts: usize = 0;
@@ -300,7 +461,7 @@ test "launcher: exec 실패를 부모가 즉시 안다 — 예전엔 알 방법�
     defer _ = c.unlink(path.ptr);
 
     const dummy: [:0]const u8 = "x";
-    try testing.expectError(error.ExecFailed, spawnDetached(allocator, path, &.{dummy}));
+    try testing.expectError(error.ExecFailed, spawnDetached(allocator, path, &.{dummy}, false));
 }
 
 // 존재하지 않는 경로도 같은 자리에서 걸린다 — `execv` 는 손자에서 실패하므로 부모가 알 방법이 파이프뿐이다.
@@ -310,7 +471,42 @@ test "launcher: 없는 실행 파일도 exec 실패로 돌아온다" {
     const dummy: [:0]const u8 = "x";
     try testing.expectError(
         error.ExecFailed,
-        spawnDetached(allocator, "/tmp/maru-sh-does-not-exist-at-all", &.{dummy}),
+        spawnDetached(allocator, "/tmp/maru-sh-does-not-exist-at-all", &.{dummy}, false),
+    );
+}
+
+test "launcher: product daemon pre-ready failure is reported through startup channel" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
+    const product_exe: [:0]const u8 = std.mem.span(product_raw);
+
+    var host_dir_buf: [160]u8 = undefined;
+    const host_dir = std.fmt.bufPrintZ(
+        &host_dir_buf,
+        "/tmp/maru-sh-startup-file-{d}",
+        .{c.getpid()},
+    ) catch return error.SkipZigTest;
+    _ = c.unlink(host_dir.ptr);
+    const file_fd = c.open(
+        host_dir.ptr,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (file_fd < 0) return error.SkipZigTest;
+    _ = c.close(file_fd);
+    defer _ = c.unlink(host_dir.ptr);
+
+    const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | 0x51A7;
+    try short_endpoint.prepareCurrentUserNamespace();
+    var socket_buf: [128]u8 = undefined;
+    const socket = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+    defer _ = c.unlink(socket.ptr);
+
+    // exec는 성공하지만 owner directory 자리에 일반 파일이 있으므로 daemon이 bind/manifest 전에
+    // OwnerLeaseFailed로 닫힌다. 부모가 이를 ExecFailed가 아닌 StartupFailed로 받는지가 제품 배선을 증명한다.
+    try testing.expectError(
+        error.StartupFailed,
+        spawnSessionHostDetached(testing.allocator, product_exe, host_dir, socket, host_id),
     );
 }
 

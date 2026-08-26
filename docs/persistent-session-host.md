@@ -6791,11 +6791,17 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   master 누수 방지, §11). 그 자리에서 상태 파이프까지 닫으면 통로가 사라지므로 **그 fd 만 예외**로 뺀다.
   파이프를 못 만들면 예전처럼 «띄우고 잊는다» 로 돈다 — 진단이 없을 뿐 회귀는 아니다.
 
-  ⚠️ **이것은 exec 성공까지만 본다.** 그 뒤 `ManifestFailed`·`OwnerLeaseFailed` 로 죽는 경우(캐시 디렉터리가
-  남의 uid·읽기 전용 FS·디스크 가득참)는 CLOEXEC 로 fd 가 이미 닫혀 여전히 안 보이고, 그때는 재시도 예산을
-  다 문다. 닫으려면 daemon 이 **CLOEXEC 아닌 fd** 를 물고 있다가 bind 성공 시 닫아야 하고, fd 번호는 argv 가
-  아니라 **env** 로 넘겨야 한다(`entrypoint.parse` 가 인자 개수를 정확히 세므로 업그레이드 중 옛 바이너리가
-  `InvalidInvocation` 으로 죽는다). 그 단계는 아직 하지 않았다.
+  **exec 이후 daemon readiness도 별도 채널로 확인한다.** exec 성패용 CLOEXEC pipe는 그대로 두고, fresh daemon
+  launch에만 별도 `SOCK_STREAM` readiness channel을 만든다. 손자는 write end를 CLOEXEC 없이 물려받고 fd 번호를
+  `MARU_SESSION_HOST_STARTUP_FD` env로 넘긴다(`entrypoint.parse`의 exact argv grammar는 바꾸지 않는다). daemon은
+  owner lease, incident owner, `RuntimeManager`, socket bind, ready manifest/`HostAuthority`, `poll_owner.Owner`까지 모두
+  구성한 뒤에만 typed `ready` 한 바이트를 보내고 fd를 닫는다. 그 전의 `ManifestFailed`·`OwnerLeaseFailed`·OOM은
+  typed `failed`를 보내므로 launcher가 `launch_failed`로 즉시 분류하고 connect 재시도 예산을 소비하지 않는다.
+  readiness fd는 same-effective-UID peer의 상속 Unix socket인지, `FD_CLOEXEC`가 꺼져 있는지 확인하고 `SO_NOSIGPIPE`로
+  parent timeout/close가 daemon을 죽이지 않게 한다. capability를 모르는 구 binary는 env를 무시할 수 있으므로 부모는
+  bounded wait 뒤 종전 connect-backoff 경로로 fallback하며 무한 대기하지 않는다. readiness는 **fresh spawn 전용**이고
+  same-PID upgrade/restore fd layout과 섞지 않는다. env 문자열·`envp`는 fork 전에 부모가 완성하고 손자는 `execve`만
+  호출하므로 다중 스레드 GUI를 fork한 뒤 libc environment lock을 취하지 않는다.
 
   **콜드런치 비용도 함께 재 뒀다(ReleaseFast, 페이지 캐시 더운 상태)**: 콜드(host 를 띄워야 함) **중앙값
   104~110 ms**(74~188), 웜(이미 떠 있음) 7~27 ms. 그 차이가 「띄우고 부팅하는 몫」이다. ⚠️ Debug 빌드로 재면

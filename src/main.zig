@@ -5989,16 +5989,25 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
                 return;
             },
             .daemon => |daemon| {
+                var startup = session_host.startup_readiness.Notifier.fromEnvironment() catch |err| {
+                    try stderr.print("maru session host startup channel failed: {s}\n", .{@errorName(err)});
+                    return error.UnknownCommand;
+                };
+                defer startup.deinit();
+                // argv/path allocation부터 poll owner publication까지 어느 실패도 parent를 connect backoff에
+                // 남겨 두지 않는다. ready 뒤에는 notifier가 이미 consumed라 이 errdefer는 no-op이다.
+                errdefer startup.failed();
                 const dir_z = try allocator.dupeZ(u8, daemon.session_dir);
                 defer allocator.free(dir_z);
                 const socket_z = try allocator.dupeZ(u8, daemon.socket_path);
                 defer allocator.free(socket_z);
-                session_host.daemon.runSessionHostWithIdentity(
+                session_host.daemon.runSessionHostWithIdentityStartup(
                     allocator,
                     io,
                     dir_z,
                     socket_z,
                     daemon.host_id,
+                    &startup,
                 ) catch |err| {
                     try stderr.print("maru {s} failed: {s}\n", .{ session_host_entrypoint.subcommand, @errorName(err) });
                     return error.UnknownCommand;

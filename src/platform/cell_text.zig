@@ -326,6 +326,40 @@ pub fn buildFileTreeDrawList(
     };
 }
 
+test "titleCols: 잰 칸 수가 cluster 계약을 따른다" {
+    const t = std.testing;
+    // ASCII 는 글자 수 그대로.
+    try t.expectEqual(@as(u16, 3), titleCols("abc", false));
+    // **한글은 두 칸**이다 — 코드포인트 수(2)가 아니라 렌더 폭(4)이어야 항목이 안 겹친다.
+    try t.expectEqual(@as(u16, 4), titleCols("마루", false));
+    // **결합 악센트는 한 클러스터**다. 코드포인트로 세면 2 가 되어 폭이 한 칸 넓게 예약된다 —
+    // 그러면 잰 폭과 그린 폭이 갈리고, 그 어긋남은 화면에서 "글자가 잘렸다" 로 보인다.
+    try t.expectEqual(@as(u16, 1), titleCols("e\u{0301}", false));
+    // 빈 문자열은 0 — 폭 0 짜리 항목은 호출자가 아예 안 넣는다(상태바 계약 §3).
+    try t.expectEqual(@as(u16, 0), titleCols("", false));
+    // **등록 아이콘을 넓히는 규칙은 주입값이 정한다** — 켜면 한 칸이 두 칸이 된다.
+    // **이름으로 부른다** — codepoint 리터럴은 경계 게이트가 막는다(chrome-strategy.md §9.7).
+    var icon_buf: [4]u8 = undefined;
+    const icon = icon_buf[0..(std.unicode.utf8Encode(icons.codepoint(.git_branch), &icon_buf) catch unreachable)];
+    try t.expect(titleCols(icon, true) > titleCols(icon, false));
+}
+
+test "titleCols: 그리는 쪽과 같은 칸 수를 낸다" {
+    const t = std.testing;
+    // **두 함수가 같은 플래너를 지나는가**를 고정한다. 여기서 갈리면 상태바가 예약한 폭과 실제로
+    // 그린 폭이 달라지는데, 그때 움직이는 판정이 하나도 없다(실측 2026-08-26).
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(t.allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(t.allocator);
+    for ([_][]const u8{ "abc", "마루 프로젝트", "e\u{0301}x", "feat/w8-status-bar" }) |s| {
+        cells.clearRetainingCapacity();
+        pool.clearRetainingCapacity();
+        const drawn = try appendEllipsizedTitle(t.allocator, &cells, &pool, s, 0, 0, std.math.maxInt(u16), .{}, false, .head);
+        try t.expectEqual(titleCols(s, false), drawn);
+    }
+}
+
 test "every semantic file tree icon lowers to a registered synthesized glyph" {
     inline for (std.meta.fields(file_tree_icon.IconKind)) |field| {
         const kind: file_tree_icon.IconKind = @enumFromInt(field.value);

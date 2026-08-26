@@ -1788,6 +1788,26 @@ fn applyCoreConfig(
 
 const smoke_spin_cap: usize = 720;
 
+test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
+    const t = std.testing;
+    var buf: [64]u8 = undefined;
+    // 홈 아래면 줄인다.
+    try t.expectEqualStrings("~/proj", shortenHome("C:/u/me/proj", "C:/u/me", &buf));
+    // 홈 자체는 `~` 하나다.
+    try t.expectEqualStrings("~", shortenHome("C:/u/me", "C:/u/me", &buf));
+    // **접두사만 같은 다른 폴더는 안 줄인다** — `C:/u/mexico` 가 `~xico` 가 되면 안 된다.
+    try t.expectEqualStrings("C:/u/mexico", shortenHome("C:/u/mexico", "C:/u/me", &buf));
+    // 홈을 모르면 원본.
+    try t.expectEqualStrings("C:/u/me/proj", shortenHome("C:/u/me/proj", null, &buf));
+    // 다른 드라이브면 원본.
+    try t.expectEqualStrings("D:/ohah/maru", shortenHome("D:/ohah/maru", "C:/u/me", &buf));
+    // **버퍼가 모자라면 자르지 않고 원본을 준다** — 자르는 것은 텍스트 단계의 일이다(계약 §3).
+    var tiny: [3]u8 = undefined;
+    try t.expectEqualStrings("C:/u/me/proj", shortenHome("C:/u/me/proj", "C:/u/me", &tiny));
+    // Windows 구분자도 같은 규칙이다.
+    try t.expectEqualStrings("~\\proj", shortenHome("C:/u/me\\proj", "C:/u/me", &buf));
+}
+
 test "판정용 앞부분: 안 잘린 문자열은 그대로, 잘리면 글자 경계에서" {
     const t = std.testing;
     // **안 잘렸으면 손대지 않는다.** 세 바이트짜리 한글 제목이 통째로 사라지던 자리다 — 남는 것이
@@ -3011,7 +3031,9 @@ fn appendStatusBarCells(
     dropped_out: *usize,
     placed_out: *usize,
     outside_out: *usize,
+    mismatch_out: *usize,
 ) !void {
+    mismatch_out.* = 0;
     dropped_out.* = 0;
     placed_out.* = 0;
     outside_out.* = 0;
@@ -3083,6 +3105,11 @@ fn appendStatusBarCells(
         // **자르지 않는다** — 상한을 항목 폭 그대로 준다. 자를지는 배치가 이미 정했다(자리를 못
         // 얻은 항목은 통째로 빠진다, 계약 §3).
         col = cell_text.appendEllipsizedTitle(allocator, &cells, &pool, item.text, 0, col, std.math.maxInt(u16), style, false, .head) catch col;
+        // **잰 폭과 그린 폭이 같아야 한다.** 배치는 `statusBarItemCols` 가 준 폭으로 자리를
+        // 잡았고 화면에는 여기 `col` 만큼 그려진다 — 둘이 갈리면 항목이 겹치거나 사이가 벌어지는데
+        // `status_outside` 는 **바 밖으로 나갈 때만** 움직여 그것을 못 본다. 두 값은 서로 다른
+        // 함수가 낸다(`titleCols` 는 0 부터, 여기는 아이콘 뒤부터 계획한다).
+        if (col != statusBarItemCols(item)) mismatch_out.* += 1;
         if (cells.items.len == 0) continue;
         const list = maru.renderer.DrawList{
             .size = .{ .cols = col, .rows = 1 },
@@ -3120,9 +3147,11 @@ fn appendStatusBarCells(
     // 앞 항목의 UV 가 옛 크기로 계산돼 있어 화면에서 사라진다 — 실측 2026-08-26: 브랜치 이름
     // `feat/w8-status-bar` 가 `fea` 세 글자만 남았다(이미 구워져 있던 글리프만 살아남았다).
     // 사이드바가 프레임 **하나**라 못 겪던 실패다.
+    // **먼저 전부 해제 예약한다.** 아래에서 한 번이라도 실패해 함수를 나가면 남은 항목의 native 가
+    // 새는데, 반복문 안의 `defer` 는 그 자리 것만 챙긴다.
+    defer for (natives) |maybe| if (maybe) |native| allocator.free(native);
     for (natives, origins) |maybe_native, ox| {
         const native = maybe_native orelse continue;
-        defer allocator.free(native);
         try out.ensureUnusedCapacity(allocator, native.len);
         for (native) |src| {
             var c = src;
@@ -3205,10 +3234,11 @@ fn rebuildStatusBar(
     dropped: *usize,
     placed: *usize,
     outside: *usize,
+    mismatch: *usize,
     rebuilds: *usize,
 ) void {
     cells_out.clearRetainingCapacity();
-    appendStatusBarCells(a, cells_out, bar, cw, ch, tk, rs, fb, pl, aw, ah, up, items, frames, dropped, placed, outside) catch {};
+    appendStatusBarCells(a, cells_out, bar, cw, ch, tk, rs, fb, pl, aw, ah, up, items, frames, dropped, placed, outside, mismatch) catch {};
     rebuilds.* += 1;
 }
 
@@ -4007,6 +4037,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var status_dropped: usize = 0;
     var status_placed: usize = 0;
     var status_outside: usize = 0;
+    var status_mismatch: usize = 0;
     var status_uploads: usize = 0;
     var status_items_buf: [max_status_bar_items]StatusBarItem = undefined;
     // 경로는 `~` 로 줄여 담는다 — 그 축약이 계약 §4 의 규칙이다(`sidebarCwdPath`).
@@ -4103,7 +4134,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 안 변해서 그 상태에서도 초록이었다 — 실기 캡처가 잡았다(2026-08-26).
     const status_items = buildStatusBarItems(&status_items_buf, scm_status, dock_root, home_dir, &status_cwd_buf);
     var status_rebuilds: usize = 0;
-    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
+    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
     try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y);
 
@@ -4658,7 +4689,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 client_w = r.width_px;
                 client_h = r.height_px;
                 geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
+                rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                 // **터미널 격자도 바꾼다.** 스왑체인만 맞추면 셸이 옛 크기로 계속 출력해 줄이 어긋난다.
                 if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size| {
                     resizeAllSessions(&runtime, sessions.items, size, io);
@@ -4820,7 +4851,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (cand) |pt| if (pt != dock_size_pt) {
                             dock_size_pt = pt;
                             geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
+                            rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                             // **화면에 선 크기를 도로 저장한다.** 포인터가 창 밖으로 나가면 `pt` 는
                             // 화면보다 훨씬 큰 값이 되는데(실측: `stored_pt=5979` 인데 `shown_w=654`),
                             // 그 상태로 창을 키우면 도크가 **새 공간을 통째로 먹는다**(실측: 654 →
@@ -4998,7 +5029,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     view_switches += 1;
                                     // 뷰가 바뀌면 기본 폭이 달라질 수 있다(`defaultRightPtForView`).
                                     geom = dockGeometryFor(client_w, client_h, cell_w, cell_h, dock_visible, dock_size_pt, dock_view, sidebar_w, titlebar_px, status_bar_px);
-                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_rebuilds);
+                                    rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
                                     if (win32_window.cellsForClient(geom.terminal.w, geom.terminal.h, cell_w, cell_h)) |size|
                                         resizeAllSessions(&runtime, sessions.items, size, io);
                                     rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
@@ -5588,7 +5619,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             break :status_bar;
         }
         const fits = bar.h == 0 or (bar.y + bar.h == client_h and bar.w == client_w);
-        try stdout.print("status_bar=({d},{d},{d},{d}) status_full_width={} status_above_bottom={} status_cells={d} status_placed={d} status_dropped={d} status_outside={d} term_bottom={d} status_ok={}\n", .{
+        try stdout.print("status_bar=({d},{d},{d},{d}) status_full_width={} status_above_bottom={} status_cells={d} status_placed={d} status_dropped={d} status_outside={d} status_mismatch={d} term_bottom={d} status_ok={}\n", .{
             bar.x,
             bar.y,
             bar.w,
@@ -5599,8 +5630,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             status_placed,
             status_dropped,
             status_outside,
+            status_mismatch,
             geom.terminal.y + geom.terminal.h,
             bar.h > 0 and bar.w == client_w and fits and status_placed > 0 and status_outside == 0 and
+                status_mismatch == 0 and
                 geom.terminal.y + geom.terminal.h <= bar.y,
         });
     }

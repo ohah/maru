@@ -719,13 +719,26 @@ pub const GenerationAttachment = struct {
         if (self.lifecycle == .terminal) return .corrupt;
         if (!self.valid()) return .corrupt;
         switch (self.lifecycle) {
-            .shell => switch (generation_transport_mod.preflightTerminalizeOwned(
-                &self.transport,
-                @intFromPtr(self),
-            )) {
-                .ready => self.terminalizeTransport(),
-                .busy => return .busy,
-                .invalid => return .corrupt,
+            .shell => {
+                // `.shell`은 두 자리를 함께 가리킨다. `initInPlace`만 끝나 아무 권위도 안 잡은 자리와,
+                // transport까지 mint된 자리다. 앞쪽에는 terminalize할 대상이 없으므로 lifecycle만 닫는다.
+                //
+                // 이 구분이 없으면 `RemoteRuntime.spawnWithConnection`의 롤백이 성공할 수 없다. 그 경로는
+                // generation owner를 세운 직후 `runtime.spawn_full`을 보내는데, 그 RPC가 실패하면 attachment는
+                // 아직 attach를 준비조차 하지 않은 `.shell`이다. 그 자리를 `.corrupt`로 읽으면 `deinit`이
+                // `@panic`하고, **회복 가능한 spawn 실패가 앱 전체의 abort로 승격된다**.
+                if (self.reservation == null and
+                    generation_transport_mod.neverMinted(&self.transport))
+                {
+                    // 잡은 것이 없으니 되돌릴 것도 없다.
+                } else switch (generation_transport_mod.preflightTerminalizeOwned(
+                    &self.transport,
+                    @intFromPtr(self),
+                )) {
+                    .ready => self.terminalizeTransport(),
+                    .busy => return .busy,
+                    .invalid => return .corrupt,
+                }
             },
             .binding_prepared, .retirement_prepared => return .busy,
             .executing => return .busy,
@@ -2292,6 +2305,39 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
         try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
     }
     attachment = .{};
+}
+
+test "CR3a-2c3d C3-1 shell attachment without a minted transport tears down cleanly" {
+    // 이 테스트가 증명하는 것: `initInPlace`만 끝난 `.shell` attachment는 teardown을 거부하지 않는다.
+    //
+    // 왜 터미널에서 중요한가: `RemoteRuntime.spawnWithConnection`은 generation owner를 세운 직후
+    // `errdefer deinitGenerationOwnerAndScreenSource()`를 걸고 host에 `runtime.spawn_full`을 보낸다.
+    // 그 RPC가 실패하면 attachment는 아직 attach를 준비조차 하지 않은 `.shell`이고, 이 상태의 teardown이
+    // `.corrupt`로 거부되면 `deinit`이 곧바로 `@panic`한다. 사용자 입장에서는 "새 터미널이 안 열린다"가
+    // 아니라 **앱 전체가 죽는다**. 실제로 2026-08-26에 이 경로로 앱이 시작 0.5~1.1초 만에 연속으로
+    // abort했다. spawn 실패는 회복 가능한 오류여야 하므로 롤백이 성공해야 한다.
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x5E11_0001,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    try std.testing.expectEqual(Lifecycle.shell, attachment.lifecycle);
+    // transport는 `prepareAttach`에서만 mint된다. 여기서는 아직 pristine이라 terminalize할 권위가 없다.
+    try std.testing.expect(attachment.reservation == null);
+
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(Lifecycle.terminal, attachment.lifecycle);
+    // teardown은 replay를 거부한다 — 두 번째 호출은 여전히 fail-closed여야 한다.
+    try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
 }
 
 test "CR3a-2c3d C3-1 inline event owner blocks teardown until explicit release" {

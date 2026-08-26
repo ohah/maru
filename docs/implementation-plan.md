@@ -1354,6 +1354,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    journal row가 이미 회수됐다는 이유로 attach를 거부하지 않는다. route 없는 local/app-owned 알림만 기존 `wt`/`sid`
    process-local 클릭 경로를 유지한다.
 
+   **G1 config loader provenance:** 기본값 전환 전에 config loader가 resolved bool과 별도로
+   `session.keep-alive-after-quit`의 source를 `absent | explicit_valid | explicit_invalid`로 보존한다.
+   같은 적용 축에서 마지막 syntactic occurrence가 provenance를 소유하므로 `true` 뒤 invalid는
+   resolved bool `true`를 유지한 `explicit_invalid`, invalid 뒤 `false`는 `explicit_valid(false)`다. 즉 invalid는
+   provenance를 바꾸되 앞서 적용된 resolved bool을 덮지 않는다. 주석·다른 key·다른 OS 전용 줄은 이 축을
+   바꾸지 않으며, 현재 OS suffix가 적용되는 경우에는 generic key와 같은 파일 순서 규칙 및 occurrence 집합을
+   사용한다. 파일 I/O 결과도 `missing | readable | unreadable | oversize`의 닫힌 상태로
+   보존하고, unreadable/oversize를 missing으로 축소하지 않는다. G1은 관측만 추가하며 default=false,
+   파일 write/materialization, notice, app-global bootstrap 정책은 바꾸지 않는다. pure parser의 duplicate/invalid/
+   OS-suffix matrix와 실제 file의 missing/readable/unreadable/1 MiB exact/cap+1을 Debug·ReleaseFast에서 검증한다.
+   G2만 이 provenance를 소비해 explicit override materialization·Reset retention을 소유한다.
+
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라

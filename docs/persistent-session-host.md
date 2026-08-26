@@ -7349,6 +7349,14 @@ G1 loader provenance/G2 explicit override materialization·retention/G3 default 
 owner와 red→green gate를 갖고,
 G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는다.
 
+**G1 loader provenance 계약.** `Config`의 resolved bool은 실행 정책이고 provenance가 아니다. loader는
+`session.keep-alive-after-quit`에 대해 `absent | explicit_valid(value) | explicit_invalid`를 별도 보존하며,
+같은 적용 축의 마지막 syntactic occurrence가 provenance를 정한다. `explicit_invalid`는 앞서 적용된 resolved bool을
+덮지 않는다. 현재 OS suffix와 generic은 파일 순서를 공유하고 다른 OS 전용 줄은
+무관하다는 기존 loader 선택 규칙을 그대로 공유해야 하며, provenance 전용 두 번째 parser를 만들지 않는다. 파일 경계는
+`missing | readable | unreadable | oversize`를 닫힌 상태로 반환한다. G1은 파일을 쓰거나 notice를 만들거나 default를
+바꾸지 않는다. G2가 이 관측을 app-instance lease 아래에서 소비하기 전에는 어떤 migration도 실행하지 않는다.
+
 ### P5 — 개별 runtime CLI attach
 
 - **T0a — `ConnectionSlot` reactor core:** P5a1 제품 fd 배선 전에 OS 중립 slot/queue/turn/drain state machine을

@@ -28,6 +28,24 @@ pub const LoadError = std.mem.Allocator.Error;
 /// 비치명 진단 — 어느 줄에서 무엇이 무시됐는지. 메시지는 arena 소유. 공유 타입 단일 출처는 schema(loader→schema 단방향).
 pub const Diagnostic = schema.Diag;
 
+/// G1: 실행에 쓰는 resolved bool과 분리된 `session.keep-alive-after-quit`의 입력 출처다.
+/// G2가 기본값 migration을 결정할 때만 소비하며 G1 자체는 파일을 쓰지 않는다.
+pub const SessionKeepAliveProvenance = union(enum) {
+    absent,
+    explicit_valid: bool,
+    explicit_invalid,
+};
+
+/// Config 파일을 읽은 결과. 기존 forgiving 동작은 유지하되, 안전한 기본값을 택한 이유를 잃지 않는다.
+pub const FileProvenance = enum {
+    missing,
+    readable,
+    unreadable,
+    oversize,
+};
+
+const max_config_file_bytes = 1 << 20;
+
 /// 파싱 결과. arena가 config의 문자열·키바인딩 slice·diagnostic 메시지를 소유한다 — config를 쓰는
 /// 동안(특히 resolve가 family를, KeyBindingResolver가 keybindings를 빌리는 동안) 살아 있어야 한다.
 pub const Parsed = struct {
@@ -48,6 +66,8 @@ pub const Parsed = struct {
     /// 플랫폼(Swift)이 이 목록을 읽어 RegisterEventHotKey로 등록한다(a2). chord→가상 키코드 매핑은 platform.
     global_bindings: []const keybinding.GlobalBinding,
     diagnostics: []const Diagnostic,
+    session_keep_alive_provenance: SessionKeepAliveProvenance,
+    file_provenance: FileProvenance,
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
@@ -134,14 +154,9 @@ fn hostOsSuffix() ?[]const u8 {
 /// config 텍스트를 raw Config로 파싱한다(파일시스템 무관, 순수). 알 수 없는 key/잘못된 값은
 /// 기본값 유지 + diagnostic. OOM만 에러.
 ///
-/// **OS 접미 키는 기본 키를 이긴다 — 파일에서의 순서와 무관하게.** 그래서 줄을 **두 번** 훑는다: 1차는 접미
-/// 없는 줄, 2차는 호스트 OS 접미가 붙은 줄. 한 패스로 "나중 줄이 이긴다"에 맡기면 `shell.command.windows`를
-/// 위에 적고 `shell.command`를 아래 적었을 때 Windows에서 후자가 이겨 버린다 — 사용자가 예상할 수 없는 순서
-/// 의존이다. 다른 OS 접미가 붙은 줄은 두 패스 모두에서 그냥 건너뛴다(그 OS에서는 유효한 줄이므로 diagnostic도
-/// 내지 않는다).
-///
-/// 각 줄은 **정확히 한 패스에서만** 적용되므로 `env.<KEY>` 누적이나 keybinding 목록이 중복되지 않는다. 패스
-/// 안에서는 파일 순서가 보존되고, 패스 사이에서만 OS 키가 뒤에 온다.
+/// **기본 키와 현재 호스트 OS 접미 키는 같은 파일 순서로 적용된다.** 다른 OS 접미가 붙은 줄은 값에는
+/// 적용하지 않되 base key가 실재하는지는 검증한다. 따라서 모든 적용 가능한 줄에서 마지막 occurrence가
+/// resolved 값을 소유하고 `env.<KEY>` 누적이나 keybinding 목록도 원래 파일 순서를 보존한다.
 /// 호스트 OS 로 `parseFor` 를 부르는 얇은 래퍼. 프로덕션 호출자가 그대로 쓴다.
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) LoadError!Parsed {
     return parseFor(@import("builtin").os.tag, allocator, source);
@@ -161,6 +176,7 @@ pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source:
     var term_binds: std.ArrayList(keybinding.TerminalBinding) = .empty;
     var global_binds: std.ArrayList(keybinding.GlobalBinding) = .empty;
     var env_overrides: std.ArrayList([]const u8) = .empty; // env.<KEY> 줄 누적(각 "KEY=VALUE", arena 소유)
+    var session_keep_alive_provenance: SessionKeepAliveProvenance = .absent;
 
     const host_os = @import("builtin").os.tag;
     var line_no: usize = 0;
@@ -186,6 +202,15 @@ pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source:
             continue;
         };
 
+        // applyKey와 같은 선택 경로 안에서 관측한다. 별도 source scan을 두면 OS suffix/중복 규칙이
+        // resolved Config와 갈라질 수 있으므로, 실제 적용 직전의 마지막 occurrence만 갱신한다.
+        if (std.mem.eql(u8, split.base, "session.keep-alive-after-quit")) {
+            session_keep_alive_provenance = if (schema.parseBool(value)) |parsed|
+                .{ .explicit_valid = parsed }
+            else
+                .explicit_invalid;
+        }
+
         try applyKey(os_tag, a, &config, &binds, &unbinds, &term_binds, &global_binds, &env_overrides, &diags, line_no, split.base, value);
     }
 
@@ -199,6 +224,8 @@ pub fn parseFor(os_tag: std.Target.Os.Tag, allocator: std.mem.Allocator, source:
         .terminal_bindings = try term_binds.toOwnedSlice(a),
         .global_bindings = try global_binds.toOwnedSlice(a),
         .diagnostics = try diags.toOwnedSlice(a),
+        .session_keep_alive_provenance = session_keep_alive_provenance,
+        .file_provenance = .readable,
     };
 }
 
@@ -991,16 +1018,31 @@ pub fn appendKeybindUnbinds(allocator: std.mem.Allocator, original: []const u8, 
 }
 
 /// 빈 기본 결과(파일 없음/HOME 없음 등). config 텍스트를 안 읽었으므로 arena도 비어 있다.
-fn emptyDefault(allocator: std.mem.Allocator) Parsed {
-    return .{ .arena = std.heap.ArenaAllocator.init(allocator), .config = .{}, .keybindings = &.{}, .unbinds = &.{}, .terminal_bindings = &.{}, .global_bindings = &.{}, .diagnostics = &.{} };
+fn emptyDefault(allocator: std.mem.Allocator, file_provenance: FileProvenance) Parsed {
+    return .{
+        .arena = std.heap.ArenaAllocator.init(allocator),
+        .config = .{},
+        .keybindings = &.{},
+        .unbinds = &.{},
+        .terminal_bindings = &.{},
+        .global_bindings = &.{},
+        .diagnostics = &.{},
+        .session_keep_alive_provenance = .absent,
+        .file_provenance = file_provenance,
+    };
 }
 
 /// 경로에서 config를 읽어 파싱한다. 파일이 없거나 읽기 실패면 기본 Config(빈 arena)를 돌려준다
 /// (forgiving — 설정 파일이 없어도 터미널은 정상 동작해야 한다). OOM만 에러.
 pub fn loadFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) LoadError!Parsed {
-    const source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 20)) catch {
-        // 없음/권한/크기 초과 등 — 기본값으로 시작한다(빈 arena).
-        return emptyDefault(allocator);
+    // std.Io.Limit is exclusive (reached *or* exceeded => StreamTooLong), hence +1 admits an
+    // exact 1 MiB config while still reading at most that many owned bytes.
+    const source = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_config_file_bytes + 1)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.FileNotFound => return emptyDefault(allocator, .missing),
+        error.StreamTooLong => return emptyDefault(allocator, .oversize),
+        // Forgiving 기본값은 유지하지만 G2가 unreadable을 absent로 오인하지 않도록 원인을 보존한다.
+        else => return emptyDefault(allocator, .unreadable),
     };
     defer allocator.free(source);
     return parse(allocator, source);
@@ -1039,7 +1081,7 @@ pub fn defaultConfigPath(allocator: std.mem.Allocator) LoadError!?[]const u8 {
 /// 단일 진입점. 경로/파일이 없으면 기본 Config. 호출자는 Parsed(arena)를 세션 동안 보관해야 한다
 /// (resolve가 font.family 슬라이스를 빌린다).
 pub fn loadDefault(io: std.Io, allocator: std.mem.Allocator) LoadError!Parsed {
-    const path = (try defaultConfigPath(allocator)) orelse return emptyDefault(allocator);
+    const path = (try defaultConfigPath(allocator)) orelse return emptyDefault(allocator, .missing);
     defer allocator.free(path);
     return loadFile(io, allocator, path);
 }
@@ -1223,6 +1265,105 @@ test "parse: session.keep-alive-after-quit — 영속 세션 opt-in, 미설정 �
     var q = try parse(std.testing.allocator, "font.size = 14");
     defer q.deinit();
     try std.testing.expect(!q.config.session.keep_alive_after_quit);
+}
+
+test "Session default G1 config provenance follows the last applied syntactic occurrence" {
+    var absent = try parse(std.testing.allocator, "font.size = 14");
+    defer absent.deinit();
+    try std.testing.expect(absent.session_keep_alive_provenance == .absent);
+
+    var invalid_last = try parse(std.testing.allocator,
+        \\session.keep-alive-after-quit = true
+        \\session.keep-alive-after-quit = maybe
+    );
+    defer invalid_last.deinit();
+    try std.testing.expect(invalid_last.config.session.keep_alive_after_quit);
+    try std.testing.expect(invalid_last.session_keep_alive_provenance == .explicit_invalid);
+
+    var valid_last = try parse(std.testing.allocator,
+        \\session.keep-alive-after-quit = invalid
+        \\session.keep-alive-after-quit = false
+    );
+    defer valid_last.deinit();
+    try std.testing.expect(!valid_last.config.session.keep_alive_after_quit);
+    try std.testing.expectEqual(false, valid_last.session_keep_alive_provenance.explicit_valid);
+
+    // 다른 OS 전용 occurrence는 이 host의 provenance가 아니다.
+    const foreign_suffix = if (@import("builtin").os.tag == .windows) ".macos" else ".windows";
+    const source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "session.keep-alive-after-quit = true\nsession.keep-alive-after-quit{s} = invalid\n",
+        .{foreign_suffix},
+    );
+    defer std.testing.allocator.free(source);
+    var foreign = try parse(std.testing.allocator, source);
+    defer foreign.deinit();
+    try std.testing.expectEqual(true, foreign.session_keep_alive_provenance.explicit_valid);
+
+    // 현재 OS suffix도 generic과 같은 occurrence 집합·파일 순서를 쓴다.
+    const current_suffix = hostOsSuffix() orelse return error.SkipZigTest;
+    const suffix_then_generic = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "session.keep-alive-after-quit{s} = invalid\nsession.keep-alive-after-quit = false\n",
+        .{current_suffix},
+    );
+    defer std.testing.allocator.free(suffix_then_generic);
+    var generic_last = try parse(std.testing.allocator, suffix_then_generic);
+    defer generic_last.deinit();
+    try std.testing.expectEqual(false, generic_last.session_keep_alive_provenance.explicit_valid);
+
+    const generic_then_suffix = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "session.keep-alive-after-quit = false\nsession.keep-alive-after-quit{s} = invalid\n",
+        .{current_suffix},
+    );
+    defer std.testing.allocator.free(generic_then_suffix);
+    var suffix_last = try parse(std.testing.allocator, generic_then_suffix);
+    defer suffix_last.deinit();
+    try std.testing.expect(suffix_last.session_keep_alive_provenance == .explicit_invalid);
+}
+
+test "Session default G1 config provenance loadFile preserves missing readable unreadable and oversize" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    const missing_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/missing", .{tmp.sub_path});
+    var missing = try loadFile(io, allocator, missing_path);
+    defer missing.deinit();
+    try std.testing.expectEqual(FileProvenance.missing, missing.file_provenance);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "session.keep-alive-after-quit = false\n" });
+    const readable_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    var readable = try loadFile(io, allocator, readable_path);
+    defer readable.deinit();
+    try std.testing.expectEqual(FileProvenance.readable, readable.file_provenance);
+    try std.testing.expectEqual(false, readable.session_keep_alive_provenance.explicit_valid);
+
+    const directory_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var unreadable = try loadFile(io, allocator, directory_path);
+    defer unreadable.deinit();
+    try std.testing.expectEqual(FileProvenance.unreadable, unreadable.file_provenance);
+
+    const exact = try allocator.alloc(u8, max_config_file_bytes);
+    defer allocator.free(exact);
+    @memset(exact, '#');
+    try tmp.dir.writeFile(io, .{ .sub_path = "exact", .data = exact });
+    const exact_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/exact", .{tmp.sub_path});
+    var exact_loaded = try loadFile(io, allocator, exact_path);
+    defer exact_loaded.deinit();
+    try std.testing.expectEqual(FileProvenance.readable, exact_loaded.file_provenance);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "oversize", .data = exact });
+    const oversize_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/oversize", .{tmp.sub_path});
+    var file = try tmp.dir.openFile(io, "oversize", .{ .mode = .write_only });
+    defer file.close(io);
+    try file.setLength(io, max_config_file_bytes + 1);
+    var oversize = try loadFile(io, allocator, oversize_path);
+    defer oversize.deinit();
+    try std.testing.expectEqual(FileProvenance.oversize, oversize.file_provenance);
 }
 
 test "theme.preset 영속: 한 줄이 16색 팔레트까지 복원 + 개별 override 제거로 충돌 없음 (팔레트 영속 리뷰)" {

@@ -1012,6 +1012,33 @@ test "regionAt: 사이드바·띠·터미널이 갈린다" {
     try std.testing.expectEqual(Region.none, regionAt(g, 400, 10));
 }
 
+test "상태바가 서면 사이드바가 그만큼 짧아진다 — 둘이 안 겹친다" {
+    const g = compute(.{
+        .backing_width_px = 1000,
+        .backing_height_px = 640,
+        .sidebar_width_px = 180,
+        .titlebar_height_px = 38,
+        .cell_width_px = 8,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = 10,
+        .side = .right,
+        .size_pt = 220,
+        .visible = true,
+        .status_bar_px = 27,
+    });
+    // 상태바는 **창 전폭**이라 사이드바 아래까지 지나간다(status-bar.md §1).
+    try std.testing.expectEqual(@as(u32, 0), g.status_bar.x);
+    try std.testing.expectEqual(@as(u32, 1000), g.status_bar.w);
+    // **사이드바 바닥 = 상태바 윗변.** 겹치면 카드가 바 뒤로 숨고, 틈이 벌어지면 배경이 끊긴다.
+    try std.testing.expectEqual(g.status_bar.y, g.sidebar.y + g.sidebar.h);
+    // 터미널·도크도 같은 선에서 멈춘다.
+    try std.testing.expect(g.terminal.y + g.terminal.h <= g.status_bar.y);
+    try std.testing.expect(g.dock.y + g.dock.h <= g.status_bar.y);
+    // 사이드바는 여전히 **창 맨 위**부터다 — 상태바가 그것을 안 건드린다.
+    try std.testing.expectEqual(@as(u32, 0), g.sidebar.y);
+}
+
 test "도크를 접어도 사이드바는 남는다" {
     const base = Input{
         .backing_width_px = 1000,

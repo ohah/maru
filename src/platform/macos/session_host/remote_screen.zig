@@ -12,8 +12,8 @@
 const std = @import("std");
 const maru = @import("maru");
 const terminal = maru.terminal;
-const screen_stream = @import("screen_stream.zig");
-const screen_assembler = @import("screen_assembler.zig");
+const screen_stream = @import("maru").session.screen_stream;
+const screen_assembler = @import("maru").session.screen_assembler;
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 
 const Run = screen_stream.Run;
@@ -246,18 +246,15 @@ fn decodeCodepoints(out: *std.ArrayListUnmanaged(u21), allocator: std.mem.Alloca
     if (out.items.len == 0) try out.append(allocator, ' ');
 }
 
-fn unpackRgb(v: u32) terminal.Rgb {
-    return .{ .r = @intCast((v >> 16) & 0xFF), .g = @intCast((v >> 8) & 0xFF), .b = @intCast(v & 0xFF) };
-}
-
-/// Run wire의 태그드 u32 Color intent를 core `Color`로 푼다(§screen_stream.ColorTag). host가 구운 RGB가 아니라 의도라,
-/// client 렌더가 이 intent를 자기 theme로 해석한다(config 16색 base·bold-is-bright·min-contrast·default 색 — in-process 동일).
+/// Run wire의 태그드 u32 Color intent를 core `Color`로 **옮긴다**. 비트 규칙을 푸는 것은
+/// `screen_stream.decodeColor` 가 하고(인코딩을 정의한 자리가 해석도 소유한다) 여기서는 그 결과를
+/// 코어 타입에 담기만 한다. host 가 구운 RGB 가 아니라 의도라, client 렌더가 이 intent 를 자기
+/// theme 로 해석한다(config 16색 base·bold-is-bright·min-contrast·default 색 — in-process 동일).
 fn unpackColorIntent(v: u32) terminal.Color {
-    const Tag = screen_stream.ColorTag;
-    return switch (v >> Tag.shift) {
-        Tag.default => .default,
-        Tag.indexed => .{ .indexed = @intCast(v & Tag.index_mask) },
-        else => .{ .rgb = unpackRgb(v & Tag.rgb_mask) }, // Tag.rgb — unpackRgb가 채널별 &0xFF로 태그 바이트를 이미 버린다.
+    return switch (screen_stream.decodeColor(v)) {
+        .default => .default,
+        .indexed => |index| .{ .indexed = index },
+        .rgb => |c| .{ .rgb = .{ .r = c.r, .g = c.g, .b = c.b } },
     };
 }
 

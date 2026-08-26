@@ -160,7 +160,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     defer allocator.free(snapshot);
     const assembler = try readSource(
         allocator,
-        "src/platform/macos/session_host/screen_assembler.zig",
+        "src/session/screen_assembler.zig",
     );
     defer allocator.free(assembler);
     const runtime_manager = try readSource(

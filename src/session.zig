@@ -116,6 +116,11 @@ pub const file_tree_layout = @import("session/file_tree_layout.zig"); // 파일 
 pub const workspace = @import("session/workspace.zig");
 pub const workspace_checkpoint = @import("session/workspace_checkpoint.zig"); // P4 C1: dirty 세대·debounce/retry·final Quit 순수 coordinator
 pub const runtime_reconcile = @import("session/runtime_reconcile.zig"); // P4 R2b: manifest↔host inventory 순수 분류
+/// 화면 레코드 wire 코덱(§12). **OS 를 안 부르는 순수 코드**라 여기 산다 — host 가 굽고,
+/// GUI 가 읽고, 폰이 SSH 너머로 받은 것을 같은 코덱으로 조립한다(소비자가 셋이다).
+pub const screen_stream = @import("session/screen_stream.zig");
+/// 위 레코드를 화면 모델로 되돌리는 조립기. 투영의 역이고 역시 순수하다.
+pub const screen_assembler = @import("session/screen_assembler.zig");
 pub const host_protocol = @import("session/host_protocol.zig"); // P5a2: daemon/CLI 공용 typed error와 bounded inventory 응답 정책 SSOT
 pub const cache_path = @import("session/cache_path.zig"); // public CLI와 GUI session-host discovery의 `<cache>/maru` 경로 정책 SSOT
 

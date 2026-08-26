@@ -16,8 +16,8 @@ const external_pump_owner = @import("external_pump_owner.zig");
 const external_tty = @import("external_tty.zig");
 const external_tty_output = @import("external_tty_output.zig");
 const remote_screen = @import("remote_screen.zig");
-const screen_stream = @import("screen_stream.zig");
-const screen_assembler = @import("screen_assembler.zig");
+const screen_stream = @import("maru").session.screen_stream;
+const screen_assembler = @import("maru").session.screen_assembler;
 
 const c = std.c;
 const posix = std.posix;

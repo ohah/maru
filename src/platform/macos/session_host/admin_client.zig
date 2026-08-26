@@ -9,7 +9,7 @@ const discovery = @import("discovery.zig");
 const host_manifest = @import("host_manifest.zig");
 const protocol = @import("protocol.zig");
 const recovery_discovery = @import("recovery_discovery.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const short_endpoint = @import("short_endpoint.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn openpty(

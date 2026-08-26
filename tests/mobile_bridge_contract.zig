@@ -4996,6 +4996,44 @@ test "목록 응답이 세션으로 들어온다" {
     try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_control_listed());
 }
 
+test "화면 코덱이 모바일 타깃에서 컴파일되고 돈다" {
+    // **이 이동의 목적이 이것이다.** 코덱이 `platform/macos` 에 있던 동안에는 폰이 그것을 쓸 수
+    // 없었다(그쪽 배럴은 macOS 조건부다). 목적을 재지 않으면 "옮겼다" 만 남고, 다음 사람이
+    // 되돌려도 아무도 모른다.
+    const stream = maru.session.screen_stream;
+    const assembler = maru.session.screen_assembler;
+
+    // 색 intent 해석도 코덱 쪽에 있다 — 폰이 비트 규칙을 다시 적지 않는다.
+    try std.testing.expectEqual(stream.ColorIntent.default, stream.decodeColor(0));
+
+    var a = assembler.ScreenAssembler.init(std.testing.allocator);
+    defer a.deinit();
+
+    // 한 줄짜리 화면을 만들어 조립해 본다 — 폰이 할 일과 같은 모양이다.
+    var runs = [_]stream.Run{.{ .grapheme = "가", .width = 2, .count = 1 }};
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    const meta = try stream.encodeScreenMeta(std.testing.allocator, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{
+        .cols = 2,
+        .rows = 1,
+        .active_screen = 0,
+        .cursor = .{ .col = 0, .row = 0, .visible = true, .shape = 0 },
+        .modes = 0,
+    });
+    defer std.testing.allocator.free(meta);
+    try stream.appendRecord(&bytes, std.testing.allocator, meta);
+    const row = try stream.encodeRow(std.testing.allocator, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = 0, .runs = &runs });
+    defer std.testing.allocator.free(row);
+    try stream.appendRecord(&bytes, std.testing.allocator, row);
+    try a.applySnapshot(bytes.items);
+
+    const got = a.rowRuns(0);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("가", got[0].grapheme);
+    // 폰 렌더가 셀을 잡을 때 쓰는 값이다 — 양폭이 1로 오면 격자가 어긋난다.
+    try std.testing.expectEqual(@as(u8, 2), got[0].width);
+}
+
 test "알림 한 줄에 목록이 비지 않는다" {
     // 응답이 아닌 프레임(이벤트)이 오면 목록을 지우면 안 된다 — 지우면 화면이 깜빡이며 빈다.
     bridge.maru_mobile_control_reset();

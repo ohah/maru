@@ -16,7 +16,7 @@ const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const socket_server = @import("socket_server.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 

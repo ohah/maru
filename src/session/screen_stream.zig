@@ -142,6 +142,46 @@ pub const ColorTag = struct {
     pub const rgb_mask: u32 = 0xFFFFFF;
 };
 
+/// 태그드 u32 를 푼 결과. **`terminal.Color` 가 아니다** — 이 파일은 wire 코덱이라 코어 타입을
+/// 안 끈다(그래야 폰·host·GUI 셋이 같은 코덱을 쓴다). 각 소비자가 자기 색 타입으로 옮긴다.
+pub const ColorIntent = union(enum) {
+    default,
+    indexed: u8,
+    rgb: struct { r: u8, g: u8, b: u8 },
+};
+
+/// **인코딩을 정의한 자리가 해석도 소유한다.** 예전에는 `remote_screen` 에만 푸는 코드가 있어,
+/// 다른 소비자(폰)가 생기면 그 비트 규칙을 자기 쪽에 다시 적게 되어 있었다 — 규칙이 두 곳에
+/// 생기는 순간 갈린다.
+pub fn decodeColor(v: u32) ColorIntent {
+    return switch (v >> ColorTag.shift) {
+        ColorTag.default => .default,
+        ColorTag.indexed => .{ .indexed = @intCast(v & ColorTag.index_mask) },
+        // rgb 태그(그리고 알 수 없는 태그)는 하위 24비트를 색으로 읽는다 — 마스크가 태그 바이트를
+        // 이미 버리므로 상위 비트가 새지 않는다.
+        else => blk: {
+            const p = v & ColorTag.rgb_mask;
+            break :blk .{ .rgb = .{
+                .r = @intCast((p >> 16) & 0xFF),
+                .g = @intCast((p >> 8) & 0xFF),
+                .b = @intCast(p & 0xFF),
+            } };
+        },
+    };
+}
+
+test "색 intent 해석은 태그마다 갈리고 상위 비트가 안 샌다" {
+    try std.testing.expectEqual(ColorIntent.default, decodeColor(0));
+    try std.testing.expectEqual(@as(u8, 9), decodeColor((ColorTag.indexed << ColorTag.shift) | 9).indexed);
+    const c = decodeColor((ColorTag.rgb << ColorTag.shift) | 0x123456).rgb;
+    try std.testing.expectEqual(@as(u8, 0x12), c.r);
+    try std.testing.expectEqual(@as(u8, 0x34), c.g);
+    try std.testing.expectEqual(@as(u8, 0x56), c.b);
+    // 태그 바이트가 payload 로 새면 r 이 틀어진다.
+    const masked = decodeColor((ColorTag.rgb << ColorTag.shift) | 0xFFFFFF).rgb;
+    try std.testing.expectEqual(@as(u8, 0xFF), masked.r);
+}
+
 /// 화면 메타(snapshot의 첫 record). cols/rows·active/alternate screen·커서·mode bitmask.
 /// wire: cols:u16 | rows:u16 | active_screen:u8 | cursor(col:u16,row:u16,visible:u8,shape:u8) | modes:u32.
 pub const ScreenMeta = struct {

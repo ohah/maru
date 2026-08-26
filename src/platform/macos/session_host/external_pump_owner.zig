@@ -163,7 +163,7 @@ const maru = @import("maru");
 const protocol = @import("protocol.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 
 const OwnerLifecycle = enum(u8) {
     empty,

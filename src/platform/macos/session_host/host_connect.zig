@@ -18,7 +18,7 @@ const registry_mod = @import("registry.zig");
 const socket_server = @import("socket_server.zig");
 const host_manifest = @import("host_manifest.zig");
 const short_endpoint = @import("short_endpoint.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const owner_lease = @import("owner_lease.zig");
 const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const client_deadline = @import("client_deadline.zig");
@@ -1492,7 +1492,7 @@ test "CR4a actual issuer는 bounded connectExistingHostUntil로 existing host에
         .host_id = host_id,
         .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         .protocol_major = protocol.version_major,
-        .screen_codec_version = @import("screen_stream.zig").codec_version,
+        .screen_codec_version = @import("maru").session.screen_stream.codec_version,
         .upgrade_epoch = 0,
         .lifecycle = .ready,
         .endpoint = socket,

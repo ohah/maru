@@ -23,8 +23,8 @@
 const std = @import("std");
 const maru = @import("maru");
 const terminal = maru.terminal;
-const screen_stream = @import("screen_stream.zig");
-const screen_assembler = @import("screen_assembler.zig");
+const screen_stream = @import("maru").session.screen_stream;
+const screen_assembler = @import("maru").session.screen_assembler;
 
 const Run = screen_stream.Run;
 

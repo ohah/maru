@@ -4,7 +4,7 @@ const std = @import("std");
 const host_manifest = @import("host_manifest.zig");
 const socket_server = @import("socket_server.zig");
 const protocol = @import("protocol.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const upgrade_wire = @import("upgrade_wire.zig");
 const upgrade_product = @import("upgrade_product_coordinator.zig");
 

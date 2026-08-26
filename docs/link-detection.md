@@ -349,7 +349,7 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
 - 순수 분류: `src/terminal/selection.zig` — `linkSpanInWord`(구 `urlSpanInWord`), `LinkKind`/`LinkScopes`/`LinkSpan`,
   뷰포트 전체 수집 `collectViewportLinks`(원격 host가 방출할 span 목록을 만드는 단일 출처 — 로컬 조회와 같은 분류기를 쓴다).
 - resolve+stat·facade: `src/terminal/core.zig` — `extractUrlAt`, `resolveClickedPath`, `currentCwd`(OSC 7).
-- 원격(host-backed): wire record `src/platform/macos/session_host/screen_stream.zig`(`link_spans`), host 방출
+- 원격(host-backed): wire record `src/session/screen_stream.zig`(`link_spans`), host 방출
   `screen_snapshot.zig`, client 조립 `screen_assembler.zig`·`remote_screen.zig`, 클릭 RPC `remote_runtime.zig`
   (`runtime.link_at`)·`server.zig`. 설계 근거는 위 §원격(host-backed) 세션.
 - 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·`hoverCursor`·pane 라우팅 `paneTargetAt`·밑줄 `hoverLinkSpanFor`·

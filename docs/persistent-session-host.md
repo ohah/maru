@@ -6098,6 +6098,16 @@ magic "MRSS"(4) | kind:u8 (0=snapshot, 1=delta) | reserved:u8 x3 | len:u32 LE | 
 `magic`은 셸이 끼워 넣은 잡음(프로필 배너 등)과 첫 프레임을 가르는 자리다 — 컨트롤 채널의 `hello` 찾기와 같은
 이유로 필요하다(§4a). `len`은 `screen_stream.max_record_stream_bytes`(16 MiB)를 넘지 않는다.
 
+**코덱은 OS 중립 자리에 있다.** `screen_stream`(레코드 wire)과 `screen_assembler`(그 역)는
+`src/session/`이 소유한다 — OS를 안 부르는 순수 코드이고 소비자가 셋이기 때문이다: host가 굽고,
+GUI가 읽고, **폰이 SSH 너머로 받은 것을 같은 코덱으로 조립한다**. `platform/macos` 아래 두면 폰이
+그 배럴에 닿지 못한다(그쪽은 macOS 조건부다).
+
+색은 resolved RGB가 아니라 **태그드 intent**이고, 그것을 푸는 `decodeColor`도 `screen_stream`이
+소유한다 — **인코딩을 정의한 자리가 해석도 소유한다.** 예전에는 `remote_screen`에만 푸는 코드가
+있어, 소비자가 늘면 그 비트 규칙을 각자 다시 적게 되어 있었다. 반환은 코어 타입이 아니라 순수
+union이라 코덱이 `terminal.Color`를 끌지 않는다(각 소비자가 자기 색 타입으로 옮긴다).
+
 **delta의 base는 client가 유지한다.** `--stream`도 받은 레코드를 자기 조립기에 그대로 적용한다 — 적용을
 건너뛰면 다음 delta의 base가 어긋난다. 즉 흘리는 것은 부수 효과이고, 상태 유지는 그대로다.
 
@@ -6634,7 +6644,7 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
 - codec decoder는 unknown optional record를 length로 skip하고 unknown required record, run이 row 폭을 넘는 경우, wide-cell
   continuation 불일치, UTF-8/length/cap 손상을 snapshot 전체 reject로 처리한다.
 
-구현이 확정한 바이트 레이아웃(§12 필드 목록을 바이트로 확정 — **단일 출처는 `src/platform/macos/session_host/screen_stream.zig`**,
+구현이 확정한 바이트 레이아웃(§12 필드 목록을 바이트로 확정 — **단일 출처는 `src/session/screen_stream.zig`**,
 각 record struct 주석이 미러다):
 
 - record header는 **28바이트**다: `codec_version:u16=2`(current, capability-tagged N-1은 exact 1) |
@@ -6797,7 +6807,7 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
   kind별 payload cap)와 `session_host/framing.zig`(partial I/O incremental `FrameParser`·`encodeFrame`·cap을 payload 적재 전
   거부·unknown required 닫기·unknown optional skip)를 추가했다. 순수 OS-중립 codec(platform import 0)이라 non-macOS에서
   wire 회귀를 고정한다(`test-session-host`).
-- **P3-b(screen-stream codec) ✅**: `session_host/screen_stream.zig`에 §12 current `maru.screen-stream.v2`와
+- **P3-b(screen-stream codec) ✅**: `src/session/screen_stream.zig`에 §12 current `maru.screen-stream.v2`와
   capability-tagged frozen N-1 v1 reader를 구현했다 —
   28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob·prompt_marks), delta record(set_runs·
   clear_rect·scroll_rect·cursor·modes·image_place·image_remove·prompt_marks) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/

@@ -11,8 +11,8 @@ const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const generation_batch_registry = @import("generation_batch_registry.zig");
 const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_screen = @import("remote_screen.zig");
-const screen_assembler = @import("screen_assembler.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_assembler = @import("maru").session.screen_assembler;
+const screen_stream = @import("maru").session.screen_stream;
 const catchup_stage_contract = @import("catchup_stage_contract.zig");
 
 pub const AttachmentBatchLease = union(enum) {

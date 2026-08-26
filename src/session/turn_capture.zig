@@ -143,6 +143,13 @@ pub const Turn = struct {
     /// **경로 항목과 독립이다.** 셸만 쓴 턴은 `entries` 가 비어도 이 수가 있고, `seal` 이 그 경우도
     /// 봉인한다(아래) — 고지가 **가장 필요한 자리**가 바로 그 턴이기 때문이다.
     shell_calls: u32 = 0,
+    /// **봉인 때 한 번 센** 「에이전트가 실제로 고친 경로 수」(= `editedByAgent()` 가 참인 항목).
+    ///
+    /// 화면이 이 수를 **턴 행마다 매 프레임** 읽는다. 그때마다 세면 `sameAs` 가 `.text` 두 쪽을
+    /// `mem.eql` 로 비교하는데 한 쪽이 **최대 `max_capture_bytes`(1 MiB)** 다 — 길이가 같은 편집
+    /// (한 글자 치환·되돌린 편집)은 전부를 비교한다. 항목 최대 256 × 행 최대 8 이면 **프레임마다
+    /// 수백 MiB** 를 훑을 수 있다. 봉인 뒤 `entries` 는 안 변하므로 그때 한 번 세는 것으로 족하다.
+    edited_count: u32 = 0,
 
     pub fn deinit(self: *Turn, gpa: std.mem.Allocator) void {
         for (self.entries.items) |*e| {
@@ -168,7 +175,12 @@ pub const Turn = struct {
     }
 
     /// **에이전트 편집 도구가 실제로 바꾼 파일 수.** 화면의 `✎ M` 이 이 값이다.
-    pub fn editedCount(self: *const Turn) u32 {
+    /// 지금 항목을 **실제로 훑어** 센다 — `seal` 이 한 번 부르고, 테스트가 쓴다.
+    ///
+    /// ⚠️ **화면은 이것을 부르지 않는다.** 매 프레임 도는 자리에서는 `edited_count` 를 읽는다
+    /// (위 그 필드의 주석에 이유를 적었다 — 여기 `mem.eql` 이 최대 1 MiB 를 훑는다).
+    /// 「봉인 전엔 0을 내는 래퍼」를 두지 않는 이유는 그 래퍼가 **부르는 쪽을 속이기** 때문이다.
+    pub fn countEdited(self: *const Turn) u32 {
         var n: u32 = 0;
         for (self.entries.items) |e| {
             if (e.editedByAgent()) n += 1;
@@ -192,7 +204,7 @@ pub const Id = u64;
 /// 상한이 **링에서 파생된다** — 새 상한을 발명하지 않는다. 세션 8 × 링 8 = 64.
 pub const max_open: usize = 8;
 
-/// 봉인 자리. **링이 가리킬 수 있는 최대(64) + 1** 이다.
+/// 봉인 자리. **링이 가리킬 수 있는 최대(64) + 2** 다.
 ///
 /// **+1 의 이유**: 새 턴은 링에 실리기 **전에** 봉인된다. 링이 64개를 꽉 가리키는 순간 65번째를 봉인하면
 /// 자리가 없어 `seal` 이 가장 오래된 것을 밀어내는데, 그 자리에서는 **아직 가리켜지는 사본**이 밀린다 —
@@ -201,7 +213,17 @@ pub const max_open: usize = 8;
 ///
 /// 호출자는 **봉인 전에 sweep 을 돌려** 고아를 먼저 비운다(`captureTurnSnapshot`) — 이 +1 은 그 뒤에도
 /// 남는 «전부 살아 있는» 경우만 덮는 마지막 한 칸이다.
-pub const max_sealed: usize = 64 + 1;
+/// **+2 의 내역**(둘 다 「링에 없지만 살아 있는 것」이다):
+///
+/// 1. **요청 중인 사본 하나.** 봉인된 사본은 `submitSnapshot` 뒤 harvest 가 돌 때까지 링에 안 들어간다.
+///    호출자는 그 id 를 살아 있는 것으로 쳐 sweep 에서 지킨다.
+/// 2. **지금 봉인하는 것 하나.** 위 둘이 다 살아 있는 순간(링 64 + 요청 중 1 = 65)에도 새 턴을 담을
+///    자리가 있어야 한다 — 없으면 `seal` 이 가장 오래된 것을 밀어내는데 그것이 **아직 가리켜지는 사본**
+///    이고, 그러면 그 턴의 `✎` 와 고지가 조용히 0이 된다.
+///
+/// ⚠️ **이 값은 「살아 있는 것의 최대」와 함께 움직인다.** 요청 중 사본을 살려 두는 고침(2026-08-26)을
+/// 넣으면서 이 산술을 다시 안 봐 65로 남아 있었고, 적대적 검증이 그 한 칸을 잡았다.
+pub const max_sealed: usize = 64 + 2;
 pub const max_session_id_len: usize = 64;
 
 const OpenSlot = struct {
@@ -398,6 +420,10 @@ pub const Store = struct {
             slot.turn.deinit(gpa);
             return 0;
         }
+        // **여기서 한 번 센다.** 봉인 뒤 `entries` 는 안 변하고, 화면은 이 수를 매 프레임 읽는다.
+        // (`after` 는 이 호출 직전에 다 채워져 있다 — `sealTurnCapture` 가 그 루프를 먼저 돈다.)
+        slot.turn.edited_count = slot.turn.countEdited();
+
         const id = self.next_id;
         self.next_id += 1;
 
@@ -487,7 +513,7 @@ test "읽기만 한 파일은 ✎ 로 세지 않는다 — 내용이 달라져�
     store.noteAfter(gpa, "S1", "/r/e.zig", .{ .text = try gpa.dupe(u8, "two") });
 
     const turn = store.openTurn("S1").?;
-    try testing.expectEqual(@as(u32, 1), turn.editedCount());
+    try testing.expectEqual(@as(u32, 1), turn.countEdited());
     try testing.expect(!turn.entries.items[0].editedByAgent());
     try testing.expect(turn.entries.items[1].editedByAgent());
 }
@@ -498,7 +524,7 @@ test "편집했지만 내용이 같으면 세지 않는다" {
     defer store.deinit(gpa);
     try testing.expect(store.noteBefore(gpa, "S1", "/r/a.zig", .edit, .{ .text = try gpa.dupe(u8, "same") }));
     store.noteAfter(gpa, "S1", "/r/a.zig", .{ .text = try gpa.dupe(u8, "same") });
-    try testing.expectEqual(@as(u32, 0), store.openTurn("S1").?.editedCount());
+    try testing.expectEqual(@as(u32, 0), store.openTurn("S1").?.countEdited());
 }
 
 test "모르는 쪽이 있으면 같다고도 다르다고도 하지 않는다" {
@@ -672,13 +698,20 @@ test "봉인 자리가 꽉 차도 **살아 있는 사본**은 밀려나지 않�
         live[i] = store.seal(gpa, sid);
         try testing.expect(live[i] != 0);
     }
-    // 65번째를 봉인한다 — **+1 칸이 이 전이를 덮는다.**
-    try testing.expect(store.noteBefore(gpa, "S-new", "/r/b.zig", .edit, .empty));
+    // 65번째를 봉인한다 — 호출자가 이것을 «요청 중» 으로 붙들어 둘 수 있다(harvest 전까지 링에 없다).
+    try testing.expect(store.noteBefore(gpa, "S-flight", "/r/b.zig", .edit, .empty));
+    const in_flight = store.seal(gpa, "S-flight");
+    try testing.expect(in_flight != 0);
+
+    // **66번째**를 봉인한다 — 링 64 + 요청 중 1 이 모두 살아 있는 순간이다. `+2` 가 이 전이를 덮는다.
+    try testing.expect(store.noteBefore(gpa, "S-new", "/r/c.zig", .edit, .empty));
     const fresh = store.seal(gpa, "S-new");
     try testing.expect(fresh != 0);
 
-    // 살아 있던 64개가 **하나도 안 밀렸다** — 밀어내는 구현은 `live[0]` 에서 죽는다.
+    // 살아 있던 65개가 **하나도 안 밀렸다** — 자리가 모자라면 `seal` 이 가장 오래된 것을 밀어내는데
+    // 그것이 `live[0]` 이다. `+1` 만 두면 여기서 죽는다.
     for (live) |id| try testing.expect(store.sealedTurn(id) != null);
+    try testing.expect(store.sealedTurn(in_flight) != null);
     try testing.expect(store.sealedTurn(fresh) != null);
 }
 

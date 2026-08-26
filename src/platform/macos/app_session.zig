@@ -20344,7 +20344,9 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
     try std.testing.expectEqual(@as(usize, 2), sealed.entries.items.len);
     try std.testing.expectEqualStrings("after!\n", sealed.entries.items[0].after.?.text);
     // **핵심 판정**: 편집 도구가 바꾼 것만 센다. 둘 다 내용이 달라졌는데 답은 1이다.
-    try std.testing.expectEqual(@as(u32, 1), sealed.editedCount());
+    try std.testing.expectEqual(@as(u32, 1), sealed.edited_count);
+    // **캐시가 훑어 센 값과 같아야 한다** — 봉인이 안 채우면 여기서 0 ≠ 1 로 갈린다.
+    try std.testing.expectEqual(sealed.countEdited(), sealed.edited_count);
 }
 
 // [AT3 §4.4] **backlog 따라잡기 중에는 캡처하지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 도구가
@@ -20506,6 +20508,56 @@ test "훅 캡처: 링에 실리기 전 요청 중인 사본을 sweep 이 지우�
 
 // [AT4 §5] **셸 호출은 캡처와 같은 게이트를 지난다.** 게이트를 공유하지 않으면 「창이 없던 시간의 셸
 // 명령」이 지금 턴에 세어져 고지가 **거짓 수**를 말한다.
+// [AT4] **셸만 쓴 턴도 봉인에 닿아야 한다.** `Store.seal` 은 「붙일 것이 있으면 봉인한다」로 넓혔지만
+// 배선이 그 앞에서 `entries.len == 0` 으로 돌아서면 **경로가 0개인 셸 전용 턴이 seal 에 닿지 못한다** —
+// 그러면 `capture_id == 0` 이 되어 **고지가 가장 필요한 자리에서만 사라진다.** 순수 층 테스트는
+// `Store.seal` 을 직접 부르므로 이 갈라짐을 못 잡는다. 그래서 배선으로 한 번 더 묻는다.
+test "훅 캡처: 셸만 쓴 턴도 배선에서 봉인된다 (AT4)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-only" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-only",
+        .tool_name = "Bash",
+        .tool_command = "ls",
+    });
+    // 경로는 **하나도 없다** — 셸 도구는 경로를 안 준다.
+    try std.testing.expectEqual(@as(usize, 0), session.turn_captures.openTurn("S-only").?.entries.items.len);
+
+    const id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(id != 0);
+    try std.testing.expectEqual(@as(u32, 1), (session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn).shell_calls);
+
+    // **결과 Ⓑ** — 봉인에 닿아야 `seal` 의 `defer` 가 열린 슬롯을 비운다. 안 닿으면 슬롯이 남아
+    // **셸 수가 다음 턴으로 샌다**(턴1 이 3회면 턴2 가 「5개」라고 말한다). 같은 세션에 한 번 더 물어본다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-only",
+        .tool_name = "Bash",
+        .tool_command = "pwd",
+    });
+    try std.testing.expectEqual(@as(u32, 1), session.turn_captures.openTurn("S-only").?.shell_calls);
+
+    // **반대쪽** — 셸도 경로도 없는 턴은 여전히 `0` 이다. 이것이 없으면 「무조건 봉인한다」가 통과한다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-none" });
+    try std.testing.expectEqual(@as(u64, 0), agent_ops.sealTurnCaptureNow(session, term));
+}
+
 test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -20615,6 +20667,62 @@ test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
         .tool_name = "Agent",
     });
     try std.testing.expectEqual(@as(u32, 4), session.turn_captures.openTurn("S-sh").?.shell_calls);
+}
+
+// [AT3] **회전본은 진행 중 턴의 사본을 훔쳐 가면 안 된다.** 회전본에 `Stop` 이 들어 있으면 그 자리에서
+// 봉인이 돌 수 있는데, 그 이벤트의 도구는 이미 오래전에 끝나 사본이 없다 — 그런데도 봉인하면 **지금
+// 진행 중인 턴의 열린 버킷**이 엉뚱한 턴으로 굳고 진짜 턴 끝에는 빈 버킷만 남는다.
+test "훅 캡처: 회전본의 Stop 이 진행 중 턴의 사본을 가져가지 않는다 (AT3)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.writeFile(io, .{ .sub_path = "live.zig", .data = "진행 중\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-rot2" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-rot2", .turn_key = "p-live" });
+
+    // 진행 중 턴이 사본을 하나 들고 있다.
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/live.zig", .{root});
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .pre_tool_use,
+        .session_id = "S-rot2",
+        .tool_name = "Edit",
+        .file_path = abs,
+    });
+    try std.testing.expectEqual(@as(usize, 1), session.turn_captures.openTurn("S-rot2").?.entries.items.len);
+
+    // 회전본에 **옛 턴의 `Stop`** 이 들어 있다.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "rot.ndjson",
+        .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"S-rot2\",\"prompt_id\":\"p-old\"}\n",
+    });
+    var rot_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rotated = try std.fmt.bufPrint(&rot_buf, "{s}/rot.ndjson", .{root});
+    agent_ops.drainRotatedAgentHookLogForTest(session, term, rotated);
+
+    // **진행 중 사본이 그대로 있어야 한다** — 봉인하는 구현은 여기서 죽는다(버킷이 비어 있게 된다).
+    const open = session.turn_captures.openTurn("S-rot2") orelse return error.CaptureStolen;
+    try std.testing.expectEqual(@as(usize, 1), open.entries.items.len);
+    try std.testing.expectEqualStrings("진행 중\n", open.entries.items[0].before.text);
 }
 
 // [AT3 §4.4] **회전본의 `PreToolUse` 로는 before 를 뜨지 않는다.** 회전본은 이미 지나간 이벤트라 그 도구는

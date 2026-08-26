@@ -54,6 +54,7 @@ for bin in maru-macos-app maru; do
 done
 # Helper의 Swift executable만 lipo 대상이다. Info/resource가 arch build 사이에서 달라지면 arm
 # 번들을 임의 선택하지 않고 실패해 embedded digest와 nested resource seal의 결합을 보존한다.
+cmp "$work/arm.app/Contents/Info.plist" "$work/x86.app/Contents/Info.plist"
 cmp "$work/arm.app/$helper_rel/Contents/Info.plist" "$work/x86.app/$helper_rel/Contents/Info.plist"
 cmp "$work/arm.app/$helper_rel/Contents/Resources/web/mermaid-helper.js" "$work/x86.app/$helper_rel/Contents/Resources/web/mermaid-helper.js"
 lipo -create \

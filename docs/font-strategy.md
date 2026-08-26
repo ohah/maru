@@ -153,7 +153,7 @@ font.family-italic = ""
 
 - 자산은 `assets/fonts/<Family>/`에 둔다(`.ttf` + 라이선스 파일 `OFL.txt`/`LICENSE.md`). **재배포 의무상 라이선스 동봉은 필수.**
 - `build.zig`의 `macos-app-bundle` 단계가 모든 `assets/fonts/*/*.ttf`를 `Maru.app/Contents/Resources/Fonts/`에 평평하게 복사하고, 라이선스는 패밀리명 프리픽스로 충돌 없이 함께 넣는다.
-- `MaruAppHost-Info.plist`의 `ATSApplicationFontsPath = Fonts`가 그 디렉터리를 스캔해 **앱 실행 시 자동 등록**한다. 그래서 폰트 추가에는 Zig/Swift 코드 변경이 필요 없다.
+- `MaruAppHost-Info.plist.in`에서 생성한 plist의 `ATSApplicationFontsPath = Fonts`가 그 디렉터리를 스캔해 **앱 실행 시 자동 등록**한다. 그래서 폰트 추가에는 Zig/Swift 코드 변경이 필요 없다.
 - **새 패밀리 추가** = `assets/fonts/<NewFamily>/`에 `.ttf` + 라이선스를 넣기만 하면 된다(빌드가 자동 포함). 이 표와 [third-party 라이선스](third-party-licenses.md)를 갱신한다.
 - **GUI 폰트 피커**: 세팅 GUI의 `font.family` 행은 이 번들 목록을 **열리는 드롭다운 팝업**으로 고른다(Enter/클릭으로 열고 ↑↓ 라이브 미리보기·Enter 확정·Esc 원복). 목록 끝의 **"직접 입력…"** 항목을 고르면 인라인 편집이 열려 목록 밖 시스템 폰트를 타이핑한다. 목록의 단일 출처는 `theme.bundled_font_families`(config) — 새 번들 폰트를 추가하면 이 상수도 함께 갱신한다(첫 항목=기본 `font.family`). 세부는 [config GUI](config-gui.md) §폰트 피커.
 

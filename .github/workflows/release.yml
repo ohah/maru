@@ -40,6 +40,18 @@ jobs:
           # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
           cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      - name: Verify release version SSOT
+        env:
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_REF_TYPE" == tag ]]; then
+            zig build check-release-version -Drelease-tag="$RELEASE_TAG"
+          else
+            zig build check-release-version
+          fi
+
       - name: Import Developer ID certificate
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}

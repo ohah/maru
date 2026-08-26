@@ -59,7 +59,7 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
   `-iframeworkwithsysroot`/`-iwithsysroot`를 줘 framework 헤더 내부의 angle include(`<libDER/...>`)와
   availability 메타데이터가 SDK 컨텍스트로 풀리게 한다(해당 코드 주석에 근거). native 빌드에는 무해하다.
 - **최소 macOS는 11.0**(Big Sur, Apple Silicon 시작 버전 = arm64 하한). `build.zig`의 `default_target`
-  os_version_min과 `MaruAppHost-Info.plist`의 `LSMinimumSystemVersion`을 함께 11.0으로 맞춘다.
+  os_version_min과 `MaruAppHost-Info.plist.in`의 `LSMinimumSystemVersion`을 함께 11.0으로 맞춘다.
 
 ## 서명·공증
 
@@ -179,16 +179,16 @@ trusted tag workflow가 B 후보로 만든다. source가 merge됐다는 사실�
 release workflow의 모든 third-party Action은 full commit SHA로 pin한다.
 release A/B의 실제 준비 상태와 남은 외부 gate는 [검증 매트릭스](verification-matrix.md)가 추적한다.
 
-`build.zig.zon`의 `.version`이 선언된 repository version SSOT지만 현재 macOS Info.plist의
-`CFBundleShortVersionString`은 정적 값이고 DMG 이름은 그 plist를 다시 읽으므로 release 산출물까지 SSOT가 관통하지 않는다.
-session-host manifest/release workflow를 구현하기 전에 plist 생성을 SSOT에 연결하고 `tag = v<SSOT> =
-CFBundleShortVersionString = manifest.release.version` 검증을 먼저 배포한다.
+`build.zig.zon`의 `.version`이 repository version SSOT이며 release 값은 canonical 숫자 `major.minor.patch` 세 요소다. 빌드는 `MaruAppHost-Info.plist.in`의 exact-one placeholder를
+이 값으로 치환한 plist 하나를 만들고 bare executable과 `.app` bundle 양쪽에 같은 bytes를 사용한다. release tag workflow는
+서명 secret을 열기 전에 `tag = v<SSOT>`를 검증하며 DMG 이름도 생성된 plist의 `CFBundleShortVersionString`을 읽는다.
+후속 session-host manifest workflow는 `manifest.release.version = SSOT` 검증을 같은 gate에 추가한다.
 
 ## 버전 정책
 
 - 버전 단일 출처는 `build.zig.zon`의 `.version`이다(현재 `0.0.0` placeholder, `conformance-testing.md` 참고).
 - 릴리스 시 `.version`을 올리고 태그(`v<버전>`)를 만든다. dmg 산출물 이름의 버전은 빌드 시
-  `Info.plist`(`CFBundleShortVersionString`)에서 읽는다.
+  생성된 `Info.plist`(`CFBundleShortVersionString`)에서 읽는다.
 
 ## 라이선스와 attribution
 

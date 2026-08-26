@@ -3685,6 +3685,43 @@ pub fn build(b: *std.Build) void {
         run_delivery_backend_tests.addArg("--maru-expect-tests=2");
         session_host_notification_delivery_step.dependOn(&run_delivery_backend_tests.step);
     }
+    const session_host_config_provenance_step = b.step(
+        "test-session-host-config-provenance",
+        "Verify session default G1 config and file provenance",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |provenance_optimize| {
+        const provenance_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/config.zig"),
+                .target = target,
+                .optimize = provenance_optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"Session default G1 config provenance"},
+        });
+        provenance_tests.root_module.addAnonymousImport("config_doc_md", .{
+            .root_source_file = b.path("docs/configuration.md"),
+        });
+        const run_provenance_tests = b.addRunArtifact(provenance_tests);
+        // config/terminal aggregate roots are comptime test carriers in addition to the two G1 cases.
+        run_provenance_tests.addArg("--maru-expect-tests=4");
+        session_host_config_provenance_step.dependOn(&run_provenance_tests.step);
+        test_step.dependOn(&run_provenance_tests.step);
+
+        const provenance_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_config_provenance_boundary.zig"),
+                .target = target,
+                .optimize = provenance_optimize,
+            }),
+            .filters = &.{"Session default G1 provenance boundary"},
+        });
+        const run_provenance_boundary_tests = b.addRunArtifact(provenance_boundary_tests);
+        run_provenance_boundary_tests.addArg("--maru-expect-tests=1");
+        run_provenance_boundary_tests.setCwd(b.path("."));
+        session_host_config_provenance_step.dependOn(&run_provenance_boundary_tests.step);
+        boundary_step.dependOn(&run_provenance_boundary_tests.step);
+    }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

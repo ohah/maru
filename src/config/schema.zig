@@ -787,7 +787,9 @@ pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
 
 // ── 파싱 프리미티브(CS-1 한정 중복 — CS-2에서 loader와 단일화 예정) ─────────────────────────────────
 
-fn parseBool(value: []const u8) ?bool {
+/// Config bool 문법의 단일 출처. loader의 provenance 관측도 이 함수를 사용해야
+/// resolved 값과 "유효하게 명시됨" 판정이 갈라지지 않는다.
+pub fn parseBool(value: []const u8) ?bool {
     if (std.mem.eql(u8, value, "true")) return true;
     if (std.mem.eql(u8, value, "false")) return false;
     return null;

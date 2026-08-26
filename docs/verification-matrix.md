@@ -2271,3 +2271,17 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **남은 OS gate:** provisioned signed runner에서 GUI 0 OSC 발화→실제 배너 클릭→cold launch와 GUI-live 발화→Quit→기존
   배너 클릭이 모두 원래 `host_id:runtime_id` 및 child PID 불변으로 attach하는 구조화 artifact가 필요하다. synthetic
   `UNNotificationResponse`나 source fixture는 이 Notification Center gate를 대체하지 않는다.
+
+### Session default G1 config provenance
+
+- **상태: 구현, G2 정책 소비 전.** resolved `session.keep-alive-after-quit` bool과 별도로 마지막 적용 가능한
+  syntactic occurrence를 `absent | explicit_valid(value) | explicit_invalid`로 보존한다. bool 유효성은 schema parser가
+  단일 소유하며 provenance 전용 parser를 두지 않는다. invalid occurrence는 직전 resolved bool을 유지한 채 provenance만
+  `explicit_invalid`로 바꾼다. 현재 OS suffix와 generic은 같은 파일 순서를 따르고 외국 OS
+  occurrence는 provenance에 영향을 주지 않는다.
+- **자동 검증:** `zig build test-session-host-config-provenance`가 Debug·ReleaseFast에서 config aggregate의 미설정,
+  valid→invalid, invalid→valid, generic/current-OS 양방향 순서와 foreign-OS
+  무관성을 검증한다. 실제 파일 경계는 missing/readable/directory-unreadable/정확히 1 MiB readable/1 MiB+1 oversize를
+  검증한다. G1은 기존 `default=false`와 forgiving load 동작을 유지하며 파일 write·notice·bootstrap을 실행하지 않는다.
+- **다음 gate:** G2만 이 관측을 app-instance lease 아래 소비해 explicit override materialization과 Reset retention을
+  구현한다. G1의 parser/file fixture를 G2의 실제 migration 성공·실패·경합 증거로 대체해 해석하지 않는다.

@@ -7294,8 +7294,12 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     `notification_delivery_v1` client는 exact `{stream_id,delivery_version:1}`로 opt-in하고 응답은 exact
     `{event:null|{hid,rid,eid,occurred_at_ns,title,body,display_label}}`이고 기존 `notification_stream_auth_v1` client에는
     `{title,body}` adapter를 유지한다. response body와 stable key가 connection control queue에 admission된 뒤에만 `.gui`
-    ack를 commit한다. GUI는 key를
-    인앱 history와 OS request에 함께 투영하지만 OS sink의 `.os` bit를 내리지 않는다. legacy client에는 기존 단일-slot
+    ack를 commit한다. GUI는 host-backed event의 typed `{hid,rid,eid}`를 인앱 history row의 optional owned scalar route와
+    Swift ABI의 별도 out field에 그대로 투영한다. occurrence timestamp와 display label도 GUI 수신 시각/현재 binding으로
+    다시 만들지 않고 event snapshot을 쓴다. Swift는 route가 있을 때 daemon과 같은
+    `maru-{hid:032x}-{rid:032x}-{eid}` request identifier 및 문자열 `hid`/`rid`·숫자 `eid` userInfo를 사용해 양쪽 제출이
+    Notification Center row 하나를 replace하게 한다. route 없는 in-process·hook·앱 자체 알림은 기존 UUID와
+    window-token/surface route를 유지한다. 표시 문자열에서 route를 역파싱하지 않으며 OS sink의 `.os` bit를 내리지 않는다. legacy client에는 기존 단일-slot
     adapter를 유지하되 같은 event를 journal과 legacy slot 양쪽에서 소비시키지 않는 negotiated owner가 하나뿐이다.
   - daemon-internal macOS adapter는 별도 MRSH client나 `AppSession` 없이 `pending_os` row를 게시한다. `hid`·`rid`·`eid`를
     표시 문자열과 분리된 typed route로 넘기며 OS API가 request를 받아들인 뒤에만 `.os` ack한다. permission denied,

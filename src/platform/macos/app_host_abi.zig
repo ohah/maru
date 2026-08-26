@@ -111,8 +111,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v173 final Quit checkpoint values match the C header" {
-    try std.testing.expectEqual(@as(u32, 173), abi_version);
+test "ABI v174 notification route and final Quit checkpoint values match the C header" {
+    try std.testing.expectEqual(@as(u32, 174), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1576,6 +1576,12 @@ pub export fn maru_macos_app_session_pending_notification(
     body_len: ?*usize,
     surface_id_out: ?*u64,
     foreground_out: ?*u32,
+    route_present_out: ?*u32,
+    host_id_hi_out: ?*u64,
+    host_id_lo_out: ?*u64,
+    runtime_id_hi_out: ?*u64,
+    runtime_id_lo_out: ?*u64,
+    event_id_out: ?*u64,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const has = has_out orelse return @intFromEnum(Status.null_out);
@@ -1585,6 +1591,12 @@ pub export fn maru_macos_app_session_pending_notification(
     const bl = body_len orelse return @intFromEnum(Status.null_out);
     const sid = surface_id_out orelse return @intFromEnum(Status.null_out);
     const fg = foreground_out orelse return @intFromEnum(Status.null_out);
+    const route_present = route_present_out orelse return @intFromEnum(Status.null_out);
+    const hid_hi = host_id_hi_out orelse return @intFromEnum(Status.null_out);
+    const hid_lo = host_id_lo_out orelse return @intFromEnum(Status.null_out);
+    const rid_hi = runtime_id_hi_out orelse return @intFromEnum(Status.null_out);
+    const rid_lo = runtime_id_lo_out orelse return @intFromEnum(Status.null_out);
+    const eid = event_id_out orelse return @intFromEnum(Status.null_out);
     const n = app_session.pendingNotification() orelse {
         has.* = 0;
         tp.* = null;
@@ -1593,6 +1605,12 @@ pub export fn maru_macos_app_session_pending_notification(
         bl.* = 0;
         sid.* = 0;
         fg.* = 0;
+        route_present.* = 0;
+        hid_hi.* = 0;
+        hid_lo.* = 0;
+        rid_hi.* = 0;
+        rid_lo.* = 0;
+        eid.* = 0;
         return @intFromEnum(Status.ok);
     };
     has.* = 1;
@@ -1602,7 +1620,63 @@ pub export fn maru_macos_app_session_pending_notification(
     bl.* = n.body.len;
     sid.* = n.surface_id;
     fg.* = if (n.foreground_banner) 1 else 0;
+    writeNotificationRoute(n.route, route_present, hid_hi, hid_lo, rid_hi, rid_lo, eid);
     return @intFromEnum(Status.ok);
+}
+
+fn writeNotificationRoute(
+    route: ?session_mod.StableNotificationRoute,
+    present: *u32,
+    host_hi: *u64,
+    host_lo: *u64,
+    runtime_hi: *u64,
+    runtime_lo: *u64,
+    event_id: *u64,
+) void {
+    if (route) |stable| {
+        present.* = 1;
+        host_hi.* = @intCast(stable.host_id >> 64);
+        host_lo.* = @truncate(stable.host_id);
+        runtime_hi.* = @intCast(stable.runtime_id >> 64);
+        runtime_lo.* = @truncate(stable.runtime_id);
+        event_id.* = stable.event_id;
+    } else {
+        present.* = 0;
+        host_hi.* = 0;
+        host_lo.* = 0;
+        runtime_hi.* = 0;
+        runtime_lo.* = 0;
+        event_id.* = 0;
+    }
+}
+
+test "P4 N2b3 notification ABI projects the complete stable route and zeroes route-less output" {
+    var present: u32 = 99;
+    var host_hi: u64 = 99;
+    var host_lo: u64 = 99;
+    var runtime_hi: u64 = 99;
+    var runtime_lo: u64 = 99;
+    var event_id: u64 = 99;
+
+    writeNotificationRoute(.{
+        .host_id = 0x00112233445566778899aabbccddeeff,
+        .runtime_id = 0xffeeddccbbaa99887766554433221100,
+        .event_id = 0x0123456789abcdef,
+    }, &present, &host_hi, &host_lo, &runtime_hi, &runtime_lo, &event_id);
+    try std.testing.expectEqual(@as(u32, 1), present);
+    try std.testing.expectEqual(@as(u64, 0x0011223344556677), host_hi);
+    try std.testing.expectEqual(@as(u64, 0x8899aabbccddeeff), host_lo);
+    try std.testing.expectEqual(@as(u64, 0xffeeddccbbaa9988), runtime_hi);
+    try std.testing.expectEqual(@as(u64, 0x7766554433221100), runtime_lo);
+    try std.testing.expectEqual(@as(u64, 0x0123456789abcdef), event_id);
+
+    writeNotificationRoute(null, &present, &host_hi, &host_lo, &runtime_hi, &runtime_lo, &event_id);
+    try std.testing.expectEqual(@as(u32, 0), present);
+    try std.testing.expectEqual(@as(u64, 0), host_hi);
+    try std.testing.expectEqual(@as(u64, 0), host_lo);
+    try std.testing.expectEqual(@as(u64, 0), runtime_hi);
+    try std.testing.expectEqual(@as(u64, 0), runtime_lo);
+    try std.testing.expectEqual(@as(u64, 0), event_id);
 }
 
 // 데스크톱 알림 클릭 → 발신 surface로 활성화. Swift가 알림 userInfo의 (창 토큰, surface_id)에서 토큰으로 올바른

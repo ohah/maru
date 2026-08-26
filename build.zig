@@ -34,6 +34,10 @@ fn linkSessionHostNotificationAdapter(b: *std.Build, compile: *std.Build.Step.Co
             "/usr/include",
         },
     });
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/platform/macos/session_host_notification_route.c"),
+        .flags = &.{},
+    });
     compile.root_module.linkFramework("Foundation", .{});
     compile.root_module.linkFramework("UserNotifications", .{});
 }
@@ -1322,6 +1326,12 @@ pub fn build(b: *std.Build) void {
     // build_options 모듈(위에서 생성)을 app host lib에도 주입 — 계약 테스트 모듈과 같은 모듈을 공유한다.
     macos_app_host_abi_lib.root_module.addImport("build_options", build_options_mod);
     if (target.result.os.tag == .macos) {
+        macos_app_host_abi_lib.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/session_host_notification_route.c"),
+            // Swift가 이 archive를 최종 링크하므로 Zig UBSan runtime 심볼을 요구하면 안 된다.
+            // 아래 CoreText/Metal C bridge와 같은 최종-link owner 규칙이다.
+            .flags = &.{"-fno-sanitize=undefined"},
+        });
         // CoreText 브리지 object를 정적 라이브러리에 함께 담아, Swift 최종 링크가 .a 하나로
         // app session의 glyph rasterize 심볼을 모두 얻게 한다. CoreText/CoreGraphics
         // framework는 Swift 링크 단계에서 제공한다.
@@ -3548,6 +3558,35 @@ pub fn build(b: *std.Build) void {
         run_os_delivery_boundary_tests.addArg("--maru-expect-tests=1");
         session_host_notification_delivery_step.dependOn(&run_os_delivery_boundary_tests.step);
 
+        const gui_history_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_gui_history_boundary.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+            }),
+            .filters = &.{"P4 N2b3 GUI history stable route boundary"},
+        });
+        const run_gui_history_boundary_tests = b.addRunArtifact(gui_history_boundary_tests);
+        run_gui_history_boundary_tests.addArg("--maru-expect-tests=1");
+        session_host_notification_delivery_step.dependOn(&run_gui_history_boundary_tests.step);
+
+        const notification_route_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_route.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+            }),
+            .filters = &.{"P4 N2b3 canonical notification route identifier"},
+        });
+        notification_route_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+        notification_route_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/session_host_notification_route.c"),
+            .flags = &.{},
+        });
+        const run_notification_route_tests = b.addRunArtifact(notification_route_tests);
+        run_notification_route_tests.addArg("--maru-expect-tests=2");
+        session_host_notification_delivery_step.dependOn(&run_notification_route_tests.step);
+
         if (target.result.os.tag == .macos) {
             const notification_macos_adapter_mod = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/notification_macos_adapter.zig"),
@@ -3568,6 +3607,10 @@ pub fn build(b: *std.Build) void {
             macos_adapter_tests.root_module.addCSourceFile(.{
                 .file = b.path("src/platform/macos/session_host_notification_adapter.m"),
                 .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            macos_adapter_tests.root_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/session_host_notification_route.c"),
+                .flags = &.{},
             });
             macos_adapter_tests.root_module.linkFramework("Foundation", .{});
             macos_adapter_tests.root_module.linkFramework("UserNotifications", .{});

@@ -2915,6 +2915,19 @@ fn agentListBenign(reason: []const u8) bool {
         std.mem.eql(u8, reason, "no_home");
 }
 
+/// `n` 번째 **그룹**이 목록의 몇 번 항목인가. 그룹과 카드가 섞여 있으므로 그룹만 센다.
+fn agentFirstGroupIndexAtOrAfter(items: []const maru.chrome.components.session_dock.types.Item, n: usize) ?usize {
+    var seen: usize = 0;
+    for (items, 0..) |it, idx| switch (it) {
+        .group => {
+            if (seen == n) return idx;
+            seen += 1;
+        },
+        else => {},
+    };
+    return null;
+}
+
 /// 그려진 목록 항목 하나의 사각형 — **published tree 가 준 자리**다.
 ///
 /// **손으로 고른 좌표를 쓰지 않는다.** 배치가 바뀌면 그 좌표는 엉뚱한 곳을 가리키는데 판정은
@@ -4312,6 +4325,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **되돌아오는가.** 접기만 재면 `isCollapsed`·제거가 틀려도 초록이다 — 한 번 접히면 그만이니까.
     var ag_items_reopened: usize = 0;
     var ag_collapsed_reopened: usize = 1;
+    // **둘을 접고 하나만 편다.** 번호→키 대응이 흔들리면 **엉뚱한 그룹**이 펴진다 — 하나만
+    // 재면 그 부류가 통째로 안 보인다(접힌 그룹도 헤더는 남아 번호가 안 밀리는 것이 전제다).
+    var ag_multi_judgeable = false;
+    var ag_multi_keys_before: usize = 0;
+    var ag_multi_keys_after: usize = 0;
+    var ag_multi_first_still: bool = false;
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
@@ -5023,6 +5042,52 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, gx, gy);
             }
         };
+        // 그룹 0 과 1 을 **스핀을 갈라** 접는다. 한 스핀에 둘을 보내면 둘째 클릭이 **옛 프레임의
+        // 자리와 action** 을 겨눈다 — 중립 `ids.Table.resolve` 가 세대로 그것을 거부하므로(그 규율이
+        // 맞다) 접히는 것은 하나뿐이었다(실측 2026-08-27: `multi=1->2`).
+        if (smoke and spins == 728) if (agent_built) |*b| {
+            if (agentFirstGroupIndexAtOrAfter(agent_items.items, 0)) |idx| {
+                if (agentItemRect(b, idx)) |r| {
+                    const gx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                    const gy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                    window.postSyntheticMouse(.left_down, gx, gy);
+                    window.postSyntheticMouse(.left_up, gx, gy);
+                }
+            }
+        };
+        if (smoke and spins == 733) if (agent_built) |*b| {
+            if (agentFirstGroupIndexAtOrAfter(agent_items.items, 1)) |idx| {
+                if (agentItemRect(b, idx)) |r| {
+                    const gx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                    const gy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                    window.postSyntheticMouse(.left_down, gx, gy);
+                    window.postSyntheticMouse(.left_up, gx, gy);
+                }
+            }
+        };
+        if (smoke and spins == 736) ag_multi_keys_before = agent_archive.collapsed.items.len;
+        // **둘째 그룹만 다시 편다.** 첫째는 접힌 채 남아야 한다.
+        if (smoke and spins == 738) if (agent_built) |*b| {
+            if (agentFirstGroupIndexAtOrAfter(agent_items.items, 1)) |idx| {
+                if (agentItemRect(b, idx)) |r| {
+                    ag_multi_judgeable = true;
+                    const gx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                    const gy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                    window.postSyntheticMouse(.left_down, gx, gy);
+                    window.postSyntheticMouse(.left_up, gx, gy);
+                }
+            }
+        };
+        if (smoke and spins == 742) {
+            ag_multi_keys_after = agent_archive.collapsed.items.len;
+            // 첫째 그룹이 **여전히 접혀 있는가** — 그 자리의 항목이 group 이고 `collapsed` 여야 한다.
+            if (agentFirstGroupIndexAtOrAfter(agent_items.items, 0)) |idx| {
+                ag_multi_first_still = switch (agent_items.items[idx]) {
+                    .group => |g| g.collapsed,
+                    else => false,
+                };
+            }
+        }
         if (smoke and spins == 725) {
             ag_items_reopened = agent_items.items.len;
             ag_collapsed_reopened = agent_archive.collapsed.items.len;
@@ -6367,7 +6432,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     if (ag_click_judgeable) {
         // **목록이 줄어야 한다.** 인텐트 개수만 세면 속 빈다 — 적용이 안 돼도 인텐트는 난다.
-        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} reopened={d}/{d} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
+        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} reopened={d}/{d} multi={d}->{d} first_still={} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
             ag_items_before,
             ag_items_after,
             ag_collapsed_after,
@@ -6375,6 +6440,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             ag_expand_after,
             ag_items_reopened,
             ag_collapsed_reopened,
+            ag_multi_keys_before,
+            ag_multi_keys_after,
+            ag_multi_first_still,
             agent_applied_intents,
             agent_pointer_intents,
             agent_redraws,
@@ -6383,7 +6451,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 ag_expand_before == null and ag_expand_after != null and
                 // **되돌아와야 한다** — 접기만 되고 펴기가 죽어 있어도 위 조건은 전부 참이다.
                 ag_items_reopened == ag_items_before and ag_collapsed_reopened == 0 and
-                agent_applied_intents == 3 and agent_redraws > 0,
+                // **둘을 접고 하나만 폈을 때 남은 하나가 첫째여야 한다** — 번호→키 대응이
+                // 흔들리면 엉뚱한 그룹이 펴진다.
+                ag_multi_judgeable and ag_multi_keys_before == 2 and ag_multi_keys_after == 1 and
+                ag_multi_first_still and
+                agent_redraws > 0,
         });
     } else {
         try stdout.print("agent_click=unjudgeable reason=no_surface\n", .{});

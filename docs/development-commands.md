@@ -20,6 +20,46 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 이 설정은 fuzz server protocol을 대체하지 않는다. Maru의 기본 test graph에는 fuzz test가 없으며, fuzz를 도입하면 server-mode runner 지원을 별도 gate로 추가해야 한다.
 - Zig를 올리거나 upstream IPC 경로를 재검증할 때는 custom runner를 제거한 상태의 `zig build test`와 CI를 먼저 green으로 만든 뒤에만 이 우회를 삭제한다.
 
+### 테스트가 끝나지 않을 때 — 하네스가 자식을 못 거두는 형태
+
+**증상**: `zig build test`가 출력 없이 안 끝난다. `ps`로 보면 test 바이너리가 **CPU 0%로 정지**해 있고,
+그 자식 셸이 **코어 하나를 100% 태우고** 있다. 부모를 Ctrl-C로 끊으면 자식은 고아로 남아 계속 돈다.
+
+**진단**: 멈춘 pid에 `sample`을 걸면 어느 테스트의 어느 syscall인지 바로 나온다.
+
+```sh
+sample <pid> 1 -f /tmp/hang.txt && grep -E "test\.|__wait4|__kevent" /tmp/hang.txt | head
+```
+
+**실측(2026-08-26)**: 이 트리에 그렇게 멈춘 test 바이너리가 5개(최고 16시간 30분), 그 자식 스핀 셸이
+26개 쌓여 CPU 약 1,020%(16코어 중 6.4코어)를 태우고 있었다. 스택은 전부 같은 곳을 가리켰다 —
+`cli.ssh.expectNotifyLifecycle` → `__wait4`.
+
+**원인**: `fork`는 부모의 signal disposition을 자식에게 물려주는데, **셸은 진입 시점에 이미 무시
+(`SIG_IGN`) 상태이던 시그널을 `trap`으로 다시 잡지 못한다**(POSIX Shell Command Language §2.11).
+그래서 부모가 SIGINT를 무시하고 있으면 자식 셸의 `trap … INT`가 무력화되고, 셸은 신호를 받아도 죽지
+않는다 — 하네스의 `while :; do :; done`이 남고 `waitpid(…, 0)`은 영영 안 돌아온다.
+
+**왜 간헐적이고, 왜 CI에서 안 잡혔나.** 갈림은 딱 하나다 — **셸을 띄우는 프로세스의 SIGINT가 무시
+상태인가**. 포그라운드로 돌리면 `SIG_DFL`이라 통과하고, 백그라운드 잡(`&`)으로 돌리면 POSIX가
+SIGINT/SIGQUIT를 무시로 만들므로 그 경로에서 재현된다. 같은 커밋이 어떤 날은 초록이고 어떤 날은
+영영 안 끝나던 이유가 이것이다.
+
+**규율 — 자식 프로세스를 기다리는 테스트 하네스는 둘 다 지킨다.**
+
+1. **exec 직전에 disposition을 기본으로 되돌린다.** 안 되돌리면 자식이 부모의 무시 상태를 물려받는다
+   (`src/cli/ssh.zig`의 `restoreDefaultSignals`).
+2. **무한 `waitpid(…, 0)`을 쓰지 않는다.** 데드라인을 걸고, 넘기면 자식을 `SIGKILL`로 걷어낸 뒤
+   **실패로 보고한다**(`waitpidWithin`·`reapRunaway`). 원인이 무엇이든 **테스트는 끝나야** 무엇이
+   틀렸는지 볼 수 있다 — 멈춰 서면 실패조차 못 하고 빌드 전체가 인질이 된다.
+
+**뒤처리**: 이미 쌓인 고아를 걷어내려면 부모가 죽은 스핀 셸을 찾아 죽인다. 부모가 아직 살아 있는
+쌍은 **자식만 죽여도 된다** — `waitpid`가 풀려 부모가 스스로 끝난다.
+
+```sh
+ps -Ao pid,ppid,command | grep "[b]egin_notify" | awk '{print $1}' | xargs kill -9
+```
+
 ### 파일 하나만 돌린다 (개발 루프 전용)
 
 방금 고친 파일의 test만 보고 싶을 때 `zig build test` 전체를 돌리지 않는다. **`zig test <파일>`로 그 파일의 test 만 따로 컴파일·실행할 수 있다.**
@@ -33,7 +73,7 @@ zig test src/session/agent_hook_command.zig
 | 방법 | 실측 |
 |---|---|
 | `zig test src/session/agent_hook_command.zig` | **6.5초**, `All 56 tests passed.` (import한 `agent_hook_event.zig` 포함) |
-| `zig build test` | **20분+ 출력 0바이트**. 완주하지 못했고 `.zig-cache`가 디스크를 채워 중단했다 |
+| `zig build test` | **12분 19초**, `127/127 steps succeeded`(2026-08-26 실측, CPU 111%). 2026-08-22에는 "20분+ 출력 0바이트로 완주 실패"로 적혀 있었는데, **그 완주 실패의 원인은 캐시도 디스크도 아니었다** — 하네스가 자식 셸을 못 거두고 `waitpid`에서 멈춘 것이다(위 [테스트가 끝나지 않을 때](#테스트가-끝나지-않을-때--하네스가-자식을-못-거두는-형태)). 디스크가 찬 것은 그렇게 멈춰 있는 동안의 결과이지 원인이 아니다. 같은 날 그 hang이 살아 있고 그 자식 스핀 셸들이 코어를 태우던 상태에서 잰 값은 **31분 08초**, CPU 53%였다 — 두 값의 차이는 hang 수정과 유령 프로세스 정리가 **함께** 만든 것이고 각각의 몫은 따로 재지 않았다 |
 
 **어디까지 되는가.** 전이적으로 상위 디렉터리(`../`) import이 없어야 한다 — Zig는 root 파일의 디렉터리를 module 경로로 잡으므로 `../`가 하나라도 끼면 `error: import of file outside module path`로 멈춘다. test를 가진 466개 중 직접 `../` import이 없는 후보가 **346개**이고, 그 후보에서 5개마다 하나씩 뽑은 표본 70개를 실제로 컴파일해 보면:
 

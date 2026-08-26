@@ -322,6 +322,27 @@ maru는 원격 rc를 자동으로 고치지 않는다 — terminfo(`$HOME/.termi
 `end_notify`가 `cleanup_notify`에서 분리된 이유가 이것이다(걷는 일과 셸을 끝내는 일이 한 함수에 붙어
 있으면 루프에서 쓸 수 없다). 끊긴 동안 Maru가 그 목적지를 계속 원격으로 표시하지 않는다.
 
+**이 trap 계약은 셸 진입 시점의 signal disposition에 매인다.** POSIX Shell Command Language §2.11은
+*"Signals that were ignored on entry to a non-interactive shell cannot be trapped or reset"*이라고
+못박는다 — 셸을 띄우는 쪽이 SIGINT를 무시하고 있으면 `trap 'cleanup_notify 130' INT`가 **통째로
+무력화된다**. 그러면 Ctrl-C로 끊어도 `ssh-end`가 안 나가 Maru가 죽은 목적지를 계속 원격으로 표시하고,
+셸 자신도 신호를 받고 안 죽는다.
+
+전파 규칙이 두 경로에서 다르므로 둘 다 적는다.
+
+- **제품 경로는 `execve("/bin/sh", …)`로 프로세스를 교체한다**(`src/main.zig`). exec은 핸들러가 걸린
+  시그널은 `SIG_DFL`로 리셋하지만 **`SIG_IGN`은 그대로 유지한다**. 그래서 `maru ssh`를 실행한 쪽이
+  SIGINT를 무시하고 있으면 이 계약이 깨진다. 사용자가 인터랙티브 셸에서 직접 치는 통상 경로는
+  `SIG_DFL`이라 성립한다.
+- **테스트 하네스는 `fork`+`execv`라 disposition을 통째로 물려받는다**(`src/cli/ssh.zig`의 `spawnShell`).
+  그래서 exec 직전에 `restoreDefaultSignals`로 INT·HUP·TERM·QUIT을 기본 처리로 되돌린다. 이것을
+  빠뜨렸던 동안 하네스가 `waitpid`에서 영영 멈췄다(2026-08-26 실측: 멈춘 test 바이너리 5개, 고아 스핀
+  셸 26개 — [개발 명령](development-commands.md#테스트가-끝나지-않을-때--하네스가-자식을-못-거두는-형태)).
+
+회귀는 `"notify lifecycle: 부모가 SIGINT를 무시해도 자식 셸의 trap 은 살아 있다"`가 잡는다. 기존
+lifecycle 테스트는 **부모가 기본 처리일 때만 돌아서 이 결함을 못 봤다** — 전제를 바꾸지 않는 테스트는
+그 전제가 깨지는 경우를 증명하지 못한다.
+
 ### 10.4 재시도하지 않는 것 — 세 가지 안전장치
 
 - **exit 255가 아니면 안 한다.** 255는 ssh(1)가 자기 오류(연결 실패·끊김)에 쓰는 코드다. 원격 셸의

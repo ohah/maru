@@ -85,8 +85,8 @@ const inventory = [_]Entry{
     },
     .{
         .path = "ssh.zig",
-        .expect = .{ .exact = 24 },
-        .why = "테스트 전용 fork/pipe 헬퍼(spawnShell·drainShell과 그 호출자 expectNotifyLifecycle·runSessionLoop)가 top-level fn이라 test 마스크에 안 걸린다. 제품 경로는 순수하다. 20→24는 재접속 루프를 실제 /bin/sh로 돌리는 하네스가 붙은 몫이고, fork 절차 자체는 spawnShell 하나로 합쳐 뒀다(따로 들면 33이었다).",
+        .expect = .{ .exact = 36 },
+        .why = "테스트 전용 fork/pipe 헬퍼(spawnShell·drainShell과 그 호출자 expectNotifyLifecycle·runSessionLoop)가 top-level fn이라 test 마스크에 안 걸린다. 제품 경로는 순수하다. 20→24는 재접속 루프를 실제 /bin/sh로 돌리는 하네스가 붙은 몫이고, fork 절차 자체는 spawnShell 하나로 합쳐 뒀다(따로 들면 33이었다). 24→36은 셸이 신호를 받고도 안 죽어 waitpid가 영영 안 끝나던 hang(2026-08-26 실측: 멈춘 test 바이너리 5개, 고아 스핀 셸 26개)을 닫은 몫이다 — restoreDefaultSignals(+5, exec 직전 disposition 복원)·waitpidWithin(+5, WNOHANG 폴링 데드라인)·reapRunaway(+4, 데드라인 초과 자식 수거)에서 늘고 무한 waitpid 두 자리가 사라져 -2 다.",
     },
 };
 

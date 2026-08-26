@@ -4330,7 +4330,20 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     return true;
 }
 
+/// 삭제가 지우는 **단위**(§3.2 "문자/단어/줄 단위 삭제").
+///
+/// **이동 일습의 거울이다** — `Motion`이 커서를 옮기는 자리를 이쪽은 지운다. 그래서 경계 계산을
+/// `motion.zig`가 그대로 소유하고, 여기서 다시 세지 않는다. 세면 **"⌥←로 간 자리"와 "⌥⌫가 지운
+/// 자리"가 갈리고**, 사용자는 그 차이를 설명할 수 없다.
+pub const DeleteUnit = enum { char, word, line_edge };
+
 pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
+    return deleteBy(self, term, backward, .char);
+}
+
+/// **단위로 지운다**(§3.2). 선택이 있으면 단위와 무관하게 그 선택을 지운다 — 사용자가 이미 범위를
+/// 골랐는데 단위로 다시 정하면 고른 것이 무시된다.
+pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
     const doc = term.rt.editor_doc orelse return false;
@@ -4346,15 +4359,50 @@ pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
         var lo = @min(sel.start(), content.len);
         var hi = @min(sel.end(), content.len);
         if (lo == hi) {
-            // caret뿐 — 한 글자를 무른다.
+            // caret뿐 — **단위만큼** 무른다. 경계는 `motion.zig`가 소유한다(이동과 같은 자리여야
+            // "⌥←로 간 곳"과 "⌥⌫가 지운 곳"이 갈리지 않는다).
             if (backward) {
                 if (lo == 0) continue; // 문서 처음: 지울 것이 없다
-                lo = prevCharBoundary(content, lo);
+                lo = switch (unit) {
+                    .char => prevCharBoundary(content, lo),
+                    .word => editor_motion.wordLeft(content, lo),
+                    .line_edge => blk: {
+                        // **줄 시작까지** — smart home과 같은 자리다(들여쓰기 앞이 아니라 첫 글자).
+                        // 이미 첫 글자면 줄 머리까지 간다(그 함수가 토글을 소유한다).
+                        const li = doc.file.lines.lineAt(lo);
+                        const line = doc.file.lines.line(li) orelse break :blk lo;
+                        const start = editor_motion.lineStartSmart(content, line, lo);
+                        // **줄 머리에 있으면 앞 줄과 합친다.** 토글이 첫 글자를 돌려주므로 그대로 두면
+                        // `lo`가 커져 아무것도 안 지우는 **죽은 키**가 된다 — `⌘⌦`가 줄 끝에서 겪던
+                        // 것과 같은 함정이고, macOS는 그 자리에서 앞 개행을 지운다
+                        // (적대적 검증 2026-08-27이 실측으로 잡았다).
+                        break :blk if (start < lo) start else prevCharBoundary(content, lo);
+                    },
+                };
             } else {
                 if (hi >= content.len) continue; // 문서 끝
-                hi = nextCharBoundary(content, hi);
+                hi = switch (unit) {
+                    .char => nextCharBoundary(content, hi),
+                    .word => editor_motion.wordRight(content, hi),
+                    .line_edge => blk: {
+                        const li = doc.file.lines.lineAt(hi);
+                        const line = doc.file.lines.line(li) orelse break :blk hi;
+                        const end = editor_motion.lineEnd(line);
+                        // **이미 줄 끝이면 개행 하나를 먹는다** — 안 그러면 `⌘⌦`가 죽은 키가 된다.
+                        break :blk if (end > hi) end else nextCharBoundary(content, hi);
+                    },
+                };
             }
         }
+        // **지금은 닿지 않는 방어다**(적대적 검증 2026-08-27). caret 갈래가 단위마다 반드시
+        // 전진하고(`lo == 0`·문서 끝은 그 앞에서 걸러진다), 선택이 있으면 `start() <= end()`가
+        // 보장되므로 여기서 `lo >= hi`가 되는 입력을 만들지 못했다 — 지운 뮤턴트가 살아남아
+        // 그것을 보였다.
+        //
+        // 그래도 남기는 이유: **`delta`의 계약이 빈 변경을 금지하지는 않는다.** 빈 범위가 흘러가면
+        // 아무것도 안 바꾸는 undo 항목이 쌓여 **undo가 헛돈다** — `DEL3`이 그 증상(빈 문서에서
+        // 무동작)을 재고, 이 줄은 그 성질을 **여기서** 지킨다. 위에 같은 검사를 하나 더 두었다가
+        // 중복임을 확인하고 지웠다: 방어가 둘이면 하나는 반드시 검증 밖에 남는다.
         if (lo >= hi) continue;
         ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = "" }) catch return false;
     }
@@ -11978,6 +12026,188 @@ test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 �
         const c = map.columnOf(map.ctx, text, b);
         try testing.expectEqual(b, map.offsetOf(map.ctx, text, c));
     }
+}
+
+test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같은 자리다 (§3.2)" {
+    // **§3.2가 "문자/단어/줄 단위 삭제"를 요구한다.** 문자만 있으면 낱말을 지우려고 키를 여러 번
+    // 눌러야 한다.
+    //
+    // **경계를 다시 세지 않는다**: `motion.zig`의 `wordLeft`·`lineStartSmart`를 그대로 쓴다.
+    // 세면 "⌥←로 간 곳"과 "⌥⌫가 지운 곳"이 갈리고, 사용자는 그 차이를 설명할 수 없다 —
+    // 이 판정자가 **둘이 같은 자리인지**까지 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "del1.txt", "    foo bar\nnext\n");
+
+    // ⑴ **⌥⌫ = 낱말 뒤로.** "bar" 끝(11)에서 누르면 "bar"가 사라진다.
+    term.rt.editor_selection = editor_selection.Selection.at(11);
+    try pressKey(&fx, .backspace, .{ .option = true });
+    try testing.expectEqualStrings("    foo \nnext\n", term.rt.editor_doc.?.file.content);
+
+    // **이동과 같은 자리인가** — 같은 시작점에서 `⌥←`가 가는 곳이 지운 범위의 시작이어야 한다.
+    {
+        const t2 = try undoFixture(&fx, allocator, "del1b.txt", "    foo bar\nnext\n");
+        t2.rt.editor_selection = editor_selection.Selection.at(11);
+        try testing.expect(moveCarets(fx.session, t2, .word_left, false));
+        try testing.expectEqual(@as(usize, 8), t2.rt.editor_selection.?.focus); // "bar" 앞
+    }
+
+    // ⑵ **⌘⌫ = 줄 시작까지**(smart home과 같은 자리 — 들여쓰기 앞이 아니라 첫 글자).
+    const t3 = try undoFixture(&fx, allocator, "del1c.txt", "    foo bar\nnext\n");
+    t3.rt.editor_selection = editor_selection.Selection.at(7); // "foo" 뒤
+    try pressKey(&fx, .backspace, .{ .command = true });
+    try testing.expectEqualStrings("     bar\nnext\n", t3.rt.editor_doc.?.file.content);
+
+    // ⑵′ **줄 머리에서 ⌘⌫는 앞 줄과 합친다** — 안 그러면 죽은 키다(`⌘⌦`가 줄 끝에서 겪던 것과
+    //     같은 함정. 적대적 검증 2026-08-27이 실측으로 잡았다).
+    {
+        const t = try undoFixture(&fx, allocator, "del1f.txt", "aa\nbb\n");
+        t.rt.editor_selection = editor_selection.Selection.at(3); // "bb" 줄 머리
+        try pressKey(&fx, .backspace, .{ .command = true });
+        try testing.expectEqualStrings("aabb\n", t.rt.editor_doc.?.file.content);
+    }
+
+    // ⑶ **⌥⌦ = 낱말 앞으로.**
+    const t4 = try undoFixture(&fx, allocator, "del1d.txt", "foo bar\n");
+    t4.rt.editor_selection = editor_selection.Selection.at(0);
+    try pressKey(&fx, .delete, .{ .option = true });
+    try testing.expectEqualStrings("bar\n", t4.rt.editor_doc.?.file.content);
+
+    // ⑷ **⌘⌦ = 줄 끝까지.** 이미 줄 끝이면 개행을 먹는다(안 그러면 죽은 키다).
+    const t5 = try undoFixture(&fx, allocator, "del1e.txt", "foo bar\nnext\n");
+    t5.rt.editor_selection = editor_selection.Selection.at(4); // "bar" 앞
+    try pressKey(&fx, .delete, .{ .command = true });
+    try testing.expectEqualStrings("foo \nnext\n", t5.rt.editor_doc.?.file.content);
+    try pressKey(&fx, .delete, .{ .command = true }); // 이미 줄 끝 → 개행을 먹는다
+    try testing.expectEqualStrings("foo next\n", t5.rt.editor_doc.?.file.content);
+}
+
+test "DEL2 선택이 있으면 단위와 무관하게 그 선택을 지운다 (§3.2)" {
+    // **사용자가 이미 범위를 골랐는데 단위로 다시 정하면 고른 것이 무시된다.** `⌥⌫`를 눌렀다고
+    // 선택 밖 낱말까지 지우면 되돌릴 방법이 undo뿐이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "del2.txt", "alpha beta gamma\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(6, 10); // "beta"
+    try pressKey(&fx, .backspace, .{ .option = true });
+    try testing.expectEqualStrings("alpha  gamma\n", term.rt.editor_doc.?.file.content);
+
+    // 커서가 여럿이어도 각자 자기 단위로 지운다.
+    const t2 = try undoFixture(&fx, allocator, "del2b.txt", "aa bb cc\n");
+    t2.rt.editor_selection = editor_selection.Selection.at(5); // "bb" 끝
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(8); // "cc" 끝
+    t2.rt.editor_extra_selections = extras;
+    try testing.expect(deleteBy(fx.session, t2, true, .word));
+    // "bb"와 "cc"가 각자 사라지고 **앞 공백은 남는다** — 가 낱말 앞에서 멈추기 때문이다.
+    try testing.expectEqualStrings("aa  \n", t2.rt.editor_doc.?.file.content);
+}
+
+test "DEL3 문서 밖 커서는 문서 끝으로 접히고, 빈 문서는 무동작이다 (§3.2)" {
+    // **커서가 문서 밖을 가리키는 상태가 존재한다** — 편집·재로드가 문서를 줄이면 옛 offset이
+    // 남는다(`selections`는 그것을 clamp해서 준다). 그때 `lo`와 `hi`가 **둘 다 문서 끝으로**
+    // 접혀 빈 범위가 되고, 거르지 않으면 **빈 편집이 undo 스택에 쌓여** undo가 헛돈다.
+    //
+    // 그 방어가 판정 밖이었다(적대적 검증 2026-08-27 — 지운 뮤턴트가 살아남았다). 같은 검사를
+    // 두 곳에 두었던 것도 그때 확인해 하나로 줄였다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "del3.txt", "ab\n");
+
+    // **문서 밖**을 가리키게 만든다.
+    const len = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(len + 10, len + 20);
+
+    // **문서 끝으로 접힌다.** `@min`이 양끝을 clamp하므로 caret이 문서 끝에 있는 것과 같아진다 —
+    // 그래서 뒤로 지우면 마지막 글자가 사라지고, 앞으로 지우면 지울 것이 없다.
+    //
+    // 처음엔 "아무것도 안 지운다"고 적었는데 **틀렸다**(적대적 검증 2026-08-27이 실측으로 잡았다).
+    // 접힌 뒤에는 문서 밖이었다는 사실이 남지 않으므로, 문서 끝 caret과 **구분할 수 없고 구분할
+    // 이유도 없다** — 중요한 것은 **죽지 않고 문서를 망가뜨리지 않는 것**이다.
+    try testing.expect(!deleteBy(fx.session, term, false, .char)); // 문서 끝: 앞으로 지울 것이 없다
+    try testing.expect(deleteBy(fx.session, term, true, .char)); // 뒤로: 마지막 글자
+    try testing.expectEqualStrings("ab", term.rt.editor_doc.?.file.content);
+
+    // 낱말·줄 단위도 같은 축이다 — 죽지 않고, 남은 것을 정확히 지운다.
+    term.rt.editor_selection = editor_selection.Selection.at(999);
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expectEqualStrings("", term.rt.editor_doc.?.file.content);
+
+    // 빈 문서에서는 어느 단위로도 아무 일이 없다 — 빈 편집이 쌓이면 undo가 헛돈다.
+    for ([_]DeleteUnit{ .char, .word, .line_edge }) |unit| {
+        try testing.expect(!deleteBy(fx.session, term, true, unit));
+        try testing.expect(!deleteBy(fx.session, term, false, unit));
+    }
+}
+
+test "DEL4 연속 낱말 삭제는 한 묶음이고, 타이핑이 끼면 끊긴다 (§3.3)" {
+    // §3.3의 묶음 규칙은 **단위와 무관**하다 — 같은 종류(`.delete`)가 이어지면 한 묶음이고,
+    // 종류가 바뀌면 끊긴다. `⌥⌫`를 세 번 눌러 문장을 지웠는데 undo가 세 번 필요하면 사용자는
+    // "왜 이건 한 번에 안 돌아오나"를 겪는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "del4.txt", "one two three\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(13); // "three" 끝
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expectEqualStrings("\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번**에 셋 다 돌아온다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("one two three\n", term.rt.editor_doc.?.file.content);
+
+    // **타이핑이 끼면 끊긴다** — 종류가 바뀌기 때문이다.
+    term.rt.editor_selection = editor_selection.Selection.at(13);
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expect(insertText(fx.session, term, "X"));
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expect(undoEdit(fx.session, term)); // 마지막 낱말 삭제만
+    try testing.expectEqualStrings("one two X\n", term.rt.editor_doc.?.file.content);
+}
+
+test "DEL5 한글·탭이 섞여도 단위 삭제가 깨진 UTF-8을 만들지 않는다 (§3.2·§3.8)" {
+    // **byte로 지우면 한글이 반쪽 난다.** 그 상태는 화면에 §3.8 표기로 뜨고 저장하면 파일이
+    // 깨진다 — 되돌릴 방법이 undo뿐인 종류다. `EDIT4`가 문자 단위에서 재는 것을 **낱말·줄**
+    // 단위에서도 잰다: 경계를 `motion.zig`가 소유하므로 같은 성질이 따라와야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "del5.txt", "\t한글 영어\n다음\n");
+
+    // ⑴ 낱말 뒤로 — "영어"(6 byte)가 통째로 사라진다.
+    const content0 = term.rt.editor_doc.?.file.content;
+    const nl = std.mem.indexOfScalar(u8, content0, '\n').?;
+    term.rt.editor_selection = editor_selection.Selection.at(nl);
+    try testing.expect(deleteBy(fx.session, term, true, .word));
+    try testing.expectEqualStrings("\t한글 \n다음\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(std.unicode.utf8ValidateSlice(term.rt.editor_doc.?.file.content));
+
+    // ⑵ 줄 시작까지 — 탭(들여쓰기) **뒤**가 첫 글자다(smart home과 같은 자리).
+    const t2 = try undoFixture(&fx, allocator, "del5b.txt", "\t한글 영어\n");
+    const c2 = t2.rt.editor_doc.?.file.content;
+    t2.rt.editor_selection = editor_selection.Selection.at(std.mem.indexOfScalar(u8, c2, '\n').?);
+    try testing.expect(deleteBy(fx.session, t2, true, .line_edge));
+    try testing.expectEqualStrings("\t\n", t2.rt.editor_doc.?.file.content);
+    try testing.expect(std.unicode.utf8ValidateSlice(t2.rt.editor_doc.?.file.content));
+
+    // ⑶ 낱말 앞으로 — 한글 낱말 머리에서 눌러도 반쪽이 안 남는다.
+    const t3 = try undoFixture(&fx, allocator, "del5c.txt", "한글 영어\n");
+    t3.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(deleteBy(fx.session, t3, false, .word));
+    try testing.expectEqualStrings("영어\n", t3.rt.editor_doc.?.file.content);
+    try testing.expect(std.unicode.utf8ValidateSlice(t3.rt.editor_doc.?.file.content));
 }
 
 test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 축)" {

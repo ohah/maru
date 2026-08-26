@@ -148,7 +148,7 @@ fn activateValidated(
     // LIFO 로 나중에 풀리게 한다.
     const hook_log_base = agent_hook_logs.resolveCacheBase(allocator);
     defer if (hook_log_base) |base| allocator.free(base);
-    manager.init(allocator, io, &registry, if (hook_log_base) |base| .{
+    manager.initWithHostId(allocator, io, &registry, invocation.host_id, if (hook_log_base) |base| .{
         .host_id = invocation.host_id,
         .log_base = base,
     } else null);

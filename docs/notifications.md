@@ -16,10 +16,10 @@
 OSC는 `AppSession.pendingNotification()`이 `{ title, body, surface_id, foreground_banner }`(`PendingNotification`)로
 드레인해 Swift에 넘기고 동시에 인앱 히스토리에 보관한다. 업데이트 안내는 OS 배너로 보내지 않고 인앱 히스토리에 직접 추가한다.
 
-### 영속 session host와 GUI 종료 상태 (계획, 미구현)
+### 영속 session host와 GUI 종료 상태
 
-현재 funnel은 `AppSession`/Swift가 살아 있어야 하므로 앱을 완전히 종료하면 알림을 전달하지 못한다.
-[영속 터미널 세션 호스트](persistent-session-host.md) P4는 다음 경계를 추가하며, 이 gate 전에는
+GUI-local funnel은 `AppSession`/Swift가 살아 있을 때 동작한다. 앱이 완전히 종료된 동안의 전달은
+[영속 터미널 세션 호스트](persistent-session-host.md) P4의 host-owned 경계가 담당하며, 그 gate 전에는
 `session.keep-alive-after-quit=true`를 기본값으로 바꾸지 않는다.
 
 - OSC 9/777 parsing과 bounded pending event는 `TerminalCore`와 함께 `maru-sessiond`가 소유한다.

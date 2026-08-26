@@ -165,7 +165,7 @@ pub fn dispatchNotify9(self: *TerminalCore, body: []const u8) void {
         dispatchConEmuCwd(self, body[2..]);
         return;
     }
-    if (looksLikeConemu9(body)) return; // `<숫자>;...` → ConEmu 서브커맨드(소비, 알림 안 함)
+    if (!isNotify9Body(body)) return; // `<숫자>;...` → ConEmu 서브커맨드(소비, 알림 안 함)
     setNotification(self, "", body); // iTerm2: title 없음, body=메시지 전체
 }
 
@@ -208,6 +208,11 @@ fn looksLikeConemu9(s: []const u8) bool {
     var i: usize = 0;
     while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {}
     return i > 0 and i < s.len and s[i] == ';';
+}
+
+/// Parser overflow 경로도 정상 dispatch와 같은 OSC 9/ConEmu 판정을 쓰게 하는 SSOT다.
+pub fn isNotify9Body(body: []const u8) bool {
+    return body.len > 0 and !looksLikeConemu9(body);
 }
 
 /// 알림 title/body를 pending에 둔다(소유 버퍼에 복사). 할당 실패면 조용히 폐기(알림은 best-effort).

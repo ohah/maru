@@ -3,7 +3,7 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
-test "P4 N1 notification journal 경계는 pure owner와 dormant product boundary를 고정한다" {
+test "P4 N1 notification journal 경계는 pure owner와 N2a single product owner를 고정한다" {
     const allocator = std.testing.allocator;
     const journal = try readSource(allocator, "src/platform/macos/session_host/notification_journal.zig");
     defer allocator.free(journal);
@@ -15,6 +15,8 @@ test "P4 N1 notification journal 경계는 pure owner와 dormant product boundar
     defer allocator.free(persistent);
     const plan = try readSource(allocator, "docs/implementation-plan.md");
     defer allocator.free(plan);
+    const manager = try readSource(allocator, "src/platform/macos/session_host/runtime_manager.zig");
+    defer allocator.free(manager);
 
     try std.testing.expectEqual(@as(usize, 1), count(barrel, "pub const notification_journal = @import(\"session_host/notification_journal.zig\");"));
     try std.testing.expectEqual(@as(usize, 1), count(journal, "@import("));
@@ -22,7 +24,10 @@ test "P4 N1 notification journal 경계는 pure owner와 dormant product boundar
     try std.testing.expectEqual(@as(usize, 0), count(journal, "platform/"));
     try std.testing.expectEqual(@as(usize, 0), count(journal, "TerminalCore"));
     try std.testing.expectEqual(@as(usize, 0), count(journal, "AppKit"));
-    try std.testing.expectEqual(@as(usize, 0), try countProductReferences(allocator));
+    try std.testing.expect((try countProductReferences(allocator)) > 0);
+    try std.testing.expectEqual(@as(usize, 1), count(manager, "const notification_journal = @import(\"notification_journal.zig\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(manager, "self.notification_journal.initInPlace("));
+    try std.testing.expectEqual(@as(usize, 1), count(manager, "self.notification_journal.admit("));
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-notification-journal\""));
     try std.testing.expect(std.mem.indexOf(u8, persistent, "N1 bounded notification journal 계약") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "P4 N1 bounded notification journal") != null);

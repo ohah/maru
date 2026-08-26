@@ -445,6 +445,9 @@ pub const TerminalCore = struct {
     // 네이티브 알림(UNUserNotificationCenter)으로 띄운다(후속 PR). 한 tick에 여럿 오면 마지막만 남는다(드묾, 허용).
     // 알림은 transient 이벤트라 RIS 대상 아님(pending은 다음 tick에 drain되어 곧 사라진다). osc_overflow가 크기 방어.
     notification_pending: bool = false,
+    // 일반 OSC의 2 KiB 수집 상한에서 notify payload가 폐기됐다는 one-shot 신호. host가 이를
+    // bounded drop counter로 옮겨 악의적/과대 알림이 무음 재시도되거나 PTY 수명을 깨지 않게 한다.
+    notification_write_rejected: bool = false,
     notification_generation: u64 = 0,
     notification_title: std.ArrayListUnmanaged(u8) = .empty,
     notification_body: std.ArrayListUnmanaged(u8) = .empty,
@@ -1470,6 +1473,13 @@ pub const TerminalCore = struct {
             self.notification_generation != expected_generation) return false;
         self.clearNotification();
         return true;
+    }
+
+    /// OSC 9/777 notification이 parser 상한에서 폐기됐는지 exact once 가져온다.
+    pub fn takeNotificationWriteRejected(self: *TerminalCore) bool {
+        const rejected = self.notification_write_rejected;
+        self.notification_write_rejected = false;
+        return rejected;
     }
 
     /// 마지막 ConEmu OSC 9;4 progress payload(`4;state[;value]`). 없으면 빈 슬라이스다.
@@ -4870,6 +4880,27 @@ test "OSC 9/777 desktop notification: parse iTerm2/rxvt, ConEmu sub-commands ign
         std.math.maxInt(u64),
         core.notification_generation,
     );
+}
+
+test "P4 N2a notification overflow classifies OSC 9 and 777 without ConEmu false positive" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+
+    try core.osc_buffer.appendSlice(core.allocator, "777;notify;title;oversized");
+    core.osc_overflow = true;
+    parser.dispatchOsc(&core);
+    try std.testing.expect(core.takeNotificationWriteRejected());
+    try std.testing.expect(!core.takeNotificationWriteRejected());
+
+    try core.osc_buffer.appendSlice(core.allocator, "9;plain oversized notification");
+    core.osc_overflow = true;
+    parser.dispatchOsc(&core);
+    try std.testing.expect(core.takeNotificationWriteRejected());
+
+    try core.osc_buffer.appendSlice(core.allocator, "9;4;1;oversized-progress");
+    core.osc_overflow = true;
+    parser.dispatchOsc(&core);
+    try std.testing.expect(!core.takeNotificationWriteRejected());
 }
 
 test "OSC notification allocation failure preserves prior payload and generation atomically" {

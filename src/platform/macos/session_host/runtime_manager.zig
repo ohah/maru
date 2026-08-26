@@ -32,6 +32,8 @@ const screen_snapshot = @import("screen_snapshot.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const protocol = @import("protocol.zig");
 const handoff_codec = @import("handoff_codec.zig");
+const notification_admission = @import("notification_admission.zig");
+const notification_journal = @import("notification_journal.zig");
 const agent_hook_logs = @import("agent_hook_logs.zig");
 const runtime_observation_cache = @import("runtime_observation_cache.zig");
 
@@ -52,6 +54,16 @@ const SurfaceRuntime = maru.app.SurfaceRuntime;
 const RuntimeHandle = maru.app.TermRuntimeHandle;
 const LivePtySession = maru.app.LivePtySession;
 const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
+
+/// Product caps are named here with their owner. Documentation refers to these names rather than
+/// duplicating values. Resident bytes exclude ArrayList bookkeeping and count owned display fields.
+pub const notification_limits: notification_journal.Limits = .{
+    .max_events = 256,
+    .max_resident_bytes = 1024 * 1024,
+    .max_title_bytes = 4 * 1024,
+    .max_body_bytes = 64 * 1024,
+    .max_label_bytes = 256,
+};
 
 // host runtime의 PTY→core 이벤트 큐 용량. 제품 경로(app_session.default_queue_capacity)와 같은 16으로 맞춰
 // 재접속한 GUI가 in-process와 같은 backpressure를 보게 한다(e2d stream이 이 큐를 소비).
@@ -251,6 +263,10 @@ pub const RuntimeManager = struct {
     backend_impl: InProcessTermBackend,
     /// host의 runtime_id 키드 표. 이 매니저가 아니라 daemon이 소유한다(SocketServer도 참조) — 여기선 등록/해제만 한다.
     host_registry: *reg.TerminalRuntimeRegistry,
+    /// Stable OSC delivery state belongs to the host, not to any GUI connection. It is final-address
+    /// for the same reason as RuntimeManager itself and is mutated only by the daemon owner tick.
+    notification_journal: notification_journal.Journal,
+    notification_permanent_drops: u64 = 0,
     observed_reaped_children: u64 = 0,
     observed_last_child_exit_status: i32 = -1,
     output_metrics_enabled: bool = false,
@@ -291,12 +307,29 @@ pub const RuntimeManager = struct {
     /// 증상은 「그 터미널만 관측 모드로 조용히 강등」이라 알아채기 어렵다. 인자로 만들면 새 제품 경로가
     /// 생겨도 컴파일이 그 결정을 강제한다(테스트는 `null` 을 명시해 «훅 없는 host» 를 뜻한다).
     pub fn init(self: *RuntimeManager, allocator: std.mem.Allocator, io: std.Io, host_registry: *reg.TerminalRuntimeRegistry, hook_identity: ?HookIdentity) void {
+        // Unit fixtures predating N2 do not model discovery identity. Product construction must use
+        // initWithHostId; the non-zero sentinel keeps those fixtures explicit and deterministic.
+        self.initWithHostId(allocator, io, host_registry, if (hook_identity) |identity| identity.host_id else 1, hook_identity);
+    }
+
+    pub fn initWithHostId(
+        self: *RuntimeManager,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host_registry: *reg.TerminalRuntimeRegistry,
+        host_id: u128,
+        hook_identity: ?HookIdentity,
+    ) void {
+        std.debug.assert(host_id != 0);
+        if (hook_identity) |identity| std.debug.assert(identity.host_id == host_id);
         self.allocator = allocator;
         self.io = io;
         self.live_registry = LiveRegistry.init(allocator);
         self.surface_runtime = SurfaceRuntime.init(allocator);
         self.backend_impl = InProcessTermBackend.init(allocator, io, &self.live_registry, &self.surface_runtime);
         self.host_registry = host_registry;
+        self.notification_journal.initInPlace(allocator, host_id, notification_limits) catch unreachable;
+        self.notification_permanent_drops = 0;
         self.observed_reaped_children = 0;
         self.observed_last_child_exit_status = -1;
         self.output_metrics_enabled = false;
@@ -404,6 +437,7 @@ pub const RuntimeManager = struct {
             self.observation_caches.deinit(self.allocator);
         }
         self.bell_counts.deinit(self.allocator);
+        self.notification_journal.deinit() catch @panic("notification journal owner moved");
         {
             var it = self.clipboards.valueIterator();
             while (it.next()) |state| state.deinit(self.allocator);
@@ -473,10 +507,13 @@ pub const RuntimeManager = struct {
         next_handle: u64,
         resources: []UpgradeResource,
         views: []handoff_codec.RuntimeView,
+        notification_handoff: []u8,
+        notification_digest: notification_journal.LogicalDigest,
 
         pub fn deinit(self: *QuiescedCapture) void {
             self.allocator.free(self.views);
             self.allocator.free(self.resources);
+            self.allocator.free(self.notification_handoff);
             self.* = undefined;
         }
 
@@ -505,6 +542,7 @@ pub const RuntimeManager = struct {
                 .next_handle = self.next_handle,
                 .runtimes = self.views,
                 .attempt_record = attempt_record,
+                .notification_handoff = self.notification_handoff,
             });
         }
 
@@ -516,6 +554,7 @@ pub const RuntimeManager = struct {
             const allocator = self.allocator;
             const resources = self.resources;
             allocator.free(self.views);
+            allocator.free(self.notification_handoff);
             self.* = undefined;
             return .{ .allocator = allocator, .bytes = bytes, .resources = resources };
         }
@@ -554,6 +593,8 @@ pub const RuntimeManager = struct {
                 continue;
             };
             result.output_events += drained.output_events;
+            self.admitPendingNotification(item.runtime_id, terminal_slot);
+            self.takeRejectedNotification(terminal_slot);
             if (drained.ended) |ended| switch (ended) {
                 .exited => |status| {
                     result.exited += 1;
@@ -574,6 +615,91 @@ pub const RuntimeManager = struct {
         }
         for (remove_ids[0..remove_count]) |runtime_id| self.terminateRuntime(runtime_id);
         return result;
+    }
+
+    /// Product owner-tick transaction: copy the current core generation, normalize untrusted bytes,
+    /// admit the stable row, then clear only that exact generation. Allocation/transient journal
+    /// failure leaves the core slot for retry. Permanent presentation rejection is consumed once so
+    /// one hostile OSC cannot pin every later notification in that runtime's single core slot.
+    fn admitPendingNotification(self: *RuntimeManager, runtime_id: u128, terminal_slot: anytype) void {
+        const surface = &terminal_slot.surface;
+        surface.lockCore(self.io);
+        const pending = surface.core.pendingNotification() orelse {
+            surface.unlockCore(self.io);
+            return;
+        };
+        const generation = pending.generation;
+        const raw_title = self.allocator.dupe(u8, pending.title) catch {
+            surface.unlockCore(self.io);
+            return;
+        };
+        const raw_body = self.allocator.dupe(u8, pending.body) catch {
+            self.allocator.free(raw_title);
+            surface.unlockCore(self.io);
+            return;
+        };
+        surface.unlockCore(self.io);
+        defer self.allocator.free(raw_title);
+        defer self.allocator.free(raw_body);
+
+        const title = notification_admission.sanitizeOwned(
+            self.allocator,
+            raw_title,
+            .single_line,
+            notification_limits.max_title_bytes,
+        ) catch |err| return self.finishRejectedNotification(surface, generation, err);
+        defer self.allocator.free(title);
+        const display_title = notification_admission.titleOrFallback(title);
+        const body = notification_admission.sanitizeOwned(
+            self.allocator,
+            raw_body,
+            .multi_line,
+            notification_limits.max_body_bytes,
+        ) catch |err| return self.finishRejectedNotification(surface, generation, err);
+        defer self.allocator.free(body);
+        var label_buf: [32]u8 = undefined;
+        const label = std.fmt.bufPrint(&label_buf, "{x:0>32}", .{runtime_id}) catch unreachable;
+        const occurred = std.Io.Clock.awake.now(self.io).nanoseconds;
+        _ = self.notification_journal.admit(
+            runtime_id,
+            if (occurred <= 0) 0 else @intCast(@min(occurred, std.math.maxInt(u64))),
+            display_title,
+            body,
+            label,
+        ) catch |err| switch (err) {
+            error.FieldTooLarge, error.ResidentLimit, error.EventIdExhausted => return self.finishRejectedNotification(surface, generation, err),
+            error.OutOfMemory => return,
+            error.InvalidOwner => @panic("notification journal owner moved"),
+        };
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        _ = surface.core.clearNotificationIfGeneration(generation);
+    }
+
+    fn finishRejectedNotification(self: *RuntimeManager, surface: anytype, generation: u64, err: anyerror) void {
+        if (err == error.OutOfMemory) return;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        if (surface.core.clearNotificationIfGeneration(generation)) self.notification_permanent_drops +|= 1;
+    }
+
+    fn takeRejectedNotification(self: *RuntimeManager, terminal_slot: anytype) void {
+        const surface = &terminal_slot.surface;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        if (surface.core.takeNotificationWriteRejected()) self.notification_permanent_drops +|= 1;
+    }
+
+    pub fn oldestNotification(self: *const RuntimeManager, consumer: notification_journal.Consumer) ?notification_journal.View {
+        return self.notification_journal.oldestPending(consumer);
+    }
+
+    pub fn acknowledgeNotification(
+        self: *RuntimeManager,
+        key: notification_journal.Key,
+        consumer: notification_journal.Consumer,
+    ) notification_journal.AckResult {
+        return self.notification_journal.ack(key, consumer);
     }
 
     /// 현재 host가 소유한 실제 PTY reader들의 누적 raw output bytes. test fixture가
@@ -962,6 +1088,9 @@ pub const RuntimeManager = struct {
             live_initialized = false;
             surface_initialized = false;
         }
+        if (host.notification_handoff) |notification_bytes| {
+            self.notification_permanent_drops = try self.notification_journal.restoreHandoff(notification_bytes);
+        }
         try self.host_registry.restoreMembershipGeneration(host.membership_generation);
         self.next_handle = host.next_handle;
         return prepared;
@@ -1115,6 +1244,16 @@ pub const RuntimeManager = struct {
         errdefer allocator.free(resources);
         const views = allocator.alloc(handoff_codec.RuntimeView, count) catch return error.OutOfMemory;
         errdefer allocator.free(views);
+        const notification_handoff = self.notification_journal.encodeHandoff(
+            allocator,
+            self.notification_permanent_drops,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.LimitExceeded => return error.LimitExceeded,
+            error.InvalidOwner => return error.UnsafeFrontier,
+        };
+        errdefer allocator.free(notification_handoff);
+        if (notification_handoff.len > handoff_codec.max_notification_handoff_bytes) return error.LimitExceeded;
         var locked: usize = 0;
         defer for (items[0..locked]) |item| item.terminal_slot.surface.unlockCore(self.io);
         for (items[0..count], 0..) |item, index| {
@@ -1153,6 +1292,8 @@ pub const RuntimeManager = struct {
             .next_handle = self.next_handle,
             .resources = resources,
             .views = views,
+            .notification_handoff = notification_handoff,
+            .notification_digest = self.notification_journal.logicalDigest(self.notification_permanent_drops),
         };
     }
 
@@ -1165,6 +1306,9 @@ pub const RuntimeManager = struct {
         if (capture.next_handle != self.next_handle or
             capture.resources.len != capture.views.len or
             capture.resources.len != self.host_registry.count())
+            return error.UnsafeFrontier;
+        const current_notification_digest = self.notification_journal.logicalDigest(self.notification_permanent_drops);
+        if (!std.mem.eql(u8, &capture.notification_digest, &current_notification_digest))
             return error.UnsafeFrontier;
         for (capture.resources, capture.views) |resource, view| {
             if (resource.runtime_id != view.runtime_id or resource.inherited_slot != view.fd_slot)
@@ -1576,25 +1720,23 @@ pub const RuntimeManager = struct {
         };
     }
 
-    /// Core lock 아래 pending bytes+generation을 복제하되 아직 clear하지 않는다. response frame이 owner control
-    /// queue에 admission된 뒤 notificationCommitOp가 같은 generation만 지워 OOM/backpressure 소실을 막는다.
+    /// N2a journal의 이 runtime용 GUI row를 직렬화하되 아직 ack하지 않는다. server가 response frame을
+    /// owner control queue에 admission한 뒤 notificationCommitOp가 같은 stable event만 ack해 backpressure
+    /// 소실을 막는다. wire body는 기존 client 호환을 위해 title/body 그대로이며 generation 칸에 event_id를 싣는다.
     fn notificationPeekOp(
         ctx: *anyopaque,
         runtime_id: u128,
         allocator: std.mem.Allocator,
     ) anyerror!server.NotificationSnapshot {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
-        const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
-        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
+        if (self.handleFor(runtime_id) == null) return error.RuntimeNotFound;
         var out: std.Io.Writer.Allocating = .init(allocator);
         defer out.deinit();
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
         var generation: ?u64 = null;
-        if (surface.core.pendingNotification()) |n| {
-            js.write(.{ .title = n.title, .body = n.body }) catch return error.OutOfMemory;
-            generation = n.generation;
+        if (self.notification_journal.oldestPendingForRuntime(.gui, runtime_id)) |row| {
+            js.write(.{ .title = row.title, .body = row.body }) catch return error.OutOfMemory;
+            generation = row.key.event_id;
         } else {
             js.write(.{ .title = "", .body = "" }) catch return error.OutOfMemory;
         }
@@ -1611,11 +1753,15 @@ pub const RuntimeManager = struct {
     ) bool {
         const expected = generation orelse return true;
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
-        const handle = self.handleFor(runtime_id) orelse return false;
-        const surface = self.backend_impl.surfaceFor(handle) orelse return false;
-        surface.lockCore(self.io);
-        defer surface.unlockCore(self.io);
-        return surface.core.clearNotificationIfGeneration(expected);
+        if (self.handleFor(runtime_id) == null) return false;
+        const host_id = self.notification_journal.hostId() orelse return false;
+        const key: notification_journal.Key = .{ .host_id = host_id, .event_id = expected };
+        const row = self.notification_journal.peek(key) orelse return false;
+        if (row.runtime_id != runtime_id) return false;
+        return switch (self.notification_journal.ack(key, .gui)) {
+            .acknowledged, .already_acknowledged => true,
+            .not_found, .invalid_owner => false,
+        };
     }
 
     /// 검증된 wire command를 내부 `CoreCommand`로 명시 변환한다. PTY 응답·parser/config를 건드리는 명령은 host reader
@@ -2080,6 +2226,200 @@ fn rgbFromWire(rgb: u32) terminal.Rgb {
     };
 }
 
+test "P4 N2a product owner admits real PTY OSC into stable host journal" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const host_id: u128 = 0x11223344556677889900aabbccddeeff;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.initWithHostId(allocator, std.testing.io, &host_registry, host_id, null);
+    defer manager.deinit();
+    const ops = manager.runtimeOps();
+    const runtime_id = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cols = 40,
+        .rows = 8,
+    });
+    defer ops.terminate(ops.ctx, runtime_id);
+
+    try ops.write_input(ops.ctx, runtime_id, "\x1b]777;notify; Build\nTitle ;done\xff\x07\n");
+    // The aggregate Debug gate runs thousands of tests beside this real forkpty child. Keep a
+    // bounded 10 s product deadline so scheduler pressure cannot turn a correct PTY echo into a
+    // two-second false negative; the 1 ms poll still makes the normal path complete immediately.
+    var attempts: usize = 0;
+    while (attempts < 10_000 and manager.oldestNotification(.gui) == null) : (attempts += 1) {
+        _ = manager.drainOwnedEvents();
+        _ = usleep(1000);
+    }
+    const row = manager.oldestNotification(.gui) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(host_id, row.key.host_id);
+    try std.testing.expectEqual(runtime_id, row.runtime_id);
+    try std.testing.expectEqual(@as(u64, 1), row.key.event_id);
+    try std.testing.expectEqualStrings("Build Title", row.title);
+    try std.testing.expectEqualStrings("done\xef\xbf\xbd", row.body);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(row.title));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(row.body));
+    const snapshot = try ops.notification_peek(ops.ctx, runtime_id, allocator);
+    defer allocator.free(snapshot.body);
+    try std.testing.expectEqual(row.key.event_id, snapshot.generation.?);
+    try std.testing.expectEqualStrings("{\"title\":\"Build Title\",\"body\":\"done\xef\xbf\xbd\"}", snapshot.body);
+    try std.testing.expect(ops.notification_commit(ops.ctx, runtime_id, snapshot.generation));
+    try std.testing.expect(manager.oldestNotification(.gui) == null);
+    try std.testing.expectEqual(row.key.event_id, manager.oldestNotification(.os).?.key.event_id);
+
+    try ops.write_input(ops.ctx, runtime_id, "\x1b]9;legacy body\x07\n");
+    attempts = 0;
+    while (attempts < 10_000 and manager.notification_journal.oldestPendingForRuntime(.gui, runtime_id) == null) : (attempts += 1) {
+        _ = manager.drainOwnedEvents();
+        _ = usleep(1000);
+    }
+    const osc9 = manager.notification_journal.oldestPendingForRuntime(.gui, runtime_id) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Maru", osc9.title);
+    try std.testing.expectEqualStrings("legacy body", osc9.body);
+}
+
+test "P4 N2a product owner retries allocation failure and consumes permanent rejection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.initWithHostId(allocator, std.testing.io, &host_registry, 0x2233, null);
+    defer manager.deinit();
+    const ops = manager.runtimeOps();
+    const retry_runtime = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cols = 40, .rows = 8 });
+    defer ops.terminate(ops.ctx, retry_runtime);
+    const retry_handle = manager.handleFor(retry_runtime) orelse return error.TestUnexpectedResult;
+    const retry_slot = manager.backend_impl.terminalForHostLifecycle(retry_handle) orelse return error.TestUnexpectedResult;
+    retry_slot.surface.lockCore(manager.io);
+    retry_slot.surface.core.write("\x1b]777;notify;retry;body\x07") catch |err| {
+        retry_slot.surface.unlockCore(manager.io);
+        return err;
+    };
+    retry_slot.surface.unlockCore(manager.io);
+
+    var reached_success = false;
+    for (0..16) |fail_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        failing.fail_index = fail_offset;
+        manager.allocator = failing.allocator();
+        manager.admitPendingNotification(retry_runtime, retry_slot);
+        manager.allocator = allocator;
+        failing.fail_index = std.math.maxInt(usize);
+        if (manager.oldestNotification(.gui) != null) {
+            reached_success = true;
+            retry_slot.surface.lockCore(manager.io);
+            const pending = retry_slot.surface.core.pendingNotification();
+            retry_slot.surface.unlockCore(manager.io);
+            try std.testing.expect(pending == null);
+            break;
+        }
+        retry_slot.surface.lockCore(manager.io);
+        const pending = retry_slot.surface.core.pendingNotification();
+        retry_slot.surface.unlockCore(manager.io);
+        try std.testing.expect(pending != null);
+        try std.testing.expectEqual(@as(u64, 0), manager.notification_permanent_drops);
+    }
+    try std.testing.expect(reached_success);
+    try std.testing.expectEqual(@as(u64, 1), manager.oldestNotification(.gui).?.key.event_id);
+
+    const rejected_runtime = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cols = 40, .rows = 8 });
+    defer ops.terminate(ops.ctx, rejected_runtime);
+    const rejected_handle = manager.handleFor(rejected_runtime) orelse return error.TestUnexpectedResult;
+    const rejected_slot = manager.backend_impl.terminalForHostLifecycle(rejected_handle) orelse return error.TestUnexpectedResult;
+    const oversized = try allocator.alloc(u8, notification_limits.max_title_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 'x');
+    rejected_slot.surface.lockCore(manager.io);
+    rejected_slot.surface.core.write("\x1b]777;notify;") catch |err| {
+        rejected_slot.surface.unlockCore(manager.io);
+        return err;
+    };
+    rejected_slot.surface.core.write(oversized) catch |err| {
+        rejected_slot.surface.unlockCore(manager.io);
+        return err;
+    };
+    rejected_slot.surface.core.write(";body\x07") catch |err| {
+        rejected_slot.surface.unlockCore(manager.io);
+        return err;
+    };
+    rejected_slot.surface.unlockCore(manager.io);
+
+    const fair_runtime = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cols = 40, .rows = 8 });
+    defer ops.terminate(ops.ctx, fair_runtime);
+    const fair_handle = manager.handleFor(fair_runtime) orelse return error.TestUnexpectedResult;
+    const fair_slot = manager.backend_impl.terminalForHostLifecycle(fair_handle) orelse return error.TestUnexpectedResult;
+    fair_slot.surface.lockCore(manager.io);
+    fair_slot.surface.core.write("\x1b]777;notify;fair;admitted\x07") catch |err| {
+        fair_slot.surface.unlockCore(manager.io);
+        return err;
+    };
+    fair_slot.surface.unlockCore(manager.io);
+
+    _ = manager.drainOwnedEvents();
+    rejected_slot.surface.lockCore(manager.io);
+    const rejected_pending = rejected_slot.surface.core.pendingNotification();
+    rejected_slot.surface.unlockCore(manager.io);
+    try std.testing.expect(rejected_pending == null);
+    try std.testing.expectEqual(@as(u64, 1), manager.notification_permanent_drops);
+    try std.testing.expect(manager.notification_journal.oldestPendingForRuntime(.gui, rejected_runtime) == null);
+    const fair = manager.notification_journal.oldestPendingForRuntime(.gui, fair_runtime) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("fair", fair.title);
+    try std.testing.expectEqualStrings("admitted", fair.body);
+    try std.testing.expectEqual(@as(u64, 2), fair.key.event_id);
+}
+
+test "P4 N2a outer handoff restores journal before successor publication" {
+    const allocator = std.testing.allocator;
+    const host_id: u128 = 0x1234;
+    var source_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer source_registry.deinit();
+    var source: RuntimeManager = undefined;
+    source.initWithHostId(allocator, std.testing.io, &source_registry, host_id, null);
+    defer source.deinit();
+    const first = try source.notification_journal.admit(7, 10, "one", "body", "label");
+    _ = try source.notification_journal.admit(8, 11, "two", "body", "label");
+    try std.testing.expectEqual(notification_journal.AckResult.acknowledged, source.notification_journal.ack(first, .os));
+    source.notification_permanent_drops = 9;
+
+    const resources = try allocator.alloc(RuntimeManager.UpgradeResource, 0);
+    const views = try allocator.alloc(handoff_codec.RuntimeView, 0);
+    const notification_bytes = try source.notification_journal.encodeHandoff(allocator, source.notification_permanent_drops);
+    var capture: RuntimeManager.QuiescedCapture = .{
+        .allocator = allocator,
+        .host_id = host_id,
+        .upgrade_epoch = 2,
+        .next_handle = 1,
+        .resources = resources,
+        .views = views,
+        .notification_handoff = notification_bytes,
+        .notification_digest = source.notification_journal.logicalDigest(source.notification_permanent_drops),
+    };
+    defer capture.deinit();
+    const encoded = try capture.encode(null);
+    defer allocator.free(encoded);
+    _ = try source.notification_journal.admit(10, 13, "late", "mutation", "label");
+    try std.testing.expectError(error.UnsafeFrontier, source.revalidateQuiescedCapture(&capture));
+    var decoded = try handoff_codec.decodeHost(allocator, encoded);
+    defer decoded.deinit();
+
+    var target_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer target_registry.deinit();
+    var target: RuntimeManager = undefined;
+    target.initWithHostId(allocator, std.testing.io, &target_registry, host_id, null);
+    defer target.deinit();
+    var graph = try target.prepareRestoredGraph(&decoded);
+    defer graph.discard();
+    try std.testing.expectEqual(@as(u64, 9), target.notification_permanent_drops);
+    try std.testing.expect(!target.notification_journal.peek(first).?.pending_os);
+    try std.testing.expect(target.notification_journal.peek(first).?.pending_gui);
+    const next = try target.notification_journal.admit(9, 12, "three", "body", "label");
+    try std.testing.expectEqual(@as(u64, 3), next.event_id);
+}
+
 fn paletteFromWire(wire_palette: core_command_wire.Command.Palette) [16]?terminal.Rgb {
     var palette: [16]?terminal.Rgb = .{null} ** 16;
     for (wire_palette, 0..) |maybe_rgb, index| {
@@ -2104,6 +2444,8 @@ test "quiesced capture derives one sorted runtime authority set and rejects dive
         .next_handle = 4,
         .resources = resources,
         .views = views,
+        .notification_handoff = try allocator.alloc(u8, 0),
+        .notification_digest = [_]u8{0} ** 32,
     };
     defer capture.deinit();
     var ids: [upgrade_limits.max_runtime_count]u128 = undefined;

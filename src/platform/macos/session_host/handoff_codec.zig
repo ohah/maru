@@ -39,9 +39,11 @@ const section_terminal_core: u32 = 1;
 const section_host_meta: u32 = 2;
 const section_runtime: u32 = 3;
 const section_attempt_record: u32 = 4;
+const section_notification_journal: u32 = 5;
 pub const max_runtime_count = upgrade_limits.max_runtime_count;
 pub const max_attempt_record_bytes = upgrade_limits.max_attempt_record_bytes;
-const max_section_count: usize = max_runtime_count + 2;
+pub const max_notification_handoff_bytes: usize = 2 * 1024 * 1024;
+const max_section_count: usize = max_runtime_count + 3;
 
 pub const Error = std.mem.Allocator.Error || error{
     BadMagic,
@@ -169,6 +171,9 @@ const core_fields_v1 = [_]FieldSpec{
     // 짧은 구간이고 그 방향의 degrade는 안전하다(폴더줄이 예전처럼 브랜치 조건에 묶일 뿐 — ssh-integration.md §9.5의
     // "보고자가 없을 때" 상태와 같다). 반대로 업그레이드를 막는 쪽은 세션 전체를 잃는다.
     .{ .tag = 90, .name = "cwd_host", .optional = true },
+    // N2a overflow observability. Old writers did not expose this one-shot bit, so absence safely
+    // means false; new writers preserve it rather than losing the bounded drop at same-PID exec.
+    .{ .tag = 91, .name = "notification_write_rejected", .optional = true },
 };
 
 comptime {
@@ -853,6 +858,9 @@ pub const HostView = struct {
     /// Daemon attempt registry의 versioned opaque record. Outer optional section이라 frozen old reader는 안전하게
     /// 건너뛰고, current target/rollback entrypoint는 자체 codec으로 필수 검증한다.
     attempt_record: ?[]const u8 = null,
+    /// Host-owned notification journal. Optional outer section keeps an N1-era writer readable by
+    /// the new successor while a writer that advertises the section is validated strictly.
+    notification_handoff: ?[]const u8 = null,
 };
 
 pub const RuntimeState = struct {
@@ -883,11 +891,13 @@ pub const HostState = struct {
     next_handle: u64,
     runtimes: []RuntimeState,
     attempt_record: ?[]u8,
+    notification_handoff: ?[]u8 = null,
 
     pub fn deinit(self: *HostState) void {
         for (self.runtimes) |*runtime| runtime.deinit();
         self.allocator.free(self.runtimes);
         if (self.attempt_record) |record| self.allocator.free(record);
+        if (self.notification_handoff) |record| self.allocator.free(record);
         self.* = undefined;
     }
 };
@@ -950,6 +960,13 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
         try writer.endTlv(attempt_start);
     }
 
+    if (host.notification_handoff) |record| {
+        if (record.len == 0 or record.len > max_notification_handoff_bytes) return error.LimitExceeded;
+        const notification_start = try writer.beginTlv(section_notification_journal, flag_optional);
+        try writer.append(record);
+        try writer.endTlv(notification_start);
+    }
+
     for (host.runtimes) |runtime| {
         if (runtime.child_pid <= 0 or runtime.cols < 2 or runtime.rows < 1 or
             runtime.fd_slot < 3 or runtime.core.response.items.len != 0) return error.InvalidValue;
@@ -970,7 +987,8 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
         try writer.endTlv(runtime_start);
         if (writer.bytes.items.len - runtime_start > max_runtime_section_bytes) return error.LimitExceeded;
     }
-    return finishEnvelope(&writer, @intCast(host.runtimes.len + 1 + @intFromBool(host.attempt_record != null)));
+    return finishEnvelope(&writer, @intCast(host.runtimes.len + 1 +
+        @intFromBool(host.attempt_record != null) + @intFromBool(host.notification_handoff != null)));
 }
 
 fn readTagged(comptime T: type, field: *Reader, allocator: std.mem.Allocator) Error!T {
@@ -1070,6 +1088,8 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
     var saw_meta = false;
     var attempt_record: ?[]u8 = null;
     errdefer if (attempt_record) |record| allocator.free(record);
+    var notification_handoff: ?[]u8 = null;
+    errdefer if (notification_handoff) |record| allocator.free(record);
     var payload = Reader{ .bytes = envelope.payload };
     for (0..envelope.section_count) |_| {
         const tag = try payload.integer(u32);
@@ -1098,6 +1118,12 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
                 attempt_record = allocator.dupe(u8, section.bytes) catch return error.OutOfMemory;
                 section.pos = section.bytes.len;
             },
+            section_notification_journal => {
+                if (flags & flag_optional == 0 or notification_handoff != null or section.bytes.len == 0 or
+                    section.bytes.len > max_notification_handoff_bytes) return error.InvalidValue;
+                notification_handoff = allocator.dupe(u8, section.bytes) catch return error.OutOfMemory;
+                section.pos = section.bytes.len;
+            },
             else => if (flags & flag_optional == 0) return error.UnknownRequiredField,
         }
     }
@@ -1124,6 +1150,7 @@ pub fn decodeHost(allocator: std.mem.Allocator, bytes: []const u8) Error!HostSta
         .next_handle = next_handle,
         .runtimes = try runtimes.toOwnedSlice(allocator),
         .attempt_record = attempt_record,
+        .notification_handoff = notification_handoff,
     };
 }
 

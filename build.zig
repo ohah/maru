@@ -3356,6 +3356,72 @@ pub fn build(b: *std.Build) void {
         session_host_notification_journal_step.dependOn(&run_journal_boundary_tests.step);
         boundary_step.dependOn(&run_journal_boundary_tests.step);
     }
+    const session_host_notification_admission_step = b.step(
+        "test-session-host-notification-admission",
+        "Verify P4 N2a host notification sanitizer and product admission",
+    );
+    session_host_notification_admission_step.dependOn(session_host_notification_journal_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |admission_optimize| {
+        const notification_admission_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/notification_admission.zig"),
+            .target = target,
+            .optimize = admission_optimize,
+        });
+        const admission_red_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_admission_red.zig"),
+                .target = target,
+                .optimize = admission_optimize,
+                .imports = &.{.{ .name = "notification_admission", .module = notification_admission_mod }},
+            }),
+            .filters = &.{"P4 N2a notification sanitizer"},
+        });
+        const run_admission_red_tests = b.addRunArtifact(admission_red_tests);
+        run_admission_red_tests.addArg("--maru-expect-tests=4");
+        session_host_notification_admission_step.dependOn(&run_admission_red_tests.step);
+
+        const admission_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = admission_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "P4 N2a product owner admits real PTY OSC",
+                "P4 N2a product owner retries allocation failure",
+                "P4 N2a outer handoff restores journal",
+            },
+        });
+        const run_admission_product_tests = b.addRunArtifact(admission_product_tests);
+        run_admission_product_tests.addArg("--maru-expect-tests=3");
+        session_host_notification_admission_step.dependOn(&run_admission_product_tests.step);
+
+        const admission_core_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/terminal.zig"),
+                .target = target,
+                .optimize = admission_optimize,
+            }),
+            .filters = &.{"P4 N2a notification overflow classifies"},
+        });
+        const run_admission_core_tests = b.addRunArtifact(admission_core_tests);
+        // terminal.zig reaches core through three facade paths; all three select the same contract.
+        run_admission_core_tests.addArg("--maru-expect-tests=3");
+        session_host_notification_admission_step.dependOn(&run_admission_core_tests.step);
+
+        const admission_handoff_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/notification_journal.zig"),
+                .target = target,
+                .optimize = admission_optimize,
+            }),
+            .filters = &.{"P4 N2a handoff"},
+        });
+        const run_admission_handoff_tests = b.addRunArtifact(admission_handoff_tests);
+        run_admission_handoff_tests.addArg("--maru-expect-tests=3");
+        session_host_notification_admission_step.dependOn(&run_admission_handoff_tests.step);
+    }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

@@ -177,6 +177,7 @@ pub const terminal_core_groups = [_]Group{
             "clipboard_read_pending",
             "clipboard_read_target",
             "notification_pending",
+            "notification_write_rejected",
             "notification_title",
             "notification_body",
             "agent_progress",
@@ -663,8 +664,8 @@ pub const live_pty_session_groups = [_]Group{
 pub const runtime_manager_groups = [_]Group{
     .{
         .disposition = .serialized,
-        .fields = &.{"next_handle"},
-        .why = "restored handles must not collide with a handle issued before exec",
+        .fields = &.{ "next_handle", "notification_journal", "notification_permanent_drops" },
+        .why = "restored handles must not collide with a handle issued before exec; host-lifetime notification IDs, pending delivery bits, and bounded drop evidence cannot reset at the exec boundary",
     },
     .{
         .disposition = .reconstructed,

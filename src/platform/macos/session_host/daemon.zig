@@ -493,7 +493,7 @@ fn runSessionHostImpl(
     // 등록 순서가 곧 해제 순서의 역이라, base 해제(위)보다 뒤·manager 해제(아래)보다 앞에 둔다.
     defer if (hook_log_base) |base| agent_hook_logs.removeInstanceDir(io, base, host_id);
     var manager: runtime_manager.RuntimeManager = undefined;
-    manager.init(allocator, io, &registry, if (hook_log_base) |base| .{
+    manager.initWithHostId(allocator, io, &registry, host_id, if (hook_log_base) |base| .{
         .host_id = host_id,
         .log_base = base,
     } else null);

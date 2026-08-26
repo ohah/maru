@@ -2408,6 +2408,72 @@ test "CRT1 커서 수만큼 막대가 서고, blink가 꺼지면 하나도 안 �
     }
 }
 
+test "CRT3 랩이 걸린 줄에서 caret은 한 번만, 제 행에 선다 (§4.1g)" {
+    // **랩에서 caret이 어느 행에 서는지 아무도 재지 않았다**(적대적 검증 2026-08-26 — 행 앞을
+    // 거르는 `col < row.start_col`을 없앤 뮤턴트가 살아남았다). 거르지 않으면 **같은 caret이
+    // 그 줄의 모든 시각 행에 선다** — 화면에는 커서가 여러 개로 보이고, 어느 것이 진짜인지
+    // 알 수 없다.
+    //
+    // 이음매 선택(위 행 끝이냐 아래 행 머리냐)은 아직 **결정이 아니라 부수효과**다
+    // (`native-editor-visual-mapping.md` §4 `assoc`) — 여기서는 그 선택을 고정하지 않고
+    // **"한 번만 선다"**와 **"제 행에 선다"**만 잰다.
+    var ops: [128]draw.Op = undefined;
+    var text: [1024]u8 = undefined;
+    var runs: [128]draw.Run = undefined;
+    var content_rows: [16]content.Row = undefined;
+    var visual_rows: [16]visual_map.VisualRow = undefined;
+    var gutter_rows: [16]gutter.Row = undefined;
+    var counts: [16]u32 = undefined;
+    var count_scratch: [512]u8 = undefined;
+
+    // 20칸 폭에 40자 — 두 시각 행으로 접힌다.
+    const lines = [_][]const u8{"0123456789abcdefghijABCDEFGHIJklmnopqrst"};
+    const total_cols: u16 = 20;
+    // 25번째 글자 = 둘째 시각 행의 5번째 칸.
+    const row_carets = [_]u32{25};
+    const carets = [_][]const u32{&row_carets};
+
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .carets = &carets,
+        .caret_visible = true,
+        .visible_rows = 4,
+        .wrap = true,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = @as(u32, total_cols) * 8, .h = 64 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = total_cols,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+    });
+
+    var n: usize = 0;
+    var y: i32 = -1;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role != .cursor) continue;
+        n += 1;
+        y = op.quad.rect.y;
+    }
+    // **한 번만** — 거르지 않으면 두 행 모두에 선다.
+    try std.testing.expectEqual(@as(usize, 1), n);
+    // **둘째 시각 행**이다 — 첫 행(y=0)에 서면 랩을 무시한 것이다.
+    try std.testing.expect(y >= 16);
+}
+
 test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제로 작동하는가)" {
     // **예약을 뒀다와 예약이 작동한다는 다르다.** 커서는 줄당 개수에 상한이 없는 둘째 층이라
     // (검색이 첫째) 예산을 다 먹으면 뒤에 오는 막대가 통째로 안 그려지고, 그때 `scrollbar.build`는

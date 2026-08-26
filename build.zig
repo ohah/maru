@@ -2629,6 +2629,52 @@ pub fn build(b: *std.Build) void {
 
     const chrome_ui_test_step = b.step("test-chrome-ui", "Run the focused typed Chrome UI tree, interaction, and paint tests");
     chrome_ui_test_step.dependOn(&run_chrome_ui_tests.step);
+
+    // **편집기 판정자만 돌리는 스텝.** `zig build test`는 3,995개를 전부 돌려 20~30분이 걸리는데,
+    // 그 대부분은 소켓·프로세스·타임아웃을 실제로 쓰는 `session_host` 계열이다. 편집기를 고치는
+    // 동안 그것을 매번 기다리는 것은 낭비다 — 뮤턴트 하나 판정에 20분이 들어 적대적 검증이
+    // 사실상 막혔다(2026-08-25).
+    //
+    // **`test`를 대신하지 않는다.** 필터가 걸려 있으므로 여기 통과는 편집기 판정자만의 통과이고,
+    // 합류 전에는 `mise run check`가 전부 돈다. 이 스텝은 **고치는 동안의 되먹임**을 위한 것이다.
+    const editor_test_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/editor_judges.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    if (target.result.os.tag == .macos) {
+        editor_test_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        editor_test_module.linkFramework("AppKit", .{});
+        editor_test_module.linkFramework("Metal", .{});
+        editor_test_module.linkFramework("MetalKit", .{});
+        editor_test_module.linkFramework("QuartzCore", .{});
+        editor_test_module.linkFramework("Foundation", .{});
+        editor_test_module.linkFramework("CoreText", .{});
+        editor_test_module.linkFramework("CoreGraphics", .{});
+    }
+    const editor_tests = addProjectTest(b, .{
+        .root_module = editor_test_module,
+        // **import와 필터를 함께 쓴다.** 진입 파일의 `test {}`가 대상 파일을 참조해 분석을
+        // 강제하고(그것 없이 필터만 걸면 0개를 돌고도 통과한다 — 실측), 필터가 그 안에서 편집
+        // 슬라이스의 판정자만 고른다. import만 두면 `editor.zig`가 `app_session.zig`를 들여와
+        // 3,851개가 통째로 딸려온다(이것도 실측).
+        // **`CRT`를 여기 적어 두었다가 0개를 돌았다**(적대적 검증 2026-08-26). caret 렌더 판정자와
+        // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
+        // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
+        // 의존으로 실제로 돌린다.
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD" },
+    });
+    const run_editor_tests = b.addRunArtifact(editor_tests);
+    run_editor_tests.setCwd(b.path("."));
+    const editor_test_step = b.step("test-editor", "Run the native editor judges only (fast feedback; not a substitute for `test`)");
+    editor_test_step.dependOn(&run_editor_tests.step);
+    // caret 렌더(`CRT*`)와 왕복 불변식 ①은 chrome 쪽 모듈에 있다 — 15초라 함께 돌린다.
+    editor_test_step.dependOn(&run_chrome_ui_tests.step);
     // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라
     // 기본 Zig test에서 어느 플랫폼에서든 돌린다(인앱 새 버전 안내의 판정 동작 고정).
     const update_check_tests = addProjectTest(b, .{

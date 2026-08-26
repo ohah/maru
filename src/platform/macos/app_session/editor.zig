@@ -3798,9 +3798,50 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 fn refreshAfterEdit(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const doc = term.rt.editor_doc orelse return;
 
+    // ⑷⑸⑹은 **실패할 수 없는 연산이고, ⑵⑶이 실패해도 반드시 돌아야 한다.**
+    //
+    // 적대적 검증(2026-08-25)이 연 자리다. 원래는 ⑵⑶ 뒤에 순서대로 적혀 있었는데, `ensureFoldRanges`나
+    // `rebuildVisible`이 할당에 실패하면 `try`가 즉시 반환해 **⑷⑸⑹이 통째로 안 돌았다** — 행 캐시가
+    // 편집 **전** 계수를 든 채 `filled`로 남고 렌더 스냅숏도 낡은 채 남는다. 그것이 바로 ⑸의 주석이
+    // 막으려는 상태이고, 호출자(`insertText`·`deleteText`)가 이 실패를 `catch {}`로 삼키므로
+    // **편집은 성사되고 파생 상태만 낡는다** — 사용자는 클릭이 어긋나는 것으로만 겪는다.
+    //
+    // 닿는 경로는 OOM 하나뿐이지만 이론적이지 않다: 이 함수의 할당은 전부 줄 수에 비례하고
+    // (`ranges`·`folded`·`folded_prev`·`marks`·`out_lines`), 64 MiB 상한 문서면 편집 한 번마다
+    // 수십 MB를 잡는다. 무엇보다 **부분 실패라 프로세스가 살아서 계속 그린다.**
+    defer {
+        // ⑷ 파생 수치.
+        invalidateFoldDerived(self, term);
+
+        // ⑸ **렌더 스냅숏.** 다음 프레임이 다시 굳힐 때까지 클릭이 답할 것이 없어야 한다 —
+        // 옛 값을 남기는 것보다 "아직 없다"가 낫다(hit-test가 `len == 0`을 이미 그렇게 다룬다).
+        term.rt.editor_hit_rows_len = 0;
+        term.rt.editor_hit_geom = .{};
+
+        // ⑹ 스크롤이 문서 끝을 넘었을 수 있다(줄이 지워졌다면).
+        if (term.rt.editor_first_line >= term.rt.editor_lines.len) {
+            setEditorTop(self, term, term.rt.editor_lines.len -| 1);
+        }
+        self.metal_dirty = true;
+    }
+
     // ⑴ 줄 배열 — 줄 수가 바뀌었을 수 있으므로 다시 잡는다.
+    //
+    // **여기서 실패하면 옛 배열을 그냥 둘 수 없다.** 줄 슬라이스는 문서 content 버퍼를 **빌리는데**,
+    // `edit_doc.apply`는 새 내용을 만든 뒤 **옛 버퍼를 푼다**. 그래서 이 시점의 `editor_lines`는
+    // 이미 **해제된 메모리를 가리킨다** — 남겨 두면 다음 프레임의 `editorLines(term)`가 그것을 읽는다.
+    // 낡은 값이 아니라 **use-after-free**다(적대적 검증 2026-08-25).
+    //
+    // 놓고 비운다. 그러면 화면이 빈 문서로 보이지만 **읽을 수 없는 것을 읽지는 않는다** —
+    // ⑸가 "옛 값보다 아직 없다가 낫다"고 고른 것과 같은 판단이다.
     const n = doc.file.lineCount();
-    const lines = try self.allocator.alloc([]const u8, n);
+    const lines = self.allocator.alloc([]const u8, n) catch |err| {
+        if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
+        term.rt.editor_lines = &.{};
+        // 보이는 줄도 같은 버퍼를 빌린다 — 함께 놓는다.
+        dropFoldState(self, term);
+        return err;
+    };
     for (0..n) |i| lines[i] = doc.file.lineText(i) orelse "";
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = lines;
@@ -3809,20 +3850,6 @@ fn refreshAfterEdit(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     dropFoldState(self, term);
     try ensureFoldRanges(self, term);
     try rebuildVisible(self, term);
-
-    // ⑷ 파생 수치.
-    invalidateFoldDerived(self, term);
-
-    // ⑸ **렌더 스냅숏.** 다음 프레임이 다시 굳힐 때까지 클릭이 답할 것이 없어야 한다 —
-    // 옛 값을 남기는 것보다 "아직 없다"가 낫다(hit-test가 `len == 0`을 이미 그렇게 다룬다).
-    term.rt.editor_hit_rows_len = 0;
-    term.rt.editor_hit_geom = .{};
-
-    // 스크롤이 문서 끝을 넘었을 수 있다(줄이 지워졌다면).
-    if (term.rt.editor_first_line >= term.rt.editor_lines.len) {
-        setEditorTop(self, term, term.rt.editor_lines.len -| 1);
-    }
-    self.metal_dirty = true;
 }
 
 fn dropSelectionState(self: *AppSession, term: *Term) void {
@@ -9789,6 +9816,16 @@ test "EDIT4 Backspace·Delete가 글자 단위로 지운다 — 깨진 UTF-8을 
     try testing.expect(deleteText(fx.session, term, false));
     try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
 
+    // **위 Delete는 ASCII라 byte 하나와 결과가 같다.** 앞으로 지우기를 byte 단위로 바꾼 뮤턴트가
+    // 그래서 살아남았다(적대적 검증 2026-08-26) — 지워질 글자가 **여러 byte인 경우**를 따로 잰다.
+    {
+        const wide = try undoFixture(&fx, allocator, "e4b.txt", "a한b\n");
+        wide.rt.editor_selection = editor_selection.Selection.at(1); // "한" 바로 앞
+        try testing.expect(deleteText(fx.session, wide, false));
+        try testing.expectEqualStrings("ab\n", wide.rt.editor_doc.?.file.content);
+        try testing.expectEqual(@as(usize, 1), wide.rt.editor_selection.?.focus);
+    }
+
     // **문서 처음에서 Backspace는 아무 일도 안 한다** — 빈 편집이 쌓이면 undo가 헛돈다.
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(!deleteText(fx.session, term, true));
@@ -9823,6 +9860,82 @@ test "EDIT5 Enter가 줄을 나누고 줄 배열이 따라온다 (§3.3)" {
     try testing.expectEqualStrings("abc", term.rt.editor_lines[0]);
     try testing.expectEqualStrings("def", term.rt.editor_lines[1]);
     try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+test "EDIT6 파생 상태 갱신이 중간에 실패해도 렌더 스냅숏은 남지 않는다 (§4.1g)" {
+    // **적대적 검증(2026-08-25)이 연 자리다.** `refreshAfterEdit`의 ⑵⑶(접힘·보이는 줄)이 할당에
+    // 실패하면 `try`가 즉시 반환해 ⑷⑸⑹이 통째로 안 돌았다 — 그러면 렌더 스냅숏이 편집 **전**
+    // 행 배열을 든 채 남고, 클릭이 **사라진 글자의 자리를 답한다.** 호출자가 이 실패를 `catch {}`로
+    // 삼키므로 편집은 성사되고 파생 상태만 낡는다.
+    //
+    // 재는 방식은 `EDOC9`와 같다 — 실패 지점을 하나씩 뒤로 밀며 **불변식**을 확인한다:
+    // **문서가 바뀌었으면 스냅숏은 비어 있다.** 안 바뀌었으면 옛 스냅숏이 여전히 맞으므로 묻지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const backing = testing.allocator;
+
+    var reached: usize = 0; // 실제로 편집이 성사된 지점 수
+    var step: usize = 0;
+    while (step < 40) : (step += 1) {
+        var failing = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = failing.allocator();
+
+        var fx = try PaneFixture.init(alloc);
+        defer fx.deinit(alloc);
+        // **접히는 문서를 쓴다.** 평평한 문서는 `editor_visible_lines`가 늘 비어 있어 아래
+        // 불변식 ②의 절반이 **공허하게 통과한다** — 접힘 상태를 안 버리는 뮤턴트가 그래서
+        // 살아남았다(적대적 검증 2026-08-26).
+        const term = undoFixture(&fx, alloc, "e6.txt", "fn a() {\n    x\n    y\n}\nz\n") catch continue;
+        // 실제로 하나 접어 둔다 — 접힌 것이 있어야 보이는 줄 배열이 생긴다.
+        _ = toggleFoldHead(fx.session, term, 0);
+
+        const before = try backing.dupe(u8, term.rt.editor_doc.?.file.content);
+        defer backing.free(before);
+
+        // 렌더가 굳혀 둔 상태를 흉내 낸다 — 지워지는지 보려면 0이 아니어야 한다.
+        // **행 수만이 아니라 기하도 함께 본다.** 행 배열만 비우고 기하를 남기면 클릭이 "행은
+        // 없는데 셀 크기는 옛 프레임"인 상태로 답한다 — 기하만 안 버리는 뮤턴트가 살아남았다.
+        term.rt.editor_hit_rows_len = 1;
+        term.rt.editor_hit_geom.cell_w_px = 7;
+        term.rt.editor_hit_geom.cell_h_px = 15;
+        term.rt.editor_hit_geom.tab_width = 4;
+
+        // **여기서부터** 실패시킨다. 편집 자체가 막히는 지점도, 갱신 중간에 막히는 지점도 지난다.
+        failing.fail_index = failing.allocations + step;
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        _ = insertText(fx.session, term, "z");
+
+        const content = term.rt.editor_doc.?.file.content;
+        const changed = !std.mem.eql(u8, before, content);
+        if (changed) {
+            reached += 1;
+            // **불변식 ①**: 문서가 바뀌었으면 클릭이 읽을 옛 스냅숏이 남아 있으면 안 된다.
+            try testing.expectEqual(@as(usize, 0), term.rt.editor_hit_rows_len);
+            try testing.expectEqual(@as(u16, 0), term.rt.editor_hit_geom.cell_w_px);
+            try testing.expectEqual(@as(u16, 0), term.rt.editor_hit_geom.cell_h_px);
+            try testing.expectEqual(@as(u8, 0), term.rt.editor_hit_geom.tab_width);
+
+            // **불변식 ②**: 줄 슬라이스가 **지금** content 안을 가리킨다.
+            //
+            // 줄 배열은 content 버퍼를 빌리는데 `edit_doc.apply`가 옛 버퍼를 푼다. 갱신이 중간에
+            // 실패해 옛 배열이 남으면 그것은 낡은 값이 아니라 **해제된 메모리**이고, 다음 프레임의
+            // `editorLines(term)`가 그것을 읽는다. 포인터가 현재 버퍼 안인지 직접 본다 —
+            // `testing.allocator`가 use-after-free를 늘 잡아 주지는 않기 때문이다.
+            const lo = @intFromPtr(content.ptr);
+            const hi = lo + content.len;
+            for (term.rt.editor_lines) |ln| {
+                const at = @intFromPtr(ln.ptr);
+                try testing.expect(at >= lo and at + ln.len <= hi);
+            }
+            for (term.rt.editor_visible_lines) |ln| {
+                const at = @intFromPtr(ln.ptr);
+                try testing.expect(at >= lo and at + ln.len <= hi);
+            }
+        }
+    }
+
+    // **"한 번도 안 밟았는데 통과"를 막는다.** 실패 지점이 전부 편집 앞이면 이 판정자는 아무것도
+    // 재지 않는다 — `EDOC9`를 고칠 때 실제로 그 착각을 했다(36개 중 34개가 목표 경로 앞이었다).
+    try testing.expect(reached > 0);
 }
 
 /// UNDO 판정자들이 쓰는 픽스처 — 파일을 열고 caret을 놓는다.
@@ -10053,6 +10166,55 @@ test "UNDO2 연속 타이핑은 한 묶음이라 undo 한 번에 함께 돌아�
     try testing.expectEqualStrings("x\n", term.rt.editor_doc.?.file.content);
 }
 
+test "UNDO9 타이핑하다 지우면 묶음이 끊긴다 — 연산 종류 변경 (§3.3)" {
+    // **뮤턴트가 뚫고 나온 자리다**(적대적 검증 2026-08-25). 타이핑을 `.delete` 종류로 기록하게
+    // 바꿔도 `UNDO1~8`이 전부 통과했다 — §3.3이 묶음을 끊는 이유로 셋(**커서 이동**·**시간 경과**·
+    // **연산 종류 변경**)을 드는데 판정자는 첫째(UNDO3)만 재고 있었다.
+    //
+    // 안 끊으면 "치다가 한 글자 지웠다"가 한 묶음이 되어, 지운 것을 되돌리려는 undo 한 번에
+    // **친 것까지 사라진다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u9.txt", "AB\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(insertText(fx.session, term, "12"));
+    try testing.expectEqualStrings("AB12\n", term.rt.editor_doc.?.file.content);
+
+    // 종류가 바뀐다 — 여기서 묶음이 끊겨야 한다.
+    try testing.expect(deleteText(fx.session, term, true));
+    try testing.expectEqualStrings("AB1\n", term.rt.editor_doc.?.file.content);
+
+    // **끊겼으면** undo 한 번이 지우기만 되돌린다. 안 끊겼으면 삽입까지 함께 돌아가 "AB\n"이 된다 —
+    // 길이가 셋으로 갈리므로 애매하지 않다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("AB12\n", term.rt.editor_doc.?.file.content);
+}
+
+test "UNDO10 손을 뗐다 다시 치면 묶음이 끊긴다 — 시간 경과 (§3.3)" {
+    // §3.3의 셋 중 마지막. 시계를 앞으로 돌릴 수 없으므로 **앞 편집의 시각을 과거로 적어** 같은
+    // 조건을 만든다 — `sameUndoGroup`이 재는 것이 정확히 그 차이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "u10.txt", "AB\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(insertText(fx.session, term, "1"));
+
+    // 간격을 넘긴다(경계보다 확실히 크게).
+    term.rt.editor_last_edit_ms -|= undo_group_gap_ms + 50;
+    try testing.expect(insertText(fx.session, term, "2"));
+    try testing.expectEqualStrings("AB12\n", term.rt.editor_doc.?.file.content);
+
+    // 끊겼으므로 뒤에 친 것만 돌아간다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("AB1\n", term.rt.editor_doc.?.file.content);
+}
+
 test "UNDO3 커서가 움직이면 묶음이 끊긴다 — 클릭 전 타이핑은 남는다 (§3.3)" {
     // **안 끊으면 클릭해서 다른 곳에 친 글자를 되돌릴 때 앞의 타이핑까지 사라진다.**
     // 사용자가 예측할 수 없는 종류다.
@@ -10190,6 +10352,36 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     term.rt.editor_doc.?.file.read_only = true;
     try testing.expect(!insertText(fx.session, term, "x"));
     try testing.expectEqualStrings("locked\n", term.rt.editor_doc.?.file.content);
+
+    // **비교 뷰 축은 이름만 있고 재지 않았다**(적대적 검증 2026-08-26 — 이 판정자의 이름이
+    // "읽기 전용 문서와 **비교 뷰**는"인데 비교 뷰 분기를 지운 뮤턴트가 살아남았다).
+    //
+    // 비교 뷰는 좌우 **두 축**이라 커서 offset 하나로는 어디를 가리키는지 정해지지 않는다(§4.1g).
+    // 편집을 받으면 왼쪽 문서에 들어가고 화면은 오른쪽을 그리는 식으로 어긋난다.
+    term.rt.editor_doc.?.file.read_only = false;
+    // **caret을 지울 것이 있는 자리에 둔다.** 문서 처음에 두면 `deleteText`가 비교 뷰 때문이
+    // 아니라 "지울 것이 없어서" false를 내고, 그러면 이 판정자가 비교 뷰를 재는 척만 한다
+    // (적대적 검증 2026-08-26 — 그 상태로 뮤턴트가 살아남았다).
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+
+    // **되돌릴 것을 먼저 쌓는다.** 스택이 비면 `undoEdit`이 비교 뷰 때문이 아니라 "되돌릴 것이
+    // 없어서" false를 내고, 그러면 그 축을 재는 척만 한다(적대적 검증 2026-08-26 — 그 상태로
+    // 뮤턴트가 두 번 살아남았다).
+    try testing.expect(insertText(fx.session, term, "Q"));
+    const after_edit = try allocator.dupe(u8, term.rt.editor_doc.?.file.content);
+    defer allocator.free(after_edit);
+
+    term.rt.editor_diff = .{}; // 네 상태 중 `loading` — 문서는 그대로 열려 있다
+    defer term.rt.editor_diff = null; // 픽스처 해체가 비교 상태를 따로 풀지 않게 되돌린다
+    try testing.expect(!insertText(fx.session, term, "x"));
+    try testing.expect(!deleteText(fx.session, term, true));
+    try testing.expect(!addNextOccurrence(fx.session, term));
+    try testing.expect(!saveDocument(fx.session, term));
+    // **되돌리기도 같은 축이다.** 비교 뷰에서 undo가 돌면 화면은 오른쪽을 그리는데 왼쪽 문서가
+    // 바뀐다 — 다섯 경로 중 이것만 판정자가 없어 뮤턴트가 살아남았다(적대적 검증 2026-08-26).
+    try testing.expect(!undoEdit(fx.session, term));
+    try testing.expect(!redoEdit(fx.session, term));
+    try testing.expectEqualStrings(after_edit, term.rt.editor_doc.?.file.content);
 }
 
 test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체를 통과한다 (§9.1)" {
@@ -10240,6 +10432,32 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
         if (e.action == .add_next_occurrence) found = true;
     }
     try testing.expect(found);
+}
+
+test "MC9 커서 상한을 넘기면 더 늘지 않는다 (§9.1)" {
+    // **상한이 근거 없이 서 있었다**(적대적 검증 2026-08-26 — 그 분기를 없앤 뮤턴트가 아무
+    // 판정자도 깨지 않았다). 큰 파일에서 흔한 글자를 잡고 `⌘⌃D`를 누르고 있으면 커서 수가
+    // 파일 크기만큼 자라고, 마크 저장소는 커서 수에 비례한다(`MC3`이 실측으로 고정한 성질).
+    //
+    // 상한까지 실제로 눌러 보는 것은 느리므로 **나머지 배열을 상한 직전으로 채워 두고** 한 번
+    // 부른다 — 재는 것은 "상한에서 멈추는가" 하나다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mc9.txt", "x x x x\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 1);
+    // 상한 직전까지 채운다. 세션이 이 배열의 주인이 되므로 세션 할당자로 잡는다.
+    const fill = editor_selection.max_cursors - 1;
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, fill);
+    for (extras) |*e| e.* = editor_selection.Selection.fromPoints(0, 1);
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_extra_selections = extras;
+
+    // 한 번 더 부르면 **거절된다** — 배열도 그대로다.
+    try testing.expect(!addNextOccurrence(fx.session, term));
+    try testing.expectEqual(fill, term.rt.editor_extra_selections.len);
 }
 
 test "MC7 편집기 기능을 섞어 돌려도 불변식이 깨지지 않는다 (상호작용 퍼즈)" {

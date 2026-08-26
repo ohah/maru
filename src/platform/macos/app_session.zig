@@ -10717,6 +10717,58 @@ pub const AppSession = struct {
         {
             key_event.modifiers = .{ .option = true };
         }
+        // **편집기 Term이면 편집·이동 키가 PTY로 가지 않는다**(N2 — §3.2).
+        //
+        // **PTY 쓰기보다 앞에 둔다.** 뒤에 두었다가 죽은 코드였다(적대적 검증 2026-08-26):
+        // `frame_loop.handleKeyEvent`는 터미널 입력을 **write까지** 하는데 편집기 Term에는 살아 있는
+        // PTY가 없어 그 write가 실패하고, 실패는 `catch`가 `keyIgnored`로 삼킨다 — 그 아래 분기는
+        // 영영 실행되지 않는다. 화살표가 커서를 안 움직이는 것으로 드러났고, **Backspace·Enter·Tab도
+        // 같은 자리에 있었다**(판정자들이 함수를 직접 불러 배선을 안 봤다 — `MOV1`이 키를 누른다).
+        //
+        // **해석은 먼저 한다.** 앱 단축키(⌘⌃D 등)가 편집기 포커스에서도 먹어야 하므로, resolver가
+        // `.app_action`을 내면 이 분기는 비켜서고 아래 정상 경로가 처리한다.
+        if (self.surface_initialized) {
+            const active = pane_ops.activePane(self).activeTerm();
+            if (active.kind == .editor and active.rt.editor_diff == null) {
+                var enc_buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+                // 해석이 실패하면(인코딩 버퍼 등) **앱 액션이 아닌 것으로 본다** — 편집기가 처리하고,
+                // 처리 못 하면 아래 정상 경로가 그대로 이어받는다.
+                const is_app_action = if (self.loaded_config.keyBindingResolver().resolve(key_event, &enc_buf, .{})) |r|
+                    r == .app_action
+                else |_|
+                    false;
+                if (!is_app_action) {
+                    // 수정자로 단위가 갈린다 — macOS 관례 그대로다: **⌥**는 낱말, **⌘**는 줄/문서,
+                    // 맨몸은 문자/줄. **Shift**는 단위를 바꾸지 않고 **선택을 늘린다**.
+                    const m = key_event.modifiers;
+                    const extend = m.shift;
+                    const motion: ?editor_ops.Motion = switch (key_event.key) {
+                        .arrow_left => if (m.option) .word_left else if (m.command) .line_start else .char_left,
+                        .arrow_right => if (m.option) .word_right else if (m.command) .line_end else .char_right,
+                        .arrow_up => if (m.command) .doc_start else .line_up,
+                        .arrow_down => if (m.command) .doc_end else .line_down,
+                        .home => if (m.command) .doc_start else .line_start,
+                        .end => if (m.command) .doc_end else .line_end,
+                        .page_up => .page_up,
+                        .page_down => .page_down,
+                        else => null,
+                    };
+                    const handled = if (motion) |how|
+                        editor_ops.moveCarets(self, active, how, extend)
+                    else switch (key_event.key) {
+                        .backspace => editor_ops.deleteText(self, active, true),
+                        .delete => editor_ops.deleteText(self, active, false),
+                        .enter => editor_ops.insertText(self, active, "\n"),
+                        .tab => editor_ops.insertText(self, active, "\t"),
+                        else => false,
+                    };
+                    if (handled) {
+                        self.metal_dirty = true;
+                        return input_ops.keyConsumedByApp(self); // 편집기가 삼켰다
+                    }
+                }
+            }
+        }
         // 사용자 config의 keybind를 적용한다 — resolver가 사용자 바인딩(앱 액션 + terminal 매크로)을 먼저 보고
         // 없으면 빌트인(`default_*_bindings`)으로 폴백한다(override/추가/`=unbind`로 기본 끄기/`text:`·`esc:`·`ctrl:`
         // 매크로로 셸 바이트 묶기 가능). 빈 config(테스트·파일 없음)면 사용자 바인딩이 비어 곧장 빌트인으로 떨어진다.
@@ -10727,29 +10779,6 @@ pub const AppSession = struct {
             // → held 창에서도 앱 단축키로 복구가 된다. (write하는 터미널 입력만 죽은 surface에서 걸러진다.)
             return input_ops.keyIgnored(self);
         };
-        // **편집기 Term이면 편집 키가 PTY로 가지 않는다**(N2 — §3.2 "문자 단위 삭제").
-        //
-        // 평범한 글자는 여기 오지 않는다 — macOS가 `NSTextInputClient` 확정으로 보내므로
-        // `sendCommittedText`가 그 자리다. 여기 오는 것은 **Backspace·Delete·Enter** 같은 편집 키다.
-        //
-        // **해석 뒤에 둔다.** 앞에 두면 사용자가 편집기 포커스에서 건 앱 단축키(⌘⌃D 등)가 먹지
-        // 않는다 — `result`가 `.app_action`이면 이 분기에 아예 안 온다.
-        if (result == .terminal_input) {
-            const active = pane_ops.activePane(self).activeTerm();
-            if (active.kind == .editor and active.rt.editor_diff == null) {
-                const handled = switch (key_event.key) {
-                    .backspace => editor_ops.deleteText(self, active, true),
-                    .delete => editor_ops.deleteText(self, active, false),
-                    .enter => editor_ops.insertText(self, active, "\n"),
-                    .tab => editor_ops.insertText(self, active, "\t"),
-                    else => false,
-                };
-                if (handled) {
-                    self.metal_dirty = true;
-                    return input_ops.keyConsumedByApp(self); // 편집기가 삼켰다
-                }
-            }
-        }
         switch (result) {
             .terminal_input => |terminal_input| {
                 self.total_terminal_input_events += 1;

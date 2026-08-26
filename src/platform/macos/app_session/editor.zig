@@ -28,6 +28,7 @@ const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
 const editor_selection = maru.session.editor.selection;
+const editor_motion = maru.session.editor.motion;
 const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
 const settings_ops = @import("settings.zig");
@@ -1757,6 +1758,391 @@ pub fn clearExtraSelections(self: *AppSession, term: *Term) void {
 ///
 /// 새로 놓은 것이 **primary가 된다** — 다음에 또 누르면 그 다음 일치로 이어져야 하고, 화면이
 /// 따라가는 기준도 방금 놓은 자리다. 그래서 옛 primary는 나머지 쪽으로 내려간다.
+/// 커서를 옮기는 단위(§3.2). **키가 아니라 의미로 적는다** — 같은 이동을 여러 chord가 부르고
+/// (Home과 ⌘←), 플랫폼마다 관례가 다르기 때문이다.
+pub const Motion = enum {
+    char_left,
+    char_right,
+    word_left,
+    word_right,
+    /// smart home — 첫 글자와 줄 머리를 오간다.
+    line_start,
+    line_end,
+    line_up,
+    line_down,
+    doc_start,
+    doc_end,
+    page_up,
+    page_down,
+};
+
+/// 열↔offset 변환을 **화면과 같은 출처**로 만든다(§5.4 MUST).
+///
+/// `motion.zig`가 열을 직접 세지 않는 이유가 이것이다 — 세면 `columnsAtOffsets`와 갈리는 두 번째
+/// 출처가 생기고, 그 어긋남은 "커서가 눈에 보이는 자리와 다른 곳에 선다"로 나타난다. 정방향은
+/// `columnsAtOffsets`, 역방향은 §4.1g의 `byteAtPoint`를 **열을 픽셀로 바꿔** 그대로 쓴다.
+/// **열의 왼쪽 끝을 정확히 겨냥하려고 크게 잡는 탐침 셀 폭.**
+///
+/// `byteAtPoint`는 열을 픽셀로 받으므로, "7열"을 x=7px로 주면 **6번 글자의 오른쪽 절반**으로 읽혀
+/// 한 칸 밀린다(적대적 검증 2026-08-26 — `MOV3`이 21 대신 22를 봤다). 폭을 크게 잡으면
+/// `col * cell`이 그 열의 **왼쪽 끝**에 정확히 떨어져 **글자 시작 열에서는** 반올림이 없다.
+///
+/// **글자 안쪽 열에서는 여전히 반올림한다 — 그리고 그것이 계약이다**(2라운드 적대적 검증이
+/// "반올림이 일어나지 않는다"고 적은 앞 문장을 반증했다). 탭 하나가 열 [0,4)를 먹을 때 목표 열
+/// 1은 탭 **앞**(byte 0), 2·3은 탭 **뒤**(byte 1)에 선다 — 즉 **가장 가까운 경계**다.
+///
+/// 왜 그 계약인가: 그러면 **열 하나를 경계로 옮기는 규칙이 저장소에 하나뿐**이다. 같은 열을
+/// 클릭해서 가든 ↓로 내려와서 가든 **같은 자리**에 선다. 내림으로 따로 정하면 규칙이 둘이 되고,
+/// 사용자는 "클릭과 화살표가 다른 곳에 선다"로 겪는다. `MOT8`이 이 계약을 판정한다.
+///
+/// 화면 셀 폭과 무관해도 된다 — 이 변환은 **비율만** 쓰기 때문이다(열 = x / cell).
+const column_probe_cell_px: u16 = 64;
+
+const ProductColumnMap = struct {
+    tab_width: u16,
+    /// **열의 왼쪽 끝을 정확히 겨냥하려고 크게 잡는다.**
+    ///
+    /// `byteAtPoint`는 **클릭** 매핑이라 글자 중간을 넘으면 다음 글자로 넘어간다 — 클릭에는 맞지만
+    /// 열→offset에는 **내림**이 필요하다. 셀 폭을 1로 두면 "7열"이 곧 x=7px이라 그 반올림에 걸려
+    /// 한 칸 밀렸다(적대적 검증 2026-08-26 — `MOV3`이 21 대신 22를 봤다). 폭을 크게 잡으면
+    /// `col * cell`이 그 열의 **왼쪽 끝**에 정확히 떨어져 반올림이 일어나지 않는다.
+    ///
+    /// 화면 셀 폭과 무관해도 된다 — 이 변환은 **비율만** 쓰기 때문이다(열 = x / cell).
+    fn columnOf(ctx: *const anyopaque, line: []const u8, byte_in_line: usize) u32 {
+        const self: *const ProductColumnMap = @ptrCast(@alignCast(ctx));
+        var offs = [_]u32{@intCast(@min(byte_in_line, line.len))};
+        var out = [_]u32{0};
+        chrome_editor.content.columnsAtOffsets(line, self.tab_width, &offs, &out, std.math.maxInt(u32));
+        return out[0];
+    }
+
+    fn offsetOf(ctx: *const anyopaque, line: []const u8, column: u32) usize {
+        const self: *const ProductColumnMap = @ptrCast(@alignCast(ctx));
+        const x_px: i32 = @intCast(@as(u64, column) * column_probe_cell_px);
+        return chrome_editor.content.byteAtPoint(
+            line,
+            self.tab_width,
+            0, // 줄 시작부터 센다 — 랩된 행이 아니라 논리 줄이다
+            0,
+            0,
+            std.math.maxInt(u32), // 행 폭 상한 없음: 논리 줄 전체가 대상이다
+            x_px,
+            column_probe_cell_px,
+        );
+    }
+
+    fn map(self: *const ProductColumnMap) editor_motion.ColumnMap {
+        return .{ .ctx = self, .columnOf = columnOf, .offsetOf = offsetOf };
+    }
+};
+
+fn productColumnMap(term: *Term) ProductColumnMap {
+    return .{ .tab_width = term.rt.editor_tab_width };
+}
+
+/// 한 페이지가 몇 줄인가. **렌더가 굳힌 기하에서 읽는다** — 클릭이 같은 값을 읽는 것과 같은 출처다.
+fn pageRows(term: *Term) usize {
+    // **렌더가 마지막에 굳힌 행 수**다 — 클릭이 읽는 것과 같은 스냅숏이라 화면과 어긋나지 않는다.
+    // 편집 직후에는 이것이 0으로 비워지고(`refreshAfterEdit` ⑸) 다음 프레임이 다시 채운다.
+    // 그 사이에 PageDown이 오면 1줄로 떨어진다 — **0으로 두면 죽은 키가 된다**.
+    return @max(1, term.rt.editor_hit_rows_len);
+}
+
+/// 편집 **전** 화면 맨 위 줄이 어디였는지 — byte offset으로 든다.
+///
+/// **줄 번호로는 안 된다.** 뷰포트 **위**에서 줄이 늘거나 줄면 같은 번호가 다른 내용을 가리켜
+/// 화면이 그만큼 흔들린다(멀티커서 편집·undo가 실제로 그렇게 한다). §4.1c가 *"N2에서 Zed형
+/// 앵커로 승격한다"*고 적은 자리이고, 여기서 **스크롤 앵커만** 먼저 승격한다 — 이 슬라이스가
+/// 요구하는 것이 그것이고, 나머지(선택·표식 앵커)는 각자 필요할 때 같은 방식으로 옮긴다.
+const ScrollAnchor = struct { off: usize };
+
+fn captureScrollAnchor(term: *Term) ?ScrollAnchor {
+    const doc = term.rt.editor_doc orelse return null;
+    const top: u32 = @intCast(term.rt.editor_first_line);
+    if (top == 0) return null; // 맨 위다 — 밀릴 것이 없다
+    const doc_line = docLineOfVisibleRow(term, top) orelse return null;
+    const line = doc.file.lines.line(doc_line) orelse return null;
+    return .{ .off = line.start };
+}
+
+/// 편집이 민 만큼 앵커를 옮겨 **화면이 제자리에 남게** 한다.
+///
+/// **`refreshAfterEdit` 뒤에 부른다** — 줄 인덱스가 새 문서의 것이어야 옮긴 offset이 어느 줄인지
+/// 답할 수 있다.
+fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor, d: maru.session.editor.delta.Delta) void {
+    const a = saved orelse return;
+    const doc = term.rt.editor_doc orelse return;
+    const moved = maru.session.editor.delta.mapOffset(d, a.off);
+    const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(moved, doc.file.content.len)));
+    const row = visibleRowOfDocLine(term, doc_line) orelse return;
+    if (row != term.rt.editor_first_line) setEditorTop(self, term, row);
+}
+
+/// 랩이 켜졌을 때 **한 시각 행** 위/아래로 옮긴 offset. 랩이 꺼졌거나 조립할 수 없으면 `null`.
+///
+/// **왜 논리 줄로는 안 되는가**: 랩이 켜지면 한 논리 줄이 여러 행을 차지하므로, ↓ 한 번이 화면에서
+/// 서너 행을 건너뛴다. 사용자는 "한 줄 아래"를 눌렀는데 화면이 그만큼 안 맞는다.
+///
+/// **경계를 세지 않고 읽는다.** 어디서 접히는지는 `visual_map.pieces`가 정하는데(cluster를 안
+/// 쪼개므로 열 상한의 배수가 아니다), 그 결과가 **렌더가 굳힌 `VisualRow` 배열**에 이미 원본 byte와
+/// 열로 실려 있다(§4.1g의 스냅숏). 여기서 다시 세면 그것이 곧 두 번째 규칙이고, 걸친 2칸 글자와
+/// §3.8 표기에서 갈린다.
+///
+/// **그래서 화면에 그려진 범위 안에서만 답한다.** 스냅숏 밖으로 나가는 이동은 `null`을 내고
+/// 호출자가 논리 줄로 떨어진다 — 그 경우 caret 노출이 스크롤을 따라오게 하므로 다음 눌림에는
+/// 다시 시각 축으로 돈다. **모를 때 추측해 두 번째 규칙을 만드는 것보다 낫다.**
+///
+/// **이음매(`assoc`)를 여기서 정한다**(§4 — 그동안 "부수효과"로 남아 있던 자리): 목표 열이 행
+/// 경계에 정확히 걸리면 **뒤 행의 머리**를 고른다. `paintCarets`의 열 거르기가 이미 그렇게 그리고
+/// 있었고(그래서 화면과 일치한다), CM6의 `assoc = 1`과도 같다.
+fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: editor_selection.Goal, down: bool) ?usize {
+    // **랩이 꺼졌으면 논리 줄 경로로 보낸다.** 그때 조각은 줄과 1:1이라 두 경로가 **같은 답**을
+    // 내므로(뮤턴트로 확인 — 이 분기를 지워도 아무 판정자가 안 깨진다) 정답 문제가 아니라
+    // **의존성 문제**다: 시각 경로는 렌더 스냅숏을 읽으므로, 굳이 랩도 아닌데 그것에 기대면
+    // 스냅숏이 낡았을 때 답이 없어진다(`null` → 폴백). 랩이 아니면 스냅숏 없이도 답할 수 있다.
+    const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
+    if (!wrap) return null;
+    const rows = term.rt.editor_hit_rows_len;
+    if (rows == 0) return null; // 아직 안 그렸다 — 논리 줄로 떨어진다
+    const doc = term.rt.editor_doc orelse return null;
+
+    const lines = doc.file.lines;
+    const doc_line = lines.lineAt(focus);
+    const line = lines.line(doc_line) orelse return null;
+    const visible_row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse return null;
+    const first: u32 = @intCast(term.rt.editor_first_line);
+    if (visible_row < first) return null;
+    const screen_line: u32 = visible_row - first;
+
+    // 이 논리 줄의 조각들을 스냅숏에서 찾는다.
+    const snap = term.rt.editor_hit_rows[0..rows];
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const text = doc.file.content[line.start..line.contentEnd()];
+    const col = if (focus >= line.contentEnd())
+        map.columnOf(map.ctx, text, text.len)
+    else
+        map.columnOf(map.ctx, text, focus - line.start);
+
+    // 지금 caret이 든 조각과, 목표가 될 조각을 스냅숏에서 고른다.
+    var here: ?usize = null;
+    for (snap, 0..) |vr, i| {
+        if (vr.line != screen_line) continue;
+        if (vr.start_col <= col) here = i else break;
+    }
+    const cur = here orelse return null;
+    const target = if (down) cur + 1 else (if (cur == 0) return null else cur - 1);
+    if (target >= snap.len) return null; // 화면 밖 — 논리 줄로 떨어진다
+
+    const dest = snap[target];
+    // **행 안 열**을 유지한다. 목표가 `line_end`면 그 행의 끝이다.
+    const within: u32 = switch (goal) {
+        .line_end => std.math.maxInt(u32),
+        .none => col -| snap[cur].start_col,
+        .col => |c| c -| snap[cur].start_col,
+    };
+    const want_col = dest.start_col +| within;
+
+    const dest_doc_line = docLineOfVisibleRow(term, first + dest.line) orelse return null;
+    const dest_line = lines.line(dest_doc_line) orelse return null;
+    const dest_text = doc.file.content[dest_line.start..dest_line.contentEnd()];
+    return dest_line.start + map.offsetOf(map.ctx, dest_text, want_col);
+}
+
+/// **보이는 줄** 인덱스가 어느 문서 줄인가 — `visibleRowOfDocLine`의 역이다.
+///
+/// 접힘이 켜지면 둘이 1:1이 아니므로 `editor_visible_numbers`(줄 번호 = 문서 줄 + 1)를 읽는다.
+/// 접힘이 없으면 그 배열이 비고 두 축이 같다.
+fn docLineOfVisibleRow(term: *const Term, visible_row: u32) ?u32 {
+    const numbers = term.rt.editor_visible_numbers;
+    if (term.rt.editor_visible_lines.len == 0 or numbers.len == 0) {
+        return if (visible_row < term.rt.editor_lines.len) visible_row else null;
+    }
+    if (visible_row >= numbers.len) return null;
+    const n = numbers[visible_row] orelse return null;
+    return n - 1;
+}
+
+/// 한 커서를 옮긴 결과 offset. **선택을 어떻게 다룰지는 호출자가 정한다**(Shift 여부).
+fn movedOffset(
+    self: *AppSession,
+    term: *Term,
+    doc: Opened,
+    sel: editor_selection.Selection,
+    how: Motion,
+    goal: *editor_selection.Goal,
+) usize {
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    const focus = @min(sel.focus, content.len);
+    const line_idx = lines.lineAt(focus);
+    const line = lines.line(line_idx) orelse return focus;
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+
+    return switch (how) {
+        // **가로 이동은 목표 열을 버린다**(§3.2) — 남기면 다음 세로 이동이 편집 전 열로 튄다.
+        .char_left => blk: {
+            goal.* = .none;
+            break :blk editor_motion.prevCharBoundary(content, focus);
+        },
+        .char_right => blk: {
+            goal.* = .none;
+            break :blk editor_motion.nextCharBoundary(content, focus);
+        },
+        .word_left => blk: {
+            goal.* = .none;
+            break :blk editor_motion.wordLeft(content, focus);
+        },
+        .word_right => blk: {
+            goal.* = .none;
+            break :blk editor_motion.wordRight(content, focus);
+        },
+        .line_start => blk: {
+            goal.* = .none;
+            break :blk editor_motion.lineStartSmart(content, line, focus);
+        },
+        .line_end => blk: {
+            // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
+            goal.* = .line_end;
+            break :blk editor_motion.lineEnd(line);
+        },
+        .doc_start => blk: {
+            goal.* = .none;
+            break :blk 0;
+        },
+        .doc_end => blk: {
+            goal.* = .none;
+            break :blk content.len;
+        },
+        .line_up, .line_down, .page_up, .page_down => blk: {
+            // **세로 이동은 목표 열을 유지한다.** 없으면 지금 자리에서 세운다.
+            if (goal.* == .none) goal.* = editor_motion.goalAt(content, line, focus, map);
+            // **랩이 켜졌으면 시각 행이 먼저다**(§4.1g). 논리 줄로만 움직이면 ↓ 한 번이 화면에서
+            // 서너 행을 건너뛴다 — 사용자가 누른 것과 화면이 안 맞는다. 스냅숏 밖으로 나가는
+            // 이동은 `null`이라 아래 논리 줄 경로로 떨어지고, caret 노출이 스크롤을 따라오게 하므로
+            // 다음 눌림에는 다시 시각 축으로 돈다.
+            if (how == .line_up or how == .line_down) {
+                if (movedVisualRow(self, term, focus, goal.*, how == .line_down)) |v| break :blk v;
+            }
+            const step: usize = switch (how) {
+                .line_up, .line_down => 1,
+                // 페이지는 **보이는 행 수**만큼이다. 화면이 아직 안 굳었으면(첫 프레임) 1로 떨어진다 —
+                // 0으로 두면 PageDown이 아무 일도 안 해 사용자가 키가 죽은 줄 안다.
+                else => pageRows(term),
+            };
+            const down = (how == .line_down or how == .page_down);
+            const target = if (down)
+                @min(line_idx + step, lines.lineCount() -| 1)
+            else
+                line_idx -| step;
+            const dest = lines.line(target) orelse break :blk focus;
+            break :blk editor_motion.offsetForGoal(content, dest, goal.*, map);
+        },
+    };
+}
+
+/// **커서를 옮긴다**(§3.2). `extend`면 anchor를 남겨 선택이 늘어난다(Shift).
+///
+/// 커서가 여럿이면 **전부** 옮긴다 — 하나만 옮기면 나머지가 제자리에 남아 다음 타이핑이 두 축으로
+/// 갈린다. 옮긴 뒤 겹치면 합친다(`mergeOverlapping`이 그 규칙을 소유한다).
+///
+/// **묶음을 끊는다.** 커서가 편집 아닌 이유로 움직였으므로 §3.3의 그룹핑 규칙 그대로다 — 안 끊으면
+/// "옮겨서 친 글자"가 앞의 타이핑과 한 묶음이 되어 undo 한 번에 둘 다 사라진다.
+/// 커서가 화면 밖이면 **최소한만** 굴려 보이게 한다(§5.2 reveal의 줄 축).
+///
+/// **가운데로 보내지 않는다** — ⌘F의 `revealCurrentFindMatch`는 다음 매치가 어디로 이어지는지
+/// 보여야 해서 가운데지만, 화살표는 한 번에 한 줄이라 가운데로 튕기면 **누를 때마다 화면이 반쯤
+/// 갈아엎어진다**. VSCode·Vim도 caret 이동은 가장자리에서만 한 줄씩 민다.
+///
+/// **판정은 렌더가 굳힌 스냅숏으로 한다**(§4.1g ②) — 여기서 pane 사각을 다시 구하면 마지막
+/// 프레임과 다른 값이 나오고, 그러면 "보인다"가 화면과 갈린다. 스냅숏이 지금 화면을 설명하지
+/// 못하면(그 사이 접힘·랩·탭 폭·폰트가 바뀌었으면) **묻지 않고 민다** — 모를 때는 움직이는 쪽이
+/// 덜 나쁘다. 그 규율과 대조식은 `revealCurrentFindMatch`가 값비싸게 세운 것을 그대로 쓴다.
+///
+/// **줄 축만 본다.** 한 화면보다 긴 줄 안에서의 가로 이동은 이 함수가 못 잡는다 — §5.2가 소유할
+/// 2차원 reveal이고 그때 함께 닫힌다.
+fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
+    const doc = term.rt.editor_doc orelse return;
+    const sel = term.rt.editor_selection orelse return;
+    const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)));
+
+    // **먼저 편다.** 접힌 채로는 보이는 줄에 없어 아무 데도 못 간다.
+    const unfolded = revealFoldedLine(self, term, doc_line);
+    const row = visibleRowOfDocLine(term, doc_line) orelse return;
+
+    const rows = term.rt.editor_hit_rows_len;
+    if (rows == 0) { // 아직 한 프레임도 안 그렸다 — 맨 위에 둔다
+        setEditorTop(self, term, row);
+        return;
+    }
+
+    const geom = term.rt.editor_hit_geom;
+    const snapshot_is_current = geom.top_line == term.rt.editor_first_line and
+        geom.top_piece == term.rt.editor_first_piece and
+        geom.visible_len == editorLines(term).len and
+        geom.wrap == (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) and
+        geom.tab_width == term.rt.editor_tab_width and
+        geom.cell_w_px == self.cell_width_px and
+        geom.cell_h_px == self.cell_height_px;
+
+    if (!unfolded and snapshot_is_current) {
+        for (term.rt.editor_hit_lines[0..rows]) |drawn| {
+            if (drawn == doc_line) return; // 이미 보인다 — 굴리면 화면만 튄다
+        }
+    }
+
+    // 밖이다. **어느 쪽으로 나갔는지**에 따라 가장자리에 붙인다.
+    if (row < term.rt.editor_first_line) {
+        setEditorTop(self, term, row);
+    } else {
+        // 아래로 나갔다 — 그 줄이 **마지막 줄**이 되도록 민다. 논리 줄 수로 센다(시각 행 수로
+        // 세면 랩에서 과대 계수라 필요 이상으로 굴러간다 — 가운데 배치가 같은 이유로 논리 줄을 쓴다).
+        setEditorTop(self, term, row -| (drawnDocLines(term) -| 1));
+    }
+}
+
+pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return false;
+    const primary = term.rt.editor_selection orelse return false;
+
+    var moved_any = false;
+    var next_primary = primary;
+    {
+        var goal = primary.goal;
+        const off = movedOffset(self, term, doc, primary, how, &goal);
+        next_primary = if (extend)
+            editor_selection.Selection.fromAnchorRange(primary.anchorLo(), primary.anchorHi(), off, primary.kind)
+        else
+            editor_selection.Selection.at(off);
+        next_primary.goal = goal;
+        if (off != primary.focus or (!extend and !primary.isEmpty())) moved_any = true;
+    }
+
+    // 나머지 커서도 같은 단위로 옮긴다.
+    for (term.rt.editor_extra_selections) |*extra| {
+        var goal = extra.goal;
+        const off = movedOffset(self, term, doc, extra.*, how, &goal);
+        const next = if (extend)
+            editor_selection.Selection.fromAnchorRange(extra.anchorLo(), extra.anchorHi(), off, extra.kind)
+        else
+            editor_selection.Selection.at(off);
+        if (off != extra.focus or (!extend and !extra.isEmpty())) moved_any = true;
+        extra.* = next;
+        extra.goal = goal;
+    }
+
+    if (!moved_any) return false;
+
+    term.rt.editor_selection = next_primary;
+    breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
+    revealPrimaryCaret(self, term); // 화면 밖으로 나갔으면 따라간다
+    self.metal_dirty = true;
+    return true;
+}
+
 pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g) — 이 슬라이스 밖
@@ -3610,6 +3996,8 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
 
+    // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
+    const scroll_anchor = captureScrollAnchor(term);
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -3630,6 +4018,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
 
     writeBackSelections(self, term, sels);
     refreshAfterEdit(self, term) catch {};
+    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     return true;
 }
 
@@ -3734,6 +4123,8 @@ pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
 
+    // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
+    const scroll_anchor = captureScrollAnchor(term);
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -3754,6 +4145,7 @@ pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
 
     writeBackSelections(self, term, sels);
     refreshAfterEdit(self, term) catch {};
+    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     return true;
 }
 
@@ -10381,6 +10773,11 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     // 바뀐다 — 다섯 경로 중 이것만 판정자가 없어 뮤턴트가 살아남았다(적대적 검증 2026-08-26).
     try testing.expect(!undoEdit(fx.session, term));
     try testing.expect(!redoEdit(fx.session, term));
+    // **이동도 같은 축이다**(적대적 검증 2026-08-26 — 이 목록에 없어서 뮤턴트가 살아남았다).
+    // 비교 뷰는 좌우 두 축이라 커서 offset 하나가 어느 쪽을 가리키는지 정해지지 않는다 —
+    // 옮기면 화면은 오른쪽을 그리는데 왼쪽 문서 기준으로 움직인다.
+    try testing.expect(!moveCarets(fx.session, term, .char_right, false));
+    try testing.expect(!moveCarets(fx.session, term, .line_down, false));
     try testing.expectEqualStrings(after_edit, term.rt.editor_doc.?.file.content);
 }
 
@@ -10432,6 +10829,414 @@ test "MC8 ⌘⌃D를 실제로 눌렀을 때 커서가 는다 — 배선 전체�
         if (e.action == .add_next_occurrence) found = true;
     }
     try testing.expect(found);
+}
+
+fn pressKey(fx: *PaneFixture, key: maru.terminal.input.Key, mods: maru.terminal.input.ModifierSet) !void {
+    _ = try fx.session.handleKeyEvent(.{ .key = key, .modifiers = mods });
+}
+
+test "MOV1 화살표가 커서를 옮긴다 — 키 경로 전체를 통과한다 (§3.2)" {
+    // **함수를 직접 부르면 배선이 빠져도 통과한다.** `MC1`이 그렇게 통과하고도 chord가 안 붙어
+    // 있었다(2026-08-25). 그래서 여기서는 **키를 눌러** `handleKeyEvent`부터 지난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov1.txt", "ab\ncd\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    // 먼저 **직접 부르는 경로**가 되는지 본다 — 여기가 되는데 키가 안 되면 배선 문제로 좁혀진다.
+    try testing.expect(moveCarets(fx.session, term, .char_right, false));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term); // 활성 Term이 편집기인가
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+
+    try pressKey(&fx, .arrow_left, .{});
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // 아래로 — 둘째 줄 같은 열(0)이다.
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+
+    // 문서 처음에서 왼쪽은 **아무 일도 안 한다** — 없으면 매 키가 "옮겼다"고 보고해 화면이 계속 더러워진다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(!moveCarets(fx.session, term, .char_left, false));
+}
+
+test "MOV2 Shift가 선택을 늘리고, 맨몸 이동은 선택을 접는다 (§3.2)" {
+    // **Shift가 anchor를 안 남기면 선택이 안 생긴다.** 반대로 맨몸 이동이 선택을 안 접으면
+    // 사용자가 선택을 없앨 방법이 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov2.txt", "abcdef\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try pressKey(&fx, .arrow_right, .{ .shift = true });
+    try pressKey(&fx, .arrow_right, .{ .shift = true });
+    const sel = term.rt.editor_selection.?;
+    try testing.expectEqual(@as(usize, 2), sel.start());
+    try testing.expectEqual(@as(usize, 4), sel.end());
+
+    // 맨몸 이동은 **접는다**.
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+}
+
+test "MOV3 세로 이동이 목표 열을 지킨다 — 짧은 줄을 지나도 돌아온다 (§3.2)" {
+    // `MOT4`가 순수 계산으로 재는 것을 **제품 경로**에서 다시 잰다 — 목표를 selection에 저장하고
+    // 다음 이동까지 들고 있는 것은 이쪽 책임이라, L2가 맞아도 여기서 버리면 증상이 그대로 난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov3.txt", "0123456789\nab\n0123456789\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(7); // 첫 줄 7열
+    try pressKey(&fx, .arrow_down, .{}); // 짧은 줄 → 줄 끝(13)
+    try testing.expectEqual(@as(usize, 13), term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_down, .{}); // 다시 긴 줄 → **7열로 돌아온다**
+    try testing.expectEqual(@as(usize, 21), term.rt.editor_selection.?.focus);
+
+    // **가로 이동은 목표를 버린다** — 안 버리면 다음 세로 이동이 편집 전 열로 튄다.
+    try pressKey(&fx, .arrow_left, .{});
+    try pressKey(&fx, .arrow_up, .{});
+    try pressKey(&fx, .arrow_up, .{});
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+}
+
+test "MOV4 커서가 여럿이면 전부 움직이고, 겹치면 그대로 둔다 (§3.2·§9.1)" {
+    // **하나만 옮기면 나머지가 제자리에 남아 다음 타이핑이 두 축으로 갈린다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov4.txt", "aa aa aa\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 2);
+    extras[0] = editor_selection.Selection.at(3);
+    extras[1] = editor_selection.Selection.at(6);
+    term.rt.editor_extra_selections = extras;
+
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_extra_selections[0].focus);
+    try testing.expectEqual(@as(usize, 7), term.rt.editor_extra_selections[1].focus);
+}
+
+test "MOV5 이동이 undo 묶음을 끊는다 — 옮겨서 친 글자는 따로 돌아간다 (§3.3)" {
+    // §3.3이 묶음을 끊는 이유 셋 중 **커서 이동**이다. `UNDO3`은 클릭으로 재는데, 키 이동은
+    // 다른 경로라 따로 잰다 — 안 끊으면 옮겨서 친 글자를 되돌릴 때 앞의 타이핑까지 사라진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov5.txt", "AB\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "1"));
+    try pressKey(&fx, .arrow_right, .{}); // 커서를 옮긴다 → 묶음이 끊긴다
+    try testing.expect(insertText(fx.session, term, "2"));
+    try testing.expectEqualStrings("1A2B\n", term.rt.editor_doc.?.file.content);
+
+    // undo 한 번은 **뒤에 친 것만** 되돌린다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("1AB\n", term.rt.editor_doc.?.file.content);
+}
+
+test "MOV7 수정자가 이동 단위를 가른다 — ⌥는 낱말, ⌘는 줄·문서 (§3.2)" {
+    // **`MOV1`은 맨몸 화살표만 눌러서 수정자 매핑을 안 쟀다** — `⌥←`·`⌘←`를 문자 이동으로 바꾼
+    // 뮤턴트가 살아남았다(적대적 검증 2026-08-26). 매핑이 어긋나면 사용자는 낱말 단위로 가려다
+    // 한 글자씩 가고, 그 차이는 조용하다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov7.txt", "    foo bar\nnext\n");
+
+    // ⌥→ 는 **낱말** 단위다(문자면 5에 선다).
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    try pressKey(&fx, .arrow_right, .{ .option = true });
+    try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
+
+    // ⌥← 는 거울이다.
+    try pressKey(&fx, .arrow_left, .{ .option = true });
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+
+    // ⌘← 는 **smart home** — 들여쓰기 뒤 첫 글자(4)로, 이미 거기면 줄 머리(0)로.
+    term.rt.editor_selection = editor_selection.Selection.at(7);
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // ⌘→ 는 줄 끝(개행 **앞**)이다.
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+
+    // ⌘↓ 는 문서 끝, ⌘↑ 는 문서 처음이다 — 한 줄 이동이 아니다.
+    try pressKey(&fx, .arrow_down, .{ .command = true });
+    try testing.expectEqual(term.rt.editor_doc.?.file.content.len, term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_up, .{ .command = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // Home/End도 같은 단위를 연다(키보드마다 있는 쪽이 다르다).
+    term.rt.editor_selection = editor_selection.Selection.at(7);
+    try pressKey(&fx, .end, .{});
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .home, .{});
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 안쪽 (§5.4)" {
+    // **판정자와 제품이 서로 다른 의미를 재고 있었다**(적대적 검증 2026-08-26). `motion.zig`의
+    // 테스트 대역은 **내림**, 제품은 **가장 가까운 경계**였다 — 탭 하나가 열 [0,4)를 먹을 때
+    // 목표 열 1에서 대역은 탭 뒤, 제품은 탭 앞을 냈다. L2 판정자 62개가 전부 통과한 채로였다.
+    //
+    // 계약을 "가장 가까운 경계"로 통일했고(`MOT8`), **여기서 제품이 그 계약을 지키는지** 잰다 —
+    // 대역만 고치고 제품을 안 재면 다음에 또 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov10.txt", "\tx\nyy\n");
+
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const line = term.rt.editor_doc.?.file.lines.line(0).?;
+    const text = term.rt.editor_doc.?.file.content[line.start..line.contentEnd()];
+
+    // `MOT8`과 **같은 표**다 — 둘이 갈리면 여기서 잡힌다.
+    try testing.expectEqual(@as(usize, 0), map.offsetOf(map.ctx, text, 0));
+    try testing.expectEqual(@as(usize, 0), map.offsetOf(map.ctx, text, 1));
+    try testing.expectEqual(@as(usize, 1), map.offsetOf(map.ctx, text, 2));
+    try testing.expectEqual(@as(usize, 1), map.offsetOf(map.ctx, text, 3));
+    try testing.expectEqual(@as(usize, 1), map.offsetOf(map.ctx, text, 4));
+    try testing.expectEqual(@as(usize, 2), map.offsetOf(map.ctx, text, 5));
+
+    // 왕복도 같다.
+    for ([_]usize{ 0, 1, 2 }) |b| {
+        const c = map.columnOf(map.ctx, text, b);
+        try testing.expectEqual(b, map.offsetOf(map.ctx, text, c));
+    }
+}
+
+test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스크롤 앵커 (§4.1c)" {
+    // **문서에 "아는 대가"로 적어 두었던 자리를 닫는다.** 스크롤 앵커가 **줄 번호**라, 뷰포트
+    // 위에서 줄이 늘거나 줄면 같은 번호가 다른 내용을 가리켜 **화면이 그만큼 흔들렸다**.
+    // 멀티커서 편집·undo가 실제로 그렇게 한다.
+    //
+    // 고친 방식은 §4.1c가 예고한 승격이다 — 앵커를 **byte offset**으로 떠 두었다가 편집이 민
+    // 만큼 옮긴다(`delta.mapOffset`이 그 규칙을 이미 소유한다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..100) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
+    const term = try undoFixture(&fx, allocator, "edit7.txt", doc.items);
+
+    // 아래로 굴려 뷰포트를 문서 중간에 둔다.
+    setEditorTop(fx.session, term, 40);
+    const lines = term.rt.editor_doc.?.file.lines;
+    const top_line = lines.line(40).?;
+    const top_text = try allocator.dupe(u8, term.rt.editor_doc.?.file.content[top_line.start .. top_line.start + 7]);
+    defer allocator.free(top_text);
+
+    // **뷰포트 위**(줄 0)에 줄 셋을 끼운다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "a\nb\nc\n"));
+
+    // 맨 위 줄이 **같은 내용**을 가리켜야 한다 — 번호는 43으로 밀렸어도 화면은 제자리다.
+    const now_top = term.rt.editor_first_line;
+    const now_line = term.rt.editor_doc.?.file.lines.line(now_top).?;
+    const now_text = term.rt.editor_doc.?.file.content[now_line.start .. now_line.start + 7];
+    try testing.expectEqualStrings(top_text, now_text);
+    try testing.expectEqual(@as(usize, 43), now_top); // 실제로 밀렸다(보정이 없으면 40에 머문다)
+
+    // 지운 경우도 같다 — 위에서 줄이 줄면 앵커가 그만큼 당겨진다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 6); // "a\nb\nc\n" 중 앞 셋
+    try testing.expect(deleteText(fx.session, term, false));
+    const after_line = term.rt.editor_doc.?.file.lines.line(term.rt.editor_first_line).?;
+    const after_text = term.rt.editor_doc.?.file.content[after_line.start .. after_line.start + 7];
+    try testing.expectEqualStrings(top_text, after_text);
+}
+
+test "MOV9 랩이 켜지면 위/아래가 시각 행을 따라간다 — 이음매는 뒤 행 머리다 (§4.1g)" {
+    // **문서에 "아는 대가"로 적어 두었던 자리를 닫는다**(§4 `assoc`).
+    //
+    // 논리 줄로만 움직이면 랩된 줄에서 ↓ 한 번이 화면에서 서너 행을 건너뛴다 — 사용자가 누른 것과
+    // 화면이 안 맞는다. 그리고 **이음매 선택이 결정이 아니라 부수효과**였다: `paintCarets`의 열
+    // 거르기가 caret을 늘 뒤 행 머리에 세우고 있었는데 우리가 고른 적이 없었다. 여기서 고른다 —
+    // 목표 열이 행 경계에 걸리면 **뒤 행의 머리**다(CM6 `assoc = 1`과 같다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 화면 폭보다 훨씬 긴 줄 하나 — 여러 조각으로 접힌다.
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    for (0..300) |i| try long.append(allocator, @intCast('a' + (i % 26)));
+    try long.append(allocator, '\n');
+    try long.appendSlice(allocator, "tail\n");
+    const term = try undoFixture(&fx, allocator, "mov9.txt", long.items);
+
+    term.rt.editor_wrap = true;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_hit_rows_len > 1); // 실제로 접혔다
+
+    // ⑴ **한 번의 ↓가 한 시각 행만큼** 간다 — 논리 줄이면 첫 줄을 통째로 지나 "tail"로 갔을 것이다.
+    try testing.expect(moveCarets(fx.session, term, .line_down, false));
+    const after_down = term.rt.editor_selection.?.focus;
+    try testing.expect(after_down > 0);
+    const first_line = term.rt.editor_doc.?.file.lines.line(0).?;
+    try testing.expect(after_down < first_line.contentEnd()); // **아직 같은 논리 줄 안**이다
+
+    // ⑵ 그 자리는 **뒤 행의 머리**다(이음매 결정) — 스냅숏의 조각 시작 열과 정확히 같다.
+    const rows = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
+    var pcm2 = productColumnMap(term);
+    const map2 = pcm2.map();
+    const text = term.rt.editor_doc.?.file.content[first_line.start..first_line.contentEnd()];
+    const landed_col = map2.columnOf(map2.ctx, text, after_down - first_line.start);
+    try testing.expectEqual(rows[1].start_col, landed_col);
+
+    // ⑶ ↑ 로 되돌아오면 제자리다 — 왕복이 성립해야 사용자가 방향키를 믿는다.
+    try testing.expect(moveCarets(fx.session, term, .line_up, false));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+}
+
+test "MOV8 문서 끝·처음을 넘지 않고, 나머지 커서만 움직여도 보고한다 (§3.2)" {
+    // **경계 둘이 판정 밖에 있었다**(적대적 검증 2026-08-26):
+    // ⑴ 아래 이동이 줄 수를 안 자르면 없는 줄을 집어 `line()`이 null → 커서가 제자리에 남는데,
+    //    화면은 "움직였다"고 다시 그린다. 없는 줄을 집는 것 자체가 §3.2 밖이다.
+    // ⑵ 나머지 커서만 움직인 경우를 안 세면 `moveCarets`가 false를 내고 **화면이 안 갱신된다** —
+    //    커서는 옮겨졌는데 그대로 그려진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov8.txt", "aa\nbb\ncc\n");
+
+    // ⑴ 마지막 줄에서 아래로 — **끝에 머문다**(넘으면 없는 줄이다).
+    const last = term.rt.editor_doc.?.file.lines;
+    const last_line = last.line(last.lineCount() - 1).?;
+    term.rt.editor_selection = editor_selection.Selection.at(last_line.start);
+    const before = term.rt.editor_selection.?.focus;
+    _ = moveCarets(fx.session, term, .line_down, false);
+    try testing.expect(term.rt.editor_selection.?.focus >= before);
+    try testing.expect(term.rt.editor_selection.?.focus <= term.rt.editor_doc.?.file.content.len);
+    // 한 번 더 눌러도 같은 자리다 — 넘어가면 여기서 갈린다.
+    const settled = term.rt.editor_selection.?.focus;
+    _ = moveCarets(fx.session, term, .line_down, false);
+    try testing.expectEqual(settled, term.rt.editor_selection.?.focus);
+
+    // ⑴′ **PageDown이 문서 끝 근처**일 때가 진짜 갈림길이다(적대적 검증 2026-08-26 — 한 줄
+    // 이동만 재서 자르기 뮤턴트가 살아남았다). 자르지 않으면 `line()`이 null을 내 **아무 일도
+    // 안 하고**, 사용자는 문서 끝으로 못 간다. 자르면 **마지막 줄**에 선다 — 그것이 기대다.
+    {
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+        try testing.expect(pageRows(term) > 1); // 한 페이지가 여러 줄이어야 이 갈래가 열린다
+
+        const first = term.rt.editor_doc.?.file.lines.line(0).?;
+        term.rt.editor_selection = editor_selection.Selection.at(first.start);
+        _ = moveCarets(fx.session, term, .page_down, false);
+        const lines_now = term.rt.editor_doc.?.file.lines;
+        const last_now = lines_now.line(lines_now.lineCount() - 1).?;
+        try testing.expectEqual(last_now.start, term.rt.editor_selection.?.focus);
+    }
+
+    // ⑵ **primary는 못 움직이고 나머지만 움직이는** 배치를 만든다.
+    term.rt.editor_selection = editor_selection.Selection.at(0); // 문서 처음 — 왼쪽으로 못 간다
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(4); // 이쪽은 왼쪽으로 갈 수 있다
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(moveCarets(fx.session, term, .char_left, false)); // **true여야 한다**
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_extra_selections[0].focus);
+}
+
+test "MOV6 커서가 화면 밖으로 나가면 스크롤이 따라간다 (§5.2 줄 축)" {
+    // **없으면 아래 화살표를 누르는 동안 커서가 화면 밖으로 사라진다** — 사용자는 자기가 어디를
+    // 고치는지 못 본다. 반대로 매번 굴리면 화면이 계속 튄다(§5.2가 "이미 보이면 두라"고 요구).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..200) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
+    const term = try undoFixture(&fx, allocator, "mov6.txt", doc.items);
+
+    // **프레임을 한 번 굳힌다.** 안 그러면 `editor_hit_rows_len == 0`이라 노출이 "아직 안 그렸다"
+    // 갈래로만 돌고, **최소 스크롤과 "이미 보이면 두라"가 아예 실행되지 않는다** — 그 상태로
+    // 뮤턴트 둘이 살아남았다(적대적 검증 2026-08-26). 재는 상황이 결함이 드러나는 상황과 달랐다.
+    const freeze = struct {
+        fn once(f: *PaneFixture, t: *Term) !void {
+            f.session.gpu_quads.clearRetainingCapacity();
+            var drawn = appendPaneFrame(f.session, f.leaf_rect, t) orelse return error.EditorPaneDidNotDraw;
+            drawn.dl.deinit(testing.allocator);
+        }
+    }.once;
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try freeze(&fx, term);
+    try testing.expect(term.rt.editor_hit_rows_len > 0); // 스냅숏이 실제로 섰다
+    const rows_shown = drawnDocLines(term);
+    try testing.expect(rows_shown > 1);
+
+    // ⑴ **이미 보이는 줄로 옮기면 굴리지 않는다** — 굴리면 화살표마다 화면이 튄다.
+    const before_top = term.rt.editor_first_line;
+    try testing.expect(moveCarets(fx.session, term, .line_down, false));
+    try testing.expectEqual(before_top, term.rt.editor_first_line);
+
+    // ⑵ **아래로 나가면 그 줄이 마지막 줄이 되도록만** 민다(가운데로 튕기지 않는다).
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try freeze(&fx, term);
+    const target_line: u32 = @intCast(rows_shown); // 화면 바로 아래 첫 줄
+    const line = term.rt.editor_doc.?.file.lines.line(target_line).?;
+    term.rt.editor_selection = editor_selection.Selection.at(line.start);
+    revealPrimaryCaret(fx.session, term);
+    // 마지막 줄이 되도록 밀었으면 top은 정확히 한 줄만큼 움직인다.
+    try testing.expectEqual(@as(u32, 1), term.rt.editor_first_line);
+
+    // ⑴′ **top이 0이 아닐 때** 보이는 줄 안에서 움직이면 그대로 둔다.
+    //
+    // 위 ⑴은 top이 0이라 최소 스크롤 공식이 포화 뺄셈으로 0을 내 **"이미 보이면 두라"를 지운
+    // 뮤턴트와 같은 답**이 나왔다(적대적 검증 2026-08-26). top이 0에서 떨어져 있어야 갈린다 —
+    // 지우면 보이는 줄인데도 그 줄을 **맨 아래로 끌어내리며 위로 굴러간다**.
+    try freeze(&fx, term);
+    try testing.expectEqual(@as(u32, 1), term.rt.editor_first_line);
+    const visible_mid = term.rt.editor_doc.?.file.lines.line(2).?;
+    term.rt.editor_selection = editor_selection.Selection.at(visible_mid.start);
+    revealPrimaryCaret(fx.session, term);
+    try testing.expectEqual(@as(u32, 1), term.rt.editor_first_line);
+
+    // ⑶ 문서 끝까지 가면 따라가고, 처음으로 돌아오면 다시 0이다.
+    try freeze(&fx, term);
+    try testing.expect(moveCarets(fx.session, term, .doc_end, false));
+    try testing.expect(term.rt.editor_first_line > 1);
+    try freeze(&fx, term);
+    try testing.expect(moveCarets(fx.session, term, .doc_start, false));
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line);
 }
 
 test "MC9 커서 상한을 넘기면 더 늘지 않는다 (§9.1)" {

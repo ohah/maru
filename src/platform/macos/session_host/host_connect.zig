@@ -442,7 +442,21 @@ fn connectNewHostWithBackoff(
                 // endpoint도 없다"(host_gone)는 "사라졌다"가 아니라 "아직 안 떴다"이므로 재시도 대상이다 — host_gone의
                 // 영구 의미는 이미 실행 중인 host를 조회하는 restore 경로(connectExistingHost 직접 호출)에서만 성립한다.
                 // 이걸 빼면 갓 띄운 host를 첫 폴에서 버리고 in-process로 폴백한다(회귀).
-                .startup_timeout, .invalid_manifest, .host_gone => {},
+                // `transient_timeout`은 **일부러 뺐다.** 안쪽 backoff가 이제 hello 실패에 자기 예산(10×20ms)을
+                // 쓰므로, 여기서까지 재시도하면 500×220ms≈110s 가 되어 위 주석이 상정한 10s 예산이 11배로
+                // 부풀고 업그레이드 실패 시 앱 시작이 그만큼 늦어진다. 고치려던 것보다 나쁜 회귀다.
+                // `stale_manifest`도 재시도한다. exec upgrade 직후에는 host 가 아직 restore 중이라
+                // manifest 를 **자기 새 이미지 값으로 정정하기 전**이고, 그 찰나에 읽으면 hello(새것)와
+                // manifest(옛것)가 어긋난다. 그건 "영구히 틀린 host"가 아니라 **아직 갱신 전**이다.
+                //
+                // 2026-08-27 실측: 이 값이 재시도 대상이 아니어서 한 번의 불일치로 즉시 포기했고, 세션 6 개를
+                // 쥔 host 를 버린 채 **빈 host 를 새로 띄웠다**. 잠시 뒤 manifest 는 정상값으로 정정됐으므로
+                // 몇십 ms 만 기다렸으면 그대로 붙었을 자리다.
+                //
+                // 시간 비용은 안전하다 — `stale_manifest` 는 안쪽 backoff 가 hello ack 검증에서 **즉시**
+                // 반환하므로(예산을 쓰지 않는다) 위 `transient_timeout` 이 일으켰던 110s 폭발이 없다.
+                // 진짜로 다른 host 가 그 자리를 차지한 경우는 예산을 다 쓴 뒤 실패로 끝난다(fail-closed 유지).
+                .startup_timeout, .invalid_manifest, .host_gone, .stale_manifest => {},
                 else => return .{ .failed = reason },
             },
         }
@@ -712,8 +726,10 @@ fn connectDiscoveredHostProfileWithObserved(
         return .{ .failed = manifestLoadFailure(io, err) };
     defer current.deinit();
     if (deadlineExpired(io)) return .{ .failed = .deadline_exceeded };
-    if (!host_manifest.descriptorEql(current.descriptor(), expected))
+    if (!host_manifest.descriptorEql(current.descriptor(), expected)) {
+        logStaleManifest("manifest", host_manifest.firstDescriptorMismatch(current.descriptor(), expected));
         return .{ .failed = .stale_manifest };
+    }
     const endpoint = allocator.dupeZ(u8, expected.endpoint) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
     const outcome = switch (io) {
@@ -878,9 +894,83 @@ fn validateExactClient(client: client_mod.Client, expected: host_manifest.Descri
         client.upgrade_epoch == expected.upgrade_epoch and
         std.mem.eql(u8, client.lifecycle, @tagName(expected.lifecycle)))
         return .{ .connected = client };
+    logStaleClient(client, expected);
     var stale = client;
     stale.deinit();
     return .{ .failed = .stale_manifest };
+}
+
+/// `stale_manifest` 로 접히기 **전에** 어긋난 축을 남긴다.
+///
+/// 이 값 하나에 도달하는 축이 일곱이라, 사유만 보고는 `build_id` 인지 `lifecycle` 인지 알 수 없다.
+/// 2026-08-27 실측: exec upgrade 가 `reason=stale_manifest` 로 실패해 구 host(사용자 PTY 6 개 보유)와
+/// 새 host(빈 껍데기)가 공존했고, `host status` 가 ambiguous 가 됐다. 그 상태에서 앱을 다시 띄우면
+/// 스캔이 빈 host 를 고를 수 있고 그러면 세션을 통째로 잃는다 — 원인을 좁히지 못하면 반복된다.
+/// 같은 사유가 연속으로 반복되면 한 번만 남긴다.
+///
+/// `stale_manifest` 는 이제 재시도 대상이라 한 번의 upgrade 에서 최대 500 회 반복될 수 있다. 그대로 찍으면
+/// 진단이 아니라 소음이 되고, 정작 봐야 할 다른 줄을 덮는다 — 2026-08-27 에 tick 마다 찍히던 정상 로그가
+/// `app.log` 를 28MB 로 불려 4MB 캡을 무의미하게 만든 전례가 있다. 사유가 **바뀌는 순간**이 정보다.
+var last_stale_key: u64 = 0;
+
+fn logStaleManifest(site: []const u8, axis: ?host_manifest.DescriptorAxis) void {
+    if (builtin.is_test) return;
+    const axis_name = if (axis) |a| @tagName(a) else "none";
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(site);
+    hasher.update(axis_name);
+    const key = hasher.final() | 1; // 0 은 "아직 없음" 이라 예약한다
+    if (key == last_stale_key) return;
+    last_stale_key = key;
+    std.log.err(
+        "session host stale manifest: site={s} axis={s}",
+        .{ site, axis_name },
+    );
+}
+
+/// hello ack 검증 실패. client 가 실제로 답한 값과 기대값을 **둘 다** 남긴다 — 축 이름만으로는
+/// "어느 쪽이 옛것인지" 가 안 보여서 upgrade 방향을 판단할 수 없다.
+var last_stale_client_key: u64 = 0;
+
+fn logStaleClient(client: client_mod.Client, expected: host_manifest.Descriptor) void {
+    if (builtin.is_test) return;
+    // 값까지 넣은 키로 연속 중복을 억제한다. 재시도가 500 회까지 돌 수 있으므로 이게 없으면 같은 줄이
+    // 그대로 500 번 쌓여, 정작 상태가 **바뀌는** 순간을 덮는다.
+    var hasher = std.hash.Wyhash.init(1);
+    hasher.update(if (client.build_id) |b| b else "");
+    hasher.update(expected.build_id);
+    hasher.update(client.lifecycle);
+    hasher.update(std.mem.asBytes(&client.upgrade_epoch));
+    const key = hasher.final() | 1;
+    if (key == last_stale_client_key) return;
+    last_stale_client_key = key;
+    if (!client.host_manifest_v1) return logStaleManifest("hello:no_manifest_v1", null);
+    if (client.host_id != expected.host_id) return logStaleManifest("hello", .host_id);
+    if (client.screen_codec_version != expected.screen_codec_version) return logStaleManifest("hello", .screen_codec_version);
+    if (client.wire_major != expected.protocol_major) return logStaleManifest("hello", .protocol_major);
+    if (client.build_id == null) return logStaleManifest("hello:build_id_absent", .build_id);
+    if (!std.mem.eql(u8, client.build_id.?, expected.build_id)) {
+        std.log.err(
+            "session host stale manifest: site=hello axis=build_id got={s} want={s}",
+            .{ client.build_id.?, expected.build_id },
+        );
+        return;
+    }
+    if (client.upgrade_epoch != expected.upgrade_epoch) {
+        std.log.err(
+            "session host stale manifest: site=hello axis=upgrade_epoch got={d} want={d}",
+            .{ client.upgrade_epoch, expected.upgrade_epoch },
+        );
+        return;
+    }
+    if (!std.mem.eql(u8, client.lifecycle, @tagName(expected.lifecycle))) {
+        std.log.err(
+            "session host stale manifest: site=hello axis=lifecycle got={s} want={s}",
+            .{ client.lifecycle, @tagName(expected.lifecycle) },
+        );
+        return;
+    }
+    logStaleManifest("hello", null);
 }
 
 fn connectExactWithBackoff(
@@ -913,7 +1003,17 @@ fn connectExactWithBackoffKind(
             .connected => |client| return validateExactClient(client, expected),
             .absent => {},
             .transient => saw_transient = true,
-            .failed => |reason| return .{ .failed = reason },
+            // exec 직후 **복원 중**인 host는 endpoint를 이미 열어 accept까지 되지만, runtime과 큐를 되살리는 동안
+            // hello만 아직 못 준다. client는 그 국면을 `handshake_failed`로 읽는데, 이건 "죽었다"가 아니라 "아직
+            // 준비 전"이라 재시도 대상이다. 확정 실패로 보고 즉시 반환하면 여기 있는 예산을 **한 번도 쓰지 못한다** —
+            // 2026-08-27 실측에서 총 시도가 1회였고, 살아 있는 host가 `unreachable`로 판정돼 새 host가 떴다.
+            // 그 결과가 `connectNewHostWithBackoff`가 경고하는 **같은 build_id host 둘**이다.
+            //
+            // 진짜 프로토콜 불일치는 `incompatible_version`으로 따로 오므로 구 host를 오래 기다리게 되지도 않는다.
+            .failed => |reason| switch (reason) {
+                .handshake_failed => saw_transient = true,
+                else => return .{ .failed = reason },
+            },
         }
         _ = usleep(opts.connect_delay_ms * 1000);
     }
@@ -1194,16 +1294,29 @@ const TryConnectResult = union(enum) {
     failed: FailureReason,
 };
 
+/// `handshake_failed` 로 접히기 전에 **원래 에러**를 남긴다. 세 에러가 같은 값으로 나가므로 이 한 줄이
+/// 없으면 "상대가 아직 준비 전"과 "상대가 우리를 거부함"을 영영 구분할 수 없다.
+fn logHandshakeFailure(err_name: []const u8) void {
+    if (builtin.is_test) return;
+    std.log.err("session host handshake failure: error={s}", .{err_name});
+}
+
 fn connectFailure(err: client_mod.ClientError) TryConnectResult {
     return switch (err) {
         error.EndpointAbsent => .absent,
         error.EndpointTransient => .transient,
         error.EndpointDenied => .{ .failed = .endpoint_denied },
         error.IncompatibleVersion => .{ .failed = .incompatible_version },
+        // 세 에러가 한 값으로 접힌다 — "hello 를 거부당함"·"상대가 소켓을 닫음"·"쓰지도 못함" 은 원인이
+        // 전혀 다른데 로그에는 `handshake_failed` 한 단어만 남았다. 2026-08-27 에 exec upgrade 실패를
+        // 추적할 때 이 셋을 구분할 수 없어 legacy 경로를 한 번 헛짚었다. 분류는 그대로 두고 사유만 남긴다.
         error.HandshakeFailed,
         error.ConnectionClosed,
         error.WriteFailed,
-        => .{ .failed = .handshake_failed },
+        => blk: {
+            logHandshakeFailure(@errorName(err));
+            break :blk .{ .failed = .handshake_failed };
+        },
         error.AdminBusy => .{ .failed = .resource_exhausted },
         error.Unauthorized => .{ .failed = .unauthorized },
         error.ProtocolError, error.EventQueueFull, error.ExternalMode => .{ .failed = .protocol_error },
@@ -1685,6 +1798,86 @@ test "host_connect: legacy 경로의 미확정 probe는 host_gone으로 승격�
     try testing.expect(outcome == .failed);
     // 핵심: 응답하지 않은 endpoint 뒤에 host가 살아 있을 수 있으므로 **영구(host_gone)가 아니다**.
     try testing.expect(outcome.failed != .host_gone);
+}
+
+/// exec 직후 **복원 중**인 host: endpoint는 이미 열려 accept까지 되지만 hello는 아직 답하지 못한다. runtime과
+/// 큐를 되살리는 동안의 정상 국면이며, 죽은 상태가 아니다. client는 이를 `handshake_failed`(=ConnectionClosed)로
+/// 본다 — `MismatchedPeer`와 wire 동작은 같고 **의미만 다르다**(말이 안 통함 vs 아직 준비 전).
+const RestoringPeer = struct {
+    fn serve(server: *socket_server.SocketServer, accepted: *usize, want: usize) void {
+        while (accepted.* < want) {
+            var ready = c.pollfd{
+                .fd = server.listen_fd,
+                .events = c.POLL.IN,
+                .revents = 0,
+            };
+            if (c.poll(@ptrCast(&ready), 1, 1_000) <= 0 or ready.revents & c.POLL.IN == 0) return;
+            const fd = server.acceptOne() orelse return;
+            _ = c.close(fd); // 아직 hello를 줄 수 없다 — 복원이 끝나면 준다.
+            accepted.* += 1;
+        }
+    }
+};
+
+// 회귀: exec upgrade의 재연결이 **재시도 예산을 한 번도 쓰지 못하고** 첫 실패에서 끝났다.
+//
+// exec 직후 host는 manifest를 이미 publish했고 owner lease도 쥐고 있다. 그래서 "아직 안 떴다"(`host_gone`)도,
+// "복원 중"(`lifecycle == .restoring`)도 아니다 — endpoint는 accept까지 되는데 복원이 끝나지 않아 hello만 아직
+// 못 준다. client는 그 국면을 `handshake_failed`로 읽는데, 두 겹의 backoff가 **모두** 그 값을 확정 실패로 보고
+// 즉시 반환한다: 안쪽 `connectExactWithBackoffKind`의 `.failed => return`, 바깥
+// `connectNewHostWithBackoff`의 `else => return`. 결과적으로 500×20ms=10s 예산을 두고도 **총 시도는 1회**다.
+//
+// 이 파일이 스스로 경고한 최악의 형태가 그대로 나온다 — 살아 있는 host를 `unreachable`로 오판하고 새 host를 띄워
+// **같은 build_id host가 둘** 남는다. 2026-08-27 실측이 정확히 그랬다: 어제 저녁 host와 새벽 host가 공존했고,
+// `host status`가 ambiguous로 답했으며, 복구 세션을 눌러도 어느 쪽에 붙을지 정하지 못해 앱이 조용히 종료됐다.
+//
+// 관찰 지표는 **peer가 accept당한 횟수**다. 첫 실패에서 포기하면 1회, 예산을 쓰면 요청한 횟수만큼 찍힌다.
+test "host_connect: 복원 중 host 의 hello 실패는 재연결 예산을 소진한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-restoring-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    const socket = discovery.socketPathForMajorIn(&socket_buf, dir, protocol.version_major) catch
+        return error.SkipZigTest;
+    var registry = registry_mod.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var server = try socket_server.SocketServer.bind(allocator, dir, socket, 0xBB, &registry);
+    defer {
+        server.deinit();
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+
+    // 실패 경로만 보므로 descriptor는 대조에 쓰이지 않는다(`validateExactClient`는 connected에서만 돈다).
+    const expected = host_manifest.Descriptor{
+        .host_id = 0x9999_8888_7777_6666,
+        .build_id = "test-build-id",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = 0,
+        .upgrade_epoch = 0,
+        .lifecycle = .ready,
+        .endpoint = socket,
+    };
+
+    const want: usize = 3;
+    var accepted: usize = 0;
+    var thread = try std.Thread.spawn(.{}, RestoringPeer.serve, .{ &server, &accepted, want });
+    const outcome = connectExactWithBackoffKind(allocator, socket, protocol.version_major, expected, .gui, .{
+        .connect_attempts = want,
+        .connect_delay_ms = 1,
+    });
+    thread.join();
+
+    try testing.expect(outcome == .failed);
+    // 핵심: 복원이 끝나지 않아 결국 실패하더라도, 그 전에 **예산을 모두 써 봐야** 한다. 살아 있는 host를 한 번의
+    // hello 실패로 `unreachable`이라 단정하는 것이 이 회귀의 본체였다.
+    try testing.expectEqual(want, accepted);
 }
 
 test "host_connect: launches the product maru session host and completes host.info" {

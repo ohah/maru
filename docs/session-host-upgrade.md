@@ -558,14 +558,81 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   기본 `test-session-host`에서 항상 compile되고 순수 helper test도 실행한다. 저장소와 일반 CI에는 release
   signing identity/frozen artifact가 없으므로 signed process 본체는 opt-in이며, 실행하지 않은 상태를 green으로
   보고하지 않는다.
-- **남은 release provenance gate:** release job이 immutable manifest로 두 artifact의 semver/tag/commit,
-  MRSH major, handoff schema, app bundle/build identity, SHA-256과 signer requirement를 제공하고, 하네스 summary와
-  교차검증해야 한다. `release.yml`의 계획된 `session-host-compat-artifact` job이 release A의 signed executable과
-  manifest를 current+N-1 지원 창 동안 Release asset으로 보존하고, release B의
-  `Session host compatibility / frozen N-1` protected job이
-  `A daemon spawn→B adapter attach→동일 PID exec→B GUI exact reattach`를 실행한다. Release maintainer가 보존
-  owner이며 B published 전 artifact/result 존재를 강제한다. 같은 source tree에서 이름만 바꾸거나 현재 native
-  module과 함께 재컴파일한 fixture는 이 gate를 만족하지 않는다.
+- **release provenance gate:** release job은 아래 `maru.session-host-release.v1` manifest와 signed 제품 executable을
+  Release asset으로 보존한다. B의 manifest는 SemVer 산술이나 `latest` 조회가 아니라 exact A release를 predecessor로
+  지목한다. B 검증기는 그 immutable A와 B 후보를 사용해 `A daemon spawn→B adapter attach→동일 PID exec→B GUI exact
+  reattach`를 실행한다. 같은 source tree에서 이름만 바꾸거나 현재 native module과 함께 재컴파일한 fixture는 이 gate를
+  만족하지 않는다.
+
+  manifest는 UTF-8 JSON object 하나와 마지막 LF 하나인 canonical writer output이다. object key는 아래 표의 순서로
+  쓰고 parser는 모든 scope에서 duplicate·unknown key, trailing value, 잘못된 UTF-8과 정수 overflow를 거부한다. 보안 판정은
+  JSON의 모양이나 asset 이름이 아니라 release/attestation이 결속한 manifest bytes와 각 SHA-256을 사용한다.
+
+  | scope | 필수 필드 | 불변식 |
+  | --- | --- | --- |
+  | root | `schema`, `role`, `repository`, `release`, `source`, `build`, `compatibility`, `signing`, `assets`, `evidence` | `schema`는 exact `maru.session-host-release.v1`; `role`은 `a` 또는 `b`; B만 `predecessor` 추가 |
+  | `repository` | `id`, `owner`, `name` | GitHub numeric repository ID와 exact `ohah`/`maru`; 이름 재사용이나 다른 repository의 attestation 거부 |
+  | `release` | `id`, `tag`, `version` | `id`는 GitHub numeric release ID, tag는 exact `v<version>`; version은 repository의 version SSOT와 같음 |
+  | `source` | `commit`, `tree` | full lowercase Git object ID; release tag가 exact commit을 가리키고 checkout tree와 같음 |
+  | `build` | `workflow_ref`, `run_id`, `run_attempt` | artifact attestation의 repository·commit·workflow identity와 exact 일치 |
+  | `compatibility` | `mrsh_major`, `screen_codec`, `handoff_reader_min`, `handoff_reader_max`, `app_host_abi` | frozen executable의 `protocol.version_major`, `screen_stream.codec_version`, `handoff_codec.reader_min/reader_max`, app ABI와 exact 일치; `min > max` 거부 |
+  | `signing` | `bundle_id`, `bundle_short_version`, `bundle_version`, `team_id`, `designated_requirement_sha256`, `architectures`, `notarization`, `stapled` | plist, `codesign`, `lipo`, `spctl`/stapler 검증 결과와 exact 일치; architecture는 중복 없는 정렬 배열; `notarization`은 exact `accepted`, `stapled`는 true |
+  | `assets[]` | `role`, `name`, `sha256`, `size` | role은 `universal_dmg`, `frozen_product_executable`, `evidence_summary`가 각각 exact 1; regular file bytes의 digest/size와 일치; basename만 허용; DMG에서 no-follow로 추출한 제품 executable bytes는 frozen executable asset과 동일 |
+  | `evidence` | `test_uuid`, `summary_name`, `summary_sha256`, `result` | summary는 같은 후보 bytes를 실행한 결과이며 `result`는 exact `passed`; stale summary와 다른 test UUID 거부 |
+  | B 전용 `predecessor` | `release_id`, `tag`, `commit`, `manifest_sha256` | 네 필드 모두 published immutable A와 exact 일치; A에는 이 scope가 없고 B에는 반드시 있음 |
+
+  manifest 파일 자체는 `assets[]`에 넣지 않는다. 자기 digest를 자기 bytes 안에 넣는 순환을 만들지 않고, trusted workflow가
+  canonical manifest bytes를 별도 필수 Release asset으로 첨부한 뒤 그 bytes를 subject로 한 artifact attestation을 발급한다.
+  다음 release는 predecessor release에서 이 manifest asset을 exact 이름으로 내려받아 SHA-256과 attestation subject를 먼저
+  검증한 뒤에만 내부 `assets[]`를 해석한다. manifest asset 누락·복수·이름 불일치도 publication/consumption 실패다.
+
+  parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
+  executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를
+  typed input으로 만들어 core validator에 주입할 뿐 JSON을 두 번째로 해석하지 않는다. runtime/GUI는 이 manifest를 읽지
+  않으며 새 런타임 의존성도 추가하지 않는다. 이 모듈의 `max_manifest_bytes`(64 KiB), `max_evidence_bytes`(1 MiB),
+  `max_scalar_string_bytes`(4 KiB), `max_asset_name_bytes`(255)가 입력 상한의 단일 출처다. release/run ID와 size는 nonzero u64,
+  SHA-256은 exact 64 lowercase hex이며 checked 합산이 상한을 넘으면 allocation 전에 거부한다. focused gate
+  `test-session-host-release-manifest`는 canonical round-trip,
+  모든 scope의 duplicate/unknown/missing/type/range/cap, A/B predecessor 유무, asset role exact-count, basename traversal·symlink,
+  SHA/size/signature/compatibility/attestation mismatch와 allocation fail-index에서 publication 0을 Debug·ReleaseFast로 검증한다.
+  별도 workflow contract fixture는 draft 생성 전 publish, evidence 전 manifest 생성, 누락 asset, mutable A, `--clobber`, 임의 ref와
+  unpinned third-party action을 거부한다.
+
+  A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
+  default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과
+  동일 `test_uuid`를 결속한다. manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이
+  생성하고 artifact attestation을 발급한다. attestation 검증은 repository·workflow·source commit과 subject digest를 모두
+  policy input으로 사용하며 단순히 cryptographic valid만으로 통과시키지 않는다.
+
+  publish 순서는 닫혀 있다. trusted tag workflow가 후보 bytes에 artifact attestation을 발급하고 draft release ID를 얻은 뒤,
+  그 후보로 제품 gate를 실행해 evidence를 만든다. 그 다음에야 release ID와 evidence digest를 담은 manifest를 생성·attest하고
+  manifest와 그 manifest가 열거한 모든 asset을 draft에 attach한다. draft를 다시 내려받아 pre-publish validator가 검사한 뒤에만 publish한다. immutable release
+  attestation은 publish 뒤에만 생기므로 자기 publish의 선행조건으로 순환 참조하지 않는다. 대신 후보/manifest artifact
+  attestation과 manifest digest가 pre-publish trust를 맡고, publish 직후
+  `gh release verify`/`verify-asset`에 해당하는 검증이 tag·commit·asset 결속을 확인해 release audit artifact를 남긴다.
+  B가 A를 소비할 때는 이 post-publish release attestation까지 필수다. 공개 뒤 검증 실패는 asset 교체나 `--clobber`로
+  복구하지 않고 그 release를 실패 기록으로 보존한 채 새 version으로 다시 출하한다.
+
+  ```mermaid
+  flowchart TD
+      BUILD["trusted tag workflow builds signed candidate"]
+      CANDIDATE["candidate attestation binds workflow commit and bytes"]
+      DRAFT["draft release allocates exact release ID"]
+      PRODUCT["product gates create evidence for candidate bytes"]
+      MANIFEST["manifest binds release ID assets and evidence"]
+      ATTEST["manifest attestation binds final manifest bytes"]
+      VALIDATE["downloaded draft assets pass pre-publish validator"]
+      PUBLISH["publish immutable release"]
+      VERIFY["release attestation verifies tag commit and assets"]
+      CONSUME["next release consumes exact predecessor"]
+      BUILD --> CANDIDATE --> DRAFT --> PRODUCT --> MANIFEST --> ATTEST --> VALIDATE --> PUBLISH --> VERIFY --> CONSUME
+  ```
+
+  release A asset의 보존 기간은 A를 predecessor로 지목하는 모든 B가 지원되는 동안이며, 지원 창 종료는 별도 release가
+  더는 A를 predecessor로 지목하지 않고 rollback 정책도 종료했음을 먼저 게시한 뒤에만 가능하다. attestation이나 release
+  asset을 임의 삭제해 지원 창을 조용히 줄이지 않는다. release workflow는 protected tag/release environment만 사용하고
+  fork PR·`pull_request_target`·임의 `workflow_dispatch` ref에서 signing secret 또는 self-hosted Aqua runner를 열지 않는다.
+  모든 third-party Action은 mutable major tag가 아니라 full commit SHA로 pin한다.
 - **구현된 component seam:** attempt-key exclusive target staging, strict same-designated-requirement codesign authorizer,
   accepted/armed/running/terminal idempotency owner, exec를 넘는 checksummed attempt record, host/epoch/next-handle/live
   runtime/target/rollback-image identity 교차검증, descriptor-relative primary/backup commit, 64 MiB operational cap, exact disk

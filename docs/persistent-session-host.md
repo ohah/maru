@@ -558,9 +558,9 @@ session.keep-alive-after-quit = true
 - **"모든 설정 초기화"(Reset to Defaults)는 이 키를 초기화하지 않고 보존한다.** 리셋이 이 값을 기본값으로 되돌리면
   live 정책이 그 자리에서 뒤집혀 다음 평범한 `Quit Maru`가 살아 있는 host-backed runtime을 전부 terminate한다 —
   파괴를 `Quit and End All Sessions`라는 명시적 경로로 분리한 위 원칙을 리셋이 우회하는 셈이다(실측 사고: 리셋 뒤
-  일반 Quit으로 runtime 12개 소멸, workspace의 `host_id:runtime_id` 12개가 dangling). 현재 `resetAllSettings`는
-  값과 live 정책을 보존하고 값이 현재 `Config{}` 기본값과 다르면 override를 남긴다. release A의 G2부터는 기본값과
-  같아도 session explicit override를 항상 보존·emit해 B→A rollback에서도 의미가 유지되게 한다.
+  일반 Quit으로 runtime 12개 소멸, workspace의 `host_id:runtime_id` 12개가 dangling). `resetAllSettings`는 app-global
+  snapshot의 값과 live 정책을 보존한다. `absent`는 줄을 만들지 않고 explicit valid/invalid는 현재 `Config{}` 기본값과
+  같아도 canonical session bool override를 atomic replace에 포함해 B→A rollback에서도 의미가 유지되게 한다.
   끄는 결정은 사용자 몫이라 notice로 수동 변경 경로를 안내한다. 기본값이 `true`로 전환된 뒤에도 같은 규칙이라
   "사용자가 명시적으로 끈 `false`"를 리셋이 도로 켜지 않는다(리터럴이 아니라 기본값과 비교하는 이유).
 - 기본 전환은 두 release로 나눈다. 준비 release A는 default `false`를 유지한 채 durable tombstone reader/writer,
@@ -577,13 +577,13 @@ session.keep-alive-after-quit = true
 | `explicit_invalid` | `false` | 파일 무변경, persistent invalid-value notice |
 | file `unreadable` 또는 `oversize` | `false` | 파일 무변경, persistent read-error notice |
 
-duplicate key는 마지막 syntactic occurrence의 valid/invalid가 outcome을 정한다. G2 migration owner는 app-instance lease를
+duplicate key는 마지막 syntactic occurrence의 valid/invalid가 outcome을 정한다. G3 migration owner는 app-instance lease를
 획득한 AppRuntime bootstrap 하나이며 첫 AppSession/config resolve 전에 정확히 한 번 실행한다. 모든 Window/AppSession은
 그 owned result snapshot을 빌려 반복 materialize하지 않는다.
 - 별도 persisted migration marker나 만료 정책은 두지 않는다. `session.keep-alive-after-quit`의 explicit override는
   global/row Reset이 항상 보존하고, 사용자가 Workspace 토글을 직접 바꿀 때만 true/false를 교체한다. 따라서 B의
   기본값과 값이 같아도 explicit true가 남는다. B→frozen A rollback에서 true와 durable tombstone이 함께 보존되는
-  것을 검증하고, A보다 오래된 writer로의 downgrade round-trip은 지원하지 않는다. 이 provenance와 two-release gate
+  것을 검증하고, B manifest가 exact predecessor로 지목하지 않은 release로의 downgrade round-trip은 지원하지 않는다. 이 provenance와 two-release gate
   없이 기본값을 바꾸지 않는다.
 - restore 중 saved Window 하나라도 host/runtime 불일치나 attach 실패로 apply되지 않으면 default shell 창을 성공한 복원으로
   남기지 않고 teardown하고 `restore incomplete`를 세운다. 다음 종료 checkpoint는 마지막 완전 manifest를
@@ -7380,6 +7380,40 @@ Workspace 토글과 외부 config reload만 app-global snapshot을 새 `explicit
 창 생성이나 row/global Reset이 snapshot owner를 다시 초기화하지 않는다. Debug·ReleaseFast pure owner/file fixture는
 absent/valid/invalid, exact-one/duplicate init, 실제 atomic replace 실패와 dirty/remove queue 0을 검증하고, AppHost source-order
 fixture와 실제 fresh process는 `lease → G2 bootstrap → AppKit/AppSession` 순서 및 두 번째 instance의 config I/O 0을 검증한다.
+
+**G3 frozen-release default migration 계약.** G3는 [upgrade release provenance](session-host-upgrade.md#u5--제품-활성화)가
+지목한 exact immutable A와 provisioned `Session host product / default-on` runner가 모두 존재할 때만 코드를 시작한다. B의
+SemVer가 A에 산술적으로 인접하다는 가정이나 `latest` 조회는 migration 권위가 아니다. B manifest의 exact predecessor
+release ID·tag·commit·manifest SHA-256만 A 선택 권위이며, B→A rollback도 그 exact A 하나만 지원한다.
+
+B bootstrap은 L0 app-instance lease 뒤, AppKit/첫 Window/첫 `AppSession` 전에 G2 owner의 같은 exact-once entry를 사용한다.
+파일을 두 번 읽거나 Window별로 migration하지 않는다. migration 결과는 아래 닫힌 표 하나다.
+
+| B bootstrap 입력 | live/snapshot | 파일 | notice |
+| --- | --- | --- | --- |
+| `missing` 또는 `readable + absent` | atomic replace 성공 뒤 `true`, `explicit_valid(true)` | canonical explicit true 한 줄 | 없음 |
+| 위 행의 replace plan/write/fsync/rename/dir-sync 실패 | `false`, retryable migration 상태 | 기존 bytes 또는 missing을 그대로 보존; partial file 0 | 실패 원인 kind를 가진 persistent retryable notice |
+| `explicit_valid(value)` | 같은 `value`, 같은 provenance | mutation 0 | 없음 |
+| `explicit_invalid` | `false`, invalid 보존 | mutation 0 | persistent invalid-config notice |
+| `unreadable` 또는 `oversize` | `false`, file provenance 보존 | mutation 0 | persistent inaccessible-config notice |
+| lease 없음 또는 duplicate bootstrap | 기존 owner 불변 | config I/O 0 | caller에 typed reject |
+
+materialization의 atomic replace는 G2 Reset과 같은 file owner를 사용하고 성공 suffix에서만 snapshot을 true로 publish한다.
+성공 전에 새 runtime·Window·AppSession·workspace/cache write·notice dismissal을 허용하지 않는다. 실패 notice는 사용자가
+Workspace 토글로 explicit 값을 쓰거나 reload에서 새 valid provenance가 publish될 때까지 사라지지 않으며, frame마다 같은
+notice를 추가하지 않고 stable kind별 exact 한 행을 갱신한다. retry는 app-instance bootstrap 또는 명시적 Reload Config에서만
+일어나며 background timer가 config를 몰래 바꾸지 않는다.
+
+G3 제품 gate는 frozen A에서 default false와 explicit true/false Reset retention을 먼저 확인하고, A가 만든 non-empty runtime을
+B가 exact adapter로 attach해 PID/runtime/input/output/copy/resize를 보존하는지 검사한다. B가 materialize한 explicit true를 exact
+A가 rollback 뒤 그대로 읽어 opt-in을 유지하고, B에서 새로 만든 runtime은 B host에만 생기며 A runtime 종료 뒤 A host가
+drain cleanup되는지까지 같은 test UUID로 묶는다. config matrix, 2 Window+3 Workspace topology, tombstone relaunch, Quit 취소,
+Notification cold/live click leaf 중 하나라도 없거나 release manifest/evidence digest와 다르면 B publish는 실패다. G3 소스
+PR은 immutable A와 provisioned runner가 준비된 뒤 component gate와 product harness의 compile/policy gate를 통과해야 merge할
+수 있다. merge된 exact `main` commit으로만 비공개 draft B 후보를 만들고 같은 후보를 제품 gate에 넣으며, 통과 뒤에만
+publish한다. 따라서 default
+flip source가 `main`에 들어간 사실은 출하 완료 증거가 아니고, 실패한 B 후보는 publish하지 않은 채 후속 PR로 수정한다.
+release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate를 `skip` 또는 advisory success로 바꾸지 않는다.
 
 ### P5 — 개별 runtime CLI attach
 

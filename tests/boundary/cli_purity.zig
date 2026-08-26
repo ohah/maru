@@ -79,6 +79,11 @@ const inventory = [_]Entry{
         .why = "cli/의 의도된 impure 예외 — browser.zig(순수)의 짝으로 응답 수신 read/close와 --out 원자 공개를 갖는다.",
     },
     .{
+        .path = "incidents_run.zig",
+        .expect = .exempt,
+        .why = "cli/의 의도된 impure 예외 — incidents.zig(순수)의 짝으로 incident 디렉터리 열거와 봉투 읽기를 갖는다(browser.zig ↔ browser/run.zig와 같은 분할). 파싱·포맷은 순수 절반이 갖고 여긴 디스크 접착만 남는다.",
+    },
+    .{
         .path = "ssh.zig",
         .expect = .{ .exact = 24 },
         .why = "테스트 전용 fork/pipe 헬퍼(spawnShell·drainShell과 그 호출자 expectNotifyLifecycle·runSessionLoop)가 top-level fn이라 test 마스크에 안 걸린다. 제품 경로는 순수하다. 20→24는 재접속 루프를 실제 /bin/sh로 돌리는 하네스가 붙은 몫이고, fork 절차 자체는 spawnShell 하나로 합쳐 뒀다(따로 들면 33이었다).",

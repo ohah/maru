@@ -78,7 +78,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(incident, "pub const aggregate_slot_count: usize = 8;"));
     try std.testing.expectEqual(@as(usize, 1), count(incident, "fn recordRepeatForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(incident, "pub fn recordRepeat("));
-    try std.testing.expectEqual(@as(usize, 20), count(incident, "test \"CR0b core "));
+    try std.testing.expectEqual(@as(usize, 21), count(incident, "test \"CR0b core "));
     try std.testing.expectEqual(@as(usize, 5), count(incident, "test \"CR0b service transaction"));
     inline for (.{
         .{ "prepareFirstPublication(", 1, 4 },

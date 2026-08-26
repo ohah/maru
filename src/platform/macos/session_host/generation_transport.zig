@@ -1248,6 +1248,22 @@ fn mapControlError(err: client_slot_mod.GenerationControlError) ControlError {
     };
 }
 
+/// mint을 한 번도 거치지 않은 transport인가.
+///
+/// `GenerationAttachment.initInPlace`는 lifecycle만 `.shell`로 올리고 transport는 손대지 않는다. transport
+/// 권위는 `prepareAttach`의 `mintInPlace`에서 비로소 생긴다. 그래서 attach 준비 전에 teardown이 들어오면
+/// terminalize할 권위가 **아직 없는** 것이고, 이는 손상이 아니라 정상적인 "아무것도 안 잡았다"이다.
+///
+/// 판정 축을 `mintInPlace`의 목적지 검사와 **같게** 두는 것이 이 함수의 요점이다. 한쪽이 "빈 자리"로 보고
+/// 쓰기를 허락하는 상태를 다른 쪽이 "손상"으로 읽으면, 그 자리는 채울 수도 비울 수도 없는 상태로 남는다.
+pub fn neverMinted(transport: *const GenerationTransport) bool {
+    return rawLifecycleValid(&transport.lifecycle) and transport.lifecycle == .pristine and
+        transport.self_addr == 0 and transport.rpc_response.pristineExact() and
+        transport.owner_addr == 0 and transport.owner_seal_addr == 0 and
+        transport.slot_addr == 0 and transport.event_owner_addr == 0 and
+        transport.transport_incarnation == 0 and transport.bound_stream_id == 0;
+}
+
 pub fn mintInPlace(
     out: *GenerationTransport,
     slot: *client_slot_mod.ClientSlot,

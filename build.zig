@@ -4043,6 +4043,13 @@ pub fn build(b: *std.Build) void {
         release_version_step.dependOn(&release_tag_check.step);
     }
 
+    const github_release_publication_contract = b.addSystemCommand(&.{ "sh", "tools/test-github-release-publication.sh" });
+    github_release_publication_contract.setCwd(b.path("."));
+    github_release_publication_contract.stdio = .inherit;
+    const github_release_publication_step = b.step("check-github-release-publication", "Check draft-first GitHub release publication");
+    github_release_publication_step.dependOn(&github_release_publication_contract.step);
+    test_step.dependOn(&github_release_publication_contract.step);
+
     const config_docs_step = b.step("check-config-docs", "Check config docs against the real schema keys");
     config_docs_step.dependOn(&run_config_docs_tests.step);
 

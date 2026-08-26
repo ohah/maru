@@ -2306,7 +2306,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **상태: 구현 전, 외부 gate 미준비.** G3 코드는 provisioned `Session host product / default-on` runner와 immutable
   release A manifest가 모두 준비된 뒤에만 시작한다. `build.zig.zon` version SSOT는 generated macOS plist와 tag gate까지
   연결됐지만 manifest가 아직 없으므로 manifest 일치 검증은 release workflow 슬라이스가 추가한다. 현재 일반 PR의
-  component/fixture green은 이 선결조건들을 대신하지 않는다.
+  component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte
+  equality는 연결됐지만 session-host manifest/evidence attestation과 post-publish release attestation은 아직 없다.
 - **release gate:** B manifest가 exact predecessor release A의 immutable release ID·tag·commit과 DMG/내부 제품 executable
   SHA-256을 지목하고, release attestation·artifact attestation·Developer ID identity를 validator가 교차검증한다. SemVer 숫자의
   산술 인접성이나 `latest` 조회로 A를 추측하지 않는다. manifest가 지목하지 않은 downgrade는 지원하지 않는다.

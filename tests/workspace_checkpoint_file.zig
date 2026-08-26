@@ -269,3 +269,33 @@ test "P4 C4 hostile backup leaf fails closed and preserves current" {
     try std.testing.expectEqualStrings("old-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
     try std.testing.expectEqualStrings("victim", try readLeaf(&tmp, "victim", &read_buf));
 }
+
+test "P4 C4 loose backup permissions are tightened instead of failing the publish" {
+    // 이 테스트가 증명하는 것: 이미 있는 `.bak` 의 권한이 느슨해도 **저장은 진행된다**.
+    //
+    // 거절하면 어떻게 되는지 실측했다(2026-08-27). `.bak` 이 `0644` 로 남아 있어 `ensureBackup` 이
+    // `backup_failed` 를 냈고, 그것이 쓰기 전체의 실패로 옮겨져 checkpoint 가 write-failed 로 끝났다.
+    // keep-alive 종료는 저장 실패를 허용하지 않으므로 **앱이 닫히지 않았고**, 평상시 저장까지 함께
+    // 막혀 workspace.v1 이 9 시간 동안 한 번도 갱신되지 않았다. 파일 권한 한 비트가 사용자를
+    // "종료할 수도, 저장할 수도 없는" 상태에 가둔다.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "old-complete" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1.bak", .data = "stale-backup" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    var bak_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const bak_path = try std.fmt.bufPrintZ(&bak_buf, "{s}/workspace.v1.bak", .{parent});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(bak_path.ptr, @as(std.c.mode_t, 0o644)));
+
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publishFinal(parent, "new", true));
+
+    var read_buf: [64]u8 = undefined;
+    // 저장은 진행됐다.
+    try std.testing.expectEqualStrings("new", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    // 기존 `.bak` 은 그대로 둔다 — 가장 완전한 첫 사본을 밀어내지 않는다.
+    try std.testing.expectEqualStrings("stale-backup", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+    // 그리고 권한은 조여졌다.
+    const backup_stat = try tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{});
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(backup_stat.permissions.toMode() & 0o777)));
+}

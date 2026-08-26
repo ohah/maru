@@ -38,6 +38,18 @@ fn linkSessionHostNotificationAdapter(b: *std.Build, compile: *std.Build.Step.Co
     compile.root_module.linkFramework("UserNotifications", .{});
 }
 
+/// `check-targets` analyzes the macOS executable from Linux without owning an Apple SDK.
+/// Keep that compile-only gate honest about the C ABI without pretending that it can build
+/// the product platform adapter. Product and macOS-host builds always use the Objective-C
+/// implementation above; this stub is never installed or executed.
+fn linkSessionHostNotificationCompileStub(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    compile.root_module.addIncludePath(b.path("src/platform/macos"));
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("tests/fixtures/session_host_notification_adapter_compile_stub.c"),
+        .flags = &.{},
+    });
+}
+
 pub fn build(b: *std.Build) void {
     // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
     // 실행되게 한다. 단 이 기본값은 macOS 호스트에서 빌드할 때만 건다.
@@ -938,7 +950,13 @@ pub fn build(b: *std.Build) void {
         // `main()`과 그 아래(호스트 게이트·경로 정책)가 통째로 빠진다 — 실측: `main.zig`에 macOS 전용 타입
         // 오류를 심고 테스트 빌드로 돌리면 **통과한다.** 실행 파일은 `main`이 진입점이라 반드시 분석된다.
         const cross_exe = b.addExecutable(.{ .name = b.fmt("maru-check-{s}", .{triple}), .root_module = cross_exe_mod });
-        if (cross_target.result.os.tag == .macos) linkSessionHostNotificationAdapter(b, cross_exe);
+        if (cross_target.result.os.tag == .macos) {
+            if (builtin.os.tag == .macos or b.sysroot != null) {
+                linkSessionHostNotificationAdapter(b, cross_exe);
+            } else {
+                linkSessionHostNotificationCompileStub(b, cross_exe);
+            }
+        }
         check_targets_step.dependOn(&cross_exe.step);
     }
 

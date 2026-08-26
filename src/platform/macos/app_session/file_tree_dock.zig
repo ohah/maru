@@ -310,7 +310,19 @@ fn shapeFileTreeText(
 /// **같은 tree 가 다시 나오는 것은 교체가 아니다.** 그걸 교체로 치면 방금 누른 행이 AppKit 의 mouse-up
 /// 전에 취소된다(Session Dock·SCM 도크와 같은 판단).
 fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content: anytype) void {
-    const replaced = !frameEql(self.file_tree_entries.items, self.file_tree_actions.items, frame.tree.entries, frame.actions);
+    // **두 좌표계를 견주지 않는다.** 저장본은 아래에서 pane origin 을 더해 backing 좌표로 굳고,
+    // `frame.tree.entries` 는 아직 도크 로컬 좌표다. 오프셋을 빼고 비교하면 `content` 가 원점이 아닌 한
+    // (오른쪽 도크는 x 가 1400 대다) **모든 발행이 교체로 판정된다** — 그러면 방금 누른 행의 capture 가
+    // 다음 paint 에서 취소되고, mouse-up 이 intent 를 못 내 **좌클릭이 영영 안 열린다**(2026-08-26 실측:
+    // `entries 25->25 actions 23->23 rows 23->23 gen 2464->2464` 인데 `replaced=true`).
+    const replaced = !frameEql(
+        self.file_tree_entries.items,
+        self.file_tree_actions.items,
+        frame.tree.entries,
+        frame.actions,
+        @floatFromInt(content.x),
+        @floatFromInt(content.y),
+    );
     // 두 저장소를 **먼저** 확보한다. 할당이 실패해도 마지막으로 온전히 그린 hit tree 가 남아야 한다.
     self.file_tree_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
     self.file_tree_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
@@ -352,16 +364,22 @@ pub fn releaseFileTreePointer(self: *AppSession) void {
     if (had_hover) self.metal_dirty = true;
 }
 
+/// `old_entries` 는 **backing 좌표**(발행이 pane origin 을 더해 굳힌 것)이고 `new_entries` 는 아직
+/// 도크 **로컬** 좌표다. 그래서 `dx`·`dy` 를 받아 새 쪽을 옮겨 놓고 견준다 — 발행이 쓰는 것과 같은
+/// 덧셈이라 부동소수도 비트까지 같은 값이 나온다. 이 인자가 없던 동안 두 좌표계를 그대로 비교해
+/// 모든 발행이 교체였다.
 fn frameEql(
     old_entries: []const chrome.ui.tree.RectEntry,
     old_actions: []const component.ids.Entry,
     new_entries: []const chrome.ui.tree.RectEntry,
     new_actions: []const component.ids.Entry,
+    dx: f32,
+    dy: f32,
 ) bool {
     if (old_entries.len != new_entries.len or old_actions.len != new_actions.len) return false;
     for (old_entries, new_entries) |old, new| {
         if (old.id != new.id) return false;
-        if (old.rect.x != new.rect.x or old.rect.y != new.rect.y) return false;
+        if (old.rect.x != new.rect.x + dx or old.rect.y != new.rect.y + dy) return false;
         if (old.rect.width != new.rect.width or old.rect.height != new.rect.height) return false;
     }
     for (old_actions, new_actions) |old, new| {

@@ -40800,11 +40800,35 @@ test "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 
     _ = file_tree_dock_ops.fileTreeDockPointer(session, .move, 10, row_y);
     try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, 10, row_y) != null);
 
+    // ⑵c **같은 tree 를 다시 발행해도 capture 는 산다.** 제품에서는 down 과 up 사이에 paint 가 끼고
+    //     그 paint 가 발행을 다시 낸다. 그 발행이 "교체"로 판정되면 mouse-up 이 intent 를 못 내
+    //     **좌클릭이 영영 안 열린다** — 호버·우클릭·키보드는 capture 를 안 쓰므로 멀쩡하고 좌클릭만
+    //     죽는다(2026-08-26 사용자 제보, 계측 실측: `entries 25->25 actions 23->23 rows 23->23
+    //     gen 2464->2464` 인데 `replaced=true`).
+    //
+    //     **위 ⑵·⑵b 가 이것을 못 잡았다** — 둘 다 down 과 up 을 연달아 부르고 그 사이에 발행이 없다.
+    //     빠져 있던 것은 판정이 아니라 **제품의 순서**였다.
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, row_y);
+    try std.testing.expect(session.file_tree_interaction.capture != null);
+    file_tree_dock_ops.publishFileTreeHitTree(session); // 내용이 같은 재발행 = 그 사이에 낀 paint
+    try std.testing.expect(session.file_tree_interaction.capture != null);
+    try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) != null);
+
     // ⑶ 누르고 있는 동안 tree 가 **실제로 바뀌면** capture 를 놓는다(늦은 up 이 새 행을 열지 않게).
+    //
+    //     **보이는 행 수 자체를 줄인다.** 예전에는 `pop()` 으로 마지막 행을 뗐는데, 40 행 중 뷰포트에
+    //     들어오는 것은 앞쪽 일부라 그 행은 **발행되는 tree 에 없다** — tree 가 안 바뀌니 capture 를 놓지
+    //     않는 것이 옳고, 이 판정은 그 시나리오를 만들지 못했다. 그런데도 초록이었던 이유는 `frameEql`
+    //     이 좌표계를 섞어 **모든** 발행을 교체로 판정했기 때문이다(2026-08-26 수정). 그 버그를 고치자
+    //     이 자리가 빨개져 가짜였음이 드러났다.
+    //
+    //     행 하나를 앞에서 빼는 것으로도 부족하다: node id 도 `model_index` 도 **창 기준**이라 창이
+    //     그대로면 셋 다 같은 값이 다시 나온다(`frameEql` 의 몫은 기하와 action 이지 어느 파일인가가
+    //     아니다). 창이 실제로 줄어드는 크기까지 내려야 발행이 달라진다.
     _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, row_y);
     try std.testing.expect(session.file_tree_interaction.capture != null);
     // 뗀 행의 경로도 우리 것이다 — `defer` 는 **남아 있는** 행만 훑으므로 여기서 놓아준다.
-    if (session.file_tree_rows.pop()) |removed| allocator.free(removed.file.path);
+    while (session.file_tree_rows.items.len > 3) allocator.free(session.file_tree_rows.pop().?.file.path);
     file_tree_dock_ops.publishFileTreeHitTree(session);
     try std.testing.expect(session.file_tree_interaction.capture == null);
     try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) == null);

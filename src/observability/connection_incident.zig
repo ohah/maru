@@ -888,6 +888,88 @@ pub fn encodeAggregate(value: IncidentAggregate) ValidationError![payload_size]u
     return result;
 }
 
+pub const DecodedRecord = union(enum) {
+    incident: ConnectionIncident,
+    aggregate: IncidentAggregate,
+};
+
+/// 봉투 하나를 무결성까지 확인하며 읽는다.
+///
+/// 쓰기만 있고 읽기가 없으면 artifact 는 진단이 아니라 잔해다. 2026-08-26 에 앱이 host 연결을 잃은
+/// 원인을 찾을 때 `.incident` 를 손으로 hexdump 해야 했는데, 그 해독은 스키마 표를 사람이 옮겨 적은
+/// 것이라 **틀려도 아무도 못 잡는다**. digest 와 typed 검증을 함께 통과한 레코드만 돌려주어 읽는 쪽이
+/// 손상된 바이트를 사실로 착각하지 않게 한다.
+pub fn decodeEnvelope(envelope: *const [envelope_size]u8) ValidationError!DecodedRecord {
+    if (!validEnvelope(envelope)) return error.InvalidIncident;
+    const payload = envelope[16..][0..payload_size];
+    return switch (envelope[2]) {
+        1 => .{ .incident = try decodeIncident(payload) },
+        2 => .{ .aggregate = try decodeAggregate(payload) },
+        else => error.InvalidIncident,
+    };
+}
+
+/// `encodeIncident` 의 정확한 역이다. 필드 순서가 하나라도 어긋나면 round-trip 테스트가 깨진다 —
+/// 그 대칭이 이 파일에 encode 와 decode 를 나란히 두는 이유다.
+pub fn decodeIncident(payload: *const [payload_size]u8) ValidationError!ConnectionIncident {
+    var cursor: usize = 0;
+    var value: ConnectionIncident = undefined;
+    value.version = readInt(u16, payload, &cursor);
+    value.record_kind = readInt(u8, payload, &cursor);
+    value.flags = readInt(u8, payload, &cursor);
+    value.incident_id = .{
+        .app_instance_nonce = readInt(u128, payload, &cursor),
+        .sequence = readInt(u64, payload, &cursor),
+    };
+    value.timestamp_ns = readInt(i128, payload, &cursor);
+    value.host_id = readInt(u128, payload, &cursor);
+    value.host_adapter_generation = readInt(u64, payload, &cursor);
+    value.connection_generation = readInt(u64, payload, &cursor);
+    value.wire_major = readInt(u16, payload, &cursor);
+    inline for (.{
+        &value.reason_raw,         &value.scope_raw,      &value.disposition_raw,
+        &value.source_site_raw,    &value.host_class_raw, &value.parser_phase_raw,
+        &value.outbound_phase_raw, &value.reserved0,
+    }) |field| field.* = readInt(u8, payload, &cursor);
+    value.last_success_request_id = readInt(u64, payload, &cursor);
+    inline for (.{
+        &value.pending_request_count, &value.pending_stream_count,
+        &value.pending_event_count,   &value.queue_item_count,
+    }) |field| field.* = readInt(u32, payload, &cursor);
+    inline for (.{
+        &value.queue_bytes,           &value.outbound_offset, &value.outbound_length,
+        &value.controller_generation, &value.upgrade_epoch,   &value.occurrence_count,
+    }) |field| field.* = readInt(u64, payload, &cursor);
+    value.first_timestamp_ns = readInt(i128, payload, &cursor);
+    value.last_timestamp_ns = readInt(i128, payload, &cursor);
+    @memcpy(&value.reserved_tail, payload[cursor..][0..value.reserved_tail.len]);
+    cursor += value.reserved_tail.len;
+    std.debug.assert(cursor == payload_size);
+    try validateIncident(value);
+    return value;
+}
+
+/// `encodeAggregate` 의 역이다. aggregate 의 유효성 규칙은 `encodeAggregate` 가 소유하므로,
+/// 규칙을 이 자리에 복제하지 않고 되읽은 값을 그 encode 에 다시 통과시켜 같은 축으로 판정한다.
+pub fn decodeAggregate(payload: *const [payload_size]u8) ValidationError!IncidentAggregate {
+    var cursor: usize = 0;
+    var value: IncidentAggregate = undefined;
+    value.version = readInt(u16, payload, &cursor);
+    inline for (.{
+        &value.kind,      &value.flags,           &value.reason_raw,
+        &value.scope_raw, &value.source_site_raw, &value.host_class_raw,
+    }) |field| field.* = readInt(u8, payload, &cursor);
+    value.count = readInt(u64, payload, &cursor);
+    value.detail_dropped_count = readInt(u64, payload, &cursor);
+    value.first_timestamp_ns = readInt(i128, payload, &cursor);
+    value.last_timestamp_ns = readInt(i128, payload, &cursor);
+    @memcpy(&value.reserved, payload[cursor..][0..value.reserved.len]);
+    cursor += value.reserved.len;
+    std.debug.assert(cursor == payload_size);
+    _ = try encodeAggregate(value);
+    return value;
+}
+
 fn aggregateFromIncident(incident: ConnectionIncident, other: bool, detail_dropped: bool) IncidentAggregate {
     return .{
         .flags = (if (other) @as(u8, 1) else 0) | (if (detail_dropped) @as(u8, 2) else 0),
@@ -1713,4 +1795,40 @@ test "CR0b writer는 stale receipt replay가 최신 inflight를 소비하지 못
     try std.testing.expectError(error.InvalidAuthority, service.completeWriterHandoff(7, 9, stale, .persisted));
     try std.testing.expectEqual(inflight_before, service.writer_inflight_slots);
     try std.testing.expectEqual(current.receipt.record_generation, service.writer_inflight_generations[current.receipt.slot_index]);
+}
+
+test "CR0b core decode는 encode의 정확한 역이고 손상된 봉투를 거부한다" {
+    const original = fixture();
+
+    // payload round-trip. 필드 순서가 하나라도 어긋나면 여기서 깨진다.
+    const payload = try encodeIncident(original);
+    try std.testing.expectEqualDeep(original, try decodeIncident(&payload));
+
+    // 봉투 round-trip. ring이 실제로 기록하는 바이트를 그대로 되읽는다.
+    var ring: EmergencyRing = .{};
+    const published = try ring.publish(original);
+    const envelope = ring.record(published.detail_slot.?).?;
+    switch (try decodeEnvelope(envelope)) {
+        .incident => |value| try std.testing.expectEqualDeep(original, value),
+        .aggregate => return error.TestUnexpectedResult,
+    }
+    const aggregate_envelope = ring.record(incident_slot_count + @as(usize, published.aggregate_slot)).?;
+    switch (try decodeEnvelope(aggregate_envelope)) {
+        .aggregate => |value| {
+            try std.testing.expectEqual(@as(u64, 1), value.count);
+            try std.testing.expectEqual(original.reason_raw, value.reason_raw);
+        },
+        .incident => return error.TestUnexpectedResult,
+    }
+
+    // 무결성. payload 한 비트만 뒤집어도 digest가 어긋나 거부해야 한다 — 손상된 진단을 사실로 읽는 것은
+    // 진단이 아예 없는 것보다 나쁘다.
+    var tampered = envelope.*;
+    tampered[16] ^= 0x01;
+    try std.testing.expectError(error.InvalidIncident, decodeEnvelope(&tampered));
+
+    // record_kind가 닫힌 집합(1·2) 밖이면 거부한다.
+    var unknown_kind = envelope.*;
+    unknown_kind[2] = 3;
+    try std.testing.expectError(error.InvalidIncident, decodeEnvelope(&unknown_kind));
 }

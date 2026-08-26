@@ -3446,6 +3446,21 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_session_host_cr6e_soak_validator_tests.step);
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
+
+    // **판정 스캐폴딩이 제품 경로에서 돌지 않는가.** 합성 앱 루프를 제품과 스모크가 같이 쓰는데,
+    // 단계들이 스핀 번호로만 갈려 있어 제품 실행이 판정 각본을 그대로 따라 했다(캡처에 `MARK-ONE`
+    // 이 찍혀 드러났다). 소스를 그대로 읽어 관용구를 고정한다 — 타입으로는 안 보이는 규율이다.
+    const smoke_steps_gated_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/smoke_steps_gated.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "main_source", .module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }) }},
+        }),
+    });
+    const run_smoke_steps_gated_tests = b.addRunArtifact(smoke_steps_gated_tests);
+    run_smoke_steps_gated_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_smoke_steps_gated_tests.step);
     boundary_step.dependOn(&run_i18n_pinned_language_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
     boundary_step.dependOn(&run_icon_literal_boundary_tests.step);

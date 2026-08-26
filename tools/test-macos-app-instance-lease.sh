@@ -32,7 +32,7 @@ workspace_dir="$test_home/Library/Application Support/maru"
 mkdir -p "$workspace_dir" "$run_dir" "$test_root/config" "$test_root/cache"
 lock_path="$test_home/Library/Application Support/maru/workspace.v1.lock"
 printf 'maru.workspace.v1\nsentinel=true\n' >"$workspace_dir/workspace.v1"
-printf 'sentinel-config\n' >"$test_root/config/config.toml"
+printf '# sentinel-config\nsession.keep-alive-after-quit = false\n' >"$test_root/config/config.toml"
 printf 'sentinel-cache\n' >"$test_root/cache/sentinel"
 
 launch() {
@@ -45,6 +45,8 @@ launch() {
         CFFIXED_USER_HOME="$test_home" \
         XDG_CONFIG_HOME="$test_root/config" \
         XDG_CACHE_HOME="$test_root/cache" \
+        MARU_CONFIG="$test_root/config/config.toml" \
+        MARU_SESSION_CONFIG_BOOTSTRAP_DUPLICATE_SMOKE=1 \
         MARU_APP_INSTANCE_LEASE_SMOKE_READY=1 \
         MARU_MACOS_APP_SMOKE_MS="$duration_ms" \
         "$app_executable"
@@ -61,6 +63,8 @@ launch() {
         CFFIXED_USER_HOME="$test_home" \
         XDG_CONFIG_HOME="$test_root/config" \
         XDG_CACHE_HOME="$test_root/cache" \
+        MARU_CONFIG="$test_root/config/config.toml" \
+        MARU_SESSION_CONFIG_BOOTSTRAP_DUPLICATE_SMOKE=1 \
         MARU_APP_INSTANCE_LEASE_SMOKE_READY=1 \
         MARU_APP_INSTANCE_LEASE_SMOKE_HOLD=1 \
         MARU_MACOS_APP_SMOKE_MS=60000 \
@@ -83,6 +87,8 @@ while ! grep -Fq "maru: app instance writer lease acquired" "$test_root/winner.s
     fi
     sleep 0.05
 done
+grep -Fq "maru: session config bootstrap ready" "$test_root/winner.stderr"
+grep -Fq "maru: duplicate session config bootstrap rejected" "$test_root/winner.stderr"
 test -f "$lock_path"
 test "$(stat -f '%Lp' "$lock_path")" = "600"
 
@@ -113,6 +119,14 @@ if [ "$loser_status" -ne 2 ]; then
     exit 1
 fi
 grep -Fq "second instance unsupported: workspace writer lease held" "$test_root/loser.stderr"
+if grep -Fq "session config bootstrap ready" "$test_root/loser.stderr"; then
+    echo "second instance reached session config bootstrap" >&2
+    exit 1
+fi
+if grep -Fq "duplicate session config bootstrap" "$test_root/loser.stderr"; then
+    echo "second instance reached duplicate session config bootstrap probe" >&2
+    exit 1
+fi
 kill -0 "$winner_pid"
 snapshot_tree "$test_root/after-loser.snapshot"
 cmp "$test_root/before-loser.snapshot" "$test_root/after-loser.snapshot"
@@ -122,6 +136,8 @@ wait "$winner_pid" 2>/dev/null || true
 winner_pid=
 
 launch 500 "$test_root/successor.stdout" "$test_root/successor.stderr"
+grep -Fq "maru: session config bootstrap ready" "$test_root/successor.stderr"
+grep -Fq "maru: duplicate session config bootstrap rejected" "$test_root/successor.stderr"
 summary="$run_dir/zig-out/maru-macos-app/app.summary.txt"
 test -f "$summary"
 grep -Eq '^app_instance_lease_status=0$' "$summary"

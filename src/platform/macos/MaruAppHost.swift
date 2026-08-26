@@ -4301,11 +4301,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             fputs("maru: \(failure.reason)\n", stderr)
             Darwin.exit(failure.code)
         }
+        let configBootstrapStatus = maru_macos_session_config_bootstrap()
+        guard configBootstrapStatus == UInt32(MARU_SESSION_CONFIG_BOOTSTRAP_READY) else {
+            fputs("maru: session config bootstrap failed (status=\(configBootstrapStatus))\n", stderr)
+            Darwin.exit(1)
+        }
+        if ProcessInfo.processInfo.environment["MARU_SESSION_CONFIG_BOOTSTRAP_DUPLICATE_SMOKE"] == "1" {
+            let duplicateStatus = maru_macos_session_config_bootstrap()
+            guard duplicateStatus == UInt32(MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED) else {
+                fputs("maru: duplicate session config bootstrap was not rejected (status=\(duplicateStatus))\n", stderr)
+                Darwin.exit(1)
+            }
+            fputs("maru: duplicate session config bootstrap rejected\n", stderr)
+        }
         if ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_READY"] == "1" {
+            fputs("maru: session config bootstrap ready\n", stderr)
             fputs("maru: app instance writer lease acquired\n", stderr)
         }
-        // 제품 스모크가 AppKit/Window/AppSession/config/restore/runtime을 하나도 시작하지 않은 exact
-        // post-acquire 지점에서 winner를 붙잡는다. SIGKILL만 이 process-lifetime lease를 끝낸다.
+        // 제품 스모크가 config scalar bootstrap까지 끝냈지만 AppKit/Window/AppSession/restore/runtime은 아직
+        // 시작하지 않은 exact post-bootstrap 지점에서 winner를 붙잡는다. SIGKILL만 lease를 끝낸다.
         if ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] == "1" {
             while true { _ = Darwin.sleep(60) }
         }

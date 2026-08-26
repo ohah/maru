@@ -460,7 +460,7 @@ pub fn createTerm(
         .default_cursor_shape = settings_ops.configCursorShape(self),
     };
     const surface = surface: {
-        if (is_macos and (app_session_mod.app_keep_alive_after_quit or force_reconnect) and reconnect_id.len > 0) {
+        if (is_macos and (app_session_mod.appKeepAlivePolicyValue() or force_reconnect) and reconnect_id.len > 0) {
             if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
             var reconnect_host: u128 = 0;
             if (reconnect_host_id.len > 0) {

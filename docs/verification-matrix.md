@@ -2285,3 +2285,19 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   검증한다. G1은 기존 `default=false`와 forgiving load 동작을 유지하며 파일 write·notice·bootstrap을 실행하지 않는다.
 - **다음 gate:** G2만 이 관측을 app-instance lease 아래 소비해 explicit override materialization과 Reset retention을
   구현한다. G1의 parser/file fixture를 G2의 실제 migration 성공·실패·경합 증거로 대체해 해석하지 않는다.
+
+### Session default G2 explicit override retention
+
+- **상태: 구현, focused/product gate green.** L0 lease 뒤 AppKit/첫 AppSession 전 app-global owner가 G1의 resolved bool과 두
+  provenance를 exact once scalar snapshot으로 만들고 모든 Window가 공유한다. release A default `false`와 absent profile은
+  그대로이며 G2 bootstrap은 파일 write/notice 0이다.
+- **Reset gate:** whole Reset은 `absent`에는 keep-alive 줄을 만들지 않고 `explicit_valid`/`explicit_invalid`에는 Reset 전
+  live bool을 기본값과 같아도 canonical explicit override로 atomic replace한다. row Reset/Backspace는 값·snapshot·dirty/remove
+  queue·파일 mutation 0이고 전용 수동 변경 notice만 낸다. write 실패는 부분 파일 0이다.
+- **자동 검증:** `zig build test-session-host-config-override-retention`이 Debug·ReleaseFast에서 absent/valid/invalid,
+  exact-one/duplicate owner, multi-Window snapshot, toggle/reload 교체, row no-op, 실제 atomic replace 실패와 source boundary를
+  검증한다. `mise run macos-app-instance-lease-smoke`는 실제 fresh 앱 process에서
+  `lease → G2 bootstrap → duplicate reject → AppKit/AppSession`과 loser의 bootstrap 전 exit/config·workspace·cache mutation 0,
+  `SIGKILL` 뒤 successor 재획득/bootstrap을 검증한다. G1 parser fixture나 in-process owner 단위만으로 제품 순서를 완료
+  처리하지 않는다.
+- **범위 밖:** absent explicit `true` materialization, persistent retry notice, default `true` 전환과 frozen A rollback은 G3다.

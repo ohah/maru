@@ -1366,6 +1366,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    OS-suffix matrix와 실제 file의 missing/readable/unreadable/1 MiB exact/cap+1을 Debug·ReleaseFast에서 검증한다.
    G2만 이 provenance를 소비해 explicit override materialization·Reset retention을 소유한다.
 
+   **G2 explicit override materialization·retention:** L0 lease 직후 AppKit/첫 AppSession 전에 app-global owner가 G1의
+   resolved bool·keep-alive provenance·file provenance를 scalar snapshot으로 exact once seal한다. release A default는
+   `false`로 유지하고 bootstrap 자체는 파일/notice를 만들지 않는다. 모든 Window는 이 snapshot을 빌리며 Workspace
+   토글·외부 reload만 새 snapshot을 게시한다. whole Reset은 `absent`면 줄을 만들지 않고 explicit valid/invalid면 Reset
+   직전 live bool을 기본값과 같아도 canonical explicit override로 같은 atomic replace에 보존한다. row Reset/Backspace는
+   값·snapshot·write-back queue mutation 0 + 수동 Workspace 토글 notice다. lease 없는/중복 bootstrap, 실제 atomic replace
+   실패, multi-Window, source-order와 fresh-process loser I/O 0을 Debug·ReleaseFast/product gate로 고정한다. G2는
+   absent→true materialization과 default flip을 하지 않으며 그것은 frozen release A artifact를 쓰는 G3만 소유한다.
+
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라

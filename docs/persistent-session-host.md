@@ -7357,6 +7357,30 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 `missing | readable | unreadable | oversize`를 닫힌 상태로 반환한다. G1은 파일을 쓰거나 notice를 만들거나 default를
 바꾸지 않는다. G2가 이 관측을 app-instance lease 아래에서 소비하기 전에는 어떤 migration도 실행하지 않는다.
 
+**G2 explicit override materialization·retention 계약.** release A의 기본값은 계속 `false`이며 G2는
+`absent` profile을 opt-out으로 바꾸거나 G3의 explicit `true` migration을 미리 실행하지 않는다. Swift entry가 L0
+app-instance lease를 얻은 직후, AppKit·첫 Window·첫 `AppSession`보다 먼저 app-global bootstrap ABI를 정확히 한 번
+호출한다. bootstrap owner는 G1 loader 결과에서 resolved bool, keep-alive provenance, file provenance를 owned scalar
+snapshot으로 seal한다. 같은 process의 모든 `AppSession`은 각자 다시 읽은 session bool/provenance가 아니라 이 snapshot을
+빌려 새 runtime backend와 app-wide Quit 정책을 결정한다. lease가 없거나 두 번째 초기화를 시도하면 config read/write와
+snapshot mutation 0으로 typed reject한다. G2 bootstrap은 어떤 provenance에서도 파일을 쓰거나 notice를 만들지 않는다.
+
+Reset은 이 snapshot의 explicit intent를 다음 닫힌 표로 보존한다. whole Reset은 다른 설정을 지운 body와 keep-alive
+override를 하나의 atomic replace에 넣으며 write가 실패하면 파일을 부분 게시하지 않는다. row Reset/Backspace는 이 키에서
+값·snapshot·dirty/remove queue·파일을 모두 바꾸지 않고 Workspace 토글을 직접 쓰라는 typed notice만 남긴다.
+
+| G2 Reset 전 snapshot | whole Reset 뒤 live/snapshot | 파일 |
+| --- | --- | --- |
+| `absent` | 현재 resolved `false`, `absent` 유지 | keep-alive 줄 없음 |
+| `explicit_valid(value)` | 같은 `value`, `explicit_valid(value)` | 기본값과 같아도 canonical explicit bool 한 줄 |
+| `explicit_invalid` | Reset 직전 fail-safe resolved bool, `explicit_valid(resolved)` | 같은 bool의 canonical explicit 한 줄 |
+| file `unreadable`/`oversize`이며 explicit intent 없음 | 현재 fail-safe `false`, `absent` | Reset이 성공하면 keep-alive 줄 없음 |
+
+Workspace 토글과 외부 config reload만 app-global snapshot을 새 `explicit_valid(value)` 또는 새 G1 loader 결과로 교체한다.
+창 생성이나 row/global Reset이 snapshot owner를 다시 초기화하지 않는다. Debug·ReleaseFast pure owner/file fixture는
+absent/valid/invalid, exact-one/duplicate init, 실제 atomic replace 실패와 dirty/remove queue 0을 검증하고, AppHost source-order
+fixture와 실제 fresh process는 `lease → G2 bootstrap → AppKit/AppSession` 순서 및 두 번째 instance의 config I/O 0을 검증한다.
+
 ### P5 — 개별 runtime CLI attach
 
 - **T0a — `ConnectionSlot` reactor core:** P5a1 제품 fd 배선 전에 OS 중립 slot/queue/turn/drain state machine을

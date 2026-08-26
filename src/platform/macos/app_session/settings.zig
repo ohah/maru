@@ -72,6 +72,10 @@ const scm_dock_ops = @import("scm_dock.zig"); // 도크 `∨` 메뉴 선택 적�
 const fontDirectInputLabel = AppSession.fontDirectInputLabel;
 const font_size_min = app_session_mod.font_size_min;
 const setAppKeepAlivePolicy = app_session_mod.setAppKeepAlivePolicy;
+const replaceAppKeepAlivePolicyFromReload = app_session_mod.replaceAppKeepAlivePolicyFromReload;
+const appKeepAliveResetPlan = app_session_mod.appKeepAliveResetPlan;
+const commitAppKeepAliveReset = app_session_mod.commitAppKeepAliveReset;
+const appKeepAliveSnapshot = app_session_mod.appKeepAliveSnapshot;
 const sidebar_ops = @import("sidebar.zig");
 const tab_bg_labels = app_session_mod.tab_bg_labels;
 const FileMenuAction = AppSession.FileMenuAction;
@@ -638,7 +642,12 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
             // `loaded_config.config` 는 창마다의 미러다. 재적용 경로가 그 미러를 전역에서 되동기화하므로
             // (`currentSectionFields` 의 첫 문장), 전역을 나중에 세우면 **방금 쓴 새 값이 옛 전역으로
             // 되돌려진다** — 껐는데 켜진 채로 남고 그 값이 파일로 간다. 순서 하나가 그 창을 닫는다.
-            if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) setAppKeepAlivePolicy(new_value);
+            if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) {
+                setAppKeepAlivePolicy(new_value);
+                const snapshot = appKeepAliveSnapshot();
+                self.loaded_config.session_keep_alive_provenance = snapshot.provenance;
+                self.loaded_config.file_provenance = snapshot.file_provenance;
+            }
             // theme.follow-system은 단순 재resolve로 부족하다 — 켜면 현재 시스템 외관 프리셋을 즉시 덮고(reapply만
             // 하면 system_is_dark가 안 반영돼 토글이 무효처럼 보임), 끄면 덮기 전 사용자 테마로 복귀해야 한다(F2-9).
             if (std.mem.eql(u8, f.key, "theme.follow-system")) {
@@ -803,6 +812,12 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
     // bool 행 → 기본값으로 flip(theme.follow-system은 toggle과 같은 특수 재적용).
     if (sel < cf.bools.len) {
         const key = cf.bools[sel].key;
+        if (std.mem.eql(u8, key, "session.keep-alive-after-quit")) {
+            // 이 값의 기본값 복귀는 다음 Quit의 runtime 소유권을 바꾸는 파괴적 우회다. G2는 row ↺와
+            // Backspace 모두 exact no-op으로 막고 사용자가 Workspace 토글에서 명시적으로 결정하게 한다.
+            self.showNoticeKey(.set_keepalive_reset_preserved);
+            return;
+        }
         const dv = defaults.boolFor(key) orelse return;
         if (config_mod.schema.setBool(&self.loaded_config.config, key, dv)) {
             if (std.mem.eql(u8, key, "theme.follow-system")) {
@@ -1827,7 +1842,7 @@ pub fn reloadConfig(self: *AppSession) void {
     self.loaded_config = new_parsed;
     applyAppearancePreservingZoom(self, new_appearance);
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
-    setAppKeepAlivePolicy(self.loaded_config.config.session.keep_alive_after_quit);
+    replaceAppKeepAlivePolicyFromReload(self.loaded_config);
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
     self.theme_pre_follow = null;
@@ -1927,15 +1942,18 @@ pub fn resetAllSettings(self: *AppSession) void {
     // 파괴는 명시적이어야 한다며 `Quit and End All Sessions`를 전용 경로로 따로 둔 같은 문서의 원칙과 정면으로
     // 어긋난다(실제 사고: 리셋 뒤 평범한 Quit으로 host-backed runtime 12개가 소멸). 따라서 리셋은 이 키만
     // 보존하고, 끄는 결정은 사용자가 세팅 workspace 섹션 토글로 직접 하도록 아래 notice로 안내한다.
-    const keep_alive = self.loaded_config.config.session.keep_alive_after_quit;
+    // 다른 Window가 토글/reload한 뒤 이 Window의 parsed mirror가 아직 낡았을 수 있다. Reset은 process-global
+    // owner의 최신 값을 보존해야 하며, 창 로컬 값을 정본으로 승격하면 stale Window가 새 정책을 되돌린다.
+    const keep_alive = appKeepAliveSnapshot().value;
     self.loaded_config.config = config_mod.Config{}; // 내장 기본값(정적 — 옛 arena 문자열은 미참조로 남았다 다음 reload/deinit에 해제)
     self.loaded_config.config.session.keep_alive_after_quit = keep_alive; // 보존 — 아래 파일 write도 같은 값을 남긴다
     // 리터럴 false가 아니라 `Config{}` 기본값을 기준으로 "보존이 실제 override인지" 판정한다. 문서가 기능 완성
     // 뒤 기본값을 true로 전환한다고 예고했으므로(persistent-session-host.md), 그때 리터럴 비교로 두면 사용자가
     // 명시적으로 끈 false를 리셋이 도로 켜 버려 같은 사고가 반대 방향으로 난다.
-    const default_keep_alive = (config_mod.Config{}).session.keep_alive_after_quit;
-    const keep_alive_preserved = keep_alive != default_keep_alive;
-    setAppKeepAlivePolicy(keep_alive); // 보존값 그대로 — 리셋이 live 소유권 정책을 뒤집지 않는다.
+    const keep_alive_reset_plan = appKeepAliveResetPlan();
+    const keep_alive_preserved = std.meta.activeTag(keep_alive_reset_plan) == .preserve;
+    // live/app-global snapshot은 이미 `keep_alive`를 소유한다. 여기서 일반 토글 setter를 부르면 absent도
+    // explicit intent로 바뀌고, write 실패 전 invalid provenance도 성급히 canonicalize되므로 mutation 0으로 둔다.
     // keybind도 config다 — "모든 설정 초기화"는 인앱/파일 keybind 바인딩(keybindings·unbinds·terminal_bindings·
     // global_bindings)도 즉시 기본값(빈 슬라이스=빌트인만)으로 되돌린다. 옛 슬라이스는 arena 소유라 미참조로 남았다
     // 다음 reload/deinit에 해제(config.* 정적 교체와 같은 수명 규칙 — 여기서 free 금지). 이렇게 비워야 keyBindingResolver
@@ -1980,6 +1998,12 @@ pub fn resetAllSettings(self: *AppSession) void {
             af.replace(self.io) catch break :write_blk;
             wrote = true;
         }
+    }
+    if (wrote) {
+        commitAppKeepAliveReset();
+        const snapshot = appKeepAliveSnapshot();
+        self.loaded_config.session_keep_alive_provenance = snapshot.provenance;
+        self.loaded_config.file_provenance = snapshot.file_provenance;
     }
     // 모든 dirty 컬렉션을 비워 Swift 부분 write-back을 막는다(리뷰 #844-followup) — config_dirty_keys 하나만 비우면
     // 리셋 직전 예약된 keybind rebind/unbind·env 삭제가 살아남아, 다음 tick serializeConfig가 takeConfigDirty()=true로
@@ -2641,7 +2665,7 @@ fn sectionIndexOfSettingsKey(self: *AppSession, key: []const u8) ?usize {
 pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !SettingsSectionFields {
     // 다른 Window에서 바꾼 앱 전역 policy를 이 창의 설정 스냅샷에도 반영한다. 이 동기화 뒤 field 생성과
     // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
-    self.loaded_config.config.session.keep_alive_after_quit = app_session_mod.app_keep_alive_after_quit;
+    self.loaded_config.config.session.keep_alive_after_quit = app_session_mod.appKeepAlivePolicyValue();
     const sections = try buildSectionList(self, arena);
     const sel_sec: ?config_mod.Section = if (sections.len > 0)
         sections[@min(self.chrome_host.settings.section, sections.len - 1)].section

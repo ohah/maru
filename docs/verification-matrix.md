@@ -2307,7 +2307,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   release A manifest가 모두 준비된 뒤에만 시작한다. `build.zig.zon` version SSOT는 generated macOS plist와 tag gate까지
   연결됐지만 manifest가 아직 없으므로 manifest 일치 검증은 release workflow 슬라이스가 추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte
-  equality는 연결됐지만 session-host manifest/evidence attestation과 post-publish release attestation은 아직 없다.
+  equality는 연결됐고 release workflow의 third-party Action은 exact SHA로 고정했으며 임의 ref를 고를 수 있는 수동 실행은
+  제거했다. session-host manifest/evidence attestation과 post-publish release attestation은 아직 없다. 2026-08-27 GitHub
+  API 감사에서 repository self-hosted runner, Actions Secret, deployment environment, tag ruleset은 각각 0개였으므로
+  Developer ID 출하와 전용 Aqua 제품 gate는 `not_provisioned`다. repository-level release immutability는 공개 REST 응답으로
+  판정하지 못했으며 manifest validator 배포 뒤 Settings에서 켜고 이후 release에만 적용된다는 사실을 별도 확인해야 한다.
 - **release gate:** B manifest가 exact predecessor release A의 immutable release ID·tag·commit과 DMG/내부 제품 executable
   SHA-256을 지목하고, release attestation·artifact attestation·Developer ID identity를 validator가 교차검증한다. SemVer 숫자의
   산술 인접성이나 `latest` 조회로 A를 추측하지 않는다. manifest가 지목하지 않은 downgrade는 지원하지 않는다.

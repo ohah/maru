@@ -27,6 +27,31 @@ test "$download_line" -lt "$publish_line"
 test "$(grep -c 'sh tools/publish-github-release.sh "$RELEASE_TAG"' .github/workflows/release.yml)" = 1
 ! grep -q -- '--clobber' .github/workflows/release.yml
 
+# Signing credentials are tag-only. A manual dispatcher can select an arbitrary
+# ref, so merely skipping the final upload would still expose Apple credentials
+# to unreviewed workflow content.
+trigger_block=$(sed -n '/^on:$/,/^permissions:$/p' .github/workflows/release.yml | sed '$d')
+expected_trigger_block='on:
+  push:
+    tags: ["v*"]'
+if test "$trigger_block" != "$expected_trigger_block"; then
+    echo 'error: release signing workflow must be triggered only by canonical tags' >&2
+    exit 1
+fi
+
+# Release credentials execute third-party code, so mutable action tags are not
+# an acceptable trust root. Keep the human-readable major only as a comment.
+action_uses=$(sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*uses:[[:space:]]*\([^#[:space:]]*\).*/\1/p' .github/workflows/release.yml)
+test "$(printf '%s\n' "$action_uses" | sed '/^$/d' | wc -l | tr -d ' ')" = 3
+if printf '%s\n' "$action_uses" | grep -Ev '^[^@[:space:]]+@[0-9a-f]{40}$' >/dev/null; then
+    echo 'error: release workflow contains an unpinned third-party Action' >&2
+    exit 1
+fi
+test "$(printf '%s\n' "$action_uses" | grep -Fxc 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5')" = 1
+test "$(printf '%s\n' "$action_uses" | grep -Fxc 'jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac')" = 1
+test "$(printf '%s\n' "$action_uses" | grep -Fxc 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02')" = 1
+test "$(grep -c 'persist-credentials: false' .github/workflows/release.yml)" = 1
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"

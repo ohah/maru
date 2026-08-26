@@ -142,7 +142,8 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 단계다. 근거와 대가는 `.github/workflows/ci.yml`의 그 job 주석과
 [필수 CI 체크](performance-budget.md#필수-ci-체크)가 소유한다.
 
-`.github/workflows/release.yml`로 구현돼 있다. 태그 푸시(`v*`) 또는 수동 실행(workflow_dispatch) 시:
+`.github/workflows/release.yml`로 구현돼 있다. 서명 Secret을 caller가 고른 임의 ref에 노출하지 않도록 수동 실행은
+제공하지 않으며, canonical 태그 푸시(`v*`)에서만 다음 순서를 실행한다.
 
 1. macOS 러너(Apple Silicon)에서 mise로 zig 0.16 준비
 2. `.p12` Secret을 임시 키체인에 import

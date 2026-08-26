@@ -1269,6 +1269,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                // poison 이 어느 불변식에서 났는지 남기는 축(=진단). 판정은 안 바꾸고 사유만 적는다.
+                .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "ScopeInvalidAxis" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "logCanonicalScopeInvalid" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "notification_delivery_v1" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "catchup_barrier_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "BufferedCatchupBarrier" },

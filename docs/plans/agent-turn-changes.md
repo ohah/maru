@@ -260,10 +260,21 @@ maru 세트에 `PostToolUse` 가 없어 Post 데이터가 한 건도 없었고, 
 붙는다. 회전이 그만큼 잦아지고, 그러면 **회전본 드레인 경로가 훨씬 자주 밟힌다** — AT4 의 결함 ⑺ 가
 바로 거기서 나왔다(회전본이 살아 있는 사본을 봉인했다). 그 경로의 게이트를 다시 확인하고 가야 한다.
 
-**⑹ 설치 코드가 방금 넣은 것을 도로 지울 수 있다.** 지금 `agent_hook_install.zig` 는 **세트에 없는
-이벤트에 붙은 우리 항목을 제거**한다(`PostToolUse` 를 뺀 적이 있어서 그 경로가 있고 테스트도 있다).
-matcher 를 좁혀 다시 넣으면 그 제거 규칙과 **정면으로 만난다** — 세트 비교가 이름만 보는지 matcher 까지
-보는지에 따라 「넣고 지우기」를 반복할 수 있다. 되돌리기 전에 그 판정부터 읽는다.
+**⑹ 설치 코드와의 충돌 — 코드를 읽고 나니 걱정보다 작다.** 「세트 비교가 이름만 보면 넣고 지우기를
+반복한다」고 적었는데, `entryIsCurrent` 가 **matcher 를 비교한다**(명령 바이트·timeout 도 함께).
+그래서 `PostToolUse` 를 `matcher = "Bash"` 로 세트에 넣으면, 예전 `matcher = "*"` 항목은
+`ours_current` 에 안 잡혀 `.refresh` 로 떨어지고 **올바른 matcher 로 다시 쓰인다.** 반복은 없다.
+
+**실제로 해야 할 일은 다른 것이다 — 테스트가 검증하던 규칙이 사라진다.**
+`agent_hook_install.zig` 의 「세트 밖 항목을 걷어낸다」 테스트는 **`PostToolUse` 를 소재로** 쓴다
+(`expect(indexOf(after_text, "PostToolUse") == null)`). 세트에 넣는 순간 그 단언이 뒤집히는데,
+**고쳐야 할 것은 단언이 아니라 소재**다 — 그대로 지우면 「세트 밖 항목을 걷어낸다」는 규칙 자체가
+**테스트 밖으로 나간다.** claude 세트는 9개(`SessionStart`·`UserPromptSubmit`·`Stop`·`StopFailure`·
+`Notification`·`PermissionRequest`·`PreToolUse`·`SubagentStart`·`SubagentStop`)이므로
+`PreCompact`·`SessionEnd` 같은 **여전히 세트 밖인 이벤트로 소재를 옮긴다.**
+
+그리고 **새 테스트가 하나 필요하다**: `PostToolUse` 가 **잘못된 matcher(`*`)로 설치돼 있으면
+`Bash` 로 고쳐 쓰는가**. 이것이 없으면 matcher 를 안 보는 구현이 통과한다.
 
 **⑷ 명령 단위 귀속은 아무도 안 물었다.** 겹친 구간에서 어느 명령의 소행인지는 FSEvents 로 못 가린다.
 그런데 화면에 있는 것은 `✎`/`·` 뿐이고 그것은 **「이 턴의 에이전트 소행인가」**만 묻는다. tree 제거 뒤에도

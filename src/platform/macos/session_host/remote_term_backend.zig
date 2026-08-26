@@ -22,6 +22,7 @@ const client_mod = @import("client.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const remote_runtime = @import("remote_runtime.zig");
+const notification_delivery = @import("notification_delivery.zig");
 const close_authority = @import("remote_close_authority.zig");
 const close_contract = @import("remote_close_contract.zig");
 const event_pump_contract = @import("remote_event_pump_contract.zig");
@@ -70,6 +71,14 @@ const RemoteRuntime = remote_runtime.RemoteRuntime;
 const HostAdapter = host_adapter_mod.HostAdapter;
 const AdapterPool = host_pool_mod.HostPool(HostAdapter);
 pub const max_remote_backend_runtimes: usize = protocol.max_inventory_runtimes;
+
+fn boundedNotificationLabel(label: []const u8) []const u8 {
+    if (!std.unicode.utf8ValidateSlice(label)) return "";
+    if (label.len <= notification_delivery.max_display_label_bytes) return label;
+    var end = notification_delivery.max_display_label_bytes;
+    while (end > 0 and (label[end] & 0xc0) == 0x80) end -= 1;
+    return label[0..end];
+}
 
 pub const ReconnectDrainResult = enum { idle, started, retry_later, discarded_stale };
 
@@ -1219,6 +1228,14 @@ pub const RemoteTermBackend = struct {
         host_id: u128,
         host_adapter_generation: u64 = 0,
         runtime_generation: u64,
+        notification_config_applied_generation: u64 = 0,
+        notification_display_label: [notification_delivery.max_display_label_bytes]u8 =
+            [_]u8{0} ** notification_delivery.max_display_label_bytes,
+        notification_display_label_len: u16 = 0,
+
+        fn notificationDisplayLabel(self: *const RuntimeEntry) []const u8 {
+            return self.notification_display_label[0..self.notification_display_label_len];
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -1255,6 +1272,8 @@ pub const RemoteTermBackend = struct {
     app_quit_first_ticket: u64 = 0,
     app_quit_target_count: u32 = 0,
     next_shutdown_connection_identity: u64 = 0,
+    notification_config_generation: u64 = 1,
+    notifications_osc: bool = false,
 
     const vtable = term_backend.VTable{
         .input_owner = &input_vtable,
@@ -1307,6 +1326,59 @@ pub const RemoteTermBackend = struct {
             .mode = .attach_only,
             .surface_runtime = surface_runtime,
         };
+    }
+
+    pub fn configureNotifications(self: *RemoteTermBackend, enabled: bool) client_mod.ClientError!void {
+        if (self.notifications_osc != enabled) {
+            const next_generation = std.math.add(u64, self.notification_config_generation, 1) catch
+                return error.ProtocolError;
+            self.notifications_osc = enabled;
+            self.notification_config_generation = next_generation;
+        }
+        var values = self.runtimes.valueIterator();
+        while (values.next()) |entry| {
+            if (entry.notification_config_applied_generation == self.notification_config_generation) continue;
+            entry.runtime.updateNotificationConfig(
+                self.notification_config_generation,
+                self.notifications_osc,
+                entry.notificationDisplayLabel(),
+            ) catch |err| {
+                // Multi-runtime RPC는 분산 원자 commit이 아니다. 이미 적용된 entry는 완전본이고 그대로 두되,
+                // 아직 target generation에 도달하지 못한 entry를 retryable 0으로 표시한다. AppSession의 매-frame
+                // binding sync가 같은 label까지 포함한 완전본을 개별 재전송하므로 보상 RPC 자체가 실패해도
+                // daemon 정책이 영구히 갈라지지 않는다.
+                var retry_values = self.runtimes.valueIterator();
+                while (retry_values.next()) |retry_entry| {
+                    if (retry_entry.notification_config_applied_generation != self.notification_config_generation)
+                        retry_entry.notification_config_applied_generation = 0;
+                }
+                return err;
+            };
+            entry.notification_config_applied_generation = self.notification_config_generation;
+        }
+    }
+
+    /// GUI의 현재 binding 표시 라벨을 daemon runtime metadata에 반영한다. 빈 라벨은 host의 runtime-ID fallback을
+    /// 요청한다. 라벨은 UTF-8 codepoint를 자르지 않는 256-byte 상한으로 정규화하며, 같은 값은 RPC/generation을
+    /// 만들지 않는다. generation은 runtime metadata별 축이므로 이 runtime만 전진해도 다른 runtime snapshot과 충돌하지
+    /// 않는다. 이후 전역 notifications 토글은 각 entry가 보존한 라벨을 포함한 완전본을 다시 보낸다.
+    pub fn configureNotificationBinding(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        display_label: []const u8,
+    ) client_mod.ClientError!void {
+        const entry = self.runtimes.getPtr(handle) orelse return error.ProtocolError;
+        const bounded = boundedNotificationLabel(display_label);
+        if (std.mem.eql(u8, entry.notificationDisplayLabel(), bounded) and
+            entry.notification_config_applied_generation != 0) return;
+        const next_generation = std.math.add(u64, self.notification_config_generation, 1) catch
+            return error.ProtocolError;
+        try entry.runtime.updateNotificationConfig(next_generation, self.notifications_osc, bounded);
+        self.notification_config_generation = next_generation;
+        @memset(&entry.notification_display_label, 0);
+        @memcpy(entry.notification_display_label[0..bounded.len], bounded);
+        entry.notification_display_label_len = @intCast(bounded.len);
+        entry.notification_config_applied_generation = next_generation;
     }
 
     /// restore-first attach-only backend가 같은 pool의 current host publication을 얻은 뒤 새 backend를 만들지 않고
@@ -3561,6 +3633,10 @@ pub const RemoteTermBackend = struct {
         // client-side(surface/screen)만 회수한다. spawn 경로는 방금 우리가 띄운 runtime이라 deinit(terminate)이 맞지만
         // attach는 남의 runtime이므로 detachClientSide로 되돌려야 재접속 실패가 세션을 죽이지 않는다.
         errdefer rr.detachClientSide();
+        // attach 대상은 이전 GUI가 남긴 snapshot을 갖고 있을 수 있다. 현재 앱의 complete snapshot을 map publication 전에
+        // 확인해야 복원 직후 GUI 0으로 돌아가도 stale 알림 정책으로 동작하지 않는다. 실제 binding label은 AppSession이
+        // Term을 layout에 결속한 직후 configureNotificationBinding으로 덮고, 이 단계는 안전한 runtime-ID fallback이다.
+        try rr.updateNotificationConfig(self.notification_config_generation, self.notifications_osc, "");
         try self.runtimes.put(self.allocator, handle, .{
             .runtime = rr,
             .host_id = host_id,
@@ -3569,6 +3645,7 @@ pub const RemoteTermBackend = struct {
             else
                 0,
             .runtime_generation = try self.issueRuntimeGeneration(),
+            .notification_config_applied_generation = self.notification_config_generation,
         });
         self.consumeRuntimeAdmission(&admission);
         return &rr.surface;
@@ -3667,10 +3744,15 @@ pub const RemoteTermBackend = struct {
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
         const request = persistentSpawnRequest(params.request);
+        const notification: remote_runtime.NotificationBootstrap = .{
+            .config_generation = self.notification_config_generation,
+            .notifications_osc = self.notifications_osc,
+            .display_label = "",
+        };
         if (selected_adapter) |adapter|
-            try rr.spawnWithAdapter(adapter, self.allocator, self.io, params.handle, request, params.size, params.initial_config)
+            try rr.spawnWithAdapterAndNotification(adapter, self.allocator, self.io, params.handle, request, params.size, params.initial_config, notification)
         else
-            try rr.spawnWithConfig(selected_client.?, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
+            try rr.spawnWithConfigAndNotification(selected_client.?, self.allocator, self.io, params.handle, request, params.size, params.initial_config, notification);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
         try self.runtimes.put(self.allocator, params.handle, .{
             .runtime = rr,
@@ -3680,6 +3762,7 @@ pub const RemoteTermBackend = struct {
             else
                 0,
             .runtime_generation = try self.issueRuntimeGeneration(),
+            .notification_config_applied_generation = self.notification_config_generation,
         });
         self.consumeRuntimeAdmission(&admission);
         return &rr.surface;
@@ -4396,6 +4479,20 @@ fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnReque
     request.hook_instance = null;
     request.hook_pane = null;
     return request;
+}
+
+test "P4 N2b1 remote backend binding은 UTF-8 display label을 256-byte 경계에서만 자른다" {
+    try std.testing.expectEqual(@as(usize, 256), boundedNotificationLabel("x" ** 300).len);
+    const split = ("x" ** 255) ++ "한";
+    try std.testing.expectEqual(@as(usize, 255), boundedNotificationLabel(split).len);
+    try std.testing.expectEqualStrings("", boundedNotificationLabel("\xff"));
+
+    var backend = b5TestBackend(testing.allocator);
+    defer backend.runtimes.deinit(testing.allocator);
+    backend.notification_config_generation = std.math.maxInt(u64);
+    try testing.expectError(error.ProtocolError, backend.configureNotifications(true));
+    try testing.expect(!backend.notifications_osc);
+    try testing.expectEqual(std.math.maxInt(u64), backend.notification_config_generation);
 }
 
 test "persistent spawn omits process-local MARU_PANE_ID without mutating local fallback request" {
@@ -6918,7 +7015,7 @@ test "C3-3b4 async close parity는 committed cleanup callback 뒤에만 제거�
     try testing.expect(!backend_value.runtimes.contains(42));
 }
 
-test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다" {
+test "P4 N2b1 remote backend binding은 실제 host runtime의 stable notification label을 갱신한다 (C3-3b4)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     if (std.c.getenv("MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST")) |raw| {
         if (std.mem.eql(u8, std.mem.span(raw), "skip-in-aggregate-v1")) return error.SkipZigTest;
@@ -6926,6 +7023,18 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
     try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;
+
+    // Debug·ReleaseFast focused artifacts both launch a real daemon. Keep the same cross-process
+    // fixture lock as the other actual-host backend tests: HostAdapter's process-global execution
+    // runtime and forked socket fixture are deliberately exercised one artifact at a time.
+    const fixture_lock_fd = c.open(
+        "/tmp/maru-session-host-actual-fixture.lock",
+        .{ .ACCMODE = .RDWR, .CREAT = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fixture_lock_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(fixture_lock_fd);
+    if (c.flock(fixture_lock_fd, posix.LOCK.EX) != 0) return error.TestUnexpectedResult;
 
     var dir_buf: [256]u8 = undefined;
     const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rtb-{d}", .{c.getpid()}) catch return error.SkipZigTest;
@@ -6935,6 +7044,7 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
+        _ = c.close(fixture_lock_fd);
         _ = c.setsid();
         // The test runner control pipe must not survive an unexpected parent abort, otherwise the
         // build waits forever on an orphaned daemon instead of reporting the failing assertion.
@@ -7010,6 +7120,25 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
 
     const link = try be.attach(1, true); // 원격 Term을 SurfaceRuntime에 원격 PtyIo로 등록한다(RuntimeLink 반환).
     try testing.expectEqual(@as(u64, 1), link.surface_id);
+
+    // AppSession tick이 쓰는 backend API 그대로 현재 workspace/Term binding을 완전 snapshot으로 갱신한다. 이후 OSC가
+    // 발화 시점의 owned label을 stable event에 싣는지 실제 PTY→host core→journal→GUI pull 왕복으로 증명한다.
+    try be_impl.configureNotifications(true);
+    try be_impl.configureNotificationBinding(1, "workspace › cat");
+    try surface_runtime.writeInput(1, .{ .bytes = "\x1b]777;notify;Build;done\x1b\\\n" });
+    var notification: ?remote_runtime.Notification = null;
+    var attempts: usize = 0;
+    while (attempts < 150 and notification == null) : (attempts += 1) {
+        notification = be_impl.takeNotificationFor(1);
+        if (notification == null) _ = usleep(20 * 1000);
+    }
+    var delivered = notification orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer delivered.deinit(allocator);
+    try testing.expectEqualStrings("workspace › cat", delivered.display_label.?);
+
     var frame_pump = try be.pump(1); // 원격 모드 RuntimeEventPump.
 
     // **핵심**: GUI 키 입력 hot path와 **똑같이** self.runtime.writeInput(surface.id, ...)로 보낸다 — 계약 vtable을 우회해도
@@ -7017,13 +7146,20 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
     // pump.drainAvailable()(원격 drain)로 소비해 Surface에 "h"가 반영되는지 폴링(host delta tick ~20ms).
     try surface_runtime.writeInput(1, .{ .bytes = "hello\n" });
     var found = false;
-    var attempts: usize = 0;
+    attempts = 0;
     while (attempts < 100 and !found) : (attempts += 1) {
         const ds = try frame_pump.drainAvailable();
         surface.lockCore(io);
-        const c0 = surface.renderSnapshot().cells[0].codepoint;
+        const snapshot = surface.renderSnapshot();
+        var contains_h = false;
+        for (snapshot.cells) |cell| {
+            if (cell.codepoint == 'h') {
+                contains_h = true;
+                break;
+            }
+        }
         surface.unlockCore(io);
-        if (c0 == 'h') {
+        if (contains_h) {
             found = true;
             try testing.expect(ds.output_events > 0); // 배치가 적용된 tick은 렌더 트리거를 낸다.
         } else _ = usleep(20 * 1000);
@@ -7033,16 +7169,48 @@ test "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약�
     // resize도 hot path(self.runtime.resize)로 원격 PtyIo→resize RPC에 도달한다(에러 없이 위임).
     try surface_runtime.resize(1, .{ .cols = 80, .rows = 24 }, io);
 
-    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(1));
+    // 앱 quit의 client-side detach를 축약해 같은 host runtime을 살려 둔 뒤 재attach한다. 새 backend entry publication 전에
+    // 현재 `notifications_osc=true` 완전 snapshot이 적용돼, 실제 binding label sync 전에도 발화가 켜지고 runtime-ID
+    // fallback label을 쓰는지 검증한다.
+    surface_runtime.detachSurface(1);
+    const detached = be_impl.runtimes.fetchRemove(1).?;
+    detached.value.runtime.detachClientSide();
+    allocator.destroy(detached.value.runtime);
+    pool.release(host_id);
+    // 새 GUI process가 만든 backend처럼 local config 축을 초기값으로 되돌린 뒤, AppSession backend 설치 경로가
+    // loaded config=true를 runtime attach 전에 주입하는 순서를 재현한다. daemon에는 더 높은 옛 generation이 남아 있지만
+    // 새 controller generation이므로 새 축의 nonzero generation 2가 정당하게 교체돼야 한다.
+    be_impl.notifications_osc = false;
+    be_impl.notification_config_generation = 1;
+    try be_impl.configureNotifications(true);
+    const restored_surface = try be_impl.attachTermOnHost(host_id, 2, existing_runtime_id, size);
+    _ = restored_surface;
+    _ = try be.attach(2, true);
+    try surface_runtime.writeInput(2, .{ .bytes = "\x1b]777;notify;Restored;alive\x1b\\\n" });
+    notification = null;
+    attempts = 0;
+    while (attempts < 150 and notification == null) : (attempts += 1) {
+        notification = be_impl.takeNotificationFor(2);
+        if (notification == null) _ = usleep(20 * 1000);
+    }
+    var restored_delivery = notification orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer restored_delivery.deinit(allocator);
+    try testing.expectEqualStrings(existing_runtime_id[0..], restored_delivery.display_label.?);
+
+    var restored_pump = try be.pump(2);
+    try testing.expectEqual(term_backend.CloseProgress.complete, be.closeAndDetach(2));
     var saw_close_ended = false;
     attempts = 0;
     while (attempts < 100 and !saw_close_ended) : (attempts += 1) {
-        const summary = try frame_pump.drainAvailable();
+        const summary = try restored_pump.drainAvailable();
         saw_close_ended = summary.ended != null;
         if (!saw_close_ended) _ = usleep(20 * 1000);
     }
     try testing.expect(saw_close_ended);
-    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(1)); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
+    try testing.expectEqual(term_backend.RemoveProgress.removed, be.remove(2)); // client-side 회수(map 제거 + SurfaceRuntime detach + host terminate 멱등).
     try testing.expectEqual(@as(usize, 0), be_impl.runtimes.count());
     try testing.expect(try pool.remove(host_id));
     try testing.expectError(error.SpawnHostUnavailable, be.spawn(.{

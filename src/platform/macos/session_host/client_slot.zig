@@ -4974,6 +4974,7 @@ pub fn projectGenerationCapabilities(
         .screen_viewport_scrolled = node.client.screen_viewport_scrolled_v1,
         .async_scroll_to_bottom = node.client.async_scroll_to_bottom_v1,
         .notification_stream_auth = node.client.notification_stream_auth_v1,
+        .notification_delivery = node.client.notification_delivery_v1,
         .runtime_clipboard = node.client.runtime_clipboard_v1,
         .runtime_core_command = node.client.runtime_core_command_v1,
         .runtime_link_at = node.client.runtime_link_at_v1,
@@ -4997,6 +4998,16 @@ fn encodeGenerationRequestParams(
     stream_id: u64,
     request: contract.ValidatedRuntimeRequest,
 ) ?[]const u8 {
+    return encodeGenerationRequestParamsWithCapabilities(out, identity, stream_id, request, false);
+}
+
+fn encodeGenerationRequestParamsWithCapabilities(
+    out: []u8,
+    identity: contract.BindingIdentity,
+    stream_id: u64,
+    request: contract.ValidatedRuntimeRequest,
+    notification_delivery_v1: bool,
+) ?[]const u8 {
     return switch (request) {
         .spawn_full => null,
         .attach_controller => if (identity.role != .controller) null else std.fmt.bufPrint(
@@ -5015,7 +5026,18 @@ fn encodeGenerationRequestParams(
             .rows = v.rows,
             .client_sequence = v.client_sequence,
         }),
-        .observation, .clipboard_write, .notification, .detach => stringifyGenerationParams(out, .{ .stream_id = stream_id }),
+        .observation, .clipboard_write, .detach => stringifyGenerationParams(out, .{ .stream_id = stream_id }),
+        .notification => if (notification_delivery_v1)
+            stringifyGenerationParams(out, .{ .stream_id = stream_id, .delivery_version = @as(u8, 1) })
+        else
+            stringifyGenerationParams(out, .{ .stream_id = stream_id }),
+        .notification_config_update => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .expected_controller_generation = v.expected_controller_generation,
+            .config_generation = v.config_generation,
+            .notifications_osc = v.notifications_osc,
+            .display_label = v.label() orelse return null,
+        }),
         .selected_text => |v| stringifyGenerationParams(out, .{
             .stream_id = stream_id,
             .sr = v.start_row,
@@ -5332,6 +5354,14 @@ test "CR3a-2c3b typed request encoder injects only canonical binding identities"
         }).?,
     );
     try std.testing.expectEqualStrings(
+        "{\"stream_id\":77,\"delivery_version\":1}",
+        encodeGenerationRequestParamsWithCapabilities(&buffer, identity, 77, .notification, true).?,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":77}",
+        encodeGenerationRequestParamsWithCapabilities(&buffer, identity, 77, .notification, false).?,
+    );
+    try std.testing.expectEqualStrings(
         "{\"runtime_id\":\"000000000000000000000000000000aa\"}",
         encodeGenerationRequestParams(&buffer, identity, 77, .terminate).?,
     );
@@ -5470,11 +5500,12 @@ pub fn prepareGenerationRequest(
     defer node.client.restoreGenerationAllocatorScope(&allocator_scope) catch
         @panic("generation allocator scope restore drifted");
     var params_buffer: [4096]u8 = undefined;
-    const params_json = encodeGenerationRequestParams(
+    const params_json = encodeGenerationRequestParamsWithCapabilities(
         &params_buffer,
         identity,
         request.bound_stream_id,
         decoded,
+        node.client.notification_delivery_v1,
     ) orelse return error.ResourceExhausted;
     const prepared_identity = node.client.prepareBlockingRpcStorage(
         storage,

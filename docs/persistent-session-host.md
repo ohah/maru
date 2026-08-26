@@ -7275,18 +7275,33 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     Maru fallback을 쓰고 빈 label은 runtime ID의 bounded fallback을 쓴다. stable route ID는 표시 문자열에 섞거나 표시
     문자열에서 역파싱하지 않는다.
   - `notifications.osc`와 `display_label`은 GUI process-local `surface_id`가 아니라 daemon이 보존하는 runtime metadata
-    snapshot이다. product GUI의 authenticated controller가 capability-advertised additive control로만 갱신하고, observer,
-    legacy·unknown field, cross-runtime update는 mutation 0으로 거부한다. config false는 새 core pending을 journal에 넣지
+    snapshot이다. `notification_delivery_v1`을 협상한 spawn authority는 PTY reader publication 전 초기
+    `{config_generation,notifications_osc,display_label}` 완전본을 설치한다. 완전본이 없으면 `false`와 runtime-ID label로
+    fail-closed한다. 이후 product GUI의 authenticated controller만 exact `config.update`의
+    `{stream_id,expected_controller_generation,config_generation,notifications_osc,display_label}` 완전본으로 갱신한다.
+    같은 controller generation 안에서는 nonzero config generation이 strictly increasing이고 controller generation이 바뀔
+    때만 새 축으로 교체된다. observer, legacy·unknown field, stale controller, cross-runtime update는 mutation 0으로 거부한다. config false는 새 core pending을 journal에 넣지
     않고 generation-CAS로 drop하며 이미 admitted된 row의 delivery bit를 소급 변경하지 않는다. label update는 다음 event부터
-    적용하고 이미 admitted된 row는 발화 당시 owned label을 유지한다. GUI 0에서는 마지막 검증 snapshot을 사용한다.
+    적용하고 이미 admitted된 row는 발화 당시 owned label을 유지한다. GUI 설정은 live runtime 전부의 update 응답을 확인한
+    뒤에만 파일/UI 값을 commit하며 실패하면 이전 값으로 보상 update하고 설정 변경을 취소한다. multi-runtime 전파나 그
+    보상이 중간 실패하면 target generation에 도달하지 못한 entry를 미적용으로 남기고, GUI frame owner가 같은 label을
+    포함한 개별 완전본을 성공할 때까지 재시도한다. GUI 0에서는 마지막 검증 snapshot을 사용한다. restore attach는 새 client
+    binding을 publish하기 전에 현재 config와 runtime-ID fallback 완전본을
+    먼저 확인하고, GUI frame owner는 기존 `notificationLocation`의 `workspace › term` 라벨을 attach·rename·OSC title
+    변경 뒤 동일 값 비교로 동기화한다. typed HostAdapter encoder는 협상된 delivery capability에서만
+    `delivery_version:1`을 넣어 stable 응답 decoder와 요청 schema가 어긋나지 않게 한다.
   - GUI consumer는 기존 `runtime.notification` 단일 슬롯을 직접 소비하지 않고 journal의 `pending_gui` row를 가져간다.
-    response body와 stable key가 connection control queue에 admission된 뒤에만 `.gui` ack를 commit한다. GUI는 key를
+    `notification_delivery_v1` client는 exact `{stream_id,delivery_version:1}`로 opt-in하고 응답은 exact
+    `{event:null|{hid,rid,eid,occurred_at_ns,title,body,display_label}}`이고 기존 `notification_stream_auth_v1` client에는
+    `{title,body}` adapter를 유지한다. response body와 stable key가 connection control queue에 admission된 뒤에만 `.gui`
+    ack를 commit한다. GUI는 key를
     인앱 history와 OS request에 함께 투영하지만 OS sink의 `.os` bit를 내리지 않는다. legacy client에는 기존 단일-slot
     adapter를 유지하되 같은 event를 journal과 legacy slot 양쪽에서 소비시키지 않는 negotiated owner가 하나뿐이다.
   - daemon-internal macOS adapter는 별도 MRSH client나 `AppSession` 없이 `pending_os` row를 게시한다. `hid`·`rid`·`eid`를
     표시 문자열과 분리된 typed route로 넘기며 OS API가 request를 받아들인 뒤에만 `.os` ack한다. permission denied,
     bundle/entitlement 부재, transient adapter failure는 PTY/runtime 실패가 아니다. denied는 재요청 loop 없이 degraded
-    상태로 기록하고, transient failure는 같은 row를 bounded backoff로 재시도한다. GUI-live 여부는 delivery ownership을
+    상태로 기록하고, transient failure는 같은 row를 250ms에서 시작해 최대 8초인 지수 backoff로 최대 6회 재시도한다.
+    terminal degraded와 retry exhaustion은 bounded typed counter만 남기고 raw text를 로그하지 않는다. GUI-live 여부는 delivery ownership을
     바꾸지 않으며 GUI와 OS 두 bit가 독립적으로 exact once 내려간다.
   - **upgrade 불변식:** N2 journal은 host-lifetime state다. same-PID exec handoff는 `last_event_id`, exhaustion, eviction/drop
     counters와 모든 owned row·delivery bit를 outer optional bounded section으로 encode한다. successor는 exact `host_id`,

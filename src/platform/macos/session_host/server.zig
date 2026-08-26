@@ -85,6 +85,13 @@ pub const RuntimeSpawnParams = struct {
     cols: u16,
     rows: u16,
     initial_config: ?core_command_wire.Command.RuntimeConfig = null,
+    initial_notification: ?NotificationConfigSnapshot = null,
+};
+
+pub const NotificationConfigSnapshot = struct {
+    config_generation: u64,
+    notifications_osc: bool,
+    display_label: []const u8,
 };
 
 /// attach된 observe-capability client에만 보내는 화면 외 runtime full-state. public `runtime.list/get` redacted metadata와
@@ -229,6 +236,7 @@ pub const RuntimeOps = struct {
     notification_peek: *const fn (
         ctx: *anyopaque,
         runtime_id: u128,
+        stable_delivery: bool,
         allocator: std.mem.Allocator,
     ) anyerror!NotificationSnapshot,
     notification_commit: *const fn (
@@ -236,6 +244,12 @@ pub const RuntimeOps = struct {
         runtime_id: u128,
         generation: ?u64,
     ) bool,
+    notification_config_update: ?*const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+        current_controller_generation: u64,
+        snapshot: NotificationConfigSnapshot,
+    ) anyerror!bool = null,
     /// host-authoritative core command. JSON은 server에서 strict bounded DTO로 검증하고, runtime_manager가 내부
     /// `session.CoreCommand`로 명시 변환해 reader queue에 넣는다.
     core_command: *const fn (ctx: *anyopaque, runtime_id: u128, command: core_command_wire.Command) anyerror!void,
@@ -1135,7 +1149,48 @@ pub const Connection = struct {
             .runtime_find => self.dispatchFind(frame.header.request_id, params),
             .runtime_resize => self.dispatchResize(frame.header.request_id, params),
             .runtime_notification => self.dispatchNotification(frame.header.request_id, params),
+            .notification_config_update => self.dispatchNotificationConfigUpdate(frame.header.request_id, params),
         };
+    }
+
+    fn dispatchNotificationConfigUpdate(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
+        const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
+        const update = ops.notification_config_update orelse return self.replyError(request_id, .unauthorized);
+        const p = params orelse return self.replyError(request_id, .invalid_request);
+        if (p.count() != 5) return self.replyError(request_id, .invalid_request);
+        const stream = intFieldU64(p, "stream_id") orelse return self.replyError(request_id, .invalid_request);
+        const expected_generation = intFieldU64(p, "expected_controller_generation") orelse
+            return self.replyError(request_id, .invalid_request);
+        const config_generation = intFieldU64(p, "config_generation") orelse
+            return self.replyError(request_id, .invalid_request);
+        const notifications_osc = exactBoolField(p, "notifications_osc") orelse
+            return self.replyError(request_id, .invalid_request);
+        const display_label = strField(p, "display_label") orelse
+            return self.replyError(request_id, .invalid_request);
+        const attachment = self.attachments.get(stream) orelse
+            return self.replyError(request_id, .invalid_request);
+        if (!reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(attachment.runtime_id, attachment.subscription_id),
+            reg.Capability.input,
+        )) return self.replyError(request_id, .unauthorized);
+        const current_generation = self.registry.controllerGeneration(attachment.runtime_id) catch
+            return self.replyError(request_id, .runtime_not_found);
+        if (current_generation != expected_generation)
+            return self.replyError(request_id, .invalid_generation);
+        const applied = update(ops.ctx, attachment.runtime_id, current_generation, .{
+            .config_generation = config_generation,
+            .notifications_osc = notifications_osc,
+            .display_label = display_label,
+        }) catch |err| return switch (err) {
+            error.RuntimeNotFound => self.replyError(request_id, .runtime_not_found),
+            error.DisplayLabelTooLong, error.InvalidDisplayLabel, error.InvalidConfigGeneration => self.replyError(request_id, .invalid_request),
+            error.OutOfMemory => error.OutOfMemory,
+            else => self.replyError(request_id, .internal),
+        };
+        if (!applied) return self.replyError(request_id, .invalid_generation);
+        const body = try self.stringify(.{ .applied = true });
+        defer self.allocator.free(body);
+        return self.replyResult(request_id, body);
     }
 
     fn dispatchRuntimeInventory(
@@ -1447,7 +1502,14 @@ pub const Connection = struct {
     fn dispatchNotification(self: *Connection, request_id: u64, params: ?std.json.ObjectMap) HandleError!Action {
         const ops = self.runtime_ops orelse return self.replyError(request_id, .unauthorized);
         const p = params orelse return self.replyError(request_id, .invalid_request);
-        if (p.count() != 1) return self.replyError(request_id, .invalid_request);
+        if (p.count() != 1 and p.count() != 2) return self.replyError(request_id, .invalid_request);
+        const stable_delivery = if (p.get("delivery_version")) |value| switch (value) {
+            .integer => |version| version == 1,
+            else => false,
+        } else false;
+        if (p.count() == 2 and !stable_delivery) return self.replyError(request_id, .invalid_request);
+        if (stable_delivery and intFieldU64(p, "stream_id") == null)
+            return self.replyError(request_id, .invalid_request);
         const runtime_id = if (intFieldU64(p, "stream_id")) |stream| blk: {
             const attachment = self.attachments.get(stream) orelse
                 return self.replyError(request_id, .invalid_request);
@@ -1471,6 +1533,7 @@ pub const Connection = struct {
         const snapshot = ops.notification_peek(
             ops.ctx,
             runtime_id,
+            stable_delivery,
             self.allocator,
         ) catch |err| switch (err) {
             error.RuntimeNotFound => return self.replyError(request_id, .runtime_not_found),
@@ -1572,6 +1635,15 @@ pub const Connection = struct {
             }
         else
             null;
+        const initial_notification: ?NotificationConfigSnapshot = if (p.get("notification_config")) |value|
+            switch (value) {
+                .null => null,
+                .object => decodeInitialNotification(value) orelse
+                    return self.replyError(request_id, .invalid_request),
+                else => return self.replyError(request_id, .invalid_request),
+            }
+        else
+            null;
         const runtime_id = ops.spawn(ops.ctx, .{
             .argv = argv,
             .cwd = cwd,
@@ -1586,6 +1658,7 @@ pub const Connection = struct {
             .cols = cols,
             .rows = rows,
             .initial_config = initial_config,
+            .initial_notification = initial_notification,
         }) catch |err| switch (err) {
             error.RuntimeLimitReached, error.AggregateGridLimitReached => return self.replyError(request_id, .resource_exhausted),
             error.InvalidGridSize => return self.replyError(request_id, .invalid_request),
@@ -2936,7 +3009,7 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
-        var capability_buf: [22][]const u8 = undefined;
+        var capability_buf: [23][]const u8 = undefined;
         const capabilities = self.helloCapabilities(&capability_buf);
         if (!self.host_status.manifest_capable) {
             return self.stringify(.{
@@ -2971,10 +3044,10 @@ pub const Connection = struct {
         });
     }
 
-    fn helloCapabilities(self: *const Connection, buf: *[22][]const u8) []const []const u8 {
+    fn helloCapabilities(self: *const Connection, buf: *[23][]const u8) []const []const u8 {
         var count: usize = 0;
         const append = struct {
-            fn one(target: *[22][]const u8, index: *usize, value: []const u8) void {
+            fn one(target: *[23][]const u8, index: *usize, value: []const u8) void {
                 target[index.*] = value;
                 index.* += 1;
             }
@@ -3003,6 +3076,7 @@ pub const Connection = struct {
         if (self.runtime_ops != null and self.subscription_identity != null) {
             append(buf, &count, "controller_transfer_v1");
             append(buf, &count, "notification_stream_auth_v1");
+            append(buf, &count, "notification_delivery_v1");
         }
         if (self.subscription_identity != null)
             append(buf, &count, catchup_barrier_contract.capability);
@@ -3242,6 +3316,28 @@ fn boolField(obj: std.json.ObjectMap, key: []const u8) bool {
     };
 }
 
+fn exactBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
+    return switch (obj.get(key) orelse return null) {
+        .bool => |b| b,
+        else => null,
+    };
+}
+
+fn decodeInitialNotification(value: ?std.json.Value) ?NotificationConfigSnapshot {
+    const object = switch (value orelse return null) {
+        .object => |object| object,
+        else => return null,
+    };
+    if (object.count() != 3) return null;
+    const config_generation = intFieldU64(object, "config_generation") orelse return null;
+    if (config_generation == 0) return null;
+    return .{
+        .config_generation = config_generation,
+        .notifications_osc = exactBoolField(object, "notifications_osc") orelse return null,
+        .display_label = strField(object, "display_label") orelse return null,
+    };
+}
+
 /// Additive bool은 부재만 legacy false로 허용하고, 존재하는데 bool이 아니면 schema 위반으로 거부한다.
 fn optionalBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
     return switch (obj.get(key) orelse return false) {
@@ -3395,6 +3491,7 @@ const RequestMethod = enum {
     runtime_find,
     runtime_resize,
     runtime_notification,
+    notification_config_update,
 
     fn wireName(self: RequestMethod) []const u8 {
         return switch (self) {
@@ -3424,6 +3521,7 @@ const RequestMethod = enum {
             .runtime_find => "runtime.find",
             .runtime_resize => "runtime.resize",
             .runtime_notification => "runtime.notification",
+            .notification_config_update => "config.update",
         };
     }
 };
@@ -3461,6 +3559,7 @@ fn requestPolicy(method: RequestMethod) RequestPolicy {
         .runtime_find,
         .runtime_resize,
         .runtime_notification,
+        .notification_config_update,
         => .privileged,
     };
 }
@@ -4650,6 +4749,11 @@ pub const FakeRuntimeOps = struct {
     cached_observation_valid: bool = false,
     notification_calls: usize = 0,
     notification_commit_calls: usize = 0,
+    notification_config_calls: usize = 0,
+    notification_config_generation: u64 = 0,
+    notification_config_enabled: bool = false,
+    notification_config_label: [256]u8 = undefined,
+    notification_config_label_len: usize = 0,
     runtime_missing: bool = false,
     snapshot_missing: bool = false,
     delta_missing: bool = false,
@@ -4685,6 +4789,21 @@ pub const FakeRuntimeOps = struct {
     fn terminateFn(ctx: *anyopaque, id: u128) void {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         self.terminated_id = id;
+    }
+    fn notificationConfigUpdateFn(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        current_controller_generation: u64,
+        snapshot: NotificationConfigSnapshot,
+    ) anyerror!bool {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        if (self.runtime_missing or runtime_id != 0xaa) return error.RuntimeNotFound;
+        self.notification_config_calls += 1;
+        self.notification_config_generation = snapshot.config_generation;
+        self.notification_config_enabled = snapshot.notifications_osc;
+        self.notification_config_label_len = @min(snapshot.display_label.len, self.notification_config_label.len);
+        @memcpy(self.notification_config_label[0..self.notification_config_label_len], snapshot.display_label[0..self.notification_config_label_len]);
+        return current_controller_generation != 0;
     }
     fn writeInputFn(ctx: *anyopaque, runtime_id: u128, bytes: []const u8) anyerror!void {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
@@ -4761,13 +4880,14 @@ pub const FakeRuntimeOps = struct {
     fn notificationPeekFn(
         ctx: *anyopaque,
         runtime_id: u128,
+        stable_delivery: bool,
         allocator: std.mem.Allocator,
     ) anyerror!NotificationSnapshot {
         const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
         _ = runtime_id;
         self.notification_calls += 1;
         return .{
-            .body = try allocator.dupe(u8, "{\"title\":\"\",\"body\":\"\"}"),
+            .body = try allocator.dupe(u8, if (stable_delivery) "{\"event\":null}" else "{\"title\":\"\",\"body\":\"\"}"),
             .generation = null,
         };
     }
@@ -4979,9 +5099,62 @@ pub const FakeRuntimeOps = struct {
     }
 
     pub fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
+        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .notification_config_update = notificationConfigUpdateFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
     }
 };
+
+test "P4 N2b1 config.update is exact controller-bound and mutation-free on rejection" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xaa, 80, 24);
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+    if (hello.frame) |frame| frame.deinit(allocator);
+    inline for (.{ "controller", "observer" }, 0..) |mode, index| {
+        var request_buf: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(&request_buf, "{{\"method\":\"runtime.attach\",\"params\":{{\"runtime_id\":\"aa\",\"mode\":\"{s}\"}}}}", .{mode});
+        const frames = try feedExpectFrames(&conn, .request, index + 2, request);
+        defer {
+            for (frames) |frame| frame.deinit(allocator);
+            allocator.free(frames);
+        }
+    }
+    const generation = try registry.controllerGeneration(0xaa);
+    var good_buf: [256]u8 = undefined;
+    const good = try std.fmt.bufPrint(&good_buf, "{{\"method\":\"config.update\",\"params\":{{\"stream_id\":1,\"expected_controller_generation\":{d},\"config_generation\":7,\"notifications_osc\":true,\"display_label\":\"workspace\"}}}}", .{generation});
+    const accepted = try feedJson(&conn, .request, 4, good);
+    defer if (accepted.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, accepted.frame.?.payload, "\"applied\":true") != null);
+    try testing.expectEqual(@as(usize, 1), fake.notification_config_calls);
+    try testing.expectEqualStrings("workspace", fake.notification_config_label[0..fake.notification_config_label_len]);
+
+    const stable = try feedJson(&conn, .request, 7, "{\"method\":\"runtime.notification\",\"params\":{\"stream_id\":1,\"delivery_version\":1}}");
+    defer if (stable.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, stable.frame.?.payload, "\"event\":null") != null);
+
+    const forged_stable = try feedJson(&conn, .request, 8, "{\"method\":\"runtime.notification\",\"params\":{\"runtime_id\":\"aa\",\"delivery_version\":1}}");
+    defer if (forged_stable.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, forged_stable.frame.?.payload, "invalid_request") != null);
+
+    const denied = try feedJson(&conn, .request, 5, "{\"method\":\"config.update\",\"params\":{\"stream_id\":2,\"expected_controller_generation\":1,\"config_generation\":8,\"notifications_osc\":false,\"display_label\":\"observer\"}}");
+    defer if (denied.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, denied.frame.?.payload, "unauthorized") != null);
+    try testing.expectEqual(@as(usize, 1), fake.notification_config_calls);
+
+    const stale = try feedJson(&conn, .request, 9, "{\"method\":\"config.update\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":999,\"config_generation\":8,\"notifications_osc\":false,\"display_label\":\"stale\"}}");
+    defer if (stale.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, stale.frame.?.payload, "invalid_generation") != null);
+    try testing.expectEqual(@as(usize, 1), fake.notification_config_calls);
+
+    const unknown = try feedJson(&conn, .request, 6, "{\"method\":\"config.update\",\"params\":{\"stream_id\":1,\"expected_controller_generation\":1,\"config_generation\":8,\"notifications_osc\":false,\"display_label\":\"bad\",\"extra\":1}}");
+    defer if (unknown.frame) |frame| frame.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, unknown.frame.?.payload, "invalid_request") != null);
+    try testing.expectEqual(@as(usize, 1), fake.notification_config_calls);
+}
 
 test "server: runtime.spawn/terminate dispatch through RuntimeOps; read-only host is unauthorized" {
     const allocator = testing.allocator;

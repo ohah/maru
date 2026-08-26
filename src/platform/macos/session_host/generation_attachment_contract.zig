@@ -468,11 +468,12 @@ pub const RuntimeRequestTag = enum(u8) {
     terminate,
     detach,
     attach_observer,
+    notification_config_update,
 };
 
 pub fn runtimeRequestTagRawValid(value: *const RuntimeRequestTag) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(RuntimeRequestTag.attach_observer);
+    return raw <= @intFromEnum(RuntimeRequestTag.notification_config_update);
 }
 
 /// Decoder는 응답 bytes를 빌린 호출 안에서 이 두 종료 의미 중 하나만 선택한다. bytes나
@@ -569,7 +570,7 @@ pub fn requestFamilyForTag(tag: RuntimeRequestTag) RequestFamily {
         .spawn_full => .connection_only_denied,
         .attach_controller, .attach_observer => .attach_only,
         .observation, .selected_text, .link_at, .find => .bound_observation,
-        .resize, .clipboard_write, .select_op, .core_command, .report_mouse, .notification => .bound_controller_mutation,
+        .resize, .clipboard_write, .select_op, .core_command, .report_mouse, .notification, .notification_config_update => .bound_controller_mutation,
         .terminate, .detach => .bound_terminal,
     };
 }
@@ -602,6 +603,7 @@ pub fn requestMethod(tag: RuntimeRequestTag) []const u8 {
         .core_command => "runtime.core_command",
         .report_mouse => "runtime.report_mouse",
         .notification => "runtime.notification",
+        .notification_config_update => "config.update",
         .terminate => "runtime.terminate",
         .detach => "runtime.detach",
     };
@@ -699,6 +701,44 @@ const RawMouseReportRequest = extern struct {
     mods: u8,
 };
 const RawCoreCommand = runtime_control_types.RawCoreCommand;
+pub const NotificationConfigUpdateRequest = struct {
+    expected_controller_generation: u64,
+    config_generation: u64,
+    notifications_osc: bool,
+    display_label: [256]u8 = [_]u8{0} ** 256,
+    display_label_len: u16 = 0,
+
+    pub fn init(
+        expected_controller_generation: u64,
+        config_generation: u64,
+        notifications_osc: bool,
+        display_label: []const u8,
+    ) ?NotificationConfigUpdateRequest {
+        if (expected_controller_generation == 0 or config_generation == 0 or display_label.len > 256)
+            return null;
+        var result: NotificationConfigUpdateRequest = .{
+            .expected_controller_generation = expected_controller_generation,
+            .config_generation = config_generation,
+            .notifications_osc = notifications_osc,
+        };
+        @memcpy(result.display_label[0..display_label.len], display_label);
+        result.display_label_len = @intCast(display_label.len);
+        return result;
+    }
+
+    pub fn label(self: *const NotificationConfigUpdateRequest) ?[]const u8 {
+        if (self.display_label_len > self.display_label.len) return null;
+        return self.display_label[0..self.display_label_len];
+    }
+};
+
+const RawNotificationConfigUpdateRequest = extern struct {
+    expected_controller_generation: u64,
+    config_generation: u64,
+    notifications_osc: u8,
+    display_label: [256]u8,
+    display_label_len: u16,
+};
 pub const RuntimeControlTag = runtime_control_types.RuntimeControlTag;
 pub const RuntimeControl = runtime_control_types.RuntimeControl;
 pub const ValidatedRuntimeControl = runtime_control_types.ValidatedRuntimeControl;
@@ -711,6 +751,7 @@ const RuntimeRequestPayload = extern union {
     select_op: RawSelectRequest,
     core_command: RawCoreCommand,
     report_mouse: RawMouseReportRequest,
+    notification_config_update: RawNotificationConfigUpdateRequest,
 };
 
 /// Public request boundary with an explicit raw discriminator. A Zig tagged
@@ -794,6 +835,17 @@ pub const RuntimeRequest = extern struct {
     pub fn notification() RuntimeRequest {
         return empty(.notification);
     }
+    pub fn notificationConfigUpdate(value: NotificationConfigUpdateRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.notification_config_update), .payload = .{
+            .notification_config_update = .{
+                .expected_controller_generation = value.expected_controller_generation,
+                .config_generation = value.config_generation,
+                .notifications_osc = @intFromBool(value.notifications_osc),
+                .display_label = value.display_label,
+                .display_label_len = value.display_label_len,
+            },
+        } };
+    }
     pub fn terminate() RuntimeRequest {
         return empty(.terminate);
     }
@@ -873,6 +925,19 @@ pub const RuntimeRequest = extern struct {
                 } };
             },
             @intFromEnum(RuntimeRequestTag.notification) => .notification,
+            @intFromEnum(RuntimeRequestTag.notification_config_update) => blk: {
+                const value = self.payload.notification_config_update;
+                if (value.expected_controller_generation == 0 or value.config_generation == 0 or
+                    value.notifications_osc > 1 or value.display_label_len > value.display_label.len)
+                    break :blk null;
+                break :blk .{ .notification_config_update = .{
+                    .expected_controller_generation = value.expected_controller_generation,
+                    .config_generation = value.config_generation,
+                    .notifications_osc = value.notifications_osc == 1,
+                    .display_label = value.display_label,
+                    .display_label_len = value.display_label_len,
+                } };
+            },
             @intFromEnum(RuntimeRequestTag.terminate) => .terminate,
             @intFromEnum(RuntimeRequestTag.detach) => .detach,
             else => null,
@@ -896,6 +961,7 @@ pub const ValidatedRuntimeRequest = union(RuntimeRequestTag) {
     terminate,
     detach,
     attach_observer,
+    notification_config_update: NotificationConfigUpdateRequest,
 
     pub fn family(self: @This()) RequestFamily {
         return switch (self) {
@@ -918,6 +984,7 @@ pub const GenerationCapabilities = struct {
     screen_viewport_scrolled: bool,
     async_scroll_to_bottom: bool,
     notification_stream_auth: bool,
+    notification_delivery: bool,
     runtime_clipboard: bool,
     runtime_core_command: bool,
     runtime_link_at: bool,
@@ -936,6 +1003,7 @@ comptime {
         screen_viewport_scrolled: bool,
         async_scroll_to_bottom: bool,
         notification_stream_auth: bool,
+        notification_delivery: bool,
         runtime_clipboard: bool,
         runtime_core_command: bool,
         runtime_link_at: bool,
@@ -1074,11 +1142,12 @@ test "CR3a-2c3a binding identity rejects every invalid raw attachment role" {
 test "CR3a-2a neutral lifecycle and request vocabularies are closed" {
     try std.testing.expectEqual(@as(usize, 6), std.enums.values(BindingLifecycle).len);
     try std.testing.expectEqual(@as(usize, 5), std.enums.values(ExecutedResponseLifecycle).len);
-    // The SSOT list contains fifteen variants; CR4a splits observer attach from controller attach
-    // so the transport encoder cannot infer or accept a caller-supplied role string.
-    try std.testing.expectEqual(@as(usize, 15), std.meta.fields(RuntimeRequestTag).len);
+    // CR4a splits observer attach from controller attach, and N2b1 adds one typed notification
+    // config mutation; the transport encoder cannot infer either role or config payload.
+    try std.testing.expectEqual(@as(usize, 16), std.meta.fields(RuntimeRequestTag).len);
     try std.testing.expectEqual(@as(u8, 13), @intFromEnum(RuntimeRequestTag.detach));
     try std.testing.expectEqual(@as(u8, 14), @intFromEnum(RuntimeRequestTag.attach_observer));
+    try std.testing.expectEqual(@as(u8, 15), @intFromEnum(RuntimeRequestTag.notification_config_update));
     try std.testing.expectEqual(@as(usize, 5), std.enums.values(RequestFamily).len);
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(ExecuteOutcome).len);
 }
@@ -1100,6 +1169,7 @@ test "CR3a-2c3b every request tag has one closed request family" {
         .bound_terminal,
         .bound_terminal,
         .attach_only,
+        .bound_controller_mutation,
     };
     inline for (std.enums.values(RuntimeRequestTag), expected) |tag, family|
         try std.testing.expectEqual(family, requestFamilyForTag(tag));

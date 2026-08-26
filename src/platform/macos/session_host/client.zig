@@ -2034,6 +2034,7 @@ const ExternalAdoptionSnapshot = struct {
     runtime_selected_text_v1: bool,
     runtime_selection_state_v1: bool,
     notification_stream_auth_v1: bool,
+    notification_delivery_v1: bool,
     runtime_link_at_v1: bool,
     runtime_clipboard_v1: bool,
     connection_profile: ConnectionProfile,
@@ -3614,6 +3615,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.runtime_selected_text_v1);
         writer.writeBool(client.runtime_selection_state_v1);
         writer.writeBool(client.notification_stream_auth_v1);
+        writer.writeBool(client.notification_delivery_v1);
         writer.writeBool(client.runtime_link_at_v1);
         writer.writeBool(client.runtime_clipboard_v1);
         writer.writeTag(@intFromEnum(client.connection_profile.?));
@@ -5471,6 +5473,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .runtime_selected_text_v1 = self.runtime_selected_text_v1,
         .runtime_selection_state_v1 = self.runtime_selection_state_v1,
         .notification_stream_auth_v1 = self.notification_stream_auth_v1,
+        .notification_delivery_v1 = self.notification_delivery_v1,
         .runtime_link_at_v1 = self.runtime_link_at_v1,
         .runtime_clipboard_v1 = self.runtime_clipboard_v1,
         .connection_profile = self.connection_profile.?,
@@ -6687,6 +6690,7 @@ pub const Client = struct {
     /// host가 consumptive notification RPC를 exact attached stream으로 인가하는가. false인 same-major 구 host에는
     /// legacy runtime selector를 보내되, 새 host도 그 connection의 live controller만 fallback으로 허용한다.
     notification_stream_auth_v1: bool = false,
+    notification_delivery_v1: bool = false,
     /// host가 `runtime.link_at`으로 자기 core의 `extractUrlAt`(추출 + cwd resolve + 존재 stat)을 실행할 수 있는가.
     /// 없으면 client는 이 RPC를 보내지 않고 원격 링크 열기를 비활성한다(docs/link-detection.md §원격(host-backed) 세션).
     runtime_link_at_v1: bool = false,
@@ -7093,6 +7097,12 @@ pub const Client = struct {
             ack.payload,
             "notification_stream_auth_v1",
         );
+        self.notification_delivery_v1 = payloadHasCapability(
+            ack.payload,
+            "notification_delivery_v1",
+        );
+        if (self.notification_delivery_v1 and !self.notification_stream_auth_v1)
+            return error.HandshakeFailed;
         self.runtime_link_at_v1 = payloadHasCapability(ack.payload, "runtime_link_at_v1");
         self.runtime_clipboard_v1 = payloadHasCapability(ack.payload, "runtime_clipboard_v1");
         // This is the sole proof publication point: all schema/fingerprint checks above succeeded.
@@ -15321,6 +15331,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "runtime_selected_text_v1",
     "runtime_selection_state_v1",
     "notification_stream_auth_v1",
+    "notification_delivery_v1",
     "runtime_link_at_v1",
     "runtime_clipboard_v1",
     "connection_profile",
@@ -23054,8 +23065,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\x16\xf5\xbc\x3a\x8a\xd9\xd9\x1d\x37\xd0\xdc\x0e\xcd\x4b\x23\x25" ++
-        "\xd7\x1a\x6b\x9d\x08\x3d\x91\x77\xa7\xd3\xeb\x10\x61\xc7\xd0\x4a";
+        "\xd8\x90\x73\x7f\x1a\x16\x86\x00\x5d\x5d\x98\x3d\x03\x09\xec\xdd" ++
+        "\xb3\x43\xff\xb2\x9c\x31\x6f\xe3\xc5\x20\x58\x37\x78\xc6\x8f\xf7";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,

@@ -651,6 +651,7 @@ pub const HostAdapter = struct {
             .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
             .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
             .notification_stream_auth = client.notification_stream_auth_v1,
+            .notification_delivery = client.notification_delivery_v1,
             .runtime_clipboard = client.runtime_clipboard_v1,
             .runtime_core_command = client.runtime_core_command_v1,
             .runtime_link_at = client.runtime_link_at_v1,

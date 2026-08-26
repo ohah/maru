@@ -266,7 +266,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
             "platform/macos/session_host/remote_runtime.zig",
         }),
     );
-    try std.testing.expectEqual(@as(usize, 9), count(contract, ".attach_observer"));
+    try std.testing.expectEqual(@as(usize, 8), count(contract, ".attach_observer"));
     try std.testing.expectEqual(@as(usize, 0), count(attachment, ".attach_observer"));
     try std.testing.expectEqual(@as(usize, 3), count(client_slot, ".attach_observer"));
     try std.testing.expectEqual(@as(usize, 3), count(cleanup_registry, ".attach_observer"));

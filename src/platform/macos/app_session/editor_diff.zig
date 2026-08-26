@@ -431,14 +431,16 @@ fn displayText(text: []const u8) []const u8 {
 /// `read_only`가 참인 이유는 파일 권한이 아니라 **비교 자체가 읽기 전용**이라서다(§3.5가 v1에서
 /// stage 버튼을 숨기는 것과 같은 사실). 소비자가 보는 것은 "이 화면은 편집할 수 없다"이므로,
 /// 이유가 달라도 값은 참이어야 한다.
-pub fn editorMeta(term: *const Term) struct { path: ?[]const u8, read_only: bool } {
+pub fn editorMeta(term: *const Term) struct { path: ?[]const u8, read_only: bool, dirty: bool } {
     if (isDiffTerm(term)) {
         const entry = term.file_entry.?;
-        return .{ .path = if (entry.path.len == 0) null else entry.path, .read_only = true };
+        // 비교 뷰는 **읽기 전용 결과**라 저장할 것이 없다 — dirty 축이 아예 없다(§7).
+        return .{ .path = if (entry.path.len == 0) null else entry.path, .read_only = true, .dirty = false };
     }
     return .{
         .path = if (term.rt.editor_path) |p| p else null,
         .read_only = if (term.rt.editor_doc) |d| d.file.read_only else false,
+        .dirty = if (term.rt.editor_doc) |d| d.isDirty() else false,
     };
 }
 

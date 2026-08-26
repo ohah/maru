@@ -249,6 +249,11 @@ const Table = struct {
     app_close_window_running: [:0]const u8,
     app_close_browser: [:0]const u8,
     app_close_window_browser: [:0]const u8,
+    /// 저장하지 않은 편집이 있는 편집기를 닫으려 할 때(file-panel-dock-ui.md §3.2 "dirty 보호").
+    /// **`app_close_running`을 재사용하지 않는다** — 실행 중 명령이 없는데 "명령이 돌고 있다"고
+    /// 말하면 사용자가 무엇을 잃는지 모른다. 브라우저 탭이 같은 이유로 자기 문구를 갖는다.
+    app_close_unsaved: [:0]const u8,
+    app_close_window_unsaved: [:0]const u8,
 
     // ── 세팅 섹션 이름 (I4) ──
     // 스키마의 `Section` 과 1:1 이다. 새 섹션을 넣고 여기 키를 빠뜨리면 `settingsSectionLabel` 의
@@ -932,7 +937,9 @@ const en: Table = .{
     .app_close_running = "A command is still running. Close anyway?",
     .app_close_window_running = "A command is still running. Close this window?",
     .app_close_browser = "You have open browser tabs. Close anyway?",
+    .app_close_unsaved = "You have unsaved changes. Close anyway?",
     .app_close_window_browser = "You have open browser tabs. Close this window?",
+    .app_close_window_unsaved = "You have unsaved changes. Close this window?",
     .set_section_app = "App",
     .set_section_font = "Font",
     .set_section_theme = "Theme",
@@ -1491,7 +1498,9 @@ const ko: Table = .{
     .app_close_running = "실행 중인 명령이 있습니다. 닫을까요?",
     .app_close_window_running = "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
     .app_close_browser = "열린 브라우저 탭이 있습니다. 닫을까요?",
+    .app_close_unsaved = "저장하지 않은 편집이 있습니다. 닫을까요?",
     .app_close_window_browser = "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
+    .app_close_window_unsaved = "저장하지 않은 편집이 있습니다. 이 창을 닫을까요?",
     .set_section_app = "앱",
     .set_section_font = "폰트",
     .set_section_theme = "테마",

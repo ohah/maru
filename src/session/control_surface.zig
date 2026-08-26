@@ -130,6 +130,13 @@ pub const EditorMeta = struct {
     path: ?[]const u8 = null,
     /// 쓸 수 없는 파일이라 읽기 전용으로 열렸는가(§3.5 — 여는 것을 막지는 않는다).
     read_only: bool = false,
+    /// 저장하지 않은 편집이 있는가([file-panel.md](../../docs/file-panel.md) §1이 계약을 소유한다 —
+    /// **내용 동등성**이라 undo로 저장 시점 내용에 돌아오면 false다).
+    ///
+    /// **타입 있는 필드로 싣는 이유**: 이 값은 사람이 보는 제목에 `●` 접두로도 나간다. 그것만 두면
+    /// 소비자가 **제목 문자열을 뜯어** dirty를 알아내야 하고, 표식을 바꾸는 순간 조용히 깨진다
+    /// (적대적 검증 2026-08-26이 그 상태를 잡았다).
+    dirty: bool = false,
 };
 
 /// web surface 전용 메타(§3). collector가 WKWebView 상태에서 채운다(Phase 4·5, 여긴 스키마만).

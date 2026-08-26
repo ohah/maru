@@ -7296,6 +7296,18 @@ pub const Client = struct {
         restored,
     };
 
+    /// generation allocator scope 가 무효가 되는 축. 닫힌 집합이라 새 축을 더하면 여기부터 손댄다.
+    pub const ScopeInvalidAxis = enum {
+        ledger_absent,
+        purpose_out_of_range,
+        token_addr_zero,
+        client_addr_mismatch,
+        epoch_zero,
+        ledger_mismatch,
+        installed_allocator_mismatch,
+        parser_allocator_mismatch,
+    };
+
     const GenerationAllocatorScopeIdentity = struct {
         token_addr: usize,
         client_addr: usize,
@@ -7304,21 +7316,34 @@ pub const Client = struct {
         previous_allocator: std.mem.Allocator,
         installed_allocator: std.mem.Allocator,
 
-        fn validForClient(self: GenerationAllocatorScopeIdentity, client: *const Client) bool {
+        /// scope 가 이 Client 에 유효하지 않게 만드는 **첫 축**. 유효하면 null.
+        ///
+        /// 판정 자체는 `validForClient` 와 완전히 같다(같은 순서·같은 조건). 나눠 둔 이유는 진단이다 —
+        /// 2026-08-26 에 이 검사가 실패해 read pump 가 연결을 poison 했고 incident 10 건이 남았는데,
+        /// 전부 `local_invariant_violation` 한 값뿐이라 **일곱 축 중 무엇이 깨졌는지 알 길이 없었다.**
+        /// 원인 추적이 정확히 여기서 막혔다.
+        fn firstInvalidAxis(self: GenerationAllocatorScopeIdentity, client: *const Client) ?ScopeInvalidAxis {
             const purpose_raw = @as(*const u8, @ptrCast(&self.purpose)).*;
-            const ledger = client.generation_batch_accounting.ledger orelse return false;
-            return purpose_raw <= @intFromEnum(GenerationAllocatorPurpose.rpc_execute) and
-                self.token_addr != 0 and self.client_addr == @intFromPtr(client) and
-                self.epoch != 0 and ledger.allocatorScopeMatches(
+            const ledger = client.generation_batch_accounting.ledger orelse return .ledger_absent;
+            if (purpose_raw > @intFromEnum(GenerationAllocatorPurpose.rpc_execute)) return .purpose_out_of_range;
+            if (self.token_addr == 0) return .token_addr_zero;
+            if (self.client_addr != @intFromPtr(client)) return .client_addr_mismatch;
+            if (self.epoch == 0) return .epoch_zero;
+            if (!ledger.allocatorScopeMatches(
                 self.client_addr,
                 self.token_addr,
                 self.epoch,
                 purpose_raw,
                 self.previous_allocator,
                 self.installed_allocator,
-            ) and
-                allocatorEql(client.allocator, self.installed_allocator) and
-                client.parser.usesAllocator(self.installed_allocator);
+            )) return .ledger_mismatch;
+            if (!allocatorEql(client.allocator, self.installed_allocator)) return .installed_allocator_mismatch;
+            if (!client.parser.usesAllocator(self.installed_allocator)) return .parser_allocator_mismatch;
+            return null;
+        }
+
+        fn validForClient(self: GenerationAllocatorScopeIdentity, client: *const Client) bool {
+            return self.firstInvalidAxis(client) == null;
         }
 
         fn matchesToken(
@@ -7358,11 +7383,27 @@ pub const Client = struct {
         return left.ptr == right.ptr and left.vtable == right.vtable;
     }
 
+    /// canonical event allocator scope 가 깨진 **축**을 남긴다.
+    ///
+    /// incident 는 `local_invariant_violation` 이라는 **결론**만 담는다 — DTO 의 scalar 집합이 고정이라
+    /// 그 결론에 이른 축은 실을 자리가 없다. 2026-08-26 에 이 경로로 incident 10 건이 쌓였는데 전부 같은
+    /// 값이라 일곱 축 중 무엇이 깨졌는지 못 좁혔고, 추적이 거기서 멈췄다. GUI 진단이
+    /// `<cache>/maru/app.log` 로 남게 된 지금은 이 한 줄이 다음 재발의 출발점이 된다.
+    ///
+    /// 판정에는 관여하지 않는다 — fail-closed 는 그대로이고 사유만 적는다.
+    fn logCanonicalScopeInvalid(axis: ScopeInvalidAxis) void {
+        if (builtin.is_test) return;
+        std.log.err("canonical event allocator scope invalid: axis={s}", .{@tagName(axis)});
+    }
+
     /// Event ownership outlives a blocking generation allocator scope. While the parser uses the
     /// installed allocator, event publication remains anchored to the pre-scope Client domain.
     fn canonicalEventAllocator(self: *const Client) error{InvalidState}!std.mem.Allocator {
         if (self.active_generation_allocator_scope) |scope| {
-            if (!scope.validForClient(self)) return error.InvalidState;
+            if (scope.firstInvalidAxis(self)) |axis| {
+                logCanonicalScopeInvalid(axis);
+                return error.InvalidState;
+            }
             return scope.previous_allocator;
         }
         return self.allocator;
@@ -25075,4 +25116,51 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
     const term_resp = try client.call("runtime.terminate", term_params);
     defer allocator.free(term_resp);
     try testing.expect(std.mem.indexOf(u8, term_resp, "terminated") != null);
+}
+
+test "generation allocator scope 무효 축은 하나씩 구별된다" {
+    // 이 테스트가 증명하는 것: `firstInvalidAxis`가 일곱 축을 **뭉개지 않는다**. 2026-08-26에 이 검사가
+    // read pump에서 실패해 incident 10건이 쌓였는데, 전부 `local_invariant_violation` 한 값뿐이라 무엇이
+    // 깨졌는지 못 좁혔다. 축이 구별되지 않으면 로그를 남겨도 같은 자리에서 다시 막힌다.
+    const stable_allocator = std.testing.allocator;
+    var temporary_counting: FreeCountingAllocator = .{ .parent = std.testing.allocator };
+    const temporary_allocator = temporary_counting.allocator();
+    var client = makeConnectedTestClient(stable_allocator, -1);
+    defer client.deinit();
+    client.connection_profile = .gui;
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(temporary_allocator, .attachment_batch, &scope);
+    defer client.restoreGenerationAllocatorScope(&scope) catch {};
+
+    const identity = client.active_generation_allocator_scope orelse return error.TestUnexpectedResult;
+    // 정상 scope는 어떤 축도 걸리지 않는다 — 그래야 아래 위반들이 "그 축 때문"임이 증명된다.
+    try std.testing.expectEqual(@as(?Client.ScopeInvalidAxis, null), identity.firstInvalidAxis(&client));
+    try std.testing.expect(identity.validForClient(&client));
+
+    // 축을 하나씩만 깨뜨리고, 정확히 그 축이 나오는지 본다. 판정 순서가 그대로임도 함께 고정된다.
+    var broken = identity;
+    broken.token_addr = 0;
+    try std.testing.expectEqual(Client.ScopeInvalidAxis.token_addr_zero, broken.firstInvalidAxis(&client).?);
+    try std.testing.expect(!broken.validForClient(&client));
+
+    broken = identity;
+    broken.client_addr = @intFromPtr(&client) + 1;
+    try std.testing.expectEqual(Client.ScopeInvalidAxis.client_addr_mismatch, broken.firstInvalidAxis(&client).?);
+
+    broken = identity;
+    broken.epoch = 0;
+    try std.testing.expectEqual(Client.ScopeInvalidAxis.epoch_zero, broken.firstInvalidAxis(&client).?);
+
+    // ledger가 아예 없으면 다른 어떤 축보다 먼저 걸린다 — 나머지를 잴 근거 자체가 없기 때문이다.
+    // Client를 복사해서 재지 않는다: 복사본은 주소가 달라 `client_addr` 축을 먼저 건드리고, 무엇보다
+    // 이 타입은 복사를 불변식 위반으로 다룬다. 원본의 ledger만 잠시 떼었다 되돌린다.
+    const saved_ledger = client.generation_batch_accounting.ledger;
+    client.generation_batch_accounting.ledger = null;
+    try std.testing.expectEqual(Client.ScopeInvalidAxis.ledger_absent, identity.firstInvalidAxis(&client).?);
+    client.generation_batch_accounting.ledger = saved_ledger;
+    try std.testing.expectEqual(@as(?Client.ScopeInvalidAxis, null), identity.firstInvalidAxis(&client));
 }

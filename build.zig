@@ -3324,6 +3324,38 @@ pub fn build(b: *std.Build) void {
         session_host_input_parity_step.dependOn(&run_input_parity_boundary_tests.step);
         boundary_step.dependOn(&run_input_parity_boundary_tests.step);
     }
+    const session_host_notification_journal_step = b.step(
+        "test-session-host-notification-journal",
+        "Verify P4 N1 bounded host notification journal",
+    );
+    session_host_notification_journal_step.dependOn(session_host_input_parity_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |journal_optimize| {
+        const journal_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/notification_journal.zig"),
+                .target = target,
+                .optimize = journal_optimize,
+            }),
+            .filters = &.{"P4 N1"},
+        });
+        const run_journal_tests = b.addRunArtifact(journal_tests);
+        run_journal_tests.addArg("--maru-expect-tests=8");
+        session_host_notification_journal_step.dependOn(&run_journal_tests.step);
+
+        const journal_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_journal_boundary.zig"),
+                .target = target,
+                .optimize = journal_optimize,
+            }),
+            .filters = &.{"P4 N1 notification journal 경계는"},
+        });
+        const run_journal_boundary_tests = b.addRunArtifact(journal_boundary_tests);
+        run_journal_boundary_tests.addArg("--maru-expect-tests=1");
+        run_journal_boundary_tests.setCwd(b.path("."));
+        session_host_notification_journal_step.dependOn(&run_journal_boundary_tests.step);
+        boundary_step.dependOn(&run_journal_boundary_tests.step);
+    }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

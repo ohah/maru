@@ -2221,3 +2221,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   routing과 transient host selection clear, 실제 host의 viewport보다 긴 scrollback 전체 선택·복사를 검증한다.
 - **호환 한계:** `all` op를 모르는 same-major 구 host는 `{sel:false}`를 반환해 새 client가 절대 좌표를
   추측하지 않고 현재 viewport 선택으로만 degraded된다. frozen 구 binary 재접속 행은 별도 자동 gate가 아니다.
+
+### P4 N1 bounded notification journal
+
+- **상태: 구현(독립 pure owner).** final-address host owner가 `{host_id,runtime_id,event_id}` stable identity,
+  GUI/OS delivery bit, checked-monotonic ID와 bounded owned payload를 소유한다.
+- **자동 검증:** `zig build test-session-host-notification-journal`이 Debug·ReleaseFast runtime 8개와 boundary 1개로
+  cap, prepare-before-evict, allocator fail-index rollback, copied owner 거부와 repo-wide 제품 caller 0을 검증한다.
+- **미완료 경계:** OSC admission, daemon-internal macOS sink, runtime label/config 배선은 N2이고 cold-launch route는
+  N3다. 따라서 N1만으로 GUI 0 배너나 background notification 제품 완료를 주장하지 않는다.

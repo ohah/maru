@@ -7244,6 +7244,23 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 - 모든 일반 persistent runtime의 OSC 9/777에 `{host_id,runtime_id,event_id}` stable identity를 부여하고, GUI 0
   bounded journal·OS 배너·cold-launch attach와 GUI-live fast hint를 구현한다. notification sink는 daemon 내부
   platform adapter이며 별도 MRSH client가 아니다. permission denied는 세션 실패가 아닌 명시적 degraded 상태다.
+  - **N1 bounded notification journal 계약:** N1은 socket·AppKit·Notification Center·`TerminalCore`를 import하지 않는
+    host-owned pure journal을 먼저 만든다. journal은 final address에 `initInPlace`하고 copy/move 뒤의
+    admit/peek/ack/deinit을 typed `invalid_owner` 또는 mutation 0으로 거부한다. 생성 때 exact `host_id`와 0이 아닌
+    `Limits { max_events, max_resident_bytes, max_title_bytes, max_body_bytes, max_label_bytes }`를 받고, 각 accepted row에
+    `{host_id,runtime_id,event_id,occurred_at_ns,title,body,display_label}`의 독립 소유 bytes를 저장한다. `surface_id`,
+    app epoch와 GUI token은 stable row에 들어가지 않는다. `event_id`는 1에서 시작하는 host-lifetime checked-monotonic
+    `u64`이고 drop·consume 뒤에도 재사용하지 않는다. max에서 다음 admission은 allocation과 journal mutation 0인 typed
+    `event_id_exhausted`이며 wrap하지 않는다.
+  - title/body/label의 개별 cap과 `max_resident_bytes`는 allocation 전에 checked-add로 판정한다. 한 row 자체가 cap을
+    넘으면 `field_too_large|resident_limit`로 기존 row·next id mutation 0이다. 정상 admission은 세 field를 모두
+    준비한 뒤에만 row와 next id를 commit하며, allocator fail-index 어느 지점에서도 partial row·ID hole·resident-byte
+    drift가 없다. `max_events`가 찼을 때는 가장 오래된 row를 exact once evict한 뒤 새 row를 넣되, candidate 준비 실패면
+    old row를 보존한다. eviction은 admission commit의 infallible suffix에서만 일어난다.
+  - reader는 stable `{host_id,event_id}` key로 row를 peek한다. GUI와 N2 sink가 서로의 소비를 빼앗지 않도록 N1 row는
+    `pending_gui`와 `pending_os` 두 delivery bit를 갖고, 각 consumer의 `ack(key)`가 자기 bit만 one-shot으로 내린다.
+    unknown/cross-host/copied ack는 mutation 0이고 두 bit가 모두 내려간 row만 앞에서 회수한다. N1은 sink 호출, runtime
+    label 갱신, OSC config 판단과 제품 admission을 열지 않으며 그 배선은 N2가 소유한다.
 - 준비 release A에서 durable tombstone과 typed config provenance/explicit override retention을 default `false`로
   배포하고, release B에서만
   absent materialization 성공 뒤 default `true`를 적용한다.

@@ -256,6 +256,11 @@ fn decodeHookPath(buf: []u8, raw: []const u8) ?[]const u8 {
 ///
 /// `exec` 는 계약이 codex 의 셸 이름으로 적어 둔 것인데 **이 기계 실측에서는 안 나왔다**(codex 도 `Bash`
 /// 를 쓴다 — 185건). 지우지 않는 이유는 계약이 그 이름을 말하기 때문이다 — 관측이 계약을 이기지 않는다.
+/// ⚠️ **codex 도 `Bash` 로 보고한다**(2026-08-26 실측: codex 훅 이벤트의 도구 이름은
+/// `Bash` 185 · `apply_patch` 42 · `update_plan` 13 · mcp 몇 — **`exec` 는 양 provider 통틀어 0건**).
+/// 계약 §2 가 적은 `exec-96de8969-…` 는 **`tool_use_id` 의 접두어**이지 도구 이름이 아니다.
+/// 그래서 아래 `exec` 가지는 지금 한 번도 안 밟힌다 — 방어로 남기되, **codex 를 위해 `Bash` 를 지우면
+/// codex 의 셸이 통째로 안 세어진다.**
 fn isShellTool(tool_name: []const u8) bool {
     if (std.mem.eql(u8, tool_name, "Bash")) return true;
     if (std.mem.eql(u8, tool_name, "exec")) return true;

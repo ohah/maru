@@ -407,6 +407,10 @@ jobs:
           launchctl print "gui/$(id -u)" 2>&1 | head -5 || echo "(gui 도메인 없음)"
           echo "== WindowServer"
           pgrep -l WindowServer || echo "(WindowServer 없음)"
+      # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다 — 이걸 빠뜨린 첫 시도가
+      # `unresolved_import` 로 죽었다(AppKit 과 무관한 실패였다). 기존 web job 과 같은 명령을 쓴다.
+      - name: 웹 의존성 설치
+        run: bun install --cwd web --frozen-lockfile
       - name: AppKit 창 스모크
         run: mise run macos-app-smoke
 

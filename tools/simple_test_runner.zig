@@ -40,6 +40,10 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 /// `overwrite=0` 이라 이미 값을 정한 실행(전용 격리 하니스)은 그대로 존중한다. 실패는 무시한다 — 격리는
 /// 라이브러리 기본값이 한 번 더 받치고 있고, runner 가 여기서 죽으면 테스트 자체를 못 돌린다.
 fn isolateSessionHostRoot() void {
+    // **macOS 전용이다.** session host 자체가 macOS 기능이고, 무엇보다 `setenv` 는 libc 심볼이라
+    // libc 를 링크하지 않는 Linux test 바이너리에서는 **링크 단계에서 실패한다**(CI 의 ubuntu 오라클
+    // 잡이 그렇게 깨졌다). `comptime` 분기라 그 대상에서는 아래 코드와 심볼 참조가 통째로 사라진다.
+    if (comptime builtin.os.tag != .macos) return;
     var buf: [64]u8 = undefined;
     const root = std.fmt.bufPrintZ(&buf, "/tmp/maru-t{d}", .{std.c.getpid()}) catch return;
     _ = setenv("MARU_SESSION_HOST_ROOT", root.ptr, 0);

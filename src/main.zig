@@ -5618,8 +5618,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             });
             break :status_bar;
         }
+        // **지은 것이 지금 기하와 같은가.** 창이 커진 뒤 다시 안 지으면 옛 사각형에 남는데
+        // (실측 2026-08-26: y=574·w=984 에 남아 화면에서 사라졌다) 위 값들은 **전부 기하만 보므로**
+        // 하나도 안 움직였다. 그래서 **실제로 지어 둔 배경 셀**과 지금 기하를 견준다 — 서로 다른
+        // 곳에서 온 두 값이라 동어반복이 아니다.
+        const built_rect: ?[4]f32 = if (status_cells.items.len == 0) null else status_cells.items[0].rect;
+        const fresh = if (built_rect) |r|
+            r[0] == @as(f32, @floatFromInt(bar.x)) and r[1] == @as(f32, @floatFromInt(bar.y)) and
+                r[2] == @as(f32, @floatFromInt(bar.w)) and r[3] == @as(f32, @floatFromInt(bar.h))
+        else
+            false;
         const fits = bar.h == 0 or (bar.y + bar.h == client_h and bar.w == client_w);
-        try stdout.print("status_bar=({d},{d},{d},{d}) status_full_width={} status_above_bottom={} status_cells={d} status_placed={d} status_dropped={d} status_outside={d} status_mismatch={d} term_bottom={d} status_ok={}\n", .{
+        try stdout.print("status_bar=({d},{d},{d},{d}) status_full_width={} status_above_bottom={} status_cells={d} status_placed={d} status_dropped={d} status_outside={d} status_mismatch={d} status_rect_fresh={} status_rebuilds={d} term_bottom={d} status_ok={}\n", .{
             bar.x,
             bar.y,
             bar.w,
@@ -5631,9 +5641,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             status_dropped,
             status_outside,
             status_mismatch,
+            fresh,
+            status_rebuilds,
             geom.terminal.y + geom.terminal.h,
             bar.h > 0 and bar.w == client_w and fits and status_placed > 0 and status_outside == 0 and
-                status_mismatch == 0 and
+                status_mismatch == 0 and fresh and
                 geom.terminal.y + geom.terminal.h <= bar.y,
         });
     }

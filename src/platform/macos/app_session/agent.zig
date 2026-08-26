@@ -317,9 +317,14 @@ pub fn sealTurnCaptureNow(self: *AppSession, term: *Term) turn_capture.Id {
 
 fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
     const turn = self.turn_captures.openTurn(identity) orelse return 0;
-    if (turn.entries.items.len == 0) return 0;
+    // **경로 수가 아니라 「붙일 것이 있나」로 묻는다.** 예전에는 `entries.len == 0` 이면 여기서 돌아섰는데,
+    // 그러면 **셸만 쓴 턴이 봉인에 닿지 못한다** — 경로가 0개이므로. 그런데 그 턴이야말로 고지가 가장
+    // 필요한 자리다(파일 행이 전부 `·` 인데 왜 그런지를 말해 줄 것이 셸 수뿐이다). `Store.seal` 이
+    // 이미 같은 질문을 하지만, 여기서 먼저 물어야 **뒤의 저장소 루트 조회를 안 한다**.
+    if (!turn.hasEvidence()) return 0;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse "");
+    // 경로가 없으면 사본을 뜰 것도 없다 — 루트를 찾는 syscall 도 건너뛴다.
+    const root = if (turn.entries.items.len == 0) "" else (self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse ""));
     if (root.len != 0) {
         // **인덱스로 훑어도 안전한 이유**: `noteAfter` 는 `after` 필드만 채우고 **항목을 추가하지 않는다**
         // — 리스트가 재할당되지 않으므로 순회 중 길이·주소가 안 흔들린다. (경로 슬라이스는 항목이 소유하고
@@ -2113,12 +2118,16 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
         var rotated_turn_end = false;
         var rotated_base = false;
         var rotated_facts: BatchTurnFacts = .{};
-        var rotated_capture: turn_capture.Id = 0;
+        // ⚠️ **회전본에서는 봉인하지 않는다 — 늘 0이다.** 그 이벤트의 도구는 이미 오래전에 끝나 사본이
+        // 없고(위에서 캡처를 막는다), 그런데도 봉인하면 **지금 진행 중인 턴의 열린 버킷**을 굳혀 버린다 —
+        // 회전본에 `Stop` 이 들어 있으면 진행 중 턴의 사본이 **엉뚱한 턴으로 도둑맞고** 진짜 턴 끝에는
+        // 빈 버킷만 남는다. 스냅샷(tree)은 회전본에도 찍는 것이 맞지만(그 세션의 첫 턴을 잃지 않으려고)
+        // 사본은 그렇지 않다 — 없는 것을 지어내는 쪽이 나쁘다.
+        const rotated_capture: turn_capture.Id = 0;
         for (events[0..batch.count]) |ev| {
             const applied = applyHookEvent(self, term, ev);
             if (applied.turn_end) {
                 rotated_turn_end = true;
-                rotated_capture = sealTurnCaptureNow(self, term);
                 rotated_facts.captureFrom(term); // 회전본도 같은 규율이다
             }
             if (applied.base) rotated_base = true;

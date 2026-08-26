@@ -656,6 +656,9 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
         var file_index: u32 = 0;
         var any_file = false;
+        // **사본은 파일마다가 아니라 한 번 찾는다.** 이 투영은 **매 프레임** 도는데, 파일마다 찾으면
+        // 봉인 슬롯(최대 65)을 파일 수만큼 다시 훑고 그 안에서 다시 경로를 최대 256개 비교한다.
+        const turn_capture_ref = turnCaptureRef(self, head);
         while (files.next()) |entry| : (file_index += 1) {
             if (n >= items.len) break;
             any_file = true;
@@ -668,7 +671,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .letter = entry.letter,
                     .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
                     .from_turn = true, // 이 줄을 누르면 `스냅샷 ↔ 스냅샷`이 열린다(커밋과 다른 비교다)
-                    .origin = turnFileOrigin(self, head, entry.path),
+                    .origin = turnFileOrigin(self, turn_capture_ref, entry.path),
                 },
             };
             n += 1;
@@ -771,16 +774,27 @@ fn shellNoticeFor(
 ///
 /// 「캡처에 있는데 편집 도구 소행이 아님」은 `.turn_change` 다 — `Read` 로 열어 두고 셸로 고친 경우가
 /// 그것이고, 그 판정은 `Entry.editedByAgent` 한 자리에 있다.
-fn turnFileOrigin(
+/// 스냅샷이 가리키는 봉인 사본(없으면 `null`).
+///
+/// **한 자리에 모아 둔 이유**: 「`capture_id == 0` 은 «모른다»」가 이 기능의 규율인데, 이 해상을
+/// 부르는 쪽마다 인라인으로 쓰면 그 규율이 여러 벌로 갈린다. 제품(투영)과 테스트가 **같은 것**을 쓴다.
+fn turnCaptureRef(
     self: *AppSession,
     head: ?*const maru.session.turn_snapshot.Snapshot,
+) ?*const maru.session.turn_capture.Turn {
+    const snap = head orelse return null;
+    if (snap.capture_id == 0) return null;
+    return self.turn_captures.sealedTurn(snap.capture_id);
+}
+
+fn turnFileOrigin(
+    self: *AppSession,
+    turn: ?*const maru.session.turn_capture.Turn,
     rel_path: []const u8,
 ) chrome.components.scm_dock.types.TurnFileOrigin {
-    const snap = head orelse return .unknown;
-    if (snap.capture_id == 0) return .unknown;
-    const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return .unknown;
+    const found = turn orelse return .unknown;
     const repo = self.git_repo orelse return .unknown;
-    for (turn.entries.items) |entry| {
+    for (found.entries.items) |entry| {
         const entry_rel = maru.session.repo_path.displayRelative(entry.path, repo);
         if (!std.mem.eql(u8, entry_rel, rel_path)) continue;
         return if (entry.editedByAgent()) .ai_edit else .turn_change;
@@ -795,7 +809,9 @@ fn turnFileOrigin(
 fn editedCountFor(self: *AppSession, snap: *const maru.session.turn_snapshot.Snapshot) u32 {
     if (snap.capture_id == 0) return 0;
     const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return 0;
-    return turn.editedCount();
+    // **캐시를 읽는다** — 이 함수는 턴 행마다 **매 프레임** 돈다. 훑어 세는 `countEdited()` 는
+    // 항목마다 `mem.eql` 로 최대 1 MiB 를 비교한다(`turn_capture.Turn.edited_count` 주석).
+    return turn.edited_count;
 }
 
 fn turnSummary(
@@ -812,6 +828,16 @@ fn turnSummary(
     //
     // ⚠️ **`Read` 를 여기 더하면 안 된다.** 경로를 실은 `PreToolUse` 의 70%가 `Read` 라(실측) 읽기만 한
     // 파일이 «편집» 으로 뜬다. 판정은 `Entry.editedByAgent` 한 자리에 있다.
+    //
+    // ⚠️ **오른쪽이 왼쪽보다 클 수 있다 — 그리고 그때 펼친 목록과 수가 안 맞는다.** `add -A` 가
+    // gitignore 를 지키므로 에이전트가 **무시되는 파일**(`.env`·빌드 산출물·로컬 설정)을 고치면 tree 는
+    // 못 보고 캡처는 본다. 그러면 `3개 파일 · ✎ AI 편집 5` 가 뜨는데 펼치면 `✎` 가 **3개뿐**이다 —
+    // 목록은 tree 가 만들기 때문이다.
+    //
+    // **그래도 줄이지 않는다.** 「git 이 3개만 보지만 에이전트는 5개를 고쳤다」는 **사실이고 쓸모 있다** —
+    // 수를 tree 에 맞춰 깎으면 그 사실이 사라진다. 두 라벨이 서로 다른 것을 센다고 이미 말하고 있다
+    // (`N개 파일` 은 작업트리, `✎ N` 은 편집 도구). 목록이 캡처로 옮겨가면(tree 제거 뒤) 이 어긋남도
+    // 함께 사라진다.
     //
     // 0이면 붙이지 않는다 — `files_known` 이 「0과 모름을 가른다」와 같은 규율이다. 캡처가 없는 턴
     // (관측 모드·훅 없는 세션·셸 전용 턴)에서 «✎ 0» 은 «에이전트가 아무것도 안 했다» 로 읽히는데,
@@ -4150,27 +4176,27 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
     // 목록이 주는 것은 **저장소 상대경로**다.
     try std.testing.expectEqual(
         chrome.components.scm_dock.types.TurnFileOrigin.ai_edit,
-        turnFileOrigin(session, &snap, "src/edited.zig"),
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "src/edited.zig"),
     );
     // 읽기만 한 파일은 내용이 달라졌어도 **편집 도구 소행이 아니다**.
     try std.testing.expectEqual(
         chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
-        turnFileOrigin(session, &snap, "src/shell.zig"),
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "src/shell.zig"),
     );
     // 캡처에 없는 파일도 마찬가지다.
     try std.testing.expectEqual(
         chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
-        turnFileOrigin(session, &snap, "src/never_touched.zig"),
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "src/never_touched.zig"),
     );
     // **캡처가 없는 턴은 `.unknown`** 이다 — 「셸이 고쳤다」와 「우리가 못 봤다」를 가른다.
     var no_capture: maru.session.turn_snapshot.Snapshot = .{};
     try std.testing.expectEqual(
         chrome.components.scm_dock.types.TurnFileOrigin.unknown,
-        turnFileOrigin(session, &no_capture, "src/edited.zig"),
+        turnFileOrigin(session, turnCaptureRef(session, &no_capture), "src/edited.zig"),
     );
     try std.testing.expectEqual(
         chrome.components.scm_dock.types.TurnFileOrigin.unknown,
-        turnFileOrigin(session, null, "src/edited.zig"),
+        turnFileOrigin(session, turnCaptureRef(session, null), "src/edited.zig"),
     );
 }
 

@@ -47,6 +47,10 @@ pub fn dispatchOsc(self: *TerminalCore) void {
         // 수집 상한(oscMayGrow)을 넘긴 OSC는 통째로 무시(거대/악의적 시퀀스 방어). 그게 클립보드(52;)였으면
         // (osc_large_ok latch) 무음 폐기 대신 거부를 표면화해 사용자가 "왜 복사가 안 됐는지" 알게 한다.
         if (self.osc_large_ok) self.clipboard_write_rejected = true;
+        const body = self.osc_buffer.items;
+        if ((std.mem.startsWith(u8, body, "777;notify;")) or
+            (std.mem.startsWith(u8, body, "9;") and osc.isNotify9Body(body[2..])))
+            self.notification_write_rejected = true;
         return;
     }
     const body = self.osc_buffer.items;

@@ -1293,8 +1293,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
 
    **P4 N1 bounded notification journal (구현 완료):** parity micro-gate 다음 순서로 host-owned pure
    journal을 독립 gate로 세운다. stable host/runtime/event identity, dual GUI/OS delivery bit, checked-monotonic ID,
-   event/resident/field cap, prepare-before-evict와 allocator fail-index rollback을 고정한다. 이 slice의 제품 caller는 0이며
-   OSC admission과 daemon-internal sink 배선은 N2, cold-launch route는 N3가 소유한다.
+   event/resident/field cap, prepare-before-evict와 allocator fail-index rollback을 고정한다.
+
+   **P4 N2a product admission·handoff (구현 완료):** `RuntimeManager` owner tick이 실제 PTY OSC slot을 UTF-8/control-sequence
+   sanitizer 뒤 N1 journal에 generation-CAS로 옮기고 기존 `runtime.notification` GUI consume을 journal 위로 이관한다.
+   same-PID outer optional handoff는 row/ID/delivery bit/drop counter를 보존하고 capture 뒤 mutation을 semantic digest로
+   fail-close한다. config/label control과 daemon-internal macOS sink는 N2b, cold-launch route는 N3가 소유한다.
 
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.

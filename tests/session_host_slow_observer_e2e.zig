@@ -373,9 +373,21 @@ pub fn main(init: std.process.Init) !void {
     );
     if (!pty_probe_fds_closed) return error.ProbeFdLeakEvidenceMissing;
 
-    stage = "output wake idle observation";
-    const idle_cpu_before = try takeIdleCpuSample(host_identity, init.io);
-    const idle_wake_before = try probe(
+    stage = "output wake source settle";
+    while (try pumpHealthy(
+        &controller,
+        controller_stream,
+        &controller_screen,
+        &controller_drained,
+    )) {}
+    while (try pumpHealthy(
+        &healthy,
+        healthy_stream,
+        &healthy_screen,
+        &healthy_drained,
+    )) {}
+    while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
+    var settle_before = try probe(
         command_pair[0],
         report_pair[0],
         &sequence,
@@ -383,6 +395,50 @@ pub fn main(init: std.process.Init) !void {
         deadline_ns,
         init.io,
     );
+    var settled = false;
+    var settle_attempts: usize = 0;
+    while (settle_attempts < 4) : (settle_attempts += 1) {
+        _ = usleep(600 * std.time.us_per_ms);
+        while (try pumpHealthy(
+            &controller,
+            controller_stream,
+            &controller_screen,
+            &controller_drained,
+        )) {}
+        while (try pumpHealthy(
+            &healthy,
+            healthy_stream,
+            &healthy_screen,
+            &healthy_drained,
+        )) {}
+        while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
+        const settle_after = try probe(
+            command_pair[0],
+            report_pair[0],
+            &sequence,
+            .snapshot,
+            deadline_ns,
+            init.io,
+        );
+        if (settle_after.observation_materializations == settle_before.observation_materializations and
+            settle_after.observation_core_lock_acquisitions == settle_before.observation_core_lock_acquisitions and
+            settle_after.observation_core_lock_hold_total_ns == settle_before.observation_core_lock_hold_total_ns and
+            settle_after.output_wake_notify_attempts == settle_before.output_wake_notify_attempts and
+            settle_after.output_wake_published_writes == settle_before.output_wake_published_writes and
+            settle_after.output_wake_coalesced_writes == settle_before.output_wake_coalesced_writes and
+            settle_after.output_wake_drain_turns == settle_before.output_wake_drain_turns)
+        {
+            settle_before = settle_after;
+            settled = true;
+            break;
+        }
+        settle_before = settle_after;
+    }
+    if (!settled) return error.ObservationSourceDidNotSettle;
+
+    stage = "output wake idle observation";
+    const idle_cpu_before = try takeIdleCpuSample(host_identity, init.io);
+    const idle_wake_before = settle_before;
     const idle_wake_started_at = monotonicNow(init.io);
     _ = usleep(@intCast(idle_wake_observation_ms * std.time.us_per_ms));
     const idle_wake_after = try probe(

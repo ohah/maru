@@ -7261,6 +7261,38 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     `pending_gui`와 `pending_os` 두 delivery bit를 갖고, 각 consumer의 `ack(key)`가 자기 bit만 one-shot으로 내린다.
     unknown/cross-host/copied ack는 mutation 0이고 두 bit가 모두 내려간 row만 앞에서 회수한다. N1은 sink 호출, runtime
     label 갱신, OSC config 판단과 제품 admission을 열지 않으며 그 배선은 N2가 소유한다.
+  - **N2 admission·delivery 계약:** `RuntimeManager`는 exact `host_id`로 journal을 final address에 만들고, owner tick만
+    `TerminalCore.pendingNotification()`을 runtime별 core lock 아래 peek한다. title/body를 journal candidate로 완전히
+    준비한 뒤 `clearNotificationIfGeneration`을 commit하므로 OOM·journal rejection·stale generation에서는 core와 journal
+    어느 쪽도 반쪽 소비하지 않는다. 한 runtime의 단일 core slot이 뒤 이벤트로 덮이기 전에 owner tick이 admission을
+    수행하며, runtime별 실패가 다른 runtime의 drain을 막지 않는다. 일반 OSC parser의 2 KiB 수집 상한에서
+    `9;...` 또는 `777;notify;...`가 넘친 경우 core의 one-shot rejection을 같은 bounded drop counter로 옮긴다.
+    sanitizer/journal의 permanent rejection도 무한 재시도하지 않으며 원문이나 input/paste bytes를 로그에 남기지 않는다.
+  - PTY가 만든 OSC payload는 신뢰 경계 밖이다. N2 presentation sanitizer는 journal admission 전에 title/body/label을
+    valid UTF-8로 만들고 NUL, C0/C1 controls와 ESC/C1로 시작한 CSI·OSC·DCS 계열 제어 시퀀스 전체를 제거한다.
+    불완전한 제어 문자열은 남은 tail 전체를 표시하지 않는다. body의 CR/LF만 줄 경계로 보존하고 title/label의 줄바꿈은
+    공백 하나로 접는다. cap은 정규화된 bytes에 적용하며 잘린 UTF-8이나 escape sequence를 만들지 않는다. 빈 title은
+    Maru fallback을 쓰고 빈 label은 runtime ID의 bounded fallback을 쓴다. stable route ID는 표시 문자열에 섞거나 표시
+    문자열에서 역파싱하지 않는다.
+  - `notifications.osc`와 `display_label`은 GUI process-local `surface_id`가 아니라 daemon이 보존하는 runtime metadata
+    snapshot이다. product GUI의 authenticated controller가 capability-advertised additive control로만 갱신하고, observer,
+    legacy·unknown field, cross-runtime update는 mutation 0으로 거부한다. config false는 새 core pending을 journal에 넣지
+    않고 generation-CAS로 drop하며 이미 admitted된 row의 delivery bit를 소급 변경하지 않는다. label update는 다음 event부터
+    적용하고 이미 admitted된 row는 발화 당시 owned label을 유지한다. GUI 0에서는 마지막 검증 snapshot을 사용한다.
+  - GUI consumer는 기존 `runtime.notification` 단일 슬롯을 직접 소비하지 않고 journal의 `pending_gui` row를 가져간다.
+    response body와 stable key가 connection control queue에 admission된 뒤에만 `.gui` ack를 commit한다. GUI는 key를
+    인앱 history와 OS request에 함께 투영하지만 OS sink의 `.os` bit를 내리지 않는다. legacy client에는 기존 단일-slot
+    adapter를 유지하되 같은 event를 journal과 legacy slot 양쪽에서 소비시키지 않는 negotiated owner가 하나뿐이다.
+  - daemon-internal macOS adapter는 별도 MRSH client나 `AppSession` 없이 `pending_os` row를 게시한다. `hid`·`rid`·`eid`를
+    표시 문자열과 분리된 typed route로 넘기며 OS API가 request를 받아들인 뒤에만 `.os` ack한다. permission denied,
+    bundle/entitlement 부재, transient adapter failure는 PTY/runtime 실패가 아니다. denied는 재요청 loop 없이 degraded
+    상태로 기록하고, transient failure는 같은 row를 bounded backoff로 재시도한다. GUI-live 여부는 delivery ownership을
+    바꾸지 않으며 GUI와 OS 두 bit가 독립적으로 exact once 내려간다.
+  - **upgrade 불변식:** N2 journal은 host-lifetime state다. same-PID exec handoff는 `last_event_id`, exhaustion, eviction/drop
+    counters와 모든 owned row·delivery bit를 outer optional bounded section으로 encode한다. successor는 exact `host_id`,
+    limits, runtime membership과 전량 검증한 candidate를 final manager에 결합한 뒤에만 publish한다. 손상·중복 key·cap 초과,
+    foreign host, allocation failure는 부분 restore나 ID reset 없이 upgrade 전체를 fail-close한다. N1 이전 writer의 section
+    부재는 빈 journal로 호환되지만, section을 광고한 writer의 손상은 조용히 버리지 않는다.
 - 준비 release A에서 durable tombstone과 typed config provenance/explicit override retention을 default `false`로
   배포하고, release B에서만
   absent materialization 성공 뒤 default `true`를 적용한다.

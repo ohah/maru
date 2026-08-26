@@ -5,7 +5,9 @@
 
 const std = @import("std");
 
-pub const HostId = [16]u8;
+/// Product/session-host protocol already owns host identity as a non-zero opaque u128. Reusing that
+/// exact type avoids inventing a byte order when journal keys cross the upgrade or RPC boundary.
+pub const HostId = u128;
 pub const RuntimeId = u128;
 
 pub const Limits = struct {
@@ -48,6 +50,24 @@ pub const AdmissionError = error{
 };
 
 pub const AckResult = enum { acknowledged, already_acknowledged, not_found, invalid_owner };
+pub const LogicalDigest = [32]u8;
+
+pub const HandoffError = std.mem.Allocator.Error || error{
+    InvalidOwner,
+    DestinationNotEmpty,
+    BadMagic,
+    UnsupportedVersion,
+    Truncated,
+    TrailingBytes,
+    ForeignHost,
+    LimitsMismatch,
+    InvalidValue,
+    LimitExceeded,
+};
+pub const EncodeHandoffError = std.mem.Allocator.Error || error{ InvalidOwner, LimitExceeded };
+
+const handoff_magic = "MRUNOT01";
+const handoff_version: u16 = 1;
 
 const Row = struct {
     event_id: u64,
@@ -160,7 +180,7 @@ pub const Journal = struct {
     /// Returned slices borrow the journal and remain valid only until its next successful mutation.
     pub fn peek(self: *const Journal, key: Key) ?View {
         if (!self.isOwner()) return null;
-        if (!std.mem.eql(u8, &key.host_id, &self.host_id)) return null;
+        if (key.host_id != self.host_id) return null;
         for (self.rows.items) |row| if (row.event_id == key.event_id) return viewOf(self.host_id, row);
         return null;
     }
@@ -178,9 +198,24 @@ pub const Journal = struct {
         return null;
     }
 
+    /// Legacy GUI RPC is addressed by runtime. Stable delivery still uses the row key internally;
+    /// this selector prevents one Term's poll from consuming another Term's oldest event.
+    pub fn oldestPendingForRuntime(self: *const Journal, consumer: Consumer, runtime_id: RuntimeId) ?View {
+        if (!self.isOwner()) return null;
+        for (self.rows.items) |row| {
+            if (row.runtime_id != runtime_id) continue;
+            const pending = switch (consumer) {
+                .gui => row.pending_gui,
+                .os => row.pending_os,
+            };
+            if (pending) return viewOf(self.host_id, row);
+        }
+        return null;
+    }
+
     pub fn ack(self: *Journal, key: Key, consumer: Consumer) AckResult {
         if (!self.isOwner()) return .invalid_owner;
-        if (!std.mem.eql(u8, &key.host_id, &self.host_id)) return .not_found;
+        if (key.host_id != self.host_id) return .not_found;
         for (self.rows.items) |*row| {
             if (row.event_id != key.event_id) continue;
             const pending = switch (consumer) {
@@ -193,6 +228,165 @@ pub const Journal = struct {
             return .acknowledged;
         }
         return .not_found;
+    }
+
+    pub fn hostId(self: *const Journal) ?HostId {
+        return if (self.isOwner()) self.host_id else null;
+    }
+
+    /// Encode only logical host-lifetime state. Allocator identity, owner address, and capacity are
+    /// process-local and are rebuilt by the successor at its final address.
+    pub fn encodeHandoff(self: *const Journal, allocator: std.mem.Allocator, permanent_drops: u64) EncodeHandoffError![]u8 {
+        if (!self.isOwner()) return error.InvalidOwner;
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, handoff_magic);
+        try appendInt(&out, allocator, u16, handoff_version);
+        try appendInt(&out, allocator, u128, self.host_id);
+        inline for (.{
+            self.limits.max_events,
+            self.limits.max_resident_bytes,
+            self.limits.max_title_bytes,
+            self.limits.max_body_bytes,
+            self.limits.max_label_bytes,
+        }) |value| try appendInt(&out, allocator, u64, std.math.cast(u64, value) orelse return error.LimitExceeded);
+        try appendInt(&out, allocator, u64, self.last_event_id);
+        try appendInt(&out, allocator, u64, permanent_drops);
+        try appendInt(&out, allocator, u64, self.evicted_count);
+        try out.append(allocator, @intFromBool(self.event_id_exhausted));
+        try appendInt(&out, allocator, u32, std.math.cast(u32, self.rows.items.len) orelse return error.LimitExceeded);
+        try appendInt(&out, allocator, u64, std.math.cast(u64, self.resident_bytes) orelse return error.LimitExceeded);
+        for (self.rows.items) |row| {
+            try appendInt(&out, allocator, u64, row.event_id);
+            try appendInt(&out, allocator, u128, row.runtime_id);
+            try appendInt(&out, allocator, u64, row.occurred_at_ns);
+            try out.append(allocator, @as(u8, @intFromBool(row.pending_gui)) | (@as(u8, @intFromBool(row.pending_os)) << 1));
+            try appendInt(&out, allocator, u32, std.math.cast(u32, row.title.len) orelse return error.LimitExceeded);
+            try appendInt(&out, allocator, u32, std.math.cast(u32, row.body.len) orelse return error.LimitExceeded);
+            try appendInt(&out, allocator, u32, std.math.cast(u32, row.display_label.len) orelse return error.LimitExceeded);
+            try out.appendSlice(allocator, row.title);
+            try out.appendSlice(allocator, row.body);
+            try out.appendSlice(allocator, row.display_label);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    /// Decode into temporary owned rows and publish only after every cap, identity, and ordering
+    /// invariant succeeds. The destination must be the empty final-address journal created by init.
+    pub fn restoreHandoff(self: *Journal, bytes: []const u8) HandoffError!u64 {
+        if (!self.isOwner()) return error.InvalidOwner;
+        if (self.rows.items.len != 0 or self.resident_bytes != 0 or self.last_event_id != 0 or
+            self.event_id_exhausted or self.evicted_count != 0) return error.DestinationNotEmpty;
+        var reader = HandoffReader{ .bytes = bytes };
+        if (!std.mem.eql(u8, try reader.take(handoff_magic.len), handoff_magic)) return error.BadMagic;
+        if (try reader.int(u16) != handoff_version) return error.UnsupportedVersion;
+        if (try reader.int(u128) != self.host_id) return error.ForeignHost;
+        const encoded_limits = Limits{
+            .max_events = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded,
+            .max_resident_bytes = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded,
+            .max_title_bytes = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded,
+            .max_body_bytes = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded,
+            .max_label_bytes = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded,
+        };
+        if (!std.meta.eql(encoded_limits, self.limits)) return error.LimitsMismatch;
+        const last_event_id = try reader.int(u64);
+        const permanent_drops = try reader.int(u64);
+        const evicted_count = try reader.int(u64);
+        const exhausted_raw = (try reader.take(1))[0];
+        if (exhausted_raw > 1) return error.InvalidValue;
+        const exhausted = exhausted_raw == 1;
+        if (exhausted != (last_event_id == std.math.maxInt(u64))) return error.InvalidValue;
+        const row_count = try reader.int(u32);
+        if (row_count > self.limits.max_events) return error.LimitExceeded;
+        const encoded_resident = std.math.cast(usize, try reader.int(u64)) orelse return error.LimitExceeded;
+        if (encoded_resident > self.limits.max_resident_bytes) return error.LimitExceeded;
+
+        var prepared: std.ArrayListUnmanaged(Row) = .empty;
+        errdefer {
+            for (prepared.items) |*row| row.deinit(self.allocator);
+            prepared.deinit(self.allocator);
+        }
+        try prepared.ensureTotalCapacity(self.allocator, row_count);
+        var resident: usize = 0;
+        var previous_event_id: u64 = 0;
+        for (0..row_count) |_| {
+            const event_id = try reader.int(u64);
+            const runtime_id = try reader.int(u128);
+            const occurred_at_ns = try reader.int(u64);
+            const flags = (try reader.take(1))[0];
+            if (event_id == 0 or event_id <= previous_event_id or event_id > last_event_id or runtime_id == 0 or
+                flags == 0 or flags & ~@as(u8, 0x03) != 0) return error.InvalidValue;
+            const title_len = try boundedLength(&reader, self.limits.max_title_bytes);
+            const body_len = try boundedLength(&reader, self.limits.max_body_bytes);
+            const label_len = try boundedLength(&reader, self.limits.max_label_bytes);
+            const title_source = try reader.take(title_len);
+            const body_source = try reader.take(body_len);
+            const label_source = try reader.take(label_len);
+            if (!std.unicode.utf8ValidateSlice(title_source) or !std.unicode.utf8ValidateSlice(body_source) or
+                !std.unicode.utf8ValidateSlice(label_source)) return error.InvalidValue;
+            const row_bytes = std.math.add(usize, title_len, body_len) catch return error.LimitExceeded;
+            resident = std.math.add(usize, resident, std.math.add(usize, row_bytes, label_len) catch return error.LimitExceeded) catch
+                return error.LimitExceeded;
+            if (resident > self.limits.max_resident_bytes) return error.LimitExceeded;
+            const title = self.allocator.dupe(u8, title_source) catch return error.OutOfMemory;
+            errdefer self.allocator.free(title);
+            const body = self.allocator.dupe(u8, body_source) catch return error.OutOfMemory;
+            errdefer self.allocator.free(body);
+            const label = self.allocator.dupe(u8, label_source) catch return error.OutOfMemory;
+            errdefer self.allocator.free(label);
+            prepared.appendAssumeCapacity(.{
+                .event_id = event_id,
+                .runtime_id = runtime_id,
+                .occurred_at_ns = occurred_at_ns,
+                .title = title,
+                .body = body,
+                .display_label = label,
+                .pending_gui = flags & 0x01 != 0,
+                .pending_os = flags & 0x02 != 0,
+            });
+            previous_event_id = event_id;
+        }
+        if (reader.pos != reader.bytes.len) return error.TrailingBytes;
+        if (resident != encoded_resident) return error.InvalidValue;
+        self.rows = prepared;
+        prepared = .empty;
+        self.resident_bytes = resident;
+        self.last_event_id = last_event_id;
+        self.event_id_exhausted = exhausted;
+        self.evicted_count = evicted_count;
+        return permanent_drops;
+    }
+
+    /// Allocation-free semantic seal used between upgrade capture and destructive exec. It covers
+    /// delivery bits and payload bytes, so an ack or admission after capture invalidates the plan.
+    pub fn logicalDigest(self: *const Journal, permanent_drops: u64) LogicalDigest {
+        var hasher = std.crypto.hash.Blake3.init(.{});
+        hasher.update("maru.notification-journal.logical.v1");
+        hashInt(&hasher, u128, self.host_id);
+        inline for (.{ self.limits.max_events, self.limits.max_resident_bytes, self.limits.max_title_bytes, self.limits.max_body_bytes, self.limits.max_label_bytes }) |value|
+            hashInt(&hasher, u64, @intCast(value));
+        hashInt(&hasher, u64, self.last_event_id);
+        hashInt(&hasher, u64, permanent_drops);
+        hashInt(&hasher, u64, self.evicted_count);
+        hashInt(&hasher, u8, @intFromBool(self.event_id_exhausted));
+        hashInt(&hasher, u64, @intCast(self.resident_bytes));
+        hashInt(&hasher, u64, @intCast(self.rows.items.len));
+        for (self.rows.items) |row| {
+            hashInt(&hasher, u64, row.event_id);
+            hashInt(&hasher, u128, row.runtime_id);
+            hashInt(&hasher, u64, row.occurred_at_ns);
+            hashInt(&hasher, u8, @intFromBool(row.pending_gui));
+            hashInt(&hasher, u8, @intFromBool(row.pending_os));
+            hashInt(&hasher, u64, @intCast(row.title.len));
+            hasher.update(row.title);
+            hashInt(&hasher, u64, @intCast(row.body.len));
+            hasher.update(row.body);
+            hashInt(&hasher, u64, @intCast(row.display_label.len));
+            hasher.update(row.display_label);
+        }
+        var out: LogicalDigest = undefined;
+        hasher.final(&out);
+        return out;
     }
 
     fn reclaimAcknowledgedPrefix(self: *Journal) void {
@@ -208,12 +402,53 @@ pub const Journal = struct {
     }
 };
 
+fn appendInt(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    value: T,
+) std.mem.Allocator.Error!void {
+    var encoded: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &encoded, value, .big);
+    try out.appendSlice(allocator, &encoded);
+}
+
+fn hashInt(hasher: *std.crypto.hash.Blake3, comptime T: type, value: T) void {
+    var encoded: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &encoded, value, .big);
+    hasher.update(&encoded);
+}
+
+const HandoffReader = struct {
+    bytes: []const u8,
+    pos: usize = 0,
+
+    fn take(self: *HandoffReader, len: usize) HandoffError![]const u8 {
+        const end = std.math.add(usize, self.pos, len) catch return error.Truncated;
+        if (end > self.bytes.len) return error.Truncated;
+        defer self.pos = end;
+        return self.bytes[self.pos..end];
+    }
+
+    fn int(self: *HandoffReader, comptime T: type) HandoffError!T {
+        const bytes = try self.take(@sizeOf(T));
+        const fixed: *const [@sizeOf(T)]u8 = @ptrCast(bytes.ptr);
+        return std.mem.readInt(T, fixed, .big);
+    }
+};
+
+fn boundedLength(reader: *HandoffReader, limit: usize) HandoffError!usize {
+    const len = std.math.cast(usize, try reader.int(u32)) orelse return error.LimitExceeded;
+    if (len > limit) return error.LimitExceeded;
+    return len;
+}
+
 fn viewOf(host_id: HostId, row: Row) View {
     return .{ .key = .{ .host_id = host_id, .event_id = row.event_id }, .runtime_id = row.runtime_id, .occurred_at_ns = row.occurred_at_ns, .title = row.title, .body = row.body, .display_label = row.display_label, .pending_gui = row.pending_gui, .pending_os = row.pending_os };
 }
 
 const test_limits: Limits = .{ .max_events = 3, .max_resident_bytes = 64, .max_title_bytes = 16, .max_body_bytes = 32, .max_label_bytes = 16 };
-const test_host: HostId = [_]u8{0x11} ** 16;
+const test_host: HostId = 0x11111111111111111111111111111111;
 
 test "P4 N1 limits reject zero before ownership" {
     var limits = test_limits;
@@ -260,7 +495,7 @@ test "P4 N1 cross-host and unknown acknowledgements do not mutate" {
     defer journal.deinit() catch unreachable;
     const key = try journal.admit(1, 2, "t", "b", "l");
     var foreign = key;
-    foreign.host_id[0] ^= 1;
+    foreign.host_id ^= 1;
     try std.testing.expectEqual(AckResult.not_found, journal.ack(foreign, .gui));
     try std.testing.expectEqual(AckResult.not_found, journal.ack(.{ .host_id = test_host, .event_id = 99 }, .gui));
     try std.testing.expect(journal.peek(key).?.pending_gui);
@@ -342,4 +577,87 @@ test "P4 N1 copied owner cannot read mutate or free canonical rows" {
     try std.testing.expectError(error.InvalidOwner, copied.admit(1, 2, "x", "y", "z"));
     try std.testing.expectError(error.InvalidOwner, copied.deinit());
     try std.testing.expect(journal.peek(key) != null);
+}
+
+test "P4 N2a handoff preserves IDs rows delivery bits and counters" {
+    const allocator = std.testing.allocator;
+    var source: Journal = undefined;
+    try source.initInPlace(allocator, test_host, test_limits);
+    defer source.deinit() catch unreachable;
+    const first = try source.admit(1, 10, "one", "body", "left");
+    _ = try source.admit(2, 11, "two", "body", "right");
+    try std.testing.expectEqual(AckResult.acknowledged, source.ack(first, .gui));
+    const encoded = try source.encodeHandoff(allocator, 7);
+    defer allocator.free(encoded);
+
+    var target: Journal = undefined;
+    try target.initInPlace(allocator, test_host, test_limits);
+    defer target.deinit() catch unreachable;
+    const drops = try target.restoreHandoff(encoded);
+    try std.testing.expectEqual(@as(u64, 7), drops);
+    try std.testing.expectEqual(@as(u64, 2), target.last_event_id);
+    try std.testing.expect(!target.peek(first).?.pending_gui);
+    try std.testing.expect(target.peek(first).?.pending_os);
+    const next = try target.admit(3, 12, "three", "body", "final");
+    try std.testing.expectEqual(@as(u64, 3), next.event_id);
+}
+
+test "P4 N2a handoff rejects corruption foreign host and nonempty target without mutation" {
+    const allocator = std.testing.allocator;
+    var source: Journal = undefined;
+    try source.initInPlace(allocator, test_host, test_limits);
+    defer source.deinit() catch unreachable;
+    _ = try source.admit(1, 10, "one", "body", "left");
+    const encoded = try source.encodeHandoff(allocator, 4);
+    defer allocator.free(encoded);
+
+    var target: Journal = undefined;
+    try target.initInPlace(allocator, test_host, test_limits);
+    defer target.deinit() catch unreachable;
+    try std.testing.expectError(error.Truncated, target.restoreHandoff(encoded[0 .. encoded.len - 1]));
+    try std.testing.expectEqual(@as(usize, 0), target.count());
+
+    var foreign: Journal = undefined;
+    try foreign.initInPlace(allocator, test_host ^ 1, test_limits);
+    defer foreign.deinit() catch unreachable;
+    try std.testing.expectError(error.ForeignHost, foreign.restoreHandoff(encoded));
+    try std.testing.expectEqual(@as(usize, 0), foreign.count());
+
+    _ = try target.admit(9, 9, "existing", "row", "kept");
+    try std.testing.expectError(error.DestinationNotEmpty, target.restoreHandoff(encoded));
+    try std.testing.expectEqual(@as(usize, 1), target.count());
+}
+
+test "P4 N2a handoff allocation failures leave destination pristine" {
+    const allocator = std.testing.allocator;
+    var source: Journal = undefined;
+    try source.initInPlace(allocator, test_host, test_limits);
+    defer source.deinit() catch unreachable;
+    _ = try source.admit(1, 10, "one", "body", "left");
+    _ = try source.admit(2, 11, "two", "more", "right");
+    const encoded = try source.encodeHandoff(allocator, 4);
+    defer allocator.free(encoded);
+
+    var reached_success = false;
+    for (0..16) |fail_offset| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var target: Journal = undefined;
+        try target.initInPlace(failing.allocator(), test_host, test_limits);
+        failing.fail_index = failing.alloc_index + fail_offset;
+        const result = target.restoreHandoff(encoded);
+        if (result) |drops| {
+            reached_success = true;
+            try std.testing.expectEqual(@as(u64, 4), drops);
+            try std.testing.expectEqual(@as(usize, 2), target.count());
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), target.count());
+            try std.testing.expectEqual(@as(usize, 0), target.residentBytes());
+            try std.testing.expectEqual(@as(u64, 0), target.last_event_id);
+        }
+        failing.fail_index = std.math.maxInt(usize);
+        try target.deinit();
+        if (reached_success) break;
+    }
+    try std.testing.expect(reached_success);
 }

@@ -152,7 +152,11 @@ hard cap을 소유한다. 기존 cadence-only 구조의 21~23ms floor는 두 gat
 slow-observer/RSS pressure 전에 512×256으로 resize한다. 대형 화면 projection을 wake 책임에 섞었던 격리 전 표본은 최대
 99.9ms였지만, phase를 분리한 5회 연속 35표본은 median 2.8~3.1ms, 전체 max 5.2ms였다. validator는 7개 raw 표본의
 개수·순서·exact subtraction·min/median/max 재계산과 median/tail cap+1 실패를 검증한다.
-같은 artifact는 marker 전 250ms 이상 idle 구간의 `RuntimeManager.OutputWakeEvidence` 전후값과
+같은 artifact는 READY 뒤 controller·healthy·slow 세 stream을 모두 drain하면서 foreground refresh 500ms를 넘는 연속
+600ms source-settle 창에서 observation materialization·core-lock·output-wake 증분 0을 먼저 확인한다. 최초 source 변경이
+이 준비 창에 걸리면 그 뒤에서 bounded retry하며,
+무변경 창을 한 번도 만들지 못하면 제품 idle 실패로 닫는다. 이 barrier 뒤 marker 전 250ms 이상 idle 구간의
+`RuntimeManager.OutputWakeEvidence` 전후값과
 `proc_pid_rusage:RUSAGE_INFO_V4` user/system CPU 전후값도 남긴다. validator는 idle notify/write/coalesce/drain delta를 모두
 0으로, user+system CPU delta를 **25ms 이하**로 판정한다. 이 상한은 250ms 관측창에서 단일 core 10%이며, 짧은 표본의
 scheduler/계측 잡음에는 여유를 두면서 busy-spin이나 output-wake storm은 거부하는 값이다. active marker 구간은 notify delta 7 이상, 실제 write와 owner drain

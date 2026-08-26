@@ -2915,6 +2915,15 @@ fn agentListBenign(reason: []const u8) bool {
         std.mem.eql(u8, reason, "no_home");
 }
 
+/// 목록의 **첫 카드**가 가리키는 레코드 번호. 정렬이 뒤집혔는지의 관측점이다.
+fn agentFirstCardIdentity(items: []const maru.chrome.components.session_dock.types.Item) ?u64 {
+    for (items) |it| switch (it) {
+        .card => |c| return c.identity,
+        else => {},
+    };
+    return null;
+}
+
 /// `n` 번째 **그룹**이 목록의 몇 번 항목인가. 그룹과 카드가 섞여 있으므로 그룹만 센다.
 fn agentFirstGroupIndexAtOrAfter(items: []const maru.chrome.components.session_dock.types.Item, n: usize) ?usize {
     var seen: usize = 0;
@@ -2963,6 +2972,9 @@ const AgentArchive = struct {
     /// 접힌 그룹의 키(= cwd). **키 문자열이다** — 투영이 그것으로 접기를 판정한다(`build` 의 셋째 인자).
     /// 인텐트는 `u64` 로 오지만 그것은 **그 순간의 그룹 번호**라, 목록이 바뀌면 다른 그룹을 가리킨다.
     collapsed: std.ArrayList([]const u8) = .empty,
+    /// 정렬 방향. **스캔 순서는 늘 최신 우선**이고(그 백엔드의 계약) 이 값은 **보여 줄 방향**만
+    /// 정한다 — `oldest_first` 면 재투영이 뒤집힌 순서로 짓는다.
+    sort: maru.chrome.components.session_dock.types.SortOrder = .newest_first,
 
     fn isCollapsed(self: *const AgentArchive, key: []const u8) bool {
         for (self.collapsed.items) |k| if (std.mem.eql(u8, k, key)) return true;
@@ -2982,7 +2994,17 @@ fn projectAgentItems(
 ) !void {
     out.clearRetainingCapacity();
     if (archive.view_items.len == 0) return;
-    var projection = try maru.session.agent_session_archive_view.build(scratch, archive.view_items, archive.collapsed.items);
+    // **뒤집는 것은 투영 앞이다.** 투영이 "첫 등장 순서" 로 그룹을 만들므로(그 함수의 주석), 뒤에서
+    // 항목만 뒤집으면 그룹 머리와 카드가 어긋난다 — 그룹 순서까지 함께 뒤집혀야 한다.
+    const ordered: []const maru.session.agent_session_archive_view.Item = switch (archive.sort) {
+        .newest_first => archive.view_items,
+        .oldest_first => blk: {
+            const rev = try scratch.alloc(maru.session.agent_session_archive_view.Item, archive.view_items.len);
+            for (archive.view_items, 0..) |vi, idx| rev[archive.view_items.len - 1 - idx] = vi;
+            break :blk rev;
+        },
+    };
+    var projection = try maru.session.agent_session_archive_view.build(scratch, ordered, archive.collapsed.items);
     defer projection.deinit(scratch);
     for (projection.entries.items) |entry| switch (entry) {
         .group => |gi| {
@@ -3044,6 +3066,17 @@ fn applyAgentIntent(
             } else {
                 archive.collapsed.append(persist, key) catch return false;
             }
+            projectAgentItems(scratch, persist, archive, items) catch return false;
+            state.invalidateTree();
+            return true;
+        },
+        .toggle_sort => {
+            // **방향만 뒤집는다.** 어느 방향으로 갈지는 인텐트가 아니라 **지금 상태**가 정한다
+            // (그 인텐트의 doc: 두 곳이 방향을 알면 published tree 와 host 상태가 어긋난다).
+            archive.sort = switch (archive.sort) {
+                .newest_first => .oldest_first,
+                .oldest_first => .newest_first,
+            };
             projectAgentItems(scratch, persist, archive, items) catch return false;
             state.invalidateTree();
             return true;
@@ -4347,6 +4380,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var ag_hover_redraws_after: usize = 0;
     var ag_hover_intents_before: usize = 0;
     var ag_hover_intents_after: usize = 0;
+    // **정렬이 진짜 뒤집히는가.** 라벨만 바뀌고 목록은 그대로면 사용자는 "눌러도 안 바뀐다" 로
+    // 겪는다 — 그래서 **첫 카드의 레코드 번호**를 견준다(뒤집으면 그것이 달라진다).
+    var ag_sort_judgeable = false;
+    var ag_sort_first_before: u64 = 0;
+    var ag_sort_first_after: u64 = 0;
+    var ag_sort_order_after: bool = false;
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
@@ -5018,6 +5057,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         // **기준을 카드 클릭 앞에서 잡는다** — 뒤에서 읽으면 이미 펼쳐진 값이라 `0->0` 으로 보인다.
+        // **먼저 도크를 넓힌다.** 정렬 토글은 헤더가 좁으면 컴포넌트가 **일부러 안 낸다**(경계
+        // viewport 320, 스모크 기본 도크는 220) — 그 상태로 재면 "안 눌린다" 가 아니라 "없다" 이고,
+        // 그 둘을 섞으면 죽은 컨트롤을 정상으로 읽는다.
+        if (smoke and spins == 750 and geom.divider.w != 0) {
+            const dx: i32 = @intCast(geom.divider.x + geom.divider.w / 2);
+            window.postSyntheticMouse(.left_down, dx, 200);
+            window.postSyntheticMouse(.moved, dx - 160, 200);
+            window.postSyntheticMouse(.left_up, dx - 160, 200);
+        }
+        // **정렬 토글을 누른다.** 자리는 published tree 가 준다.
+        if (smoke and spins == 752) if (agent_built) |*b| {
+            if (agentFirstCardIdentity(agent_items.items)) |first| {
+                const id = maru.chrome.components.session_dock.build.NodeIds.sort_toggle;
+                for (b.frame.tree.entries) |e| {
+                    if (e.id != id) continue;
+                    ag_sort_judgeable = true;
+                    ag_sort_first_before = first;
+                    const sx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(e.rect.x + e.rect.width / 2)));
+                    const sy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(e.rect.y + e.rect.height / 2)));
+                    window.postSyntheticMouse(.left_down, sx, sy);
+                    window.postSyntheticMouse(.left_up, sx, sy);
+                    break;
+                }
+            }
+        };
+        if (smoke and spins == 756) {
+            if (agentFirstCardIdentity(agent_items.items)) |f| ag_sort_first_after = f;
+            ag_sort_order_after = agent_archive.sort == .oldest_first;
+        }
         // **카드 위로 커서를 옮긴다** — 클릭이 아니라 이동만.
         if (smoke and spins == 745) if (agent_built) |*b| {
             for (agent_items.items, 0..) |it, idx| switch (it) {
@@ -5796,6 +5864,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // **항목이 바뀌면 옵션도 그것을 봐야 한다** — 표면은 `opts.items`
                                     // 를 그리므로 슬라이스를 갱신 안 하면 옛 목록이 남는다.
                                     agent_opts.items = agent_items.items;
+                                    // **라벨도 함께 옮긴다** — 목록만 뒤집고 이 값을 두면 헤더가
+                                    // 거짓말을 한다("Newest first" 라고 적힌 채 오래된 것이 위에).
+                                    agent_opts.sort_order = agent_archive.sort;
                                 }
                             }
                             if (changed) {
@@ -6522,6 +6593,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     } else {
         try stdout.print("agent_click=unjudgeable reason=no_surface\n", .{});
+    }
+    if (ag_sort_judgeable) {
+        // **목록이 실제로 뒤집혔는가**와 **라벨이 따라왔는가**를 함께 본다.
+        try stdout.print("agent_sort: first {d}->{d} oldest_first={} agent_sort_ok={}\n", .{
+            ag_sort_first_before,
+            ag_sort_first_after,
+            ag_sort_order_after,
+            ag_sort_first_after != ag_sort_first_before and ag_sort_order_after,
+        });
+    } else {
+        // **사유가 정확해야 한다** — 좁아서 없는 것과 눌러도 안 되는 것은 다른 사실이다.
+        try stdout.print("agent_sort=unjudgeable reason=header_too_narrow dock_w={d}\n", .{geom.dock.w});
     }
     if (ag_hover_judgeable) {
         // **다시 그리되 아무 일도 하면 안 된다** — 이동이 인텐트를 내면 스치기만 해도 목록이 바뀐다.

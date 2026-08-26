@@ -46,6 +46,8 @@ test "P4 N2b2 OS delivery boundary pins daemon ownership and macOS stable route 
     try std.testing.expectEqual(@as(usize, 1), count(zig_adapter, "maru_session_host_notification_expire("));
     try std.testing.expectEqual(@as(usize, 2), count(build, "session_host_notification_adapter.m"));
     try std.testing.expect(count(build, "linkFramework(\"UserNotifications\"") >= 2);
+    try std.testing.expectEqual(@as(usize, 1), count(build, "session_host_notification_adapter_compile_stub.c"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "linkSessionHostNotificationCompileStub(b, cross_exe)"));
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

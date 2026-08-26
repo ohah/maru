@@ -43,7 +43,8 @@ const std = @import("std");
 ///
 /// **이 함수는 홈만 정한다.** config·캐시가 어디 사는지는 `defaultConfigPathFor`·`cacheBaseFor`가 따로
 /// 정하고, Windows에서는 둘 다 `%LOCALAPPDATA%`로 간다(위 모듈 doc). 홈이 여전히 필요한 자리는 셋이다 —
-/// `%LOCALAPPDATA%`가 없는 비정상 환경의 폴백, `install-cli`의 `~/.local/bin`(W10이 자리를 정한다),
+/// `%LOCALAPPDATA%`가 없는 비정상 환경의 폴백, `install-cli`의 폴백 자리(W10 이 정했다 —
+/// Windows 는 `%LOCALAPPDATA%\maru\bin`, `%LOCALAPPDATA%` 가 없을 때만 `~/.local/bin`),
 /// 그리고 `trace anonymize`의 매칭 키.
 ///
 /// `os_tag`가 **인자**인 이유는 다른 OS-인지 술어들과 같다 — CI에 Windows 러너가 없으므로 컴파일 타임

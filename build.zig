@@ -3570,13 +3570,28 @@ pub fn build(b: *std.Build) void {
         run_gui_history_boundary_tests.addArg("--maru-expect-tests=1");
         session_host_notification_delivery_step.dependOn(&run_gui_history_boundary_tests.step);
 
+        const cold_route_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_cold_route_boundary.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+            }),
+            .filters = &.{"P4 N3 cold notification response routes only a coherent stable handle"},
+        });
+        const run_cold_route_boundary_tests = b.addRunArtifact(cold_route_boundary_tests);
+        run_cold_route_boundary_tests.addArg("--maru-expect-tests=1");
+        session_host_notification_delivery_step.dependOn(&run_cold_route_boundary_tests.step);
+
         const notification_route_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_notification_route.zig"),
                 .target = target,
                 .optimize = delivery_optimize,
             }),
-            .filters = &.{"P4 N2b3 canonical notification route identifier"},
+            .filters = &.{
+                "P4 N2b3 canonical notification route identifier",
+                "P4 N3 persisted notification route decoder",
+            },
         });
         notification_route_tests.root_module.addIncludePath(b.path("src/platform/macos"));
         notification_route_tests.root_module.addCSourceFile(.{
@@ -3584,7 +3599,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{},
         });
         const run_notification_route_tests = b.addRunArtifact(notification_route_tests);
-        run_notification_route_tests.addArg("--maru-expect-tests=2");
+        run_notification_route_tests.addArg("--maru-expect-tests=3");
         session_host_notification_delivery_step.dependOn(&run_notification_route_tests.step);
 
         if (target.result.os.tag == .macos) {
@@ -6852,6 +6867,7 @@ pub fn build(b: *std.Build) void {
             }),
             .filters = &.{
                 "CR6b orphan row action은",
+                "N3 stable notification route는",
                 "CR6b ended conflict row action은",
                 "CR6b stale projection row action은",
                 "CR6b stale manifest slot row action은",
@@ -6871,7 +6887,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
         });
         const run_cr6b_product_tests = b.addRunArtifact(cr6b_product_tests);
-        run_cr6b_product_tests.addArg("--maru-expect-tests=10");
+        run_cr6b_product_tests.addArg("--maru-expect-tests=12");
         run_cr6b_product_tests.setCwd(b.path("."));
         session_host_cr6b_step.dependOn(&run_cr6b_product_tests.step);
         session_host_cr6b_product_step.dependOn(&run_cr6b_product_tests.step);

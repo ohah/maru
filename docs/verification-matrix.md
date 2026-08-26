@@ -2256,3 +2256,18 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **제품 gate:** 실제 host-backed runtime의 OSC 9/777이 GUI 연결 중 stable key로 기존 인앱/배너 경로에 한 번만 나타나고,
   GUI 0에서는 signed bundle daemon adapter가 `hid`/`rid`/`eid`를 가진 배너를 게시한다. provisioned runner가 없는 실제
   Notification Center 행은 fixture로 대체해 완료 처리하지 않으며 N3 cold-click exact attach와도 구분한다.
+
+### P4 N3 notification cold-launch route
+
+- **상태: 자동 구현·검증 완료, 실제 OS gate 미완료.** stable response는 exact lowercase `hid`/`rid`, nonzero integer
+  `eid`, shared formatter와 동일한 request identifier를 모두 검증하며, stable route가 있으면 process-local
+  `wt`/`sid`를 사용하지 않는다. callback queue를 main으로 가정하지 않고 값 타입 파싱 뒤 `MainActor`로 명시적으로
+  hop한다.
+- **필수 자동 검증:** delegate pre-run 설치, launch 전 bounded exact-key queue와 one-shot drain, malformed/incoherent route
+  거부, live binding의 app-wide probe와 cross-Window duplicate mutation-zero 거부, exact runtime의 중복 attach 없는
+  활성화, binding이 없을 때 current projection의 exact 한 행 또는 projection/config-off 상태의 secure registry exact
+  membership만 fresh authority 검증 뒤 adopt, stale/unknown/duplicate/attach 실패의 spawn·topology mutation 0을 Debug·ReleaseFast와 실제
+  AppHost ABI/Swift type-check로 검증한다.
+- **남은 OS gate:** provisioned signed runner에서 GUI 0 OSC 발화→실제 배너 클릭→cold launch와 GUI-live 발화→Quit→기존
+  배너 클릭이 모두 원래 `host_id:runtime_id` 및 child PID 불변으로 attach하는 구조화 artifact가 필요하다. synthetic
+  `UNNotificationResponse`나 source fixture는 이 Notification Center gate를 대체하지 않는다.

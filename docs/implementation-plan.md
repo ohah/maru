@@ -1336,6 +1336,24 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    소비하는 별도 slice다. Debug·ReleaseFast 집중 gate와 AppHost ABI 4,070-test aggregate, Swift type-check 및 실제
    `Maru.app` 링크가 이 투영을 검증한다. 실제 Notification Center 게시·replace는 위 provisioned 제품 gate에 남긴다.
 
+   **N3 cold-launch notification route:** Notification Center response의 `userInfo`는 저장된 OS 입력이라 권위가 아니다.
+   Swift는 문자열 `hid`/`rid`를 정확히 32자의 lowercase hex, `eid`를 0이 아닌 정수로 읽고, 세 값으로 shared C
+   formatter가 만든 canonical request identifier가 실제 request identifier와 byte-for-byte 같을 때만 stable route를
+   admit한다. stable route가 있으면 process-local `wt`/`sid`는 새 앱 epoch에서 재사용될 수 있으므로 attach 권위나
+   fast path로 쓰지 않는다. delegate는 `NSApplication.run()` 전에 설치하고, AppSession/recovery publication 전 response는
+   bounded exact-key queue에 보관해 launch 완료 뒤 main actor에서 한 번만 소비한다.
+
+   Zig 제품 경로는 먼저 모든 live Window에서 mutation 없이 exact `{host_id,runtime_id}` binding을 probe해 앱 전체에서
+   정확히 하나일 때만 그 Surface를 활성화하며 cross-Window duplicate는 실패시킨다. 없으면 현재 app-global Recovered
+   Sessions projection에서 같은 handle의 행이 정확히 하나일 때는 기존
+   `activateRecoveredSessionAt`을 호출해 fresh `host.info`/`runtime.get` 검증과 orphan 새 tab 또는 ended placeholder 교체를
+   그대로 재사용한다. 배너보다 나중에 keep-alive 설정이 꺼져 projection이 없더라도 secure current registry의
+   runtime membership을 fresh resolve하고 selected `host_id`까지 같을 때만 기존 attachExisting staging으로 새 비고정 tab을
+   연다. 이 resolve는 host/runtime을 시작하지 않는다. unknown·duplicate·stale host/runtime, malformed route와 attach 실패는 topology/workspace/runtime spawn
+   mutation 0이며 default shell로 폴백하지 않는다. `event_id`는 response dedup/identity이지 attach capability가 아니므로
+   journal row가 이미 회수됐다는 이유로 attach를 거부하지 않는다. route 없는 local/app-owned 알림만 기존 `wt`/`sid`
+   process-local 클릭 경로를 유지한다.
+
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라

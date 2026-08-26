@@ -111,8 +111,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v174 notification route and final Quit checkpoint values match the C header" {
-    try std.testing.expectEqual(@as(u32, 174), abi_version);
+test "ABI v175 notification cold route and final Quit checkpoint values match the C header" {
+    try std.testing.expectEqual(@as(u32, 175), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1696,6 +1696,45 @@ pub export fn maru_macos_app_session_activate_surface(session: ?*AppSession, sur
     const found = app_session.activateSurfaceById(surface_id);
     app_session.markNotificationsReadBySurface(surface_id);
     return if (found) 1 else 0;
+}
+
+// N3 stable notification response. Swift first calls every live normal Window with
+// action=0 to probe every Window without mutation, then action=1 on the exact single match. With no
+// match it calls only the primary session with action=2. The latter can consume the current recovered
+// projection and therefore reuses its fresh host.info/runtime.get authority checks. No-match probe
+// returns 0; malformed, unknown, duplicate, stale, or failed routes return 2 and never fall back to
+// a fresh shell.
+pub export fn maru_macos_app_session_activate_notification_runtime(
+    session: ?*AppSession,
+    host_id_hi: u64,
+    host_id_lo: u64,
+    runtime_id_hi: u64,
+    runtime_id_lo: u64,
+    action_raw: u32,
+) u32 {
+    const app_session = session orelse return 0;
+    const host_id = (@as(u128, host_id_hi) << 64) | host_id_lo;
+    const runtime_id = (@as(u128, runtime_id_hi) << 64) | runtime_id_lo;
+    const action: AppSession.NotificationRuntimeAction = switch (action_raw) {
+        0 => .probe_bound,
+        1 => .activate_bound,
+        2 => .adopt_recovered,
+        else => return 2,
+    };
+    const handled = app_session.activateNotificationRuntime(
+        host_id,
+        runtime_id,
+        action,
+    ) catch {
+        if (action == .adopt_recovered)
+            app_session.showNoticeKey(.app_recovered_session_failed);
+        return 2;
+    };
+    if (!handled and action == .adopt_recovered) {
+        app_session.showNoticeKey(.app_recovered_session_failed);
+        return 2;
+    }
+    return if (handled) 1 else 0;
 }
 
 // G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨

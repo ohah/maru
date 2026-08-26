@@ -19,7 +19,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 ## 번들 폰트
 
-`assets/fonts/<Family>/`의 폰트를 `build.zig`가 `Maru.app/Contents/Resources/Fonts/`로 복사하고, `MaruAppHost-Info.plist`의 `ATSApplicationFontsPath`가 실행 시 등록한다(메커니즘 단일 출처: [font-strategy.md](font-strategy.md) §번들 폰트). 동봉 폰트는 모두 **원본 무수정**으로 재배포한다.
+`assets/fonts/<Family>/`의 폰트를 `build.zig`가 `Maru.app/Contents/Resources/Fonts/`로 복사하고, `MaruAppHost-Info.plist.in`에서 생성한 plist의 `ATSApplicationFontsPath`가 실행 시 등록한다(메커니즘 단일 출처: [font-strategy.md](font-strategy.md) §번들 폰트). 동봉 폰트는 모두 **원본 무수정**으로 재배포한다.
 
 | 패밀리 | 버전 | 라이선스 | 저작권 | 출처 |
 | --- | --- | --- | --- | --- |

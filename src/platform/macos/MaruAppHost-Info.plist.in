@@ -18,7 +18,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>@@MARU_VERSION@@</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <!-- 실행 가능한 최소 macOS 버전. Apple Silicon(arm64)은 11.0(Big Sur)부터 시작하므로

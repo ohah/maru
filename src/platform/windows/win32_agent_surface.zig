@@ -61,6 +61,9 @@ pub const Options = struct {
     tokens: *const maru.chrome.Tokens,
     /// 목록. ⒜ 에서는 비어 있고, 데이터 경로가 붙으면 호출자가 채운다.
     items: []const component.types.Item = &.{},
+    /// 정렬 **방향**. 목록 자체는 호출자가 이미 그 방향으로 넘긴다 — 이 값은 헤더의 라벨이
+    /// 무엇을 말할지를 정한다(`Newest first` / `Oldest first`). 둘이 갈리면 라벨이 거짓말을 한다.
+    sort_order: component.types.SortOrder = .newest_first,
 };
 
 pub const Built = struct {
@@ -105,6 +108,7 @@ pub fn build(
         .snapshot_generation = state.generation,
         .displayed_count = @intCast(opts.items.len),
         .items = opts.items,
+        .sort_order = opts.sort_order,
         .expanded_identity = state.expanded_identity,
     };
     const frame = component.build.build(props, .{

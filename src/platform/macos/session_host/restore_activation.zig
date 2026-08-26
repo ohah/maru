@@ -5,6 +5,7 @@
 //! 허용한다. ready commit 뒤 오류는 reader/admission을 열지 않는 fail-stop
 //! 이며 이전 image로 다시 exec하지 않는다.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const c = std.c;
 const entrypoint = @import("entrypoint.zig");
@@ -118,6 +119,25 @@ fn bootstrapProcessSeal() !process_seal_service.ReadyIdentity {
     return process_seal_service.currentReadyIdentity();
 }
 
+/// 지금 실행 중인 이미지의 build_id. 실패하면 `null` — 호출자는 기존 값을 그대로 쓴다.
+fn selfImageBuildId(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
+    const self_path = std.process.executablePathAlloc(io, allocator) catch return null;
+    defer allocator.free(self_path);
+    const self_path_z = allocator.dupeZ(u8, self_path) catch return null;
+    defer allocator.free(self_path_z);
+    return host_manifest.buildIdForExecutable(allocator, self_path_z) catch null;
+}
+
+/// manifest 가 광고하려던 값과 실제 이미지가 어긋났다. 정정 자체는 위에서 하고, 여기서는 **어긋났다는 사실**을
+/// 남긴다 — 이 드리프트가 있었다는 것 자체가 attempt record 전달 경로의 회귀 신호다.
+fn logManifestBuildIdDrift(attempt_build_id: []const u8, actual_build_id: []const u8) void {
+    if (builtin.is_test) return;
+    std.log.err(
+        "session host manifest build_id drift: attempt={s} actual={s} (publishing actual)",
+        .{ attempt_build_id, actual_build_id },
+    );
+}
+
 fn activateValidated(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -186,11 +206,9 @@ fn activateValidated(
     );
 
     var gate = upgrade.AdmissionGate.initClosed(io);
-    var socket_dir_buf: [112]u8 = undefined;
-    const socket_dir = try short_endpoint.socketDirPathIn(
-        &socket_dir_buf,
-        c.getuid(),
-    );
+    // restore 로 살아나는 host 도 socket 을 여기서 만든다 — `daemon.zig` 의 bind 자리와 같은 뿌리여야 한다.
+    var socket_dir_buf: [272]u8 = undefined;
+    const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
     const socket_path = try allocator.dupeZ(u8, invocation.socket_path);
     defer allocator.free(socket_path);
     var server = try socket_server.SocketServer.bind(
@@ -294,11 +312,35 @@ fn activateValidated(
     var ready = restoring;
     ready.lifecycle = .ready;
     var next_upgrade_capable = invocation.role == .rollback;
+    // manifest 가 광고할 build_id 의 수명. 실제 이미지에서 구한 값을 쓸 때만 채워지고, `publish` 가 자기
+    // 사본을 뜨므로 이 함수 밖으로 새어 나가지 않는다.
+    var actual_build_id: ?[]u8 = null;
+    defer if (actual_build_id) |b| allocator.free(b);
     if (invocation.role == .target) {
         ready.build_id = validated.state.attempt.build_id;
         ready.protocol_major = protocol.version_major;
         ready.screen_codec_version = screen_stream.codec_version;
         ready.upgrade_epoch = validated.state.attempt.expected_epoch_after;
+        // **manifest 는 지금 돌고 있는 이미지를 광고해야 한다.**
+        //
+        // attempt record 의 build_id 는 전달 과정에서 실제와 어긋날 수 있고, 어긋나면 manifest 가 거짓이 된다.
+        // 그러면 client 는 hello(진짜)와 manifest(거짓)의 불일치를 `stale_manifest` 로 읽고 **성공한 upgrade 를
+        // 실패로 판정해** 새 host 를 띄운다. 2026-08-27 실측이 정확히 그랬다 — exec 는 성공해 host 가 새 이미지로
+        // 갈아탔는데(`got=2680714d`) manifest 는 옛 값에 머물러(`want=b61d9ae1`), 앱을 켤 때마다 host 가 하나씩
+        // 늘고 사용자 PTY 를 쥔 host 는 고아가 됐다.
+        //
+        // 진실의 단일 출처는 **실행 중인 바이너리**다. 이 대조는 양방향 모두 옳은 값으로 수렴한다 — exec 가
+        // 됐는데 attempt 가 옛것이면 새 값을, exec 가 안 됐는데 attempt 가 새것이면 옛 값을 광고하게 되고,
+        // 둘 다 client 의 hello 와 일치한다. 구하지 못하면 기존 동작 그대로 둔다(fail-open 이 아니라 무변경).
+        if (selfImageBuildId(allocator, io)) |actual| {
+            if (std.mem.eql(u8, actual, ready.build_id)) {
+                allocator.free(actual);
+            } else {
+                logManifestBuildIdDrift(ready.build_id, actual);
+                actual_build_id = actual;
+                ready.build_id = actual;
+            }
+        }
     }
     var prepared_authority = try host_authority.HostAuthority.prepareInit(
         allocator,

@@ -878,6 +878,60 @@ pub fn descriptorEql(a: Descriptor, b: Descriptor) bool {
     return sameDescriptor(a, b);
 }
 
+/// descriptor 가 어긋난 **축**. `sameDescriptor` 와 완전히 같은 순서·같은 조건이며, 판정에는 관여하지 않는다.
+///
+/// 왜 나눠 두는가. 불일치는 전부 `stale_manifest` 한 값으로 접혀 나가는데, 그 값에 도달하는 축이 일곱이다.
+/// 2026-08-27 실측에서 exec upgrade 가 `reason=stale_manifest` 로 실패해 **같은 build_id host 가 둘** 남았고
+/// (구 host 가 PTY 6 개를 전부 쥔 채, 새 host 는 빈 껍데기로), 그 한 단어만으로는 `build_id` 인지
+/// `lifecycle` 인지 `upgrade_epoch` 인지 좁힐 수 없었다. 축을 남기면 다음 재발이 곧 원인이다.
+pub const DescriptorAxis = enum {
+    host_id,
+    protocol_major,
+    screen_codec_version,
+    upgrade_epoch,
+    lifecycle,
+    build_id,
+    endpoint,
+};
+
+pub fn firstDescriptorMismatch(a: Descriptor, b: Descriptor) ?DescriptorAxis {
+    if (a.host_id != b.host_id) return .host_id;
+    if (a.protocol_major != b.protocol_major) return .protocol_major;
+    if (a.screen_codec_version != b.screen_codec_version) return .screen_codec_version;
+    if (a.upgrade_epoch != b.upgrade_epoch) return .upgrade_epoch;
+    if (a.lifecycle != b.lifecycle) return .lifecycle;
+    if (!std.mem.eql(u8, a.build_id, b.build_id)) return .build_id;
+    if (!std.mem.eql(u8, a.endpoint, b.endpoint)) return .endpoint;
+    return null;
+}
+
+test "firstDescriptorMismatch 는 sameDescriptor 와 같은 판정을 축으로 되돌려 준다" {
+    const base = Descriptor{
+        .host_id = 0xAABB,
+        .build_id = "b1",
+        .protocol_major = 2,
+        .screen_codec_version = 3,
+        .upgrade_epoch = 7,
+        .lifecycle = .ready,
+        .endpoint = "/tmp/x.sock",
+    };
+    try std.testing.expect(firstDescriptorMismatch(base, base) == null);
+    try std.testing.expect(sameDescriptor(base, base));
+
+    var other = base;
+    other.build_id = "b2";
+    try std.testing.expectEqual(DescriptorAxis.build_id, firstDescriptorMismatch(base, other).?);
+    try std.testing.expect(!sameDescriptor(base, other));
+
+    var life = base;
+    life.lifecycle = .restoring;
+    try std.testing.expectEqual(DescriptorAxis.lifecycle, firstDescriptorMismatch(base, life).?);
+
+    var epoch = base;
+    epoch.upgrade_epoch = 8;
+    try std.testing.expectEqual(DescriptorAxis.upgrade_epoch, firstDescriptorMismatch(base, epoch).?);
+}
+
 fn writeAll(fd: c.fd_t, bytes: []const u8) Error!void {
     var offset: usize = 0;
     while (offset < bytes.len) {

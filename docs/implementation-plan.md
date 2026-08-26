@@ -1326,9 +1326,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    owner가 정산할 때까지 adapter의 단일 slot을 독점한다. primary와 secondary inflight owner는 제출 당시 전체 typed route를
    보존해 journal 축출이나 delivery-bit 선행 정산에서도 exact request를 expire하고 slot을 회수한다. 자동 gate는 product type과
    bare-binary bundle fail-close까지 증명한다. 실제
-   Notification Center 게시는 provisioned signed runner가 없어 미완료 제품 gate로 남는다. N2b3는 host-backed GUI history와 Swift OS request identifier/userInfo에
-   같은 stable key를 투영해 daemon/GUI 동시 제출도 Notification Center에서 같은 request를 replace하도록 한다. GUI는
-   `.os` bit를 내리지 않는다. N3는 그 route의 response를 cold-launch exact attach로 소비하는 별도 slice다.
+   Notification Center 게시는 provisioned signed runner가 없어 미완료 제품 gate로 남는다. **N2b3 구현 완료:** host-backed GUI history와 Swift OS request identifier/userInfo에
+   같은 stable key를 투영해 daemon/GUI 동시 제출도 Notification Center에서 같은 request를 replace하도록 한다. host-backed
+   history row는 optional typed `{hid,rid,eid}`를 owned scalar로 보존하고 occurrence timestamp와 발화 시점 display label을
+   host snapshot에서 사용한다. GUI→Swift ABI는 route 유무와 세 scalar를 별도 out field로 전달하고, Swift identifier는 daemon과
+   같은 `maru-{hid:032x}-{rid:032x}-{eid}` canonical 형식이며 userInfo에도 문자열 `hid`/`rid`와 숫자 `eid`를 싣는다.
+   in-process·hook·앱 자체 알림은 route가 없으므로 기존 UUID identifier와 window-token/surface route를 유지한다. 표시 문자열을
+   stable key로 역파싱하지 않으며 GUI는 `.os` bit를 내리지 않는다. N3는 그 route의 response를 cold-launch exact attach로
+   소비하는 별도 slice다. Debug·ReleaseFast 집중 gate와 AppHost ABI 4,070-test aggregate, Swift type-check 및 실제
+   `Maru.app` 링크가 이 투영을 검증한다. 실제 Notification Center 게시·replace는 위 provisioned 제품 gate에 남긴다.
 
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.

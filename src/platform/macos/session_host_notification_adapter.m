@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
 #import "session_host_notification_adapter.h"
+#import "session_host_notification_route.h"
 
 // The daemon has one owner thread, but UserNotifications completion handlers run on framework
 // queues. This tiny process-local slot bridges that asynchronous result without blocking the PTY
@@ -14,10 +15,11 @@ static const NSTimeInterval maruInflightTimeoutSeconds = 10.0;
 
 static NSString *maruRouteIdentifier(uint64_t hid_hi, uint64_t hid_lo,
                                      uint64_t rid_hi, uint64_t rid_lo, uint64_t eid) {
-    return [NSString stringWithFormat:@"maru-%016llx%016llx-%016llx%016llx-%llu",
-            (unsigned long long)hid_hi, (unsigned long long)hid_lo,
-            (unsigned long long)rid_hi, (unsigned long long)rid_lo,
-            (unsigned long long)eid];
+    char bytes[MARU_SESSION_HOST_NOTIFICATION_IDENTIFIER_CAP];
+    size_t len = maru_session_host_notification_format_identifier(
+        hid_hi, hid_lo, rid_hi, rid_lo, eid, bytes, sizeof(bytes));
+    if (len == 0) return nil;
+    return [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding];
 }
 
 static void maruFinishNotification(NSString *identifier, uint64_t generation, uint32_t result) {
@@ -36,6 +38,7 @@ static uint32_t maruSubmitNotification(
     if (NSBundle.mainBundle.bundleIdentifier == nil) return MARU_NOTIFICATION_BUNDLE_MISSING;
 
     NSString *identifier = maruRouteIdentifier(hid_hi, hid_lo, rid_hi, rid_lo, eid);
+    if (identifier == nil) return MARU_NOTIFICATION_TRANSIENT;
     [maruNotificationLock lock];
     if (maruInflightIdentifier != nil) {
         if (![maruInflightIdentifier isEqualToString:identifier]) {
@@ -136,6 +139,7 @@ void maru_session_host_notification_expire(
     uint64_t hid_hi, uint64_t hid_lo, uint64_t rid_hi, uint64_t rid_lo, uint64_t eid) {
     @autoreleasepool {
         NSString *identifier = maruRouteIdentifier(hid_hi, hid_lo, rid_hi, rid_lo, eid);
+        if (identifier == nil) return;
         [maruNotificationLock lock];
         if ([maruInflightIdentifier isEqualToString:identifier]) {
             maruInflightIdentifier = nil;

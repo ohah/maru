@@ -7315,7 +7315,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var bodyLen: size_t = 0
         var surfaceId: UInt64 = 0
         var foreground: UInt32 = 0
-        guard maru_macos_app_session_pending_notification(session, &has, &titlePtr, &titleLen, &bodyPtr, &bodyLen, &surfaceId, &foreground) == Self.statusOK,
+        var routePresent: UInt32 = 0
+        var hostIdHi: UInt64 = 0
+        var hostIdLo: UInt64 = 0
+        var runtimeIdHi: UInt64 = 0
+        var runtimeIdLo: UInt64 = 0
+        var eventId: UInt64 = 0
+        guard maru_macos_app_session_pending_notification(
+            session,
+            &has,
+            &titlePtr,
+            &titleLen,
+            &bodyPtr,
+            &bodyLen,
+            &surfaceId,
+            &foreground,
+            &routePresent,
+            &hostIdHi,
+            &hostIdLo,
+            &runtimeIdHi,
+            &runtimeIdLo,
+            &eventId
+        ) == Self.statusOK,
               has != 0 else { return }
         guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
         let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
@@ -7326,11 +7347,58 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // drainNotification은 tickAppSession이 explicitSurface로 이 창을 고른 컨텍스트에서 돈다 — activeSurface가 곧
         // 발신 창이다. 그 token과 surface_id를 실어, 클릭 시 token으로 창/세션을, surface_id로 그 안의 Term을 찾는다.
         // fg=전면 배너 여부(Zig 결정) — willPresent가 읽어 자기 화면 OSC 알림 배너 노이즈를 억제한다.
-        content.userInfo = ["wt": activeSurface?.token ?? 0, "sid": surfaceId, "fg": foreground]
-        // identifier는 UUID 유지(알림 dedup 식별자 — (token, surface_id)를 identifier에 쓰면 같은 터미널의 연속 알림이
-        // 서로 덮어써 사라진다). 라우팅 정보는 userInfo로 분리한다.
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        var userInfo: [String: Any] = ["wt": activeSurface?.token ?? 0, "sid": surfaceId, "fg": foreground]
+        let identifier: String
+        if routePresent != 0 {
+            let stableHostId = String(format: "%016llx%016llx", hostIdHi, hostIdLo)
+            let stableRuntimeId = String(format: "%016llx%016llx", runtimeIdHi, runtimeIdLo)
+            let stableRouteInfo: [String: Any] = [
+                "hid": stableHostId,
+                "rid": stableRuntimeId,
+                "eid": eventId,
+            ]
+            userInfo.merge(stableRouteInfo) { _, new in new }
+            guard let stableIdentifier = Self.hostNotificationIdentifier(
+                hostIdHi: hostIdHi,
+                hostIdLo: hostIdLo,
+                runtimeIdHi: runtimeIdHi,
+                runtimeIdLo: runtimeIdLo,
+                eventId: eventId
+            ) else { return }
+            identifier = stableIdentifier
+        } else {
+            // In-process, hook, and app-owned notifications have no host event identity. UUID keeps
+            // consecutive notifications from one local surface distinct, as before N2b3.
+            identifier = UUID().uuidString
+        }
+        content.userInfo = userInfo
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Shared C leaf also used by the daemon Objective-C adapter. Keeping the canonical identifier
+    /// formatter below both callers prevents one side from silently creating a second OS row.
+    private nonisolated static func hostNotificationIdentifier(
+        hostIdHi: UInt64,
+        hostIdLo: UInt64,
+        runtimeIdHi: UInt64,
+        runtimeIdLo: UInt64,
+        eventId: UInt64
+    ) -> String? {
+        var bytes = [CChar](repeating: 0, count: Int(MARU_SESSION_HOST_NOTIFICATION_IDENTIFIER_CAP))
+        let length = bytes.withUnsafeMutableBufferPointer { buffer in
+            maru_session_host_notification_format_identifier(
+                hostIdHi,
+                hostIdLo,
+                runtimeIdHi,
+                runtimeIdLo,
+                eventId,
+                buffer.baseAddress,
+                buffer.count
+            )
+        }
+        guard length > 0 else { return nil }
+        return String(cString: bytes)
     }
 
     /// 알림 userInfo에서 (창 토큰, surface_id)를 꺼낸다(drainNotification이 실은 ["wt","sid"]를 역으로 읽는다).

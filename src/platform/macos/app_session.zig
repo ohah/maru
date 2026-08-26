@@ -217,6 +217,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
+// 174: pending_notification에 optional host stable route의 presence와 fixed-width `{hid,rid,eid}` out field를
+// 추가한다. Swift가 이 시그니처를 직접 호출하므로 낡은 host/new Zig 조합은 ABI guard에서 실패해야 한다.
 // 173: 접근성 서술자를 host 로 여는 네 export(count/element/label/value)와 새 extern struct
 // `accessibility.Element`. Swift 가 그 레코드를 **자기 스택에 잡고** Zig 가 채우므로, 낡은 host 와 새
 // Zig 가 짝지어지면 배치를 추측하는 대신 ABI 가드에서 실패해야 한다(166 이 같은 이유로 올라갔다).
@@ -225,7 +227,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 173;
+pub const abi_version: u32 = 174;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2126,11 +2128,18 @@ pub const AgentKind = maru.session.session_model.AgentKind;
 /// 인앱 알림 센터에 보관하는 알림 한 건(owned title/body). OSC 9/777이 pendingNotification()으로
 /// 드레인하는 단일 funnel에서 push된다. surface_id로 클릭 시 그 터미널로 점프(activateSurfaceById). timestamp_ns는
 /// 상대시간("N분 전") 표시용, is_read=목록에서 클릭하면 true(안읽음 점/배지 계산).
+pub const StableNotificationRoute = struct {
+    host_id: u128,
+    runtime_id: u128,
+    event_id: u64,
+};
+
 const NotificationHistoryItem = struct {
     title: []u8,
     body: []u8,
     surface_id: u64,
     timestamp_ns: i128,
+    route: ?StableNotificationRoute = null,
     is_read: bool = false,
 };
 
@@ -13994,7 +14003,13 @@ pub const AppSession = struct {
     /// pendingNotification/drainOscNotificationFrom 공유 반환 타입 — Zig는 동일 필드 익명 struct도 서로 다른 타입으로
     /// 봐서 두 함수가 같은 익명 struct를 못 쓰므로 named로 둔다. surface_id로 클릭 점프(activateSurfaceById), foreground_banner는
     /// 전면 배너 여부. Swift ABI 래퍼(app_host_abi.zig)가 필드를 out 인자로 꺼낸다.
-    pub const PendingNotification = struct { title: []const u8, body: []const u8, surface_id: u64, foreground_banner: bool };
+    pub const PendingNotification = struct {
+        title: []const u8,
+        body: []const u8,
+        surface_id: u64,
+        foreground_banner: bool,
+        route: ?StableNotificationRoute = null,
+    };
 
     /// 타이핑 중 마우스 숨김 1회성 신호 drain(config input.mouse-hide-while-typing). pending이면 true + 비운다.
     /// Swift가 tick마다 호출해 true면 NSCursor.setHiddenUntilMouseMoves(true) — 복원은 다음 마우스 이동에서 AppKit이
@@ -34344,8 +34359,18 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         try std.testing.expectEqualStrings("ok", n.body); // body는 그대로
         try std.testing.expect(std.mem.indexOf(u8, n.title, "BuildDone") != null); // 위치 접두 + OSC title
         try std.testing.expectEqual(cat.surface.id, n.surface_id); // 클릭 점프용 발신 surface
+        const stable_route = n.route orelse {
+            try std.testing.expect(false);
+            return;
+        };
+        try std.testing.expect(stable_route.host_id != 0);
+        try std.testing.expect(stable_route.runtime_id != 0);
+        try std.testing.expect(stable_route.event_id != 0);
         // 인앱 히스토리에도 보관됐다(in-process와 같은 경로).
         try std.testing.expect(session.notification_history.items.len >= 1);
+        const history = session.notification_history.items[session.notification_history.items.len - 1];
+        try std.testing.expectEqual(stable_route, history.route.?);
+        try std.testing.expect(history.timestamp_ns > 0);
 
         _ = session.tabs.items[0].panes.items[0].terms.pop(); // destroyTerm 전 탭에서 뗀다(dangling 방지).
         term_ops.destroyTerm(session, cat);

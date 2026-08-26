@@ -185,6 +185,20 @@ pub fn drainOscNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focus
 /// foreground_banner=false(전면 노이즈 억제, 목록만)로 둔다. 포맷/dupe 실패(OOM)면 null(best-effort). `notifications.osc`
 /// 게이트와 소스 소비는 caller가 한다. 위치 라벨은 메인 스레드 상태(auto_title/custom_name/surface.title)만 읽는다.
 pub fn emitNotification(self: *AppSession, tab: *Tab, term: *Term, focused_term: ?*Term, title: []const u8, body: []const u8) ?PendingNotification {
+    var loc_buf: [notification_location_buf_len]u8 = undefined;
+    return emitNotificationAt(self, term, focused_term, notificationLocation(&loc_buf, tab, term), title, body, null, null);
+}
+
+fn emitNotificationAt(
+    self: *AppSession,
+    term: *Term,
+    focused_term: ?*Term,
+    display_label: []const u8,
+    title: []const u8,
+    body: []const u8,
+    route: ?app_session_mod.StableNotificationRoute,
+    occurred_at_ns: ?u64,
+) ?PendingNotification {
     if (self.notification_title_out.len > 0) {
         self.allocator.free(self.notification_title_out);
         self.notification_title_out = &.{};
@@ -193,12 +207,10 @@ pub fn emitNotification(self: *AppSession, tab: *Tab, term: *Term, focused_term:
         self.allocator.free(self.notification_body_out);
         self.notification_body_out = &.{};
     }
-    var loc_buf: [notification_location_buf_len]u8 = undefined;
-    const location = notificationLocation(&loc_buf, tab, term);
     self.notification_title_out = (if (title.len > 0)
-        std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ location, title })
+        std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ display_label, title })
     else
-        self.allocator.dupe(u8, location)) catch return null;
+        self.allocator.dupe(u8, display_label)) catch return null;
     self.notification_body_out = notificationBodyOwned(self, term, body) catch {
         self.allocator.free(self.notification_title_out);
         self.notification_title_out = &.{};
@@ -210,8 +222,21 @@ pub fn emitNotification(self: *AppSession, tab: *Tab, term: *Term, focused_term:
     // 여러 줄을 제대로 보여주므로 그쪽엔 원문을 그대로 보내고, 히스토리에만 눕힌 사본을 넣는다(code-review max).
     const history_body = flattenForHistory(self, self.notification_body_out) catch null;
     defer if (history_body) |h| self.allocator.free(h);
-    _ = pushNotificationHistory(self, self.notification_title_out, history_body orelse self.notification_body_out, osc_surface_id);
-    return .{ .title = self.notification_title_out, .body = self.notification_body_out, .surface_id = osc_surface_id, .foreground_banner = fg_banner };
+    _ = pushNotificationHistoryAt(
+        self,
+        self.notification_title_out,
+        history_body orelse self.notification_body_out,
+        osc_surface_id,
+        if (occurred_at_ns) |ns| @as(i128, ns) else @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
+        route,
+    );
+    return .{
+        .title = self.notification_title_out,
+        .body = self.notification_body_out,
+        .surface_id = osc_surface_id,
+        .foreground_banner = fg_banner,
+        .route = route,
+    };
 }
 
 /// 알림 **히스토리용** 한 줄 사본(owned) — 개행을 중점(·)으로 바꾼다. 원문을 안 고치는 이유는 OS 배너가
@@ -298,6 +323,18 @@ pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingN
         // **훅 모드 Term 에서는 OSC 알림을 쓰지 않는다**(계약 §1.1) — in-process `drainOscNotificationFrom` 과
         // 같은 규율이다. 여기서 함께 방출하면 같은 턴에 두 번 울린다. host 슬롯은 위에서 이미 비웠다(drop).
         if (agent_ops.agentHookMode(self, term) == .hook) return null;
+        if (notif.route) |route| {
+            return emitNotificationAt(
+                self,
+                term,
+                focused_term,
+                notif.display_label orelse return null,
+                notif.title,
+                notif.body,
+                .{ .host_id = route.host_id, .runtime_id = route.runtime_id, .event_id = route.event_id },
+                route.occurred_at_ns,
+            );
+        }
         return emitNotification(self, tab, term, focused_term, notif.title, notif.body);
     }
     return null;
@@ -309,6 +346,24 @@ pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingN
 /// 알림을 인앱 센터에 추가하고 성공하면 true. 할당 실패(title/body dup·append)면 false를 돌려준다 —
 /// drainUpdateCheck가 이 결과로 "성공했을 때만" 1회 가드를 닫아 일시적 실패 시 재시도하게 한다.
 pub fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []const u8, surface_id: u64) bool {
+    return pushNotificationHistoryAt(
+        self,
+        title,
+        body,
+        surface_id,
+        @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
+        null,
+    );
+}
+
+fn pushNotificationHistoryAt(
+    self: *AppSession,
+    title: []const u8,
+    body: []const u8,
+    surface_id: u64,
+    timestamp_ns: i128,
+    route: ?app_session_mod.StableNotificationRoute,
+) bool {
     const title_dup = self.allocator.dupe(u8, title) catch return false;
     const body_dup = self.allocator.dupe(u8, body) catch {
         self.allocator.free(title_dup);
@@ -324,7 +379,8 @@ pub fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []con
         .title = title_dup,
         .body = body_dup,
         .surface_id = surface_id,
-        .timestamp_ns = @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
+        .timestamp_ns = timestamp_ns,
+        .route = route,
         .is_read = false,
     }) catch {
         self.allocator.free(title_dup);

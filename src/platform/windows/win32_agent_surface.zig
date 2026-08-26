@@ -216,20 +216,32 @@ pub const Routed = struct {
 pub fn pointer(
     built: *const Built,
     state: *State,
-    kind: interaction.PointerKind,
+    phase: interaction.UiPointerPhase,
     x_px: f64,
     y_px: f64,
 ) Routed {
+    // **SCM 표면과 같은 호출 모양이다**(`win32_scm_surface.pointer`) — 여기서 다른 순서로 부르면
+    // 두 도크가 다른 규칙으로 반응한다.
+    const tree_view = maru.chrome.ui.tree.UiRectTree{ .entries = built.frame.tree.entries };
     const dispatched = interaction.dispatch(
-        &built.frame.tree,
         &state.interaction,
-        .{ .kind = kind, .x = x_px, .y = y_px },
-    );
-    var routed = Routed{ .dirty = dispatched.dirty };
-    if (dispatched.action) |action| {
-        routed.intent = built.frame.actions.resolve(action);
+        tree_view,
+        .{ .phase = phase, .x_px = x_px, .y_px = y_px, .timestamp_ns = 0 },
+    ) catch return .{};
+    var dirty = false;
+    for (dispatched.dirty.ids) |id| {
+        if (id != null) {
+            dirty = true;
+            break;
+        }
     }
-    return routed;
+    const action = dispatched.action orelse return .{ .dirty = dirty };
+    // **`@constCast` 는 안전하다** — `resolve` 는 `self` 를 값으로 받고 읽기만 한다(SCM 표면의 그
+    // 주석과 같은 이유). 표를 손으로 훑지 않는 이유는 `enabled` 와 **세대 판정**이 거기 있기
+    // 때문이다: 직접 훑으면 꺼진 컨트롤도 눌리고, 옛 프레임의 action 도 살아난다.
+    var table = component.ids.Table.init(@constCast(built.frame.actions));
+    table.count = built.frame.actions.len;
+    return .{ .intent = table.resolve(action, built.props.snapshot_generation), .dirty = dirty };
 }
 
 /// 누르고 떼는 한 벌 — 판정이 쓰기 좋게 묶어 둔다(`.up` 만 보내면 클릭이 안 난다: §2m.35).

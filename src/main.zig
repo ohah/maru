@@ -2913,11 +2913,152 @@ fn agentListBenign(reason: []const u8) bool {
         std.mem.eql(u8, reason, "no_home");
 }
 
+/// 그려진 목록 항목 하나의 사각형 — **published tree 가 준 자리**다.
+///
+/// **손으로 고른 좌표를 쓰지 않는다.** 배치가 바뀌면 그 좌표는 엉뚱한 곳을 가리키는데 판정은
+/// 그대로 초록이다 — 이 포트에서 그 부류를 여러 번 겪었다. 노드 id 는 `NodeIds.item(index)` 이고
+/// 그 번호는 **투영된 목록의 인덱스**다(그 파일의 주석: *"Every projected list item gets an
+/// eight-id lane"*).
+fn agentItemRect(built: *const agent_surface.Built, index: usize) ?maru.chrome.ui.layout.UiRect {
+    const id = maru.chrome.components.session_dock.build.NodeIds.item(index);
+    for (built.frame.tree.entries) |e| {
+        if (e.id == id) return e.rect;
+    }
+    return null;
+}
+
+/// 스캔이 끝난 뒤에도 남는 **카드 재료**. 재투영(그룹 접기)이 목록을 다시 만들 때 이것만 있으면 된다 —
+/// 레코드 원본은 스캔 arena 와 함께 사라진다.
+///
+/// **왜 레코드 인덱스로 잡나**: 투영이 카드를 `record_index` 로 가리키고(`archive_view.Entry.card`),
+/// 그 번호는 접기·펼치기로 안 바뀐다. 목록 위치로 잡으면 그룹을 접는 순간 전부 밀린다.
+const AgentCard = struct {
+    provider: maru.chrome.components.session_dock.types.Provider,
+    title: []const u8,
+    summary: []const u8,
+    messages: []const u8,
+    age: []const u8,
+    model: []const u8,
+};
+
+/// 재투영에 필요한 것 전부. 문자열은 전부 앱 수명 arena 소유다.
+const AgentArchive = struct {
+    view_items: []maru.session.agent_session_archive_view.Item = &.{},
+    cards: []AgentCard = &.{},
+    /// 접힌 그룹의 키(= cwd). **키 문자열이다** — 투영이 그것으로 접기를 판정한다(`build` 의 셋째 인자).
+    /// 인텐트는 `u64` 로 오지만 그것은 **그 순간의 그룹 번호**라, 목록이 바뀌면 다른 그룹을 가리킨다.
+    collapsed: std.ArrayList([]const u8) = .empty,
+
+    fn isCollapsed(self: *const AgentArchive, key: []const u8) bool {
+        for (self.collapsed.items) |k| if (std.mem.eql(u8, k, key)) return true;
+        return false;
+    }
+};
+
+/// 투영 → 화면 항목. **접기 상태를 반영해 다시 만든다.**
+///
+/// `scratch` 는 이 호출에서만 사는 arena(투영이 거기 쌓인다), `persist` 는 항목이 가리키는 문자열의
+/// 주인이다 — 다만 문자열은 이미 `AgentArchive` 가 들고 있으므로 여기서는 **빌려 쓴다**.
+fn projectAgentItems(
+    scratch: std.mem.Allocator,
+    persist: std.mem.Allocator,
+    archive: *const AgentArchive,
+    out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
+) !void {
+    out.clearRetainingCapacity();
+    if (archive.view_items.len == 0) return;
+    var projection = try maru.session.agent_session_archive_view.build(scratch, archive.view_items, archive.collapsed.items);
+    defer projection.deinit(scratch);
+    for (projection.entries.items) |entry| switch (entry) {
+        .group => |gi| {
+            const g = projection.groups.items[gi];
+            try out.append(persist, .{
+                .group = .{
+                    .identity = gi,
+                    // **라벨은 투영이 매번 새로 만든다** — 이 arena 는 곧 사라지므로 복사한다.
+                    .label = try persist.dupe(u8, g.label),
+                    .count = @intCast(@min(g.count, std.math.maxInt(u16))),
+                    .collapsed = g.collapsed,
+                },
+            });
+        },
+        .card => |ri| {
+            if (ri >= archive.cards.len) continue;
+            const c = archive.cards[ri];
+            try out.append(persist, .{ .card = .{
+                .identity = ri,
+                .provider = c.provider,
+                .title = c.title,
+                .summary = c.summary,
+                .metadata = .{ .messages = c.messages, .age = c.age, .model = c.model },
+            } });
+        },
+    };
+}
+
+/// 인텐트 하나를 상태에 적용한다. 화면이 바뀌면 `true`.
+///
+/// **지금 지킬 수 있는 것만 지킨다.** 나머지(`scope`·`toggle_sort`·`refresh`·`resume_session` …)는
+/// 모델이 Windows 앱에 아직 없다 — 조용히 무시하지 않고 **여기 목록으로 남겨** 무엇이 빠졌는지가
+/// 코드에서 보이게 한다.
+fn applyAgentIntent(
+    scratch: std.mem.Allocator,
+    persist: std.mem.Allocator,
+    archive: *AgentArchive,
+    state: *agent_surface.State,
+    items: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
+    intent: maru.chrome.components.session_dock.ids.Intent,
+) bool {
+    switch (intent) {
+        .select_card => |identity| {
+            // **같은 카드를 다시 누르면 접힌다.** 펼침이 하나뿐이라 그것이 유일한 닫는 방법이다.
+            state.expanded_identity = if (state.expanded_identity == identity) null else identity;
+            return true;
+        },
+        .toggle_group => |gi| {
+            // **번호를 키로 바꾼다.** 인텐트의 `u64` 는 그 순간의 그룹 번호이고, 접기 상태는
+            // 키(cwd)로 산다 — 목록이 바뀌어도 같은 그룹을 가리키게 하는 것이 그 차이다.
+            const key = groupKeyAt(archive, gi) orelse return false;
+            if (archive.isCollapsed(key)) {
+                for (archive.collapsed.items, 0..) |k, i| {
+                    if (std.mem.eql(u8, k, key)) {
+                        _ = archive.collapsed.orderedRemove(i);
+                        break;
+                    }
+                }
+            } else {
+                archive.collapsed.append(persist, key) catch return false;
+            }
+            projectAgentItems(scratch, persist, archive, items) catch return false;
+            state.invalidateTree();
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// 그 순간의 그룹 번호 → 그룹 키. 투영을 다시 돌려 얻는다 — 번호의 의미가 거기 있기 때문이다.
+fn groupKeyAt(archive: *const AgentArchive, gi: u64) ?[]const u8 {
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var projection = maru.session.agent_session_archive_view.build(fba.allocator(), archive.view_items, archive.collapsed.items) catch return null;
+    defer projection.deinit(fba.allocator());
+    if (gi >= projection.groups.items.len) return null;
+    // **호출자 arena 가 아니라 archive 가 이미 든 키를 돌려준다** — 투영은 곧 사라진다.
+    const key = projection.groups.items[gi].key;
+    for (archive.view_items) |vi| {
+        const k = if (vi.cwd_canonical and vi.cwd.len > 0) vi.cwd else "";
+        if (std.mem.eql(u8, k, key)) return k;
+    }
+    return null;
+}
+
 fn buildAgentItems(
     scan: std.mem.Allocator,
     persist: std.mem.Allocator,
     io: std.Io,
     home: []const u8,
+    archive: *AgentArchive,
     out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
 ) ![]const u8 {
     var backend = agent_archive_backend.Backend.init(scan, io) catch return "backend_init";
@@ -2941,60 +3082,48 @@ fn buildAgentItems(
     defer res.deinit(scan);
     if (res.records.items.len == 0) return "no_history";
 
-    // ── 레코드 → 묶음(중립) ──────────────────────────────────────────────────────────────────
-    const view_items = try scan.alloc(maru.session.agent_session_archive_view.Item, res.records.items.len);
-    for (res.records.items, 0..) |rec, i| {
-        view_items[i] = .{ .record_index = i, .cwd = rec.parsed.cwd, .cwd_canonical = rec.parsed.cwd_canonical };
-    }
-    var projection = try maru.session.agent_session_archive_view.build(scan, view_items, &.{});
-    defer projection.deinit(scan);
-
+    // ── 레코드 → **오래 사는 재료** ──────────────────────────────────────────────────────────
+    //
+    // **문자열을 복사한다.** 전부 `res` 안의 메모리를 가리키는 슬라이스인데 이 함수를 나가며 그것을
+    // `deinit` 한다 — arena 라 메모리가 살아 있어도 안전 빌드의 `Allocator.free` 가 해제한 자리를
+    // `undefined`(0xAA)로 덮으므로 내용이 통째로 사라진다(§2m.57 실측).
     const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
-    for (projection.entries.items) |entry| switch (entry) {
-        .group => |gi| {
-            const g = projection.groups.items[gi];
-            try out.append(persist, .{
-                .group = .{
-                    .identity = gi,
-                    // **문자열을 복사한다.** `label`·`title`·`summary`·`model` 은 전부 `res`/`projection`
-                    // 안의 메모리를 가리키는 슬라이스인데, 이 함수를 나가며 그 둘을 `deinit` 한다.
-                    // 안전 빌드의 `Allocator.free` 는 해제한 자리를 `undefined`(0xAA)로 덮으므로 —
-                    // `persist` 가 arena 라 메모리가 살아 있어도 — **내용이 통째로 0xAA 가 된다**(실측: 제목 첫
-                    // 세 바이트가 전부 170, UTF-8 로 성립조차 안 하는 값이라 그리는 쪽에서 조용히
-                    // 사라졌다). `persist` 는 이 함수보다 오래 사니 복사본이 화면 수명을 넘긴다.
-                    .label = try persist.dupe(u8, g.label),
-                    .count = @intCast(@min(g.count, std.math.maxInt(u16))),
-                    .collapsed = g.collapsed,
-                },
-            });
-        },
-        .card => |ri| {
-            if (ri >= res.records.items.len) continue;
-            const rec = res.records.items[ri];
-            const p = rec.parsed;
-            // **메타는 세그먼트다**(한 문장이 아니다) — 컴포넌트가 구분자와 색을 소유해 위계를 준다.
-            const messages = try std.fmt.allocPrint(persist, "{d}", .{p.message_count});
-            var age_buf: [24]u8 = undefined;
-            const age_src = maru.chrome.components.sidebar.formatRelativeAge(
-                @intCast(@max(0, @divTrunc(now_ns - @as(i128, agent_archive_backend.lastActivityNs(rec)), 1_000_000))),
-                &age_buf,
-            );
-            const age = try persist.dupe(u8, age_src);
-            try out.append(persist, .{ .card = .{
-                .identity = ri,
-                .provider = switch (p.provider) {
-                    .claude => .claude,
-                    .codex => .codex,
-                },
-                .title = try persist.dupe(u8, p.title),
-                .summary = try persist.dupe(u8, p.summary),
-                .metadata = .{ .messages = messages, .age = age, .model = try persist.dupe(u8, p.model) },
-            } });
-        },
-    };
+    const vi = try persist.alloc(maru.session.agent_session_archive_view.Item, res.records.items.len);
+    const cards = try persist.alloc(AgentCard, res.records.items.len);
+    for (res.records.items, 0..) |rec, idx| {
+        const p = rec.parsed;
+        vi[idx] = .{
+            .record_index = idx,
+            .cwd = try persist.dupe(u8, p.cwd),
+            .cwd_canonical = p.cwd_canonical,
+        };
+        // **메타는 세그먼트다**(한 문장이 아니다) — 컴포넌트가 구분자와 색을 소유해 위계를 준다.
+        const messages = try std.fmt.allocPrint(persist, "{d}", .{p.message_count});
+        var age_buf: [24]u8 = undefined;
+        const age_src = maru.chrome.components.sidebar.formatRelativeAge(
+            @intCast(@max(0, @divTrunc(now_ns - @as(i128, agent_archive_backend.lastActivityNs(rec)), 1_000_000))),
+            &age_buf,
+        );
+        cards[idx] = .{
+            .provider = switch (p.provider) {
+                .claude => .claude,
+                .codex => .codex,
+            },
+            .title = try persist.dupe(u8, p.title),
+            .summary = try persist.dupe(u8, p.summary),
+            .messages = messages,
+            .age = try persist.dupe(u8, age_src),
+            .model = try persist.dupe(u8, p.model),
+        };
+    }
+    archive.view_items = vi;
+    archive.cards = cards;
+    // **첫 화면도 같은 함수가 만든다** — 접기 뒤와 다른 코드로 만들면 그 둘이 갈린다.
+    var proj_arena = std.heap.ArenaAllocator.init(scan);
+    defer proj_arena.deinit();
+    try projectAgentItems(proj_arena.allocator(), persist, archive, out);
     return "";
 }
-
 /// 상태바 항목 하나 — **아이콘(선택) + 글자**. 정체는 중립 `ItemId` 가 갖는다(슬롯 인덱스를 id 로
 /// 쓰면 항목 하나가 사라질 때 남은 것의 id 가 밀려 눌린 것과 실행된 것이 갈린다 — 그 enum 의 doc).
 const StatusBarItem = struct {
@@ -4164,6 +4293,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var agent_arena = std.heap.ArenaAllocator.init(allocator);
     defer agent_arena.deinit();
     var agent_items: std.ArrayList(maru.chrome.components.session_dock.types.Item) = .empty;
+    // 재투영 재료 — 그룹을 접으면 이것으로 목록을 다시 만든다(레코드 원본은 스캔 arena 와 함께 사라진다).
+    var agent_archive: AgentArchive = .{};
+    var agent_pointer_intents: usize = 0;
+    var agent_applied_intents: usize = 0;
+    var agent_redraws: usize = 0;
+    // **죽은 컨트롤이었는지**의 관측점. 그려진 그룹 헤더를 눌러 목록이 **줄어드는지** 본다 —
+    // 인텐트 개수만 세면 속 빈다(적용이 안 돼도 인텐트는 난다).
+    var ag_click_judgeable = false;
+    var ag_items_before: usize = 0;
+    var ag_items_after: usize = 0;
+    var ag_collapsed_after: usize = 0;
+    var ag_expand_before: ?u64 = null;
+    var ag_expand_after: ?u64 = null;
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
@@ -4177,12 +4319,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (home_dir) |home| {
             var scan_arena = std.heap.ArenaAllocator.init(allocator);
             defer scan_arena.deinit();
-            agent_list_reason = buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_items) catch "scan_failed";
+            agent_list_reason = buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_archive, &agent_items) catch "scan_failed";
             agent_scan_kb = scan_arena.queryCapacity() / 1024;
         } else agent_list_reason = "no_home";
     }
     const scm_tokens = chromeTokensFor(cfg);
-    const agent_opts = agent_surface.Options{
+    var agent_opts = agent_surface.Options{
         .font_family = cfg.font.family,
         .font_fallback = cfg.font.fallback,
         .font_size_pt = cfg.font.size,
@@ -4474,8 +4616,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 본다. 계약이 적어 둔 두 실패가 여기서 갈린다 — 터미널에 갈 것이 도크로 새면 셸이 먹통이 되고,
     // 반대면 도크가 죽은 컨트롤이 된다.
     var spins: usize = 0;
+    // **판정 단계는 스모크에서만 돈다.** 이 루프는 `win32-terminal`(제품)과
+    // `win32-terminal-smoke`(판정)가 **같이 쓴다** — 스핀 번호로만 가른 단계들이 제품에서도 돌아,
+    // 실기가 세션을 스스로 만들고 셸에 `MARK-ONE` 을 치고 창을 최대화하고 그룹을 접었다(실측
+    // 2026-08-26: 캡처에 그 글자가 찍혀 드러났다). 스모크만 스핀 상한을 넘기므로 그것이 판정이다.
+    const smoke = max_spins != null;
     while ((max_spins == null or spins < max_spins.?) and !window.quit_requested and !close_requested) : (spins += 1) {
-        if (spins == 60) {
+        if (smoke and spins == 60) {
             // **판정 불가와 실패를 가른다.** 창이 좁아 도크가 없으면 누를 것이 없는데, 그것을
             // `dock_row_clicks=0` 으로만 적으면 고장난 것처럼 읽힌다(이 세션에서 다섯 번째다).
             if (geom.dock.w != 0 and dock_rows_drawn > 2) {
@@ -4491,7 +4638,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // 잡기 띠 한가운데를 누르고 **왼쪽으로 40px** 끈 뒤 뗀다. 도크가 그만큼 넓어져야 하고,
         // 터미널 격자는 그만큼 좁아져야 한다.
-        if (spins == 90 and geom.divider.w != 0) {
+        if (smoke and spins == 90 and geom.divider.w != 0) {
             divider_judgeable = true;
             dock_w_before_drag = geom.dock.w;
             grid_cols_before_drag = if (app_window.active()) |a| a.core.size.cols else 0;
@@ -4504,7 +4651,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // 뷰 바의 **두 번째 칸**(소스 컨트롤)을 눌러 도크 그림이 실제로 달라지는지 본다. 개수만
         // 세면 "전환했다" 가 헛일이어도 초록이라, **셀 지문**을 견준다.
-        if (spins == 150 and geom.view_bar.w != 0) {
+        if (smoke and spins == 150 and geom.view_bar.w != 0) {
             const bar = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
             if (maru.chrome.components.dock_view_bar.slotRect(bar, cell_w, 1)) |r| {
                 view_judgeable = true;
@@ -4521,7 +4668,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **뷰 바 셋째 칸을 눌러 연다.** 그 칸은 지금까지 **빈 도크**를 열었다 — 눌리는데 아무것도
         // 안 그려졌다. 목록이 비어도 헤더·검색 줄·안내는 그려져야 한다: "비었다" 와 "조립이
         // 깨졌다" 는 다른 사실이다.
-        if (spins == 260 and geom.view_bar.w != 0) {
+        if (smoke and spins == 260 and geom.view_bar.w != 0) {
             const bar3 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
             if (maru.chrome.components.dock_view_bar.slotRect(bar3, cell_w, 2)) |r3| {
                 agent_judgeable = true;
@@ -4533,7 +4680,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, ax, ay);
             }
         }
-        if (spins == 290 and agent_judgeable) {
+        if (smoke and spins == 290 and agent_judgeable) {
             agent_view_reached = dock_view == .agent_sessions;
             if (agent_built) |*b| {
                 agent_cells = b.cells.len;
@@ -4557,7 +4704,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         // 전환 뒤 **소스 컨트롤 행을 눌러 본다** — 뷰가 바뀌었는데 안 눌리면 죽은 컨트롤이다.
-        if (spins == 200 and dock_view == .source_control) {
+        if (smoke and spins == 200 and dock_view == .source_control) {
             if (scm_built) |*b| {
                 const component = maru.chrome.components.scm_dock;
                 for (b.items, 0..) |item, i| switch (item) {
@@ -4580,7 +4727,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **버튼을 진짜 누른다.** 최대화(가운데)를 눌러 창 상태가 뒤집히는지 보고, 다시 눌러
         // 되돌린다. 최소화는 창을 숨겨 이후 판정이 못 돌고 닫기는 루프를 끝내므로 **최대화가
         // 유일하게 판정 가능한 버튼**이다. `ShowWindowAsync` 라 상태가 몇 스핀 뒤에 온다.
-        if (spins == 250 and titlebar_px != 0) {
+        if (smoke and spins == 250 and titlebar_px != 0) {
             caption_judgeable = true;
             caption_max_before = window.isMaximized();
             const r = captionButtonRects(client_w, titlebar_px, caption_btn_w)[1];
@@ -4589,7 +4736,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, cx, cy);
             window.postSyntheticMouse(.left_up, cx, cy);
         }
-        if (spins == 330 and caption_judgeable) {
+        if (smoke and spins == 330 and caption_judgeable) {
             caption_max_after = window.isMaximized();
             // **지금 폭으로 다시 잰다** — 최대화로 클라이언트가 넓어졌으므로 옛 사각형을 쓰면
             // 화면 한복판을 누르게 된다.
@@ -4599,7 +4746,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, cx, cy);
             window.postSyntheticMouse(.left_up, cx, cy);
         }
-        if (spins == 410 and caption_judgeable) caption_max_restored = window.isMaximized();
+        if (smoke and spins == 410 and caption_judgeable) caption_max_restored = window.isMaximized();
         // ── 프레임리스 배선 판정 (W8.8⒝) ───────────────────────────────────────────────────
         //
         // 복원이 끝난 뒤 잰다 — 최대화 중에는 창 사각형이 화면 작업영역이라 값이 흔들린다.
@@ -4621,7 +4768,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **행 수가 늘었다가 돌아와야 한다.** 개수만 세면 속 빈다 — 누른 것이 파일이어도 클릭은
         // 세어진다. 그래서 **디렉터리 행을 골라** 누르고 목록 길이를 견준다.
-        if (spins == 40 and dock_view == .explorer and geom.tree_content.w != 0) {
+        if (smoke and spins == 40 and dock_view == .explorer and geom.tree_content.w != 0) {
             for (dock_rows.items, 0..) |r, i| switch (r) {
                 .directory => |dir| {
                     if (dir.expanded) continue;
@@ -4637,7 +4784,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 else => {},
             };
         }
-        if (spins == 55 and expand_judgeable) expand_rows_after = dock_rows.items.len;
+        if (smoke and spins == 55 and expand_judgeable) expand_rows_after = dock_rows.items.len;
         // ── 도크 스크롤바 판정 (W8.10) ─────────────────────────────────────────────────────
         //
         // **트리를 넘치게 만든다.** 기본 상태에서는 21 행이라 뷰포트에 다 들어가고, 그러면 막대가
@@ -4647,7 +4794,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 접힌 디렉터리를 차례로 눌러 행을 늘린다 — 한 번에 하나씩(펼치기가 스캔을 기다린다).
         // **탐색기로 되돌린다** — 그 앞 판정이 뷰를 에이전트로 바꿔 놨고, 도크 막대는 탐색기
         // 뷰에서만 뜬다(SCM·에이전트는 자기 컴포넌트가 스크롤을 소유한다).
-        if (spins == 655) {
+        if (smoke and spins == 655) {
             const bar3 = geom.view_bar;
             if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar3.x, .y = bar3.y, .w = bar3.w, .h = bar3.h }, cell_w, 0)) |r0| {
                 const vx: i32 = @intCast(r0.x + r0.w / 2);
@@ -4656,7 +4803,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, vx, vy);
             }
         }
-        if (spins >= 656 and spins <= 690 and dock_view == .explorer and
+        if (smoke and spins >= 656 and spins <= 690 and dock_view == .explorer and
             dock_rows.items.len *| cell_h <= geom.tree_content.h)
         {
             for (dock_rows.items, 0..) |r, i| switch (r) {
@@ -4671,7 +4818,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 else => {},
             };
         }
-        if (spins == 700) if (dock_bar) |b| {
+        if (smoke and spins == 700) if (dock_bar) |b| {
             db_seen = b;
             db_judgeable = true;
             db_off_before = dock_scroll_px;
@@ -4681,10 +4828,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, gx, gy + @as(i32, @intFromFloat(b.track_h / 3)));
             window.postSyntheticMouse(.left_up, gx, gy + @as(i32, @intFromFloat(b.track_h / 3)));
         };
-        if (spins == 705) db_off_after = dock_scroll_px;
+        if (smoke and spins == 705) db_off_after = dock_scroll_px;
         // **행 클릭 판정의 답을 먼저 챙긴다** — 아래 접기 클릭이 같은 변수를 덮는다(도크 스크롤과
         // 사이드바에서 같은 일을 두 번 겪었다).
-        if (spins == 65) {
+        if (smoke and spins == 65) {
             dock_click_answer = dock_last_row;
             // **이름도 그때 것을 챙긴다.** 끝 상태에서 읽으면 그 사이 펼치기·접기로 목록이 바뀌어
             // **누른 적 없는 줄의 이름**을 적게 된다(대조하라고 넣은 값이 대조를 방해한다).
@@ -4701,15 +4848,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 dock_click_name_len = n2;
             };
         }
-        if (spins == 70 and expand_judgeable) {
+        if (smoke and spins == 70 and expand_judgeable) {
             // 같은 줄을 다시 눌러 **접힌다**. 펼친 뒤 그 줄은 자리가 그대로다(그 위 행이 안 늘었다).
             const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
             const ey: i32 = @intCast(geom.tree_content.y + cell_h * @as(u32, @intCast(expand_row)) + cell_h / 2);
             window.postSyntheticMouse(.left_down, ex, ey);
             window.postSyntheticMouse(.left_up, ex, ey);
         }
-        if (spins == 85 and expand_judgeable) expand_rows_collapsed = dock_rows.items.len;
-        if (spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
+        if (smoke and spins == 85 and expand_judgeable) expand_rows_collapsed = dock_rows.items.len;
+        if (smoke and spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
             dock_rows.items.len *| cell_h > geom.tree_content.h)
         {
             dock_scroll_judgeable = true;
@@ -4722,7 +4869,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 통과했다(실측). 이제 답은 그 호출부가 낸다.
         // **두 판정이 각자 자기 클릭을 읽어야 한다.** 이 클릭이 `dock_last_row` 를 덮으면 앞선
         // 행 클릭 판정(`want_row=2`)이 엉뚱한 값을 보고 실패한다 — 실측으로 그렇게 됐다.
-        if (spins == 115 and dock_scroll_judgeable) {
+        if (smoke and spins == 115 and dock_scroll_judgeable) {
             dock_row_before_scroll_click = dock_last_row;
             const cx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
             const cy: i32 = @intCast(geom.tree_content.y + 1);
@@ -4730,11 +4877,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, cx, cy);
             dock_scroll_click_sent = true;
         }
-        if (spins == 130 and dock_scroll_click_sent) {
+        if (smoke and spins == 130 and dock_scroll_click_sent) {
             dock_scroll_clicked_row = dock_last_row;
             dock_last_row = dock_row_before_scroll_click; // 앞선 판정에 그 클릭의 답을 돌려준다
         }
-        if (spins == 470 and sidebar_w != 0 and sidebar_header_h != 0) {
+        if (smoke and spins == 470 and sidebar_w != 0 and sidebar_header_h != 0) {
             sidebar_judgeable = true;
             const m_sb = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const card_top = geom.sidebar.y + sidebar_header_h + m_sb.content_pad_v;
@@ -4744,19 +4891,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, cx, card_mid);
             window.postSyntheticMouse(.left_up, cx, card_mid);
         }
-        if (spins == 490) {
+        if (smoke and spins == 490) {
             maru.app.host.sendInputToActiveSurface(&app_window, &runtime, .{ .bytes = "MARK-ONE" }) catch {};
         }
         // **⒜3 판정은 자기 순간의 답을 챙긴다.** 끝 상태를 읽으면 뒤에 오는 스크롤 시험의
         // 클릭들(＋ 여러 번·카드 두 번)이 그 값을 덮어 엉뚱하게 실패한다.
-        if (spins == 480) a3_card_slot = sidebar_last_slot;
-        if (spins == 510) {
+        if (smoke and spins == 480) a3_card_slot = sidebar_last_slot;
+        if (smoke and spins == 510) {
             a3_header = sidebar_last_header;
             a3_card_clicks = sidebar_card_clicks;
             a3_header_clicks = sidebar_header_clicks;
             a3_redraws = sidebar_redraws;
         }
-        if (spins == 500 and sidebar_w != 0 and sidebar_header_h != 0) {
+        if (smoke and spins == 500 and sidebar_w != 0 and sidebar_header_h != 0) {
             // 헤더의 **새 워크스페이스(＋)** 칸 — 오른쪽 끝이라 다른 칸과 안 겹친다.
             //
             // **먼저 첫 세션에 표시를 남긴다.** 두 셸이 같은 크기·같은 프롬프트면 화면이 **똑같아서**
@@ -4780,7 +4927,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **넘치게 만든 뒤 굴린다.** ＋ 를 여러 번 눌러 카드가 창 높이를 넘게 한 다음, 목록 위에서
         // 굴리고 **목록 맨 위를 진짜로 눌러** 그 자리에 그려진 카드가 나오는지 본다.
-        if (spins > 570 and spins < 582 and sidebar_header_h != 0 and sessions.items.len < max_win_sessions) {
+        if (smoke and spins > 570 and spins < 582 and sidebar_header_h != 0 and sessions.items.len < max_win_sessions) {
             const hc: u32 = sidebar_w / cell_w;
             const cpx = maru.chrome.components.sidebar.headerIconCol(.new_workspace, hc);
             const hx: i32 = @intCast(cpx *| cell_w + cell_w / 2);
@@ -4790,7 +4937,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, hx, hy);
         }
         // **안 넘칠 때 막대가 없는지**를 그 순간에 센다. 트리는 아직 21 행이라 뷰포트에 들어간다.
-        if (spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
+        if (smoke and spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
             dock_rows.items.len *| cell_h <= geom.tree_content.h)
         {
             fits_judgeable = true;
@@ -4807,7 +4954,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **끌기 바로 뒤여야 한다.** 한참 뒤에 두었더니 그 사이 도크 끌기가 있어, 남아 있던 것은
         // 도크 드래그인데 판정은 사이드바만 봤다 — `left_up` 을 지우는 뮤턴트가 **그대로 통과했다**
         // (실측 2026-08-26). 그리고 **두 offset 을 함께 본다**: 어느 쪽이 새도 잡힌다.
-        if (spins == 645) if (sidebar_bar) |b| {
+        if (smoke and spins == 645) if (sidebar_bar) |b| {
             after_release_judgeable = true;
             after_release_before = sidebar_scroll_px;
             after_release_dock_before = dock_scroll_px;
@@ -4815,7 +4962,58 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **트랙 위쪽으로** 옮긴다 — 지금 offset 이 최대라 아래로는 clamp 되어 안 움직인다.
             window.postSyntheticMouse(.moved, gx, @intFromFloat(b.track_y + 4));
         };
-        if (spins == 646) {
+        // ── 에이전트 카드·그룹 클릭 판정 (W8.11) ───────────────────────────────────────
+        //
+        // **그룹 헤더를 누르면 목록이 줄어야 한다**(그 그룹의 카드가 빠진다). 그리고 카드를 누르면
+        // 펼침 identity 가 붙어야 한다. 둘 다 **그린 자리**에서 누른다 — published tree 가 준 자리다.
+        if (smoke and spins == 712 and agent_built != null) {
+            // 에이전트 뷰로 되돌린다(앞 판정들이 탐색기로 바꿔 놨다).
+            const bar4 = geom.view_bar;
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar4.x, .y = bar4.y, .w = bar4.w, .h = bar4.h }, cell_w, 2)) |r2| {
+                const vx: i32 = @intCast(r2.x + r2.w / 2);
+                const vy: i32 = @intCast(r2.y + r2.h / 2);
+                window.postSyntheticMouse(.left_down, vx, vy);
+                window.postSyntheticMouse(.left_up, vx, vy);
+            }
+        }
+        // **기준을 카드 클릭 앞에서 잡는다** — 뒤에서 읽으면 이미 펼쳐진 값이라 `0->0` 으로 보인다.
+        if (smoke and spins == 713) ag_expand_before = agent_state.expanded_identity;
+        // **카드부터 누른다** — 그룹을 접으면 그 카드들이 목록에서 빠져 누를 것이 없어진다.
+        if (smoke and spins == 714) if (agent_built) |*b| {
+            for (agent_items.items, 0..) |it, idx| switch (it) {
+                .card => {
+                    if (agentItemRect(b, idx)) |r| {
+                        const cx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        const cy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                        window.postSyntheticMouse(.left_down, cx, cy);
+                        window.postSyntheticMouse(.left_up, cx, cy);
+                    }
+                    break;
+                },
+                else => {},
+            };
+        };
+        if (smoke and spins == 716) if (agent_built) |*b| {
+            // 첫 그룹 헤더의 자리를 published tree 에서 얻는다 — 손으로 고른 좌표면 배치가 바뀌어도
+            // 판정이 안 움직인다.
+            // 첫 그룹은 목록의 0 번이다(투영이 그룹 헤더를 먼저 낸다).
+            if (agentItemRect(b, 0)) |r| {
+                ag_click_judgeable = true;
+                ag_items_before = agent_items.items.len;
+                // **카드 클릭은 이 앞(714)에 이미 났다** — 그 결과를 여기서 기준으로 잡는다.
+
+                const gx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                const gy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                window.postSyntheticMouse(.left_down, gx, gy);
+                window.postSyntheticMouse(.left_up, gx, gy);
+            }
+        };
+        if (smoke and spins == 719) {
+            ag_items_after = agent_items.items.len;
+            ag_collapsed_after = agent_archive.collapsed.items.len;
+            ag_expand_after = agent_state.expanded_identity;
+        }
+        if (smoke and spins == 646) {
             after_release_after = sidebar_scroll_px;
             after_release_dock_after = dock_scroll_px;
             // 이 순간 offset 이 **최대**다(위 끌기가 끝까지 갔다) — 그때 thumb 바닥과 트랙 바닥의
@@ -4832,7 +5030,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         // **여기가 그 순간이다** — 아래 스크롤바 시험이 값을 덮기 직전에 챙긴다.
-        if (spins == 638 and !snap_taken) {
+        if (smoke and spins == 638 and !snap_taken) {
             snap_taken = true;
             snap_scroll_px = sidebar_scroll_px;
             snap_first_visible = sidebar_first_visible;
@@ -4850,7 +5048,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **thumb 을 잡아 아래로 끈다.** 휠과 달리 이 경로는 `offsetForPointer` 를 지나므로, 막대가
         // 죽어 있으면(그려만 지고 안 잡히면) offset 이 그대로다 — 그것이 이 판정의 전부다.
-        if (spins == 640) {
+        if (smoke and spins == 640) {
             if (sidebar_bar) |b| {
                 sb_bar_seen = b;
                 sb_bar_judgeable = true;
@@ -4862,14 +5060,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, gx, gy + @as(i32, @intFromFloat(b.track_h / 2)));
             }
         }
-        if (spins == 643) sb_off_after = sidebar_scroll_px;
+        if (smoke and spins == 643) sb_off_after = sidebar_scroll_px;
         // **트랙을 누른다 — 그리고 거터 맨 왼쪽에서.**
         //
         // 두 가지를 한 번에 잰다. ⑴ thumb 바깥을 누르면 그 자리로 뛰는가(`offsetForTrackClick`).
         // ⑵ **잡는 폭이 그리는 폭보다 넓은가** — `hit_x + 1` 은 거터 안이지만 막대(8px) **밖**이라,
         //    잡는 자리를 `track_w` 로 좁히면 이 클릭이 그냥 목록으로 샌다. 앞선 끌기 판정은 막대
         //    한가운데를 눌러서 그 차이를 **못 봤다**.
-        if (spins == 648) if (sidebar_bar) |b| {
+        if (smoke and spins == 648) if (sidebar_bar) |b| {
             sb_track_before = sidebar_scroll_px;
             const tx: i32 = @intFromFloat(b.hit_x + 1);
             const ty: i32 = @intFromFloat(b.track_y + 4);
@@ -4877,12 +5075,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, tx, ty);
             sb_track_judgeable = true;
         };
-        if (spins == 651) sb_track_after = sidebar_scroll_px;
+        if (smoke and spins == 651) sb_track_after = sidebar_scroll_px;
         // **합성된 셀에서 직접 찾는다** — 기하가 아니라 화면에 들어간 것을 본다. 그리기를 빼면
         // 이 값이 죽는다(기하 판정은 안 죽는다).
         // **지금 프레임의 막대**를 본다 — 끌기 전에 잡아 둔 것과 견주면 thumb 이 그 사이 움직여
         // "안 그려졌다" 가 된다(실측: `drawn=false` 가 그 이유였다).
-        if (spins == 644) if (sidebar_bar) |b| {
+        if (smoke and spins == 644) if (sidebar_bar) |b| {
             for (cells.items) |c| {
                 if (@abs(c.rect[0] - b.track_x) < 0.5 and @abs(c.rect[2] - b.track_w) < 0.5 and
                     @abs(c.rect[1] - b.thumb_y) < 0.5 and @abs(c.rect[3] - b.thumb_h) < 0.5) sb_bar_drawn = true;
@@ -4900,7 +5098,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
             }
         };
-        if (spins == 590 and sidebar_header_h != 0) {
+        if (smoke and spins == 590 and sidebar_header_h != 0) {
             var rb: [16]maru.chrome.components.sidebar.Row = undefined;
             const rr = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb);
             const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
@@ -4912,7 +5110,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouseWheel(.wheel, sx, sy, -1);
             }
         }
-        if (spins == 620 and sidebar_scroll_judgeable) {
+        if (smoke and spins == 620 and sidebar_scroll_judgeable) {
             // **그린 밴드 한복판을 누른다.** 헤더 바로 아래(목록 위 여백)를 누르면 `slotAt` 이 그
             // 여백을 **이전 카드**로 되돌린다 — 그 자리는 카드가 그려진 자리가 아니다(실측:
             // `first_visible=1` 인데 `clicked_slot=0` 이었다).
@@ -4928,11 +5126,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **활성을 첫 보이는 카드와 다른 카드로 옮긴다.** 둘이 같으면 "앰버 막대가 옳은 카드에
         // 있나" 를 물어도 구별이 안 된다 — 그 상태에서 뮤턴트 둘이 그대로 통과했다.
         // **첫 클릭의 답을 먼저 챙긴다** — 아래 두 번째 클릭이 같은 변수를 덮는다.
-        if (spins == 630 and sidebar_scroll_click_sent) {
+        if (smoke and spins == 630 and sidebar_scroll_click_sent) {
             sidebar_scroll_clicked_slot = sidebar_last_slot;
             sidebar_last_slot = sidebar_slot_before_scroll_click;
         }
-        if (spins == 635 and sidebar_scroll_judgeable and sidebar_cards_visible > 1) {
+        if (smoke and spins == 635 and sidebar_scroll_judgeable and sidebar_cards_visible > 1) {
             const sx2: i32 = @intCast(sidebar_w / 2);
             var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
             const rr3 = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb3);
@@ -4946,7 +5144,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
 
-        if (spins == 530 and sessions.items.len > 1) {
+        if (smoke and spins == 530 and sessions.items.len > 1) {
             switch_judgeable = true;
             grid_digest_before_switch = activeGridDigest(io, &app_window);
             active_before_switch = app_window.active_tab;
@@ -4968,13 +5166,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **되돌아오지 않는 리사이즈여야 한다.** 최대화→복원 왕복은 크기가 제자리로 와서 배경
         // 세션이 뒤처진 것을 덮는다(실측: 왕복으로는 뮤턴트가 살아남았다). 디바이더를 끌면
         // 터미널 격자가 **그대로 좁아진 채** 남는다.
-        if (spins == 600 and sessions.items.len > 1 and geom.divider.w != 0) {
+        if (smoke and spins == 600 and sessions.items.len > 1 and geom.divider.w != 0) {
             const gx: i32 = @intCast(geom.divider.x + geom.divider.w / 2);
             window.postSyntheticMouse(.left_down, gx, 300);
             window.postSyntheticMouse(.moved, gx - 60, 300);
             window.postSyntheticMouse(.left_up, gx - 60, 300);
         }
-        if (spins == 560 and switch_judgeable) {
+        if (smoke and spins == 560 and switch_judgeable) {
             grid_digest_after_switch = activeGridDigest(io, &app_window);
             // **시간 비교는 혼입된다** — 셸이 계속 출력하므로 전환을 안 해도 지문이 바뀐다(실측:
             // `selectTab` 을 막은 뮤턴트에서도 `grid_changed=true` 였다). 그래서 **활성 화면이
@@ -4988,7 +5186,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 적용된 것이다 — 리더 스레드가 한 일이다(pump 가 아니다, 위 주석).
             background_ink = other.ink;
         }
-        if (spins == 450 and titlebar_px != 0) {
+        if (smoke and spins == 450 and titlebar_px != 0) {
             frameless_covers = window.clientCoversWindow();
             const wr = window.windowRect();
             const border: i32 = 8; // 모서리 규칙에 안 걸리게 충분히 안쪽에서 찌른다
@@ -5006,7 +5204,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 nchittest_sidebar_icon = window.probeHitTest(wr.left + @as(i32, @intCast(icol *| cell_w + cell_w / 2)), wr.top + border + 4);
             }
         }
-        if (spins == 120) {
+        if (smoke and spins == 120) {
             selections_before_term_click = selections;
             dock_clicks_before_term_click = dock_row_clicks;
             const tx: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
@@ -5427,6 +5625,42 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         dock_rebuild_failures += 1;
                                     };
                                 };
+                            }
+                        }
+                        continue;
+                    }
+                    // ── 에이전트 뷰의 포인터 (W8.11) ────────────────────────────────────
+                    //
+                    // **SCM 과 같은 길이다** — 표면이 자기 좌표로 판정하고, 인텐트를 상태에 적용한
+                    // 뒤 바뀌었으면 다시 그린다. 이 배선이 없던 동안 카드 셰브런과 그룹 헤더가
+                    // **그려지는데 안 눌리는 죽은 컨트롤**이었다(§2m.56 이 한계로 적어 뒀다).
+                    if (dock_view == .agent_sessions and region == .dock_content) {
+                        if (agent_built) |*b| {
+                            const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.tree_content.x));
+                            const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.tree_content.y));
+                            const kind: maru.chrome.ui.interaction.UiPointerPhase = switch (m.kind) {
+                                .moved => .move,
+                                .left_down => .down,
+                                .left_up => .up,
+                                else => continue,
+                            };
+                            const routed = agent_surface.pointer(b, &agent_state, kind, lx, ly);
+                            var changed = routed.dirty;
+                            if (routed.intent) |intent| {
+                                agent_pointer_intents += 1;
+                                var intent_arena = std.heap.ArenaAllocator.init(allocator);
+                                defer intent_arena.deinit();
+                                if (applyAgentIntent(intent_arena.allocator(), agent_arena.allocator(), &agent_archive, &agent_state, &agent_items, intent)) {
+                                    changed = true;
+                                    agent_applied_intents += 1;
+                                    // **항목이 바뀌면 옵션도 그것을 봐야 한다** — 표면은 `opts.items`
+                                    // 를 그리므로 슬라이스를 갱신 안 하면 옛 목록이 남는다.
+                                    agent_opts.items = agent_items.items;
+                                }
+                            }
+                            if (changed) {
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+                                agent_redraws += 1;
                             }
                         }
                         continue;
@@ -6111,6 +6345,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             dock_rows.items.len *| cell_h,
             geom.tree_content.h,
         });
+    }
+    if (ag_click_judgeable) {
+        // **목록이 줄어야 한다.** 인텐트 개수만 세면 속 빈다 — 적용이 안 돼도 인텐트는 난다.
+        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
+            ag_items_before,
+            ag_items_after,
+            ag_collapsed_after,
+            ag_expand_before,
+            ag_expand_after,
+            agent_applied_intents,
+            agent_pointer_intents,
+            agent_redraws,
+            ag_items_after < ag_items_before and ag_collapsed_after > 0 and
+                // **펼침도 붙어야 한다** — 그룹만 되고 카드가 죽어 있어도 위 조건은 참이다.
+                ag_expand_before == null and ag_expand_after != null and
+                agent_applied_intents == 2 and agent_redraws > 0,
+        });
+    } else {
+        try stdout.print("agent_click=unjudgeable reason=no_surface\n", .{});
     }
     if (max_judgeable) {
         // **바닥에 닿아야 한다.** 반올림 한 픽셀은 봐준다 — 그보다 벌어지면 마지막 항목이 영영

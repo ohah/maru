@@ -6415,6 +6415,8 @@ const HostGatedFeature = enum {
     ssh,
     /// `maru install-cli` — `~/.local/bin/maru`에 symlink를 건다. Windows에는 그 관례가 없고, symlink는 개발자
     /// 모드나 관리자 권한을 요구하며, `symlink` 심볼 자체가 msvcrt에 없다(실측: `undefined symbol: symlink`).
+    // **W10 이 열었다** — 남겨 두는 이유는 이 enum 이 "무엇이 OS 게이트를 받는가" 의 목록이고,
+    // 여기서 지우면 그 사실이 어디에도 안 남는다. `hostGateReason` 이 이제 이 항목에 `null` 을 준다.
     install_cli,
     /// 컨트롤 소켓 — unix domain socket. Windows는 named pipe 이식이 선행이고 `socket`은 ws2_32라 `-lc`로
     /// 링크되지 않는다(실측: `undefined symbol: socket`).
@@ -6436,7 +6438,9 @@ fn hostGateReason(os_tag: std.Target.Os.Tag, feature: HostGatedFeature) ?[]const
     if (os_tag != .windows) return null;
     return switch (feature) {
         .ssh => "maru ssh is not supported on Windows yet (docs/plans/windows-platform.md W9).",
-        .install_cli => "maru install-cli is not supported on Windows yet (docs/plans/windows-platform.md W10).",
+        // **W10 완료(§2m.62)** — Windows 는 LOCALAPPDATA 아래 maru/bin/maru.cmd 로 설치한다.
+        // POSIX 본문과 갈라진 자리는 `runInstallCli` 의 comptime 분기다.
+        .install_cli => null,
         // 문구의 단일 출처는 그 게이트를 actual로 강제하는 곳이다 — 접착이 `cli/control_client.zig`로 옮겨 갔으므로
         // 문구도 거기 산다. 여기서 복제하면 둘이 갈려도 아무도 못 잡는다. **`gate`(이 빌드의 comptime 값)가 아니라
         // `gate_reason`(OS 무관 문구)을 쓴다** — 이 함수는 OS를 인자로 받아 두 갈래를 모두 답해야 하기 때문이다.
@@ -6564,13 +6568,97 @@ fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.
     return error.UnknownCommand;
 }
 
-fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
-    // Windows 미지원(백로그 W10) — 이유는 `HostGatedFeature.install_cli`. 설치 위치(`%LOCALAPPDATA%\Programs`?)·
-    // shim 방식(symlink vs `.cmd`)·PATH 등록이 전부 계약에 없는 결정이라 별도 슬라이스로 나눴다.
-    if (gate_install_cli) |reason| {
-        try stderr.print("{s}\n", .{reason});
+/// `maru install-cli` 의 Windows 갈래(W10).
+///
+/// **POSIX 본문과 갈라 둔다.** 그쪽은 `std.c.symlink`·`std.c.mkdir` 를 부르는데 Windows 에서는 그
+/// 심볼이 없다 — 위 게이트 상수들이 **comptime 으로 본문을 죽여** 링크를 지켜 온 그 구조 그대로,
+/// 이 갈래도 comptime 분기 뒤에 산다.
+///
+/// **셋을 정했다**(계획 W10 의 선행 결정 3건). 근거는 전부 이 저장소의 단일 출처다.
+///
+/// | 결정 | 값 | 근거 |
+/// |---|---|---|
+/// | 위치 | `%LOCALAPPDATA%\maru\bin` | `user_paths` 모듈 doc — *"Windows 에서는 `%LOCALAPPDATA%\maru\` 아래로 모은다"* |
+/// | shim | `maru.cmd` | symlink 는 개발자 모드·관리자 권한이 필요하다. `.cmd` 는 권한이 없고 `PATHEXT` 기본값에 든다 |
+/// | PATH | **안내만** | 레지스트리를 쓰면 되돌리기와 실패 처리가 늘고, 사용자가 안 시킨 시스템 상태를 바꾼다 |
+fn runInstallCliWindows(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    const exe_path = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(exe_path);
+
+    // **경로 값은 `os_env` 로 읽는다** — 비-ASCII 사용자명이 ACP 바이트로 오면 비교가 어긋난다.
+    const local = maru.os_env.allocValue(allocator, "LOCALAPPDATA");
+    defer if (local) |l| allocator.free(l);
+    const home_env = maru.os_env.allocValue(allocator, "HOME");
+    defer if (home_env) |h| allocator.free(h);
+    const up_env = maru.os_env.allocValue(allocator, "USERPROFILE");
+    defer if (up_env) |u| allocator.free(u);
+    const home = maru.user_paths.homeDirFor(.windows, home_env, up_env);
+
+    const bindir = (try maru.cli.install.binDirFor(allocator, .windows, home, local)) orelse {
+        try stderr.writeAll("maru install-cli: cannot determine the install location: neither %LOCALAPPDATA% nor a home directory\n");
         try stderr.flush();
         return error.UnknownCommand;
+    };
+    defer allocator.free(bindir);
+    const shim = (try maru.cli.install.shimPathFor(allocator, .windows, home, local)).?;
+    defer allocator.free(shim);
+
+    std.Io.Dir.cwd().createDirPath(io, bindir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {
+            try stderr.print("maru install-cli: cannot create {s}\n", .{bindir});
+            try stderr.flush();
+            return error.UnknownCommand;
+        },
+    };
+
+    const body = try maru.cli.install.cmdShimContents(allocator, exe_path);
+    defer allocator.free(body);
+    // **원자적으로 바꾼다** — 반쯤 쓰인 `.cmd` 는 셸이 그대로 실행한다. 재실행 안전(idempotent)이다.
+    var af = std.Io.Dir.cwd().createFileAtomic(io, shim, .{ .replace = true, .make_path = true }) catch {
+        try stderr.print("maru install-cli: cannot write {s}\n", .{shim});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+    defer af.deinit(io);
+    var wbuf: [512]u8 = undefined;
+    var fw = af.file.writer(io, &wbuf);
+    fw.interface.writeAll(body) catch return error.UnknownCommand;
+    fw.interface.flush() catch return error.UnknownCommand;
+    af.replace(io) catch {
+        try stderr.print("maru install-cli: cannot replace {s}\n", .{shim});
+        try stderr.flush();
+        return error.UnknownCommand;
+    };
+
+    // **보여 줄 때는 Windows 모양으로 되돌린다.** 안쪽은 `/` 로 정규화된 형태이고(입구 정규화,
+    // 계약 §5), 사용자가 그대로 붙여 넣을 `setx` 줄에 두 구분자가 섞여 있으면 읽기 나쁘다.
+    const shim_native = try maru.path_shape.toNativeSeparatorsFor(.windows, allocator, shim);
+    defer allocator.free(shim_native);
+    const bindir_native = try maru.path_shape.toNativeSeparatorsFor(.windows, allocator, bindir);
+    defer allocator.free(bindir_native);
+    try stdout.print("maru CLI installed: {s} -> {s}\n", .{ shim_native, exe_path });
+
+    if (maru.os_env.allocValue(allocator, "PATH")) |path_value| {
+        defer allocator.free(path_value);
+        // **Windows 규칙으로 본다** — `;` 구분, 대소문자 무시, `/`·`\` 동일시. POSIX 규칙으로 보면
+        // `C:` 에서 두 동강 나 이미 PATH 에 있어도 늘 안내가 뜬다.
+        if (!maru.cli.install.pathContainsDirFor(.windows, path_value, bindir)) {
+            try stdout.print(
+                "\nnote: {s} is not on PATH. Add it for this user with:\n  setx PATH \"%PATH%;{s}\"\nThen open a new terminal.\n",
+                .{ bindir_native, bindir_native },
+            );
+        }
+    }
+    try stdout.flush();
+}
+
+fn runInstallCli(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    // **Windows 는 갈라진다**(W10). 이 분기가 `comptime` 인 이유는 아래 POSIX 본문이 `std.c.symlink`·
+    // `std.c.mkdir` 를 부르기 때문이다 — 게이트 상수들이 지켜 오던 그 성질을 그대로 쓴다: 참인
+    // 갈래 뒤는 **의미 분석되지 않아** Windows 에서 그 심볼을 안 찾는다.
+    if (comptime builtin.os.tag == .windows) {
+        return runInstallCliWindows(io, allocator, stdout, stderr);
     }
 
     // `maru install-cli`: 현재 maru 바이너리를 `~/.local/bin/maru`에 symlink해 셸 PATH에서 쓸 수 있게
@@ -7112,13 +7200,18 @@ test {
 // 술어가 OS를 **인자로** 받으므로 이 테스트는 Windows 러너 없이도 두 갈래를 모두 실행한다. 컴파일 타임 분기로
 // 두면 이 단언들이 비-Windows CI에서 공허참이 되는데, 그 함정은 W1.5 코드 리뷰에서 이미 한 번 밟았다.
 test "host gate: POSIX 전제 명령은 Windows에서만 접히고, 이유가 사용자에게 보인다" {
+    // **아직 막힌 것**. `install_cli` 는 W10 이 열었다(§2m.62).
+    const gated = [_]HostGatedFeature{ .ssh, .control_socket };
     const features = [_]HostGatedFeature{ .ssh, .install_cli, .control_socket };
 
-    // Windows: 셋 다 막히고 이유 문구가 있다(빈 문자열이면 사용자가 무슨 일인지 못 안다).
-    for (features) |f| {
+    // Windows: 막힌 것은 이유 문구가 있다(빈 문자열이면 사용자가 무슨 일인지 못 안다).
+    for (gated) |f| {
         const reason = hostGateReason(.windows, f) orelse return error.TestUnexpectedResult;
         try std.testing.expect(reason.len > 0);
     }
+
+    // **열린 것은 Windows 에서도 null 이다** — 게이트를 풀고 문구만 남기면 명령이 여전히 죽는다.
+    try std.testing.expect(hostGateReason(.windows, .install_cli) == null);
 
     // 다른 호스트: 셋 다 열려 있다. macOS/Linux 동작이 이 슬라이스로 바뀌지 않는다는 증거다.
     for ([_]std.Target.Os.Tag{ .macos, .linux }) |os| {
@@ -7127,7 +7220,6 @@ test "host gate: POSIX 전제 명령은 Windows에서만 접히고, 이유가 �
 
     // 백로그 슬라이스 번호를 문구에 담아 둔다 — "안 된다"만 말하고 어디서 하는지 안 알려주면 보고가 아니다.
     try std.testing.expect(std.mem.indexOf(u8, hostGateReason(.windows, .ssh).?, "W9") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hostGateReason(.windows, .install_cli).?, "W10") != null);
 }
 
 // `printSmoke`가 PTY 안내를 띄울지와, `demo`가 오류 대신 실행될지는 **같은 사실** 하나에 달려 있다 —

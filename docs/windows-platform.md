@@ -5002,6 +5002,84 @@ Windows 에서는 `\` 라 통과하지만 Linux 에서는 `/` 라 역슬래시�
   한 패스로 되돌리는 뮤턴트를 넣어도 어떤 수치도 안 움직인다(실측). **낡은 사각형 쪽은 2 차에서
   `status_rect_fresh` 로 옮겼다** — 남은 것은 이 하나다.
 
+### 2m.62 `maru install-cli` 가 Windows 에서 돈다 (W10, 실측 2026-08-26)
+
+W2 가 미지원 안내로 접어 둔 마지막 명령이다. **선행 결정 3건이 계약에 없다**고 계획이 적어 뒀는데,
+셋 다 **이 저장소의 단일 출처에서 나왔다** — 새로 정한 것이 아니라 이미 정해진 것을 적용했다.
+
+| 결정 | 값 | 어디서 나왔나 |
+|---|---|---|
+| 설치 위치 | `%LOCALAPPDATA%\maru\bin` | `user_paths` 모듈 doc — *"Windows 에서는 `%LOCALAPPDATA%\maru\` 아래로 모은다 — config·캐시·런타임 전부"* |
+| shim 방식 | `maru.cmd` | symlink 는 개발자 모드나 관리자 권한이 필요하다(`CreateSymbolicLink` 규약). `.cmd` 는 권한이 없고 `PATHEXT` 기본값에 든다 |
+| PATH 등록 | **안내만** | 레지스트리를 쓰면 되돌리기와 실패 처리가 늘고, **사용자가 안 시킨 시스템 상태**를 바꾼다 |
+
+계획 행은 위치를 `%LOCALAPPDATA%\Programs?` 로 적어 두었지만 **물음표였다.** 그쪽은 *설치된 응용
+프로그램*의 자리이고 여기서 두는 것은 실행 파일이 아니라 **shim 한 장**이다. 모듈 doc 을 따르면
+사용자가 지울 자리도 한 곳이다.
+
+## POSIX 본문과 comptime 으로 갈랐다
+
+`runInstallCli` 의 POSIX 본문은 `std.c.symlink`·`std.c.mkdir` 를 부른다 — Windows 에 그 심볼이 없다.
+게이트 상수(`gate_install_cli`)가 지켜 오던 성질이 정확히 그것이었다: **참인 갈래 뒤는 의미 분석되지
+않는다.** 그 자리를 `if (comptime builtin.os.tag == .windows) return runInstallCliWindows(...)` 로
+바꿔 같은 성질을 유지한다.
+
+**게이트는 지우지 않고 `null` 로 열었다.** `HostGatedFeature` 는 "무엇이 OS 게이트를 받는가" 의
+목록이라 항목을 지우면 그 사실이 어디에도 안 남는다. 그 테스트도 **열린 것이 Windows 에서 `null`
+인지**를 따로 단언한다 — 문구만 지우고 게이트를 안 풀면 명령은 여전히 죽는다.
+
+## PATH 판정이 진짜 결함이었다
+
+기존 `pathContainsDir` 은 `:` 로 가른다. Windows 에서 그러면 **`C:\Users\me\...` 가 드라이브 문자에서
+두 동강 난다** — 어떤 항목과도 안 맞아 이미 PATH 에 있어도 "추가하라" 가 늘 뜬다. 셋을 함께 고쳤다.
+
+| | 규칙 | 안 지키면 |
+|---|---|---|
+| 구분자 | `;` | 위 |
+| 대소문자 | 무시 | `C:/USERS/...` 가 다른 자리로 읽힌다 |
+| `/` vs `\` | 같다 | 레지스트리 PATH 는 `\`, 우리 내부 표현은 `/` |
+
+**`os_tag` 를 인자로 받는다** — `user_paths.homeDirFor` 가 적어 둔 이유 그대로다. 컴파일 타임 분기면
+CI 에 Windows 러너가 없어 Windows 단언이 **공허참**이 된다.
+
+## 보여 줄 때는 Windows 모양으로 되돌린다
+
+안쪽은 `/` 로 정규화된 형태다(입구 정규화, §5). 사용자가 그대로 붙여 넣을 `setx` 줄에 두 구분자가
+섞여 있으면 읽기 나쁘다 — `path_shape.toNativeSeparatorsFor` 로 되돌린다.
+
+```text
+maru CLI installed: C:\Users\me\AppData\Local\maru\bin\maru.cmd -> D:\ohah\maru\zig-out\bin\maru.exe
+
+note: C:\Users\me\AppData\Local\maru\bin is not on PATH. Add it for this user with:
+  setx PATH "%PATH%;C:\Users\me\AppData\Local\maru\bin"
+Then open a new terminal.
+```
+
+## 판정
+
+**순수 부분은 중립 테스트 넷**이 잡는다(위치·shim 이름·shim 내용·PATH 규칙). 배선은 **실기로 돌려**
+확인했다 — `%LOCALAPPDATA%` 를 임시 폴더로 두고(사용자 PATH·레지스트리는 안 건드린다):
+
+| 무엇 | 결과 |
+|---|---|
+| 파일이 생기나 | `<tmp>/maru/bin/maru.cmd` 하나 |
+| 내용 | `@echo off` + `"<exe>" %*`, CRLF |
+| shim 이 도나 | `maru.cmd help` 가 usage 를 낸다 |
+| **공백 든 인자가 사나** | `maru.cmd "un known"` → `unknown maru command: un known` — **직접 실행과 같다** |
+| 두 번 돌려도 되나 | 파일 수 그대로(원자적 교체) |
+
+넷째가 핵심이다 — `%*` 없이 `%1 %2` 로 적으면 그 인자가 두 개로 갈리는데 **파일이 생겼다는 것만
+보면 초록**이다.
+
+## 한계
+
+- **PATH 를 안 건드린다.** 안내만 내므로 사용자가 `setx` 를 직접 돌려야 한다. 레지스트리 등록은
+  되돌리기·실패 처리가 별개 슬라이스다.
+- **제거 명령이 없다**(`uninstall-cli`). POSIX 쪽에도 없다.
+- **`PATHEXT` 를 안 본다.** 기본값에 `.CMD` 가 있다고 가정한다 — 지운 사용자는 `maru.cmd` 를 전체
+  이름으로 불러야 한다.
+- **exe 를 옮기면 shim 이 깨진다.** symlink 가 아니라 경로를 박은 `.cmd` 라 그렇다. 다시 돌리면 된다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만
@@ -6290,7 +6368,7 @@ line1\nline2.log  → [line1][nline2.log]  ← 막아야 하는 것
 | 터미널 | Windows config | 근거 |
 |---|---|---|
 | **Warp** | `%LOCALAPPDATA%\warp\Warp\config\` (테마·탭 config만 `%APPDATA%`) | `directories` 크레이트 관례 — *"portable"은 Roaming, "machine-specific"은 Local*. macOS는 `~/.warp/`, Linux는 XDG — **OS마다 그 OS 관례**. `~/.warp/`는 Windows에서 **안 읽는다**고 명시 |
-| **Alacritty** | `%APPDATA%lacritty\` **만** | Unix에서는 XDG 5단계를 보지만 Windows에서는 `$HOME/.config`를 아예 안 본다 |
+| **Alacritty** | `%APPDATA%\alacritty\` **만** | Unix에서는 XDG 5단계를 보지만 Windows에서는 `$HOME/.config`를 아예 안 본다 |
 | Windows Terminal | `%LOCALAPPDATA%\…\LocalState` | MSIX 샌드박스가 **강제**한다. Windows 전용 앱이라 이식성 고민이 없어 **선례로 치지 않는다** |
 | **WezTerm** | `$HOME/.config/wezterm`·`~/.local/share/wezterm` | appdata를 **의도적으로 거부** — *"it works against the idea that the same configuration layout can be used on multiple operating systems"*, *"bootstrap my dotfiles from git on any OS"* |
 

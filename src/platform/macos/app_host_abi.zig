@@ -620,10 +620,68 @@ pub export fn maru_macos_remote_backend_settle() u32 {
     return @intFromEnum(session_mod.settleProcessRemoteBackendForTermination());
 }
 
+/// 앱 로그 상한. 넘으면 새로 시작한다 — 진단은 **최근 실행**이 중요하고, 회전 정책을 따로 두면
+/// 그 정책 자체가 관리 대상이 된다. host 로그와 달리 앱은 한 파일에 계속 쌓이므로 상한이 없으면
+/// 무한히 자란다.
+const app_log_max_bytes: i64 = 4 * 1024 * 1024;
+
+/// `<base>/app.log` 를 append 로 열고 상한을 넘었으면 비운다. 실패하면 `-1`.
+///
+/// 부작용을 이 함수 하나로 좁혀 테스트가 실제 파일로 계약을 잴 수 있게 한다 — `dup2` 로 프로세스
+/// stderr 를 바꾸는 쪽은 테스트가 건드릴 수 없기 때문이다.
+fn openAppLogFd(base: [:0]const u8) c_int {
+    _ = std.c.mkdir(base.ptr, @as(std.c.mode_t, 0o700));
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/app.log", .{base}) catch return -1;
+
+    const fd = std.c.open(
+        path.ptr,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .NOFOLLOW = true },
+        @as(std.c.mode_t, 0o600),
+    );
+    if (fd < 0) return -1;
+    // 크기 확인에 별도 stat 을 쓰지 않는다 — 이미 연 fd 의 끝 오프셋이 곧 크기다.
+    if (std.c.lseek(fd, 0, std.c.SEEK.END) > app_log_max_bytes) _ = std.c.ftruncate(fd, 0);
+    return fd;
+}
+
+/// GUI 실행(Dock·Finder)의 stderr 는 `/dev/null` 이라 진단이 통째로 사라진다. host 는 이미
+/// `redirectStderrToHostLog`(daemon.zig)로 같은 문제를 풀었고 앱만 사각지대로 남아 있었다 —
+/// 2026-08-26 에 앱이 host 연결을 잃은 원인(`stage=runtime_death error=ConnectionClosed`)을 찾을 때,
+/// 터미널에서 앱을 손으로 다시 띄우는 것 말고는 그 한 줄을 볼 방법이 없었다. 그때는 이미 재현이
+/// 끝난 뒤라 **사후 진단이 불가능**했다.
+///
+/// **stderr 가 tty 면 건드리지 않는다.** 터미널에서 직접 띄웠다면 콘솔이 이미 진단을 받고 있고,
+/// 그것을 파일로 가로채면 개발 중 출력을 빼앗는다.
+///
+/// 이 파일의 `c` 는 `@cImport(app_host_abi.h)` 라 daemon.zig 의 `c = std.c` 와 다르다. syscall 은
+/// `std.c` 로 명시해 부른다 — 섞으면 플래그가 조용히 깨진다.
+fn redirectStderrToAppLog() void {
+    if (builtin.is_test) return;
+    if (std.c.isatty(2) != 0) return;
+
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = controlBaseDir(&base_buf) orelse return;
+    const fd = openAppLogFd(base);
+    if (fd < 0) return;
+    defer if (fd > 2) {
+        _ = std.c.close(fd);
+    };
+    _ = std.c.dup2(fd, 2);
+
+    // 여러 실행이 한 파일에 쌓이므로 어디부터가 이번 실행인지 보이게 한다.
+    var header_buf: [96]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "=== maru app start pid={d} ===\n", .{std.c.getpid()}) catch return;
+    _ = std.c.write(2, header.ptr, header.len);
+}
+
 pub export fn maru_macos_app_session_create(
     config: ?*const AppSessionConfig,
     out_session: ?*?*AppSession,
 ) c_int {
+    // 앱의 가장 이른 Zig 진입점이다. 여기서 걸어야 config 경고를 포함한 시작 단계 진단이 전부 남는다.
+    redirectStderrToAppLog();
     const raw_config = (config orelse return @intFromEnum(Status.null_out)).*;
     const out = out_session orelse return @intFromEnum(Status.null_out);
     out.* = null;
@@ -7673,4 +7731,40 @@ test "파일 선택 안내는 UI 언어를 따르고 종류마다 다른 문장�
 
     // 알 수 없는 종류는 빈 문자열 — 크래시하지 않는다(패널이 안내 없이 뜬다).
     try std.testing.expectEqualStrings("", std.mem.span(maru_macos_file_pick_message(9999)));
+}
+
+test "app 진단 로그 fd는 base 아래 app.log를 append로 열고 상한을 넘으면 비운다" {
+    // 이 테스트가 증명하는 것: GUI 실행의 진단을 담을 파일이 **실제로 열린다**. 여기서 부작용을
+    // `openAppLogFd` 하나로 좁혀 둔 이유가 이것이다 — `dup2`로 프로세스 stderr를 바꾸는 쪽은
+    // 테스트가 건드릴 수 없어, 열기·append·상한 계약만이라도 실물로 재지 않으면 "빌드는 되는데
+    // 파일이 안 생긴다"를 아무도 못 잡는다(실제로 그렇게 한 번 놓쳤다).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    var resolved: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &resolved);
+    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/cache-base", .{resolved[0..len]});
+
+    // base가 아직 없어도 만들어 연다 — 첫 실행에서 진단이 사라지면 안 된다.
+    const fd = openAppLogFd(base);
+    try std.testing.expect(fd >= 0);
+    const first_line = "hello\n";
+    try std.testing.expectEqual(@as(isize, first_line.len), std.c.write(fd, first_line.ptr, first_line.len));
+    _ = std.c.close(fd);
+
+    // 두 번째 열기는 append다 — 이전 실행의 진단을 덮지 않는다.
+    const again = openAppLogFd(base);
+    try std.testing.expect(again >= 0);
+    try std.testing.expectEqual(@as(i64, first_line.len), std.c.lseek(again, 0, std.c.SEEK.END));
+    _ = std.c.close(again);
+
+    // 상한을 넘긴 파일은 비우고 시작한다.
+    const grow = openAppLogFd(base);
+    try std.testing.expect(grow >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.ftruncate(grow, app_log_max_bytes + 1));
+    _ = std.c.close(grow);
+    const after_cap = openAppLogFd(base);
+    try std.testing.expect(after_cap >= 0);
+    try std.testing.expectEqual(@as(i64, 0), std.c.lseek(after_cap, 0, std.c.SEEK.END));
+    _ = std.c.close(after_cap);
 }

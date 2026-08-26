@@ -130,6 +130,7 @@ const Table = struct {
     set_selection_changed_cancel: [:0]const u8,
     set_reset_write_failed: [:0]const u8,
     set_reset_done_keepalive: [:0]const u8,
+    set_keepalive_reset_preserved: [:0]const u8,
     set_reset_done: [:0]const u8,
 
     // ── 파일 패널 notice (I3a 슬라이스 3) ──
@@ -831,6 +832,7 @@ const en: Table = .{
     .set_selection_changed_cancel = "The selection changed, so the command was cancelled.",
     .set_reset_write_failed = "Reset to defaults (applied on screen) — writing the config file failed",
     .set_reset_done_keepalive = "All settings were reset to defaults — session keep-alive was left as is to protect live terminals. Turn it off in Settings > workspace.",
+    .set_keepalive_reset_preserved = "Session keep-alive was left as is to protect live terminals. Change it directly in Settings > workspace.",
     .set_reset_done = "All settings were reset to defaults",
 
     .fp_view_rebuild_failed = "Could not rebuild the file view, so the previous view was kept.",
@@ -1392,6 +1394,7 @@ const ko: Table = .{
     .set_selection_changed_cancel = "선택한 항목이 변경되어 명령을 취소했습니다.",
     .set_reset_write_failed = "기본값으로 초기화(화면은 적용됨) — config 파일 쓰기에 실패했습니다",
     .set_reset_done_keepalive = "모든 설정을 기본값으로 초기화했습니다 — 세션 유지(keep-alive)는 살아 있는 터미널을 지키려 그대로 뒀습니다. 끄려면 세팅 › workspace에서 직접 변경하세요",
+    .set_keepalive_reset_preserved = "세션 유지(keep-alive)는 살아 있는 터미널을 지키기 위해 그대로 뒀습니다. 세팅 › workspace에서 직접 변경하세요",
     .set_reset_done = "모든 설정을 기본값으로 초기화했습니다",
 
     .fp_view_rebuild_failed = "파일 뷰를 다시 만들 수 없어 이전 보기를 유지했습니다.",

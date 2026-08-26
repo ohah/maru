@@ -9,12 +9,16 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 175u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 176u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
 #define MARU_APP_INSTANCE_LEASE_IO_FAILURE 3u
 #define MARU_APP_INSTANCE_LEASE_INVALID_PATH 4u
+#define MARU_SESSION_CONFIG_BOOTSTRAP_READY 0u
+#define MARU_SESSION_CONFIG_BOOTSTRAP_NO_LEASE 1u
+#define MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED 2u
+#define MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE 3u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
 #define MARU_FILE_PANEL_MODE_RICH 2u
@@ -565,6 +569,9 @@ int32_t maru_macos_app_host_capabilities(MaruAppHostCapabilities *out_capabiliti
    path는 workspace.v1.lock UTF-8 bytes다. Zig는 final leaf를 no-follow/0600/current-UID regular로
    검증하고 CLOEXEC flock fd를 process lifetime 동안 보관한다. */
 uint32_t maru_macos_app_instance_lease_acquire(const uint8_t *path, size_t path_len);
+/* ABI v176: lease가 이미 확보된 process에서 AppKit/첫 AppSession보다 먼저 G1 provenance를 app-global
+   scalar snapshot으로 exact once seal한다. release A에서는 config를 쓰거나 기본값을 바꾸지 않는다. */
+uint32_t maru_macos_session_config_bootstrap(void);
 /* OS 로케일 식별자(`ko-KR` 류 짧은 ASCII)를 프로세스 전역으로 넘긴다 — Swift 는 읽어서 전달만 하고
    해석하지 않는다(docs/i18n.md §5.1: 판정은 중립 층인 src/i18n.zig 가 소유). 세션을 만들기 전마다 메인
    스레드에서 호출한다(같은 값이면 무해). NULL·빈 값·128 바이트 초과는 무동작이며, 그때 `ui.language = auto`

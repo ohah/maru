@@ -1,12 +1,13 @@
 //! Session default G1 config provenance source boundary.
 //!
-//! G1 may observe loader input only. Policy consumption, config materialization, notices, and
-//! bootstrap belong to G2, so the new fields must not escape the config layer in this slice.
+//! G1 owns parsing and G2 is the only product consumer of its provenance fields. This gate keeps
+//! the parser singular and pins the deliberately opened G2 inventory rather than preserving the
+//! obsolete pre-G2 assumption that provenance never leaves the config layer.
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
-test "Session default G1 provenance boundary keeps one parser and no policy consumer" {
+test "Session default G1 provenance boundary keeps one parser and the exact G2 consumer inventory" {
     const allocator = std.testing.allocator;
     const loader = try readSource(allocator, "src/config/loader.zig");
     defer allocator.free(loader);
@@ -37,9 +38,11 @@ test "Session default G1 provenance boundary keeps one parser and no policy cons
     try std.testing.expect(std.mem.indexOf(u8, verification, "Session default G1 config provenance") != null);
     try expectOne(commands, "`zig build test-session-host-config-provenance`");
 
-    // G1 is observation-only. Any product consumer here would silently start G2 policy early.
-    try std.testing.expectEqual(@as(usize, 0), try countOutsideConfig(allocator, "session_keep_alive_provenance"));
-    try std.testing.expectEqual(@as(usize, 0), try countOutsideConfig(allocator, "file_provenance"));
+    // G2 deliberately opens these projections only in app_session and its settings submodule.
+    // Exact counts include their same-file tests; an additional product reader must update the
+    // G2 SSOT boundary rather than silently becoming another policy owner.
+    try std.testing.expectEqual(@as(usize, 7), try countOutsideConfig(allocator, "session_keep_alive_provenance"));
+    try std.testing.expectEqual(@as(usize, 14), try countOutsideConfig(allocator, "file_provenance"));
 }
 
 fn countOutsideConfig(allocator: std.mem.Allocator, needle: []const u8) !usize {

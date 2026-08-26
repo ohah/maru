@@ -217,6 +217,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
+// 176: L0 app-instance lease 뒤 AppKit/첫 AppSession 전 G2 keep-alive provenance snapshot bootstrap ABI를 추가한다.
 // 175: notification response의 stable `{hid,rid}`를 현재 AppSession binding에서 먼저 활성화하고, primary caller가
 // 허용한 경우에만 current Recovered Sessions projection의 exact 한 행을 기존 fresh-authority adopt로 넘기는 export를
 // 추가한다. Swift가 이 symbol을 직접 호출하므로 old Zig/new host 조합은 ABI guard에서 실패해야 한다.
@@ -230,7 +231,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 175;
+pub const abi_version: u32 = 176;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2729,10 +2730,12 @@ const app_incident_testing = if (builtin.is_test) struct {
 var app_quitting: bool = false;
 // 설정 GUI는 창별 AppSession에 있지만 이 값은 앱 전체 정책이다. 한 창에서 true→false로 바꾼 뒤 다른 창이 stale
 // config를 들고 있어도 새 Term backend와 Quit teardown이 갈리지 않도록 process-global SSOT로 유지한다.
+// 기존 same-module/submodule fixture가 직접 조작하는 test compatibility mirror. 제품 reader는 반드시
+// appKeepAlivePolicyValue()를 거쳐 bootstrap owner만 정본으로 읽는다.
 pub var app_keep_alive_after_quit: bool = false;
-// 첫 AppSession이 디스크 config를 앱 전역 정책으로 채운 뒤에는 새 Window/quick의 stale config snapshot이 이 값을
-// 덮지 않는다. 이후 변경 주체는 settings toggle/reload/reset뿐이다.
-var app_keep_alive_policy_initialized: bool = false;
+// G2: bool만으로는 explicit false와 absent를 구분할 수 없다. lease 직후의 app-global bootstrap이
+// G1 loader 결과를 이 scalar owner에 exact once seal하고 모든 Window가 같은 provenance를 빌린다.
+var app_keep_alive_bootstrap_owner: config_mod.SessionKeepAliveBootstrapOwner = .{};
 // Zig test runner 안에서 full AppSession fixture가 모두 내려가면 다음 test의 첫 세션이 새 앱 launch처럼 config를
 // 다시 채택하게 한다. 같은 test의 두 번째 Window는 production resolver를 그대로 탄다.
 var live_app_sessions: usize = 0;
@@ -2849,12 +2852,71 @@ pub fn appQuitEndAll() bool {
 
 pub fn setAppKeepAlivePolicy(value: bool) void {
     app_keep_alive_after_quit = value;
-    app_keep_alive_policy_initialized = true;
+    if (app_keep_alive_bootstrap_owner.borrow() != null)
+        app_keep_alive_bootstrap_owner.setExplicit(value) catch
+            session_host.pending_term_close_graph.fatalProofLoss();
 }
 
-fn keepAlivePolicyForNewSession(config_value: bool) bool {
-    if (!app_keep_alive_policy_initialized) setAppKeepAlivePolicy(config_value);
-    return app_keep_alive_after_quit;
+pub fn bootstrapSessionKeepAliveConfig(io: std.Io, allocator: std.mem.Allocator) !void {
+    // 중복 bootstrap은 config 경로 해석/파일 open보다 먼저 닫는다. snapshot mutation만 0이고 read는 한 번 더
+    // 하는 구현은 loser/duplicate I/O 0 계약을 어긴다. 제품 caller는 AppKit 전 main thread 하나다.
+    if (app_keep_alive_bootstrap_owner.borrow() != null) return error.AlreadyInitialized;
+    var parsed = try config_mod.loadConfigDefault(io, allocator);
+    defer parsed.deinit();
+    _ = try app_keep_alive_bootstrap_owner.initialize(.{
+        .value = parsed.config.session.keep_alive_after_quit,
+        .provenance = parsed.session_keep_alive_provenance,
+        .file_provenance = parsed.file_provenance,
+    });
+    app_keep_alive_after_quit = parsed.config.session.keep_alive_after_quit;
+}
+
+fn initializeTestSessionKeepAlive(parsed: config_mod.ParsedConfig) void {
+    _ = app_keep_alive_bootstrap_owner.initialize(.{
+        .value = parsed.config.session.keep_alive_after_quit,
+        .provenance = parsed.session_keep_alive_provenance,
+        .file_provenance = parsed.file_provenance,
+    }) catch session_host.pending_term_close_graph.fatalProofLoss();
+    app_keep_alive_after_quit = parsed.config.session.keep_alive_after_quit;
+}
+
+fn keepAliveSnapshotForNewSession() config_mod.SessionKeepAliveSnapshot {
+    return app_keep_alive_bootstrap_owner.borrow() orelse
+        session_host.pending_term_close_graph.fatalProofLoss();
+}
+
+pub fn replaceAppKeepAlivePolicyFromReload(parsed: config_mod.ParsedConfig) void {
+    const next: config_mod.SessionKeepAliveSnapshot = .{
+        .value = parsed.config.session.keep_alive_after_quit,
+        .provenance = parsed.session_keep_alive_provenance,
+        .file_provenance = parsed.file_provenance,
+    };
+    app_keep_alive_bootstrap_owner.replaceFromReload(next) catch
+        session_host.pending_term_close_graph.fatalProofLoss();
+    app_keep_alive_after_quit = next.value;
+}
+
+pub fn appKeepAliveResetPlan() config_mod.SessionKeepAliveResetPlan {
+    return app_keep_alive_bootstrap_owner.resetPlan() orelse
+        session_host.pending_term_close_graph.fatalProofLoss();
+}
+
+pub fn commitAppKeepAliveReset() void {
+    app_keep_alive_bootstrap_owner.commitReset() catch
+        session_host.pending_term_close_graph.fatalProofLoss();
+}
+
+pub fn appKeepAliveSnapshot() config_mod.SessionKeepAliveSnapshot {
+    return keepAliveSnapshotForNewSession();
+}
+
+pub fn appKeepAlivePolicyValue() bool {
+    // AppSession unit fixture가 owner 초기화 전 직접 정책 leaf만 검사하는 옛 경로를 보존한다. 제품은 Swift
+    // bootstrap이 먼저여야 하므로 owner 부재를 bool fallback으로 축소하지 않는다. test는 과거 fixture가
+    // 이 mirror를 직접 주입하므로 먼저 읽고, G2 owner 자체는 별도 focused test가 검증한다.
+    if (builtin.is_test) return app_keep_alive_after_quit;
+    if (app_keep_alive_bootstrap_owner.borrow()) |snapshot| return snapshot.value;
+    return session_host.pending_term_close_graph.fatalProofLoss();
 }
 // P4 §6 L291: keep-alive인데 host 연결/spawn이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 알린다("유지된다"
 // 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
@@ -3520,7 +3582,7 @@ pub const AppSession = struct {
         workspace_generation: u64,
     ) !void {
         try app_recovered_sessions_projection.refresh(std.heap.smp_allocator, .{
-            .keep_alive = app_keep_alive_after_quit,
+            .keep_alive = appKeepAlivePolicyValue(),
             .primary_window = primary_window,
             .quick_window = self.is_quick,
             .workspace_generation = workspace_generation,
@@ -3529,7 +3591,7 @@ pub const AppSession = struct {
     }
 
     pub fn recoveredSessionsRows(self: *const AppSession, primary_window: bool) []const session_host.recovered_sessions_projection.Row {
-        if (!primary_window or self.is_quick or !app_keep_alive_after_quit) return &.{};
+        if (!primary_window or self.is_quick or !appKeepAlivePolicyValue()) return &.{};
         return app_recovered_sessions_projection.rows;
     }
 
@@ -3567,7 +3629,7 @@ pub const AppSession = struct {
         var out: RecoveredSessionAppKitSmokeProbe = .{
             .tab_count = @intCast(@min(self.tabs.items.len, std.math.maxInt(u32))),
             .surface_initialized = self.surface_initialized,
-            .keep_alive_enabled = app_keep_alive_after_quit,
+            .keep_alive_enabled = appKeepAlivePolicyValue(),
             .discovered_candidates = app_recovery_smoke_discovered_candidates,
             .ready_adapters = app_recovery_smoke_ready_adapters,
             .inventory_runtimes = app_recovery_smoke_inventory_runtimes,
@@ -3672,7 +3734,7 @@ pub const AppSession = struct {
     /// host.info/runtime.get을 다시 확인한 뒤에만 exact runtime attach를 시작한다. 실패는 projection과 topology를
     /// 그대로 두고, attach 뒤 construction 실패는 createTerm의 client-side detach errdefer가 host runtime을 보존한다.
     pub fn activateRecoveredSessionAt(self: *AppSession, projection_index: usize) !void {
-        if (!self.is_primary_window or self.is_quick or !app_keep_alive_after_quit)
+        if (!self.is_primary_window or self.is_quick or !appKeepAlivePolicyValue())
             return error.InvalidAuthority;
         if (projection_index >= app_recovered_sessions_projection.rows.len)
             return error.InvalidAuthority;
@@ -3818,7 +3880,7 @@ pub const AppSession = struct {
     /// CR6a-2 launch-before-terminal coordinator. 저장 Workspace 전체 binding과 secure host inventory를 한 번에
     /// reconcile해 app-global projection을 교체한다. attach/adopt/runtime spawn은 하지 않는다.
     pub fn prepareRecoveredSessionsAtLaunch(self: *AppSession, workspace_text: ?[]const u8) RecoveredSessionsLaunchOutcome {
-        if (!is_macos or !app_keep_alive_after_quit or self.is_quick or !self.is_primary_window)
+        if (!is_macos or !appKeepAlivePolicyValue() or self.is_quick or !self.is_primary_window)
             return .skipped;
         if (app_recovered_sessions_launch_attempted) return .skipped;
         app_recovered_sessions_launch_attempted = true;
@@ -5873,10 +5935,13 @@ pub const AppSession = struct {
         if (builtin.is_test and live_app_sessions == 0) {
             // 이전 test의 process-global 값만 리셋한다. 같은 test에서 이미 열린 Window가 있으면 아래 production
             // resolver를 그대로 타므로 Window A toggle → Window B 첫 Term remote 배선을 실제 통합 검증할 수 있다.
-            app_keep_alive_policy_initialized = false;
+            app_keep_alive_bootstrap_owner = .{};
+            initializeTestSessionKeepAlive(self.loaded_config);
         }
-        self.loaded_config.config.session.keep_alive_after_quit =
-            keepAlivePolicyForNewSession(self.loaded_config.config.session.keep_alive_after_quit);
+        const keep_alive_snapshot = keepAliveSnapshotForNewSession();
+        self.loaded_config.config.session.keep_alive_after_quit = keep_alive_snapshot.value;
+        self.loaded_config.session_keep_alive_provenance = keep_alive_snapshot.provenance;
+        self.loaded_config.file_provenance = keep_alive_snapshot.file_provenance;
         live_app_sessions = std.math.add(usize, live_app_sessions, 1) catch
             session_host.pending_term_close_graph.fatalProofLoss();
         self.test_policy_registered = true;
@@ -5937,7 +6002,7 @@ pub const AppSession = struct {
         // 실패(연결 거부·spawn 실패)면 notice를 예약하고 in-process로 폴백한다 — host 문제가 GUI를 막지 않는다. ⚠️최초 cold launch에서
         // host를 새로 띄우면 backoff로 최대 수 초 블로킹될 수 있다(opt-in 실험적; async/lazy 연결은 후속). 기본값(false)이면
         // 이 블록을 건너뛰어 현행 경로와 byte-identical이다.
-        if (app_keep_alive_after_quit and !self.is_quick) self.ensureRemoteBackend();
+        if (appKeepAlivePolicyValue() and !self.is_quick) self.ensureRemoteBackend();
 
         // MARU_TRACE=<파일경로>: 라이브 trace 레코딩을 켠다. 파일을 열어(truncate) self 소유 file writer를 세우고,
         // 레코더가 이벤트마다 그 writer에 쓰고 flush한다(증분 append → 크래시 복원). 파일 생성 실패면 조용히 건너뛴다
@@ -6652,7 +6717,7 @@ pub const AppSession = struct {
         // keep-alive를 끈 즉시 이후 Term은 local이어야 한다. quick은 아직 workspace manifest에 handle을 저장하지 않으므로
         // remote로 만들면 정상 Quit detach 뒤 재접속할 경로가 없는 orphan이 된다.
         if (self.is_quick) return term_ops.termBackend(self);
-        if (!app_keep_alive_after_quit and
+        if (!appKeepAlivePolicyValue() and
             !(self.restore_runtime_force_attach and self.restore_runtime_id.len > 0))
             return term_ops.termBackend(self);
         // host_connect_failed면 원격을 안 고른다 — 초기 연결 실패(그땐 backend가 null이라 무해)뿐 아니라, **런타임 중 host가
@@ -7845,7 +7910,7 @@ pub const AppSession = struct {
         // P4 §6 row 3: host-backed runtime(keep-alive)이 살아 있으면 "종료 및 세션 끝내기" alternate를 함께 띄운다 — 기본
         // "종료"는 detach(runtime 생존, e3-6), alternate는 terminate(다 끝냄). host-backed가 없으면(in-process뿐) alternate가
         // 무의미하니 기존 2버튼(종료/취소)을 쓴다.
-        if (is_macos and app_keep_alive_after_quit and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
+        if (is_macos and appKeepAlivePolicyValue() and app_remote_backend != null and app_remote_backend.?.runtimes.count() > 0) {
             self.showConfirmChoiceKeys(.quit, .app_quit_confirm_keepalive, .{ .primary = .btn_quit, .alternate = .btn_quit_end_session });
         } else {
             self.showConfirmKeys(.quit, .app_quit_confirm, .{ .confirm = .btn_quit });
@@ -10279,7 +10344,7 @@ pub const AppSession = struct {
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => {
                         self.quit_decision = .accepted;
-                        app_quit_keep_alive = app_keep_alive_after_quit;
+                        app_quit_keep_alive = appKeepAlivePolicyValue();
                         app_quitting = true; // P3-e3-6: 앱 종료 확정 → 각 창 deinit이 host-backed Term을 terminate 대신 detach(runtime 생존).
                     },
                     .file_conflict_reload => |surface_id| file_panel_ops.beginFileConflictReload(self, surface_id),
@@ -19457,7 +19522,7 @@ pub const AppSession = struct {
             self.test_policy_registered = false;
             if (builtin.is_test and live_app_sessions == 0) {
                 app_keep_alive_after_quit = false;
-                app_keep_alive_policy_initialized = false;
+                app_keep_alive_bootstrap_owner = .{};
             }
         }
         self.* = undefined;
@@ -32844,12 +32909,9 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         try std.testing.expect(up);
 
         const previous_keep_alive = app_keep_alive_after_quit;
-        const previous_policy_initialized = app_keep_alive_policy_initialized;
         app_keep_alive_after_quit = false;
-        app_keep_alive_policy_initialized = true;
         defer {
             app_keep_alive_after_quit = previous_keep_alive;
-            app_keep_alive_policy_initialized = previous_policy_initialized;
         }
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
@@ -34060,18 +34122,23 @@ test "persistent session quit policy: setting off terminates instead of detachin
 
 test "persistent session policy: a stale second-window config cannot overwrite the app-wide toggle" {
     const previous_value = app_keep_alive_after_quit;
-    const previous_initialized = app_keep_alive_policy_initialized;
+    const previous_owner = app_keep_alive_bootstrap_owner;
     defer {
         app_keep_alive_after_quit = previous_value;
-        app_keep_alive_policy_initialized = previous_initialized;
+        app_keep_alive_bootstrap_owner = previous_owner;
     }
 
     app_keep_alive_after_quit = false;
-    app_keep_alive_policy_initialized = false;
-    try std.testing.expect(!keepAlivePolicyForNewSession(false)); // 첫 Window가 디스크 config를 초기화한다.
+    app_keep_alive_bootstrap_owner = .{};
+    _ = try app_keep_alive_bootstrap_owner.initialize(.{
+        .value = false,
+        .provenance = .absent,
+        .file_provenance = .missing,
+    });
+    try std.testing.expect(!keepAliveSnapshotForNewSession().value);
 
     setAppKeepAlivePolicy(true); // Window A에서 토글했지만 아직 파일 write-back 전.
-    try std.testing.expect(keepAlivePolicyForNewSession(false)); // stale false를 읽은 Window B가 전역 값을 되돌리지 못한다.
+    try std.testing.expect(keepAliveSnapshotForNewSession().value); // stale false를 읽은 Window B가 전역 값을 되돌리지 못한다.
 }
 
 test "persistent session quit policy: cancelled late preflight clears accepted lifecycle latches" {
@@ -52767,9 +52834,17 @@ test "resetAllSettings: session.keep-alive-after-quit은 초기화 예외로 보
     if (session.config_path_buffer) |b| allocator.free(b);
     session.config_path_buffer = try allocator.dupe(u8, cfg_path); // 세션 소유 — deinit이 해제
 
+    const default_keep_alive = (config_mod.Config{}).session.keep_alive_after_quit;
+
+    // absent profile에서 전체 Reset은 미래 기본값 전환을 거부한 것으로 오인될 explicit false를 만들지 않는다.
+    settings_ops.resetAllSettings(session);
+    const absent_after = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
+    defer allocator.free(absent_after);
+    try std.testing.expect(std.mem.indexOf(u8, absent_after, "session.keep-alive-after-quit") == null);
+    try std.testing.expectEqual(config_mod.SessionKeepAliveProvenance.absent, session.loaded_config.session_keep_alive_provenance);
+
     // 기본값 뒤집기로 표현한다(리터럴 false 금지) — 문서가 기능 완성 뒤 기본값을 true로 전환한다고 예고했고,
     // 그때도 "사용자가 명시적으로 정한 값"을 리셋이 되돌리지 않아야 이 테스트가 계속 옳다.
-    const default_keep_alive = (config_mod.Config{}).session.keep_alive_after_quit;
     session.loaded_config.config.session.keep_alive_after_quit = !default_keep_alive;
     setAppKeepAlivePolicy(!default_keep_alive);
     session.loaded_config.config.font.size = 99; // 함께 갈려야 하는 대조군(보통 설정은 초기화된다)
@@ -52788,14 +52863,142 @@ test "resetAllSettings: session.keep-alive-after-quit은 초기화 예외로 보
     try std.testing.expect(std.mem.indexOf(u8, after, "session.keep-alive-after-quit") != null);
     try std.testing.expect(std.mem.indexOf(u8, after, "font.size = 99") == null); // 다른 override는 사라진다
 
-    // 값이 기본값과 같으면 보존할 게 없으므로 파일에 이 키를 쏟지 않는다("기본값 위 override만 쓴다" 정책 유지 —
-    // 여기서 무조건 emit하면 리셋 결과 파일이 기본값 한 줄을 항상 갖게 되어 full-dump 회피 원칙이 깨진다).
+    // G2부터는 사용자가 명시적으로 기본값과 같은 값을 골라도 intent다. 값 비교로 줄을 빼면 release B→A rollback에서
+    // explicit false/true가 absent로 무너진다. 토글 setter가 provenance를 explicit으로 만든 뒤 Reset은 반드시 emit한다.
     session.loaded_config.config.session.keep_alive_after_quit = default_keep_alive;
     setAppKeepAlivePolicy(default_keep_alive);
     settings_ops.resetAllSettings(session);
     const plain = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
     defer allocator.free(plain);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "session.keep-alive-after-quit") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "session.keep-alive-after-quit") != null);
+}
+
+test "G2 keep-alive row Reset과 Backspace는 live snapshot과 write-back queue를 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    settings_ops.toggleSettings(session);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
+    for (sections, 0..) |section, i| if (section.section == .workspace) {
+        session.chrome_host.settings.section = i;
+        break;
+    };
+    const fields = try settings_ops.currentSectionFields(session, scratch.allocator());
+    var keep_index: ?usize = null;
+    for (fields.bools, 0..) |field, i| if (std.mem.eql(u8, field.key, "session.keep-alive-after-quit")) {
+        keep_index = i;
+        break;
+    };
+    session.chrome_host.settings.selected = keep_index orelse return error.TestUnexpectedResult;
+
+    const explicit_value = (config_mod.Config{}).session.keep_alive_after_quit;
+    session.loaded_config.config.session.keep_alive_after_quit = explicit_value;
+    setAppKeepAlivePolicy(explicit_value);
+    const before = appKeepAliveSnapshot();
+    const dirty_before = session.config_dirty_keys.items.len;
+    const removed_before = session.config_removed_keys.items.len;
+
+    settings_ops.resetSelectedSettingRow(session);
+    try std.testing.expectEqual(before, appKeepAliveSnapshot());
+    try std.testing.expectEqual(explicit_value, session.loaded_config.config.session.keep_alive_after_quit);
+    try std.testing.expectEqual(dirty_before, session.config_dirty_keys.items.len);
+    try std.testing.expectEqual(removed_before, session.config_removed_keys.items.len);
+
+    settings_ops.resetSelectedSettingRow(session); // Backspace와 같은 dispatch를 반복해도 exact no-op이다.
+    try std.testing.expectEqual(before, appKeepAliveSnapshot());
+    try std.testing.expectEqual(dirty_before, session.config_dirty_keys.items.len);
+    try std.testing.expectEqual(removed_before, session.config_removed_keys.items.len);
+}
+
+test "G2 stale Window 전체 Reset은 app-global keep-alive snapshot과 같은 override를 쓴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path);
+
+    const stale = session.loaded_config.config.session.keep_alive_after_quit;
+    const current = !stale;
+    setAppKeepAlivePolicy(current); // 다른 Window가 바꿨고 이 Window mirror는 아직 stale인 상황.
+    try std.testing.expectEqual(stale, session.loaded_config.config.session.keep_alive_after_quit);
+
+    settings_ops.resetAllSettings(session);
+    try std.testing.expectEqual(current, appKeepAliveSnapshot().value);
+    try std.testing.expectEqual(current, session.loaded_config.config.session.keep_alive_after_quit);
+    const after = try tmp.dir.readFileAlloc(io, "config", allocator, .limited(4096));
+    defer allocator.free(after);
+    const expected = if (current)
+        "session.keep-alive-after-quit = true"
+    else
+        "session.keep-alive-after-quit = false";
+    try std.testing.expect(std.mem.indexOf(u8, after, expected) != null);
+}
+
+test "G2 전체 Reset atomic replace 실패는 keep-alive provenance와 기존 대상에 mutation 0이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "config-target", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config-target/sentinel", .data = "unchanged\n" });
+    var path_buf: [4096]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/config-target", .{tmp.sub_path});
+    if (session.config_path_buffer) |b| allocator.free(b);
+    session.config_path_buffer = try allocator.dupe(u8, cfg_path);
+
+    const before: config_mod.SessionKeepAliveSnapshot = .{
+        .value = true,
+        .provenance = .explicit_invalid,
+        .file_provenance = .readable,
+    };
+    try app_keep_alive_bootstrap_owner.replaceFromReload(before);
+    app_keep_alive_after_quit = before.value;
+    try std.testing.expectEqual(before, appKeepAliveSnapshot());
+
+    settings_ops.resetAllSettings(session);
+    try std.testing.expectEqual(before, appKeepAliveSnapshot());
+    const sentinel = try tmp.dir.readFileAlloc(io, "config-target/sentinel", allocator, .limited(64));
+    defer allocator.free(sentinel);
+    try std.testing.expectEqualStrings("unchanged\n", sentinel);
 }
 
 test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 색·팔레트 잠금 + 프리셋 행 최상단" {

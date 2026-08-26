@@ -58,6 +58,13 @@ pub const AppInstanceLeaseResult = enum(u32) {
     invalid_path = c.MARU_APP_INSTANCE_LEASE_INVALID_PATH,
 };
 
+pub const SessionConfigBootstrapResult = enum(u32) {
+    ready = c.MARU_SESSION_CONFIG_BOOTSTRAP_READY,
+    no_lease = c.MARU_SESSION_CONFIG_BOOTSTRAP_NO_LEASE,
+    already_initialized = c.MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED,
+    load_failure = c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE,
+};
+
 const LeaseSlot = if (builtin.os.tag == .macos)
     struct {
         held: ?app_instance_lease_mod.AppInstanceLease = null,
@@ -76,6 +83,10 @@ const LeaseSlot = if (builtin.os.tag == .macos)
             if (self.held) |*lease| lease.deinit();
             self.held = null;
         }
+
+        fn isHeld(self: *const @This()) bool {
+            return self.held != null;
+        }
     }
 else
     struct {
@@ -86,6 +97,10 @@ else
         }
 
         fn deinitForTest(_: *@This()) void {}
+
+        fn isHeld(_: *const @This()) bool {
+            return false;
+        }
     };
 
 // AppSession보다 먼저 생기고 모든 Window보다 오래 사는 process-global owner다. 제품에는 release/reset ABI를
@@ -111,13 +126,17 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v175 notification cold route and final Quit checkpoint values match the C header" {
-    try std.testing.expectEqual(@as(u32, 175), abi_version);
+test "ABI v176 session config bootstrap and notification cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 176), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_IO_FAILURE), @intFromEnum(AppInstanceLeaseResult.io_failure));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_INVALID_PATH), @intFromEnum(AppInstanceLeaseResult.invalid_path));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_READY), @intFromEnum(SessionConfigBootstrapResult.ready));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_NO_LEASE), @intFromEnum(SessionConfigBootstrapResult.no_lease));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED), @intFromEnum(SessionConfigBootstrapResult.already_initialized));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE), @intFromEnum(SessionConfigBootstrapResult.load_failure));
 }
 
 test "app instance LeaseSlot acquires exactly once and preserves typed failure" {
@@ -162,7 +181,10 @@ test "Swift startup acquires the writer lease before AppKit and mutable app boot
         return error.MissingLeaseAcquire;
     const failure_exit = std.mem.indexOf(u8, main_body, "Darwin.exit(failure.code)") orelse
         return error.MissingLeaseFailureExit;
+    const config_bootstrap = std.mem.indexOf(u8, main_body, "maru_macos_session_config_bootstrap()") orelse
+        return error.MissingConfigBootstrap;
     try std.testing.expect(lease < failure_exit);
+    try std.testing.expect(failure_exit < config_bootstrap);
     const prelease_forbidden = [_][]const u8{
         "NSApplication.shared",
         "MaruAppHostController()",
@@ -172,7 +194,7 @@ test "Swift startup acquires the writer lease before AppKit and mutable app boot
     for (prelease_forbidden) |needle| {
         const position = std.mem.indexOf(u8, main_body, needle) orelse
             return error.MissingAppKitBootstrap;
-        try std.testing.expect(lease < position);
+        try std.testing.expect(config_bootstrap < position);
         try std.testing.expect(failure_exit < position);
     }
 
@@ -610,6 +632,18 @@ pub export fn maru_macos_app_instance_lease_acquire(path_ptr: ?[*]const u8, path
     path_buf[path.len] = 0;
     const path_z: [:0]const u8 = path_buf[0..path.len :0];
     return @intFromEnum(app_instance_lease_slot.acquire(path_z));
+}
+
+pub export fn maru_macos_session_config_bootstrap() u32 {
+    if (!app_instance_lease_slot.isHeld()) return @intFromEnum(SessionConfigBootstrapResult.no_lease);
+    session_mod.bootstrapSessionKeepAliveConfig(
+        std.Io.Threaded.global_single_threaded.io(),
+        std.heap.page_allocator,
+    ) catch |err| return @intFromEnum(switch (err) {
+        error.AlreadyInitialized => SessionConfigBootstrapResult.already_initialized,
+        else => SessionConfigBootstrapResult.load_failure,
+    });
+    return @intFromEnum(SessionConfigBootstrapResult.ready);
 }
 
 pub export fn maru_macos_incident_owner_shutdown() u32 {

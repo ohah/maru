@@ -3722,6 +3722,83 @@ pub fn build(b: *std.Build) void {
         session_host_config_provenance_step.dependOn(&run_provenance_boundary_tests.step);
         boundary_step.dependOn(&run_provenance_boundary_tests.step);
     }
+    const session_host_config_override_retention_step = b.step(
+        "test-session-host-config-override-retention",
+        "Verify session default G2 bootstrap and reset override retention",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |retention_optimize| {
+        const retention_config_mod = b.createModule(.{
+            .root_source_file = b.path("src/config.zig"),
+            .target = target,
+            .optimize = retention_optimize,
+            .link_libc = true,
+        });
+        const retention_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_config_override_retention.zig"),
+                .target = target,
+                .optimize = retention_optimize,
+                .imports = &.{.{ .name = "config", .module = retention_config_mod }},
+            }),
+            .filters = &.{"G2"},
+        });
+        const run_retention_tests = b.addRunArtifact(retention_tests);
+        run_retention_tests.addArg("--maru-expect-tests=4");
+        session_host_config_override_retention_step.dependOn(&run_retention_tests.step);
+        test_step.dependOn(&run_retention_tests.step);
+
+        const retention_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_config_override_retention_boundary.zig"),
+                .target = target,
+                .optimize = retention_optimize,
+            }),
+            .filters = &.{"Session default G2 override retention boundary"},
+        });
+        retention_boundary_tests.root_module.addAnonymousImport("app_session_source", .{
+            .root_source_file = b.path("src/platform/macos/app_session.zig"),
+        });
+        retention_boundary_tests.root_module.addAnonymousImport("settings_source", .{
+            .root_source_file = b.path("src/platform/macos/app_session/settings.zig"),
+        });
+        retention_boundary_tests.root_module.addAnonymousImport("swift_host_source", .{
+            .root_source_file = b.path("src/platform/macos/MaruAppHost.swift"),
+        });
+        const run_retention_boundary_tests = b.addRunArtifact(retention_boundary_tests);
+        run_retention_boundary_tests.addArg("--maru-expect-tests=1");
+        run_retention_boundary_tests.setCwd(b.path("."));
+        session_host_config_override_retention_step.dependOn(&run_retention_boundary_tests.step);
+        boundary_step.dependOn(&run_retention_boundary_tests.step);
+
+        if (target.result.os.tag == .macos) {
+            const retention_app_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                    .target = target,
+                    .optimize = retention_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"G2"},
+            });
+            retention_app_tests.root_module.linkFramework("AppKit", .{});
+            retention_app_tests.root_module.linkFramework("Metal", .{});
+            retention_app_tests.root_module.linkFramework("MetalKit", .{});
+            retention_app_tests.root_module.linkFramework("QuartzCore", .{});
+            retention_app_tests.root_module.linkFramework("CoreText", .{});
+            retention_app_tests.root_module.linkFramework("CoreGraphics", .{});
+            retention_app_tests.root_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/coretext_smoke.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            const run_retention_app_tests = b.addRunArtifact(retention_app_tests);
+            // app_session root/import sentinel 3개와 이름 있는 G2 제품 경로 3개.
+            run_retention_app_tests.addArg("--maru-expect-tests=6");
+            run_retention_app_tests.setCwd(b.path("."));
+            session_host_config_override_retention_step.dependOn(&run_retention_app_tests.step);
+            test_step.dependOn(&run_retention_app_tests.step);
+        }
+    }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

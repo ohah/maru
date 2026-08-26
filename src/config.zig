@@ -5,6 +5,7 @@ pub const theme = @import("config/theme.zig");
 pub const loader = @import("config/loader.zig");
 pub const serialize = @import("config/serialize.zig");
 pub const schema = @import("config/schema.zig");
+pub const session_keep_alive_bootstrap = @import("config/session_keep_alive_bootstrap.zig");
 
 pub const Action = action.Action;
 pub const GlobalAction = action.GlobalAction;
@@ -36,6 +37,9 @@ pub const ParsedConfig = loader.Parsed;
 pub const ConfigDiagnostic = loader.Diagnostic;
 pub const SessionKeepAliveProvenance = loader.SessionKeepAliveProvenance;
 pub const ConfigFileProvenance = loader.FileProvenance;
+pub const SessionKeepAliveBootstrapOwner = session_keep_alive_bootstrap.Owner;
+pub const SessionKeepAliveSnapshot = session_keep_alive_bootstrap.Snapshot;
+pub const SessionKeepAliveResetPlan = session_keep_alive_bootstrap.ResetPlan;
 pub const parseConfig = loader.parse;
 pub const loadConfigFile = loader.loadFile;
 pub const loadConfigDefault = loader.loadDefault;

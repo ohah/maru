@@ -4074,6 +4074,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var snap_cards_visible: usize = 0;
     var snap_over_header: usize = 0;
     var snap_taken = false;
+    // **안 넘치면 안 그린다**(중립 계약: *"넘치지 않는 목록에 스크롤바를 그리면 사용자에게 없는
+    // 여백을 있다고 말하는 셈"*). 지금 판정은 **있을 때만** 보므로 그 규칙이 깨져도 안 움직인다.
+    var fits_bar_quads: usize = 0;
+    var fits_judgeable = false;
+    // **손을 떼면 따라오기를 멈추는가.** `left_up` 이 드래그를 안 끝내면 그 뒤 모든 마우스 이동이
+    // 목록을 굴린다 — 사용자는 "커서를 스쳤을 뿐인데 화면이 뛴다" 로 겪는다.
+    var after_release_before: u32 = 0;
+    var after_release_after: u32 = 0;
+    var after_release_judgeable = false;
+    var after_release_dock_before: u32 = 0;
+    var after_release_dock_after: u32 = 0;
     var db_seen: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
     var db_off_before: u32 = 0;
     var db_off_after: u32 = 0;
@@ -4764,6 +4775,36 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, hx, hy);
             window.postSyntheticMouse(.left_down, hx, hy);
             window.postSyntheticMouse(.left_up, hx, hy);
+        }
+        // **안 넘칠 때 막대가 없는지**를 그 순간에 센다. 트리는 아직 21 행이라 뷰포트에 들어간다.
+        if (spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
+            dock_rows.items.len *| cell_h <= geom.tree_content.h)
+        {
+            fits_judgeable = true;
+            const m = scrollbarMetrics();
+            const gx: f32 = @floatFromInt(geom.tree_content.x + geom.tree_content.w -| m.gutterPx());
+            for (cells.items) |c| {
+                // 막대 굵기의 **단색** 쿼드가 거터 자리에 있으면 그린 것이다(음수 UV = 단색).
+                if (c.uv[0] < 0 and @abs(c.rect[2] - @as(f32, @floatFromInt(m.width_px))) < 0.5 and
+                    c.rect[0] >= gx - 0.5 and c.rect[3] > @as(f32, @floatFromInt(cell_h))) fits_bar_quads += 1;
+            }
+        }
+        // **손을 뗀 **직후** 커서를 옮긴다** — 드래그가 안 끝났으면 그 이동이 목록을 굴린다.
+        //
+        // **끌기 바로 뒤여야 한다.** 한참 뒤에 두었더니 그 사이 도크 끌기가 있어, 남아 있던 것은
+        // 도크 드래그인데 판정은 사이드바만 봤다 — `left_up` 을 지우는 뮤턴트가 **그대로 통과했다**
+        // (실측 2026-08-26). 그리고 **두 offset 을 함께 본다**: 어느 쪽이 새도 잡힌다.
+        if (spins == 645) if (sidebar_bar) |b| {
+            after_release_judgeable = true;
+            after_release_before = sidebar_scroll_px;
+            after_release_dock_before = dock_scroll_px;
+            const gx: i32 = @intFromFloat(b.hit_x + 1);
+            // **트랙 위쪽으로** 옮긴다 — 지금 offset 이 최대라 아래로는 clamp 되어 안 움직인다.
+            window.postSyntheticMouse(.moved, gx, @intFromFloat(b.track_y + 4));
+        };
+        if (spins == 646) {
+            after_release_after = sidebar_scroll_px;
+            after_release_dock_after = dock_scroll_px;
         }
         // **여기가 그 순간이다** — 아래 스크롤바 시험이 값을 덮기 직전에 챙긴다.
         if (spins == 638 and !snap_taken) {
@@ -6045,6 +6086,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             dock_rows.items.len *| cell_h,
             geom.tree_content.h,
         });
+    }
+    if (fits_judgeable) {
+        try stdout.print("bar_when_fits: quads={d} ok={}\n", .{ fits_bar_quads, fits_bar_quads == 0 });
+    } else {
+        try stdout.print("bar_when_fits=unjudgeable reason=already_overflowing\n", .{});
+    }
+    if (after_release_judgeable) {
+        try stdout.print("bar_after_release: sb {d}->{d} dock {d}->{d} ok={}\n", .{
+            after_release_before,
+            after_release_after,
+            after_release_dock_before,
+            after_release_dock_after,
+            after_release_after == after_release_before and after_release_dock_after == after_release_dock_before,
+        });
+    } else {
+        try stdout.print("bar_after_release=unjudgeable reason=no_bar\n", .{});
     }
     if (sb_track_judgeable) {
         // 트랙 위쪽(맨 위 근처)을 눌렀으니 **위로** 가야 한다.

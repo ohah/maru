@@ -659,7 +659,7 @@ fn snapshotContainsText(
     snapshot: []const u8,
     needle: []const u8,
 ) !bool {
-    const screen_stream = @import("screen_stream.zig");
+    const screen_stream = @import("maru").session.screen_stream;
     var records: screen_stream.RecordStream = .{ .bytes = snapshot };
     var row_text: std.ArrayListUnmanaged(u8) = .empty;
     defer row_text.deinit(allocator);

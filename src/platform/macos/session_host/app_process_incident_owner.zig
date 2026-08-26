@@ -554,7 +554,7 @@ test "CR0b GUI incident owner prerequisite는 copied owner와 다른 nonce 교�
 test "CR0b managed public poison은 canonical suffix만 호출한다" {
     const client_mod = @import("client.zig");
     const protocol = @import("protocol.zig");
-    const screen_stream = @import("screen_stream.zig");
+    const screen_stream = @import("maru").session.screen_stream;
     const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse

@@ -50,10 +50,10 @@ pub const host_authority = if (builtin.os.tag == .macos)
 else
     struct {};
 pub const core_command_wire = @import("session_host/core_command_wire.zig");
-pub const screen_stream = @import("session_host/screen_stream.zig");
+pub const screen_stream = @import("maru").session.screen_stream;
 // screen_assembler(records → client 화면 모델, screen_snapshot 투영의 역)는 screen_stream codec만 써서 순수 계층으로
 // 둔다(platform-import-0, non-macOS에서도 테스트). 실 렌더/backend 배선은 macOS 전용 후속(e2e-2)에서 이 조립기를 쓴다.
-pub const screen_assembler = @import("session_host/screen_assembler.zig");
+pub const screen_assembler = @import("maru").session.screen_assembler;
 pub const registry = @import("session_host/registry.zig");
 pub const server = @import("session_host/server.zig");
 pub const discovery = @import("session_host/discovery.zig");

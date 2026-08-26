@@ -25,7 +25,7 @@ const r2a_client_slot = client_slot_mod;
 const client_poison = @import("client_poison.zig");
 const control_response_wire = @import("control_response_wire.zig");
 const protocol = @import("protocol.zig");
-const screen_assembler = @import("screen_assembler.zig");
+const screen_assembler = @import("maru").session.screen_assembler;
 const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -12627,7 +12627,7 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const framing = @import("framing.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 
 fn readPeerFrame(fd: c.fd_t, allocator: std.mem.Allocator) !struct { header: protocol.Header, payload: []u8 } {
     var header_bytes: [protocol.header_size]u8 = undefined;

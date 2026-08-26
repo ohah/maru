@@ -40,7 +40,7 @@ const client_source_transcript = @import("client_source_transcript.zig");
 const incident_binding_contract = @import("maru").observability.incident_binding_contract;
 const incident_publication_contract = @import("maru").observability.incident_publication_contract;
 const connection_incident = @import("maru").observability.connection_incident;
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
@@ -6659,7 +6659,7 @@ pub const Client = struct {
     wire_major: u16 = protocol.version_major,
     /// 이 MRSH adapter가 받아야 하는 exact screen record version. current major는 current codec,
     /// capability-tagged N-1 adapter는 직전 codec만 받는다. 두 버전을 전역 reader 범위로 섞지 않는다.
-    screen_codec_version: u16 = @import("screen_stream.zig").codec_version,
+    screen_codec_version: u16 = @import("maru").session.screen_stream.codec_version,
     /// hello_ack에서 host가 `screen_viewport_scrolled_v1` mode bit을 신뢰할 수 있다고 광고했는가. 구 host ACK에는
     /// capability가 없으므로 false로 남겨 remote preedit가 숨은 live cursor에 그려지지 않게 한다.
     screen_viewport_scrolled_v1: bool = false,

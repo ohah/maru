@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const protocol = @import("protocol.zig");
-const screen_stream = @import("screen_stream.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const shutdown_n1_baseline = @import("shutdown_n1_baseline.zig");
 
 pub const ShutdownProfile = struct {

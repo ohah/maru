@@ -803,7 +803,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         .host_id = host_id,
         .build_id = build_id,
         .protocol_major = @import("protocol.zig").version_major,
-        .screen_codec_version = @import("screen_stream.zig").codec_version,
+        .screen_codec_version = @import("maru").session.screen_stream.codec_version,
         .upgrade_epoch = 4,
         .lifecycle = .restoring,
         .endpoint = socket_path,

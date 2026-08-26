@@ -4061,6 +4061,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 기하는 나오고, 거터를 안 비워도 offset 은 잘 움직인다.
     var sb_bar_drawn = false;
     var sb_bar_overlap: usize = 0;
+    var sb_track_before: u32 = 0;
+    var sb_track_after: u32 = 0;
+    var sb_track_judgeable = false;
+    // **사이드바 스크롤 판정의 순간**. 아래 스크롤바 시험이 offset 을 0 으로 되돌리는데 그 판정은
+    // 끝 상태를 읽는다 — 같은 변수를 덮는 이 함정은 이 포트에서 **네 번째**다(§2m.52·§2m.53·§2m.55).
+    var snap_scroll_px: u32 = 0;
+    var snap_first_visible: usize = 0;
+    var snap_first_band_y: u32 = 0;
+    var snap_partial: u32 = 0;
+    var snap_active_band_y: ?u32 = null;
+    var snap_cards_visible: usize = 0;
+    var snap_over_header: usize = 0;
+    var snap_taken = false;
+    var db_seen: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
+    var db_off_before: u32 = 0;
+    var db_off_after: u32 = 0;
+    var db_judgeable = false;
     var dock_scrolls: usize = 0;
     var dock_click_judgeable = false;
     var dock_click_target_row: usize = 0;
@@ -4597,6 +4614,50 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             };
         }
         if (spins == 55 and expand_judgeable) expand_rows_after = dock_rows.items.len;
+        // ── 도크 스크롤바 판정 (W8.10) ─────────────────────────────────────────────────────
+        //
+        // **트리를 넘치게 만든다.** 기본 상태에서는 21 행이라 뷰포트에 다 들어가고, 그러면 막대가
+        // 아예 안 뜬다(넘치지 않는 목록에 그리는 것은 중립이 금지한다). 사이드바 쪽만 재고 도크는
+        // "같은 헬퍼를 쓴다" 로 넘기면 **그 배선이 실제로 도는지는 아무도 안 재는 상태**가 된다.
+        //
+        // 접힌 디렉터리를 차례로 눌러 행을 늘린다 — 한 번에 하나씩(펼치기가 스캔을 기다린다).
+        // **탐색기로 되돌린다** — 그 앞 판정이 뷰를 에이전트로 바꿔 놨고, 도크 막대는 탐색기
+        // 뷰에서만 뜬다(SCM·에이전트는 자기 컴포넌트가 스크롤을 소유한다).
+        if (spins == 655) {
+            const bar3 = geom.view_bar;
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar3.x, .y = bar3.y, .w = bar3.w, .h = bar3.h }, cell_w, 0)) |r0| {
+                const vx: i32 = @intCast(r0.x + r0.w / 2);
+                const vy: i32 = @intCast(r0.y + r0.h / 2);
+                window.postSyntheticMouse(.left_down, vx, vy);
+                window.postSyntheticMouse(.left_up, vx, vy);
+            }
+        }
+        if (spins >= 656 and spins <= 690 and dock_view == .explorer and
+            dock_rows.items.len *| cell_h <= geom.tree_content.h)
+        {
+            for (dock_rows.items, 0..) |r, i| switch (r) {
+                .directory => |dir| {
+                    if (dir.expanded) continue;
+                    const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                    const ey: i32 = @intCast(geom.tree_content.y + cell_h * @as(u32, @intCast(i)) + cell_h / 2);
+                    window.postSyntheticMouse(.left_down, ex, ey);
+                    window.postSyntheticMouse(.left_up, ex, ey);
+                    break;
+                },
+                else => {},
+            };
+        }
+        if (spins == 700) if (dock_bar) |b| {
+            db_seen = b;
+            db_judgeable = true;
+            db_off_before = dock_scroll_px;
+            const gx: i32 = @intFromFloat(b.hit_x + 1);
+            const gy: i32 = @intFromFloat(b.thumb_y + b.thumb_h / 2);
+            window.postSyntheticMouse(.left_down, gx, gy);
+            window.postSyntheticMouse(.moved, gx, gy + @as(i32, @intFromFloat(b.track_h / 3)));
+            window.postSyntheticMouse(.left_up, gx, gy + @as(i32, @intFromFloat(b.track_h / 3)));
+        };
+        if (spins == 705) db_off_after = dock_scroll_px;
         // **행 클릭 판정의 답을 먼저 챙긴다** — 아래 접기 클릭이 같은 변수를 덮는다(도크 스크롤과
         // 사이드바에서 같은 일을 두 번 겪었다).
         if (spins == 65) {
@@ -4704,11 +4765,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, hx, hy);
             window.postSyntheticMouse(.left_up, hx, hy);
         }
+        // **여기가 그 순간이다** — 아래 스크롤바 시험이 값을 덮기 직전에 챙긴다.
+        if (spins == 638 and !snap_taken) {
+            snap_taken = true;
+            snap_scroll_px = sidebar_scroll_px;
+            snap_first_visible = sidebar_first_visible;
+            snap_first_band_y = sidebar_first_band_y;
+            snap_partial = sidebar_partial;
+            snap_active_band_y = sidebar_active_band_y;
+            snap_cards_visible = sidebar_cards_visible;
+            snap_over_header = sidebar_card_over_header;
+        }
         // ── 스크롤바 끌기 판정 (W8.10) ─────────────────────────────────────────────────
+        //
+        // **다른 판정이 다 끝난 뒤(635 이후)에 둔다.** 이 단계들은 스크롤 위치와 도크 뷰를 바꾸는데
+        // 앞선 판정 둘이 그 값을 **끝 상태에서** 읽는다 — 가운데 끼웠더니 사이드바 스크롤과 세션
+        // 전환이 둘 다 빨개졌다(실측 2026-08-26). 같은 변수를 덮는 이 함정은 이 포트에서 **네 번째**다.
         //
         // **thumb 을 잡아 아래로 끈다.** 휠과 달리 이 경로는 `offsetForPointer` 를 지나므로, 막대가
         // 죽어 있으면(그려만 지고 안 잡히면) offset 이 그대로다 — 그것이 이 판정의 전부다.
-        if (spins == 596) {
+        if (spins == 640) {
             if (sidebar_bar) |b| {
                 sb_bar_seen = b;
                 sb_bar_judgeable = true;
@@ -4720,12 +4796,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, gx, gy + @as(i32, @intFromFloat(b.track_h / 2)));
             }
         }
-        if (spins == 598) sb_off_after = sidebar_scroll_px;
+        if (spins == 643) sb_off_after = sidebar_scroll_px;
+        // **트랙을 누른다 — 그리고 거터 맨 왼쪽에서.**
+        //
+        // 두 가지를 한 번에 잰다. ⑴ thumb 바깥을 누르면 그 자리로 뛰는가(`offsetForTrackClick`).
+        // ⑵ **잡는 폭이 그리는 폭보다 넓은가** — `hit_x + 1` 은 거터 안이지만 막대(8px) **밖**이라,
+        //    잡는 자리를 `track_w` 로 좁히면 이 클릭이 그냥 목록으로 샌다. 앞선 끌기 판정은 막대
+        //    한가운데를 눌러서 그 차이를 **못 봤다**.
+        if (spins == 648) if (sidebar_bar) |b| {
+            sb_track_before = sidebar_scroll_px;
+            const tx: i32 = @intFromFloat(b.hit_x + 1);
+            const ty: i32 = @intFromFloat(b.track_y + 4);
+            window.postSyntheticMouse(.left_down, tx, ty);
+            window.postSyntheticMouse(.left_up, tx, ty);
+            sb_track_judgeable = true;
+        };
+        if (spins == 651) sb_track_after = sidebar_scroll_px;
         // **합성된 셀에서 직접 찾는다** — 기하가 아니라 화면에 들어간 것을 본다. 그리기를 빼면
         // 이 값이 죽는다(기하 판정은 안 죽는다).
         // **지금 프레임의 막대**를 본다 — 끌기 전에 잡아 둔 것과 견주면 thumb 이 그 사이 움직여
         // "안 그려졌다" 가 된다(실측: `drawn=false` 가 그 이유였다).
-        if (spins == 599) if (sidebar_bar) |b| {
+        if (spins == 644) if (sidebar_bar) |b| {
             for (cells.items) |c| {
                 if (@abs(c.rect[0] - b.track_x) < 0.5 and @abs(c.rect[2] - b.track_w) < 0.5 and
                     @abs(c.rect[1] - b.thumb_y) < 0.5 and @abs(c.rect[3] - b.thumb_h) < 0.5) sb_bar_drawn = true;
@@ -5933,6 +6024,39 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     } else {
         try stdout.print("sb_bar=unjudgeable reason=no_overflow\n", .{});
     }
+    if (db_judgeable) {
+        const b = db_seen.?;
+        try stdout.print("dock_bar=({d:.0},{d:.0},{d:.0},{d:.0}) thumb=({d:.0},{d:.0}) max_off={d} off {d}->{d} dock_bar_ok={}\n", .{
+            b.track_x,
+            b.track_y,
+            b.track_w,
+            b.track_h,
+            b.thumb_y,
+            b.thumb_h,
+            b.max_offset_px,
+            db_off_before,
+            db_off_after,
+            b.max_offset_px > 0 and db_off_after > db_off_before,
+        });
+    } else {
+        // **왜 못 쟀는지 남긴다** — 그냥 빠지면 "도크는 안 본다" 가 조용해진다.
+        try stdout.print("dock_bar=unjudgeable reason=no_overflow rows={d} content_h={d} viewport_h={d}\n", .{
+            dock_rows.items.len,
+            dock_rows.items.len *| cell_h,
+            geom.tree_content.h,
+        });
+    }
+    if (sb_track_judgeable) {
+        // 트랙 위쪽(맨 위 근처)을 눌렀으니 **위로** 가야 한다.
+        try stdout.print("sb_track: off {d}->{d} clicks={d} sb_track_ok={}\n", .{
+            sb_track_before,
+            sb_track_after,
+            bar_track_clicks,
+            bar_track_clicks > 0 and sb_track_after < sb_track_before,
+        });
+    } else {
+        try stdout.print("sb_track=unjudgeable reason=no_bar\n", .{});
+    }
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} card_over_header={d} cards_visible={d}/{d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, sidebar_card_over_header, sidebar_cards_visible, sidebar_cards.items.len, geom.terminal.x });
     {
         // **"다시 그렸다" 와 "보이게 달라졌다" 는 다르다.** 처음에 `tab_hover_bg` 를 썼더니 스모크는
@@ -5950,7 +6074,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     }
     if (sidebar_scroll_judgeable) {
-        // **그린 첫 카드는 빌더가**(`sidebar_first_visible`), **눌린 카드는 클릭이 지나간 호출부가**
+        // **그린 첫 카드는 빌더가**(`snap_first_visible`), **눌린 카드는 클릭이 지나간 호출부가**
         // 낸다. 판정이 어느 한쪽을 다시 계산하면 그쪽 배선이 끊겨도 안 잡힌다 — 도크에서 그 함정을
         // 두 번 밟았다(§2m.52).
         var rb2: [16]maru.chrome.components.sidebar.Row = undefined;
@@ -5964,37 +6088,37 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // `rowTop` 이 말하는 그 카드의 y 와 우리가 실제로 그린 밴드 y 를 견준다. `rowTop` 은 우리
         // 누적을 안 쓰므로 그리기만 어긋나도 갈린다.
         const want_band_y: i64 = @as(i64, geom.sidebar.y) +
-            maru.chrome.components.sidebar.rowTop(rr2, sidebar_first_visible, sidebar_header_h, mm2, sidebar_scroll_px);
-        const band_matches = @abs(@as(i64, sidebar_first_band_y) - want_band_y) <= 1;
+            maru.chrome.components.sidebar.rowTop(rr2, snap_first_visible, sidebar_header_h, mm2, snap_scroll_px);
+        const band_matches = @abs(@as(i64, snap_first_band_y) - want_band_y) <= 1;
         // **활성 표시가 옳은 카드에 있는가.** 창 좌표로 안 옮기면 굴린 뒤 엉뚱한 카드에 앰버 막대가
         // 선다 — 개수·자리 판정은 그것을 전혀 안 본다.
         const want_active_y: i64 = @as(i64, geom.sidebar.y) +
-            maru.chrome.components.sidebar.rowTop(rr2, app_window.active_tab, sidebar_header_h, mm2, sidebar_scroll_px);
+            maru.chrome.components.sidebar.rowTop(rr2, app_window.active_tab, sidebar_header_h, mm2, snap_scroll_px);
         // **공허하지 않게 한다.** 활성 카드가 창 안이면 **반드시 그려져야** 하고 자리도 맞아야
         // 한다. 처음에는 `null` 이면 참으로 뒀는데, 활성 카드가 화면 밖이라 그 검사가 통째로
         // 건너뛰어졌다 — 앰버 막대를 엉뚱한 카드에 그리는 뮤턴트가 그대로 통과했다.
-        const active_in_window = app_window.active_tab >= sidebar_first_visible and
-            app_window.active_tab < sidebar_first_visible + sidebar_cards_visible;
+        const active_in_window = app_window.active_tab >= snap_first_visible and
+            app_window.active_tab < snap_first_visible + snap_cards_visible;
         const active_ok = if (active_in_window)
-            sidebar_active_band_y != null and @abs(@as(i64, sidebar_active_band_y.?) - want_active_y) <= 1
+            snap_active_band_y != null and @abs(@as(i64, snap_active_band_y.?) - want_active_y) <= 1
         else
-            sidebar_active_band_y == null;
-        try stdout.print("sidebar_scrolls={d} sidebar_scroll_px={d}/{d} first_visible={d} clicked_slot={?d} band_y={d} want_band_y={d} band_matches={} partial={d} active_ok={} over_header={d} sidebar_scroll_ok={}\n", .{
+            snap_active_band_y == null;
+        try stdout.print("sidebar_scrolls={d} snap_scroll_px={d}/{d} first_visible={d} clicked_slot={?d} band_y={d} want_band_y={d} band_matches={} partial={d} active_ok={} over_header={d} sidebar_scroll_ok={}\n", .{
             sidebar_scrolls,
-            sidebar_scroll_px,
+            snap_scroll_px,
             max_scroll,
-            sidebar_first_visible,
+            snap_first_visible,
             sidebar_scroll_clicked_slot,
-            sidebar_first_band_y,
+            snap_first_band_y,
             want_band_y,
             band_matches,
-            sidebar_partial,
+            snap_partial,
             active_ok,
-            sidebar_card_over_header,
-            sidebar_scrolls > 0 and sidebar_scroll_px > 0 and sidebar_scroll_px <= max_scroll and
+            snap_over_header,
+            sidebar_scrolls > 0 and snap_scroll_px > 0 and snap_scroll_px <= max_scroll and
                 sidebar_scroll_click_sent and sidebar_scroll_clicked_slot != null and
-                sidebar_scroll_clicked_slot.? == sidebar_first_visible and
-                band_matches and active_ok and sidebar_card_over_header == 0,
+                sidebar_scroll_clicked_slot.? == snap_first_visible and
+                band_matches and active_ok and snap_over_header == 0,
         });
     } else {
         try stdout.print("sidebar_scroll=unjudgeable reason=content_fits cards={d}\n", .{sidebar_cards.items.len});
@@ -6275,7 +6399,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     } else {
         // **판정 불가 사유가 맞아야 한다.** 굴릴 것이 없는 것과 도크가 없는 것은 다른 사실이다.
         const content_h: u32 = @intCast(dock_rows.items.len *| cell_h);
-        const why: []const u8 = if (geom.tree_content.w == 0) "no_dock" else "content_fits";
+        // **사유가 지금 숫자와 맞아야 한다.** 이 판정은 앞선 순간에 "안 넘친다" 로 접히는데, 그
+        // 뒤 스크롤바 시험이 폴더를 펼쳐 목록을 늘린다 — 그때 `content_fits` 라고 적으면서 넘치는
+        // 숫자를 함께 찍게 된다(실측 2026-08-26: `content_h=570 viewport_h=537` 인데 "fits").
+        // 사유를 **찍는 값에서** 유도하면 그 어긋남이 생기지 않는다.
+        const why: []const u8 = if (geom.tree_content.w == 0)
+            "no_dock"
+        else if (content_h > geom.tree_content.h)
+            "not_scrolled"
+        else
+            "content_fits";
         try stdout.print("dock_scroll=unjudgeable reason={s} rows={d} content_h={d} viewport_h={d}\n", .{ why, dock_rows.items.len, content_h, geom.tree_content.h });
     }
     if (dock_click_judgeable) {

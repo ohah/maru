@@ -47,7 +47,7 @@ test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를
     try std.testing.expectEqual(@as(usize, 3), count(runtime, "test \"C3-3b4 proof-loss subprocess"));
     try std.testing.expectEqual(
         @as(usize, 1),
-        count(backend, "test \"C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다\""),
+        count(backend, "test \"P4 N2b1 remote backend binding은 실제 host runtime의 stable notification label을 갱신한다 (C3-3b4)\""),
     );
     try std.testing.expectEqual(
         @as(usize, 1),

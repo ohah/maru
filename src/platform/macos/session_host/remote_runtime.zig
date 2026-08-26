@@ -429,12 +429,27 @@ const EventGenerationTracking = enum {
 
 /// host에서 가져온 대기 OSC 9/777 데스크톱 알림 한 건(§6.32). title/body는 owned(caller가 deinit).
 pub const Notification = struct {
+    pub const Route = struct {
+        host_id: u128,
+        runtime_id: u128,
+        event_id: u64,
+        occurred_at_ns: u64,
+    };
     title: []u8,
     body: []u8,
+    display_label: ?[]u8 = null,
+    route: ?Route = null,
     pub fn deinit(self: Notification, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
         allocator.free(self.body);
+        if (self.display_label) |label| allocator.free(label);
     }
+};
+
+pub const NotificationBootstrap = struct {
+    config_generation: u64,
+    notifications_osc: bool,
+    display_label: []const u8,
 };
 
 fn attachmentReadBatch(
@@ -3500,6 +3515,7 @@ pub const RemoteRuntime = struct {
                     .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
                     .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
                     .notification_stream_auth = client.notification_stream_auth_v1,
+                    .notification_delivery = client.notification_delivery_v1,
                     .runtime_clipboard = client.runtime_clipboard_v1,
                     .runtime_core_command = client.runtime_core_command_v1,
                     .runtime_link_at = client.runtime_link_at_v1,
@@ -3556,7 +3572,22 @@ pub const RemoteRuntime = struct {
             request,
             size,
             initial_config,
+            null,
         );
+    }
+
+    pub fn spawnWithConfigAndNotification(
+        self: *RemoteRuntime,
+        client: *client_mod.Client,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        initial_config: ?maru.session.core_command.RuntimeConfig,
+        notification: NotificationBootstrap,
+    ) anyerror!void {
+        return self.spawnWithConnection(.{ .legacy = client }, allocator, io, surface_id, request, size, initial_config, notification);
     }
 
     pub fn spawnWithAdapter(
@@ -3577,7 +3608,22 @@ pub const RemoteRuntime = struct {
             request,
             size,
             initial_config,
+            null,
         );
+    }
+
+    pub fn spawnWithAdapterAndNotification(
+        self: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        initial_config: ?maru.session.core_command.RuntimeConfig,
+        notification: NotificationBootstrap,
+    ) anyerror!void {
+        return self.spawnWithConnection(.{ .generation = adapter }, allocator, io, surface_id, request, size, initial_config, notification);
     }
 
     fn spawnWithConnection(
@@ -3589,6 +3635,7 @@ pub const RemoteRuntime = struct {
         request: maru.pty.SpawnRequest,
         size: terminal.Size,
         initial_config: ?maru.session.core_command.RuntimeConfig,
+        notification: ?NotificationBootstrap,
     ) anyerror!void {
         // origin/main의 구 v2 daemon도 runtime.spawn_full 이름은 알지만 unknown `runtime_config` 필드를 무시한다.
         // 새 config codec과 함께 도입된 capability가 없으면 잘못된 기본값으로 spawn 성공을 가장하지 않고,
@@ -3598,6 +3645,11 @@ pub const RemoteRuntime = struct {
             .generation => |adapter| adapter.generationCapabilities().runtime_core_command,
         };
         if (initial_config != null and !runtime_core_command) return error.UnsupportedSpawnContract;
+        const notification_delivery = switch (connection) {
+            .legacy => |client| client.notification_delivery_v1,
+            .generation => |adapter| adapter.generationCapabilities().notification_delivery,
+        };
+        if (notification != null and !notification_delivery) return error.UnsupportedSpawnContract;
         try self.initializeGenerationOwner(connection, allocator, io, size);
         errdefer self.deinitGenerationOwnerAndScreenSource();
         self.direct_input = .empty;
@@ -3623,7 +3675,7 @@ pub const RemoteRuntime = struct {
         try self.initializePendingEventOwner();
 
         // 1. runtime.spawn_full — host가 확장 spawn 계약으로 실 PTY를 띄우고 runtime_id를 준다.
-        const spawn_params = buildSpawnParams(allocator, request, size, initial_config) catch return error.OutOfMemory;
+        const spawn_params = buildSpawnParams(allocator, request, size, initial_config, notification) catch return error.OutOfMemory;
         defer allocator.free(spawn_params);
         // 기존 v2 host가 새 필드를 unknown JSON으로 무시해 다른 셸을 띄우지 않도록 새 method 이름을 쓴다. 구 host는
         // invalid_request로 거부하고 기존 runtime attach는 계속 v2로 가능하다.
@@ -6318,6 +6370,64 @@ pub const RemoteRuntime = struct {
         );
     }
 
+    /// 실행 중 runtime의 daemon-owned notification snapshot을 현재 controller generation에 묶어 교체한다.
+    /// capability가 없는 구 host에는 RPC를 보내지 않는다. 이 경우 daemon 내부 OS sink도 존재하지 않으므로 local
+    /// 설정만 바꾸는 것이 호환 동작이다.
+    pub fn updateNotificationConfig(
+        self: *RemoteRuntime,
+        config_generation: u64,
+        notifications_osc: bool,
+        display_label: []const u8,
+    ) client_mod.ClientError!void {
+        try self.admitRuntimeOperation();
+        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (!self.connectionCapabilities().notification_delivery) return;
+        const controller_generation = self.currentGeneration().attachment.statePtr().controller_generation;
+        const update = generation_contract.NotificationConfigUpdateRequest.init(
+            controller_generation,
+            config_generation,
+            notifications_osc,
+            display_label,
+        ) orelse return error.ProtocolError;
+        var params_buffer: [768]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&params_buffer);
+        var json: std.json.Stringify = .{ .writer = &writer, .options = .{} };
+        json.write(.{
+            .stream_id = self.currentGeneration().attachment.streamId(),
+            .expected_controller_generation = controller_generation,
+            .config_generation = config_generation,
+            .notifications_osc = notifications_osc,
+            .display_label = display_label,
+        }) catch return error.OutOfMemory;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
+        var applied = false;
+        try self.callDecoded(
+            generation_contract.RuntimeRequest.notificationConfigUpdate(update),
+            "config.update",
+            writer.buffered(),
+            &applied,
+            applyNotificationConfigUpdateResponse,
+        );
+        if (!applied) return error.ProtocolError;
+    }
+
+    fn applyNotificationConfigUpdateResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
+        const output: *bool = @ptrCast(@alignCast(raw_output));
+        const obj = decodeStrictObject(runtime.allocator, bytes) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        };
+        defer obj.deinit();
+        if (obj.boolean("applied") != true or obj.hasUnknownKey(&.{"applied"})) {
+            runtime.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        }
+        output.* = true;
+    }
+
     /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
     /// 터미널의 알림은 host의 `TerminalCore`가 파싱하므로 client가 이걸로 가져와 GUI 알림 funnel에 넣는다(app_session이 surfacing).
     /// 반환 title/body는 caller 소유(Notification.deinit로 회수). 둘 다 빈 값이면(host 대기 없음) null.
@@ -6331,9 +6441,11 @@ pub const RemoteRuntime = struct {
         try self.beginStableMutation(&mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
         var buf: [96]u8 = undefined;
+        const stable_delivery = self.connectionCapabilities().notification_delivery;
         const params = notificationParams(
             &buf,
             self.currentGeneration().attachment.streamId(),
+            stable_delivery,
         ) catch return error.OutOfMemory;
         var output: ?Notification = null;
         try self.callDecoded(
@@ -6356,12 +6468,12 @@ pub const RemoteRuntime = struct {
     fn notificationParams(
         buf: []u8,
         stream_id: u64,
+        stable_delivery: bool,
     ) error{NoSpaceLeft}![]u8 {
-        return std.fmt.bufPrint(
-            buf,
-            "{{\"stream_id\":{d}}}",
-            .{stream_id},
-        );
+        return if (stable_delivery)
+            std.fmt.bufPrint(buf, "{{\"stream_id\":{d},\"delivery_version\":1}}", .{stream_id})
+        else
+            std.fmt.bufPrint(buf, "{{\"stream_id\":{d}}}", .{stream_id});
     }
 
     /// `runtime.notification`의 success envelope는 항상 문자열 `title`·`body` 두 필드다. 알림이 없어도 host가 둘을 빈
@@ -6374,6 +6486,8 @@ pub const RemoteRuntime = struct {
     /// screen_codec_version·wire_major·build_id 일치를 요구한다 — host_connect.zig). 여기 도달 = 같은 빌드가 계약을
     /// 어겼다는 뜻이고, 그 연결로 이후 RPC를 계속 보내는 쪽이 더 위험하다.
     fn decodeNotificationResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?Notification {
+        if (self.connectionCapabilities().notification_delivery)
+            return self.decodeStableNotificationResponse(resp);
         // std.json.parseFromSlice 대신 **수동 디코드** — parseFromSlice가 숫자 파서(f128 소프트플로트 ___divtf3/___fixtfti
         // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-mermaid-perf)가 undefined symbol로
         // 깨진다(code-review 후속). 파싱은 selected_text/link_at과 **같은 strict 디코더**를 쓴다 — 응답 schema 위반을
@@ -6408,6 +6522,155 @@ pub const RemoteRuntime = struct {
         errdefer self.allocator.free(title);
         const body = self.allocator.dupe(u8, body_src) catch return error.OutOfMemory;
         return .{ .title = title, .body = body };
+    }
+
+    fn decodeStableNotificationResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?Notification {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const decoded = decodeStableNotificationPayload(arena.allocator(), resp) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidJson => return self.notificationProtocolFailure(),
+        } orelse return null;
+        const title = self.allocator.dupe(u8, decoded.title) catch return error.OutOfMemory;
+        errdefer self.allocator.free(title);
+        const body = self.allocator.dupe(u8, decoded.body) catch return error.OutOfMemory;
+        errdefer self.allocator.free(body);
+        const label = self.allocator.dupe(u8, decoded.display_label) catch return error.OutOfMemory;
+        return .{
+            .title = title,
+            .body = body,
+            .display_label = label,
+            .route = .{
+                .host_id = decoded.host_id,
+                .runtime_id = decoded.runtime_id,
+                .event_id = decoded.event_id,
+                .occurred_at_ns = decoded.occurred_at_ns,
+            },
+        };
+    }
+
+    fn notificationProtocolFailure(self: *RemoteRuntime) client_mod.ClientError {
+        self.poisonConnection(.peer_contract_violation);
+        return error.ProtocolError;
+    }
+
+    const StableNotificationDecoded = struct {
+        host_id: u128,
+        runtime_id: u128,
+        event_id: u64,
+        occurred_at_ns: u64,
+        title: []const u8,
+        body: []const u8,
+        display_label: []const u8,
+    };
+
+    const StableDecodeError = error{ OutOfMemory, InvalidJson };
+
+    fn decodeStableNotificationPayload(allocator: std.mem.Allocator, resp: []const u8) StableDecodeError!?StableNotificationDecoded {
+        var scanner = std.json.Scanner.initCompleteInput(allocator, resp);
+        defer scanner.deinit();
+        if ((try stableToken(&scanner, allocator, protocol.max_control_json)) != .object_begin)
+            return error.InvalidJson;
+        const root_key = stableString(try stableToken(&scanner, allocator, protocol.max_control_json)) orelse
+            return error.InvalidJson;
+        if (std.mem.eql(u8, root_key, "error")) {
+            const code = stableString(try stableToken(&scanner, allocator, protocol.max_control_json)) orelse
+                return error.InvalidJson;
+            if (protocol.ErrorCode.fromWireName(code) == null or
+                (try stableToken(&scanner, allocator, protocol.max_control_json)) != .object_end or
+                (try stableToken(&scanner, allocator, protocol.max_control_json)) != .end_of_document)
+                return error.InvalidJson;
+            return null;
+        }
+        if (!std.mem.eql(u8, root_key, "event")) return error.InvalidJson;
+        const event_start = try stableToken(&scanner, allocator, protocol.max_control_json);
+        if (event_start == .null) {
+            if ((try stableToken(&scanner, allocator, protocol.max_control_json)) != .object_end or
+                (try stableToken(&scanner, allocator, protocol.max_control_json)) != .end_of_document)
+                return error.InvalidJson;
+            return null;
+        }
+        if (event_start != .object_begin) return error.InvalidJson;
+        var hid: ?[]const u8 = null;
+        var rid: ?[]const u8 = null;
+        var eid: ?u64 = null;
+        var occurred_at_ns: ?u64 = null;
+        var title: ?[]const u8 = null;
+        var body: ?[]const u8 = null;
+        var display_label: ?[]const u8 = null;
+        while (true) {
+            const key_token = try stableToken(&scanner, allocator, protocol.max_control_json);
+            if (key_token == .object_end) break;
+            const key = stableString(key_token) orelse return error.InvalidJson;
+            const value = try stableToken(&scanner, allocator, protocol.max_control_json);
+            if (std.mem.eql(u8, key, "hid")) {
+                if (hid != null) return error.InvalidJson;
+                hid = stableString(value) orelse return error.InvalidJson;
+            } else if (std.mem.eql(u8, key, "rid")) {
+                if (rid != null) return error.InvalidJson;
+                rid = stableString(value) orelse return error.InvalidJson;
+            } else if (std.mem.eql(u8, key, "eid")) {
+                if (eid != null) return error.InvalidJson;
+                eid = try stableU64(value);
+            } else if (std.mem.eql(u8, key, "occurred_at_ns")) {
+                if (occurred_at_ns != null) return error.InvalidJson;
+                occurred_at_ns = try stableU64(value);
+            } else if (std.mem.eql(u8, key, "title")) {
+                if (title != null) return error.InvalidJson;
+                title = stableString(value) orelse return error.InvalidJson;
+            } else if (std.mem.eql(u8, key, "body")) {
+                if (body != null) return error.InvalidJson;
+                body = stableString(value) orelse return error.InvalidJson;
+            } else if (std.mem.eql(u8, key, "display_label")) {
+                if (display_label != null) return error.InvalidJson;
+                display_label = stableString(value) orelse return error.InvalidJson;
+            } else return error.InvalidJson;
+        }
+        if ((try stableToken(&scanner, allocator, protocol.max_control_json)) != .object_end or
+            (try stableToken(&scanner, allocator, protocol.max_control_json)) != .end_of_document)
+            return error.InvalidJson;
+        const host_id = parseStableHex128(hid orelse return error.InvalidJson) orelse return error.InvalidJson;
+        const runtime_id = parseStableHex128(rid orelse return error.InvalidJson) orelse return error.InvalidJson;
+        const event_id = eid orelse return error.InvalidJson;
+        if (host_id == 0 or runtime_id == 0 or event_id == 0) return error.InvalidJson;
+        return .{
+            .host_id = host_id,
+            .runtime_id = runtime_id,
+            .event_id = event_id,
+            .occurred_at_ns = occurred_at_ns orelse return error.InvalidJson,
+            .title = title orelse return error.InvalidJson,
+            .body = body orelse return error.InvalidJson,
+            .display_label = display_label orelse return error.InvalidJson,
+        };
+    }
+
+    fn stableToken(scanner: *std.json.Scanner, allocator: std.mem.Allocator, max_len: usize) StableDecodeError!std.json.Token {
+        return scanner.nextAllocMax(allocator, .alloc_if_needed, max_len) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidJson,
+        };
+    }
+
+    fn stableString(token: std.json.Token) ?[]const u8 {
+        return switch (token) {
+            .string => |value| value,
+            .allocated_string => |value| value,
+            else => null,
+        };
+    }
+
+    fn stableU64(token: std.json.Token) StableDecodeError!u64 {
+        const value = switch (token) {
+            .number => |bytes| bytes,
+            .allocated_number => |bytes| bytes,
+            else => return error.InvalidJson,
+        };
+        return std.fmt.parseInt(u64, value, 10) catch error.InvalidJson;
+    }
+
+    fn parseStableHex128(text: []const u8) ?u128 {
+        if (text.len != 32) return null;
+        return std.fmt.parseInt(u128, text, 16) catch null;
     }
 
     /// `key` 뒤 `[...]` 배열의 **첫 4정수**를 `SelectionSpan`으로 파싱한다(§6c-2 현재 매치 `"cur":[sr,sc,er,ec]`). 4개 미만
@@ -6458,13 +6721,13 @@ pub const RemoteRuntime = struct {
         }
     }
 
-    /// strict RPC 응답 객체 하나. 값은 string(escape 해제)과 정수만 담는다 — 현재 응답 schema가 그 둘만 쓴다.
+    /// strict RPC 응답 객체 하나. 값은 string(escape 해제)·정수·bool만 담는다.
     /// 배열 값을 쓰는 응답(`runtime.find`의 span 목록)은 아직 전용 스캐너를 쓴다(§한계 — 확장하려면 여기 Value에 더한다).
     const StrictObject = struct {
         fields: []Field,
         allocator: std.mem.Allocator,
 
-        const Value = union(enum) { string: []u8, number: u64 };
+        const Value = union(enum) { string: []u8, number: u64, boolean: bool };
         const Field = struct { key: []u8, value: Value };
 
         fn deinit(self: StrictObject) void {
@@ -6472,7 +6735,7 @@ pub const RemoteRuntime = struct {
                 self.allocator.free(f.key);
                 switch (f.value) {
                     .string => |v| self.allocator.free(v),
-                    .number => {},
+                    .number, .boolean => {},
                 }
             }
             self.allocator.free(self.fields);
@@ -6483,7 +6746,7 @@ pub const RemoteRuntime = struct {
             for (self.fields) |f| {
                 if (std.mem.eql(u8, f.key, key)) return switch (f.value) {
                     .string => |v| v,
-                    .number => null,
+                    .number, .boolean => null,
                 };
             }
             return null;
@@ -6494,7 +6757,17 @@ pub const RemoteRuntime = struct {
             for (self.fields) |f| {
                 if (std.mem.eql(u8, f.key, key)) return switch (f.value) {
                     .number => |v| v,
-                    .string => null,
+                    .string, .boolean => null,
+                };
+            }
+            return null;
+        }
+
+        fn boolean(self: StrictObject, key: []const u8) ?bool {
+            for (self.fields) |f| {
+                if (std.mem.eql(u8, f.key, key)) return switch (f.value) {
+                    .boolean => |v| v,
+                    .string, .number => null,
                 };
             }
             return null;
@@ -6526,7 +6799,7 @@ pub const RemoteRuntime = struct {
                 allocator.free(f.key);
                 switch (f.value) {
                     .string => |v| allocator.free(v),
-                    .number => {},
+                    .number, .boolean => {},
                 }
             }
             fields.deinit(allocator);
@@ -6557,12 +6830,17 @@ pub const RemoteRuntime = struct {
             if (i >= json.len) return error.InvalidJson;
             const value: StrictObject.Value = if (json[i] == '"')
                 .{ .string = try decodeStrictJsonStringAt(allocator, json, &i) }
-            else
-                .{ .number = try decodeStrictJsonNumberAt(json, &i) };
+            else if (std.mem.startsWith(u8, json[i..], "true")) blk: {
+                i += 4;
+                break :blk .{ .boolean = true };
+            } else if (std.mem.startsWith(u8, json[i..], "false")) blk: {
+                i += 5;
+                break :blk .{ .boolean = false };
+            } else .{ .number = try decodeStrictJsonNumberAt(json, &i) };
             fields.append(allocator, .{ .key = key, .value = value }) catch {
                 switch (value) {
                     .string => |v| allocator.free(v),
-                    .number => {},
+                    .number, .boolean => {},
                 }
                 return error.OutOfMemory;
             };
@@ -7797,6 +8075,7 @@ fn buildSpawnParams(
     request: maru.pty.SpawnRequest,
     size: terminal.Size,
     initial_config: ?maru.session.core_command.RuntimeConfig,
+    notification: ?NotificationBootstrap,
 ) error{OutOfMemory}![]u8 {
     const argv = allocator.alloc([]const u8, 1 + request.args.len) catch return error.OutOfMemory;
     defer allocator.free(argv);
@@ -7843,6 +8122,7 @@ fn buildSpawnParams(
         .cols = size.cols,
         .rows = size.rows,
         .runtime_config = if (initial_config) |config| coreConfigToSpawnWire(config) else null,
+        .notification_config = notification,
     }) catch return error.OutOfMemory;
     return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
 }
@@ -7915,7 +8195,7 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
             .background = .{ .r = 0x01, .g = 0x02, .b = 0x03 },
         },
         .cell_metrics = .{ .width = 9, .height = 18 },
-    });
+    }, null);
     defer allocator.free(json);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"argv\":[\"/bin/zsh\",\"-l\",\"-c\",\"pwd\"]") != null);
@@ -14223,7 +14503,8 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
         .clipboard_write => "{\"b64\":\"\",\"too_large\":0}",
         .find => "{\"count\":0,\"spans\":[]}",
         .select_op => "{\"sel\":false}",
-        .notification => "{\"title\":\"\",\"body\":\"\"}",
+        .notification => "{\"event\":null}",
+        .notification_config_update => "{\"applied\":true}",
         .core_command, .report_mouse, .terminate, .detach => "{}",
         .spawn_full, .attach_controller, .attach_observer => unreachable,
     };
@@ -14244,6 +14525,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
     client.runtime_clipboard_v1 = true;
     client.runtime_core_command_v1 = true;
     client.notification_stream_auth_v1 = true;
+    client.notification_delivery_v1 = true;
     var adapter: host_adapter_mod.HostAdapter = undefined;
     var runtime: RemoteRuntime = undefined;
     try initGenerationRuntimeAggregateFixture(&runtime, &adapter, &client);
@@ -14282,6 +14564,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
             .mods = 0,
         }),
         .notification => if (try runtime.takeNotification()) |value| value.deinit(runtime.allocator),
+        .notification_config_update => try runtime.updateNotificationConfig(7, true, "workspace"),
         .terminate => runtime.terminate(),
         .detach => {
             runtime.admitDestructiveRuntimeOperation();
@@ -14331,6 +14614,10 @@ test "2c3e C2 제품 RPC family는 report mouse를 typed request로 실행한다
 
 test "2c3e C2 제품 RPC family는 notification을 typed request로 실행한다" {
     try runC2TypedFamilySocket(.notification);
+}
+
+test "P4 N2b1 제품 RPC family는 실행 중 notification config를 typed request로 실행한다" {
+    try runC2TypedFamilySocket(.notification_config_update);
 }
 
 test "2c3e C2 제품 RPC family는 terminate를 typed request로 실행한다" {
@@ -16871,7 +17158,7 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     try testing.expectError(error.RuntimeNotFound, bogus.attachExisting(&client, allocator, io, 2, bogus_id, .{ .cols = 40, .rows = 10 }));
 }
 
-test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notification (§6.32)" {
+test "P4 N2b1 product runtime pulls stable host OSC notification" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;
@@ -16907,7 +17194,11 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
     defer client.deinit();
 
     var rr: RemoteRuntime = undefined;
-    try rr.spawn(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 });
+    try rr.spawnWithConfigAndNotification(&client, allocator, io, 1, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, null, .{
+        .config_generation = 1,
+        .notifications_osc = true,
+        .display_label = "workspace",
+    });
     defer rr.deinit();
 
     // 처음엔 대기 알림 없음(fresh cat).
@@ -16932,6 +17223,38 @@ test "remote runtime: takeNotification pulls a host-side OSC 9/777 desktop notif
     // host의 TerminalCore가 파싱한 OSC 777 title/body가 client로 전달됐다(host-backed 터미널의 알림이 유실 안 됨).
     try testing.expectEqualStrings("Deploy", n.title);
     try testing.expectEqualStrings("done in 3s", n.body);
+    try testing.expectEqual(client.host_id, n.route.?.host_id);
+    try testing.expectEqualStrings("workspace", n.display_label.?);
+
+    // 실행 중 config off는 이후 core pending을 journal에 넣지 않는다. 같은 controller generation의 더 큰 config
+    // generation만 받아들이며, 이미 받은 첫 row에는 영향을 주지 않는다.
+    try rr.updateNotificationConfig(2, false, "workspace");
+    try rr.sendInput("\x1b]9;must stay hidden\x07\n");
+    attempts = 0;
+    while (attempts < 20) : (attempts += 1) {
+        if (try rr.takeNotification()) |unexpected| {
+            unexpected.deinit(allocator);
+            try testing.expect(false);
+        }
+        _ = usleep(20 * 1000);
+    }
+
+    // 다시 켠 뒤 바꾼 label은 다음 event에만 snapshot된다.
+    try rr.updateNotificationConfig(3, true, "renamed workspace");
+    try rr.sendInput("\x1b]777;notify;Deploy;second\x1b\\\n");
+    var second: ?Notification = null;
+    attempts = 0;
+    while (attempts < 100 and second == null) : (attempts += 1) {
+        second = try rr.takeNotification();
+        if (second == null) _ = usleep(20 * 1000);
+    }
+    const n2 = second orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer n2.deinit(allocator);
+    try testing.expectEqualStrings("second", n2.body);
+    try testing.expectEqualStrings("renamed workspace", n2.display_label.?);
 }
 
 // takeNotification의 수동 JSON 문자열 디코더(std.json.parseFromSlice의 f128 링크 회피). host의 std.json.Stringify escape를
@@ -17065,8 +17388,70 @@ test "remote runtime: notification selector follows negotiated stream auth capab
     var buf: [96]u8 = undefined;
     try testing.expectEqualStrings(
         "{\"stream_id\":7}",
-        try RemoteRuntime.notificationParams(&buf, 7),
+        try RemoteRuntime.notificationParams(&buf, 7, false),
     );
+    try testing.expectEqualStrings(
+        "{\"stream_id\":7,\"delivery_version\":1}",
+        try RemoteRuntime.notificationParams(&buf, 7, true),
+    );
+}
+
+test "P4 N2b1 stable notification response decodes exact route and owned presentation" {
+    const allocator = testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .notification_stream_auth_v1 = true,
+        .notification_delivery_v1 = true,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rt: RemoteRuntime = undefined;
+    try testing_api.initializeGenerationForConnection(&rt, .{ .legacy = &client });
+    rt.allocator = allocator;
+    const notification = (try rt.decodeNotificationResponse(
+        "{\"event\":{\"hid\":\"00000000000000000000000000000011\",\"rid\":\"00000000000000000000000000000022\",\"eid\":3,\"occurred_at_ns\":4,\"title\":\"Deploy\",\"body\":\"done\",\"display_label\":\"workspace\"}}",
+    )).?;
+    defer notification.deinit(allocator);
+    try testing.expectEqual(@as(u128, 0x11), notification.route.?.host_id);
+    try testing.expectEqual(@as(u128, 0x22), notification.route.?.runtime_id);
+    try testing.expectEqual(@as(u64, 3), notification.route.?.event_id);
+    try testing.expectEqualStrings("workspace", notification.display_label.?);
+    const reordered = (try rt.decodeNotificationResponse(
+        "{\"event\":{\"body\":\"done\",\"rid\":\"00000000000000000000000000000022\",\"display_label\":\"workspace\",\"title\":\"Deploy\",\"occurred_at_ns\":4,\"eid\":3,\"hid\":\"00000000000000000000000000000011\"}}",
+    )).?;
+    defer reordered.deinit(allocator);
+    try testing.expectEqual(@as(u128, 0x11), reordered.route.?.host_id);
+    try testing.expect((try rt.decodeNotificationResponse("{\"event\":null}")) == null);
+}
+
+test "P4 N2b1 stable notification response preserves OOM and connection reuse" {
+    const Runner = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var client = client_mod.Client{
+                .allocator = allocator,
+                .fd = -1,
+                .host_id = 1,
+                .notification_stream_auth_v1 = true,
+                .notification_delivery_v1 = true,
+                .parser = framing.FrameParser.init(allocator),
+            };
+            defer client.deinit();
+            var rt: RemoteRuntime = undefined;
+            try testing_api.initializeGenerationForConnection(&rt, .{ .legacy = &client });
+            rt.allocator = allocator;
+            const notification = (rt.decodeNotificationResponse(
+                "{\"event\":{\"body\":\"done\",\"rid\":\"00000000000000000000000000000022\",\"display_label\":\"workspace\",\"title\":\"Deploy\",\"occurred_at_ns\":4,\"eid\":3,\"hid\":\"00000000000000000000000000000011\"}}",
+            ) catch |err| {
+                if (err != error.OutOfMemory) return err;
+                try testing.expect(!client.unusable);
+                return err;
+            }).?;
+            notification.deinit(allocator);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Runner.run, .{});
 }
 
 test "remote runtime: notification decode는 모든 할당 실패 지점에서 소유 메모리를 회수한다" {

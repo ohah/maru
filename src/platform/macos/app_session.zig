@@ -6534,7 +6534,10 @@ pub const AppSession = struct {
         // 죽은 뒤**(createTerm이 연결사로 감지해 세움, #3)에도 새 Term은 in-process로 연다. 기존 host-backed Term의 close/remove
         // 라우팅은 `backendFor`(게이트 없음)가 여전히 공유 backend로 보낸다(client-side 회수는 host 없어도 됨).
         if (is_macos and !host_connect_failed) {
-            if (app_remote_backend) |*rb| return rb.backend();
+            if (app_remote_backend) |*rb| {
+                rb.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
+                return rb.backend();
+            }
         }
         return term_ops.termBackend(self);
     }
@@ -6662,6 +6665,9 @@ pub const AppSession = struct {
                 self.markHostConnectFailedReason(.adapter, .resource_exhausted);
                 return;
             }
+            // backend가 runtime을 받기 전에 현재 app config 완전본을 심는다. restore-only 앱과 달리 current-first도
+            // 첫 spawn의 PTY reader publication 전에 같은 값이 들어가야 한다.
+            app_remote_backend.?.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
         }
     }
 
@@ -7040,6 +7046,9 @@ pub const AppSession = struct {
             if (!claimInstalledRemoteBackend(created_pool, wanted_host_id)) {
                 return .unavailable;
             }
+            // 새 GUI process의 backend 기본값(false)을 이전 daemon runtime에 재사용하면 사용자 설정 true가 새 Term을
+            // 만들 때까지 사라진다. attachTermOnHost가 map publication 전에 이 현재값을 보내도록 먼저 초기화한다.
+            app_remote_backend.?.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
             // attach-only pool은 과거 runtime 복원만 가능하고 새 runtime spawn owner가 아니다. 이를 current backend처럼
             // 보이면 launch recovery 직후 default surface/new tab이 SpawnHostUnavailable로 막힌다. 새 셸은 명시적으로
             // in-process fallback을 택하고, recovered runtime attach는 위 pool을 계속 사용한다.
@@ -15216,6 +15225,27 @@ pub const AppSession = struct {
         }
     }
 
+    /// host-backed runtime의 daemon-owned 표시 라벨을 현재 workspace/Term binding과 맞춘다. notificationLocation이
+    /// foreground GUI 알림과 같은 `workspace › term` 해석 SSOT이고, backend가 동일 값·256-byte UTF-8 상한·generation을
+    /// 소유한다. 매 tick 비교는 값이 같으면 RPC 0이며, attach/restore/rename/OSC title 변경을 별도 호출처 없이 모두 덮는다.
+    fn syncRemoteNotificationBindings(self: *AppSession) void {
+        if (!is_macos) return;
+        const rb = if (app_remote_backend) |*backend| backend else return;
+        // multi-runtime 전파/보상의 일부가 실패했으면 configureNotifications가 해당 entry를 retryable 0으로 남긴다.
+        // 프레임 owner가 설정 완전본도 먼저 재시도한 뒤 각 binding label을 맞춰 eventual convergence를 보장한다.
+        rb.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (!term.rt.live_initialized or term.surface.remote == null) continue;
+                    var label_buf: [notification_location_buf_len]u8 = undefined;
+                    const display_label = notificationLocation(&label_buf, tab, term);
+                    rb.configureNotificationBinding(term.surface.id, display_label) catch {};
+                }
+            }
+        }
+    }
+
     /// synchronized output(2026) 게이트의 tick별 상태를 sync_diag(.sync)로 한 줄 찍는다(MARU_DEBUG 관측 전용, release는
     /// 첫 게이트에서 즉시 return). 노이즈를 줄이려 **sync 에피소드 중이거나 ESU가 바뀐 tick 또는 사이드바 전용 투영(cproj)
     /// tick만** emit한다(idle 정적 화면은 안 찍음). 필드: active=활성 surface sync_output, hold=sync_hold_ticks/timeout,
@@ -15665,6 +15695,7 @@ pub const AppSession = struct {
         self.runFramePreHousekeeping();
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
         self.syncAutoTitles(); // 라벨용 자동 제목 캐시 갱신(core_mutex 하 owned 복사 — termLabel use-after-free 회피)
+        self.syncRemoteNotificationBindings(); // host snapshot label = 현재 workspace/Term binding(동일 값이면 RPC 0)
         sidebar_ops.reprojectSidebarIfRowLinesStale(self); // 관측·cwd·활성 Term 변화로 행 줄 수가 바뀌었으면 재투영(아래 주석)
         if (ft_on) ft_titles = std.Io.Clock.awake.now(self.io).nanoseconds; // titles(syncAutoTitles=전체 코어 lock) 끝
         // 모든 탭의 모든 panel의 모든 Term PTY를 drain한다 — 백그라운드 탭/panel/탭(Term)도 출력을 받게

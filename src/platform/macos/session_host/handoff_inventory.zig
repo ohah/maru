@@ -664,7 +664,7 @@ pub const live_pty_session_groups = [_]Group{
 pub const runtime_manager_groups = [_]Group{
     .{
         .disposition = .serialized,
-        .fields = &.{ "next_handle", "notification_journal", "notification_permanent_drops" },
+        .fields = &.{ "next_handle", "notification_journal", "notification_metadata", "notification_permanent_drops" },
         .why = "restored handles must not collide with a handle issued before exec; host-lifetime notification IDs, pending delivery bits, and bounded drop evidence cannot reset at the exec boundary",
     },
     .{

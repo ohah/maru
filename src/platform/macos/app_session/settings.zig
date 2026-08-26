@@ -622,6 +622,18 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
         const f = cf.bools[sel];
         const new_value = !f.value;
         if (config_mod.schema.setBool(&self.loaded_config.config, f.key, new_value)) {
+            // daemon-owned notification snapshot 갱신이 실패했는데 GUI 값만 저장하면 이후 GUI 0에서도 host가 이전
+            // 정책으로 동작한다. 따라서 live runtime 전부가 새 generation을 확인하기 전에는 config commit을 열지 않고,
+            // 실패 시 이전 값으로 보상 갱신한 뒤 UI/config도 되돌린다.
+            if (isDesktopNotificationSettingKey(f.key) and app_session_mod.is_macos) {
+                if (app_session_mod.app_remote_backend) |*rb| {
+                    rb.configureNotifications(new_value) catch {
+                        _ = rb.configureNotifications(f.value) catch {};
+                        _ = config_mod.schema.setBool(&self.loaded_config.config, f.key, f.value);
+                        return;
+                    };
+                }
+            }
             // **전역을 config 갱신 직후, 재적용 전에 세운다.** keep-alive 는 앱 전역이 정본이고
             // `loaded_config.config` 는 창마다의 미러다. 재적용 경로가 그 미러를 전역에서 되동기화하므로
             // (`currentSectionFields` 의 첫 문장), 전역을 나중에 세우면 **방금 쓴 새 값이 옛 전역으로

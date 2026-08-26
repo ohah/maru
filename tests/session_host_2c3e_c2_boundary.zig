@@ -2,7 +2,7 @@ const std = @import("std");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "2c3e C2 경계는 열두 제품 RPC family를 typed decoder 경로로만 실행한다" {
+test "2c3e C2 경계는 열세 제품 RPC family를 typed decoder 경로로만 실행한다" {
     const allocator = std.testing.allocator;
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime);
@@ -23,12 +23,13 @@ test "2c3e C2 경계는 열두 제품 RPC family를 typed decoder 경로로만 �
         .{ .start = "pub fn find(", .end = "fn applyFindResponse(", .constructor = "RuntimeRequest.find(", .call = "self.callDecoded(" },
         .{ .start = "pub fn selectContentAware(", .end = "fn applySelectResponse(", .constructor = "RuntimeRequest.selectOp(", .call = "self.callDecoded(" },
         .{ .start = "pub fn sendCoreCommandBlocking(", .end = "pub fn sendMouseReport(", .constructor = "RuntimeRequest.coreCommand(", .call = "self.callDecoded(" },
-        .{ .start = "pub fn sendMouseReport(", .end = "pub fn takeNotification(", .constructor = "RuntimeRequest.reportMouse(", .call = "self.callDecoded(" },
+        .{ .start = "pub fn sendMouseReport(", .end = "pub fn updateNotificationConfig(", .constructor = "RuntimeRequest.reportMouse(", .call = "self.callDecoded(" },
+        .{ .start = "pub fn updateNotificationConfig(", .end = "fn applyNotificationConfigUpdateResponse(", .constructor = "RuntimeRequest.notificationConfigUpdate(", .call = "self.callDecoded(" },
         .{ .start = "pub fn takeNotification(", .end = "fn applyNotificationResponse(", .constructor = "RuntimeRequest.notification()", .call = "self.callDecoded(" },
         .{ .start = "fn terminateBestEffort(", .end = "fn detachBestEffort(", .constructor = "RuntimeRequest.terminate()", .call = "self.callDecodedAfterFlush(" },
         .{ .start = "fn detachBestEffort(", .end = "fn failCloseTeardownFlush(", .constructor = "RuntimeRequest.detach()", .call = "self.callDecodedAfterFlush(" },
     };
-    try std.testing.expectEqual(@as(usize, 12), rows.len);
+    try std.testing.expectEqual(@as(usize, 13), rows.len);
     for (rows) |row| {
         const body = between(runtime, row.start, row.end) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(usize, 1), count(body, row.constructor));

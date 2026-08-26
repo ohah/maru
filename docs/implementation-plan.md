@@ -1300,6 +1300,31 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    same-PID outer optional handoff는 row/ID/delivery bit/drop counter를 보존하고 capture 뒤 mutation을 semantic digest로
    fail-close한다. config/label control과 daemon-internal macOS sink는 N2b, cold-launch route는 N3가 소유한다.
 
+   **P4 N2b notification delivery:** N2a 다음을 세 owner slice로 닫는다. N2b1은 additive
+   `notification_delivery_v1` capability 아래 runtime 생성 시의 완전한 notification metadata snapshot과 exact controller
+   `config.update`를 제품 wire에 연결한다. update는 `{stream_id, expected_controller_generation, config_generation,
+   notifications_osc, display_label}` 다섯 필드를 정확히 요구하며, 같은 controller generation에서는
+   `config_generation`이 strictly increasing이어야 한다. controller generation이 바뀐 경우에만 새 controller의 nonzero
+   generation 축으로 교체한다. observer·legacy·미지 필드·stale controller·cross-runtime 요청은 allocator/core/journal
+   mutation 0이다. spawn authority의 초기 snapshot은 PTY reader publication 전에 설치하고, snapshot이 없거나 capability가
+   없으면 `notifications_osc=false`와 runtime-ID label fallback으로 fail-closed한다. N2b1의 새 GUI
+   `runtime.notification` 요청은 capability 확인 뒤 exact `{stream_id,delivery_version:1}`로 opt-in하고 응답은 exact
+   `{event:null|{hid,rid,eid,occurred_at_ns,title,body,display_label}}`이다. 기존 `{stream_id}` 또는 `runtime_id` 요청에는
+   `{title,body}` adapter를 유지한다. 두 경로 모두 response control queue admission 뒤 같은 stable key의
+   `.gui` bit만 ack한다. **N2b1 구현 완료:** GUI frame owner가 기존 `notificationLocation` SSOT로 현재
+   `workspace › term` binding label을 동기화하고, restore attach는 map publication 전에 현재 config 완전본과 runtime-ID
+   fallback을 재설치한다. typed HostAdapter canonical encoder도 협상 capability에 따라 exact `delivery_version:1`을
+   주입한다. multi-runtime config 전파/보상 중 실패한 entry는 미적용으로 남겨 frame binding 완전본이 재수렴시킨다. 실제
+   daemon/socket/PTY detach→재attach gate가 이 제품 경로를 Debug·ReleaseFast에서 고정한다.
+
+   N2b2는 daemon owner 안의 bounded OS delivery machine과 macOS adapter를 연결한다. adapter 입력은 borrowed presentation
+   text와 typed `{hid,rid,eid}`뿐이며 MRSH client나 AppSession을 만들지 않는다. `accepted` 뒤에만 `.os` bit를 ack하고,
+   `denied`/bundle·entitlement 부재는 row를 재요청하지 않는 degraded terminal 결과로 기록하며, transient 실패는 같은 key를
+   250ms에서 시작해 최대 8초인 지수 backoff로 최대 6회 재시도한다. retry state는 row 하나만 final-address로 pin하고 다른
+   runtime의 admission·GUI delivery를 막지 않는다. N2b3는 host-backed GUI history와 Swift OS request identifier/userInfo에
+   같은 stable key를 투영해 daemon/GUI 동시 제출도 Notification Center에서 같은 request를 replace하도록 한다. GUI는
+   `.os` bit를 내리지 않는다. N3는 그 route의 response를 cold-launch exact attach로 소비하는 별도 slice다.
+
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라

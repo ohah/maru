@@ -1269,6 +1269,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "notification_delivery_v1" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "catchup_barrier_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "BufferedCatchupBarrier" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "writeProjectionCatchupBarriers" },
@@ -1576,6 +1577,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "encodeGenerationRequestParamsWithCapabilities" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "catchup_barrier_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_deadline" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "DeadlineGenerationExecuteError" },
@@ -2854,6 +2856,7 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         .{ .name = "screen_viewport_scrolled_v1", .count = 1 },
         .{ .name = "async_scroll_to_bottom_v1", .count = 2 },
         .{ .name = "notification_stream_auth_v1", .count = 1 },
+        .{ .name = "notification_delivery_v1", .count = 2 },
         .{ .name = "runtime_clipboard_v1", .count = 1 },
         .{ .name = "runtime_core_command_v1", .count = 6 },
         .{ .name = "runtime_clear_screen_v1", .count = 3 },
@@ -8026,8 +8029,12 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         countIdentifierOutsideTopLevelTests(backend, "logicalClient"),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 0),
         countOccurrences(backend, "try rr.spawnWithAdapter("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(backend, "try rr.spawnWithAdapterAndNotification("),
     );
     try std.testing.expectEqual(
         @as(usize, 1),

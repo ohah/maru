@@ -3422,6 +3422,76 @@ pub fn build(b: *std.Build) void {
         run_admission_handoff_tests.addArg("--maru-expect-tests=3");
         session_host_notification_admission_step.dependOn(&run_admission_handoff_tests.step);
     }
+    const session_host_notification_delivery_step = b.step(
+        "test-session-host-notification-delivery",
+        "Verify P4 N2b notification metadata and delivery",
+    );
+    session_host_notification_delivery_step.dependOn(session_host_notification_admission_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |delivery_optimize| {
+        const notification_delivery_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/notification_delivery.zig"),
+            .target = target,
+            .optimize = delivery_optimize,
+        });
+        const delivery_red_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_delivery_red.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .imports = &.{.{ .name = "notification_delivery", .module = notification_delivery_mod }},
+            }),
+            .filters = &.{"P4 N2b1 notification metadata"},
+        });
+        const run_delivery_red_tests = b.addRunArtifact(delivery_red_tests);
+        run_delivery_red_tests.addArg("--maru-expect-tests=6");
+        session_host_notification_delivery_step.dependOn(&run_delivery_red_tests.step);
+
+        const delivery_server_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 N2b1 config.update"},
+        });
+        const run_delivery_server_tests = b.addRunArtifact(delivery_server_tests);
+        run_delivery_server_tests.addArg("--maru-expect-tests=1");
+        session_host_notification_delivery_step.dependOn(&run_delivery_server_tests.step);
+
+        const delivery_remote_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "P4 N2b1 stable notification response",
+                "P4 N2b1 product runtime pulls stable",
+                "P4 N2b1 제품 RPC family는 실행 중 notification config",
+                "2c3e C2 제품 RPC family는 notification을 typed request",
+            },
+        });
+        const run_delivery_remote_tests = b.addRunArtifact(delivery_remote_tests);
+        run_delivery_remote_tests.addArg("--maru-expect-tests=5");
+        session_host_notification_delivery_step.dependOn(&run_delivery_remote_tests.step);
+
+        const delivery_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 N2b1 remote backend binding"},
+        });
+        const run_delivery_backend_tests = b.addRunArtifact(delivery_backend_tests);
+        run_delivery_backend_tests.addArg("--maru-expect-tests=2");
+        session_host_notification_delivery_step.dependOn(&run_delivery_backend_tests.step);
+    }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

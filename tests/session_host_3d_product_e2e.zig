@@ -41,13 +41,20 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     try mkdirExact(xdg);
     var xdg_exists = true;
     defer if (xdg_exists) removeTree(xdg);
+    // base 를 **이 프로세스의 격리 root** 로 통일한다. registry(`{base}/session-host`)·socket(`{base}/sh`)·
+    // 자식에게 넘기는 `MARU_SESSION_HOST_ROOT` 가 한 뿌리를 봐야 attach 가 성립한다 — 뿌리가 갈리면
+    // 자식이 bind 한 socket 을 부모가 못 찾아 `P5C3D_READY` 마커 전에 죽는다.
+    //
+    // 예전에는 `{xdg}/maru` 를 썼는데, 그때는 socket 이 uid 로 고정이라 registry 만 옮겨지고 socket 은
+    // 사용자의 공용 `/tmp/maru-<uid>/sh` 로 새어 나갔다. 아래 host_id 의 `0x5035633364707479`("P5c3dpty")
+    // 가 실제로 사용자 registry 에서 발견된 가짜 항목의 정체다.
     var base_buf: [320]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/maru", .{xdg});
-    try mkdirExact(base);
+    const base = try session_host.short_endpoint.currentUserRootPathIn(&base_buf);
+    try session_host.short_endpoint.prepareCurrentUserNamespace();
     var session_buf: [384]u8 = undefined;
     const session_dir = try session_host.discovery.sessionHostDirPath(&session_buf, base);
-    try mkdirExact(session_dir);
-    try session_host.short_endpoint.prepareCurrentUserNamespace();
+    // 격리 root 는 **이 프로세스 공용**이라 앞선 테스트가 이미 만들어 뒀을 수 있다. 존재를 실패로 보지 않는다.
+    if (c.mkdir(session_dir.ptr, 0o700) != 0 and std.posix.errno(-1) != .EXIST) return error.MkdirFailed;
 
     const host_id: u128 = (@as(u128, nonce) << 64) | 0x5035633364707479;
     var socket_buf: [128]u8 = undefined;

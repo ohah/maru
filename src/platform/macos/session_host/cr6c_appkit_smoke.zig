@@ -94,8 +94,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try short_endpoint.prepareCurrentUserNamespace();
-    var base_buf: [96]u8 = undefined;
-    const base = try short_endpoint.userRootPathIn(&base_buf, std.c.getuid());
+    // 바로 위 `prepareCurrentUserNamespace` 가 준비한 **그 뿌리**를 쓴다. uid 로 다시 계산하면 준비한 자리와
+    // 갈려, 격리를 켠 실행에서 사용자의 공용 registry 를 건드리게 된다.
+    var base_buf: [256]u8 = undefined;
+    const base = try short_endpoint.currentUserRootPathIn(&base_buf);
     var dir_buf: [192]u8 = undefined;
     const session_dir = try discovery.sessionHostDirPath(&dir_buf, base);
     const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0xC6C0_A77C_17A0_0001;

@@ -24,6 +24,27 @@ var log_err_count: std.atomic.Value(usize) = .init(0);
 var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// 이 test 프로세스와 **그 자식들**이 사용자의 공용 session-host registry 를 절대 건드리지 않게 한다.
+///
+/// 왜 runner 인가. 격리를 라이브러리 기본값(`builtin.is_test`)만으로 하면 test 프로세스 자신만 옮겨가고,
+/// test 가 spawn 하는 **제품 바이너리**(`MARU_SESSION_HOST_PRODUCT_EXE` 계열)는 `is_test` 가 false 라
+/// 다시 `/tmp/maru-<uid>` 로 돌아간다. 환경변수는 fork/exec 로 상속되므로 여기서 한 번 심으면 그 자식까지
+/// 함께 옮겨간다(`launcher.clearSessionHostTestEnvironment` 도 이 이름은 지우지 않는다).
+///
+/// 실측 배경(2026-08-27): `test-session-host` 와 `test-macos-app-host-abi` 가 사용자의 `/tmp/maru-501/sh`
+/// 에 가짜 host socket 을 남겼고, 그 가짜가 `maru host status` 를 ambiguous 로 만들어 **실행 중인 앱이
+/// 복구 세션을 adopt 하지 못하고 크래시 로그도 없이 종료**됐다. 두 번 반복된 사고다.
+///
+/// `overwrite=0` 이라 이미 값을 정한 실행(전용 격리 하니스)은 그대로 존중한다. 실패는 무시한다 — 격리는
+/// 라이브러리 기본값이 한 번 더 받치고 있고, runner 가 여기서 죽으면 테스트 자체를 못 돌린다.
+fn isolateSessionHostRoot() void {
+    var buf: [64]u8 = undefined;
+    const root = std.fmt.bufPrintZ(&buf, "/tmp/maru-t{d}", .{std.c.getpid()}) catch return;
+    _ = setenv("MARU_SESSION_HOST_ROOT", root.ptr, 0);
+}
+
 fn optionValue(args: std.process.Args, prefix: []const u8) ?usize {
     // windows/wasi는 인자 이터레이션 모델이 달라 이 옵션을 읽지 않는다. `comptime if (...) return null;`로 쓰면
     // 조건이 참인 타깃(=windows)에서 "comptime에 return 불가"로 **컴파일이 깨진다** — macOS에선 조건이 거짓이라
@@ -57,6 +78,8 @@ fn expectedPassedCount(args: std.process.Args) ?usize {
 
 pub fn main(init: std.process.Init.Minimal) void {
     @disableInstrumentation();
+
+    isolateSessionHostRoot();
 
     comptime if (builtin.fuzz) {
         @compileError("Maru's simple test runner does not support Zig fuzz mode; add a server-mode fuzz gate first");

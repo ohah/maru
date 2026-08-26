@@ -3287,8 +3287,7 @@ test "runtime manager: host selection scroll-and-extend is fenced before authori
         .authoritative = true,
     }, allocator);
     defer allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "L") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
+    try std.testing.expectEqualStrings("{\"text\":\"L24\\nL25\\nL26\\nL27\\nL28\\nL29\\n\"}", body);
 }
 
 test "runtime manager: focus report is written back to the real PTY by the host reader" {
@@ -3351,6 +3350,73 @@ test "runtime manager: focus report is written back to the real PTY by the host 
         if (!saw_ordered_bytes) _ = usleep(10 * 1000);
     }
     try std.testing.expect(saw_ordered_bytes);
+}
+
+test "P4 input parity: host reader writes DECSET 1003 motion to the real PTY" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
+    const proc_cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    const result_path = try std.fs.path.join(allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path, "motion.hex" });
+    defer allocator.free(result_path);
+    const script = try std.fmt.allocPrint(
+        allocator,
+        "stty raw -echo; printf '\\033[?1003h\\033[?1006h'; dd bs=1 count=10 2>/dev/null | od -An -tx1 | tr -d ' \\n' > '{s}'",
+        .{result_path},
+    );
+    defer allocator.free(script);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cwd = null, .cols = 40, .rows = 10 });
+    defer ops.terminate(ops.ctx, rid);
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    var ready = false;
+    var attempts: usize = 0;
+    while (attempts < 200 and !ready) : (attempts += 1) {
+        surface.lockCore(std.testing.io);
+        ready = surface.core.mouse_tracking == .any and surface.core.mouse_format == .sgr;
+        surface.unlockCore(std.testing.io);
+        if (!ready) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(ready);
+
+    // AppSession의 0-based cell `(4,2)`와 no-button 3을 그대로 보낸다. host core만 현재
+    // DECSET/format을 알고 있으므로 reader가 `Cb=3+32`, 1-based 좌표로 인코딩해야 한다.
+    try ops.report_mouse(ops.ctx, rid, .{
+        .button = 3,
+        .col = 4,
+        .row = 2,
+        .x_px = 0,
+        .y_px = 0,
+        .pressed = true,
+        .motion = true,
+        .mods = 0,
+    });
+
+    var saw_motion = false;
+    attempts = 0;
+    while (attempts < 200 and !saw_motion) : (attempts += 1) {
+        const result = tmp.dir.readFileAlloc(std.testing.io, "motion.hex", allocator, .limited(4096)) catch null;
+        if (result) |bytes| {
+            // ESC [ < 35 ; 5 ; 3 M == xterm SGR no-button motion at cell (4,2).
+            saw_motion = std.mem.eql(u8, bytes, "1b5b3c33353b353b334d");
+            allocator.free(bytes);
+        }
+        if (!saw_motion) _ = usleep(10 * 1000);
+    }
+    try std.testing.expect(saw_motion);
 }
 
 test "runtime manager: clear and reset commands reach the authoritative host reader" {

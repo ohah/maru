@@ -3261,6 +3261,69 @@ pub fn build(b: *std.Build) void {
     run_session_host_e2c_boundary_tests.setCwd(b.path("."));
     session_host_e2c_step.dependOn(&run_session_host_e2c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e2c_boundary_tests.step);
+    const session_host_input_parity_step = b.step(
+        "test-session-host-input-parity",
+        "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",
+    );
+    session_host_input_parity_step.dependOn(session_host_e2c_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |input_parity_optimize| {
+        const input_parity_app_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = input_parity_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"host-backed motion 리포팅"},
+        });
+        input_parity_app_tests.root_module.linkFramework("AppKit", .{});
+        input_parity_app_tests.root_module.linkFramework("Metal", .{});
+        input_parity_app_tests.root_module.linkFramework("MetalKit", .{});
+        input_parity_app_tests.root_module.linkFramework("QuartzCore", .{});
+        input_parity_app_tests.root_module.linkFramework("CoreText", .{});
+        input_parity_app_tests.root_module.linkFramework("CoreGraphics", .{});
+        input_parity_app_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_input_parity_app_tests = b.addRunArtifact(input_parity_app_tests);
+        // app_session root의 세 무명 sentinel과 1003 관측 게이트 한 행.
+        run_input_parity_app_tests.addArg("--maru-expect-tests=4");
+        run_input_parity_app_tests.setCwd(b.path("."));
+        session_host_input_parity_step.dependOn(&run_input_parity_app_tests.step);
+
+        const input_parity_host_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = input_parity_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "P4 input parity: host reader writes DECSET 1003 motion to the real PTY",
+                "runtime manager: host selection scroll-and-extend is fenced before authoritative copy",
+            },
+        });
+        const run_input_parity_host_tests = b.addRunArtifact(input_parity_host_tests);
+        run_input_parity_host_tests.addArg("--maru-expect-tests=2");
+        run_input_parity_host_tests.setCwd(b.path("."));
+        session_host_input_parity_step.dependOn(&run_input_parity_host_tests.step);
+
+        const input_parity_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_input_parity_boundary.zig"),
+                .target = target,
+                .optimize = input_parity_optimize,
+            }),
+            .filters = &.{"P4 input parity 경계는"},
+        });
+        const run_input_parity_boundary_tests = b.addRunArtifact(input_parity_boundary_tests);
+        run_input_parity_boundary_tests.addArg("--maru-expect-tests=1");
+        run_input_parity_boundary_tests.setCwd(b.path("."));
+        session_host_input_parity_step.dependOn(&run_input_parity_boundary_tests.step);
+        boundary_step.dependOn(&run_input_parity_boundary_tests.step);
+    }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_budget_validator.zig"),

@@ -23,23 +23,63 @@ const std = @import("std");
 
 const loop_marker = "while ((max_spins == null or spins < max_spins.?)";
 
+/// 이 줄이 **스핀 번호와 견주는가**. 이름이 나오는 것만으로는 부족하다 — 증가문·주석·판정
+/// 출력에도 그 이름이 나온다.
+fn hasSpinComparison(line: []const u8) bool {
+    for ([_][]const u8{ "spins ==", "spins >=", "spins <=", "spins >", "spins <" }) |needle| {
+        if (std.mem.indexOf(u8, line, needle) != null) return true;
+    }
+    return false;
+}
+
 test "합성 앱 루프의 스핀 단계는 전부 smoke 로 갈린다" {
     const source = @embedFile("main_source");
+    // 루프가 끝나는 자리 — 그 뒤는 판정 출력이라 각본이 아니다.
+    const end_marker = "try stdout.writeAll(\"maru.win32-terminal-smoke.v1";
     const loop_at = std.mem.indexOf(u8, source, loop_marker) orelse {
         // 루프 모양이 바뀌면 **조용히 통과하지 않는다** — 이 게이트가 무엇을 보는지 잃어버린다.
         std.debug.print("합성 앱 루프를 못 찾았다: 이 게이트의 표지(`{s}`)가 바뀌었다\n", .{loop_marker});
         return error.LoopMarkerMissing;
     };
 
+    const end_at = std.mem.indexOf(u8, source, end_marker) orelse {
+        std.debug.print("루프의 끝 표지를 못 찾았다: {s}\n", .{end_marker});
+        return error.EndMarkerMissing;
+    };
     var violations: usize = 0;
     var line_no: usize = 1;
     var i: usize = 0;
+    var prev: []const u8 = "";
+
     var it = std.mem.splitScalar(u8, source, '\n');
     while (it.next()) |line| : (line_no += 1) {
-        defer i += line.len + 1;
+        defer {
+            i += line.len + 1;
+            prev = line;
+        }
         if (i < loop_at) continue;
+        // **루프 안에서만 본다.** 파일 끝까지 훑었더니 뒤에 있는 다른 함수의 `while (spins < 32)`
+        // 를 각본으로 잡았다(실측: `pumpForIntent`). 중괄호 깊이로 루프의 끝을 찾는다 — 형식
+        // 문자열의 `{d}` 는 여닫이가 짝이라 셈에 영향이 없다.
+        // **루프의 끝은 표지로 잡는다.** 처음에는 중괄호를 셌는데 **후반부를 통째로 놓쳤다**
+        // (실측 2026-08-26: 4626 은 잡고 4889 는 안 잡혔다 — 깊이가 어딘가에서 일찍 0 이 됐다).
+        // 문자열·문자 리터럴 안의 중괄호를 세지 않으려면 렉서가 필요한데, 이 게이트가 하려는 일에
+        // 비해 과하다. 루프 **바로 뒤에 오는 줄**을 끝으로 삼으면 그 문제가 사라진다.
+        if (i >= end_at) break;
         const trimmed = std.mem.trimStart(u8, line, " ");
-        if (!std.mem.startsWith(u8, trimmed, "if (spins ")) continue;
+        // 주석은 안 본다 — 이 게이트를 설명하는 줄에도 `spins` 가 나온다.
+        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        // 루프 머리와 증가문은 각본이 아니다.
+        if (std.mem.indexOf(u8, trimmed, loop_marker) != null) continue;
+        if (std.mem.startsWith(u8, trimmed, "spins +=")) continue;
+        // **비교 자체를 본다 — 줄 앞을 보지 않는다.** 앞을 보면 `if (titlebar_px != 0 and spins == 490)`
+        // 처럼 **조건 순서만 바꿔도 통째로 새어 나간다**(실측 2026-08-26: 그 모양이 이 게이트를
+        // 그냥 지나갔다). 각본은 스핀 번호와 견주는 것이 본질이므로 그 비교를 표지로 삼는다.
+        if (!hasSpinComparison(trimmed)) continue;
+        // 같은 줄이나 **바로 앞 줄**에 `smoke` 가 있으면 갈린 것이다 — 조건이 길면 `zig fmt` 가
+        // 두 줄로 접는다.
+        if (std.mem.indexOf(u8, trimmed, "smoke") != null) continue;
+        if (std.mem.indexOf(u8, prev, "smoke") != null) continue;
         violations += 1;
         std.debug.print("src/main.zig:{d}: 스핀 단계가 `smoke` 로 안 갈렸다 — 제품 실행이 이 각본을 따라 한다\n", .{line_no});
     }

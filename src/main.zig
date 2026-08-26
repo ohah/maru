@@ -225,6 +225,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "incidents")) {
+        try runIncidentsCli(io, allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "host")) {
         try runPersistentReadCli(io, allocator, &args, stdout, stderr, .host);
         return;
@@ -6955,6 +6960,49 @@ fn runPersistentReadCli(
                 return persistentCliExit(stdout, stderr, .unsupported);
             }
             return session_host_admin_cli.runRequest(io, allocator, request, stdout, stderr);
+        },
+    }
+}
+
+fn runIncidentsCli(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const incidents_cli = maru.cli.incidents;
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (collected.items) |item| allocator.free(item);
+        collected.deinit(allocator);
+    }
+    while (args.next()) |arg| try collected.append(allocator, try allocator.dupe(u8, arg));
+
+    const parsed = incidents_cli.parse(collected.items) catch {
+        try stderr.writeAll(incidents_cli.help);
+        return persistentCliExit(stdout, stderr, .usage);
+    };
+    switch (parsed) {
+        .help => {
+            try stdout.writeAll(incidents_cli.help);
+            try stdout.flush();
+            return;
+        },
+        .list => |request| {
+            // artifact 는 HOME 아래 고정 경로에 있다. 살아 있는 인스턴스를 찾지 않는 것이 이 명령의 요점이라
+            // 컨트롤 소켓도 host registry 도 건드리지 않는다.
+            const home = maru.os_env.allocValue(allocator, "HOME") orelse {
+                try stderr.writeAll("maru: HOME is not set\n");
+                return persistentCliExit(stdout, stderr, .usage);
+            };
+            defer allocator.free(home);
+            const xdg_cache_home = maru.os_env.allocValue(allocator, "XDG_CACHE_HOME");
+            defer if (xdg_cache_home) |value| allocator.free(value);
+            const localappdata = maru.os_env.allocValue(allocator, "LOCALAPPDATA");
+            defer if (localappdata) |value| allocator.free(value);
+            const cache_base = maru.user_paths.cacheBaseFor(builtin.os.tag, xdg_cache_home, localappdata);
+            return maru.cli.incidents_run.run(io, allocator, request, home, cache_base, stdout, stderr);
         },
     }
 }

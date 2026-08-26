@@ -4206,7 +4206,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR0b core"},
         });
         const run_cr0b_contract_tests = b.addRunArtifact(cr0b_contract_tests);
-        run_cr0b_contract_tests.addArg("--maru-expect-tests=20");
+        run_cr0b_contract_tests.addArg("--maru-expect-tests=21");
         run_cr0b_contract_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_contract_tests.step);
         const cr0b_writer_tests = addProjectTest(b, .{

@@ -1375,6 +1375,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    실패, multi-Window, source-order와 fresh-process loser I/O 0을 Debug·ReleaseFast/product gate로 고정한다. G2는
    absent→true materialization과 default flip을 하지 않으며 그것은 frozen release A artifact를 쓰는 G3만 소유한다.
 
+   **G3 frozen-release default migration:** `session-host-upgrade.md`의 `maru.session-host-release.v1` B manifest가 지목한
+   exact immutable A와 provisioned `Session host product / default-on` runner가 모두 준비된 뒤에만 시작한다. B bootstrap은
+   `missing|readable_absent`를 atomic explicit true로 materialize한 성공 suffix에서만 app-global snapshot을 true로 publish한다.
+   explicit valid는 보존하고 invalid/unreadable/oversize와 write 실패는 false·파일 mutation 0·persistent typed notice다.
+   exact A rollback, A runtime→B adapter attach, B 새 runtime 분리, config/topology/tombstone/Quit/Notification matrix를 같은
+   manifest/evidence test UUID로 결속하며 한 leaf라도 없으면 B publish를 막는다. SemVer 산술 인접성이나
+   `latest` 조회는 A 선택 권위가 아니다.
+
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라

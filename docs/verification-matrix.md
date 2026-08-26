@@ -941,10 +941,10 @@ U5의 non-empty 성공 경로는 `test-session-host-signed-upgrade`로 자동 �
 same-designated-requirement signer인 caller-attested frozen N-1/current executable을 받아 echo를 끈 실제 `/bin/cat` PTY의
 pre/post child output, 동일 host/child PID·host/runtime ID, epoch/build 전진과 `committed/none`, capability 유지를
 단언하고 pathname 대신 두 SHA/build ID와 signer requirement digest를 담은 JSON artifact를 남긴다. 입력의 release
-인접성/방향은 executable 내부에서 증명하지 않으므로, release job이 immutable manifest의 semver/tag/commit,
-protocol/handoff schema, bundle/build identity, SHA와 signer를 summary에 교차검증해야 한다. 실제 배포 artifact A를
-보존해 B job에서 A daemon→B adapter→same-PID exec→B GUI attach를 실행하는 named release gate와 artifact owner가
-없으면 provenance 미검증이다.
+인접성/방향은 executable 내부에서 증명하지 않으므로 release job은
+[`maru.session-host-release.v1`](session-host-upgrade.md#u5--제품-활성화)의 exact predecessor·compatibility·서명·asset·attestation
+계약을 summary와 교차검증해야 한다. 실제 배포 artifact A를 보존해 B job에서 A daemon→B adapter→same-PID exec→B GUI
+attach를 실행하는 named release gate와 artifact owner가 없으면 provenance 미검증이다.
 하네스 구현/compile 성공과 실제 signed release artifact 실행 성공은 다른 증거다. 현재 저장소와 일반 CI에는 해당
 아티팩트가 없어 후자는 여전히 미검증이며, 위 U5 미완료 판정을 바꾸지 않는다.
 
@@ -2274,7 +2274,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 
 ### Session default G1 config provenance
 
-- **상태: 구현, G2 정책 소비 전.** resolved `session.keep-alive-after-quit` bool과 별도로 마지막 적용 가능한
+- **상태: 구현, G2 정책에서 소비 중.** resolved `session.keep-alive-after-quit` bool과 별도로 마지막 적용 가능한
   syntactic occurrence를 `absent | explicit_valid(value) | explicit_invalid`로 보존한다. bool 유효성은 schema parser가
   단일 소유하며 provenance 전용 parser를 두지 않는다. invalid occurrence는 직전 resolved bool을 유지한 채 provenance만
   `explicit_invalid`로 바꾼다. 현재 OS suffix와 generic은 같은 파일 순서를 따르고 외국 OS
@@ -2283,8 +2283,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   valid→invalid, invalid→valid, generic/current-OS 양방향 순서와 foreign-OS
   무관성을 검증한다. 실제 파일 경계는 missing/readable/directory-unreadable/정확히 1 MiB readable/1 MiB+1 oversize를
   검증한다. G1은 기존 `default=false`와 forgiving load 동작을 유지하며 파일 write·notice·bootstrap을 실행하지 않는다.
-- **다음 gate:** G2만 이 관측을 app-instance lease 아래 소비해 explicit override materialization과 Reset retention을
-  구현한다. G1의 parser/file fixture를 G2의 실제 migration 성공·실패·경합 증거로 대체해 해석하지 않는다.
+- G1의 parser/file fixture를 G2의 실제 bootstrap·Reset 성공/실패·경합 증거로 대체해 해석하지 않는다.
 
 ### Session default G2 explicit override retention
 
@@ -2301,3 +2300,20 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `SIGKILL` 뒤 successor 재획득/bootstrap을 검증한다. G1 parser fixture나 in-process owner 단위만으로 제품 순서를 완료
   처리하지 않는다.
 - **범위 밖:** absent explicit `true` materialization, persistent retry notice, default `true` 전환과 frozen A rollback은 G3다.
+
+### Session default G3 frozen-release migration
+
+- **상태: 구현 전, 외부 gate 미준비.** G3 코드는 provisioned `Session host product / default-on` runner와 immutable
+  release A manifest가 모두 준비된 뒤에만 시작한다. 선언된 `build.zig.zon` version SSOT가 정적 macOS plist까지 관통하지 않고
+  tag/plist/manifest 일치 gate도 아직 없으므로 release workflow보다 먼저 연결해야 한다. 현재 일반 PR의 component/fixture
+  green은 이 선결조건들을 대신하지 않는다.
+- **release gate:** B manifest가 exact predecessor release A의 immutable release ID·tag·commit과 DMG/내부 제품 executable
+  SHA-256을 지목하고, release attestation·artifact attestation·Developer ID identity를 validator가 교차검증한다. SemVer 숫자의
+  산술 인접성이나 `latest` 조회로 A를 추측하지 않는다. manifest가 지목하지 않은 downgrade는 지원하지 않는다.
+- **config gate:** `missing|readable_absent`만 atomic explicit `true` materialization 성공 뒤 true로 publish한다.
+  `explicit_valid(value)`는 그대로, `explicit_invalid|unreadable|oversize`와 write 실패는 false·파일 부분 게시 0이며 persistent
+  typed notice를 남긴다. B가 만든 explicit true를 exact A가 읽는 rollback과 A runtime을 B adapter가 exact attach하는 제품
+  경로를 함께 검증한다.
+- **제품 증거:** signed/notarized A와 B, clean/explicit/malformed config matrix, 2 Window+3 Workspace, PID·runtime·input/output/
+  copy/resize, tombstone relaunch, Quit 취소, Notification cold/live click을 같은 test UUID의 구조화 artifact로 묶는다. 결과가
+  없거나 manifest/summary가 한 필드라도 다르면 B publish를 실패시킨다. G3 source merge는 출하 완료 증거가 아니다.

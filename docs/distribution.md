@@ -147,8 +147,10 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 1. macOS 러너(Apple Silicon)에서 mise로 zig 0.16 준비
 2. `.p12` Secret을 임시 키체인에 import
 3. `tools/build-macos-universal-dmg.sh` 실행(공증은 Secret 자격증명)
-4. `gh release upload`로 universal dmg를 Release에 첨부
-5. `ohah/homebrew-maru`의 cask version/sha256 bump PR(또는 formula version bump)
+4. `gh release create`/`upload`로 universal dmg를 Release에 첨부
+
+`ohah/homebrew-maru`의 cask version/sha256 bump PR(또는 formula version bump)은 tap repository write token을 추가하는
+별도 후속 단계다.
 
 실제 배포는 아래 Secret이 세팅되고 태그가 푸시돼야 일어난다 — **워크플로 파일만으로는 아무 일도 하지
 않는다**(Secret이 없으면 인증서 import 단계에서 멈추는 게 의도된 가드다). 필요한 Secret:
@@ -160,8 +162,27 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 | `KEYCHAIN_PASSWORD` | CI 임시 키체인 잠금 비번(아무 값, 잡 안에서만 씀) |
 | `APPLE_ID` · `APPLE_TEAM_ID` · `APPLE_APP_SPECIFIC_PASSWORD` | 공증 자격증명 |
 
-위 5단계의 cask version/sha256 자동 bump는 tap repo(`ohah/homebrew-maru`) write 토큰이 필요해 후속으로
-추가한다(현재 워크플로는 dmg 빌드·서명·공증·Release 첨부까지).
+현재 워크플로는 dmg 빌드·서명·공증·Release 첨부까지다.
+
+### Session host 호환 release
+
+영속 session host의 default 전환이나 frozen N-1 지원 창을 여는 release는 위 일반 첨부만으로 출하하지 않는다.
+[Session host upgrade provenance](session-host-upgrade.md#u5--제품-활성화)의 `maru.session-host-release.v1`을 사용하며,
+release workflow는 `signed 후보 attestation → draft 생성 → 제품 gate → evidence/manifest 생성·attestation → manifest와 열거된 모든 asset 첨부 →
+draft 재다운로드 검증 → publish → release attestation 검증` 순서다. publish 전 실패는 draft를 공개하지 않고, publish 뒤에는
+asset 교체·삭제·`--clobber`를 허용하지 않는다. immutable release 설정은 이 draft-first workflow와 validator가 먼저 배포된
+뒤 켠다.
+
+서명·공증·Aqua/Notification/localhost sshd 자격은 fork PR, `pull_request_target`, caller가 임의 ref를 고를 수 있는 수동
+실행에 노출하지 않는다. G3 source는 immutable A와 provisioned runner가 준비된 뒤 일반 PR로 merge하고, exact `main` commit을
+trusted tag workflow가 B 후보로 만든다. source가 merge됐다는 사실이나 일반 component CI green은 release evidence가 아니다.
+release workflow의 모든 third-party Action은 full commit SHA로 pin한다.
+release A/B의 실제 준비 상태와 남은 외부 gate는 [검증 매트릭스](verification-matrix.md)가 추적한다.
+
+`build.zig.zon`의 `.version`이 선언된 repository version SSOT지만 현재 macOS Info.plist의
+`CFBundleShortVersionString`은 정적 값이고 DMG 이름은 그 plist를 다시 읽으므로 release 산출물까지 SSOT가 관통하지 않는다.
+session-host manifest/release workflow를 구현하기 전에 plist 생성을 SSOT에 연결하고 `tag = v<SSOT> =
+CFBundleShortVersionString = manifest.release.version` 검증을 먼저 배포한다.
 
 ## 버전 정책
 

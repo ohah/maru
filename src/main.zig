@@ -3207,7 +3207,11 @@ fn shortenHome(path: []const u8, home: ?[]const u8, buf: []u8) []const u8 {
     if (h.len == 0 or path.len < h.len) return path;
     if (!std.mem.eql(u8, path[0..h.len], h)) return path;
     const rest = path[h.len..];
-    if (rest.len != 0 and rest[0] != std.fs.path.sep and rest[0] != '/') return path;
+    // **구분자는 타깃이 아니라 데이터가 정한다.** `std.fs.path.sep` 을 쓰면 같은 Windows 경로가
+    // 빌드 타깃마다 다르게 처리된다 — Linux 빌드에서 `sep` 은 `/` 라 역슬래시로 이어진 경로가 안 줄어든다.
+    // 이 함수가 보는 것은 **Windows 가 준 경로**이고 거기엔 둘 다 나온다(실측 2026-08-26: CI 가
+    // 이 테스트를 Linux 에서 돌려 잡았다 — 로컬은 Windows 라 초록이었다).
+    if (rest.len != 0 and rest[0] != '\\' and rest[0] != '/') return path;
     if (1 + rest.len > buf.len) return path;
     buf[0] = '~';
     @memcpy(buf[1..][0..rest.len], rest);

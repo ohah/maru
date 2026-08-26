@@ -21,7 +21,7 @@ done
 	echo "p5d: bundle CLI is not a regular executable: $BUNDLE_CLI" >&2
 	exit 1
 }
-BUNDLE_CLI=$(CDPATH= cd -- "$(dirname -- "$BUNDLE_CLI")" && pwd)/$(basename -- "$BUNDLE_CLI")
+BUNDLE_CLI=$(CDPATH= cd -- "$(dirname -- "$BUNDLE_CLI")" && pwd -P)/$(basename -- "$BUNDLE_CLI")
 PRODUCT_TEST=$(CDPATH= cd -- "$(dirname -- "$PRODUCT_TEST")" && pwd)/$(basename -- "$PRODUCT_TEST")
 [ -x "$PRODUCT_TEST" ] || { echo "p5d: product E2E driver is not executable" >&2; exit 1; }
 
@@ -46,7 +46,7 @@ if [ "${MARU_P5D_REQUIRE_DEVELOPER_ID:-0}" = 1 ]; then
 			echo "p5d: executable lacks Developer ID Application authority: $signed_bin" >&2
 			exit 1
 		}
-		echo "$detail" | /usr/bin/grep -Eq '^flags=.*runtime' || {
+		echo "$detail" | /usr/bin/grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)' || {
 			echo "p5d: executable lacks hardened runtime: $signed_bin" >&2
 			exit 1
 		}
@@ -56,7 +56,7 @@ if [ "${MARU_P5D_REQUIRE_DEVELOPER_ID:-0}" = 1 ]; then
 		echo "p5d: app TeamIdentifier is unavailable" >&2
 		exit 1
 	}
-	signature_detail "$APP_ROOT" | /usr/bin/grep -Eq '^flags=.*runtime' || {
+	signature_detail "$APP_ROOT" | /usr/bin/grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)' || {
 		echo "p5d: app lacks hardened runtime" >&2
 		exit 1
 	}

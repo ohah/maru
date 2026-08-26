@@ -1885,7 +1885,12 @@ fn buildDockTreeFrame(
     drawn.* = 0;
     const area = geom.tree_content;
     if (area.w < cell_w or area.h < cell_h) return null;
-    const cols: u16 = @intCast(area.w / cell_w);
+    // **거터를 뺀 폭이 글자의 폭이다**(`scrollGutterPx` 의 doc). 안 빼면 스크롤바가 마지막 칸
+    // 위에 겹쳐 그려진다 — 중립이 "목록 위에 겹쳐 그리는 대안은 사용자가 겹쳐 보인다고 보고한
+    // 바로 그 상태" 라고 적어 둔 자리다.
+    const text_w = area.w -| scrollGutterPx();
+    if (text_w < cell_w) return null;
+    const cols: u16 = @intCast(text_w / cell_w);
     // **어느 행을 그릴지는 중립이 정한다**(`file_tree_layout.drawWindow`) — 히트테스트
     // (`rowAtLocalY`)와 짝이라 그린 행과 눌리는 행이 안 갈린다. 여기서 다시 나누면 부분만 보이는
     // 첫 행에서 어긋난다(그 함수 doc 이 왜 올림인지까지 적어 뒀다).
@@ -2233,6 +2238,9 @@ fn rebuildSidebarCells(
     partial_out: *u32,
     /// **활성 카드**의 밴드 y(안 보이면 null). 굴린 뒤 활성 표시가 엉뚱한 카드에 가는 것을 잡는다.
     active_band_y: *?u32,
+    /// 카드 글자가 실제로 쓴 칸 수. **판정이 이 값을 스크롤바 자리와 견준다** — 판정 쪽에서
+    /// 다시 계산하면 내가 쓴 식을 되읽는 꼴이라 거터를 빼는 것을 잊어도 안 움직인다.
+    card_cols_out: *u16,
 ) !void {
     out.clearRetainingCapacity();
     glyphs.* = 0;
@@ -2408,7 +2416,13 @@ fn rebuildSidebarCells(
     // **spacing 은 색과 무관하다** — 기본 토큰셋에서 읽는다(테마가 간격을 바꾸지 않는다).
     const sp = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors)).space;
     const indent_cols: u16 = @intCast((@as(u32, sp.card_gap_px) + @as(u32, sp.accent_bar_width_px) + cell_w - 1) / cell_w);
-    const cols: u16 = @intCast(sidebar_w / cell_w);
+    // **거터를 뺀 폭이 글자의 폭이다**(`scrollGutterPx` 의 doc). 안 빼면 카드 이름 끝이 스크롤바
+    // 밑으로 들어간다 — 판정이 실제로 그것을 잡았다(`overlap=4`, 실측 2026-08-26).
+    const card_text_w = sidebar_w -| scrollGutterPx();
+    const cols: u16 = @intCast(card_text_w / cell_w);
+    // **그리기가 실제로 쓴 칸 수를 낸다.** 판정이 이 값을 스크롤바 자리와 견준다 — 여기서 다시
+    // 계산하면 내가 쓴 식을 되읽는 동어반복이라, 거터를 빼는 것을 잊어도 안 움직인다.
+    card_cols_out.* = cols;
     if (cols < indent_cols + 4) return;
     const fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xD0, .b = 0xE0 } };
     const active_fg: maru.terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
@@ -3246,6 +3260,103 @@ fn rebuildStatusBar(
     rebuilds.* += 1;
 }
 
+/// 세로 스크롤바 한 벌(트랙 + thumb)을 셀로 낸다.
+///
+/// **기하는 중립이 준다**(`chrome.ui.scroll_area.scrollbarGeometry`) — 트랙 자리, thumb 길이·위치,
+/// 잡는 자리가 전부 거기서 나온다. 여기서 산수를 하면 **그린 자리와 잡히는 자리가 갈린다**(그
+/// 모듈의 doc 이 "그리는 폭과 잡는 폭은 다르다" 로 그 실패를 적어 뒀다).
+///
+/// **색은 SCM 도크와 같은 역할을 쓴다** — 트랙 `inset_bg`, thumb `muted_fg`(`scm_dock/build.zig`).
+/// 여기서 다른 역할을 고르면 같은 앱 안에서 스크롤바 둘이 다른 색이 된다.
+/// 포인터가 이 막대의 **잡는 자리** 안인가. 그리는 폭이 아니라 거터 전체다 — 막대가 8px 이라
+/// 보이는 띠를 정확히 찍어야만 잡히면 조준이 1mm 짜리 과제가 된다(중립 doc 의 그 이유).
+fn barHit(b: maru.chrome.ui.scroll_area.ScrollbarGeometry, x_px: i32, y_px: i32) bool {
+    const x: f32 = @floatFromInt(x_px);
+    const y: f32 = @floatFromInt(y_px);
+    return x >= b.hit_x and x < b.hit_x + b.hit_w and y >= b.track_y and y < b.track_y + b.track_h;
+}
+
+fn appendScrollbarCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    bar: maru.chrome.ui.scroll_area.ScrollbarGeometry,
+    tk: *const maru.chrome.Tokens,
+) !void {
+    try out.append(allocator, d3d11_cells.solidCell(
+        bar.track_x,
+        bar.track_y,
+        bar.track_w,
+        bar.track_h,
+        cellColor(tk, .inset_bg),
+        .{ 0, 0, 0, 0 },
+    ));
+    try out.append(allocator, d3d11_cells.solidCell(
+        bar.track_x,
+        bar.thumb_y,
+        bar.track_w,
+        bar.thumb_h,
+        cellColor(tk, .muted_fg),
+        .{ 0, 0, 0, 0 },
+    ));
+}
+
+/// 이 창의 스크롤바 치수. **도크와 사이드바가 같은 값을 쓴다** — 한 화면에 굵기가 둘이면 사용자가
+/// 다른 컨트롤로 읽는다. 값의 단일 출처는 `session_dock` 의 `DockMetrics` 다(macOS 도 그것을 쓴다).
+fn scrollbarMetrics() maru.chrome.ui.scroll_area.ScrollbarMetrics {
+    return maru.chrome.components.session_dock.types.DockMetrics.resolve(1000).scrollbarMetrics();
+}
+
+/// 스크롤 컨테이너가 **상시 비워 두는** 오른쪽 폭.
+///
+/// **넘칠 때만 비우면 안 된다.** 그러면 목록이 길어지는 순간 글자가 한 칸 좁아지며 **전체가
+/// 다시 흐른다** — 항목을 하나 더할 때마다 화면이 출렁인다. 중립도 같은 말을 한다: 거터는
+/// *"컨테이너가 자기 폭에서 **상시** 예약하는 자리"* 다.
+fn scrollGutterPx() u32 {
+    return scrollbarMetrics().gutterPx();
+}
+
+/// 도크 트리의 세로 스크롤바 기하. 없으면 `null`(넘치지 않거나 자리가 안 난다).
+///
+/// **거터를 뺀 폭이 글자의 폭이고, 거터 자체가 막대의 자리다.** 둘을 여기 한 곳에서 내야
+/// 그린 자리와 잡는 자리가 안 갈린다.
+fn dockScrollbarGeometry(
+    geom: maru.session.dock_layout.Geometry,
+    rows_len: usize,
+    cell_h: u32,
+    offset_px: u32,
+) ?maru.chrome.ui.scroll_area.ScrollbarGeometry {
+    const m = scrollbarMetrics();
+    const gutter = m.gutterPx();
+    const area = geom.tree_content;
+    if (area.w <= gutter) return null;
+    return maru.chrome.ui.scroll_area.scrollbarGeometry(.{
+        .x = @floatFromInt(area.x),
+        .y = @floatFromInt(area.y),
+        .w = @floatFromInt(area.w - gutter),
+        .h = @floatFromInt(area.h),
+        .gutter_w = @floatFromInt(gutter),
+    }, @intCast(rows_len *| cell_h), offset_px, m);
+}
+
+/// 사이드바 카드 목록의 세로 스크롤바 기하. 헤더는 스크롤 밖이라 뷰포트에서 뺀다.
+fn sidebarScrollbarGeometry(
+    geom: maru.session.dock_layout.Geometry,
+    header_h: u32,
+    content_h: u32,
+    offset_px: u32,
+) ?maru.chrome.ui.scroll_area.ScrollbarGeometry {
+    const m = scrollbarMetrics();
+    const gutter = m.gutterPx();
+    if (geom.sidebar.w <= gutter or geom.sidebar.h <= header_h) return null;
+    return maru.chrome.ui.scroll_area.scrollbarGeometry(.{
+        .x = 0,
+        .y = @floatFromInt(geom.sidebar.y + header_h),
+        .w = @floatFromInt(geom.sidebar.w - gutter),
+        .h = @floatFromInt(geom.sidebar.h - header_h),
+        .gutter_w = @floatFromInt(gutter),
+    }, content_h, offset_px, m);
+}
+
 /// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
 /// 줄 수에서 나오므로 두 곳에서 따로 만들면 `slotAt` 의 누적이 밴드와 어긋난다.
 fn sidebarRowsFor(
@@ -3930,6 +4041,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dock_scroll_shift: u32 = 0;
     var dock_draw_start: usize = 0;
     var dock_tree_top_px: ?f32 = null;
+    // 이 프레임의 스크롤바 기하. **그리기와 포인터가 같은 값을 본다** — 따로 재면 보이는 자리와
+    // 잡히는 자리가 갈린다(중립 `ScrollbarGeometry` 의 doc 이 그 실패를 적어 뒀다).
+    var dock_bar: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
+    var sidebar_bar: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
+    // 끌고 있는 막대와 **잡은 지점**(누른 y − thumb 위). 그 값을 유지해야 포인터를 따라갈 때 막대가
+    // 손가락 밑에서 튀지 않는다(중립 `offsetForPointer` 의 계약).
+    const BarDrag = struct { which: enum { dock, sidebar }, grab_dy: f32 };
+    var bar_drag: ?BarDrag = null;
+    var bar_drag_moves: usize = 0;
+    var bar_track_clicks: usize = 0;
+    // 판정용 — 끌기 전후의 offset 과 그때 본 막대. **끝 상태에서 읽으면 안 된다**: 그 사이 다른
+    // 스크롤이 값을 덮는다(이 세션에서 같은 함정을 세 번 겪었다).
+    var sb_bar_seen: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
+    var sb_off_before: u32 = 0;
+    var sb_off_after: u32 = 0;
+    var sb_bar_judgeable = false;
+    // **그려졌는가**와 **글자가 침범하는가**. 끌기 판정만으로는 둘 다 안 보인다 — 막대를 안 그려도
+    // 기하는 나오고, 거터를 안 비워도 offset 은 잘 움직인다.
+    var sb_bar_drawn = false;
+    var sb_bar_overlap: usize = 0;
     var dock_scrolls: usize = 0;
     var dock_click_judgeable = false;
     var dock_click_target_row: usize = 0;
@@ -4073,6 +4204,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 헤더가 차지한 높이 — 히트테스트가 같은 값을 봐야 그린 자리와 눌리는 자리가 안 갈린다.
     var sidebar_header_h: u32 = 0;
     var sidebar_header_icon_band: u32 = 0;
+    var sidebar_card_cols: u16 = 0;
     var sidebar_header_icon_glyphs: usize = 0;
     var sidebar_header_search_glyphs: usize = 0;
     var sidebar_header_outside: usize = 0;
@@ -4140,7 +4272,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var status_rebuilds: usize = 0;
     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -4572,6 +4704,45 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, hx, hy);
             window.postSyntheticMouse(.left_up, hx, hy);
         }
+        // ── 스크롤바 끌기 판정 (W8.10) ─────────────────────────────────────────────────
+        //
+        // **thumb 을 잡아 아래로 끈다.** 휠과 달리 이 경로는 `offsetForPointer` 를 지나므로, 막대가
+        // 죽어 있으면(그려만 지고 안 잡히면) offset 이 그대로다 — 그것이 이 판정의 전부다.
+        if (spins == 596) {
+            if (sidebar_bar) |b| {
+                sb_bar_seen = b;
+                sb_bar_judgeable = true;
+                sb_off_before = sidebar_scroll_px;
+                const gx: i32 = @intFromFloat(b.hit_x + b.hit_w / 2);
+                const gy: i32 = @intFromFloat(b.thumb_y + b.thumb_h / 2);
+                window.postSyntheticMouse(.left_down, gx, gy);
+                window.postSyntheticMouse(.moved, gx, gy + @as(i32, @intFromFloat(b.track_h / 2)));
+                window.postSyntheticMouse(.left_up, gx, gy + @as(i32, @intFromFloat(b.track_h / 2)));
+            }
+        }
+        if (spins == 598) sb_off_after = sidebar_scroll_px;
+        // **합성된 셀에서 직접 찾는다** — 기하가 아니라 화면에 들어간 것을 본다. 그리기를 빼면
+        // 이 값이 죽는다(기하 판정은 안 죽는다).
+        // **지금 프레임의 막대**를 본다 — 끌기 전에 잡아 둔 것과 견주면 thumb 이 그 사이 움직여
+        // "안 그려졌다" 가 된다(실측: `drawn=false` 가 그 이유였다).
+        if (spins == 599) if (sidebar_bar) |b| {
+            for (cells.items) |c| {
+                if (@abs(c.rect[0] - b.track_x) < 0.5 and @abs(c.rect[2] - b.track_w) < 0.5 and
+                    @abs(c.rect[1] - b.thumb_y) < 0.5 and @abs(c.rect[3] - b.thumb_h) < 0.5) sb_bar_drawn = true;
+                // **글자가 막대 자리에 있으면 안 된다.** 거터를 안 비우면 카드 이름 끝이 막대 밑으로
+                // 들어간다 — 중립이 "겹쳐 그리는 대안은 사용자가 겹쳐 보인다고 보고한 그 상태" 라고
+                // 적어 둔 자리다. 배경 쿼드(uv 0)는 빼고 **글리프만** 센다.
+                // **단색 셀은 음수 UV 다**(`d3d11_cells.solidCell` — 셰이더가 그것으로 가른다).
+                // `uv[2] != 0` 로 보면 배경·밴드·막대 자신이 전부 "글자" 로 세어진다(실측: 겹침이
+                // 4 로 나왔는데 넷 다 쿼드였다).
+                const is_glyph = c.uv[0] >= 0;
+                if (is_glyph and c.rect[0] + c.rect[2] > b.track_x and c.rect[0] < b.track_x + b.track_w and
+                    c.rect[1] + c.rect[3] > b.track_y and c.rect[1] < b.track_y + b.track_h)
+                {
+                    sb_bar_overlap += 1;
+                }
+            }
+        };
         if (spins == 590 and sidebar_header_h != 0) {
             var rb: [16]maru.chrome.components.sidebar.Row = undefined;
             const rr = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb);
@@ -4715,7 +4886,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -4829,6 +5000,65 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
                 }
 
+                // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────
+                //
+                // **영역 판정보다 먼저 본다.** 거터는 도크/사이드바 사각형 **안**이라, 나중에 보면
+                // 목록 행 클릭이 막대를 가져간다(중립 doc 이 "탐색기는 스크롤바를 행보다 먼저
+                // 판정한다" 로 그 순서를 정해 뒀다).
+                if (bar_drag) |drag| {
+                    if (m.kind == .moved) {
+                        const bar = if (drag.which == .dock) dock_bar else sidebar_bar;
+                        if (bar) |b| {
+                            const next = b.offsetForPointer(@floatFromInt(m.y_px), drag.grab_dy);
+                            if (drag.which == .dock) {
+                                if (next != dock_scroll_px) {
+                                    dock_scroll_px = next;
+                                    dock_scrolls += 1;
+                                    bar_drag_moves += 1;
+                                    rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+                                }
+                            } else if (next != sidebar_scroll_px) {
+                                sidebar_scroll_px = next;
+                                sidebar_scrolls += 1;
+                                sidebar_redraws += 1;
+                                bar_drag_moves += 1;
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                            }
+                        }
+                        continue;
+                    }
+                    if (m.kind == .left_up or m.kind == .capture_lost) {
+                        bar_drag = null;
+                        continue;
+                    }
+                }
+                if (m.kind == .left_down) {
+                    const py: f64 = @floatFromInt(m.y_px);
+                    const on_dock = if (dock_bar) |b| barHit(b, m.x_px, m.y_px) else false;
+                    const on_sidebar = if (!on_dock) (if (sidebar_bar) |b| barHit(b, m.x_px, m.y_px) else false) else false;
+                    if (on_dock or on_sidebar) {
+                        const b = (if (on_dock) dock_bar else sidebar_bar).?;
+                        if (b.thumbContains(py)) {
+                            bar_drag = .{ .which = if (on_dock) .dock else .sidebar, .grab_dy = @floatCast(py - @as(f64, b.thumb_y)) };
+                        } else {
+                            // **트랙을 누르면 그 자리로 간다** — 이어서 끌면 같은 매핑을 쓰므로
+                            // 위치가 안 튄다(중립 `offsetForTrackClick` 의 계약).
+                            const next = b.offsetForTrackClick(py);
+                            bar_track_clicks += 1;
+                            if (on_dock) {
+                                dock_scroll_px = next;
+                                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+                            } else {
+                                sidebar_scroll_px = next;
+                                sidebar_redraws += 1;
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                            }
+                            bar_drag = .{ .which = if (on_dock) .dock else .sidebar, .grab_dy = b.thumb_h / 2 };
+                        }
+                        continue;
+                    }
+                }
+
                 // ── 어느 영역의 포인터인가 (W8.7b) ──────────────────────────────────────
                 //
                 // **판정은 중립이 소유한다**(`dock_layout.regionAt`) — 잡기 띠가 이웃과 겹치는
@@ -4911,7 +5141,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             sidebar_scroll_px = clamped;
                             sidebar_scrolls += 1;
                             sidebar_redraws += 1;
-                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                         }
                     }
                     continue;
@@ -4946,7 +5176,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         sidebar_hover_header = next_header;
                         sidebar_hover_slot = next_slot;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                     }
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
@@ -4970,7 +5200,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // 눌린 것이 화면에 안 나타난다.
                                     _ = app_window.selectTab(sessions.items.len - 1);
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                                 } else |_| {
                                     session_spawn_failures += 1;
                                 }
@@ -4983,7 +5213,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             if (s != app_window.active_tab and app_window.selectTab(s)) {
                                 tab_switches += 1;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                             }
                         }
                     }
@@ -5512,6 +5742,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
         cells.appendSliceAssumeCapacity(sidebar_cells.items);
         cells.appendSliceAssumeCapacity(dock_cells.items);
+        // ── 스크롤바 (W8.10) ────────────────────────────────────────────────────────────
+        //
+        // **내용 위에 얹는다** — 그리는 순서가 z 순서다. 거터는 상시 비워 둔 자리라 겹칠 것이
+        // 없지만, 부분만 보이는 첫 행이 거터로 새는 경우가 있어 순서로 못 박는다.
+        //
+        // **매 프레임 다시 잰다.** 상태(offset·행 수)가 바뀌면 thumb 이 따라와야 하는데, 캐시하면
+        // "굴렸는데 막대가 안 움직인다" 가 된다 — 쿼드 넷이라 값이 싸다.
+        dock_bar = if (dock_view == .explorer)
+            dockScrollbarGeometry(geom, dock_rows.items.len, cell_h, dock_scroll_px)
+        else
+            null;
+        if (dock_bar) |bar| appendScrollbarCells(allocator, &cells, bar, &chrome_tokens) catch {};
+        sidebar_bar = blk: {
+            if (sidebar_header_h == 0) break :blk null;
+            var rb: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rws = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb);
+            const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            break :blk sidebarScrollbarGeometry(geom, sidebar_header_h, maru.chrome.components.sidebar.contentHeight(rws, mm), sidebar_scroll_px);
+        };
+        if (sidebar_bar) |bar| appendScrollbarCells(allocator, &cells, bar, &chrome_tokens) catch {};
         const term_first = cells.items.len;
         for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
@@ -5652,6 +5902,36 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 status_mismatch == 0 and fresh and
                 geom.terminal.y + geom.terminal.h <= bar.y,
         });
+    }
+    if (sb_bar_judgeable) {
+        const b = sb_bar_seen.?;
+        // **thumb 이 트랙 안이어야 한다** — 넘치면 목록 밖에 뜬다.
+        const inside = b.thumb_y >= b.track_y and b.thumb_y + b.thumb_h <= b.track_y + b.track_h + 0.5;
+        try stdout.print("sb_bar=({d:.0},{d:.0},{d:.0},{d:.0}) thumb=({d:.0},{d:.0}) hit_w={d:.0} max_off={d} off {d}->{d} drag_moves={d} track_clicks={d} drawn={} overlap={d} text_right={d} sb_bar_ok={}\n", .{
+            b.track_x,
+            b.track_y,
+            b.track_w,
+            b.track_h,
+            b.thumb_y,
+            b.thumb_h,
+            b.hit_w,
+            b.max_offset_px,
+            sb_off_before,
+            sb_off_after,
+            bar_drag_moves,
+            bar_track_clicks,
+            sb_bar_drawn,
+            sb_bar_overlap,
+            @as(u32, sidebar_card_cols) *| cell_w,
+            inside and b.thumb_h > 0 and b.max_offset_px > 0 and bar_drag_moves > 0 and sb_off_after > sb_off_before and
+                sb_bar_drawn and sb_bar_overlap == 0 and
+                // **글자가 쓸 수 있는 오른쪽 끝이 막대 왼쪽 안이어야 한다.** `overlap` 은 지금
+                // 카드 이름이 짧아 **공허하다**(거터를 빼는 것을 잊어도 0 이었다 — 뮤턴트 실측).
+                // 이 조건은 그리기가 **실제로 쓴 칸 수**를 보므로 그때 움직인다.
+                @as(f32, @floatFromInt(@as(u32, sidebar_card_cols) *| cell_w)) <= b.track_x,
+        });
+    } else {
+        try stdout.print("sb_bar=unjudgeable reason=no_overflow\n", .{});
     }
     try stdout.print("sidebar_w={d} sidebar_cells={d} sidebar_glyphs={d} sidebar_cells_outside={d} card_over_header={d} cards_visible={d}/{d} term_x={d}\n", .{ sidebar_w, sidebar_cells.items.len, sidebar_glyphs, sidebar_outside, sidebar_card_over_header, sidebar_cards_visible, sidebar_cards.items.len, geom.terminal.x });
     {

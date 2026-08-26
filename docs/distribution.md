@@ -147,7 +147,8 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 1. macOS 러너(Apple Silicon)에서 mise로 zig 0.16 준비
 2. `.p12` Secret을 임시 키체인에 import
 3. `tools/build-macos-universal-dmg.sh` 실행(공증은 Secret 자격증명)
-4. `gh release create`/`upload`로 universal dmg를 Release에 첨부
+4. 새 draft Release를 만들고 universal dmg를 무덮어쓰기 첨부
+5. draft의 exact-one asset을 다시 내려받아 로컬 DMG와 byte equality를 검증한 뒤 publish
 
 `ohah/homebrew-maru`의 cask version/sha256 bump PR(또는 formula version bump)은 tap repository write token을 추가하는
 별도 후속 단계다.
@@ -162,7 +163,10 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 | `KEYCHAIN_PASSWORD` | CI 임시 키체인 잠금 비번(아무 값, 잡 안에서만 씀) |
 | `APPLE_ID` · `APPLE_TEAM_ID` · `APPLE_APP_SPECIFIC_PASSWORD` | 공증 자격증명 |
 
-현재 워크플로는 dmg 빌드·서명·공증·Release 첨부까지다.
+현재 워크플로는 dmg 빌드·서명·공증 뒤 `tools/publish-github-release.sh`가 새 draft만 생성하고, exact-one
+DMG를 `--clobber` 없이 올린 뒤 재다운로드 byte equality를 통과해야 publish한다. 같은 tag의 Release가 이미
+있거나 asset 이름·개수·bytes가 다르면 기존 Release를 재사용하거나 고치지 않고 실패한다. publish 뒤 asset
+교체·삭제 경로는 제공하지 않는다.
 
 ### Session host 호환 release
 

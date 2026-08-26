@@ -297,5 +297,5 @@ tools/
     web.yml                 `web/**` 변경 시 Bun lock install + zntc bundle/SRI + sanitizer fixture + Oxc + license audit를 실행하고 생성 bundle evidence를 업로드
     performance.yml         `mise run perf`를 `code` 변경 PR(required check)·main push·수동·주간으로 실행한다(성능 회귀가 main에 들어가기 전에 잡는다 — 예산 정책은 performance-budget.md)
     pr-metadata.yml         라벨 1개 이상 + assignee=ohah 강제(required check 지정은 branch protection에서 한다)
-    release.yml             태그 푸시(v*) 시 universal .dmg를 서명·공증해 GitHub Release에 첨부한다(distribution.md "CI 릴리스")
+    release.yml             태그 푸시(v*) 시 universal .dmg를 서명·공증하고 새 draft에 무덮어쓰기 첨부·재검증한 뒤 publish한다(distribution.md "CI 릴리스")
 ```

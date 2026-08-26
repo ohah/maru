@@ -1,7 +1,7 @@
 name: Release
 
 # 배포 플로우(docs/distribution.md "CI 릴리스"). 태그 푸시(v*) 또는 수동 실행 시 universal(arm64+x86_64)
-# .dmg를 서명·공증·staple해 GitHub Release에 첨부한다. 실제 배포는 아래 Secret 세팅 + 태그 푸시가
+# .dmg를 서명·공증·staple한 뒤 새 draft에서 재다운로드 검증하고 GitHub Release로 publish한다. 실제 배포는 아래 Secret 세팅 + 태그 푸시가
 # 있어야 동작한다(없으면 인증서 import 단계에서 멈춘다 — 의도된 가드). workflow_dispatch는 태그 없이
 # 빌드만 확인하는 용도라 Release 업로드는 건너뛴다.
 #
@@ -91,12 +91,10 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # 태그 릴리스에 dmg 첨부(릴리스 없으면 생성, 있으면 업로드).
-          gh release create "${{ github.ref_name }}" dist/Maru-*-universal.dmg \
-            --title "${{ github.ref_name }}" --generate-notes \
-          || gh release upload "${{ github.ref_name }}" dist/Maru-*-universal.dmg --clobber
+          sh tools/publish-github-release.sh "$RELEASE_TAG" dist/Maru-*-universal.dmg
 
       - name: Upload dmg as workflow artifact
         if: always()

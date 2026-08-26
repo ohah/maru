@@ -7301,6 +7301,13 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     표시 문자열과 분리된 typed route로 넘기며 OS API가 request를 받아들인 뒤에만 `.os` ack한다. permission denied,
     bundle/entitlement 부재, transient adapter failure는 PTY/runtime 실패가 아니다. denied는 재요청 loop 없이 degraded
     상태로 기록하고, transient failure는 같은 row를 250ms에서 시작해 최대 8초인 지수 backoff로 최대 6회 재시도한다.
+    OS framework callback은 10초 상한을 가지며, 상한을 넘기면 machine뿐 아니라 adapter의 process-local inflight slot도
+    비워 다음 backoff가 같은 stable identifier의 실제 새 request를 제출한다. 권한이 `notDetermined`인 headless daemon은
+    prompt를 띄우지 않고 transient로 기다리며, 명시적 `denied`만 terminal degraded로 접는다.
+    primary backoff 중 sibling 제출이 async pending이면 machine이 그 sibling을 별도 exact inflight owner로 고정해 정산할
+    때까지 primary와 다른 sibling을 adapter의 단일 process-local slot에 제출하지 않는다. inflight owner는 journal key만이
+    아니라 제출 당시의 전체 typed route를 보존하므로 bounded journal 축출이나 delivery-bit 선행 정산 뒤에도 정확한 OS
+    request를 expire하고 adapter slot을 회수한다.
     terminal degraded와 retry exhaustion은 bounded typed counter만 남기고 raw text를 로그하지 않는다. GUI-live 여부는 delivery ownership을
     바꾸지 않으며 GUI와 OS 두 bit가 독립적으로 exact once 내려간다.
   - **upgrade 불변식:** N2 journal은 host-lifetime state다. same-PID exec handoff는 `last_event_id`, exhaustion, eviction/drop

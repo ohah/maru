@@ -35,6 +35,7 @@ const handoff_codec = @import("handoff_codec.zig");
 const notification_admission = @import("notification_admission.zig");
 const notification_journal = @import("notification_journal.zig");
 const notification_delivery = @import("notification_delivery.zig");
+const notification_os_delivery = @import("notification_os_delivery.zig");
 const agent_hook_logs = @import("agent_hook_logs.zig");
 const runtime_observation_cache = @import("runtime_observation_cache.zig");
 
@@ -268,6 +269,8 @@ pub const RuntimeManager = struct {
     /// for the same reason as RuntimeManager itself and is mutated only by the daemon owner tick.
     notification_journal: notification_journal.Journal,
     notification_metadata: notification_delivery.MetadataStore,
+    notification_os_machine: notification_os_delivery.Machine,
+    notification_os_adapter: ?notification_os_delivery.Adapter = null,
     notification_permanent_drops: u64 = 0,
     observed_reaped_children: u64 = 0,
     observed_last_child_exit_status: i32 = -1,
@@ -332,6 +335,8 @@ pub const RuntimeManager = struct {
         self.host_registry = host_registry;
         self.notification_journal.initInPlace(allocator, host_id, notification_limits) catch unreachable;
         self.notification_metadata = notification_delivery.MetadataStore.init(allocator);
+        self.notification_os_machine.initInPlace();
+        self.notification_os_adapter = null;
         self.notification_permanent_drops = 0;
         self.observed_reaped_children = 0;
         self.observed_last_child_exit_status = -1;
@@ -623,7 +628,26 @@ pub const RuntimeManager = struct {
             };
         }
         for (remove_ids[0..remove_count]) |runtime_id| self.terminateRuntime(runtime_id);
+        if (self.notification_os_adapter) |adapter| {
+            const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+            _ = self.notification_os_machine.tick(
+                if (now <= 0) 0 else @intCast(@min(now, std.math.maxInt(u64))),
+                &self.notification_journal,
+                adapter,
+            );
+        }
         return result;
+    }
+
+    /// Product daemon installs exactly one process-local platform adapter before publication. The
+    /// journal and retry machine remain host-owned; the adapter carries no MRSH/AppSession state.
+    pub fn installNotificationOsAdapter(self: *RuntimeManager, adapter: notification_os_delivery.Adapter) void {
+        std.debug.assert(self.notification_os_adapter == null and self.host_registry.count() == 0);
+        self.notification_os_adapter = adapter;
+    }
+
+    pub fn notificationOsCounters(self: *const RuntimeManager) notification_os_delivery.Counters {
+        return self.notification_os_machine.typedCounters();
     }
 
     /// Product owner-tick transaction: copy the current core generation, normalize untrusted bytes,
@@ -2307,6 +2331,41 @@ fn rgbFromWire(rgb: u32) terminal.Rgb {
         .g = @truncate(rgb >> 8),
         .b = @truncate(rgb),
     };
+}
+
+test "P4 N2b2 daemon owner tick delivers OS notification through typed adapter without GUI" {
+    const Probe = struct {
+        calls: usize = 0,
+        route: notification_os_delivery.Route = undefined,
+
+        fn submit(context: *anyopaque, request: notification_os_delivery.Request) notification_os_delivery.AdapterResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.route = request.route;
+            return .accepted;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const host_id: u128 = 0x11223344556677889900aabbccddeeff;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.initWithHostId(allocator, std.testing.io, &host_registry, host_id, null);
+    defer manager.deinit();
+    var probe: Probe = .{};
+    manager.installNotificationOsAdapter(.{ .context = &probe, .submitFn = Probe.submit });
+    const key = try manager.notification_journal.admit(0xaa, 7, "title", "body", "workspace");
+
+    _ = manager.drainOwnedEvents();
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(notification_os_delivery.Route{
+        .hid = host_id,
+        .rid = 0xaa,
+        .eid = key.event_id,
+    }, probe.route);
+    try std.testing.expect(manager.notification_journal.oldestPending(.os) == null);
+    try std.testing.expect(manager.notification_journal.peek(key).?.pending_gui);
+    try std.testing.expectEqual(@as(u64, 1), manager.notificationOsCounters().accepted);
 }
 
 test "P4 N2a product owner admits real PTY OSC into stable host journal" {

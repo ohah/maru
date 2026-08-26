@@ -682,6 +682,8 @@ pub const runtime_manager_groups = [_]Group{
             "clipboards",
             "observed_reaped_children",
             "observed_last_child_exit_status",
+            "notification_os_machine",
+            "notification_os_adapter",
             "output_metrics_enabled",
             "observed_output_bytes",
             "observation_materializations",
@@ -700,7 +702,7 @@ pub const runtime_manager_groups = [_]Group{
             // spawned after an upgrade silently lost its hook identity. Adversarial review caught it.
             "hook_identity",
         },
-        .why = "the self-referential manager graph, process-local output self-pipe, and derived canonical observation caches are rebuilt in place from serialized host and runtime records; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
+        .why = "the self-referential manager graph, process-local output self-pipe, OS notification adapter/retry clock, and derived canonical observation caches are rebuilt in place from serialized host and runtime records; pending_os remains authoritative in the serialized journal so an interrupted delivery is retried without success ack, while process-local backoff and diagnostic counters restart; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
     },
 };
 

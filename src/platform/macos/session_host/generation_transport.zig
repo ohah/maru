@@ -7591,11 +7591,20 @@ test "B3-0.4 execute allocation fail index settles every actual socket attempt" 
             if (reached_success) break;
         }
         try std.testing.expect(reached_success);
-        try std.testing.expect(failure_count > 0);
-        try std.testing.expect(saw_post_wire_failure);
         switch (failure_kind) {
-            .alloc => try std.testing.expect(saw_terminal_failure),
-            .resize => try std.testing.expect(saw_recovered_resize_failure),
+            .alloc => {
+                try std.testing.expect(failure_count > 0);
+                try std.testing.expect(saw_post_wire_failure);
+                try std.testing.expect(saw_terminal_failure);
+            },
+            .resize => {
+                // GenerationGuardedAllocator rejects remap/resize before invoking its parent. The
+                // only recoverable growth protocol is allocate-copy-free, so a parent resize fault
+                // must now be unreachable rather than "recovered" after a committed mutation.
+                try std.testing.expectEqual(@as(usize, 0), failure_count);
+                try std.testing.expect(!saw_post_wire_failure);
+                try std.testing.expect(!saw_recovered_resize_failure);
+            },
         }
     }
 }

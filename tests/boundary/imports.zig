@@ -4829,9 +4829,10 @@ test "generation batch Client ownership mutations have one node-bound production
     // allocator authority가 없다.
     try std.testing.expectEqual(@as(usize, 6), begin_allocator_references);
     try std.testing.expectEqual(@as(usize, 7), restore_allocator_references);
-    // C3-3b3 effect settlement가 여섯 번째 guarded cleanup callback owner다.
-    try std.testing.expectEqual(@as(usize, 6), enter_callback_references);
-    try std.testing.expectEqual(@as(usize, 6), leave_callback_references);
+    // C3-3b3 effect settlement까지 다섯 guarded callback owner만 남는다. remap은 parent가
+    // 크기 변경을 commit한 뒤 alias를 거부할 수 없으므로 callback에 들어가지 않고 선제 거부한다.
+    try std.testing.expectEqual(@as(usize, 5), enter_callback_references);
+    try std.testing.expectEqual(@as(usize, 5), leave_callback_references);
     const slot_source = try readZigFileZ(allocator, "src/platform/macos/session_host/client_slot.zig");
     defer allocator.free(slot_source);
     const retirement_fixture = betweenMarkers(

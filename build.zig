@@ -16,6 +16,28 @@ fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step
     return b.addTest(configured);
 }
 
+fn linkSessionHostNotificationAdapter(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    if (b.sysroot) |sdk| {
+        compile.root_module.addSystemFrameworkPath(.{
+            .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}),
+        });
+    }
+    compile.root_module.addIncludePath(b.path("src/platform/macos"));
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/platform/macos/session_host_notification_adapter.m"),
+        .flags = &.{
+            "-fobjc-arc",
+            "-fno-sanitize=undefined",
+            "-iframeworkwithsysroot",
+            "/System/Library/Frameworks",
+            "-iwithsysroot",
+            "/usr/include",
+        },
+    });
+    compile.root_module.linkFramework("Foundation", .{});
+    compile.root_module.linkFramework("UserNotifications", .{});
+}
+
 pub fn build(b: *std.Build) void {
     // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
     // 실행되게 한다. 단 이 기본값은 macOS 호스트에서 빌드할 때만 건다.
@@ -112,6 +134,9 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("dwrite", .{});
         // W7.4c: IME 조합 문자열(`ImmGetCompositionStringW`).
         exe.root_module.linkSystemLibrary("imm32", .{});
+    }
+    if (target.result.os.tag == .macos) {
+        linkSessionHostNotificationAdapter(b, exe);
     }
 
     b.installArtifact(exe);
@@ -913,6 +938,7 @@ pub fn build(b: *std.Build) void {
         // `main()`과 그 아래(호스트 게이트·경로 정책)가 통째로 빠진다 — 실측: `main.zig`에 macOS 전용 타입
         // 오류를 심고 테스트 빌드로 돌리면 **통과한다.** 실행 파일은 `main`이 진입점이라 반드시 분석된다.
         const cross_exe = b.addExecutable(.{ .name = b.fmt("maru-check-{s}", .{triple}), .root_module = cross_exe_mod });
+        if (cross_target.result.os.tag == .macos) linkSessionHostNotificationAdapter(b, cross_exe);
         check_targets_step.dependOn(&cross_exe.step);
     }
 
@@ -3445,6 +3471,97 @@ pub fn build(b: *std.Build) void {
         const run_delivery_red_tests = b.addRunArtifact(delivery_red_tests);
         run_delivery_red_tests.addArg("--maru-expect-tests=6");
         session_host_notification_delivery_step.dependOn(&run_delivery_red_tests.step);
+
+        const notification_os_delivery_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/notification_os_delivery.zig"),
+            .target = target,
+            .optimize = delivery_optimize,
+        });
+        const os_delivery_red_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_os_delivery_red.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .imports = &.{.{ .name = "notification_os_delivery", .module = notification_os_delivery_mod }},
+            }),
+            .filters = &.{"P4 N2b2 notification OS delivery"},
+        });
+        const run_os_delivery_red_tests = b.addRunArtifact(os_delivery_red_tests);
+        run_os_delivery_red_tests.addArg("--maru-expect-tests=13");
+        session_host_notification_delivery_step.dependOn(&run_os_delivery_red_tests.step);
+
+        const os_delivery_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 N2b2 daemon owner tick delivers OS notification"},
+        });
+        const run_os_delivery_product_tests = b.addRunArtifact(os_delivery_product_tests);
+        run_os_delivery_product_tests.addArg("--maru-expect-tests=1");
+        session_host_notification_delivery_step.dependOn(&run_os_delivery_product_tests.step);
+
+        // The inherited actual-host N2b1 fixture grows its response parser through this allocator.
+        // Keep the remap protocol regression that the N2b2 stress run exposed in the same gate.
+        const delivery_allocator_regression_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"generation guarded allocator refuses remap before parent mutation"},
+        });
+        const run_delivery_allocator_regression_tests = b.addRunArtifact(delivery_allocator_regression_tests);
+        run_delivery_allocator_regression_tests.addArg("--maru-expect-tests=1");
+        session_host_notification_delivery_step.dependOn(&run_delivery_allocator_regression_tests.step);
+
+        const os_delivery_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_os_delivery_boundary.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+            }),
+            .filters = &.{"P4 N2b2 OS delivery boundary"},
+        });
+        const run_os_delivery_boundary_tests = b.addRunArtifact(os_delivery_boundary_tests);
+        run_os_delivery_boundary_tests.addArg("--maru-expect-tests=1");
+        session_host_notification_delivery_step.dependOn(&run_os_delivery_boundary_tests.step);
+
+        if (target.result.os.tag == .macos) {
+            const notification_macos_adapter_mod = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/notification_macos_adapter.zig"),
+                .target = target,
+                .optimize = delivery_optimize,
+            });
+            notification_macos_adapter_mod.addIncludePath(b.path("src/platform/macos"));
+            const macos_adapter_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_notification_macos_adapter.zig"),
+                    .target = target,
+                    .optimize = delivery_optimize,
+                    .imports = &.{.{ .name = "notification_macos_adapter", .module = notification_macos_adapter_mod }},
+                }),
+                .filters = &.{"P4 N2b2 notification OS delivery bare macOS adapter"},
+            });
+            macos_adapter_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+            macos_adapter_tests.root_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/session_host_notification_adapter.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
+            macos_adapter_tests.root_module.linkFramework("Foundation", .{});
+            macos_adapter_tests.root_module.linkFramework("UserNotifications", .{});
+            if (macos_sdk) |sdk| {
+                const frameworks = std.Build.LazyPath{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) };
+                notification_macos_adapter_mod.addSystemFrameworkPath(frameworks);
+                macos_adapter_tests.root_module.addSystemFrameworkPath(frameworks);
+            }
+            const run_macos_adapter_tests = b.addRunArtifact(macos_adapter_tests);
+            run_macos_adapter_tests.addArg("--maru-expect-tests=1");
+            session_host_notification_delivery_step.dependOn(&run_macos_adapter_tests.step);
+        }
 
         const delivery_server_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -9225,6 +9342,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        linkSessionHostNotificationAdapter(b, session_host_restore_test);
         // 서로 다른 root source의 old/new helper artifact를 실제 exec한다. 테스트 binary를 두 번 같은
         // source로 빌드해 "교체"처럼 보이게 하지 않는다.
         const session_host_fixture_mod = b.createModule(.{

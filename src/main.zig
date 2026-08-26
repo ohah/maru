@@ -6852,10 +6852,12 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
             },
             .restore => |restore| {
                 if (!session_host_build_options.allow_validation_only_restore) {
-                    session_host.restore_activation.run(
+                    var notification_adapter_state: session_host.notification_macos_adapter.State = .{};
+                    session_host.restore_activation.runWithNotificationAdapter(
                         allocator,
                         io,
                         restore,
+                        notification_adapter_state.adapter(),
                     ) catch |err| {
                         try stderr.print(
                             "maru session host restore activation failed: {s}\n",
@@ -6894,13 +6896,15 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
                 defer allocator.free(dir_z);
                 const socket_z = try allocator.dupeZ(u8, daemon.socket_path);
                 defer allocator.free(socket_z);
-                session_host.daemon.runSessionHostWithIdentityStartup(
+                var notification_adapter_state: session_host.notification_macos_adapter.State = .{};
+                session_host.daemon.runSessionHostWithIdentityStartupAndNotificationAdapter(
                     allocator,
                     io,
                     dir_z,
                     socket_z,
                     daemon.host_id,
                     &startup,
+                    notification_adapter_state.adapter(),
                 ) catch |err| {
                     try stderr.print("maru {s} failed: {s}\n", .{ session_host_entrypoint.subcommand, @errorName(err) });
                     return error.UnknownCommand;

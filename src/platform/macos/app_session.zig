@@ -34472,7 +34472,7 @@ test "CLI 와 GUI 가 같은 런타임 registry 를 본다 — 캐시 밖이다"
     try std.testing.expect(std.mem.indexOf(u8, cli_base, ".cache") == null);
     // socket 도 같은 자리 아래다 — 열쇠와 자물쇠가 갈리면 "한쪽만 사라지는" 실패가 성립한다.
     var sock_buf: [128]u8 = undefined;
-    const sock_dir = try short_endpoint.socketDirPathIn(&sock_buf, std.c.getuid());
+    const sock_dir = try short_endpoint.currentSocketDirPathIn(&sock_buf);
     try std.testing.expect(std.mem.startsWith(u8, sock_dir, cli_base));
 }
 
@@ -34517,7 +34517,7 @@ test "session host 런타임 base는 캐시 경로 밖이며 socket과 같은 �
 
     // 열쇠(manifest)와 자물쇠(socket)가 같은 디렉터리에 있어야 "한쪽만 사라지는" 실패 모드가 성립하지 않는다.
     var socket_buf: [128]u8 = undefined;
-    const socket_dir = try session_host.short_endpoint.socketDirPathIn(&socket_buf, std.c.getuid());
+    const socket_dir = try session_host.short_endpoint.currentSocketDirPathIn(&socket_buf);
     try std.testing.expect(std.mem.startsWith(u8, socket_dir, runtime_base));
 }
 

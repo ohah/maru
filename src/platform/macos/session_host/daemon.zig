@@ -308,12 +308,14 @@ fn touchRuntimeArtifacts(
     }
     // 소켓과 manifest의 부모(`/tmp/maru-<uid>`, `.../sh`)도 함께 찍는다. 자식이 남아 있으면 `-empty` 조건에
     // 걸리지 않지만, 자식이 먼저 지워진 뒤 빈 디렉터리로 남는 창을 없앤다.
-    var root_buf: [64]u8 = undefined;
-    if (short_endpoint.userRootPathIn(&root_buf, c.getuid())) |root| {
+    // 우리가 **실제로 쓰는** 뿌리를 찍는다. uid 로 다시 계산하면 격리된 실행에서 남의 자리를 건드리면서
+    // 정작 자기 endpoint 는 안 찍어, 살아 있는 host 가 tmp 정리에 지워지는 원래 실패로 되돌아간다.
+    var root_buf: [256]u8 = undefined;
+    if (short_endpoint.currentUserRootPathIn(&root_buf)) |root| {
         _ = c.utimensat(c.AT.FDCWD, root.ptr, null, 0);
     } else |_| {}
-    var sock_dir_buf: [64]u8 = undefined;
-    if (short_endpoint.socketDirPathIn(&sock_dir_buf, c.getuid())) |sock_dir| {
+    var sock_dir_buf: [272]u8 = undefined;
+    if (short_endpoint.currentSocketDirPathIn(&sock_dir_buf)) |sock_dir| {
         _ = c.utimensat(c.AT.FDCWD, sock_dir.ptr, null, 0);
     } else |_| {}
 }
@@ -526,9 +528,11 @@ fn runSessionHostImpl(
         manager.enableOutputMetrics();
         manager.fixtureEnableObservationPerformanceEvidence();
     }
-    var socket_dir_buf: [112]u8 = undefined;
+    // socket 을 **실제로 만드는** 자리다. uid 로 계산하면 격리를 켠 실행에서도 사용자의 공용
+    // `/tmp/maru-<uid>/sh` 에 socket 이 생기고, 그 가짜가 `host status` 를 ambiguous 로 만든다.
+    var socket_dir_buf: [272]u8 = undefined;
     const bind_dir = if (exact_host_id != null)
-        short_endpoint.socketDirPathIn(&socket_dir_buf, c.getuid()) catch return error.ManifestFailed
+        short_endpoint.currentSocketDirPathIn(&socket_dir_buf) catch return error.ManifestFailed
     else
         dir_path;
     var server = try socket_server.SocketServer.bind(allocator, bind_dir, socket_path, host_id, &registry);

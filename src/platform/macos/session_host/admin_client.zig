@@ -507,6 +507,10 @@ fn finishControlledProductCli(
     return collectProductProcess(std.testing.io, allocator, process, stderr_prefix);
 }
 
+/// `session_host_root` 는 이 테스트가 정한 **자기 격리 뿌리**다(pid+nonce). 호출부는 socket 경로도 반드시
+/// 같은 뿌리에서 만들어야 한다(`socketPathUnder`) — 예전에는 registry 만 이 root 로 옮기고 socket 은 uid 로
+/// 따로 계산해, 둘이 갈렸는데도 **우연히 양쪽 다 공용 `/tmp/maru-<uid>` 라서** 맞아떨어졌다. 그 우연이
+/// 통과의 이유이자 사용자 registry 오염의 이유였다.
 fn spawnProductHost(
     product_exe: [*:0]const u8,
     session_host_root: [:0]const u8,
@@ -517,7 +521,7 @@ fn spawnProductHost(
     const child = c.fork();
     if (child < 0) return error.TestUnexpectedResult;
     if (child == 0) {
-        var env_buf: [256]u8 = undefined;
+        var env_buf: [320]u8 = undefined;
         const env_arg = std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root}) catch c._exit(127);
         const argv = [_:null]?[*:0]const u8{
             "env",
@@ -628,9 +632,16 @@ test "product read CLI connects to an existing daemon without spawning and emits
         .{ c.getpid(), nonce },
     );
     _ = c.mkdir(xdg.ptr, 0o700);
+    // base 를 **이 프로세스의 격리 root** 로 통일한다. registry(`{base}/session-host`)·socket(`{base}/sh`)·
+    // 자식에게 넘기는 `MARU_SESSION_HOST_ROOT` 가 전부 한 뿌리를 보게 하는 것이 핵심이다 — 뿌리가 갈리면
+    // 자식이 bind 한 socket 을 부모가 못 찾는다(그 상태로 `waitProductHostReady` 가 타임아웃한다).
+    //
+    // 예전에는 여기서 `{xdg}/maru` 를 썼는데, 그때는 socket 이 uid 로 고정이라 registry 만 옮겨졌고 socket 은
+    // 사용자의 공용 `/tmp/maru-<uid>/sh` 로 새어 나갔다. 이제 socket 도 root 를 따르므로 뿌리를 하나로 맞춘다.
+    // per-run 충돌은 `host_id` 의 nonce 가 이미 막고 있고, root 자체도 test runner 가 pid 로 갈라 준다.
     var base_buf: [256]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/maru", .{xdg});
-    _ = c.mkdir(base.ptr, 0o700);
+    const base = try short_endpoint.currentUserRootPathIn(&base_buf);
+    try short_endpoint.prepareCurrentUserNamespace();
     var session_buf: [320]u8 = undefined;
     const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
     _ = c.mkdir(session_dir.ptr, 0o700);
@@ -707,7 +718,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
             _ = c.rmdir(path.ptr)
         else |_| {}
         _ = c.rmdir(session_dir.ptr);
-        _ = c.rmdir(base.ptr);
+        // base 는 이제 이 프로세스 공용 격리 root 다 — 뒤따르는 테스트가 계속 쓰므로 지우지 않는다.
         _ = c.rmdir(xdg.ptr);
     }
     try waitProductHostReady(allocator, session_dir, host_id);

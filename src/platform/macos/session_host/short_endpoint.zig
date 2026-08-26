@@ -35,14 +35,22 @@ pub const root_override_env = "MARU_SESSION_HOST_ROOT";
 /// 잃게 만든다). 앱(host 를 띄우는 쪽)과 CLI(`runtime`·`attach`)가 **같은 이 함수**를 봐야
 /// 한다 — 갈리면 CLI 가 앱이 띄운 host 를 못 찾는다(실제로 그랬다).
 ///
-/// **override 는 registry 만 옮긴다 — socket 은 안 옮긴다.** `currentSocketPathIn` 은 uid 로
-/// 고정이라, 격리한 registry 와 공용 socket 디렉터리가 갈린다. §10 이 "열쇠(manifest)와
-/// 자물쇠(socket)를 한 디렉터리에" 라고 한 불변식이 **이 경로에서는 성립하지 않는다**. 지금
-/// 소비자(테스트)는 socket 경로를 따로 주입하므로 문제가 없지만, 이 문을 제품에서 쓰려 한다면
-/// 그때는 socket 도 함께 옮겨야 한다.
+/// **override 는 registry 와 socket 을 함께 옮긴다.** 예전에는 registry 만 옮기고 socket 은 uid 로
+/// 고정이라 둘이 갈렸고, §10 의 "열쇠(manifest)와 자물쇠(socket)를 한 디렉터리에" 불변식이 이
+/// 경로에서만 깨져 있었다. 당시 주석은 "소비자(테스트)가 socket 경로를 따로 주입하므로 문제가
+/// 없다"고 적었지만 **사실이 아니었다** — 2026-08-27 에 `test-session-host` 와
+/// `test-macos-app-host-abi` 가 사용자의 공용 `/tmp/maru-<uid>/sh` 에 가짜 socket 을 남겨
+/// `maru host status` 를 ambiguous 로 만들었고, 앱이 복구 세션을 adopt 하지 못해 크래시 로그도
+/// 없이 조용히 종료됐다. 격리는 **양쪽을 다 옮겨야** 격리다.
 pub fn currentUserRootPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
     if (overrideRoot(if (std.c.getenv(root_override_env)) |v| std.mem.span(v) else null)) |root|
         return std.fmt.bufPrintZ(buf, "{s}", .{root});
+    // **테스트 빌드는 공용 자리를 절대 쓰지 않는다.** override 를 걸지 않은 테스트가 하나라도 있으면
+    // 그 하나가 사용자의 `/tmp/maru-<uid>/sh` 에 가짜 host 를 남기고, 그 가짜가 `host status` 를
+    // ambiguous 로 만들어 **실행 중인 앱을 죽인다**(2026-08-27 에 두 번). 주입을 build 쪽 규율에
+    // 맡기면 새 run 스텝이 생길 때마다 같은 구멍이 다시 열리므로, 기본값 자체를 프로세스별로 가른다.
+    // pid 를 쓰므로 병렬 실행도 서로 밟지 않는다. 길이도 uid 형태보다 길지 않아 `sun_path` 여유가 그대로다.
+    if (builtin.is_test) return std.fmt.bufPrintZ(buf, "/tmp/maru-t{d}", .{std.c.getpid()});
     return userRootPathIn(buf, std.c.getuid());
 }
 
@@ -68,8 +76,28 @@ pub fn socketPathIn(buf: []u8, uid: posix.uid_t, host_id: u128) error{ NoSpaceLe
     return std.fmt.bufPrintZ(buf, "/tmp/maru-{d}/sh/{x:0>32}.sock", .{ uid, host_id });
 }
 
+/// 임의의 runtime base 아래 socket 디렉터리. `userRootPathIn` 과 짝이며, override 가 걸린
+/// 자리에서도 registry 와 같은 뿌리를 쓰게 하는 단일 출처다.
+pub fn socketDirPathUnder(buf: []u8, root: []const u8) error{NoSpaceLeft}![:0]u8 {
+    return std.fmt.bufPrintZ(buf, "{s}/sh", .{root});
+}
+
+pub fn socketPathUnder(buf: []u8, root: []const u8, host_id: u128) error{ NoSpaceLeft, InvalidHostId }![:0]u8 {
+    if (host_id == 0) return error.InvalidHostId;
+    return std.fmt.bufPrintZ(buf, "{s}/sh/{x:0>32}.sock", .{ root, host_id });
+}
+
+/// 이 프로세스가 실제로 쓸 socket 디렉터리. **registry 와 같은 뿌리**를 본다.
+pub fn currentSocketDirPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
+    var root_buf: [256]u8 = undefined;
+    const root = try currentUserRootPathIn(&root_buf);
+    return socketDirPathUnder(buf, root);
+}
+
 pub fn currentSocketPathIn(buf: []u8, host_id: u128) error{ NoSpaceLeft, InvalidHostId }![:0]u8 {
-    return socketPathIn(buf, c.getuid(), host_id);
+    var root_buf: [256]u8 = undefined;
+    const root = currentUserRootPathIn(&root_buf) catch return error.NoSpaceLeft;
+    return socketPathUnder(buf, root, host_id);
 }
 
 pub fn validateCurrentSocketPath(path: []const u8, host_id: u128) Error!void {
@@ -80,11 +108,14 @@ pub fn validateCurrentSocketPath(path: []const u8, host_id: u128) Error!void {
 
 /// Product launch 전에 호출한다. 기존 directory의 mode를 고쳐 신뢰하는 대신 exact 계약이 아니면 거부한다.
 pub fn prepareCurrentUserNamespace() Error!void {
-    var root_buf: [96]u8 = undefined;
-    const root = userRootPathIn(&root_buf, c.getuid()) catch return error.PathTooLong;
+    // **override 를 반드시 통과시킨다.** 예전에는 여기서 `userRootPathIn(uid)`·`socketDirPathIn(uid)` 를
+    // 직접 불러 공용 `/tmp/maru-<uid>` 를 만들었다. 그래서 registry 만 격리한 테스트가 socket 은 사용자의
+    // 공용 자리에 남겼고, 가짜 host 가 `host status` 를 ambiguous 로 만들어 실행 중인 앱을 깨뜨렸다.
+    var root_buf: [256]u8 = undefined;
+    const root = currentUserRootPathIn(&root_buf) catch return error.PathTooLong;
     try ensureExactOwnerDir(root);
-    var dir_buf: [112]u8 = undefined;
-    const dir = socketDirPathIn(&dir_buf, c.getuid()) catch return error.PathTooLong;
+    var dir_buf: [272]u8 = undefined;
+    const dir = currentSocketDirPathIn(&dir_buf) catch return error.PathTooLong;
     try ensureExactOwnerDir(dir);
 }
 
@@ -101,17 +132,47 @@ test "short endpoint is host-id keyed, bounded, and under the current UID namesp
     var path_buf: [128]u8 = undefined;
     const path = try currentSocketPathIn(&path_buf, 0xAABB);
     var expected_buf: [128]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buf, "/tmp/maru-{d}/sh/0000000000000000000000000000aabb.sock", .{c.getuid()});
+    // 기대값을 uid 로 직접 짜지 않고 **registry 와 같은 뿌리**에서 유도한다. 그래야 override 가 걸린
+    // 실행에서도 이 테스트가 "열쇠와 자물쇠가 한 뿌리" 를 실제로 검사한다(하드코딩하면 격리를 켜는 순간
+    // 계약이 아니라 테스트가 깨진다).
+    var root_buf: [256]u8 = undefined;
+    const root = try currentUserRootPathIn(&root_buf);
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/sh/0000000000000000000000000000aabb.sock", .{root});
     try std.testing.expectEqualStrings(expected, path);
     try std.testing.expect(path.len + 1 <= @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len);
     try validateCurrentSocketPath(path, 0xAABB);
     try std.testing.expectError(error.PathTooLong, validateCurrentSocketPath("/tmp/maru-0/sh/other.sock", 0xAABB));
 }
 
+// 회귀: override 가 registry 만 옮기고 socket 은 uid 로 고정이라, 격리했다고 믿은 테스트가 사용자의 공용
+// `/tmp/maru-<uid>/sh` 에 가짜 socket 을 남겼다. 그 가짜가 `host status` 를 ambiguous 로 만들어 실행 중인
+// 앱이 복구 세션을 adopt 하지 못했고, 세션이 ended 로 접히며 앱이 크래시 로그도 없이 종료됐다.
+// 격리는 **양쪽을 다 옮겨야** 격리다 — 이 계약을 환경변수 없이 순수 함수로 고정한다.
+test "격리 root 아래에서 registry 와 socket 은 같은 뿌리를 쓴다" {
+    var root_buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/maru-iso-test", .{});
+
+    var dir_buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("/tmp/maru-iso-test/sh", try socketDirPathUnder(&dir_buf, root));
+
+    var path_buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/tmp/maru-iso-test/sh/0000000000000000000000000000aabb.sock",
+        try socketPathUnder(&path_buf, root, 0xAABB),
+    );
+
+    // host_id 0 은 여전히 거부한다 — 뿌리를 옮겨도 키 계약은 그대로다.
+    try std.testing.expectError(error.InvalidHostId, socketPathUnder(&path_buf, root, 0));
+
+    // socket 경로는 sockaddr_un 한계 안이어야 한다. 뿌리가 길어지면 여기서 먼저 걸린다.
+    const path = try socketPathUnder(&path_buf, root, 0xAABB);
+    try std.testing.expect(path.len + 1 <= @typeInfo(@FieldType(posix.sockaddr.un, "path")).array.len);
+}
+
 test "short endpoint namespace is owner-only" {
     try prepareCurrentUserNamespace();
-    var dir_buf: [112]u8 = undefined;
-    const dir = try socketDirPathIn(&dir_buf, c.getuid());
+    var dir_buf: [272]u8 = undefined;
+    const dir = try currentSocketDirPathIn(&dir_buf);
     var stat: StatInfo = undefined;
     try std.testing.expectEqual(
         posix.E.SUCCESS,

@@ -11019,8 +11019,23 @@ pub const AppSession = struct {
                         // 자기 키 처리기 안에서 `addrEditCut`을 부르는 것과 같은 자리에 둔다.
                         editor_ops.cutSelection(self, active)
                     else switch (key_event.key) {
-                        .backspace => editor_ops.deleteText(self, active, true),
-                        .delete => editor_ops.deleteText(self, active, false),
+                        // **삭제도 단위가 있다**(§3.2). macOS 관례 그대로 — `⌥`는 낱말,
+                        // `⌘`는 줄 끝까지다(주소창이 이미 같은 chord를 쓴다: `addr_field.deleteToLineStart`).
+                        //
+                        // 경계는 `motion.zig`가 소유한다 — 이동과 **같은 자리**여야 "⌥←로 간 곳"과
+                        // "⌥⌫가 지운 곳"이 갈리지 않는다.
+                        .backspace => editor_ops.deleteBy(self, active, true, if (m.option)
+                            .word
+                        else if (m.command)
+                            .line_edge
+                        else
+                            .char),
+                        .delete => editor_ops.deleteBy(self, active, false, if (m.option)
+                            .word
+                        else if (m.command)
+                            .line_edge
+                        else
+                            .char),
                         .enter => editor_ops.insertText(self, active, "\n"),
                         .tab => editor_ops.insertText(self, active, "\t"),
                         else => false,

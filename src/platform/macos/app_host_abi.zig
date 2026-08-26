@@ -691,6 +691,27 @@ fn openAppLogFd(base: [:0]const u8) c_int {
 ///
 /// 이 파일의 `c` 는 `@cImport(app_host_abi.h)` 라 daemon.zig 의 `c = std.c` 와 다르다. syscall 은
 /// `std.c` 로 명시해 부른다 — 섞으면 플래그가 조용히 깨진다.
+/// 실행 중에도 캡을 지킨다.
+///
+/// `openAppLogFd` 는 **열 때 한 번만** 크기를 재므로, 앱이 며칠 떠 있으면 그 캡이 아무 의미가 없다.
+/// 2026-08-27 실측: 4MB 캡을 둔 `app.log` 가 **28MB** 까지 자랐다(원인은 tick 마다 찍히던 정상 로그).
+/// 그 소음은 따로 없앴지만, 캡은 소음이 다시 생겨도 파일이 무한히 자라지 않게 하는 마지막 방어선이라
+/// 주기적으로도 재야 한다.
+///
+/// redirect 이후 fd 2 가 곧 app.log 이므로 별도 fd 를 들고 다니지 않는다. `O_APPEND` 라 오프셋을 끝으로
+/// 옮겨도 다음 write 는 그대로 끝에 붙고, truncate 뒤에는 0 부터 다시 쌓인다.
+/// **우리가 실제로 fd 2 를 app.log 로 바꿨을 때만** 참이다. 이 플래그 없이 `isatty` 만 보면
+/// `maru-macos-app 2> mylog.txt` 처럼 사용자가 자기 파일로 리다이렉트한 실행에서 — `isatty` 는 0 이고
+/// `openAppLogFd` 가 실패해 리다이렉트는 일어나지 않은 상태에서 — 캡이 **사용자 파일을 잘라버린다**.
+/// 로그를 줄이려다 남의 데이터를 파괴하는 교환은 성립하지 않는다.
+var app_log_redirected: bool = false;
+
+fn enforceAppLogCap() void {
+    if (builtin.is_test) return;
+    if (!app_log_redirected) return;
+    if (std.c.lseek(2, 0, std.c.SEEK.END) > app_log_max_bytes) _ = std.c.ftruncate(2, 0);
+}
+
 fn redirectStderrToAppLog() void {
     if (builtin.is_test) return;
     if (std.c.isatty(2) != 0) return;
@@ -702,7 +723,8 @@ fn redirectStderrToAppLog() void {
     defer if (fd > 2) {
         _ = std.c.close(fd);
     };
-    _ = std.c.dup2(fd, 2);
+    if (std.c.dup2(fd, 2) < 0) return;
+    app_log_redirected = true;
 
     // 여러 실행이 한 파일에 쌓이므로 어디부터가 이번 실행인지 보이게 한다.
     var header_buf: [96]u8 = undefined;
@@ -1738,6 +1760,20 @@ pub export fn maru_macos_app_session_activate_surface(session: ?*AppSession, sur
 // projection and therefore reuses its fresh host.info/runtime.get authority checks. No-match probe
 // returns 0; malformed, unknown, duplicate, stale, or failed routes return 2 and never fall back to
 // a fresh shell.
+/// 복구 세션 adopt 가 **왜** 실패했는지 남긴다.
+///
+/// 지금까지 이 경로는 사용자에게 "이 세션을 복구하지 못했습니다" 한 문장만 보여주고 사유를 통째로 버렸다
+/// (`catch {}` 가 error 값을 버렸고, `!handled` 분기는 아무것도 남기지 않았다). 2026-08-27 에 사용자가
+/// 목록의 host 를 눌렀을 때 실패했는데 `app.log`·unified log·crash report 어디에도 단서가 없어, host_id 가
+/// 레지스트리에 없다는 **정황**까지밖에 좁히지 못했다. 사유를 버리지 않는 것이 진단의 출발점이다.
+fn logRecoveredAdoptFailed(host_id: u128, runtime_id: u128, reason: []const u8) void {
+    if (builtin.is_test) return;
+    std.log.err(
+        "recovered session adopt failed: host={x:0>32} runtime={x:0>32} reason={s}",
+        .{ host_id, runtime_id, reason },
+    );
+}
+
 pub export fn maru_macos_app_session_activate_notification_runtime(
     session: ?*AppSession,
     host_id_hi: u64,
@@ -1759,12 +1795,16 @@ pub export fn maru_macos_app_session_activate_notification_runtime(
         host_id,
         runtime_id,
         action,
-    ) catch {
-        if (action == .adopt_recovered)
+    ) catch |err| {
+        if (action == .adopt_recovered) {
+            logRecoveredAdoptFailed(host_id, runtime_id, @errorName(err));
             app_session.showNoticeKey(.app_recovered_session_failed);
+        }
         return 2;
     };
     if (!handled and action == .adopt_recovered) {
+        // `handled=false` 는 error 가 아니다 — 붙을 대상을 못 찾았다는 뜻이라 사유가 더더욱 필요하다.
+        logRecoveredAdoptFailed(host_id, runtime_id, "not_handled");
         app_session.showNoticeKey(.app_recovered_session_failed);
         return 2;
     }
@@ -2623,6 +2663,7 @@ pub export fn maru_macos_workspace_checkpoint_tick(
     now_ns: u64,
     out_effect: ?*c.MaruWorkspaceCheckpointEffect,
 ) c_int {
+    enforceAppLogCap();
     const out = out_effect orelse return @intFromEnum(Status.null_out);
     clearWorkspaceCheckpointEffect(out);
     if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);

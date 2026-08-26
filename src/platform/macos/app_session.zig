@@ -10986,8 +10986,9 @@ pub const AppSession = struct {
         // reportMouse(코어 mutate + 응답)는 full (a)(docs/plans/io-render-threading.md §9 P3-4)로 reader에 위임 — reader가
         // 적용 후 pendingResponse를 PTY로 흘린다. button 3 = no-button motion(any-event 1003). 적용 시점에 앱이 1003을
         // 꺼도 reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전.
-        // command(32)은 마우스 리포트 modifier가 아니라 그룹 드래그 전용이라 마스킹해 뺀다(위 mouse() report 경로와 동형 — motion 비트 32 충돌 회피).
-        self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods & ~@as(i32, 32)) } }, self.io) catch {};
+        // xterm modifier(shift=4, option=8, ctrl=16)만 wire로 넘긴다. command(32)은 그룹 드래그 전용이고,
+        // ABI에서 들어온 알 수 없는 상위/음수 비트도 제거해야 i32→u8 변환이 trap하지 않는다.
+        self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods & (4 | 8 | 16)) } }, self.io) catch {};
     }
 
     /// 스크린 px → 셀 변환 결과. 순수 산술·CellHit는 session/layout_math.zig로 분리(b2) — 여긴 alias.
@@ -59752,6 +59753,26 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     const surface = term_ops.activeSurface(session);
     surface.remote = .{ .ctx = &fake, .vtable = &FakeLinkScreen.vtable };
     defer surface.remote = null;
+    var report_bytes: std.ArrayList(u8) = .empty;
+    defer report_bytes.deinit(allocator);
+    var report_capture = ReportCaptureCtx{ .buf = &report_bytes };
+    var capture_runtime = app.SurfaceRuntime.init(allocator);
+    defer capture_runtime.deinit();
+    _ = try capture_runtime.attach(surface, surface.id, .{
+        .ctx = &report_capture,
+        .write_input = ReportCaptureCtx.write,
+        .resize_fn = testNoopPtyResize,
+    });
+    const product_runtime = session.runtime;
+    session.runtime = &capture_runtime;
+    defer session.runtime = product_runtime;
+    {
+        surface.lockCore(session.io);
+        defer surface.unlockCore(session.io);
+        // AppSession의 gate는 remote observation이 소유하지만, 아래 capture runtime은 reader 없는
+        // 동기 제품 fallback이라 실제 reportMouse encoding을 검증하도록 동일 host mode를 세운다.
+        try surface.core.write("\x1b[?1003h\x1b[?1006h");
+    }
 
     const term = pane_ops.activePane(session).terms.items[pane_ops.activePane(session).active_term];
     term.rt.observation.availability = .current;
@@ -59764,12 +59785,20 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.none);
     session.mouseMoved(x, y, 0);
     try std.testing.expect(session.last_motion_cell == null);
+    try std.testing.expectEqual(@as(usize, 0), report_bytes.items.len);
+
+    // button-event(1002)도 버튼 없는 hover는 보내지 않는다.
+    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.button);
+    session.mouseMoved(x, y, 0);
+    try std.testing.expect(session.last_motion_cell == null);
+    try std.testing.expectEqual(@as(usize, 0), report_bytes.items.len);
 
     // 클릭 트래킹(1000)만 켜짐 → motion은 여전히 안 보낸다(1000만 켠 앱에 motion을 쏟으면 오작동).
     term.rt.observation.mouse_tracking = true;
     term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.normal);
     session.mouseMoved(x, y, 0);
     try std.testing.expect(session.last_motion_cell == null);
+    try std.testing.expectEqual(@as(usize, 0), report_bytes.items.len);
 
     // any-event(1003) → motion을 보낸다. 예전에는 placeholder core(.none)를 읽어 여기서도 null이었다.
     term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.any);
@@ -59777,6 +59806,27 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     const reported = session.last_motion_cell orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 5), reported.col);
     try std.testing.expectEqual(@as(u16, 2), reported.row);
+    try std.testing.expectEqualStrings("\x1b[<35;6;3M", report_bytes.items);
+
+    // 60~120Hz mouseMoved가 같은 셀에 머물면 wire를 늘리지 않는다.
+    session.mouseMoved(x + 1, y + 1, 0);
+    try std.testing.expectEqualStrings("\x1b[<35;6;3M", report_bytes.items);
+
+    // ABI의 알 수 없는 상위 modifier 비트는 버린다. u8 cast trap 없이 다음 셀 motion은 정상 전송한다.
+    session.mouseMoved(x + @as(f64, @floatFromInt(session.cell_width_px)), y, 1 << 20);
+    try std.testing.expectEqualStrings("\x1b[<35;6;3M\x1b[<35;7;3M", report_bytes.items);
+
+    // Shift/Option은 local selection override다. 다른 셀이어도 host wire는 0이어야 한다.
+    session.mouseMoved(x + @as(f64, @floatFromInt(session.cell_width_px)), y, 4);
+    session.mouseMoved(x + 2 * @as(f64, @floatFromInt(session.cell_width_px)), y, 8);
+    try std.testing.expectEqualStrings("\x1b[<35;6;3M\x1b[<35;7;3M", report_bytes.items);
+
+    // chrome을 경유하면 dedup을 비워 터미널 재진입 첫 셀은 다시 한 번 전달된다.
+    session.mouseMoved(1, y, 0);
+    try std.testing.expect(session.last_motion_cell == null);
+    try std.testing.expectEqualStrings("\x1b[<35;6;3M\x1b[<35;7;3M", report_bytes.items);
+    session.mouseMoved(x, y, 0);
+    try std.testing.expectEqualStrings("\x1b[<35;6;3M\x1b[<35;7;3M\x1b[<35;6;3M", report_bytes.items);
 }
 
 // host-backed 스크롤바 회귀 가드. 스크롤바 thumb은 스크롤백 길이와 view offset으로 계산하는데, 예전 호출처들은

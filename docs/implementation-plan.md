@@ -1285,6 +1285,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    구조적 20ms floor 제거와 hard latency cap, 250ms idle wake/CPU, active notifier/write/drain, fd·child cleanup을 증명한다.
    실제 pipe 포화·broken read end와 restore graph의 새 notifier는 process/unit gate가 맡고, 장시간 idle은 운영 soak 범위다.
 
+   **P4 parity micro-gate (완료):** P4의 C4→E1→E2 다음 순서로, host-backed DECSET 1003
+   motion과 selection autoscroll을 독립 제품 gate로 승격한다. `test-session-host-input-parity`는 Debug·ReleaseFast에서
+   AppSession 관측 게이트, 실제 forkpty host reader의 xterm SGR motion byte, 실제 host selection scroll-and-extend 뒤
+   authoritative copy와 source boundary를 함께 실행한다. 같은 셀/비-any/override/chrome 억제는 제품형 테스트로,
+   capability 없는 구 host의 fail-closed degradation은 source boundary로 고정했다.
+
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라

@@ -6959,8 +6959,8 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     RPC(`server.MouseReport` primitive) 신설 — client는 **raw 이벤트만** 보내고 host core가 자기 `mouse_tracking`/`mouse_format`으로
     SGR/x10을 인코딩(인코딩 모드가 host에만 있어 client가 몰라도 됨). ⑶ host `reportMouseOp`은 로컬과 **동형**으로 report_mouse를
     host의 **reader에 `enqueueCoreCommand`**한다 — reader가 적용 후 `pendingResponse`를 PTY로 흘려, 모든 PTY 입력 쓰기를 reader
-    단일 스레드로 모아 dispatch↔reader PTY-write race를 없앤다. **고빈도 1003 hover motion은
-    latency 우려로 후속**(휠/클릭/드래그가 사용자 보고 케이스를 덮음).
+    단일 스레드로 모아 dispatch↔reader PTY-write race를 없앤다. 고빈도 1003 hover motion도 아래 mode-aware
+    경로와 제품 gate를 사용한다.
   - **P3-e4c-2(붙여넣기 bracketed parity) ✅**: 관측에 `bracketed_paste`(optional) 추가 — host-backed `submitPaste`가 placeholder
     대신 관측의 bracketed로 DECSET 2004 판정·인코딩(`pasteNeedsConfirmationWith` 순수 변형)해, Claude Code 등이 붙여넣은 파일
     경로를 `[Image]`로 인식하고 멀티라인이 실행되지 않는다. **bracketed는 mouse_tracking과 같은 "클라가 자기 UI 판단(paste-protection
@@ -7023,7 +7023,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `RenderSnapshot`을 채워** 소비자가 화면 소유자를 묻지 않는 한 경로(`scrollStateOf`)를 쓴다. ⌘⇧R은 placeholder만
     리셋해 원격 앱이 계속 mouse/focus 리포트를 보냈다 — `core_command`에 `reset_input_modes` op를 더해 host core에
     적용한다. 두 필드는 record 끝에 붙은 optional이라 구 host는 0으로 남아 기존 동작(미표시)을 유지한다.
-  - **P3-e4c-6(마우스 motion parity) 🟨**: host-backed의 **버튼 없는 motion 리포팅(DECSET 1003)**이 관측 모드를 쓴다.
+  - **P3-e4c-6(마우스 motion parity)**: host-backed의 **버튼 없는 motion 리포팅(DECSET 1003)**이 관측 모드를 쓴다.
     클릭 리포팅은 이미 관측으로 이관됐는데 `mouseMoved`만 placeholder core를 읽어(항상 `.none`) 원격에서 motion이
     통째로 빠져 있었다 — 1003을 켠 앱(vim/tmux hover)이 무동작. 근본 원인은 관측의 `mouse_tracking`이 **bool**이라
     1000/1002/1003을 가를 수 없었던 것이라, optional `mouse_tracking_mode`(`terminal.MouseTracking` ordinal)를 추가하고
@@ -7057,8 +7057,13 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     focus/config/prompt의 backend-neutral core-command 경로는 bounded codec·controller auth·실 host reader core 적용과
     focus `CSI I` PTY write까지 자동 검증한다. 일반 key의 DECCKM/DECKPAM/kitty 인코딩 parity는 P3-e4c-4에서 완료했다. 남은
     input parity gate에서 Reset Terminal은 host 소유 core 적용까지 닫혔고, Clear Screen도 같은 core-command reader
-    순서축에서 권위 core clear와 조건부 `^L` 주입을 함께 닫았다. 남은 축은 고빈도 1003 hover, selection
-    autoscroll이다. 전체 선택은 host 권위 추출 의도와 client-local viewport highlight를 분리해 완료했다. 사용자 word separator는 bounded request·host 권위 선택·구 host
+    순서축에서 권위 core clear와 조건부 `^L` 주입을 함께 닫았다. 고빈도 1003 hover와 selection autoscroll은
+    하나의 제품 경계 gate를 공유한다. AppSession은 host-backed 관측의 exact `.any`에서만 button 3 motion을
+    enqueue하고 같은 셀 반복, 1000/1002, Shift/Option override와 chrome 경유를 PTY write 0으로 억제한다. host reader는
+    실제 forkpty child가 DECSET 1003+1006을 게시한 뒤 그 raw command를 xterm SGR no-button motion byte로 정확히 한 번
+    기록해야 한다. selection autoscroll은 `selection_scroll_and_extend`를 host reader의 ordered command fence에 넣고,
+    뒤따르는 authoritative copy가 viewport 밖 anchor를 포함해야 한다. capability 없는 same-major host는 두 상태를
+    client에서 추측하지 않고 motion 0·autoscroll transaction no-op으로 낮춘다. 전체 선택은 host 권위 추출 의도와 client-local viewport highlight를 분리해 완료했다. 사용자 word separator는 bounded request·host 권위 선택·구 host
     additive-field degradation을 자동 검증한다. cwd/SSH destination/raw process argv는
     trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local

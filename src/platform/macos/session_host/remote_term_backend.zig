@@ -12,7 +12,8 @@
 //!
 //! metadata observation(cwd/title/SSH/foreground process/mode/size)은 host full-state event+fresh barrier로 읽는다.
 //! focus/config/prompt command는 `runtime_core_command_v1`로 host reader에 보내며, 일반 key의
-//! DECCKM/DECKPAM/kitty mode와 selection autoscroll parity는 후속 gate다. macOS 전용(client·Surface·app 계약).
+//! DECCKM/DECKPAM/kitty mode, DECSET 1003 motion과 selection autoscroll parity도 같은 원격 owner 경계를
+//! 사용한다. macOS 전용(client·Surface·app 계약).
 
 const std = @import("std");
 const builtin = @import("builtin");

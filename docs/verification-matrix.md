@@ -2146,6 +2146,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller wire로 보내 healthy client의 exact delta marker까지 측정한 raw artifact와 `performance-budget.md` hard cap이 없으면
   구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 빠른 제품 gate는 250ms idle wake delta 0과 CPU
   cap, 7 active marker의 notifier/write/drain 증가를 소유하며, 장시간 idle soak는 CR6f 이후 운영 soak 범위로 남긴다.
+- **P4 input parity micro-gate: 구현.** `test-session-host-input-parity`가 Debug·ReleaseFast에서 host-backed
+  AppSession의 DECSET 1003 exact-mode/중복·modifier·chrome 억제, 실제 forkpty host reader의 xterm SGR no-button motion
+  byte, `selection_scroll_and_extend` 두 번 뒤 authoritative copy와 source boundary를 exact-count한다. AppSession 행은
+  reader 없는 product fallback의 실제 SGR bytes로 같은 셀 중복, 1000/1002 mode, Shift/Option override와 chrome 경유 재진입을
+  함께 고정하고, host 행은 독립 forkpty child가 받은 bytes와 viewport 밖 authoritative selection text를 검증한다.
+  capability 없는 구 host의 motion 0·selection transaction no-op은 동적 legacy process E2E가 아니라 source boundary다.
 - **P4 E2 runtime-shared observation cache: 구현(E2a·E2b·E2c artifact/cap gate).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
   E2a의 `runtime_observation_cache.Cache`는 canonical bytes와 checked-monotonic change token을 소유하고, 동일 bytes의
   allocation/token 증가 0, changed prepare→exact-token commit, stale prepared 거부, OOM·token overflow 때 이전 bytes/token

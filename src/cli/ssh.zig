@@ -473,6 +473,63 @@ test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·
 /// 게이트가 아니어도 fork 절차를 두 벌 두는 것은 그 자체로 나쁘다.
 const SpawnedShell = struct { pid: std.c.pid_t, fd: c_int };
 
+/// 셸 하네스가 자식을 거두기까지 허용하는 시간. 정상 경로는 수 ms 이므로 넉넉하다 — 이 값은
+/// "빠른가"를 재는 것이 아니라 **영원히 멈추지 않게** 하는 상한이다.
+const shell_wait_timeout_ms: u32 = 10_000;
+/// 데드라인을 쪼개는 잠 단위.
+const shell_wait_slice_ms: c_int = 10;
+
+/// `fork` 는 부모의 signal disposition 을 자식에게 그대로 물려준다. 그런데 **셸은 진입 시점에 이미
+/// 무시(`SIG_IGN`) 상태이던 시그널을 `trap` 으로 다시 잡지 못한다** — POSIX Shell Command Language
+/// §2.11 이 "Signals that were ignored on entry to a non-interactive shell cannot be trapped or reset"
+/// 이라고 못박는다. 그래서 부모가 SIGINT 를 무시하고 있으면 자식 셸의 `trap 'cleanup_notify 130' INT`
+/// 가 통째로 무력화되고, 셸은 신호를 받아도 죽지 않는다 — 하네스의 `while :; do :; done` 이 코어
+/// 하나를 태우며 남고 부모의 `waitpid` 는 영영 안 끝난다.
+///
+/// **실측(2026-08-26)**: 이 트리에 그렇게 멈춘 test 바이너리가 5 개(최고 16 시간 30 분) 있었고, 그
+/// 자식 스핀 셸 26 개가 CPU 약 1,020% 를 태우고 있었다. `zig build test` 가 "20분+ 출력 0바이트로
+/// 완주하지 못한다"(docs/development-commands.md)던 증상의 정체가 이것이다.
+///
+/// 되돌리는 자리가 `spawnShell` 인 이유는 두 하네스(`expectNotifyLifecycle`·`runSessionLoop`)가 같은
+/// 셸 수명을 공유하기 때문이다 — 한쪽만 고치면 다른 쪽이 같은 방식으로 멈춘다.
+fn restoreDefaultSignals() void {
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    // 하네스가 실제로 trap 하는 셋에, 백그라운드 잡에서 관례적으로 무시되는 QUIT 을 더한다.
+    for ([_]std.posix.SIG{ .INT, .HUP, .TERM, .QUIT }) |sig| std.posix.sigaction(sig, &act, null);
+}
+
+/// 자식을 데드라인 안에서 거둔다. 거뒀으면 `true`.
+///
+/// `waitpid(…, 0)` 은 자식이 끝나지 않으면 **영영 돌아오지 않는다**. 그러면 테스트는 실패조차 못 하고
+/// `zig build test` 가 통째로 멈춰 선다 — 위 `restoreDefaultSignals` 의 실측이 정확히 그 상태였다.
+/// 루트커즈를 고쳤어도 이 안전망은 남긴다: **원인이 무엇이든 테스트는 끝나야** 무엇이 틀렸는지 본다.
+///
+/// 잠은 `poll(빈 배열, 0, ms)` 로 잔다. Zig 0.16 std 에는 프로세스용 sleep 이 없고(그 자리는 `std.Io`
+/// 로 옮겨져 Io 인스턴스를 요구한다), 이 파일이 이미 부르는 libc 표면 안에서 끝내는 편이 `cli/`
+/// 순수성 재고를 덜 흔든다.
+fn waitpidWithin(child: std.c.pid_t, status: *c_int, timeout_ms: u32) bool {
+    var waited: u32 = 0;
+    while (true) {
+        if (std.c.waitpid(child, status, std.c.W.NOHANG) == child) return true;
+        if (waited >= timeout_ms) return false;
+        var idle: [0]std.c.pollfd = .{};
+        _ = std.c.poll(&idle, 0, shell_wait_slice_ms);
+        waited += @intCast(shell_wait_slice_ms);
+    }
+}
+
+/// 데드라인을 넘긴 자식을 확실히 걷어낸다. 남기면 스핀 셸이 고아로 남아 코어를 계속 태운다 —
+/// 위 실측에서 고아 26 개가 쌓인 경로가 이것이다(부모가 죽어도 자식은 안 죽는다).
+fn reapRunaway(child: std.c.pid_t) void {
+    _ = std.c.kill(child, std.posix.SIG.KILL);
+    var discarded: c_int = 0;
+    _ = std.c.waitpid(child, &discarded, 0);
+}
+
 fn spawnShell(script_z: [:0]const u8, capture_stderr: bool) ?SpawnedShell {
     var pipe_fds: [2]c_int = undefined;
     if (std.c.pipe(&pipe_fds) != 0) return null;
@@ -488,6 +545,8 @@ fn spawnShell(script_z: [:0]const u8, capture_stderr: bool) ?SpawnedShell {
         // 재접속 루프의 안내는 stderr로 나가므로(CLI 진단 관례) 그쪽 테스트만 stderr까지 모은다.
         if (capture_stderr) _ = std.c.dup2(pipe_fds[1], 2);
         _ = std.c.close(pipe_fds[1]);
+        // exec 직전에 되돌린다 — 이유는 `restoreDefaultSignals` 의 주석에 있다.
+        restoreDefaultSignals();
         const sh: [:0]const u8 = "/bin/sh";
         const arg0: [:0]const u8 = "sh";
         const arg1: [:0]const u8 = "-c";
@@ -540,7 +599,14 @@ fn expectNotifyLifecycle(body: []const u8, signal: ?std.c.SIG, expected_exit: u3
     if (signal) |sig| try std.testing.expectEqual(@as(c_int, 0), std.c.kill(child, sig));
 
     var status: c_int = 0;
-    try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    // **무한 `waitpid` 를 쓰지 않는다.** 위 `defer` 는 이 줄을 **지나간 뒤**에야 도는데, 여기서 영원히
+    // 멈추면 그 자리에 닿지 못한다 — 자식을 거두는 장치가 있어도 부모가 먼저 걸려 버리는 것이다.
+    // 데드라인을 걸고, 넘기면 죽여서 거둔 뒤 **실패로 보고한다**(멈춰 서면 실패조차 못 한다).
+    if (!waitpidWithin(child, &status, shell_wait_timeout_ms)) {
+        reapRunaway(child);
+        reaped = true; // `reapRunaway` 가 이미 거뒀다 — defer 가 재사용된 pid 를 건드리지 않게 한다.
+        return error.TestUnexpectedResult;
+    }
     reaped = true;
     drainShell(spawned.fd, &output, &used);
     try std.testing.expectEqualStrings("notify\nclear\n", output[0..used]);
@@ -565,6 +631,26 @@ test "notify lifecycle: normal exit and HUP INT TERM emit ssh-end exactly once w
     try expectNotifyLifecycle(wait_body, std.posix.SIG.HUP, 129);
     try expectNotifyLifecycle(wait_body, std.posix.SIG.INT, 130);
     try expectNotifyLifecycle(wait_body, std.posix.SIG.TERM, 143);
+}
+
+test "notify lifecycle: 부모가 SIGINT를 무시해도 자식 셸의 trap 은 살아 있다" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    // **이 테스트가 잡는 회귀**: `fork` 는 disposition 을 물려주고, 셸은 진입 시 무시 상태이던 시그널을
+    // `trap` 하지 못한다(POSIX §2.11). 그래서 `spawnShell` 이 exec 직전에 기본 처리로 되돌리지 않으면
+    // 자식이 신호를 받고도 안 죽고, 하네스는 `waitpid` 에서 **영영 멈춘다** — 실측으로 16 시간 넘게
+    // 멈춘 test 바이너리가 있었다. 위의 lifecycle 테스트는 부모가 기본 처리일 때만 돌아 이것을 못 잡는다.
+    //
+    // 러너 전체의 disposition 을 잠깐 바꾸므로 반드시 되돌린다.
+    const ignore: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(std.posix.SIG.INT, &ignore, &previous);
+    defer std.posix.sigaction(std.posix.SIG.INT, &previous, null);
+
+    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.INT, 130);
 }
 
 test "embed: 바이너리에 terminfo 소스가 들어있고 emit 구절이 그걸 흘린다" {
@@ -768,7 +854,10 @@ fn runSessionLoop(allocator: std.mem.Allocator, setup: []const u8, out: []u8) ![
     var used: usize = 0;
     drainShell(spawned.fd, out, &used);
     var status: c_int = 0;
-    _ = std.c.waitpid(spawned.pid, &status, 0);
+    if (!waitpidWithin(spawned.pid, &status, shell_wait_timeout_ms)) {
+        reapRunaway(spawned.pid);
+        return error.TestUnexpectedResult;
+    }
     return out[0..used];
 }
 

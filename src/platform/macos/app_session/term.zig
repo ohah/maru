@@ -434,8 +434,10 @@ pub fn createTerm(
     // loud-fail한다. keep-alive를 끈 복원은 identity를 명시적으로 무시하고 일반 in-process spawn으로 전환한다.
     const reconnect_host_id = self.restore_runtime_host_id;
     const reconnect_id = self.restore_runtime_id;
+    const force_reconnect = self.restore_runtime_force_attach;
     self.restore_runtime_host_id = "";
     self.restore_runtime_id = "";
+    self.restore_runtime_force_attach = false;
     var reconnected = false; // attach(재접속) 경로면 true — errdefer가 terminate 대신 detach로 되돌린다(아래).
     // 새 host runtime은 reader를 시작하기 전에 이 snapshot을 적용해야 한다. spawn 뒤 별도 RPC만 쓰면 child가
     // 즉시 낸 첫 출력이 기본 폭/scrollback/theme으로 parse되는 race가 생긴다. in-process도 같은 값으로 시작하고,
@@ -458,7 +460,7 @@ pub fn createTerm(
         .default_cursor_shape = settings_ops.configCursorShape(self),
     };
     const surface = surface: {
-        if (is_macos and app_session_mod.app_keep_alive_after_quit and reconnect_id.len > 0) {
+        if (is_macos and (app_session_mod.app_keep_alive_after_quit or force_reconnect) and reconnect_id.len > 0) {
             if (reconnect_id.len != 32) return error.InvalidPersistentRuntimeIdentity;
             var reconnect_host: u128 = 0;
             if (reconnect_host_id.len > 0) {

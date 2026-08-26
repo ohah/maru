@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 174u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 175u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1030,6 +1030,20 @@ int32_t maru_macos_app_session_pending_notification(
    자리로 포커스한다(switchTab→focusPaneByPtr→focusTerm). 찾아 활성화했으면 1, 이미 닫혔으면 0(무동작). session
    null=0. take_bell과 같은 u32 반환(found 여부). v76. */
 uint32_t maru_macos_app_session_activate_surface(MaruAppHostSession *session, uint64_t surface_id);
+/* Stable host notification click. Probe each live normal Window with action=0 without mutation; an
+   exact single match is activated with action=1. With zero matches, only the primary Window may use
+   action=2, which consumes the current Recovered Sessions row via
+   fresh host.info/runtime.get validation. Returns 0 for probe/activate no-match, 1 for exact
+   match/activation/adoption, and 2 for invalid, stale, duplicate, or failed routes. No failure
+   spawns a fallback shell. v175. */
+uint32_t maru_macos_app_session_activate_notification_runtime(
+    MaruAppHostSession *session,
+    uint64_t host_id_hi,
+    uint64_t host_id_lo,
+    uint64_t runtime_id_hi,
+    uint64_t runtime_id_lo,
+    uint32_t action
+);
 /* G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨
    (NSSound.beep)을 울린다(벨은 OS 소유). */
 uint32_t maru_macos_app_session_take_bell(MaruAppHostSession *session);

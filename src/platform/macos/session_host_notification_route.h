@@ -18,4 +18,23 @@ size_t maru_session_host_notification_format_identifier(
     size_t out_cap
 );
 
+/* Strict decoder for persisted Notification Center userInfo scalars plus request identifier.
+   Hex IDs must be exactly 32 lowercase ASCII digits and nonzero; event ID is canonical nonzero
+   decimal u64. The identifier must equal the shared formatter output. Returns 1 on success. */
+int maru_session_host_notification_parse_route(
+    const char *hid,
+    size_t hid_len,
+    const char *rid,
+    size_t rid_len,
+    const char *eid,
+    size_t eid_len,
+    const char *identifier,
+    size_t identifier_len,
+    uint64_t *hid_hi_out,
+    uint64_t *hid_lo_out,
+    uint64_t *rid_hi_out,
+    uint64_t *rid_lo_out,
+    uint64_t *eid_out
+);
+
 #endif

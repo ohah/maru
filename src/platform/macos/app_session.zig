@@ -217,6 +217,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
+// 175: notification response의 stable `{hid,rid}`를 현재 AppSession binding에서 먼저 활성화하고, primary caller가
+// 허용한 경우에만 current Recovered Sessions projection의 exact 한 행을 기존 fresh-authority adopt로 넘기는 export를
+// 추가한다. Swift가 이 symbol을 직접 호출하므로 old Zig/new host 조합은 ABI guard에서 실패해야 한다.
 // 174: pending_notification에 optional host stable route의 presence와 fixed-width `{hid,rid,eid}` out field를
 // 추가한다. Swift가 이 시그니처를 직접 호출하므로 낡은 host/new Zig 조합은 ABI guard에서 실패해야 한다.
 // 173: 접근성 서술자를 host 로 여는 네 export(count/element/label/value)와 새 extern struct
@@ -227,7 +230,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 174;
+pub const abi_version: u32 = 175;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3211,6 +3214,118 @@ pub const AppSession = struct {
     pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
         return term_ops.activateSurfaceById(self, id);
     }
+
+    pub const NotificationRuntimeAction = enum {
+        probe_bound,
+        activate_bound,
+        adopt_recovered,
+    };
+
+    /// N3 stable notification response 제품 경로. process-local surface id는 cold launch 뒤 재사용될 수 있으므로
+    /// stable handle과 현재 RemoteTermBackend binding을 exact 비교해 같은 세션 안의 live Term만 먼저 활성화한다.
+    /// caller가 primary에서 `.adopt_recovered`를 고른 마지막 단계만 app-global projection의 exact 한 행을 기존
+    /// fresh-authority adopt로 넘긴다. unknown/duplicate는 새 shell이나 topology fallback 없이 닫힌다.
+    pub fn activateNotificationRuntime(
+        self: *AppSession,
+        host_id: u128,
+        runtime_id: u128,
+        action: NotificationRuntimeAction,
+    ) !bool {
+        if (host_id == 0 or runtime_id == 0 or self.is_quick) return error.InvalidAuthority;
+        var bound_surface_id: ?u64 = null;
+        if (app_remote_backend) |*remote| {
+            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                const bound_host_id = remote.runtimeHostId(term.rt.handle) orelse continue;
+                if (bound_host_id != host_id) continue;
+                const bound_runtime_hex = remote.runtimeIdFor(term.rt.handle) orelse continue;
+                const bound_runtime_id = std.fmt.parseInt(u128, &bound_runtime_hex, 16) catch continue;
+                if (bound_runtime_id != runtime_id) continue;
+                if (bound_surface_id != null) return error.InvalidAuthority;
+                bound_surface_id = term.surfaceId();
+            };
+        }
+        if (bound_surface_id) |surface_id| {
+            if (action == .probe_bound) return true;
+            if (!self.activateSurfaceById(surface_id)) return error.InvalidAuthority;
+            self.markNotificationsReadBySurface(surface_id);
+            return true;
+        }
+        if (action != .adopt_recovered) return false;
+        if (!self.is_primary_window) return error.InvalidAuthority;
+
+        var projection_index: ?usize = null;
+        for (app_recovered_sessions_projection.rows, 0..) |row, index| {
+            if (row.host_id != host_id or row.runtime_id != runtime_id) continue;
+            if (projection_index != null) return error.InvalidAuthority;
+            projection_index = index;
+        }
+        if (projection_index) |index| {
+            try self.activateRecoveredSessionAt(index);
+            return true;
+        }
+
+        // A persisted banner can outlive a later keep-alive config change, so N3 cannot require a
+        // Recovered Sessions projection. Resolve the exact runtime against the secure current
+        // registry without launching a host, require the selected descriptor's host_id to match,
+        // then publish the normal pool adapter and reuse the existing attachExisting staging path.
+        const allocator = std.heap.smp_allocator;
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const base = sessionHostRuntimeBase(arena_state.allocator()) orelse
+            return error.SessionHostUnavailable;
+        try self.adoptNotificationRuntimeAtBase(base, host_id, runtime_id);
+        return true;
+    }
+
+    fn adoptNotificationRuntimeAtBase(
+        self: *AppSession,
+        base: []const u8,
+        host_id: u128,
+        runtime_id: u128,
+    ) !void {
+        const allocator = std.heap.smp_allocator;
+        const phase = session_host.attach_phase_deadline.PhaseDeadline.start(self.io, .resolve) catch
+            return error.SessionHostUnavailable;
+        var resolved = switch (session_host.attach_product_resolver.resolveProduct(
+            allocator,
+            base,
+            runtime_id,
+            phase,
+        )) {
+            .selected => |value| value,
+            .failed => return error.InvalidAuthority,
+        };
+        defer resolved.deinit();
+        if (resolved.host_id != host_id) return error.InvalidAuthority;
+        if (self.ensureRestoreHostAdapterAtBase(base, host_id) != .ready)
+            return error.SessionHostUnavailable;
+        var host_id_buf: [32]u8 = undefined;
+        var runtime_id_buf: [32]u8 = undefined;
+        _ = std.fmt.bufPrint(&host_id_buf, "{x:0>32}", .{host_id}) catch unreachable;
+        _ = std.fmt.bufPrint(&runtime_id_buf, "{x:0>32}", .{runtime_id}) catch unreachable;
+        try self.attachExistingRuntimeInNewTab(&host_id_buf, &runtime_id_buf);
+    }
+
+    fn attachExistingRuntimeInNewTab(self: *AppSession, host_id: []const u8, runtime_id: []const u8) !void {
+        std.debug.assert(self.restore_runtime_host_id.len == 0 and self.restore_runtime_id.len == 0 and
+            !self.restore_runtime_force_attach);
+        self.restore_runtime_host_id = host_id;
+        self.restore_runtime_id = runtime_id;
+        // This staged identity was selected by fresh recovery/notification authority. It may attach
+        // even if keep-alive was toggled off after the runtime and banner were created; the bit is
+        // consumed with the IDs by createTerm and never affects a later user-created Term.
+        self.restore_runtime_force_attach = true;
+        errdefer {
+            self.restore_runtime_host_id = "";
+            self.restore_runtime_id = "";
+            self.restore_runtime_force_attach = false;
+        }
+        _ = try tab_ops.newTab(self);
+        std.debug.assert(self.restore_runtime_host_id.len == 0 and self.restore_runtime_id.len == 0 and
+            !self.restore_runtime_force_attach);
+        pane_ops.activePane(self).activeTerm().rt.restored_existing = false;
+        term_ops.finishInitialSurface(self);
+    }
     /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
     pub fn agentSessionArchiveSmokeActiveSurfaceId(self: *const AppSession) u64 {
         return term_ops.agentSessionArchiveSmokeActiveSurfaceId(self);
@@ -3598,26 +3713,16 @@ pub const AppSession = struct {
         _ = std.fmt.bufPrint(&host_id_buf, "{x:0>32}", .{row.host_id}) catch unreachable;
         switch (row.kind) {
             .orphan => {
-                std.debug.assert(self.restore_runtime_host_id.len == 0 and self.restore_runtime_id.len == 0);
-                self.restore_runtime_host_id = &host_id_buf;
-                self.restore_runtime_id = &runtime_id_buf;
-                errdefer {
-                    self.restore_runtime_host_id = "";
-                    self.restore_runtime_id = "";
-                }
-                _ = try tab_ops.newTab(self);
-                std.debug.assert(self.restore_runtime_host_id.len == 0 and self.restore_runtime_id.len == 0);
+                try self.attachExistingRuntimeInNewTab(&host_id_buf, &runtime_id_buf);
                 // `createTerm` keeps this bit set only while an existing host runtime is staged: every
                 // fallible suffix before publication must detach instead of terminating it.  The tab is
                 // now part of the live AppSession graph, so later user/window teardown owns the normal
                 // terminate path just like a successfully published workspace restore.
-                pane_ops.activePane(self).activeTerm().rt.restored_existing = false;
                 app_recovered_sessions_projection.consumeExactNoFail(
                     projection_index,
                     row,
                     next_projection_generation,
                 );
-                term_ops.finishInitialSurface(self);
             },
             .ended_present_conflict => try replaceRecoveredEnded(
                 ended_location orelse return error.InvalidAuthority,
@@ -4044,6 +4149,7 @@ pub const AppSession = struct {
     // migration이다. 둘 다 읽고 즉시 클리어해 다음 create로 새지 않는다.
     restore_runtime_host_id: []const u8 = "",
     restore_runtime_id: []const u8 = "",
+    restore_runtime_force_attach: bool = false,
     // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
     // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
     host_connect_notice_pending: bool = false,
@@ -6545,7 +6651,10 @@ pub const AppSession = struct {
     pub fn backendForNew(self: *AppSession) app.TermRuntimeBackend {
         // keep-alive를 끈 즉시 이후 Term은 local이어야 한다. quick은 아직 workspace manifest에 handle을 저장하지 않으므로
         // remote로 만들면 정상 Quit detach 뒤 재접속할 경로가 없는 orphan이 된다.
-        if (!app_keep_alive_after_quit or self.is_quick) return term_ops.termBackend(self);
+        if (self.is_quick) return term_ops.termBackend(self);
+        if (!app_keep_alive_after_quit and
+            !(self.restore_runtime_force_attach and self.restore_runtime_id.len > 0))
+            return term_ops.termBackend(self);
         // host_connect_failed면 원격을 안 고른다 — 초기 연결 실패(그땐 backend가 null이라 무해)뿐 아니라, **런타임 중 host가
         // 죽은 뒤**(createTerm이 연결사로 감지해 세움, #3)에도 새 Term은 in-process로 연다. 기존 host-backed Term의 close/remove
         // 라우팅은 `backendFor`(게이트 없음)가 여전히 공유 backend로 보낸다(client-side 회수는 host 없어도 됨).
@@ -67690,7 +67799,7 @@ test "CR6a-2 primary sidebar는 dead 또는 malformed discovery를 complete empt
     try std.testing.expectEqual(maru.session.runtime_reconcile.UnavailableReason.stale, inventories.items[2].unavailable.reason);
 }
 
-const Cr6RecoveredFixtureMode = enum { inert, orphan, ended_conflict, stale_projection, stale_manifest_slot, missing_runtime, deadline_stall, attach_oom };
+const Cr6RecoveredFixtureMode = enum { inert, orphan, notification_orphan, notification_direct, ended_conflict, stale_projection, stale_manifest_slot, missing_runtime, deadline_stall, attach_oom };
 
 fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode) !void {
     if (!is_macos) return error.SkipZigTest;
@@ -67890,7 +67999,25 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         try sidebar_ops.rebuildSidebar(session);
     }
 
-    if (mode != .inert) {
+    if (mode == .notification_direct) {
+        const runtime_value = try std.fmt.parseInt(u128, &runtime_id, 16);
+        app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
+        app_keep_alive_after_quit = false;
+        const backend_count_before = app_remote_backend.?.runtimes.count();
+        try std.testing.expectError(
+            error.InvalidAuthority,
+            session.adoptNotificationRuntimeAtBase(base, host_id + 1, runtime_value),
+        );
+        try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+        try std.testing.expectEqual(backend_count_before, app_remote_backend.?.runtimes.count());
+        try session.adoptNotificationRuntimeAtBase(base, host_id, runtime_value);
+        try std.testing.expectEqual(backend_count_before + 1, app_remote_backend.?.runtimes.count());
+        try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+        try std.testing.expect(!session.restore_runtime_force_attach);
+        try std.testing.expectEqual(host_id, app_remote_backend.?.runtimeHostId(pane_ops.activePane(session).activeTerm().rt.handle).?);
+        try std.testing.expectEqual(runtime_id, app_remote_backend.?.runtimeIdFor(pane_ops.activePane(session).activeTerm().rt.handle).?);
+    }
+    if (mode != .inert and mode != .notification_direct) {
         const row_before = app_recovered_sessions_projection.rows[0];
         const projection_generation_before = app_recovered_sessions_projection.generation;
         const source_graph_generation_before = session.session_host_window_graph_generation;
@@ -67921,7 +68048,7 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         }
         const action_started_ns = std.Io.Clock.awake.now(io).nanoseconds;
         switch (mode) {
-            .inert => unreachable,
+            .inert, .notification_direct => unreachable,
             .orphan, .stale_projection, .missing_runtime, .deadline_stall, .attach_oom => {
                 session.sidebar_width_px = 200;
                 session.sidebar_header_height_px = 40;
@@ -67942,6 +68069,23 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
                 } else {
                     session.mouse(1, 10, click_y, 0, 0);
                 }
+            },
+            .notification_orphan => {
+                const runtime_value = try std.fmt.parseInt(u128, &runtime_id, 16);
+                const projection_before = app_recovered_sessions_projection.generation;
+                const backend_count_before = app_remote_backend.?.runtimes.count();
+                try std.testing.expectError(
+                    error.InvalidAuthority,
+                    session.activateNotificationRuntime(host_id + 1, runtime_value, .adopt_recovered),
+                );
+                try std.testing.expectEqual(projection_before, app_recovered_sessions_projection.generation);
+                try std.testing.expectEqual(backend_count_before, app_remote_backend.?.runtimes.count());
+                try std.testing.expect(!(try session.activateNotificationRuntime(host_id, runtime_value, .probe_bound)));
+                try std.testing.expect(try session.activateNotificationRuntime(host_id, runtime_value, .adopt_recovered));
+                // A repeated response finds the live binding after the projection row is consumed;
+                // it must not create a duplicate tab or a second host attachment.
+                try std.testing.expect(try session.activateNotificationRuntime(host_id, runtime_value, .probe_bound));
+                try std.testing.expect(try session.activateNotificationRuntime(host_id, runtime_value, .activate_bound));
             },
             .ended_conflict, .stale_manifest_slot => {
                 if (mode == .stale_manifest_slot)
@@ -68010,11 +68154,11 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         // shell here would add a second runtime to the same host on every app relaunch and hide
         // the row that the user is expected to recover.
         .inert, .stale_projection, .stale_manifest_slot, .missing_runtime, .deadline_stall, .attach_oom => 0,
-        .orphan, .ended_conflict => 1,
+        .orphan, .notification_orphan, .notification_direct, .ended_conflict => 1,
     }), session.tabs.items.len);
     try std.testing.expectEqual(@as(usize, switch (mode) {
         .inert, .stale_projection, .stale_manifest_slot, .missing_runtime, .deadline_stall, .attach_oom => 2,
-        .orphan, .ended_conflict => 1,
+        .orphan, .notification_orphan, .notification_direct, .ended_conflict => 1,
     }), session.sidebar_rows.items.len);
     if (mode == .inert) {
         _ = try session.resize(800, 600, 1000);
@@ -68046,6 +68190,14 @@ test "CR6a-2 primary sidebar는 실제 secure discovery와 ephemeral inventory �
 
 test "CR6b orphan row action은 fresh authority 뒤 exact runtime을 새 비고정 탭으로 채택한다" {
     return runCr6RecoveredSessionRealHostFixture(.orphan);
+}
+
+test "N3 stable notification route는 actual host exact runtime을 채택하고 재응답에 중복 attach하지 않는다" {
+    return runCr6RecoveredSessionRealHostFixture(.notification_orphan);
+}
+
+test "N3 stable notification route는 projection과 keep-alive가 없어도 secure registry에서 exact attach한다" {
+    return runCr6RecoveredSessionRealHostFixture(.notification_direct);
 }
 
 test "CR6b ended conflict row action은 다른 Window의 exact tombstone을 같은 pane 슬롯에서 교체한다" {

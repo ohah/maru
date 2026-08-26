@@ -52,11 +52,14 @@ test "CR6b 경계는 projection을 직접 attach 권위로 쓰지 않고 fresh e
         return error.TestUnexpectedResult;
     const evidence_pos = std.mem.indexOf(u8, activation, "recovered_session_adopt.validateFreshEvidence(") orelse
         return error.TestUnexpectedResult;
-    const orphan_publish_pos = std.mem.indexOf(u8, activation, "tab_ops.newTab(self)") orelse
+    const orphan_publish_pos = std.mem.indexOf(u8, activation, "self.attachExistingRuntimeInNewTab(") orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(host_info_pos < runtime_get_pos);
     try std.testing.expect(runtime_get_pos < evidence_pos);
     try std.testing.expect(evidence_pos < orphan_publish_pos);
+    const notification_attach = between(app_session, "fn attachExistingRuntimeInNewTab(", "pub fn agentSessionArchiveSmokeActiveSurfaceId") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(notification_attach, "tab_ops.newTab(self)"));
     try std.testing.expectEqual(@as(usize, 1), count(host_adapter, "pub fn callUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(host_adapter, "self.slot.callCurrentUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(workspace, "try assignEndedManifestOrdinals(new_tabs.items, win);"));
@@ -89,7 +92,7 @@ test "CR6b 경계는 projection을 직접 attach 권위로 쓰지 않고 fresh e
     try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=3"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "run_cr6b_projection_tests.addArg(\"--maru-expect-tests=1\");"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "run_cr6b_boundary_tests.addArg(\"--maru-expect-tests=1\");"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_cr6b_product_tests.addArg(\"--maru-expect-tests=10\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_cr6b_product_tests.addArg(\"--maru-expect-tests=12\");"));
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -3866,6 +3866,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     )
     // 알림 클릭 라우팅 토큰 채번기(makeTerminalSurface가 단조 증가로 부여 — 창마다 유일). 0은 미설정 sentinel이라 1부터.
     private var nextSurfaceToken: UInt64 = 1
+    private struct StableNotificationRoute: Equatable, Sendable {
+        let hostIdHi: UInt64
+        let hostIdLo: UInt64
+        let runtimeIdHi: UInt64
+        let runtimeIdLo: UInt64
+        let eventId: UInt64
+    }
+    // Notification Center can deliver the launch response before AppSession/recovery publication.
+    // Keep only typed scalars, deduplicate the OS callback key, and never let persisted userInfo grow
+    // an unbounded launch queue. MainActor owns both this queue and all AppSession mutation.
+    private static let maxPendingStableNotificationRoutes = 8
+    private var pendingStableNotificationRoutes: [StableNotificationRoute] = []
+    private var stableNotificationRoutingReady = false
     // 앱-전역 "메인/첫 일반 창" 별칭(= windows.first). 앱 요약·종료처럼 특정 한 창이 기준일 때 쓴다. 창별
     // 타게팅 세분화(key 창 기준 메뉴/포커스)는 W4. TerminalSurface는 reference라 `primary?.field = x` 변형은
     // 객체를 통해 그대로 동작한다(컬렉션 재대입이 아님).
@@ -4304,6 +4317,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 두면 future refactor에서 delegate가 일찍 해제될 수 있으므로 명시적으로 잡아 둔다.
         retainedDelegate = delegate
         app.delegate = delegate
+        // Install before NSApplication.run so a notification-launched process cannot lose its first
+        // response while applicationDidFinishLaunching is still creating recovery authority.
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().delegate = delegate
+        }
         app.setActivationPolicy(.regular)
         app.run()
         Darwin.exit(delegate.exitCode)
@@ -4405,6 +4423,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
 
+        // All restored Window bindings and the app-global recovered projection now exist. A response
+        // received before this point is safe to consume exactly once through the same product path.
+        stableNotificationRoutingReady = true
+        drainPendingStableNotificationRoutes()
+
         // 표준 메뉴바를 세운다(커맨드 카탈로그에서 액션 항목·단축키를 읽어). smoke에서도 빌드해 구성 경로를
         // CI가 구동한다(메뉴는 OS-global 부수효과가 없어 hotkey 등록과 달리 게이트 불요).
         buildMainMenu()
@@ -4419,14 +4442,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if !smokeMode {
             // 전역(OS) 단축키를 OS에 등록한다(앱이 비활성이어도 동작). smoke는 자동 종료라 등록하지 않는다.
             registerGlobalHotkeys()
-        }
-
-        // 알림 클릭/포그라운드 콜백(didReceive·willPresent)을 받으려면 delegate가 **launch 완료 전에** 걸려 있어야
-        // 한다(Apple 요구사항) — 앱이 꺼진 상태에서 알림 클릭으로 켜진 경우의 첫 didReceive를 놓치지 않으려면 첫 tick의
-        // ensureNotificationAuthorization(lazy)이 아니라 여기서 등록해야 한다. 번들 ID가 없으면(smoke 등)
-        // UNUserNotificationCenter를 못 써 건너뛴다(권한 요청은 여전히 첫 tick에서 lazy로).
-        if Bundle.main.bundleIdentifier != nil {
-            UNUserNotificationCenter.current().delegate = self
         }
 
         // The first frame can already expose the cold dock launcher.  Install the fixture driver
@@ -7410,27 +7425,154 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (token: wt, surfaceId: sid)
     }
 
+    /// Persisted Notification Center userInfo is untrusted input, not attach authority. Accept only
+    /// the exact N2b3 scalar representation and require the request identifier to be the canonical
+    /// shared-C rendering of those scalars. Display text and process-local wt/sid are never parsed as
+    /// a stable handle.
+    private nonisolated static func parseStableNotificationRoute(
+        _ userInfo: [AnyHashable: Any],
+        requestIdentifier: String
+    ) -> StableNotificationRoute? {
+        guard let hostText = userInfo["hid"] as? String,
+              let runtimeText = userInfo["rid"] as? String,
+              let eventNumber = userInfo["eid"] as? NSNumber,
+              CFGetTypeID(eventNumber) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(eventNumber),
+              UInt64(eventNumber.stringValue) != nil else { return nil }
+        var hostIdHi: UInt64 = 0
+        var hostIdLo: UInt64 = 0
+        var runtimeIdHi: UInt64 = 0
+        var runtimeIdLo: UInt64 = 0
+        var eventId: UInt64 = 0
+        let accepted = hostText.withCString { hid in
+            runtimeText.withCString { rid in
+                eventNumber.stringValue.withCString { eid in
+                    requestIdentifier.withCString { identifier in
+                        maru_session_host_notification_parse_route(
+                            hid, hostText.utf8.count,
+                            rid, runtimeText.utf8.count,
+                            eid, eventNumber.stringValue.utf8.count,
+                            identifier, requestIdentifier.utf8.count,
+                            &hostIdHi, &hostIdLo,
+                            &runtimeIdHi, &runtimeIdLo,
+                            &eventId
+                        )
+                    }
+                }
+            }
+        }
+        guard accepted != 0 else { return nil }
+        return StableNotificationRoute(
+            hostIdHi: hostIdHi,
+            hostIdLo: hostIdLo,
+            runtimeIdHi: runtimeIdHi,
+            runtimeIdLo: runtimeIdLo,
+            eventId: eventId
+        )
+    }
+
+    private func handleStableNotificationRoute(_ route: StableNotificationRoute) {
+        guard stableNotificationRoutingReady else {
+            if pendingStableNotificationRoutes.contains(route) { return }
+            guard pendingStableNotificationRoutes.count < Self.maxPendingStableNotificationRoutes else { return }
+            pendingStableNotificationRoutes.append(route)
+            return
+        }
+
+        // Pass 1 probes every normal Window without mutation. Exactly one live binding may win; two
+        // matches are an invalid cross-Window duplicate and fail closed before focus/topology changes.
+        // The route itself is stable; eventId is identity/dedup, not capability.
+        var boundSurface: TerminalSurface?
+        for surface in windows {
+            guard let session = surface.appSession else { continue }
+            let matched = maru_macos_app_session_activate_notification_runtime(
+                session,
+                route.hostIdHi,
+                route.hostIdLo,
+                route.runtimeIdHi,
+                route.runtimeIdLo,
+                0
+            )
+            if matched == 2 { return }
+            guard matched == 1 else { continue }
+            if boundSurface != nil { return }
+            boundSurface = surface
+        }
+        if let surface = boundSurface, let session = surface.appSession {
+            guard maru_macos_app_session_activate_notification_runtime(
+                session,
+                route.hostIdHi,
+                route.hostIdLo,
+                route.runtimeIdHi,
+                route.runtimeIdLo,
+                1
+            ) == 1 else { return }
+            surface.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Pass 2 is primary-only and may consume one current Recovered Sessions row. Zig performs
+        // fresh host.info/runtime.get validation and fails closed; there is deliberately no default
+        // shell fallback for an unknown, stale, duplicate, or failed notification route.
+        guard let surface = primary, let session = surface.appSession,
+              maru_macos_app_session_activate_notification_runtime(
+                  session,
+                  route.hostIdHi,
+                  route.hostIdLo,
+                  route.runtimeIdHi,
+                  route.runtimeIdLo,
+                  2
+              ) == 1 else { return }
+        surface.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        withSurface(surface) { _ = renderTick() }
+    }
+
+    private func drainPendingStableNotificationRoutes() {
+        guard stableNotificationRoutingReady else { return }
+        let pending = pendingStableNotificationRoutes
+        pendingStableNotificationRoutes.removeAll(keepingCapacity: true)
+        for route in pending { handleStableNotificationRoute(route) }
+    }
+
     // 알림 클릭 → 발신 터미널로 점프. userInfo의 (token, surface_id)에서 token으로 정확한 창(세션)을 고르고(surface.id는
     // 세션-로컬이라 token 없이 id만으론 창 간 오활성화가 난다), 창을 키로 올린 뒤 surface_id를 activate_surface로 넘겨
     // Zig가 탭/pane/Term을 활성화한다(경계: 창 활성화=Swift AppKit, 세션 내 역조회/포커스=Zig). 창/Term이 이미 닫혔으면
     // 무동작(창만 활성화). completionHandler는 모든 경로에서 호출한다(누락 시 OS 경고).
-    // UNUserNotificationCenterDelegate 요구사항은 nonisolated라 메서드도 nonisolated로 선언하고, 실제 작업은
-    // MainActor에서 한다 — 이 콜백은 메인 스레드로 오므로 assumeIsolated로 동기 진입한다(코드베이스 공통 패턴).
+    // UNUserNotificationCenterDelegate 요구사항은 nonisolated이고 Apple 계약은 callback queue를 main으로
+    // 고정하지 않는다. persisted payload를 값 타입으로 먼저 파싱한 뒤 UI/AppSession mutation을 MainActor로
+    // 명시적으로 hop한다. completionHandler도 그 작업이 끝난 모든 경로에서 정확히 한 번 호출한다.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        MainActor.assumeIsolated {
+        let request = response.notification.request
+        let userInfo = request.content.userInfo
+        let stableRoute = Self.parseStableNotificationRoute(
+            userInfo,
+            requestIdentifier: request.identifier
+        )
+        let hasStableKey = userInfo["hid"] != nil || userInfo["rid"] != nil || userInfo["eid"] != nil
+        let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo)
+        Task { @MainActor [weak self] in
             defer { completionHandler() } // 누락 시 OS 경고 — 모든 경로에서 보장.
-            guard let route = Self.parseNotificationRoute(response.notification.request.content.userInfo) else { return }
-            guard let surface = surfaceForToken(route.token) else { return } // 창이 닫혔으면 무동작.
-            if surface === quick, let panel = surface.window {
+            guard let self else { return }
+            if let stableRoute {
+                self.handleStableNotificationRoute(stableRoute)
+                return
+            }
+            // Any stable-key-shaped response that failed strict parsing is malformed persisted input.
+            // Never reinterpret its possibly stale wt/sid as a local route in a new process.
+            guard !hasStableKey, let route = localRoute else { return }
+            guard let surface = self.surfaceForToken(route.token) else { return } // 창이 닫혔으면 무동작.
+            if surface === self.quick, let panel = surface.window {
                 // quick 패널은 숨김 시 화면 밖(frames.hidden)에 있어, 그냥 makeKeyAndOrderFront하면 보이지 않는 창이
                 // 키를 가져간다. 숨김 상태면 정식 show 경로(슬라이드/페이드 + grid + 상태)를 태우고, 이미 보이면 키만 올린다.
                 if panel.isVisible {
                     panel.makeKeyAndOrderFront(nil)
                     NSApp.activate(ignoringOtherApps: true)
                 } else {
-                    showQuickTerminalAnimated(panel) // 내부에서 makeKeyAndOrderFront + NSApp.activate 수행
+                    self.showQuickTerminalAnimated(panel) // 내부에서 makeKeyAndOrderFront + NSApp.activate 수행
                 }
             } else {
                 surface.window?.makeKeyAndOrderFront(nil)

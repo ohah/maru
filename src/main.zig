@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 760;
+const smoke_spin_cap: usize = 800;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -2839,44 +2839,66 @@ fn refreshSidebarCards(
 /// 통째로 멈춘다 — 그때는 접힌 그대로 두고 다음 프레임으로 넘어간다(트리는 다음 클릭에 다시 시도한다).
 ///
 /// 돌려주는 값: 행 목록이 바뀌었나(= 다시 그려야 하나).
+/// 트리 행 하나를 토글하고 **스캔은 제출까지만** 한다.
+///
+/// **결과를 여기서 기다리지 않는다.** 예전에는 400 회까지 `sleep(1ms)` 로 돌며 기다렸는데, 그동안
+/// 창이 통째로 멈춘다 — 큰 폴더나 느린 디스크에서 눈에 띈다(§2m.55 가 그것을 한계로 적어 뒀다).
+/// 받는 일은 루프가 매 프레임 하는 `drainTreeScan` 이 한다.
+///
+/// **접기는 즉시 반영된다** — 요청이 안 생기므로 기다릴 것도 없다.
 fn toggleTreeRow(
     allocator: std.mem.Allocator,
-    io: std.Io,
     tree: *maru.session.file_tree.Tree,
     backend: ?*file_tree_backend.Backend,
     rows: *std.ArrayList(maru.session.file_tree.Row),
     root_path: []const u8,
     path: []const u8,
+    /// 이 토글이 스캔을 **제출했는지**. 접기는 제출하지 않으므로 비동기 판정은 이것을 봐야 한다.
+    submitted_out: ?*bool,
 ) bool {
     _ = tree.toggleDirectory(path) catch return false;
-
-    // 펼치면서 예약된 스캔이 있으면 그것부터 돌린다. 접는 쪽은 요청이 없어 바로 아래로 간다.
     if (backend) |b| {
         while (tree.takeScanRequest()) |req| {
             if (!b.submit(req, 0)) {
                 allocator.free(req);
                 break;
             }
-        }
-        var rounds: usize = 0;
-        while (rounds < 400) : (rounds += 1) {
-            if (b.takeResult()) |taken| {
-                var result = taken;
-                defer result.deinit(allocator, io);
-                if (!result.ok) break;
-                var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
-                defer inputs.deinit(allocator);
-                for (result.entries.items) |e|
-                    inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break;
-                tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch break;
-                break;
-            }
-            io.sleep(.fromMilliseconds(1), .awake) catch {};
+            if (submitted_out) |o| o.* = true;
         }
     }
-
     tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch return false;
     // **아이콘 종류를 다시 채운다** — 새 행에는 분류가 안 들어 있다(§2m.42 가 그 실패를 겪었다).
+    cell_text.classifyFileTreeRows(rows.items);
+    return true;
+}
+
+/// 와 있는 스캔 결과를 **전부** 받아 트리에 반영한다. 행이 바뀌었으면 `true`.
+///
+/// 루프가 매 프레임 부른다. **하나만 받고 끝내지 않는다** — 한 프레임에 여러 폴더가 돌아올 수 있고,
+/// 남겨 두면 그 결과가 다음 프레임까지 안 보인다.
+fn drainTreeScan(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    tree: *maru.session.file_tree.Tree,
+    backend: ?*file_tree_backend.Backend,
+    rows: *std.ArrayList(maru.session.file_tree.Row),
+    root_path: []const u8,
+) bool {
+    const b = backend orelse return false;
+    var applied = false;
+    while (b.takeResult()) |taken| {
+        var result = taken;
+        defer result.deinit(allocator, io);
+        if (!result.ok) continue;
+        var inputs: std.ArrayList(maru.session.file_tree.EntryInput) = .empty;
+        defer inputs.deinit(allocator);
+        for (result.entries.items) |e|
+            inputs.append(allocator, .{ .name = e.name, .kind = e.kind, .identity = e.identity }) catch break;
+        tree.applySnapshotWithIdentity(result.path, result.identity, inputs.items) catch continue;
+        applied = true;
+    }
+    if (!applied) return false;
+    tree.buildRows(allocator, &.{.{ .path = root_path, .active = true }}, rows) catch return false;
     cell_text.classifyFileTreeRows(rows.items);
     return true;
 }
@@ -3102,33 +3124,110 @@ fn groupKeyAt(scratch: std.mem.Allocator, archive: *const AgentArchive, gi: u64)
     return null;
 }
 
-fn buildAgentItems(
+/// 이력 훑기를 **제출만** 한다. 결과는 `drainAgentItems` 가 프레임 루프에서 받는다.
+///
+/// **백엔드가 이 함수보다 오래 산다** — 예전에는 여기서 만들고 여기서 버리며 그 사이 3000 회까지
+/// `sleep(1ms)` 로 기다렸다. 이력이 큰 기계에서는 그 시간 동안 **창이 아예 안 떴다.** 트리 펼치기와
+/// 같은 모양으로 갈랐다(§2m.68).
+/// 훑기 메모리가 **돌아오는지** 재려고 감싸는 allocator. 최고점과 지금 살아 있는 양을 센다.
+///
+/// arena 로는 이것을 못 잰다 — arena 는 원래 안 돌려주므로 `queryCapacity` 가 최고점에서 안 내려온다.
+/// 그리고 그 최고점이 이 기계에서 **40 MB** 다: 훑는 동안만 필요한 것을 앱 수명으로 들고 있으면
+/// 창 하나가 그만큼을 계속 물고 있게 된다.
+const CountingAllocator = struct {
+    child: std.mem.Allocator,
+    live: usize = 0,
+    peak: usize = 0,
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn note(self: *CountingAllocator, delta_add: usize, delta_sub: usize) void {
+        self.live = self.live + delta_add - delta_sub;
+        if (self.live > self.peak) self.peak = self.live;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawAlloc(len, a, ra) orelse return null;
+        self.note(len, 0);
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.child.rawResize(buf, a, new_len, ra)) return false;
+        self.note(new_len, buf.len);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, buf: []u8, a: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawRemap(buf, a, new_len, ra) orelse return null;
+        self.note(new_len, buf.len);
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, a: std.mem.Alignment, ra: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(buf, a, ra);
+        self.note(0, buf.len);
+    }
+};
+
+fn submitAgentScan(
+    scan: std.mem.Allocator,
+    backend: *agent_archive_backend.Backend,
+    home: []const u8,
+) []const u8 {
+    const home_owned = scan.dupe(u8, home) catch return "scan_failed";
+    if (!backend.submit(home_owned, false)) {
+        scan.free(home_owned);
+        return "submit_refused";
+    }
+    return "";
+}
+
+/// 와 있는 이력 결과를 받아 카드로 만든다. 아직 안 왔으면 `null` — **그 프레임은 그냥 지나간다.**
+///
+/// 돌려주는 문자열은 `agent_list_reason` 그대로다(`""` 이면 성공).
+fn drainAgentItems(
     scan: std.mem.Allocator,
     persist: std.mem.Allocator,
     io: std.Io,
-    home: []const u8,
+    backend: *agent_archive_backend.Backend,
+    archive: *AgentArchive,
+    out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
+) ?[]const u8 {
+    var res = backend.takeResult() orelse return null;
+    defer res.deinit(scan);
+    switch (res.outcome) {
+        // **자격이 있는 것만 목록을 갈아 끼운다.** `cancelled` 는 보이는 것을 대체할 자격이 없고
+        // `retain_previous` 는 그 이름 그대로 이전을 지키라는 뜻이다(백엔드 doc). 갈아 끼우면
+        // 취소된 세대의 부분 목록이 완성본 자리에 앉는다.
+        .cancelled, .retain_previous => return null,
+        .completed, .partial_progress => {},
+    }
+    return drainAgentItemsInner(scan, persist, io, &res, archive, out) catch "scan_failed";
+}
+
+fn drainAgentItemsInner(
+    scan: std.mem.Allocator,
+    persist: std.mem.Allocator,
+    io: std.Io,
+    res_in: *agent_archive_backend.Result,
     archive: *AgentArchive,
     out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
 ) ![]const u8 {
-    var backend = agent_archive_backend.Backend.init(scan, io) catch return "backend_init";
-    defer backend.deinit();
-    const home_owned = try scan.dupe(u8, home);
-    if (!backend.submit(home_owned, false)) return "submit_refused";
-
-    // **상한을 둔다** — 이력이 크면 오래 걸리고, 시작에서 무한히 기다리면 창이 안 뜬다.
-    var rounds: usize = 0;
-    var result: ?agent_archive_backend.Result = null;
-    while (rounds < 3000) : (rounds += 1) {
-        if (backend.takeResult()) |taken| {
-            result = taken;
-            break;
-        }
-        io.sleep(.fromMilliseconds(1), .awake) catch {};
-    }
-    // **이유가 정확해야 한다.** 상한에 걸린 것과 이력이 없는 것은 다른 사실인데, 둘 다 "카드 0" 으로
+    const res = res_in.*;
+    // **이유가 정확해야 한다.** 이력이 없는 것과 훑기가 깨진 것은 다른 사실인데, 둘 다 "카드 0" 으로
     // 끝난다 — 하나로 접으면 큰 이력을 가진 기계에서 "이력이 없다" 고 보고하게 된다.
-    var res = result orelse return "scan_timeout";
-    defer res.deinit(scan);
     if (res.records.items.len == 0) return "no_history";
 
     // ── 레코드 → **오래 사는 재료** ──────────────────────────────────────────────────────────
@@ -4217,6 +4316,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
 
     var dock_rebuild_failures: usize = 0;
+    // **비동기가 진짜인가**의 관측점. **제출한** 프레임과 그 결과가 반영된 프레임이 같으면 아직 그
+    // 자리에서 기다리는 것이다. 접기는 제출을 안 하므로 아무 토글이나 재면 판정이 어긋난다.
+    var tree_scan_applied: usize = 0;
+    var tree_expand_submit_spin: ?usize = null;
+    var tree_expand_apply_spin: ?usize = null;
+    // **창이 먼저 뜨는가.** 이력 훑기가 끝난 **뒤에** 첫 프레임이 나오면 그것이 예전 동작이다 —
+    // 그러면 이 값이 영영 `null` 이다(루프가 받을 것이 남아 있지 않다).
+    var agent_apply_spin: ?usize = null;
+    // **새로고침이 진짜 다시 훑는가.** 인텐트를 받은 횟수만 세면 속 빈다(라우팅은 이미 다른 판정이
+    // 잰다) — **제출**과 그 뒤에 **결과가 또 왔는지**를 갈라 센다.
+    var agent_refresh_submits: usize = 0;
+    var agent_applies: usize = 0;
+    var ag_refresh_judgeable = false;
+    var ag_refresh_applies_before: usize = 0;
     var dock_region_uploads: usize = 0;
     var dock_cells_outside: usize = 0;
     var dock_rows_drawn: u16 = 0;
@@ -4344,6 +4457,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const home_dir = maru.user_paths.homeDirFor(@import("builtin").os.tag, home_env, up_env);
     var agent_arena = std.heap.ArenaAllocator.init(allocator);
     defer agent_arena.deinit();
+    // **훑는 동안 나오는 것**도 이제 앱 수명이다 — 결과를 루프가 받으므로 그때까지 살아 있어야 하고,
+    // 백엔드 doc 이 요구하는 것도 그것이다("In production `allocator` must be process-lifetime" —
+    // `deinit` 이 nonblocking 이라 worker 가 그 뒤에 만질 수 있다). 예전 코드는 이 arena 를 블록
+    // 끝에서 버렸는데, **기다렸기 때문에** 무사했던 것이다.
+    //
+    // **arena 가 아니다.** 이력이 크면 훑기가 이 기계에서 40 MB 를 쓰는데 arena 는 그것을 안 돌려준다
+    // — 앱 수명으로 올리는 순간 그 40 MB 가 창에 눌러앉는다.
+    var agent_counting = CountingAllocator{ .child = allocator };
+    var agent_backend: ?agent_archive_backend.Backend = null;
+    defer if (agent_backend) |*b| b.deinit();
     var agent_items: std.ArrayList(maru.chrome.components.session_dock.types.Item) = .empty;
     // 재투영 재료 — 그룹을 접으면 이것으로 목록을 다시 만든다(레코드 원본은 스캔 arena 와 함께 사라진다).
     var agent_archive: AgentArchive = .{};
@@ -4400,10 +4523,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **홈은 중립이 정한다**(`user_paths.homeDirFor`) — Windows 는 `HOME` 이 없어 `%USERPROFILE%`
         // 로 간다. 여기서 손으로 고르면 그 규칙이 두 곳이 된다(그 함수 doc 이 왜 이렇게 되는지 적어 뒀다).
         if (home_dir) |home| {
-            var scan_arena = std.heap.ArenaAllocator.init(allocator);
-            defer scan_arena.deinit();
-            agent_list_reason = buildAgentItems(scan_arena.allocator(), agent_arena.allocator(), io, home, &agent_archive, &agent_items) catch "scan_failed";
-            agent_scan_kb = scan_arena.queryCapacity() / 1024;
+            agent_backend = agent_archive_backend.Backend.init(agent_counting.allocator(), io) catch null;
+            if (agent_backend) |*b| {
+                agent_list_reason = submitAgentScan(agent_counting.allocator(), b, home);
+                // **아직 결과가 없다.** 이 자리에서 기다리지 않으므로 첫 프레임의 목록은 비어 있고,
+                // 루프가 받는 순간 채워진다 — 그래서 여기서는 `pending` 이다.
+                if (agent_list_reason.len == 0) agent_list_reason = "pending";
+            } else agent_list_reason = "backend_init";
         } else agent_list_reason = "no_home";
     }
     const scm_tokens = chromeTokensFor(cfg);
@@ -4704,7 +4830,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 실기가 세션을 스스로 만들고 셸에 `MARK-ONE` 을 치고 창을 최대화하고 그룹을 접었다(실측
     // 2026-08-26: 캡처에 그 글자가 찍혀 드러났다). 스모크만 스핀 상한을 넘기므로 그것이 판정이다.
     const smoke = max_spins != null;
-    while ((max_spins == null or spins < max_spins.?) and !window.quit_requested and !close_requested) : (spins += 1) {
+    var frames_total: usize = 0;
+    var settle_frames: usize = 0;
+    var agent_settling = false;
+    while ((max_spins == null or spins < max_spins.?) and !window.quit_requested and !close_requested) : ({
+        // ── 스모크의 단계 번호는 **이력이 온 뒤부터** 센다 ─────────────────────────────────────
+        //
+        // 단계가 고정된 `spins` 번호에 걸려 있는데 이력 훑기는 이제 **몇백 프레임 뒤**에 온다 —
+        // 그냥 두면 카드 판정들이 **빈 목록**을 재고, 기계가 빠르냐 느리냐에 따라 초록·빨강이
+        // 오간다(실측으로 275 와 518 을 봤다). 그동안은 번호를 멈춰 세운다.
+        //
+        // **비동기 판정은 이 번호를 안 쓴다** — `frames_total` 로 잰다. 같은 값을 쓰면 "멈춰 세웠으니
+        // 0 이다" 가 되어 판정이 자기 자신을 증명한다.
+        frames_total += 1;
+        if (agent_settling) settle_frames += 1 else spins += 1;
+    }) {
         if (smoke and spins == 60) {
             // **판정 불가와 실패를 가른다.** 창이 좁아 도크가 없으면 누를 것이 없는데, 그것을
             // `dock_row_clicks=0` 으로만 적으면 고장난 것처럼 읽힌다(이 세션에서 다섯 번째다).
@@ -5089,6 +5229,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (agentFirstCardIdentity(agent_items.items)) |f| ag_sort_first_after = f;
             ag_sort_order_after = agent_archive.sort == .oldest_first;
         }
+        // **새로고침을 누른다.** 헤더 전체가 refresh action 이고 정렬 토글이 그 오른쪽 끝을 파낸
+        // 형태라(`build.zig` 의 그 주석), **왼쪽 4 분의 1** 을 겨눈다 — 가운데를 누르면 무엇을
+        // 눌렀는지가 배치에 따라 흔들린다.
+        if (smoke and spins == 762) if (agent_built) |*b| {
+            const id = maru.chrome.components.session_dock.build.NodeIds.header;
+            for (b.frame.tree.entries) |e| {
+                if (e.id != id) continue;
+                ag_refresh_judgeable = true;
+                ag_refresh_applies_before = agent_applies;
+                const rx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(e.rect.x + e.rect.width / 4)));
+                const ry: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(e.rect.y + e.rect.height / 2)));
+                window.postSyntheticMouse(.left_down, rx, ry);
+                window.postSyntheticMouse(.left_up, rx, ry);
+                break;
+            }
+        };
         // **카드 위로 커서를 옮긴다** — 클릭이 아니라 이동만.
         if (smoke and spins == 745) if (agent_built) |*b| {
             for (agent_items.items, 0..) |it, idx| switch (it) {
@@ -5422,6 +5578,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const ty: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
             window.postSyntheticMouse(.left_down, tx, ty);
             window.postSyntheticMouse(.left_up, tx, ty);
+        }
+        // ── 스캔 결과 받기 (W8.12) ──────────────────────────────────────────────────────
+        //
+        // **매 프레임 받는다.** 예전에는 토글한 자리에서 400 회까지 `sleep(1ms)` 로 기다렸고 그동안
+        // 창이 통째로 멈췄다 — 이제 제출만 하고 여기서 받는다. 결과가 없으면 이 줄은 공짜다.
+        // 이력 결과도 매 프레임 받는다. 안 왔으면 `null` 이고 이 줄은 공짜다.
+        if (agent_backend) |*b| {
+            if (drainAgentItems(agent_counting.allocator(), agent_arena.allocator(), io, b, &agent_archive, &agent_items)) |reason| {
+                agent_list_reason = reason;
+                agent_scan_kb = agent_counting.peak / 1024;
+                agent_applies += 1;
+                if (agent_apply_spin == null) agent_apply_spin = frames_total;
+                // **옵션도 새 목록을 봐야 한다** — 슬라이스를 안 갱신하면 빈 목록이 그대로 남는다.
+                agent_opts.items = agent_items.items;
+                agent_opts.sort_order = agent_archive.sort;
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+            }
+        }
+        // 이력이 아직 안 왔고 올 가능성이 있으면 단계 번호를 멈춰 세운다 — 상한을 둔다(이력이
+        // 없는 기계에서 영영 안 오면 스모크가 통째로 멈춘다).
+        // 첫 훑기든 새로고침이든 **결과를 기다리는 동안**은 번호를 멈춰 세운다. 새로고침을 안 세우면
+        // 다음 단계가 옛 목록을 재고, 캐시가 더운 기계에서만 초록인 판정이 된다.
+        const waiting_first = agent_apply_spin == null;
+        const waiting_refresh = agent_refresh_submits > 0 and agent_applies <= ag_refresh_applies_before;
+        agent_settling = smoke and agent_backend != null and settle_frames < 6000 and (waiting_first or waiting_refresh);
+        if (drainTreeScan(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, dock_root orelse ".")) {
+            tree_scan_applied += 1;
+            if (tree_expand_submit_spin != null and tree_expand_apply_spin == null) tree_expand_apply_spin = spins;
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
         }
         for (window.poll()) |ev| switch (ev) {
             .resized => |r| {
@@ -5859,6 +6044,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             var changed = routed.dirty;
                             if (routed.intent) |intent| {
                                 agent_pointer_intents += 1;
+                                // ── 새로고침 (W8.12) ───────────────────────────────────────
+                                //
+                                // **비동기가 되어서야 배선할 수 있는 인텐트다.** 훑기를 그 자리에서
+                                // 기다리던 때는 이것을 누르면 창이 몇 초씩 멈췄을 것이다 — 그래서
+                                // "모델이 없다" 가 아니라 **막고 있었기 때문에** 빠져 있었다.
+                                if (intent == .refresh) {
+                                    if (agent_backend) |*ab| if (home_dir) |home| {
+                                        const r = submitAgentScan(agent_counting.allocator(), ab, home);
+                                        // 훑는 중이면 백엔드가 거절한다 — 그것은 실패가 아니라
+                                        // "이미 하고 있다" 이므로 이유를 덮어쓰지 않는다.
+                                        if (r.len == 0) agent_refresh_submits += 1;
+                                    };
+                                }
                                 var intent_arena = std.heap.ArenaAllocator.init(allocator);
                                 defer intent_arena.deinit();
                                 if (applyAgentIntent(intent_arena.allocator(), agent_arena.allocator(), &agent_archive, &agent_state, &agent_items, intent)) {
@@ -5935,7 +6133,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         // 다시 지으면서 해제하므로, 넘기기 전에 복사한다.
                                         const owned_path = allocator.dupe(u8, tp) catch continue;
                                         defer allocator.free(owned_path);
-                                        if (toggleTreeRow(allocator, io, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, rp, owned_path)) {
+                                        var submitted = false;
+                                        if (toggleTreeRow(allocator, &dock_tree, if (tree_backend) |*b| b else null, &dock_rows, rp, owned_path, &submitted)) {
+                                            if (submitted and tree_expand_submit_spin == null) tree_expand_submit_spin = spins;
                                             dock_row_toggles += 1;
                                             rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
                                         }
@@ -6596,6 +6796,45 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     } else {
         try stdout.print("agent_click=unjudgeable reason=no_surface\n", .{});
+    }
+    {
+        // **비동기가 진짜인가.** 토글한 프레임과 반영된 프레임이 **같으면** 아직 그 자리에서
+        // 기다리는 것이다 — 예전 코드가 정확히 그랬다(400 회 `sleep(1ms)`). 개수만 세면 막고
+        // 있어도 초록이므로 **프레임 차이**를 낸다.
+        const sub = tree_expand_submit_spin orelse 0;
+        const app = tree_expand_apply_spin orelse 0;
+        const lag: i64 = @as(i64, @intCast(app)) - @as(i64, @intCast(sub));
+        try stdout.print("tree_scan: applied={d} submit_spin={d} apply_spin={d} lag={d} tree_async_ok={}\n", .{
+            tree_scan_applied,
+            sub,
+            app,
+            lag,
+            tree_expand_submit_spin != null and tree_expand_apply_spin != null and lag > 0,
+        });
+    }
+    {
+        // **이 둘은 판정이 아니라 관측값이다.** 세는 것은 "요청했다가 놓은 양" 이지 allocator 가
+        // 실제로 돌려준 양이 아니다 — child 가 arena 면 `free` 가 no-op 인데도 이 계수는 줄어든다.
+        // 그러니 여기에 `ok` 를 달면 40 MB 가 눌러앉아도 초록인 판정이 된다(실제로 그렇게 썼다가
+        // 되돌렸다). **상주 여부의 판정은 DebugAllocator 의 누수 보고**가 맡는다(§2m.69).
+        try stdout.print("agent_scan: apply_spin={d} reason={s} cards={d} req_peak_kb={d} unfreed_kb={d} agent_async_ok={}\n", .{
+            agent_apply_spin orelse 0,
+            agent_list_reason,
+            agent_archive.cards.len,
+            agent_counting.peak / 1024,
+            agent_counting.live / 1024,
+            agent_apply_spin != null and (agent_apply_spin.? > 0),
+        });
+    }
+    if (ag_refresh_judgeable) {
+        // **제출과 반영을 갈라 센다.** 인텐트가 왔다는 것만으로는 다시 훑었다고 못 한다.
+        try stdout.print("agent_refresh: submits={d} applies {d}->{d} cards={d} agent_refresh_ok={}\n", .{
+            agent_refresh_submits,
+            ag_refresh_applies_before,
+            agent_applies,
+            agent_archive.cards.len,
+            agent_refresh_submits > 0 and agent_applies > ag_refresh_applies_before and agent_archive.cards.len > 0,
+        });
     }
     if (ag_sort_judgeable) {
         // **목록이 실제로 뒤집혔는가**와 **라벨이 따라왔는가**를 함께 본다.

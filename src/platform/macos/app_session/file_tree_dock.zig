@@ -354,6 +354,18 @@ fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content
     );
 }
 
+/// 행의 신원을 한 값으로 접는다 — **비교 전용**이다.
+///
+/// `RowIdentity` 를 그대로 들 수 없는 사정(빌려온 `path`)은 `file_tree_press_identity` 의 선언이
+/// 소유한다. 여기서 필요한 것은 "같은 행인가" 하나뿐이라 kind 와 경로를 함께 접는다. 신원이 없는
+/// 행(빈 자리 안내)은 null 이고, 그런 행은 애초에 action 을 안 든다.
+fn rowIdentityHash(row: file_tree.Row) ?u64 {
+    const identity = file_tree.rowIdentity(row) orelse return null;
+    var hasher = std.hash.Wyhash.init(@intFromEnum(identity.kind));
+    hasher.update(identity.path);
+    return hasher.final();
+}
+
 /// 누르고 있던 행과 호버를 **놓는다**. 창이 비활성될 때처럼 "이 트리에 더는 손이 없다"가 확실한 자리용.
 ///
 /// capture 만 지우면 밴드가 켜진 채 남는다 — 호버도 같이 놓고, 그림이 바뀌므로 dirty 를 세운다.
@@ -456,6 +468,24 @@ pub fn fileTreeDockPointer(
             break;
         }
     }
+    // **누른 행의 신원을 down 에서 굳힌다.** up 이 이것과 대조한다(그 이유는 필드 선언이 소유한다).
+    //
+    // **이 자리가 그 값의 단일 출처다** — 모든 down 이 먼저 비우고 capture 가 섰을 때만 채우므로, 옛
+    // 값이 다음 클릭으로 샐 길이 없다. capture 를 놓는 다른 자리들(교체 발행·창 비활성)에서 함께
+    // 비우는 코드를 두지 않는 이유가 이것이다 — 그 방어는 여기와 중복이라 어떤 판정자도 물지 못했고,
+    // 죽은 방어는 "무엇을 지키는가"를 흐린다.
+    if (phase == .down) {
+        self.file_tree_press_identity = null;
+        if (self.file_tree_interaction.capture) |capture| {
+            var pressed_table = component.ids.Table.init(self.file_tree_actions.items);
+            pressed_table.count = self.file_tree_actions.items.len;
+            if (pressed_table.resolve(capture.action_id, self.file_tree_projection_generation)) |pressed| switch (pressed) {
+                .activate_row => |index| if (index < self.file_tree_rows.items.len) {
+                    self.file_tree_press_identity = rowIdentityHash(self.file_tree_rows.items[index]);
+                },
+            };
+        }
+    }
     const action = dispatched.action orelse return null;
     var table = component.ids.Table.init(self.file_tree_actions.items);
     table.count = self.file_tree_actions.items.len;
@@ -464,7 +494,20 @@ pub fn fileTreeDockPointer(
     // 거르지만, 세대를 안 올리고 행만 줄어드는 경로가 생기면 그 방어가 통째로 비껴간다 — 질의 경로
     // (`fileTreeRowAtPublished`)가 정확히 그래서 죽었다. 같은 값의 두 소비자가 **같은 판정**을 쓰게 한다.
     return switch (intent) {
-        .activate_row => |index| if (index < self.file_tree_rows.items.len) intent else null,
+        .activate_row => |index| blk: {
+            if (index >= self.file_tree_rows.items.len) break :blk null;
+            // **누른 그 파일인가.** 자리가 유지된 채 내용만 갈리는 경우는 위 세대·범위 검사가 전부
+            // 통과하므로(같은 `model_index`·같은 rect), 여기서만 걸린다. 손을 뗀 순간 한 번 쓰고 놓는다.
+            if (phase == .up) {
+                const pressed = self.file_tree_press_identity;
+                self.file_tree_press_identity = null;
+                if (pressed) |want| {
+                    const now = rowIdentityHash(self.file_tree_rows.items[index]) orelse break :blk null;
+                    if (now != want) break :blk null;
+                }
+            }
+            break :blk intent;
+        },
     };
 }
 

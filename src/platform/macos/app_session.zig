@@ -4976,6 +4976,18 @@ pub const AppSession = struct {
     /// 놓는다(`app_session.zig` 의 그 자리 주석: "published rect tree still describes pre-resize
     /// geometry until the next paint"). 트리는 놓는 대신 **다시 발행**한다 — 클릭을 잃지 않는다.
     file_tree_published_content: struct { x: u32 = 0, y: u32 = 0, w: u32 = 0, h: u32 = 0 } = .{},
+    /// 좌클릭 **down 이 잡은 행의 신원**(해시). up 이 이 값과 대조해, 누르고 떼는 사이에 그 자리의
+    /// 파일이 다른 것으로 바뀌었으면 열지 않는다.
+    ///
+    /// **왜 필요한가**: 발행 교체 판정(`frameEql`)은 id·rect·`model_index` 만 본다 — 목록의 자리와
+    /// 기하가 그대로면 그 줄이 **어느 파일인가**가 바뀌어도 같은 tree 로 친다. 그래서 A 를 누른 손이
+    /// 뗄 때 B 를 열 수 있었다(실측 프로브로 재현). `applyFileTreeIntent` 의 "모델 인덱스는 다시
+    /// 조회한다"는 그 사이 목록이 **줄어드는** 경우만 막지, 자리가 유지된 채 내용이 갈리는 경우는 못 막는다.
+    ///
+    /// **`RowIdentity` 를 그대로 들지 않는 이유**는 그 `path` 가 투영 배열이 소유한 빌려온 글자이기
+    /// 때문이다 — 재빌드되면 해제돼 다음 프레임에 읽을 수 없다(접근성 스냅숏이 라벨을 복사하는 것과
+    /// 같은 사정). 여기서 필요한 것은 **같은지 여부**뿐이라 복사 대신 한 값으로 접어 든다.
+    file_tree_press_identity: ?u64 = null,
     scm_dock_snapshot_generation: u64 = 1,
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
@@ -40813,6 +40825,35 @@ test "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 
     file_tree_dock_ops.publishFileTreeHitTree(session); // 내용이 같은 재발행 = 그 사이에 낀 paint
     try std.testing.expect(session.file_tree_interaction.capture != null);
     try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) != null);
+
+    // ⑵d **자리는 같은데 그 자리의 파일이 바뀌면 열지 않는다.** 위 ⑵c 가 지키는 "같은 tree 면 capture 를
+    //     잇는다" 는 곧 `frameEql` 이 id·rect·`model_index` 만 본다는 뜻이기도 하다 — 그 줄이 **어느
+    //     파일인가**는 안 본다. 그래서 A 를 누른 손이 뗄 때 B 가 열릴 수 있었다(2026-08-27 적대적 검증
+    //     4회차에서 프로브로 재현: `capture=true up_intent=true`). down 이 굳힌 신원이 그 구멍을 막는다.
+    //
+    //     capture 는 **살아 있어야** 한다 — 그것이 이 판정의 전제다. capture 가 죽어서 안 열리는 것이면
+    //     ⑵c 의 회귀이지 신원 대조가 아니다.
+    _ = file_tree_dock_ops.fileTreeDockPointer(session, .down, x, row_y);
+    {
+        const swapped_at = file_tree_dock_ops.fileTreeRowAtPublished(session, x, row_y).?;
+        const swapped = try std.fmt.allocPrint(allocator, "/repo/SWAPPED.zig", .{});
+        allocator.free(session.file_tree_rows.items[swapped_at].file.path);
+        session.file_tree_rows.items[swapped_at] = .{ .file = .{
+            .path = swapped,
+            .label = swapped[6..],
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } };
+        file_panel_ops.classifyFileTreeRows(session.file_tree_rows.items);
+        file_tree_dock_ops.publishFileTreeHitTree(session);
+        try std.testing.expect(session.file_tree_interaction.capture != null);
+        try std.testing.expect(file_tree_dock_ops.fileTreeDockPointer(session, .up, x, row_y) == null);
+    }
 
     // ⑶ 누르고 있는 동안 tree 가 **실제로 바뀌면** capture 를 놓는다(늦은 up 이 새 행을 열지 않게).
     //

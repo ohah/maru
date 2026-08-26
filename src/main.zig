@@ -4085,6 +4085,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var after_release_judgeable = false;
     var after_release_dock_before: u32 = 0;
     var after_release_dock_after: u32 = 0;
+    // **끝까지 끌면 thumb 이 바닥에 닿는가.** travel 계산이 어긋나면 막대는 멀쩡해 보이는데
+    // **마지막 항목에 영영 못 닿는다** — 지금 판정은 thumb 이 트랙 **안**인지만 본다.
+    var bottom_gap: f32 = -1;
+    // **막대의 상한과 휠의 상한이 같은가.** 둘을 **다른 코드가 따로** 계산한다 — 갈리면 한쪽으로는
+    // 갈 수 있는 자리에 다른 쪽으로는 못 간다.
+    var bar_max: u32 = 0;
+    var wheel_max: u32 = 0;
+    var max_judgeable = false;
     var db_seen: ?maru.chrome.ui.scroll_area.ScrollbarGeometry = null;
     var db_off_before: u32 = 0;
     var db_off_after: u32 = 0;
@@ -4805,6 +4813,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (spins == 646) {
             after_release_after = sidebar_scroll_px;
             after_release_dock_after = dock_scroll_px;
+            // 이 순간 offset 이 **최대**다(위 끌기가 끝까지 갔다) — 그때 thumb 바닥과 트랙 바닥의
+            // 차이를 잰다.
+            if (sidebar_bar) |b| {
+                bottom_gap = (b.track_y + b.track_h) - (b.thumb_y + b.thumb_h);
+                bar_max = b.max_offset_px;
+                var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
+                const rr3 = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb3);
+                const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                // **휠이 쓰는 그 식 그대로**(그 자리의 주석: "상한은 콘텐츠가 정한다").
+                wheel_max = maru.chrome.components.sidebar.contentHeight(rr3, mm3) -| (geom.sidebar.h -| sidebar_header_h);
+                max_judgeable = true;
+            }
         }
         // **여기가 그 순간이다** — 아래 스크롤바 시험이 값을 덮기 직전에 챙긴다.
         if (spins == 638 and !snap_taken) {
@@ -6086,6 +6106,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             dock_rows.items.len *| cell_h,
             geom.tree_content.h,
         });
+    }
+    if (max_judgeable) {
+        // **바닥에 닿아야 한다.** 반올림 한 픽셀은 봐준다 — 그보다 벌어지면 마지막 항목이 영영
+        // 안 보인다는 뜻이다.
+        try stdout.print("bar_bottom: gap={d:.1} bar_max={d} wheel_max={d} bar_extent_ok={}\n", .{
+            bottom_gap,
+            bar_max,
+            wheel_max,
+            @abs(bottom_gap) <= 1.0 and bar_max == wheel_max and bar_max > 0,
+        });
+    } else {
+        try stdout.print("bar_bottom=unjudgeable reason=no_bar\n", .{});
     }
     if (fits_judgeable) {
         try stdout.print("bar_when_fits: quads={d} ok={}\n", .{ fits_bar_quads, fits_bar_quads == 0 });

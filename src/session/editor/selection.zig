@@ -549,6 +549,22 @@ test "merge: 겹치는 둘을 합친다" {
     try testing.expectEqual(@as(usize, 10), items[0].end());
 }
 
+test "merge: 앞 것이 뒤 것을 통째로 품으면 앞 것의 끝이 살아남는다" {
+    // **겹치는 둘을 합치는 판정자가 이미 있는데도 뮤턴트가 살아남았다**(적대적 검증 2026-08-26 —
+    // 병합 끝을 `@max(prev.end, cur.end)`에서 `cur.end`로 바꿔도 아무도 못 잡았다).
+    //
+    // 그 판정자의 배치가 **계단식**이라(`[0,6)` + `[4,10)`) 뒤 것의 끝이 언제나 더 크고, 두 식이
+    // 같은 답을 냈다. **앞이 뒤를 품는 배치**에서만 갈린다 — 긴 낱말을 잡아 두고 그 안쪽을
+    // `⌘⌃D`로 잡으면 실제로 생긴다.
+    var items = [_]Selection{ Selection.fromPoints(0, 10), Selection.fromPoints(2, 5) };
+    const r = mergeOverlapping(&items, 0);
+
+    try testing.expectEqual(@as(usize, 1), r.len);
+    try testing.expectEqual(@as(usize, 0), items[0].start());
+    // `cur.end`(=5)를 쓰면 **5~10이 사라진다**.
+    try testing.expectEqual(@as(usize, 10), items[0].end());
+}
+
 test "merge: primary가 흡수되면 흡수한 쪽이 승계한다" {
     var items = [_]Selection{ Selection.fromPoints(0, 6), Selection.fromPoints(4, 10) };
     const r = mergeOverlapping(&items, 1);

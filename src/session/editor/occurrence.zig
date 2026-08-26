@@ -263,6 +263,34 @@ test "OCC11: 가장 뒤 커서부터 찾는다 — 누를 때마다 아래로 �
     };
     const r = nextOccurrence(content, &sels, 0).?;
     try testing.expectEqual(@as(usize, 12), r.start);
+
+    // **위 배치로는 `end` 기준과 `start` 기준이 갈리지 않는다**(적대적 검증 2026-08-25 — 시작점을
+    // `start`로 바꾼 뮤턴트가 살아남았다). 한 글자짜리 일치는 `start`에서 시작해도 그 자리가
+    // "이미 고름"으로 걸러져 같은 답이 나오기 때문이다.
+    //
+    // **겹치는 일치**에서 비로소 갈린다. `aaaa`에서 `aa`는 0·1·2 세 곳이고, (1,3)을 골라 두면
+    //   · `end` 기준: 3부터 → 뒤에 없어 **감아서 0**
+    //   · `start` 기준: 1부터 → 1은 고름 → **2**
+    // 겹침은 실제로 생긴다(반복 문자열에서 낱말 경계 없이 고르면).
+    const overlapping = "aaaa";
+    var one = [_]selection.Selection{selection.Selection.fromPoints(1, 3)};
+    const w = nextOccurrence(overlapping, &one, 0).?;
+    try testing.expectEqual(@as(usize, 0), w.start); // 가장 뒤(3)부터 → 감아서 0
+
+    // **훑기가 한 칸씩 나아가는 것도 따로 재야 한다**(적대적 검증 2026-08-26 — `i = at + 1`을
+    // `i = at + needle.len`으로 바꾼 뮤턴트가 살아남았다). 위 배치는 **첫 후보가 곧 답**이라
+    // 두 식이 같은 자리를 본다.
+    //
+    // **거절된 일치 바로 다음 칸**에 답이 있을 때만 갈린다: `aaaaa`에서 `aa`를 (0,2)·(2,4)로
+    // 골라 두면 감아 도는 훑기가 0을 거절하고 **1**을 찾아야 하는데, 두 칸씩 뛰면 2로 건너뛰어
+    // 그것마저 거절하고 **아무것도 못 찾는다.**
+    const dense = "aaaaa";
+    var two = [_]selection.Selection{
+        selection.Selection.fromPoints(0, 2),
+        selection.Selection.fromPoints(2, 4),
+    };
+    const d = nextOccurrence(dense, &two, 0).?;
+    try testing.expectEqual(@as(usize, 1), d.start);
 }
 
 test "OCC12: 빈 selection 배열·범위 밖 primary는 null" {

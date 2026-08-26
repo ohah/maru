@@ -719,21 +719,17 @@ const GenerationGuardedAllocator = struct {
         new_len: usize,
         return_address: usize,
     ) ?[*]u8 {
-        const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
-        if (!self.client.?.enterGenerationAllocatorCallback()) return null;
-        defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
-        const result = self.parent.vtable.remap(
-            self.parent.ptr,
-            memory,
-            alignment,
-            new_len,
-            return_address,
-        ) orelse return null;
-        if (self.rejects(result, new_len)) {
-            self.recordAliasRejection();
-            return null;
-        }
-        return result;
+        _ = context;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = return_address;
+        // `Allocator.remap` is already committed when the parent returns a pointer. A guard cannot
+        // inspect that result and then report null: ArrayList would believe the old allocation is
+        // still sized as before and free it with a stale length. This happened when an in-place
+        // parser growth necessarily overlapped its own old backing. Force the allocator protocol's
+        // recoverable allocate-copy-free path, where `alloc` can reject aliases before publication.
+        return null;
     }
 
     fn free(
@@ -773,6 +769,20 @@ const GenerationGuardedAllocator = struct {
         );
     }
 };
+
+test "generation guarded allocator refuses remap before parent mutation" {
+    var guard: GenerationGuardedAllocator = undefined;
+    var byte: [1]u8 = .{0};
+    const result = GenerationGuardedAllocator.remap(
+        &guard,
+        byte[0..],
+        .of(u8),
+        2,
+        @returnAddress(),
+    );
+    try std.testing.expect(result == null);
+    try std.testing.expectEqual(@as(u8, 0), byte[0]);
+}
 
 pub const RpcFreeEvidenceState = enum(u8) {
     empty,

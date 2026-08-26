@@ -2233,13 +2233,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 
 ### P4 N2 notification admission·delivery
 
-- **상태: N2a·N2b1 구현 완료.** N1 journal은 `RuntimeManager` final owner, 실제 OSC core slot, GUI
+- **상태: N2a·N2b1·N2b2 자동 구현 완료, N2b2 실제 Notification Center 제품 gate 미완료.** N1 journal은 `RuntimeManager` final owner, 실제 OSC core slot, GUI
   `runtime.notification` consume과 same-PID outer optional handoff에 연결됐다. N2b1의 product config/label metadata,
   controller-bound `config.update`, stable-key GUI wire가 연결됐다. 실제 daemon/socket/PTY gate는 live on/off와 label 변경,
   detach→재attach 뒤 현재 config와 runtime-ID fallback 재설치, capability-aware typed HostAdapter의 exact
   `delivery_version:1` selector를 Debug·ReleaseFast에서 검증한다. partial multi-runtime 전파/보상 실패는 미적용 entry로
-  남겨 frame binding 완전본이 재시도한다. daemon-internal macOS
-  sink와 GUI history/OS stable-key 투영은 각각 N2b2/N2b3로 남아 있다.
+  남겨 frame binding 완전본이 재시도한다. daemon-internal macOS sink는 N2b2에서 fresh/restore daemon owner에 연결됐고,
+  GUI history/OS stable-key 투영은 N2b3로 남아 있다.
 - **N2a 자동 검증:** `zig build test-session-host-notification-admission`이 Debug·ReleaseFast에서 generation-CAS
   admission의 OOM/rejection rollback, 일반 OSC 2 KiB overflow one-shot 계수와 runtime 공정성, UTF-8/control-sequence
   sanitizer와 normalized cap, GUI/OS delivery bit 독립, handoff row/ID/bit/counter 보존, allocation fail-index 및
@@ -2248,7 +2248,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller-generation/config-generation 2축, observer·legacy·미지 필드·stale·cross-runtime mutation 0,
   capability별 exact stable-key/legacy GUI schema와 response-admission 뒤 `.gui` ack를 검증한다. N2b2는 daemon-internal
   adapter의 typed `{hid,rid,eid}`, accepted 뒤 `.os` ack, permission/bundle/entitlement degraded terminal, 같은 row의
-  250ms→최대 8초·6회 bounded retry와 sibling 공정성을 검증한다. N2b3는 GUI history와 OS request가 같은 stable key를
+  250ms→최대 8초·6회 bounded retry와 sibling 공정성, async sibling의 exact secondary ownership, journal 축출 뒤에도
+  저장한 전체 route로 exact request expire, 10초 callback timeout 뒤 process-local slot 회수와 fresh request 가능성을 검증한다. N2b3는 GUI history와 OS request가 같은 stable key를
   쓰고 GUI가 `.os` bit를 내리지 않음을 Debug·ReleaseFast에서 검증한다.
 - **제품 gate:** 실제 host-backed runtime의 OSC 9/777이 GUI 연결 중 stable key로 기존 인앱/배너 경로에 한 번만 나타나고,
   GUI 0에서는 signed bundle daemon adapter가 `hid`/`rid`/`eid`를 가진 배너를 게시한다. provisioned runner가 없는 실제

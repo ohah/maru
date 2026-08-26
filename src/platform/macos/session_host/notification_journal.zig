@@ -213,7 +213,39 @@ pub const Journal = struct {
         return null;
     }
 
+    /// Round-robin selector for daemon-internal consumers. `after_event_id` is only a fairness
+    /// cursor, never authority: selection still validates the canonical row and delivery bit, then
+    /// wraps once. An optional pinned key is skipped so a delayed retry cannot starve siblings.
+    pub fn nextPendingExcluding(
+        self: *const Journal,
+        consumer: Consumer,
+        after_event_id: u64,
+        excluded: ?Key,
+    ) ?View {
+        if (!self.isOwner()) return null;
+        if (excluded) |key| if (key.host_id != self.host_id) return null;
+        for (self.rows.items) |row| {
+            if (row.event_id <= after_event_id or isExcluded(self.host_id, row.event_id, excluded)) continue;
+            if (rowPending(row, consumer)) return viewOf(self.host_id, row);
+        }
+        for (self.rows.items) |row| {
+            if (row.event_id > after_event_id or isExcluded(self.host_id, row.event_id, excluded)) continue;
+            if (rowPending(row, consumer)) return viewOf(self.host_id, row);
+        }
+        return null;
+    }
+
     pub fn ack(self: *Journal, key: Key, consumer: Consumer) AckResult {
+        return self.settle(key, consumer);
+    }
+
+    /// Terminal delivery failure consumes only that consumer bit without representing a successful
+    /// acknowledgement. The caller owns the typed degraded/drop counter.
+    pub fn abandonOs(self: *Journal, key: Key) AckResult {
+        return self.settle(key, .os);
+    }
+
+    fn settle(self: *Journal, key: Key, consumer: Consumer) AckResult {
         if (!self.isOwner()) return .invalid_owner;
         if (key.host_id != self.host_id) return .not_found;
         for (self.rows.items) |*row| {
@@ -401,6 +433,18 @@ pub const Journal = struct {
         return self.owner_addr == @intFromPtr(self);
     }
 };
+
+fn rowPending(row: Row, consumer: Consumer) bool {
+    return switch (consumer) {
+        .gui => row.pending_gui,
+        .os => row.pending_os,
+    };
+}
+
+fn isExcluded(host_id: HostId, event_id: u64, excluded: ?Key) bool {
+    const key = excluded orelse return false;
+    return key.host_id == host_id and key.event_id == event_id;
+}
 
 fn appendInt(
     out: *std.ArrayListUnmanaged(u8),

@@ -17,6 +17,7 @@ const protocol = @import("protocol.zig");
 const reg = @import("registry.zig");
 const rollback_image = @import("rollback_image.zig");
 const runtime_manager = @import("runtime_manager.zig");
+const notification_os_delivery = @import("notification_os_delivery.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const short_endpoint = @import("short_endpoint.zig");
 const socket_server = @import("socket_server.zig");
@@ -39,6 +40,24 @@ pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     invocation: entrypoint.RestoreInvocation,
+) !void {
+    return runImpl(allocator, io, invocation, null);
+}
+
+pub fn runWithNotificationAdapter(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    invocation: entrypoint.RestoreInvocation,
+    adapter: notification_os_delivery.Adapter,
+) !void {
+    return runImpl(allocator, io, invocation, adapter);
+}
+
+fn runImpl(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    invocation: entrypoint.RestoreInvocation,
+    notification_adapter: ?notification_os_delivery.Adapter,
 ) !void {
     _ = try bootstrapProcessSeal();
 
@@ -79,6 +98,7 @@ pub fn run(
         invocation,
         &validated,
         &rollback_allowed,
+        notification_adapter,
     ) catch |err| {
         if (rollback_allowed and err != error.AuthorityPoisoned) {
             if (rollback_exec) |*prepared|
@@ -104,6 +124,7 @@ fn activateValidated(
     invocation: entrypoint.RestoreInvocation,
     validated: *upgrade_bootstrap.RestoreValidated,
     rollback_allowed: *bool,
+    notification_adapter: ?notification_os_delivery.Adapter,
 ) !void {
     const deadline = try validated.deadline(io);
     try checkRoleDeadline(invocation.role, deadline);
@@ -153,6 +174,7 @@ fn activateValidated(
         .log_base = base,
     } else null);
     defer manager.deinit();
+    if (notification_adapter) |adapter| manager.installNotificationOsAdapter(adapter);
     manager.enableOutputWake() catch return error.RestoreFailed;
     var graph = try manager.prepareRestoredGraph(&validated.state.host);
     defer graph.discard();

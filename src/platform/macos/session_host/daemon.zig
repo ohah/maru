@@ -20,6 +20,7 @@ const posix = std.posix;
 const socket_server = @import("socket_server.zig");
 const reg = @import("registry.zig");
 const runtime_manager = @import("runtime_manager.zig");
+const notification_os_delivery = @import("notification_os_delivery.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const discovery = @import("discovery.zig");
 const owner_lease = @import("owner_lease.zig");
@@ -144,7 +145,7 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null, null);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null, null, null);
 }
 
 /// 별도 ReleaseFast fixture executable만 사용하는 entrypoint. ambient env나 public MRSH
@@ -156,7 +157,7 @@ pub fn runSessionHostForFixture(
     socket_path: [:0]const u8,
     probe: FixtureProbe,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe, null);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe, null, null);
 }
 
 /// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
@@ -171,7 +172,7 @@ pub fn runSessionHostWithIdentity(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, null, null);
 }
 
 /// Fresh detached launch 전용 entrypoint. notifier는 startup 결과만 소유하며 accept loop 수명이나
@@ -187,7 +188,24 @@ pub fn runSessionHostWithIdentityStartup(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier, null);
+}
+
+/// Product fresh-launch path with the process-local macOS notification adapter. Keeping the adapter
+/// explicit prevents fixtures and non-product callers from accidentally claiming OS delivery.
+pub fn runSessionHostWithIdentityStartupAndNotificationAdapter(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+    notifier: *startup_readiness.Notifier,
+    adapter: notification_os_delivery.Adapter,
+) RunError!void {
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier, adapter);
 }
 
 /// Process fixture entrypoint. It changes only the release-signer decision; staging, typed
@@ -204,7 +222,7 @@ pub fn runSessionHostWithIdentityTestAuthorizer(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null, null, null);
 }
 
 /// exec layout(연속 `exec_fd_set.max_slots`개 슬롯) + 최대 runtime의 PTY master/wake pipe + listener·lease 여유.
@@ -412,6 +430,7 @@ fn runSessionHostImpl(
     test_allow_any_upgrade_target: bool,
     fixture_probe: ?FixtureProbe,
     startup_notifier: ?*startup_readiness.Notifier,
+    notification_adapter: ?notification_os_delivery.Adapter,
 ) RunError!void {
     // exec 업그레이드 layout을 확보할 수 있도록 가장 먼저 올린다. 이후 열리는 socket/PTY/lease fd가 상한에
     // 걸리지 않게 하려면 어떤 fd를 열기 전이어야 한다.
@@ -498,6 +517,7 @@ fn runSessionHostImpl(
         .log_base = base,
     } else null);
     defer manager.deinit();
+    if (notification_adapter) |adapter| manager.installNotificationOsAdapter(adapter);
     // 죽은 host 가 남긴 칸을 거둔다(SIGKILL 로 아래 정리가 못 돈 경우의 안전망). 살아 있는 남의 칸은
     // manifest 로 가려 남긴다 — GUI 는 이 질문에 답할 수 없어 이 정리가 host 쪽에 있다.
     if (hook_log_base) |base| agent_hook_logs.sweepDeadHostDirs(io, base, host_id);

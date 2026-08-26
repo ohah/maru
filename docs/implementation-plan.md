@@ -1317,11 +1317,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    주입한다. multi-runtime config 전파/보상 중 실패한 entry는 미적용으로 남겨 frame binding 완전본이 재수렴시킨다. 실제
    daemon/socket/PTY detach→재attach gate가 이 제품 경로를 Debug·ReleaseFast에서 고정한다.
 
-   N2b2는 daemon owner 안의 bounded OS delivery machine과 macOS adapter를 연결한다. adapter 입력은 borrowed presentation
+   **N2b2 구현 완료:** daemon owner 안의 bounded OS delivery machine과 macOS adapter를 연결한다. adapter 입력은 borrowed presentation
    text와 typed `{hid,rid,eid}`뿐이며 MRSH client나 AppSession을 만들지 않는다. `accepted` 뒤에만 `.os` bit를 ack하고,
    `denied`/bundle·entitlement 부재는 row를 재요청하지 않는 degraded terminal 결과로 기록하며, transient 실패는 같은 key를
-   250ms에서 시작해 최대 8초인 지수 backoff로 최대 6회 재시도한다. retry state는 row 하나만 final-address로 pin하고 다른
-   runtime의 admission·GUI delivery를 막지 않는다. N2b3는 host-backed GUI history와 Swift OS request identifier/userInfo에
+   250ms에서 시작해 최대 8초인 지수 backoff로 최대 6회 재시도한다. framework callback이 10초 동안 돌아오지 않으면 process-local
+   inflight slot도 함께 비워 다음 backoff가 실제 새 request를 만들며, retry state는 row 하나만 final-address로 pin하고 다른
+   runtime의 admission·GUI delivery를 막지 않는다. primary backoff에서 async pending이 된 sibling은 exact secondary inflight
+   owner가 정산할 때까지 adapter의 단일 slot을 독점한다. primary와 secondary inflight owner는 제출 당시 전체 typed route를
+   보존해 journal 축출이나 delivery-bit 선행 정산에서도 exact request를 expire하고 slot을 회수한다. 자동 gate는 product type과
+   bare-binary bundle fail-close까지 증명한다. 실제
+   Notification Center 게시는 provisioned signed runner가 없어 미완료 제품 gate로 남는다. N2b3는 host-backed GUI history와 Swift OS request identifier/userInfo에
    같은 stable key를 투영해 daemon/GUI 동시 제출도 Notification Center에서 같은 request를 replace하도록 한다. GUI는
    `.os` bit를 내리지 않는다. N3는 그 route의 response를 cold-launch exact attach로 소비하는 별도 slice다.
 

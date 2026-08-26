@@ -3316,11 +3316,14 @@ fn appendStatusBarCells(
             .overlays = try allocator.alloc(maru.renderer.DrawOverlay, 0),
             .grapheme_pool = try pool.toOwnedSlice(allocator),
         };
-        const glyph_runs = maru.renderer.glyph_layout.buildGlyphRunList(allocator, list, renderer_state.text_config, builder.shaper) catch {
+        var glyph_runs = maru.renderer.glyph_layout.buildGlyphRunList(allocator, list, renderer_state.text_config, builder.shaper) catch {
             var l = list;
             l.deinit(allocator);
             continue;
         };
+        // **여기서 놓고 간다.** 프레임은 이것을 빌려 가지 않는다(사이드바 쪽이 이미 그렇게 쓴다) —
+        // 안 놓으면 상태바를 다시 그릴 때마다 런 목록이 하나씩 샌다.
+        defer glyph_runs.deinit(allocator);
         const frame = renderer_state.buildFrameFromGlyphRunListWithRasterizer(allocator, list, glyph_runs, builder.rasterizer) catch {
             var l = list;
             l.deinit(allocator);

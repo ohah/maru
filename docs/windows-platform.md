@@ -4899,6 +4899,30 @@ $ MARU_CONFIG=<show=false> maru win32-terminal-smoke
 status=unjudgeable reason=hidden_by_config term_bottom=640 client_h=640 reclaimed=true
 ```
 
+## 적대적 검증이 셋을 더 찾았다
+
+| 무엇 | 왜 안 보였나 | 갚은 것 |
+|---|---|---|
+| **잰 폭과 그린 폭이 갈릴 수 있다** | `status_outside` 는 **바 밖으로 나갈 때만** 움직인다 — 항목끼리 겹치거나 사이가 벌어지는 것은 안 본다 | `status_mismatch` 판정 + 중립 테스트(그리는 쪽과 같은 칸 수를 낸다) |
+| **두 번째 패스에 누수 경로가 있었다** | 반복문 안의 `defer` 는 **그 자리 것만** 챙긴다 — 중간에 실패해 나가면 남은 항목의 native 가 샌다 | 반복 **전에** 전부 해제 예약 |
+| **새로 만든 두 함수를 아무도 안 쟀다** | `titleCols`·`shortenHome` 이 실기에서 ASCII 경로만 지났다 | 테스트 셋(한글 두 칸·결합 악센트 한 칸·접두사만 같은 폴더는 안 줄인다) |
+
+`shortenHome` 은 **접두사만 같은 폴더**에서 틀릴 수 있었다 — 구분자 검사를 빼는 뮤턴트를 넣으면
+`C:/u/mexico` 가 `~xico` 가 된다.
+
+**경계 게이트가 한 번 더 잡았다.** 테스트에 아이콘을 codepoint 리터럴로 적었더니 *"등록 아이콘
+codepoint 리터럴 — 이름을 쓰세요"* 로 막았다(chrome-strategy.md §9.7). 이름으로 부르게 고쳤다.
+
+| 뮤턴트(2차) | 무엇이 움직이나 |
+|---|---|
+| 잰 폭을 한 칸 늘린다 | `status_mismatch 0 → 2 ok=false` |
+| 바를 60px 로 좁힌다 | `placed 2 → 0 dropped 0 → 2 ok=false` |
+| `shortenHome` 의 구분자 검사를 뺀다 | 중립 테스트 실패 |
+| 사이드바가 상태바를 안 피한다 | 중립 테스트 `expected 613, found 640` |
+
+**macOS 값이 안 바뀌었는지도 확인했다** — 중립으로 옮긴 상수 여섯을 `main` 의 원본과 하나씩
+견줬고 전부 같다(22·8·12·4·1·4).
+
 ## 한계
 
 - **좌측 둘뿐이다** — 브랜치·경로. 우측(막힌/실행 중 에이전트·알림·커서 위치·리소스)은 그 모델이

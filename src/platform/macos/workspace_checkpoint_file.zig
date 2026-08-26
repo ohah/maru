@@ -100,7 +100,23 @@ fn ensureBackup(parent_path: [:0]const u8) Result {
         defer _ = c.close(existing_fd);
         var existing_stat: posix.Stat = undefined;
         if (c.fstat(existing_fd, &existing_stat) != 0 or !posix.S.ISREG(existing_stat.mode) or
-            existing_stat.uid != c.getuid() or existing_stat.mode & 0o777 != 0o600) return .backup_failed;
+            existing_stat.uid != c.getuid()) return .backup_failed;
+        // 권한이 느슨하면 **거절하지 않고 조인다.** 우리가 소유한 정규 파일이고(위 두 검사), 새로 만드는
+        // 경로도 바로 아래에서 `fchmod(0o600)` 으로 같은 값을 강제한다 — 기존 파일만 거절할 이유가 없다.
+        //
+        // 거절하면 어떻게 되는지 실측했다(2026-08-27): `.bak` 이 `0644` 로 남아 있어 `ensureBackup` 이
+        // `.backup_failed` 를 냈고, `publishFinal` 이 그걸 **쓰기 전체의 실패**로 옮겨 checkpoint 가
+        // `notice=2`(write failed)로 끝났다. keep-alive 종료는 저장 실패를 허용하지 않으므로 **앱이 닫히지
+        // 않았다** — 파일 권한 한 비트가 사용자를 종료할 수 없는 상태에 가둔 셈이다. `chmod 600` 을 준 즉시
+        // 저장이 성공했고(3211→4719 bytes) 종료도 통과했다.
+        //
+        // 범위는 정확히 여기까지다. `ensureBackup` 은 `publishFinal` 에서만 불리므로 **평상시 저장(`publish`)은
+        // 이 권한과 무관하다**. 같은 기간 workspace.v1 이 갱신되지 않은 것은 `restore_incomplete` 동안 평상시
+        // 저장을 건너뛰는 **설계된 동작** 탓이고, 이 비트가 막은 것은 final-quit 저장 하나다. 두 원인을 뭉치면
+        // 다음 사람이 엉뚱한 곳을 판다.
+        //
+        // `0644` 가 애초에 어떻게 생겼는지는 아직 모른다 — 아래 생성 경로는 항상 `fchmod(0o600)` 을 준다.
+        if (existing_stat.mode & 0o777 != 0o600 and c.fchmod(existing_fd, 0o600) != 0) return .backup_failed;
         return .committed;
     }
     var keep_backup = false;

@@ -1791,7 +1791,9 @@ fn applyCoreConfig(
     });
 }
 
-const smoke_spin_cap: usize = 720;
+// **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
+// 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
+const smoke_spin_cap: usize = 760;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -3018,7 +3020,7 @@ fn applyAgentIntent(
         .toggle_group => |gi| {
             // **번호를 키로 바꾼다.** 인텐트의 `u64` 는 그 순간의 그룹 번호이고, 접기 상태는
             // 키(cwd)로 산다 — 목록이 바뀌어도 같은 그룹을 가리키게 하는 것이 그 차이다.
-            const key = groupKeyAt(archive, gi) orelse return false;
+            const key = groupKeyAt(scratch, archive, gi) orelse return false;
             if (archive.isCollapsed(key)) {
                 for (archive.collapsed.items, 0..) |k, i| {
                     if (std.mem.eql(u8, k, key)) {
@@ -3038,11 +3040,12 @@ fn applyAgentIntent(
 }
 
 /// 그 순간의 그룹 번호 → 그룹 키. 투영을 다시 돌려 얻는다 — 번호의 의미가 거기 있기 때문이다.
-fn groupKeyAt(archive: *const AgentArchive, gi: u64) ?[]const u8 {
-    var buf: [4096]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
-    var projection = maru.session.agent_session_archive_view.build(fba.allocator(), archive.view_items, archive.collapsed.items) catch return null;
-    defer projection.deinit(fba.allocator());
+fn groupKeyAt(scratch: std.mem.Allocator, archive: *const AgentArchive, gi: u64) ?[]const u8 {
+    // **고정 버퍼를 안 쓴다.** 4 KiB 로 두었더니 이력이 커지는 순간 투영이 실패하고, 그러면 이
+    // 함수가 `null` 을 내 **그룹 토글이 조용히 아무 일도 안 한다** — 사용자에겐 "가끔 안 눌린다"
+    // 로 보인다. 호출자가 이미 버리는 arena 를 들고 있으므로 그것을 쓴다(상한이 사라진다).
+    var projection = maru.session.agent_session_archive_view.build(scratch, archive.view_items, archive.collapsed.items) catch return null;
+    defer projection.deinit(scratch);
     if (gi >= projection.groups.items.len) return null;
     // **호출자 arena 가 아니라 archive 가 이미 든 키를 돌려준다** — 투영은 곧 사라진다.
     const key = projection.groups.items[gi].key;
@@ -4306,6 +4309,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var ag_collapsed_after: usize = 0;
     var ag_expand_before: ?u64 = null;
     var ag_expand_after: ?u64 = null;
+    // **되돌아오는가.** 접기만 재면 `isCollapsed`·제거가 틀려도 초록이다 — 한 번 접히면 그만이니까.
+    var ag_items_reopened: usize = 0;
+    var ag_collapsed_reopened: usize = 1;
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
@@ -5008,6 +5014,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.postSyntheticMouse(.left_up, gx, gy);
             }
         };
+        // **같은 그룹을 다시 누른다** — 목록이 원래 길이로 돌아와야 한다.
+        if (smoke and spins == 722) if (agent_built) |*b| {
+            if (agentItemRect(b, 0)) |r| {
+                const gx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                const gy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                window.postSyntheticMouse(.left_down, gx, gy);
+                window.postSyntheticMouse(.left_up, gx, gy);
+            }
+        };
+        if (smoke and spins == 725) {
+            ag_items_reopened = agent_items.items.len;
+            ag_collapsed_reopened = agent_archive.collapsed.items.len;
+        }
         if (smoke and spins == 719) {
             ag_items_after = agent_items.items.len;
             ag_collapsed_after = agent_archive.collapsed.items.len;
@@ -6348,19 +6367,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     if (ag_click_judgeable) {
         // **목록이 줄어야 한다.** 인텐트 개수만 세면 속 빈다 — 적용이 안 돼도 인텐트는 난다.
-        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
+        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} reopened={d}/{d} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
             ag_items_before,
             ag_items_after,
             ag_collapsed_after,
             ag_expand_before,
             ag_expand_after,
+            ag_items_reopened,
+            ag_collapsed_reopened,
             agent_applied_intents,
             agent_pointer_intents,
             agent_redraws,
             ag_items_after < ag_items_before and ag_collapsed_after > 0 and
                 // **펼침도 붙어야 한다** — 그룹만 되고 카드가 죽어 있어도 위 조건은 참이다.
                 ag_expand_before == null and ag_expand_after != null and
-                agent_applied_intents == 2 and agent_redraws > 0,
+                // **되돌아와야 한다** — 접기만 되고 펴기가 죽어 있어도 위 조건은 전부 참이다.
+                ag_items_reopened == ag_items_before and ag_collapsed_reopened == 0 and
+                agent_applied_intents == 3 and agent_redraws > 0,
         });
     } else {
         try stdout.print("agent_click=unjudgeable reason=no_surface\n", .{});

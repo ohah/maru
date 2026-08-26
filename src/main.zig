@@ -4331,6 +4331,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var ag_multi_keys_before: usize = 0;
     var ag_multi_keys_after: usize = 0;
     var ag_multi_first_still: bool = false;
+    // **어느 카드가 사라졌는가.** 개수만 보면 **엉뚱한 카드를 지워도** 초록이다(늘 마지막 여섯을
+    // 지우는 재투영이 그렇다). 접은 그룹에 속한 레코드가 목록에 **하나도 안 남아야** 한다.
+    var ag_wrong_cards: usize = 0;
+    var ag_kept_cards: usize = 0;
+    // **펼친 카드가 든 그룹을 접었다 펴면 그 카드가 그대로여야 한다.** 이것이 `expanded_identity` 가
+    // 인덱스가 아니라 identity 인 **이유**다(그 필드 doc: *"목록이 갱신되면 인덱스는 밀리고, 그러면
+    // 엉뚱한 카드가 펼쳐진 채로 남는다"*). 지금 판정은 펼침이 **붙는지**만 보고 **살아남는지**는 안 본다.
+    var ag_expand_survived: bool = false;
+    var ag_expand_target: ?u64 = null;
+    // **호버가 도는가.** 클릭만 재면 `.move` 경로가 통째로 죽어 있어도 초록이다 — 사용자는 "카드에
+    // 마우스를 올려도 아무 표시가 안 난다" 로 겪는다(§2m.50 이 사이드바에서 겪은 그 부류).
+    var ag_hover_judgeable = false;
+    var ag_hover_redraws_before: usize = 0;
+    var ag_hover_redraws_after: usize = 0;
+    var ag_hover_intents_before: usize = 0;
+    var ag_hover_intents_after: usize = 0;
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
@@ -5002,6 +5018,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         // **기준을 카드 클릭 앞에서 잡는다** — 뒤에서 읽으면 이미 펼쳐진 값이라 `0->0` 으로 보인다.
+        // **카드 위로 커서를 옮긴다** — 클릭이 아니라 이동만.
+        if (smoke and spins == 745) if (agent_built) |*b| {
+            for (agent_items.items, 0..) |it, idx| switch (it) {
+                .card => {
+                    if (agentItemRect(b, idx)) |r| {
+                        ag_hover_judgeable = true;
+                        ag_hover_redraws_before = agent_redraws;
+                        ag_hover_intents_before = agent_applied_intents;
+                        const hx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(r.x + r.width / 2)));
+                        const hy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(r.y + r.height / 2)));
+                        window.postSyntheticMouse(.moved, hx, hy);
+                    }
+                    break;
+                },
+                else => {},
+            };
+        };
+        if (smoke and spins == 748) {
+            ag_hover_redraws_after = agent_redraws;
+            ag_hover_intents_after = agent_applied_intents;
+        }
         if (smoke and spins == 713) ag_expand_before = agent_state.expanded_identity;
         // **카드부터 누른다** — 그룹을 접으면 그 카드들이 목록에서 빠져 누를 것이 없어진다.
         if (smoke and spins == 714) if (agent_built) |*b| {
@@ -5018,6 +5055,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 else => {},
             };
         };
+        if (smoke and spins == 715) ag_expand_target = agent_state.expanded_identity;
         if (smoke and spins == 716) if (agent_built) |*b| {
             // 첫 그룹 헤더의 자리를 published tree 에서 얻는다 — 손으로 고른 좌표면 배치가 바뀌어도
             // 판정이 안 움직인다.
@@ -5090,10 +5128,28 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 725) {
             ag_items_reopened = agent_items.items.len;
+            // 접기→펴기를 지난 뒤에도 같은 레코드가 펼쳐져 있는가.
+            ag_expand_survived = agent_state.expanded_identity != null and
+                agent_state.expanded_identity.? == (ag_expand_target orelse ~@as(u64, 0));
             ag_collapsed_reopened = agent_archive.collapsed.items.len;
         }
         if (smoke and spins == 719) {
             ag_items_after = agent_items.items.len;
+            // 접은 그룹의 키를 알고 있으므로, 남은 카드의 레코드가 그 키를 안 갖는지 본다.
+            if (agent_archive.collapsed.items.len == 1) {
+                const gone = agent_archive.collapsed.items[0];
+                for (agent_items.items) |it| switch (it) {
+                    .card => |c| {
+                        ag_kept_cards += 1;
+                        if (c.identity < agent_archive.view_items.len) {
+                            const vi = agent_archive.view_items[c.identity];
+                            const key = if (vi.cwd_canonical and vi.cwd.len > 0) vi.cwd else "";
+                            if (std.mem.eql(u8, key, gone)) ag_wrong_cards += 1;
+                        }
+                    },
+                    else => {},
+                };
+            }
             ag_collapsed_after = agent_archive.collapsed.items.len;
             ag_expand_after = agent_state.expanded_identity;
         }
@@ -6432,7 +6488,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     if (ag_click_judgeable) {
         // **목록이 줄어야 한다.** 인텐트 개수만 세면 속 빈다 — 적용이 안 돼도 인텐트는 난다.
-        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} reopened={d}/{d} multi={d}->{d} first_still={} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
+        try stdout.print("agent_click: items {d}->{d} collapsed={d} expanded {?d}->{?d} reopened={d}/{d} kept={d} wrong={d} survived={} multi={d}->{d} first_still={} intents={d}/{d} redraws={d} agent_click_ok={}\n", .{
             ag_items_before,
             ag_items_after,
             ag_collapsed_after,
@@ -6440,6 +6496,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             ag_expand_after,
             ag_items_reopened,
             ag_collapsed_reopened,
+            ag_kept_cards,
+            ag_wrong_cards,
+            ag_expand_survived,
             ag_multi_keys_before,
             ag_multi_keys_after,
             ag_multi_first_still,
@@ -6453,12 +6512,29 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 ag_items_reopened == ag_items_before and ag_collapsed_reopened == 0 and
                 // **둘을 접고 하나만 폈을 때 남은 하나가 첫째여야 한다** — 번호→키 대응이
                 // 흔들리면 엉뚱한 그룹이 펴진다.
+                // **접은 그룹의 카드가 하나도 안 남아야 한다** — 개수만 보면 엉뚱한 것을 지워도 맞다.
+                ag_wrong_cards == 0 and ag_kept_cards > 0 and
+                // **펼침이 접기·펴기를 넘어 살아남아야 한다** — identity 를 쓰는 이유가 그것이다.
+                ag_expand_survived and
                 ag_multi_judgeable and ag_multi_keys_before == 2 and ag_multi_keys_after == 1 and
                 ag_multi_first_still and
                 agent_redraws > 0,
         });
     } else {
         try stdout.print("agent_click=unjudgeable reason=no_surface\n", .{});
+    }
+    if (ag_hover_judgeable) {
+        // **다시 그리되 아무 일도 하면 안 된다** — 이동이 인텐트를 내면 스치기만 해도 목록이 바뀐다.
+        try stdout.print("agent_hover: redraws {d}->{d} intents {d}->{d} agent_hover_ok={}\n", .{
+            ag_hover_redraws_before,
+            ag_hover_redraws_after,
+            ag_hover_intents_before,
+            ag_hover_intents_after,
+            ag_hover_redraws_after > ag_hover_redraws_before and
+                ag_hover_intents_after == ag_hover_intents_before,
+        });
+    } else {
+        try stdout.print("agent_hover=unjudgeable reason=no_card\n", .{});
     }
     if (max_judgeable) {
         // **바닥에 닿아야 한다.** 반올림 한 픽셀은 봐준다 — 그보다 벌어지면 마지막 항목이 영영

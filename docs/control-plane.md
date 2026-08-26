@@ -66,6 +66,9 @@ wire에서 `kind`는 `"editor"` 문자열이고 detail은 `EditorMeta`다 — **
 |---|---|---|
 | `path` | 열린 파일의 절대 경로 | 아직 파일이 안 붙은 편집기면 생략 |
 | `read_only` | 쓸 수 없는 파일이라 읽기 전용으로 열렸는가(§3.5 — 여는 것을 막지는 않는다) | 항상 실린다 |
+| `dirty` | 저장하지 않은 편집이 있는가 — 계약은 [file-panel.md](file-panel.md) §1이 소유한다(**내용 동등성**이므로 undo로 저장 시점 내용에 돌아오면 `false`) | 항상 실린다 |
+
+`dirty`는 사람이 보는 `title`에 `●` 접두로도 나간다. **소비자는 그 접두사가 아니라 이 필드를 본다** — 표식을 바꾸는 순간 문자열을 뜯던 소비자가 조용히 깨진다.
 
 - **외부 ID = `{surface_id, generation}`.** `surface_id`는 앱 인스턴스 전역 unique opaque u64이고 **절대 재사용하지 않는다**(주 방어 — 죽은 surface를 가리키는 옛 selector는 새 surface로 리다이렉트될 수 없다). `generation`은 defense-in-depth로, `surface_id`를 유지한 채 런타임만 갈리는 경우(예: PTY crash 후 같은 트리 슬롯 respawn)에만 증가한다 — 그 경로가 설계에 없으면 generation은 순수 보조다. workspace restore는 `surface_id`를 새로 발급하므로(=이동성 §7) restore를 generation 증가로 표현하지 않는다. `surface_id` 값 자체에는 window/session/local index 의미가 없다. `window_token`은 AppSession-local ID 충돌을 막기 위한 복합키가 아니라 현재 어느 window에 배치돼 있는지 알려주는 위치 메타데이터다. 외부 자동화가 저장한 ID는 재시작 후 무효일 수 있음을 계약에 명시한다.
 - **재시작 영속 상관키.** workspace restore는 surface를 새 ID로 복원하지만 에이전트 대화(claude/codex `session_id`)는 영속한다. 재시작을 건너 재연결하려면 컨트롤 플레인 ID를 workspace stable-id·트리 좌표·에이전트 `session_id`에 묶는 상관키를 함께 노출한다.

@@ -62,6 +62,14 @@ pub const OpenFileError = error{
     OutOfMemory,
 };
 
+/// 문서 내용의 해시 — dirty 판정 전용.
+///
+/// **저장 identity가 아니다.** 저장 경로는 inode와 `stableOpenedFileHash`로 외부 변경을 잡고
+/// (그쪽은 디스크를 읽는다), 이 함수는 **메모리 안 두 상태가 같은가**만 답한다.
+fn contentHash(bytes: []const u8) u64 {
+    return std.hash.Wyhash.hash(0, bytes);
+}
+
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
     ///
@@ -69,6 +77,24 @@ pub const Opened = struct {
     /// 버퍼가 문서보다 오래 살아야 했다. 이제 문서가 자기 내용을 들므로 읽기 버퍼는 `openPath`가
     /// 끝나면 놓는다 — 파일이 `stat`과 read 사이에 줄어들어 생기던 "안 쓰는 꼬리"도 함께 사라진다.
     file: editor.edit_doc.EditableFile,
+
+    /// **마지막으로 디스크와 같았던 내용의 해시.** dirty 판정의 유일한 근거다.
+    ///
+    /// **개정 번호가 아니라 내용이다**([file-panel.md](../../../docs/file-panel.md) §1이 소유하는
+    /// 계약): *"편집 뒤 undo로 snapshot과 같은 내용에 돌아오면 revision이 더 높아도 clean"*.
+    /// 개정 번호로 재면 열 번 고치고 열 번 되돌린 문서가 dirty로 남아, 사용자가 **바꾼 것이 없는데
+    /// 저장하라는 표시**를 본다.
+    ///
+    /// **해시인 이유**: 사본을 들면 문서 하나에 메모리가 두 배가 되고(§3.0이 잰 2.7배 위에 또
+    /// 얹힌다), 큰 파일에서 매 키 입력마다 전체 비교가 돈다. 해시는 충돌 가능성이 있지만 그 대가는
+    /// *"바뀌었는데 clean으로 보인다"*가 아니라 **저장 버튼을 한 번 더 누르는 것**이다 — 저장
+    /// 자체는 내용을 그대로 쓴다.
+    saved_hash: u64,
+
+    /// 지금 내용이 마지막 저장과 다른가.
+    pub fn isDirty(self: Opened) bool {
+        return contentHash(self.file.content) != self.saved_hash;
+    }
 
     pub fn deinit(self: *Opened, allocator: std.mem.Allocator) void {
         _ = allocator;
@@ -107,7 +133,8 @@ pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Open
         error.NotUtf8 => return error.NotUtf8,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    return .{ .file = opened };
+    // 방금 읽어 온 그대로다 — **여는 순간은 clean**이다.
+    return .{ .file = opened, .saved_hash = contentHash(opened.content) };
 }
 
 /// 이 경로에 쓸 수 있는가. **여는 것을 막는 판정이 아니라 표시할 값**이다.
@@ -3911,6 +3938,18 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
 ///
 /// **저장 뒤 문서를 다시 읽지 않는다.** 방금 쓴 것이 곧 문서이고, 다시 읽으면 그 사이 외부 변경을
 /// 조용히 삼킨다(§3.6의 외부 편집 감지는 별도 계약이다).
+/// 저장하지 않은 편집이 있는가. **편집기 Term이 아니면 false** — 호출자가 kind를 따로 안 봐도 된다.
+pub fn isDirty(term: *const Term) bool {
+    if (term.kind != .editor) return false;
+    // **비교 뷰는 읽기 전용 결과라 저장할 축이 없다**(§7). 같은 Term이 문서를 든 채 비교로
+    // 전환되므로, 이 갈래가 없으면 **비교 탭에 저장 표식이 뜨고** 닫기 게이트도 열린다 —
+    // 사용자는 "이 비교를 저장해야 하나?"로 읽는다(적대적 검증 2026-08-26).
+    // `editorMeta`는 같은 갈래를 이미 갖고 있었는데 여기만 빠져 있었다.
+    if (term.rt.editor_diff != null) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    return doc.isDirty();
+}
+
 pub fn saveDocument(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
@@ -3919,6 +3958,8 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
     const path = term.rt.editor_path orelse return false;
 
     const bytes = doc.file.saveBytes(self.allocator) catch return false;
+    // **쓴 내용이 무엇이었는지** 기억해 둔다 — 아래에서 clean 판정에 쓴다.
+    const saved_content = doc.file.content;
     defer self.allocator.free(bytes);
 
     var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return false;
@@ -3943,6 +3984,18 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
         expected,
         bytes,
     ) catch return false;
+
+    // **여기서 clean이 된다.** 쓰기가 성공한 그 순간의 내용이 곧 디스크 내용이다.
+    //
+    // **`bytes`가 아니라 `content`의 해시다** — `bytes`에는 BOM이 붙어 있고(§3.5 원본 보존)
+    // 편집기가 든 내용에는 없다. `bytes`로 재면 BOM 있는 파일이 저장 직후에도 dirty로 남는다.
+    //
+    // **쓰기 뒤에 읽는다.** 쓰는 동안 사용자가 더 칠 수 있으므로(§1의 "저장 중 재편집은 dirty를
+    // 유지한다") 지금 내용이 방금 쓴 것과 다를 수 있고, 그러면 dirty로 남는 것이 **맞다**.
+    // 그래서 저장 시작 시점이 아니라 **끝난 뒤**의 내용을 재면 안 된다 — `saved_bytes`가 그것을
+    // 위해 남아 있다.
+    term.rt.editor_doc.?.saved_hash = contentHash(saved_content);
+    self.metal_dirty = true;
     return true;
 }
 
@@ -10990,6 +11043,338 @@ test "MOV7 수정자가 이동 단위를 가른다 — ⌥는 낱말, ⌘는 줄
     try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
     try pressKey(&fx, .home, .{});
     try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+test "DIRTY1 저장과 다르면 dirty, undo로 같은 내용에 돌아오면 clean (file-panel.md §1)" {
+    // **계약은 개정 번호가 아니라 내용 동등성이다** — `file-panel.md` §1이 소유한다:
+    // *"편집 뒤 undo로 snapshot과 같은 내용에 돌아오면 revision이 더 높아도 clean"*.
+    //
+    // 개정 번호로 재면 열 번 고치고 열 번 되돌린 문서가 dirty로 남아, 사용자가 **바꾼 것이 없는데
+    // 저장하라는 표시**를 본다. 그래서 이 판정자의 가운데가 그 왕복이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "dirty1.txt", "hello\n");
+
+    // 여는 순간은 clean이다.
+    try testing.expect(!term.rt.editor_doc.?.isDirty());
+    const rev0 = term.rt.editor_doc.?.file.revision;
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(term.rt.editor_doc.?.isDirty());
+
+    // **되돌리면 clean이다 — 개정 번호는 더 높다.**
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("hello\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(term.rt.editor_doc.?.file.revision > rev0); // 되감지 않는다
+    try testing.expect(!term.rt.editor_doc.?.isDirty()); // **그래도 clean**
+
+    // 다시 고치면 dirty, 저장하면 clean.
+    try testing.expect(insertText(fx.session, term, "?"));
+    try testing.expect(term.rt.editor_doc.?.isDirty());
+    try testing.expect(saveDocument(fx.session, term));
+    try testing.expect(!term.rt.editor_doc.?.isDirty());
+
+    // **저장 뒤 되돌리면 다시 dirty다** — 이제 디스크와 다르다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expect(term.rt.editor_doc.?.isDirty());
+}
+
+test "DIRTY7 빈 파일과 읽기 전용도 계약을 지킨다 (file-panel.md §1)" {
+    // **가장자리 둘.** 빈 파일은 내용이 0 byte라 해시가 상수인데, 그 자체는 문제가 아니고
+    // *"열자마자 clean"*·*"한 글자 치면 dirty"*가 성립하면 된다. 읽기 전용은 편집이 거절되므로
+    // **영원히 clean**이어야 한다 — dirty가 서면 저장할 수 없는 문서에 저장 표식이 붙고,
+    // 닫기 게이트가 **닫을 수 없는 문**을 연다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // ⑴ 빈 파일.
+    const empty = try undoFixture(&fx, allocator, "empty.txt", "");
+    try testing.expect(!isDirty(empty));
+    empty.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, empty, "a"));
+    try testing.expect(isDirty(empty));
+    // 지워서 **다시 빈 내용**이 되면 clean이다 — 내용 동등성이므로.
+    try testing.expect(deleteText(fx.session, empty, true));
+    try testing.expectEqualStrings("", empty.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(empty));
+
+    // ⑵ 읽기 전용.
+    const ro = try undoFixture(&fx, allocator, "ro2.txt", "locked\n");
+    ro.rt.editor_doc.?.file.read_only = true;
+    ro.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(!insertText(fx.session, ro, "x")); // 편집이 거절된다
+    try testing.expect(!isDirty(ro)); // **그래서 영원히 clean**
+    try testing.expect(!fx.session.scopeHasUnsavedEditor(.term));
+}
+
+test "DIRTY6 비교 뷰로 전환하면 dirty 표시를 내리지 않는다 — 축이 다르다 (§7)" {
+    // **비교 뷰는 읽기 전용 결과**라 저장할 것이 없다(§7). 그런데 같은 Term이 `editor_doc`을 든 채
+    // 비교 뷰로 전환될 수 있어, 그 상태에서 dirty를 물으면 **비교 탭에 저장 표식이 뜬다** —
+    // 사용자는 "이 비교를 저장해야 하나?"로 읽는다. 닫기 게이트도 그 문을 연다.
+    //
+    // `editorMeta`는 비교 뷰를 이미 갈라 `dirty = false`를 내는데, `isDirty`에는 그 갈래가 없었다
+    // (적대적 검증 2026-08-26).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "dirty6.txt", "hello\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(isDirty(term)); // 편집기로서는 dirty다
+
+    // 비교 뷰로 전환한다.
+    term.rt.editor_diff = .{};
+    defer term.rt.editor_diff = null;
+    try testing.expect(!isDirty(term)); // **비교 뷰에서는 dirty 축이 없다**
+
+    // 라벨에도 표식이 없다.
+    const label = try fx.session.diffAwareLabel(allocator, term);
+    defer allocator.free(label);
+    try testing.expect(!std.mem.startsWith(u8, label, app_session_mod.editor_dirty_marker));
+}
+
+/// 파일을 쓰고 그 절대 경로를 준다 — 호출자가 free한다.
+fn dirtyFixturePath(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8, data: []const u8) ![]const u8 {
+    const io = std.testing.io;
+    try fx.dir.dir.writeFile(io, .{ .sub_path = name, .data = data });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    return std.fs.path.join(allocator, &.{ root, name });
+}
+
+test "DIRTY5 저장 안 한 편집기를 닫으면 확인을 묻는다 (file-panel-dock-ui.md §3.2)" {
+    // **§3.2 "파일 탭 닫기와 dirty 보호"** — 닫기 직전에 게이트를 지나야 한다. 안 지나면
+    // `⌘W` 한 번에 **저장 안 한 편집이 조용히 사라진다.** 되돌릴 방법이 없는 종류다.
+    //
+    // 기존 게이트는 **실행 중 셸 명령**만 봤다(`closeTargetHasRunningJob`) — 편집기 dirty는
+    // 그 판정에 없었다(적대적 검증 2026-08-26).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "dirty5.txt", "hello\n");
+
+    // **cascade가 아니라 dirty를 잰다.** 마지막 Term을 닫으면 pane·탭·창으로 범위가 번져 다른
+    // 이유(창 닫기 확인)로도 모달이 뜬다 — 그러면 이 판정자가 dirty를 재는 척만 한다. 그래서
+    // Term을 하나 더 두고 **Term 범위에서** 잰다.
+    {
+        const other = try dirtyFixturePath(&fx, allocator, "other.txt", "x\n");
+        defer allocator.free(other);
+        _ = try openPathInActivePane(fx.session, other);
+    }
+    // **픽스처의 터미널 Term을 프롬프트로 정착시킨다.** 안 그러면 "실행 중 명령" 분기가 **먼저**
+    // 걸려 이 판정자가 dirty가 아니라 그것을 잰다(적대적 검증 2026-08-26 — 실제로 그 문구가 떴다).
+    for (pane_ops.activePane(fx.session).terms.items) |t| {
+        if (t.kind != .editor) t.surface.core.semantic_state = .input;
+    }
+    // 편집기를 활성으로 되돌린다.
+    for (pane_ops.activePane(fx.session).terms.items, 0..) |t, i| {
+        if (t == term) fx.session.focusTerm(i);
+    }
+    try testing.expect(pane_ops.activePane(fx.session).terms.items.len > 1);
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(isDirty(term));
+
+    // **dirty면 묻는다.**
+    fx.session.requestClose(.active_term);
+    try testing.expect(fx.session.chrome_host.confirm.open); // 모달이 떴다
+
+    // **문구가 dirty를 말한다** — `app_close_running`("명령이 돌고 있다")을 재사용하면 사용자가
+    // 무엇을 잃는지 모른다(적대적 검증 2026-08-26 — 처음엔 그 문구를 쓰고 있었다).
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+
+    // **탭·창을 닫을 때도 같은 문이 선다.** Term 범위만 재면 `⌘W`는 막히는데 탭 닫기·창 닫기로
+    // 같은 편집이 사라진다 — 범위마다 따로 배선돼 있어 하나만 재면 나머지는 판정 밖이다
+    // (적대적 검증 2026-08-26 — 탭·창 갈래를 지운 뮤턴트가 둘 다 살아남았다).
+    // 은 split 없는 탭에서 **pane**으로 풀린다 —  범위는 사이드바 ✕
+    // ()가 연다. 셋을 다 재야 범위별 배선이 전부 판정 아래 든다.
+    // `.tab_index`는 **탭이 하나면** `.session`으로 풀린다(마지막 탭 = 창 전체) — 탭을 하나 더
+    // 만들어야 `.tab` 갈래에 닿는다. 안 그러면 그 범위가 판정 밖에 남는다(적대적 검증 2026-08-26).
+    _ = try tab_ops.newTab(fx.session);
+    fx.session.app_window.active_tab = 0; // dirty 편집기가 있는 탭으로 되돌린다
+    // 새 탭의 터미널도 프롬프트로 정착시킨다 — 안 그러면 창 범위에서 "실행 중 명령"이 먼저 걸려
+    // 이 판정자가 dirty를 재는 척만 한다(같은 함정을 두 번째로 밟았다).
+    for (fx.session.tabs.items) |t| {
+        for (t.panes.items) |pn| {
+            for (pn.terms.items) |tm| if (tm.kind != .editor) {
+                tm.surface.core.semantic_state = .input;
+            };
+        }
+    }
+    try testing.expect(fx.session.tabs.items.len > 1);
+    for ([_]app_session_mod.PendingClose{ .pane_or_tab, .{ .tab_index = 0 }, .window }) |target| {
+        fx.session.chrome_host.confirm.open = false;
+        fx.session.pending_confirm = .none;
+        fx.session.requestClose(target);
+        try testing.expect(fx.session.chrome_host.confirm.open);
+        try testing.expectEqualStrings(
+            if (target == .window) maru.i18n.t(.app_close_window_unsaved) else maru.i18n.t(.app_close_unsaved),
+            fx.session.chrome_host.confirm.message,
+        );
+    }
+
+    // **네 범위 술어를 직접 잰다.** 위 루프는 `target → scope` 해소까지 함께 지나는데, `.pane`은
+    // split이 있어야 그 갈래로 풀린다 — 위상을 더 만들면 픽스처의 다른 전제가 깨졌다. 해소 규칙은
+    // 이미 기존 판정자들이 재고 있으므로, 여기서는 **술어가 범위마다 dirty를 보는지**만 잰다
+    // (그것이 없으면 탭·창 닫기로 같은 편집이 사라진다 — 뮤턴트가 그 갈래마다 따로 살아남았다).
+    for ([_]app_session_mod.CloseScope{ .term, .pane, .{ .tab = 0 }, .session }) |scope| {
+        try testing.expect(fx.session.scopeHasUnsavedEditor(scope));
+    }
+
+    // 저장하면 다시 묻지 않는다 — 닫힌다.
+    fx.session.chrome_host.confirm.open = false;
+    fx.session.pending_confirm = .none;
+    try testing.expect(saveDocument(fx.session, term));
+    fx.session.requestClose(.active_term);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    for ([_]app_session_mod.CloseScope{ .term, .pane, .{ .tab = 0 }, .session }) |scope| {
+        try testing.expect(!fx.session.scopeHasUnsavedEditor(scope));
+    }
+}
+
+test "DIRTY4 저장이 실패하면 dirty가 남는다 — 실패를 성공으로 보고하지 않는다 (file-panel.md §1)" {
+    // **§1: *"실패·external conflict에서는 buffer와 dirty를 유지한다"***. 이것을 안 지키면
+    // 사용자는 **저장됐다고 믿고 창을 닫는다** — 그 순간 편집이 사라진다. 되돌릴 방법이 없는 종류다.
+    //
+    // 이 축에 판정자가 없어서, 실패 경로에서도 clean으로 만드는 뮤턴트가 살아남았다
+    // (적대적 검증 2026-08-26).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "dirty4.txt", "hello\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(isDirty(term));
+
+    // ⑴ **디렉터리를 쓰기 금지로 만든다** — 원본은 열리고 해시도 나오지만 **temp 만들기가 실패**한다.
+    //    쓰기 자리까지 실제로 닿아야 그 경로의 결함이 드러난다: 파일만 지우면 그 앞(열기)에서
+    //    끝나 **쓰기 실패 경로가 아예 안 돈다**(적대적 검증 2026-08-26 — 그 상태로 뮤턴트가 살았다).
+    {
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+        const root_z = try allocator.dupeZ(u8, root);
+        defer allocator.free(root_z);
+        if (std.c.chmod(root_z, 0o500) != 0) return error.SkipZigTest; // 권한을 못 바꾸면 이 축을 못 잰다
+        defer _ = std.c.chmod(root_z, 0o700); // 픽스처 정리가 지울 수 있게 되돌린다
+
+        try testing.expect(!saveDocument(fx.session, term)); // 실패를 실패로 보고한다
+        try testing.expect(isDirty(term)); // **dirty가 남는다**
+        try testing.expectEqualStrings("hello!\n", term.rt.editor_doc.?.file.content);
+    }
+
+    // ⑵ **파일이 사라진 경우**도 같다 — 열기에서 실패하는 다른 갈래다.
+    try fx.dir.dir.deleteFile(io, "dirty4.txt");
+    try testing.expect(!saveDocument(fx.session, term));
+    try testing.expect(isDirty(term));
+    try testing.expectEqualStrings("hello!\n", term.rt.editor_doc.?.file.content);
+}
+
+test "DIRTY3 dirty면 제목에 점이 붙고, 저장하면 사라진다 (file-panel.md §1)" {
+    // **상태만 맞고 화면에 안 나오면 사용자에게는 없는 기능이다.** `isDirty`가 참인 것과 제목에
+    // 점이 붙는 것은 다른 자리이고, 그 사이가 끊긴 채로 "dirty 표시를 했다"고 적을 수 있다 —
+    // 이 슬라이스에서 배선이 죽어 있던 것을 두 번 겪었다(⌘⌃D chord·편집기 키 분기).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "dirty3.txt", "hello\n");
+
+    try testing.expect(!isDirty(term));
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(isDirty(term));
+
+    // **스냅숏이 실제로 내는 제목**을 본다 — `isDirty`가 참인 것과 제목에 점이 붙는 것은 다른 자리다.
+    const marker = app_session_mod.editor_dirty_marker;
+    const snapshotDto = struct {
+        fn get(session: *AppSession, alloc: std.mem.Allocator, sid: u64) !struct { title: []const u8, dirty: bool } {
+            var arena_state = std.heap.ArenaAllocator.init(alloc);
+            defer arena_state.deinit();
+            const a = arena_state.allocator();
+            var surfaces: std.ArrayList(maru.session.control_surface.SurfaceDto) = .empty;
+            var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+            try session.collectSessionInto(a, 1, .normal, &surfaces, &windows);
+            for (surfaces.items) |dto| {
+                if (dto.surface_id != sid) continue;
+                return .{
+                    .title = try alloc.dupe(u8, dto.title),
+                    .dirty = switch (dto.detail) {
+                        .editor => |m| m.dirty,
+                        else => false,
+                    },
+                };
+            }
+            return error.SurfaceNotInSnapshot;
+        }
+    }.get;
+
+    {
+        const dto = try snapshotDto(fx.session, allocator, term.surface.id);
+        defer allocator.free(dto.title);
+        try testing.expect(std.mem.startsWith(u8, dto.title, marker));
+        try testing.expect(std.mem.endsWith(u8, dto.title, "dirty3.txt"));
+        // **타입 있는 필드로도 나간다.** 제목 접두사만 두면 소비자가 문자열을 뜯어야 하고,
+        // 표식을 바꾸는 순간 조용히 깨진다(적대적 검증 2026-08-26 — 그 상태로 wire에 나가고 있었다).
+        try testing.expect(dto.dirty);
+    }
+
+    // **사용자가 보는 탭 라벨에도 나온다.** DTO에만 붙였다가 화면에는 안 나오는 상태였다
+    // (적대적 검증 2026-08-26 — 탭 바는 `diffAwareLabel` 경로를 탄다).
+    {
+        const label = try fx.session.diffAwareLabel(allocator, term);
+        defer allocator.free(label);
+        try testing.expect(std.mem.startsWith(u8, label, marker));
+    }
+    // **에이전트 running 표식과 다른 글자여야 한다** — 같은 자리에 붙으므로 겹치면 뜻이 겹친다.
+    {
+        var flag: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(app_session_mod.agent_running_flag, &flag) catch 0;
+        try testing.expect(!std.mem.eql(u8, marker, flag[0..n]));
+    }
+
+    try testing.expect(saveDocument(fx.session, term));
+    try testing.expect(!isDirty(term));
+    {
+        const label = try fx.session.diffAwareLabel(allocator, term);
+        defer allocator.free(label);
+        try testing.expect(!std.mem.startsWith(u8, label, marker));
+    }
+    {
+        const dto = try snapshotDto(fx.session, allocator, term.surface.id);
+        defer allocator.free(dto.title);
+        try testing.expect(!std.mem.startsWith(u8, dto.title, marker));
+        try testing.expectEqualStrings("dirty3.txt", dto.title);
+        try testing.expect(!dto.dirty);
+    }
+}
+
+test "DIRTY2 BOM이 있는 파일도 저장 직후 clean이다 (§3.5)" {
+    // **저장이 쓰는 bytes에는 BOM이 붙고 편집기가 든 내용에는 없다.** 쓴 bytes로 해시를 재면
+    // BOM 있는 파일이 **저장 직후에도 dirty로 남아** 사용자가 저장을 반복한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "dirty2.txt", "\xEF\xBB\xBFhi\n");
+    try testing.expect(term.rt.editor_doc.?.file.format.has_bom); // 전제: 실제로 BOM 문서다
+
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(term.rt.editor_doc.?.isDirty());
+    try testing.expect(saveDocument(fx.session, term));
+    try testing.expect(!term.rt.editor_doc.?.isDirty());
 }
 
 test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 안쪽 (§5.4)" {

@@ -1309,6 +1309,23 @@ pub fn blendRgb(base: u32, tint_rgb: u32, alpha: u8) u32 {
 /// 제목도 OSC 제목 우선·없으면 cwd basename(동작 비교).
 /// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name=세션 소유,
 /// auto_title=메인 스레드 소유 캐시, surface.title=정적) — 모두 reader 스레드가 안 건드려 렌더 중 안정. 호출자가 즉시 복사.
+/// 저장하지 않은 편집이 있는 편집기 제목 앞에 붙는 표식(U+25CB WHITE CIRCLE).
+///
+/// **running 표식과 그리는 층이 다르다.** `●`는 `tabTitleRunningMarker`가 떼어 **셀로** 그리고
+/// (`appendPaneTabTitles`가 `tabTitleBody`로 본문만 measured에 보낸다), 이 `○`는 **본문에 남아**
+/// 제목과 함께 measured로 그려진다. 층을 나누지 않는 이유: 셀 층은 에이전트 색으로 다시 칠해지는
+/// 자리라(`recolorAgentFlagCells`) dirty가 거기 끼면 색 규칙이 둘이 된다. 대신 좁은 탭에서
+/// 말줄임될 때 **표식이 이름과 함께 잘린다** — 그 대가는 §5.2가 2차원 reveal과 함께 볼 자리다.
+///
+/// **글자 하나다** — 탭 폭은 칸으로 세므로(`paneTabWidth`) 여러 칸을 먹는 표식은 좁은 탭에서
+/// 이름을 통째로 밀어낸다.
+///
+/// **`agent_running_flag`(`●` U+25CF)와 다른 글자여야 한다.** 처음에 같은 `●`를 골랐다가
+/// 적대적 검증(2026-08-26)이 잡았다 — 사용자는 *"에이전트가 도는 중"*과 *"저장 안 됨"*을
+/// 구분할 수 없게 된다. 같은 탭 바에 같은 자리(앞)로 붙으므로 **모양이 겹치면 뜻이 겹친다.**
+/// 속이 빈 원은 "아직 안 채워짐 = 저장 안 됨"으로 읽히고, VSCode도 dirty에 빈 점을 쓴다.
+pub const editor_dirty_marker = "\u{25CB}";
+
 pub fn termLabel(term: *const Term) []const u8 {
     // 파일 Term은 **파일 이름**이 라벨이다. 패널 종류 라벨("Markdown")을 쓰면 파일을 세 개 열어도 탭이 전부
     // "Markdown"이라 어느 탭이 무엇인지 알 수 없다(diff를 열면서 드러났다 — 사용자 지적). 사용자 rename이 있으면
@@ -7449,6 +7466,40 @@ pub const AppSession = struct {
         };
     }
 
+    /// 이 범위에 **저장하지 않은 편집**이 있는가([file-panel-dock-ui.md](../../../docs/file-panel-dock-ui.md)
+    /// §3.2 "파일 탭 닫기와 dirty 보호").
+    ///
+    /// **실행 중 명령과 따로 선다.** 합치면 편할 것 같지만 그러면 확인 문구가 하나로 묶여 dirty인데
+    /// *"명령이 돌고 있다"*고 말한다 — 사용자가 **무엇을 잃는지 모른다**. 바로 아래 브라우저 탭
+    /// 분기가 같은 이유로 자기 술어와 자기 문구를 갖고 있고, 그 선례를 따른다(적대적 검증 2026-08-26이
+    /// 합쳐 두었던 것을 잡았다).
+    ///
+    /// 이 문이 없어서 `⌘W` 한 번에 **저장 안 한 편집이 조용히 사라졌다** — 되돌릴 방법이 없는 종류다.
+    pub fn scopeHasUnsavedEditor(self: *AppSession, scope: CloseScope) bool {
+        const paneDirty = struct {
+            fn f(pane: *Pane) bool {
+                for (pane.terms.items) |t| if (editor_ops.isDirty(t)) return true;
+                return false;
+            }
+        }.f;
+        const tabDirty = struct {
+            fn f(tab: *Tab) bool {
+                for (tab.panes.items) |p| if (paneDirty(p)) return true;
+                return false;
+            }
+        }.f;
+        return switch (scope) {
+            .none => false,
+            .term => editor_ops.isDirty(pane_ops.activePane(self).activeTerm()),
+            .pane => paneDirty(pane_ops.activePane(self)),
+            .tab => |idx| tabDirty(self.tabs.items[idx]),
+            .session => blk: {
+                for (self.tabs.items) |t| if (tabDirty(t)) break :blk true;
+                break :blk false;
+            },
+        };
+    }
+
     /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.
     pub fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
         const scope = self.resolveCloseScope(target);
@@ -7509,6 +7560,13 @@ pub const AppSession = struct {
             self.showConfirm(switch (target) {
                 .window => .app_close_window_running,
                 else => .app_close_running,
+            }, target);
+        } else if (self.scopeHasUnsavedEditor(scope)) {
+            // 저장 안 한 편집 = 잃을 수 있는 상태. running job과 **병렬**로 자기 문구를 띄운다
+            // (브라우저 탭 분기와 같은 모양 — 그쪽 주석이 근거를 든다).
+            self.showConfirm(switch (target) {
+                .window => .app_close_window_unsaved,
+                else => .app_close_unsaved,
             }, target);
         } else if (web_ops.scopeHasWebBrowser(self, scope)) {
             // 브라우저 탭 닫기 확인(제보): web browser term은 실행 중 셸 명령이 없어(live_initialized=false) 위 게이트를
@@ -13994,10 +14052,20 @@ pub const AppSession = struct {
                     // 채우면 소비자가 웹과 같은 것으로 오인한다(docs/control-plane.md §3).
                     if (term.kind == .editor) {
                         const ed_sid = term.surface.id;
+                        // **저장 안 한 편집은 제목에 점을 붙인다**(dirty — `file-panel.md` §1이 계약을
+                        // 소유한다: 내용 동등성이므로 undo로 돌아오면 점이 사라진다).
+                        //
+                        // **접두사인 이유**: 탭이 좁아지면 제목 **뒤**가 말줄임되므로 뒤에 붙이면
+                        // 좁은 탭에서 표식이 먼저 사라진다 — "저장 안 됨"은 이름보다 먼저 보여야 한다.
+                        // 에이전트 running 마커(`flagPrefixedLabel`)가 같은 이유로 앞에 붙는다.
+                        const ed_title = if (editor_ops.isDirty(term))
+                            try std.fmt.allocPrint(arena, "{s} {s}", .{ editor_dirty_marker, termLabel(term) })
+                        else
+                            try arena.dupe(u8, termLabel(term));
                         try surfaces.append(arena, .{
                             .surface_id = ed_sid,
                             .generation = 0,
-                            .title = try arena.dupe(u8, termLabel(term)),
+                            .title = ed_title,
                             .window = window_id,
                             .tab = @intCast(ti),
                             .pane = @intCast(pi),
@@ -14010,6 +14078,7 @@ pub const AppSession = struct {
                                 break :blk .{
                                     .path = if (meta.path) |p| try arena.dupe(u8, p) else null,
                                     .read_only = meta.read_only,
+                                    .dirty = meta.dirty,
                                 };
                             } },
                         });
@@ -17479,7 +17548,9 @@ pub const AppSession = struct {
     /// 탭이 공유 — ● 셀은 recolorAgentFlagCells가 브랜드색으로 칠한다. base는 borrowed 가능(여기서 복제해 소유권 반환).
     /// 파형(5칸)이 아니라 1칸이라 등폭 탭에서 이름을 거의 안 갉아먹는다(tmux 창-플래그 관례, code-review max #1).
     /// 탭 라벨(owned). diff Term이면 `이름 · 기준`으로, 그 외에는 기존 규칙(running 플래그 prefix) 그대로.
-    fn diffAwareLabel(self: *AppSession, allocator: std.mem.Allocator, term: *Term) ![]u8 {
+    /// 탭 바가 그리는 라벨 — **사용자가 보는 제목의 단일 자리**다(diff 기준·running 표식·dirty 표식이
+    /// 전부 여기서 붙는다). 판정자가 화면에 실제로 나오는지 재려면 이 함수를 지나야 한다.
+    pub fn diffAwareLabel(self: *AppSession, allocator: std.mem.Allocator, term: *Term) ![]u8 {
         _ = self;
         const base = termLabel(term);
         if (term.file_entry) |entry| {
@@ -17508,6 +17579,15 @@ pub const AppSession = struct {
                 }
                 return std.fmt.allocPrint(allocator, "{s} · {s}", .{ base, label });
             }
+        }
+        // **저장 안 한 편집기는 라벨 앞에 표식을 단다.** `flagPrefixedLabel`(에이전트 running)과
+        // 같은 자리이지만 **다른 글자**다 — 겹치면 두 뜻을 구분할 수 없다(그 상수 doc이 근거를 든다).
+        //
+        // **이 함수가 사용자가 보는 라벨의 단일 자리다.** 처음에는 컨트롤 플레인 DTO에만 붙였는데,
+        // 탭 바는 이 경로를 타므로 **화면에는 점이 안 나왔다**(적대적 검증 2026-08-26 — 이 슬라이스에서
+        // 배선이 끊긴 것을 세 번째로 잡았다).
+        if (editor_ops.isDirty(term)) {
+            return std.fmt.allocPrint(allocator, "{s} {s}", .{ editor_dirty_marker, base });
         }
         return flagPrefixedLabel(allocator, base, term.agent_state == .running);
     }

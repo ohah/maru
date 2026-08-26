@@ -156,6 +156,10 @@ pub const editor = struct {
     /// N2: 커서 이동 일습(§3.2 — 문자·낱말·smart home·줄 끝·목표 열). **논리 축만 안다** —
     /// 랩이 켜졌을 때의 시각 행 이동은 화면 폭을 아는 L3가 조립한다.
     pub const motion = @import("session/editor/motion.zig");
+    /// N2: 클립보드 조각 경계와 분배 규칙(§3.4 — 멀티 커서가 규칙을 규정한다). 시스템 클립보드에는
+    /// 통짜가 들어가므로 "조각이 몇 개였나"는 앱이 따로 기억해야 하고, 그 기억이 지금 클립보드를
+    /// 설명하는지 판정하는 것이 순수 계산이라 여기 산다.
+    pub const clipboard = @import("session/editor/clipboard.zig");
     /// N2: 한 번의 편집을 값으로 만든다(§3.3 — 여러 range를 담고 selection을 같은 연산에서 민다).
     /// 스택·그룹핑은 시계와 입력 사건을 읽어야 해서 여기 없다.
     pub const delta = @import("session/editor/delta.zig");

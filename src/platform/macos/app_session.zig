@@ -5450,6 +5450,13 @@ pub const AppSession = struct {
     // pendingClipboard가 OSC52 write와 같은 drain으로
     // 우선 반환 → Swift가 NSPasteboard에 씀. 선택 바이트를 **먼저 캡처**해 deleteSelection과 순서 무관(cut 표준). drain 시 비움.
     chrome_clipboard_write: []u8 = &.{},
+    /// 편집기 복사가 남긴 **조각 경계 기억**(§3.4). 시스템 클립보드에는 통짜가 들어가므로
+    /// "조각이 몇 개였나"는 여기 있어야 한다. 붙여넣기가 **지금 클립보드가 이 기억이 설명하는
+    /// 그것인지** 먼저 묻고(`clipboard.describes`), 아니면 통짜로 넣는다.
+    ///
+    /// **세션이 소유한다** — Term이 아니다. 한 편집기에서 복사해 **다른 편집기에 붙여넣는** 것이
+    /// 같은 규칙을 타야 하고, Term에 두면 그 경로에서 경계가 사라진다.
+    editor_clipboard_meta: ?maru.session.editor.clipboard.Meta = null,
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
     notification_body_out: []u8 = &.{},
@@ -10822,6 +10829,12 @@ pub const AppSession = struct {
                     };
                     const handled = if (motion) |how|
                         editor_ops.moveCarets(self, active, how, extend)
+                    else if (m.command and !m.control and !m.option and key_event.key == .char and
+                        (key_event.key.char == 'x' or key_event.key.char == 'X'))
+                        // **⌘X 잘라내기**(§3.4). `⌘C`는 `copyText`가, `⌘V`는 `pasteText`가 받는데
+                        // (Swift가 그 둘을 따로 부른다) **잘라내기는 그런 진입점이 없다** — 주소창이
+                        // 자기 키 처리기 안에서 `addrEditCut`을 부르는 것과 같은 자리에 둔다.
+                        editor_ops.cutSelection(self, active)
                     else switch (key_event.key) {
                         .backspace => editor_ops.deleteText(self, active, true),
                         .delete => editor_ops.deleteText(self, active, false),
@@ -12696,6 +12709,18 @@ pub const AppSession = struct {
             scm_dock_ops.insertCommitText(self, bytes);
             return;
         }
+        // **편집기 Term이면 문서에 넣는다**(§3.4). 주소창·커밋 상자와 같은 자리·같은 이유다 —
+        // 편집기에는 PTY가 없어 아래 경로로 흘리면 **붙여넣기가 소멸한다.**
+        //
+        // 분배 규칙(조각 수가 커서 수와 같으면 하나씩)과 줄 단위 삽입은 `editor_ops.pasteText`가
+        // 소유하고, 그 규칙 자체는 `session/editor/clipboard.zig`가 든다.
+        {
+            const active = pane_ops.activePane(self).activeTerm();
+            if (active.kind == .editor and editor_ops.pasteText(self, active, bytes)) {
+                self.metal_dirty = true;
+                return;
+            }
+        }
         // tree/dock-group/overlay input owner에서는 TerminalView가 native responder일 수 있어도 PTY가 대상이 아니다.
         // 특히 surface publish 대기 `.dock_pending`의 Cmd+V가 보이지 않는 셸 명령으로 실행되지 않게 fail-close한다.
         if (self.structuralInputOwner() or self.inputFocus() != .terminal) return;
@@ -13846,6 +13871,21 @@ pub const AppSession = struct {
             if (slice.len == 0) return &.{};
             self.copy_buffer = self.allocator.dupe(u8, slice) catch return &.{};
             return self.copy_buffer;
+        }
+        // **편집기 Term이면 문서 선택이 클립보드 주체다**(§3.4). 주소창·커밋 상자와 같은 규율이다 —
+        // 편집기에서 `⌘C`를 눌렀는데 화면 뒤 셸 출력이 복사되면 안 된다.
+        //
+        // 이 갈래가 없어서 `⌘C`가 편집기에 **안 걸렸다**(적대적 검증 2026-08-26). `copySelection`은
+        // 명령 팔레트로만 닿았고, 붙여넣기(`pasteText`)만 배선돼 **한쪽만 되는 상태**였다.
+        //
+        // `copySelection`이 조각 경계까지 기억하므로(§3.4) 여기서 그것을 부르고, 그 함수가 넣어 둔
+        // `chrome_clipboard_write`를 그대로 돌려준다 — 두 저장소가 갈리면 붙여넣기가 남의 것으로 본다.
+        {
+            const active = pane_ops.activePane(self).activeTerm();
+            if (active.kind == .editor) {
+                if (!editor_ops.copyDiffSelection(self) and !editor_ops.copySelection(self)) return &.{};
+                return self.chrome_clipboard_write;
+            }
         }
         // §6b-1 host-backed: 선택 텍스트는 **host가 뽑는다**(host가 콘텐츠 소유 = `extractSelection` 단일 출처, soft-wrap 이음·
         // 스크롤백 충실 — "client 렌더/host 해석" 불변식). 하이라이트 span(placeholder core가 렌더용으로 든 것)만 host로 보내
@@ -18953,6 +18993,7 @@ pub const AppSession = struct {
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
         if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write); // 슬라이스 4: 미-drain 주소창 cut 버퍼
         self.clipboard_read_target_buf.deinit(self.allocator);
+        if (self.editor_clipboard_meta) |*m| m.deinit(self.allocator);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
         for (self.notification_history.items) |n| {

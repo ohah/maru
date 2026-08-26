@@ -1637,9 +1637,8 @@ pub fn copySelection(self: *AppSession) bool {
     // **커서가 여럿이면 조각도 여럿이다**(§3.4). 시스템 클립보드에는 **문서 순서로 줄바꿈 연결**해
     // 넣는다 — 다른 앱이 붙여넣을 때 자연스러우라고 그 절이 정한 규칙이다.
     //
-    // **조각 경계는 아직 기억하지 않는다.** §3.4는 그것을 앱 안에 함께 두라고 하지만, 그 값을 쓰는
-    // 곳은 **붙여넣기 분배**뿐이고 붙여넣기는 편집 연산이라 이 슬라이스 밖이다. 지금 기억해 두면
-    // 읽는 사람이 없는 상태가 되고, 포맷 version(§3.4)도 소비처 없이 정하게 된다.
+    // **조각 경계를 함께 기억한다**(§3.4). 붙여넣기가 그 소비처다 — 그것이 없던 동안에는 기억할
+    // 이유가 없어 미뤄 두었고, 이제 함께 선다.
     var iter = selections(term);
     if (iter.count() == 0) return false;
 
@@ -1651,6 +1650,21 @@ pub fn copySelection(self: *AppSession) bool {
         if (hi <= lo or lo >= bytes.len) continue; // caret뿐이거나 낡은 offset이다
         ranges.append(self.allocator, .{ .start = lo, .end = hi }) catch return false;
     }
+
+    // **선택이 없으면 caret이 있는 줄 전체다**(§3.4). 그 사실을 표식으로 함께 기억해 두었다가
+    // 붙여넣을 때 **줄 단위로** 넣는다 — caret 자리에 끼워 넣으면 줄이 깨진다.
+    //
+    // 이것이 없어서 선택 없이 `⌘C`를 누르면 **아무 일도 안 일어났다**(적대적 검증 2026-08-26 —
+    // 판정자가 오히려 "선택이 없으면 복사도 없다"로 그 상태를 고정하고 있었다). 다른 편집기는
+    // 전부 줄을 담는다.
+    const from_empty = ranges.items.len == 0;
+    if (from_empty) {
+        const primary = term.rt.editor_selection orelse return false;
+        const line_idx = doc.file.lines.lineAt(@min(primary.focus, bytes.len));
+        const line = doc.file.lines.line(line_idx) orelse return false;
+        // **줄 끝 문자를 포함한다** — 줄 단위 삽입이 그것으로 줄을 만든다.
+        ranges.append(self.allocator, .{ .start = line.start, .end = line.end_with_ending }) catch return false;
+    }
     if (ranges.items.len == 0) return false;
 
     std.mem.sort(occurrence.Range, ranges.items, {}, struct {
@@ -1661,14 +1675,34 @@ pub fn copySelection(self: *AppSession) bool {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(self.allocator);
+    var ends: std.ArrayList(usize) = .empty;
+    defer ends.deinit(self.allocator);
     for (ranges.items, 0..) |r, i| {
         if (i > 0) out.append(self.allocator, '\n') catch return false;
         out.appendSlice(self.allocator, bytes[r.start..r.end]) catch return false;
+        ends.append(self.allocator, out.items.len) catch return false;
     }
 
     const captured = out.toOwnedSlice(self.allocator) catch return false; // OOM이면 복사 안 함(선택 보존)
+    const ends_owned = ends.toOwnedSlice(self.allocator) catch {
+        self.allocator.free(captured);
+        return false;
+    };
+    // **기억은 클립보드 문자열과 한 단위로 선다.** 하나만 서면 붙여넣기가 남의 문자열을 우리
+    // 경계로 자른다 — `describes`가 문자열을 대조해 막지만, 애초에 어긋난 상태를 만들지 않는다.
+    const meta_text = self.allocator.dupe(u8, captured) catch {
+        self.allocator.free(captured);
+        self.allocator.free(ends_owned);
+        return false;
+    };
     if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
     self.chrome_clipboard_write = captured;
+    if (self.editor_clipboard_meta) |*m| m.deinit(self.allocator);
+    self.editor_clipboard_meta = .{
+        .text = meta_text,
+        .ends = ends_owned,
+        .from_empty_selection = from_empty,
+    };
     return true;
 }
 
@@ -2090,6 +2124,16 @@ fn movedOffset(
 /// **줄 축만 본다.** 한 화면보다 긴 줄 안에서의 가로 이동은 이 함수가 못 잡는다 — §5.2가 소유할
 /// 2차원 reveal이고 그때 함께 닫힌다.
 fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
+    revealPrimaryCaretRows(self, term, 0);
+}
+
+/// `fallback_rows`: 스냅숏이 비어 있을 때 쓸 **편집 전 행 수**.
+///
+/// **편집 경로가 이것을 준다.** `refreshAfterEdit`가 렌더 스냅숏을 비우므로(§4.1g ⑸ — 클릭이 옛
+/// 자리를 답하지 않게), 편집 직후의 노출은 늘 "아직 안 그렸다" 갈래로 떨어진다. 그 갈래는 커서
+/// 줄을 **맨 위에 두므로**, 그대로 두면 **한 글자 칠 때마다 화면이 그 줄을 천장으로 끌어올린다**
+/// (적대적 검증 2026-08-26이 잡았다). 편집 전 화면이 몇 줄이었는지는 그 순간에도 알 수 있다.
+fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) void {
     const doc = term.rt.editor_doc orelse return;
     const sel = term.rt.editor_selection orelse return;
     const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)));
@@ -2099,8 +2143,15 @@ fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
     const row = visibleRowOfDocLine(term, doc_line) orelse return;
 
     const rows = term.rt.editor_hit_rows_len;
-    if (rows == 0) { // 아직 한 프레임도 안 그렸다 — 맨 위에 둔다
-        setEditorTop(self, term, row);
+    if (rows == 0) {
+        // 스냅숏이 없다. **편집 전 행 수를 알면 그것으로 최소 스크롤**을 하고, 그것도 없으면
+        // (정말 한 프레임도 안 그렸다) 맨 위에 둔다.
+        if (fallback_rows == 0) {
+            setEditorTop(self, term, row);
+            return;
+        }
+        const top0: u32 = @intCast(term.rt.editor_first_line);
+        if (row < top0) setEditorTop(self, term, row) else if (row >= top0 + fallback_rows) setEditorTop(self, term, row -| (@as(u32, @intCast(fallback_rows)) -| 1));
         return;
     }
 
@@ -2510,9 +2561,14 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
 fn drawnDocLines(term: *const Term) usize {
     const n = term.rt.editor_hit_rows_len;
     if (n == 0) return 0;
-    const lines = term.rt.editor_hit_lines[0..n];
+    // **길이를 배열로 좁힌다.** 스냅숏의 두 값(`len`과 배열)이 어긋난 상태가 존재한다 —
+    // 판정자가 "렌더가 굳혀 둔 상태"를 흉내 낼 때 길이만 세우고(`EDIT6`), 제품에서도
+    // `storeHitRows`가 실패하면 그 사이가 벌어질 수 있다. 좁히지 않으면 **읽다가 죽는다**
+    // (적대적 검증 2026-08-26 — 편집 경로가 이 함수를 부르기 시작하자 바로 패닉했다).
+    const lines = term.rt.editor_hit_lines[0..@min(n, term.rt.editor_hit_lines.len)];
+    if (lines.len == 0) return 0;
     var count: usize = 1;
-    for (lines[1..], lines[0 .. n - 1]) |cur, prev| {
+    for (lines[1..], lines[0 .. lines.len - 1]) |cur, prev| {
         if (cur != prev) count += 1;
     }
     return count;
@@ -4051,6 +4107,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
 
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
+    const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -4072,6 +4129,11 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     writeBackSelections(self, term, sels);
     refreshAfterEdit(self, term) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
+    // **편집한 자리를 보여 준다**(§5.2 줄 축). 앵커 보정 **뒤**여야 한다 — 보정은 "화면을 제자리에"
+    // 두는 것이고 노출은 "커서를 화면 안에"이므로, 순서가 반대면 보정이 노출을 되돌린다.
+    //
+    // 이것이 없어서 화면 밖에서 편집하면 **자기가 어디를 고치는지 못 봤다**(적대적 검증 2026-08-26).
+    revealPrimaryCaretRows(self, term, rows_before);
     return true;
 }
 
@@ -4130,6 +4192,144 @@ fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor
 ///
 /// **지울 것이 없는 커서는 delta에서 뺀다**(문서 처음에서 Backspace). 빈 range를 넣으면
 /// `delta.apply`가 겹침으로 볼 수 있고, 무엇보다 "아무것도 안 지웠는데 undo가 하나 쌓인다".
+/// **잘라내기** — 복사한 뒤 지운다(§3.4).
+///
+/// **복사를 먼저 한다.** 지우고 나면 복사할 것이 없고, 복사가 실패했는데 지우면 사용자가
+/// **클립보드에도 없고 문서에도 없는** 상태를 겪는다(undo가 있지만 "잘라냈는데 붙여넣을 것이
+/// 없다"는 그 자체로 계약 위반이다). 주소창 `addrEditCut`이 같은 순서다.
+///
+/// **이 순서를 지금 판정할 수는 없다**(적대적 검증 2026-08-26). 커서가 멀쩡한데 복사만 실패하는
+/// 경우는 **할당 실패**뿐인데, 그 실패는 아래 `deleteText`도 함께 깨뜨려 두 식이 같은 답을 낸다 —
+/// 실패 지점을 미는 판정자로도 안 갈렸다(**동치 뮤턴트**). 그래서 이 `if`는 검증된 동작이 아니라
+/// **의도의 표현**이고, 복사가 할당 아닌 이유로 실패할 수 있게 되는 날 비로소 판정된다.
+///
+/// **선택이 없으면 줄 전체를 잘라낸다** — 복사 쪽이 그렇게 담으므로(§3.4) 지우는 것도 같은 범위여야
+/// "복사한 것이 사라졌다"가 성립한다. 다른 편집기도 `⌘X`가 줄을 자른다.
+pub fn cutSelection(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    if (!copySelection(self)) return false;
+
+    const had_selection = blk: {
+        var it = selections(term);
+        while (it.next()) |sel| if (!sel.isEmpty()) break :blk true;
+        break :blk false;
+    };
+    if (had_selection) return deleteText(self, term, false);
+
+    // **선택이 없다 = 줄 전체다.** caret이 있는 줄을 통째로 지운다.
+    const primary = term.rt.editor_selection orelse return false;
+    const line_idx = doc.file.lines.lineAt(@min(primary.focus, doc.file.content.len));
+    const line = doc.file.lines.line(line_idx) orelse return false;
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(line.start, line.end_with_ending);
+    clearExtraSelections(self, term);
+    return deleteText(self, term, false);
+}
+
+/// **클립보드를 커서마다 넣는다**(§3.4).
+///
+/// 분배 규칙은 `clipboard.distribute`가 소유한다 — 조각 수가 커서 수와 **같으면** 하나씩,
+/// **다르면** 전부에 통짜다. 외부 앱이 복사한 문자열이면 기억한 경계를 버리고 통짜로 간다.
+///
+/// **선택 없이 복사한 것은 줄 단위로 넣는다**(§3.4 — `from_empty_selection`): caret 자리에
+/// 끼워 넣으면 줄이 깨지므로 **그 줄 앞**에 통째로 넣는다.
+///
+/// **한 번의 붙여넣기는 undo 하나다**(§3.3) — 커서가 N개여도 `delta.apply` 한 번이라 그렇게 된다.
+pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    if (clipboard.len == 0) return false;
+
+    var iter = selections(term);
+    const n = iter.count();
+    if (n == 0) return false;
+
+    const clip = maru.session.editor.clipboard;
+    const line_wise = clip.describes(self.editor_clipboard_meta, clipboard) and
+        self.editor_clipboard_meta.?.from_empty_selection;
+
+    const pieces_buf = self.allocator.alloc([]const u8, n) catch return false;
+    defer self.allocator.free(pieces_buf);
+    const dist = clip.distribute(self.editor_clipboard_meta, clipboard, n, pieces_buf);
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    const content = doc.file.content;
+    var i: usize = 0;
+    iter = selections(term);
+    while (iter.next()) |sel| : (i += 1) {
+        const text = switch (dist) {
+            .per_cursor => |ps| ps[i],
+            .whole => |w| w,
+        };
+        if (line_wise) {
+            // **줄 단위**: caret이 있는 줄의 **머리**에 넣는다. 선택이 있어도 그 줄 머리다 —
+            // 줄 단위로 담은 것을 줄 중간에 끼우면 두 줄이 한 줄이 된다.
+            const line_idx = doc.file.lines.lineAt(@min(sel.focus, content.len));
+            const line = doc.file.lines.line(line_idx) orelse continue;
+            ranges.append(self.allocator, .{ .start = line.start, .end = line.start, .text = text }) catch return false;
+        } else {
+            const lo = @min(sel.start(), content.len);
+            const hi = @min(sel.end(), content.len);
+            ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = text }) catch return false;
+        }
+    }
+    if (ranges.items.len == 0) return false;
+
+    std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
+        fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
+            return a.start < b.start;
+        }
+    }.lessThan);
+    // 겹치면 `delta.apply`가 거절한다. **줄 단위에서 같은 줄에 커서가 여럿**이면 줄 머리가 같아
+    // 실제로 겹치므로 뒤 것을 버린다 — 두 번 넣으면 사용자는 커서를 둘 뒀다는 이유로 **줄이 두 번**
+    // 들어간 것을 본다(`PASTE7`이 판정한다).
+    //
+    // **범위 겹침(아래 첫 줄)은 닿지 않는다** — `selectionsForEdit`이 부르는 `mergeOverlapping`이
+    // 이미 합쳐서 준다. 지운 뮤턴트가 살아남아 그것을 확인했다(적대적 검증 2026-08-26). 남겨 두는
+    // 이유는 **`delta`의 계약이 정렬·비겹침을 요구**하기 때문이다 — 그 전제가 깨지면 `apply`가
+    // `MalformedDelta`로 붙여넣기를 통째로 거절하므로, 여기서 한 번 더 좁히는 값이 있다.
+    var dedup: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer dedup.deinit(self.allocator);
+    for (ranges.items) |c| {
+        if (dedup.items.len > 0 and c.start < dedup.items[dedup.items.len - 1].end) continue;
+        if (dedup.items.len > 0 and line_wise and c.start == dedup.items[dedup.items.len - 1].start) continue;
+        dedup.append(self.allocator, c) catch return false;
+    }
+
+    var sels = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(sels.items);
+    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
+    const before_primary = sels.primary;
+
+    const scroll_anchor = captureScrollAnchor(term);
+    const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
+    const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = dedup.items }, &sels) catch {
+        self.allocator.free(before);
+        return false;
+    };
+
+    for (dedup.items, 0..) |_, k| {
+        if (k < sels.items.len) sels.items[k] = editor_selection.Selection.at(inverse.changes[k].end);
+    }
+    // **앞뒤로 끊는다**(§3.3 "연산 종류 변경"). 뒤에만 끊으면 **붙여넣기 자신이** 앞 타이핑과 한
+    // 묶음이 되어, 붙여넣기를 되돌리려는 undo 한 번에 친 것까지 사라진다 — `pushUndo`가 묶음을
+    // 정하므로 그 **전에** 끊어야 붙여넣기가 자기 묶음을 갖는다(적대적 검증 2026-08-26이 잡았다).
+    breakUndoGroup(term);
+    pushUndo(self, term, inverse, before, before_primary, .insert);
+    writeBackSelections(self, term, sels);
+    refreshAfterEdit(self, term) catch {};
+    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = dedup.items });
+    revealPrimaryCaretRows(self, term, rows_before); // 붙여넣은 자리를 보여 준다(§5.2)
+    breakUndoGroup(term); // 다음 타이핑도 새 묶음이다
+    self.metal_dirty = true;
+    return true;
+}
+
 pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
@@ -4178,6 +4378,7 @@ pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
 
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
+    const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
         return false;
@@ -4199,6 +4400,11 @@ pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
     writeBackSelections(self, term, sels);
     refreshAfterEdit(self, term) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
+    // **편집한 자리를 보여 준다**(§5.2 줄 축). 앵커 보정 **뒤**여야 한다 — 보정은 "화면을 제자리에"
+    // 두는 것이고 노출은 "커서를 화면 안에"이므로, 순서가 반대면 보정이 노출을 되돌린다.
+    //
+    // 이것이 없어서 화면 밖에서 편집하면 **자기가 어디를 고치는지 못 봤다**(적대적 검증 2026-08-26).
+    revealPrimaryCaretRows(self, term, rows_before);
     return true;
 }
 
@@ -10090,12 +10296,16 @@ test "SEL3 선택이 화면에 띠로 서고, 복사가 문서 원본을 뜬다 
     try testing.expect(copySelection(fx.session));
     try testing.expectEqualStrings("alpha", fx.session.chrome_clipboard_write);
 
-    // ⑷ caret뿐이면 복사가 없다 — 빈 문자열을 클립보드에 넣으면 사용자가 가진 것을 지운다.
-    fx.session.allocator.free(fx.session.chrome_clipboard_write);
-    fx.session.chrome_clipboard_write = &.{};
+    // ⑷ **caret뿐이면 그 줄 전체를 담는다**(§3.4 — "선택 없이 복사하면 caret이 있는 줄 전체").
+    //
+    // **이 판정자는 원래 그 반대를 고정하고 있었다**: `!copySelection` + 빈 클립보드. 그때는
+    // 복사만 있고 붙여넣기가 없어 "빈 문자열을 넣으면 사용자가 가진 것을 지운다"가 유일한 걱정
+    // 이었는데, §3.4가 요구하는 것은 **빈 문자열이 아니라 줄**이다(적대적 검증 2026-08-26).
+    // 줄 단위 표식과 붙여넣기가 함께 서면서 그 계약을 지킬 수 있게 됐다 — `COPY1`이 소유한다.
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(6);
-    try testing.expect(!copySelection(fx.session));
-    try testing.expectEqual(@as(usize, 0), fx.session.chrome_clipboard_write.len);
+    try testing.expect(copySelection(fx.session));
+    try testing.expect(fx.session.chrome_clipboard_write.len > 0); // 빈 문자열은 여전히 아니다
+    try testing.expect(fx.session.editor_clipboard_meta.?.from_empty_selection);
 }
 
 test "MC1 다음 일치 추가가 커서를 늘리고, 띠가 전부 서고, 복사가 문서 순서로 잇는다 (§9.1·§3.4)" {
@@ -11082,6 +11292,366 @@ test "DIRTY1 저장과 다르면 dirty, undo로 같은 내용에 돌아오면 cl
     try testing.expect(term.rt.editor_doc.?.isDirty());
 }
 
+test "CUT1 ⌘X가 잘라내고, 선택이 없으면 줄 전체다 (§3.4)" {
+    // **복사·붙여넣기만 있고 잘라내기가 없으면 반쪽이다.** 그리고 `⌘C`(`copyText`)·`⌘V`
+    // (`pasteText`)와 달리 잘라내기는 Swift 진입점이 없어 **키 분기에서 잡아야** 한다 —
+    // 주소창이 `addrEditCut`을 자기 키 처리기에서 부르는 것과 같은 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cut1.txt", "alpha\nbeta\n");
+
+    // ⑴ 선택이 있으면 그것만 잘라낸다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // "alpha"
+    try pressKey(&fx, .{ .char = 'x' }, .{ .command = true });
+    try testing.expectEqualStrings("\nbeta\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqualStrings("alpha", fx.session.chrome_clipboard_write);
+
+    // **한 묶음이라 undo 한 번에 돌아온다.**
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("alpha\nbeta\n", term.rt.editor_doc.?.file.content);
+
+    // ⑵ **선택이 없으면 줄 전체다** — 복사가 줄을 담으므로 지우는 것도 같은 범위여야
+    //    "복사한 것이 사라졌다"가 성립한다.
+    term.rt.editor_selection = editor_selection.Selection.at(2); // "alpha" 가운데
+    try pressKey(&fx, .{ .char = 'x' }, .{ .command = true });
+    try testing.expectEqualStrings("beta\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqualStrings("alpha\n", fx.session.chrome_clipboard_write);
+
+    // ⑶ **복사가 실패하면 지우지 않는다.** 지우고 나서 복사가 실패하면 사용자는 **클립보드에도
+    //    없고 문서에도 없는** 상태를 겪는다 — undo가 있지만 "잘라냈는데 붙여넣을 것이 없다"는
+    //    그 자체로 계약 위반이다(적대적 검증 2026-08-26 — 복사 실패를 무시하는 뮤턴트가 살았다).
+    //
+    //    **커서를 없애는 방법으로는 갈리지 않는다** — 그 경우 뒤쪽 `orelse return false`가 어차피
+    //    막아 두 식이 같은 답을 낸다(뮤턴트가 그 배치에서 살아남았다). 커서가 멀쩡한데 복사만
+    //    실패하는 경우는 **할당 실패**뿐이므로, `EDIT6`처럼 실패 지점을 하나씩 밀며 잰다.
+    {
+        var reached: usize = 0;
+        var step: usize = 0;
+        while (step < 40) : (step += 1) {
+            var failing = std.testing.FailingAllocator.init(allocator, .{});
+            const alloc = failing.allocator();
+            var fx2 = try PaneFixture.init(alloc);
+            defer fx2.deinit(alloc);
+            const t2 = undoFixture(&fx2, alloc, "cutfail.txt", "alpha\nbeta\n") catch continue;
+            t2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
+            const before2 = allocator.dupe(u8, t2.rt.editor_doc.?.file.content) catch continue;
+            defer allocator.free(before2);
+
+            failing.fail_index = failing.allocations + step;
+            const ok = cutSelection(fx2.session, t2);
+            if (!ok) {
+                reached += 1;
+                // **실패했으면 문서가 그대로다** — 복사가 실패했는데 지우면 클립보드에도 없고
+                // 문서에도 없는 상태가 된다.
+                try testing.expectEqualStrings(before2, t2.rt.editor_doc.?.file.content);
+            }
+        }
+        try testing.expect(reached > 0); // 한 번도 실패 안 했으면 이 갈래를 안 잰 것이다
+    }
+
+    // ⑷ 읽기 전용은 거절한다 — 복사만 하고 지우지 않는 것도 아니다(아예 무동작).
+    term.rt.editor_doc.?.file.read_only = true;
+    const before = term.rt.editor_doc.?.file.content;
+    try testing.expect(!cutSelection(fx.session, term));
+    try testing.expectEqualStrings(before, term.rt.editor_doc.?.file.content);
+}
+
+test "COPY4 복사 기억은 세션과 함께 사라진다 — 새지 않는다 (§3.4)" {
+    // **복사 기억은 세션이 소유한다**(한 편집기에서 복사해 다른 편집기에 붙여넣는 것이 같은 규칙을
+    // 타야 하므로 Term이 아니다). 소유가 세션이면 **해체도 세션이 한다** — 안 하면 복사할 때마다
+    // 문자열 두 벌(클립보드 사본 + 경계)이 남는다.
+    //
+    // 편집기 판정자들은 대개 복사를 안 하고 끝나 **그 해제 경로를 안 지났다**(적대적 검증
+    // 2026-08-26 — 해체에서 메타를 안 푸는 뮤턴트가 살아남았다). `testing.allocator`가 누수를
+    // 잡으므로, 복사한 채로 픽스처를 해체하는 것만으로 판정이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator); // ← 여기서 메타가 풀려야 한다
+    const term = try undoFixture(&fx, allocator, "copy4.txt", "keep me\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 4);
+    try testing.expect(copySelection(fx.session));
+    try testing.expect(fx.session.editor_clipboard_meta != null);
+    // **일부러 정리하지 않고 끝낸다** — 해체가 그것을 하는지가 이 판정자의 전부다.
+}
+
+test "COPY3 ⌘C가 편집기 선택을 복사한다 — 배선 전체를 통과한다 (§3.4)" {
+    // **한쪽만 배선돼 있었다**(적대적 검증 2026-08-26): 붙여넣기는 `AppSession.pasteText`에 갈래를
+    // 넣었는데 복사는 안 넣어, `⌘C`가 편집기에 **안 걸렸다**. `copySelection`은 명령 팔레트로만
+    // 닿았다 — 사용자는 "붙여넣기는 되는데 복사가 안 된다"를 겪는다.
+    //
+    // 그리고 편집기에서 `⌘C`가 터미널 선택으로 흐르면 **화면 뒤 셸 출력**이 복사된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "copy3.txt", "alpha beta\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // "alpha"
+    const copied = fx.session.copyText(); // ← Swift ⌘C가 부르는 자리
+    try testing.expectEqualStrings("alpha", copied);
+
+    // **조각 경계도 함께 선다** — 그 자리에서 `copySelection`을 부르기 때문이다. 두 저장소가
+    // 갈리면 붙여넣기가 방금 복사한 것을 **남의 것**으로 본다.
+    try testing.expect(maru.session.editor.clipboard.describes(
+        fx.session.editor_clipboard_meta,
+        fx.session.chrome_clipboard_write,
+    ));
+
+    // 선택이 없으면 **줄 전체**다(§3.4) — `⌘C` 경로도 같은 규칙이다.
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expectEqualStrings("alpha beta\n", fx.session.copyText());
+}
+
+test "PASTE6 ⌘V가 편집기 문서에 들어간다 — 배선 전체를 통과한다 (§3.4)" {
+    // **함수를 직접 부르면 배선이 빠져도 통과한다.** 이 세션에서 배선이 네 번 끊겨 있었다
+    // (⌘⌃D chord · 편집기 키 분기 · dirty 탭 라벨 · dirty DTO 필드). 그래서 여기서는
+    // **`AppSession.pasteText`**(Swift가 ⌘V로 부르는 그 자리)부터 지난다.
+    //
+    // 편집기에는 PTY가 없어, 갈래가 없으면 붙여넣기가 **소멸한다**(터미널 경로로 흘러 사라진다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste6.txt", "ab\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    fx.session.pasteText("XY", false); // ← Swift ⌘V가 부르는 자리
+    try testing.expectEqualStrings("aXYb\n", term.rt.editor_doc.?.file.content);
+
+    // **한 묶음이라 undo 한 번에 돌아간다**(§3.3).
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("ab\n", term.rt.editor_doc.?.file.content);
+}
+
+test "PASTE1 조각 수가 커서 수와 같으면 하나씩 분배한다 (§3.4)" {
+    // **§3.4: "개수가 맞을 때만 분배한다."** 커서마다 자기 조각이 들어가야 멀티 커서 복사→
+    // 붙여넣기가 왕복한다. 개수가 다른데 억지로 나누면 사용자가 예측할 수 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste1.txt", "aa bb cc\n");
+
+    // 셋을 골라 복사한다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 2);
+    extras[0] = editor_selection.Selection.fromPoints(3, 5);
+    extras[1] = editor_selection.Selection.fromPoints(6, 8);
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(copySelection(fx.session));
+
+    // 같은 세 자리에 붙여넣으면 **제자리로 돌아온다**(왕복).
+    try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
+    try testing.expectEqualStrings("aa bb cc\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번의 붙여넣기는 undo 하나다**(§3.3) — 커서가 셋이어도.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("aa bb cc\n", term.rt.editor_doc.?.file.content);
+}
+
+test "PASTE2 개수가 다르면 전부에 통짜로 넣는다 (§3.4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste2.txt", "xx yy\n");
+
+    // 조각 **둘**을 복사해 두고,
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.fromPoints(3, 5);
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("xx\nyy", fx.session.chrome_clipboard_write);
+
+    // 커서 **하나**에 붙여넣는다 — 개수가 다르므로 **통짜**다.
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
+    try testing.expectEqualStrings("xx\nyyxx yy\n", term.rt.editor_doc.?.file.content);
+}
+
+test "PASTE3 외부 클립보드는 항상 통짜다 (§3.4)" {
+    // **조각 경계는 이 앱이 만든 복사에만 있다.** 시스템 클립보드가 그 사이 바뀌었으면 기억한
+    // 경계로 **남의 문자열**을 자르게 되고, 사용자가 복사한 적 없는 조각이 커서마다 들어간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste3.txt", "aa bb\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.fromPoints(3, 5);
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(copySelection(fx.session)); // 조각 둘을 기억한다
+
+    // **다른 앱이 복사한 것**을 붙여넣는다 — 조각 수가 둘로 맞아 보여도 통짜여야 한다.
+    try testing.expect(pasteText(fx.session, term, "PP\nQQ"));
+    try testing.expectEqualStrings("PP\nQQ PP\nQQ\n", term.rt.editor_doc.?.file.content);
+}
+
+test "PASTE4 선택 없이 복사한 것은 줄 단위로 넣는다 (§3.4)" {
+    // **§3.4: "그렇게 담긴 것을 붙여넣으면 caret 위치가 아니라 줄 단위로 삽입한다"** —
+    // 줄 중간에 끼워 넣으면 줄이 깨진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste4.txt", "alpha\nbeta\n");
+
+    // 첫 줄 가운데에 caret만 두고 복사 → 줄 전체가 담긴다.
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("alpha\n", fx.session.chrome_clipboard_write);
+
+    // 둘째 줄 **가운데**에 caret을 두고 붙여넣는다 — 줄 중간이 아니라 **그 줄 앞**에 들어간다.
+    term.rt.editor_selection = editor_selection.Selection.at(8); // "beta"의 't' 앞
+    try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
+    try testing.expectEqualStrings("alpha\nalpha\nbeta\n", term.rt.editor_doc.?.file.content);
+}
+
+test "PASTE8 붙여넣기는 타이핑과 다른 묶음이고, 문서를 dirty로 만든다 (§3.3·file-panel.md §1)" {
+    // **§3.3이 묶음을 끊는 이유 셋 중 "연산 종류 변경"이다.** 안 끊으면 "치다가 붙여넣었다"가
+    // 한 묶음이 되어, 붙여넣기를 되돌리려는 undo 한 번에 **친 것까지 사라진다**.
+    //
+    // 그 축이 판정 밖이었다(적대적 검증 2026-08-26 — 끊기를 지운 뮤턴트가 살아남았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste8.txt", "AB\n");
+
+    try testing.expect(!isDirty(term));
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "1"));
+    try testing.expect(pasteText(fx.session, term, "X"));
+    try testing.expectEqualStrings("1XAB\n", term.rt.editor_doc.?.file.content);
+
+    // **붙여넣기도 편집이라 dirty다.**
+    try testing.expect(isDirty(term));
+
+    // undo 한 번은 **붙여넣기만** 되돌린다 — 안 끊으면 "AB\n"까지 간다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("1AB\n", term.rt.editor_doc.?.file.content);
+
+    // **붙여넣기 뒤에 친 것도 새 묶음이다** — 끊기는 양쪽이다.
+    //
+    // **redo를 거치면 안 된다**: `stepHistory`가 이미 묶음을 끊어, 뒤쪽 끊기를 지운 뮤턴트가
+    // 그 배치에서 살아남았다(적대적 검증 2026-08-26). 붙여넣기 **바로 뒤에** 쳐야 갈린다.
+    try testing.expect(pasteText(fx.session, term, "Y"));
+    try testing.expect(insertText(fx.session, term, "2"));
+    const after_typing = term.rt.editor_doc.?.file.content;
+    try testing.expect(std.mem.indexOf(u8, after_typing, "Y2") != null);
+    // undo 한 번은 **친 것만** 되돌린다 — 안 끊으면 붙여넣은 "Y"까지 함께 사라진다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expect(std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "Y") != null);
+}
+
+test "PASTE7 줄 단위 붙여넣기에서 같은 줄 커서 여럿은 한 번만 넣는다 (§3.4)" {
+    // **같은 줄에 커서가 둘이면 줄 머리가 같다.** 거르지 않으면 그 줄에 **두 번** 넣게 되고,
+    // `delta.apply`가 겹침으로 거절하거나(그러면 붙여넣기가 통째로 실패한다) 중복이 생긴다 —
+    // 사용자는 커서를 둘 뒀다는 이유로 **줄이 두 번** 들어간 것을 본다.
+    //
+    // 이 방어가 판정 밖이었다(적대적 검증 2026-08-26 — 거르기를 지운 뮤턴트가 살아남았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste7.txt", "alpha\nbeta\n");
+
+    // 선택 없이 복사 → 줄 단위 표식이 선다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("alpha\n", fx.session.chrome_clipboard_write);
+
+    // **둘째 줄 안에 커서 둘**을 둔다 — 줄 머리가 같다.
+    term.rt.editor_selection = editor_selection.Selection.at(6); // "beta"의 'b'
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(8); // 같은 줄 't' 앞
+    term.rt.editor_extra_selections = extras;
+
+    try testing.expect(pasteText(fx.session, term, fx.session.chrome_clipboard_write));
+    // **한 번만** 들어간다 — 두 번이면 "alpha\nalpha\nalpha\nbeta\n"이 된다.
+    try testing.expectEqualStrings("alpha\nalpha\nbeta\n", term.rt.editor_doc.?.file.content);
+}
+
+test "PASTE5 읽기 전용·비교 뷰는 붙여넣기를 거절한다 (§3.5·§4.1g)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "paste5.txt", "locked\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    term.rt.editor_doc.?.file.read_only = true;
+    try testing.expect(!pasteText(fx.session, term, "x"));
+    term.rt.editor_doc.?.file.read_only = false;
+
+    term.rt.editor_diff = .{};
+    try testing.expect(!pasteText(fx.session, term, "x"));
+    term.rt.editor_diff = null;
+
+    try testing.expectEqualStrings("locked\n", term.rt.editor_doc.?.file.content);
+    // 빈 클립보드도 무동작이다 — 빈 편집을 undo 스택에 쌓으면 undo가 헛돈다.
+    try testing.expect(!pasteText(fx.session, term, ""));
+}
+
+test "COPY1 선택 없이 복사하면 caret 줄 전체를 담는다 (§3.4)" {
+    // **§3.4: "선택 없이 복사하면 caret이 있는 줄 전체를 담고, 그 사실을 함께 기억한다."**
+    // 그것이 없어서 선택 없이 `⌘C`를 누르면 **아무 일도 안 일어났다**(적대적 검증 2026-08-26) —
+    // 기존 판정자는 오히려 "선택이 없으면 복사도 없다"로 그 상태를 고정하고 있었는데, 그쪽은
+    // **커서 자체가 없는** 경우라 이 갈래를 안 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "copy1.txt", "alpha\nbeta\ngamma\n");
+
+    // 둘째 줄 가운데에 caret만 둔다(선택 없음).
+    term.rt.editor_selection = editor_selection.Selection.at(8);
+    try testing.expect(copySelection(fx.session));
+
+    // **줄 끝 문자까지** 담긴다 — 줄 단위 삽입이 그것으로 줄을 만든다.
+    try testing.expectEqualStrings("beta\n", fx.session.chrome_clipboard_write);
+    const meta = fx.session.editor_clipboard_meta.?;
+    try testing.expect(meta.from_empty_selection); // **그 사실을 함께 기억한다**
+    try testing.expectEqual(@as(usize, 1), meta.pieceCount());
+}
+
+test "COPY2 커서가 여럿이면 조각 경계를 기억한다 (§3.4)" {
+    // 시스템 클립보드에는 **통짜**가 들어가므로(다른 앱이 붙여넣을 때 자연스러우라고 §3.4가 정했다)
+    // 조각이 몇 개였는지는 앱이 따로 기억해야 한다. 그것이 없으면 붙여넣기가 **분배할 수 없다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "copy2.txt", "aa bb cc\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2); // "aa"
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 2);
+    extras[0] = editor_selection.Selection.fromPoints(3, 5); // "bb"
+    extras[1] = editor_selection.Selection.fromPoints(6, 8); // "cc"
+    term.rt.editor_extra_selections = extras;
+
+    try testing.expect(copySelection(fx.session));
+    try testing.expectEqualStrings("aa\nbb\ncc", fx.session.chrome_clipboard_write);
+
+    const meta = fx.session.editor_clipboard_meta.?;
+    try testing.expect(!meta.from_empty_selection);
+    try testing.expectEqual(@as(usize, 3), meta.pieceCount());
+    try testing.expectEqualStrings("aa", meta.piece(0).?);
+    try testing.expectEqualStrings("bb", meta.piece(1).?);
+    try testing.expectEqualStrings("cc", meta.piece(2).?);
+
+    // **기억이 지금 클립보드를 설명한다** — 이 대조가 외부 클립보드를 걸러 낸다.
+    try testing.expect(maru.session.editor.clipboard.describes(meta, fx.session.chrome_clipboard_write));
+}
+
 test "DIRTY7 빈 파일과 읽기 전용도 계약을 지킨다 (file-panel.md §1)" {
     // **가장자리 둘.** 빈 파일은 내용이 0 byte라 해시가 상수인데, 그 자체는 문제가 아니고
     // *"열자마자 clean"*·*"한 글자 치면 dirty"*가 성립하면 된다. 읽기 전용은 편집이 거절되므로
@@ -11410,6 +11980,70 @@ test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 �
     }
 }
 
+test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 축)" {
+    // **`moveCarets`는 노출을 부르는데 편집 경로 셋(타이핑·삭제·붙여넣기)은 안 불렀다**
+    // (적대적 검증 2026-08-26). 화면 밖에서 편집하면 — 스크롤해 둔 뒤 `⌘V`를 누르거나,
+    // 검색으로 커서를 옮겼다가 치면 — **자기가 어디를 고치는지 못 본다.**
+    //
+    // 이동은 "커서를 옮기는 것이 목적"이라 노출이 당연해 보이지만, 편집도 **커서가 그 자리에
+    // 있다는 전제**로 일어난다. 그래서 같은 규칙이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..200) |i| {
+        var buf: [32]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
+    const term = try undoFixture(&fx, allocator, "edit8.txt", doc.items);
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    // 화면을 아래로 굴려 두고, **위쪽 줄**에 커서를 둔 채 편집한다.
+    setEditorTop(fx.session, term, 100);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    try testing.expect(insertText(fx.session, term, "X"));
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line); // **따라왔다**
+
+    // 붙여넣기도 같다.
+    setEditorTop(fx.session, term, 100);
+    try testing.expect(pasteText(fx.session, term, "Y"));
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line);
+
+    // 삭제도 같다.
+    setEditorTop(fx.session, term, 100);
+    try testing.expect(deleteText(fx.session, term, true));
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_line);
+
+    // **이미 보이는 자리에서 치면 화면이 안 움직인다.**
+    //
+    // `refreshAfterEdit`가 렌더 스냅숏을 비우므로(§4.1g ⑸) 편집 직후의 노출은 "아직 안 그렸다"
+    // 갈래로 떨어지는데, 그 갈래가 커서 줄을 **맨 위에 둔다** — 그대로 두면 **한 글자 칠 때마다
+    // 화면이 그 줄을 천장으로 끌어올린다**(적대적 검증 2026-08-26 — 폴백 행 수를 무시하는 뮤턴트가
+    // 살아남아 이 축이 판정 밖임을 보였다).
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    setEditorTop(fx.session, term, 50);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d3 = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    d3.dl.deinit(allocator);
+    const rows = drawnDocLines(term);
+    try testing.expect(rows >= 2);
+
+    // 화면 안(맨 위 다음 줄)에 커서를 두고 친다 — **top이 그대로여야 한다**.
+    const inside = term.rt.editor_doc.?.file.lines.line(51).?;
+    term.rt.editor_selection = editor_selection.Selection.at(inside.start);
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expectEqual(@as(u32, 50), term.rt.editor_first_line);
+}
+
 test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스크롤 앵커 (§4.1c)" {
     // **문서에 "아는 대가"로 적어 두었던 자리를 닫는다.** 스크롤 앵커가 **줄 번호**라, 뷰포트
     // 위에서 줄이 늘거나 줄면 같은 번호가 다른 내용을 가리켜 **화면이 그만큼 흔들렸다**.
@@ -11437,9 +12071,27 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     const top_text = try allocator.dupe(u8, term.rt.editor_doc.?.file.content[top_line.start .. top_line.start + 7]);
     defer allocator.free(top_text);
 
-    // **뷰포트 위**(줄 0)에 줄 셋을 끼운다.
-    term.rt.editor_selection = editor_selection.Selection.at(0);
-    try testing.expect(insertText(fx.session, term, "a\nb\nc\n"));
+    // **앵커 쌍을 직접 잰다.** 편집 함수를 통과시키면 caret 노출이 함께 돌아 화면을 커서 쪽으로
+    // 옮기고(그것이 옳다 — `EDIT8`), 그러면 이 판정자가 앵커가 아니라 **노출을 재게 된다**
+    // (적대적 검증 2026-08-26에 그 둘이 충돌해 드러났다).
+    //
+    // 둘은 **다른 것을 지킨다**: 노출은 *"내가 고치는 자리를 보여 준다"*, 앵커는 *"내가 안 건드린
+    // 위쪽이 밀려도 화면은 제자리"*. 그래서 여기서는 **문서만 바꾸고** 앵커 쌍을 직접 부른다 —
+    // 커서가 개입하지 않는, 앵커가 정확히 필요한 상황이다.
+    const anchor = captureScrollAnchor(term).?;
+    var sels_dummy = maru.session.editor.selection.Selections.init(
+        (try allocator.alloc(editor_selection.Selection, 1))[0..1],
+        0,
+    );
+    sels_dummy.items[0] = editor_selection.Selection.at(0);
+    defer allocator.free(sels_dummy.items);
+    const changes = [_]maru.session.editor.delta.Change{
+        .{ .start = 0, .end = 0, .text = "a\nb\nc\n" },
+    };
+    var inv = try term.rt.editor_doc.?.file.apply(.{ .changes = &changes }, &sels_dummy);
+    inv.deinit();
+    refreshAfterEdit(fx.session, term) catch {};
+    restoreScrollAnchor(fx.session, term, anchor, .{ .changes = &changes });
 
     // 맨 위 줄이 **같은 내용**을 가리켜야 한다 — 번호는 43으로 밀렸어도 화면은 제자리다.
     const now_top = term.rt.editor_first_line;
@@ -11448,9 +12100,19 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     try testing.expectEqualStrings(top_text, now_text);
     try testing.expectEqual(@as(usize, 43), now_top); // 실제로 밀렸다(보정이 없으면 40에 머문다)
 
-    // 지운 경우도 같다 — 위에서 줄이 줄면 앵커가 그만큼 당겨진다.
-    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 6); // "a\nb\nc\n" 중 앞 셋
-    try testing.expect(deleteText(fx.session, term, false));
+    // **지운 경우도 같다** — 위에서 줄이 줄면 앵커가 그만큼 당겨진다. 여기서도 편집 함수를
+    // 통과시키지 않는다: `deleteText`는 caret 노출을 부르고, 커서가 0줄에 있으므로 화면이 거기로
+    // 따라간다(그것이 옳다 — `EDIT8`). 이 판정자는 **앵커만** 재므로 델타를 직접 적용한다.
+    const anchor2 = captureScrollAnchor(term).?;
+    const changes2 = [_]maru.session.editor.delta.Change{
+        .{ .start = 0, .end = 6, .text = "" }, // "a\nb\nc\n" 중 앞 셋을 지운다
+    };
+    sels_dummy.items[0] = editor_selection.Selection.at(0);
+    var inv2 = try term.rt.editor_doc.?.file.apply(.{ .changes = &changes2 }, &sels_dummy);
+    inv2.deinit();
+    refreshAfterEdit(fx.session, term) catch {};
+    restoreScrollAnchor(fx.session, term, anchor2, .{ .changes = &changes2 });
+
     const after_line = term.rt.editor_doc.?.file.lines.line(term.rt.editor_first_line).?;
     const after_text = term.rt.editor_doc.?.file.content[after_line.start .. after_line.start + 7];
     try testing.expectEqualStrings(top_text, after_text);

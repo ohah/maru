@@ -10262,6 +10262,15 @@ pub const Client = struct {
         // The strict prepared-execution owner has no canonical empty response representation.
         // Keep legacy/deadline correlated reads unchanged and reject empty only at this boundary.
         if (response.payload.len == 0) {
+            // **왜 빈 응답이 왔는지 남긴다.** 이 판정은 `frame_malformed` → `ProtocolError` 로 나가고,
+            // `remote_term_backend.drainRemoteNow` 의 복구 목록(`GenerationGap`·`MalformedRow`)에 없어
+            // **세션 종료**로 처리된다 — resync 를 시도조차 하지 않으므로 화면이 마지막 상태로 굳고
+            // 앱 재시작 말고는 복구 수단이 없다(2026-08-27 실측: 장시간 sleep 뒤 「화면이 깨져 보인다」).
+            //
+            // 설계상 빈 응답은 존재할 수 없다. 그런데 실제로 왔다면 host 가 정말 빈 것을 보냈거나, 읽기가
+            // 중단돼 우리가 빈 것으로 읽은 것이다. 둘은 고치는 자리가 다르므로 request_id 와 연결 상태를
+            // 함께 남겨 다음 재발에서 갈리게 한다.
+            logEmptyPreparedResponse(self, lease.identity.request_id);
             if (payload_observer) |active| {
                 if (response.payload_observation_generation != 0)
                     active.discard_fn(active.context, response.payload_observation_generation);
@@ -14813,6 +14822,15 @@ pub const Client = struct {
     /// 어디인지 좁히지 못했다. 호출자 주소 한 개면 `atos`/`llvm-symbolizer` 로 그 자리를 곧장 짚는다.
     ///
     /// 판정에는 관여하지 않는다 — fail-closed 는 그대로이고 사유만 적는다.
+    /// prepared 응답이 **빈 payload** 로 왔다. 그 자체가 계약 위반이라 여기서 사유를 남긴다.
+    fn logEmptyPreparedResponse(self: *const Client, request_id: u64) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "empty prepared response: request_id={d} host={x:0>32} wire_major={d} lifecycle={s} last_success_request_id={d}",
+            .{ request_id, self.host_id, self.wire_major, self.lifecycle, self.last_success_request_id },
+        );
+    }
+
     fn logPoisonCallSite(reason: client_poison.ConnectionReason, ra: usize) void {
         if (builtin.is_test) return;
         std.log.err("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });

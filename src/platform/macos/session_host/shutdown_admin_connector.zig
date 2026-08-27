@@ -403,9 +403,20 @@ test "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하
     const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
     _ = c.mkdir(session_dir.ptr, 0o700);
     const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0xC3B6_0001;
-    try short_endpoint.prepareCurrentUserNamespace();
-    var socket_buf: [128]u8 = undefined;
-    const socket_path = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+    // **이 테스트만 uid 기준 공용 socket 을 쓴다.** 전역 환경(`MARU_SESSION_HOST_ROOT`)은 건드리지 않는다.
+    //
+    // N-1 baseline 은 저장소에 커밋된 고정 이미지(sha256 고정)라 registry 격리 코드가 없고, 그 daemon 은
+    // socket 을 `socketDirPathIn(uid)` 기준으로 bind 검증한다. 격리 root 아래 socket 을 넘기면 bind 가
+    // 거부되어 host 자체가 뜨지 않는다 — 환경을 어떻게 맞춰도 그 바이너리의 uid 기준은 바뀌지 않는다.
+    //
+    // 전역 unsetenv/setenv 로 격리를 껐다 켜는 방법은 **쓰지 않는다**. 프로세스 전역 상태라 뒤따르는
+    // 테스트까지 오염시켜, 실측에서 실패가 1 개에서 7 개로 번졌다. 순수 함수로 이 한 경로만 공용을 짚는다.
+    // 아래 `defer` 가 socket 을 지우므로 잔해는 남지 않는다.
+    var pub_dir_buf: [160]u8 = undefined;
+    const pub_dir = try short_endpoint.socketDirPathIn(&pub_dir_buf, c.getuid());
+    _ = c.mkdir(pub_dir.ptr, 0o700);
+    var socket_buf: [160]u8 = undefined;
+    const socket_path = try short_endpoint.socketPathIn(&socket_buf, c.getuid(), host_id);
     const child = try launcher.spawnSessionHostSupervisedForTest(
         allocator,
         baseline_z,

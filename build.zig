@@ -10117,6 +10117,58 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_github_release_tests.step);
         test_step.dependOn(&run_github_release_tests.step);
     }
+    const session_host_release_adapter_github_environment_step = b.step(
+        "test-session-host-release-adapter-github-environment",
+        "Validate bounded GitHub release-environment protection responses",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |github_environment_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = github_environment_optimize,
+        });
+        const github_environment_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_environment.zig"),
+            .target = target,
+            .optimize = github_environment_optimize,
+            .imports = &.{
+                .{
+                    .name = "release_adapter_contract",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"),
+                        .target = target,
+                        .optimize = github_environment_optimize,
+                    }),
+                },
+                .{
+                    .name = "release_adapter_github_json",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+                        .target = target,
+                        .optimize = github_environment_optimize,
+                        .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+                    }),
+                },
+            },
+        });
+        const github_environment_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_environment.zig"),
+                .target = target,
+                .optimize = github_environment_optimize,
+                .imports = &.{.{
+                    .name = "release_adapter_github_environment",
+                    .module = github_environment_mod,
+                }},
+            }),
+        });
+        const run_github_environment_tests = b.addRunArtifact(github_environment_tests);
+        run_github_environment_tests.addArg("--maru-expect-tests=6");
+        run_github_environment_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_environment_step.dependOn(&run_github_environment_tests.step);
+        session_host_step.dependOn(&run_github_environment_tests.step);
+        test_step.dependOn(&run_github_environment_tests.step);
+    }
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",
         "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",

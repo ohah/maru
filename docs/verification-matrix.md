@@ -2358,7 +2358,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   Debug·ReleaseFast에서 검증한다. `release_adapter_git_resolver.zig`는 final-address `Backing`이 소유한 caller-sized `[]Sha` 길이를 정책 상한으로 받아 0-hop
   direct commit과 nested chain의 exact manifest commit 수렴, self/earlier cycle, depth exhaustion, foreign current/commit,
   replay·copied resolver/backing·cross-resolver reuse·owner/backing overlap·결속 뒤 descriptor drift를 terminal fail-close한다. `test-session-host-release-adapter-git-resolver`가 이를
-  Debug·ReleaseFast에서 검증한다. 제품 최대 깊이 선택과 API 호출은 아직 없다. 이 역시 component 의미 검증이며 실제 GitHub release/
+  Debug·ReleaseFast에서 검증한다. 제품 최대 깊이 선택과 API 호출은 아직 없다. 이 역시 component 의미 검증이다.
+  environment 응답은 `release_adapter_github_environment.zig`가 exact nonzero `release` identity, rule ID/type와 rule별
+  effective payload를 typed fact로 보존한다. wait timer는 1~43,200분, reviewer는 1~6개의 exact `User|Team`+nonzero ID,
+  branch policy는 rule/object 동시 존재와 두 mode exact-one을 요구한다. unknown future rule은 파싱 호환성을 위해 보존하되
+  보호 증거로 세지 않는다. `test-session-host-release-adapter-github-environment`가 malformed/missing/type/duplicate/trailing,
+  foreign/zero identity, duplicate/incoherent/empty policy와 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 parser는
+  configured environment component만 증명하며 current workflow run/job이 그 protection을 통과했다는 증거는 아니다.
+  실제 GitHub release/
   deployment API·codesign·DMG 결과의 의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의

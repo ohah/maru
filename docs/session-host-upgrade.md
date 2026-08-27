@@ -709,6 +709,17 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
   신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub
   API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.
+  Environment REST 응답의 component 의미 해석은 `release_adapter_github_environment.zig`가 소유한다. exact nonzero
+  environment ID와 `name=release`, `protection_rules[].{id,type}` 및 rule별 payload, nullable `deployment_branch_policy`의
+  `protected_branches`/`custom_branch_policies`를 typed observation으로 보존한다. 알려진 rule type은
+  `required_reviewers|wait_timer|branch_policy`로 닫고, endpoint가 나중에 추가한 rule type은 additive field처럼 허용하되
+  보호 증거로 세지 않는다. consumed field의 missing·duplicate·wrong wire type, zero/duplicate rule ID, 같은 알려진 rule의
+  중복, 1~43,200분 밖 wait timer, 1~6명이 아니거나 `User|Team`/nonzero ID가 아닌 reviewer, known rule에 맞지 않는
+  payload, `branch_policy` rule과 nullable policy object의 불일치 및 두 branch-policy bool이 exact-one이 아닌 경우를 거부한다.
+  이 parser는 환경에 구성된 보호 사실만 증명하며
+  현재 workflow run/job이 그 환경의 deployment를 통과했다는 증거가 아니다. 후속 adapter가 current run/job deployment와 이
+  observation을 결속하기 전에는 `PublicationObservation.protected_environment=true`를 만들 수 없다. 근거는 GitHub REST API의
+  [Deployment environments schema](https://docs.github.com/en/rest/deployments/environments)다.
 
   A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
   default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과

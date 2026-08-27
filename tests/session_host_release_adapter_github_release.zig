@@ -105,6 +105,12 @@ test "zero and foreign release identity fail closed" {
             github_release.parseAndBind(std.testing.allocator, draft_valid, expected),
         );
     }
+    const oversized_tag = "v" ++ ("1" ** github_release.max_response_bytes) ++ ".2.3";
+    try std.testing.expectError(error.ReleaseMismatch, github_release.parseAndBind(std.testing.allocator, draft_valid, .{
+        .id = draft_expected.id,
+        .tag = oversized_tag,
+        .publication = .draft,
+    }));
 }
 
 test "draft prerelease and immutable state mismatches fail closed" {

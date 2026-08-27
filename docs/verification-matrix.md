@@ -2333,9 +2333,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   검증한다. release adapter가 사용할 macOS 외부 명령 leaf는 `bounded_process.zig` 한 곳에서 absolute exec, stdin `/dev/null`,
   merged output exact cap, exit 0+EOF, monotonic timeout과 process-group kill/direct-child reap을 소유하고 기존 upgrade codesign이 먼저
   재사용하며, `test-session-host-bounded-process`가 Debug·ReleaseFast 실제 process로 검증한다. 그러나 release adapter executable
-  배선 전에 OS 중립 `release_adapter_context.zig`가 exact 11개 `GITHUB_*` identity key의 bounded·canonical 파싱과 trusted
+  배선 전에 `release_adapter_environment.zig`가 실행 프로세스에서 parser 소유의 exact 11개 이름만 직접 조회하고,
+  OS 중립 `release_adapter_context.zig`가 해당 `GITHUB_*` identity key의 bounded·canonical 파싱과 trusted
   protected tag push/workflow 조합, manifest repository/release tag/source commit/build 결속을 닫으며
-  `test-session-host-release-adapter-context`가 Debug·ReleaseFast에서 검증한다. 이는 caller가 identity 문자열을 임의 조립하는
+  `test-session-host-release-adapter-environment`와 `test-session-host-release-adapter-context`가 Debug·ReleaseFast에서 검증한다.
+  이는 caller가 identity 문자열을 임의 조립하는
   경로를 닫는 component seam일 뿐 프로세스 환경 자체를 GitHub service 증거로 승격하지 않는다. 실제 GitHub API·codesign·DMG 결과의
   의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가

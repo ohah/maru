@@ -4420,6 +4420,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var mouse_sel_after = false;
     var mousetest_judgeable = false;
     var oob_judgeable = false;
+    var divfile_judgeable = false;
+    var divfile_dock_w_before: u32 = 0;
+    var divfile_dock_w_after: u32 = 0;
     var oob_first_after: usize = 0;
     var oob_rows_after: usize = 0;
     var oob_lines: usize = 0;
@@ -5632,6 +5635,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, dx1, dy1);
             window.postSyntheticMouse(.left_up, dx1, dy1);
         }
+        // ── 파일을 보는 중에도 디바이더는 끌린다 (적대적 검증 5회차) ────────────────────
+        //
+        // 문서 위 클릭을 삼키는 코드가 **터미널 영역 안**에 있어야 한다. 더 위로 올라가면 디바이더·
+        // 사이드바·도크까지 함께 죽는데, 그것은 화면만 보고는 "원래 그런가" 싶은 종류다.
+        if (smoke and spins == 795 and active_view == .file and geom.divider.w != 0) {
+            divfile_judgeable = true;
+            divfile_dock_w_before = geom.dock.w;
+            const gx2: i32 = @intCast(geom.divider.x + geom.divider.w / 2);
+            window.postSyntheticMouse(.left_down, gx2, 200);
+            window.postSyntheticMouse(.moved, gx2 - 40, 200);
+            window.postSyntheticMouse(.left_up, gx2 - 40, 200);
+        }
+        if (smoke and spins == 797) divfile_dock_w_after = geom.dock.w;
         // ── 파일을 보는 중에 ＋ 를 누르면 (적대적 검증 1회차) ──────────────────────────
         //
         // 그 자리 주석이 이미 규칙을 적어 뒀다 — *"만들고 안 보여 주면 눌린 것이 화면에 안
@@ -7518,6 +7534,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (divfile_judgeable) {
+        try stdout.print("divider_while_file: dock_w {d}->{d} divider_alive={}\n", .{
+            divfile_dock_w_before,
+            divfile_dock_w_after,
+            divfile_dock_w_after > divfile_dock_w_before,
+        });
     }
     if (oob_judgeable) {
         // **되돌아온 것만으로는 모자란다** — 0 으로 되돌려도 "되돌아왔다" 이다. **행을 그렸는지**를

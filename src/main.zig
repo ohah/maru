@@ -3795,9 +3795,11 @@ fn buildComposedEditor(
     const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
     defer allocator.free(count_scratch);
 
+    // **u16 로 자른다.** 창이 아무리 커도 격자는 u16 이고, `@intCast` 로 넘기면 안전 빌드에서
+    // **패닉**이다 — 휠 경로에는 이 가드를 뒀는데 여기만 빠져 있었다(적대적 검증 7회차).
     const grid = maru.terminal.Size{
-        .cols = @intCast(@max(1, rect.w / cell_w)),
-        .rows = @intCast(@max(1, rect.h / cell_h)),
+        .cols = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, rect.w / cell_w))),
+        .rows = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, rect.h / cell_h))),
     };
     const sel_cap = @as(usize, grid.rows) + 2;
     const sel_rows = try allocator.alloc([]const editor_view.frame.Mark, sel_cap);

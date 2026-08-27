@@ -114,6 +114,8 @@ pub const Action = union(enum) {
     // (선택 시 acceptPalette가 팝업을 닫고 Find를 연다) — 자기 토글이라 재귀인 toggle_command_palette와 달리 Find는
     // 별개 모달이라 띄워도 된다. 단 메뉴 Find 서브메뉴는 keyEquivalent 없이 따로(키바인딩 가림 방지).
     toggle_find,
+    /// 찾기 오버레이를 **바꾸기 줄과 함께** 연다(§5.1 — macOS `⌥⌘F` 관례).
+    toggle_find_replace,
     // 활성 편집기 뷰의 랩(긴 줄 자동 줄바꿈)을 뒤집는다(visual-mapping §4 "가로 스크롤이 기본이고 랩은 토글").
     // **기본 chord가 없다** — VSCode의 `⌥Z`를 그대로 두면 터미널의 Meta-z를 전역으로 가져간다. 키 계약의
     // context-aware resolver에는 파일 트리·웹 편집기 컨텍스트만 있고 **편집기 Term 컨텍스트가 아직 없어서**,
@@ -229,6 +231,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "toggle_settings")) return .toggle_settings;
     if (std.mem.eql(u8, value, "install_cli")) return .install_cli;
     if (std.mem.eql(u8, value, "toggle_find")) return .toggle_find;
+    if (std.mem.eql(u8, value, "toggle_find_replace")) return .toggle_find_replace;
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;

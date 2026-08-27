@@ -72,15 +72,19 @@ test "filter: 빈 쿼리=전부·부분일치·actionAt 해석" {
     try std.testing.expect(actionAt(out.items, 0) == null);
 }
 
-test "filter: 'find'로 Find 명령군이 팝업에 노출된다(toggle_find/next/previous)" {
+test "filter: 'find'로 Find 명령군이 팝업에 노출된다(toggle_find/replace/next/previous)" {
     const allocator = std.testing.allocator;
     var out: std.ArrayList(usize) = .empty;
     defer out.deinit(allocator);
 
-    // "find" → Find / Find Next / Find Previous 3개(팝업에서 Find 띄우기). 카탈로그 순서대로.
+    // "find" → Find / Find and Replace / Find Next / Find Previous 4개. 카탈로그 순서대로.
+    //
+    // **바꾸기가 팔레트에 있어야 하는 이유**: 빌트인 `⌥⌘F`는 사용자가 `unbind`하거나 다른 액션으로
+    // 덮어쓸 수 있다(configuration-input.md §keybind). 그때 팔레트가 유일한 도달 경로다.
     try filter(allocator, "find", &out);
-    try std.testing.expectEqual(@as(usize, 3), out.items.len);
+    try std.testing.expectEqual(@as(usize, 4), out.items.len);
     try std.testing.expect(actionAt(out.items, 0).? == .toggle_find);
-    try std.testing.expect(actionAt(out.items, 1).? == .find_next);
-    try std.testing.expect(actionAt(out.items, 2).? == .find_previous);
+    try std.testing.expect(actionAt(out.items, 1).? == .toggle_find_replace);
+    try std.testing.expect(actionAt(out.items, 2).? == .find_next);
+    try std.testing.expect(actionAt(out.items, 3).? == .find_previous);
 }

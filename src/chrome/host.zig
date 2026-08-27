@@ -28,6 +28,12 @@ pub const HostAction = union(enum) {
     find_close,
     find_navigated,
     find_query_changed,
+    /// 바꿀 문자열이 바뀌었다 — **재검색은 하지 않는다**(검색어가 그대로다).
+    find_replace_text_changed,
+    /// Tab으로 두 입력을 오갔다 — caret만 다시 그린다.
+    find_focus_moved,
+    find_replace_one,
+    find_replace_all,
     palette_close,
     palette_accept,
     palette_query_changed,
@@ -235,6 +241,10 @@ pub const ChromeHost = struct {
                         .close => .find_close,
                         .navigated => .find_navigated,
                         .query_changed => .find_query_changed,
+                        .replace_text_changed => .find_replace_text_changed,
+                        .focus_moved => .find_focus_moved,
+                        .replace_one => .find_replace_one,
+                        .replace_all => .find_replace_all,
                     };
                 }
                 if (self.palette.open) {

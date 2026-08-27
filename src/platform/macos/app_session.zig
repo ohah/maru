@@ -8796,6 +8796,7 @@ pub const AppSession = struct {
             //
             // 대상 자체는 여기서 정하지 않는다 — tick이 매 프레임 동기화한다(전환 경로마다 세우면 새는 문이 남는다).
             .toggle_find => self.toggleFind(),
+            .toggle_find_replace => find_ops.toggleFindReplace(self),
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
@@ -10315,6 +10316,11 @@ pub const AppSession = struct {
                 web_ops.submitWebFind(self, false)
             else
                 self.recomputeFind(),
+            // **바꿀 문자열은 검색을 다시 돌리지 않는다** — 검색어가 그대로이기 때문이다. 다시 돌리면
+            // 타이핑마다 `current`가 0으로 리셋돼(증분 검색 규칙) 사용자가 고른 매치를 잃는다.
+            .find_replace_text_changed, .find_focus_moved => self.metal_dirty = true,
+            .find_replace_one => find_ops.replaceOne(self),
+            .find_replace_all => find_ops.replaceAll(self),
             .palette_close => {}, // palette.hide는 컴포넌트가 이미 — platform 부수효과 없음
             .palette_query_changed => self.recomputePalette(), // 재필터 + result_count 동기화
             // 창 갱신은 여기서 하지 않는다 — 선택은 이 액션 말고도 **쿼리 필터**(recomputePalette가
@@ -12751,9 +12757,15 @@ pub const AppSession = struct {
             .terminal => {
                 _ = self.commitTerminalComposition();
             },
-            .find => if (self.chrome_host.find.input.commitPreedit(self.allocator)) {
-                self.recomputeFind(); // 검색어가 바뀜
-                self.metal_dirty = true;
+            // **확정도 포커스를 따라간다.** 그리고 **바꿀 문자열은 재검색을 부르지 않는다** —
+            // 검색어가 그대로이므로 다시 돌리면 `current`가 0으로 리셋돼 고른 매치를 잃는다.
+            .find => if (self.chrome_host.find.focused().commitPreedit(self.allocator)) {
+                if (self.chrome_host.find.replaceActive() and self.chrome_host.find.focus == .replace) {
+                    self.metal_dirty = true;
+                } else {
+                    self.recomputeFind(); // 검색어가 바뀜
+                    self.metal_dirty = true;
+                }
             },
             .palette => if (self.chrome_host.palette.input.commitPreedit(self.allocator)) {
                 self.recomputePalette(); // 필터가 바뀜
@@ -38329,6 +38341,536 @@ test "EF9 터미널에서도 ⌘F를 다시 열면 옛 강조가 안 남는다 �
     try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.query.items.len);
     try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
     try std.testing.expect(!session.find_nav);
+}
+
+test "EF11 현재 일치가 primary selection을 옮긴다 — 닫으면 그 자리에서 편집이 이어진다 (§5.1)" {
+    // **색만 바꾸면 찾은 자리와 고치는 자리가 갈린다.** Enter로 매치를 오가다 Esc를 누르면 caret은
+    // 검색 전 자리에 남아, 사용자는 **화면이 가리키는 곳과 다른 곳**을 고친다. §5.1이 *"별도 커서
+    // 개념을 만들지 않는다"*고 정한 이유가 그것이다.
+    //
+    // **종단으로 잰다** — 키 → chrome → recomputeFind → reveal. 중간만 재면 배선을 지워도 초록이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    // 매치 셋: 0줄 4, 0줄 17, 2줄 0. 줄 안 offset이 0이 아닌 것을 섞어야 **줄 머리로 가는 실수**가 잡힌다.
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "abc NEEDLE def NEEDLE\nplain\nNEEDLE tail\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // 검색 전 caret은 문서 머리다.
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("NEEDLE") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+
+    // ⑴ **증분 검색이 첫 매치를 고른다** — caret이 아니라 **범위**여야 무엇을 찾았는지 화면이 말한다.
+    {
+        const sel = term.rt.editor_selection.?;
+        try std.testing.expectEqual(@as(usize, 4), sel.start());
+        try std.testing.expectEqual(@as(usize, 10), sel.end());
+    }
+
+    // ⑵ Enter가 다음 매치로 옮긴다(같은 줄 두 번째 — 줄 머리로 가면 여기서 걸린다).
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        const sel = term.rt.editor_selection.?;
+        try std.testing.expectEqual(@as(usize, 15), sel.start());
+        try std.testing.expectEqual(@as(usize, 21), sel.end());
+    }
+
+    // ⑶ 한 번 더 — 줄이 바뀌어도 문서 offset 축을 지킨다("plain\n"이 22..28).
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    {
+        const sel = term.rt.editor_selection.?;
+        try std.testing.expectEqual(@as(usize, 28), sel.start());
+        try std.testing.expectEqual(@as(usize, 34), sel.end());
+    }
+
+    // ⑷ **닫으면 그 자리에서 편집이 이어진다** — 고른 매치 위에 타이핑하면 그것을 덮어쓴다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.chrome_host.find.open);
+    _ = editor_ops.insertText(session, term, "X");
+    try std.testing.expectEqualStrings("abc NEEDLE def NEEDLE\nplain\nX tail\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF12 매치로 옮길 때 멀티커서를 정리한다 (§3.2)" {
+    // 커서를 새로 놓는 경로는 전부 나머지를 버린다 — 안 버리면 사용자가 그것을 없앨 방법이 없고,
+    // 곧 설 **바꾸기**가 엉뚱한 자리까지 건드린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa NEEDLE bb\ncc NEEDLE dd\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    const extras = try allocator.alloc(maru.session.editor.selection.Selection, 2);
+    extras[0] = maru.session.editor.selection.Selection.at(1);
+    extras[1] = maru.session.editor.selection.Selection.at(2);
+    allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("NEEDLE") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try std.testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.start());
+}
+
+test "EF13 검색으로 옮긴 커서는 앞의 타이핑과 한 묶음이 아니다 (§3.3)" {
+    // **묶음 판단은 종류와 시간만 본다**(`sameUndoGroup`) — 커서가 어디로 갔는지는 안 본다.
+    // 그래서 검색 네비게이션이 `breakUndoGroup`을 안 부르면, 찾아가서 고친 것이 **찾기 전에 친
+    // 글자와 한 덩어리**가 되어 되돌리기 한 번에 둘 다 사라진다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa NEEDLE bb\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    _ = editor_ops.insertText(session, term, "X"); // ⑴ 찾기 전 타이핑
+    try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editor_doc.?.file.content);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("NEEDLE") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    _ = editor_ops.insertText(session, term, "Y"); // ⑵ 찾아간 자리를 고친다
+    try std.testing.expectEqualStrings("Xaa Y bb\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번의 되돌리기는 ⑵만 되돌린다.** 묶이면 여기서 ⑴까지 사라진다.
+    try std.testing.expect(editor_ops.undoEdit(session, term));
+    try std.testing.expectEqualStrings("Xaa NEEDLE bb\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF14 ⌥⌘F가 바꾸기 줄을 연다 — 키 경로 전체 (§5.1)" {
+    // **함수를 직접 부르는 판정자만 두면 chord가 안 붙어도 전부 초록이다.** 이 저장소가 반복해
+    // 당한 모양이라 여기서는 **키를 눌러** 지난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa NEEDLE bb\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    // ⌘F는 한 줄 그대로다 — 평범한 찾기의 배치를 건드리지 않는 것이 설계다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expect(!session.chrome_host.find.replace_open);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+
+    // ⌥⌘F가 두 줄을 연다. 포커스는 **바꿀 문자열** 쪽이다 — 그것을 치러 온 것이다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expect(session.chrome_host.find.replace_open);
+    try std.testing.expectEqual(chrome.components.find.Focus.replace, session.chrome_host.find.focus);
+    _ = term;
+}
+
+test "EF15 바꾸기 하나 — 되돌리기 하나로 풀리고 다음 매치로 간다 (§5.1·§3.3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa NEEDLE bb NEEDLE cc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    // 검색어는 **찾기 줄**에 친다 — Tab으로 옮겨 간다.
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    try std.testing.expectEqual(chrome.components.find.Focus.find, session.chrome_host.find.focus);
+    for ("NEEDLE") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} }); // 바꿀 문자열 줄로
+    for ("Z") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    // **바꿀 문자열은 재검색을 부르지 않는다** — 부르면 current가 0으로 리셋돼 고른 매치를 잃는다.
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 바꾸기
+    try std.testing.expectEqualStrings("aa Z bb NEEDLE cc\n", term.rt.editor_doc.?.file.content);
+
+    // **다음 매치로 갔다** — 바꾼 자리를 다시 가리키면 Enter가 같은 곳을 되풀이한다.
+    {
+        const sel = term.rt.editor_selection.?;
+        try std.testing.expectEqual(@as(usize, 8), sel.start());
+        try std.testing.expectEqual(@as(usize, 14), sel.end());
+    }
+
+    // 한 번 더 → 둘 다 바뀐다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("aa Z bb Z cc\n", term.rt.editor_doc.?.file.content);
+
+    // **되돌리기 둘이 각각 풀린다**(바꾸기 하나 = 편집 하나).
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(editor_ops.undoEdit(session, term));
+    try std.testing.expectEqualStrings("aa Z bb NEEDLE cc\n", term.rt.editor_doc.?.file.content);
+    try std.testing.expect(editor_ops.undoEdit(session, term));
+    try std.testing.expectEqualStrings("aa NEEDLE bb NEEDLE cc\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF16 전부 바꾸기는 되돌리기 하나다 (§5.1·§3.3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "x1\nAB y AB\nz AB\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("AB") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("QQ") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    // ⌘Enter = 전부 바꾸기.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try std.testing.expectEqualStrings("x1\nQQ y QQ\nz QQ\n", term.rt.editor_doc.?.file.content);
+
+    // **셋이 한 번에 되돌아간다.** 셋이면 사용자는 "전부 바꾸기를 취소"할 수 없다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(editor_ops.undoEdit(session, term));
+    try std.testing.expectEqualStrings("x1\nAB y AB\nz AB\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF17 바꿀 문자열이 검색어를 품어도 되풀이하지 않는다 (§5.1)" {
+    // `a` → `aa`가 고전적인 자리다. 하나씩 바꾸며 다시 찾는 구현은 **끝나지 않는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "a b a\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'a' }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 2), session.editor_find_matches.items.len);
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("aa") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    // 전부 바꾸기: 한 번의 편집이라 새로 생긴 `a`를 다시 훑지 않는다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try std.testing.expectEqualStrings("aa b aa\n", term.rt.editor_doc.?.file.content);
+
+    // 하나씩 바꾸기도 **자란 자리 뒤**로 간다 — 다시 그 자리를 가리키면 무한히 자란다.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    const grew = term.rt.editor_doc.?.file.content;
+    try std.testing.expect(grew.len < 40); // 되풀이했다면 여기서 폭발한다
+}
+
+test "EF18 읽기 전용 문서는 안 바뀐다 (§3.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "aa NEEDLE bb\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("NEEDLE") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("Z") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    term.rt.editor_doc.?.file.read_only = true;
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try std.testing.expectEqualStrings("aa NEEDLE bb\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EF19 바꾼 뒤 가는 곳은 **바꾼 자리 뒤**다 — 앞으로 돌아가지 않는다 (§5.1)" {
+    // **`EF15`는 이것을 구분하지 못한다.** 거기서는 남은 매치가 하나뿐이라 "첫 매치"와 "바꾼 자리
+    // 뒤"가 같은 답이다 — 뮤턴트가 살아남아 그 사실이 드러났다(적대적 검증 2026-08-27).
+    // 앞에도 매치가 남아 있어야 둘이 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "A x A y A\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'A' }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // **가운데** 매치로
+
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'B' }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 바꾸기
+    try std.testing.expectEqualStrings("A x B y A\n", term.rt.editor_doc.?.file.content);
+
+    // 남은 매치는 **앞(0)과 뒤(8)** 둘이다. 가야 할 곳은 뒤다 — 앞으로 돌아가면 사용자는 이미
+    // 지나온 자리를 다시 밟는다.
+    {
+        const sel = term.rt.editor_selection.?;
+        try std.testing.expectEqual(@as(usize, 8), sel.start());
+    }
+}
+
+test "EF20 바꾼 문자열이 검색어를 품으면 **자란 만큼** 건너뛴다 (§5.1)" {
+    // `a` → `aa`에서 바꾼 자리의 **시작**부터 다시 찾으면 방금 만든 것을 또 집는다. 길이로는
+    // 구분되지 않는다 — 어느 쪽이든 한 번에 한 글자씩 자라기 때문이다(`EF17`이 못 잡은 이유).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "A x A\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'A' }, .modifiers = .{} });
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    for ("AA") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} }); // 첫 매치를 바꾼다
+    try std.testing.expectEqualStrings("AA x A\n", term.rt.editor_doc.?.file.content);
+
+    // 매치는 셋(0·1·5). **방금 만든 둘을 건너뛰고** 원래의 셋째로 가야 한다.
+    try std.testing.expectEqual(@as(usize, 3), session.editor_find_matches.items.len);
+    {
+        const sel = term.rt.editor_selection.?;
+        try std.testing.expectEqual(@as(usize, 5), sel.start());
+    }
+}
+
+test "EF21 두 입력의 IME 조합은 서로 독립이다 (§5.1)" {
+    // §5.1이 *"두 입력 사이 포커스 이동(Tab)과 IME 조합이 각각 독립이어야 한다"*고 **명시**한 자리다.
+    // 조합을 검색어 칸에 고정해 두면 바꿀 문자열을 한글로 치는 동안 글자가 **위 줄에 쌓인다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "\xea\xb0\x80 x\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    _ = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true, .option = true } });
+    try std.testing.expect(session.chrome_host.find.replaceActive());
+    try std.testing.expectEqual(chrome.components.find.Focus.replace, session.chrome_host.find.focus);
+
+    // 바꿀 문자열 줄에서 조합 "나" → 확정 → 다음 조합 "다".
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "\xeb\x82\x98");
+    input_ops.imeInsert(session, "\xeb\x82\x98");
+    input_ops.imeMarked(session, "\xeb\x8b\xa4");
+    input_ops.imeEnd(session, null);
+
+    // **바꿀 문자열 쪽에만** 쌓인다. 검색어는 손대지 않은 그대로여야 한다.
+    try std.testing.expectEqualStrings("\xeb\x82\x98", session.chrome_host.find.replace.query.items);
+    try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.replace.preedit.items);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.find.input.preedit.items.len);
+
+    // Tab으로 옮기면 이번엔 검색어 쪽이 받는다 — 조합 버퍼가 서로 안 섞인다.
+    _ = try session.handleKeyEvent(.{ .key = .tab, .modifiers = .{} });
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "\xea\xb0\x80");
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.replace.preedit.items); // 그대로
 }
 
 test "EF10 모달이 강조를 멎게 해도 ⌘G는 이어진다 — `find_nav`를 내리는 대가의 크기" {

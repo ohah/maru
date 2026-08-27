@@ -80,6 +80,12 @@ fn recomputeEditorFind(self: *AppSession, term: *Term) void {
 }
 
 /// 편집기 매치를 버린다 — 검색을 닫거나 대상이 편집기가 아니게 됐을 때.
+/// `recomputeEditorFind`를 그룹 밖(편집기 연산)에서 부르기 위한 자리. **바꾸기가 문서를 고친
+/// 직후 매치 목록은 낡는다** — 낡은 목록으로 다음 자리를 고르면 엉뚱한 offset을 집는다.
+pub fn recomputeEditorFindPublic(self: *AppSession, term: *Term) void {
+    recomputeEditorFind(self, term);
+}
+
 pub fn clearEditorFind(self: *AppSession) void {
     self.editor_find_matches.clearRetainingCapacity();
     self.editor_find_source = 0;
@@ -110,6 +116,18 @@ pub fn clearAllFindMatches(self: *AppSession) void {
     self.find_matches.clearRetainingCapacity();
     clearEditorFind(self);
     self.find_nav = false;
+}
+
+/// ⌥⌘F: 찾기를 **바꾸기 줄과 함께** 연다(§5.1).
+///
+/// **이미 열려 있으면 닫지 않고 바꾸기 줄만 켠다.** ⌘F로 검색어를 친 뒤 "바꿔야겠다"고 생각하는
+/// 것이 흔한 순서인데, 여기서 닫아 버리면 방금 친 검색어가 사라진다.
+pub fn toggleFindReplace(self: *AppSession) void {
+    if (!self.chrome_host.find.open) toggleFind(self);
+    if (!self.chrome_host.find.open) return; // 토글이 닫는 쪽이었다면 그대로 둔다
+    self.chrome_host.find.replace_open = true;
+    self.chrome_host.find.focus = .replace; // 바꿀 문자열을 치러 온 것이다
+    self.metal_dirty = true;
 }
 
 /// ⌘F: Find 오버레이를 토글한다. 열려 있으면 닫고(매치 하이라이트·⌘G 닫힘-네비 세션 종료),
@@ -177,6 +195,20 @@ pub fn findNavigate(self: *AppSession, forward: bool) void {
 /// 현재 검색어로 활성 surface를 다시 검색해 find_matches를 채우고, 현재 인덱스를 첫 매치로 리셋한 뒤 뷰로
 /// 스크롤한다(증분 검색 — 타이핑·Backspace마다). 검색어가 비면 매치 0. OOM이면 매치를 비워 안전하게 둔다.
 /// chrome_host.find.match_count를 동기화해(setMatchCount) 컴포넌트의 카운터·next/prev wrap이 맞게 한다.
+/// 현재 매치 하나를 바꾼다 — 편집기가 아니면 무동작(스크롤백·웹은 읽기 전용이다).
+pub fn replaceOne(self: *AppSession) void {
+    const term = activeEditorTerm(self) orelse return;
+    if (!editor_ops.replaceCurrentMatch(self, term)) return;
+    self.metal_dirty = true;
+}
+
+/// 전부 바꾼다 — 되돌리기 하나(§3.3).
+pub fn replaceAll(self: *AppSession) void {
+    const term = activeEditorTerm(self) orelse return;
+    if (!editor_ops.replaceAllMatches(self, term)) return;
+    self.metal_dirty = true;
+}
+
 pub fn recomputeFind(self: *AppSession) void {
     if (!self.surface_initialized) return;
     if (activeEditorTerm(self)) |term| {

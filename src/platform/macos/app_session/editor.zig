@@ -21,6 +21,7 @@ const Pane = app_session_mod.Pane;
 const pane_ops = @import("pane.zig");
 const tab_ops = @import("tab.zig");
 const term_ops = @import("term.zig");
+const find_ops = @import("find.zig");
 const scroll_ops = @import("scroll.zig");
 const editor_diff_ops = @import("editor_diff.zig");
 const workspace_ops = @import("workspace.zig");
@@ -2453,6 +2454,139 @@ fn markRangeInLine(
 ///
 /// **이미 보이면 아무것도 하지 않는다.** 타이핑마다 재검색이 돌므로(증분 검색) 매번 화면을 옮기면
 /// 글자 하나 지울 때마다 본문이 튄다. VSCode도 화면 안 매치로는 뷰를 움직이지 않는다.
+/// 검색 매치들을 문서 offset 범위로 편다. 매치는 `(줄, 줄 안 offset)`이고 편집은 문서 offset을
+/// 받는다(§3.1) — 그 환산을 **한 곳**에 둔다. 줄 번호가 범위 밖이면 그 매치를 버린다(목록이
+/// 편집보다 낡은 순간).
+fn matchRange(doc: Opened, m: maru.session.editor.find.Match) ?struct { start: usize, end: usize } {
+    const line = doc.file.lines.line(m.line) orelse return null;
+    const start = line.start + m.start;
+    if (start > doc.file.content.len) return null;
+    return .{ .start = start, .end = @min(start + m.len, doc.file.content.len) };
+}
+
+/// **현재 매치 하나를 바꾼다**(§5.1). 바꾸기는 편집 연산이므로 되돌리기 하나다(§3.3).
+///
+/// 바꾼 뒤 **다음 매치로 간다** — 그러지 않으면 같은 자리를 다시 가리키게 되고, 바꿀 문자열이
+/// 검색어를 품으면(`a` → `aa`) Enter를 누를 때마다 **같은 자리가 자라난다.**
+pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    if (!isFindTarget(self, term)) return false; // 남의 문서 좌표로 이 문서를 고치지 않는다
+
+    const idx = self.chrome_host.find.current;
+    if (idx >= self.editor_find_matches.items.len) return false;
+    const r = matchRange(doc, self.editor_find_matches.items[idx]) orelse return false;
+
+    const text = self.chrome_host.find.replace.query.items;
+    var changes = [_]maru.session.editor.delta.Change{.{ .start = r.start, .end = r.end, .text = text }};
+
+    if (!applyEditAsOne(self, term, &changes)) return false;
+
+    // **바꾼 자리 뒤의 첫 매치로 간다.** 목록은 방금 낡았으므로 다시 찾고, 그 안에서 고른다.
+    const after = r.start + text.len;
+    find_ops.recomputeEditorFindPublic(self, term);
+    selectNextMatchAtOrAfter(self, term, after);
+    return true;
+}
+
+/// **전부 바꾼다**(§5.1). 멀티 selection 동시 편집과 **같은 경로**를 타므로 되돌리기 하나다(§3.3).
+///
+/// **한 번에 적용하는 것이 되풀이를 막는다.** 하나씩 바꾸고 다시 찾기를 반복하면 바꾼 문자열이
+/// 검색어를 품을 때 끝나지 않는다(`a` → `aa`).
+pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    if (!isFindTarget(self, term)) return false;
+    if (self.editor_find_matches.items.len == 0) return false;
+
+    const text = self.chrome_host.find.replace.query.items;
+    var changes: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer changes.deinit(self.allocator);
+    for (self.editor_find_matches.items) |m| {
+        const r = matchRange(doc, m) orelse continue;
+        changes.append(self.allocator, .{ .start = r.start, .end = r.end, .text = text }) catch return false;
+    }
+    if (changes.items.len == 0) return false;
+
+    if (!applyEditAsOne(self, term, changes.items)) return false;
+
+    // 다 바꿨으니 남은 매치는 **바꾼 문자열이 검색어를 품은 경우뿐**이다. 다시 찾아 카운터를 맞춘다.
+    find_ops.recomputeEditorFindPublic(self, term);
+    self.chrome_host.find.current = 0;
+    return true;
+}
+
+/// 문서 offset `at` **이상**에서 시작하는 첫 매치를 현재로 삼는다. 없으면 첫 매치로 돌아간다(wrap).
+fn selectNextMatchAtOrAfter(self: *AppSession, term: *Term, at: usize) void {
+    const doc = term.rt.editor_doc orelse return;
+    for (self.editor_find_matches.items, 0..) |m, i| {
+        const r = matchRange(doc, m) orelse continue;
+        if (r.start >= at) {
+            self.chrome_host.find.current = i;
+            revealCurrentFindMatch(self, term);
+            return;
+        }
+    }
+    self.chrome_host.find.current = 0;
+    revealCurrentFindMatch(self, term);
+}
+
+/// 변경 목록 하나를 **한 번의 편집**으로 적용한다 — 되돌리기 하나(§3.3), 스크롤·caret 추종까지.
+/// 주석 토글과 바꾸기가 같은 꼬리를 쓰므로 여기 모은다.
+///
+/// **읽기 전용을 강제하는 것은 이 층이 아니다.** `EditableFile.apply`가 `error.ReadOnly`를 내는
+/// 것이 그 계약의 방어이고(§3.5), 그것은 `edit_doc.zig`의 판정자가 직접 잡는다. 부르는 쪽들이
+/// 앞서 두는 `read_only` 검사는 **싼 조기 반환**이지 두 번째 방어가 아니다 — 지워도 동작이
+/// 같음을 뮤턴트로 확인했다(적대적 검증 2026-08-27). 이 파일의 여덟 자리가 같은 관용구를 쓰므로
+/// 그 형태는 유지하되, **무엇이 실제로 막는지**를 여기 한 번 적어 둔다.
+fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
+    var sels = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(sels.items);
+    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
+    const before_primary = sels.primary;
+
+    const scroll_anchor = captureScrollAnchor(term);
+    const rows_before = drawnDocLines(term);
+    const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = changes }, &sels) catch {
+        self.allocator.free(before);
+        return false;
+    };
+
+    breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
+    pushUndo(self, term, inverse, before, before_primary, .insert);
+    writeBackSelections(self, term, sels);
+    refreshAfterEdit(self, term) catch {};
+    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = changes });
+    revealPrimaryCaretRows(self, term, rows_before);
+    breakUndoGroup(term);
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 검색 매치 하나를 primary selection으로 만든다(§5.1). **선택 범위**여야 한다 — caret만 옮기면
+/// 무엇을 찾았는지 화면이 말하지 않고, 바꾸기가 "지금 것"을 집을 근거도 사라진다.
+fn selectFindMatch(self: *AppSession, term: *Term, match: maru.session.editor.find.Match) void {
+    if (term.rt.editor_diff != null) return; // 비교 뷰는 축이 둘이다(§4.1g) — 검색 대상도 아직 아니다
+    const doc = term.rt.editor_doc orelse return;
+    const line = doc.file.lines.line(match.line) orelse return;
+
+    // 매치는 **줄 안 offset**이고 selection은 **문서 offset**이다(§3.1 단일 위치 축).
+    const start = line.start + match.start;
+    const end = @min(start + match.len, doc.file.content.len);
+    if (start > doc.file.content.len) return; // 목록이 편집보다 낡았다 — 조용히 둔다
+
+    // **커서를 새로 놓는 경로다.** 멀티커서를 남기면 사용자가 그것을 없앨 방법이 없고(클릭이
+    // 정리하는 그 규칙), 바꾸기가 엉뚱한 자리까지 건드린다.
+    clearExtraSelections(self, term);
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(start, end);
+    // 편집이 아닌 이유로 커서가 움직였다 — 다음 타이핑이 앞의 것과 한 묶음이 되면 안 된다(§3.3).
+    breakUndoGroup(term);
+}
+
 pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
     // **이 Term의 매치가 맞는지 먼저 묻는다.** 목록은 계산한 시점의 편집기 것이고, 그 뒤 pane이
     // 바뀌었을 수 있다. 안 물으면 **남의 문서 줄 번호로 이 문서를 굴리고 이 문서의 접힘을
@@ -2464,7 +2598,17 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
 
     const idx = self.chrome_host.find.current;
     if (idx >= self.editor_find_matches.items.len) return;
-    const doc_line = self.editor_find_matches.items[idx].line;
+    const match = self.editor_find_matches.items[idx];
+    const doc_line = match.line;
+
+    // **현재 일치가 primary selection을 옮긴다**(§5.1). 별도 "검색 커서"를 만들지 않는 것이
+    // 이 문장의 요점이다 — 그래서 오버레이를 닫으면 **찾은 자리에서 그대로 편집이 이어진다**
+    // (바꾸기도 그 selection 위에서 일어난다). 색만 바꾸면 Enter로 옮겨 다닌 뒤 Esc를 눌렀을 때
+    // caret이 검색 전 자리에 남아, 사용자는 **화면과 다른 곳을 고치게 된다.**
+    //
+    // **스크롤보다 앞에 둔다.** 아래는 "이미 보인다"면 굴리지 않고 돌아가는데, 보이든 말든
+    // selection은 옮겨야 한다.
+    selectFindMatch(self, term, match);
 
     // **먼저 편다.** 접힌 채로 보이는 줄을 찾으면 그 줄이 없어 아무 데도 못 간다.
     const unfolded = revealFoldedLine(self, term, doc_line);

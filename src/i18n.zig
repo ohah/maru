@@ -498,7 +498,6 @@ const Table = struct {
     dock_staged: [:0]const u8,
     dock_worktree: [:0]const u8,
     dock_new_file: [:0]const u8,
-    dock_branch: [:0]const u8,
     /// diff 탭 라벨: 히스토리에서 고른 커밋 하나(`커밋^ ↔ 커밋`).
     dock_commit: [:0]const u8,
     /// diff 탭 라벨: 에이전트 타임라인의 완료된 턴 하나(`스냅샷 ↔ 스냅샷`).
@@ -1006,7 +1005,6 @@ const en: Table = .{
     .dock_staged = "Staged",
     .dock_worktree = "Worktree",
     .dock_new_file = "New file",
-    .dock_branch = "Branch",
     .dock_commit = "Commit",
     .dock_turn = "Turn",
     .dock_conflict = "Conflict",
@@ -1568,7 +1566,6 @@ const ko: Table = .{
     .dock_staged = "스테이지됨",
     .dock_worktree = "작업트리",
     .dock_new_file = "새 파일",
-    .dock_branch = "브랜치",
     .dock_commit = "커밋",
     .dock_turn = "턴",
     .dock_conflict = "충돌",

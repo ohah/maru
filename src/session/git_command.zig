@@ -62,14 +62,6 @@ pub const Kind = enum {
     /// 두 상태의 답이 다르다 — 앞은 사용자가 기준을 골라야 하고, 뒤는 첫 커밋을 하면 저절로 풀린다.
     /// 이 읽기는 unborn 저장소에서도 성공하므로(원격 HEAD는 로컬 HEAD와 무관하다) 그 둘을 가른다.
     default_base,
-    /// 기본 브랜치와 갈린 지점(`merge-base origin/HEAD HEAD`). 이 값이 "브랜치에 COMMIT 됨" 섹션의 왼쪽이다.
-    /// **실패해도 목록은 성립한다** — origin/HEAD가 없는 저장소(로컬 전용·clone 아님)에서는 그 섹션만 숨긴다.
-    merge_base,
-    /// 그 갈린 지점 이후 이 브랜치의 커밋들이 바꾼 파일: `git diff --name-status origin/HEAD...HEAD`.
-    /// **삼점 범위**라 merge-base를 따로 구해 넘길 필요가 없다(git이 같은 계산을 한다).
-    branch_name_status,
-    /// 같은 범위의 +N -N.
-    branch_numstat,
     /// 턴 스냅샷 ①: 임시 index를 HEAD로 채운다(`read-tree HEAD`). 진짜 index는 안 건드린다 — `GIT_INDEX_FILE`이
     /// 가리키는 파일만 쓴다. 그 파일은 **저장소 밖**에 둔다(안에 두면 그 파일 자체가 diff에 잡힌다).
     snapshot_read_tree,
@@ -503,33 +495,6 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
                 n += 1;
             }
         },
-        .merge_base => {
-            buf[n] = "merge-base";
-            n += 1;
-            // `arg`는 **기준 ref**다(없으면 기본 브랜치). 호출자가 검증한 값만 온다 — `isSafeBaseRef`.
-            buf[n] = arg orelse default_base_ref;
-            n += 1;
-            buf[n] = "HEAD";
-            n += 1;
-        },
-        .branch_name_status, .branch_numstat => {
-            buf[n] = "diff";
-            n += 1;
-            buf[n] = if (kind == .branch_numstat) "--numstat" else "--name-status";
-            n += 1;
-            buf[n] = "--find-renames";
-            n += 1;
-            buf[n] = "--no-ext-diff";
-            n += 1;
-            buf[n] = "--no-textconv";
-            n += 1;
-            // `A...B` = B가 갈린 지점 이후 바꾼 것(공통 조상 기준). `A..B`(두 점)로 쓰면 기본 브랜치에 새로 들어온
-            // 커밋까지 "내가 바꾼 것"으로 잡혀 목록이 부풀어 오른다.
-            // `arg`는 **이미 만들어진 삼점 범위**다(`baseRange`) — 여기서 이어 붙이면 버퍼가 필요하고,
-            // 그 버퍼의 수명이 argv보다 짧으면 조용히 쓰레기를 싣는다.
-            buf[n] = arg orelse default_base_range;
-            n += 1;
-        },
         .snapshot_read_tree => {
             buf[n] = "read-tree";
             n += 1;
@@ -567,7 +532,12 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             buf[n] = "--left-right";
             n += 1;
-            buf[n] = arg orelse default_base_range; // 범위 문자열 그대로(`baseRange`)
+            // `A...B` = B가 갈린 지점 이후 바꾼 것(공통 조상 기준). `A..B`(두 점)로 쓰면 기본 브랜치에 새로
+            // 들어온 커밋까지 "내가 바꾼 것"으로 잡혀 숫자가 부풀어 오른다.
+            //
+            // `arg`는 **이미 만들어진 삼점 범위**다(`baseRange`) — 여기서 이어 붙이면 버퍼가 필요하고,
+            // 그 버퍼의 수명이 argv보다 짧으면 조용히 쓰레기를 싣는다.
+            buf[n] = arg orelse default_base_range;
             n += 1;
         },
         .branches, .base_candidates => {
@@ -691,7 +661,7 @@ test "숫자를 내는 diff는 알고리즘을 못 박는다 — 사용자 설�
     // `histogram`을 켜 두면 같은 파일에 목록은 `+1756 -1696`, 본문은 `+250 -190`을 말한다(실측).
     // **둘 중 하나를 고쳐야 한다면 목록이다** — 본문 계산은 우리 것이고 설정을 따를 이유가 없다.
     var buf: [max_argv][]const u8 = undefined;
-    inline for (.{ Kind.numstat_staged, Kind.numstat_worktree, Kind.branch_numstat }) |kind| {
+    inline for (.{ Kind.numstat_staged, Kind.numstat_worktree }) |kind| {
         const argv = build(kind, "/usr/bin/git", "/repo", "deadbeef", &buf);
         try testing.expect(has(argv, "diff.algorithm=myers"));
     }
@@ -815,19 +785,13 @@ test "argv 상한이 모든 kind를 담는다(넘치면 범위를 벗어난다)"
 }
 
 test "브랜치 범위는 삼점(...)으로 물어 기본 브랜치의 새 커밋을 섞지 않는다" {
+    // 이 규율의 소비자는 이제 `ahead_behind` **하나**다(브랜치 범위 파일 목록 둘은 2026-08-27 에 걷혔다 —
+    // 화면이 2026-08-14 에 사라졌는데 배관만 남아 있었다). 규율 자체는 그대로 지켜야 한다: 두 점으로 물으면
+    // 기본 브랜치에 새로 들어온 커밋까지 `↑N` 에 잡혀 "내가 안 보낸 커밋"이 부풀어 오른다.
     var buf: [max_argv][]const u8 = undefined;
-    const argv = build(.branch_name_status, "/usr/bin/git", "/repo", null, &buf);
+    const argv = build(.ahead_behind, "/usr/bin/git", "/repo", null, &buf);
     try testing.expect(has(argv, "origin/HEAD...HEAD"));
     try testing.expect(!has(argv, "origin/HEAD..HEAD"));
-    try testing.expect(has(argv, "--name-status"));
-    // 같은 범위의 증감도 같은 형태로 묻는다.
-    var buf2: [max_argv][]const u8 = undefined;
-    try testing.expect(has(build(.branch_numstat, "/usr/bin/git", "/repo", null, &buf2), "--numstat"));
-    // merge-base는 그 섹션의 diff 왼쪽을 읽을 때 쓴다.
-    var buf3: [max_argv][]const u8 = undefined;
-    const mb = build(.merge_base, "/usr/bin/git", "/repo", null, &buf3);
-    try testing.expect(has(mb, "merge-base"));
-    try testing.expect(has(mb, "origin/HEAD"));
 }
 
 test "commitBlobSpec은 hex 해시만 받는다(임의 문자열을 인자로 넘기지 않는다)" {
@@ -888,13 +852,9 @@ test "기준을 넘기면 세 명령이 **같은** 기준을 쓴다" {
     const range = baseRange("origin/release", &range_buf).?;
     try testing.expectEqualStrings("origin/release...HEAD", range);
 
-    try testing.expect(has(build(.merge_base, "/usr/bin/git", "/repo", "origin/release", &buf), "origin/release"));
     try testing.expect(has(build(.ahead_behind, "/usr/bin/git", "/repo", range, &buf), "origin/release...HEAD"));
-    try testing.expect(has(build(.branch_name_status, "/usr/bin/git", "/repo", range, &buf), "origin/release...HEAD"));
-    try testing.expect(has(build(.branch_numstat, "/usr/bin/git", "/repo", range, &buf), "origin/release...HEAD"));
 
     // 안 넘기면 기본값이다 — 기준을 고른 적 없는 저장소가 지금과 똑같이 돈다.
-    try testing.expect(has(build(.merge_base, "/usr/bin/git", "/repo", null, &buf), "origin/HEAD"));
     try testing.expect(has(build(.ahead_behind, "/usr/bin/git", "/repo", null, &buf), "origin/HEAD...HEAD"));
 }
 

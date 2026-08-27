@@ -698,6 +698,17 @@ pub const Window = struct {
         self.postSyntheticMouseWheel(kind, x_px, y_px, 0);
     }
 
+    /// **합성 문자 입력을 자기 큐에 넣는다** — 판정용이다.
+    ///
+    /// 마우스 쪽과 같은 이유다: "파일을 보는 중에 친 글자가 **안 보이는 셸**로 가지 않는가" 를
+    /// 사람 없이 재려면 창이 실제로 받는 메시지가 있어야 한다. 핸들러를 직접 부르면
+    /// **창 → `WindowEvent.key` → 라우팅**이 안 밟혀, 거기가 틀려도 판정이 초록이 된다.
+    ///
+    /// `WM_CHAR` 만 넣는다 — 우리가 읽는 것이 그것이다(위 §W7.4a 주석).
+    pub fn postSyntheticChar(self: *Window, codepoint: u16) void {
+        _ = PostMessageW(self.hwnd, WM_CHAR, @intCast(codepoint), 0);
+    }
+
     /// 휠까지 보낸다. `notches` 는 눈금 수(+위, −아래) — 0 이면 휠이 아닌 종류로 취급한다.
     ///
     /// **휠은 `lParam` 이 화면 좌표다**(다른 마우스 메시지는 클라이언트 좌표). 창이 그 차이를 이미

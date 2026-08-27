@@ -2355,7 +2355,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   self/target SHA 및 closed `commit|tag` kind로 파싱한다. 첫 annotated hop은 release tag name도 결속하고 후속 nested hop은 서로 다른
   non-empty bounded name을 허용해 SHA 체인을 막지 않는다. `test-session-host-release-adapter-github-git`가 lightweight ref, annotated/nested
   target, cap, malformed/missing/type/duplicate/trailing, foreign/noncanonical identity와 두 allocation path의 fail-index를
-  Debug·ReleaseFast에서 검증한다. traversal depth·cycle·최종 commit 결속 resolver와 API 호출은 아직 없다. 이 역시 component 의미 검증이며 실제 GitHub release/
+  Debug·ReleaseFast에서 검증한다. `release_adapter_git_resolver.zig`는 final-address `Backing`이 소유한 caller-sized `[]Sha` 길이를 정책 상한으로 받아 0-hop
+  direct commit과 nested chain의 exact manifest commit 수렴, self/earlier cycle, depth exhaustion, foreign current/commit,
+  replay·copied resolver/backing·cross-resolver reuse·owner/backing overlap·결속 뒤 descriptor drift를 terminal fail-close한다. `test-session-host-release-adapter-git-resolver`가 이를
+  Debug·ReleaseFast에서 검증한다. 제품 최대 깊이 선택과 API 호출은 아직 없다. 이 역시 component 의미 검증이며 실제 GitHub release/
   deployment API·codesign·DMG 결과의 의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의

@@ -154,6 +154,7 @@ pub const AssetObservation = struct {
 };
 
 pub const EvidenceObservation = struct {
+    summary_sha256: []const u8,
     test_uuid: []const u8,
     result: []const u8,
     candidate_executable_sha256: []const u8,
@@ -173,6 +174,8 @@ pub const Observation = struct {
     release: Release,
     source: Source,
     build: Build,
+    /// Compatibility and signing must come from this exact frozen executable, not another build.
+    executable_sha256: []const u8,
     compatibility: Compatibility,
     executable_compatibility_verified: bool,
     signing: Signing,
@@ -367,13 +370,6 @@ fn validateObservation(
     if (!equalRelease(manifest.release, observed.release)) return error.ReleaseMismatch;
     if (!equalSource(manifest.source, observed.source)) return error.SourceMismatch;
     if (!equalBuild(manifest.build, observed.build)) return error.BuildMismatch;
-    if (!observed.executable_compatibility_verified or
-        !equalCompatibility(manifest.compatibility, observed.compatibility))
-        return error.CompatibilityMismatch;
-    if (!observed.strict_signature_verified or !observed.notarization_verified or
-        !observed.staple_verified or !equalSigning(manifest.signing, observed.signing))
-        return error.SigningMismatch;
-
     if (observed.assets.len != manifest.assets.len) return error.AssetMismatch;
     var frozen_sha: ?[]const u8 = null;
     for (manifest.assets) |expected| {
@@ -385,11 +381,19 @@ fn validateObservation(
         if (expected.role == .frozen_product_executable) frozen_sha = expected.sha256;
     }
     const executable_sha = frozen_sha orelse return error.AssetMismatch;
+    if (!std.mem.eql(u8, executable_sha, observed.executable_sha256) or
+        !observed.executable_compatibility_verified or
+        !equalCompatibility(manifest.compatibility, observed.compatibility))
+        return error.CompatibilityMismatch;
+    if (!observed.strict_signature_verified or !observed.notarization_verified or
+        !observed.staple_verified or !equalSigning(manifest.signing, observed.signing))
+        return error.SigningMismatch;
     if (!observed.dmg_extraction_no_follow or
         !std.mem.eql(u8, executable_sha, observed.dmg_product_executable_sha256))
         return error.DmgExecutableMismatch;
 
     if (!observed.evidence_schema_verified or
+        !std.mem.eql(u8, manifest.evidence.summary_sha256, observed.evidence.summary_sha256) or
         !std.mem.eql(u8, manifest.evidence.test_uuid, observed.evidence.test_uuid) or
         !std.mem.eql(u8, manifest.evidence.result, observed.evidence.result) or
         !std.mem.eql(u8, executable_sha, observed.evidence.candidate_executable_sha256))
@@ -678,6 +682,7 @@ fn validObservation(
         .release = manifest.release,
         .source = manifest.source,
         .build = manifest.build,
+        .executable_sha256 = executable,
         .compatibility = manifest.compatibility,
         .executable_compatibility_verified = true,
         .signing = manifest.signing,
@@ -688,6 +693,7 @@ fn validObservation(
         .dmg_product_executable_sha256 = executable,
         .dmg_extraction_no_follow = true,
         .evidence = .{
+            .summary_sha256 = manifest.evidence.summary_sha256,
             .test_uuid = manifest.evidence.test_uuid,
             .result = manifest.evidence.result,
             .candidate_executable_sha256 = executable,
@@ -932,6 +938,20 @@ test "release manifest typed observations reject attestation evidence and predec
     a.release.id += 1;
     observed = validObservation(&b, &assets, predecessor);
     try std.testing.expectError(error.PredecessorMismatch, validateObservation(b, observed, a));
+}
+
+test "release manifest observations reject cross artifact substitution" {
+    const manifest = validManifest(.a);
+    var assets: [3]AssetObservation = undefined;
+    fillAssetObservations(manifest, &assets);
+
+    var observed = validObservation(&manifest, &assets, null);
+    observed.executable_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expectError(error.CompatibilityMismatch, validateObservation(manifest, observed, null));
+
+    observed = validObservation(&manifest, &assets, null);
+    observed.evidence.summary_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expectError(error.EvidenceMismatch, validateObservation(manifest, observed, null));
 }
 
 test "release manifest observation binds attestation to exact canonical bytes" {

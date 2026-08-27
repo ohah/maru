@@ -5282,10 +5282,74 @@ test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
     bridge.maru_mobile_control_reset();
 }
 
+test "원하는 것이 바뀌면 닫고 나서 연다 — 같은 채널이니까" {
+    // 같은 채널 번호를 **닫히기 전에** 다시 열면 상대의 늦은 `close` 가 새 채널로 배달돼 방금 연
+    // 것이 이유 없이 닫힌다(SSH §3.4.1 — 적대적 검증이 잡은 실패다). 그래서 전이는
+    // want≠open → 닫기 → 닫힘 확인 → 열기 다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    // 목록을 원한다 → 연다.
+    bridge.wantControl(.sessions);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+
+    // 화면을 원한다 → **먼저 닫으라고 한다**. 이때 열기를 같이 집어 가면 안 된다.
+    const id: [32]u8 = @splat('a');
+    bridge.wantControl(.{ .screen = id });
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    // 닫힘을 host 가 확인한 뒤에야 연다 — 그 순서는 host 가 채널 상태로 지킨다(§4a).
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // 같은 것을 다시 원하면 아무 일도 안 일어난다(그 서버에서 명령이 한 번 더 돌면 안 된다).
+    bridge.wantControl(.{ .screen = id });
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+}
+
+test "열기 요청은 가져간다고 사라지지 않는다 — 열렸을 때만 내린다" {
+    // host 는 채널이 닫힌 뒤에만 연다. 그때까지 이 뜻이 사라지면 축이 **영영 안 선다**.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    bridge.wantControl(.sessions);
+    // 열기가 지면 되돌아간다 — 다시 시도할 자리가 열려 있어야 한다.
+    _ = bridge.maru_mobile_take_control_open();
+    bridge.maru_mobile_control_open_failed();
+    bridge.maru_mobile_control_reset();
+    bridge.wantControl(.sessions);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+}
+
+test "명령은 원하는 것에 따라 달라진다" {
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    const cfg = "ssh.server.1.host = h\nssh.server.1.user = u\n";
+    bridge.maru_mobile_load_config(cfg, cfg.len);
+    var buf: [256]u8 = undefined;
+
+    // 아무것도 안 원하면 **만들지 않는다** — host 가 그 상태에서 열면 뜻 없는 명령이 하나 돈다.
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_control_command(&buf, buf.len));
+
+    bridge.wantControl(.sessions);
+    var n = bridge.maru_mobile_control_command(&buf, buf.len);
+    try std.testing.expectEqualStrings("maru control --stdio", buf[0..n]);
+
+    var id: [32]u8 = @splat('0');
+    @memcpy(id[0..4], "beef");
+    bridge.wantControl(.{ .screen = id });
+    n = bridge.maru_mobile_control_command(&buf, buf.len);
+    try std.testing.expectEqualStrings("maru attach --stream beef000000000000000000000000000000"[0..25], buf[0..25]);
+    try std.testing.expect(std.mem.endsWith(u8, buf[0..n], &id));
+}
+
 test "컨트롤 명령은 설정 경로를 쓰고 셸이 쪼개지 못하게 인용한다" {
     // `exec` 문자열은 **원격 셸이 낱말로 쪼갠다** — 공백이 든 경로를 그대로 실으면
     // `/Applications/My Apps/maru` 가 두 낱말이 되고, 사용자는 "왜인지 안 된다" 만 본다.
     var buf: [256]u8 = undefined;
+    // **무엇을 원하는지가 명령을 정한다**(§4a) — 원하는 것이 없으면 만들 명령도 없다.
+    bridge.maru_mobile_control_reset();
+    bridge.wantControl(.sessions);
+    defer bridge.maru_mobile_control_reset();
 
     // 경로가 없으면 기본을 그대로 쓴다(설치 경로를 추측하지 않는다 — 계약 §4a).
     const cfg0 = "ssh.server.1.host = h\nssh.server.1.user = u\n";

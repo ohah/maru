@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 830;
+const smoke_spin_cap: usize = 860;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4373,12 +4373,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var scroll_first_after: usize = 0;
     var scroll_digest_before: u64 = 0;
     var scroll_digest_after: u64 = 0;
+    var spawn_while_file_judgeable = false;
+    var spawn_while_file_sessions_before: usize = 0;
+    var spawn_while_file_sessions_after: usize = 0;
+    var spawn_while_file_shows_terminal = false;
     var editor_last_cells: usize = 0;
     var editor_last_rows: usize = 0;
     // **파일이 진짜 떴는가.** 카드가 늘어난 것만 보면 속 빈다 — 편집기가 **그 파일의 줄**을 그렸는지,
     // 그리고 같은 줄을 다시 눌렀을 때 카드가 **안 늘어나는지**(창당 경로 유일성)를 함께 본다.
     var open_judgeable = false;
-    var open_target_path: []const u8 = "";
+    // **경로를 소유한다.** 행이 든 슬라이스는 **트리 노드**의 것이라, 재스캔이 그 항목을 갈아
+    // 끼우면 죽는다 — W8.12 로 재스캔이 임의 프레임에 오게 되면서 더 위험해졌다. 그리고 이 값이
+    // 죽으면 두 번째 클릭이 대상을 못 찾아 **유일성 검사가 초록인 채 속이 빈다**(실측: `reopens=0`
+    // 인데 `open_file_ok=true`).
+    var open_target_buf: [512]u8 = undefined;
+    var open_target_len: usize = 0;
     var open_files_after_first: usize = 0;
     var open_files_after_second: usize = 0;
     var open_editor_cells: usize = 0;
@@ -4584,6 +4593,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var snap_active_band_y: ?u32 = null;
     var snap_cards_visible: usize = 0;
     var snap_over_header: usize = 0;
+    var snap_content_h: u32 = 0;
+    var snap_view_h: u32 = 0;
+    var snap_want_band_y: i64 = 0;
+    var snap_want_active_y: i64 = 0;
+    var snap_active_slot: usize = 0;
+    var snap_active_names_view = false;
     var snap_taken = false;
     // **안 넘치면 안 그린다**(중립 계약: *"넘치지 않는 목록에 스크롤바를 그리면 사용자에게 없는
     // 여백을 있다고 말하는 셈"*). 지금 판정은 **있을 때만** 보므로 그 규칙이 깨져도 안 움직인다.
@@ -5466,7 +5481,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
                 const fy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
                 open_judgeable = true;
-                open_target_path = r.file.path;
+                open_target_len = @min(r.file.path.len, open_target_buf.len);
+                @memcpy(open_target_buf[0..open_target_len], r.file.path[0..open_target_len]);
                 // **그려진 셀의 지문을 잰다.** 카드 수(모델)는 맞는데 화면은 그대로인 실패를 실측
                 // 캡처가 찾았다 — 모델만 보는 판정은 그것을 영영 못 본다.
                 //
@@ -5485,7 +5501,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             open_files_after_first = open_files.items.len;
             for (dock_rows.items, 0..) |r, ri| {
                 if (r != .file) continue;
-                if (!std.mem.eql(u8, r.file.path, open_target_path)) continue;
+                if (!std.mem.eql(u8, r.file.path, open_target_buf[0..open_target_len])) continue;
                 const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
                 if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
                 const fy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
@@ -5536,12 +5552,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             scroll_first_after = open_files.items[active_view.file].first_line;
             scroll_digest_after = editor_last_digest;
         };
-        if (smoke and spins == 775) open_sidebar_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
-        if (smoke and spins == 796) {
-            open_files_after_second = open_files.items.len;
+        // **자기 순간을 챙긴다.** 예전에는 이 둘을 맨 뒤(796)에서 읽었는데 그 사이 790 의 스크롤이
+        // 화면을 바꿔 놓는다 — "연 직후에 그렸나" 를 묻는 값이 "굴린 뒤에 그렸나" 를 답하고 있었다.
+        if (smoke and spins == 775) {
+            open_sidebar_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
             open_editor_cells = editor_last_cells;
             open_editor_rows = editor_last_rows;
             open_showing_file = active_view == .file;
+        }
+        if (smoke and spins == 796) {
+            open_files_after_second = open_files.items.len;
+        }
+        // ── 파일을 보는 중에 ＋ 를 누르면 (적대적 검증 1회차) ──────────────────────────
+        //
+        // 그 자리 주석이 이미 규칙을 적어 뒀다 — *"만들고 안 보여 주면 눌린 것이 화면에 안
+        // 나타난다."* 그런데 파일이 활성이면 `selectTab` 만 하고 화면은 파일 그대로였다.
+        if (smoke and spins == 802) if (active_view == .file and sessions.items.len < max_win_sessions) {
+            spawn_while_file_judgeable = true;
+            spawn_while_file_sessions_before = sessions.items.len;
+            const hcols2: u32 = sidebar_w / cell_w;
+            const col2 = maru.chrome.components.sidebar.headerIconCol(.new_workspace, hcols2);
+            const hx2: i32 = @intCast(col2 *| cell_w + cell_w / 2);
+            const hy2: i32 = @intCast(geom.sidebar.y + sidebar_header_icon_band / 2);
+            window.postSyntheticMouse(.moved, hx2, hy2);
+            window.postSyntheticMouse(.left_down, hx2, hy2);
+            window.postSyntheticMouse(.left_up, hx2, hy2);
+        };
+        if (smoke and spins == 808) {
+            spawn_while_file_sessions_after = sessions.items.len;
+            spawn_while_file_shows_terminal = active_view == .terminal;
         }
         // **새로고침을 누른다.** 헤더 전체가 refresh action 이고 정렬 토글이 그 오른쪽 끝을 파낸
         // 형태라(`build.zig` 의 그 주석), **왼쪽 4 분의 1** 을 겨눈다 — 가운데를 누르면 무엇을
@@ -5720,6 +5759,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             snap_active_band_y = sidebar_active_band_y;
             snap_cards_visible = sidebar_cards_visible;
             snap_over_header = sidebar_card_over_header;
+            // **원하는 자리도 이 순간에 계산한다.** 예전에는 끝 상태의 카드 목록으로 다시 계산했다 —
+            // 638 이후에 목록이 안 바뀌던 동안만 우연히 맞았고, W8.13 이 그 뒤에 파일 카드를 붙이자
+            // 곧바로 어긋났다(실측 `active_ok=false`). 판정은 **자기 순간**을 챙겨야 한다.
+            var rb0: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr0 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb0);
+            const mm0 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            snap_content_h = maru.chrome.components.sidebar.contentHeight(rr0, mm0);
+            snap_view_h = geom.sidebar.h -| sidebar_header_h;
+            snap_want_band_y = @as(i64, geom.sidebar.y) +
+                maru.chrome.components.sidebar.rowTop(rr0, sidebar_first_visible, sidebar_header_h, mm0, sidebar_scroll_px);
+            snap_active_slot = sidebarActiveSlot(active_view, sessions.items.len);
+            // **동어반복을 끊는다.** 그린 슬롯과 기대 슬롯이 같은 함수에서 나오면, 그 함수가 틀려도
+            // 둘이 똑같이 틀려 판정이 맞다고 한다. 그래서 **그 칸의 이름이 지금 보고 있는 것을
+            // 가리키는지**를 모델 쪽에서 따로 확인한다.
+            snap_active_names_view = blk: {
+                if (snap_active_slot >= sidebar_cards.items.len) break :blk false;
+                const card_name = sidebar_cards.items[snap_active_slot].name;
+                break :blk switch (active_view) {
+                    .terminal => |t| t < sessions.items.len and std.mem.eql(u8, card_name, sessions.items[t].label()),
+                    .file => |f| f < open_files.items.len and std.mem.eql(u8, card_name, open_files.items[f].name()),
+                };
+            };
+            snap_want_active_y = @as(i64, geom.sidebar.y) +
+                maru.chrome.components.sidebar.rowTop(rr0, snap_active_slot, sidebar_header_h, mm0, sidebar_scroll_px);
         }
         // ── 스크롤바 끌기 판정 (W8.10) ─────────────────────────────────────────────────
         //
@@ -6263,7 +6326,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name) catch {};
                                     // 새 세션을 **바로 활성으로** 만든다 — 만들고 안 보여 주면
                                     // 눌린 것이 화면에 안 나타난다.
+                                    //
+                                    // **보는 것도 터미널로 돌린다.** `selectTab` 만 하면 파일을 보는
+                                    // 중에 ＋ 를 눌렀을 때 세션은 생기는데 화면은 파일 그대로다 —
+                                    // 위 규칙이 말하는 바로 그 실패다(적대적 검증 1회차 실측).
                                     _ = app_window.selectTab(sessions.items.len - 1);
+                                    active_view = .{ .terminal = sessions.items.len - 1 };
                                     sidebar_redraws += 1;
                                     rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                                 } else |_| {
@@ -7251,7 +7319,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 아무 파일이나 열려도 초록이다. 그래서 ⑴ 목록이 늘었나 ⑵ **다시 눌러도 안 늘었나**
         // (창당 경로 유일성) ⑶ 활성이 파일인가 ⑷ 편집기가 **행을 그렸나** 를 모은다.
         try stdout.print("open_file: path={s} opens={d} reopens={d} rejects={d} files {d}->{d} showing_file={} editor_cells={d} editor_rows={d} sidebar_digest {x}->{x} open_file_ok={}\n", .{
-            open_target_path,
+            open_target_buf[0..open_target_len],
             file_opens,
             file_reopens,
             file_rejects,
@@ -7262,7 +7330,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             open_editor_rows,
             open_sidebar_digest_before,
             open_sidebar_digest_after,
+            // **`reopens > 0` 이 빠지면 안 된다.** 두 번째 클릭이 대상을 못 찾으면 클릭 자체가
+            // 안 일어나고 `files 1->1` 은 그대로 참이라, 유일성 검사가 **초록인 채 속이 빈다**.
             file_opens > 0 and
+                file_reopens > 0 and
                 open_sidebar_digest_after != open_sidebar_digest_before and
                 open_files_after_first == open_files_after_second and
                 open_showing_file and
@@ -7271,6 +7342,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     } else {
         try stdout.print("open_file=unjudgeable reason=no_zig_row_visible\n", .{});
+    }
+    if (spawn_while_file_judgeable) {
+        // **만든 것과 보여 준 것을 갈라 센다.** 세션 수만 보면 "만들었다" 로 초록인데 화면은
+        // 파일 그대로일 수 있다 — 실제로 그랬다.
+        try stdout.print("spawn_while_file: sessions {d}->{d} shows_terminal={} spawn_while_file_ok={}\n", .{
+            spawn_while_file_sessions_before,
+            spawn_while_file_sessions_after,
+            spawn_while_file_shows_terminal,
+            spawn_while_file_sessions_after > spawn_while_file_sessions_before and spawn_while_file_shows_terminal,
+        });
+    } else {
+        try stdout.print("spawn_while_file=unjudgeable reason=no_file_active_or_session_cap\n", .{});
     }
     if (scroll_judgeable) {
         try stdout.print("editor_scroll: first {d}->{d} scrolls={d} digest {x}->{x} editor_scroll_ok={}\n", .{
@@ -7391,33 +7474,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **그린 첫 카드는 빌더가**(`snap_first_visible`), **눌린 카드는 클릭이 지나간 호출부가**
         // 낸다. 판정이 어느 한쪽을 다시 계산하면 그쪽 배선이 끊겨도 안 잡힌다 — 도크에서 그 함정을
         // 두 번 밟았다(§2m.52).
-        var rb2: [16]maru.chrome.components.sidebar.Row = undefined;
-        const rr2 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb2);
-        const mm2 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
-        const content_h = maru.chrome.components.sidebar.contentHeight(rr2, mm2);
-        const view_h = geom.sidebar.h -| sidebar_header_h;
-        const max_scroll: u32 = content_h -| view_h;
+        const max_scroll: u32 = snap_content_h -| snap_view_h;
         // **그린 자리와 누른 자리가 함께 틀리면 서로는 맞는다.** 그리기가 스크롤을 통째로 무시한
         // 뮤턴트가 그렇게 통과했다 — 둘 다 0 이면 일치한다. 그래서 **세 번째 눈**을 둔다: 중립
         // `rowTop` 이 말하는 그 카드의 y 와 우리가 실제로 그린 밴드 y 를 견준다. `rowTop` 은 우리
         // 누적을 안 쓰므로 그리기만 어긋나도 갈린다.
-        const want_band_y: i64 = @as(i64, geom.sidebar.y) +
-            maru.chrome.components.sidebar.rowTop(rr2, snap_first_visible, sidebar_header_h, mm2, snap_scroll_px);
+        const want_band_y: i64 = snap_want_band_y;
         const band_matches = @abs(@as(i64, snap_first_band_y) - want_band_y) <= 1;
         // **활성 표시가 옳은 카드에 있는가.** 창 좌표로 안 옮기면 굴린 뒤 엉뚱한 카드에 앰버 막대가
         // 선다 — 개수·자리 판정은 그것을 전혀 안 본다.
-        const want_active_y: i64 = @as(i64, geom.sidebar.y) +
-            maru.chrome.components.sidebar.rowTop(rr2, app_window.active_tab, sidebar_header_h, mm2, snap_scroll_px);
+        const want_active_y: i64 = snap_want_active_y;
         // **공허하지 않게 한다.** 활성 카드가 창 안이면 **반드시 그려져야** 하고 자리도 맞아야
         // 한다. 처음에는 `null` 이면 참으로 뒀는데, 활성 카드가 화면 밖이라 그 검사가 통째로
         // 건너뛰어졌다 — 앰버 막대를 엉뚱한 카드에 그리는 뮤턴트가 그대로 통과했다.
-        const active_in_window = app_window.active_tab >= snap_first_visible and
-            app_window.active_tab < snap_first_visible + snap_cards_visible;
+        // **`app_window.active_tab` 이 아니라 그때 그린 슬롯이다.** 파일이 활성이면 둘이 다르다.
+        const active_in_window = snap_active_slot >= snap_first_visible and
+            snap_active_slot < snap_first_visible + snap_cards_visible;
         const active_ok = if (active_in_window)
             snap_active_band_y != null and @abs(@as(i64, snap_active_band_y.?) - want_active_y) <= 1
         else
             snap_active_band_y == null;
-        try stdout.print("sidebar_scrolls={d} snap_scroll_px={d}/{d} first_visible={d} clicked_slot={?d} band_y={d} want_band_y={d} band_matches={} partial={d} active_ok={} over_header={d} sidebar_scroll_ok={}\n", .{
+        try stdout.print("sidebar_scrolls={d} snap_scroll_px={d}/{d} first_visible={d} clicked_slot={?d} band_y={d} want_band_y={d} band_matches={} partial={d} active_ok={} names_view={} over_header={d} sidebar_scroll_ok={}\n", .{
             sidebar_scrolls,
             snap_scroll_px,
             max_scroll,
@@ -7428,11 +7505,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             band_matches,
             snap_partial,
             active_ok,
+            snap_active_names_view,
             snap_over_header,
             sidebar_scrolls > 0 and snap_scroll_px > 0 and snap_scroll_px <= max_scroll and
                 sidebar_scroll_click_sent and sidebar_scroll_clicked_slot != null and
                 sidebar_scroll_clicked_slot.? == snap_first_visible and
-                band_matches and active_ok and snap_over_header == 0,
+                band_matches and active_ok and snap_active_names_view and snap_over_header == 0,
         });
     } else {
         try stdout.print("sidebar_scroll=unjudgeable reason=content_fits cards={d}\n", .{sidebar_cards.items.len});

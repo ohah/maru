@@ -127,7 +127,9 @@ pub fn parseAndBind(
 }
 
 fn validExpected(expected: Expected) bool {
-    return expected.id != 0 and identity.canonicalTag(expected.tag);
+    return expected.id != 0 and
+        expected.tag.len <= github_json.max_scalar_string_bytes and
+        identity.canonicalTag(expected.tag);
 }
 
 fn publicationMatches(value: ApiRelease, expected: Publication) bool {

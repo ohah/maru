@@ -2351,7 +2351,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   응답이 `immutable`을 생략해도 불변성을 추정하지 않는다.
   `test-session-host-release-adapter-github-release`가 두 상태, additive field, cap, malformed/missing/type/duplicate/trailing,
   zero/foreign/noncanonical identity, 상태 혼용과 allocation fail-index를 Debug·ReleaseFast에서 검증한다. `target_commitish`를 source
-  권위로 쓰지 않으며 exact tag ref→commit 해소는 별도 Git ref/tag API 판정자의 책임이다. 이 역시 component 의미 검증이며 실제 GitHub release/
+  권위로 쓰지 않는다. `release_adapter_github_git.zig`는 exact tag ref와 annotated-tag object의 각 한 hop을 lowercase 40-hex
+  self/target SHA 및 closed `commit|tag` kind로 파싱한다. 첫 annotated hop은 release tag name도 결속하고 후속 nested hop은 서로 다른
+  non-empty bounded name을 허용해 SHA 체인을 막지 않는다. `test-session-host-release-adapter-github-git`가 lightweight ref, annotated/nested
+  target, cap, malformed/missing/type/duplicate/trailing, foreign/noncanonical identity와 두 allocation path의 fail-index를
+  Debug·ReleaseFast에서 검증한다. traversal depth·cycle·최종 commit 결속 resolver와 API 호출은 아직 없다. 이 역시 component 의미 검증이며 실제 GitHub release/
   deployment API·codesign·DMG 결과의 의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의

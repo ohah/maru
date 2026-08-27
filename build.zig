@@ -10117,6 +10117,55 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_github_release_tests.step);
         test_step.dependOn(&run_github_release_tests.step);
     }
+    const session_host_release_adapter_github_git_step = b.step(
+        "test-session-host-release-adapter-github-git",
+        "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |github_git_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = github_git_optimize,
+        });
+        const github_git_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_git.zig"),
+            .target = target,
+            .optimize = github_git_optimize,
+            .imports = &.{
+                .{
+                    .name = "release_adapter_github_json",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+                        .target = target,
+                        .optimize = github_git_optimize,
+                        .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+                    }),
+                },
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = github_git_optimize,
+                    }),
+                },
+            },
+        });
+        const github_git_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_git.zig"),
+                .target = target,
+                .optimize = github_git_optimize,
+                .imports = &.{.{ .name = "release_adapter_github_git", .module = github_git_mod }},
+            }),
+        });
+        const run_github_git_tests = b.addRunArtifact(github_git_tests);
+        run_github_git_tests.addArg("--maru-expect-tests=7");
+        run_github_git_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_git_step.dependOn(&run_github_git_tests.step);
+        session_host_step.dependOn(&run_github_git_tests.step);
+        test_step.dependOn(&run_github_git_tests.step);
+    }
     const session_host_release_adapter_files_step = b.step(
         "test-session-host-release-adapter-files",
         "Validate session-host release adapter file authorities on macOS",

@@ -654,6 +654,16 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   full lowercase source commit으로 해소하는 Git ref/tag API 판정자가 그 책임을 별도로 소유한다.
   이 parser 역시 이미 획득한 bytes의 component 의미만 검증하며 transport나 executable authority를 증명하지 않는다.
 
+  Git ref와 annotated-tag 응답의 한 hop 의미 해석은 `release_adapter_github_git.zig`가 소유한다. ref 응답은 exact
+  `refs/tags/<canonical-tag>`와 object의 lowercase 40-hex SHA를 결속하고 object type을 `commit|tag`로 닫는다. annotated-tag
+  응답은 caller가 직전 hop에서 얻은 exact tag-object SHA를 self `sha`에 결속하고, 첫 hop에서는 release tag name도 self `tag`에
+  결속한 뒤 다음 `commit|tag` target을 typed하게 반환한다. 후속 nested hop은 서로 다른 non-empty bounded tag name을 허용하되 관측값으로
+  보존한다. additive API field는 허용하지만 consumed field의 missing·duplicate·wrong wire type,
+  unknown object type, uppercase/잘못된 길이 SHA는 거부한다. 근거는 GitHub REST API의
+  [Git Reference와 Git Tag schema](https://github.com/github/rest-api-description/blob/main/descriptions/api.github.com/api.github.com.yaml)다.
+  이 한 hop parser는 annotated-tag traversal의 최대 깊이·cycle 검출·최종 commit과 manifest source의 결속을 정하지 않는다.
+  그 resolver policy와 실제 API 호출 배선이 추가되기 전에는 source provenance가 완료됐다고 주장하지 않는다.
+
   ```text
   validate_release_manifest pre-publish \
     --repo ohah/maru \

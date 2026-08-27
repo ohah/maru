@@ -7,6 +7,7 @@ const std = @import("std");
 const release_manifest = @import("release_manifest");
 
 pub const max_response_bytes: usize = 64 * 1024;
+pub const max_scalar_string_bytes = release_manifest.max_scalar_string_bytes;
 
 pub const Error = error{
     ResponseTooLarge,
@@ -24,7 +25,7 @@ pub fn validateCompleteResponse(bytes: []const u8) Error!void {
         const token = scanner.nextAllocMax(
             fixed.allocator(),
             .alloc_if_needed,
-            release_manifest.max_scalar_string_bytes,
+            max_scalar_string_bytes,
         ) catch return error.InvalidJson;
         if (token == .end_of_document) {
             // The scanner reports a complete first root before guaranteeing that the input slice

@@ -312,6 +312,9 @@ pub const default_app_bindings = [_]AppBinding{
     // 모디파이어 정확 비교(셸 Ctrl+F[커서 전진]와 안 겹친다). Find 열림 동안엔 handleKeyEvent가 키를 검색 입력으로
     // 가로채 이 경로 안 탄다(Enter=다음 매치, Shift+Enter=이전, Esc=닫기).
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'F' } }, .action = .toggle_find },
+    // Cmd+Option+F: 찾기 + **바꾸기** 줄(§5.1 — VSCode·Xcode·TextEdit이 같은 자리다). ⌘F가 한 줄을
+    // 유지하는 대신 이 chord가 두 줄을 연다 — 평범한 찾기에서 오버레이가 본문을 더 가리지 않는다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'F' } }, .action = .toggle_find_replace },
     // Cmd+G/Cmd+Shift+G: Find 오버레이가 **닫혀 있어도** 보존된 검색어로 다음/이전 매치로 점프(macOS Find Next/
     // Previous 관례 — Safari/TextEdit 등). 'g'→'G' fold, 모디파이어 정확 비교(Shift 유무로 방향). Find가 열린
     // 동안엔 모달 라우팅이 ⌘+글자를 가로채 닫으므로(Enter로 네비) 이 바인딩은 닫힌 경우를 위한 것이다.

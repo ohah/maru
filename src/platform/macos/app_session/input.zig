@@ -203,7 +203,10 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
         .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
         .agent_session_search => self.agent_session_archive_search.setPreedit(self.allocator, bytes) catch {},
-        .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
+        // **조합은 포커스를 따라간다**(§5.1 — "두 입력 사이 포커스 이동과 IME 조합이 각각 독립").
+        // 검색어 칸에 고정하면 바꿀 문자열을 한글로 치는 동안 조합 글자가 **위 줄에 쌓인다**
+        // (적대적 검증 2026-08-27이 계약 문장을 근거로 잡았다).
+        .find => self.chrome_host.find.focused().setPreedit(self.allocator, bytes) catch {},
         .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
         // 커밋 상자 조합. **NFC 조합을 하지 않는다** — 주소창이 그것을 하는 이유는 codepoint당 셀
         // 하나로 그리기 때문이고(자모가 안 합쳐진다), 이 상자는 CoreText 셰이핑 경로라 NFD 자모도
@@ -236,7 +239,7 @@ pub fn imeComposingActive(self: *AppSession) bool {
         .rename => self.rename_input.preedit.items.len > 0,
         .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
         .agent_session_search => self.agent_session_archive_search.preedit.items.len > 0,
-        .find => self.chrome_host.find.input.preedit.items.len > 0,
+        .find => self.chrome_host.find.focused().preedit.items.len > 0,
         .palette => self.chrome_host.palette.input.preedit.items.len > 0,
         .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
         .scm_commit => self.scm_commit_field.preedit.items.len > 0,

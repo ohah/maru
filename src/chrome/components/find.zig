@@ -76,9 +76,22 @@ pub const Target = enum {
     editor,
 };
 
+/// 어느 입력줄이 키를 받는가. 바꾸기 줄이 열렸을 때만 의미가 있다.
+pub const Focus = enum { find, replace };
+
 pub const State = struct {
     open: bool = false,
     input: overlay_input.OverlayInput = .{},
+    /// **바꿀 문자열**(§5.1 — "입력 필드가 하나 더 필요하다"). 별도 `OverlayInput`이라 조합(IME)이
+    /// 검색어와 **독립**이다 — 하나를 공유하면 한글을 조합하다 Tab을 누를 때 조합 중인 글자가
+    /// 반대편 줄로 넘어간다.
+    replace: overlay_input.OverlayInput = .{},
+    /// 바꾸기 줄이 열렸는가. **`⌘F`는 한 줄 그대로다** — 늘 두 줄이면 평범한 찾기에서도 오버레이가
+    /// 본문을 두 줄 가리고, 매치를 화면 가운데 두는 계산(§5.1 reveal)도 함께 흔들린다.
+    /// `⌥⌘F`(macOS 관례)가 이것을 켠다.
+    replace_open: bool = false,
+    /// 키를 받는 줄. `replace_open`이 거짓이면 늘 `.find`다.
+    focus: Focus = .find,
     current: usize = 0,
     match_count: usize = 0,
     target: Target = .scrollback,
@@ -91,11 +104,31 @@ pub const State = struct {
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.input.deinit(allocator);
+        self.replace.deinit(allocator);
+    }
+
+    /// **바꾸기 줄이 지금 살아 있는가.** `replace_open`은 사용자의 *의도*이고, 이것은 그 의도가
+    /// 지금 대상에서 성립하는지다 — 바꾸기는 **편집기 문서에만** 있다(스크롤백·웹 페이지는 읽기
+    /// 전용이다). 둘을 안 가르면 터미널 pane에서 `⌥⌘F`가 **아무것도 못 하는 입력칸**을 띄우고,
+    /// 편집기에서 열어 둔 채 pane을 옮겨도 그 칸이 따라간다. 그 자리에서 Enter를 누르면 조용히
+    /// 아무 일도 일어나지 않는다 — §5.1이 피하려는 부류다(적대적 검증 2026-08-27).
+    pub fn replaceActive(self: *const State) bool {
+        return self.replace_open and self.target == .editor;
+    }
+
+    /// 지금 키를 받는 입력줄.
+    pub fn focused(self: *State) *overlay_input.OverlayInput {
+        return if (self.replaceActive() and self.focus == .replace) &self.replace else &self.input;
     }
 
     /// 오버레이를 연다 — 검색어·조합·네비·카운트를 비운다(host가 곧 recompute, 빈 쿼리면 매치 0이라 안전).
     pub fn show(self: *State) void {
         self.input.clear();
+        // **바꿀 문자열도 비운다.** 남겨 두면 새로 연 찾기에서 Enter 한 번이 **지난번 문자열로**
+        // 바꾼다 — 보이지 않는 상태가 파괴적 편집을 하는 자리다.
+        self.replace.clear();
+        self.replace_open = false;
+        self.focus = .find;
         self.current = 0;
         self.match_count = 0;
         self.page_found = null; // 지난 검색의 찾음/없음이 새로 연 창에 남지 않게(target은 session이 tick에 세운다)
@@ -131,6 +164,12 @@ pub const Action = enum {
     close, // Esc / ⌘·⌃·⌥+글자 / 알 수 없는 키 — 닫기(host가 매치 정리)
     navigated, // Enter/Shift+Enter/↑↓ — current 갱신(host가 현재 매치로 스크롤)
     query_changed, // 글자/Backspace — 검색어 갱신(host가 재검색)
+    /// 바꿀 문자열만 바뀌었다 — **재검색하지 않는다**(검색어가 그대로다).
+    replace_text_changed,
+    /// 포커스가 옮겨졌다(Tab) — host는 caret 위치만 다시 그리면 된다.
+    focus_moved,
+    replace_one, // 바꾸기 줄에서 Enter — 현재 매치 하나를 바꾼다
+    replace_all, // ⌘Enter — 전부 바꾼다(undo 하나)
 };
 
 /// 키 처리(열려 있을 때만 호출 — host가 open 확인 후 디스패치). 모든 키를 소비하고 intent를 낸다(모달이라 뒤
@@ -143,6 +182,12 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
             return .close;
         },
         .enter => {
+            // **⌘Enter는 전부 바꾸기다** — 어느 줄에 서 있든. 되돌리기 하나로 풀리므로(§3.3)
+            // 실수해도 한 번에 되돌아간다.
+            if (state.replaceActive() and k.mods.command) return .replace_all;
+            // **바꾸기 줄의 Enter는 바꾸기다.** 그 줄에 서서 Enter를 눌렀을 때 네비게이션이 일어나면
+            // 사용자는 바꾼 줄 알고 지나친다(VSCode도 이 자리에서 바꾼다).
+            if (state.replaceActive() and state.focus == .replace and !k.mods.shift) return .replace_one;
             state.nav_forward = !k.mods.shift;
             if (k.mods.shift) state.prev() else state.next();
             return .navigated;
@@ -158,8 +203,8 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
             return .navigated;
         },
         .backspace => {
-            state.input.backspace();
-            return .query_changed;
+            state.focused().backspace();
+            return if (state.replaceActive() and state.focus == .replace) .replace_text_changed else .query_changed;
         },
         .char => {
             // 모디파이어 조합(⌘F 토글-닫기·⌘C 등)은 검색어에 안 쌓고 닫는다(평문 글자만 입력).
@@ -167,12 +212,22 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
                 state.hide();
                 return .close;
             }
-            state.input.appendChar(allocator, k.codepoint) catch {};
-            return .query_changed;
+            state.focused().appendChar(allocator, k.codepoint) catch {};
+            return if (state.replaceActive() and state.focus == .replace) .replace_text_changed else .query_changed;
         },
-        // left/right(가로 화살표)·tab은 Find 입력줄에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 — 예전엔
+        // **Tab은 바꾸기 줄이 열렸을 때만 뜻이 있다** — 두 입력을 오간다(§5.1). 안 열렸으면 예전처럼
+        // 닫는다: 한 줄짜리 오버레이에서 Tab이 갈 곳이 없다.
+        .tab => {
+            if (!state.replaceActive()) {
+                state.hide();
+                return .close;
+            }
+            state.focus = if (state.focus == .find) .replace else .find;
+            return .focus_moved;
+        },
+        // left/right(가로 화살표)는 Find 입력줄에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 — 예전엔
         // arrow_left/right·tab이 chrome .other로 매핑돼 같은 경로였다).
-        .left, .right, .tab, .other => {
+        .left, .right, .other => {
             state.hide();
             return .close;
         },
@@ -189,9 +244,16 @@ pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     const lay = overlay_input.findLayout(p) orelse return null;
     // caret 위치는 view의 tail 창 배치와 **같은 단일 출처**(inputLineView)에서 얻는다 — 검색어가 텍스트 영역을 넘치면
     // caret은 창 오른쪽 끝(= query 끝)으로 오고, 넘치지 않으면 prompt_cols+queryCols(기존과 동일). 조합 글자는 그 위에 겹친다.
-    const line = overlay_input.inputLineView(&state.input, prompt_cols, textCols(state, lay.panel_cols));
+    // **caret은 포커스를 따라간다.** 안 따라가면 바꿀 문자열을 치는 동안 커서가 위 줄에서 깜빡이고,
+    // IME 후보창(imeCursorRect가 같은 값을 쓴다)도 엉뚱한 줄에 뜬다.
+    const on_replace = state.replaceActive() and state.focus == .replace;
+    const line = if (on_replace)
+        overlay_input.inputLineView(&state.replace, prompt_cols, lay.panel_cols)
+    else
+        overlay_input.inputLineView(&state.input, prompt_cols, textCols(state, lay.panel_cols));
     if (line.caret_col >= lay.panel_cols) return null; // 패널 밖(극단 좁음)
-    return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
+    const cy = lay.y + if (on_replace) @as(i32, @intCast(lay.ch)) else 0;
+    return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = cy, .w = lay.cw, .h = lay.ch };
 }
 
 /// **활성 pane 우상단**(findLayout) 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query><조합중>" + 우측 정렬
@@ -211,7 +273,10 @@ pub fn view(
     const panel_w = lay.panel_cols * cw;
     const x = lay.x;
     const y = lay.y;
-    const rect = draw.Rect{ .x = x, .y = y, .w = panel_w, .h = lay.ch };
+    // **바꾸기 줄이 열리면 패널이 두 줄이다.** 안 열렸으면 예전 그대로 한 줄 — 평범한 찾기의
+    // 배치를 건드리지 않는 것이 `replace_open`을 둔 이유다.
+    const rows: u32 = if (state.replaceActive()) 2 else 1;
+    const rect = draw.Rect{ .x = x, .y = y, .w = panel_w, .h = lay.ch * rows };
 
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
@@ -240,6 +305,15 @@ pub fn view(
             const cx = x + @as(i32, @intCast((lay.panel_cols - counter_cols - 1) * cw));
             try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = counter_runs, .role = .surface_fg } });
         }
+    }
+
+    // **바꿀 문자열 줄.** 프롬프트 폭을 검색어 줄과 **같게** 맞춘다("Find: "/"Repl: " 둘 다 6칸) —
+    // 다르면 두 입력이 세로로 안 맞아 눈이 줄을 잃는다. 카운터는 이 줄에 없다(매치 수는 검색어의 성질이다).
+    if (state.replaceActive()) {
+        const ry = y + @as(i32, @intCast(lay.ch));
+        const rline = overlay_input.inputLineView(&state.replace, prompt_cols, lay.panel_cols);
+        const rruns = try overlay_input.promptRuns(arena, "Repl: ", rline);
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = ry }, .runs = rruns, .role = .surface_fg } });
     }
 
     // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor role fill 1칸(caretRect 단일 출처). platform rasterizer가
@@ -351,6 +425,117 @@ test "find view: 닫힘이면 ops 0, 열림이면 fill+prompt+counter+caret" {
     try std.testing.expectEqual(@as(u32, 8), out.items[3].fill.rect.w); // 1칸
     // 패널은 사이드바 오른쪽(active_pane 미설정 → 창 전체 우상단 폴백).
     try std.testing.expect(out.items[0].quad.rect.x >= 40);
+}
+
+test "FR1 바꾸기 줄: 패널이 두 줄이 되고 두 번째 줄과 caret이 그려진다 (§5.1)" {
+    // **그리지 않으면 사용자는 무엇을 치는지 못 본다.** 상태만 세우고 view를 안 고치면 키 판정자는
+    // 전부 초록인데 화면에는 아무것도 없다 — 이 저장소가 반복해 당한 모양의 렌더판이다.
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 40,
+        .backing_width_px = 800,
+        .backing_height_px = 600,
+    } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    s.target = .editor;
+
+    // ⑴ 바꾸기 줄이 닫혀 있으면 **한 줄**이다 — 평범한 찾기의 배치를 안 건드린다.
+    var one: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena, &one);
+    const lay = overlay_input.findLayout(p).?;
+    var one_h: u32 = 0;
+    for (one.items) |op| if (op == .quad) {
+        one_h = op.quad.rect.h;
+    };
+    try std.testing.expectEqual(lay.ch, one_h);
+
+    // ⑵ 열면 **두 줄**이고, 두 번째 줄에 "Repl: " 프롬프트가 선다.
+    s.replace_open = true;
+    s.focus = .replace;
+    try s.replace.appendChar(std.testing.allocator, 'Z');
+    var two: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena, &two);
+    var two_h: u32 = 0;
+    var saw_repl = false;
+    for (two.items) |op| switch (op) {
+        .quad => two_h = op.quad.rect.h,
+        .text => for (op.text.runs) |r| {
+            if (std.mem.indexOf(u8, r.text, "Repl") != null) saw_repl = true;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(lay.ch * 2, two_h);
+    try std.testing.expect(saw_repl);
+
+    // ⑶ **caret이 두 번째 줄로 내려간다.** 안 내려가면 바꿀 문자열을 치는 동안 커서가 위에서
+    // 깜빡이고, 같은 값을 쓰는 IME 후보창도 엉뚱한 줄에 뜬다.
+    const cr = caretRect(&s, p).?;
+    try std.testing.expectEqual(lay.y + @as(i32, @intCast(lay.ch)), cr.y);
+
+    // ⑷ 포커스를 되돌리면 caret도 첫 줄로 돌아온다.
+    s.focus = .find;
+    const cr2 = caretRect(&s, p).?;
+    try std.testing.expectEqual(lay.y, cr2.y);
+}
+
+test "FR3 바꾸기 줄은 편집기 대상에서만 산다 (§5.1)" {
+    // **터미널·웹은 읽기 전용이다.** 거기서 바꾸기 칸을 띄우면 Enter가 조용히 아무 일도 안 한다 —
+    // §5.1이 피하려는 바로 그 부류다. `replace_open`은 사용자의 의도이고, 그 의도가 지금 대상에서
+    // 성립하는지는 따로 물어야 한다(편집기에서 열어 둔 채 pane을 옮기는 경우까지 같은 문이다).
+    const allocator = std.testing.allocator;
+    var s: State = .{};
+    defer s.deinit(allocator);
+    s.show();
+    s.replace_open = true;
+    s.focus = .replace;
+
+    // ⑴ 스크롤백이면 죽어 있다 — 키도 예전 그대로다(Tab은 닫기, Enter는 네비게이션).
+    s.target = .scrollback;
+    try std.testing.expect(!s.replaceActive());
+    try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .tab, .mods = .{} }, &s));
+    s.open = true;
+    s.setMatchCount(2);
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .enter, .mods = .{} }, &s));
+    try std.testing.expectEqual(Action.navigated, handle(allocator, .{ .key = .enter, .mods = .{ .command = true } }, &s));
+
+    // ⑵ **글자는 검색어로 간다** — 죽은 칸에 쌓여 보이지도 않는 상태가 되면 안 된다.
+    _ = handle(allocator, .{ .key = .char, .codepoint = 'q' }, &s);
+    try std.testing.expectEqual(@as(usize, 1), s.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 0), s.replace.query.items.len);
+
+    // ⑶ 편집기면 살아난다.
+    s.target = .editor;
+    try std.testing.expect(s.replaceActive());
+    try std.testing.expectEqual(Action.replace_one, handle(allocator, .{ .key = .enter, .mods = .{} }, &s));
+    try std.testing.expectEqual(Action.replace_all, handle(allocator, .{ .key = .enter, .mods = .{ .command = true } }, &s));
+    try std.testing.expectEqual(Action.focus_moved, handle(allocator, .{ .key = .tab, .mods = .{} }, &s));
+}
+
+test "FR2 새로 연 찾기는 지난 바꿀 문자열을 물려받지 않는다 (§5.1)" {
+    // **보이지 않는 상태가 파괴적 편집을 하는 자리다.** 남겨 두면 새로 연 창에서 Enter 한 번이
+    // 지난번 문자열로 바꾼다.
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    s.replace_open = true;
+    s.focus = .replace;
+    try s.replace.appendChar(std.testing.allocator, 'X');
+    try std.testing.expectEqual(@as(usize, 1), s.replace.query.items.len);
+
+    s.hide();
+    s.show();
+    try std.testing.expectEqual(@as(usize, 0), s.replace.query.items.len);
+    try std.testing.expect(!s.replace_open);
+    try std.testing.expectEqual(Focus.find, s.focus);
 }
 
 test "find view: 활성 pane 우상단에 패널 — pane rect 기준 우측 정렬(왼쪽 pane 안 침범)" {

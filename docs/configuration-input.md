@@ -78,7 +78,10 @@ keybind = F4 = esc:[2J
   폰트 크기 `increase_font_size`·`decrease_font_size`(보폭 고정 1pt)·`reset_font_size`·`set_font_size:N`
   (N=절대 pt, 6~72로 클램프 — 예: `Ctrl+Cmd+1 = set_font_size:14`로 크기 프리셋), 그리고 `select_all`·
   `clear_screen`(화면+스크롤백 비우기, 빌트인 ⌘K — alt 화면 무동작, 셸 프롬프트면 ^L로 재그림. 자세히는
-  [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`find_next`·
+  [키 입력과 단축키](key-input-and-shortcuts.md))·`toggle_find`·`toggle_find_replace`
+  (찾기를 **바꾸기 줄과 함께** 연다 — 빌트인 `⌥⌘F`. 이미 열려 있으면 닫지 않고 바꾸기 줄만 켜므로
+  `⌘F`로 친 검색어가 살아 있다. 바꾸기는 **편집기 문서에서만** 동작한다 — 스크롤백·웹 페이지는
+  읽기 전용이라 그 대상에서는 줄이 뜨지 않는다)·`find_next`·
   `find_previous`·`toggle_command_palette`·`toggle_settings`(세팅 화면 ⌘,)·`reset_settings`
   (설정을 기본값으로 되돌리는 통합 리셋 — 커맨드 팝업 "Reset All Settings to Defaults". 단
   `session.keep-alive-after-quit`은 위 소유권 예외대로 현재 값을 보존·materialize하고, 나머지 config 파일의

@@ -9902,6 +9902,31 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_manifest_tests.step);
         test_step.dependOn(&run_release_manifest_tests.step);
     }
+    const session_host_release_adapter_contract_step = b.step(
+        "test-session-host-release-adapter-contract",
+        "Validate the closed session-host release adapter CLI contract",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |adapter_optimize| {
+        const release_adapter_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"),
+            .target = target,
+            .optimize = adapter_optimize,
+        });
+        const release_adapter_contract_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_contract.zig"),
+                .target = target,
+                .optimize = adapter_optimize,
+                .imports = &.{.{ .name = "release_adapter", .module = release_adapter_mod }},
+            }),
+        });
+        const run_release_adapter_contract_tests = b.addRunArtifact(release_adapter_contract_tests);
+        run_release_adapter_contract_tests.addArg("--maru-expect-tests=8");
+        run_release_adapter_contract_tests.setCwd(b.path("."));
+        session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
+        session_host_step.dependOn(&run_release_adapter_contract_tests.step);
+        test_step.dependOn(&run_release_adapter_contract_tests.step);
+    }
     const workspace_checkpoint_step = b.step(
         "test-workspace-checkpoint-coordinator",
         "P4 C1 pure workspace checkpoint generation and Quit ordering gates",

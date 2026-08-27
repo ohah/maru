@@ -2323,8 +2323,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   release publication typed policy는 trusted tag/protected environment, pinned Action, no-clobber, immutable B predecessor,
   manifest exact-one+열거 asset exact-set과 attestation→draft→evidence→manifest→재다운로드→publish→release attestation
   exact 순서를 fail-close한다. `test-session-host-release-manifest`가 이를 Debug·ReleaseFast에서 검증한다. 다만 GitHub
-  API·codesign·DMG를 실행해 typed
-  observation을 만드는 executable adapter와 release workflow 배선은 아직 없으므로 외부 release 검증은 후속 슬라이스가
+  API·codesign·DMG를 실행해 typed observation을 만드는 executable adapter의 선행 계약은
+  `release_adapter_contract.zig`가 allocation-free `pre-publish`·`verify-predecessor` command, phase별 exact option,
+  canonical manifest asset 이름, repository/tag, `release` protected environment와 summary schema를 닫고 observation JSON 입력을
+  금지하며 `test-session-host-release-adapter-contract`가 Debug·ReleaseFast에서 검증한다. 그러나 실제 GitHub API·codesign·DMG
+  실행과 filesystem no-follow 검증, summary 생성, release workflow 배선은 아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte
   equality는 연결됐고 release workflow의 third-party Action은 exact SHA로 고정했으며 임의 ref를 고를 수 있는 수동 실행은

@@ -583,6 +583,10 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   manifest 파일 자체는 `assets[]`에 넣지 않는다. 자기 digest를 자기 bytes 안에 넣는 순환을 만들지 않고, trusted workflow가
   canonical manifest bytes를 별도 필수 Release asset으로 첨부한 뒤 그 bytes를 subject로 한 artifact attestation을 발급한다.
+  그 asset의 exact 이름은 `Maru-<version>-session-host-release.json`이다. `<version>`은 manifest의
+  `release.version`과 repository version SSOT의 canonical 세 요소이고, release tag는 exact `v<version>`이다. 고정 이름이나
+  tag에서만 유도한 이름을 허용하지 않는다. 따라서 다른 release의 manifest를 같은 draft에 끼워 넣거나 predecessor tag와
+  manifest version을 갈아 끼우는 경우 이름·내용·tag 교차검증에서 모두 실패한다.
   다음 release는 predecessor release에서 이 manifest asset을 exact 이름으로 내려받아 SHA-256과 attestation subject를 먼저
   검증한 뒤에만 내부 `assets[]`를 해석한다. manifest asset 누락·복수·이름 불일치도 publication/consumption 실패다.
 
@@ -599,6 +603,39 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   SHA/size/signature/compatibility/attestation mismatch와 allocation fail-index에서 publication 0을 Debug·ReleaseFast로 검증한다.
   별도 workflow contract fixture는 draft 생성 전 publish, evidence 전 manifest 생성, 누락 asset, mutable A, `--clobber`, 임의 ref와
   unpinned third-party action을 거부한다.
+
+  adapter CLI는 다음 두 command만 허용한다. 모든 option은 exact 1회이며 순서는 자유지만 unknown/duplicate/missing option,
+  positional argument, 빈 값, symlink/non-regular input, 기존 output을 거부한다. artifact path는 CLI가 받고 GitHub identity를
+  caller가 문자열로 주입하지 않는다. repository ID·owner/name, tag/ref, source SHA, workflow ref, run ID/attempt, event 종류는
+  표준 `GITHUB_*` context와 GitHub API/attestation 결과를 서로 교차검증한다.
+
+  ```text
+  validate_release_manifest pre-publish \
+    --repo ohah/maru \
+    --tag v<version> \
+    --manifest <canonical-manifest-path> \
+    --evidence <evidence-summary-path> \
+    --dmg <universal-dmg-path> \
+    --frozen-executable <extracted-product-executable-path> \
+    --summary-out <new-summary-path>
+
+  validate_release_manifest verify-predecessor \
+    --repo ohah/maru \
+    --tag v<version> \
+    --manifest <downloaded-predecessor-manifest-path> \
+    --work-dir <new-empty-directory> \
+    --summary-out <new-summary-path>
+  ```
+
+  `pre-publish`는 current draft와 local candidate bytes를 검사하고 publish하지 않는다. `verify-predecessor`는 이미 published인 exact
+  predecessor에서 manifest가 열거한 asset을 새 `work-dir`로 내려받아 `gh release verify`와 각 파일의
+  `gh release verify-asset`까지 검사하고 release를 수정하지 않는다. 둘 다 성공 시 stdout이 아니라 `--summary-out`에
+  `maru.session-host-release-validation.v1` bounded canonical JSON 하나를 원자적으로 만들며, 실패 시 output 0이다. summary는
+  audit 결과일 뿐 다음 command의 권위 입력이 아니다. 별도 observation JSON input 포맷을 만들지 않는다.
+
+  signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
+  신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub
+  API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.
 
   A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
   default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과

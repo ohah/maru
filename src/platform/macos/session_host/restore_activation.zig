@@ -206,9 +206,11 @@ fn activateValidated(
     );
 
     var gate = upgrade.AdmissionGate.initClosed(io);
-    // restore 로 살아나는 host 도 socket 을 여기서 만든다 — `daemon.zig` 의 bind 자리와 같은 뿌리여야 한다.
-    var socket_dir_buf: [272]u8 = undefined;
-    const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
+    var socket_dir_buf: [112]u8 = undefined;
+    const socket_dir = try short_endpoint.socketDirPathIn(
+        &socket_dir_buf,
+        c.getuid(),
+    );
     const socket_path = try allocator.dupeZ(u8, invocation.socket_path);
     defer allocator.free(socket_path);
     var server = try socket_server.SocketServer.bind(

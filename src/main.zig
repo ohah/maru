@@ -4393,6 +4393,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var editor_build_failures: usize = 0;
     var editor_scrolls: usize = 0;
     var editor_clamps: usize = 0;
+    var editor_atlas_growths: usize = 0;
     var editor_cells_outside_last: usize = 0;
     var editor_cells_outside_max: usize = 0;
     var editor_last_digest: u64 = 0;
@@ -7151,6 +7152,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 파일이 활성이면 **그 사각형에 편집기가 선다.** 터미널 셀은 아예 안 넣는다 — 겹쳐 그리면
         // 두 화면이 포개져 글자가 서로를 뚫고 나온다.
         var editor_cells_drawn: usize = 0;
+        // **편집기가 아틀라스를 키우면 그 신호가 사라진다.** 이 루프의 ⑴ 은 `atlas_w/h` 가 바뀐 것을
+        // 보고 도크를 다시 짓는데, 편집기 프레임은 `syncAtlasTexture` 를 스스로 불러 그 값을 **먼저**
+        // 갱신한다 — 다음 프레임의 ⑴ 은 아무 변화도 못 본다. 그러면 사이드바·도크는 옛 아틀라스
+        // 기준 UV 를 **영영** 들고 있게 된다(상태바가 겪은 그 실패: 이름이 `fea` 세 글자만 남았다).
+        //
+        // **못 밀었다.** 이 작업부하에서는 아틀라스가 안 커진다(256×256 으로 줄여도 `resizes=0` —
+        // 축출·재사용으로 끝난다). 기전은 코드로 확실하므로 좁게 막고, 판정은 **지어내지 않는다**.
+        const atlas_before_w = atlas_w;
+        const atlas_before_h = atlas_h;
         const showing_file = active_view == .file and active_view.file < open_files.items.len;
         const term_first = cells.items.len;
         if (showing_file) {
@@ -7199,6 +7209,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 editor_cells_outside_max = @max(editor_cells_outside_max, out_n);
                 editor_frames += 1;
             } else |_| editor_build_failures += 1;
+            if (atlas_w != atlas_before_w or atlas_h != atlas_before_h) {
+                editor_atlas_growths += 1;
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+            }
         } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
         // 폭을 가로지르고 `y=0` 에서 시작하므로 **두 판정이 영원히 0 이 아니게 되어 죽는다**
@@ -7501,6 +7516,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             editor_cells_outside_max,
             editor_cells_outside_max == 0,
         });
+        // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
+        try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
     }
     if (oob_judgeable) {
         // **되돌아온 것만으로는 모자란다** — 0 으로 되돌려도 "되돌아왔다" 이다. **행을 그렸는지**를

@@ -4,16 +4,12 @@
 //! 검증을 통과하고 current requirement가 Apple certificate/team을 포함하며 exact requirement가 같아야 한다.
 
 const std = @import("std");
-const c = std.c;
-const posix = std.posix;
+const bounded_process = @import("bounded_process.zig");
 const upgrade_target = @import("upgrade_target.zig");
-
-extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 const codesign_path: [:0]const u8 = "/usr/bin/codesign";
 const capture_cap: usize = 16 * 1024;
 const timeout_ns: i128 = 2 * std.time.ns_per_s;
-const poll_quantum_ms: c_int = 50;
 
 pub const Authorizer = struct {
     io: std.Io,
@@ -62,7 +58,8 @@ fn verify(io: std.Io, path: [:0]const u8) bool {
         "--verbose=0",
         path.ptr,
     };
-    return runCapture(io, codesign_path, &argv, &output, timeout_ns) != null;
+    _ = bounded_process.runCapture(io, codesign_path, &argv, &output, timeout_ns) catch return false;
+    return true;
 }
 
 fn requirement(io: std.Io, path: [:0]const u8, output: *[capture_cap]u8) ?[]const u8 {
@@ -73,123 +70,7 @@ fn requirement(io: std.Io, path: [:0]const u8, output: *[capture_cap]u8) ?[]cons
         "--verbose=0",
         path.ptr,
     };
-    return runCapture(io, codesign_path, &argv, output, timeout_ns);
-}
-
-fn runCapture(
-    io: std.Io,
-    executable: [:0]const u8,
-    argv: [*:null]const ?[*:0]const u8,
-    output: *[capture_cap]u8,
-    budget_ns: i128,
-) ?[]const u8 {
-    if (budget_ns <= 0) return null;
-    var pipe_fds: [2]c.fd_t = undefined;
-    if (c.pipe(&pipe_fds) != 0) return null;
-    if (!setCloseOnExec(pipe_fds[0]) or !setCloseOnExec(pipe_fds[1])) {
-        _ = c.close(pipe_fds[0]);
-        _ = c.close(pipe_fds[1]);
-        return null;
-    }
-    const pid = c.fork();
-    if (pid < 0) {
-        _ = c.close(pipe_fds[0]);
-        _ = c.close(pipe_fds[1]);
-        return null;
-    }
-    if (pid == 0) {
-        if (c.dup2(pipe_fds[1], 1) < 0 or c.dup2(pipe_fds[1], 2) < 0) c._exit(126);
-        _ = c.close(pipe_fds[0]);
-        _ = c.close(pipe_fds[1]);
-        _ = execv(executable.ptr, argv);
-        c._exit(126);
-    }
-    _ = c.close(pipe_fds[1]);
-    var used: usize = 0;
-    var eof = false;
-    var child_reaped = false;
-    var status: c_int = undefined;
-    const start = std.Io.Clock.awake.now(io).nanoseconds;
-    const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
-    var valid = true;
-    while (!(eof and child_reaped)) {
-        if (!child_reaped) switch (pollChild(pid, &status)) {
-            .running => {},
-            .reaped => child_reaped = true,
-            .failed => {
-                valid = false;
-                break;
-            },
-        };
-        if (eof and child_reaped) break;
-        const now = std.Io.Clock.awake.now(io).nanoseconds;
-        if (now >= deadline) {
-            valid = false;
-            break;
-        }
-        const remaining_ms = @divTrunc(deadline - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
-        const wait_ms: c_int = @intCast(@min(remaining_ms, poll_quantum_ms));
-        var fds = [_]c.pollfd{.{
-            .fd = if (eof) -1 else pipe_fds[0],
-            .events = c.POLL.IN,
-            .revents = 0,
-        }};
-        const rc = c.poll(&fds, if (eof) 0 else 1, wait_ms);
-        if (rc < 0) {
-            if (posix.errno(rc) == .INTR) continue;
-            valid = false;
-            break;
-        }
-        if (rc == 0 or eof) continue;
-        if (fds[0].revents & (c.POLL.IN | c.POLL.HUP) == 0) break;
-        if (used == output.len) {
-            valid = false;
-            break;
-        }
-        const count = c.read(pipe_fds[0], output.ptr + used, output.len - used);
-        if (count < 0) {
-            if (posix.errno(count) == .INTR) continue;
-            valid = false;
-            break;
-        }
-        if (count == 0) {
-            eof = true;
-            continue;
-        }
-        used += @intCast(count);
-    }
-    _ = c.close(pipe_fds[0]);
-    if (!child_reaped) {
-        _ = c.kill(pid, c.SIG.KILL);
-        if (!reapChild(pid, &status)) return null;
-        child_reaped = true;
-    }
-    if (!valid or !eof or !child_reaped or status != 0) return null;
-    return output[0..used];
-}
-
-fn setCloseOnExec(fd: c.fd_t) bool {
-    const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
-    return flags >= 0 and c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC) == 0;
-}
-
-const ChildPoll = enum { running, reaped, failed };
-
-fn pollChild(pid: c.pid_t, status: *c_int) ChildPoll {
-    while (true) {
-        const rc = c.waitpid(pid, status, c.W.NOHANG);
-        if (rc == pid) return .reaped;
-        if (rc == 0) return .running;
-        if (posix.errno(rc) != .INTR) return .failed;
-    }
-}
-
-fn reapChild(pid: c.pid_t, status: *c_int) bool {
-    while (true) {
-        const rc = c.waitpid(pid, status, 0);
-        if (rc == pid) return true;
-        if (rc >= 0 or posix.errno(rc) != .INTR) return false;
-    }
+    return bounded_process.runCapture(io, codesign_path, &argv, output, timeout_ns) catch null;
 }
 
 fn requirementLine(output: []const u8) ?[]const u8 {
@@ -219,7 +100,7 @@ test "code signature requirement parser accepts only Apple team-designated lines
     try std.testing.expect(requirementLine("Executable=/tmp/no-requirement") == null);
 }
 
-test "code signature child runner captures output and enforces monotonic timeout after pipe EOF" {
+test "code signature uses the shared bounded child runner" {
     var output: [capture_cap]u8 = undefined;
     const shell: [:0]const u8 = "/bin/sh";
     const success = [_:null]?[*:0]const u8{
@@ -229,7 +110,7 @@ test "code signature child runner captures output and enforces monotonic timeout
     };
     try std.testing.expectEqualStrings(
         "ok",
-        runCapture(std.testing.io, shell, &success, &output, std.time.ns_per_s).?,
+        try bounded_process.runCapture(std.testing.io, shell, &success, &output, std.time.ns_per_s),
     );
 
     const hangs_after_eof = [_:null]?[*:0]const u8{
@@ -238,8 +119,9 @@ test "code signature child runner captures output and enforces monotonic timeout
         "exec 1>&- 2>&-; exec /bin/sleep 10",
     };
     const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-    try std.testing.expect(
-        runCapture(std.testing.io, shell, &hangs_after_eof, &output, 50 * std.time.ns_per_ms) == null,
+    try std.testing.expectError(
+        error.TimedOut,
+        bounded_process.runCapture(std.testing.io, shell, &hangs_after_eof, &output, 50 * std.time.ns_per_ms),
     );
     const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
     try std.testing.expect(elapsed >= 30 * std.time.ns_per_ms);

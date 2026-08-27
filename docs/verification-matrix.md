@@ -2330,7 +2330,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   path component와 final을 `openat(O_NOFOLLOW)`로 열어 regular/bounded bytes·SHA-256·device/inode를 같은 fd에서 만들고 input
   hardlink alias를 거부한다. summary는 0600 temp complete write·fsync·close 뒤 `RENAME_EXCL`로 absent final에만 게시하며 predecessor
   work-dir도 absent leaf에만 0700으로 만든다. `test-session-host-release-adapter-files`가 이를 Debug·ReleaseFast 실제 filesystem에서
-  검증한다. 그러나 실제 GitHub API·codesign·DMG 실행, typed observation 조립, canonical summary encoding, release workflow 배선은
+  검증한다. release adapter가 사용할 macOS 외부 명령 leaf는 `bounded_process.zig` 한 곳에서 absolute exec, stdin `/dev/null`,
+  merged output exact cap, exit 0+EOF, monotonic timeout과 process-group kill/direct-child reap을 소유하고 기존 upgrade codesign이 먼저
+  재사용하며, `test-session-host-bounded-process`가 Debug·ReleaseFast 실제 process로 검증한다. 그러나 release adapter executable
+  배선과 실제 GitHub API·codesign·DMG 결과의
+  의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte

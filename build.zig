@@ -9960,6 +9960,31 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_adapter_files_tests.step);
         test_step.dependOn(&run_release_adapter_files_tests.step);
     };
+    const session_host_bounded_process_step = b.step(
+        "test-session-host-bounded-process",
+        "Validate the shared bounded macOS child-process capture authority",
+    );
+    if (macos_host_tests) for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |process_optimize| {
+        const bounded_process_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+            .target = target,
+            .optimize = process_optimize,
+        });
+        const bounded_process_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_bounded_process.zig"),
+                .target = target,
+                .optimize = process_optimize,
+                .imports = &.{.{ .name = "bounded_process", .module = bounded_process_mod }},
+            }),
+        });
+        const run_bounded_process_tests = b.addRunArtifact(bounded_process_tests);
+        run_bounded_process_tests.addArg("--maru-expect-tests=4");
+        run_bounded_process_tests.setCwd(b.path("."));
+        session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
+        session_host_step.dependOn(&run_bounded_process_tests.step);
+        test_step.dependOn(&run_bounded_process_tests.step);
+    };
     const workspace_checkpoint_step = b.step(
         "test-workspace-checkpoint-coordinator",
         "P4 C1 pure workspace checkpoint generation and Quit ordering gates",

@@ -665,7 +665,7 @@ pub fn main(init: std.process.Init) !void {
     // 도크의 캡처는 **글자가 하나도 안 잘린 그림**이었고, 제품도 같은 배선이 빠져 있었다(2026-08-25).
     const scroll_clip: ?renderer.metal_frame.ClipPx = blk: {
         const rect = (switch (scenario_id) {
-            .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
+            .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
             else => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
@@ -895,6 +895,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-diff")) return .editor_diff;
     if (std.mem.eql(u8, raw, "editor-diff-scrolled")) return .editor_diff_scrolled;
     if (std.mem.eql(u8, raw, "scm-rows")) return .scm_rows;
+    if (std.mem.eql(u8, raw, "scm-history")) return .scm_history;
     if (std.mem.eql(u8, raw, "scm-row-hover")) return .scm_row_hover;
     if (std.mem.eql(u8, raw, "scm-repo-hover")) return .scm_repo_hover;
     if (std.mem.eql(u8, raw, "scm-scrolled")) return .scm_scrolled;
@@ -914,6 +915,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
 fn artifactName(id: lab.ScenarioId) []const u8 {
     return switch (id) {
         .scm_rows => "scm-rows",
+        .scm_history => "scm-history",
         .scm_row_hover => "scm-row-hover",
         .scm_repo_hover => "scm-repo-hover",
         .scm_scrolled => "scm-scrolled",

@@ -131,18 +131,28 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
         // 제목·작성자·시각·해시·ref 칩·`+N` 접힘 — 여섯.
         .commit => |commit| {
             text_ops += 6;
+            // 위 구분선 + 선택 막대 + ref 칩의 면 — 셋. **줄마다 잡는다**: 어느 줄이 고른 줄인지·칩을
+            // 갖는지는 이 예산 함수가 다시 판정할 일이 아니고, 모자라면 그 프레임이 통째로 버려진다.
+            quad_extra += 3;
             bytes += commit.subject.len + commit.author.len + commit.when.len + commit.short_oid.len + commit.ref.len;
             bytes += 8; // `+N` 접힘 표시(§3.5.3) — 자릿수가 늘어도 담기게 넉넉히 잡는다
         },
         // 제목·에이전트·시각 — 셋.
         .turn => |turn| {
             text_ops += 3;
+            quad_extra += 2; // 위 구분선 + 선택 막대(커밋 줄과 같은 규율)
             bytes += turn.title.len + turn.agent.len + turn.when.len;
         },
-        // 아이콘·이름·경로·상태 문자 — 넷.
+        // 아이콘·이름·경로·상태 문자·증감 둘(`-N`·`+N`) — 여섯. 소행 표시(`✎`·`·`)는 그 자리를 상태
+        // 문자와 나눠 쓰지 않으므로 따로 센다.
         .commit_file => |file| {
-            text_ops += 4;
+            text_ops += 7;
+            quad_extra += 2; // 세로 안내선 + 선택 막대
             bytes += icon_bytes + file.name.len + file.dir.len + 2;
+            // `-N`·`+N`(부호 포함 `count_digits + 1` 씩)·`bin`·소행 표시. **u32 최대 자릿수로 잡는다** —
+            // 24 로 두면 `-4294967295 +4294967295` 조합에서 한 바이트가 모자라고, 그때는 그 조각이
+            // 빠지는 게 아니라 **프레임이 통째로 버려진다**(이 함수 위 주석의 두 사고가 그것이었다).
+            bytes += (count_digits + 1) * 2 + 3 + icon_bytes;
         },
         .load_more => {
             text_ops += 1;
@@ -1228,15 +1238,35 @@ const Writer = struct {
         if (rect.rect.height < title_h + sub_h) return;
         const pad_y = (rect.rect.height - title_h - sub_h) / 2;
 
+        // 두 줄짜리 행이 이어지면 어디서 한 커밋이 끝나는지가 안 보인다 — 목록이 한 덩어리로 읽힌다.
+        // **첫 줄에는 안 그린다**(위 고정 chrome 과 맞닿아 이중선이 된다).
+        if (commit.index > 0) try self.rowTopDivider(rect, m);
+        // 고른 줄은 **막대로도** 말한다(밴드만으로는 「조금 밝은 줄」로 읽힌다 — `accent_bar_w` 주석).
+        if (commit.selected) try self.selectionBar(rect, m);
+
         // ── 첫 줄: ref 칩 + 제목.
         var left = rect.rect.x + inset;
         if (commit.ref.len > 0) {
             const w = self.measureBudget(commit.ref, .supporting);
-            if (left + w < rect.rect.x + rect.rect.width - inset) {
+            const chip_pad: f32 = @floatFromInt(m.chip_pad_x);
+            if (left + w + chip_pad * 2 < rect.rect.x + rect.rect.width - inset) {
+                const chip_y = rect.rect.y + pad_y + (title_h - sub_h) / 2;
+                // **칩은 면을 갖는다.** 배경 없이 글자만 두면 제목과 같은 줄에서 한 덩어리로 읽혀,
+                // 브랜치 이름이 커밋 제목의 앞부분처럼 보였다(사용자 캡처 2026-08-27).
+                try self.appendQuad(.{
+                    .rect = .{
+                        .x = @intFromFloat(@floor(left)),
+                        .y = @intFromFloat(@floor(chip_y)),
+                        .w = @intFromFloat(@max(w + chip_pad * 2, 1)),
+                        .h = @intFromFloat(@max(sub_h, 1)),
+                    },
+                    .fill_role = .inset_bg,
+                    .corner_radii = .{ 3, 3, 3, 3 },
+                });
                 // 지금 체크아웃된 브랜치만 강조색이다 — 나머지 ref는 상태 진술이라 흐리다.
                 try self.emit(
-                    left,
-                    rect.rect.y + pad_y + (title_h - sub_h) / 2,
+                    left + chip_pad,
+                    chip_y,
                     commit.ref,
                     self.colsFor(w),
                     if (commit.ref_is_head) .focus_accent else .muted_fg,
@@ -1245,7 +1275,7 @@ const Writer = struct {
                     @intFromFloat(@max(w, 0)),
                     .origin,
                 );
-                left += w + gap;
+                left += w + chip_pad * 2 + gap;
             }
         }
         const title_right = rect.rect.x + rect.rect.width - inset;
@@ -1323,6 +1353,11 @@ const Writer = struct {
         if (rect.rect.height < title_h + sub_h) return;
         const pad_y = (rect.rect.height - title_h - sub_h) / 2;
 
+        // 커밋 줄과 **같은 규율**이다(그 함수 주석) — 두 목록이 다른 리듬으로 갈리면 탭을 오갈 때
+        // 같은 화면이 아닌 것처럼 읽힌다.
+        if (turn.index > 0) try self.rowTopDivider(rect, m);
+        if (turn.selected) try self.selectionBar(rect, m);
+
         const left = rect.rect.x + inset;
         const right = rect.rect.x + rect.rect.width - inset;
         // **요약은 제목 줄 오른쪽에 선다.** 아래 줄(에이전트 · 시각)은 이미 양끝이 차 있어 여기밖에
@@ -1392,32 +1427,148 @@ const Writer = struct {
     fn commitFileRow(self: *Writer, rect: tree.RectEntry, file: types.CommitFileItem, m: types.DockMetrics) ViewError!void {
         // 그 커밋에 속한다는 것을 들여쓰기로 말한다(그룹 안의 파일 행과 같은 규율 — 같은 아이콘 열).
         const indent = @as(f32, @floatFromInt(m.iconColumnX()));
+        const gap: f32 = @floatFromInt(m.gap);
+        const name_x = indent + @as(f32, @floatFromInt(m.icon_extent + m.gap));
+
+        // **증감을 먼저 잰다.** 오른쪽에 무엇이 설지 정해야 이름 예산이 나온다(변경 사항 탭의 파일 행이
+        // `fileRowLadder` 로 하는 일과 같은 판단 — 이 행은 동작 버튼이 없어 사다리가 한 칸 짧다).
+        var removed_buf: [16]u8 = undefined;
+        var added_buf: [16]u8 = undefined;
+        const delta_removed: []const u8 = if (file.has_delta and !file.binary) (std.fmt.bufPrint(&removed_buf, "-{d}", .{file.removed}) catch "") else "";
+        const delta_added: []const u8 = if (file.has_delta and !file.binary) (std.fmt.bufPrint(&added_buf, "+{d}", .{file.added}) catch "") else "";
+        const delta_w: f32 = if (!file.has_delta)
+            0
+        else if (file.binary)
+            self.measureBudget("bin", .supporting) + gap
+        else
+            self.measureBudget(delta_removed, .supporting) + self.measureBudget(delta_added, .supporting) + gap * 2;
+        const mark = originMark(file.origin);
+        const mark_w: f32 = if (mark) |text| self.measureBudget(text, .supporting) + gap else 0;
+        const status_w: f32 = @floatFromInt(m.status_extent + m.gap);
+
+        // 사다리: 이름이 목표 폭에 못 미치면 **증감 → 소행 표시 → 상태 문자** 순으로 내려놓는다.
+        // 이름이 마지막까지 남는 이유는 파일 행과 같다 — 어느 파일인지가 이 줄의 존재 이유다.
+        const floor = types.DockMetrics.name_floor_px;
+        const right_edge = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x));
+        var show_delta = delta_w > 0;
+        var show_mark = mark != null;
+        var show_status = true;
+        const nameSpace = struct {
+            fn f(edge: f32, start: f32, d: f32, mk: f32, st: f32, sd: bool, sm: bool, ss: bool) f32 {
+                return edge - start - (if (sd) d else 0) - (if (sm) mk else 0) - (if (ss) st else 0);
+            }
+        }.f;
+        if (nameSpace(right_edge, name_x, delta_w, mark_w, status_w, show_delta, show_mark, show_status) < floor) show_delta = false;
+        if (nameSpace(right_edge, name_x, delta_w, mark_w, status_w, show_delta, show_mark, show_status) < floor) show_mark = false;
+        if (nameSpace(right_edge, name_x, delta_w, mark_w, status_w, show_delta, show_mark, show_status) < floor) show_status = false;
+
+        // 그 줄들이 **바로 위 커밋/턴에 속한다**는 사실을 안내선이 말한다(들여쓰기만으로는 목록의
+        // 다음 항목처럼 읽혔다 — 사용자 캡처 2026-08-27).
+        try self.childRail(rect, m);
+        if (file.selected) try self.selectionBar(rect, m);
         if (file_tree_icon.codepoint(file_tree_icon.classify(.file, file.name, false))) |cp| {
             var icon_buf: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(cp, &icon_buf) catch 0;
             if (len > 0) try self.icon(rect, indent, icon_buf[0..len], m.icon_extent, .list_secondary_fg); // 위 파일 행과 같은 단
         }
-        var letter_buf: [1]u8 = .{file.letter};
-        try self.trailing(rect, letter_buf[0..], statusRole(file.status), .supporting, m.inset_x);
-        const name_x = indent + @as(f32, @floatFromInt(m.icon_extent + m.gap));
-        var right = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(m.inset_x + m.status_extent));
-        // **누가 바꿨나**(계약 §4.2). 상태 글자 **왼쪽**에 선다 — 그 둘은 다른 축이라(무엇이 일어났나 /
-        // 누가 했나) 한 자리에 겹칠 수 없다. `.unknown` 은 **아무것도 안 그린다**: 근거가 없다는 것과
-        // 「셸이 고쳤다」는 다른 사실이라, 없는 근거를 기호로 지어내지 않는다.
-        if (originMark(file.origin)) |mark| {
-            const w = self.measureBudget(mark, .supporting);
-            if (right - w > name_x) {
-                try self.emitAt(right - w, rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(typography.lineHeightPx(.supporting, effectiveScale(self.props.scale_milli))))) / 2, mark, switch (file.origin) {
+        var right_inset = m.inset_x;
+        if (show_status) {
+            var letter_buf: [1]u8 = .{file.letter};
+            try self.trailing(rect, letter_buf[0..], statusRole(file.status), .supporting, right_inset);
+            right_inset += m.status_extent + m.gap;
+        }
+        // **증감도 색을 갖는다**(변경 사항 탭과 같은 역할 토큰) — 한 덩어리로 흐리게 그리면 "얼마나 늘고
+        // 줄었나"가 한눈에 안 들어온다. 이진 파일은 `0/0` 으로 거짓말하지 않고 `bin` 이라 적는다.
+        if (show_delta) {
+            if (file.binary) {
+                try self.trailing(rect, "bin", .muted_fg, .supporting, right_inset);
+                right_inset += @intFromFloat(self.measureBudget("bin", .supporting) + gap);
+            } else {
+                try self.trailing(rect, delta_removed, .git_deleted_fg, .supporting, right_inset);
+                right_inset += @intFromFloat(self.measureBudget(delta_removed, .supporting));
+                right_inset += m.gap;
+                try self.trailing(rect, delta_added, .git_added_fg, .supporting, right_inset);
+                right_inset += @intFromFloat(self.measureBudget(delta_added, .supporting) + gap);
+            }
+        }
+        // **누가 바꿨나**(계약 §4.2). 상태 글자·증감 **왼쪽**에 선다 — 그것들은 다른 축이라(무엇이
+        // 일어났나 / 얼마나 / 누가 했나) 한 자리에 겹칠 수 없다. `.unknown` 은 **아무것도 안 그린다**:
+        // 근거가 없다는 것과 「셸이 고쳤다」는 다른 사실이라, 없는 근거를 기호로 지어내지 않는다.
+        if (show_mark) {
+            if (mark) |text| {
+                try self.trailing(rect, text, switch (file.origin) {
                     // 본문 색이다 — 흐린 `·` 와 **대비가 나야** 두 근거가 갈려 보인다. 새 역할을 만들지
                     // 않는다(테마마다 두 곳을 고치게 된다 — `statusRole` 과 같은 규율).
                     .ai_edit => .surface_fg,
                     else => .muted_fg,
-                }, .supporting);
-                right -= w + @as(f32, @floatFromInt(m.gap));
+                }, .supporting, right_inset);
+                right_inset += @intFromFloat(self.measureBudget(text, .supporting) + gap);
             }
         }
         // 위 변경 파일 행과 **같은 목록 행 타이포**다(한 화면에서 두 목록이 다른 크기면 안 된다).
-        try self.lineWithin(rect, name_x - rect.rect.x, right, file.name, .list_secondary_fg, .list_row, false);
+        //
+        // **이름 끝은 사다리가 쓴 그 수에서 나온다** — 위에서 조각을 놓으며 누적한 `right_inset` 을
+        // 쓰면 안 된다. 그쪽은 `u32` 라 조각마다 `@intFromFloat` 으로 **버려지고**(예: 8.4 → 8),
+        // 조각이 셋이면 최대 3px 이 덜 예약되어 긴 이름이 증감 위로 파고든다. 파일 행이 예약을
+        // `fileRowLadder` 하나에서만 내는 이유가 그것이다(`text_end` 주석 — 두 값이 갈리면 겹친다).
+        const name_end = right_edge -
+            (if (show_delta) delta_w else 0) -
+            (if (show_mark) mark_w else 0) -
+            (if (show_status) status_w else 0);
+        try self.lineWithin(rect, name_x - rect.rect.x, name_end, file.name, if (file.selected) .focus_accent else .list_secondary_fg, .list_row, false);
+    }
+
+    /// 고른 줄의 **좌측 강조 막대**. 밴드(`variant = .selected`)와 **함께** 선다 — 밴드는 「이 줄」을
+    /// 말하고 막대는 「고른 줄」을 말한다. 두 줄짜리 행이 이어지는 히스토리·에이전트 목록에서는 밴드만으로
+    /// 「조금 밝은 줄」과 구별되지 않는다(사용자 지적 2026-08-27).
+    ///
+    /// **행 왼쪽 끝에 붙는다**(들여쓰기 안이 아니라). 목록 격자의 밖이어야 그 줄 전체를 가리키는 표시로
+    /// 읽히고, 안쪽에 두면 아이콘 열과 다투다.
+    fn selectionBar(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) ViewError!void {
+        if (rect.rect.width <= 0 or rect.rect.height <= 0) return;
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(rect.rect.x)),
+                .y = @intFromFloat(@floor(rect.rect.y)),
+                .w = @max(m.accent_bar_w, 1),
+                .h = @intFromFloat(@max(rect.rect.height, 1)),
+            },
+            .fill_role = .accent_bar,
+        });
+    }
+
+    /// 항목 사이의 **얇은 가로선**. 두 줄짜리 행(커밋·턴)은 자기 안에 이미 두 층이 있어, 선이 없으면
+    /// 어디서 한 항목이 끝나는지가 안 보인다 — 파일 행에는 그리지 않는다(한 줄짜리라 표가 된다는
+    /// 2026-08-14 지적이 그대로 산다).
+    fn rowTopDivider(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) ViewError!void {
+        if (rect.rect.width <= 0) return;
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(rect.rect.x)),
+                .y = @intFromFloat(@floor(rect.rect.y)),
+                .w = @intFromFloat(@max(rect.rect.width, 1)),
+                .h = @max(m.rail_w, 1),
+            },
+            .fill_role = .divider,
+        });
+    }
+
+    /// 펼친 항목 아래 파일 줄의 **세로 안내선**. 파일 탐색기의 들여쓰기 안내선과 같은 값·같은 뜻이다 —
+    /// 그 줄들이 바로 위 커밋/턴에 속한다는 사실을 들여쓰기 하나로는 말하지 못한다(사용자 캡처에서
+    /// 파일 목록이 목록 전체의 다음 항목처럼 보였다).
+    fn childRail(self: *Writer, rect: tree.RectEntry, m: types.DockMetrics) ViewError!void {
+        if (rect.rect.width <= 0 or rect.rect.height <= 0) return;
+        // 아이콘 열의 **왼쪽 절반** 자리 — 들여쓰기 칸의 가운데다. 아이콘과 다투지 않는다.
+        const x = rect.rect.x + @as(f32, @floatFromInt(m.inset_x + m.disclosure_extent / 2));
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(x)),
+                .y = @intFromFloat(@floor(rect.rect.y)),
+                .w = @max(m.rail_w, 1),
+                .h = @intFromFloat(@max(rect.rect.height, 1)),
+            },
+            .fill_role = .divider,
+        });
     }
 
     /// 글자 하나를 (x, y)에 그대로 놓는다(세로 가운데 계산 없이 — 두 줄 행이 자기 y를 안다).
@@ -3363,6 +3514,142 @@ test "이름이 길면 이름이 먼저 잘린다(어느 저장소인지가 어�
     const name = findExactText(draws, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") orelse return error.MissingName;
     // 이름 예산은 브랜치 왼쪽에서 끝난다.
     try testing.expect(name.origin.x + @as(i32, @intCast(name.max_width_px.?)) <= branch.origin.x);
+}
+
+test "고른 줄은 좌측 강조 막대를 갖는다 — 커밋·턴·파일 모두 (P4c)" {
+    // 밴드(`variant = .selected`)만으로는 두 줄짜리 행이 이어지는 목록에서 「조금 밝은 줄」로만 읽힌다.
+    // **예산과 함께 고정된다**: `quad_extra` 가 모자라면 `viewBudgeted` 가 아니라 `view` 가 실패해
+    // 이 테스트가 깨진다(프레임이 통째로 버려지는 그 상태다).
+    // **차이로 센다.** 활성 탭 언더바가 이미 `accent_bar` 라 절대 수는 그 고정 chrome 까지 세고,
+    // 그러면 이 테스트는 막대가 아니라 탭 줄을 증언하게 된다(첫 판이 실제로 그랬다 — 0 을 기대했는데 1).
+    var storage: TestStorage = .{};
+    const unselected = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a" } },
+    };
+    const baseline = countQuads(try renderFixture(&storage, .{}, &unselected), .accent_bar);
+
+    var storage2: TestStorage = .{};
+    const selected = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a", .selected = true } },
+    };
+    try testing.expectEqual(baseline + 1, countQuads(try renderFixture(&storage2, .{}, &selected), .accent_bar));
+
+    var storage3: TestStorage = .{};
+    const file_selected = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a", .expanded = true } },
+        .{ .commit_file = .{ .index = 0, .name = "a.zig", .status = .modified, .letter = 'M', .selected = true } },
+    };
+    try testing.expectEqual(baseline + 1, countQuads(try renderFixture(&storage3, .{}, &file_selected), .accent_bar));
+
+    var storage4: TestStorage = .{};
+    const turn_selected = [_]types.Item{
+        .{ .turn = .{ .index = 0, .title = "마지막 턴", .selected = true } },
+    };
+    try testing.expectEqual(baseline + 1, countQuads(try renderFixture(&storage4, .{}, &turn_selected), .accent_bar));
+}
+
+test "항목 사이 가로선은 두 줄 행에만 있고 첫 줄에는 없다 (P4c)" {
+    // 한 줄짜리 파일 행에까지 줄마다 선을 그으면 목록이 **표**가 된다(사용자 지적 2026-08-14).
+    // 첫 줄에 그리면 위 고정 chrome 과 맞닿아 이중선이 된다.
+    var storage: TestStorage = .{};
+    const first_only = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a" } },
+    };
+    const before = countQuads(try renderFixture(&storage, .{}, &first_only), .divider);
+
+    var storage2: TestStorage = .{};
+    const two = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a" } },
+        .{ .commit = .{ .index = 1, .subject = "fix: b" } },
+    };
+    const after = countQuads(try renderFixture(&storage2, .{}, &two), .divider);
+    try testing.expectEqual(before + 1, after); // 둘째 줄에만 하나 늘었다
+}
+
+test "펼친 커밋의 파일 줄은 세로 안내선으로 소속을 말한다 (P4c)" {
+    // 들여쓰기 하나로는 좁은 도크에서 약해, 사용자 캡처에서 파일 목록이 **목록의 다음 항목**처럼 보였다.
+    var storage: TestStorage = .{};
+    const without = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a", .expanded = true } },
+    };
+    const before = countQuads(try renderFixture(&storage, .{}, &without), .divider);
+
+    var storage2: TestStorage = .{};
+    const with_file = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: a", .expanded = true } },
+        .{ .commit_file = .{ .index = 0, .name = "a.zig", .status = .modified, .letter = 'M' } },
+    };
+    const after = countQuads(try renderFixture(&storage2, .{}, &with_file), .divider);
+    try testing.expectEqual(before + 1, after); // 파일 줄 하나당 안내선 하나
+}
+
+test "펼친 커밋의 파일 줄: 증감이 상태 문자 왼쪽에 서고 이름이 그 위로 안 온다 (P4c)" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: something", .expanded = true } },
+        .{ .commit_file = .{
+            .index = 0,
+            .name = "a-rather-long-file-name-that-wants-the-whole-row.zig",
+            .status = .modified,
+            .letter = 'M',
+            .added = 34,
+            .removed = 12,
+            .has_delta = true,
+        } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    const added = findExactText(draws, "+34") orelse return error.MissingAdded;
+    const removed = findExactText(draws, "-12") orelse return error.MissingRemoved;
+    const name = findExactText(draws, "a-rather-long-file-name-that-wants-the-whole-row.zig") orelse return error.MissingName;
+
+    // 변경 사항 탭과 **같은 순서**다: 왼쪽부터 `+N` `-N` `M`(오른쪽 끝).
+    try testing.expect(added.origin.x < removed.origin.x);
+    // **이름 예약이 증감 앞에서 끝난다.** 조각을 놓으며 누적한 `u32` 를 이름 끝으로 쓰면 조각마다
+    // 버림이 쌓여 이 단언이 깨진다(적대적 검증 2회차에서 그 상태였다).
+    const name_right = name.origin.x + @as(i32, @intCast(name.max_width_px.?));
+    try testing.expect(name_right <= added.origin.x);
+}
+
+test "펼친 커밋의 파일 줄: 좁아지면 증감이 먼저 사라지고 이름이 남는다 (P4c)" {
+    // 사다리의 방향이 뒤집히면 도크 하한에서 **이름이 통째로 사라진다** — 파일 행이 2026-08-25 에
+    // 겪은 그 결함이고, 이 줄은 같은 격자를 쓴다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: something", .expanded = true } },
+        .{ .commit_file = .{ .index = 0, .name = "renderer.zig", .status = .modified, .letter = 'M', .added = 1234, .removed = 5678, .has_delta = true } },
+    };
+    // 도크 하한(폭 104pt = 도크 120 − 스크롤 거터 16) — 위 파일 행 사다리 테스트와 같은 수다.
+    const draws = try renderFixtureBranch(&storage, &items, "main", 104);
+    try testing.expect(findExactText(draws, "renderer.zig") != null); // 이름은 끝까지 남는다
+    try testing.expect(findExactText(draws, "+1234") == null); // 증감이 먼저 내려간다
+}
+
+test "펼친 커밋의 파일 줄: 이진 파일은 0이 아니라 `bin` 이라고 적는다 (P4c)" {
+    // `0 -0` 으로 그리면 «안 바뀐 파일» 이라는 거짓 진술이 된다(변경 사항 탭과 같은 규율).
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "feat: art", .expanded = true } },
+        .{ .commit_file = .{ .index = 0, .name = "logo.png", .status = .added, .letter = 'A', .binary = true, .has_delta = true } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findExactText(draws, "bin") != null);
+    try testing.expect(findExactText(draws, "+0") == null);
+    try testing.expect(findExactText(draws, "-0") == null);
+}
+
+test "펼친 커밋의 파일 줄: 증감을 못 읽었으면 그 자리를 비운다 (P4c)" {
+    // 짝이 어긋난 목록은 `has_delta = false` 로 온다. 그때 0 을 그리면 **읽지 못한 것**과
+    // **안 바뀐 것**이 화면에서 같아진다.
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit = .{ .index = 0, .subject = "fix: x", .expanded = true } },
+        .{ .commit_file = .{ .index = 0, .name = "unknown.zig", .status = .modified, .letter = 'M' } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expect(findExactText(draws, "unknown.zig") != null);
+    try testing.expect(findExactText(draws, "+0") == null);
+    try testing.expect(findExactText(draws, "-0") == null);
+    try testing.expect(findExactText(draws, "bin") == null);
 }
 
 test "브랜치 줄: 긴 이름이 오른쪽 묶음(∨·fetch)을 침범하지 않는다 (사용자 지적 2026-08-25)" {

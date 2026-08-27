@@ -471,24 +471,142 @@ pub const NameStatusIterator = struct {
             const end = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
             const line = self.rest[0..end];
             self.rest = if (end < self.rest.len) self.rest[end + 1 ..] else "";
-            if (line.len < 3) continue;
-
-            // `R100\told\tnew` / `M\tpath`. 상태 뒤 숫자(유사도)는 무시한다 — 표시에 쓰지 않는다.
-            const first_tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-            const letter = line[0];
-            const rest = line[first_tab + 1 ..];
-            if (letter == 'R' or letter == 'C') {
-                const sep = std.mem.indexOfScalar(u8, rest, '\t') orelse continue;
-                // 옛 경로가 비어 있으면 그 줄은 못 믿는다(잘린 출력).
-                if (sep == 0 or sep + 1 >= rest.len) continue;
-                return .{ .letter = letter, .path = rest[sep + 1 ..], .orig_path = rest[0..sep] };
-            }
-            if (rest.len == 0) continue;
-            return .{ .letter = letter, .path = rest };
+            if (parseNameStatusLine(line)) |entry| return entry;
         }
         return null;
     }
 };
+
+/// `M\tpath` · `R100\told\tnew` 한 줄. **`--raw` 줄도 받는다**(`:100644 100644 aaa bbb M\tpath`) —
+/// 상태 문자 앞의 mode/blob 필드는 공백으로 갈리므로 첫 탭 **앞의 마지막 공백** 뒤부터가 곧
+/// name-status 줄이다. 두 형식이 한 함수에서 나와야 파싱 규칙이 갈리지 않는다.
+fn parseNameStatusLine(raw_line: []const u8) ?NameStatusEntry {
+    var line = std.mem.trimEnd(u8, raw_line, "\r");
+    if (line.len < 3) return null;
+    const first_tab = std.mem.indexOfScalar(u8, line, '\t') orelse return null;
+    if (line[0] == ':') {
+        // `--raw`: 상태 문자는 첫 탭 앞의 마지막 공백 뒤에 있다. 없으면 못 믿는 줄이다(잘린 출력).
+        const space = std.mem.lastIndexOfScalar(u8, line[0..first_tab], ' ') orelse return null;
+        line = line[space + 1 ..];
+        if (line.len < 3) return null;
+    }
+    // `R100\told\tnew` / `M\tpath`. 상태 뒤 숫자(유사도)는 무시한다 — 표시에 쓰지 않는다.
+    const tab = std.mem.indexOfScalar(u8, line, '\t') orelse return null;
+    const letter = line[0];
+    // 상태 자리에 글자가 아닌 것이 오면 그 줄은 name-status가 아니다 — numstat 줄(`12\t3\tpath`)이
+    // 그대로 여기 오면 `letter = '1'`, `path = "3\tpath"` 같은 **없는 파일**이 목록에 선다.
+    if (!std.ascii.isAlphabetic(letter)) return null;
+    const rest = line[tab + 1 ..];
+    if (letter == 'R' or letter == 'C') {
+        const sep = std.mem.indexOfScalar(u8, rest, '\t') orelse return null;
+        // 옛 경로가 비어 있으면 그 줄은 못 믿는다(잘린 출력).
+        if (sep == 0 or sep + 1 >= rest.len) return null;
+        return .{ .letter = letter, .path = rest[sep + 1 ..], .orig_path = rest[0..sep] };
+    }
+    if (rest.len == 0) return null;
+    return .{ .letter = letter, .path = rest };
+}
+
+/// 그 줄이 `--numstat` 한 줄인가(`12\t3\tpath` · `-\t-\tpath`). 상태 줄과 **같은 출력에 섞여 오므로**
+/// 종류 판정이 파싱보다 먼저다.
+fn isNumstatLine(raw_line: []const u8) bool {
+    const line = std.mem.trimEnd(u8, raw_line, "\r");
+    if (line.len == 0 or line[0] == ':') return false;
+    const t1 = std.mem.indexOfScalar(u8, line, '\t') orelse return false;
+    const t2 = std.mem.indexOfScalarPos(u8, line, t1 + 1, '\t') orelse return false;
+    return isCountField(line[0..t1]) and isCountField(line[t1 + 1 .. t2]) and t2 + 1 < line.len;
+}
+
+fn isCountField(field: []const u8) bool {
+    if (field.len == 0) return false;
+    if (std.mem.eql(u8, field, "-")) return true; // 이진 파일
+    for (field) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+/// 펼친 커밋·턴의 파일 한 줄 — **상태 문자와 증감이 함께** 온다(P4b).
+///
+/// **베이스**: `git show --format= --raw --numstat <oid>`(실측 git 2.50.1). `--name-status`와
+/// `--numstat`은 같은 출력 그룹이라 **뒤에 온 쪽만** 나오지만(실측), `--raw`는 다른 그룹이라 numstat과
+/// 나란히 온다 — 그래서 프로세스를 하나 더 쓰지 않고 증감을 얻는다.
+pub const CommitFileEntry = struct {
+    letter: u8,
+    path: []const u8,
+    orig_path: ?[]const u8 = null,
+    added: u32 = 0,
+    removed: u32 = 0,
+    binary: bool = false,
+    /// 증감을 **실제로 읽었나**. false면 화면은 그 자리를 비운다 — 0/0으로 그리면 "안 바뀐 파일"이라는
+    /// 거짓 진술이 된다(변경 사항 탭의 `unknown_delta`와 같은 규율).
+    has_delta: bool = false,
+};
+
+/// 상태 줄과 numstat 줄을 **자리로 짝짓는다**. git은 두 형식을 같은 diff queue에서 같은 순서로 내므로
+/// (실측) i번째끼리 맞는다. 상태 줄만 있는 출력(`--name-status`만 부른 옛 경로)도 그대로 흐른다 —
+/// 그때는 증감만 빈다.
+///
+/// **짝을 미리 세지 않는다.** 이 이터레이터는 **매 프레임 여러 번** 돌고(행 수 세기·그리기·클릭 해석),
+/// 커밋 하나가 파일 수천 개를 바꿀 수 있다 — 개수를 세려면 그때마다 원문을 통째로 한 번 더 훑어야 한다.
+/// 대신 **꺼내면서 대조한다**: 경로가 어긋나거나 짝이 모자라는 순간 그 뒤로는 숫자를 안 붙인다(아래
+/// `next`). 잘린 출력은 **끝에서** 잘리므로 앞의 짝은 그대로 정확하고, 어긋난 지점부터만 자리가 빈다.
+pub fn iterateCommitFiles(text: []const u8) CommitFileIterator {
+    return .{ .status_rest = text, .delta_rest = text, .paired = true };
+}
+
+pub const CommitFileIterator = struct {
+    status_rest: []const u8,
+    delta_rest: []const u8,
+    paired: bool,
+
+    pub fn next(self: *CommitFileIterator) ?CommitFileEntry {
+        const status = self.nextStatus() orelse return null;
+        var entry: CommitFileEntry = .{ .letter = status.letter, .path = status.path, .orig_path = status.orig_path };
+        if (!self.paired) return entry;
+        const delta = self.nextDelta() orelse {
+            // 짝이 모자라면 **여기서 짝짓기를 그만둔다** — 뒤의 줄들이 한 칸씩 밀려 남의 숫자를 단다.
+            self.paired = false;
+            return entry;
+        };
+        // rename은 numstat 경로가 `old => new`로 축약되어 status 경로와 글자 그대로 다르다 — 그 대조는
+        // 버퍼가 필요하므로(`newPath`) 여기서는 자리만 믿는다. 그 외에는 경로가 같아야 하고, 다르면
+        // 두 목록이 어긋났다는 뜻이라 그때부터 숫자를 붙이지 않는다.
+        if (!delta.rename and !std.mem.eql(u8, delta.path, status.path)) {
+            self.paired = false;
+            return entry;
+        }
+        entry.added = delta.added;
+        entry.removed = delta.removed;
+        entry.binary = delta.binary;
+        entry.has_delta = true;
+        return entry;
+    }
+
+    fn nextStatus(self: *CommitFileIterator) ?NameStatusEntry {
+        while (self.status_rest.len > 0) {
+            const line = takeLine(&self.status_rest);
+            if (isNumstatLine(line)) continue;
+            if (parseNameStatusLine(line)) |entry| return entry;
+        }
+        return null;
+    }
+
+    fn nextDelta(self: *CommitFileIterator) ?LineDelta {
+        while (self.delta_rest.len > 0) {
+            const line = takeLine(&self.delta_rest);
+            if (!isNumstatLine(line)) continue;
+            var one = iterateNumstat(line);
+            if (one.next()) |delta| return delta;
+        }
+        return null;
+    }
+};
+
+fn takeLine(rest: *[]const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, rest.*, '\n') orelse rest.*.len;
+    const line = rest.*[0..end];
+    rest.* = if (end < rest.*.len) rest.*[end + 1 ..] else "";
+    return line;
+}
 
 test "name-status: 상태 문자와 경로, rename의 옛 경로를 낸다" {
     var it = iterateNameStatus("M\tsrc/main.zig\nA\tnew.txt\nD\tgone.txt\nR100\told.txt\tnew.txt\n");
@@ -508,6 +626,155 @@ test "name-status: 잘린 줄은 건너뛴다(엉뚱한 경로를 만들지 않�
     var it = iterateNameStatus("R100\tonly-old\nM\nX\nM\tok.txt\n");
     try std.testing.expectEqualStrings("ok.txt", it.next().?.path);
     try std.testing.expect(it.next() == null);
+}
+
+// 아래 두 fixture 는 실제 저장소에서 그대로 캡처했다(2026-08-27, git 2.50.1) — 손으로 지어낸 문자열이
+// 아니라 `git show --format= --raw --numstat --find-renames --first-parent -m <oid>` 의 출력이다.
+const real_commit_files =
+    ":100644 100644 efb30dbc 49ac6ee0 M\tdocs/plans/windows-platform.md\n" ++
+    ":100644 100644 b3718734 6592e53b M\tdocs/windows-platform.md\n" ++
+    ":100644 100644 3475532b d832b8b6 M\tsrc/main.zig\n" ++
+    ":100644 100644 09727edc 48d6c7fc M\tsrc/platform/windows/win32_agent_surface.zig\n" ++
+    "1\t1\tdocs/plans/windows-platform.md\n" ++
+    "46\t0\tdocs/windows-platform.md\n" ++
+    "84\t1\tsrc/main.zig\n" ++
+    "4\t0\tsrc/platform/windows/win32_agent_surface.zig\n";
+
+const real_commit_rename =
+    ":100644 100644 87bfddd 87bfddd R100\ta.txt\trenamed.txt\n" ++
+    "0\t0\ta.txt => renamed.txt\n";
+
+test "커밋 파일 목록: raw 줄의 상태와 numstat 줄의 증감이 한 항목으로 온다" {
+    var it = iterateCommitFiles(real_commit_files);
+    const first = it.next().?;
+    try testing.expectEqual(@as(u8, 'M'), first.letter);
+    try testing.expectEqualStrings("docs/plans/windows-platform.md", first.path);
+    try testing.expect(first.has_delta);
+    try testing.expectEqual(@as(u32, 1), first.added);
+    try testing.expectEqual(@as(u32, 1), first.removed);
+
+    const second = it.next().?;
+    try testing.expectEqualStrings("docs/windows-platform.md", second.path);
+    try testing.expectEqual(@as(u32, 46), second.added);
+    try testing.expectEqual(@as(u32, 0), second.removed);
+
+    _ = it.next().?; // src/main.zig
+    const last = it.next().?;
+    try testing.expectEqualStrings("src/platform/windows/win32_agent_surface.zig", last.path);
+    try testing.expectEqual(@as(u32, 4), last.added);
+    try testing.expect(it.next() == null);
+}
+
+test "커밋 파일 목록: numstat 줄이 파일 항목으로 새지 않는다" {
+    // 이 회귀가 나면 목록이 **정확히 두 배**가 되고, 없는 파일(`3\tpath`)이 줄로 선다.
+    var it = iterateCommitFiles(real_commit_files);
+    var count: usize = 0;
+    while (it.next()) |entry| : (count += 1) {
+        try testing.expect(std.ascii.isAlphabetic(entry.letter));
+        try testing.expect(std.mem.indexOfScalar(u8, entry.path, '\t') == null);
+    }
+    try testing.expectEqual(@as(usize, 4), count);
+}
+
+test "커밋 파일 목록: rename은 자리로 짝짓는다(numstat 경로가 축약된다)" {
+    var it = iterateCommitFiles(real_commit_rename);
+    const renamed = it.next().?;
+    try testing.expectEqual(@as(u8, 'R'), renamed.letter);
+    try testing.expectEqualStrings("renamed.txt", renamed.path);
+    try testing.expectEqualStrings("a.txt", renamed.orig_path.?);
+    // 내용이 안 바뀐 rename 이라 0/0 이지만 **읽은 0** 이다 — 자리를 비우는 «못 읽었다» 와 다르다.
+    try testing.expect(renamed.has_delta);
+    try testing.expect(it.next() == null);
+}
+
+test "커밋 파일 목록: 이진 파일은 숫자 대신 그 사실을 싣는다" {
+    var it = iterateCommitFiles(
+        ":000000 100644 0000000 aaaaaaa A\tassets/logo.png\n" ++
+            "-\t-\tassets/logo.png\n",
+    );
+    const bin = it.next().?;
+    try testing.expect(bin.binary);
+    try testing.expect(bin.has_delta);
+    try testing.expectEqual(@as(u32, 0), bin.added);
+}
+
+test "커밋 파일 목록: 짝이 모자라면 그 뒤로 숫자를 안 붙인다(남의 숫자를 달지 않는다)" {
+    // 출력이 상한에서 잘리면 numstat 블록이 짧게 온다. 잘림은 **끝에서** 일어나므로 앞의 짝은 정확하고,
+    // 모자란 지점부터 자리가 빈다 — 그 뒤로 한 칸씩 밀어 남의 숫자를 다는 것이 이 테스트가 막는 결함이다.
+    var it = iterateCommitFiles(
+        ":100644 100644 aaa bbb M\ta.txt\n" ++
+            ":100644 100644 ccc ddd M\tb.txt\n" ++
+            "1\t2\ta.txt\n",
+    );
+    const a = it.next().?;
+    try testing.expectEqualStrings("a.txt", a.path);
+    try testing.expect(a.has_delta);
+    try testing.expectEqual(@as(u32, 1), a.added);
+    const b = it.next().?;
+    try testing.expectEqualStrings("b.txt", b.path);
+    try testing.expect(!b.has_delta);
+    try testing.expect(it.next() == null);
+}
+
+test "커밋 파일 목록: 두 블록이 어긋나면 그 지점부터 숫자를 버린다" {
+    // 경로가 안 맞는다 = 두 목록이 다른 것을 세고 있다. 그때부터는 **자리를 믿을 근거가 없다**.
+    var it = iterateCommitFiles(
+        ":100644 100644 aaa bbb M\ta.txt\n" ++
+            ":100644 100644 ccc ddd M\tb.txt\n" ++
+            "1\t2\tsomewhere-else.txt\n" ++
+            "3\t4\tb.txt\n",
+    );
+    const a = it.next().?;
+    try testing.expect(!a.has_delta); // 첫 대조부터 어긋났다
+    const b = it.next().?;
+    try testing.expect(!b.has_delta); // 한 번 어긋나면 뒤도 안 믿는다
+}
+
+test "커밋 파일 목록: 두 블록의 순서가 뒤집혀도 같은 답이 나온다" {
+    // git 의 출력 순서는 **우리 계약이 아니다**(diff 형식 그룹의 내부 순서다). 이 이터레이터가 줄을
+    // 종류로 갈라 각각 훑는 것은 그 순서에 기대지 않기 위해서다 — 그 방어가 실제로 서 있는지 본다.
+    var it = iterateCommitFiles(
+        "1\t1\ta.txt\n" ++
+            "46\t0\tb.txt\n" ++
+            ":100644 100644 aaa bbb M\ta.txt\n" ++
+            ":100644 100644 ccc ddd M\tb.txt\n",
+    );
+    const a = it.next().?;
+    try testing.expectEqualStrings("a.txt", a.path);
+    try testing.expectEqual(@as(u32, 1), a.added);
+    const b = it.next().?;
+    try testing.expectEqualStrings("b.txt", b.path);
+    try testing.expectEqual(@as(u32, 46), b.added);
+    try testing.expect(it.next() == null);
+}
+
+test "커밋 파일 목록: 공백·이스케이프가 든 경로도 두 블록이 같은 글자로 온다(실측)" {
+    // 실측(2026-08-27): `core.quotePath=false` 라도 탭이 든 이름은 **양쪽 다** 같은 꼴로 quote 된다
+    // (`"tab\there.txt"`). 그래서 경로 대조가 성립한다 — 한쪽만 quote 되면 그 줄의 증감이 조용히 빈다.
+    var it = iterateCommitFiles(
+        ":100644 100644 587be6b 2795c87 M\tsp ace/b b.txt\n" ++
+            ":000000 100644 0000000 72e24ec A\t\"tab\\there.txt\"\n" ++
+            "2\t1\tsp ace/b b.txt\n" ++
+            "1\t0\t\"tab\\there.txt\"\n",
+    );
+    const spaced = it.next().?;
+    try testing.expectEqualStrings("sp ace/b b.txt", spaced.path);
+    try testing.expect(spaced.has_delta);
+    try testing.expectEqual(@as(u32, 2), spaced.added);
+    const quoted = it.next().?;
+    try testing.expectEqualStrings("\"tab\\there.txt\"", quoted.path);
+    try testing.expect(quoted.has_delta);
+    try testing.expect(it.next() == null);
+}
+
+test "커밋 파일 목록: name-status 만 온 출력도 그대로 흐른다" {
+    // 옛 형식(또는 numstat 이 빠진 출력)에서 목록이 사라지면 안 된다 — 증감만 비운다.
+    var it = iterateCommitFiles("M\tsrc/main.zig\nA\tnew.txt\n");
+    const first = it.next().?;
+    try testing.expectEqualStrings("src/main.zig", first.path);
+    try testing.expect(!first.has_delta);
+    try testing.expectEqualStrings("new.txt", it.next().?.path);
+    try testing.expect(it.next() == null);
 }
 
 test "충돌은 두 축 모두 unmerged로 오고, 하위 모듈은 표시된다(실측 출력)" {

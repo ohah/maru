@@ -109,7 +109,11 @@ const inventory = [_]Entry{
     // 17·18번째는 `editor_find` 시나리오의 두 줄이다 — 하나는 "매치가 넷"임을 캡처를 보는 사람에게
     // 말해 주는 대조군 주석이고, 다른 하나는 **한글 사이에 선 매치**다(멀티바이트 앞뒤에서 강조 열이
     // 밀리지 않는지는 한국어 줄이 있어야 픽셀로 보인다).
-    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 18 },
+    // 19~30번째는 `scm_history` 시나리오의 커밋 제목·작성자다(2026-08-27). **사용자 캡처를 그대로
+    // 재현한 픽스처**라 그 화면이 실제로 겪는 것 — 한글 제목이 좁은 도크에서 어디서 말줄임되는지,
+    // 대괄호가 붙은 한국어 이름이 시각·해시를 밀어내지 않는지 — 을 픽셀로 보려면 한국어여야 한다.
+    // 영어로 바꾸면 이 캡처가 증언하는 폭 산술이 통째로 다른 경우가 된다.
+    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 30 },
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 2 },
     .{ .path = "src/platform/macos/control_server.zig", .count = 1 },
     .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 9 },
@@ -210,7 +214,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 183;
+const header_total = 195;
 const header_config_total = 53;
 
 comptime {

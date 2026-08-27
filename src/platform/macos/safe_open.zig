@@ -62,3 +62,45 @@ pub fn openNoFollow(root: []const u8, rel_path: []const u8) !c_int {
     _ = std.c.close(dir_fd);
     return error.OpenFailed; // rel_path가 비어 있었다(isSafeRelative가 이미 막지만 경로를 열어 두지 않는다)
 }
+
+/// 신뢰할 별도 root capability가 없는 absolute path용 변형이다. `/`부터 모든 component를
+/// descriptor-relative로 내려가므로 중간 symlink도 따라가지 않는다. 마지막 component는 regular-file
+/// 판정 전에 FIFO에서 멈추지 않도록 nonblocking으로 열며, `final_directory`이면 directory로 제한한다.
+pub fn openAbsoluteNoFollow(path: [:0]const u8, final_directory: bool) !c_int {
+    if (path.len == 0 or path[0] != '/') return error.UnsafePath;
+    var current = std.c.open("/", .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .DIRECTORY = true,
+        .NOFOLLOW = true,
+    });
+    if (current < 0) return error.UnsafePath;
+    errdefer _ = std.c.close(current);
+
+    var iterator = std.mem.splitScalar(u8, path[1..], '/');
+    while (iterator.next()) |component| {
+        if (component.len == 0) {
+            if (iterator.peek() == null) break;
+            return error.UnsafePath;
+        }
+        if (!validAbsoluteComponent(component)) return error.UnsafePath;
+        var name_buf: [std.fs.max_name_bytes:0]u8 = undefined;
+        const name = std.fmt.bufPrintZ(&name_buf, "{s}", .{component}) catch return error.UnsafePath;
+        const is_last = iterator.peek() == null;
+        const flags: std.c.O = if (!is_last or final_directory)
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }
+        else
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true };
+        const next = std.c.openat(current, name.ptr, flags, @as(std.c.mode_t, 0));
+        if (next < 0) return error.UnsafePath;
+        _ = std.c.close(current);
+        current = next;
+    }
+    return current;
+}
+
+fn validAbsoluteComponent(component: []const u8) bool {
+    return component.len != 0 and component.len <= std.fs.max_name_bytes and
+        !std.mem.eql(u8, component, ".") and !std.mem.eql(u8, component, "..") and
+        std.mem.indexOfScalar(u8, component, 0) == null;
+}

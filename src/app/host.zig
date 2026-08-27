@@ -806,8 +806,10 @@ test "app host does not leak app actions or ignored Cmd keys to PTY" {
     try std.testing.expectEqual(config_mod.Action.new_tab, app_result.app_action);
     try std.testing.expectEqual(@as(usize, 0), memory_pty.writes.items.len);
 
+    // **글자는 계산해서 고른다** — 손으로 박으면 그 글자가 묶이는 날 이 판정자가 규율(「안 묶인 Cmd 는
+    // PTY 로 안 샌다」)이 아니라 예시 때문에 깨진다. 2026-08-27 에 ⌘S·⌘Z 를 배선하며 실제로 그랬다.
     const ignored = try handleKeyEvent(&app_window, &runtime, resolver, .{
-        .key = .{ .char = 's' },
+        .key = .{ .char = config_mod.keybinding.unbound_command_char },
         .modifiers = .{ .command = true },
     }, true, null);
     try std.testing.expectEqual(KeyHandlingResult.ignored, ignored);

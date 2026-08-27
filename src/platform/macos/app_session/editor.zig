@@ -29,6 +29,7 @@ const chrome_draw = maru.chrome.draw;
 const editor_fold = maru.session.editor.fold;
 const editor_selection = maru.session.editor.selection;
 const editor_motion = maru.session.editor.motion;
+const editor_pairs = maru.session.editor.pairs;
 const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
 const settings_ops = @import("settings.zig");
@@ -3809,6 +3810,12 @@ const undo_stack_limit: usize = 2048;
 /// 둘 다 사라진다 — 사용자가 예측할 수 없다.
 pub fn breakUndoGroup(term: *Term) void {
     term.rt.editor_last_edit_kind = .none;
+    // **자동 닫기 표시도 여기서 버린다**(§3.7 — "그 표시는 그 caret이 떠나면 버린다").
+    //
+    // 이 함수는 *"커서가 편집 아닌 이유로 움직였다"*의 단일 자리다(클릭·⌘⌃D·이동 일습·붙여넣기).
+    // 표시를 따로 버리는 함수를 두면 **그 둘이 갈리는 경로가 반드시 생긴다** — 실제로 따로 두려다
+    // 호출부를 하나씩 세다가 그만뒀다.
+    term.rt.editor_auto_closed_at = null;
 }
 
 /// 이번 편집이 앞의 것과 같은 묶음인가.
@@ -4079,11 +4086,83 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     // 커서를 문서 순서로 모은다 — delta가 정렬·비겹침을 요구한다.
     var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
     defer ranges.deinit(self.allocator);
+    // 자동 닫기가 만든 문자열은 **우리가 소유한다**(호출자의 `text`와 달리 임시다).
+    var pair_texts: std.ArrayList([]u8) = .empty;
+    defer {
+        for (pair_texts.items) |t| self.allocator.free(t);
+        pair_texts.deinit(self.allocator);
+    }
+    // type-over로 지나간 커서 자리 — 변경 없이 caret만 옮긴다.
+    var skip_overs: std.ArrayList(usize) = .empty;
+    defer skip_overs.deinit(self.allocator);
+
+    // **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7). 붙여넣기·IME 확정은 여러 글자가 한 번에
+    // 오는데 그때 괄호를 닫으면 **사용자가 넣지 않은 문자**가 문서에 들어간다.
+    const aid: ?u8 = if (text.len == 1) text[0] else null;
+    const content_now = doc.file.content;
+
     while (iter.next()) |sel| {
         const lo = @min(sel.start(), doc.file.content.len);
         const hi = @min(sel.end(), doc.file.content.len);
+
+        if (aid) |typed| {
+            const before: ?u8 = if (lo > 0) content_now[lo - 1] else null;
+            const after: ?u8 = if (hi < content_now.len) content_now[hi] else null;
+            switch (editor_pairs.decide(typed, hi > lo, before, after)) {
+                .insert_plain => {},
+                .insert_pair => |pr| {
+                    const owned = self.allocator.dupe(u8, &[_]u8{ pr.open, pr.close }) catch return false;
+                    pair_texts.append(self.allocator, owned) catch {
+                        self.allocator.free(owned);
+                        return false;
+                    };
+                    ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = owned }) catch return false;
+                    continue;
+                },
+                .skip_over => {
+                    // **빈 변경을 넣어 자리를 지킨다.** 아래 caret 재배치가 `inverse.changes`와
+                    // **인덱스로** 맞추는데, 건너뛴 커서가 delta에 안 실리면 그 뒤 커서들이 밀려
+                    // **엉뚱한 자리로 튄다**(적대적 검증 2026-08-27이 실측으로 잡았다 — type-over
+                    // 커서가 다른 커서 자리로 갔다). 길이 0에 빈 텍스트라 버퍼는 안 바뀐다.
+                    skip_overs.append(self.allocator, ranges.items.len) catch return false;
+                    ranges.append(self.allocator, .{ .start = lo, .end = lo, .text = "" }) catch return false;
+                    continue;
+                },
+                .surround => |pr| {
+                    // **감싼다** — 선택을 지우지 않는다. 앞뒤 두 변경으로 나눠 넣으면 그 사이 내용이
+                    // 그대로 살아 사용자가 고른 것이 유지된다.
+                    const o = self.allocator.dupe(u8, &[_]u8{pr.open}) catch return false;
+                    pair_texts.append(self.allocator, o) catch {
+                        self.allocator.free(o);
+                        return false;
+                    };
+                    const c = self.allocator.dupe(u8, &[_]u8{pr.close}) catch return false;
+                    pair_texts.append(self.allocator, c) catch {
+                        self.allocator.free(c);
+                        return false;
+                    };
+                    ranges.append(self.allocator, .{ .start = lo, .end = lo, .text = o }) catch return false;
+                    ranges.append(self.allocator, .{ .start = hi, .end = hi, .text = c }) catch return false;
+                    continue;
+                },
+            }
+        }
         ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = text }) catch return false;
     }
+    // **type-over만 있었으면 문서는 안 바뀐다** — caret만 한 칸 넘기고 끝낸다(§3.7).
+    //
+    // 변경이 없으므로 delta도 undo도 만들지 않는다 — 빈 편집을 쌓으면 undo가 헛돈다.
+    if (ranges.items.len == skip_overs.items.len) {
+        if (skip_overs.items.len == 0) return false; // 애초에 아무 커서도 없었다
+        if (term.rt.editor_selection) |sel| {
+            term.rt.editor_selection = editor_selection.Selection.at(sel.focus + 1);
+        }
+        for (term.rt.editor_extra_selections) |*e| e.* = editor_selection.Selection.at(e.focus + 1);
+        breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
+        self.metal_dirty = true;
+        return true;
+    }
+
     std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
         fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
             return a.start < b.start;
@@ -4120,8 +4199,39 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     //
     // 역연산의 각 range가 편집 **후** 좌표로 "새로 들어간 구간"을 가리키므로, 그 끝이 곧 커서 자리다
     // (삭제는 길이가 0이라 시작 = 끝이고, 지운 자리에 커서가 선다).
+    // **건너뛴 커서는 한 칸 넘어간다**(type-over) — 빈 변경이라 `ic.end`가 제자리다.
+    //
+    // **`skip_overs`가 오름차순이라는 것을 쓴다.** 커서마다 그 목록을 훑으면 **커서 수에
+    // 곱해진다**(상한 10,000이면 1억 번 — `MC3`이 같은 축을 실측으로 고정한 전례가 있다).
+    // 넣는 자리가 `ranges.items.len`이라 정렬이 보장되므로, 한 번만 앞으로 밀며 본다.
+    // **밀기와 소비 중 하나면 된다.** 둘 다 두었더니 각각을 지운 뮤턴트가 **둘 다 살아남았다**
+    // (적대적 검증 2026-08-27 — 동치였다): `i`가 0부터 하나씩 오르고 목록이 오름차순이라
+    // 소비만 해도 커서가 늘 맞은 자리에 온다. 방어가 둘이면 하나는 반드시 검증 밖에 남는다.
+    var skip_at: usize = 0;
     for (inverse.changes, 0..) |ic, i| {
-        if (i < sels.items.len) sels.items[i] = editor_selection.Selection.at(ic.end);
+        if (i >= sels.items.len) break;
+        var at = ic.end;
+        if (skip_at < skip_overs.items.len and skip_overs.items[skip_at] == i) {
+            at += 1;
+            skip_at += 1;
+        }
+        sels.items[i] = editor_selection.Selection.at(at);
+    }
+
+    // **자동으로 닫은 쌍은 caret이 가운데다**(§3.7). 위 규칙은 "넣은 것 뒤"라 `()`에서 닫는 괄호
+    // **뒤**에 서게 되는데, 그러면 자동 닫기가 오히려 방해가 된다 — 사용자는 그 안에 이어 친다.
+    //
+    // **감싼 경우는 보정하지 않는다**: 여는 것과 닫는 것이 별개 변경이라 그 사이 선택이 그대로
+    // 살아 있고, caret은 그 끝에 서는 것이 맞다.
+    for (ranges.items, 0..) |r, i| {
+        if (i >= sels.items.len) break;
+        if (r.text.len == 2 and r.start == r.end) {
+            const p = editor_pairs.pairFor(r.text[0]) orelse continue;
+            if (p.close != r.text[1]) continue;
+            sels.items[i] = editor_selection.Selection.at(sels.items[i].focus -| 1);
+            // **자동으로 넣은 닫는 문자를 표시해 둔다**(§3.7) — Backspace가 그것만 함께 지운다.
+            term.rt.editor_auto_closed_at = sels.items[i].focus;
+        }
     }
 
     pushUndo(self, term, inverse, before, before_primary, .insert);
@@ -4363,6 +4473,15 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
             // "⌥←로 간 곳"과 "⌥⌫가 지운 곳"이 갈리지 않는다).
             if (backward) {
                 if (lo == 0) continue; // 문서 처음: 지울 것이 없다
+                // **자동으로 넣은 닫는 문자를 함께 지운다**(§3.7). `(|)`에서 Backspace를 누르면
+                // 여는 것만 지우고 닫는 것이 남으면 사용자가 그것을 또 지워야 한다 — 자동 닫기가
+                // 만든 일을 자동 닫기가 되무르는 것이 맞다.
+                //
+                // **표시가 지금 caret 바로 뒤일 때만** 그렇게 한다. 사용자가 직접 친 닫는 문자는
+                // 표시가 없고, 그 자리를 떠났다가 돌아온 경우도 표시가 버려져 있다.
+                if (unit == .char and term.rt.editor_auto_closed_at == hi and hi < content.len) {
+                    hi = nextCharBoundary(content, hi);
+                }
                 lo = switch (unit) {
                     .char => prevCharBoundary(content, lo),
                     .word => editor_motion.wordLeft(content, lo),
@@ -12208,6 +12327,330 @@ test "DEL5 한글·탭이 섞여도 단위 삭제가 깨진 UTF-8을 만들지 �
     try testing.expect(deleteBy(fx.session, t3, false, .word));
     try testing.expectEqualStrings("영어\n", t3.rt.editor_doc.?.file.content);
     try testing.expect(std.unicode.utf8ValidateSlice(t3.rt.editor_doc.?.file.content));
+}
+
+test "AID1 괄호를 치면 닫히고 caret이 가운데 선다 (§3.7)" {
+    // **§1.1의 "VSCode 무회귀"에서 없으면 즉시 체감되는 보조다.** 그리고 caret이 닫는 괄호
+    // **뒤**에 서면 자동 닫기가 오히려 방해가 된다 — 사용자는 그 **안에** 이어 친다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid1.txt", "\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "("));
+    try testing.expectEqualStrings("()\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus); // **가운데**
+
+    // 이어서 치면 안에 들어간다.
+    try testing.expect(insertText(fx.session, term, "x"));
+    try testing.expectEqualStrings("(x)\n", term.rt.editor_doc.?.file.content);
+}
+
+test "AID2 닫는 괄호를 다시 치면 지나간다 — 겹쳐 쓰지 않는다 (type-over §3.7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid2.txt", "\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "("));
+    // `()`의 가운데에서 `)`를 치면 **하나 더 넣지 않고** caret만 넘어간다.
+    const undo_before = term.rt.editor_undo_len;
+    try testing.expect(insertText(fx.session, term, ")"));
+    // **undo 스택이 안 늘었다.** 문서가 안 바뀐 편집을 쌓으면 되돌리기 한 번이 아무것도 안 하는
+    // 것처럼 보인다 — 묶음이 그것을 가리므로(같은 종류·500ms 안이면 앞 편집과 한 묶음이 된다)
+    // **문서 상태만으로는 안 드러난다**(적대적 검증 2026-08-27).
+    try testing.expectEqual(undo_before, term.rt.editor_undo_len);
+    try testing.expectEqualStrings("()\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
+
+    // **빈 편집이 쌓이지 않았다** — undo가 헛돌면 사용자가 되돌리기를 믿지 못한다.
+    //
+    // 전부 건너뛴 경우를 못 알아보면 **길이 0짜리 delta가 undo 스택에 쌓이고**, 되돌리기 한 번이
+    // 아무것도 안 바꾸는 것처럼 보인다(적대적 검증 2026-08-27 — 그 갈래를 지운 뮤턴트가 살아남아
+    // 여기까지 재게 됐다). 그래서 **문서 상태만이 아니라 되돌리기 횟수**를 잰다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("\n", term.rt.editor_doc.?.file.content); // **한 번**에 원래대로
+    try testing.expect(!undoEdit(fx.session, term)); // 더 되돌릴 것이 없다
+}
+
+test "AID3 선택이 있으면 감싼다 — 고른 것을 지우지 않는다 (surround §3.7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid3.txt", "alpha beta\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // "alpha"
+    try testing.expect(insertText(fx.session, term, "\""));
+    try testing.expectEqualStrings("\"alpha\" beta\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번의 감싸기는 undo 하나다** — 앞뒤 두 변경이지만 `delta.apply` 한 번이다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("alpha beta\n", term.rt.editor_doc.?.file.content);
+}
+
+test "AID4 붙여넣기·IME 확정은 보조를 타지 않는다 (§3.7)" {
+    // **여러 글자가 한 번에 오는 경로에서 괄호를 닫으면 사용자가 넣지 않은 문자가 문서에 들어간다.**
+    // 한글 IME 확정(N3)이 같은 경로를 쓰므로 지금 막아 두는 것이 맞다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid4.txt", "\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "((")); // 두 글자 = 보조 없음
+    try testing.expectEqualStrings("((\n", term.rt.editor_doc.?.file.content);
+
+    // 붙여넣기도 마찬가지다.
+    const t2 = try undoFixture(&fx, allocator, "aid4b.txt", "\n");
+    t2.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(pasteText(fx.session, t2, "("));
+    try testing.expectEqualStrings("(\n", t2.rt.editor_doc.?.file.content);
+}
+
+test "AID6 커서마다 판단이 달라도 각자 제자리에 선다 (§3.7 × §9.1)" {
+    // **커서 하나는 지나가고(type-over) 다른 하나는 넣는** 경우가 실재한다. caret 재배치가
+    // `inverse.changes`와 **인덱스로** 맞추는데 건너뛴 커서가 delta에 안 실리면 그 뒤 커서들이
+    // 밀려 **엉뚱한 자리로 튄다** — 실측으로 잡았다(적대적 검증 2026-08-27: type-over 커서가
+    // 다른 커서 자리인 4로 갔다).
+    //
+    // 고친 방식은 **빈 변경으로 자리를 지키는 것**이다: 길이 0에 빈 텍스트라 버퍼는 안 바뀌고
+    // 인덱스만 맞는다. 전부 건너뛴 경우는 delta 없이 끝내 **빈 편집이 undo에 쌓이지 않는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid6.txt", "a) b\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(1); // ")" 앞 → 지나간다
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(4); // "b" 뒤 → 넣는다
+    term.rt.editor_extra_selections = extras;
+
+    try testing.expect(insertText(fx.session, term, ")"));
+    try testing.expectEqualStrings("a) b)\n", term.rt.editor_doc.?.file.content);
+
+    // 각자 제자리다 — 지나간 커서는 `)` **뒤**(2), 넣은 커서는 넣은 것 뒤(5).
+    const a = term.rt.editor_selection.?.focus;
+    const b = term.rt.editor_extra_selections[0].focus;
+    try testing.expect((a == 2 and b == 5) or (a == 5 and b == 2));
+}
+
+test "AID7 감싸기가 커서 여럿·역방향 선택에서도 맞는다 (§3.7 × §9.1)" {
+    // **감싸기는 한 커서당 변경 둘**(여는 것·닫는 것)이라, 커서가 여럿이면 delta에 네 개가 실린다.
+    // 정렬·비겹침이 깨지면 `apply`가 통째로 거절하고 **아무 일도 안 일어난다** — 사용자는 `(`가
+    // 죽은 키가 된 것으로 겪는다.
+    //
+    // **역방향 선택**(뒤에서 앞으로 끌어 고른 것)도 같은 자리다. `start()`/`end()`가 정렬해 주므로
+    // 맞아야 하지만, 그 전제가 이 경로에서 지켜지는지는 별개다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // ⑴ 커서 둘이 각자 낱말을 감싼다.
+    const term = try undoFixture(&fx, allocator, "aid7.txt", "aa bb\n");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.fromPoints(3, 5);
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(insertText(fx.session, term, "("));
+    try testing.expectEqualStrings("(aa) (bb)\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번의 감싸기는 undo 하나다** — 커서가 둘이어도(§3.3).
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("aa bb\n", term.rt.editor_doc.?.file.content);
+
+    // ⑵ 역방향 선택도 같다.
+    const t2 = try undoFixture(&fx, allocator, "aid7b.txt", "xyz\n");
+    t2.rt.editor_selection = editor_selection.Selection.fromPoints(3, 0); // 뒤에서 앞으로
+    try testing.expect(insertText(fx.session, t2, "["));
+    try testing.expectEqualStrings("[xyz]\n", t2.rt.editor_doc.?.file.content);
+}
+
+test "AID8 다른 편집이 끼면 자동 닫기 표식이 낡지 않는다 (§3.7)" {
+    // **표식은 offset이라 그 앞이 바뀌면 뜻이 달라진다.** 붙여넣기·다른 커서의 편집이 앞쪽 길이를
+    // 바꾸면 같은 숫자가 **다른 글자**를 가리키고, 그때 Backspace를 누르면 사용자가 직접 친 글자가
+    // 함께 사라진다.
+    //
+    // 지금은 `breakUndoGroup`이 표식을 버리므로 안전하다 — 그 함수가 *"커서가 편집 아닌 이유로
+    // 움직였다"*의 단일 자리이고 붙여넣기도 그것을 부른다. **그 결합이 이 판정자의 대상**이다:
+    // 둘이 갈리면 여기서 잡힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid8.txt", "\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "("));
+    try testing.expectEqualStrings("()\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(term.rt.editor_auto_closed_at != null);
+
+    // **붙여넣기가 사이에 낀다** — 표식이 버려져야 한다.
+    try testing.expect(pasteText(fx.session, term, "XY"));
+    try testing.expectEqualStrings("(XY)\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(term.rt.editor_auto_closed_at == null);
+
+    // Backspace는 **"Y"만** 지운다 — 표식이 남아 있었으면 ")"까지 함께 갔을 것이다.
+    try testing.expect(deleteText(fx.session, term, true));
+    try testing.expectEqualStrings("(X)\n", term.rt.editor_doc.?.file.content);
+}
+
+test "AID9 문맥을 못 물어 생기는 한계를 못 박는다 (§3.7 저하 동작)" {
+    // **§3.7이 정한 저하 동작의 경계를 판정자로 고정한다.** 토큰 층(§5.3)이 없으므로 "지금
+    // 문자열/주석 안인가"를 못 묻고, 그래서 **문자열 안에서도 괄호가 닫힌다**. 그것이 지금의
+    // 계약이고, grammar가 붙으면 달라진다 — 그때 이 판정자가 **바뀌어야 할 자리**를 가리킨다.
+    //
+    // 판정자를 안 두면 나중에 문맥 판정을 넣었을 때 "원래 이랬나 아닌가"를 아무도 모른다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "aid9.txt", "s = \"\"\n");
+
+    // 문자열 **안**(따옴표 사이)에서 `(`를 친다 — 문맥을 알면 안 닫는 쪽이 낫지만 지금은 닫는다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, term, "("));
+    try testing.expectEqualStrings("s = \"()\"\n", term.rt.editor_doc.?.file.content);
+
+    // **읽기 전용·비교 뷰에서는 보조 이전에 편집 자체가 막힌다** — 보조가 그 문을 우회하지 않는다.
+    term.rt.editor_doc.?.file.read_only = true;
+    try testing.expect(!insertText(fx.session, term, "("));
+    term.rt.editor_doc.?.file.read_only = false;
+    term.rt.editor_diff = .{};
+    try testing.expect(!insertText(fx.session, term, "("));
+    term.rt.editor_diff = null;
+    try testing.expectEqualStrings("s = \"()\"\n", term.rt.editor_doc.?.file.content);
+}
+
+test "AID10 한글 주변과 Enter에서도 규칙이 그대로다 (§3.7 × §3.2)" {
+    // **낱말 판정이 byte 기준**(`b >= 0x80`)이라 한글도 낱말이다. 그 판정이 어긋나면 한국어
+    // 문서에서 괄호가 엉뚱하게 닫히거나 안 닫힌다 — 이 저장소의 주 사용자가 겪는 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // ⑴ 한글 **뒤**에서는 닫는다 — 뒤가 줄 끝이라 막을 이유가 없다.
+    const t1 = try undoFixture(&fx, allocator, "aid10.txt", "한글\n");
+    t1.rt.editor_selection = editor_selection.Selection.at(6);
+    try testing.expect(insertText(fx.session, t1, "("));
+    try testing.expectEqualStrings("한글()\n", t1.rt.editor_doc.?.file.content);
+
+    // ⑵ 한글 **앞**에서는 안 닫는다 — `(한글`을 의도한 것이지 `()한글`이 아니다.
+    const t2 = try undoFixture(&fx, allocator, "aid10b.txt", "한글\n");
+    t2.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t2, "("));
+    try testing.expectEqualStrings("(한글\n", t2.rt.editor_doc.?.file.content);
+
+    // ⑶ `()` 사이 Enter는 **줄만 나눈다** — 자동 들여쓰기는 언어 판정(§5)이 서야 하고
+    //    그때까지 계약 밖이다(§3.7이 문맥을 요구하는 자리와 같은 이유).
+    const t3 = try undoFixture(&fx, allocator, "aid10c.txt", "\n");
+    t3.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t3, "("));
+    try testing.expect(insertText(fx.session, t3, "\n"));
+    try testing.expectEqualStrings("(\n)\n", t3.rt.editor_doc.?.file.content);
+}
+
+test "AID11 커서가 많아도 재배치가 곱해지지 않는다 (§9.1 — 실측)" {
+    // **`MC3`이 "마크 저장소가 커서 수에 곱해지지 않는다"를 실측으로 고정한 것과 같은 축.**
+    // caret 재배치가 커서마다 건너뛴 목록을 훑으면 **커서 수에 곱해진다** — 상한이 10,000이라
+    // 1억 번이다(적대적 검증 2026-08-27이 그 형태를 잡았다).
+    //
+    // 목록이 **오름차순**이라는 성질을 쓰면 한 번의 훑기로 된다. 그 성질이 깨지면 답이 틀리므로,
+    // 이 판정자는 **큰 입력에서 답이 맞는지**로 그것을 함께 지킨다(시간을 재면 기계마다 갈린다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // ")" 가 많은 문서에서 커서를 잔뜩 세워 **전부 type-over** 시킨다.
+    const n = 2000;
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..n) |_| try doc.appendSlice(allocator, "x)");
+    try doc.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "aid11.txt", doc.items);
+
+    term.rt.editor_selection = editor_selection.Selection.at(1); // 첫 ")" 앞
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, n - 1);
+    for (extras, 1..) |*e, k| e.* = editor_selection.Selection.at(k * 2 + 1);
+    term.rt.editor_extra_selections = extras;
+
+    // **전부 지나간다** — 문서는 안 바뀌고 커서만 한 칸씩 간다.
+    const before_len = term.rt.editor_doc.?.file.content.len;
+    try testing.expect(insertText(fx.session, term, ")"));
+    try testing.expectEqual(before_len, term.rt.editor_doc.?.file.content.len);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, n * 2), term.rt.editor_extra_selections[n - 2].focus);
+
+    // **섞인 경우**도 큰 입력에서 맞는다 — 오름차순 전제가 깨지면 여기서 어긋난다.
+    const t2 = try undoFixture(&fx, allocator, "aid11b.txt", doc.items);
+    t2.rt.editor_selection = editor_selection.Selection.at(1); // 지나간다
+    const ex2 = try fx.session.allocator.alloc(editor_selection.Selection, 2);
+    ex2[0] = editor_selection.Selection.at(2); // "x" 앞 → 평범한 삽입
+    ex2[1] = editor_selection.Selection.at(3); // ")" 앞 → 지나간다
+    t2.rt.editor_extra_selections = ex2;
+    try testing.expect(insertText(fx.session, t2, ")"));
+    // 첫·셋째는 지나가고 둘째만 넣었다 — 길이가 정확히 1 늘었다.
+    try testing.expectEqual(before_len + 1, t2.rt.editor_doc.?.file.content.len);
+}
+
+test "AID5 자동으로 넣은 닫는 문자만 backspace로 함께 지운다 (§3.7)" {
+    // **§3.7: "자동으로 넣은 닫는 문자만 backspace로 함께 지운다. 사용자가 직접 친 것은 지우지
+    // 않는다."** 자동 닫기가 만든 일은 자동 닫기가 되물러야 한다 — 여는 것만 지우고 닫는 것이
+    // 남으면 사용자가 그것을 또 지운다.
+    //
+    // 그리고 **표시는 caret이 떠나면 버린다**: 안 버리면 한참 뒤에 그 자리로 돌아와 Backspace를
+    // 눌렀을 때 **옆 글자가 함께 사라진다** — 사용자가 안 만든 규칙에 당한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // ⑴ 자동으로 닫은 직후 Backspace → **둘 다** 사라진다.
+    const term = try undoFixture(&fx, allocator, "aid5.txt", "\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "("));
+    try testing.expectEqualStrings("()\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(deleteText(fx.session, term, true));
+    try testing.expectEqualStrings("\n", term.rt.editor_doc.?.file.content);
+
+    // ⑴′ **문자 단위일 때만 함께 지운다.** `⌥⌫`(낱말)·`⌘⌫`(줄)는 사용자가 **범위를 정해** 지우는
+    //     것이라, 거기에 자동 닫기 보정을 얹으면 **요청한 것보다 한 글자 더** 사라진다 —
+    //     그 축이 판정 밖이었다(적대적 검증 2026-08-27 — 단위 조건을 지운 뮤턴트가 살아남았다).
+    {
+        const t = try undoFixture(&fx, allocator, "aid5d.txt", "ab\n");
+        t.rt.editor_selection = editor_selection.Selection.at(2);
+        try testing.expect(insertText(fx.session, t, "(")); // "ab()" — 표식이 선다
+        try testing.expectEqualStrings("ab()\n", t.rt.editor_doc.?.file.content);
+        // 낱말 삭제는 **자동 닫은 ")"를 안 먹는다** — "ab("까지가 낱말 경계다.
+        try testing.expect(deleteBy(fx.session, t, true, .word));
+        try testing.expectEqualStrings(")\n", t.rt.editor_doc.?.file.content);
+    }
+
+    // ⑵ **사용자가 직접 친 닫는 문자는 안 지운다.**
+    const t2 = try undoFixture(&fx, allocator, "aid5b.txt", "x)\n");
+    t2.rt.editor_selection = editor_selection.Selection.at(1); // "x" 뒤, ")" 앞
+    try testing.expect(deleteText(fx.session, t2, true));
+    try testing.expectEqualStrings(")\n", t2.rt.editor_doc.?.file.content); // ")"는 남는다
+
+    // ⑶ **커서가 떠나면 표시를 버린다.** 자동으로 닫고 → 옮기고 → 돌아와서 Backspace.
+    const t3 = try undoFixture(&fx, allocator, "aid5c.txt", "\n");
+    t3.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t3, "["));
+    try testing.expectEqualStrings("[]\n", t3.rt.editor_doc.?.file.content);
+    try testing.expect(moveCarets(fx.session, t3, .char_right, false)); // 떠난다
+    try testing.expect(moveCarets(fx.session, t3, .char_left, false)); // 돌아온다
+    try testing.expect(deleteText(fx.session, t3, true));
+    // **"["만** 사라진다 — 표시를 안 버렸으면 "]"까지 함께 갔을 것이다.
+    try testing.expectEqualStrings("]\n", t3.rt.editor_doc.?.file.content);
 }
 
 test "EDIT8 편집하면 커서가 보이는 자리로 따라온다 (§5.2 줄 축)" {

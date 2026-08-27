@@ -9871,6 +9871,25 @@ pub fn build(b: *std.Build) void {
 
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
+    const session_host_release_manifest_step = b.step(
+        "test-session-host-release-manifest",
+        "Validate canonical session-host release manifests in Debug and ReleaseFast",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |manifest_optimize| {
+        const release_manifest_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+                .target = target,
+                .optimize = manifest_optimize,
+            }),
+        });
+        const run_release_manifest_tests = b.addRunArtifact(release_manifest_tests);
+        run_release_manifest_tests.addArg("--maru-expect-tests=5");
+        run_release_manifest_tests.setCwd(b.path("."));
+        session_host_release_manifest_step.dependOn(&run_release_manifest_tests.step);
+        session_host_step.dependOn(&run_release_manifest_tests.step);
+        test_step.dependOn(&run_release_manifest_tests.step);
+    }
     const workspace_checkpoint_step = b.step(
         "test-workspace-checkpoint-coordinator",
         "P4 C1 pure workspace checkpoint generation and Quit ordering gates",

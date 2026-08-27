@@ -898,6 +898,11 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         const vm = currentVisibleMatch(self, term) orelse break :blk null;
         break :blk .{ .line = vm.row, .start = vm.start };
     };
+    // **조합 중이면 그 글자를 끼운 사본을 그린다**(N3). 문서는 그대로다 — 조합은 확정이 아니다.
+    const preedit_rows = preeditLines(self, term, lines);
+    defer if (preedit_rows) |rows| freePreeditLines(self, term, rows);
+    const draw_lines: []const []const u8 = if (preedit_rows) |rows| rows else lines;
+
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
@@ -918,7 +923,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -2454,6 +2459,132 @@ fn markRangeInLine(
 ///
 /// **이미 보이면 아무것도 하지 않는다.** 타이핑마다 재검색이 돌므로(증분 검색) 매번 화면을 옮기면
 /// 글자 하나 지울 때마다 본문이 튄다. VSCode도 화면 안 매치로는 뷰를 움직이지 않는다.
+/// **IME 후보창이 설 자리**(N3 — 조합 중인 글자 아래). backing px, 창 좌상단 원점.
+///
+/// 편집기 Term은 코어가 sentinel이라 `imeCursorRect`의 터미널 갈래가 못 쓴다 — 그대로 두면
+/// 후보창이 **pane 좌상단**에 뜬다(조합 글자는 문서 한가운데 있는데). 한글은 후보창을 보며
+/// 고르는 입력이라 그 어긋남이 곧바로 걸린다.
+///
+/// **열은 `columnsAtOffsets`로 센다**(§5.4 MUST — 픽셀 배치의 단일 출처). 여기서 따로 세면
+/// 렌더와 갈리는 두 번째 출처가 생긴다.
+pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_diff != null) return null;
+    const doc = term.rt.editor_doc orelse return null;
+
+    // 조합 중이면 **조합을 시작한 자리**, 아니면 primary caret.
+    const at = if (term.rt.editor_preedit.len > 0)
+        term.rt.editor_preedit_at
+    else if (term.rt.editor_selection) |sel| sel.start() else return null;
+    if (at > doc.file.content.len) return null;
+
+    const doc_line = doc.file.lines.lineAt(at);
+    const row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse return null;
+    if (row < term.rt.editor_first_line) return null; // 화면 위로 벗어났다
+    const screen_row = row - term.rt.editor_first_line;
+
+    const line = doc.file.lines.line(doc_line) orelse return null;
+    const text = doc.file.content[line.start..line.contentEnd()];
+    var map: ProductColumnMap = .{ .tab_width = term.rt.editor_tab_width };
+    const col = ProductColumnMap.columnOf(&map, text, at - line.start);
+    const first_col = effectiveFirstCol(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap, term, false);
+    if (col < first_col) return null; // 가로로 벗어났다
+    const screen_col = col - first_col;
+
+    const body = editorBodyRect(self, .{
+        .x = self.active_pane_rect.x,
+        .y = self.active_pane_rect.y,
+        .w = self.active_pane_rect.w,
+        .h = self.active_pane_rect.h,
+    }, term);
+    const cw: i32 = @intCast(self.cell_width_px);
+    const ch: i32 = @intCast(self.cell_height_px);
+    return .{
+        .x = @as(i32, @intCast(body.x)) + @as(i32, @intCast(screen_col)) * cw,
+        .y = @as(i32, @intCast(body.y)) + @as(i32, @intCast(screen_row)) * ch,
+        .w = @intCast(self.cell_width_px),
+        .h = @intCast(self.cell_height_px),
+    };
+}
+
+/// 조합 중 글자를 **그리는 줄 배열에만** 끼운 사본을 만든다(N3). 조합이 없거나 끼울 자리가
+/// 화면 밖(접힘에 숨음)이면 `null` — 그때는 원래 배열을 그대로 그린다.
+///
+/// **버퍼가 아니라 화면만 바꾸는 이유**는 `setEditorPreedit`가 적어 두었다. 여기서 사본을 뜨는
+/// 것은 그 판단의 대가다 — 조합 중에만, 프레임마다 줄 **포인터** 배열 하나를 복사한다(2만 줄이면
+/// 160KB). 조합이 없으면 이 함수는 즉시 `null`이라 **평소에는 비용이 0**이다.
+///
+/// 제자리에서 바꿔치기하고 되돌리는 방법도 있었지만, 그러면 그 배열을 읽는 다른 것들(검색·클릭
+/// 좌표)이 **그리는 도중의 값**을 볼 수 있는 창이 생긴다. 조합 중에만 드는 사본이 그 창보다 싸다.
+fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?[][]const u8 {
+    if (term.rt.editor_preedit.len == 0) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const at = term.rt.editor_preedit_at;
+    if (at > doc.file.content.len) return null;
+
+    const doc_line = doc.file.lines.lineAt(at);
+    const row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse return null; // 접혀 숨었다
+    if (row >= base.len) return null;
+
+    const line = doc.file.lines.line(doc_line) orelse return null;
+    const text = doc.file.content[line.start..line.contentEnd()];
+    const off = at - line.start;
+    if (off > text.len) return null;
+
+    const spliced = self.allocator.alloc(u8, text.len + term.rt.editor_preedit.len) catch return null;
+    @memcpy(spliced[0..off], text[0..off]);
+    @memcpy(spliced[off..][0..term.rt.editor_preedit.len], term.rt.editor_preedit);
+    @memcpy(spliced[off + term.rt.editor_preedit.len ..], text[off..]);
+
+    const rows = self.allocator.alloc([]const u8, base.len) catch {
+        self.allocator.free(spliced);
+        return null;
+    };
+    @memcpy(rows, base);
+    rows[row] = spliced;
+    return rows;
+}
+
+/// `preeditLines`가 뜬 사본을 놓는다 — 끼운 줄과 배열 둘 다.
+fn freePreeditLines(self: *AppSession, term: *Term, rows: [][]const u8) void {
+    const at = term.rt.editor_preedit_at;
+    const doc = term.rt.editor_doc orelse {
+        self.allocator.free(rows);
+        return;
+    };
+    const doc_line = doc.file.lines.lineAt(@min(at, doc.file.content.len));
+    if (visibleRowOfDocLine(term, @intCast(doc_line))) |row| {
+        if (row < rows.len) self.allocator.free(rows[row]);
+    }
+    self.allocator.free(rows);
+}
+
+/// **IME 조합 중 글자를 갈아 끼운다**(N3 — native-editor.md §11). 빈 문자열이면 조합을 끝낸다.
+///
+/// **문서에 넣지 않는다.** 조합은 아직 확정이 아니므로 버퍼에 들어가면 undo·저장·검색이 그것을
+/// 진짜 내용으로 본다 — 그리고 확정될 때 그 자리를 되돌리는 편집을 한 번 더 해야 한다. 터미널이
+/// `terminal/preedit.zig`로 하는 것과 같은 판단이다(*"canonical cell grid를 바꾸지 않는다"*).
+///
+/// 자리는 **조합을 시작한 곳**으로 고정한다 — 그 규칙은 확정 텍스트가 이미 따르고 있다(§3.3의
+/// IME 고정). 조합 중에 커서가 움직일 일은 없지만(입력기가 키를 다 먹는다) 두 값이 갈리면
+/// **조합 글자와 확정 글자가 다른 자리에 나타난다.**
+pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void {
+    if (bytes.len == 0) {
+        if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
+        term.rt.editor_preedit = &.{};
+        return;
+    }
+    // **새 값을 먼저 복사한다.** OOM이면 보이던 조합 상태가 그대로 남는다 — 터미널 오버레이의
+    // `replace`가 같은 순서를 쓴다(사라지는 것보다 낡은 것이 낫다).
+    const next = self.allocator.dupe(u8, bytes) catch return;
+    if (term.rt.editor_preedit.len == 0) {
+        // 조합의 **시작**이다 — 이 자리에 확정 텍스트가 온다.
+        term.rt.editor_preedit_at = if (term.rt.editor_selection) |sel| sel.start() else 0;
+    }
+    if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
+    term.rt.editor_preedit = next;
+}
+
 /// 검색 매치들을 문서 offset 범위로 편다. 매치는 `(줄, 줄 안 offset)`이고 편집은 문서 offset을
 /// 받는다(§3.1) — 그 환산을 **한 곳**에 둔다. 줄 번호가 범위 밖이면 그 매치를 버린다(목록이
 /// 편집보다 낡은 순간).
@@ -5161,6 +5292,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_hit_geom = .{};
     term.rt.editor_hit_rows_len = 0;
     if (term.rt.editor_path) |p| self.allocator.free(p);
+    setEditorPreedit(self, term, ""); // 조합 중이던 글자(N3)
     dropFoldState(self, term); // 접힘 층을 통째로 놓는다(그 함수 doc)
     dropSelectionState(self, term);
     if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
@@ -5179,6 +5311,147 @@ const builtin = @import("builtin");
 // 사각도 같다 — leaf 전체를 쓰면 탭 바를 덮고 hit-test와 갈리지만 어떤 단위 테스트도 안 깨진다.
 
 /// 헤드리스 세션 + 실제 파일을 연 편집기 Term. 렌더 상태(셀 크기·padding)는 init이 안 세우므로 준다.
+/// 그린 셀 중에 이 코드포인트가 있는가 — 조합 글자가 **화면에 닿았는지**를 재는 유일한 방법이다.
+fn drawnHasCodepoint(dl: renderer.DrawList, cp: u21) bool {
+    for (dl.cells) |c| if (c.codepoint == cp) return true;
+    return false;
+}
+
+test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니라 (N3)" {
+    // 편집기 Term은 코어가 sentinel이라 `imeCursorRect`의 터미널 갈래를 못 쓴다. 그대로 두면
+    // **pane 좌상단**으로 떨어지는데, 한글은 후보창을 보며 고르는 입력이라 그 어긋남이 곧바로 걸린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    if (appendPaneFrame(fx.session, fx.leaf_rect, term)) |*d| { // pane 사각을 세운다
+        var drawn = d.*;
+        drawn.dl.deinit(allocator);
+    }
+
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+
+    // ⑴ 줄 머리(offset 0)면 본문 왼쪽 끝이다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    const head = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+
+    // ⑵ 같은 줄 다섯 글자 뒤면 **다섯 칸 오른쪽**이다 — 구석 고정이면 둘이 같아진다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    const mid = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+    try testing.expectEqual(head.y, mid.y);
+    try testing.expectEqual(head.x + 5 * @as(i32, @intCast(fx.session.cell_width_px)), mid.x);
+
+    // ⑶ 둘째 줄이면 **한 행 아래**다.
+    term.rt.editor_selection = editor_selection.Selection.at(13); // "const a = 1;\n" 다음
+    const next_line = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+    try testing.expectEqual(head.y + @as(i32, @intCast(fx.session.cell_height_px)), next_line.y);
+
+    // ⑷ **조합 중이면 caret이 아니라 조합을 시작한 자리**를 가리킨다 — 조합 중에 caret이 다른
+    //    곳을 가리키게 되어도 후보창은 글자 아래에 남아야 한다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    const while_composing = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+    try testing.expectEqual(mid.x, while_composing.x);
+
+    // ⑸ pane 구석이 아니다(그 폴백과 실제로 다르다).
+    try testing.expect(while_composing.x != @as(i32, @intCast(fx.session.active_pane_rect.x)) or
+        while_composing.y != @as(i32, @intCast(fx.session.active_pane_rect.y)));
+    _ = body;
+}
+
+test "IME1 조합 중 글자는 화면에 뜨고 문서에는 안 들어간다 (N3 §11)" {
+    // **실측으로 연 자리다**(적대적 검증 2026-08-27): 편집기 Term의 코어는 1×1 sentinel이라
+    // 조합 글자가 거기 얹히면 화면에 닿지 않았다 — 한글을 치면 조합 중에는 아무것도 안 보이고
+    // 음절이 확정될 때만 툭 나타났다. 확정 텍스트는 이미 문서로 가고 있었고 **조합만 갈 곳이
+    // 없었다.**
+    //
+    // 그리고 **문서에는 안 들어가야 한다.** 조합은 확정이 아니므로 버퍼에 넣으면 undo·저장·검색이
+    // 그것을 진짜 내용으로 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    const before = try allocator.dupe(u8, term.rt.editor_doc.?.file.content);
+    defer allocator.free(before);
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c"); // 조합 "한"(U+D55C)
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C)); // 화면에 있다
+    try testing.expectEqualStrings(before, term.rt.editor_doc.?.file.content); // 문서는 그대로다
+}
+
+test "IME2 조합은 조합을 시작한 자리에 그려진다 (N3 §11)" {
+    // 줄 머리에 그리면 caret이 중간일 때 **글자가 딴 데 뜬다**. 확정 텍스트가 이미 "조합을 시작한
+    // 곳"으로 가는 규칙을 지키므로(§3.3 IME 고정), 조합 글자도 같은 자리여야 둘이 안 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+
+    // 첫 줄이 "const a = 1;" — 5번째 byte(=`t` 뒤)에서 조합을 시작한다.
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c");
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_preedit_at);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    // 조합 글자가 선 셀의 **열**을 찾는다. 줄 머리(gutter 다음 첫 글자)면 실패한다.
+    var found_col: ?u16 = null;
+    var const_t_col: ?u16 = null;
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint == 0xD55C) found_col = c.col;
+        if (c.row == 0 and c.codepoint == 't') const_t_col = c.col; // "const"의 t
+    }
+    const hangul_col = found_col orelse return error.PreeditNotDrawn;
+    const t_col = const_t_col orelse return error.AnchorNotDrawn;
+    try testing.expectEqual(t_col + 1, hangul_col); // `t` 바로 뒤다
+}
+
+test "IME3 조합이 끝나면 화면에서도 사라진다 (N3)" {
+    // 남으면 확정 글자와 조합 글자가 **둘 다** 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c");
+    setEditorPreedit(fx.session, term, ""); // 입력기가 조합을 거둔다
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(!drawnHasCodepoint(drawn.dl, 0xD55C));
+}
+
+test "IME4 조합 자리는 시작할 때 한 번만 잡는다 (N3)" {
+    // 'ㅎ' → '하' → '한'은 **같은 자리에서** 갈아 끼우는 것이다. 갱신마다 caret을 다시 읽으면
+    // 자리가 흔들리고, 그러면 확정 텍스트가 조합이 보이던 곳과 다른 데로 간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+
+    term.rt.editor_selection = editor_selection.Selection.at(5);
+    setEditorPreedit(fx.session, term, "\xe3\x85\x8e"); // "ㅎ"
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_preedit_at);
+
+    // 조합 중에 커서가 어떤 이유로든 움직여도 자리는 그대로다.
+    term.rt.editor_selection = editor_selection.Selection.at(9);
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c"); // "한"
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_preedit_at);
+}
+
 const PaneFixture = struct {
     session: *AppSession,
     term: *Term,

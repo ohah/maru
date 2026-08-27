@@ -191,6 +191,16 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
             if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
             return;
         };
+        // **편집기 Term이면 코어가 아니라 문서 쪽에 둔다**(N3). 편집기의 코어는 1×1 sentinel이라
+        // 거기 얹은 조합 글자는 **화면에 닿지 않는다** — 실측: 한글을 치면 조합 중에는 아무것도
+        // 안 보이고 음절이 확정될 때만 툭 나타났다(적대적 검증 2026-08-27). 확정 텍스트는 이미
+        // 편집기로 가고 있었으므로(`sendCommittedText`) 조합만 갈 곳이 없었던 것이다.
+        if (editorTermBySurfaceId(self, target_id)) |editor_term| {
+            editor_ops.setEditorPreedit(self, editor_term, bytes);
+            self.metal_dirty = true; // 편집기는 출력이 없어 아무도 안 깨운다
+            if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
+            return;
+        }
         surface.lockCore(self.io);
         _ = surface.setPreeditLocked(bytes);
         surface.unlockCore(self.io);
@@ -228,6 +238,9 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
 /// find/palette 조합을 놓쳤다(단일-출처 위반 → 조합 보호·표시 버그). inputFocus로 통일.
 pub fn imeComposingActive(self: *AppSession) bool {
     if (self.ime_terminal_target_id) |target_id| {
+        // 편집기 Term의 조합은 문서 쪽에 있다(N3) — 코어를 물으면 늘 "조합 없음"이라, 조합 보호가
+        // 걸려야 할 자리에서 안 걸린다.
+        if (editorTermBySurfaceId(self, target_id)) |editor_term| return editor_term.rt.editor_preedit.len > 0;
         const surface = imeTerminalSurfaceById(self, target_id) orelse return false;
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
@@ -587,6 +600,19 @@ pub fn encodeImeReplayKeyTo(
 /// `terminalSurfaceById`가 `kind != .terminal`을 걸러 내는 것과 짝이다 — 그쪽은 "터미널만",
 /// 이쪽은 "편집기만"이다. 둘을 한 함수로 합치면 호출자가 kind를 다시 물어야 하고, 그 물음이
 /// 빠지는 날 확정 바이트가 엉뚱한 Term으로 간다.
+/// 조합이 향하는 편집기 Term — 고정(pin)이 있으면 그것, 없으면 활성 Term.
+fn activeEditorTermForIme(self: *AppSession) ?*Term {
+    if (self.ime_terminal_target_id) |target_id| return editorTermBySurfaceId(self, target_id);
+    if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    return if (term.kind == .editor) term else null;
+}
+
+/// 이 surface id가 편집기 Term인가 — 그룹 밖(app_session)에서도 묻는다(포커스 상실 확정).
+pub fn editorTermForIme(self: *AppSession, id: u64) ?*Term {
+    return editorTermBySurfaceId(self, id);
+}
+
 fn editorTermBySurfaceId(self: *AppSession, id: u64) ?*Term {
     const loc = term_ops.findTermWhere(self, id, struct {
         fn pred(want: u64, term: *Term) bool {
@@ -939,6 +965,14 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
     }
     // [4e-2, §6·1-B] 활성 Term이 web이면 터미널 커서(sentinel)가 없다 — 본문 origin 폴백 rect를 준다(WebKit이 웹
     // 포커스 IME 후보창 위치를 자체 관리, 4d). web Term 없으면 이 분기 미진입(byte-identical).
+    // **편집기 Term은 문서 caret 아래에 둔다**(N3). 아래 폴백은 pane **좌상단**이라, 조합 글자가
+    // 문서 한가운데 있는데 후보창은 구석에 뜬다 — 한글은 후보창을 보며 고르는 입력이라 그 어긋남이
+    // 곧바로 걸린다.
+    if (activeEditorTermForIme(self)) |editor_term| {
+        if (editor_ops.editorImeCaretRect(self, editor_term)) |r| {
+            return .{ .x = @floatFromInt(r.x), .y = @floatFromInt(r.y), .w = @floatFromInt(r.w), .h = @floatFromInt(r.h) };
+        }
+    }
     if (!term_ops.activeTermIsTerminal(self)) {
         return .{ .x = @floatFromInt(self.active_pane_rect.x), .y = @floatFromInt(self.active_pane_rect.y), .w = cw, .h = ch };
     }

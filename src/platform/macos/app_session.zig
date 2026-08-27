@@ -1784,6 +1784,14 @@ const TermRuntime = struct {
     /// 렌더가 아니라 **입력이 세운다**. 렌더는 이 값을 읽어 띠를 그릴 뿐이고, 다음 프레임이 덮지
     /// 않는다 — `editor_hit_*`(렌더가 굳히는 스냅숏)와 방향이 반대다.
     editor_selection: ?maru.session.editor.selection.Selection = null,
+    /// **IME 조합 중 글자**(N3 — native-editor.md §11). 문서에 넣지 않고 **화면에만** 끼워 그린다 —
+    /// 조합은 아직 확정이 아니므로 버퍼에 들어가면 undo·저장·검색이 전부 그것을 진짜 내용으로 본다.
+    /// 터미널이 `terminal/preedit.zig`로 하는 것과 **같은 모델**이다(줄에 끼우고 뒤를 민다).
+    ///
+    /// 편집기 Term은 코어가 1×1 sentinel이라 그쪽 오버레이가 화면에 닿지 않는다 — 그래서 여기 든다.
+    editor_preedit: []u8 = &.{},
+    /// 조합이 시작된 **문서 offset**. 확정 텍스트가 갈 자리이자 조합 글자를 끼울 자리다.
+    editor_preedit_at: usize = 0,
     /// **자동으로 넣은 닫는 문자**가 서 있는 offset(§3.7). Backspace가 그것만 함께 지운다.
     ///
     /// **사용자가 직접 친 것은 안 지운다** — 그러려면 "자동 삽입된 것"을 표시해 둬야 하고,
@@ -12864,6 +12872,25 @@ pub const AppSession = struct {
     }
 
     fn commitTerminalCompositionWithFlush(self: *AppSession, flush: bool) bool {
+        // **편집기 조합은 코어에 없다**(N3). 아래는 sentinel 코어의 preedit를 읽는데 편집기는 늘
+        // 비어 있어 *"확정할 것이 없다"*고 답하고 고정만 푼다 — 그러면 화면에 그려지던 조합 글자가
+        // **영영 남는다**(적대적 검증 2026-08-27). 포커스를 잃으면 확정한다: Terminal.app·Ghostty
+        // 의미론이고, 이 파일의 `setFocused`가 이미 그것을 소유한다고 적어 두었다.
+        if (self.ime_terminal_target_id) |target_id| {
+            if (input_ops.editorTermForIme(self, target_id)) |editor_term| {
+                const bytes = editor_term.rt.editor_preedit;
+                if (bytes.len > 0) {
+                    // 조합을 시작한 자리에 넣는다 — 확정 텍스트가 따르는 그 규칙 그대로다.
+                    editor_term.rt.editor_selection = maru.session.editor.selection.Selection.at(editor_term.rt.editor_preedit_at);
+                    editor_ops.clearExtraSelections(self, editor_term);
+                    _ = editor_ops.insertText(self, editor_term, bytes);
+                }
+                editor_ops.setEditorPreedit(self, editor_term, "");
+                self.ime_terminal_target_id = null;
+                self.metal_dirty = true;
+                return true;
+            }
+        }
         // Surface overlay를 먼저 지우지 않는다. 같은 lock 구간에서 ordered input queue가 marked
         // text를 소유한 뒤에만 take한다. queue allocation OOM이면 overlay+pin을 그대로 유지해 다음
         // focus callback에서 재시도하며, 중복 callback은 성공한 첫 take 뒤 null을 보므로 재전송하지 않는다.
@@ -38936,6 +38963,48 @@ test "EF21 두 입력의 IME 조합은 서로 독립이다 (§5.1)" {
     input_ops.imeMarked(session, "\xea\xb0\x80");
     input_ops.imeEnd(session, null);
     try std.testing.expectEqualStrings("\xeb\x8b\xa4", session.chrome_host.find.replace.preedit.items); // 그대로
+}
+
+test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 글자가 안 남는다 (N3)" {
+    // **편집기 조합은 코어에 없다.** 확정 경로가 sentinel 코어만 보면 "확정할 것 없음"으로 답하고
+    // 고정만 푸는데, 그러면 화면에 그려지던 조합 글자가 **영영 남는다**(적대적 검증 2026-08-27).
+    // Terminal.app·Ghostty 의미론대로 **확정**한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "ab\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(1);
+
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "\xed\x95\x9c"); // 조합 "한"
+    try std.testing.expectEqual(@as(usize, 3), term.rt.editor_preedit.len);
+    try std.testing.expect(input_ops.imeComposingActive(session)); // 조합 중으로 보고한다
+
+    session.setFocused(false); // 앱 전환
+
+    // 조합은 **문서로 확정**되고 화면 상태는 비었다.
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    try std.testing.expectEqualStrings("a\xed\x95\x9cb\n", term.rt.editor_doc.?.file.content);
 }
 
 test "EF10 모달이 강조를 멎게 해도 ⌘G는 이어진다 — `find_nav`를 내리는 대가의 크기" {

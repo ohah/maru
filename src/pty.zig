@@ -45,6 +45,10 @@ pub const SpawnRequest = types.SpawnRequest;
 pub const plannedBackendForMacOS = types.plannedBackendForMacOS;
 pub const resolveInteractiveShell = types.resolveInteractiveShell;
 pub const selfResourceSample = session.selfResourceSample;
+// host-backed 터미널의 트리를 앱이 직접 재려면 **뿌리 pid를 밖에서 받는** 표본기가 필요하다(그 PTY의
+// `PtySession`은 세션 host 프로세스 안에 있다). 배럴에서 내보내 소비처가 `pty/macos.zig`를 직접 파고들지 않게 한다.
+pub const processTreeSamples = session.processTreeSamples;
+pub const processResourceSample = session.processResourceSample;
 
 test {
     // Aggregate this layer's child-file tests into the build. refAllDecls is

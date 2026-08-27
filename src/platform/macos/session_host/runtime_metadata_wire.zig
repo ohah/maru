@@ -90,6 +90,10 @@ pub const OwnedMetadataDto = struct {
     clipboard_read_seq: u64,
     foreground_available: bool,
     foreground_pgid: ?i32,
+    /// PTY 자식 뿌리 pid와 그 소유 host 프로세스 pid(구 host면 0). GUI 상태바가 host-backed 터미널의
+    /// 트리와 데몬 자신을 재는 두 뿌리다(docs/status-bar.md §4.1).
+    child_pid: i32,
+    host_pid: i32,
     cwd_range: Range,
     title_range: Range,
     ssh_range: ?Range,
@@ -154,6 +158,8 @@ pub const OwnedMetadataDto = struct {
             a.clipboard_read_seq != b.clipboard_read_seq or
             a.foreground_available != b.foreground_available or
             a.foreground_pgid != b.foreground_pgid or
+            a.child_pid != b.child_pid or
+            a.host_pid != b.host_pid or
             !std.mem.eql(u8, a.cwd(), b.cwd()) or
             !std.mem.eql(u8, a.windowTitle(), b.windowTitle()) or
             !optionalStringEql(a.sshRemoteDest(), b.sshRemoteDest()) or
@@ -245,6 +251,8 @@ pub fn ownedMetadataSemanticEqlEvent(
         dto.clipboard_read_seq != event.clipboard_read_seq or
         dto.foreground_available != event.foreground_available or
         dto.foreground_pgid != event.foreground_pgid or
+        dto.child_pid != event.child_pid or
+        dto.host_pid != event.host_pid or
         dto.process_count != event.process_count or
         !runtime_event_wire.decodedStringSpanEqualsBytes(
             event_payload,
@@ -514,6 +522,8 @@ fn metadataSemanticDigest(
     hashBool(&hasher, dto.foreground_available);
     hashBool(&hasher, dto.foreground_pgid != null);
     if (dto.foreground_pgid) |pgid| hashInt(&hasher, i32, pgid);
+    hashInt(&hasher, i32, dto.child_pid);
+    hashInt(&hasher, i32, dto.host_pid);
     hashRange(&hasher, dto.cwd_range, backing);
     hashRange(&hasher, dto.title_range, backing);
     hashBool(&hasher, dto.ssh_range != null);
@@ -712,6 +722,8 @@ fn materializePreflight(
         .clipboard_read_seq = metadata.clipboard_read_seq,
         .foreground_available = metadata.foreground_available,
         .foreground_pgid = metadata.foreground_pgid,
+        .child_pid = metadata.child_pid,
+        .host_pid = metadata.host_pid,
         .cwd_range = undefined,
         .title_range = undefined,
         .ssh_range = null,
@@ -932,6 +944,8 @@ fn materializePreparedEventMetadata(
             recipe.foreground_pgid
         else
             null,
+        .child_pid = recipe.child_pid,
+        .host_pid = recipe.host_pid,
         .cwd_range = ownedRange(projection.cwd),
         .title_range = ownedRange(projection.window_title),
         .ssh_range = if (projection.ssh_remote_dest_present_raw == 1)
@@ -999,6 +1013,40 @@ test "runtime metadata wire owns current metadata event projection" {
     for (dto.foregroundProcesses()[0].bytes[3..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
+test "metadata wire: child_pid/host_pid는 실려 오면 그대로, 구 host면 0이다" {
+    // 이 테스트가 증명하는 것: 상태바 리소스 항목이 host-backed 터미널을 재는 **유일한 뿌리**가 이 두
+    // 스칼라다(docs/status-bar.md §4.1). 값이 흐르지 않으면 그 탭이 조용히 `—`로 남고, 반대로 이 키를
+    // 필수로 만들면 **구 host의 관측 전체가 Malformed**가 되어 터미널이 아예 안 뜬다 — 둘 다 화면에서만
+    // 드러나는 종류라 wire 층에서 못박는다(docs/session-host-upgrade.md §3 "관측 metadata에 스칼라를 더할 때").
+    const allocator = std.testing.allocator;
+
+    const with_pids =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/repo","window_title":"w","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
+        \\"foreground_available":false,"foreground_pgid":null,"child_pid":4242,"host_pid":99,"processes":[]}}
+    ;
+    var decoded = try decodeMetadataEvent(allocator, with_pids, .supported);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(i32, 4242), decoded.current.child_pid);
+    try std.testing.expectEqual(@as(i32, 99), decoded.current.host_pid);
+
+    // 구 host: 키 자체가 없다. `Malformed`가 아니라 0이어야 한다 — 0은 "모른다"이고 소비자는 그때
+    // 표본을 못 얻는 것으로 다룬다(0을 그리면 "0바이트를 쓰는 중"이라는 거짓말이 된다).
+    const legacy =
+        \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/repo","window_title":"w","ssh_remote_dest":null,
+        \\"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,
+        \\"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    var old = try decodeMetadataEvent(allocator, legacy, .supported);
+    defer old.deinit();
+    try std.testing.expectEqual(@as(i32, 0), old.current.child_pid);
+    try std.testing.expectEqual(@as(i32, 0), old.current.host_pid);
+
+    // pid는 **foreground 가용성과 무관**하다 — foreground 조회가 실패해도 PTY 뿌리는 그대로 있다.
+    // 위 두 payload가 모두 `foreground_available:false`인데 첫 번째가 pid를 살려 낸 것이 그 증거다.
+    try std.testing.expect(!decoded.current.foreground_available);
+}
+
 test "runtime metadata seal inventory covers every OwnedMetadataDto field" {
     // The three seal functions (descriptor, structure, semantic digest) enumerate these fields by
     // hand. A new field — especially a second heap slice — would otherwise slip past the seal and
@@ -1015,7 +1063,8 @@ test "runtime metadata seal inventory covers every OwnedMetadataDto field" {
         "mouse_tracking_mode",    "bracketed_paste",
         "bell_count",             "clipboard_write_seq",
         "clipboard_read_seq",     "foreground_available",
-        "foreground_pgid",        "cwd_range",
+        "foreground_pgid",        "child_pid",
+        "host_pid",               "cwd_range",
         "title_range",            "ssh_range",
         "clipboard_target_range", "processes",
         "process_count",

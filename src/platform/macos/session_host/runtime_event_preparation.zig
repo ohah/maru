@@ -52,6 +52,10 @@ pub const MetadataPreparationRecipe = struct {
     foreground_available_raw: u8 = 0,
     foreground_pgid_present_raw: u8 = 0,
     foreground_pgid: i32 = 0,
+    /// PTY 자식 뿌리와 host 프로세스 pid. **선택 필드라 present 플래그가 없다** — 구 host면 0이고,
+    /// 0은 "모른다"와 "없다"를 가를 필요가 없는 값이다(pid 0은 유효한 대상이 아니다).
+    child_pid: i32 = 0,
+    host_pid: i32 = 0,
     cwd: StringRecipe = .{},
     window_title: StringRecipe = .{},
     ssh_remote_dest_present_raw: u8 = 0,
@@ -280,6 +284,8 @@ fn buildMetadataRecipe(
         .foreground_available_raw = @intFromBool(metadata.foreground_available),
         .foreground_pgid_present_raw = @intFromBool(metadata.foreground_pgid != null),
         .foreground_pgid = metadata.foreground_pgid orelse 0,
+        .child_pid = metadata.child_pid,
+        .host_pid = metadata.host_pid,
         .ssh_remote_dest_present_raw = @intFromBool(metadata.ssh_remote_dest != null),
         .process_count = metadata.process_count,
     };
@@ -355,6 +361,9 @@ fn validateFillPlan(
         return error.Malformed;
     if (recipe.process_count > max_process_entries or
         recipe.process_count != metadata.process_count)
+        return error.Malformed;
+    // pid 둘은 범위 제약이 없으므로 **원본과 같은가**로만 본다 — recipe가 관측과 갈리면 seal이 무의미해진다.
+    if (recipe.child_pid != metadata.child_pid or recipe.host_pid != metadata.host_pid)
         return error.Malformed;
     if (recipe.foreground_available_raw == 0 and
         (recipe.foreground_pgid_present_raw != 0 or recipe.foreground_pgid != 0 or
@@ -597,16 +606,17 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
         .{ "pid", i32 }, .{ "name_len", u8 }, .{ "name_digest", Digest },
     });
     try expectExactFields(std.meta.fields(MetadataPreparationRecipe), .{
-        .{ "payload_digest", Digest },              .{ "semantic_digest", Digest },                       .{ "backing_bytes", u32 },
-        .{ "revision", u64 },                       .{ "observer_generation", u64 },                      .{ "title_generation", u32 },
-        .{ "cols", u16 },                           .{ "rows", u16 },                                     .{ "semantic_state_raw", u8 },
-        .{ "alt_active_raw", u8 },                  .{ "app_cursor_keys_raw", u8 },                       .{ "app_keypad_raw", u8 },
-        .{ "kitty_flags_raw", u8 },                 .{ "alternate_scroll_raw", u8 },                      .{ "mouse_tracking_raw", u8 },
-        .{ "mouse_tracking_mode", u8 },             .{ "bracketed_paste_raw", u8 },                       .{ "bell_count", u64 },
-        .{ "clipboard_write_seq", u64 },            .{ "clipboard_read_seq", u64 },                       .{ "foreground_available_raw", u8 },
-        .{ "foreground_pgid_present_raw", u8 },     .{ "foreground_pgid", i32 },                          .{ "cwd", StringRecipe },
-        .{ "window_title", StringRecipe },          .{ "ssh_remote_dest_present_raw", u8 },               .{ "ssh_remote_dest", StringRecipe },
-        .{ "clipboard_read_target", StringRecipe }, .{ "processes", [max_process_entries]ProcessRecipe }, .{ "process_count", u8 },
+        .{ "payload_digest", Digest },                        .{ "semantic_digest", Digest },       .{ "backing_bytes", u32 },
+        .{ "revision", u64 },                                 .{ "observer_generation", u64 },      .{ "title_generation", u32 },
+        .{ "cols", u16 },                                     .{ "rows", u16 },                     .{ "semantic_state_raw", u8 },
+        .{ "alt_active_raw", u8 },                            .{ "app_cursor_keys_raw", u8 },       .{ "app_keypad_raw", u8 },
+        .{ "kitty_flags_raw", u8 },                           .{ "alternate_scroll_raw", u8 },      .{ "mouse_tracking_raw", u8 },
+        .{ "mouse_tracking_mode", u8 },                       .{ "bracketed_paste_raw", u8 },       .{ "bell_count", u64 },
+        .{ "clipboard_write_seq", u64 },                      .{ "clipboard_read_seq", u64 },       .{ "foreground_available_raw", u8 },
+        .{ "foreground_pgid_present_raw", u8 },               .{ "foreground_pgid", i32 },          .{ "child_pid", i32 },
+        .{ "host_pid", i32 },                                 .{ "cwd", StringRecipe },             .{ "window_title", StringRecipe },
+        .{ "ssh_remote_dest_present_raw", u8 },               .{ "ssh_remote_dest", StringRecipe }, .{ "clipboard_read_target", StringRecipe },
+        .{ "processes", [max_process_entries]ProcessRecipe }, .{ "process_count", u8 },
     });
     try expectExactUnionFields(std.meta.fields(AcceptedPreparationRecipe), .{
         .{ "revoked", u64 },                        .{ "invalidated", void }, .{ "resized", resize_wire.Event },

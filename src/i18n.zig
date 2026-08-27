@@ -588,6 +588,7 @@ const Table = struct {
     // ── app_session 본체 (I3a 슬라이스 8) ──
     app_last_activity: [:0]const u8,
     app_shared_all_windows: [:0]const u8,
+    app_session_host_shared: [:0]const u8,
     app_editor: [:0]const u8,
     set_direct_input: [:0]const u8,
     app_more_lines: [:0]const u8,
@@ -1054,6 +1055,7 @@ const en: Table = .{
     .set_shell_not_found = "The shell executable was not found, so the default shell runs (needs an absolute path to the executable · this field is not the start directory)",
     .app_last_activity = "Last activity",
     .app_shared_all_windows = "Maru (app · shared by all windows)",
+    .app_session_host_shared = "Session host (shared by all windows)",
     .app_editor = "Editor",
     .set_direct_input = "Enter directly\u{2026}",
     .app_more_lines = "\u{2026} {0} more lines",
@@ -1616,6 +1618,7 @@ const ko: Table = .{
     .set_shell_not_found = "셸 실행 파일을 찾을 수 없어 기본 셸로 실행됩니다 (실행 파일 절대경로 필요 · 시작 위치는 이 필드가 아님)",
     .app_last_activity = "마지막 활동",
     .app_shared_all_windows = "Maru(앱 · 모든 창 공유)",
+    .app_session_host_shared = "세션 호스트(모든 창 공유)",
     .app_editor = "편집기",
     .set_direct_input = "직접 입력\u{2026}",
     .app_more_lines = "\u{2026} {0}줄 더",

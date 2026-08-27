@@ -134,6 +134,14 @@ pub const RuntimeObservation = struct {
     rows: u16,
     foreground_available: bool,
     foreground_pgid: ?i32,
+    /// 이 runtime PTY의 **자식 뿌리 pid**(host가 fork한 `login`/셸). GUI가 상태바 리소스 항목에서 그 트리를
+    /// 직접 재는 유일한 출처다 — PTY가 host 안에 살아 GUI의 트리 walk가 닿지 않는다(docs/status-bar.md §4.1).
+    /// **구 host면 0**이고, 그때 GUI는 표본을 못 얻어 그 탭 행이 `—`로 남는다(기존 동작과 같다).
+    child_pid: i32 = 0,
+    /// 그 자식을 소유한 **host 프로세스 자신의 pid**. GUI가 데몬 자체의 오버헤드를 "모든 창 공유" 행으로
+    /// 세는 데 쓴다. 자식 트리(`child_pid`)와 **서로소**라 이중 계산이 없다 — 자식은 host의 직속 자식이고
+    /// 이 값은 host 자기 자신만 가리킨다(트리를 훑지 않는다).
+    host_pid: i32 = 0,
     processes: []Process,
 
     pub fn deinit(self: *RuntimeObservation, allocator: std.mem.Allocator) void {

@@ -188,6 +188,108 @@ pub fn format(out: []u8, reading: Reading) []const u8 {
     return written;
 }
 
+/// 정렬 밖 **고정 행**(팝오버 꼬리)을 나머지와 가른다. 팝오버는 탭 행을 무거운 순으로 정렬하는데,
+/// 앱 자신·세션 호스트처럼 "항상 있고 항상 맨 아래인" 행은 그 정렬에 섞이면 값에 따라 떠다니고 행 상한에
+/// 걸려 사라진다(docs/status-bar.md §4.2 "앱 행은 고정이다").
+///
+/// **왜 순수 모듈에 있나.** 꼬리 개수는 `context_menu.showWithFooters`가 "고를 수 없는 뒤쪽 줄 수"로
+/// 그대로 받는 값이다. 고정 행이 둘이 되면서 상수(`resource_footer_rows`)를 그대로 넘기는 것이 틀리게
+/// 됐다 — 표본을 못 얻어 **한 행만 서는** 경우가 실제로 있고(앱 표본 실패·host 미연결), 그때 상수를
+/// 넘기면 살아 있는 탭 행 하나가 선택 불가가 된다. 그 산술을 화면 밖에서 단언할 수 있게 여기 둔다.
+pub const Partition = struct {
+    /// 정렬 대상(탭) 행의 인덱스 수. `order[0..sortable]`가 유효하다.
+    sortable: usize,
+    /// 실제로 존재하는 고정 행의 인덱스 수. `pinned[0..pinned_len]`가 `pinned_keys` **순서 그대로**다.
+    pinned_len: usize,
+};
+
+/// `rows`를 훑어 `pinned_keys`에 있는 키는 `pinned`에, 나머지는 `order`에 인덱스로 담는다.
+///
+/// 고정 행은 **`pinned_keys`가 준 순서**로 나온다(rows에 나타난 순서가 아니다) — 표본 획득 순서에 따라
+/// 꼬리 두 줄의 위아래가 바뀌면 같은 화면이 실행마다 달라 보인다.
+pub fn partitionPinned(
+    rows: []const GroupReading,
+    pinned_keys: []const u64,
+    order: []usize,
+    pinned: []usize,
+) Partition {
+    var sortable: usize = 0;
+    for (rows, 0..) |row, i| {
+        var is_pinned = false;
+        for (pinned_keys) |key| {
+            if (row.key == key) {
+                is_pinned = true;
+                break;
+            }
+        }
+        if (is_pinned) continue;
+        if (sortable >= order.len) break;
+        order[sortable] = i;
+        sortable += 1;
+    }
+    var pinned_len: usize = 0;
+    for (pinned_keys) |key| {
+        if (pinned_len >= pinned.len) break;
+        for (rows, 0..) |row, i| {
+            if (row.key != key) continue;
+            pinned[pinned_len] = i;
+            pinned_len += 1;
+            break;
+        }
+    }
+    return .{ .sortable = sortable, .pinned_len = pinned_len };
+}
+
+test "partitionPinned: 고정 행은 정렬에서 빠지고 주어진 순서로 나온다" {
+    const app: u64 = 100;
+    const host: u64 = 200;
+    const rows = [_]GroupReading{
+        .{ .key = host, .reading = null }, // 표본 순서상 host가 먼저 들어왔더라도…
+        .{ .key = 7, .reading = null },
+        .{ .key = app, .reading = null },
+        .{ .key = 9, .reading = null },
+    };
+    var order: [4]usize = undefined;
+    var pinned: [2]usize = undefined;
+    const p = partitionPinned(&rows, &.{ host, app }, &order, &pinned);
+    try std.testing.expectEqual(@as(usize, 2), p.sortable);
+    try std.testing.expectEqual(@as(usize, 1), order[0]); // key 7
+    try std.testing.expectEqual(@as(usize, 3), order[1]); // key 9
+    try std.testing.expectEqual(@as(usize, 2), p.pinned_len);
+    // …순서는 pinned_keys가 정한다(host → app).
+    try std.testing.expectEqual(@as(usize, 0), pinned[0]);
+    try std.testing.expectEqual(@as(usize, 2), pinned[1]);
+}
+
+test "partitionPinned: 없는 고정 행은 자리를 차지하지 않는다(꼬리 수가 줄어든다)" {
+    const app: u64 = 100;
+    const host: u64 = 200;
+    // host 표본을 못 얻었다(keep-alive 꺼짐·host 미연결). 꼬리는 **하나**여야 한다 —
+    // 둘이라고 넘기면 살아 있는 탭 행 하나가 선택 불가가 된다.
+    const rows = [_]GroupReading{
+        .{ .key = app, .reading = null },
+        .{ .key = 7, .reading = null },
+    };
+    var order: [2]usize = undefined;
+    var pinned: [2]usize = undefined;
+    const p = partitionPinned(&rows, &.{ host, app }, &order, &pinned);
+    try std.testing.expectEqual(@as(usize, 1), p.sortable);
+    try std.testing.expectEqual(@as(usize, 1), p.pinned_len);
+    try std.testing.expectEqual(@as(usize, 0), pinned[0]); // app 행
+}
+
+test "partitionPinned: 고정 행이 하나도 없으면 전부 정렬 대상이다" {
+    const rows = [_]GroupReading{
+        .{ .key = 1, .reading = null },
+        .{ .key = 2, .reading = null },
+    };
+    var order: [2]usize = undefined;
+    var pinned: [2]usize = undefined;
+    const p = partitionPinned(&rows, &.{ 100, 200 }, &order, &pinned);
+    try std.testing.expectEqual(@as(usize, 2), p.sortable);
+    try std.testing.expectEqual(@as(usize, 0), p.pinned_len);
+}
+
 test "Meter: 첫 표본은 값을 내지 않는다(0%는 거짓말이다)" {
     const allocator = std.testing.allocator;
     var m: Meter = .{};

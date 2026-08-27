@@ -756,7 +756,9 @@ pub const unbound_command_char: u21 = blk: {
         };
         if (!taken) break :blk candidate;
     }
-    @compileError("빌트인 표가 후보 글자를 전부 먹었다 — 후보를 늘리거나 판정 방식을 다시 본다");
+    // **영어로 적는다**(docs/i18n.md §7). 이것은 표시 문자열이 아니라 **컴파일 진단**이고, 이 파일은
+    // 번역 대상 레이어라 한국어 리터럴 원장이 0 이다(경계 테스트가 잡았다).
+    @compileError("built-in tables consumed every candidate char for unbound_command_char");
 };
 
 test "built-in app bindings: 편집기 편집 일습이 chord 를 갖는다 (⌘Z·⌘⇧Z·⌘S)" {

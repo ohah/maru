@@ -7527,10 +7527,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("keys_while_file=unjudgeable reason=no_file_active\n", .{});
     }
     if (open_judgeable) {
-        try stdout.print("editor_bounds: outside_last={d} outside_max={d} editor_in_pane={}\n", .{
+        // **그린 적이 있어야 의미가 있다.** 편집기가 한 번도 안 그렸으면 "밖으로 안 나갔다" 는
+        // 그냥 참이다 — 프레임 수를 함께 요구해 공허해지지 않게 한다.
+        try stdout.print("editor_bounds: frames={d} outside_last={d} outside_max={d} editor_in_pane={}\n", .{
+            editor_frames,
             editor_cells_outside_last,
             editor_cells_outside_max,
-            editor_cells_outside_max == 0,
+            editor_frames > 0 and editor_cells_outside_max == 0,
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });

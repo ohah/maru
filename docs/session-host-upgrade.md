@@ -622,6 +622,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   positional argument, 빈 값, symlink/non-regular input, 기존 output을 거부한다. artifact path는 CLI가 받고 GitHub identity를
   caller가 문자열로 주입하지 않는다. repository ID·owner/name, tag/ref, source SHA, workflow ref, run ID/attempt, event 종류는
   표준 `GITHUB_*` context와 GitHub API/attestation 결과를 서로 교차검증한다.
+  `release_adapter_context.zig`는 실행 leaf가 이름으로 수집한 exact 11개 context만 받아 missing·duplicate·unknown key와
+  빈 값·제어문자·`max_scalar_string_bytes` 초과를 거부한다. `GITHUB_REPOSITORY`/numeric ID, canonical `vMAJOR.MINOR.PATCH`
+  tag/ref, lowercase 40-hex SHA, exact release workflow ref, nonzero canonical run ID/attempt, `push`, protected ref를 하나의
+  typed context로 만든 뒤 manifest의 repository/release tag/source/build와 exact 결속한다. 이 context는 프로세스 환경만으로
+  GitHub service identity를 증명하지 않으며, GitHub API·attestation 교차검증이나 protected `release` environment 증거를
+  대신하지 않는다.
 
   ```text
   validate_release_manifest pre-publish \

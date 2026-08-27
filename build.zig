@@ -9927,6 +9927,40 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_release_adapter_contract_tests.step);
         test_step.dependOn(&run_release_adapter_contract_tests.step);
     }
+    const session_host_release_adapter_context_step = b.step(
+        "test-session-host-release-adapter-context",
+        "Validate bounded GitHub Actions identity context for the release adapter",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |context_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = context_optimize,
+        });
+        const release_adapter_context_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
+            .target = target,
+            .optimize = context_optimize,
+            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+        });
+        const release_adapter_context_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_context.zig"),
+                .target = target,
+                .optimize = context_optimize,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = release_adapter_context_mod },
+                    .{ .name = "release_manifest", .module = release_manifest_mod },
+                },
+            }),
+        });
+        const run_release_adapter_context_tests = b.addRunArtifact(release_adapter_context_tests);
+        run_release_adapter_context_tests.addArg("--maru-expect-tests=5");
+        run_release_adapter_context_tests.setCwd(b.path("."));
+        session_host_release_adapter_context_step.dependOn(&run_release_adapter_context_tests.step);
+        session_host_step.dependOn(&run_release_adapter_context_tests.step);
+        test_step.dependOn(&run_release_adapter_context_tests.step);
+    }
     const session_host_release_adapter_files_step = b.step(
         "test-session-host-release-adapter-files",
         "Validate session-host release adapter file authorities on macOS",

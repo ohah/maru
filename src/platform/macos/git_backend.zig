@@ -103,12 +103,6 @@ pub const Result = struct {
     numstat_staged: []u8 = &.{},
     /// `git diff --numstat` 출력.
     numstat_worktree: []u8 = &.{},
-    /// 기본 브랜치와 갈린 지점 이후 이 브랜치가 바꾼 것(`--name-status`/`--numstat`). **없으면 빈 문자열**이고
-    /// 그건 실패가 아니라 "그 섹션이 없는 것"이다(origin/HEAD 없는 저장소 — docs/editor-surface-dock.md §3.5).
-    branch_name_status: []u8 = &.{},
-    branch_numstat: []u8 = &.{},
-    /// 그 갈린 지점의 커밋 해시. 브랜치 섹션 행의 diff 왼쪽이 이 커밋이다.
-    merge_base: []u8 = &.{},
     /// `git worktree list --porcelain` 출력. 도크가 워크트리마다 한 줄을 세우기 때문에 읽는다(§3.5.1c).
     /// **선택이다** — 실패해도 목록은 성립한다(그 저장소는 자기 한 줄로만 뜬다).
     worktrees: []u8 = &.{},
@@ -137,9 +131,6 @@ pub const Result = struct {
         allocator.free(self.numstat_head);
         allocator.free(self.numstat_staged);
         allocator.free(self.numstat_worktree);
-        allocator.free(self.branch_name_status);
-        allocator.free(self.branch_numstat);
-        allocator.free(self.merge_base);
         allocator.free(self.worktrees);
         allocator.free(self.remotes);
         allocator.free(self.ahead_behind);
@@ -228,9 +219,12 @@ const Job = struct {
         rel_path: []u8,
         /// rename의 옛 경로(그 외 빈 값). 왼쪽(HEAD)만 이 경로를 쓴다.
         orig_rel_path: []u8,
-        /// `.branch` 기준의 왼쪽 커밋(merge-base 해시). `.turn`은 스냅샷 tree, `.commit`은 그 커밋,
-        /// `.turn_range`는 **왼쪽 스냅샷 tree**다 — 전부 "왼쪽 rev"라는 같은 자리다.
-        merge_base: []u8,
+        /// 비교의 **왼쪽 rev**. `.commit`은 그 커밋, `.turn_range`는 왼쪽 스냅샷 tree다.
+        ///
+        /// 이름이 `merge_base` 였던 것은 이 자리를 처음 쓴 기준이 「브랜치에 COMMIT 됨」(`merge-base ↔ HEAD`)
+        /// 이었기 때문인데, 그 기준이 2026-08-27 에 걷히면서 **merge-base 를 담는 경로가 하나도 없어졌다** —
+        /// 남겨 두면 이름이 값을 두고 거짓말한다.
+        left_rev: []u8,
         /// `.turn_range`의 **오른쪽 tree**. 다른 기준에서는 빈 값이다(오른쪽이 작업트리이거나 그 커밋 자신).
         right_rev: []u8 = &.{},
         base: dock_panel.DiffBase,
@@ -589,7 +583,8 @@ pub const Backend = struct {
         repo: []const u8,
         rel_path: []const u8,
         orig_rel_path: []const u8,
-        merge_base: []const u8,
+        /// 비교의 **왼쪽 rev**(위 `DiffTarget.left_rev`).
+        left_rev: []const u8,
         /// `.turn_range`의 **오른쪽 tree**(P5). 다른 기준은 빈 문자열이다 — 오른쪽이 작업트리이거나
         /// 커밋 자신이라 따로 받을 값이 없다.
         right_rev: []const u8,
@@ -613,9 +608,9 @@ pub const Backend = struct {
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseDiffJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseDiffJob(job);
         const owned_path = state.allocator.dupe(u8, rel_path) catch return self.releaseDiffJob(job);
-        job.diff = .{ .rel_path = owned_path, .orig_rel_path = &.{}, .merge_base = &.{}, .base = base };
+        job.diff = .{ .rel_path = owned_path, .orig_rel_path = &.{}, .left_rev = &.{}, .base = base };
         job.diff.?.orig_rel_path = state.allocator.dupe(u8, orig_rel_path) catch return self.releaseDiffJob(job);
-        job.diff.?.merge_base = state.allocator.dupe(u8, merge_base) catch return self.releaseDiffJob(job);
+        job.diff.?.left_rev = state.allocator.dupe(u8, left_rev) catch return self.releaseDiffJob(job);
         job.diff.?.right_rev = state.allocator.dupe(u8, right_rev) catch return self.releaseDiffJob(job);
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
@@ -628,7 +623,7 @@ pub const Backend = struct {
         if (job.diff) |d| {
             state.allocator.free(d.rel_path);
             if (d.orig_rel_path.len > 0) state.allocator.free(d.orig_rel_path);
-            if (d.merge_base.len > 0) state.allocator.free(d.merge_base);
+            if (d.left_rev.len > 0) state.allocator.free(d.left_rev);
         }
         if (job.repo.len > 0) state.allocator.free(job.repo);
         if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
@@ -1194,6 +1189,39 @@ fn branchesWorker(job: *Job) void {
     state.release();
 }
 
+/// status 읽기 한 벌의 **선택 명령들**: 실패해도 목록은 성립하고, 여기서 ok를 내리면 그 상태의 저장소에서
+/// 목록 전체가 실패로 보인다.
+///
+/// **상수로 둔 이유는 그 수를 세는 판정자가 필요해서다.** 소비자를 잃은 읽기 셋(`merge-base`·브랜치 범위
+/// `--name-status`·`--numstat`)이 13일 동안 매 status 읽기마다 프로세스를 띄우고 출력을 버렸는데, 그동안
+/// **아무 테스트도 빨개지지 않았다** — 명령의 *형태*를 보는 테스트는 있었지만 *몇 개인지*를 보는 것은
+/// 없었다. 아래 `한 벌이 띄우는 프로세스 수` 테스트가 그 자리를 메운다(docs/plans/scm-dock.md §2.5).
+const optional_reads = .{
+    // **`numstat_head`도 선택이다**: unborn 저장소에는 HEAD가 없어 실패하는데, 그건 그 상태의 정상이고
+    // 그때는 목록이 `numstat_staged`로 증감을 붙인다. 여기서 ok를 내리면 첫 커밋 전 저장소가 통째로
+    // "git 읽기에 실패했습니다"가 된다.
+    .{ git_command.Kind.numstat_head, "numstat_head" },
+    // **워크트리 목록도 선택이다.** 아주 오래된 git에는 `worktree list`가 없고, 그때는 그 저장소가
+    // 목록에 자기 한 줄로만 뜬다 — 워크트리를 못 찾는 것이지 저장소를 못 읽는 것이 아니다.
+    .{ git_command.Kind.worktree_list, "worktrees" },
+    // **원격 목록도 선택이다.** 못 읽으면 `Fetch`가 꺼진 채 "원격 없음"으로 보이는데, 그건 틀릴 수
+    // 있어도 **안전한 쪽으로 틀린다**(누르면 될 것을 못 누른다 vs. 안 되는 것을 눌러 실패를 본다).
+    .{ git_command.Kind.remotes, "remotes" },
+    // **기본 브랜치 대비 ahead/behind도 선택이다**(§3.5). origin/HEAD가 없는 저장소(로컬 전용·clone
+    // 아님)에서는 실패하는데 그건 정상이고, 그때는 화면이 `@{u}` 값으로 돌아간다.
+    .{ git_command.Kind.ahead_behind, "ahead_behind" },
+    // **기준 이름 읽기도 선택이다**(§3.5). `origin/HEAD`가 없는 저장소에서 실패하고, 그 실패가 곧
+    // "사용자가 기준을 골라야 한다"는 신호다 — `ahead_behind`의 실패만으로는 unborn과 구별되지 않는다.
+    .{ git_command.Kind.default_base, "default_base" },
+};
+
+/// 같은 한 벌의 **필수 명령들**: 하나라도 실패하면 목록이 성립하지 않는다.
+const required_reads = .{
+    .{ git_command.Kind.status, "status" },
+    .{ git_command.Kind.numstat_staged, "numstat_staged" },
+    .{ git_command.Kind.numstat_worktree, "numstat_worktree" },
+};
+
 fn diffWorker(job: *Job) void {
     const state = job.state;
     const target = job.diff.?;
@@ -1208,7 +1236,7 @@ fn diffWorker(job: *Job) void {
     if (target.base == .turn_range) {
         // 턴 하나: 스냅샷 tree 둘. **양쪽 다 tree라** 작업트리를 읽지 않는다 — 그 턴의 결과가 지금
         // 파일 상태와 무관하게 고정된다(§3.5.4).
-        if (commitSide(state.allocator, job, target.merge_base)) |out| {
+        if (commitSide(state.allocator, job, target.left_rev)) |out| {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
@@ -1230,30 +1258,12 @@ fn diffWorker(job: *Job) void {
         //
         // **왼쪽 실패는 정상일 수 있다**: 루트 커밋에는 `^`가 없다. 그때는 오른쪽만 실려 "새로 생긴
         // 파일"과 같은 모양이 되는데, 루트 커밋의 파일은 실제로 그렇다.
-        if (commitParentSide(state.allocator, job, target.merge_base)) |out| {
+        if (commitParentSide(state.allocator, job, target.left_rev)) |out| {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
         } else |_| {}
-        if (commitSide(state.allocator, job, target.merge_base)) |out| {
-            result.modified = out.bytes;
-            if (out.truncated) truncated = true;
-            had_side = true;
-        } else |_| {}
-        result.ok = had_side;
-        result.truncated = truncated;
-        finishDiff(state, job, target, result);
-        return;
-    }
-
-    if (target.base == .branch) {
-        // 브랜치 섹션: 갈린 지점(merge-base) ↔ HEAD. 둘 다 커밋이라 작업트리를 읽지 않는다.
-        if (commitSide(state.allocator, job, target.merge_base)) |out| {
-            result.original = out.bytes;
-            if (out.truncated) truncated = true;
-            had_side = true;
-        } else |_| {}
-        if (blobSide(state.allocator, job, .head)) |out| {
+        if (commitSide(state.allocator, job, target.left_rev)) |out| {
             result.modified = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
@@ -1268,9 +1278,8 @@ fn diffWorker(job: *Job) void {
         // 충돌은 왼쪽이 HEAD다 — index엔 stage 0이 없어 `:<경로>`가 실패한다(실측).
         const side: git_command.BlobSide = switch (target.base) {
             .staged, .conflict => .head,
-            // `.commit`은 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
             // `.commit`·`.turn_range`는 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
-            .unstaged, .untracked, .branch, .commit, .turn_range => .index,
+            .unstaged, .untracked, .commit, .turn_range => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
@@ -1302,7 +1311,7 @@ fn finishDiff(state: *State, job: *Job, target: Job.DiffTarget, result_in: DiffR
     var result = result_in;
     state.allocator.free(target.rel_path);
     if (target.orig_rel_path.len > 0) state.allocator.free(target.orig_rel_path);
-    if (target.merge_base.len > 0) state.allocator.free(target.merge_base);
+    if (target.left_rev.len > 0) state.allocator.free(target.left_rev);
     if (target.right_rev.len > 0) state.allocator.free(target.right_rev);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
@@ -1414,42 +1423,20 @@ fn worker(job: *Job) void {
     var result: Result = .{ .request_id = job.request_id };
     var ok = true;
     var truncated = false;
-    // **기준은 여기서 한 번 정해 셋이 함께 쓴다**(§3.5). 갈리면 화면의 `↑N`과 그 아래 "브랜치에 COMMIT 됨"
-    // 목록이 서로 다른 질문의 답이 된다. 고른 기준이 없으면(빈 값) 기본 브랜치(`origin/HEAD`)다.
+    // **고른 기준이 `↑N ↓N`의 범위를 정한다**(§3.5). 없으면(빈 값) 기본 브랜치(`origin/HEAD`)다.
+    //
+    // 예전에는 이 기준을 **셋이 함께** 썼다(ahead/behind · `merge-base` · 브랜치 범위 diff). 나머지 둘은
+    // 「브랜치에 COMMIT 됨」섹션의 것이었고 그 섹션이 사라지며 소비자를 잃어 2026-08-27 에 걷혔다.
     var range_buf: [git_command.max_base_range_len]u8 = undefined;
-    const base_ref: []const u8 = if (job.base.len > 0) job.base else git_command.default_base_ref;
     // `submit`이 이미 걸렀으므로 여기서 null이 나오지 않는다. 그래도 orelse를 두는 이유는 그 사실이
     // **다른 파일의 규율**이기 때문이다 — 그쪽이 느슨해지면 여기서 죽는 대신 기본값으로 돈다.
     const base_range: []const u8 = if (job.base.len > 0)
         (git_command.baseRange(job.base, &range_buf) orelse git_command.default_base_range)
     else
         git_command.default_base_range;
-    // 브랜치 범위 셋은 **선택**이다: 기준이 없으면 실패하는데 그건 정상이고 그 섹션만 없다.
-    // 여기서 ok를 내리면 기준을 못 잡는 저장소에서 목록 전체가 실패로 보인다.
-    inline for (.{
-        .{ git_command.Kind.merge_base, "merge_base" },
-        .{ git_command.Kind.branch_name_status, "branch_name_status" },
-        .{ git_command.Kind.branch_numstat, "branch_numstat" },
-        // **`numstat_head`도 선택이다**: unborn 저장소에는 HEAD가 없어 실패하는데, 그건 그 상태의 정상이고
-        // 그때는 목록이 `numstat_staged`로 증감을 붙인다. 여기서 ok를 내리면 첫 커밋 전 저장소가 통째로
-        // "git 읽기에 실패했습니다"가 된다.
-        .{ git_command.Kind.numstat_head, "numstat_head" },
-        // **워크트리 목록도 선택이다.** 아주 오래된 git에는 `worktree list`가 없고, 그때는 그 저장소가
-        // 목록에 자기 한 줄로만 뜬다 — 워크트리를 못 찾는 것이지 저장소를 못 읽는 것이 아니다.
-        .{ git_command.Kind.worktree_list, "worktrees" },
-        // **원격 목록도 선택이다.** 못 읽으면 `Fetch`가 꺼진 채 "원격 없음"으로 보이는데, 그건 틀릴 수
-        // 있어도 **안전한 쪽으로 틀린다**(누르면 될 것을 못 누른다 vs. 안 되는 것을 눌러 실패를 본다).
-        .{ git_command.Kind.remotes, "remotes" },
-        // **기본 브랜치 대비 ahead/behind도 선택이다**(§3.5). origin/HEAD가 없는 저장소(로컬 전용·clone
-        // 아님)에서는 실패하는데 그건 정상이고, 그때는 화면이 `@{u}` 값으로 돌아간다.
-        .{ git_command.Kind.ahead_behind, "ahead_behind" },
-        // **기준 이름 읽기도 선택이다**(§3.5). `origin/HEAD`가 없는 저장소에서 실패하고, 그 실패가 곧
-        // "사용자가 기준을 골라야 한다"는 신호다 — `ahead_behind`의 실패만으로는 unborn과 구별되지 않는다.
-        .{ git_command.Kind.default_base, "default_base" },
-    }) |pair| {
+    inline for (optional_reads) |pair| {
         const arg: ?[]const u8 = switch (pair[0]) {
-            .merge_base => base_ref,
-            .branch_name_status, .branch_numstat, .ahead_behind => base_range,
+            .ahead_behind => base_range,
             // 기준 이름 자체를 묻는 읽기에는 기준을 안 넘긴다 — 그 답이 곧 기본값이다.
             else => null,
         };
@@ -1461,11 +1448,7 @@ fn worker(job: *Job) void {
             if (out.truncated) truncated = true;
         } else |_| {}
     }
-    inline for (.{
-        .{ git_command.Kind.status, "status" },
-        .{ git_command.Kind.numstat_staged, "numstat_staged" },
-        .{ git_command.Kind.numstat_worktree, "numstat_worktree" },
-    }) |pair| {
+    inline for (required_reads) |pair| {
         if (ok) {
             const out = run(state.allocator, pair[0], job.git_exe, job.repo) catch null;
             if (out) |o| {
@@ -2054,6 +2037,24 @@ fn runWriteSyncWindows(
 
 const testing = std.testing;
 
+test "status 한 벌이 띄우는 프로세스 수 — 소비자 없는 읽기가 붙으면 여기서 걸린다" {
+    // **이 판정자가 없어서 결함이 13일 동안 숨었다.** 「브랜치에 COMMIT 됨」섹션이 사라진 뒤
+    // `merge-base`·브랜치 범위 `--name-status`·`--numstat` 셋이 매 읽기마다 돌면서 출력을 버렸는데,
+    // 명령의 *형태*를 보는 테스트는 있었어도 *몇 개인지*를 보는 것은 없었다(docs/plans/scm-dock.md §2.5).
+    //
+    // **수를 늘리는 것 자체가 금지는 아니다.** 늘려야 할 이유가 있으면 이 수와 함께 그 이유를 적으면
+    // 된다 — 이 테스트가 막는 것은 **아무도 모르게** 늘거나, 화면이 사라졌는데 읽기만 남는 일이다.
+    try testing.expectEqual(@as(usize, 5), optional_reads.len);
+    try testing.expectEqual(@as(usize, 3), required_reads.len);
+
+    // 실린 kind 가 전부 **결과를 담을 자리**를 갖는지도 함께 본다. 이것은 **다른 종류**의 사고를 막는다 —
+    // 자리 없이 실행만 하는 읽기. 이 건은 그 반대였다(자리는 있고 읽는 사람이 없었다). 그쪽은 위의
+    // 개수 판정과 리뷰가 잡고, 이 줄은 이 목록이 `Result` 와 어긋나는 것을 잡는다.
+    inline for (optional_reads ++ required_reads) |pair| {
+        try testing.expect(@hasField(Result, pair[1]));
+    }
+}
+
 test "제출 없이 열고 닫아도 안전하다(수명 계약)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     // 실제 spawn을 테스트에서 돌리지 않는다 — worker가 detached라 테스트 종료와 경합해 결과가 비결정적이 된다.
@@ -2167,8 +2168,12 @@ fn waitForDiff(backend: *Backend) ?DiffResult {
     return null;
 }
 
-test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
-    // 다른 기준과 달리 **양쪽 다 커밋**이라 작업트리를 읽지 않는다. 실제 저장소·실제 git으로 그 대응을 고정한다.
+test "diff 왼쪽 rev 는 hex 만 받는다(end-to-end — 인자 주입 차단)" {
+    // 앞선 판은 「브랜치 기준 diff」(`merge-base ↔ HEAD`)를 돌렸다. 그 기준은 2026-08-27 에 걷혔고
+    // (그리는 섹션이 2026-08-14 에 사라졌다) 이 테스트가 증언하던 것 중 **살아남은 규율은 이것**이다:
+    // 왼쪽 rev 가 hex 가 아니면 spec 자체가 안 만들어져 그쪽이 빈 채로 온다. `git_command` 단위
+    // 테스트가 `commitBlobSpec` 을 이미 고정하지만, **`submitDiff` 경로가 그 판정을 실제로 지나는지**는
+    // 여기서만 보인다 — 그 사이에 인자를 그대로 싣는 길이 생기면 단위 테스트는 여전히 초록이다.
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = locate(&exe_buf) orelse return error.SkipZigTest;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2178,25 +2183,31 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
 
-    // 목록 읽기가 merge-base를 함께 준다 — 브랜치 섹션의 왼쪽이 그 커밋이다.
-    try testing.expect(backend.submit(exe, repo, "", 1));
-    var listed = waitForList(&backend) orelse return error.ListNeverCompleted;
-    defer listed.deinit(worker_allocator);
-    if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다
-    const merge_base = std.mem.trim(u8, listed.merge_base, " \t\r\n");
+    // **대조군이 먼저다.** hex rev 로는 왼쪽이 실제로 차야, 아래의 0 이 「거부됐다」는 뜻이 된다 —
+    // 대조군이 없으면 경로가 통째로 죽어도(예: spec 을 아무도 안 만들어도) 이 테스트는 초록이다.
+    var head_buf: [64]u8 = undefined;
+    const head_oid = headOid(exe, repo, &head_buf) orelse return error.SkipZigTest;
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", head_oid, "", .commit, 1));
+    var good = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer good.deinit(worker_allocator);
+    try testing.expect(good.modified.len > 0); // `<oid>:build.zig`
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", merge_base, "", .branch, 2));
-    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
-    defer result.deinit(worker_allocator);
-    try testing.expect(result.ok);
-    try testing.expect(result.original.len > 0); // merge-base:build.zig
-    try testing.expect(result.modified.len > 0); // HEAD:build.zig
-
-    // hex가 아닌 rev는 애초에 spec이 안 만들어져 실패한다(인자 주입 차단이 실제로 걸리는지).
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", "", .branch, 3));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", "", .commit, 2));
     var bad = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     defer bad.deinit(worker_allocator);
     try testing.expectEqual(@as(usize, 0), bad.original.len);
+    try testing.expectEqual(@as(usize, 0), bad.modified.len);
+}
+
+/// 이 저장소의 HEAD 해시(hex). 위 테스트의 대조군이 **진짜 rev** 여야 하므로 실측으로 얻는다.
+fn headOid(git_exe: []const u8, repo: []const u8, buf: []u8) ?[]const u8 {
+    const out = runWithArg(worker_allocator, .log, git_exe, repo, "1") catch return null;
+    defer worker_allocator.free(out.bytes);
+    var it = maru.session.git_log.iterate(out.bytes);
+    const first = it.next() orelse return null;
+    if (first.oid.len == 0 or first.oid.len > buf.len) return null;
+    @memcpy(buf[0..first.oid.len], first.oid);
+    return buf[0..first.oid.len];
 }
 
 fn waitForList(backend: *Backend) ?Result {

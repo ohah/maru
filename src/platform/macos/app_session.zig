@@ -9501,16 +9501,16 @@ pub const AppSession = struct {
             entry.diff_repo,
             entry.diff_rel_path,
             entry.diff_orig_rel_path,
-            // 왼쪽 트리/커밋: 브랜치 기준은 merge-base, 커밋·턴 범위 기준은 그 비교가 든 rev. 셋 다
-            // `<oid>:<경로>`로 읽으므로 같은 자리를 쓴다(목록을 읽을 때 함께 받아 둔 값이라 여기서 git을
-            // 또 부르지 않는다).
+            // 왼쪽 트리/커밋. 둘 다 `<oid>:<경로>`로 읽으므로 같은 자리를 쓴다 — 그 값은 목록을 읽을 때
+            // 함께 받아 둔 것이라 여기서 git을 또 부르지 않는다.
             switch (entry.diff_base) {
                 // 커밋 기준은 **그 비교가 든 커밋**이다(P4b) — 여기서 다시 구하면 그 사이 다른 커밋을
                 // 펼쳤을 때 남의 커밋을 읽는다.
                 .commit => entry.diff_commit_oid,
                 // 턴 범위는 **왼쪽 tree**를 여기로 보내고, 오른쪽 tree는 아래 인자가 따로 든다(P5).
                 .turn_range => entry.diff_commit_oid,
-                else => if (self.git_result) |r| r.merge_base else "",
+                // 나머지 기준은 왼쪽이 rev가 아니라 index·HEAD·작업트리라 이 자리를 안 쓴다.
+                else => "",
             },
             // 오른쪽 rev는 **턴 범위만** 갖는다(다른 기준은 작업트리이거나 커밋 자신이다).
             if (entry.diff_base == .turn_range) entry.diff_right_oid else "",

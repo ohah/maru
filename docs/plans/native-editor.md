@@ -128,7 +128,7 @@
   | 조각 | 상태 |
   |---|---|
   | `git_backend.submitDiff` → `DiffResult{original, modified, ok, truncated}` | **있다.** 비동기 worker + `takeDiffResult` 폴링, 목록 결과와 슬롯 분리. `truncated`는 이미 `error.TooLarge`로 접힌다(`app_session.diffSidesForSurface`) — 잘린 내용을 온전한 파일처럼 그리지 않는다. b는 그것을 `unavailable = .too_large`로 잇기만 하면 된다 |
-  | `DiffBase`(staged·unstaged·untracked·branch·turn·conflict)와 탭 라벨 | **있다**(`session/dock_panel.zig`) |
+  | `DiffBase`(staged·unstaged·untracked·commit·turn_range·conflict)와 탭 라벨 | **있다**(`session/dock_panel.zig`) |
   | 유일성 키 `(경로, kind, base)`·workspace 미저장 | **정해져 있다**(§3.5) |
   | `syntax_theme.diffFromTheme` → `DiffColors` | **있다**(지금은 web CSS 변수로만 흐른다) |
   | 도크 소스 컨트롤 목록 | **있다**(GPU chrome) |

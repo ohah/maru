@@ -100,8 +100,6 @@ pub const DiffBase = enum {
     unstaged,
     /// 비교 대상이 없다 — 파일 내용을 그대로 보여 준다(추적되지 않은 파일).
     untracked,
-    /// `merge-base(기본 브랜치) ↔ HEAD` — 이 브랜치의 커밋들이 바꾼 것(§3.5 "브랜치에 COMMIT 됨").
-    branch,
     /// 히스토리에서 고른 **커밋 하나**: `커밋^ ↔ 커밋`(P4b). 루트 커밋은 `^`가 없어 왼쪽이 없다 —
     /// 그때는 `untracked`처럼 오른쪽만 보인다(새로 생긴 파일과 같은 모양이고, 실제로 그렇다).
     ///
@@ -122,7 +120,6 @@ pub const DiffBase = enum {
             .staged => i18n.t(.dock_staged),
             .unstaged => i18n.t(.dock_worktree),
             .untracked => i18n.t(.dock_new_file),
-            .branch => i18n.t(.dock_branch),
             .conflict => i18n.t(.dock_conflict),
             .commit => i18n.t(.dock_commit),
             .turn_range => i18n.t(.dock_turn),

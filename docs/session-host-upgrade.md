@@ -629,13 +629,30 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   typed context로 만든 뒤 manifest의 repository/release tag/source/build와 exact 결속한다. 이 context는 프로세스 환경만으로
   GitHub service identity를 증명하지 않으며, GitHub API·attestation 교차검증이나 protected `release` environment 증거를
   대신하지 않는다.
+  adapter observation이 공유하는 canonical tag와 lowercase hex 문법은 `release_adapter_identity.zig` 한 곳이 소유한다.
 
-  repository REST 응답의 의미 해석은 OS 중립 `release_adapter_github_repository.zig` 한 곳이 소유한다. 응답은 그 모듈의
-  `max_response_bytes`가 소유하는 64 KiB 이하의 JSON root 하나여야 하며 additive API field는 허용하되
+  GitHub REST 응답의 공통 envelope는 OS 중립 `release_adapter_github_json.zig` 한 곳이 소유한다. 응답은 그 모듈의
+  `max_response_bytes`가 소유하는 64 KiB 이하의 JSON root 하나여야 하며 scalar cap은
+  `release_manifest.max_scalar_string_bytes`를 재사용한다. endpoint별 additive API field는 허용하되 완전한 root 뒤 두 번째
+  value나 trailing garbage는 거부한다.
+
+  repository 응답의 의미 해석은 `release_adapter_github_repository.zig`가 소유하며
   `id`·`name`·`full_name`·`owner.login`은 missing·duplicate·wrong wire
   type을 거부한다. numeric ID는 nonzero JSON number여야 하고 textual owner/name/full_name의 내부 정합성과 앞서 캡처한
   `GITHUB_REPOSITORY_ID`·`GITHUB_REPOSITORY`에 모두 exact 일치해야 한다. 이 parser는 이미 획득한 bytes의 의미만 검증하며,
   bytes가 GitHub에서 왔다는 transport 증거나 `gh` executable의 권위를 대신하지 않는다.
+
+  release 응답의 의미 해석은 `release_adapter_github_release.zig`가 소유한다. GitHub REST release schema의 `id` JSON number,
+  `tag_name` string과 `draft`·`prerelease` boolean을 필수로 소비하며 missing·duplicate·wrong wire type을 거부한다.
+  `immutable`은 GitHub OpenAPI가 property로 정의하지만 required 목록에는 넣지 않으므로 draft에서 absent 또는 false를 허용하고
+  true는 거부한다. draft 후보는 exact nonzero release ID와 canonical tag가 일치하고
+  `draft=true`, `prerelease=false`여야 한다. published predecessor는 manifest가 지목한 exact ID·tag와 일치하고
+  `draft=false`, `prerelease=false`, `immutable=true`여야 한다. GitHub OpenAPI에서 `immutable`이 required field로
+  선언되지 않았으므로 predecessor 응답에서 absent이면 Maru가 immutability를 추정하지 않고 거부한다. 근거는 GitHub REST API의
+  [Release schema](https://github.com/github/rest-api-description/blob/main/descriptions/api.github.com/api.github.com.yaml)다.
+  release의 `target_commitish`는 기존 tag가 가리키는 commit의 증거가 아니므로 source 결속에 쓰지 않는다. exact tag ref를
+  full lowercase source commit으로 해소하는 Git ref/tag API 판정자가 그 책임을 별도로 소유한다.
+  이 parser 역시 이미 획득한 bytes의 component 의미만 검증하며 transport나 executable authority를 증명하지 않는다.
 
   ```text
   validate_release_manifest pre-publish \

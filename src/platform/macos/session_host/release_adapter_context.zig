@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const release_manifest = @import("release_manifest");
+const identity = @import("release_adapter_identity");
 
 pub const max_value_bytes: usize = release_manifest.max_scalar_string_bytes;
 
@@ -98,7 +99,7 @@ pub fn parse(entries: []const Entry) Error!Context {
     const tag = values[@intFromEnum(Key.ref_name)].?;
     const ref = values[@intFromEnum(Key.ref)].?;
     if (!std.mem.eql(u8, values[@intFromEnum(Key.ref_type)].?, "tag") or
-        !canonicalTag(tag) or
+        !identity.canonicalTag(tag) or
         ref.len != "refs/tags/".len + tag.len or
         !std.mem.startsWith(u8, ref, "refs/tags/") or
         !std.mem.eql(u8, ref["refs/tags/".len..], tag)) return error.InvalidRef;
@@ -109,7 +110,7 @@ pub fn parse(entries: []const Entry) Error!Context {
         return error.UnprotectedRef;
 
     const source_commit = values[@intFromEnum(Key.sha)].?;
-    if (!lowerHex(source_commit, 40)) return error.InvalidSource;
+    if (!identity.lowerHex(source_commit, 40)) return error.InvalidSource;
 
     const workflow_ref = values[@intFromEnum(Key.workflow_ref)].?;
     var expected_workflow: [max_value_bytes]u8 = undefined;
@@ -171,29 +172,4 @@ fn parseCanonicalU64(value: []const u8, comptime invalid: Error) Error!u64 {
     const parsed = std.fmt.parseInt(u64, value, 10) catch return invalid;
     if (parsed == 0) return invalid;
     return parsed;
-}
-
-fn lowerHex(value: []const u8, expected_len: usize) bool {
-    if (value.len != expected_len) return false;
-    for (value) |byte| {
-        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
-    }
-    return true;
-}
-
-fn canonicalTag(tag: []const u8) bool {
-    if (tag.len < 2 or tag[0] != 'v') return false;
-    const version = tag[1..];
-    var components: usize = 0;
-    var start: usize = 0;
-    var index: usize = 0;
-    while (index <= version.len) : (index += 1) {
-        if (index != version.len and version[index] != '.') continue;
-        const component = version[start..index];
-        if (component.len == 0 or (component.len > 1 and component[0] == '0')) return false;
-        for (component) |byte| if (!std.ascii.isDigit(byte)) return false;
-        components += 1;
-        start = index + 1;
-    }
-    return components == 3;
 }

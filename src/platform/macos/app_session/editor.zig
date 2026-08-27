@@ -4338,6 +4338,137 @@ pub fn cutSelection(self: *AppSession, term: *Term) bool {
     return deleteText(self, term, false);
 }
 
+/// **주석 토글**(§3.7) — selection이 걸친 줄 전체를 한 번에 뒤집는다.
+///
+/// **"하나라도 주석이 아니면 전부 주석"**(VSCode 관례를 §3.7이 채택했다). 섞여 있을 때 "전부
+/// 해제"로 가면 **주석이던 줄이 코드가 되어** 사용자가 의도하지 않은 실행이 생긴다 — 반대 방향은
+/// 되돌리기 쉽고 이쪽은 아니다.
+///
+/// **언어를 모르면 아무 일도 안 한다**(그 절이 그렇게 정했다). 모르는 파일에 아무 문법이나 넣으면
+/// 사용자가 **그 언어에 없는 문자**를 문서에 박는다.
+///
+/// **한 번의 토글은 undo 하나다** — 커서가 N개여도 `delta.apply` 한 번이다(§3.3).
+pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+
+    const path = term.rt.editor_path orelse return false;
+    const lang = maru.session.editor.language.forPath(path);
+    const marker = lang.lineComment() orelse return false; // 모르는 언어 — no-op(§3.7)
+
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+
+    // 커서들이 걸친 **줄 번호**를 모은다. 같은 줄에 커서가 여럿이면 한 번만 — 두 번 주석 처리하면
+    // `////`가 된다.
+    var line_nums: std.ArrayList(usize) = .empty;
+    defer line_nums.deinit(self.allocator);
+    var iter = selections(term);
+    if (iter.count() == 0) return false;
+    while (iter.next()) |sel| {
+        const s_off = @min(sel.start(), content.len);
+        var e_off = @min(sel.end(), content.len);
+        // **선택이 다음 줄 **머리**에서 끝나면 그 줄은 안 넣는다.** 줄 전체를 끌어 고르면 끝이
+        // 다음 줄 offset 0이 되는데, 그대로 `lineAt`에 넣으면 **고르지 않은 줄이 주석 처리된다**
+        // (적대적 검증 2026-08-27이 실측으로 잡았다 — `[0,2)`로 첫 줄만 골랐는데 둘째 줄까지 갔다).
+        // VSCode·Xcode가 같은 자리에서 그 줄을 뺀다.
+        if (e_off > s_off) {
+            const e_line = lines.lineAt(e_off);
+            if (lines.line(e_line)) |l| {
+                if (l.start == e_off) e_off -= 1;
+            }
+        }
+        const lo = lines.lineAt(s_off);
+        const hi = lines.lineAt(e_off);
+        var n = lo;
+        while (n <= hi) : (n += 1) line_nums.append(self.allocator, n) catch return false;
+    }
+    if (line_nums.items.len == 0) return false;
+
+    // **중복은 정렬한 뒤 인접한 것끼리 지운다.** 넣을 때마다 앞을 전부 훑으면 O(n²)이고, 커서는
+    // `⌘⌃D`로 수천 개가 된다 — 4,000개에서 비교가 800만 번임을 실측했다(2026-08-27). 커서가
+    // primary 먼저 나오는 순서라 정렬돼 있지 않으므로, 넣는 중에는 인접 비교로 지울 수 없다.
+    std.mem.sort(usize, line_nums.items, {}, std.sort.asc(usize));
+    var w: usize = 0;
+    for (line_nums.items, 0..) |n, i| {
+        if (i == 0 or n != line_nums.items[w - 1]) {
+            line_nums.items[w] = n;
+            w += 1;
+        }
+    }
+    line_nums.shrinkRetainingCapacity(w);
+
+    // **하나라도 주석이 아니면 전부 주석.** 빈 줄은 판단에서 뺀다 — 빈 줄 하나 때문에 전체가
+    // "주석 아님"으로 뒤집히면 이미 다 주석인 블록을 해제할 수 없다.
+    var all_commented = true;
+    var any_content = false;
+    for (line_nums.items) |n| {
+        const line = lines.line(n) orelse continue;
+        const text = content[line.start..line.contentEnd()];
+        const trimmed = std.mem.trimStart(u8, text, " \t");
+        if (trimmed.len == 0) continue; // 빈 줄
+        any_content = true;
+        if (!std.mem.startsWith(u8, trimmed, marker)) all_commented = false;
+    }
+    if (!any_content) return false; // 빈 줄만 골랐다 — 넣을 자리가 없다
+
+    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
+    defer ranges.deinit(self.allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |t| self.allocator.free(t);
+        owned.deinit(self.allocator);
+    }
+
+    for (line_nums.items) |n| {
+        const line = lines.line(n) orelse continue;
+        const text = content[line.start..line.contentEnd()];
+        const indent = text.len - std.mem.trimStart(u8, text, " \t").len;
+        if (indent == text.len) continue; // 빈 줄은 건드리지 않는다
+        if (all_commented) {
+            // **해제** — 표식과 그 뒤 공백 하나까지 지운다(넣을 때 붙인 그 공백이다).
+            const at = line.start + indent;
+            var end = at + marker.len;
+            if (end < content.len and content[end] == ' ') end += 1;
+            ranges.append(self.allocator, .{ .start = at, .end = end, .text = "" }) catch return false;
+        } else {
+            // **주석** — 들여쓰기 **뒤**에 넣는다. 줄 머리에 넣으면 들여쓰기가 무너져 보인다.
+            const t = std.fmt.allocPrint(self.allocator, "{s} ", .{marker}) catch return false;
+            owned.append(self.allocator, t) catch {
+                self.allocator.free(t);
+                return false;
+            };
+            const at = line.start + indent;
+            ranges.append(self.allocator, .{ .start = at, .end = at, .text = t }) catch return false;
+        }
+    }
+    if (ranges.items.len == 0) return false;
+
+    var sels = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(sels.items);
+    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
+    const before_primary = sels.primary;
+
+    const scroll_anchor = captureScrollAnchor(term);
+    const rows_before = drawnDocLines(term);
+    const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
+        self.allocator.free(before);
+        return false;
+    };
+
+    breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
+    pushUndo(self, term, inverse, before, before_primary, .insert);
+    writeBackSelections(self, term, sels);
+    refreshAfterEdit(self, term) catch {};
+    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
+    revealPrimaryCaretRows(self, term, rows_before);
+    breakUndoGroup(term);
+    self.metal_dirty = true;
+    return true;
+}
+
 /// **클립보드를 커서마다 넣는다**(§3.4).
 ///
 /// 분배 규칙은 `clipboard.distribute`가 소유한다 — 조각 수가 커서 수와 **같으면** 하나씩,
@@ -12600,6 +12731,213 @@ test "AID11 커서가 많아도 재배치가 곱해지지 않는다 (§9.1 — �
     try testing.expect(insertText(fx.session, t2, ")"));
     // 첫·셋째는 지나가고 둘째만 넣었다 — 길이가 정확히 1 늘었다.
     try testing.expectEqual(before_len + 1, t2.rt.editor_doc.?.file.content.len);
+}
+
+test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "tmp.zig", "abcd\nefgh\n");
+
+    // 같은 줄 안 세 자리 + 둘째 줄 한 자리. 줄을 두 번 세면 `//// abcd`가 된다.
+    const extras = try allocator.alloc(editor_selection.Selection, 3);
+    extras[0] = editor_selection.Selection.at(2);
+    extras[1] = editor_selection.Selection.at(3);
+    extras[2] = editor_selection.Selection.at(6);
+    allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extras;
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+
+    try testing.expect(toggleLineComment(fx.session, term));
+    try testing.expectEqualStrings("// abcd\n// efgh\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT8 여러 줄 토글이 되돌리기 한 번에 풀린다 (§3.3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "tmp.zig", "a\nb\nc\n");
+    try testing.expect(!isDirty(term));
+
+    // 세 줄을 한 번에 주석 처리 — **한 번의 편집이므로 한 번의 되돌리기**여야 한다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5);
+    try testing.expect(toggleLineComment(fx.session, term));
+    try testing.expectEqualStrings("// a\n// b\n// c\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(term)); // 고쳤으니 표시가 뜬다(§3.5)
+
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("a\nb\nc\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(term)); // 되돌리면 디스크와 같아진다
+
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("// a\n// b\n// c\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT9 토글은 앞뒤 타이핑과 한 묶음이 되지 않는다 (§3.3 연산 종류 변경)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "tmp.zig", "a\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    _ = insertText(fx.session, term, "X"); // 타이핑
+    try testing.expectEqualStrings("aX\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(toggleLineComment(fx.session, term)); // 토글
+    try testing.expectEqualStrings("// aX\n", term.rt.editor_doc.?.file.content);
+    _ = insertText(fx.session, term, "Y"); // 다시 타이핑
+
+    // **되돌리기 세 번이 세 단계로 풀려야 한다.** 묶이면 사용자가 토글만 되돌릴 수 없다.
+    _ = undoEdit(fx.session, term);
+    try testing.expectEqualStrings("// aX\n", term.rt.editor_doc.?.file.content);
+    _ = undoEdit(fx.session, term);
+    try testing.expectEqualStrings("aX\n", term.rt.editor_doc.?.file.content);
+    _ = undoEdit(fx.session, term);
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT10 ⌘/ 키가 실제로 토글에 닿는다 — 키 경로 전체 (§3.7)" {
+    // **함수를 직접 부르는 판정자만 있으면 배선이 빠져도 전부 초록이다.** 이 세션에서 두 번
+    // 그렇게 죽은 키가 있었다(2026-08-25 `MC1`, `⌘⌫`). 그래서 `handleKeyEvent`부터 지난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cmt10.zig", "a\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+
+    try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
+    try testing.expectEqualStrings("// a\n", term.rt.editor_doc.?.file.content);
+
+    // 다시 누르면 풀린다 — 같은 chord가 양방향이다.
+    try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+
+    // **수식키를 가린다.** 맨 `/`나 `⌥/`·`⌃/`가 토글이면 사용자가 `/`를 칠 때마다 줄이 뒤집힌다.
+    // (글자 입력 자체는 이 경로가 아니라 Swift 입력 진입점이 받으므로 여기서는 **토글 여부**만 잰다.)
+    try pressKey(&fx, .{ .char = '/' }, .{});
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+    try pressKey(&fx, .{ .char = '/' }, .{ .option = true });
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+    try pressKey(&fx, .{ .char = '/' }, .{ .control = true });
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT5 선택이 다음 줄 머리에서 끝나면 그 줄은 빼고 센다 (§3.7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "tmp.zig", "a\nb\nc\n");
+
+    // 첫 줄을 끝까지 끌어 고르면 끝이 **둘째 줄 offset 0**이 된다. 둘째 줄은 고른 게 아니다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    try testing.expect(toggleLineComment(fx.session, term));
+    try testing.expectEqualStrings("// a\nb\nc\n", term.rt.editor_doc.?.file.content);
+
+    // 반대로 **둘째 줄 안까지** 뻗으면 둘 다 들어간다 (깨끗한 문서로 다시 잰다).
+    const t2 = try undoFixture(&fx, allocator, "tmp2.zig", "a\nb\nc\n");
+    t2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
+    try testing.expect(toggleLineComment(fx.session, t2));
+    try testing.expectEqualStrings("// a\n// b\nc\n", t2.rt.editor_doc.?.file.content);
+}
+
+test "CMT6 공백 없이 붙은 주석도 푼다 (§3.7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 사람이 손으로 `//`만 붙인 줄. 뒤 공백을 **있을 때만** 지워야 글자를 먹지 않는다.
+    const term = try undoFixture(&fx, allocator, "tmp.zig", "//a\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(toggleLineComment(fx.session, term));
+    try testing.expectEqualStrings("a\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT1 ⌘/가 줄을 주석 처리하고 다시 누르면 푼다 (§3.7)" {
+    // **§3.7이 요구하는 셋**: selection이 걸친 줄 전체를 한 번에 · 들여쓰기 **뒤**에 넣기 ·
+    // 전체가 undo 하나. 그리고 `⌘C`·`⌘V`처럼 Swift 진입점이 없어 **키 분기**에서 잡는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cmt1.zig", "    const a = 1;\n    const b = 2;\n");
+
+    // 두 줄을 걸쳐 고른다.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 22);
+    try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
+    // **들여쓰기 뒤**에 들어간다 — 줄 머리에 넣으면 들여쓰기가 무너져 보인다.
+    try testing.expectEqualStrings("    // const a = 1;\n    // const b = 2;\n", term.rt.editor_doc.?.file.content);
+
+    // **한 번**에 돌아온다(§3.3).
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("    const a = 1;\n    const b = 2;\n", term.rt.editor_doc.?.file.content);
+
+    // 다시 주석 처리한 뒤 또 누르면 **푼다** — 표식과 그 뒤 공백 하나까지.
+    try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
+    try pressKey(&fx, .{ .char = '/' }, .{ .command = true });
+    try testing.expectEqualStrings("    const a = 1;\n    const b = 2;\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT2 하나라도 주석이 아니면 전부 주석이다 (§3.7 — VSCode 관례)" {
+    // **섞여 있을 때 "전부 해제"로 가면 주석이던 줄이 코드가 되어** 사용자가 의도하지 않은 실행이
+    // 생긴다. 반대 방향은 되돌리기 쉽고 이쪽은 아니다 — 그래서 §3.7이 방향을 못 박았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cmt2.zig", "// a\nb\n// c\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 11); // 세 줄 전부
+    try testing.expect(toggleLineComment(fx.session, term));
+    // 가운데만 주석이 아니었으므로 **전부 주석**이 된다(이미 주석인 줄에도 하나 더).
+    try testing.expectEqualStrings("// // a\n// b\n// // c\n", term.rt.editor_doc.?.file.content);
+
+    // 이제 전부 주석이므로 다음 토글은 **해제**다.
+    try testing.expect(toggleLineComment(fx.session, term));
+    try testing.expectEqualStrings("// a\nb\n// c\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CMT3 언어를 모르면 아무 일도 안 한다 (§3.7 no-op)" {
+    // **모르는 파일에 아무 문법이나 넣으면 사용자가 그 언어에 없는 문자를 문서에 박는다.**
+    // §3.7이 *"없으면 주석 토글이 no-op"*이라고 정한 이유다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const unknown = try undoFixture(&fx, allocator, "data.bin", "x\n");
+    unknown.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(!toggleLineComment(fx.session, unknown));
+    try testing.expectEqualStrings("x\n", unknown.rt.editor_doc.?.file.content);
+
+    // **HTML은 줄 주석이 없다** — 블록만 있으므로 이 슬라이스에서는 no-op이다.
+    const html = try undoFixture(&fx, allocator, "a.html", "<p>\n");
+    html.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(!toggleLineComment(fx.session, html));
+
+    // 언어별 문법이 실제로 갈린다 — 셸은 `#`이다.
+    const sh = try undoFixture(&fx, allocator, "run.sh", "echo hi\n");
+    sh.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(toggleLineComment(fx.session, sh));
+    try testing.expectEqualStrings("# echo hi\n", sh.rt.editor_doc.?.file.content);
+}
+
+test "CMT4 빈 줄은 건드리지 않고, 판단에서도 뺀다 (§3.7)" {
+    // **빈 줄에 주석을 넣으면 공백만 남은 줄이 늘어난다.** 그리고 빈 줄 하나 때문에 전체가
+    // "주석 아님"으로 뒤집히면 **이미 다 주석인 블록을 해제할 수 없다** — 판단에서도 빼야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "cmt4.zig", "// a\n\n// b\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 10);
+    // 빈 줄을 빼면 **둘 다 주석**이므로 해제가 맞다.
+    try testing.expect(toggleLineComment(fx.session, term));
+    try testing.expectEqualStrings("a\n\nb\n", term.rt.editor_doc.?.file.content);
 }
 
 test "AID5 자동으로 넣은 닫는 문자만 backspace로 함께 지운다 (§3.7)" {

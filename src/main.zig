@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 800;
+const smoke_spin_cap: usize = 830;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -2812,20 +2812,42 @@ const max_status_bar_items: usize = 4;
 const max_win_sessions: usize = 16;
 
 /// 세션 목록 → 카드 목록. **세션이 늘거나 줄면 다시 부른다** — 안 부르면 사이드바가 옛 목록을 그린다.
+/// 사이드바가 **굵게 그릴 칸**. 활성이 터미널이면 그 탭 번호이고, 파일이면 세션 수만큼 밀린다 —
+/// 이 산수가 목록을 짓는 곳과 갈리면 누른 칸과 굵은 칸이 어긋난다.
+fn sidebarActiveSlot(view: ActiveView, session_count: usize) usize {
+    return switch (view) {
+        .terminal => |t| t,
+        .file => |f| session_count + f,
+    };
+}
+
+/// 사이드바 목록 = **세션 다음에 연 파일**. 순서가 곧 슬롯 번호이고, 클릭 라우팅이 그 경계를
+/// `sessions.len` 으로 가른다 — 두 곳이 다른 순서를 쓰면 누른 칸과 열리는 것이 갈린다.
 fn refreshSidebarCards(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(SidebarCard),
     sessions: []const *WinSession,
+    files: []const OpenFile,
     folder: []const u8,
 ) !void {
     out.clearRetainingCapacity();
-    try out.ensureTotalCapacity(allocator, sessions.len);
+    try out.ensureTotalCapacity(allocator, sessions.len + files.len);
     for (sessions) |s| {
         out.appendAssumeCapacity(.{
             .name = s.label(),
             .branch = "",
             .folder = folder,
             .lines = if (folder.len > 0) 2 else 1,
+        });
+    }
+    for (files) |*f| {
+        // **둘째 줄은 폴더가 아니라 경로다** — 파일 카드에서 알고 싶은 것은 "어느 폴더 창인가" 가
+        // 아니라 "이 파일이 어디 것인가" 다. 같은 이름이 여러 폴더에 있을 때 그것만이 가른다.
+        out.appendAssumeCapacity(.{
+            .name = f.name(),
+            .branch = "",
+            .folder = f.path,
+            .lines = 2,
         });
     }
 }
@@ -3656,6 +3678,157 @@ fn sidebarRowsFor(
 /// **왜 힙에 고정하나**: `AppWindow` 의 doc 이 그 이유를 소유한다 — `SurfaceRuntime` 이 `*Surface` 를
 /// 라우팅에 보관하고 리더 스레드가 `&reader` 를 잡으므로, 목록이 realloc 될 때 본체가 움직이면 그
 /// 포인터들이 dangling 된다. 그래서 목록은 `*WinSession` 만 든다.
+/// 사이드바가 전환하는 것 — 터미널이거나 **연 파일**이다.
+///
+/// 문서가 정한 목적지는 "활성 워크스페이스 pane 의 새 탭"(file-panel.md §6)인데 Windows 에는 아직
+/// pane 탭 스트립이 없다. 사용자 결정(2026-08-27)으로 **이미 있는 전환기**(사이드바 카드)를 쓴다 —
+/// 새 모델을 세우지 않고 §2m.51 이 만든 배선을 그대로 탄다.
+const ActiveView = union(enum) { terminal: usize, file: usize };
+
+/// 연 파일 하나. **텍스트를 우리가 소유한다** — `lines` 의 슬라이스가 그 안을 가리킨다.
+const OpenFile = struct {
+    path: []u8,
+    text: []u8,
+    lines: std.ArrayList([]const u8),
+    line_starts: []usize,
+    /// 뷰포트 맨 위 줄. 파일마다 따로 산다 — 파일을 오갈 때 자리를 잃으면 안 된다.
+    first_line: usize = 0,
+
+    /// 사이드바 카드에 뜨는 이름. **경로 안을 가리킨다**(따로 복사하지 않는다).
+    fn name(self: *const OpenFile) []const u8 {
+        return std.fs.path.basename(self.path);
+    }
+
+    fn deinit(self: *OpenFile, allocator: std.mem.Allocator) void {
+        self.lines.deinit(allocator);
+        allocator.free(self.line_starts);
+        allocator.free(self.text);
+        allocator.free(self.path);
+    }
+};
+
+/// 파일을 읽어 편집기가 쓸 재료로 만든다. **여는 규칙은 중립이 소유한다**
+/// (`file_panel_bridge.openKindForPath`) — 확장자 표를 여기서 다시 적으면 macOS 와 갈린다.
+///
+/// 지금은 `.text` 만 연다. `.markdown`·`.html` 등의 본문은 계약상 WebView 이고 Windows 에서는
+/// WebView2(W8.6)라 아직 없다 — **조용히 텍스트로 열지 않는다.** 그러면 마크다운이 렌더된 줄
+/// 알았는데 소스가 뜨는 것을 사용자가 겪는다.
+fn openFileFor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) ?OpenFile {
+    const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return null;
+    if (kind != .text) return null;
+
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 << 20)) catch return null;
+    errdefer allocator.free(text);
+    const owned_path = allocator.dupe(u8, path) catch return null;
+    errdefer allocator.free(owned_path);
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    errdefer lines.deinit(allocator);
+    var it = std.mem.splitScalar(u8, text, 0x0A);
+    // CRLF 를 여기서 벗긴다 — 편집기 뷰는 **표시 텍스트**를 받는다(스모크가 쓰는 그 규칙).
+    while (it.next()) |raw| lines.append(allocator, std.mem.trimEnd(u8, raw, "\r")) catch return null;
+
+    const starts = allocator.alloc(usize, lines.items.len) catch return null;
+    var off: usize = 0;
+    for (lines.items, starts) |l, *st| {
+        st.* = off;
+        off += l.len + 1;
+    }
+    return .{ .path = owned_path, .text = text, .lines = lines, .line_starts = starts };
+}
+
+/// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을
+/// 오래 들고 있어 미리 잡아 두지만, 여기서는 파일이 오갈 때마다 줄 수가 바뀐다.
+///
+/// 배경 사각은 **pane 원점에 딱 맞는다**(스모크처럼 음수로 시작하지 않는다 — 그 함수 doc).
+fn buildComposedEditor(
+    allocator: std.mem.Allocator,
+    host: EditorHost,
+    file: *const OpenFile,
+    rect: maru.session.split_tree.Rect,
+    ops: []maru.chrome.draw.Op,
+    tokens: *const maru.chrome.Tokens,
+    cell_w: u32,
+    cell_h: u32,
+) !EditorBuilt {
+    const n_lines = file.lines.items.len;
+    const text_bytes = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(text_bytes);
+    const runs = try allocator.alloc(maru.chrome.draw.Run, 4096);
+    defer allocator.free(runs);
+    const content_rows = try allocator.alloc(editor_view.content.Row, 512);
+    defer allocator.free(content_rows);
+    const visual_rows = try allocator.alloc(editor_view.visual_map.VisualRow, 512);
+    defer allocator.free(visual_rows);
+    const gutter_rows = try allocator.alloc(editor_view.gutter.Row, 512);
+    defer allocator.free(gutter_rows);
+    const row_counts = try allocator.alloc(u32, n_lines + 1);
+    defer allocator.free(row_counts);
+    const count_scratch = try allocator.alloc(u8, editor_view.content.count_scratch_bytes);
+    defer allocator.free(count_scratch);
+
+    const grid = maru.terminal.Size{
+        .cols = @intCast(@max(1, rect.w / cell_w)),
+        .rows = @intCast(@max(1, rect.h / cell_h)),
+    };
+    const sel_cap = @as(usize, grid.rows) + 2;
+    const sel_rows = try allocator.alloc([]const editor_view.frame.Mark, sel_cap);
+    defer allocator.free(sel_rows);
+    const sel_buf = try allocator.alloc(editor_view.frame.Mark, sel_cap);
+    defer allocator.free(sel_buf);
+    const sel_spans = try allocator.alloc(editor_view.selection_marks.Span, sel_cap);
+    defer allocator.free(sel_spans);
+
+    const inset = editor_view.frame.content_inset_px;
+    // **안쪽 사각은 pane 안에서 사방 inset 만큼 줄어든다.** 좌표는 pane 로컬이다 — 창 절대 좌표로
+    // 옮기는 일은 `origin_x`·`origin_y` 가 한다(그 함수가 그렇게 갈라 뒀다).
+    const inner: maru.chrome.draw.Rect = .{
+        .x = 0,
+        .y = 0,
+        .w = rect.w -| inset * 2,
+        .h = rect.h -| inset * 2,
+    };
+    const view: maru.chrome.draw.Rect = .{ .x = 0, .y = 0, .w = rect.w, .h = rect.h };
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = .{ .r = 0xD8, .g = 0xE0, .b = 0xF0 },
+        .default_bg = .{ .r = 0x1E, .g = 0x24, .b = 0x30 },
+    };
+    return buildEditorFrame(
+        allocator,
+        host,
+        file.first_line,
+        file.lines.items,
+        editor_view.frame.Scratch{
+            .ops = ops,
+            .text_bytes = text_bytes,
+            .runs = runs,
+            .content_rows = content_rows,
+            .visual_rows = visual_rows,
+            .gutter_rows = gutter_rows,
+            .row_counts = row_counts,
+            .count_scratch = count_scratch,
+        },
+        ops,
+        tokens,
+        colors,
+        view,
+        inner,
+        cell_w,
+        cell_h,
+        grid,
+        // **배경을 내용보다 inset 만큼 넓게 잡지 않는다** — 제품은 pane 원점에서 시작해 pane 크기다.
+        .{ .x = -@as(i32, @intCast(inset)), .y = -@as(i32, @intCast(inset)), .w = rect.w, .h = rect.h },
+        rect.x,
+        rect.y,
+        null,
+        .{ .line_starts = file.line_starts, .rows = sel_rows, .buf = sel_buf, .spans = sel_spans },
+    );
+}
+
 const WinSession = struct {
     surface: maru.session.surface.Surface,
     live: maru.app.LivePtySession,
@@ -4177,6 +4350,50 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // **세션마다 PTY 하나다.** `LivePtySession` 은 링크를 하나만 든다(`self.link`). macOS 도 Term
     // 마다 세션·pump 를 따로 들고 tick 이 **전부** 드레인한다 — 같은 모양을 쓴다.
+    // ── 연 파일 (W8.13) ────────────────────────────────────────────────────────────────────
+    //
+    // **창당 경로 유일성**(file-panel.md §1)을 지킨다 — 같은 파일을 다시 누르면 새로 열지 않고
+    // 그것으로 간다. 그 불변식이 없으면 트리를 두 번 눌렀을 때 같은 파일이 카드 둘이 된다.
+    var open_files: std.ArrayList(OpenFile) = .empty;
+    defer {
+        for (open_files.items) |*f| f.deinit(allocator);
+        open_files.deinit(allocator);
+    }
+    var active_view: ActiveView = .{ .terminal = 0 };
+    var file_opens: usize = 0;
+    var file_reopens: usize = 0;
+    var file_rejects: usize = 0;
+    var file_view_switches: usize = 0;
+    var editor_frames: usize = 0;
+    var editor_build_failures: usize = 0;
+    var editor_scrolls: usize = 0;
+    var editor_last_digest: u64 = 0;
+    var scroll_judgeable = false;
+    var scroll_first_before: usize = 0;
+    var scroll_first_after: usize = 0;
+    var scroll_digest_before: u64 = 0;
+    var scroll_digest_after: u64 = 0;
+    var editor_last_cells: usize = 0;
+    var editor_last_rows: usize = 0;
+    // **파일이 진짜 떴는가.** 카드가 늘어난 것만 보면 속 빈다 — 편집기가 **그 파일의 줄**을 그렸는지,
+    // 그리고 같은 줄을 다시 눌렀을 때 카드가 **안 늘어나는지**(창당 경로 유일성)를 함께 본다.
+    var open_judgeable = false;
+    var open_target_path: []const u8 = "";
+    var open_files_after_first: usize = 0;
+    var open_files_after_second: usize = 0;
+    var open_editor_cells: usize = 0;
+    var open_editor_rows: usize = 0;
+    var open_showing_file = false;
+    var open_sidebar_digest_before: u64 = 0;
+    var open_sidebar_digest_after: u64 = 0;
+    var md_judgeable = false;
+    var md_files_before: usize = 0;
+    var md_files_after: usize = 0;
+    var md_rejects_before: usize = 0;
+    var md_rejects_after: usize = 0;
+    // 편집기 op 버퍼는 **한 번만 잡는다** — 프레임마다 4096 개를 새로 잡으면 그것이 곧 프레임 비용이다.
+    const ops_buf = try allocator.alloc(maru.chrome.draw.Op, 4096);
+    defer allocator.free(ops_buf);
     var sessions: std.ArrayList(*WinSession) = .empty;
     defer {
         for (sessions.items) |s| s.destroy(allocator);
@@ -4650,7 +4867,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sidebar_cards: std.ArrayList(SidebarCard) = .empty;
     defer sidebar_cards.deinit(allocator);
     const folder_name: []const u8 = if (dock_root) |r| std.fs.path.basename(r) else "";
-    try refreshSidebarCards(allocator, &sidebar_cards, sessions.items, folder_name);
+    try refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name);
     // **기하가 바뀔 때마다 다시 짓는다.** 내용(브랜치·cwd)은 이 슬라이스에서 안 바뀌지만 **자리는
     // 바뀐다** — 창을 키우면 바가 아래로 가고 폭이 넓어진다. 시작에 한 번만 지었더니 창이 커진 뒤
     // 옛 자리(실측 y=574, w=984)에 남아 **화면에서 통째로 사라졌다**. 스모크는 자기 창 크기가
@@ -4659,7 +4876,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var status_rebuilds: usize = 0;
     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -5224,6 +5441,108 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (agentFirstCardIdentity(agent_items.items)) |f| ag_sort_first_after = f;
             ag_sort_order_after = agent_archive.sort == .oldest_first;
         }
+        // **탐색기로 되돌린다.** 앞선 단계들이 도크를 에이전트 뷰로 바꿔 놓아, 그대로 두면 파일
+        // 줄이 화면에 없어 이 판정이 영영 `unjudgeable` 이다(실측으로 그렇게 한 번 비었다).
+        if (smoke and spins == 768 and geom.view_bar.w != 0) {
+            const bar0 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
+            if (maru.chrome.components.dock_view_bar.slotRect(bar0, cell_w, 0)) |r0| {
+                const ex: i32 = @intCast(r0.x + r0.w / 2);
+                const ey: i32 = @intCast(r0.y + r0.h / 2);
+                window.postSyntheticMouse(.left_down, ex, ey);
+                window.postSyntheticMouse(.left_up, ex, ey);
+            }
+        }
+        // ── 파일을 누르면 열린다 (W8.13) ────────────────────────────────────────────────
+        //
+        // **`.zig` 줄을 골라 누른다.** 아무 행이나 누르면 그것이 폴더일 수도 `.md` 일 수도 있어,
+        // "안 열렸다" 가 회귀인지 계약인지 갈리지 않는다. 자리는 그린 행 표가 준다.
+        if (smoke and spins == 772) if (dock_view == .explorer) {
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .file) continue;
+                if (!std.mem.endsWith(u8, r.file.path, ".zig")) continue;
+                // **클릭 경로와 같은 축으로 센다**(`rowAtLocalY` 의 역산) — 다른 산수를 쓰면
+                // 판정이 겨눈 줄과 실제로 눌리는 줄이 갈린다.
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const fy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                open_judgeable = true;
+                open_target_path = r.file.path;
+                // **그려진 셀의 지문을 잰다.** 카드 수(모델)는 맞는데 화면은 그대로인 실패를 실측
+                // 캡처가 찾았다 — 모델만 보는 판정은 그것을 영영 못 본다.
+                //
+                // **개수가 아니라 지문이다.** 이 스모크는 그때 세션이 13 개라 새 카드가 **화면 밖**
+                // 이고, 개수로 재면 늘기는커녕 줄어든다(실측 124→121). 여기서 물을 수 있는 참인
+                // 질문은 "파일을 열면 사이드바가 **다시 그려지는가**" 다 — 안 그리던 것이 그 결함이었다.
+                open_sidebar_digest_before = d3d11_cells.cellsDigest(sidebar_cells.items);
+                const fx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                window.postSyntheticMouse(.left_down, fx, fy);
+                window.postSyntheticMouse(.left_up, fx, fy);
+                break;
+            }
+        };
+        // **같은 줄을 다시 누른다** — 창당 경로 유일성(카드가 둘이 되면 안 된다).
+        if (smoke and spins == 778) if (open_judgeable) {
+            open_files_after_first = open_files.items.len;
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .file) continue;
+                if (!std.mem.eql(u8, r.file.path, open_target_path)) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const fy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                const fx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                window.postSyntheticMouse(.left_down, fx, fy);
+                window.postSyntheticMouse(.left_up, fx, fy);
+                break;
+            }
+        };
+        // **`.md` 를 누른다 — 열리면 안 된다.** 계약상 마크다운 본문은 WebView 이고 Windows 는
+        // WebView2(W8.6)가 아직 없다. 이 판정이 없으면 "나머지는 전부 텍스트로 연다" 쪽으로 규칙을
+        // 넓히는 변경이 아무것도 안 깨뜨리며 지나간다 — 사용자는 렌더된 문서 대신 소스를 본다.
+        if (smoke and spins == 784) if (dock_view == .explorer) {
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .file) continue;
+                if (!std.mem.endsWith(u8, r.file.path, ".md")) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                md_judgeable = true;
+                md_files_before = open_files.items.len;
+                md_rejects_before = file_rejects;
+                const mx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const my: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, mx, my);
+                window.postSyntheticMouse(.left_up, mx, my);
+                break;
+            }
+        };
+        if (smoke and spins == 790) {
+            md_files_after = open_files.items.len;
+            md_rejects_after = file_rejects;
+        }
+        // **곧바로 잰다.** 뒤로 미루면 그 사이의 호버·두 번째 클릭이 지문을 바꿔, 이 판정이
+        // "무언가가 사이드바를 건드렸다" 로 흐려진다.
+        // ── 편집기를 굴린다 ────────────────────────────────────────────────────────────
+        //
+        // **그린 셀의 지문을 견준다.** `first_line` 이 움직인 것만 보면 내가 넣은 값을 되읽는
+        // 동어반복이다 — 화면이 실제로 그 줄들을 그렸는지가 물어야 할 것이다.
+        if (smoke and spins == 790) if (active_view == .file) {
+            scroll_judgeable = true;
+            scroll_first_before = open_files.items[active_view.file].first_line;
+            scroll_digest_before = editor_last_digest;
+            const wx: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const wy: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx, wy, -3);
+        };
+        if (smoke and spins == 794) if (active_view == .file) {
+            scroll_first_after = open_files.items[active_view.file].first_line;
+            scroll_digest_after = editor_last_digest;
+        };
+        if (smoke and spins == 775) open_sidebar_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
+        if (smoke and spins == 796) {
+            open_files_after_second = open_files.items.len;
+            open_editor_cells = editor_last_cells;
+            open_editor_rows = editor_last_rows;
+            open_showing_file = active_view == .file;
+        }
         // **새로고침을 누른다.** 헤더 전체가 refresh action 이고 정렬 토글이 그 오른쪽 끝을 파낸
         // 형태라(`build.zig` 의 그 주석), **왼쪽 4 분의 1** 을 겨눈다 — 가운데를 누르면 무엇을
         // 눌렀는지가 배치에 따라 흔들린다.
@@ -5384,7 +5703,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 bottom_gap = (b.track_y + b.track_h) - (b.thumb_y + b.thumb_h);
                 bar_max = b.max_offset_px;
                 var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
-                const rr3 = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb3);
+                const rr3 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb3);
                 const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
                 // **휠이 쓰는 그 식 그대로**(그 자리의 주석: "상한은 콘텐츠가 정한다").
                 wheel_max = maru.chrome.components.sidebar.contentHeight(rr3, mm3) -| (geom.sidebar.h -| sidebar_header_h);
@@ -5462,7 +5781,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         };
         if (smoke and spins == 590 and sidebar_header_h != 0) {
             var rb: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb);
+            const rr = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb);
             const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             // **넘치는가로 가른다** — 카드 수가 아니라(도크에서 그 가드를 틀렸다).
             if (maru.chrome.components.sidebar.contentHeight(rr, mm) > geom.sidebar.h -| sidebar_header_h) {
@@ -5495,7 +5814,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 635 and sidebar_scroll_judgeable and sidebar_cards_visible > 1) {
             const sx2: i32 = @intCast(sidebar_w / 2);
             var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr3 = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb3);
+            const rr3 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb3);
             const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const second_top: i64 = @as(i64, geom.sidebar.y) +
                 maru.chrome.components.sidebar.rowTop(rr3, sidebar_first_visible + 1, sidebar_header_h, mm3, sidebar_scroll_px);
@@ -5511,7 +5830,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             grid_digest_before_switch = activeGridDigest(io, &app_window);
             active_before_switch = app_window.active_tab;
             var rows_buf: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rws = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rows_buf);
+            const rws = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rows_buf);
             const m_sw = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const y0 = maru.chrome.components.sidebar.rowTop(rws, 0, sidebar_header_h, m_sw, 0);
             const cy: i32 = @intCast(geom.sidebar.y + @as(u32, @intCast(@max(0, y0))) + cell_h);
@@ -5632,7 +5951,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -5768,7 +6087,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 sidebar_scrolls += 1;
                                 sidebar_redraws += 1;
                                 bar_drag_moves += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                             }
                         }
                         continue;
@@ -5797,7 +6116,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             } else {
                                 sidebar_scroll_px = next;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                             }
                             bar_drag = .{ .which = if (on_dock) .dock else .sidebar, .grab_dy = b.thumb_h / 2 };
                         }
@@ -5874,7 +6193,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     if (notches != 0 and sidebar_header_h != 0) {
                         const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                         var rows_buf2: [16]maru.chrome.components.sidebar.Row = undefined;
-                        const rws2 = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rows_buf2);
+                        const rws2 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rows_buf2);
                         const m2 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
                         // **상한은 콘텐츠가 정한다** — 중립이 그 높이를 소유한다(`contentHeight`).
                         const content_h = maru.chrome.components.sidebar.contentHeight(rws2, m2);
@@ -5887,7 +6206,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             sidebar_scroll_px = clamped;
                             sidebar_scrolls += 1;
                             sidebar_redraws += 1;
-                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                         }
                     }
                     continue;
@@ -5910,7 +6229,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     // **그리는 쪽과 같은 행 목록을 쓴다** — 여기서 따로 만들면 카드 높이가 갈려
                     // 그린 자리와 눌리는 자리가 어긋난다.
                     var sb_rows_buf: [16]maru.chrome.components.sidebar.Row = undefined;
-                    const sb_rows = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &sb_rows_buf);
+                    const sb_rows = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &sb_rows_buf);
                     const next_slot = maru.chrome.components.sidebar.slotAt(
                         local_y,
                         sidebar_header_h,
@@ -5922,7 +6241,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         sidebar_hover_header = next_header;
                         sidebar_hover_slot = next_slot;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                     }
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
@@ -5941,12 +6260,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 if (app_window.active()) |a| spawn_opts.size = a.core.size;
                                 if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, spawn_opts)) {
                                     session_spawns += 1;
-                                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, folder_name) catch {};
+                                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name) catch {};
                                     // 새 세션을 **바로 활성으로** 만든다 — 만들고 안 보여 주면
                                     // 눌린 것이 화면에 안 나타난다.
                                     _ = app_window.selectTab(sessions.items.len - 1);
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                                 } else |_| {
                                     session_spawn_failures += 1;
                                 }
@@ -5954,12 +6273,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         } else if (next_slot) |s| {
                             sidebar_card_clicks += 1;
                             sidebar_last_slot = s;
+                            // **경계는 `sessions.len` 이다** — 그 뒤 슬롯은 연 파일이다(목록을 짓는
+                            // `refreshSidebarCards` 와 같은 순서를 쓴다).
+                            if (s >= sessions.items.len) {
+                                const fi = s - sessions.items.len;
+                                if (fi < open_files.items.len and !(active_view == .file and active_view.file == fi)) {
+                                    active_view = .{ .file = fi };
+                                    file_view_switches += 1;
+                                    sidebar_redraws += 1;
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                                }
+                                continue;
+                            }
                             // **카드를 누르면 그 세션으로 간다.** 판정은 중립이 소유한다
                             // (`AppWindow.selectTab` — 범위 밖이면 false).
                             if (s != app_window.active_tab and app_window.selectTab(s)) {
+                                active_view = .{ .terminal = s };
                                 tab_switches += 1;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, app_window.active_tab, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
                             }
                         }
                     }
@@ -6118,6 +6450,48 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 // 펼칠 수 있어 보이는 줄이 죽은 컨트롤이었다(사용자 보고).
                                 // 경로는 **행이 들고 있다** — 여기서 다시 만들지 않는다.
                                 if (row < dock_rows.items.len) {
+                                    // ── 파일 줄을 누르면 열린다 (W8.13) ──────────────────
+                                    //
+                                    // §2m.55 가 "파일 행은 아직 아무 일도 안 한다" 로 남겨 둔 자리다.
+                                    // **경로는 행이 들고 있다**(폴더와 같은 규율) — 다시 만들지 않고,
+                                    // `buildRows` 가 그 메모리를 해제하므로 넘기기 전에 복사한다.
+                                    if (dock_rows.items[row] == .file) {
+                                        const fp = dock_rows.items[row].file.path;
+                                        const owned = allocator.dupe(u8, fp) catch continue;
+                                        // `openFileFor` 가 자기 몫을 따로 복사하므로 이것은 항상 놓는다.
+                                        defer allocator.free(owned);
+                                        // **이미 열려 있으면 그것으로 간다**(창당 경로 유일성).
+                                        var found: ?usize = null;
+                                        for (open_files.items, 0..) |*of, fi|
+                                            if (std.mem.eql(u8, of.path, owned)) {
+                                                found = fi;
+                                                break;
+                                            };
+                                        if (found) |fi| {
+                                            file_reopens += 1;
+                                            active_view = .{ .file = fi };
+                                        } else if (openFileFor(allocator, io, owned)) |of| {
+                                            open_files.append(allocator, of) catch {
+                                                var tmp = of;
+                                                tmp.deinit(allocator);
+                                                continue;
+                                            };
+                                            file_opens += 1;
+                                            active_view = .{ .file = open_files.items.len - 1 };
+                                        } else {
+                                            // **못 여는 것을 조용히 넘기지 않는다.** `.md` 는 계약상
+                                            // WebView 본문이라 W8.6 이 선행이고, 이진 파일은 외부 앱이다.
+                                            file_rejects += 1;
+                                            continue;
+                                        }
+                                        refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name) catch {};
+                                        // **목록만 고치면 화면은 그대로다.** 실측 캡처에서 편집기는
+                                        // 떴는데 사이드바에 그 파일 카드가 없었다 — 카드 **수**를
+                                        // 보는 판정은 그것을 못 본다(모델은 맞았으니까).
+                                        sidebar_redraws += 1;
+                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols) catch {};
+                                        continue;
+                                    }
                                     const toggle_path: ?[]const u8 = switch (dock_rows.items[row]) {
                                         .directory => |dir| dir.path,
                                         .root => |r| r.path,
@@ -6173,6 +6547,28 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 const rows = snap.rows;
                 const to_shell = win32_mouse.reportsToShell(tracking != .none, m.mods);
 
+                // ── 편집기를 굴린다 (W8.13) ────────────────────────────────────────────
+                //
+                // **파일이 활성이면 터미널이 아니라 편집기가 굴러간다.** 29 행 뷰포트에 100 줄짜리
+                // 파일을 띄워 놓고 못 굴리면 연 것이 아니다.
+                //
+                // **상한은 중립이 정한다**(`viewport.clampFirstRow`) — 여기서 산수로 잡으면 편집기
+                // 스모크와 갈린다.
+                if (m.kind == .wheel and active_view == .file and active_view.file < open_files.items.len) {
+                    const notches = wheel_acc.feed(m.wheel_delta);
+                    if (notches == 0) continue;
+                    const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
+                    const of = &open_files.items[active_view.file];
+                    const vis: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, geom.terminal.h / cell_h)));
+                    const next: i64 = @as(i64, @intCast(of.first_line)) - @as(i64, lines);
+                    const max_top = editor_view.viewport.clampFirstRow(std.math.maxInt(usize), of.lines.items.len, vis);
+                    const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_top))));
+                    if (clamped != of.first_line) {
+                        of.first_line = clamped;
+                        editor_scrolls += 1;
+                    }
+                    continue;
+                }
                 if (m.kind == .wheel) {
                     // **눈금과 줄을 가른다.** 리포팅은 xterm 규약상 눈금당 한 번이고, 사용자 설정
                     // (`SPI_GETWHEELSCROLLLINES`)은 로컬 스크롤백이 한 눈금에 몇 줄을 갈지 정하는 값이다.
@@ -6557,13 +6953,42 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         sidebar_bar = blk: {
             if (sidebar_header_h == 0) break :blk null;
             var rb: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rws = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb);
+            const rws = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb);
             const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             break :blk sidebarScrollbarGeometry(geom, sidebar_header_h, maru.chrome.components.sidebar.contentHeight(rws, mm), sidebar_scroll_px);
         };
         if (sidebar_bar) |bar| appendScrollbarCells(allocator, &cells, bar, &chrome_tokens) catch {};
+        // ── 터미널 자리에 무엇이 서는가 (W8.13) ──────────────────────────────────────────
+        //
+        // 파일이 활성이면 **그 사각형에 편집기가 선다.** 터미널 셀은 아예 안 넣는다 — 겹쳐 그리면
+        // 두 화면이 포개져 글자가 서로를 뚫고 나온다.
+        var editor_cells_drawn: usize = 0;
+        const showing_file = active_view == .file and active_view.file < open_files.items.len;
         const term_first = cells.items.len;
-        for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
+        if (showing_file) {
+            const of = &open_files.items[active_view.file];
+            const ed_host = EditorHost{
+                .renderer_state = &renderer_state,
+                .shaper = builder.shaper,
+                .rasterizer = builder.rasterizer,
+                .pipeline = pipeline,
+                .atlas_w = &atlas_w,
+                .atlas_h = &atlas_h,
+                .cell_w = cell_w,
+                .cell_h = cell_h,
+            };
+            if (buildComposedEditor(allocator, ed_host, of, geom.terminal, ops_buf, &chrome_tokens, cell_w, cell_h)) |built_ed| {
+                var be = built_ed;
+                defer be.deinit(allocator);
+                cells.ensureUnusedCapacity(allocator, be.cells.items.len) catch {};
+                for (be.cells.items) |c| cells.appendAssumeCapacity(c);
+                editor_cells_drawn = be.cells.items.len;
+                editor_last_cells = be.cells.items.len;
+                editor_last_rows = be.written.visual_rows;
+                editor_last_digest = d3d11_cells.cellsDigest(be.cells.items);
+                editor_frames += 1;
+            } else |_| editor_build_failures += 1;
+        } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
         // 폭을 가로지르고 `y=0` 에서 시작하므로 **두 판정이 영원히 0 이 아니게 되어 죽는다**
         // (실측: 둘 다 15600 = 띠 26 셀 × 600 프레임).
@@ -6821,6 +7246,57 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             agent_apply_spin != null and (agent_apply_spin.? > 0),
         });
     }
+    if (open_judgeable) {
+        // **네 가지를 함께 본다.** 카드 수만 보면 편집기가 빈 화면이어도 초록이고, 셀 수만 보면
+        // 아무 파일이나 열려도 초록이다. 그래서 ⑴ 목록이 늘었나 ⑵ **다시 눌러도 안 늘었나**
+        // (창당 경로 유일성) ⑶ 활성이 파일인가 ⑷ 편집기가 **행을 그렸나** 를 모은다.
+        try stdout.print("open_file: path={s} opens={d} reopens={d} rejects={d} files {d}->{d} showing_file={} editor_cells={d} editor_rows={d} sidebar_digest {x}->{x} open_file_ok={}\n", .{
+            open_target_path,
+            file_opens,
+            file_reopens,
+            file_rejects,
+            open_files_after_first,
+            open_files_after_second,
+            open_showing_file,
+            open_editor_cells,
+            open_editor_rows,
+            open_sidebar_digest_before,
+            open_sidebar_digest_after,
+            file_opens > 0 and
+                open_sidebar_digest_after != open_sidebar_digest_before and
+                open_files_after_first == open_files_after_second and
+                open_showing_file and
+                open_editor_cells > 0 and
+                open_editor_rows > 0,
+        });
+    } else {
+        try stdout.print("open_file=unjudgeable reason=no_zig_row_visible\n", .{});
+    }
+    if (scroll_judgeable) {
+        try stdout.print("editor_scroll: first {d}->{d} scrolls={d} digest {x}->{x} editor_scroll_ok={}\n", .{
+            scroll_first_before,
+            scroll_first_after,
+            editor_scrolls,
+            scroll_digest_before,
+            scroll_digest_after,
+            scroll_first_after > scroll_first_before and scroll_digest_after != scroll_digest_before,
+        });
+    } else {
+        try stdout.print("editor_scroll=unjudgeable reason=no_file_active\n", .{});
+    }
+    if (md_judgeable) {
+        // **거절을 세는 것만으로는 모자란다** — 거절했다고 적으면서 열었을 수도 있다. 목록이
+        // 안 늘었는지를 함께 본다.
+        try stdout.print("open_md: files {d}->{d} rejects {d}->{d} md_not_opened={}\n", .{
+            md_files_before,
+            md_files_after,
+            md_rejects_before,
+            md_rejects_after,
+            md_files_before == md_files_after and md_rejects_after > md_rejects_before,
+        });
+    } else {
+        try stdout.print("open_md=unjudgeable reason=no_md_row_visible\n", .{});
+    }
     if (ag_refresh_judgeable) {
         // **제출과 반영을 갈라 센다.** 인텐트가 왔다는 것만으로는 다시 훑었다고 못 한다.
         try stdout.print("agent_refresh: submits={d} applies {d}->{d} cards={d} agent_refresh_ok={}\n", .{
@@ -6916,7 +7392,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 낸다. 판정이 어느 한쪽을 다시 계산하면 그쪽 배선이 끊겨도 안 잡힌다 — 도크에서 그 함정을
         // 두 번 밟았다(§2m.52).
         var rb2: [16]maru.chrome.components.sidebar.Row = undefined;
-        const rr2 = sidebarRowsFor(sidebar_cards.items, app_window.active_tab, &rb2);
+        const rr2 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(active_view, sessions.items.len), &rb2);
         const mm2 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
         const content_h = maru.chrome.components.sidebar.contentHeight(rr2, mm2);
         const view_h = geom.sidebar.h -| sidebar_header_h;
@@ -6993,17 +7469,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("session_grid_want={d}x{d} sessions_wrong_size={d}\n", .{ want.cols, want.rows, wrong });
     }
     // ── 세션·전환 판정 (W8.8⒞) ──────────────────────────────────────────────────────────────
-    // **카드 수 == 세션 수 == 탭 수.** 셋이 갈리면 사이드바가 세션 수를 거짓말하고, `slotAt` 이
-    // 없는 카드를 가리키거나 있는 세션을 못 가리킨다. 갱신을 빼먹은 뮤턴트가 **다른 판정 전부를
-    // 통과**했다(실측: `cards=1 sessions=2` 인데 `switch_ok=true`).
-    try stdout.print("sessions={d} spawns={d} spawn_failures={d} tab_switches={d} cards={d} tabs={d} lists_agree={}\n", .{
+    // **카드 수 == 세션 수 + 연 파일 수, 그리고 탭 수 == 세션 수.** 셋이 갈리면 사이드바가 목록을
+    // 거짓말하고, `slotAt` 이 없는 카드를 가리키거나 있는 세션을 못 가리킨다. 갱신을 빼먹은
+    // 뮤턴트가 **다른 판정 전부를 통과**했다(실측: `cards=1 sessions=2` 인데 `switch_ok=true`).
+    //
+    // **전제가 바뀐 자리다.** W8.13 전에는 `cards == tabs` 였는데 파일이 카드로 붙으면서 그것이
+    // 깨졌다(실측 `cards=14 tabs=13`). 판정을 **끄지 않고** 참인 불변식으로 고쳤다 — 끄면 그 뒤로
+    // 목록이 어긋나도 아무 말이 없다.
+    try stdout.print("sessions={d} spawns={d} spawn_failures={d} tab_switches={d} cards={d} tabs={d} open_files={d} lists_agree={}\n", .{
         sessions.items.len,
         session_spawns,
         session_spawn_failures,
         tab_switches,
         sidebar_cards.items.len,
         app_window.tabs.len,
-        sidebar_cards.items.len == sessions.items.len and app_window.tabs.len == sessions.items.len,
+        open_files.items.len,
+        sidebar_cards.items.len == sessions.items.len + open_files.items.len and app_window.tabs.len == sessions.items.len,
     });
     if (switch_judgeable) {
         // **동어반복을 피한다.** `active_tab` 이 바뀐 것만 보면 내가 부른 `selectTab` 을 되읽는
@@ -8561,6 +9042,66 @@ const EditorBuilt = struct {
     }
 };
 
+/// 편집기 프레임에 필요한 렌더 자원. **스모크는 `draw_host.Host` 가, 합성 루프는 흩어져 있는 자기
+/// 상태가 준다** — 둘이 같은 조립을 쓰게 하는 이음매다.
+///
+/// **`renderer_state` 를 포인터로 받는다.** 값으로 받으면 합성 루프에 아틀라스 상태가 하나 더 생겨,
+/// 편집기가 구운 글리프를 터미널이 못 보고 UV 가 갈린다.
+const EditorHost = struct {
+    renderer_state: *maru.renderer.RendererState,
+    shaper: win32_text.Shaper,
+    rasterizer: win32_text.NeutralRasterizer,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    cell_w: u32,
+    cell_h: u32,
+
+    fn fromHost(h: *draw_host.Host) EditorHost {
+        return .{
+            .renderer_state = &h.renderer_state,
+            .shaper = h.shaper,
+            .rasterizer = h.rasterizer,
+            .pipeline = h.pipeline,
+            .atlas_w = &h.atlas_w,
+            .atlas_h = &h.atlas_h,
+            .cell_w = h.cell_w,
+            .cell_h = h.cell_h,
+        };
+    }
+
+    /// `Host.prepare` 가 하던 것 — 프레임을 짓고 아틀라스를 맞추고 새 글리프를 올린다. 셋을 한
+    /// 자리에 묶어 둔다: 하나라도 빠지면 글자가 **엉뚱한 UV** 를 가리킨다(그 함수 doc).
+    fn prepare(self: EditorHost, a: std.mem.Allocator, draw_list: maru.renderer.DrawList) !maru.renderer.RenderFrame {
+        var list = draw_list;
+        var frame = self.renderer_state.buildFrameFromDrawListWithRasterizer(a, list, self.shaper, self.rasterizer) catch |err| {
+            list.deinit(a);
+            return err;
+        };
+        errdefer frame.deinit(a);
+        try draw_host.syncAtlasTexture(self.pipeline, self.renderer_state, self.atlas_w, self.atlas_h);
+        _ = draw_host.uploadFrameRegions(self.pipeline, frame);
+        return frame;
+    }
+
+    fn appendGlyphCellsAt(
+        self: EditorHost,
+        a: std.mem.Allocator,
+        frame: maru.renderer.RenderFrame,
+        colors: maru.renderer.metal_frame.CellColors,
+        origin_x: u32,
+        origin_y: u32,
+        cells: *std.ArrayList(d3d11_cells.Cell),
+    ) !usize {
+        const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(a, frame.glyph_quad_frame, frame.draw_list.cells, colors);
+        defer a.free(native);
+        maru.renderer.metal_frame.setCellsPaneOrigin(native, origin_x, origin_y);
+        try cells.ensureUnusedCapacity(a, native.len);
+        for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, self.cell_w, self.cell_h, self.atlas_w.*, self.atlas_h.*));
+        return native.len;
+    }
+};
+
 /// 편집기 한 프레임을 짓는다 — **스모크와 제품이 같은 함수를 쓴다.**
 ///
 /// 예전에는 이 조립이 `win32-editor-draw-smoke` 안의 클로저였다. 합성 창에 편집기를 붙이며 그대로
@@ -8571,7 +9112,7 @@ const EditorBuilt = struct {
 /// 터미널 사각형의 왼쪽 위다.
 fn buildEditorFrame(
     a: std.mem.Allocator,
-    h: *draw_host.Host,
+    h: EditorHost,
     first_line: usize,
     ls: []const []const u8,
     sc: anytype,
@@ -8637,9 +9178,9 @@ fn buildEditorFrame(
     };
 
     const dl = try chrome_draw_lowering.buildTextDrawList(a, op_buf[0..w.ops], tk, cw, ch, g.cols, g.rows);
-    const prepared = try h.prepare(a, dl);
+    const frame_built = try h.prepare(a, dl);
     var built = EditorBuilt{
-        .frame = prepared.frame,
+        .frame = frame_built,
         .written = w,
         .cells = .empty,
         .ops_text = n_text,
@@ -8961,7 +9502,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 조용히 어긋난다 — 그 필드 doc 이 경고하는 자리가 정확히 이것이다.
     var max_top: usize = 0;
     {
-        var probe = try buildEditorFrame(allocator, &host, 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
+        var probe = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
         defer probe.deinit(allocator);
         max_top = probe.written.max_top_line;
     }
@@ -8973,7 +9514,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else
                 before -| @as(usize, @intCast(-delta));
 
-            var built = try buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
+            var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
             defer built.deinit(allocator);
             const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
             script_steps += 1;
@@ -9023,7 +9564,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         // 3 번 줄 5 바이트에서 6 번 줄 2 바이트까지.
         const lo = line_starts[3] + 5;
         const hi = line_starts[6] + 2;
-        var built_sel = try buildEditorFrame(allocator, &host, 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, .{ .lo = lo, .hi = hi }, sel_scratch);
+        var built_sel = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, .{ .lo = lo, .hi = hi }, sel_scratch);
         defer built_sel.deinit(allocator);
 
         // **기대값을 여기서 따로 센다** — 중립 함수를 안 부르고, 줄 범위가 겹치는지만 본다.
@@ -9067,7 +9608,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     var drag_anchor: ?usize = null;
     var sel_range: ?EditorSelRange = null;
     var caret_at: ?editor_view.hit.Point = null;
-    var built = try buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch);
+    var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch);
     defer built.deinit(allocator);
     var frames: usize = 0;
     var wheel_events: usize = 0;
@@ -9131,7 +9672,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else => {},
         };
         if (dirty) {
-            var next_built = buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch) catch built;
+            var next_built = buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch) catch built;
             if (next_built.cells.items.ptr != built.cells.items.ptr) {
                 built.deinit(allocator);
                 built = next_built;
@@ -9145,7 +9686,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 first_line -| @as(usize, @intCast(-scroll));
             if (next != first_line) {
                 first_line = next;
-                const next_built = try buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
+                const next_built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
                 built.deinit(allocator);
                 built = next_built;
             }

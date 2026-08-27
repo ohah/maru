@@ -4367,6 +4367,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var editor_frames: usize = 0;
     var editor_build_failures: usize = 0;
     var editor_scrolls: usize = 0;
+    var editor_clamps: usize = 0;
     var editor_last_digest: u64 = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
@@ -4377,6 +4378,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var spawn_while_file_sessions_before: usize = 0;
     var spawn_while_file_sessions_after: usize = 0;
     var spawn_while_file_shows_terminal = false;
+    // **파일을 보는 중에 친 글자가 어디로 가나.** 화면에 문서가 떠 있는데 글자가 **안 보이는 셸**로
+    // 들어가면, 사용자는 자기가 무엇을 치고 있는지 모른 채 친다.
+    var keys_while_file: usize = 0;
+    var keys_to_terminal_while_file: usize = 0;
+    var keytest_judgeable = false;
+    // 문서 위 클릭이 터미널 선택·리포트로 새는가.
+    var mouse_over_file: usize = 0;
+    // **리포트 수로는 못 잰다.** 마우스 리포트는 트래킹이 켜져야 나가는데 스모크의 셸은 꺼져 있어,
+    // 삼키지 않아도 0 이다(실측: 뮤턴트가 초록으로 통과했다). 트래킹이 꺼진 상태의 진짜 누출은
+    // **터미널에 선택이 생기는 것**이라 그것을 직접 본다.
+    var mouse_sel_before = false;
+    var mouse_sel_after = false;
+    var mousetest_judgeable = false;
+    var oob_judgeable = false;
+    var oob_first_after: usize = 0;
+    var oob_rows_after: usize = 0;
+    var oob_lines: usize = 0;
     var editor_last_cells: usize = 0;
     var editor_last_rows: usize = 0;
     // **파일이 진짜 떴는가.** 카드가 늘어난 것만 보면 속 빈다 — 편집기가 **그 파일의 줄**을 그렸는지,
@@ -5563,10 +5581,46 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 796) {
             open_files_after_second = open_files.items.len;
         }
+        // ── 파일을 보는 중에 글자를 치면 (적대적 검증 2회차) ──────────────────────────
+        //
+        // **개행은 안 보낸다**(§2m.64 의 규율) — 실행되면 안 된다. 눈에 띄는 글자 하나면 충분하다.
+        if (smoke and spins == 798 and active_view == .file) {
+            keytest_judgeable = true;
+            window.postSyntheticChar('Z');
+            // 문서 한가운데를 **끌어** 본다 — 터미널이라면 선택이 생기는 동작이다.
+            mousetest_judgeable = true;
+            const dx0: i32 = @intCast(geom.terminal.x + geom.terminal.w / 4);
+            const dy0: i32 = @intCast(geom.terminal.y + geom.terminal.h / 4);
+            const dx1: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const dy1: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            if (app_window.active()) |a| {
+                a.lockCore(io);
+                mouse_sel_before = a.core.selectionViewportSpan() != null;
+                a.unlockCore(io);
+            }
+            window.postSyntheticMouse(.left_down, dx0, dy0);
+            window.postSyntheticMouse(.moved, dx1, dy1);
+            window.postSyntheticMouse(.left_up, dx1, dy1);
+        }
         // ── 파일을 보는 중에 ＋ 를 누르면 (적대적 검증 1회차) ──────────────────────────
         //
         // 그 자리 주석이 이미 규칙을 적어 뒀다 — *"만들고 안 보여 주면 눌린 것이 화면에 안
         // 나타난다."* 그런데 파일이 활성이면 `selectTab` 만 하고 화면은 파일 그대로였다.
+        // ── 범위를 넘긴 위치는 다음 프레임에 되돌아온다 (적대적 검증 2회차) ─────────────
+        if (smoke and spins == 799) if (active_view == .file) {
+            oob_judgeable = true;
+            open_files.items[active_view.file].first_line = 1_000_000;
+        };
+        if (smoke and spins == 801) if (active_view == .file) {
+            oob_first_after = open_files.items[active_view.file].first_line;
+            oob_rows_after = editor_last_rows;
+            oob_lines = open_files.items[active_view.file].lines.items.len;
+        };
+        if (smoke and spins == 800) if (app_window.active()) |a| {
+            a.lockCore(io);
+            mouse_sel_after = a.core.selectionViewportSpan() != null;
+            a.unlockCore(io);
+        };
         if (smoke and spins == 802) if (active_view == .file and sessions.items.len < max_win_sessions) {
             spawn_while_file_judgeable = true;
             spawn_while_file_sessions_before = sessions.items.len;
@@ -6022,6 +6076,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **입력이 여기서 셸로 간다.** 창은 중립 `KeyEvent`만 주고, 앱 동작이냐 셸 입력이냐는
             // `handleKeyEvent`(중립 정책)가 정한다 — Windows 가 키바인딩을 다시 발명하지 않는다.
             .key => |key_ev| {
+                // ── 파일을 보는 중에는 키가 셸로 안 간다 (적대적 검증 2회차) ──────────────
+                //
+                // **화면에 문서가 떠 있는데 친 글자가 안 보이는 셸로 들어가면 안 된다.** 사용자는
+                // 자기가 무엇을 치고 있는지 모른 채 치게 되고, 개행 하나면 그것이 **실행**된다.
+                // 실측으로 그랬다(`reached_terminal=1`).
+                //
+                // **복사·붙여넣기도 함께 막는다** — 복사는 안 보이는 터미널의 선택을 집어 오고,
+                // 붙여넣기는 안 보이는 셸에 쏟는다. 지금 이 뷰는 읽기 전용이라 삼키는 것이 맞다.
+                if (active_view == .file) {
+                    keys_while_file += 1;
+                    continue;
+                }
                 // **복사가 여기서 붙는다.** §2j 가 `isCopyChord` 를 만들어 두고 호출자를 못 붙인 것은
                 // "무엇을 복사할지"가 선택 영역이고 그것이 마우스와 같은 계층이었기 때문이다(§2k).
                 // 경계는 그대로다 — 선택은 중립 코어가, 클립보드는 플랫폼이 안다.
@@ -6067,6 +6133,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     .terminal_input => |ti| {
                         keys_to_shell += 1;
                         bytes_to_shell += ti.bytes_len;
+                        if (active_view == .file) keys_to_terminal_while_file += 1;
                     },
                     // 앱 동작은 아직 할 일이 없다(Windows 엔 탭·pane 이 없다 — W8). 센다.
                     .app_action => app_actions += 1,
@@ -6637,6 +6704,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     continue;
                 }
+                // ── 문서 위의 클릭도 셸로 안 간다 (적대적 검증 2회차) ────────────────
+                //
+                // 휠은 이미 편집기가 가로챈다. **클릭·드래그는 그대로 지나가고 있었다** — 문서를
+                // 드래그하면 안 보이는 터미널에 선택이 생기고, 트래킹을 켠 TUI 에게는 **마우스
+                // 리포트**가 날아간다(그 앱은 사용자가 자기를 클릭했다고 믿는다).
+                //
+                // 지금 이 뷰는 읽기 전용이라 삼킨다. 편집기 히트테스트(§2m.24)는 이미 중립에 있고,
+                // 캐럿·선택 모델이 붙는 슬라이스에서 여기에 이어 붙이면 된다.
+                if (active_view == .file) {
+                    mouse_over_file += 1;
+                    continue;
+                }
                 if (m.kind == .wheel) {
                     // **눈금과 줄을 가른다.** 리포팅은 xterm 규약상 눈금당 한 번이고, 사용자 설정
                     // (`SPI_GETWHEELSCROLLLINES`)은 로컬 스크롤백이 한 눈금에 몇 줄을 갈지 정하는 값이다.
@@ -7035,6 +7114,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const term_first = cells.items.len;
         if (showing_file) {
             const of = &open_files.items[active_view.file];
+            // **그리기 직전에 상한을 다시 잡는다.** 휠은 그때의 뷰포트로 clamp 하는데, 창이 **커지면**
+            // 보이는 행이 늘어 상한이 줄어든다 — 그러면 방금까지 옳던 위치가 범위를 넘어 **빈 문서**가
+            // 그려진다(실측: `first=1000000` 에서 `rows=0 cells=2`). 상한은 중립이 정한다.
+            {
+                const vis_now: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, geom.terminal.h / cell_h)));
+                const capped = editor_view.viewport.clampFirstRow(of.first_line, of.lines.items.len, vis_now);
+                if (capped != of.first_line) {
+                    of.first_line = capped;
+                    editor_clamps += 1;
+                }
+            }
             const ed_host = EditorHost{
                 .renderer_state = &renderer_state,
                 .shaper = builder.shaper,
@@ -7342,6 +7432,34 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     } else {
         try stdout.print("open_file=unjudgeable reason=no_zig_row_visible\n", .{});
+    }
+    if (keytest_judgeable) {
+        try stdout.print("keys_while_file: seen={d} reached_terminal={d} keys_not_leaked={}\n", .{
+            keys_while_file,
+            keys_to_terminal_while_file,
+            keys_while_file > 0 and keys_to_terminal_while_file == 0,
+        });
+    } else {
+        try stdout.print("keys_while_file=unjudgeable reason=no_file_active\n", .{});
+    }
+    if (oob_judgeable) {
+        // **되돌아온 것만으로는 모자란다** — 0 으로 되돌려도 "되돌아왔다" 이다. **행을 그렸는지**를
+        // 함께 본다(빈 문서가 이 결함의 증상이었다).
+        try stdout.print("editor_oob: first={d} lines={d} rows={d} clamps={d} editor_oob_ok={}\n", .{
+            oob_first_after,
+            oob_lines,
+            oob_rows_after,
+            editor_clamps,
+            oob_first_after < oob_lines and oob_rows_after > 0 and editor_clamps > 0,
+        });
+    }
+    if (mousetest_judgeable) {
+        try stdout.print("mouse_over_file: seen={d} term_selection {}->{} mouse_not_leaked={}\n", .{
+            mouse_over_file,
+            mouse_sel_before,
+            mouse_sel_after,
+            mouse_over_file > 0 and !mouse_sel_after,
+        });
     }
     if (spawn_while_file_judgeable) {
         // **만든 것과 보여 준 것을 갈라 센다.** 세션 수만 보면 "만들었다" 로 초록인데 화면은

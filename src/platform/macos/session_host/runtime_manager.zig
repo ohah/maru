@@ -2379,17 +2379,22 @@ test "P4 N2a product owner admits real PTY OSC into stable host journal" {
     defer manager.deinit();
     const ops = manager.runtimeOps();
     const runtime_id = try ops.spawn(ops.ctx, .{
-        .argv = &.{"/bin/cat"},
+        .argv = &.{
+            "/bin/sh",
+            "-c",
+            "printf '\\033]777;notify; Build\\nTitle ;done\\377\\007\\n'; " ++
+                "read trigger; printf '\\033]9;legacy body\\007\\n'; sleep 30",
+        },
         .cols = 40,
         .rows = 8,
         .initial_notification = .{ .config_generation = 1, .notifications_osc = true, .display_label = "test" },
     });
     defer ops.terminate(ops.ctx, runtime_id);
 
-    try ops.write_input(ops.ctx, runtime_id, "\x1b]777;notify; Build\nTitle ;done\xff\x07\n");
-    // The aggregate Debug gate runs thousands of tests beside this real forkpty child. Keep a
-    // bounded 10 s product deadline so scheduler pressure cannot turn a correct PTY echo into a
-    // two-second false negative; the 1 ms poll still makes the normal path complete immediately.
+    // The child emits the hostile OSC bytes itself. Feeding them through a canonical-mode `cat`
+    // races terminal echo against the child's second copy and does not define one stable PTY
+    // producer transcript under aggregate scheduler pressure.
+    // Keep a bounded 10 s product deadline; the 1 ms poll still makes the normal path immediate.
     var attempts: usize = 0;
     while (attempts < 10_000 and manager.oldestNotification(.gui) == null) : (attempts += 1) {
         _ = manager.drainOwnedEvents();
@@ -2418,7 +2423,7 @@ test "P4 N2a product owner admits real PTY OSC into stable host journal" {
     try std.testing.expect(manager.oldestNotification(.gui) == null);
     try std.testing.expectEqual(row.key.event_id, manager.oldestNotification(.os).?.key.event_id);
 
-    try ops.write_input(ops.ctx, runtime_id, "\x1b]9;legacy body\x07\n");
+    try ops.write_input(ops.ctx, runtime_id, "next\n");
     attempts = 0;
     while (attempts < 10_000 and manager.notification_journal.oldestPendingForRuntime(.gui, runtime_id) == null) : (attempts += 1) {
         _ = manager.drainOwnedEvents();

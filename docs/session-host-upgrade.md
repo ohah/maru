@@ -615,6 +615,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   B가 A를 소비할 때는 이 post-publish release attestation까지 필수다. 공개 뒤 검증 실패는 asset 교체나 `--clobber`로
   복구하지 않고 그 release를 실패 기록으로 보존한 채 새 version으로 다시 출하한다.
 
+  이 순서의 policy도 manifest parser와 같은 `release_manifest.zig`가 typed `PublicationObservation`으로 단일 소유하며,
+  외부 공개 진입점 `parseAndValidatePublication`이 canonical manifest/evidence와 publication transcript를 함께 판정한다.
+  관측은 trusted tag push·protected tag/environment·third-party Action pin 여부, fork PR/`pull_request_target`/임의 ref와
+  `--clobber` 사용 여부, B predecessor의 published+immutable 상태, draft에 붙은 manifest exact-one과 manifest가 열거한
+  asset set, 그리고 위 단계의 exact 순서를 전달한다. policy는 단계 누락·중복·재배열, publish 전 재다운로드 검증 누락,
+  publish 전 release attestation, publish 뒤 manifest/asset 변경을 모두 거부한다. adapter와 workflow가 이 typed policy를
+  실제 GitHub 관측에 연결하기 전에는 component fixture만으로 release publication이 안전하다고 주장하지 않는다.
+
   ```mermaid
   flowchart TD
       BUILD["trusted tag workflow builds signed candidate"]

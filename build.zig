@@ -9884,7 +9884,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_manifest_tests = b.addRunArtifact(release_manifest_tests);
-        run_release_manifest_tests.addArg("--maru-expect-tests=10");
+        run_release_manifest_tests.addArg("--maru-expect-tests=11");
         run_release_manifest_tests.setCwd(b.path("."));
         session_host_release_manifest_step.dependOn(&run_release_manifest_tests.step);
         session_host_step.dependOn(&run_release_manifest_tests.step);

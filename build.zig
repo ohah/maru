@@ -10817,7 +10817,7 @@ pub fn build(b: *std.Build) void {
                     .module = session_host_3d_mod,
                 }},
             }),
-            .filters = &.{"p5c3d current product"},
+            .filters = &.{ "p5c3d current product", "p5c3d --stream" },
         });
         const run_session_host_3d_product_e2e_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_session_host_3d_product_e2e_tests.addPrefixedArtifactArg(
@@ -10827,7 +10827,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_3d_product_e2e_tests.addArtifactArg(
             session_host_3d_product_e2e_tests,
         );
-        run_session_host_3d_product_e2e_tests.addArg("--maru-expect-tests=1");
+        run_session_host_3d_product_e2e_tests.addArg("--maru-expect-tests=2");
         run_session_host_3d_product_e2e_tests.expectExitCode(0);
         run_session_host_3d_product_e2e_tests.setCwd(b.path("."));
         session_host_3d_step.dependOn(&run_session_host_3d_product_e2e_tests.step);

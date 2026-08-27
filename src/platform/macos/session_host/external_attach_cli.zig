@@ -16,6 +16,7 @@ const external_pump_owner = @import("external_pump_owner.zig");
 const external_tty = @import("external_tty.zig");
 const external_tty_output = @import("external_tty_output.zig");
 const remote_screen = @import("remote_screen.zig");
+const attach_pump = @import("client_pump.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const screen_assembler = @import("maru").session.screen_assembler;
 
@@ -153,7 +154,19 @@ fn runStreamRequest(
     std.posix.sigaction(std.posix.SIG.PIPE, &ignore, null);
 
     var sink: StdoutStreamSink = .{ .fd = posix.STDOUT_FILENO };
-    const screen = &(prepared.attachment.screen orelse {
+
+    // **pump 를 세워야 delta 가 온다.** 예전에는 `attachment.pumpScreen` 을 직접 불렀는데,
+    // `bindTransport` 는 이 owner 만 하므로 transport 가 null 이라 첫 호출이 곧바로
+    // `ConnectionClosed` 였다 — 그것을 정상 종료로 접어 **첫 화면만 흘리고 조용히 끝났다**
+    // (실기에서 잡았다: 매초 바뀌는 세션에 붙었는데 snapshot 하나 뒤 `exit=0`).
+    var owner: external_pump_owner.ExternalPumpOwner = .{};
+    owner.initInPlace(prepared) catch |err| {
+        try stderr.print("maru attach: stream cannot start ({s})\n", .{@errorName(err)});
+        return .protocol;
+    };
+    defer _ = owner.teardown();
+
+    const screen = &(owner.attachment.screen orelse {
         try stderr.writeAll("maru attach: screen is unavailable\n");
         return .protocol;
     });
@@ -169,22 +182,87 @@ fn runStreamRequest(
     // 이제부터 오는 것은 sink 가 그대로 나른다.
     screen.byte_sink = .{ .ctx = &sink, .write = StdoutStreamSink.write };
 
+    const socket_fd = owner.socketPollFd() orelse {
+        try stderr.writeAll("maru attach: stream lost the host socket\n");
+        return .protocol;
+    };
+
+    var apply_ctx: StreamApplyContext = .{ .owner = &owner, .io = io };
+    // **TX 관심사를 들고 있어야 한다.** observer 도 host 에 ack 을 보내야 다음 화면이 온다 —
+    // 안 보내면 첫 snapshot 뒤로 아무것도 안 오고, 조용히 멈춘 것처럼 보인다(실기에서 잡았다).
+    // 규칙은 ANSI 루프(`notePumpResult`)와 같다: 권위가 확인된 턴에서만 관심사를 내린다.
+    var write_interest = false;
     while (!sink.broken) {
-        const result = prepared.attachment.pumpScreen(io) catch |err| switch (err) {
-            error.ConnectionClosed => return .success, // host 가 끝났다 — 정상 종료다.
-            else => {
-                try stderr.print("maru attach: stream ended ({s})\n", .{@errorName(err)});
-                return .protocol;
-            },
+        var fds = [_]posix.pollfd{.{
+            .fd = socket_fd,
+            .events = posix.POLL.IN | (if (write_interest) posix.POLL.OUT else @as(i16, 0)),
+            .revents = 0,
+        }};
+        const ready = posix.poll(&fds, stream_poll_timeout_ms) catch |err| {
+            try stderr.print("maru attach: stream poll failed ({s})\n", .{@errorName(err)});
+            return .protocol;
         };
-        switch (result) {
-            .terminal => return .success,
-            .idle, .applied, .recovery_commit_pending => {},
+        const turn: attach_pump.TurnInput = .{
+            .readable = ready > 0 and fds[0].revents & posix.POLL.IN != 0,
+            .writable = ready > 0 and fds[0].revents & posix.POLL.OUT != 0,
+            .now_ns = streamNowNs(),
+        };
+        const result = owner.pumpApplying(
+            turn,
+            &apply_ctx,
+            @sizeOf(StreamApplyContext),
+            StreamApplyContext.apply,
+        );
+        if (result.terminal != null) return .success; // host 가 끝났다 — 정상 종료다.
+        // 이어받은 화면 배치는 별도 경로로 한 번 더 끌어온다(ANSI 루프와 같은 순서).
+        if (result.inherited_work_ready) {
+            switch (owner.pumpCommittedScreen(io)) {
+                .idle, .retry, .applied => {},
+                .terminal => return .success,
+            }
+            // **메타데이터/resize 트랜잭션도 소비해야 한다.** 이걸 빼면 이어받은 작업이 영영 안
+            // 풀려 pump 가 새 RX 를 진행하지 않는다 — 실기에서 `inherited_work_ready` 가 계속
+            // 참인 채 apply 콜백이 **한 번도 안 불렸다**(delta 가 오는데도 화면이 안 갱신).
+            switch (owner.consumeCliOwnerProjection()) {
+                .applied, .none, .retry => {},
+                .terminal => return .success,
+            }
         }
+        if (result.authority_clear)
+            write_interest = result.write_interest or result.immediate_tx
+        else if (result.immediate_tx)
+            write_interest = true;
     }
     // 소비자가 끊었다 — 우리 잘못이 아니다.
     return .success;
 }
+
+/// pump 가 마감을 재는 데 쓰는 단조 시각. 실패하면 0 을 준다 — 시계가 없다고 스트림을 끊는
+/// 것보다, 마감 계산이 보수적으로 도는 편이 낫다(이 모드는 입력도 resize 도 안 보낸다).
+fn streamNowNs() i128 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0) return 0;
+    return @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec);
+}
+
+/// poll 한 번의 상한. host 가 조용해도 주기적으로 깨어나 `broken`(소비자가 끊었나)을 본다.
+const stream_poll_timeout_ms: i32 = 250;
+
+/// `apply_live_screen` 콜백이 화면에 닿는 자리. **바이트를 여기서 흘리지 않는다** — apply 가
+/// `RemoteScreen` 안에서 sink 를 부르므로, 여기서 또 쓰면 같은 덩어리가 두 번 나간다.
+const StreamApplyContext = struct {
+    owner: *external_pump_owner.ExternalPumpOwner,
+    io: std.Io,
+
+    fn apply(
+        context: *anyopaque,
+        view: external_pump_owner.LiveScreenPayloadView,
+    ) external_pump_owner.LiveScreenApplyResult {
+        const self: *StreamApplyContext = @ptrCast(@alignCast(context));
+        self.owner.attachment.applyExternalLiveScreen(view, self.io) catch return .retry;
+        return .applied;
+    }
+};
 
 test "흘린 프레임은 소비자의 조립기로 그대로 되살아난다" {
     // **이 왕복이 판정자다.** "바이트가 나온다" 는 것만 재면 소비자가 못 읽는 스트림도 초록이다.

@@ -664,7 +664,10 @@ pub const ExternalPumpOwner = struct {
         self.storage.failAttachment(reason);
     }
 
-    fn socketPollFd(self: *const ExternalPumpOwner) ?c.fd_t {
+    /// host 소켓의 poll fd. `--stream` 은 raw TTY 스택 없이 이 pump 만 돌리므로(§8) 자기 poll
+    /// 루프를 짤 자리가 필요하다 — 그리는 쪽 루프는 stdin·wake fd 까지 묶은 4-fd 집합을 쓰지만
+    /// 그 모드는 stdin 을 안 읽는다.
+    pub fn socketPollFd(self: *const ExternalPumpOwner) ?c.fd_t {
         if (!self.addressValid() or self.lifecycle != .live) return null;
         return self.storage.pollSocketFd();
     }

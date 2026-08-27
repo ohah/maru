@@ -20,20 +20,18 @@ const darwin_tiocswinsz: c_int = @bitCast(@as(u32, 0x80087467));
 
 test "p5c3d current product owns controller observer takeover detach and reattach over real PTY" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const raw_product = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const product = try allocator.dupeZ(u8, std.mem.span(raw_product));
+    const product = try productExe(allocator);
     defer allocator.free(product);
     // P5d runs the same product oracle through a harness-owned OpenSSH wrapper. Keeping the
     // daemon executable separate prevents the SSH gate from replacing the host with a test double.
-    const raw_attach = c.getenv("MARU_SESSION_HOST_ATTACH_EXE") orelse raw_product;
-    const attach_product = try allocator.dupeZ(u8, std.mem.span(raw_attach));
+    const attach_product = if (c.getenv("MARU_SESSION_HOST_ATTACH_EXE")) |raw|
+        try allocator.dupeZ(u8, std.mem.span(raw))
+    else
+        try allocator.dupeZ(u8, product);
     defer allocator.free(attach_product);
-    const verify_local_termios = std.mem.eql(
-        u8,
-        std.mem.span(raw_attach),
-        std.mem.span(raw_product),
-    );
+    // attach 를 제품 exe 로 직접 부르는 경우에만 로컬 termios 를 검증한다(SSH 래퍼면 원격이다).
+    const verify_local_termios = std.mem.eql(u8, attach_product, product);
 
     var nonce: u64 = 0;
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
@@ -131,7 +129,7 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     );
     try controller.waitFor("P5C3D_READY");
     try controller.write("P5C3D_INPUT\r");
-    if (std.mem.eql(u8, std.mem.span(raw_attach), std.mem.span(raw_product))) {
+    if (verify_local_termios) {
         // The direct child may leave the just-written byte readable on its local slave. OpenSSH
         // intentionally consumes it before forwarding, so P5d uses the stronger PTY-side exact
         // byte oracle below instead of requiring an implementation-specific intermediate state.
@@ -227,6 +225,135 @@ test "p5c3d current product owns controller observer takeover detach and reattac
 }
 
 const AttachMode = enum { controller, observer, takeover };
+
+test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
+    // **이 테스트가 없어서 두 결함이 함께 살아 있었다.**
+    //   ① pump 를 안 세워 `transport` 가 null 이라 첫 호출이 `ConnectionClosed` → 그것을 정상
+    //      종료로 접어 **첫 화면만 흘리고 즉시 끝났다**(실기에서 `exit=0`).
+    //   ② 그것을 고친 뒤에도 `consumeCliOwnerProjection` 을 안 불러 이어받은 작업이 안 풀렸고,
+    //      **apply 콜백이 한 번도 안 불렸다** — host 는 매초 delta 를 보내는데 화면이 멈춰 있었다.
+    // 그래서 판정은 "바이트가 나온다" 가 아니라 **snapshot 뒤에 delta 가 이어지는가** 여야 한다.
+    const allocator = std.testing.allocator;
+    const product = try productExe(allocator);
+    defer allocator.free(product);
+
+    var nonce: u64 = 0;
+    c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
+    nonce = (nonce & (std.math.maxInt(u64) >> 1)) | 1;
+    var xdg_buf: [256]u8 = undefined;
+    const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-p5c3d-stream-{x}", .{nonce});
+    try mkdirExact(xdg);
+    defer removeTree(xdg);
+    var base_buf: [288]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/maru", .{xdg});
+    try mkdirExact(base);
+    var session_buf: [320]u8 = undefined;
+    const session_dir = try session_host.discovery.sessionHostDirPath(&session_buf, base);
+    try mkdirExact(session_dir);
+    try session_host.short_endpoint.prepareCurrentUserNamespace();
+
+    const host_id: u128 = (@as(u128, nonce) << 64) | 0x50356333647374726d;
+    var socket_buf: [128]u8 = undefined;
+    const socket_path = try session_host.short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+    _ = c.unlink(socket_path.ptr);
+    const host_pid = try session_host.launcher.spawnSessionHostSupervisedForTest(
+        allocator,
+        product,
+        session_dir,
+        socket_path,
+        host_id,
+    );
+    defer stopAndReap(host_pid);
+
+    var admin = try connectExact(allocator, base, host_id);
+    defer admin.deinit();
+
+    // **화면이 계속 바뀌는 runtime.** 정적인 화면이면 delta 가 안 와서 이 테스트가 아무것도 못 잰다.
+    const spawn_response = try admin.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"i=0; while :; do printf 'tick %s\\n' $i; i=$((i+1)); sleep 1; done\"],\"cols\":40,\"rows\":10}",
+    );
+    defer allocator.free(spawn_response);
+    const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse
+        return error.RuntimeSpawnFailed;
+    var runtime_text: [33]u8 = undefined;
+    const runtime_z = try std.fmt.bufPrintZ(&runtime_text, "{s}", .{&runtime_id});
+
+    // `--stream` 은 pty 가 필요 없다 — **파이프로 돌리는 것이 이 모드의 목적이다**(§8).
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.PipeFailed;
+    const read_fd = try moveAboveStdio(pipe_fds[0]);
+    const write_fd = try moveAboveStdio(pipe_fds[1]);
+
+    var root_env: [320]u8 = undefined;
+    const root_arg = try std.fmt.bufPrintZ(&root_env, "MARU_SESSION_HOST_ROOT={s}", .{base});
+    const child = c.fork();
+    if (child < 0) return error.ForkFailed;
+    if (child == 0) {
+        _ = c.dup2(write_fd, 1);
+        _ = c.close(read_fd);
+        _ = c.close(write_fd);
+        const argv = [_:null]?[*:0]const u8{ "env", root_arg.ptr, product.ptr, "attach", "--stream", runtime_z.ptr };
+        _ = c.execve("/usr/bin/env", &argv, @ptrCast(c.environ));
+        c._exit(127);
+    }
+    _ = c.close(write_fd);
+    defer {
+        _ = c.kill(child, c.SIG.TERM);
+        var status: c_int = 0;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.close(read_fd);
+    }
+
+    // 프레임을 모은다. delta 는 원격이 1초마다 한 줄을 내므로 넉넉히 기다린다.
+    var buf: [256 * 1024]u8 = undefined;
+    var len: usize = 0;
+    var snapshots: usize = 0;
+    var deltas: usize = 0;
+    var waited_ms: usize = 0;
+    while (waited_ms < 15_000 and deltas < 2) : (waited_ms += 100) {
+        var fds = [_]posix.pollfd{.{ .fd = read_fd, .events = posix.POLL.IN, .revents = 0 }};
+        const ready = posix.poll(&fds, 100) catch break;
+        if (ready > 0 and fds[0].revents & posix.POLL.IN != 0) {
+            const n = c.read(read_fd, buf[len..].ptr, buf.len - len);
+            if (n <= 0) break;
+            len += @intCast(n);
+        }
+        // 모인 만큼 프레임 경계를 다시 센다(부분 프레임은 다음 회차에 이어 읽는다).
+        snapshots = 0;
+        deltas = 0;
+        var off: usize = 0;
+        while (off + stream_header_bytes <= len) {
+            if (!std.mem.eql(u8, buf[off..][0..4], "MRSS")) return error.StreamFramingBroken;
+            const payload_len = std.mem.readInt(u32, buf[off + 8 ..][0..4], .little);
+            if (off + stream_header_bytes + payload_len > len) break; // 아직 덜 왔다
+            switch (buf[off + 4]) {
+                0 => snapshots += 1,
+                1 => deltas += 1,
+                else => return error.StreamFramingBroken,
+            }
+            off += stream_header_bytes + payload_len;
+        }
+    }
+
+    // 첫 화면은 정확히 하나다 — 그 뒤는 이어받기(delta)여야 한다.
+    try std.testing.expectEqual(@as(usize, 1), snapshots);
+    // **여기가 회귀의 핵심이다.** 예전 구현은 여기서 0 이었다.
+    try std.testing.expect(deltas >= 2);
+    // 그리고 프로세스는 **아직 살아 있어야** 한다 — 즉시 종료가 첫 번째 결함이었다.
+    try std.testing.expectEqual(@as(c.pid_t, 0), c.waitpid(child, null, 1));
+}
+
+/// `--stream` stdout 프레이밍 헤더 크기(§8). 소비자가 세는 자리라 여기서도 같은 값을 쓴다.
+const stream_header_bytes: usize = 12;
+
+/// 제품 exe 경로. **이 env 를 읽는 자리는 하나여야 한다** — 경계 게이트가 "제품 프로세스
+/// 호출자 하나" 로 그것을 고정한다(`tests/session_host_3d_boundary.zig`). 없으면 이 스위트는
+/// 제품 없이 돌 수 없으므로 건너뛴다.
+fn productExe(allocator: std.mem.Allocator) ![:0]u8 {
+    const raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
+    return allocator.dupeZ(u8, std.mem.span(raw));
+}
 
 const PtyAttach = struct {
     allocator: std.mem.Allocator,

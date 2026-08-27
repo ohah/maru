@@ -8541,6 +8541,146 @@ test "PTY 안내는 백엔드가 있는 호스트에 새지 않는다" {
 /// 스크롤 상한도 중립이다(`editor_view.viewport.clampFirstRow`). 창부터 표현까지는
 /// `win32_draw_host` 가 맡는다.
 ///
+/// 편집기 선택 구간(문서 byte). **이름을 준다** — 익명 구조체는 리터럴마다 다른 타입이라 호출부와
+/// 파라미터가 안 맞는다.
+const editor_view = maru.chrome.components.editor_view;
+
+const EditorSelRange = struct { lo: usize, hi: usize };
+
+const EditorBuilt = struct {
+    frame: maru.renderer.RenderFrame,
+    written: editor_view.frame.Written,
+    cells: std.ArrayList(d3d11_cells.Cell),
+    ops_text: usize,
+    ops_fill: usize,
+    ops_dropped: usize,
+
+    pub fn deinit(self: *@This(), a: std.mem.Allocator) void {
+        self.cells.deinit(a);
+        self.frame.deinit(a);
+    }
+};
+
+/// 편집기 한 프레임을 짓는다 — **스모크와 제품이 같은 함수를 쓴다.**
+///
+/// 예전에는 이 조립이 `win32-editor-draw-smoke` 안의 클로저였다. 합성 창에 편집기를 붙이며 그대로
+/// 두 벌이 될 뻔했는데, 그러면 스크롤한 프레임과 첫 프레임이 갈리던 그 실패(그 클로저 머리말)가
+/// **플랫폼 두 곳 사이**에서 다시 난다.
+///
+/// `origin_x`·`origin_y` 는 이 프레임이 창의 어느 픽셀에 앉는가다 — 스모크는 (0,0), 제품은
+/// 터미널 사각형의 왼쪽 위다.
+fn buildEditorFrame(
+    a: std.mem.Allocator,
+    h: *draw_host.Host,
+    first_line: usize,
+    ls: []const []const u8,
+    sc: anytype,
+    op_buf: []maru.chrome.draw.Op,
+    tk: *const maru.chrome.Tokens,
+    cl: maru.renderer.metal_frame.CellColors,
+    v: maru.chrome.draw.Rect,
+    inn: maru.chrome.draw.Rect,
+    cw: u32,
+    ch: u32,
+    g: maru.terminal.Size,
+    /// 배경 사각. **호출자가 준다** — 스모크는 내용을 창 (0,0) 에 놓아 배경이 음수로 시작해야 하고,
+    /// 제품은 pane 원점에 딱 맞는다. 그 산수를 여기 두면 둘 중 하나가 반드시 틀린다.
+    bg: maru.chrome.draw.Rect,
+    origin_x: u32,
+    origin_y: u32,
+    sel: ?EditorSelRange,
+    ss: anytype,
+) !EditorBuilt {
+    // **선택을 행 축으로 자른다.** 산술은 중립이 소유한다(`selection_marks`) — macOS 와
+    // Windows 가 각자 적으면 경계 셋(줄 시작·줄 끝·선택 양끝) 중 하나가 조용히 갈린다.
+    //
+    // 행 → 문서 줄 대응은 **여기서** 푼다(랩·접힘이 없으므로 순차다). 그것이 축을 정하는
+    // 일이고, 그 파일 머리말이 호출자 몫이라고 적어 둔 자리다.
+    var sel_marks: ?[]const []const editor_view.frame.Mark = null;
+    if (sel) |sr| {
+        const n = @min(ss.rows.len, ls.len -| first_line);
+        for (0..n) |i| {
+            const li = first_line + i;
+            ss.spans[i] = .{ .start = ss.line_starts[li], .end = ss.line_starts[li] + ls[li].len };
+        }
+        editor_view.selection_marks.build(sr.lo, sr.hi, ss.spans[0..n], ss.rows[0..n], ss.buf[0..n]);
+        sel_marks = ss.rows[0..n];
+    }
+
+    const w = editor_view.diff_frame.buildSide(
+        .{ .lines = ls, .total_lines = ls.len, .selection_marks = sel_marks },
+        .{
+            .first_line = first_line,
+            .wrap = false,
+            .tab_width = 4,
+            .cell_w_px = @intCast(cw),
+            .cell_h_px = @intCast(ch),
+            .font_px = @intCast(ch),
+        },
+        inn,
+        // **배경 사각은 호출자가 준다**(위 파라미터 doc).
+        bg,
+        sc,
+    );
+
+    // **낮추기가 무엇을 버리는지 센다.** `buildTextDrawList` 는 이름 그대로 **글자만** 셀로
+    // 만든다. 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을
+    // 못 본다(이 스모크를 쓰면서 그렇게 한 번 넘길 뻔했다).
+    var n_text: usize = 0;
+    var n_fill: usize = 0;
+    var n_drop: usize = 0;
+    for (op_buf[0..w.ops]) |op| switch (op) {
+        .text => n_text += 1,
+        .fill, .quad => n_fill += 1,
+        .clip => {},
+        else => n_drop += 1,
+    };
+
+    const dl = try chrome_draw_lowering.buildTextDrawList(a, op_buf[0..w.ops], tk, cw, ch, g.cols, g.rows);
+    const prepared = try h.prepare(a, dl);
+    var built = EditorBuilt{
+        .frame = prepared.frame,
+        .written = w,
+        .cells = .empty,
+        .ops_text = n_text,
+        .ops_fill = n_fill,
+        .ops_dropped = n_drop,
+    };
+    errdefer built.deinit(a);
+
+    // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
+    for (op_buf[0..w.ops]) |op| {
+        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            // **그라디언트·테두리는 아직 없다.** 이 셰이더에 그 계산이 없으므로 `solid` 가
+            // 아닌 것은 세어서 남긴다 — 조용히 단색으로 그리면 화면이 틀린 채로 그럴듯해진다.
+            .quad => |q| if (q.gradient == .solid and q.border_role == null)
+                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
+            else
+                continue,
+            else => continue,
+        };
+        const x0 = @max(rect.x, 0);
+        const y0 = @max(rect.y, 0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(v.w)));
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(v.h)));
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tk.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        // 단색 사각도 글리프와 **같은 원점**으로 옮긴다 — 하나만 옮기면 배경과 글자가 어긋난다.
+        try built.cells.append(a, d3d11_cells.solidCell(
+            @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
+            @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
+            @floatFromInt(x1 - x0),
+            @floatFromInt(y1 - y0),
+            d3d11_cells.colorFromArgb(argb),
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        ));
+    }
+    _ = try h.appendGlyphCellsAt(a, built.frame, cl, origin_x, origin_y, &built.cells);
+    return built;
+}
+
 /// **색은 리터럴이다.** §2m.17 이 "스모크에 config 가 끼면 판정이 흐려진다" 로 정해 둔 규율이다.
 fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (@import("builtin").os.tag != .windows) {
@@ -8548,7 +8688,6 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         try stderr.flush();
         return error.UnknownCommand;
     }
-    const editor_view = maru.chrome.components.editor_view;
 
     var loaded = try maru.config.loader.loadDefault(io, allocator);
     defer loaded.deinit();
@@ -8627,7 +8766,6 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     const sel_spans = try allocator.alloc(editor_view.selection_marks.Span, sel_cap);
     defer allocator.free(sel_spans);
     // **이름을 준다.** 익명 구조체는 리터럴마다 다른 타입이라 호출부와 파라미터가 안 맞는다.
-    const SelRange = struct { lo: usize, hi: usize };
     const SelScratch = struct {
         line_starts: []const usize,
         rows: [][]const editor_view.frame.Mark,
@@ -8659,6 +8797,14 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         .h = host.initial.height_px,
     };
     const inset: i32 = @intCast(editor_view.frame.content_inset_px);
+    // **스모크는 내용을 창 (0,0) 에 놓는다** — 그래서 배경이 음수로 시작하고 그만큼 폭·높이도
+    // 늘어야 오른쪽·아래가 안 빈다(초록 대조군 5,844 px). 제품은 pane 원점에 딱 맞는 사각을 준다.
+    const smoke_editor_bg: maru.chrome.draw.Rect = .{
+        .x = -inset,
+        .y = -inset,
+        .w = host.initial.width_px + editor_view.frame.content_inset_px * 2,
+        .h = host.initial.height_px + editor_view.frame.content_inset_px * 2,
+    };
     const inner: maru.chrome.draw.Rect = .{
         .x = 0,
         .y = 0,
@@ -8682,130 +8828,6 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     //
     // 스크롤이 붙으면서 프레임이 **여러 번** 만들어진다. 그래서 조립을 한 자리에 모은다 — 두 군데에
     // 적으면 스크롤한 프레임과 첫 프레임이 조용히 갈린다.
-    const Built = struct {
-        frame: maru.renderer.RenderFrame,
-        written: editor_view.frame.Written,
-        cells: std.ArrayList(d3d11_cells.Cell),
-        ops_text: usize,
-        ops_fill: usize,
-        ops_dropped: usize,
-
-        fn deinit(self: *@This(), a: std.mem.Allocator) void {
-            self.cells.deinit(a);
-            self.frame.deinit(a);
-        }
-    };
-    const build = struct {
-        fn go(
-            a: std.mem.Allocator,
-            h: *draw_host.Host,
-            ev: type,
-            first_line: usize,
-            ls: []const []const u8,
-            sc: anytype,
-            op_buf: []maru.chrome.draw.Op,
-            tk: *const maru.chrome.Tokens,
-            cl: maru.renderer.metal_frame.CellColors,
-            v: maru.chrome.draw.Rect,
-            inn: maru.chrome.draw.Rect,
-            ins: i32,
-            cw: u32,
-            ch: u32,
-            g: maru.terminal.Size,
-            sel: ?SelRange,
-            ss: anytype,
-        ) !Built {
-            // **선택을 행 축으로 자른다.** 산술은 중립이 소유한다(`selection_marks`) — macOS 와
-            // Windows 가 각자 적으면 경계 셋(줄 시작·줄 끝·선택 양끝) 중 하나가 조용히 갈린다.
-            //
-            // 행 → 문서 줄 대응은 **여기서** 푼다(랩·접힘이 없으므로 순차다). 그것이 축을 정하는
-            // 일이고, 그 파일 머리말이 호출자 몫이라고 적어 둔 자리다.
-            var sel_marks: ?[]const []const ev.frame.Mark = null;
-            if (sel) |sr| {
-                const n = @min(ss.rows.len, ls.len -| first_line);
-                for (0..n) |i| {
-                    const li = first_line + i;
-                    ss.spans[i] = .{ .start = ss.line_starts[li], .end = ss.line_starts[li] + ls[li].len };
-                }
-                ev.selection_marks.build(sr.lo, sr.hi, ss.spans[0..n], ss.rows[0..n], ss.buf[0..n]);
-                sel_marks = ss.rows[0..n];
-            }
-
-            const w = ev.diff_frame.buildSide(
-                .{ .lines = ls, .total_lines = ls.len, .selection_marks = sel_marks },
-                .{
-                    .first_line = first_line,
-                    .wrap = false,
-                    .tab_width = 4,
-                    .cell_w_px = @intCast(cw),
-                    .cell_h_px = @intCast(ch),
-                    .font_px = @intCast(ch),
-                },
-                inn,
-                // **배경은 안쪽 사각보다 사방 `inset` 만큼 넓다.** 제품은 내용을 pane 원점 + inset 에
-                // 놓고 배경을 pane 원점에 놓아 딱 맞는데, 스모크는 내용을 창 (0,0) 에 놓으므로 배경이
-                // 음수로 시작하는 만큼 폭·높이도 늘려야 오른쪽·아래가 안 빈다(초록 대조군 5,844 px).
-                .{ .x = -ins, .y = -ins, .w = v.w + ev.frame.content_inset_px * 2, .h = v.h + ev.frame.content_inset_px * 2 },
-                sc,
-            );
-
-            // **낮추기가 무엇을 버리는지 센다.** `buildTextDrawList` 는 이름 그대로 **글자만** 셀로
-            // 만든다. 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을
-            // 못 본다(이 스모크를 쓰면서 그렇게 한 번 넘길 뻔했다).
-            var n_text: usize = 0;
-            var n_fill: usize = 0;
-            var n_drop: usize = 0;
-            for (op_buf[0..w.ops]) |op| switch (op) {
-                .text => n_text += 1,
-                .fill, .quad => n_fill += 1,
-                .clip => {},
-                else => n_drop += 1,
-            };
-
-            const dl = try chrome_draw_lowering.buildTextDrawList(a, op_buf[0..w.ops], tk, cw, ch, g.cols, g.rows);
-            const prepared = try h.prepare(a, dl);
-            var built = Built{
-                .frame = prepared.frame,
-                .written = w,
-                .cells = .empty,
-                .ops_text = n_text,
-                .ops_fill = n_fill,
-                .ops_dropped = n_drop,
-            };
-            errdefer built.deinit(a);
-
-            // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
-            for (op_buf[0..w.ops]) |op| {
-                const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
-                    .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-                    // **그라디언트·테두리는 아직 없다.** 이 셰이더에 그 계산이 없으므로 `solid` 가
-                    // 아닌 것은 세어서 남긴다 — 조용히 단색으로 그리면 화면이 틀린 채로 그럴듯해진다.
-                    .quad => |q| if (q.gradient == .solid and q.border_role == null)
-                        .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
-                    else
-                        continue,
-                    else => continue,
-                };
-                const x0 = @max(rect.x, 0);
-                const y0 = @max(rect.y, 0);
-                const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(v.w)));
-                const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(v.h)));
-                if (x1 <= x0 or y1 <= y0) continue;
-                const rgb = tk.get(role);
-                const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
-                try built.cells.append(a, d3d11_cells.solidCell(
-                    @floatFromInt(x0),
-                    @floatFromInt(y0),
-                    @floatFromInt(x1 - x0),
-                    @floatFromInt(y1 - y0),
-                    d3d11_cells.colorFromArgb(argb),
-                    .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
-                ));
-            }
-            _ = try h.appendGlyphCells(a, built.frame, cl, &built.cells);
-            return built;
-        }
-    }.go;
 
     // **그려진 셀에서 글자를 도로 읽어** 그 행에 파일의 그 줄이 있는지 본다(§2m.6 의 규율).
     //
@@ -8939,7 +8961,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 조용히 어긋난다 — 그 필드 doc 이 경고하는 자리가 정확히 이것이다.
     var max_top: usize = 0;
     {
-        var probe = try build(allocator, &host, editor_view, 0, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, null, sel_scratch);
+        var probe = try buildEditorFrame(allocator, &host, 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
         defer probe.deinit(allocator);
         max_top = probe.written.max_top_line;
     }
@@ -8951,7 +8973,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else
                 before -| @as(usize, @intCast(-delta));
 
-            var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, null, sel_scratch);
+            var built = try buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
             defer built.deinit(allocator);
             const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
             script_steps += 1;
@@ -9001,7 +9023,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         // 3 번 줄 5 바이트에서 6 번 줄 2 바이트까지.
         const lo = line_starts[3] + 5;
         const hi = line_starts[6] + 2;
-        var built_sel = try build(allocator, &host, editor_view, 0, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, .{ .lo = lo, .hi = hi }, sel_scratch);
+        var built_sel = try buildEditorFrame(allocator, &host, 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, .{ .lo = lo, .hi = hi }, sel_scratch);
         defer built_sel.deinit(allocator);
 
         // **기대값을 여기서 따로 센다** — 중립 함수를 안 부르고, 줄 범위가 겹치는지만 본다.
@@ -9043,9 +9065,9 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
 
     // ── 실기 루프 ────────────────────────────────────────────────────────────────────────────
     var drag_anchor: ?usize = null;
-    var sel_range: ?SelRange = null;
-    var caret_at: ?maru.chrome.components.editor_view.hit.Point = null;
-    var built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, sel_range, sel_scratch);
+    var sel_range: ?EditorSelRange = null;
+    var caret_at: ?editor_view.hit.Point = null;
+    var built = try buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch);
     defer built.deinit(allocator);
     var frames: usize = 0;
     var wheel_events: usize = 0;
@@ -9109,7 +9131,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else => {},
         };
         if (dirty) {
-            var next_built = build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, sel_range, sel_scratch) catch built;
+            var next_built = buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch) catch built;
             if (next_built.cells.items.ptr != built.cells.items.ptr) {
                 built.deinit(allocator);
                 built = next_built;
@@ -9123,7 +9145,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 first_line -| @as(usize, @intCast(-scroll));
             if (next != first_line) {
                 first_line = next;
-                const next_built = try build(allocator, &host, editor_view, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, inset, cell_w, cell_h, grid, null, sel_scratch);
+                const next_built = try buildEditorFrame(allocator, &host, first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
                 built.deinit(allocator);
                 built = next_built;
             }

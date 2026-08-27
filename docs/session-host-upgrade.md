@@ -588,7 +588,9 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 
   parser/writer/policy의 단일 소유자는 OS 중립 `src/platform/macos/session_host/release_manifest.zig`이고, release job의
   executable adapter는 `tools/session-host/validate_release_manifest.zig`다. adapter는 GitHub API/`gh`·codesign·DMG 추출 결과를
-  typed input으로 만들어 core validator에 주입할 뿐 JSON을 두 번째로 해석하지 않는다. runtime/GUI는 이 manifest를 읽지
+  typed input으로 만들어 core validator에 주입할 뿐 JSON을 두 번째로 해석하지 않는다. compatibility와 signing 관측은
+  공통 executable SHA-256으로 frozen executable asset에 결속하고, evidence schema/result 관측은 파싱한 summary bytes의
+  SHA-256으로 evidence summary asset에 결속한다. runtime/GUI는 이 manifest를 읽지
   않으며 새 런타임 의존성도 추가하지 않는다. 이 모듈의 `max_manifest_bytes`(64 KiB), `max_evidence_bytes`(1 MiB),
   `max_scalar_string_bytes`(4 KiB), `max_asset_name_bytes`(255)가 입력 상한의 단일 출처다. release/run ID와 size는 nonzero u64,
   SHA-256은 exact 64 lowercase hex이며 checked 합산이 상한을 넘으면 allocation 전에 거부한다. focused gate

@@ -2308,7 +2308,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   연결됐다. OS 중립 `release_manifest.zig`는 canonical A/B JSON, bounded parser/writer와 intrinsic repository/release/source/
   build/compatibility/signing/asset/evidence/predecessor 정책을 단일 소유한다. 같은 모듈의 typed observation policy는 실제
   manifest/A predecessor canonical bytes의 SHA, GitHub identity, executable compatibility/signing, regular no-follow asset,
-  artifact/release attestation, DMG 내부 executable과 evidence candidate를 fail-close로 교차검증하며
+  artifact/release attestation, DMG 내부 executable과 evidence candidate를 fail-close로 교차검증한다. compatibility/signing
+  관측은 frozen executable SHA에, schema/result 관측은 evidence summary SHA에 각각 결속하며
   `test-session-host-release-manifest`가 Debug·ReleaseFast에서 검증한다. 다만 GitHub API·codesign·DMG를 실행해 typed
   observation을 만드는 executable adapter와 release workflow 배선은 아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의

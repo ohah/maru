@@ -6108,6 +6108,16 @@ GUI가 읽고, **폰이 SSH 너머로 받은 것을 같은 코덱으로 조립�
 있어, 소비자가 늘면 그 비트 규칙을 각자 다시 적게 되어 있었다. 반환은 코어 타입이 아니라 순수
 union이라 코덱이 `terminal.Color`를 끌지 않는다(각 소비자가 자기 색 타입으로 옮긴다).
 
+**`--stream`도 attach와 같은 pump를 돈다.** 화면을 그리지 않을 뿐 전송 계층은 같다 — external
+pump owner를 세우고(그것만이 transport를 bind한다), 매 턴 `pumpApplying`으로 live 배치를 적용한 뒤
+이어받은 작업이 남아 있으면 `pumpCommittedScreen`과 **`consumeCliOwnerProjection`을 함께** 소비한다.
+TX 관심사도 같은 규칙으로 든다(observer도 ack을 보내야 다음 화면이 온다).
+
+이 순서를 하나라도 빠뜨리면 **조용히 멈춘다**. pump를 안 세우면 transport가 없어 첫 턴이 곧바로
+연결 종료로 보이고, projection을 안 소비하면 이어받은 작업이 풀리지 않아 apply 콜백이 한 번도
+불리지 않는다 — host는 계속 delta를 보내는데 화면만 첫 장에 멈춰 있다. 둘 다 실기에서 겪었고,
+제품 게이트가 **snapshot 뒤에 delta가 이어지는지**와 **프로세스가 아직 살아 있는지**로 고정한다.
+
 **delta의 base는 client가 유지한다.** `--stream`도 받은 레코드를 자기 조립기에 그대로 적용한다 — 적용을
 건너뛰면 다음 delta의 base가 어긋난다. 즉 흘리는 것은 부수 효과이고, 상태 유지는 그대로다.
 

@@ -204,6 +204,6 @@ chmod 700 "$WRAPPER"
 
 MARU_SESSION_HOST_PRODUCT_EXE=$BUNDLE_CLI \
 MARU_SESSION_HOST_ATTACH_EXE=$WRAPPER \
-"$PRODUCT_TEST" --maru-expect-tests=1
+"$PRODUCT_TEST" --maru-expect-tests=2
 
 echo "p5d: bundle PATH and localhost sshd product PTY gates passed"

@@ -655,6 +655,11 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   complete write·`fsync`·`close`한 뒤 macOS `RENAME_EXCL`로 absent final에만 게시하고 parent를 `fsync`한다. predecessor work-dir도
   안전하게 연 parent 아래 absent leaf에만 0700으로 만들며, 기존 file/directory/symlink를 재사용하지 않는다.
 
+  외부 관측 명령은 shell 문자열이나 호출자 PATH로 실행하지 않는다. absolute executable과 고정 argv를 공용
+  `bounded_process.zig`에 넘기고 stdin은 `/dev/null`, stdout/stderr는 하나의 exact-cap pipe로 제한한다. 성공은 monotonic
+  deadline 안에 pipe EOF와 child exit 0을 모두 관측한 경우뿐이다. timeout·출력 초과·비정상 종료는 child가 만든 process
+  group 전체를 SIGKILL하고 direct child를 reap한 뒤 fail-close한다. upgrade codesign도 이 동일 실행 경계를 사용한다.
+
   signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
   신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub
   API에서 확인해 `PublicationObservation.protected_environment`를 만든다. 이 증거가 없거나 API가 불완전하면 fail-close한다.

@@ -1699,8 +1699,18 @@ pub fn abortStaleFilePanelClose(self: *AppSession) void {
 }
 
 /// root/watch/rows의 모든 allocation이 끝난 뒤 세 authority를 한 번에 무실패 교체한다.
+///
+/// ⚠️ **선택을 지우지 않는다.** 이 함수는 2026-07-20 에 **root 교체 전용**으로 태어나(`220c09dd`) 첫 줄에서
+/// `clearFileTreeSelection` 을 불렀는데, 그때도 호출자가 직후에 같은 clear 를 한 번 더 부르는 **중복**이었다.
+/// 그 뒤 파일 열기(`openFilePanelPathAfterValidation`)가 같은 헬퍼를 재사용하면서 **root 교체용 정책만
+/// 따라왔다**: 파일을 열 때마다 선택이 사라지고, 트리에 포커스가 있으면 `reconcileFileTreeSelection` 이
+/// 「첫 행」규칙으로 떨어져 **스크롤이 맨 위로 튀었다**(사용자 보고 2026-08-27 — "열면 맨 위로 팅겨서요").
+///
+/// **지울 필요가 없다**: 선택은 신원 기반이라(`file_tree_navigation.Selection`) 행 배열이 통째로 바뀌어도
+/// `reconcile` 이 새 목록에서 같은 항목을 찾고, **없으면 스스로 지운다**. 그래서 root 를 갈아끼워 그 항목이
+/// 사라진 경우는 여기서 손대지 않아도 옳게 비워진다 — 초기화가 **정책**인 자리(root 교체·제거)는 그
+/// 호출자가 계속 자기 손으로 부른다.
 pub fn commitFileTreeCandidate(self: *AppSession, candidate: *file_tree.Tree, candidate_rows: *std.ArrayList(file_tree.Row)) void {
-    clearFileTreeSelection(self);
     const old_tree = self.file_tree;
     const old_rows = self.file_tree_rows;
     self.file_tree = candidate.*;

@@ -312,6 +312,18 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 - **루트**: inferred mode에서는 열린 파일이 git repo 안이면 repo 루트, 밖이면 부모 폴더를 합류시킨다. explicit mode에서는 open/add/remove 명령만 표시 root를 바꾼다. 서로 겹치지 않는 루트는 멀티루트 섹션으로 두고, parent/child로 겹치면 가장 바깥 ancestor 하나로 정규화한다. ~~root가 없으면 cwd를 암묵 추가하지 않고 빈 안내를 표시한다.~~ → **root가 없으면 §1의 자동 따라가기가 활성 터미널의 저장소를 root로 세운다**(2026-08-11 결정). 빈 상태에서 "아무것도 없음"을 보여 주는 것보다 지금 일하는 곳을 보여 주는 편이 맞고, root **밖**과 root **없음**을 다르게 다룰 이유가 없다. 터미널이 cwd를 안 주면(파일 Term·원격 세션) 예전대로 빈 안내다.
 - **내용**: 폴더 접기(lazy 열거), 파일 클릭=열기(§6), 열린 파일 하이라이트 + dirty 점, **최근 파일 접이식 섹션**(파일 열람 히스토리 흡수처).
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.
+
+  ⚠️ **그래서 트리를 통째로 갈아끼우는 자리도 선택을 지우지 않는다**(2026-08-27 사용자 보고 — "열면 맨 위로
+  팅겨서요"). 파일을 열면 트리 상태가 바뀌므로(MRU·root 합류·ancestor 펼치기) 사본에 만들어 한 번에 교체하는데
+  (`commitFileTreeCandidate`), 그 함수가 첫 줄에서 선택을 지우고 있었다. 그러면 선택이 사라진 자리에서
+  `reconcileFileTreeSelection` 이 「포커스가 트리에 있으면 첫 행」규칙으로 떨어져 **스크롤이 맨 위로 튄다** —
+  목록을 내려 파일을 하나 열 때마다 그 자리를 다시 찾아 내려와야 했다.
+
+  **루트커즈는 정책이 기계와 한 몸이었던 것**이다. 그 함수는 2026-07-20 에 **root 교체 전용**으로 태어났고
+  (`220c09dd`), 그때는 호출자가 직후에 같은 clear 를 한 번 더 부르는 중복이었다. 파일 열기가 같은 헬퍼를
+  재사용하면서 root 교체용 정책만 따라왔다. 지울 필요도 없다 — 위 문단대로 선택은 신원 기반이라 `reconcile`
+  이 새 목록에서 같은 항목을 찾고 **없으면 스스로 지운다**. 초기화가 실제 정책인 자리(root 교체·제거, 선택된
+  항목의 삭제)는 그 호출자가 계속 자기 손으로 부른다.
 - **표준 탐색**: `↑/↓`는 이전/다음 조작 가능한 row, `←`는 열린 directory를 접고 그 외에는 부모 row, `→`는 닫힌 directory를 펼치고 이미 열렸으면 첫 자식, `Enter`는 directory toggle 또는 파일 열기, `Home/End`는 첫/마지막 row, `PageUp/PageDown`은 현재 tree viewport의 표시 row 수만큼 이동한다. 선택 이동은 같은 row layout/scroll 상태를 사용해 최소 거리로 scroll-into-view한다. `Esc`는 트리 진입 직전 도크 WKWebView를 복원하고, 없거나 stale이면 활성 terminal/browser pane으로 돌아간다. tree focus 동안 평문·IME와 terminal macro는 PTY로 전달하지 않는다.
 - **파일 변경 명령**: `new_file`, `new_directory`, `rename_file_tree_entry`, `delete_file_tree_entry`를 command catalog와 project tree context menu에 노출한다. rename은 `F2`, delete는 `⌘Backspace`도 사용한다. project root/directory/file row만 대상이며 recent row/header와 root 자체의 rename/delete는 금지한다. 생성 위치는 선택이 directory면 그 안, file이면 부모다. 빈 이름·`.`·`..`·`/` 포함·기존 항목 충돌은 거부하고 dotfile은 허용한다.
 - **identity 는 축이 셋이고 섞으면 안 된다**(2026-08-21 사용자 보고). 같은 경로라도 재는 방법마다 다른 값이

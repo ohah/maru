@@ -39723,6 +39723,89 @@ fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {
     try file_panel_ops.updateFileTree(session);
 }
 
+// **파일을 열어도 트리의 선택과 스크롤은 그 자리에 있어야 한다**(사용자 보고 2026-08-27 — "열면 맨 위로
+// 팅겨서요"). 목록을 스크롤해 아래쪽 파일을 눌렀는데 트리가 맨 위로 돌아가면, 이어서 형제 파일을 열려는
+// 사용자는 매번 그 자리를 다시 찾아 내려와야 한다.
+//
+// **루트커즈**: `commitFileTreeCandidate` 가 첫 줄에서 선택을 지웠다. 그 함수는 2026-07-20 에 **root 교체
+// 전용**으로 태어났고(`220c09dd`), 그때는 호출자가 직후에 같은 clear 를 한 번 더 부르는 중복이었다. 파일
+// 열기가 같은 헬퍼를 재사용하면서 **정책만 따라와**, 선택이 사라진 자리에서 `reconcileFileTreeSelection`
+// 이 «포커스가 트리에 있으면 첫 행» 규칙으로 떨어져 스크롤이 0 이 됐다.
+test "파일을 열어도 트리 선택과 스크롤은 그 자리다 (사용자 보고 2026-08-27)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // **낮은 창**이다 — 목록이 넘쳐야 «그 자리»라는 말이 성립한다(스크롤이 없으면 offset 은 늘 0 이고
+    // 이 테스트는 아무것도 증언하지 못한다).
+    _ = try session.resize(1400, 320, 1000);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var name_buf: [32]u8 = undefined;
+    for (0..60) |i| {
+        const name = try std.fmt.bufPrint(&name_buf, "f{d:0>3}.md", .{i});
+        try tmp.dir.writeFile(session.io, .{ .sub_path = name, .data = "# x" });
+    }
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const root = try allocator.dupe(u8, tmp_root);
+    defer allocator.free(root);
+
+    file_panel_ops.requestFileTreeRootPick(session, .replace);
+    _ = session.takeFileTreeRootPickRequest();
+    file_panel_ops.provideFileTreeRootPick(session, root);
+    try testWaitForFileTreeRootCompletion(session);
+    file_panel_ops.activateFilePanelDockControl(session);
+
+    // **첫 스캔은 비동기다.** 행이 찰 때까지 재투영을 돌린다 — 안 기다리면 목록이 root 한 줄이라
+    // 아래에서 고를 행이 없다.
+    var spins: usize = 0;
+    const target_index = blk: while (spins < 400) : (spins += 1) {
+        // **tick 이 스캔 요청을 backend 에 낸다** — `updateFileTree` 만 돌리면 첫 배치에서 멈춘다.
+        _ = session.tick() catch {};
+        try file_panel_ops.updateFileTree(session);
+        // **목록 끝 근처의 파일**을 고른다. 그 행을 보이게 하려면 실제로 스크롤이 내려가야 한다.
+        var last_file: ?usize = null;
+        var files_seen: usize = 0;
+        for (session.file_tree_rows.items, 0..) |row, i| if (row == .file) {
+            files_seen += 1;
+            last_file = i;
+        };
+        if (files_seen >= 6) if (last_file) |i| break :blk i;
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(2), .awake) catch {};
+    } else return error.FileTreeScanNeverFilled;
+
+    // 목록 아래쪽 파일을 고른다. **트리에 포커스를 준다** — 사용자가 트리를 눌러 여는 그 상태다.
+    file_panel_ops.focusFileTree(session);
+    const target_path = try allocator.dupe(u8, maru.session.file_tree.rowPath(session.file_tree_rows.items[target_index]).?);
+    defer allocator.free(target_path);
+    try std.testing.expect(file_panel_ops.setFileTreeSelection(session, target_index));
+    const scrolled = file_panel_ops.fileTreeEffectiveScrollPx(session);
+    try std.testing.expect(scrolled > 0); // 그 행을 보이게 하느라 실제로 내려갔다
+
+    // 트리 클릭과 **같은 경로**를 태운다(intent → 선택 → 열기). 여기서 파일이 열리고
+    // `commitFileTreeCandidate` 가 돈다.
+    file_tree_dock_ops.applyFileTreeIntent(session, .{ .activate_row = @intCast(target_index) });
+    // 선택 재조정은 tick 의 일이다 — 사용자가 보는 다음 프레임까지 간다.
+    file_panel_ops.reconcileFileTreeSelection(session);
+
+    // ① 선택이 **그 파일에 그대로** 있다. 지워지면 아래 스크롤 단언은 «우연히» 통과할 수 있다.
+    const still = file_panel_ops.selectedFileTreeRow(session) orelse return error.SelectionLost;
+    const still_path = maru.session.file_tree.rowPath(session.file_tree_rows.items[still]) orelse return error.SelectedRowHasNoPath;
+    try std.testing.expectEqualStrings(target_path, still_path);
+
+    // ② 스크롤이 맨 위로 튀지 않았다. 행이 밀려 정확히 같은 px 는 아닐 수 있으므로 **0 이 아님**과
+    //    «그 행이 여전히 창 안»을 함께 본다 — 후자가 없으면 1px 만 남아도 통과한다.
+    try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) > 0);
+    const row_h = file_tree_dock_ops.fileTreeRowHeightPx(session);
+    const offset = file_panel_ops.fileTreeEffectiveScrollPx(session);
+    const viewport = file_panel_ops.fileTreeScrollExtent(session).viewport_h_px;
+    const row_top: u64 = @as(u64, still) * @as(u64, row_h);
+    try std.testing.expect(row_top + row_h > offset and row_top < @as(u64, offset) + viewport);
+}
+
 test "file tree root picker replaces adds repeats and rejects stale completion without touching dirty dock entries" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

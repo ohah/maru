@@ -630,8 +630,16 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `pre-publish`는 current draft와 local candidate bytes를 검사하고 publish하지 않는다. `verify-predecessor`는 이미 published인 exact
   predecessor에서 manifest가 열거한 asset을 새 `work-dir`로 내려받아 `gh release verify`와 각 파일의
   `gh release verify-asset`까지 검사하고 release를 수정하지 않는다. 둘 다 성공 시 stdout이 아니라 `--summary-out`에
-  `maru.session-host-release-validation.v1` bounded canonical JSON 하나를 원자적으로 만들며, 실패 시 output 0이다. summary는
+  `maru.session-host-release-validation.v1` bounded canonical JSON 하나를 원자적으로 만든다. publish 전 실패는 output 0이며,
+  exclusive rename 뒤 parent `fsync`가 실패하면 새 output을 제거하고 parent를 다시 동기화하는 best-effort rollback 뒤 terminal
+  failure다. 저장장치가 unlink/fsync까지 함께 실패한 경우에는 이미 게시된 이름의 부재를 거짓 보장하지 않는다. summary는
   audit 결과일 뿐 다음 command의 권위 입력이 아니다. 별도 observation JSON input 포맷을 만들지 않는다.
+
+  로컬 artifact는 pathname을 `stat`한 뒤 다시 열지 않는다. absolute path의 모든 component와 final을
+  `openat(O_NOFOLLOW)`로 내려가며, 최종 regular fd 하나에서 bounded bytes·size·SHA-256·device/inode identity를 만든다. 서로 다른
+  option이 같은 device/inode를 가리키면 hardlink라도 alias로 거부한다. summary는 같은 방식으로 연 parent fd 아래 0600 temp를
+  complete write·`fsync`·`close`한 뒤 macOS `RENAME_EXCL`로 absent final에만 게시하고 parent를 `fsync`한다. predecessor work-dir도
+  안전하게 연 parent 아래 absent leaf에만 0700으로 만들며, 기존 file/directory/symlink를 재사용하지 않는다.
 
   signing job은 GitHub Environment exact `release`를 사용한다. adapter는 caller가 설정한 `environment=release` 문자열을
   신뢰하지 않고, 현재 run/job의 deployment가 그 environment에 결속됐으며 repository의 protection policy가 적용됐음을 GitHub

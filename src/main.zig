@@ -3713,32 +3713,56 @@ const OpenFile = struct {
 /// 지금은 `.text` 만 연다. `.markdown`·`.html` 등의 본문은 계약상 WebView 이고 Windows 에서는
 /// WebView2(W8.6)라 아직 없다 — **조용히 텍스트로 열지 않는다.** 그러면 마크다운이 렌더된 줄
 /// 알았는데 소스가 뜨는 것을 사용자가 겪는다.
+/// 왜 안 열렸는가. **뭉개면 안 된다** — "이 확장자는 아직 못 연다"(계약)와 "읽다가 실패했다"(결함)와
+/// "너무 커서 못 읽는다"(상한)는 서로 다른 사실인데, 하나로 접으면 큰 파일을 못 여는 회귀가
+/// "원래 안 여는 종류" 로 보인다. §2m.57 이 `scan_timeout`·`no_history` 로 같은 교훈을 남겼다.
+const OpenOutcome = union(enum) {
+    opened: OpenFile,
+    /// 이진 파일 등 — 외부 앱의 것이다(중립 `openKindForPath` 가 `null` 을 낸다).
+    unsupported,
+    /// `.md`·`.html`·이미지 … 본문이 WebView 라 Windows 는 W8.6 이 선행이다.
+    needs_web_panel,
+    /// 읽기 실패 — 권한·삭제됨·**4 MiB 상한 초과**.
+    read_failed,
+    out_of_memory,
+
+    fn name(self: std.meta.Tag(OpenOutcome)) []const u8 {
+        return switch (self) {
+            .opened => "opened",
+            .unsupported => "unsupported",
+            .needs_web_panel => "needs_web_panel",
+            .read_failed => "read_failed",
+            .out_of_memory => "out_of_memory",
+        };
+    }
+};
+
 fn openFileFor(
     allocator: std.mem.Allocator,
     io: std.Io,
     path: []const u8,
-) ?OpenFile {
-    const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return null;
-    if (kind != .text) return null;
+) OpenOutcome {
+    const kind = maru.session.file_panel_bridge.openKindForPath(path) orelse return .unsupported;
+    if (kind != .text) return .needs_web_panel;
 
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 << 20)) catch return null;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 << 20)) catch return .read_failed;
     errdefer allocator.free(text);
-    const owned_path = allocator.dupe(u8, path) catch return null;
+    const owned_path = allocator.dupe(u8, path) catch return .out_of_memory;
     errdefer allocator.free(owned_path);
 
     var lines: std.ArrayList([]const u8) = .empty;
     errdefer lines.deinit(allocator);
     var it = std.mem.splitScalar(u8, text, 0x0A);
     // CRLF 를 여기서 벗긴다 — 편집기 뷰는 **표시 텍스트**를 받는다(스모크가 쓰는 그 규칙).
-    while (it.next()) |raw| lines.append(allocator, std.mem.trimEnd(u8, raw, "\r")) catch return null;
+    while (it.next()) |raw| lines.append(allocator, std.mem.trimEnd(u8, raw, "\r")) catch return .out_of_memory;
 
-    const starts = allocator.alloc(usize, lines.items.len) catch return null;
+    const starts = allocator.alloc(usize, lines.items.len) catch return .out_of_memory;
     var off: usize = 0;
     for (lines.items, starts) |l, *st| {
         st.* = off;
         off += l.len + 1;
     }
-    return .{ .path = owned_path, .text = text, .lines = lines, .line_starts = starts };
+    return .{ .opened = .{ .path = owned_path, .text = text, .lines = lines, .line_starts = starts } };
 }
 
 /// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을
@@ -4363,11 +4387,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var file_opens: usize = 0;
     var file_reopens: usize = 0;
     var file_rejects: usize = 0;
+    var last_reject: std.meta.Tag(OpenOutcome) = .opened;
     var file_view_switches: usize = 0;
     var editor_frames: usize = 0;
     var editor_build_failures: usize = 0;
     var editor_scrolls: usize = 0;
     var editor_clamps: usize = 0;
+    var editor_cells_outside_last: usize = 0;
+    var editor_cells_outside_max: usize = 0;
     var editor_last_digest: u64 = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
@@ -4418,6 +4445,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var md_files_after: usize = 0;
     var md_rejects_before: usize = 0;
     var md_rejects_after: usize = 0;
+    var md_reason: std.meta.Tag(OpenOutcome) = .opened;
     // 편집기 op 버퍼는 **한 번만 잡는다** — 프레임마다 4096 개를 새로 잡으면 그것이 곧 프레임 비용이다.
     const ops_buf = try allocator.alloc(maru.chrome.draw.Op, 4096);
     defer allocator.free(ops_buf);
@@ -5551,6 +5579,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 790) {
             md_files_after = open_files.items.len;
             md_rejects_after = file_rejects;
+            md_reason = last_reject;
         }
         // **곧바로 잰다.** 뒤로 미루면 그 사이의 호버·두 번째 클릭이 지문을 바꿔, 이 판정이
         // "무언가가 사이드바를 건드렸다" 로 흐려진다.
@@ -6590,8 +6619,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     // §2m.55 가 "파일 행은 아직 아무 일도 안 한다" 로 남겨 둔 자리다.
                                     // **경로는 행이 들고 있다**(폴더와 같은 규율) — 다시 만들지 않고,
                                     // `buildRows` 가 그 메모리를 해제하므로 넘기기 전에 복사한다.
-                                    if (dock_rows.items[row] == .file) {
-                                        const fp = dock_rows.items[row].file.path;
+                                    // **`recent_file` 도 파일이다.** 라벨·아이콘을 내는 다른 세 곳은
+                                    // 이미 `.file, .recent_file` 을 함께 받는데 여기만 `.file` 이었다 —
+                                    // 그러면 똑같이 생긴 줄이 눌리는 것과 안 눌리는 것으로 갈린다
+                                    // (방금 고친 죽은 컨트롤과 같은 결함, 적대적 검증 3회차).
+                                    const clicked_file_path: ?[]const u8 = switch (dock_rows.items[row]) {
+                                        .file, .recent_file => |fr| fr.path,
+                                        else => null,
+                                    };
+                                    if (clicked_file_path) |fp| {
                                         const owned = allocator.dupe(u8, fp) catch continue;
                                         // `openFileFor` 가 자기 몫을 따로 복사하므로 이것은 항상 놓는다.
                                         defer allocator.free(owned);
@@ -6605,19 +6641,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (found) |fi| {
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
-                                        } else if (openFileFor(allocator, io, owned)) |of| {
-                                            open_files.append(allocator, of) catch {
-                                                var tmp = of;
-                                                tmp.deinit(allocator);
+                                        } else switch (openFileFor(allocator, io, owned)) {
+                                            .opened => |of| {
+                                                open_files.append(allocator, of) catch {
+                                                    var tmp = of;
+                                                    tmp.deinit(allocator);
+                                                    continue;
+                                                };
+                                                file_opens += 1;
+                                                active_view = .{ .file = open_files.items.len - 1 };
+                                            },
+                                            // **못 여는 것을 조용히 넘기지 않고, 이유도 안 뭉갠다.**
+                                            // `.md` 는 계약상 WebView 본문이라 W8.6 이 선행이고,
+                                            // 읽기 실패는 결함이거나 4 MiB 상한이다 — 다른 사실이다.
+                                            else => |why| {
+                                                file_rejects += 1;
+                                                last_reject = std.meta.activeTag(why);
                                                 continue;
-                                            };
-                                            file_opens += 1;
-                                            active_view = .{ .file = open_files.items.len - 1 };
-                                        } else {
-                                            // **못 여는 것을 조용히 넘기지 않는다.** `.md` 는 계약상
-                                            // WebView 본문이라 W8.6 이 선행이고, 이진 파일은 외부 앱이다.
-                                            file_rejects += 1;
-                                            continue;
+                                            },
                                         }
                                         refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name) catch {};
                                         // **목록만 고치면 화면은 그대로다.** 실측 캡처에서 편집기는
@@ -7144,6 +7185,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 editor_last_cells = be.cells.items.len;
                 editor_last_rows = be.written.visual_rows;
                 editor_last_digest = d3d11_cells.cellsDigest(be.cells.items);
+                // **자기 사각형 밖으로 나간 셀을 센다**(도크가 이미 쓰는 그 검사). 원점이 틀리면
+                // 화면은 이상한데 개수·행 수 판정은 조용하다 — 편집기는 사이드바·도크보다 **뒤에**
+                // 그려지므로 새면 그것들을 덮는다.
+                var out_n: usize = 0;
+                for (be.cells.items) |c| {
+                    if (c.rect[0] < @as(f32, @floatFromInt(geom.terminal.x)) or
+                        c.rect[0] + c.rect[2] > @as(f32, @floatFromInt(geom.terminal.x + geom.terminal.w)) or
+                        c.rect[1] < @as(f32, @floatFromInt(geom.terminal.y)) or
+                        c.rect[1] + c.rect[3] > @as(f32, @floatFromInt(geom.terminal.y + geom.terminal.h))) out_n += 1;
+                }
+                editor_cells_outside_last = out_n;
+                editor_cells_outside_max = @max(editor_cells_outside_max, out_n);
                 editor_frames += 1;
             } else |_| editor_build_failures += 1;
         } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
@@ -7442,6 +7495,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     } else {
         try stdout.print("keys_while_file=unjudgeable reason=no_file_active\n", .{});
     }
+    if (open_judgeable) {
+        try stdout.print("editor_bounds: outside_last={d} outside_max={d} editor_in_pane={}\n", .{
+            editor_cells_outside_last,
+            editor_cells_outside_max,
+            editor_cells_outside_max == 0,
+        });
+    }
     if (oob_judgeable) {
         // **되돌아온 것만으로는 모자란다** — 0 으로 되돌려도 "되돌아왔다" 이다. **행을 그렸는지**를
         // 함께 본다(빈 문서가 이 결함의 증상이었다).
@@ -7488,12 +7548,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     if (md_judgeable) {
         // **거절을 세는 것만으로는 모자란다** — 거절했다고 적으면서 열었을 수도 있다. 목록이
         // 안 늘었는지를 함께 본다.
-        try stdout.print("open_md: files {d}->{d} rejects {d}->{d} md_not_opened={}\n", .{
+        try stdout.print("open_md: files {d}->{d} rejects {d}->{d} reason={s} md_not_opened={}\n", .{
             md_files_before,
             md_files_after,
             md_rejects_before,
             md_rejects_after,
-            md_files_before == md_files_after and md_rejects_after > md_rejects_before,
+            OpenOutcome.name(md_reason),
+            // **이유까지 본다.** 거절 수만 세면 읽기가 깨져서 못 연 것도 "계약대로 안 열었다" 로
+            // 초록이 된다 — `.md` 는 반드시 `needs_web_panel` 이어야 한다.
+            md_files_before == md_files_after and md_rejects_after > md_rejects_before and md_reason == .needs_web_panel,
         });
     } else {
         try stdout.print("open_md=unjudgeable reason=no_md_row_visible\n", .{});

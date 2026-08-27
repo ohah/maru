@@ -630,6 +630,13 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   GitHub service identity를 증명하지 않으며, GitHub API·attestation 교차검증이나 protected `release` environment 증거를
   대신하지 않는다.
 
+  repository REST 응답의 의미 해석은 OS 중립 `release_adapter_github_repository.zig` 한 곳이 소유한다. 응답은 그 모듈의
+  `max_response_bytes`가 소유하는 64 KiB 이하의 JSON root 하나여야 하며 additive API field는 허용하되
+  `id`·`name`·`full_name`·`owner.login`은 missing·duplicate·wrong wire
+  type을 거부한다. numeric ID는 nonzero JSON number여야 하고 textual owner/name/full_name의 내부 정합성과 앞서 캡처한
+  `GITHUB_REPOSITORY_ID`·`GITHUB_REPOSITORY`에 모두 exact 일치해야 한다. 이 parser는 이미 획득한 bytes의 의미만 검증하며,
+  bytes가 GitHub에서 왔다는 transport 증거나 `gh` executable의 권위를 대신하지 않는다.
+
   ```text
   validate_release_manifest pre-publish \
     --repo ohah/maru \

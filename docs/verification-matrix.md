@@ -2338,8 +2338,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   protected tag push/workflow 조합, manifest repository/release tag/source commit/build 결속을 닫으며
   `test-session-host-release-adapter-environment`와 `test-session-host-release-adapter-context`가 Debug·ReleaseFast에서 검증한다.
   이는 caller가 identity 문자열을 임의 조립하는
-  경로를 닫는 component seam일 뿐 프로세스 환경 자체를 GitHub service 증거로 승격하지 않는다. 실제 GitHub API·codesign·DMG 결과의
-  의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
+  경로를 닫는 component seam일 뿐 프로세스 환경 자체를 GitHub service 증거로 승격하지 않는다. OS 중립
+  `release_adapter_github_repository.zig`는 그 모듈의 `max_response_bytes`가 소유하는 64 KiB 이하의 repository REST JSON root
+  하나에서 additive field는 허용하되 exact `id`·`name`·`full_name`·`owner.login`의 missing·duplicate·wrong wire type,
+  zero/foreign/internal mismatch와 context ID·owner/name
+  불일치를 fail-close하며 `test-session-host-release-adapter-github-repository`가 Debug·ReleaseFast 및 allocation fail-index로 검증한다.
+  이는 이미 캡처된 bytes의 component 의미 검증이며 GitHub transport나 `gh` executable 권위는 증명하지 않는다. 실제 GitHub release/
+  deployment API·codesign·DMG 결과의 의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte

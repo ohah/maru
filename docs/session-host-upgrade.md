@@ -661,8 +661,13 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   보존한다. additive API field는 허용하지만 consumed field의 missing·duplicate·wrong wire type,
   unknown object type, uppercase/잘못된 길이 SHA는 거부한다. 근거는 GitHub REST API의
   [Git Reference와 Git Tag schema](https://github.com/github/rest-api-description/blob/main/descriptions/api.github.com/api.github.com.yaml)다.
-  이 한 hop parser는 annotated-tag traversal의 최대 깊이·cycle 검출·최종 commit과 manifest source의 결속을 정하지 않는다.
-  그 resolver policy와 실제 API 호출 배선이 추가되기 전에는 source provenance가 완료됐다고 주장하지 않는다.
+  `release_adapter_git_resolver.zig`는 이 typed hop을 이어 lightweight tag 또는 annotated-tag chain이 manifest의 exact
+  lowercase source commit으로 수렴하는지 결속한다. caller가 제공한 `Backing`의 `[]Sha` 길이가 annotated object 수의 정책 상한이며
+  0도 direct-commit-only 정책으로 유효하다. final-address `Backing`은 exact 한 final-address resolver에만 결속되고 storage와 두
+  owner의 비겹침과 결속 뒤 backing descriptor 불변을 고정한다. resolver는 self/earlier cycle,
+  depth exhaustion, foreign current object/commit, replay와 copied owner를 terminal fail-close한다. 따라서 component가 임의 최대 깊이
+  숫자를 만들지 않는다. caller가 선택할 제품 최대 깊이와 실제 API 호출 배선이 추가되기 전에는 source provenance가 완료됐다고
+  주장하지 않는다.
 
   ```text
   validate_release_manifest pre-publish \

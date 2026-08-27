@@ -1651,10 +1651,13 @@ fn runArgvWithEnvWindows(
 
     // POSIX 갈래와 같은 판정이다 — 0 이 아니면 실패고, 그때 stdout 은 버린다(부분 출력을 정상 결과로
     // 싣지 않는다).
-    if (result.exit_code != 0) {
-        result.deinit(allocator);
-        return error.GitFailed;
-    }
+    //
+    // **여기서 손으로 놓지 않는다.** 위 `errdefer` 가 이미 그 일을 하는데 한 번 더 부르면 **이중
+    // 해제**다 — `Output.deinit` 이 `self.* = undefined` 로 덮으므로 두 번째 `free` 는 0xAA 포인터를
+    // 넘긴다. git 이 0 이 아닌 코드로 끝나는 것은 **흔한 일**이고(저장소가 아닌 폴더에서 열면 늘
+    // 그렇다), 그때마다 프로세스가 죽었다 — 실측 2026-08-27: `Segmentation fault at address
+    // 0xffffffffffffffff`, `repoStatusWorker` 스레드.
+    if (result.exit_code != 0) return error.GitFailed;
     return .{ .bytes = result.bytes, .truncated = result.truncated };
 }
 

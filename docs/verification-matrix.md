@@ -2306,9 +2306,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **상태: 선결조건 부분 구현, 외부 gate 미준비.** G3 제품 config 코드는 provisioned `Session host product / default-on` runner와 immutable
   release A manifest가 모두 준비된 뒤에만 시작한다. `build.zig.zon` version SSOT는 generated macOS plist와 tag gate까지
   연결됐다. OS 중립 `release_manifest.zig`는 canonical A/B JSON, bounded parser/writer와 intrinsic repository/release/source/
-  build/compatibility/signing/asset/evidence/predecessor 정책을 단일 소유하며 `test-session-host-release-manifest`가
-  Debug·ReleaseFast에서 검증한다. 다만 typed GitHub·codesign·DMG·attestation 관측값 대조 adapter와 release workflow 배선은
-  아직 없으므로 manifest 일치 검증은 후속 release workflow 슬라이스가 추가한다. 현재 일반 PR의
+  build/compatibility/signing/asset/evidence/predecessor 정책을 단일 소유한다. 같은 모듈의 typed observation policy는 실제
+  manifest/A predecessor canonical bytes의 SHA, GitHub identity, executable compatibility/signing, regular no-follow asset,
+  artifact/release attestation, DMG 내부 executable과 evidence candidate를 fail-close로 교차검증하며
+  `test-session-host-release-manifest`가 Debug·ReleaseFast에서 검증한다. 다만 GitHub API·codesign·DMG를 실행해 typed
+  observation을 만드는 executable adapter와 release workflow 배선은 아직 없으므로 외부 release 검증은 후속 슬라이스가
+  추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte
   equality는 연결됐고 release workflow의 third-party Action은 exact SHA로 고정했으며 임의 ref를 고를 수 있는 수동 실행은
   제거했다. session-host manifest/evidence attestation과 post-publish release attestation은 아직 없다. 2026-08-27 GitHub

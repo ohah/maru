@@ -125,6 +125,85 @@ pub const ParseError = error{
     InvalidEvidence,
 } || std.mem.Allocator.Error;
 
+pub const Attestation = struct {
+    verified: bool,
+    repository: Repository,
+    source_commit: []const u8,
+    workflow_ref: []const u8,
+    run_id: u64,
+    run_attempt: u64,
+    subject_name: []const u8,
+    subject_sha256: []const u8,
+};
+
+pub const ReleaseAttestation = struct {
+    verified: bool,
+    repository: Repository,
+    release_id: u64,
+    release_tag: []const u8,
+    source_commit: []const u8,
+    manifest_sha256: []const u8,
+    assets: []const Asset,
+};
+
+pub const AssetObservation = struct {
+    asset: Asset,
+    regular_file: bool,
+    no_follow: bool,
+    attestation: Attestation,
+};
+
+pub const EvidenceObservation = struct {
+    test_uuid: []const u8,
+    result: []const u8,
+    candidate_executable_sha256: []const u8,
+};
+
+pub const PredecessorObservation = struct {
+    manifest_bytes: []const u8,
+    manifest_sha256: []const u8,
+    published: bool,
+    immutable: bool,
+    manifest_asset_count: u64,
+    release_attestation: ReleaseAttestation,
+};
+
+pub const Observation = struct {
+    repository: Repository,
+    release: Release,
+    source: Source,
+    build: Build,
+    compatibility: Compatibility,
+    executable_compatibility_verified: bool,
+    signing: Signing,
+    strict_signature_verified: bool,
+    notarization_verified: bool,
+    staple_verified: bool,
+    assets: []const AssetObservation,
+    dmg_product_executable_sha256: []const u8,
+    dmg_extraction_no_follow: bool,
+    evidence: EvidenceObservation,
+    evidence_schema_verified: bool,
+    manifest_sha256: []const u8,
+    manifest_attestation: Attestation,
+    predecessor: ?PredecessorObservation = null,
+};
+
+pub const EvidenceError = error{
+    RepositoryMismatch,
+    ReleaseMismatch,
+    SourceMismatch,
+    BuildMismatch,
+    CompatibilityMismatch,
+    SigningMismatch,
+    AssetMismatch,
+    DmgExecutableMismatch,
+    EvidenceMismatch,
+    AttestationMismatch,
+    PredecessorMismatch,
+    ManifestDigestMismatch,
+};
+
 /// Parses only the writer's exact byte representation. This turns key order, whitespace, number
 /// spelling, escaping, and the final LF into one closed format instead of several equivalent JSONs.
 pub fn parseCanonical(allocator: std.mem.Allocator, bytes: []const u8) ParseError!Parsed {
@@ -242,6 +321,187 @@ pub fn validateIntrinsic(manifest: Manifest) ParseError!void {
             return error.InvalidRolePolicy;
         try scalar(predecessor.tag);
     }
+}
+
+/// Cross-checks already observed external facts. The release adapter owns filesystem and service
+/// calls, but this function remains the only place allowed to decide whether those typed facts are
+/// sufficient. No pathname, command output, or JSON syntax reaches this policy boundary.
+pub fn parseAndValidateObservation(
+    allocator: std.mem.Allocator,
+    canonical_bytes: []const u8,
+    observed: Observation,
+) (ParseError || EvidenceError)!Parsed {
+    var parsed = try parseCanonical(allocator, canonical_bytes);
+    errdefer parsed.deinit();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canonical_bytes, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    if (!std.mem.eql(u8, &digest_hex, observed.manifest_sha256))
+        return error.ManifestDigestMismatch;
+
+    var predecessor_parsed: ?Parsed = null;
+    defer if (predecessor_parsed) |*value| value.deinit();
+    if (observed.predecessor) |predecessor| {
+        predecessor_parsed = try parseCanonical(allocator, predecessor.manifest_bytes);
+        var predecessor_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(predecessor.manifest_bytes, &predecessor_digest, .{});
+        const predecessor_digest_hex = std.fmt.bytesToHex(predecessor_digest, .lower);
+        if (!std.mem.eql(u8, &predecessor_digest_hex, predecessor.manifest_sha256))
+            return error.PredecessorMismatch;
+    }
+    try validateObservation(
+        parsed.value().*,
+        observed,
+        if (predecessor_parsed) |*value| value.value().* else null,
+    );
+    return parsed;
+}
+
+fn validateObservation(
+    manifest: Manifest,
+    observed: Observation,
+    predecessor_manifest: ?Manifest,
+) EvidenceError!void {
+    if (!equalRepository(manifest.repository, observed.repository))
+        return error.RepositoryMismatch;
+    if (!equalRelease(manifest.release, observed.release)) return error.ReleaseMismatch;
+    if (!equalSource(manifest.source, observed.source)) return error.SourceMismatch;
+    if (!equalBuild(manifest.build, observed.build)) return error.BuildMismatch;
+    if (!observed.executable_compatibility_verified or
+        !equalCompatibility(manifest.compatibility, observed.compatibility))
+        return error.CompatibilityMismatch;
+    if (!observed.strict_signature_verified or !observed.notarization_verified or
+        !observed.staple_verified or !equalSigning(manifest.signing, observed.signing))
+        return error.SigningMismatch;
+
+    if (observed.assets.len != manifest.assets.len) return error.AssetMismatch;
+    var frozen_sha: ?[]const u8 = null;
+    for (manifest.assets) |expected| {
+        const actual = observationForRole(observed.assets, expected.role) orelse
+            return error.AssetMismatch;
+        if (!equalAsset(expected, actual.asset) or !actual.regular_file or !actual.no_follow)
+            return error.AssetMismatch;
+        try validateAttestation(manifest, actual.attestation, expected.name, expected.sha256);
+        if (expected.role == .frozen_product_executable) frozen_sha = expected.sha256;
+    }
+    const executable_sha = frozen_sha orelse return error.AssetMismatch;
+    if (!observed.dmg_extraction_no_follow or
+        !std.mem.eql(u8, executable_sha, observed.dmg_product_executable_sha256))
+        return error.DmgExecutableMismatch;
+
+    if (!observed.evidence_schema_verified or
+        !std.mem.eql(u8, manifest.evidence.test_uuid, observed.evidence.test_uuid) or
+        !std.mem.eql(u8, manifest.evidence.result, observed.evidence.result) or
+        !std.mem.eql(u8, executable_sha, observed.evidence.candidate_executable_sha256))
+        return error.EvidenceMismatch;
+    if (!lowerHex(observed.manifest_sha256, 64)) return error.AttestationMismatch;
+    try validateAttestation(manifest, observed.manifest_attestation, null, observed.manifest_sha256);
+
+    switch (manifest.role) {
+        .a => if (observed.predecessor != null) return error.PredecessorMismatch,
+        .b => {
+            const expected = manifest.predecessor orelse return error.PredecessorMismatch;
+            const actual = observed.predecessor orelse return error.PredecessorMismatch;
+            const predecessor = predecessor_manifest orelse return error.PredecessorMismatch;
+            if (!actual.published or !actual.immutable or actual.manifest_asset_count != 1 or
+                predecessor.role != .a or predecessor.predecessor != null or
+                expected.release_id != predecessor.release.id or
+                !std.mem.eql(u8, expected.tag, predecessor.release.tag) or
+                !std.mem.eql(u8, expected.commit, predecessor.source.commit) or
+                !std.mem.eql(u8, expected.manifest_sha256, actual.manifest_sha256))
+                return error.PredecessorMismatch;
+            if (!actual.release_attestation.verified or
+                !equalRepository(predecessor.repository, actual.release_attestation.repository) or
+                predecessor.release.id != actual.release_attestation.release_id or
+                !std.mem.eql(u8, predecessor.release.tag, actual.release_attestation.release_tag) or
+                !std.mem.eql(u8, predecessor.source.commit, actual.release_attestation.source_commit) or
+                !std.mem.eql(u8, actual.manifest_sha256, actual.release_attestation.manifest_sha256) or
+                !equalAssetSet(predecessor.assets, actual.release_attestation.assets))
+                return error.PredecessorMismatch;
+        },
+    }
+}
+
+fn validateAttestation(
+    manifest: Manifest,
+    attestation: Attestation,
+    subject_name: ?[]const u8,
+    subject_sha256: []const u8,
+) EvidenceError!void {
+    if (!attestation.verified or
+        !equalRepository(manifest.repository, attestation.repository) or
+        !std.mem.eql(u8, manifest.source.commit, attestation.source_commit) or
+        !std.mem.eql(u8, manifest.build.workflow_ref, attestation.workflow_ref) or
+        manifest.build.run_id != attestation.run_id or
+        manifest.build.run_attempt != attestation.run_attempt or
+        !basename(attestation.subject_name) or
+        (subject_name != null and !std.mem.eql(u8, subject_name.?, attestation.subject_name)) or
+        !std.mem.eql(u8, subject_sha256, attestation.subject_sha256))
+        return error.AttestationMismatch;
+}
+
+fn observationForRole(observed: []const AssetObservation, role: AssetRole) ?AssetObservation {
+    var result: ?AssetObservation = null;
+    for (observed) |candidate| {
+        if (candidate.asset.role != role) continue;
+        if (result != null) return null;
+        result = candidate;
+    }
+    return result;
+}
+
+fn equalRepository(a: Repository, b: Repository) bool {
+    return a.id == b.id and std.mem.eql(u8, a.owner, b.owner) and std.mem.eql(u8, a.name, b.name);
+}
+
+fn equalRelease(a: Release, b: Release) bool {
+    return a.id == b.id and std.mem.eql(u8, a.tag, b.tag) and std.mem.eql(u8, a.version, b.version);
+}
+
+fn equalSource(a: Source, b: Source) bool {
+    return std.mem.eql(u8, a.commit, b.commit) and std.mem.eql(u8, a.tree, b.tree);
+}
+
+fn equalBuild(a: Build, b: Build) bool {
+    return a.run_id == b.run_id and a.run_attempt == b.run_attempt and
+        std.mem.eql(u8, a.workflow_ref, b.workflow_ref);
+}
+
+fn equalCompatibility(a: Compatibility, b: Compatibility) bool {
+    return a.mrsh_major == b.mrsh_major and a.screen_codec == b.screen_codec and
+        a.handoff_reader_min == b.handoff_reader_min and
+        a.handoff_reader_max == b.handoff_reader_max and a.app_host_abi == b.app_host_abi;
+}
+
+fn equalSigning(a: Signing, b: Signing) bool {
+    if (!std.mem.eql(u8, a.bundle_id, b.bundle_id) or
+        !std.mem.eql(u8, a.bundle_short_version, b.bundle_short_version) or
+        !std.mem.eql(u8, a.bundle_version, b.bundle_version) or
+        !std.mem.eql(u8, a.team_id, b.team_id) or
+        !std.mem.eql(u8, a.designated_requirement_sha256, b.designated_requirement_sha256) or
+        !std.mem.eql(u8, a.notarization, b.notarization) or a.stapled != b.stapled or
+        a.architectures.len != b.architectures.len) return false;
+    for (a.architectures, b.architectures) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    return true;
+}
+
+fn equalAsset(a: Asset, b: Asset) bool {
+    return a.role == b.role and a.size == b.size and std.mem.eql(u8, a.name, b.name) and
+        std.mem.eql(u8, a.sha256, b.sha256);
+}
+
+fn equalAssetSet(expected: []const Asset, actual: []const Asset) bool {
+    if (expected.len != actual.len) return false;
+    for (expected) |asset| {
+        var matches: usize = 0;
+        for (actual) |candidate| {
+            if (equalAsset(asset, candidate)) matches += 1;
+        }
+        if (matches != 1) return false;
+    }
+    return true;
 }
 
 fn validateSigning(signing: Signing) ParseError!void {
@@ -368,6 +628,87 @@ fn validManifest(role: Role) Manifest {
     };
 }
 
+fn validAttestation(manifest: Manifest, subject_name: []const u8, subject_sha256: []const u8) Attestation {
+    return .{
+        .verified = true,
+        .repository = manifest.repository,
+        .source_commit = manifest.source.commit,
+        .workflow_ref = manifest.build.workflow_ref,
+        .run_id = manifest.build.run_id,
+        .run_attempt = manifest.build.run_attempt,
+        .subject_name = subject_name,
+        .subject_sha256 = subject_sha256,
+    };
+}
+
+fn validReleaseAttestation(manifest: Manifest, manifest_sha256: []const u8) ReleaseAttestation {
+    return .{
+        .verified = true,
+        .repository = manifest.repository,
+        .release_id = manifest.release.id,
+        .release_tag = manifest.release.tag,
+        .source_commit = manifest.source.commit,
+        .manifest_sha256 = manifest_sha256,
+        .assets = manifest.assets,
+    };
+}
+
+fn fillAssetObservations(manifest: Manifest, out: *[3]AssetObservation) void {
+    for (manifest.assets, 0..) |asset, index| {
+        out[index] = .{
+            .asset = asset,
+            .regular_file = true,
+            .no_follow = true,
+            .attestation = validAttestation(manifest, asset.name, asset.sha256),
+        };
+    }
+}
+
+fn validObservation(
+    manifest: *const Manifest,
+    assets: []const AssetObservation,
+    predecessor: ?PredecessorObservation,
+) Observation {
+    const executable = for (manifest.assets) |asset| {
+        if (asset.role == .frozen_product_executable) break asset.sha256;
+    } else unreachable;
+    const manifest_sha = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    return .{
+        .repository = manifest.repository,
+        .release = manifest.release,
+        .source = manifest.source,
+        .build = manifest.build,
+        .compatibility = manifest.compatibility,
+        .executable_compatibility_verified = true,
+        .signing = manifest.signing,
+        .strict_signature_verified = true,
+        .notarization_verified = true,
+        .staple_verified = true,
+        .assets = assets,
+        .dmg_product_executable_sha256 = executable,
+        .dmg_extraction_no_follow = true,
+        .evidence = .{
+            .test_uuid = manifest.evidence.test_uuid,
+            .result = manifest.evidence.result,
+            .candidate_executable_sha256 = executable,
+        },
+        .evidence_schema_verified = true,
+        .manifest_sha256 = manifest_sha,
+        .manifest_attestation = validAttestation(manifest.*, "release-manifest.json", manifest_sha),
+        .predecessor = predecessor,
+    };
+}
+
+fn validPredecessorManifest(successor: Manifest) Manifest {
+    var predecessor = validManifest(.a);
+    predecessor.release.id = successor.predecessor.?.release_id;
+    predecessor.release.tag = successor.predecessor.?.tag;
+    predecessor.release.version = successor.predecessor.?.tag[1..];
+    predecessor.signing.bundle_short_version = predecessor.release.version;
+    predecessor.source.commit = successor.predecessor.?.commit;
+    return predecessor;
+}
+
 test "release manifest canonical A and B round trip" {
     for ([_]Role{ .a, .b }) |role| {
         const bytes = try writeCanonical(std.testing.allocator, validManifest(role));
@@ -433,6 +774,15 @@ fn parseAllocationFailureCase(allocator: std.mem.Allocator, bytes: []const u8) !
     defer parsed.deinit();
 }
 
+fn observationAllocationFailureCase(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    observed: Observation,
+) !void {
+    var parsed = try parseAndValidateObservation(allocator, bytes, observed);
+    defer parsed.deinit();
+}
+
 test "release manifest caps strings binds evidence and unwinds every allocation failure" {
     var manifest = validManifest(.a);
     var assets: [3]Asset = undefined;
@@ -469,5 +819,148 @@ test "release manifest caps strings binds evidence and unwinds every allocation 
         std.testing.allocator,
         parseAllocationFailureCase,
         .{bytes},
+    );
+}
+
+test "release manifest typed observations accept exact A and immutable predecessor B" {
+    var b = validManifest(.b);
+    const a = validPredecessorManifest(b);
+    const a_bytes = try writeCanonical(std.testing.allocator, a);
+    defer std.testing.allocator.free(a_bytes);
+    var a_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(a_bytes, &a_digest, .{});
+    const a_digest_hex = std.fmt.bytesToHex(a_digest, .lower);
+
+    var a_assets: [3]AssetObservation = undefined;
+    fillAssetObservations(a, &a_assets);
+    var a_observed = validObservation(&a, &a_assets, null);
+    a_observed.manifest_sha256 = &a_digest_hex;
+    a_observed.manifest_attestation.subject_sha256 = &a_digest_hex;
+    var validated_a = try parseAndValidateObservation(std.testing.allocator, a_bytes, a_observed);
+    validated_a.deinit();
+
+    b.predecessor.?.manifest_sha256 = &a_digest_hex;
+    const b_bytes = try writeCanonical(std.testing.allocator, b);
+    defer std.testing.allocator.free(b_bytes);
+    var b_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(b_bytes, &b_digest, .{});
+    const b_digest_hex = std.fmt.bytesToHex(b_digest, .lower);
+
+    var b_assets: [3]AssetObservation = undefined;
+    fillAssetObservations(b, &b_assets);
+    const predecessor = PredecessorObservation{
+        .manifest_bytes = a_bytes,
+        .manifest_sha256 = &a_digest_hex,
+        .published = true,
+        .immutable = true,
+        .manifest_asset_count = 1,
+        .release_attestation = validReleaseAttestation(a, &a_digest_hex),
+    };
+    var b_observed = validObservation(&b, &b_assets, predecessor);
+    b_observed.manifest_sha256 = &b_digest_hex;
+    b_observed.manifest_attestation.subject_sha256 = &b_digest_hex;
+    var validated_b = try parseAndValidateObservation(std.testing.allocator, b_bytes, b_observed);
+    validated_b.deinit();
+
+    var changed_a = try std.testing.allocator.dupe(u8, a_bytes);
+    defer std.testing.allocator.free(changed_a);
+    const predecessor_hash_start = std.mem.indexOf(u8, changed_a, "aaaaaaaaaaaaaaaa") orelse unreachable;
+    changed_a[predecessor_hash_start] = 'f';
+    b_observed.predecessor.?.manifest_bytes = changed_a;
+    try std.testing.expectError(
+        error.PredecessorMismatch,
+        parseAndValidateObservation(std.testing.allocator, b_bytes, b_observed),
+    );
+}
+
+test "release manifest typed observations reject identity signature and asset drift" {
+    var manifest = validManifest(.a);
+    var assets: [3]AssetObservation = undefined;
+    fillAssetObservations(manifest, &assets);
+    var observed = validObservation(&manifest, &assets, null);
+
+    observed.repository.id += 1;
+    try std.testing.expectError(error.RepositoryMismatch, validateObservation(manifest, observed, null));
+    observed = validObservation(&manifest, &assets, null);
+    observed.compatibility.screen_codec += 1;
+    try std.testing.expectError(error.CompatibilityMismatch, validateObservation(manifest, observed, null));
+    observed = validObservation(&manifest, &assets, null);
+    observed.signing.team_id = "OTHERTEAM";
+    try std.testing.expectError(error.SigningMismatch, validateObservation(manifest, observed, null));
+    observed = validObservation(&manifest, &assets, null);
+    observed.strict_signature_verified = false;
+    try std.testing.expectError(error.SigningMismatch, validateObservation(manifest, observed, null));
+    observed = validObservation(&manifest, &assets, null);
+    assets[0].no_follow = false;
+    try std.testing.expectError(error.AssetMismatch, validateObservation(manifest, observed, null));
+    fillAssetObservations(manifest, &assets);
+    observed = validObservation(&manifest, &assets, null);
+    observed.dmg_extraction_no_follow = false;
+    try std.testing.expectError(error.DmgExecutableMismatch, validateObservation(manifest, observed, null));
+}
+
+test "release manifest typed observations reject attestation evidence and predecessor substitution" {
+    var b = validManifest(.b);
+    var a = validPredecessorManifest(b);
+    var assets: [3]AssetObservation = undefined;
+    fillAssetObservations(b, &assets);
+    var predecessor = PredecessorObservation{
+        .manifest_bytes = "unused by the internal policy test",
+        .manifest_sha256 = b.predecessor.?.manifest_sha256,
+        .published = true,
+        .immutable = true,
+        .manifest_asset_count = 1,
+        .release_attestation = validReleaseAttestation(a, b.predecessor.?.manifest_sha256),
+    };
+    var observed = validObservation(&b, &assets, predecessor);
+    observed.manifest_attestation.source_commit = a.source.commit;
+    try std.testing.expectError(error.AttestationMismatch, validateObservation(b, observed, a));
+
+    observed = validObservation(&b, &assets, predecessor);
+    assets[0].attestation.subject_name = assets[1].asset.name;
+    try std.testing.expectError(error.AttestationMismatch, validateObservation(b, observed, a));
+    fillAssetObservations(b, &assets);
+
+    observed = validObservation(&b, &assets, predecessor);
+    observed.evidence.candidate_executable_sha256 = a.source.commit;
+    try std.testing.expectError(error.EvidenceMismatch, validateObservation(b, observed, a));
+
+    predecessor.immutable = false;
+    observed = validObservation(&b, &assets, predecessor);
+    try std.testing.expectError(error.PredecessorMismatch, validateObservation(b, observed, a));
+    predecessor.immutable = true;
+    a.release.id += 1;
+    observed = validObservation(&b, &assets, predecessor);
+    try std.testing.expectError(error.PredecessorMismatch, validateObservation(b, observed, a));
+}
+
+test "release manifest observation binds attestation to exact canonical bytes" {
+    var manifest = validManifest(.a);
+    const bytes = try writeCanonical(std.testing.allocator, manifest);
+    defer std.testing.allocator.free(bytes);
+
+    var assets: [3]AssetObservation = undefined;
+    fillAssetObservations(manifest, &assets);
+    var observed = validObservation(&manifest, &assets, null);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    observed.manifest_sha256 = &digest_hex;
+    observed.manifest_attestation.subject_sha256 = &digest_hex;
+    var validated = try parseAndValidateObservation(std.testing.allocator, bytes, observed);
+    validated.deinit();
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        observationAllocationFailureCase,
+        .{ bytes, observed },
+    );
+
+    var changed = try std.testing.allocator.dupe(u8, bytes);
+    defer std.testing.allocator.free(changed);
+    const hash_start = std.mem.indexOf(u8, changed, "aaaaaaaaaaaaaaaa") orelse unreachable;
+    changed[hash_start] = 'f';
+    try std.testing.expectError(
+        error.ManifestDigestMismatch,
+        parseAndValidateObservation(std.testing.allocator, changed, observed),
     );
 }

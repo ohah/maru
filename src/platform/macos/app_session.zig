@@ -11036,6 +11036,10 @@ pub const AppSession = struct {
                     const handled = if (motion) |how|
                         editor_ops.moveCarets(self, active, how, extend)
                     else if (m.command and !m.control and !m.option and key_event.key == .char and
+                        key_event.key.char == '/')
+                        // **⌘/ 주석 토글**(§3.7). `⌘C`·`⌘V`처럼 Swift 진입점이 없어 여기서 잡는다.
+                        editor_ops.toggleLineComment(self, active)
+                    else if (m.command and !m.control and !m.option and key_event.key == .char and
                         (key_event.key.char == 'x' or key_event.key.char == 'X'))
                         // **⌘X 잘라내기**(§3.4). `⌘C`는 `copyText`가, `⌘V`는 `pasteText`가 받는데
                         // (Swift가 그 둘을 따로 부른다) **잘라내기는 그런 진입점이 없다** — 주소창이

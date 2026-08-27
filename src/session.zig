@@ -163,6 +163,10 @@ pub const editor = struct {
     /// N2: 타이핑 보조 — 괄호·따옴표 자동 닫기·type-over·surround(§3.7). **문맥을 묻지 않는다** —
     /// 문자열/주석 판정은 토큰 층(§5.3)의 일이고 아직 없어, 그 절이 정한 **저하 동작**을 한다.
     pub const pairs = @import("session/editor/pairs.zig");
+    /// N2: 파일이 어떤 **언어**인가(확장자·파일명). 계약은 [문서 모델] §3.7a가 소유한다 — 세 곳이
+    /// 없는 §5를 가리키고 있어서 그 절을 새로 세웠다(§5는 언어를 **입력으로 받는** 쪽이다).
+    /// 지금 실소비처는 주석 토글(§3.7)이고, 구문 강조·자동 들여쓰기가 뒤따를 자리다.
+    pub const language = @import("session/editor/language.zig");
     /// N2: 한 번의 편집을 값으로 만든다(§3.3 — 여러 range를 담고 selection을 같은 연산에서 민다).
     /// 스택·그룹핑은 시계와 입력 사건을 읽어야 해서 여기 없다.
     pub const delta = @import("session/editor/delta.zig");

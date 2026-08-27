@@ -2735,7 +2735,7 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG" },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -2743,6 +2743,18 @@ pub fn build(b: *std.Build) void {
     editor_test_step.dependOn(&run_editor_tests.step);
     // caret 렌더(`CRT*`)와 왕복 불변식 ①은 chrome 쪽 모듈에 있다 — 15초라 함께 돌린다.
     editor_test_step.dependOn(&run_chrome_ui_tests.step);
+    // **L2 순수 모듈(`session/editor/*.zig`)의 판정자도 이 바이너리에 없다.** `app_session/editor.zig`가
+    // 그것들을 **부르지만**, 부르는 것과 그 파일의 `test`가 함께 실려 오는 것은 다르다 — `maru`는 별도
+    // 모듈이고 `zig test`는 루트 모듈의 test만 싣는다. `LANG`을 필터에 적어 놓고 **0개를 돌았다**
+    // (적대적 검증 2026-08-27 — `CRT`와 똑같은 함정을 같은 파일에서 반복했다). 그래서 `maru` 모듈을
+    // 뿌리로 하는 실행을 따로 걸어 편집기 L2 판정자를 **실제로** 돌린다.
+    const editor_core_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND" },
+    });
+    const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
+    run_editor_core_tests.setCwd(b.path("."));
+    editor_test_step.dependOn(&run_editor_core_tests.step);
     // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라
     // 기본 Zig test에서 어느 플랫폼에서든 돌린다(인앱 새 버전 안내의 판정 동작 고정).
     const update_check_tests = addProjectTest(b, .{

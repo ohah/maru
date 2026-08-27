@@ -2339,11 +2339,19 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-release-adapter-environment`와 `test-session-host-release-adapter-context`가 Debug·ReleaseFast에서 검증한다.
   이는 caller가 identity 문자열을 임의 조립하는
   경로를 닫는 component seam일 뿐 프로세스 환경 자체를 GitHub service 증거로 승격하지 않는다. OS 중립
-  `release_adapter_github_repository.zig`는 그 모듈의 `max_response_bytes`가 소유하는 64 KiB 이하의 repository REST JSON root
+  `release_adapter_github_json.zig`는 `max_response_bytes`가 소유하는 64 KiB 이하의 완전한 GitHub REST JSON root 하나와
+  manifest scalar cap을 공통 envelope로 고정한다. `release_adapter_github_repository.zig`는 그 envelope의 repository 응답
   하나에서 additive field는 허용하되 exact `id`·`name`·`full_name`·`owner.login`의 missing·duplicate·wrong wire type,
   zero/foreign/internal mismatch와 context ID·owner/name
   불일치를 fail-close하며 `test-session-host-release-adapter-github-repository`가 Debug·ReleaseFast 및 allocation fail-index로 검증한다.
-  이는 이미 캡처된 bytes의 component 의미 검증이며 GitHub transport나 `gh` executable 권위는 증명하지 않는다. 실제 GitHub release/
+  이는 이미 캡처된 bytes의 component 의미 검증이며 GitHub transport나 `gh` executable 권위는 증명하지 않는다.
+  `release_adapter_github_release.zig`는 같은 envelope에서 release REST 응답의 exact nonzero numeric ID, canonical tag와 boolean
+  `draft`·`prerelease`·`immutable`을 duplicate·wrong wire type까지 닫는다. draft 후보는
+  `draft=true`·`prerelease=false`와 absent/false immutable만, published predecessor는 `false/false/true`만 허용하며 predecessor
+  응답이 `immutable`을 생략해도 불변성을 추정하지 않는다.
+  `test-session-host-release-adapter-github-release`가 두 상태, additive field, cap, malformed/missing/type/duplicate/trailing,
+  zero/foreign/noncanonical identity, 상태 혼용과 allocation fail-index를 Debug·ReleaseFast에서 검증한다. `target_commitish`를 source
+  권위로 쓰지 않으며 exact tag ref→commit 해소는 별도 Git ref/tag API 판정자의 책임이다. 이 역시 component 의미 검증이며 실제 GitHub release/
   deployment API·codesign·DMG 결과의 의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의

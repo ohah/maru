@@ -6,8 +6,9 @@
 
 const std = @import("std");
 const release_manifest = @import("release_manifest");
+const github_json = @import("release_adapter_github_json");
 
-pub const max_response_bytes: usize = 64 * 1024;
+pub const max_response_bytes = github_json.max_response_bytes;
 
 const ApiOwner = struct {
     login: []const u8,
@@ -61,8 +62,7 @@ pub fn parseAndBind(
     bytes: []const u8,
     expected: release_manifest.Repository,
 ) Error!Parsed {
-    if (bytes.len > max_response_bytes) return error.ResponseTooLarge;
-    try preflight(bytes);
+    github_json.validateCompleteResponse(bytes) catch |err| return err;
 
     var inner = std.json.parseFromSlice(ApiRepository, allocator, bytes, .{
         .allocate = .alloc_always,
@@ -98,29 +98,6 @@ fn fullNameMatches(full_name: []const u8, owner: []const u8, name: []const u8) b
     return std.mem.eql(u8, full_name[0..owner.len], owner) and
         full_name[owner.len] == '/' and
         std.mem.eql(u8, full_name[owner.len + 1 ..], name);
-}
-
-fn preflight(bytes: []const u8) Error!void {
-    // The typed parser stops after its first root value. Fully draining a complete-input scanner
-    // first rejects a second root/trailing garbage and bounds nesting scratch independently of the
-    // caller allocator. Scalar allocation is capped by the manifest scalar SSOT.
-    var scratch: [max_response_bytes]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
-    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), bytes);
-    defer scanner.deinit();
-    while (true) {
-        const token = scanner.nextAllocMax(
-            fixed.allocator(),
-            .alloc_if_needed,
-            release_manifest.max_scalar_string_bytes,
-        ) catch return error.InvalidJson;
-        if (token == .end_of_document) {
-            // Scanner reports the first complete root as end-of-document without promising that
-            // the complete-input slice was exhausted, so bind the verdict to the final byte too.
-            if (scanner.cursor != bytes.len) return error.InvalidJson;
-            return;
-        }
-    }
 }
 
 /// Public only so std's allocation-failure harness can exercise the complete successful path.

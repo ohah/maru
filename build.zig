@@ -9941,7 +9941,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
             .target = target,
             .optimize = context_optimize,
-            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = context_optimize,
+                    }),
+                },
+            },
         });
         const release_adapter_context_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -9975,7 +9985,17 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
             .target = target,
             .optimize = environment_optimize,
-            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = environment_optimize,
+                    }),
+                },
+            },
         });
         const release_adapter_environment_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_environment.zig"),
@@ -10017,7 +10037,18 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_repository.zig"),
             .target = target,
             .optimize = github_repository_optimize,
-            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{
+                    .name = "release_adapter_github_json",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+                        .target = target,
+                        .optimize = github_repository_optimize,
+                        .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+                    }),
+                },
+            },
         });
         const github_repository_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -10036,6 +10067,55 @@ pub fn build(b: *std.Build) void {
         session_host_release_adapter_github_repository_step.dependOn(&run_github_repository_tests.step);
         session_host_step.dependOn(&run_github_repository_tests.step);
         test_step.dependOn(&run_github_repository_tests.step);
+    }
+    const session_host_release_adapter_github_release_step = b.step(
+        "test-session-host-release-adapter-github-release",
+        "Validate bounded GitHub release identity and publication responses for the release adapter",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |github_release_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = github_release_optimize,
+        });
+        const github_release_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_release.zig"),
+            .target = target,
+            .optimize = github_release_optimize,
+            .imports = &.{
+                .{
+                    .name = "release_adapter_github_json",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+                        .target = target,
+                        .optimize = github_release_optimize,
+                        .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+                    }),
+                },
+                .{
+                    .name = "release_adapter_identity",
+                    .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+                        .target = target,
+                        .optimize = github_release_optimize,
+                    }),
+                },
+            },
+        });
+        const github_release_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_release.zig"),
+                .target = target,
+                .optimize = github_release_optimize,
+                .imports = &.{.{ .name = "release_adapter_github_release", .module = github_release_mod }},
+            }),
+        });
+        const run_github_release_tests = b.addRunArtifact(github_release_tests);
+        run_github_release_tests.addArg("--maru-expect-tests=6");
+        run_github_release_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_release_step.dependOn(&run_github_release_tests.step);
+        session_host_step.dependOn(&run_github_release_tests.step);
+        test_step.dependOn(&run_github_release_tests.step);
     }
     const session_host_release_adapter_files_step = b.step(
         "test-session-host-release-adapter-files",

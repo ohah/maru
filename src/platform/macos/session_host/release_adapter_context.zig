@@ -55,6 +55,25 @@ const Key = enum {
 
 const key_count = @typeInfo(Key).@"enum".fields.len;
 
+/// The executable leaf is allowed to read only this closed environment vocabulary.
+pub const required_names = [_][:0]const u8{
+    "GITHUB_REPOSITORY",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REF",
+    "GITHUB_REF_TYPE",
+    "GITHUB_REF_NAME",
+    "GITHUB_SHA",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_REF_PROTECTED",
+};
+
+comptime {
+    if (required_names.len != key_count) @compileError("GitHub context key table is incomplete");
+}
+
 pub fn parse(entries: []const Entry) Error!Context {
     if (entries.len < key_count) return error.MissingKey;
     if (entries.len > key_count) return error.UnknownKey;
@@ -132,20 +151,7 @@ pub fn bindManifest(context: Context, manifest: release_manifest.Manifest) Error
 }
 
 fn keyForName(name: []const u8) ?Key {
-    const names = [_][]const u8{
-        "GITHUB_REPOSITORY",
-        "GITHUB_REPOSITORY_ID",
-        "GITHUB_REF",
-        "GITHUB_REF_TYPE",
-        "GITHUB_REF_NAME",
-        "GITHUB_SHA",
-        "GITHUB_WORKFLOW_REF",
-        "GITHUB_RUN_ID",
-        "GITHUB_RUN_ATTEMPT",
-        "GITHUB_EVENT_NAME",
-        "GITHUB_REF_PROTECTED",
-    };
-    for (names, 0..) |candidate, index| {
+    for (required_names, 0..) |candidate, index| {
         if (std.mem.eql(u8, name, candidate)) return @enumFromInt(index);
     }
     return null;

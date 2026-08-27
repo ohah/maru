@@ -2875,19 +2875,34 @@ test "실제 저장소: 커밋 파일 목록과 `커밋^` 쪽 blob (P4b)" {
     // ③ 두 번째 커밋이 바꾼 파일: `a.txt`(M)와 `b.txt`(A).
     const files_out = try runWithArg(allocator, .commit_files, fixture.exe, fixture.root, second.oid);
     defer allocator.free(files_out.bytes);
-    var names = maru.session.git_status.iterateNameStatus(files_out.bytes);
+    // **증감도 같은 출력에서 온다**(`--raw --numstat` — P4c). 형식이 갈리면 여기서 걸린다: 실제 git 을
+    // 돌리는 자리라 「우리가 안다고 적은 형식」이 아니라 **그 버전이 실제로 내는 형식**을 본다.
+    var names = maru.session.git_status.iterateCommitFiles(files_out.bytes);
     var saw_modified = false;
     var saw_added = false;
-    while (names.next()) |entry| {
-        if (std.mem.eql(u8, entry.path, "a.txt") and entry.letter == 'M') saw_modified = true;
-        if (std.mem.eql(u8, entry.path, "b.txt") and entry.letter == 'A') saw_added = true;
+    var count: usize = 0;
+    while (names.next()) |entry| : (count += 1) {
+        if (std.mem.eql(u8, entry.path, "a.txt") and entry.letter == 'M') {
+            saw_modified = true;
+            try std.testing.expect(entry.has_delta);
+            try std.testing.expectEqual(@as(u32, 1), entry.added); // `one` → `two`
+            try std.testing.expectEqual(@as(u32, 1), entry.removed);
+        }
+        if (std.mem.eql(u8, entry.path, "b.txt") and entry.letter == 'A') {
+            saw_added = true;
+            try std.testing.expect(entry.has_delta);
+            try std.testing.expectEqual(@as(u32, 1), entry.added);
+            try std.testing.expectEqual(@as(u32, 0), entry.removed);
+        }
     }
     try std.testing.expect(saw_modified and saw_added);
+    // numstat 줄이 파일로 새면 여기서 **네 줄**이 된다(그 회귀는 화면에서 목록이 두 배가 되는 모습이다).
+    try std.testing.expectEqual(@as(usize, 2), count);
 
     // ④ 루트 커밋도 파일을 낸다(`diff <oid>^ <oid>`였다면 여기서 실패한다).
     const root_files = try runWithArg(allocator, .commit_files, fixture.exe, fixture.root, root.oid);
     defer allocator.free(root_files.bytes);
-    var root_names = maru.session.git_status.iterateNameStatus(root_files.bytes);
+    var root_names = maru.session.git_status.iterateCommitFiles(root_files.bytes);
     const first_entry = root_names.next() orelse return error.MissingRootFile;
     try std.testing.expectEqualStrings("a.txt", first_entry.path);
     try std.testing.expectEqual(@as(u8, 'A'), first_entry.letter);

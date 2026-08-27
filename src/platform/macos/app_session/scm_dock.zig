@@ -556,7 +556,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // 펼친 턴의 파일 줄도 목록에 든다(커밋과 같은 규율·같은 슬롯).
     var file_rows: usize = 0;
     if (self.scm_expanded_turn != null) {
-        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        var files = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
         while (files.next()) |_| file_rows += 1;
         if (file_rows == 0) file_rows = 1; // 읽는 중·실패·빈 턴을 한 줄로 말한다
         if (self.scm_commit_files_truncated) file_rows += 1;
@@ -653,7 +653,7 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             items[n] = .{ .notice = maru.i18n.t(.scm_commit_files_truncated) };
             n += 1;
         }
-        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        var files = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
         var file_index: u32 = 0;
         var any_file = false;
         // **사본은 파일마다가 아니라 한 번 찾는다.** 이 투영은 **매 프레임** 도는데, 파일마다 찾으면
@@ -669,6 +669,12 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .dir = entry.path[0 .. entry.path.len - std.fs.path.basename(entry.path).len],
                     .status = commitFileStatus(entry.letter),
                     .letter = entry.letter,
+                    // 증감은 같은 출력에서 온다(`--raw --numstat`). **읽지 못했으면 자리를 비운다** —
+                    // 0/0 은 「안 바뀐 파일」이라는 거짓 진술이다.
+                    .added = entry.added,
+                    .removed = entry.removed,
+                    .binary = entry.binary,
+                    .has_delta = entry.has_delta,
                     .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
                     .from_turn = true, // 이 줄을 누르면 `스냅샷 ↔ 스냅샷`이 열린다(커밋과 다른 비교다)
                     .origin = turnFileOrigin(self, turn_capture_ref, entry.path),
@@ -881,7 +887,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // 펼친 커밋의 파일 줄도 목록에 든다(P4b).
     var commit_file_rows: usize = 0;
     if (self.scm_expanded_commit != null) {
-        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        var files = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
         while (files.next()) |_| commit_file_rows += 1;
         // 읽는 중이거나 실패면 그 사실을 한 줄로 말한다(빈 자리는 "바꾼 것이 없다"로 읽힌다).
         if (commit_file_rows == 0) commit_file_rows = 1;
@@ -955,7 +961,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
             }
             continue;
         }
-        var files = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+        var files = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
         var file_index: u32 = 0;
         var any_file = false;
         while (files.next()) |entry| : (file_index += 1) {
@@ -968,6 +974,10 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .dir = entry.path[0 .. entry.path.len - std.fs.path.basename(entry.path).len],
                     .status = commitFileStatus(entry.letter),
                     .letter = entry.letter,
+                    .added = entry.added,
+                    .removed = entry.removed,
+                    .binary = entry.binary,
+                    .has_delta = entry.has_delta,
                     .selected = self.scm_selected_commit_file != null and self.scm_selected_commit_file.? == file_index,
                 },
             };
@@ -1047,7 +1057,7 @@ fn openCommitFileDiff(self: *AppSession, index: u32) void {
     // **실린 목록이 그 커밋의 것일 때만 연다**(적대적 검증). 늦게 온 클릭이 다른 항목의 목록에서
     // 같은 번호를 집으면 **엉뚱한 파일**이 열린다 — 그리는 쪽과 같은 불변식을 여기서도 건다.
     if (!filesLoadedFor(self, oid)) return;
-    var it = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+    var it = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
     var i: u32 = 0;
     while (it.next()) |entry| : (i += 1) {
         if (i != index) continue;
@@ -1075,7 +1085,7 @@ fn openTurnFileDiff(self: *AppSession, index: u32) void {
     const sep = std.mem.indexOfScalar(u8, key, ' ') orelse return;
     const base_tree = key[0..sep];
     const head_tree = key[sep + 1 ..];
-    var it = maru.session.git_status.iterateNameStatus(self.scm_commit_files_text);
+    var it = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
     var i: u32 = 0;
     while (it.next()) |entry| : (i += 1) {
         if (i != index) continue;
@@ -2383,7 +2393,7 @@ pub fn pumpCommitFiles(self: *AppSession) void {
 ///
 /// `pumpCommitFiles` 의 «펼쳤을 때만 읽는다» 규율과 다른 판단이 필요한 자리다. 커밋 히스토리는 수백 개라
 /// 미리 읽으면 프로세스를 공짜로 띄우지만, **턴은 최대 7개고 결과가 링에 남아 다시 묻지 않는다.**
-/// tree↔tree `--name-status` 는 실측 30 ms 라 목록 하나를 채우는 데 드는 총비용이 240 ms 남짓이고,
+/// tree↔tree `--raw --numstat` 은 실측 30 ms 라 목록 하나를 채우는 데 드는 총비용이 240 ms 남짓이고,
 /// 그것도 도크의 에이전트 탭을 **보고 있을 때만** 든다.
 ///
 /// **슬롯을 펼침 요청과 공유하므로** 둘 중 하나만 돈다(§6 — `git_backend` 의 결과 자리가 하나다).
@@ -2434,7 +2444,9 @@ fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
     const head = self.scm_turn_summary_head orelse return;
     var count: u32 = 0;
     if (ok) {
-        var files = maru.session.git_status.iterateNameStatus(text);
+        // 같은 출력 형식이므로 **같은 이터레이터로 센다**(`--raw --numstat` — numstat 줄까지 세면
+        // 파일 수가 정확히 두 배가 된다).
+        var files = maru.session.git_status.iterateCommitFiles(text);
         while (files.next()) |_| count +|= 1;
     }
     // **어느 세션의 링인지 요청 시점에 기억해 둔 값으로 되찾는다**(AT0). 결과가 오는 사이 활성 세션이

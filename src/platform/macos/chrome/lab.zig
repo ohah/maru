@@ -112,6 +112,11 @@ pub const ScenarioId = enum {
     /// 그려지고, 그 중 무엇도 단위 테스트가 "자리"까지 보지는 못한다 — 열을 셀 폭으로 환산해 놓는
     /// 일이라 한 칸 어긋나도 테스트는 통과하고 화면만 틀린다.
     scm_commit_edit,
+    /// **히스토리 탭**(P4·P4b) — 커밋 줄과 **펼친 커밋의 파일 줄**이 한 캡처에 든다. 이 탭에는 Lab
+    /// 시나리오가 하나도 없었고(`scm_rows` 는 전부 변경 사항 탭이다), 그래서 커밋 줄의 두 단 배치·ref
+    /// 칩·펼친 파일 행의 증감은 **사용자 캡처로만** 보였다. 실제로 그 목록은 파일마다 증감이 빈 채로
+    /// 나갔다(사용자 지적 2026-08-27 — 「라인 몇 개 바뀐지 나왔으면」).
+    scm_history,
     /// SB1 §5.2 — 사이드바 배경 strip이 창 바닥까지 가지 않고 **상태바 위에서 끊기는지**를 픽셀로 본다.
     /// 도크 내용은 필요 없다(strip은 `.m`이 직접 그린다) — 빈 프레임에 사이드바 폭·상태바 높이만 실어 준다.
     sidebar_status_strip,
@@ -294,6 +299,7 @@ pub fn buildFrame(
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
+        .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
@@ -952,7 +958,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1198,6 +1204,88 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
     if (budget.ops > buffers.ops.len or budget.runs > buffers.text_runs.len or budget.text_bytes > buffers.text_bytes.len)
         return error.LabBufferTooSmall;
     const draws = try scm_dock.view.view(props, frame, state, tokens, .{
+        .ops = buffers.ops[0..budget.ops],
+        .runs = buffers.text_runs[0..budget.runs],
+        .text_bytes = buffers.text_bytes[0..budget.text_bytes],
+    });
+    return .{ .tree = frame.tree, .draws = draws };
+}
+
+/// 히스토리 탭(P4·P4b). **변경 사항 탭과 다른 목록**이라 `buildScmFrame` 의 픽스처를 나눠 쓸 수 없다 —
+/// 저장소 머리 줄·커밋 상자가 없고, 커밋 줄과 그 아래 파일 줄만 선다.
+///
+/// 픽스처는 사용자 캡처의 모양을 따른다(2026-08-27): 제목이 긴 커밋, ref 칩이 붙은 커밋, 한글 작성자,
+/// 그리고 **펼친 커밋의 파일 줄들**. 그 줄들이 이 캡처의 관심사다 — 증감이 실제로 서는지, 좁은 도크에서
+/// 이름을 밀어내지 않는지는 픽셀로만 보인다.
+fn buildScmHistoryFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const items = [_]scm_dock.types.Item{
+        .{ .commit = .{
+            .index = 0,
+            .subject = "feat(pc-seller): 상품 카드 레이아웃을 격자로 바꾼다",
+            .author = "윤형배 [Frontend]",
+            .when = "15시간 전",
+            .short_oid = "63b092b",
+            .ref = "feat/pc-seller-grid",
+            .ref_is_head = true,
+            .ref_more = 1,
+        } },
+        // **펼친 커밋**. 아래 파일 줄들이 이 커밋의 것이다.
+        .{ .commit = .{
+            .index = 1,
+            .subject = "fix(mobile-seller): 상품탭 카테고리 전환 지연 개선 (#8721)",
+            .author = "윤형배 [Frontend]",
+            .when = "20시간 전",
+            .short_oid = "0556c10",
+            .selected = true,
+            .expanded = true,
+        } },
+        .{ .commit_file = .{ .index = 0, .name = "ProductArea.js", .dir = "src/pages/product/", .status = .modified, .letter = 'M', .added = 34, .removed = 12, .has_delta = true } },
+        .{ .commit_file = .{ .index = 1, .name = "ProductGridItem.js", .dir = "src/pages/product/", .status = .added, .letter = 'A', .added = 128, .removed = 0, .has_delta = true } },
+        .{ .commit_file = .{ .index = 2, .name = "ProductListItem.js", .dir = "src/pages/product/", .status = .deleted, .letter = 'D', .added = 0, .removed = 96, .has_delta = true } },
+        // 지금 열어 둔 비교(강조). 목록이 **무엇을 보고 있는지** 말하는 자리다.
+        .{ .commit_file = .{ .index = 3, .name = "ProductListRenderer.js", .dir = "src/pages/product/", .status = .modified, .letter = 'M', .added = 7, .removed = 3, .has_delta = true, .selected = true } },
+        // 증감이 **없는** 파일(이진). `0/0` 으로 거짓말하지 않고 `bin` 이라고 적는 자리다.
+        .{ .commit_file = .{ .index = 4, .name = "placeholder.png", .dir = "assets/", .status = .added, .letter = 'A', .binary = true, .has_delta = true } },
+        .{ .commit = .{
+            .index = 2,
+            .subject = "[FE-1350] test(sales-analysis): vitest 러너 도입",
+            .author = "사공 지은 [Frontend]",
+            .when = "21시간 전",
+            .short_oid = "da0d391",
+        } },
+        .{ .commit = .{
+            .index = 3,
+            .subject = "결제 수단별 적립률 저장에 확인 모달을 노출한다 (#8720)",
+            .author = "이흥수",
+            .when = "21시간 전",
+            .short_oid = "54629ed",
+        } },
+    };
+    const props = scm_dock.types.Props{
+        .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },
+        .cell_width_px = scenario.cell_w_px,
+        .advance_milli_per_point = scenario.advance_milli_per_point,
+        .snapshot_generation = 1,
+        .items = &items,
+        // 히스토리 탭은 브랜치 줄·요약 줄이 **없다**(P4) — 그 숫자는 작업트리의 것이라 커밋 목록과
+        // 관계가 없다. 여기서 켜면 제품에 없는 화면이 골든이 된다.
+        .branch = "",
+        .active_tab = .history,
+        .show_summary = false,
+        .changed_file_count = 4,
+    };
+    const frame = try scm_dock.build.build(props, .{
+        .nodes = buffers.scm_nodes,
+        .entries = buffers.entries,
+        .layout_items = buffers.items,
+        .flex_scratch = buffers.flex_scratch,
+        .child_rects = buffers.child_rects,
+        .actions = buffers.scm_actions,
+    });
+    const budget = scm_dock.view.drawBufferSizes(props, frame.tree.entries.len);
+    if (budget.ops > buffers.ops.len or budget.runs > buffers.text_runs.len or budget.text_bytes > buffers.text_bytes.len)
+        return error.LabBufferTooSmall;
+    const draws = try scm_dock.view.view(props, frame, .{}, tokens, .{
         .ops = buffers.ops[0..budget.ops],
         .runs = buffers.text_runs[0..budget.runs],
         .text_bytes = buffers.text_bytes[0..budget.text_bytes],

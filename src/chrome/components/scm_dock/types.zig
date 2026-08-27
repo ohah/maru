@@ -213,6 +213,16 @@ pub const CommitFileItem = struct {
     status: StatusKind,
     /// 화면에 그대로 그릴 한 글자(`M`·`A`·`D`·`R`).
     letter: u8,
+    /// 그 커밋/턴이 이 파일에서 **더한·지운 줄 수**. 변경 사항 탭의 `FileItem` 과 **같은 세 필드**다 —
+    /// 한 화면의 두 목록이 같은 사실을 다른 모양으로 말하면 그 자체가 두 화면처럼 읽힌다.
+    ///
+    /// **`has_delta` 가 없으면 자리를 비운다**: 0/0 으로 그리면 "안 바뀐 파일"이라는 거짓 진술이 되고,
+    /// 읽지 못한 목록(짝이 안 맞는 numstat·잘린 출력)도 그 자리로 온다.
+    added: u32 = 0,
+    removed: u32 = 0,
+    /// 이진 파일인가. git 이 `-\t-` 로 주는 그 사실이고, 숫자 대신 `bin` 을 그린다.
+    binary: bool = false,
+    has_delta: bool = false,
     /// 지금 열려 있는 비교인가(강조). 목록이 **무엇을 보고 있는지** 말해야 파일 여럿을 오갈 때 길을
     /// 잃지 않는다(변경 사항 탭의 파일 행과 같은 규율).
     selected: bool = false,
@@ -430,6 +440,13 @@ pub const DockMetrics = struct {
     commit_subject_min_cols: u32,
     /// 그룹 헤더의 접힘 표시가 차지하는 가로 자리.
     disclosure_extent: u32,
+    /// 고른 줄의 **좌측 강조 막대** 폭. 밴드 하나만으로는 히스토리처럼 두 줄짜리 행이 이어지는 목록에서
+    /// 「고른 줄」이 「조금 밝은 줄」로만 읽힌다(사용자 지적 2026-08-27). 사이드바 활성 카드가 같은
+    /// 이유로 막대를 갖는다 — 색 하나를 더 쓰지 않고 **자리**로 말하는 신호다.
+    accent_bar_w: u32,
+    /// 펼친 항목 아래 파일 줄들을 잇는 **세로 안내선** 폭. 파일 탐색기의 들여쓰기 안내선과 같은 값·같은
+    /// 뜻이다 — 그 줄들이 바로 위 커밋/턴에 속한다는 사실을 들여쓰기만으로는 말하지 못한다.
+    rail_w: u32,
     /// **아이콘 한 변(logical px)**. 셀 크기가 아니라 디자인 토큰(`ui/icon.Size`)에서 온다 — 셀로 그리면
     /// 행 높이와 무관하게 구워져 화살표가 글자보다 크고 세로도 어긋난다(사용자 지적 2026-08-14).
     icon_extent: u32,
@@ -473,6 +490,8 @@ pub const DockMetrics = struct {
             // 칸 수는 배율과 무관하다(셀 폭이 이미 배율을 든다).
             .commit_subject_min_cols = 8,
             .disclosure_extent = s.px(16, scale_milli),
+            .accent_bar_w = s.px(2, scale_milli),
+            .rail_w = s.px(1, scale_milli),
             // 행 높이 24px에 18pt 아이콘은 꽉 차 보인다 — 목록 행은 밀집한 자리라 `compact`가 맞다.
             .icon_extent = s.px(ui_icon.Size.compact.extentPt(), scale_milli),
             .scrollbar_width = s.px(8, scale_milli),

@@ -198,6 +198,18 @@ fn rowPaint(item: types.Item) tree.PaintStyle {
             // "여기에 caret을 놓는다"이고 그건 커서 모양이 말한다(사용자 지적 2026-08-17).
             .state_fill = false,
         },
+        // 펼친 커밋·턴의 파일 줄은 **한 단 들어간 면**에 앉는다. 그 묶음이 바로 위 항목에 속한다는 사실을
+        // 세로 안내선(`view.childRail`)과 면이 **함께** 말한다 — 들여쓰기 하나로는 좁은 도크에서 약해서,
+        // 사용자 캡처에서 파일 목록이 목록 전체의 다음 항목처럼 보였다(2026-08-27).
+        //
+        // **고른 줄은 예외다**: 여기서 면을 지정하면 `selected` variant 의 밴드를 덮어써, 지금 열어 둔
+        // 비교가 목록에서 사라진다(`resolveCard` 는 paint override 를 variant 뒤에 얹는다).
+        .commit_file => |file| if (file.selected) flat else .{
+            .background = .inset_bg,
+            .corner_radii_px = .{ 0, 0, 0, 0 },
+            .border_widths_px = .{ 0, 0, 0, 0 },
+            .shadow = .none,
+        },
         // 고른 커밋은 목록에서 **선택 밴드**로 말한다(파일 행이 `selected` variant를 쓰는 것과 같다).
         // **버튼 줄 자체는 칠하지 않는다** — 칠은 면 노드가 받는다(아래 여백까지 파래지면 글자가 그
         // 띠의 가운데보다 위에 앉는다).

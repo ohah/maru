@@ -110,7 +110,7 @@ pub const Kind = enum {
     ///
     /// 상한(`-n`)은 호출자가 인자로 준다 — 화면이 "더 보기"로 늘릴 수 있어야 하므로 명령이 그 수를 고정하면 안 된다.
     log,
-    /// 커밋 하나가 **바꾼 파일들**(P4b): `git show --format= --name-status <oid>`.
+    /// 커밋 하나가 **바꾼 파일들**(P4b): `git show --format= --raw --numstat <oid>`.
     ///
     /// **`git diff <oid>^ <oid>`가 아니다** — 루트 커밋에는 `^`가 없어 그 명령이 실패한다. `show`는
     /// 루트 커밋도 "전부 새로 생긴 파일"로 낸다.
@@ -119,10 +119,12 @@ pub const Kind = enum {
     /// 첫 부모 기준으로 보면 한 줄에 한 상태라 이 목록의 모양과 맞는다(combined diff는 파일마다 상태가
     /// 여럿이다).
     ///
-    /// **numstat은 읽지 않는다**(②d와 같은 판단): 파일 줄의 실체는 상태 문자와 경로이고, 증감 숫자는
-    /// 프로세스를 하나 더 쓴다. 그 자리는 비워 두는 길이 이미 있다.
+    /// **증감도 같은 프로세스에서 읽는다**(2026-08-27 — 사용자 요청 「라인 몇 개 바뀐지」). 옛 판단은
+    /// "numstat은 프로세스를 하나 더 쓴다"였는데, 그 전제가 `--name-status`였다: 그 옵션은 `--numstat`과
+    /// 같은 출력 그룹이라 함께 걸면 **뒤에 온 쪽만** 나온다(실측 git 2.50.1). `--raw`는 다른 그룹이라
+    /// 둘이 나란히 오므로 프로세스는 그대로 하나다.
     commit_files,
-    /// 턴 하나가 바꾼 파일들(P5): `git diff --name-status <treeA> <treeB>`.
+    /// 턴 하나가 바꾼 파일들(P5): `git diff --raw --numstat <treeA> <treeB>`.
     ///
     /// **양쪽 다 tree다** — 그래서 작업트리가 어떻게 바뀌든 그 턴의 목록은 고정된다(§3.5.4가 타임라인을
     /// 두 스냅샷 사이로 잡은 이유). 두 rev는 `arg`에 `<A> <B>`로 붙여 넘긴다.
@@ -380,7 +382,7 @@ pub fn baseRange(base: []const u8, buf: *[max_base_range_len]u8) ?[]const u8 {
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
-pub const max_argv = 28; // 기본 3 + config 덮어쓰기 16 + kind별 최대 9(commit_files) + 여유
+pub const max_argv = 30; // 기본 3 + config 덮어쓰기 14 + kind별 최대 10(commit_files) + 여유
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 const config_overrides = [_][]const u8{
@@ -612,7 +614,12 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             buf[n] = "--format="; // 커밋 헤더는 목록이 이미 갖고 있다 — 파일 줄만 받는다
             n += 1;
-            buf[n] = "--name-status";
+            // **`--raw`이고 `--name-status`가 아니다**: 증감을 함께 받으려면 `--numstat`을 걸어야 하는데
+            // 그 둘은 같은 출력 그룹이라 **뒤에 온 쪽만** 나온다(실측 git 2.50.1). `--raw`는 다른 그룹이라
+            // numstat과 나란히 오고, 상태 문자는 그 줄의 마지막 필드에 그대로 있다.
+            buf[n] = "--raw";
+            n += 1;
+            buf[n] = "--numstat";
             n += 1;
             buf[n] = "--find-renames";
             n += 1;
@@ -630,7 +637,11 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
         .turn_name_status => {
             buf[n] = "diff";
             n += 1;
-            buf[n] = "--name-status";
+            // 커밋 파일 목록과 **같은 형식**이다(위 `commit_files` 주석) — 두 탭이 같은 파서·같은 화면
+            // 모양을 쓰므로 출력이 갈리면 한쪽에만 증감이 선다.
+            buf[n] = "--raw";
+            n += 1;
+            buf[n] = "--numstat";
             n += 1;
             buf[n] = "--find-renames";
             n += 1;
@@ -795,7 +806,9 @@ test "spec 버퍼가 모자라면 자르지 않고 실패한다(다른 파일을
 test "argv 상한이 모든 kind를 담는다(넘치면 범위를 벗어난다)" {
     // config 쌍이 늘 때마다 조용히 깨지지 않게, 가장 긴 조합을 실제로 만들어 본다.
     var buf: [max_argv][]const u8 = undefined;
-    inline for (.{ Kind.status, Kind.numstat_staged, Kind.numstat_worktree, Kind.show_blob }) |kind| {
+    // **`commit_files`가 지금 가장 길다**(P4c에서 `--raw --numstat` 둘이 되며 한 칸 늘었다). 그것을 빼면
+    // 이 테스트는 상한이 실제로 모자란 순간을 못 본다.
+    inline for (.{ Kind.status, Kind.numstat_staged, Kind.numstat_worktree, Kind.show_blob, Kind.commit_files, Kind.turn_name_status }) |kind| {
         const argv = build(kind, "/usr/bin/git", "/repo", "HEAD:x", &buf);
         try testing.expect(argv.len <= max_argv);
     }
@@ -1051,20 +1064,25 @@ test "commit_files: 루트·병합에서도 파일이 나오게 만든다" {
     var buf: [max_argv][]const u8 = undefined;
     const argv = build(.commit_files, "/usr/bin/git", "/repo", "abc1234", &buf);
     var saw_show = false;
-    var saw_name_status = false;
+    var saw_raw = false;
+    var saw_numstat = false;
     var saw_first_parent = false;
     var saw_m = false;
     var saw_rev = false;
     for (argv) |a| {
         if (std.mem.eql(u8, a, "show")) saw_show = true;
-        if (std.mem.eql(u8, a, "--name-status")) saw_name_status = true;
+        if (std.mem.eql(u8, a, "--raw")) saw_raw = true;
+        if (std.mem.eql(u8, a, "--numstat")) saw_numstat = true;
         if (std.mem.eql(u8, a, "--first-parent")) saw_first_parent = true;
         if (std.mem.eql(u8, a, "-m")) saw_m = true;
         if (std.mem.eql(u8, a, "abc1234")) saw_rev = true;
         // 외부 프로그램을 부르는 길은 여기서도 닫는다.
         try testing.expect(!std.mem.eql(u8, a, "--ext-diff"));
+        // **`--name-status`가 있으면 안 된다**(P4c): 그 옵션은 `--numstat`과 같은 출력 그룹이라 함께 걸면
+        // 뒤에 온 쪽만 나온다(실측 git 2.50.1) — 증감이 통째로 사라지고 그 사실이 조용하다.
+        try testing.expect(!std.mem.eql(u8, a, "--name-status"));
     }
-    try testing.expect(saw_show and saw_name_status and saw_first_parent and saw_m and saw_rev);
+    try testing.expect(saw_show and saw_raw and saw_numstat and saw_first_parent and saw_m and saw_rev);
     // 커밋 헤더는 목록이 이미 갖고 있다 — 파일 줄만 받는다.
     var saw_empty_format = false;
     for (argv) |a| if (std.mem.eql(u8, a, "--format=")) {
@@ -1098,12 +1116,16 @@ test "turn_name_status: 두 tree를 각각의 인자로 넘긴다" {
     const argv = build(.turn_name_status, "/usr/bin/git", "/repo", "aaaa111 bbbb222", &buf);
     try testing.expectEqualStrings("aaaa111", argv[argv.len - 2]);
     try testing.expectEqualStrings("bbbb222", argv[argv.len - 1]);
-    var saw_name_status = false;
+    var saw_raw = false;
+    var saw_numstat = false;
     for (argv) |a| {
-        if (std.mem.eql(u8, a, "--name-status")) saw_name_status = true;
+        if (std.mem.eql(u8, a, "--raw")) saw_raw = true;
+        if (std.mem.eql(u8, a, "--numstat")) saw_numstat = true;
         try testing.expect(!std.mem.eql(u8, a, "--cached")); // 작업트리·index가 아니라 tree 둘이다
+        // 커밋 파일 목록과 **같은 이유**로 금지한다(위 테스트 주석).
+        try testing.expect(!std.mem.eql(u8, a, "--name-status"));
     }
-    try testing.expect(saw_name_status);
+    try testing.expect(saw_raw and saw_numstat);
 }
 
 // `check-ignore` 는 경로를 **인자로** 받는다(이 backend 의 실행 경로가 stdout 만 읽으므로 `--stdin` 을

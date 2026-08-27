@@ -1753,7 +1753,12 @@ static void driveControlChannel(void) {
     // 셸이 떠도 목록은 영영 "받는 중" 이었다(기기 실측). 상태로 가르면 준비 전에는 아예 안 가져가
     // 요청이 남고, READY 가 된 프레임에 한 번 연다 — 자동 재시도가 아니라 **제 시점에 한 번**이라
     // 계약(§4a: 재시도는 사용자가 그 화면에 다시 올 때다)과도 맞다.
-    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY && maru_mobile_take_control_open()) {
+    // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다(계약 §4a) — 채널이 아직 안
+    // 닫혔는데 가져가면 그 뜻이 사라져 축이 영영 안 선다. 닫힘이 확인된 다음 tick 에 연다.
+    const unsigned int control_ch = maru_ssh_pump_control_state();
+    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
+        (control_ch == MARU_SSH_CONTROL_NONE || control_ch == MARU_SSH_CONTROL_CLOSED) &&
+        maru_mobile_take_control_open()) {
         // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];

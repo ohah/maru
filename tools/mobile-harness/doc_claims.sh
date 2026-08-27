@@ -41,6 +41,9 @@ ck "두 host 가 컨트롤 채널을 연다" 2 "$(grep -l maru_ssh_pump_open_con
 # 안 잡힌 기계가 "답이 없다" 로만 뜨고, 종료 코드는 pump 가 들고 있는데 아무도 안 읽는다 —
 # 실제로 그 화면을 두 번 오진했다(2026-08-23).
 ck "두 host 가 exec 종료를 코어에 알린다" 2 "$(grep -l "maru_mobile_control_note_exit(" $I $A | wc -l | tr -d ' ')"
+# **열기 요청은 take-once 가 아니다**(계약 §4a). host 가 채널 상태를 안 보고 집어 가면 아직 안
+# 닫힌 자리에서 그 뜻이 사라져 축이 영영 안 선다 — 명령을 갈아 끼우는 전이가 통째로 멈춘다.
+ck "두 host 가 열 수 있을 때만 열기를 집는다" 2 "$(grep -l "MARU_SSH_CONTROL_CLOSED" $I $A | wc -l | tr -d ' ')"
 
 echo "§4 셀 기하·글자 크기 단일 출처"
 ck "헤더의 TEXT_PX 정의" 1 "$(grep -c 'define MARU_ATLAS_TEXT_PX' $H)"

@@ -1345,7 +1345,12 @@ static void driveControlChannel(void) {
     // 참이라 READY 와 무관하다 — 목록 화면이 nav 스택의 뿌리라 접속 중에 거기 있으면 요청이 곧바로
     // 서고, 그때 열기가 `not_running`/`NotReady` 로 지고 **요청은 take-once 라 사라졌다**. 그러면
     // 셸이 떠도 목록은 영영 "받는 중" 이었다(Android 기기에서 실측 — 같은 코드라 여기도 같다).
-    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY && maru_mobile_take_control_open()) {
+    // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다(계약 §4a) — 채널이 아직 안
+    // 닫혔는데 가져가면 그 뜻이 사라져 축이 영영 안 선다. 닫힘이 확인된 다음 tick 에 연다.
+    const unsigned int control_ch = maru_ssh_pump_control_state();
+    if (maru_ssh_pump_state() == MARU_SSH_STATE_READY &&
+        (control_ch == MARU_SSH_CONTROL_NONE || control_ch == MARU_SSH_CONTROL_CLOSED) &&
+        maru_mobile_take_control_open()) {
         // **명령은 코어가 만든다** — 그 서버 설정의 `maru-path` 를 쓰고, 셸이 쪼개지 못하게
         // 인용까지 해서 준다(계약 §4a). host 가 문자열을 조립하면 두 플랫폼이 갈린다.
         char cmd[512];

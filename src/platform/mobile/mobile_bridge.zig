@@ -975,14 +975,38 @@ var control_req_len: usize = 0;
 /// 와 "아직 모른다" 를 갈라 말해야 한다.
 var control_listed: bool = false;
 
-/// **채널을 열어 달라**는 요청(take-once). 화면이 목록을 보여 줄 자리에 왔을 때 세운다.
-///
-/// 계약 §4a 의 "언제 여는가" 그대로다 — **터미널만 쓰는 접속에서는 안 연다**. 채널을 여는 것은
-/// 그 서버에서 명령을 하나 실행하는 일이라 감사 로그에 남고, 사용자가 "터미널 붙었을 뿐" 이라고
-/// 생각하는 동안 조용히 그러면 안 된다.
+/// 컨트롤 채널이 돌릴 **원격 명령의 종류**. 채널은 하나뿐이고(SSH 코어가 `control` 을 한 자리만
+/// 든다) 화면마다 원하는 명령이 다르므로, 축은 "열렸나" 가 아니라 **"무엇을 원하나"** 로
+/// 판정한다(계약 §4a "한 채널, 여러 명령").
+pub const ControlWant = union(enum) {
+    /// 아무것도 안 원한다 — 터미널만 쓰는 접속이 여기다(§4a: 그때는 안 연다).
+    none,
+    /// 세션 목록. `maru control --stdio` 로 ndjson 을 주고받는다.
+    sessions,
+    /// 고른 세션의 화면. `maru attach --stream <32-hex>` 로 레코드를 받는다.
+    screen: [32]u8,
+
+    fn eql(a: ControlWant, b: ControlWant) bool {
+        return switch (a) {
+            .none => b == .none,
+            .sessions => b == .sessions,
+            .screen => |id| switch (b) {
+                .screen => |other| std.mem.eql(u8, &id, &other),
+                else => false,
+            },
+        };
+    }
+};
+
+/// 지금 **원하는** 것. 그리는 자리가 세운다.
+var control_want: ControlWant = .none;
+/// 지금 채널이 **돌리고 있는** 것. host 가 열었다고 알릴 때 옮겨 담는다.
+var control_open: ControlWant = .none;
+/// 열어 달라는 뜻. **take-once 가 아니다** — host 가 가져갔는데 채널이 아직 안 닫혀 못 열면 그
+/// 요청이 사라져 축이 영영 안 선다(§4a). 실제로 열렸을 때만 내린다.
 var control_open_req: bool = false;
-/// **닫아 달라**는 요청(take-once). 목록 화면을 벗어나면 세운다 — 열어 둔 채로 두면 배터리·
-/// 트래픽을 쓰고, 그 비용은 사용자가 안 보는 화면을 위해 치르는 것이다.
+/// **닫아 달라**는 요청(take-once). 원하는 것이 바뀌었거나 아무것도 안 원할 때 세운다 — 열어 둔
+/// 채로 두면 배터리·트래픽을 쓰고, 그 비용은 사용자가 안 보는 화면을 위해 치르는 것이다.
 var control_close_req: bool = false;
 /// 지금 화면이 목록을 보여 주는 자리인가. **프레임마다 판정한다** — 화면 전환은 여러 경로로
 /// 일어나고(뒤로가기·팝·연결 실패), 그 전부에 갈고리를 다는 대신 결과만 본다.
@@ -993,12 +1017,37 @@ fn noteControlScreen(active: bool) void {
     if (active == control_screen_active) return;
     control_screen_active = active;
     if (active) {
-        // **이미 서 있으면 다시 안 연다** — 다시 열면 채널 번호가 겹치고, 무엇보다 그 서버에서
-        // 명령이 한 번 더 돈다.
-        if (control_client.state == .waiting_hello and !control_listed) control_open_req = true;
-    } else {
-        if (control_client.state != .off or control_listed) control_close_req = true;
+        // **이미 받아 둔 목록이 있으면 다시 안 연다**(§4a) — 다시 열면 그 서버에서 명령이 한 번
+        // 더 돌고, 그것은 감사 로그에 남는다.
+        if (control_client.state == .waiting_hello and !control_listed) wantControl(.sessions);
+    } else if (control_want == .sessions) {
+        // 목록 자리를 벗어났다. **세션 화면을 보는 중이면 건드리지 않는다** — 그건 목록 화면이
+        // 세운 뜻이 아니다(세션 화면은 자기 자리에서 `wantControl` 을 부른다).
+        wantControl(.none);
     }
+}
+
+/// **원하는 명령을 바꾼다.** 같은 것을 다시 원하면 아무 일도 안 일어난다 — 그 서버에서 명령이
+/// 한 번 더 도는 것을 막는 규칙(§4a)은 그대로다.
+///
+/// 다른 것을 원하면 **먼저 닫는다.** 같은 채널 번호를 닫히기 전에 다시 열면 상대의 늦은 `close`
+/// 가 새 채널로 배달돼 방금 연 것이 이유 없이 닫힌다(SSH §3.4.1 — 적대적 검증이 잡은 실패다).
+pub fn wantControl(next: ControlWant) void {
+    if (control_want.eql(next)) return;
+    control_want = next;
+    if (control_open.eql(next)) {
+        // 이미 그것을 돌리고 있다 — 열 것도 닫을 것도 없다.
+        control_open_req = false;
+        return;
+    }
+    if (control_open == .none) {
+        // 열린 것이 없다. 원하는 것이 있으면 바로 연다.
+        control_open_req = next != .none;
+        return;
+    }
+    // 돌리고 있는 것이 다르다 — 닫고 나서 연다. 열기 요청은 닫힘이 확인된 뒤 host 가 집는다.
+    control_close_req = true;
+    control_open_req = next != .none;
 }
 
 /// 컨트롤 채널이 돌릴 **명령 한 줄**. host 가 그대로 `exec` 에 싣는다.
@@ -1011,16 +1060,30 @@ fn noteControlScreen(active: bool) void {
 /// 안에서는 작은따옴표만 특별하므로 그것만 `'\''` 로 바꾼다.
 pub export fn maru_mobile_control_command(out: [*]u8, cap: usize) usize {
     const path = serverMaruPath();
-    const tail = " control --stdio";
+    // **무엇을 원하는지가 명령을 정한다**(§4a "한 채널, 여러 명령"). 아무것도 안 원하면 만들 것도
+    // 없다 — host 가 그 상태에서 열면 그 서버에서 뜻 없는 명령이 하나 돈다.
+    var tail_buf: [64]u8 = undefined;
+    const tail: []const u8 = switch (control_want) {
+        .none => {
+            setLastError("control_command_without_want");
+            return 0;
+        },
+        .sessions => " control --stdio",
+        .screen => |id| std.fmt.bufPrint(&tail_buf, " attach --stream {s}", .{&id}) catch {
+            setLastError("control_command_too_long");
+            return 0;
+        },
+    };
     if (path.len == 0) {
-        const plain = "maru" ++ " control --stdio";
         // **자르지 않는다** — 잘린 명령은 다른 명령이다(계약 §4a). 이름을 남겨 host 가 안다.
-        if (plain.len > cap) {
+        const plain_len = "maru".len + tail.len;
+        if (plain_len > cap) {
             setLastError("control_command_too_long");
             return 0;
         }
-        @memcpy(out[0..plain.len], plain);
-        return plain.len;
+        @memcpy(out[0.."maru".len], "maru");
+        @memcpy(out["maru".len..][0..tail.len], tail);
+        return plain_len;
     }
 
     // 작은따옴표 안에서는 작은따옴표만 특별하므로 그것만 `'\''` 로 바꾼다 — 그 한 글자가
@@ -1067,16 +1130,22 @@ fn serverMaruPath() []const u8 {
 
 /// host 가 가져간다: 지금 채널을 열어야 하나. **가져가면 사라진다.**
 pub export fn maru_mobile_take_control_open() c_int {
-    const want = control_open_req;
+    if (!control_open_req) return 0;
+    // **가져간 순간 그것이 돌고 있는 것이 된다.** host 는 채널이 열릴 수 있을 때만 이걸 부르므로
+    // (계약 §4a) 여기서 옮겨 담아야 "이미 그것을 돌리고 있다" 판정이 성립한다. 열기가 지면
+    // `maru_mobile_control_open_failed` 가 되돌린다.
+    control_open = control_want;
     control_open_req = false;
-    return if (want) 1 else 0;
+    return 1;
 }
 
 /// host 가 가져간다: 지금 채널을 닫아야 하나. **가져가면 사라진다.**
 pub export fn maru_mobile_take_control_close() c_int {
-    const want = control_close_req;
+    if (!control_close_req) return 0;
+    // 닫으라고 했으면 그 채널은 곧 사라진다 — 돌고 있는 것을 비워야 다음 명령을 열 수 있다.
+    control_open = .none;
     control_close_req = false;
-    return if (want) 1 else 0;
+    return 1;
 }
 
 /// host 가 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 배압이 아니라
@@ -1142,6 +1211,8 @@ pub export fn maru_mobile_control_timeout() void {
 /// 안 알리면 화면은 `listed` 가 거짓인 채로 남아 **영영 "받는 중"** 을 보인다 — 실패를 아는 쪽이
 /// host 뿐이라 그렇다. 계약 §4a 가 "실패하면 그 화면에서 말한다" 인 이유가 이것이다.
 pub export fn maru_mobile_control_open_failed() void {
+    // 못 열었으니 돌고 있는 것이 아니다 — 되돌리지 않으면 다시 시도할 자리가 막힌다.
+    control_open = .none;
     control_client.openFailed();
 }
 
@@ -1187,6 +1258,9 @@ pub export fn maru_mobile_control_listed() c_int {
 /// 세션이 새 연결에서 다시 시작한다. **끊겼다 붙으면 목록도 축도 처음부터**다 — 남겨 두면
 /// 죽은 세션을 살아 있는 것처럼 보여 준다.
 pub export fn maru_mobile_control_reset() void {
+    // 새 연결이면 원하는 것도 돌고 있는 것도 처음부터다 — 남겨 두면 옛 세션의 화면을 열려 한다.
+    control_want = .none;
+    control_open = .none;
     control_client = .{};
     control_row_count = 0;
     control_req_len = 0;

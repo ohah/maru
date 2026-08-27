@@ -411,8 +411,13 @@ jobs:
       # `unresolved_import` 로 죽었다(AppKit 과 무관한 실패였다). 기존 web job 과 같은 명령을 쓴다.
       - name: 웹 의존성 설치
         run: bun install --cwd web --frozen-lockfile
-      - name: AppKit 창 스모크
-        run: mise run macos-app-smoke
+      # **이게 우리가 답을 원하는 그 게이트다** — `session.keep-alive-after-quit = true` 를 실제로 켜고
+      # recovered-session 발견·클릭·렌더까지 보는 스모크다. 앞선 시도로 창 자체는 열린다는 걸 확인했으므로
+      # (러너에 WindowServer pid 145, 앱이 뜨고 tick 하고 종료까지 함), 남은 질문은 「이 스모크가 요구하는
+      # 것이 러너에서 되는가」뿐이다. `macos-app-smoke` 는 파일 뷰어·Mermaid·web panel 까지 한꺼번에 보는
+      # 큰 스모크라 우리가 필요한 것보다 훨씬 많은 걸 요구했다(그래서 `file_viewer_*` 단언에서 걸렸다).
+      - name: keep-alive recovered-session 스모크
+        run: mise run macos-session-host-recovery-smoke
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)

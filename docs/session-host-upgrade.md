@@ -100,6 +100,20 @@ schema v3를 **최초 제품 baseline**으로 고정한다. 향후 capability를
 reader/up-converter 규칙을 적용한다. v1·v2 record는 rollback executable 또는 남은 deadline을 안전하게 복원할
 정보가 없으므로 추측 변환하지 않고 거부한다.
 
+### 관측 metadata에 스칼라를 더할 때 — major를 올리지 않는다
+
+`runtime.metadata`의 metadata object는 **모르는 스칼라 키를 흘려보낸다**(`drainUnknownScalar`). 그래서 필드를
+더하는 쪽은 major를 올리지 않고, 대신 **양방향 결손을 값으로 흡수**한다:
+
+- **신 앱 ↔ 구 host**: 키가 없으니 파서 기본값(0)이 남는다. 소비자는 0을 "모른다"로 다뤄야 하고, 그 자리를
+  필수(`_seen`) 키로 만들면 안 된다 — 필수로 만들면 구 host의 관측 전체가 `Malformed`가 되어 **터미널이 아예
+  안 뜬다**(리소스 숫자 하나 때문에 세션을 잃는 교환이다).
+- **구 앱 ↔ 신 host**: 모르는 키라 조용히 버려진다. 기존 동작 그대로다.
+
+2026-08-27에 `child_pid`·`host_pid`가 이 규칙으로 들어왔다(상태바 리소스 항목이 host-backed 터미널과 데몬
+자신을 재는 두 뿌리 — [status-bar.md](status-bar.md) §4.1). **0은 "없다"와 "모른다"를 가를 필요가 없다** — pid 0은
+어차피 유효한 측정 대상이 아니라, `foreground_pgid`처럼 present 플래그를 따로 두지 않았다.
+
 MRSH major를 올리는 PR은 다음을 모두 만족해야 한다.
 
 - 직전 release major adapter가 실제 frozen-old-binary fixture와 통신한다.

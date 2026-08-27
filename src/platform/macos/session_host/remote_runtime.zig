@@ -519,6 +519,36 @@ fn metadataDtoMatchesObservation(
     return true;
 }
 
+/// host-backed runtime의 프로세스 뿌리 둘. **0은 "모른다"** 다 — 구 host(필드 없음)이거나 아직 관측이
+/// 도착하지 않은 상태이고, 그때 소비자는 표본을 못 얻는 것으로 다룬다(0을 그리면 "0바이트를 쓰는 중"이 된다).
+pub const ProcessIdentity = struct {
+    /// host가 fork한 PTY 자식(`login`/셸)의 pid. 이 pid의 **트리**가 그 터미널의 사용량이다.
+    child_pid: i32 = 0,
+    /// 그 자식을 소유한 session host 데몬의 pid. 이 pid **자신만**이 데몬 오버헤드다(트리를 훑으면
+    /// 위의 자식들과 겹쳐 이중 계산이 된다).
+    host_pid: i32 = 0,
+
+    /// 관측이 실어 온 값을 흡수한다. **0은 덮어쓰지 않는다** — 구 host의 관측이나 자식이 이미 회수된
+    /// 관측이 한 번 섞이면 알고 있던 뿌리가 사라지고 그 탭이 영영 `—`가 된다. 값은 runtime 수명 동안
+    /// 안 바뀌므로(PTY는 한 번 fork된다) **유지가 옳다**.
+    pub fn adopt(self: *ProcessIdentity, child_pid: i32, host_pid: i32) void {
+        if (child_pid > 0) self.child_pid = child_pid;
+        if (host_pid > 0) self.host_pid = host_pid;
+    }
+
+    /// 관측을 못 믿을 때(`availability != .current`) **아무것도 모르는 상태**로 되돌린다.
+    ///
+    /// pid 는 캐시다 — host 와 말이 끊긴 뒤에도 값이 남아 있는데, 그 사이 그 pid 가 죽고 **OS 가 같은
+    /// 번호를 남에게 재사용하면 남의 메모리를 그 탭 것으로 그린다.** 숫자가 그럴듯해서 화면으로는 절대
+    /// 못 잡는 종류라, 못 믿을 때는 재지 않는 편이 낫다(그 행은 `—`가 된다).
+    ///
+    /// **캐시를 지우지는 않는다** — 다시 `current` 가 되면 그대로 살아난다(재접속마다 뿌리를 잃으면
+    /// 그 탭이 한동안 `—`로 남는다). 판정만 하고 값은 `adopt` 가 소유한다.
+    pub fn trusted(self: ProcessIdentity, observation_is_current: bool) ProcessIdentity {
+        return if (observation_is_current) self else .{};
+    }
+};
+
 /// Active connection과 함께 교체·retire되는 generation-local owner bundle이다. CR2a는 기존
 /// field를 물리적으로 묶기만 하며 allocator, Surface와 stable input/lifecycle owner를 섞지 않는다.
 pub const RemoteGeneration = struct {
@@ -2601,11 +2631,16 @@ fn initObserverReconnectCandidate(
         .accepted => |*value| value,
     };
     switch (accepted.initial_metadata) {
-        .current => |*dto| _ = try RemoteRuntime.applyMetadataDtoToObservation(
-            runtime.allocator,
-            &out.observation,
-            dto,
-        ),
+        .current => |*dto| {
+            _ = try RemoteRuntime.applyMetadataDtoToObservation(
+                runtime.allocator,
+                &out.observation,
+                dto,
+            );
+            // attach 응답이 **처음이자 대개 유일한** 전달 기회다 — pid는 안 바뀌므로 이후 metadata event가
+            // 다시 실어 보내도 값이 같고, revision 필터에 걸리면 event 자체가 안 온다.
+            RemoteRuntime.adoptProcessIdentity(runtime, dto);
+        },
         .unsupported, .unavailable => {},
     }
     out.event_generation_tracking = switch (generation_schema) {
@@ -2694,6 +2729,12 @@ pub const RemoteRuntime = struct {
     // copy 때 host의 권위 scrollback 전체에서 selectAll→extractSelection을 원자 실행한다.
     selection_all: bool = false,
     selection_host_authoritative: bool = false,
+    /// host가 관측에 실어 보낸 프로세스 신원 — PTY 자식 뿌리와 그것을 소유한 host 프로세스.
+    ///
+    /// **generation이 아니라 runtime에 둔다.** 값이 runtime 수명 동안 안 바뀌므로(PTY는 한 번 fork된다)
+    /// 재접속으로 generation이 갈려도 같은 사실이고, 여기 두면 attach 경로와 event 경로가 같은 자리를 쓴다.
+    /// 상태바 리소스 항목이 이 뿌리로 트리를 직접 잰다(docs/status-bar.md §4.1 "host-backed 터미널").
+    process_identity: ProcessIdentity = .{},
 
     /// Stable shell의 실제 `GenerationSlot.currentPayload()`만 current generation을 결정한다.
     fn currentGeneration(self: *RemoteRuntime) *RemoteGeneration {
@@ -3419,6 +3460,19 @@ pub const RemoteRuntime = struct {
             const count = @min(out.len, observation.foreground_processes.items.len);
             @memcpy(out[0..count], observation.foreground_processes.items[0..count]);
             return count;
+        }
+
+        /// host가 알려 준 프로세스 뿌리 둘. 상태바 리소스 표본이 이걸로 트리를 잰다 — 관측(`RuntimeObservation`)
+        /// 에 싣지 않는 이유는 그 타입이 **두 backend가 공유하는 seam**이고, 이 사실은 원격에만 있기 때문이다.
+        ///
+        /// **관측이 current가 아니면 0을 돌려준다**(= "모른다"). `foregroundProcessGroup`이 같은 자리에 건
+        /// 것과 같은 가드다. pid는 캐시라 host와 말이 끊긴 뒤에도 값이 남아 있는데, 그 사이 그 pid가 죽고
+        /// **OS가 같은 번호를 남에게 재사용하면 남의 메모리를 그 탭 것으로 그린다** — 숫자가 그럴듯해서
+        /// 화면으로는 절대 못 잡는 종류다. 못 믿을 때는 재지 않는 편이 낫다(그 행은 `—`가 된다).
+        pub fn processIdentity(runtime: *const RemoteRuntime) ProcessIdentity {
+            return runtime.process_identity.trusted(
+                runtime.currentGenerationConst().observation.availability == .current,
+            );
         }
 
         pub fn observationMatches(runtime: *const RemoteRuntime, out: *const term_backend.RuntimeObservation) bool {
@@ -5722,11 +5776,21 @@ pub const RemoteRuntime = struct {
         self: *RemoteRuntime,
         dto: *const runtime_metadata_wire.OwnedMetadataDto,
     ) error{ OutOfMemory, ProtocolError }!bool {
+        adoptProcessIdentity(self, dto);
         return applyMetadataDtoToObservation(
             self.allocator,
             &self.currentGeneration().observation,
             dto,
         );
+    }
+
+    /// 관측이 실어 온 pid를 받아 둔다. **0이면 덮어쓰지 않는다** — 구 host나 자식이 이미 회수된 관측이
+    /// 한 번 섞이면 알고 있던 뿌리가 사라지고 그 탭이 영영 `—`가 된다(값은 원래 안 바뀌므로 유지가 옳다).
+    fn adoptProcessIdentity(
+        self: *RemoteRuntime,
+        dto: *const runtime_metadata_wire.OwnedMetadataDto,
+    ) void {
+        self.process_identity.adopt(dto.child_pid, dto.host_pid);
     }
 
     fn applyMetadataDtoToObservation(
@@ -15213,10 +15277,15 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 11328,
+            // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
+            // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
+            .Debug => 11344,
             .ReleaseFast => 11280,
             else => unreachable,
         },
+        // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
+        // (session_host.zig `if (builtin.os.tag == .macos)`) linux 로는 이 파일이 아예 컴파일되지 않는다.
+        // 그래서 `process_identity` 를 더하면서도 손대지 않았다 — 잴 수 없는 자리에 숫자를 지어 넣지 않는다.
         .linux => switch (builtin.mode) {
             .Debug => 11312,
             .ReleaseFast => 11264,
@@ -15226,10 +15295,11 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8608,
+            .Debug => 8624,
             .ReleaseFast => 8560,
             else => unreachable,
         },
+        // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
         .linux => switch (builtin.mode) {
             .Debug => 8592,
             .ReleaseFast => 8544,
@@ -18170,10 +18240,15 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 11328,
+            // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
+            // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
+            .Debug => 11344,
             .ReleaseFast => 11280,
             else => unreachable,
         },
+        // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
+        // (session_host.zig `if (builtin.os.tag == .macos)`) linux 로는 이 파일이 아예 컴파일되지 않는다.
+        // 그래서 `process_identity` 를 더하면서도 손대지 않았다 — 잴 수 없는 자리에 숫자를 지어 넣지 않는다.
         .linux => switch (builtin.mode) {
             .Debug => 11312,
             .ReleaseFast => 11264,
@@ -18876,4 +18951,42 @@ fn countField(comptime fields: []const std.builtin.Type.StructField, comptime na
         result += 1;
     };
     return result;
+}
+
+test "ProcessIdentity.adopt: 0은 알던 뿌리를 지우지 않는다" {
+    // 이 테스트가 증명하는 것(터미널에서 왜 중요한가): 이 pid가 상태바가 host-backed 터미널을 재는
+    // 유일한 뿌리다. 한 번이라도 0으로 덮이면 그 탭의 메모리·CPU가 **영영** `—`가 되는데, 화면에서는
+    // "원래 안 나오는 값"과 구분되지 않아 회귀를 눈으로 못 잡는다.
+    var id: ProcessIdentity = .{};
+    id.adopt(4242, 99);
+    try std.testing.expectEqual(@as(i32, 4242), id.child_pid);
+    try std.testing.expectEqual(@as(i32, 99), id.host_pid);
+
+    id.adopt(0, 0); // 구 host 관측이 한 번 섞였다 — 유지되어야 한다.
+    try std.testing.expectEqual(@as(i32, 4242), id.child_pid);
+    try std.testing.expectEqual(@as(i32, 99), id.host_pid);
+
+    // 한쪽만 실려 와도 다른 쪽은 그대로다(둘은 독립된 사실이다).
+    id.adopt(7, 0);
+    try std.testing.expectEqual(@as(i32, 7), id.child_pid);
+    try std.testing.expectEqual(@as(i32, 99), id.host_pid);
+}
+
+test "ProcessIdentity.trusted: 못 믿는 관측에서는 아무것도 모르는 상태로 돌려준다" {
+    // 이 테스트가 증명하는 것(터미널에서 왜 중요한가): 이 가드가 없으면 host 와 말이 끊긴 뒤에도 캐시된
+    // pid 로 계속 재고, 그 pid 가 죽고 **OS 가 같은 번호를 재사용하는 순간 남의 프로세스 메모리가 그 탭의
+    // 값으로 그려진다.** 숫자가 그럴듯해서 화면으로는 절대 못 잡는 종류라 여기서 못박는다.
+    const known: ProcessIdentity = .{ .child_pid = 4242, .host_pid = 99 };
+
+    // current 면 그대로 — 재는 데 쓴다.
+    try std.testing.expectEqual(@as(i32, 4242), known.trusted(true).child_pid);
+    try std.testing.expectEqual(@as(i32, 99), known.trusted(true).host_pid);
+
+    // current 가 아니면 **둘 다** 0 이다. 하나만 막으면 데몬 행이나 탭 행 중 한쪽이 계속 잘못 그려진다.
+    try std.testing.expectEqual(@as(i32, 0), known.trusted(false).child_pid);
+    try std.testing.expectEqual(@as(i32, 0), known.trusted(false).host_pid);
+
+    // **캐시를 지우지는 않는다** — 다시 current 가 되면 살아나야 한다(재접속마다 뿌리를 잃으면 그 탭이
+    // 한동안 `—`로 남는다). `trusted` 는 값 판정이지 소거가 아니다.
+    try std.testing.expectEqual(@as(i32, 4242), known.trusted(true).child_pid);
 }

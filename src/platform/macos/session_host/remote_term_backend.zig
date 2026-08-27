@@ -4247,16 +4247,66 @@ pub const RemoteTermBackend = struct {
         return RemoteRuntime.backend_api.foregroundProcessGroup(rr);
     }
 
-    /// host-backed 터미널의 자원 표본은 **아직 없다**(docs/status-bar.md §6 "keep-alive를 켜면 터미널이 0이 된다").
-    /// PTY가 host 프로세스 안에 있어 앱에서 트리를 훑을 수 없고, host가 `live_child_pid`를 들고 있으므로
-    /// 나중에 이 함수를 RPC로 채우면 된다 — 그때 재설계가 아니라 구멍 메우기다. 지금은 0이라 항목이 안 뜬다
-    /// (0을 그리면 "터미널이 메모리를 안 쓴다"는 거짓말이 된다).
+    /// host-backed 터미널의 자원 표본. PTY가 host 프로세스 안에 살아 **앱의 트리 walk가 자기 자식에서
+    /// 출발해서는 못 닿지만**, 뿌리 pid만 알면 닿는다 — libproc은 같은 uid면 자손이 아닌 프로세스도
+    /// 열거·조회하게 해 준다(실측: 비-자손 pid에서 `proc_listchildpids` 자식 5개, `proc_pid_rusage` rc=0.
+    /// 다른 uid면 rc=-1). 그 뿌리를 host가 관측에 실어 보낸다(docs/status-bar.md §4.1).
+    ///
+    /// 예전 판은 무조건 0을 돌려줬고, 그래서 keep-alive를 켠 사용자에게는 모든 탭이 `—`였다.
+    /// **호스트 데몬 자신은 여기서 안 센다** — 자식 트리와 겹치지 않게 별도 "모든 창 공유" 행이 갖는다
+    /// (`hostProcessSamples`).
     fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []maru.session.resource_usage.Sample) usize {
-        _ = ctx;
-        _ = handle;
-        _ = out;
-        return 0;
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        if (out.len == 0) return 0;
+        const rr = (self.runtimes.get(handle) orelse return 0).runtime;
+        const root = RemoteRuntime.backend_api.processIdentity(rr).child_pid;
+        if (root <= 0) return 0; // 구 host이거나 관측이 아직 안 왔다 — 0을 그리지 않고 항목이 `—`로 남는다.
+        var raw: [max_resource_samples]maru.pty.types.ProcessResourceSample = undefined;
+        const room = @min(raw.len, out.len);
+        const n = maru.pty.processTreeSamples(root, raw[0..room]);
+        for (raw[0..n], 0..) |sample, i| out[i] = .{
+            .pid = sample.pid,
+            .footprint_bytes = sample.footprint_bytes,
+            .cpu_ns = sample.cpu_ns,
+        };
+        return n;
     }
+
+    /// 이 backend가 붙어 있는 **session host 데몬 프로세스 자신**의 표본(중복 제거). 트리를 훑지 **않는다** —
+    /// 그 자식들은 위 `resourceSamples`가 탭별로 이미 세므로, 여기서 트리를 훑으면 같은 바이트를 두 번 센다.
+    ///
+    /// backend는 앱 전역이라(창마다가 아니다) 어느 창에서 물어도 같은 답이고, 그래서 상태바는 이 값을
+    /// 앱 자신과 같은 **"모든 창 공유"** 행으로 낸다(docs/status-bar.md §4.1 "앱 자신은 센다"와 같은 규율).
+    /// host가 여럿일 수 있어(업그레이드 중 구/신 host 공존) pid로 중복을 거른다.
+    pub fn hostProcessSamples(self: *RemoteTermBackend, out: []maru.session.resource_usage.Sample) usize {
+        var n: usize = 0;
+        var it = self.runtimes.valueIterator();
+        while (it.next()) |entry| {
+            if (n >= out.len) break;
+            const pid = RemoteRuntime.backend_api.processIdentity(entry.runtime).host_pid;
+            if (pid <= 0) continue;
+            var seen = false;
+            for (out[0..n]) |prev| {
+                if (prev.pid == pid) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            const sample = maru.pty.processResourceSample(pid) orelse continue;
+            out[n] = .{
+                .pid = sample.pid,
+                .footprint_bytes = sample.footprint_bytes,
+                .cpu_ns = sample.cpu_ns,
+            };
+            n += 1;
+        }
+        return n;
+    }
+
+    /// 한 host-backed Term 트리에서 가져올 표본 상한. in-process backend의 같은 이름 상수와 같은 근거다
+    /// (폭주 방어 — fork 폭탄이나 깊은 트리가 tick을 붙잡지 않게).
+    const max_resource_samples: usize = 64;
 
     /// **원격 runtime은 커널 cwd 폴백이 없다.** PTY와 그 자식 프로세스가 host 데몬 프로세스에 살아서 GUI
     /// 프로세스의 `proc_pidinfo`가 닿지 않는다(pid 네임스페이스가 아니라 소유 프로세스가 다른 문제다).

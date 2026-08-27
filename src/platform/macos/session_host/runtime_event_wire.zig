@@ -98,6 +98,8 @@ fn metadataViewEql(a: MetadataView, b: MetadataView) bool {
         a.rows != b.rows or
         a.foreground_available != b.foreground_available or
         a.foreground_pgid != b.foreground_pgid or
+        a.child_pid != b.child_pid or
+        a.host_pid != b.host_pid or
         a.process_count != b.process_count or
         !std.mem.eql(u8, &a.semantic_digest, &b.semantic_digest))
         return false;
@@ -228,6 +230,11 @@ pub const MetadataView = struct {
     rows: u16,
     foreground_available: bool,
     foreground_pgid: ?i32,
+    /// PTY 자식 뿌리 pid와 그것을 소유한 host 프로세스 pid. **구 host면 둘 다 0**이고, 소비자는 그때
+    /// 표본을 못 얻는 것으로 다룬다(docs/status-bar.md §4.1). `foreground_*`와 달리 필수 키가 아니다 —
+    /// 없으면 `Malformed`가 아니라 0이다(구 host와의 호환 규약, docs/session-host-upgrade.md).
+    child_pid: i32,
+    host_pid: i32,
     processes: [max_process_entries]ProcessView,
     process_count: u8,
     semantic_digest: Digest,
@@ -434,6 +441,8 @@ const MetadataFields = struct {
     foreground_available: ?bool = null,
     foreground_pgid_seen: bool = false,
     foreground_pgid: ?i32 = null,
+    child_pid: i32 = 0,
+    host_pid: i32 = 0,
     processes_seen: bool = false,
     processes: [max_process_entries]ProcessView = undefined,
     process_count: usize = 0,
@@ -1086,6 +1095,12 @@ fn parseMetadata(
             if (metadata.foreground_pgid_seen) return error.Malformed;
             metadata.foreground_pgid_seen = true;
             metadata.foreground_pgid = try readOptionalI32(scanner);
+        } else if (spanEquals(payload, key, "child_pid")) {
+            // 선택 키다 — 중복 검사(`_seen`)를 두지 않는 것은 `app_keypad`·`bell_count`와 같은 부류라서다
+            // (필수 3인방만 `_seen`으로 누락을 잡는다). 마지막 값이 이긴다.
+            metadata.child_pid = try readSigned(i32, scanner);
+        } else if (spanEquals(payload, key, "host_pid")) {
+            metadata.host_pid = try readSigned(i32, scanner);
         } else if (spanEquals(payload, key, "processes")) {
             if (metadata.processes_seen) return error.Malformed;
             metadata.processes_seen = true;
@@ -1229,6 +1244,9 @@ fn finishMetadata(
         .rows = fields.rows orelse return null,
         .foreground_available = foreground,
         .foreground_pgid = if (foreground) fields.foreground_pgid else null,
+        // pid 둘은 foreground 가용성과 **무관하다** — foreground 조회가 실패해도 PTY 뿌리는 그대로 있다.
+        .child_pid = fields.child_pid,
+        .host_pid = fields.host_pid,
         .processes = fields.processes,
         .process_count = if (foreground) @intCast(fields.process_count) else 0,
         .semantic_digest = undefined,
@@ -1267,6 +1285,8 @@ fn metadataDigest(view: *const MetadataView, payload: []const u8) Digest {
     hashBool(&hasher, view.foreground_available);
     hashBool(&hasher, view.foreground_pgid != null);
     if (view.foreground_pgid) |pid| hashI64(&hasher, pid);
+    hashI64(&hasher, view.child_pid);
+    hashI64(&hasher, view.host_pid);
     hashU64(&hasher, view.process_count);
     for (view.foregroundProcesses()) |process| {
         hashI64(&hasher, process.pid);
@@ -1321,6 +1341,8 @@ pub fn metadataSemanticEqlExact(
         a.cols != b.cols or a.rows != b.rows or
         a.foreground_available != b.foreground_available or
         a.foreground_pgid != b.foreground_pgid or
+        a.child_pid != b.child_pid or
+        a.host_pid != b.host_pid or
         a.process_count != b.process_count or
         !decodedStringSpansEqual(a_payload, a.cwd, b_payload, b.cwd) or
         !decodedStringSpansEqual(a_payload, a.window_title, b_payload, b.window_title) or
@@ -1683,6 +1705,8 @@ test "metadata view field inventory forces every manual semantic mapping to be r
         "rows",
         "foreground_available",
         "foreground_pgid",
+        "child_pid",
+        "host_pid",
         "processes",
         "process_count",
         "semantic_digest",

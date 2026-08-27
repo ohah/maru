@@ -1539,6 +1539,12 @@ pub const RuntimeManager = struct {
             process_names_initialized += 1;
         }
 
+        // PTY 자식 뿌리 pid — 없으면(비-터미널 arm·이미 회수) 0이고 GUI는 그 탭을 `—`로 둔다.
+        const child_pid: i32 = if (self.backend_impl.terminalForHostLifecycle(handle)) |t|
+            @intCast(t.live_pty.childPid())
+        else
+            0;
+
         surface.lockCore(self.io);
         const lock_started_at_ns = if (self.observation_metrics_enabled)
             std.Io.Clock.awake.now(self.io).nanoseconds
@@ -1580,6 +1586,14 @@ pub const RuntimeManager = struct {
             .rows = core.size.rows,
             .foreground_available = true,
             .foreground_pgid = foreground_pgid,
+            // GUI 상태바가 host-backed 터미널을 재려면 **뿌리 pid**가 필요하다. host만 그것을 알고 있고
+            // (PTY가 이 프로세스 안에 있다), 값은 runtime 수명 동안 안 바뀐다 — 그래서 full-state 관측에
+            // 그냥 싣는다(별도 RPC를 두면 같은 사실에 왕복이 하나 더 생긴다).
+            .child_pid = child_pid,
+            // 데몬 자신의 pid. 관측마다 같은 값이지만 **자기 pid를 아는 쪽이 host뿐**이라 여기서 싣는다.
+            // 커널 인증(LOCAL_PEERPID)을 쓰지 않는 이유는 신뢰 경계가 늘지 않기 때문이다 — `child_pid`를
+            // 이미 이 출처에서 받아 그 트리를 재므로, 같은 출처의 `host_pid`가 새 신뢰를 요구하지 않는다.
+            .host_pid = @intCast(c.getpid()),
             .processes = processes,
         };
         return result;

@@ -27,6 +27,30 @@ pub fn selfResourceSample() ?types.ProcessResourceSample {
     };
 }
 
+/// **임의 pid를 뿌리로 한 프로세스 트리**의 자원 표본(뿌리 + 자손). `PtySession.resourceSamples`가 자기
+/// `child_pid`로 부르는 것과 **같은 계산**인데, 뿌리를 밖에서 받는다 — 세션 host 안에서 도는 PTY의 뿌리는
+/// 이 프로세스가 소유하지 않아 여기에 `PtySession`이 없기 때문이다(docs/status-bar.md §4.1 "host-backed 터미널").
+///
+/// 남의 프로세스를 잴 수 있는 근거는 libproc의 권한 규칙이다 — **같은 uid면 자손이 아니어도** 열거·조회가
+/// 된다(실측: 비-자손 pid에서 `proc_listchildpids`가 자식 5개, `proc_pid_rusage` rc=0. 다른 uid면 rc=-1).
+/// 세션 host는 앱과 같은 사용자로 돌므로 그 전제가 성립한다.
+/// pid **하나**의 표본(트리를 훑지 않는다). 세션 host 데몬처럼 "그 프로세스 자신만" 세야 하는 자리가 쓴다 —
+/// 그 자식들은 다른 행이 이미 세므로 트리를 훑으면 이중 계산이 된다(docs/status-bar.md §4.1).
+pub fn processResourceSample(pid: i32) ?types.ProcessResourceSample {
+    return switch (builtin.os.tag) {
+        .macos => @import("macos.zig").processResourceSample(pid),
+        else => null,
+    };
+}
+
+pub fn processTreeSamples(root: i32, out: []types.ProcessResourceSample) usize {
+    return switch (builtin.os.tag) {
+        .macos => @import("macos.zig").processTreeSamples(root, out),
+        // Windows는 §3.6이 프로세스 관측을 정하기 전까지 표본이 없다(`selfResourceSample`과 같은 계약).
+        else => 0,
+    };
+}
+
 // non-macOS에서도 public facade는 컴파일되어야 한다.
 // 실제 backend가 없다는 사실을 런타임 오류로 노출해 Windows/ConPTY 추가 전까지 import 경계를 안정화한다.
 const UnsupportedPtySession = struct {

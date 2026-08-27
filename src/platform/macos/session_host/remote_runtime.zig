@@ -5316,6 +5316,15 @@ pub const RemoteRuntime = struct {
         return result;
     }
 
+    /// screen batch 가 GUI transport 에서 나올 수 없는 outcome 으로 끝났다. 세션 종료로 이어지므로 사유를 남긴다.
+    fn logScreenBatchTerminal(self: *const RemoteRuntime, outcome: anytype) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "remote screen batch terminal: outcome={s} runtime={s}",
+            .{ @tagName(outcome), self.runtime_id_hex },
+        );
+    }
+
     fn pumpDeltaInner(
         self: *RemoteRuntime,
     ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
@@ -5347,7 +5356,18 @@ pub const RemoteRuntime = struct {
             // The blocking GUI transport never produces charged recovery batches. These outcomes
             // belong to the external owner adapter and cannot be interpreted as ordinary screen
             // activity on this connection.
-            .recovery_commit_pending, .terminal => return error.ProtocolError,
+            .recovery_commit_pending, .terminal => |outcome| {
+                // **왜 세션이 끝나는지 남긴다.** 이 `ProtocolError` 는 `drainRemoteNow` 의 복구 목록
+                // (`GenerationGap`·`MalformedRow`)에 없어 `else` 로 떨어지고, 거기서 `process_state = .exited`
+                // 로 세션이 종료된다 — resync 를 시도하지 않으므로 화면이 마지막 상태로 굳고 앱 재시작
+                // 말고는 복구 수단이 없다. 바로 위 주석이 "예전엔 read_error 로 뭉개 터미널이 영구 멈췄다"
+                // 고 적어 둔 그 실패 모드에, 이 두 outcome 은 아직 남아 있다.
+                //
+                // 두 outcome 은 원인이 다르다(복구 배치가 왔다 vs 스트림이 끝났다). 사유 없이 나가면
+                // 2026-08-27 처럼 「장시간 sleep 뒤 화면이 깨진다」는 관찰만 남고 어느 쪽인지 못 좁힌다.
+                logScreenBatchTerminal(self, outcome);
+                return error.ProtocolError;
+            },
         }
         const after_screen = self.drainObservationEvents() catch |err| switch (err) {
             error.AdminBusy => return .event_pending,

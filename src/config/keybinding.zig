@@ -246,6 +246,17 @@ pub const default_app_bindings = [_]AppBinding{
     // 것은 `⌘D`이지만 편집기 포커스 컨텍스트가 서야 터미널의 pane split과 갈라 쓸 수 있다.
     // 자세한 근거는 `action.zig`의 `add_next_occurrence`가 든다.
     .{ .chord = .{ .modifiers = .{ .command = true, .control = true }, .key = .{ .char = 'D' } }, .action = .add_next_occurrence },
+    // 편집기 편집 일습(§3.3·§3.5). **셋 다 터미널이 쓰지 않는 chord다** — 여기까지 안 묶인 Cmd 조합은
+    // 아래 fallthrough 에서 `.ignored` 가 되므로, 배선 전에는 **누르면 아무 일도 안 일어나는 상태**였다.
+    // 그 사이 undo 스택은 계약대로 다 서 있었고(`93bd67f7`) 부르는 길만 커맨드 팔레트뿐이었다 —
+    // 사용자에게는 「undo 가 없는 것」과 거의 같았다(docs/plans/native-editor.md "키 chord").
+    //
+    // **컨텍스트 게이트는 액션 쪽이 이미 갖고 있다**: `stepHistory`·`saveDocument` 가 `term.kind != .editor`
+    // 를 먼저 보고 거절하므로, 터미널 Term 에서 눌러도 전과 같이 아무 일도 안 일어난다. 그래서 이 셋은
+    // ⌘C 처럼 「컨텍스트가 서야 양보할 수 있는」 부류가 아니다(§9.1 이 ⌘C 에만 그 조건을 건 이유).
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'Z' } }, .action = .editor_undo }, // Cmd+Z
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'Z' } }, .action = .editor_redo }, // Cmd+Shift+Z
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'S' } }, .action = .editor_save }, // Cmd+S
     // 탭 풀 모델: ⌘T=활성 pane에 새 Term(탭), ⌘⇧T=새 워크스페이스(사이드바 탭). normalizeEventChar가 't'를
     // 'T'로 fold하므로 char는 같고 shift 유무(modifier 정확 비교)로 갈린다. 워크스페이스 생성은 사이드바 "+"가
     // 생기기 전 ⌘⇧T를 임시로 둔다(단일 출처: docs/tabs-splits-layout.md).
@@ -717,6 +728,96 @@ test "resolver consumes configured app actions before terminal input" {
     try std.testing.expectEqual(action_mod.Action.new_tab, resolved.app_action);
 }
 
+/// 빌트인 표 **어디에도 없는** Cmd+글자 하나(테스트 전용).
+///
+/// **테스트가 글자를 손으로 고르지 않게 한다.** 「안 묶인 Cmd 조합은 셸로 안 샌다」를 지키는 판정자가
+/// 여럿인데, 그들이 각자 `'s'` 를 예시로 박아 두고 있었다 — 2026-08-27 에 ⌘S·⌘Z 를 배선하자 **넷이
+/// 동시에 깨졌다**. 규율이 깨진 것이 아니라 예시가 유효하지 않게 된 것이고, 그 구분이 커밋을 열기
+/// 전에는 보이지 않는다.
+///
+/// 여기서 표를 훑어 고르면 표가 자라도 판정자가 따라온다. 남는 글자가 없으면 그 자체가 답할 것이
+/// 없어진 상태이므로 comptime 에 멈춘다.
+/// **상수이지 함수가 아니다.** `@compileError` 는 함수 본문에 있으면 **도달 가능성과 무관하게**
+/// 평가되므로(첫 판이 그랬다), 계산 전체를 comptime 블록에 둔다.
+pub const unbound_command_char: u21 = blk: {
+    for ("BCHIJLMNQRUVXY") |candidate| {
+        var taken = false;
+        for (default_app_bindings) |b| switch (b.chord.key) {
+            .char => |c| if (c == candidate) {
+                taken = true;
+            },
+            else => {},
+        };
+        for (default_terminal_bindings) |b| switch (b.chord.key) {
+            .char => |c| if (c == candidate) {
+                taken = true;
+            },
+            else => {},
+        };
+        if (!taken) break :blk candidate;
+    }
+    @compileError("빌트인 표가 후보 글자를 전부 먹었다 — 후보를 늘리거나 판정 방식을 다시 본다");
+};
+
+test "built-in app bindings: 편집기 편집 일습이 chord 를 갖는다 (⌘Z·⌘⇧Z·⌘S)" {
+    // **이 셋이 없던 동안 기능은 다 서 있었다** — undo 스택은 §3.3 계약대로 완성됐는데 부르는 길이
+    // 커맨드 팔레트뿐이라 사용자에게는 「undo 가 없는 것」과 거의 같았다. 계획 문서의 「남은 것」
+    // 목록은 각 기능의 완료만 적고 *"어떤 키가 부르는가"* 는 아무도 자기 것으로 적지 않았다.
+    var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const resolver: KeyBindingResolver = .{};
+
+    // 소문자로 눌러도 `normalizeEventChar` 가 대문자로 fold 한다(⌘T 와 같은 규율).
+    const z = try resolver.resolve(.{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.editor_undo, z.app_action);
+    const sz = try resolver.resolve(.{ .key = .{ .char = 'Z' }, .modifiers = .{ .command = true, .shift = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.editor_redo, sz.app_action);
+    const s_key = try resolver.resolve(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.editor_save, s_key.app_action);
+
+    // **⌘Z 와 ⌘⇧Z 는 modifier 정확 비교로 갈린다.** shift 를 무시하면 redo 가 undo 를 덮어 되돌리기만
+    // 남는다 — `.eql` 이 부분 일치였다면 이 단언이 깨진다.
+    try std.testing.expect(std.meta.activeTag(z.app_action) != std.meta.activeTag(sz.app_action));
+
+    // **사용자 바인딩이 이긴다.** 빌트인은 사용자 표 **다음**에 보므로(`resolve` 의 순서) 이 셋도
+    // 사용자가 다른 것으로 바꿀 수 있어야 한다 — 빌트인을 먼저 보면 그 자유가 사라진다.
+    const overridden: KeyBindingResolver = .{ .app_bindings = &.{
+        .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'Z' } }, .action = .new_term },
+    } };
+    const user_z = try overridden.resolve(.{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true } }, &buffer, .{});
+    try std.testing.expectEqual(action_mod.Action.new_term, user_z.app_action);
+
+    // **끌 수도 있어야 한다.** `unbind` 하면 빌트인 표를 건너뛰고 Cmd 조합이므로 `.ignored` 로 떨어진다 —
+    // 배선 전 상태로 정확히 돌아간다. 이것이 없으면 새 기본 chord 가 사용자에게 **강제**가 된다.
+    const unbound_z: KeyBindingResolver = .{ .unbinds = &.{
+        .{ .modifiers = .{ .command = true }, .key = .{ .char = 'Z' } },
+    } };
+    try std.testing.expectEqual(
+        ResolvedKey.ignored,
+        try unbound_z.resolve(.{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true } }, &buffer, .{}),
+    );
+}
+
+test "웹 편집 필드의 ⌘Z·⌘S 는 빌트인 편집기 chord 에 안 뺏긴다 (순서 계약)" {
+    // **위험이 실재했다.** ⌘Z·⌘S 를 `default_app_bindings` 에 넣는 순간, 웹 편집 필드(주소창·CM6·
+    // 브라우저 폼)에서 그 키가 WebKit 대신 편집기 액션으로 갈 수 있다 — 그러면 웹에서 되돌리기가 죽는다.
+    //
+    // 막는 것은 `resolveWebDetailed` 의 **순서** 하나다: `isWebEditorDefault` 가 `default_app_bindings`
+    // **앞**에 있다. 그 순서가 뒤집히면 이 단언이 깨진다 — 지금은 우연히 맞는 것이 아니라 계약이다.
+    const resolver: KeyBindingResolver = .{};
+    inline for (.{ 'z', 's', 'a', 'c', 'f', 'v', 'x' }) |c| {
+        const ev = terminal.KeyEvent{ .key = .{ .char = c }, .modifiers = .{ .command = true } };
+        try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(ev, true));
+        // **편집 불가 문서에서는 이야기가 다르다** — 거기서는 빌트인이 가져가고, 활성 Term 이 웹이라
+        // 편집기 액션은 `term.kind != .editor` 로 거절된다(무동작). 뺏기는 것이 아니라 갈 곳이 없다.
+        _ = resolver.resolveWeb(ev, false);
+    }
+
+    // ⌘⇧Z 는 `isWebEditorDefault` 목록에 **없다**(그 함수는 shift 를 안 가리는 대신 글자로만 판정하고
+    // `Z` 는 목록에 있다) — 편집 필드에서도 같은 갈래로 간다. 이 줄은 그 사실을 고정한다.
+    const redo = terminal.KeyEvent{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true, .shift = true } };
+    try std.testing.expectEqual(WebKeyRoute.web_editor, resolver.resolveWeb(redo, true));
+}
+
 test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (tab model)" {
     var buffer: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const resolver: KeyBindingResolver = .{}; // 사용자 바인딩 없음 — default_app_bindings가 가져가야
@@ -730,9 +831,10 @@ test "built-in app bindings: Cmd+T new_term, Cmd+Shift+T new_tab (tab model)" {
     const ot = try resolver.resolve(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true, .option = true } }, &buffer, .{});
     try std.testing.expectEqual(action_mod.Action.new_web_tab, ot.app_action);
 
-    // 안 묶인 Cmd 조합은 그대로 ignored(셸로 글자 안 샘).
+    // 안 묶인 Cmd 조합은 그대로 ignored(셸로 글자 안 샘). **글자는 계산해서 고른다** — 손으로 박으면
+    // 그 글자가 묶이는 날 이 판정자가 규율이 아니라 예시 때문에 깨진다(`unboundCommandChar` 주석).
     try std.testing.expect((try resolver.resolve(.{
-        .key = .{ .char = 's' },
+        .key = .{ .char = unbound_command_char },
         .modifiers = .{ .command = true },
     }, &buffer, .{})) == .ignored);
 }
@@ -1028,7 +1130,7 @@ test "resolver leaves ordinary terminal keys alone and ignores unbound command k
     try std.testing.expectEqual(
         ResolvedKey.ignored,
         try resolver.resolve(.{
-            .key = .{ .char = 's' },
+            .key = .{ .char = unbound_command_char }, // 계산해서 고른다(위 헬퍼 주석)
             .modifiers = .{ .command = true },
         }, &buffer, .{}),
     );
@@ -1062,8 +1164,8 @@ test "resolve: built-in macOS line-editing bindings (Cmd/Option) override the ig
     // Option 단어 이동.
     try std.testing.expectEqualStrings("\x1bb", (try r.resolve(.{ .key = .arrow_left, .modifiers = .{ .option = true } }, &buf, .{})).terminal_input);
     try std.testing.expectEqualStrings("\x1bf", (try r.resolve(.{ .key = .arrow_right, .modifiers = .{ .option = true } }, &buf, .{})).terminal_input);
-    // 안 묶인 다른 Cmd 조합은 그대로 .ignored.
-    try std.testing.expectEqual(ResolvedKey.ignored, try r.resolve(.{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } }, &buf, .{}));
+    // 안 묶인 다른 Cmd 조합은 그대로 .ignored(글자는 계산해서 고른다 — `unboundCommandChar`).
+    try std.testing.expectEqual(ResolvedKey.ignored, try r.resolve(.{ .key = .{ .char = unbound_command_char }, .modifiers = .{ .command = true } }, &buf, .{}));
     // 정확한 modifier만 — Cmd+Shift+Backspace는 빌트인 매칭 안 되고 .ignored.
     try std.testing.expectEqual(ResolvedKey.ignored, try r.resolve(.{ .key = .backspace, .modifiers = .{ .command = true, .shift = true } }, &buf, .{}));
     // Option+Backspace는 encodeKey의 meta-ESC(\x1b\x7f)로 — 빌트인 아님.

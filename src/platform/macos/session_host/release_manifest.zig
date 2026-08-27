@@ -192,6 +192,42 @@ pub const Observation = struct {
     predecessor: ?PredecessorObservation = null,
 };
 
+pub const PublicationStep = enum {
+    candidate_attested,
+    draft_created,
+    evidence_verified,
+    manifest_created,
+    manifest_attested,
+    assets_attached,
+    draft_redownload_validated,
+    published,
+    release_attestation_verified,
+};
+
+/// Facts observed by the release adapter. Keeping the ordered transcript here prevents shell and
+/// workflow implementations from each inventing a slightly different publication policy.
+pub const PublicationObservation = struct {
+    repository: Repository,
+    source_commit: []const u8,
+    build: Build,
+    manifest_sha256: []const u8,
+    trusted_tag_push: bool,
+    protected_tag: bool,
+    protected_environment: bool,
+    fork_pr: bool,
+    pull_request_target: bool,
+    arbitrary_ref: bool,
+    third_party_actions_pinned: bool,
+    clobber_used: bool,
+    predecessor_published: bool,
+    predecessor_immutable: bool,
+    manifest_asset_count: u64,
+    attached_assets: []const Asset,
+    release_attested_assets: []const Asset,
+    post_publish_mutation: bool,
+    steps: []const PublicationStep,
+};
+
 pub const EvidenceError = error{
     RepositoryMismatch,
     ReleaseMismatch,
@@ -205,7 +241,62 @@ pub const EvidenceError = error{
     AttestationMismatch,
     PredecessorMismatch,
     ManifestDigestMismatch,
+    PublicationMismatch,
 };
+
+const required_publication_steps = [_]PublicationStep{
+    .candidate_attested,
+    .draft_created,
+    .evidence_verified,
+    .manifest_created,
+    .manifest_attested,
+    .assets_attached,
+    .draft_redownload_validated,
+    .published,
+    .release_attestation_verified,
+};
+
+fn validatePublication(
+    manifest: Manifest,
+    manifest_sha256: []const u8,
+    observed: PublicationObservation,
+) EvidenceError!void {
+    if (!equalRepository(manifest.repository, observed.repository) or
+        !std.mem.eql(u8, manifest.source.commit, observed.source_commit) or
+        !equalBuild(manifest.build, observed.build) or
+        !std.mem.eql(u8, manifest_sha256, observed.manifest_sha256))
+        return error.PublicationMismatch;
+    if (!observed.trusted_tag_push or !observed.protected_tag or
+        !observed.protected_environment or observed.fork_pr or
+        observed.pull_request_target or observed.arbitrary_ref or
+        !observed.third_party_actions_pinned or observed.clobber_used or
+        observed.post_publish_mutation or observed.manifest_asset_count != 1)
+        return error.PublicationMismatch;
+    switch (manifest.role) {
+        .a => if (observed.predecessor_published or observed.predecessor_immutable)
+            return error.PublicationMismatch,
+        .b => if (!observed.predecessor_published or !observed.predecessor_immutable)
+            return error.PublicationMismatch,
+    }
+    if (!equalAssetSet(manifest.assets, observed.attached_assets) or
+        !equalAssetSet(manifest.assets, observed.release_attested_assets) or
+        !std.mem.eql(PublicationStep, &required_publication_steps, observed.steps))
+        return error.PublicationMismatch;
+}
+
+/// Final release audit entrypoint: content evidence and publication ordering must describe the
+/// same canonical manifest bytes. Callers cannot accidentally run one half of the policy only.
+pub fn parseAndValidatePublication(
+    allocator: std.mem.Allocator,
+    canonical_bytes: []const u8,
+    evidence: Observation,
+    publication: PublicationObservation,
+) (ParseError || EvidenceError)!Parsed {
+    var parsed = try parseAndValidateObservation(allocator, canonical_bytes, evidence);
+    errdefer parsed.deinit();
+    try validatePublication(parsed.value().*, evidence.manifest_sha256, publication);
+    return parsed;
+}
 
 /// Parses only the writer's exact byte representation. This turns key order, whitespace, number
 /// spelling, escaping, and the final LF into one closed format instead of several equivalent JSONs.
@@ -952,6 +1043,142 @@ test "release manifest observations reject cross artifact substitution" {
     observed = validObservation(&manifest, &assets, null);
     observed.evidence.summary_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     try std.testing.expectError(error.EvidenceMismatch, validateObservation(manifest, observed, null));
+}
+
+test "release publication policy rejects unsafe trigger order and asset substitution" {
+    const manifest = validManifest(.b);
+    const exact_steps = [_]PublicationStep{
+        .candidate_attested,
+        .draft_created,
+        .evidence_verified,
+        .manifest_created,
+        .manifest_attested,
+        .assets_attached,
+        .draft_redownload_validated,
+        .published,
+        .release_attestation_verified,
+    };
+    var observed = PublicationObservation{
+        .repository = manifest.repository,
+        .source_commit = manifest.source.commit,
+        .build = manifest.build,
+        .manifest_sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        .trusted_tag_push = true,
+        .protected_tag = true,
+        .protected_environment = true,
+        .fork_pr = false,
+        .pull_request_target = false,
+        .arbitrary_ref = false,
+        .third_party_actions_pinned = true,
+        .clobber_used = false,
+        .predecessor_published = true,
+        .predecessor_immutable = true,
+        .manifest_asset_count = 1,
+        .attached_assets = manifest.assets,
+        .release_attested_assets = manifest.assets,
+        .post_publish_mutation = false,
+        .steps = &exact_steps,
+    };
+    try validatePublication(manifest, observed.manifest_sha256, observed);
+
+    observed.trusted_tag_push = false;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.trusted_tag_push = true;
+    observed.protected_tag = false;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.protected_tag = true;
+    observed.protected_environment = false;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.protected_environment = true;
+    observed.fork_pr = true;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.fork_pr = false;
+    observed.pull_request_target = true;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.pull_request_target = false;
+    observed.third_party_actions_pinned = false;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.third_party_actions_pinned = true;
+    observed.clobber_used = true;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.clobber_used = false;
+    observed.predecessor_immutable = false;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.predecessor_immutable = true;
+    observed.manifest_asset_count = 0;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.manifest_asset_count = 1;
+
+    const substituted_assets = manifest.assets[0 .. manifest.assets.len - 1];
+    observed.attached_assets = substituted_assets;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.attached_assets = manifest.assets;
+
+    observed.release_attested_assets = substituted_assets;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.release_attested_assets = manifest.assets;
+    observed.post_publish_mutation = true;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.post_publish_mutation = false;
+
+    observed.steps = exact_steps[0 .. exact_steps.len - 1];
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+
+    var reordered_steps = exact_steps;
+    std.mem.swap(PublicationStep, &reordered_steps[6], &reordered_steps[7]);
+    observed.steps = &reordered_steps;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.steps = &exact_steps;
+    observed.arbitrary_ref = true;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+    observed.arbitrary_ref = false;
+    observed.build.run_attempt += 1;
+    try std.testing.expectError(error.PublicationMismatch, validatePublication(manifest, observed.manifest_sha256, observed));
+
+    const a = validManifest(.a);
+    const a_bytes = try writeCanonical(std.testing.allocator, a);
+    defer std.testing.allocator.free(a_bytes);
+    var a_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(a_bytes, &a_digest, .{});
+    const a_digest_hex = std.fmt.bytesToHex(a_digest, .lower);
+    var a_assets: [3]AssetObservation = undefined;
+    fillAssetObservations(a, &a_assets);
+    var a_evidence = validObservation(&a, &a_assets, null);
+    a_evidence.manifest_sha256 = &a_digest_hex;
+    a_evidence.manifest_attestation.subject_sha256 = &a_digest_hex;
+    var a_publication = PublicationObservation{
+        .repository = a.repository,
+        .source_commit = a.source.commit,
+        .build = a.build,
+        .manifest_sha256 = &a_digest_hex,
+        .trusted_tag_push = true,
+        .protected_tag = true,
+        .protected_environment = true,
+        .fork_pr = false,
+        .pull_request_target = false,
+        .arbitrary_ref = false,
+        .third_party_actions_pinned = true,
+        .clobber_used = false,
+        .predecessor_published = false,
+        .predecessor_immutable = false,
+        .manifest_asset_count = 1,
+        .attached_assets = a.assets,
+        .release_attested_assets = a.assets,
+        .post_publish_mutation = false,
+        .steps = &exact_steps,
+    };
+    var validated = try parseAndValidatePublication(
+        std.testing.allocator,
+        a_bytes,
+        a_evidence,
+        a_publication,
+    );
+    validated.deinit();
+    a_publication.manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    try std.testing.expectError(
+        error.PublicationMismatch,
+        parseAndValidatePublication(std.testing.allocator, a_bytes, a_evidence, a_publication),
+    );
 }
 
 test "release manifest observation binds attestation to exact canonical bytes" {

@@ -160,6 +160,9 @@ pub const editor = struct {
     /// 통짜가 들어가므로 "조각이 몇 개였나"는 앱이 따로 기억해야 하고, 그 기억이 지금 클립보드를
     /// 설명하는지 판정하는 것이 순수 계산이라 여기 산다.
     pub const clipboard = @import("session/editor/clipboard.zig");
+    /// N2: 타이핑 보조 — 괄호·따옴표 자동 닫기·type-over·surround(§3.7). **문맥을 묻지 않는다** —
+    /// 문자열/주석 판정은 토큰 층(§5.3)의 일이고 아직 없어, 그 절이 정한 **저하 동작**을 한다.
+    pub const pairs = @import("session/editor/pairs.zig");
     /// N2: 한 번의 편집을 값으로 만든다(§3.3 — 여러 range를 담고 selection을 같은 연산에서 민다).
     /// 스택·그룹핑은 시계와 입력 사건을 읽어야 해서 여기 없다.
     pub const delta = @import("session/editor/delta.zig");

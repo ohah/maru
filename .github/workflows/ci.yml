@@ -376,17 +376,22 @@ jobs:
       - name: Verify bundled CLI over harness-owned localhost OpenSSH
         run: zig build test-session-host-p5d -Doptimize=ReleaseFast -j1
 
-  macos-appkit-probe:
-    name: macOS AppKit 창 probe (수동)
+  session-host-keepalive-macos:
+    name: keep-alive recovered session macOS
     needs: changes
-    # **가정을 실측으로 바꾸는 잡이다.** keep-alive 를 켠 GUI 경로(`macos-session-host-recovery-smoke` 계열)는
-    # 실 AppKit 창이 필요해 CI 에서 못 돈다고 문서가 적어 왔는데, `macos-app-smoke`·`window-smoke` 는 ci.yml
-    # 이력에 **한 번도 없었다** — 즉 시도한 적이 없는 가정이다. 기본값 `true` 전환의 선결이 「켠 경로를 무엇으로
-    # 검증하나」이므로(persistent-session-host.md 백로그), 그 답을 짐작이 아니라 결과로 정한다.
+    # **keep-alive 를 실제로 켜고 도는 유일한 CI 잡이다.** `session.keep-alive-after-quit = true` 인 홈에서
+    # 앱을 두 번 띄워, 1차가 남긴 host runtime 을 2차가 목록에서 찾아 클릭하고 그 원격 터미널을 세운 뒤,
+    # 1차 셸이 남긴 표식이 보이는지까지 본다 — 즉 「GUI 를 껐다 켜도 **같은 프로세스**에 다시 붙는다」는
+    # keep-alive 의 핵심 계약을 실 AppKit 창으로 end-to-end 검증한다.
     #
-    # 자동으로는 돌지 않는다(`workflow_dispatch` 전용) — 매 PR 에 러너 분을 얹지 않고, 답이 나오면 그때
-    # 상시 편입 여부를 정한다. 실패해도 다른 잡을 막지 않는다(필수 체크 아님).
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+    # **오래 «CI 에서 못 돈다» 고 적혀 있었는데 시도한 적이 없었다**(`macos-app-smoke`·`window-smoke` 는
+    # ci.yml 이력에 없다). 실제로 재 보니 러너에 WindowServer 가 살아 있고(pid 145) 이 스모크가 통과한다.
+    # 실측 **2분 14초**로 macOS 잡 중 가장 싸다(slow observer 1m46s, bundled CLI 7m09s, Debug 8m01s,
+    # file explorer 14m04s) — 병렬이라 wall-clock 영향도 사실상 없다.
+    #
+    # ⚠️ 이 잡이 덮는 것은 **정상 종료 → 재실행 → 재접속**이다. 강제 종료 경로·멀티 윈도우 배치 복원(R7)·
+    # GUI 부재 중 알림(OS 배너)은 덮지 않는다.
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -398,24 +403,14 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: false
-      # 러너 세션에 WindowServer 가 붙어 있는지부터 본다 — 창이 안 열리면 그 다음 단계는 볼 필요가 없고,
-      # 실패해도 진행해 아래 스모크의 실제 오류를 함께 남긴다(둘 중 무엇이 막는지 가리려고).
-      - name: 러너 GUI 세션 확인
-        continue-on-error: true
-        run: |
-          echo "== launchctl GUI 도메인"
-          launchctl print "gui/$(id -u)" 2>&1 | head -5 || echo "(gui 도메인 없음)"
-          echo "== WindowServer"
-          pgrep -l WindowServer || echo "(WindowServer 없음)"
       # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다 — 이걸 빠뜨린 첫 시도가
       # `unresolved_import` 로 죽었다(AppKit 과 무관한 실패였다). 기존 web job 과 같은 명령을 쓴다.
       - name: 웹 의존성 설치
         run: bun install --cwd web --frozen-lockfile
-      # **이게 우리가 답을 원하는 그 게이트다** — `session.keep-alive-after-quit = true` 를 실제로 켜고
-      # recovered-session 발견·클릭·렌더까지 보는 스모크다. 앞선 시도로 창 자체는 열린다는 걸 확인했으므로
-      # (러너에 WindowServer pid 145, 앱이 뜨고 tick 하고 종료까지 함), 남은 질문은 「이 스모크가 요구하는
-      # 것이 러너에서 되는가」뿐이다. `macos-app-smoke` 는 파일 뷰어·Mermaid·web panel 까지 한꺼번에 보는
-      # 큰 스모크라 우리가 필요한 것보다 훨씬 많은 걸 요구했다(그래서 `file_viewer_*` 단언에서 걸렸다).
+      # 이 스모크가 단언하는 일곱(build.zig): stage=2(두 번째 실행까지 감) · row_present(살아남은 세션을
+      # 목록에서 찾음) · click_dispatched(실제 클릭) · remote_published(원격 터미널이 섬) ·
+      # marker_present(**1 차 셸이 남긴 표식이 2 차에서 보임 = 같은 프로세스에 재접속**) · before/after_capture
+      # (그 화면을 렌더해 캡처).
       - name: keep-alive recovered-session 스모크
         run: mise run macos-session-host-recovery-smoke
 

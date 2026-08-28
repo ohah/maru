@@ -40813,13 +40813,13 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     //    있을 수 있으므로, 그 다음 행부터가 "온전히 보이는" 첫 행이다.
     const first_full_row = (after_track + file_tree_dock_ops.fileTreeRowHeightPx(session) - 1) / file_tree_dock_ops.fileTreeRowHeightPx(session);
     const visible_index = first_full_row + file_panel_ops.fileTreeVisibleRows(session) / 2;
-    file_panel_ops.scrollFileTreeRowIntoView(session, visible_index);
+    _ = file_panel_ops.scrollFileTreeRowIntoView(session, visible_index);
     try std.testing.expectEqual(after_track, file_panel_ops.fileTreeEffectiveScrollPx(session));
 
     // ④ keyboard — 선택이 화면 밖으로 나가면 anchor가 그것을 따라 들어온다.
-    file_panel_ops.scrollFileTreeRowIntoView(session, 0);
+    _ = file_panel_ops.scrollFileTreeRowIntoView(session, 0);
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
-    file_panel_ops.scrollFileTreeRowIntoView(session, 500);
+    _ = file_panel_ops.scrollFileTreeRowIntoView(session, 500);
     const after_anchor = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expect(after_anchor > 0);
 
@@ -41500,6 +41500,34 @@ test "file tree reprojection keeps the user's scroll unless the selection actual
     session.file_tree_scroll.offset_y_px = nudged;
     file_panel_ops.reconcileFileTreeSelection(session);
     try std.testing.expectEqual(nudged, file_panel_ops.fileTreeEffectiveScrollPx(session));
+
+    // ⑥ **보여 주지 못한 것을 보여 줬다고 기록하지 않는다.** 도크가 접혀 뷰포트가 0이면
+    //    `scrollFileTreeRowIntoView` 는 아무것도 못 한다. 그때 "보여 줬다"고 표시하면 도크를 다시
+    //    열어도 그 선택은 영영 뷰포트 밖에 남는다 — 재투영이 매 tick 도는 동안 도크를 접어 두기만
+    //    해도 예약이 통째로 삼켜지는 자리다.
+    session.file_tree_scroll.reset();
+    // **④와 다른 행이어야 한다** — 같은 신원을 다시 예약하면 generation 이 안 움직여 이 항이
+    // 판정할 상태(아직 못 보여 준 예약)에 도달하지 못한다.
+    const pending_index = last_index - 1;
+    try std.testing.expect(pending_index != last_index);
+    try std.testing.expect(session.file_tree_selection.setIdentity(
+        .file,
+        session.file_tree_rows.items[pending_index].file.path,
+        0,
+    ));
+    // 렌더 메트릭이 아직 없는 상태를 만든다(⑧과 같은 패턴 — 첫 프레임이 그렇다). 창 높이를 줄여
+    // 뷰포트를 0으로 만드는 길은 "낮은 도크 규칙"에 걸려 본문이 **오히려 커진다**(⑨의 주석).
+    const saved_cell_h = session.cell_height_px;
+    session.cell_height_px = 0;
+    try std.testing.expectEqual(@as(u32, 0), file_tree_dock_ops.fileTreeRowHeightPx(session));
+    file_panel_ops.reconcileFileTreeSelection(session);
+    session.cell_height_px = saved_cell_h;
+    try std.testing.expect(file_tree_dock_ops.fileTreeRowHeightPx(session) > 0);
+    file_panel_ops.reconcileFileTreeSelection(session); // 이제야 보여 준다
+    try std.testing.expectEqual(
+        @as(u32, @intCast(pending_index + 1)) * cell_h - dock_ops.dockGeometry(session).tree_content.h,
+        file_panel_ops.fileTreeEffectiveScrollPx(session),
+    );
 }
 
 // FT2 의 세 계약을 한 세션에서 본다. 셋 다 **화면으로는 안 보이는** 종류라 캡처로는 못 잡는다.

@@ -81,8 +81,57 @@ if [ ! -x "$DRIVER" ]; then
 	exit 1
 fi
 
-DIR=$(mktemp -d)
+# **임시 디렉터리 이름에 소유 스크립트의 pid 를 박는다.** 아래 `reap_dead_owners` 가 "이 sshd 를 띄운
+# 스크립트가 아직 사는가" 를 그 이름 하나로 판정한다 — 그것 말고는 띄운 쪽과 띄워진 쪽을 이을 실마리가
+# 없다(sshd 는 daemonize 하며 setsid 로 떨어져 나가 부모도, 프로세스 그룹도 남지 않는다).
+SMOKE_TAG=maru-ssh-smoke
+DIR=$(mktemp -d "${TMPDIR:-/tmp}/$SMOKE_TAG.$$.XXXXXX")
 PIDFILE="$DIR/sshd.pid"
+# `start_sshd` 가 지금까지 쓴 pid 파일 목록. 같은 자리를 두 번 쓰는 것을 그 자리에서 죽이는 데만 쓴다.
+USED_PIDFILES="$DIR/.used-pidfiles"
+
+# **앞선 실행이 남긴 sshd 를 거둔다.** 아래 `trap` 은 EXIT/INT/TERM 에서만 돌고 **SIGKILL 이나 프로세스
+# 그룹 kill 에는 안 돈다** — 게이트가 타임아웃으로 죽거나 Ctrl-C 가 에스컬레이션되면 그 자리에서
+# listener 가 고아로 남는다. 그 구멍은 trap 으로 막을 수 없으므로(SIGKILL 은 가로챌 수 없다) **다음
+# 실행이 치우는 쪽**으로 닫는다.
+#
+# 실측(2026-08-28): 그렇게 남은 sshd 가 **19 개**, 최고 **9 일째** localhost 포트를 하나씩 물고 있었다.
+# CPU 0 · 메모리 448KB 라 눈에 안 띄는데, **포트는 계속 먹으므로** 다음 실행이 `PORT_TRIES` 를 헛돌게
+# 하고 그만큼 조용한 SKIP 에 가까워진다.
+#
+# ⚠️ **살아 있는 소유자의 sshd 는 절대 안 건드린다.** 이 스크립트는 병렬로 돌 수 있고(포트를 pid 로
+# 흩는 이유가 그것이다), 남의 실행을 죽이면 그쪽이 영문 모를 실패를 한다. 그래서 판정은 소유자 pid 의
+# 생존 하나뿐이다 — **pid 재사용은 "안 죽인다" 쪽으로만 틀린다**(죽은 소유자의 번호를 남이 물려받으면
+# 우리는 살아 있다고 보고 그냥 지나간다). 안전한 방향으로만 틀리는 판정이라 이 정도면 충분하다.
+reap_dead_owners() {
+	_tmp_root=${TMPDIR:-/tmp}
+	ps -Ao pid=,command= 2>/dev/null | grep "[s]shd -f " | while read -r _dead_pid _dead_rest; do
+		# **공백 있는 경로에서 잘리지 않게 태그에 앵커해서 뽑는다.** 예전 판은 `-f` 뒤의 공백 없는
+		# 토큰만 잘라 왔는데, `$TMPDIR` 에 공백이 하나라도 있으면 태그 앞에서 끊겨 **조용히 아무것도
+		# 안 하는** 상태가 된다(이 저장소가 가장 싫어하는 형태다). 우리가 만드는 이름 모양
+		# (`태그.pid.6자`) 자체를 패턴으로 삼으면 공백과 무관하고, 덤으로 모양 검사까지 겸한다.
+		_dead_dir=$(printf '%s\n' "$_dead_rest" |
+			sed -n "s|.*-f \(.*/$SMOKE_TAG\.[0-9][0-9]*\.[A-Za-z0-9]*\)/[^/]*.*|\1|p")
+		[ -n "$_dead_dir" ] || continue
+		# ⚠️ **`ps` 출력은 아무 프로세스나 지어낼 수 있다.** 여기서 하는 일이 `kill` 과 `rm -rf` 라
+		# 경로를 그대로 믿으면 안 된다 — 적대적 입력을 먹여 보니 `sshd -f /etc/maru-ssh-smoke.1./x`
+		# 가 통과해 `/etc/...` 를 지우려 들었다. 그래서 **우리가 실제로 만들 수 있는 자리**로 좁힌다:
+		# `mktemp` 에 준 것과 **같은 식으로 지은 접두**만 받는다. `$TMPDIR` 이 그때와 다르면 못 거두는데,
+		# 그건 "남의 것을 지우는 것" 보다 훨씬 나은 실패 방향이다.
+		case "$_dead_dir" in
+		"$_tmp_root"/"$SMOKE_TAG".*) ;;
+		*) continue ;;
+		esac
+		# 디렉터리 존재는 조건에 안 넣는다 — OS 의 임시 청소기가 이미 지웠어도 `ps` 는 원래 경로를
+		# 그대로 보여 주므로, 파일 존재를 요구하면 **가장 오래된 시체를 못 거둔다**.
+		_dead_owner=$(basename "$_dead_dir" | sed -n "s/^$SMOKE_TAG\.\([0-9][0-9]*\)\..*/\1/p")
+		[ -n "$_dead_owner" ] || continue
+		if kill -0 "$_dead_owner" 2>/dev/null; then continue; fi
+		kill "$_dead_pid" 2>/dev/null || true
+		rm -rf "$_dead_dir" 2>/dev/null || true
+	done
+}
+reap_dead_owners
 
 # **띄운 것을 하나도 안 남긴다.** 예전에는 pid 파일을 하나씩 적었는데, 회차를 늘리면서 새로
 # 띄운 sshd 를 목록에 안 넣어 **listener 가 그대로 살아남았다**(실측: `pgrep sshd` 에 두 개).
@@ -126,6 +175,16 @@ start_sshd() {
 	if [ -n "$_cmd" ]; then
 		_force="ForceCommand $_cmd"
 	fi
+	# **같은 pid 파일을 두 회차가 나눠 쓰면 앞의 sshd 를 잃는다** — 아래 `rm -f "$_pidfile"` 이 그
+	# 자리를 지워서 `cleanup` 이 그 pid 를 영영 못 찾는다. 조용히 새는 대신 **여기서 죽는다**:
+	# 실측으로 그렇게 성공한 실행마다 하나씩 남아 9 일치가 19 개로 쌓였고, CPU 가 0 이라 아무도
+	# 눈치채지 못했다. 새 회차를 더하며 이름을 복사해 오는 것이 자연스러운 실수라 사람 대신 검사가 본다.
+	if [ -f "$USED_PIDFILES" ] && grep -qxF "$_pidfile" "$USED_PIDFILES"; then
+		echo "[ssh-client-smoke] FAIL: pid 파일을 두 번 썼다 — 앞 회차 sshd 를 잃는다: $_pidfile" >&2
+		exit 1
+	fi
+	printf '%s\n' "$_pidfile" >>"$USED_PIDFILES"
+
 	_conf="$_pidfile.conf"
 	STARTED_PORT=""
 	_try=0
@@ -397,8 +456,13 @@ ROUNDS=$((ROUNDS + 1))
 #     `ForceCommand` 라 우리 명령이 무시된다(그것이 계약 §4a 가 그런 서버에서 컨트롤 축을 안
 #     켜는 이유이고, 여기서는 그 반대편을 잰다). 단위 테스트는 우리가 만든 답을 먹이므로
 #     **진짜 sshd 가 `exec` 을 받아 주는지**는 이 회차 말고 밟는 데가 없다.
-start_sshd "$DIR/sshd10.pid" "$((PORT + 10))" "$DIR/sshd10.log" "" || {
-	sed -n '1,5p' "$DIR/sshd10.log" >&2 2>/dev/null || true
+# ⚠️ **회차마다 pid 파일 이름이 달라야 한다.** 이 회차는 `sshd10` 을 재사용하고 있었는데,
+# `start_sshd` 는 시작 전에 `rm -f "$_pidfile"` 을 하므로 **앞 회차(14번) sshd 의 pid 가 그 자리에서
+# 사라졌다** — `cleanup` 은 pid 파일로만 거두니 그 listener 는 영영 안 죽는다. 실측: 성공한 실행
+# 하나가 sshd 를 정확히 하나씩 남겼고, 그렇게 9 일치가 19 개로 쌓였다. 위 `cleanup` 주석이 "전수로
+# 돈다" 고 적은 것은 **목록을 잊는 것**을 막을 뿐, **같은 자리를 덮어쓰는 것**은 못 막는다.
+start_sshd "$DIR/sshd12.pid" "$((PORT + 10))" "$DIR/sshd12.log" "" || {
+	sed -n '1,5p' "$DIR/sshd12.log" >&2 2>/dev/null || true
 	echo "[ssh-client-smoke] FAIL: 컨트롤 회차용 sshd 를 어느 포트에도 못 띄웠다" >&2
 	exit 1
 }

@@ -3801,6 +3801,50 @@ pub fn build(b: *std.Build) void {
         session_host_e3c_step.dependOn(&run_session_host_e3c_validator.step);
         session_host_e3c_step.dependOn(&run_session_host_e3c_validator_tests.step);
     }
+    const session_host_metadata_reattach_parity_step = b.step(
+        "test-session-host-metadata-reattach-parity",
+        "Verify P3-e4d-1 actual metadata isolation and reconnect full-state parity",
+    );
+    const session_host_metadata_reattach_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_metadata_reattach_parity_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P3-e4d-1 metadata parity uses actual daemon runtimes"},
+    });
+    const run_session_host_metadata_reattach_boundary_tests = b.addRunArtifact(
+        session_host_metadata_reattach_boundary_tests,
+    );
+    run_session_host_metadata_reattach_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_metadata_reattach_boundary_tests.setCwd(b.path("."));
+    session_host_metadata_reattach_parity_step.dependOn(
+        &run_session_host_metadata_reattach_boundary_tests.step,
+    );
+    boundary_step.dependOn(&run_session_host_metadata_reattach_boundary_tests.step);
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |metadata_parity_optimize| {
+            const session_host_metadata_reattach_product_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                    .target = target,
+                    .optimize = metadata_parity_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"P3-e4d-1 actual metadata events stay isolated"},
+            });
+            const run_session_host_metadata_reattach_product_tests = b.addRunArtifact(
+                session_host_metadata_reattach_product_tests,
+            );
+            // session_host.zig includes two anonymous import sentinels plus the selected product test.
+            run_session_host_metadata_reattach_product_tests.addArg("--maru-expect-tests=3");
+            run_session_host_metadata_reattach_product_tests.setCwd(b.path("."));
+            session_host_metadata_reattach_parity_step.dependOn(
+                &run_session_host_metadata_reattach_product_tests.step,
+            );
+        }
+    }
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",

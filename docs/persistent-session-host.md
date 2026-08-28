@@ -7319,6 +7319,21 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     BEL·clipboard·notification처럼 queue drain에서 이미 드러나는 urgent source는 같은 output wake epoch에 합쳐 다음
     100ms deadline을 기다리지 않는다. unchanged runtime은 canonical JSON materialization·core lock·heap allocation뿐 아니라
     metadata stream producer visit도 0이다.
+  - **E3c client idle-pump evidence:** host producer가 idle에서 projection 0이어도 GUI가 display cadence마다
+    `RemoteTermBackend.maintenanceEventTick`에서 원격 runtime을 선택해 `RemoteRuntime.pumpDelta`의 authority·transport
+    경로를 반복하면 default-on의 유휴 예산은 닫히지 않는다. ReleaseFast 제품 계측은 실제 독립 host와 generation-backed
+    `RemoteTermBackend`를 사용해 1·10·15·100 runtime을 붙이고, 60Hz와 같은 1초 turn에서 client process의 user/system CPU,
+    selected owner 수, `pumpDelta` 진입 수, publication timestamp seal 수, `ClientSlot` 전역 registry visit 수, socket read 수와
+    적용된 metadata/screen/ended 수를 기록한다. 15 runtime 행은 `max_owners_per_frame` 아래에서 매 frame 전부 선택되는
+    사용례를, 100 runtime 행은 상한과 round-robin을 각각 판정한다.
+
+    계측은 원인을 미리 정하지 않는다. seal 수와 registry visit 수를 별도 counter로 남겨 "4,096칸 registry scan + Blake3"를
+    하나의 비용으로 뭉치지 않고, raw counter·CPU 전후값·호출 상한을 validator가 다시 계산한다. steady idle은 initial
+    snapshot/metadata와 foreground source가 수렴한 뒤 시작하며, 그 창에서 적용 event가 0이어야 한다. active marker 행은
+    같은 owner 선택 경로로 실제 PTY output이 화면에 도달하고 target만 output event를 내는지 함께 증명한다. 측정 전에는
+    cadence 하향이나 event-readable wake 전환 어느 쪽도 채택하지 않으며, 측정 결과와 wake/latency 불변식을 함께 만족하는
+    최소 변경만 별도 구현 단계에서 고른다. hard budget과 artifact schema는
+    [성능 예산](performance-budget.md#p4-e3c-client-idle-pump-예산)이 소유한다.
   - **E3 gate:** Debug·ReleaseFast component fixture는 idle/one-runtime-change/multi-observer/hidden/resync/resize/token-overflow와
     lost-wake interleaving을 검증한다. macOS 제품 artifact는 1·10·100 actual runtime에서 idle screen projector와
     screen-owned allocation 0, 한 runtime output 뒤 sibling runtime projector 0, controller/healthy observer latency와 slow

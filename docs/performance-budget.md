@@ -208,12 +208,18 @@ CPU만으로 구조를 판정하지 않고 exact-zero projector/allocation/core-
 요구한다. 한 runtime source change 뒤 sampler/materialization은 runtime당 exact 1이고 controller+observer delivery 수만큼
 producer visit만 증가하되 sibling runtime visit은 0이어야 한다. output wake와 100ms deadline의 lost-wake interleaving,
 slow observer/backpressure, revision exhaustion의 incarnation rollover에서도 target 외 visit·base mutation은 0이어야 한다. 이 구조
-counter와 1·10·100 actual-runtime artifact gate가 붙기 전에는 P4 E3 전체를 완료 처리하지 않는다.
+counter와 1·10·100 actual-runtime artifact gate가 함께 green이어야 P4 E3 전체를 완료 처리한다.
 
 E3a 제품 배선 뒤 2026-08-28 동일 ReleaseFast artifact v3 실측은 1·10·100 runtime의 1초 창에서 CPU
 0.025691ms·0.081410ms·1.162807ms였고, 세 행 모두 snapshot/delta/owned-allocation/core-lock 증분 0이었다.
 같은 run의 healthy delivery median은 0.152750ms, max는 1.494833ms였다. 이 값은 상한을 완화하는 기준이 아니라
 raw artifact가 실제 제품 경로를 통과했다는 기록이며 validator는 위 hard cap만 판정한다.
+
+E3b 제품 배선 뒤 2026-08-28 ReleaseFast artifact v4 재실측은 1·10·100 runtime의 1초 창에서 CPU
+0.087600ms·0.463486ms·5.099731ms였고, 세 행 모두 metadata producer visit/materialization/core-lock 증분 0을
+screen projector 계열 exact-zero와 함께 기록했다. 100 runtime 중 한 target의 source 변경은 sampler 1회,
+연결된 stream producer 3회, runtime-shared materialization 1회, stream별 core-lock 3회였으며 sampler failure는 0이었다.
+이 수치는 환경별 성능 상한을 완화하지 않으며 exact-schema validator가 구조 counter와 함께 판정한다.
 
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 

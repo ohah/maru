@@ -21,6 +21,7 @@ const Probe = struct {
         output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
         observation: session_host.runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
+        metadata_sampler: session_host.runtime_manager.RuntimeManager.MetadataSamplerEvidence,
         screen: session_host.runtime_manager.RuntimeManager.ScreenPerformanceEvidence,
     ) ?session_host.daemon.FixtureAction {
         if (self.pending_sequence == 0) return null;
@@ -32,6 +33,7 @@ const Probe = struct {
             output_wake,
             child_exit,
             observation,
+            metadata_sampler,
             screen,
         );
         const rc = c.send(
@@ -57,10 +59,11 @@ const Probe = struct {
         output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
         observation: session_host.runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
+        metadata_sampler: session_host.runtime_manager.RuntimeManager.MetadataSamplerEvidence,
         screen: session_host.runtime_manager.RuntimeManager.ScreenPerformanceEvidence,
     ) session_host.daemon.FixtureAction {
         const self: *Probe = @ptrCast(@alignCast(context));
-        if (self.sendPending(telemetry, pty_output_bytes, output_wake, child_exit, observation, screen)) |action| return action;
+        if (self.sendPending(telemetry, pty_output_bytes, output_wake, child_exit, observation, metadata_sampler, screen)) |action| return action;
 
         var packet_bytes: [@sizeOf(probe_wire.CommandPacket) + 1]u8 = undefined;
         const rc = c.recv(
@@ -89,7 +92,7 @@ const Probe = struct {
                 self.pending_after_send = .stop;
             },
         }
-        return self.sendPending(telemetry, pty_output_bytes, output_wake, child_exit, observation, screen) orelse
+        return self.sendPending(telemetry, pty_output_bytes, output_wake, child_exit, observation, metadata_sampler, screen) orelse
             .continue_serving;
     }
 };

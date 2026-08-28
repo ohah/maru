@@ -117,6 +117,30 @@ const session_loop =
     "esac; rc=$?; end_notify; " ++
     "[ \"$rcon\" = 1 ] || return \"$rc\"; " ++
     "[ \"$rc\" = 255 ] || return \"$rc\"; " ++
+    // **끊긴 자리에서 입력 모드를 되돌린다.** 여기까지 왔다는 것은 링크가 비정상으로 죽었다는 뜻이고
+    // (255), 그러면 원격 TUI(claude/codex/vim/tmux)는 자기가 켠 모드를 **끄는 시퀀스를 못 보낸 채**
+    // 사라진다. 로컬 터미널은 그 모드를 그대로 들고 있으므로, 이어서 붙는 새 셸에 마우스 리포트가
+    // **입력으로** 쏟아진다 — 사용자 실측: `ESC[<0;126;59M` 의 `ESC[<` 를 zle 이 삼키고 `0;126;59M`
+    // 만 글자로 남았는데, 셸에서 `;` 가 명령 구분자라 `zsh: command not found: 0` `126` `59M0` …
+    // 가 줄줄이 실행됐다.
+    //
+    // **셸 통합의 `_maru_reset_input_modes` 로는 못 막는다.** 그 훅은 매 프롬프트에서 같은 일을
+    // 하지만 **maru 의 셸 통합이 깔린 셸에서만** 돌고, `maru ssh` 가 원격에 설치하는 것은
+    // **terminfo 하나뿐**이다(`remote_install`). TUI 가 죽는 자리는 정확히 그 원격이다 — 완화
+    // 장치가 있는 곳과 필요한 곳이 어긋나 있었다.
+    //
+    // 그래서 **래퍼가 직접 보낸다.** 원격에 무엇이 깔렸는지와 무관해지고, 안내 문구도 정리된
+    // 터미널 위에 찍힌다. 포기 경로(`short >= 3`)보다 **앞**에 두어 되살리기를 포기하고 로컬
+    // 셸로 돌아갈 때도 모드가 남지 않게 한다.
+    //
+    // 끄는 것: focus(1004) · mouse(1000/1002/1003) · SGR 인코딩(1006) · 붙여넣기 래핑(2004) ·
+    // app cursor(1) · kitty keyboard 스택(16 회 pop — 빈 스택 pop 은 no-op).
+    // 훅은 2004·1 을 **일부러 뺐다**("zle 이 매 줄 직접 켜고 끈다"). 그 보장은 maru 통합이 있는
+    // 셸의 이야기이고, 여기서 이어 주는 것은 **그 보장이 없는 원격 셸**이라 함께 끈다(사용자 결정).
+    //
+    // **화면은 안 건드린다.** alternate screen 종료·DECSTBM 리셋은 커서를 옮기고 보이던 내용을
+    // 바꾼다 — 그 결정은 이 절과 별개다(docs/ssh-integration.md §10.7).
+    "printf '\\033[?1004l\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?2004l\\033[?1l\\033[<16u'; " ++
     "t1=$(date +%s 2>/dev/null || printf 0); case \"$t1\" in ''|*[!0-9]*) t1=0 ;; esac; " ++
     "if [ \"$t0\" != 0 ] && [ \"$t1\" != 0 ] && [ $((t1 - t0)) -lt 2 ]; then short=$((short + 1)); else short=0; delay=1; fi; " ++
     "if [ \"$short\" -ge 3 ]; then printf 'maru ssh: cannot reach %s -- giving up after %s attempts\\n' \"$dest\" \"$attempt\" >&2; return \"$rc\"; fi; " ++
@@ -794,6 +818,19 @@ test "wrapper 스크립트: 재접속은 255에만·원격 command엔 안 걸고
     try std.testing.expect(std.mem.indexOf(u8, s, "if [ \"$short\" -ge 3 ]") != null); // 접속 자체가 안 되면 포기
     try std.testing.expect(std.mem.indexOf(u8, s, "delay=$((delay * 2)); [ \"$delay\" -gt 30 ] && delay=30") != null); // 백오프와 상한
     try std.testing.expect(std.mem.indexOf(u8, s, "wait_retry() { if [ -n \"$BASH_VERSION\" ] && [ -t 0 ]; then read -t") != null); // Enter로 건너뛰기(bash·tty)
+
+    // **입력 모드 리셋은 두 `return` 가드 뒤에 온다.** 앞에 두면 재접속 대상이 아닌 종료
+    // (`maru ssh host ls` 의 파이프 출력 등)에까지 시퀀스를 흘려 바이트를 오염시킨다. 순서가
+    // 계약이라 자리까지 못박는다 — 문자열이 있는지만 보면 위로 옮겨도 통과한다.
+    const guard = "[ \"$rc\" = 255 ] || return \"$rc\"; ";
+    const reset = "printf '\\033[?1004l\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?2004l\\033[?1l\\033[<16u'; ";
+    const guard_at = std.mem.indexOf(u8, s, guard) orelse return error.TestExpectedGuard;
+    const reset_at = std.mem.indexOf(u8, s, reset) orelse return error.TestExpectedReset;
+    try std.testing.expect(reset_at > guard_at);
+    // 포기 경로(`short >= 3`)보다 **앞**이어야 한다 — 되살리기를 포기하고 로컬 셸로 돌아갈 때도
+    // 모드가 남으면 안 된다.
+    const giveup_at = std.mem.indexOf(u8, s, "if [ \"$short\" -ge 3 ]") orelse return error.TestExpectedGiveUp;
+    try std.testing.expect(reset_at < giveup_at);
 }
 
 test "buildArgv: keepalive·재접속이 $4~$6 자리에 십진으로 들어간다" {
@@ -877,6 +914,52 @@ test "재접속 루프(실행): 끊기면 다시 붙고, 통지는 세션마다 
     // 통지는 세션마다 열고 닫힌다 — 안 닫으면 Maru가 끊긴 목적지를 계속 원격으로 표시한다.
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "notify\n"));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "clear\n"));
+}
+
+test "재접속 루프(실행): 끊긴 자리에서 입력 모드를 되돌린다" {
+    // 이 테스트가 증명하는 것(터미널에서 왜 중요한가): 링크가 비정상으로 죽으면 원격 TUI 는 자기가 켠
+    // 모드를 **끄지 못하고** 사라진다. 그 상태로 새 셸을 이어 주면 마우스 리포트가 **입력으로** 쏟아져
+    // `zsh: command not found: 0` `126` `59M0` … 가 줄줄이 실행된다(사용자 실측). 눈으로는 "이상한 글자"
+    // 로만 보여 원인을 못 찾는 종류라, 바이트가 실제로 나가는지 실행 경로에서 못박는다.
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    // 첫 세션 255(끊김) → 재접속, 두 번째 0(정상 종료) → 멈춤. 리셋은 **끊긴 그 한 번만** 나가야 한다.
+    const text = try runSessionLoop(a, "rcon=1; ssh() { n=$((n+1)); printf 'try%s\\n' \"$n\"; [ \"$n\" -ge 2 ] && return 0; return 255; };", &buf);
+    try std.testing.expect(std.mem.indexOf(u8, text, "try2") != null); // 전제: 실제로 끊기고 다시 붙었다
+
+    // 마우스 추적 세 모드가 전부 꺼진다 — 하나라도 남으면 그 모드의 리포트가 계속 흘러나온다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?1000l"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?1002l"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?1003l"));
+    // SGR 인코딩(1006)·포커스(1004)·kitty 스택도 함께. 인코딩이 남으면 다음에 누가 추적만 켰을 때
+    // 좌표 형식이 예상과 달라진다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?1006l"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?1004l"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[<16u"));
+    // 2004·1 은 셸 통합 훅이 **일부러 뺀** 둘이다(zle 이 매 줄 다시 세우므로). 원격 셸에는 그 보장이
+    // 없어 여기서는 함께 끈다 — 남으면 붙여넣기 래핑과 방향키 인코딩이 이상해진다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?2004l"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\x1b[?1l"));
+}
+
+test "재접속 루프(실행): 재접속하지 않는 종료에서는 입력 모드를 건드리지 않는다" {
+    // 리셋은 **끊긴 자리**의 처방이다. 사용자가 정상적으로 끝낸 세션(또는 정책이 꺼진 세션)에서까지
+    // 시퀀스를 흘리면, `maru ssh host ls` 처럼 출력을 파이프로 받는 호출의 **바이트를 오염시킨다**.
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+
+    // 원격이 3 으로 끝났다 — 255 가 아니므로 재접속 대상이 아니다.
+    const clean = try runSessionLoop(a, "rcon=1; ssh() { n=$((n+1)); printf 'try%s\\n' \"$n\"; return 3; };", &buf);
+    try std.testing.expect(std.mem.indexOf(u8, clean, "rc=3") != null); // 전제
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, clean, "\x1b[?1002l"));
+
+    var buf2: [4096]u8 = undefined;
+    // 255 이지만 재접속 정책이 꺼져 있다 — 우리가 셸을 이어 주지 않으므로 손대지 않는다.
+    const off = try runSessionLoop(a, "rcon=0; ssh() { n=$((n+1)); printf 'try%s\\n' \"$n\"; return 255; };", &buf2);
+    try std.testing.expect(std.mem.indexOf(u8, off, "rc=255") != null); // 전제
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, off, "\x1b[?1002l"));
 }
 
 test "재접속 루프(실행): 255가 아니면 재시도하지 않는다" {

@@ -1164,15 +1164,34 @@ pub fn appendSidebarSearchRow(
     row: u16,
     cols: u16,
     muted: terminal.Color,
+    /// 지금까지 친 것(확정 + IME 조합). 비어 있으면 placeholder 를 그린다.
+    query: []const u8,
+    /// 활성 색으로 그릴 글자 색. 검색이 포커스일 때 placeholder 와 구분된다.
+    typed: terminal.Color,
+    /// 캐럿을 그리나(포커스일 때만).
+    caret: bool,
+    /// grapheme cluster 본체를 싣는 곳 — 호출자가 `DrawList.grapheme_pool` 로 넘긴다(`appendCluster` doc).
+    pool: *std.ArrayList(u32),
 ) !void {
     if (cols < sidebar_header_min_cols) return;
     try cells.append(allocator, .{ .row = row, .col = sidebar_search_icon_col, .codepoint = icons.codepoint(.search), .width = 2, .style = .{ .foreground = muted } });
-    const placeholder = "Search";
     var col: u16 = sidebar_search_text_col;
-    for (placeholder) |ch| {
-        if (col >= cols) break;
-        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
-        col += 1;
+    if (query.len == 0) {
+        const placeholder = "Search";
+        for (placeholder) |ch| {
+            if (col >= cols) break;
+            try cells.append(allocator, .{ .row = row, .col = col, .codepoint = ch, .style = .{ .foreground = muted } });
+            col += 1;
+        }
+    } else {
+        // **cluster 경로에 위임한다**(CG1). 코드포인트로 순회해 셀을 만들면 NFD 한글이
+        // "ㅅㅡㅋㅡ리ㄴㅅㅑㅅ" 으로, `café` 가 `cafe´` 로 나온다 — 실제 제보가 그것이고, 경계
+        // 테스트(`chrome_text_clusters`)가 이 자리를 정확히 잡았다. 폭 계산도 그쪽이 소유한다.
+        col = try appendEllipsizedTitle(allocator, cells, pool, query, row, col, cols, .{ .foreground = typed }, false, .head);
+    }
+    // **캐럿은 글자 뒤에 선다.** `OverlayInput` 은 끝-caret 전용이라(그 파일 머리말) 자리가 하나다.
+    if (caret and col < cols) {
+        try cells.append(allocator, .{ .row = row, .col = col, .codepoint = '_', .style = .{ .foreground = typed } });
     }
 }
 
@@ -1215,7 +1234,10 @@ test "검색 줄은 🔍 와 placeholder 를 낸다 — 밴드가 .search 라 �
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     defer cells.deinit(allocator);
     const muted: terminal.Color = .{ .rgb = .{ .r = 9, .g = 9, .b = 9 } };
-    try appendSidebarSearchRow(allocator, &cells, 1, 20, muted);
+    const plain: terminal.Color = .{ .rgb = .{ .r = 200, .g = 200, .b = 200 } };
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+    try appendSidebarSearchRow(allocator, &cells, 1, 20, muted, "", plain, false, &pool);
     try std.testing.expectEqual(icons.codepoint(.search), cells.items[0].codepoint);
     try std.testing.expectEqual(sidebar_search_icon_col, cells.items[0].col);
     try std.testing.expectEqual(@as(u21, 'S'), cells.items[1].codepoint);
@@ -1225,10 +1247,46 @@ test "검색 줄은 🔍 와 placeholder 를 낸다 — 밴드가 .search 라 �
     try std.testing.expect(!isSidebarHeaderIcon(icons.codepoint(.search)));
 }
 
+test "검색어를 치면 placeholder 대신 그 글자가 나오고 캐럿이 뒤에 선다 (W8.15)" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    const muted: terminal.Color = .{ .rgb = .{ .r = 9, .g = 9, .b = 9 } };
+    const typed: terminal.Color = .{ .rgb = .{ .r = 250, .g = 250, .b = 250 } };
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+    try appendSidebarSearchRow(allocator, &cells, 1, 20, muted, "ab", typed, true, &pool);
+    // 🔍 · a · b · 캐럿
+    try std.testing.expectEqual(@as(usize, 4), cells.items.len);
+    try std.testing.expectEqual(@as(u21, 'a'), cells.items[1].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), cells.items[2].codepoint);
+    try std.testing.expectEqual(cells.items[2].col + 1, cells.items[3].col);
+    // **placeholder 색이 아니다** — 친 글자와 안 친 자리가 같은 색이면 화면이 거짓말한다.
+    try std.testing.expectEqual(typed.rgb.r, cells.items[1].style.foreground.rgb.r);
+}
+
+test "한글 검색어는 두 칸을 먹고 캐럿이 그만큼 밀린다 — 코드포인트 수로 세면 글자 중간에 박힌다 (W8.15)" {
+    const allocator = std.testing.allocator;
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    defer cells.deinit(allocator);
+    const c: terminal.Color = .{ .rgb = .{ .r = 1, .g = 1, .b = 1 } };
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+    try appendSidebarSearchRow(allocator, &cells, 1, 20, c, "가나", c, true, &pool);
+    try std.testing.expectEqual(@as(usize, 4), cells.items.len);
+    try std.testing.expectEqual(@as(u8, 2), cells.items[1].width);
+    try std.testing.expectEqual(cells.items[1].col + 2, cells.items[2].col);
+    // 캐럿은 두 글자 **네 칸** 뒤다.
+    try std.testing.expectEqual(cells.items[1].col + 4, cells.items[3].col);
+}
+
 test "좁으면 검색 줄도 안 낸다 — 아이콘 줄과 같은 문턱" {
     const allocator = std.testing.allocator;
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     defer cells.deinit(allocator);
-    try appendSidebarSearchRow(allocator, &cells, 1, sidebar_header_min_cols - 1, .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } });
+    const c0: terminal.Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
+    var pool: std.ArrayList(u32) = .empty;
+    defer pool.deinit(allocator);
+    try appendSidebarSearchRow(allocator, &cells, 1, sidebar_header_min_cols - 1, c0, "", c0, false, &pool);
     try std.testing.expectEqual(@as(usize, 0), cells.items.len);
 }

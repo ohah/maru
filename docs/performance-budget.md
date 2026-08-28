@@ -221,6 +221,27 @@ screen projector 계열 exact-zero와 함께 기록했다. 100 runtime 중 한 t
 연결된 stream producer 3회, runtime-shared materialization 1회, stream별 core-lock 3회였으며 sampler failure는 0이었다.
 이 수치는 환경별 성능 상한을 완화하지 않으며 exact-schema validator가 구조 counter와 함께 판정한다.
 
+## P4 E3c client idle-pump 예산
+
+이 예산은 위 E3a/E3b host PID 측정을 GUI client 비용으로 재해석하지 않는다. 별도 ReleaseFast client process가 실제 독립
+host에 generation-backed `RemoteTermBackend` runtime 1·10·15·100개를 붙이고, initial screen/metadata 수렴 뒤 정확한 60회
+frame turn을 실행한다. `proc_pid_rusage:RUSAGE_INFO_V4`의 client user/system CPU 전후값과 제품 경로 counter를 하나의
+strict-schema artifact에 남긴다. `std.time.Timer` 벽시계만 재거나 legacy `RemoteRuntime` fixture, fake drain hook,
+host PID CPU를 대신 쓰면 이 gate를 충족하지 않는다.
+
+| workload | RED measurement gate |
+| --- | --- |
+| 1·10·15 runtime, 60 idle frames | frame=60; selected owner=`runtime_count * 60`; applied metadata/screen/ended=0; `pumpDelta`, timestamp seal, registry visit, socket read와 client CPU를 raw 기록 |
+| 100 runtime, 60 idle frames | selected owner=`max_owners_per_frame * 60`; 모든 runtime이 round-robin에서 최소 한 번 선택; applied event=0; counter와 client CPU raw 기록 |
+| 100 runtime 중 한 target marker | target screen output event exact 1 이상, sibling output event=0; marker delivery가 기존 median 10ms·tail 20ms를 지킴 |
+| cleanup | host/runtime/client child 전부 reap, fd/socket/directory residue 0, 계측 counter owner 해제 뒤 재사용 0 |
+
+첫 슬라이스의 CPU 값은 **진단 baseline**이지 최종 hard cap이 아니다. 구조 수정 전 RED artifact에서 호출별 비용과 실제 runner
+분산을 얻은 뒤 같은 runner의 수정 후 표본으로 hard cap을 정한다. 다만 counter 정합은 처음부터 hard gate다: timestamp seal과
+registry visit은 실제 발생 횟수 그대로 각각 기록해야 하며, 둘 중 하나를 다른 값으로 추정하거나 합산해서는 안 된다.
+최적화 완료 판정은 idle에서 불필요한 authority/transport 작업이 구조적으로 0이거나 명시적으로 정한 bounded wake cadence만큼이고,
+active marker latency가 후퇴하지 않으며 위 cleanup이 모두 성립할 때만 가능하다.
+
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
 [control-plane-protocol.md §4.4](control-plane-protocol.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.

@@ -462,10 +462,12 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
   `workspaceChanged` 가 덮는 자리였으며 나머지(`detachTabForMove`·`moveWorkspaceToSession`)는 transaction
   **진행 중**이라 위 규율을 어겼다. 원인은 착수 시점에 플랫폼 쪽 현재 상태를 다시 확인하지 않은 것이다.
 
-**쓰기 소유자는 Zig 다(2026-08-25 확정).** 지금은 Swift 가 창을 돌며 창별 블록을 ABI 로 받아 헤더 아래로
-이어 붙이고 파일에 쓴다. 그 조립·쓰기를 플랫폼에 두면 **Windows·Linux 가 같은 것을 다시 짜야 한다** — 그리고
-그건 「어느 창이 있었나」를 파일로 옮기는, 플랫폼과 무관한 일이다. 직렬화(`session/workspace.zig`)가 이미
-공용 Zig 인 것과 같은 이유로 조립·쓰기도 Zig 가 갖는다.
+**쓰기 소유자는 Zig 다(2026-08-25 확정 — 2026-08-28 기준 checkpoint 경로는 그렇게 되어 있다).** 원자적
+쓰기는 `maru_macos_workspace_checkpoint_publish`/`_publish_final` → `platform/macos/workspace_checkpoint_file.zig`
+가 한다. 플랫폼이 하는 것은 **창별 블록 캡처와 이어 붙이기**(`captureWorkspaceSnapshot`)까지다. 그 조립까지
+플랫폼에 두면 **Windows·Linux 가 같은 것을 다시 짜야 한다** — 그건 「어느 창이 있었나」를 파일로 옮기는,
+플랫폼과 무관한 일이다. 직렬화(`session/workspace.zig`)가 이미 공용 Zig 인 것과 같은 이유로 남은 조립도
+Zig 가 가져갈 자리다.
 
 **그래도 플랫폼에 남는 것이 있다 — 둘을 갈라 둔다.**
 
@@ -502,8 +504,8 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
   transaction 의 성공 꼬리에서만** 부른다 — 진행 중에 부르면 반쯤 바뀐 배치가 발행된다.
 - **구동**: `maru_macos_workspace_checkpoint_{arm,tick,quit_requested,capture_completed,write_completed,mark_*}`
   와 Swift 의 effect 루프. 디바운스 500ms, 재시도 1s → 30s.
-- **저장**: `captureWorkspaceSnapshot(useTerminationKeyWindow:publishedOnly:)`. 창 순회·유일성 검증·`.bak`·
-  원자적 쓰기 정책은 종료 경로와 **같은 것을 쓴다**.
+- **저장**: 캡처·조립은 `captureWorkspaceSnapshot(useTerminationKeyWindow:publishedOnly:)`(Swift), 원자적
+  쓰기는 `maru_macos_workspace_checkpoint_publish`/`_publish_final`(Zig). 종료 경로와 **같은 것을 쓴다**.
 - **완료 보고**: 성패가 `capture_completed`/`write_completed` 로 coordinator 에 돌아간다. 이게 없으면 재시도·
   백오프가 죽어 coordinator 가 **디바운서로만** 쓰인다(그럴 거면 타이머면 된다).
 

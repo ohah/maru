@@ -11952,8 +11952,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3520,
-        .ReleaseFast => 3504,
+        .Debug => 3536,
+        .ReleaseFast => 3520,
         else => error.SkipZigTest,
     };
 }
@@ -15299,30 +15299,30 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
         .macos => switch (builtin.mode) {
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
-            .Debug => 11344,
-            .ReleaseFast => 11280,
+            .Debug => 11360,
+            .ReleaseFast => 11296,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
         // (session_host.zig `if (builtin.os.tag == .macos)`) linux 로는 이 파일이 아예 컴파일되지 않는다.
         // 그래서 `process_identity` 를 더하면서도 손대지 않았다 — 잴 수 없는 자리에 숫자를 지어 넣지 않는다.
         .linux => switch (builtin.mode) {
-            .Debug => 11312,
-            .ReleaseFast => 11264,
+            .Debug => 11328,
+            .ReleaseFast => 11280,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8624,
-            .ReleaseFast => 8560,
+            .Debug => 8640,
+            .ReleaseFast => 8576,
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
         .linux => switch (builtin.mode) {
-            .Debug => 8592,
-            .ReleaseFast => 8544,
+            .Debug => 8608,
+            .ReleaseFast => 8560,
             else => unreachable,
         },
         else => unreachable,
@@ -18253,8 +18253,8 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3472,
-        .ReleaseFast => 3456,
+        .Debug => 3488,
+        .ReleaseFast => 3472,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
@@ -18262,16 +18262,16 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
         .macos => switch (builtin.mode) {
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
-            .Debug => 11344,
-            .ReleaseFast => 11280,
+            .Debug => 11360,
+            .ReleaseFast => 11296,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
         // (session_host.zig `if (builtin.os.tag == .macos)`) linux 로는 이 파일이 아예 컴파일되지 않는다.
         // 그래서 `process_identity` 를 더하면서도 손대지 않았다 — 잴 수 없는 자리에 숫자를 지어 넣지 않는다.
         .linux => switch (builtin.mode) {
-            .Debug => 11312,
-            .ReleaseFast => 11264,
+            .Debug => 11328,
+            .ReleaseFast => 11280,
             else => unreachable,
         },
         else => unreachable,

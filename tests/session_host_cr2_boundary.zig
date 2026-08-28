@@ -71,10 +71,10 @@ test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 �
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
     // 네 값은 `RemoteRuntime` 이 커질 때마다 함께 움직인다. macOS 둘은 **실측**이고, linux 둘은 이
     // 모듈이 macOS 전용이라(session_host.zig 배럴) 이 트리에서 컴파일되지 않아 잴 수 없다.
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11344,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11360,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11296,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11328,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11280,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11312,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11264,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -841,8 +841,8 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
     );
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "pub const ReconnectResidentLedger"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn reconnectCandidateResidentBytes() !usize"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3520,"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3504,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3536,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3520,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "else => error.SkipZigTest,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e3a1"));
     const e3a_tests = between(

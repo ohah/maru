@@ -16,6 +16,9 @@ const screen_stream = @import("screen_stream.zig");
 const Run = screen_stream.Run;
 
 /// 다중 청크 이미지 재조립 총량 절대 상한(리뷰 #8). 선언 w*h*bpp가 이보다 크거나 오버플로면 이 값으로 클램프한다.
+///
+/// **소비자가 정할 수 있어야 한다.** 이 값은 데스크톱 예산이고, 폰에서 그대로 쓰면 손상된 delta
+/// 하나가 앱을 통째로 죽인다(S11-5). 그래서 기본값은 여기 두되 조립기마다 낮출 수 있게 한다.
 const max_reassembled_image: usize = 512 * 1024 * 1024; // 512 MiB
 
 pub const ApplyError = screen_stream.DecodeError || error{
@@ -93,12 +96,21 @@ pub const ScreenAssembler = struct {
     scrollback_len: u32 = 0,
     view_offset: u32 = 0,
 
+    /// 이 조립기의 이미지 재조립 상한. 기본은 데스크톱 예산이고 소비자가 낮출 수 있다.
+    image_cap: usize = max_reassembled_image,
+
     pub fn init(allocator: std.mem.Allocator) ScreenAssembler {
         return .{ .allocator = allocator };
     }
 
     pub fn initForCodec(allocator: std.mem.Allocator, expected_codec_version: u16) ScreenAssembler {
         return .{ .allocator = allocator, .expected_codec_version = expected_codec_version };
+    }
+
+    /// 이미지 재조립 상한을 **이 조립기에 한해** 낮춘다. 폰은 데스크톱 예산(512 MiB)을 못 든다 —
+    /// 손상되거나 악의적인 delta 하나가 앱을 죽인다. 기본보다 큰 값은 받지 않는다.
+    pub fn limitReassembledImage(self: *ScreenAssembler, cap: usize) void {
+        self.image_cap = @min(cap, max_reassembled_image);
     }
 
     /// CR4 staged reconnect만 호출한다. 일반 old-host rendering은 sequence=0 compatibility를
@@ -159,10 +171,11 @@ pub const ScreenAssembler = struct {
 
     /// 다중 청크 재조립 pending 버퍼 상한(리뷰 #8, DoS 방어): 선언된 w*h*bpp(오버플로/과대 시 절대 상한)를 넘으면 폐기한다.
     /// per-record 1 MiB cap은 청크 하나만 막고 재조립 총량은 안 막으므로, 손상/악성 delta가 큰 chunk_count로 GB를 누적하는 걸 차단.
-    fn reassembleCap(width: u32, height: u32, bpp: u8) usize {
-        const wh = std.math.mul(u64, width, height) catch return max_reassembled_image;
-        const total = std.math.mul(u64, wh, bpp) catch return max_reassembled_image;
-        return @intCast(@min(total, @as(u64, max_reassembled_image)));
+    fn reassembleCap(self: *const ScreenAssembler, width: u32, height: u32, bpp: u8) usize {
+        const limit = self.image_cap;
+        const wh = std.math.mul(u64, width, height) catch return limit;
+        const total = std.math.mul(u64, wh, bpp) catch return limit;
+        return @intCast(@min(total, @as(u64, limit)));
     }
 
     /// image_blob record 하나를 재조립한다. 단일 청크(count<=1)면 바로 저장, 다중 청크면 chunk_index 순서대로 누적하고
@@ -183,7 +196,7 @@ pub const ScreenAssembler = struct {
                 pend.buf.deinit(self.allocator);
                 return error.OutOfMemory;
             };
-            if (pend.buf.items.len > reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 재조립 폐기.
+            if (pend.buf.items.len > self.reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 재조립 폐기.
                 pend.buf.deinit(self.allocator);
                 return;
             }
@@ -200,7 +213,7 @@ pub const ScreenAssembler = struct {
                 return;
             }
             p.buf.appendSlice(self.allocator, blob.pixels) catch return error.OutOfMemory;
-            if (p.buf.items.len > reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 폐기.
+            if (p.buf.items.len > self.reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 폐기.
                 p.buf.deinit(self.allocator);
                 _ = self.pending_images.remove(blob.image_id);
                 return;

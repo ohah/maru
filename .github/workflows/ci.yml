@@ -418,6 +418,10 @@ jobs:
       # 띄운다. 두 실행 모두 셸 child 0이어야 하므로 unit의 restoreSpawn sentinel보다 강한 제품 경계다.
       - name: durable tombstone 다회 재실행 스모크
         run: mise run macos-session-host-r1-tombstone-smoke
+      # 실제 AppKit terminateLater 경로에서 final checkpoint 성공과 권한 실패를 모두 실행한다.
+      # 성공은 앱 종료, 실패는 앱과 이전 완전본 보존이며 각 reply가 exact once여야 한다.
+      - name: checkpoint Quit 성공·취소 스모크
+        run: mise run macos-session-host-c4-quit-cancel-smoke
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)

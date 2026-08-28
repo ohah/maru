@@ -53,21 +53,30 @@ R5 는 **정상 종료 시점 한 번**만 저장한다(`saveWorkspace()` 호출
 「incremental manifest checkpoint 가 없어 최신 layout 자동 재연결은 아직 완료 계약이 아니다」(§2)가 이 상태다.
 
 순수 층은 이미 둘 다 있다 — P4 C1 coordinator(dirty 세대·debounce/retry·final Quit)와 C2 원자적 발행 leaf.
-**dirty 신호까지 배선됐고**(P4 C3-1), 남은 것은 구동이다.
 
-- **R7-0 게이트 — 이것이 먼저다.** 복원이 끝나기 전·종료가 시작된 뒤에는 checkpoint 를 돌리지 않는다.
-  🔴 복원은 창을 차례로 만들므로, 그 중간에 저장이 뛰면 **아직 안 만들어진 창이 빠진 스냅샷**을 쓴다 —
-  기존 가드(캡처 실패 시 전체 포기·유일성 검증)는 「아직 없는 창」을 못 막는다. 즉 게이트가 없으면 이
-  기능이 지키려던 것을 이 기능이 부순다. 선례가 이미 있다(`tickAppSession()`이 deferred 세션을 건너뛴다).
-- **R7-1 `TerminationWindowPolicy` 전제 확장.** 그 판정은 「종료 경로는 창을 먼저 숨기므로 `isKeyWindow`가
-  전부 false」를 전제로 쓰였다. 세션 중에는 우연히 맞는데, 우연히 맞는 것은 계약이 아니다 — 전제를 넓혀
-  명시하고 판정자로 고정한다.
-- **R7-2 구동 + 완료 보고(한 슬라이스).** Swift 가 tick 에서 coordinator 에게 묻고, 「지금 저장」이면
-  **기존 `saveWorkspace()` 를 그대로** 부른다(저장 로직 무변경 → 회귀 위험 최소, 사용자 값은 즉시).
-  ⚠️ 성패 반환을 **함께** 해야 한다 — 지금은 `Void` 에 오류를 삼켜 `writeCompleted` 에 넘길 값이 없고,
-  그러면 coordinator 가 디바운서로만 쓰인다(그럴 거면 타이머면 된다).
-- **R7-3 비용 실측 → 디바운스 주기 확정.** 한 번의 저장은 창 전부 직렬화 + 전체 스냅샷 재파싱 + 쓰기다.
-  **재기 전에는 주기를 숫자로 못 박지 않는다.**
+**✅ 구동까지 구현돼 있다(2026-08-28 확인). 아래 R7-0~R7-3 은 「할 일」이 아니라 「이미 되어 있는 것」이다.**
+
+이 절은 원래 R7-0~R7-3 을 남은 작업으로 적고 있었다. **틀렸다** — 계획 문서와 백로그만 보고 세운 것이고,
+착수 시점에 `MaruAppHost.swift`·`app_host_abi.zig` 의 현재 상태를 다시 확인하지 않았다. 실제로는 신호부터
+구동·완료 보고·최종 발행까지 전부 있다. 같은 실수를 막으려고 **어디에 있는지**를 적어 둔다.
+
+| 원래 적었던 「할 일」 | 실제 구현 |
+|---|---|
+| **R7-0 게이트**(복원 중엔 저장 금지) | `armWorkspaceCheckpoint(initialDirty:)` 가 `windows.allSatisfy { $0.appSession != nil }` 로 막는다 — 「staged Window 가 하나라도 남아 있으면 아무 세션도 publish 하지 않는다」. 세션마다는 `workspace_checkpoint_mutations_enabled` 가 arm 될 때 켜지므로, 복원·빌드 단계의 변경은 애초에 coordinator 에 닿지 않는다. |
+| **R7-1 `TerminationWindowPolicy` 전제** | 넓힐 것이 없다. 파라미터 문서가 `currentKeyIndex` 를 「종료가 아닌 경로의 판정 근거」로 이미 적고, `tests/macos_termination_window_policy.swift` 가 그 경로를 고정한다(`capturedKeyIndex: nil, currentKeyIndex: 3` → 3). |
+| **R7-2 구동 + 완료 보고** | ABI `maru_macos_workspace_checkpoint_{arm,tick,quit_requested,capture_completed,write_completed,mark_*}` 와 Swift 의 effect 루프. 저장은 `captureWorkspaceSnapshot(useTerminationKeyWindow:publishedOnly:)` 가 하고, 성패가 `capture_completed`/`write_completed` 로 coordinator 에 되돌아간다 — 걱정했던 「`Void` 라 성패를 못 넘긴다」는 해소돼 있다. |
+| **R7-3 디바운스 주기** | `arm` 이 `debounce_ns = 500ms`, `retry_initial_ns = 1s`, `retry_max_ns = 30s` 로 정한다. |
+
+신호는 `AppSession.workspaceChanged(kind)` 하나로 들어가고, `kind` 가 무엇이 바뀌었는지 구분한다
+(`topology`/`selection`/`ordering`/`appearance`/`dock`/`naming`/`scm_base`/`runtime_binding`/`persisted_surface`/
+`explorer_roots`). 호출부는 **manifest 에 보이는 transaction 의 성공 꼬리에서만** 부른다 — 진행 중에 부르면
+반쯤 바뀐 배치가 발행된다.
+
+⚠️ **P4 C3-1(`noteWorkspaceMutation`)은 되돌렸다.** 위 체계와 별개로 앱 전역 coordinator 를 하나 더 만들고
+5 개 호출부를 달았는데, 그 두 번째 coordinator 는 아무도 `tick` 을 몰지 않아 dirty 만 세우고 끝났다. 게다가
+호출 지점이 `createTab`/`closeTab`/`moveTab` 은 이미 `workspaceChanged` 가 덮는 자리였고,
+`detachTabForMove`/`moveWorkspaceToSession` 은 **transaction 진행 중**이라 위 규율을 어겼다.
+
 - **후속(지금 아님)**: 정책·쓰기를 Zig 로 이관(플랫폼마다 다시 짜면 아까운 것은 「조립」이 아니라 **정책** —
   전체 포기·검증 순서·`.bak`), 원자적 교체 seam(POSIX `rename` vs Windows `ReplaceFile`)은 **Windows 가 실제로
   필요할 때**. 지금 옮기면 POSIX 전용 «공용» 모듈이 된다.

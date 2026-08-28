@@ -446,12 +446,21 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
 살아 있고 GUI만 비정상 종료한 경우**의 layout orphan을 줄이는 다음 계약만 추가한다.
 
 - workspace 생성/삭제, split, Term 이동/닫기, cross-window 이동, runtime bind 변경은 manifest dirty를 세운다.
-  **구현 상태(2026-08-25): 그 신호까지 배선됐다.** `app_session.noteWorkspaceMutation()` 이 P4 C1 순수
-  coordinator(`session/workspace_checkpoint.zig`)의 `mutation()` 을 부르고, 위 목록의 진입점(`createTab`·
-  `closeTab`·`moveTab`·`detachTabForMove`·`moveWorkspaceToSession`)이 그것을 부른다. coordinator 는 **앱
-  전역**이다 — manifest 는 여러 창의 블록을 한 파일로 모은 것이라 창마다 두면 같은 파일을 두 번 쓴다.
-  ⚠️ **구동은 아직이다**: `tick`/capture/write 를 이 슬라이스는 몰지 않는다. 즉 **dirty 는 서지만 파일은
-  아직 정상 종료 시점에만 쓰인다** — 강제 종료 뒤 최신 layout 자동 재연결은 여전히 완료 계약이 아니다(§2).
+  **구현 상태(2026-08-28): 신호부터 구동까지 배선돼 있다.** 신호는 `AppSession.workspaceChanged(kind)` 가
+  받아 앱 전역 coordinator(`session/workspace_checkpoint.zig`)의 `markChanged()` 로 넘긴다 — manifest 는 여러
+  창의 블록을 한 파일로 모은 것이라 창마다 두면 같은 파일을 두 번 쓴다. `kind` 가 무엇이 바뀌었는지 구분한다
+  (`topology`/`selection`/`ordering`/`appearance`/`dock`/`naming`/`scm_base`/`runtime_binding`/
+  `persisted_surface`/`explorer_roots`). 호출부는 **manifest 에 보이는 transaction 의 성공 꼬리에서만**
+  부른다 — 진행 중에 부르면 반쯤 바뀐 배치가 발행된다.
+  구동은 `maru_macos_workspace_checkpoint_{arm,tick,quit_requested,capture_completed,write_completed,mark_*}`
+  와 Swift 의 effect 루프가 한다(디바운스 500ms·재시도 1s→30s). 복원 중 발행은 `armWorkspaceCheckpoint` 가
+  막는다 — staged Window 가 하나라도 남아 있으면 arm 하지 않고, 세션별 `workspace_checkpoint_mutations_enabled`
+  도 그때 함께 켜므로 복원·빌드 단계의 변경은 애초에 coordinator 에 닿지 않는다.
+
+  ⚠️ **P4 C3-1(`noteWorkspaceMutation`)은 되돌렸다(2026-08-28).** 위 체계와 별개로 두 번째 앱 전역
+  coordinator 를 만들었는데 아무도 `tick` 을 몰지 않아 dirty 만 세우고 끝났고, 호출 지점도 절반은 이미
+  `workspaceChanged` 가 덮는 자리였으며 나머지(`detachTabForMove`·`moveWorkspaceToSession`)는 transaction
+  **진행 중**이라 위 규율을 어겼다. 원인은 착수 시점에 플랫폼 쪽 현재 상태를 다시 확인하지 않은 것이다.
 
 **쓰기 소유자는 Zig 다(2026-08-25 확정).** 지금은 Swift 가 창을 돌며 창별 블록을 ABI 로 받아 헤더 아래로
 이어 붙이고 파일에 쓴다. 그 조립·쓰기를 플랫폼에 두면 **Windows·Linux 가 같은 것을 다시 짜야 한다** — 그리고
@@ -475,7 +484,7 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
 수명 문제까지 떠안는다. 대신 플랫폼이 **밀어 넣는다**: tick 이 「지금 캡처」를 돌려주면 그때 창을 돌며
 블록을 밀고 publish 한다.
 
-#### 구동 계약 (목표 설계 — 아직 구현 안 됨)
+#### 구동 계약 (구현됨 — 2026-08-28 확인)
 
 **무엇을 얻고 무엇은 이미 안전한지부터 적는다.** 강제 종료·크래시로 checkpoint 가 낡으면 잃는 것은
 **배치(창·탭·split·위치)와 자동 재연결**이다. 그 사이 만든 live runtime 자체는 **안 잃는다** — 위 §7-8 이
@@ -483,50 +492,31 @@ host crash·host 강제 종료·재부팅·전원 손실 뒤 동일 runtime 복�
 이미 덮는다. 그래서 이 작업은 **데이터 손실을 막는 일이 아니라, 「수동 복구」를 「자동 복원」으로 바꾸는
 일**이다(§2 의 표현도 「최신 layout **자동** 재연결」이다). 우선순위를 매길 때 그 크기로 다뤄야 한다.
 
-⚠️ **시계는 한 출처여야 한다.** `mutation()` 과 `tick()` 이 서로 다른 시계(Zig 단조 시계 vs 플랫폼이 넘긴
+⚠️ **시계는 한 출처여야 한다.** `markChanged()` 와 `tick()` 이 서로 다른 시계(Zig 단조 시계 vs 플랫폼이 넘긴
 타임스탬프)를 받으면 debounce·retry 창이 뒤틀린다 — 두 값의 기준점이 다르면 「방금 바뀌었다」가 과거로도
-미래로도 보인다. **Zig 가 양쪽에서 자기 단조 시계를 읽는다**; 플랫폼은 「지금 tick 하라」만 알린다.
+미래로도 보인다.
 
-**값이 먼저 나오는 순서로 간다.** `saveWorkspace()`(macOS)는 이미 창 순회·유일성 검증·`.bak`·원자적 쓰기를
-**다 한다** — 종료 시점 한 곳에서만 불릴 뿐이다. 그래서 첫 단계는 그 함수를 다시 짜는 것이 아니라 **더 자주
-부르는 것**이다. 저장 로직을 안 건드리므로 회귀 위험이 가장 작고, 사용자 값(강제 종료해도 배치가 남는다)은
-즉시 나온다. 정책·쓰기의 Zig 이관은 그 뒤다.
+**구현 배치는 이렇다.**
 
-🔴 **그러나 게이트가 먼저다 — 없으면 이 기능이 지키려던 것을 이 기능이 부순다.**
+- **신호**: `AppSession.workspaceChanged(kind)` → 앱 전역 coordinator 의 `markChanged()`. **manifest 에 보이는
+  transaction 의 성공 꼬리에서만** 부른다 — 진행 중에 부르면 반쯤 바뀐 배치가 발행된다.
+- **구동**: `maru_macos_workspace_checkpoint_{arm,tick,quit_requested,capture_completed,write_completed,mark_*}`
+  와 Swift 의 effect 루프. 디바운스 500ms, 재시도 1s → 30s.
+- **저장**: `captureWorkspaceSnapshot(useTerminationKeyWindow:publishedOnly:)`. 창 순회·유일성 검증·`.bak`·
+  원자적 쓰기 정책은 종료 경로와 **같은 것을 쓴다**.
+- **완료 보고**: 성패가 `capture_completed`/`write_completed` 로 coordinator 에 돌아간다. 이게 없으면 재시도·
+  백오프가 죽어 coordinator 가 **디바운서로만** 쓰인다(그럴 거면 타이머면 된다).
 
-- **시작 복원이 끝나기 전에는 checkpoint 를 돌리지 않는다.** 복원은 창을 차례로 만들므로(deferred surface →
-  `applyWorkspaceWindow`), 그 중간에 저장이 뛰면 **아직 안 만들어진 창이 빠진 스냅샷**이 쓰인다. 기존 가드는
-  «캡처 실패»를 막지 «아직 없는 창»은 못 막고, 블록이 하나라도 있으면 유일성 검증도 통과한다. 즉 **복원 중
-  저장은 창을 지우는 경로다.** 같은 이유로 `tickAppSession()`이 deferred 세션에서 이미 건너뛴다.
-- **종료가 시작된 뒤에도 돌리지 않는다.** 종료 경로의 저장 직전에 중복 저장이 끼면 `.bak` 정책과 순서가
-  얽힌다.
-
-**완료를 보고해야 coordinator 가 값을 한다.** `saveWorkspace()`는 지금 `Void`를 돌려주고 오류를 삼킨다
-(`try?`·`guard … else { return }`). 그대로 두면 `captureCompleted`/`writeCompleted`에 넘길 값이 없어 재시도·
-백오프가 죽고, coordinator 는 **디바운서로만** 쓰이게 된다(그럴 거면 타이머면 된다). 그래서 성패 반환과
-tick 배선은 **한 슬라이스**여야 한다.
-
-**`TerminationWindowPolicy`의 전제를 넓혀야 한다.** 그 판정은 「종료 경로는 창을 먼저 숨기므로 `isKeyWindow`
-가 전부 false」를 전제로 쓰였다. 세션 중에는 `terminationKeyWindow`가 비어 `currentKeyIndex`로 떨어지는데,
-그때는 창이 안 숨겨져 있어 **우연히 맞는다**. 우연히 맞는 것은 계약이 아니므로, 세션 중 호출을 허용하려면
-그 전제를 명시하고 판정자로 고정한다.
-
-**디바운스 주기는 재고 정한다.** 한 번의 저장은 창 전부 직렬화 + 전체 스냅샷 재파싱 + 쓰기다. 그 비용을
-아직 안 쟀으므로 주기를 숫자로 못 박지 않는다 — 재기 전에는 임의값을 계약에 넣지 않는다.
+🔴 **복원 중 발행 금지가 이 설계에서 가장 중요한 가드다 — 없으면 이 기능이 지키려던 것을 이 기능이 부순다.**
+복원은 창을 차례로 만들므로(deferred surface → `applyWorkspaceWindow`), 그 중간에 저장이 뛰면 **아직 안
+만들어진 창이 빠진 스냅샷**이 쓰인다. 기존 가드는 «캡처 실패»를 막지 «아직 없는 창»은 못 막고, 블록이 하나라도
+있으면 유일성 검증도 통과한다. 즉 **복원 중 저장은 창을 지우는 경로다.**
+이것을 `armWorkspaceCheckpoint` 가 막는다 — staged Window 가 하나라도 남아 있으면(`windows.allSatisfy {
+$0.appSession != nil }` 불성립) arm 하지 않고, 세션별 `workspace_checkpoint_mutations_enabled` 도 그때 함께
+켜므로 복원·빌드 단계의 변경은 애초에 coordinator 에 닿지 않는다. 같은 이유로 `tickAppSession()` 이 deferred
+세션을 건너뛴다.
 
 **원자적 교체 seam 은 Windows 가 실제로 필요할 때 만든다.** 지금 옮기면 POSIX 전용 «공용» 모듈이 된다.
-  회귀 gate 는 `test-provider-session-removal` 의 「P4: 배치를 바꾸는 사건이 checkpoint dirty 를 세운다」이며,
-  한 사건은 제품 경로로 태우고 나머지는 **소스로** 못 박는다(함수마다 UI 를 만들다 깨지면 판정자가 «배선» 이
-  아니라 «픽스처» 를 재게 된다). ⚠️ 그 소스 판정은 **줄 단위**로 본다 — 글자만 찾으면 주석 처리된 호출도
-  통과한다(실제로 그렇게 썼다가 뮤테이션이 «안 잡힘» 으로 드러났다).
-- dirty manifest는 짧게 debounce한 뒤 같은 디렉터리의 temp write + atomic replace로 전체 파일을 교체한다. 전원 손실
-  durability를 주장하지 않으므로 file/directory `fsync`와 별도 journal DB는 이 단계의 선결이 아니다.
-- 구조 mutation과 GUI process 종료가 경합하면 이전 또는 새 완전본만 읽고 반쪽 파일은 사용하지 않는다.
-- background checkpoint 실패는 기존 완전본을 유지하고 typed failure를 지속 표시한다. 정상 Quit의 마지막 checkpoint가
-  실패하면 GUI detach를 시작하지 않고 Quit을 취소한다. 사용자가 명시적으로 `Quit and End All Sessions`를 택한 경우에만
-  runtime 종료 뒤 workspace 갱신 실패를 허용하며, live runtime을 보이지 않는 orphan으로 남기는 선택지는 제공하지 않는다.
-- host는 layout 정책을 적용하지 않는다. 최신 manifest 사본을 발견/attach용으로 읽거나 캐시할 수만 있다.
-- `maru attach --workspace`는 같은 manifest parser를 사용하고 별도 workspace DB를 만들지 않는다.
 
 구체 wire와 손상/하위호환 규칙의 단일 출처는
 [Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire-runtime-handle-구현-durable-tombstone-r1)이다.

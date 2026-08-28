@@ -1377,11 +1377,11 @@ pub fn build(b: *std.Build) void {
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
     // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
     // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 24 = 위 필터 19개 + 이름 없는 test 블록 5개.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=24");
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=23");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이
     // 된다. 통과 수를 함께 못박아 「돌았는가」를 센다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-passed=24");
+    run_provider_no_mutation_tests.addArg("--maru-expect-passed=23");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

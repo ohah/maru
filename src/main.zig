@@ -4089,8 +4089,16 @@ fn closeWinSession(
     _ = sessions.orderedRemove(index);
     _ = tab_ptrs.orderedRemove(index);
     app_window.tabs = tab_ptrs.items;
-    // **활성 탭을 범위 안으로 당긴다** — 마지막을 닫으면 그 번호가 사라진다.
-    if (app_window.active_tab >= sessions.items.len) app_window.active_tab = sessions.items.len - 1;
+    // **활성 탭을 removal 에 맞춰 당긴다.** 번호만 clamp 하면 앞쪽을 닫았을 때 **보고 있던 세션이
+    // 조용히 바뀐다** — 뒤 색인이 하나씩 앞으로 당겨지기 때문이다. 화면은 멀쩡해 보이고 개수 판정도
+    // 초록이라, 이름을 견주는 판정을 넣기 전까지 안 보였다(적대적 검증 1회차: `want=session 5
+    // got=session 6`). 파일 목록에서 이미 같은 함정을 밟았다(W8.14).
+    if (index < app_window.active_tab) {
+        app_window.active_tab -= 1;
+    } else if (app_window.active_tab >= sessions.items.len) {
+        // 닫은 것이 활성이었고 그것이 마지막이면 앞으로 당긴다(그 외에는 같은 번호가 곧 승계자다).
+        app_window.active_tab = sessions.items.len - 1;
+    }
     s.destroy(allocator);
     return .closed;
 }
@@ -4609,6 +4617,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sclose_first_name_len: usize = 0;
     var sclose_active_ok = false;
     var sclose_pump_rebound = false;
+    var sclose_active_want: [24]u8 = undefined;
+    var sclose_active_want_len: usize = 0;
+    var sclose_active_name: [24]u8 = undefined;
+    var sclose_active_name_len: usize = 0;
     var file_closes: usize = 0;
     var session_closes: usize = 0;
     var session_close_busy: usize = 0;
@@ -5870,7 +5882,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **첫 카드가 아니라 둘째를 닫는다** — 첫 것을 닫으면 `pump` 재바인딩이 안 돼도 지나갈 수
         // 있는데, 둘째를 닫으면 그 결함이 안 잡힌다. 그래서 **첫 것을** 닫아 pump 까지 민다.
         // **먼저 맨 위로 되돌린다** — 앞선 단계가 사이드바를 바닥까지 굴려 놨다(§2m.74).
-        if (smoke and spins == 864 and geom.sidebar.w != 0) {
+        if (smoke and spins == 861 and geom.sidebar.w != 0) {
             const ux: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
             const uy: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
             var u: usize = 0;
@@ -5879,6 +5891,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **프롬프트 마크를 먹인다.** 이 기계의 셸은 OSC 133 을 안 내므로 `semantic_state` 가 늘
         // `unknown` 이고, 중립 술어는 그것을 **보수적으로 "실행 중"** 으로 본다(그 함수 doc). 통합된
         // 셸이 idle 에서 내는 바로 그 바이트를 넣어, 닫기의 **성공 갈래**도 실제로 밟는다.
+        // **가운데 세션을 보게 만든다.** 활성이 마지막이면 색인이 밀려도 clamp 가 우연히 같은 것을
+        // 가리켜 판정이 통과한다 — 실측으로 그렇게 한 번 초록이었다.
+        if (smoke and spins == 863 and sessions.items.len >= 6) {
+            var rb5: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr5 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb5);
+            const mm5 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const top5 = maru.chrome.components.sidebar.rowTop(rr5, 4, sidebar_header_h, mm5, sidebar_scroll_px);
+            const cy5: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top5) + @as(i64, @intCast(cell_h / 2)));
+            const cx5: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 3);
+            window.postSyntheticMouse(.moved, cx5, cy5);
+            window.postSyntheticMouse(.left_down, cx5, cy5);
+            window.postSyntheticMouse(.left_up, cx5, cy5);
+        }
         if (smoke and spins == 865 and sessions.items.len >= 2) {
             const s0 = sessions.items[0];
             s0.surface.lockCore(io);
@@ -5891,6 +5916,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             sclose_sessions_before = sessions.items.len;
             sclose_tabs_before = app_window.tabs.len;
             sclose_second_name_len = @min(sessions.items[1].label().len, sclose_second_name.len);
+            // 닫기 **전에** 보고 있던 세션의 이름을 챙긴다(닫은 뒤에 읽으면 이미 바뀐 것을 읽는다).
+            sclose_active_want_len = @min(sessions.items[app_window.active_tab].label().len, sclose_active_want.len);
+            @memcpy(sclose_active_want[0..sclose_active_want_len], sessions.items[app_window.active_tab].label()[0..sclose_active_want_len]);
             @memcpy(sclose_second_name[0..sclose_second_name_len], sessions.items[1].label()[0..sclose_second_name_len]);
             var rb4: [16]maru.chrome.components.sidebar.Row = undefined;
             const rr4 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb4);
@@ -5913,6 +5941,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 메모리를 가리킨다 — 그런데 **아무 증상도 안 났다**(뮤턴트가 크래시도 판정도 안 냈다).
             // 큐 포인터를 견주는 것이 그 use-after-free 를 잡는 유일한 값이다.
             sclose_pump_rebound = sessions.items.len > 0 and pump.queue == sessions.items[0].pump.queue;
+            // **보고 있던 세션이 그대로인가.** 앞쪽을 닫으면 뒤 색인이 하나씩 당겨지는데 활성 번호를
+            // 그대로 두면 **다른 세션을 보게 된다** — 화면은 멀쩡해 보이고 개수 판정도 초록이다.
+            sclose_active_name_len = if (app_window.active_tab < sessions.items.len)
+                @min(sessions.items[app_window.active_tab].label().len, sclose_active_name.len)
+            else
+                0;
+            if (sclose_active_name_len > 0)
+                @memcpy(sclose_active_name[0..sclose_active_name_len], sessions.items[app_window.active_tab].label()[0..sclose_active_name_len]);
         }
         // ── 에이전트 도크 검색 (W8.15 나머지) ──────────────────────────────────────────
         //
@@ -7008,7 +7044,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
                                                 // 그것이 닫혔을 수 있다(포인터로 보므로 값만 바꾸면 된다).
                                                 pump = sessions.items[0].pump;
-                                                active_view = .{ .terminal = app_window.active_tab };
+                                                // **보고 있던 것이 파일이면 그대로 둔다.** 배경
+                                                // 세션 하나를 닫았다고 문서에서 튕겨 나오면 안 된다
+                                                // (적대적 검증 1회차). 터미널을 보고 있었을 때만
+                                                // 번호를 다시 맞춘다 — 그 번호는 방금 당겨졌다.
+                                                if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
                                                 refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                                 sidebar_redraws += 1;
                                                 rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
@@ -8136,7 +8176,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     }
     if (sclose_judgeable) {
         // **탭도 함께 줄어야 한다** — 목록만 줄이고 `app_window.tabs` 를 두면 라우팅이 죽은 표면을 든다.
-        try stdout.print("close_session: sessions {d}->{d} tabs {d}->{d} kept want={s} got={s} closes={d} busy={d} last={d} active_ok={} pump_rebound={} close_session_ok={}\n", .{
+        try stdout.print("close_session: sessions {d}->{d} tabs {d}->{d} kept want={s} got={s} closes={d} busy={d} last={d} active_ok={} pump_rebound={} active want={s} got={s} close_session_ok={}\n", .{
             sclose_sessions_before,
             sclose_sessions_after,
             sclose_tabs_before,
@@ -8148,7 +8188,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             session_close_last,
             sclose_active_ok,
             sclose_pump_rebound,
+            sclose_active_want[0..sclose_active_want_len],
+            sclose_active_name[0..sclose_active_name_len],
             sclose_sessions_after == sclose_sessions_before - 1 and
+                std.mem.eql(u8, sclose_active_want[0..sclose_active_want_len], sclose_active_name[0..sclose_active_name_len]) and
                 sclose_pump_rebound and
                 sclose_tabs_after == sclose_tabs_before - 1 and
                 std.mem.eql(u8, sclose_second_name[0..sclose_second_name_len], sclose_first_name[0..sclose_first_name_len]) and

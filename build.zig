@@ -2891,6 +2891,22 @@ pub fn build(b: *std.Build) void {
     test_mobile_step.dependOn(&run_mobile_control_tests.step);
     const test_mobile_control_step = b.step("test-mobile-control", "Run the phone-side ndjson control client tests only");
     test_mobile_control_step.dependOn(&run_mobile_control_tests.step);
+    // 원격 화면 조립기(S11-5). 컨트롤 축과 **다른 소비자**라 스위트도 나눈다 — 한쪽이 죽어도
+    // 다른 쪽 회귀가 가려지지 않는다.
+    const mobile_screen_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/mobile/mobile_screen.zig"),
+            .target = target,
+            .optimize = optimize,
+            // 화면 코덱을 **서버와 한 벌로** 든다(S11-3 이 그것을 OS 중립 자리로 옮겼다).
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    const run_mobile_screen_tests = b.addRunArtifact(mobile_screen_tests);
+    test_step.dependOn(&run_mobile_screen_tests.step);
+    test_mobile_step.dependOn(&run_mobile_screen_tests.step);
+    const test_mobile_screen_step = b.step("test-mobile-screen", "Run the phone-side remote screen assembler tests only");
+    test_mobile_screen_step.dependOn(&run_mobile_screen_tests.step);
     // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
     // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
     // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.

@@ -919,6 +919,7 @@ pub export fn maru_mobile_term_rows() u32 {
 // 흐름이라 이름도 자리도 따로다** — 합치면 ndjson 파서가 사람 화면을 읽게 된다(계약 §4a).
 
 const control = @import("mobile_control.zig");
+const screen = @import("mobile_screen.zig");
 
 /// 화면이 그릴 세션 목록의 상한. **폰 화면에 그 이상은 안 들어간다** — 넘으면 앞에서부터
 /// 담고(파서가 그렇게 한다) 개수로 드러난다.
@@ -1054,6 +1055,8 @@ pub fn wantControl(next: ControlWant) void {
         else => {},
     }
     if (control_want.eql(next)) return;
+    // 보던 화면이 아니게 됐다 — 그 조립 상태는 여기서 끝난다(죽은 화면을 남기지 않는다).
+    if (control_want == .screen) dropRemoteScreen();
     control_want = next;
     if (control_open.eql(next)) {
         // 이미 그것을 돌리고 있다 — 열 것도 닫을 것도 없다.
@@ -1173,6 +1176,9 @@ pub export fn maru_mobile_take_control_close() c_int {
 /// host 가 컨트롤 채널에서 읽은 바이트를 넣는다. **먹은 만큼**을 돌려준다(0 이면 배압이 아니라
 /// 축이 꺼진 것이다 — 코어와 달리 이 층은 버퍼가 없다).
 pub export fn maru_mobile_control_feed(bytes: [*]const u8, len: usize) usize {
+    // **소비자는 원하는 것이 정한다**(§4a). 화면을 원할 때 그 레코드를 ndjson 파서에 먹이면
+    // 파서가 그것을 잡음으로 세다가 축을 꺼 버린다 — 그러면 목록으로 돌아와도 안 선다.
+    if (control_want == .screen) return feedRemoteScreen(bytes[0..len]);
     var off: usize = 0;
     while (off < len) {
         var consumed: usize = 0;
@@ -1186,6 +1192,42 @@ pub export fn maru_mobile_control_feed(bytes: [*]const u8, len: usize) usize {
         if (step.frame) |frame| absorbFrame(frame);
     }
     return off;
+}
+
+/// 원격 화면 조립기. **컨트롤 축과 다른 소비자**라 자리도 따로 든다(§4a).
+var remote_screen: ?screen.Screen = null;
+
+fn feedRemoteScreen(bytes: []const u8) usize {
+    const s = &(remote_screen orelse blk: {
+        remote_screen = screen.Screen.init(term_allocator);
+        break :blk remote_screen.?;
+    });
+    return s.feed(term_allocator, bytes);
+}
+
+/// 원격 화면을 놓는다. 새 연결이거나 그 화면을 그만 볼 때다 — 남겨 두면 **죽은 세션의 화면을
+/// 살아 있는 것처럼** 보여 준다(목록이 같은 이유로 같은 규칙을 쓴다).
+fn dropRemoteScreen() void {
+    if (remote_screen) |*s| s.deinit(term_allocator);
+    remote_screen = null;
+}
+
+/// 조립된 원격 화면의 상태(0=첫 프레임 대기, 1=선다, 2=껐다). 없으면 0.
+pub export fn maru_mobile_remote_screen_state() u32 {
+    const s = remote_screen orelse return 0;
+    return switch (s.state) {
+        .waiting_first => 0,
+        .ready => 1,
+        .off => 2,
+    };
+}
+
+/// 받은 덩어리 수(진단용). 상위 16비트=snapshot, 하위 16비트=delta.
+pub export fn maru_mobile_remote_screen_frames() u32 {
+    const s = remote_screen orelse return 0;
+    const snap: u32 = @intCast(@min(s.snapshots, 0xFFFF));
+    const delta: u32 = @intCast(@min(s.deltas, 0xFFFF));
+    return (snap << 16) | delta;
 }
 
 fn requestSessions() void {
@@ -1287,6 +1329,7 @@ pub export fn maru_mobile_control_reset() void {
     // 집고 `control_command` 가 0 을 답한다(뜻 없는 열기 한 번 + `control_command_without_want`).
     control_open_req = false;
     control_close_req = false;
+    dropRemoteScreen();
     control_client = .{};
     control_row_count = 0;
     control_req_len = 0;

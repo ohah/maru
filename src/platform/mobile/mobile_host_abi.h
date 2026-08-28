@@ -731,6 +731,14 @@ unsigned int maru_mobile_control_off_reason(void);
 /// **열기가 졌다고 host 가 알린다.** 여는 것은 host 가 하므로(소켓이 그쪽에 있다) 실패도 그쪽만
 /// 안다 — 안 알리면 화면은 이유를 모른 채 기다린다(계약 §4a: 실패하면 그 화면에서 말한다).
 void maru_mobile_control_open_failed(void);
+/// 조립된 **원격 화면**의 상태(0=첫 프레임 대기, 1=선다, 2=껐다). 없으면 0.
+///
+/// 컨트롤 축과 **다른 소비자**다(§4a "소비자도 원하는 것이 정한다") — 화면을 원할 때 오는
+/// 바이트는 ndjson 이 아니라 §8 `MRSS` 프레임이고, 화면 조립기가 읽는다.
+unsigned int maru_mobile_remote_screen_state(void);
+/// 받은 덩어리 수(진단용). 상위 16비트=snapshot, 하위 16비트=delta. 기기에서 "화면이 멈췄다" 를
+/// **안 온다** 와 **와도 안 그린다** 로 가르는 자리다.
+unsigned int maru_mobile_remote_screen_frames(void);
 /// 지금 아는 세션 수.
 unsigned int maru_mobile_control_session_count(void);
 /// 목록을 한 번이라도 받았나. **"세션이 없다" 와 "아직 모른다" 는 화면에서 다른 말이다.**

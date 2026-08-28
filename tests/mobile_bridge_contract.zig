@@ -5282,6 +5282,59 @@ test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
     bridge.maru_mobile_control_reset();
 }
 
+test "화면을 원할 때 그 바이트는 ndjson 파서로 안 간다" {
+    // **S11-4 가 한계로 남긴 자리다.** 화면 레코드를 ndjson 파서에 먹이면 파서가 그것을 잡음으로
+    // 세다가 축을 꺼 버리고(`too_much_noise`), 그러면 목록으로 돌아와도 축이 다시 안 선다
+    // (`noteControlScreen` 이 `waiting_hello` 일 때만 연다). 소비자를 원하는 것으로 가른다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    const id: [32]u8 = @splat('c');
+    bridge.wantControl(.{ .screen = id });
+
+    // 화면 프레임 하나를 만든다 — `maru attach --stream` 이 흘리는 것과 같은 모양이다.
+    const frame = try makeScreenFrame(std.testing.allocator);
+    defer std.testing.allocator.free(frame);
+    _ = feedControl(frame);
+
+    // 화면이 섰고, **컨트롤 축은 안 꺼졌다**(그 바이트를 잡음으로 세지 않았다).
+    try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_remote_screen_state());
+    try std.testing.expectEqual(@as(u32, 1 << 16), bridge.maru_mobile_remote_screen_frames());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_control_state()); // 여전히 hello 대기
+
+    // 목록으로 돌아가면 그 화면은 놓는다 — 죽은 화면을 남기지 않는다.
+    bridge.wantControl(.sessions);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_remote_screen_state());
+}
+
+/// `maru attach --stream` 이 흘리는 프레임 하나(한 글자 화면). 프레이밍은 세션 호스트 §8 이 정했다.
+fn makeScreenFrame(a: std.mem.Allocator) ![]u8 {
+    const stream = maru.session.screen_stream;
+    var runs = [_]stream.Run{.{ .grapheme = "R", .width = 1, .count = 1 }};
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(a);
+    const meta = try stream.encodeScreenMeta(a, .{ .kind = .screen_meta, .generation = 1, .sequence = 1 }, .{
+        .cols = 1,
+        .rows = 1,
+        .active_screen = 0,
+        .cursor = .{ .col = 0, .row = 0, .visible = true, .shape = 0 },
+        .modes = 0,
+    });
+    defer a.free(meta);
+    try stream.appendRecord(&body, a, meta);
+    const row = try stream.encodeRow(a, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = 0, .runs = &runs });
+    defer a.free(row);
+    try stream.appendRecord(&body, a, row);
+
+    const out = try a.alloc(u8, 12 + body.items.len);
+    @memset(out[0..12], 0);
+    @memcpy(out[0..4], "MRSS");
+    out[4] = 0; // snapshot
+    std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
+    @memcpy(out[12..], body.items);
+    return out;
+}
+
 test "runtime id 는 32 소문자 hex 만 — 셸 메타문자를 안 싣는다" {
     // 이 값은 **원격이 준 목록**에서 오고 명령 줄에 그대로 실린다. 셸이 그 줄을 파싱하므로
     // `;` 하나면 **원격 CLI 가 32-hex 를 거절하기 전에** 다른 명령이 그 서버에서 돈다.

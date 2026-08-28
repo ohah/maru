@@ -206,11 +206,15 @@ fn activateValidated(
     );
 
     var gate = upgrade.AdmissionGate.initClosed(io);
-    var socket_dir_buf: [112]u8 = undefined;
-    const socket_dir = try short_endpoint.socketDirPathIn(
-        &socket_dir_buf,
-        c.getuid(),
-    );
+    // restore 로 살아나는 host 도 socket 을 여기서 만든다 — `daemon.zig` 의 bind 자리와 **같은 뿌리**여야 한다.
+    //
+    // main 은 이 자리를 `socketDirPathIn(uid)` 로 두는 것이 맞다: 거기엔 override 를 따르는
+    // `currentSocketDirPathIn` 자체가 없다. 그러나 이 브랜치는 그 함수를 들여오면서 registry 와 socket 을
+    // 함께 옮기므로, 이 한 경로만 uid 로 남으면 restore 자식이 남의 뿌리에 socket 을 연다. 그러면 부모가
+    // 건넨 경로와 어긋나 activation 이 성립하지 않는다(CI: upgrade_bootstrap 의 zero-runtime graph 테스트가
+    // activation marker 를 영영 보지 못했다). 격리를 들여온 쪽이 이 자리도 함께 옮겨야 한다.
+    var socket_dir_buf: [272]u8 = undefined;
+    const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
     const socket_path = try allocator.dupeZ(u8, invocation.socket_path);
     defer allocator.free(socket_path);
     var server = try socket_server.SocketServer.bind(

@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 920;
+const smoke_spin_cap: usize = 940;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4641,6 +4641,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var multi_tabs: usize = 0;
     var multi_dups: usize = 0;
     var multi_active_ok = false;
+    var busy_judgeable = false;
+    var busy_result_busy = false;
+    var busy_sessions_before: usize = 0;
+    var busy_sessions_after: usize = 0;
+    var busy_tabs_before: usize = 0;
+    var busy_tabs_after: usize = 0;
+    var busy_active_before: usize = 0;
+    var busy_active_after: usize = 0;
+    var busy_still_alive = false;
     var file_closes: usize = 0;
     var session_closes: usize = 0;
     var session_close_busy: usize = 0;
@@ -5954,6 +5963,33 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, cx4, cy4);
         }
         // **닫은 뒤에 새로 만들면 id 가 겹치나** — 그 자리 주석이 "겹치면 안 된다" 고 못 박는다.
+        // ── 거절은 상태를 안 건드린다 (적대적 검증 4회차) ──────────────────────────────
+        //
+        // **부분 적용이 가장 나쁘다.** 라우팅만 끊고 목록에 남거나, 목록에서 뺐는데 살아 있으면
+        // 화면과 실물이 갈린다. 실행 중인 세션에 닫기를 걸어 **아무것도 안 변하는지** 본다.
+        if (smoke and spins == 896 and sessions.items.len >= 3) {
+            // 프롬프트 마크를 **안** 준 세션(1번)은 `unknown` 이라 중립 술어가 "실행 중" 으로 본다.
+            busy_judgeable = true;
+            busy_sessions_before = sessions.items.len;
+            busy_tabs_before = app_window.tabs.len;
+            busy_active_before = app_window.active_tab;
+            busy_result_busy = closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 1) == .busy_needs_confirm;
+            busy_sessions_after = sessions.items.len;
+            busy_tabs_after = app_window.tabs.len;
+            busy_active_after = app_window.active_tab;
+            // **그 세션이 아직 살아 있는가** — 큐 포인터로 확인한다(해제됐으면 이 값이 안 맞는다).
+            // **런타임에 직접 묻는다.** 처음에는 세션의 큐 포인터를 자기 자신과 견줬는데, 둘 다
+            // 같은 `live` 에서 나오는 **동어반복**이라 라우팅만 끊는 뮤턴트가 그대로 통과했다
+            // (적대적 검증 4회차 실측). 라우팅이 살아 있는지는 런타임만 안다.
+            busy_still_alive = blk_alive: {
+                if (sessions.items.len <= 1) break :blk_alive false;
+                // 빈 입력이라 셸에 아무것도 안 간다 — 묻는 것은 **라우팅이 아직 있는가**뿐이다.
+                _ = runtime.writeInputNonBlocking(sessions.items[1].surface.id, "") catch |e| {
+                    break :blk_alive e != error.UnknownSurface;
+                };
+                break :blk_alive true;
+            };
+        }
         // ── 연달아 닫는다 (적대적 검증 3회차) ──────────────────────────────────────────
         //
         // 한 번만 닫으면 순서에 기대는 실수가 안 드러난다 — 색인·활성·id 가 **누적으로** 어긋나는지
@@ -8253,6 +8289,23 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (busy_judgeable) {
+        try stdout.print("close_busy: refused={} sessions {d}->{d} tabs {d}->{d} active {d}->{d} alive={} close_busy_ok={}\n", .{
+            busy_result_busy,
+            busy_sessions_before,
+            busy_sessions_after,
+            busy_tabs_before,
+            busy_tabs_after,
+            busy_active_before,
+            busy_active_after,
+            busy_still_alive,
+            busy_result_busy and
+                busy_sessions_after == busy_sessions_before and
+                busy_tabs_after == busy_tabs_before and
+                busy_active_after == busy_active_before and
+                busy_still_alive,
+        });
     }
     if (multi_closes > 0) {
         try stdout.print("close_many: closes={d} sessions={d} tabs={d} dups={d} active_ok={} close_many_ok={}\n", .{

@@ -7095,7 +7095,11 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 - **R1 구현:** `runtime-state="ended"` durable tombstone은 Enter 없는 parse→apply→capture 반복에도 자동 spawn 0을 보장한다.
   ended Term close는 host probe/terminate 0으로 manifest slot만 제거한다. `⏎` remote spawn 실패는 사용자 명시
   승격이므로 local fallback을 허용하되, 성공하면 구 handle/state를 제거하고 live-local `not preserved`로 전이한다.
-  local spawn도 실패하면 tombstone을 그대로 유지한다.
+  local spawn도 실패하면 tombstone을 그대로 유지한다. 실제 제품 경계는
+  `zig build macos-session-host-r1-tombstone-smoke`가 검증한다. 격리 Application Support의 ended manifest를
+  built AppKit executable이 복원하고 background capture→atomic checkpoint한 생성본을 다시 입력으로 두 번째 실행한다.
+  두 실행 모두 exact handle/state, 관측 시점의 직접 child process 0, `.bak`/고정 temp 0을 유지하고 두 생성본이 byte-for-byte
+  같아야 한다. 이 gate는 ad-hoc signed bundle을 닫지만 provisioned Developer ID artifact의 Quit/relaunch 증거는 아니다.
 - **R2a 구현 슬라이스:** manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증한다. legacy bare
   ID가 같은 runtime ID를 full/bare owner와 공유하는 경우도 host namespace 미확정 중복으로 fail-close한다.
   실제 제품 파일 경계는 `zig build macos-session-host-r2a-checkpoint-smoke`가 검증한다. 격리 HOME의 실제
@@ -7364,8 +7368,8 @@ Notification Center
 권한·로그인 UI 자동화가 준비된 전용 macOS runner가 없으면 수동 클릭으로 대체하지 않고 해당 notification gate를 미완료로
 둔다. P5 CLI나 U5 자동 migration 전체는 이 종료 gate에 포함하지 않는다.
 
-구현 순서는 L0 app-instance lease(완료) → R1 tombstone(완료) → R2a manifest validator(core/ABI/source-order fixture 완료,
-제품 file E2E 미완) → R2b inventory reconciliation/Recovered Sessions →
+구현 순서는 L0 app-instance lease(완료) → R1 tombstone(core와 actual AppKit 다회 재실행 완료, Developer ID 미완) →
+R2a manifest validator(core/ABI/source-order/actual AppKit file E2E 완료) → R2b inventory reconciliation/Recovered Sessions →
 R3 `ScreenInbox`/R4 deferred resync →
 T0 single-connection `ConnectionSlot` → C1 pure checkpoint coordinator/C2 file adapter failure injection/C3 dirty wiring/
 C4 AppKit terminate handshake → E1 event wake(`CR6f`) → E2a cache transaction/E2b product wiring/E2c perf → parity micro-PR → N1 journal/N2 sink/N3 cold route →
@@ -7409,6 +7413,13 @@ fixture와 실제 fresh process는 `lease → G2 bootstrap → AppKit/AppSession
 지목한 exact immutable A와 provisioned `Session host product / default-on` runner가 모두 존재할 때만 코드를 시작한다. B의
 SemVer가 A에 산술적으로 인접하다는 가정이나 `latest` 조회는 migration 권위가 아니다. B manifest의 exact predecessor
 release ID·tag·commit·manifest SHA-256만 A 선택 권위이며, B→A rollback도 그 exact A 하나만 지원한다.
+
+⚠️ **protected-environment 통과 증거는 아직 설계 결정이 남았다.** GitHub environment REST 응답은 protection
+설정 사실만 제공하고, deployment 응답의 `sha/ref/environment`도 현재 `run_id/run_attempt/job`이 그 규칙을 통과했다는
+결속이 아니다. 둘을 조합해 `protected_environment=true`를 만들면 다른 run의 deployment를 현재 run 증거로 재사용하는
+거짓 양성이 열린다. 따라서 release adapter는 이 두 REST 응답만으로 해당 bool을 발행하지 않는다. current job에 결속된
+OIDC/attestation 증거를 검증할지, exact workflow를 신뢰 경계로 삼을지 사용자와 정한 뒤 제품 adapter를 연다. 이 결정
+전의 parser/component green은 G3 외부 gate 준비로 세지 않는다.
 
 B bootstrap은 L0 app-instance lease 뒤, AppKit/첫 Window/첫 `AppSession` 전에 G2 owner의 같은 exact-once entry를 사용한다.
 파일을 두 번 읽거나 Window별로 migration하지 않는다. migration 결과는 아래 닫힌 표 하나다.

@@ -4062,6 +4062,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var isSessionHostR2aCheckpointSmokeMode: Bool {
         ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R2A_CHECKPOINT_SMOKE"] == "maru-test-only-v1"
     }
+    private var isSessionHostR1TombstoneSmokeMode: Bool {
+        ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE"] == "maru-test-only-v1"
+    }
     private var isSessionHostInputContinuitySmokeMode: Bool {
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE"] == "1"
@@ -4388,6 +4391,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let restoreDisabled = ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] != nil
         let recoverySmoke = isSessionHostRecoverySmokeMode
         let r2aCheckpointSmoke = isSessionHostR2aCheckpointSmokeMode
+        let r1TombstoneSmoke = isSessionHostR1TombstoneSmokeMode
         let preparedWorkspace = ((smokeMode && !recoverySmoke && !r2aCheckpointSmoke) || restoreDisabled) ? nil : loadWorkspaceText()
         let preparedWorkspaceWindowCount = preparedWorkspace.map { text -> Int64 in
             let bytes = Array(text.utf8)
@@ -4477,7 +4481,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             agentSessionArchiveSmokeDriver = AgentSessionArchiveSmokeDriver(scenario: scenario)
         }
-        let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0
+        // R1's product fixture deliberately requests one real background capture. That makes the
+        // generated checkpoint, rather than the input fixture, the authority for the second launch.
+        // The exact test-only token prevents an arbitrary environment value from changing product
+        // persistence behavior.
+        let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0 || r1TombstoneSmoke
         armWorkspaceCheckpoint(initialDirty: checkpointInitialDirty)
         if r2aCheckpointSmoke {
             guard let markerPath = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R2A_CHECKPOINT_MARKER"],

@@ -3847,6 +3847,49 @@ pub fn build(b: *std.Build) void {
             );
         }
     }
+    const session_host_metadata_consumers_step = b.step(
+        "test-session-host-metadata-consumers",
+        "Verify P3-e4d-2a actual foreground and AppSession metadata consumers",
+    );
+    const session_host_metadata_consumers_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_metadata_consumers_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P3-e4d-2a metadata consumers use actual product boundaries"},
+    });
+    const run_session_host_metadata_consumers_boundary_tests = b.addRunArtifact(
+        session_host_metadata_consumers_boundary_tests,
+    );
+    run_session_host_metadata_consumers_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_metadata_consumers_boundary_tests.setCwd(b.path("."));
+    session_host_metadata_consumers_step.dependOn(
+        &run_session_host_metadata_consumers_boundary_tests.step,
+    );
+    boundary_step.dependOn(&run_session_host_metadata_consumers_boundary_tests.step);
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |metadata_consumers_optimize| {
+            const session_host_metadata_consumers_product_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                    .target = target,
+                    .optimize = metadata_consumers_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers"},
+            });
+            const run_session_host_metadata_consumers_product_tests = b.addRunArtifact(
+                session_host_metadata_consumers_product_tests,
+            );
+            run_session_host_metadata_consumers_product_tests.addArg("--maru-expect-tests=1");
+            run_session_host_metadata_consumers_product_tests.setCwd(b.path("."));
+            session_host_metadata_consumers_step.dependOn(
+                &run_session_host_metadata_consumers_product_tests.step,
+            );
+        }
+    }
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",

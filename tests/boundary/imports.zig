@@ -1293,6 +1293,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "CatchupBarrierPlan" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readCatchupBarrierPlanUntil" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readCatchupBarrierUntilWithOps" },
+                // P3-e4d-2b exact frozen GUI restore: public entrypoint rechecks the frozen hash,
+                // while the private policy and leaves keep GUI/shutdown attestation independent.
+                .{ .parent = "Client", .kind = "const", .visibility = "private", .modifier = "", .name = "LegacyHelloPolicy" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectFrozenGui" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "connectMajorWithPolicy" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readCatchupBarrierPlanUntilWithOps" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readCatchupBarrierWithIo" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "incident_binding_contract" },

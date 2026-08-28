@@ -28,10 +28,11 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 저장소 선택, 파일 탐색기 루트, 도크 범위 칩, 제어 평면 `TerminalMeta.cwd`가 함께 빈다(축이 하나라 갈리지는
 > 않는다). 메우려면 host가 관측 payload에 측정한 cwd를 더해야 하고 그건 wire schema 변경이라
 > [session-host-upgrade.md](session-host-upgrade.md)의 호환 규약을 건드린다 — **별도 슬라이스이며 아직 계획에
-> 없다.** **P3-e4a~c는 구현됐고 P3-e4d parity gate는 부분 완료**다. 실제 host PTY OSC
+> 없다.** **P3-e4a~c와 P3-e4d 자동 parity gate는 구현 완료**다. 실제 host PTY OSC
 > 7/2/5379 왕복·revision/coalescing·소유권, 다중 runtime 격리, detach 중 변경→재접속과 controlled
-> Claude/Codex foreground→실제 Git·agent·SSH upload 소비자 테스트는 존재하지만 capability 없는 실제 legacy binary E2E가 남아 있어 runtime metadata parity 전체를
-> 완료로 선언하지 않는다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
+> Claude/Codex foreground→실제 Git·agent·SSH upload 소비자, capability 없는 frozen N-1 protocol fixture의
+> fail-closed 복원까지 별도 제품 E2E가 소유한다. 이 자동 완료는 위 kernel cwd 공백이나 notarized 과거 release
+> provenance를 닫았다는 뜻이 아니다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
 > IME marked text 표시는 별도 client-local 계약으로 구현됐다. 각 GUI `Surface`가 host snapshot 위에 같은
 > `PreeditOverlay`를 합성하고, MRSH/runtime/workspace에는 저장하지 않는다. 그래서 다중 클라이언트가 같은
 > runtime을 보더라도 조합 중 문자열은 입력한 attachment에만 보이며 detach/reconnect에는 남지 않는다.
@@ -7045,13 +7046,12 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     `runtime.link_at` RPC로 host가 `extractUrlAt`(추출 + cwd resolve + 존재 stat)을 수행한다. 매 mouse-move RPC를 피하려고
     hover만 스냅샷 동봉으로 가르는 것이 이 슬라이스의 설계 결정이다. 로컬(in-process) 경로는 불변이다. 단일 출처는
     [링크 감지](link-detection.md#원격host-backed-세션).
-  - **P3-e4d(parity gate) 🟨**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
+  - **P3-e4d(parity gate) ✅**: 실제 독립 host PTY의 OSC 7/2/5379→client observation, host core의
     OSC 7/2/133/5379 export, owned-copy/OOM-safe replace, attach initial metadata, changed-only event,
     malformed/stale revision과 stream별 coalescing, capability 없는 v2 client event 억제, observation barrier revision,
-    기존 AppSession cwd/title/at-prompt/workspace/control 소비 회귀는 자동 검증한다. 남은 gate는 controlled foreground
-    process fixture, multi-runtime event 격리,
-    response 대기 중 event, detach/reconnect 최신 metadata, cwd→Git·agent·SSH 제품 소비 경로를
-    실제 제품 경계에서 무인 테스트하는 것이다.
+    기존 AppSession cwd/title/at-prompt/workspace/control 소비 회귀를 자동 검증한다. e4d-1은 multi-runtime 격리와
+    detach/reconnect 최신본, e4d-2a는 controlled foreground와 cwd→Git·agent·SSH 소비자, e4d-2b는 capability 없는
+    frozen N-1 protocol fixture의 fail-closed 복원을 실제 제품 경계에서 각각 무인 검증해 이 gate를 함께 닫는다.
     **P3-e4d-1은 multi-runtime event 격리와 detach/reconnect 최신본을 한 제품 gate로 닫는다.**
     별도 프로세스의 실제 daemon과 하나의 generation-backed GUI `HostAdapter`에 두 forkpty runtime을 붙이고, runtime A의
     OSC 7/2/5379 변경이 A의 revision·owned observation만 전진시키며 B의 revision·cwd·title·SSH
@@ -7060,15 +7060,14 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     최초 응답이 새 full-state를 담고 있음을 추가 pump 이전에 검증한다. 시간 추측은 쓰지 않고
     harness-owned trigger/marker로 detach 전·변경 commit·reattach 순서를 구분한다. 새 test-only wire
     method나 제품 분기를 열지 않고, cwd·SSH destination·raw argv는 artifact·실패 log에 남기지
-    않는다. controlled foreground와 Git·agent·SSH 소비자 E2E는 e4d-2a, 실제 capability 없는 N-1 binary는
-    e4d-2b 후속이며 e4d-1만으로
-    metadata parity 전체 완료를 주장하지 않는다.
+    않는다. controlled foreground와 Git·agent·SSH 소비자 E2E는 e4d-2a, capability 없는 frozen N-1 protocol fixture는
+    e4d-2b가 완료했다. 세 gate의 결합 증거만 metadata parity 자동 완료를 주장한다.
     IME marked text의 client-local 공통 snapshot 합성, remote delta 재합성,
     scrollback 합성 억제와 canonical cursor/mode 투영, clear 후 canonical base 복원, base ambiguous-width 소비,
     OOM fail-closed, 중복 포커스 상실, 대상 소멸 tombstone, ordered commit→replay, 활성 workspace 창 간 queue 이전과
     source/destination admission과 queue-transfer preflight의 2-phase abort-before-commit/detach 원자성,
     runtime-owned direct-key FIFO의 socket backpressure 보존과 async scroll barrier wire ordering은
-    단위 또는 controlled host-backed 테스트로 검증한다. capability 없는 **실제 구 binary** host 재접속, pane/Term/tab 및
+    단위 또는 controlled host-backed 테스트로 검증한다. capability 없는 frozen N-1 fixture의 host 재접속은 자동화됐고, pane/Term/tab 및
     모든 비-terminal input owner 전환의 개별 제품 E2E, 실제 AppKit run-loop의 stalled-socket deadline 계측, 실제 macOS 입력기의 후보창·자모별
     픽셀 갱신은 아직 수동/후속 gate다. socketpair backpressure는 AppKit 경계의 일반 key가 64 KiB FIFO에
     소유된 뒤 막힌 connection/encode OOM에서도 유실되지 않는지, exact-cap/cap+1 의미론,
@@ -7090,21 +7089,23 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
 
 P3 core의 현재 종료 gate는 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot,
-input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 완료**는 실제 host PTY가 OSC 7/0·2/133/5379와
-controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕복하고, detach 중 바뀐 최신 metadata가 reconnect
-첫 attach에 복원되며, sidebar cwd·임시 Git branch·agent 표시·SSH upload 분기와 capability 없는 N-1 host의
-fail-closed degradation을 자동 검증해야 선언한다. current host의 foreground·consumer 흐름은 P3-e4d-2a,
-실제 구 binary packaging은 P3-e4d-2b가 각각 소유한다.
+input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 자동 gate는 완료됐다.** 실제 host PTY의
+OSC 7/0·2/133/5379와 controlled Claude/Codex foreground가 GUI observation까지 왕복하고, detach 중 바뀐 최신 metadata가
+reconnect 첫 attach에 복원되며, sidebar cwd·임시 Git branch·agent 표시·SSH upload 분기와 capability 없는 N-1 fixture의
+fail-closed degradation을 자동 검증한다. current host의 foreground·consumer 흐름은 P3-e4d-2a,
+historical source와 봉인 patch에서 만든 별도 실행 N-1 protocol fixture packaging은 P3-e4d-2b가 각각 소유한다.
 
-P3-e4d-2b packaging gate는 `tests/fixtures/session_host_n1/manifest.json`이 봉인한 실제 universal
+P3-e4d-2b packaging gate는 `tests/fixtures/session_host_metadata_n1/manifest.json`이 봉인한 실제 universal
 arm64/x86_64 ad-hoc executable과 source patch의 SHA-256을 실행 전에 다시 계산하고 서명 형태를 확인한다. 해당
 artifact가 제품 hidden session-host command로 만든 exact host manifest와 endpoint에 current GUI가
 `connectExistingHost`로 hello한 뒤, generation `HostAdapter`와 attach-only `RemoteTermBackend`를 거쳐 기존 runtime을
 `term_ops.createTerm`으로 복원한다. current source에 legacy-mode 분기나 capability toggle을 추가하지 않는다.
-N-1 profile은 `runtime_metadata_v1`을 협상할 수 없으므로 attach 최초 observation부터 `.unsupported`이며 cwd,
+N-1 profile은 `runtime_metadata_v1`을 협상할 수 없으므로 transport capability는 `.unsupported`, AppSession의
+attach 최초 observation은 `.unavailable`이며 cwd,
 foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그 상태를 기존 `termGitBranch`,
 `pollAgentKinds`, `remoteUploadContext`가 각각 branch 없음, agent `.none`, upload route 없음으로 소비하는 데까지가
 자동 제품 gate다. raw cwd, destination, argv와 file payload는 artifact나 실패 log에 기록하지 않는다.
+이 ad-hoc image는 compatibility test artifact이며 과거 notarized release 자체였다는 provenance를 주장하지 않는다.
 
 ### P4 — 일반 Window default readiness·background 알림
 

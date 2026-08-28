@@ -1,0 +1,69 @@
+diff --git a/src/platform/macos/session_host/compatibility.zig b/src/platform/macos/session_host/compatibility.zig
+index db725611..87e228fb 100644
+--- a/src/platform/macos/session_host/compatibility.zig
++++ b/src/platform/macos/session_host/compatibility.zig
+@@ -29,8 +29,8 @@ pub const Profile = struct {
+ pub const profiles = [_]Profile{
+     .{
+         .kind = .current,
+-        .wire_major = 2,
+-        .screen_codec_version = 2,
++        .wire_major = 1,
++        .screen_codec_version = 1,
+         .required_fingerprint = null,
+         .attach_schema = .granted_roles,
+     },
+@@ -46,4 +46,4 @@
+ comptime {
+-    if (protocol.version_major != 2 or screen_stream.codec_version != 2)
++    if (protocol.version_major != 1 or screen_stream.codec_version != 1)
+         @compileError("update the explicit current/N-1 compatibility table and frozen fixtures before bumping protocol/screen");
+ }
+diff --git a/src/platform/macos/session_host/protocol.zig b/src/platform/macos/session_host/protocol.zig
+index 823758ec..7fe1cf8d 100644
+--- a/src/platform/macos/session_host/protocol.zig
++++ b/src/platform/macos/session_host/protocol.zig
+@@ -26,7 +26,7 @@ pub const header_size = 32;
+ /// wire의 비호환 변경이다. 확장 spawn 계약을 요구하는 새 GUI는 새 command `runtime.spawn_full`을 써서 구 v2 host가
+ /// unknown method로 거부하게 한다. major를 올리면 이미 살아 있는 v2 host/runtime에도 attach할 수 없고 host 교체 CLI가
+ /// 아직 없으므로, 화면 wire가 같은 동안은 strict method 이름으로 spawn 의미론만 fail-closed한다.
+-pub const version_major: u16 = 2;
++pub const version_major: u16 = 1;
+ /// runtime.inventory_v1 complete snapshot의 host-side hard cap. page는 더 작지만 total이 이를 넘으면 partial prefix 대신
+ /// resource_exhausted로 fail-close한다.
+ /// Wire-only 모듈은 platform-import-0을 유지한다. `runtime_manager`의 compile-time boundary gate가 이 값을
+diff --git a/src/platform/macos/session_host/screen_stream.zig b/src/platform/macos/session_host/screen_stream.zig
+index 93decdea..f02b6543 100644
+--- a/src/platform/macos/session_host/screen_stream.zig
++++ b/src/platform/macos/session_host/screen_stream.zig
+@@ -22,7 +22,7 @@ const std = @import("std");
+ /// codec 버전. decode가 다른 값을 보면 `BadCodecVersion`(상위가 fresh snapshot 재요청). **v2**(리뷰 #3): Run 색(resolved RGB→
+ /// 태그드 Color intent)·ImageBlob/ImagePlacement 레이아웃이 비호환 변경돼, 구 codec 레코드를 신 client가 조용히 오해석하지
+ /// 않게 올렸다. protocol.version_major와 화면 codec은 둘 다 v2이며, full spawn은 새 command 이름으로 capability를 가른다.
+-pub const codec_version: u16 = 2;
++pub const codec_version: u16 = 1;
+ /// Frozen MRSH v1 boundary (`66a78614^`) already used the current record body layout; the major bump changed the
+ /// explicit record version from 1→2. Therefore v1 can be normalized by accepting only this exact header-version
+ /// difference. Older, pre-layout v1 artifacts are not in the supported N-1 release set.
+diff --git a/src/platform/macos/session_host/server.zig b/src/platform/macos/session_host/server.zig
+index 4b280ae2..34ee820f 100644
+--- a/src/platform/macos/session_host/server.zig
++++ b/src/platform/macos/session_host/server.zig
+@@ -745,7 +745,8 @@ pub const Connection = struct {
+         const pmin = intField(obj, "protocol_min") orelse 0;
+         const pmax = intField(obj, "protocol_max") orelse 0;
+         self.client_kind = parseClientKind(strField(obj, "client_kind"));
+-        self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
++        // Frozen P3-e4d-2b fixture: this historical peer predates runtime metadata negotiation.
++        self.runtime_metadata_v1 = false;
+         self.runtime_ended_v1 = stringArrayContains(obj, "capabilities", "runtime_ended_v1");
+         self.controller_transfer_v1 = stringArrayContains(
+             obj,
+@@ -2653,7 +2654,6 @@ pub const Connection = struct {
+         }
+         append(buf, &count, "admin_one_shot_v1");
+         if (self.runtime_ops != null) append(buf, &count, "admin_runtime_end_v1");
+-        append(buf, &count, "runtime_metadata_v1");
+         append(buf, &count, "runtime_ended_v1");
+         append(buf, &count, "screen_stream_v2_current_body");
+         append(buf, &count, "screen_viewport_scrolled_v1");

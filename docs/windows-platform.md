@@ -5438,7 +5438,7 @@ agent_sort: first 3->10 oldest_first=true agent_sort_ok=true
 |---|---|
 | `scope`(Workspace/Project) | macOS 도 **비동기로 범위 루트를 해석**한 뒤에야 적용한다(`requestAgentSessionArchiveScopeRoots`). Windows 앱에 그 루트 모델이 없다 |
 | ~~`refresh`~~ | ~~스캔이 **동기**라 누르는 순간 창이 멈춘다(§2m.57 의 그 경로). 비동기 배선이 선행이다~~ → **§2m.69 완료** |
-| `focus_search`·검색 | 도크로 **문자 입력을 라우팅**하는 길이 없다 |
+| `focus_search`·검색 | 도크로 **문자 입력을 라우팅**하는 길이 없다. **모델은 있다** — `chrome/components/text_field.zig`(선택·삽입·삭제까지). 없는 것은 **포커스의 주인**(키가 터미널 것인가 검색 것인가)과 캐럿 렌더다(계획 W8.15) |
 | `resume_session`·`reveal_log`·`focus_live` | 세션을 띄우거나 파일을 여는 경로가 Windows 에 없다 |
 
 **조용히 무시하지 않는다** — `applyAgentIntent` 의 `else` 가 그것들을 받아 `false` 를 내고, 이 표가

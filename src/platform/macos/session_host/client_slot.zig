@@ -10102,11 +10102,38 @@ pub fn sendGenerationResyncNonBlocking(
     );
     if (decision == .blocked) return false;
     defer transaction.finish() catch @panic("generation resync admission settlement failed");
-    return admission.operation.node.client
+    const accepted = try admission.operation.node.client
         .sendResyncNonBlockingUnderRegisteredOperationExecutionLease(
         transaction.execution_handle.?,
         stream_id,
     );
+    return accepted;
+}
+
+/// Lock-free notification projection used by the owner-thread frame pump. It validates the
+/// stable slot/node identity but deliberately does not scan either 4,096-entry registry; false
+/// means no recovery work and must remain the idle fast path.
+pub fn generationScreenRecoveryState(
+    owner: GenerationTransportOwnerQuery,
+    stream_id: u64,
+) GenerationInputError!client_mod.ScreenRecoveryState {
+    if (stream_id == 0 or owner.slot_addr == 0 or owner.slot_incarnation == 0 or
+        owner.node_incarnation == 0 or owner.host_id == 0 or owner.transport_addr == 0 or
+        owner.transport_incarnation == 0 or owner.owner_addr == 0 or owner.owner_size == 0 or
+        owner.pid != currentPid() or owner.process_nonce == 0 or
+        client_mod.generationAllocatorCallbackActive())
+        return error.InvalidOwner;
+    const slot: *ClientSlot = @ptrFromInt(owner.slot_addr);
+    if (slot.self_addr != owner.slot_addr or slot.lifecycle != .live or
+        slot.pid != owner.pid or slot.process_nonce != owner.process_nonce or
+        slot.incarnation.tagged != owner.slot_incarnation or
+        slot.current.incarnation.tagged != owner.node_incarnation or
+        slot.current.client.host_id != owner.host_id or
+        slot.current.pin_owner.slot_addr != owner.slot_addr or
+        slot.current.pin_owner.node_addr != @intFromPtr(slot.current) or
+        !operationThreadMatches(slot.operation_owner_thread_incarnation))
+        return error.InvalidOwner;
+    return slot.current.client.screenRecoveryState(stream_id);
 }
 
 pub fn callGenerationRpc(

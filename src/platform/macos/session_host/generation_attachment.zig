@@ -1590,6 +1590,16 @@ pub const GenerationAttachment = struct {
         );
     }
 
+    pub fn screenRecoveryState(
+        self: *GenerationAttachment,
+    ) generation_transport_mod.InputError!@import("client.zig").ScreenRecoveryState {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return generation_transport_mod.screenRecoveryStateOwned(
+            &self.transport,
+            @intFromPtr(self),
+        );
+    }
+
     pub fn fenceRevoke(
         self: *GenerationAttachment,
     ) generation_transport_mod.InputError!generation_transport_mod.RevokeFence {
@@ -1602,6 +1612,12 @@ pub const GenerationAttachment = struct {
         io: std.Io,
     ) (@import("client.zig").ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!remote_attachment.PumpScreenResult {
         return self.payloadMut().pumpScreen(io);
+    }
+
+    pub fn discardPendingScreen(
+        self: *GenerationAttachment,
+    ) remote_attachment.LeaseError!void {
+        return self.payloadMut().discardPendingScreen();
     }
 
     /// Host barrier보다 앞선 exact same-stream batch만 적용하고 실제 assembler frontier가

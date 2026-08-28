@@ -197,6 +197,15 @@ const RuntimeAttachment = union(enum) {
         };
     }
 
+    fn discardPendingScreen(
+        self: *RuntimeAttachment,
+    ) remote_attachment.LeaseError!void {
+        return switch (self.*) {
+            .legacy => |*value| value.discardPendingScreen(),
+            .generation => |*value| value.discardPendingScreen(),
+        };
+    }
+
     fn applyValidatedRevokedAndFence(
         self: *RuntimeAttachment,
         client: ?*client_mod.Client,
@@ -262,8 +271,24 @@ const RuntimeAttachment = union(enum) {
         client: ?*client_mod.Client,
     ) client_mod.ClientError!bool {
         return switch (self.*) {
-            .legacy => |*value| (client orelse return error.ProtocolError).sendResyncNonBlocking(value.streamId()),
+            .legacy => |*value| blk: {
+                const transport = client orelse return error.ProtocolError;
+                const accepted = try transport.sendResyncNonBlocking(value.streamId());
+                break :blk accepted;
+            },
             .generation => |*value| value.sendResyncNonBlocking() catch |err|
+                return mapGenerationInputError(err),
+        };
+    }
+
+    fn screenRecoveryState(
+        self: *RuntimeAttachment,
+        client: ?*client_mod.Client,
+    ) client_mod.ClientError!client_mod.ScreenRecoveryState {
+        return switch (self.*) {
+            .legacy => |*value| (client orelse return error.ProtocolError)
+                .screenRecoveryState(value.streamId()),
+            .generation => |*value| value.screenRecoveryState() catch |err|
                 return mapGenerationInputError(err),
         };
     }
@@ -4806,24 +4831,25 @@ pub const RemoteRuntime = struct {
     }
 
     /// 직접 key FIFO와 control FIFO를 단일 시간 순서로 Client outbound에 넘긴다.
-    /// 반환 false는 socket backpressure로 아직 queue/barrier가 남았다는 뜻이며 데이터 소유권은 유지된다.
-    fn pumpQueuedInput(self: *RemoteRuntime) client_mod.ClientError!bool {
+    const QueuedInputPump = enum { ready, blocked, sibling_revoke };
+
+    fn pumpQueuedInputOutcome(self: *RemoteRuntime) client_mod.ClientError!QueuedInputPump {
         // Blocking drain이 front item의 copied value를 들고 있는 동안 callback이 public queue API를
         // 재진입해 같은 item을 소비하지 못하게 한다. false는 기존 backpressure와 같은 retained-owner 결과다.
-        if (self.blocking_flush_active) return false;
+        if (self.blocking_flush_active) return .blocked;
         if (!self.mutation_owner.admits(
             self.generation_owner.currentGeneration() catch blk: {
                 if (!builtin.is_test) return error.ProtocolError;
                 break :blk self.generation_owner.slot.currentGeneration() catch @as(u64, 1);
             },
             self.input_batches.epoch,
-        )) return false;
+        )) return .blocked;
         if (!self.currentGeneration().attachment.allowsMutation()) {
             self.discardQueuedMutations();
-            return true;
+            return .ready;
         }
         if (self.legacyConnectionOrNull()) |client|
-            if (self.currentGeneration().attachment.hasBufferedControllerRevoke(client)) return false;
+            if (self.currentGeneration().attachment.hasBufferedControllerRevoke(client)) return .sibling_revoke;
         while (true) {
             if (self.pending_controls.items.len > 0) {
                 const control = self.pending_controls.items[0];
@@ -4838,10 +4864,10 @@ pub const RemoteRuntime = struct {
                             self.direct_input.items[self.direct_input_offset..barrier],
                         ) catch |err| return mapGenerationInputError(err),
                     } catch |err| switch (err) {
-                        error.OutOfMemory, error.AdminBusy => return false,
+                        error.OutOfMemory, error.AdminBusy => return .blocked,
                         else => return err,
                     };
-                    if (accepted == 0) return false;
+                    if (accepted == 0) return .blocked;
                     self.direct_input_offset += accepted;
                     self.retireInputQueueRecords();
                     continue;
@@ -4851,7 +4877,7 @@ pub const RemoteRuntime = struct {
                     if (decoded.control == .scroll_to_bottom) .scroll_to_bottom else .core_command,
                     barrier,
                 );
-                if (!(try self.admitControl(control))) return false;
+                if (!(try self.admitControl(control))) return .blocked;
                 self.retireControlRecordNoFail();
                 _ = self.pending_controls.orderedRemove(0);
                 continue;
@@ -4866,10 +4892,10 @@ pub const RemoteRuntime = struct {
                         self.direct_input.items[self.direct_input_offset..],
                     ) catch |err| return mapGenerationInputError(err),
                 } catch |err| switch (err) {
-                    error.OutOfMemory, error.AdminBusy => return false,
+                    error.OutOfMemory, error.AdminBusy => return .blocked,
                     else => return err,
                 };
-                if (accepted == 0) return false;
+                if (accepted == 0) return .blocked;
                 self.direct_input_offset += accepted;
                 self.retireInputQueueRecords();
                 continue;
@@ -4877,8 +4903,14 @@ pub const RemoteRuntime = struct {
             self.retireInputQueueRecords();
             self.direct_input.clearRetainingCapacity();
             self.direct_input_offset = 0;
-            return true;
+            return .ready;
         }
+    }
+
+    /// `true` means the input/control FIFO is fully drained. `false` retains historical callers;
+    /// the frame pump uses the typed outcome so only a sibling revoke may bypass this ordering gate.
+    fn pumpQueuedInput(self: *RemoteRuntime) client_mod.ClientError!bool {
+        return (try self.pumpQueuedInputOutcome()) == .ready;
     }
 
     /// 이 runtime이 이미 소유한 key/control barrier를 blocking RPC보다 먼저 전송한다. RemoteRuntime의 FIFO와
@@ -5335,12 +5367,20 @@ pub const RemoteRuntime = struct {
             else => return err,
         };
         if (events.ended) return .ended;
+        if (try self.currentGeneration().attachment.screenRecoveryState(self.legacyConnectionOrNull()) == .needs_resync) {
+            self.currentGeneration().resync_needed = true;
+            try self.currentGeneration().attachment.discardPendingScreen();
+        }
         // 마지막 non-blocking input 뒤에 새 입력/RPC가 영원히 없더라도 frame-loop pump가 연결의 bounded pending frame을
         // 계속 DONTWAIT로 진전시킨다. Client 하나를 여러 runtime이 공유하므로 어느 runtime pump가 호출해도 충분하다.
-        if (!(try self.pumpQueuedInput()))
+        const input_outcome = try self.pumpQueuedInputOutcome();
+        if (input_outcome == .blocked)
             return if (events.metadata) .metadata else .idle;
-        _ = try self.currentGeneration().attachment.pumpPendingOutput(self.legacyConnectionOrNull());
+        if (input_outcome == .ready)
+            _ = try self.currentGeneration().attachment.pumpPendingOutput(self.legacyConnectionOrNull());
         try self.pumpResyncIntent();
+        if (input_outcome == .sibling_revoke)
+            return if (events.metadata) .metadata else .idle;
         switch (try self.currentGeneration().attachment.pumpScreen(self.io)) {
             .idle => {
                 // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
@@ -17714,11 +17754,9 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     try testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
 }
 
-// 화면 정지 재현: host가 screen pressure로 내 화면을 회수하면 `snapshot.invalidated`만 보내고, 복구는 GUI가
-// 능동적으로 보내는 resync에 달려 있다. 그런데 `pumpDelta`는 `pumpQueuedInput`이 false면 `pumpResyncIntent`에
-// 닿기 전에 조기 반환하고, `hasBufferedControllerRevoke`는 **남의 stream** revoke 하나만 버퍼에 있어도 false를
-// 만든다. 주인 runtime이 그 이벤트를 소비하기 전까지 같은 Client를 공유하는 모든 pane의 화면 복구가 함께 멈춘다.
-test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막는다" {
+// R4: sibling revoke는 그 stream의 input만 fence한다. 내 deferred resync는 input FIFO와 독립된 control이며
+// 같은 pump turn에서 exact once admission되어야 한다.
+test "R4 sibling revoke does not block my deferred resync" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fds: [2]c.fd_t = undefined;
@@ -17759,15 +17797,24 @@ test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막
     defer rr.pending_controls.deinit(allocator);
 
     // 내 무효화는 소비되어 resync 의도가 걸린다.
+    try rr.mutation_owner.initInPlace(
+        try rr.generation_owner.slot.currentGeneration(),
+        rr.input_batches.epoch,
+    );
     _ = try rr.drainObservationEvents();
     try testing.expect(rr.currentGeneration().resync_needed);
     // 남의 revoke는 여전히 버퍼에 남아 있다 — 소비할 주인은 stream 10의 runtime이다.
     try testing.expect(client.hasBufferedControllerRevoke());
 
-    // 소켓은 멀쩡하고 보낼 입력도 없는데, 남의 latch 하나가 내 진행을 막는다.
+    // sibling revoke가 input pump를 막아도 outer pump의 resync 단계는 실행된다.
     try testing.expect(!(try rr.pumpQueuedInput()));
-    // 그래서 `pumpDelta`는 여기서 조기 반환하고 resync는 전송 시도조차 되지 않는다.
-    try testing.expect(rr.currentGeneration().resync_needed);
+    try testing.expectEqual(RemoteRuntime.PumpResult.idle, try rr.pumpDelta());
+    try testing.expect(!rr.currentGeneration().resync_needed);
+    const ack = try readPeerFrame(fds[1], allocator);
+    defer allocator.free(ack.payload);
+    try testing.expectEqual(protocol.Kind.stream_ack, ack.header.kind);
+    try testing.expectEqual(@as(u64, 9), ack.header.stream_id);
+    try testing.expectEqualStrings("{\"action\":\"resync\"}", ack.payload);
 }
 
 test "remote runtime: typed ended event terminates only its stream pump" {
@@ -17794,6 +17841,8 @@ test "remote runtime: typed ended event terminates only its stream pump" {
         .allocator = allocator,
     });
     client.pending_batch_bytes = "stale".len + "sibling".len;
+    _ = try client.screen_recovery.invalidate(9);
+    _ = try client.screen_recovery.invalidate(10);
     var rr: RemoteRuntime = undefined;
     try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
@@ -17818,6 +17867,8 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     try testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
     try testing.expectEqual(@as(u64, 10), client.pending_batches.items[0].stream_id);
     try testing.expectEqualStrings("sibling", client.pending_batches.items[0].bytes);
+    try testing.expectEqual(client_mod.ScreenRecoveryState.valid, client.screenRecoveryState(9));
+    try testing.expectEqual(client_mod.ScreenRecoveryState.needs_resync, client.screenRecoveryState(10));
 }
 
 test "remote runtime: resync intent survives occupied outbound slot and emits one ack after drain" {

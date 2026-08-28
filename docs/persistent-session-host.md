@@ -7277,6 +7277,26 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 - shared Client의 `pending_stream`과 `pending_batches`를 하나의 bounded `ScreenInbox`로 관리한다. overflow handler는
   `Client.call()` 안에서 RPC를 재진입하지 않고 `needs_resync`만 기록하며, 바깥 runtime pump가 stream별 ordered resync
   한 번을 보내 fresh snapshot 전 delta를 버린다.
+  - **R3 inbox owner 계약:** `ScreenInbox`는 `pending_stream`, `partial_batch`, `pending_batches`와 generation adapter에
+    넘겼지만 아직 소비되지 않은 screen lease의 item/byte 회계를 한 owner로 합친다. cap 판정은 checked-add이며
+    connection당 4,096 item·18 MiB다. 초과한 frame이 속한 stream만 `needs_resync`로 전이하고, 그 stream의 아직 적용되지
+    않은 delta/snapshot prefix를 회수한다. sibling stream, correlated RPC response, metadata/event queue와 transport는
+    그대로 살아 있어야 한다. allocator 실패나 손상된 회계는 복구 가능한 pressure가 아니므로 기존 connection
+    fail-close를 유지한다.
+  - **R4 deferred resync 계약:** `Client.call()`과 screen demux는 resync RPC를 보내지 않는다. `needs_resync`인 stream의
+    screen frame은 버리되 framing은 끝까지 소비하고, 바깥 `RemoteRuntime` pump가 기존 outbound frame 뒤에 exact one
+    response-free resync ACK를 admission한다. admission 전에는 intent가 sticky이고, 성공 뒤 `awaiting_snapshot`으로
+    전이한다. 이 상태에서는 delta를 버리며 첫 fresh snapshot batch만 받아 `valid`로 돌아간다. 같은 stream의 중복
+    overflow/invalidation은 요청 수를 늘리지 않는다. 단, 이미 도착한 recovery snapshot 자체가 unified cap 때문에
+    admission되지 못하면 그 응답은 재사용할 수 없으므로 `needs_resync`로 한 번 되돌아가 다음 outer pump가 replacement를
+    exact one admission한다. 한 stream의 deferred resync나 backpressure가 sibling pump를 막지 않는다. generation frame
+    pump의 intent 관측은 owner-thread stable slot/node scalar와 empty-table fast path만 읽고,
+    유휴 tick마다 binding/cleanup registry 또는 seal digest를 다시 순회하지 않는다. ended/revoked stream은 intent와
+    buffered screen owner를 함께 제거한다.
+  - **R3/R4 gate:** Debug·ReleaseFast fixture는 `call()` 중 exact cap/cap+1, partial multi-frame overflow, 두 stream 혼합,
+    resync outbound backpressure, delta-before-snapshot 폐기, fresh snapshot 복구, ended/revoke cleanup과 allocator
+    fail-index를 검증한다. cap+1에서 target만 invalidated되고 sibling RPC·screen pump가 계속되는 actual socket fixture를
+    포함하며, connection poison·중복 resync·resident 회계 drift가 모두 0이어야 한다.
 - event-driven delta wake와 runtime-shared observation cache/change token을 구현하고 100-runtime idle CPU/allocation,
   hidden stream, slow observer artifact를 측정한다.
 - 남은 P3 product parity(metadata/selection/Reset·Clear/async SSH action)를 닫는다.

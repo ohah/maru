@@ -2713,15 +2713,43 @@ pub fn noteWorkspaceMutation() void {
     coord.mutation(monotonicNs()) catch {};
 }
 
+/// 시작 복원이 **끝났는가**. 플랫폼이 마지막 창까지 복원한 뒤 켠다.
+///
+/// 🔴 **이 게이트가 없으면 이 기능이 지키려던 것을 이 기능이 부순다.** 복원은 창을 차례로 만들므로
+/// (deferred surface → `applyWorkspaceWindow`), 그 중간에 저장이 뛰면 **아직 안 만들어진 창이 빠진
+/// 스냅샷**이 쓰인다. 기존 가드(한 창이라도 캡처 실패하면 전체 포기·유일성 검증)는 «캡처 실패» 를 막지
+/// «아직 없는 창» 은 못 막고, 블록이 하나라도 있으면 검증도 통과한다. 즉 복원 중 저장은 **창을 지우는
+/// 경로**다(계약 §P4 구동 계약).
+///
+/// 같은 이유로 `tickAppSession()` 이 이미 deferred 세션을 건너뛴다 — 선례가 있다.
+var app_workspace_restore_finished: bool = false;
+
+/// 플랫폼이 마지막 창까지 복원한 뒤 부른다. **여러 창이면 마지막 하나까지** 끝난 뒤여야 한다 — 창마다
+/// 부르면 첫 창이 끝난 시점에 게이트가 열려 나머지가 빠진 스냅샷이 쓰인다.
+pub fn markWorkspaceRestoreFinished() void {
+    app_workspace_restore_finished = true;
+}
+
+/// 지금 checkpoint 를 써도 되는가(계약 §P4). **셋을 모두** 만족해야 한다.
+///
+/// ⚠️ 종료는 `app_quitting` 을 그대로 쓴다 — 종료 확인이 수락되면 켜지는 기존 플래그다. 종료 경로의 저장
+/// 직전에 중복 저장이 끼면 `.bak` 정책과 순서가 얽힌다.
+pub fn workspaceCheckpointShouldSave() bool {
+    if (!app_workspace_restore_finished) return false; // 복원 중 — 창이 빠진 스냅샷을 쓸 수 있다
+    if (app_quitting) return false; // 종료 시작 — 종료 경로의 저장과 겹친다
+    return workspaceCheckpointDirty();
+}
+
 /// 테스트가 「이 사건이 dirty 를 세우는가」를 보는 자리. 제품은 `tick` 을 아직 안 몬다(다음 슬라이스).
 pub fn workspaceCheckpointDirty() bool {
     const coord = app_workspace_checkpoint orelse return false;
     return coord.isDirty();
 }
 
-/// 테스트 전용 리셋 — 앱 전역이라 판정자끼리 상태가 샌다.
+/// 테스트 전용 리셋 — 앱 전역이라 판정자끼리 상태가 샌다. 게이트도 함께 되돌린다.
 pub fn resetWorkspaceCheckpointForTest() void {
     app_workspace_checkpoint = null;
+    app_workspace_restore_finished = false;
 }
 
 fn monotonicNs() u64 {
@@ -22837,6 +22865,43 @@ test "P4: 배치를 바꾸는 사건이 checkpoint dirty 를 세운다" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+// P4 checkpoint 게이트 — **복원 중·종료 중에는 저장하지 않는다**(계약 §P4 구동 계약).
+//
+// 🔴 복원 중 저장이 위험한 이유가 이 판정자의 존재 이유다: 복원은 창을 차례로 만들므로 그 중간에 저장이
+// 뛰면 **아직 안 만들어진 창이 빠진 스냅샷**이 쓰인다. 기존 가드는 «캡처 실패» 를 막지 «아직 없는 창» 은
+// 못 막고, 블록이 하나라도 있으면 유일성 검증도 통과한다 — 즉 **창을 지우는 경로**다.
+//
+// 셋을 각각 본다: 복원 전이면 안 된다 · 종료 중이면 안 된다 · dirty 가 아니면 안 된다.
+test "P4 게이트: 복원 중·종료 중에는 checkpoint 를 쓰지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    resetWorkspaceCheckpointForTest();
+    defer {
+        resetWorkspaceCheckpointForTest();
+        app_quitting = false; // 앱 전역이라 다음 판정자로 샌다
+    }
+
+    // ① 배치가 바뀌어도 **복원이 안 끝났으면** 안 쓴다.
+    noteWorkspaceMutation();
+    try std.testing.expect(workspaceCheckpointDirty()); // 표시는 섰는데
+    try std.testing.expect(!workspaceCheckpointShouldSave()); // 쓰지는 않는다
+
+    // ② 복원이 끝나면 그때 열린다.
+    markWorkspaceRestoreFinished();
+    try std.testing.expect(workspaceCheckpointShouldSave());
+
+    // ③ 종료가 시작되면 다시 닫힌다 — 종료 경로의 저장과 겹치면 `.bak` 정책과 순서가 얽힌다.
+    app_quitting = true;
+    try std.testing.expect(!workspaceCheckpointShouldSave());
+    app_quitting = false;
+    try std.testing.expect(workspaceCheckpointShouldSave()); // 되돌리면 다시 열린다
+
+    // ④ 바뀐 게 없으면 열려 있어도 안 쓴다 — 게이트가 dirty 를 대체하지 않는다.
+    resetWorkspaceCheckpointForTest();
+    markWorkspaceRestoreFinished();
+    try std.testing.expect(!workspaceCheckpointDirty());
+    try std.testing.expect(!workspaceCheckpointShouldSave());
 }
 
 test "agent hooks stay out of provider files while the gate is off" {

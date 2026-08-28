@@ -39,9 +39,14 @@ pub const root_override_env = "MARU_SESSION_HOST_ROOT";
 /// 고정이라 둘이 갈렸고, §10 의 "열쇠(manifest)와 자물쇠(socket)를 한 디렉터리에" 불변식이 이
 /// 경로에서만 깨져 있었다. 당시 주석은 "소비자(테스트)가 socket 경로를 따로 주입하므로 문제가
 /// 없다"고 적었지만 **사실이 아니었다** — 2026-08-27 에 `test-session-host` 와
-/// `test-macos-app-host-abi` 가 사용자의 공용 `/tmp/maru-<uid>/sh` 에 가짜 socket 을 남겨
-/// `maru host status` 를 ambiguous 로 만들었고, 앱이 복구 세션을 adopt 하지 못해 크래시 로그도
-/// 없이 조용히 종료됐다. 격리는 **양쪽을 다 옮겨야** 격리다.
+/// `test-macos-app-host-abi` 가 사용자의 공용 자리에 살아 있는 host 를 남겨 앱이 복구 세션을
+/// adopt 하지 못했다.
+///
+/// 다만 **무엇이 앱을 깨뜨렸는지는 정확히 적는다**: `ambiguous`(`too_many_hosts`)는
+/// `recovery_discovery` 가 **registry 의 host entry** 를 셀 때 나오고, socket 디렉터리를 열거하는
+/// 제품 코드는 없다. 그러니 흘린 socket 파일 자체가 status 를 흔든 것이 아니다. socket 까지 옮기는
+/// 이유는 따로 있다 — daemon 은 자기가 **실제로 쓰는** 뿌리를 touch 해 tmp 정리로부터 지키는데,
+/// 뿌리가 갈리면 남의 자리를 지키면서 정작 자기 socket 을 잃는다. 격리는 양쪽을 다 옮겨야 격리다.
 pub fn currentUserRootPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
     if (overrideRoot(if (std.c.getenv(root_override_env)) |v| std.mem.span(v) else null)) |root|
         return std.fmt.bufPrintZ(buf, "{s}", .{root});

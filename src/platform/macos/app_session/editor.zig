@@ -72,6 +72,10 @@ fn contentHash(bytes: []const u8) u64 {
     return std.hash.Wyhash.hash(0, bytes);
 }
 
+/// 구문 강조 색(§5.3 1층). **`syntax` 모듈이 여기서 처음 제품에 들어온다** — 그 전까지는
+/// 모듈만 서 있고 부르는 코드가 없어 exe에 링크되지 않았다.
+pub const syntax_color = @import("editor_syntax.zig");
+
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
     ///
@@ -186,6 +190,34 @@ pub const FrameScratch = chrome_editor.frame.Scratch;
 const diff_frame = chrome_editor.diff_frame;
 
 /// pane 사각과 셀 크기로 편집기 op을 만든다. 반환값은 `scratch.ops[0..ops_len]`이 유효하다는 뜻이다.
+/// 보이는 줄의 **구문 강조 색**(§5.3 1층). 없으면 무색이다.
+///
+/// **보이는 범위만 묻는다.** 실측으로 전 문서 질의가 154KB에서 11ms인데 창 질의는 34~148µs다 —
+/// §5.3이 LSP 층에 정한 *"보이는 범위만 요청한다"*와 같은 논리이고, 화면 밖 결과는 소비되지 않는다.
+///
+/// **비교 뷰는 빈 것을 낸다** — 문서가 둘이라 provider도 둘이어야 하고, 그 축을 가르는 것은 좌우
+/// 히트테스트가 선 뒤의 일이다(`search_marks`가 같은 이유로 같은 자리에 있다).
+fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
+    if (term.rt.editor_diff != null) return &.{};
+    const doc = term.rt.editor_doc orelse return &.{};
+    const first = term.rt.editor_first_line;
+    if (first >= term.rt.editor_lines.len) return &.{};
+    // 화면 높이를 모르는 자리라 **넉넉히** 잡는다 — 랩이 켜지면 논리 줄 하나가 여러 행이 되므로
+    // 보이는 논리 줄은 행 수보다 적다. 남는 줄의 색은 만들어도 안 그려질 뿐이고, 모자라면 화면
+    // 아래가 무색이 된다.
+    const budget: usize = 256;
+    const count = @min(budget, term.rt.editor_lines.len - first);
+    return syntax_color.lineColors(
+        &term.rt.editor_syntax,
+        self.allocator,
+        doc.file.content,
+        doc.file.lines,
+        first,
+        count,
+        term.rt.editor_tab_width,
+    );
+}
+
 pub fn buildPaneOps(
     lines: []const []const u8,
     numbers: ?[]const ?u32,
@@ -209,6 +241,9 @@ pub fn buildPaneOps(
     /// 이 Term이 검색 대상이 아니다(활성이 아닌 pane — 그쪽까지 칠하면 어디를 검색 중인지 흐려진다).
     search_marks: ?[]const []const chrome_editor.frame.Mark,
     search_current: ?chrome_editor.frame.CurrentMatch,
+    /// 줄별 **구문 강조 색**(§5.3 1층). `lines`와 같은 축이고, 비어 있으면 무색이다 —
+    /// grammar가 없거나 아직 안 판 문서가 그렇다.
+    line_colors: []const []const chrome_editor.content.ColorSpan,
     /// 논리 줄마다의 **커서 자리**(줄 안 byte offset, 오름차순). `null`이면 커서가 없다.
     carets: ?[]const []const u32,
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다.
@@ -232,7 +267,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .line_colors = line_colors },
         .{ .first_line = first_line, .first_piece = first_piece, .carets = carets, .caret_visible = caret_visible, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -906,7 +941,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -923,7 +958,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -1117,6 +1152,15 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     term.rt.editor_doc = prepared.opened;
     term.rt.editor_lines = prepared.lines;
     term.rt.editor_path = prepared.path;
+
+    // **구문 트리를 여기서 연다**(§5.3). 문서와 수명이 같으므로 `releaseEditorTerm`이 함께 놓는다.
+    // grammar가 없는 언어면 `provider`가 `null`이고 그 문서는 끝까지 무색이다 — 실패가 아니라
+    // 저하다(§5). 여는 값은 문서 크기에 비례하지만(154KB 5ms 실측) **파일당 한 번**이고, 편집은
+    // 증분이라 65µs다.
+    term.rt.editor_syntax = syntax_color.open(
+        term.rt.editor_doc.?.file.content,
+        maru.session.editor.language.forPath(prepared.path),
+    );
 
     // **탭 폭을 config에서 받는다**(§9). 아래 파생값(접힘 겹수·`max_cols`)이 이 값에 달렸으므로
     // **그것들을 세기 전에** 넣어야 한다 — 뒤에 넣으면 세터가 방금 센 것을 도로 버린다.
@@ -2690,7 +2734,9 @@ fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor
     breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
-    refreshAfterEdit(self, term) catch {};
+    // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = changes });
     revealPrimaryCaretRows(self, term, rows_before);
     breakUndoGroup(term);
@@ -4261,7 +4307,9 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
         }
     }
     breakUndoGroup(term); // 되돌린 뒤 친 글자는 새 묶음이다
-    refreshAfterEdit(self, term) catch {};
+    // **undo·redo는 범위를 안 넘긴다 — 전체를 다시 판다.** 한 번에 항목 여럿을
+    // 되돌리는데 각 적용이 그 뒤 offset을 밀어, 범위를 합치면 어긋난 통지가 된다.
+    refreshAfterEdit(self, term, null) catch {};
     return true;
 }
 
@@ -4512,7 +4560,8 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     pushUndo(self, term, inverse, before, before_primary, .insert);
 
     writeBackSelections(self, term, sels);
-    refreshAfterEdit(self, term) catch {};
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     // **편집한 자리를 보여 준다**(§5.2 줄 축). 앵커 보정 **뒤**여야 한다 — 보정은 "화면을 제자리에"
     // 두는 것이고 노출은 "커서를 화면 안에"이므로, 순서가 반대면 보정이 노출을 되돌린다.
@@ -4736,7 +4785,9 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
     breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
-    refreshAfterEdit(self, term) catch {};
+    // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     revealPrimaryCaretRows(self, term, rows_before);
     breakUndoGroup(term);
@@ -4838,7 +4889,9 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     breakUndoGroup(term);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
-    refreshAfterEdit(self, term) catch {};
+    // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = dedup.items });
     revealPrimaryCaretRows(self, term, rows_before); // 붙여넣은 자리를 보여 준다(§5.2)
     breakUndoGroup(term); // 다음 타이핑도 새 묶음이다
@@ -4971,7 +5024,9 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     pushUndo(self, term, inverse, before, before_primary, .delete);
 
     writeBackSelections(self, term, sels);
-    refreshAfterEdit(self, term) catch {};
+    // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
+    const edit_span = syntax_color.spanFromInverse(inverse.changes);
+    refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
     // **편집한 자리를 보여 준다**(§5.2 줄 축). 앵커 보정 **뒤**여야 한다 — 보정은 "화면을 제자리에"
     // 두는 것이고 노출은 "커서를 화면 안에"이므로, 순서가 반대면 보정이 노출을 되돌린다.
@@ -5019,8 +5074,23 @@ fn nextCharBoundary(bytes: []const u8, at: usize) usize {
 ///
 /// **selection은 여기서 안 건드린다** — `delta.apply`가 이미 같은 연산에서 밀어 놓았다(§3.3).
 /// 여기서 또 손대면 그 매핑을 덮어쓴다.
-fn refreshAfterEdit(self: *AppSession, term: *Term) error{OutOfMemory}!void {
+fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
     const doc = term.rt.editor_doc orelse return;
+
+    // **구문 트리에 편집을 알린다 — 여기가 유일한 자리다**(§5.3 `onEdit`). 제품의 편집 경로
+    // 여섯이 전부 이 함수를 지나므로 통지도 한 곳이면 된다. 알리지 않으면 §5.3이 적었듯
+    // *"매번 전체 재파싱"*이 되고, 실측으로 그 차이가 81배다(154KB에서 5.3ms 대 65µs).
+    //
+    // **줄 인덱스보다 먼저 부른다.** 아래 ⑴이 줄 배열을 갈아 끼우는데, 통지에 실리는 행·열은
+    // **편집 뒤 문서**의 것이라 `doc.file.lines`가 이미 새 것이어야 한다 — `file.apply`가 그것을
+    // 이미 갱신해 두었다(줄 배열 `editor_lines`와는 다른 축이다).
+    if (edit) |e|
+        syntax_color.onEditSpan(&term.rt.editor_syntax, doc.file.content, e, doc.file.lines)
+    else
+        // **`null`은 "안 바뀌었다"가 아니라 "범위를 모른다"이다.** 이 함수는 편집 뒤에만 불리므로
+        // 통지를 건너뛰면 트리가 낡은 채로 남아 **색이 옛 문서를 가리킨다**. 범위를 못 만드는
+        // 경로(undo·redo — 한 번에 항목 여럿)는 전체를 다시 파는 쪽이 정확하다.
+        syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);
 
     // ⑷⑸⑹은 **실패할 수 없는 연산이고, ⑵⑶이 실패해도 반드시 돌아야 한다.**
     //
@@ -5281,6 +5351,9 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     editor_diff_ops.release(self, term); // N1.5 diff 행·줄 배열(entry 버퍼를 빌린다)
     if (term.rt.editor_doc) |*d| d.deinit(self.allocator);
     term.rt.editor_doc = null;
+    // **구문 트리도 문서와 함께 죽는다.** tree-sitter의 파서·트리는 자기 `malloc`에서 오므로
+    // 여기서 안 놓으면 `std.testing.allocator`가 못 보는 누수가 된다(`SYN10`이 그 자리를 잰다).
+    term.rt.editor_syntax.deinit(self.allocator);
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
     if (term.rt.editor_hit_rows.len > 0) self.allocator.free(term.rt.editor_hit_rows);
@@ -13518,7 +13591,7 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     };
     var inv = try term.rt.editor_doc.?.file.apply(.{ .changes = &changes }, &sels_dummy);
     inv.deinit();
-    refreshAfterEdit(fx.session, term) catch {};
+    refreshAfterEdit(fx.session, term, null) catch {};
     restoreScrollAnchor(fx.session, term, anchor, .{ .changes = &changes });
 
     // 맨 위 줄이 **같은 내용**을 가리켜야 한다 — 번호는 43으로 밀렸어도 화면은 제자리다.
@@ -13538,7 +13611,7 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     sels_dummy.items[0] = editor_selection.Selection.at(0);
     var inv2 = try term.rt.editor_doc.?.file.apply(.{ .changes = &changes2 }, &sels_dummy);
     inv2.deinit();
-    refreshAfterEdit(fx.session, term) catch {};
+    refreshAfterEdit(fx.session, term, null) catch {};
     restoreScrollAnchor(fx.session, term, anchor2, .{ .changes = &changes2 });
 
     const after_line = term.rt.editor_doc.?.file.lines.line(term.rt.editor_first_line).?;
@@ -15183,4 +15256,284 @@ test "[측정] 검색 강조가 프레임마다 문서 전체를 훑는 비용" 
     try testing.expect(filled > matches / 2);
     // 그리고 버퍼는 문서 전체 매치 수만큼 잡혀 있다(그 필드 doc이 적은 대가).
     try testing.expect(term.rt.editor_find_mark_buf.len >= matches);
+}
+
+// ── 구문 강조 배선(§5.3 1층) ────────────────────────────────────────────────────
+//
+// **아래 넷은 변환 층이 아니라 배선을 잰다.** `editor_syntax.zig`의 `ES1`~`ES12`는 그 모듈을
+// 직접 부르므로, 그것이 **제품 프레임 경로에 실제로 연결됐는지**는 하나도 안 본다 — 적대적
+// 검증에서 배선을 통째로 들어낸 뮤턴트 넷이 전부 살아남았다(`W03`·`W05`·`W06`·`W07`).
+
+/// 그린 셀 중에 구문 색 역할을 쓴 것이 있는가. **역할별로 센다** — "색이 있다"만 보면 본문색과
+/// 구분이 안 된다.
+fn drawnSyntaxRoles(self: *AppSession, term: *Term) usize {
+    // **셀 전경색을 센다 — draw op의 역할이 아니라.** `PaneDraw`가 주는 것은 이미 lowering된
+    // 셀이고, 그것이 **화면에 닿는 마지막 자료**다. 역할만 보면 lowering이 그것을 버려도 못
+    // 잡는다(이 파일이 배경 layer 뒤집힘에서 이미 겪은 부류다).
+    //
+    // **"본문색과 다르다"로 세면 안 된다.** 처음에 그렇게 썼다가 **gutter 줄 번호**를 세고
+    // 있었다 — 그것도 흐린 색이라 본문색과 다르다. 그러면 구문 색이 0개여도 34행이 "칠해진"
+    // 것으로 나오고, 창 예산·스크롤 뮤턴트가 전부 살아남는다(적대적 검증 3·4회차).
+    // 그래서 **구문 색 팔레트와 일치하는 셀만** 센다.
+    var d = appendPaneFrame(self, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, term) orelse return 0;
+    defer d.dl.deinit(self.allocator);
+    var n: usize = 0;
+    for (d.dl.cells) |c| {
+        if (isSyntaxColored(self, c)) n += 1;
+    }
+    return n;
+}
+
+/// 이 셀이 **구문 색**으로 칠해졌는가. gutter·선택·비교 밴드와 구분한다.
+fn isSyntaxColored(self: *AppSession, c: renderer.DrawCell) bool {
+    if (c.codepoint == ' ') return false;
+    const rgb = switch (c.style.foreground) {
+        .rgb => |v| v,
+        else => return false,
+    };
+    const tk = self.buildChromeTokens();
+    for ([_]chrome.tokens.ColorRole{
+        .syntax_keyword,  .syntax_string,    .syntax_number,   .syntax_comment,
+        .syntax_property, .syntax_type_name, .syntax_function, .syntax_punctuation,
+    }) |role| {
+        if (std.meta.eql(rgb, tk.get(role))) return true;
+    }
+    return false;
+}
+
+test "ES13 파일을 열면 프레임 op 에 구문 색이 실린다 — 배선이 실제로 붙었다" {
+    // **`ES1`은 이것을 못 잰다.** 그쪽은 `lineColors`를 직접 부르므로 그 결과가 프레임까지
+    // 흐르는지는 안 본다 — 열 때 provider 를 안 세우거나 프레임에 색을 안 넘기는 뮤턴트가
+    // 둘 다 살아남았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    try testing.expect(fx.term.rt.editor_syntax.provider != null); // grammar 가 섰다
+    try testing.expect(drawnSyntaxRoles(fx.session, fx.term) > 0); // 화면까지 닿았다
+}
+
+/// 그린 셀 중 **구문 색이 붙은 행**의 집합(화면 기준 행 번호). "색이 있다"만 세면 화면 대부분이
+/// 무색이어도 한 셀만 칠해지면 통과한다 — 적대적 검증 3회차에서 창 예산·스크롤 뮤턴트 셋이
+/// 그렇게 살아남았다(`W06`·`W09`·`W11`).
+fn coloredRows(self: *AppSession, term: *Term, out: *std.AutoHashMap(i32, void)) !void {
+    var d = appendPaneFrame(self, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, term) orelse return;
+    defer d.dl.deinit(self.allocator);
+    for (d.dl.cells) |c| {
+        if (isSyntaxColored(self, c)) try out.put(@intCast(c.row), {});
+    }
+}
+
+test "ES18 화면의 여러 행이 칠해진다 — 한 셀만 보고 통과하지 않는다" {
+    // **`ES13`·`ES14`는 "색이 하나라도 있으면" 통과한다.** 그래서 창 예산을 1줄로 줄이거나
+    // 스크롤 위치를 어긋내도 안 죽었다(3회차). 화면에 색이 **여러 행에 걸쳐** 있어야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 400) : (i += 1) _ = insertText(fx.session, fx.term, "const q = 7;\n");
+
+    var rows = std.AutoHashMap(i32, void).init(allocator);
+    defer rows.deinit();
+
+    // 첫 화면.
+    try coloredRows(fx.session, fx.term, &rows);
+    const at_top = rows.count();
+    try testing.expect(at_top >= 5); // 한 셀이 아니라 여러 행이다
+
+    // **끝 가까이로 굴려도** 마찬가지여야 한다 — 0번부터만 묻거나 예산이 작으면 여기가 빈다.
+    rows.clearRetainingCapacity();
+    setEditorTop(fx.session, fx.term, fx.term.rt.editor_lines.len - 20);
+    try coloredRows(fx.session, fx.term, &rows);
+    try testing.expect(rows.count() >= 5);
+
+    // **맨 윗행도 칠해져야 한다** — 스크롤이 한 줄 어긋나면 거기가 무색으로 남는다.
+    var min_row: i32 = std.math.maxInt(i32);
+    var it = rows.keyIterator();
+    while (it.next()) |k| min_row = @min(min_row, k.*);
+    var all = std.AutoHashMap(i32, void).init(allocator);
+    defer all.deinit();
+    try coloredRows(fx.session, fx.term, &all);
+    try testing.expect(all.contains(min_row));
+}
+
+test "ES14 창보다 긴 문서를 굴려도 그 화면에 색이 붙는다 — 늘 0번 줄을 묻지 않는다" {
+    // **문서가 짧으면 이 결함이 원리상 안 보인다.** 처음에는 픽스처의 3줄 문서를 그대로 쓰고
+    // 두 줄 굴렸는데, 0번부터 물어도 그 세 줄이 전부 범위에 들어와 뮤턴트가 살아남았다
+    // (적대적 검증 2회차 `W06`). **질의 창보다 긴 문서**여야 굴린 화면이 범위 밖으로 나간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 창 예산(256줄)을 넘기는 문서를 만든다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 400) : (i += 1) _ = insertText(fx.session, fx.term, "const q = 7;\n");
+
+    const total = fx.term.rt.editor_lines.len;
+    try testing.expect(total > 300);
+
+    // **끝 가까이로 굴린다** — 0번부터 256줄만 물으면 여기는 무색이 된다.
+    setEditorTop(fx.session, fx.term, total - 10);
+    try testing.expect(drawnSyntaxRoles(fx.session, fx.term) > 0);
+}
+
+test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 산다" {
+    // undo·redo 는 한 번에 항목 여럿을 되돌려 범위를 못 만들므로 **전체를 다시 판다**. 그 경로를
+    // 없애면 트리가 편집된 문서를 가리킨 채 남아 색이 옛 내용에 붙는다 — 적대적 검증에서 그
+    // 경로를 지운 뮤턴트 셋이 전부 살아남았다(2회차 `W02`·`E25`·`E27`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "// c\n"));
+
+    const doc = fx.term.rt.editor_doc.?;
+    const st = &fx.term.rt.editor_syntax;
+    {
+        const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 2, 4);
+        var is_comment = false;
+        for (colors[0]) |cs| if (cs.role == .syntax_comment) {
+            is_comment = true;
+        };
+        try testing.expect(is_comment);
+    }
+
+    try testing.expect(undoEdit(fx.session, fx.term));
+
+    // 되돌린 뒤 첫 줄은 다시 `const a = 1;`이다 — **키워드**여야 한다.
+    const doc2 = fx.term.rt.editor_doc.?;
+    const colors2 = syntax_color.lineColors(st, allocator, doc2.file.content, doc2.file.lines, 0, 2, 4);
+    try testing.expect(colors2.len >= 1);
+    var is_keyword = false;
+    for (colors2[0]) |cs| if (cs.role == .syntax_keyword and cs.start_col == 0) {
+        is_keyword = true;
+    };
+    try testing.expect(is_keyword);
+}
+
+test "ES15 편집하면 색이 새 내용을 따라온다 — 트리가 낡지 않는다" {
+    // **이것이 증분 통지를 재는 유일한 자리다.** 통지가 없으면 트리가 편집 전 문서를 가리킨 채
+    // 남고, 색은 **옛 offset**에 붙는다 — 화면에서는 색이 글자에서 밀린 것으로 보인다.
+    // 적대적 검증에서 통지를 뺀 뮤턴트 셋이 전부 살아남았다(`W02`·`E25`·`E27`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const before = drawnSyntaxRoles(fx.session, fx.term);
+    try testing.expect(before > 0);
+
+    // 문서 **머리에** 주석 줄을 넣는다 — 뒤 내용이 통째로 밀리므로, 트리가 안 따라오면 색이
+    // 밀린 자리에 남는다.
+    // **커서를 먼저 둔다** — 없으면 `insertText`가 거절한다(`iter.count() == 0`). 처음에 그것을
+    // 빠뜨려 판정자가 빨갛게 나왔는데, 구현이 아니라 이 테스트가 틀린 것이었다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "// added comment line\n"));
+    const doc = fx.term.rt.editor_doc.?;
+    const st = &fx.term.rt.editor_syntax;
+    const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 4, 4);
+    try testing.expect(colors.len >= 2);
+
+    // 첫 줄은 이제 주석이다 — **주석색**이어야 한다. 트리가 낡았으면 여기가 `keyword`로 남는다.
+    var first_is_comment = false;
+    for (colors[0]) |cs| {
+        if (cs.role == .syntax_comment) first_is_comment = true;
+    }
+    try testing.expect(first_is_comment);
+
+    // 둘째 줄은 원래 첫 줄(`const a = 1;`)이다 — 키워드가 0열에 있어야 한다.
+    var second_has_keyword = false;
+    for (colors[1]) |cs| {
+        if (cs.role == .syntax_keyword and cs.start_col == 0) second_has_keyword = true;
+    }
+    try testing.expect(second_has_keyword);
+}
+
+test "ES16 비교 뷰는 무색이다 — 문서가 둘이라 축이 갈린다" {
+    // 비교 뷰는 좌우가 **다른 문서**라 provider 도 둘이어야 한다. 단일 편집기의 색을 그대로
+    // 넘기면 **왼쪽 문서의 색이 오른쪽 글자 위에** 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    try testing.expect(syntaxColors(fx.session, fx.term).len > 0); // 단일 편집기는 색이 있다
+    fx.term.rt.editor_diff = .{}; // 비교 상태로 바꾼다
+    defer fx.term.rt.editor_diff = null;
+    try testing.expectEqual(@as(usize, 0), syntaxColors(fx.session, fx.term).len);
+}
+
+test "ES19 탭 폭을 바꾸면 색 경계가 따라온다 — 제품 경로로 잰다" {
+    // **판정자가 전부 탭 폭 4로만 돌면 하드코딩과 단일 출처를 구분할 수 없다.** 이 저장소가
+    // `ADV3-D`에서 같은 함정을 적어 두었는데, 색 계산이 그대로 그 안에 있었다.
+    //
+    // **두 가지를 함께 잡아야 한다.** 처음에는 `syntax_color.lineColors`를 **직접** 부르며 탭 폭을
+    // 인자로 넘겼는데, 그러면 제품 헬퍼(`syntaxColors`)에 박힌 4를 **원리상 못 본다** — 그 뮤턴트가
+    // 다섯 회차를 살아남았다. 그래서 여기서는 **제품 경로로** 묻는다.
+    //
+    // 그리고 탭을 **넷** 둔다. 열 계산이 탭 폭을 작게 보면 색 **예산**(`w`)이 줄어 뒤쪽 토큰이
+    // 통째로 빠지는데, 탭 하나짜리 줄에서는 그 차이가 예산 안에 묻힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "\t\t\t\t"));
+    setEditorTabWidth(fx.session, fx.term, 8);
+    try testing.expectEqual(@as(u8, 8), fx.term.rt.editor_tab_width);
+
+    const colors = syntaxColors(fx.session, fx.term); // **제품 경로**
+    try testing.expect(colors.len >= 1);
+
+    var kw_start: ?u32 = null;
+    for (colors[0]) |cs| {
+        if (cs.role == .syntax_keyword) kw_start = cs.start_col;
+    }
+    // 탭 넷 × 8열 = 32열에서 `const`가 시작한다. 탭 폭이 4로 박히면 16, 1로 세면 4다.
+    try testing.expect(kw_start != null);
+    try testing.expectEqual(@as(u32, 32), kw_start.?);
+}
+
+test "ES20 화면 맨 윗줄도 칠해진다 — 한 줄 어긋남을 잡는다" {
+    // 스크롤 위치가 한 줄만 밀려도 **맨 윗줄이 질의 범위 밖**이 되어 그 줄만 무색이 된다.
+    // `ES18`은 "다섯 행 이상 칠해짐"으로 세므로 한 줄 차이를 못 본다 — 적대적 검증에서 그
+    // 뮤턴트가 다섯 회차 내내 살아남았다(`W11`).
+    //
+    // **행 번호로 짚는다**: 본문 첫 행에 구문 색이 있어야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 400) : (i += 1) _ = insertText(fx.session, fx.term, "const q = 7;\n");
+    setEditorTop(fx.session, fx.term, 100);
+
+    var rows = std.AutoHashMap(i32, void).init(allocator);
+    defer rows.deinit();
+    try coloredRows(fx.session, fx.term, &rows);
+    try testing.expect(rows.count() >= 5);
+
+    // **본문 첫 행**(칠해진 행 중 가장 작은 값이 아니라, 그린 셀 전체의 첫 본문 행)에 색이 있어야
+    // 한다. 한 줄 밀리면 그 행만 빠지므로 `min`으로 재면 못 잡는다 — 밀린 뒤의 첫 행이 최소가
+    // 되기 때문이다.
+    var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse
+        return error.NoFrame;
+    defer d.dl.deinit(allocator);
+    var body_first: i32 = std.math.maxInt(i32);
+    for (d.dl.cells) |c| {
+        if (c.codepoint == ' ') continue;
+        body_first = @min(body_first, @as(i32, @intCast(c.row)));
+    }
+    try testing.expect(rows.contains(body_first));
 }

@@ -275,6 +275,13 @@ jobs:
       # socket/WebKit flaky에 묻히지 않게 격리하는 전용 게이트이고(위 주석), 이 스텝은 전수 그물이다.
       - name: Run the macOS AppSession test suite
         run: mise run test-macos-app-host-abi
+      # Swift 앱 호스트가 링크하는 **바로 그 정적 라이브러리**를 컴파일한다. 위 스텝이 이걸 대신하지
+      # 못한다 — `build.zig` 에서 테스트 바이너리(1139행)와 이 라이브러리(1399행)는 각자 `imports` 를
+      # 가진 별개 모듈이라, 라이브러리 쪽 배선만 빠지면 테스트 빌드는 초록인 채 앱만 안 빌드된다.
+      # ubuntu 의 check job 은 이걸 못 돈다: `session_host` 가 비-macOS 에서 `struct {}` 스텁이라
+      # 앱 호스트는 Linux 에서 컴파일이 불가능하다(2026-08-28 PR #2803 에서 실측 — 8개 컴파일 오류).
+      - name: Compile the static library the Swift app host links
+        run: mise run macos-app-host-abi-lib
 
   # session-host live-upgrade fixture는 macOS에서만 활성화되고, Debug와 ReleaseFast는 서로 다른 결함을
   # 잡는 독립 컴파일이다(Debug는 safety check, ReleaseFast는 no-fail 경로). 둘을 한 job에 직렬로 두면

@@ -972,7 +972,7 @@ fn allocPathZ(allocator: std.mem.Allocator, comptime format: []const u8, args: a
 fn labTokens() chrome.Tokens {
     // Lab token input is intentionally static: no config, system appearance, font fallback, or
     // user theme can turn a visual regression into an unreviewed golden update.
-    return chrome.Tokens.rich(.{
+    var tk = chrome.Tokens.rich(.{
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
         // Lab의 터미널 배경 = clear color와 같은 값. 편집기 시나리오의 바탕이 제품과 같은 관계를 갖는다.
@@ -1001,6 +1001,32 @@ fn labTokens() chrome.Tokens {
         // default theme never asks users to interpret.
         .accent = .{ .r = 221, .g = 161, .b = 94 },
     });
+
+    // **구문 강조 색을 얹는다**(§5.3). 안 얹으면 그 역할들이 **본문색으로 해석되어 캡처가 무색**이
+    // 된다 — 실제로 그 상태였다(2026-08-28 실측: 색이 op 의 run 까지 흘렀는데 토큰이 본문색을
+    // 돌려줬다). 그러면 **캡처 하네스가 이 기능을 원리상 못 밟고**, 골든 게이트도 색 회귀를 못 잡는다.
+    //
+    // **값은 제품과 같은 함수에서 온다** — `syntax_theme.fromTheme`가 위 팔레트에서 파생하므로
+    // 캡처의 색이 제품 화면의 색을 예고한다(diff 밴드가 같은 이유로 같은 계열 값을 쓴다).
+    // **값은 diff 밴드와 같은 방침으로 고정한다** — 제품은 `syntax_theme.fromTheme`가 팔레트에서
+    // 파생하지만 Lab은 입력을 고정해 결정적으로 만든다. 계열은 그 함수가 어두운 기본 테마에서 내는
+    // 자리와 같다(터미널 관례: keyword=magenta · string=green · number=yellow · comment=dim ·
+    // type/property=cyan · function=blue). 이 시나리오가 판정하는 것은 색상값이 아니라 **어느
+    // 글자에 어느 계열이 서는가**다.
+    tk.setSyntax(.{
+        .keyword = .{ .r = 0xd6, .g = 0x7a, .b = 0xd6 },
+        .string = .{ .r = 0x7a, .g = 0xc6, .b = 0x7a },
+        .number = .{ .r = 0xd6, .g = 0xc0, .b = 0x6a },
+        .comment = .{ .r = 0x88, .g = 0x88, .b = 0x88 },
+        .property = .{ .r = 0x6a, .g = 0xb8, .b = 0xd6 },
+        .type_name = .{ .r = 0x6a, .g = 0xc6, .b = 0xc6 },
+        .function = .{ .r = 0x6a, .g = 0xa0, .b = 0xd6 },
+        .punctuation = .{ .r = 0xb0, .g = 0xb0, .b = 0xb0 },
+        .tag = .{ .r = 0xd6, .g = 0x7a, .b = 0x7a },
+        .attribute = .{ .r = 0xd6, .g = 0x7a, .b = 0xd6 },
+        .invalid = .{ .r = 0xff, .g = 0x6a, .b = 0x6a },
+    });
+    return tk;
 }
 
 fn resetArtifacts(io: std.Io, ppm_path: []const u8, png_path: []const u8, json_path: []const u8) !void {

@@ -101,17 +101,22 @@ pub fn build(b: *std.Build) void {
     });
     // ── tree-sitter(구문 트리) C 배선 ─────────────────────────────────────────────
     //
-    // **별도 모듈로 세운다 — `maru`에도 exe 루트 모듈에도 매달지 않는다.**
-    //  · `maru`가 아닌 이유: wasm·mobile 빌드가 같은 root(`src/maru.zig`)를 쓰므로 거기 C를 매달면
-    //    그 둘이 깨진다(`check-wasm-sync`가 게이트다).
-    //  · exe 루트가 아닌 이유: **아직 부르는 코드가 없다.** 루트 모듈에 C를 매달면 소비처가 하나도
-    //    없어도 코어와 grammar가 배포물에 들어간다 — `ReleaseFast`(배포 `macos-dmg`가 쓰는 모드)
-    //    object 실측으로 코어 896KB · zig grammar 736KB다.
-    //    provider가 서는 N4에서 이 모듈을 `@import`하는 쪽에 붙인다 — 그때가 링크가 의미를 갖는
-    //    첫 시점이다.
+    // **별도 모듈로 세운다 — `maru`에 매달지 않는다.** wasm·mobile 빌드가 같은 root
+    // (`src/maru.zig`)를 쓰므로 거기 C를 매달면 그 둘이 깨진다(`check-wasm-sync`가 게이트다).
+    //
+    // **제품이 이 모듈을 `@import`한다**(`app_session/editor.zig`) — 그래서 exe 루트와 편집기
+    // 판정자 모듈이 이것을 import로 받는다. 코어와 grammar가 배포물에 들어간다:
+    // `ReleaseFast`(배포 `macos-dmg`가 쓰는 모드) object 실측으로 코어 896KB · zig grammar 736KB.
+    // 화면에 색이 뜨는 것이 그 대가로 얻는 것이고, **링크되는 순간 라이선스 전문 동봉 의무가
+    // 생긴다**(`docs/third-party-licenses.md`).
     //
     // 코어는 `lib.c` 하나가 나머지 `.c`를 `#include`하는 **단일 번역 단위**다 — 파일을 열거하지
     // 않는다(그 목록은 upstream이 바꾼다).
+    // **번들에 넣을 라이선스 전문**(third-party-licenses.md — *"컴파일 산출물이 들어가므로
+    // 라이선스 전문을 앱 리소스에 동봉한다"*). 코어와 grammar가 exe에 링크되므로 의무가 생겼다.
+    var ts_core_license: ?std.Build.LazyPath = null;
+    var ts_grammar_license: ?std.Build.LazyPath = null;
+
     const syntax_mod = b.addModule("syntax", .{
         .root_source_file = b.path("src/syntax/tree_sitter.zig"),
         .target = target,
@@ -119,6 +124,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     if (b.lazyDependency("tree_sitter", .{})) |ts_dep| {
+        ts_core_license = ts_dep.path("LICENSE");
         // **세 경로를 다 준다 — 상류 자신의 레시피다**(`build.zig`의 `addIncludePath` 셋,
         // `binding_rust/build.rs`의 `.include()` 셋이 같은 목록이다). `include`만 주면 코어의
         // `src/unicode/utf8.h`가 부르는 `"unicode/umachine.h"`가 **벤더링 헤더로 안 풀리고**,
@@ -153,6 +159,7 @@ pub fn build(b: *std.Build) void {
         });
     }
     if (b.lazyDependency("tree_sitter_zig", .{})) |ts_zig_dep| {
+        ts_grammar_license = ts_zig_dep.path("LICENSE");
         // **지금 grammar에는 이 경로가 없어도 된다** — `parser.c`가 `#include "tree_sitter/parser.h"`로
         // 인용 형식이라 자기 디렉터리 기준으로 풀린다(적대적 검증: 뗀 뮤턴트가 양쪽에서 살아남았다).
         // 그래도 두는 것은 생성된 파서가 꺾쇠 형식(`<tree_sitter/parser.h>`)을 쓰는 판도 있어서다 —
@@ -201,6 +208,7 @@ pub fn build(b: *std.Build) void {
     });
     const session_host_product_options = b.addOptions();
     session_host_product_options.addOption(bool, "allow_validation_only_restore", false);
+    const session_host_build_options_mod = session_host_product_options.createModule();
 
     const exe = b.addExecutable(.{
         .name = "maru",
@@ -210,7 +218,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
-                .{ .name = "session_host_build_options", .module = session_host_product_options.createModule() },
+                .{ .name = "syntax", .module = syntax_mod },
+                .{ .name = "session_host_build_options", .module = session_host_build_options_mod },
             },
         }),
     });
@@ -637,6 +646,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
         });
@@ -693,6 +703,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
         });
@@ -1133,6 +1144,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
                 .{ .name = "build_options", .module = build_options_test_mod },
             },
         }),
@@ -1396,6 +1408,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
             },
         }),
     });
@@ -1468,6 +1481,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
                     .{ .name = "build_options", .module = build_options_test_mod },
                 },
             }),
@@ -1835,6 +1849,17 @@ pub fn build(b: *std.Build) void {
                 // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
                 "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
                 "cp \"$1\" zig-out/Maru.app/Contents/Info.plist; " ++
+                // **번들 코드 라이브러리의 라이선스 전문**(third-party-licenses.md §번들 코드 라이브러리).
+                // tree-sitter 코어와 grammar가 컴파일 산출물로 exe에 들어가므로 재배포 의무가 있다 —
+                // 폰트가 `Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리·같은 이유다.
+                "mkdir -p zig-out/Maru.app/Contents/Resources/Licenses; " ++
+                "cp \"$2\" zig-out/Maru.app/Contents/Resources/Licenses/tree-sitter-LICENSE; " ++
+                "cp \"$3\" zig-out/Maru.app/Contents/Resources/Licenses/tree-sitter-zig-LICENSE; " ++
+                // **넣었는지 확인한다** — 재배포 의무는 빠뜨려도 아무 테스트가 안 깨지는 부류라
+                // 조용히 넘어가면 안 된다. 폰트 쪽 `lic_found`와 같은 규율이다.
+                "for lic in tree-sitter-LICENSE tree-sitter-zig-LICENSE; do " ++
+                "[ -s \"zig-out/Maru.app/Contents/Resources/Licenses/$lic\" ] || " ++
+                "{ echo \"error: bundled code library license missing or empty: $lic — 재배포 의무\" >&2; exit 1; }; done; " ++
                 // 모든 폰트 패밀리(assets/fonts/<Family>/)의 .ttf를 Fonts/에 평평하게 복사한다 — ATSApplicationFontsPath가
                 // 그 디렉터리를 스캔해 전부 자동 등록하므로 사용자는 config의 font.family에 패밀리명만 적으면 된다.
                 // 라이선스(OFL.txt·LICENSE.*)는 평평화 시 충돌하지 않게 패밀리명 프리픽스로 동봉한다(재배포 의무).
@@ -1875,6 +1900,11 @@ pub fn build(b: *std.Build) void {
         // `sh -c` 뒤 첫 인자는 $0이므로 label을 하나 두고 generated plist를 $1로 전달한다.
         macos_app_bundle.addArg("maru-app-bundle");
         macos_app_bundle.addFileArg(macos_info_plist);
+        // **순서가 스크립트의 `$2`·`$3`과 같아야 한다.** 없으면 번들이 라이선스 없이 나가므로
+        // 조용히 건너뛰지 않고 **소리 내어 죽는다** — 재배포 의무는 빠뜨려도 아무 테스트가 안
+        // 깨지는 부류이고, 폰트 쪽이 같은 이유로 `lic_found` 검사를 둔다.
+        macos_app_bundle.addFileArg(ts_core_license orelse @panic("tree-sitter LICENSE missing"));
+        macos_app_bundle.addFileArg(ts_grammar_license orelse @panic("tree-sitter-zig LICENSE missing"));
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(&macos_mermaid_helper_bundle.step);
@@ -2974,7 +3004,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        .imports = &.{
+            .{ .name = "maru", .module = maru_mod },
+            // **편집기 판정자가 제품 코드를 들여오므로 `syntax`도 따라온다** — `app_session/editor.zig`가
+            // 그것을 `@import`한다. 없으면 이 스텝이 컴파일조차 안 된다.
+            .{ .name = "syntax", .module = syntax_mod },
+        },
     });
     if (target.result.os.tag == .macos) {
         editor_test_module.addCSourceFile(.{
@@ -2999,7 +3034,7 @@ pub fn build(b: *std.Build) void {
         // 왕복 불변식 ①은 `src/chrome/components/editor_view/`에 있어 **이 바이너리에 없다** —
         // 필터에 이름을 적는 것과 그 판정자가 도는 것은 다르다. 그쪽은 아래 `test-chrome-ui`
         // 의존으로 실제로 돌린다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES" },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
@@ -4003,7 +4038,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = input_parity_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"host-backed motion 리포팅"},
         });
@@ -4453,7 +4491,10 @@ pub fn build(b: *std.Build) void {
                     .target = target,
                     .optimize = retention_optimize,
                     .link_libc = true,
-                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                    .imports = &.{
+                        .{ .name = "maru", .module = maru_mod },
+                        .{ .name = "syntax", .module = syntax_mod },
+                    },
                 }),
                 .filters = &.{"G2"},
             });
@@ -5174,7 +5215,10 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
                 .target = target,
                 .optimize = cr0b_optimize,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR0b AppSession publication은"},
         });
@@ -5195,7 +5239,10 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
                 .target = target,
                 .optimize = cr0b_optimize,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{ "CR0b GUI current first는", "CR0b GUI restore first 뒤 current는", "CR0b GUI multiple window와 adapter는", "CR0b AppHost incident ABI prerequisite는" },
         });
@@ -5260,7 +5307,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr0b_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR0b bootstrap 4 GUI child는"},
         });
@@ -5601,7 +5651,10 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
                 .target = target,
                 .optimize = cr2d1_optimize,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR2d1 AppSession batch routing은"},
         });
@@ -5710,7 +5763,10 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
                 .target = target,
                 .optimize = cr2d3_optimize,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{ "host-backed 벨:", "host-backed OSC 52 read:", "host-backed 재접속:" },
         });
@@ -5756,7 +5812,10 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
                 .target = target,
                 .optimize = cr2d4_optimize,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR2d4"},
         });
@@ -7479,7 +7538,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr5d2_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR5d-2 actual AppSession Window 이동은"},
         });
@@ -7525,7 +7587,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr6a1_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR6a-1 AppSession은 recovered projection을"},
         });
@@ -7584,7 +7649,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr6a2_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{"CR6a-2 primary sidebar는"},
         });
@@ -7611,6 +7679,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
                     .{ .name = "build_options", .module = build_options_test_mod },
                 },
             }),
@@ -7689,7 +7758,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = cr6b_optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
             }),
             .filters = &.{
                 "CR6b orphan row action은",
@@ -8323,7 +8395,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+            },
         });
         if (target.result.os.tag == .macos) {
             event_c3_3b5_app_session_module.addCSourceFile(.{
@@ -8376,7 +8451,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+            },
         });
         if (target.result.os.tag == .macos) {
             event_c3_3b4_async_close_module.addCSourceFile(.{
@@ -8809,7 +8887,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = b3_optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+            },
         });
         if (target.result.os.tag == .macos) {
             event_c3_3b6_app_session_module.addCSourceFile(.{

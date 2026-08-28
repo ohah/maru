@@ -110,7 +110,7 @@ pub fn lower(
             } else paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
         },
         .border => |b| if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
-        .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
+        .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, tk),
         .swatch => |sw| {
             const rounded = sw.corner_radii[0] != 0 or sw.corner_radii[1] != 0 or sw.corner_radii[2] != 0 or sw.corner_radii[3] != 0;
             if (!rounded) {
@@ -215,7 +215,7 @@ fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin
     }
 }
 
-fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
+fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, tk: *const chrome.Tokens) void {
     // 이 경로는 셀 격자에 찍으므로 부분 클립이 불가능하다. 대신 셀 단위로 판정한다 — 같은 행의 배경
     // quad는 GPU가 픽셀 단위로 자르는데 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
     if (t.clip) |clip| {
@@ -227,6 +227,13 @@ fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, 
     const row: usize = @intCast(row_i);
     var col_i = @divTrunc(t.origin.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
     for (t.runs) |run| {
+        // **run 이 제 색을 가지면 그것이 이긴다**(`run.role orelse text.role`) — 제품 lowering
+        // (`chrome_draw_lowering.zig`)이 쓰는 것과 **같은 규칙**이다.
+        //
+        // 이 줄이 없어서 Lab 캡처가 무색이었다: 구문 색이 op 의 run 까지 흘렀는데 여기서
+        // op 색 하나로 덮였다. **캡처 하네스가 그 기능을 원리상 못 밟는 상태**였고, 그래서
+        // 골든 게이트도 색 회귀를 잡을 수 없었다(2026-08-28 실측).
+        const color: terminal.Color = .{ .rgb = tk.get(run.role orelse t.role) };
         const view = std.unicode.Utf8View.init(run.text) catch continue;
         var it = view.iterator();
         while (it.nextCodepoint()) |codepoint| {

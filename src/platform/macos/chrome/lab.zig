@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const maru = @import("maru");
+const syntax = @import("syntax");
+const editor_syntax = @import("../app_session/editor_syntax.zig");
 const lowering = @import("metal_lowering.zig");
 
 /// **Lab 안의 탭 폭 단일 출처.** 제품은 `Term.rt.editor_tab_width`를 쓰는데 Lab에는 Term이 없다.
@@ -554,6 +556,59 @@ const editor_width_lines = [_][]const u8{
 /// 이 시나리오가 증명하려는 것은 문서 내용이 아니라 **기하**다 — 줄 번호가 우측 정렬로 같은 오른쪽
 /// 끝에 서는가, 자릿수가 9에서 10으로 넘어가도 본문 시작 열이 그대로인가, 본문이 gutter 오른쪽에서
 /// 시작하며 줄 번호와 **같은 baseline**에 서는가. 마지막 항목이 셀↔픽셀 변환 회귀가 드러나는 자리다.
+/// Lab 편집기 장면의 구문 색. 줄 배열을 문서 하나로 이어 붙여 제품의 변환 층에 물린다.
+///
+/// **Lab은 결정적이어야 하므로** 여는 언어를 `.zig`로 고정한다 — 픽스처가 전부 Zig 코드다.
+/// 색이 안 나오면(`grammar` 없음 등) 빈 것을 돌려주고 화면은 무색이 된다(§5).
+const LabSyntax = struct {
+    allocator: std.mem.Allocator,
+    doc: []u8 = &.{},
+    file: ?maru.session.editor.edit_doc.EditableFile = null,
+    state: editor_syntax.State = .{},
+    colors: []const []const chrome.components.editor_view.content.ColorSpan = &.{},
+
+    fn deinit(self: *LabSyntax) void {
+        self.state.deinit(self.allocator);
+        if (self.file) |*f| f.deinit();
+        if (self.doc.len > 0) self.allocator.free(self.doc);
+        self.* = .{ .allocator = self.allocator };
+    }
+};
+
+fn editorSyntaxColors(lines: []const []const u8, tab_width: u16) LabSyntax {
+    const a = std.heap.page_allocator;
+    var out: LabSyntax = .{ .allocator = a };
+
+    var total: usize = 0;
+    for (lines) |l| total += l.len + 1;
+    if (total == 0) return out;
+
+    const doc = a.alloc(u8, total) catch return out;
+    var n: usize = 0;
+    for (lines) |l| {
+        @memcpy(doc[n..][0..l.len], l);
+        n += l.len;
+        doc[n] = '\n';
+        n += 1;
+    }
+    out.doc = doc;
+
+    out.file = maru.session.editor.edit_doc.EditableFile.init(a, doc, true) catch {
+        return out;
+    };
+    out.state = editor_syntax.open(out.file.?.content, .zig);
+    out.colors = editor_syntax.lineColors(
+        &out.state,
+        a,
+        out.file.?.content,
+        out.file.?.lines,
+        0,
+        lines.len,
+        tab_width,
+    );
+    return out;
+}
+
 fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const editor_view = chrome.components.editor_view;
 
@@ -692,8 +747,18 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 골든으로 굳힌다 — 캡처가 지켜야 할 것이 바로 제품 화면이다(적대적 검증 2026-08-17).
     var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
 
-    const fw = editor_view.frame.build(.{
+    // **구문 강조 색**(§5.3). **제품과 같은 층을 지난다** — Lab이 자기 나름대로 색을 만들면
+    // 캡처가 제품을 예고하지 못한다(이 파일이 크기 계산에서 이미 같은 판단을 적어 두었다).
+    //
+    // **이 배선 전에는 캡처가 무색이었다** — Lab이 `frame.build`를 직접 부르며 색을 안 넘겼고,
+    // 그래서 **골든 게이트가 색 회귀를 원리상 못 잡았다**. 기능이 화면에 뜨는데 캡처 하네스가
+    // 그것을 한 번도 안 밟는 상태였다.
+    var syn = editorSyntaxColors(lines, lab_tab_width);
+    defer syn.deinit();
+
+    const fw = chrome.components.editor_view.frame.build(.{
         .lines = lines,
+        .line_colors = syn.colors,
         .tab_width = lab_tab_width,
         .first_line = first_line,
         .first_piece = first_piece,

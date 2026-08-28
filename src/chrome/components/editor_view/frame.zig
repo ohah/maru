@@ -15,7 +15,7 @@
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
-const content = @import("content.zig");
+pub const content = @import("content.zig");
 const geometry = @import("geometry.zig");
 const gutter = @import("gutter.zig");
 const scrollbar = @import("scrollbar.zig");

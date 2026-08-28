@@ -34,6 +34,10 @@ pub const Side = struct {
 
     /// 그 쪽 **행**들의 표시 텍스트. 좌우 길이가 같아야 같은 인덱스가 같은 높이다.
     lines: []const []const u8,
+    /// 줄별 **구문 강조 색 구간**(§5.3). `lines`와 같은 축이고, 짧거나 비어도 된다 —
+    /// 없는 줄은 무색이다. **단일 편집기만 채운다**(비교 뷰는 문서가 둘이라 provider도 둘이고,
+    /// 그 축을 가르는 것은 좌우 히트테스트가 선 뒤의 일이다 — `search_marks`와 같은 이유).
+    line_colors: []const []const frame.content.ColorSpan = &.{},
     /// gutter 자릿수를 정하는 **문서** 줄 수(행 수가 아니다). `null`이면 `lines.len`.
     total_lines: ?usize = null,
     /// 행마다의 줄 번호(`null` 항목 = 짝을 맞추려 넣은 빈 행). `null`이면 순차 번호.
@@ -233,6 +237,7 @@ pub fn buildSide(
         frame.showsHorizontalBar(shared.wrap, side.content_max_cols, geometry.compute(probe.total_cols, side.total_lines orelse side.lines.len, .{}).content.width);
     const m = sideMetricsWith(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
     return frame.build(.{
+        .line_colors = side.line_colors,
         .lines = side.lines,
         .first_line = shared.first_line,
         .first_piece = shared.first_piece,

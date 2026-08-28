@@ -64,6 +64,7 @@ pub const FixtureProbe = struct {
         output_wake: runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: runtime_manager.RuntimeManager.ChildExitEvidence,
         observation: runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
+        screen: runtime_manager.RuntimeManager.ScreenPerformanceEvidence,
     ) FixtureAction,
 };
 
@@ -527,6 +528,7 @@ fn runSessionHostImpl(
     if (fixture_probe != null) {
         manager.enableOutputMetrics();
         manager.fixtureEnableObservationPerformanceEvidence();
+        manager.fixtureEnableScreenPerformanceEvidence();
     }
     // socket 을 **실제로 만드는** 자리다. uid 로 계산하면 격리를 켠 실행에서도 사용자의 공용
     // `/tmp/maru-<uid>/sh` 에 socket 이 생겨, 이 host 의 열쇠(격리된 registry)와 자물쇠가 갈린다.
@@ -749,6 +751,7 @@ fn runSessionHostImpl(
                 manager.fixtureOutputWakeEvidence(),
                 manager.fixtureChildExitEvidence(),
                 manager.fixtureObservationPerformanceEvidence(),
+                manager.fixtureScreenPerformanceEvidence(),
             )) {
                 .continue_serving => {},
                 .reset_stall => fd_owner.resetFixtureStallTelemetry(),

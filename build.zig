@@ -3590,6 +3590,50 @@ pub fn build(b: *std.Build) void {
     run_session_host_e2c_boundary_tests.setCwd(b.path("."));
     session_host_e2c_step.dependOn(&run_session_host_e2c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e2c_boundary_tests.step);
+    const session_host_e3a_step = b.step(
+        "test-session-host-e3a",
+        "Verify P4 E3a screen-change token gating in Debug and ReleaseFast",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e3a_optimize| {
+        const session_host_e3a_server_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+                .target = target,
+                .optimize = e3a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 E3a unchanged screen token"},
+        });
+        const run_session_host_e3a_server_tests = b.addRunArtifact(session_host_e3a_server_tests);
+        run_session_host_e3a_server_tests.addArg("--maru-expect-tests=1");
+        session_host_e3a_step.dependOn(&run_session_host_e3a_server_tests.step);
+
+        const session_host_e3a_manager_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = e3a_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 E3a screen token advances"},
+        });
+        const run_session_host_e3a_manager_tests = b.addRunArtifact(session_host_e3a_manager_tests);
+        run_session_host_e3a_manager_tests.addArg("--maru-expect-tests=1");
+        session_host_e3a_step.dependOn(&run_session_host_e3a_manager_tests.step);
+    }
+    const session_host_e3a_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_e3a_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P4 E3a product token"},
+    });
+    const run_session_host_e3a_boundary_tests = b.addRunArtifact(session_host_e3a_boundary_tests);
+    run_session_host_e3a_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_e3a_boundary_tests.setCwd(b.path("."));
+    session_host_e3a_step.dependOn(&run_session_host_e3a_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_e3a_boundary_tests.step);
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",

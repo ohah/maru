@@ -211,6 +211,19 @@ const ObservationCacheRecord = struct {
     }
 };
 
+const ScreenChangeRecord = struct {
+    token: server.ScreenChangeToken = .{ .incarnation = 1, .revision = 1 },
+
+    fn advance(self: *ScreenChangeRecord) error{ScreenChangeTokenExhausted}!void {
+        self.token.revision = std.math.add(u64, self.token.revision, 1) catch {
+            self.token.incarnation = std.math.add(u64, self.token.incarnation, 1) catch
+                return error.ScreenChangeTokenExhausted;
+            self.token.revision = 1;
+            return;
+        };
+    }
+};
+
 // macOS libc CSPRNG(std.posix 미노출 — 이 파일은 macOS 전용). runtime_id 발급용.
 extern "c" fn arc4random_buf(buf: [*]u8, nbytes: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -281,6 +294,11 @@ pub const RuntimeManager = struct {
     observation_core_lock_acquisitions: u64 = 0,
     observation_core_lock_hold_total_ns: u64 = 0,
     observation_core_lock_hold_max_ns: u64 = 0,
+    screen_metrics_enabled: bool = false,
+    screen_snapshot_calls: u64 = 0,
+    screen_delta_calls: u64 = 0,
+    screen_owned_allocations: u64 = 0,
+    screen_core_lock_acquisitions: u64 = 0,
     /// 다음 in-process handle. 1부터 발급한다 — 0은 opaque 슬롯의 null과 겹치므로 handle로 쓰지 않는다.
     next_handle: RuntimeHandle = 1,
     /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
@@ -289,6 +307,9 @@ pub const RuntimeManager = struct {
     /// Heap-pinned runtime-global canonical metadata. Hash-map growth moves only pointers, never a
     /// cache owner while a prepared transaction or borrowed view exists.
     observation_caches: std.AutoHashMapUnmanaged(RuntimeHandle, *ObservationCacheRecord) = .empty,
+    /// Owner-thread screen mutation tokens. They let the socket producer reject an unchanged
+    /// cadence before opening the core lock, projector, or screen-owned allocator.
+    screen_changes: std.AutoHashMapUnmanaged(u128, ScreenChangeRecord) = .empty,
     /// runtime별 BEL 누적 횟수. core의 `takeBell()`은 **소비형 bool**이라 관측(full-state, "이전과 같으면 미전송")에
     /// 그대로 실으면 true→true 전이를 잃어 둘째 벨을 놓친다. 그래서 host가 drain할 때마다 여기서 단조 증가시키고,
     /// client는 마지막에 본 값과의 **차이**로 울릴지 정한다(로컬이 bool을 소비하는 것과 결과 동일).
@@ -347,9 +368,15 @@ pub const RuntimeManager = struct {
         self.observation_core_lock_acquisitions = 0;
         self.observation_core_lock_hold_total_ns = 0;
         self.observation_core_lock_hold_max_ns = 0;
+        self.screen_metrics_enabled = false;
+        self.screen_snapshot_calls = 0;
+        self.screen_delta_calls = 0;
+        self.screen_owned_allocations = 0;
+        self.screen_core_lock_acquisitions = 0;
         self.next_handle = 1;
         self.foreground_cache = .empty;
         self.observation_caches = .empty;
+        self.screen_changes = .empty;
         self.bell_counts = .empty;
         self.clipboards = .empty;
         self.output_wake = null;
@@ -422,6 +449,30 @@ pub const RuntimeManager = struct {
         };
     }
 
+    pub const ScreenPerformanceEvidence = struct {
+        snapshot_calls: u64,
+        delta_calls: u64,
+        owned_allocations: u64,
+        core_lock_acquisitions: u64,
+    };
+
+    pub fn fixtureEnableScreenPerformanceEvidence(self: *RuntimeManager) void {
+        self.screen_metrics_enabled = true;
+        self.screen_snapshot_calls = 0;
+        self.screen_delta_calls = 0;
+        self.screen_owned_allocations = 0;
+        self.screen_core_lock_acquisitions = 0;
+    }
+
+    pub fn fixtureScreenPerformanceEvidence(self: *const RuntimeManager) ScreenPerformanceEvidence {
+        return .{
+            .snapshot_calls = self.screen_snapshot_calls,
+            .delta_calls = self.screen_delta_calls,
+            .owned_allocations = self.screen_owned_allocations,
+            .core_lock_acquisitions = self.screen_core_lock_acquisitions,
+        };
+    }
+
     fn recordObservationCoreLockHold(self: *RuntimeManager, started_at_ns: i128) void {
         if (!self.observation_metrics_enabled) return;
         const ended_at_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -444,6 +495,7 @@ pub const RuntimeManager = struct {
             while (it.next()) |record| record.*.deinit(self.allocator);
             self.observation_caches.deinit(self.allocator);
         }
+        self.screen_changes.deinit(self.allocator);
         self.bell_counts.deinit(self.allocator);
         self.notification_journal.deinit() catch @panic("notification journal owner moved");
         self.notification_metadata.deinit();
@@ -460,7 +512,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -607,6 +659,11 @@ pub const RuntimeManager = struct {
                 continue;
             };
             result.output_events += drained.output_events;
+            if (drained.output_events != 0)
+                self.advanceScreenChange(item.runtime_id) catch {
+                    result.failures += 1;
+                    continue;
+                };
             self.admitPendingNotification(item.runtime_id, terminal_slot);
             self.takeRejectedNotification(terminal_slot);
             if (drained.ended) |ended| switch (ended) {
@@ -1109,6 +1166,12 @@ pub const RuntimeManager = struct {
                 @ptrFromInt(runtime.surface_id),
             );
             entry_registered = true;
+            try self.screen_changes.putNoClobber(
+                self.allocator,
+                runtime.runtime_id,
+                .{},
+            );
+            errdefer _ = self.screen_changes.remove(runtime.runtime_id);
 
             prepared.items[prepared.count] = .{
                 .runtime_id = runtime.runtime_id,
@@ -1433,7 +1496,8 @@ pub const RuntimeManager = struct {
 
     fn resizeOp(ctx: *anyopaque, runtime_id: u128, cols: u16, rows: u16) anyerror!void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
-        return self.resizeWithApply(runtime_id, cols, rows, self, backendResizeApply);
+        try self.resizeWithApply(runtime_id, cols, rows, self, backendResizeApply);
+        try self.publishScreenChange(runtime_id);
     }
 
     fn backendResizeApply(ctx: *anyopaque, handle: RuntimeHandle, size: maru.terminal.Size, io: std.Io) anyerror!void {
@@ -1732,6 +1796,10 @@ pub const RuntimeManager = struct {
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
+        if (self.screen_metrics_enabled) {
+            self.screen_snapshot_calls +|= 1;
+            self.screen_core_lock_acquisitions +|= 1;
+        }
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
         const bytes = try screen_snapshot.projectSnapshotBounded(
@@ -1740,6 +1808,7 @@ pub const RuntimeManager = struct {
             .{ .generation = generation, .sequence = sequence },
             protocol.max_viewport_snapshot,
         );
+        if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 1;
         return .{ .bytes = bytes, .frontier = .{ .generation = generation, .sequence = sequence } };
     }
 
@@ -1752,6 +1821,10 @@ pub const RuntimeManager = struct {
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
         const opts = screen_snapshot.ProjectOptions{ .generation = generation, .sequence = sequence };
+        if (self.screen_metrics_enabled) {
+            self.screen_delta_calls +|= 1;
+            self.screen_core_lock_acquisitions +|= 1;
+        }
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
 
@@ -1773,6 +1846,7 @@ pub const RuntimeManager = struct {
                 );
                 errdefer allocator.free(snap);
                 const send = allocator.dupe(u8, snap) catch return error.OutOfMemory;
+                if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 2;
                 return .{
                     .send = send,
                     .is_snapshot = true,
@@ -1782,6 +1856,7 @@ pub const RuntimeManager = struct {
             },
             else => return e,
         };
+        if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 2;
         return .{
             .send = result.delta,
             .is_snapshot = false,
@@ -1895,6 +1970,7 @@ pub const RuntimeManager = struct {
                 surface.lockCore(self.io);
                 defer surface.unlockCore(self.io);
                 _ = core_command.apply(&surface.core, command);
+                try self.publishScreenChange(runtime_id);
                 return;
             },
             else => {},
@@ -2063,6 +2139,7 @@ pub const RuntimeManager = struct {
         } else {
             return allocator.dupe(u8, "{\"sel\":false}") catch return error.OutOfMemory;
         }
+        try self.publishScreenChange(runtime_id);
         const maybe = surface.core.selectionViewportSpan();
         if (maybe) |sp| {
             return std.fmt.allocPrint(allocator, "{{\"sel\":true,\"sr\":{d},\"sc\":{d},\"er\":{d},\"ec\":{d},\"block\":{}}}", .{ sp.start.row, sp.start.col, sp.end.row, sp.end.col, sp.block }) catch return error.OutOfMemory;
@@ -2090,6 +2167,9 @@ pub const RuntimeManager = struct {
         // 변화 → 다음 delta로 스크롤 화면 투영). 그 뒤 클립하므로 현재 매치가 보이게 된다.
         if (scroll and cur_index < matches.items.len) {
             surface.core.scrollToAbs(matches.items[cur_index].start.row);
+            // Search navigation changes the authoritative viewport without passing through the
+            // PTY reader queue, so it must publish the same screen-change edge explicitly.
+            try self.publishScreenChange(runtime_id);
         }
 
         var out: std.ArrayList(u8) = .empty;
@@ -2124,6 +2204,28 @@ pub const RuntimeManager = struct {
         const entry = self.host_registry.get(runtime_id) orelse return null;
         const slot = entry.runtime orelse return null;
         return @intFromPtr(slot);
+    }
+
+    fn screenChangeTokenOp(ctx: *anyopaque, runtime_id: u128) anyerror!server.ScreenChangeToken {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        if (self.handleFor(runtime_id) == null) return error.RuntimeNotFound;
+        return (self.screen_changes.get(runtime_id) orelse return error.RuntimeNotFound).token;
+    }
+
+    fn advanceScreenChange(self: *RuntimeManager, runtime_id: u128) error{
+        RuntimeNotFound,
+        ScreenChangeTokenExhausted,
+    }!void {
+        if (self.handleFor(runtime_id) == null) return error.RuntimeNotFound;
+        const record = self.screen_changes.getPtr(runtime_id) orelse return error.RuntimeNotFound;
+        try record.advance();
+    }
+
+    /// Owner-side mutations use the same coalescing pipe as reader output. Publication precedes
+    /// notify, so a full pipe means an unread wake already owns the obligation.
+    fn publishScreenChange(self: *RuntimeManager, runtime_id: u128) !void {
+        try self.advanceScreenChange(runtime_id);
+        if (self.output_wake) |*wake| OutputWake.notify(wake);
     }
 
     /// 실 PTY runtime을 띄운다: backend.spawn(forkpty) → attach(reader 시작) → host registry 등록. `runtime_id`를 돌려준다.
@@ -2238,7 +2340,9 @@ pub const RuntimeManager = struct {
         // **위에서 뽑아 자식에게 실어 보낸 그 id** 로 등록한다. 여기서 다시 뽑으면 자식 env 의 pane 칸과
         // 갈려, 그 터미널은 자기 훅 로그를 영영 못 읽는다.
         const entry = try self.host_registry.register(runtime_id, params.cols, params.rows);
+        errdefer self.host_registry.unregister(runtime_id);
         entry.runtime = @ptrFromInt(handle); // opaque 슬롯에 handle 보관(그 목적: 실 runtime handle). handle>=1이라 non-null.
+        try self.screen_changes.putNoClobber(self.allocator, runtime_id, .{});
         self.next_handle += 1;
         return runtime_id;
     }
@@ -2253,6 +2357,7 @@ pub const RuntimeManager = struct {
             agent_hook_logs.removeRuntimeLog(identity.log_base, identity.host_id, runtime_id);
         const slot = entry.runtime orelse {
             self.host_registry.unregister(runtime_id); // handle 미기록(비정상) — registry만 정리.
+            _ = self.screen_changes.remove(runtime_id);
             _ = self.notification_metadata.remove(runtime_id);
             return;
         };
@@ -2271,6 +2376,7 @@ pub const RuntimeManager = struct {
             var state = kv.value;
             state.deinit(self.allocator);
         }
+        _ = self.screen_changes.remove(runtime_id);
         self.host_registry.unregister(runtime_id);
         _ = self.notification_metadata.remove(runtime_id);
     }
@@ -2698,6 +2804,64 @@ test "runtime manager: output wake is nonblocking CLOEXEC and coalesces queue pu
     try std.testing.expect(manager.drainOutputWake());
     ready.revents = 0;
     try std.testing.expectEqual(@as(c_int, 0), c.poll(@ptrCast(&ready), 1, 0));
+}
+
+test "P4 E3a screen token advances only after owned output drain and committed owner mutation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var rollover: ScreenChangeRecord = .{
+        .token = .{ .incarnation = 7, .revision = std.math.maxInt(u64) },
+    };
+    try rollover.advance();
+    try std.testing.expectEqual(server.ScreenChangeToken{
+        .incarnation = 8,
+        .revision = 1,
+    }, rollover.token);
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(allocator, std.testing.io, &host_registry, null);
+    defer manager.deinit();
+    try manager.enableOutputWake();
+    const ops = manager.runtimeOps();
+    const read_token = ops.screen_change_token.?;
+    const rid = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cols = 40,
+        .rows = 10,
+    });
+    defer ops.terminate(ops.ctx, rid);
+
+    const initial = try read_token(ops.ctx, rid);
+    try ops.write_input(ops.ctx, rid, "E3A\n");
+    var ready = c.pollfd{
+        .fd = manager.outputWakeReadFd().?,
+        .events = c.POLL.IN,
+        .revents = 0,
+    };
+    try std.testing.expect(c.poll(@ptrCast(&ready), 1, 1000) > 0);
+    try std.testing.expect(manager.drainOutputWake());
+    var output_events: usize = 0;
+    var attempts: usize = 0;
+    while (attempts < 100 and output_events == 0) : (attempts += 1) {
+        output_events += manager.drainOwnedEvents().output_events;
+        if (output_events == 0) _ = usleep(1000);
+    }
+    try std.testing.expect(output_events != 0);
+    const after_output = try read_token(ops.ctx, rid);
+    try std.testing.expect(!std.meta.eql(initial, after_output));
+
+    const idle = manager.drainOwnedEvents();
+    try std.testing.expectEqual(@as(usize, 0), idle.output_events);
+    try std.testing.expectEqual(after_output, try read_token(ops.ctx, rid));
+
+    try ops.resize(ops.ctx, rid, 41, 11);
+    const after_resize = try read_token(ops.ctx, rid);
+    try std.testing.expect(!std.meta.eql(after_output, after_resize));
+    ready.revents = 0;
+    try std.testing.expect(c.poll(@ptrCast(&ready), 1, 100) > 0);
+    try std.testing.expect(manager.drainOutputWake());
 }
 
 test "runtime manager: output wake saturates into nonblocking coalescing and drains reusable" {

@@ -155,16 +155,15 @@ slow-observer/RSS pressure 전에 512×256으로 resize한다. 대형 화면 pro
 같은 artifact는 READY 뒤 controller·healthy·slow 세 stream을 모두 drain하면서 foreground refresh 500ms를 넘는 연속
 600ms source-settle 창에서 observation materialization·core-lock·output-wake 증분 0을 먼저 확인한다. 최초 source 변경이
 이 준비 창에 걸리면 그 뒤에서 bounded retry하며,
-무변경 창을 한 번도 만들지 못하면 제품 idle 실패로 닫는다. 이 barrier 뒤 marker 전 250ms 이상 idle 구간의
+무변경 창을 한 번도 만들지 못하면 제품 idle 실패로 닫는다. 이 barrier 뒤 marker 전 1초 이상 idle 구간의
 `RuntimeManager.OutputWakeEvidence` 전후값과
 `proc_pid_rusage:RUSAGE_INFO_V4` user/system CPU 전후값도 남긴다. validator는 idle notify/write/coalesce/drain delta를 모두
-0으로, user+system CPU delta를 **25ms 이하**로 판정한다. 이 상한은 250ms 관측창에서 단일 core 10%이며, 짧은 표본의
-scheduler/계측 잡음에는 여유를 두면서 busy-spin이나 output-wake storm은 거부하는 값이다. active marker 구간은 notify delta 7 이상, 실제 write와 owner drain
+0으로, user+system CPU delta를 **25ms 이하**로 판정한다. 이 상한은 1초 관측창에서 단일 core 2.5%이며 scheduler/계측
+잡음에는 여유를 두면서 busy-spin이나 output-wake storm은 거부하는 값이다. active marker 구간은 notify delta 7 이상, 실제 write와 owner drain
 delta 1 이상이어야 하므로 우연히 20ms cadence에 걸린 빠른 표본을 wake 성공으로 세지 않는다. 실제 pipe 포화 `EAGAIN`,
 `EINTR` 분기, broken read-end `SIGPIPE`, drain 뒤 idle readiness와 restore graph의 새 process-local notifier는
 `runtime_manager.zig` 단위/process 테스트가 별도로 소유한다. 이 숫자를 바꾸려면 같은 runner의 raw artifact와 validator
-상수·이 절을 함께 갱신한다. wake counter와 idle CPU 표본까지 더한 뒤의 5회 연속 실행도 median 2.8~3.1ms, 전체 max
-8.7ms, idle wake delta 0, idle CPU delta 0.071~0.088ms였다. 250ms는 빠른 제품 gate이지 장시간 idle soak를 대체하지 않는다.
+상수·이 절을 함께 갱신한다. 이 1초 제품 gate는 장시간 idle soak를 대체하지 않는다.
 
 ## P4 E2 runtime-shared observation cache 예산
 
@@ -174,8 +173,8 @@ runtime 하나의 source generation 변경 뒤 증분을 정확히 1회로 판�
 BEL·clipboard·screen의 정확히 3회여야 한다. 이 호출 수 판정은 하드웨어 속도와 무관하며 client 수나 idle cadence가
 제품 작업량을 다시 늘리는 구조 회귀를 잡는다.
 
-`session-host-slow-observer-macos.json` v2는 별도 ReleaseFast host의 실제 controller·slow observer·healthy
-observer 제품 경로에서 누적 materialization, core-lock 획득 수, lock hold total/max와 250ms idle 전후 증분을
+`session-host-slow-observer-macos.json` v3는 별도 ReleaseFast host의 실제 controller·slow observer·healthy
+observer 제품 경로에서 누적 materialization, core-lock 획득 수, lock hold total/max와 1초 idle 전후 증분을
 남긴다. validator는 누적 획득 수가 `materializations * 3`과 정확히 같은지, idle 구간의 materialization·lock
 획득·lock hold 증분이 모두 0인지 판정한다. observation-owned heap copy·canonical JSON·cache transaction은
 materialization 안에서만 열리므로 idle materialization 0이 이 경계의 allocation opportunity 0을 구조적으로
@@ -207,6 +206,11 @@ CPU 상한 100ms는 1초 창에서 single core 10%다. 현재 한 runtime idle �
 CPU만으로 구조를 판정하지 않고 exact-zero projector/allocation/core-lock counter를 함께 요구한다. E3b runtime metadata sampler는
 같은 1·10·100 workload에서 unchanged runtime의 metadata producer visit·materialization·core lock·owned allocation 0을 추가로
 요구하며, 그 gate가 붙기 전에는 P4 E3 전체를 완료 처리하지 않는다.
+
+E3a 제품 배선 뒤 2026-08-28 동일 ReleaseFast artifact v3 실측은 1·10·100 runtime의 1초 창에서 CPU
+0.025691ms·0.081410ms·1.162807ms였고, 세 행 모두 snapshot/delta/owned-allocation/core-lock 증분 0이었다.
+같은 run의 healthy delivery median은 0.152750ms, max는 1.494833ms였다. 이 값은 상한을 완화하는 기준이 아니라
+raw artifact가 실제 제품 경로를 통과했다는 기록이며 validator는 위 hard cap만 판정한다.
 
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 

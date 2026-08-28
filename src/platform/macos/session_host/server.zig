@@ -246,6 +246,15 @@ pub const RuntimeOps = struct {
         ctx: *anyopaque,
         runtime_id: u128,
     ) anyerror!ScreenChangeToken = null,
+    /// Runtime-owner metadata source token. Equal tokens let a stream skip the metadata producer
+    /// before cadence counters, core locks, canonicalization, or allocation. Null preserves the
+    /// legacy protocol fixture cadence until its backend adopts P4 E3b.
+    metadata_change_token: ?*const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+    ) anyerror!MetadataChangeToken = null,
+    /// Sole-owner bounded sampler. Calling before its deadline is an O(1) no-op.
+    sample_metadata_sources: ?*const fn (ctx: *anyopaque, now_ns: u64) void = null,
     /// Pending notification을 지우지 않고 off-side JSON과 generation token으로 복제한다. server가 response를
     /// canonical control queue에 admission한 뒤에만 `notification_commit`으로 같은 generation을 소비한다.
     notification_peek: *const fn (
@@ -313,6 +322,11 @@ pub const RuntimeOps = struct {
 };
 
 pub const ScreenChangeToken = struct {
+    incarnation: u64,
+    revision: u64,
+};
+
+pub const MetadataChangeToken = struct {
     incarnation: u64,
     revision: u64,
 };
@@ -610,6 +624,7 @@ pub const CollectedOutput = struct {
     clear_resync: bool = false,
     next_observation_token: ?u64 = null,
     next_observation_revision: ?u64 = null,
+    next_metadata_change_token: ?MetadataChangeToken = null,
     previous_observation_ticks: u8,
     base_reservation: ?connection_slot.BaseReservation = null,
     frames_taken: bool = true,
@@ -673,6 +688,8 @@ pub const CollectedOutput = struct {
             self.next_observation_token = null;
             sub.observation_revision = self.next_observation_revision.?;
         }
+        if (self.next_metadata_change_token) |next|
+            sub.metadata_change_token = next;
         self.finishFrames();
         self.finished = true;
     }
@@ -759,6 +776,8 @@ pub const Connection = struct {
         observation_token: ?u64 = null,
         observation_revision: u64 = 0,
         observation_ticks: u8 = 0,
+        /// Runtime source token committed with the last admitted metadata full state.
+        metadata_change_token: ?MetadataChangeToken = null,
         /// Non-null only while a newly acquired controller attach is unpublished. rollbackAttach
         /// may restore this exact epoch; normal detach never decrements generation.
         unpublished_controller_generation: ?u64 = null,
@@ -1434,6 +1453,10 @@ pub const Connection = struct {
             },
             else => return self.replyError(request_id, .internal),
         };
+        const metadata_change_token: ?MetadataChangeToken = if (ops.metadata_change_token) |read_token|
+            read_token(ops.ctx, sub.runtime_id) catch return self.replyError(request_id, .internal)
+        else
+            null;
         const canonical = observation.canonical_json;
         const changed = sub.observation_token != observation.change_token;
         const revision = if (changed)
@@ -1456,6 +1479,7 @@ pub const Connection = struct {
             sub.observation_token = observation.change_token;
             sub.observation_revision = revision;
         }
+        if (metadata_change_token) |token| sub.metadata_change_token = token;
         return action;
     }
 
@@ -1492,6 +1516,10 @@ pub const Connection = struct {
             },
             else => return self.replyError(request_id, .internal),
         };
+        const metadata_change_token: ?MetadataChangeToken = if (ops.metadata_change_token) |read_token|
+            read_token(ops.ctx, sub.runtime_id) catch return self.replyError(request_id, .internal)
+        else
+            null;
         const canonical = observation.canonical_json;
         const changed = sub.observation_token != observation.change_token;
         const revision = if (changed)
@@ -1510,10 +1538,13 @@ pub const Connection = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
         };
-        if (!changed) return .{ .reply = reply };
+        if (!changed and metadata_change_token == null) return .{ .reply = reply };
 
-        output.next_observation_token = observation.change_token;
-        output.next_observation_revision = revision;
+        if (changed) {
+            output.next_observation_token = observation.change_token;
+            output.next_observation_revision = revision;
+        }
+        output.next_metadata_change_token = metadata_change_token;
         transferred = true;
         return .{ .prepared_reply = .{ .reply = reply, .output = output } };
     }
@@ -1865,6 +1896,19 @@ pub const Connection = struct {
                     }
                 }
             }
+            if (cached != null) if (ops.metadata_change_token) |read_token| {
+                const source_token = read_token(ops.ctx, id.?) catch {
+                    self.rollbackAttach(stream);
+                    self.state = .closed;
+                    return .close;
+                };
+                if (self.attachments.getPtr(stream)) |sub| {
+                    if (prepared_product)
+                        prepared_output.next_metadata_change_token = source_token
+                    else
+                        sub.metadata_change_token = source_token;
+                }
+            };
         };
         const metadata_revision: u64 = if (prepared_output.next_observation_revision) |revision|
             revision
@@ -2767,11 +2811,35 @@ pub const Connection = struct {
             ) orelse return error.ProjectionBudgetUnavailable;
         }
 
-        sub.observation_ticks +%= 1;
-        if (self.runtime_metadata_v1 and
-            (sub.observation_ticks >= 5 or ops.observation_urgent(ops.ctx, sub.runtime_id)))
-        {
-            sub.observation_ticks = 0;
+        const metadata_change_token: ?MetadataChangeToken = if (self.runtime_metadata_v1)
+            if (ops.metadata_change_token) |read_token|
+                read_token(ops.ctx, sub.runtime_id) catch |err| switch (err) {
+                    error.RuntimeNotFound => {
+                        if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                        output.rollback(self);
+                        self.endMissingRuntime(stream);
+                        return null;
+                    },
+                    else => return error.OutOfMemory,
+                }
+            else
+                null
+        else
+            null;
+        const metadata_token_changed = if (metadata_change_token) |current|
+            sub.metadata_change_token == null or
+                !std.meta.eql(current, sub.metadata_change_token.?)
+        else
+            false;
+        const legacy_metadata_due = if (self.runtime_metadata_v1 and
+            ops.metadata_change_token == null)
+        blk: {
+            sub.observation_ticks +%= 1;
+            break :blk sub.observation_ticks >= 5 or
+                ops.observation_urgent(ops.ctx, sub.runtime_id);
+        } else false;
+        if (self.runtime_metadata_v1 and (metadata_token_changed or legacy_metadata_due)) {
+            if (legacy_metadata_due) sub.observation_ticks = 0;
             const maybe_observation = ops.cached_observation(
                 ops.ctx,
                 sub.runtime_id,
@@ -2834,6 +2902,8 @@ pub const Connection = struct {
                     output.next_observation_token = obs.change_token;
                     output.next_observation_revision = next_revision;
                 }
+                if (metadata_change_token) |source_token|
+                    output.next_metadata_change_token = source_token;
             }
         }
 
@@ -2985,7 +3055,8 @@ pub const Connection = struct {
         }
 
         if (list.items.len == 0 and !output.replace_base and
-            output.next_observation_token == null)
+            output.next_observation_token == null and
+            output.next_metadata_change_token == null)
         {
             // This was a successful idle sampling opportunity, not a rejected output batch.
             // Preserve its metadata cadence while rolling back only the unused projection-budget
@@ -3034,6 +3105,7 @@ pub const Connection = struct {
             sub.base = null;
         }
         sub.observation_token = null;
+        sub.metadata_change_token = null;
     }
 
     pub fn resyncPending(
@@ -4808,6 +4880,8 @@ pub const FakeRuntimeOps = struct {
     delta_calls: usize = 0,
     screen_change_token: ScreenChangeToken = .{ .incarnation = 1, .revision = 1 },
     screen_token_reads: usize = 0,
+    metadata_change_token: MetadataChangeToken = .{ .incarnation = 1, .revision = 1 },
+    metadata_token_reads: usize = 0,
     delta_probe_ctx: ?*anyopaque = null,
     delta_probe: ?*const fn (*anyopaque) void = null,
     snapshot_fail_count: usize = 0,
@@ -4954,6 +5028,12 @@ pub const FakeRuntimeOps = struct {
         if (self.runtime_missing or runtime_id != 0xaa) return error.RuntimeNotFound;
         self.screen_token_reads += 1;
         return self.screen_change_token;
+    }
+    fn metadataChangeTokenFn(ctx: *anyopaque, runtime_id: u128) anyerror!MetadataChangeToken {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        if (self.runtime_missing or runtime_id != 0xaa) return error.RuntimeNotFound;
+        self.metadata_token_reads += 1;
+        return self.metadata_change_token;
     }
     /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
     fn notificationPeekFn(
@@ -5184,6 +5264,12 @@ pub const FakeRuntimeOps = struct {
     pub fn opsWithScreenChangeToken(self: *FakeRuntimeOps) RuntimeOps {
         var result = self.ops();
         result.screen_change_token = screenChangeTokenFn;
+        return result;
+    }
+
+    pub fn opsWithScreenAndMetadataChangeTokens(self: *FakeRuntimeOps) RuntimeOps {
+        var result = self.opsWithScreenChangeToken();
+        result.metadata_change_token = metadataChangeTokenFn;
         return result;
     }
 };
@@ -5726,6 +5812,91 @@ test "P4 E3a unchanged screen preserves metadata cadence and publishes the fifth
     try testing.expectEqual(@as(usize, 0), fake.delta_calls);
     metadata.commit(&conn);
     try testing.expectEqual(@as(u8, 0), conn.attachments.get(1).?.observation_ticks);
+}
+
+test "P4 E3b unchanged runtime bypasses metadata producer and admission owns its source token" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.opsWithScreenAndMetadataChangeTokens();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    const attach = try feedExpectFrames(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (attach) |frame| frame.deinit(allocator);
+        allocator.free(attach);
+    }
+    const after_attach_calls = fake.observation_calls;
+    try testing.expectEqual(
+        fake.metadata_change_token,
+        conn.attachments.get(1).?.metadata_change_token.?,
+    );
+
+    for (0..100) |_| try testing.expectEqual(
+        @as(?CollectedOutput, null),
+        try conn.collectOutputForLocalStreamAtEpoch(1, 100, 100),
+    );
+    try testing.expectEqual(after_attach_calls, fake.observation_calls);
+    try testing.expectEqual(@as(u8, 0), conn.attachments.get(1).?.observation_ticks);
+
+    fake.observation_version = 1;
+    fake.metadata_change_token.revision = 2;
+    var rejected = (try conn.collectOutputForLocalStreamAtEpoch(1, 101, 101)).?;
+    try testing.expectEqual(after_attach_calls + 1, fake.observation_calls);
+    rejected.rollback(&conn);
+    try testing.expectEqual(@as(u64, 1), conn.attachments.get(1).?.metadata_change_token.?.revision);
+
+    var admitted = (try conn.collectOutputForLocalStreamAtEpoch(1, 102, 102)).?;
+    try testing.expectEqual(after_attach_calls + 2, fake.observation_calls);
+    admitted.commit(&conn);
+    try testing.expectEqual(@as(u64, 2), conn.attachments.get(1).?.metadata_change_token.?.revision);
+    try testing.expectEqual(
+        @as(?CollectedOutput, null),
+        try conn.collectOutputForLocalStreamAtEpoch(1, 103, 103),
+    );
+    try testing.expectEqual(after_attach_calls + 2, fake.observation_calls);
+
+    // A user-action fresh response is also a full-state delivery. It must commit the current
+    // source token even when canonical metadata bytes are unchanged, otherwise the next producer
+    // turn sends a duplicate event for the same state.
+    fake.metadata_change_token.revision = 3;
+    const barrier = try feedJson(
+        &conn,
+        .request,
+        3,
+        "{\"method\":\"runtime.observation\",\"params\":{\"stream_id\":1}}",
+    );
+    defer if (barrier.frame) |frame| frame.deinit(allocator);
+    try testing.expectEqual(@as(u64, 3), conn.attachments.get(1).?.metadata_change_token.?.revision);
+    const after_barrier_calls = fake.observation_calls;
+    try testing.expectEqual(
+        @as(?CollectedOutput, null),
+        try conn.collectOutputForLocalStreamAtEpoch(1, 104, 104),
+    );
+    try testing.expectEqual(after_barrier_calls, fake.observation_calls);
+
+    // Purging a committed full-state delivery releases both the canonical observation and its
+    // source-token authority. Keeping either base would suppress or duplicate the resync state.
+    conn.markResyncDeliveryPurged(1);
+    try testing.expectEqual(@as(?u64, null), conn.attachments.get(1).?.observation_token);
+    try testing.expectEqual(@as(?MetadataChangeToken, null), conn.attachments.get(1).?.metadata_change_token);
 }
 
 test "CR4a frontier는 output admission commit 뒤에만 subscription sequence를 전진한다" {

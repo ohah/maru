@@ -64,6 +64,7 @@ pub const FixtureProbe = struct {
         output_wake: runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: runtime_manager.RuntimeManager.ChildExitEvidence,
         observation: runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
+        metadata_sampler: runtime_manager.RuntimeManager.MetadataSamplerEvidence,
         screen: runtime_manager.RuntimeManager.ScreenPerformanceEvidence,
     ) FixtureAction,
 };
@@ -751,6 +752,7 @@ fn runSessionHostImpl(
                 manager.fixtureOutputWakeEvidence(),
                 manager.fixtureChildExitEvidence(),
                 manager.fixtureObservationPerformanceEvidence(),
+                manager.fixtureMetadataSamplerEvidence(),
                 manager.fixtureScreenPerformanceEvidence(),
             )) {
                 .continue_serving => {},

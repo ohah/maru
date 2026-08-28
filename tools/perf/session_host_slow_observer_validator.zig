@@ -7,7 +7,7 @@
 const std = @import("std");
 const connection_slot = @import("connection_slot");
 
-const schema_name = "maru.session-host-slow-observer-macos.v3";
+const schema_name = "maru.session-host-slow-observer-macos.v4";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -78,6 +78,9 @@ const ScreenIdleScaleSample = struct {
     delta_call_delta: u64,
     owned_allocation_delta: u64,
     core_lock_acquisition_delta: u64,
+    metadata_producer_visit_delta: u64,
+    metadata_materialization_delta: u64,
+    metadata_core_lock_acquisition_delta: u64,
 };
 
 /// Flat top-level fields make the artifact easy to inspect in CI while RawSample remains a typed
@@ -146,6 +149,11 @@ const Artifact = struct {
     idle_observation_materialization_delta: u64,
     idle_observation_core_lock_acquisition_delta: u64,
     idle_observation_core_lock_hold_delta_ns: u64,
+    metadata_sampler_visits: u64,
+    metadata_sampler_changes: u64,
+    metadata_sampler_failures: u64,
+    metadata_producer_visits: u64,
+    idle_metadata_producer_visit_delta: u64,
     screen_snapshot_calls: u64,
     screen_delta_calls: u64,
     screen_owned_allocations: u64,
@@ -155,6 +163,12 @@ const Artifact = struct {
     idle_screen_owned_allocation_delta: u64,
     idle_screen_core_lock_acquisition_delta: u64,
     screen_idle_scale_samples: []const ScreenIdleScaleSample,
+    metadata_change_runtime_count: u32,
+    metadata_change_target_stream_count: u32,
+    metadata_change_sampler_delta: u64,
+    metadata_change_producer_visit_delta: u64,
+    metadata_change_materialization_delta: u64,
+    metadata_change_core_lock_acquisition_delta: u64,
     active_wake_notify_delta: u64,
     active_wake_published_delta: u64,
     active_wake_coalesced_delta: u64,
@@ -345,7 +359,10 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
             observation_core_lock_hold_cap_ns or
         artifact.idle_observation_materialization_delta != 0 or
         artifact.idle_observation_core_lock_acquisition_delta != 0 or
-        artifact.idle_observation_core_lock_hold_delta_ns != 0)
+        artifact.idle_observation_core_lock_hold_delta_ns != 0 or
+        artifact.metadata_sampler_visits == 0 or
+        artifact.metadata_sampler_failures != 0 or
+        artifact.idle_metadata_producer_visit_delta != 0)
     {
         return error.InvalidObservationEvidence;
     }
@@ -370,10 +387,22 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
             sample.cpu_total_delta_ns > screen_idle_cpu_total_cap_ns or
             sample.snapshot_call_delta != 0 or sample.delta_call_delta != 0 or
             sample.owned_allocation_delta != 0 or
-            sample.core_lock_acquisition_delta != 0)
+            sample.core_lock_acquisition_delta != 0 or
+            sample.metadata_producer_visit_delta != 0 or
+            sample.metadata_materialization_delta != 0 or
+            sample.metadata_core_lock_acquisition_delta != 0)
         {
             return error.InvalidScreenScaleEvidence;
         }
+    }
+    if (artifact.metadata_change_runtime_count != 100 or
+        artifact.metadata_change_target_stream_count != 3 or
+        artifact.metadata_change_sampler_delta != 1 or
+        artifact.metadata_change_producer_visit_delta != 3 or
+        artifact.metadata_change_materialization_delta != 1 or
+        artifact.metadata_change_core_lock_acquisition_delta != 3)
+    {
+        return error.InvalidMetadataChangeScaleEvidence;
     }
     if (artifact.slow_connection_id == 0 or
         artifact.slow_connection_id != artifact.first_stall_connection_id)
@@ -709,9 +738,9 @@ const wake_fixture = [_]WakeSample{
     .{ .input_at_ns = 970_000_000, .input_accepted_at_ns = 971_000_000, .marker_at_ns = 981_000_000, .end_to_end_latency_ns = 11_000_000, .delivery_latency_ns = 10_000_000 },
 };
 const screen_idle_scale_fixture = [_]ScreenIdleScaleSample{
-    .{ .runtime_count = 1, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 1_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0 },
-    .{ .runtime_count = 10, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 10_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0 },
-    .{ .runtime_count = 100, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 50_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0 },
+    .{ .runtime_count = 1, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 1_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0, .metadata_producer_visit_delta = 0, .metadata_materialization_delta = 0, .metadata_core_lock_acquisition_delta = 0 },
+    .{ .runtime_count = 10, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 10_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0, .metadata_producer_visit_delta = 0, .metadata_materialization_delta = 0, .metadata_core_lock_acquisition_delta = 0 },
+    .{ .runtime_count = 100, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 50_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0, .metadata_producer_visit_delta = 0, .metadata_materialization_delta = 0, .metadata_core_lock_acquisition_delta = 0 },
 };
 
 fn goodArtifact() Artifact {
@@ -783,6 +812,11 @@ fn goodArtifact() Artifact {
         .idle_observation_materialization_delta = 0,
         .idle_observation_core_lock_acquisition_delta = 0,
         .idle_observation_core_lock_hold_delta_ns = 0,
+        .metadata_sampler_visits = 100,
+        .metadata_sampler_changes = 1,
+        .metadata_sampler_failures = 0,
+        .metadata_producer_visits = 4,
+        .idle_metadata_producer_visit_delta = 0,
         .screen_snapshot_calls = 3,
         .screen_delta_calls = 7,
         .screen_owned_allocations = 17,
@@ -792,6 +826,12 @@ fn goodArtifact() Artifact {
         .idle_screen_owned_allocation_delta = 0,
         .idle_screen_core_lock_acquisition_delta = 0,
         .screen_idle_scale_samples = &screen_idle_scale_fixture,
+        .metadata_change_runtime_count = 100,
+        .metadata_change_target_stream_count = 3,
+        .metadata_change_sampler_delta = 1,
+        .metadata_change_producer_visit_delta = 3,
+        .metadata_change_materialization_delta = 1,
+        .metadata_change_core_lock_acquisition_delta = 3,
         .active_wake_notify_delta = wake_sample_count,
         .active_wake_published_delta = wake_sample_count,
         .active_wake_coalesced_delta = 0,

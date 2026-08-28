@@ -476,6 +476,7 @@ pub const Owner = struct {
     fn scheduleCadence(self: *Owner, now_ns: u64) void {
         if (now_ns < self.next_cadence_ns) return;
         self.next_cadence_ns = now_ns +| cadence_ns;
+        self.server.sampleMetadataSources(now_ns);
         const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
         for (self.clients, 0..) |maybe_client, index| {
             const client = maybe_client orelse continue;

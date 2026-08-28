@@ -38,6 +38,7 @@ const notification_delivery = @import("notification_delivery.zig");
 const notification_os_delivery = @import("notification_os_delivery.zig");
 const agent_hook_logs = @import("agent_hook_logs.zig");
 const runtime_observation_cache = @import("runtime_observation_cache.zig");
+const runtime_metadata_sampler = @import("runtime_metadata_sampler.zig");
 
 comptime {
     if (@import("protocol.zig").max_inventory_runtimes != maru.session.workspace.max_runtime_bindings)
@@ -196,6 +197,7 @@ const ForegroundCache = struct {
     count: usize = 0,
     pgid: ?i32 = null,
     refreshed_at_ns: i128 = 0,
+    generation: u64 = 0,
 };
 
 const ObservationCacheRecord = struct {
@@ -307,6 +309,13 @@ pub const RuntimeManager = struct {
     /// Heap-pinned runtime-global canonical metadata. Hash-map growth moves only pointers, never a
     /// cache owner while a prepared transaction or borrowed view exists.
     observation_caches: std.AutoHashMapUnmanaged(RuntimeHandle, *ObservationCacheRecord) = .empty,
+    /// Runtime-scoped E3b source tokens. Streams retain only an admission-owned delivery copy.
+    metadata_samplers: std.AutoHashMapUnmanaged(u128, runtime_metadata_sampler.Record) = .empty,
+    next_metadata_sample_ns: u64 = 0,
+    metadata_sampler_visits: u64 = 0,
+    metadata_sampler_changes: u64 = 0,
+    metadata_sampler_failures: u64 = 0,
+    metadata_producer_visits: u64 = 0,
     /// Owner-thread screen mutation tokens. They let the socket producer reject an unchanged
     /// cadence before opening the core lock, projector, or screen-owned allocator.
     screen_changes: std.AutoHashMapUnmanaged(u128, ScreenChangeRecord) = .empty,
@@ -376,6 +385,12 @@ pub const RuntimeManager = struct {
         self.next_handle = 1;
         self.foreground_cache = .empty;
         self.observation_caches = .empty;
+        self.metadata_samplers = .empty;
+        self.next_metadata_sample_ns = 0;
+        self.metadata_sampler_visits = 0;
+        self.metadata_sampler_changes = 0;
+        self.metadata_sampler_failures = 0;
+        self.metadata_producer_visits = 0;
         self.screen_changes = .empty;
         self.bell_counts = .empty;
         self.clipboards = .empty;
@@ -449,6 +464,22 @@ pub const RuntimeManager = struct {
         };
     }
 
+    pub const MetadataSamplerEvidence = struct {
+        visits: u64,
+        changes: u64,
+        failures: u64,
+        producer_visits: u64,
+    };
+
+    pub fn fixtureMetadataSamplerEvidence(self: *const RuntimeManager) MetadataSamplerEvidence {
+        return .{
+            .visits = self.metadata_sampler_visits,
+            .changes = self.metadata_sampler_changes,
+            .failures = self.metadata_sampler_failures,
+            .producer_visits = self.metadata_producer_visits,
+        };
+    }
+
     pub const ScreenPerformanceEvidence = struct {
         snapshot_calls: u64,
         delta_calls: u64,
@@ -495,6 +526,7 @@ pub const RuntimeManager = struct {
             while (it.next()) |record| record.*.deinit(self.allocator);
             self.observation_caches.deinit(self.allocator);
         }
+        self.metadata_samplers.deinit(self.allocator);
         self.screen_changes.deinit(self.allocator);
         self.bell_counts.deinit(self.allocator);
         self.notification_journal.deinit() catch @panic("notification journal owner moved");
@@ -512,7 +544,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -659,11 +691,18 @@ pub const RuntimeManager = struct {
                 continue;
             };
             result.output_events += drained.output_events;
-            if (drained.output_events != 0)
+            if (drained.output_events != 0) {
                 self.advanceScreenChange(item.runtime_id) catch {
                     result.failures += 1;
                     continue;
                 };
+                const sampled_at = std.Io.Clock.awake.now(self.io).nanoseconds;
+                self.sampleMetadataSource(
+                    item.runtime_id,
+                    item.handle,
+                    if (sampled_at <= 0) 0 else @intCast(@min(sampled_at, std.math.maxInt(u64))),
+                );
+            }
             self.admitPendingNotification(item.runtime_id, terminal_slot);
             self.takeRejectedNotification(terminal_slot);
             if (drained.ended) |ended| switch (ended) {
@@ -1172,6 +1211,13 @@ pub const RuntimeManager = struct {
                 .{},
             );
             errdefer _ = self.screen_changes.remove(runtime.runtime_id);
+            const sampled_at = std.Io.Clock.awake.now(self.io).nanoseconds;
+            try self.installMetadataSampler(
+                runtime.runtime_id,
+                runtime.surface_id,
+                if (sampled_at <= 0) 0 else @intCast(@min(sampled_at, std.math.maxInt(u64))),
+            );
+            errdefer _ = self.metadata_samplers.remove(runtime.runtime_id);
 
             prepared.items[prepared.count] = .{
                 .runtime_id = runtime.runtime_id,
@@ -1208,6 +1254,9 @@ pub const RuntimeManager = struct {
     }
 
     fn discardRestoredItem(self: *RuntimeManager, item: RestoredGraphItem) void {
+        _ = self.metadata_samplers.remove(item.runtime_id);
+        _ = self.foreground_cache.remove(item.handle);
+        _ = self.screen_changes.remove(item.runtime_id);
         self.host_registry.unregister(item.runtime_id);
         item.terminal.live_pty.discardPreparedAdoption(&self.surface_runtime);
         item.terminal.surface.deinit();
@@ -1688,11 +1737,117 @@ pub const RuntimeManager = struct {
                 break;
             }
         };
+        const next_generation = if (changed)
+            std.math.add(u64, foreground.generation, 1) catch
+                return error.ForegroundGenerationExhausted
+        else
+            foreground.generation;
         @memcpy(foreground.names[0..count], names[0..count]);
         foreground.count = count;
         foreground.pgid = pgid;
         foreground.refreshed_at_ns = now_ns;
+        foreground.generation = next_generation;
         return changed;
+    }
+
+    fn metadataSource(
+        self: *RuntimeManager,
+        handle: RuntimeHandle,
+        now_ns: u64,
+    ) !runtime_metadata_sampler.Source {
+        _ = try self.refreshForegroundCache(handle, now_ns);
+        const foreground = self.foreground_cache.getPtr(handle) orelse
+            return error.RuntimeNotFound;
+        const surface = self.backend_impl.surfaceFor(handle) orelse
+            return error.RuntimeNotFound;
+        return .{
+            .observer_generation = surface.core.observerGeneration(),
+            .title_generation = surface.core.title_generation.load(.monotonic),
+            .foreground_generation = foreground.generation,
+        };
+    }
+
+    fn installMetadataSampler(
+        self: *RuntimeManager,
+        runtime_id: u128,
+        handle: RuntimeHandle,
+        now_ns: u64,
+    ) !void {
+        const source = try self.metadataSource(handle, now_ns);
+        try self.metadata_samplers.putNoClobber(
+            self.allocator,
+            runtime_id,
+            runtime_metadata_sampler.Record.init(source, now_ns),
+        );
+    }
+
+    fn sampleMetadataSource(
+        self: *RuntimeManager,
+        runtime_id: u128,
+        handle: RuntimeHandle,
+        now_ns: u64,
+    ) void {
+        const record = self.metadata_samplers.getPtr(runtime_id) orelse {
+            self.metadata_sampler_failures +|= 1;
+            return;
+        };
+        if (record.terminal) return;
+        const source = self.metadataSource(handle, now_ns) catch {
+            self.metadata_sampler_failures +|= 1;
+            return;
+        };
+        self.metadata_sampler_visits +|= 1;
+        switch (record.sample(source, now_ns) catch {
+            record.terminal = true;
+            self.metadata_sampler_failures +|= 1;
+            return;
+        }) {
+            .changed => self.metadata_sampler_changes +|= 1,
+            .stale, .unchanged => {},
+        }
+    }
+
+    fn sampleMetadataSources(self: *RuntimeManager, now_ns: u64) void {
+        const deadline_ns = 100 * std.time.ns_per_ms;
+        if (self.next_metadata_sample_ns != 0 and now_ns < self.next_metadata_sample_ns)
+            return;
+        self.next_metadata_sample_ns = now_ns +| deadline_ns;
+        var items: [upgrade_limits.max_runtime_count]struct {
+            runtime_id: u128,
+            handle: RuntimeHandle,
+        } = undefined;
+        var count: usize = 0;
+        var it = self.host_registry.entries.iterator();
+        while (it.next()) |entry| {
+            if (count == items.len) break;
+            const slot = entry.value_ptr.*.runtime orelse continue;
+            items[count] = .{
+                .runtime_id = entry.key_ptr.*,
+                .handle = @intFromPtr(slot),
+            };
+            count += 1;
+        }
+        for (items[0..count]) |item|
+            self.sampleMetadataSource(item.runtime_id, item.handle, now_ns);
+    }
+
+    fn metadataChangeTokenOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+    ) anyerror!server.MetadataChangeToken {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        const record = self.metadata_samplers.get(runtime_id) orelse
+            return error.RuntimeNotFound;
+        if (record.terminal) return error.MetadataChangeTokenExhausted;
+        return .{
+            .incarnation = record.token.incarnation,
+            .revision = record.token.revision,
+        };
+    }
+
+    fn sampleMetadataSourcesOp(ctx: *anyopaque, now_ns: u64) void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        self.sampleMetadataSources(now_ns);
     }
 
     fn cachedObservationOp(
@@ -1701,6 +1856,10 @@ pub const RuntimeManager = struct {
         request: server.ObservationRequest,
     ) anyerror!server.CachedRuntimeObservation {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        switch (request) {
+            .cadence_epoch => self.metadata_producer_visits +|= 1,
+            .current, .fresh => {},
+        }
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const gop = try self.observation_caches.getOrPut(self.allocator, handle);
         if (!gop.found_existing) {
@@ -2343,6 +2502,13 @@ pub const RuntimeManager = struct {
         errdefer self.host_registry.unregister(runtime_id);
         entry.runtime = @ptrFromInt(handle); // opaque 슬롯에 handle 보관(그 목적: 실 runtime handle). handle>=1이라 non-null.
         try self.screen_changes.putNoClobber(self.allocator, runtime_id, .{});
+        errdefer _ = self.screen_changes.remove(runtime_id);
+        const sampled_at = std.Io.Clock.awake.now(self.io).nanoseconds;
+        try self.installMetadataSampler(
+            runtime_id,
+            handle,
+            if (sampled_at <= 0) 0 else @intCast(@min(sampled_at, std.math.maxInt(u64))),
+        );
         self.next_handle += 1;
         return runtime_id;
     }
@@ -2357,6 +2523,7 @@ pub const RuntimeManager = struct {
             agent_hook_logs.removeRuntimeLog(identity.log_base, identity.host_id, runtime_id);
         const slot = entry.runtime orelse {
             self.host_registry.unregister(runtime_id); // handle 미기록(비정상) — registry만 정리.
+            _ = self.metadata_samplers.remove(runtime_id);
             _ = self.screen_changes.remove(runtime_id);
             _ = self.notification_metadata.remove(runtime_id);
             return;
@@ -2377,6 +2544,7 @@ pub const RuntimeManager = struct {
             state.deinit(self.allocator);
         }
         _ = self.screen_changes.remove(runtime_id);
+        _ = self.metadata_samplers.remove(runtime_id);
         self.host_registry.unregister(runtime_id);
         _ = self.notification_metadata.remove(runtime_id);
     }
@@ -4447,6 +4615,70 @@ test "P4 E2c observation materialization follows runtime source changes at 1 10 
         mgr.deinit();
         host_registry.deinit();
     }
+}
+
+test "P4 E3b runtime sampler visits once per deadline and advances only the changed runtime" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const first = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, first);
+    const second = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, second);
+    const first_before = try ops.metadata_change_token.?(ops.ctx, first);
+    const second_before = try ops.metadata_change_token.?(ops.ctx, second);
+    const base_epoch = @max(
+        mgr.metadata_samplers.get(first).?.last_epoch_ns,
+        mgr.metadata_samplers.get(second).?.last_epoch_ns,
+    );
+
+    ops.sample_metadata_sources.?(ops.ctx, base_epoch +| 100 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u64, 2), mgr.fixtureMetadataSamplerEvidence().visits);
+    ops.sample_metadata_sources.?(ops.ctx, base_epoch +| 101 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u64, 2), mgr.fixtureMetadataSamplerEvidence().visits);
+
+    const handle = mgr.handleFor(second) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+    surface.lockCore(std.testing.io);
+    surface.core.write("metadata-source-change") catch |err| {
+        surface.unlockCore(std.testing.io);
+        return err;
+    };
+    surface.unlockCore(std.testing.io);
+    ops.sample_metadata_sources.?(ops.ctx, base_epoch +| 200 * std.time.ns_per_ms);
+
+    const evidence = mgr.fixtureMetadataSamplerEvidence();
+    try std.testing.expectEqual(@as(u64, 4), evidence.visits);
+    try std.testing.expectEqual(@as(u64, 1), evidence.changes);
+    try std.testing.expectEqual(@as(u64, 0), evidence.failures);
+    try std.testing.expectEqual(first_before, try ops.metadata_change_token.?(ops.ctx, first));
+    try std.testing.expect(!std.meta.eql(second_before, try ops.metadata_change_token.?(ops.ctx, second)));
+
+    const second_record = mgr.metadata_samplers.getPtr(second) orelse
+        return error.TestUnexpectedResult;
+    second_record.token = .{
+        .incarnation = std.math.maxInt(u64),
+        .revision = std.math.maxInt(u64),
+    };
+    surface.lockCore(std.testing.io);
+    surface.core.write("terminal-source-change") catch |err| {
+        surface.unlockCore(std.testing.io);
+        return err;
+    };
+    surface.unlockCore(std.testing.io);
+    ops.sample_metadata_sources.?(ops.ctx, base_epoch +| 300 * std.time.ns_per_ms);
+    try std.testing.expectError(
+        error.MetadataChangeTokenExhausted,
+        ops.metadata_change_token.?(ops.ctx, second),
+    );
+    try std.testing.expectEqual(first_before, try ops.metadata_change_token.?(ops.ctx, first));
+    try std.testing.expectEqual(@as(u64, 1), mgr.fixtureMetadataSamplerEvidence().failures);
 }
 
 test "runtime manager: empty argv is rejected before allocating a handle" {

@@ -298,6 +298,11 @@ pub const SocketServer = struct {
         if (self.owner_tick) |tick| tick(self.owner_tick_ctx.?);
     }
 
+    pub fn sampleMetadataSources(self: *SocketServer, now_ns: u64) void {
+        const ops = self.runtime_ops orelse return;
+        if (ops.sample_metadata_sources) |sample| sample(ops.ctx, now_ns);
+    }
+
     pub fn drainOwnerWake(self: *SocketServer) bool {
         const drain = self.owner_wake_drain orelse return false;
         return drain(self.owner_wake_ctx.?);

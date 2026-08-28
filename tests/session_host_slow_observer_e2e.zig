@@ -19,7 +19,7 @@ extern "c" fn getdtablesize() c_int;
 extern "c" fn arc4random_buf(buffer: *anyopaque, length: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
 
-const schema_name = "maru.session-host-slow-observer-macos.v3";
+const schema_name = "maru.session-host-slow-observer-macos.v4";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -69,6 +69,9 @@ const ScreenIdleScaleSample = struct {
     delta_call_delta: u64,
     owned_allocation_delta: u64,
     core_lock_acquisition_delta: u64,
+    metadata_producer_visit_delta: u64,
+    metadata_materialization_delta: u64,
+    metadata_core_lock_acquisition_delta: u64,
 };
 
 const ProcessIdentity = struct {
@@ -140,6 +143,11 @@ const Artifact = struct {
     idle_observation_materialization_delta: u64,
     idle_observation_core_lock_acquisition_delta: u64,
     idle_observation_core_lock_hold_delta_ns: u64,
+    metadata_sampler_visits: u64,
+    metadata_sampler_changes: u64,
+    metadata_sampler_failures: u64,
+    metadata_producer_visits: u64,
+    idle_metadata_producer_visit_delta: u64,
     screen_snapshot_calls: u64,
     screen_delta_calls: u64,
     screen_owned_allocations: u64,
@@ -149,6 +157,12 @@ const Artifact = struct {
     idle_screen_owned_allocation_delta: u64,
     idle_screen_core_lock_acquisition_delta: u64,
     screen_idle_scale_samples: []const ScreenIdleScaleSample,
+    metadata_change_runtime_count: u32,
+    metadata_change_target_stream_count: u32,
+    metadata_change_sampler_delta: u64,
+    metadata_change_producer_visit_delta: u64,
+    metadata_change_materialization_delta: u64,
+    metadata_change_core_lock_acquisition_delta: u64,
     active_wake_notify_delta: u64,
     active_wake_published_delta: u64,
     active_wake_coalesced_delta: u64,
@@ -440,6 +454,7 @@ pub fn main(init: std.process.Init) !void {
             init.io,
         );
         if (settle_after.observation_materializations == settle_before.observation_materializations and
+            settle_after.metadata_producer_visits == settle_before.metadata_producer_visits and
             settle_after.observation_core_lock_acquisitions == settle_before.observation_core_lock_acquisitions and
             settle_after.observation_core_lock_hold_total_ns == settle_before.observation_core_lock_hold_total_ns and
             settle_after.output_wake_notify_attempts == settle_before.output_wake_notify_attempts and
@@ -490,6 +505,9 @@ pub fn main(init: std.process.Init) !void {
         .delta_call_delta = idle_wake_after.screen_delta_calls - idle_wake_before.screen_delta_calls,
         .owned_allocation_delta = idle_wake_after.screen_owned_allocations - idle_wake_before.screen_owned_allocations,
         .core_lock_acquisition_delta = idle_wake_after.screen_core_lock_acquisitions - idle_wake_before.screen_core_lock_acquisitions,
+        .metadata_producer_visit_delta = idle_wake_after.metadata_producer_visits - idle_wake_before.metadata_producer_visits,
+        .metadata_materialization_delta = idle_wake_after.observation_materializations - idle_wake_before.observation_materializations,
+        .metadata_core_lock_acquisition_delta = idle_wake_after.observation_core_lock_acquisitions - idle_wake_before.observation_core_lock_acquisitions,
     };
 
     // Scale the same product host to 10 and 100 actual PTYs. Each runtime has one controller and
@@ -561,11 +579,58 @@ pub fn main(init: std.process.Init) !void {
                 .delta_call_delta = after.screen_delta_calls - before.screen_delta_calls,
                 .owned_allocation_delta = after.screen_owned_allocations - before.screen_owned_allocations,
                 .core_lock_acquisition_delta = after.screen_core_lock_acquisitions - before.screen_core_lock_acquisitions,
+                .metadata_producer_visit_delta = after.metadata_producer_visits - before.metadata_producer_visits,
+                .metadata_materialization_delta = after.observation_materializations - before.observation_materializations,
+                .metadata_core_lock_acquisition_delta = after.observation_core_lock_acquisitions - before.observation_core_lock_acquisitions,
             };
             scale_sample_index += 1;
         }
     }
     if (scale_sample_index != scale_samples.len) return error.MissingScaleEvidence;
+
+    stage = "metadata change scale 100";
+    const metadata_change_before = try probe(
+        command_pair[0],
+        report_pair[0],
+        &sequence,
+        .snapshot,
+        deadline_ns,
+        init.io,
+    );
+    try sendInputBeforeDeadline(
+        &controller,
+        controller_stream,
+        "MARU_E3B_METADATA_SCALE\n",
+        deadline_ns,
+        init.io,
+    );
+    var metadata_change_after = metadata_change_before;
+    while (metadata_change_after.metadata_producer_visits < metadata_change_before.metadata_producer_visits + 3 or
+        metadata_change_after.observation_materializations < metadata_change_before.observation_materializations + 1)
+    {
+        _ = try pumpHealthy(&controller, controller_stream, &controller_screen, &controller_drained);
+        _ = try pumpHealthy(&healthy, healthy_stream, &healthy_screen, &healthy_drained);
+        while (try slow.readStreamBatch(slow_stream)) |batch| batch.deinit();
+        _ = usleep(2_000);
+        metadata_change_after = try probe(
+            command_pair[0],
+            report_pair[0],
+            &sequence,
+            .snapshot,
+            deadline_ns,
+            init.io,
+        );
+        if (monotonicNow(init.io) >= deadline_ns) return error.MetadataChangeTimeout;
+    }
+    _ = usleep(50_000);
+    metadata_change_after = try probe(
+        command_pair[0],
+        report_pair[0],
+        &sequence,
+        .snapshot,
+        deadline_ns,
+        init.io,
+    );
 
     stage = "screen idle scale cleanup";
     var cleanup_index: usize = scale_runtime_ids.len;
@@ -990,6 +1055,11 @@ pub fn main(init: std.process.Init) !void {
         .idle_observation_materialization_delta = idle_wake_after.observation_materializations - idle_wake_before.observation_materializations,
         .idle_observation_core_lock_acquisition_delta = idle_wake_after.observation_core_lock_acquisitions - idle_wake_before.observation_core_lock_acquisitions,
         .idle_observation_core_lock_hold_delta_ns = idle_wake_after.observation_core_lock_hold_total_ns - idle_wake_before.observation_core_lock_hold_total_ns,
+        .metadata_sampler_visits = final_report.metadata_sampler_visits,
+        .metadata_sampler_changes = final_report.metadata_sampler_changes,
+        .metadata_sampler_failures = final_report.metadata_sampler_failures,
+        .metadata_producer_visits = final_report.metadata_producer_visits,
+        .idle_metadata_producer_visit_delta = idle_wake_after.metadata_producer_visits - idle_wake_before.metadata_producer_visits,
         .screen_snapshot_calls = final_report.screen_snapshot_calls,
         .screen_delta_calls = final_report.screen_delta_calls,
         .screen_owned_allocations = final_report.screen_owned_allocations,
@@ -999,6 +1069,12 @@ pub fn main(init: std.process.Init) !void {
         .idle_screen_owned_allocation_delta = idle_wake_after.screen_owned_allocations - idle_wake_before.screen_owned_allocations,
         .idle_screen_core_lock_acquisition_delta = idle_wake_after.screen_core_lock_acquisitions - idle_wake_before.screen_core_lock_acquisitions,
         .screen_idle_scale_samples = &scale_samples,
+        .metadata_change_runtime_count = 100,
+        .metadata_change_target_stream_count = 3,
+        .metadata_change_sampler_delta = metadata_change_after.metadata_sampler_changes - metadata_change_before.metadata_sampler_changes,
+        .metadata_change_producer_visit_delta = metadata_change_after.metadata_producer_visits - metadata_change_before.metadata_producer_visits,
+        .metadata_change_materialization_delta = metadata_change_after.observation_materializations - metadata_change_before.observation_materializations,
+        .metadata_change_core_lock_acquisition_delta = metadata_change_after.observation_core_lock_acquisitions - metadata_change_before.observation_core_lock_acquisitions,
         .active_wake_notify_delta = active_wake_after.output_wake_notify_attempts - idle_wake_after.output_wake_notify_attempts,
         .active_wake_published_delta = active_wake_after.output_wake_published_writes - idle_wake_after.output_wake_published_writes,
         .active_wake_coalesced_delta = active_wake_after.output_wake_coalesced_writes - idle_wake_after.output_wake_coalesced_writes,

@@ -3651,6 +3651,63 @@ pub fn build(b: *std.Build) void {
         run_session_host_e3a_remote_runtime_tests.setCwd(b.path("."));
         session_host_e3a_step.dependOn(&run_session_host_e3a_remote_runtime_tests.step);
     }
+    const session_host_e3b_step = b.step(
+        "test-session-host-e3b",
+        "Verify P4 E3b runtime-scoped metadata source tokens in Debug and ReleaseFast",
+    );
+    session_host_e3b_step.dependOn(session_host_e3a_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e3b_optimize| {
+        const session_host_e3b_sampler_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_metadata_sampler.zig"),
+                .target = target,
+                .optimize = e3b_optimize,
+            }),
+            .filters = &.{"P4 E3b sampler"},
+        });
+        const run_session_host_e3b_sampler_tests = b.addRunArtifact(session_host_e3b_sampler_tests);
+        run_session_host_e3b_sampler_tests.addArg("--maru-expect-tests=1");
+        session_host_e3b_step.dependOn(&run_session_host_e3b_sampler_tests.step);
+
+        const session_host_e3b_server_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+                .target = target,
+                .optimize = e3b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 E3b unchanged runtime"},
+        });
+        const run_session_host_e3b_server_tests = b.addRunArtifact(session_host_e3b_server_tests);
+        run_session_host_e3b_server_tests.addArg("--maru-expect-tests=1");
+        session_host_e3b_step.dependOn(&run_session_host_e3b_server_tests.step);
+
+        const session_host_e3b_manager_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = e3b_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P4 E3b runtime sampler"},
+        });
+        const run_session_host_e3b_manager_tests = b.addRunArtifact(session_host_e3b_manager_tests);
+        run_session_host_e3b_manager_tests.addArg("--maru-expect-tests=1");
+        session_host_e3b_step.dependOn(&run_session_host_e3b_manager_tests.step);
+    }
+    const session_host_e3b_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_e3b_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P4 E3b runtime sampler is"},
+    });
+    const run_session_host_e3b_boundary_tests = b.addRunArtifact(session_host_e3b_boundary_tests);
+    run_session_host_e3b_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_e3b_boundary_tests.setCwd(b.path("."));
+    session_host_e3b_step.dependOn(&run_session_host_e3b_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_e3b_boundary_tests.step);
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",

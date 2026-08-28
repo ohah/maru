@@ -22,7 +22,7 @@ pub const ReportKind = enum(u8) {
 
 pub const CommandPacket = extern struct {
     magic: u32 = 0x4d525343, // MRSC
-    version: u16 = 3,
+    version: u16 = 4,
     length: u16 = @sizeOf(CommandPacket),
     sequence: u64,
     action: u8,
@@ -33,7 +33,7 @@ pub const CommandPacket = extern struct {
     }
 
     pub fn command(self: CommandPacket) ?Command {
-        if (self.magic != 0x4d525343 or self.version != 3 or
+        if (self.magic != 0x4d525343 or self.version != 4 or
             self.length != @sizeOf(CommandPacket) or self.sequence == 0 or
             !std.mem.allEqual(u8, &self.reserved, 0)) return null;
         return std.enums.fromInt(Command, self.action);
@@ -42,7 +42,7 @@ pub const CommandPacket = extern struct {
 
 pub const Report = extern struct {
     magic: u32 = 0x4d525350, // MRSP
-    version: u16 = 3,
+    version: u16 = 4,
     length: u16 = @sizeOf(Report),
     sequence: u64,
     kind: u8,
@@ -81,6 +81,10 @@ pub const Report = extern struct {
     observation_core_lock_acquisitions: u64,
     observation_core_lock_hold_total_ns: u64,
     observation_core_lock_hold_max_ns: u64,
+    metadata_sampler_visits: u64,
+    metadata_sampler_changes: u64,
+    metadata_sampler_failures: u64,
+    metadata_producer_visits: u64,
     screen_snapshot_calls: u64,
     screen_delta_calls: u64,
     screen_owned_allocations: u64,
@@ -94,6 +98,7 @@ pub const Report = extern struct {
         output_wake: session_host.runtime_manager.RuntimeManager.OutputWakeEvidence,
         child_exit: session_host.runtime_manager.RuntimeManager.ChildExitEvidence,
         observation: session_host.runtime_manager.RuntimeManager.ObservationPerformanceEvidence,
+        metadata_sampler: session_host.runtime_manager.RuntimeManager.MetadataSamplerEvidence,
         screen: session_host.runtime_manager.RuntimeManager.ScreenPerformanceEvidence,
     ) Report {
         const a = telemetry.accounting;
@@ -133,6 +138,10 @@ pub const Report = extern struct {
             .observation_core_lock_acquisitions = observation.core_lock_acquisitions,
             .observation_core_lock_hold_total_ns = observation.core_lock_hold_total_ns,
             .observation_core_lock_hold_max_ns = observation.core_lock_hold_max_ns,
+            .metadata_sampler_visits = metadata_sampler.visits,
+            .metadata_sampler_changes = metadata_sampler.changes,
+            .metadata_sampler_failures = metadata_sampler.failures,
+            .metadata_producer_visits = metadata_sampler.producer_visits,
             .screen_snapshot_calls = screen.snapshot_calls,
             .screen_delta_calls = screen.delta_calls,
             .screen_owned_allocations = screen.owned_allocations,
@@ -143,7 +152,7 @@ pub const Report = extern struct {
     pub fn valid(self: Report) bool {
         const parsed_kind = std.enums.fromInt(ReportKind, self.kind) orelse return false;
         _ = parsed_kind;
-        return self.magic == 0x4d525350 and self.version == 3 and
+        return self.magic == 0x4d525350 and self.version == 4 and
             self.length == @sizeOf(Report) and self.sequence != 0 and
             std.mem.allEqual(u8, &self.reserved, 0) and self.exit_reserved == 0;
     }
@@ -226,6 +235,11 @@ test "report rejects every framing field corruption" {
         .core_lock_hold_total_ns = 0,
         .core_lock_hold_max_ns = 0,
     }, .{
+        .visits = 0,
+        .changes = 0,
+        .failures = 0,
+        .producer_visits = 0,
+    }, .{
         .snapshot_calls = 0,
         .delta_calls = 0,
         .owned_allocations = 0,
@@ -295,6 +309,11 @@ test "exact packet decodes and exact plus one datagram is rejected" {
         .core_lock_acquisitions = 0,
         .core_lock_hold_total_ns = 0,
         .core_lock_hold_max_ns = 0,
+    }, .{
+        .visits = 0,
+        .changes = 0,
+        .failures = 0,
+        .producer_visits = 0,
     }, .{
         .snapshot_calls = 0,
         .delta_calls = 0,

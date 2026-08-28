@@ -1278,12 +1278,19 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **CR6f — output wake와 입력 echo 예산:** daemon-global nonblocking self-pipe를 `RuntimeManager`가 소유하고, 각
    `PtyEventQueue`는 성공한 output/terminal publication 뒤 byte wake만 수행한다. `poll_owner.Owner`가 read end를 유일하게
    poll/drain하고 같은 owner turn에서 runtime event drain과 producer sweep을 시작한다. reader thread가 socket, `Connection`,
-   subscription 또는 `collectDeltas`를 직접 호출하는 경로는 0이다. 20ms cadence는 metadata·lost-wake 안전망으로 유지하되
-   PTY output의 정상 push 조건으로 사용하지 않는다. self-pipe 포화는 이미 resident한 wake와 coalesce하고 reader를 block하지
+   subscription 또는 `collectDeltas`를 직접 호출하는 경로는 0이다. PTY output의 정상 push는 20ms cadence를 조건으로 사용하지
+   않는다. self-pipe 포화는 이미 resident한 wake와 coalesce하고 reader를 block하지
    않으며, EOF/broken read end는 host owner를 fail-close한다. fresh spawn과 same-PID restore가 각각 새 process-local pipe와
    notifier를 만들고 handoff inventory는 notifier/fd를 직렬화하지 않는다. 실제 forkpty `/bin/cat` input→valid delta artifact가
    구조적 20ms floor 제거와 hard latency cap, 250ms idle wake/CPU, active notifier/write/drain, fd·child cleanup을 증명한다.
    실제 pipe 포화·broken read end와 restore graph의 새 notifier는 process/unit gate가 맡고, 장시간 idle은 운영 soak 범위다.
+
+   **P4 E3 event-driven producer (E3a·E3b 구현 완료):** runtime별 checked screen token과 output wake가 unchanged
+   projector를 닫고, runtime-owned 100ms metadata sampler가 lock-free source generation을 token으로 접어 변경 runtime의
+   stream만 producer로 연다. initial/fresh/resync admission과 same-PID restore가 delivery base를 재구성하며, exhaustion은
+   target runtime만 fail-close한다. Debug·ReleaseFast gate와 ReleaseFast artifact v4는 actual `/bin/cat` runtime 1·10·100의
+   steady idle screen/metadata producer·materialization·core-lock exact 0과 100-runtime 단일 source 변경의 target-only work를
+   고정한다. 세부 계약과 수치는 persistent-session-host.md와 performance-budget.md가 소유한다.
 
    **P4 parity micro-gate (완료):** P4의 C4→E1→E2 다음 순서로, host-backed DECSET 1003
    motion과 selection autoscroll을 독립 제품 gate로 승격한다. `test-session-host-input-parity`는 Debug·ReleaseFast에서

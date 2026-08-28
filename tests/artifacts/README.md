@@ -11,8 +11,9 @@ GitHub `CI` workflow는 `tests/artifacts/**`를 업로드한다. 그래서 로�
 GitHub `Performance` workflow의 일반 microbenchmark는 `tests/artifacts/perf/**`를 장기 추적용 artifact로 업로드한다.
 다만 문서화된 구조 guardrail인 core performance, file explorer, live preview와
 `session-host-slow-observer-macos.json`은 각 required job의 typed validator가 판정한다.
-이 session-host artifact의 v2 schema는 실제 host의 observation materialization·core-lock hold 누적값과 idle
-구간 증분도 포함하며, 누락/unknown/duplicate field를 허용하지 않는다.
+이 session-host artifact의 v4 schema는 실제 host의 observation materialization·core-lock hold, runtime metadata
+sampler/producer visit, screen projector의 누적값과 1·10·100 runtime idle 구간 증분을 포함하며,
+누락/unknown/duplicate field를 허용하지 않는다.
 required 여부의 단일 출처는 `docs/performance-budget.md`의 필수 CI 체크 표다.
 
 현재 생성되는 예시는 다음과 같다.

@@ -386,3 +386,41 @@ test "SYN8 문서의 마지막 byte 까지 판다 — 개행으로 끝나지 않
     }
     try std.testing.expect(touches_end);
 }
+
+test "SYN9 캡처 목록이 정확히 이것이다 — 순서·범위·이름까지 (골든)" {
+    // **앞의 판정자들은 "있다"만 본다.** `SYN1`이 세 종류를 텍스트로 대조하지만 나머지는 안 보고,
+    // 개수도 안 센다. 적대적 검증에서 그 틈으로 둘이 빠져나갔다: 같은 캡처를 **두 번** 담는
+    // 뮤턴트와, 노드 대신 **부모의 범위**를 쓰는 뮤턴트(span이 통째로 넓어진다). 둘 다 화면에서는
+    // 잘못 칠해지는데 판정자는 초록이었다.
+    //
+    // 그래서 작은 소스 하나의 **캡처 목록 전체**를 박는다. grammar 버전이 `build.zig.zon`에 고정돼
+    // 있으므로 이 목록이 흔들리는 것은 **grammar를 올렸다는 뜻**이고, 그때는 색 사상을 다시 봐야
+    // 한다 — 깨지는 것이 이 판정자의 일이다.
+    //
+    // `x` 하나에 넷이 붙는 것은 **머리말이 적어 둔 predicate 미평가**의 귀결이다. 그것이 여기
+    // 박혀 있으므로, 나중에 평가기를 세우면 이 목록이 줄면서 그 변화가 눈에 띈다.
+    const allocator = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+
+    const src = "const x = 1;";
+    highlights(allocator, .zig, src, &spans);
+
+    const expected = [_]Span{
+        .{ .start = 0, .end = 5, .capture = "keyword" },
+        .{ .start = 6, .end = 7, .capture = "variable" },
+        .{ .start = 6, .end = 7, .capture = "type" },
+        .{ .start = 6, .end = 7, .capture = "constant" },
+        .{ .start = 6, .end = 7, .capture = "variable.builtin" },
+        .{ .start = 8, .end = 9, .capture = "operator" },
+        .{ .start = 10, .end = 11, .capture = "number" },
+        .{ .start = 11, .end = 12, .capture = "punctuation.delimiter" },
+    };
+
+    try std.testing.expectEqual(expected.len, spans.items.len);
+    for (expected, spans.items) |want, got| {
+        try std.testing.expectEqual(want.start, got.start);
+        try std.testing.expectEqual(want.end, got.end);
+        try std.testing.expectEqualStrings(want.capture, got.capture);
+    }
+}

@@ -1285,6 +1285,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    구조적 20ms floor 제거와 hard latency cap, 250ms idle wake/CPU, active notifier/write/drain, fd·child cleanup을 증명한다.
    실제 pipe 포화·broken read end와 restore graph의 새 notifier는 process/unit gate가 맡고, 장시간 idle은 운영 soak 범위다.
 
+   **P3-e4d-1 metadata isolation·reattach gate:** 별도 실제 daemon, 하나의 generation-backed GUI
+   connection, 두 forkpty runtime으로 metadata event의 stream/runtime 격리와 detach 중 변경된
+   full-state가 같은 persistent handle의 다음 attach 최초 observation이 되는지 검증한다. harness-owned
+   trigger를 child가 소비한 뒤 screen marker와 metadata change token이 모두 전진한 것을 본 후에만
+   reattach하며, reattach 후 추가 event pump가 없어도 attach response의 full-state가 최신이어야 한다.
+   A 변경 전·후 B의 revision·owned string·foreground projection은 byte-for-byte 불변이고,
+   copied/stale/foreign stream을 수용하는 test seam은 만들지 않는다. Debug·ReleaseFast focused gate와
+   source-boundary test가 실제 제품 type·wire만 쓰는지 고정한다. controlled Claude/Codex foreground와
+   cwd→Git·agent·SSH 소비자는 e4d-2로 남긴다.
+
    **P4 E3 event-driven producer (E3a·E3b 구현 완료):** runtime별 checked screen token과 output wake가 unchanged
    projector를 닫고, runtime-owned 100ms metadata sampler가 lock-free source generation을 token으로 접어 변경 runtime의
    stream만 producer로 연다. initial/fresh/resync admission과 same-PID restore가 delivery base를 재구성하며, exhaustion은

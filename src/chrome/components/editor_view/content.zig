@@ -2781,3 +2781,25 @@ test "HL15 build 를 지나도 색이 붙는다 — 탭 전개 뒤에도 경계�
     // 탭이 4열을 먹었으므로 열 4 는 `a`다. 전개를 안 세면 여기가 공백이 된다.
     try testing.expectEqualStrings("a", colored);
 }
+
+test "HL16 줄 끝 토큰의 색도 실린다 — 꼬리 run 이 무색이 되지 않는다" {
+    // **앞의 판정자들은 줄 앞쪽만 본다.** `HL11`은 첫 run 과 숫자 자리를 보고 `HL12`·`HL13`도
+    // 가운데를 본다 — 그래서 **꼬리 run 의 역할을 버리는** 뮤턴트가 살아남았다(적대적 검증).
+    // 줄의 마지막 토큰이 무색이 되는 것은 화면에서 바로 보이는 결함이다.
+    const text = "x = 1;";
+    const colors = [_]ColorSpan{
+        .{ .start_col = 0, .end_col = 1, .role = .syntax_property },
+        // **마지막 열까지 덮는다** — 꼬리가 색 구간 안에서 끝나야 그 run 이 역할을 갖는다.
+        .{ .start_col = 4, .end_col = 6, .role = .syntax_number },
+    };
+    var rs: [16]draw.Run = undefined;
+    const n = writeRuns(text, 0, &colors, &rs);
+
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
+
+    // **마지막 run** 이 색을 갖고 줄 끝 글자를 담아야 한다.
+    const last = rs[n - 1];
+    try testing.expectEqual(tokens.ColorRole.syntax_number, last.role.?);
+    try testing.expectEqualStrings("1;", last.text);
+}

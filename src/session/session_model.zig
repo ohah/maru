@@ -99,6 +99,13 @@ pub fn Model(comptime Rt: type) type {
             /// 표시는 이 값으로 잰다. 판정용 activity window는 계속 awake clock을 쓴다 — 그쪽은 "앱이 깨어 있는
             /// 동안 얼마나 최근인가"가 맞는 질문이라 의미가 다르다.
             agent_last_output_wall_ns: i96 = 0,
+            /// 이 Term 이 **마지막 알림 확인 이후 새 출력을 받았는가**. 알림은 출력의 결과로만 생기므로,
+            /// 조용한 Term 을 매 프레임 훑을 이유가 없다. 세우는 쪽은 drain 루프, 내리는 쪽은 확인한 소비자다.
+            ///
+            /// 이것만으로 «알림 없음» 을 단정하지는 않는다 — OSC 9/777 은 화면을 안 바꿀 수 있어 출력 신호가
+            /// 서지 않을 수 있다. 그래서 소비자는 이 표시를 «먼저 볼 대상» 을 좁히는 힌트로만 쓰고, 바닥 주기
+            /// 순회를 따로 남겨 놓친 것을 반드시 줍는다.
+            output_since_notify_check: bool = false,
             /// 훅 모드에서 이벤트 로그를 어디까지 읽었는가(docs/agent-hooks.md §4.2). 파일이 회전하면
             /// 커서가 스스로 되돌아간다. 훅을 쓰지 않는 Term 에서는 손대지 않으므로 비용이 0이다.
             agent_hook_cursor: agent_hook_event.Cursor = .{},

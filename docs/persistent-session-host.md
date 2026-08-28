@@ -7096,6 +7096,16 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 fail-closed degradation을 자동 검증해야 선언한다. current host의 foreground·consumer 흐름은 P3-e4d-2a,
 실제 구 binary packaging은 P3-e4d-2b가 각각 소유한다.
 
+P3-e4d-2b packaging gate는 `tests/fixtures/session_host_n1/manifest.json`이 봉인한 실제 universal
+arm64/x86_64 ad-hoc executable과 source patch의 SHA-256을 실행 전에 다시 계산하고 서명 형태를 확인한다. 해당
+artifact가 제품 hidden session-host command로 만든 exact host manifest와 endpoint에 current GUI가
+`connectExistingHost`로 hello한 뒤, generation `HostAdapter`와 attach-only `RemoteTermBackend`를 거쳐 기존 runtime을
+`term_ops.createTerm`으로 복원한다. current source에 legacy-mode 분기나 capability toggle을 추가하지 않는다.
+N-1 profile은 `runtime_metadata_v1`을 협상할 수 없으므로 attach 최초 observation부터 `.unsupported`이며 cwd,
+foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그 상태를 기존 `termGitBranch`,
+`pollAgentKinds`, `remoteUploadContext`가 각각 branch 없음, agent `.none`, upload route 없음으로 소비하는 데까지가
+자동 제품 gate다. raw cwd, destination, argv와 file payload는 artifact나 실패 log에 기록하지 않는다.
+
 ### P4 — 일반 Window default readiness·background 알림
 
 - **R1 구현:** `runtime-state="ended"` durable tombstone은 Enter 없는 parse→apply→capture 반복에도 자동 spawn 0을 보장한다.

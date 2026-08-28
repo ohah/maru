@@ -1308,8 +1308,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **P3-e4d-2b legacy-binary compatibility gate:** capability 없는 실제 N-1 host executable에 current GUI가
    접속하는 별도 packaging gate다. current source를 legacy mode로 분기하거나 test-only capability toggle을
    열지 않고, 고정된 signed/ad-hoc N-1 artifact의 hello·attach 결과로 metadata unavailable degradation과
-   cwd·agent·SSH 소비자의 fail-closed 동작을 검증한다. 2a와 2b가 모두 끝나기 전에는 P3-e4d 전체 또는 runtime
-   metadata parity 완료를 선언하지 않는다.
+   cwd·agent·SSH 소비자의 fail-closed 동작을 검증한다. artifact·source patch digest, universal architecture와
+   ad-hoc signature를 먼저 검증하고, artifact가 만든 exact manifest/endpoint를 현재 `connectExistingHost`→
+   generation `HostAdapter`→attach-only `RemoteTermBackend`→`term_ops.createTerm` 제품 복원 흐름으로 소비한다.
+   initial observation은 `.unsupported`이고 cwd/process/SSH owned field가 비어 있어야 하며, 기존
+   `termGitBranch`·`pollAgentKinds`·`remoteUploadContext`는 각각 null·none·null로 닫혀야 한다. raw cwd,
+   destination, argv 또는 file payload는 artifact/실패 log에 남기지 않는다. 2a와 2b가 모두 끝나기 전에는
+   P3-e4d 전체 또는 runtime metadata parity 완료를 선언하지 않는다.
 
    **P4 E3 event-driven producer (E3a·E3b 구현 완료):** runtime별 checked screen token과 output wake가 unchanged
    projector를 닫고, runtime-owned 100ms metadata sampler가 lock-free source generation을 token으로 접어 변경 runtime의

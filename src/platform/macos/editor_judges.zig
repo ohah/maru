@@ -18,5 +18,6 @@
 
 test {
     _ = @import("app_session/editor.zig");
+    _ = @import("app_session/editor_syntax.zig");
     _ = @import("app_session/editor_diff.zig");
 }

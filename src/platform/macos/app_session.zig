@@ -1660,6 +1660,10 @@ const TermRuntime = struct {
     editor_lines: []const []const u8 = &.{},
     /// 열려 있는 파일의 절대 경로(owned). 탭 라벨과 컨트롤 플레인 `EditorMeta.path`가 읽는다.
     editor_path: ?[]u8 = null,
+    /// **구문 강조 상태**(§5.3 1층 — tree-sitter 트리와 그 파생 색). 위 셋과 **같은 묶음**이라
+    /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
+    /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
+    editor_syntax: editor_ops.syntax_color.State = .{},
     /// 마지막으로 그린 프레임이 센 **문서 전체 시각 행 수**(랩 포함). 0이면 아직 안 그렸다.
     ///
     /// **렌더만 접힘을 안다.** 스크롤 입력은 논리 줄만 아는데, 랩된 문서에서 "화면에 다 들어가는가"는

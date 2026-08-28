@@ -101,6 +101,22 @@ run = "zig build test-macos-app-host-abi"
 description = "Build the Zig static library exported to the Swift macOS app host"
 run = "zig build macos-app-host-abi-lib"
 
+[tasks.check-macos-app-host]
+# `check` 가 거는 얼굴. macOS 에서는 앱 호스트를 실제로 컴파일하고, 다른 OS 에서는 **왜 건너뛰는지 찍고**
+# 통과한다. 조용한 skip 이 아니다 — 로그에 한 줄이 남아야 "돌았다"와 "못 돈다"를 구분할 수 있다.
+# 다른 OS 를 통과시키는 근거: 이 라이브러리는 macOS 스텁 구조상 Linux 에서 빌드 자체가 불가능하다.
+# CI 쪽은 macOS job 이 `macos-app-host-abi-lib` 를 직접 돈다 — `test-macos-app-host-abi` 로는 대신할 수
+# 없다. 그 둘은 `build.zig` 에서 **각자 imports 를 가진 별개 모듈**이라(1139행 대 1399행), 라이브러리
+# 쪽 배선만 깨지면 테스트 빌드는 초록이다.
+description = "Compile the macOS app host on macOS; explain the skip elsewhere"
+run = """
+if [ "$(uname -s)" = Darwin ]; then
+  zig build macos-app-host-abi-lib
+else
+  echo "skip: macos-app-host-abi-lib는 macOS에서만 컴파일된다 (session_host가 비-macOS에서 struct{} 스텁) — 현재 $(uname -s)"
+fi
+"""
+
 [tasks.macos-app-host-swift-check]
 description = "Type-check the Swift macOS app host"
 run = "zig build macos-app-host-swift-check"
@@ -354,7 +370,17 @@ run = "sh tools/ci/changed-areas.test.sh"
 
 [tasks.check]
 description = "Check format, tests, boundaries, config docs, doc links, and build"
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-mobile-contract", "check-wasm-sync", "build"]
+# **`macos-app-host-abi-lib`가 여기 있어야 하는 이유.** `build`(=`zig build`)도 `check-targets`도
+# **macOS 앱 호스트를 컴파일하지 않는다** — 전자는 기본 스텝이라 그 라이브러리를 안 만들고,
+# 후자는 `src/maru.zig`만 세 타깃으로 본다. 그래서 **앱이 안 빌드되는 변경이 게이트를 통과한다.**
+# 2026-08-28 실측으로 확정했다: `app_host_abi` 모듈의 import 하나를 빼면 `zig build`와
+# `check-targets`는 exit=0인데 `macos-app-host-abi-lib`만 exit=1이었다. 그 상태를 실제로 만들었고
+# 라이선스 동봉을 확인하려다 우연히 발견했다 — 안 그랬으면 PR이 초록으로 올라갔다.
+# **그런데 그 라이브러리는 macOS 에서만 컴파일된다.** `session_host.zig` 가 macOS 가 아니면 각 모듈을
+# `struct {}` 로 스텁하므로, 앱 호스트는 Linux 에서 빌드가 **불가능**하다. CI 의 check job 은 ubuntu 라
+# `macos-app-host-abi-lib` 를 직접 걸면 항상 빨갛다(2026-08-28 PR #2803 에서 실측했다 — 로컬 macOS 는
+# 초록이었고 CI 만 8개 컴파일 오류로 죽었다). 그래서 OS 로 갈라지는 `check-macos-app-host` 를 건다.
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "build"]
 
 [tasks."packages:check"]
 # npm 라이브러리 게이트. Zig `check`와 분리된 opt-in 경로다(web:check와 같은 구조) —

@@ -296,7 +296,6 @@ pub fn isMovableWorkspace(self: *const AppSession, idx: usize) bool {
 /// **전에** 예약해 실패 시 source 불변(promotePaneToNewWorkspace 선례). 빈 source면 `ended_seen`을 직접 latch(§1.6 —
 /// activeSurface 접근 없이; 실제 창 close는 M3d-2b Swift가 source_window_closed 신호로 수행).
 pub fn moveWorkspaceToSession(src: *AppSession, dst: *AppSession, idx: usize, out_ids: []u64) !surface_move.MoveOutcome {
-    app_session_mod.noteWorkspaceMutation(); // 배치가 바뀌었다(계약 §P4 checkpoint 사건 목록).
     if (idx >= src.tabs.items.len) return error.InvalidCoordinate;
     // 범위 게이트(code-review [1]): M3d-2a-i는 비-그룹·비-pinned 워크스페이스만. detach(비가역) **전에** 거부해 source
     // 불변(pinned/group 워크스페이스 이동은 M3d-2a-ii). 안 막으면 adoptTab의 부분 정규화가 pinned prefix·그룹 파티션을 깬다.

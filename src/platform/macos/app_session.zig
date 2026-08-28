@@ -2686,49 +2686,6 @@ var app_session_host_coordinator: session_host.session_host_coordinator.SessionH
 // CR6a-2에서 이 owner를 갱신하며, secondary/quick은 별도 사본을 만들지 않고 primary가 이 rows를 빌려 렌더한다.
 var app_recovered_sessions_projection: session_host.recovered_sessions_projection.Projection = .{};
 var app_recovered_sessions_workspace_generation: u64 = 0;
-/// workspace manifest 의 checkpoint 순서를 재는 **앱 전역** coordinator(P4 C1 순수 층).
-///
-/// **창마다가 아니라 앱마다다** — manifest 는 여러 창의 블록을 한 파일로 모은 것이라, 창마다 두면 같은 파일을
-/// 두 번 쓴다. 배치를 바꾸는 사건은 어느 창에서 나든 이 하나를 dirty 로 만든다.
-///
-/// 이 슬라이스는 **신호만** 배선한다 — `tick`/capture/write 를 누가 모는지(그리고 지금 Swift 가 하는 조립·쓰기를
-/// Zig 로 옮길지)는 아직 정하지 않았다. 그 결정을 미루려고 여기서는 `mutation` 만 부른다.
-var app_workspace_checkpoint: ?maru.session.workspace_checkpoint.Coordinator = null;
-
-/// 배치가 바뀌었다고 표시한다. **여기 없는 사건은 checkpoint 를 미루지 못한다** — 계약(§P4 background
-/// checkpoint)이 세는 사건은 workspace 생성/삭제, split, Term 이동/닫기, 창 간 이동, runtime bind 변경이다.
-///
-/// best-effort 다: 정책이 잘못됐거나 시계를 못 읽어도 **호출부를 실패시키지 않는다**. checkpoint 가 늦어질 뿐
-/// 배치 변경 자체를 막을 이유가 없다.
-pub fn noteWorkspaceMutation() void {
-    if (app_workspace_checkpoint == null) {
-        app_workspace_checkpoint = maru.session.workspace_checkpoint.Coordinator.init(.{
-            // 사용자가 split 을 연달아 눌러도 파일을 매번 갈아 끼우지 않을 만큼만 모은다.
-            .debounce_ns = 300 * std.time.ns_per_ms,
-            .retry_initial_ns = 500 * std.time.ns_per_ms,
-            .retry_max_ns = 5 * std.time.ns_per_s,
-        }) catch return;
-    }
-    var coord = &(app_workspace_checkpoint orelse return);
-    coord.mutation(monotonicNs()) catch {};
-}
-
-/// 테스트가 「이 사건이 dirty 를 세우는가」를 보는 자리. 제품은 `tick` 을 아직 안 몬다(다음 슬라이스).
-pub fn workspaceCheckpointDirty() bool {
-    const coord = app_workspace_checkpoint orelse return false;
-    return coord.isDirty();
-}
-
-/// 테스트 전용 리셋 — 앱 전역이라 판정자끼리 상태가 샌다.
-pub fn resetWorkspaceCheckpointForTest() void {
-    app_workspace_checkpoint = null;
-}
-
-fn monotonicNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
 
 var app_recovered_sessions_launch_attempted: bool = false;
 var app_recovered_session_windows: std.ArrayListUnmanaged(*AppSession) = .empty;
@@ -22767,76 +22724,6 @@ test "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다" {
     const after = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
     defer a.free(after);
     try std.testing.expectEqualStrings(stale_text.items, after);
-}
-
-// P4 checkpoint — **배치를 바꾸는 사건이 dirty 를 세운다.** 이게 없으면 강제 종료 뒤 재접속이 낡은 배치로
-// 돌아간다(터미널은 살아 있는데 창·split 구성이 마지막 정상 종료 시점의 것). 계약 §P4 가 세는 사건은
-// workspace 생성/삭제, split, Term 이동/닫기, 창 간 이동, runtime bind 변경이다.
-//
-// **이 판정자는 「사건 → dirty」까지만 본다.** capture·write 를 누가 모는지는 아직 정하지 않았고(다음 슬라이스),
-// 그래서 여기서 tick 을 돌리지 않는다.
-test "P4: 배치를 바꾸는 사건이 checkpoint dirty 를 세운다" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // AppSession.init = 실 PTY/CoreText
-    const allocator = std.testing.allocator;
-    const session = try allocator.create(AppSession);
-    defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-
-    // init 자체가 첫 탭을 만들어 이미 dirty 다 — 리셋하고 시작해야 «이 사건이» 세웠음을 가릴 수 있다.
-    resetWorkspaceCheckpointForTest();
-    defer resetWorkspaceCheckpointForTest(); // 앱 전역이라 다음 판정자로 샌다.
-    try std.testing.expect(!workspaceCheckpointDirty());
-
-    // 제품 경로 하나를 실제로 태운다. 탭이 하나뿐인 세션에서도 안전한 사건을 고른다 — 여기서 UI 상태를
-    // 억지로 만들다 깨지면 판정자가 «배선» 이 아니라 «픽스처» 를 재게 된다.
-    _ = tab_ops.moveTab(session, 0, 0);
-    try std.testing.expect(workspaceCheckpointDirty());
-
-    // 나머지 사건은 **소스로 못 박는다.** 계약 §P4 가 세는 목록이 코드에 다 배선돼 있는지는 함수마다 UI 를
-    // 만들어 태우는 것보다 이렇게 보는 편이 확실하고, 한 자리를 빼면 여기서 걸린다.
-    const cwd = std.Io.Dir.cwd();
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const tab_src = try cwd.readFileAlloc(io, "src/platform/macos/app_session/tab.zig", allocator, .limited(1 << 20));
-    defer allocator.free(tab_src);
-    const ws_src = try cwd.readFileAlloc(io, "src/platform/macos/app_session/workspace.zig", allocator, .limited(1 << 20));
-    defer allocator.free(ws_src);
-
-    // 함수 머리 뒤 첫 줄에 호출이 오는 모양을 그대로 찾는다.
-    const wired = [_]struct { src: []const u8, head: []const u8 }{
-        .{ .src = tab_src, .head = "pub fn createTab(" },
-        .{ .src = tab_src, .head = "pub fn closeTab(" },
-        .{ .src = tab_src, .head = "pub fn moveTab(" },
-        .{ .src = tab_src, .head = "pub fn detachTabForMove(" },
-        .{ .src = ws_src, .head = "pub fn moveWorkspaceToSession(" },
-    };
-    for (wired) |w| {
-        const at = std.mem.indexOf(u8, w.src, w.head) orelse return error.TestUnexpectedResult;
-        const body = w.src[at..];
-        const brace = std.mem.indexOfScalar(u8, body, '{') orelse return error.TestUnexpectedResult;
-        // **줄 단위로 본다 — 글자만 찾으면 주석 처리된 호출도 통과한다.** 실제로 그렇게 썼다가 뮤테이션
-        // (배선을 주석으로 만들기)이 «안 잡힘» 으로 드러났다.
-        const window_end = @min(body.len, brace + 240);
-        var lines = std.mem.splitScalar(u8, body[brace..window_end], '\n');
-        var called = false;
-        while (lines.next()) |raw| {
-            const line = std.mem.trim(u8, raw, " \t\r");
-            if (std.mem.startsWith(u8, line, "app_session_mod.noteWorkspaceMutation(")) {
-                called = true;
-                break;
-            }
-        }
-        if (!called) {
-            std.debug.print("배선 누락: {s}\n", .{w.head});
-            return error.TestUnexpectedResult;
-        }
-    }
 }
 
 test "agent hooks stay out of provider files while the gate is off" {

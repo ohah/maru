@@ -998,6 +998,15 @@ pub const ControlWant = union(enum) {
     }
 };
 
+/// 32 소문자 hex 인가. 원격이 준 값을 명령 줄에 싣기 전에 여기서 거른다.
+fn validRuntimeId(id: [32]u8) bool {
+    for (id) |b| {
+        const is_hex_digit = (b >= '0' and b <= '9') or (b >= 'a' and b <= 'f');
+        if (!is_hex_digit) return false;
+    }
+    return true;
+}
+
 /// 지금 **원하는** 것. 그리는 자리가 세운다.
 var control_want: ControlWant = .none;
 /// 지금 채널이 **돌리고 있는** 것. host 가 열었다고 알릴 때 옮겨 담는다.
@@ -1033,6 +1042,17 @@ fn noteControlScreen(active: bool) void {
 /// 다른 것을 원하면 **먼저 닫는다.** 같은 채널 번호를 닫히기 전에 다시 열면 상대의 늦은 `close`
 /// 가 새 채널로 배달돼 방금 연 것이 이유 없이 닫힌다(SSH §3.4.1 — 적대적 검증이 잡은 실패다).
 pub fn wantControl(next: ControlWant) void {
+    // **runtime id 는 32 소문자 hex 만이다.** 이 값은 원격이 준 목록에서 오고, 명령 줄에 그대로
+    // 실린다 — 셸이 그 줄을 파싱하므로 `;` 나 공백이 들어가면 **원격 CLI 가 거절하기 전에**
+    // 다른 명령이 그 서버에서 돈다. 인용으로 막을 수도 있지만, 형식이 정해진 값은 **아예 안
+    // 받는 편**이 낫다(경로와 다르다 — 경로는 임의 문자열이라 인용한다).
+    switch (next) {
+        .screen => |id| if (!validRuntimeId(id)) {
+            setLastError("control_runtime_id_invalid");
+            return;
+        },
+        else => {},
+    }
     if (control_want.eql(next)) return;
     control_want = next;
     if (control_open.eql(next)) {
@@ -1069,6 +1089,8 @@ pub export fn maru_mobile_control_command(out: [*]u8, cap: usize) usize {
             return 0;
         },
         .sessions => " control --stdio",
+        // **id 는 이미 32 소문자 hex 다** — `wantControl` 이 유일한 설정자이고 거기서 걸렀다
+        // (여기서 또 검사해도 도달할 수 없다: 변이 검사로 확인했다). 그래서 인용 없이 싣는다.
         .screen => |id| std.fmt.bufPrint(&tail_buf, " attach --stream {s}", .{&id}) catch {
             setLastError("control_command_too_long");
             return 0;
@@ -1261,6 +1283,10 @@ pub export fn maru_mobile_control_reset() void {
     // 새 연결이면 원하는 것도 돌고 있는 것도 처음부터다 — 남겨 두면 옛 세션의 화면을 열려 한다.
     control_want = .none;
     control_open = .none;
+    // **요청도 함께 비운다.** 이걸 빼면 원하는 것이 없는데 열기 요청만 살아남아, host 가 그것을
+    // 집고 `control_command` 가 0 을 답한다(뜻 없는 열기 한 번 + `control_command_without_want`).
+    control_open_req = false;
+    control_close_req = false;
     control_client = .{};
     control_row_count = 0;
     control_req_len = 0;

@@ -10,6 +10,11 @@
 //! **import로** 끌어온다: 여기 적힌 파일의 판정자는 반드시 컴파일된다.
 //!
 //! **`test`를 대신하지 않는다.** 합류 전에는 `mise run check`가 전부 돈다.
+//!
+//! **구문 트리 판정자(`TS*`)는 여기 없다.** `src/syntax/`는 별도 모듈이라 이 파일의 모듈 경로
+//! 밖이고(`error: import of file outside module path`), 설령 모듈 이름으로 들여와도 `zig test`는
+//! **루트 모듈의 test만** 싣는다 — `LANG`이 그렇게 0개를 돌았다. `build.zig`가 그 모듈을 뿌리로
+//! 하는 실행을 따로 걸어 `test-editor`에 매단다.
 
 test {
     _ = @import("app_session/editor.zig");

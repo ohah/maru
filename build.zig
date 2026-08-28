@@ -2092,6 +2092,59 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
+        const session_host_r2a_checkpoint_step = b.step(
+            "macos-session-host-r2a-checkpoint-smoke",
+            "Run actual AppKit duplicate runtime checkpoint rejection and preservation smoke",
+        );
+        const session_host_r2a_checkpoint_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-r2a-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/Library/Application Support/maru\"; " ++
+                "cp tests/fixtures/session-host/duplicate-runtime-workspace.v1 \"$root/Library/Application Support/maru/workspace.v1\"; " ++
+                "rm -f zig-out/maru-macos-app/app.summary.txt",
+        });
+        session_host_r2a_checkpoint_fixture.setCwd(b.path("."));
+        const run_session_host_r2a_checkpoint = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-r2a-home; " ++
+                "checkpoint=\"$root/Library/Application Support/maru/workspace.v1\"; marker=\"$root/restore.marker\"; " ++
+                "./zig-out/Maru.app/Contents/MacOS/maru-macos-app & pid=$!; " ++
+                "trap 'kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true' EXIT; " ++
+                "attempt=0; while test ! -s \"$marker\"; do kill -0 \"$pid\" 2>/dev/null; " ++
+                "attempt=$((attempt + 1)); test \"$attempt\" -lt 300; sleep 0.1; done; " ++
+                "/usr/bin/grep -Eq '^preflight_count=-1$' \"$marker\"; " ++
+                "/usr/bin/grep -Eq '^restore_incomplete=true$' \"$marker\"; " ++
+                "/usr/bin/grep -Eq '^checkpoint_armed=true$' \"$marker\"; " ++
+                "sleep 1; kill -0 \"$pid\" 2>/dev/null; " ++
+                "cmp -s tests/fixtures/session-host/duplicate-runtime-workspace.v1 \"$checkpoint\"; " ++
+                "test ! -e \"$checkpoint.bak\"; test ! -e \"$root/Library/Application Support/maru/.workspace.v1.tmp\"; " ++
+                "kill -KILL \"$pid\"; wait \"$pid\" 2>/dev/null || true; trap - EXIT; " ++
+                "cmp -s tests/fixtures/session-host/duplicate-runtime-workspace.v1 \"$checkpoint\"; " ++
+                "test ! -e \"$checkpoint.bak\"; test ! -e \"$root/Library/Application Support/maru/.workspace.v1.tmp\"",
+        });
+        run_session_host_r2a_checkpoint.setCwd(b.path("."));
+        run_session_host_r2a_checkpoint.setEnvironmentVariable(
+            "MARU_SESSION_HOST_R2A_CHECKPOINT_SMOKE",
+            "maru-test-only-v1",
+        );
+        run_session_host_r2a_checkpoint.setEnvironmentVariable(
+            "MARU_SESSION_HOST_R2A_CHECKPOINT_MARKER",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home/restore.marker"),
+        );
+        run_session_host_r2a_checkpoint.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home"),
+        );
+        run_session_host_r2a_checkpoint.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home"),
+        );
+        run_session_host_r2a_checkpoint.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_r2a_checkpoint.step.dependOn(&macos_app_bundle.step);
+        run_session_host_r2a_checkpoint.step.dependOn(&file_panel_web_build.step);
+        run_session_host_r2a_checkpoint.step.dependOn(&session_host_r2a_checkpoint_fixture.step);
+        session_host_r2a_checkpoint_step.dependOn(&run_session_host_r2a_checkpoint.step);
+
         const session_host_cr6c_appkit_step = b.step(
             "macos-session-host-recovery-smoke",
             "Run actual AppKit recovered-session discovery, click, render, and keep-alive smoke",

@@ -1,0 +1,11 @@
+maru.workspace.v1
+window tabs=1 active-tab=0
+tab panes=1 active-pane=0 custom-name=""
+tree-node leaf pane=0
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="" cwd="" command="" runtime-handle="fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef" cols=80 rows=24
+window tabs=1 active-tab=0
+tab panes=1 active-pane=0 custom-name=""
+tree-node leaf pane=0
+pane surfaces=1 active-term=0 custom-name=""
+surface custom-name="" title="" cwd="" command="" runtime-handle="fedcba9876543210fedcba9876543210:0123456789abcdef0123456789abcdef" cols=80 rows=24

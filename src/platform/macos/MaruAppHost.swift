@@ -4003,6 +4003,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
     private var smokeMode = false
+    private var sessionHostR2aCheckpointPreflightCount: Int64 = 0
     private var sessionHostRecoverySmokeStage: UInt32 = 0
     private var sessionHostRecoverySmokeRowPresent = false
     private var sessionHostRecoverySmokeClickDispatched = false
@@ -4057,6 +4058,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var launchSummaryWritten = false
     private var isSessionHostRecoverySmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
+    }
+    private var isSessionHostR2aCheckpointSmokeMode: Bool {
+        ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R2A_CHECKPOINT_SMOKE"] == "maru-test-only-v1"
     }
     private var isSessionHostInputContinuitySmokeMode: Bool {
         isSessionHostRecoverySmokeMode &&
@@ -4383,17 +4387,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Zig parser를 session=NULL preflight로 호출해 Swift가 wire를 따로 해석하지 않으면서 throwaway 셸 spawn을 막는다.
         let restoreDisabled = ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] != nil
         let recoverySmoke = isSessionHostRecoverySmokeMode
-        let preparedWorkspace = ((smokeMode && !recoverySmoke) || restoreDisabled) ? nil : loadWorkspaceText()
+        let r2aCheckpointSmoke = isSessionHostR2aCheckpointSmokeMode
+        let preparedWorkspace = ((smokeMode && !recoverySmoke && !r2aCheckpointSmoke) || restoreDisabled) ? nil : loadWorkspaceText()
         let preparedWorkspaceWindowCount = preparedWorkspace.map { text -> Int64 in
             let bytes = Array(text.utf8)
             return bytes.withUnsafeBufferPointer { buf in
                 maru_macos_app_session_workspace_window_count(nil, buf.baseAddress, buf.count)
             }
         }
+        if r2aCheckpointSmoke {
+            sessionHostR2aCheckpointPreflightCount = preparedWorkspaceWindowCount ?? 0
+        }
         // CR6a-2: 일반 launch는 저장 Workspace 유무와 무관하게 terminal publication을 잠깐 defer한다. secure
         // discovery/inventory가 먼저 끝난 뒤 저장 창을 apply하거나 아래에서 default surface를 명시적으로 finish해,
         // launch가 방금 만든 runtime을 자기 orphan으로 관측하지 않게 한다. smoke는 recovery 제품 범위 밖이다.
-        let deferInitialSurface = !smokeMode || recoverySmoke
+        let deferInitialSurface = !smokeMode || recoverySmoke || r2aCheckpointSmoke
 
         if !startAppSession(smokeMode: smokeMode, deferInitialSurface: deferInitialSurface) {
             writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
@@ -4411,15 +4419,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 } else {
                     sessionHostRecoverySmokePrepareOutcome = maru_macos_app_session_prepare_recovered_sessions(session, nil, 0, 0)
                 }
-                // parse 가능한 저장 Window가 없으면 recovery cut 뒤에만 기본 shell을 만든다. 실제 저장 Window가
-                // 있으면 applyWorkspaceWindow가 deferred surface를 완성한다.
-                if (preparedWorkspaceWindowCount ?? 0) <= 0 {
-                    guard maru_macos_app_session_finish_deferred_initial_surface(session) == Self.statusOK else {
-                        exitCode = 1
-                        writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
-                        NSApp.terminate(nil)
-                        return
-                    }
+            }
+            // parse 가능한 저장 Window가 없으면 recovery cut 뒤에만 기본 shell을 만든다. 실제 저장 Window가
+            // 있으면 applyWorkspaceWindow가 deferred surface를 완성한다. R2a smoke는 discovery를 우회하고
+            // null-session preflight 뒤의 제품 fallback만 허용한다.
+            if (!smokeMode || recoverySmoke || r2aCheckpointSmoke), (preparedWorkspaceWindowCount ?? 0) <= 0 {
+                guard maru_macos_app_session_finish_deferred_initial_surface(session) == Self.statusOK else {
+                    exitCode = 1
+                    writeSummary(visibleUI: true, abiReady: true, smokeDurationMs: smokeDuration)
+                    NSApp.terminate(nil)
+                    return
                 }
             }
         }
@@ -4470,6 +4479,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0
         armWorkspaceCheckpoint(initialDirty: checkpointInitialDirty)
+        if r2aCheckpointSmoke {
+            guard let markerPath = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R2A_CHECKPOINT_MARKER"],
+                  sessionHostR2aCheckpointPreflightCount == -1,
+                  workspaceRestoreIncomplete,
+                  workspaceCheckpointArmed
+            else {
+                exitCode = 1
+                NSApp.terminate(nil)
+                return
+            }
+            let marker = "preflight_count=-1\nrestore_incomplete=true\ncheckpoint_armed=true\n"
+            do {
+                try Data(marker.utf8).write(to: URL(fileURLWithPath: markerPath), options: .atomic)
+            } catch {
+                exitCode = 1
+                NSApp.terminate(nil)
+                return
+            }
+        }
         startFrameLoopTicks()
 
         // 세션 컨트롤 플레인 라이브 서버(A2b): 앱 전역 소켓 + accept 스레드를 띄운다. 이 뒤로 tickAppSession이 매
@@ -5680,7 +5708,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         preparedWindowCount: Int64? = nil,
         deferredInitialSurface: Bool = false
     ) -> Bool {
-        guard !smokeMode else { return true }
+        guard !smokeMode || isSessionHostR2aCheckpointSmokeMode else { return true }
         // 끄기(임시): config 토글은 후속. 기본은 ON. 이 플래그는 saveWorkspace도 막는다 — 복원을 끈 사용자의 저장
         // 파일을 종료 시 덮어쓰지 않게(persistence 자체 off).
         guard ProcessInfo.processInfo.environment["MARU_NO_WORKSPACE_RESTORE"] == nil else { return true }
@@ -11407,6 +11435,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         final_frame_ended=\(frameEnded)
         smoke_mode=\(smokeMode)
         smoke_duration_ms=\(duration)
+        session_host_r2a_checkpoint_smoke=\(isSessionHostR2aCheckpointSmokeMode)
+        session_host_r2a_checkpoint_preflight_count=\(sessionHostR2aCheckpointPreflightCount)
+        session_host_r2a_checkpoint_restore_incomplete=\(workspaceRestoreIncomplete)
         session_host_recovery_smoke_stage=\(sessionHostRecoverySmokeStage)
         session_host_recovery_smoke_row_present=\(sessionHostRecoverySmokeRowPresent)
         session_host_recovery_smoke_click_dispatched=\(sessionHostRecoverySmokeClickDispatched)

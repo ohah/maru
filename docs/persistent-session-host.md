@@ -29,8 +29,8 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 않는다). 메우려면 host가 관측 payload에 측정한 cwd를 더해야 하고 그건 wire schema 변경이라
 > [session-host-upgrade.md](session-host-upgrade.md)의 호환 규약을 건드린다 — **별도 슬라이스이며 아직 계획에
 > 없다.** **P3-e4a~c는 구현됐고 P3-e4d parity gate는 부분 완료**다. 실제 host PTY OSC
-> 7/2/5379 왕복·revision/coalescing·소유권 테스트는 존재하지만 detach 중 변경→재접속, controlled Claude/Codex
-> foreground, 다중 runtime event 격리, 실제 upload branch 제품 E2E가 남아 있어 runtime metadata parity 전체를
+> 7/2/5379 왕복·revision/coalescing·소유권, 다중 runtime 격리와 detach 중 변경→재접속 테스트는 존재하지만
+> controlled Claude/Codex foreground, 실제 Git·agent·SSH upload 소비자와 legacy binary E2E가 남아 있어 runtime metadata parity 전체를
 > 완료로 선언하지 않는다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
 > IME marked text 표시는 별도 client-local 계약으로 구현됐다. 각 GUI `Surface`가 host snapshot 위에 같은
 > `PreeditOverlay`를 합성하고, MRSH/runtime/workspace에는 저장하지 않는다. 그래서 다중 클라이언트가 같은
@@ -7060,7 +7060,8 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     최초 응답이 새 full-state를 담고 있음을 추가 pump 이전에 검증한다. 시간 추측은 쓰지 않고
     harness-owned trigger/marker로 detach 전·변경 commit·reattach 순서를 구분한다. 새 test-only wire
     method나 제품 분기를 열지 않고, cwd·SSH destination·raw argv는 artifact·실패 log에 남기지
-    않는다. controlled foreground와 Git·agent·SSH 소비자 E2E는 e4d-2 후속이며 e4d-1만으로
+    않는다. controlled foreground와 Git·agent·SSH 소비자 E2E는 e4d-2a, 실제 capability 없는 N-1 binary는
+    e4d-2b 후속이며 e4d-1만으로
     metadata parity 전체 완료를 주장하지 않는다.
     IME marked text의 client-local 공통 snapshot 합성, remote delta 재합성,
     scrollback 합성 억제와 canonical cursor/mode 투영, clear 후 canonical base 복원, base ambiguous-width 소비,
@@ -7091,7 +7092,9 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
 P3 core의 현재 종료 gate는 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot,
 input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 완료**는 실제 host PTY가 OSC 7/0·2/133/5379와
 controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕복하고, detach 중 바뀐 최신 metadata가 reconnect
-첫 attach에 복원되며, sidebar cwd·임시 Git branch·agent 표시·SSH upload 분기를 자동 검증해야 선언한다.
+첫 attach에 복원되며, sidebar cwd·임시 Git branch·agent 표시·SSH upload 분기와 capability 없는 N-1 host의
+fail-closed degradation을 자동 검증해야 선언한다. current host의 foreground·consumer 흐름은 P3-e4d-2a,
+실제 구 binary packaging은 P3-e4d-2b가 각각 소유한다.
 
 ### P4 — 일반 Window default readiness·background 알림
 

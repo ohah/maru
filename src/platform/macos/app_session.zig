@@ -5692,6 +5692,11 @@ pub const AppSession = struct {
     // host-backed Term 알림 round-robin 커서(P4 §6.32) — host 알림은 RPC로 pull하므로 tick당 원격 Term 하나만 폴링해
     // 폴링 비용을 bound한다(in-process는 코어 락 read라 매 tick 전부 훑음). 원격 Term 개수로 wrap.
     remote_notif_cursor: usize = 0,
+    // 알림 폴링의 **바닥 주기** 카운트다운(tick). 0 이 되는 tick 에만 round-robin 한 칸을 돌린다.
+    // 프레임 속도에서 폴링을 떼기 위한 것이다 — 예전에는 매 tick RPC 를 보내, 유휴 상태에서도 초당 60 번
+    // host 를 깨웠다(실측: 앱 73% + host 33% CPU). host 는 그 질문에 답하느라 영영 잠들지 못했다.
+    // `ticksForMs` 로 채우므로 주사율이 30 이든 120 이든 실제 간격은 같다.
+    remote_notif_floor_ticks: u32 = 0,
     // 인앱 알림 센터 히스토리(owned). pendingNotification()이 드레인하는 알림을 여기에도 보관해 종 아이콘으로 다시
     // 열람한다(2단계). 최신이 뒤(append). notification_unread는 안 읽은 개수 캐시 — push/read/cap-drop 3곳에서만
     // 증감(직접 조작 금지). 매번 순회하지 않게 캐시해 배지 렌더를 싸게 한다.
@@ -16097,6 +16102,9 @@ pub const AppSession = struct {
                     if (!term.rt.live_initialized) continue;
                     const ds = try term.rt.pump.drainAvailable();
                     if (ds.output_events > 0) {
+                        // 알림 폴링이 «먼저 볼 Term» 을 고르는 힌트(session_model 의 필드 주석 참고). 여기서만 세우고
+                        // 내리는 것은 확인한 쪽이다. 조용한 Term 은 이 표시가 서지 않아 폴링 대상에서 빠진다.
+                        term.output_since_notify_check = true;
                         term.agent_last_output_ms = self.awakeMs();
                         term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
                         // 커서 blink 리셋은 **활성 surface 자신의 출력**에만 반응한다 — 아래 drain_summary는 모든

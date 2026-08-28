@@ -288,16 +288,44 @@ pub fn notificationBodyOwned(self: *AppSession, term: *Term, body: []const u8) !
 }
 
 /// host-backed Term의 OSC 9/777 알림을 host에서 pull해 GUI 알림 경로에 잇는다(§6.32 — #1523 host→client 전달의 GUI
-/// surfacing). host core가 알림을 파싱하므로 client placeholder 코어엔 없어 RPC(`runtime.notification`)로 뺀다. RPC 비용을
-/// bound하려고 **tick당 원격 Term 하나만 round-robin**으로 폴링한다(cursor로 순회 — N tick 안에 전부 훑음, 알림은 host
-/// 단일 슬롯이라 term당 최대 1건). notifications.osc off면 이미 host에서 소비됐으니 그냥 drop. best-effort.
+/// surfacing). host core가 알림을 파싱하므로 client placeholder 코어엔 없어 RPC(`runtime.notification`)로 뺀다.
+///
+/// **폴링을 프레임 속도에서 뗀다.** 예전에는 tick 마다 원격 Term 하나를 round-robin 으로 물어봤다. 인프로세스에서
+/// 같은 질문은 코어 락 아래 필드 읽기라 사실상 공짜였는데, 코어가 host 로 나가면서 한 줄의 의미가 **프로세스 간
+/// 왕복**으로 바뀌었다. 그 사실이 호출부에는 드러나지 않아, 유휴 상태에서도 초당 60 번 host 를 깨우고 있었다
+/// (2026-08-28 실측: 앱 73% + host 33% CPU. host 는 답하느라 영영 잠들지 못한다).
+///
+/// 그래서 두 갈래로 고른다.
+///   1. **힌트** — 마지막 확인 이후 출력을 받은 Term 을 먼저 본다. 알림은 출력의 결과로만 생기므로 조용한 Term 을
+///      물어볼 이유가 없고, 출력이 난 Term 은 그 tick 에 바로 본다(지연이 오히려 줄어든다).
+///   2. **바닥 주기** — 힌트가 없어도 `notification_floor_poll_ms` 마다 한 칸씩 round-robin 한다. OSC 9/777 은
+///      화면을 안 바꿀 수 있어 출력 신호가 안 서는 경우가 있는데, 이 순회가 그것을 반드시 줍는다.
+///
+/// `notifications.osc` 가 꺼져 있어도 **바닥 주기로는 비운다**. 게이트를 RPC 앞에 두면 RPC 가 0 이 되지만,
+/// `notification_config_update` 는 host 슬롯을 비우지 않아 껐을 때 들어온 알림이 고이고 **다시 켜는 순간 옛 알림이
+/// 튄다**. 비우기 위한 순회는 남기고 결과만 버린다. best-effort.
+const notification_floor_poll_ms: u32 = 100;
+
 pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingNotification {
     if (is_macos) {
         if (app_session_mod.app_remote_backend == null) return null;
-        // 원격 Term을 순서대로 세어 cursor 위치의 하나를 고른다(중첩 tabs/panes/terms를 flat index로).
+        const osc_enabled = self.loaded_config.config.notifications.osc;
+        // 바닥 주기 카운트다운. 이 tick 이 바닥이면 round-robin 한 칸을 돌린다.
+        const floor_tick = blk: {
+            if (self.remote_notif_floor_ticks == 0) {
+                self.remote_notif_floor_ticks = self.ticksForMs(notification_floor_poll_ms);
+                break :blk true;
+            }
+            self.remote_notif_floor_ticks -= 1;
+            break :blk false;
+        };
+        // 원격 Term을 순서대로 세어 cursor 위치의 하나를 고르고(중첩 tabs/panes/terms를 flat index로), 그와 별개로
+        // 출력 힌트가 선 Term 중 처음 하나를 집는다. 힌트는 **집는 순간 내린다** — 이번에 확인했다는 뜻이다.
         var count: usize = 0;
         var target_tab: ?*Tab = null;
         var target_term: ?*Term = null;
+        var hinted_tab: ?*Tab = null;
+        var hinted_term: ?*Term = null;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -305,6 +333,10 @@ pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingN
                     if (count == self.remote_notif_cursor) {
                         target_tab = tab;
                         target_term = term;
+                    }
+                    if (hinted_term == null and term.output_since_notify_check) {
+                        hinted_tab = tab;
+                        hinted_term = term;
                     }
                     count += 1;
                 }
@@ -314,12 +346,26 @@ pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingN
             self.remote_notif_cursor = 0;
             return null;
         }
-        self.remote_notif_cursor = (self.remote_notif_cursor + 1) % count;
-        const term = target_term orelse return null; // cursor가 count 넘음(원격 Term 감소) — 다음 tick에 보정됨.
-        const tab = target_tab.?;
+        // 힌트가 있으면 그것을, 없으면 바닥 tick 에만 cursor 한 칸을. 둘 다 아니면 이 tick 은 RPC 를 보내지 않는다.
+        // 알림이 꺼져 있으면 힌트는 무시한다 — 비우기 위한 바닥 순회만 남긴다.
+        var tab: *Tab = undefined;
+        var term: *Term = undefined;
+        if (osc_enabled and hinted_term != null) {
+            hinted_term.?.output_since_notify_check = false;
+            tab = hinted_tab.?;
+            term = hinted_term.?;
+        } else if (floor_tick) {
+            self.remote_notif_cursor = (self.remote_notif_cursor + 1) % count;
+            // cursor가 count 넘음(원격 Term 감소) — 다음 바닥 tick에 보정된다.
+            term = target_term orelse return null;
+            term.output_since_notify_check = false;
+            tab = target_tab.?;
+        } else return null;
         const notif = app_session_mod.app_remote_backend.?.takeNotificationFor(term.rt.handle) orelse return null;
         defer notif.deinit(app_session_mod.app_remote_backend.?.allocator); // takeNotificationFor가 backend allocator로 dupe.
-        if (!self.loaded_config.config.notifications.osc) return null; // 게이트 — host에서 이미 소비됨(drop).
+        // 게이트. 여기까지 왔다는 것은 «바닥 순회로 슬롯을 비우러 온» 경우뿐이다(위에서 osc 가 꺼져 있으면 힌트를
+        // 건너뛴다). 슬롯은 이미 비웠으니 결과만 버린다 — 이것이 다시 켰을 때 옛 알림이 튀지 않는 이유다.
+        if (!osc_enabled) return null;
         // **훅 모드 Term 에서는 OSC 알림을 쓰지 않는다**(계약 §1.1) — in-process `drainOscNotificationFrom` 과
         // 같은 규율이다. 여기서 함께 방출하면 같은 턴에 두 번 울린다. host 슬롯은 위에서 이미 비웠다(drop).
         if (agent_ops.agentHookMode(self, term) == .hook) return null;

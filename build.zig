@@ -99,6 +99,64 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/shutdown_wire_contract.zig"),
         .target = target,
     });
+    // ── tree-sitter(구문 트리) C 배선 ─────────────────────────────────────────────
+    //
+    // **별도 모듈로 세운다 — `maru`에도 exe 루트 모듈에도 매달지 않는다.**
+    //  · `maru`가 아닌 이유: wasm·mobile 빌드가 같은 root(`src/maru.zig`)를 쓰므로 거기 C를 매달면
+    //    그 둘이 깨진다(`check-wasm-sync`가 게이트다).
+    //  · exe 루트가 아닌 이유: **아직 부르는 코드가 없다.** 루트 모듈에 C를 매달면 소비처가 하나도
+    //    없어도 코어와 grammar가 배포물에 들어간다 — `ReleaseFast`(배포 `macos-dmg`가 쓰는 모드)
+    //    object 실측으로 코어 896KB · zig grammar 736KB다.
+    //    provider가 서는 N4에서 이 모듈을 `@import`하는 쪽에 붙인다 — 그때가 링크가 의미를 갖는
+    //    첫 시점이다.
+    //
+    // 코어는 `lib.c` 하나가 나머지 `.c`를 `#include`하는 **단일 번역 단위**다 — 파일을 열거하지
+    // 않는다(그 목록은 upstream이 바꾼다).
+    const syntax_mod = b.addModule("syntax", .{
+        .root_source_file = b.path("src/syntax/tree_sitter.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    if (b.lazyDependency("tree_sitter", .{})) |ts_dep| {
+        // **세 경로를 다 준다 — 상류 자신의 레시피다**(`build.zig`의 `addIncludePath` 셋,
+        // `binding_rust/build.rs`의 `.include()` 셋이 같은 목록이다). `include`만 주면 코어의
+        // `src/unicode/utf8.h`가 부르는 `"unicode/umachine.h"`가 **벤더링 헤더로 안 풀리고**,
+        // macOS에서는 SDK의 시스템 ICU 헤더가 조용히 그 자리를 메운다(실측: MacOSX.sdk에 그
+        // 파일이 있다). Linux에는 없어서 CI가 빨개졌다 — 즉 macOS 초록이 결함을 가리고 있었다.
+        syntax_mod.addIncludePath(ts_dep.path("include"));
+        syntax_mod.addIncludePath(ts_dep.path("src"));
+        syntax_mod.addIncludePath(ts_dep.path("src/wasm"));
+        syntax_mod.addCSourceFile(.{
+            .file = ts_dep.path("src/lib.c"),
+            .flags = &.{
+                "-std=c11",
+                // **기능 검사 매크로도 상류 레시피 그대로다.** 엄격 ISO(`-std=c11`)에서 glibc는
+                // POSIX·BSD 확장을 가리므로 `fdopen`·`le16toh`·`be16toh`가 선언되지 않는다
+                // (CI 실측: `error: call to undeclared function 'le16toh'`). macOS 헤더는 그것을
+                // 늘 노출해서 여기서는 안 터진다 — 이것도 macOS 초록이 가린 자리다.
+                "-D_POSIX_C_SOURCE=200112L",
+                "-D_DEFAULT_SOURCE",
+                "-D_BSD_SOURCE",
+                "-D_DARWIN_C_SOURCE",
+                // `-fno-sanitize=undefined`: 제3자 C를 우리 UBSan 정책으로 재단하지 않는다(이 저장소의
+                // `coretext_smoke.m`이 같은 이유로 같은 플래그를 쓴다).
+                "-fno-sanitize=undefined",
+            },
+        });
+    }
+    if (b.lazyDependency("tree_sitter_zig", .{})) |ts_zig_dep| {
+        // grammar는 자기 `src`를 include로 요구한다(`tree_sitter/parser.h`가 거기 있다).
+        syntax_mod.addIncludePath(ts_zig_dep.path("src"));
+        syntax_mod.addCSourceFile(.{
+            .file = ts_zig_dep.path("src/parser.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+        });
+        // **하이라이트 쿼리는 grammar가 소유한다**(`queries/highlights.scm`). 우리가 베껴 두면
+        // grammar를 올릴 때마다 조용히 낡는다 — `maru_terminfo`가 같은 이유로 같은 패턴을 쓴다.
+        syntax_mod.addAnonymousImport("zig_highlights_scm", .{ .root_source_file = ts_zig_dep.path("queries/highlights.scm") });
+    }
+
     const maru_mod = b.addModule("maru", .{
         .root_source_file = b.path("src/maru.zig"),
         .target = target,
@@ -2755,6 +2813,21 @@ pub fn build(b: *std.Build) void {
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));
     editor_test_step.dependOn(&run_editor_core_tests.step);
+    // **구문 트리 판정자(`SYN*`)도 자기 모듈을 뿌리로 따로 돌린다.** `syntax`는 별도 모듈이고
+    // `zig test`는 루트 모듈의 test만 싣는다 — `editor_judges.zig`에 `_ = @import("syntax")`를 적어도
+    // 그 안의 판정자는 **0개가 돈다**. 바로 위 `LANG`, 그 위 `CRT`와 **같은 함정**이라 세 번째로
+    // 반복하지 않는다. 필터를 걸지 않는 것도 같은 이유다 — 이 모듈에는 `SYN*`밖에 없어서
+    // 필터가 고를 것이 없고, 이름을 적어 두면 그 이름이 도는지 다시 확인할 거리만 생긴다.
+    //
+    // **`TS*`로 짓지 않았다.** 그 이름은 `app_session.zig`의 chrome 탭 스타일 판정자가 이미 쓴다
+    // (`TS1 chrome.tab-style=underline` …). 편집기 필터에 `"TS"`를 적으면 **그쪽이 골라져 초록이
+    // 되는데** 구문 판정자는 한 개도 안 돈다 — `CRT`·`LANG`이 낸 거짓 초록과 정확히 같은 모양이다.
+    const syntax_tests = addProjectTest(b, .{ .root_module = syntax_mod });
+    const run_syntax_tests = b.addRunArtifact(syntax_tests);
+    run_syntax_tests.setCwd(b.path("."));
+    editor_test_step.dependOn(&run_syntax_tests.step);
+    // `test`에도 건다 — 편집기 스텝은 되먹임용이고, 합류 게이트는 이쪽이다.
+    test_step.dependOn(&run_syntax_tests.step);
     // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라
     // 기본 Zig test에서 어느 플랫폼에서든 돌린다(인앱 새 버전 안내의 판정 동작 고정).
     const update_check_tests = addProjectTest(b, .{

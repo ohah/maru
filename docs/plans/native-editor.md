@@ -418,6 +418,28 @@
     확정**(grammar마다 `parser.c`가 붙어 배포물이 커진다 — 열린 집합으로 두지 않는다) · grammar별 **라이선스 확인
     후** [third-party-licenses.md](../third-party-licenses.md) 표 갱신 · 파싱 상한과 파서 실패 격리(§5.3) ·
     전 문서 파싱을 렌더 루프에서 분리(§2.1)
+  - **번들 언어 목록(이 문서가 소유한다)**. 열린 집합이 아니다 — 여기 없는 확장자는 무색이고, 늘리려면
+    이 표에 행을 더하면서 [third-party-licenses.md](../third-party-licenses.md)의 라이선스 확인을 함께 한다.
+
+    | 언어 | grammar | 버전 | `parser.c` object 크기 |
+    | --- | --- | --- | --- |
+    | Zig | `tree-sitter-grammars/tree-sitter-zig` | v1.1.2 | 736KB |
+
+    **Zig 하나로 시작한다.** 이 저장소를 이 편집기로 여는 것이 첫 소비이고, grammar가 실제로 붙는지를
+    재는 데 하나면 충분하다. 코어(896KB)는 언어 수와 무관한 **고정 비용**이라 두 번째 언어부터가 진짜
+    증가분이다 — 그래서 하나씩 판단한다.
+
+    **크기는 `zig build-obj -OReleaseFast`(배포 `macos-dmg`가 쓰는 모드) 산출물 실측이다.** 링크·strip
+    전 값이라 `.app` 증가분의 상한으로 읽는다. 모드에 따라 크게 갈린다 — 같은 방법으로 `Debug`는
+    코어 572KB · grammar 740KB, `ReleaseSmall`은 192KB · 684KB였다.
+  - **1층 배선의 현재 자리**: `src/syntax/tree_sitter.zig`(`syntax` 모듈 — `maru`가 아니다. wasm·mobile이
+    `src/maru.zig`를 공유하므로 C를 거기 매달면 그 둘이 깨진다). **아직 exe에 링크되지 않는다** —
+    `@import("syntax")`하는 제품 코드가 없어서고, provider(`init`/`onEdit`/`spansForRange`)가 서는 것이
+    링크가 의미를 갖는 첫 시점이다. 판정자는 `SYN1`(키워드·문자열·주석이 갈린다)·`SYN2`(모르는 언어와
+    상한 넘는 문서는 무색)·`SYN3`(깨진 소스도 트리가 나온다)이고, `syntax` 모듈을 뿌리로 하는 실행이
+    `test`와 `test-editor`에 걸려 있다(모듈이 달라 `editor_judges.zig`의 import로는 **0개가 돈다** —
+    `LANG`·`CRT`가 같은 함정이었다). **`TS*`가 아닌 이유**는 그 접두를 chrome 탭 스타일 판정자가 이미
+    쓰기 때문이다 — 편집기 필터에 `"TS"`를 적으면 그쪽이 골라져 **구문 판정자 0개로 초록이 된다**.
   - **grammar가 없는 파일은 무색이다**(§5). 자체 lexer fallback을 만들지 않는다
   - **진단**(§5): 물결 밑줄(기존 밑줄 장식 확장)·gutter 마커. 출처가 LSP든 CLI 린터든 한 층
   - **레이아웃을 바꾸는 LSP 결과**: 인레이 힌트·ghost text(§4 가로 축)·code lens(세로 축)·

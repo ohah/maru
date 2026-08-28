@@ -1,6 +1,9 @@
 references/
 .zig-cache/
 zig-out/
+# Zig 0.16이 `build.zig.zon` 의존성을 푸는 자리다(전역 캐시에는 tarball만 남는다). 빌드 산출물이라
+# 커밋하지 않는다 — tree-sitter 코어(1.1MB)와 zig grammar(6.1MB)만으로도 7.2MB의 제3자 소스다.
+zig-pkg/
 dist/
 web/node_modules/
 web/dist/

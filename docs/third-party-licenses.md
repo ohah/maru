@@ -10,11 +10,14 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 | 라이브러리 | 용도 | 라이선스 | 출처 |
 | --- | --- | --- | --- |
-| tree-sitter (core) | 편집기 syntax 1층 — 증분 파싱 런타임([native-editor-visual-mapping.md](native-editor-visual-mapping.md) §5.3) | MIT | <https://github.com/tree-sitter/tree-sitter> |
+| tree-sitter (core) v0.26.13 | 편집기 syntax 1층 — 증분 파싱 런타임([native-editor-visual-mapping.md](native-editor-visual-mapping.md) §5.3) | MIT (© 2018 Max Brunsfeld) | <https://github.com/tree-sitter/tree-sitter> — 받는 것은 **crates.io 소스 배포본**이다(아래) |
 | tree-sitter grammar (언어별) | 각 언어의 생성 파서(`parser.c`) | **개별 확인** — permissive(MIT·Apache-2.0·BSD·ISC)만 채택하고 copyleft는 받지 않는다 | 언어별 저장소 |
+| └ tree-sitter-zig v1.1.2 | `.zig` 파일의 생성 파서와 `queries/highlights.scm` | MIT (© 2024 Amaan Qureshi) | <https://github.com/tree-sitter-grammars/tree-sitter-zig> |
 
+- **코어는 GitHub 태그 tarball이 아니라 crates.io 소스 배포본을 받는다**(`build.zig.zon`이 근거를 갖는다). 상류 저장소의 `build.zig`가 Zig 0.16에서 제거된 API를 부르는데 `lazyDependency`는 그 파일을 **실행**하므로, 우리가 거기서 아무것도 안 가져와도 빌드가 죽는다. crates.io 배포본에는 `build.zig`가 없고 `src/`는 두 배포본이 동일하다 — **같은 코드, 같은 MIT 라이선스**이며 경로 접두사(`lib/`)만 다르다.
 - **번들 언어는 명시 목록으로 관리한다** — grammar마다 `parser.c`가 붙어 배포물이 커지므로 열린 집합으로 두지 않는다. 목록과 추가 절차는 [네이티브 편집기 구현 계획](plans/native-editor.md)이 소유한다.
 - **grammar를 추가하는 PR은 이 표에 행을 더한다.** 라이선스 확인 없이 grammar를 넣지 않는다.
+- **라이선스 전문 동봉은 아직 안 됐다 — 배포물에 들어가지 않기 때문이다.** 현재 tree-sitter는 `syntax` 모듈에만 매달려 있고 그 모듈을 `@import`하는 제품 코드가 없어 `Maru.app`에 링크되지 않는다(근거는 `build.zig`의 해당 블록). **provider가 서서 exe에 링크되는 순간 이 문단이 의무가 된다** — 폰트가 `Resources/Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리에 코어·grammar의 `LICENSE`를 넣는다.
 - 이것이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **첫 예외**이며, 그 문서가 요구한 사용자 논의를 거쳤다(2026-08-09).
 
 ## 번들 폰트

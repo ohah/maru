@@ -7337,7 +7337,9 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     기존 20ms는 host delivery까지만 재는 E3b 구간이고 E3c는 GUI screen apply까지 재므로 같은 cap을 붙인 최초 판정은
     scope 오류였다. E3c는 GUI enqueue turn·host delivery·GUI apply turn과 dispatch를 합성한 60ms tail을 쓴다. 따라서 4,096칸 registry scan을 원인으로 보거나 cadence를
     10Hz로 낮추지 않는다. 이후 gate는 각 idle 표본의 client CPU를 25ms 이하로 제한하고 registry visit과 socket read를
-    exact 0으로 요구해, 기각한 원인이 다시 들어와도 측정 파일만 남기고 green이 되는 구멍을 닫는다.
+    exact 0으로 요구해, 기각한 원인이 다시 들어와도 측정 파일만 남기고 green이 되는 구멍을 닫는다. 60 frame
+    wall 창은 `usleep` runner scheduling과 실제 process CPU를 혼동하지 않도록 0.9~10.0초 liveness 범위만 검사하고,
+    CPU 25ms hard cap은 그 wall 값과 독립적으로 적용한다.
 
     선택한 수정은 display cadence와 16-owner retained budget을 유지하는 **probe→ready priority**다. host별 첫
     round-robin owner가 공유 연결의 readable frame을 canonical stream queue로 demux한 뒤, 그 queue 또는 로컬 pending

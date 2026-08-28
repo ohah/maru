@@ -18397,6 +18397,25 @@ pub const AppSession = struct {
         defer for (right_frames[0..rn]) |*maybe| {
             if (maybe.*) |*dl| dl.deinit(self.allocator);
         };
+        // 영속 세션 강등도 데이터 보존 경고라 같은 자리를 다툰다 — 체크포인트 실패보다 **먼저** 넣어
+        // 가장 오른쪽에 서고 가장 오래 살아남는다. 이 상태가 보이는 동안 새 Term 은 앱과 함께 죽는데,
+        // notice 는 첫 폴백 때 한 번 뜨고 아무 키에나 닫혀 사라진다(status-bar.md §4.3).
+        if (is_macos and host_connect_failed) {
+            const danger: terminal.Color = .{ .rgb = self.appearance.theme.palette[1] orelse self.appearance.theme.accent };
+            if (self.buildStatusBarItem(
+                icons.codepoint(.hourglass),
+                maru.i18n.t(.status_session_not_persisted),
+                bar_cols,
+                danger,
+                danger,
+                .plain,
+            )) |dl| {
+                right_frames[rn] = dl;
+                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                right_ids[rn] = .session_host_disconnected;
+                rn += 1;
+            }
+        }
         // checkpoint 실패는 데이터 보존 경고라 우측 최우선이다. 성공 commit 전까지 필드가 유지되므로
         // 프레임이 바뀌어도 사라지지 않는 비모달 상태다.
         const checkpoint_failure_text: ?[]const u8 = switch (self.workspace_checkpoint_failure) {
@@ -18740,7 +18759,9 @@ pub const AppSession = struct {
             .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
             // 편집기 넷은 **표시 전용**이다. 열 대상이 없다 — 읽기 전용을 눌러 편집을 켜는 길은 N2가
             // 만들고(그 전에 누르면 아무 일도 안 일어난다), 저하·줄바꿈은 상태 진술이지 컨트롤이 아니다.
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure => {},
+            // 영속 세션 강등은 **표시 전용**이다. 다시 잇는 동작은 실제 socket reconnect(CR4)가 소유하므로
+            // 여기서 만들지 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure, .session_host_disconnected => {},
         }
         self.metal_dirty = true;
     }
@@ -18754,7 +18775,7 @@ pub const AppSession = struct {
             .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
             // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
             // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure => false,
+            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .workspace_checkpoint_failure, .session_host_disconnected => false,
         };
     }
 

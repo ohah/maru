@@ -151,6 +151,17 @@ pub const ItemId = enum(u64) {
     /// 앱 전역 workspace checkpoint가 연속 실패 중일 때 모든 일반 창에 남는 비모달 경고.
     /// 우측 배열의 첫 항목으로 조립해 좁은 창에서도 가장 오래 보존한다.
     workspace_checkpoint_failure = 11,
+    /// host 연결이 죽어 **새 Term이 in-process로 열리는** 상태(`host_connect_failed`). 체크포인트 실패와
+    /// 같은 급의 데이터 보존 경고라 같은 대우를 한다 — 앱 전역이고, 비모달이고, 우측 최우선이다.
+    ///
+    /// **notice로는 부족해서 생겼다.** 폴백은 `!host_connect_failed` 가드 때문에 **첫 번째 한 번만**
+    /// notice를 띄우고, 그 notice 마저 아무 키나 누르면 닫힌다(터미널 앱에서 다음 행동은 타이핑이다).
+    /// 그런데 강등은 프로세스가 끝날 때까지 남는다 — 그 뒤 여는 터미널은 전부 앱과 함께 죽는데 화면
+    /// 어디에도 그 사실이 없었다. 영속 세션은 이 제품의 약속이므로 **깨진 동안에는 화면에 남아야 한다**.
+    ///
+    /// **표시 전용이다.** 누르면 다시 잇는 동작은 실제 socket reconnect(CR4)가 소유하므로 여기서 만들지
+    /// 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
+    session_host_disconnected = 12,
 };
 
 /// **우측 묶음에 실릴 수 있는 항목 전부** — `ItemId`에서 좌측 전용을 뺀 것.

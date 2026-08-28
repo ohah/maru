@@ -411,6 +411,17 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
   notice 문장과 `std.log.err`에 같이 싣는다. **notice가 주 경로다** — GUI process의 stdout/stderr는 `/dev/null`이라
   (Dock·Finder 실행) 로그는 터미널에서 직접 실행할 때만 보이고 통합 로그로도 가지 않는다. 단계를 남기지 않으면 위
   다섯 실패가 전부 "사유 없음" 하나로 뭉개져 사후 진단이 불가능하다.
+- **강등은 프로세스 수명 동안 유지되고, 되돌리는 것은 사용자다**(2026-08-28). `runtime_death`로 폴백하면
+  `host_connect_failed`가 서고 이후 `backendForNew`가 원격을 고르지 않는다 — 새 Term은 전부 in-process다.
+  이 래치를 **자동으로 내리지 않는 이유**는 두 가지다. ⑴ 모호한 쓰기 뒤에는 host 쪽 상태가 불확실해 성급한
+  재접속이 이중 attach를 만들 수 있다. ⑵ 원격과 in-process를 오가면 한 창 안에 유지되는 탭과 아닌 탭이
+  섞여, 어느 것이 살아남는지 사용자가 알 수 없게 된다.
+  그러나 **되돌아올 길이 아예 없는 것은 다른 문제였다.** notice는 한 번 뜨고 사라지는데 강등은 앱을 끌
+  때까지 남아, 그 뒤 여는 터미널이 유지되지 않는다는 사실이 화면에서 지워졌다. 그래서 상태바에 끊긴 동안
+  계속 남는 항목을 두고, 그것을 눌러 **사용자가 명시적으로** 재연결하게 한다
+  ([status-bar.md](status-bar.md) §4.3). 자동 복구가 아니라 사용자 개시라 위 두 이유와 충돌하지 않는다.
+  **이미 in-process로 열린 Term은 옮기지 않는다** — 옮기는 시늉은 "이어진 세션" 오인을 만들고, 그건 복원
+  경로가 loud-fail로 막는 바로 그 손실이다. 재연결이 고치는 것은 **앞으로 열 Term**이다.
 - Window를 닫거나 Workspace/Term을 다른 Window로 옮기는 것은 먼저 하나의 layout transaction으로 source/target을 검증한
   뒤 manifest 위치만 바꾼다. 성공한 이동은 `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존

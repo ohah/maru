@@ -205,7 +205,10 @@ CPU 상한 100ms는 1초 창에서 single core 10%다. 현재 한 runtime idle �
 구현 뒤 같은 격리 config와 `controller=yes` runtime evidence 없이 얻은 숫자는 비교에 쓰지 않는다. CI runner 차이 때문에
 CPU만으로 구조를 판정하지 않고 exact-zero projector/allocation/core-lock counter를 함께 요구한다. E3b runtime metadata sampler는
 같은 1·10·100 workload에서 unchanged runtime의 metadata producer visit·materialization·core lock·owned allocation 0을 추가로
-요구하며, 그 gate가 붙기 전에는 P4 E3 전체를 완료 처리하지 않는다.
+요구한다. 한 runtime source change 뒤 sampler/materialization은 runtime당 exact 1이고 controller+observer delivery 수만큼
+producer visit만 증가하되 sibling runtime visit은 0이어야 한다. output wake와 100ms deadline의 lost-wake interleaving,
+slow observer/backpressure, revision exhaustion의 incarnation rollover에서도 target 외 visit·base mutation은 0이어야 한다. 이 구조
+counter와 1·10·100 actual-runtime artifact gate가 붙기 전에는 P4 E3 전체를 완료 처리하지 않는다.
 
 E3a 제품 배선 뒤 2026-08-28 동일 ReleaseFast artifact v3 실측은 1·10·100 runtime의 1초 창에서 CPU
 0.025691ms·0.081410ms·1.162807ms였고, 세 행 모두 snapshot/delta/owned-allocation/core-lock 증분 0이었다.

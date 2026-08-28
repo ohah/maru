@@ -7310,7 +7310,24 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     client/stream별 100ms sweep이 아니라 runtime별 bounded sampler 하나가 관측한다. core observer/title generation과
     foreground identity를 runtime-shared cache의 change token으로 접고, token이 전진한 runtime만 metadata producer를
     깨운다. BEL·clipboard·notification처럼 queue drain에서 이미 드러나는 urgent source는 같은 output wake에 합친다.
-    unchanged runtime은 canonical JSON materialization·core lock·heap allocation뿐 아니라 stream producer visit도 0이다.
+    sampler는 sole poll owner가 PTY queue를 drain한 직후와 100ms metadata deadline에서 runtime당 최대 한 번 실행한다.
+    같은 owner epoch의 controller/observer 수는 sampler 횟수를 늘리지 않는다. runtime 등록 때 source baseline과 nonzero
+    checked-monotonic token을 함께 만들고, attach initial metadata를 admission한 stream은 그때의 token을 delivery base로
+    보존한다. 이후 producer 후보는 current token과 stream base가 다른 runtime의 stream뿐이다. output wake와 deadline이
+    교차해도 이미 관측한 token을 되감거나 마지막 source change를 cadence 뒤에 남기지 않는다.
+
+    sampler preflight는 lock-free core observer/title generation과 bounded foreground identity만 비교한다. 같으면 core lock,
+    canonical JSON materialization, heap allocation과 stream producer visit가 모두 0이다. source가 달라진 경우에도 runtime당
+    canonical cache transaction은 한 번만 수행하고, admission 성공한 각 stream만 자기 delivery base/revision을 전진시킨다.
+    느린 observer, OOM 또는 queue backpressure는 runtime cache나 sibling stream base를 바꾸지 않는다. token은
+    `{incarnation, revision}` 두 nonzero checked-monotonic 축이다. revision exhaustion은 incarnation을 전진시키고 revision 1의
+    full-state publication을 강제한다. incarnation까지 exhausted되거나 sampler/cache가 불일치하면 해당 runtime의 stream만
+    fail-close하고 sibling runtime을 방문하지 않는다. same-PID restore는 process-local sampler/token을 직렬화하지 않고
+    복구된 runtime graph에서 새 incarnation 1/revision 1 baseline을 만든다.
+
+    BEL·clipboard·notification처럼 queue drain에서 이미 드러나는 urgent source는 같은 output wake epoch에 합쳐 다음
+    100ms deadline을 기다리지 않는다. unchanged runtime은 canonical JSON materialization·core lock·heap allocation뿐 아니라
+    metadata stream producer visit도 0이다.
   - **E3 gate:** Debug·ReleaseFast component fixture는 idle/one-runtime-change/multi-observer/hidden/resync/resize/token-overflow와
     lost-wake interleaving을 검증한다. macOS 제품 artifact는 1·10·100 actual runtime에서 idle screen projector와
     screen-owned allocation 0, 한 runtime output 뒤 sibling runtime projector 0, controller/healthy observer latency와 slow

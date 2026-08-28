@@ -4110,7 +4110,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     const previous = try transport.capabilities();
     try std.testing.expectEqual(@as(u16, 1), previous.wire_major);
     try std.testing.expectEqual(@as(u16, 1), previous.screen_codec_version);
-    try std.testing.expectEqual(contract.AttachSchema.frozen_controller_only, previous.attach_schema);
+    try std.testing.expectEqual(contract.AttachSchema.granted_roles, previous.attach_schema);
     try std.testing.expectEqual(contract.MetadataSupport.unsupported, previous.metadata_support);
     try std.testing.expect(!previous.peer_attach_generation);
     try std.testing.expect(previous.screen_viewport_scrolled);

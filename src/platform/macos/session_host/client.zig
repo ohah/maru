@@ -6639,6 +6639,12 @@ test "CR3a B3b-F fork child rejects an inherited fence before atomic state acces
 }
 
 pub const Client = struct {
+    const LegacyHelloPolicy = enum {
+        strict,
+        frozen_shutdown,
+        frozen_gui,
+    };
+
     allocator: std.mem.Allocator,
     fd: c.fd_t,
     host_id: u128,
@@ -6853,7 +6859,7 @@ pub const Client = struct {
             wire_major,
             deadline,
             client_deadline.posix_ops,
-            true,
+            .frozen_shutdown,
         );
     }
 
@@ -6881,6 +6887,43 @@ pub const Client = struct {
         socket_path: [:0]const u8,
         connection_profile: ConnectionProfile,
         wire_major: u16,
+    ) ClientError!Client {
+        return connectMajorWithPolicy(
+            allocator,
+            socket_path,
+            connection_profile,
+            wire_major,
+            .strict,
+        );
+    }
+
+    /// Exact manifest의 build SHA가 compatibility table의 frozen artifact와 먼저 일치한 GUI restore만
+    /// historical hello의 fingerprint 부재를 허용한다. Hash 검증은 caller가 임의 bool로 대체할 수 없게
+    /// 이 API에서도 다시 닫으며, current/CLI profile과 다른 previous image는 계속 거부한다.
+    pub fn connectFrozenGui(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        wire_major: u16,
+        artifact_sha256: [32]u8,
+    ) ClientError!Client {
+        const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
+        const frozen = compatibility.frozenGuiArtifactForMajor(wire_major) orelse
+            return error.IncompatibleVersion;
+        if (profile.kind != .previous or !std.mem.eql(u8, &frozen, &artifact_sha256))
+            return error.IncompatibleVersion;
+        var client = try connectMajorWithPolicy(allocator, socket_path, .gui, wire_major, .frozen_gui);
+        errdefer client.deinit();
+        if (client.build_id == null or !compatibility.artifactBuildIdMatches(client.build_id.?, artifact_sha256))
+            return error.IncompatibleVersion;
+        return client;
+    }
+
+    fn connectMajorWithPolicy(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        connection_profile: ConnectionProfile,
+        wire_major: u16,
+        legacy_hello_policy: LegacyHelloPolicy,
     ) ClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
@@ -6927,7 +6970,7 @@ pub const Client = struct {
         // hello_ack 수신.
         const ack = try self.readFrame();
         defer ack.deinit(allocator);
-        try self.finishHello(connection_profile, profile, ack);
+        try self.finishHelloWithPolicy(connection_profile, profile, ack, legacy_hello_policy);
         return self;
     }
 
@@ -6946,7 +6989,7 @@ pub const Client = struct {
             wire_major,
             deadline,
             ops,
-            false,
+            .strict,
         );
     }
 
@@ -6957,7 +7000,7 @@ pub const Client = struct {
         wire_major: u16,
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
-        allow_attested_legacy_hello: bool,
+        legacy_hello_policy: LegacyHelloPolicy,
     ) DeadlineClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         const connected = client_deadline.connectUnixUntil(
@@ -7005,7 +7048,7 @@ pub const Client = struct {
         const ack = try self.readFrameUntil(deadline, ops);
         defer ack.deinit(allocator);
         connected.restoreBlocking(ops) catch return error.ConnectionClosed;
-        try self.finishHelloWithPolicy(connection_profile, profile, ack, allow_attested_legacy_hello);
+        try self.finishHelloWithPolicy(connection_profile, profile, ack, legacy_hello_policy);
         if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
         return self;
     }
@@ -7025,7 +7068,7 @@ pub const Client = struct {
         profile: compatibility.Profile,
         ack: framing.Frame,
     ) ClientError!void {
-        return self.finishHelloWithPolicy(connection_profile, profile, ack, false);
+        return self.finishHelloWithPolicy(connection_profile, profile, ack, .strict);
     }
 
     fn finishHelloWithPolicy(
@@ -7033,7 +7076,7 @@ pub const Client = struct {
         connection_profile: ConnectionProfile,
         profile: compatibility.Profile,
         ack: framing.Frame,
-        allow_attested_legacy_hello: bool,
+        legacy_hello_policy: LegacyHelloPolicy,
     ) ClientError!void {
         if (ack.header.kind != .hello_ack) return error.HandshakeFailed;
         if (std.mem.indexOf(u8, ack.payload, "incompatible_version") != null) return error.IncompatibleVersion;
@@ -7046,10 +7089,17 @@ pub const Client = struct {
         // current body로 추측하면 structurally-valid silent misrender가 가능하므로, frozen release가 명시한
         // capability가 있는 직전 major만 연다. current major는 major bump 자체가 screen v2 경계다.
         if (profile.required_fingerprint) |fingerprint| if (!payloadHasCapability(ack.payload, fingerprint)) {
-            const shutdown = profile.shutdown_profile orelse return error.IncompatibleVersion;
-            if (!allow_attested_legacy_hello or connection_profile != .gui or
-                profile.kind != .previous or !shutdown.complete())
+            if (connection_profile != .gui or profile.kind != .previous)
                 return error.IncompatibleVersion;
+            switch (legacy_hello_policy) {
+                .strict => return error.IncompatibleVersion,
+                .frozen_shutdown => {
+                    const shutdown = profile.shutdown_profile orelse return error.IncompatibleVersion;
+                    if (!shutdown.complete()) return error.IncompatibleVersion;
+                },
+                .frozen_gui => if (compatibility.frozenGuiArtifactForMajor(profile.wire_major) == null)
+                    return error.IncompatibleVersion,
+            }
         };
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
         const build_id = try parseStringFieldAlloc(self.allocator, ack.payload, "build_id");

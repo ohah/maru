@@ -33,9 +33,9 @@ test "CR6a-2 경계는 launch-before-terminal 순서와 inert system rows를 고
     try std.testing.expectEqual(@as(usize, 1), count(tabs, ".recovered_sessions_header, .recovered_session => null"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(app, "prepareRecoveredSessionsAtLaunch"));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(app, "prepareRecoveredSessionsAtLaunchFromBase"));
-    // N3 adds one secure-registry notification adoption caller; the helper itself and the
-    // launch/recovery callers remain the only product authority boundary.
-    try std.testing.expectEqual(@as(usize, 5), countIdentifier(app, "ensureRestoreHostAdapterAtBase"));
+    // N3 adds one secure-registry notification adoption caller. P3-e4d-2b adds one focused actual
+    // frozen-binary product test caller; the helper and shipping launch/recovery callers do not grow.
+    try std.testing.expectEqual(@as(usize, 6), countIdentifier(app, "ensureRestoreHostAdapterAtBase"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(app, "appendRecoveredSessionRows"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifier(tabs, "appendRecoveredSessionRows"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(app, "finishDeferredInitialSurface"));

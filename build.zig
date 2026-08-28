@@ -3970,10 +3970,20 @@ pub fn build(b: *std.Build) void {
             // app_session root/import sentinels 3개와 P3-e4d-2b 제품 테스트 하나.
             run_session_host_legacy_metadata_consumers_product_tests.addArg("--maru-expect-tests=4");
             run_session_host_legacy_metadata_consumers_product_tests.addFileArg(
-                b.path("tests/fixtures/session_host_n1/maru"),
+                b.path("tests/fixtures/session_host_metadata_n1/maru"),
             );
             run_session_host_legacy_metadata_consumers_product_tests.addFileArg(
-                b.path("tests/fixtures/session_host_n1/source.patch"),
+                b.path("tests/fixtures/session_host_metadata_n1/source.patch"),
+            );
+            run_session_host_legacy_metadata_consumers_product_tests.addFileArg(
+                b.path("tests/fixtures/session_host_metadata_n1/manifest.json"),
+            );
+            // Frozen N-1 predates test-registry isolation and validates the historical uid root.
+            // Only a native macOS build host can execute this product gate; keep getuid out of
+            // cross-host build-script semantic analysis.
+            if (builtin.os.tag == .macos) run_session_host_legacy_metadata_consumers_product_tests.setEnvironmentVariable(
+                "MARU_SESSION_HOST_ROOT",
+                b.fmt("/tmp/maru-{d}", .{std.c.getuid()}),
             );
             run_session_host_legacy_metadata_consumers_product_tests.setCwd(b.path("."));
             session_host_legacy_metadata_consumers_step.dependOn(

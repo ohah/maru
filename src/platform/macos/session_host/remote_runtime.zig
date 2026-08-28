@@ -13269,7 +13269,7 @@ const PreviousAttachPeer = struct {
         const response = framing.encodeFrame(
             allocator,
             .{ .kind = .response, .major = 1, .request_id = attach.header.request_id },
-            "{\"stream_id\":9}",
+            "{\"result\":{\"stream_id\":9,\"controller_generation\":1,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false}}",
         ) catch return;
         defer allocator.free(response);
         @import("socket_server.zig").writeAll(fd, response) catch return;
@@ -13491,6 +13491,10 @@ test "remote runtime attaches through N-1 MRSH and normalizes frozen v1 screen r
         .screen_codec_version = 1,
         .parser = framing.FrameParser.initForMajor(allocator, 1),
         .compatibility_profile = @import("compatibility.zig").profileForMajor(1).?,
+        .attachment_capabilities = .{
+            .peer_attach_generation = true,
+            .negotiated_controller_transfer = true,
+        },
     };
     defer client.deinit();
     var rr: RemoteRuntime = undefined;

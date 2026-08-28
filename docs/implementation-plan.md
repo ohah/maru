@@ -1305,16 +1305,20 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    destination, argv, file payload를 artifact나 실패 로그에 쓰지 않는다. Debug·ReleaseFast focused gate와
    source-boundary test가 direct field 주입, test-only wire·consumer seam, fake upload 성공을 금지한다.
 
-   **P3-e4d-2b legacy-binary compatibility gate:** capability 없는 실제 N-1 host executable에 current GUI가
+   **P3-e4d-2b legacy-binary compatibility gate:** historical source commit과 봉인된 patch로 빌드해 별도
+   프로세스로 실행하는 capability 없는 N-1 protocol fixture executable에 current GUI가
    접속하는 별도 packaging gate다. current source를 legacy mode로 분기하거나 test-only capability toggle을
    열지 않고, 고정된 signed/ad-hoc N-1 artifact의 hello·attach 결과로 metadata unavailable degradation과
    cwd·agent·SSH 소비자의 fail-closed 동작을 검증한다. artifact·source patch digest, universal architecture와
-   ad-hoc signature를 먼저 검증하고, artifact가 만든 exact manifest/endpoint를 현재 `connectExistingHost`→
+   ad-hoc signature를 먼저 검증한다. 이는 release/notarization provenance를 주장하는 출하 artifact가 아니라
+   compatibility test artifact다. artifact가 만든 exact manifest/endpoint를 현재 `connectExistingHost`→
    generation `HostAdapter`→attach-only `RemoteTermBackend`→`term_ops.createTerm` 제품 복원 흐름으로 소비한다.
-   initial observation은 `.unsupported`이고 cwd/process/SSH owned field가 비어 있어야 하며, 기존
+   negotiated transport profile은 metadata `.unsupported`, AppSession observation은 `.unavailable`이고
+   cwd/process/SSH owned field가 비어 있어야 하며, 기존
    `termGitBranch`·`pollAgentKinds`·`remoteUploadContext`는 각각 null·none·null로 닫혀야 한다. raw cwd,
-   destination, argv 또는 file payload는 artifact/실패 log에 남기지 않는다. 2a와 2b가 모두 끝나기 전에는
-   P3-e4d 전체 또는 runtime metadata parity 완료를 선언하지 않는다.
+   destination, argv 또는 file payload는 artifact/실패 log에 남기지 않는다. 2a와 2b의 Debug·ReleaseFast 제품 gate와
+   source boundary가 모두 green이어서 P3-e4d runtime metadata parity 자동 gate를 완료로 선언한다. notarized 과거
+   release provenance와 실제 AppKit 입력기/픽셀 검증은 이 선언의 범위가 아니다.
 
    **P4 E3 event-driven producer (E3a·E3b 구현 완료):** runtime별 checked screen token과 output wake가 unchanged
    projector를 닫고, runtime-owned 100ms metadata sampler가 lock-free source generation을 token으로 접어 변경 runtime의

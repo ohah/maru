@@ -592,7 +592,7 @@ test "resolved host descriptor allocation is leak-free at every fail index" {
     );
 }
 
-test "frozen previous host rejects observer intents before reconnect" {
+test "previous granted host defers observer and takeover policy to negotiated reconnect" {
     var pinned = try ResolvedHostDescriptor.init(
         std.testing.allocator,
         0xaa,
@@ -610,7 +610,7 @@ test "frozen previous host rejects observer intents before reconnect" {
     defer pinned.deinit();
     inline for (.{ attach_cli.Intent.read_only, attach_cli.Intent.take_over }) |intent| {
         const result = connectPinned(std.testing.allocator, "/tmp", &pinned, intent, try testPhase(.connect_hello));
-        try std.testing.expectEqual(attach_cli.ExitCode.unsupported, result.failed);
+        try std.testing.expectEqual(attach_cli.ExitCode.host_unavailable, result.failed);
     }
 }
 

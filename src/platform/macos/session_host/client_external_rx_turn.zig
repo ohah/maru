@@ -514,10 +514,9 @@ test "p5c3d no-intent closed traversal is reusable before a new intent is create
     scratch.lifecycle = .busy;
     scratch.digest = scratchDigest(&scratch);
     try std.testing.expect(closeScratch(&scratch));
-    try std.testing.expectEqual(
-        external_rx_intent.ExternalRxIntentHandle{},
-        scratch.intent,
-    );
+    // Allocator's zero-work representation is an implementation detail and differs under
+    // ReleaseFast. The public closure predicate owns the exact authority-bearing empty fields.
+    try std.testing.expect(external_rx_intent.closedForOuterTurn(&scratch.intent));
 
     try std.testing.expect(Scratch.prepareForIntentCreation(&scratch));
     try std.testing.expectEqual(first_generation + 1, scratch.generation);

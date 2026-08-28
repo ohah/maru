@@ -39843,7 +39843,7 @@ test "generation-less authority permits only zero-generation detach control" {
     try std.testing.expect(!controlGenerationMatches(.resize, .{ .tracked = 7 }, 0));
 }
 
-test "external pump authority seed permits only verified frozen untracked controller" {
+test "previous granted schema without transfer permits only verified untracked observer" {
     var frozen = try TestClient.init();
     defer frozen.deinitPeer();
     frozen.client.wire_major = 1;
@@ -39859,7 +39859,7 @@ test "external pump authority seed permits only verified frozen untracked contro
             .{
                 .runtime_id = 0xaa,
                 .stream_id = 7,
-                .initial_role = .controller,
+                .initial_role = .observer,
                 .initial_controller_generation = 0,
             },
         ) == .initialized,
@@ -39869,6 +39869,10 @@ test "external pump authority seed permits only verified frozen untracked contro
     try std.testing.expect(
         frozen_storage.prepared_adoption.source_decision.?.verdict.adopted
             .authority.generation == .untracked,
+    );
+    try std.testing.expect(
+        frozen_storage.prepared_adoption.source_decision.?.verdict.adopted
+            .authority.role == .observer,
     );
 
     var wrong_fingerprint = try TestClient.init();
@@ -39887,7 +39891,7 @@ test "external pump authority seed permits only verified frozen untracked contro
         .{
             .runtime_id = 0xaa,
             .stream_id = 7,
-            .initial_role = .controller,
+            .initial_role = .observer,
             .initial_controller_generation = 0,
         },
     ).failed;
@@ -39937,7 +39941,7 @@ test "external pump authority seed table preserves protocol and invariant classe
     var authority = try prepareAuthority(client, .{
         .runtime_id = 1,
         .stream_id = 7,
-        .initial_role = .controller,
+        .initial_role = .observer,
         .initial_controller_generation = 0,
     });
     try std.testing.expect(authority.generation == .untracked);
@@ -39946,7 +39950,7 @@ test "external pump authority seed table preserves protocol and invariant classe
         prepareAuthority(client, .{
             .runtime_id = 1,
             .stream_id = 7,
-            .initial_role = .observer,
+            .initial_role = .controller,
             .initial_controller_generation = 0,
         }),
     );
@@ -39955,13 +39959,13 @@ test "external pump authority seed table preserves protocol and invariant classe
         prepareAuthority(client, .{
             .runtime_id = 1,
             .stream_id = 7,
-            .initial_role = .controller,
+            .initial_role = .observer,
             .initial_controller_generation = 1,
         }),
     );
     client.attachment_capabilities.peer_attach_generation = true;
     try std.testing.expectError(
-        error.ProtocolAuthority,
+        error.InvariantAuthority,
         prepareAuthority(client, .{
             .runtime_id = 1,
             .stream_id = 7,

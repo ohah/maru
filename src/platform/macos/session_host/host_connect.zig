@@ -23,6 +23,7 @@ const owner_lease = @import("owner_lease.zig");
 const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const client_deadline = @import("client_deadline.zig");
 const staged_image = @import("staged_image.zig");
+const compatibility = @import("compatibility.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -541,7 +542,6 @@ pub fn connectExistingHost(
     const outcome = connectExactWithBackoff(
         allocator,
         endpoint,
-        exact.protocol_major,
         exact.descriptor(),
         .{ .connect_attempts = 10, .connect_delay_ms = 20 },
     );
@@ -736,7 +736,6 @@ fn connectDiscoveredHostProfileWithObserved(
         .blocking => connectExactWithBackoffKind(
             allocator,
             endpoint,
-            expected.protocol_major,
             expected,
             connection_profile,
             .{ .connect_attempts = 10, .connect_delay_ms = 20 },
@@ -976,17 +975,15 @@ fn logStaleClient(client: client_mod.Client, expected: host_manifest.Descriptor)
 fn connectExactWithBackoff(
     allocator: std.mem.Allocator,
     endpoint: [:0]const u8,
-    major: u16,
     expected: host_manifest.Descriptor,
     opts: Options,
 ) Outcome {
-    return connectExactWithBackoffKind(allocator, endpoint, major, expected, .gui, opts);
+    return connectExactWithBackoffKind(allocator, endpoint, expected, .gui, opts);
 }
 
 fn connectExactWithBackoffKind(
     allocator: std.mem.Allocator,
     endpoint: [:0]const u8,
-    major: u16,
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
     opts: Options,
@@ -994,10 +991,10 @@ fn connectExactWithBackoffKind(
     var attempts: usize = 0;
     var saw_transient = false;
     while (attempts < opts.connect_attempts) : (attempts += 1) {
-        switch (tryConnectMajorKind(
+        switch (tryConnectExactKind(
             allocator,
             endpoint,
-            major,
+            expected,
             connection_profile,
         )) {
             .connected => |client| return validateExactClient(client, expected),
@@ -1381,6 +1378,65 @@ const FrozenV1Peer = struct {
     }
 };
 
+const FrozenBuildMismatchPeer = struct {
+    fn serve(server: *socket_server.SocketServer, ok: *bool) void {
+        var ready = c.pollfd{
+            .fd = server.listen_fd,
+            .events = c.POLL.IN,
+            .revents = 0,
+        };
+        if (c.poll(@ptrCast(&ready), 1, 1_000) <= 0 or ready.revents & c.POLL.IN == 0) return;
+        const fd = server.acceptOne() orelse return;
+        defer _ = c.close(fd);
+        socket_server.setBlocking(fd) catch return;
+        var header_bytes: [protocol.header_size]u8 = undefined;
+        if (!readExact(fd, &header_bytes)) return;
+        const header = protocol.Header.decode(&header_bytes) catch return;
+        if (header.major != 1 or header.kind != .hello) return;
+        const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+        defer std.heap.page_allocator.free(payload);
+        if (!readExact(fd, payload)) return;
+        const response = framing.encodeFrame(
+            std.heap.page_allocator,
+            .{ .kind = .hello_ack, .major = 1 },
+            "{\"version\":1,\"host_id\":\"000000000000000000000000000000aa\",\"build_id\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"capabilities\":[]}",
+        ) catch return;
+        defer std.heap.page_allocator.free(response);
+        socket_server.writeAll(fd, response) catch return;
+        ok.* = true;
+    }
+};
+
+test "P3-e4d-2b frozen GUI rejects a peer build ID that differs from the attested manifest" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-v1-build-mismatch-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    const socket = discovery.socketPathForMajorIn(&socket_buf, dir, 1) catch return error.SkipZigTest;
+    var registry = registry_mod.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var server = try socket_server.SocketServer.bind(allocator, dir, socket, 0xAA, &registry);
+    defer {
+        server.deinit();
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+    var served = false;
+    var thread = try std.Thread.spawn(.{}, FrozenBuildMismatchPeer.serve, .{ &server, &served });
+    const artifact = compatibility.frozenGuiArtifactForMajor(1).?;
+    try testing.expectError(
+        error.IncompatibleVersion,
+        client_mod.Client.connectFrozenGui(allocator, socket, 1, artifact),
+    );
+    thread.join();
+    try testing.expect(served);
+}
+
 test "host_connect finds an existing frozen N-1 major without spawning and preserves adapter major" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -1443,6 +1499,84 @@ fn tryConnectMajorKind(
     } else |err| {
         return connectFailure(err);
     }
+}
+
+/// Manifest의 exact build SHA가 frozen compatibility row와 일치할 때만 historical GUI hello를 연다.
+/// 다른 N-1 image, manifest 없는 legacy probe와 CLI는 일반 fingerprint 검증을 그대로 탄다.
+fn tryConnectExactKind(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    expected: host_manifest.Descriptor,
+    connection_profile: client_mod.ConnectionProfile,
+) TryConnectResult {
+    if (connection_profile == .gui) if (frozenGuiArtifactDigest(expected)) |digest| {
+        if (client_mod.Client.connectFrozenGui(
+            allocator,
+            socket,
+            @intCast(expected.protocol_major),
+            digest,
+        )) |client| {
+            return .{ .connected = client };
+        } else |err| {
+            return connectFailure(err);
+        }
+    };
+    return tryConnectMajorKind(
+        allocator,
+        socket,
+        @intCast(expected.protocol_major),
+        connection_profile,
+    );
+}
+
+fn frozenGuiArtifactDigest(expected: host_manifest.Descriptor) ?[32]u8 {
+    const profile = compatibility.profileForMajor(@intCast(expected.protocol_major)) orelse return null;
+    const artifact = compatibility.frozenGuiArtifactForMajor(@intCast(expected.protocol_major)) orelse return null;
+    if (profile.kind != .previous or
+        expected.lifecycle != .ready or
+        expected.screen_codec_version != profile.screen_codec_version or expected.host_id == 0 or
+        expected.endpoint.len == 0 or !compatibility.artifactBuildIdMatches(expected.build_id, artifact))
+        return null;
+    return artifact;
+}
+
+test "P3-e4d-2b frozen GUI exception requires an exact ready manifest" {
+    const artifact = compatibility.frozenGuiArtifactForMajor(1).?;
+    const artifact_hex = std.fmt.bytesToHex(artifact, .lower);
+    var build_id_buf: ["sha256:".len + 64]u8 = undefined;
+    @memcpy(build_id_buf[0.."sha256:".len], "sha256:");
+    @memcpy(build_id_buf["sha256:".len..], &artifact_hex);
+    const exact = host_manifest.Descriptor{
+        .host_id = 1,
+        .build_id = &build_id_buf,
+        .protocol_major = 1,
+        .screen_codec_version = 1,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = "/tmp/frozen-gui",
+    };
+    try testing.expectEqualSlices(u8, &artifact, &frozenGuiArtifactDigest(exact).?);
+
+    var wrong_build = build_id_buf;
+    wrong_build[wrong_build.len - 1] = if (wrong_build[wrong_build.len - 1] == '0') '1' else '0';
+    var changed = exact;
+    changed.build_id = &wrong_build;
+    try testing.expect(frozenGuiArtifactDigest(changed) == null);
+    changed = exact;
+    changed.lifecycle = .restoring;
+    try testing.expect(frozenGuiArtifactDigest(changed) == null);
+    changed = exact;
+    changed.host_id = 0;
+    try testing.expect(frozenGuiArtifactDigest(changed) == null);
+    changed = exact;
+    changed.endpoint = "";
+    try testing.expect(frozenGuiArtifactDigest(changed) == null);
+    changed = exact;
+    changed.screen_codec_version = 2;
+    try testing.expect(frozenGuiArtifactDigest(changed) == null);
+    changed = exact;
+    changed.protocol_major = protocol.version_major;
+    try testing.expect(frozenGuiArtifactDigest(changed) == null);
 }
 
 fn connectWithBackoffDetailed(allocator: std.mem.Allocator, socket: [:0]const u8, opts: Options) Outcome {
@@ -1868,7 +2002,7 @@ test "host_connect: 복원 중 host 의 hello 실패는 재연결 예산을 소�
     const want: usize = 3;
     var accepted: usize = 0;
     var thread = try std.Thread.spawn(.{}, RestoringPeer.serve, .{ &server, &accepted, want });
-    const outcome = connectExactWithBackoffKind(allocator, socket, protocol.version_major, expected, .gui, .{
+    const outcome = connectExactWithBackoffKind(allocator, socket, expected, .gui, .{
         .connect_attempts = want,
         .connect_delay_ms = 1,
     });

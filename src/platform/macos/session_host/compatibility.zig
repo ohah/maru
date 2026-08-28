@@ -7,6 +7,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const shutdown_n1_baseline = @import("shutdown_n1_baseline.zig");
+const metadata_n1_baseline = @import("metadata_n1_baseline.zig");
 
 pub const ShutdownProfile = struct {
     artifact_sha256: [32]u8 = [_]u8{0} ** 32,
@@ -59,7 +60,10 @@ pub const profiles = [_]Profile{
         .wire_major = 1,
         .screen_codec_version = 1,
         .required_fingerprint = "screen_stream_v1_current_body",
-        .attach_schema = .frozen_controller_only,
+        // The frozen image is v1 only at the protocol/screen identity. Its actual attach reply
+        // already uses granted roles + controller_generation; source_commit and executable E2E
+        // are the oracle, not an inferred pre-history schema.
+        .attach_schema = .granted_roles,
         .shutdown_profile = .{
             .artifact_sha256 = shutdown_n1_baseline.artifact_sha256,
             .wire_major = shutdown_n1_baseline.wire_major,
@@ -82,6 +86,42 @@ pub fn profileForMajor(wire_major: u16) ?Profile {
     return null;
 }
 
+/// GUI restore may bypass a historical missing screen fingerprint only for this exact frozen
+/// capability-less artifact. Shutdown has a separate baseline because its maintenance-only trust
+/// boundary and source history are not interchangeable with screen attach.
+pub fn frozenGuiArtifactForMajor(wire_major: u16) ?[32]u8 {
+    const profile = profileForMajor(wire_major) orelse return null;
+    if (profile.kind != .previous or wire_major != metadata_n1_baseline.wire_major or
+        profile.screen_codec_version != metadata_n1_baseline.screen_codec_version or
+        metadata_n1_baseline.runtime_metadata_v1)
+        return null;
+    return metadata_n1_baseline.artifact_sha256;
+}
+
+pub fn artifactBuildIdMatches(build_id: []const u8, digest: [32]u8) bool {
+    if (build_id.len != "sha256:".len + 64 or !std.mem.startsWith(u8, build_id, "sha256:"))
+        return false;
+    const expected = std.fmt.bytesToHex(digest, .lower);
+    return std.mem.eql(u8, build_id["sha256:".len..], &expected);
+}
+
+test "P3-e4d-2b artifact build ID attestation is exact" {
+    const digest = [_]u8{0xAB} ** 32;
+    try std.testing.expect(artifactBuildIdMatches(
+        "sha256:abababababababababababababababababababababababababababababababab",
+        digest,
+    ));
+    try std.testing.expect(!artifactBuildIdMatches(
+        "sha256:abababababababababababababababababababababababababababababababac",
+        digest,
+    ));
+    try std.testing.expect(!artifactBuildIdMatches(
+        "SHA256:abababababababababababababababababababababababababababababababab",
+        digest,
+    ));
+    try std.testing.expect(!artifactBuildIdMatches("sha256:ab", digest));
+}
+
 test "compatibility table has one exact current and one fingerprinted N-1 profile" {
     const current = profileForMajor(protocol.version_major).?;
     try std.testing.expectEqual(Kind.current, current.kind);
@@ -93,10 +133,15 @@ test "compatibility table has one exact current and one fingerprinted N-1 profil
     try std.testing.expectEqual(Kind.previous, previous.kind);
     try std.testing.expectEqual(@as(u16, 1), previous.screen_codec_version);
     try std.testing.expectEqualStrings("screen_stream_v1_current_body", previous.required_fingerprint.?);
-    try std.testing.expectEqual(AttachSchema.frozen_controller_only, previous.attach_schema);
+    try std.testing.expectEqual(AttachSchema.granted_roles, previous.attach_schema);
     const shutdown = previous.shutdown_profile.?;
     try std.testing.expect(shutdown.complete());
     try std.testing.expectEqual(@as(u32, 1), shutdown.wire_major);
     try std.testing.expectEqualSlices(u8, &shutdown_n1_baseline.artifact_sha256, &shutdown.artifact_sha256);
+    try std.testing.expectEqualSlices(
+        u8,
+        &metadata_n1_baseline.artifact_sha256,
+        &frozenGuiArtifactForMajor(1).?,
+    );
     try std.testing.expect(profileForMajor(0) == null);
 }

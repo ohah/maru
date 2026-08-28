@@ -20,6 +20,14 @@ const sidebar_ops = @import("app_session/sidebar.zig");
 const tab_ops = @import("app_session/tab.zig");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const session_host_bounded_process = if (builtin.os.tag == .macos)
+    @import("session_host/bounded_process.zig")
+else
+    struct {};
+const metadata_n1_baseline = if (builtin.os.tag == .macos)
+    @import("session_host/metadata_n1_baseline.zig")
+else
+    struct {};
 
 pub const app = maru.app;
 const chrome = maru.chrome;
@@ -32836,6 +32844,257 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
     try std.testing.expect(cleared);
     try std.testing.expect(git_ops.termGitBranch(session, term) == null);
     try std.testing.expect(session.remoteUploadContext() == null);
+}
+
+// P3-e4d-2b는 current source를 legacy처럼 실행하지 않는다. 저장소에 digest로 동결한 실제 N-1 image가
+// 만든 host에 current GUI 제품 경로로 재접속하고, capability 부재가 attach observation과 세 소비자에서
+// fail-closed로 유지되는지를 한 흐름으로 검증한다.
+test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
+    if (!is_macos) return error.SkipZigTest;
+    // Aggregate suite는 frozen executable 입력과 역사적 uid registry namespace를 소유하지 않는다.
+    // Focused build step만 세 file argument와 process-local MARU_SESSION_HOST_ROOT를 제공한다.
+    if (_NSGetArgc().* < 4) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const argc = _NSGetArgc().*;
+    const argv = _NSGetArgv().*;
+    const baseline = std.mem.span(argv[@intCast(argc - 3)] orelse return error.MissingN1Fixture);
+    const source_patch_path = std.mem.span(argv[@intCast(argc - 2)] orelse return error.MissingN1Fixture);
+    const manifest_path = std.mem.span(argv[@intCast(argc - 1)] orelse return error.MissingN1Fixture);
+
+    // Packaging provenance: actual image bytes, source patch bytes, architecture set and the
+    // embedded ad-hoc signature are all observed before execution.
+    const identity = try session_host.staged_image.inspect(baseline);
+    try std.testing.expectEqualSlices(u8, &metadata_n1_baseline.artifact_sha256, &identity.sha256);
+    const source_patch = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        source_patch_path,
+        allocator,
+        .limited(64 * 1024),
+    );
+    defer allocator.free(source_patch);
+    var source_patch_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(source_patch, &source_patch_digest, .{});
+    try std.testing.expectEqualSlices(u8, &metadata_n1_baseline.source_patch_sha256, &source_patch_digest);
+
+    const Manifest = struct {
+        schema: []const u8,
+        source_commit: []const u8,
+        source_commit_date: []const u8,
+        source_patch_sha256: []const u8,
+        artifact_sha256: []const u8,
+        signature_kind: []const u8,
+        architectures: []const []const u8,
+        wire_major: u16,
+        screen_codec_version: u16,
+        attach_schema: []const u8,
+        runtime_metadata_v1: bool,
+    };
+    const manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        manifest_path,
+        allocator,
+        .limited(8 * 1024),
+    );
+    defer allocator.free(manifest_bytes);
+    var manifest_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(manifest_bytes, &manifest_digest, .{});
+    try std.testing.expectEqualSlices(u8, &metadata_n1_baseline.manifest_sha256, &manifest_digest);
+    const parsed_manifest = try std.json.parseFromSlice(Manifest, allocator, manifest_bytes, .{});
+    defer parsed_manifest.deinit();
+    const baseline_manifest = parsed_manifest.value;
+    const artifact_hex = std.fmt.bytesToHex(metadata_n1_baseline.artifact_sha256, .lower);
+    const source_patch_hex = std.fmt.bytesToHex(metadata_n1_baseline.source_patch_sha256, .lower);
+    try std.testing.expectEqualStrings("maru.session-host-metadata-n1-baseline.v1", baseline_manifest.schema);
+    try std.testing.expectEqualStrings(metadata_n1_baseline.source_commit, baseline_manifest.source_commit);
+    try std.testing.expect(baseline_manifest.source_commit_date.len != 0);
+    try std.testing.expectEqualStrings(&source_patch_hex, baseline_manifest.source_patch_sha256);
+    try std.testing.expectEqualStrings(&artifact_hex, baseline_manifest.artifact_sha256);
+    try std.testing.expectEqualStrings("adhoc", baseline_manifest.signature_kind);
+    try std.testing.expectEqual(@as(usize, 2), baseline_manifest.architectures.len);
+    try std.testing.expectEqualStrings("arm64", baseline_manifest.architectures[0]);
+    try std.testing.expectEqualStrings("x86_64", baseline_manifest.architectures[1]);
+    try std.testing.expectEqual(metadata_n1_baseline.wire_major, baseline_manifest.wire_major);
+    try std.testing.expectEqual(metadata_n1_baseline.screen_codec_version, baseline_manifest.screen_codec_version);
+    try std.testing.expectEqualStrings("granted_roles", baseline_manifest.attach_schema);
+    try std.testing.expectEqual(metadata_n1_baseline.runtime_metadata_v1, baseline_manifest.runtime_metadata_v1);
+
+    const codesign_path: [:0]const u8 = "/usr/bin/codesign";
+    const codesign_argv = [_:null]?[*:0]const u8{
+        codesign_path.ptr,
+        "-dv",
+        "--verbose=4",
+        baseline.ptr,
+    };
+    var codesign_output: [16 * 1024]u8 = undefined;
+    const signature = try session_host_bounded_process.runCapture(
+        io,
+        codesign_path,
+        &codesign_argv,
+        &codesign_output,
+        2 * std.time.ns_per_s,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, signature, "Signature=adhoc") != null);
+    const lipo_path: [:0]const u8 = "/usr/bin/lipo";
+    const lipo_argv = [_:null]?[*:0]const u8{ lipo_path.ptr, "-archs", baseline.ptr };
+    var lipo_output: [256]u8 = undefined;
+    const architectures = try session_host_bounded_process.runCapture(
+        io,
+        lipo_path,
+        &lipo_argv,
+        &lipo_output,
+        2 * std.time.ns_per_s,
+    );
+    var architecture_count: usize = 0;
+    var architecture_tokens = std.mem.tokenizeAny(u8, architectures, " \t\r\n");
+    var saw_arm64 = false;
+    var saw_x86_64 = false;
+    while (architecture_tokens.next()) |architecture| {
+        architecture_count += 1;
+        saw_arm64 = saw_arm64 or std.mem.eql(u8, architecture, "arm64");
+        saw_x86_64 = saw_x86_64 or std.mem.eql(u8, architecture, "x86_64");
+    }
+    try std.testing.expectEqual(@as(usize, 2), architecture_count);
+    try std.testing.expect(saw_arm64 and saw_x86_64);
+
+    const root_env = std.c.getenv(session_host.short_endpoint.root_override_env) orelse
+        return error.MissingN1RegistryRoot;
+    const base = std.mem.span(root_env);
+    var session_dir_buf: [256]u8 = undefined;
+    const session_dir = try session_host.discovery.sessionHostDirPath(&session_dir_buf, base);
+    _ = std.c.mkdir(base.ptr, 0o700);
+    _ = std.c.mkdir(session_dir.ptr, 0o700);
+    const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0xE4D2_B001;
+    var socket_dir_buf: [160]u8 = undefined;
+    const socket_dir = try session_host.short_endpoint.socketDirPathIn(&socket_dir_buf, std.c.getuid());
+    _ = std.c.mkdir(socket_dir.ptr, 0o700);
+    var socket_buf: [160]u8 = undefined;
+    const socket_path = try session_host.short_endpoint.socketPathIn(&socket_buf, std.c.getuid(), host_id);
+    const host_child = try session_host.launcher.spawnSessionHostSupervisedForTest(
+        allocator,
+        baseline,
+        session_dir,
+        socket_path,
+        host_id,
+    );
+    defer {
+        _ = std.c.kill(host_child, std.posix.SIG.TERM);
+        var status: c_int = 0;
+        while (true) {
+            const waited = std.c.waitpid(host_child, &status, 0);
+            if (waited == host_child) break;
+            if (waited < 0 and std.posix.errno(waited) == .INTR) continue;
+            break;
+        }
+        _ = std.c.unlink(socket_path.ptr);
+        session_host.host_manifest.removeEmptyHostDirectories(session_dir, host_id);
+    }
+
+    var manifest_ready = false;
+    for (0..250) |_| {
+        if (session_host.host_manifest.load(allocator, session_dir, host_id)) |manifest_value| {
+            var manifest = manifest_value;
+            const expected_hex = std.fmt.bytesToHex(metadata_n1_baseline.artifact_sha256, .lower);
+            try std.testing.expectEqualStrings("sha256:", manifest.build_id[0.."sha256:".len]);
+            try std.testing.expectEqualStrings(&expected_hex, manifest.build_id["sha256:".len..]);
+            manifest.deinit();
+            manifest_ready = true;
+            break;
+        } else |_| _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(manifest_ready);
+
+    // First current-GUI hello creates one runtime on the actual old daemon. Closing this client
+    // makes the following AppSession connection a genuine restore/attach, not an in-process handoff.
+    var spawner = switch (session_host.host_connect.connectExistingHost(allocator, base, host_id)) {
+        .connected => |client| client,
+        .failed => return error.N1HelloFailed,
+    };
+    try std.testing.expect(spawner.metadata_support == .unsupported);
+    const spawn_response = try spawner.call(
+        "runtime.spawn",
+        "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}",
+    );
+    const runtime_id_slice = session_host.client.extractRuntimeId(spawn_response) orelse
+        return error.MissingN1Runtime;
+    var runtime_id: [32]u8 = undefined;
+    @memcpy(&runtime_id, &runtime_id_slice);
+    allocator.free(spawn_response);
+    spawner.deinit();
+
+    try std.testing.expect(app_remote_client == null);
+    try std.testing.expect(app_remote_backend == null);
+    try std.testing.expect(app_remote_host_pool == null);
+    const old_policy = app_keep_alive_after_quit;
+    defer {
+        host_connect_failed = false;
+        app_keep_alive_after_quit = old_policy;
+        if (app_remote_backend) |*backend| backend.deinit();
+        app_remote_backend = null;
+        if (app_remote_host_pool) |*pool| pool.deinit();
+        app_remote_host_pool = null;
+        if (app_remote_client) |*client| client.deinit();
+        app_remote_client = null;
+    }
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+
+    try std.testing.expectEqual(
+        AppSession.RestoreHostOutcome.ready,
+        session.ensureRestoreHostAdapterAtBase(base, host_id),
+    );
+    const adapter = app_remote_host_pool.?.get(host_id) orelse return error.MissingN1Adapter;
+    try std.testing.expect(adapter.generationCapabilities().metadata_support == .unsupported);
+
+    var host_id_hex: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&host_id_hex, "{x:0>32}", .{host_id}) catch unreachable;
+    session.restore_runtime_host_id = &host_id_hex;
+    session.restore_runtime_id = &runtime_id;
+    session.restore_runtime_force_attach = true;
+    const term = try term_ops.createTerm(
+        session,
+        .{ .command = "/bin/cat" },
+        .{ .cols = 40, .rows = 10 },
+        16,
+        "legacy-metadata",
+        "/bin/cat",
+    );
+    try std.testing.expect(term.surface.remote != null);
+    const pane = session.tabs.items[0].panes.items[0];
+    try pane.terms.append(allocator, term);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
+    defer {
+        term_ops.focusTerm(session, 0);
+        _ = pane.terms.pop();
+        term_ops.destroyTerm(session, term);
+    }
+
+    // The initial attach response and later pumps must both remain capability-derived unsupported.
+    for (0..3) |_| {
+        _ = term.rt.pump.drainAvailable() catch {};
+        session.agent_poll_ticks = std.math.maxInt(u32) - 1;
+        agent_ops.pollAgentKinds(session);
+        try std.testing.expect(term.rt.observation.availability == .unavailable);
+        try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len);
+        try std.testing.expect(!term.rt.observation.foreground_available);
+        try std.testing.expectEqual(@as(usize, 0), term.rt.observation.foreground_processes.items.len);
+        try std.testing.expect(!term.rt.observation.ssh_remote_dest_present);
+        try std.testing.expectEqual(AgentKind.none, term.agent_kind);
+        try std.testing.expect(git_ops.termGitBranch(session, term) == null);
+        try std.testing.expect(session.remoteUploadContext() == null);
+        _ = usleep(20 * 1000);
+    }
 }
 
 // AH7 통합 스모크 — keep-alive Term 의 **배지·대화 줄이 진짜 훅에서 오는지**를 끝까지 돈다. 조각은 각각

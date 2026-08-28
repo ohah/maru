@@ -188,6 +188,26 @@ materialization 안에서만 열리므로 idle materialization 0이 이 경계�
 같은 artifact의 기존 CR6f·slow-observer 판정을 그대로 공유한다. lock cap, 구조 counter, raw RSS/CPU/latency 중
 하나라도 없거나 불일치하면 exact-schema validator가 fail-closed한다.
 
+## P4 E3 event-driven screen delta 예산
+
+이 예산은 output self-pipe가 있다는 사실이나 wake latency만으로 screen producer가 event-driven이라고 과장하지 않는다.
+실제 제품 `RuntimeManager.deltaOp`·snapshot projector 입구와 screen-owned allocator를 계측해, steady idle과 다른 runtime의
+변경에서 호출되지 않았음을 구조 counter로 판정한다. 전체 프로세스 allocation 0은 주장하지 않는다.
+
+| workload | hard gate |
+| --- | --- |
+| actual runtime 1·10·100, controller+observer attach 뒤 1초 steady idle | delta call=0, snapshot call=0, screen-owned allocation=0, screen core-lock acquisition=0; host user+system CPU delta ≤100ms |
+| 100 runtime 중 한 runtime에 marker 7개 | 변경 runtime만 delta 후보가 되고 sibling runtime delta/snapshot=0; marker별 healthy delivery median ≤10ms·tail ≤20ms |
+| hidden stream·slow observer·resync | hidden unchanged stream projector=0; slow observer는 기존 queue/RSS cap을 지키며 controller/healthy 진행을 막지 않음; resync는 target fresh snapshot exact 1, sibling projector=0 |
+| change-token/lost-wake 경계 | checked overflow는 target fresh-snapshot recovery, stale/equal token은 publication 0; queue publish와 pipe drain이 교차해도 마지막 변경 token이 미관측으로 남지 않음 |
+
+CPU 상한 100ms는 1초 창에서 single core 10%다. 현재 한 runtime idle 실측의 host 평균 78.34%와 `sample`의
+`pollOnce -> collectOutputForLocalStreamAtEpoch -> deltaOp -> computeDeltaBounded` call graph를 RED baseline으로 보존한다.
+구현 뒤 같은 격리 config와 `controller=yes` runtime evidence 없이 얻은 숫자는 비교에 쓰지 않는다. CI runner 차이 때문에
+CPU만으로 구조를 판정하지 않고 exact-zero projector/allocation/core-lock counter를 함께 요구한다. E3b runtime metadata sampler는
+같은 1·10·100 workload에서 unchanged runtime의 metadata producer visit·materialization·core lock·owned allocation 0을 추가로
+요구하며, 그 gate가 붙기 전에는 P4 E3 전체를 완료 처리하지 않는다.
+
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
 [control-plane-protocol.md §4.4](control-plane-protocol.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.

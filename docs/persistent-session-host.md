@@ -7297,8 +7297,7 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     resync outbound backpressure, delta-before-snapshot 폐기, fresh snapshot 복구, ended/revoke cleanup과 allocator
     fail-index를 검증한다. cap+1에서 target만 invalidated되고 sibling RPC·screen pump가 계속되는 actual socket fixture를
     포함하며, connection poison·중복 resync·resident 회계 drift가 모두 0이어야 한다.
-- **P4 E3 — event-driven producer (E3a·E3b 구현 완료):** screen과 metadata를 같은 20ms stream sweep으로
-  재투영하던 임시 경로를 다음 두 gate로 닫았다.
+- **P4 E3 — event-driven producer:** screen과 metadata producer는 다음 두 gate의 event-driven 경로를 따른다.
   - **E3a screen change token/wake:** `RuntimeManager`가 runtime별 checked-monotonic screen change token을 소유한다.
     PTY queue drain에서 output을 실제 적용했거나 resize·Reset/Clear·scroll/selection처럼 제품 screen projection을 바꾼
     owner mutation이 commit된 뒤에만 token을 전진시키고 process-local output self-pipe를 깨운다. attachment는 마지막으로
@@ -7328,7 +7327,7 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     BEL·clipboard·notification처럼 queue drain에서 이미 드러나는 urgent source는 같은 output wake epoch에 합쳐 다음
     100ms deadline을 기다리지 않는다. unchanged runtime은 canonical JSON materialization·core lock·heap allocation뿐 아니라
     metadata stream producer visit도 0이다.
-  - **E3 gate (green):** Debug·ReleaseFast component fixture는 idle/one-runtime-change/multi-observer/hidden/resync/resize/token-overflow와
+  - **E3 gate:** Debug·ReleaseFast component fixture는 idle/one-runtime-change/multi-observer/hidden/resync/resize/token-overflow와
     lost-wake interleaving을 검증한다. macOS 제품 artifact는 1·10·100 actual runtime에서 idle screen projector와
     screen-owned allocation 0, 한 runtime output 뒤 sibling runtime projector 0, controller/healthy observer latency와 slow
     observer 격리를 기록한다. CPU와 allocation hard budget은 [성능 예산](performance-budget.md#p4-e3-event-driven-screen-delta-예산)이

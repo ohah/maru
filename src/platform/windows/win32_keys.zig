@@ -466,3 +466,51 @@ test "displaced_plain_chars: 바인딩 표에서 유도되고 전부 셸 충돌 
     try testing.expect(!ctrlShiftMeansPlainCommand(','));
     try testing.expect(!ctrlShiftMeansPlainCommand('0'));
 }
+
+/// `terminal.KeyEvent` → `chrome.input.InputEvent`. **이 변환은 플랫폼이 소유한다** — 중립 chrome 은
+/// terminal 타입을 모른다(L1/L3 경계, `chrome/input.zig` 의 그 doc). 그래서 macOS
+/// (`app_session/input.zig`)와 Windows 가 **각자** 갖는 것이 설계다: 그 파일은 `app_session` 을
+/// 끌어와 Windows 에서 컴파일되지 않는다.
+///
+/// 매핑은 macOS 쪽과 **같은 표**여야 한다 — 여기서 갈리면 같은 키가 두 OS 에서 다른 위젯 동작을 낸다.
+pub fn chromeKeyEvent(event: maru.terminal.input.KeyEvent) maru.chrome.input.InputEvent.KeyEvent {
+    const key: maru.chrome.input.Key = switch (event.key) {
+        .enter => .enter,
+        .escape => .escape,
+        .arrow_up => .up,
+        .arrow_down => .down,
+        .arrow_left => .left,
+        .arrow_right => .right,
+        .backspace => .backspace,
+        .char => .char,
+        .tab => .tab,
+        else => .other,
+    };
+    return .{
+        .key = key,
+        .codepoint = switch (event.key) {
+            .char => |c| c,
+            else => 0,
+        },
+        .mods = .{
+            .shift = event.modifiers.shift,
+            .control = event.modifiers.control,
+            .option = event.modifiers.option,
+            .command = event.modifiers.command,
+        },
+    };
+}
+
+test "chromeKeyEvent: 특수 키와 글자, 모디파이어가 그대로 건너간다" {
+    const enter = chromeKeyEvent(.{ .key = .enter });
+    try std.testing.expectEqual(maru.chrome.input.Key.enter, enter.key);
+    try std.testing.expectEqual(@as(u21, 0), enter.codepoint);
+
+    const y = chromeKeyEvent(.{ .key = .{ .char = 'y' }, .modifiers = .{ .shift = true } });
+    try std.testing.expectEqual(maru.chrome.input.Key.char, y.key);
+    try std.testing.expectEqual(@as(u21, 'y'), y.codepoint);
+    try std.testing.expect(y.mods.shift);
+
+    // 표에 없는 키는 `.other` 로 떨어진다 — 위젯이 "모르는 키" 로 다루게 하는 것이 계약이다.
+    try std.testing.expectEqual(maru.chrome.input.Key.other, chromeKeyEvent(.{ .key = .home }).key);
+}

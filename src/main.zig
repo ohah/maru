@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 940;
+const smoke_spin_cap: usize = 960;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4054,6 +4054,21 @@ fn spawnWinSession(
     app_window.tabs = tab_ptrs.items;
 }
 
+/// 확인 모달이 자기 자리를 잡는 데 필요한 chrome props.
+///
+/// **그리는 쪽과 히트테스트가 같은 값을 받아야 한다** — 중립 `confirm.view` 와 `buttonAtPoint` 가
+/// 둘 다 이것을 보고 상자를 놓는다(그 컴포넌트가 `modal_box` 프리미티브에 위임한다). 한쪽만
+/// 다른 값을 주면 "보이는 버튼 ≠ 눌리는 버튼" 이 된다 — 사이드바에서 이미 그 함정을 봤다(§2m.74).
+fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32) maru.chrome.props.ChromeProps {
+    return .{ .metrics = .{
+        .cell_width_px = cell_w,
+        .cell_height_px = cell_h,
+        .sidebar_width_px = sidebar_w,
+        .backing_width_px = client_w,
+        .backing_height_px = client_h,
+    } };
+}
+
 /// 세션 하나를 닫아 목록·탭에서 뺀다. **왜 안 닫혔는지**를 돌려준다.
 ///
 /// **계약은 이미 있다**(`macos-app-host-boundary.md`): 사이드바 ✕ 는 `requestClose` 게이트를 타고,
@@ -4080,6 +4095,9 @@ fn closeWinSession(
     app_window: *maru.session.window.AppWindow,
     runtime: *maru.app.SurfaceRuntime,
     index: usize,
+    /// 확인을 이미 받았나. **`true` 는 "사용자가 예를 눌렀다" 는 뜻이지 "검사를 건너뛴다" 가 아니다**
+    /// — 마지막 하나 보호는 그대로다(그것은 앱 종료 결정이라 확인의 대상이 다르다).
+    confirmed: bool,
 ) CloseSessionResult {
     if (index >= sessions.items.len) return .out_of_range;
     if (sessions.items.len <= 1) return .last_session;
@@ -4090,7 +4108,7 @@ fn closeWinSession(
         defer s.surface.unlockCore(io);
         break :blk s.surface.core.cursorIsAtPrompt();
     };
-    if (!at_prompt) return .busy_needs_confirm;
+    if (!at_prompt and !confirmed) return .busy_needs_confirm;
 
     // **라우팅을 먼저 끊는다.** `destroy` 가 부르는 `deinit` 은 라우팅을 안 끊으므로(그 함수 주석),
     // 여기서 안 떼면 runtime 이 해제된 표면을 계속 든다.
@@ -4650,6 +4668,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var busy_active_before: usize = 0;
     var busy_active_after: usize = 0;
     var busy_still_alive = false;
+    // **모달이 뜨고, 그려지고, 승낙하면 닫히는가.** 셋을 함께 본다 — 상태만 서면 화면이 안 답하고,
+    // 그리기만 되면 승낙이 아무 일도 안 한다.
+    var modal_judgeable = false;
+    var modal_open_after_click = false;
+    var modal_open_after_accept = true;
+    var modal_cells: usize = 0;
+    var modal_sessions_before: usize = 0;
+    var modal_sessions_while_open: usize = 0;
+    var modal_sessions_after: usize = 0;
     var file_closes: usize = 0;
     var session_closes: usize = 0;
     var session_close_busy: usize = 0;
@@ -4719,6 +4746,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const ops_buf = try allocator.alloc(maru.chrome.draw.Op, 4096);
     defer allocator.free(ops_buf);
     // **세션 번호는 단조 증가한다** — 길이에서 뽑으면 닫은 뒤 번호가 되살아난다(위 함수 doc).
+    // ── 확인 모달 (W8.16b) ─────────────────────────────────────────────────────────────────
+    //
+    // **컴포넌트는 중립이 이미 갖고 있다**(`chrome/components/confirm.zig`) — macOS 도 AppKit 대화상자가
+    // 아니라 이것을 그린다. 메시지·버튼은 **키로만** 온다(계약 §7.2: 리터럴을 넘기면 컴파일이 막힌다).
+    //
+    // Windows 에 없던 것은 셋이다: 그리는 배선, 모달이 떠 있는 동안의 **입력 주인**, 그리고 보류 상태.
+    var confirm_state: maru.chrome.components.confirm.State = .{};
+    // 확인을 기다리는 닫기 대상(세션 번호). 확인이 오면 **그때** 다시 푼다 — 담아 둔 포인터를 쓰면
+    // 그 사이 목록이 바뀌었을 때 엉뚱한 것을 닫는다(macOS `confirm_accept` 가 같은 규율을 쓴다).
+    var pending_close_session: ?usize = null;
+    var confirm_shows: usize = 0;
+    var confirm_accepts: usize = 0;
+    var confirm_cancels: usize = 0;
+    // 마우스로 고른 것은 **다음 프레임에** 실행한다 — 이벤트 루프 안에서 세션을 지우면 그 프레임의
+    // 나머지가 사라진 것을 만진다.
+    var confirm_pending_click: ?maru.chrome.components.confirm.Action = null;
+    var confirm_cells_drawn: usize = 0;
+    var confirm_draw_failures: usize = 0;
+    var confirm_unpainted: usize = 0;
+    var confirm_frame: ?maru.renderer.RenderFrame = null;
+    defer if (confirm_frame) |*f| f.deinit(allocator);
     var next_session_id: usize = 0;
     var sessions: std.ArrayList(*WinSession) = .empty;
     defer {
@@ -5963,6 +6011,35 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, cx4, cy4);
         }
         // **닫은 뒤에 새로 만들면 id 가 겹치나** — 그 자리 주석이 "겹치면 안 된다" 고 못 박는다.
+        // ── 확인 모달 (W8.16b) ─────────────────────────────────────────────────────────
+        //
+        // **프롬프트 마크가 없는 세션**의 ✕ 를 눌러 모달을 띄운다 — 그 갈래가 §2m.77 이 "모달이
+        // 선행" 이라 남겨 둔 자리다. 그리고 **Enter 로 승낙**해 실제로 닫히는지 본다.
+        if (smoke and spins == 900 and sessions.items.len >= 3 and sidebar_card_columns != null) {
+            modal_judgeable = true;
+            modal_sessions_before = sessions.items.len;
+            var rb6: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr6 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb6);
+            const mm6 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const top6 = maru.chrome.components.sidebar.rowTop(rr6, 1, sidebar_header_h, mm6, sidebar_scroll_px);
+            const cy6: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top6) + @as(i64, @intCast(cell_h / 2)));
+            const rng6 = sidebar_card_columns.?.closeXRange(cell_w);
+            const cx6: i32 = @intCast(@as(i64, @intFromFloat(rng6.start)) + @as(i64, @intCast(cell_w / 2)));
+            window.postSyntheticMouse(.moved, cx6, cy6);
+            window.postSyntheticMouse(.left_down, cx6, cy6);
+            window.postSyntheticMouse(.left_up, cx6, cy6);
+        }
+        if (smoke and spins == 904 and modal_judgeable) {
+            modal_open_after_click = confirm_state.open;
+            modal_cells = confirm_cells_drawn;
+            modal_sessions_while_open = sessions.items.len;
+            // **Enter 로 승낙한다** — 중립 `confirm.handle` 이 포커스된 버튼을 실행한다.
+            window.postSyntheticVirtualKey(win32_keys.vk_return);
+        }
+        if (smoke and spins == 910 and modal_judgeable) {
+            modal_open_after_accept = confirm_state.open;
+            modal_sessions_after = sessions.items.len;
+        }
         // ── 거절은 상태를 안 건드린다 (적대적 검증 4회차) ──────────────────────────────
         //
         // **부분 적용이 가장 나쁘다.** 라우팅만 끊고 목록에 남거나, 목록에서 뺐는데 살아 있으면
@@ -5973,7 +6050,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             busy_sessions_before = sessions.items.len;
             busy_tabs_before = app_window.tabs.len;
             busy_active_before = app_window.active_tab;
-            busy_result_busy = closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 1) == .busy_needs_confirm;
+            busy_result_busy = closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 1, false) == .busy_needs_confirm;
             busy_sessions_after = sessions.items.len;
             busy_tabs_after = app_window.tabs.len;
             busy_active_after = app_window.active_tab;
@@ -6000,7 +6077,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             s0.surface.core.write("\x1b]133;A\x1b\\") catch {};
             s0.surface.core.write("\x1b]133;B\x1b\\") catch {};
             s0.surface.unlockCore(io);
-            switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 0)) {
+            switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 0, false)) {
                 .closed => {
                     multi_closes += 1;
                     pump = sessions.items[0].pump;
@@ -6701,6 +6778,41 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // **복사·붙여넣기도 함께 막는다** — 복사는 안 보이는 터미널의 선택을 집어 오고,
                 // 붙여넣기는 안 보이는 셸에 쏟는다. 지금 이 뷰는 읽기 전용이라 삼키는 것이 맞다.
+                // ── 모달이 열려 있으면 키는 모달 것이다 (W8.16b) ──────────────────────
+                //
+                // **모든 것보다 먼저다.** 모달은 화면을 덮고 있으므로 그 뒤로 키가 새면 사용자는
+                // 보이지 않는 곳을 조작하게 된다. 판정은 중립이 소유한다(`confirm.handle`:
+                // Enter/Esc·Y/N·←/→).
+                if (confirm_state.open) {
+                    if (maru.chrome.components.confirm.handle(win32_keys.chromeKeyEvent(key_ev), &confirm_state)) |action| switch (action) {
+                        .confirmed => {
+                            confirm_accepts += 1;
+                            confirm_state.dismiss();
+                            // **지금 다시 푼다** — 담아 둔 번호가 그 사이 밀렸을 수 있다.
+                            if (pending_close_session) |ci| {
+                                switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
+                                    .closed => {
+                                        session_closes += 1;
+                                        pump = sessions.items[0].pump;
+                                        if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                                        refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                                        sidebar_redraws += 1;
+                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                    },
+                                    else => {},
+                                }
+                            }
+                            pending_close_session = null;
+                        },
+                        .cancelled => {
+                            confirm_cancels += 1;
+                            confirm_state.dismiss();
+                            pending_close_session = null;
+                        },
+                        .alternate => {},
+                    };
+                    continue;
+                }
                 // ── 검색이 포커스면 키는 검색 것이다 (W8.15) ─────────────────────────
                 //
                 // **파일 삼킴보다 먼저 본다.** 뒤에 두면 문서를 보는 중에는 검색에 글자를 못 친다.
@@ -6842,6 +6954,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
+                // 모달이 떠 있으면 **버튼만** 받고 나머지는 삼킨다 — 뒤의 카드·트리가 눌리면 안 된다.
+                if (confirm_state.open) {
+                    if (m.kind == .left_up) {
+                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
+                            .confirmed => confirm_pending_click = .confirmed,
+                            .cancelled => confirm_pending_click = .cancelled,
+                            .alternate => {},
+                        };
+                    }
+                    continue;
+                }
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
@@ -7154,7 +7277,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         // 계약이 정한 그대로다 — 프롬프트면 즉시, 실행 중이면 보류.
                                         // Windows 에 모달이 없어 **보류 = 안 닫음**이고, 그 사실을
                                         // 수치로 남긴다(조용히 죽이지 않는다).
-                                        switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, src.session)) {
+                                        switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, src.session, false)) {
                                             .closed => {
                                                 session_closes += 1;
                                                 // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
@@ -7169,7 +7292,19 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 sidebar_redraws += 1;
                                                 rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                             },
-                                            .busy_needs_confirm => session_close_busy += 1,
+                                            .busy_needs_confirm => {
+                                                // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
+                                                // "모달이 선행" 이라 적어 둔 자리다.
+                                                session_close_busy += 1;
+                                                pending_close_session = src.session;
+                                                confirm_state.show(maru.i18n.t(.app_close_running), .{
+                                                    .confirm = maru.i18n.t(.btn_close),
+                                                    .cancel = maru.i18n.t(.common_cancel),
+                                                });
+                                                confirm_shows += 1;
+                                                stderr.print("MODALDBG shown open={} idx={d}{c}", .{ confirm_state.open, src.session, @as(u8, 10) }) catch {};
+                                                stderr.flush() catch {};
+                                            },
                                             .last_session => session_close_last += 1,
                                             .out_of_range => {},
                                         }
@@ -7992,6 +8127,50 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **상태바도 맨 위다** — 창 전폭이라 터미널·도크 위에 얹힌다(그 아래가 이미 비워져 있다:
         // `compute` 가 창 높이에서 먼저 깎았다).
         cells.appendSlice(allocator, status_cells.items) catch {};
+        // **마우스로 고른 것을 여기서 실행한다.** 이벤트 루프 안에서 세션을 지우면 그 프레임의
+        // 나머지가 사라진 것을 만진다 — 키 갈래는 곧바로 실행해도 되지만(그 뒤에 `continue` 로
+        // 프레임을 빠져나간다) 마우스는 다른 처리가 뒤따를 수 있어 한 박자 미룬다.
+        if (confirm_pending_click) |act| {
+            confirm_pending_click = null;
+            switch (act) {
+                .confirmed => {
+                    confirm_accepts += 1;
+                    confirm_state.dismiss();
+                    if (pending_close_session) |ci| {
+                        switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
+                            .closed => {
+                                session_closes += 1;
+                                pump = sessions.items[0].pump;
+                                if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                                refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                                sidebar_redraws += 1;
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                            },
+                            else => {},
+                        }
+                    }
+                    pending_close_session = null;
+                },
+                .cancelled => {
+                    confirm_cancels += 1;
+                    confirm_state.dismiss();
+                    pending_close_session = null;
+                },
+                .alternate => {},
+            }
+        }
+        // ── 확인 모달은 **가장 위**다 (W8.16b) ─────────────────────────────────────────
+        //
+        // 그리는 순서가 z 순서다 — 띠·상태바보다도 뒤에 얹어야 그 위를 덮는다. 모달이 무엇을 덮는지가
+        // 곧 "무엇을 못 누르는가" 라, 입력 삼킴과 같은 자리에 있어야 한다.
+        confirm_cells_drawn = 0;
+        if (confirm_state.open) {
+            stderr.print("MODALDBG draw{c}", .{@as(u8, 10)}) catch {};
+            stderr.flush() catch {};
+            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
+                confirm_cells_drawn = n_drawn;
+            } else |_| confirm_draw_failures += 1;
+        }
         last_cells = cells.items.len;
 
         // **터미널 셀이 도크 사각형에 들어가면 안 된다**(§2m.31 의 진짜 위험). 격자를 창 폭에서
@@ -8289,6 +8468,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (modal_judgeable) {
+        try stdout.print("confirm_modal: shows={d} open_after_click={} cells={d} sessions {d}->{d}(open)->{d} accepts={d} cancels={d} open_after_accept={} draw_fail={d} unpainted_quads={d} confirm_modal_ok={}\n", .{
+            confirm_shows,
+            modal_open_after_click,
+            modal_cells,
+            modal_sessions_before,
+            modal_sessions_while_open,
+            modal_sessions_after,
+            confirm_accepts,
+            confirm_cancels,
+            modal_open_after_accept,
+            confirm_draw_failures,
+            confirm_unpainted,
+            modal_open_after_click and
+                modal_cells > 0 and
+                modal_sessions_while_open == modal_sessions_before and
+                !modal_open_after_accept and
+                confirm_accepts > 0 and
+                modal_sessions_after == modal_sessions_before - 1 and
+                confirm_draw_failures == 0,
+        });
+    } else {
+        try stdout.print("confirm_modal=unjudgeable reason=need_three_sessions\n", .{});
     }
     if (busy_judgeable) {
         try stdout.print("close_busy: refused={} sessions {d}->{d} tabs {d}->{d} active {d}->{d} alive={} close_busy_ok={}\n", .{
@@ -10219,6 +10422,153 @@ const EditorBuilt = struct {
     }
 };
 
+/// 확인 모달을 셀로 낮춰 **맨 위에** 얹는다. 그린 셀 수를 돌려준다(0 이면 안 그렸다).
+///
+/// **편집기와 같은 길을 쓴다** — `confirm.view` 가 내는 op 를 `buildTextDrawList` 로 글자로, 단색
+/// 사각은 `appendSolidOps` 로. 모달은 창 좌표에 그려지므로 원점이 (0,0)이다.
+fn appendConfirmCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    state: *const maru.chrome.components.confirm.State,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+    confirm_unpainted_quads: *usize,
+) !usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    defer ops.deinit(arena.allocator());
+    try maru.chrome.components.confirm.view(state, p, tk, arena.allocator(), &ops);
+    if (ops.items.len == 0) return 0;
+
+    const cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, p.metrics.backing_width_px / p.metrics.cell_width_px)));
+    const rows: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, p.metrics.backing_height_px / p.metrics.cell_height_px)));
+    const dl = try chrome_draw_lowering.buildTextDrawList(allocator, ops.items, tk, p.metrics.cell_width_px, p.metrics.cell_height_px, cols, rows);
+    const frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, dl, builder.shaper, builder.rasterizer) catch |err| {
+        var l = dl;
+        l.deinit(allocator);
+        return err;
+    };
+    // **앞 프레임을 놓는다** — 매 프레임 새로 만드므로 안 놓으면 그만큼 샌다.
+    if (frame_slot.*) |*old| old.deinit(allocator);
+    frame_slot.* = frame;
+    try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
+    _ = draw_host.uploadFrameRegions(pipeline, frame);
+
+    // **버려지는 op 를 센다.** 이 셰이더에 그라디언트·테두리 계산이 없어 그런 quad 는 안 그려지는데,
+    // 조용히 넘기면 "패널 없이 글자만 뜨는" 화면이 그럴듯해 보인다(실측으로 그랬다).
+    for (ops.items) |op| switch (op) {
+        // **그라디언트만 남았다.** 테두리는 이제 사각 넷으로 그린다(`appendSolidOps`).
+        .quad => |q| if (q.gradient != .solid) {
+            confirm_unpainted_quads.* += 1;
+        },
+        else => {},
+    };
+    const before = out.items.len;
+    try appendSolidOps(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
+    const colors = maru.renderer.metal_frame.CellColors{
+        .default_fg = blk: {
+            const c = tk.get(.surface_fg);
+            break :blk .{ .r = c.r, .g = c.g, .b = c.b };
+        },
+        .default_bg = blk2: {
+            const c = tk.get(.surface_bg);
+            break :blk2 .{ .r = c.r, .g = c.g, .b = c.b };
+        },
+    };
+    const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
+    defer allocator.free(native);
+    try out.ensureUnusedCapacity(allocator, native.len);
+    for (native) |n| out.appendAssumeCapacity(win32_terminal.cellFromNative(n, p.metrics.cell_width_px, p.metrics.cell_height_px, atlas_w.*, atlas_h.*));
+    return out.items.len - before;
+}
+
+/// `draw.Op` 의 **단색 사각**(fill·solid quad)을 셀로 낮춘다. 글리프는 호출자가 따로 넣는다 —
+/// 그리는 순서가 곧 z 순서라 사각이 **먼저**여야 한다.
+///
+/// **한 곳에 둔다.** 편집기와 확인 모달이 같은 op 스트림을 쓰는데, 이 루프를 각자 적으면 그라디언트·
+/// 테두리를 세는 규칙(아래)이 한쪽만 바뀌는 날 화면이 조용히 갈린다.
+fn appendSolidOps(
+    a: std.mem.Allocator,
+    ops: []const maru.chrome.draw.Op,
+    tk: *const maru.chrome.Tokens,
+    clip_w: u32,
+    clip_h: u32,
+    origin_x: u32,
+    origin_y: u32,
+    out: *std.ArrayList(d3d11_cells.Cell),
+) !void {
+    for (ops) |op| {
+        // **테두리는 사각 넷으로 그린다.** 이 셰이더에 테두리 계산은 없지만 `border_widths` 가
+        // 변마다 두께를 주므로 단색 사각으로 정확히 같은 그림이 된다 — 확인 모달의 패널 테두리가
+        // 통째로 빠져 글자만 떠 있던 것이 그래서였다(실측: 버려진 quad 4 개).
+        //
+        // **그라디언트는 여전히 안 그린다** — 그것은 단색으로 근사하면 화면이 틀린 채로 그럴듯해진다.
+        if (op == .quad) {
+            const q = op.quad;
+            if (q.gradient == .solid) {
+                if (q.border_role) |br| {
+                    const bc = tk.get(br);
+                    const bargb = (@as(u32, q.alpha) << 24) | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | bc.b;
+                    // 위·아래·왼쪽·오른쪽 순서(`border_widths` 의 규약).
+                    const edges = [4]maru.chrome.draw.Rect{
+                        .{ .x = q.rect.x, .y = q.rect.y, .w = q.rect.w, .h = q.border_widths[0] },
+                        .{ .x = q.rect.x, .y = q.rect.y + @as(i32, @intCast(q.rect.h -| q.border_widths[1])), .w = q.rect.w, .h = q.border_widths[1] },
+                        .{ .x = q.rect.x, .y = q.rect.y, .w = q.border_widths[2], .h = q.rect.h },
+                        .{ .x = q.rect.x + @as(i32, @intCast(q.rect.w -| q.border_widths[3])), .y = q.rect.y, .w = q.border_widths[3], .h = q.rect.h },
+                    };
+                    for (edges) |e| {
+                        if (e.w == 0 or e.h == 0) continue;
+                        const ex0 = @max(e.x, 0);
+                        const ey0 = @max(e.y, 0);
+                        const ex1 = @min(e.x + @as(i32, @intCast(e.w)), @as(i32, @intCast(clip_w)));
+                        const ey1 = @min(e.y + @as(i32, @intCast(e.h)), @as(i32, @intCast(clip_h)));
+                        if (ex1 <= ex0 or ey1 <= ey0) continue;
+                        try out.append(a, d3d11_cells.solidCell(
+                            @floatFromInt(ex0 + @as(i32, @intCast(origin_x))),
+                            @floatFromInt(ey0 + @as(i32, @intCast(origin_y))),
+                            @floatFromInt(ex1 - ex0),
+                            @floatFromInt(ey1 - ey0),
+                            d3d11_cells.colorFromArgb(bargb),
+                            .{ 0, 0, 0, 0 },
+                        ));
+                    }
+                }
+            }
+        }
+        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
+            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
+            // **그라디언트는 아직 없다** — 단색으로 근사하면 화면이 틀린 채로 그럴듯해진다.
+            .quad => |q| if (q.gradient == .solid)
+                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
+            else
+                continue,
+            else => continue,
+        };
+        const x0 = @max(rect.x, 0);
+        const y0 = @max(rect.y, 0);
+        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
+        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
+        if (x1 <= x0 or y1 <= y0) continue;
+        const rgb = tk.get(role);
+        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+        try out.append(a, d3d11_cells.solidCell(
+            @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
+            @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
+            @floatFromInt(x1 - x0),
+            @floatFromInt(y1 - y0),
+            d3d11_cells.colorFromArgb(argb),
+            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+        ));
+    }
+}
+
 /// 편집기 프레임에 필요한 렌더 자원. **스모크는 `draw_host.Host` 가, 합성 루프는 흩어져 있는 자기
 /// 상태가 준다** — 둘이 같은 조립을 쓰게 하는 이음매다.
 ///
@@ -10367,34 +10717,7 @@ fn buildEditorFrame(
     errdefer built.deinit(a);
 
     // **단색 사각(배경·스크롤바)을 글리프보다 먼저 넣는다** — 그리는 순서가 곧 z 순서다.
-    for (op_buf[0..w.ops]) |op| {
-        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
-            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-            // **그라디언트·테두리는 아직 없다.** 이 셰이더에 그 계산이 없으므로 `solid` 가
-            // 아닌 것은 세어서 남긴다 — 조용히 단색으로 그리면 화면이 틀린 채로 그럴듯해진다.
-            .quad => |q| if (q.gradient == .solid and q.border_role == null)
-                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
-            else
-                continue,
-            else => continue,
-        };
-        const x0 = @max(rect.x, 0);
-        const y0 = @max(rect.y, 0);
-        const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(v.w)));
-        const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(v.h)));
-        if (x1 <= x0 or y1 <= y0) continue;
-        const rgb = tk.get(role);
-        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
-        // 단색 사각도 글리프와 **같은 원점**으로 옮긴다 — 하나만 옮기면 배경과 글자가 어긋난다.
-        try built.cells.append(a, d3d11_cells.solidCell(
-            @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
-            @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
-            @floatFromInt(x1 - x0),
-            @floatFromInt(y1 - y0),
-            d3d11_cells.colorFromArgb(argb),
-            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
-        ));
-    }
+    try appendSolidOps(a, op_buf[0..w.ops], tk, v.w, v.h, origin_x, origin_y, &built.cells);
     _ = try h.appendGlyphCellsAt(a, built.frame, cl, origin_x, origin_y, &built.cells);
     return built;
 }

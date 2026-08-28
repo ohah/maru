@@ -7324,7 +7324,13 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     screen-owned allocation 0, 한 runtime output 뒤 sibling runtime projector 0, controller/healthy observer latency와 slow
     observer 격리를 기록한다. CPU와 allocation hard budget은 [성능 예산](performance-budget.md#p4-e3-event-driven-screen-delta-예산)이
     소유한다.
-- 남은 P3 product parity(metadata/selection/Reset·Clear/async SSH action)를 닫는다.
+- 남은 P3 product parity를 닫는다. **2026-08-28 코드 대조: 넷 중 셋은 이미 닫혔다.**
+  - metadata·selection·Reset·Clear는 **구현됨** — OSC metadata/notification pull, `runtime_selected_text_v1`
+    협상(host `TerminalCore.extractSelection`이 SSOT), `core_command_wire.Command`의 `reset_input_modes`·
+    `clear_screen`(GUI 라우팅은 `app_session.zig`의 `enqueueCoreCommand`)이 각각 있다.
+  - **async SSH action만 남았다.** drop/paste 직전 `runtime.observation` barrier가 아직 main thread의 동기
+    RPC라(`client.zig`의 `setReadTimeoutMs(fd, 5000)`) stalled host에서 **최대 5초 UI 정지**가 가능하다.
+    상세와 gate 지위는 [SSH 통합](ssh-integration.md) §9.2가 소유한다.
 - 모든 일반 persistent runtime의 OSC 9/777에 `{host_id,runtime_id,event_id}` stable identity를 부여하고, GUI 0
   bounded journal·OS 배너·cold-launch attach와 GUI-live fast hint를 구현한다. notification sink는 daemon 내부
   platform adapter이며 별도 MRSH client가 아니다. permission denied는 세션 실패가 아닌 명시적 degraded 상태다.
@@ -7411,6 +7417,17 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 **P4 완료는 위 목록 전체의 gate를 포함한다.** durable tombstone/reconciliation, L0 lease/checkpoint/Quit 취소,
 `ConnectionSlot`, `ScreenInbox`/deferred resync, 100-runtime wake·cache·echo-latency perf, 남은 P3 parity와 async SSH,
 host-backed notification, release A→B config migration을 각각 L2/L3/L4 또는 명시된 product/perf gate로 통과해야 한다.
+
+**이 중 어디까지 왔는지(2026-08-28 코드·실측 대조).**
+
+| gate | 상태 |
+|---|---|
+| `ConnectionSlot` | **통과** — reactor core 가 제품 daemon 에 배선돼 있다(`daemon.zig` 의 `poll_owner.Owner.init`). |
+| echo-latency perf | **통과** — `session-host-cr6f-output-wake` 가 median 10ms·tail 20ms 를 코드로 소유하고(`tools/perf/session_host_slow_observer_validator.zig`) CI `session host slow observer macOS` 가 돈다. 실 forkpty 제품 경로 7표본 실측 median **0.86ms**·max **5.17ms**. ⚠️ 옛 「21~23ms floor」는 **cadence-only 구조의 값**이라 현재 경로의 근거로 쓰지 않는다. |
+| 남은 P3 parity | **async SSH 만 남음**(위 항목). |
+| `ScreenInbox`/deferred resync | **부분** — 상한 자체는 **이미 강제된다**(`protocol.max_client_screen_inbox` 18 MiB·`max_client_screen_items` 를 `client.zig` 가 검사). 남은 것은 `pending_stream`·`partial_batch`·`pending_batches` 를 **한 owner 로 합치는 것**과 그 위의 통일된 overflow/deferred resync 계약이다. 즉 무한 증가 위험이 아니라 소유권 정리다. |
+| host-backed notification | **구현은 끝났고 OS gate 만 남았다.** daemon 안에 전 경로가 있다 — journal → `notification_os_delivery`(bounded 재시도·degraded) → `notification_macos_adapter` → `session_host_notification_adapter.m` 의 실제 `UNUserNotificationCenter.addNotificationRequest`. 배너는 `{hid,rid,eid}` stable route 를 싣고, 클릭 핸들러가 그 route 로 cold-launch attach 한다. 번들 밖 실행은 `bundleIdentifier == nil` 로 **명시적 degraded**(조용한 유실 아님)이며, 제품 daemon 은 GUI 형제 경로(`siblingMaruPath`)라 `.app` 안에서 뜬다. 남은 것은 **provisioned signed runner 의 실제 Notification Center artifact** 다(상세: [검증 매트릭스](verification-matrix.md) §P4 N3). |
+| durable tombstone / release A→B | **미통과 — 코드가 아니라 릴리스 체제가 막는다.** Developer ID 서명 자체는 `release.yml` 이 갖고 있지만 **그 위에서 세션호스트 E2E 를 돌지 않는다** — tombstone·checkpoint 게이트는 `ci.yml` 의 ad-hoc 서명 빌드에서만 돈다. `Session host product / default-on` 러너도 아직 없다. |
 아래 통합 E2E는 이 개별 gate의 대체재가 아니라 마지막 조합 검증이다.
 
 종료 gate: 무인 signed app의 clean profile/explicit false/토글 mixed backend, 2 windows + 3 workspaces topology hash,

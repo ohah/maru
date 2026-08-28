@@ -687,7 +687,8 @@ test "CR2e-e1 경계는 current accessor와 backend facade만 generation을 읽�
     inline for (.{
         .{ "RemoteRuntime.backend_api.frameSummaryReady(", 1 },
         .{ "RemoteRuntime.backend_api.prepareFrameSummary(", 1 },
-        .{ "RemoteRuntime.backend_api.storeFrameSummary(", 1 },
+        // E3c stores the shared-connection probe and the remaining selected owners separately.
+        .{ "RemoteRuntime.backend_api.storeFrameSummary(", 2 },
         .{ "RemoteRuntime.backend_api.takeFrameSummary(", 1 },
         .{ "RemoteRuntime.backend_api.pumpEnded(", 1 },
         .{ "RemoteRuntime.backend_api.markPumpEnded(", 2 },

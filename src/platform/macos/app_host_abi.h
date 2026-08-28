@@ -131,6 +131,14 @@ typedef enum MaruAppHostEventKind {
     MaruAppHostEventAppShouldTerminate = 5,
 } MaruAppHostEventKind;
 
+typedef struct MaruSessionHostWakeSource {
+    int32_t fd;
+    uint32_t reserved;
+    uint64_t host_id_low;
+    uint64_t host_id_high;
+    uint64_t connection_generation;
+} MaruSessionHostWakeSource;
+
 typedef enum MaruAppHostKeyCode {
     MaruAppHostKeyCodeUnknown = 0,
     MaruAppHostKeyCodeEnter = 1,
@@ -606,6 +614,12 @@ int32_t maru_macos_app_session_tick(
     uint32_t frame_loop_rate_hz,
     MaruAppHostFrameSummary *out_summary
 );
+
+/* Borrowed session-host socket identities. Swift may observe readability but must never close fd. */
+size_t maru_macos_remote_backend_wake_sources(
+    MaruSessionHostWakeSource *out_sources,
+    size_t capacity
+);
 int32_t maru_macos_app_session_key_down(
     MaruAppHostSession *session,
     const MaruAppHostKeyEvent *event,
@@ -767,6 +781,7 @@ typedef struct MaruAppHostRecoveredSessionSmokeProbe {
     uint32_t surface_initialized;
     uint32_t active_remote;
     uint32_t marker_present;
+    uint32_t async_wake_marker_present;
     uint32_t keep_alive_enabled;
     uint32_t discovered_candidates;
     uint32_t ready_adapters;

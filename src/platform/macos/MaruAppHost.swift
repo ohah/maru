@@ -3995,6 +3995,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
     private var tickTimer: Timer?
     private var frameLoopRateHz: UInt32 = 0
+    // Session-host sockets wake the same main-actor tick between display timer fires. Zig lends
+    // the original identity only long enough to reconcile; each DispatchSource owns a CLOEXEC
+    // duplicate until its cancel handler closes it. Keeping the original borrowed fd in a source
+    // would race ClientSlot close and descriptor-number reuse.
+    private struct SessionHostWakeKey: Hashable {
+        let fd: Int32
+        let hostIdLow: UInt64
+        let hostIdHigh: UInt64
+        let connectionGeneration: UInt64
+    }
+    private struct SessionHostWakeRegistration {
+        let source: DispatchSourceRead
+    }
+    private var sessionHostWakeSources: [SessionHostWakeKey: SessionHostWakeRegistration] = [:]
+    private var sessionHostWakeRows: [MaruSessionHostWakeSource] = []
+    private var sessionHostWakeDesiredKeys: Set<SessionHostWakeKey> = []
+    private var sessionHostWakeStaleKeys: [SessionHostWakeKey] = []
     // 세션 컨트롤 플레인 라이브 서버(A2b)가 떴는지. Zig가 앱 전역 소켓 + accept 스레드를 소유하고, 여긴 (1) 시작 시
     // start 1회, (2) 매 tick drain(살아있는 세션 목록 전달 — §2 열거), (3) 종료 시 stop만 부른다. bind 실패는
     // 비치명(false로 남고 컨트롤 플레인만 꺼짐). 단일 출처: docs/control-plane.md §2·§5.
@@ -4009,6 +4026,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostRecoverySmokeClickDispatched = false
     private var sessionHostRecoverySmokeRemotePublished = false
     private var sessionHostRecoverySmokeMarkerPresent = false
+    private var sessionHostRecoverySmokeAsyncWakeMarkerPresent = false
+    private var sessionHostRecoverySmokeWakeHandlerBaseline: UInt64?
+    private var sessionHostWakeHandlerCount: UInt64 = 0
+    private var sessionHostWakeHandlerActive = false
+    private var sessionHostWakeHandlerStartedNs: UInt64 = 0
+    private var sessionHostRecoverySmokeAsyncWakeHandlerStartedNs: UInt64 = 0
+    private var sessionHostRecoverySmokeAsyncWakeAppliedNs: UInt64 = 0
     private var sessionHostRecoverySmokeBeforeCapture = false
     private var sessionHostRecoverySmokeAfterCapture = false
     private var sessionHostRecoverySmokeFailure = ""
@@ -4634,6 +4658,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         restoreSessionHostInputSmokePasteboard()
         tickTimer?.invalidate()
         tickTimer = nil
+        cancelSessionHostWakeSources()
         smokeTimer?.invalidate()
         smokeTimer = nil
         // 아래 정리는 전부 메인 스레드에서 동기로 돌아 그동안 이벤트 루프가 멈춘다. 창이 그대로 떠 있으면 그 멈춤이
@@ -5968,6 +5993,82 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 새 창 크기로 스케일되며 글자가 늘어나 보인다.
         RunLoop.main.add(timer, forMode: .common)
         tickTimer = timer
+        refreshSessionHostWakeSources()
+    }
+
+    private func sessionHostWakeKey(_ source: MaruSessionHostWakeSource) -> SessionHostWakeKey {
+        return SessionHostWakeKey(
+            fd: source.fd,
+            hostIdLow: source.host_id_low,
+            hostIdHigh: source.host_id_high,
+            connectionGeneration: source.connection_generation
+        )
+    }
+
+    private func cancelSessionHostWakeSources() {
+        if sessionHostWakeSources.isEmpty { return }
+        for registration in sessionHostWakeSources.values { registration.source.cancel() }
+        sessionHostWakeSources.removeAll(keepingCapacity: false)
+    }
+
+    private func refreshSessionHostWakeSources() {
+        let required = Int(maru_macos_remote_backend_wake_sources(nil, 0))
+        if required == 0 {
+            cancelSessionHostWakeSources()
+            return
+        }
+        let empty = MaruSessionHostWakeSource(
+            fd: -1,
+            reserved: 0,
+            host_id_low: 0,
+            host_id_high: 0,
+            connection_generation: 0
+        )
+        if sessionHostWakeRows.count < required {
+            sessionHostWakeRows.append(
+                contentsOf: repeatElement(empty, count: required - sessionHostWakeRows.count)
+            )
+        }
+        let actual = sessionHostWakeRows.withUnsafeMutableBufferPointer { buffer in
+            Int(maru_macos_remote_backend_wake_sources(buffer.baseAddress, buffer.count))
+        }
+        let copied = min(actual, sessionHostWakeRows.count)
+        sessionHostWakeDesiredKeys.removeAll(keepingCapacity: true)
+        sessionHostWakeDesiredKeys.reserveCapacity(copied)
+        for row in sessionHostWakeRows.prefix(copied) where row.fd >= 0 {
+            let key = sessionHostWakeKey(row)
+            sessionHostWakeDesiredKeys.insert(key)
+            if sessionHostWakeSources[key] != nil { continue }
+            // row.fd is borrowed from Zig. Duplicate it before creating an asynchronous source so
+            // a ClientSlot close plus numeric-fd reuse cannot redirect this registration to an
+            // unrelated object. The resumed source owns this duplicate through its cancel handler.
+            let observedFd = Darwin.fcntl(row.fd, F_DUPFD_CLOEXEC, 0)
+            guard observedFd >= 0 else { continue }
+            let source = DispatchSource.makeReadSource(fileDescriptor: observedFd, queue: .main)
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.sessionHostWakeHandlerActive = true
+                    self.sessionHostWakeHandlerStartedNs = DispatchTime.now().uptimeNanoseconds
+                    defer { self.sessionHostWakeHandlerActive = false }
+                    if self.sessionHostWakeHandlerCount != UInt64.max {
+                        self.sessionHostWakeHandlerCount += 1
+                    }
+                    self.tickAppSession()
+                }
+            }
+            source.setCancelHandler { _ = Darwin.close(observedFd) }
+            source.resume()
+            sessionHostWakeSources[key] = .init(source: source)
+        }
+        sessionHostWakeStaleKeys.removeAll(keepingCapacity: true)
+        sessionHostWakeStaleKeys.reserveCapacity(sessionHostWakeSources.count)
+        for key in sessionHostWakeSources.keys where !sessionHostWakeDesiredKeys.contains(key) {
+            sessionHostWakeStaleKeys.append(key)
+        }
+        for key in sessionHostWakeStaleKeys {
+            sessionHostWakeSources.removeValue(forKey: key)?.source.cancel()
+        }
     }
 
     // MARU_DEBUG=1일 때만 켜지는 진단. 렌더링/스케일 문제를 추적할 때 창 제목에 live
@@ -6019,6 +6120,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // quick terminal이 보이면 그것도 tick한다(quick 셸 종료/fault는 quick만 닫고 앱은 계속). 각 surface를
     // explicitSurface로 지정해, 세션별 forwarder(window/appSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickAppSession() {
+        refreshSessionHostWakeSources()
         guard !windows.isEmpty || quick != nil else { return }
         prepareSessionHostInputSmokePasteboard()
 
@@ -6081,6 +6183,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         bypassQuitConfirm = true
                         tickTimer?.invalidate()
                         tickTimer = nil
+                        cancelSessionHostWakeSources()
                         NSApp.terminate(nil)
                     }
                 }
@@ -9120,6 +9223,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         sessionHostRecoverySmokeSurfaceInitialized = probe.surface_initialized != 0
         sessionHostRecoverySmokeActiveRemoteObserved = probe.active_remote != 0
         sessionHostRecoverySmokeMarkerObserved = probe.marker_present != 0
+        sessionHostRecoverySmokeAsyncWakeMarkerPresent = probe.async_wake_marker_present != 0
+        if probe.async_wake_marker_present != 0, sessionHostWakeHandlerActive,
+           sessionHostRecoverySmokeAsyncWakeAppliedNs == 0 {
+            sessionHostRecoverySmokeAsyncWakeHandlerStartedNs = sessionHostWakeHandlerStartedNs
+            sessionHostRecoverySmokeAsyncWakeAppliedNs = DispatchTime.now().uptimeNanoseconds
+        }
         switch sessionHostRecoverySmokeStage {
         case 0:
             guard probe.row_present != 0, probe.recovered_count == 1,
@@ -9182,6 +9291,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard probe.recovered_count == 0, probe.tab_count >= 1,
                   probe.surface_initialized != 0, probe.active_remote != 0,
                   probe.marker_present != 0 else { return }
+            if sessionHostRecoverySmokeWakeHandlerBaseline == nil {
+                sessionHostRecoverySmokeWakeHandlerBaseline = sessionHostWakeHandlerCount
+                guard armSessionHostNativeWakeSmoke() else {
+                    failSessionHostRecoverySmoke("native-wake-arm")
+                    return
+                }
+            }
+            guard probe.async_wake_marker_present != 0,
+                  sessionHostWakeHandlerCount > sessionHostRecoverySmokeWakeHandlerBaseline!,
+                  sessionHostRecoverySmokeAsyncWakeHandlerStartedNs > 0,
+                  sessionHostRecoverySmokeAsyncWakeAppliedNs >= sessionHostRecoverySmokeAsyncWakeHandlerStartedNs else { return }
             sessionHostRecoverySmokeRemotePublished = true
             sessionHostRecoverySmokeMarkerPresent = true
             if sessionHostRecoverySmokeRemoteVisibleNs == 0 {
@@ -9280,6 +9400,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func sessionHostRecoverySmokeCaptureLabel(_ label: String) -> String {
         guard let iteration = sessionHostRecoveryBaselineIteration else { return label }
         return "\(label)-\(iteration)"
+    }
+
+    /// The fixture PTY waits on this exact smoke-only rendezvous before producing output. Arming
+    /// after the recovered remote is visible makes a later DispatchSource receipt non-vacuous:
+    /// the bytes cannot have been buffered before AppKit installed its borrowed-fd source.
+    private func armSessionHostNativeWakeSmoke() -> Bool {
+        guard isSessionHostRecoverySmokeMode,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        let allowedRoots = Set(["session-host-cr6c-home", "session-host-cr6d-home", "session-host-cr6e-home"])
+        guard allowedRoots.contains(root.lastPathComponent),
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let marker = root.appendingPathComponent("e3c-wake-ready", isDirectory: false).standardizedFileURL
+        guard marker.deletingLastPathComponent() == root else { return false }
+        return FileManager.default.createFile(atPath: marker.path, contents: Data(), attributes: nil)
     }
 
     /// CR6d may legitimately spend most of its deadline waiting for the user to foreground the
@@ -11471,6 +11606,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_recovery_smoke_click_dispatched=\(sessionHostRecoverySmokeClickDispatched)
         session_host_recovery_smoke_remote_published=\(sessionHostRecoverySmokeRemotePublished)
         session_host_recovery_smoke_marker_present=\(sessionHostRecoverySmokeMarkerPresent)
+        session_host_recovery_smoke_async_wake_marker_present=\(sessionHostRecoverySmokeAsyncWakeMarkerPresent)
+        session_host_recovery_smoke_wake_handler_count=\(sessionHostWakeHandlerCount)
+        session_host_recovery_smoke_async_wake_handler_started_ns=\(sessionHostRecoverySmokeAsyncWakeHandlerStartedNs)
+        session_host_recovery_smoke_async_wake_applied_ns=\(sessionHostRecoverySmokeAsyncWakeAppliedNs)
+        session_host_recovery_smoke_async_wake_apply_latency_ns=\(sessionHostRecoverySmokeAsyncWakeAppliedNs >= sessionHostRecoverySmokeAsyncWakeHandlerStartedNs ? sessionHostRecoverySmokeAsyncWakeAppliedNs - sessionHostRecoverySmokeAsyncWakeHandlerStartedNs : 0)
         session_host_recovery_smoke_before_capture=\(sessionHostRecoverySmokeBeforeCapture)
         session_host_recovery_smoke_after_capture=\(sessionHostRecoverySmokeAfterCapture)
         session_host_recovery_smoke_failure=\(sessionHostRecoverySmokeFailure)

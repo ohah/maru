@@ -20,6 +20,7 @@ const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const operation_thread_identity = @import("operation_thread_identity.zig");
 const process_seal_service = @import("process_seal_service.zig");
+const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const contract = @import("generation_attachment_contract.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -3257,6 +3258,7 @@ fn clientSlotRegistryEntry(slot_addr: usize) ?ClientSlotRegistryEntry {
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer client_slot_registry_mutex.unlock();
     for (client_slot_registry) |entry| {
+        client_idle_pump_evidence.recordRegistryVisit();
         if (entry.live and entry.ready and entry.slot_addr == slot_addr) return entry;
     }
     return null;
@@ -13300,6 +13302,33 @@ pub const ClientSlot = struct {
             }
         };
         return self.withCurrent(expected_generation, {}, Operation.run) catch |err|
+            return mapCurrentBorrowError(err);
+    }
+
+    pub fn currentHasAnyBufferedRuntimeWork(
+        self: *ClientSlot,
+        expected_generation: u64,
+    ) client_mod.ClientError!bool {
+        const Operation = struct {
+            fn run(_: void, client: *client_mod.Client) client_mod.ClientError!bool {
+                return client.hasAnyBufferedRuntimeWork();
+            }
+        };
+        return self.withCurrent(expected_generation, {}, Operation.run) catch |err|
+            return mapCurrentBorrowError(err);
+    }
+
+    pub fn currentHasBufferedRuntimeWork(
+        self: *ClientSlot,
+        expected_generation: u64,
+        stream_id: u64,
+    ) client_mod.ClientError!bool {
+        const Operation = struct {
+            fn run(target_stream_id: u64, client: *client_mod.Client) client_mod.ClientError!bool {
+                return client.hasBufferedRuntimeWork(target_stream_id);
+            }
+        };
+        return self.withCurrent(expected_generation, stream_id, Operation.run) catch |err|
             return mapCurrentBorrowError(err);
     }
 

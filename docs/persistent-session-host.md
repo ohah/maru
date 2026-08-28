@@ -7330,10 +7330,33 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     계측은 원인을 미리 정하지 않는다. seal 수와 registry visit 수를 별도 counter로 남겨 "4,096칸 registry scan + Blake3"를
     하나의 비용으로 뭉치지 않고, raw counter·CPU 전후값·호출 상한을 validator가 다시 계산한다. steady idle은 initial
     snapshot/metadata와 foreground source가 수렴한 뒤 시작하며, 그 창에서 적용 event가 0이어야 한다. active marker 행은
-    같은 owner 선택 경로로 실제 PTY output이 화면에 도달하고 target만 output event를 내는지 함께 증명한다. 측정 전에는
-    cadence 하향이나 event-readable wake 전환 어느 쪽도 채택하지 않으며, 측정 결과와 wake/latency 불변식을 함께 만족하는
-    최소 변경만 별도 구현 단계에서 고른다. hard budget과 artifact schema는
+    같은 owner 선택 경로로 실제 PTY output이 화면에 도달하고 target만 output event를 내는지 함께 증명한다. 첫 RED
+    실측(2026-08-28)은 15 runtime에서 60 frame 동안 pump/seal 각 900회였지만 registry visit·idle socket read는 0회,
+    client CPU는 1.576초 중 4.926ms였다. 100 runtime은 16-owner cap으로 960회·3.915ms였고 target marker는
+    33.810ms였다. 이후 60Hz와 실제 fd cleanup을 강화한 계측은 local-input priority 뒤 2 frame·30.557ms였다.
+    기존 20ms는 host delivery까지만 재는 E3b 구간이고 E3c는 GUI screen apply까지 재므로 같은 cap을 붙인 최초 판정은
+    scope 오류였다. E3c는 GUI enqueue turn·host delivery·GUI apply turn과 dispatch를 합성한 60ms tail을 쓴다. 따라서 4,096칸 registry scan을 원인으로 보거나 cadence를
+    10Hz로 낮추지 않는다. 이후 gate는 각 idle 표본의 client CPU를 25ms 이하로 제한하고 registry visit과 socket read를
+    exact 0으로 요구해, 기각한 원인이 다시 들어와도 측정 파일만 남기고 green이 되는 구멍을 닫는다.
+
+    선택한 수정은 display cadence와 16-owner retained budget을 유지하는 **probe→ready priority**다. host별 첫
+    round-robin owner가 공유 연결의 readable frame을 canonical stream queue로 demux한 뒤, 그 queue 또는 로컬 pending
+    input/control에 work가 생긴
+    runtime을 같은 frame의 남은 owner slot에 우선 배치하고 빈 slot만 기존 round-robin으로 채운다. priority owner는
+    cursor를 전진시키지 않아 지속 출력이 quiet owner의 probe turn을 건너뛰게 하지 않으며, handle 중복·17번째 owner·
+    별도 unsealed readiness authority를 허용하지 않는다. hard budget과 artifact schema는
     [성능 예산](performance-budget.md#p4-e3c-client-idle-pump-예산)이 소유한다.
+
+    AppKit의 native readable wake는 Client/ClientSlot이 소유한 socket fd를 **빌려서** 감시할 뿐 읽거나 닫지 않고,
+    `{host_id, connection_generation, fd}` exact identity가 바뀔 때 기존 source를 취소·교체한다. source handler는 별도
+    pump를 만들지 않고 main actor의 기존 `tickAppSession`만 깨운다. timer tick에서도 topology를 재조정할 수 있지만
+    steady-state identity가 같을 때 새 Array/Set/String backing allocation은 0이어야 한다. 행 scratch와 typed identity
+    set/stale scratch는 controller가 재사용하며, 문자열로 identity를 materialize하지 않는다. 실제 AppKit E2E는 timer보다
+    늦게 스스로 출력하는 PTY를 사용해 readable source가 timer 이전에 tick을 깨웠음과 target-only apply, source 교체·취소,
+    종료 뒤 fd/socket 잔여 0을 반복 표본으로 증명한다. handler 진입부터 그 handler의 normal tick이 marker를 screen에
+    적용하고 Metal frame 뒤 probe가 관측한 구간은 동일한 60ms 합성 tail 안의 하위 raw 값으로 남기되, host 출력 시작
+    시각이 없는 표본을 전체 end-to-end 값으로 부풀리지 않는다. 이 E2E와
+    CI artifact가 green이기 전에는 E3c 완료가 아니다.
   - **E3 gate:** Debug·ReleaseFast component fixture는 idle/one-runtime-change/multi-observer/hidden/resync/resize/token-overflow와
     lost-wake interleaving을 검증한다. macOS 제품 artifact는 1·10·100 actual runtime에서 idle screen projector와
     screen-owned allocation 0, 한 runtime output 뒤 sibling runtime projector 0, controller/healthy observer latency와 slow

@@ -124,6 +124,26 @@ pub const HostAdapter = struct {
         return self.slot.connectionGeneration();
     }
 
+    pub const WakeSource = struct {
+        fd: std.c.fd_t,
+        host_id: u128,
+        connection_generation: u64,
+    };
+
+    /// Borrowed descriptor identity for the AppKit run-loop read source. The source observes only
+    /// readability and never closes the fd; ClientSlot remains the sole transport owner.
+    pub fn wakeSource(self: *const HostAdapter) ?WakeSource {
+        const client = self.slot.logicalClientConst();
+        if (client.fd < 0 or client.io_mode != .blocking) return null;
+        const generation = self.slot.connectionGeneration();
+        if (client.host_id == 0 or generation == 0) return null;
+        return .{
+            .fd = client.fd,
+            .host_id = client.host_id,
+            .connection_generation = generation,
+        };
+    }
+
     /// The adapter owns the final ClientSlot address but never stores publisher/runtime pointers.
     pub fn prepareManagedPoisonRequest(
         self: *HostAdapter,
@@ -692,6 +712,14 @@ pub const HostAdapter = struct {
     /// generation RPC가 새 request를 쓰기 전에 현재 readable RX를 canonical queue로 옮긴다.
     pub fn ingestRuntimeReadableEvidence(self: *HostAdapter) client_mod.ClientError!void {
         return self.slot.ingestCurrentReadableEvidence(self.slot.connectionGeneration());
+    }
+
+    pub fn hasBufferedRuntimeWork(self: *HostAdapter, stream_id: u64) client_mod.ClientError!bool {
+        return self.slot.currentHasBufferedRuntimeWork(self.slot.connectionGeneration(), stream_id);
+    }
+
+    pub fn hasAnyBufferedRuntimeWork(self: *HostAdapter) client_mod.ClientError!bool {
+        return self.slot.currentHasAnyBufferedRuntimeWork(self.slot.connectionGeneration());
     }
 
     pub fn canTerminalizeSharedConnectionNoDestroy(self: *HostAdapter) bool {

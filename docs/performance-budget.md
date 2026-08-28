@@ -61,7 +61,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
 | `session host macOS (Debug)` | ci.yml `session-host-macos-debug` | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
 | `session host bundled CLI macOS` | ci.yml `session-host-bundled-cli-macos` | `code` 변경 PR(macos-15). ReleaseFast 앱 번들/PATH와 harness-owned localhost OpenSSH의 public `maru attach` 제품 E2E. Debug 전수 스위트와 병렬 실행해 각 20분 상한을 독립 판정. |
-| `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
+| `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation·host-PID RSS와 generation-backed GUI client idle-pump artifact. |
 | `web build and security fixtures` | web.yml `check` | `web` 변경 PR. web build·보안 fixture. |
 
 **`session host macOS (ReleaseFast)`는 required가 아니고 자동으로 돌지 않는다.** 이 표에는 오래 required로 적혀 있었지만 실제 `required_status_checks.contexts`에는 없다 — 실행 시점을 PR에서 main push로 옮길 때 함께 뺀 것이 의도이고, 이 표가 그 결정을 따라오지 못했다(2026-08-17 정정). 같은 날 시점을 한 번 더 옮겨 **`workflow_dispatch` 수동 실행 전용**이 됐고, [릴리스 절차](distribution.md#ci-릴리스github-actions)가 태그 푸시 전 `gh workflow run ci.yml`로 이 잡을 돌릴 책임을 진다. **Debug와 중복이 아니다**: 같은 스위트를 도는 것은 맞지만 실행 체제가 다르다. ReleaseFast에서는 `std.debug.assert`(session host 소스에 123개)와 정수 오버플로·배열 경계·`unreachable` 런타임 검사가 모두 사라지고 최적화가 fork/exec·소켓·스레딩 인터리빙을 바꾼다. 출하 `.dmg`가 ReleaseFast이므로 이 잡만이 **출하 체제**를 검증한다. 그래서 없애지 않고 시점만 계속 뒤로 옮긴다. 대가는 그만큼 커진다 — **main이 초록이어도 릴리스 직전에 이 잡이 처음 빨개질 수 있다.** 얻는 것은 main push마다 macOS 러너 14분과 main 그룹 캐시 항목 하나(약 500MB × 최신 2개)다. 근거와 실측(잡 8개 합계 24분 46초 중 이 잡 8분 14초)은 `ci.yml`의 job 주석이 소유한다.
@@ -233,14 +233,34 @@ host PID CPU를 대신 쓰면 이 gate를 충족하지 않는다.
 | --- | --- |
 | 1·10·15 runtime, 60 idle frames | frame=60; selected owner=`runtime_count * 60`; applied metadata/screen/ended=0; `pumpDelta`, timestamp seal, registry visit, socket read와 client CPU를 raw 기록 |
 | 100 runtime, 60 idle frames | selected owner=`max_owners_per_frame * 60`; 모든 runtime이 round-robin에서 최소 한 번 선택; applied event=0; counter와 client CPU raw 기록 |
-| 100 runtime 중 한 target marker | target screen output event exact 1 이상, sibling output event=0; marker delivery가 기존 median 10ms·tail 20ms를 지킴 |
+| 100 runtime 중 한 target marker | target screen output event exact 1 이상, sibling output event=0; GUI enqueue turn + host delivery 20ms + GUI apply turn·dispatch를 합성한 end-to-end tail ≤60ms |
 | cleanup | host/runtime/client child 전부 reap, fd/socket/directory residue 0, 계측 counter owner 해제 뒤 재사용 0 |
+| AppKit native wake reconciliation | steady-state exact identity에서 새 Array/Set/String backing allocation 0; original borrowed fd read/close 0; source별 CLOEXEC duplicate를 cancel handler가 exact 1 close; identity 변경 시 old source cancel exact 1; actual handler 진입→Metal frame 뒤 screen probe 관측 ≤60ms(반복 raw 표본 기록) |
 
-첫 슬라이스의 CPU 값은 **진단 baseline**이지 최종 hard cap이 아니다. 구조 수정 전 RED artifact에서 호출별 비용과 실제 runner
-분산을 얻은 뒤 같은 runner의 수정 후 표본으로 hard cap을 정한다. 다만 counter 정합은 처음부터 hard gate다: timestamp seal과
-registry visit은 실제 발생 횟수 그대로 각각 기록해야 하며, 둘 중 하나를 다른 값으로 추정하거나 합산해서는 안 된다.
-최적화 완료 판정은 idle에서 불필요한 authority/transport 작업이 구조적으로 0이거나 명시적으로 정한 bounded wake cadence만큼이고,
-active marker latency가 후퇴하지 않으며 위 cleanup이 모두 성립할 때만 가능하다.
+첫 슬라이스의 CPU 값은 hard cap을 정하기 위한 진단 baseline이었다. 구조 수정 전 RED와 수정 후 표본을 얻은 뒤 아래처럼
+25ms hard cap과 registry/socket exact-zero를 확정했다. timestamp seal과 registry visit은 실제 발생 횟수 그대로 각각 기록해야
+하며, 둘 중 하나를 다른 값으로 추정하거나 합산해서는 안 된다. 최적화 완료 판정은 idle에서 불필요한 authority/transport
+작업이 구조적으로 0이고, active marker latency가 후퇴하지 않으며 위 cleanup이 모두 성립할 때만 가능하다.
+
+2026-08-28 첫 ReleaseFast RED는 1·10·15·100 runtime에서 각각 client CPU 0.552ms·2.238ms·4.926ms·3.915ms,
+selected/pump/seal 60·600·900·960, registry visit 0, idle socket read 0을 기록했다. 15-runtime CPU는 단일 코어 환산
+약 0.31%라 “4,096 registry scan이 유휴 부하의 지배 원인”이라는 가설을 기각한다. 반면 100-runtime target marker
+33.810ms를 처음에는 기존 20ms tail 실패로 판정했지만, 적대적 재검토에서 그 20ms는 host의
+`input_accepted_at_ns→marker_at_ns` delivery 구간이고 E3c 값은 GUI 입력부터 client screen apply까지라 종점이 다름을 확인했다.
+같은 숫자를 재사용한 것은 scope 오류였다. E3c는 host acceptance 이전의 GUI enqueue turn과 host tail 20ms, 이후 GUI apply
+turn 및 dispatch를 모두 포함하므로 합성 tail을 60ms로 둔다. 강화된 60Hz·실제 fd-cleanup 계측에서 probe/local-work priority 뒤 2 frame, timer timeout 1회,
+max frame 8.745ms, end-to-end 30.557ms를 기록했다. 수정 gate는 60Hz·16-owner cap을 그대로 두고 probe 뒤 canonical queue와
+로컬 pending input에 준비된 target을 같은 frame에 우선하며, quiet round-robin의 bounded 진행과 exact counter를 함께 보존해야
+한다. 10Hz cadence 하향은 이 latency를 악화시키므로 채택하지 않는다.
+
+각 0.9~2.0초 idle 표본은 client user+system CPU 25ms 이하, `ClientSlot` registry visit exact 0, socket read attempt
+exact 0이어야 한다. 25ms는 첫 RED 최대 4.926ms의 약 5배로 runner noise를 허용하지만 한 코어의 2.5%를 넘는
+idle 회귀는 닫는다. registry/socket 값은 단순 관측 필드가 아니라 최초 실측이 기각한 원인의 재도입을 막는 hard gate다.
+
+실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
+관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.
+다섯 행 모두 60ms 안이며 fd 6→6, child 0, daemon/socket/host artifact cleanup을 함께 통과했다. 이 하위 값은 host가
+marker를 쓰기 시작한 시각을 포함하지 않으므로 전체 end-to-end latency라고 부르지 않는다.
 
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 

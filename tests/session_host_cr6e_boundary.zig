@@ -55,7 +55,8 @@ test "CR6e-a2 경계는 exact AppKit fixture root와 반복 raw artifact만 연�
 
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"macos-session-host-cr6e-recovery-baseline\""));
     try std.testing.expectEqual(@as(usize, 1), count(build, "MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"));
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "\"session-host-cr6e-home\""));
+    // Capture root validation and native-wake handshake root allowlist each name the exact root.
+    try std.testing.expectEqual(@as(usize, 2), count(swift, "\"session-host-cr6e-home\""));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "private var isSessionHostRecoveryBaselineMode: Bool"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "sessionHostRecoverySmokeCaptureLabel(label)"));

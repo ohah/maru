@@ -3,6 +3,7 @@ const diag_gate = @import("diag.zig"); // MARU_DEBUG 게이트(진단 로그 단
 const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
+const session_host = @import("session_host.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
@@ -654,6 +655,37 @@ pub export fn maru_macos_remote_backend_settle() u32 {
     return @intFromEnum(session_mod.settleProcessRemoteBackendForTermination());
 }
 
+pub const SessionHostWakeSource = extern struct {
+    fd: i32,
+    reserved: u32 = 0,
+    host_id_low: u64,
+    host_id_high: u64,
+    connection_generation: u64,
+};
+
+/// Returns borrowed descriptor identities only. AppKit read sources wake the main actor and call
+/// the ordinary tick; descriptor ownership and all reads remain in Client/RemoteTermBackend.
+pub export fn maru_macos_remote_backend_wake_sources(
+    out_sources: ?[*]SessionHostWakeSource,
+    capacity: usize,
+) usize {
+    const backend = if (session_mod.app_remote_backend) |*value| value else return 0;
+    var scratch: [session_host.remote_term_backend.max_remote_backend_runtimes]session_host.remote_term_backend.RemoteTermBackend.WakeSource = undefined;
+    const count = backend.wakeSources(&scratch);
+    if (out_sources) |out| {
+        const copied = @min(count, capacity);
+        for (scratch[0..copied], out[0..copied]) |source, *destination| {
+            destination.* = .{
+                .fd = source.fd,
+                .host_id_low = @truncate(source.host_id),
+                .host_id_high = @truncate(source.host_id >> 64),
+                .connection_generation = source.connection_generation,
+            };
+        }
+    }
+    return count;
+}
+
 /// 앱 로그 상한. 넘으면 새로 시작한다 — 진단은 **최근 실행**이 중요하고, 회전 정책을 따로 두면
 /// 그 정책 자체가 관리 대상이 된다. host 로그와 달리 앱은 한 파일에 계속 쌓이므로 상한이 없으면
 /// 무한히 자란다.
@@ -919,6 +951,7 @@ pub const RecoveredSessionSmokeProbe = extern struct {
     surface_initialized: u32,
     active_remote: u32,
     marker_present: u32,
+    async_wake_marker_present: u32,
     keep_alive_enabled: u32,
     discovered_candidates: u32,
     ready_adapters: u32,
@@ -955,6 +988,7 @@ pub export fn maru_macos_app_session_recovered_session_smoke_probe(
         .surface_initialized = @intFromBool(probe.surface_initialized),
         .active_remote = @intFromBool(probe.active_remote),
         .marker_present = @intFromBool(probe.marker_present),
+        .async_wake_marker_present = @intFromBool(probe.async_wake_marker_present),
         .keep_alive_enabled = @intFromBool(probe.keep_alive_enabled),
         .discovered_candidates = probe.discovered_candidates,
         .ready_adapters = probe.ready_adapters,

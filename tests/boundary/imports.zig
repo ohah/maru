@@ -506,6 +506,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "nextExecutionCapabilityIdentityForTest", .receiver_type = immutable, .class = .observation },
         .{ .name = "revalidatePreparedResponsePublication", .receiver_type = immutable, .class = .observation },
         .{ .name = "screenRecoveryState", .receiver_type = immutable, .class = .observation },
+        .{ .name = "hasBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
+        .{ .name = "hasAnyBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -1263,11 +1265,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     }{
         .{
             .path = "src/platform/macos/session_host/client.zig",
-            .baseline_count = 532,
+            .baseline_count = 535,
             // Event publication selector와 negotiated selection-state capability를 포함한
             // current Client declaration inventory를 고정한다. poison capture 두 곳이 사유 drift 를
-            // 죽이지 않고 기록하게 되면서 로깅 함수 둘이 늘었다(530 → 532).
-            .baseline_digest = .{ 0xcb, 0x5f, 0x71, 0x0d, 0x28, 0x2f, 0x78, 0x26, 0xb2, 0xf4, 0x96, 0x42, 0xcf, 0x1c, 0xf7, 0x98, 0x6c, 0xa7, 0x70, 0xbb, 0xa2, 0x31, 0x48, 0x68, 0xe3, 0x46, 0xfb, 0xf7, 0xfe, 0x39, 0x22, 0x83 },
+            // 죽이지 않고 기록하게 되면서 로깅 함수 둘이 늘었다(530 → 532). E3c는 계측 import와
+            // buffered runtime/connection 관측 둘만 추가한다(532 → 535).
+            .baseline_digest = .{ 0xfe, 0xf5, 0xd4, 0x92, 0x3e, 0x89, 0x02, 0xee, 0xbc, 0x6f, 0x72, 0xca, 0x14, 0xba, 0xca, 0x7e, 0x82, 0x53, 0x39, 0x85, 0xf7, 0x5b, 0x7f, 0x77, 0x94, 0xc9, 0x83, 0x4e, 0xf5, 0x4b, 0xae, 0xfa },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
@@ -1579,8 +1582,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         },
         .{
             .path = "src/platform/macos/session_host/client_slot.zig",
-            .baseline_count = 126,
-            .baseline_digest = .{ 0x83, 0xb0, 0x73, 0x6a, 0x08, 0x61, 0xf1, 0x7f, 0xdc, 0x89, 0x89, 0xe2, 0xf5, 0x2b, 0x63, 0x1b, 0x04, 0x86, 0x39, 0x70, 0x04, 0x6c, 0xf8, 0xbc, 0x02, 0x03, 0x87, 0x43, 0xf5, 0x43, 0x8d, 0x99 },
+            .baseline_count = 129,
+            .baseline_digest = .{ 0x70, 0x0a, 0x3d, 0x6a, 0x2e, 0x4d, 0xd6, 0xa8, 0x5a, 0x65, 0xa7, 0x59, 0x2d, 0x1e, 0xed, 0xf9, 0x66, 0x18, 0x7e, 0x8f, 0xaa, 0x63, 0xfd, 0x3d, 0xe6, 0xd8, 0x61, 0xf5, 0x90, 0x35, 0x16, 0xef },
             .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
             .optional_containers = &.{
                 "PreparedExecutionTxn",

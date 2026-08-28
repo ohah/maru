@@ -8,6 +8,7 @@ const client_external_rx_read = @import("client_external_rx_read.zig");
 const client_pump = @import("client_pump.zig");
 const external_recovery_types = @import("external_recovery_types.zig");
 const runtime_event_types = @import("runtime_event_types.zig");
+const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
@@ -96,6 +97,7 @@ fn readPosix(
     }
     // Per-call nonblocking is mandatory even though external-mode adoption also sets O_NONBLOCK:
     // another descriptor for the same open-file-description can change that shared flag.
+    client_idle_pump_evidence.recordSocketRead();
     const result = c.recv(
         fd,
         destination.ptr,

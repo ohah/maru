@@ -30,6 +30,24 @@ const tokens = chrome.tokens;
 /// 돌려주고 gutter가 그것을 따른다.
 pub const Row = struct {
     bytes: []const u8,
+    /// **이 줄의 색 구간**(§5.3 구문 강조 1층). 비어 있으면 줄 전체가 본문색이다 —
+    /// grammar가 없거나 파싱이 실패했을 때가 그렇고, 그것이 §5의 *"무색"*이다.
+    ///
+    /// **논리 열 기준이다**(byte가 아니다). 이 모듈은 이미 열로 배치를 정하고, byte→열 변환은
+    /// `columnsAtOffsets` 하나가 소유한다 — 여기서 다시 변환하면 탭스톱 규칙이 두 곳이 되고
+    /// 그 둘은 갈린다(이 파일이 반복해서 적어 둔 함정이다). 그래서 **호출자가 그 함수로 옮겨서**
+    /// 넘긴다.
+    ///
+    /// **오름차순이고 겹치지 않아야 한다.** 겹치면 뒤엣것이 조용히 무시된다 — tree-sitter는 한
+    /// 범위에 캡처를 여럿 내므로(그 모듈 머리말 참고) **겹침 해소는 호출자의 일**이다.
+    colors: []const ColorSpan = &.{},
+};
+
+/// 한 색 구간. `end_col`은 **배타적**이다.
+pub const ColorSpan = struct {
+    start_col: u32,
+    end_col: u32,
+    role: tokens.ColorRole,
 };
 
 pub const Props = struct {
@@ -62,6 +80,73 @@ pub const Props = struct {
 };
 
 pub const text_role: tokens.ColorRole = .surface_fg;
+
+/// 조각 텍스트를 **색이 갈리는 자리에서** run으로 쪼갠다. 쓴 run 수를 돌려준다.
+///
+/// **열을 여기서 다시 센다 — 다만 규칙은 빌려 쓴다.** `columnsOf`와 **같은 걸음**(cluster 분절 +
+/// `display_width`)이라 2칸 글자·§3.8 표기에서 갈리지 않는다. 새 규칙을 쓰면 색 경계가 글자에서
+/// 밀리는데, 그 어긋남은 크래시도 테스트 실패도 없이 화면에만 나타난다.
+///
+/// **run 예산이 다하면 마지막 칸에 남은 글자를 통째로 싣는다.** 색은 그 자리의 것으로 번지지만
+/// **글자는 하나도 안 잃는다** — 이 파일이 scratch·op 예산에서 내린 판단(줄이지 화면을 지우지
+/// 않는다)과 같은 방향이다.
+///
+/// 그러려면 **마지막 칸을 미리 비워 둬야 한다**(`written + 1 >= out_runs.len`에서 멈춘다).
+/// 처음에는 그냥 `written >= out_runs.len`에서 멈췄는데, 그러면 꼬리를 쓸 칸이 없어 **줄 끝이
+/// 조용히 사라졌다** — `HL14`가 그것을 잡았고, 위 주석은 코드가 안 하는 일을 적고 있었다.
+fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, out_runs: []draw.Run) usize {
+    if (out_runs.len == 0) return 0;
+    // **색이 없으면 한 run이다.** 흔한 경우(grammar 없음·무색 줄)라 걷지 않고 빠져나간다.
+    if (colors.len == 0) {
+        out_runs[0] = .{ .text = text };
+        return 1;
+    }
+
+    var written: usize = 0;
+    var i: usize = 0;
+    var col: u32 = start_col;
+    var seg_start: usize = 0;
+    var cursor: usize = 0; // colors 를 앞으로만 훑는다 — 줄당 한 번 지나간다
+    var seg_role: ?tokens.ColorRole = roleAt(colors, &cursor, col);
+
+    while (i < text.len) {
+        const base = text_layout.decodeCodepoint(text, i);
+        const end = @min(text_layout.clusterEndAfter(text, i, base.advance), text.len);
+        const n = @max(1, end - i);
+        const role = roleAt(colors, &cursor, col);
+        if (role != seg_role) {
+            if (i > seg_start) {
+                // **마지막 칸은 꼬리 몫이다.** 여기서 다 쓰면 남은 글자를 실을 자리가 없다.
+                if (written + 1 >= out_runs.len) break;
+                out_runs[written] = .{ .text = text[seg_start..i], .role = seg_role };
+                written += 1;
+                seg_start = i;
+            }
+            seg_role = role;
+        }
+        col += display_width.clusterCols(text, i, i + n);
+        i += n;
+    }
+    if (seg_start < text.len and written < out_runs.len) {
+        out_runs[written] = .{ .text = text[seg_start..], .role = seg_role };
+        written += 1;
+    }
+    // 예산이 0이 되어 아무것도 못 쓴 경우는 위에서 걸렀지만, 그래도 **빈 run 묶음을 내지 않는다** —
+    // 그러면 op이 아무 글자도 안 그린다.
+    if (written == 0) {
+        out_runs[0] = .{ .text = text };
+        written = 1;
+    }
+    return written;
+}
+
+/// `col`을 덮는 구간의 역할. `cursor`는 **뒤로 가지 않는다** — 한 줄을 한 번만 지나간다.
+fn roleAt(colors: []const ColorSpan, cursor: *usize, col: u32) ?tokens.ColorRole {
+    while (cursor.* < colors.len and colors[cursor.*].end_col <= col) cursor.* += 1;
+    if (cursor.* >= colors.len) return null;
+    const c = colors[cursor.*];
+    return if (col >= c.start_col and col < c.end_col) c.role else null;
+}
 
 /// gutter와 같은 이유로 각 저장소에서 쓴 양을 돌려준다(`gutter.Written` 참고).
 pub const Written = struct {
@@ -242,9 +327,9 @@ pub fn build(
             // 나온다. 번호가 없으면 화면 전체가 어느 위치인지 알 수 없다는 것이 같은 PR의 결론이다.
             if (run_used >= runs.len or op_count >= out.len) continue;
 
-            runs[run_used] = .{ .text = text };
-            const run_slice = runs[run_used .. run_used + 1];
-            run_used += 1;
+            const run_start = run_used;
+            run_used += writeRuns(text, @max(src_col, start_col), row.colors, runs[run_used..]);
+            const run_slice = runs[run_start..run_used];
 
             out[op_count] = .{
                 .text = .{
@@ -2558,4 +2643,141 @@ test "왕복 불변식 ①: 보이는 offset은 왕복한다 — 실제 페인�
 /// 위 판정자가 쓰는 얇은 감쌈 — `columnsAtOffsets`는 `[]align(1)`을 받는다.
 fn content_columnsAtOffsets(bytes: []const u8, tab: u16, offsets: []u32, out: []u32, stop_col: u32) void {
     columnsAtOffsets(bytes, tab, offsets, out, stop_col);
+}
+
+// ── 구문 강조 색 분할(§5.3) ────────────────────────────────────────────────────
+
+/// run 묶음의 글자를 이어 붙인다. **어떤 분할이든 원본과 같아야 한다** — 색을 넣다가 글자를
+/// 잃거나 겹치는 것이 이 층에서 가장 나쁜 회귀이고, 화면에서는 "글자가 사라졌다"로 보인다.
+fn joinRuns(out: []u8, rs: []const draw.Run) []const u8 {
+    var n: usize = 0;
+    for (rs) |r| {
+        @memcpy(out[n .. n + r.text.len], r.text);
+        n += r.text.len;
+    }
+    return out[0..n];
+}
+
+test "HL10 색 구간이 없으면 run 하나 — 흔한 경로가 안 느려진다" {
+    var rs: [8]draw.Run = undefined;
+    const n = writeRuns("const x = 1;", 0, &.{}, &rs);
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqualStrings("const x = 1;", rs[0].text);
+    // 역할이 없어야 op 의 본문색이 그대로 쓰인다(`run.role orelse text.role`).
+    try testing.expectEqual(@as(?tokens.ColorRole, null), rs[0].role);
+}
+
+test "HL11 색 경계에서 쪼개지고, 이어 붙이면 원본이다" {
+    const text = "const x = 1;";
+    const colors = [_]ColorSpan{
+        .{ .start_col = 0, .end_col = 5, .role = .syntax_keyword }, // const
+        .{ .start_col = 10, .end_col = 11, .role = .syntax_number }, // 1
+    };
+    var rs: [16]draw.Run = undefined;
+    const n = writeRuns(text, 0, &colors, &rs);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
+
+    // 첫 run 은 키워드, 그 다음은 무색, 숫자 자리에서 다시 색이 붙는다.
+    try testing.expectEqualStrings("const", rs[0].text);
+    try testing.expectEqual(tokens.ColorRole.syntax_keyword, rs[0].role.?);
+    try testing.expectEqual(@as(?tokens.ColorRole, null), rs[1].role);
+    var saw_number = false;
+    for (rs[0..n]) |r| {
+        if (r.role) |role| if (role == .syntax_number) {
+            try testing.expectEqualStrings("1", r.text);
+            saw_number = true;
+        };
+    }
+    try testing.expect(saw_number);
+}
+
+test "HL12 2칸 글자에서 경계가 안 밀린다 — 글자 수가 아니라 열로 센다" {
+    // 한글은 한 글자가 **두 열**이다. 열 대신 글자 수로 세면 경계가 오른쪽으로 밀리고, 그
+    // 어긋남은 크래시 없이 화면에만 나온다(이 파일이 반복해서 적어 둔 함정).
+    const text = "가나ab"; // 열: 가=0..2, 나=2..4, a=4, b=5
+    const colors = [_]ColorSpan{.{ .start_col = 2, .end_col = 5, .role = .syntax_string }};
+    var rs: [16]draw.Run = undefined;
+    const n = writeRuns(text, 0, &colors, &rs);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
+
+    try testing.expectEqualStrings("가", rs[0].text);
+    try testing.expectEqual(@as(?tokens.ColorRole, null), rs[0].role);
+    try testing.expectEqualStrings("나a", rs[1].text); // 열 2~4 가 '나', 4 가 'a'
+    try testing.expectEqual(tokens.ColorRole.syntax_string, rs[1].role.?);
+    try testing.expectEqualStrings("b", rs[2].text);
+    try testing.expectEqual(@as(?tokens.ColorRole, null), rs[2].role);
+}
+
+test "HL13 시작 열이 0이 아니어도 맞는다 — 가로 스크롤·랩된 조각" {
+    // 조각은 줄 머리에서 시작하지 않는다(`first_col`·랩). 시작 열을 안 넘기면 그 조각 전체의
+    // 색이 왼쪽으로 밀린다.
+    const text = "x = 1;"; // 이 조각이 논리 열 6 에서 시작한다고 하자
+    const colors = [_]ColorSpan{.{ .start_col = 10, .end_col = 11, .role = .syntax_number }};
+    var rs: [16]draw.Run = undefined;
+    const n = writeRuns(text, 6, &colors, &rs);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
+    var colored: []const u8 = "";
+    for (rs[0..n]) |r| if (r.role != null) {
+        colored = r.text;
+    };
+    try testing.expectEqualStrings("1", colored);
+}
+
+test "HL14 run 예산이 모자라도 글자를 잃지 않는다" {
+    // 색 구간이 많으면 run 이 그만큼 늘어난다. 예산이 다했을 때 **남은 글자를 버리면** 줄 끝이
+    // 사라지는데, 그것은 scratch·op 예산에서 이 파일이 내린 판단(줄이지 화면을 지우지 않는다)과
+    // 어긋난다.
+    const text = "abcdef";
+    const colors = [_]ColorSpan{
+        .{ .start_col = 0, .end_col = 1, .role = .syntax_keyword },
+        .{ .start_col = 2, .end_col = 3, .role = .syntax_string },
+        .{ .start_col = 4, .end_col = 5, .role = .syntax_number },
+    };
+    var rs: [2]draw.Run = undefined; // 일부러 모자라게
+    const n = writeRuns(text, 0, &colors, &rs);
+    try testing.expect(n <= rs.len);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
+}
+
+test "HL15 build 를 지나도 색이 붙는다 — 탭 전개 뒤에도 경계가 글자에 선다" {
+    // 위 판정자들은 `writeRuns`만 본다. 실제 경로는 **탭을 전개한 뒤** 그것을 부르므로, 탭이
+    // 있는 줄에서 경계가 맞는지는 `build`를 지나야 확인된다.
+    //
+    // `\tab` → 전개하면 `    ab`(탭 폭 4). 논리 열은 탭이 0..4, a=4, b=5.
+    const colors = [_]ColorSpan{.{ .start_col = 4, .end_col = 5, .role = .syntax_keyword }};
+    var rows = [_]Row{.{ .bytes = "\tab", .colors = &colors }};
+    var ops: [4]draw.Op = undefined;
+    var scratch: [128]u8 = undefined;
+    var runs: [8]draw.Run = undefined;
+
+    const w = build(.{
+        .layout = geometry.compute(40, 1, .{}),
+        .rows = &rows,
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+        .origin_px = .{ .x = 0, .y = 0 },
+    }, &ops, &scratch, &runs, &test_visual);
+
+    try testing.expectEqual(@as(usize, 1), w.ops);
+    try testing.expect(w.runs >= 2); // 색 경계가 있으니 한 run 으로 안 끝난다
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("    ab", joinRuns(&buf, runs[0..w.runs]));
+
+    var colored: []const u8 = "";
+    for (runs[0..w.runs]) |r| if (r.role) |role| {
+        try testing.expectEqual(tokens.ColorRole.syntax_keyword, role);
+        colored = r.text;
+    };
+    // 탭이 4열을 먹었으므로 열 4 는 `a`다. 전개를 안 세면 여기가 공백이 된다.
+    try testing.expectEqualStrings("a", colored);
 }

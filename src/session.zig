@@ -105,6 +105,7 @@ pub const git_log = @import("session/git_log.zig"); // 히스토리 탭 커밋 �
 pub const content_menu = @import("session/content_menu.zig"); // 파일 본문 우클릭 메뉴 항목 정책(file-panel-kinds.md §2.6)
 pub const file_panel_bridge = @import("session/file_panel_bridge.zig"); // FP4: readAsset 상대 경로·읽기 상한·MIME 순수 정책
 pub const syntax_theme = @import("session/syntax_theme.zig"); // FP12b: 터미널 색상 테마 → text 소스 편집기 syntax 색 파생(순수)
+pub const syntax_capture = @import("session/syntax_capture.zig"); // N4 §5.3: tree-sitter capture 이름 → syntax 색 역할(다대일, 순수)
 pub const agent_selection = @import("session/agent_selection.zig"); // 파일 패널 선택 → 에이전트 CLI 페이로드(순수)
 pub const mermaid_protocol = @import("session/mermaid_protocol.zig"); // FP10c1: parent/helper가 공유하는 bounded wire codec SSOT
 pub const mermaid_coordinator = @import("session/mermaid_coordinator.zig"); // FP10c1: 앱 전역 queue/capability/deadline/failure 정책 SSOT

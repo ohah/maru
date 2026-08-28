@@ -218,6 +218,48 @@ pub const ColorRole = enum {
     /// 띠(진하게)에 함께 쓰이므로, 세기까지 역할로 나누면 토큰이 두 배가 되고 둘이 어긋난다.
     diff_added_bg,
     diff_removed_bg,
+    /// **구문 강조 전경색**(native-editor-visual-mapping.md §5.3). 이름은 `session.syntax_capture.Role`과
+    /// 하나씩 대응하며, chrome은 그 모듈을 **import 하지 않는다** — config `ChromeTabStyle`을 중립
+    /// enum으로 옮기는 것과 같은 모양이고, 옮기는 일은 platform이 한다.
+    ///
+    /// **기본값이 `surface_fg`다.** 색을 안 넘기면 본문색으로 그려지고 화면은 무색이 된다 — §5의
+    /// *"grammar가 없으면 무색"*이 토큰 층에서도 그대로 성립한다. 그래서 픽스처 수십 곳이 이 값을
+    /// 안 채워도 컴파일되고, 안 채운 결과가 **거짓 색이 아니라 무색**이다.
+    syntax_keyword,
+    syntax_string,
+    syntax_number,
+    syntax_comment,
+    syntax_property,
+    syntax_type_name,
+    syntax_function,
+    syntax_punctuation,
+    syntax_tag,
+    syntax_attribute,
+    syntax_invalid,
+};
+
+/// 구문 강조 색 묶음. **필드 이름이 `ColorRole`의 `syntax_` 접두를 뗀 것과 같다** — 아래 `setSyntax`가
+/// `@field`로 옮기므로 이름이 갈리면 컴파일이 죽는다.
+pub const SyntaxPalette = struct {
+    keyword: Rgb,
+    string: Rgb,
+    number: Rgb,
+    comment: Rgb,
+    property: Rgb,
+    type_name: Rgb,
+    function: Rgb,
+    punctuation: Rgb,
+    tag: Rgb,
+    attribute: Rgb,
+    invalid: Rgb,
+};
+
+/// 구문 역할 전부. **평범한 배열이다**(반사가 아니다) — 위 `setSyntax` 주석이 적은 이유로
+/// 이 파일에서는 `@typeInfo`를 안 쓴다. 개수가 `SyntaxPalette`와 맞는지는 `HL9`가 잰다.
+const syntax_roles = [_]ColorRole{
+    .syntax_keyword,  .syntax_string,    .syntax_number,   .syntax_comment,
+    .syntax_property, .syntax_type_name, .syntax_function, .syntax_punctuation,
+    .syntax_tag,      .syntax_attribute, .syntax_invalid,
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -332,6 +374,29 @@ pub const Tokens = struct {
     space: Spacing = .{},
     border: Border = .{},
 
+    /// 구문 강조 색을 얹는다. **`rich`/`base` 뒤에 부른다** — 안 부르면 그 역할들이 본문색으로
+    /// 남아 화면이 무색이 되고, 그것이 §5가 정한 저하 동작이다.
+    ///
+    /// 이름으로 옮기므로(`@field`) `SyntaxPalette`의 필드와 `ColorRole`의 `syntax_*`가 갈리면
+    /// **컴파일이 죽는다** — 두 벌이 조용히 어긋나는 것을 막는 자리다.
+    pub fn setSyntax(self: *Tokens, colors: SyntaxPalette) void {
+        // **반사로 옮기지 않는다.** `@typeInfo`/`@field`를 쓰면 이 파일이 `imports.zig`의 반사
+        // 재고에 들어와 digest 원장을 건드린다(실측: `unreviewed external reflection inventory:
+        // src/chrome/tokens.zig count=3`). 명시 대입도 이름이 바뀌면 똑같이 컴파일이 죽고,
+        // **자리 바꿔치기**(keyword 색이 string 역할로 가는 것)는 아래 `HL9`가 잡는다.
+        self.palette.set(.syntax_keyword, colors.keyword);
+        self.palette.set(.syntax_string, colors.string);
+        self.palette.set(.syntax_number, colors.number);
+        self.palette.set(.syntax_comment, colors.comment);
+        self.palette.set(.syntax_property, colors.property);
+        self.palette.set(.syntax_type_name, colors.type_name);
+        self.palette.set(.syntax_function, colors.function);
+        self.palette.set(.syntax_punctuation, colors.punctuation);
+        self.palette.set(.syntax_tag, colors.tag);
+        self.palette.set(.syntax_attribute, colors.attribute);
+        self.palette.set(.syntax_invalid, colors.invalid);
+    }
+
     /// 기반 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 15개 ColorRole을 채운다 — **역할→색 매핑의 단일
     /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider는 sidebar_background의 명암
     /// 반대 방향으로 파생해 light/dark 모두에서 panel과 다른 RGB를 보장한다. rich도 divider의 출처를 바꾸지 않는다.
@@ -396,6 +461,10 @@ pub const Tokens = struct {
         palette.set(.terminal_bg, theme.terminal_background);
         palette.set(.diff_added_bg, theme.diff_added);
         palette.set(.diff_removed_bg, theme.diff_removed);
+        // **구문 색은 본문색으로 시작한다 — 그것이 "무색"이다.** 실제 색은 `setSyntax`가 나중에
+        // 덮는다(`chrome_theme.tokensFor`가 `syntax_theme.fromTheme`에서 받아 넘긴다). 여기서
+        // 안 채우면 `EnumArray`가 미초기화로 남아 쓰레기 색이 나온다.
+        for (syntax_roles) |r| palette.set(r, palette.get(.surface_fg));
         return .{ .palette = palette };
     }
 
@@ -789,4 +858,42 @@ test "비교 밴드 색은 자기 역할에만 산다 — 다른 역할을 덮�
             try std.testing.expect(!std.meta.eql(tk.get(role), theme.diff_removed));
         }
     }
+}
+
+test "HL9 setSyntax 가 11색을 각자 제 역할에 넣는다 — 자리 바꿔치기를 잡는다" {
+    // `setSyntax`는 명시 대입 열한 줄이라 **이름이 바뀌면** 컴파일이 죽지만, `keyword` 색을
+    // `syntax_string` 역할에 넣는 **자리 바꿔치기**는 타입이 같아 컴파일러가 못 잡는다. 색마다
+    // 다른 값을 넣어 하나씩 대조한다.
+    const testing = std.testing;
+    var tk = Tokens.rich(std.mem.zeroes(ThemeColors));
+
+    // 필드 수가 역할 수와 같아야 한다 — 한쪽만 늘면 `setSyntax`가 조용히 빠뜨린다.
+    // (반사는 여기서만 쓴다. test 블록은 digest 원장이 마스킹한다.)
+    try testing.expectEqual(syntax_roles.len, @typeInfo(SyntaxPalette).@"struct".fields.len);
+
+    tk.setSyntax(.{
+        .keyword = .{ .r = 1, .g = 0, .b = 0 },
+        .string = .{ .r = 2, .g = 0, .b = 0 },
+        .number = .{ .r = 3, .g = 0, .b = 0 },
+        .comment = .{ .r = 4, .g = 0, .b = 0 },
+        .property = .{ .r = 5, .g = 0, .b = 0 },
+        .type_name = .{ .r = 6, .g = 0, .b = 0 },
+        .function = .{ .r = 7, .g = 0, .b = 0 },
+        .punctuation = .{ .r = 8, .g = 0, .b = 0 },
+        .tag = .{ .r = 9, .g = 0, .b = 0 },
+        .attribute = .{ .r = 10, .g = 0, .b = 0 },
+        .invalid = .{ .r = 11, .g = 0, .b = 0 },
+    });
+
+    try testing.expectEqual(@as(u8, 1), tk.get(.syntax_keyword).r);
+    try testing.expectEqual(@as(u8, 2), tk.get(.syntax_string).r);
+    try testing.expectEqual(@as(u8, 3), tk.get(.syntax_number).r);
+    try testing.expectEqual(@as(u8, 4), tk.get(.syntax_comment).r);
+    try testing.expectEqual(@as(u8, 5), tk.get(.syntax_property).r);
+    try testing.expectEqual(@as(u8, 6), tk.get(.syntax_type_name).r);
+    try testing.expectEqual(@as(u8, 7), tk.get(.syntax_function).r);
+    try testing.expectEqual(@as(u8, 8), tk.get(.syntax_punctuation).r);
+    try testing.expectEqual(@as(u8, 9), tk.get(.syntax_tag).r);
+    try testing.expectEqual(@as(u8, 10), tk.get(.syntax_attribute).r);
+    try testing.expectEqual(@as(u8, 11), tk.get(.syntax_invalid).r);
 }

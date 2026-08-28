@@ -3012,7 +3012,7 @@ pub fn build(b: *std.Build) void {
     // 뿌리로 하는 실행을 따로 걸어 편집기 L2 판정자를 **실제로** 돌린다.
     const editor_core_tests = addProjectTest(b, .{
         .root_module = maru_mod,
-        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND" },
+        .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL" },
     });
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));

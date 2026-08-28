@@ -654,3 +654,198 @@ test "SYN10 Provider 가 C 메모리를 안 남긴다 — 열고 고치고 닫�
     }
     try std.testing.expectEqual(@as(isize, 0), live_allocs);
 }
+
+// ── 창·증분 판정(§5.3 — 보이는 범위만 · 통지가 있어야 증분이 성립한다) ──────────────
+
+test "SYN11 빈 범위는 빈 목록이다 — end=0 을 무제한으로 읽지 않는다" {
+    // **헤더의 함정을 고정한다.** `ts_query_cursor_set_byte_range`는 `end`가 0이면 그것을
+    // `UINT32_MAX`(무제한)로 읽는다. 그래서 빈 범위를 그대로 넘기면 **문서 전체**가 돌아온다 —
+    // 화면에는 "왜 이렇게 느리지" 말고는 증상이 없고, 색은 오히려 더 많이 나온다.
+    // `collect`의 `hi <= range.start` 거르기가 그 자리이고, 이 판정자가 그것을 지킨다.
+    const allocator = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+
+    const src =
+        \\const x = "abc"; // c
+        \\pub fn f() void {}
+        \\
+    ;
+    // 먼저 이 문서에 색이 **있다**는 것부터 — 아래 0이 "원래 없음"이 아니라 "범위가 걸렀음"이어야 한다.
+    highlights(allocator, .zig, src, &spans);
+    try std.testing.expect(spans.items.len > 0);
+
+    highlightsInRange(allocator, .zig, src, .{ .start = 0, .end = 0 }, &spans);
+    try std.testing.expectEqual(@as(usize, 0), spans.items.len);
+
+    highlightsInRange(allocator, .zig, src, .{ .start = 5, .end = 5 }, &spans);
+    try std.testing.expectEqual(@as(usize, 0), spans.items.len);
+
+    // 뒤집힌 범위도 같다.
+    highlightsInRange(allocator, .zig, src, .{ .start = 10, .end = 3 }, &spans);
+    try std.testing.expectEqual(@as(usize, 0), spans.items.len);
+}
+
+test "SYN12 창 밖은 안 칠한다 — 범위 뒤에서 시작하는 조각이 없다" {
+    // 편집기는 보이는 수십 줄만 그린다(§5.3). 창을 무시하고 문서 전체를 질의해도 **화면은 같아
+    // 보인다** — 소비처가 창 밖을 안 그리기 때문이다. 그래서 이 회귀는 성능으로만 나타나고,
+    // 색을 보는 판정자로는 안 잡힌다. 여기서 범위 계약 자체를 잰다.
+    const allocator = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+
+    const src =
+        \\const a = 1;
+        \\const b = "second line string";
+        \\const c = "third line string";
+        \\
+    ;
+    const first_line_end: u32 = @intCast(std.mem.indexOfScalar(u8, src, '\n').? + 1);
+    const second_line_end: u32 = @intCast(std.mem.indexOfScalarPos(u8, src, first_line_end, '\n').? + 1);
+
+    // ⑴ 위쪽 경계. 창 **뒤에서 시작하는** 조각은 창 밖이다(걸치는 것은 허용한다 — 창 안에서
+    //    시작해 넘어갈 수 있다).
+    highlightsInRange(allocator, .zig, src, .{ .start = 0, .end = first_line_end }, &spans);
+    try std.testing.expect(spans.items.len > 0); // 창 안에는 색이 있다
+    for (spans.items) |sp| {
+        try std.testing.expect(sp.start < first_line_end);
+    }
+
+    // ⑵ **아래쪽 경계도 잰다.** 위만 재면 하한을 0으로 바꾸는 회귀가 그대로 지나간다 — 실제로
+    //    그 뮤턴트가 ⑴만 있을 때 살아남았다. 창은 두 끝이 다 있어야 창이다.
+    highlightsInRange(allocator, .zig, src, .{ .start = first_line_end, .end = second_line_end }, &spans);
+    try std.testing.expect(spans.items.len > 0);
+    for (spans.items) |sp| {
+        try std.testing.expect(sp.end > first_line_end);
+        try std.testing.expect(sp.start < second_line_end);
+    }
+}
+
+/// 지금까지의 tree-sitter 할당 **횟수**(누적). `live_allocs`와 달리 free로 줄지 않는다 — 재사용을
+/// 재는 자다. 아래 판정자만 쓴다.
+var total_allocs: usize = 0;
+
+fn totalMalloc(n: usize) callconv(.c) ?*anyopaque {
+    total_allocs += 1;
+    return std.c.malloc(n);
+}
+fn totalCalloc(n: usize, sz: usize) callconv(.c) ?*anyopaque {
+    total_allocs += 1;
+    return std.c.calloc(n, sz);
+}
+fn totalRealloc(p: ?*anyopaque, n: usize) callconv(.c) ?*anyopaque {
+    total_allocs += 1;
+    return std.c.realloc(p, n);
+}
+fn totalFree(p: ?*anyopaque) callconv(.c) void {
+    std.c.free(p);
+}
+
+test "SYN13 onEdit 이 옛 트리를 실제로 재사용한다 — 전체 재파싱의 1/4 미만으로 판다" {
+    // **문서가 주장하는 81배를 지키는 자리다.** `setSource`의 주석과 §5.3이 *"통지가 없으면 매번
+    // 전체 재파싱"*이라고 적었는데, 그 배선이 끊겨도 **색은 똑같이 나온다** — 판정자도 골든도
+    // 통과한다. 실제로 5회차 뮤턴트 실험에서 옛 트리를 안 넘기는 변경이 모든 게이트를 지나갔다.
+    //
+    // **시간이 아니라 할당 횟수로 잰다.** 시간은 기계와 부하를 타서 CI에서 흔들리지만, 재사용
+    // 여부는 tree-sitter가 새로 만드는 subtree 수에 그대로 나타난다.
+    //
+    // 실측(이 문서, 약 14KB): 전체 8706 · 정상 증분 614(7%) · 옛 트리 미전달 8704(99%) ·
+    // 편집 지점을 0으로 4656(53%). 7%와 53% 사이가 넓어 **25%**를 경계로 잡는다.
+    const allocator = std.testing.allocator;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < 300) : (i += 1) {
+        try buf.appendSlice(allocator, "pub fn f() void { const s = \"abc\"; _ = s; } // c\n");
+    }
+    const src1 = try allocator.dupe(u8, buf.items);
+    defer allocator.free(src1);
+
+    // 한가운데 한 글자를 넣는다.
+    const at: u32 = @intCast(src1.len / 2);
+    var edited: std.ArrayList(u8) = .empty;
+    defer edited.deinit(allocator);
+    try edited.appendSlice(allocator, src1[0..at]);
+    try edited.append(allocator, ' ');
+    try edited.appendSlice(allocator, src1[at..]);
+    const src2 = edited.items;
+
+    var row: u32 = 0;
+    var col: u32 = 0;
+    for (src1[0..at]) |ch| {
+        if (ch == '\n') {
+            row += 1;
+            col = 0;
+        } else col += 1;
+    }
+
+    // 쿼리 캐시를 먼저 데운다(SYN10과 같은 이유 — 계수에 섞이면 기준이 흐려진다).
+    var warm: std.ArrayList(Span) = .empty;
+    defer warm.deinit(allocator);
+    highlights(allocator, .zig, "const x = 1;", &warm);
+    try std.testing.expect(warm.items.len > 0);
+
+    c.ts_set_allocator(totalMalloc, totalCalloc, totalRealloc, totalFree);
+    defer c.ts_set_allocator(null, null, null, null);
+
+    var prov = Provider.init(src1, .zig) orelse return error.NoProvider;
+    defer prov.deinit();
+
+    total_allocs = 0;
+    prov.setSource(src2);
+    const full = total_allocs;
+    try std.testing.expect(full > 0); // 계수 훅이 실제로 걸렸다
+
+    prov.setSource(src1);
+    total_allocs = 0;
+    prov.onEdit(src2, .{
+        .start_byte = at,
+        .old_end_byte = at,
+        .new_end_byte = at + 1,
+        .start_point = .{ .row = row, .column = col },
+        .old_end_point = .{ .row = row, .column = col },
+        .new_end_point = .{ .row = row, .column = col + 1 },
+    });
+    const incremental = total_allocs;
+
+    try std.testing.expect(incremental * 4 < full);
+}
+
+test "SYN14 편집 뒤 색이 새 내용을 따른다 — 통지 없이는 옛 트리가 그대로 살아남는다" {
+    // SYN13은 **얼마나 일했는지**를 잰다. 통지 자체를 빼면 tree-sitter는 옛 트리를 그대로
+    // 유효하다고 믿어 **일을 거의 안 하고** 옛 색을 돌려주므로, 그 경로는 SYN13을 오히려
+    // 통과한다. 그래서 **결과**를 보는 자가 따로 있어야 한다.
+    const allocator = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+
+    const before = "const a = 1;\nzzz\n";
+    const after = "const a = 1;\n// zzz\n";
+    const line2: u32 = @intCast(std.mem.indexOfScalar(u8, before, '\n').? + 1);
+
+    var prov = Provider.init(before, .zig) orelse return error.NoProvider;
+    defer prov.deinit();
+
+    prov.spansForRange(allocator, before, .{ .start = 0, .end = @intCast(before.len) }, &spans);
+    try std.testing.expect(!hasCaptureAt(spans.items, "comment", line2));
+
+    prov.onEdit(after, .{
+        .start_byte = line2,
+        .old_end_byte = line2,
+        .new_end_byte = line2 + 3, // "// "
+        .start_point = .{ .row = 1, .column = 0 },
+        .old_end_point = .{ .row = 1, .column = 0 },
+        .new_end_point = .{ .row = 1, .column = 3 },
+    });
+
+    prov.spansForRange(allocator, after, .{ .start = 0, .end = @intCast(after.len) }, &spans);
+    try std.testing.expect(hasCaptureAt(spans.items, "comment", line2));
+}
+
+fn hasCaptureAt(spans: []const Span, comptime prefix: []const u8, at: u32) bool {
+    for (spans) |sp| {
+        if (sp.start == at and std.mem.startsWith(u8, sp.capture, prefix)) return true;
+    }
+    return false;
+}

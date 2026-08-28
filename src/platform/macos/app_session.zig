@@ -32595,6 +32595,249 @@ fn appendTrackedRemoteTermForTest(session: *AppSession) !*Term {
     return term;
 }
 
+fn writeE4d2aFixtureFile(path: [:0]const u8, bytes: []const u8, mode: std.c.mode_t) !void {
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, mode);
+    if (fd < 0) return error.FixtureWriteFailed;
+    defer _ = std.c.close(fd);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const written = std.c.write(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (written <= 0) return error.FixtureWriteFailed;
+        offset += @intCast(written);
+    }
+}
+
+fn signalE4d2aFifo(path: [:0]const u8) !void {
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.FixtureSignalFailed;
+    defer _ = std.c.close(fd);
+    if (std.c.write(fd, "go\n", 3) != 3) return error.FixtureSignalFailed;
+}
+
+extern "c" fn _NSGetArgc() *c_int;
+extern "c" fn _NSGetArgv() *[*:null]?[*:0]u8;
+
+fn e4d2aForegroundFixturePaths() !struct { claude: [:0]const u8, codex: [:0]const u8 } {
+    const argc = _NSGetArgc().*;
+    if (argc < 3) return error.MissingForegroundFixture;
+    const argv = _NSGetArgv().*;
+    const claude = argv[@intCast(argc - 2)] orelse return error.MissingForegroundFixture;
+    const codex = argv[@intCast(argc - 1)] orelse return error.MissingForegroundFixture;
+    return .{ .claude = std.mem.span(claude), .codex = std.mem.span(codex) };
+}
+
+// P3-e4d-2a는 metadata wire 자체가 아니라 그 뒤의 실제 제품 소비자를 닫는다. 독립 daemon의 forkpty가
+// script basename `claude`와 `codex`를 실제 foreground identity로 내고, OSC metadata와 같은 revision에
+// 결속된 observation을 AppSession의 기존 Git·agent·SSH 분기가 소비한다. 테스트가 observation이나 소비자
+// 결과를 직접 심으면 wire와 GUI 사이가 끊겨도 초록이므로 그런 seam은 의도적으로 두지 않는다.
+test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" {
+    if (!is_macos) return error.SkipZigTest;
+    // The ordinary all-tests runner does not own the two executable fixtures. The focused
+    // `test-session-host-metadata-consumers` gate supplies them as artifact arguments and is the
+    // sole product E2E owner; keep the aggregate suite green without replacing those executables
+    // with an inferred/script fixture.
+    if (_NSGetArgc().* < 3) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const TestC = struct {
+        extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+    };
+
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e4d2a-{d}", .{std.c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = std.c.mkdir(base.ptr, 0o700);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    var repo_buf: [192]u8 = undefined;
+    const repo = try std.fmt.bufPrintZ(&repo_buf, "{s}/repo", .{base});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(repo.ptr, 0o700));
+    var git_buf: [224]u8 = undefined;
+    const git_dir = try std.fmt.bufPrintZ(&git_buf, "{s}/.git", .{repo});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(git_dir.ptr, 0o700));
+    var head_buf: [256]u8 = undefined;
+    const head = try std.fmt.bufPrintZ(&head_buf, "{s}/HEAD", .{git_dir});
+    try writeE4d2aFixtureFile(head, "ref: refs/heads/e4d-fixture\n", 0o600);
+    var plain_buf: [192]u8 = undefined;
+    const plain = try std.fmt.bufPrintZ(&plain_buf, "{s}/plain", .{base});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(plain.ptr, 0o700));
+
+    var fifo_claude_buf: [192]u8 = undefined;
+    const fifo_claude = try std.fmt.bufPrintZ(&fifo_claude_buf, "{s}/claude.next", .{base});
+    var fifo_codex_buf: [192]u8 = undefined;
+    const fifo_codex = try std.fmt.bufPrintZ(&fifo_codex_buf, "{s}/codex.next", .{base});
+    try std.testing.expectEqual(@as(c_int, 0), TestC.mkfifo(fifo_claude.ptr, 0o600));
+    try std.testing.expectEqual(@as(c_int, 0), TestC.mkfifo(fifo_codex.ptr, 0o600));
+
+    const fixtures = try e4d2aForegroundFixturePaths();
+
+    var dir_buf: [192]u8 = undefined;
+    const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    var socket_buf: [256]u8 = undefined;
+    const socket = session_host.discovery.socketPathIn(&socket_buf, dir) catch return error.SkipZigTest;
+    const host_child = std.c.fork();
+    if (host_child < 0) return error.SkipZigTest;
+    if (host_child == 0) {
+        _ = std.c.setsid();
+        session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = std.c.kill(host_child, std.posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = std.c.waitpid(host_child, &status, 0);
+    }
+
+    var ready = false;
+    for (0..250) |_| {
+        if (session_host.client.Client.connect(allocator, socket, .gui)) |connected| {
+            var probe = connected;
+            probe.deinit();
+            ready = true;
+            break;
+        } else |_| _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(ready);
+
+    const previous_keep_alive = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = false;
+    defer app_keep_alive_after_quit = previous_keep_alive;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const client = session_host.host_connect.connectOrLaunch(
+        allocator,
+        "/unused",
+        base,
+        .{ .connect_attempts = 30, .connect_delay_ms = 10 },
+    ) orelse return error.TestUnexpectedResult;
+    app_remote_client = client;
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(
+        allocator,
+        io,
+        &app_remote_client.?,
+        session.runtime,
+    );
+    defer {
+        host_connect_failed = false;
+        if (app_remote_backend) |*backend| {
+            backend.deinit();
+            app_remote_backend = null;
+        }
+        if (app_remote_client) |*remote_client_owner| {
+            remote_client_owner.deinit();
+            app_remote_client = null;
+        }
+    }
+    app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+
+    const term = try term_ops.createTerm(
+        session,
+        .{ .command = fixtures.claude, .args = &.{ repo, fifo_claude, fixtures.codex, fifo_codex, plain } },
+        .{ .cols = 40, .rows = 10 },
+        16,
+        "foreground-consumer",
+        fixtures.claude,
+    );
+    try std.testing.expect(term.surface.remote != null);
+    const pane = session.tabs.items[0].panes.items[0];
+    try pane.terms.append(allocator, term);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
+    defer {
+        term_ops.focusTerm(session, 0);
+        _ = pane.terms.pop();
+        term_ops.destroyTerm(session, term);
+    }
+
+    var claude_current = false;
+    var saw_claude = false;
+    var saw_repo_cwd = false;
+    var saw_current_observation = false;
+    var saw_foreground_available = false;
+    var saw_foreground_process = false;
+    for (0..300) |_| {
+        _ = term.rt.pump.drainAvailable() catch {};
+        session.agent_poll_ticks = std.math.maxInt(u32) - 1;
+        agent_ops.pollAgentKinds(session);
+        saw_claude = saw_claude or term.agent_kind == .claude;
+        saw_repo_cwd = saw_repo_cwd or std.mem.eql(u8, term.rt.observation.cwd.items, repo);
+        saw_current_observation = saw_current_observation or term.rt.observation.availability == .current;
+        saw_foreground_available = saw_foreground_available or term.rt.observation.foreground_available;
+        saw_foreground_process = saw_foreground_process or term.rt.observation.foreground_processes.items.len != 0;
+        claude_current = term.agent_kind == .claude and
+            term.rt.observation.availability == .current and
+            std.mem.eql(u8, term.rt.observation.cwd.items, repo);
+        if (claude_current) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(saw_current_observation);
+    try std.testing.expect(saw_repo_cwd);
+    try std.testing.expect(saw_foreground_available);
+    try std.testing.expect(saw_foreground_process);
+    try std.testing.expect(saw_claude);
+    try std.testing.expect(claude_current);
+    try std.testing.expectEqualStrings("e4d-fixture", git_ops.termGitBranch(session, term).?);
+    try std.testing.expect(session.remoteUploadContext() == null);
+
+    try signalE4d2aFifo(fifo_claude);
+    var codex_current = false;
+    for (0..300) |_| {
+        _ = term.rt.pump.drainAvailable() catch {};
+        session.agent_poll_ticks = std.math.maxInt(u32) - 1;
+        agent_ops.pollAgentKinds(session);
+        codex_current = term.agent_kind == .codex and
+            term.rt.observation.availability == .current and
+            term.rt.observation.ssh_remote_dest_present;
+        if (codex_current) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(codex_current);
+    try std.testing.expect(git_ops.termGitBranch(session, term) == null);
+    const upload = session.remoteUploadContext() orelse return error.MissingRemoteUploadRoute;
+    try std.testing.expect(upload.dest.len != 0 and upload.ctl.len != 0);
+    upload.deinit(allocator);
+
+    // 사용자 동작 경계도 실제로 지난다. 존재하지 않는 파일은 원격 upload start가 0건이어야 하고,
+    // SSH current를 이미 안 이상 로컬 경로 paste로 물러서면 안 된다. 이 호출은 내부에서 fresh
+    // refreshObservation barrier를 다시 통과하므로 periodic cache만 보고 분기하는 가짜 green도 막는다.
+    const paste_queue_count = session.pending_pastes.count();
+    const terminal_input_events = session.total_terminal_input_events;
+    session.handleDroppedFiles("/definitely/missing/maru-e4d2a.txt\x00");
+    try std.testing.expectEqual(paste_queue_count, session.pending_pastes.count());
+    try std.testing.expectEqual(terminal_input_events, session.total_terminal_input_events);
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.app_file_send_start_failed),
+        session.chrome_host.notice.message,
+    );
+
+    try signalE4d2aFifo(fifo_codex);
+    var cleared = false;
+    for (0..300) |_| {
+        _ = term.rt.pump.drainAvailable() catch {};
+        session.agent_poll_ticks = std.math.maxInt(u32) - 1;
+        agent_ops.pollAgentKinds(session);
+        cleared = term.agent_kind == .none and
+            term.rt.observation.availability == .current and
+            !term.rt.observation.ssh_remote_dest_present and
+            std.mem.eql(u8, term.rt.observation.cwd.items, plain);
+        if (cleared) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(cleared);
+    try std.testing.expect(git_ops.termGitBranch(session, term) == null);
+    try std.testing.expect(session.remoteUploadContext() == null);
+}
+
 // AH7 통합 스모크 — keep-alive Term 의 **배지·대화 줄이 진짜 훅에서 오는지**를 끝까지 돈다. 조각은 각각
 // 봤지만(자식 env·칸 생성·이름 규칙·리더 분기) 그 다섯이 이어지는 것은 아무도 안 봤고, 하나만 어긋나도
 // 증상은 «빈 배지» 하나다. 여기서는 실 fork host 가 띄운 자식이 **maru 가 provider 설정에 심는 그 커맨드**

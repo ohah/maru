@@ -206,6 +206,10 @@ const ObservationCacheRecord = struct {
     cadence_epoch: ?u64 = null,
     observer_generation: u64 = 0,
     title_generation: u32 = 0,
+    // Foreground sampling owns a separate generation from TerminalCore. The 100ms sampler may
+    // advance it before cachedObservation materializes JSON, so a transient `changed` bool is not
+    // enough: the record must remember which exact foreground generation its bytes contain.
+    foreground_generation: u64 = 0,
 
     fn deinit(self: *ObservationCacheRecord, allocator: std.mem.Allocator) void {
         self.cache.deinit() catch @panic("runtime observation cache retained a prepared value");
@@ -1896,10 +1900,15 @@ pub const RuntimeManager = struct {
         var foreground_changed = false;
         if (may_sample_source and record.cache.view() != null)
             foreground_changed = try self.refreshForegroundCache(handle, now_ns);
+        const foreground_generation = if (self.foreground_cache.get(handle)) |foreground|
+            foreground.generation
+        else
+            return error.RuntimeNotFound;
         const source_changed = may_sample_source and record.cache.view() != null and
             (surface.core.observerGeneration() != record.observer_generation or
                 surface.core.title_generation.load(.monotonic) != record.title_generation or
-                foreground_changed);
+                foreground_changed or
+                foreground_generation != record.foreground_generation);
         const refresh = switch (request) {
             .fresh => true,
             .current => record.cache.view() == null or
@@ -1932,6 +1941,7 @@ pub const RuntimeManager = struct {
             record.refreshed_at_ns = now_ns;
             record.observer_generation = observation.observer_generation;
             record.title_generation = observation.title_generation;
+            record.foreground_generation = foreground_generation;
             switch (request) {
                 .cadence_epoch => |epoch| {
                     if (record.cadence_epoch == null or epoch > record.cadence_epoch.?)

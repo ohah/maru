@@ -17399,7 +17399,10 @@ test "P3-e4d-1 actual metadata events stay isolated and reattach starts current"
     try testing.expect(attempts < 150);
 
     // Let the foreground sampler settle while both children are blocked in the shell builtin read.
-    for (0..10) |_| {
+    // The product deadline is 500ms. The old 10 * 20ms wait captured the attach-time foreground
+    // revision as the baseline, so the first legitimate sampler publication during A's update made
+    // B look contaminated. Cross at least one full deadline before freezing pointer/revision identity.
+    for (0..35) |_| {
         _ = try runtime_a.pumpDelta();
         _ = try runtime_b.pumpDelta();
         _ = usleep(20 * 1000);

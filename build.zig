@@ -3869,6 +3869,24 @@ pub fn build(b: *std.Build) void {
     );
     boundary_step.dependOn(&run_session_host_metadata_consumers_boundary_tests.step);
     if (target.result.os.tag == .macos) {
+        const metadata_foreground_claude = b.addExecutable(.{
+            .name = "claude",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/fixtures/session_host_metadata_foreground_fixture.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        const metadata_foreground_codex = b.addExecutable(.{
+            .name = "codex",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/fixtures/session_host_metadata_foreground_fixture.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
         for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |metadata_consumers_optimize| {
             const session_host_metadata_consumers_product_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
@@ -3880,10 +3898,23 @@ pub fn build(b: *std.Build) void {
                 }),
                 .filters = &.{"P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers"},
             });
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("AppKit", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("Metal", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("MetalKit", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("QuartzCore", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("CoreText", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("CoreGraphics", .{});
+            session_host_metadata_consumers_product_tests.root_module.addCSourceFile(.{
+                .file = b.path("src/platform/macos/coretext_smoke.m"),
+                .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+            });
             const run_session_host_metadata_consumers_product_tests = b.addRunArtifact(
                 session_host_metadata_consumers_product_tests,
             );
-            run_session_host_metadata_consumers_product_tests.addArg("--maru-expect-tests=1");
+            // app_session root/import sentinels 3개와 P3-e4d-2a 제품 테스트 하나.
+            run_session_host_metadata_consumers_product_tests.addArg("--maru-expect-tests=4");
+            run_session_host_metadata_consumers_product_tests.addArtifactArg(metadata_foreground_claude);
+            run_session_host_metadata_consumers_product_tests.addArtifactArg(metadata_foreground_codex);
             run_session_host_metadata_consumers_product_tests.setCwd(b.path("."));
             session_host_metadata_consumers_step.dependOn(
                 &run_session_host_metadata_consumers_product_tests.step,

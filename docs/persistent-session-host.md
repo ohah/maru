@@ -29,8 +29,8 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 않는다). 메우려면 host가 관측 payload에 측정한 cwd를 더해야 하고 그건 wire schema 변경이라
 > [session-host-upgrade.md](session-host-upgrade.md)의 호환 규약을 건드린다 — **별도 슬라이스이며 아직 계획에
 > 없다.** **P3-e4a~c는 구현됐고 P3-e4d parity gate는 부분 완료**다. 실제 host PTY OSC
-> 7/2/5379 왕복·revision/coalescing·소유권, 다중 runtime 격리와 detach 중 변경→재접속 테스트는 존재하지만
-> controlled Claude/Codex foreground, 실제 Git·agent·SSH upload 소비자와 legacy binary E2E가 남아 있어 runtime metadata parity 전체를
+> 7/2/5379 왕복·revision/coalescing·소유권, 다중 runtime 격리, detach 중 변경→재접속과 controlled
+> Claude/Codex foreground→실제 Git·agent·SSH upload 소비자 테스트는 존재하지만 capability 없는 실제 legacy binary E2E가 남아 있어 runtime metadata parity 전체를
 > 완료로 선언하지 않는다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
 > IME marked text 표시는 별도 client-local 계약으로 구현됐다. 각 GUI `Surface`가 host snapshot 위에 같은
 > `PreeditOverlay`를 합성하고, MRSH/runtime/workspace에는 저장하지 않는다. 그래서 다중 클라이언트가 같은

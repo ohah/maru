@@ -126,7 +126,10 @@ pub fn build(b: *std.Build) void {
         // 파일이 있다). Linux에는 없어서 CI가 빨개졌다 — 즉 macOS 초록이 결함을 가리고 있었다.
         syntax_mod.addIncludePath(ts_dep.path("include"));
         syntax_mod.addIncludePath(ts_dep.path("src"));
-        syntax_mod.addIncludePath(ts_dep.path("src/wasm"));
+        // 상류는 `src/wasm`도 준다. **우리는 안 준다** — 그 경로의 헤더는 `TREE_SITTER_FEATURE_WASM`을
+        // 정의했을 때만 들어가는데 우리는 그 매크로를 어디서도 켜지 않는다(적대적 검증: 그 경로를
+        // 뗀 뮤턴트가 native·Linux 양쪽에서 살아남았다 — 아무것도 안 하는 설정이었다). 켜는 날
+        // 그 배선과 함께 돌아온다.
         syntax_mod.addCSourceFile(.{
             .file = ts_dep.path("src/lib.c"),
             .flags = &.{
@@ -135,6 +138,10 @@ pub fn build(b: *std.Build) void {
                 // POSIX·BSD 확장을 가리므로 `fdopen`·`le16toh`·`be16toh`가 선언되지 않는다
                 // (CI 실측: `error: call to undeclared function 'le16toh'`). macOS 헤더는 그것을
                 // 늘 노출해서 여기서는 안 터진다 — 이것도 macOS 초록이 가린 자리다.
+                // 넷은 **서로 겹친다** — 적대적 검증에서 `_DEFAULT_SOURCE`만, `_POSIX_C_SOURCE`만
+                // 뗀 뮤턴트가 각각 살아남았다(남은 것이 같은 것을 켜 준다). 그래도 상류 집합을
+                // 그대로 두는 이유는 어느 하나가 켜 주는 범위가 libc·버전마다 달라서다 —
+                // 넷을 다 뗀 뮤턴트는 Linux에서 즉시 죽는다.
                 "-D_POSIX_C_SOURCE=200112L",
                 "-D_DEFAULT_SOURCE",
                 "-D_BSD_SOURCE",
@@ -146,7 +153,10 @@ pub fn build(b: *std.Build) void {
         });
     }
     if (b.lazyDependency("tree_sitter_zig", .{})) |ts_zig_dep| {
-        // grammar는 자기 `src`를 include로 요구한다(`tree_sitter/parser.h`가 거기 있다).
+        // **지금 grammar에는 이 경로가 없어도 된다** — `parser.c`가 `#include "tree_sitter/parser.h"`로
+        // 인용 형식이라 자기 디렉터리 기준으로 풀린다(적대적 검증: 뗀 뮤턴트가 양쪽에서 살아남았다).
+        // 그래도 두는 것은 생성된 파서가 꺾쇠 형식(`<tree_sitter/parser.h>`)을 쓰는 판도 있어서다 —
+        // 번들 언어를 늘릴 때 그쪽이 오면 이 줄이 없을 때만 깨진다.
         syntax_mod.addIncludePath(ts_zig_dep.path("src"));
         syntax_mod.addCSourceFile(.{
             .file = ts_zig_dep.path("src/parser.c"),

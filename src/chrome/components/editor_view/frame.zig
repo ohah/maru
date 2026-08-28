@@ -96,6 +96,15 @@ pub const Props = struct {
     ///
     /// 큰 문서에서 이 계수가 비싸지면 `total_visual_rows`로 미리 센 값을 넘겨 건너뛴다.
     lines: []const []const u8,
+    /// **줄별 구문 강조 색 구간**(§5.3 1층). `lines`와 **같은 축**으로 색인한다 — `i`번째 원소가
+    /// `lines[i]`의 색이다.
+    ///
+    /// **비어 있어도 되고, `lines`보다 짧아도 된다.** 없는 줄은 무색으로 그린다(§5) — 파싱이
+    /// 아직 안 끝났거나 grammar가 없는 문서가 그렇고, 그때 화면은 색만 없지 멀쩡하다. 배열
+    /// 길이를 맞추라고 요구하면 호출자가 빈 배열을 만들어 채우는 일이 생긴다.
+    ///
+    /// 열 기준이며 오름차순·비겹침이라는 계약은 `content.Row.colors`가 소유한다.
+    line_colors: []const []const content.ColorSpan = &.{},
     /// 화면 맨 위에 올 논리 줄(0-based). 여기서부터 그리고, 줄 번호도 여기서 시작한다.
     first_line: usize,
     /// 첫 줄의 몇 번째 **조각**부터 그리는가. 랩이 켜졌을 때 화면이 줄 중간에서 시작하는 상태다
@@ -385,7 +394,12 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 쪽만 알기 때문이다(§4 세로 축) — 둘이 각자 세면 랩된 줄에서 번호가 본문과 어긋난다.
     var n: usize = 0;
     while (n < scratch.content_rows.len and props.first_line + n < props.lines.len) : (n += 1) {
-        scratch.content_rows[n] = .{ .bytes = props.lines[props.first_line + n] };
+        const li = props.first_line + n;
+        scratch.content_rows[n] = .{
+            .bytes = props.lines[li],
+            // **짧은 배열을 허용한다** — 없는 줄은 무색이다(위 `line_colors` 계약).
+            .colors = if (li < props.line_colors.len) props.line_colors[li] else &.{},
+        };
     }
     const visual_budget = @min(props.visible_rows, scratch.visual_rows.len);
 

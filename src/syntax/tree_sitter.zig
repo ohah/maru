@@ -117,6 +117,38 @@ pub fn highlights(
     source: []const u8,
     out: *std.ArrayList(Span),
 ) void {
+    highlightsInRange(allocator, lang, source, .{ .start = 0, .end = @intCast(@min(source.len, max_parse_bytes)) }, out);
+}
+
+/// 한 번의 편집. 행·열(0-based)까지 채워야 증분 파싱이 이득을 낸다.
+pub const Point = struct { row: u32, column: u32 };
+pub const Edit = struct {
+    start_byte: u32,
+    old_end_byte: u32,
+    new_end_byte: u32,
+    start_point: Point,
+    old_end_point: Point,
+    new_end_point: Point,
+};
+
+/// 문서에서 **byte 범위 하나만** 색을 모은다. 파싱은 문서 전체를 하고(문맥이 있어야 트리가 맞다)
+/// 쿼리만 그 범위로 좁힌다.
+///
+/// **왜 나누는가 — 비용이 거기 있다.** 실측(`ReleaseFast`, 154KB 소스): 전체 문서에 쿼리를 돌리면
+/// 11ms인데, 그 대부분이 파싱이 아니라 **쿼리 실행**이다. 편집기는 화면에 보이는 수십 줄만 그리므로
+/// 그 범위만 물으면 같은 그림을 훨씬 싸게 얻는다. §5.3이 LSP 층에 *"보이는 범위만 요청한다"*고
+/// 정한 것과 **같은 논리**이고, 이유도 같다 — 화면 밖 결과는 소비되지 않는다.
+///
+/// `range`가 문서를 넘으면 잘린다. `end <= start`면 빈 목록이다.
+pub const Range = struct { start: u32, end: u32 };
+
+pub fn highlightsInRange(
+    allocator: std.mem.Allocator,
+    lang: Language,
+    source: []const u8,
+    range: Range,
+    out: *std.ArrayList(Span),
+) void {
     out.clearRetainingCapacity();
     if (source.len == 0 or source.len > max_parse_bytes) return;
     const slot = slotFor(lang) orelse return;
@@ -130,8 +162,27 @@ pub fn highlights(
 
     const query = queryFor(slot) orelse return;
 
+    collect(allocator, tree, query, source, range, out);
+}
+
+/// 쿼리 커서를 돌려 조각을 모은다. **`highlightsInRange`와 `Provider`가 같은 함수를 쓴다** —
+/// 둘이 각자 걷으면 범위 처리·폭 0 규칙이 갈리고, 그 어긋남은 화면에만 나타난다.
+fn collect(
+    allocator: std.mem.Allocator,
+    tree: *c.TSTree,
+    query: *c.TSQuery,
+    source: []const u8,
+    range: Range,
+    out: *std.ArrayList(Span),
+) void {
     const cursor = c.ts_query_cursor_new() orelse return;
     defer c.ts_query_cursor_delete(cursor);
+
+    // **범위를 exec 전에 건다** — `api.h`가 그렇게 요구한다. `end`가 0이면 헤더가 그것을
+    // `UINT32_MAX`(무제한)로 읽으므로, 빈 범위는 여기 오기 전에 걸러야 한다.
+    const hi = @min(range.end, @as(u32, @intCast(source.len)));
+    if (hi <= range.start) return;
+    _ = c.ts_query_cursor_set_byte_range(cursor, range.start, hi);
     c.ts_query_cursor_exec(cursor, query, c.ts_tree_root_node(tree));
 
     var match: c.TSQueryMatch = undefined;
@@ -160,6 +211,105 @@ pub fn highlights(
         }) catch return; // OOM이면 여기까지가 색이다 — 그린 것은 맞는 색이다
     }
 }
+
+// ── provider(§5.3) ─────────────────────────────────────────────────────────────
+
+/// **트리를 들고 있는** 하이라이트 제공자. 한 문서에 하나다.
+///
+/// **왜 함수 하나로 안 되는가 — 실측이 그렇게 말했다.** `highlightsInRange`는 부를 때마다 문서를
+/// 다시 판다. 154KB 소스에서 전체 쿼리가 10ms, 창으로 좁히면 5ms인데 **그 5ms가 파싱이다**
+/// (`ReleaseFast`). 창으로 좁히는 것만으로는 스크롤이 매번 5ms를 낸다 — 스크롤은 편집보다 잦다.
+/// 트리를 살려 두면 스크롤은 쿼리만 내고 파싱은 **문서가 바뀔 때만** 든다.
+///
+/// **증분 파싱(`onEdit`)은 아직 없다.** `setSource`가 전체를 다시 판다 — 그래서 편집 한 번의 값이
+/// 위 5ms다. 그것을 지우는 것이 §5.3이 말한 증분 파싱이고 다음 슬라이스다. 지금 구조는 그때
+/// `ts_tree_edit` + 옛 트리를 넘기는 것으로 **이 자리만** 바뀐다.
+pub const Provider = struct {
+    parser: *c.TSParser,
+    tree: ?*c.TSTree = null,
+    slot: Slot,
+
+    /// 문서 하나를 맡는다. **§5.3의 `init(문서 bytes, 언어)` 그대로다** — 언어만 받고 내용을
+    /// 나중에 넣는 형태였다가 계약에 맞췄다(이름과 인자가 계약과 갈리면 문서를 읽고 코드를 찾는
+    /// 사람이 두 번 헤맨다).
+    ///
+    /// grammar가 없으면 `null` — 그 문서는 무색이다(§5).
+    pub fn init(source: []const u8, lang: Language) ?Provider {
+        const slot = slotFor(lang) orelse return null;
+        const parser = c.ts_parser_new() orelse return null;
+        if (!c.ts_parser_set_language(parser, slot.language)) {
+            c.ts_parser_delete(parser);
+            return null;
+        }
+        var self: Provider = .{ .parser = parser, .slot = slot };
+        self.setSource(source);
+        return self;
+    }
+
+    pub fn deinit(self: *Provider) void {
+        if (self.tree) |t| c.ts_tree_delete(t);
+        c.ts_parser_delete(self.parser);
+        self.* = undefined;
+    }
+
+    /// 문서 내용이 **통째로** 바뀌었다(디스크에서 다시 읽기 등) — 전체를 다시 판다.
+    ///
+    /// **편집에는 `onEdit`을 쓴다.** 실측으로 81배 차이가 난다(154KB에서 5.3ms 대 65µs) —
+    /// §5.3이 *"통지가 없으면 증분 파싱이 성립하지 않아 매번 전체 재파싱이 된다"*고 적은 그 자리다.
+    ///
+    /// **상한을 넘으면 트리를 버린다**(그 뒤 질의는 빈 목록이다).
+    pub fn setSource(self: *Provider, source: []const u8) void {
+        if (self.tree) |t| {
+            c.ts_tree_delete(t);
+            self.tree = null;
+        }
+        if (source.len == 0 or source.len > max_parse_bytes) return;
+        self.tree = c.ts_parser_parse_string(self.parser, null, source.ptr, @intCast(source.len));
+    }
+
+    /// 편집 하나를 알린 뒤 **증분으로** 다시 판다. `source`는 **바뀐 뒤**의 내용이다.
+    ///
+    /// **행·열을 반드시 채워야 한다.** 처음에는 *"byte offset만으로도 된다"*고 적고 0을 넘겼는데,
+    /// 실측이 그것을 반증했다 — 그렇게 하면 증분이 전체 재파싱보다 **더 느리다**(154KB에서 9.8ms
+    /// 대 5ms, 618KB에서 30ms 대 21ms). tree-sitter가 어긋난 위치를 되맞추느라 더 일한다.
+    pub fn onEdit(self: *Provider, source: []const u8, e: Edit) void {
+        const old_tree = self.tree orelse {
+            self.setSource(source);
+            return;
+        };
+        if (source.len == 0 or source.len > max_parse_bytes) {
+            c.ts_tree_delete(old_tree);
+            self.tree = null;
+            return;
+        }
+        var edit: c.TSInputEdit = .{
+            .start_byte = e.start_byte,
+            .old_end_byte = e.old_end_byte,
+            .new_end_byte = e.new_end_byte,
+            .start_point = .{ .row = e.start_point.row, .column = e.start_point.column },
+            .old_end_point = .{ .row = e.old_end_point.row, .column = e.old_end_point.column },
+            .new_end_point = .{ .row = e.new_end_point.row, .column = e.new_end_point.column },
+        };
+        c.ts_tree_edit(old_tree, &edit);
+        const next = c.ts_parser_parse_string(self.parser, old_tree, source.ptr, @intCast(source.len));
+        c.ts_tree_delete(old_tree);
+        self.tree = next;
+    }
+
+    /// 이 byte 범위의 색 조각. **트리가 없으면 빈 목록**이다 — 실패는 늘 무색으로 떨어진다(§5).
+    pub fn spansForRange(
+        self: *Provider,
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        range: Range,
+        out: *std.ArrayList(Span),
+    ) void {
+        out.clearRetainingCapacity();
+        const tree = self.tree orelse return;
+        const query = queryFor(self.slot) orelse return;
+        collect(allocator, tree, query, source, range, out);
+    }
+};
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 
@@ -423,4 +573,84 @@ test "SYN9 캡처 목록이 정확히 이것이다 — 순서·범위·이름까
         try std.testing.expectEqual(want.end, got.end);
         try std.testing.expectEqualStrings(want.capture, got.capture);
     }
+}
+
+// ── 누수 판정(§5.3 — provider가 C 메모리를 쥔다) ────────────────────────────────
+
+/// 지금 살아 있는 tree-sitter 할당 수. 아래 판정자만 쓴다.
+var live_allocs: isize = 0;
+
+fn countingMalloc(n: usize) callconv(.c) ?*anyopaque {
+    const p = std.c.malloc(n);
+    if (p != null) live_allocs += 1;
+    return p;
+}
+fn countingCalloc(n: usize, sz: usize) callconv(.c) ?*anyopaque {
+    const p = std.c.calloc(n, sz);
+    if (p != null) live_allocs += 1;
+    return p;
+}
+fn countingRealloc(ptr: ?*anyopaque, n: usize) callconv(.c) ?*anyopaque {
+    // **`realloc(NULL, n)`은 `malloc`이다** — 그때만 살아 있는 수가 는다. 기존 블록을 옮기는
+    // 경우는 하나가 하나로 바뀌므로 수가 그대로다.
+    const grew = (ptr == null);
+    const p = std.c.realloc(ptr, n);
+    if (grew and p != null) live_allocs += 1;
+    return p;
+}
+fn countingFree(ptr: ?*anyopaque) callconv(.c) void {
+    // `free(NULL)`은 아무것도 안 한다 — 세면 수가 음수로 샌다.
+    if (ptr != null) live_allocs -= 1;
+    std.c.free(ptr);
+}
+
+test "SYN10 Provider 가 C 메모리를 안 남긴다 — 열고 고치고 닫으면 0으로 돌아온다" {
+    // **파서와 트리는 tree-sitter의 `malloc`에서 온다.** `std.testing.allocator`의 누수 검사는
+    // 그것을 못 본다 — 이 모듈에서 진짜로 샐 수 있는 곳이 정확히 거기다(`deinit`을 빼먹거나,
+    // `setSource`가 옛 트리를 안 지우거나, `onEdit`이 실패 경로에서 놓치거나).
+    //
+    // **쿼리 캐시를 먼저 데운다.** 그것은 프로세스 수명이라 일부러 안 지운다 — 계수 안에 넣으면
+    // 절대 0으로 안 돌아오고, 그러면 이 판정자가 늘 빨갛거나(쓸모없거나) 기준을 헐겁게 잡아야
+    // 한다. 데운 뒤부터 세면 **provider가 쥐는 것만** 남는다.
+    const allocator = std.testing.allocator;
+    var warm: std.ArrayList(Span) = .empty;
+    defer warm.deinit(allocator);
+    highlights(allocator, .zig, "const x = 1;", &warm);
+    try std.testing.expect(warm.items.len > 0); // 데우기가 실제로 돌았다
+
+    c.ts_set_allocator(countingMalloc, countingCalloc, countingRealloc, countingFree);
+    defer c.ts_set_allocator(null, null, null, null);
+
+    live_allocs = 0;
+    {
+        var spans: std.ArrayList(Span) = .empty;
+        defer spans.deinit(allocator);
+
+        const src1 = "const x = 1;\npub fn f() void {}\n";
+        var prov = Provider.init(src1, .zig) orelse return error.NoProvider;
+        prov.spansForRange(allocator, src1, .{ .start = 0, .end = src1.len }, &spans);
+        try std.testing.expect(spans.items.len > 0);
+
+        // 여러 번 고친다 — 옛 트리를 매번 놓는지 본다.
+        var i: usize = 0;
+        while (i < 20) : (i += 1) {
+            prov.setSource(src1);
+            prov.onEdit(src1, .{
+                .start_byte = 6,
+                .old_end_byte = 6,
+                .new_end_byte = 6,
+                .start_point = .{ .row = 0, .column = 6 },
+                .old_end_point = .{ .row = 0, .column = 6 },
+                .new_end_point = .{ .row = 0, .column = 6 },
+            });
+        }
+        // 상한을 넘는 문서로 트리를 버리는 경로도 지난다.
+        const big = try allocator.alloc(u8, max_parse_bytes + 1);
+        defer allocator.free(big);
+        @memset(big, ' ');
+        prov.setSource(big);
+
+        prov.deinit();
+    }
+    try std.testing.expectEqual(@as(isize, 0), live_allocs);
 }

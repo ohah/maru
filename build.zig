@@ -1356,7 +1356,6 @@ pub fn build(b: *std.Build) void {
             "agent hooks install into codex and record trust without touching existing entries",
             "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린다",
             "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다",
-            "P4: 배치를 바꾸는 사건이 checkpoint dirty 를 세운다",
             "turning the agent hooks gate off removes what we installed and nothing else",
             "hook mode fills state and conversation from the event log, and only then",
             "hook mode runs exactly one source and takes over notifications",
@@ -1376,7 +1375,7 @@ pub fn build(b: *std.Build) void {
     run_provider_no_mutation_tests.setCwd(b.path("."));
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
     // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
-    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 24 = 위 필터 19개 + 이름 없는 test 블록 5개.
+    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 23 = 위 필터 18개 + 이름 없는 test 블록 5개.
     run_provider_no_mutation_tests.addArg("--maru-expect-tests=23");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이

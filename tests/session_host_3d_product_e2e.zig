@@ -251,13 +251,16 @@ test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
     const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-p5c3d-stream-{x}", .{nonce});
     try mkdirExact(xdg);
     defer removeTree(xdg);
+    // 위 테스트와 같은 이유로 base 를 **이 프로세스의 격리 root** 로 통일한다. 부모가 socket 을 여는
+    // 뿌리와 자식에게 넘기는 `MARU_SESSION_HOST_ROOT` 가 갈리면 자식이 그 socket 을 찾지 못한다 —
+    // 이 테스트에서는 delta 가 한 건도 오지 않아 `expected 1, found 0` 으로 떨어졌다.
     var base_buf: [288]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/maru", .{xdg});
-    try mkdirExact(base);
+    const base = try session_host.short_endpoint.currentUserRootPathIn(&base_buf);
+    try session_host.short_endpoint.prepareCurrentUserNamespace();
     var session_buf: [320]u8 = undefined;
     const session_dir = try session_host.discovery.sessionHostDirPath(&session_buf, base);
-    try mkdirExact(session_dir);
-    try session_host.short_endpoint.prepareCurrentUserNamespace();
+    // 격리 root 는 이 프로세스 공용이라 앞 테스트가 이미 만들어 뒀다. 존재를 실패로 보지 않는다.
+    if (c.mkdir(session_dir.ptr, 0o700) != 0 and std.posix.errno(-1) != .EXIST) return error.MkdirFailed;
 
     const host_id: u128 = (@as(u128, nonce) << 64) | 0x50356333647374726d;
     var socket_buf: [128]u8 = undefined;

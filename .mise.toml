@@ -153,6 +153,10 @@ run = "zig build macos-app"
 description = "Run the macOS Swift app host dev shell smoke"
 run = "zig build macos-app-smoke"
 
+[tasks.macos-session-host-r2a-checkpoint-smoke]
+description = "Run actual AppKit duplicate runtime checkpoint rejection and preservation smoke"
+run = "zig build macos-session-host-r2a-checkpoint-smoke"
+
 [tasks.macos-session-host-recovery-smoke]
 description = "Run the actual AppKit recovered-session discovery/click/render smoke"
 run = "zig build macos-session-host-recovery-smoke"

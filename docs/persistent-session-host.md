@@ -7098,6 +7098,14 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
   local spawn도 실패하면 tombstone을 그대로 유지한다.
 - **R2a 구현 슬라이스:** manifest 전체의 writable `runtime-handle` 중복을 attach/spawn 전에 검증한다. legacy bare
   ID가 같은 runtime ID를 full/bare owner와 공유하는 경우도 host namespace 미확정 중복으로 fail-close한다.
+  실제 제품 파일 경계는 `zig build macos-session-host-r2a-checkpoint-smoke`가 검증한다. 격리 HOME의 실제
+  `Library/Application Support/maru/workspace.v1`에 cross-Window exact full handle 중복을 설치하고 built `.app`
+  executable을 시작한다. 앱은 일반 launch와 같은 null-session preflight에서 `window_count=-1`을 얻고 복원
+  불완전 상태로 전이해야 하며, 중복 binding을 apply/attach하지 않는다. 정상 제품 모드에서 checkpoint coordinator를
+  arm한 뒤 한 debounce 구간을 지나도 원본은 fixture와 byte-for-byte 같아야 하며 `.bak`·고정 temp가 생기면 실패다.
+  이어 앱을 `SIGKILL`한 뒤에도 같은 불변을 다시 확인한다. 손상 checkpoint 뒤 만드는 기본 shell은
+  사용 가능한 fallback일 뿐 저장 binding의 attach/spawn 성공으로 세지 않는다. 이 gate는 ad-hoc built AppKit
+  process와 실제 파일 경계를 닫지만 provisioned Developer ID signed artifact의 Quit/relaunch 증거는 아니다.
 - **R2b core module 구현:** 위 §7 계약의 paginated ID-only `runtime.inventory`, authority generation,
   secure registry discovery, pinned descriptor ephemeral collector와 manifest relation/inventory-only orphan의
   side-effect-free reconcile까지 구현했다.

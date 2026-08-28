@@ -30,7 +30,7 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
         "workspaceCheckpointWriter.async",
         "maru_macos_workspace_checkpoint_capture_completed",
         "maru_macos_workspace_checkpoint_publish",
-        "DispatchQueue.main.async",
+        "RunLoop.main.perform(inModes: [.common])",
         "maru_macos_workspace_checkpoint_write_completed",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, swift, needle) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "workspaceCheckpointWriter.async"));
@@ -41,6 +41,9 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     try std.testing.expect(std.mem.indexOf(u8, swift, "!workspaceRestoreIncomplete") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE\"] == \"maru-test-only-v1\""));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_R1_TOMBSTONE_MARKER"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_C4_QUIT_CANCEL_SMOKE\"] == \"maru-test-only-v1\""));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_C4_QUIT_CANCEL_MARKER"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "RunLoop.main.perform(inModes: [.common])"));
 
     for ([_][]const u8{
         "maru_macos_workspace_checkpoint_quit_requested",
@@ -56,9 +59,13 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, swift, needle) != null);
 
     const writer_start = std.mem.indexOf(u8, swift, "workspaceCheckpointWriter.async") orelse return error.MissingWriter;
-    const writer_end = std.mem.indexOfPos(u8, swift, writer_start, "DispatchQueue.main.async") orelse return error.MissingMainCompletion;
+    const writer_end = std.mem.indexOfPos(u8, swift, writer_start, "\n    private func beginFinalWorkspaceCheckpoint") orelse
+        return error.MissingWriterEnd;
     const writer = swift[writer_start..writer_end];
     try std.testing.expect(std.mem.indexOf(u8, writer, "maru_macos_workspace_checkpoint_publish") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer, "RunLoop.main.perform(inModes: [.common])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer, "MainActor.assumeIsolated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer, "DispatchQueue.main.async {") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer, "captureWorkspaceSnapshot") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer, "serialize_workspace") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer, "windows") == null);

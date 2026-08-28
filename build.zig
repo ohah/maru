@@ -2193,6 +2193,71 @@ pub fn build(b: *std.Build) void {
         run_session_host_r1_tombstone.step.dependOn(&session_host_r1_tombstone_fixture.step);
         session_host_r1_tombstone_step.dependOn(&run_session_host_r1_tombstone.step);
 
+        const session_host_c4_quit_cancel_step = b.step(
+            "macos-session-host-c4-quit-cancel-smoke",
+            "Run actual AppKit final checkpoint success and failure Quit handshake smoke",
+        );
+        const session_host_c4_quit_cancel_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "for root in zig-out/maru-macos-app/session-host-c4-success-home zig-out/maru-macos-app/session-host-c4-home; do " ++
+                "parent=\"$root/Library/Application Support/maru\"; " ++
+                "if test -e \"$parent/workspace.v1\"; then chflags nouchg \"$parent/workspace.v1\" || true; fi; rm -rf \"$root\"; " ++
+                "mkdir -p \"$parent\"; cp tests/fixtures/session-host/ended-runtime-workspace.v1 \"$parent/workspace.v1\"; " ++
+                ": > \"$parent/workspace.v1.lock\"; chmod 0600 \"$parent/workspace.v1\" \"$parent/workspace.v1.lock\"; done; " ++
+                "chflags uchg \"zig-out/maru-macos-app/session-host-c4-home/Library/Application Support/maru/workspace.v1\"",
+        });
+        session_host_c4_quit_cancel_fixture.setCwd(b.path("."));
+        const run_session_host_c4_quit_cancel = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "success_root=\"$PWD/zig-out/maru-macos-app/session-host-c4-success-home\"; success_parent=\"$success_root/Library/Application Support/maru\"; " ++
+                "success_checkpoint=\"$success_parent/workspace.v1\"; success_log=\"$success_root/app.stderr\"; " ++
+                "success_inode=$(/usr/bin/stat -f '%i' \"$success_checkpoint\"); " ++
+                "HOME=\"$success_root\" CFFIXED_USER_HOME=\"$success_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$success_log\" & success_pid=$!; " ++
+                "trap 'kill -KILL \"$success_pid\" 2>/dev/null || true; wait \"$success_pid\" 2>/dev/null || true' EXIT; " ++
+                "attempt=0; until /usr/bin/grep -q 'workspace checkpoint: final-quit finished' \"$success_log\"; do " ++
+                "kill -0 \"$success_pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
+                "attempt=0; while kill -0 \"$success_pid\" 2>/dev/null; do attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
+                "wait \"$success_pid\"; trap - EXIT; " ++
+                "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit finished' \"$success_log\")\" -eq 1; " ++
+                "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit cancelled' \"$success_log\" || true)\" -eq 0; " ++
+                "test \"$(/usr/bin/stat -f '%i' \"$success_checkpoint\")\" != \"$success_inode\"; " ++
+                "/usr/bin/grep -Eq '^maru\\.workspace\\.v1$' \"$success_checkpoint\"; " ++
+                "test ! -e \"$success_checkpoint.bak\"; test ! -e \"$success_parent/.workspace.v1.tmp\"; " ++
+                "root=zig-out/maru-macos-app/session-host-c4-home; parent=\"$root/Library/Application Support/maru\"; " ++
+                "checkpoint=\"$parent/workspace.v1\"; lease=\"$parent/workspace.v1.lock\"; log=\"$root/app.stderr\"; " ++
+                "checkpoint_inode=$(/usr/bin/stat -f '%i' \"$checkpoint\"); lease_inode=$(/usr/bin/stat -f '%i' \"$lease\"); " ++
+                "./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$log\" & pid=$!; " ++
+                "trap 'kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; chflags nouchg \"$checkpoint\" 2>/dev/null || true' EXIT; " ++
+                "attempt=0; until /usr/bin/grep -q 'workspace checkpoint: final-quit cancelled' \"$log\"; do " ++
+                "kill -0 \"$pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
+                "sleep 0.2; kill -0 \"$pid\"; " ++
+                "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit cancelled' \"$log\")\" -eq 1; " ++
+                "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit finished' \"$log\" || true)\" -eq 0; " ++
+                "cmp -s tests/fixtures/session-host/ended-runtime-workspace.v1 \"$checkpoint\"; " ++
+                "test \"$(/usr/bin/stat -f '%i' \"$checkpoint\")\" = \"$checkpoint_inode\"; " ++
+                "test \"$(/usr/bin/stat -f '%i' \"$lease\")\" = \"$lease_inode\"; " ++
+                "test ! -e \"$checkpoint.bak\"; test ! -e \"$parent/.workspace.v1.tmp\"; " ++
+                "kill -KILL \"$pid\"; wait \"$pid\" 2>/dev/null || true; chflags nouchg \"$checkpoint\"; trap - EXIT",
+        });
+        run_session_host_c4_quit_cancel.setCwd(b.path("."));
+        run_session_host_c4_quit_cancel.setEnvironmentVariable(
+            "MARU_SESSION_HOST_C4_QUIT_CANCEL_SMOKE",
+            "maru-test-only-v1",
+        );
+        run_session_host_c4_quit_cancel.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-c4-home"),
+        );
+        run_session_host_c4_quit_cancel.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-c4-home"),
+        );
+        run_session_host_c4_quit_cancel.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_c4_quit_cancel.step.dependOn(&macos_app_bundle.step);
+        run_session_host_c4_quit_cancel.step.dependOn(&file_panel_web_build.step);
+        run_session_host_c4_quit_cancel.step.dependOn(&session_host_c4_quit_cancel_fixture.step);
+        session_host_c4_quit_cancel_step.dependOn(&run_session_host_c4_quit_cancel.step);
+
         const session_host_cr6c_appkit_step = b.step(
             "macos-session-host-recovery-smoke",
             "Run actual AppKit recovered-session discovery, click, render, and keep-alive smoke",

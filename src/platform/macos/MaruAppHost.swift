@@ -4065,6 +4065,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var isSessionHostR1TombstoneSmokeMode: Bool {
         ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE"] == "maru-test-only-v1"
     }
+    private var isSessionHostC4QuitCancelSmokeMode: Bool {
+        ProcessInfo.processInfo.environment["MARU_SESSION_HOST_C4_QUIT_CANCEL_SMOKE"] == "maru-test-only-v1"
+    }
     private var isSessionHostInputContinuitySmokeMode: Bool {
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE"] == "1"
@@ -4487,6 +4490,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // persistence behavior.
         let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0 || r1TombstoneSmoke
         armWorkspaceCheckpoint(initialDirty: checkpointInitialDirty)
+        if isSessionHostC4QuitCancelSmokeMode {
+            // The harness makes the existing checkpoint user-immutable. This seam only requests the
+            // normal AppKit termination transaction; it cannot select a failure or an output path.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.bypassQuitConfirm = true
+                NSApp.terminate(nil)
+            }
+        }
         if r2aCheckpointSmoke {
             guard let markerPath = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R2A_CHECKPOINT_MARKER"],
                   sessionHostR2aCheckpointPreflightCount == -1,
@@ -11189,23 +11201,31 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         }
                     }
                 }
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    var next = MaruWorkspaceCheckpointEffect()
-                    let committed = result == UInt32(MARU_WORKSPACE_CHECKPOINT_PUBLISH_COMMITTED)
-                    guard maru_macos_workspace_checkpoint_write_completed(
-                        generation,
-                        committed ? 1 : 0,
-                        DispatchTime.now().uptimeNanoseconds,
-                        &next
-                    ) == Self.statusOK else {
-                        self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_WRITE_FAILED))
-                        return
+                // `applicationShouldTerminate`가 `.terminateLater`를 반환하면 AppKit은
+                // `NSApplication.terminate` 안에서 중첩 run loop를 돈다. 그 loop는 timer/event는
+                // 처리하지만 main dispatch queue를 drain하지 않으므로 `DispatchQueue.main.async`로
+                // 완료를 돌려보내면 final checkpoint가 성공하든 실패하든 Quit이 영원히 pending에
+                // 남는다. `.common` run-loop source는 그 중첩 loop에서도 실행되어 AppKit reply와
+                // checkpoint state machine을 같은 main-thread owner에게 되돌린다.
+                RunLoop.main.perform(inModes: [.common]) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        var next = MaruWorkspaceCheckpointEffect()
+                        let committed = result == UInt32(MARU_WORKSPACE_CHECKPOINT_PUBLISH_COMMITTED)
+                        guard maru_macos_workspace_checkpoint_write_completed(
+                            generation,
+                            committed ? 1 : 0,
+                            DispatchTime.now().uptimeNanoseconds,
+                            &next
+                        ) == Self.statusOK else {
+                            self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_WRITE_FAILED))
+                            return
+                        }
+                        if committed {
+                            self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE))
+                        }
+                        self.handleWorkspaceCheckpointEffect(next, snapshot: nil)
                     }
-                    if committed {
-                        self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE))
-                    }
-                    self.handleWorkspaceCheckpointEffect(next, snapshot: nil)
                 }
             }
         default:

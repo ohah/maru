@@ -7202,6 +7202,16 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     기존 `.bak`은 current UID regular `0600`일 때만 보존하며 symlink/non-regular/wrong-mode는 Quit을 취소한다.
     명시적 `Quit and End All Sessions`는 runtime admin shutdown 완료 뒤에도 같은 final checkpoint를 시도하지만,
     실패 시 orphan runtime을 남기지 않도록 종료를 계속하는 유일한 예외다.
+    실제 AppKit 제품 gate는 먼저 쓰기 가능한 격리 Application Support에서 `NSApplication.terminate`를 호출해
+    `final-quit finished` exact once, 앱의 정상 종료, checkpoint inode 교체와 canonical header, 고정 temp/backup 부재를
+    검증한다. 이어 별도 격리 완전본에 user-immutable flag를 걸고 같은 종료 요청을 보낸다. final C2 publication이
+    실패한 뒤 앱 PID가 살아 있고, 기존 완전본 bytes와 lease inode가 불변이며, 고정 temp/backup이 없고, 로그가
+    `final-quit cancelled`를 exact once 남겨야 한다.
+    writer 완료는 일반 main-dispatch queue가 아니라 main run loop의 `.common` mode로 돌려보낸다.
+    `terminateLater` 뒤 `NSApplication.terminate`가 도는 중첩 AppKit loop는 timer/event는 처리하지만 main-dispatch
+    callback을 drain하지 않아, 그 큐를 쓰면 성공·실패 모두 reply 전에 영구 대기하기 때문이다.
+    test-only 제품 seam은 exact closed token으로 종료 요청만 예약하며 실패 경로나 marker 경로를 제품 코드에 주입하지 않는다.
+    이 gate는 ad-hoc signed AppKit 경계를 닫지만 Developer ID artifact와 실제 사용자 confirmation UI를 대신하지 않는다.
   - **E1 event wake:** 검증 매트릭스의 `CR6f output-wake`가 이 순서 항목의 구현 이름이다. PTY reader의 성공
     publication은 daemon-global nonblocking wake fd를 coalesce하고, 단일 poll owner가 runtime queue를 drain한 뒤
     기존 producer sweep을 즉시 예약한다. idle polling이나 client별 wake owner를 새로 만들지 않는다.

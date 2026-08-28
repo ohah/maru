@@ -161,6 +161,10 @@ run = "zig build macos-session-host-r2a-checkpoint-smoke"
 description = "Run actual AppKit durable tombstone relaunch and checkpoint smoke"
 run = "zig build macos-session-host-r1-tombstone-smoke"
 
+[tasks.macos-session-host-c4-quit-cancel-smoke]
+description = "Run actual AppKit final checkpoint success and failure Quit handshake smoke"
+run = "zig build macos-session-host-c4-quit-cancel-smoke"
+
 [tasks.macos-session-host-recovery-smoke]
 description = "Run the actual AppKit recovered-session discovery/click/render smoke"
 run = "zig build macos-session-host-recovery-smoke"

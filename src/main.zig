@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 880;
+const smoke_spin_cap: usize = 900;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -3092,6 +3092,9 @@ const AgentArchive = struct {
     /// 정렬 방향. **스캔 순서는 늘 최신 우선**이고(그 백엔드의 계약) 이 값은 **보여 줄 방향**만
     /// 정한다 — `oldest_first` 면 재투영이 뒤집힌 순서로 짓는다.
     sort: maru.chrome.components.session_dock.types.SortOrder = .newest_first,
+    /// 지금 걸러 보고 있는 것. **투영 입력만 좁힌다** — `view_items`·`cards` 는 그대로 두므로
+    /// record index 로 잡은 정체가 안 흔들린다(§2m.75 의 사이드바와 다른 점).
+    query: []const u8 = "",
 
     fn isCollapsed(self: *const AgentArchive, key: []const u8) bool {
         for (self.collapsed.items) |k| if (std.mem.eql(u8, k, key)) return true;
@@ -3121,7 +3124,32 @@ fn projectAgentItems(
             break :blk rev;
         },
     };
-    var projection = try maru.session.agent_session_archive_view.build(scratch, ordered, archive.collapsed.items);
+    // ── 검색어로 거른다 (W8.15) ────────────────────────────────────────────────────────────
+    //
+    // **중립 투영은 안 거른다**(`build` 가 질의를 안 받는다) — 무엇이 걸리는가는 호스트의 판단이라
+    // 여기서 입력을 좁힌다.
+    //
+    // **정체가 안 흔들린다.** 카드 identity 는 목록 위치가 아니라 **record index** 다(`build` 가
+    // `.card = record_index` 를 낸다) — 걸러도 클릭이 엉뚱한 카드를 짚지 않는다. 사이드바에는 그
+    // 성질이 없어 카드에 정체를 따로 달아야 했다(§2m.75).
+    const filtered: []const maru.session.agent_session_archive_view.Item = if (archive.query.len == 0) ordered else blk_q: {
+        const buf = try scratch.alloc(maru.session.agent_session_archive_view.Item, ordered.len);
+        var kept: usize = 0;
+        for (ordered) |vi| {
+            if (vi.record_index >= archive.cards.len) continue;
+            const c = archive.cards[vi.record_index];
+            // 제목·요약·폴더를 본다 — 사용자가 기억하는 것이 셋 중 하나다.
+            if (asciiContainsIgnoreCase(c.title, archive.query) or
+                asciiContainsIgnoreCase(c.summary, archive.query) or
+                asciiContainsIgnoreCase(vi.cwd, archive.query))
+            {
+                buf[kept] = vi;
+                kept += 1;
+            }
+        }
+        break :blk_q buf[0..kept];
+    };
+    var projection = try maru.session.agent_session_archive_view.build(scratch, filtered, archive.collapsed.items);
     defer projection.deinit(scratch);
     for (projection.entries.items) |entry| switch (entry) {
         .group => |gi| {
@@ -4470,6 +4498,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 검색어가 흔들리지 않는다.
     var search: maru.chrome.components.overlay_input.OverlayInput = .{};
     defer search.deinit(allocator);
+    // **에이전트 도크는 자기 검색을 따로 든다.** 사이드바와 한 상자를 쓰면 한쪽을 치는 동안 다른
+    // 쪽 목록이 같이 걸러진다 — 두 목록은 서로 다른 것을 찾는다.
+    var agent_search: maru.chrome.components.overlay_input.OverlayInput = .{};
+    defer agent_search.deinit(allocator);
+    var agent_search_focused = false;
+    var agent_search_chars: usize = 0;
+    var agent_search_focus_changes: usize = 0;
     // 키가 **누구 것인가**. 이것이 없으면 검색 줄을 눌러도 글자가 셸로 간다.
     var search_focused = false;
     var search_focus_changes: usize = 0;
@@ -4507,6 +4542,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var search_sessions_after: usize = 0;
     var search_files_after: usize = 0;
     var search_query_drawn: usize = 0;
+    var asearch_judgeable = false;
+    var asearch_focused = false;
+    var asearch_items_before: usize = 0;
+    var asearch_items_after: usize = 0;
+    var asearch_items_restored: usize = 0;
     var file_closes: usize = 0;
     var session_close_unimplemented: usize = 0;
     var editor_frames: usize = 0;
@@ -5761,6 +5801,43 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, dx1, dy1);
             window.postSyntheticMouse(.left_up, dx1, dy1);
         }
+        // ── 에이전트 도크 검색 (W8.15 나머지) ──────────────────────────────────────────
+        //
+        // **탐색기가 아니라 에이전트 뷰여야 한다** — 그 검색 줄은 그 뷰에만 있다.
+        if (smoke and spins == 836 and geom.view_bar.w != 0) {
+            const bar_a = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, cell_w, 2)) |ra| {
+                const ax2: i32 = @intCast(ra.x + ra.w / 2);
+                const ay2: i32 = @intCast(ra.y + ra.h / 2);
+                window.postSyntheticMouse(.left_down, ax2, ay2);
+                window.postSyntheticMouse(.left_up, ax2, ay2);
+            }
+        }
+        // **검색 줄을 누른다.** 자리는 published tree 가 준다(손으로 고르면 배치가 바뀌어도 안 움직인다).
+        if (smoke and spins == 842) if (agent_built) |*b| {
+            const sid = maru.chrome.components.session_dock.build.NodeIds.search;
+            for (b.frame.tree.entries) |e| {
+                if (e.id != sid) continue;
+                asearch_judgeable = true;
+                asearch_items_before = agent_items.items.len;
+                const qx: i32 = @intCast(geom.tree_content.x + @as(u32, @intFromFloat(e.rect.x + e.rect.width / 2)));
+                const qy: i32 = @intCast(geom.tree_content.y + @as(u32, @intFromFloat(e.rect.y + e.rect.height / 2)));
+                window.postSyntheticMouse(.left_down, qx, qy);
+                window.postSyntheticMouse(.left_up, qx, qy);
+                break;
+            }
+        };
+        if (smoke and spins == 848) if (asearch_judgeable) {
+            asearch_focused = agent_search_focused;
+            // 이 기계 이력에 없을 법한 글자 — 걸리는 것이 없어야 한다.
+            for ("zzqx") |ch| window.postSyntheticChar(ch);
+        };
+        if (smoke and spins == 854) if (asearch_judgeable) {
+            asearch_items_after = agent_items.items.len;
+            var k2: usize = 0;
+            while (k2 < 4) : (k2 += 1) window.postSyntheticVirtualKey(win32_keys.vk_back);
+        };
+        if (smoke and spins == 860 and asearch_judgeable) asearch_items_restored = agent_items.items.len;
         // ── 검색에 글자를 친다 (W8.15) ─────────────────────────────────────────────────
         //
         // **검색 줄을 누르고 글자를 친다.** 그 줄은 §2m.46 이후 그려만 있고 죽어 있었다.
@@ -6392,6 +6469,42 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     }
                     continue;
                 }
+                // 에이전트 도크 검색도 같은 축이다 — 그 뷰가 보일 때만 받는다.
+                if (agent_search_focused and dock_view == .agent_sessions) {
+                    var changed_a = false;
+                    switch (key_ev.key) {
+                        .escape => {
+                            agent_search_focused = false;
+                            agent_search_focus_changes += 1;
+                            changed_a = true;
+                        },
+                        .backspace => {
+                            agent_search.backspace();
+                            changed_a = true;
+                        },
+                        .char => |cp| {
+                            if (cp >= 0x20) {
+                                agent_search.appendChar(allocator, cp) catch {};
+                                agent_search_chars += 1;
+                                changed_a = true;
+                            }
+                        },
+                        else => {},
+                    }
+                    if (changed_a) {
+                        agent_archive.query = agent_search.query.items;
+                        var qa = std.heap.ArenaAllocator.init(allocator);
+                        defer qa.deinit();
+                        projectAgentItems(qa.allocator(), agent_arena.allocator(), &agent_archive, &agent_items) catch {};
+                        agent_opts.items = agent_items.items;
+                        agent_opts.search = agent_search.query.items;
+                        agent_opts.search_focused = agent_search_focused;
+                        agent_state.invalidateTree();
+                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+                        agent_redraws += 1;
+                    }
+                    continue;
+                }
                 if (active_view == .file) {
                     keys_while_file += 1;
                     continue;
@@ -6701,6 +6814,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 if (!search_focused) {
                                     search_focused = true;
                                     search_focus_changes += 1;
+                                    // **주인은 하나다**(위 짝).
+                                    if (agent_search_focused) {
+                                        agent_search_focused = false;
+                                        agent_search_focus_changes += 1;
+                                    }
                                     sidebar_redraws += 1;
                                     rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                 }
@@ -6880,6 +6998,33 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 // **비동기가 되어서야 배선할 수 있는 인텐트다.** 훑기를 그 자리에서
                                 // 기다리던 때는 이것을 누르면 창이 몇 초씩 멈췄을 것이다 — 그래서
                                 // "모델이 없다" 가 아니라 **막고 있었기 때문에** 빠져 있었다.
+                                // ── 검색 줄을 누르면 포커스가 간다 (W8.15) ─────────────────
+                                //
+                                // 인텐트도 렌더도 **중립이 이미 갖고 있었다**(`focus_search`,
+                                // `props.search`·`search_focused`·`search_cursor_visible`) — 없던 것은
+                                // 키의 주인뿐이다.
+                                if (intent == .focus_search) {
+                                    if (!agent_search_focused) {
+                                        agent_search_focused = true;
+                                        agent_search_focus_changes += 1;
+                                        // **포커스 주인은 하나다.** 둘이 동시에 켜지면 앞서 보는
+                                        // 쪽이 키를 삼켜, 사용자는 "여기를 눌렀는데 글자가 안
+                                        // 들어간다" 를 겪는다(실측: `focused=true chars=0`).
+                                        // **눌렀으면 화면이 답해야 한다.** 포커스만 바꾸고 안
+                                        // 그리면 캐럿이 안 서서 "눌렸는지" 를 알 수가 없다 —
+                                        // 실제 마우스로 캡처하다 드러났다(합성 판정은 값만 봤다).
+                                        agent_opts.search = agent_search.query.items;
+                                        agent_opts.search_focused = true;
+                                        agent_state.invalidateTree();
+                                        rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+                                        agent_redraws += 1;
+                                        if (search_focused) {
+                                            search_focused = false;
+                                            search_focus_changes += 1;
+                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                        }
+                                    }
+                                }
                                 if (intent == .refresh) {
                                     if (agent_backend) |*ab| if (home_dir) |home| {
                                         const r = submitAgentScan(agent_counting.allocator(), ab, home);
@@ -7860,6 +8005,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (asearch_judgeable) {
+        // **에이전트 목록은 그룹 헤더 + 카드다** — 전부 걸러지면 0 이어야 하고, 지우면 되돌아와야
+        // 한다. 사이드바와 달리 카드 정체가 record index 라 색인이 안 흔들린다.
+        try stdout.print("agent_search: focused={} chars={d} items {d}->{d}->{d} agent_search_ok={}\n", .{
+            asearch_focused,
+            agent_search_chars,
+            asearch_items_before,
+            asearch_items_after,
+            asearch_items_restored,
+            asearch_focused and
+                agent_search_chars > 0 and
+                asearch_items_before > 0 and
+                asearch_items_after == 0 and
+                asearch_items_restored == asearch_items_before,
+        });
+    } else {
+        try stdout.print("agent_search=unjudgeable reason=no_search_node\n", .{});
     }
     if (search_judgeable) {
         try stdout.print("search: focused={} chars={d} query_len={d} cards {d}->{d}->{d} kept sessions={d} files={d} search_ok={}\n", .{

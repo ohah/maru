@@ -64,6 +64,11 @@ pub const Options = struct {
     /// 정렬 **방향**. 목록 자체는 호출자가 이미 그 방향으로 넘긴다 — 이 값은 헤더의 라벨이
     /// 무엇을 말할지를 정한다(`Newest first` / `Oldest first`). 둘이 갈리면 라벨이 거짓말을 한다.
     sort_order: component.types.SortOrder = .newest_first,
+    /// 검색 줄에 무엇이 떠 있고 포커스인가. **그리기는 중립이 이미 한다**(`view.zig` 가 질의·조합·
+    /// 캐럿을 그린다) — 호스트가 할 일은 값을 주는 것뿐이다. 거르는 것은 호스트다(목록을 이미
+    /// 걸러 넘긴다).
+    search: []const u8 = "",
+    search_focused: bool = false,
 };
 
 pub const Built = struct {
@@ -109,6 +114,11 @@ pub fn build(
         .displayed_count = @intCast(opts.items.len),
         .items = opts.items,
         .sort_order = opts.sort_order,
+        .search = opts.search,
+        .search_focused = opts.search_focused,
+        // **캐럿은 포커스일 때만** — 중립이 `search_focused and search_cursor_visible` 로 판정한다.
+        // 깜빡임은 아직 없다(타이머가 없다) — 항상 켜 둔다.
+        .search_cursor_visible = opts.search_focused,
         .expanded_identity = state.expanded_identity,
     };
     const frame = component.build.build(props, .{

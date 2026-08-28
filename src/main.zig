@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 960;
+const smoke_spin_cap: usize = 1000;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4054,6 +4054,16 @@ fn spawnWinSession(
     app_window.tabs = tab_ptrs.items;
 }
 
+/// id 로 세션 번호를 다시 푼다. **보류한 대상은 번호가 아니라 id 다** — 모달이 떠 있는 동안 목록이
+/// 밀리면 같은 번호가 다른 세션을 가리킨다(적대적 검증 3회차 실측). 사라졌으면 `null`.
+fn sessionIndexById(sessions: []const *WinSession, id: ?u64) ?usize {
+    const want = id orelse return null;
+    for (sessions, 0..) |s, i| {
+        if (s.surface.id == want) return i;
+    }
+    return null;
+}
+
 /// 확인 모달이 자기 자리를 잡는 데 필요한 chrome props.
 ///
 /// **그리는 쪽과 히트테스트가 같은 값을 받아야 한다** — 중립 `confirm.view` 와 `buttonAtPoint` 가
@@ -4677,6 +4687,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var modal_sessions_before: usize = 0;
     var modal_sessions_while_open: usize = 0;
     var modal_sessions_after: usize = 0;
+    var cancel_judgeable = false;
+    var cancel_open_before = false;
+    var cancel_open_after = true;
+    var cancel_sessions_before: usize = 0;
+    var cancel_sessions_after: usize = 0;
+    var capmodal_judgeable = false;
+    var capmodal_before = false;
+    var capmodal_after = false;
+    var probe_victim_id: u64 = 0;
+    var shift_judgeable = false;
+    var shift_target_survived = true;
     var file_closes: usize = 0;
     var session_closes: usize = 0;
     var session_close_busy: usize = 0;
@@ -4753,9 +4774,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // Windows 에 없던 것은 셋이다: 그리는 배선, 모달이 떠 있는 동안의 **입력 주인**, 그리고 보류 상태.
     var confirm_state: maru.chrome.components.confirm.State = .{};
-    // 확인을 기다리는 닫기 대상(세션 번호). 확인이 오면 **그때** 다시 푼다 — 담아 둔 포인터를 쓰면
-    // 그 사이 목록이 바뀌었을 때 엉뚱한 것을 닫는다(macOS `confirm_accept` 가 같은 규율을 쓴다).
-    var pending_close_session: ?usize = null;
+    // 확인을 기다리는 닫기 대상. **번호가 아니라 id 다.**
+    //
+    // 처음에는 목록 번호를 들었다 — 모달이 입력을 삼키므로 그동안 목록이 안 바뀐다고 봤기 때문이다.
+    // 그런데 **한 줄만 바뀌면**(셸이 끝난 세션을 자동으로 걷어내는 등) 밀린다. 실험으로 모달이 뜬
+    // 동안 다른 세션을 지워 보니 승낙이 **엉뚱한 세션**을 닫았다(적대적 검증 3회차:
+    // `pending_idx_target_survives=true` — 닫으라고 한 것이 살아남았다).
+    //
+    // id 는 단조 증가라 재사용되지 않는다(§2m.78 ⑵ 가 그것을 고쳤다). 승낙할 때 **그 id 를 다시
+    // 찾아** 번호를 푼다 — macOS `confirm_accept` 가 범위를 다시 푸는 것과 같은 규율이다.
+    var pending_close_id: ?u64 = null;
     var confirm_shows: usize = 0;
     var confirm_accepts: usize = 0;
     var confirm_cancels: usize = 0;
@@ -6029,12 +6057,103 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, cx6, cy6);
             window.postSyntheticMouse(.left_up, cx6, cy6);
         }
+        // **자기 모달 주기를 연다.** 앞선 판정과 같은 모달을 쓰면 서로의 기대를 깨뜨린다 —
+        // "열려 있는 동안 세션이 안 준다" 와 "일부러 줄인다" 는 한 모달에 같이 못 산다(실측으로
+        // `confirm_modal_ok` 를 한 번 빨갛게 만들었다).
+        if (smoke and spins == 926 and sessions.items.len >= 3 and sidebar_card_columns != null) {
+            var rb8: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr8 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb8);
+            const mm8 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const top8 = maru.chrome.components.sidebar.rowTop(rr8, 1, sidebar_header_h, mm8, sidebar_scroll_px);
+            const cy8: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top8) + @as(i64, @intCast(cell_h / 2)));
+            const rng8 = sidebar_card_columns.?.closeXRange(cell_w);
+            const cx8: i32 = @intCast(@as(i64, @intFromFloat(rng8.start)) + @as(i64, @intCast(cell_w / 2)));
+            window.postSyntheticMouse(.moved, cx8, cy8);
+            window.postSyntheticMouse(.left_down, cx8, cy8);
+            window.postSyntheticMouse(.left_up, cx8, cy8);
+        }
+        if (smoke and spins == 934 and shift_judgeable) window.postSyntheticVirtualKey(win32_keys.vk_return);
+        // ── 목록이 밀려도 지목한 그것이 닫히나 (적대적 검증 3회차) ────────────────────
+        //
+        // 모달이 떠 있는 동안 **다른** 세션이 사라지면 보류한 대상이 무엇을 가리키나. 번호를 들면
+        // 밀려서 **엉뚱한 세션이 죽는다** — 지금은 입력을 삼켜 그 일이 안 일어나지만, 셸이 끝난
+        // 세션을 걷어내는 한 줄만 생겨도 도달한다. id 를 들면 안 밀린다.
+        if (smoke and spins == 930 and confirm_state.open and sessions.items.len >= 3) {
+            shift_judgeable = true;
+            const victim = sessions.items[1].surface.id;
+            const s0 = sessions.items[0];
+            s0.surface.lockCore(io);
+            s0.surface.core.write("\x1b]133;A\x1b\\") catch {};
+            s0.surface.core.write("\x1b]133;B\x1b\\") catch {};
+            s0.surface.unlockCore(io);
+            _ = closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 0, true);
+            pump = sessions.items[0].pump;
+            probe_victim_id = victim;
+        }
+        if (smoke and spins == 938 and shift_judgeable) {
+            var still: bool = false;
+            for (sessions.items) |s| if (s.surface.id == probe_victim_id) {
+                still = true;
+            };
+            shift_target_survived = still;
+        }
         if (smoke and spins == 904 and modal_judgeable) {
             modal_open_after_click = confirm_state.open;
             modal_cells = confirm_cells_drawn;
             modal_sessions_while_open = sessions.items.len;
             // **Enter 로 승낙한다** — 중립 `confirm.handle` 이 포커스된 버튼을 실행한다.
             window.postSyntheticVirtualKey(win32_keys.vk_return);
+        }
+        // ── 취소 갈래 (적대적 검증 1회차) ──────────────────────────────────────────────
+        //
+        // **승낙만 밀면 절반이다.** 취소가 아무 일도 안 하는지(세션이 그대로인지), 그리고 모달이
+        // 닫히는지를 따로 본다 — 취소가 닫기를 실행하면 그것이 가장 나쁜 결함이다.
+        if (smoke and spins == 914 and sessions.items.len >= 3 and sidebar_card_columns != null) {
+            cancel_judgeable = true;
+            cancel_sessions_before = sessions.items.len;
+            var rb7: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr7 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb7);
+            const mm7 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const top7 = maru.chrome.components.sidebar.rowTop(rr7, 1, sidebar_header_h, mm7, sidebar_scroll_px);
+            const cy7: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top7) + @as(i64, @intCast(cell_h / 2)));
+            const rng7 = sidebar_card_columns.?.closeXRange(cell_w);
+            const cx7: i32 = @intCast(@as(i64, @intFromFloat(rng7.start)) + @as(i64, @intCast(cell_w / 2)));
+            window.postSyntheticMouse(.moved, cx7, cy7);
+            window.postSyntheticMouse(.left_down, cx7, cy7);
+            window.postSyntheticMouse(.left_up, cx7, cy7);
+        }
+        // ── 모달이 떠 있어도 창 버튼은 살아 있어야 한다 (적대적 검증 2회차) ────────────
+        //
+        // **삼킴이 너무 넓으면 갇힌다.** 모달 뒤의 카드·트리는 막아야 하지만 창의 최소화·최대화까지
+        // 죽으면 사용자가 빠져나갈 길이 줄어든다 — OS 창 조작은 앱 모달의 대상이 아니다.
+        if (smoke and spins == 916 and cancel_judgeable and confirm_state.open) {
+            capmodal_judgeable = true;
+            capmodal_before = window.isMaximized();
+            const caps = captionButtonRects(client_w, titlebar_px, caption_btn_w);
+            const mx: i32 = @intCast(caps[1].x + caps[1].w / 2); // ☐ 최대화
+            const my: i32 = @intCast(caps[1].y + caps[1].h / 2);
+            window.postSyntheticMouse(.moved, mx, my);
+            window.postSyntheticMouse(.left_down, mx, my);
+            window.postSyntheticMouse(.left_up, mx, my);
+        }
+        if (smoke and spins == 921 and capmodal_judgeable) {
+            capmodal_after = window.isMaximized();
+            // **되돌린다.** 최대화한 채로 두면 뒤따르는 판정이 다른 크기의 창을 본다 — 실측으로
+            // `dock_scroll` 이 `content_fits` 로 바뀌었다.
+            const caps2 = captionButtonRects(client_w, titlebar_px, caption_btn_w);
+            const rx: i32 = @intCast(caps2[1].x + caps2[1].w / 2);
+            const ry: i32 = @intCast(caps2[1].y + caps2[1].h / 2);
+            window.postSyntheticMouse(.moved, rx, ry);
+            window.postSyntheticMouse(.left_down, rx, ry);
+            window.postSyntheticMouse(.left_up, rx, ry);
+        }
+        if (smoke and spins == 918 and cancel_judgeable) {
+            cancel_open_before = confirm_state.open;
+            window.postSyntheticVirtualKey(win32_keys.vk_escape);
+        }
+        if (smoke and spins == 922 and cancel_judgeable) {
+            cancel_open_after = confirm_state.open;
+            cancel_sessions_after = sessions.items.len;
         }
         if (smoke and spins == 910 and modal_judgeable) {
             modal_open_after_accept = confirm_state.open;
@@ -6789,7 +6908,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             confirm_accepts += 1;
                             confirm_state.dismiss();
                             // **지금 다시 푼다** — 담아 둔 번호가 그 사이 밀렸을 수 있다.
-                            if (pending_close_session) |ci| {
+                            if (sessionIndexById(sessions.items, pending_close_id)) |ci| {
                                 switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
                                     .closed => {
                                         session_closes += 1;
@@ -6802,12 +6921,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     else => {},
                                 }
                             }
-                            pending_close_session = null;
+                            pending_close_id = null;
                         },
                         .cancelled => {
                             confirm_cancels += 1;
                             confirm_state.dismiss();
-                            pending_close_session = null;
+                            pending_close_id = null;
                         },
                         .alternate => {},
                     };
@@ -6954,17 +7073,6 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
-                // 모달이 떠 있으면 **버튼만** 받고 나머지는 삼킨다 — 뒤의 카드·트리가 눌리면 안 된다.
-                if (confirm_state.open) {
-                    if (m.kind == .left_up) {
-                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
-                            .confirmed => confirm_pending_click = .confirmed,
-                            .cancelled => confirm_pending_click = .cancelled,
-                            .alternate => {},
-                        };
-                    }
-                    continue;
-                }
                 const active = app_window.active() orelse continue;
                 mouse_events += 1;
 
@@ -7126,6 +7234,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // **누르는 것과 지금 가리키는 것을 함께 갱신한다** — hover 가 안 바뀌면 눌러도
                 // 화면이 그대로라 "죽은 컨트롤" 과 구별이 안 된다(§2m.35 가 그 실패를 겪었다).
+                // ── 모달이 떠 있으면 버튼만 받고 나머지는 삼킨다 (W8.16b) ─────────────────
+                //
+                // **캡션 버튼 뒤에 둔다.** 앞에 두면 모달이 뜬 동안 창의 최소화·최대화·닫기까지
+                // 죽어 사용자가 빠져나갈 길이 준다 — OS 창 조작은 앱 모달의 대상이 아니다
+                // (적대적 검증 2회차 실측: `caption_alive=false`).
+                if (confirm_state.open) {
+                    if (m.kind == .left_up) {
+                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
+                            .confirmed => confirm_pending_click = .confirmed,
+                            .cancelled => confirm_pending_click = .cancelled,
+                            .alternate => {},
+                        };
+                    }
+                    continue;
+                }
                 if (region == .sidebar and m.kind == .wheel) {
                     // **헤더는 안 굴린다** — 고정이다(`slotAt` 이 정한 규칙). 목록만 움직인다.
                     const notches = wheel_acc.feed(m.wheel_delta);
@@ -7296,7 +7419,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
                                                 // "모달이 선행" 이라 적어 둔 자리다.
                                                 session_close_busy += 1;
-                                                pending_close_session = src.session;
+                                                pending_close_id = if (src.session < sessions.items.len) sessions.items[src.session].surface.id else null;
                                                 confirm_state.show(maru.i18n.t(.app_close_running), .{
                                                     .confirm = maru.i18n.t(.btn_close),
                                                     .cancel = maru.i18n.t(.common_cancel),
@@ -8136,7 +8259,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 .confirmed => {
                     confirm_accepts += 1;
                     confirm_state.dismiss();
-                    if (pending_close_session) |ci| {
+                    if (sessionIndexById(sessions.items, pending_close_id)) |ci| {
                         switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, ci, true)) {
                             .closed => {
                                 session_closes += 1;
@@ -8149,12 +8272,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             else => {},
                         }
                     }
-                    pending_close_session = null;
+                    pending_close_id = null;
                 },
                 .cancelled => {
                     confirm_cancels += 1;
                     confirm_state.dismiss();
-                    pending_close_session = null;
+                    pending_close_id = null;
                 },
                 .alternate => {},
             }
@@ -8468,6 +8591,36 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (shift_judgeable) {
+        // **지목한 그것이 죽어야 한다.** 개수만 보면 하나 줄었으니 초록인데, 죽은 것이 다른
+        // 세션이면 사용자는 남기려던 것을 잃는다.
+        try stdout.print("confirm_shift: victim_id={d} survived={} confirm_shift_ok={}\n", .{
+            probe_victim_id,
+            shift_target_survived,
+            !shift_target_survived,
+        });
+    }
+    if (capmodal_judgeable) {
+        try stdout.print("caption_while_modal: max {}->{} caption_alive={}\n", .{
+            capmodal_before,
+            capmodal_after,
+            capmodal_before != capmodal_after,
+        });
+    }
+    if (cancel_judgeable) {
+        try stdout.print("confirm_cancel: open_before={} open_after={} sessions {d}->{d} cancels={d} confirm_cancel_ok={}\n", .{
+            cancel_open_before,
+            cancel_open_after,
+            cancel_sessions_before,
+            cancel_sessions_after,
+            confirm_cancels,
+            cancel_open_before and !cancel_open_after and
+                cancel_sessions_after == cancel_sessions_before and
+                confirm_cancels > 0,
+        });
+    } else {
+        try stdout.print("confirm_cancel=unjudgeable reason=need_three_sessions\n", .{});
     }
     if (modal_judgeable) {
         try stdout.print("confirm_modal: shows={d} open_after_click={} cells={d} sessions {d}->{d}(open)->{d} accepts={d} cancels={d} open_after_accept={} draw_fail={d} unpainted_quads={d} confirm_modal_ok={}\n", .{

@@ -3723,6 +3723,24 @@ pub fn build(b: *std.Build) void {
     run_session_host_e3b_boundary_tests.setCwd(b.path("."));
     session_host_e3b_step.dependOn(&run_session_host_e3b_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3b_boundary_tests.step);
+    const session_host_e3c_step = b.step(
+        "test-session-host-e3c",
+        "Measure P4 E3c generation-backed GUI client idle pump in ReleaseFast",
+    );
+    session_host_e3c_step.dependOn(session_host_e3b_step);
+    const session_host_e3c_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_e3c_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P4 E3c client idle pump"},
+    });
+    const run_session_host_e3c_boundary_tests = b.addRunArtifact(session_host_e3c_boundary_tests);
+    run_session_host_e3c_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_e3c_boundary_tests.setCwd(b.path("."));
+    session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",

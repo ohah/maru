@@ -4045,6 +4045,56 @@ fn spawnWinSession(
     app_window.tabs = tab_ptrs.items;
 }
 
+/// 세션 하나를 닫아 목록·탭에서 뺀다. **왜 안 닫혔는지**를 돌려준다.
+///
+/// **계약은 이미 있다**(`macos-app-host-boundary.md`): 사이드바 ✕ 는 `requestClose` 게이트를 타고,
+/// *"실행 중 명령이 있으면 확인 모달을 띄우고 닫기를 보류, 없으면 즉시"* 다. 판정 술어도 중립이
+/// 소유한다(`TerminalCore.cursorIsAtPrompt` — OSC 133 의미 상태로 단위 테스트가 고정한다).
+///
+/// **Windows 에는 확인 모달이 없다.** 그래서 실행 중이면 **안 닫고 이유를 낸다** — 조용히 죽이면
+/// 사용자가 돌려받을 수 없는 것을 잃는다. 모달이 생기는 날 이 자리에 이어 붙인다.
+const CloseSessionResult = enum {
+    closed,
+    /// 실행 중인 명령이 있다 — 모달이 선행이다.
+    busy_needs_confirm,
+    /// 마지막 하나다. macOS 는 이때 **창이 닫히고 앱이 종료**된다 — Windows 에서 그 결정을 여기서
+    /// 대신 내리지 않는다.
+    last_session,
+    out_of_range,
+};
+
+fn closeWinSession(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    sessions: *std.ArrayList(*WinSession),
+    tab_ptrs: *std.ArrayList(*maru.session.surface.Surface),
+    app_window: *maru.session.window.AppWindow,
+    runtime: *maru.app.SurfaceRuntime,
+    index: usize,
+) CloseSessionResult {
+    if (index >= sessions.items.len) return .out_of_range;
+    if (sessions.items.len <= 1) return .last_session;
+    const s = sessions.items[index];
+    // **락 아래에서 묻는다** — 리더 스레드가 같은 코어를 쓴다.
+    const at_prompt = blk: {
+        s.surface.lockCore(io);
+        defer s.surface.unlockCore(io);
+        break :blk s.surface.core.cursorIsAtPrompt();
+    };
+    if (!at_prompt) return .busy_needs_confirm;
+
+    // **라우팅을 먼저 끊는다.** `destroy` 가 부르는 `deinit` 은 라우팅을 안 끊으므로(그 함수 주석),
+    // 여기서 안 떼면 runtime 이 해제된 표면을 계속 든다.
+    s.live.closeAndDetach(runtime);
+    _ = sessions.orderedRemove(index);
+    _ = tab_ptrs.orderedRemove(index);
+    app_window.tabs = tab_ptrs.items;
+    // **활성 탭을 범위 안으로 당긴다** — 마지막을 닫으면 그 번호가 사라진다.
+    if (app_window.active_tab >= sessions.items.len) app_window.active_tab = sessions.items.len - 1;
+    s.destroy(allocator);
+    return .closed;
+}
+
 /// 사이드바 카드 한 장이 싣는 것. 빈 문자열이면 그 줄을 안 그린다(`buildSidebarDrawList` 의 계약).
 const SidebarCard = struct {
     name: []const u8,
@@ -4547,8 +4597,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var asearch_items_before: usize = 0;
     var asearch_items_after: usize = 0;
     var asearch_items_restored: usize = 0;
+    // **닫은 뒤에 무엇이 남았나.** 개수만 보면 엉뚱한 세션이 죽어도 초록이다 — 남은 첫 이름을 본다.
+    var sclose_judgeable = false;
+    var sclose_sessions_before: usize = 0;
+    var sclose_sessions_after: usize = 0;
+    var sclose_tabs_before: usize = 0;
+    var sclose_tabs_after: usize = 0;
+    var sclose_second_name: [24]u8 = undefined;
+    var sclose_second_name_len: usize = 0;
+    var sclose_first_name: [24]u8 = undefined;
+    var sclose_first_name_len: usize = 0;
+    var sclose_active_ok = false;
+    var sclose_pump_rebound = false;
     var file_closes: usize = 0;
-    var session_close_unimplemented: usize = 0;
+    var session_closes: usize = 0;
+    var session_close_busy: usize = 0;
+    var session_close_last: usize = 0;
     var editor_frames: usize = 0;
     var editor_build_failures: usize = 0;
     var editor_scrolls: usize = 0;
@@ -5801,6 +5865,55 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, dx1, dy1);
             window.postSyntheticMouse(.left_up, dx1, dy1);
         }
+        // ── 세션 카드의 ✕ (W8.16) ──────────────────────────────────────────────────────
+        //
+        // **첫 카드가 아니라 둘째를 닫는다** — 첫 것을 닫으면 `pump` 재바인딩이 안 돼도 지나갈 수
+        // 있는데, 둘째를 닫으면 그 결함이 안 잡힌다. 그래서 **첫 것을** 닫아 pump 까지 민다.
+        // **먼저 맨 위로 되돌린다** — 앞선 단계가 사이드바를 바닥까지 굴려 놨다(§2m.74).
+        if (smoke and spins == 864 and geom.sidebar.w != 0) {
+            const ux: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
+            const uy: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
+            var u: usize = 0;
+            while (u < 12) : (u += 1) window.postSyntheticMouseWheel(.wheel, ux, uy, 3);
+        }
+        // **프롬프트 마크를 먹인다.** 이 기계의 셸은 OSC 133 을 안 내므로 `semantic_state` 가 늘
+        // `unknown` 이고, 중립 술어는 그것을 **보수적으로 "실행 중"** 으로 본다(그 함수 doc). 통합된
+        // 셸이 idle 에서 내는 바로 그 바이트를 넣어, 닫기의 **성공 갈래**도 실제로 밟는다.
+        if (smoke and spins == 865 and sessions.items.len >= 2) {
+            const s0 = sessions.items[0];
+            s0.surface.lockCore(io);
+            s0.surface.core.write("\x1b]133;A\x1b\\") catch {};
+            s0.surface.core.write("\x1b]133;B\x1b\\") catch {};
+            s0.surface.unlockCore(io);
+        }
+        if (smoke and spins == 866 and sidebar_card_columns != null and sessions.items.len >= 2) {
+            sclose_judgeable = true;
+            sclose_sessions_before = sessions.items.len;
+            sclose_tabs_before = app_window.tabs.len;
+            sclose_second_name_len = @min(sessions.items[1].label().len, sclose_second_name.len);
+            @memcpy(sclose_second_name[0..sclose_second_name_len], sessions.items[1].label()[0..sclose_second_name_len]);
+            var rb4: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr4 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb4);
+            const mm4 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const top4 = maru.chrome.components.sidebar.rowTop(rr4, 0, sidebar_header_h, mm4, sidebar_scroll_px);
+            const cy4: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top4) + @as(i64, @intCast(cell_h / 2)));
+            const rng4 = sidebar_card_columns.?.closeXRange(cell_w);
+            const cx4: i32 = @intCast(@as(i64, @intFromFloat(rng4.start)) + @as(i64, @intCast(cell_w / 2)));
+            window.postSyntheticMouse(.moved, cx4, cy4);
+            window.postSyntheticMouse(.left_down, cx4, cy4);
+            window.postSyntheticMouse(.left_up, cx4, cy4);
+        }
+        if (smoke and spins == 872 and sclose_judgeable) {
+            sclose_sessions_after = sessions.items.len;
+            sclose_tabs_after = app_window.tabs.len;
+            sclose_first_name_len = if (sessions.items.len > 0) @min(sessions.items[0].label().len, sclose_first_name.len) else 0;
+            if (sclose_first_name_len > 0) @memcpy(sclose_first_name[0..sclose_first_name_len], sessions.items[0].label()[0..sclose_first_name_len]);
+            sclose_active_ok = app_window.active_tab < sessions.items.len;
+            // **루프가 든 pump 가 살아 있는 세션 것인가.** 첫 세션을 닫으면 그 pump 는 해제된
+            // 메모리를 가리킨다 — 그런데 **아무 증상도 안 났다**(뮤턴트가 크래시도 판정도 안 냈다).
+            // 큐 포인터를 견주는 것이 그 use-after-free 를 잡는 유일한 값이다.
+            sclose_pump_rebound = sessions.items.len > 0 and pump.queue == sessions.items[0].pump.queue;
+        }
         // ── 에이전트 도크 검색 (W8.15 나머지) ──────────────────────────────────────────
         //
         // **탐색기가 아니라 에이전트 뷰여야 한다** — 그 검색 줄은 그 뷰에만 있다.
@@ -6884,11 +6997,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                             rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                         }
                                     } else {
-                                        // **세션 닫기는 아직 못 한다.** 중립 `AppWindow` 에 탭을 빼는
-                                        // 모델이 없고(있는 것은 `selectTab` 뿐), 세우는 것은 macOS 가
-                                        // Swift 로 이미 가진 것과 겹칠 수 있는 결정이다. 조용히
-                                        // 넘기지 않고 **세어서** 그 자리가 비었음을 수치로 남긴다.
-                                        session_close_unimplemented += 1;
+                                        // ── 세션을 닫는다 (W8.16) ───────────────────────────
+                                        //
+                                        // 계약이 정한 그대로다 — 프롬프트면 즉시, 실행 중이면 보류.
+                                        // Windows 에 모달이 없어 **보류 = 안 닫음**이고, 그 사실을
+                                        // 수치로 남긴다(조용히 죽이지 않는다).
+                                        switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, src.session)) {
+                                            .closed => {
+                                                session_closes += 1;
+                                                // **pump 를 다시 건다.** 루프는 첫 세션 것을 보는데
+                                                // 그것이 닫혔을 수 있다(포인터로 보므로 값만 바꾸면 된다).
+                                                pump = sessions.items[0].pump;
+                                                active_view = .{ .terminal = app_window.active_tab };
+                                                refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                                                sidebar_redraws += 1;
+                                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                            },
+                                            .busy_needs_confirm => session_close_busy += 1,
+                                            .last_session => session_close_last += 1,
+                                            .out_of_range => {},
+                                        }
                                     }
                                     continue;
                                 }
@@ -8006,6 +8134,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
     }
+    if (sclose_judgeable) {
+        // **탭도 함께 줄어야 한다** — 목록만 줄이고 `app_window.tabs` 를 두면 라우팅이 죽은 표면을 든다.
+        try stdout.print("close_session: sessions {d}->{d} tabs {d}->{d} kept want={s} got={s} closes={d} busy={d} last={d} active_ok={} pump_rebound={} close_session_ok={}\n", .{
+            sclose_sessions_before,
+            sclose_sessions_after,
+            sclose_tabs_before,
+            sclose_tabs_after,
+            sclose_second_name[0..sclose_second_name_len],
+            sclose_first_name[0..sclose_first_name_len],
+            session_closes,
+            session_close_busy,
+            session_close_last,
+            sclose_active_ok,
+            sclose_pump_rebound,
+            sclose_sessions_after == sclose_sessions_before - 1 and
+                sclose_pump_rebound and
+                sclose_tabs_after == sclose_tabs_before - 1 and
+                std.mem.eql(u8, sclose_second_name[0..sclose_second_name_len], sclose_first_name[0..sclose_first_name_len]) and
+                sclose_active_ok and
+                session_closes > 0,
+        });
+    } else {
+        try stdout.print("close_session=unjudgeable reason=need_two_sessions\n", .{});
+    }
     if (asearch_judgeable) {
         // **에이전트 목록은 그룹 헤더 + 카드다** — 전부 걸러지면 0 이어야 하고, 지우면 되돌아와야
         // 한다. 사이드바와 달리 카드 정체가 record index 라 색인이 안 흔들린다.
@@ -8045,14 +8197,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         try stdout.print("search=unjudgeable reason=no_header\n", .{});
     }
     if (close_judgeable) {
-        try stdout.print("close_file: files {d}->{d} kept want={s} got={s} clicks={d} closes={d} session_unimpl={d} x={d} close_file_ok={}\n", .{
+        try stdout.print("close_file: files {d}->{d} kept want={s} got={s} clicks={d} closes={d} session_closes={d} x={d} close_file_ok={}\n", .{
             close_files_before,
             close_files_after,
             close_want_buf[0..close_want_len],
             close_got_buf[0..close_got_len],
             close_clicks,
             file_closes,
-            session_close_unimplemented,
+            session_closes,
             close_click_x,
             close_files_after == close_files_before - 1 and
                 std.mem.eql(u8, close_want_buf[0..close_want_len], close_got_buf[0..close_got_len]) and

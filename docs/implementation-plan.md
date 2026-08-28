@@ -1292,8 +1292,24 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    reattach하며, reattach 후 추가 event pump가 없어도 attach response의 full-state가 최신이어야 한다.
    A 변경 전·후 B의 revision·owned string·foreground projection은 byte-for-byte 불변이고,
    copied/stale/foreign stream을 수용하는 test seam은 만들지 않는다. Debug·ReleaseFast focused gate와
-   source-boundary test가 실제 제품 type·wire만 쓰는지 고정한다. controlled Claude/Codex foreground와
-   cwd→Git·agent·SSH 소비자는 e4d-2로 남긴다.
+   source-boundary test가 실제 제품 type·wire만 쓰는지 고정한다.
+
+   **P3-e4d-2a current-host foreground·consumer parity gate:** e4d-1과 같은 별도 실제 daemon과
+   generation-backed GUI connection에서 controlled `claude`·`codex` foreground process를 차례로 실행해
+   host PTY sampler→revisioned metadata→`RemoteRuntime` observation→AppSession consumer의 한 제품 흐름을
+   검증한다. 임시 local Git repository의 OSC 7 cwd는 기존 `termGitBranch`에서 branch로 파생되고,
+   foreground process는 기존 `pollAgentKinds`에서 exact provider로 분류되며, OSC 5379 destination은
+   파일 drop 직전 `refreshObservation` barrier와 기존 SSH upload route에서 remote 분기로 소비돼야 한다.
+   provider 전환과 cwd/SSH 제거도 stale 캐시를 남기지 않고 `codex→none`, branch/destination `present→absent`로
+   수렴해야 한다. 테스트는 제품 backend/vtable과 실제 filesystem·process observation만 쓰고 raw cwd,
+   destination, argv, file payload를 artifact나 실패 로그에 쓰지 않는다. Debug·ReleaseFast focused gate와
+   source-boundary test가 direct field 주입, test-only wire·consumer seam, fake upload 성공을 금지한다.
+
+   **P3-e4d-2b legacy-binary compatibility gate:** capability 없는 실제 N-1 host executable에 current GUI가
+   접속하는 별도 packaging gate다. current source를 legacy mode로 분기하거나 test-only capability toggle을
+   열지 않고, 고정된 signed/ad-hoc N-1 artifact의 hello·attach 결과로 metadata unavailable degradation과
+   cwd·agent·SSH 소비자의 fail-closed 동작을 검증한다. 2a와 2b가 모두 끝나기 전에는 P3-e4d 전체 또는 runtime
+   metadata parity 완료를 선언하지 않는다.
 
    **P4 E3 event-driven producer (E3a·E3b 구현 완료):** runtime별 checked screen token과 output wake가 unchanged
    projector를 닫고, runtime-owned 100ms metadata sampler가 lock-free source generation을 token으로 접어 변경 runtime의

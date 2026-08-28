@@ -40,7 +40,11 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "P3-e4d-1 metadata isolation·reattach parity"));
 
     try std.testing.expect(std.mem.indexOf(u8, body, "daemon.runSessionHost") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "RemoteRuntime.attachExisting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "HostAdapter.initInPlace") != null);
+    try std.testing.expectEqual(@as(usize, 2), count(body, ".spawnWithAdapter("));
+    try std.testing.expectEqual(@as(usize, 1), count(body, "RemoteRuntime.attachExistingWithAdapter("));
+    try std.testing.expect(std.mem.indexOf(u8, body, ".spawn(&client") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "RemoteRuntime.attachExisting(&") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "currentGeneration().observation") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "pumpDelta") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "testing_api") == null);

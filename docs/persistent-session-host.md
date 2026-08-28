@@ -7053,10 +7053,10 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     response 대기 중 event, detach/reconnect 최신 metadata, cwd→Git·agent·SSH 제품 소비 경로를
     실제 제품 경계에서 무인 테스트하는 것이다.
     **P3-e4d-1은 multi-runtime event 격리와 detach/reconnect 최신본을 한 제품 gate로 닫는다.**
-    별도 프로세스의 실제 daemon과 하나의 GUI `Client`에 두 forkpty runtime을 붙이고, runtime A의
+    별도 프로세스의 실제 daemon과 하나의 generation-backed GUI `HostAdapter`에 두 forkpty runtime을 붙이고, runtime A의
     OSC 7/2/5379 변경이 A의 revision·owned observation만 전진시키며 B의 revision·cwd·title·SSH
     목적지를 바꾸지 않는지 고정한다. 그런 다음 A attachment를 terminate 없이 detach하고 child가
-    그 사이 새 metadata를 게시하게 한 뒤, 같은 `host_id:runtime_id`로 재접속한 `attachExisting`의
+    그 사이 새 metadata를 게시하게 한 뒤, 같은 `host_id:runtime_id`로 재접속한 `attachExistingWithAdapter`의
     최초 응답이 새 full-state를 담고 있음을 추가 pump 이전에 검증한다. 시간 추측은 쓰지 않고
     harness-owned trigger/marker로 detach 전·변경 commit·reattach 순서를 구분한다. 새 test-only wire
     method나 제품 분기를 열지 않고, cwd·SSH destination·raw argv는 artifact·실패 log에 남기지

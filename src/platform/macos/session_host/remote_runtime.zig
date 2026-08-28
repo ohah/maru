@@ -17083,6 +17083,53 @@ test "CR3a-2c3a CR3a-2c3c C3 detach Busy fail-closes without mutation or RPC wir
 const daemon = @import("daemon.zig");
 
 extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+
+fn signalMetadataParityFifo(path: [:0]const u8) !void {
+    var attempts: usize = 0;
+    while (attempts < 150) : (attempts += 1) {
+        const fd = posix.openatZ(posix.AT.FDCWD, path.ptr, .{
+            .ACCMODE = .WRONLY,
+            .NONBLOCK = true,
+            .CLOEXEC = true,
+        }, 0) catch {
+            _ = usleep(20 * 1000);
+            continue;
+        };
+        defer _ = c.close(fd);
+        if (c.write(fd, "go\n".ptr, 3) == 3) return;
+        return error.FifoSignalFailed;
+    }
+    return error.FifoReaderUnavailable;
+}
+
+fn metadataParitySurfaceContains(runtime: *RemoteRuntime, io: std.Io, expected: []const u8) bool {
+    const surface = runtime.surfacePtr();
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    const cells = surface.renderSnapshot().cells;
+    var matched: usize = 0;
+    for (cells) |cell| {
+        if (cell.codepoint == expected[matched]) {
+            matched += 1;
+            if (matched == expected.len) return true;
+        } else {
+            matched = if (cell.codepoint == expected[0]) 1 else 0;
+        }
+    }
+    return false;
+}
+
+fn metadataParityProcessesEqual(
+    actual: []const maru.pty.types.ForegroundProcessName,
+    expected: []const maru.pty.types.ForegroundProcessName,
+) bool {
+    if (actual.len != expected.len) return false;
+    for (actual, expected) |left, right| {
+        if (left.pid != right.pid or !std.mem.eql(u8, left.slice(), right.slice())) return false;
+    }
+    return true;
+}
 
 test "remote runtime: spawns over the wire, renders host screen into a Surface, and reflects input via delta" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -17238,6 +17285,234 @@ test "remote runtime: two runtimes sharing one connection both receive their own
     }
     try testing.expect(f1); // rr1 화면이 자기 echo를 받았다.
     try testing.expect(f2); // rr2도 — 남의 pump에 배치를 뺏기지 않았다(demux).
+}
+
+test "P3-e4d-1 actual metadata events stay isolated and reattach starts current" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var dir_buf: [256]u8 = undefined;
+    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-e4d1-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{dir_path}) catch
+        return error.SkipZigTest;
+    var fifo_a_buf: [256]u8 = undefined;
+    const fifo_a = std.fmt.bufPrintZ(&fifo_a_buf, "/tmp/maru-e4d1-a-{d}.fifo", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var fifo_b_buf: [256]u8 = undefined;
+    const fifo_b = std.fmt.bufPrintZ(&fifo_b_buf, "/tmp/maru-e4d1-b-{d}.fifo", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var commit_buf: [256]u8 = undefined;
+    const detached_commit = std.fmt.bufPrintZ(&commit_buf, "/tmp/maru-e4d1-a2-{d}.commit", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.unlink(fifo_a.ptr);
+    _ = c.unlink(fifo_b.ptr);
+    _ = c.unlink(detached_commit.ptr);
+    if (mkfifo(fifo_a.ptr, 0o600) != 0) return error.SkipZigTest;
+    defer _ = c.unlink(fifo_a.ptr);
+    if (mkfifo(fifo_b.ptr, 0o600) != 0) return error.SkipZigTest;
+    defer _ = c.unlink(fifo_b.ptr);
+    defer _ = c.unlink(detached_commit.ptr);
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |value| break :blk value else |_| {
+                _ = usleep(20 * 1000);
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+    // HostAdapter moves the connected Client into its final-address ClientSlot. The adapter is
+    // therefore the sole transport owner for both runtimes and their reconnect generation.
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var command_a_buf: [2048]u8 = undefined;
+    const command_a = try std.fmt.bufPrint(
+        &command_a_buf,
+        "printf '\\033]7;file://localhost/tmp/e4d-a0\\007\\033]2;e4d-a0\\007\\033]5379;ssh;a0\\007A0\\n'; " ++
+            "IFS= read -r _ < '{s}'; " ++
+            "printf '\\033]7;file://localhost/tmp/e4d-a1\\007\\033]2;e4d-a1\\007\\033]5379;ssh;a1\\007A1\\n'; " ++
+            "IFS= read -r _ < '{s}'; " ++
+            "printf '\\033]7;file://localhost/tmp/e4d-a2\\007\\033]2;e4d-a2\\007\\033]5379;ssh;a2\\007A2\\n'; " ++
+            "stty -icanon -echo min 0 time 30 2>/dev/null; printf '\\033]11;?\\033\\\\'; " ++
+            "dd bs=64 count=1 >/dev/null 2>/dev/null; : > '{s}'; exec /bin/cat",
+        .{ fifo_a, fifo_a, detached_commit },
+    );
+    var command_b_buf: [1536]u8 = undefined;
+    const command_b = try std.fmt.bufPrint(
+        &command_b_buf,
+        "printf '\\033]7;file://localhost/tmp/e4d-b0\\007\\033]2;e4d-b0\\007\\033]5379;ssh;b0\\007B0\\n'; " ++
+            "IFS= read -r _ < '{s}'; " ++
+            "printf '\\033]7;file://localhost/tmp/e4d-b1\\007\\033]2;e4d-b1\\007\\033]5379;ssh;b1\\007B1\\n'; " ++
+            "exec /bin/cat",
+        .{fifo_b},
+    );
+
+    var runtime_a: RemoteRuntime = undefined;
+    var runtime_a_live = false;
+    defer if (runtime_a_live) runtime_a.deinit();
+    try runtime_a.spawnWithAdapter(&adapter, allocator, io, 1, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", command_a },
+    }, .{ .cols = 40, .rows = 10 }, null);
+    runtime_a_live = true;
+    var runtime_b: RemoteRuntime = undefined;
+    try runtime_b.spawnWithAdapter(&adapter, allocator, io, 2, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", command_b },
+    }, .{ .cols = 40, .rows = 10 }, null);
+    defer runtime_b.deinit();
+
+    var attempts: usize = 0;
+    while (attempts < 150) : (attempts += 1) {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        const a = &runtime_a.currentGeneration().observation;
+        const b = &runtime_b.currentGeneration().observation;
+        if (std.mem.eql(u8, a.cwd.items, "/tmp/e4d-a0") and
+            std.mem.eql(u8, b.cwd.items, "/tmp/e4d-b0") and
+            metadataParitySurfaceContains(&runtime_a, io, "A0") and
+            metadataParitySurfaceContains(&runtime_b, io, "B0")) break;
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(attempts < 150);
+
+    // Let the foreground sampler settle while both children are blocked in the shell builtin read.
+    for (0..10) |_| {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        _ = usleep(20 * 1000);
+    }
+    const b_before = &runtime_b.currentGeneration().observation;
+    const b_revision = b_before.revision;
+    const b_cwd_ptr = b_before.cwd.items.ptr;
+    const b_title_ptr = b_before.window_title.items.ptr;
+    const b_ssh_ptr = b_before.ssh_remote_dest.items.ptr;
+    const b_process_ptr = b_before.foreground_processes.items.ptr;
+    const b_pgid = b_before.foreground_pgid;
+    const b_processes = try allocator.dupe(
+        maru.pty.types.ForegroundProcessName,
+        b_before.foreground_processes.items,
+    );
+    defer allocator.free(b_processes);
+
+    try signalMetadataParityFifo(fifo_a);
+    attempts = 0;
+    while (attempts < 150) : (attempts += 1) {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        if (std.mem.eql(u8, runtime_a.currentGeneration().observation.cwd.items, "/tmp/e4d-a1") and
+            metadataParitySurfaceContains(&runtime_a, io, "A1")) break;
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(attempts < 150);
+    const b_after_a = &runtime_b.currentGeneration().observation;
+    try testing.expectEqual(b_revision, b_after_a.revision);
+    try testing.expectEqual(b_cwd_ptr, b_after_a.cwd.items.ptr);
+    try testing.expectEqual(b_title_ptr, b_after_a.window_title.items.ptr);
+    try testing.expectEqual(b_ssh_ptr, b_after_a.ssh_remote_dest.items.ptr);
+    try testing.expectEqual(b_process_ptr, b_after_a.foreground_processes.items.ptr);
+    try testing.expectEqual(b_pgid, b_after_a.foreground_pgid);
+    try testing.expect(metadataParityProcessesEqual(b_after_a.foreground_processes.items, b_processes));
+    try testing.expectEqualStrings("/tmp/e4d-b0", b_after_a.cwd.items);
+    try testing.expectEqualStrings("e4d-b0", b_after_a.window_title.items);
+    try testing.expectEqualStrings("b0", b_after_a.ssh_remote_dest.items);
+
+    const a_after_first = &runtime_a.currentGeneration().observation;
+    const a_revision = a_after_first.revision;
+    const a_cwd_ptr = a_after_first.cwd.items.ptr;
+    const a_title_ptr = a_after_first.window_title.items.ptr;
+    const a_ssh_ptr = a_after_first.ssh_remote_dest.items.ptr;
+    const a_process_ptr = a_after_first.foreground_processes.items.ptr;
+    const a_pgid = a_after_first.foreground_pgid;
+    const a_processes = try allocator.dupe(
+        maru.pty.types.ForegroundProcessName,
+        a_after_first.foreground_processes.items,
+    );
+    defer allocator.free(a_processes);
+    try signalMetadataParityFifo(fifo_b);
+    attempts = 0;
+    while (attempts < 150) : (attempts += 1) {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        if (std.mem.eql(u8, runtime_b.currentGeneration().observation.cwd.items, "/tmp/e4d-b1") and
+            metadataParitySurfaceContains(&runtime_b, io, "B1")) break;
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(attempts < 150);
+    for (0..10) |_| {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        _ = usleep(20 * 1000);
+    }
+    const b_after_update_revision = runtime_b.currentGeneration().observation.revision;
+    const a_after_b = &runtime_a.currentGeneration().observation;
+    try testing.expectEqual(a_revision, a_after_b.revision);
+    try testing.expectEqual(a_cwd_ptr, a_after_b.cwd.items.ptr);
+    try testing.expectEqual(a_title_ptr, a_after_b.window_title.items.ptr);
+    try testing.expectEqual(a_ssh_ptr, a_after_b.ssh_remote_dest.items.ptr);
+    try testing.expectEqual(a_process_ptr, a_after_b.foreground_processes.items.ptr);
+    try testing.expectEqual(a_pgid, a_after_b.foreground_pgid);
+    try testing.expect(metadataParityProcessesEqual(a_after_b.foreground_processes.items, a_processes));
+    try testing.expectEqualStrings("/tmp/e4d-a1", a_after_b.cwd.items);
+    try testing.expectEqualStrings("e4d-a1", a_after_b.window_title.items);
+    try testing.expectEqualStrings("a1", a_after_b.ssh_remote_dest.items);
+
+    const runtime_id_a = runtime_a.runtimeIdHex();
+    runtime_a.detachClientSide();
+    runtime_a_live = false;
+    try signalMetadataParityFifo(fifo_a);
+    attempts = 0;
+    while (attempts < 150 and c.access(detached_commit.ptr, c.F_OK) != 0) : (attempts += 1)
+        _ = usleep(20 * 1000);
+    try testing.expect(c.access(detached_commit.ptr, c.F_OK) == 0);
+
+    // The child creates detached_commit only after receiving the OSC 11 reply. That reply is emitted
+    // by the host reader after it has parsed the preceding A2 metadata, so this attach cannot race the
+    // metadata commit. attachExisting must publish the current full-state before returning; no pump is
+    // allowed between return and these assertions.
+    var reattached: RemoteRuntime = undefined;
+    try RemoteRuntime.attachExistingWithAdapter(
+        &reattached,
+        &adapter,
+        allocator,
+        io,
+        3,
+        runtime_id_a,
+        .{ .cols = 40, .rows = 10 },
+    );
+    defer reattached.deinit();
+    try testing.expectEqual(runtime_id_a, reattached.runtimeIdHex());
+    const current = &reattached.currentGeneration().observation;
+    try testing.expect(current.revision != 0);
+    try testing.expectEqualStrings("/tmp/e4d-a2", current.cwd.items);
+    try testing.expectEqualStrings("e4d-a2", current.window_title.items);
+    try testing.expect(current.ssh_remote_dest_present);
+    try testing.expectEqualStrings("a2", current.ssh_remote_dest.items);
+    try testing.expect(metadataParitySurfaceContains(&reattached, io, "A2"));
+    try testing.expectEqual(b_after_update_revision, runtime_b.currentGeneration().observation.revision);
+    try testing.expectEqualStrings("/tmp/e4d-b1", runtime_b.currentGeneration().observation.cwd.items);
 }
 
 test "remote runtime: attachExisting reconnects to a pre-existing host runtime and renders its screen" {

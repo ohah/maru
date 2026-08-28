@@ -41584,6 +41584,12 @@ test "file tree reprojection keeps the user's scroll unless the selection actual
     //    조용히 남는다 — 그래서 축이 `Selection.generation` 이 아니라 **보여 준 신원**이다.
     session.file_tree_scroll.reset();
     const last_index = session.file_tree_rows.items.len - 1;
+    // **판정할 수 있는 상태인지 먼저 본다**(§10.1). 아래 두 항은 목록이 뷰포트보다 두 행 이상 길
+    // 때만 무엇을 판정한다 — 짧으면 예약이 "이미 보이는 행"이 돼 reveal 이 no-op 이 되고, 기대값의
+    // u32 뺄셈이 음수로 감겨 패닉한다. 픽스처가 그 상태를 못 만들면 통과시키지 않는다.
+    const tree_h = dock_ops.dockGeometry(session).tree_content.h;
+    if (last_index < 1 or @as(u32, @intCast(last_index)) * cell_h <= tree_h)
+        return error.FileTreeFixtureTooShortToJudgeReveal;
     try std.testing.expect(session.file_tree_selection.setIdentity(
         .file,
         session.file_tree_rows.items[last_index].file.path,
@@ -41592,7 +41598,7 @@ test "file tree reprojection keeps the user's scroll unless the selection actual
     file_panel_ops.reconcileFileTreeSelection(session);
     const revealed_scroll = file_panel_ops.fileTreeEffectiveScrollPx(session);
     try std.testing.expectEqual(
-        @as(u32, @intCast(last_index + 1)) * cell_h - dock_ops.dockGeometry(session).tree_content.h,
+        @as(u32, @intCast(last_index + 1)) * cell_h - tree_h,
         revealed_scroll,
     );
 
@@ -41628,7 +41634,7 @@ test "file tree reprojection keeps the user's scroll unless the selection actual
     try std.testing.expect(file_tree_dock_ops.fileTreeRowHeightPx(session) > 0);
     file_panel_ops.reconcileFileTreeSelection(session); // 이제야 보여 준다
     try std.testing.expectEqual(
-        @as(u32, @intCast(pending_index + 1)) * cell_h - dock_ops.dockGeometry(session).tree_content.h,
+        @as(u32, @intCast(pending_index + 1)) * cell_h - tree_h,
         file_panel_ops.fileTreeEffectiveScrollPx(session),
     );
 }

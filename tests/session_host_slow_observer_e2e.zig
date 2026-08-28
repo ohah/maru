@@ -19,7 +19,7 @@ extern "c" fn getdtablesize() c_int;
 extern "c" fn arc4random_buf(buffer: *anyopaque, length: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
 
-const schema_name = "maru.session-host-slow-observer-macos.v2";
+const schema_name = "maru.session-host-slow-observer-macos.v3";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -30,7 +30,7 @@ const baseline_sample_count = 10;
 const pressure_sample_count_min = 20;
 const post_sample_count = 10;
 const wake_sample_count = 7;
-const idle_wake_observation_ms: u64 = 250;
+const idle_wake_observation_ms: u64 = 1_000;
 const target_interval_us: c_uint = 20_000;
 const deadline_ms: u64 = 30_000;
 const sol_local: c_int = 0;
@@ -59,6 +59,16 @@ const IdleCpuSample = struct {
     monotonic_ns: u64,
     user_time_ns: u64,
     system_time_ns: u64,
+};
+
+const ScreenIdleScaleSample = struct {
+    runtime_count: u32,
+    observation_ns: u64,
+    cpu_total_delta_ns: u64,
+    snapshot_call_delta: u64,
+    delta_call_delta: u64,
+    owned_allocation_delta: u64,
+    core_lock_acquisition_delta: u64,
 };
 
 const ProcessIdentity = struct {
@@ -130,6 +140,15 @@ const Artifact = struct {
     idle_observation_materialization_delta: u64,
     idle_observation_core_lock_acquisition_delta: u64,
     idle_observation_core_lock_hold_delta_ns: u64,
+    screen_snapshot_calls: u64,
+    screen_delta_calls: u64,
+    screen_owned_allocations: u64,
+    screen_core_lock_acquisitions: u64,
+    idle_screen_snapshot_call_delta: u64,
+    idle_screen_delta_call_delta: u64,
+    idle_screen_owned_allocation_delta: u64,
+    idle_screen_core_lock_acquisition_delta: u64,
+    screen_idle_scale_samples: []const ScreenIdleScaleSample,
     active_wake_notify_delta: u64,
     active_wake_published_delta: u64,
     active_wake_coalesced_delta: u64,
@@ -426,7 +445,11 @@ pub fn main(init: std.process.Init) !void {
             settle_after.output_wake_notify_attempts == settle_before.output_wake_notify_attempts and
             settle_after.output_wake_published_writes == settle_before.output_wake_published_writes and
             settle_after.output_wake_coalesced_writes == settle_before.output_wake_coalesced_writes and
-            settle_after.output_wake_drain_turns == settle_before.output_wake_drain_turns)
+            settle_after.output_wake_drain_turns == settle_before.output_wake_drain_turns and
+            settle_after.screen_snapshot_calls == settle_before.screen_snapshot_calls and
+            settle_after.screen_delta_calls == settle_before.screen_delta_calls and
+            settle_after.screen_owned_allocations == settle_before.screen_owned_allocations and
+            settle_after.screen_core_lock_acquisitions == settle_before.screen_core_lock_acquisitions)
         {
             settle_before = settle_after;
             settled = true;
@@ -456,6 +479,107 @@ pub fn main(init: std.process.Init) !void {
         idle_wake_after.output_wake_coalesced_writes != idle_wake_before.output_wake_coalesced_writes or
         idle_wake_after.output_wake_drain_turns != idle_wake_before.output_wake_drain_turns)
         return error.IdleOutputWakeStorm;
+
+    var scale_samples: [3]ScreenIdleScaleSample = undefined;
+    scale_samples[0] = .{
+        .runtime_count = 1,
+        .observation_ns = idle_wake_ended_at - idle_wake_started_at,
+        .cpu_total_delta_ns = (idle_cpu_after.user_time_ns - idle_cpu_before.user_time_ns) +
+            (idle_cpu_after.system_time_ns - idle_cpu_before.system_time_ns),
+        .snapshot_call_delta = idle_wake_after.screen_snapshot_calls - idle_wake_before.screen_snapshot_calls,
+        .delta_call_delta = idle_wake_after.screen_delta_calls - idle_wake_before.screen_delta_calls,
+        .owned_allocation_delta = idle_wake_after.screen_owned_allocations - idle_wake_before.screen_owned_allocations,
+        .core_lock_acquisition_delta = idle_wake_after.screen_core_lock_acquisitions - idle_wake_before.screen_core_lock_acquisitions,
+    };
+
+    // Scale the same product host to 10 and 100 actual PTYs. Each runtime has one controller and
+    // one observer stream; initial snapshots are consumed before the one-second steady window.
+    var scale_runtime_ids: [100][32]u8 = undefined;
+    scale_runtime_ids[0] = runtime_id;
+    var scale_runtime_count: usize = 1;
+    var scale_sample_index: usize = 1;
+    while (scale_runtime_count < scale_runtime_ids.len) : (scale_runtime_count += 1) {
+        stage = "screen idle scale spawn";
+        const extra_spawn = try controller.call("runtime.spawn",
+            \\{"argv":["/bin/cat"],"cols":80,"rows":24}
+        );
+        scale_runtime_ids[scale_runtime_count] = session_host.client.extractRuntimeId(extra_spawn) orelse
+            return error.RuntimeSpawnFailed;
+        allocator.free(extra_spawn);
+
+        const extra_controller_stream = try attachRuntime(
+            allocator,
+            &controller,
+            &scale_runtime_ids[scale_runtime_count],
+            "controller",
+        );
+        const extra_controller_snapshot = try controller.readSnapshot(extra_controller_stream);
+        allocator.free(extra_controller_snapshot);
+        const extra_observer_stream = try attachRuntime(
+            allocator,
+            &healthy,
+            &scale_runtime_ids[scale_runtime_count],
+            "observer",
+        );
+        const extra_observer_snapshot = try healthy.readSnapshot(extra_observer_stream);
+        allocator.free(extra_observer_snapshot);
+
+        const reached_count = scale_runtime_count + 1;
+        if (reached_count == 10 or reached_count == 100) {
+            stage = if (reached_count == 10)
+                "screen idle scale 10"
+            else
+                "screen idle scale 100";
+            _ = usleep(600 * std.time.us_per_ms);
+            const before = try probe(
+                command_pair[0],
+                report_pair[0],
+                &sequence,
+                .snapshot,
+                deadline_ns,
+                init.io,
+            );
+            const cpu_before = try takeIdleCpuSample(host_identity, init.io);
+            const started_at = monotonicNow(init.io);
+            _ = usleep(@intCast(idle_wake_observation_ms * std.time.us_per_ms));
+            const after = try probe(
+                command_pair[0],
+                report_pair[0],
+                &sequence,
+                .snapshot,
+                deadline_ns,
+                init.io,
+            );
+            const cpu_after = try takeIdleCpuSample(host_identity, init.io);
+            const ended_at = monotonicNow(init.io);
+            scale_samples[scale_sample_index] = .{
+                .runtime_count = @intCast(reached_count),
+                .observation_ns = ended_at - started_at,
+                .cpu_total_delta_ns = (cpu_after.user_time_ns - cpu_before.user_time_ns) +
+                    (cpu_after.system_time_ns - cpu_before.system_time_ns),
+                .snapshot_call_delta = after.screen_snapshot_calls - before.screen_snapshot_calls,
+                .delta_call_delta = after.screen_delta_calls - before.screen_delta_calls,
+                .owned_allocation_delta = after.screen_owned_allocations - before.screen_owned_allocations,
+                .core_lock_acquisition_delta = after.screen_core_lock_acquisitions - before.screen_core_lock_acquisitions,
+            };
+            scale_sample_index += 1;
+        }
+    }
+    if (scale_sample_index != scale_samples.len) return error.MissingScaleEvidence;
+
+    stage = "screen idle scale cleanup";
+    var cleanup_index: usize = scale_runtime_ids.len;
+    while (cleanup_index > 1) {
+        cleanup_index -= 1;
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"runtime_id\":\"{s}\"}}",
+            .{&scale_runtime_ids[cleanup_index]},
+        );
+        const response = try controller.call("runtime.terminate", params);
+        allocator.free(params);
+        allocator.free(response);
+    }
 
     stage = "output wake latency";
     var wake_samples: [wake_sample_count]WakeSample = undefined;
@@ -866,6 +990,15 @@ pub fn main(init: std.process.Init) !void {
         .idle_observation_materialization_delta = idle_wake_after.observation_materializations - idle_wake_before.observation_materializations,
         .idle_observation_core_lock_acquisition_delta = idle_wake_after.observation_core_lock_acquisitions - idle_wake_before.observation_core_lock_acquisitions,
         .idle_observation_core_lock_hold_delta_ns = idle_wake_after.observation_core_lock_hold_total_ns - idle_wake_before.observation_core_lock_hold_total_ns,
+        .screen_snapshot_calls = final_report.screen_snapshot_calls,
+        .screen_delta_calls = final_report.screen_delta_calls,
+        .screen_owned_allocations = final_report.screen_owned_allocations,
+        .screen_core_lock_acquisitions = final_report.screen_core_lock_acquisitions,
+        .idle_screen_snapshot_call_delta = idle_wake_after.screen_snapshot_calls - idle_wake_before.screen_snapshot_calls,
+        .idle_screen_delta_call_delta = idle_wake_after.screen_delta_calls - idle_wake_before.screen_delta_calls,
+        .idle_screen_owned_allocation_delta = idle_wake_after.screen_owned_allocations - idle_wake_before.screen_owned_allocations,
+        .idle_screen_core_lock_acquisition_delta = idle_wake_after.screen_core_lock_acquisitions - idle_wake_before.screen_core_lock_acquisitions,
+        .screen_idle_scale_samples = &scale_samples,
         .active_wake_notify_delta = active_wake_after.output_wake_notify_attempts - idle_wake_after.output_wake_notify_attempts,
         .active_wake_published_delta = active_wake_after.output_wake_published_writes - idle_wake_after.output_wake_published_writes,
         .active_wake_coalesced_delta = active_wake_after.output_wake_coalesced_writes - idle_wake_after.output_wake_coalesced_writes,

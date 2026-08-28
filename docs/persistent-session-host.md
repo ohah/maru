@@ -7248,8 +7248,8 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
       1·10·100 runtime 제품 fixture는 최초 sweep의 materialization이 runtime 수와 정확히 같고, 둘째 consumer·다음 idle
       sweep의 증분은 0이며, runtime 하나의 source change 뒤 증분은 정확히 1임을 고정한다. 별도 macOS artifact는 idle
       CPU/allocation, output→healthy-client latency, core-lock hold와 RSS를 남기며 hard cap은 `performance-budget.md`가
-      소유한다. **E2c artifact/cap gate도 구현됐다.** private probe v2가 실제 ReleaseFast host의 누적
-      materialization·core-lock 획득/hold와 250ms idle 전후 증분을 raw artifact에 남긴다. validator는
+      소유한다. **E2c artifact/cap gate도 구현됐다.** private probe v3가 실제 ReleaseFast host의 누적
+      materialization·core-lock 획득/hold와 1초 idle 전후 증분을 raw artifact에 남긴다. validator는
       runtime당 lock 획득 정확히 3회, idle materialization/lock/allocation opportunity 0, 개별 lock hold 25ms
       상한을 기존 idle CPU·healthy latency·RSS 상한과 함께 fail-closed로 판정한다. 이로써 E2는 완료지만
       아래 P4의 다른 목록 전체가 닫힌 것은 아니다.

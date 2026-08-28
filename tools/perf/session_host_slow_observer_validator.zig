@@ -7,7 +7,7 @@
 const std = @import("std");
 const connection_slot = @import("connection_slot");
 
-const schema_name = "maru.session-host-slow-observer-macos.v2";
+const schema_name = "maru.session-host-slow-observer-macos.v3";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -17,7 +17,8 @@ const workload_bytes_per_iteration: u64 = 2 * mib;
 const workload_iterations_max: u64 = 8;
 const marker_input_bytes: u64 = 33; // 128-bit nonce의 lowercase hex 32 byte + LF.
 const wake_sample_count: usize = 7;
-const idle_wake_observation_min_ns: u64 = 250 * std.time.ns_per_ms;
+const idle_wake_observation_min_ns: u64 = 1_000 * std.time.ns_per_ms;
+const screen_idle_cpu_total_cap_ns: u64 = 100 * std.time.ns_per_ms;
 pub const idle_cpu_total_cap_ns: u64 = 25 * std.time.ns_per_ms;
 pub const output_wake_median_cap_ns: u64 = 10 * std.time.ns_per_ms;
 pub const output_wake_tail_cap_ns: u64 = 20 * std.time.ns_per_ms;
@@ -67,6 +68,16 @@ const IdleCpuSample = struct {
     monotonic_ns: u64,
     user_time_ns: u64,
     system_time_ns: u64,
+};
+
+const ScreenIdleScaleSample = struct {
+    runtime_count: u32,
+    observation_ns: u64,
+    cpu_total_delta_ns: u64,
+    snapshot_call_delta: u64,
+    delta_call_delta: u64,
+    owned_allocation_delta: u64,
+    core_lock_acquisition_delta: u64,
 };
 
 /// Flat top-level fields make the artifact easy to inspect in CI while RawSample remains a typed
@@ -135,6 +146,15 @@ const Artifact = struct {
     idle_observation_materialization_delta: u64,
     idle_observation_core_lock_acquisition_delta: u64,
     idle_observation_core_lock_hold_delta_ns: u64,
+    screen_snapshot_calls: u64,
+    screen_delta_calls: u64,
+    screen_owned_allocations: u64,
+    screen_core_lock_acquisitions: u64,
+    idle_screen_snapshot_call_delta: u64,
+    idle_screen_delta_call_delta: u64,
+    idle_screen_owned_allocation_delta: u64,
+    idle_screen_core_lock_acquisition_delta: u64,
+    screen_idle_scale_samples: []const ScreenIdleScaleSample,
     active_wake_notify_delta: u64,
     active_wake_published_delta: u64,
     active_wake_coalesced_delta: u64,
@@ -328,6 +348,32 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
         artifact.idle_observation_core_lock_hold_delta_ns != 0)
     {
         return error.InvalidObservationEvidence;
+    }
+    if (artifact.screen_snapshot_calls == 0 or artifact.screen_delta_calls == 0 or
+        artifact.screen_owned_allocations <
+            artifact.screen_snapshot_calls + artifact.screen_delta_calls or
+        artifact.screen_core_lock_acquisitions !=
+            artifact.screen_snapshot_calls + artifact.screen_delta_calls or
+        artifact.idle_screen_snapshot_call_delta != 0 or
+        artifact.idle_screen_delta_call_delta != 0 or
+        artifact.idle_screen_owned_allocation_delta != 0 or
+        artifact.idle_screen_core_lock_acquisition_delta != 0)
+    {
+        return error.InvalidScreenEvidence;
+    }
+    const expected_runtime_counts = [_]u32{ 1, 10, 100 };
+    if (artifact.screen_idle_scale_samples.len != expected_runtime_counts.len)
+        return error.InvalidScreenScaleEvidence;
+    for (artifact.screen_idle_scale_samples, expected_runtime_counts) |sample, expected_count| {
+        if (sample.runtime_count != expected_count or
+            sample.observation_ns < idle_wake_observation_min_ns or
+            sample.cpu_total_delta_ns > screen_idle_cpu_total_cap_ns or
+            sample.snapshot_call_delta != 0 or sample.delta_call_delta != 0 or
+            sample.owned_allocation_delta != 0 or
+            sample.core_lock_acquisition_delta != 0)
+        {
+            return error.InvalidScreenScaleEvidence;
+        }
     }
     if (artifact.slow_connection_id == 0 or
         artifact.slow_connection_id != artifact.first_stall_connection_id)
@@ -662,6 +708,11 @@ const wake_fixture = [_]WakeSample{
     .{ .input_at_ns = 950_000_000, .input_accepted_at_ns = 951_000_000, .marker_at_ns = 960_000_000, .end_to_end_latency_ns = 10_000_000, .delivery_latency_ns = 9_000_000 },
     .{ .input_at_ns = 970_000_000, .input_accepted_at_ns = 971_000_000, .marker_at_ns = 981_000_000, .end_to_end_latency_ns = 11_000_000, .delivery_latency_ns = 10_000_000 },
 };
+const screen_idle_scale_fixture = [_]ScreenIdleScaleSample{
+    .{ .runtime_count = 1, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 1_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0 },
+    .{ .runtime_count = 10, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 10_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0 },
+    .{ .runtime_count = 100, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 50_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0 },
+};
 
 fn goodArtifact() Artifact {
     return .{
@@ -720,7 +771,7 @@ fn goodArtifact() Artifact {
             .system_time_ns = 50_000_000,
         },
         .idle_cpu_after = .{
-            .monotonic_ns = 950_000_000,
+            .monotonic_ns = 1_700_000_000,
             .user_time_ns = 105_000_000,
             .system_time_ns = 52_000_000,
         },
@@ -732,6 +783,15 @@ fn goodArtifact() Artifact {
         .idle_observation_materialization_delta = 0,
         .idle_observation_core_lock_acquisition_delta = 0,
         .idle_observation_core_lock_hold_delta_ns = 0,
+        .screen_snapshot_calls = 3,
+        .screen_delta_calls = 7,
+        .screen_owned_allocations = 17,
+        .screen_core_lock_acquisitions = 10,
+        .idle_screen_snapshot_call_delta = 0,
+        .idle_screen_delta_call_delta = 0,
+        .idle_screen_owned_allocation_delta = 0,
+        .idle_screen_core_lock_acquisition_delta = 0,
+        .screen_idle_scale_samples = &screen_idle_scale_fixture,
         .active_wake_notify_delta = wake_sample_count,
         .active_wake_published_delta = wake_sample_count,
         .active_wake_coalesced_delta = 0,
@@ -845,6 +905,66 @@ test "idle observation evidence rejects every product-owned work delta" {
     artifact.idle_observation_core_lock_hold_delta_ns = 1;
     try testing.expectError(
         error.InvalidObservationEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+}
+
+test "idle screen evidence rejects every projector-owned work delta" {
+    inline for (.{
+        "idle_screen_snapshot_call_delta",
+        "idle_screen_delta_call_delta",
+        "idle_screen_owned_allocation_delta",
+        "idle_screen_core_lock_acquisition_delta",
+    }) |field_name| {
+        var artifact = goodArtifact();
+        @field(artifact, field_name) = 1;
+        try testing.expectError(
+            error.InvalidScreenEvidence,
+            validateArtifact(testing.allocator, artifact),
+        );
+    }
+}
+
+test "screen scale evidence pins actual 1 10 100 runtime rows and hard budgets" {
+    var rows = screen_idle_scale_fixture;
+    var artifact = goodArtifact();
+    artifact.screen_idle_scale_samples = rows[0..2];
+    try testing.expectError(
+        error.InvalidScreenScaleEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    inline for (.{
+        "snapshot_call_delta",
+        "delta_call_delta",
+        "owned_allocation_delta",
+        "core_lock_acquisition_delta",
+    }) |field_name| {
+        rows = screen_idle_scale_fixture;
+        @field(rows[2], field_name) = 1;
+        artifact = goodArtifact();
+        artifact.screen_idle_scale_samples = &rows;
+        try testing.expectError(
+            error.InvalidScreenScaleEvidence,
+            validateArtifact(testing.allocator, artifact),
+        );
+    }
+
+    rows = screen_idle_scale_fixture;
+    rows[1].runtime_count = 11;
+    artifact = goodArtifact();
+    artifact.screen_idle_scale_samples = &rows;
+    try testing.expectError(
+        error.InvalidScreenScaleEvidence,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    rows = screen_idle_scale_fixture;
+    rows[2].cpu_total_delta_ns = screen_idle_cpu_total_cap_ns + 1;
+    artifact = goodArtifact();
+    artifact.screen_idle_scale_samples = &rows;
+    try testing.expectError(
+        error.InvalidScreenScaleEvidence,
         validateArtifact(testing.allocator, artifact),
     );
 }

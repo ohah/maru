@@ -678,6 +678,7 @@ pub const runtime_manager_groups = [_]Group{
             "host_registry",
             "foreground_cache",
             "observation_caches",
+            "screen_changes",
             "bell_counts",
             "clipboards",
             "observed_reaped_children",
@@ -691,6 +692,11 @@ pub const runtime_manager_groups = [_]Group{
             "observation_core_lock_acquisitions",
             "observation_core_lock_hold_total_ns",
             "observation_core_lock_hold_max_ns",
+            "screen_metrics_enabled",
+            "screen_snapshot_calls",
+            "screen_delta_calls",
+            "screen_owned_allocations",
+            "screen_core_lock_acquisitions",
             "output_wake",
             // The successor re-derives this from its own invocation host_id, which upgrade validation forces to
             // equal the predecessor's, so the agent-hook instance segment it stamps on new children keeps the
@@ -702,7 +708,7 @@ pub const runtime_manager_groups = [_]Group{
             // spawned after an upgrade silently lost its hook identity. Adversarial review caught it.
             "hook_identity",
         },
-        .why = "the self-referential manager graph, process-local output self-pipe, OS notification adapter/retry clock, and derived canonical observation caches are rebuilt in place from serialized host and runtime records; pending_os remains authoritative in the serialized journal so an interrupted delivery is retried without success ack, while process-local backoff and diagnostic counters restart; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
+        .why = "the self-referential manager graph, process-local output self-pipe, OS notification adapter/retry clock, derived canonical observation caches, and screen-change tokens are rebuilt in place from serialized host and runtime records; upgrade preflight requires zero attachments, so restored streams capture the successor token with their initial snapshot rather than inheriting a predecessor subscription frontier; pending_os remains authoritative in the serialized journal so an interrupted delivery is retried without success ack, while process-local backoff and diagnostic counters restart; bell, clipboard, and fixture-only diagnostic counters restart at zero; the agent-hook log identity (host id + cache base) is re-derived from the invocation that upgrade validation already pins to the same host_id",
     },
 };
 

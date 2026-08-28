@@ -239,6 +239,13 @@ pub const RuntimeOps = struct {
     /// `base`(client가 마지막으로 받은 full snapshot 바이트) 대비 현재 화면 변화를 계산한다(§9 delta). host가 core lock
     /// 아래 diff하고 `StreamUpdate`를 돌려준다 — `send`(delta 또는 fresh snapshot)와 다음 diff의 base가 될 현재 snapshot.
     delta: *const fn (ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!StreamUpdate,
+    /// Runtime-owner screen mutation token. When present, an equal committed token proves that
+    /// opening the delta projector would only rebuild the same base. Null keeps the legacy test
+    /// seam polling until its backend adopts P4 E3a.
+    screen_change_token: ?*const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+    ) anyerror!ScreenChangeToken = null,
     /// Pending notification을 지우지 않고 off-side JSON과 generation token으로 복제한다. server가 response를
     /// canonical control queue에 admission한 뒤에만 `notification_commit`으로 같은 generation을 소비한다.
     notification_peek: *const fn (
@@ -303,6 +310,11 @@ pub const RuntimeOps = struct {
     /// host가 정확히 아는 **이벤트**라 그 주기를 기다릴 이유가 없다. true면 다음 serve tick(약 20ms)에 바로
     /// 관측을 만들어 push한다 — 통로는 그대로 두고 트리거만 앞당긴다.
     observation_urgent: *const fn (ctx: *anyopaque, runtime_id: u128) bool,
+};
+
+pub const ScreenChangeToken = struct {
+    incarnation: u64,
+    revision: u64,
 };
 
 pub const NotificationSnapshot = struct {
@@ -593,6 +605,7 @@ pub const CollectedOutput = struct {
     replace_base: bool = false,
     next_screen_sequence: ?u64 = null,
     next_screen_generation: ?u64 = null,
+    next_screen_change_token: ?ScreenChangeToken = null,
     prepared_catchup: ?PreparedCatchupBatch = null,
     clear_resync: bool = false,
     next_observation_token: ?u64 = null,
@@ -646,6 +659,7 @@ pub const CollectedOutput = struct {
         }
         if (self.next_screen_sequence) |sequence| sub.screen_sequence = sequence;
         if (self.next_screen_generation) |generation| sub.screen_generation = generation;
+        if (self.next_screen_change_token) |token| sub.screen_change_token = token;
         if (self.prepared_catchup) |*prepared| {
             sub.catchup = prepared.after;
         }
@@ -752,6 +766,7 @@ pub const Connection = struct {
         /// 0이고, 이후 resync/fallback snapshot과 non-empty delta batch는 exact +1로 전진한다.
         screen_sequence: u64 = 0,
         screen_generation: u64 = 0,
+        screen_change_token: ?ScreenChangeToken = null,
         catchup: catchup_barrier_contract.HostState = .idle,
     };
 
@@ -1910,6 +1925,18 @@ pub const Connection = struct {
             reply_transferred = true;
             return .{ .reply = reply_frame };
         };
+        const initial_screen_change_token: ?ScreenChangeToken = if (ops.screen_change_token) |read_token|
+            read_token(ops.ctx, id.?) catch {
+                if (prepared_product) {
+                    prepared_output.rollback(self);
+                    prepared_transferred = true;
+                }
+                self.rollbackAttach(stream);
+                self.state = .closed;
+                return .close;
+            }
+        else
+            null;
         const projected_snapshot = ops.snapshot(ops.ctx, id.?, 0, self.allocator) catch {
             if (prepared_product) {
                 prepared_output.rollback(self);
@@ -1938,10 +1965,12 @@ pub const Connection = struct {
             prepared_output.replace_base = true;
             prepared_output.next_screen_sequence = projected_snapshot.frontier.sequence;
             prepared_output.next_screen_generation = projected_snapshot.frontier.generation;
+            prepared_output.next_screen_change_token = initial_screen_change_token;
         } else if (self.attachments.getPtr(stream)) |sub| {
             sub.base = snap_bytes;
             sub.screen_sequence = projected_snapshot.frontier.sequence;
             sub.screen_generation = projected_snapshot.frontier.generation;
+            sub.screen_change_token = initial_screen_change_token;
         } else self.allocator.free(snap_bytes);
 
         // snapshot_chunk*를 조립한다. Product path는 response와 이 batch를 owner가 각각 admission한 뒤
@@ -2808,11 +2837,38 @@ pub const Connection = struct {
             }
         }
 
-        if (sub.resync_pending) {
+        // Read once before projection. A reader mutation racing after this read advances a later
+        // token and therefore schedules another delta; reading after projection could instead
+        // stamp a base with a mutation it did not contain and lose that wake.
+        const screen_change_token: ?ScreenChangeToken = if (ops.screen_change_token) |read_token|
+            read_token(ops.ctx, sub.runtime_id) catch |err| switch (err) {
+                error.RuntimeNotFound => {
+                    if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    self.discardPreparedOutput(&list, &output);
+                    output.rollback(self);
+                    self.endMissingRuntime(stream);
+                    return null;
+                },
+                else => return error.OutOfMemory,
+            }
+        else
+            null;
+        const screen_changed = screen_change_token == null or
+            sub.screen_change_token == null or
+            !std.meta.eql(screen_change_token.?, sub.screen_change_token.?);
+        const screen_incarnation_changed = if (screen_change_token) |current|
+            if (sub.screen_change_token) |committed|
+                current.incarnation != committed.incarnation
+            else
+                false
+        else
+            false;
+
+        if (sub.resync_pending or screen_incarnation_changed) {
             // Invalidation releases both screen and metadata delivery authority. A metadata-capable
             // client must therefore receive a fresh prefix in the same atomic recovery batch; a
             // transient observation/encoding miss cannot be committed as snapshot-only recovery.
-            if (self.runtime_metadata_v1 and sub.observation_token == null and
+            if (sub.resync_pending and self.runtime_metadata_v1 and sub.observation_token == null and
                 output.next_observation_token == null)
             {
                 self.discardPreparedOutput(&list, &output);
@@ -2845,11 +2901,12 @@ pub const Connection = struct {
                 return error.OutOfMemory;
             output.next_base = self.allocator.dupe(u8, projected.bytes) catch return error.OutOfMemory;
             output.replace_base = true;
-            output.clear_resync = true;
+            output.clear_resync = sub.resync_pending;
             output.next_screen_sequence = projected.frontier.sequence;
             output.next_screen_generation = projected.frontier.generation;
+            output.next_screen_change_token = screen_change_token;
             try self.appendChunks(&list, .snapshot_chunk, stream, projected.bytes);
-        } else if (sub.base) |base| {
+        } else if (sub.base) |base| if (screen_changed) {
             // A valid delta producer failure cannot be treated as "no change": bounded projection
             // overflow would then retry every tick forever while the client silently freezes on an
             // old base. The adapter fail-closes this connection and revokes its leases.
@@ -2879,6 +2936,7 @@ pub const Connection = struct {
             }
             output.next_base = update.new_base;
             output.replace_base = true;
+            output.next_screen_change_token = screen_change_token;
             if (update.send.len != 0) {
                 const kind: protocol.Kind = if (update.is_snapshot) .snapshot_chunk else .delta_chunk;
                 try self.appendChunks(&list, kind, stream, update.send);
@@ -2892,7 +2950,7 @@ pub const Connection = struct {
             {
                 return error.OutOfMemory;
             }
-        }
+        };
 
         if (sub.catchup == .pending) {
             const pending = sub.catchup.pending;
@@ -4743,6 +4801,8 @@ pub const FakeRuntimeOps = struct {
     delta_is_snapshot: bool = false,
     frontier_generation: u64 = 0,
     delta_calls: usize = 0,
+    screen_change_token: ScreenChangeToken = .{ .incarnation = 1, .revision = 1 },
+    screen_token_reads: usize = 0,
     delta_probe_ctx: ?*anyopaque = null,
     delta_probe: ?*const fn (*anyopaque) void = null,
     snapshot_fail_count: usize = 0,
@@ -4883,6 +4943,12 @@ pub const FakeRuntimeOps = struct {
                 .sequence = if (send.len == 0) sequence - 1 else sequence,
             },
         };
+    }
+    fn screenChangeTokenFn(ctx: *anyopaque, runtime_id: u128) anyerror!ScreenChangeToken {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        if (self.runtime_missing or runtime_id != 0xaa) return error.RuntimeNotFound;
+        self.screen_token_reads += 1;
+        return self.screen_change_token;
     }
     /// 대기 알림 없음(빈 title/body)을 돌려준다 — 기본 fake. server dispatch 배선만 검증(실 core 파싱은 runtime_manager smoke).
     fn notificationPeekFn(
@@ -5108,6 +5174,12 @@ pub const FakeRuntimeOps = struct {
 
     pub fn ops(self: *FakeRuntimeOps) RuntimeOps {
         return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .notification_config_update = notificationConfigUpdateFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
+    }
+
+    pub fn opsWithScreenChangeToken(self: *FakeRuntimeOps) RuntimeOps {
+        var result = self.ops();
+        result.screen_change_token = screenChangeTokenFn;
+        return result;
     }
 };
 
@@ -5550,6 +5622,59 @@ test "server: attach streams the runtime snapshot as snapshot_chunk frames after
     try testing.expect(protocol.Flags.hasEndStream(frames[1].header.flags));
     try testing.expectEqual(@as(u64, 1), frames[1].header.stream_id);
     try testing.expectEqualStrings("SNAPSHOT-BYTES", frames[1].payload);
+}
+
+test "P4 E3a unchanged screen token opens no projector and one advance commits exactly once" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{ .screen_change_token = .{ .incarnation = 1, .revision = 1 } };
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.opsWithScreenChangeToken();
+    {
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    const attach = try feedExpectFrames(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (attach) |frame| frame.deinit(allocator);
+        allocator.free(attach);
+    }
+    try testing.expectEqual(@as(usize, 1), fake.snapshot_calls);
+
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(@as(usize, 0), fake.delta_calls);
+    try testing.expectEqual(@as(usize, 2), fake.screen_token_reads);
+
+    fake.screen_change_token.revision = 2;
+    var rejected = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 1), fake.delta_calls);
+    rejected.rollback(&conn);
+
+    // Admission rollback must not consume the edge: the same token is projected again.
+    var changed = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 2), fake.delta_calls);
+    changed.commit(&conn);
+
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(@as(usize, 2), fake.delta_calls);
+
+    fake.screen_change_token = .{ .incarnation = 2, .revision = 1 };
+    var rollover = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 2), fake.snapshot_calls);
+    try testing.expectEqual(@as(usize, 2), fake.delta_calls);
+    rollover.commit(&conn);
+
+    try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(@as(usize, 2), fake.snapshot_calls);
 }
 
 test "CR4a frontier는 output admission commit 뒤에만 subscription sequence를 전진한다" {

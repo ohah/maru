@@ -7051,7 +7051,18 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     기존 AppSession cwd/title/at-prompt/workspace/control 소비 회귀는 자동 검증한다. 남은 gate는 controlled foreground
     process fixture, multi-runtime event 격리,
     response 대기 중 event, detach/reconnect 최신 metadata, cwd→Git·agent·SSH 제품 소비 경로를
-    실제 제품 경계에서 무인 테스트하는 것이다. IME marked text의 client-local 공통 snapshot 합성, remote delta 재합성,
+    실제 제품 경계에서 무인 테스트하는 것이다.
+    **P3-e4d-1은 multi-runtime event 격리와 detach/reconnect 최신본을 한 제품 gate로 닫는다.**
+    별도 프로세스의 실제 daemon과 하나의 GUI `Client`에 두 forkpty runtime을 붙이고, runtime A의
+    OSC 7/2/5379 변경이 A의 revision·owned observation만 전진시키며 B의 revision·cwd·title·SSH
+    목적지를 바꾸지 않는지 고정한다. 그런 다음 A attachment를 terminate 없이 detach하고 child가
+    그 사이 새 metadata를 게시하게 한 뒤, 같은 `host_id:runtime_id`로 재접속한 `attachExisting`의
+    최초 응답이 새 full-state를 담고 있음을 추가 pump 이전에 검증한다. 시간 추측은 쓰지 않고
+    harness-owned trigger/marker로 detach 전·변경 commit·reattach 순서를 구분한다. 새 test-only wire
+    method나 제품 분기를 열지 않고, cwd·SSH destination·raw argv는 artifact·실패 log에 남기지
+    않는다. controlled foreground와 Git·agent·SSH 소비자 E2E는 e4d-2 후속이며 e4d-1만으로
+    metadata parity 전체 완료를 주장하지 않는다.
+    IME marked text의 client-local 공통 snapshot 합성, remote delta 재합성,
     scrollback 합성 억제와 canonical cursor/mode 투영, clear 후 canonical base 복원, base ambiguous-width 소비,
     OOM fail-closed, 중복 포커스 상실, 대상 소멸 tombstone, ordered commit→replay, 활성 workspace 창 간 queue 이전과
     source/destination admission과 queue-transfer preflight의 2-phase abort-before-commit/detach 원자성,

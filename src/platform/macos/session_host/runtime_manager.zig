@@ -2849,8 +2849,27 @@ test "P4 E3a screen token advances only after owned output drain and committed o
         if (output_events == 0) _ = usleep(1000);
     }
     try std.testing.expect(output_events != 0);
-    const after_output = try read_token(ops.ctx, rid);
+    var after_output = try read_token(ops.ctx, rid);
     try std.testing.expect(!std.meta.eql(initial, after_output));
+
+    // A PTY can publish terminal echo and child output as two adjacent queue events. Wait for one
+    // bounded quiet window before asserting the idle invariant; an immediately repeated drain is
+    // a race with the second legitimate publication, not evidence that idle polling advanced.
+    var quiet = false;
+    for (0..100) |_| {
+        ready.revents = 0;
+        const poll_result = c.poll(@ptrCast(&ready), 1, 20);
+        try std.testing.expect(poll_result >= 0);
+        if (poll_result == 0) {
+            quiet = true;
+            break;
+        }
+        try std.testing.expect(manager.drainOutputWake());
+        const adjacent = manager.drainOwnedEvents();
+        if (adjacent.output_events != 0)
+            after_output = try read_token(ops.ctx, rid);
+    }
+    try std.testing.expect(quiet);
 
     const idle = manager.drainOwnedEvents();
     try std.testing.expectEqual(@as(usize, 0), idle.output_events);

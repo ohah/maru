@@ -3602,10 +3602,10 @@ pub fn build(b: *std.Build) void {
                 .optimize = e3a_optimize,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"P4 E3a unchanged screen token"},
+            .filters = &.{"P4 E3a unchanged screen"},
         });
         const run_session_host_e3a_server_tests = b.addRunArtifact(session_host_e3a_server_tests);
-        run_session_host_e3a_server_tests.addArg("--maru-expect-tests=1");
+        run_session_host_e3a_server_tests.addArg("--maru-expect-tests=2");
         session_host_e3a_step.dependOn(&run_session_host_e3a_server_tests.step);
 
         const session_host_e3a_manager_tests = addProjectTest(b, .{
@@ -3634,6 +3634,23 @@ pub fn build(b: *std.Build) void {
     run_session_host_e3a_boundary_tests.setCwd(b.path("."));
     session_host_e3a_step.dependOn(&run_session_host_e3a_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3a_boundary_tests.step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e3a_optimize| {
+        const session_host_e3a_remote_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                .target = target,
+                .optimize = e3a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"remote runtime: spawns over the wire"},
+        });
+        const run_session_host_e3a_remote_runtime_tests = b.addRunArtifact(session_host_e3a_remote_runtime_tests);
+        // session_host.zig includes two anonymous import sentinels plus the selected product test.
+        run_session_host_e3a_remote_runtime_tests.addArg("--maru-expect-tests=3");
+        run_session_host_e3a_remote_runtime_tests.setCwd(b.path("."));
+        session_host_e3a_step.dependOn(&run_session_host_e3a_remote_runtime_tests.step);
+    }
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",

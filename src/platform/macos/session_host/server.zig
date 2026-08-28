@@ -2987,6 +2987,11 @@ pub const Connection = struct {
         if (list.items.len == 0 and !output.replace_base and
             output.next_observation_token == null)
         {
+            // This was a successful idle sampling opportunity, not a rejected output batch.
+            // Preserve its metadata cadence while rolling back only the unused projection-budget
+            // reservation. Otherwise an unchanged screen resets 0 -> 1 -> 0 forever and periodic
+            // OSC metadata can never reach its fifth-tick sampling gate.
+            output.previous_observation_ticks = sub.observation_ticks;
             output.rollback(self);
             return null;
         }
@@ -5675,6 +5680,52 @@ test "P4 E3a unchanged screen token opens no projector and one advance commits e
 
     try testing.expectEqual(@as(?CollectedOutput, null), try conn.collectOutputForLocalStream(1));
     try testing.expectEqual(@as(usize, 2), fake.snapshot_calls);
+}
+
+test "P4 E3a unchanged screen preserves metadata cadence and publishes the fifth source change" {
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+
+    var fake: FakeRuntimeOps = .{ .screen_change_token = .{ .incarnation = 1, .revision = 1 } };
+    var conn = Connection.init(allocator, 1, &registry);
+    defer conn.deinit();
+    conn.runtime_ops = fake.opsWithScreenChangeToken();
+    {
+        const hello = try feedJson(
+            &conn,
+            .hello,
+            1,
+            "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\"]}",
+        );
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+    const attach = try feedExpectFrames(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (attach) |frame| frame.deinit(allocator);
+        allocator.free(attach);
+    }
+
+    fake.observation_version = 1;
+    for (0..4) |_| try testing.expectEqual(
+        @as(?CollectedOutput, null),
+        try conn.collectOutputForLocalStream(1),
+    );
+    try testing.expectEqual(@as(usize, 0), fake.delta_calls);
+    try testing.expectEqual(@as(u8, 4), conn.attachments.get(1).?.observation_ticks);
+
+    var metadata = (try conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 1), metadata.frames.len);
+    try testing.expect(std.mem.indexOf(u8, metadata.frames[0], "/tmp/project-next") != null);
+    try testing.expectEqual(@as(usize, 0), fake.delta_calls);
+    metadata.commit(&conn);
+    try testing.expectEqual(@as(u8, 0), conn.attachments.get(1).?.observation_ticks);
 }
 
 test "CR4a frontier는 output admission commit 뒤에만 subscription sequence를 전진한다" {

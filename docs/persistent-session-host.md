@@ -7297,8 +7297,25 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
     resync outbound backpressure, delta-before-snapshot 폐기, fresh snapshot 복구, ended/revoke cleanup과 allocator
     fail-index를 검증한다. cap+1에서 target만 invalidated되고 sibling RPC·screen pump가 계속되는 actual socket fixture를
     포함하며, connection poison·중복 resync·resident 회계 drift가 모두 0이어야 한다.
-- event-driven delta wake와 runtime-shared observation cache/change token을 구현하고 100-runtime idle CPU/allocation,
-  hidden stream, slow observer artifact를 측정한다.
+- **P4 E3 — event-driven producer:** screen과 metadata를 같은 20ms stream sweep으로 재투영하는 현재 임시 경로를
+  두 gate로 닫는다. E3 전체가 green이기 전에는 이 항목을 구현 완료로 표시하지 않는다.
+  - **E3a screen change token/wake:** `RuntimeManager`가 runtime별 checked-monotonic screen change token을 소유한다.
+    PTY queue drain에서 output을 실제 적용했거나 resize·Reset/Clear·scroll/selection처럼 제품 screen projection을 바꾼
+    owner mutation이 commit된 뒤에만 token을 전진시키고 process-local output self-pipe를 깨운다. attachment는 마지막으로
+    commit한 token을 base와 함께 보존한다. wake 뒤 producer는 token이 달라진 runtime의 stream만 delta/snapshot 후보로
+    만들며, unchanged runtime·hidden stream·idle cadence에서는 `delta`/snapshot projector, core lock과 screen-owned
+    allocation이 모두 0이다. resync/initial snapshot은 token equality와 무관한 명시적 work이고, token overflow·누락·
+    stale base는 해당 runtime stream을 fresh-snapshot recovery로 fail-close하되 sibling runtime을 오염시키지 않는다.
+  - **E3b runtime metadata change sampler:** foreground process처럼 PTY output과 독립적으로 바뀔 수 있는 source는
+    client/stream별 100ms sweep이 아니라 runtime별 bounded sampler 하나가 관측한다. core observer/title generation과
+    foreground identity를 runtime-shared cache의 change token으로 접고, token이 전진한 runtime만 metadata producer를
+    깨운다. BEL·clipboard·notification처럼 queue drain에서 이미 드러나는 urgent source는 같은 output wake에 합친다.
+    unchanged runtime은 canonical JSON materialization·core lock·heap allocation뿐 아니라 stream producer visit도 0이다.
+  - **E3 gate:** Debug·ReleaseFast component fixture는 idle/one-runtime-change/multi-observer/hidden/resync/resize/token-overflow와
+    lost-wake interleaving을 검증한다. macOS 제품 artifact는 1·10·100 actual runtime에서 idle screen projector와
+    screen-owned allocation 0, 한 runtime output 뒤 sibling runtime projector 0, controller/healthy observer latency와 slow
+    observer 격리를 기록한다. CPU와 allocation hard budget은 [성능 예산](performance-budget.md#p4-e3-event-driven-screen-delta-예산)이
+    소유한다.
 - 남은 P3 product parity(metadata/selection/Reset·Clear/async SSH action)를 닫는다.
 - 모든 일반 persistent runtime의 OSC 9/777에 `{host_id,runtime_id,event_id}` stable identity를 부여하고, GUI 0
   bounded journal·OS 배너·cold-launch attach와 GUI-live fast hint를 구현한다. notification sink는 daemon 내부
@@ -15445,8 +15462,9 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
 
 - client process 종료 전후 child pid/process group/runtime_id 불변.
 - detach 중 1 MiB 이상 output 후 재접속 화면·scrollback 정합.
-- idle PTY/screen은 timeout polling 없이 기다리고, 현재 100ms metadata poll의 CPU/allocation은 별도 100-runtime budget을 통과한
-  change-driven/shared-cache 경로로 교체.
+- idle PTY/screen은 timeout polling 없이 기다린다. screen은 runtime change token+output wake에서만 projector를 열고,
+  현재 stream별 100ms metadata poll은 runtime별 bounded sampler+shared-cache change token으로 교체한다. 두 경로 모두 별도
+  100-runtime CPU/allocation budget을 통과해야 한다(P4 E3).
 - slow observer queue overflow 뒤 controller/PTY 진행 무정지.
 - 100 runtime의 attach/list/snapshot 메모리 상한과 첫 visible runtime latency artifact.
 - runtime 0/client 0 host bounded 종료와 stale socket 회수.
@@ -15480,8 +15498,10 @@ round-robin producer sweep을 같은 owner turn에서 시작한다. 따라서 `c
 pipe가 가득 찬 `EAGAIN`은 이미 unread wake가 있다는 뜻이라 성공 coalesce이며 reader를 block하지 않는다. 각 성공 queue
 publication은 wake를 시도하므로 owner가 pipe를 비운 직후의 동시 publication도 다음 readiness를 남긴다. QueueFull/QueueClosed는
 새 publication이 아니므로 wake를 만들지 않는다. spurious wake는 빈 drain 뒤 no-op producer sweep이고, read end EOF/error는
-poll owner가 fail-close한다. 20ms `delta_tick_ms`는 metadata 관측과 lost-wake 안전망으로 남지만 정상 PTY output push의
-latency floor가 아니다. same-PID exec migration은 pipe/notifier/fd를 직렬화하지 않고 target process에서 새로 만든 뒤 reader를
+poll owner가 fail-close한다. 20ms `delta_tick_ms`는 P4 E3 전의 임시 metadata 관측/lost-wake 안전망이며, 정상 PTY output push의
+latency floor는 아니다. E3a는 screen projector를 이 timer에서 제거하고 E3b는 metadata source도 runtime change sampler로 옮긴다.
+lost wake는 periodic full projection으로 숨기지 않고 queue publication과 wake token의 acquire/release handshake 및 actual race
+fixture로 검출한다. same-PID exec migration은 pipe/notifier/fd를 직렬화하지 않고 target process에서 새로 만든 뒤 reader를
 재개한다. 실제 input→delta latency와 idle wake/CPU hard cap은 [성능 예산](performance-budget.md)이 소유하며, 그 artifact가
 통과하기 전에는 default `keep-alive-after-quit=true` 전환 조건을 충족한 것으로 세지 않는다.
 

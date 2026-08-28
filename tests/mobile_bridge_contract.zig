@@ -5282,6 +5282,55 @@ test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
     bridge.maru_mobile_control_reset();
 }
 
+test "runtime id 는 32 소문자 hex 만 — 셸 메타문자를 안 싣는다" {
+    // 이 값은 **원격이 준 목록**에서 오고 명령 줄에 그대로 실린다. 셸이 그 줄을 파싱하므로
+    // `;` 하나면 **원격 CLI 가 32-hex 를 거절하기 전에** 다른 명령이 그 서버에서 돈다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    const cfg = "ssh.server.1.host = h\nssh.server.1.user = u\n";
+    bridge.maru_mobile_load_config(cfg, cfg.len);
+    var buf: [256]u8 = undefined;
+
+    var evil: [32]u8 = @splat('a');
+    @memcpy(evil[0..8], "; id > /");
+    bridge.wantControl(.{ .screen = evil });
+    // want 로 서지 않는다 — 그래서 열기 요청도 안 난다.
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(usize, 0), bridge.maru_mobile_control_command(&buf, buf.len));
+
+    // 대문자도 안 받는다(원격 CLI 가 소문자만 받는다).
+    const upper: [32]u8 = @splat('A');
+    bridge.wantControl(.{ .screen = upper });
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+
+    // 제대로 된 값은 그대로 실린다.
+    const good: [32]u8 = @splat('f');
+    bridge.wantControl(.{ .screen = good });
+    const n = bridge.maru_mobile_control_command(&buf, buf.len);
+    try std.testing.expect(std.mem.endsWith(u8, buf[0..n], &good));
+}
+
+test "새 연결이면 남은 요청도 사라진다 — 뜻 없는 열기를 안 한다" {
+    // 원하는 것이 `.none` 인데 열기 요청만 살아남으면 host 가 그것을 집고, 명령을 만들 수 없어
+    // (`control_command` 가 0) 그 서버에서 **뜻 없는 열기 시도**가 한 번 난다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+
+    const id: [32]u8 = @splat('b');
+    bridge.wantControl(.{ .screen = id });
+    // 아직 안 집힌 열기 요청이 남은 채로 연결이 새로 선다.
+    bridge.maru_mobile_control_reset();
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+
+    // 닫기 요청도 마찬가지다.
+    bridge.wantControl(.sessions);
+    _ = bridge.maru_mobile_take_control_open();
+    bridge.wantControl(.{ .screen = id });
+    bridge.maru_mobile_control_reset();
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_close());
+}
+
 test "원하는 것이 바뀌면 닫고 나서 연다 — 같은 채널이니까" {
     // 같은 채널 번호를 **닫히기 전에** 다시 열면 상대의 늦은 `close` 가 새 채널로 배달돼 방금 연
     // 것이 이유 없이 닫힌다(SSH §3.4.1 — 적대적 검증이 잡은 실패다). 그래서 전이는

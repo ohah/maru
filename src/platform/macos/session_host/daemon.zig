@@ -529,7 +529,8 @@ fn runSessionHostImpl(
         manager.fixtureEnableObservationPerformanceEvidence();
     }
     // socket 을 **실제로 만드는** 자리다. uid 로 계산하면 격리를 켠 실행에서도 사용자의 공용
-    // `/tmp/maru-<uid>/sh` 에 socket 이 생기고, 그 가짜가 `host status` 를 ambiguous 로 만든다.
+    // `/tmp/maru-<uid>/sh` 에 socket 이 생겨, 이 host 의 열쇠(격리된 registry)와 자물쇠가 갈린다.
+    // 위 tmp-touch 가 지키는 뿌리와도 어긋나 살아 있는 socket 이 정리 대상이 된다.
     var socket_dir_buf: [272]u8 = undefined;
     const bind_dir = if (exact_host_id != null)
         short_endpoint.currentSocketDirPathIn(&socket_dir_buf) catch return error.ManifestFailed

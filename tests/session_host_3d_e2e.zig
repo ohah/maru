@@ -33,15 +33,20 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-p5c3d-{x}", .{nonce});
     try mkdirExact(xdg);
     defer _ = c.rmdir(xdg.ptr);
+    // base 를 **이 프로세스의 격리 root** 로 통일한다. registry(`{base}/session-host`)·socket(`{base}/sh`)·
+    // 자식에게 넘기는 `MARU_SESSION_HOST_ROOT` 가 한 뿌리를 봐야 attach 가 성립한다.
+    //
+    // 예전에는 `{xdg}/maru` 를 썼다. 그때는 socket 이 uid 로 고정이라 registry 만 옮겨져도 부모가 만든
+    // socket 과 자식이 찾는 socket 이 우연히 같은 `/tmp/maru-<uid>/sh` 에서 만났다. override 가 socket 까지
+    // 옮기게 된 지금은 그 우연이 사라져, 부모는 격리 root 에 bind 하고 자식은 `{xdg}/maru/sh` 를 뒤지다
+    // observer 가 exit 4 로 죽는다. `{xdg}` 는 snapshot·report 자리로만 남는다.
     var base_buf: [320]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/maru", .{xdg});
-    try mkdirExact(base);
-    defer _ = c.rmdir(base.ptr);
+    const base = try session_host.short_endpoint.currentUserRootPathIn(&base_buf);
+    try session_host.short_endpoint.prepareCurrentUserNamespace();
     var session_buf: [512]u8 = undefined;
     const session_dir = try session_host.discovery.sessionHostDirPath(&session_buf, base);
-    try mkdirExact(session_dir);
-    defer _ = c.rmdir(session_dir.ptr);
-    try session_host.short_endpoint.prepareCurrentUserNamespace();
+    // 격리 root 는 **이 프로세스 공용**이라 앞선 테스트가 이미 만들어 뒀을 수 있다. 존재를 실패로 보지 않는다.
+    if (c.mkdir(session_dir.ptr, 0o700) != 0 and std.posix.errno(-1) != .EXIST) return error.MkdirFailed;
 
     const host_id: u128 = (@as(u128, nonce) << 64) | 0x503562337632;
     const runtime_id: u128 = (@as(u128, nonce) << 64) | 0x72756e74696d65;

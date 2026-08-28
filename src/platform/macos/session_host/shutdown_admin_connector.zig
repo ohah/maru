@@ -438,7 +438,7 @@ test "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하
         std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     }
 
-    var manifest = try waitForN1Manifest(allocator, session_dir, host_id);
+    var manifest = try waitForN1Manifest(allocator, session_dir, host_id, socket_path);
     defer manifest.deinit();
     const descriptor = manifest.descriptor();
     try std.testing.expect(exactPreviousManifestEligible(descriptor));
@@ -497,16 +497,47 @@ test "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하
     try std.testing.expectEqual(@as(u64, 1), authority.attempt_generation);
 }
 
+/// **`host_manifest.load` 를 쓰지 않는다.** 그 경로는 endpoint 가 *이 프로세스의* namespace 안에
+/// 있는지(`validateCurrentSocketPath`) 를 함께 재는데, 여기 peer 는 그 정책보다 앞선 **동결 이미지**다
+/// (2026-08-12 커밋, `MARU_SESSION_HOST_ROOT` 문자열이 아예 없다). 그 daemon 은 socket 을 언제나
+/// `/tmp/maru-<uid>/sh` 에 열고 그 경로를 manifest 에 적는데, test 빌드의 registry 는 프로세스별로
+/// 격리돼 있어 둘이 영영 어긋난다 — 실제로 `load` 가 매번 `InvalidManifest` 를 돌려주어 250 회 재시도가
+/// 통째로 헛돌았다(CI: observer 가 아니라 이 대기가 먼저 죽는다).
+///
+/// 전역 `setenv` 로 이 프로세스를 uid namespace 로 되돌리는 방법은 **쓰지 않는다** — 프로세스 전역
+/// 상태라 뒤따르는 테스트까지 오염시킨다. 대신 정책 대신 **이 테스트가 daemon 에게 직접 건넨 경로**로
+/// endpoint 를 고정한다. 정책보다 좁은 검사라 N-1 호환성이라는 취지도 그대로 남는다.
 fn waitForN1Manifest(
     allocator: std.mem.Allocator,
     session_dir: [:0]const u8,
     host_id: u128,
+    expected_endpoint: []const u8,
 ) !host_manifest.Manifest {
+    var path_buf: [512]u8 = undefined;
+    const path = host_manifest.manifestPathIn(&path_buf, session_dir, host_id) catch
+        return error.TestUnexpectedResult;
     var retry: usize = 0;
     while (retry < 250) : (retry += 1) {
-        if (host_manifest.load(allocator, session_dir, host_id)) |manifest| return manifest else |_| {
+        // 아직 없거나 쓰는 중일 수 있다. 부분 파일은 decode 가 걸러내므로 둘 다 재시도로 접는다.
+        const bytes = std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            path,
+            allocator,
+            .limited(64 * 1024),
+        ) catch {
             _ = usleep(20_000);
-        }
+            continue;
+        };
+        defer allocator.free(bytes);
+        var manifest = host_manifest.decode(allocator, bytes) catch {
+            _ = usleep(20_000);
+            continue;
+        };
+        errdefer manifest.deinit();
+        if (manifest.host_id != host_id) return error.TestUnexpectedResult;
+        if (!std.mem.eql(u8, manifest.descriptor().endpoint, expected_endpoint))
+            return error.TestUnexpectedResult;
+        return manifest;
     }
     return error.TestUnexpectedResult;
 }

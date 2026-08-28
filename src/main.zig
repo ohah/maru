@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 900;
+const smoke_spin_cap: usize = 920;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4002,14 +4002,23 @@ fn spawnWinSession(
     tab_ptrs: *std.ArrayList(*maru.session.surface.Surface),
     app_window: *maru.session.window.AppWindow,
     runtime: *maru.app.SurfaceRuntime,
+    /// **단조 증가 세션 번호.** 목록 길이가 아니다 — 닫으면 길이가 줄어 번호가 되살아난다.
+    next_session_id: *usize,
     opts: WinSession.SpawnOptions,
 ) !void {
     const s = try allocator.create(WinSession);
     errdefer allocator.destroy(s);
 
     // **PTY id 는 겹치면 안 된다** — 라우팅이 그 값으로 세션을 가른다.
-    const pty_id: u32 = @intCast(10 + sessions.items.len);
-    s.surface = try maru.session.surface.Surface.init(allocator, @intCast(1 + sessions.items.len), opts.size);
+    //
+    // **길이에서 뽑으면 안 된다.** 닫기가 생기기 전에는 길이가 단조 증가라 우연히 맞았는데(W8.16),
+    // 하나를 닫으면 그 번호가 되살아나 **살아 있는 세션과 겹친다.** 런타임이 그것을 잡아
+    // `SurfaceAlreadyAttached` 로 거절하므로 오배선은 없지만, **닫은 뒤에는 ＋ 가 아무 일도 안 하게
+    // 된다**(적대적 검증 2회차 실측). 그래서 **단조 증가 계수기**에서 뽑는다.
+    next_session_id.* += 1;
+    const seq = next_session_id.*;
+    const pty_id: u32 = @intCast(10 + seq);
+    s.surface = try maru.session.surface.Surface.init(allocator, @intCast(1 + seq), opts.size);
     errdefer s.surface.deinit();
     s.surface.command = opts.command;
 
@@ -4017,7 +4026,7 @@ fn spawnWinSession(
     // 그러면 초기화 안 된 스택을 복사해 길이만 7 인 **쓰레기 이름**이 된다. 지금 폭(24)과 상한(16)
     // 에서는 `bufPrint` 가 실패하지 않지만, 형식이나 상한을 바꾸는 날 조용히 밟는 자리다.
     s.name = std.mem.zeroes([24]u8);
-    const written = std.fmt.bufPrint(&s.name, "session {d}", .{sessions.items.len + 1}) catch blk: {
+    const written = std.fmt.bufPrint(&s.name, "session {d}", .{seq}) catch blk: {
         const fallback = "session";
         @memcpy(s.name[0..fallback.len], fallback);
         break :blk s.name[0..fallback.len];
@@ -4621,6 +4630,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sclose_active_want_len: usize = 0;
     var sclose_active_name: [24]u8 = undefined;
     var sclose_active_name_len: usize = 0;
+    var idcheck_judgeable = false;
+    var idcheck_dups: usize = 0;
+    var idcheck_count: usize = 0;
+    var idcheck_spawned = false;
+    var idcheck_err: [48]u8 = undefined;
+    var idcheck_err_len: usize = 0;
     var file_closes: usize = 0;
     var session_closes: usize = 0;
     var session_close_busy: usize = 0;
@@ -4689,6 +4704,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 편집기 op 버퍼는 **한 번만 잡는다** — 프레임마다 4096 개를 새로 잡으면 그것이 곧 프레임 비용이다.
     const ops_buf = try allocator.alloc(maru.chrome.draw.Op, 4096);
     defer allocator.free(ops_buf);
+    // **세션 번호는 단조 증가한다** — 길이에서 뽑으면 닫은 뒤 번호가 되살아난다(위 함수 doc).
+    var next_session_id: usize = 0;
     var sessions: std.ArrayList(*WinSession) = .empty;
     defer {
         for (sessions.items) |s| s.destroy(allocator);
@@ -4724,7 +4741,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         .cell_h = cell_h,
     };
     // 첫 세션. 실패하면 창을 띄울 이유가 없다.
-    try spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, spawn_opts);
+    try spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts);
 
     // **pump 는 세션이 소유한다.** `AppFrameLoop` 는 pump 하나만 받으므로 그것을 첫 세션 것으로 두고
     // **재바인딩하지 않는다** — macOS 가 같은 이유로 같은 짓을 한다(`frame_loop.pump` 주석). 매 tick 은
@@ -5931,6 +5948,32 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, cx4, cy4);
             window.postSyntheticMouse(.left_up, cx4, cy4);
         }
+        // **닫은 뒤에 새로 만들면 id 가 겹치나** — 그 자리 주석이 "겹치면 안 된다" 고 못 박는다.
+        if (smoke and spins == 874 and sclose_judgeable and sessions.items.len < max_win_sessions) {
+            if (app_window.active()) |a| spawn_opts.size = a.core.size;
+            // **판정을 먼저 켠다.** 실패했을 때 판정이 사라지면(`unjudgeable`) 빨간 줄이 안 나오고,
+            // 없는 줄은 눈에 안 띈다 — 실측으로 옛 동작 뮤턴트가 그렇게 조용히 지나갔다.
+            idcheck_judgeable = true;
+            if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts)) {
+                idcheck_spawned = true;
+                // **제품의 ＋ 경로가 하는 것을 그대로 한다** — 목록을 안 새로 지으면 카드 수가
+                // 세션 수와 갈린다(`lists_agree` 가 그것을 잡았다).
+                refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+            } else |e| {
+                idcheck_err_len = @min(@errorName(e).len, idcheck_err.len);
+                @memcpy(idcheck_err[0..idcheck_err_len], @errorName(e)[0..idcheck_err_len]);
+            }
+        }
+        if (smoke and spins == 878 and idcheck_spawned) {
+            var dup: usize = 0;
+            for (sessions.items, 0..) |a, i| {
+                for (sessions.items[i + 1 ..]) |b| {
+                    if (a.surface.id == b.surface.id) dup += 1;
+                }
+            }
+            idcheck_dups = dup;
+            idcheck_count = sessions.items.len;
+        }
         if (smoke and spins == 872 and sclose_judgeable) {
             sclose_sessions_after = sessions.items.len;
             sclose_tabs_after = app_window.tabs.len;
@@ -6976,7 +7019,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             if (r == .new_workspace and sessions.items.len < max_win_sessions) {
                                 // **지금 크기로 만든다.** 활성 표면의 격자가 창이 아는 최신 값이다.
                                 if (app_window.active()) |a| spawn_opts.size = a.core.size;
-                                if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, spawn_opts)) {
+                                if (spawnWinSession(allocator, &sessions, &tab_ptrs, &app_window, &runtime, &next_session_id, spawn_opts)) {
                                     session_spawns += 1;
                                     refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                     // 새 세션을 **바로 활성으로** 만든다 — 만들고 안 보여 주면
@@ -8173,6 +8216,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (idcheck_judgeable) {
+        // **닫고 다시 만들면 id 가 겹치나.** 라우팅이 그 값으로 세션을 가르므로, 겹치면 한 세션의
+        // 출력이 다른 세션 화면에 간다 — 개수·이름 판정으로는 전혀 안 보인다.
+        try stdout.print("session_ids: spawned={} err={s} count={d} duplicates={d} ids_unique={}\n", .{
+            idcheck_spawned,
+            idcheck_err[0..idcheck_err_len],
+            idcheck_count,
+            idcheck_dups,
+            idcheck_spawned and idcheck_count > 0 and idcheck_dups == 0,
+        });
     }
     if (sclose_judgeable) {
         // **탭도 함께 줄어야 한다** — 목록만 줄이고 `app_window.tabs` 를 두면 라우팅이 죽은 표면을 든다.

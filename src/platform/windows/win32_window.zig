@@ -709,6 +709,15 @@ pub const Window = struct {
         _ = PostMessageW(self.hwnd, WM_CHAR, @intCast(codepoint), 0);
     }
 
+    /// **합성 가상 키를 자기 큐에 넣는다** — 판정용이다.
+    ///
+    /// `postSyntheticChar` 는 `WM_CHAR` 라 **글자만** 보낸다. Backspace·Esc 처럼 글자가 아닌 키는
+    /// `WM_KEYDOWN` 으로 와야 우리 핸들러가 `Key.backspace`·`Key.escape` 로 번역한다 — 검색어를
+    /// 지우는 길이 실제로 있는지 재려면 그 칸까지 밟아야 한다.
+    pub fn postSyntheticVirtualKey(self: *Window, vk: u32) void {
+        _ = PostMessageW(self.hwnd, WM_KEYDOWN, @intCast(vk), 0);
+    }
+
     /// 휠까지 보낸다. `notches` 는 눈금 수(+위, −아래) — 0 이면 휠이 아닌 종류로 취급한다.
     ///
     /// **휠은 `lParam` 이 화면 좌표다**(다른 마우스 메시지는 클라이언트 좌표). 창이 그 차이를 이미

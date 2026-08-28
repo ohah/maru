@@ -1323,6 +1323,8 @@ pub fn build(b: *std.Build) void {
             // 스텝에서 조용히 빠져 있었고, 러너는 남은 test만으로 green이었다. 아래 expect 개수 단언이
             // 같은 사고를 다시 허용하지 않는다.
             "file tree pixel window is one arithmetic shared by follow, clamp, hit-test, and render",
+            // 재투영이 사용자의 스크롤을 되감지 않는지. 같은 픽셀 좌표계를 쓰므로 여기가 자리다.
+            "file tree reprojection keeps the user's scroll unless the selection actually moved",
             // FT2: 발행된 rect ↔ 창 산술 일치, up 에서만 열림, tree 교체 시 capture 취소.
             "file tree pointer: published rect 와 창 산술이 같고, 여는 것은 up 이며, tree 교체는 capture 를 취소한다",
             // 발행된 tree 가 행 목록보다 오래 살 때 인덱스가 범위를 넘지 않는지.
@@ -1341,10 +1343,10 @@ pub fn build(b: *std.Build) void {
     run_macos_file_explorer_perf_tests.setCwd(b.path("."));
     // 이름 필터는 매치가 0개여도 러너가 "All 0 tests passed."로 exit 0이라, 판정자 이름이 바뀌거나
     // 다른 파일로 옮겨가면 게이트가 **초록인 채로** 죽는다(실제로 위 SV2-0 판정자가 그렇게 빠져 있었다).
-    // 컴파일된 test 수를 못 박아 그 사고를 실패로 바꾼다. 13 = 위 필터 8개 + 이 모듈 그래프의
+    // 컴파일된 test 수를 못 박아 그 사고를 실패로 바꾼다. 14 = 위 필터 9개 + 이 모듈 그래프의
     // 이름 없는 test 블록 5개(app_host_abi·app_session·session_host×2·control_socket).
     // 숫자가 틀렸다고 나오면 먼저 **어느 판정자가 빠졌는지** 확인하고, 정당한 증감일 때만 갱신한다.
-    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=13");
+    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=14");
     const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
     test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
 

@@ -91,6 +91,8 @@ const usizeOptEql = AppSession.usizeOptEql;
 pub fn setFileTreeSelection(self: *AppSession, index: usize) bool {
     if (!self.file_tree_selection.set(self.file_tree_rows.items, index)) return false;
     scrollFileTreeRowIntoView(self, index);
+    // 방금 보여 줬다 — 뒤이은 재투영이 같은 신원으로 스크롤을 다시 뺏지 않게 표시한다.
+    self.file_tree_revealed_selection_generation = self.file_tree_selection.generation;
     self.metal_dirty = true;
     return true;
 }
@@ -2792,13 +2794,29 @@ pub fn fileTreeScrollExtent(self: *const AppSession) FileTreeScrollExtent {
     return .{ .content_h_px = content, .viewport_h_px = viewport, .max_offset_px = content -| viewport };
 }
 
+/// 재투영 뒤 선택을 신원으로 되찾는다. **아직 보여 준 적 없는 선택일 때만** 그 행으로 스크롤한다.
+///
+/// ⚠️ 그 조건이 이 함수의 본체다. 재투영은 사용자 조작과 무관하게 돈다 — FSEvents, 배경 스캔 완료,
+/// git ignore 판정 도착, 활성 파일 변경이 전부 `file_tree_rows_dirty`를 세우고 `updateFileTree`가 매
+/// frame tick 그것을 본다. 그때마다 `scrollFileTreeRowIntoView`를 걸면 **사용자가 내려둔 목록이 선택 행
+/// 자리로 되감긴다**(2026-08-28 사용자 보고 — "선택한 것보다 밑으로 내려가면 스크롤이 원복된다").
+/// 스크롤은 필요할 때만 뺏는다는 규칙(file-explorer.md §1 정책 4)에서 "필요할 때"는 **그 선택을 아직
+/// 안 보여 준 때**이지 목록을 다시 그린 때가 아니다.
+///
+/// 반환값으로는 그것을 못 가른다: `Selection.reconcile`은 제자리 exact match 에서도 인덱스를 준다
+/// (그것이 `reconcileIdentity`의 첫 갈래다). `generation` 만으로도 부족하다 — 생성·이름변경은 행이
+/// 투영되기 **전에** `setIdentity`로 선택을 예약해 그 시점에 generation 을 올리므로, "바뀌었나"로
+/// 물으면 정작 새 항목이 도착했을 때가 "제자리"로 보여 뷰포트 밖에 조용히 남는다. 그래서 축을 하나 더
+/// 두고(`file_tree_revealed_selection_generation`) **보여 준 신원**을 기억한다.
 pub fn reconcileFileTreeSelection(self: *AppSession) void {
     if (self.file_tree_selection.kind == null) {
         if (fileTreeFocused(self)) selectFirstFileTreeRow(self);
         return;
     }
     const resolved = self.file_tree_selection.reconcile(self.file_tree_rows.items) orelse return;
+    if (self.file_tree_revealed_selection_generation == self.file_tree_selection.generation) return; // 이미 보여 줬다 — 스크롤은 사용자 것이다
     scrollFileTreeRowIntoView(self, resolved);
+    self.file_tree_revealed_selection_generation = self.file_tree_selection.generation;
 }
 
 pub fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u8) void {

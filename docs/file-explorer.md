@@ -324,6 +324,28 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   재사용하면서 root 교체용 정책만 따라왔다. 지울 필요도 없다 — 위 문단대로 선택은 신원 기반이라 `reconcile`
   이 새 목록에서 같은 항목을 찾고 **없으면 스스로 지운다**. 초기화가 실제 정책인 자리(root 교체·제거, 선택된
   항목의 삭제)는 그 호출자가 계속 자기 손으로 부른다.
+
+  ⚠️ **그리고 재투영은 스크롤도 뺏지 않는다**(2026-08-28 사용자 보고 — "선택한 것보다 밑으로 내려가면
+  스크롤이 원복된다"). 위 수정으로 선택은 살아남게 됐는데, 이번에는 `reconcileFileTreeSelection` 이
+  살아남은 그 선택으로 **매번** `scrollFileTreeRowIntoView` 를 걸고 있었다. 재투영은 사용자 조작과
+  무관하게 돈다 — FSEvents, 배경 스캔 완료, git ignore 판정 도착, 활성 파일 변경이 전부
+  `file_tree_rows_dirty` 를 세우고 `updateFileTree` 가 매 frame tick 그것을 본다. 그래서 목록을 선택
+  행보다 아래로 내려 두면 다음 tick 이 그 자리를 선택 행의 top 으로 되감았다(위 §1 정책 4 의 `top <
+  offset` 갈래가 그 되감기다).
+
+  **정책 4 의 "필요할 때"는 그 선택을 아직 안 보여 준 때이지 목록을 다시 그린 때가 아니다.** 그것을
+  `reconcile` 의 반환값으로는 못 가른다 — 제자리 exact match 에서도 인덱스가 나오는 것이
+  `reconcileIdentity` 의 첫 갈래다. **`Selection.generation` 만으로도 부족하다**: 생성·이름변경은 행이
+  투영되기 **전에** `setIdentity` 로 선택을 예약해 그 시점에 generation 을 올리므로, "바뀌었나"로 물으면
+  정작 새 항목이 도착한 재투영이 "제자리"로 보여 방금 만든 파일이 뷰포트 밖에 조용히 남는다. 그래서 축을
+  하나 더 둔다 — `file_tree_revealed_selection_generation` 이 **보여 준 신원**을 기억하고, 스크롤을 실제로
+  건 자리(`setFileTreeSelection`·이 함수)만 그 값을 옮긴다.
+
+  결과: 행이 재정렬돼 인덱스만 달라진 경우(스캔이 형제를 끼워 넣는 흔한 경로)에도 스크롤은 사용자 것으로
+  남고, 선택 행이 사라져 조상·이웃으로 옮겨간 경우와 아직 못 보여 준 예약이 도착한 경우에만 그 행을 보여
+  준다. 판정자는 `test-macos-file-explorer-perf` 의 "file tree reprojection keeps the user's scroll unless
+  the selection actually moved" 이고, 대조군 셋(선택 행 삭제 · `setIdentity` 예약 도착 · 보여 준 뒤 다시
+  민 스크롤)이 없으면 그 단언은 reveal 호출을 통째로 지워도, 축을 generation 으로 되돌려도 통과한다.
 - **표준 탐색**: `↑/↓`는 이전/다음 조작 가능한 row, `←`는 열린 directory를 접고 그 외에는 부모 row, `→`는 닫힌 directory를 펼치고 이미 열렸으면 첫 자식, `Enter`는 directory toggle 또는 파일 열기, `Home/End`는 첫/마지막 row, `PageUp/PageDown`은 현재 tree viewport의 표시 row 수만큼 이동한다. 선택 이동은 같은 row layout/scroll 상태를 사용해 최소 거리로 scroll-into-view한다. `Esc`는 트리 진입 직전 도크 WKWebView를 복원하고, 없거나 stale이면 활성 terminal/browser pane으로 돌아간다. tree focus 동안 평문·IME와 terminal macro는 PTY로 전달하지 않는다.
 - **파일 변경 명령**: `new_file`, `new_directory`, `rename_file_tree_entry`, `delete_file_tree_entry`를 command catalog와 project tree context menu에 노출한다. rename은 `F2`, delete는 `⌘Backspace`도 사용한다. project root/directory/file row만 대상이며 recent row/header와 root 자체의 rename/delete는 금지한다. 생성 위치는 선택이 directory면 그 안, file이면 부모다. 빈 이름·`.`·`..`·`/` 포함·기존 항목 충돌은 거부하고 dotfile은 허용한다.
 - **identity 는 축이 셋이고 섞으면 안 된다**(2026-08-21 사용자 보고). 같은 경로라도 재는 방법마다 다른 값이

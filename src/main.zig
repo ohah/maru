@@ -4636,6 +4636,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var idcheck_spawned = false;
     var idcheck_err: [48]u8 = undefined;
     var idcheck_err_len: usize = 0;
+    var multi_closes: usize = 0;
+    var multi_sessions: usize = 0;
+    var multi_tabs: usize = 0;
+    var multi_dups: usize = 0;
+    var multi_active_ok = false;
     var file_closes: usize = 0;
     var session_closes: usize = 0;
     var session_close_busy: usize = 0;
@@ -5949,6 +5954,38 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, cx4, cy4);
         }
         // **닫은 뒤에 새로 만들면 id 가 겹치나** — 그 자리 주석이 "겹치면 안 된다" 고 못 박는다.
+        // ── 연달아 닫는다 (적대적 검증 3회차) ──────────────────────────────────────────
+        //
+        // 한 번만 닫으면 순서에 기대는 실수가 안 드러난다 — 색인·활성·id 가 **누적으로** 어긋나는지
+        // 본다. 매번 프롬프트 마크를 먹여 성공 갈래로 민다.
+        if (smoke and spins >= 880 and spins <= 890 and @mod(spins, 2) == 0 and sessions.items.len >= 3) {
+            const s0 = sessions.items[0];
+            s0.surface.lockCore(io);
+            s0.surface.core.write("\x1b]133;A\x1b\\") catch {};
+            s0.surface.core.write("\x1b]133;B\x1b\\") catch {};
+            s0.surface.unlockCore(io);
+            switch (closeWinSession(allocator, io, &sessions, &tab_ptrs, &app_window, &runtime, 0)) {
+                .closed => {
+                    multi_closes += 1;
+                    pump = sessions.items[0].pump;
+                    if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
+                    refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
+                },
+                else => {},
+            }
+        }
+        if (smoke and spins == 894) {
+            multi_sessions = sessions.items.len;
+            multi_tabs = app_window.tabs.len;
+            multi_active_ok = app_window.active_tab < sessions.items.len;
+            var dup2: usize = 0;
+            for (sessions.items, 0..) |a, i| {
+                for (sessions.items[i + 1 ..]) |b| {
+                    if (a.surface.id == b.surface.id) dup2 += 1;
+                }
+            }
+            multi_dups = dup2;
+        }
         if (smoke and spins == 874 and sclose_judgeable and sessions.items.len < max_win_sessions) {
             if (app_window.active()) |a| spawn_opts.size = a.core.size;
             // **판정을 먼저 켠다.** 실패했을 때 판정이 사라지면(`unjudgeable`) 빨간 줄이 안 나오고,
@@ -8216,6 +8253,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (multi_closes > 0) {
+        try stdout.print("close_many: closes={d} sessions={d} tabs={d} dups={d} active_ok={} close_many_ok={}\n", .{
+            multi_closes,
+            multi_sessions,
+            multi_tabs,
+            multi_dups,
+            multi_active_ok,
+            multi_closes >= 3 and multi_sessions == multi_tabs and multi_dups == 0 and multi_active_ok,
+        });
+    } else {
+        try stdout.print("close_many=unjudgeable reason=no_close\n", .{});
     }
     if (idcheck_judgeable) {
         // **닫고 다시 만들면 id 가 겹치나.** 라우팅이 그 값으로 세션을 가르므로, 겹치면 한 세션의

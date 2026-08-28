@@ -9853,8 +9853,24 @@ pub const Client = struct {
             (lifecycle != .armed and lifecycle != .captured))
             @panic("prepared execution poison capture authority drifted");
         if (lifecycle == .captured) {
+            // **첫 사유가 이긴다 — 두 번째 사유는 버리되 죽이지 않는다.**
+            //
+            // 예전에는 다른 사유가 오면 `@panic` 했다. 그런데 사유가 갈리는 것은 예외가 아니라 **구조적으로
+            // 필연**이다. 바로 아래 `poisonWhilePreparedExecutionHeld` 는 capture 가 성공하면 곧바로
+            // 반환해 `latchFirstPoisonReason` 을 건너뛴다 — 그래서 `first_poison_reason` 은 계속 `null` 이고,
+            // 유일하게 `if (self.first_poison_reason == null)` 가드를 둔 호출부(현재 19 곳 중 1 곳)마저
+            // 두 번째 poison 을 통과시킨다. 나머지 18 곳은 가드 자체가 없다. 즉 lease 를 쥔 동안 두 번째
+            // 사유가 도달하는 것은 정상 경로다: 연결이 끊겨 `connection_eof` 로 잡힌 뒤 정리 과정에서
+            // `local_invariant_violation` 이 겹치는 식이다.
+            //
+            // first-poison-wins 를 실제로 강제하는 것은 호출부가 아니라 **이 capture 자신**이다. 그러니
+            // 여기서 할 일은 첫 사유를 지키고 두 번째를 버리는 것이지, 프로세스를 끝내는 것이 아니다.
+            //
+            // 2026-08-28 실측: `reason drifted` panic 으로 앱이 SIGABRT 로 죽었다(간헐, 같은 세션에서 2 회).
+            // session host 는 멀쩡히 살아 있는데 앱만 사라져 사용자가 열어 둔 창을 전부 잃었다. 진단 가치는
+            // 남기되(첫 사유와 버린 사유를 함께 기록) 프로세스를 끝내지는 않는다.
             if (capture.reason_raw != @intFromEnum(reason))
-                @panic("prepared execution poison reason drifted");
+                logPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason));
             return true;
         }
         if (capture.source_site_raw != lease.poison_source_site_raw)
@@ -9919,8 +9935,16 @@ pub const Client = struct {
             (lifecycle == .armed and (capture.reason_present_raw != 0 or capture.reason_raw != 0)))
             @panic("read pump poison capture authority drifted");
         if (lifecycle == .captured) {
-            if (capture.reason_present_raw != 1 or capture.reason_raw != @intFromEnum(reason))
-                @panic("read pump poison reason drifted");
+            // `captured` 인데 사유가 실려 있지 않은 것은 **손상**이다 — lifecycle 과 payload 가 갈렸다는 뜻이라
+            // 계속 진행하면 무엇을 publish 할지 알 수 없다. 여기서는 멈춘다.
+            if (capture.reason_present_raw != 1) @panic("read pump poison capture lost its reason");
+            // 사유가 **다른** 것은 손상이 아니다. `poisonAllocator` 경로도 capture 가 성공하면 곧바로
+            // 반환해 `latchFirstPoisonReason` 을 건너뛰므로, 한 armed 창 안에 두 번째 사유가 도달하는 것은
+            // prepared execution 쪽과 똑같이 정상 경로다. 그쪽은 이 자리에서 죽는 바람에 2026-08-28 에
+            // 앱이 SIGABRT 로 사라졌다(같은 세션에서 2 회). 같은 구조를 남겨 두지 않는다 — 첫 사유를 지키고
+            // 두 번째는 기록만 하고 버린다.
+            if (capture.reason_raw != @intFromEnum(reason))
+                logReadPumpPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason));
             return true;
         }
         capture.reason_raw = @intFromEnum(reason);
@@ -14828,6 +14852,25 @@ pub const Client = struct {
         std.log.err(
             "empty prepared response: request_id={d} host={x:0>32} wire_major={d} lifecycle={s} last_success_request_id={d}",
             .{ request_id, self.host_id, self.wire_major, self.lifecycle, self.last_success_request_id },
+        );
+    }
+
+    /// 이미 캡처된 poison 에 **다른 사유**가 뒤따랐다. 첫 사유를 유지하고 두 번째는 버리되, 그 사실을 남긴다.
+    /// 사유가 갈리는 것 자체는 정상이지만(정리 중 2 차 실패), 어떤 조합이 실제로 일어나는지는 알아야 한다.
+    /// read pump 쪽 짝. prepared execution 과 사유 공간이 달라 로그를 섞지 않는다.
+    fn logReadPumpPoisonReasonDrift(kept_raw: u8, dropped_raw: u8) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "read pump poison reason drift: kept={d} dropped={d}",
+            .{ kept_raw, dropped_raw },
+        );
+    }
+
+    fn logPoisonReasonDrift(kept_raw: u8, dropped_raw: u8) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "prepared execution poison reason drift: kept={d} dropped={d}",
+            .{ kept_raw, dropped_raw },
         );
     }
 

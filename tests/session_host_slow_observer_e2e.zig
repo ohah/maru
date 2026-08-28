@@ -548,12 +548,14 @@ pub fn main(init: std.process.Init) !void {
                 "screen idle scale 10"
             else
                 "screen idle scale 100";
-            _ = usleep(600 * std.time.us_per_ms);
-            const before = try probe(
+            // A newly spawned PTY may not have reached its first 500ms foreground refresh when
+            // attach snapshots finish. Start the steady window only after two product reports
+            // agree; a fixed sleep made fast local runs green while slower CI leaked that initial
+            // source discovery into the idle producer counter.
+            const before = try waitForProjectionSettle(
                 command_pair[0],
                 report_pair[0],
                 &sequence,
-                .snapshot,
                 deadline_ns,
                 init.io,
             );
@@ -1363,6 +1365,39 @@ fn probe(
         return error.ProbeReadFailed;
     }
     return error.ProbeTimeout;
+}
+
+fn waitForProjectionSettle(
+    command_fd: c.fd_t,
+    report_fd: c.fd_t,
+    sequence: *u64,
+    deadline_ns: u64,
+    io: std.Io,
+) !probe_wire.Report {
+    var before = try probe(command_fd, report_fd, sequence, .snapshot, deadline_ns, io);
+    var attempts: usize = 0;
+    while (attempts < 6) : (attempts += 1) {
+        _ = usleep(600 * std.time.us_per_ms);
+        const after = try probe(command_fd, report_fd, sequence, .snapshot, deadline_ns, io);
+        if (projectionCountersEqual(before, after)) return after;
+        before = after;
+    }
+    return error.ProjectionSourceDidNotSettle;
+}
+
+fn projectionCountersEqual(a: probe_wire.Report, b: probe_wire.Report) bool {
+    return a.observation_materializations == b.observation_materializations and
+        a.metadata_producer_visits == b.metadata_producer_visits and
+        a.observation_core_lock_acquisitions == b.observation_core_lock_acquisitions and
+        a.observation_core_lock_hold_total_ns == b.observation_core_lock_hold_total_ns and
+        a.output_wake_notify_attempts == b.output_wake_notify_attempts and
+        a.output_wake_published_writes == b.output_wake_published_writes and
+        a.output_wake_coalesced_writes == b.output_wake_coalesced_writes and
+        a.output_wake_drain_turns == b.output_wake_drain_turns and
+        a.screen_snapshot_calls == b.screen_snapshot_calls and
+        a.screen_delta_calls == b.screen_delta_calls and
+        a.screen_owned_allocations == b.screen_owned_allocations and
+        a.screen_core_lock_acquisitions == b.screen_core_lock_acquisitions;
 }
 
 fn processIdentity(pid: c.pid_t, include_rusage: bool) !ProcessIdentity {

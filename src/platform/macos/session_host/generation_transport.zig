@@ -988,6 +988,19 @@ pub fn sendResyncNonBlockingOwned(
     ) catch |err| return mapGenerationInputError(err);
 }
 
+pub fn screenRecoveryStateOwned(
+    transport: *GenerationTransport,
+    attachment_owner_addr: usize,
+) InputError!client_mod.ScreenRecoveryState {
+    if (!transport.requestIdentityValid() or attachment_owner_addr == 0 or
+        transport.owner_addr != attachment_owner_addr)
+        return error.InvalidOwner;
+    return client_slot_mod.generationScreenRecoveryState(
+        transport.ownerQuery(),
+        transport.bound_stream_id,
+    ) catch |err| return mapGenerationInputError(err);
+}
+
 pub fn callOwned(
     transport: *GenerationTransport,
     attachment_owner_addr: usize,

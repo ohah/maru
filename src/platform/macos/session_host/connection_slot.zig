@@ -26,6 +26,10 @@ pub const shared_steady_bytes: usize = shared_hard_bytes - base_replacement_head
 pub const max_chunks_per_slot: usize = 4096;
 pub const control_chunk_reserve: usize = 64;
 pub const max_screen_trackers_per_slot: usize = 256;
+comptime {
+    if (max_screen_trackers_per_slot != @import("client_queue_limits.zig").max_recovery_streams)
+        @compileError("client recovery and reactor stream caps diverged");
+}
 pub const turn_bytes: usize = 1024 * 1024;
 pub const turn_frames: usize = 64;
 pub const partial_deadline_ns: u64 = 10 * std.time.ns_per_s;

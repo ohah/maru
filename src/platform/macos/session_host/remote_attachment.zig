@@ -376,6 +376,27 @@ pub const RemoteAttachment = struct {
         };
     }
 
+    /// A Client inbox overflow invalidates every not-yet-applied lease already transferred to
+    /// this stream owner. Release them before admitting resync so stale deltas cannot cross the
+    /// recovery boundary and their resident accounting returns to the shared connection budget.
+    pub fn discardPendingScreen(self: *RemoteAttachment) LeaseError!void {
+        const transport = self.transport orelse return error.LedgerInvariant;
+        if (self.failed_release != null) {
+            transport.fail_closed(transport.context, .attachment_cleanup_failed);
+            return error.LedgerInvariant;
+        }
+        while (self.pending_batch_head < self.pending_batches.items.len) {
+            const lease = self.pending_batches.items[self.pending_batch_head];
+            self.pending_batch_head += 1;
+            if (self.releaseOrRetain(lease, transport) != .completed) {
+                self.compactConsumedBatches();
+                transport.fail_closed(transport.context, .attachment_cleanup_failed);
+                return error.LedgerInvariant;
+            }
+        }
+        self.compactConsumedBatches();
+    }
+
     pub fn pumpCatchupScreen(
         self: *RemoteAttachment,
         io: std.Io,
@@ -2335,6 +2356,38 @@ test "remote attachment deinit releases every queued charged lease before droppi
     try std.testing.expectEqual(@as(usize, 3), transport.release_calls);
     try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
     try std.testing.expect(transport.drop_observed_zero);
+    try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
+    try ledger.finish();
+}
+
+test "R3 recovery discards every transferred lease before a fresh snapshot" {
+    const allocator = std.testing.allocator;
+    var ledger: external_inbox_ledger.ExternalInboxLedger = .{};
+    var transport = ChargedTestTransport{
+        .ledger = &ledger,
+        .batch = null,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    for (0..3) |i| {
+        const bytes = try std.fmt.allocPrint(allocator, "stale-{d}", .{i});
+        const token = try reserveChargedBatch(&ledger, allocator, false, 7, bytes);
+        try attachment.pending_batches.append(allocator, .{ .charged = token });
+    }
+
+    try attachment.discardPendingScreen();
+    try std.testing.expectEqual(@as(usize, 3), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), ledger.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batch_head);
+
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
     try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
     try ledger.finish();
 }

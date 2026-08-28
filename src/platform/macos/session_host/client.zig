@@ -34,6 +34,8 @@ const operation_thread_identity = @import("operation_thread_identity.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_poison = @import("client_poison.zig");
+const screen_inbox = @import("screen_inbox.zig");
+pub const ScreenRecoveryState = screen_inbox.State;
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_source_transcript = @import("client_source_transcript.zig");
@@ -779,8 +781,13 @@ test "CR3a-2b1 pending과 transferred payload는 18 MiB exact cap을 함께 사�
     defer allocator.free(overflow_wire);
     try socket_server.writeAll(fds[1], overflow_wire);
     var rejected: generation_batch_registry.OwnedBatch = .{};
-    try testing.expectError(error.ProtocolError, client.readGenerationBatch(&rejected, 9, 3));
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.idle,
+        try client.readGenerationBatch(&rejected, 9, 3),
+    );
     try testing.expect(rejected.pristine());
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
+    try testing.expect(!client.unusable);
     try testing.expectEqual(
         protocol.max_client_screen_inbox,
         accounting_ledger.byte_count,
@@ -5425,7 +5432,8 @@ fn validateExternalAdoptionStructure(
     self: *const Client,
     catchup_barrier_policy: ExternalCatchupBarrierPolicy,
 ) ExternalAdoptionInspectError!void {
-    if (self.parser.buf.items.len > self.parser.buf.capacity or
+    if (!self.screen_recovery.valid() or self.screen_recovery.count != 0 or
+        self.parser.buf.items.len > self.parser.buf.capacity or
         self.pending_batches.items.len > self.pending_batches.capacity or
         self.pending_stream.items.len > self.pending_stream.capacity or
         self.pending_events.items.len > self.pending_events.capacity or
@@ -6730,6 +6738,9 @@ pub const Client = struct {
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
     pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
     pending_stream_bytes: usize = 0,
+    /// R3/R4 pressure is stream-local. This fixed table is allocation-free so an inbox overflow
+    /// can publish deferred recovery without recursively issuing an RPC or killing siblings.
+    screen_recovery: screen_inbox.RecoveryTable = .{},
     // screen batch와 별개인 full-state runtime metadata/resize event. 종류별로 최신 한 건을 coalesce한다.
     pending_events: std.ArrayListUnmanaged(BufferedEvent) = .empty,
     pending_event_bytes: usize = 0,
@@ -7145,6 +7156,10 @@ pub const Client = struct {
     fn prepareDeinitGraph(self: *Client, bound_client: bool) bool {
         if (checkedAllocatorReentry(self)) return false;
         if (self.ownership == .moved) return false;
+        if (!self.screen_recovery.valid()) {
+            self.poison(.local_invariant_violation);
+            return false;
+        }
         if (self.pending_events.items.len != 0 and
             !(self.connection_profile != null and
                 self.connection_profile.?.requiresStrictExternalEvents()) and
@@ -7597,6 +7612,15 @@ pub const Client = struct {
         writer.writeUsize(if (generation_ledger) |ledger| ledger.releasing_item_count else 0);
         writer.writeUsize(if (generation_ledger) |ledger| ledger.releasing_byte_count else 0);
         writer.writeUsize(self.pending_stream_bytes);
+        const recovery_valid = self.screen_recovery.valid();
+        writer.writeBool(recovery_valid);
+        if (recovery_valid) {
+            writer.writeUsize(self.screen_recovery.count);
+            for (self.screen_recovery.entries[0..self.screen_recovery.count]) |entry| {
+                writer.writeU64(entry.stream_id);
+                writer.writeU8(@intFromEnum(entry.state));
+            }
+        }
         writer.writeUsize(self.pending_event_bytes);
         if (self.partial_batch) |partial| {
             writer.writeBool(true);
@@ -10451,12 +10475,42 @@ pub const Client = struct {
             defer if (manual_allocator_guard)
                 self.leaveGenerationAllocatorCallbackUnchecked();
             discardFramePayloadObservation(payload_observer, frame);
-            if (self.pending_stream.items.len >= protocol.max_client_screen_items or
-                self.screenInboxBytes() +| frame.payload.len > protocol.max_client_screen_inbox)
-            {
+            if (frame.header.request_id != 0) {
                 frame.deinit(allocator);
-                self.poisonMutationIo(.event_queue_overflow, execution_lease_held);
-                return error.EventQueueFull;
+                self.poisonMutationIo(.response_correlation_lost, execution_lease_held);
+                return error.ProtocolError;
+            }
+            if (frame.header.stream_id == 0 or frame.header.flags & ~protocol.Flags.end_stream != 0) {
+                frame.deinit(allocator);
+                self.poisonMutationIo(.frame_malformed, execution_lease_held);
+                return error.ProtocolError;
+            }
+            if (self.screen_recovery.classify(frame.header.stream_id, frame.header.kind) == .discard) {
+                frame.deinit(allocator);
+                return true;
+            }
+            const inbox_bytes = self.screenInboxBytes() catch {
+                frame.deinit(allocator);
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            };
+            const next_inbox_bytes = std.math.add(usize, inbox_bytes, frame.payload.len) catch {
+                frame.deinit(allocator);
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            };
+            const inbox_items = self.screenInboxItems() catch {
+                frame.deinit(allocator);
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            };
+            if (inbox_items >= protocol.max_client_screen_items or
+                next_inbox_bytes > protocol.max_client_screen_inbox)
+            {
+                const stream_id = frame.header.stream_id;
+                frame.deinit(allocator);
+                try self.invalidateBufferedScreenStream(stream_id);
+                return true;
             }
             var durable_frame = frame;
             durable_frame.payload_observation_generation = 0;
@@ -11118,13 +11172,18 @@ pub const Client = struct {
         if (byte_count == 0) return error.InvalidDescriptor;
         const accounting = &self.generation_batch_accounting;
         const ledger = accounting.ledger orelse return error.InvalidState;
-        const total_items = self.pending_batches.items.len +| ledger.item_count;
+        const total_items = try self.screenInboxItems();
         if ((source == .direct and total_items >= protocol.max_client_screen_items) or
             (source == .pending and total_items > protocol.max_client_screen_items))
             return error.EventQueueFull;
-        if (source == .direct and
-            self.screenInboxBytes() +| byte_count > protocol.max_client_screen_inbox)
-            return error.EventQueueFull;
+        if (source == .direct) {
+            const total_bytes = std.math.add(
+                usize,
+                try self.screenInboxBytes(),
+                byte_count,
+            ) catch return error.InvalidState;
+            if (total_bytes > protocol.max_client_screen_inbox) return error.EventQueueFull;
+        }
         if (ledger.item_count == generation_batch_registry.max_entries)
             return error.CapacityExhausted;
         if (transfer_id == 0 or transfer_id <= accounting.last_transfer_id)
@@ -11280,16 +11339,35 @@ pub const Client = struct {
     }
 
     fn bufferPendingScreenBatch(self: *Client, batch: StreamBatch) ClientError!void {
-        const ledger_items = if (self.generation_batch_accounting.ledger) |ledger|
-            ledger.item_count
-        else
-            0;
-        if (self.pending_batches.items.len +| ledger_items >= protocol.max_client_screen_items or
-            self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
+        const recovery_state = self.screen_recovery.state(batch.stream_id);
+        if (recovery_state == .needs_resync or
+            (recovery_state == .awaiting_snapshot and !batch.is_snapshot))
         {
             batch.deinit();
-            self.poison(.event_queue_overflow);
-            return error.EventQueueFull;
+            return;
+        }
+        const inbox_items = self.screenInboxItems() catch {
+            batch.deinit();
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+        const inbox_bytes = self.screenInboxBytes() catch {
+            batch.deinit();
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+        const next_inbox_bytes = std.math.add(usize, inbox_bytes, batch.bytes.len) catch {
+            batch.deinit();
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+        if (inbox_items >= protocol.max_client_screen_items or
+            next_inbox_bytes > protocol.max_client_screen_inbox)
+        {
+            const stream_id = batch.stream_id;
+            batch.deinit();
+            try self.invalidateBufferedScreenStream(stream_id);
+            return;
         }
         self.pending_batches.append(self.allocator, batch) catch {
             batch.deinit();
@@ -11297,6 +11375,12 @@ pub const Client = struct {
             return error.OutOfMemory;
         };
         self.pending_batch_bytes += batch.bytes.len;
+        if (recovery_state == .awaiting_snapshot) {
+            self.screen_recovery.snapshotAccepted(batch.stream_id) catch {
+                self.poison(.local_invariant_violation);
+                return error.ProtocolError;
+            };
+        }
     }
 
     /// 소켓/`pending_stream`에서 완성 stream 배치 하나를 `end_stream`까지 읽어 돌려준다(stream_id 무관). **논블로킹**: 배치가
@@ -11401,10 +11485,21 @@ pub const Client = struct {
                 self.poison(.response_correlation_lost);
                 return error.ProtocolError;
             }
+            if (frame.header.stream_id == 0 or frame.header.flags & ~protocol.Flags.end_stream != 0) {
+                self.poison(.frame_malformed);
+                return error.ProtocolError;
+            }
+            if (self.screen_recovery.classify(frame.header.stream_id, frame.header.kind) == .discard)
+                continue;
             if (!started) {
-                if (frame.header.stream_id == 0) {
-                    self.poison(.peer_contract_violation);
+                const inbox_items = self.screenInboxItems() catch {
+                    self.poison(.local_invariant_violation);
                     return error.ProtocolError;
+                };
+                if (inbox_items >= protocol.max_client_screen_items) {
+                    const stream_id = frame.header.stream_id;
+                    try self.invalidateBufferedScreenStream(stream_id);
+                    continue;
                 }
                 state.stream_id = frame.header.stream_id;
                 state.is_snapshot = frame.header.kind == .snapshot_chunk;
@@ -11415,14 +11510,35 @@ pub const Client = struct {
                 self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
-            if (frame.header.flags & ~protocol.Flags.end_stream != 0 or
-                state.chunk_count >= protocol.max_viewport_snapshot / protocol.max_binary_chunk or
-                state.bytes.items.len +| frame.payload.len > protocol.max_viewport_snapshot or
-                self.screenInboxBytes() +| state.bytes.items.len +| frame.payload.len >
-                    protocol.max_client_screen_inbox)
+            if (state.chunk_count >= protocol.max_viewport_snapshot / protocol.max_binary_chunk or
+                state.bytes.items.len +| frame.payload.len > protocol.max_viewport_snapshot)
             {
                 self.poison(.frame_malformed);
                 return error.ProtocolError;
+            }
+            const inbox_bytes = self.screenInboxBytes() catch {
+                self.poison(.local_invariant_violation);
+                return error.ProtocolError;
+            };
+            const partial_bytes = std.math.add(
+                usize,
+                state.bytes.items.len,
+                frame.payload.len,
+            ) catch {
+                self.poison(.local_invariant_violation);
+                return error.ProtocolError;
+            };
+            const next_inbox_bytes = std.math.add(usize, inbox_bytes, partial_bytes) catch {
+                self.poison(.local_invariant_violation);
+                return error.ProtocolError;
+            };
+            if (next_inbox_bytes > protocol.max_client_screen_inbox) {
+                const stream_id = state.stream_id;
+                state.bytes.deinit(allocator);
+                state = .{ .stream_id = 0, .is_snapshot = false };
+                started = false;
+                try self.invalidateBufferedScreenStream(stream_id);
+                continue;
             }
             state.chunk_count += 1;
             const next_len = state.bytes.items.len + frame.payload.len;
@@ -11478,6 +11594,12 @@ pub const Client = struct {
                         allocator,
                         receipt,
                     );
+                    if (state.is_snapshot and
+                        self.screen_recovery.state(state.stream_id) == .awaiting_snapshot)
+                    {
+                        self.screen_recovery.snapshotAccepted(state.stream_id) catch
+                            @panic("prevalidated screen recovery transition drifted");
+                    }
                     return null;
                 };
                 const bytes = state.bytes.toOwnedSlice(allocator) catch {
@@ -11490,6 +11612,15 @@ pub const Client = struct {
                     allocator.free(bytes);
                     self.poison(.local_invariant_violation);
                     return error.InvalidState;
+                }
+                if (state.is_snapshot and
+                    self.screen_recovery.state(state.stream_id) == .awaiting_snapshot)
+                {
+                    self.screen_recovery.snapshotAccepted(state.stream_id) catch {
+                        allocator.free(bytes);
+                        self.poison(.local_invariant_violation);
+                        return error.ProtocolError;
+                    };
                 }
                 return .{
                     .is_snapshot = state.is_snapshot,
@@ -11646,6 +11777,48 @@ pub const Client = struct {
         }
     }
 
+    fn discardBufferedScreenStream(self: *Client, stream_id: u64) void {
+        var i: usize = 0;
+        while (i < self.pending_batches.items.len) {
+            if (self.pending_batches.items[i].stream_id == stream_id) {
+                const b = self.pending_batches.orderedRemove(i);
+                self.pending_batch_bytes -= b.bytes.len;
+                b.deinit();
+            } else i += 1;
+        }
+        if (self.partial_batch) |*partial| {
+            if (partial.stream_id == stream_id) {
+                partial.bytes.deinit(self.allocator);
+                self.partial_batch = null;
+            }
+        }
+        i = 0;
+        while (i < self.pending_stream.items.len) {
+            if (self.pending_stream.items[i].header.stream_id == stream_id) {
+                const frame = self.pending_stream.orderedRemove(i);
+                self.pending_stream_bytes -= frame.payload.len;
+                frame.deinit(self.allocator);
+            } else i += 1;
+        }
+    }
+
+    fn invalidateBufferedScreenStream(self: *Client, stream_id: u64) ClientError!void {
+        if (!self.screen_recovery.valid()) {
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        }
+        const recovery_before_cleanup = self.screen_recovery;
+        self.discardBufferedScreenStream(stream_id);
+        if (!std.meta.eql(recovery_before_cleanup, self.screen_recovery)) {
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        }
+        _ = self.screen_recovery.invalidate(stream_id) catch {
+            self.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        };
+    }
+
     /// `stream_id` 앞으로 버퍼된 demux 배치를 모두 버린다(runtime이 detach/remove될 때 그 runtime의 pump가 다신 안 도므로
     /// 잔여 배치가 영구히 쌓이지 않게 — RemoteRuntime.deinit/detachClientSide가 부른다). 없으면 no-op.
     pub fn dropBufferedStream(self: *Client, stream_id: u64) void {
@@ -11670,29 +11843,8 @@ pub const Client = struct {
                 self.poison(.local_invariant_violation);
                 return;
             };
+        self.discardBufferedScreenStream(stream_id);
         var i: usize = 0;
-        while (i < self.pending_batches.items.len) {
-            if (self.pending_batches.items[i].stream_id == stream_id) {
-                const b = self.pending_batches.orderedRemove(i);
-                self.pending_batch_bytes -= b.bytes.len;
-                b.deinit();
-            } else i += 1;
-        }
-        if (self.partial_batch) |*partial| {
-            if (partial.stream_id == stream_id) {
-                partial.bytes.deinit(self.allocator);
-                self.partial_batch = null;
-            }
-        }
-        i = 0;
-        while (i < self.pending_stream.items.len) {
-            if (self.pending_stream.items[i].header.stream_id == stream_id) {
-                const frame = self.pending_stream.orderedRemove(i);
-                self.pending_stream_bytes -= frame.payload.len;
-                frame.deinit(self.allocator);
-            } else i += 1;
-        }
-        i = 0;
         while (i < self.pending_events.items.len) {
             if (self.pending_events.items[i].header.stream_id == stream_id) {
                 const frame = self.pending_events.orderedRemove(i);
@@ -11706,12 +11858,40 @@ pub const Client = struct {
                 _ = self.pending_catchup_barriers.orderedRemove(i);
             } else i += 1;
         }
+        self.screen_recovery.remove(stream_id);
     }
 
-    fn screenInboxBytes(self: *const Client) usize {
+    fn screenInboxBytes(self: *const Client) error{InvalidState}!usize {
         const partial = if (self.partial_batch) |batch| batch.bytes.items.len else 0;
-        return self.pending_stream_bytes +| self.pending_batch_bytes +|
-            (if (self.generation_batch_accounting.ledger) |ledger| ledger.byte_count else 0) +| partial;
+        var total = std.math.add(
+            usize,
+            self.pending_stream_bytes,
+            self.pending_batch_bytes,
+        ) catch return error.InvalidState;
+        total = std.math.add(
+            usize,
+            total,
+            if (self.generation_batch_accounting.ledger) |ledger| ledger.byte_count else 0,
+        ) catch return error.InvalidState;
+        return std.math.add(usize, total, partial) catch error.InvalidState;
+    }
+
+    fn screenInboxItems(self: *const Client) error{InvalidState}!usize {
+        const ledger_items = if (self.generation_batch_accounting.ledger) |ledger|
+            ledger.item_count
+        else
+            0;
+        var total = std.math.add(
+            usize,
+            self.pending_stream.items.len,
+            self.pending_batches.items.len,
+        ) catch return error.InvalidState;
+        total = std.math.add(usize, total, ledger_items) catch return error.InvalidState;
+        return std.math.add(
+            usize,
+            total,
+            if (self.partial_batch != null) 1 else 0,
+        ) catch error.InvalidState;
     }
 
     fn validateGenerationEventQueue(self: *const Client) bool {
@@ -12921,6 +13101,7 @@ pub const Client = struct {
         self.pending_batch_bytes = 0;
         self.pending_stream_bytes = 0;
         self.pending_event_bytes = 0;
+        self.screen_recovery = .{};
     }
 
     fn endedPurgeFinalizationSeal(
@@ -13838,8 +14019,14 @@ pub const Client = struct {
         return self.sendResyncNonBlockingGuarded(stream_id, false);
     }
 
+    pub fn screenRecoveryState(self: *const Client, stream_id: u64) ScreenRecoveryState {
+        return self.screen_recovery.state(stream_id);
+    }
+
     fn sendResyncNonBlockingGuarded(self: *Client, stream_id: u64, execution_lease_held: bool) ClientError!bool {
-        if (!(try self.pumpPendingOutputGuarded(execution_lease_held))) return false;
+        // The outer frame pump advances older output only after its stream-ordering gates pass.
+        // Do not make this admission helper flush a sibling's revoked frame as a side effect.
+        if (self.pending_outbound != null) return false;
         const frame = framing.encodeFrame(
             self.allocator,
             .{ .kind = .stream_ack, .stream_id = stream_id, .major = self.wire_major },
@@ -13847,6 +14034,12 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
         self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
+        if (self.screen_recovery.state(stream_id) == .needs_resync) {
+            self.screen_recovery.requestAdmitted(stream_id) catch {
+                self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
+                return error.ProtocolError;
+            };
+        }
         _ = try self.pumpPendingOutputGuarded(execution_lease_held);
         return true;
     }
@@ -15464,6 +15657,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "last_success_request_id",
     "pending_stream",
     "pending_stream_bytes",
+    "screen_recovery",
     "pending_events",
     "pending_event_bytes",
     "pending_batches",
@@ -17015,6 +17209,247 @@ test "client call flushes accepted nonblocking input before its request frame" {
     peer.join();
     try std.testing.expectEqualStrings("{\"result\":{\"ok\":true}}", response);
     try std.testing.expect(peer_ok);
+}
+
+fn screenOverflowDuringCallPeer(fd: c.fd_t, ok: *bool) void {
+    defer _ = c.close(fd);
+    var header_bytes: [protocol.header_size]u8 = undefined;
+    readExactFd(fd, &header_bytes) catch return;
+    const request = protocol.Header.decode(&header_bytes) catch return;
+    if (request.kind != .request or request.request_id != 1) return;
+    const payload = std.heap.page_allocator.alloc(u8, request.payload_len) catch return;
+    defer std.heap.page_allocator.free(payload);
+    readExactFd(fd, payload) catch return;
+
+    const delta_prefix = framing.encodeFrame(
+        std.heap.page_allocator,
+        .{ .kind = .delta_chunk, .stream_id = 9 },
+        "a",
+    ) catch return;
+    defer std.heap.page_allocator.free(delta_prefix);
+    const delta_overflow = framing.encodeFrame(
+        std.heap.page_allocator,
+        .{ .kind = .delta_chunk, .stream_id = 9, .flags = protocol.Flags.end_stream },
+        "bb",
+    ) catch return;
+    defer std.heap.page_allocator.free(delta_overflow);
+    const response = framing.encodeFrame(
+        std.heap.page_allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"ok\":true}}",
+    ) catch return;
+    defer std.heap.page_allocator.free(response);
+    socket_server.writeAll(fd, delta_prefix) catch return;
+    socket_server.writeAll(fd, delta_overflow) catch return;
+    socket_server.writeAll(fd, response) catch return;
+    ok.* = true;
+}
+
+test "R3 call partial multi-frame cap plus one invalidates only target and preserves sibling RPC" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    // The first target chunk leaves the unified inbox at exact cap-1. The second chunk crosses
+    // cap by one, so recovery must reclaim the already-assembled target prefix as one owner.
+    const sibling = try allocator.alloc(u8, protocol.max_client_screen_inbox - 2);
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 10,
+        .bytes = sibling,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = sibling.len;
+
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, screenOverflowDuringCallPeer, .{ fds[1], &peer_ok });
+    const response = try client.call("host.info", null);
+    defer allocator.free(response);
+    peer.join();
+
+    try testing.expect(peer_ok);
+    try testing.expectEqualStrings("{\"result\":{\"ok\":true}}", response);
+    try testing.expect(!client.unusable);
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
+    try testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 10), client.pending_batches.items[0].stream_id);
+    try testing.expect(client.partial_batch == null);
+}
+
+test "R3 corrupted unified inbox arithmetic is not recoverable stream pressure" {
+    var client = Client{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    defer client.deinit();
+    client.pending_stream_bytes = std.math.maxInt(usize);
+    client.pending_batch_bytes = 1;
+    try testing.expectError(error.InvalidState, client.screenInboxBytes());
+    try testing.expectEqual(screen_inbox.State.valid, client.screenRecoveryState(9));
+}
+
+test "R3 item cap is unified across raw frames and completed batches" {
+    const allocator = testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const raw_count = protocol.max_client_screen_items / 2;
+    for (0..raw_count) |_| {
+        const payload = try allocator.dupe(u8, "");
+        try client.pending_stream.append(allocator, .{
+            .header = .{
+                .kind = .delta_chunk,
+                .stream_id = 10,
+                .flags = protocol.Flags.end_stream,
+            },
+            .payload = payload,
+        });
+    }
+    for (raw_count..protocol.max_client_screen_items) |_| {
+        const payload = try allocator.dupe(u8, "");
+        try client.pending_batches.append(allocator, .{
+            .is_snapshot = false,
+            .stream_id = 10,
+            .bytes = payload,
+            .allocator = allocator,
+        });
+    }
+    try testing.expectEqual(protocol.max_client_screen_items, try client.screenInboxItems());
+
+    try client.bufferPendingScreenBatch(.{
+        .is_snapshot = false,
+        .stream_id = 9,
+        .bytes = try allocator.dupe(u8, "target"),
+        .allocator = allocator,
+    });
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
+    try testing.expectEqual(protocol.max_client_screen_items, try client.screenInboxItems());
+    try testing.expect(!client.unusable);
+
+    try client.screen_recovery.requestAdmitted(9);
+    try client.bufferPendingScreenBatch(.{
+        .is_snapshot = true,
+        .stream_id = 9,
+        .bytes = try allocator.dupe(u8, "fresh-but-still-full"),
+        .allocator = allocator,
+    });
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
+    try testing.expect(!client.unusable);
+}
+
+test "R4 awaiting snapshot discards delta and accepts the first fresh snapshot" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    _ = try client.screen_recovery.invalidate(9);
+    try client.screen_recovery.requestAdmitted(9);
+
+    const stale = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 9, .flags = protocol.Flags.end_stream },
+        "stale",
+    );
+    defer allocator.free(stale);
+    const fresh = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 9, .flags = protocol.Flags.end_stream },
+        "fresh",
+    );
+    defer allocator.free(fresh);
+    try socket_server.writeAll(fds[1], stale);
+    try socket_server.writeAll(fds[1], fresh);
+
+    const batch = (try client.readStreamBatch(9)).?;
+    defer batch.deinit();
+    try testing.expect(batch.is_snapshot);
+    try testing.expectEqualStrings("fresh", batch.bytes);
+    try testing.expectEqual(screen_inbox.State.valid, client.screenRecoveryState(9));
+    try testing.expect(!client.unusable);
+}
+
+test "R4 resync frame allocation failure preserves the sticky recovery intent" {
+    const allocator = testing.allocator;
+    var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var client = Client{
+        .allocator = failing.allocator(),
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(failing.allocator()),
+    };
+    defer client.deinit();
+    _ = try client.screen_recovery.invalidate(9);
+
+    try testing.expectError(error.OutOfMemory, client.sendResyncNonBlocking(9));
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
+    try testing.expect(client.pending_outbound == null);
+    try testing.expect(!client.unusable);
+}
+
+test "R4 recovery never hides a malformed screen header" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    _ = try client.screen_recovery.invalidate(9);
+
+    const Peer = struct {
+        fn run(fd: c.fd_t) void {
+            defer _ = c.close(fd);
+            var header_bytes: [protocol.header_size]u8 = undefined;
+            readExactFd(fd, &header_bytes) catch return;
+            const request = protocol.Header.decode(&header_bytes) catch return;
+            const payload = std.heap.page_allocator.alloc(u8, request.payload_len) catch return;
+            defer std.heap.page_allocator.free(payload);
+            readExactFd(fd, payload) catch return;
+            const malformed = framing.encodeFrame(
+                std.heap.page_allocator,
+                .{
+                    .kind = .delta_chunk,
+                    .request_id = 77,
+                    .stream_id = 9,
+                    .flags = protocol.Flags.end_stream,
+                },
+                "stale",
+            ) catch return;
+            defer std.heap.page_allocator.free(malformed);
+            socket_server.writeAll(fd, malformed) catch return;
+        }
+    };
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{fds[1]});
+    try testing.expectError(error.ProtocolError, client.call("host.info", null));
+    peer.join();
+    try testing.expect(client.unusable);
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
 }
 
 test "client call poisons malformed event headers instead of buffering them" {

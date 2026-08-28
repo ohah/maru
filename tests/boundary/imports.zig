@@ -505,6 +505,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "preparedExecutionRecoveryPoisonedForTest", .receiver_type = immutable, .class = .observation },
         .{ .name = "nextExecutionCapabilityIdentityForTest", .receiver_type = immutable, .class = .observation },
         .{ .name = "revalidatePreparedResponsePublication", .receiver_type = immutable, .class = .observation },
+        .{ .name = "screenRecoveryState", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -1529,6 +1530,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnderExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnchecked" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferPendingScreenBatch" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "discardBufferedScreenStream" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "invalidateBufferedScreenStream" },
                 .{ .parent = "Client", .kind = "const", .visibility = "private", .modifier = "", .name = "StreamFenceMode" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpRxDemuxUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
@@ -1555,6 +1558,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendResyncNonBlockingGuarded" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendResyncNonBlockingUnderRegisteredOperationExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "screenRecoveryState" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendCoreCommandNonBlockingGuarded" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendScrollToBottomUnderRegisteredOperationExecutionLease" },
@@ -1566,6 +1570,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "ingestReadableOutOfBandEvidence" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pollReadableOrTerminal" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "retirement_cleanup_testing_api" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "screen_inbox" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ScreenRecoveryState" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "screenOverflowDuringCallPeer" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "screen_recovery" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "screenInboxItems" },
             },
         },
         .{
@@ -1990,6 +1999,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginGenerationInputOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginBoundControllerMutationOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendGenerationResyncNonBlocking" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "generationScreenRecoveryState" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "callGenerationRpc" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeStreamOperationPermitNoFail" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "settlement_contract" },
@@ -5401,6 +5411,25 @@ test "session host client pump policy imports only dependency-neutral leaves" {
         \\const allocator = system.heap.page_allocator;
     ;
     try std.testing.expect(containsForbiddenStdChild(forbidden_fake_std));
+}
+
+test "P4 R3 screen inbox recovery stays allocation free and below Client ownership" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/screen_inbox.zig",
+    );
+    defer allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(source, "@import("));
+    const forbidden = [_][]const u8{
+        "std.mem.Allocator",
+        "@import(\"client.zig\")",
+        "@import(\"client_slot.zig\")",
+        "@import(\"remote_runtime.zig\")",
+        "@import(\"server.zig\")",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
 }
 
 test "session host runtime event wire stays below framing and product ownership" {

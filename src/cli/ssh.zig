@@ -521,22 +521,27 @@ fn expectNotifyLifecycle(body: []const u8, signal: ?std.c.SIG, expected_exit: u3
     const spawned = spawnShell(script_z, false) orelse return error.SkipZigTest;
     const child = spawned.pid;
     defer _ = std.c.close(spawned.fd);
+    // 어떤 경로로 빠져나가도 자식을 거둔다. 아래 `expect` 들이 실패하면 그 자리에서 반환하는데, 그러면
+    // 자식이 고아로 남아 부모 없이 계속 돈다(2026-08-28 실측: 며칠 된 고아가 load average 를 89 까지
+    // 끌어올렸다). 정상 종료 경로가 이미 거뒀으면 `reaped` 로 표시해 두 번 기다리지 않는다.
+    var reaped = false;
+    defer if (!reaped) {
+        _ = std.c.kill(child, std.posix.SIG.KILL);
+        var orphan_status: c_int = 0;
+        _ = std.c.waitpid(child, &orphan_status, 0);
+    };
 
     var output: [64]u8 = undefined;
     // 첫 조각은 **신호를 보내기 전에** 읽어야 한다 — `notify`가 나온 뒤라야 trap이 걸린 상태다.
     const first = std.c.read(spawned.fd, &output, output.len);
-    if (first <= 0) {
-        _ = std.c.kill(child, std.posix.SIG.KILL);
-        var failed_status: c_int = 0;
-        _ = std.c.waitpid(child, &failed_status, 0);
-        return error.TestUnexpectedResult;
-    }
+    if (first <= 0) return error.TestUnexpectedResult; // 위 defer 가 거둔다
     var used: usize = @intCast(first);
     try std.testing.expect(std.mem.indexOf(u8, output[0..used], "notify\n") != null);
     if (signal) |sig| try std.testing.expectEqual(@as(c_int, 0), std.c.kill(child, sig));
 
     var status: c_int = 0;
     try std.testing.expectEqual(child, std.c.waitpid(child, &status, 0));
+    reaped = true;
     drainShell(spawned.fd, &output, &used);
     try std.testing.expectEqualStrings("notify\nclear\n", output[0..used]);
     const unsigned_status: u32 = @bitCast(status);
@@ -546,10 +551,20 @@ fn expectNotifyLifecycle(body: []const u8, signal: ?std.c.SIG, expected_exit: u3
 
 test "notify lifecycle: normal exit and HUP INT TERM emit ssh-end exactly once with preserved status" {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
+    // 대기 body 는 **CPU 를 태우지 않고, 고아가 되어도 스스로 사라져야 한다.**
+    //
+    // 예전에는 `while :; do :; done` 이었다. signal 을 기다리는 동안 코어 하나를 100% 로 돌리고, 테스트가
+    // 도중에 죽으면(타임아웃 kill 등) 자식이 고아로 남아 **며칠씩** 그 상태로 돈다. 2026-08-28 실측:
+    // 3~4 일 된 고아 3 개가 살아 있어 load average 가 89/145/133 까지 올랐고 맥 전체가 느려졌다.
+    // 정리 후 32 로 떨어졌다.
+    //
+    // `sleep` 은 그 사이에도 signal 을 받아 trap 이 그대로 돌므로 검증 대상은 바뀌지 않는다. 유한 루프라
+    // 고아가 되어도 수명이 60 초로 끝난다 — 테스트는 그 전에 signal 을 보내므로 여유가 넉넉하다.
+    const wait_body = "begin_notify; i=0; while [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done";
     try expectNotifyLifecycle("begin_notify; exit 17", null, 17);
-    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.HUP, 129);
-    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.INT, 130);
-    try expectNotifyLifecycle("begin_notify; while :; do :; done", std.posix.SIG.TERM, 143);
+    try expectNotifyLifecycle(wait_body, std.posix.SIG.HUP, 129);
+    try expectNotifyLifecycle(wait_body, std.posix.SIG.INT, 130);
+    try expectNotifyLifecycle(wait_body, std.posix.SIG.TERM, 143);
 }
 
 test "embed: 바이너리에 terminfo 소스가 들어있고 emit 구절이 그걸 흘린다" {

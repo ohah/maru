@@ -90,9 +90,10 @@ const usizeOptEql = AppSession.usizeOptEql;
 
 pub fn setFileTreeSelection(self: *AppSession, index: usize) bool {
     if (!self.file_tree_selection.set(self.file_tree_rows.items, index)) return false;
-    scrollFileTreeRowIntoView(self, index);
-    // 방금 보여 줬다 — 뒤이은 재투영이 같은 신원으로 스크롤을 다시 뺏지 않게 표시한다.
-    self.file_tree_revealed_selection_generation = self.file_tree_selection.generation;
+    // 방금 보여 줬다 — 뒤이은 재투영이 같은 신원으로 스크롤을 다시 뺏지 않게 표시한다. **그리고 보여
+    // 주지 못했으면 기록하지 않는다**(도크가 접혔거나 렌더 전) — 그때 표시하면 도크를 열어도 안 보인다.
+    if (scrollFileTreeRowIntoView(self, index))
+        self.file_tree_revealed_selection_generation = self.file_tree_selection.generation;
     self.metal_dirty = true;
     return true;
 }
@@ -219,11 +220,16 @@ pub fn fileSurfaceOwnsInput(self: *const AppSession, surface_id: u64) bool {
 
 /// 대상 행을 뷰포트 안으로 **최소한만** 민다(file-explorer §1 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
 /// 픽셀 좌표라 "보인다"의 기준은 행이 **온전히** 들어와 있는가다: 부분적으로 걸친 행은 마저 넣는다.
-pub fn scrollFileTreeRowIntoView(self: *AppSession, index: usize) void {
+///
+/// 반환값은 **판정할 수 있었는가**이지 스크롤을 옮겼는가가 아니다. 렌더 메트릭이 아직 없거나(첫 프레임)
+/// 도크가 접혀 뷰포트가 0이면 이 함수는 아무것도 못 하고 `false`를 낸다 — 그때 호출자가 "보여 줬다"고
+/// 기록하면(`file_tree_revealed_selection_generation`) 도크를 다시 열어도 그 선택은 영영 안 보인다.
+/// `scrollFileTreeToFollowedCwd`가 같은 위험을 pending 유지로 다루는 것과 같은 규율이다.
+pub fn scrollFileTreeRowIntoView(self: *AppSession, index: usize) bool {
     const row_h = file_tree_dock_ops.fileTreeRowHeightPx(self);
-    if (row_h == 0) return;
+    if (row_h == 0) return false;
     const extent = fileTreeScrollExtent(self);
-    if (extent.viewport_h_px == 0) return;
+    if (extent.viewport_h_px == 0) return false;
     const top: u64 = @as(u64, index) * @as(u64, row_h);
     const bottom = top + row_h;
     const offset = fileTreeEffectiveScrollPx(self);
@@ -232,6 +238,7 @@ pub fn scrollFileTreeRowIntoView(self: *AppSession, index: usize) void {
     } else if (bottom > @as(u64, offset) + extent.viewport_h_px) {
         setFileTreeScrollOffsetPx(self, @intCast(@min(bottom - extent.viewport_h_px, @as(u64, std.math.maxInt(i32)))));
     }
+    return true;
 }
 
 pub fn applyFileTreeRename(self: *AppSession, id: u64, new_path: []const u8) bool {
@@ -2815,8 +2822,8 @@ pub fn reconcileFileTreeSelection(self: *AppSession) void {
     }
     const resolved = self.file_tree_selection.reconcile(self.file_tree_rows.items) orelse return;
     if (self.file_tree_revealed_selection_generation == self.file_tree_selection.generation) return; // 이미 보여 줬다 — 스크롤은 사용자 것이다
-    scrollFileTreeRowIntoView(self, resolved);
-    self.file_tree_revealed_selection_generation = self.file_tree_selection.generation;
+    if (scrollFileTreeRowIntoView(self, resolved))
+        self.file_tree_revealed_selection_generation = self.file_tree_selection.generation;
 }
 
 pub fn openCreatedFilePanel(self: *AppSession, path: []const u8, root: []const u8) void {
@@ -3227,7 +3234,7 @@ pub fn scrollFileTreeToFollowedCwd(self: *AppSession) void {
     self.file_tree_follow_scroll_pending = false;
     // 키보드 anchor와 **같은** 최소 이동을 쓴다. 예전에는 여기 산술이 따로 있었고, 픽셀로 옮기면
     // 두 벌이 각각 갈릴 자리였다.
-    scrollFileTreeRowIntoView(self, row_index);
+    _ = scrollFileTreeRowIntoView(self, row_index); // 위 두 게이트가 이미 같은 조건을 봤다
 }
 
 pub fn removeFilePanelQueuedActions(self: *AppSession, surface_id: u64) void {

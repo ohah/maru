@@ -341,11 +341,19 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   하나 더 둔다 — `file_tree_revealed_selection_generation` 이 **보여 준 신원**을 기억하고, 스크롤을 실제로
   건 자리(`setFileTreeSelection`·이 함수)만 그 값을 옮긴다.
 
+  **그리고 보여 주지 못했으면 기록하지 않는다.** `scrollFileTreeRowIntoView` 는 렌더 메트릭이 아직
+  없거나(첫 프레임 — `fileTreeRowHeightPx` 가 0) 도크가 접혀 뷰포트가 0이면 아무것도 못 하고 돌아간다.
+  그때도 "보여 줬다"고 표시하면 **도크를 다시 열어도 그 선택은 영영 뷰포트 밖에 남는다** — 재투영은 매
+  tick 도니 도크를 접어 둔 채 파일 하나를 만들기만 해도 그 예약이 통째로 삼켜지는 자리다. 그래서 그
+  함수는 "판정할 수 있었는가"를 `bool` 로 돌려주고 호출자는 참일 때만 기록한다.
+  `scrollFileTreeToFollowedCwd` 가 같은 위험을 pending 유지로 다루는 것과 같은 규율이다.
+
   결과: 행이 재정렬돼 인덱스만 달라진 경우(스캔이 형제를 끼워 넣는 흔한 경로)에도 스크롤은 사용자 것으로
   남고, 선택 행이 사라져 조상·이웃으로 옮겨간 경우와 아직 못 보여 준 예약이 도착한 경우에만 그 행을 보여
   준다. 판정자는 `test-macos-file-explorer-perf` 의 "file tree reprojection keeps the user's scroll unless
-  the selection actually moved" 이고, 대조군 셋(선택 행 삭제 · `setIdentity` 예약 도착 · 보여 준 뒤 다시
-  민 스크롤)이 없으면 그 단언은 reveal 호출을 통째로 지워도, 축을 generation 으로 되돌려도 통과한다.
+  the selection actually moved" 이고, 대조군 넷(선택 행 삭제 · `setIdentity` 예약 도착 · 보여 준 뒤
+  다시 민 스크롤 · 렌더 메트릭 없는 동안의 재투영)이 없으면 그 단언은 reveal 호출을 통째로 지워도, 축을
+  generation 으로 되돌려도, 보여 주지 못한 것을 기록해도 통과한다.
 - **표준 탐색**: `↑/↓`는 이전/다음 조작 가능한 row, `←`는 열린 directory를 접고 그 외에는 부모 row, `→`는 닫힌 directory를 펼치고 이미 열렸으면 첫 자식, `Enter`는 directory toggle 또는 파일 열기, `Home/End`는 첫/마지막 row, `PageUp/PageDown`은 현재 tree viewport의 표시 row 수만큼 이동한다. 선택 이동은 같은 row layout/scroll 상태를 사용해 최소 거리로 scroll-into-view한다. `Esc`는 트리 진입 직전 도크 WKWebView를 복원하고, 없거나 stale이면 활성 terminal/browser pane으로 돌아간다. tree focus 동안 평문·IME와 terminal macro는 PTY로 전달하지 않는다.
 - **파일 변경 명령**: `new_file`, `new_directory`, `rename_file_tree_entry`, `delete_file_tree_entry`를 command catalog와 project tree context menu에 노출한다. rename은 `F2`, delete는 `⌘Backspace`도 사용한다. project root/directory/file row만 대상이며 recent row/header와 root 자체의 rename/delete는 금지한다. 생성 위치는 선택이 directory면 그 안, file이면 부모다. 빈 이름·`.`·`..`·`/` 포함·기존 항목 충돌은 거부하고 dotfile은 허용한다.
 - **identity 는 축이 셋이고 섞으면 안 된다**(2026-08-21 사용자 보고). 같은 경로라도 재는 방법마다 다른 값이

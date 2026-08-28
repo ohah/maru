@@ -13,6 +13,11 @@ pub fn HostPool(comptime Adapter: type) type {
             adapter_generation: u64,
         };
 
+        pub const AdapterSnapshot = struct {
+            adapter: *Adapter,
+            adapter_generation: u64,
+        };
+
         allocator: std.mem.Allocator,
         entries: std.AutoHashMapUnmanaged(u128, Entry) = .empty,
         spawn_host_id: ?u128 = null,
@@ -303,6 +308,20 @@ pub fn HostPool(comptime Adapter: type) type {
         pub fn adapterGeneration(self: *Self, host_id: u128) ?u64 {
             self.ensureOwner() catch return null;
             return (self.entries.get(host_id) orelse return null).adapter_generation;
+        }
+
+        pub fn adapterSnapshots(self: *Self, out: []AdapterSnapshot) usize {
+            self.requireOwner();
+            var count: usize = 0;
+            var entries = self.entries.valueIterator();
+            while (entries.next()) |entry| {
+                if (count < out.len) out[count] = .{
+                    .adapter = entry.adapter,
+                    .adapter_generation = entry.adapter_generation,
+                };
+                count += 1;
+            }
+            return count;
         }
 
         pub fn setSpawnHost(self: *Self, host_id: u128) !void {

@@ -63,6 +63,7 @@ const SurfaceRuntime = maru.app.SurfaceRuntime;
 const PtyIo = maru.app.runtime.PtyIo;
 const runtime_pump = maru.app.runtime_pump;
 const RuntimeEventPump = runtime_pump.RuntimeEventPump;
+const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const DrainSummary = runtime_pump.DrainSummary;
 const CoreCommand = maru.session.core_command.CoreCommand;
 const ForegroundProcessName = maru.pty.types.ForegroundProcessName;
@@ -1218,6 +1219,35 @@ pub const CloseMaintenanceStats = struct {
 /// `host_pool`만 권위로 사용한다. **`RemoteRuntime`은 self-referential**(surface.remote가 자기 조립기를 가리킴)이라
 /// heap에 개별 할당해 안정 주소를 주며, map value가 runtime과 host lease identity를 한 단위로 소유한다.
 pub const RemoteTermBackend = struct {
+    pub const WakeSource = struct {
+        fd: std.c.fd_t,
+        host_id: u128,
+        connection_generation: u64,
+    };
+
+    const HostProbe = struct {
+        host_id: u128,
+        runtime: *RemoteRuntime,
+    };
+
+    fn hostProbeLessThan(_: void, lhs: HostProbe, rhs: HostProbe) bool {
+        return lhs.host_id < rhs.host_id;
+    }
+
+    fn sortedHostsContain(hosts: []const u128, target: u128) bool {
+        var low: usize = 0;
+        var high = hosts.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            if (hosts[middle] < target) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        return low < hosts.len and hosts[low] == target;
+    }
+
     const Mode = enum {
         spawn_and_attach,
         attach_only,
@@ -1272,6 +1302,7 @@ pub const RemoteTermBackend = struct {
     app_quit_first_ticket: u64 = 0,
     app_quit_target_count: u32 = 0,
     next_shutdown_connection_identity: u64 = 0,
+
     notification_config_generation: u64 = 1,
     notifications_osc: bool = false,
 
@@ -1303,6 +1334,35 @@ pub const RemoteTermBackend = struct {
         .enqueue_core_command = enqueueCoreCommand,
         .enqueue_batch = enqueueInputBatch,
     };
+
+    /// Borrowed host socket identities for native read sources. Client/ClientSlot still own and
+    /// close every descriptor; callers must replace a source whenever its identity tuple changes.
+    pub fn wakeSources(self: *RemoteTermBackend, out: []WakeSource) usize {
+        if (self.host_pool) |pool| {
+            var adapters: [max_remote_backend_runtimes]AdapterPool.AdapterSnapshot = undefined;
+            const adapter_count = pool.adapterSnapshots(&adapters);
+            if (adapter_count > adapters.len) process_seal.fatalIntegrity(.proof_loss);
+            var count: usize = 0;
+            for (adapters[0..adapter_count]) |snapshot| {
+                const source = snapshot.adapter.wakeSource() orelse continue;
+                if (count < out.len) out[count] = .{
+                    .fd = source.fd,
+                    .host_id = source.host_id,
+                    .connection_generation = source.connection_generation,
+                };
+                count += 1;
+            }
+            return count;
+        }
+        const client = self.client orelse return 0;
+        if (client.fd < 0 or client.host_id == 0) return 0;
+        if (out.len != 0) out[0] = .{
+            .fd = client.fd,
+            .host_id = client.host_id,
+            .connection_generation = 1,
+        };
+        return 1;
+    }
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, client: *client_mod.Client, surface_runtime: *SurfaceRuntime) RemoteTermBackend {
         return .{ .allocator = allocator, .io = io, .client = client, .surface_runtime = surface_runtime };
@@ -2927,19 +2987,68 @@ pub const RemoteTermBackend = struct {
         }
         std.mem.sort(RuntimeHandle, handles[0..handle_count], {}, std.sort.asc(RuntimeHandle));
         if (self.event_pump_cursor >= handle_count) self.event_pump_cursor = 0;
-        const selected_count = @min(handle_count, event_pump_contract.max_owners_per_frame);
+
+        // The first round-robin owner is the connection probe. Its ordinary pump either consumes
+        // its own batch or demultiplexes a sibling batch into the sealed canonical Client queue.
+        // Only after that real read may the queue provide a routing hint for the remaining slots.
+        const probe_handle = handles[self.event_pump_cursor];
+        const probe_entry = self.runtimes.get(probe_handle) orelse
+            process_seal.fatalIntegrity(.proof_loss);
+        client_idle_pump_evidence.recordSelectedOwner();
+        RemoteRuntime.backend_api.storeFrameSummary(
+            probe_entry.runtime,
+            if (builtin.is_test and B5TestState.event_pump_hook != null)
+                B5TestState.event_pump_hook.?(probe_handle, probe_entry.runtime)
+            else
+                drainRemoteNow(probe_entry.runtime),
+        );
+
+        var host_probes: [max_remote_backend_runtimes]HostProbe = undefined;
+        var ready_hosts: [max_remote_backend_runtimes]u128 = undefined;
+        var ready_host_count: usize = 0;
+        for (handles[0..handle_count], 0..) |handle, index| {
+            const entry = self.runtimes.get(handle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            host_probes[index] = .{ .host_id = entry.host_id, .runtime = entry.runtime };
+        }
+        std.mem.sort(HostProbe, host_probes[0..handle_count], {}, hostProbeLessThan);
+        for (host_probes[0..handle_count], 0..) |probe, index| {
+            if (index != 0 and host_probes[index - 1].host_id == probe.host_id) continue;
+            if (RemoteRuntime.backend_api.hasAnyBufferedFrameWork(probe.runtime) catch false) {
+                ready_hosts[ready_host_count] = probe.host_id;
+                ready_host_count += 1;
+            }
+        }
+        var priority = [_]bool{false} ** max_remote_backend_runtimes;
+        for (handles[0..handle_count], 0..) |handle, index| {
+            const entry = self.runtimes.get(handle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            priority[index] = RemoteRuntime.backend_api.hasImmediateFrameWork(entry.runtime);
+            const host_ready = sortedHostsContain(ready_hosts[0..ready_host_count], entry.host_id);
+            if (host_ready)
+                priority[index] = priority[index] or
+                    (RemoteRuntime.backend_api.hasBufferedFrameWork(entry.runtime) catch false);
+        }
+        var selected: [event_pump_contract.max_owners_per_frame]RuntimeHandle = undefined;
+        const selection = event_pump_contract.selectAfterProbe(
+            handles[0..handle_count],
+            self.event_pump_cursor,
+            priority[0..handle_count],
+            &selected,
+        ) catch process_seal.fatalIntegrity(.proof_loss);
+        const selected_count = selection.count;
         _ = event_pump_contract.frameBudget(
             selected_count,
             selected_count * event_pump_contract.retained_parts_per_owner * protocol.max_control_json,
         ) catch process_seal.fatalIntegrity(.proof_loss);
-        for (0..selected_count) |offset| {
-            const index = (self.event_pump_cursor + offset) % handle_count;
-            const entry = self.runtimes.get(handles[index]) orelse
+        for (selected[1..selected_count]) |handle| {
+            const entry = self.runtimes.get(handle) orelse
                 process_seal.fatalIntegrity(.proof_loss);
+            client_idle_pump_evidence.recordSelectedOwner();
             RemoteRuntime.backend_api.storeFrameSummary(
                 entry.runtime,
                 if (builtin.is_test and B5TestState.event_pump_hook != null)
-                    B5TestState.event_pump_hook.?(handles[index], entry.runtime)
+                    B5TestState.event_pump_hook.?(handle, entry.runtime)
                 else
                     drainRemoteNow(entry.runtime),
             );
@@ -2947,7 +3056,7 @@ pub const RemoteTermBackend = struct {
         self.event_pump_cursor = event_pump_contract.nextCursor(
             self.event_pump_cursor,
             handle_count,
-            selected_count,
+            selection.round_robin_advanced,
         ) catch process_seal.fatalIntegrity(.proof_loss);
     }
 
@@ -3403,6 +3512,24 @@ pub const RemoteTermBackend = struct {
     }
 
     pub const testing_api = if (builtin.is_test) struct {
+        pub const EvidenceAdapterPool = AdapterPool;
+
+        pub fn evidenceAddOwnedClient(
+            pool: *EvidenceAdapterPool,
+            allocator: std.mem.Allocator,
+            source: *client_mod.Client,
+        ) !u128 {
+            return addOwnedClient(pool, allocator, source);
+        }
+
+        pub fn runtimeUsesGenerationAttachment(
+            remote_backend: *RemoteTermBackend,
+            handle: RuntimeHandle,
+        ) bool {
+            const entry = remote_backend.runtimes.get(handle) orelse return false;
+            return entry.runtime.usesGenerationAttachment();
+        }
+
         pub fn cr5d2WindowSurface(
             remote_backend: *RemoteTermBackend,
             handle: RuntimeHandle,
@@ -3824,9 +3951,16 @@ pub const RemoteTermBackend = struct {
             switch (result) {
                 .idle => break,
                 .event_pending => break,
-                .metadata => continue,
-                .screen => summary.output_events += 1,
+                .metadata => {
+                    client_idle_pump_evidence.recordMetadataEvent();
+                    continue;
+                },
+                .screen => {
+                    client_idle_pump_evidence.recordScreenEvent();
+                    summary.output_events += 1;
+                },
                 .ended => {
+                    client_idle_pump_evidence.recordEndedEvent();
                     RemoteRuntime.backend_api.markPumpEnded(rr);
                     rr.surface.process_state = .exited;
                     // Registry membership proves lifecycle end but no tombstone carries the child

@@ -16,6 +16,9 @@ const Iteration = struct {
     harness_exit_ns: u64,
     stage: u32,
     marker_present: bool,
+    async_wake_marker_present: bool,
+    wake_handler_count: u64,
+    wake_apply_latency_ns: u64,
     before_capture: bool,
     after_capture: bool,
     runtime_survived: bool,
@@ -38,7 +41,7 @@ const Artifact = struct {
 };
 
 fn validateArtifact(artifact: Artifact) !void {
-    if (!std.mem.eql(u8, artifact.schema, "maru.session-host-cr6e-recovery-baseline-macos.v1") or
+    if (!std.mem.eql(u8, artifact.schema, "maru.session-host-cr6e-recovery-baseline-macos.v2") or
         !std.mem.eql(u8, artifact.build_mode, "ReleaseFast") or
         artifact.iteration_count != iteration_count or artifact.iterations.len != iteration_count or
         !isCanonicalHostId(artifact.host_id_hex))
@@ -46,6 +49,8 @@ fn validateArtifact(artifact: Artifact) !void {
     var previous_exit: u64 = 0;
     for (artifact.iterations, 0..) |row, index| {
         if (row.index != index or row.swift_iteration != index or row.stage != 2 or !row.marker_present or
+            !row.async_wake_marker_present or row.wake_handler_count == 0 or
+            row.wake_apply_latency_ns == 0 or row.wake_apply_latency_ns > 60 * std.time.ns_per_ms or
             !row.before_capture or !row.after_capture or
             !row.runtime_survived or !row.controller_zero or !row.observer_zero)
             return error.InvalidIteration;
@@ -99,6 +104,18 @@ test "CR6e-a2 validator rejects marker duplication projection and cleanup residu
     try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
     rows = fixtureRows();
     artifact = validFixture(&rows);
+    rows[2].async_wake_marker_present = false;
+    try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
+    rows = fixtureRows();
+    artifact = validFixture(&rows);
+    rows[2].wake_handler_count = 0;
+    try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
+    rows = fixtureRows();
+    artifact = validFixture(&rows);
+    rows[2].wake_apply_latency_ns = 60 * std.time.ns_per_ms + 1;
+    try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
+    rows = fixtureRows();
+    artifact = validFixture(&rows);
     rows[2].swift_iteration = 3;
     try std.testing.expectError(error.InvalidIteration, validateArtifact(artifact));
     rows = fixtureRows();
@@ -145,6 +162,9 @@ fn fixtureRows() [iteration_count]Iteration {
             .harness_exit_ns = start + 6,
             .stage = 2,
             .marker_present = true,
+            .async_wake_marker_present = true,
+            .wake_handler_count = 1,
+            .wake_apply_latency_ns = std.time.ns_per_ms,
             .before_capture = true,
             .after_capture = true,
             .runtime_survived = true,
@@ -157,7 +177,7 @@ fn fixtureRows() [iteration_count]Iteration {
 
 fn validFixture(rows: []const Iteration) Artifact {
     return .{
-        .schema = "maru.session-host-cr6e-recovery-baseline-macos.v1",
+        .schema = "maru.session-host-cr6e-recovery-baseline-macos.v2",
         .build_mode = "ReleaseFast",
         .iteration_count = iteration_count,
         .host_id_hex = "00000000000000000000000000000001",

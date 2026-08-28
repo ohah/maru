@@ -3607,6 +3607,7 @@ pub const AppSession = struct {
         surface_initialized: bool = false,
         active_remote: bool = false,
         marker_present: bool = false,
+        async_wake_marker_present: bool = false,
         keep_alive_enabled: bool = false,
         discovered_candidates: u32 = 0,
         ready_adapters: u32 = 0,
@@ -3674,6 +3675,7 @@ pub const AppSession = struct {
         ) catch return out;
         defer self.allocator.free(recent);
         out.marker_present = std.mem.indexOf(u8, recent, "CR6C-RECOVERED-MARKER") != null;
+        out.async_wake_marker_present = std.mem.indexOf(u8, recent, "E3C-APPKIT-ASYNC-WAKE") != null;
         return out;
     }
 

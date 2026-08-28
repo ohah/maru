@@ -408,10 +408,11 @@ jobs:
       # `unresolved_import` 로 죽었다(AppKit 과 무관한 실패였다). 기존 web job 과 같은 명령을 쓴다.
       - name: 웹 의존성 설치
         run: bun install --cwd web --frozen-lockfile
-      # 이 스모크가 단언하는 일곱(build.zig): stage=2(두 번째 실행까지 감) · row_present(살아남은 세션을
+      # 이 스모크가 단언하는 항목(build.zig): stage=2(두 번째 실행까지 감) · row_present(살아남은 세션을
       # 목록에서 찾음) · click_dispatched(실제 클릭) · remote_published(원격 터미널이 섬) ·
       # marker_present(**1 차 셸이 남긴 표식이 2 차에서 보임 = 같은 프로세스에 재접속**) · before/after_capture
-      # (그 화면을 렌더해 캡처).
+      # (그 화면을 렌더해 캡처) · attach 뒤 handshake로 PTY가 낸 async marker · 실제 DispatchSourceRead
+      # handler 증가 · handler tick→Metal frame 뒤 screen probe 60ms 이내.
       - name: keep-alive recovered-session 스모크
         run: mise run macos-session-host-recovery-smoke
       # 저장된 ended tombstone을 실제 AppKit 제품이 capture→atomic checkpoint한 결과로 다시 두 번
@@ -512,6 +513,8 @@ jobs:
             zig-v2-${{ runner.os }}-slow-observer-
       - name: Verify real PTY slow-observer isolation and host RSS
         run: zig build test-session-host-slow-observer-macos
+      - name: Verify generation-backed GUI client idle pump
+        run: zig build test-session-host-e3c
       - name: Measure CR6e real stalled-peer baseline
         run: zig build test-session-host-cr6e-baseline-macos
       - name: Upload session-host slow-observer artifact
@@ -520,6 +523,14 @@ jobs:
         with:
           name: maru-session-host-slow-observer-macos-artifact
           path: tests/artifacts/perf/session-host-slow-observer-macos.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload session-host GUI client idle-pump artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-session-host-client-idle-pump-macos-artifact
+          path: tests/artifacts/perf/session-host-client-idle-pump-macos.json
           if-no-files-found: error
           retention-days: 14
       - name: Upload CR6e stalled-peer baseline artifact

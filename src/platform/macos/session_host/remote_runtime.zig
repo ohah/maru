@@ -23,6 +23,7 @@ const client_mod = @import("client.zig");
 const client_slot_mod = @import("client_slot.zig");
 const r2a_client_slot = client_slot_mod;
 const client_poison = @import("client_poison.zig");
+const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const control_response_wire = @import("control_response_wire.zig");
 const protocol = @import("protocol.zig");
 const screen_assembler = @import("maru").session.screen_assembler;
@@ -3449,6 +3450,32 @@ pub const RemoteRuntime = struct {
             generation.frame_summary_ready = true;
         }
 
+        pub fn hasBufferedFrameWork(runtime: *RemoteRuntime) client_mod.ClientError!bool {
+            try runtime.admitRuntimeOperation();
+            const generation = runtime.currentGeneration();
+            return switch (generation.connection) {
+                .legacy => false,
+                .generation => |adapter| adapter.hasBufferedRuntimeWork(
+                    generation.attachment.streamId(),
+                ),
+            };
+        }
+
+        pub fn hasAnyBufferedFrameWork(runtime: *RemoteRuntime) client_mod.ClientError!bool {
+            try runtime.admitRuntimeOperation();
+            return switch (runtime.currentGeneration().connection) {
+                .legacy => false,
+                .generation => |adapter| adapter.hasAnyBufferedRuntimeWork(),
+            };
+        }
+
+        pub fn hasImmediateFrameWork(runtime: *const RemoteRuntime) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            const generation = runtime.currentGenerationConst();
+            return runtime.direct_input_offset < runtime.direct_input.items.len or
+                runtime.pending_controls.items.len != 0 or generation.resync_needed;
+        }
+
         pub fn storeFrameSummary(runtime: *RemoteRuntime, summary: runtime_pump_mod.DrainSummary) void {
             runtime.currentGeneration().frame_summary = summary;
         }
@@ -5309,6 +5336,7 @@ pub const RemoteRuntime = struct {
     pub fn pumpDelta(
         self: *RemoteRuntime,
     ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!PumpResult {
+        client_idle_pump_evidence.recordPumpDelta();
         try self.admitRuntimeOperation();
         switch (self.currentGeneration().attachment) {
             .legacy => return self.pumpDeltaInner(),
@@ -5318,6 +5346,7 @@ pub const RemoteRuntime = struct {
             if (builtin.is_test and err == error.InvalidOwner) return self.pumpDeltaInner();
             return error.ProtocolError;
         };
+        client_idle_pump_evidence.recordTimestampSeal();
         var capture: incident_publication_contract.ReadPumpPoisonCapture = .{};
         const generation = switch (self.currentGeneration().attachment) {
             .legacy => unreachable,

@@ -30,6 +30,9 @@ const RecoveryBaselineIteration = struct {
     harness_exit_ns: u64,
     stage: u32,
     marker_present: bool,
+    async_wake_marker_present: bool,
+    wake_handler_count: u64,
+    wake_apply_latency_ns: u64,
     before_capture: bool,
     after_capture: bool,
     runtime_survived: bool,
@@ -144,9 +147,9 @@ pub fn main(init: std.process.Init) !void {
     if (admin == null) return error.DaemonNotReady;
     defer if (admin) |*client| client.deinit();
     const spawn_params = if (input_continuity)
-        "{\"argv\":[\"/bin/sh\",\"-c\",\"printf 'CR6C-RECOVERED-MARKER\\nCR6D-HISTORICAL-ONCE\\n'; printf '\\\\033]52;c;Q1I2RC1ISVNUT1JJQ0FMLU9TQzUy\\\\007'; stty -echo; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"(while true; do while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\n'; done) & printf 'CR6C-RECOVERED-MARKER\\nCR6D-HISTORICAL-ONCE\\n'; printf '\\\\033]52;c;Q1I2RC1ISVNUT1JJQ0FMLU9TQzUy\\\\007'; stty -echo; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
     else
-        "{\"argv\":[\"/bin/sh\",\"-c\",\"printf 'CR6C-RECOVERED-MARKER\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}";
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"(while true; do while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\n'; done) & printf 'CR6C-RECOVERED-MARKER\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}";
     const spawn = try admin.?.call("runtime.spawn", spawn_params);
     defer allocator.free(spawn);
     const runtime_id = client_mod.extractRuntimeId(spawn) orelse return error.RuntimeIdMissing;
@@ -244,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
         const fd_after = try countOpenFds(io);
         const child_processes_remaining = try remainingChildProcesses();
         try writeRecoveryBaselineArtifact(allocator, io, path, .{
-            .schema = "maru.session-host-cr6e-recovery-baseline-macos.v1",
+            .schema = "maru.session-host-cr6e-recovery-baseline-macos.v2",
             .build_mode = @tagName(builtin.mode),
             .iteration_count = recovery_baseline_iterations,
             .host_id_hex = host_text,
@@ -284,6 +287,7 @@ fn readRecoveryBaselineIteration(
     defer allocator.free(summary);
     const stage = try summaryU32(summary, "session_host_recovery_smoke_stage");
     const marker = try summaryBool(summary, "session_host_recovery_smoke_marker_present");
+    const async_marker = try summaryBool(summary, "session_host_recovery_smoke_async_wake_marker_present");
     const before_capture = try summaryBool(summary, "session_host_recovery_smoke_before_capture");
     const after_capture = try summaryBool(summary, "session_host_recovery_smoke_after_capture");
     const failure = summaryValue(summary, "session_host_recovery_smoke_failure") orelse
@@ -300,13 +304,18 @@ fn readRecoveryBaselineIteration(
         .harness_exit_ns = harness_exit_ns,
         .stage = stage,
         .marker_present = marker,
+        .async_wake_marker_present = async_marker,
+        .wake_handler_count = try summaryU64(summary, "session_host_recovery_smoke_wake_handler_count"),
+        .wake_apply_latency_ns = try summaryU64(summary, "session_host_recovery_smoke_async_wake_apply_latency_ns"),
         .before_capture = before_capture,
         .after_capture = after_capture,
         .runtime_survived = runtime_survived,
         .controller_zero = controller_zero,
         .observer_zero = observer_zero,
     };
-    if (row.swift_iteration != index or stage != 2 or !marker or !before_capture or !after_capture or
+    if (row.swift_iteration != index or stage != 2 or !marker or !async_marker or
+        row.wake_handler_count == 0 or row.wake_apply_latency_ns == 0 or
+        row.wake_apply_latency_ns > 60 * std.time.ns_per_ms or !before_capture or !after_capture or
         failure.len != 0 or
         !(row.harness_launch_ns <= row.swift_launch_ns and
             row.swift_launch_ns < row.row_ns and row.row_ns < row.click_ns and

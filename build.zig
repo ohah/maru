@@ -2379,6 +2379,9 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_click_dispatched=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_remote_published=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_marker_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^session_host_recovery_smoke_async_wake_marker_present=true$' \"$summary\"; " ++
+                "/usr/bin/awk -F= '$1 == \"session_host_recovery_smoke_wake_handler_count\" && $2 + 0 > 0 { ok=1 } END { exit !ok }' \"$summary\"; " ++
+                "/usr/bin/awk -F= '$1 == \"session_host_recovery_smoke_async_wake_apply_latency_ns\" && $2 + 0 > 0 && $2 + 0 <= 60000000 { ok=1 } END { exit !ok }' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_before_capture=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_after_capture=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_failure=$' \"$summary\"; " ++
@@ -2489,7 +2492,17 @@ pub fn build(b: *std.Build) void {
                 "tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json",
         });
         session_host_cr6e_recovery_fixture.setCwd(b.path("."));
-        const run_session_host_cr6e_recovery = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        const session_host_cr6e_recovery_harness = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-recovery-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/cr6c_appkit_smoke.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_session_host_cr6e_recovery = b.addRunArtifact(session_host_cr6e_recovery_harness);
         run_session_host_cr6e_recovery.setCwd(b.path("."));
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
@@ -3741,6 +3754,53 @@ pub fn build(b: *std.Build) void {
     run_session_host_e3c_boundary_tests.setCwd(b.path("."));
     session_host_e3c_step.dependOn(&run_session_host_e3c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3c_boundary_tests.step);
+    if (target.result.os.tag == .macos) {
+        const session_host_e3c_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_client_idle_pump_e2e.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "session_host", .module = b.createModule(.{
+                        .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                        .target = target,
+                        .optimize = .ReleaseFast,
+                        .link_libc = true,
+                        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                    }) },
+                },
+            }),
+            .filters = &.{"P4 E3c actual generation-backed"},
+        });
+        const run_session_host_e3c_product_tests = b.addRunArtifact(session_host_e3c_product_tests);
+        run_session_host_e3c_product_tests.addArg("--maru-expect-tests=1");
+        run_session_host_e3c_product_tests.setCwd(b.path("."));
+
+        const session_host_e3c_validator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_client_idle_pump_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_session_host_e3c_validator_tests = b.addRunArtifact(session_host_e3c_validator_tests);
+        const session_host_e3c_validator = b.addExecutable(.{
+            .name = "maru-session-host-client-idle-pump-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_client_idle_pump_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_session_host_e3c_validator = b.addRunArtifact(session_host_e3c_validator);
+        run_session_host_e3c_validator.addArg("tests/artifacts/perf/session-host-client-idle-pump-macos.json");
+        run_session_host_e3c_validator.setCwd(b.path("."));
+        run_session_host_e3c_validator.step.dependOn(&run_session_host_e3c_product_tests.step);
+        session_host_e3c_step.dependOn(&run_session_host_e3c_validator.step);
+        session_host_e3c_step.dependOn(&run_session_host_e3c_validator_tests.step);
+    }
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",
@@ -9328,7 +9388,7 @@ pub fn build(b: *std.Build) void {
             "own buffered revoke suppresses newly arriving input before role cache catches up",
             "sibling runtime cannot flush a stream whose buffered revoke is not consumed yet",
             "remote runtime observer locally consumes input and sends no resize mutation",
-            "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막는다",
+            "R4 sibling revoke does not block my deferred resync",
         }) |filter| {
             const family_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{

@@ -33,6 +33,7 @@ const owner_seal = @import("external_owner_seal.zig");
 const operation_thread_identity = @import("operation_thread_identity.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
+const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const client_poison = @import("client_poison.zig");
 const screen_inbox = @import("screen_inbox.zig");
 pub const ScreenRecoveryState = screen_inbox.State;
@@ -7494,6 +7495,29 @@ pub const Client = struct {
         return error.AdminBusy;
     }
 
+    /// Read-only routing hint after a shared connection has demultiplexed readable wire input.
+    /// This does not create a second event owner: the sealed canonical queues remain authoritative,
+    /// and the selected runtime must still consume them through the normal generation pump.
+    pub fn hasBufferedRuntimeWork(self: *const Client, stream_id: u64) ClientError!bool {
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (stream_id == 0) return error.ProtocolError;
+        for (self.pending_events.items) |pending|
+            if (pending.header.stream_id == stream_id) return true;
+        for (self.pending_batches.items) |pending|
+            if (pending.stream_id == stream_id) return true;
+        for (self.pending_stream.items) |pending|
+            if (pending.header.stream_id == stream_id) return true;
+        return false;
+    }
+
+    pub fn hasAnyBufferedRuntimeWork(self: *const Client) ClientError!bool {
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
+        return self.pending_events.items.len != 0 or self.pending_batches.items.len != 0 or
+            self.pending_stream.items.len != 0;
+    }
+
     pub fn restoreGenerationAllocatorScope(
         self: *Client,
         scope: *GenerationAllocatorScope,
@@ -14451,6 +14475,7 @@ pub const Client = struct {
                     self.poisonFrameRead(.peer_contract_violation, execution_lease_held);
                     return err;
                 };
+            client_idle_pump_evidence.recordSocketRead();
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
                 const read_errno = posix.errno(n);

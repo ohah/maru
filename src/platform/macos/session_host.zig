@@ -107,6 +107,10 @@ pub const app_process_incident_owner = if (builtin.os.tag == .macos)
     @import("session_host/app_process_incident_owner.zig")
 else
     struct {};
+pub const client_idle_pump_evidence = if (builtin.os.tag == .macos)
+    @import("session_host/client_idle_pump_evidence.zig")
+else
+    struct {};
 pub const session_host_coordinator = if (builtin.os.tag == .macos)
     @import("session_host/session_host_coordinator.zig")
 else

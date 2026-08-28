@@ -7113,9 +7113,10 @@ controlled Claude/Codex foreground fixture를 낸 뒤 GUI observation까지 왕�
 - **R2b core module 구현:** 위 §7 계약의 paginated ID-only `runtime.inventory`, authority generation,
   secure registry discovery, pinned descriptor ephemeral collector와 manifest relation/inventory-only orphan의
   side-effect-free reconcile까지 구현했다.
-- **R2b 제품 후속:** single-client host의 별도 ephemeral connection scheduling을 먼저 해결하고 restore coordinator에
-  core module을 연결한다. primary Window에는 typed virtual `Recovered Sessions` projection만 publish하며, 사용자의
-  explicit one-item adopt가 fresh authority revalidation 뒤 orphan 새 tab 또는 ended tombstone 제자리 교체를 수행한다.
+- **R2b 제품 배선 구현:** single-client host의 별도 ephemeral connection scheduling과 restore coordinator 배선을
+  완료했다. primary Window에만 typed virtual `Recovered Sessions` projection을 publish하며, 사용자의 explicit
+  one-item adopt는 fresh authority revalidation 뒤 orphan 새 tab 또는 ended tombstone 제자리 교체를 수행한다.
+  CR6c actual AppKit smoke가 launch discovery→projection→click→remote publication과 row 소멸을 자동 검증한다.
 - GUI abnormal exit 직전 layout을 위해 `WorkspaceCheckpointCoordinator`를 구현한다. 결과는
   `committed(generation)|stale|capture_failed|write_failed`이며 background 실패는 dirty를 유지하고 bounded
   backoff/notice coalescing을 한다. 마지막 Quit은 AppKit `terminateLater`에서 mutation을 freeze하거나 captured

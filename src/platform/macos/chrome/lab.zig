@@ -753,7 +753,17 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // **이 배선 전에는 캡처가 무색이었다** — Lab이 `frame.build`를 직접 부르며 색을 안 넘겼고,
     // 그래서 **골든 게이트가 색 회귀를 원리상 못 잡았다**. 기능이 화면에 뜨는데 캡처 하네스가
     // 그것을 한 번도 안 밟는 상태였다.
-    var syn = editorSyntaxColors(lines, lab_tab_width);
+    // **표시 폭 장면은 색을 안 입힌다.** `a390f8b8`이 세운 규율을 잇는다 — 그 커밋은 *"그림은
+    // Apple Color Emoji가 소유하고 우리가 계약하는 것은 몇 칸을 차지하는가뿐"*이라며 이모지
+    // 그림을 크롭에서 잘라 냈다. 그런데 **색이 붙으면 그 회피가 무력화된다**: 잘라 낸 것은
+    // 이모지였지만 남긴 `|` 막대 자체가 색을 갖게 되고, 색 있는 글리프는 안티에일리어싱이
+    // macOS 버전마다 달라 CI에서만 깨진다(실측: 채널 차이 139, 허용치 2 — 같은 사고가 그
+    // 커밋에서 200으로 한 번 났다).
+    //
+    // **색 계약은 다른 골든이 지킨다**(`editor-real-file`·`editor-content-text` 등). 여기서
+    // 재는 것은 폭이지 색이 아니다.
+    const paints_syntax = scenario.id != .editor_wide_glyph;
+    var syn = if (paints_syntax) editorSyntaxColors(lines, lab_tab_width) else LabSyntax{ .allocator = std.heap.page_allocator };
     defer syn.deinit();
 
     const fw = chrome.components.editor_view.frame.build(.{

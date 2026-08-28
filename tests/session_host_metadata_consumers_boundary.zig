@@ -40,10 +40,11 @@ test "P3-e4d-2a metadata consumers use actual product boundaries" {
     try std.testing.expect(std.mem.indexOf(u8, body, "agent_ops.pollAgentKinds") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "git_ops.termGitBranch") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "remoteUploadContext") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "handleDroppedFiles") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "testing_api") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "test_only") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "writeArtifact") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "observation.replace") == null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "agent_kind =") == null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "git_branch =") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "term.agent_kind = .") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "term.git_branch = ") == null);
 }

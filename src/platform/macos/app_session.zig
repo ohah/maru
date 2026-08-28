@@ -5096,6 +5096,14 @@ pub const AppSession = struct {
     file_tree_perf_counters: ?*FileTreePerfCounters = null,
     // path+row-kind가 selection SSOT다. index는 rebuild에서 fallback/scroll 보정에만 쓰는 힌트이며 영속하지 않는다.
     file_tree_selection: file_tree_navigation.Selection = .{},
+    /// **이 신원의 선택을 스크롤로 이미 한 번 보여 줬는가**(`Selection.generation`과 같은 축).
+    ///
+    /// 재투영이 사용자의 스크롤을 되감지 않게 하는 것이 이 값의 존재 이유다 — 자세한 것은
+    /// `file_panel.reconcileFileTreeSelection`. generation 하나만 보면 안 되는 이유는 생성·이름변경이
+    /// **행이 투영되기 전에** `Selection.setIdentity`로 선택을 예약해 그 시점에 generation을 올리기
+    /// 때문이다. 그 예약은 아직 화면에 보인 적이 없으므로, "바뀌었나"가 아니라 "보여 줬나"를 물어야
+    /// 새 항목이 뷰포트 밖에 조용히 남지 않는다.
+    file_tree_revealed_selection_generation: u64 = 0,
     /// 호버 중인 뷰 스위처 슬롯(§3.5). 렌더가 배경 강조에 쓰고 hoverCursor가 갱신한다 — 트리 행 호버와 같은 규율.
     dock_view_hovered_slot: ?usize = null,
     /// 뷰 바 오른쪽 끝 동작 버튼의 호버 자리. 뷰 슬롯과 **다른 필드**다 — 한 필드로 겸하면 어느 쪽 자리인지
@@ -41394,6 +41402,104 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
     session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
     session.file_tree_scroll.offset_y_px = std.math.maxInt(u32);
     try std.testing.expectEqual(@as(u32, 0), file_panel_ops.fileTreeEffectiveScrollPx(session));
+}
+
+// 재투영은 **선택이 실제로 옮겨갔을 때만** 스크롤을 뺏는다(file-explorer.md §1 정책 4).
+//
+// 그 가드가 없으면 백그라운드 재투영(FSEvents·스캔 완료·git ignore 결과)이 도는 매 tick마다
+// `reconcileFileTreeSelection` 이 선택 행으로 `scrollFileTreeRowIntoView` 를 걸어, 사용자가 내려
+// 둔 목록이 선택 행 자리로 되감긴다 — 2026-08-28 사용자 보고 "선택한 것보다 밑으로 내려가면
+// 스크롤이 원복된다". `Selection.reconcile` 이 **제자리 exact match 에서도** 인덱스를 돌려주므로
+// 반환값만으로는 "복원할 것이 없었다"와 "복원했다"가 구분되지 않는 것이 루트커즈다.
+test "file tree reprojection keeps the user's scroll unless the selection actually moved" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    file_panel_ops.activateFilePanelDockControl(session);
+    _ = try session.resize(1400, 900, 1000);
+
+    const cell_h = file_tree_dock_ops.fileTreeRowHeightPx(session);
+    if (cell_h == 0) return error.FileTreeFixtureCannotJudgePartialRow;
+    const visible = file_panel_ops.fileTreeVisibleRows(session);
+    if (visible == 0) return error.FileTreeFixtureCannotJudgePartialRow;
+
+    // **행 경로가 겹치면 이 테스트는 아무것도 판정하지 못한다** — identity 가 같아 `reconcile` 이
+    // 늘 첫 행을 찾고, 아래 대조군이 "선택이 옮겨갔다"는 상태에 도달하지 못한다.
+    var paths: std.ArrayList([]u8) = .empty;
+    defer {
+        for (paths.items) |p| allocator.free(p);
+        paths.deinit(allocator);
+    }
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..visible * 3) |i| {
+        const path = try std.fmt.allocPrint(allocator, "/repo/src/f{d}.zig", .{i});
+        try paths.append(allocator, path);
+        try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = path,
+            .label = path,
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+    session.file_tree_scroll.reset();
+
+    // 첫 행을 고르고 — 사용자가 목록을 그보다 아래로 내린다.
+    try std.testing.expect(file_panel_ops.setFileTreeSelection(session, 0));
+    const user_scroll = 5 * cell_h;
+    session.file_tree_scroll.offset_y_px = user_scroll;
+    try std.testing.expectEqual(user_scroll, file_panel_ops.fileTreeEffectiveScrollPx(session));
+
+    // ① 재투영이 돌아도 선택이 제자리면 스크롤은 사용자 것이다.
+    file_panel_ops.reconcileFileTreeSelection(session);
+    try std.testing.expectEqual(user_scroll, file_panel_ops.fileTreeEffectiveScrollPx(session));
+
+    // ② **행이 재정렬돼 선택 인덱스만 바뀌어도** 같다. 같은 항목이 다른 자리로 옮겨 간 것은
+    //    사용자가 보던 곳을 바꿀 이유가 아니다(스캔 완료가 형제를 끼워 넣는 흔한 경로다).
+    const moved = paths.items[0];
+    session.file_tree_rows.items[0].file.path = paths.items[1];
+    session.file_tree_rows.items[1].file.path = moved;
+    file_panel_ops.reconcileFileTreeSelection(session);
+    try std.testing.expectEqual(user_scroll, file_panel_ops.fileTreeEffectiveScrollPx(session));
+    try std.testing.expectEqual(@as(?usize, 1), session.file_tree_selection.index(session.file_tree_rows.items));
+
+    // ③ **대조군** — 선택 행이 사라지면 옮겨간 선택을 따라간다. 이 항이 없으면 ①②는
+    //    `scrollFileTreeRowIntoView` 호출을 통째로 지워도 통과한다.
+    _ = session.file_tree_rows.orderedRemove(1);
+    file_panel_ops.reconcileFileTreeSelection(session);
+    try std.testing.expect(file_panel_ops.fileTreeEffectiveScrollPx(session) != user_scroll);
+
+    // ④ **두 번째 대조군: 아직 보여 준 적 없는 선택은 따라간다.** 생성·이름변경은 행이 투영되기
+    //    **전에** `Selection.setIdentity` 로 선택을 예약하므로 generation 은 그 시점에 이미 올라가
+    //    있다. 재투영에서 "generation 이 안 바뀌었다"만 보고 넘기면 방금 만든 파일이 뷰포트 밖에
+    //    조용히 남는다 — 그래서 축이 `Selection.generation` 이 아니라 **보여 준 신원**이다.
+    session.file_tree_scroll.reset();
+    const last_index = session.file_tree_rows.items.len - 1;
+    try std.testing.expect(session.file_tree_selection.setIdentity(
+        .file,
+        session.file_tree_rows.items[last_index].file.path,
+        0,
+    ));
+    file_panel_ops.reconcileFileTreeSelection(session);
+    const revealed_scroll = file_panel_ops.fileTreeEffectiveScrollPx(session);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(last_index + 1)) * cell_h - dock_ops.dockGeometry(session).tree_content.h,
+        revealed_scroll,
+    );
+
+    // ⑤ 보여 준 뒤로는 다시 사용자 것이다 — 그 행을 화면 밖으로 밀어 두어도 재투영이 되감지 않는다.
+    //    ④가 매 재투영마다 걸리면 이 항이 잡는다(그것이 원래 버그의 형태다).
+    const nudged = revealed_scroll -| cell_h;
+    try std.testing.expect(nudged != revealed_scroll); // 판정할 수 있는 상태인지 먼저 본다
+    session.file_tree_scroll.offset_y_px = nudged;
+    file_panel_ops.reconcileFileTreeSelection(session);
+    try std.testing.expectEqual(nudged, file_panel_ops.fileTreeEffectiveScrollPx(session));
 }
 
 // FT2 의 세 계약을 한 세션에서 본다. 셋 다 **화면으로는 안 보이는** 종류라 캡처로는 못 잡는다.

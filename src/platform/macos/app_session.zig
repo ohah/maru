@@ -18403,7 +18403,10 @@ pub const AppSession = struct {
         if (is_macos and host_connect_failed) {
             const danger: terminal.Color = .{ .rgb = self.appearance.theme.palette[1] orelse self.appearance.theme.accent };
             if (self.buildStatusBarItem(
-                icons.codepoint(.hourglass),
+                // **`hourglass` 를 쓰지 않는다.** §4 가 막힌 에이전트를 «모양으로» 구분한다고 정했고 그
+                // 모양이 모래시계다 — 같은 모양을 다른 뜻으로 재사용하면 그 규칙이 무너진다. `host` 는
+                // 이 상태가 가리키는 대상 그 자체이고 아직 UI 어디에도 쓰이지 않았다.
+                icons.codepoint(.host),
                 maru.i18n.t(.status_session_not_persisted),
                 bar_cols,
                 danger,

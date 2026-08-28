@@ -39,6 +39,8 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     try std.testing.expect(std.mem.indexOf(u8, swift, "private func saveWorkspace()") == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi, "workspace_checkpoint_file.publish(path"));
     try std.testing.expect(std.mem.indexOf(u8, swift, "!workspaceRestoreIncomplete") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE\"] == \"maru-test-only-v1\""));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_R1_TOMBSTONE_MARKER"));
 
     for ([_][]const u8{
         "maru_macos_workspace_checkpoint_quit_requested",

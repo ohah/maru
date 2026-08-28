@@ -2145,6 +2145,54 @@ pub fn build(b: *std.Build) void {
         run_session_host_r2a_checkpoint.step.dependOn(&session_host_r2a_checkpoint_fixture.step);
         session_host_r2a_checkpoint_step.dependOn(&run_session_host_r2a_checkpoint.step);
 
+        const session_host_r1_tombstone_step = b.step(
+            "macos-session-host-r1-tombstone-smoke",
+            "Run actual AppKit durable tombstone checkpoint and two-launch smoke",
+        );
+        const session_host_r1_tombstone_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-r1-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/Library/Application Support/maru\"; " ++
+                "cp tests/fixtures/session-host/ended-runtime-workspace.v1 \"$root/Library/Application Support/maru/workspace.v1\"",
+        });
+        session_host_r1_tombstone_fixture.setCwd(b.path("."));
+        const run_session_host_r1_tombstone = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-r1-home; " ++
+                "checkpoint=\"$root/Library/Application Support/maru/workspace.v1\"; " ++
+                "run_once() { " ++
+                "before=$(/usr/bin/stat -f '%i' \"$checkpoint\"); " ++
+                "./zig-out/Maru.app/Contents/MacOS/maru-macos-app & pid=$!; " ++
+                "trap 'kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true' EXIT; " ++
+                "attempt=0; while test \"$(/usr/bin/stat -f '%i' \"$checkpoint\")\" = \"$before\"; do " ++
+                "kill -0 \"$pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
+                "sleep 0.2; kill -0 \"$pid\"; " ++
+                "test -z \"$(/usr/bin/pgrep -P \"$pid\" 2>/dev/null || true)\"; " ++
+                "/usr/bin/grep -Eq 'runtime-handle=\"1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321\" runtime-state=\"ended\"' \"$checkpoint\"; " ++
+                "test ! -e \"$checkpoint.bak\"; test ! -e \"$root/Library/Application Support/maru/.workspace.v1.tmp\"; " ++
+                "kill -KILL \"$pid\"; wait \"$pid\" 2>/dev/null || true; trap - EXIT; }; " ++
+                "run_once; cp \"$checkpoint\" \"$root/after-first.v1\"; run_once; " ++
+                "cmp -s \"$root/after-first.v1\" \"$checkpoint\"",
+        });
+        run_session_host_r1_tombstone.setCwd(b.path("."));
+        run_session_host_r1_tombstone.setEnvironmentVariable(
+            "MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE",
+            "maru-test-only-v1",
+        );
+        run_session_host_r1_tombstone.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r1-home"),
+        );
+        run_session_host_r1_tombstone.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r1-home"),
+        );
+        run_session_host_r1_tombstone.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_r1_tombstone.step.dependOn(&macos_app_bundle.step);
+        run_session_host_r1_tombstone.step.dependOn(&file_panel_web_build.step);
+        run_session_host_r1_tombstone.step.dependOn(&session_host_r1_tombstone_fixture.step);
+        session_host_r1_tombstone_step.dependOn(&run_session_host_r1_tombstone.step);
+
         const session_host_cr6c_appkit_step = b.step(
             "macos-session-host-recovery-smoke",
             "Run actual AppKit recovered-session discovery, click, render, and keep-alive smoke",

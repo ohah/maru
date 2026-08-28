@@ -389,8 +389,9 @@ jobs:
     # 실측 **2분 14초**로 macOS 잡 중 가장 싸다(slow observer 1m46s, bundled CLI 7m09s, Debug 8m01s,
     # file explorer 14m04s) — 병렬이라 wall-clock 영향도 사실상 없다.
     #
-    # ⚠️ 이 잡이 덮는 것은 **정상 종료 → 재실행 → 재접속**이다. 강제 종료 경로·멀티 윈도우 배치 복원(R7)·
-    # GUI 부재 중 알림(OS 배너)은 덮지 않는다.
+    # 복구 스모크는 **정상 종료 → 재실행 → 재접속**을, R1 스모크는 ended checkpoint를 두 번 게시한 뒤의
+    # **SIGKILL → 재실행**을 덮는다. live runtime이 있는 최신 멀티 윈도우 checkpoint 강제 종료 복원(R7)·
+    # GUI 부재 중 알림(OS 배너)은 여전히 덮지 않는다.
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
@@ -413,6 +414,10 @@ jobs:
       # (그 화면을 렌더해 캡처).
       - name: keep-alive recovered-session 스모크
         run: mise run macos-session-host-recovery-smoke
+      # 저장된 ended tombstone을 실제 AppKit 제품이 capture→atomic checkpoint한 결과로 다시 두 번
+      # 띄운다. 두 실행 모두 셸 child 0이어야 하므로 unit의 restoreSpawn sentinel보다 강한 제품 경계다.
+      - name: durable tombstone 다회 재실행 스모크
+        run: mise run macos-session-host-r1-tombstone-smoke
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)

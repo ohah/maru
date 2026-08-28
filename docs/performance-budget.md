@@ -253,9 +253,12 @@ max frame 8.745ms, end-to-end 30.557ms를 기록했다. 수정 gate는 60Hz·16-
 로컬 pending input에 준비된 target을 같은 frame에 우선하며, quiet round-robin의 bounded 진행과 exact counter를 함께 보존해야
 한다. 10Hz cadence 하향은 이 latency를 악화시키므로 채택하지 않는다.
 
-각 0.9~2.0초 idle 표본은 client user+system CPU 25ms 이하, `ClientSlot` registry visit exact 0, socket read attempt
-exact 0이어야 한다. 25ms는 첫 RED 최대 4.926ms의 약 5배로 runner noise를 허용하지만 한 코어의 2.5%를 넘는
-idle 회귀는 닫는다. registry/socket 값은 단순 관측 필드가 아니라 최초 실측이 기각한 원인의 재도입을 막는 hard gate다.
+각 60-frame idle 표본은 wall 0.9~10.0초 안에서 끝나고 client user+system CPU 25ms 이하, `ClientSlot` registry
+visit exact 0, socket read attempt exact 0이어야 한다. `usleep`은 하한이라 macos-15 shared runner가 60회 nominal
+16.7ms wait를 4.91~5.55초로 늘린 실측을 허용하되, 10초는 harness liveness 상한으로 남긴다. 실제 work 예산은
+wall time과 분리된 raw process CPU 25ms다. 이 값은 첫 RED 최대 4.926ms의 약 5배로 runner noise를 허용하면서
+nominal 1초 창에서 한 코어 2.5%를 넘는 idle 회귀를 닫는다. registry/socket 값은 단순 관측 필드가 아니라 최초
+실측이 기각한 원인의 재도입을 막는 hard gate다.
 
 실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
 관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.

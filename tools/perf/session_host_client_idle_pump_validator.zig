@@ -9,6 +9,11 @@ const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
 const expected_runtime_counts = [_]u32{ 1, 10, 15, 100 };
 const idle_frame_count: u32 = 60;
 const max_owners_per_frame: u32 = 16;
+const idle_observation_min_ns: u64 = 900 * std.time.ns_per_ms;
+// `usleep` is a lower bound, not a frame-clock guarantee. The macos-15 shared runner stretched
+// sixty nominal 16.7ms waits to 5.55s while the measured process CPU stayed below 3ms. Keep a
+// generous liveness ceiling here; the actual work budget remains the independent 25ms CPU cap.
+const idle_observation_max_ns: u64 = 10 * std.time.ns_per_s;
 // The first ReleaseFast RED peaked at 4.926ms across the four scale rows. Five times that
 // observed cost leaves machine noise headroom while still rejecting a client that burns more
 // than 2.5% of one core during the nominal one-second idle window.
@@ -72,8 +77,8 @@ fn validateArtifact(artifact: Artifact) !void {
     if (artifact.scale_samples.len != expected_runtime_counts.len) return error.InvalidScaleRows;
     for (artifact.scale_samples, expected_runtime_counts) |sample, expected_runtime_count| {
         if (sample.runtime_count != expected_runtime_count or sample.frame_count != idle_frame_count or
-            sample.observation_ns < 900 * std.time.ns_per_ms or
-            sample.observation_ns > 2 * std.time.ns_per_s or
+            sample.observation_ns < idle_observation_min_ns or
+            sample.observation_ns > idle_observation_max_ns or
             sample.cpu_total_delta_ns != sample.cpu_user_delta_ns + sample.cpu_system_delta_ns or
             sample.cpu_total_delta_ns > idle_client_cpu_cap_ns)
             return error.InvalidScaleRow;
@@ -187,5 +192,8 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
     drifted_rows[2].cpu_total_delta_ns = idle_client_cpu_cap_ns + 1;
     drifted_rows[2].cpu_user_delta_ns = drifted_rows[2].cpu_total_delta_ns;
     drifted_rows[2].cpu_system_delta_ns = 0;
+    try std.testing.expectError(error.InvalidScaleRow, validateArtifact(artifact));
+    drifted_rows[2] = rows[2];
+    drifted_rows[2].observation_ns = idle_observation_max_ns + 1;
     try std.testing.expectError(error.InvalidScaleRow, validateArtifact(artifact));
 }

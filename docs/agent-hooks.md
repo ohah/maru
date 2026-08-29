@@ -1409,9 +1409,9 @@ trusted_hash = "sha256:…"
 [컨트롤 플레인 §4a](control-plane.md) 가 정한 규율을 따른다 — **포워딩이 아니라 `exec` 채널**이다
 ([control-plane-security.md](control-plane-security.md) §8.7).
 
-그 축의 단계 분해는 [원격 에이전트 상태 계획](plans/remote-agent-state.md)이고, **RA1~RA5 는 배선까지
-들어왔다**. 지금 성립하는 것과 아직 아닌 것을 갈라 적는다 — 이 절을 «전부 안 된다» 로 읽고 OSC 설정을
-지우면 안 되기 때문이다.
+그 축의 단계 분해는 [원격 에이전트 상태 계획](plans/remote-agent-state.md)이다. **전송과 소비는 제품
+경로에 들어왔고, 원격에 훅을 «설치» 하는 절반은 아직이다.** 지금 성립하는 것과 아직 아닌 것을 갈라
+적는다 — 이 절을 «전부 안 된다» 로 읽고 OSC 설정을 지우면 안 되기 때문이다.
 
 - **선다**: `maru ssh` 가 `LC_MARU_PANE` 으로 pane 신원을 싣고(RA2), 목적지마다 `exec` 채널 하나가
   `maru agent-events --stdio` 를 띄우며(RA4·RA5), 도착한 이벤트는 **로컬 훅과 같은 자리**

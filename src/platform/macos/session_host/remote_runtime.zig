@@ -532,6 +532,7 @@ fn metadataDtoMatchesObservation(
         dto.foreground_available != view.foreground_available or
         dto.foreground_pgid != view.foreground_pgid or
         !std.mem.eql(u8, dto.cwd(), view.cwd) or
+        !std.mem.eql(u8, dto.cwdHost(), view.cwd_host) or
         !std.mem.eql(u8, dto.windowTitle(), view.window_title) or
         !std.mem.eql(u8, dto.clipboardReadTarget(), view.clipboard_read_target) or
         ((dto.sshRemoteDest() == null) != (view.ssh_remote_dest == null)) or
@@ -6126,6 +6127,7 @@ pub const RemoteRuntime = struct {
             .title_generation = dto.title_generation,
             .size = .{ .cols = dto.cols, .rows = dto.rows },
             .cwd = dto.cwd(),
+            .cwd_host = dto.cwdHost(),
             .window_title = dto.windowTitle(),
             .ssh_remote_dest = dto.sshRemoteDest(),
             .semantic_state = @enumFromInt(@intFromEnum(dto.semantic_state)),

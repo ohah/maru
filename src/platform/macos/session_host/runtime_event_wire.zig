@@ -83,6 +83,7 @@ fn metadataViewEql(a: MetadataView, b: MetadataView) bool {
     if (a.revision != b.revision or
         a.observation_probe_nonce != b.observation_probe_nonce or
         !std.meta.eql(a.cwd, b.cwd) or
+        !std.meta.eql(a.cwd_host, b.cwd_host) or
         !std.meta.eql(a.window_title, b.window_title) or
         !std.meta.eql(a.ssh_remote_dest, b.ssh_remote_dest) or
         a.semantic_state != b.semantic_state or
@@ -216,6 +217,8 @@ pub const MetadataView = struct {
     revision: u64,
     observation_probe_nonce: ?u64 = null,
     cwd: StringSpan,
+    /// Optional same-major authority host for `cwd`. Missing peers normalize to empty.
+    cwd_host: StringSpan,
     window_title: StringSpan,
     ssh_remote_dest: ?StringSpan,
     semantic_state: SemanticPrompt,
@@ -425,6 +428,7 @@ const MetadataFields = struct {
     keys: KeySet = .{},
     count: usize = 0,
     cwd: ?StringSpan = null,
+    cwd_host: ?StringSpan = null,
     window_title: ?StringSpan = null,
     ssh_seen: bool = false,
     ssh_remote_dest: ?StringSpan = null,
@@ -1053,6 +1057,9 @@ fn parseMetadata(
         if (spanEquals(payload, key, "cwd")) {
             if (metadata.cwd != null) return error.Malformed;
             metadata.cwd = try readString(scanner);
+        } else if (spanEquals(payload, key, "cwd_host")) {
+            if (metadata.cwd_host != null) return error.Malformed;
+            metadata.cwd_host = try readString(scanner);
         } else if (spanEquals(payload, key, "window_title")) {
             if (metadata.window_title != null) return error.Malformed;
             metadata.window_title = try readString(scanner);
@@ -1239,11 +1246,15 @@ fn finishMetadata(
     digest_ops: DigestOps,
 ) ?MetadataView {
     if (!fields.ssh_seen or !fields.foreground_pgid_seen or !fields.processes_seen) return null;
+    if (fields.cwd_host) |authority|
+        if ((fields.cwd orelse return null).decoded_len == 0 and authority.decoded_len != 0)
+            return null;
     const foreground = fields.foreground_available orelse return null;
     var view: MetadataView = .{
         .revision = revision,
         .observation_probe_nonce = observation_probe_nonce,
         .cwd = fields.cwd orelse return null,
+        .cwd_host = fields.cwd_host orelse emptyStringSpan(),
         .window_title = fields.window_title orelse return null,
         .ssh_remote_dest = fields.ssh_remote_dest,
         .semantic_state = fields.semantic_state orelse return null,
@@ -1284,6 +1295,7 @@ fn metadataDigest(view: *const MetadataView, payload: []const u8) Digest {
     var hasher = Sha256.init(.{});
     hashU64(&hasher, view.revision);
     hashSpan(&hasher, view.cwd);
+    hashSpan(&hasher, view.cwd_host);
     hashSpan(&hasher, view.window_title);
     hashBool(&hasher, view.ssh_remote_dest != null);
     if (view.ssh_remote_dest) |value| hashSpan(&hasher, value);
@@ -1367,6 +1379,7 @@ pub fn metadataSemanticEqlExact(
         a.host_pid != b.host_pid or
         a.process_count != b.process_count or
         !decodedStringSpansEqual(a_payload, a.cwd, b_payload, b.cwd) or
+        !decodedStringSpansEqual(a_payload, a.cwd_host, b_payload, b.cwd_host) or
         !decodedStringSpansEqual(a_payload, a.window_title, b_payload, b.window_title) or
         !optionalSpanEql(a_payload, a.ssh_remote_dest, b_payload, b.ssh_remote_dest) or
         !decodedStringSpansEqual(
@@ -1707,6 +1720,7 @@ test "metadata view field inventory forces every manual semantic mapping to be r
         "revision",
         "observation_probe_nonce",
         "cwd",
+        "cwd_host",
         "window_title",
         "ssh_remote_dest",
         "semantic_state",

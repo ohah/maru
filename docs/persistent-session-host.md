@@ -26,9 +26,9 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > `processCwd`가 그래서 `null`을 낸다). 결과: **셸 통합이 없는 셸(bash/fish)과 재개 Term은 host-backed일 때
 > cwd가 아예 없다** — in-process에서는 커널이 답하는 바로 그 경우들이다. 사이드바 폴더·브랜치줄, 소스 컨트롤
 > 저장소 선택, 파일 탐색기 루트, 도크 범위 칩, 제어 평면 `TerminalMeta.cwd`가 함께 빈다(축이 하나라 갈리지는
-> 않는다). 메우려면 host가 관측 payload에 측정한 cwd를 더해야 하고 그건 wire schema 변경이라
-> [session-host-upgrade.md](session-host-upgrade.md)의 호환 규약을 건드린다 — **별도 슬라이스이며 아직 계획에
-> 없다.** **P3-e4a~c와 P3-e4d-1~4 자동 parity gate는 구현 완료**다. 실제 host PTY OSC
+> 않는다). 메우는 순서는 [Session host kernel cwd parity 구현 계획](plans/session-host-kernel-cwd.md)이 소유한다.
+> K1 authority model/wire → K2 host-side bounded sampler → K3 제품 parity gate가 모두 green이 되기 전에는
+> 완료로 세지 않는다. **P3-e4a~c와 P3-e4d-1~4 자동 parity gate는 구현 완료**다. 실제 host PTY OSC
 > 7/2/5379 왕복·revision/coalescing·소유권, 다중 runtime 격리, detach 중 변경→재접속과 controlled
 > Claude/Codex foreground→실제 Git·agent·SSH upload 소비자, capability 없는 frozen N-1 protocol fixture의
 > fail-closed 복원, 실제 file/image upload 성공·transport 실패, 재접속 initial full-state의 SSH destination을 새 OSC 없이

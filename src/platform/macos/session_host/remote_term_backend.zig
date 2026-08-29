@@ -4855,9 +4855,9 @@ pub const RemoteTermBackend = struct {
 
     /// **원격 runtime은 커널 cwd 폴백이 없다.** PTY와 그 자식 프로세스가 host 데몬 프로세스에 살아서 GUI
     /// 프로세스의 `proc_pidinfo`가 닿지 않는다(pid 네임스페이스가 아니라 소유 프로세스가 다른 문제다).
-    /// 그래서 원격 Term의 cwd는 host가 observation으로 실어 보내는 OSC 7 값이 유일한 출처다 — bash/fish나
-    /// TUI가 화면을 리셋한 뒤에는 비어 있을 수 있다. 메우려면 host가 관측 payload에 cwd를 더해야 하고 그건
-    /// wire schema 변경이라 docs/session-host-upgrade.md의 호환 규약을 건드린다(별도 슬라이스).
+    /// 그래서 원격 Term의 cwd는 지금은 host가 observation으로 실어 보내는 OSC 7 값이 유일한 출처다 — bash/fish나
+    /// TUI가 화면을 리셋한 뒤에는 비어 있을 수 있다. K1은 cwd authority wire만 마련했고 kernel fallback은 아직
+    /// 활성화하지 않았다. K2·K3 순서는 docs/plans/session-host-kernel-cwd.md가 소유한다.
     fn processCwd(ctx: *anyopaque, handle: RuntimeHandle, out: []u8) ?[]const u8 {
         _ = ctx;
         _ = handle;

@@ -104,6 +104,8 @@ pub const RuntimeObservation = struct {
     };
 
     cwd: []u8,
+    /// Authority host paired with cwd. Empty means an older peer or unknown authority.
+    cwd_host: []u8 = &.{},
     window_title: []u8,
     ssh_remote_dest: ?[]u8,
     semantic_state: u8,
@@ -146,6 +148,7 @@ pub const RuntimeObservation = struct {
 
     pub fn deinit(self: *RuntimeObservation, allocator: std.mem.Allocator) void {
         allocator.free(self.cwd);
+        allocator.free(self.cwd_host);
         allocator.free(self.window_title);
         if (self.ssh_remote_dest) |dest| allocator.free(dest);
         for (self.processes) |p| allocator.free(p.name);
@@ -178,8 +181,10 @@ const RawCanonicalObservation = struct {
 
 pub fn observationWireValid(observation: RuntimeObservation) bool {
     if (observation.mouse_tracking_mode > 4 or
+        (observation.cwd.len == 0 and observation.cwd_host.len != 0) or
         observation.processes.len > runtime_metadata_wire.max_process_entries or
         !std.unicode.utf8ValidateSlice(observation.cwd) or
+        !std.unicode.utf8ValidateSlice(observation.cwd_host) or
         !std.unicode.utf8ValidateSlice(observation.window_title) or
         !std.unicode.utf8ValidateSlice(observation.clipboard_read_target))
         return false;
@@ -191,6 +196,7 @@ pub fn observationWireValid(observation: RuntimeObservation) bool {
     var aggregate: usize = 0;
     const strings = [_][]const u8{
         observation.cwd,
+        observation.cwd_host,
         observation.window_title,
         observation.ssh_remote_dest orelse "",
         observation.clipboard_read_target,

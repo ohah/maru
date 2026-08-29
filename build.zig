@@ -4014,6 +4014,38 @@ pub fn build(b: *std.Build) void {
     run_session_host_e3b_boundary_tests.setCwd(b.path("."));
     session_host_e3b_step.dependOn(&run_session_host_e3b_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3b_boundary_tests.step);
+    const session_host_kernel_cwd_k1_step = b.step(
+        "test-session-host-kernel-cwd-k1",
+        "Verify K1 paired cwd authority wire ownership without enabling kernel cwd parity",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |k1_optimize| {
+        const session_host_kernel_cwd_k1_wire_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_metadata_wire.zig"),
+                .target = target,
+                .optimize = k1_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"K1 cwd authority"},
+        });
+        const run_session_host_kernel_cwd_k1_wire_tests =
+            b.addRunArtifact(session_host_kernel_cwd_k1_wire_tests);
+        run_session_host_kernel_cwd_k1_wire_tests.addArg("--maru-expect-tests=1");
+        session_host_kernel_cwd_k1_step.dependOn(&run_session_host_kernel_cwd_k1_wire_tests.step);
+    }
+    const session_host_kernel_cwd_k1_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_kernel_cwd_k1_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_kernel_cwd_k1_boundary_tests =
+        b.addRunArtifact(session_host_kernel_cwd_k1_boundary_tests);
+    run_session_host_kernel_cwd_k1_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_kernel_cwd_k1_boundary_tests.setCwd(b.path("."));
+    session_host_kernel_cwd_k1_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
     const session_host_e3c_step = b.step(
         "test-session-host-e3c",
         "Measure P4 E3c generation-backed GUI client idle pump in ReleaseFast",
@@ -11177,6 +11209,7 @@ pub fn build(b: *std.Build) void {
 
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
+    session_host_step.dependOn(session_host_kernel_cwd_k1_step);
     const session_host_release_manifest_step = b.step(
         "test-session-host-release-manifest",
         "Validate canonical session-host release manifests in Debug and ReleaseFast",

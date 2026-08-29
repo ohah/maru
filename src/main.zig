@@ -3767,6 +3767,27 @@ fn sidebarScrollbarGeometry(
 
 /// 카드 목록 → 사이드바 행 목록. **그리는 쪽과 누르는 쪽이 같은 함수를 쓴다** — 카드 높이가
 /// 줄 수에서 나오므로 두 곳에서 따로 만들면 `slotAt` 의 누적이 밴드와 어긋난다.
+/// 그 활성 슬롯이 **통째로** 사이드바 뷰포트 안에 있는가 — 판정 전용이다.
+///
+/// 자리는 중립이 소유한다(`rowTop`·`rowHeight`) — 여기서 누적을 다시 적으면 그린 자리와 갈린다.
+fn sidebarSlotFullyVisible(
+    cards: []const SidebarCard,
+    view: ActiveView,
+    header_h: u32,
+    cell_h: u32,
+    sidebar_h: u32,
+    scroll_px: u32,
+) bool {
+    var buf: [16]maru.chrome.components.sidebar.Row = undefined;
+    const slot = sidebarActiveSlot(cards, view);
+    const rows = sidebarRowsFor(cards, slot, &buf);
+    if (slot >= rows.len) return false;
+    const m = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+    const top = maru.chrome.components.sidebar.rowTop(rows, slot, header_h, m, scroll_px);
+    const bottom = top + @as(i64, maru.chrome.components.sidebar.rowHeight(rows[slot], m));
+    return top >= @as(i64, header_h) and bottom <= @as(i64, sidebar_h);
+}
+
 fn sidebarRowsFor(
     cards: []const SidebarCard,
     active: usize,
@@ -4790,6 +4811,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var jump_local_x: f32 = 0;
     var jump_on_thumb_before = false;
     var jump_on_thumb_after = false;
+    var reveal_judgeable = false;
+    var reveal_slot: usize = 0;
+    var reveal_slot_after: usize = 0;
+    var reveal_visible_before = false;
+    var reveal_visible_after = false;
+    var reveal_off_before: u32 = 0;
+    var reveal_off_after: u32 = 0;
+    var reveal_count: usize = 0;
+    var reveal_path_buf: [512]u8 = undefined;
+    var reveal_path_len: usize = 0;
+    var reveal_digest_before: u64 = 0;
+    var reveal_digest_after: u64 = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -5308,6 +5341,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 도크와 같은 모양이다 — **그리기와 히트테스트가 같은 값을 본다.** 헤더는 스크롤 무관 고정이라
     // `slotAt` 이 그 규칙을 소유한다.
     var sidebar_scroll_px: u32 = 0;
+    var sidebar_reveals: usize = 0;
+    var sidebar_reveal_request = false;
+    var last_active_slot: usize = std.math.maxInt(usize);
     var sidebar_first_visible: usize = 0;
     var sidebar_first_band_y: u32 = 0;
     var sidebar_partial: u32 = 0;
@@ -6255,6 +6291,68 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, tx, gy);
             window.postSyntheticMouse(.left_up, tx, gy);
         };
+        // ── 눈이 따라간다 (W8.18a) ───────────────────────────────────────────────────
+        //
+        // **먼저 목록을 맨 위로 굴린다** — 세션이 열셋이라 파일 카드는 바닥에 있고, 위에서 보면
+        // 화면 밖이다. 그 상태에서 도크의 파일 행을 누르면(사이드바가 아니라 **도크**다 — 그쪽은
+        // 늘 보인다) 사이드바가 그 카드로 따라와야 한다.
+        // **먼저 목록이 넘치게 만든다.** 이 시점의 세션은 일곱이라 카드가 다 들어간다 — 그 상태로
+        // 재면 "이미 보이는 것이 보인다" 는 빈 판정이다. 파일을 몇 개 더 열어(그것이 이 기능의 실제
+        // 사용처다) 마지막 카드를 화면 밖으로 민다.
+        if (smoke and spins == 996 and dock_view == .explorer) {
+            var opened_more: usize = 0;
+            for (dock_rows.items, 0..) |r, ri| {
+                if (opened_more >= 4) break;
+                if (r != .file) continue;
+                const k = maru.session.file_panel_bridge.openKindForPath(r.file.path) orelse continue;
+                if (k != .text) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const ox: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const oy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, ox, oy);
+                window.postSyntheticMouse(.left_up, ox, oy);
+                opened_more += 1;
+            }
+        }
+        // **마지막으로 연 파일의 경로를 챙긴다** — 그 카드가 목록 맨 아래라 맨 위에서 보면 화면
+        // 밖이다. 끝 상태에서 다시 고르면 그 사이 목록이 바뀌어 다른 줄을 누르게 된다.
+        if (smoke and spins == 997 and open_files.items.len > 0) {
+            const lp = open_files.items[open_files.items.len - 1].path;
+            reveal_path_len = @min(lp.len, reveal_path_buf.len);
+            @memcpy(reveal_path_buf[0..reveal_path_len], lp[0..reveal_path_len]);
+        }
+        if (smoke and spins == 998) {
+            const rx: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
+            const ry: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
+            var rn: usize = 0;
+            while (rn < 12) : (rn += 1) window.postSyntheticMouseWheel(.wheel, rx, ry, 3);
+        }
+        if (smoke and spins == 1000 and dock_view == .explorer and sidebar_header_h != 0) {
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .file) continue;
+                if (!std.mem.eql(u8, r.file.path, reveal_path_buf[0..reveal_path_len])) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                reveal_judgeable = true;
+                reveal_slot = sidebarActiveSlot(sidebar_cards.items, active_view);
+                reveal_visible_before = sidebarSlotFullyVisible(sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
+                reveal_off_before = sidebar_scroll_px;
+                reveal_digest_before = d3d11_cells.cellsDigest(sidebar_cells.items);
+                const fx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const fy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, fx, fy);
+                window.postSyntheticMouse(.left_up, fx, fy);
+                break;
+            }
+        }
+        if (smoke and spins == 1003 and reveal_judgeable) {
+            reveal_slot_after = sidebarActiveSlot(sidebar_cards.items, active_view);
+            reveal_visible_after = sidebarSlotFullyVisible(sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
+            reveal_off_after = sidebar_scroll_px;
+            reveal_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
+            reveal_count = sidebar_reveals;
+        }
         // ── 트랙 빈 자리를 누르면 그 자리로 뛴다 (적대적 검증 3회차) ─────────────────
         //
         // 드래그와 **다른 길**이다(`begin` 이 offset 을 돌려주는 쪽). 판정은 "값이 바뀌었나" 가
@@ -6953,6 +7051,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // **thumb 을 잡아 아래로 끈다.** 휠과 달리 이 경로는 `offsetForPointer` 를 지나므로, 막대가
         // 죽어 있으면(그려만 지고 안 잡히면) offset 이 그대로다 — 그것이 이 판정의 전부다.
+        // **먼저 맨 위로 되돌린다.** W8.18a 가 활성 카드를 보여 주려 목록을 **바닥까지** 굴려 놓아,
+        // 여기서 아래로 끄는 이 시험이 "이미 끝이라 안 움직인다" 로 읽혔다(실측 `off 330->330`).
+        // 시험은 자기가 재는 방향의 여지를 자기가 만든다.
+        if (smoke and spins == 639) {
+            const ux0: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
+            const uy0: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
+            var up_n: usize = 0;
+            while (up_n < 12) : (up_n += 1) window.postSyntheticMouseWheel(.wheel, ux0, uy0, 3);
+        }
         if (smoke and spins == 640) {
             if (sidebar_bar) |b| {
                 sb_bar_seen = b;
@@ -7957,6 +8064,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 found = fi;
                                                 break;
                                             };
+                                        // **연 순간은 색인이 그대로여도 보여 준다**(W8.18a) — 다시
+                                        // 누른 사람은 그 카드를 보러 온 것이다.
+                                        sidebar_reveal_request = true;
                                         if (found) |fi| {
                                             file_reopens += 1;
                                             active_view = .{ .file = fi };
@@ -8494,6 +8604,40 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 왼쪽 위에서 시작해 도크 밑으로 깔린다.
         maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
 
+        // ── 눈이 따라간다 (W8.18a) ──────────────────────────────────────────────────────
+        //
+        // **활성 카드가 화면 밖이면 옮겨 준다.** 파일을 열면 그 카드가 활성이 되는데 세션이 쌓이면
+        // 목록 아래라, 화면은 그대로여서 "눌렀는데 아무 표시가 없다" 로 보인다(계획서 W8.18a).
+        //
+        // **얼마나 굴릴지는 중립이 정한다**(`sidebar.scrollToSlot`) — 여기서 산수로 잡으면 그린
+        // 자리와 갈린다. 이미 보이면 그 함수가 지금 값을 그대로 주므로 **매 프레임 불러도 안전**하고,
+        // 그래서 사용자가 손으로 굴린 자리를 빼앗지 않는다.
+        {
+            const active_slot_now = sidebarActiveSlot(sidebar_cards.items, active_view);
+            // **바뀐 순간**과 **연 순간**을 함께 본다. 색인이 그대로여도(같은 카드를 다시 열었다)
+            // 사용자는 그 카드를 보러 온 것이다.
+            const want_reveal = sidebar_reveal_request or active_slot_now != last_active_slot;
+            last_active_slot = active_slot_now;
+            sidebar_reveal_request = false;
+            if (want_reveal and sidebar_header_h != 0 and geom.sidebar.h > sidebar_header_h) {
+                var rb_rv: [16]maru.chrome.components.sidebar.Row = undefined;
+                const rws_rv = sidebarRowsFor(sidebar_cards.items, active_slot_now, &rb_rv);
+                const mm_rv = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                const next_off = maru.chrome.components.sidebar.scrollToSlot(
+                    rws_rv,
+                    active_slot_now,
+                    mm_rv,
+                    geom.sidebar.h - sidebar_header_h,
+                    sidebar_scroll_px,
+                );
+                if (next_off != sidebar_scroll_px) {
+                    sidebar_scroll_px = next_off;
+                    sidebar_reveals += 1;
+                    // **셀을 다시 짓는다** — 사이드바 셀은 클릭 때 지어져 옛 offset 을 들고 있다.
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                }
+            }
+        }
         cells.clearRetainingCapacity();
         try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
@@ -9247,6 +9391,22 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             track_right,
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("sidebar_reveal: slot {d}->{d} visible {}->{} off {d}->{d} digest {x}->{x} reveals={d} reveal_ok={}\n", .{
+            reveal_slot,
+            reveal_slot_after,
+            reveal_visible_before,
+            reveal_visible_after,
+            reveal_off_before,
+            reveal_off_after,
+            reveal_digest_before,
+            reveal_digest_after,
+            reveal_count,
+            // **누르기 전에 화면 밖이어야** 이 판정이 무언가를 묻는다 — 이미 보이는 것을 "보인다" 고
+            // 말하는 판정은 아무것도 안 지킨다.
+            // **그린 것까지 본다** — offset 만 옮기고 셀을 다시 안 지으면 값은 맞는데 화면은 그대로다.
+            reveal_judgeable and !reveal_visible_before and reveal_visible_after and reveal_count > 0 and
+                reveal_digest_after != reveal_digest_before,
         });
         try stdout.print("hbar_jump: col {d}->{d} on_thumb {}->{} jump_ok={}\n", .{
             jump_col_before,

@@ -1275,9 +1275,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `performance-budget.md`에 하드 상한과 하드웨어/OS 조건으로 확정한 뒤 20 batch(transport 40행·actual-AppKit recovery 100행) 반복에서 stalled peer의 deadline 초과 0,
    backoff 과잉 attempt 0, runtime/controller/observer/fd leak 0, RSS·CPU·recovery latency 예산 준수를 자동 판정한다.
    CR6c·CR6d·CR6e-a1·CR6e-a2·CR6e-b의 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다. 후속
-   **CR6e-c**는 c1 app-global bounded job/completion owner → c2 worker의 deadline-aware exact-host connect/hello issuer →
+   **CR6e-c**는 c1 app-global bounded job/completion owner → c2 thread/queue 비소유 blocking worker entrypoint의
+   deadline-aware exact-host connect/hello와 move-only candidate completion →
    c3 main frame owner의 stale 재검증·기존 CR5 host transaction publication과 actual AppKit disconnect→자동복구 E2E
-   순서로 닫는다. frame owner는 connect/hello/backoff/join을 실행하지 않고, worker는 raw runtime/client/adapter pointer를
+   순서로 닫는다. c2의 thread spawn과 AppSession caller는 0이고, c3 app-global worker가 thread 수·cancellation wake·Quit
+   join을 소유한다. frame owner는 connect/hello/backoff/join을 실행하지 않고, worker는 raw runtime/adapter pointer를
    보존하거나 제품 generation을 게시하지 않는다. keep-alive opt-in 밖과 G3 default migration은 이 배선으로 바뀌지 않는다.
    **CR6f — output wake와 입력 echo 예산:** daemon-global nonblocking self-pipe를 `RuntimeManager`가 소유하고, 각
    `PtyEventQueue`는 성공한 output/terminal publication 뒤 byte wake만 수행한다. `poll_owner.Owner`가 read end를 유일하게

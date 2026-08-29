@@ -4646,6 +4646,39 @@ pub fn build(b: *std.Build) void {
         session_host_cr6e_c1_step.dependOn(&run_cr6e_c1_boundary_tests.step);
         boundary_step.dependOn(&run_cr6e_c1_boundary_tests.step);
     }
+    const session_host_cr6e_c2_step = b.step(
+        "test-session-host-cr6e-c2",
+        "Verify the blocking CR6e-c2 exact-host worker issuer",
+    );
+    session_host_cr6e_c2_step.dependOn(session_host_cr6e_c1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6e_c2_optimize| {
+        const cr6e_c2_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_worker_issuer.zig"),
+                .target = target,
+                .optimize = cr6e_c2_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6e-c2"},
+        });
+        const run_cr6e_c2_tests = b.addRunArtifact(cr6e_c2_tests);
+        run_cr6e_c2_tests.addArg("--maru-expect-tests=7");
+        session_host_cr6e_c2_step.dependOn(&run_cr6e_c2_tests.step);
+
+        const cr6e_c2_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr6e_c2_boundary.zig"),
+                .target = target,
+                .optimize = cr6e_c2_optimize,
+            }),
+            .filters = &.{"CR6e-c2 boundary"},
+        });
+        const run_cr6e_c2_boundary_tests = b.addRunArtifact(cr6e_c2_boundary_tests);
+        run_cr6e_c2_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr6e_c2_boundary_tests.setCwd(b.path("."));
+        session_host_cr6e_c2_step.dependOn(&run_cr6e_c2_boundary_tests.step);
+        boundary_step.dependOn(&run_cr6e_c2_boundary_tests.step);
+    }
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
 

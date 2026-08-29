@@ -1037,7 +1037,7 @@ pub fn build(b: *std.Build) void {
     // 30 = 이름이 필터에 걸리는 중계 테스트 9개 + 이 모듈 그래프의 **이름 없는 test 블록** 21개
     // (필터는 이름 있는 것만 거르고 익명 블록은 늘 컴파일된다 — 파일 탐색기 게이트와 같은 셈법).
     // 숫자가 틀렸다고 나오면 먼저 **어느 테스트가 빠졌는지** 보고, 정당한 증감일 때만 갱신한다.
-    run_cli_relay_tests.addArg("--maru-expect-tests=30");
+    run_cli_relay_tests.addArg("--maru-expect-tests=31");
     const test_cli_relay_step = b.step("test-cli-relay", "Run the `maru control --stdio` relay tests only");
     test_cli_relay_step.dependOn(&run_cli_relay_tests.step);
 
@@ -1452,6 +1452,7 @@ pub fn build(b: *std.Build) void {
             "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫힌다 — 침묵이 사망 신호다",
             "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스 없이 훅 모드에 갇힌다",
             "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term 을 두 소스가 쓴다",
+            "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그리고 그 목적지를 다시 안 두드린다",
             "agent hooks stay out of provider files while the gate is off",
             "statusline hook is removed on startup — the wrapped original comes back and our files go",
             "statusline removal leaves someone else's statusLine alone",
@@ -1463,15 +1464,15 @@ pub fn build(b: *std.Build) void {
     run_provider_no_mutation_tests.setCwd(b.path("."));
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
     // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
-    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 30 = 위 필터 25개 + 이름 없는 test 블록 5개.
-    // **+7 은 원격(ssh) 축이다**(docs/plans/remote-agent-state.md RA5). 그 일곱을 여기 적기 전까지는
+    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 31 = 위 필터 26개 + 이름 없는 test 블록 5개.
+    // **+8 은 원격(ssh) 축이다**(docs/plans/remote-agent-state.md RA5). 그 여덟을 여기 적기 전까지는
     // 그 판정자들이 **어느 게이트에도 안 매달려 있었다** — 파일에 있으니 도는 줄 알았는데 이름 필터는
     // 0개 매치도 초록이라, 정확히 이 주석이 경고하는 사고가 원격 축에서 한 번 더 날 뻔했다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-tests=30");
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=31");
     // **골라진 수만으로는 부족하다.** 이 게이트가 드는 증거 중 하나(훅 이름 이음매)는 aggregate 에서
     // 건너뛰도록 env 가드를 달고 있어, 그 env 가 이 스텝에도 새어 들어오면 **SKIP 인 채 17 로 초록**이
     // 된다. 통과 수를 함께 못박아 「돌았는가」를 센다.
-    run_provider_no_mutation_tests.addArg("--maru-expect-passed=30");
+    run_provider_no_mutation_tests.addArg("--maru-expect-passed=31");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

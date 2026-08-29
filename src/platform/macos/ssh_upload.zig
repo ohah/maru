@@ -108,6 +108,58 @@ pub const Stream = struct {
     out_fd: c_int,
 };
 
+/// 원격에서 **한 번 도는 명령**을 띄운다([계획](../../../docs/plans/remote-agent-state.md) RA3 배선).
+///
+/// 스트리머(`spawnAgentEvents`)와 같은 모양이지만 수명이 다르다 — 이쪽은 곧 끝나고 그 **stdout 한 줄이
+/// 결과**다. 그런데도 `uploadBytes` 처럼 동기로 기다리지 않는다: 이 함수는 tick 스레드에서 불리고,
+/// ssh 왕복은 수백 ms 에서 몇 초다. 그동안 UI 가 멈추면 그것이 곧 «maru 가 원격에 붙을 때 뻗는다» 다.
+/// 그래서 fd 를 돌려주고 **호출자가 논블로킹으로 훑는다**(스트리머와 같은 규율).
+pub fn spawnRemoteCommand(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    shell_command: []const u8,
+) !Stream {
+    const c_env0 = try allocator.dupeZ(u8, "env");
+    defer allocator.free(c_env0);
+    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(c_ssh);
+    const c_flag = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(c_flag);
+    const c_ctl = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(c_ctl);
+    const c_dest = try allocator.dupeZ(u8, dest);
+    defer allocator.free(c_dest);
+    const c_cmd = try allocator.dupeZ(u8, shell_command);
+    defer allocator.free(c_cmd);
+    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        // **stdin 을 /dev/null 로 막는다** — 이 명령은 입력을 안 읽고, 열어 두면 부모가 죽었을 때
+        // 그 fd 가 남아 자식이 안 끝난다(스트리머와 같은 이유).
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.dup2(out_pipe[1], 1);
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+    return .{ .pid = pid, .out_fd = out_pipe[0] };
+}
+
 pub fn spawnAgentEvents(
     allocator: std.mem.Allocator,
     ctl: []const u8,

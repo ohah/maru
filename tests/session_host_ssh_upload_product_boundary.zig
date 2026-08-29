@@ -37,3 +37,32 @@ test "P3-e4d-3 host-backed SSH upload uses actual AppSession product boundaries"
     try std.testing.expect(std.mem.indexOf(u8, test_body, "startUpload(") == null);
     try std.testing.expect(std.mem.indexOf(u8, test_body, "startUploadBytes(") == null);
 }
+
+test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작은따옴표는 $HOME 을 리터럴로 굳힌다" {
+    // **한 글자 차이가 축 전체를 죽인다.** `--dir='$HOME/...'` 로 적으면 작은따옴표 안에서 `$HOME` 이
+    // 확장되지 않아, 원격 maru 가 리터럴 `$HOME/...` 이라는 이름의 디렉터리를 열려다 실패한다. 증상은
+    // «hello 가 안 온다» 하나뿐이고 그것은 «원격에 훅이 안 깔렸다» 와 화면에서 구분되지 않는다 —
+    // 그래서 소스 수준에서 못박는다(이 실수를 실제로 한 번 했다).
+    //
+    // 인용을 아예 빼는 것도 답이 아니다: 홈에 공백이 있는 계정에서 원격 셸이 인자를 쪼갠다.
+    const allocator = std.testing.allocator;
+    const body = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        "src/platform/macos/ssh_upload.zig",
+        allocator,
+        .limited(4 * 1024 * 1024),
+    );
+    defer allocator.free(body);
+
+    const start = std.mem.indexOf(u8, body, "pub fn spawnAgentEvents") orelse return error.SpawnMissing;
+    const tail = body[start..];
+    const end = std.mem.indexOfPos(u8, tail, 1, "\npub fn ") orelse tail.len;
+    const fn_body = tail[0..end];
+
+    // 큰따옴표로 감싼 `$HOME/` 이어야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "--dir=\\\"$HOME/{s}\\\"") != null);
+    // 그리고 작은따옴표 형태는 남아 있으면 안 된다.
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "--dir='") == null);
+    // 받는 값이 **상대 경로**임을 이름으로도 못박는다 — 절대 경로를 넘기면 `$HOME` 이 앞에 또 붙는다.
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_dir_rel") != null);
+}

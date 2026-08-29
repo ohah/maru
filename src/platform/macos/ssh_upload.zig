@@ -113,11 +113,20 @@ pub fn spawnAgentEvents(
     ctl: []const u8,
     dest: []const u8,
     remote_maru: []const u8,
-    remote_dir: []const u8,
+    /// **원격 홈 기준 상대 경로**다(`agent_hook_command.remote_log_dir_rel`). 절대 경로가 아니다 —
+    /// 저쪽 홈이 어디인지는 이쪽이 모르고, 안다고 가정하면 틀린다.
+    remote_dir_rel: []const u8,
 ) !Stream {
-    // `<maru> agent-events --stdio --dir=<절대경로>`. 경로는 셸을 거치므로 인용한다 — 공백이 든 경로가
-    // 있으면 원격 셸이 인자를 쪼갠다.
-    const cmd = try std.fmt.allocPrint(allocator, "{s} agent-events --stdio --dir='{s}'", .{ remote_maru, remote_dir });
+    // `<maru> agent-events --stdio --dir="$HOME/<rel>"`.
+    //
+    // ⚠️ **작은따옴표가 아니라 큰따옴표다.** 처음엔 경로를 작은따옴표로 감싼 채 `$HOME/...` 을 넣었는데,
+    // 작은따옴표 안에서는 `$HOME` 이 **확장되지 않는다** — 원격 maru 가 리터럴 `$HOME/...` 이라는 디렉터리를
+    // 열려다 실패하고, 증상은 «hello 가 안 온다» 하나뿐이라 원인이 화면에 안 나온다(실측으로 확인했다).
+    // 인용을 아예 빼면 홈에 공백이 있는 계정에서 인자가 쪼개진다. 그래서 큰따옴표다.
+    //
+    // 큰따옴표 안에 들어가는 값이 **우리 상수 하나**라는 점이 이 인용을 안전하게 만든다 — 사용자 입력이
+    // 여기 들어오게 되면 그때는 인용이 아니라 검증이 필요하다.
+    const cmd = try std.fmt.allocPrint(allocator, "{s} agent-events --stdio --dir=\"$HOME/{s}\"", .{ remote_maru, remote_dir_rel });
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

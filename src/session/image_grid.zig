@@ -11,8 +11,14 @@ const std = @import("std");
 
 /// 도크 안 격자의 여백과 간격(backing px). 값 자체는 디자인이 정할 일이라 호출자가 넘긴다.
 pub const Metrics = struct {
-    /// 타일 한 변. 썸네일 픽셀(160)과 **다를 수 있다** — 화면 크기는 레이아웃이, 텍스처 크기는 디코드가 정한다.
+    /// 타일 **가로**. 썸네일 픽셀(160)과 **다를 수 있다** — 화면 크기는 레이아웃이, 텍스처 크기는 디코드가 정한다.
     tile: u32,
+    /// 타일 **세로**. 0 이면 정사각(`tile`).
+    ///
+    /// **정사각이 기본이 아닌 이유는 실측이다**(2026-08-30, 실제 트랜스크립트 600장): 에이전트가
+    /// 다루는 이미지는 가로/세로 비율 **중앙 2.00**, 79% 가 가로로 길고 36% 는 비율 3 이상이다.
+    /// 정사각 타일은 그 절반 이상을 여백으로 버리고, 같은 도크 높이에 들어가는 칸 수도 절반이 된다.
+    tile_h: u32 = 0,
     /// 타일 사이 간격.
     gap: u32 = 8,
     /// 격자 바깥 여백.
@@ -24,6 +30,11 @@ pub const Metrics = struct {
 };
 
 pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
+
+/// 타일 세로. `tile_h` 가 0 이면 정사각이다 — 이 파생을 한 곳에 두어 배치·hit-test·라벨이 갈리지 않게 한다.
+pub fn tileHeight(m: Metrics) u32 {
+    return if (m.tile_h > 0) m.tile_h else m.tile;
+}
 
 pub const Layout = struct {
     /// 한 행에 몇 칸인가. 0 이면 폭이 모자라 하나도 못 그린다.
@@ -51,11 +62,11 @@ pub fn layout(area: Rect, m: Metrics, count: usize, scroll_px: u32) Layout {
     // 열 수가 거대해져 화면 밖에 칸을 그린다.
     const inner_w = area.w -| (m.pad *| 2);
     const inner_h = area.h -| (m.pad *| 2);
-    if (inner_w < m.tile or inner_h < m.tile) return .{ .cols = 0, .visible = 0, .overflow = count };
+    if (inner_w < m.tile or inner_h < tileHeight(m)) return .{ .cols = 0, .visible = 0, .overflow = count };
 
     // 첫 칸은 간격 없이 들어가고 그 다음부터 (간격 + 타일)씩 먹는다.
     // **세로는 라벨까지가 한 칸이다** — 라벨 높이를 빼먹으면 마지막 행 글자가 도크 밖으로 나간다.
-    const cell_h = m.tile +| m.label;
+    const cell_h = tileHeight(m) +| m.label;
     if (inner_h < cell_h) return .{ .cols = 0, .visible = 0, .overflow = count };
     const step = m.tile +| m.gap;
     const step_y = cell_h +| m.gap;
@@ -93,7 +104,7 @@ pub fn layout(area: Rect, m: Metrics, count: usize, scroll_px: u32) Layout {
 pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     if (l.cols == 0 or n < l.first or n >= l.first + l.visible) return null;
     const step = m.tile +| m.gap;
-    const step_y = m.tile +| m.label +| m.gap;
+    const step_y = tileHeight(m) +| m.label +| m.gap;
     const col: u32 = @intCast(n % l.cols);
     const row: u32 = @intCast(n / l.cols);
     const top = area.y +| m.pad +| row *| step_y;
@@ -103,7 +114,7 @@ pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
         .x = area.x +| m.pad +| col *| step,
         .y = top -| l.scroll_px,
         .w = m.tile,
-        .h = m.tile,
+        .h = tileHeight(m),
     };
 }
 
@@ -127,7 +138,7 @@ pub fn labelRectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
 pub fn hitTest(area: Rect, m: Metrics, l: Layout, px: u32, py: u32) ?usize {
     if (l.cols == 0 or l.visible == 0) return null;
     const step = m.tile +| m.gap;
-    const step_y = m.tile +| m.label +| m.gap;
+    const step_y = tileHeight(m) +| m.label +| m.gap;
     if (step == 0 or step_y == 0) return null;
     const ox = area.x +| m.pad;
     const oy = area.y +| m.pad;
@@ -426,5 +437,39 @@ test "스크롤: 어느 깊이에서도 라벨이 영역 안에 있다" {
             try testing.expect(lab.y >= area_400x300.y);
             try testing.expect(lab.y + lab.h <= area_400x300.y + area_400x300.h);
         }
+    }
+}
+
+test "비정사각 타일: 세로가 tile_h 를 따르고 같은 높이에 더 많이 들어간다" {
+    // 실측(600장): 가로/세로 중앙 2.00 · 79% 가 가로로 길다. 정사각은 절반을 여백으로 버린다.
+    const square = Metrics{ .tile = 80, .gap = 8, .pad = 8 };
+    const wide = Metrics{ .tile = 80, .tile_h = 40, .gap = 8, .pad = 8 };
+    try testing.expectEqual(@as(u32, 80), tileHeight(square));
+    try testing.expectEqual(@as(u32, 40), tileHeight(wide));
+
+    const ls = layout(area_400x300, square, 100, 0);
+    const lw = layout(area_400x300, wide, 100, 0);
+    try testing.expectEqual(ls.cols, lw.cols); // 가로는 그대로
+    try testing.expect(lw.visible > ls.visible); // 세로로 더 들어간다
+
+    const r = rectAt(area_400x300, wide, lw, 0).?;
+    try testing.expectEqual(@as(u32, 80), r.w);
+    try testing.expectEqual(@as(u32, 40), r.h);
+    // 두 번째 행은 tile_h 기준으로 내려간다.
+    const r2 = rectAt(area_400x300, wide, lw, lw.cols).?;
+    try testing.expectEqual(r.y + 40 + 8, r2.y);
+}
+
+test "비정사각 타일: 라벨과 hitTest 가 같은 세로를 쓴다" {
+    // 셋 중 하나라도 `tile` 을 세로로 쓰면 글자가 그림에서 밀리거나 누른 자리가 어긋난다.
+    const wide = Metrics{ .tile = 80, .tile_h = 40, .gap = 8, .pad = 8, .label = 16 };
+    const l = layout(area_400x300, wide, 40, 0);
+    var n: usize = 0;
+    while (n < l.visible) : (n += 1) {
+        const r = rectAt(area_400x300, wide, l, n).?;
+        const lab = labelRectAt(area_400x300, wide, l, n).?;
+        try testing.expectEqual(r.y + 40, lab.y); // 라벨은 타일 **세로** 바로 아래
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, wide, l, r.x + 2, r.y + 2));
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, wide, l, lab.x + 2, lab.y + 2));
     }
 }

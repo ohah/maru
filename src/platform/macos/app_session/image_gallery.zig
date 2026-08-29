@@ -639,7 +639,16 @@ pub fn gridArea(self: *const AppSession) image_grid.Rect {
 /// 타일 한 변(backing px). 썸네일 텍스처(160)와 **다를 수 있다** — 화면 크기는 레이아웃이,
 /// 텍스처 크기는 디코드가 정한다. 지금은 같은 값을 쓰되 그 둘을 한 상수로 묶지 않는다.
 pub fn gridMetrics(self: *const AppSession) image_grid.Metrics {
-    return .{ .tile = thumbnail_side, .gap = 8, .pad = 8, .label = labelHeightPx(self) };
+    // **타일은 정사각이 아니다.** 실측(실제 트랜스크립트 600장)에서 가로/세로 비율 중앙이 2.00 이고
+    // 79% 가 가로로 길다 — 정사각으로 두면 타일의 절반 이상이 여백이고, 같은 도크 높이에 들어가는
+    // 칸이 절반(4칸 대 8칸)이 된다. 151 장짜리 실제 세션에서는 그 차이가 크게 느껴진다.
+    return .{
+        .tile = thumbnail_side,
+        .tile_h = thumbnail_side / 2,
+        .gap = 8,
+        .pad = 8,
+        .label = labelHeightPx(self),
+    };
 }
 
 /// 타일 아래 라벨 한 줄의 높이(backing px). 도크 글자 한 줄과 같다 — 다른 값을 쓰면 글자가

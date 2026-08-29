@@ -60,9 +60,8 @@ pub const State = struct {
     key_focus: bool = false,
     /// 격자 세로 스크롤. 도크의 다른 목록과 **같은 상태 타입**을 쓴다(잔여 축적·방향 전환·clamp).
     scroll: maru.chrome.ui.scroll_area.State = .{},
-    /// `tiles` 의 첫 칸이 인덱스의 몇 번째인가. **타일은 전체가 아니라 «보이는 창»**이다 —
-    /// 실측 세션이 151 장이라 전부 들면 9 MB 를 상주시키고 3 초를 디코드에 쓴다.
-    tiles_base: usize = 0,
+    /// 지금 디코드를 걸어 둔 칸의 인덱스. `decoding != 0` 일 때만 뜻이 있다.
+    decoding_index: usize = 0,
     /// 화면에 올린 썸네일. **인덱스와 다르다** — 인덱스는 파일 전체의 «자리» 이고 이것은 지금 보이는
     /// 칸의 «픽셀» 이다. 장당 0.06 MB 라 상한 안에서 상주해도 가볍다(계약 §5.2).
     tiles: std.ArrayList(Tile) = .empty,
@@ -101,7 +100,33 @@ pub const State = struct {
         self.decoding = 0;
         self.overflow = 0;
         self.scroll = .{};
-        self.tiles_base = 0;
+        self.decoding_index = 0;
+    }
+
+    /// 그 칸의 타일이 있으면 준다. **`hit_index` 가 유일 키다** — 배열 위치가 아니다.
+    pub fn tileFor(self: *State, hit_index: usize) ?*Tile {
+        for (self.tiles.items) |*tile| {
+            if (tile.hit_index == hit_index) return tile;
+        }
+        return null;
+    }
+
+    /// 상한을 넘으면 **지금 창에서 가장 먼** 타일을 버린다. 스크롤로 멀어진 것부터 나가므로
+    /// 되돌아올 때 바로 앞뒤는 남아 있다.
+    pub fn evictFarthest(self: *State, allocator: std.mem.Allocator, center: usize) void {
+        while (self.tiles.items.len > max_tiles) {
+            var worst: usize = 0;
+            var worst_d: usize = 0;
+            for (self.tiles.items, 0..) |tile, i| {
+                const d = if (tile.hit_index > center) tile.hit_index - center else center - tile.hit_index;
+                if (d >= worst_d) {
+                    worst_d = d;
+                    worst = i;
+                }
+            }
+            allocator.free(self.tiles.items[worst].pixels);
+            _ = self.tiles.swapRemove(worst);
+        }
     }
 
     pub fn count(self: *const State) usize {
@@ -155,9 +180,14 @@ pub const gallery_image_id_base: u32 = 0xFFF0_0000;
 /// 동시에 픽셀을 들고 있는 타일 수 상한. 장당 0.06 MB 이므로 256장이면 15 MB 다.
 pub const max_tiles: usize = 256;
 
-/// 크게 보기 텍스처의 예약 id. 썸네일 구간(`base .. base+max_tiles`) **뒤**에 둔다 — 겹치면
-/// 크게 보기를 닫았을 때 그 텍스처가 어느 칸의 썸네일로 되살아난다.
-pub const gallery_open_image_id: u32 = gallery_image_id_base +| max_tiles;
+/// 크게 보기 텍스처의 예약 id. 썸네일 구간 **뒤**에 둔다 — 겹치면 크게 보기를 닫았을 때 그 텍스처가
+/// 어느 칸의 썸네일로 되살아난다.
+///
+/// 썸네일 id 는 **`hit_index` 로 짓는다**(배열 위치가 아니라). 배열 위치로 지으면 퇴출·추가로 위치가
+/// 바뀔 때 같은 타일의 id 가 달라지고, 두 타일이 id 를 맞바꾸면 한 프레임 동안 엉뚱한 그림이 뜬다.
+/// 그래서 구간을 인덱스 상한(`max_hits_per_file`)만큼 잡는다 — 0xFFF0_0000 위로 백만 개가 남아 있어
+/// 배경(0xFFFF_FFFF)과 부딪히지 않는다.
+pub const gallery_open_image_id: u32 = gallery_image_id_base +| 0x10000;
 
 /// 활성 Term 의 트랜스크립트 경로. 없으면 null — 에이전트가 붙지 않은 pane(셸만 띄운 창)이 그렇다.
 ///
@@ -281,19 +311,15 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     if (self.image_gallery.decoding != 0) return; // 이미 한 장 도는 중
     if (self.image_gallery.source.isEmpty()) return;
 
-    // 스크롤로 창이 옮겨 갔으면 들고 있던 타일은 다른 칸의 것이다. 버리고 새 창을 채운다.
-    // **다시 디코드하는 비용을 받아들인다**(창 하나 ≈ 8장 × 20 ms). 전부 들고 있으면 실측 세션
-    // 151 장에서 9 MB 상주 · 3 초 디코드이고, LRU 를 지금 만들 근거가 없다.
-    if (first != self.image_gallery.tiles_base) {
-        self.image_gallery.dropTiles(self.allocator);
-        self.image_gallery.tiles_base = first;
+    // **보이는 칸 중 아직 없는 것**을 채운다. 창을 통째로 버리지 않는 이유는 그렇게 하면 스크롤할
+    // 때마다 격자가 ~160 ms(8장 × 20 ms) 비어 깜빡이기 때문이다. 상한(`max_tiles` = 15 MB)은
+    // 계약 §5.2 가 허용하는 값이고 실측 세션이 151 장이라 실제로는 거의 안 걸린다.
+    const last = @min(first +| visible, self.image_gallery.count());
+    var next: usize = first;
+    while (next < last) : (next += 1) {
+        if (self.image_gallery.tileFor(next) == null) break;
     }
-
-    const want = @min(visible, max_tiles);
-    const next_in_window: usize = self.image_gallery.tiles.items.len;
-    if (next_in_window >= want) return;
-    const next = first + next_in_window;
-    if (next >= self.image_gallery.count()) return;
+    if (next >= last) return; // 보이는 칸이 다 찼다
 
     const hit = self.image_gallery.hits.items[next];
     if (backend.submit(
@@ -304,6 +330,7 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
         next,
     )) |generation| {
         self.image_gallery.decoding = generation;
+        self.image_gallery.decoding_index = next;
     }
 }
 
@@ -334,8 +361,10 @@ fn harvestDecoded(self: *AppSession) void {
 
     if (r.generation != self.image_gallery.decoding) return; // 늦게 온 것
     self.image_gallery.decoding = 0;
-    // 순서를 지킨다 — **창 기준**이다. 스크롤로 창이 옮겨 갔으면 이 결과는 남의 칸 것이다.
-    if (r.hit_index != self.image_gallery.tiles_base + self.image_gallery.tiles.items.len) return;
+    // **내가 건 그 칸의 것인가.** 배열 위치가 아니라 인덱스로 판정한다 — 스크롤이 배열 순서를
+    // 바꾸므로 순서로 판정하면 결과가 조용히 버려진다.
+    if (r.hit_index != self.image_gallery.decoding_index) return;
+    if (self.image_gallery.tileFor(r.hit_index) != null) return; // 이미 있다(중복 제출 방어)
 
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
@@ -347,6 +376,7 @@ fn harvestDecoded(self: *AppSession) void {
         .label = readLabel(self, r.hit_index),
     }) catch return;
     r.pixels = &.{}; // 소유가 타일로 넘어갔다 — defer 가 두 번 풀지 않게 비운다
+    self.image_gallery.evictFarthest(self.allocator, r.hit_index);
     self.metal_dirty = true;
 }
 
@@ -748,12 +778,10 @@ pub fn collectLabels(
     if (l.visible == 0) return;
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
-    for (self.image_gallery.tiles.items, 0..) |*tile, i| {
-        if (i >= l.visible) break;
-        const n = self.image_gallery.tiles_base + i;
+    for (self.image_gallery.tiles.items) |*tile| {
         const text = tile.label.text();
         if (text.len == 0) continue; // 없는 설명을 지어내지 않는다 — 빈 칸이 낫다
-        const rect = image_grid.labelRectAt(area, m, l, n) orelse continue;
+        const rect = image_grid.labelRectAt(area, m, l, tile.hit_index) orelse continue;
         const cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), rect.w / self.cell_width_px));
         if (cols == 0) continue;
         const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, text, fg) catch continue;
@@ -839,14 +867,13 @@ pub fn appendGpuImages(
     defer new_pixels.deinit(self.allocator);
 
     for (self.image_gallery.tiles.items, 0..) |*tile, i| {
-        if (i >= l.visible) break;
-        const n = self.image_gallery.tiles_base + i; // 창 안 위치 → 절대 인덱스
+        const n = tile.hit_index; // **자리는 인덱스가 정한다** — 배열 순서가 아니다
         if (tile.pixels.len == 0) continue; // 못 푼 이미지는 자리만 차지하고 안 그린다
-        const cell = image_grid.rectAt(area, m, l, n) orelse continue;
+        const cell = image_grid.rectAt(area, m, l, n) orelse continue; // 창 밖이면 안 그린다
         // **비율을 지켜 가운데**. 늘리면 스크린샷 글자가 찌그러지고 자르면 무엇인지 못 알아본다.
         const r = image_grid.fitInside(cell, tile.width, tile.height);
-        // id 는 **창 안 위치**로 짓는다 — 절대 인덱스로 지으면 예약 구간(max_tiles)을 넘는다.
-        const id: u32 = gallery_image_id_base +| @as(u32, @intCast(i));
+        // id 는 **인덱스**로 짓는다 — 배열 위치는 퇴출·추가로 바뀐다(위 주석).
+        const id: u32 = gallery_image_id_base +| @as(u32, @intCast(@min(n, 0xFFFF)));
 
         new_images.append(self.allocator, .{
             .image_id = id,
@@ -860,7 +887,7 @@ pub fn appendGpuImages(
             .src_v0 = 0,
             .src_u1 = 1,
             .src_v1 = 1,
-            .z = @intCast(i),
+            .z = @intCast(@min(i, 255)),
             .pass = 2, // above_text — 도크 배경 셀 위에 그린다
         }) catch return;
         live_ids.append(self.allocator, id) catch {};

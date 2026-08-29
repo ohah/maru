@@ -72904,6 +72904,11 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     try std.testing.expectEqual(l0.max_scroll, lend.scroll_px);
     try std.testing.expectEqual(@as(usize, 30), lend.first + lend.visible); // 마지막 칸이 창 안에 있다
 
+    // ── ④-b **되돌아왔을 때 격자가 비지 않는다.** 창을 통째로 버리면 스크롤할 때마다
+    // 8장 × 20 ms 동안 빈 화면이 된다. 타일은 «창» 이 아니라 `hit_index` 로 찾는 보관함이라
+    // 멀어졌다 돌아와도 앞서 푼 것이 남아 있다.
+    try std.testing.expect(session.image_gallery.tileFor(0) != null);
+
     // ── ⑤ **누른 자리와 열리는 것이 같다.** 스크롤을 되더하지 않으면 여기서 어긋난다.
     const area = image_gallery_ops.gridArea(session);
     const m = image_gallery_ops.gridMetrics(session);

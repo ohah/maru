@@ -815,10 +815,14 @@ fn appendBytes(buf: []u8, offset: *usize, text: []const u8) void {
 
 /// 음수도 그대로 보인다. `si_code` 는 음수 값(`SI_QUEUE` 등)을 쓰므로, 부호를 버리고 u32 로
 /// 접으면 `-1` 이 `4294967295` 로 보여 읽는 사람이 커널 상수와 대조를 못 한다.
+///
+/// 크기는 `@abs` 로 얻는다. `-value` 로 뒤집으면 **i64 최솟값에서 오버플로 패닉**이 난다 — 실측으로
+/// `thread panic: integer overflow` 를 확인했다. 지금 들어오는 값은 `si_code`·`si_pid` 라 i32 범위이니
+/// 도달하지 않지만, 여기는 **시그널 핸들러 안**이라 도달 불가에 기대면 안 되는 자리다.
 fn appendSigned(buf: []u8, offset: *usize, value: i64) void {
     if (value < 0) {
         appendBytes(buf, offset, "-");
-        appendDecimal(buf, offset, @intCast(-value));
+        appendDecimal(buf, offset, @abs(value));
         return;
     }
     appendDecimal(buf, offset, @intCast(value));
@@ -871,7 +875,9 @@ fn exitSignalHandler(
     info: *const std.c.siginfo_t,
     _: ?*anyopaque,
 ) callconv(.c) void {
-    var buf: [128]u8 = undefined;
+    // 최악의 경우(20자리 pid·signal·code·from)가 127바이트다. 128 로 두면 축을 하나만 더해도
+    // 조용히 잘리므로 여유를 준다 — 잘림은 안전하지만 진단이 말없이 짧아지는 것은 이 기능의 목적을 깎는다.
+    var buf: [192]u8 = undefined;
     writeMarker(formatSignalExitMarker(
         &buf,
         @intCast(std.c.getpid()),
@@ -8139,6 +8145,13 @@ test "앱 종료 마커는 시그널·보낸 쪽·정상 종료를 구분하고,
     try std.testing.expectEqualStrings(
         "=== maru app exit pid=7 via=exit ===\n",
         formatCleanExitMarker(&buf, 7),
+    );
+
+    // `si_code` 는 i32 범위지만 서명이 i64 다. 뒤집기(`-value`)로 크기를 구하면 최솟값에서
+    // **핸들러 안에서 오버플로 패닉**이 난다 — 도달 불가에 기대지 않고 여기서 고정한다.
+    try std.testing.expectEqualStrings(
+        "=== maru app exit pid=1 signal=6 code=-9223372036854775808 from=0 ===\n",
+        formatSignalExitMarker(&buf, 1, 6, std.math.minInt(i64), 0),
     );
 
     // 버퍼가 모자라도 넘치지 않는다. 시그널 핸들러 안에서 도는 코드라 이 성질이 곧 안전성이다.

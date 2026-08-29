@@ -94,6 +94,10 @@ pub fn syntaxLanguage(g: editor_language.Grammar) syntax.Language {
     };
 }
 
+/// 접을 줄 범위(§4 — 접힘의 tree-sitter 층). `syntax` 의 것을 그대로 다시 내보낸다 —
+/// 제품이 `syntax` 를 직접 들여오지 않게 하는 이 모듈의 다른 이름들과 같은 규율이다.
+pub const FoldSpan = syntax.Provider.FoldSpan;
+
 /// 문서를 연다. **실패는 무색이다** — 오류로 올리지 않는다(§5.3의 모든 진입점과 같은 규율).
 /// **한 프레임에 파싱에 쓸 수 있는 시간**(§2.1a). 60fps 예산 16.7ms 중 이만큼만 구문 트리에 준다 —
 /// 나머지는 랩 계수·레이아웃·lowering·드로우가 쓴다.

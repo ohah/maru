@@ -94,6 +94,8 @@ const Slot = struct {
     language: *const c.TSLanguage,
     query_cell: *std.atomic.Value(?*c.TSQuery),
     scm: []const u8,
+    /// 접을 노드 종류(§4.1f). 비면 그 언어는 구문 접힘이 없다.
+    fold_kinds: []const []const u8 = &.{},
 };
 
 /// **지원 언어의 관문은 이 함수 하나다.** 처음에는 grammar를 고르는 `switch`와 쿼리 캐시를 고르는
@@ -102,7 +104,7 @@ const Slot = struct {
 /// (뮤턴트 생존). 규칙이 두 곳에 있으면 갈리고, 갈려도 안 보인다. 늘리는 자리도 여기 하나다.
 fn slotFor(lang: Language) ?Slot {
     inline for (grammar_table, 0..) |g, i| {
-        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm };
+        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm, .fold_kinds = g.fold_kinds };
     }
     return null;
 }
@@ -113,35 +115,46 @@ const GrammarEntry = struct {
     lang: Language,
     get: *const fn () callconv(.c) *const c.TSLanguage,
     scm: []const u8,
+    /// **접을 노드 종류**(§4.1f — 언어별 목록이고 우리가 소유한다). 비어 있으면 그 언어는 구문
+    /// 접힘이 없고 들여쓰기 층이 그대로 산다.
+    ///
+    /// **"두 줄 이상 노드를 다 접는" 규칙은 실측이 반박했다** — markdown 에서 화살표의 76%가
+    /// 목록 항목·문단이었다(§4.1f 표). 코드에서 잘 맞는 규칙이 산문에서 망가진다.
+    fold_kinds: []const []const u8 = &.{},
 };
 
+// 종류 이름은 grammar 가 정한다(`ts_node_type`). 아래는 **접었을 때 의미가 있는 것**만 골랐고,
+// 언어마다 이름이 다르므로 겹치는 것도 각자 적는다 — 공통 집합을 만들면 한 언어의 개명이 다른
+// 언어를 조용히 바꾼다.
+const brace_block = [_][]const u8{ "block", "compound_statement", "statement_block", "declaration_list", "field_declaration_list", "class_body", "enum_body", "switch_body", "argument_list", "arguments", "parameter_list", "formal_parameters", "initializer_list", "array", "object" };
+
 const grammar_table = [_]GrammarEntry{
-    .{ .lang = .zig, .get = tree_sitter_zig, .scm = zig_highlights },
-    .{ .lang = .json, .get = tree_sitter_json, .scm = json_highlights },
-    .{ .lang = .markdown, .get = tree_sitter_markdown, .scm = markdown_highlights },
-    .{ .lang = .javascript, .get = tree_sitter_javascript, .scm = javascript_highlights },
+    .{ .lang = .zig, .get = tree_sitter_zig, .scm = zig_highlights, .fold_kinds = &.{ "block", "switch_expression", "initializer_list", "asm_expression", "multiline_string", "if_statement", "while_statement", "for_statement", "if_expression", "else_clause", "for_expression", "container_declaration", "function_declaration", "variable_declaration", "test_declaration", "labeled_statement", "switch_case", "struct_declaration", "enum_declaration" } },
+    .{ .lang = .json, .get = tree_sitter_json, .scm = json_highlights, .fold_kinds = &.{ "object", "array" } },
+    .{ .lang = .markdown, .get = tree_sitter_markdown, .scm = markdown_highlights, .fold_kinds = &.{ "section", "list", "fenced_code_block", "pipe_table", "block_quote" } },
+    .{ .lang = .javascript, .get = tree_sitter_javascript, .scm = javascript_highlights, .fold_kinds = &brace_block },
     // **상속을 우리가 잇는다.** Neovim 이 `; inherits: javascript` 로 잇는 그 구조인데 tree-sitter
     // 자체에는 그 기능이 없다 — 쿼리 파일이 그냥 텍스트다. 안 이으면 TypeScript 파일에서 문자열·주석
     // 같은 **JS 층 색이 통째로 빠진다**(ts 쿼리는 35줄이고 js 는 204줄이다).
     //
     // **기본을 앞에 둔다** — 겹치는 범위는 `collect`가 마지막 캡처를 택하므로(§5.3 겹침 규칙),
     // 언어 고유 패턴이 뒤에 와야 기본을 이긴다.
-    .{ .lang = .typescript, .get = tree_sitter_typescript, .scm = javascript_highlights ++ "\n" ++ typescript_highlights },
-    .{ .lang = .tsx, .get = tree_sitter_tsx, .scm = javascript_highlights ++ "\n" ++ tsx_highlights },
-    .{ .lang = .c, .get = tree_sitter_c, .scm = c_highlights },
+    .{ .lang = .typescript, .get = tree_sitter_typescript, .scm = javascript_highlights ++ "\n" ++ typescript_highlights, .fold_kinds = &brace_block },
+    .{ .lang = .tsx, .get = tree_sitter_tsx, .scm = javascript_highlights ++ "\n" ++ tsx_highlights, .fold_kinds = &brace_block },
+    .{ .lang = .c, .get = tree_sitter_c, .scm = c_highlights, .fold_kinds = &brace_block },
     // C++ 도 같다(`; inherits: c` — cpp 쿼리는 70줄이고 c 는 81줄이다). 안 이으면 `int main(void)`
     // 같은 C 층 구문이 무색이라 **파일 대부분이 색을 잃는다**(`SYN18`이 그것을 잡았다).
-    .{ .lang = .cpp, .get = tree_sitter_cpp, .scm = c_highlights ++ "\n" ++ cpp_highlights },
-    .{ .lang = .python, .get = tree_sitter_python, .scm = python_highlights },
-    .{ .lang = .go, .get = tree_sitter_go, .scm = go_highlights },
-    .{ .lang = .rust, .get = tree_sitter_rust, .scm = rust_highlights },
-    .{ .lang = .java, .get = tree_sitter_java, .scm = java_highlights },
-    .{ .lang = .ruby, .get = tree_sitter_ruby, .scm = ruby_highlights },
-    .{ .lang = .php, .get = tree_sitter_php, .scm = php_highlights },
-    .{ .lang = .kotlin, .get = tree_sitter_kotlin, .scm = kotlin_highlights },
-    .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights },
-    .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights },
-    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights },
+    .{ .lang = .cpp, .get = tree_sitter_cpp, .scm = c_highlights ++ "\n" ++ cpp_highlights, .fold_kinds = &brace_block },
+    .{ .lang = .python, .get = tree_sitter_python, .scm = python_highlights, .fold_kinds = &.{ "block", "dictionary", "list", "set", "tuple", "argument_list", "parameters" } },
+    .{ .lang = .go, .get = tree_sitter_go, .scm = go_highlights, .fold_kinds = &.{ "block", "field_declaration_list", "composite_literal", "argument_list", "parameter_list", "literal_value", "expression_switch_statement", "type_switch_statement", "const_declaration", "var_declaration", "import_declaration" } },
+    .{ .lang = .rust, .get = tree_sitter_rust, .scm = rust_highlights, .fold_kinds = &.{ "block", "declaration_list", "field_declaration_list", "arguments", "parameters", "match_block", "use_list", "token_tree" } },
+    .{ .lang = .java, .get = tree_sitter_java, .scm = java_highlights, .fold_kinds = &.{ "block", "class_body", "enum_body", "interface_body", "argument_list", "formal_parameters", "array_initializer", "switch_block" } },
+    .{ .lang = .ruby, .get = tree_sitter_ruby, .scm = ruby_highlights, .fold_kinds = &.{ "body_statement", "do_block", "block", "hash", "array", "argument_list", "then", "else" } },
+    .{ .lang = .php, .get = tree_sitter_php, .scm = php_highlights, .fold_kinds = &.{ "compound_statement", "declaration_list", "array_creation_expression", "arguments", "formal_parameters", "switch_block", "enum_declaration_list" } },
+    .{ .lang = .kotlin, .get = tree_sitter_kotlin, .scm = kotlin_highlights, .fold_kinds = &.{ "class_body", "function_body", "control_structure_body", "statements", "value_arguments", "function_value_parameters", "when_expression", "lambda_literal" } },
+    .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights, .fold_kinds = &.{ "compound_statement", "do_group", "if_statement", "case_statement", "function_definition", "subshell" } },
+    .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights, .fold_kinds = &.{ "block", "keyframe_block_list", "declaration" } },
+    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights, .fold_kinds = &.{ "element", "script_element", "style_element" } },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -445,6 +458,94 @@ pub const Provider = struct {
         };
         c.ts_tree_edit(old_tree, &edit);
         _ = self.parseBudgeted(source, old_tree, budget_ns);
+    }
+
+    /// 판 문서의 줄 수(트리 뿌리의 끝 행 + 1). **트리가 없으면 0**이다.
+    ///
+    /// 소비처가 *"내가 그리는 줄과 같은 문서인가"* 를 싸게 확인하는 자리다 — 접힘 범위를 구문 층으로
+    /// 덮을 때 그 둘이 갈려 있으면 엉뚱한 줄에 화살표가 선다.
+    pub fn lineCount(self: *Provider) usize {
+        const tree = self.tree orelse return 0;
+        return @as(usize, c.ts_node_end_point(c.ts_tree_root_node(tree)).row) + 1;
+    }
+
+    /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
+    pub const FoldSpan = struct {
+        /// 접어도 보이는 줄(화살표가 여기 선다).
+        start_row: u32,
+        /// 접으면 숨는 마지막 줄(포함).
+        end_row: u32,
+    };
+
+    /// 트리에서 접을 범위를 뽑는다. **없으면 빈 목록**이다(§5의 저하와 같은 규율).
+    ///
+    /// **쿼리를 쓰지 않는다.** grammar 열여덟 중 `queries/folds.scm` 을 가진 것은 **zig 하나뿐**이다
+    /// (nvim 계열은 접힘 쿼리를 grammar 밖에서 따로 관리한다). 그 하나만 쿼리로 접으면 언어마다
+    /// 동작이 갈리고, 우리가 열여섯 벌을 적어 두면 grammar 를 올릴 때마다 조용히 낡는다 — 색 쿼리를
+    /// **grammar 가 소유하게** 둔 것과 같은 이유로 그 길을 안 간다.
+    ///
+    /// 대신 **구조로 판단한다**: 두 줄 이상에 걸친 노드가 접을 수 있는 것이다. 언어별 자료가 0이고
+    /// 열여덟에 그대로 적용된다. §4가 *"들여쓰기로는 잡히지 않는 것(여러 줄 인자 목록, 배열
+    /// 리터럴)이 여기서 접힌다"* 고 적은 것이 정확히 이 규칙으로 잡힌다 — 그것들이 여러 줄 노드다.
+    ///
+    /// **시작 줄마다 하나만 남긴다**(가장 긴 것). gutter 화살표가 줄마다 하나이므로 그 축과 같아야
+    /// 하고, 안 그러면 같은 줄에 후보가 여럿이라 "이 화살표가 무엇을 접는가" 가 정해지지 않는다.
+    pub fn foldSpans(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(FoldSpan)) void {
+        out.clearRetainingCapacity();
+        const tree = self.tree orelse return;
+
+        // **접을 종류가 없으면 여기서 끝난다** — 그 언어는 들여쓰기 층이 그대로 산다(§4.1f).
+        const kinds = self.slot.fold_kinds;
+        if (kinds.len == 0) return;
+
+        var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
+        defer c.ts_tree_cursor_delete(&cursor);
+
+        // 시작 줄 → 그 줄에서 가장 멀리 가는 끝 줄.
+        var best: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+        defer best.deinit(allocator);
+
+        // 깊이 우선으로 전부 훑는다. 재귀 대신 커서를 쓰는 이유는 **깊이가 문서에 달렸기** 때문이다 —
+        // 중첩이 깊은 파일에서 스택이 터지면 그것은 편집기가 죽는 것이다(§5.3의 "적대적일 수 있다").
+        while (true) {
+            const node = c.ts_tree_cursor_current_node(&cursor);
+            const sp = c.ts_node_start_point(node);
+            const ep = c.ts_node_end_point(node);
+            if (ep.row > sp.row and hasKind(kinds, c.ts_node_type(node))) {
+                const gop = best.getOrPut(allocator, sp.row) catch return;
+                if (!gop.found_existing or gop.value_ptr.* < ep.row) gop.value_ptr.* = ep.row;
+            }
+
+            if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
+            while (true) {
+                if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
+                if (!c.ts_tree_cursor_goto_parent(&cursor)) return sortInto(allocator, &best, out);
+            }
+        }
+    }
+
+    fn hasKind(kinds: []const []const u8, raw: [*c]const u8) bool {
+        const name = std.mem.span(raw);
+        for (kinds) |k| {
+            if (std.mem.eql(u8, k, name)) return true;
+        }
+        return false;
+    }
+
+    /// 시작 줄 오름차순으로 담는다 — 소비처(접힘 층)가 그 순서를 전제한다.
+    fn sortInto(
+        allocator: std.mem.Allocator,
+        best: *std.AutoHashMapUnmanaged(u32, u32),
+        out: *std.ArrayList(FoldSpan),
+    ) void {
+        out.ensureTotalCapacity(allocator, best.count()) catch return;
+        var it = best.iterator();
+        while (it.next()) |e| out.appendAssumeCapacity(.{ .start_row = e.key_ptr.*, .end_row = e.value_ptr.* });
+        std.mem.sort(FoldSpan, out.items, {}, struct {
+            fn lt(_: void, a: FoldSpan, b: FoldSpan) bool {
+                return a.start_row < b.start_row;
+            }
+        }.lt);
     }
 
     /// 이 byte 범위의 색 조각. **트리가 없으면 빈 목록**이다 — 실패는 늘 무색으로 떨어진다(§5).
@@ -1137,4 +1238,155 @@ test "SYN18 번들한 grammar 열여덟이 전부 실제로 색을 낸다" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), failed);
+}
+
+test "SYN19 구문 접힘이 들여쓰기가 못 잡는 것을 잡는다 (§4)" {
+    // §4: *"들여쓰기로는 잡히지 않는 것(여러 줄 인자 목록, 배열 리터럴)이 여기서 접힌다"*.
+    // **그 문장을 값으로 고정한다** — 구조 규칙(여러 줄 노드)이 실제로 그 둘을 잡는지 본다.
+    const allocator = std.testing.allocator;
+    const src =
+        \\const items = .{
+        \\    1,
+        \\    2,
+        \\};
+        \\pub fn f(
+        \\    a: u32,
+        \\    b: u32,
+        \\) void {
+        \\    _ = a;
+        \\}
+    ;
+    var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var spans: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer spans.deinit(allocator);
+    prov.foldSpans(allocator, &spans);
+
+    // ⑴ 배열 리터럴(0행에서 시작해 3행까지)
+    var literal = false;
+    // ⑵ 여러 줄 인자 목록(4행에서 시작)
+    var arg_list = false;
+    for (spans.items) |sp| {
+        if (sp.start_row == 0 and sp.end_row >= 3) literal = true;
+        if (sp.start_row == 4 and sp.end_row >= 7) arg_list = true;
+    }
+    if (!literal or !arg_list) {
+        std.debug.print("접힘 범위 {d}개: ", .{spans.items.len});
+        for (spans.items) |sp| std.debug.print("{d}-{d} ", .{ sp.start_row, sp.end_row });
+        std.debug.print("\n", .{});
+    }
+    try std.testing.expect(literal);
+    try std.testing.expect(arg_list);
+
+    // ⑶ **시작 줄마다 하나만** — gutter 화살표가 줄마다 하나다.
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer seen.deinit(allocator);
+    for (spans.items) |sp| {
+        const gop = try seen.getOrPut(allocator, sp.start_row);
+        try std.testing.expect(!gop.found_existing);
+    }
+
+    // ⑷ 시작 줄 오름차순(소비처가 전제한다)
+    var prev: u32 = 0;
+    for (spans.items) |sp| {
+        try std.testing.expect(sp.start_row >= prev);
+        prev = sp.start_row;
+    }
+}
+
+test "SYN20 트리가 없으면 빈 목록이다 — 실패는 저하다 (§5)" {
+    const allocator = std.testing.allocator;
+    var prov = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var spans: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer spans.deinit(allocator);
+    prov.foldSpans(allocator, &spans);
+    try std.testing.expectEqual(@as(usize, 0), spans.items.len);
+}
+
+test "SYN21 언어마다 접을 것이 있는 표본에서 범위가 나온다 — 종류 이름이 낡으면 여기서 깨진다" {
+    // **종류 목록은 우리가 소유한다**(§4.1f). grammar 가 노드 이름을 바꾸면 그 언어에서 범위가
+    // **0이 되는데 아무 데도 안 나타난다** — 화살표가 조용히 사라질 뿐이다. 그 그물이 이것이다.
+    //
+    // 표본은 "접을 것이 분명히 있는" 모양으로 골랐다(함수 몸통·객체·절).
+    const allocator = std.testing.allocator;
+    const samples = [_]struct { lang: Language, src: []const u8 }{
+        .{ .lang = .zig, .src = "pub fn f() void {\n    const a = 1;\n    _ = a;\n}\n" },
+        .{ .lang = .json, .src = "{\n  \"a\": 1,\n  \"b\": 2\n}\n" },
+        .{ .lang = .markdown, .src = "# 제목\n\n본문\n\n## 다음\n\n본문\n" },
+        .{ .lang = .javascript, .src = "function f() {\n  let a = 1;\n  return a;\n}\n" },
+        .{ .lang = .typescript, .src = "function f(): number {\n  let a = 1;\n  return a;\n}\n" },
+        .{ .lang = .tsx, .src = "function f() {\n  const a = 1;\n  return a;\n}\n" },
+        .{ .lang = .c, .src = "int f(void) {\n  int a = 1;\n  return a;\n}\n" },
+        .{ .lang = .cpp, .src = "int f() {\n  int a = 1;\n  return a;\n}\n" },
+        .{ .lang = .python, .src = "def f():\n    a = 1\n    return a\n" },
+        .{ .lang = .go, .src = "package m\n\nfunc f() int {\n\ta := 1\n\treturn a\n}\n" },
+        .{ .lang = .rust, .src = "fn f() -> i32 {\n    let a = 1;\n    a\n}\n" },
+        .{ .lang = .java, .src = "class A {\n  int f() {\n    return 1;\n  }\n}\n" },
+        .{ .lang = .ruby, .src = "def f\n  a = 1\n  a\nend\n" },
+        .{ .lang = .php, .src = "<?php\nfunction f() {\n  $a = 1;\n  return $a;\n}\n" },
+        .{ .lang = .kotlin, .src = "fun f(): Int {\n    val a = 1\n    return a\n}\n" },
+        .{ .lang = .bash, .src = "f() {\n  a=1\n  echo $a\n}\n" },
+        .{ .lang = .css, .src = "a {\n  color: red;\n  display: block;\n}\n" },
+        .{ .lang = .html, .src = "<div>\n  <p>t</p>\n</div>\n" },
+    };
+    try std.testing.expectEqual(grammar_table.len, samples.len);
+
+    var spans: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer spans.deinit(allocator);
+    var empty: usize = 0;
+    for (samples) |s| {
+        var prov = Provider.init(s.src, s.lang, 0) orelse {
+            std.debug.print("provider 없음: {s}\n", .{@tagName(s.lang)});
+            empty += 1;
+            continue;
+        };
+        defer prov.deinit();
+        prov.foldSpans(allocator, &spans);
+        if (spans.items.len == 0) {
+            std.debug.print("'{s}' 에서 접을 범위가 0 — 종류 이름을 확인하라\n", .{@tagName(s.lang)});
+            empty += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), empty);
+}
+
+test "SYN22 산문은 과하게 접지 않는다 — 문단·목록 항목에 화살표가 안 선다" {
+    // **실측이 이 판정자를 낳았다**(§4.1f): "두 줄 이상 노드를 다 접는" 규칙에서 markdown 화살표의
+    // 76%가 `list_item`·`paragraph` 였다. 종류 목록이 그것을 거른다.
+    const allocator = std.testing.allocator;
+    const src =
+        \\# 제목
+        \\
+        \\여러 줄에
+        \\걸친 문단이다.
+        \\
+        \\- 항목 하나가
+        \\  두 줄이다
+        \\- 항목 둘도
+        \\  두 줄이다
+        \\
+    ;
+    var prov = Provider.init(src, .markdown, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var spans: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer spans.deinit(allocator);
+    prov.foldSpans(allocator, &spans);
+
+    // **문단(2행)과 두 번째 목록 항목(7행)에는 화살표가 없어야 한다.**
+    //
+    // 5행은 첫 목록 항목이자 **목록 전체가 시작하는 자리**다 — 항목만 접는 것과 목록을 접는 것을
+    // 시작 줄로는 못 가른다(같은 줄에서 시작한다). 그래서 그 줄은 "있으면 안 된다" 가 아니라
+    // **"목록 끝까지 덮는가"** 로 본다. 항목 하나만 접으면 6행에서 끝난다.
+    var list_end: ?u32 = null;
+    for (spans.items) |sp| {
+        if (sp.start_row == 2 or sp.start_row == 7) {
+            std.debug.print("산문에 화살표가 섰다: {d}행\n", .{sp.start_row});
+            return error.ProseFolded;
+        }
+        if (sp.start_row == 5) list_end = sp.end_row;
+    }
+    if (list_end) |e| try std.testing.expect(e >= 8); // 항목이 아니라 목록 전체다
+    // 그리고 **절**은 접힌다 — 아무것도 안 접으면 기능이 없는 것이다.
+    try std.testing.expect(spans.items.len > 0);
 }

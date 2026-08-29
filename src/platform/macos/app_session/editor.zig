@@ -207,7 +207,13 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     //
     // **여기 두는 이유**: 이 함수가 색을 만드는 유일한 자리이고 프레임마다 불린다. 별도 tick 훅을
     // 두면 "언제 이어 파는가"의 출처가 둘이 된다.
-    if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) self.metal_dirty = true;
+    if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
+        self.metal_dirty = true;
+    } else {
+        // **파싱이 끝난 프레임에 접힘을 구문 층으로 덮는다**(§4). 여는 자리에서는 트리가 아직
+        // 없을 수 있어(§2.1a) 들여쓰기로 세웠고, 여기가 그 두 번째 갱신 시점이다.
+        promoteFoldRangesToSyntax(self, term);
+    }
 
     const first = term.rt.editor_first_line;
     if (first >= term.rt.editor_lines.len) return &.{};
@@ -3807,6 +3813,93 @@ fn ensureFoldRanges(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     term.rt.editor_fold_marks_len = 0;
 }
 
+/// **구문 층으로 승격한다**(§4 — *"grammar가 있으면 구문 기반 범위가 들여쓰기 추정을 덮는다"*).
+///
+/// **왜 여는 자리가 아닌가.** §4.1f 는 *"범위는 파일을 열 때 센다"* 고 정했는데, §2.1a 예산이 붙은
+/// 뒤로는 **그 시점에 트리가 아직 없을 수 있다**(690KB 파일이 여섯 프레임에 나뉜다). 그래서 여는
+/// 자리는 들여쓰기로 세우고, **파싱이 끝난 프레임에 이 함수가 덮는다** — 갱신 시점이 하나에서
+/// 둘이 됐다.
+///
+/// **접어 둔 것은 푼다.** 승격하면 화살표가 서는 줄이 달라지므로 옛 머리 번호가 가리키는 곳이
+/// 다른 범위가 된다. 파싱은 여는 직후에 끝나므로 그 사이에 접어 둔 것이 있을 확률은 낮고, 있어도
+/// **틀린 곳이 접힌 채로 남는 것보다 펼쳐지는 편이 낫다**.
+fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
+    const doc = term.rt.editor_doc orelse return;
+    const st = &term.rt.editor_syntax;
+    if (st.pending) return; // 아직 파는 중이다 — 다음 프레임에 다시 본다
+    if (term.rt.editor_syntax_folds_applied) return;
+    var prov = &(st.provider orelse return);
+    if (prov.tree == null) return; // grammar 없음 — 들여쓰기 층이 그대로 산다(§5)
+
+    const lines = foldSourceLines(term);
+    if (lines.len == 0) return;
+
+    // **범위는 화면에 그리는 줄과 같은 문서에서 나와야 한다.** 트리는 `doc.file.content` 를 판
+    // 것이고 범위가 실리는 곳은 `foldSourceLines`(=`rt.editor_lines`)다. 제품에서 그 둘은 **같은
+    // 배열**이지만, 갈린 상태에서 덮으면 엉뚱한 줄에 화살표가 서고 접으면 다른 줄이 사라진다.
+    //
+    // **줄 수만 보면 모자란다.** 우연히 같은 경우를 못 거른다(실측: 판정자 픽스처가 네 줄짜리
+    // 배열을 주입하는데 문서도 네 줄이라 통과했고, 승격이 다른 문서의 범위를 덮었다).
+    // 그래서 **첫 줄과 끝 줄의 내용**까지 본다 — O(1)이고 갈린 상태를 실제로 거른다.
+    if (prov.lineCount() != lines.len) return;
+    if (doc.file.lineCount() != lines.len) return;
+    const first_doc = doc.file.lineText(0) orelse return;
+    const last_doc = doc.file.lineText(lines.len - 1) orelse return;
+    if (!std.mem.eql(u8, first_doc, lines[0])) return;
+    if (!std.mem.eql(u8, last_doc, lines[lines.len - 1])) return;
+
+    var spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
+    defer spans.deinit(self.allocator);
+    prov.foldSpans(self.allocator, &spans);
+    // **머리 한 줄짜리는 만들지 않는다**(§4.1f — 접어도 줄어드는 것이 없다). `foldSpans`가 두 줄
+    // 이상만 내므로 여기서 다시 거를 것은 없지만, 그 계약이 갈리면 아래 변환이 빈 범위를 만든다.
+    if (spans.items.len == 0) {
+        term.rt.editor_syntax_folds_applied = true; // 접을 것이 없다 — 다시 세지 않는다
+        return;
+    }
+
+    const n = spans.items.len;
+    const ranges = self.allocator.alloc(editor_fold.Range, n) catch return;
+    const folded = self.allocator.alloc(u32, n) catch {
+        self.allocator.free(ranges);
+        return;
+    };
+    const folded_prev = self.allocator.alloc(u32, n) catch {
+        self.allocator.free(ranges);
+        self.allocator.free(folded);
+        return;
+    };
+
+    // **중첩 레벨은 담긴 순서로 센다.** 시작 줄 오름차순이므로, 아직 안 끝난 범위의 수가 곧 깊이다
+    // (들여쓰기 층이 스택 깊이를 쓰는 것과 같은 정의 — §4의 `Range.level` 주석).
+    var stack: [editor_fold.max_depth]u32 = undefined;
+    var depth: usize = 0;
+    for (spans.items, 0..) |sp, i| {
+        while (depth > 0 and stack[depth - 1] < sp.start_row) depth -= 1;
+        if (depth < stack.len) {
+            stack[depth] = sp.end_row;
+            depth += 1;
+        }
+        ranges[i] = .{
+            .head = sp.start_row,
+            .first_hidden = sp.start_row + 1,
+            .last_hidden = sp.end_row,
+            .level = @intCast(@min(depth, std.math.maxInt(u16))),
+        };
+    }
+
+    // 여기서부터 실패 지점이 없다 — 옛 것을 놓고 새 것을 건다.
+    if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
+    if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
+    if (term.rt.editor_folded_prev.len > 0) self.allocator.free(term.rt.editor_folded_prev);
+    term.rt.editor_fold_ranges = ranges;
+    term.rt.editor_folded_buf = folded;
+    term.rt.editor_folded_prev = folded_prev;
+    term.rt.editor_folded_len = 0; // 접어 둔 것은 푼다(위 주석)
+    term.rt.editor_syntax_folds_applied = true;
+    self.metal_dirty = true;
+}
+
 /// 접을 수 있는 것을 **전부 접는다**(§4 — *"큰 파일에서 하나씩 접는 것은 쓸모가 없다"*).
 /// 편집기가 아니거나 접을 것이 없으면 `false`.
 pub fn foldAll(self: *AppSession) bool {
@@ -5208,6 +5301,10 @@ fn dropFoldState(self: *AppSession, term: *Term) void {
     term.rt.editor_fold_marks = &.{};
     term.rt.editor_folded_len = 0;
     term.rt.editor_fold_marks_len = 0;
+    // **구문 승격 표시도 함께 되돌린다.** 이 함수가 접힘 무효화의 유일한 자리이므로(편집·닫기·다시
+    // 열기가 전부 여기를 지난다) 표시를 여기 두면 갈릴 수 없다. 안 되돌리면 다음 문서가 **들여쓰기
+    // 범위를 든 채 승격을 건너뛴다** — 구문 접힘이 조용히 사라진다.
+    term.rt.editor_syntax_folds_applied = false;
     // 보이는 줄 배열도 접힘에서 나온 것이라 함께 놓는다 — 남기면 접힌 화면이 그대로 보인다.
     if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
     if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
@@ -15510,6 +15607,71 @@ test "ES19 탭 폭을 바꾸면 색 경계가 따라온다 — 제품 경로로 
     // 탭 넷 × 8열 = 32열에서 `const`가 시작한다. 탭 폭이 4로 박히면 16, 1로 세면 4다.
     try testing.expect(kw_start != null);
     try testing.expectEqual(@as(u32, 32), kw_start.?);
+}
+
+test "ES23 접힘이 구문 층으로 승격된다 — 들여쓰기가 못 잡는 것이 접힌다 (§4)" {
+    // §4: *"grammar 가 있으면 구문 기반 범위가 들여쓰기 추정을 덮는다. 들여쓰기로는 잡히지 않는 것
+    // (여러 줄 인자 목록, 배열 리터럴)이 여기서 접힌다"*.
+    //
+    // **여는 자리에서는 못 한다**(§2.1a — 그때 트리가 아직 없을 수 있다). 프레임이 돌면서 파싱이
+    // 끝나야 덮이므로, 이 판정자는 **프레임을 돌린 뒤** 범위를 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 들여쓰기가 **못 잡는** 모양: 배열 리터럴이 같은 들여쓰기 겹에서 시작해 닫힌다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "const items = .{\n1,\n2,\n};\npub fn f() void {}\n");
+
+    var frames: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and frames < 200) : (frames += 1) {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.NoFrame;
+        d.dl.deinit(allocator);
+    }
+    var d2 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.NoFrame;
+    d2.dl.deinit(allocator);
+
+    try testing.expect(fx.term.rt.editor_syntax_folds_applied);
+
+    // 0행(`const items = .{`)이 3행(`};`)까지 접힌다 — 들여쓰기 층은 이것을 못 만든다.
+    var found = false;
+    for (fx.term.rt.editor_fold_ranges) |r| {
+        if (r.head == 0 and r.last_hidden >= 2) found = true;
+    }
+    if (!found) {
+        std.debug.print("범위 {d}개: ", .{fx.term.rt.editor_fold_ranges.len});
+        for (fx.term.rt.editor_fold_ranges) |r| std.debug.print("{d}->{d} ", .{ r.head, r.last_hidden });
+        std.debug.print("\n", .{});
+    }
+    try testing.expect(found);
+}
+
+test "ES24 문서와 줄 배열이 갈리면 승격하지 않는다 — 엉뚱한 줄이 접힌다" {
+    // 트리는 문서에서, 범위는 `rt.editor_lines` 에서 나온다. 제품에서는 같은 문서지만 그 둘이 갈린
+    // 상태에서 덮으면 **화살표가 엉뚱한 줄에 서고 접으면 다른 줄이 사라진다**.
+    //
+    // 이 판정자가 없으면 그 방어가 조용히 사라진다 — 실제로 방어를 넣기 전 기존 접힘 판정자 일곱이
+    // 깨졌고, 그것이 이 상태가 실재한다는 증거다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "const items = .{\n1,\n2,\n};\n");
+
+    // 문서와 **다른** 줄 배열을 끼운다(줄 수까지 같게 맞춰 "수만 보는" 검사를 통과시킨다).
+    const saved = fx.term.rt.editor_lines;
+    defer fx.term.rt.editor_lines = saved;
+    const lines = try allocator.alloc([]const u8, saved.len);
+    defer allocator.free(lines);
+    for (lines) |*l| l.* = "zzz";
+    fx.term.rt.editor_lines = lines;
+    fx.term.rt.editor_syntax_folds_applied = false;
+
+    promoteFoldRangesToSyntax(fx.session, fx.term);
+    try testing.expect(!fx.term.rt.editor_syntax_folds_applied); // 덮지 않았다
 }
 
 test "ES21 큰 파일은 여는 프레임에 다 안 판다 — 이어 파고 결국 색이 온다 (§2.1a)" {

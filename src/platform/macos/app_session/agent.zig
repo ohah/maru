@@ -1573,6 +1573,25 @@ fn adoptHookSessionIdentity(self: *AppSession, term: *Term, ev: maru.session.age
     self.metal_dirty = true;
 }
 
+/// 이미지 갤러리가 읽을 파일을 훅 payload 에서 채택한다(docs/agent-image-gallery.md §4.4).
+/// `transcript_path` 는 provider 가 **절대 경로를 통째로** 주므로 디렉터리 조립도 추측도 없다 —
+/// 바로 위 `adoptHookSessionIdentity` 가 `session_id` 로 하는 일의 짝이다.
+///
+/// **경로가 바뀌면 그 Term 의 인덱스가 무효다.** `/clear` 는 새 파일을 만들고(실측: 직전 세션 종료
+/// 46 ms 뒤 새 세션 시작), 옛 파일의 바이트 오프셋은 새 파일에서 아무 뜻이 없다. 지금은 갤러리가
+/// 스캔을 들고 있지 않으므로 다시 그리기만 요청한다 — 인덱스 무효화는 소비자가 생길 때 여기 붙는다.
+///
+/// 버퍼가 상한보다 하나 큰 이유는 `adoptHookSessionIdentity` 와 같다: 넘치는 값이 상한에 딱 맞게 잘려
+/// **통과해 버리는** 것을 막는다. `Source.set` 이 그 길이를 거절해 **비운다** — 자른 경로는 없는 파일이거나
+/// 더 나쁘게는 다른 파일이다.
+fn adoptHookImageSource(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+    if (ev.transcript_path.len == 0) return;
+    var buf: [maru.session.agent_image_index.max_source_path_bytes + 1]u8 = undefined;
+    const value = maru.session.agent_hook_event.decodeInto(&buf, ev.transcript_path);
+    if (!term.agent_image_source.set(value)) return;
+    self.metal_dirty = true;
+}
+
 /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
 /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
 pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
@@ -1972,6 +1991,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     //      이벤트에서 채택이 **아예 안 돈다**.
     // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
     adoptHookSessionIdentity(self, term, ev);
+    adoptHookImageSource(self, term, ev);
     captureBeforeForEvent(self, term, ev);
     const prev_state = term.agent_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지

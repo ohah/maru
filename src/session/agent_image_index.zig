@@ -70,6 +70,49 @@ pub const Hit = struct {
     mime: Mime,
 };
 
+/// 이 Term 이 읽을 트랜스크립트의 **절대 경로**. 훅 `SessionStart`/`UserPromptSubmit` 이 `transcript_path` 로
+/// 통째로 주므로(계약 §4.4) 디렉터리를 조립하거나 추측하지 않는다.
+///
+/// 힙을 잡지 않는 고정 버퍼다 — `agent_transcript.Cache` 와 같은 규율이라 Term 파괴가 따로 해제하지 않는다.
+///
+/// **512인 근거(2026-08-29 실측)**: 이 기계의 트랜스크립트 경로 4,155개에서 최대 **215자**, p99 205자였고
+/// 256자를 넘는 것이 하나도 없었다. 길이는 사실상 cwd 가 정하는데(claude 는 cwd 를 인코딩한 디렉터리 이름을
+/// 쓴다), 512면 cwd 400자까지 담는다. **넘치면 담지 않는다 — 자르지 않는다**: 자른 경로는 없는 파일이거나,
+/// 더 나쁘게는 **다른 파일**을 가리킨다.
+pub const max_source_path_bytes: usize = 512;
+
+/// 갤러리가 읽는 대상 하나.
+pub const Source = struct {
+    buf: [max_source_path_bytes]u8 = undefined,
+    len: usize = 0,
+
+    pub fn path(self: *const Source) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn isEmpty(self: *const Source) bool {
+        return self.len == 0;
+    }
+
+    /// 경로를 바꾼다. 바뀌었으면 true — 호출자가 그때만 인덱스를 버린다.
+    /// 상한을 넘거나 절대 경로가 아니면 **비운다**(추측한 경로로 남의 파일을 읽지 않는다).
+    pub fn set(self: *Source, value: []const u8) bool {
+        if (value.len == 0 or value.len > max_source_path_bytes or value[0] != '/') {
+            const had = self.len != 0;
+            self.len = 0;
+            return had;
+        }
+        if (self.len == value.len and std.mem.eql(u8, self.buf[0..self.len], value)) return false;
+        @memcpy(self.buf[0..value.len], value);
+        self.len = value.len;
+        return true;
+    }
+
+    pub fn clear(self: *Source) void {
+        self.len = 0;
+    }
+};
+
 const claude_image_marker = "\"type\":\"image\",\"source\":{\"type\":\"base64\"";
 const claude_tool_file_marker = "\"file\":{\"base64\":\"";
 const codex_marker = "\"type\":\"input_image\"";
@@ -375,4 +418,36 @@ test "Kind 는 provider 를 안다" {
     try testing.expectEqual(Provider.claude, Kind.claude_image.provider());
     try testing.expectEqual(Provider.claude, Kind.claude_tool_file.provider());
     try testing.expectEqual(Provider.codex, Kind.codex_input_image.provider());
+}
+
+test "Source: 경로를 담고, 바뀔 때만 true 를 돌려준다" {
+    var src: Source = .{};
+    try testing.expect(src.isEmpty());
+    try testing.expect(src.set("/Users/u/.claude/projects/p/a.jsonl"));
+    try testing.expectEqualStrings("/Users/u/.claude/projects/p/a.jsonl", src.path());
+    // 같은 값이면 바뀐 것이 아니다 — 인덱스를 헛되이 버리지 않는다.
+    try testing.expect(!src.set("/Users/u/.claude/projects/p/a.jsonl"));
+    try testing.expect(src.set("/Users/u/.claude/projects/p/b.jsonl"));
+    try testing.expectEqualStrings("/Users/u/.claude/projects/p/b.jsonl", src.path());
+}
+
+test "Source: 상한 초과·상대 경로·빈 값은 담지 않고 비운다 — 자르지 않는다" {
+    var src: Source = .{};
+    _ = src.set("/ok/a.jsonl");
+
+    // 자르면 없는 파일이거나 **다른 파일**이 된다.
+    const too_long = "/" ++ ("x" ** max_source_path_bytes);
+    try testing.expect(src.set(too_long)); // 바뀌었다(비워졌다)
+    try testing.expect(src.isEmpty());
+
+    _ = src.set("/ok/a.jsonl");
+    try testing.expect(src.set("relative/a.jsonl"));
+    try testing.expect(src.isEmpty());
+
+    _ = src.set("/ok/a.jsonl");
+    try testing.expect(src.set(""));
+    try testing.expect(src.isEmpty());
+
+    // 이미 비어 있으면 바뀐 것이 아니다.
+    try testing.expect(!src.set(""));
 }

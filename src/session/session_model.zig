@@ -18,6 +18,7 @@ const agent_hook_event = @import("agent_hook_event.zig");
 const agent_hook_mode = @import("agent_hook_mode.zig");
 const agent_hook_command = @import("agent_hook_command.zig"); // RA5: 원격 pane 신원 상수·대조
 const remote_agent_stream = @import("remote_agent_stream.zig"); // RA5: 원격 이벤트 채널 수명
+const agent_image_index = @import("agent_image_index.zig");
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 const control_surface = @import("control_surface.zig");
 const dock_panel = @import("dock_panel.zig"); // FP16: 파일 entry 소유를 Term으로 옮긴다(§1). 의존은 workspace.zig 경유로 이미 존재. // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
@@ -162,6 +163,11 @@ pub fn Model(comptime Rt: type) type {
             /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
             /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
             agent_transcript: agent_transcript_mod.Cache = .{},
+            /// 이미지 갤러리가 읽을 트랜스크립트 절대 경로(docs/agent-image-gallery.md §4.1). 훅
+            /// `transcript_path` 가 통째로 주므로 추측이 없다 — `agent_transcript.Cache.name` 은 파일 **이름**
+            /// 뿐이라 디렉터리를 다시 조립해야 하고, 그 조립이 과거에 «다른 세션의 대화를 붙이는» 사고를 냈다.
+            /// 고정 크기라 destroyTerm 이 따로 해제하지 않는다.
+            agent_image_source: agent_image_index.Source = .{},
             /// 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 core.windowTitle()을 복사해 채운다. destroyTerm이 해제.
             auto_title: std.ArrayListUnmanaged(u8) = .empty,
             /// syncAutoTitles가 마지막으로 auto_title에 반영한 core.title_generation(P4-1). 코어의 현재 generation과 같으면

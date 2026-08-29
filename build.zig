@@ -4772,6 +4772,22 @@ pub fn build(b: *std.Build) void {
     const doc_links_step = b.step("check-doc-links", "Check cross-document links and section anchors");
     doc_links_step.dependOn(&run_doc_link_tests.step);
 
+    // 문서에서 **코드로** 나가는 참조(`` `심볼`(파일.zig:1234) ``)를 지킨다 — 위 게이트가 문서 사이를
+    // 보는 것과 짝이다. 좌표는 손으로 관리하는데 코드는 자라므로 조용히 썩는다(실측 2026-08-29: 41건,
+    // 최대 3,911줄 차이). 같은 이유로 cwd를 루트에 고정한다 — 문서와 소스를 런타임에 읽는다.
+    const doc_line_ref_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/doc_line_refs/refs.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_doc_line_ref_tests = b.addRunArtifact(doc_line_ref_tests);
+    run_doc_line_ref_tests.setCwd(b.path("."));
+
+    const doc_line_refs_step = b.step("check-doc-line-refs", "Check code line references in docs still hit their symbol");
+    doc_line_refs_step.dependOn(&run_doc_line_ref_tests.step);
+
     // session-host MRSH codec/framing 단위 테스트(P3). codec(protocol/framing/screen_stream/registry/server)은 std만
     // 쓰는 순수 계층이지만, macOS 전용 `runtime_manager`(P3-e2b)가 `@import("maru")`로 app InProcessTermBackend를
     // 재사용하므로 `maru` 모듈을 import로 준다(non-macOS 크로스컴파일에선 barrel이 runtime_manager를 제외해 maru가

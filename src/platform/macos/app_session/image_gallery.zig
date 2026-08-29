@@ -464,7 +464,6 @@ pub fn panDrag(self: *AppSession, dx: f64, dy: f64) void {
     self.metal_dirty = true;
 }
 
-
 /// 갤러리가 키보드를 쥐고 있나. 에이전트 도크와 같은 게이트다 — 이것이 없으면 터미널로 돌아간 뒤의
 /// Esc 가 셸이 아니라 크게 보기를 닫는다.
 pub fn ownsKeys(self: *const AppSession) bool {

@@ -6795,6 +6795,22 @@ search_ime: glyphs 9->10 digest 1ea53c5…->aa05113… cards 14->14 to_search=0 
 | `searchDisplay` 가 조합을 안 붙인다(**옛 동작**) | `search_ime_ok`(`glyphs 9->9`, 지문 그대로) |
 | 라우팅이 늘 터미널이다(**옛 동작**) | **단위 테스트**(`expected .sidebar_search, found .terminal`) |
 
+## 게이트 하나를 로컬에서 안 돌리고 있었다
+
+CI 의 `check` 가 빨갛게 왔다:
+
+```text
+src/main.zig: 한국어 리터럴 1 개 (원장 0) — **늘었다**.
+```
+
+스모크 fixture 에 `"한"` 을 그대로 적었는데, `src/main.zig` 는 i18n 원장이 **0** 으로 못 박아 둔
+파일이다(§7.1 영어 고정 표면 — 예전에 0 으로 **갚아 원장에서 뺀** 자리다). 원장을 다시 올리는 대신
+`\u{d55c}` 이스케이프로 적었다 — **바이트가 같으므로** 두 칸 폭·멀티바이트라는 시험의 뜻은 그대로다.
+
+> **`zig build check-boundaries` 와 `mise run check-boundaries` 가 다르다.** 앞의 것만 돌리고
+> 초록으로 읽었는데, i18n 원장 판정은 뒤의 것에만 들어 있었다. 앞으로 경계 게이트는 **mise 쪽**으로
+> 돌린다(`mise run check` 가 CI 와 같은 묶음이다).
+
 ## 아직 아닌 것
 
 - **에이전트 검색 쪽은 캡처로 못 봤다** — 배선은 같은 자리에서 함께 했고(`search_preedit` 를 Options 에

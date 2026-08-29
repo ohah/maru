@@ -7087,7 +7087,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             ime_glyphs_before = sidebar_header_search_glyphs;
             ime_digest_before = d3d11_cells.cellsDigest(sidebar_cells.items);
             ime_cards_before = sidebar_cards.items.len;
-            search.setPreedit(allocator, "한") catch {};
+            // **한글을 이스케이프로 적는다**(\`\u{d55c}\` = 그 글자). `src/main.zig` 는 i18n 원장이
+            // 한국어 리터럴 **0** 으로 못 박아 둔 파일이고(§7.1 — 영어 고정 표면), 예전에 0 으로
+            // 갚아 원장에서 빠졌다. 이건 표시가 아니라 **조합 fixture** 라 그 빚을 다시 지지 않는다
+            // — 바이트는 같으므로 두 칸 폭·멀티바이트라는 시험의 뜻도 그대로다.
+            search.setPreedit(allocator, "\u{d55c}") catch {};
             rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
         }
         if (smoke and spins == 821 and ime_judgeable) {

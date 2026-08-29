@@ -261,5 +261,5 @@ pub fn scrollToCurrentMatch(self: *AppSession) void {
     if (cur >= self.find_matches.items.len) return;
     const surface = term_ops.activeSurface(self);
     // scrollToAbs는 코어 mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
-    self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_abs = self.find_matches.items[cur].start.row }, self.io) catch {};
+    self.enqueueCoreCommandForSurface(surface.id, .{ .scroll_to_abs = self.find_matches.items[cur].start.row }) catch {};
 }

@@ -2053,6 +2053,32 @@ test "CR3b R2b prepared cleanup handle은 invalid raw lifecycle과 copied addres
     permit_settled = true;
 }
 
+test "CR3b R2b cleanup receipt는 stateless allocator의 zero context를 유효한 identity로 보존한다" {
+    try ClientSlot.initializeProcessRuntime();
+    var source: client_mod.Client = .{
+        .allocator = std.heap.smp_allocator,
+        .fd = -1,
+        .host_id = 0xC3B2BA,
+        .parser = framing.FrameParser.init(std.heap.smp_allocator),
+    };
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
+    defer if (slot.lifecycle == .live) {
+        const outcome = slot.tryDeinit();
+        if (outcome != .cleaned) @panic("CR3b R2b stateless allocator fixture teardown failed");
+    };
+
+    var admission: PreparedAdmissionClose = .{};
+    try slot.prepareAdmissionClose(1, &admission);
+    var cleanup: PreparedRetirementCleanup = .{};
+    try slot.prepareRetirementCleanup(&admission, 2, &cleanup);
+    try std.testing.expectEqual(@as(usize, 0), cleanup.allocator_ptr);
+    try std.testing.expect(cleanup.allocator_vtable != 0);
+    try slot.preflightRetirementCleanupBeforeAdmissionClose(&admission, &cleanup, 2);
+    try slot.abortRetirementCleanup(&cleanup);
+    try slot.cancelAdmissionClose(&admission);
+}
+
 test "B3-4/5 RPC free evidence retire permit consumes exact committed record" {
     var record: RpcFreeEvidenceRecord = .{};
     const digest = rpcFreeEvidenceFixture(0xE1);
@@ -13072,7 +13098,7 @@ pub const ClientSlot = struct {
             cleanup.current_node_incarnation != self.current.incarnation.tagged or
             cleanup.expected_connection_generation != self.current.connection_generation or
             cleanup.admission_request_generation == 0 or cleanup.placeholder_generation == 0 or
-            cleanup.allocator_ptr == 0 or cleanup.allocator_vtable == 0 or
+            cleanup.allocator_vtable == 0 or
             cleanup.external_deinit_reserved_raw > 1 or
             cleanup.lifecycle != lifecycle)
             return false;

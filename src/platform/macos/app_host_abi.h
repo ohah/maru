@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 177u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 180u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -600,6 +600,24 @@ const char *maru_macos_file_pick_message(uint32_t kind);
 /* CR0b bootstrap 5: 모든 AppSession teardown 뒤 app-global remote backend/pool/client를 정산한다.
    0=inactive, 1=settled. incident owner shutdown보다 반드시 먼저 호출한다. */
 uint32_t maru_macos_remote_backend_settle(void);
+/* CR6e-c3c: process-global reconnect owner를 Window 순회 전 timer turn당 정확히 한 번 전진한다. */
+uint32_t maru_macos_reconnect_product_tick(void);
+/* CR6e-c3c: runtime graph teardown 전에 worker와 CR5/admission authority를 정산한다. */
+uint32_t maru_macos_reconnect_product_shutdown(void);
+typedef struct MaruReconnectProductSmokeProbe {
+    uint32_t coordinator_ready;
+    uint32_t worker_state_raw;
+    uint32_t active_jobs;
+    uint32_t job_receipt_present;
+    uint32_t completion_receipt_present;
+    uint32_t cr5_job_present;
+    uint32_t cr5_preparing;
+    uint32_t cr5_state_raw;
+    uint32_t runtime_count;
+    uint32_t admission_count;
+    uint32_t resident_entries;
+} MaruReconnectProductSmokeProbe;
+int32_t maru_macos_reconnect_product_smoke_probe(MaruReconnectProductSmokeProbe *out_probe);
 /* CR0b: all AppSession/backend settlement 뒤 app-global incident writer를 exact once 정산한다.
    0=inactive, 1=joined, 2=detached, 3=degraded. */
 uint32_t maru_macos_incident_owner_shutdown(void);
@@ -782,6 +800,13 @@ typedef struct MaruAppHostRecoveredSessionSmokeProbe {
     uint32_t active_remote;
     uint32_t marker_present;
     uint32_t async_wake_marker_present;
+    uint32_t c3c_historical_count;
+    uint32_t c3c_disconnect_after_count;
+    uint32_t c3c_input_count;
+    uint32_t c3c_sibling_live;
+    uint32_t c3c_sibling_controller;
+    uint32_t cols;
+    uint32_t rows;
     uint32_t keep_alive_enabled;
     uint32_t discovered_candidates;
     uint32_t ready_adapters;

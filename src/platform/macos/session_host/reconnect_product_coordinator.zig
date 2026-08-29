@@ -17,6 +17,14 @@ pub const PollResult = enum(u8) { idle, connected_ready, logical_completion_read
 pub const AdmissionResult = enum(u8) { idle, admitted, coalesced, retry_later, discarded_stale };
 pub const ConnectedSettlement = enum(u8) { adopted, retry_later };
 pub const ConnectedProgress = enum(u8) { advanced, retry_later, completed, retained_terminal };
+pub const TurnResult = enum(u8) { idle, progressed };
+pub const Snapshot = struct {
+    ready: bool,
+    worker_state_raw: u8,
+    active_jobs: usize,
+    job_receipt_present: bool,
+    completion_receipt_present: bool,
+};
 
 pub const Coordinator = struct {
     self_addr: usize = 0,
@@ -49,6 +57,75 @@ pub const Coordinator = struct {
         errdefer self.jobs.deinit() catch unreachable;
         try self.worker.initInPlace(allocator, io, cache_base);
         self.ready = true;
+    }
+
+    pub fn ensureReady(
+        self: *Coordinator,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        cache_base: []const u8,
+        process_nonce: u64,
+    ) !void {
+        if (!self.ready) return self.initInPlace(allocator, io, cache_base, process_nonce);
+        try self.validate();
+        if (self.jobs.process_nonce != process_nonce or
+            self.worker.cache_base_len != cache_base.len or
+            !std.mem.eql(u8, self.worker.cache_base[0..self.worker.cache_base_len], cache_base))
+            return error.InvalidCoordinator;
+    }
+
+    pub fn diagnosticSnapshot(self: *Coordinator) !Snapshot {
+        if (!self.ready) return .{
+            .ready = false,
+            .worker_state_raw = @intFromEnum(worker_mod.State.pristine),
+            .active_jobs = 0,
+            .job_receipt_present = false,
+            .completion_receipt_present = false,
+        };
+        try self.validate();
+        return .{
+            .ready = true,
+            .worker_state_raw = @intFromEnum(try self.worker.stateSnapshot()),
+            .active_jobs = try self.jobs.activeCount(),
+            .job_receipt_present = !std.meta.eql(self.job_receipt, owner_mod.JobReceipt{}),
+            .completion_receipt_present = !std.meta.eql(self.completion_receipt, owner_mod.CompletionReceipt{}),
+        };
+    }
+
+    /// One app-global frame turn. The caller invokes this once before iterating Window sessions;
+    /// every leaf is bounded to one claim/state/admission/dispatch and no leaf waits for I/O.
+    pub fn turnOne(
+        self: *Coordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        admissions: *admission_mod.Owner,
+        budget: *budget_mod.ReconnectAdmissionBudget,
+        absolute_deadline_ns: u64,
+    ) !TurnResult {
+        try self.validate();
+        var progressed = false;
+        switch (try self.pollCompletion()) {
+            .idle => {},
+            .logical_completion_ready => {
+                if ((try self.logicalCompletion()).outcome != .connected) {
+                    _ = try self.settleLogicalCompletion(backend, budget);
+                    progressed = true;
+                }
+            },
+            .connected_ready => {
+                _ = try self.settleConnectedCompletion(backend, budget);
+                progressed = true;
+            },
+        }
+        if (!std.meta.eql(self.completion_receipt, owner_mod.CompletionReceipt{}) and
+            self.completion_receipt.outcome == .connected)
+        {
+            _ = try self.progressConnectedOne(backend, budget);
+            progressed = true;
+        }
+        if (try self.admitOne(backend, admissions, budget, absolute_deadline_ns) != .idle)
+            progressed = true;
+        if (try self.dispatchOne()) progressed = true;
+        return if (progressed) .progressed else .idle;
     }
 
     pub fn admit(self: *Coordinator, snapshot: owner_mod.Snapshot) !owner_mod.AdmitResult {
@@ -308,6 +385,56 @@ pub const Coordinator = struct {
         try self.worker.deinit();
         try self.jobs.deinit();
         self.* = .{};
+    }
+
+    /// Product Quit variant. Every c1 slot admitted by `admitOne` has a bound backend lease, so
+    /// cancellation must settle that authority before the generic owners can be destroyed.
+    pub fn shutdownProductAndDeinit(
+        self: *Coordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        budget: *budget_mod.ReconnectAdmissionBudget,
+    ) !void {
+        try self.validate();
+        try backend.validateReconnectCoordinatorTarget();
+        try self.jobs.requestCancelAll();
+        if (try self.worker.stateSnapshot() == .claimed) {
+            if (!sameOrder(self.worker.completion.order, self.job_receipt))
+                return error.StaleCompletion;
+            try self.worker.completion.abandon();
+            try self.finishClaimedPhysical(.cancelled);
+        }
+        try self.worker.requestShutdown();
+        try self.worker.join();
+        if (try self.worker.claimCompletion()) |completion| {
+            if (!sameOrder(completion.order, self.job_receipt)) return error.StaleCompletion;
+            try completion.abandon();
+            try self.finishClaimedPhysical(.cancelled);
+        }
+        if (!std.meta.eql(self.completion_receipt, owner_mod.CompletionReceipt{}))
+            try self.settleProductShutdownCompletion(backend, budget);
+        while (true) {
+            self.jobs.takeCompletion(&self.completion_receipt) catch |err| switch (err) {
+                error.NotFound => break,
+                else => return err,
+            };
+            try self.settleProductShutdownCompletion(backend, budget);
+        }
+        try self.worker.deinit();
+        try self.jobs.deinit();
+        self.* = .{};
+    }
+
+    fn settleProductShutdownCompletion(
+        self: *Coordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        budget: *budget_mod.ReconnectAdmissionBudget,
+    ) !void {
+        const completion = try self.logicalCompletion();
+        try backend.preflightBoundReconnectSnapshotSettlement(completion.snapshot, budget);
+        if (completion.outcome == .connected)
+            backend.cancelHostReconnectForProcessShutdownNoFail();
+        backend.settleBoundReconnectSnapshotNoFail(completion.snapshot, budget);
+        try self.consumeLogicalCompletion();
     }
 
     fn finishClaimedPhysical(self: *Coordinator, outcome: owner_mod.Outcome) !void {
@@ -571,6 +698,123 @@ fn actualReconnectCoordinatorHook(
         return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
     try std.testing.expectError(error.NotFound, coordinator.logicalCompletion());
+}
+
+test "CR6e-c3c app-global turn drives an actual daemon candidate to terminal settlement" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try backend_mod.RemoteTermBackend.testing_api.runActualReconnectCoordinatorFixture(
+        actualProductTurnHook,
+    );
+}
+
+fn actualProductTurnHook(
+    backend: *backend_mod.RemoteTermBackend,
+    fixture: backend_mod.RemoteTermBackend.testing_api.ActualReconnectFixture,
+) !void {
+    const host_adapter = @import("host_adapter.zig");
+    try host_adapter.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var admissions: admission_mod.Owner = .{};
+    try admissions.initInPlace(identity.process_nonce);
+    var budget: budget_mod.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    defer budget.deinit() catch @panic("c3c actual turn budget leak");
+    var coordinator: Coordinator = .{};
+    try coordinator.initInPlace(
+        std.testing.allocator,
+        std.testing.io,
+        fixture.cache_base,
+        identity.process_nonce,
+    );
+    defer if (coordinator.ready)
+        coordinator.shutdownProductAndDeinit(backend, &budget) catch
+            @panic("c3c actual turn coordinator shutdown failed");
+    try admitFixture(
+        &admissions,
+        fixture.host_id,
+        fixture.host_adapter_generation,
+        fixture.connection_generation,
+        1,
+    );
+    var completed = false;
+    for (0..100_000) |_| {
+        _ = try coordinator.turnOne(
+            backend,
+            &admissions,
+            &budget,
+            std.math.maxInt(u64),
+        );
+        if ((try budget.snapshot()).live_entries == 0 and
+            try coordinator.jobs.activeCount() == 0)
+        {
+            completed = true;
+            break;
+        }
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(completed);
+    try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
+    try coordinator.shutdownProductAndDeinit(backend, &budget);
+}
+
+test "CR6e-c3c Quit cancels an actual mid-CR5 job before releasing its admission" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try backend_mod.RemoteTermBackend.testing_api.runActualReconnectCoordinatorFixture(
+        actualProductQuitHook,
+    );
+}
+
+fn actualProductQuitHook(
+    backend: *backend_mod.RemoteTermBackend,
+    fixture: backend_mod.RemoteTermBackend.testing_api.ActualReconnectFixture,
+) !void {
+    const host_adapter = @import("host_adapter.zig");
+    try host_adapter.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var admissions: admission_mod.Owner = .{};
+    try admissions.initInPlace(identity.process_nonce);
+    var budget: budget_mod.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    defer budget.deinit() catch @panic("c3c actual Quit budget leak");
+    var coordinator: Coordinator = .{};
+    try coordinator.initInPlace(
+        std.testing.allocator,
+        std.testing.io,
+        fixture.cache_base,
+        identity.process_nonce,
+    );
+    try admitFixture(
+        &admissions,
+        fixture.host_id,
+        fixture.host_adapter_generation,
+        fixture.connection_generation,
+        1,
+    );
+    try std.testing.expectEqual(
+        AdmissionResult.admitted,
+        try coordinator.admitOne(backend, &admissions, &budget, std.math.maxInt(u64)),
+    );
+    try std.testing.expect(try coordinator.dispatchOne());
+    var poll: PollResult = .idle;
+    for (0..100_000) |_| {
+        poll = try coordinator.pollCompletion();
+        if (poll != .idle) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(PollResult.connected_ready, poll);
+    try std.testing.expectEqual(
+        ConnectedSettlement.adopted,
+        try coordinator.settleConnectedCompletion(backend, &budget),
+    );
+    try std.testing.expectEqual(
+        ConnectedProgress.advanced,
+        try coordinator.progressConnectedOne(backend, &budget),
+    );
+    try coordinator.shutdownProductAndDeinit(backend, &budget);
+    try std.testing.expect(!coordinator.ready);
+    try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
 }
 
 fn admitFixture(

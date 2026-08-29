@@ -2714,6 +2714,84 @@ pub fn build(b: *std.Build) void {
         session_host_cr6e_recovery_step.dependOn(&run_session_host_cr6e_recovery_validator.step);
         session_host_cr6e_recovery_step.dependOn(&run_session_host_cr6e_recovery_validator_tests.step);
 
+        const session_host_cr6e_c3c_appkit_step = b.step(
+            "macos-session-host-cr6e-c3c-appkit",
+            "Run the CR6e-c3c actual-AppKit automatic reconnect product gate",
+        );
+        const session_host_cr6e_c3c_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-cr6e-c3c-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\" tests/artifacts/session-host; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
+                "rm -f zig-out/maru-macos-app/app.summary.txt " ++
+                "tests/artifacts/session-host/cr6e-c3c-appkit.json",
+        });
+        session_host_cr6e_c3c_fixture.setCwd(b.path("."));
+        const run_session_host_cr6e_c3c = b.addRunArtifact(session_host_cr6e_recovery_harness);
+        run_session_host_cr6e_c3c.setCwd(b.path("."));
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6E_C3C_AUTO_RECONNECT_ARTIFACT",
+            b.pathFromRoot("tests/artifacts/session-host/cr6e-c3c-appkit.json"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
+        run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "CFFIXED_USER_HOME",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home/.config/maru/config"),
+        );
+        run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6e_c3c.step.dependOn(&macos_app_bundle.step);
+        run_session_host_cr6e_c3c.step.dependOn(&file_panel_web_build.step);
+        run_session_host_cr6e_c3c.step.dependOn(&session_host_cr6e_c3c_fixture.step);
+        const session_host_cr6e_c3c_validator = b.addExecutable(.{
+            .name = "maru-session-host-cr6e-c3c-validator",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const session_host_cr6e_c3c_validator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_validator.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+            }),
+        });
+        const run_session_host_cr6e_c3c_validator_tests = b.addRunArtifact(
+            session_host_cr6e_c3c_validator_tests,
+        );
+        run_session_host_cr6e_c3c_validator_tests.addArg("--maru-expect-tests=2");
+        const run_session_host_cr6e_c3c_validator = b.addRunArtifact(session_host_cr6e_c3c_validator);
+        run_session_host_cr6e_c3c_validator.addArg(
+            "tests/artifacts/session-host/cr6e-c3c-appkit.json",
+        );
+        run_session_host_cr6e_c3c_validator.setCwd(b.path("."));
+        run_session_host_cr6e_c3c_validator.step.dependOn(&run_session_host_cr6e_c3c.step);
+        session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c_validator.step);
+        session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c_validator_tests.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -4915,6 +4993,40 @@ pub fn build(b: *std.Build) void {
         session_host_cr6e_c3b_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
         boundary_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
     }
+    const session_host_cr6e_c3c_step = b.step(
+        "test-session-host-cr6e-c3c",
+        "Verify the CR6e-c3c app-global frame and termination wiring",
+    );
+    session_host_cr6e_c3c_step.dependOn(session_host_cr6e_c3b_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6e_c3c_optimize| {
+        const cr6e_c3c_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_product_coordinator.zig"),
+                .target = target,
+                .optimize = cr6e_c3c_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6e-c3c"},
+        });
+        const run_cr6e_c3c_tests = b.addRunArtifact(cr6e_c3c_tests);
+        run_cr6e_c3c_tests.addArg("--maru-expect-tests=4");
+        session_host_cr6e_c3c_step.dependOn(&run_cr6e_c3c_tests.step);
+
+        const cr6e_c3c_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_cr6e_c3c_boundary.zig"),
+                .target = target,
+                .optimize = cr6e_c3c_optimize,
+            }),
+            .filters = &.{"CR6e-c3c boundary"},
+        });
+        const run_cr6e_c3c_boundary_tests = b.addRunArtifact(cr6e_c3c_boundary_tests);
+        run_cr6e_c3c_boundary_tests.addArg("--maru-expect-tests=1");
+        run_cr6e_c3c_boundary_tests.setCwd(b.path("."));
+        session_host_cr6e_c3c_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
+        boundary_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
+    }
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
 
@@ -6959,6 +7071,23 @@ pub fn build(b: *std.Build) void {
         run_cr3b_r2b_client_slot_tests.setCwd(b.path("."));
         session_host_cr3b_r2b_step.dependOn(&run_cr3b_r2b_client_slot_tests.step);
 
+        const cr3b_r2b_stateless_allocator_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
+                .target = target,
+                .optimize = cr3b_r2b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3b R2b cleanup receipt는 stateless allocator의 zero context를"},
+        });
+        const run_cr3b_r2b_stateless_allocator_tests = b.addRunArtifact(
+            cr3b_r2b_stateless_allocator_tests,
+        );
+        run_cr3b_r2b_stateless_allocator_tests.addArg("--maru-expect-tests=1");
+        run_cr3b_r2b_stateless_allocator_tests.setCwd(b.path("."));
+        session_host_cr3b_r2b_step.dependOn(&run_cr3b_r2b_stateless_allocator_tests.step);
+
         const cr3b_r2b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_cr3b_r2b_boundary.zig"),
@@ -7711,6 +7840,21 @@ pub fn build(b: *std.Build) void {
     );
     session_host_cr5b2a_step.dependOn(session_host_cr5b1_step);
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b2a_optimize| {
+        const cr5b2a_screen_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/stable_screen_source.zig"),
+                .target = target,
+                .optimize = cr5b2a_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR5b prepared unavailable 예약은"},
+        });
+        const run_cr5b2a_screen_tests = b.addRunArtifact(cr5b2a_screen_tests);
+        run_cr5b2a_screen_tests.addArg("--maru-expect-tests=1");
+        run_cr5b2a_screen_tests.setCwd(b.path("."));
+        session_host_cr5b2a_step.dependOn(&run_cr5b2a_screen_tests.step);
+
         const cr5b2a_backend_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
@@ -8912,8 +9056,8 @@ pub fn build(b: *std.Build) void {
         const run_event_c3_3b4_actual_host = B3SettlementTest.addRun(
             b,
             session_host_2c3d_c3_3b4_step,
-            event_c3_3b4_backend_module,
-            "C3-3b4 remote backend는 실제 host runtime을 TermRuntimeBackend 계약으로 구동한다",
+            event_c3_3b4_runtime_module,
+            "remote runtime: spawns over the wire, renders host screen into a Surface, and reflects input via delta",
             1,
         );
         run_event_c3_3b4_actual_host.dependOn(previous_actual_host_run.?);
@@ -8960,10 +9104,22 @@ pub fn build(b: *std.Build) void {
         session_host_2c3d_c3_3b4_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
         boundary_step.dependOn(&run_event_c3_3b4_boundary_tests.step);
 
+        const event_c3_3b6_screen_stream_module = b.createModule(.{
+            .root_source_file = b.path("src/session/screen_stream.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+        });
+        const event_c3_3b6_maru_root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_compatibility_maru_root.zig"),
+            .target = target,
+            .optimize = b3_optimize,
+            .imports = &.{.{ .name = "screen_stream", .module = event_c3_3b6_screen_stream_module }},
+        });
         const event_c3_3b6_compatibility_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/compatibility.zig"),
             .target = target,
             .optimize = b3_optimize,
+            .imports = &.{.{ .name = "maru", .module = event_c3_3b6_maru_root_module }},
         });
         const event_c3_3b6_contract_module = b.createModule(.{
             .root_source_file = b.path("src/app/shutdown_contract.zig"),

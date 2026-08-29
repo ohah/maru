@@ -215,7 +215,7 @@ pub fn scroll(self: *AppSession, delta_up: i32) void {
     if (!self.surface_initialized or !term_ops.activeTermIsTerminal(self)) return;
     const surface = term_ops.activeSurface(self);
     // scrollViewport는 코어 mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
-    self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, delta_up) }, self.io) catch {};
+    self.enqueueCoreCommandForSurface(surface.id, .{ .scroll = @as(isize, delta_up) }) catch {};
     self.metal_dirty = true;
 }
 
@@ -470,7 +470,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
             if (self.pxToCellIn(target, rect, x_px, y_px)) |cell| {
                 const wb: u8 = if (lines > 0) 64 else 65;
                 var n: i32 = if (lines > 0) lines else -lines;
-                while (n > 0) : (n -= 1) self.runtime.enqueueCoreCommand(target.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }, self.io) catch {};
+                while (n > 0) : (n -= 1) self.enqueueCoreCommandForSurface(target.id, .{ .report_mouse = .{ .button = wb, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = false, .mods = 0 } }) catch {};
             }
         }
     } else if (!editor_owned) {
@@ -569,7 +569,7 @@ pub fn scrollSurfaceLines(self: *AppSession, surface: *maru.session.Surface, lin
         return;
     }
     // non-alt: scrollViewport를 reader에 위임.
-    self.runtime.enqueueCoreCommand(surface.id, .{ .scroll = @as(isize, lines) }, self.io) catch {};
+    self.enqueueCoreCommandForSurface(surface.id, .{ .scroll = @as(isize, lines) }) catch {};
     self.metal_dirty = true;
 }
 
@@ -616,7 +616,7 @@ pub fn applyDragAutoscroll(self: *AppSession) void {
     // scroll+extend는 full (a)(docs/plans/io-render-threading.md §9 P3-4)로 reader에 위임 — **kind-2 드래그 extend와
     // 같은 명령 큐를 타 순서 보존**(둘이 다른 스레드면 선택이 어긋날 수 있다). 원래의 "변화 시만 재투영" 최적화는
     // reader 렌더 트리거로 대체한다(스크롤백 끝에서 포인터를 grid 밖에 둘 때 cheap render tick 몇 개 — §9 trade-off).
-    self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_and_extend = .{ .delta = @as(isize, self.drag_autoscroll), .row = row, .col = self.last_drag_col } }, self.io) catch {};
+    self.enqueueCoreCommandForSurface(surface.id, .{ .scroll_and_extend = .{ .delta = @as(isize, self.drag_autoscroll), .row = row, .col = self.last_drag_col } }) catch {};
 }
 
 pub fn scrollPage(self: *AppSession, delta_pages: i32) void {
@@ -851,7 +851,7 @@ pub fn dragScrollbarTo(self: *AppSession, y_px: f64) void {
     // 절대 목표를 reader에 위임(scroll_to_offset) — reader가 적용 시점의 fresh view_offset에서 delta 계산
     // (메인이 delta를 미리 빼면 연속 드래그가 옛 base로 double-count돼 어긋남).
     if (target != snap.view_offset) {
-        self.runtime.enqueueCoreCommand(surface.id, .{ .scroll_to_offset = target }, self.io) catch {};
+        self.enqueueCoreCommandForSurface(surface.id, .{ .scroll_to_offset = target }) catch {};
         self.metal_dirty = true;
     }
 }

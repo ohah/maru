@@ -53,7 +53,7 @@ pub const RunError = socket_server.BindError || error{
 /// ReleaseFast process fixture 전용 private observation seam. 제품 protocol/capability를
 /// 넓히지 않고 actual owner turn 뒤 canonical ledger/stall과 PTY reader bytes를 전달한다.
 /// callback action이 reset 또는 stop을 요청할 수 있으며 stop은 loop를 정상 종료한다.
-pub const FixtureAction = enum { continue_serving, reset_stall, stop };
+pub const FixtureAction = enum { continue_serving, reset_stall, disconnect_clients, stop };
 
 pub const FixtureProbe = struct {
     ctx: *anyopaque,
@@ -160,6 +160,23 @@ pub fn runSessionHostForFixture(
     probe: FixtureProbe,
 ) RunError!void {
     return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe, null, null);
+}
+
+/// Exact-identity counterpart used only by a separately linked process fixture. This preserves
+/// the product discovery/manifest/socket identity while the private callback supplies fault
+/// injection without adding a product protocol command or ambient daemon environment switch.
+pub fn runSessionHostWithIdentityForFixture(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+    probe: FixtureProbe,
+) RunError!void {
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, probe, null, null);
 }
 
 /// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
@@ -757,6 +774,7 @@ fn runSessionHostImpl(
             )) {
                 .continue_serving => {},
                 .reset_stall => fd_owner.resetFixtureStallTelemetry(),
+                .disconnect_clients => fd_owner.disconnect_fixture_clients(),
                 .stop => break,
             }
         }

@@ -2909,10 +2909,10 @@ pub fn refreshCellMetrics(self: *AppSession) void {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.kind != .terminal) continue;
-                    self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_cell_metrics = .{
+                    self.enqueueCoreCommandForTerm(term, .{ .set_cell_metrics = .{
                         .width = self.cell_width_px,
                         .height = self.cell_height_px,
-                    } }, self.io) catch {};
+                    } }) catch {};
                 }
             }
         }

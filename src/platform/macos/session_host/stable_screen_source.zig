@@ -281,9 +281,10 @@ pub const StableScreenSource = struct {
         return .{ .source = retired.source, .generation = retired.generation, .kind = retired.kind };
     }
 
-    /// CR5 host-wide preparation keeps the writer gate across sibling preflights. This freezes the
-    /// exact live target without changing what readers see; abort releases the gate unchanged and
-    /// commit is a store-only suffix after every sibling attachment has been prepared.
+    /// CR5 host-wide preparation records a logical reservation while briefly holding the writer
+    /// gate. It must release the gate before returning because CR5 advances one state per AppKit
+    /// frame and ordinary readers must run before the later commit turn. Commit reacquires the gate
+    /// and revalidates the exact live target before its no-fail publication suffix.
     pub fn prepareUnavailableFromLive(
         self: *StableScreenSource,
         expected_generation: u64,
@@ -296,7 +297,7 @@ pub const StableScreenSource = struct {
             self.prepared_expected_generation != 0 or self.prepared_next_generation != 0)
             return error.InvalidOwner;
         try self.beginWriter();
-        errdefer self.endWriter();
+        defer self.endWriter();
         if (self.lifecycle != .ready) return error.Closed;
         if (self.current.kind != .live or self.current.generation != expected_generation)
             return error.InvalidGeneration;
@@ -315,7 +316,6 @@ pub const StableScreenSource = struct {
         transaction_generation: u64,
     ) bool {
         return self.validOwner() and self.lifecycle == .ready and
-            self.writer_pending.load(.acquire) and self.pinned_target == null and
             self.current.kind == .live and self.current.generation == expected_generation and
             self.prepared_transaction_addr == transaction_addr and
             self.prepared_transaction_generation == transaction_generation and
@@ -335,7 +335,6 @@ pub const StableScreenSource = struct {
             transaction_generation,
         )) return error.InvalidOwner;
         self.clearPreparedUnavailable();
-        self.endWriter();
     }
 
     pub fn commitPreparedUnavailableNoFail(
@@ -343,6 +342,8 @@ pub const StableScreenSource = struct {
         transaction_addr: usize,
         transaction_generation: u64,
     ) void {
+        self.beginWriter() catch @panic("CR5b prepared screen lost writer authority before commit");
+        defer self.endWriter();
         if (!self.preparedUnavailableExact(
             self.prepared_expected_generation,
             self.prepared_next_generation,
@@ -355,7 +356,6 @@ pub const StableScreenSource = struct {
             .kind = .unavailable,
         };
         self.clearPreparedUnavailable();
-        self.endWriter();
     }
 
     pub fn unavailableExact(self: *const StableScreenSource, generation: u64) bool {
@@ -723,6 +723,32 @@ test "CR2b stable proxy는 writer pending 뒤 새 reader를 막고 기존 borrow
     try std.testing.expectEqual(@as(usize, 1), old.unlocks.load(.acquire));
     _ = try proxy.close();
     proxy.deinit();
+}
+
+test "CR5b prepared unavailable 예약은 frame 사이 reader gate를 붙잡지 않는다" {
+    var live = FakeTarget.init('L');
+    var proxy: StableScreenSource = undefined;
+    try proxy.initLiveInPlace(
+        std.testing.allocator,
+        std.testing.io,
+        .{ .cols = 2, .rows = 1 },
+        live.source(),
+    );
+    defer {
+        _ = proxy.close() catch @panic("CR5b reservation fixture cleanup lost owner");
+        proxy.deinit();
+    }
+
+    try proxy.prepareUnavailableFromLive(1, 2, @intFromPtr(&proxy), 1);
+    // CR5 progresses one closed-state transition per AppKit frame. Preparation must therefore
+    // reserve authority without retaining the writer gate into the next frame; otherwise the
+    // ordinary clipboard/render snapshot read self-deadlocks before the coordinator can commit.
+    try std.testing.expect(!proxy.writer_pending.load(.acquire));
+    try proxy.tryLock(std.testing.io);
+    const snapshot = proxy.screenSource().vtable.render_snapshot(&proxy);
+    try std.testing.expectEqual(@as(u32, 'L'), snapshot.cells[0].codepoint);
+    proxy.unlockPinned(std.testing.io);
+    try proxy.abortPreparedUnavailable(@intFromPtr(&proxy), 1);
 }
 
 test "CR3b R2a stable proxy reader는 tombstone callback 중간 상태를 관측하지 않는다" {

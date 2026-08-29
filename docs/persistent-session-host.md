@@ -1046,7 +1046,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `HostAdapter.ClientSlot`은 모든 captured runtime attachment가 공유하므로, 첫 runtime에서 shared Client를 retire하면 아직
    terminalize되지 않은 sibling attachment가 그 Client를 참조하게 된다. `HostReconnectJob`은 먼저 모든 행의 exact runtime,
    generation, attachment, stable-screen live target과 unavailable next generation에 대한 allocation-free prepared authority를
-   final address에 결속한다. k번째 prepare가 Busy/corrupt/drift이면 앞선 prepared authority만 취소하고 runtime screen,
+   final address에 결속한다. stable-screen 준비 receipt는 writer gate를 frame 사이에 보유하지 않으며, commit owner가 같은
+   frame의 destructive suffix 직전에 gate를 다시 얻어 exact live target과 receipt를 재검증한다. frame당 한 closed-state만
+   전진하는 coordinator에서 준비 gate를 다음 turn까지 보유하면 ordinary render/clipboard reader가 막혀 commit turn에 도달할
+   수 없기 때문이다. k번째 prepare가 Busy/corrupt/drift이면 앞선 prepared authority만 취소하고 runtime screen,
    attachment, shared Client, ledger mutation은 0이다. 전 행이 준비된 뒤에만 owner turn 하나가 각 attachment와 stable-screen을
    no-fail unavailable suffix로 전환하고, 마지막 runtime까지 전환된 뒤 shared Client retirement와 same-adapter replacement를
    exact 한 번 수행한다. 이 suffix에 들어간 뒤 recoverable rollback은 없으며 proof drift는 common proof-loss fail-stop이다.
@@ -1056,6 +1059,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    receipt와 replacement node backing·node incarnation을 exact 한 번 예약한다. 이때 fresh Client는 여전히 job이 소유하며,
    예약된 node는 Client payload를 갖지 않는 final-address `reserved` 상태다. 어느 준비가 실패해도 node와 reservation을
    취소하고 fresh Client, old Client, runtime attachment/screen을 원상태로 보존한다. 모든 준비가 끝난 뒤 commit owner turn은
+   cleanup receipt의 allocator identity는 `{context pointer, vtable}` 쌍이며 stateless allocator의 context pointer `0`도
+   유효하다. pointer 단독 nonzero를 권위 조건으로 쓰지 않고 vtable과 sealed pair로 검증한다.
    `(1) 전 runtime prepared authority 재검증`, `(2) 전 attachment terminalize와 stable-screen unavailable 게시`,
    `(3) shared admission close와 old Client retirement/cleanup exact 한 번`, `(4) fresh Client를 예약 node로 no-fail move`,
    `(5) 같은 adapter의 ClientSlot replacement exact 한 번` 순서만 수행한다. node allocation, identity 발급, allocator callback,
@@ -6052,6 +6057,61 @@ completion/admission/resident lease final 0을 제품 gate가 검증한다. c3b1
 retained completion과 idle/running Quit 상태만 닫으며 AppSession caller와 admission/CR5 publication은 c3b2가 소유한다.
 c3b 전체는 제품 배선과 synthetic actual-socket fixture까지
 닫지만 실제 AppKit process의 disconnect→자동복구는 c3c가 별도로 증명한다.
+
+**CR6e-c3c AppKit 제품 turn과 종료 배선 경계:** app-global reconnect coordinator는 Window나
+`AppSession.tick()`의 수명에 종속되지 않는다. `MaruAppHost.tickAppSession()`이 일반 Window·quick surface를 순회하기
+전에 process-global ABI를 정확히 한 번 호출하며, 따라서 Window 수와 무관하게 한 NSTimer turn의 순서는 아래 하나다.
+
+```mermaid
+flowchart TD
+    A[completion 최대 하나 claim] --> B[logical 또는 connected completion 정산]
+    B --> C[진행 중 CR5 job closed state 최대 한 단계]
+    C --> D[reconnect admission 최대 하나 예약]
+    D --> E[idle worker에 queued job 최대 하나 dispatch]
+    E --> F[Window와 quick AppSession 순회]
+```
+
+frame ABI는 connect·hello·backoff·join을 실행하지 않고, 새 reconnect deadline을 정의하지도 않는다. 새 admission은
+`attach_phase_deadline.budget_ns`의 5초 absolute deadline을 overflow 검사해 한 번 만들며 coalesce·worker·retry는 그
+scalar를 연장하지 않는다. coordinator가 pristine이거나 keep-alive backend/incident publisher가 아직 없으면 무동작이고,
+partial bootstrap·foreign thread·owner 주소 drift는 runtime/backend/admission mutation 전에 fail-closed한다.
+연결 단절 후 CR5가 대체 generation을 게시하기 전의 전환 구간에는 current attachment의
+screen이 없을 수 있다. 이때 `dumpRecentText` 같은 읽기 facade는 nullable screen을 강제 역참조하지
+않고 `ConnectionClosed`를 반환한다. AppKit probe는 이 결과를 "아직 재접속 화면이 아님"으로
+처리하며, 전환 중 한 frame의 관측이 앱 종료나 성공 판정이 되지 않는다.
+
+App Quit에서는 frame timer를 멈춘 직후 `maru_macos_reconnect_product_shutdown()`이 새 admission을 닫고 queued cancel →
+worker cancellation wake → 기존 absolute deadline 이내 반환/join → final-address completion abandon → 진행 중 CR5 job
+취소/정산 → logical job/admission/resident lease 정산을 끝낸다. 이때 runtime graph가 아직 살아 있어야 CR5의 staged
+retirement/controller 권위를 안전하게 되돌릴 수 있다. 그 뒤 모든 `AppSession` runtime을 제거하고,
+`maru_macos_remote_backend_settle()`이 backend/HostPool/client를 해제한 다음 마지막으로 incident owner를 revoke한다.
+ordinary Window close에는 이 process-global shutdown ABI caller가 없고, shutdown 뒤 frame callback도 없다.
+
+c3c actual AppKit gate는 keep-alive opt-in의 일반 제품 launch와 frame ABI만 사용한다. 실제 host socket 단절 뒤 같은
+host/runtime/child PID와 단절 전후 누적 output, input/copy/resize, sibling runtime/controller 권위, frame blocking operation 0,
+그리고 App Quit 뒤 worker/fd/client/job/completion/admission/resident lease final 0을 strict artifact로 판정한다. 직접
+coordinator·candidate adoption·test-only release를 호출하거나 기본값/G3 migration을 바꾸는 fixture는 성공 증거가 아니다.
+
+artifact schema는 `maru.session-host-cr6e-c3c-appkit.v1`이며 unknown/duplicate/missing field를 모두
+거부한다. identity는 before/after의 canonical 32-hex host/runtime ID와 positive host/child PID를 각각
+싣고 exact equality를 요구한다. continuity는 historical-before 마커와 disconnect-after 마커가
+둘 다 최종 화면에 정확히 한 번, 실제 key input·copy action·resize가 각각 정확히 한 번
+관찰되어야 한다. sibling은 별도 runtime ID, 단절 전후 live, controller 권위 불변을
+싣는다. frame blocking operation 0은 reconnect main-owner turn의 connect/hello/backoff/wait/join 호출 0을 source
+boundary로 고정하고 artifact에 `blocking_operations=0`을 싣어 판정한다. 단일 turn의
+`max_elapsed_ns`도 실측하지만, [성능 예산](performance-budget.md)에 snapshot→submit 전체 frame
+예산이 아직 없으므로 16ms를 즉석 hard gate로 만들지 않는다. wall-clock 표본은 OS
+스케줄링을 포함하므로 blocking 호출 존재의 대체 oracle가 아니다. cleanup은 App Quit 직후 coordinator worker/job/
+completion/CR5/admission/resident/backend runtime/client/fd가 전부 0이고, harness daemon reap 뒤 fd는
+baseline과 같고 child 0, socket/host artifact 제거를 요구한다. 성공 상태를 shell grep로
+재구성하지 않고 독립 Zig validator가 strict JSON을 유일하게 판정한다.
+
+AppSession에서 발생하는 모든 terminal `CoreCommand`는 exact `Term`의 `backendFor(term)`를 통해 전송한다.
+host-backed Term의 `surface.core`는 렌더 projection일 뿐이므로 `self.runtime.enqueueCoreCommand(surface.id, ...)`로
+보내면 로컬 placeholder만 바뀌고 host 권위 core는 바뀌지 않는다. `enqueueCoreCommandForTerm`과
+`enqueueCoreCommandForSurface`가 이 라우팅의 단일 경계이며 scroll/focus/mouse/selection/find/config/reset 명령도
+select-all/clear-screen과 같은 경계를 탄다. source boundary는 이 helper의 active local O(1) fallback 하나를 제외한
+제품 경로의 직접 in-process enqueue를 0으로 고정한다.
 
 c3b2 제품 배선은 권위 예약과 CR5 publication을 한 mutation으로 섞지 않고 두 수직 슬라이스로 닫는다.
 **c3b2a**에서 main coordinator는 final-address c1 `Owner`·`JobReceipt`와 c3b1 worker를 앱 전역으로

@@ -2105,10 +2105,10 @@ pub fn reapplyConfigPalette(self: *AppSession) void {
                 // Phase 3 위임(docs/plans/io-render-threading.md §9 P3-3): config 재적용도 메인이 직접 mutate 안 하고
                 // reader로 위임한다(interactive면 큐, 아니면 enqueueCoreCommand 내부 직접 폴백). reload는 attach 후라
                 // 링크 존재(없으면 UnknownSurface로 스킵 — best-effort).
-                self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_config_palette = palette }, self.io) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_config_palette = palette }) catch {};
                 // OSC 10/11 query의 default fg/bg도 renderer theme와 같은 값을 보게 한다. buildFrame의 direct
                 // setDefaultColors는 local render 안전망이고 remote placeholder에는 host 효과가 없으므로 이 경계가 필요하다.
-                self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_default_colors = default_colors }, self.io) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_default_colors = default_colors }) catch {};
             }
         }
     }
@@ -2123,7 +2123,7 @@ pub fn reapplyScrollback(self: *AppSession) void {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 // Phase 3 위임(P3-3): scrollback cap 재적용도 reader로 위임(config 재적용과 동일 — best-effort).
-                self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_max_scrollback = lines }, self.io) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_max_scrollback = lines }) catch {};
             }
         }
     }
@@ -2211,7 +2211,7 @@ pub fn reapplyAmbiguousWidth(self: *AppSession) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_ambiguous_wide = wide }, self.io) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_ambiguous_wide = wide }) catch {};
             }
         }
     }
@@ -2224,7 +2224,7 @@ pub fn reapplyEmojiWidth(self: *AppSession) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_emoji_wide = wide }, self.io) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_emoji_wide = wide }) catch {};
             }
         }
     }
@@ -2239,7 +2239,7 @@ pub fn reapplyDefaultCursorShape(self: *AppSession) void {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                self.runtime.enqueueCoreCommand(term.surface.id, .{ .set_default_cursor_shape = shape }, self.io) catch {};
+                self.enqueueCoreCommandForTerm(term, .{ .set_default_cursor_shape = shape }) catch {};
             }
         }
     }

@@ -718,6 +718,57 @@ pub const CellPipeline = struct {
 
 const testing = std.testing;
 
+/// **헤더 아래로 잘라 낸다** — 목록 셀이 헤더 위로 삐져나온 부분을 버린다(픽셀 단위).
+///
+/// 헤더를 맨 나중에 그리는 것만으로는 안 덮인다: 글리프 셀은 배경이 투명해서 **글자끼리 포개진다**
+/// (실측 캡처: 굴린 사이드바에서 `session 3` 이 `Search` 위에 겹쳐 보였다). macOS 렌더러는 같은
+/// 자리를 `[header_h, drawable_h]` scissor 로 자르는데, Windows 셀에는 clip 필드가 없다 — 그래서
+/// **낼 때 자른다**.
+///
+/// 반쯤 걸친 셀은 **지우지 않고 자른다**: 위 절반이 사라지고 아래 절반이 남는다. UV 도 같은 비율로
+/// 밀어야 글자가 늘어나 보이지 않는다(`v0` 를 자른 만큼 내린다).
+pub fn clipCellTop(c: Cell, min_y: f32) ?Cell {
+    const y = c.rect[1];
+    const h = c.rect[3];
+    if (y >= min_y) return c; // 온전히 아래 — 그대로
+    if (h <= 0 or y + h <= min_y) return null; // 통째로 헤더 위 — 버린다
+    const dy = min_y - y;
+    var out = c;
+    out.rect[1] = min_y;
+    out.rect[3] = h - dy;
+    // 아틀라스 UV 는 세로로 선형이다 — 자른 비율만큼 `v0` 를 내린다.
+    const v0 = c.uv[1];
+    const v1 = c.uv[3];
+    out.uv[1] = v0 + (v1 - v0) * (dy / h);
+    return out;
+}
+
+test "clipCellTop: 위를 자르면 UV 도 같은 비율로 내려간다" {
+    // 자른 만큼 `v0` 를 안 내리면 같은 글리프가 **줄어든 높이에 통째로** 그려져 세로로 눌린다 —
+    // 개수·자리 판정으로는 안 보이는 성질이라 여기서 값으로 고정한다.
+    const c: Cell = .{
+        .rect = .{ 10, 100, 8, 20 },
+        .uv = .{ 0.0, 0.0, 1.0, 1.0 },
+        .fg = .{ 1, 1, 1, 1 },
+        .bg = .{ 0, 0, 0, 0 },
+    };
+    // 온전히 아래 — 그대로 돌려준다.
+    try std.testing.expect(clipCellTop(c, 100).?.rect[1] == 100);
+    try std.testing.expect(clipCellTop(c, 90).?.uv[1] == 0.0);
+    // 반쯤 걸쳤다 — 위 5px 을 깎고 UV 는 1/4 만큼 내린다.
+    const cut = clipCellTop(c, 105).?;
+    try std.testing.expectEqual(@as(f32, 105), cut.rect[1]);
+    try std.testing.expectEqual(@as(f32, 15), cut.rect[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), cut.uv[1], 0.0001);
+    try std.testing.expectEqual(@as(f32, 1.0), cut.uv[3]); // 아래 끝은 그대로
+    // 통째로 위 — 버린다.
+    try std.testing.expect(clipCellTop(c, 121) == null);
+    try std.testing.expect(clipCellTop(c, 120) == null);
+    // 높이 0 은 버린다(0 으로 나누지 않는다).
+    const zero: Cell = .{ .rect = .{ 0, 0, 0, 0 }, .uv = .{ 0, 0, 1, 1 }, .fg = .{ 1, 1, 1, 1 }, .bg = .{ 0, 0, 0, 0 } };
+    try std.testing.expect(clipCellTop(zero, 1) == null);
+}
+
 test "colorFromArgb: 채널이 섞이지 않는다" {
     const c = colorFromArgb(0x80336699);
     try testing.expectApproxEqAbs(@as(f32, 0x33) / 255.0, c[0], 1e-6);

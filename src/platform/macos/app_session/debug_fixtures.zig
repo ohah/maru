@@ -76,6 +76,11 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         if (t.agent_image_source.set(path)) {
             dock_ops.openDockTo(self, .image_gallery);
             image_gallery_ops.refresh(self, true);
+            // MARU_FORCE_IMAGE_GALLERY_OPEN=<n> — 그 칸을 크게 연다. 실제 열기는 클릭이라 헤드리스로는
+            // 만들 수 없고(마우스가 없다), 스캔이 워커라 지금은 인덱스가 비어 있다 — 그래서 예약만 한다.
+            if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_OPEN")) |raw_n| {
+                self.debug_image_gallery_open = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
+            }
         }
     }
     if (std.c.getenv("MARU_FORCE_BLOCKED") != null) {

@@ -4957,6 +4957,9 @@ pub const AppSession = struct {
     // 시각 확인 디버그 훅: MARU_OPEN_SETTINGS env가 있으면 첫 frame에서 세팅 화면을 자동으로 연다(스크린샷
     // 하니스가 입력 없이 모달 상태를 캡처하게 — MARU_DEBUG와 같은 env-gate). env 미설정이면 무동작. 한 번만 연다.
     debug_settings_opened: bool = false,
+    /// MARU_FORCE_IMAGE_GALLERY_OPEN=<n> — 스캔이 끝나면 n 번째를 크게 연다. **첫 frame 에 열 수 없다** —
+    /// 스캔이 워커라 그때는 인덱스가 비어 있다. 그래서 값을 남겨 두고 `poll` 이 결과를 받은 tick 에 연다.
+    debug_image_gallery_open: ?usize = null,
     /// 캡처 전용 — `MARU_FORCE_TAB_COUNT` 이 탭을 이미 늘렸나(`applyForcedTabCount`, 한 번만).
     debug_tab_count_applied: bool = false,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.

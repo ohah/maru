@@ -255,6 +255,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "agent-hooks")) {
+        try runAgentHooks(io, allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "browser")) {
         try maru.cli.browser_run.run(io, allocator, &args, stdout, stderr);
         return;
@@ -10809,6 +10814,210 @@ fn runControl(
 ///
 /// 순수 절반(`cli/agent_events.zig`)이 인자·프레임·커서를 갖고, 여기서는 디렉터리 열거·파일 읽기·
 /// stdout 쓰기·시계만 한다. **stdout 은 오직 wire 다** — 진단은 전부 stderr 로 간다.
+/// `maru agent-hooks install|uninstall` — **이 기계의 provider 설정에 훅을 심고 뺀다**
+/// ([계획](../docs/plans/remote-agent-state.md) RA3).
+///
+/// 로컬 GUI 설치기(`app_session/agent.zig`)와 **같은 순수 판정**(`agent_hook_install`)을 쓰고, 다른 것은
+/// 둘뿐이다: ⑴ scope 가 `.remote` 라 훅 커맨드가 `LC_MARU_PANE` 을 읽는 평평한 경로를 쓰고, ⑵ 여기에는
+/// AppSession 이 없으므로 락과 파일 IO 를 이 함수가 직접 한다.
+///
+/// **codex 신뢰 항목은 손대지 않는다**([계약](../docs/agent-hooks.md) §11.5). 그 승인은 **그 기계에서
+/// 사용자가 한 번 눌러야** 하는 것이고(사용자 확인 2026-08-29: 수용), 우리가 대신 적으면 그 승인 절차를
+/// 우회하는 셈이다 — 남의 기계에서 조용히 할 일이 아니다.
+fn runAgentHooks(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: *std.process.Args.Iterator,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const ah = maru.cli.agent_hooks;
+    const install = maru.session.agent_hook_install;
+    const hook_command = maru.session.agent_hook_command;
+
+    var rest: std.ArrayList([]const u8) = .empty;
+    defer rest.deinit(allocator);
+    while (args.next()) |a| try rest.append(allocator, a);
+
+    const opts = switch (ah.parseArgs(rest.items)) {
+        .help => {
+            try stdout.writeAll(ah.usage);
+            try stdout.flush();
+            return;
+        },
+        .usage_error => {
+            try stderr.writeAll(ah.usage);
+            try stderr.flush();
+            std.process.exit(2);
+        },
+        .run => |o| o,
+    };
+
+    // 설정 디렉터리는 **로컬과 같은 규칙**으로 찾는다(환경 변수 우선, 빈 값은 «없음»).
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const env_c = std.c.getenv(install.configDirEnv(opts.provider));
+    const home_c = std.c.getenv("HOME");
+    const config_dir = install.configDir(
+        opts.provider,
+        &dir_buf,
+        if (env_c) |e| std.mem.span(e) else null,
+        if (home_c) |h| std.mem.span(h) else null,
+    ) orelse {
+        try stderr.writeAll("maru agent-hooks: neither HOME nor the provider config-dir variable is set\n");
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // 우리가 심을 커맨드. **원격 scope** 다 — 훅이 `LC_MARU_PANE` 을 검증해 평평한 경로에 적는다.
+    var cmd: std.ArrayListUnmanaged(u8) = .empty;
+    defer cmd.deinit(allocator);
+    hook_command.build(&cmd, allocator, opts.provider.tag(), opts.dir, .remote) catch {
+        try stderr.writeAll("maru agent-hooks: could not build the hook command\n");
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // 훅이 적을 디렉터리를 **우리가 만든다**(훅은 `mkdir` 을 안 한다 — 계약 §4: 훅이 하는 일이 적을수록
+    // 턴이 빨리 끝나고, 훅 안에서 실패를 다룰 방법도 없다). 0700 이다: 이 안에는 프롬프트 원문과 셸
+    // 명령이 평문으로 들어간다(§7).
+    std.Io.Dir.cwd().createDirPath(io, opts.dir) catch {};
+    setDirMode0700(opts.dir);
+
+    const hooks_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ config_dir, install.hooksFileName(opts.provider) }, 0);
+    defer allocator.free(hooks_path);
+    std.Io.Dir.cwd().createDirPath(io, config_dir) catch {};
+
+    const changed = applyRemoteHookFile(io, allocator, opts, hooks_path, cmd.items) catch |e| {
+        try stderr.print("maru agent-hooks: {s}\n", .{@errorName(e)});
+        try stderr.flush();
+        std.process.exit(1);
+    };
+
+    // **stdout 은 호출자가 읽는 결과다.** 한 줄로 못 박아 두면 로컬이 그것으로 성공을 판정할 수 있다.
+    try stdout.print("{{\"maru-agent-hooks\":1,\"provider\":\"{s}\",\"action\":\"{s}\",\"changed\":{s}}}\n", .{
+        opts.provider.tag(),
+        @tagName(opts.action),
+        if (changed) "true" else "false",
+    });
+    try stdout.flush();
+}
+
+/// provider 훅 파일의 read-modify-write. **락을 쥐고 한 번에** 한다.
+///
+/// **왜 락이 필요한가**: claude 의 `settings.json` 은 훅 전용 파일이 아니라 사용자의 다른 설정을 함께
+/// 담는다. 두 프로세스가 각자 읽어 각자 쓰면 나중에 쓴 쪽이 상대의 편집을 통째로 지운다 — 잃는 것이
+/// 훅 항목이 아니라 **사용자 설정 전체**다. 그래서 그 기계의 `flock` 으로 직렬화한다(원격이 Linux 여도
+/// 같은 호출이다).
+///
+/// **락은 실체를 잠근다.** dotfile 관리자가 그 파일을 심링크로 두는 구성이 흔한데, `O_NOFOLLOW` 로 열면
+/// 심링크에서 열기 자체가 실패해 **직렬화가 조용히 사라진다.** 쓰는 쪽이 실체를 갈아 끼우므로 잠글
+/// 것도 실체다(로컬 설치기가 같은 이유로 같은 일을 한다).
+fn applyRemoteHookFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    opts: maru.cli.agent_hooks.Options,
+    hooks_path: [:0]const u8,
+    want_command: []const u8,
+) !bool {
+    const install = maru.session.agent_hook_install;
+
+    // 파일이 없으면 만든다 — 락을 걸 대상이 있어야 하고, 어차피 install 이면 곧 쓴다.
+    // uninstall 인데 파일이 없으면 할 일이 없다.
+    const exists = blk: {
+        const f = std.Io.Dir.cwd().openFile(io, hooks_path, .{}) catch break :blk false;
+        f.close(io);
+        break :blk true;
+    };
+    if (!exists) {
+        if (opts.action == .uninstall) return false;
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = hooks_path, .data = "{}\n", .flags = .{ .truncate = true } });
+    }
+
+    const lock_path = blk: {
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = std.Io.Dir.realPathFileAbsolute(io, hooks_path, &real_buf) catch break :blk hooks_path;
+        break :blk try std.fmt.allocPrintSentinel(allocator, "{s}", .{real_buf[0..len]}, 0);
+    };
+    defer if (lock_path.ptr != hooks_path.ptr) allocator.free(lock_path);
+
+    const lock_fd = std.c.open(lock_path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
+    if (lock_fd >= 0) {
+        // **경합이면 물러난다.** 다른 인스턴스가 지금 같은 일을 하고 있고, 그쪽이 끝내면 결과는 같다.
+        if (std.c.flock(lock_fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+            _ = std.c.close(lock_fd);
+            return error.Contended;
+        }
+    }
+    defer if (lock_fd >= 0) {
+        _ = std.c.flock(lock_fd, std.posix.LOCK.UN);
+        _ = std.c.close(lock_fd);
+    };
+
+    // ── 여기부터 끝까지가 하나의 read-modify-write 다 ──
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, hooks_path, allocator, .limited(8 * 1024 * 1024));
+    defer allocator.free(text);
+
+    // ⚠️ **파싱과 변형이 같은 allocator 를 써야 한다.** `parseFromSlice` 가 만든 값은 그 함수가 쥔
+    // arena 소유인데, 그 트리를 다른 allocator 로 키우면 재할당이 **남의 메모리를 free 한다**
+    // (실측: `Invalid free` 로 즉사했다 — 다행히 쓰기 전이라 사용자 파일은 온전했다).
+    // arena 를 우리가 쥐고 파싱부터 직렬화까지 그 하나로 간다.
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return error.UnreadableConfig;
+    var root: std.json.ObjectMap = switch (value) {
+        .object => |o| o,
+        else => return error.UnreadableConfig,
+    };
+
+    const state: install.State = if (install.scan(opts.provider, .remote, root.get("hooks"), want_command)) |known|
+        .{ .known = known }
+    else
+        return error.UnreadableConfig; // **모르는 상태면 손대지 않는다**(로컬과 같은 규칙)
+
+    const intent: install.Intent = if (opts.action == .install) .ensure else .uninstall;
+    const plan = install.planForSet(opts.provider, .remote, state, intent);
+    if (plan == .abort) return error.UnknownState;
+    if (!install.mutates(plan)) return false; // 이미 원하는 모양이다
+
+    var hooks: std.json.ObjectMap = switch (root.get("hooks") orelse std.json.Value{ .object = .empty }) {
+        .object => |o| o,
+        else => return error.UnreadableConfig,
+    };
+    install.apply(
+        opts.provider,
+        .remote,
+        arena,
+        &hooks,
+        want_command,
+        if (opts.action == .install) .install else .remove,
+    ) catch return error.ApplyFailed;
+    // **훅이 하나도 안 남으면 키 자체를 뺀다** — 빈 `"hooks": {}` 를 남기면 우리가 손댄 흔적이
+    // 설치 전과 다르게 남는다(로컬 설치기와 같은 규칙).
+    if (hooks.count() == 0) {
+        _ = root.orderedRemove("hooks");
+    } else {
+        try root.put(arena, "hooks", .{ .object = hooks });
+    }
+
+    // **제자리에 쓴다**(rename 이 아니다) — 잠근 inode 가 바뀌면 직렬화가 풀린다.
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &out);
+    try std.json.Stringify.value(std.json.Value{ .object = root }, .{ .whitespace = .indent_2 }, &aw.writer);
+    try aw.writer.writeByte('\n');
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = hooks_path, .data = aw.writer.buffered(), .flags = .{ .truncate = true } });
+    return true;
+}
+
+fn setDirMode0700(path: []const u8) void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (path.len >= buf.len) return;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    _ = std.c.chmod(@ptrCast(&buf), @as(std.c.mode_t, 0o700));
+}
+
 fn runAgentEvents(
     io: std.Io,
     allocator: std.mem.Allocator,

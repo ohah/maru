@@ -20864,7 +20864,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         try std.testing.expectEqualStrings(legacy_hook, stop.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string);
 
         // 세트 전체가 덮였고, 그 판정이 «할 일 없음»으로 수렴한다.
-        const known = hook_install.scan(.claude, obj.get("hooks"), want.items) orelse return error.UnknownShape;
+        const known = hook_install.scan(.claude, .local, obj.get("hooks"), want.items) orelse return error.UnknownShape;
         try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.ours);
         try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.ours_current);
         try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.events_covered);
@@ -23181,7 +23181,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
             .get("Stop").?.array.items[0].object
             .get("hooks").?.array.items[0].object
             .get("command").?.string);
-        try std.testing.expectEqual(@as(usize, 0), hook_install.scan(.claude, parsed.value.object.get("hooks"), "").?.ours);
+        try std.testing.expectEqual(@as(usize, 0), hook_install.scan(.claude, .local, parsed.value.object.get("hooks"), "").?.ours);
     }
 
     const codex_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
@@ -23292,7 +23292,7 @@ test "agent hooks install into codex and record trust without touching existing 
         const hooks = parsed.value.object.get("hooks").?.object;
         // **codex 세트다** — `Notification` 이 들어가면 안 된다.
         try std.testing.expect(hooks.get("Notification") == null);
-        const known = hook_install.scan(.codex, parsed.value.object.get("hooks"), want.items) orelse
+        const known = hook_install.scan(.codex, .local, parsed.value.object.get("hooks"), want.items) orelse
             return error.UnknownShape;
         try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known.ours_current);
         try std.testing.expect(known.legacy_present); // 과거 표식은 그대로
@@ -23364,7 +23364,7 @@ test "agent hooks install into codex and record trust without touching existing 
         defer a.free(made_hooks);
         var parsed_new = try std.json.parseFromSlice(std.json.Value, a, made_hooks, .{});
         defer parsed_new.deinit();
-        const known_new = hook_install.scan(.codex, parsed_new.value.object.get("hooks"), want.items) orelse
+        const known_new = hook_install.scan(.codex, .local, parsed_new.value.object.get("hooks"), want.items) orelse
             return error.UnknownShape;
         try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known_new.ours_current);
         const made_config = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
@@ -23425,7 +23425,7 @@ test "agent hooks install into codex and record trust without touching existing 
         try std.testing.expect(std.mem.indexOf(u8, fixed, "maru-old-log-dir") == null); // 낡은 것이 남지 않는다
         var parsed_fixed = try std.json.parseFromSlice(std.json.Value, a, fixed, .{});
         defer parsed_fixed.deinit();
-        const known_fixed = hook_install.scan(.codex, parsed_fixed.value.object.get("hooks"), want.items) orelse
+        const known_fixed = hook_install.scan(.codex, .local, parsed_fixed.value.object.get("hooks"), want.items) orelse
             return error.UnknownShape;
         try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known_fixed.ours); // 두 벌이 아니다
         try testing_expect_leave(known_fixed);

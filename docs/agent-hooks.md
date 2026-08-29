@@ -144,7 +144,7 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 | `SessionStart` | — | ✅ | 턴 0 스냅샷(`opensSessionBase`), 세션 신원(`session_id`). `transcript_path`는 **파싱만** 한다 — 훅 모드는 transcript 파일을 아예 안 읽는 것이 설계다 |
 | `UserPromptSubmit` | — | ✅ | 턴 시작, `working` 진입, 턴 식별자 |
 | `Stop` | — | ✅ | 턴 종료 스냅샷, 마지막 응답(`last_assistant_message` → 사이드바 대화 줄), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다). **링 항목의 턴 제목은 (AT2)** — `Snapshot`에 아직 제목 슬롯이 없다 |
-| `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. ⚠️ **미검증** — 헤드리스에서 권한 거부가 실제로 일어났는데도 이 이벤트도 `PermissionDenied`도 발화하지 않았다(§9-6) |
+| `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. **대화형에서 발화 확인**(2026-08-29 재실측). 헤드리스에서는 권한 거부가 실제로 일어나도 이 이벤트도 `PermissionDenied`도 오지 않는다(§9-6) |
 | `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). **AI 소행 경로(`file_path`)는 (AT3)** — 파싱만 하고 소비자가 없다. **도구 구간 시작은 (AT3b)** — `tool_use_id`가 파서에 아직 없다. **두 provider의 payload 모양이 다르다 — §2.1** |
 | `PostToolUse` | **(AT3b) `Bash`/`exec`만** | 미검증 | **아직 걸지 않는다** — 세트에 없고 test가 그 부재를 단언한다. AT3b가 셸 브래킷과 함께 되돌린다(§3.1 예외) |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
@@ -1150,10 +1150,23 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
    이번 측정이 그것을 지웠다 — **대화형 승인 UI가 있어야만 오는 이벤트다.** 입력 대기 상태(AH4)와 주의
    알림(AH5)이 여기 걸려 있으므로 **그 두 단계는 대화형 수동 검증을 완료 조건으로 둔다.**
 
-   ⚠️ 이것이 §6 이 `Notification` 을 쓰는 이유다. `PermissionRequest` 는 **여기서만이 아니라 어떤 측정에서도**
-   발화한 적이 없어, 그 하나에만 걸어 두면 대화형에서도 안 올 경우 그 배지에 소스가 하나도 없다. 반면
-   `Notification` 은 claude 실사용에서 실제로 오는 것을 봤다(`idle_prompt` — 다만 그 종류는 배지를 옮기지
-   않는다). 둘 다 와야 하는 것이 아니라 **어느 쪽이 와도** 같은 전이라 하나만 와도 배지는 선다.
+   ⚠️ **이 자리에 「`PermissionRequest` 는 어떤 측정에서도 발화한 적이 없다」고 적혀 있었다. 낡은
+   문장이라 2026-08-29 재실측으로 걷어냈다.** 승인 프롬프트가 실제로 뜨는 대화형 세션에서 훅 다섯을 걸어
+   받은 것은 이렇다:
+
+       PreToolUse(Bash)          mode=default
+       PermissionRequest(Bash)   mode=default      ← 같은 초
+       Notification              type=permission_prompt   ← 6 초 뒤
+
+   `permission_suggestions` 라는 키가 `PermissionRequest` payload 에 함께 온다(문서 어디에도 없던 필드다).
+   그리고 `Notification(permission_prompt)` 의 지연은 **6 초**로, `idle_prompt` 의 60 초와 **다른 타이머**다.
+
+   그래도 **§6 이 `Notification` 을 함께 쓰는 규율은 유지한다** — 둘 다 와야 하는 것이 아니라 **어느 쪽이
+   와도** 같은 전이라, 하나만 와도 배지는 선다. 한쪽이 사라져도 배지에 소스가 남는다는 것이 그 이유다.
+
+   ⚠️ **재실측에서 설명 못 한 것 하나**: 승인을 누르지 않았는데 38 초 뒤 `mode=acceptEdits` 로 바뀌며
+   도구가 실행됐다(`PostToolUse` 도착, 대상 파일이 실제로 생겼다). 무엇이 모드를 옮겼는지는 모른다 —
+   추측하지 않고 남긴다.
 7. 비용 측정은 **우리가 `sh` 를 띄워** 잰 것이다(§3). 샌드박스 안팎에는 차이가 없었으나(AH6 재측정),
    provider 가 자기 프로세스에서 fork·exec 하는 경로는 다를 수 있다 — 그 차이는 spawn 비용이지 우리
    스크립트의 몫이 아니므로 「스크립트 최적화 여지가 없다」는 결론은 그대로다.

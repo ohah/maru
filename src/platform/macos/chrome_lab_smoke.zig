@@ -88,6 +88,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_wrap_scrolled,
         .editor_wrap_stale_scroll,
         .editor_real_file,
+        .editor_typescript,
         .editor_selection,
         .editor_find,
         .editor_diff_selection,
@@ -229,6 +230,32 @@ const PpmProbe = struct {
 /// `//` 가 `/` 하나로 보였다([#2123](https://github.com/ohah/maru/issues/2123)). 지금은 슬롯을 넘침만큼
 /// 넓혀 온전히 그린다 — 이 캡처가 그 사실을 잡아 두므로, 다시 잘리면 골든이 바뀌며 드러난다.
 /// 합자를 끄는 것이 아니라 **모양을 유지한 채 격자를 지킨다**(docs/font-strategy.md "Ligature").
+/// `editor_typescript` 가 그리는 내용. **번들 grammar 가 zig 말고도 실제로 색을 내는지**를 캡처에
+/// 남기는 자리다(N4 §5.3).
+///
+/// TypeScript 를 고른 이유: 그 쿼리는 35줄뿐이고 **javascript(204줄)를 상속하는 구조**다. 상속을 안
+/// 이으면 문자열·주석 같은 기본 색이 통째로 빠지는데, 그 회귀는 값 판정자로는 "색이 있다"만 보고
+/// 지나칠 수 있다 — 화면에서는 즉시 보인다.
+///
+/// 내용은 색 역할이 서로 갈리는 자리를 고른다: `import`·`export`·`interface`(keyword) · `"..."`(string)
+/// · `//`(comment) · 타입 이름(type) · 함수 이름(function) · 숫자(number).
+const typescript_fixture =
+    "// TypeScript — 상속한 js 쿼리까지 색이 붙는다\n" ++
+    "import { readFile } from \"node:fs/promises\";\n" ++
+    "\n" ++
+    "export interface Token {\n" ++
+    "    kind: \"word\" | \"space\";\n" ++
+    "    width: number;\n" ++
+    "}\n" ++
+    "\n" ++
+    "export async function load(path: string): Promise<Token[]> {\n" ++
+    "    const raw = await readFile(path, \"utf8\");\n" ++
+    "    return raw.split(/\\s+/).map((text, i) => ({\n" ++
+    "        kind: i % 2 === 0 ? \"word\" : \"space\",\n" ++
+    "        width: text.length,\n" ++
+    "    }));\n" ++
+    "}\n";
+
 const real_file_fixture =
     "\xEF\xBB\xBFconst std = @import(\"std\");\r\n" ++
     "\r\n" ++
@@ -348,10 +375,18 @@ pub fn main(init: std.process.Init) !void {
     defer if (real_file_opened) |*o| o.deinit(allocator);
     var real_file_lines: ?[][]const u8 = null;
     defer if (real_file_lines) |l| allocator.free(l);
-    if (scenario_id == .editor_real_file) {
-        const src_path = try std.fmt.allocPrint(allocator, "{s}/editor-real-file.src", .{artifact_dir});
+    if (scenario_id == .editor_real_file or scenario_id == .editor_typescript) {
+        // **Lab 에서는 확장자가 grammar 를 안 정한다.** 색 언어는 `lab.zig` 의 장면 switch 가 고른다 —
+        // Lab 계약이 "deterministic, effect-free" 라 파일 이름에 따라 캡처가 달라지면 안 되기 때문이다.
+        // 확장자를 `.ts` 로 두는 것은 **제품과 같은 모양을 보이기 위해서**일 뿐이다.
+        //
+        // 적대적 검증 5회차가 이것을 잡았다: 확장자를 `.src` 로 바꾸는 뮤턴트가 **살아남았고**, 그때
+        // 여기 적혀 있던 *"확장자가 grammar 를 정한다"* 가 틀린 문장임이 드러났다. 제품 경로에서는
+        // 맞는 말이고(`grammarForPath` — `LANG10` 이 지킨다) Lab 에서만 아니다.
+        const ts = scenario_id == .editor_typescript;
+        const src_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ artifact_dir, if (ts) "editor-typescript.src.ts" else "editor-real-file.src" });
         defer allocator.free(src_path);
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = real_file_fixture });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = if (ts) typescript_fixture else real_file_fixture });
         real_file_opened = try editor_ops.openPath(io, allocator, src_path);
         const opened = &real_file_opened.?;
         const n = opened.file.lineCount();
@@ -890,6 +925,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-wrap-scrolled")) return .editor_wrap_scrolled;
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
+    if (std.mem.eql(u8, raw, "editor-typescript")) return .editor_typescript;
     if (std.mem.eql(u8, raw, "editor-selection")) return .editor_selection;
     if (std.mem.eql(u8, raw, "editor-diff-selection")) return .editor_diff_selection;
     if (std.mem.eql(u8, raw, "editor-diff")) return .editor_diff;
@@ -956,6 +992,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_wrap_scrolled => "editor-wrap-scrolled",
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
         .editor_real_file => "editor-real-file",
+        .editor_typescript => "editor-typescript",
         .editor_selection => "editor-selection",
         .editor_diff_selection => "editor-diff-selection",
         .editor_diff => "editor-diff",

@@ -68,12 +68,29 @@ pub const State = struct {
 ///
 /// **두 열거가 갈리지 않게 옮기는 일을 여기 하나가 한다** — `syntax`는 `maru`를 못 들여오므로
 /// 자기 열거를 따로 들고, 그 머리말이 *"값을 늘릴 때 호출자가 옮긴다"*고 적어 두었다.
-pub fn syntaxLanguage(lang: editor_language.Language) syntax.Language {
-    return switch (lang) {
+pub fn syntaxLanguage(g: editor_language.Grammar) syntax.Language {
+    return switch (g) {
         .zig => .zig,
-        // 나머지는 아직 grammar가 없다 — 무색이다(§5). 번들 언어 목록은
-        // `docs/plans/native-editor.md`가 소유하고, 늘릴 때 여기 한 줄이 함께 는다.
-        .c_like, .shell, .lisp, .sql, .lua, .html, .css, .plain => .other,
+        .json => .json,
+        .markdown => .markdown,
+        .javascript => .javascript,
+        .typescript => .typescript,
+        .tsx => .tsx,
+        .c => .c,
+        .cpp => .cpp,
+        .python => .python,
+        .go => .go,
+        .rust => .rust,
+        .java => .java,
+        .ruby => .ruby,
+        .php => .php,
+        .kotlin => .kotlin,
+        .bash => .bash,
+        .css => .css,
+        .html => .html,
+        // 번들 목록에 없는 확장자 — 무색이다(§5). 늘릴 때 세 자리가 함께 는다:
+        // `build.zig`의 grammar 표 · `tree_sitter.zig`의 표 · `language.zig`의 `grammarForPath`.
+        .none => .other,
     };
 }
 
@@ -102,8 +119,8 @@ pub const frame_parse_budget_ns: u64 = 4 * std.time.ns_per_ms;
 ///
 /// **여는 파싱도 예산을 든다**(§2.1a). 690KB `build.zig`는 한 프레임에 못 판다 — 그동안 무색으로
 /// 그리고 다음 프레임에 이어 판다.
-pub fn open(source: []const u8, lang: editor_language.Language) State {
-    var st: State = .{ .provider = syntax.Provider.init(source, syntaxLanguage(lang), frame_parse_budget_ns) };
+pub fn open(source: []const u8, g: editor_language.Grammar) State {
+    var st: State = .{ .provider = syntax.Provider.init(source, syntaxLanguage(g), frame_parse_budget_ns) };
     st.pending = st.provider != null and st.provider.?.tree == null and source.len > 0;
     return st;
 }
@@ -427,7 +444,11 @@ test "ES2 grammar 없는 언어는 무색이다 — provider 자체가 안 선�
     var doc = try openDoc("body { color: red; }\n");
     defer doc.deinit();
 
-    var st = open(doc.content, .css); // 아직 grammar가 없다
+    // **`.css` 로 쓰여 있었다.** 번들 언어가 zig 하나이던 시절에는 그것이 "grammar 없는 언어"의
+    // 예였는데, 2026-08-29 에 열여덟이 실리며 CSS 에도 grammar 가 생겨 이 판정자가 깨졌다.
+    // 판정자의 **의도**(번들 목록 밖은 무색이다)는 그대로이므로 예를 `.none` 으로 옮긴다 —
+    // 그 값은 정의상 앞으로도 grammar 를 갖지 않는다.
+    var st = open(doc.content, .none);
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider == null);
 
@@ -482,9 +503,12 @@ test "ES5 언어 축을 옮기는 자리가 하나다 — 새 열거 값이 조�
     // `editor_language.Language`에 값이 늘면 **컴파일이 죽어** 여기를 고치게 된다
     // (switch 가 exhaustive 라서). 그 성질 자체를 잰다.
     try testing.expectEqual(syntax.Language.zig, syntaxLanguage(.zig));
-    inline for (@typeInfo(editor_language.Language).@"enum".fields) |f| {
-        const got = syntaxLanguage(@field(editor_language.Language, f.name));
-        if (!std.mem.eql(u8, f.name, "zig")) try testing.expectEqual(syntax.Language.other, got);
+    // **번들 목록에 없는 확장자만 무색이다.** 예전에는 zig 하나만 grammar 가 있어 "zig 아니면 전부
+    // other"였는데, 이제 열여덟이 실린다 — 그래서 `.none` 하나만 other 다.
+    try testing.expectEqual(syntax.Language.other, syntaxLanguage(.none));
+    inline for (@typeInfo(editor_language.Grammar).@"enum".fields) |f| {
+        const got = syntaxLanguage(@field(editor_language.Grammar, f.name));
+        if (!std.mem.eql(u8, f.name, "none")) try testing.expect(got != .other);
     }
 }
 

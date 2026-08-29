@@ -13,11 +13,29 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 | tree-sitter (core) v0.26.13 | 편집기 syntax 1층 — 증분 파싱 런타임([native-editor-visual-mapping.md](native-editor-visual-mapping.md) §5.3) | MIT (© 2018 Max Brunsfeld) | <https://github.com/tree-sitter/tree-sitter> — 받는 것은 **crates.io 소스 배포본**이다(아래) |
 | tree-sitter grammar (언어별) | 각 언어의 생성 파서(`parser.c`) | **개별 확인** — permissive(MIT·Apache-2.0·BSD·ISC)만 채택하고 copyleft는 받지 않는다 | 언어별 저장소 |
 | └ tree-sitter-zig v1.1.2 | `.zig` 파일의 생성 파서와 `queries/highlights.scm` | MIT (© 2024 Amaan Qureshi) | <https://github.com/tree-sitter-grammars/tree-sitter-zig> |
+| └ tree-sitter-json v0.24.8 | `.json` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-json> |
+| └ tree-sitter-markdown v0.5.1 | `.md` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter-grammars/tree-sitter-markdown> |
+| └ tree-sitter-javascript v0.25.0 | `.js`·`.jsx`·`.mjs`·`.cjs` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-javascript> |
+| └ tree-sitter-typescript v0.23.2 | `.ts`·`.tsx`·`.mts`·`.cts` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-typescript> |
+| └ tree-sitter-c v0.24.1 | `.c`·`.h` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-c> |
+| └ tree-sitter-cpp v0.23.4 | `.cc`·`.cpp`·`.hpp` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-cpp> |
+| └ tree-sitter-python v0.25.0 | `.py`·`.pyi` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-python> |
+| └ tree-sitter-go v0.25.0 | `.go` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-go> |
+| └ tree-sitter-rust v0.24.0 | `.rs` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-rust> |
+| └ tree-sitter-java v0.23.5 | `.java` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-java> |
+| └ tree-sitter-ruby v0.23.1 | `.rb`·`.rake` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-ruby> |
+| └ tree-sitter-php v0.24.2 | `.php`·`.phtml` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-php> |
+| └ tree-sitter-kotlin 0.3.8 | `.kt`·`.kts` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/fwcd/tree-sitter-kotlin> |
+| └ tree-sitter-bash v0.25.0 | `.sh`·`.bash`·`.zsh` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-bash> |
+| └ tree-sitter-css v0.23.2 | `.css`·`.scss`·`.less` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-css> |
+| └ tree-sitter-html v0.23.2 | `.html`·`.htm` 파일의 생성 파서와 `queries/highlights.scm` | MIT | <https://github.com/tree-sitter/tree-sitter-html> |
 
 - **코어는 GitHub 태그 tarball이 아니라 crates.io 소스 배포본을 받는다**(`build.zig.zon`이 근거를 갖는다). 상류 저장소의 `build.zig`가 Zig 0.16에서 제거된 API를 부르는데 `lazyDependency`는 그 파일을 **실행**하므로, 우리가 거기서 아무것도 안 가져와도 빌드가 죽는다. crates.io 배포본에는 `build.zig`가 없고 `src/`는 두 배포본이 동일하다 — **같은 코드, 같은 MIT 라이선스**이며 경로 접두사(`lib/`)만 다르다.
 - **번들 언어는 명시 목록으로 관리한다** — grammar마다 `parser.c`가 붙어 배포물이 커지므로 열린 집합으로 두지 않는다. 목록과 추가 절차는 [네이티브 편집기 구현 계획](plans/native-editor.md)이 소유한다.
 - **grammar를 추가하는 PR은 이 표에 행을 더한다.** 라이선스 확인 없이 grammar를 넣지 않는다.
-- **라이선스 전문 동봉이 이제 의무다 — 배포물에 들어간다.** `app_session/editor_syntax.zig`가 `syntax` 모듈을 `@import`하면서 코어와 grammar가 exe에 링크됐다(`nm` 실측: tree-sitter 심볼이 0개 → 8개). 폰트가 `Resources/Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리에 코어·grammar의 `LICENSE`를 넣어야 한다. **아직 안 넣었다** — 이 줄이 그 사실을 드러내는 자리이고, 넣는 일은 `.app` 번들 배선(`build.zig`의 폰트 복사 블록 옆)이다.
+- **라이선스 전문을 동봉한다 — 배포물에 들어간다.** `app_session/editor_syntax.zig`가 `syntax` 모듈을 `@import`하면서 코어와 grammar가 exe에 링크됐다(`nm` 실측: tree-sitter 심볼이 0개 → 8개). 폰트가 `Resources/Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리에 넣는다 — `Resources/Licenses/tree-sitter-LICENSE`와 `tree-sitter-<언어>-LICENSE` **열여덟 개**다(2026-08-29 실측: 번들에 18개 파일).
+- **목록을 손으로 적지 않는다.** `build.zig`의 grammar 표가 복사 명령과 **확인 목록을 함께** 만든다 — 손으로 적으면 언어를 늘릴 때 한쪽만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다(재배포 의무의 성질이다). 빠지면 번들이 `error: bundled code library license missing or empty: … — 재배포 의무`로 **소리 내어 죽는다**.
+- **한 저장소가 두 grammar 를 내면 라이선스는 하나다**(TypeScript/TSX). 표가 dep 단위로 중복을 걷는다.
 - 이것이 [project-rules.md](project-rules.md) §의존성의 "런타임 의존성 기본 0"에 대한 **첫 예외**이며, 그 문서가 요구한 사용자 논의를 거쳤다(2026-08-09).
 
 ## 번들 폰트

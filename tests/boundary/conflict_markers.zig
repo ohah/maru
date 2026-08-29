@@ -42,6 +42,10 @@ const skip_dirs = [_][]const u8{
     ".git",         ".claude", ".zig-cache",   "zig-out",
     "target",       "dist",    "node_modules", ".jj",
     "assets/fonts",
+    // **받아 온 의존성 트리**(`zig fetch` 가 푸는 자리). 우리가 쓰지 않으므로 마커가 들어갈 수 없고,
+    // grammar 를 늘리자 여기서 읽기 상한(8MB)을 넘겨 게이트가 `StreamTooLong` 으로 죽었다 —
+    // tree-sitter 생성 파서는 한 파일이 수 MB다.
+    "zig-pkg",
 };
 
 /// 훑을 확장자. 바이너리·이미지·골든 fixture 는 뺀다(마커가 들어갈 수 없고, 크기만 크다).

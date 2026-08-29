@@ -1262,7 +1262,9 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 ## 11. 원격(SSH) 세션 — 훅 모드가 성립하지 않는다, 그래서 OSC 가 산다
 
 **실측 2026-08-29.** claude 2.1.250, codex 0.149.0·0.150.1 을 pty 로 띄워 원시 바이트를 떠서
-확인했다. 이 절의 모든 «된다/안 된다» 는 그 캡처가 근거다.
+확인했다. 이 절의 모든 «된다/안 된다» 는 그 캡처가 근거다. **다시 재려면** provider 를 `openpty` 로
+띄우되 `setsid` 후 `TIOCSCTTY` 로 그 pty 를 **제어 터미널로 만들어야** 한다 — `start_new_session=True` 만
+쓰면 ctty 가 떨어져 나가 «훅이 `/dev/tty` 를 못 연다» 를 제품 결함으로 오진한다(실제로 한 번 그랬다).
 
 ### 11.1 원격에서는 훅 모드가 **구조적으로** 안 선다
 
@@ -1291,6 +1293,7 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 ### 11.3 provider 마다 길이 다르다 — 세트가 다른 것과 같은 축이다
 
 §2 가 «이벤트 세트는 provider 마다 다르다» 를 말했다. **훅 출력 필드와 훅 실행 환경도 같은 축에서 갈린다.**
+아래는 **provider 구현 세부**라 버전이 바뀌면 뒤집힐 수 있다 — 표의 값은 위 실측 시점 기준이다.
 
 | | claude | codex |
 | --- | --- | --- |
@@ -1311,10 +1314,11 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 { "preferredNotifChannel": "ghostty" }
 ```
 
-명시가 필요한 이유가 SSH 에 있다. maru 는 자식 pty 에 `TERM_PROGRAM=ghostty` 를 주입해
-(`pty/macos.zig`) provider 의 `auto` 판정이 걸리게 해 두는데, **ssh 는 그 변수를 안 넘긴다.** 그래서 원격의
-`auto` 는 `no_method_available` 로 죽는다([ssh-integration.md](ssh-integration.md) §1 의 `COLORTERM` 과
-같은 기전이다).
+명시가 필요한 이유는 **그 식별값이 원격에 도달하지 않기 때문**이다. maru 가 자식 pty 에 심는
+`TERM_PROGRAM=ghostty` 는 [터미널 호환성/보안 정책](terminal-compatibility-policy.md) «데스크톱 알림 식별»
+이 소유한다(그 문서가 «환경변수로는 못 바꿔 우회 불가» 라고 적어 둔 그 값이다 — **설정 파일로는 바꿀 수
+있다**). **ssh 는 그 변수를 안 넘기므로**([ssh-integration.md](ssh-integration.md) §1 의 `COLORTERM` 과 같은
+기전) 원격의 `auto` 판정이 `no_method_available` 로 죽는다.
 
 값은 `ghostty`(OSC 777) 또는 `iterm2`(OSC 9). 실측 캡처:
 
@@ -1330,9 +1334,14 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 > `terminalSequence`: A terminal escape sequence (e.g. OSC 9 / OSC 777 desktop-notification) for Claude Code
 > to emit on your behalf. Only notification/title OSCs (0, 1, 2, 9, 99, 777) and BEL are permitted.
 
-- 허용 밖은 버려지고, **OSC 9 body 는 숫자로 시작할 수 없다**(`9;4` progress 형태만 예외) — maru
-  `osc.zig` 의 `isNotify9Body`/ConEmu 서브커맨드 처리와 **같은 규칙**이라 그대로 들어온다.
-- **tmux/screen passthrough 를 claude 가 자기가 붙인다.** 훅이 raw OSC 를 주면 된다.
+- 허용 밖은 버려지고, **OSC 9 body 는 숫자로 시작할 수 없다**(`9;4` progress 형태만 예외). maru
+  `osc.zig` 의 `isNotify9Body`/ConEmu 서브커맨드 처리와 **경계가 맞는다** — 동작은 다르다(claude 는 그런
+  body 를 아예 안 내보내고, maru 는 와도 알림을 안 만든다). 경계가 같아서 그대로 들어온다.
+- ⚠️ **tmux/screen passthrough 는 안 붙여 준다 — 훅이 직접 감싸야 한다.** 발신이
+  `function fue(e){qY().write(e)}` 라 **검증된 시퀀스를 그대로 write** 하고, 내장 알림 채널이 타는 래퍼
+  (`fS` — `TMUX`/`screen` 이면 `ESC Ptmux;…` 로 감싼다)를 **안 탄다**. 근거는 코드다. tmux 안
+  end-to-end 실측은 미완이나, 같은 캡처에 `Ptmux;` 가 1 건 나온 것이 «그 래퍼는 다른 경로에서 살아
+  있다» 는 방증이다.
 - **훅이 `/dev/tty` 를 직접 열 수는 없다**(실측: `tty` → `not a tty`, `/dev/tty` → `Device not configured`,
   프로세스 트리를 거슬러 찾은 tty 도 `Operation not permitted`). 이 필드가 있는 이유가 그것이다.
 
@@ -1343,11 +1352,13 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 ```toml
 [tui]
 notifications = true
-notification_method = "osc9"        # osc9 | bel | system | external
+notification_method = "osc9"        # 확인된 값: osc9 | bel
 notification_condition = "always"   # unfocused | always
 ```
 
-- 타입명이 바이너리에 그대로 있어 값이 확정된다(`NotificationMethod`·`NotificationCondition`).
+- `NotificationCondition` 은 타입명 바로 옆에 `unfocused`·`always` 가 붙어 나와 **두 값이 확정**이다.
+  `NotificationMethod` 는 `osc9`·`bel` 까지만 확인했다 — 인접 바이트의 다른 토큰은 **다른 enum 것일 수
+  있어** 적지 않는다(같은 자리에서 `UriBasedFileOpener` 의 값들이 섞여 나온다).
 - **발화 사건은 `agent-turn-complete` 하나다.** `approval-requested` 계열은 없다 — 내장 경로로는
   «승인 대기» 를 못 만든다.
 - OSC 9 를 쓰고 tmux passthrough(`ESC Ptmux;`)도 자기가 붙인다.
@@ -1388,8 +1399,11 @@ trusted_hash = "sha256:…"
 
 **적대적 검증에서 나온, 그 축이 반드시 다뤄야 할 것 셋**(2026-08-29 실측):
 
-- **종료 코드로 채널 사망을 판정할 수 없다.** 정상 종료와 서버 사망이 둘 다 `0`, master 사망과 원격의 진짜
-  255 가 둘 다 `255` 로 겹치고 stderr 는 비어 있다. **하트비트로 침묵을 재는 수밖에 없다.**
+- **종료 코드에 채널 사망 판정을 걸지 않는다.** 값이 원인마다 겹친다 — 정상 종료가 `0`, 원격의 진짜
+  실패가 `255` 를 이미 쓰고, **다중화 경합으로도 255 가 난다**(공개 보고). 그리고 어느 경우에도 stderr 는
+  비어 있었다. ⚠️ **«어느 사망이 어느 값» 은 근거로 쓰지 말 것** — 사망 모드별 수치는 재현이 불안정했다
+  (리스너 sshd 를 죽여도 privilege separation 이 세션을 이어받아 스트리머가 완주했다). 필요한 것은
+  **프로토콜 하트비트로 침묵을 재는 것**이고, `ssh -S <ctl> -O check` 는 master 생사의 원인 구분에만 쓴다.
 - **`ForceCommand`·`authorized_keys` 의 `command=` 서버는 우리 명령을 갈아치우고 `exit 0` 을 준다.**
   성공한 척하므로 `hello` 를 상한 안에서 찾아 확인해야 한다(§4a 의 5 초·64 KiB 규약을 그대로 쓴다).
 - **`MaxSessions` 기본값이 10 이고 다중화도 여기 포함된다.** pane 당 터미널 1 + 채널 1 이면 같은 호스트

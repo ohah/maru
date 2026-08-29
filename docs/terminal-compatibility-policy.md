@@ -89,6 +89,12 @@ Maru는 자식 셸 env에서 부모 `TERM`/`COLORTERM`을 위 값으로 덮을 �
 
 Maru는 자식 셸 env에 `TERM_PROGRAM=ghostty`를 주입한다(부모가 남긴 `TERM_PROGRAM`/`TERM_PROGRAM_VERSION`은 제거 후 덮어쓴다). Claude Code·Codex 같은 TUI는 데스크톱 알림을 보낼 터미널을 `TERM_PROGRAM` 화이트리스트(`iTerm.app`/`ghostty`/`kitty`/`WezTerm`)로 식별하는데, Maru는 그 명단에 없어 기본값에선 OSC 9 알림을 못 받기 때문이다(Claude의 `preferredNotifChannel`은 환경변수로 못 바꿔 우회 불가). `ghostty`를 고른 건 Maru가 kitty graphics·OSC 9/133/777을 Ghostty와 같은 셋으로 지원해, 식별 후 기대되는 기능과 어긋나지 않아서다(`iTerm.app`은 inline-image OSC 1337을 기대해 부적합).
 
+**⚠️ 이 식별값은 ssh 를 못 건넌다**(2026-08-29 실측). ssh 가 전달하는 환경변수는 `TERM` 뿐이라 원격 셸에는
+`TERM_PROGRAM` 이 없고, 그래서 **원격에서 도는 claude/codex 는 알림을 하나도 못 보낸다** — 화이트리스트
+판정이 `no_method_available` 로 떨어지기 때문이다. 위 «환경변수로 못 바꿔 우회 불가» 는 그 자리에서도
+그대로지만, **설정 파일로는 바꿀 수 있다**: 원격 provider 설정에 채널을 명시하면 된다(계약과 값은
+[agent-hooks.md](agent-hooks.md) §11).
+
 이건 알림 호환을 위한 **식별값**이며 `TERM`(터미널 capability)과는 별개다 — `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 알림 식별용 고정값이다. 트레이드오프: Maru가 진짜 Ghostty는 아니므로 Ghostty 특화 시퀀스를 가정하는 프로그램과 미세한 차이가 날 수 있으나, Maru가 미지원하는 시퀀스는 무시하므로 무해하다. `TERM_PROGRAM_VERSION`은 주입하지 않는다(현재 식별 whitelist는 키 이름만 보므로 불요).
 
 **현재 상태 — 기본값 `xterm-maru`로 전환됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary

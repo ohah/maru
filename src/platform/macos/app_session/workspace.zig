@@ -39,6 +39,7 @@ const StructuralCompositionReservation = AppSession.StructuralCompositionReserva
 const RestoreAccountingSnapshot = AppSession.RestoreAccountingSnapshot;
 const WorkspaceSession = AppSession.WorkspaceSession;
 const agent_dock = app_session_mod.agent_dock;
+const image_gallery_ops = @import("image_gallery.zig");
 const config_mod = app_session_mod.config_mod;
 const dock_panel = app_session_mod.dock_panel;
 const pane_ops = @import("pane.zig");
@@ -407,6 +408,7 @@ pub fn focusWorkspaceInput(self: *AppSession) void {
     // releasing that ownership, Enter/PageUp/PageDown would keep driving an open dock while
     // the user was visibly typing in the workspace terminal.
     agent_dock.releaseAgentSessionDockKeyFocus(self);
+    image_gallery_ops.releaseKeyFocus(self);
     self.agent_session_dock_interaction.capture = null;
     self.focus_owner = .workspace;
     self.workspace_focus_pending = false;

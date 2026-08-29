@@ -115,7 +115,7 @@ view·lowering)는 row가 카드인지 헤더인지만 보고 균일하게 처�
 
 ## 3. 데이터 모델 — `src/session/session_model.zig`
 
-§2.1 위치 파생이라 새 타입이 필요 없다. `Tab`(session_model.zig:184)에 **additive 스칼라 2개**만 얹는다.
+§2.1 위치 파생이라 새 타입이 필요 없다. `Tab`(session_model.zig)에 **additive 스칼라 2개**만 얹는다.
 
 ```zig
 // Tab 블록에 추가:

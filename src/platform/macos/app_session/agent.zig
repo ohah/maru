@@ -1719,7 +1719,6 @@ pub fn agentHookMode(self: *AppSession, term: *Term) maru.session.agent_hook_mod
 /// 사후에 중단으로 끊긴 턴을 mtime 추정 없이 구분할 수 있게 한다.
 const turn_open_warn_ms: i96 = 10 * std.time.ms_per_s * 60; // 10 분
 
-
 /// 훅 이벤트 로그를 읽어 `term.agent_state` 를 채운다(계약 §4). 관측 모드의 `pollAgentState` 와 **같은 자리에
 /// 같은 값을 쓰는** 대신 소스만 다르다 — 그래서 사이드바·탭 라벨은 아무것도 바뀌지 않는다.
 ///

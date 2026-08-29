@@ -10894,13 +10894,33 @@ fn runAgentEvents(
                 continue;
             }
             reader.seekTo(cur.offset) catch continue;
-            const chunk = reader.interface.allocRemaining(allocator, .limited(1 << 20)) catch continue;
-            defer allocator.free(chunk);
+            // ⚠️ **한 회차에 읽는 양을 못 박되, 못 읽은 나머지는 다음 회차로 넘긴다.**
+            //
+            // 예전에는 `allocRemaining(.limited(1 MiB))` 로 «남은 전부» 를 요구했다. 그러면 안 읽은
+            // 구간이 그 상한을 넘긴 파일은 **읽기 자체가 실패하고**, 실패는 `catch continue` 라
+            // 그 파일이 **영영 소비되지 않는다** — 그리고 소비가 안 되니 절단도 안 걸려 계속 자란다.
+            // 즉 상한이 «큰 파일을 지키는 장치» 가 아니라 «큰 파일을 영구히 버리는 장치» 였다
+            // (실측: 1.25 MiB 로그에서 흘린 이벤트 0, stderr 도 비어 있어 조용했다).
+            //
+            // 지금은 고정 크기 한 조각만 읽고 그 안의 완성된 줄까지만 커서를 옮긴다. 폭주한 파일도
+            // 회차를 거듭하며 따라잡고, 따라잡은 뒤에 절단이 걸린다.
+            const chunk_buf = allocator.alloc(u8, ae.read_chunk_bytes) catch continue;
+            defer allocator.free(chunk_buf);
+            const got = reader.interface.readSliceShort(chunk_buf) catch continue;
+            if (got == 0) {
+                gop.value_ptr.* = cur;
+                continue;
+            }
+            const chunk = chunk_buf[0..got];
+            // 조각이 파일 끝에 닿았는가 — 닿지 않았다면 마지막 조각은 «아직 쓰는 중» 이 아니라
+            // **우리가 자른 것**이므로, 개행 없는 꼬리를 버리지 않고 다음 회차로 넘긴다(아래 루프가
+            // 개행까지만 세므로 두 경우가 같은 코드로 처리된다).
 
             var consumed: usize = 0;
             var lines = std.mem.splitScalar(u8, chunk, '\n');
             while (lines.next()) |line| {
-                // 마지막 조각이 개행으로 안 끝나면 **아직 쓰는 중**이다 — 다음 tick 에 다시 본다.
+                // 마지막 조각이 개행으로 안 끝나면 **아직 쓰는 중이거나 우리가 자른 것**이다 —
+                // 어느 쪽이든 다음 회차에 그 자리부터 다시 본다.
                 if (consumed + line.len >= chunk.len) break;
                 consumed += line.len + 1;
                 if (line.len == 0) continue;
@@ -10908,7 +10928,21 @@ fn runAgentEvents(
                 try ae.formatEvent(&frame, allocator, nonce, line);
                 try stdout.writeAll(frame.items);
             }
-            gop.value_ptr.* = .{ .offset = cur.offset + consumed, .seen_size = size };
+            const next: ae.Cursor = .{ .offset = cur.offset + consumed, .seen_size = size };
+            gop.value_ptr.* = next;
+
+            // **다 읽었고 상한을 넘겼으면 비운다**(RA3 — 원격에서는 이 프로세스가 그 기계의 소비자다).
+            // 실패는 조용히 지나간다: 못 비워도 이벤트는 계속 흐르고, 다음 회차에 다시 시도한다.
+            if (ae.shouldTruncate(next, size)) {
+                // `O_TRUNC` 로 열어 아무것도 안 쓴다 — 파일이 이미 있으므로 **권한은 그대로 남는다**
+                // (훅이 `umask 077` 로 만든 0600 이다. 지우고 다시 만들면 그 값을 잃는다).
+                if (dir.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } })) |_| {
+                    // 비운 뒤 커서도 0 으로 되돌린다. `advance` 의 회전 감지가 다음 회차에 같은 일을
+                    // 하겠지만, 여기서 함께 두어야 «비웠는데 커서가 남아» 새 이벤트를 건너뛰는 한
+                    // 회차가 안 생긴다.
+                    gop.value_ptr.* = .{ .offset = 0, .seen_size = 0 };
+                } else |_| {}
+            }
         }
         try stdout.flush();
 

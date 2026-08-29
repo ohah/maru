@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const command = @import("../session/agent_hook_command.zig");
+const hook_event = @import("../session/agent_hook_event.zig");
 
 /// 채널이 열리면 **가장 먼저** 보내는 줄.
 ///
@@ -138,6 +139,36 @@ pub const Cursor = struct {
     seen_size: u64 = 0,
 };
 
+/// **다 읽은 파일을 언제 비우나**([계획](../../docs/plans/remote-agent-state.md) RA3 의 «회전·정리를
+/// 누가 하나»).
+///
+/// 로컬은 「읽는 Term 이 소비 즉시 비우는 큐」다([계약](../../docs/agent-hooks.md) §4.2). 원격은 읽는
+/// 주체가 채널 너머에 있어 그 규칙을 그대로 못 쓴다 — 그래서 **그 기계의 소비자인 스트리머가** 비운다.
+///
+/// 조건이 둘 다 필요하다:
+/// - **다 읽었을 때만**(`offset == size`). 안 그러면 아직 안 흘린 꼬리를 버린다.
+/// - **상한을 넘었을 때만**(로컬과 같은 1 MiB). 매번 비우면 훅의 `>>` 와 우리 `truncate` 가 경합해,
+///   훅이 열어 둔 offset 뒤로 쓰는 순간 앞이 NUL 로 채워진 파일이 된다(append 모드가 그 경합을 줄이지만
+///   빈도를 낮추는 것이 더 확실하다).
+///
+/// ⚠️ **스트리머가 죽어 있는 동안은 아무도 안 비운다.** 그 구간의 상한은 이 함수가 아니라 시작 시
+/// 정리가 맡는다 — 로컬의 `cleanupAgentHookLogs` 와 같은 자리·같은 이유다(§4 가 «읽는 Term 이 없는
+/// 파일은 상한 없이 자랐다» 로 이미 겪었다).
+pub fn shouldTruncate(cur: Cursor, size: u64) bool {
+    return size >= truncate_at_bytes and cur.offset == size;
+}
+
+/// 로컬 회전 상한과 **같은 값**이어야 한다. 두 축이 다른 상한을 쓰면 «원격만 디스크를 먹는다» 가 되고,
+/// 그 차이는 사용자가 원격 기계를 들여다보기 전까지 안 보인다.
+pub const truncate_at_bytes: u64 = hook_event.rotate_at_bytes;
+
+/// 한 회차에 한 파일에서 읽는 양. **«남은 전부» 를 요구하면 안 된다** — 안 읽은 구간이 그 값을 넘긴
+/// 파일은 읽기가 실패하고, 그 실패가 조용하면 그 파일은 영영 소비도 절단도 안 된다(실측으로 겪었다).
+/// 조각을 고정하면 폭주한 파일도 회차를 거듭하며 따라잡는다.
+///
+/// 한 줄 상한(128 KiB)보다 넉넉해야 한 줄이 조각에 안 들어가 영영 못 넘어가는 일이 없다.
+pub const read_chunk_bytes: usize = 256 * 1024;
+
 /// 파일 크기를 보고 **어디부터 읽어야 하는가**. 회전을 감지해 커서를 되돌린다.
 pub fn advance(cur: Cursor, size: u64) Cursor {
     if (size < cur.offset) return .{ .offset = 0, .seen_size = size }; // 잘렸다/새 파일이다
@@ -208,4 +239,23 @@ test "hello 는 상한 안에서 찾는 값이라 모양이 고정이다" {
     // 소비자가 이 문자열을 찾는다. 바뀌면 제한 서버 판정이 통째로 어긋난다.
     try testing.expectEqualStrings("{\"hello\":\"maru-agent-events\",\"v\":1}", hello_line);
     try testing.expectEqual(@as(u32, 1), wire_version);
+}
+
+test "shouldTruncate: 다 읽었고 상한을 넘겼을 때만 비운다" {
+    const cap = truncate_at_bytes;
+    // 다 읽었지만 아직 작다 — 비우지 않는다(훅의 `>>` 와 경합할 이유가 없다).
+    try testing.expect(!shouldTruncate(.{ .offset = 10, .seen_size = 10 }, 10));
+    // 상한을 넘겼지만 **꼬리가 남았다** — 비우면 아직 안 흘린 이벤트를 버린다.
+    try testing.expect(!shouldTruncate(.{ .offset = cap - 1, .seen_size = cap }, cap));
+    // 둘 다 만족한다.
+    try testing.expect(shouldTruncate(.{ .offset = cap, .seen_size = cap }, cap));
+    try testing.expect(shouldTruncate(.{ .offset = cap * 3, .seen_size = cap * 3 }, cap * 3));
+}
+
+test "truncate 상한은 로컬 회전 상한과 같다 — 다르면 원격만 디스크를 먹는다" {
+    try testing.expectEqual(hook_event.rotate_at_bytes, truncate_at_bytes);
+}
+
+test "한 회차 읽기 조각은 한 줄 상한보다 넉넉하다 — 아니면 긴 줄이 영영 안 넘어간다" {
+    try testing.expect(read_chunk_bytes > hook_event.max_line_bytes);
 }

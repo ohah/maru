@@ -1,8 +1,12 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
-/// **중립 파일이 macOS 폴더에 있다**(`file_tree_backend`·`git_backend` 와 같은 부류 — layering §3.4 의
-/// 후속 행이 이사를 예약해 뒀다). 본문에 네이티브 참조가 0 이고 `home` 경로만 받는다.
+/// **중립 파일이 macOS 폴더에 있다**(`file_tree_backend`·`git_backend` 와 같은 부류). 본문에 네이티브
+/// 참조가 0 이고 `home` 경로만 받는다.
+///
+/// **이사는 예약돼 있지 않다** — [layering-and-portability.md](../docs/layering-and-portability.md) §3.4
+/// 가 2026-08-25 에 실제로 옮겨 보고 **"옮기지 않는다"** 로 닫았다(파일 이동이 아니라 빌드 그래프
+/// 변경이다: 모듈 루트·wasm 배럴·자기 의존·셋째 파일). 새 빚은 이 주석 한 줄로 갚는다.
 const agent_archive_backend = @import("platform/macos/agent_session_archive_backend.zig");
 const file_tree_backend = @import("platform/macos/file_tree_backend.zig"); // 파일 트리 스캔 — 이름과 달리 모든 호스트에서 돈다(계약 §2m.3)
 // W7.1 Win32 창. **최상위에서 import한다** — Win32를 부르는 본문은 `builtin.os.tag` 비교가 comptime 참이라

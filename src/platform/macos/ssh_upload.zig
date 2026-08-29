@@ -160,6 +160,84 @@ pub fn spawnAgentEvents(
     return .{ .pid = pid, .out_fd = out_pipe[0] };
 }
 
+/// 원격 tmux 에 물어 **오염되지 않은 nonce** 를 되찾는다([계획](../../../docs/plans/remote-agent-state.md) RA6).
+///
+/// tmux 안에서는 `LC_MARU_PANE` 이 서버 생성 시 값으로 굳는다 — `update-environment` 기본 목록에 `LC_*`
+/// 가 없어 나중에 attach 해도 **남의 값이 온다**(2026-08-29 실측). 그래서 env 를 안 믿고 tmux 에 직접
+/// 묻는다: `pane → session → client` 를 거쳐 **그 클라이언트 프로세스의 env** 를 읽는다. 클라이언트는
+/// SSH 셸이 직접 exec 한 것이라 그 env 는 멀쩡하다.
+///
+/// 판정은 순수 층(`session/remote_tmux_route.zig`)이 한다 — 여기서는 **묻기만** 하고 결과 줄을 돌려준다.
+/// 한 줄에 클라이언트 하나의 nonce 가 온다(못 읽었으면 빈 줄).
+///
+/// `$TMUX` 소켓 경로를 받는 이유: 사용자가 `-L`/`-S` 를 쓰면 기본 소켓이 아니라 기본으로 물으면 **엉뚱한
+/// 서버**를 본다(실측에서 기본 조회가 남의 세션을 봤다).
+pub fn queryTmuxClientNonces(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    tmux_socket: []const u8,
+    tmux_pane: []const u8,
+) ![]u8 {
+    // 원격에서 도는 한 줄. **Linux 는 `/proc/<pid>/environ`, macOS 는 `ps -E`** 로 클라이언트 env 를 읽는다.
+    // 둘 다 같은 uid 의 프로세스라 권한이 있다. 값이 없으면 빈 줄을 내 순수 층이 `unresolved` 로 접는다.
+    // ⚠️ **`tmux` 가 비대화형 PATH 에 없을 수 있다.** `ssh host cmd` 는 로그인 셸이 아니라
+    // PATH 가 `/usr/bin:/bin:/usr/sbin:/sbin` 뿐인 경우가 흔하다(2026-08-29 실측 — Homebrew tmux 가
+    // 안 잡혔다). 흔한 자리를 앞에 붙여 찾을 확률을 올리되, **못 찾으면 빈 줄이 나가 순수 층이
+    // `unresolved` 로 접는다** — 그것이 안전한 실패다(오배달보다 낫다).
+    const cmd = try std.fmt.allocPrint(allocator,
+        \\PATH="/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin:$PATH"; command -v tmux >/dev/null 2>&1 || exit 0;
+        \\tmux -S '{s}' display -p -t '{s}' '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do
+        \\tmux -S '{s}' list-clients -t "$s" -F '#{{client_pid}}' 2>/dev/null | while IFS= read -r p; do
+        \\if [ -r "/proc/$p/environ" ]; then tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^LC_MARU_PANE=//p' | head -1;
+        \\else ps -E -p "$p" 2>/dev/null | tr ' ' '\n' | sed -n 's/^LC_MARU_PANE=//p' | head -1; fi; echo; done; done
+    , .{ tmux_socket, tmux_pane, tmux_socket });
+    defer allocator.free(cmd);
+
+    const c_env0 = try allocator.dupeZ(u8, "env");
+    defer allocator.free(c_env0);
+    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(c_ssh);
+    const c_flag = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(c_flag);
+    const c_ctl = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(c_ctl);
+    const c_dest = try allocator.dupeZ(u8, dest);
+    defer allocator.free(c_dest);
+    const c_cmd = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(c_cmd);
+    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.dup2(out_pipe[1], 1);
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+    const out = readAllFd(allocator, out_pipe[0]) catch {
+        _ = std.c.close(out_pipe[0]);
+        _ = reapPid(pid);
+        return UploadError.UploadFailed;
+    };
+    _ = std.c.close(out_pipe[0]);
+    _ = reapPid(pid);
+    return out;
+}
+
 /// 스트리머를 끝낸다. **fd 를 먼저 닫는다** — 자식은 stdout 이 끊기면 다음 write 에서 EPIPE 로 죽는다.
 /// 그래도 안 죽으면 `SIGTERM` 을 보낸다(무한 루프이므로 스스로는 안 끝난다).
 pub fn stopAgentEvents(stream: Stream) void {

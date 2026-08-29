@@ -56,6 +56,12 @@ pub const log_dir_rel = "agent-turn-events";
 /// 같은 기계에 로컬 maru 도 돌 때 두 이름 규칙이 한 디렉터리에서 섞인다.
 pub const remote_log_dir_rel = ".cache/maru/remote-agent-events";
 
+/// 원격 훅이 tmux 좌표를 남기는 **옆 파일**의 확장자([계획](../../docs/plans/remote-agent-state.md) RA6).
+///
+/// 이벤트 로그(`.ndjson`)와 확장자가 달라야 한다 — 스트리머의 파일 이름 판정이 이것을 이벤트로 읽으면
+/// tmux 소켓 경로가 «훅 payload» 로 흘러 나간다.
+pub const tmux_sidecar_suffix = ".tmux";
+
 /// 훅에 신원을 넘기는 예약 환경변수 둘. **control-plane 의 `MARU_PANE_ID` 와 갈라 둔다.**
 ///
 /// 예전에는 pane 칸으로 `MARU_PANE_ID` 를 그대로 썼다. 그 값은 control-plane `auth.self` selector 이고
@@ -472,7 +478,23 @@ pub fn build(
     // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
     if (scope == .remote) {
         // 원격 경로는 **평평하다** — 인스턴스 칸이 이미 nonce 안에 들어 있다(`formatRemotePaneNonce`).
-        try out.print(allocator, "\"/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{remote_pane_env});
+        try out.print(allocator, "\"/${s}.ndjson\"", .{remote_pane_env});
+        // **tmux 좌표를 옆 파일로 남긴다**([계획](../../docs/plans/remote-agent-state.md) RA6).
+        //
+        // tmux 안에서는 `LC_MARU_PANE` 이 서버 생성 시 값으로 굳어 **남의 값이 온다** — 즉 훅은 B 의
+        // 이벤트를 A 의 파일에 적는다(값이 비는 것이 아니라 오배달이다). 그 줄의 진짜 주인은 나중에
+        // `pane → session → client` 역조회로만 되찾을 수 있고, 그러려면 **어느 서버의 어느 pane 이었는지**
+        // 가 남아 있어야 한다.
+        //
+        // **줄에 칸을 더하지 않는다.** `<provider>\t<payload JSON>` 형식이 원격에서만 달라지면 §4 가 지킨
+        // 「파서를 나누지 않는다」가 깨진다. 확장자가 다른 옆 파일이라 스트리머의 이름 판정이 이것을
+        // 이벤트 로그로 착각하지도 않는다.
+        //
+        // `>` 로 **덮어쓴다** — 이 값은 기록이 아니라 «지금 어디인가» 이고, append 하면 상한 없이 자란다.
+        // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
+        try out.appendSlice(allocator, "; printf '%s\t%s\n' \"$TMUX\" \"$TMUX_PANE\" > ");
+        try appendQuoted(out, allocator, log_dir_abs);
+        try out.print(allocator, "\"/${s}{s}\"; }} 2>/dev/null; exit 0 ", .{ remote_pane_env, tmux_sidecar_suffix });
     } else try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
     try out.appendSlice(allocator, marker_comment);
 }
@@ -1071,4 +1093,33 @@ test "parseRemotePaneNonce 는 조립기가 거부한 모양을 되돌리지 않
     try testing.expect(parseRemotePaneNonce("4331_") == null); // 빈 pane
     try testing.expect(parseRemotePaneNonce("4331_g") == null); // pane 클래스 밖(hex 아님)
     try testing.expect(parseRemotePaneNonce("../x_7") == null);
+}
+
+test "원격 커맨드는 tmux 좌표를 옆 파일에 남긴다 — 줄 형식은 그대로 둔다" {
+    // RA6: tmux 안에서는 `LC_MARU_PANE` 이 굳어 **남의 값이 온다**(값이 비는 것이 아니라 오배달이다).
+    // 그 줄의 진짜 주인은 `pane → session → client` 역조회로만 되찾을 수 있고, 그러려면 어느 서버의
+    // 어느 pane 이었는지가 남아 있어야 한다.
+    //
+    // **줄에 칸을 더하지 않는다**: `<provider>\t<payload JSON>` 이 원격에서만 달라지면 §4 가 지킨
+    // 「파서를 나누지 않는다」가 깨진다.
+    const cmd = try buildAlloc("claude", "/tmp/ev", .remote);
+    defer testing.allocator.free(cmd);
+
+    // 옆 파일: 확장자가 이벤트 로그와 달라야 스트리머가 그것을 이벤트로 안 읽는다.
+    try testing.expect(std.mem.indexOf(u8, cmd, tmux_sidecar_suffix) != null);
+    try testing.expect(!std.mem.eql(u8, tmux_sidecar_suffix, ".ndjson"));
+    try testing.expect(std.mem.indexOf(u8, cmd, "\"$TMUX\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "\"$TMUX_PANE\"") != null);
+
+    // **덮어쓴다**(`>`), append 가 아니다 — 이 값은 기록이 아니라 «지금 어디인가» 이고 append 하면 자란다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "\"$TMUX_PANE\" > ") != null);
+
+    // 이벤트 줄은 여전히 append 이고 형식이 그대로다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "'claude\t%s\n'") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, ">> ") != null);
+
+    // 로컬 커맨드는 이 축과 무관하다 — tmux 좌표를 안 남긴다(로컬은 pane 이름이 안 오염된다).
+    const local = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(local);
+    try testing.expect(std.mem.indexOf(u8, local, "TMUX") == null);
 }

@@ -47,7 +47,8 @@ test "CR5c 경계는 shared Client terminal 뒤 all-runtime unavailable 전이 �
         .{
             .id = "failHostReconnectRuntimeTransactionsAfterSharedClientTerminal",
             .contract = 0,
-            .backend = 4,
+            // CR6e-c3b2b adds the reviewed one-state frame driver caller.
+            .backend = 5,
         },
     };
     for (inventory) |entry| {

@@ -4872,6 +4872,20 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3b2a_tests.addArg("--maru-expect-tests=4");
         session_host_cr6e_c3b_step.dependOn(&run_cr6e_c3b2a_tests.step);
 
+        const cr6e_c3b2b_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/reconnect_product_coordinator.zig"),
+                .target = target,
+                .optimize = cr6e_c3b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR6e-c3b2b"},
+        });
+        const run_cr6e_c3b2b_tests = b.addRunArtifact(cr6e_c3b2b_tests);
+        run_cr6e_c3b2b_tests.addArg("--maru-expect-tests=3");
+        session_host_cr6e_c3b_step.dependOn(&run_cr6e_c3b2b_tests.step);
+
         const cr6e_c3b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_cr6e_c3b_boundary.zig"),

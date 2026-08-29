@@ -1286,8 +1286,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    순서로 닫는다. c2의 thread spawn과 AppSession caller는 0이고, c3 app-global worker가 thread 수·cancellation wake·Quit
    join을 소유한다. frame owner는 connect/hello/backoff/join을 실행하지 않고, worker는 raw runtime/adapter pointer를
    보존하거나 제품 generation을 게시하지 않는다. keep-alive opt-in 밖과 G3 default migration은 이 배선으로 바뀌지 않는다.
-   현재 c3b2a의 final-address coordinator와 admission 선예약·철회·coalesce substrate까지 구현됐고 AppSession frame caller,
-   bound admission terminal 정산과 CR5 driver는 미착수다.
+   현재 c3b2b까지 final-address coordinator의 admission 선예약·철회·coalesce, stored admission/budget identity의
+   terminal 정산, actual daemon candidate의 CR5 adoption과 closed-state driver를 구현했다. c3b2b는 (1) stored admission/budget identity의
+   all-runtime preflight와 no-fail release, (2) terminal failed logical completion 정산과 `retry_later` 동일 c1 snapshot 재큐잉,
+   (3) connected candidate의 CR5 job move 뒤 logical 정산, (4) frame당 CR5 closed-state 한 단계 driver 순서로 TDD한다.
+   CR5c `host_failure_complete` retry job은 c3b2b finalizer가 파기하지 않는다. 남은 AppSession caller와 actual disconnect E2E는
+   이 네 계약과 actual daemon coordinator E2E가 green인 뒤 c3c에서만 연다.
    **CR6f — output wake와 입력 echo 예산:** daemon-global nonblocking self-pipe를 `RuntimeManager`가 소유하고, 각
    `PtyEventQueue`는 성공한 output/terminal publication 뒤 byte wake만 수행한다. `poll_owner.Owner`가 read end를 유일하게
    poll/drain하고 같은 owner turn에서 runtime event drain과 producer sweep을 시작한다. reader thread가 socket, `Connection`,

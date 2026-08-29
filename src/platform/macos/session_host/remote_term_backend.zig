@@ -115,6 +115,13 @@ const WindowTransactionProjection = struct {
     binding_count: usize,
 };
 
+const ActualReconnectFixtureData = struct {
+    cache_base: []const u8,
+    host_id: u128,
+    host_adapter_generation: u64,
+    connection_generation: u64,
+};
+
 const B5TestState = if (builtin.is_test) struct {
     threadlocal var scan_hook: ?*const fn (*RemoteTermBackend) void = null;
     threadlocal var skip_destroy: bool = false;
@@ -132,6 +139,10 @@ const B5TestState = if (builtin.is_test) struct {
     threadlocal var cr5b2b_runtime_commit_count: usize = 0;
     threadlocal var cr5b2b_retired_counts: [3]usize = .{0} ** 3;
     threadlocal var cr5d2_window_hook: ?*const fn (*RemoteTermBackend) anyerror!void = null;
+    threadlocal var reconnect_coordinator_hook: ?*const fn (
+        *RemoteTermBackend,
+        ActualReconnectFixtureData,
+    ) anyerror!void = null;
 } else struct {};
 
 pub const RemoteBackendSingletonLifecycle = enum(u8) {
@@ -178,6 +189,15 @@ pub const HostReconnectStart = union(enum) {
     busy,
     invalid_authority,
 };
+
+pub const HostReconnectFrameProgress = enum(u8) {
+    advanced,
+    retry_later,
+    completed_ready,
+    retained_terminal_ready,
+};
+
+pub const HostReconnectTerminalKind = enum(u8) { completed, retained_terminal };
 
 const CandidatePrepareFailure = union(enum) {
     rejected_usable,
@@ -1728,11 +1748,106 @@ pub const RemoteTermBackend = struct {
         return .connected;
     }
 
+    /// Coordinator facade: reconstructs the original absolute deadline from the sealed snapshot
+    /// and moves the candidate into the existing CR5 job without exposing backend `io`.
+    pub fn adoptReconnectCoordinatorCandidate(
+        self: *RemoteTermBackend,
+        snapshot: reconnect_worker_owner.Snapshot,
+        source: *client_mod.Client,
+    ) HostReconnectStart {
+        const absolute = client_deadline.AbsoluteDeadline.fromAbsolute(
+            self.io,
+            snapshot.absolute_deadline_ns,
+        ) catch return .invalid_authority;
+        return self.beginHostReconnectCandidate(
+            snapshot,
+            attach_phase_deadline.PhaseDeadline.fromAbsolute(.connect_hello, absolute),
+            source,
+        );
+    }
+
     pub fn abortHostReconnectConnect(self: *RemoteTermBackend) !void {
         try self.validateReconnectCoordinatorTarget();
         const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
         try job.abort(self);
         self.host_reconnect_job = null;
+        self.allocator.destroy(job);
+    }
+
+    /// Advances exactly one existing CR5 closed-state transition. It never connects, waits, joins,
+    /// or loops over multiple state-machine stages in one frame turn.
+    pub fn progressHostReconnectOne(self: *RemoteTermBackend) !HostReconnectFrameProgress {
+        try self.validateReconnectCoordinatorTarget();
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self)) return error.InvalidHostReconnectJob;
+        const state = std.enums.fromInt(HostReconnectJobState, job.state_raw) orelse
+            return error.InvalidHostReconnectJob;
+        switch (state) {
+            .connected => try self.prepareHostReconnectRuntimeRetirements(),
+            .retirements_prepared => try self.prepareHostReconnectSharedReplacement(),
+            .shared_replacement_reserved => try self.commitHostReconnectSharedReplacement(),
+            .shared_replacement_published => {
+                if (job.runtime_cursor.activeRow(job.runtimeRowsSlice() orelse
+                    return error.InvalidHostReconnectJob) != null)
+                {
+                    _ = try self.beginNextHostReconnectRuntimeTransaction();
+                } else {
+                    _ = try self.completeHostReconnectRuntimeTransactions();
+                }
+            },
+            .replacement_published => _ = try self.prepareHostReconnectObserverStage(job.runtime_handle),
+            .candidate_staged => _ = try self.sealHostReconnectMutations(job.runtime_handle),
+            .mutation_sealed => _ = self.executeHostReconnectTakeover(job.runtime_handle) catch |err| {
+                if (job.valid(self) and job.state_raw != @intFromEnum(HostReconnectJobState.mutation_sealed))
+                    return .advanced;
+                return err;
+            },
+            .controller_evidenced => try self.promoteHostReconnectControllerBinding(job.runtime_handle),
+            .controller_promoted => self.publishHostReconnectGeneration(job.runtime_handle) catch |err| {
+                if (job.valid(self) and job.state_raw != @intFromEnum(HostReconnectJobState.controller_promoted))
+                    return .advanced;
+                return err;
+            },
+            .candidate_rejected, .authority_conflict, .takeover_sent_unknown, .pre_takeover_failed => {
+                _ = try self.failHostReconnectRuntimeTransactions();
+            },
+            .candidate_failed => {
+                if (job.runtime_cursor.next_index == 0) {
+                    _ = try self.failHostReconnectRuntimeTransactions();
+                } else {
+                    _ = try self.failHostReconnectRuntimeTransactionsAfterSharedClientTerminal();
+                }
+            },
+            .runtime_transactions_complete => return .completed_ready,
+            .host_failure_complete => return .retained_terminal_ready,
+            .preparing, .replacement_failed, .idle => return error.InvalidHostReconnectJob,
+        }
+        return .advanced;
+    }
+
+    pub fn preflightHostReconnectTerminal(
+        self: *RemoteTermBackend,
+    ) !HostReconnectTerminalKind {
+        try self.validateReconnectCoordinatorTarget();
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or job.terminal_summary == null or job.runtimeRowsSlice() == null)
+            return error.InvalidHostReconnectJob;
+        return switch (std.enums.fromInt(HostReconnectJobState, job.state_raw) orelse
+            return error.InvalidHostReconnectJob) {
+            .runtime_transactions_complete => .completed,
+            .host_failure_complete => .retained_terminal,
+            else => error.InvalidHostReconnectJob,
+        };
+    }
+
+    pub fn finalizeCompletedHostReconnectNoFail(self: *RemoteTermBackend) void {
+        const job = self.host_reconnect_job orelse process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self) or
+            job.state_raw != @intFromEnum(HostReconnectJobState.runtime_transactions_complete) or
+            job.terminal_summary == null)
+            process_seal.fatalIntegrity(.proof_loss);
+        self.host_reconnect_job = null;
+        job.* = .{};
         self.allocator.destroy(job);
     }
 
@@ -3268,6 +3383,56 @@ pub const RemoteTermBackend = struct {
         if (count == 0) return error.StaleAdmission;
     }
 
+    /// Preflight every same-host resident admission before the first lease release. This remains
+    /// valid after CR5 changes the current connection generation because the stored admission and
+    /// lease, rather than mutable connection state, are the terminal settlement authority.
+    pub fn preflightBoundReconnectSnapshotSettlement(
+        self: *RemoteTermBackend,
+        snapshot: reconnect_worker_owner.Snapshot,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) !void {
+        try self.validateReconnectCoordinatorTarget();
+        var count: usize = 0;
+        var preflight = self.runtimes.iterator();
+        while (preflight.next()) |row| {
+            if (row.value_ptr.host_id != snapshot.host_id) continue;
+            if (row.value_ptr.host_adapter_generation != snapshot.pool_membership_generation)
+                return error.StaleAdmission;
+            try RemoteRuntime.backend_api.preflightBoundReconnectSettlement(
+                row.value_ptr.runtime,
+                budget,
+                snapshot.host_id,
+                snapshot.pool_membership_generation,
+                snapshot.connection_generation,
+                snapshot.incident_app_instance_nonce,
+                snapshot.incident_sequence,
+            );
+            count += 1;
+        }
+        if (count == 0) return error.StaleAdmission;
+    }
+
+    pub fn settleBoundReconnectSnapshotNoFail(
+        self: *RemoteTermBackend,
+        snapshot: reconnect_worker_owner.Snapshot,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) void {
+        var settle = self.runtimes.iterator();
+        while (settle.next()) |row| {
+            if (row.value_ptr.host_id != snapshot.host_id) continue;
+            RemoteRuntime.backend_api.settleBoundReconnectAdmissionNoFail(row.value_ptr.runtime, budget);
+        }
+    }
+
+    pub fn settleBoundReconnectSnapshot(
+        self: *RemoteTermBackend,
+        snapshot: reconnect_worker_owner.Snapshot,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) !void {
+        try self.preflightBoundReconnectSnapshotSettlement(snapshot, budget);
+        self.settleBoundReconnectSnapshotNoFail(snapshot, budget);
+    }
+
     /// app-quit은 Runtime graph를 해제하기 전에 target host별 shared data connection을 한 번만 terminalize한다.
     /// 모든 host를 먼저 preflight하므로 한 host의 Busy가 앞 host fd만 닫는 partial suffix를 만들지 않는다.
     pub fn terminalizeSharedConnectionsNoDestroy(self: *RemoteTermBackend) bool {
@@ -3710,6 +3875,19 @@ pub const RemoteTermBackend = struct {
             B5TestState.cr5d2_window_hook = hook;
             defer B5TestState.cr5d2_window_hook = null;
             try runCr4aActualIssuerReplacementStage(.multi_runtime_terminal_after_success);
+        }
+
+        pub const ActualReconnectFixture = ActualReconnectFixtureData;
+
+        /// CR6e-c3b2b actual-daemon fixture. The caller drives the coordinator while this helper
+        /// retains the daemon, pool, backend, and live runtime at their product addresses.
+        pub fn runActualReconnectCoordinatorFixture(
+            hook: *const fn (*RemoteTermBackend, ActualReconnectFixture) anyerror!void,
+        ) !void {
+            if (B5TestState.reconnect_coordinator_hook != null) return error.InvalidTestState;
+            B5TestState.reconnect_coordinator_hook = hook;
+            defer B5TestState.reconnect_coordinator_hook = null;
+            try runCr4aActualIssuerReplacementStage(.coordinator_success);
         }
 
         /// CR2d3 AppSession routing fixture. `runtime`은 caller 소유이며 두 값이 scope를 벗어나기 전에
@@ -6103,6 +6281,8 @@ const Cr4aActualIssuerCandidateCase = enum {
     controller_unknown_ledger,
     controller_pre_failed_ledger,
     multi_runtime_success,
+    driver_multi_runtime_success,
+    coordinator_success,
     multi_runtime_conflict_1,
     multi_runtime_conflict_2,
     multi_runtime_conflict_3,
@@ -6210,7 +6390,9 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     var backend_owned = true;
     defer if (backend_owned) backend_value.deinit();
     const size = maru.terminal.Size{ .cols = 80, .rows = 24 };
-    const multi_runtime = selected == .multi_runtime_success or cr5b2cFailureIndex(selected) != null;
+    const multi_runtime = selected == .multi_runtime_success or
+        selected == .driver_multi_runtime_success or selected == .coordinator_success or
+        cr5b2cFailureIndex(selected) != null;
     const runtime_count: usize = if (multi_runtime) 3 else 1;
     for (0..runtime_count) |index| _ = try backend_value.backend().spawn(.{
         .handle = @intCast(index + 1),
@@ -6220,6 +6402,17 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     });
     try testing.expectEqual(runtime_count, backend_value.runtimes.count());
     const initial_connection_generation = pool.get(host_id).?.connectionGeneration();
+    if (selected == .coordinator_success) {
+        const hook = B5TestState.reconnect_coordinator_hook orelse return error.InvalidTestState;
+        try hook(&backend_value, .{
+            .cache_base = base,
+            .host_id = host_id,
+            .host_adapter_generation = pool.adapterGeneration(host_id) orelse
+                return error.InvalidTestState,
+            .connection_generation = initial_connection_generation,
+        });
+        return;
+    }
     const phase = attach_phase_deadline.PhaseDeadline.fromAbsolute(
         .connect_hello,
         client_deadline.AbsoluteDeadline.fromInjected(
@@ -6243,6 +6436,28 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     try testing.expect(job.valid(&backend_value));
     try testing.expectEqual(connected_seal, job.seal);
     try testing.expectEqual(initial_connection_generation, pool.get(host_id).?.connectionGeneration());
+    if (selected == .driver_multi_runtime_success) {
+        var advanced: usize = 0;
+        while (advanced < 64) : (advanced += 1) {
+            const before = job.state_raw;
+            switch (try backend_value.progressHostReconnectOne()) {
+                .advanced => try testing.expect(before != job.state_raw),
+                .retry_later => return error.TestUnexpectedResult,
+                .retained_terminal_ready => return error.TestUnexpectedResult,
+                .completed_ready => {
+                    try testing.expectEqual(
+                        HostReconnectTerminalKind.completed,
+                        try backend_value.preflightHostReconnectTerminal(),
+                    );
+                    backend_value.finalizeCompletedHostReconnectNoFail();
+                    try testing.expect(backend_value.host_reconnect_job == null);
+                    try testing.expectEqual(@as(usize, 0), pool.get(host_id).?.slot.retiredClientCount());
+                    return;
+                },
+            }
+        }
+        return error.TestUnexpectedResult;
+    }
     if (multi_runtime) {
         try backend_value.prepareHostReconnectRuntimeRetirements();
         try backend_value.prepareHostReconnectSharedReplacement();
@@ -6911,6 +7126,10 @@ test "CR4b actual host job은 conflict unknown pre failure를 frozen ledger로 �
 
 test "CR5b-2c actual host job은 shared Client 하나로 three-runtime을 순서대로 게시한다" {
     try runCr4aActualIssuerReplacementStage(.multi_runtime_success);
+}
+
+test "CR6e-c3b2b frame driver는 actual shared Client job을 한 closed state씩 끝낸다" {
+    try runCr4aActualIssuerReplacementStage(.driver_multi_runtime_success);
 }
 
 test "CR5b-2c actual host job은 kth failure에서 앞선 publication을 보존하고 suffix를 닫는다" {

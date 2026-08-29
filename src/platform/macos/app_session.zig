@@ -72258,3 +72258,102 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     try std.testing.expectEqual(@as(usize, 0), uploads2.len); // 업로드는 한 번뿐이다
     try std.testing.expectEqual(@as(usize, 0), pixels2.len);
 }
+
+test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장」으로 말한다 (IG3-c3)" {
+    // **「없다」와 「안 보인다」는 다른 사실이다.** 스크롤이 아직 없어 첫 화면만 그려지는데,
+    // 그걸 안 알리면 사용자는 나머지를 놓치고도 다 봤다고 믿는다. 계약 §2.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    const image_count: usize = 40; // 좁은 도크 격자보다 확실히 많다
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(allocator);
+    for (0..image_count) |_| try transcript.appendSlice(allocator, one);
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(dock_ops.dockVisible(session));
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(image_count, session.image_gallery.count());
+
+    // 타일이 하나라도 나와야 격자를 그리는 상태다 — 그 전에는 「스캔 중」이 문구를 가진다.
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expect(session.image_gallery.tiles.items.len > 0);
+
+    const l = maru.session.image_grid.layout(
+        image_gallery_ops.gridArea(session),
+        image_gallery_ops.gridMetrics(session),
+        image_count,
+    );
+    // 이 test 가 볼 것이 실제로 있는지 먼저 못박는다 — 다 들어가면 검증할 게 없다.
+    try std.testing.expect(l.overflow > 0);
+
+    var images: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels: []u8 = &.{};
+    var live: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images);
+        allocator.free(uploads);
+        allocator.free(pixels);
+        live.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    try std.testing.expectEqual(l.overflow, session.image_gallery.overflow);
+
+    var buf: [64]u8 = undefined;
+    var want_buf: [64]u8 = undefined;
+    const want = maru.i18n.format(&want_buf, maru.i18n.t(.image_gallery_shown_of), &.{
+        .{ .d = @intCast(image_count - l.overflow) },
+        .{ .d = @intCast(image_count) },
+    });
+    try std.testing.expectEqualStrings(want, image_gallery_ops.noticeText(session, &buf));
+    // 문구가 «두 수를 다 말하는지» 본다 — 어순은 언어마다 다르지만 두 숫자는 어느 쪽에도 있어야 한다.
+    var shown_buf: [24]u8 = undefined;
+    var total_buf: [24]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&shown_buf, "{d}", .{image_count - l.overflow})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&total_buf, "{d}", .{image_count})) != null);
+}

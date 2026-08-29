@@ -354,6 +354,10 @@ const Table = struct {
     image_gallery_scanning: [:0]const u8,
     /// 개수 뒤에 붙는 단위. 「12장」처럼 숫자와 이어 붙인다.
     image_gallery_count_suffix: [:0]const u8,
+    /// 격자에 다 못 들어갈 때. **「없다」와 「안 보인다」는 다른 사실이다** — 접으면 사용자가
+    /// 이미지를 놓치고도 모른다(계약 §2). `{0}` 보이는 수, `{1}` 전체 수. 두 언어의 **어순이
+    /// 반대**라(en "4 of 12" / ko "12장 중 4장") 조각을 이어 붙이면 한쪽이 반드시 틀린다.
+    image_gallery_shown_of: [:0]const u8,
     agent_hook_notice_done: [:0]const u8,
     agent_hook_notice_failed: [:0]const u8,
     agent_hook_notice_attention: [:0]const u8,
@@ -1263,6 +1267,7 @@ const en: Table = .{
     .image_gallery_partial = "Could not read the whole session",
     .image_gallery_scanning = "Scanning…",
     .image_gallery_count_suffix = " images",
+    .image_gallery_shown_of = "{0} of {1} images",
     .agent_hook_notice_done = "Turn finished",
     .agent_hook_notice_failed = "Turn ended with an error",
     .agent_hook_notice_attention = "Waiting for your approval",
@@ -1837,6 +1842,7 @@ const ko: Table = .{
     .image_gallery_partial = "세션을 다 읽지 못했습니다",
     .image_gallery_scanning = "세는 중…",
     .image_gallery_count_suffix = "장",
+    .image_gallery_shown_of = "{1}장 중 {0}장",
     .agent_hook_notice_done = "턴이 끝났습니다",
     .agent_hook_notice_failed = "턴이 오류로 끝났습니다",
     .agent_hook_notice_attention = "승인을 기다리는 중",

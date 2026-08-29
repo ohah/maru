@@ -41,6 +41,9 @@ pub const State = struct {
     awaiting: u64 = 0,
     /// 워커가 바빠 아직 못 건 요청이 있다. 다음 tick 이 다시 건다.
     resubmit: bool = false,
+    /// 격자에 자리를 못 얻은 이미지 수. **계산해 두고 안 쓰면 사용자가 이미지를 놓치고도 모른다** —
+    /// 「없다」와 「안 보인다」를 가르는 값이다(계약 §2). 매 frame `appendGpuImages` 가 갱신한다.
+    overflow: usize = 0,
     /// 지금 디코드를 걸어 둔 요청의 generation. 0 이면 없다. **한 번에 한 장만 푼다** —
     /// 여러 스레드를 띄우면 빨리 차지만 CPU 를 그만큼 먹고, 뷰를 떠나면 그 일이 전부 버려진다.
     decoding: u64 = 0,
@@ -72,6 +75,7 @@ pub const State = struct {
         self.awaiting = 0;
         self.resubmit = false;
         self.decoding = 0;
+        self.overflow = 0;
     }
 
     pub fn count(self: *const State) usize {
@@ -350,6 +354,8 @@ pub fn appendGpuImages(
     const area = gridArea(self);
     const m = gridMetrics(self);
     const l = image_grid.layout(area, m, self.image_gallery.count());
+    // **자리를 못 얻은 수를 남긴다.** 0 칸이어도(좁은 도크) 남겨야 「없다」로 거짓말하지 않는다.
+    self.image_gallery.overflow = l.overflow;
     if (l.visible == 0) return;
 
     // 보이는 칸만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
@@ -435,8 +441,15 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     if (self.image_gallery.partial) return maru.i18n.t(.image_gallery_partial);
     const n = self.image_gallery.count();
     if (n == 0) return maru.i18n.t(.image_gallery_empty);
-    // 격자가 그려지고 있으면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
-    if (self.image_gallery.tiles.items.len > 0) return "";
+    // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
+    // **다 못 보여 줄 때만 말한다**: 「4/12장」. 이 줄이 없으면 사용자는 8장을 놓치고도 모른다.
+    if (self.image_gallery.tiles.items.len > 0) {
+        if (self.image_gallery.overflow == 0) return "";
+        return maru.i18n.format(buf, maru.i18n.t(.image_gallery_shown_of), &.{
+            .{ .d = @intCast(n - self.image_gallery.overflow) },
+            .{ .d = @intCast(n) },
+        });
+    }
     // 문구가 안 들어가면 개수를 지어내지 않는다 — 빈 문자열이 낫다.
     return std.fmt.bufPrint(buf, "{d}{s}", .{ n, maru.i18n.t(.image_gallery_count_suffix) }) catch buf[0..0];
 }

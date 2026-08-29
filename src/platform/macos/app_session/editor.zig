@@ -200,6 +200,15 @@ const diff_frame = chrome_editor.diff_frame;
 fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
     if (term.rt.editor_diff != null) return &.{};
     const doc = term.rt.editor_doc orelse return &.{};
+
+    // **끊긴 파싱을 이 프레임 몫만큼 이어 판다**(§2.1a). 여는 파싱이 한 프레임에 안 끝나는 문서가
+    // 있으므로(690KB `build.zig` 실측 ~50ms) 프레임마다 예산만큼만 판다. 아직 남았으면 **다음 프레임을
+    // 부른다** — 그러지 않으면 idle skip이 도는 순간 파싱이 거기서 멈춰 색이 영영 안 온다.
+    //
+    // **여기 두는 이유**: 이 함수가 색을 만드는 유일한 자리이고 프레임마다 불린다. 별도 tick 훅을
+    // 두면 "언제 이어 파는가"의 출처가 둘이 된다.
+    if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) self.metal_dirty = true;
+
     const first = term.rt.editor_first_line;
     if (first >= term.rt.editor_lines.len) return &.{};
     // 화면 높이를 모르는 자리라 **넉넉히** 잡는다 — 랩이 켜지면 논리 줄 하나가 여러 행이 되므로
@@ -15501,6 +15510,72 @@ test "ES19 탭 폭을 바꾸면 색 경계가 따라온다 — 제품 경로로 
     // 탭 넷 × 8열 = 32열에서 `const`가 시작한다. 탭 폭이 4로 박히면 16, 1로 세면 4다.
     try testing.expect(kw_start != null);
     try testing.expectEqual(@as(u32, 32), kw_start.?);
+}
+
+test "ES21 큰 파일은 여는 프레임에 다 안 판다 — 이어 파고 결국 색이 온다 (§2.1a)" {
+    // **§2.1a가 제품에 닿았는지 재는 자리다.** 층(`SYN15`~`SYN17`)이 서도 배선이 예산을 안 걸면
+    // 여는 프레임이 그대로 멈춘다 — 그 멈춤은 판정자가 아니라 손에만 나타난다.
+    //
+    // **여기서 "다 안 판다"를 어떻게 아는가**: 여는 직후 `pending`이 참이고 트리가 아직 없다.
+    // 그 뒤 프레임을 돌리면(`appendPaneFrame`이 `resumeParse`를 부른다) 결국 색이 온다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 예산(4ms)을 한 번에 못 끝낼 만큼 조밀한 문서를 만든다.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 6000) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
+
+    // 여는 경로를 다시 태운다 — 위 삽입은 증분 경로라 열기와 다르다.
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+
+    // ⑴ 한 프레임에 안 끝났다.
+    try testing.expect(fx.term.rt.editor_syntax.pending);
+    try testing.expect(fx.term.rt.editor_syntax.provider.?.tree == null); // 그동안 무색이다(§5)
+
+    // ⑵ 프레임을 돌리면 이어 판다. 무한이 아니라 **유한 프레임 안에** 끝나야 한다.
+    var frames: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and frames < 500) : (frames += 1) {
+        var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse
+            return error.NoFrame;
+        d.dl.deinit(allocator);
+    }
+    try testing.expect(!fx.term.rt.editor_syntax.pending);
+    try testing.expect(frames > 0); // 실제로 나뉘었다 — 한 프레임에 끝났으면 ⑴이 이미 실패한다
+
+    // ⑶ 그리고 색이 온다.
+    var rows = std.AutoHashMap(i32, void).init(allocator);
+    defer rows.deinit();
+    try coloredRows(fx.session, fx.term, &rows);
+    try testing.expect(rows.count() >= 5);
+}
+
+test "ES22 파싱이 남아 있으면 다음 프레임을 부른다 — idle skip 에 멈추지 않는다" {
+    // **이 배선이 없으면 색이 영영 안 온다.** 렌더 루프에는 idle skip이 있어(투영 게이트) 아무도
+    // 프레임을 요청하지 않으면 다음 프레임이 안 온다. 이어 팔 것이 남았으면 그 자신이 프레임을
+    // 불러야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 6000) : (i += 1) _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    try testing.expect(fx.term.rt.editor_syntax.pending);
+
+    fx.session.metal_dirty = false;
+    var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse
+        return error.NoFrame;
+    d.dl.deinit(allocator);
+    try testing.expect(fx.session.metal_dirty); // 남았으니 다음 프레임을 불렀다
 }
 
 test "ES20 화면 맨 윗줄도 칠해진다 — 한 줄 어긋남을 잡는다" {

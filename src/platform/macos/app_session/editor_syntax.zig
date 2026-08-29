@@ -31,6 +31,10 @@ pub const State = struct {
     /// grammar가 없거나 파서를 못 세우면 `null`이고, 그러면 이 문서는 끝까지 무색이다(§5).
     provider: ?syntax.Provider = null,
 
+    /// 파싱이 **예산에 끊겨 남아 있는가**(§2.1a). 참인 동안 프레임마다 `resumeParse`가 이어 판다.
+    /// 그 사이 이 문서는 무색이거나(전체 파싱) 직전 색이다(증분).
+    pending: bool = false,
+
     /// 질의 결과(문서 byte 축). 프레임마다 다시 채우되 **저장소는 재사용한다**.
     spans: std.ArrayList(syntax.Span) = .empty,
     /// 줄별 색 구간이 실리는 평평한 저장소.
@@ -74,8 +78,37 @@ pub fn syntaxLanguage(lang: editor_language.Language) syntax.Language {
 }
 
 /// 문서를 연다. **실패는 무색이다** — 오류로 올리지 않는다(§5.3의 모든 진입점과 같은 규율).
+/// **한 프레임에 파싱에 쓸 수 있는 시간**(§2.1a). 60fps 예산 16.7ms 중 이만큼만 구문 트리에 준다 —
+/// 나머지는 랩 계수·레이아웃·lowering·드로우가 쓴다.
+///
+/// **4ms를 고른 근거**: 이 자리에서 이미 알려진 다른 프레임 비용이 랩 계수 0.2ms(`RowCache` 실측,
+/// layering §2.1)이고, 편집기 한 프레임이 그 밖에 무엇을 하는지는 pane 합성이 소유한다. 예산을 더
+/// 키우면 큰 파일이 덜 나뉘는 대신 한 프레임이 길어지고, 줄이면 색이 늦게 온다. **끊는 지점이
+/// 정확하지 않다는 것도 감안했다** — progress callback은 파서가 주기적으로 부르므로 예산을 조금
+/// 넘겨서 끊긴다(`ES21`이 그 초과를 잰다).
+pub const frame_parse_budget_ns: u64 = 4 * std.time.ns_per_ms;
+
+/// 문서를 연다. **실패는 무색이다** — 오류로 올리지 않는다(§5.3의 모든 진입점과 같은 규율).
+///
+/// **여는 파싱도 예산을 든다**(§2.1a). 690KB `build.zig`는 한 프레임에 못 판다 — 그동안 무색으로
+/// 그리고 다음 프레임에 이어 판다.
 pub fn open(source: []const u8, lang: editor_language.Language) State {
-    return .{ .provider = syntax.Provider.init(source, syntaxLanguage(lang)) };
+    var st: State = .{ .provider = syntax.Provider.init(source, syntaxLanguage(lang), frame_parse_budget_ns) };
+    st.pending = st.provider != null and st.provider.?.tree == null and source.len > 0;
+    return st;
+}
+
+/// 끊긴 파싱을 **이어 판다**. 프레임마다 부르고, 아직 안 끝났으면 `true`를 돌려준다 —
+/// 호출자가 그 프레임을 다시 그리게 만들어야 다음 조각이 돈다.
+pub fn resumeParse(self: *State, source: []const u8) bool {
+    if (!self.pending) return false;
+    var p = &(self.provider orelse {
+        self.pending = false;
+        return false;
+    });
+    const status = p.setSourceBudgeted(source, frame_parse_budget_ns);
+    self.pending = status == .pending;
+    return self.pending;
 }
 
 /// 제품이 넘기는 **편집 한 번의 byte 범위**. 행·열은 이 모듈이 줄 인덱스로 채운다 —

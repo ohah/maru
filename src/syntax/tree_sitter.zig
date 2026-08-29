@@ -234,7 +234,7 @@ pub const Provider = struct {
     /// 사람이 두 번 헤맨다).
     ///
     /// grammar가 없으면 `null` — 그 문서는 무색이다(§5).
-    pub fn init(source: []const u8, lang: Language) ?Provider {
+    pub fn init(source: []const u8, lang: Language, budget_ns: u64) ?Provider {
         const slot = slotFor(lang) orelse return null;
         const parser = c.ts_parser_new() orelse return null;
         if (!c.ts_parser_set_language(parser, slot.language)) {
@@ -242,7 +242,7 @@ pub const Provider = struct {
             return null;
         }
         var self: Provider = .{ .parser = parser, .slot = slot };
-        self.setSource(source);
+        _ = self.setSourceBudgeted(source, budget_ns);
         return self;
     }
 
@@ -252,6 +252,72 @@ pub const Provider = struct {
         self.* = undefined;
     }
 
+    /// 한 번의 파싱이 **끝났는가**. `pending`이면 다음 프레임에 같은 인자로 다시 부른다 —
+    /// tree-sitter가 **멈춘 자리부터 재개**한다(§2.1a · `ts_parser_reset` 계약).
+    pub const ParseStatus = enum { done, pending };
+
+    /// 예산을 든 파싱. 끊기면 **옛 트리를 그대로 둔다** — 그래야 그 사이 프레임이 직전 색으로 그린다
+    /// (§2.1a의 저하 규율, 랩 계수의 `RowCache.hold`와 같은 모양).
+    ///
+    /// **`ts_parser_parse_string`을 못 쓴다.** 옵션을 받는 진입점은 `ts_parser_parse_with_options`
+    /// 하나이고 그것은 `TSInput`(콜백)만 받는다 — 문자열 변형이 없다. 그래서 슬라이스를 한 번에
+    /// 돌려주는 reader를 얹는다(조각내지 않는다 — 우리 버퍼는 이미 연속이다).
+    fn parseBudgeted(self: *Provider, source: []const u8, old_tree: ?*c.TSTree, budget_ns: u64) ParseStatus {
+        var ctx: ParseCtx = .{ .source = source, .deadline_ns = monotonicNs() + budget_ns, .budget_ns = budget_ns };
+        const input: c.TSInput = .{
+            .payload = &ctx,
+            .read = readSlice,
+            .encoding = c.TSInputEncodingUTF8,
+            .decode = null,
+        };
+        const opts: c.TSParseOptions = .{ .payload = &ctx, .progress_callback = onProgress };
+        const next = c.ts_parser_parse_with_options(self.parser, old_tree, input, opts);
+        if (next) |t| {
+            if (self.tree) |old| {
+                if (old != t) c.ts_tree_delete(old);
+            }
+            self.tree = t;
+            return .done;
+        }
+        // **끊겼다.** 옛 트리는 그대로 두고(위 규율) 다음 프레임에 재개한다. 파서가 자기 안에
+        // 진행 상태를 들고 있으므로 우리가 더 들 것은 "아직 끝나지 않았다" 하나다.
+        return .pending;
+    }
+
+    const ParseCtx = struct {
+        source: []const u8,
+        deadline_ns: u64,
+        budget_ns: u64,
+    };
+
+    /// 슬라이스를 통째로 돌려주는 reader. 끝을 넘으면 길이 0 — tree-sitter가 그것을 EOF로 읽는다.
+    fn readSlice(payload: ?*anyopaque, byte_index: u32, _: c.TSPoint, bytes_read: [*c]u32) callconv(.c) [*c]const u8 {
+        const ctx: *ParseCtx = @ptrCast(@alignCast(payload.?));
+        if (byte_index >= ctx.source.len) {
+            bytes_read.* = 0;
+            return null;
+        }
+        bytes_read.* = @intCast(ctx.source.len - byte_index);
+        return @ptrCast(ctx.source.ptr + byte_index);
+    }
+
+    /// 예산이 찼으면 `true` — tree-sitter가 파싱을 끊는다.
+    ///
+    /// **예산이 0이면 안 끊는다.** 0은 "예산 없음"이고(호출자가 동기 파싱을 원한다), 그때 이 콜백이
+    /// 늘 참이면 파싱이 영영 안 끝난다.
+    fn onProgress(state: [*c]c.TSParseState) callconv(.c) bool {
+        const st = state orelse return false;
+        const ctx: *ParseCtx = @ptrCast(@alignCast(st.*.payload.?));
+        if (ctx.budget_ns == 0) return false;
+        return monotonicNs() >= ctx.deadline_ns;
+    }
+
+    fn monotonicNs() u64 {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
     /// 문서 내용이 **통째로** 바뀌었다(디스크에서 다시 읽기 등) — 전체를 다시 판다.
     ///
     /// **편집에는 `onEdit`을 쓴다.** 실측으로 81배 차이가 난다(154KB에서 5.3ms 대 65µs) —
@@ -259,12 +325,20 @@ pub const Provider = struct {
     ///
     /// **상한을 넘으면 트리를 버린다**(그 뒤 질의는 빈 목록이다).
     pub fn setSource(self: *Provider, source: []const u8) void {
+        _ = self.setSourceBudgeted(source, 0);
+    }
+
+    /// 예산을 든 전체 파싱(§2.1a). `pending`이면 **같은 `source`로 다음 프레임에 다시 부른다**.
+    ///
+    /// **옛 트리는 시작할 때 버린다** — 내용이 통째로 바뀌었으므로 그것으로 그리면 다른 문서의 색이다.
+    /// 그래서 이 경로가 pending인 동안은 **무색**이다(§5의 저하).
+    pub fn setSourceBudgeted(self: *Provider, source: []const u8, budget_ns: u64) ParseStatus {
         if (self.tree) |t| {
             c.ts_tree_delete(t);
             self.tree = null;
         }
-        if (source.len == 0 or source.len > max_parse_bytes) return;
-        self.tree = c.ts_parser_parse_string(self.parser, null, source.ptr, @intCast(source.len));
+        if (source.len == 0 or source.len > max_parse_bytes) return .done;
+        return self.parseBudgeted(source, null, budget_ns);
     }
 
     /// 편집 하나를 알린 뒤 **증분으로** 다시 판다. `source`는 **바뀐 뒤**의 내용이다.
@@ -273,8 +347,14 @@ pub const Provider = struct {
     /// 실측이 그것을 반증했다 — 그렇게 하면 증분이 전체 재파싱보다 **더 느리다**(154KB에서 9.8ms
     /// 대 5ms, 618KB에서 30ms 대 21ms). tree-sitter가 어긋난 위치를 되맞추느라 더 일한다.
     pub fn onEdit(self: *Provider, source: []const u8, e: Edit) void {
+        self.onEditBudgeted(source, e, 0);
+    }
+
+    /// 예산을 든 증분 파싱(§2.1a). 끊기면 **옛 트리로 계속 그린다** — 편집 전 색이지만 무색보다 낫고,
+    /// 다음 프레임에 재개한다.
+    pub fn onEditBudgeted(self: *Provider, source: []const u8, e: Edit, budget_ns: u64) void {
         const old_tree = self.tree orelse {
-            self.setSource(source);
+            _ = self.setSourceBudgeted(source, budget_ns);
             return;
         };
         if (source.len == 0 or source.len > max_parse_bytes) {
@@ -291,9 +371,7 @@ pub const Provider = struct {
             .new_end_point = .{ .row = e.new_end_point.row, .column = e.new_end_point.column },
         };
         c.ts_tree_edit(old_tree, &edit);
-        const next = c.ts_parser_parse_string(self.parser, old_tree, source.ptr, @intCast(source.len));
-        c.ts_tree_delete(old_tree);
-        self.tree = next;
+        _ = self.parseBudgeted(source, old_tree, budget_ns);
     }
 
     /// 이 byte 범위의 색 조각. **트리가 없으면 빈 목록**이다 — 실패는 늘 무색으로 떨어진다(§5).
@@ -627,7 +705,7 @@ test "SYN10 Provider 가 C 메모리를 안 남긴다 — 열고 고치고 닫�
         defer spans.deinit(allocator);
 
         const src1 = "const x = 1;\npub fn f() void {}\n";
-        var prov = Provider.init(src1, .zig) orelse return error.NoProvider;
+        var prov = Provider.init(src1, .zig, 0) orelse return error.NoProvider;
         prov.spansForRange(allocator, src1, .{ .start = 0, .end = src1.len }, &spans);
         try std.testing.expect(spans.items.len > 0);
 
@@ -789,7 +867,7 @@ test "SYN13 onEdit 이 옛 트리를 실제로 재사용한다 — 전체 재파
     c.ts_set_allocator(totalMalloc, totalCalloc, totalRealloc, totalFree);
     defer c.ts_set_allocator(null, null, null, null);
 
-    var prov = Provider.init(src1, .zig) orelse return error.NoProvider;
+    var prov = Provider.init(src1, .zig, 0) orelse return error.NoProvider;
     defer prov.deinit();
 
     total_allocs = 0;
@@ -824,7 +902,7 @@ test "SYN14 편집 뒤 색이 새 내용을 따른다 — 통지 없이는 옛 �
     const after = "const a = 1;\n// zzz\n";
     const line2: u32 = @intCast(std.mem.indexOfScalar(u8, before, '\n').? + 1);
 
-    var prov = Provider.init(before, .zig) orelse return error.NoProvider;
+    var prov = Provider.init(before, .zig, 0) orelse return error.NoProvider;
     defer prov.deinit();
 
     prov.spansForRange(allocator, before, .{ .start = 0, .end = @intCast(before.len) }, &spans);
@@ -848,4 +926,101 @@ fn hasCaptureAt(spans: []const Span, comptime prefix: []const u8, at: u32) bool 
         if (sp.start == at and std.mem.startsWith(u8, sp.capture, prefix)) return true;
     }
     return false;
+}
+
+// ── 예산 판정(§2.1a — 끊고 재개한다) ────────────────────────────────────────────
+
+/// 판정자용 큰 문서. 내용이 조밀할수록 파싱이 비싸므로(§2.1a의 실측 근거 ⑵) 조밀하게 만든다.
+fn denseSource(allocator: std.mem.Allocator, lines: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < lines) : (i += 1) {
+        try buf.appendSlice(allocator, "pub fn f() void { const s = \"abc\"; _ = s; } // c\n");
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+test "SYN15 예산이 파싱을 끊는다 — 그리고 재개해서 끝난다" {
+    // **§2.1a의 심장이다.** 예산이 안 끊으면 큰 파일이 프레임을 통째로 먹고, 재개가 안 되면
+    // 색이 영영 안 온다. 둘 다 화면에만 나타나는 종류라 값으로 못박는다.
+    const allocator = std.testing.allocator;
+    const src = try denseSource(allocator, 3000);
+    defer allocator.free(src);
+
+    var warm: std.ArrayList(Span) = .empty;
+    defer warm.deinit(allocator);
+    highlights(allocator, .zig, "const x = 1;", &warm);
+
+    var prov = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+
+    // 1µs 예산 — 이 크기에서는 반드시 끊긴다.
+    var status = prov.setSourceBudgeted(src, 1_000);
+    try std.testing.expectEqual(Provider.ParseStatus.pending, status);
+    try std.testing.expect(prov.tree == null); // 끊긴 동안은 트리가 없다 → 무색(§5)
+
+    // 재개한다. **같은 인자로 다시 부르는 것**이 계약이다(ts_parser_reset 주석).
+    var rounds: usize = 0;
+    while (status == .pending and rounds < 10_000) : (rounds += 1) {
+        status = prov.setSourceBudgeted(src, 1_000);
+    }
+    try std.testing.expectEqual(Provider.ParseStatus.done, status);
+    try std.testing.expect(rounds > 0); // 한 번에 안 끝났다 = 실제로 나뉘었다
+    try std.testing.expect(prov.tree != null);
+}
+
+test "SYN16 나눠 판 결과가 한 번에 판 것과 같다 — 재개가 트리를 바꾸지 않는다" {
+    // **이것이 §2.1a의 전제다.** 헤더는 재개를 약속하지만, 이어 판 결과가 한 번에 판 것과 다르면
+    // 예산에 따라 색이 달라진다 — 기계와 부하에 따라 화면이 달라진다는 뜻이고 그건 못 쓴다.
+    const allocator = std.testing.allocator;
+    const src = try denseSource(allocator, 1200);
+    defer allocator.free(src);
+
+    var whole: std.ArrayList(Span) = .empty;
+    defer whole.deinit(allocator);
+    var split: std.ArrayList(Span) = .empty;
+    defer split.deinit(allocator);
+
+    var a = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer a.deinit();
+    try std.testing.expectEqual(Provider.ParseStatus.done, a.setSourceBudgeted(src, 0)); // 예산 없음 = 한 번에
+    a.spansForRange(allocator, src, .{ .start = 0, .end = @intCast(src.len) }, &whole);
+    try std.testing.expect(whole.items.len > 0);
+
+    var b = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer b.deinit();
+    var status = Provider.ParseStatus.pending;
+    var rounds: usize = 0;
+    while (status == .pending and rounds < 100_000) : (rounds += 1) {
+        status = b.setSourceBudgeted(src, 1_000);
+    }
+    try std.testing.expectEqual(Provider.ParseStatus.done, status);
+    try std.testing.expect(rounds > 1); // 실제로 나뉘었다
+    b.spansForRange(allocator, src, .{ .start = 0, .end = @intCast(src.len) }, &split);
+
+    try std.testing.expectEqual(whole.items.len, split.items.len);
+    for (whole.items, split.items) |w, sp| {
+        try std.testing.expectEqual(w.start, sp.start);
+        try std.testing.expectEqual(w.end, sp.end);
+        try std.testing.expectEqualStrings(w.capture, sp.capture);
+    }
+}
+
+test "SYN17 예산 0은 안 끊는다 — 기존 동기 경로가 그대로다" {
+    // `setSource`·`onEdit`(예산 없는 얼굴)이 지금까지대로 한 번에 끝나야 한다. 이 판정자가 없으면
+    // 예산 장치가 동기 경로까지 끊어 버리는 회귀가 조용히 지나간다.
+    const allocator = std.testing.allocator;
+    const src = try denseSource(allocator, 800);
+    defer allocator.free(src);
+
+    var prov = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    try std.testing.expectEqual(Provider.ParseStatus.done, prov.setSourceBudgeted(src, 0));
+    try std.testing.expect(prov.tree != null);
+
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+    prov.spansForRange(allocator, src, .{ .start = 0, .end = 200 }, &spans);
+    try std.testing.expect(spans.items.len > 0);
 }

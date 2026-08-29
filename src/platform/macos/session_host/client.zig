@@ -15214,9 +15214,21 @@ pub const Client = struct {
         );
     }
 
+    /// **심각도는 taxonomy 가 이미 알고 있다.** `client_poison.Decision.expected` 가 "이 reason 은 설계상
+    /// 지나갈 수 있는 것"을 뜻하므로 그대로 쓴다 — 판정을 여기서 다시 만들면 두 출처가 갈린다.
+    ///
+    /// 전부 `err` 로 찍던 것을 고친다. `planned_upgrade_reconnect` 는 **이름에 planned 가 박혀 있는데도**
+    /// `error:` 로 나갔고, exec 업그레이드마다 `connection_eof` 와 함께 쌓였다. 2026-08-29 에 그 줄들을 보고
+    /// 앱의 조용한 종료와 잘못 연결지어 원인을 헛짚었다 — 로그가 진단을 돕는 대신 방해한 것이다.
+    /// 예정된 것은 `info`, 그렇지 않은 것(`frame_malformed`·`peer_contract_violation` 등)만 `err` 로 남긴다.
     fn logPoisonCallSite(reason: client_poison.ConnectionReason, ra: usize) void {
         if (builtin.is_test) return;
-        std.log.err("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });
+        const decision = client_poison.decisionFor(client_poison.outcomeForConnection(reason));
+        if (decision.expected) {
+            std.log.info("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });
+        } else {
+            std.log.err("client poison: reason={s} return_address=0x{x}", .{ @tagName(reason), ra });
+        }
     }
 
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을

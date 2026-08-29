@@ -85,7 +85,9 @@ pub fn parseArgs(args: []const []const u8) Mode {
 pub fn nonceFromFileName(name: []const u8) ?[]const u8 {
     if (!std.mem.endsWith(u8, name, log_suffix)) return null;
     const nonce = name[0 .. name.len - log_suffix.len];
-    if (nonce.len == 0 or nonce.len > command.remote_pane_nonce_max) return null;
+    // ⚠️ **nonce 상한이 아니라 파일 이름 상한으로 잰다.** tmux 안에서는 `_t<pane>` 이 붙고 host 소유
+    // nonce 는 이미 nonce 상한을 꽉 채운다 — nonce 상한으로 재면 그 파일이 통째로 건너뛰어진다.
+    if (nonce.len == 0 or nonce.len > command.remote_log_name_max) return null;
     if (!command.instance_token_class.accepts(nonce)) return null;
     return nonce;
 }
@@ -173,6 +175,46 @@ pub const truncate_at_bytes: u64 = hook_event.rotate_at_bytes;
 /// 배지로 옮길 값이 이미 아니다(가장 최근 상태만 뜻이 있는데 그것은 다음 이벤트가 다시 준다).
 pub fn shouldDropAtStartup(size: u64) bool {
     return size >= truncate_at_bytes;
+}
+
+/// **오래 손 안 댄 파일인가.** 바이트에는 상한이 있는데 «파일 수» 에는 없었다 — 비워진 로그와 옆 파일은
+/// 그 pane 이 사라져도 남고, tmux pane 번호는 단조 증가라 이름이 재사용되지 않는다. 스트리머는 매 회차
+/// 디렉터리를 통째로 훑으므로 **훑는 비용 자체가 자란다**.
+///
+/// 저장소가 원격 드롭 디렉터리에 이미 쓰는 정책(`find … -mtime +7 -delete`)과 **같은 7 일**이다 —
+/// 두 곳이 다른 값을 쓰면 「원격 파일은 언제 사라지나」에 답이 둘이 된다.
+pub fn isStale(now_ns: i128, mtime_ns: i128) bool {
+    if (mtime_ns > now_ns) return false; // 미래 mtime(시계 되돌림·NFS) — 지우지 않는다
+    return now_ns - mtime_ns > stale_after_ns;
+}
+
+pub const stale_after_ns: i128 = 7 * 24 * 60 * 60 * @as(i128, std.time.ns_per_s);
+
+/// tmux 역조회 결과를 얼마나 믿을 것인가.
+///
+/// ⚠️ **옆 파일 내용만으로는 무효화가 안 된다.** 파일 이름을 tmux pane 으로 가른 뒤(RA6) 한 파일의 옆
+/// 파일은 **늘 같은 값**이다(같은 소켓·같은 pane). 그런데 그 pane 의 «진짜 주인» 은 바뀔 수 있다 —
+/// 사용자가 detach 하고 **다른 maru pane 에서 attach** 하면 클라이언트 env 의 nonce 가 달라진다.
+/// 그때 캐시가 안 풀리면 옛 주인에게 **영구히 오배달**된다(적대적 검증 2026-08-29 이 잡았다 — 이 결함은
+/// 이름을 가르는 수정이 스스로 만든 것이다).
+///
+/// 그래서 시간으로도 푼다. 조회는 **이벤트가 도착했을 때만** 도므로, 조용한 pane 은 이 값과 무관하게
+/// 아무 비용이 없다.
+pub const route_ttl_ms: u64 = 5_000;
+
+/// tmux 역조회 하나에 줄 수 있는 시간.
+///
+/// ⚠️ **하트비트 주기보다 넉넉히 짧아야 한다.** 조회는 이 프로세스의 주 루프에서 동기로 돌므로, 이
+/// 값이 하트비트 주기(5 초)에 가까우면 멎은 tmux 하나가 **하트비트를 굶겨** 소비자가 침묵을 사망으로
+/// 읽는다(15 초) — 그러면 그 호스트의 채널이 통째로 강등되고 tmux 와 무관한 pane 까지 함께 죽는다.
+///
+/// 조회는 같은 기계의 로컬 `tmux` 호출 둘이라 정상이면 수십 ms 다. 2 초는 그 100 배 가까이이고,
+/// 그것을 넘겼다면 tmux 가 멎은 것이므로 **포기하는 쪽이 옳다**(훅 타임아웃이 같은 논리를 쓴다).
+pub const lookup_deadline_ms: u64 = 2_000;
+
+/// 이 pane 의 귀속을 다시 물어야 하나.
+pub fn shouldRefreshRoute(now_ms: u64, last_ms: u64) bool {
+    return now_ms -| last_ms >= route_ttl_ms;
 }
 
 /// 한 회차에 한 파일에서 읽는 양. **«남은 전부» 를 요구하면 안 된다** — 안 읽은 구간이 그 값을 넘긴
@@ -278,4 +320,47 @@ test "시작 시 정리는 상한을 넘긴 것만 거둔다 — 방금 생긴 �
     try testing.expect(!shouldDropAtStartup(truncate_at_bytes - 1));
     try testing.expect(shouldDropAtStartup(truncate_at_bytes));
     try testing.expect(shouldDropAtStartup(truncate_at_bytes * 9));
+}
+
+test "nonceFromFileName: tmux 칸이 붙은 host 소유 이름도 받는다 — nonce 상한으로 재면 통째로 사라진다" {
+    // `host_<32hex>_<32hex>` 는 nonce 상한(70)을 꽉 채운다. tmux 안이면 거기에 `_t<pane>` 이 더 붙는다.
+    const host_nonce = "host_" ++ ("0" ** 32) ++ "_" ++ ("0" ** 32);
+    try testing.expectEqual(command.remote_pane_nonce_max, host_nonce.len);
+
+    // 그 이름 그대로는 예전에도 통과했다.
+    try testing.expect(nonceFromFileName(host_nonce ++ ".ndjson") != null);
+    // **tmux 칸이 붙으면 nonce 상한을 넘는다** — 여기서 거르면 그 pane 의 이벤트가 조용히 사라진다.
+    try testing.expect(nonceFromFileName(host_nonce ++ "_t12.ndjson") != null);
+    try testing.expectEqualStrings(host_nonce ++ "_t12", nonceFromFileName(host_nonce ++ "_t12.ndjson").?);
+
+    // 그래도 무한히 받지는 않는다 — 상한은 있다.
+    const too_long = host_nonce ++ "_t" ++ ("1" ** 20);
+    try testing.expect(nonceFromFileName(too_long ++ ".ndjson") == null);
+}
+
+test "isStale: 7 일이 넘으면 거두고, 미래 mtime 은 안 건드린다" {
+    const day: i128 = 24 * 60 * 60 * @as(i128, std.time.ns_per_s);
+    const now: i128 = 100 * day;
+    try testing.expect(!isStale(now, now));
+    try testing.expect(!isStale(now, now - 7 * day));
+    try testing.expect(isStale(now, now - 8 * day));
+    // 시계가 되돌아갔거나 NFS 가 미래 mtime 을 준 경우 — **지우지 않는다**(살아 있는 로그를 지우는
+    // 쪽이 남기는 쪽보다 나쁘다는 규율은 로컬 정리와 같다).
+    try testing.expect(!isStale(now, now + day));
+}
+
+test "shouldRefreshRoute: 시한이 지나면 다시 묻는다 — 옆 파일은 이제 안 바뀌므로 시간이 유일한 무효화다" {
+    try testing.expect(shouldRefreshRoute(0, 0)); // 처음 — 아직 물은 적이 없다
+    try testing.expect(!shouldRefreshRoute(route_ttl_ms - 1, 1));
+    try testing.expect(shouldRefreshRoute(route_ttl_ms + 1, 1));
+    // 시계가 되돌아가도 터지지 않는다(포화 뺄셈).
+    try testing.expect(!shouldRefreshRoute(1, 10_000));
+}
+
+test "역조회 시한은 하트비트를 굶기지 않는다 — 그러면 채널이 통째로 강등된다" {
+    // 조회가 주 루프에서 동기로 도는 한, 이 부등식이 축의 생사다.
+    const Options_default: Options = .{ .dir = "/x" };
+    try testing.expect(lookup_deadline_ms < Options_default.heartbeat_ms);
+    // 그리고 소비자의 침묵 시한보다 훨씬 짧아야 한 번의 지연이 강등으로 안 번진다.
+    try testing.expect(lookup_deadline_ms * 3 < 15_000);
 }

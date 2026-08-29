@@ -11106,16 +11106,42 @@ fn runShellCapture(allocator: std.mem.Allocator, script: []const u8) ![]u8 {
     }
     _ = std.c.close(out_pipe[1]);
 
+    // ⚠️ **시한을 둔다.** 예전에는 `waitpid(…, 0)` 로 그냥 기다렸는데, 그러면 **멎은 tmux 하나가 이
+    // 프로세스 전체를 멈춘다** — 하트비트도 이 루프에서 나가므로 소비자는 침묵을 사망으로 읽고(15 초)
+    // **그 호스트의 채널을 통째로 강등한다.** tmux 와 무관한 pane 까지 함께 죽는다(적대적 검증
+    // 2026-08-29 가 잡았다). 조회 하나 때문에 축 전체를 잃을 이유가 없다.
+    //
+    // 시한을 넘기면 자식을 죽이고 **빈 결과**를 돌려준다 — 순수 층이 그것을 «클라이언트 없음» 으로
+    // 접고, 그러면 파일 이름이 그대로 나가 어느 Term 과도 안 맞아 **버려진다**. 오배달보다 낫다.
+    const fl = std.c.fcntl(out_pipe[0], std.c.F.GETFL, @as(c_int, 0));
+    if (fl >= 0) _ = std.c.fcntl(out_pipe[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     var tmp: [4096]u8 = undefined;
+    var waited_us: u64 = 0;
+    var timed_out = false;
     while (true) {
         const n = std.c.read(out_pipe[0], &tmp, tmp.len);
-        if (n <= 0) break;
-        try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
-        if (buf.items.len > 64 * 1024) break;
+        if (n > 0) {
+            try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+            if (buf.items.len > 64 * 1024) break;
+            continue;
+        }
+        if (n == 0) break; // EOF — 자식이 끝났다
+        // EAGAIN 을 포함한 그 밖 — 잠깐 쉬었다 다시 본다.
+        if (waited_us >= maru.cli.agent_events.lookup_deadline_ms * std.time.us_per_ms) {
+            timed_out = true;
+            break;
+        }
+        _ = usleep(5 * 1000);
+        waited_us += 5 * 1000;
     }
     _ = std.c.close(out_pipe[0]);
+    if (timed_out) {
+        _ = std.c.kill(pid, std.c.SIG.KILL);
+        buf.clearRetainingCapacity(); // 반쪽 출력을 목록으로 읽지 않는다
+    }
     var status: c_int = 0;
     _ = std.c.waitpid(pid, &status, 0);
     return buf.toOwnedSlice(allocator);
@@ -11171,6 +11197,10 @@ fn runAgentEvents(
     const RouteCache = struct {
         seen_sidecar: []u8 = "",
         resolved: ?[]u8 = null,
+        /// 마지막으로 물어본 시각. **옆 파일 내용만으로는 무효화가 안 된다** — 이름을 pane 으로 가른
+        /// 뒤 그 값은 늘 같기 때문이다. 시간이 유일한 무효화 축이다(`route_ttl_ms`).
+        last_lookup_ms: u64 = 0,
+        asked: bool = false,
     };
     var routes: std.StringHashMapUnmanaged(RouteCache) = .empty;
     defer {
@@ -11204,18 +11234,30 @@ fn runAgentEvents(
         var sd = startup_dir;
         defer sd.close(io);
         var sit = sd.iterate();
+        const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
         while ((sit.next(io) catch null) orelse null) |entry| {
             if (entry.kind != .file) continue;
-            if (ae.nonceFromFileName(entry.name) == null) continue;
+            const is_log = ae.nonceFromFileName(entry.name) != null;
+            const is_side = std.mem.endsWith(u8, entry.name, maru.session.agent_hook_command.tmux_sidecar_suffix);
+            if (!is_log and !is_side) continue; // 우리가 만든 파일이 아니다 — 손대지 않는다
+
             var f = sd.openFile(io, entry.name, .{}) catch continue;
-            var sbuf: [64]u8 = undefined;
-            var sr = f.reader(io, &sbuf);
-            const sz = sr.getSize() catch {
+            const st = f.stat(io) catch {
                 f.close(io);
                 continue;
             };
             f.close(io);
-            if (!ae.shouldDropAtStartup(sz)) continue;
+
+            // ⚠️ **바이트는 상한이 있는데 «파일 수» 는 없었다**(적대적 검증 2026-08-29). 비워진 로그와
+            // 옆 파일은 그 pane 이 사라져도 남고, tmux pane 번호는 단조 증가라 이름이 재사용되지 않는다.
+            // 스트리머는 매 회차 이 디렉터리를 통째로 훑으므로 **훑는 비용 자체가 자란다.**
+            // 저장소가 원격 드롭 디렉터리에 이미 쓰는 정책(7 일)을 그대로 옮긴다.
+            if (ae.isStale(now_ns, st.mtime.nanoseconds)) {
+                sd.deleteFile(io, entry.name) catch {};
+                continue;
+            }
+            if (!is_log) continue; // 옆 파일은 자라지 않는다 — 절단할 것이 없다
+            if (!ae.shouldDropAtStartup(st.size)) continue;
             _ = sd.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } }) catch {};
         }
     } else |_| {}
@@ -11238,6 +11280,8 @@ fn runAgentEvents(
         };
         defer dir.close(io);
 
+        // 이 회차의 시각. 역조회 TTL 이 유일한 캐시 무효화 축이다(옆 파일 값은 이제 안 바뀐다).
+        const now_ms: u64 = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms));
         var it = dir.iterate();
         while ((it.next(io) catch null) orelse null) |entry| {
             const nonce = ae.nonceFromFileName(entry.name) orelse continue;
@@ -11299,12 +11343,17 @@ fn runAgentEvents(
                         break :blk nonce;
                     };
                     rgop.value_ptr.* = .{};
-                } else if (std.mem.eql(u8, rgop.value_ptr.seen_sidecar, side)) {
+                } else if (std.mem.eql(u8, rgop.value_ptr.seen_sidecar, side) and
+                    rgop.value_ptr.asked and
+                    !ae.shouldRefreshRoute(now_ms, rgop.value_ptr.last_lookup_ms))
+                {
                     break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
                 }
-                // 좌표가 바뀌었다(또는 처음이다) — 한 번 묻는다.
+                // 좌표가 바뀌었거나 시한이 지났다(또는 처음이다) — 한 번 묻는다.
                 if (rgop.value_ptr.resolved) |r| allocator.free(r);
                 rgop.value_ptr.resolved = tmuxResolveNonce(allocator, obs);
+                rgop.value_ptr.last_lookup_ms = now_ms;
+                rgop.value_ptr.asked = true;
                 allocator.free(rgop.value_ptr.seen_sidecar);
                 rgop.value_ptr.seen_sidecar = allocator.dupe(u8, side) catch "";
                 break :blk if (rgop.value_ptr.resolved) |r| r else nonce;

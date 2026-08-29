@@ -4955,6 +4955,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dclamp_drawn_after: u16 = 0;
     var dclamp_draw_start_after: usize = 0;
     var dock_clamps: usize = 0;
+    var dock_tail_expand_sent = false;
     var leak_judgeable = false;
     var leak_sidebar_before: u32 = 0;
     var leak_sidebar_after: u32 = 0;
@@ -6010,7 +6011,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, ex, ey);
         }
         if (smoke and spins == 85 and expand_judgeable) expand_rows_collapsed = dock_rows.items.len;
-        if (smoke and spins == 100 and dock_view == .explorer and geom.tree_content.w != 0 and
+        // **꼬리로 옮겼다**(예전엔 스핀 100). 그 시점의 트리는 접혀 있어 **안 넘쳤고**, 그래서 이
+        // 판정이 오래 `unjudgeable reason=not_scrolled` 로 접혀 있었다 — 도크 휠·부분 픽셀 shift·
+        // 굴린 뒤 히트테스트를 재는 판정 하나가 통째로 죽어 있던 것이다(§2m.84 가 보고했다).
+        //
+        // **여기서는 넘친다** — 1034 가 `tools` 를 펼쳐 62 행이다. 앞의 도크 판정들(1016~1030 의
+        // 표면별 누적기·clamp)이 끝난 뒤라 그쪽 offset 을 안 흔든다.
+        if (smoke and spins == 1056 and dock_view == .explorer and geom.tree_content.w != 0 and
             dock_rows.items.len *| cell_h > geom.tree_content.h)
         {
             dock_scroll_judgeable = true;
@@ -6023,7 +6030,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 통과했다(실측). 이제 답은 그 호출부가 낸다.
         // **두 판정이 각자 자기 클릭을 읽어야 한다.** 이 클릭이 `dock_last_row` 를 덮으면 앞선
         // 행 클릭 판정(`want_row=2`)이 엉뚱한 값을 보고 실패한다 — 실측으로 그렇게 됐다.
-        if (smoke and spins == 115 and dock_scroll_judgeable) {
+        if (smoke and spins == 1057 and dock_scroll_judgeable) {
             dock_row_before_scroll_click = dock_last_row;
             const cx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
             const cy: i32 = @intCast(geom.tree_content.y + 1);
@@ -6031,7 +6038,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, cx, cy);
             dock_scroll_click_sent = true;
         }
-        if (smoke and spins == 130 and dock_scroll_click_sent) {
+        if (smoke and spins == 1058 and dock_scroll_click_sent) {
             dock_scroll_clicked_row = dock_last_row;
             dock_last_row = dock_row_before_scroll_click; // 앞선 판정에 그 클릭의 답을 돌려준다
         }
@@ -6517,6 +6524,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 const ty2: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
                 window.postSyntheticMouse(.left_down, tx2, ty2);
                 window.postSyntheticMouse(.left_up, tx2, ty2);
+                // **이걸 눌렀으면 도크는 넘쳐야 한다** — 아래 `dock_scroll` 판정이 그때도 판정
+                // 불가면 그건 "잴 것이 없다" 가 아니라 **무언가 깨진 것**이다.
+                dock_tail_expand_sent = true;
                 break;
             }
         }
@@ -10410,13 +10420,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         const within = dock_scroll_px <= max_scroll;
         // **부분 스크롤이 픽셀로 갔는가.** 첫 행은 뷰포트 위로 `shift` 만큼 밀려야 한다 — 안 밀면
         // 스크롤이 행 단위로만 움직인다(그때도 개수·행 판정은 전부 초록이었다).
-        const want_top: f32 = @as(f32, @floatFromInt(geom.tree_content.y)) - @as(f32, @floatFromInt(dock_scroll_shift));
-        const shift_applied = dock_tree_top_px != null and @abs(dock_tree_top_px.? - want_top) < 1.0;
-        try stdout.print("dock_scrolls={d} dock_scroll_px={d}/{d} dock_shift={d} draw_start={d} clicked_row={?d} within_max={} shift_applied={} dock_scroll_ok={}\n", .{
+        // **기대값을 빌더가 낸 값으로 만들면 안 된다.** 예전에는 `dock_scroll_shift`(빌더가 돌려준
+        // 값)로 기대 y 를 만들어, **부분 이동을 통째로 끄는 뮤턴트가 그대로 통과했다**(실측
+        // 2026-08-30: `dock_shift=0 shift_applied=true` — 양쪽이 같이 0 이 되니 늘 맞는다).
+        // 이제 **상태에서** 유도한다: 부분 픽셀은 정의상 `offset % cell_h` 다(행 높이가 균일하다).
+        const want_shift: u32 = if (cell_h == 0) 0 else dock_scroll_px % cell_h;
+        const want_top: f32 = @as(f32, @floatFromInt(geom.tree_content.y)) - @as(f32, @floatFromInt(want_shift));
+        const shift_applied = dock_tree_top_px != null and @abs(dock_tree_top_px.? - want_top) < 1.0 and
+            // 빌더가 돌려준 값도 같은 답이어야 한다 — 둘이 갈리면 그리기와 판정이 다른 것을 본다.
+            dock_scroll_shift == want_shift;
+        try stdout.print("dock_scrolls={d} dock_scroll_px={d}/{d} dock_shift={d}(want {d}) draw_start={d} clicked_row={?d} within_max={} shift_applied={} dock_scroll_ok={}\n", .{
             dock_scrolls,
             dock_scroll_px,
             max_scroll,
             dock_scroll_shift,
+            want_shift,
             dock_draw_start,
             dock_scroll_clicked_row,
             within,
@@ -10437,6 +10455,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             "not_scrolled"
         else
             "content_fits";
+        // **판정이 사라지는 것과 잴 것이 없는 것은 다르다.** 꼬리에서 폴더를 펼쳤는데도 안 넘치면
+        // 그 사이 무언가가 트리를 무너뜨린 것이다 — 실측으로 히트테스트가 스크롤을 무시하는 뮤턴트가
+        // 트리를 2 행으로 만들어 이 판정을 **빨강이 아니라 무판정**으로 지나갔다(§2m.84 의 그 교훈).
+        if (dock_tail_expand_sent) {
+            try stdout.print("dock_scroll: judgeable=false reason={s} rows={d} content_h={d} viewport_h={d} dock_scroll_ok=false\n", .{ why, dock_rows.items.len, content_h, geom.tree_content.h });
+            return;
+        }
         try stdout.print("dock_scroll=unjudgeable reason={s} rows={d} content_h={d} viewport_h={d}\n", .{ why, dock_rows.items.len, content_h, geom.tree_content.h });
     }
     if (dock_click_judgeable) {

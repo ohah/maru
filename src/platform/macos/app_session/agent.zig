@@ -711,6 +711,15 @@ pub fn pollAgentKinds(self: *AppSession) void {
     if (periodic_kind_probe) self.agent_poll_ticks = 0;
     if (observer_probe) self.agent_observer_poll_ticks = 0;
     if (!self.surface_initialized) return;
+    // **원격 채널을 여기서 돌린다 — 소비자보다 먼저, 그러나 같은 throttle 뒤에서.**
+    //
+    // 순서: 채널을 먼저 채워야 아래 `pollAgentConsumer` 의 모드 판정이 이번 회차에 도착한 이벤트를 본다.
+    // 뒤집으면 모든 이벤트가 한 회차씩 늦고, 증상은 «배지가 한 박자 늦다» 뿐이라 원인을 못 찾는다.
+    //
+    // 자리: tick 마다가 아니라 **이 throttle 뒤**다. 매 tick 부르면 원격 Term 마다 회차당 힙 할당 둘
+    // (`dest` dupe + control socket 경로)이 60 fps 로 돈다 — 로컬 훅은 이미 이 게이트 뒤에 있으므로
+    // 원격만 앞서 달릴 이유가 없고, 그동안 온 바이트는 파이프가 들고 있다(64 KiB).
+    self.pumpRemoteAgentChannels();
     // 모든 pane × 모든 Term을 보되 syscall은 ≈0.5s로 throttle한다. 화면에 카드/탭바가 실제로 보이는 탭만
     // 상태 변화 시 dirty해, background observer가 불필요한 프레임을 만들지 않는다.
     for (self.tabs.items, 0..) |tab, ti| {

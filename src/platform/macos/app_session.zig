@@ -13585,7 +13585,22 @@ pub const AppSession = struct {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized or term.rt.terminated) continue;
-                    const ctx = self.remoteUploadContextFor(term) orelse continue;
+                    const ctx = self.remoteUploadContextFor(term) orelse {
+                        // **원격이 아니게 된 Term 에서는 채널을 떼어 낸다.** 안 떼면 `modeFor` 가
+                        // «채널이 열렸다» 를 맨 먼저 보므로 그 pane 은 ssh 를 빠져나온 뒤에도 **소스
+                        // 없이 훅 모드에 갇힌다** — 거기서 로컬 에이전트를 띄워도 배지가 안 선다.
+                        //
+                        // ⚠️ **관측이 최신일 때만 판정한다.** `remoteUploadContextFor` 는 재접속 중의
+                        // `stale` 에서도 null 을 준다 — 그 순간을 «원격이 아니다» 로 읽으면 잠깐 끊길
+                        // 때마다 채널이 끊기고 배지가 깜빡인다.
+                        if (term.rt.observation.availability == .current and
+                            !term.rt.observation.ssh_remote_dest_present)
+                        {
+                            term.agent_remote_channel = null;
+                            term.agent_remote_nonce_len = 0;
+                        }
+                        continue;
+                    };
                     defer ctx.deinit(self.allocator);
                     self.ensureRemoteAgentTerm(term, ctx, now_ms);
                 }
@@ -16395,10 +16410,6 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedBranchMenu(self); // 캡처 전용: 브랜치 목록은 상태바 클릭으로만 열린다
         debug_fixtures.applyForcedScmTab(self); // 캡처 전용: 탭·턴·펼침을 강제한다(env 미설정이면 무동작)
         debug_fixtures.applyForcedScmView(self); // 캡처 전용: 도크를 소스 컨트롤 뷰로 연다(뒤의 pump 들이 그 뷰를 본다)
-        // **`pollAgentKinds` 보다 먼저 돈다.** 채널을 먼저 채워야 그 뒤의 모드 판정이 이번 tick 에 도착한
-        // 이벤트를 본다 — 순서를 뒤집으면 모든 이벤트가 한 tick 씩 늦고, 그 지연은 «배지가 한 박자 늦게
-        // 뜬다» 로만 보여 원인을 못 찾는다.
-        self.pumpRemoteAgentChannels(); // 원격(ssh) 에이전트 이벤트 채널 — 목적지당 자식 하나, 논블로킹
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
@@ -21035,6 +21046,53 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
 
     session.closeRemoteAgentHost(dest);
     try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());
+}
+
+test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스 없이 훅 모드에 갇힌다" {
+    // `modeFor` 는 «채널이 열렸다» 를 **맨 먼저** 본다(그것이 원격에서 `agent_kind`·로그 파일을
+    // 대신하는 증거이기 때문이다). 그래서 채널을 안 떼면 ssh 를 빠져나온 pane 이 그대로 훅 모드에
+    // 남고, 거기서 로컬 에이전트를 띄워도 읽을 소스가 없어 배지가 영영 안 선다.
+    //
+    // 그리고 **재접속 중의 깜빡임과 가른다** — 관측이 `stale` 인 순간을 «원격이 아니다» 로 읽으면
+    // 잠깐 끊길 때마다 채널이 끊긴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    term.agent_remote_nonce_len = 6;
+    term.agent_kind = .none;
+    term.agent_hook_log_present = false;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term));
+
+    // ① 재접속 중(관측이 stale)에는 **안 놓는다** — 여기서 놓으면 끊길 때마다 배지가 깜빡인다.
+    term.rt.observation.availability = .stale;
+    term.rt.observation.ssh_remote_dest_present = false;
+    session.pumpRemoteAgentChannels();
+    try std.testing.expect(term.agent_remote_channel != null);
+
+    // ② 관측이 최신인데 목적지가 없다 = **원격이 아니게 됐다.** 그때 놓는다.
+    term.rt.observation.availability = .current;
+    session.pumpRemoteAgentChannels();
+    try std.testing.expect(term.agent_remote_channel == null);
+    try std.testing.expectEqual(@as(u8, 0), term.agent_remote_nonce_len);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 }
 
 test "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫힌다 — 침묵이 사망 신호다" {

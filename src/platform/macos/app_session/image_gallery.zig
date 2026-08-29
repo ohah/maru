@@ -17,6 +17,8 @@ const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
+const image_decode = @import("../image_decode.zig");
+const image_scale = maru.session.image_scale;
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
 /// 다시 훑는다.
@@ -157,6 +159,59 @@ pub fn onLeaveView(self: *AppSession) void {
     backend.cancel();
     self.image_gallery.awaiting = 0;
     self.image_gallery.resubmit = false;
+}
+
+/// 격자 썸네일의 한 변(px). 계약 §5.2 — 장당 0.06 MB 라 200장 상주해도 12 MB 다. 원본 해상도로 들면
+/// 200장에 3.6 GB 라 불가능하다.
+pub const thumbnail_side: u32 = 160;
+
+/// 인덱스의 `n` 번째 이미지를 썸네일로 푼다. 실패는 `null` — 「이미지가 깨졌다」는 그리지 않는 것으로 답한다.
+///
+/// **바이트를 여기서 처음 읽는다.** 인덱스는 자리만 들고 있으므로(계약 §4) 그 구간을 그때 읽어 base64 를
+/// 풀고 ImageIO 에 넘긴다. 이미지 하나가 수 MB 라 인덱스가 픽셀을 들면 목록 하나에 수백 MB 가 앉는다.
+///
+/// 순서가 계약이다: **크기를 먼저 묻고(probe) → 계수를 고르고(`image_scale`) → 그 계수로 푼다.**
+/// 크기를 알자고 원본을 통째로 푸는 것은 앞뒤가 바뀐 일이고, 계수를 안 고르고 올리면 상한 초과에서
+/// **프로세스가 abort** 한다(계약 §5.3).
+pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
+    if (!builtin.target.os.tag.isDarwin()) return null;
+    if (n >= self.image_gallery.hits.items.len) return null;
+    if (self.image_gallery.source.isEmpty()) return null;
+    const hit = self.image_gallery.hits.items[n];
+
+    const io = self.io;
+    const file = std.Io.Dir.cwd().openFile(io, self.image_gallery.source.path(), .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return null;
+    defer file.close(io);
+
+    const b64 = self.allocator.alloc(u8, hit.data_len) catch return null;
+    defer self.allocator.free(b64);
+    var got: usize = 0;
+    while (got < b64.len) {
+        const n_read = file.readPositional(io, &.{b64[got..]}, hit.data_offset + got) catch return null;
+        if (n_read == 0) return null; // 파일이 그 사이 잘렸다
+        got += n_read;
+    }
+
+    // base64 는 표준 알파벳 + 패딩이다(provider 가 그렇게 쓴다). 길이를 먼저 물어 버퍼를 잡는다.
+    const dec = std.base64.standard.Decoder;
+    const raw_len = dec.calcSizeForSlice(b64) catch return null;
+    const raw = self.allocator.alloc(u8, raw_len) catch return null;
+    defer self.allocator.free(raw);
+    dec.decode(raw, b64) catch return null;
+
+    const size = image_decode.probeSize(raw) catch return null;
+    const fit = image_scale.fitToThumbnail(
+        size.width,
+        size.height,
+        thumbnail_side,
+        image_scale.default_max_side,
+        image_scale.default_max_pixels,
+    ) orelse return null; // 상한을 못 맞추면 **안 그린다** — 억지로 올리면 abort 다
+    return image_decode.decode(self.allocator, raw, fit.subsample) catch null;
 }
 
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.

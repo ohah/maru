@@ -62,6 +62,18 @@ pub const remote_log_dir_rel = ".cache/maru/remote-agent-events";
 /// tmux 소켓 경로가 «훅 payload» 로 흘러 나간다.
 pub const tmux_sidecar_suffix = ".tmux";
 
+/// 원격 로그 **파일 이름**이 쓸 수 있는 최대 길이.
+///
+/// ⚠️ **nonce 상한과 다르다.** tmux 안에서는 이름 뒤에 `_t<pane 번호>` 가 붙는데, host 소유 nonce 는
+/// 이미 `remote_pane_nonce_max` 를 꽉 채운다(`host_<32hex>_<32hex>` = 70). 그래서 nonce 상한으로 파일
+/// 이름을 재면 **그 파일이 통째로 건너뛰어지고 이벤트가 조용히 사라진다** — 증상은 「host 로 띄운
+/// 원격 pane 만 tmux 안에서 배지가 안 선다」라 재현 조건이 좁아 찾기 어렵다(적대적 검증이 잡았다).
+pub const remote_log_name_max = remote_pane_nonce_max + tmux_segment_max;
+
+/// `_t<pane 번호>` 가 차지하는 최대 길이. tmux pane 번호는 서버가 켜져 있는 동안 단조 증가하므로
+/// 넉넉히 잡는다 — 모자라면 위와 같은 «조용한 유실» 이 된다.
+pub const tmux_segment_max = "_t".len + 10;
+
 /// 훅에 신원을 넘기는 예약 환경변수 둘. **control-plane 의 `MARU_PANE_ID` 와 갈라 둔다.**
 ///
 /// 예전에는 pane 칸으로 `MARU_PANE_ID` 를 그대로 썼다. 그 값은 control-plane `auth.self` selector 이고

@@ -66,6 +66,22 @@ pub const Discovery = union(enum) {
     }
 };
 
+/// **owner lease 가 `free` 면 그 줄은 죽음이 확정이다 — manifest 를 못 읽었어도 그렇다.**
+///
+/// lease 가 free 라는 것은 그 host directory 를 **소유한 프로세스가 없다**는 증명이고(`owner_lease.observe`
+/// 계약: 판정 불가는 `.unknown` 으로 따로 나온다), 소유자가 없으면 그 자리에서 runtime 을 서비스하는 host 도
+/// 없다. manifest 가 읽히는지는 그 증명과 무관하다.
+///
+/// **왜 이걸 가르는가.** 예전에는 manifest 실패를 무조건 `invalid_manifest` 로 냈다. 그 이유는 소비자마다
+/// 다르게 읽힌다 — attach 의 reducer 는 그것을 "산 host 를 **가리고 있을 수 있다**" 로 보고 all-or-none 으로
+/// 전부 거절한다. 그런데 manifest 없는 잔여 디렉터리는 정리할 코드가 없어 **반드시 쌓이므로**
+/// ([persistent-session-host.md](../../../../docs/persistent-session-host.md) "죽은 host의 잔여 entry"),
+/// 그 분류는 시간이 지나면 attach 를 영구히 막는다. 실측: 잔여 100 개 중 27 개가 manifest 없는 줄이었고,
+/// 그 기계에서 `maru attach` 는 **모든** runtime 에 대해 `denied` 였다(`runtime list` 는 정상).
+fn deadOr(lease: owner_lease.Observation, fallback: EntryUnavailable) EntryUnavailable {
+    return if (lease == .free) .lease_free else fallback;
+}
+
 /// Current-UID secure registry에서 살아 있는 exact manifest만 canonical host_id 순서로 반환한다.
 /// 잘못된 entry는 cap 안에서 다른 host를 가리지 않지만, 17번째 canonical entry부터는 prefix 전체를 폐기한다.
 pub fn discover(allocator: std.mem.Allocator, session_dir: [:0]const u8) Discovery {
@@ -107,7 +123,7 @@ pub fn discover(allocator: std.mem.Allocator, session_dir: [:0]const u8) Discove
             else => {
                 entries.append(allocator, .{ .unavailable = .{
                     .host_id = host_id,
-                    .reason = .invalid_manifest,
+                    .reason = deadOr(lease, .invalid_manifest),
                 } }) catch return .{ .unavailable = .out_of_memory };
                 continue;
             },
@@ -116,7 +132,7 @@ pub fn discover(allocator: std.mem.Allocator, session_dir: [:0]const u8) Discove
             manifest.deinit();
             entries.append(allocator, .{ .unavailable = .{
                 .host_id = host_id,
-                .reason = .invalid_manifest,
+                .reason = deadOr(lease, .invalid_manifest),
             } }) catch return .{ .unavailable = .out_of_memory };
             continue;
         }
@@ -395,9 +411,19 @@ test "recovery discovery는 held exact manifest만 정렬하고 filesystem을 �
         leases[i] = try owner_lease.OwnerLease.acquire(owner_path);
         initialized += 1;
     }
+    // manifest 를 못 읽는 줄 둘 — **lease 가 갈린다.** free 면 죽음이 확정이라 `lease_free`,
+    // held 면 아직 산 host 를 가리고 있을 수 있으므로 `invalid_manifest` 다(`deadOr`).
     const malformed_host_id: u128 = 0x30;
     try host_manifest.prepareHostDirectory(dir, malformed_host_id);
     defer host_manifest.removeEmptyHostDirectories(dir, malformed_host_id);
+    const malformed_held_host_id: u128 = 0x40;
+    try host_manifest.prepareHostDirectory(dir, malformed_held_host_id);
+    defer host_manifest.removeEmptyHostDirectories(dir, malformed_held_host_id);
+    var held_buf: [832]u8 = undefined;
+    var held_lease = try owner_lease.OwnerLease.acquire(
+        try host_manifest.ownerLockPathIn(&held_buf, dir, malformed_held_host_id),
+    );
+    defer held_lease.deinit();
 
     var before: [ids.len]posix.Stat = undefined;
     for (ids, 0..) |host_id, i| {
@@ -414,11 +440,16 @@ test "recovery discovery는 held exact manifest만 정렬하고 filesystem을 �
         .complete => |items| items,
         .unavailable => return error.TestUnexpectedResult,
     };
-    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqual(@as(usize, 4), entries.len);
     try testing.expectEqual(@as(u128, 0x10), entryHostId(entries[0]));
     try testing.expectEqual(@as(u128, 0x20), entryHostId(entries[1]));
     try testing.expectEqual(malformed_host_id, entryHostId(entries[2]));
-    try testing.expectEqual(EntryUnavailable.invalid_manifest, entries[2].unavailable.reason);
+    // **소유자가 없으면 죽음이 확정이다** — manifest 를 못 읽은 것과 무관하다. 이 줄을
+    // `invalid_manifest` 로 내면 attach 의 all-or-none 이 그것을 "산 host 를 가릴 수 있다" 로
+    // 읽어 **모든** runtime 을 거절한다(실측: 잔여 27 줄이 attach 를 통째로 막았다).
+    try testing.expectEqual(EntryUnavailable.lease_free, entries[2].unavailable.reason);
+    try testing.expectEqual(malformed_held_host_id, entryHostId(entries[3]));
+    try testing.expectEqual(EntryUnavailable.invalid_manifest, entries[3].unavailable.reason);
     for (ids, 0..) |host_id, i| {
         var path_buf: [832]u8 = undefined;
         const path = try host_manifest.manifestPathIn(&path_buf, dir, host_id);

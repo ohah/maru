@@ -29,8 +29,15 @@ pub fn resolve(
     runtime_id: u128,
     ops: ProbeOps,
 ) Result {
-    if (runtime_id == 0 or entries.len > recovery_discovery.max_hosts)
-        return .{ .failed = .denied };
+    // **죽은 줄은 세지 않는다.** 상한은 "살아 있을 수 있는 host" 를 세는 것이고, 그 예산은 discovery 가
+    // 이미 매긴다(`recovery_discovery` — owner lease 가 free 인 줄은 예산을 안 쓴다: 그것들은 정리할 코드가
+    // 없어 반드시 쌓이므로, 세면 산 host 를 밀어낸다). 여기서 **emit 된 줄 전체**를 그 상한에 다시 대면 그
+    // 설계를 그대로 뒤집는다 — 실측: 레지스트리에 host 줄 99 개(대부분 죽음)가 쌓인 기계에서 `runtime list`
+    // 는 산 runtime 을 그대로 냈는데 `attach` 는 **모든** runtime 에 대해 `denied` 였다. 폰에서는 그것이
+    // "화면이 안 온다" 로만 보였다.
+    //
+    // 상한 자체는 남는다 — 아래 `eligible` 이 후보 배열을 넘기 전에 fail-closed 로 접는다.
+    if (runtime_id == 0) return .{ .failed = .denied };
 
     var descriptors: [recovery_discovery.max_hosts]host_manifest.Descriptor = undefined;
     var entry_indices: [recovery_discovery.max_hosts]usize = undefined;
@@ -53,6 +60,9 @@ pub fn resolve(
                 continue;
             if (profile.screen_codec_version != descriptor.screen_codec_version)
                 return .{ .failed = .protocol };
+            // discovery 예산(`max_hosts`)이 후보 수를 이미 묶지만, 그 계약이 깨지면 여기서 버퍼를 넘는다.
+            // 넘길 바에는 거절한다 — 자르면 "그 host 에 없다" 를 증명 못 한 채 없다고 말하게 된다.
+            if (eligible == descriptors.len) return .{ .failed = .denied };
             descriptors[eligible] = descriptor;
             entry_indices[eligible] = entry_index;
             eligible += 1;
@@ -174,6 +184,42 @@ test "attach resolver rejects uncertain or noncanonical registry evidence before
     try std.testing.expectEqual(
         attach_cli.ExitCode.denied,
         resolve(&unsorted, 0xaa, no_probe.ops()).failed,
+    );
+    try std.testing.expectEqual(@as(usize, 0), no_probe.calls);
+}
+
+test "죽은 host 줄이 상한을 넘어도 산 host 는 찾는다 — 쌓인 시체가 attach 를 못 막는다" {
+    // 실측 재현: 레지스트리에 host 줄이 오래 쌓인 기계(99 개, 대부분 owner lease free)에서 `attach` 가
+    // 모든 runtime 에 대해 denied 였다. 여기서는 상한(16) 을 넘기는 최소 모양 — 죽은 줄 16 + 산 host 1.
+    var entries: [recovery_discovery.max_hosts + 1]recovery_discovery.Entry = undefined;
+    for (0..recovery_discovery.max_hosts) |i|
+        entries[i] = .{ .unavailable = .{ .host_id = @intCast(i + 1), .reason = .lease_free } };
+    const live = manifest(recovery_discovery.max_hosts + 1, 2, 2);
+    entries[recovery_discovery.max_hosts] = .{ .candidate = .{ .manifest = live } };
+
+    var probe = TestProbe{ .evidence = &.{.match} };
+    const result = resolve(&entries, 0xaa, probe.ops());
+    try std.testing.expectEqual(@as(usize, recovery_discovery.max_hosts), result.selected_index);
+    // **산 host 하나만 두드린다** — 죽은 줄은 연결을 만들지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "죽은 줄이 많아도 확실치 않은 줄 하나면 여전히 전부 거절이다 — 완화한 것은 상한뿐" {
+    var entries: [recovery_discovery.max_hosts + 2]recovery_discovery.Entry = undefined;
+    for (0..recovery_discovery.max_hosts) |i|
+        entries[i] = .{ .unavailable = .{ .host_id = @intCast(i + 1), .reason = .lease_free } };
+    // 이 줄은 산 host 를 가리고 있을 수 있다(§ 죽음의 증거가 아님) → all-or-none.
+    entries[recovery_discovery.max_hosts] = .{ .unavailable = .{
+        .host_id = recovery_discovery.max_hosts + 1,
+        .reason = .lease_unknown,
+    } };
+    const live = manifest(recovery_discovery.max_hosts + 2, 2, 2);
+    entries[recovery_discovery.max_hosts + 1] = .{ .candidate = .{ .manifest = live } };
+
+    var no_probe = TestProbe{ .evidence = &.{} };
+    try std.testing.expectEqual(
+        attach_cli.ExitCode.denied,
+        resolve(&entries, 0xaa, no_probe.ops()).failed,
     );
     try std.testing.expectEqual(@as(usize, 0), no_probe.calls);
 }

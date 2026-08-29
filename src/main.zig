@@ -4779,6 +4779,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var hterm_scrolls_after: usize = 0;
     var hterm_reports_before: usize = 0;
     var hterm_reports_after: usize = 0;
+    var axis_judgeable = false;
+    var axis_col_before: u16 = 0;
+    var axis_col_after: u16 = 0;
+    var axis_line_before: usize = 0;
+    var axis_line_after: usize = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -5473,6 +5478,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dragging = false;
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
+    // **가로는 자기 나머지를 갖는다.** 누적기는 `WHEEL_DELTA` 미만을 다음 메시지로 넘기는데(정밀
+    // 터치패드), 축이 그것을 나눠 쓰면 **가로로 조금 민 것이 세로 한 줄로 튄다** — 대각선 제스처가
+    // 흔한 트랙패드에서 늘 일어난다.
+    var wheel_acc_h: win32_mouse.WheelAccumulator = .{};
     var last_ime_caret: ?win32_mouse.Cell = null;
     // 마지막으로 계산한 마우스 셀. **휠 좌표가 화면 기준으로 오는 것을 놓치면 창 위치만큼 어긋나는데**,
     // 카운터만으로는 그것이 안 보인다 — 이 줄이 그 자리를 지킨다.
@@ -6240,6 +6249,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, tx, gy);
             window.postSyntheticMouse(.left_up, tx, gy);
         };
+        // ── 축이 나머지를 안 나눠 쓴다 (적대적 검증 2회차) ────────────────────────────
+        //
+        // 정밀 터치패드는 `WHEEL_DELTA`(120) 미만을 보내고 누적기가 그 나머지를 들고 있는다. 축이
+        // 그것을 **나눠 쓰면** 가로로 조금 민 것이 세로 한 줄로 튄다 — 대각선 제스처에서 늘 난다.
+        // 눈금 배수로는 안 보인다(나머지가 0 이라). 그래서 **눈금 미만**으로 던진다.
+        if (smoke and spins == 988 and active_view == .file) {
+            axis_judgeable = true;
+            axis_col_before = open_files.items[active_view.file].first_col;
+            axis_line_before = open_files.items[active_view.file].first_line;
+            const ax: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const ay: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            // **부호를 맞춰야 섞인다.** 40 과 -80 은 서로를 지워 한 눈금이 안 된다 — 실측으로
+            // 나머지를 나눠 쓰는 뮤턴트가 그 조합에서 살아남았다. 둘 다 음수로 던져 합이 -120 이
+            // 되게 한다(그러면 세로가 아래로 한 눈금 굴러 `first_line` 이 0 에서 움직인다).
+            window.postSyntheticMouseWheelDelta(.wheel_h, ax, ay, -40);
+            window.postSyntheticMouseWheelDelta(.wheel, ax, ay, -80);
+        }
+        if (smoke and spins == 990 and axis_judgeable and active_view == .file) {
+            axis_col_after = open_files.items[active_view.file].first_col;
+            axis_line_after = open_files.items[active_view.file].first_line;
+        }
         if (smoke and spins == 984 and hdrag_judgeable and active_view == .file) {
             hdrag_col_after = open_files.items[active_view.file].first_col;
             hdrag_thumb_after = if (editor_last_hbar) |b| b.thumb_x else 0;
@@ -8002,7 +8032,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 기울임 휠·터치패드의 `wheel_h`, 그리고 평범한 휠에 **Shift**(터미널이 이미 쓰는 관례).
                 if ((m.kind == .wheel or m.kind == .wheel_h) and active_view == .file and active_view.file < open_files.items.len) {
                     const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
-                    const notches = wheel_acc.feed(m.wheel_delta);
+                    const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc.feed(m.wheel_delta);
                     if (notches == 0) continue;
                     const of = &open_files.items[active_view.file];
                     if (horizontal) {
@@ -9192,6 +9222,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             track_right,
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("wheel_axes: col {d}->{d} line {d}->{d} axes_ok={}\n", .{
+            axis_col_before,
+            axis_col_after,
+            axis_line_before,
+            axis_line_after,
+            // **둘 다 안 움직여야 한다** — 40 도 80 도 한 눈금이 아니다. 나머지를 나눠 쓰면
+            // 120 이 되어 세로가 한 눈금 굴러간다.
+            axis_judgeable and axis_col_after == axis_col_before and axis_line_after == axis_line_before,
         });
         try stdout.print("term_hwheel: scrolls {d}->{d} reports {d}->{d} term_hwheel_ok={}\n", .{
             hterm_scrolls_before,

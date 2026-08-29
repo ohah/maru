@@ -728,6 +728,12 @@ pub const Window = struct {
     /// 흡수하므로(`WM_MOUSEWHEEL` 처리에서 `ScreenToClient`) 여기서는 창이 기대하는 그대로 넣는다 —
     /// 판정이 클라이언트 좌표로 찌를 수 있게 화면 좌표로 올려 보낸다.
     pub fn postSyntheticMouseWheel(self: *Window, kind: MouseEvent.Kind, x_px: i32, y_px: i32, notches: i32) void {
+        self.postSyntheticMouseWheelDelta(kind, x_px, y_px, notches * 120);
+    }
+
+    /// **눈금이 아니라 raw 델타로** 던진다 — 정밀 터치패드가 보내는 `WHEEL_DELTA` 미만을 흉내 낸다.
+    /// 누적기가 축마다 따로인지 같은지는 그 작은 값에서만 갈린다(눈금 배수는 나머지를 안 남긴다).
+    pub fn postSyntheticMouseWheelDelta(self: *Window, kind: MouseEvent.Kind, x_px: i32, y_px: i32, delta: i32) void {
         const msg: UINT = switch (kind) {
             .moved => WM_MOUSEMOVE,
             .left_down => WM_LBUTTONDOWN,
@@ -751,7 +757,7 @@ pub const Window = struct {
         const hi: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
         // 휠 델타는 wParam **상위 16 비트**다(한 눈금 = 120).
         const wparam: WPARAM = if (is_wheel)
-            @as(WPARAM, @as(u32, @bitCast(@as(i32, notches) * 120)) << 16 >> 16 << 16)
+            @as(WPARAM, @as(u32, @bitCast(delta)) << 16 >> 16 << 16)
         else
             0;
         _ = PostMessageW(self.hwnd, msg, wparam, @intCast(lo | (hi << 16)));

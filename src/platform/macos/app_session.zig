@@ -2498,6 +2498,9 @@ const PointerGestureOwner = union(enum) {
         drop_slot: ?usize = null,
     },
     dock_outer_divider: struct { offset_px: f64 },
+    /// 갤러리 크게 보기 팬. **직전 좌표를 든다** — 시작점이 아니라 직전 점과의 차이를 밀어야
+    /// 가장자리에서 clamp 된 뒤 손을 되돌릴 때 그림이 곧바로 따라온다.
+    image_gallery_pan: struct { x: f64, y: f64 },
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
     address_selection,
@@ -11593,6 +11596,16 @@ pub const AppSession = struct {
         }
         // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. mouse-down을 Metal view가 받았으므로 AppKit이
         // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
+        // 갤러리 팬은 divider 캡처와 같은 자리에 둔다 — down 이 잡았으면 이후 drag/up 은 좌표와
+        // 무관하게 이 제스처의 것이다(도크 밖으로 끌고 나가도 그림이 손을 따라온다).
+        if (self.pointerGestureIs(.image_gallery_pan) and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                const g = self.pointer_gesture_owner.image_gallery_pan;
+                image_gallery_ops.panDrag(self, x_px - g.x, y_px - g.y);
+                self.pointer_gesture_owner.image_gallery_pan = .{ .x = x_px, .y = y_px };
+            } else self.finishPointerGesture();
+            return true;
+        }
         if (self.pointerGestureIs(.dock_outer_divider) and (kind == 2 or kind == 3)) {
             if (kind == 2) {
                 dock_ops.setDockSizeFromPointer(self, x_px, y_px);
@@ -72508,4 +72521,142 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images2[0].image_id);
+}
+
+test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 민다 (IG4-c)" {
+    // **계산(IG4-a)이 도는 것과 «입력이 거기 닿는 것» 은 다른 사실이다.** 배선이 빠지면 순수 test 는
+    // 전부 통과하는데 화면에서는 휠이 안 먹고 그림이 안 밀린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+    const image_view = maru.session.image_view;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 640×480 단색 PNG. **2×2 로는 이 test 가 성립하지 않는다** — 확대해도 내용이 뷰포트보다 작아
+    // 팬이 언제나 0 으로 clamp 된다(그러면 「밀린다」를 확인할 수 없다).
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgCAYAAAA10dzkAAAHYUlEQVR42u3WQREAAAQAQXGE0D+FLuQw9rEF7nXRlQMAwB8hAgCAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAAAYQAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAAAYQAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEADKAIAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBAAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBAAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAGAARQAAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAAADCABgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAAADCABgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAgAEUAgDAAAIAYAABADCAAAAYQAAADCAAAAYQAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAMoAgCAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAAAYQAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAAAYQAAADCACAAQQAwAACAGAAAQAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEADKAIAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBAAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBAAwgAAAGEAAAAwgAAAGEAAAAwgAgAEEAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAGAARQAAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAAADCABgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAAADCABgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAMAAAgBgAAEAMIAAABhAAAAMIAAABhAAAAMIAIABBADAAAIAYAABADCAAAAYQAAADCAAAAYQAMAAAgBgAAEAMIAAANy1rovt6nnj1L0AAAAASUVORK5CYII=";
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(dock_ops.dockVisible(session));
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+
+    const area = image_gallery_ops.gridArea(session);
+    const m = image_gallery_ops.gridMetrics(session);
+    const l = maru.session.image_grid.layout(area, m, 1);
+    const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
+    session.mouse(1, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
+    session.mouse(3, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
+    try std.testing.expect(session.image_gallery.open != null);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.open.?.pixels.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 640), session.image_gallery.open.?.width);
+    try std.testing.expectEqual(@as(u32, 480), session.image_gallery.open.?.height);
+
+    const vp = image_gallery_ops.viewportRect(session);
+    const w = session.image_gallery.open.?.width;
+    const h = session.image_gallery.open.?.height;
+    // 처음 배율은 fit 이다 — 열자마자 전체가 보인다.
+    const fit = image_view.fitScale(vp, w, h);
+    try std.testing.expect(fit > 0 and fit < 1.0); // 640 px 는 도크보다 넓다 = 줄여 넣는다
+    try std.testing.expectEqual(fit, image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale);
+
+    // ── ① 휠은 확대한다. **제품 진입점**(`scrollWheel`)으로 들어간다 — 배선이 빠지면 여기서 잡힌다.
+    const cx: f64 = @floatCast(vp.x + vp.w / 2);
+    const cy: f64 = @floatCast(vp.y + vp.h / 2);
+    scroll_ops.scrollWheel(session, 10.0, 0, false, cx, cy);
+    const after_one = image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale;
+    try std.testing.expect(after_one > fit);
+
+    // 내용이 뷰포트보다 커질 때까지 굴린다 — 그래야 「밀린다」를 확인할 수 있다.
+    {
+        var spins: usize = 0;
+        while (spins < 20 and
+            @as(f32, @floatFromInt(w)) * image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale <= vp.w) : (spins += 1)
+        {
+            scroll_ops.scrollWheel(session, 10.0, 0, false, cx, cy);
+        }
+    }
+    const zoomed = image_view.clamp(session.image_gallery.open.?.view, vp, w, h);
+    try std.testing.expect(@as(f32, @floatFromInt(w)) * zoomed.scale > vp.w);
+
+    // ── ② 아래로 굴리면 축소한다(부호가 뒤집혀 있으면 여기서 드러난다).
+    scroll_ops.scrollWheel(session, -10.0, 0, false, cx, cy);
+    try std.testing.expect(image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale < zoomed.scale);
+
+    // 축소가 **실제로 먹었기 때문에** 내용이 다시 뷰포트보다 작아졌을 수 있다. 그 상태에서는 팬이
+    // 언제나 0 으로 clamp 되므로(가운데 고정), 밀리는지 보려면 먼저 다시 키운다.
+    {
+        var spins: usize = 0;
+        while (spins < 20 and
+            @as(f32, @floatFromInt(w)) * image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale <= vp.w) : (spins += 1)
+        {
+            scroll_ops.scrollWheel(session, 10.0, 0, false, cx, cy);
+        }
+    }
+    try std.testing.expect(@as(f32, @floatFromInt(w)) * image_view.clamp(session.image_gallery.open.?.view, vp, w, h).scale > vp.w);
+
+    // ── ③ 드래그는 민다. down → drag → up 을 **제품 마우스 경로**로 태운다.
+    const before_pan = image_view.clamp(session.image_gallery.open.?.view, vp, w, h).pan_x;
+    session.mouse(1, cx, cy, 0, 0); // 이미지 위 = 잡기(닫기가 아니다)
+    try std.testing.expect(session.image_gallery.open != null); // 이미지 위 클릭은 닫지 않는다
+    try std.testing.expect(session.pointerGestureIs(.image_gallery_pan));
+    session.mouse(2, cx + 40, cy, 0, 0);
+    const after_pan = image_view.clamp(session.image_gallery.open.?.view, vp, w, h).pan_x;
+    try std.testing.expect(after_pan > before_pan); // 잡은 곳이 손끝을 따라온다
+    session.mouse(3, cx + 40, cy, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.image_gallery_pan));
+
+    // ── ④ 이미지 **밖**을 누르면 닫힌다. 확대돼 있어도 뷰포트 모서리는 여전히 이미지 밖일 수 있으므로
+    // 먼저 fit 으로 되돌린다(그 상태에서 좌우 여백이 확실히 생긴다).
+    session.image_gallery.open.?.view = .{};
+    const r = image_view.destRect(session.image_gallery.open.?.view, vp, w, h);
+    try std.testing.expect(r.y > vp.y); // 위아래 여백이 있다 = 밖을 누를 자리가 있다
+    session.mouse(1, cx, @floatCast(vp.y + 1), 0, 0);
+    try std.testing.expect(session.image_gallery.open == null);
 }

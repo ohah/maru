@@ -1115,7 +1115,10 @@ test "원격 커맨드는 tmux 좌표를 옆 파일에 남긴다 — 줄 형식�
     try testing.expect(std.mem.indexOf(u8, cmd, "\"$TMUX_PANE\" > ") != null);
 
     // 이벤트 줄은 여전히 append 이고 형식이 그대로다.
-    try testing.expect(std.mem.indexOf(u8, cmd, "'claude\t%s\n'") != null);
+    // ⚠️ **리터럴 `\t`·`\n` 이다**(실제 탭·개행이 아니다). 이것은 셸이 받는 `printf` 포맷 문자열이라
+    // 두 글자로 적혀 있어야 하고, 실제 탭을 넣으면 읽는 사람이 그것을 못 본다(계약이 그래서 상수와
+    // comptime 가드로 묶어 두는 자리다).
+    try testing.expect(std.mem.indexOf(u8, cmd, "'claude\\t%s\\n'") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, ">> ") != null);
 
     // 로컬 커맨드는 이 축과 무관하다 — tmux 좌표를 안 남긴다(로컬은 pane 이름이 안 오염된다).

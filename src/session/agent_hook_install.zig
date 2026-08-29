@@ -1013,10 +1013,16 @@ test "apply 도 scope 를 본다 — 판정만 원격이고 적용이 로컬이�
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const want = "echo maru-remote";
+    // ⚠️ **진짜 커맨드여야 한다.** `scan` 은 문자열이 같은지가 아니라 **우리 표식이 있는지**로 «우리
+    // 것» 을 가른다(그래야 경로·상한이 바뀌어도 우리 것으로 남는다). 아무 문자열이나 넣으면 심기는
+    // 되지만 세어지지 않아, 판정자가 «apply 가 아무것도 안 했다» 로 잘못 읽는다(실제로 그랬다).
+    var want_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer want_buf.deinit(a);
+    try command.build(&want_buf, a, "claude", "/tmp/maru-remote-events", .remote);
+    const want = want_buf.items;
+
     var hooks: std.json.ObjectMap = .empty;
     try apply(.claude, .remote, arena, &hooks, want, .install);
-
     try testing.expect(hooks.get("PreToolUse") == null); // 원격에서 뺀 그 이벤트
     try testing.expectEqual(command.eventsFor(.claude, .remote).len, hooks.count());
 

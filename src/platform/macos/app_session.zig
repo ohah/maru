@@ -14702,6 +14702,16 @@ pub const AppSession = struct {
 
                     const sid = term.surface.id;
                     try member_ids.append(arena, sid);
+                    // **host-backed 일 때만 runtime id 가 있다**(§3). in-process Term 은 `remote` 가
+                    // null 이라 여기서 자연히 걸러진다 — 그 필드의 유무가 곧 "붙을 수 있는가" 다.
+                    // 단일 출처는 세션 호스트이고 여기서는 옮겨 적기만 한다.
+                    const runtime_hex: ?[]const u8 = blk: {
+                        if (!is_macos) break :blk null;
+                        if (term.surface.remote == null) break :blk null;
+                        const backend = if (app_remote_backend) |*b| b else break :blk null;
+                        const hex = backend.runtimeIdFor(term.rt.handle) orelse break :blk null;
+                        break :blk try arena.dupe(u8, &hex);
+                    };
                     try surfaces.append(arena, .{
                         .surface_id = sid, // = surface.id(M0a 앱 전역 opaque)
                         .generation = 0, // §3 defense-in-depth 보조 — respawn 경로(M1) 전엔 0
@@ -14710,6 +14720,7 @@ pub const AppSession = struct {
                         .tab = @intCast(ti), // window 안 tab 0-based
                         .pane = @intCast(pi), // tab split 안 pane 0-based(가로 탭 term은 pane 좌표 공유)
                         .focused = (focused_surface_id != null and sid == focused_surface_id.?),
+                        .runtime_id = runtime_hex,
                         .detail = .{
                             .terminal = .{
                                 .cwd = cwd_copy, // 없으면 null(§3 필드 생략)

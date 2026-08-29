@@ -94,6 +94,22 @@ wire에서 `kind`는 `"editor"` 문자열이고 detail은 `EditorMeta`다 — **
   끝나며 이미 전송된 prefix 외 해당 surface payload suffix와 후속 sibling frame은 0이다.
 - **wire 인코딩 결정(구현 `control_surface.zig`)**: `at_prompt` 3상은 **nullable boolean**으로 실린다 — `true`→JSON `true`, `false`→JSON `false`, `unknown`→JSON **`null`**(문자열 `"unknown"` 아님). terminal surface엔 **항상** 실린다(생략≠unknown). 반면 `cwd`/`git_branch`/`url`/`agent`는 값이 없으면 **필드 자체를 생략**한다. `agent.kind`/`agent.state`/`panel_kind`/`trust`의 wire enum은 내부 observer enum과 **격리된 자체 enum**이다. `agent.state`는 `running`(진행 중) / `blocked`(사용자 입력 필요) / `idle`(현재 입력 가능) / `unknown`(판정 불가) 4상이다. `interrupted`는 더 이상 emit하지 않는다. `idle`은 완료 증명이 아니므로 클라이언트는 `running → idle`만으로 후속 자동화를 시작하면 안 된다. 외부 ID는 `{surface_id, generation}` 중첩 객체(`generation`은 `u64`).
 
+- **`runtime_id`(선택)**: 그 surface 가 **영속 세션 호스트의 runtime 으로 떠 있을 때만** 싣는다
+  (32 소문자 hex). 값이 없으면 필드를 생략한다 — in-process Term·웹 패널·편집기에는 runtime 이
+  없다. 단일 출처는 세션 호스트이고 GUI 는 그것을 옮겨 적을 뿐이다
+  (`RemoteTermBackend.runtimeIdFor`).
+
+  **`surface_id` 와 다른 축이다**([세션 호스트 §ID 표](persistent-session-host.md)):
+  `surface_id` 는 **앱 인스턴스 전역**이라 GUI 를 껐다 켜면 사라지고 렌더·입력 라우팅에 쓴다.
+  `runtime_id` 는 **PTY 가 사는 동안** 유지되고 프로세스 밖에서 그 터미널에 붙는 키다
+  (`maru attach`). 그래서 둘을 같은 정수나 권한 token 으로 접지 않는다.
+
+  **이 필드가 곧 "붙을 수 있는가" 다.** 폰은 목록에서 이 값이 있는 줄만 눌러 그 화면을 연다
+  (§4a). 없는 줄도 목록에는 보인다 — 사용자가 "내 세션이 왜 없지" 를 겪지 않게, 보이되 안 눌린다.
+
+  `runtime_id`는 secret 이 아니다([세션 호스트 §11](persistent-session-host.md)) — 그것만으로
+  output/read/write 가 허용되지 않고, 붙는 것은 same-UID 경계가 따로 지킨다.
+
 상태 수집은 기존 자산을 직렬화한다(신규 수집 로직은 collector에 둔다): app_session의 `Model` 트리, `git_ops.termCwdForDisplay`(관측 OSC 7 → 커널 조회, 원격은 관측값), `git_ops.termGitBranch`, terminal agent observer, 코어 `semantic_state`(OSC 133) + `alt_active`(alt 중 `false` 오버라이드) — 옛 `PtySession.hasForegroundJob()`은 제거됐다. bool로 접은 형태가 `cursorIsAtPrompt`([macos-app-host-boundary.md] 닫기 확인과 같은 계열)지만 그건 unknown을 `false`로 접으므로, 컨트롤 플레인은 3상을 보존하려 `cursorIsAtPrompt`가 아니라 raw `semantic_state`를 읽는다. **A1 구현**: `app_session.zig`의 순수 매핑 `atPromptWire(semantic, alt_active)`(alt→`not_at_prompt`, prompt/input→`at_prompt`, command→`not_at_prompt`, unknown→`unknown`)과 `agentInfoWire(kind, state)`(`none`→null=필드 생략, 나머지는 내부→wire enum)가 내부 상태를 wire enum으로 격리 매핑한다(헤드리스 단위 테스트로 못박음). git branch는 `termGitBranch`(내부적으로 저장소 판정용 `termCwd`를 거쳐 `termGitBranchForCwd`를 부른다 — fs 읽기는 `core_mutex` 밖).
 
 ## 계약 문서 구성

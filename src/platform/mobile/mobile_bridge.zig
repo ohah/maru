@@ -938,6 +938,10 @@ const SessionRow = struct {
     agent_len: usize = 0,
     at_prompt: control.AtPrompt = .unknown,
     focused: bool = false,
+    /// 그 줄을 눌러 화면을 열 수 있나 — **runtime id 가 있는 줄만** 눌린다(계약 §3).
+    /// 32 소문자 hex 라 자리는 고정이고, 없으면 `has_runtime` 이 거짓이다.
+    runtime_id: [32]u8 = @splat(0),
+    has_runtime: bool = false,
 
     fn copyInto(dst: []u8, len: *usize, src: []const u8) void {
         const n = @min(src.len, dst.len - 1);
@@ -950,6 +954,9 @@ const SessionRow = struct {
         self.surface_id = s.surface_id;
         self.at_prompt = s.at_prompt;
         self.focused = s.focused;
+        // 파서가 이미 32 소문자 hex 만 통과시킨다(§4a) — 여기서는 자리에 옮겨 담기만 한다.
+        self.has_runtime = s.runtime_id.len == 32;
+        if (self.has_runtime) @memcpy(&self.runtime_id, s.runtime_id);
         copyInto(&self.title, &self.title_len, s.title);
         copyInto(&self.cwd, &self.cwd_len, s.cwd);
         copyInto(&self.git, &self.git_len, s.git_branch);

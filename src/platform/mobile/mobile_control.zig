@@ -305,12 +305,24 @@ pub const Session = struct {
     agent_state: []const u8 = "",
     at_prompt: AtPrompt = .unknown,
     focused: bool = false,
+    /// 그 세션의 runtime id(32 소문자 hex). **host-backed 일 때만 온다**(계약 §3) — in-process
+    /// Term 에는 runtime 이 없다. **이 값의 유무가 곧 "붙을 수 있는가" 다**: 있으면 눌러서 그
+    /// 화면을 열고, 없으면 목록에 보이되 안 눌린다.
+    runtime_id: []const u8 = "",
 };
 
 /// 응답 프레임 하나에서 세션들을 읽어 `out` 에 채운다. **채운 개수**를 돌려준다.
 ///
 /// `out` 보다 많이 오면 **앞에서부터 담고 나머지는 버린다** — 화면이 다 못 그릴 바에야 상한을
 /// 호출자가 정하는 편이 낫다(그리고 그 사실은 개수로 드러난다).
+fn isLowerHex(text: []const u8) bool {
+    for (text) |b| {
+        const ok = (b >= '0' and b <= '9') or (b >= 'a' and b <= 'f');
+        if (!ok) return false;
+    }
+    return true;
+}
+
 pub fn parseSessions(frame: []const u8, out: []Session) usize {
     const result = jsonValueField(frame, "result") orelse return 0;
     var n: usize = 0;
@@ -329,6 +341,11 @@ fn parseSession(obj: []const u8) Session {
         s.surface_id = jsonIntField(id_obj, "surface_id") orelse -1;
     }
     if (jsonStringField(obj, "title")) |v| s.title = v;
+    // **없으면 빈 값 그대로** — 그 세션은 못 붙는다(계약 §3). 32 소문자 hex 가 아니면 안 받는다:
+    // 이 값은 명령 줄에 실리고 원격 셸이 그것을 파싱한다(§4a).
+    if (jsonStringField(obj, "runtime_id")) |v| {
+        if (v.len == 32 and isLowerHex(v)) s.runtime_id = v;
+    }
     if (jsonStringField(obj, "cwd")) |v| s.cwd = v;
     if (jsonStringField(obj, "git_branch")) |v| s.git_branch = v;
     if (jsonValueField(obj, "agent")) |ag| {
@@ -776,6 +793,31 @@ test "자리보다 많이 오면 앞에서부터 담고 개수로 드러난다" 
     const n = parseSessions(list_frame, &out);
     try testing.expectEqual(@as(usize, 2), n);
     try testing.expectEqual(@as(i64, 7), out[0].surface_id);
+}
+
+test "runtime id 는 있을 때만 실리고 32 소문자 hex 라야 한다" {
+    // **이 값의 유무가 "붙을 수 있는가" 다**(§3). 그리고 명령 줄에 실려 원격 셸이 파싱하므로
+    // (§4a) 형식이 아니면 안 받는다 — 목록은 원격이 준 것이다.
+    var out: [6]Session = @splat(.{});
+    const frame =
+        \\{"jsonrpc":"2.0","id":1,"result":[
+        \\{"id":{"surface_id":1},"title":"host-backed","runtime_id":"0123456789abcdef0123456789abcdef"},
+        \\{"id":{"surface_id":2},"title":"in-process"},
+        \\{"id":{"surface_id":3},"title":"짧다","runtime_id":"abc"},
+        \\{"id":{"surface_id":4},"title":"메타문자","runtime_id":"; id > /aaaaaaaaaaaaaaaaaaaaaaaa"},
+        \\{"id":{"surface_id":5},"title":"대문자","runtime_id":"0123456789ABCDEF0123456789abcdef"}]}
+    ;
+    const n = parseSessions(frame, &out);
+    try testing.expectEqual(@as(usize, 5), n);
+    try testing.expectEqualStrings("0123456789abcdef0123456789abcdef", out[0].runtime_id);
+    // 없는 줄은 빈 값이다 — 목록에는 보이되 안 눌린다.
+    try testing.expectEqual(@as(usize, 0), out[1].runtime_id.len);
+    // 형식이 아니면 **안 받는다**(길이·문자 둘 다).
+    try testing.expectEqual(@as(usize, 0), out[2].runtime_id.len);
+    // **길이는 맞는데 문자가 아닌 것** — 이것을 안 재면 길이 검사만으로도 초록이다(변이가 잡았다).
+    try testing.expectEqual(@as(usize, 32), @as(usize, 32));
+    try testing.expectEqual(@as(usize, 0), out[3].runtime_id.len);
+    try testing.expectEqual(@as(usize, 0), out[4].runtime_id.len);
 }
 
 test "빈 목록과 결과 없음을 가른다" {

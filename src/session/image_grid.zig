@@ -62,6 +62,27 @@ pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     };
 }
 
+/// `(px, py)` 위에 있는 칸. 없으면 `null` — 간격·여백을 누르면 아무 일도 없다.
+///
+/// **`rectAt` 에서 파생한다.** 좌표를 여기서 따로 풀면 배치를 바꿀 때 그린 자리와 눌리는 자리가
+/// 갈라지고, 그때 사용자에게는 「엉뚱한 이미지가 열린다」로 보인다 — 화면 없이는 못 잡는 종류의 버그다.
+pub fn hitTest(area: Rect, m: Metrics, l: Layout, px: u32, py: u32) ?usize {
+    if (l.cols == 0 or l.visible == 0) return null;
+    const step = m.tile +| m.gap;
+    if (step == 0) return null;
+    const ox = area.x +| m.pad;
+    const oy = area.y +| m.pad;
+    if (px < ox or py < oy) return null;
+    const col = (px - ox) / step;
+    const row = (py - oy) / step;
+    if (col >= l.cols) return null;
+    const n = @as(usize, row) *| @as(usize, l.cols) +| @as(usize, col);
+    // 후보를 **그리는 함수에 되물어** 확인한다 — 간격에 떨어진 점은 여기서 걸러진다.
+    const r = rectAt(area, m, l, n) orelse return null;
+    if (px < r.x or py < r.y or px >= r.x +| r.w or py >= r.y +| r.h) return null;
+    return n;
+}
+
 /// 원본 비율을 지키며 타일 안에 넣는 사각형(letterbox). 타일을 꽉 채우지 않고 **가운데 정렬**한다 —
 /// 늘리면 스크린샷의 글자가 찌그러지고, 자르면 무엇이 찍혔는지 못 알아본다.
 pub fn fitInside(tile: Rect, w: u32, h: u32) Rect {
@@ -183,4 +204,37 @@ test "letterbox 결과는 언제나 타일 안에 있다" {
         try testing.expect(r.y + r.h <= tile.y + tile.h);
         try testing.expect(r.w >= 1 and r.h >= 1);
     }
+}
+
+test "hitTest: 그린 자리를 누르면 그 칸이 나온다" {
+    const l = layout(area_400x300, m80, 12);
+    for (0..l.visible) |n| {
+        const r = rectAt(area_400x300, m80, l, n).?;
+        // 왼쪽 위 모서리·가운데·오른쪽 아래 직전 — 세 점 다 같은 칸이어야 한다.
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m80, l, r.x, r.y));
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m80, l, r.x + r.w / 2, r.y + r.h / 2));
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m80, l, r.x + r.w - 1, r.y + r.h - 1));
+    }
+}
+
+test "hitTest: 간격·여백·바깥은 아무 칸도 아니다" {
+    const l = layout(area_400x300, m80, 12);
+    const r0 = rectAt(area_400x300, m80, l, 0).?;
+    // 칸 바로 오른쪽(간격 안).
+    try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, r0.x + r0.w, r0.y));
+    // 여백 안(격자 시작 전).
+    try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, area_400x300.x, area_400x300.y));
+    // 영역 왼쪽·위 바깥.
+    try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, 0, 0));
+    // 열 수를 넘는 오른쪽.
+    try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, area_400x300.x + area_400x300.w, r0.y));
+}
+
+test "hitTest: 자리는 있는데 칸이 없으면 null — overflow 자리를 누르지 않는다" {
+    // 12칸이 들어가는 격자에 이미지가 3장뿐이다. 4번째 자리를 눌러도 열 것이 없다.
+    const l = layout(area_400x300, m80, 3);
+    const full = layout(area_400x300, m80, 12);
+    const r3 = rectAt(area_400x300, m80, full, 3).?;
+    try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, r3.x + 2, r3.y + 2));
+    try testing.expectEqual(@as(?usize, 2), hitTest(area_400x300, m80, l, r3.x - 88 + 2, r3.y + 2));
 }

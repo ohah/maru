@@ -84,6 +84,7 @@ pub const agent_session_archive_detail = @import("session/agent_session_archive_
 pub const agent_image_index = @import("session/agent_image_index.zig"); // IG1: 트랜스크립트 JSONL에서 이미지 **위치**만 찾는 순수 스캐너(바이트를 옮기지 않는다)
 pub const image_grid = @import("session/image_grid.zig"); // IG3: 갤러리 격자 배치 순수 계산(그린 자리=눌리는 자리)
 pub const image_scale = @import("session/image_scale.zig"); // IG3: 텍스처 상한 안으로 줄이는 **계산**(생성 아님 — 초과는 abort 라 계산만 CI가 본다)
+pub const image_view = @import("session/image_view.zig"); // IG4: 크게 보기의 팬·줌 순수 계산(연속 좌표라 격자와 나눈다)
 pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 상태줄 훅(§7.2.2 — 옵션 보강)
 pub const agent_hook_command = @import("session/agent_hook_command.zig"); // provider 훅 인라인 커맨드(docs/agent-hooks.md §4.1, 순수)
 pub const agent_hook_event = @import("session/agent_hook_event.zig"); // 훅 이벤트 로그 파서·tail 커서(§4, 순수)

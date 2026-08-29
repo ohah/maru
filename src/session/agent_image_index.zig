@@ -139,9 +139,33 @@ pub fn scanLine(
     if (line.len == 0 or line.len > max_line_bytes) return;
     if (std.mem.indexOf(u8, line, compacted_marker) != null) return;
 
+    const before = out.items.len;
     try scanClaudeImages(allocator, line, line_offset, out);
+    const after_images = out.items.len;
     try scanClaudeToolFiles(allocator, line, line_offset, out);
+    dropToolFileDuplicates(out, before, after_images);
     try scanCodexImages(allocator, line, line_offset, out);
+}
+
+/// **같은 이미지의 두 번째 사본을 접는다**(§4.3). 접지 않으면 에이전트가 읽은 이미지가 갤러리에
+/// 두 번씩 뜬다 — 실측 3,226 장 중 1,424 장(44%)이 이 사본이었다.
+///
+/// 접는 기준은 **같은 줄에 `claude_image` 가 있는가** 하나다. 왜 그것으로 충분한지는 실측이 말한다
+/// (2026-08-29, 실제 트랜스크립트 2,548 파일):
+///
+/// | 잰 것 | 값 | 뜻 |
+/// | --- | --- | --- |
+/// | `tool_file` 만 있는 줄 | **0** | 접어도 잃는 것이 없다 |
+/// | 개수 불일치 줄 | **0** | 언제나 1:1 이다 |
+/// | payload 가 다른 줄 | **0** | base64 바이트가 글자 그대로 같다 |
+///
+/// **그래도 「같은 줄에 있으면」 조건을 남긴다.** 무조건 버리면 provider 가 언젠가 `toolUseResult` 만
+/// 쓰는 레코드를 내보낼 때 그 이미지가 통째로 사라지고, 증상은 「어떤 이미지는 안 보인다」라 원인을
+/// 찾기 어렵다. 조건을 두면 그 경우 사본이 아니라 **유일본**이므로 그대로 남는다.
+fn dropToolFileDuplicates(out: *std.ArrayList(Hit), line_start: usize, images_end: usize) void {
+    if (images_end == line_start) return; // 이 줄에 `claude_image` 가 없다 = 사본이 아니라 유일본
+    if (out.items.len == images_end) return; // 접을 것이 없다
+    out.shrinkRetainingCapacity(images_end);
 }
 
 fn scanClaudeImages(
@@ -624,4 +648,54 @@ test "StreamScanner: 이미지가 상한을 넘으면 더 담지 않고 partial 
 
     try testing.expectEqual(max_hits_per_file, out.items.len);
     try testing.expect(sc.partial); // 「비었다」가 아니라 「못 봤다」임을 밝힌다
+}
+
+test "2중 저장은 접는다 — 같은 줄의 tool_file 사본은 세지 않는다 (§4.3)" {
+    // 실측: 3,226 장 중 1,424 장(44%)이 이 사본이었다. 접지 않으면 에이전트가 읽은 이미지가 전부 두 번 뜬다.
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    // 실제 모양: `message.content[].content[].source.data` 와 `toolUseResult.file.base64` 가 한 줄에 있고
+    // **바이트가 같다**(실측 identical 1,425 / different 0).
+    const line =
+        \\{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]},"toolUseResult":{"file":{"base64":"AAAA","type":"image"}}}
+    ;
+    try scanLine(allocator, line, 0, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(Kind.claude_image, out.items[0].kind);
+    try std.testing.expectEqual(Mime.png, out.items[0].mime);
+}
+
+test "2중 저장 접기: tool_file 만 있는 줄은 그대로 남는다 — 유일본을 버리지 않는다" {
+    // 실측에서는 0건이지만 provider 가 바뀌면 생길 수 있다. 그때 무조건 버리면 그 이미지가 통째로
+    // 사라지고 증상은 「어떤 이미지는 안 보인다」라 원인을 못 찾는다.
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line =
+        \\{"type":"user","toolUseResult":{"file":{"base64":"BBBB","type":"image"}}}
+    ;
+    try scanLine(allocator, line, 0, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(Kind.claude_tool_file, out.items[0].kind);
+}
+
+test "2중 저장 접기: 앞 줄에서 찾은 것은 건드리지 않는다" {
+    // 접기는 **이번 줄에서 더한 것**만 본다. 버퍼 스캔은 한 `out` 에 여러 줄을 이어 담으므로,
+    // 범위를 안 나누면 앞 줄들의 결과가 통째로 잘린다.
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const first =
+        \\{"content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"ZZZZ"}}]}
+    ;
+    const second =
+        \\{"content":[{"type":"image","source":{"type":"base64","data":"AAAA"}}],"toolUseResult":{"file":{"base64":"AAAA"}}}
+    ;
+    try scanLine(allocator, first, 0, &out);
+    try scanLine(allocator, second, 200, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len); // 앞 줄 1 + 이번 줄 1(사본 접힘)
+    try std.testing.expectEqual(Mime.jpeg, out.items[0].mime);
+    try std.testing.expectEqual(@as(u64, 0), out.items[0].line_offset);
+    try std.testing.expectEqual(@as(u64, 200), out.items[1].line_offset);
 }

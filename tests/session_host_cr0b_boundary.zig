@@ -54,6 +54,11 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     defer allocator.free(gui_owner);
     const reconnect_owner = try readSource(allocator, "src/platform/macos/session_host/reconnect_admission_owner.zig");
     defer allocator.free(reconnect_owner);
+    const reconnect_product = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_product_coordinator.zig",
+    );
+    defer allocator.free(reconnect_product);
     const session_coordinator = try readSource(allocator, "src/platform/macos/session_host/session_host_coordinator.zig");
     defer allocator.free(session_coordinator);
     const remote_runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
@@ -379,15 +384,16 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(incident, "fatalIntegrity("));
     try std.testing.expectEqual(@as(usize, 6), count(binding, "test \"CR0b binding 계약은"));
     try std.testing.expectEqual(@as(usize, 7), count(publication, "test \"CR0b poison publication 계약은"));
-    try std.testing.expectEqual(@as(usize, 2), count(reconnect_owner, "test \"CR0b reconnect admission owner는"));
+    try std.testing.expectEqual(@as(usize, 3), count(reconnect_owner, "test \"CR0b reconnect admission owner는"));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn admit("));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn peek("));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn consume("));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_owner, "pub fn ownedBy("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.ownedBy("));
-    // Publication owner와 CR1 scheduler, e3b2 stable runtime/drain, e3c1 sole drain만 bounded row를 읽는다.
+    // Publication owner와 CR1 scheduler, e3b2 stable runtime/drain, e3c1 sole drain,
+    // CR6e-c3b2a product coordinator만 bounded row를 읽는다.
     // 각 소비자 import를 별도로 고정해 전역 수치만 느슨하게 늘리는 우회를 막는다.
-    try std.testing.expectEqual(@as(usize, 5), try countProductSourcesExcept(
+    try std.testing.expectEqual(@as(usize, 6), try countProductSourcesExcept(
         allocator,
         "reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_admission_owner.zig",
@@ -396,6 +402,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(session_coordinator, "@import(\"reconnect_admission_owner.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(reconnect_product, "@import(\"reconnect_admission_owner.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.preflight("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "self.reconnect_admissions.admitAfterPreflightNoFail("));
     inline for (.{
@@ -642,6 +649,11 @@ test "CR1 reconnect scheduler 경계는 sealed inline transition만 제품에 �
     defer allocator.free(owner);
     const scheduler = try readSource(allocator, "src/platform/macos/session_host/reconnect_scheduler.zig");
     defer allocator.free(scheduler);
+    const product_coordinator = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_product_coordinator.zig",
+    );
+    defer allocator.free(product_coordinator);
     const seal_service = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
     defer allocator.free(seal_service);
     const seal_types = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
@@ -661,6 +673,7 @@ test "CR1 reconnect scheduler 경계는 sealed inline transition만 제품에 �
     try std.testing.expectEqual(@as(usize, 2), count(scheduler, "owner.prepareDispatch(&dispatch)"));
     try std.testing.expectEqual(@as(usize, 5), count(scheduler, "owner.settleDispatch(&dispatch,"));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn prepareDispatch("));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn preparedProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn settleDispatch("));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn peekScheduled("));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn consumeScheduled("));
@@ -672,14 +685,16 @@ test "CR1 reconnect scheduler 경계는 sealed inline transition만 제품에 �
         "reconnect_scheduler.zig",
         "platform/macos/session_host/reconnect_scheduler.zig",
     ));
-    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptThree(
+    try std.testing.expectEqual(@as(usize, 1), count(product_coordinator, ".prepareDispatch("));
+    try std.testing.expectEqual(@as(usize, 1), try countProductSourcesExceptThree(
         allocator,
         ".prepareDispatch(",
         "platform/macos/session_host/reconnect_admission_owner.zig",
         "platform/macos/session_host/reconnect_scheduler.zig",
         "platform/macos/session_host/remote_term_backend.zig",
     ));
-    try std.testing.expectEqual(@as(usize, 0), try countProductSourcesExceptThree(
+    try std.testing.expectEqual(@as(usize, 2), count(product_coordinator, ".settleDispatch("));
+    try std.testing.expectEqual(@as(usize, 2), try countProductSourcesExceptThree(
         allocator,
         ".settleDispatch(",
         "platform/macos/session_host/reconnect_admission_owner.zig",

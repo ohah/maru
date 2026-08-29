@@ -910,9 +910,9 @@ test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifac
     try std.testing.expectEqual(@as(usize, 5), count(budget, "test \"CR2e-e3a2 resident budget은"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const rss_testing_api = if (builtin.is_test) struct {"));
     try std.testing.expectEqual(
-        // e3c1 reconnect-only coordinator가 policy owner를 이동하지 않은 채 one-turn budget
-        // authority를 검사하므로 제품 import owner가 하나 늘어난다.
-        @as(usize, 5),
+        // e3c1 reconnect-only coordinator와 CR6e-c3b2a product coordinator가 policy owner를
+        // 이동하지 않은 채 one-turn budget authority를 검사한다.
+        @as(usize, 6),
         try countProductSourcesExceptTwo(
             allocator,
             "reconnect_resident_budget.zig",
@@ -1035,8 +1035,9 @@ test "CR2e-e3b1 경계는 queued 64와 active 8 및 128 MiB 정책을 분리한�
         count(budget, "test \"CR2e-e3b1 reconnect admission budget은"),
     );
     try std.testing.expectEqual(
-        // app-process owner, backend drain, e3c1 coordinator가 policy budget을 각각 소유/소비한다.
-        @as(usize, 3),
+        // app-process owner, backend drain, e3c1 coordinator와 c3b2a product coordinator가
+        // policy budget을 각각 소유/소비한다.
+        @as(usize, 4),
         try countProductSourcesExceptTwo(
             allocator,
             "reconnect_resident_budget.zig",
@@ -1086,7 +1087,7 @@ test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole pr
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn drainReconnectAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "test \"CR2e-e3b2 admission drain은"));
     // 실패 복구 defer, runtime Busy, resident cap의 세 경로가 모두 같은 sealed row를 재시도 상태로 돌린다.
-    try std.testing.expectEqual(@as(usize, 3), count(backend, "admissions.settleDispatch(&dispatch, .retry_later)"));
+    try std.testing.expectEqual(@as(usize, 3), count(backend, "admissions.settleDispatch(dispatch, .retry_later)"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn bindAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "resident_lease: reconnect_resident_budget.Lease = .{},"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "test \"CR2e-e3b2 actual stable executor는"));
@@ -1109,6 +1110,11 @@ test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고�
     defer allocator.free(backend);
     const coordinator = try readSource(allocator, "src/platform/macos/session_host/session_host_coordinator.zig");
     defer allocator.free(coordinator);
+    const product_coordinator = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_product_coordinator.zig",
+    );
+    defer allocator.free(product_coordinator);
     const build = try readSource(allocator, "build.zig");
     defer allocator.free(build);
 
@@ -1118,8 +1124,9 @@ test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고�
     try std.testing.expectEqual(@as(usize, 1), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "return backend.drainReconnectAdmission(admissions, budget);"));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn validateReconnectCoordinatorTarget("));
+    try std.testing.expectEqual(@as(usize, 1), count(product_coordinator, "validateReconnectCoordinatorTarget("));
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         try countProductSourcesExceptTwo(
             allocator,
             "validateReconnectCoordinatorTarget(",

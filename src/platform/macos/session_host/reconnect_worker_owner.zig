@@ -122,8 +122,6 @@ pub const Owner = struct {
             slot.coalesced_incidents = std.math.add(u32, slot.coalesced_incidents, 1) catch
                 return error.IncidentOverflow;
             if (slot.state == .queued) {
-                if (snapshot.incident_sequence > slot.snapshot.incident_sequence)
-                    slot.snapshot.incident_sequence = snapshot.incident_sequence;
                 if (snapshot.absolute_deadline_ns < slot.snapshot.absolute_deadline_ns)
                     slot.snapshot.absolute_deadline_ns = snapshot.absolute_deadline_ns;
             }
@@ -140,6 +138,39 @@ pub const Owner = struct {
             return .{ .admitted = .{ .slot = @intCast(index), .generation = generation } };
         };
         return error.CapacityExceeded;
+    }
+
+    /// Returns the immutable identity of an active same-host job before c3b2a decides whether a
+    /// newly claimed admission may coalesce without binding another resident lease.
+    pub fn activeSnapshotForHost(self: *Owner, candidate: Snapshot) !?Snapshot {
+        try self.validate();
+        if (!validSnapshot(candidate)) return error.InvalidSnapshot;
+        var found: ?Snapshot = null;
+        for (&self.slots) |*slot| {
+            if (slot.state == .free or slot.snapshot.host_id != candidate.host_id) continue;
+            if (found != null) return error.InvalidAuthority;
+            if (slot.state == .completed or slot.state == .completion_claimed) return error.HostBusy;
+            if (slot.snapshot.pool_membership_generation != candidate.pool_membership_generation or
+                slot.snapshot.connection_generation != candidate.connection_generation or
+                slot.snapshot.incident_app_instance_nonce != candidate.incident_app_instance_nonce)
+                return error.HostBusy;
+            found = slot.snapshot;
+        }
+        return found;
+    }
+
+    /// c3b2a may reserve a c1 slot before backend resident leases are bound. If that later
+    /// preflight cannot commit, only this exact still-queued reservation can be removed; a
+    /// running/coalesced/completed job is already visible authority and must settle normally.
+    pub fn withdrawQueued(self: *Owner, key: Key, snapshot: Snapshot) !void {
+        try self.validate();
+        if (key.slot >= max_jobs) return error.StaleReceipt;
+        const slot = &self.slots[key.slot];
+        if (slot.state != .queued or slot.generation != key.generation or
+            slot.coalesced_incidents != 1 or !std.meta.eql(slot.snapshot, snapshot))
+            return error.StaleReceipt;
+        const generation = slot.generation;
+        slot.* = .{ .generation = generation };
     }
 
     pub fn claim(self: *Owner, out: *JobReceipt) !void {
@@ -171,6 +202,36 @@ pub const Owner = struct {
         slot.outcome = if (slot.cancel_requested) .cancelled else outcome;
         slot.state = .completed;
         receipt.lifecycle = .consumed;
+    }
+
+    /// Physical-lane submission is the only fallible suffix after claim. Returning that exact
+    /// receipt to queued preserves the logical job if the lane closed between the readiness
+    /// probe and submit; no other running receipt may be rewound.
+    pub fn returnClaimedToQueued(self: *Owner, receipt: *JobReceipt) !void {
+        try self.validateJobReceipt(receipt);
+        const slot = &self.slots[receipt.key.slot];
+        if (slot.state != .running or slot.generation != receipt.key.generation or
+            !std.meta.eql(slot.snapshot, receipt.snapshot))
+            return error.StaleReceipt;
+        slot.state = .queued;
+        receipt.* = .{};
+    }
+
+    /// The c3b2 coordinator keeps one final-address receipt for the process lifetime. Reset is
+    /// allowed only after settle left the same exact slot in completed state, so a copied or
+    /// tampered tombstone cannot be reused as the next worker order.
+    pub fn resetConsumedJobReceipt(self: *Owner, receipt: *JobReceipt) !void {
+        try self.validate();
+        if (receipt.lifecycle != .consumed or receipt.self_addr != @intFromPtr(receipt) or
+            receipt.owner_addr != @intFromPtr(self) or receipt.pid != self.pid or
+            receipt.process_nonce != self.process_nonce or receipt.owner_thread != self.owner_thread or
+            receipt.key.slot >= max_jobs)
+            return error.InvalidReceipt;
+        const slot = &self.slots[receipt.key.slot];
+        if (slot.state != .completed or slot.generation != receipt.key.generation or
+            !std.meta.eql(slot.snapshot, receipt.snapshot))
+            return error.InvalidReceipt;
+        receipt.* = .{};
     }
 
     pub fn requestCancelAll(self: *Owner) !void {
@@ -217,6 +278,21 @@ pub const Owner = struct {
         const generation = slot.generation;
         slot.* = .{ .generation = generation };
         receipt.lifecycle = .consumed;
+    }
+
+    /// Completion consumption has already released the logical slot. The retained generation
+    /// still proves that this final-address tombstone belongs to that exact consumed slot.
+    pub fn resetConsumedCompletionReceipt(self: *Owner, receipt: *CompletionReceipt) !void {
+        try self.validate();
+        if (receipt.lifecycle != .consumed or receipt.self_addr != @intFromPtr(receipt) or
+            receipt.owner_addr != @intFromPtr(self) or receipt.pid != self.pid or
+            receipt.process_nonce != self.process_nonce or receipt.owner_thread != self.owner_thread or
+            receipt.key.slot >= max_jobs)
+            return error.InvalidReceipt;
+        const slot = &self.slots[receipt.key.slot];
+        if (slot.state != .free or slot.generation != receipt.key.generation)
+            return error.InvalidReceipt;
+        receipt.* = .{};
     }
 
     pub fn activeCount(self: *const Owner) !usize {
@@ -304,12 +380,79 @@ test "CR6e-c1 reconnect worker owner coalesces same host and preserves earliest 
     try std.testing.expect((try owner.admit(second)) == .coalesced);
     var job: JobReceipt = .{};
     try owner.claim(&job);
-    try std.testing.expectEqual(@as(u64, 2), job.snapshot.incident_sequence);
+    // The first bound runtime admission remains the authority for c3a revalidation. A later
+    // incident may tighten a still-queued deadline, but must not replace that identity.
+    try std.testing.expectEqual(@as(u64, 1), job.snapshot.incident_sequence);
     try std.testing.expectEqual(@as(u64, 900), job.snapshot.absolute_deadline_ns);
     try owner.settle(&job, .host_gone);
     var completion: CompletionReceipt = .{};
     try owner.takeCompletion(&completion);
     try std.testing.expectEqual(@as(u32, 2), completion.coalesced_incidents);
+}
+
+test "CR6e-c1 c3b2a main owner can withdraw only the exact fresh queued reservation" {
+    var owner: Owner = .{};
+    try owner.initInPlace(9);
+    const snapshot = fixture(1, 1);
+    const result = try owner.admit(snapshot);
+    const key = switch (result) {
+        .admitted => |value| value,
+        .coalesced => return error.UnexpectedCoalesce,
+    };
+    var stale = snapshot;
+    stale.incident_sequence += 1;
+    try std.testing.expectError(error.StaleReceipt, owner.withdrawQueued(key, stale));
+    try std.testing.expectEqual(@as(usize, 1), try owner.activeCount());
+    try owner.withdrawQueued(key, snapshot);
+    try std.testing.expectEqual(@as(usize, 0), try owner.activeCount());
+    try std.testing.expectError(error.StaleReceipt, owner.withdrawQueued(key, snapshot));
+}
+
+test "CR6e-c1 c3b2a final-address receipts reset only at their settled owner slot" {
+    var owner: Owner = .{};
+    try owner.initInPlace(9);
+    _ = try owner.admit(fixture(1, 1));
+    var job: JobReceipt = .{};
+    try owner.claim(&job);
+    try std.testing.expectError(error.InvalidReceipt, owner.resetConsumedJobReceipt(&job));
+    try owner.settle(&job, .host_gone);
+    try owner.resetConsumedJobReceipt(&job);
+    try std.testing.expect(std.meta.eql(job, JobReceipt{}));
+    var completion: CompletionReceipt = .{};
+    try owner.takeCompletion(&completion);
+    try std.testing.expectError(error.InvalidReceipt, owner.resetConsumedCompletionReceipt(&completion));
+    try owner.consumeCompletion(&completion);
+    try owner.resetConsumedCompletionReceipt(&completion);
+    try std.testing.expect(std.meta.eql(completion, CompletionReceipt{}));
+}
+
+test "CR6e-c1 c3b2a failed physical submit can return only its exact running receipt" {
+    var owner: Owner = .{};
+    try owner.initInPlace(9);
+    _ = try owner.admit(fixture(1, 1));
+    var job: JobReceipt = .{};
+    try owner.claim(&job);
+    var copied = job;
+    try std.testing.expectError(error.InvalidReceipt, owner.returnClaimedToQueued(&copied));
+    try owner.returnClaimedToQueued(&job);
+    try std.testing.expect(std.meta.eql(job, JobReceipt{}));
+    try owner.claim(&job);
+    try owner.settle(&job, .cancelled);
+}
+
+test "CR6e-c1 c3b2a active snapshot exposes first identity without coalesce mutation" {
+    var owner: Owner = .{};
+    try owner.initInPlace(9);
+    const first = fixture(1, 1);
+    _ = try owner.admit(first);
+    var later = fixture(1, 2);
+    later.absolute_deadline_ns = 900;
+    try std.testing.expectEqualDeep(first, (try owner.activeSnapshotForHost(later)).?);
+    var other = fixture(2, 1);
+    try std.testing.expect((try owner.activeSnapshotForHost(other)) == null);
+    other.host_id = 1;
+    other.connection_generation += 1;
+    try std.testing.expectError(error.HostBusy, owner.activeSnapshotForHost(other));
 }
 
 test "CR6e-c1 reconnect worker owner rejects stale same-host generation without mutation" {

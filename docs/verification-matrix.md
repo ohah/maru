@@ -2158,9 +2158,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   정산, c2는 thread/queue 비소유 worker entrypoint의 exact-host connect/hello, absolute deadline 보존, typed failure와
   move-only `Client` completion exact-once 정리, c3a는 128-bit incident identity와 pool/connection generation·모든 bound
   admission·absolute deadline을 재검증한 비차단 CR5 job adoption, c3b1은 final-address physical worker와 cancellation
-  wake/join, c3b2/c3c는 frame-thread block 0·bound admission 제품 정산·main-owner CR5 publication 및
+  wake/join, c3b2a는 admission-loss 없는 reversible c1 예약·최초 identity 보존 coalesce·한 frame당 completion/admission/dispatch
+  각 최대 하나, c3b2b/c3c는 frame-thread block 0·bound admission 제품 정산·main-owner CR5 publication 및
   actual AppKit socket 단절 뒤 같은 host/runtime/child PID·output/input/copy/resize·sibling/controller 보존과 모든
   worker/fd/client/admission final 0을 검증한다. c3 전에는 자동 reconnect 제품 완료로 세지 않는다.
+  c3b2a의 final-address main coordinator, prepared-dispatch 선행 seal 검증, reversible queued reservation과 synthetic
+  actual-runtime resident bind/coalesce는 구현됐다. AppSession frame caller와 terminal release/CR5 driver는 아직 구현 전이라
+  제품 connection-fatal event는 물리 worker로 dispatch되지 않는다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지
   않는지, callback이 queue mutex 밖에서 실행되는지 고정한다. daemon/restore는 runtime 생성 전에 process-local nonblocking
   CLOEXEC self-pipe를 만들고, reader는 write end에 byte만 coalesce하며 `poll_owner.Owner`만 read end와 runtime event queue를

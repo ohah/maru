@@ -17,6 +17,10 @@ pub const Metrics = struct {
     gap: u32 = 8,
     /// 격자 바깥 여백.
     pad: u32 = 8,
+    /// 타일 **아래** 라벨 한 줄의 높이. 0 이면 라벨이 없다(그때는 예전 배치와 byte-identical 이다).
+    ///
+    /// 칸 높이에 포함된다 — 라벨을 칸 밖에 그리면 다음 행 그림 위에 글자가 얹힌다.
+    label: u32 = 0,
 };
 
 pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
@@ -40,9 +44,13 @@ pub fn layout(area: Rect, m: Metrics, count: usize) Layout {
     if (inner_w < m.tile or inner_h < m.tile) return .{ .cols = 0, .visible = 0, .overflow = count };
 
     // 첫 칸은 간격 없이 들어가고 그 다음부터 (간격 + 타일)씩 먹는다.
+    // **세로는 라벨까지가 한 칸이다** — 라벨 높이를 빼먹으면 마지막 행 글자가 도크 밖으로 나간다.
+    const cell_h = m.tile +| m.label;
+    if (inner_h < cell_h) return .{ .cols = 0, .visible = 0, .overflow = count };
     const step = m.tile +| m.gap;
+    const step_y = cell_h +| m.gap;
     const cols = 1 + (inner_w - m.tile) / step;
-    const rows = 1 + (inner_h - m.tile) / step;
+    const rows = 1 + (inner_h - cell_h) / step_y;
     const capacity = @as(usize, cols) *| @as(usize, rows);
     const visible = @min(count, capacity);
     return .{ .cols = cols, .visible = visible, .overflow = count - visible };
@@ -52,14 +60,24 @@ pub fn layout(area: Rect, m: Metrics, count: usize) Layout {
 pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     if (l.cols == 0 or n >= l.visible) return null;
     const step = m.tile +| m.gap;
+    const step_y = m.tile +| m.label +| m.gap;
     const col: u32 = @intCast(n % l.cols);
     const row: u32 = @intCast(n / l.cols);
     return .{
         .x = area.x +| m.pad +| col *| step,
-        .y = area.y +| m.pad +| row *| step,
+        .y = area.y +| m.pad +| row *| step_y,
         .w = m.tile,
         .h = m.tile,
     };
+}
+
+/// `n` 번째 칸의 **라벨** 자리. 라벨 높이가 0 이면 `null` — 그릴 자리가 없다는 뜻이다.
+///
+/// `rectAt` 에서 파생한다(hitTest 와 같은 규율) — 좌표를 따로 풀면 글자가 그림에서 밀린다.
+pub fn labelRectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
+    if (m.label == 0) return null;
+    const tile = rectAt(area, m, l, n) orelse return null;
+    return .{ .x = tile.x, .y = tile.y +| tile.h, .w = tile.w, .h = m.label };
 }
 
 /// `(px, py)` 위에 있는 칸. 없으면 `null` — 간격·여백을 누르면 아무 일도 없다.
@@ -69,17 +87,20 @@ pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
 pub fn hitTest(area: Rect, m: Metrics, l: Layout, px: u32, py: u32) ?usize {
     if (l.cols == 0 or l.visible == 0) return null;
     const step = m.tile +| m.gap;
-    if (step == 0) return null;
+    const step_y = m.tile +| m.label +| m.gap;
+    if (step == 0 or step_y == 0) return null;
     const ox = area.x +| m.pad;
     const oy = area.y +| m.pad;
     if (px < ox or py < oy) return null;
     const col = (px - ox) / step;
-    const row = (py - oy) / step;
+    const row = (py - oy) / step_y;
     if (col >= l.cols) return null;
     const n = @as(usize, row) *| @as(usize, l.cols) +| @as(usize, col);
     // 후보를 **그리는 함수에 되물어** 확인한다 — 간격에 떨어진 점은 여기서 걸러진다.
+    // **라벨도 그 칸이다**: 그림 아래 글자를 눌렀는데 아무 일이 없으면 어디를 눌러야 하는지 알 수 없다.
     const r = rectAt(area, m, l, n) orelse return null;
-    if (px < r.x or py < r.y or px >= r.x +| r.w or py >= r.y +| r.h) return null;
+    if (px < r.x or py < r.y or px >= r.x +| r.w) return null;
+    if (py >= r.y +| r.h +| m.label) return null;
     return n;
 }
 
@@ -237,4 +258,54 @@ test "hitTest: 자리는 있는데 칸이 없으면 null — overflow 자리를 
     const r3 = rectAt(area_400x300, m80, full, 3).?;
     try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, r3.x + 2, r3.y + 2));
     try testing.expectEqual(@as(?usize, 2), hitTest(area_400x300, m80, l, r3.x - 88 + 2, r3.y + 2));
+}
+
+test "라벨 띠: 세로 칸이 라벨만큼 커지고 그 자리가 타일 바로 아래다" {
+    const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
+    // inner_h = 284, cell_h = 96, step_y = 104 → 1 + (284-96)/104 = 1+1 = 2행(라벨 없을 때는 3행이었다)
+    const l = layout(area_400x300, m, 100);
+    try testing.expectEqual(@as(u32, 4), l.cols);
+    try testing.expectEqual(@as(usize, 8), l.visible);
+
+    const r0 = rectAt(area_400x300, m, l, 0).?;
+    const lab0 = labelRectAt(area_400x300, m, l, 0).?;
+    try testing.expectEqual(r0.x, lab0.x);
+    try testing.expectEqual(r0.y + r0.h, lab0.y); // 타일 **바로 아래**
+    try testing.expectEqual(r0.w, lab0.w);
+    try testing.expectEqual(@as(u32, 16), lab0.h);
+
+    // 두 번째 행은 라벨 높이만큼 더 내려간다 — 안 그러면 글자가 다음 행 그림 위에 얹힌다.
+    const r4 = rectAt(area_400x300, m, l, 4).?;
+    try testing.expectEqual(r0.y + 80 + 16 + 8, r4.y);
+}
+
+test "라벨 띠: 라벨이 0 이면 예전 배치 그대로다" {
+    const with_label = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 0 };
+    const l = layout(area_400x300, with_label, 100);
+    const old = layout(area_400x300, m80, 100);
+    try testing.expectEqual(old.cols, l.cols);
+    try testing.expectEqual(old.visible, l.visible);
+    try testing.expectEqual(rectAt(area_400x300, m80, old, 7).?.y, rectAt(area_400x300, with_label, l, 7).?.y);
+    try testing.expect(labelRectAt(area_400x300, with_label, l, 0) == null);
+}
+
+test "라벨 띠: 마지막 행이 영역 안에 들어간다 — 글자가 도크 밖으로 안 나간다" {
+    const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
+    const l = layout(area_400x300, m, 100);
+    const last = l.visible - 1;
+    const lab = labelRectAt(area_400x300, m, l, last).?;
+    try testing.expect(lab.y + lab.h <= area_400x300.y + area_400x300.h);
+}
+
+test "라벨 띠: 그림 아래 글자를 눌러도 그 칸이 열린다" {
+    const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
+    const l = layout(area_400x300, m, 8);
+    for (0..l.visible) |n| {
+        const lab = labelRectAt(area_400x300, m, l, n).?;
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m, l, lab.x + 2, lab.y + 2));
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m, l, lab.x + lab.w - 1, lab.y + lab.h - 1));
+    }
+    // 라벨 아래 간격은 여전히 아무 칸도 아니다.
+    const lab0 = labelRectAt(area_400x300, m, l, 0).?;
+    try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m, l, lab0.x, lab0.y + lab0.h));
 }

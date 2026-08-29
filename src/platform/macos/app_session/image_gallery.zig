@@ -433,6 +433,32 @@ pub fn ensureOpen(self: *AppSession) void {
     }
 }
 
+/// 휠·트랙패드로 **포인터를 붙잡고** 확대·축소한다. 가운데 기준이면 보려던 곳이 밖으로 밀려나
+/// 매번 팬으로 쫓아가야 한다(계산은 `image_view.zoomAt`).
+///
+/// 트랙패드(`precise`)는 점 단위라 눈금보다 훨씬 촘촘히 온다 — 같은 계수를 쓰면 한 번 쓸어도 최대
+/// 배율에 닿는다. 그래서 계수를 나누고, 한 이벤트가 만드는 배율 변화를 e^±1 로 묶는다.
+pub fn wheelZoom(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) void {
+    const op = if (self.image_gallery.open) |*o| o else return;
+    if (op.pixels.len == 0) return;
+    if (!std.math.isFinite(delta_y) or delta_y == 0) return;
+    const per: f64 = if (precise) 0.006 else 0.12;
+    // 위로 굴리면 확대다(`lines > 0` = wheel up, 스크롤백과 같은 부호 규약).
+    const factor: f32 = @floatCast(@exp(std.math.clamp(delta_y * per, -1.0, 1.0)));
+    op.view = image_view.zoomAt(op.view, viewportRect(self), op.width, op.height, factor, @floatCast(x_px), @floatCast(y_px));
+    self.metal_dirty = true;
+}
+
+/// 드래그로 민다. **화면 이동량 그대로**다 — 잡은 곳이 손끝을 따라와야 한다.
+pub fn panDrag(self: *AppSession, dx: f64, dy: f64) void {
+    const op = if (self.image_gallery.open) |*o| o else return;
+    if (op.pixels.len == 0) return;
+    if (!std.math.isFinite(dx) or !std.math.isFinite(dy)) return;
+    op.view = image_view.panBy(op.view, viewportRect(self), op.width, op.height, @floatCast(dx), @floatCast(dy));
+    self.metal_dirty = true;
+}
+
+
 /// 갤러리가 키보드를 쥐고 있나. 에이전트 도크와 같은 게이트다 — 이것이 없으면 터미널로 돌아간 뒤의
 /// Esc 가 셸이 아니라 크게 보기를 닫는다.
 pub fn ownsKeys(self: *const AppSession) bool {
@@ -472,7 +498,11 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         const fx: f32 = @floatCast(x_px);
         const fy: f32 = @floatCast(y_px);
         const inside = fx >= r.x and fy >= r.y and fx < r.x + r.w and fy < r.y + r.h;
-        if (!inside) closeOpen(self);
+        // 이미지 위 = 잡고 밀기, 밖 = 닫기. **밖을 닫기로 둔 이유**는 크게 보기가 도크를 통째로
+        // 덮어 「어디를 눌러야 돌아가지」의 답이 하나뿐이기 때문이다(Esc 와 짝).
+        if (inside) {
+            self.beginPointerGesture(.{ .image_gallery_pan = .{ .x = x_px, .y = y_px } });
+        } else closeOpen(self);
         return true;
     }
 

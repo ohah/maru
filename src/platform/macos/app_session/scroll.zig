@@ -34,6 +34,7 @@ const Term = app_session_mod.Term;
 const default_scrollbar_fade_ticks = app_session_mod.default_scrollbar_fade_ticks;
 const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payload;
 const dock_ops = @import("dock.zig");
+const image_gallery_ops = @import("image_gallery.zig");
 const scm_dock_ops = @import("scm_dock.zig");
 const overlay_scroll_max_entries = app_session_mod.overlay_scroll_max_entries;
 const tab_ops = @import("tab.zig");
@@ -267,6 +268,15 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     if (self.anyOverlayOpen()) {
         const lines_overlay = wheelDeltaToLines(&self.wheel_accum, delta_y * @as(f64, self.appearance.scroll_multiplier), precise, self.cell_height_px, self.scale_milli);
         _ = scrollOverlayByLines(self, lines_overlay);
+        return;
+    }
+    // 갤러리 크게 보기 위의 휠은 **확대·축소**다. 목록이 아니라 한 장을 보고 있으므로 굴릴 것이
+    // 없고, 아무 일도 안 하면 「휠이 안 먹는다」로 읽힌다. 격자일 때는 아직 스크롤이 없어 흘려보낸다.
+    if (dock_ops.dockVisible(self) and self.dock.view == .image_gallery and
+        self.image_gallery.open != null and
+        layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content))
+    {
+        image_gallery_ops.wheelZoom(self, delta_y * @as(f64, self.appearance.scroll_multiplier), precise, x_px, y_px);
         return;
     }
     const session_dock_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and

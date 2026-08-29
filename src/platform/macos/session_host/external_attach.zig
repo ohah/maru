@@ -36,9 +36,35 @@ pub const Prepared = struct {
     }
 };
 
+/// **어디서 못 붙었나.** 종료 코드는 "무엇이 막았나"(denied·busy·…)만 말하고 **어느 단계인지**를 안 말한다.
+/// 그 둘이 없으면 화면에는 "안 된다" 만 남는다 — `--stream` 은 실제로 stderr 한 줄 없이 exit 4 로 끝났고, 폰에서는
+/// 그것이 "화면이 안 온다" 로만 보였다(실측).
+///
+/// 단계는 **잎이 아니라 이음매**가 붙인다. 잎마다 이유를 실어 나르면 60여 곳이 바뀌고, 그러면 새 잎이 하나
+/// 생길 때마다 이름을 또 정해야 한다. 이음매는 `prepareWithTransition` 의 순서 그 자체라 늘 여섯 곳뿐이다.
+pub const Stage = enum {
+    /// 어느 host 의 어느 runtime 인가를 고르는 중(레지스트리 열거·manifest 대조).
+    resolve,
+    /// 고른 host 소켓에 붙어 `hello` 를 주고받는 중.
+    connect,
+    /// 그 runtime 에 observer/controller 로 붙고 첫 화면을 받는 중.
+    attach,
+    /// 조종을 넘겨받는 중(`--take-over` 만).
+    takeover,
+    /// 붙은 뒤 그 자리가 아직 유효한지 다시 보는 중(조종 회수 확인).
+    publish,
+    /// 이 프로세스를 external 모드로 바꾸는 중.
+    transition,
+};
+
+pub const Failure = struct {
+    code: attach_cli.ExitCode,
+    stage: Stage,
+};
+
 pub const Result = union(enum) {
     prepared: Prepared,
-    failed: attach_cli.ExitCode,
+    failed: Failure,
 };
 
 pub fn prepare(
@@ -70,7 +96,7 @@ fn prepareWithTransition(
     transition: ModeTransition,
 ) Result {
     const resolve_phase = attach_phase_deadline.PhaseDeadline.start(io, .resolve) catch
-        return .{ .failed = .internal };
+        return failed(.internal, .resolve);
     const resolved = attach_product_resolver.resolveProduct(
         allocator,
         base_cache_dir,
@@ -79,12 +105,12 @@ fn prepareWithTransition(
     );
     var pinned = switch (resolved) {
         .selected => |value| value,
-        .failed => |code| return .{ .failed = code },
+        .failed => |code| return failed(code, .resolve),
     };
     defer pinned.deinit();
 
     const connect_phase = attach_phase_deadline.PhaseDeadline.start(io, .connect_hello) catch
-        return .{ .failed = .internal };
+        return failed(.internal, .connect);
     const connected = attach_product_resolver.connectPinned(
         allocator,
         base_cache_dir,
@@ -94,7 +120,7 @@ fn prepareWithTransition(
     );
     var client = switch (connected) {
         .client => |value| value,
-        .failed => |code| return .{ .failed = code },
+        .failed => |code| return failed(code, .connect),
     };
     var client_owned = true;
     defer if (client_owned) client.deinit();
@@ -105,7 +131,7 @@ fn prepareWithTransition(
         .default_controller => .controller,
     };
     const attach_phase = attach_phase_deadline.PhaseDeadline.start(io, .attach_snapshot) catch
-        return failClient(&client, .internal);
+        return failClient(&client, .internal, .attach);
     const attach_stage = attachSnapshot(
         allocator,
         io,
@@ -116,21 +142,21 @@ fn prepareWithTransition(
     );
     var attached = switch (attach_stage) {
         .attachment => |value| value,
-        .failed => |code| return .{ .failed = code },
+        .failed => |code| return failed(code, .attach),
     };
     var attached_owned = true;
     defer if (attached_owned) attached.deinit();
 
     if (request.intent == .take_over) {
         const code = performTakeover(allocator, io, &client, &attached.attachment);
-        if (code) |failed| return failClient(&client, failed);
+        if (code) |taken| return failClient(&client, taken, .takeover);
     }
-    if (publishGate(&client, &attached.attachment)) |failed|
-        return failClient(&client, failed);
+    if (publishGate(&client, &attached.attachment)) |gated|
+        return failClient(&client, gated, .publish);
     transition(&client) catch |err|
-        return failClient(&client, transitionExit(err));
+        return failClient(&client, transitionExit(err), .transition);
     const attach_instance_id = allocateAttachInstanceId() orelse
-        return failClient(&client, .internal);
+        return failClient(&client, .internal, .transition);
 
     // Seal the same provenance on both halves. `Prepared.attach_instance_id` is the consumable
     // token; the Client copy is the identity adoption evidence cross-checks against.
@@ -435,12 +461,16 @@ fn transitionExit(err: client_mod.EnterExternalModeError) attach_cli.ExitCode {
     };
 }
 
-fn failClient(client: *client_mod.Client, code: attach_cli.ExitCode) Result {
+fn failed(code: attach_cli.ExitCode, stage: Stage) Result {
+    return .{ .failed = .{ .code = code, .stage = stage } };
+}
+
+fn failClient(client: *client_mod.Client, code: attach_cli.ExitCode, stage: Stage) Result {
     // The caller still owns `client` and its defer performs the one-shot CLI connection close.
     // Fatal transport paths have already crossed `Client.poison`; semantic attach/takeover
     // outcomes must not be relabeled as unexpected shared-connection corruption here.
     _ = client;
-    return .{ .failed = code };
+    return failed(code, stage);
 }
 
 fn failAttachStage(client: *client_mod.Client, code: attach_cli.ExitCode) AttachStage {
@@ -565,11 +595,11 @@ test "external attach transition failure closes without follow-up wire" {
         .wire_major = protocol.version_major,
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
-    const result = failClient(&client, transitionExit(error.FlagFailed));
+    const result = failClient(&client, transitionExit(error.FlagFailed), .transition);
     try std.testing.expectEqual(
         attach_cli.ExitCode.internal,
         switch (result) {
-            .failed => |code| code,
+            .failed => |f| f.code,
             .prepared => return error.TestUnexpectedResult,
         },
     );
@@ -1218,9 +1248,20 @@ test "external attach product transaction resolves connects and assembles one li
         failExternalModeTransition,
     );
     try std.testing.expectEqual(
+        Stage.transition,
+        switch (failed_transition) {
+            .failed => |f| f.stage,
+            .prepared => |value| {
+                var unexpected = value;
+                unexpected.deinit();
+                return error.TestUnexpectedResult;
+            },
+        },
+    );
+    try std.testing.expectEqual(
         attach_cli.ExitCode.internal,
         switch (failed_transition) {
-            .failed => |code| code,
+            .failed => |f| f.code,
             .prepared => |value| {
                 var unexpected = value;
                 unexpected.deinit();

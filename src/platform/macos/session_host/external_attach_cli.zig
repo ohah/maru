@@ -54,7 +54,15 @@ pub fn runRequest(
 
     var prepared = switch (external_attach.prepare(allocator, io, base, request)) {
         .prepared => |value| value,
-        .failed => |code| return code,
+        // **말하고 끝낸다.** 여기까지 오는 실패는 전부 `prepare` 안에서 이유를 알고 있었는데, 종전에는 그 코드만
+        // 돌려주고 아무 말도 안 했다 — `--stream` 이 stderr 한 줄 없이 exit 4 로 끝나, 폰에서는 "화면이 안 온다"
+        // 로만 보였다(실측). 단계까지 적는 이유는 `denied` 하나가 레지스트리 선택·소켓 신원·조종 회수 등 여러
+        // 자리에서 나오기 때문이다 — 단계가 없으면 어디를 볼지 모른다.
+        .failed => |failure| {
+            var line_buf: [prepare_failure_line_max]u8 = undefined;
+            try stderr.writeAll(prepareFailureLine(&line_buf, failure));
+            return failure.code;
+        },
     };
     defer prepared.deinit();
 
@@ -87,6 +95,48 @@ pub fn runRequest(
         return .internal;
     }
     return runResultExit(result.cause, result.terminal_reason);
+}
+
+/// `prepareFailureLine` 이 절대 안 넘는 길이. 두 이름 다 enum tag 라 상한이 컴파일 타임에 정해진다.
+pub const prepare_failure_line_max = 128;
+
+/// 붙지 못했을 때 stderr 에 나갈 **한 줄**. 순수 함수라 테스트가 그대로 잰다.
+///
+/// **왜 단계를 같이 적는가.** `denied` 하나가 레지스트리 선택·소켓 신원·조종 회수 등 여러 자리에서 나온다.
+/// 코드만 적으면 사용자도 우리도 어디를 볼지 모른다 — 실제로 `--stream` 은 stderr 한 줄 없이 exit 4 로 끝나
+/// 폰에서 "화면이 안 온다" 로만 보였다.
+pub fn prepareFailureLine(buf: []u8, failure: external_attach.Failure) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "maru attach: could not attach ({s} at {s})\n",
+        .{ @tagName(failure.code), @tagName(failure.stage) },
+    ) catch unreachable; // 상한이 tag 이름 합보다 크다(아래 테스트가 전 조합으로 잰다).
+}
+
+test "붙지 못한 이유는 코드와 단계 둘 다 적는다 — 조용한 종료가 아니라" {
+    var buf: [prepare_failure_line_max]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "maru attach: could not attach (denied at resolve)\n",
+        prepareFailureLine(&buf, .{ .code = .denied, .stage = .resolve }),
+    );
+    try std.testing.expectEqualStrings(
+        "maru attach: could not attach (busy at takeover)\n",
+        prepareFailureLine(&buf, .{ .code = .busy, .stage = .takeover }),
+    );
+}
+
+test "어떤 코드와 단계 조합도 그 버퍼 안에 들어간다" {
+    var buf: [prepare_failure_line_max]u8 = undefined;
+    inline for (@typeInfo(attach_cli.ExitCode).@"enum".fields) |code_field| {
+        inline for (@typeInfo(external_attach.Stage).@"enum".fields) |stage_field| {
+            const line = prepareFailureLine(&buf, .{
+                .code = @enumFromInt(code_field.value),
+                .stage = @enumFromInt(stage_field.value),
+            });
+            // 잘린 줄은 다른 말이다 — 개행으로 끝나는지까지 본다.
+            try std.testing.expect(std.mem.endsWith(u8, line, ")\n"));
+        }
+    }
 }
 
 /// stdout 프레이밍(§8): `"MRSS" | kind:u8 | reserved:u8 x3 | len:u32 LE | payload`.

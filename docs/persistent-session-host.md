@@ -646,6 +646,22 @@ entry는 **반드시 쌓인다**. discovery의 canonical entry cap(16)이 그 �
 적용한다 — `.free`(소유 프로세스 없음 = 죽음이 확정)는 세지 않는다. `.unknown`은 fd/권한 실패일 수 있어 죽음의
 증거가 아니므로 그대로 센다(`owner_lease.observe` 계약).
 
+**그 상한을 attach 가 다시 뒤집고 있었다(2026-08-29 실측·수정).** discovery 는 위 규칙대로 시체를 안 셌지만,
+attach 의 reducer(`attach_resolver.resolve`)가 **emit 된 줄 전체**를 같은 상한(16)에 다시 댔다. 시체는 지우지
+않고 그대로 emit 하므로(바로 아래 문단) 줄 수는 반드시 16 을 넘고, 그 순간부터 attach 는 **모든 runtime 에
+대해 `denied`** 였다. 증상이 discovery 쪽과 갈린다는 점이 이것을 오래 숨겼다: 같은 기계에서 `maru runtime
+list` 는 산 runtime 을 그대로 냈고(그 경로는 `.unavailable` 줄을 그냥 건너뛴다) `maru attach` 만 막혔다.
+실측: 잔여 99 개가 쌓인 기계에서 `runtime list` 는 성공, `attach --stream` 은 denied. 폰에서는 그것이
+"화면이 안 온다" 로만 보였다. 이제 reducer 도 같은 규칙을 쓴다 — 죽은 줄은 안 세고, 후보가 상한을 넘길 때만
+fail-closed 로 접는다.
+
+**못 붙으면 어디서 못 붙었는지 말한다.** attach 의 준비 경로는 종전에 종료 코드만 돌려주고 **stderr 에 아무
+말도 안 했다** — `maru attach --stream <id>` 가 한 줄도 없이 exit 4 로 끝났다. 이제 한 줄을 적는다:
+`maru attach: could not attach (<code> at <stage>)`. 단계를 같이 적는 이유는 `denied` 하나가 레지스트리
+선택·소켓 신원·조종 회수 등 여러 자리에서 나오기 때문이다 — 단계가 없으면 어디를 볼지 모른다. 단계는
+**잎이 아니라 이음매**가 붙인다(`resolve · connect · attach · takeover · publish · transition`): 잎마다 이유를
+실어 나르면 60 여 곳이 바뀌고 새 잎마다 이름을 또 정해야 하지만, 이음매는 준비 순서 그 자체라 늘 여섯이다.
+
 죽은 entry를 **열거 결과에서 지우지는 않는다.** manifest가 있으면서 owner lease가 죽은 조합은 위 상태표가 정한
 "host 종료를 검증함" 확정 신호이고, 소비자는 그 신호로 기존 handle을 ended로 정리한다. 여기서 파일을 삭제하면 그
 확정이 다음 실행에서 "endpoint 미발견 = runtime 생존 가능성 있음"으로 격하되어 stale handle이 영원히 풀리지 않는다.

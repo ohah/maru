@@ -9,15 +9,21 @@ pub const Snapshot = struct {
     clipboard_read_seq: u64,
 };
 
+/// `observer_generation` 을 **일부러 담지 않는다.** 예전에는 담아 두고 `commit` 이 그 값과
+/// 커서를 대조했는데, 그 값은 출력 revision 이라(PTY 바이트마다 증가) 출력이 한 번이라도 있으면
+/// 반드시 어긋나 요청을 버렸다. 검증에 안 쓰는 값을 남겨 두면 다음 사람이 "이걸로 뭔가 확인하나 보다"
+/// 하고 같은 함정에 다시 빠진다. 유효성은 `cursor_addr`·`previous_sequence`·`sequence` 가 본다.
 const Prepared = struct {
     cursor_addr: usize,
     kind: Kind,
-    observer_generation: u64,
     previous_sequence: u64,
     sequence: u64,
 };
 
 pub const EventCursor = struct {
+    /// **기준선을 잡았는지의 표식이다** — 비교용이 아니다. `null` 이면 아직 기준선이 없다는 뜻이고,
+    /// 값이 있으면 그때 본 generation 이다. `rebase` 말고는 아무도 이 값을 읽지 않는다.
+    /// 이 값으로 "재접속했나" 를 판정하면 안 된다 — 출력 revision 이라 매 출력마다 달라진다.
     observer_generation: ?u64 = null,
     bell_count: u64 = 0,
     clipboard_write_seq: u64 = 0,
@@ -56,7 +62,6 @@ pub const EventCursor = struct {
         return .{
             .cursor_addr = @intFromPtr(self),
             .kind = kind,
-            .observer_generation = snapshot.observer_generation,
             .previous_sequence = current,
             .sequence = incoming,
         };

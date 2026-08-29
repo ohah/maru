@@ -1188,7 +1188,7 @@ fn reconcileProviderHooks(
     }
 
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
-    hook_command.build(&cmd, a, provider.tag(), log_dir) catch return;
+    hook_command.build(&cmd, a, provider.tag(), log_dir, .local) catch return;
 
     const hooks_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ config_dir, install.hooksFileName(provider) }, 0) catch return;
 

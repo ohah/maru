@@ -1320,6 +1320,20 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    source boundary가 모두 green이어서 P3-e4d runtime metadata parity 자동 gate를 완료로 선언한다. notarized 과거
    release provenance와 실제 AppKit 입력기/픽셀 검증은 이 선언의 범위가 아니다.
 
+   **P3-e4d-3 actual host-backed SSH upload product gate(완료):** harness-owned localhost `sshd`와 실제
+   OpenSSH ControlMaster, 별도 daemon의 host-owned PTY를 사용한다. 실제 OSC 5379 뒤 AppSession 공개 file drop/image
+   paste가 managed-generation freshness barrier를 지나 원격 bytes와 동작 시작 surface의 경로를 함께 증명한다. 닫힌
+   localhost port의 실제 worker 실패는 파일·이미지별 notice로 올라오고 terminal input/local fallback은 0이다. source
+   boundary는 observation 주입, private action/upload drain과 fake ssh 성공을 금지한다.
+
+   **P3-e4d-4 reconnect destination·ControlMaster isolation gate(완료):** 서로 다른 destination을 가진 실제 host
+   runtime A/B를 detach한 뒤 AppSession의 공개 recovered-runtime adoption으로 재접속한다. 새 OSC 없이 attach 초기
+   full-state가 각 destination을 복원하고 공개 file/image upload가 각 ControlMaster와 원래 surface를 선택해야 한다.
+   A/B 실제 성공 뒤 A master만 종료하고 harness key를 제거해 B의 기존 socket 성공과 A의 실제 인증 실패를 동시에
+   단언한다. control path inequality만으로 격리를 주장하지 않으며 remote byte equality, failure notice, terminal input/local
+   fallback 0을 함께 요구한다. harness는 임시 manifest/socket/key/control path/remote bytes를 exact 회수하고 민감한
+   destination·payload artifact를 남기지 않는다.
+
    **P4 E3 event-driven producer (E3a·E3b 구현 완료):** runtime별 checked screen token과 output wake가 unchanged
    projector를 닫고, runtime-owned 100ms metadata sampler가 lock-free source generation을 token으로 접어 변경 runtime의
    stream만 producer로 연다. initial/fresh/resync admission과 same-PID restore가 delivery base를 재구성하며, exhaustion은

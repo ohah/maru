@@ -266,6 +266,75 @@ pub fn scanBuffer(
     return consumed;
 }
 
+/// 한 파일에서 담는 이미지 자리의 상한. **악의적/손상 파일이 메모리를 무한히 먹지 않게** 하는 방어다.
+/// 실측(2026-08-29)에서 한 파일 최대가 770개(Codex rollout)였으므로 4096이면 실사용을 자르지 않는다.
+/// 넘치면 `partial` 로 표시하고 더 담지 않는다 — 조용히 자르지 않는다.
+pub const max_hits_per_file: usize = 4096;
+
+/// 청크로 흘러오는 파일을 줄 경계로 이어 붙여 훑는다.
+///
+/// **이 타입이 있는 이유는 청크 경계다.** 64 KiB 씩 읽으면 마커도 base64 도 경계에 걸린다. 걸친 조각을
+/// 다음 청크 앞에 이어 붙이지 않으면 그 이미지는 **없는 것이 된다**. 반대로 걸친 조각을 그대로 훑으면
+/// 반쪽을 세거나, 다음 회차가 같은 것을 또 센다(§4.2 의 `last_offset` 규율과 같은 이유).
+///
+/// I/O 를 모른다 — 호출자가 읽어서 `feed` 한다. 그래서 경계 처리를 파일 없이 시험할 수 있다.
+pub const StreamScanner = struct {
+    /// 개행을 못 만난 꼬리. 다음 청크 앞에 붙는다.
+    carry: std.ArrayList(u8) = .empty,
+    /// 파일에서 **소비한** 바이트(= 마지막 개행 다음). 이어읽기(IG2)가 `last_offset` 으로 쓴다.
+    consumed: u64 = 0,
+    /// 상한에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
+    partial: bool = false,
+
+    pub fn deinit(self: *StreamScanner, allocator: std.mem.Allocator) void {
+        self.carry.deinit(allocator);
+        self.* = .{};
+    }
+
+    /// 청크 하나를 먹인다. `chunk` 는 `self.consumed + self.carry.len` 위치부터의 바이트여야 한다.
+    pub fn feed(
+        self: *StreamScanner,
+        allocator: std.mem.Allocator,
+        chunk: []const u8,
+        out: *std.ArrayList(Hit),
+    ) !void {
+        if (chunk.len == 0) return;
+        try self.carry.appendSlice(allocator, chunk);
+        const base = self.consumed;
+        const buf = self.carry.items;
+
+        var used: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, buf, used, '\n')) |nl| {
+            if (out.items.len < max_hits_per_file) {
+                const before = out.items.len;
+                try scanLine(allocator, buf[used..nl], base + used, out);
+                if (out.items.len > max_hits_per_file) {
+                    out.shrinkRetainingCapacity(max_hits_per_file);
+                    self.partial = true;
+                }
+                _ = before;
+            } else {
+                self.partial = true;
+            }
+            used = nl + 1;
+        }
+
+        // 소비한 만큼 앞을 버리고 꼬리만 남긴다.
+        self.consumed += used;
+        const rest = buf.len - used;
+        std.mem.copyForwards(u8, self.carry.items[0..rest], buf[used..]);
+        self.carry.shrinkRetainingCapacity(rest);
+
+        // **꼬리가 한 줄 상한을 넘으면 그 줄을 버린다.** 개행 없는 바이트가 무한히 오면(손상 파일·바이너리)
+        // 이 버퍼가 파일 크기만큼 자란다. 버리는 대신 `partial` 로 밝힌다.
+        if (self.carry.items.len > max_line_bytes) {
+            self.consumed += self.carry.items.len;
+            self.carry.clearRetainingCapacity();
+            self.partial = true;
+        }
+    }
+};
+
 // ── 테스트 ─────────────────────────────────────────────────────────────────────
 //
 // **구조는 실측, 값은 합성**(계획 §P2). 아래 fixture 의 레코드 모양은 2026-08-29 에 실제 provider 기록에서
@@ -450,4 +519,109 @@ test "Source: 상한 초과·상대 경로·빈 값은 담지 않고 비운다 �
 
     // 이미 비어 있으면 바뀐 것이 아니다.
     try testing.expect(!src.set(""));
+}
+
+fn feedInChunks(src: []const u8, chunk: usize, out: *std.ArrayList(Hit)) !StreamScanner {
+    var sc: StreamScanner = .{};
+    errdefer sc.deinit(testing.allocator);
+    var i: usize = 0;
+    while (i < src.len) {
+        const end = @min(src.len, i + chunk);
+        try sc.feed(testing.allocator, src[i..end], out);
+        i = end;
+    }
+    return sc;
+}
+
+test "StreamScanner: 청크가 이미지 한가운데를 갈라도 결과가 같다 — 1바이트씩 먹여도" {
+    const line =
+        \\{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAABBBB"}},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"CCCC"}}]}
+    ;
+    const src = line ++ "\n";
+
+    // 기준: 통째로 훑은 결과.
+    var whole: std.ArrayList(Hit) = .empty;
+    defer whole.deinit(testing.allocator);
+    _ = try scanBuffer(testing.allocator, src, 0, &whole);
+    try testing.expectEqual(@as(usize, 2), whole.items.len);
+
+    // **1바이트씩** 먹여도 같아야 한다. 경계 처리가 틀리면 여기서 개수나 오프셋이 갈린다.
+    for ([_]usize{ 1, 2, 7, 64, 4096 }) |chunk| {
+        var got: std.ArrayList(Hit) = .empty;
+        defer got.deinit(testing.allocator);
+        var sc = try feedInChunks(src, chunk, &got);
+        defer sc.deinit(testing.allocator);
+
+        try testing.expectEqual(whole.items.len, got.items.len);
+        for (whole.items, got.items) |w, g| {
+            try testing.expectEqual(w.data_offset, g.data_offset);
+            try testing.expectEqual(w.data_len, g.data_len);
+            try testing.expectEqual(w.kind, g.kind);
+            try testing.expectEqual(w.mime, g.mime);
+            try testing.expectEqual(w.line_offset, g.line_offset);
+        }
+        // 오프셋이 **파일 절대값**인지도 함께 본다 — 청크 상대값이면 여기서 갈린다.
+        try testing.expectEqualStrings("AAAABBBB", src[got.items[0].data_offset..][0..8]);
+        try testing.expectEqualStrings("CCCC", src[got.items[1].data_offset..][0..4]);
+        try testing.expectEqual(@as(u64, src.len), sc.consumed);
+        try testing.expect(!sc.partial);
+    }
+}
+
+test "StreamScanner: consumed 는 마지막 개행까지만 간다 — 잘린 꼬리는 남겨 둔다" {
+    const complete =
+        \\{"content":[{"type":"image","source":{"type":"base64","data":"AAAA"}}]}
+    ;
+    const partial_tail = "{\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"data\":\"TAIL\"}},{\"type\":\"image\"";
+    const src = complete ++ "\n" ++ partial_tail;
+
+    var got: std.ArrayList(Hit) = .empty;
+    defer got.deinit(testing.allocator);
+    var sc = try feedInChunks(src, 8, &got);
+    defer sc.deinit(testing.allocator);
+
+    // 완결된 줄의 하나만 센다. 꼬리의 "TAIL" 은 **완결돼 있어도** 아직 세지 않는다 —
+    // 세면 다음 회차가 그 줄을 처음부터 다시 읽을 때 같은 이미지를 두 번 센다.
+    try testing.expectEqual(@as(usize, 1), got.items.len);
+    try testing.expectEqual(@as(u64, complete.len + 1), sc.consumed);
+    try testing.expectEqual(partial_tail.len, sc.carry.items.len);
+}
+
+test "StreamScanner: 개행 없는 거대 꼬리는 버리고 partial 로 밝힌다" {
+    var sc: StreamScanner = .{};
+    defer sc.deinit(testing.allocator);
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(testing.allocator);
+
+    const blob = try testing.allocator.alloc(u8, max_line_bytes + 1024);
+    defer testing.allocator.free(blob);
+    @memset(blob, 'x'); // 개행이 하나도 없다 — 손상 파일·바이너리가 이렇게 온다
+
+    try sc.feed(testing.allocator, blob, &out);
+    // 버퍼가 파일 크기만큼 자라지 않는다.
+    try testing.expectEqual(@as(usize, 0), sc.carry.items.len);
+    try testing.expect(sc.partial);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "StreamScanner: 이미지가 상한을 넘으면 더 담지 않고 partial 이다" {
+    var sc: StreamScanner = .{};
+    defer sc.deinit(testing.allocator);
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(testing.allocator);
+
+    const one =
+        \\{"content":[{"type":"image","source":{"type":"base64","data":"AAAA"}}]}
+    ;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    var i: usize = 0;
+    while (i < max_hits_per_file + 5) : (i += 1) {
+        try src.appendSlice(testing.allocator, one);
+        try src.append(testing.allocator, '\n');
+    }
+    try sc.feed(testing.allocator, src.items, &out);
+
+    try testing.expectEqual(max_hits_per_file, out.items.len);
+    try testing.expect(sc.partial); // 「비었다」가 아니라 「못 봤다」임을 밝힌다
 }

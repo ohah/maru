@@ -52,6 +52,7 @@ const git_backend_mod = app_session_mod.git_backend_mod;
 const is_macos = app_session_mod.is_macos;
 const pane_ops = @import("pane.zig");
 const tab_ops = @import("tab.zig");
+const image_gallery_ops = @import("image_gallery.zig");
 
 /// 에이전트 턴이 끝났다 — 그 순간의 작업트리를 tree 하나로 굳힌다(§6.1). 실패하면 그냥 안 찍힌 것이고
 /// 다음 턴에 다시 시도한다(스냅샷 실패가 목록·diff를 막지 않는다).
@@ -1590,6 +1591,9 @@ fn adoptHookImageSource(self: *AppSession, term: *Term, ev: maru.session.agent_h
     const value = maru.session.agent_hook_event.decodeInto(&buf, ev.transcript_path);
     if (!term.agent_image_source.set(value)) return;
     self.metal_dirty = true;
+    // 갤러리를 **보고 있을 때만** 다시 훑는다. 안 보는 뷰 때문에 1.6 GB 를 읽지 않는다 —
+    // 다음에 들어올 때 `refresh` 가 경로 불일치를 보고 알아서 훑는다.
+    image_gallery_ops.onSourceChanged(self);
 }
 
 /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에

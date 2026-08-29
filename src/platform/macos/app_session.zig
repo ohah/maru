@@ -98,7 +98,8 @@ pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 g
 const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
-pub const scm_dock_ops = @import("app_session/scm_dock.zig"); // 소스 컨트롤 도크 component 배선(P1b)
+pub const scm_dock_ops = @import("app_session/scm_dock.zig");
+pub const image_gallery_ops = @import("app_session/image_gallery.zig"); // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
@@ -5104,6 +5105,9 @@ pub const AppSession = struct {
     agent_session_archive_smoke_stale_reveal_count: u32 = 0,
     agent_session_archive_completed_ns: i128 = 0,
     agent_session_archive_partial: bool = false,
+    /// 이미지 갤러리 도크 뷰의 인덱스(docs/agent-image-gallery.md). **메모리 전용**이라 앱을 끄면
+    /// 사라진다 — 계약 §4.5 가 디스크에 아무것도 남기지 않기로 한 결과다.
+    image_gallery: image_gallery_ops.State = .{},
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
     agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
@@ -17656,6 +17660,21 @@ pub const AppSession = struct {
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
                             agent_dock.collectAgentSessionDock(self, &collected, pane_frame_builder, tabbar_colors);
                         }
+                        // IG1-d: 아직 격자가 아니라 **한 줄**이다(docs/agent-image-gallery.md). 이 슬라이스가
+                        // 보이려는 것은 사슬이 이어지는지 하나다 — 훅 경로 → 스캔 → 화면. 썸네일 격자는 IG3·IG4 다.
+                        // 스캔은 여기서 하지 않는다(`image_gallery_ops.refresh` 가 뷰 진입·소스 변경 때만 돈다) —
+                        // 프레임에서 읽으면 실측 최대 1,626 MB 파일을 초당 60번 훑는다.
+                        if (self.dock.view == .image_gallery and tree_content_cols > 0 and visible_rows > 0) {
+                            var notice_buf: [64]u8 = undefined;
+                            const notice = image_gallery_ops.noticeText(self, &notice_buf);
+                            if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
+                                self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
+                                    .origin_x = dg.tree_content.x,
+                                    .origin_y = dg.tree_content.y,
+                                    .colors = tabbar_colors,
+                                } });
+                            } else |_| {}
+                        }
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
                             // 높이·라운드 밴드를 표현할 수 없어 이 자리에서 물러났다(SCM 도크가 P1b에서
@@ -19964,6 +19983,9 @@ pub const AppSession = struct {
         self.turn_index_path = null;
         // 그림자 사본은 힙이다 — 링(고정 배열)과 달리 여기서 반드시 푼다.
         self.turn_captures.deinit(self.allocator);
+        // 갤러리 인덱스도 힙이다 — `Source`는 고정 배열이지만 `hits`는 아니다. 뷰를 열어 둔 채 창을 닫으면
+        // 여기 말고 푸는 자리가 없다(상한 `max_hits_per_file` 4,096개 × `Hit`이라 한 창에 100 KB 급이다).
+        self.image_gallery.deinit(self.allocator);
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
@@ -71873,4 +71895,126 @@ test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재�
     try std.testing.expect(reserved <= 5);
     // ⑵ **정지 상태에서 세대가 멈춘다.** 무한 재투영이면 이 값이 계속 는다.
     try std.testing.expectEqual(gens[1], gens[gens.len - 1]);
+}
+
+test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실제로 이어진다 (IG1-d)" {
+    // 이 슬라이스가 보이려는 것은 하나다: `Term.agent_image_source` → 스캔 → 화면 문구.
+    // 훅이 소스를 채우는 부분은 「hook mode runs exactly one source」의 ⑦-b 가 따로 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // **구조는 실측, 값은 합성**(계획 §P2). 아래 두 줄의 레코드 모양은 실제 provider 기록에서 확인한 것이고
+    // base64 와 문구만 합성이다. 사용자 기록을 fixture 로 쓰지 않는다(계약 §6).
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"이거 봐주세요\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"AAAABBBB\"}}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"봤습니다\"}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"data\":\"CCCC\"}}]}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/t.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // ── 에이전트가 없으면 「없다」가 아니라 「에이전트가 없다」다 ────────────────────────────
+    // 셋을 한 문구로 접으면 사용자가 «이미지가 없는 것» 과 «갤러리가 고장난 것» 을 구분할 수 없다.
+    image_gallery_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+    {
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.image_gallery_no_agent),
+            image_gallery_ops.noticeText(session, &buf),
+        );
+    }
+
+    // ── 소스가 붙으면 훑는다 ────────────────────────────────────────────────────────────
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+
+    // 이미지 둘: user 메시지 하나 + tool_result 하나. 두 번째는 media_type 이 없다.
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expect(!session.image_gallery.partial);
+    try std.testing.expectEqual(@as(u64, transcript.len), session.image_gallery.scanned_bytes);
+    try std.testing.expectEqual(
+        maru.session.agent_image_index.Mime.png,
+        session.image_gallery.hits.items[0].mime,
+    );
+    try std.testing.expectEqual(
+        maru.session.agent_image_index.Mime.unknown,
+        session.image_gallery.hits.items[1].mime,
+    );
+    // **오프셋이 파일 절대값인지 그 자리에서 본다.** 상대값이면 나중에 그 구간을 읽어 디코드할 때
+    // 엉뚱한 바이트가 나오는데, 그때는 원인이 여기라는 것을 알기 어렵다.
+    const h0 = session.image_gallery.hits.items[0];
+    try std.testing.expectEqualStrings("AAAABBBB", transcript[h0.data_offset..][0..h0.data_len]);
+
+    {
+        var buf: [64]u8 = undefined;
+        const notice = image_gallery_ops.noticeText(session, &buf);
+        try std.testing.expect(std.mem.startsWith(u8, notice, "2"));
+    }
+
+    // ── 같은 소스면 다시 훑지 않는다 ────────────────────────────────────────────────────
+    // 매번 훑으면 실측 최대 1,626 MB 파일을 뷰에 들어올 때마다 다시 읽는다.
+    session.image_gallery.scanned_bytes = 0;
+    image_gallery_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(u64, 0), session.image_gallery.scanned_bytes);
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    // ── 소스가 갈리면(= `/clear` 로 새 파일) 통째로 버리고 다시 훑는다 ──────────────────
+    try tmp.dir.writeFile(io, .{ .sub_path = "u.jsonl", .data = "{\"type\":\"assistant\"}\n" });
+    const path2 = try std.fmt.allocPrint(allocator, "{s}/u.jsonl", .{root});
+    defer allocator.free(path2);
+    try std.testing.expect(term.agent_image_source.set(path2));
+    image_gallery_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+    try std.testing.expect(!session.image_gallery.partial); // 「비었다」이지 「못 봤다」가 아니다
+    {
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.image_gallery_empty),
+            image_gallery_ops.noticeText(session, &buf),
+        );
+    }
+
+    // ── 못 읽으면 「없다」가 아니라 「못 봤다」다 ────────────────────────────────────────
+    const missing = try std.fmt.allocPrint(allocator, "{s}/does-not-exist.jsonl", .{root});
+    defer allocator.free(missing);
+    try std.testing.expect(term.agent_image_source.set(missing));
+    image_gallery_ops.refresh(session, false);
+    try std.testing.expect(session.image_gallery.partial);
+    {
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.image_gallery_partial),
+            image_gallery_ops.noticeText(session, &buf),
+        );
+    }
+
+    // ── **인덱스를 든 채로 끝낸다** ─────────────────────────────────────────────────────
+    // 여기서 비우고 끝내면 `deinit` 이 `hits` 를 푸는지 이 test 가 못 본다 — 뷰를 열어 둔 채 창을 닫는
+    // 실제 경로가 바로 이 모양이다. test 할당자가 누수를 잡게 인덱스가 살아 있는 상태로 둔다.
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 }

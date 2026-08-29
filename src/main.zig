@@ -4774,6 +4774,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var hdrag_thumb_before: f32 = 0;
     var hdrag_thumb_after: f32 = 0;
     var hdrag_drags: usize = 0;
+    var hterm_judgeable = false;
+    var hterm_scrolls_before: usize = 0;
+    var hterm_scrolls_after: usize = 0;
+    var hterm_reports_before: usize = 0;
+    var hterm_reports_after: usize = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -6162,6 +6167,36 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             hoob_col_after = open_files.items[active_view.file].first_col;
             hoob_hmax = open_files.items[active_view.file].hmax_col;
             hoob_cells = editor_last_cells;
+        }
+        // ── 터미널 위의 가로 휠은 아무 일도 안 해야 한다 (W8.17c 적대적 검증) ────────────
+        //
+        // **여기는 `unreachable` 이 있는 길이다.** 리포트 변환의 switch 가 가로 휠을 "위에서 이미
+        // 버렸다" 고 전제하는데, 그 버리는 줄이 사라지면 안전 빌드에서 **패닉**이다. 컴파일러는
+        // 그것을 안 잡아 준다(분기가 존재하기만 하면 된다).
+        // **리포팅을 켜고 던진다.** 끈 채로는 리포트 변환에 **닿지도 않아서**(`reportsToShell` 이
+        // false 라 그 앞에서 나간다) 버리는 줄을 지워도 아무 일이 안 난다 — 실측으로 그 뮤턴트가
+        // 살아남았다. TUI 가 마우스를 잡은 상태가 이 길의 실제 조건이라 그것을 만들어 준다.
+        if (smoke and spins == 820 and active_view == .terminal) if (app_window.active()) |a| {
+            hterm_judgeable = true;
+            hterm_scrolls_before = scrolls + alt_scrolls;
+            hterm_reports_before = mouse_report_commands;
+            a.lockCore(io);
+            a.core.mouse_tracking = .any;
+            a.unlockCore(io);
+            const tx: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const ty: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            window.postSyntheticMouseWheel(.wheel_h, tx, ty, 3);
+            window.postSyntheticMouseWheel(.wheel_h, tx, ty, -3);
+        };
+        // **되돌린다** — 뒤의 `core_modes` 판정이 이 값을 읽는다(시험은 자기가 바꾼 것을 되돌린다).
+        if (smoke and spins == 822 and hterm_judgeable) if (app_window.active()) |a| {
+            a.lockCore(io);
+            a.core.mouse_tracking = .none;
+            a.unlockCore(io);
+        };
+        if (smoke and spins == 823 and hterm_judgeable) {
+            hterm_scrolls_after = scrolls + alt_scrolls;
+            hterm_reports_after = mouse_report_commands;
         }
         // ── 막대를 끈다 (W8.17c) ───────────────────────────────────────────────────────
         //
@@ -9157,6 +9192,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             track_right,
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("term_hwheel: scrolls {d}->{d} reports {d}->{d} term_hwheel_ok={}\n", .{
+            hterm_scrolls_before,
+            hterm_scrolls_after,
+            hterm_reports_before,
+            hterm_reports_after,
+            // **살아서 여기까지 온 것**이 절반이고(패닉이면 이 줄이 안 찍힌다), 나머지 절반은
+            // 세로가 대신 굴러가지 않았다는 것이다.
+            hterm_judgeable and hterm_scrolls_after == hterm_scrolls_before and
+                hterm_reports_after == hterm_reports_before,
         });
         try stdout.print("editor_hdrag: col {d}->{d} thumb {d:.1}->{d:.1} drags={d} hdrag_ok={}\n", .{
             hdrag_col_before,

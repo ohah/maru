@@ -199,6 +199,33 @@ pub fn formatRemotePaneNonce(
     return std.fmt.bufPrint(buf, "{s}_{s}", .{ instance, pane }) catch unreachable;
 }
 
+/// `formatRemotePaneNonce` 의 역이다 — 원격에서 돌아온 nonce 를 두 칸으로 되돌린다.
+///
+/// **라우팅이 이것으로 닫힌다.** 스트리머는 host 당 하나라(RA4) 한 채널에 여러 pane 의 이벤트가 섞여
+/// 온다. 어느 Term 인가는 그 Term 에 **우리가 준 값**과 대조해 정한다 — 원격이 말한 것을 믿는 것이
+/// 아니라 우리가 발급한 것을 알아보는 것이다.
+///
+/// 마지막 `_` 로 가른다. 인스턴스 칸은 `host_` 접두에 `_` 를 갖지만 pane 칸(십진·hex)에는 없으므로
+/// **마지막 것이 유일한 경계**다. 앞에서부터 가르면 `host_…` 가 통째로 깨진다.
+pub fn parseRemotePaneNonce(nonce: []const u8) ?struct { instance: []const u8, pane: []const u8 } {
+    if (nonce.len == 0 or nonce.len > remote_pane_nonce_max) return null;
+    const sep = std.mem.lastIndexOfScalar(u8, nonce, '_') orelse return null;
+    const instance = nonce[0..sep];
+    const pane = nonce[sep + 1 ..];
+    if (!instance_token_class.accepts(instance)) return null;
+    if (!pane_token_class.accepts(pane)) return null;
+    return .{ .instance = instance, .pane = pane };
+}
+
+/// 이 nonce 가 **우리가 그 Term 에 준 것**인가.
+///
+/// 두 칸을 각각 대조한다 — 문자열 하나로 비교해도 되지만, 호출자가 이미 두 칸을 들고 있어(로컬 훅
+/// 경로가 쓰는 그 값들) 다시 조립하지 않아도 되게 한다.
+pub fn remoteNonceMatches(nonce: []const u8, instance: []const u8, pane: []const u8) bool {
+    const parts = parseRemotePaneNonce(nonce) orelse return false;
+    return std.mem.eql(u8, parts.instance, instance) and std.mem.eql(u8, parts.pane, pane);
+}
+
 /// 우리가 거는 이벤트(계약 §2). **한 번에 확정한다** — Codex는 나중에 늘리면 사용자에게 재승인을 요구한다.
 pub const Event = struct {
     name: []const u8,
@@ -990,4 +1017,49 @@ test "provider 이름이 줄을 깨뜨릴 수 있으면 거절한다" {
     out.clearRetainingCapacity();
     try build(&out, testing.allocator, "claude", "/tmp/ev", .local);
     try testing.expect(out.items.len > 0);
+}
+
+test "nonce 를 두 칸으로 되돌린다 — 라우팅이 이것으로 닫힌다" {
+    var buf: [remote_pane_nonce_max]u8 = undefined;
+    var ib: [instance_token_max]u8 = undefined;
+    var pb: [pane_token_max]u8 = undefined;
+
+    // GUI 소유: pid_surface
+    const gui = formatRemotePaneNonce(&buf, formatGuiInstance(&ib, 4331), formatSurfacePane(&pb, 7)).?;
+    const g = parseRemotePaneNonce(gui).?;
+    try testing.expectEqualStrings("4331", g.instance);
+    try testing.expectEqualStrings("7", g.pane);
+
+    // host 소유: 인스턴스 칸 자체에 `_` 가 있다 — **마지막** `_` 로 갈라야 안 깨진다.
+    var buf2: [remote_pane_nonce_max]u8 = undefined;
+    var ib2: [instance_token_max]u8 = undefined;
+    var pb2: [pane_token_max]u8 = undefined;
+    const host_instance = formatHostInstance(&ib2, 0xa11ce);
+    const host_pane = formatRuntimePane(&pb2, 1);
+    const hn = formatRemotePaneNonce(&buf2, host_instance, host_pane).?;
+    const h = parseRemotePaneNonce(hn).?;
+    try testing.expectEqualStrings(host_instance, h.instance);
+    try testing.expectEqualStrings(host_pane, h.pane);
+}
+
+test "라우팅은 우리가 발급한 값을 알아보는 것이다 — 남의 nonce 는 안 맞는다" {
+    var buf: [remote_pane_nonce_max]u8 = undefined;
+    var ib: [instance_token_max]u8 = undefined;
+    var pb: [pane_token_max]u8 = undefined;
+    const nonce = formatRemotePaneNonce(&buf, formatGuiInstance(&ib, 4331), formatSurfacePane(&pb, 7)).?;
+
+    try testing.expect(remoteNonceMatches(nonce, "4331", "7"));
+    try testing.expect(!remoteNonceMatches(nonce, "4331", "9")); // 다른 pane
+    try testing.expect(!remoteNonceMatches(nonce, "9002", "7")); // 다른 인스턴스 — maru 를 둘 띄운 경우
+    try testing.expect(!remoteNonceMatches("garbage", "4331", "7"));
+    try testing.expect(!remoteNonceMatches("../x_7", "4331", "7"));
+}
+
+test "parseRemotePaneNonce 는 조립기가 거부한 모양을 되돌리지 않는다" {
+    try testing.expect(parseRemotePaneNonce("") == null);
+    try testing.expect(parseRemotePaneNonce("4331") == null); // 구분자 없음
+    try testing.expect(parseRemotePaneNonce("_7") == null); // 빈 인스턴스
+    try testing.expect(parseRemotePaneNonce("4331_") == null); // 빈 pane
+    try testing.expect(parseRemotePaneNonce("4331_g") == null); // pane 클래스 밖(hex 아님)
+    try testing.expect(parseRemotePaneNonce("../x_7") == null);
 }

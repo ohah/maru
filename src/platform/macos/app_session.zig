@@ -17718,6 +17718,8 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
+                            // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
+                            image_gallery_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
@@ -72708,4 +72710,92 @@ test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스�
     _ = term.agent_image_source.set("/tmp/from-hook.jsonl");
     agent_ops.adoptFallbackImageSource(session, term);
     try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.agent_image_source.path());
+}
+
+test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-c)" {
+    // **순수 파서가 도는 것과 «그 라벨이 타일에 붙는 것» 은 다른 사실이다.** 배선이 빠지면
+    // agent_image_context 의 test 는 전부 통과하는데 화면에는 그림만 남는다.
+    //
+    // 그리고 이 test 는 **직전 줄 읽기**를 본다 — 라벨의 정체가 이미지 줄이 아니라 그 앞 줄에 있다
+    // (실측 1,074/1,074 가 1줄 뒤, agent_image_context 문서 참조).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // ① 사용자 붙여넣기(같은 줄 text) ② 도구 읽기(직전 줄 tool_use + 같은 줄 2중 저장)
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"[Image #1] 이 화면\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ png_b64 ++ "\"}}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01AA\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/Users/me/shots/dock.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_01AA\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ png_b64 ++
+        "\"}}]}]},\"toolUseResult\":{\"file\":{\"base64\":\"" ++ png_b64 ++ "\",\"type\":\"image\"}}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    // **2중 저장이 접혔다** — 접지 않으면 3장이 된다(실측 코퍼스에서 44%가 이 사본이었다).
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len < 2) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.tiles.items.len);
+
+    // 붙여넣기 = 같은 줄 텍스트, 상용구는 벗겨진다.
+    try std.testing.expectEqualStrings("이 화면", session.image_gallery.tiles.items[0].label.text());
+    // 도구 읽기 = **직전 줄**의 file_path 파일명.
+    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[1].label.text());
+
+    // 격자가 라벨 자리를 실제로 잡는다 — 안 그러면 글자를 그릴 곳이 없다.
+    const area = image_gallery_ops.gridArea(session);
+    const m = image_gallery_ops.gridMetrics(session);
+    try std.testing.expect(m.label > 0);
+    const l = maru.session.image_grid.layout(area, m, 2);
+    const tile0 = maru.session.image_grid.rectAt(area, m, l, 0).?;
+    const lab0 = maru.session.image_grid.labelRectAt(area, m, l, 0).?;
+    try std.testing.expectEqual(tile0.y + tile0.h, lab0.y);
+    // 그림 아래 글자를 눌러도 그 칸이 열린다.
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        maru.session.image_grid.hitTest(area, m, l, lab0.x + 2, lab0.y + 2),
+    );
 }

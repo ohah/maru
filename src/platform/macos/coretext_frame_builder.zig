@@ -700,6 +700,33 @@ test "도크 뷰 바: 슬롯 3개가 모두 그려진다" {
 /// **폭이 좁아지면 경로가 먼저 줄어든다** — 파일명·증감·상태가 스캔의 축이라 끝까지 남긴다(§3.5).
 /// 도크 뷰의 한 줄짜리 안내(빈 상태·읽는 중). 트리의 빈 안내와 같은 들여쓰기·흐린 색을 쓴다 — 같은 컬럼 안에서
 /// 안내가 두 가지 모양이면 어느 것이 상태이고 어느 것이 내용인지 헷갈린다.
+/// 갤러리 썸네일 **아래 한 줄**. 도크 안내문(`buildDockNoticeDrawList`)과 갈라 두는 이유는 둘이
+/// 다른 것을 하기 때문이다 — 안내문은 트리 들여쓰기에 맞춰 밀지만 라벨은 타일 폭을 꽉 쓴다.
+/// 생략은 **뒤에서** 한다(`.head` 앵커 = 앞을 보이고 끝에 `…`) — 파일 이름도 문장도 앞이 정체다.
+pub fn buildDockTileLabelDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    text: []const u8,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    errdefer pool.deinit(allocator);
+    if (cols > 0 and text.len > 0)
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, text, 0, 0, cols, .{ .foreground = fg }, false, .head);
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildDockNoticeDrawList(
     allocator: std.mem.Allocator,
     cols: u16,

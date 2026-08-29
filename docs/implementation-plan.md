@@ -50,6 +50,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 훅 통합 단계 계획](plans/agent-hooks.md)
 - [에이전트 턴 변경분 단계 계획](plans/agent-turn-changes.md)
 - [에이전트 세션 도크 카드 구현 계획](plans/agent-session-list.md)
+- [에이전트 이미지 갤러리 구현 계획](plans/agent-image-gallery.md)
 - [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
 - [웹 패널 구현 계획](plans/web-panel.md)
 - [다국어(i18n) 구현 계획](plans/i18n.md)

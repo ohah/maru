@@ -79,7 +79,7 @@ Codex도 새 세션은 **새 rollout 파일**이다(같은 cwd에서 3~8초 만�
 
 Claude Code는 fullscreen TUI에서 `[?1049h`(대체 화면)·`[?1000h`·`[?1006h`·`[?1007h`를 켠다(바이너리 실측). 그리고 maru의 대체 화면은 **스크롤백 용량이 0**이다.
 
-> `screen.zig:1344` — alt 진입 시 primary grid·scrollback·커서를 saved_* 슬롯으로 스왑하고 빈 alt 버퍼를 쓴다(alt는 cap=0 스크롤백 → history 안 쌓임).
+> `screen.zig` — alt 진입 시 primary grid·scrollback·커서를 saved_* 슬롯으로 스왑하고 빈 alt 버퍼를 쓴다(alt는 cap=0 스크롤백 → history 안 쌓임).
 
 즉 화면에서 긁는 설계였다면 **fullscreen 사용자에게는 아무것도 보이지 않는다.** 게다가 첨부 이미지는 화면에 픽셀로 존재한 적이 없다 — TUI는 `[Image #1]` 같은 **글자**로 그린다.
 
@@ -90,10 +90,10 @@ Claude Code는 fullscreen TUI에서 `[?1049h`(대체 화면)·`[?1000h`·`[?1006
 | 경로 | 판정 |
 | --- | --- |
 | maru **자체 스크롤백**으로 올리기 | **불가능** — alt는 `cap=0`이라 history가 없다 |
-| **앱에 화살표를 보내** 앱이 자기 화면을 올리게 | **가능** — `scroll.zig:526`이 이미 휠→화살표(DECSET 1007) 변환을 한다 |
+| **앱에 화살표를 보내** 앱이 자기 화면을 올리게 | **가능** — `scroll.zig`이 이미 휠→화살표(DECSET 1007) 변환을 한다 |
 | 목표 지점에서 **멈추기**(닫힌 루프) | **가능** — alt에서도 화면 검색이 된다 |
 
-마지막 줄의 근거는 `selection.zig:840`이다 — *"스크롤백 포함 `[0,total)` 전체를 검색한다. **alt에선 `sb.count==0`이라 자연히 현재 화면뿐**"*. 즉 "한 배치 올리고 → 지금 화면에 마커가 있나 검색 → 반복"이 성립한다.
+마지막 줄의 근거는 `selection.zig`이다 — *"스크롤백 포함 `[0,total)` 전체를 검색한다. **alt에선 `sb.count==0`이라 자연히 현재 화면뿐**"*. 즉 "한 배치 올리고 → 지금 화면에 마커가 있나 검색 → 반복"이 성립한다.
 
 그럼에도 v1 비목표인 이유는 **부작용과 대체재**다. 화살표는 사용자가 휠을 굴릴 때와 **같은 바이트**라 앱이 구분할 수 없어, 입력창에 글자가 있으면 프롬프트 히스토리 탐색으로 샌다. 되돌리기도 보장되지 않는다(앱이 끝에서 clamp하면 올린 횟수 ≠ 내린 횟수). 그리고 §2.2가 같은 정보를 **0.2 ms에 부작용 없이** 준다.
 
@@ -178,7 +178,7 @@ append-only 전제는 추론이 아니라 **양쪽 provider 각각의 격리 재
 
 | 잃는 것 | 폴백 |
 | --- | --- |
-| **pane ↔ 세션 파일 매핑**(주 경로) | `agentSessionIdentity`(`pty/macos.zig:955`) — 자식 프로세스의 `KERN_PROCARGS2` envp에서 `CLAUDE_CODE_SESSION_ID`/`CODEX_THREAD_ID` |
+| **pane ↔ 세션 파일 매핑**(주 경로) | `agentSessionIdentity`(`pty/macos.zig`) — 자식 프로세스의 `KERN_PROCARGS2` envp에서 `CLAUDE_CODE_SESSION_ID`/`CODEX_THREAD_ID` |
 | 방금 붙여넣은 이미지가 즉시 뜨는 것 | 그 파일 하나의 **mtime 폴링**. 디렉터리 순회가 없으므로 `stat` 한 번이다 |
 
 env 폴백의 한계를 명시한다: 에이전트가 자식을 한 번도 띄우지 않았으면 신원이 없고, `KERN_PROCARGS2`는 exec 시점에 고정이라 **오래 살아 있는 자식이 옛 id를 들고 있을 수 있다**(`/clear` 직후 stale). `--resume`은 session_id가 유지되므로 이 경로에서도 문제가 없다.
@@ -251,7 +251,7 @@ typedef struct MaruAppHostGpuImage {
 | 회차 | 공격 관점 | 발견한 결함 | 반영한 방어 |
 | --- | --- | --- | --- |
 | A1 | 화면에서 긁으면 되지 않나 | 사용자 환경이 `tui: fullscreen`이라 alt 화면이고 **스크롤백 용량이 0**이다. 첨부 이미지는 애초에 화면에 픽셀로 존재한 적이 없다(TUI가 `[Image #1]` 글자로 그린다) — 화면 기반 설계는 **전원 빈 화면**이 된다 | §3.1 소스는 트랜스크립트뿐 |
-| A1′ | 그럼 스크롤 복원도 불가능하다고 단정하겠지 | **과한 단정이었다.** 앱에 화살표를 보내는 길(`scroll.zig:526`)과 alt 화면 검색으로 닫힌 루프까지 **구현 가능**하다 | §3.1.1로 정정. 비목표 근거를 "불가능"이 아니라 **부작용 + §2.2 대체재**로 바꿨다 |
+| A1′ | 그럼 스크롤 복원도 불가능하다고 단정하겠지 | **과한 단정이었다.** 앱에 화살표를 보내는 길(`scroll.zig`)과 alt 화면 검색으로 닫힌 루프까지 **구현 가능**하다 | §3.1.1로 정정. 비목표 근거를 "불가능"이 아니라 **부작용 + §2.2 대체재**로 바꿨다 |
 | A2 | 활성 세션 재읽기 폭발 | 아카이브 스캐너의 `(dev,inode,mtime,size)` 캐시 키를 물려받으면 **활성 파일은 항상 캐시 미스**라 refresh마다 전량 재파싱한다. 실측 최대 파일이 1,626 MB이고 측정 중에도 자라고 있었다 | §4.2 `last_offset` 이어읽기. 델타 pread가 3,133배 저렴 |
 | A3 | 목록이 통째로 부풀어 쓸모없어짐 | 마커를 그냥 세면 Claude는 2중 저장, Codex는 `compacted`가 이미지째 재수록해 15,140개 대 실제 151개가 된다. 중복률 65% | §3.3 `compacted` 제외 + §4.3 내용 해시 dedup |
 | A4 | 이미지 하나로 앱이 죽는다 | Metal은 상한 초과 텍스처에 `nil`이 아니라 **abort**를 낸다. 실측 최대 이미지 1440×14771로 상한 16,384까지 여유 1,613 px — 긴 페이지 스크린샷 하나면 넘어 "크게 보기"가 프로세스를 죽인다 | §5.3 업로드 전 clamp 의무화 |
@@ -298,19 +298,19 @@ typedef struct MaruAppHostGpuImage {
 
 ## 10. 선행 조건 — `View` 를 더하기 전에
 
-**측정으로 초안을 정정했다(2026-08-29).** 초안은 *"`.agent_sessions` 비교 29곳이 새 뷰에서 조용히 잘못 동작한다"*였으나, 더미 4번째 값을 넣고 전수 분류한 결과 **28곳이 가드이고 나머지 1곳도 `else null`이라 안전**했다. 도크 셀 조립(`main.zig:1973`)과 `setDockView`도 뷰마다 각각 분기해 새 뷰는 "아무 훅도 없는 뷰"가 될 뿐이다. 그래서 그 29곳은 **건드리지 않는다**.
+**측정으로 초안을 정정했다(2026-08-29).** 초안은 *"`.agent_sessions` 비교 29곳이 새 뷰에서 조용히 잘못 동작한다"*였으나, 더미 4번째 값을 넣고 전수 분류한 결과 **28곳이 가드이고 나머지 1곳도 `else null`이라 안전**했다. 도크 셀 조립(`main.zig`)과 `setDockView`도 뷰마다 각각 분기해 새 뷰는 "아무 훅도 없는 뷰"가 될 뿐이다. 그래서 그 29곳은 **건드리지 않는다**.
 
 실제로 필요한 것은 둘이다.
 
-**① 손-미러 제거.** `dockViewSlotIndex`(`dock.zig:670`)가 `View.slot()`을 손으로 다시 적어 두고 있었다 — 바로 위 `dockViewForSlot`은 `View.forSlot`에 위임하는데 **역방향만 복사본**이었다. 그 비대칭을 없애 순서의 단일 출처를 `dock_panel.View` 하나로 되돌린다.
+**① 손-미러 제거.** `dockViewSlotIndex`(`dock.zig`)가 `View.slot()`을 손으로 다시 적어 두고 있었다 — 바로 위 `dockViewForSlot`은 `View.forSlot`에 위임하는데 **역방향만 복사본**이었다. 그 비대칭을 없애 순서의 단일 출처를 `dock_panel.View` 하나로 되돌린다.
 
 **② 컴파일 게이트를 바로 잡는다.** enum exhaustiveness를 잡는 것은 `zig build`가 **아니다**.
 
 | 명령 | 잡은 곳 |
 | --- | --- |
 | `zig build` | **0** — CLI(`maru`)만 짓고 macOS 앱 호스트를 안 건드린다 |
-| `zig build macos-app-host-abi-lib` | **2**(`dock.zig:670`·`dock_layout.zig:265`) |
+| `zig build macos-app-host-abi-lib` | **2**(`dock.zig`·`dock_layout.zig`) |
 
-`defaultRightPtForView`(`dock_layout.zig:265`)가 exhaustive인 것은 **정상**이다 — 새 뷰의 기본 폭을 정하도록 컴파일러가 강제한다.
+`defaultRightPtForView`(`dock_layout.zig`)가 exhaustive인 것은 **정상**이다 — 새 뷰의 기본 폭을 정하도록 컴파일러가 강제한다.
 
-`workspace.zig:614`의 `View.parse(field.raw) orelse .explorer`는 이미 있어, 새 값을 모르는 옛 빌드가 창을 통째로 버리지는 않는다.
+`workspace.zig`의 `View.parse(field.raw) orelse .explorer`는 이미 있어, 새 값을 모르는 옛 빌드가 창을 통째로 버리지는 않는다.

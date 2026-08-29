@@ -13689,6 +13689,7 @@ pub const AppSession = struct {
                 if (host.pending.items.len > RemoteAgentHost.pending_max and
                     std.mem.indexOfScalar(u8, host.pending.items, '\n') == null)
                 {
+                    // **표시가 아니라 진단이다**(i18n §7 — 원장에 그 사실을 적어 두었다).
                     std.log.scoped(.agent).warn("원격 이벤트 채널: 개행 없는 잡음이 한 줄 상한을 넘었다 — 꼬리를 버린다 dest={s}", .{dest});
                     host.pending.clearRetainingCapacity();
                 }

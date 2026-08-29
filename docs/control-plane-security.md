@@ -61,7 +61,15 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
 
 **A2b 구현 상태(정직 — same-uid+selector까지, tty 검증 없음)**: 라이브 서버 A2b는 위 **1·3·5만** 구현한다. peer-cred(3, same-uid gate)는 `acceptOne`이, 셀렉터(1)는 wire의 `auth.self` 프레임(`control_plane.serializeAuthSelf`/`parseAuthFrame` — 후자는 selector와 optional `cap_nonce`[1e]를 함께 뽑는다)이, `metadata:self` 부여+self 필터(5)는 dispatch(1d)가 한다. **4단계(peer pid의 tty/foreground pgrp ↔ surface PTY 일치 검증)는 미구현 — 1g 후속이다.** 그리고 **셀렉터의 실제 전달 매개는 `$MARU_SESSION`이 아니라 `$MARU_PANE_ID`**(=surface.id, `pty/macos.zig`가 각 팬 셸에 주입하는 실제 env; `$MARU_SESSION` 복합 selector는 미도입)다. CLI(`main.runSessionRequest`)가 `MARU_PANE_ID`를 읽어 `auth.self{surface_id}`로 보낸다.
 
-**⚠️ 이 auth의 경계 한계(A2b, §8.3/§8.4 대비)**: same-uid peer는 tty 검증이 없으므로 **임의 `surface_id`를 self로 주장**할 수 있다 — 즉 같은 uid의 임의 프로세스가 아무 surface_id나 셀렉터로 보내 그 **한 surface의 metadata(cwd·git_branch·focused·at_prompt)를 열람**할 수 있다. 완화 요소: (a) scope는 `metadata:self` 고정이라 한 번에 **한 surface**만 노출되고 `sessions.list` 전역 열거는 안 된다(§8.3 self 필터), (b) 하지만 surface_id가 monotonic이라 낮은 값부터 열거해 여러 surface metadata를 순차 수집할 수 있다(oracle 완전 차단 아님 — §8.4 4단계 tty 검증이 붙어야 self-origin이 진짜 경계가 된다). read-output/write/lifecycle은 A2b에서 애초에 안 열린다(§8.3). **1g가 4단계 tty/pgrp 검증을 붙이기 전까지 `metadata:self`는 "같은 uid면 selector로 임의 surface metadata 열람 가능"이라는 한계를 갖는다.**
+**⚠️ 이 auth의 경계 한계(A2b, §8.3/§8.4 대비)**: same-uid peer는 tty 검증이 없으므로 **임의 `surface_id`를 self로 주장**할 수 있다 — 즉 같은 uid의 임의 프로세스가 아무 surface_id나 셀렉터로 보내 그 **한 surface의 metadata(cwd·git_branch·focused·at_prompt)를 열람**할 수 있다. surface_id가 monotonic이라 낮은 값부터 셀렉터를 훑으면 여러 surface metadata를 순차 수집할 수 있다(실측으로 확인 — 한 번의 훑기로 첫 surface 의 메타데이터가 그대로 나왔다). read-output/write/lifecycle은 A2b에서 애초에 안 열린다(§8.3). **1g가 4단계 tty/pgrp 검증을 붙이기 전까지 `metadata:self`는 "같은 uid면 selector로 임의 surface metadata 열람 가능"이라는 한계를 갖는다.**
+
+**셀렉터를 안 댄 연결은 `metadata:all`이다(2026-08-29).** 앞 문단이 예전에는 "scope 가 `metadata:self` 고정이라 `sessions.list` 전역 열거는 안 된다" 를 완화 요소로 들었는데, **그 완화는 실효가 없었다** — 같은 문단이 인정하듯 셀렉터를 훑으면 같은 것이 나온다. 그리고 그 좁힘은 실제로는 **정상 사용을 막고 있었다**: 폰이 SSH `exec` 채널로 여는 중계에는 `MARU_PANE_ID`가 없어 셀렉터를 못 대는데, 그때 `.self`(anchor=0)로 두면 목록이 언제나 비어 폰 화면에 "세션이 없다" 만 떴다([컨트롤 플레인 §4a](control-plane.md)가 그 계약을 이미 "앵커가 필요 없는 것은 된다" 로 적어 두었으나 코드가 어긋나 있었다).
+
+- **셀렉터 있음** → 종전대로 `metadata:self`(그 surface 하나). 바뀐 것 없다.
+- **셀렉터 없음** → `metadata:all`. 근거는 이 소켓의 등급이다: same-uid peer-cred + 0700 이라 붙은 쪽은 **그 사용자 자신**이고, SSH 로 붙은 폰도 같다 — 그 사용자로 아무 명령이나 돌릴 수 있으므로 목록이 권한을 넓히지 않는다(§4a "왜 이 모양인가").
+- **넓어진 것은 metadata 뿐이다.** `session.capture`(read-output)·write·`browser.*` 는 그대로다 — 각각 cap 이나 target 앵커를 따로 요구하고, 이 규칙은 그 경로에 닿지 않는다.
+
+셀렉터를 대는 쪽이 **더 좁다**는 것이 낯설게 읽히지만 그 방향이 맞다 — 셀렉터는 권한이 아니라 "나는 이 surface 다" 라는 **주장**이고, 주장한 만큼만 보는 것이 self-origin 의 뜻이다. 1g 가 4단계 tty 검증을 붙이면 그 주장이 비로소 검증되고, 그때 이 비대칭은 "검증된 좁힘 vs 미검증 넓힘" 이라는 뜻을 갖는다.
 
 멀티윈도우와 quick terminal 처리:
 

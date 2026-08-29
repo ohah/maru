@@ -2171,7 +2171,7 @@ test "server max_connections(18차 [1]): 슬롯 초과 연결은 reject(hello �
     // 안 올렸으니 무한 대기 없음 — 카운터 정확성 검증).
 }
 
-test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것도 안 보인다(빈 목록)" {
+test "server 왕복: 셀렉터 없음(폰의 중계·maru 밖 shell)면 metadata:all 로 전체가 보인다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var bb: [256]u8 = undefined;
     const base = srvTmpBase(&bb, "noselector");
@@ -2209,7 +2209,11 @@ test "server 왕복: 셀렉터 없음(maru 밖 shell)면 self scope로 아무것
     var pm = try cp.parseMessage(std.heap.c_allocator, ct.resp.?);
     defer pm.deinit();
     try testing.expect(pm.message == .response);
-    try testing.expectEqual(@as(usize, 0), pm.message.response.result.?.array.items.len); // 셀렉터 0 → self 필터로 빈 목록
+    // **앵커를 안 대면 넓다**(2026-08-29 — [보안 §8.4](../../../docs/control-plane-security.md)).
+    // 예전에는 여기서 빈 목록을 기대했는데, 그 좁힘은 보호가 아니라 **폰을 막고 있었다**: 중계는
+    // `MARU_PANE_ID` 가 없어 셀렉터를 못 대고, 그러면 anchor 0 으로 아무것도 안 맞아 폰 화면에
+    // "세션이 없다" 만 떴다(실측). 좁힘 자체도 실효가 없었다 — 셀렉터를 훑으면 같은 것이 나온다.
+    try testing.expectEqual(@as(usize, 2), pm.message.response.result.?.array.items.len);
 }
 
 // 1e-core 라이브 e2e: auth 프레임에 cap_nonce를 실으면(주입 store에 metadata:all cap) 서버가 self보다 넓은 scope로

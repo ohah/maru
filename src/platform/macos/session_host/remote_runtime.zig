@@ -6346,8 +6346,11 @@ pub const RemoteRuntime = struct {
         const owned = try allocator.dupe(u8, self.currentGeneration().observation.clipboard_read_target.items);
         errdefer allocator.free(owned);
         const after = self.eventCursorSnapshot();
-        if (after.observer_generation != prepared.observer_generation or
-            after.clipboard_read_seq != prepared.sequence or
+        // **`observer_generation` 은 보지 않는다.** 그 값은 출력 revision 이라(PTY 바이트마다 증가)
+        // RPC 왕복 중 셸이 한 줄만 뱉어도 달라진다. 여기서 비교하면 가져온 결과를 거의 매번 버리는데,
+        // host 는 이미 버퍼를 비운 뒤라 사용자의 복사가 사라진다(persistent-session-host.md 규율 3).
+        // 확인해야 할 것은 "그 사이 seq 가 또 움직였나" 이고 그건 아래 seq 비교가 한다.
+        if (after.clipboard_read_seq != prepared.sequence or
             !std.mem.eql(u8, owned, self.currentGeneration().observation.clipboard_read_target.items))
         {
             return error.ProtocolError;
@@ -6382,9 +6385,11 @@ pub const RemoteRuntime = struct {
         if (output == null) return null;
         errdefer if (output.?.text) |text| self.allocator.free(text);
         const after = self.eventCursorSnapshot();
-        if (after.observer_generation != prepared.observer_generation or
-            after.clipboard_write_seq != prepared.sequence)
-        {
+        // **`observer_generation` 은 보지 않는다.** 그 값은 출력 revision 이라(PTY 바이트마다 증가)
+        // RPC 왕복 중 셸이 한 줄만 뱉어도 달라진다. 여기서 비교하면 가져온 결과를 거의 매번 버리는데,
+        // host 는 이미 버퍼를 비운 뒤라 사용자의 복사가 사라진다(persistent-session-host.md 규율 3).
+        // 확인해야 할 것은 "그 사이 seq 가 또 움직였나" 이고 그건 아래 seq 비교가 한다.
+        if (after.clipboard_write_seq != prepared.sequence) {
             return error.ProtocolError;
         }
         if (!self.event_cursor.commit(prepared)) return error.ProtocolError;

@@ -176,6 +176,13 @@ pub const SurfaceDto = struct {
     pane: u32 = 0,
     /// 앱 포커스가 이 surface에 있는가(§3 공통 메타).
     focused: bool = false,
+    /// 영속 세션 호스트의 runtime id(32 소문자 hex). **그 surface 가 host-backed 일 때만** 있다 —
+    /// in-process Term·웹 패널·편집기에는 runtime 이 없다. 값이 없으면 wire 에서 생략한다.
+    ///
+    /// **`surface_id` 와 다른 축이다**(§3): 이쪽은 GUI 를 껐다 켜도 PTY 가 사는 동안 유지되고,
+    /// 프로세스 밖에서 그 터미널에 붙는 키다(`maru attach`). 단일 출처는 세션 호스트이고 collector
+    /// 는 그것을 옮겨 적을 뿐이다. **이 필드가 곧 "붙을 수 있는가" 다.**
+    runtime_id: ?[]const u8 = null,
     /// kind-분기 detail.
     detail: SurfaceDetail,
 
@@ -315,6 +322,12 @@ fn writeSurface(s: *std.json.Stringify, dto: SurfaceDto) !void {
     try s.write(dto.pane);
     try s.objectField("focused");
     try s.write(dto.focused);
+    // **있을 때만 싣는다**(§3). 빈 문자열을 실으면 소비자가 그것을 "붙을 수 있는데 id 가 빈 세션"
+    // 으로 읽는다 — 없는 것과 다른 말이다.
+    if (dto.runtime_id) |id| {
+        try s.objectField("runtime_id");
+        try s.write(id);
+    }
 
     switch (dto.detail) {
         .terminal => |t| {
@@ -605,6 +618,37 @@ test "at_prompt 3상: true→JSON true, false→JSON false, unknown→JSON null(
 }
 
 // ── 4) agent 생략(에이전트 없으면 필드 자체가 없다) ──
+test "runtime_id 는 있을 때만 실린다 — 그 유무가 붙을 수 있는가다" {
+    // 빈 문자열을 실으면 소비자가 "붙을 수 있는데 id 가 빈 세션" 으로 읽는다 — 없는 것과 다른
+    // 말이다(§3). in-process Term 은 runtime 이 없으므로 필드 자체가 없어야 한다.
+    const gpa = std.testing.allocator;
+    const dtos = [_]SurfaceDto{
+        .{
+            .surface_id = 10,
+            .window = 1,
+            .title = "host-backed",
+            .runtime_id = "0123456789abcdef0123456789abcdef",
+            .detail = .{ .terminal = .{ .at_prompt = .unknown } },
+        },
+        .{
+            .surface_id = 11,
+            .window = 1,
+            .title = "in-process",
+            .detail = .{ .terminal = .{ .at_prompt = .unknown } },
+        },
+    };
+    // **membership 이 있어야 scope 판정을 지난다** — 빈 `windows` 로는 `.all` 이어도 아무것도 안
+    // 실린다(그렇게 짰다가 이 테스트가 그것을 잡았다).
+    const ids = [_]u64{ 10, 11 };
+    const windows = [_]wm.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &ids }};
+    const wire = try serializeSessionsListFiltered(gpa, .{ .number = 1 }, .{ .surfaces = &dtos, .windows = &windows }, 10, .all, null);
+    defer gpa.free(wire);
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"runtime_id\":\"0123456789abcdef0123456789abcdef\"") != null);
+    // 두 줄인데 필드는 하나뿐이다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, wire, "runtime_id"));
+    try std.testing.expect(std.mem.indexOf(u8, wire, "\"runtime_id\":\"\"") == null);
+}
+
 test "agent 없는 terminal surface는 agent 필드를 생략한다(none을 wire에 싣지 않음)" {
     const dto = termSurface(1, "s", .{ .at_prompt = .unknown }); // agent=null 기본.
     const wire = try serializeSurface(testing.allocator, dto);

@@ -43,8 +43,8 @@
    destroy가 곧 미저장 편집 유실이 되기 때문이며, 적용 범위는 파일뿐 아니라 **web Term 전체**(브라우저 포함)다. 그 결과
    브라우저가 워크스페이스 전환 뒤 흰 페이지가 되던 현행 동작도 함께 사라진다. 현재 코드는 아직 destroy다.
    **관련 현행 결함(적대적 검증에서 확인)**: destroy 분기의 "이동↔닫힘" 판정(`windowOwningWebSurfaceModel`)이 **자기 창을
-   `except`로 제외**하므로(MaruAppHost.swift:5343), 같은 창 안의 워크스페이스 전환도 "진짜 닫힘"으로 오판돼 실제로는 닫히지
-   않은 브라우저 패널에 `browser.closed`가 push된다(MaruAppHost.swift:7632~7638). FP16의 hidden 보존은 surface가 집합을
+   `except`로 제외**하므로(MaruAppHost.swift:5204), 같은 창 안의 워크스페이스 전환도 "진짜 닫힘"으로 오판돼 실제로는 닫히지
+   않은 브라우저 패널에 `browser.closed`가 push된다(MaruAppHost.swift:5906). FP16의 hidden 보존은 surface가 집합을
    떠나지 않게 하므로 이 control-plane 이벤트 오발행도 함께 해소한다.
 3. **모달 Metal 오버레이**(맨 위): command palette·find·confirm. `isOpaque=false`, 평소 clear(투명), 모달 열림 시에만 셀을 그린다.
 

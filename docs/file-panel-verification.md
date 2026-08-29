@@ -15,7 +15,7 @@
 | **P1** | §5.0: `pane` 줄의 미지 필드를 옛 리더가 forgiving하게 무시하는가 | **통과** — `parsePane`이 key-addressed 조회(`requireUint`/`getUint`/`getQuoted`)라 미지 필드를 보지 않는다. 새 line kind였다면 `BadLine`으로 파일 전체 폴백이므로 **필드 선택이 필수**임도 함께 확인. 필드 수 실측 `3 + 256 = 259 < 512`(cap) |
 | **P2** | §4: 워크스페이스 전환이 실제로 web surface를 파괴하는가 | **red 재현** — tab0의 browser Term을 두고 tab1로 전환하니 `수집됨=false, destroyed=1`. 문서가 주장한 결함이 실행으로 확정됐다 |
 | **P3** | §4 수술이 실제로 되는가 + 회귀는 없는가 | **green** — 비활성 탭 walk를 더해 zero rect + `visible=false`로 남기니 `수집됨=true, destroyed=0, hidden=1, rect=0x0`. **기존 전체 스위트 통과**(fix 있으면 exit 0, 없으면 exit 1로 red→green 대비 확인). 수술이 `activeTabLeafRects` 아래 ~20줄로 끝난다는 것도 확인 |
-| **P4** | §1: `PanelKind`에 `.file`을 더해도 되는가 | **불가 판정** — Swift가 `let trusted = (panelKind == 0)` 매직 비교로 trust를 파생해(MaruAppHost.swift:2868) 값을 더하면 파일 패널이 조용히 untrusted로 떨어진다. 계획을 "`PanelKind` 2값 유지 + 파일 여부는 entry 유무"로 정정했고, 부수로 `== .browser` 판정 **8곳**(중복 정의 2개 포함)을 발견해 통합 작업을 FP16b에 넣었다 |
+| **P4** | §1: `PanelKind`에 `.file`을 더해도 되는가 | **불가 판정** — Swift가 `let trusted = (panelKind == 0)` 매직 비교로 trust를 파생해(MaruAppHost.swift:2617) 값을 더하면 파일 패널이 조용히 untrusted로 떨어진다. 계획을 "`PanelKind` 2값 유지 + 파일 여부는 entry 유무"로 정정했고, 부수로 `== .browser` 판정 **8곳**(중복 정의 2개 포함)을 발견해 통합 작업을 FP16b에 넣었다 |
 
 **3차 — 불변식 확정 스파이크(2026-07-27)**
 
@@ -31,8 +31,8 @@
 | | 검증한 전제 | 결과 |
 |---|---|---|
 | **A4** | §4: 다른 워크스페이스에 갔다 **돌아왔을 때** 재생성 없이 원래 기하로 복귀하는가(1차 PoC는 편도만 봤다) | **통과** — `created=0, shown=1`, rect `1204×796`(zero rect 아님). 즉 hidden 보존이 왕복까지 성립하고 복귀가 재생성이 아니다 |
-| **D** | §1 "surface 수명 == Term 수명"이 모든 경로에서 성립하는가 | **반례 발견** — rename이 `notifySurfaceClosed` + `surface_id = 0`으로 surface를 은퇴시킨다(app_session.zig:11347). eviction과 무관한 경로라 불변식을 한정해야 했고, `EntryId` 삭제 계획도 철회했다(§1) |
-| **D2** | rename이 정말 재생성을 **요구**하는가(설계 여지 탐색) | **kind별로 갈린다** — Swift `pinnedFileHTMLURL`은 `filePanelKind == 2`(html·pdf)에서만 세팅된다(MaruAppHost.swift:2849). 신뢰 kind는 경로를 브리지로 조회하므로 surface 유지 재설계가 가능하다(열린 질문 3번 (다)안의 근거) |
+| **D** | §1 "surface 수명 == Term 수명"이 모든 경로에서 성립하는가 | **반례 발견** — rename이 `notifySurfaceClosed` + `surface_id = 0`으로 surface를 은퇴시킨다(app_session/term.zig:745). eviction과 무관한 경로라 불변식을 한정해야 했고, `EntryId` 삭제 계획도 철회했다(§1) |
+| **D2** | rename이 정말 재생성을 **요구**하는가(설계 여지 탐색) | **kind별로 갈린다** — Swift `pinnedFileHTMLURL`은 `filePanelKind == 2`(html·pdf)에서만 세팅된다(MaruAppHost.swift:2588). 신뢰 kind는 경로를 브리지로 조회하므로 surface 유지 재설계가 가능하다(열린 질문 3번 (다)안의 근거) |
 
 **P3이 확인해 준 부수 사실**: `presence` 게이트(`activeTabHasWebTerm`)는 walk를 넓혀도 **자동으로 따라오지 않는다** — 수집이 1인데 게이트는 여전히 false로 어긋난다(스파이크로 고정). §4의 "동반 확장 필수"가 추측이 아니라 실측이다.
 

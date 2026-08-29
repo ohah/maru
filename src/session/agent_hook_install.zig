@@ -142,9 +142,11 @@ pub fn planFor(state: State, intent: Intent, want_events: usize) Plan {
 /// 덮었다» 를 잘못 판정하는데, 세트는 이 저장소 안의 상수라 넘겨받을 이유가 없다. `planFor` 의 인자는
 /// 테스트가 다른 크기를 넣어 경계를 보기 위한 것이다.
 ///
-/// **provider 는 넘겨받는다** — 세트가 그것으로 갈리기 때문이다(codex 에는 `Notification` 이 없다).
-pub fn planForSet(provider: command.Provider, state: State, intent: Intent) Plan {
-    return planFor(state, intent, command.eventsFor(provider, .local).len);
+/// **provider 와 scope 를 함께 넘겨받는다** — 세트가 그 둘로 갈리기 때문이다(codex 에는
+/// `Notification` 이 없고, 원격 세트에는 `PreToolUse` 가 없다). scope 를 안 받고 로컬 개수로
+/// 판정하면 원격 설치가 **영원히 `refresh`** 로 돈다 — 개수가 영영 안 맞기 때문이다.
+pub fn planForSet(provider: command.Provider, scope: command.Scope, state: State, intent: Intent) Plan {
+    return planFor(state, intent, command.eventsFor(provider, scope).len);
 }
 
 /// 이 계획이 사용자 파일을 **바꾸는가**. platform 이 락·백업·atomic write 를 준비할지 정하는 데 쓴다.
@@ -415,6 +417,25 @@ pub fn apply(provider: command.Provider, a: std.mem.Allocator, hooks: *std.json.
 
 const testing = std.testing;
 
+test "원격 스코프로 판정하면 원격 세트 개수를 본다 — 로컬 개수로 재면 영영 refresh 다" {
+    // 원격 세트는 로컬보다 작다. scope 를 안 넘기던 시절이면 로컬 개수와 비교해 «덜 덮였다» 로 읽혀
+    // 설치가 끝나도 계속 refresh 를 돌린다. 그 회귀를 여기서 막는다.
+    const remote_n = command.eventsFor(.claude, .remote).len;
+    const local_n = command.eventsFor(.claude, .local).len;
+    try testing.expect(remote_n < local_n);
+
+    const covered_remote = Known{
+        .ours = remote_n,
+        .ours_current = remote_n,
+        .events_covered = remote_n,
+        .events_outside = 0,
+        .legacy_present = false,
+    };
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .remote, .{ .known = covered_remote }, .ensure));
+    // 같은 상태를 로컬 잣대로 재면 «덜 덮였다» 가 된다.
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = covered_remote }, .ensure));
+}
+
 test "읽지 못한 파일은 어느 방향으로도 손대지 않는다" {
     // 같은 계열의 선례가 겪은 사고: 읽기 실패를 «빈 설정» 으로 접어 사용자 파일을 통째로 날렸다.
     // 지우는 쪽도 막는다 — 무엇을 지우는지 모르는 채로 쓰면 사용자 항목이 함께 사라진다.
@@ -519,8 +540,8 @@ test "세트 크기는 호출자가 넘기지 않는다" {
         .ours_current = command.claude_events.len,
         .events_covered = command.claude_events.len,
     } };
-    try testing.expectEqual(Plan.leave, planForSet(.claude, full, .ensure));
-    try testing.expectEqual(Plan.remove, planForSet(.claude, full, .uninstall));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, full, .ensure));
+    try testing.expectEqual(Plan.remove, planForSet(.claude, .local, full, .uninstall));
 }
 
 test "Known 의 필드가 늘면 판정 누락을 잡는다" {
@@ -535,28 +556,28 @@ test "Known 의 필드가 늘면 판정 누락을 잡는다" {
         .ours_current = command.claude_events.len,
         .events_covered = command.claude_events.len,
     };
-    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = base }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = base }, .ensure));
 
     var no_ours = base;
     no_ours.ours = 0;
-    try testing.expectEqual(Plan.install, planForSet(.claude, .{ .known = no_ours }, .ensure));
+    try testing.expectEqual(Plan.install, planForSet(.claude, .local, .{ .known = no_ours }, .ensure));
 
     var stale = base;
     stale.ours_current -= 1;
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = stale }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = stale }, .ensure));
 
     var partial = base;
     partial.events_covered -= 1;
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = partial }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = partial }, .ensure));
 
     var outside = base;
     outside.events_outside = 1;
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = outside }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = outside }, .ensure));
 
     // `legacy_present` 는 **의도적으로** 계획을 바꾸지 않는다(P1 — 자동 정리 금지).
     var legacy = base;
     legacy.legacy_present = true;
-    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = legacy }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = legacy }, .ensure));
 }
 
 // ── 트리 수술 테스트 ────────────────────────────────────────────────────────────────────────────
@@ -618,7 +639,7 @@ test "빈 설정에 넣으면 세트 전체가 최신으로 선다" {
 
     const before = try scanText(a, "{}", want);
     try testing.expectEqual(Known{}, before.?);
-    try testing.expectEqual(Plan.install, planForSet(.claude, .{ .known = before.? }, .ensure));
+    try testing.expectEqual(Plan.install, planForSet(.claude, .local, .{ .known = before.? }, .ensure));
 
     const after_text = try runClaude(a, "{}", want, .install);
     const after = (try scanText(a, after_text, want)).?;
@@ -627,7 +648,7 @@ test "빈 설정에 넣으면 세트 전체가 최신으로 선다" {
     try testing.expectEqual(@as(usize, command.claude_events.len), after.events_covered);
     try testing.expectEqual(@as(usize, 0), after.events_outside);
     // **쓴 것을 다시 읽었을 때 «할 일 없음» 이 나와야** 매 시작마다 사용자 파일을 다시 쓰지 않는다.
-    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = after }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = after }, .ensure));
 }
 
 test "다시 넣어도 항목이 늘지 않는다 — 멱등" {
@@ -710,13 +731,13 @@ test "낡은 커맨드는 걷어 내고 다시 넣는다 — 한 벌만 남는�
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 1), before.ours);
     try testing.expectEqual(@as(usize, 0), before.ours_current); // 커맨드가 다르다
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = before }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
     try testing.expect(std.mem.indexOf(u8, after_text, "maru-hooks-old") == null); // 낡은 것이 남지 않는다
     const after = (try scanText(a, after_text, want)).?;
     try testing.expectEqual(@as(usize, command.claude_events.len), after.ours); // 두 벌이 되지 않는다
-    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = after }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = after }, .ensure));
 }
 
 test "matcher 나 timeout 이 어긋난 항목은 최신이 아니다" {
@@ -741,7 +762,7 @@ test "matcher 나 timeout 이 어긋난 항목은 최신이 아니다" {
     const s2 = (try scanText(a, no_matcher, want)).?;
     try testing.expectEqual(@as(usize, 1), s2.ours);
     try testing.expectEqual(@as(usize, 0), s2.ours_current);
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = s2 }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = s2 }, .ensure));
 
     // 대조: 셋 다 맞으면 최신이다(위 둘이 «커맨드가 달라서» 걸린 것이 아님을 증명한다).
     const ok = try std.fmt.allocPrint(a,
@@ -765,7 +786,7 @@ test "세트 밖 이벤트에 남은 우리 항목을 걷어 낸다" {
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 1), before.events_outside);
     try testing.expectEqual(@as(usize, 0), before.events_covered);
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = before }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
     try testing.expect(std.mem.indexOf(u8, after_text, "PostToolUse") == null);
@@ -789,12 +810,12 @@ test "같은 이벤트에 우리 항목이 둘이면 하나로 줄인다" {
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 2), before.ours);
     try testing.expectEqual(@as(usize, 1), before.events_covered); // «덮었다» 로 세어 앞 검사를 통과한다
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .{ .known = before }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
     const after = (try scanText(a, after_text, want)).?;
     try testing.expectEqual(@as(usize, command.claude_events.len), after.ours); // 한 벌만 남는다
-    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = after }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = after }, .ensure));
 }
 
 test "과거 표식 항목은 세되 건드리지 않는다" {
@@ -841,7 +862,7 @@ test "codex 세트로 넣으면 Notification 이 들어가지 않는다" {
     try testing.expectEqual(@as(usize, command.codex_events.len), known.ours);
     try testing.expectEqual(@as(usize, command.codex_events.len), known.events_covered);
     try testing.expectEqual(@as(usize, 0), known.events_outside);
-    try testing.expectEqual(Plan.leave, planForSet(.codex, .{ .known = known }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.codex, .local, .{ .known = known }, .ensure));
 }
 
 test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
@@ -873,11 +894,11 @@ test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
     try testing.expect(claude_only > 0); // 대조가 성립하는 전제
     const as_codex = scan(.codex, wrapper.get("hooks"), want).?;
     try testing.expectEqual(claude_only, as_codex.events_outside);
-    try testing.expectEqual(Plan.refresh, planForSet(.codex, .{ .known = as_codex }, .ensure));
+    try testing.expectEqual(Plan.refresh, planForSet(.codex, .local, .{ .known = as_codex }, .ensure));
 
     const as_claude = scan(.claude, wrapper.get("hooks"), want).?;
     try testing.expectEqual(@as(usize, 0), as_claude.events_outside);
-    try testing.expectEqual(Plan.leave, planForSet(.claude, .{ .known = as_claude }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = as_claude }, .ensure));
 }
 
 test "고정 배열 상한이 세트를 따라온다" {
@@ -909,7 +930,7 @@ test "모르는 모양이면 판정을 포기한다 — 거기에 쓰면 사용�
         try testing.expectEqual(@as(?Known, null), try scanText(a, text, want));
     }
     // 호출자는 이것을 `unreadable` 로 접고, 그 계획은 `abort` 다.
-    try testing.expectEqual(Plan.abort, planForSet(.claude, .unreadable, .ensure));
+    try testing.expectEqual(Plan.abort, planForSet(.claude, .local, .unreadable, .ensure));
 }
 
 test "우리 항목의 자리를 정확히 집는다 — 신뢰 키가 그 인덱스를 담는다" {

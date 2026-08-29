@@ -1227,7 +1227,7 @@ fn reconcileProviderHooks(
                 .unreadable;
         },
     };
-    const plan = install.planForSet(provider, state, intent);
+    const plan = install.planForSet(provider, .local, state, intent);
     if (plan == .abort) return; // 모르는 상태 — 손대지 않는다
     if (!install.mutates(plan)) {
         // 이미 설치돼 있어도 **신뢰 항목은 확인한다** — 훅 파일은 그대로인데 `config.toml` 쪽만

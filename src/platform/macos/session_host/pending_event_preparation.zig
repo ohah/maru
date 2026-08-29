@@ -172,6 +172,10 @@ pub fn pendingControlsDigest(values: []const pending_control.RawQueuedRuntimeCon
                 @intCast(decoded.barrier),
                 pending_control.toCoreCommand(command),
             ).?,
+            .observation_probe => |nonce| pending_control.RawQueuedRuntimeControl.observationProbe(
+                @intCast(decoded.barrier),
+                nonce,
+            ).?,
         };
         hasher.update(std.mem.asBytes(&canonical.control));
     }
@@ -1355,12 +1359,19 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
     frame.seal();
     validateCallbackAuthorities(frame);
 
-    const decision = prepared_types.decide(.{ .metadata = .{
+    var decision = prepared_types.decide(.{ .metadata = .{
         .current_revision = frame.snapshot.observation.revision,
         .incoming_revision = metadata.revision,
         .semantic_equal = metadataEqualsCurrent(metadata, fill, frame.scratch.dto_backing.items, &processes, frame.context.observation),
         .content_equal = metadataEqualsCurrent(metadata, fill, frame.scratch.dto_backing.items, &processes, frame.context.observation),
     } });
+    if (metadata.observation_probe_nonce != 0 and
+        std.meta.activeTag(decision.projection) == .ignored)
+    {
+        decision = prepared_types.decide(.violation);
+    } else {
+        decision.observation_probe_nonce = metadata.observation_probe_nonce;
+    }
     if (std.meta.activeTag(decision.projection) != .metadata_commit) {
         cleanupFrameScratchReverse(frame);
         return finishPublished(frame, attempt, decision, null);

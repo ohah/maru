@@ -472,6 +472,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "sendResyncNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "sendScrollToBottomUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "sendCoreCommandUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "pumpPendingOutputUnderRegisteredOperationExecutionLease", .receiver_type = mutable, .class = .unchecked },
@@ -1569,6 +1570,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "screenRecoveryState" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "sendCoreCommandNonBlockingGuarded" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease" },
+                // P4 user-action freshness uses the existing registered-operation control lease;
+                // capability and sender are the only new Client declarations.
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "async_observation_probe_v1" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendScrollToBottomUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sendCoreCommandUnderRegisteredOperationExecutionLease" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "flushPendingOutboundBlockingMode" },
@@ -2877,6 +2882,7 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         .{ .name = "peer_attach_generation", .count = 4 },
         .{ .name = "screen_viewport_scrolled_v1", .count = 1 },
         .{ .name = "async_scroll_to_bottom_v1", .count = 2 },
+        .{ .name = "async_observation_probe_v1", .count = 1 },
         .{ .name = "notification_stream_auth_v1", .count = 1 },
         .{ .name = "notification_delivery_v1", .count = 2 },
         .{ .name = "runtime_clipboard_v1", .count = 1 },

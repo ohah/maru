@@ -131,8 +131,8 @@ flowchart TD
    - `maru ssh`가 `OSC 5379 ; ssh ; <dest>`로 목적지를 통지하고(`wrapper_script`의 `notify`, `$TMUX`면 DCS passthrough), Maru가 `dispatchOscMaru`로 받아 `ssh_remote_dest`에 저장한다(`sshRemoteDest()` getter). foreground ssh가 정상 종료하거나 HUP/INT/TERM으로 끊기면 one-shot trap cleanup이 원래 exit/signal code를 보존한 채 `OSC 5379 ; ssh-end`를 정확히 한 번 보내 destination을 지운다. dest로 `controlSocketPath`를 계산하므로 control socket 경로를 따로 알릴 필요가 없다. control socket이 살아있는 maru 경로(캐시 hit·부트스트랩 성공)에서만 통지한다.
    - in-process Term은 실제 core에서 observation을 복사하고, persistent host-backed Term은 host core가 파싱한 값을
      attach initial metadata와 revisioned event로 GUI owned observation에 전달한다. GUI placeholder core는 읽지 않는다.
-3. **드롭/paste 핸들러가 분기한다. ✅ host-backed metadata 배선, 실제 upload 제품 E2E는 남음**
-   - **드롭(3단계)**: Swift `handleDrop`이 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text). Zig `handleDroppedFiles`가 각 파일을 메인 스레드에서 읽는다(16MB 상한).
+3. **드롭/paste 핸들러가 분기한다. ✅ async freshness 배선, 실제 upload 제품 E2E는 남음**
+   - **드롭(3단계)**: Swift `handleDrop`이 fileURL 드롭이면 경로(NUL 구분)를 ABI `maru_macos_app_session_drop_files`(v68)로 넘긴다(웹 URL·텍스트는 기존 paste_text). 로컬 Term은 즉시 기존 경로로 흐르고, host-backed Term은 아래 user-action probe가 끝난 뒤 분기한다. 원격 업로드로 확정된 파일만 메인 스레드에서 읽는다(파일당 16MB 상한).
    - **pane 라우팅(공통)**: Swift `handleDrop`이 내용 삽입 **직전에** 드롭 지점(backing px)을 ABI `maru_macos_app_session_route_drop`(v115)로 넘겨 **떨어뜨린 pane(+Term)을 활성으로** 만든다 → 뒤이은 삽입(드래그 경로는 `paste_text` 또는 `drop_files`)이 기존 경로 그대로 거기에 들어간다(예전엔 좌표를 버려 **어디에 떨어뜨려도 활성 pane**에만 삽입됐다). pane rect는 탭 바를 포함하고, **Term 탭 위 드롭이면 그 Term**까지 활성으로 만든다(탭 바는 Term 단위라 pane까지만 라우팅하면 엉뚱한 Term에 들어간다). 드롭 처리 전체는 **그 뷰의 창** surface로 스코프한다(`withSurface(surfaceForView(view))`) — 안 그러면 forwarder가 key 창을 가리켜 백그라운드 창의 드롭이 다른 창에 붙는다. 삽입할 내용이 없으면 포커스도 안 옮긴다.
      반환은 **3-상태**이고 호스트가 반드시 구분한다 — 거부를 "해당 없음"으로 접으면 호스트가 그냥 활성 pane에 삽입해 막으려던 오삽입이 그대로 일어난다:
      | 값 | 뜻 | 호스트 동작 |
@@ -142,7 +142,7 @@ flowchart TD
      | `-1` refused | chrome 오버레이/모달 열림(`anyOverlayOpen` — 마우스 클릭이 모달에 삼켜지는 것과 같은 규율) 또는 대상이 web pane(붙일 PTY 없음) | **삽입하지 않는다** |
 
    - **비동기 구간까지 대상 고정**: 원격 세션의 파일 드롭은 백그라운드 업로드가 끝난 **뒤** 경로를 paste하므로, 드롭과 붙는 시점 사이에 비동기 구간이 있다. **드롭 시점의 surface id를 업로드 job에 실어**(`UploadJob.target_id` → `UploadResult.target_id`) 완료 시 `pasteTextTo(target_id, …)`로 되돌린다 — 그 사이 사용자가 pane/탭을 옮겨도 경로는 **드롭한 pane**에 붙는다. **대상이 사라졌으면**(그 Term이 닫혔거나 워크스페이스가 다른 창으로 이동) **다른 pane에 붙이지 않고 notice 토스트로 경로를 알린다**: 사용자가 드롭하지도 않은 pane의 명령줄 한복판에 경로가 꽂히는 것이 이 라우팅이 없애려는 오삽입 그 자체고, 그렇다고 조용히 버리면 파일은 원격에 올라갔는데 참조할 방법이 없기 때문이다. 붙여넣기 확인 모달도 같은 규율이다(모달을 띄운 시점의 대상을 `pending_paste_confirm_target`에 고정 — 확인하는 동안 pane을 옮겨도 payload는 원래 pane으로). 이를 위해 미전송 paste 잔여 큐는 **surface별**(`pending_pastes`)이다: 단일 FIFO였을 땐 잔여가 다 빠지기 전까지 대상이 옛 surface에 고정돼, 다른 surface로 갈 바이트가 그 FIFO에 붙으면 엉뚱한 pane으로 갔다.
-   - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff/jpeg → `clipboardImagePng`가 PNG로 정규화)면 바이트를 ABI `maru_macos_app_session_drop_image`(v69)로 넘긴다. Zig `handleDroppedImage`가 `pasted-<pid>-N.png` 이름(pid로 세션 간 충돌 방지)으로 같은 업로드 경로를 탄다(원격이면 처리=true, 로컬이면 false→Swift가 기존 paste).
+   - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff/jpeg → `clipboardImagePng`가 PNG로 정규화)면 먼저 로컬 임시 PNG를 만들고, 그 경로와 PNG 바이트를 ABI로 넘긴다. 로컬 in-process Term은 즉시 false를 돌려 Swift가 그 경로를 paste한다. host-backed Term은 true로 소비하고 두 payload를 user-action queue가 소유한다. fresh SSH면 `pasted-<pid>-N.png`로 업로드하고, fresh local이면 **원래 surface**에 임시 경로를 paste한다. 이렇게 해야 비동기 판정이 host-backed local 이미지 paste를 조용히 버리지 않는다. 사용되지 않은 임시 파일은 기존 다음-launch 정리가 회수한다.
    - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다. 원격으로 확정된 뒤 context 생성, 크기/OOM, worker 시작 중 하나라도 실패하면 notice만 내고 **로컬 경로/Swift temp PNG fallback을 소비**한다. 실행은 **posix fork+pipe**로 ssh 자식 프로세스(0.16 `std.process.Child`가 io 기반이라 백그라운드 스레드에 부적합 — `pty/macos.zig` 패턴). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
 
 ### 4.2 원격 의존성
@@ -153,7 +153,8 @@ flowchart TD
 ### 4.3 경계 (어느 계층이 무엇을)
 
 - **Swift(`MaruAppHost.swift`)**: 드롭 파일 경로(`drop_files`) 또는 클립보드 이미지 바이트(`drop_image`)를 ABI로 넘긴다. 네이티브 I/O(NSPasteboard)만.
-- **Zig(`app_session.zig`)**: 세션이 maru ssh 원격인지 runtime observation의 `ssh_remote_dest`로 판정, 파일 읽기(메인, io), 백그라운드 스레드 관리(`startUploadBytes`/`uploadWorker`/`drainUploadResults`), paste 트리거. host-backed Term은 user action 직전 `runtime.observation {stream_id}` barrier로 host full-state와 subscription revision/base를 동기화한다. 실패·unsupported·malformed면 로컬 경로 paste로 오판하지 않고 notice와 함께 fail-closed한다. 결정 로직은 전부 Zig(테스트 가능, `macos-app-host-boundary.md` 정책).
+- **Zig(`app_session.zig` + session-host probe)**: 세션이 maru ssh 원격인지 runtime observation의 `ssh_remote_dest`로 판정하고 paste/upload를 트리거한다. in-process Term은 같은 main-thread local observation을 즉시 읽는다. host-backed Term은 기존 **managed generation 연결**에 typed observation request를 nonblocking으로 admission하고 기존 RX/event pump가 응답을 완료한다. 새 연결이나 worker를 만들지 않아 connection incident·poison·FIFO 소유권을 우회하지 않는다. 메인은 원래 `{surface_id, RuntimeHandle, host_id, runtime_id, runtime_generation}`가 그대로인지 다시 확인한 뒤에만 적용한다. 실패·timeout·unsupported·malformed·target 이동/종료는 notice와 함께 fail-closed하며 다른 pane이나 local fallback으로 재분류하지 않는다. 구 host가 async observation을 지원하지 않아도 동기 RPC로 fallback하지 않는다.
+- **bounded queue**: 창당 실행 중 observation action은 하나다. 실행 중 항목을 포함해 최대 8 actions, **freshness 판정 대기 중 owned action payload** 합계 32MiB, 파일 드롭 한 action은 최대 256 paths/64KiB NUL block을 허용한다. admission 전에 전부 검사하고 cap 초과는 payload copy·request 0으로 거부한다. 이 32MiB는 판정 뒤 기존 SSH upload worker가 읽은 파일 내용의 resident/concurrency 상한이 아니다. FIFO를 보존하되 각 action deadline은 admission monotonic 시각부터 5초다. queue에서 만료되면 request 없이 terminal 실패하므로 앞 action의 timeout이 뒤 action마다 새 5초를 만들지 않는다. 이미 전송된 probe가 timeout이면 correlation을 abandoned tombstone으로 남겨 late matching event만 조용히 소비한다. 그 event가 오기 전에는 같은 managed connection에서 다음 probe가 앞질러 가지 않으며, queue의 뒤 action은 각자의 원래 deadline으로 만료된다.
 - **순수 로직(`cli/ssh.zig`)**: `controlSocketPath`·`sanitizeDropFilename`·`uploadShellCommand`·`max_upload_bytes` + control socket 경로 안정화/세션 유지(`wrapper_script`).
 - **업로드 실행(`ssh_upload.zig`)**: posix fork+pipe로 ssh 자식 프로세스(io 무관 → 백그라운드 스레드 안전).
 
@@ -173,9 +174,9 @@ flowchart TD
 - **트리거 = 드롭 + paste(클립보드 이미지).** 파일/이미지 드래그앤드롭(3단계)과 Cmd+V 클립보드 이미지(4단계)를 업로드한다.
 - **원격 인식 토대 = `maru ssh` 전용 OSC 통지 (OSC 5379).** `maru ssh`가 접속 직전에 `OSC 5379 ; ssh ; <dest> BEL`을 emit하고(`cli/ssh.zig` `wrapper_script`의 `notify` — control socket이 살아있는 maru 경로에서만), foreground ssh 종료 뒤 `OSC 5379 ; ssh-end BEL`로 clear한다. 두 신호 모두 **`$TMUX`가 있으면 DCS tmux passthrough로 감싼다** — 다만 도달은 tmux `allow-passthrough`가 켜져 있을 때뿐이고 그 기본값은 off다(§1.1). 꺼져 있으면 통지가 버려져 그 세션은 로컬로 보이며, 이는 maru가 보장할 수 없는 사용자 환경 전제다. Maru(`terminal/osc.zig` `dispatchMaru`)는 이를 받아 `ssh_remote_dest`를 설정/해제하고(`sshRemoteDest()` getter), dest로 control socket 경로 해시를 계산한다. **5379**는 표준/벤더(iTerm 1337 등) 충돌을 피한 사설 번호이고, payload는 `<서브커맨드>;<인자>` 형식(`ssh;<dest>`, `ssh-end`)이라 확장 가능하다. 모르는 터미널은 무시하므로 안전하다. RIS에선 유지한다(ssh 연결은 터미널 리셋과 무관). OSC 7 host 보관은 원격 cwd 표시용 보조로만 남긴다.
   host-backed Term에서는 P3-e4 metadata snapshot/event가 이 값을 GUI로 전달하고, drop/paste 직전
-  `runtime.observation` barrier가 100ms periodic event보다 최신인 host 상태를 확인한다. 지원 여부가 불명하거나 barrier가
-  실패한 상태를 로컬 세션으로 오판해 로컬 경로를 원격 셸에 붙이지 않도록 fail-closed한다. 현재 barrier는 main thread의
-  local socket RPC라 stalled host에서 최대 5초 recv timeout까지 UI를 막을 수 있으며 async 전환은 opt-in P4의 UI 비차단 gate다.
+  managed generation 연결의 nonblocking observation barrier가 100ms periodic event보다 최신인 host 상태를 확인한다. 지원 여부가
+  불명하거나 barrier가 실패한 상태를 로컬 세션으로 오판해 로컬 경로를 원격 셸에 붙이지 않도록 fail-closed한다. GUI main thread는
+  blocking connect, RPC, wait/join을 하지 않는다. 이 async user-action 경계와 stalled-host 5초 deadline을 opt-in P4의 UI 비차단 gate로 둔다.
 
 ### 보안 기본값 (사용자 결정 2026-06-21)
 
@@ -192,6 +193,7 @@ flowchart TD
   image upload branch E2E를 자동 검증해야 전체 gate가 끝난다.
 - **순수 로직 단위**: 세션이 maru ssh 원격인지 판정, 업로드 명령 조립, 원격 경로 생성은 I/O 없는 순수 Zig로 TDD(`ssh.zig`의 기존 셸-구절 단위 테스트와 같은 결).
 - **관측 가능성**: 업로드 시작/성공/실패를 공통 도메인 이벤트로 남겨 로그·trace·E2E가 같은 데이터를 본다(`project-rules.md` §관측 가능성). 자동 검증이 불가능한 부분(실제 GUI 드롭)은 완료 전 수동 검증 방법과 함께 보고.
+- **비동기 user-action gate**: 순수 queue 테스트가 FIFO, 8/9 action, 32MiB exact/+1, 256/257 paths, 64KiB exact/+1, admission 기준 5초 exact/-1, target identity ABA, close 중 late result를 고정한다. actual socket 테스트는 실제 송신 버퍼를 stalled 상태로 만든 managed generation에서 request/poll이 block하지 않고 pending을 반환하는지, 같은 adapter generation·usable connection을 보존하는지, wire FIFO와 timeout abandon 뒤 exact late metadata 소비를 확인한다. 첫 pump 오류도 caller가 `.accepted`를 받기 전에 abandoned tombstone으로 전환한다. AppSession main tick은 blocking connect/RPC/wait 없이 이 facade와 queue clock만 호출한다. 테스트/artifact에는 host·destination·path·PNG를 남기지 않는다.
 
 ## 8. 후속·비범위
 

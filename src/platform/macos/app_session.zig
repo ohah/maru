@@ -239,7 +239,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
-pub const abi_version: u32 = 176;
+// 177: drop_image가 Swift가 먼저 atomic 저장한 로컬 임시 PNG 경로를 PNG 바이트와 함께 받는다. host-backed
+// 비동기 freshness barrier가 로컬로 판정된 뒤에도 원래 이미지를 재생성하지 않고 정확한 target surface에 경로를
+// 붙일 수 있게 하는 수명 계약이다. export 시그니처를 바꾸므로 낡은 Swift/new Zig 조합은 ABI 가드에서 실패해야 한다.
+pub const abi_version: u32 = 177;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3166,6 +3169,34 @@ pub const ScmPending = struct {
 /// 자리(파일 트리 수동 복구 안내, docs/i18n.md §6.3)가 이 값을 본다.
 pub const notice_message_cap: usize = 512;
 
+const UserActionPayload = union(enum) {
+    files: []u8,
+    image: struct { temp_path: []u8, png: []u8 },
+
+    fn deinit(self: *UserActionPayload, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .files => |paths| allocator.free(paths),
+            .image => |image| {
+                allocator.free(image.temp_path);
+                allocator.free(image.png);
+            },
+        }
+        self.* = undefined;
+    }
+};
+
+const OwnedUserAction = struct {
+    id: u64,
+    target: session_host.user_action_queue.TargetIdentity,
+    probe_sent: bool = false,
+    payload: UserActionPayload,
+
+    fn deinit(self: *OwnedUserAction, allocator: std.mem.Allocator) void {
+        self.payload.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const AppSession = struct {
     /// P4 C3b manifest-visible transaction의 성공 꼬리에서만 호출한다. 제품 owner가 아직 arm되지 않은 restore/build
     /// 단계는 의도적으로 no-op이며, overflow는 owner의 sticky integrity failure로 남아 후속 publish를 막는다.
@@ -5778,6 +5809,12 @@ pub const AppSession = struct {
     // **엉뚱한 pane으로 갔다**(code-review). surface마다 큐를 두면 각 큐는 자기 순서만 지키면 되고,
     // 대상은 enqueue 시점에 확정된다(탭/pane이 바뀌어도 바이트는 원래 surface로 간다 — 옛 계약 유지).
     pending_pastes: std.AutoHashMapUnmanaged(u64, PasteQueue) = .empty,
+    // Host-backed 사용자 동작은 동기 RPC 대신 기존 managed connection의 상관 nonce barrier를 탄다.
+    // ledger가 먼저 byte/action 한도를 승인하고, fixed slot이 그 승인에 대응하는 owned payload를 보관한다.
+    user_action_queue: session_host.user_action_queue.Queue = .{},
+    user_actions: [session_host.user_action_queue.max_actions]?OwnedUserAction =
+        [_]?OwnedUserAction{null} ** session_host.user_action_queue.max_actions,
+    next_user_action_id: u64 = 1,
     // 드롭 파일 업로드(maru ssh 원격) 백그라운드 스레드 ↔ 메인 tick 통신. 업로드는 ssh 자식 프로세스라
     // 느릴 수 있어 별도 스레드에서 하고(UI 안 멈춤), 완료된 원격 절대경로를 mutex 하에 upload_results에
     // push한다. 메인 tick(drainUploadResults)이 빼서 pasteText로 흘려보낸다 — core 접근은 메인 전용이라
@@ -13190,46 +13227,17 @@ pub const AppSession = struct {
         // 관측을 시도해 실패 notice를 띄우는데, 사용자에겐 "왜 실패했는지" 설명이 안 되는 잡음이다. 되살리기는 ⏎만이다.
         if (pane_ops.activePane(self).activeTerm().rt.ended_placeholder) return;
         const active_term = pane_ops.activePane(self).activeTerm();
-        if (active_term.kind == .terminal) {
-            self.backendFor(active_term).refreshObservation(
-                active_term.rt.handle,
-                self.allocator,
-                &active_term.rt.observation,
-                false,
-            ) catch {
-                // periodic cache의 current는 backend 최신 상태라는 뜻이 아니다. user action 직전 barrier가 실패하면
-                // 예전/빈 OSC 5379 destination으로 업로드하거나 로컬 경로를 원격 셸에 붙이지 않는다.
-                if (active_term.rt.observation.availability == .current)
-                    active_term.rt.observation.availability = .stale;
-                self.showNoticeKey(.app_file_send_sync_failed);
-                return;
-            };
-        }
-        // **대상 surface를 지금 고정한다** — 드롭 지점의 pane(routeDropAtPoint가 이미 활성으로 만들었다).
-        // 원격 업로드는 백그라운드 스레드라 **완료까지 비동기 구간**이 있고, 그 사이 사용자가 pane을 옮기면
-        // 옛 코드는 완료 시점의 activeSurface에 경로를 붙였다(드롭한 pane이 아니라). id를 업로드 job에 실어
-        // 결과가 원래 pane으로 돌아오게 한다.
         const target_id = term_ops.activeSurface(self).id;
-        const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
-        const rup = self.remoteUploadContext() orelse {
-            if (known_remote_ssh) {
-                self.showNoticeKey(.app_file_send_prepare_failed);
-                return;
-            }
-            self.pasteTextTo(target_id, paths_nul, true); // 로컬 세션(또는 dest/ctl 못 구함): 기존 경로 paste
+        // route_drop normally rejects non-terminal targets, but this ABI remains callable on its
+        // own. Do not let a stale/misordered native caller paste a filesystem path into a web/file
+        // surface merely because it bypassed the structural route gate.
+        if (active_term.kind != .terminal) return;
+        // in-process는 큐/RPC가 필요 없다. host-backed만 managed connection의 비동기 freshness barrier를 탄다.
+        if (active_term.surface.remote == null) {
+            self.pasteTextTo(target_id, paths_nul, true);
             return;
-        };
-        defer rup.deinit(self.allocator);
-
-        var it = std.mem.splitScalar(u8, paths_nul, 0);
-        var started: usize = 0;
-        while (it.next()) |path| {
-            if (path.len == 0) continue;
-            self.startUpload(rup.ctl, rup.dest, path, target_id) catch continue; // 읽기/크기/spawn 실패는 그 파일만 스킵
-            started += 1;
         }
-        // SSH 원격으로 확정된 뒤 업로드가 실패하면 로컬 경로를 원격 shell에 붙이지 않는다.
-        if (started == 0) self.showNoticeKey(.app_file_send_start_failed);
+        self.enqueueUserActionFiles(active_term, target_id, paths_nul);
     }
 
     /// 클립보드 이미지(Cmd+V)를 처리한다. maru ssh 원격 세션이면 control socket으로 업로드하고 완료 시
@@ -13237,7 +13245,7 @@ pub const AppSession = struct {
     /// (Swift가 기존 텍스트·URL paste 진행 — 로컬은 Claude 등이 OS 클립보드를 직접 읽으므로 maru 불개입).
     /// 파일 드롭과 달리 경로가 없어 바이트를 직접 받고 "pasted-<pid>-<N>.png" 이름을 붙인다 — pid로 앱 재시작 후
     /// cross-session 덮어쓰기를 막는다(카운터는 재시작 시 0이라 pid 없이는 다른 세션과 충돌). docs/ssh-integration.md §4.
-    pub fn handleDroppedImage(self: *AppSession, bytes: []const u8) bool {
+    pub fn handleDroppedImage(self: *AppSession, temp_path: []const u8, bytes: []const u8) bool {
         // handleDroppedFiles와 **같은 순서**를 지킨다: 빈 창 가드 → 구조 게이트 → 묘비 게이트. 묘비 게이트를 먼저 두면
         // 탭이 0인 창(merge/이동으로 비워진 뒤 Swift가 닫기 전 tick)에서 activePane()이 빈 리스트를 인덱싱해 패닉한다 —
         // 예전 코드가 구조 게이트에서 먼저 반환하던 상태다([[empty-session-resign-activesurface-crash]] 클래스).
@@ -13248,54 +13256,252 @@ pub const AppSession = struct {
         // (위 "구조 owner에서는 no-op도 consumed" 규율과 같은 이유). 되살리기는 ⏎만이다.
         if (pane_ops.activePane(self).activeTerm().rt.ended_placeholder) return true;
         const active_term = pane_ops.activePane(self).activeTerm();
-        if (active_term.kind == .terminal) {
-            self.backendFor(active_term).refreshObservation(
-                active_term.rt.handle,
-                self.allocator,
-                &active_term.rt.observation,
-                false,
-            ) catch {
-                if (active_term.rt.observation.availability == .current)
-                    active_term.rt.observation.availability = .stale;
-                self.showNoticeKey(.app_image_send_sync_failed);
-                return true; // stale route에서는 Swift의 local temp-path fallback을 반드시 소비
-            };
+        if (active_term.kind != .terminal or active_term.surface.remote == null) return false;
+        self.enqueueUserActionImage(active_term, term_ops.activeSurface(self).id, temp_path, bytes);
+        return true;
+    }
+
+    fn nextUserActionId(self: *AppSession) u64 {
+        const id = self.next_user_action_id;
+        self.next_user_action_id +%= 1;
+        if (self.next_user_action_id == 0) self.next_user_action_id = 1;
+        return id;
+    }
+
+    fn userActionSlot(self: *AppSession, id: u64) ?*?OwnedUserAction {
+        for (&self.user_actions) |*slot| if (slot.* != null and slot.*.?.id == id) return slot;
+        return null;
+    }
+
+    fn freeUserAction(self: *AppSession, id: u64) void {
+        const slot = self.userActionSlot(id) orelse return;
+        slot.*.?.deinit(self.allocator);
+        slot.* = null;
+    }
+
+    fn showUserActionFailure(self: *AppSession, action: *const OwnedUserAction) void {
+        self.showNoticeKey(switch (action.payload) {
+            .files => .app_file_send_sync_failed,
+            .image => .app_image_send_sync_failed,
+        });
+    }
+
+    fn failUserAction(self: *AppSession, id: u64) void {
+        const slot = self.userActionSlot(id) orelse return;
+        self.showUserActionFailure(&slot.*.?);
+        self.freeUserAction(id);
+    }
+
+    fn storeUserAction(self: *AppSession, action: OwnedUserAction) bool {
+        for (&self.user_actions) |*slot| {
+            if (slot.* != null) continue;
+            slot.* = action;
+            return true;
         }
-        const known_remote_ssh = active_term.kind == .terminal and active_term.rt.observation.ssh_remote_dest_present;
-        if (bytes.len > maru.cli.ssh.max_upload_bytes) {
-            if (known_remote_ssh) {
-                self.showNoticeKey(.app_image_send_too_large);
-                return true;
-            }
-            return false;
+        return false;
+    }
+
+    fn userActionIdentity(self: *AppSession, term: *Term, surface_id: u64) ?session_host.user_action_queue.TargetIdentity {
+        _ = self;
+        if (!is_macos or term.surface.remote == null) return null;
+        const backend = if (app_remote_backend) |*value| value else return null;
+        return backend.userActionProbeIdentity(term.rt.handle, surface_id);
+    }
+
+    fn enqueueUserActionFiles(self: *AppSession, term: *Term, surface_id: u64, paths_nul: []const u8) void {
+        var path_count: usize = 0;
+        var it = std.mem.splitScalar(u8, paths_nul, 0);
+        while (it.next()) |path| if (path.len != 0) {
+            path_count += 1;
+        };
+        const target = self.userActionIdentity(term, surface_id) orelse {
+            self.showNoticeKey(.app_file_send_sync_failed);
+            return;
+        };
+        const id = self.nextUserActionId();
+        const admission = self.user_action_queue.admit(.{
+            .id = id,
+            .admitted_ms = self.awakeMs(),
+            .payload_bytes = paths_nul.len,
+            .path_count = path_count,
+            .path_block_bytes = paths_nul.len,
+            .target = target,
+        });
+        if (admission != .accepted) {
+            self.showNoticeKey(.app_file_send_prepare_failed);
+            return;
         }
-        const rup = self.remoteUploadContext() orelse {
-            if (known_remote_ssh) {
-                self.showNoticeKey(.app_image_send_prepare_failed);
-                return true;
+        const owned = self.allocator.dupe(u8, paths_nul) catch {
+            std.debug.assert(self.user_action_queue.rollbackTail(id));
+            self.showNoticeKey(.app_file_send_prepare_failed);
+            return;
+        };
+        if (!self.storeUserAction(.{ .id = id, .target = target, .payload = .{ .files = owned } })) {
+            self.allocator.free(owned);
+            std.debug.assert(self.user_action_queue.rollbackTail(id));
+            self.showNoticeKey(.app_file_send_prepare_failed);
+        }
+    }
+
+    fn enqueueUserActionImage(self: *AppSession, term: *Term, surface_id: u64, temp_path: []const u8, png: []const u8) void {
+        const payload_bytes = std.math.add(usize, temp_path.len, png.len) catch {
+            self.showNoticeKey(.app_image_send_too_large);
+            return;
+        };
+        const target = self.userActionIdentity(term, surface_id) orelse {
+            self.showNoticeKey(.app_image_send_sync_failed);
+            return;
+        };
+        const id = self.nextUserActionId();
+        const admission = self.user_action_queue.admit(.{
+            .id = id,
+            .admitted_ms = self.awakeMs(),
+            .payload_bytes = payload_bytes,
+            .target = target,
+        });
+        if (admission != .accepted) {
+            self.showNoticeKey(if (admission == .payload_limit) .app_image_send_too_large else .app_image_send_prepare_failed);
+            return;
+        }
+        const path_owned = self.allocator.dupe(u8, temp_path) catch {
+            std.debug.assert(self.user_action_queue.rollbackTail(id));
+            self.showNoticeKey(.app_image_send_oom);
+            return;
+        };
+        const png_owned = self.allocator.dupe(u8, png) catch {
+            self.allocator.free(path_owned);
+            std.debug.assert(self.user_action_queue.rollbackTail(id));
+            self.showNoticeKey(.app_image_send_oom);
+            return;
+        };
+        if (!self.storeUserAction(.{ .id = id, .target = target, .payload = .{ .image = .{ .temp_path = path_owned, .png = png_owned } } })) {
+            self.allocator.free(path_owned);
+            self.allocator.free(png_owned);
+            std.debug.assert(self.user_action_queue.rollbackTail(id));
+            self.showNoticeKey(.app_image_send_prepare_failed);
+        }
+    }
+
+    fn userActionTerm(self: *AppSession, target: session_host.user_action_queue.TargetIdentity) ?*Term {
+        const loc = term_ops.findTermWhere(self, target.surface_id, struct {
+            fn pred(surface_id: u64, term: *Term) bool {
+                return term.kind == .terminal and term.surface.id == surface_id;
             }
-            return false; // current + dest 없음 = 로컬 세션 — Swift가 기존 처리
+        }.pred) orelse return null;
+        return loc.pane.terms.items[loc.term_index];
+    }
+
+    fn applyUserAction(self: *AppSession, term: *Term, action: *OwnedUserAction) void {
+        const known_remote_ssh = term.rt.observation.ssh_remote_dest_present;
+        const rup = self.remoteUploadContextFor(term) orelse {
+            if (known_remote_ssh) {
+                self.showNoticeKey(switch (action.payload) {
+                    .files => .app_file_send_prepare_failed,
+                    .image => .app_image_send_prepare_failed,
+                });
+                return;
+            }
+            switch (action.payload) {
+                .files => |paths| self.pasteTextTo(action.target.surface_id, paths, true),
+                .image => |image| self.pasteTextTo(action.target.surface_id, image.temp_path, true),
+            }
+            return;
         };
         defer rup.deinit(self.allocator);
+        switch (action.payload) {
+            .files => |paths| {
+                var it = std.mem.splitScalar(u8, paths, 0);
+                var started: usize = 0;
+                while (it.next()) |path| {
+                    if (path.len == 0) continue;
+                    self.startUpload(rup.ctl, rup.dest, path, action.target.surface_id) catch continue;
+                    started += 1;
+                }
+                if (started == 0) self.showNoticeKey(.app_file_send_start_failed);
+            },
+            .image => |image| {
+                self.upload_counter += 1;
+                const name = std.fmt.allocPrint(self.allocator, "pasted-{d}-{d}.png", .{ std.c.getpid(), self.upload_counter }) catch {
+                    self.showNoticeKey(.app_image_send_oom);
+                    return;
+                };
+                const bytes = self.allocator.dupe(u8, image.png) catch {
+                    self.allocator.free(name);
+                    self.showNoticeKey(.app_image_send_oom);
+                    return;
+                };
+                self.startUploadBytes(rup.ctl, rup.dest, name, bytes, action.target.surface_id) catch
+                    self.showNoticeKey(.app_image_send_start_failed);
+            },
+        }
+    }
 
-        // 클립보드 이미지엔 파일명이 없으므로 카운터로 고유 이름을 만든다(시간 API는 코어 결정성 위해 회피).
-        self.upload_counter += 1;
-        const name = std.fmt.allocPrint(self.allocator, "pasted-{d}-{d}.png", .{ std.c.getpid(), self.upload_counter }) catch {
-            self.showNoticeKey(.app_image_send_oom);
-            return true;
+    fn pumpUserActions(self: *AppSession) void {
+        const backend = if (is_macos) (if (app_remote_backend) |*value| value else return) else return;
+        const now = self.awakeMs();
+        if (self.user_action_queue.active_id) |active_id| {
+            if (self.user_action_queue.pollActive(now) == .expired) {
+                if (self.userActionSlot(active_id)) |slot| {
+                    if (slot.*.?.probe_sent)
+                        _ = backend.abandonUserActionObservationProbe(slot.*.?.target.runtime_handle, active_id);
+                }
+                self.failUserAction(active_id);
+            }
+        }
+        if (self.user_action_queue.active_id == null) switch (self.user_action_queue.takeNext(now)) {
+            .expired => self.failUserAction(self.user_action_queue.last_terminal_id),
+            else => {},
         };
-        const bytes_owned = self.allocator.dupe(u8, bytes) catch {
-            self.allocator.free(name);
-            self.showNoticeKey(.app_image_send_oom);
-            return true;
+        const id = self.user_action_queue.active_id orelse return;
+        const slot = self.userActionSlot(id) orelse {
+            _ = self.user_action_queue.finishActive(id);
+            return;
         };
-        // name/bytes 소유를 startUploadBytes로 넘긴다(성공/실패 무관 그쪽이 책임). 대상 surface는 지금 고정한다
-        // (업로드 완료까지 비동기 구간 — 그 사이 pane이 바뀌어도 원래 pane에 붙는다).
-        self.startUploadBytes(rup.ctl, rup.dest, name, bytes_owned, term_ops.activeSurface(self).id) catch {
-            self.showNoticeKey(.app_image_send_start_failed);
-            return true;
-        };
-        return true;
+        if (!slot.*.?.probe_sent) {
+            const admission = backend.requestUserActionObservationProbe(slot.*.?.target.runtime_handle, id) catch {
+                _ = self.user_action_queue.finishActive(id);
+                self.failUserAction(id);
+                return;
+            };
+            switch (admission) {
+                .accepted => slot.*.?.probe_sent = true,
+                .busy => return,
+                .unsupported => {
+                    _ = self.user_action_queue.finishActive(id);
+                    self.failUserAction(id);
+                    return;
+                },
+            }
+        }
+        switch (backend.pollUserActionObservationProbe(slot.*.?.target.runtime_handle, id)) {
+            .pending => {},
+            .stale => {
+                _ = self.user_action_queue.finishActive(id);
+                self.failUserAction(id);
+            },
+            .completed => {
+                const term = self.userActionTerm(slot.*.?.target) orelse {
+                    _ = self.user_action_queue.finishActive(id);
+                    self.failUserAction(id);
+                    return;
+                };
+                const current = self.userActionIdentity(term, slot.*.?.target.surface_id) orelse {
+                    _ = self.user_action_queue.finishActive(id);
+                    self.failUserAction(id);
+                    return;
+                };
+                if (self.user_action_queue.complete(id, current) != .apply) {
+                    self.failUserAction(id);
+                    return;
+                }
+                self.backendFor(term).readObservation(term.rt.handle, self.allocator, &term.rt.observation, false) catch {
+                    self.failUserAction(id);
+                    return;
+                };
+                self.applyUserAction(term, &slot.*.?);
+                self.freeUserAction(id);
+            },
+        }
     }
 
     /// maru ssh 원격 세션의 업로드 컨텍스트(목적지 + control socket 경로). 드롭(handleDroppedFiles)과
@@ -13312,8 +13518,7 @@ pub const AppSession = struct {
         }
     };
 
-    fn remoteUploadContext(self: *AppSession) ?RemoteUpload {
-        const term = pane_ops.activePane(self).activeTerm();
+    fn remoteUploadContextFor(self: *AppSession, term: *Term) ?RemoteUpload {
         if (term.kind != .terminal or term.rt.observation.availability != .current) return null;
         const dest: ?[]u8 = if (term.rt.observation.ssh_remote_dest_present)
             (self.allocator.dupe(u8, term.rt.observation.ssh_remote_dest.items) catch null)
@@ -15800,6 +16005,7 @@ pub const AppSession = struct {
             } else |_| {}
         }
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
+        self.pumpUserActions(); // host-backed drop/image freshness barrier 결과를 non-blocking으로 적용
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         file_panel_ops.ageFilePanelSelfWriteLatches(self);
@@ -19357,6 +19563,11 @@ pub const AppSession = struct {
             self.pending_pastes.deinit(self.allocator);
         }
         self.pending_paste_confirm.deinit(self.allocator);
+        self.user_action_queue.close();
+        for (&self.user_actions) |*slot| {
+            if (slot.*) |*action| action.deinit(self.allocator);
+            slot.* = null;
+        }
         // 진행 중 업로드 스레드 완료 대기(detach 스레드가 self.upload_*를 건드리므로 self 해제 전 0까지).
         while (true) {
             self.upload_mutex.lockUncancelable(self.io);
@@ -32822,7 +33033,7 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
     try std.testing.expect(saw_claude);
     try std.testing.expect(claude_current);
     try std.testing.expectEqualStrings("e4d-fixture", git_ops.termGitBranch(session, term).?);
-    try std.testing.expect(session.remoteUploadContext() == null);
+    try std.testing.expect(session.remoteUploadContextFor(pane_ops.activePane(session).activeTerm()) == null);
 
     try signalE4d2aFifo(fifo_claude);
     var codex_current = false;
@@ -32838,7 +33049,7 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
     }
     try std.testing.expect(codex_current);
     try std.testing.expect(git_ops.termGitBranch(session, term) == null);
-    const upload = session.remoteUploadContext() orelse return error.MissingRemoteUploadRoute;
+    const upload = session.remoteUploadContextFor(pane_ops.activePane(session).activeTerm()) orelse return error.MissingRemoteUploadRoute;
     try std.testing.expect(upload.dest.len != 0 and upload.ctl.len != 0);
     upload.deinit(allocator);
 
@@ -32871,7 +33082,7 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
     }
     try std.testing.expect(cleared);
     try std.testing.expect(git_ops.termGitBranch(session, term) == null);
-    try std.testing.expect(session.remoteUploadContext() == null);
+    try std.testing.expect(session.remoteUploadContextFor(pane_ops.activePane(session).activeTerm()) == null);
 }
 
 // P3-e4d-2b는 current source를 legacy처럼 실행하지 않는다. 저장소에 digest로 동결한 실제 N-1 image가
@@ -33120,7 +33331,7 @@ test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
         try std.testing.expect(!term.rt.observation.ssh_remote_dest_present);
         try std.testing.expectEqual(AgentKind.none, term.agent_kind);
         try std.testing.expect(git_ops.termGitBranch(session, term) == null);
-        try std.testing.expect(session.remoteUploadContext() == null);
+        try std.testing.expect(session.remoteUploadContextFor(pane_ops.activePane(session).activeTerm()) == null);
         _ = usleep(20 * 1000);
     }
 }
@@ -33643,7 +33854,7 @@ test "종료 placeholder: 파일 트리가 입력을 가지면 ⏎·드롭이 �
     _ = session.handleKeyEvent(.{ .key = .enter }) catch {};
     try std.testing.expect(pane.terms.items[tomb_index].rt.ended_placeholder); // 트리의 Enter를 뺏지 않았다
     // 이미지 붙여넣기는 구조 owner에서 consumed(true)지만 묘비를 만지지 않는다(순서가 지켜졌다는 뜻).
-    try std.testing.expect(session.handleDroppedImage("\x89PNG"));
+    try std.testing.expect(session.handleDroppedImage("/tmp/test.png", "\x89PNG"));
     try std.testing.expect(pane.terms.items[tomb_index].rt.ended_placeholder);
 
     // 대조군: 워크스페이스가 입력을 되찾으면 같은 ⏎가 되살린다(게이트가 vacuous하지 않다).
@@ -33913,7 +34124,7 @@ test "종료 placeholder: teardown·세션 종료 판정·resize·reap 관문을
 
     // 관문 4: 읽기 전용 — 드롭은 무동작이고 이미지는 consumed로 삼켜 Swift 텍스트 fallback이 PTY로 새지 않게 한다.
     session.handleDroppedFiles("/tmp/x.txt\x00");
-    try std.testing.expect(session.handleDroppedImage("\x89PNG"));
+    try std.testing.expect(session.handleDroppedImage("/tmp/test.png", "\x89PNG"));
 
     // 관문 5: teardown이 registry 슬롯을 회수한다(누락하면 testing.allocator가 누수로 잡는다). 슬롯 수가 생성 전으로
     // 돌아오는지까지 본다 — remove가 아니라 destroy만 됐으면 여기서 어긋난다.
@@ -43079,7 +43290,7 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·paste·drop을 fail
     session.handleDroppedFiles("/tmp/private.txt\x00");
     try std.testing.expectEqual(paste_queues, session.pending_pastes.count());
     const upload_counter = session.upload_counter;
-    try std.testing.expect(session.handleDroppedImage("private-image"));
+    try std.testing.expect(session.handleDroppedImage("/tmp/private-image.png", "private-image"));
     try std.testing.expectEqual(upload_counter, session.upload_counter);
     // **닫기는 barrier를 통과한다**(2026-08-21). barrier가 지목한 entry는 활성 pane의 활성 Term이라
     // 대상이 확정돼 있고, 여기서 삼키면 "파일 탭을 닫았더니 승계된 파일 탭에서 ⌘W가 안 먹는다"가 된다.
@@ -43095,6 +43306,19 @@ test "FP9 publish 대기 barrier가 typed ack 전까지 PTY·paste·drop을 fail
     try std.testing.expect(session.completePendingDockFocus(successor.surface_id));
     try std.testing.expect(term_ops.focusedDockSurface(session) == successor.surface_id);
     try std.testing.expectEqual(successor.surface_id, term_ops.focusedDockSurface(session).?);
+}
+
+test "drop_files ABI direct call does not paste paths into a non-terminal surface" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/drop-direct-call.md", .markdown);
+    const pending_before = session.pending_pastes.count();
+    session.handleDroppedFiles("/tmp/private.txt\x00");
+    try std.testing.expectEqual(pending_before, session.pending_pastes.count());
 }
 
 test "파일 탭을 연달아 ⌘W로 닫는다 — 승계된 탭도 파일이면 publish barrier가 그 키를 삼키지 않는다" {

@@ -79,6 +79,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn sendCoreCommandUnderRegisteredOperationExecutionLease("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease("));
+    try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn sendResyncNonBlockingUnderRegisteredOperationExecutionLease("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn callUnderRegisteredOperationExecutionLease("));
     try std.testing.expectEqual(
@@ -189,6 +190,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
         "sendCoreCommandUnderRegisteredOperationExecutionLease",
         "sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease",
         "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease",
+        "sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease",
         "sendResyncNonBlockingUnderRegisteredOperationExecutionLease",
         "callUnderRegisteredOperationExecutionLease",
     }) |identifier| try std.testing.expectEqual(
@@ -210,7 +212,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
         allocator,
         "finalAdmissionTransactionWithOperationAndRegistry",
     ));
-    try std.testing.expectEqual(@as(usize, 5), try countSessionHostProductIdentifier(
+    try std.testing.expectEqual(@as(usize, 6), try countSessionHostProductIdentifier(
         allocator,
         "finalAdmissionTransactionWithOperationPermitAndRegistry",
     ));
@@ -242,6 +244,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
         "sendCoreCommandUnderRegisteredOperationExecutionLease",
         "sendScrollToBottomNonBlockingUnderRegisteredOperationExecutionLease",
         "sendCoreCommandNonBlockingUnderRegisteredOperationExecutionLease",
+        "sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease",
         "sendResyncNonBlockingUnderRegisteredOperationExecutionLease",
         "callUnderRegisteredOperationExecutionLease",
     }) |identifier| try std.testing.expectEqual(
@@ -264,7 +267,7 @@ test "CR3a-2c3d C3-3a3 revoke ordering activation boundary" {
     const nonblocking_control = between(slot, "pub fn sendGenerationControlNonBlocking(", "fn beginGenerationControlOwner(") orelse
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 2), count(blocking_control, "finalAdmissionTransactionWithOperationPermitAndRegistry("));
-    try std.testing.expectEqual(@as(usize, 2), count(nonblocking_control, "finalAdmissionTransactionWithOperationPermitAndRegistry("));
+    try std.testing.expectEqual(@as(usize, 3), count(nonblocking_control, "finalAdmissionTransactionWithOperationPermitAndRegistry("));
 
     // GenerationTransport is the sole product facade into each ClientSlot mutation family.
     try std.testing.expectEqual(@as(usize, 1), count(transport, "client_slot_mod.pumpGenerationPendingOutput("));

@@ -73,6 +73,9 @@ pub const Kind = enum(u16) {
     /// controller의 bounded host-core 명령. focus/config/prompt hot path가 response RPC를 기다리지 않되,
     /// 같은 connection의 input frame과 wire 순서를 공유하도록 fire-and-forget stream frame으로 둔다.
     core_command = 13,
+    /// Read-only fresh metadata barrier. The fixed payload is a nonzero big-endian action nonce;
+    /// peers that did not negotiate its capability must never receive this frame.
+    observation_probe = 15,
     /// Negotiated CR4 reconnect catch-up cut. Fixed binary payload; it is the final frame of the
     /// same atomically admitted subscription batch as its preceding snapshot/delta chunks.
     screen_frontier_barrier = catchup_barrier_wire.kind_raw,
@@ -81,7 +84,7 @@ pub const Kind = enum(u16) {
     /// v1이 아는 kind인가. open enum이라 unknown 값(미래 wire)은 false다 — 상위가 optional flag로 skip 여부를 정한다.
     pub fn isKnown(self: Kind) bool {
         return switch (self) {
-            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command, .screen_frontier_barrier => true,
+            .hello, .hello_ack, .request, .response, .event, .snapshot_chunk, .delta_chunk, .input_bytes, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command, .observation_probe, .screen_frontier_barrier => true,
             _ => false,
         };
     }
@@ -161,6 +164,7 @@ pub const Header = struct {
 /// 거부한다(메모리 폭주 방지). unknown kind는 binary 상한으로 관대하게 두고(optional이면 skip) required면 상위가 닫는다.
 pub fn maxPayloadForKind(kind: Kind) usize {
     return switch (kind) {
+        .observation_probe => 8,
         .screen_frontier_barrier => screen_frontier_barrier_payload_size,
         .snapshot_chunk, .delta_chunk, .input_bytes => max_binary_chunk,
         .hello, .hello_ack, .request, .response, .event, .stream_ack, .ping, .pong, .scroll_to_bottom, .core_command => max_control_json,
@@ -260,6 +264,13 @@ test "MRSH known kinds classify control-json vs binary payloads" {
     try std.testing.expectEqual(max_binary_chunk, maxPayloadForKind(.snapshot_chunk));
     try std.testing.expectEqual(max_binary_chunk, maxPayloadForKind(.input_bytes));
     try std.testing.expectEqual(@as(usize, 96), maxPayloadForKind(.screen_frontier_barrier));
+}
+
+test "P4 async observation probe has a dedicated optional-safe fixed payload kind" {
+    try std.testing.expectEqual(@as(u16, 15), @intFromEnum(Kind.observation_probe));
+    try std.testing.expect(Kind.observation_probe.isKnown());
+    try std.testing.expect(!Kind.observation_probe.isControlJson());
+    try std.testing.expectEqual(@as(usize, 8), maxPayloadForKind(.observation_probe));
 }
 
 test "MRSH flags: end_stream/optional/unknown-bit predicates" {

@@ -670,6 +670,7 @@ pub const HostAdapter = struct {
             .controller_transfer = client.attachment_capabilities.negotiated_controller_transfer,
             .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
             .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
+            .async_observation_probe = client.async_observation_probe_v1,
             .notification_stream_auth = client.notification_stream_auth_v1,
             .notification_delivery = client.notification_delivery_v1,
             .runtime_clipboard = client.runtime_clipboard_v1,

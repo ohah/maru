@@ -42,6 +42,8 @@ pub const PreparedEventProjection = union(PreparedEventTag) {
 pub const PreparedDecision = struct {
     projection: PreparedEventProjection,
     effect: EffectRequest,
+    /// Exact probe correlation carried through PendingEventOwner. Zero means an ordinary event.
+    observation_probe_nonce: u64 = 0,
 };
 
 comptime {
@@ -58,6 +60,7 @@ pub fn sealProjection(value: PreparedDecision) DecisionSealProjection {
         .bound_raw = 1,
         .prepared_tag_raw = @intFromEnum(std.meta.activeTag(value.projection)),
         .effect_tag_raw = @intFromEnum(std.meta.activeTag(value.effect)),
+        .observation_probe_nonce = value.observation_probe_nonce,
     };
     switch (value.projection) {
         .resize_commit => |resize| {

@@ -7098,8 +7098,15 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     client에서 추측하지 않고 motion 0·autoscroll transaction no-op으로 낮춘다. 전체 선택은 host 권위 추출 의도와 client-local viewport highlight를 분리해 완료했다. 사용자 word separator는 bounded request·host 권위 선택·구 host
     additive-field degradation을 자동 검증한다. cwd/SSH destination/raw process argv는
     trace와 실패 artifact에 남기지 않는다.
-    현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
-    socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 opt-in P4의 성능 gate다.
+    SSH drop/paste barrier는 기존 managed generation 연결에 nonblocking observation request를 넣고 기존 RX/event pump가
+    완료하는 async user-action state machine으로 옮긴다. main thread는 blocking connect/RPC/wait를 하지 않고 새 observer 연결도 만들지 않는다.
+    창당 실행 중 1개, 실행 포함 8 actions/32MiB, 파일 action 256 paths/64KiB, admission부터 5초 deadline을 고정한다. 전송 뒤 timeout은 late event correlation tombstone을 유지해 shared connection을 오염시키지 않고, late event 전에는 다음 probe가 앞지르지 않는다. 완료 때
+    원래 surface·RuntimeHandle·host/runtime identity를 재검증하고 stale/unsupported/timeout/대상 소멸은 local로 추측하지 않는다.
+    실제 socket 송신 backpressure에서도 admission/poll은 block하지 않고 같은 managed adapter를
+    보존하며, timeout abandon 뒤 exact late metadata만 소비하는 회귀를 고정했다. admission 기준 5초와 queued
+    deadline은 allocation-free queue의 injected-clock exact/-1 gate가 소유하고 AppSession tick은 이 두 nonblocking
+    facade만 호출한다. 이 32MiB는 freshness 판정 대기 payload 상한이며, 판정 뒤 기존 SSH upload worker의 파일
+    내용 resident/concurrency 상한을 뜻하지 않는다.
 
 P3 core의 현재 종료 gate는 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot,
 input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 자동 gate는 완료됐다.** 실제 host PTY의
@@ -7406,9 +7413,10 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
   - metadata·selection·Reset·Clear는 **구현됨** — OSC metadata/notification pull, `runtime_selected_text_v1`
     협상(host `TerminalCore.extractSelection`이 SSOT), `core_command_wire.Command`의 `reset_input_modes`·
     `clear_screen`(GUI 라우팅은 `app_session.zig`의 `enqueueCoreCommand`)이 각각 있다.
-  - **async SSH action만 남았다.** drop/paste 직전 `runtime.observation` barrier가 아직 main thread의 동기
-    RPC라(`client.zig`의 `setReadTimeoutMs(fd, 5000)`) stalled host에서 **최대 5초 UI 정지**가 가능하다.
-    상세와 gate 지위는 [SSH 통합](ssh-integration.md) §9.2가 소유한다.
+  - **async SSH action freshness gate:** drop/paste 판정은 기존 managed generation 연결의 nonblocking
+    observation request, bounded queue/deadline, original-target identity 재검증, host-backed local image fallback을
+    사용한다. 실제 socket backpressure·late correlation·연결 보존과 exact 5초 queue 경계를 자동 검증한다.
+    실제 SSH upload 제품 E2E는 여전히 남으며 상세와 gate 지위는 [SSH 통합](ssh-integration.md) §4·§7·§9.2가 소유한다.
 - 모든 일반 persistent runtime의 OSC 9/777에 `{host_id,runtime_id,event_id}` stable identity를 부여하고, GUI 0
   bounded journal·OS 배너·cold-launch attach와 GUI-live fast hint를 구현한다. notification sink는 daemon 내부
   platform adapter이며 별도 MRSH client가 아니다. permission denied는 세션 실패가 아닌 명시적 degraded 상태다.

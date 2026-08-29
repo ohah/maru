@@ -2037,6 +2037,7 @@ const ExternalAdoptionSnapshot = struct {
     admin_runtime_end_v1: bool,
     screen_viewport_scrolled_v1: bool,
     async_scroll_to_bottom_v1: bool,
+    async_observation_probe_v1: bool,
     runtime_core_command_v1: bool,
     runtime_clear_screen_v1: bool,
     runtime_selected_text_v1: bool,
@@ -3618,6 +3619,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeU16(client.screen_codec_version);
         writer.writeBool(client.screen_viewport_scrolled_v1);
         writer.writeBool(client.async_scroll_to_bottom_v1);
+        writer.writeBool(client.async_observation_probe_v1);
         writer.writeBool(client.runtime_core_command_v1);
         writer.writeBool(client.runtime_clear_screen_v1);
         writer.writeBool(client.runtime_selected_text_v1);
@@ -5477,6 +5479,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .admin_runtime_end_v1 = self.admin_runtime_end_v1,
         .screen_viewport_scrolled_v1 = self.screen_viewport_scrolled_v1,
         .async_scroll_to_bottom_v1 = self.async_scroll_to_bottom_v1,
+        .async_observation_probe_v1 = self.async_observation_probe_v1,
         .runtime_core_command_v1 = self.runtime_core_command_v1,
         .runtime_clear_screen_v1 = self.runtime_clear_screen_v1,
         .runtime_selected_text_v1 = self.runtime_selected_text_v1,
@@ -6690,6 +6693,9 @@ pub const Client = struct {
     /// host가 응답 없는 `scroll_to_bottom` stream frame을 지원하는가. false인 구 host에서는
     /// AppKit callback이 동기 RPC로 fallback하지 않고 scrolled preedit를 fail-closed한다.
     async_scroll_to_bottom_v1: bool = false,
+    /// Host가 read-only observation probe stream frame과 nonce-correlated metadata event를 지원한다.
+    /// false인 구 host에는 frame을 보내지 않고 user action을 typed unsupported로 닫는다.
+    async_observation_probe_v1: bool = false,
     /// host가 scroll 외 focus/config/prompt를 포함한 bounded `runtime.core_command` v1 집합을 지원하는가.
     /// false인 구 host에는 기존 scroll만 보내고 새 명령은 degraded no-op으로 남긴다.
     runtime_core_command_v1: bool = false,
@@ -7148,6 +7154,7 @@ pub const Client = struct {
         self.admin_runtime_end_v1 = payloadHasCapability(ack.payload, "admin_runtime_end_v1");
         self.screen_viewport_scrolled_v1 = payloadHasCapability(ack.payload, "screen_viewport_scrolled_v1");
         self.async_scroll_to_bottom_v1 = payloadHasCapability(ack.payload, "async_scroll_to_bottom_v1");
+        self.async_observation_probe_v1 = payloadHasCapability(ack.payload, "async_observation_probe_v1");
         self.runtime_core_command_v1 = payloadHasCapability(ack.payload, "runtime_core_command_v1");
         self.runtime_clear_screen_v1 = payloadHasCapability(ack.payload, "runtime_clear_screen_v1");
         self.runtime_selected_text_v1 = payloadHasCapability(ack.payload, "runtime_selected_text_v1");
@@ -14159,6 +14166,33 @@ pub const Client = struct {
         return self.sendCoreCommandNonBlockingGuarded(stream_id, payload, true);
     }
 
+    pub fn sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease(
+        self: *Client,
+        capability: RegisteredOperationExecutionHandle,
+        stream_id: u64,
+        nonce: u64,
+    ) ClientError!bool {
+        try self.requireRegisteredOperationExecutionCapability(capability);
+        if (!self.async_observation_probe_v1 or nonce == 0) return false;
+        if (!(try self.pumpPendingOutputGuarded(true))) return false;
+        var payload: [8]u8 = undefined;
+        std.mem.writeInt(u64, &payload, nonce, .big);
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{
+                .kind = .observation_probe,
+                .flags = protocol.Flags.optional,
+                .stream_id = stream_id,
+                .major = self.wire_major,
+            },
+            &payload,
+        ) catch return error.OutOfMemory;
+        std.debug.assert(self.pending_outbound == null);
+        self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
+        _ = try self.pumpPendingOutputGuarded(true);
+        return true;
+    }
+
     /// 이미 RemoteRuntime의 ordered input FIFO가 소유한 scroll barrier를 후속 blocking RPC보다 먼저 보낸다.
     /// `call`과 마찬가지로 기존 nonblocking frame을 먼저 끝내므로 connection wire 순서는 보존된다.
     pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
@@ -15710,6 +15744,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "screen_codec_version",
     "screen_viewport_scrolled_v1",
     "async_scroll_to_bottom_v1",
+    "async_observation_probe_v1",
     "runtime_core_command_v1",
     "runtime_clear_screen_v1",
     "runtime_selected_text_v1",
@@ -21033,7 +21068,7 @@ fn buildHelloMajorFeatures(
         "";
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"]}}",
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"async_observation_probe_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"]}}",
         .{ wire_major, wire_major, client_kind, transfer_capability },
     );
 }
@@ -23691,8 +23726,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\xd8\x90\x73\x7f\x1a\x16\x86\x00\x5d\x5d\x98\x3d\x03\x09\xec\xdd" ++
-        "\xb3\x43\xff\xb2\x9c\x31\x6f\xe3\xc5\x20\x58\x37\x78\xc6\x8f\xf7";
+        "\xa0\xb9\x06\x32\xc9\xa3\x56\xf4\xc8\x3c\xda\xeb\x0a\x3c\x85\xf1" ++
+        "\x1e\xc2\xae\xb9\x9e\x68\x27\xda\x45\x62\xcb\x85\xe1\x9b\x74\x48";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -24984,6 +25019,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(std.mem.indexOf(u8, hello, "\"controller_transfer_v1\"") == null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"screen_viewport_scrolled_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"async_scroll_to_bottom_v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, hello, "\"async_observation_probe_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_core_command_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_clear_screen_v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, hello, "\"runtime_selected_text_v1\"") != null);
@@ -25022,6 +25058,7 @@ test "client: hello/request JSON build and host_id parse are server-symmetric (p
     try testing.expect(!legacy_client.runtime_selected_text_v1);
     try testing.expect(!legacy_client.runtime_selection_state_v1);
     try testing.expect(!legacy_client.runtime_clear_screen_v1);
+    try testing.expect(!legacy_client.async_observation_probe_v1);
     try testing.expect(!legacy_client.notification_stream_auth_v1);
     try testing.expect(!legacy_client.attachment_capabilities.negotiated_controller_transfer);
     legacy_client.screen_viewport_scrolled_v1 = payloadHasCapability(
@@ -25103,6 +25140,7 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
     try testing.expect(client.host_id != 0); // hello_ack에서 host_id를 받았다.
     try testing.expect(client.screen_viewport_scrolled_v1);
     try testing.expect(client.async_scroll_to_bottom_v1);
+    try testing.expect(client.async_observation_probe_v1);
     try testing.expect(client.runtime_core_command_v1);
     try testing.expect(client.runtime_clear_screen_v1);
     try testing.expect(client.runtime_selected_text_v1);

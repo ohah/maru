@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 176u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 177u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -920,10 +920,13 @@ int32_t maru_macos_app_session_drop_files(
     const uint8_t *bytes,
     size_t len
 );
-/* 클립보드 이미지(Cmd+V). maru ssh 원격이면 control socket 업로드 후 원격 경로 paste(1 반환),
-   로컬/미처리면 0(Swift가 기존 paste 진행). 파일 드롭과 달리 바이트를 직접 받는다. */
+/* 클립보드 이미지(Cmd+V). Swift가 먼저 만든 임시 PNG 경로와 같은 PNG 바이트를 넘긴다.
+   host-backed이면 1(비동기 freshness 판정이 경로 paste 또는 원격 upload를 소유),
+   in-process 로컬이면 0(Swift가 temp_path를 기존 paste 경로로 보냄). */
 int32_t maru_macos_app_session_drop_image(
     MaruAppHostSession *session,
+    const uint8_t *temp_path,
+    size_t temp_path_len,
     const uint8_t *bytes,
     size_t len
 );

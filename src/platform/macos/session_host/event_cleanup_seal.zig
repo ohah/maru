@@ -895,6 +895,7 @@ pub const PreparedSemanticCommitSealInput = struct {
     prepared_tag_raw: u8,
     publish_raw: u8,
     resize_generation: u64,
+    observation_probe_nonce: u64,
     phase_raw: u8,
     observation_moved_raw: u8,
     semantic_post_digest: Digest,

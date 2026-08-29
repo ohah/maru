@@ -625,6 +625,7 @@ pub const CollectedOutput = struct {
     next_observation_token: ?u64 = null,
     next_observation_revision: ?u64 = null,
     next_metadata_change_token: ?MetadataChangeToken = null,
+    clear_observation_probe: bool = false,
     previous_observation_ticks: u8,
     base_reservation: ?connection_slot.BaseReservation = null,
     frames_taken: bool = true,
@@ -690,6 +691,7 @@ pub const CollectedOutput = struct {
         }
         if (self.next_metadata_change_token) |next|
             sub.metadata_change_token = next;
+        if (self.clear_observation_probe) sub.observation_probe_nonce = null;
         self.finishFrames();
         self.finished = true;
     }
@@ -744,6 +746,7 @@ pub const Connection = struct {
     /// MRSH v2에 후속 비동기 event를 무조건 밀면 같은 major의 구 client가 protocol error로 종료한다. hello에서
     /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
     runtime_metadata_v1: bool = false,
+    async_observation_probe_v1: bool = false,
     runtime_ended_v1: bool = false,
     controller_transfer_v1: bool = false,
     runtime_catchup_barrier_v1: bool = false,
@@ -776,6 +779,9 @@ pub const Connection = struct {
         observation_token: ?u64 = null,
         observation_revision: u64 = 0,
         observation_ticks: u8 = 0,
+        /// One admitted read-only user-action barrier. Cleared only after its correlated metadata
+        /// event is admitted to the connection queue.
+        observation_probe_nonce: ?u64 = null,
         /// Runtime source token committed with the last admitted metadata full state.
         metadata_change_token: ?MetadataChangeToken = null,
         /// Non-null only while a newly acquired controller attach is unpublished. rollbackAttach
@@ -986,6 +992,8 @@ pub const Connection = struct {
         }
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
         self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
+        self.async_observation_probe_v1 = self.runtime_metadata_v1 and
+            stringArrayContains(obj, "capabilities", "async_observation_probe_v1");
         self.runtime_ended_v1 = stringArrayContains(obj, "capabilities", "runtime_ended_v1");
         self.controller_transfer_v1 = stringArrayContains(
             obj,
@@ -1047,6 +1055,7 @@ pub const Connection = struct {
             .stream_ack => return self.routeStreamAck(frame),
             .scroll_to_bottom => return self.routeScrollToBottom(frame),
             .core_command => return self.routeCoreCommandFrame(frame),
+            .observation_probe => return self.routeObservationProbe(frame),
             .hello => {
                 // hello는 connection당 한 번. 두 번째 hello는 protocol 위반.
                 self.state = .closed;
@@ -2731,6 +2740,30 @@ pub const Connection = struct {
         return .none;
     }
 
+    /// Read-only fresh metadata barrier. The controller-side caller is already serialized with
+    /// input before this frame is emitted, while the host authorizes only the stream's observe
+    /// capability. A second in-flight nonce is protocol ambiguity and closes the connection.
+    fn routeObservationProbe(self: *Connection, frame: framing.Frame) HandleError!Action {
+        if (!self.async_observation_probe_v1 or frame.header.request_id != 0 or
+            frame.header.flags != protocol.Flags.optional or frame.payload.len != 8)
+        {
+            self.state = .closed;
+            return .close;
+        }
+        const sub = self.attachments.getPtr(frame.header.stream_id) orelse return .none;
+        if (!reg.Capability.has(
+            self.registry.capabilitiesOfSubscription(sub.runtime_id, sub.subscription_id),
+            reg.Capability.observe,
+        )) return .none;
+        const nonce = std.mem.readInt(u64, frame.payload[0..8], .big);
+        if (nonce == 0 or sub.observation_probe_nonce != null) {
+            self.state = .closed;
+            return .close;
+        }
+        sub.observation_probe_nonce = nonce;
+        return .none;
+    }
+
     /// attach된 각 stream의 화면 변화를 모아 push할 frame들을 만든다(§9·§10 delta stream). stream별 `base`(마지막 full
     /// snapshot) 대비 `RuntimeOps.delta`로 diff해, 변화가 있으면 `delta_chunk`(또는 geometry 변화면 fresh `snapshot_chunk`)
     /// frame으로 싣고 base를 갱신한다. 보낼 게 없으면 null. caller(socket serve loop)가 poll tick마다 불러 그 프레임을
@@ -2838,7 +2871,10 @@ pub const Connection = struct {
             break :blk sub.observation_ticks >= 5 or
                 ops.observation_urgent(ops.ctx, sub.runtime_id);
         } else false;
-        if (self.runtime_metadata_v1 and (metadata_token_changed or legacy_metadata_due)) {
+        const observation_probe_nonce = sub.observation_probe_nonce;
+        if (self.runtime_metadata_v1 and
+            (metadata_token_changed or legacy_metadata_due or observation_probe_nonce != null))
+        {
             if (legacy_metadata_due) sub.observation_ticks = 0;
             const maybe_observation = ops.cached_observation(
                 ops.ctx,
@@ -2865,8 +2901,8 @@ pub const Connection = struct {
             if (maybe_observation) |obs| {
                 const current = obs.canonical_json;
                 const changed = sub.observation_token != obs.change_token;
-                if (changed) {
-                    const next_revision = std.math.add(
+                if (changed or observation_probe_nonce != null) {
+                    const next_revision = if (changed) std.math.add(
                         u64,
                         sub.observation_revision,
                         1,
@@ -2874,12 +2910,25 @@ pub const Connection = struct {
                         self.state = .closed;
                         output.rollback(self);
                         return null;
-                    };
-                    const event_body = try self.stringify(.{
-                        .event = "runtime.metadata",
-                        .metadata_revision = next_revision,
-                        .metadata = RawCanonicalObservation{ .bytes = current },
-                    });
+                    } else sub.observation_revision;
+                    if (next_revision == 0) {
+                        self.state = .closed;
+                        output.rollback(self);
+                        return null;
+                    }
+                    const event_body = if (observation_probe_nonce) |nonce|
+                        try self.stringify(.{
+                            .event = "runtime.metadata",
+                            .metadata_revision = next_revision,
+                            .observation_probe_nonce = nonce,
+                            .metadata = RawCanonicalObservation{ .bytes = current },
+                        })
+                    else
+                        try self.stringify(.{
+                            .event = "runtime.metadata",
+                            .metadata_revision = next_revision,
+                            .metadata = RawCanonicalObservation{ .bytes = current },
+                        });
                     defer self.allocator.free(event_body);
                     const frame = self.encodeWithFlags(
                         .event,
@@ -2899,8 +2948,11 @@ pub const Connection = struct {
                         self.allocator.free(frame);
                         return error.OutOfMemory;
                     };
-                    output.next_observation_token = obs.change_token;
-                    output.next_observation_revision = next_revision;
+                    if (changed) {
+                        output.next_observation_token = obs.change_token;
+                        output.next_observation_revision = next_revision;
+                    }
+                    output.clear_observation_probe = observation_probe_nonce != null;
                 }
                 if (metadata_change_token) |source_token|
                     output.next_metadata_change_token = source_token;
@@ -3152,7 +3204,7 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
-        var capability_buf: [23][]const u8 = undefined;
+        var capability_buf: [24][]const u8 = undefined;
         const capabilities = self.helloCapabilities(&capability_buf);
         if (!self.host_status.manifest_capable) {
             return self.stringify(.{
@@ -3187,10 +3239,10 @@ pub const Connection = struct {
         });
     }
 
-    fn helloCapabilities(self: *const Connection, buf: *[23][]const u8) []const []const u8 {
+    fn helloCapabilities(self: *const Connection, buf: *[24][]const u8) []const []const u8 {
         var count: usize = 0;
         const append = struct {
-            fn one(target: *[23][]const u8, index: *usize, value: []const u8) void {
+            fn one(target: *[24][]const u8, index: *usize, value: []const u8) void {
                 target[index.*] = value;
                 index.* += 1;
             }
@@ -3210,6 +3262,7 @@ pub const Connection = struct {
         append(buf, &count, "screen_stream_v2_current_body");
         append(buf, &count, "screen_viewport_scrolled_v1");
         append(buf, &count, "async_scroll_to_bottom_v1");
+        append(buf, &count, "async_observation_probe_v1");
         append(buf, &count, "runtime_core_command_v1");
         append(buf, &count, "runtime_clear_screen_v1");
         append(buf, &count, "runtime_selected_text_v1");

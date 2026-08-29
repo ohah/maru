@@ -45,7 +45,12 @@ pub fn eventPreflightProjectionDigest(value: EventPreflight) Digest {
             hasher.update(std.mem.asBytes(&event.rows));
             hasher.update(std.mem.asBytes(&event.resize_generation));
         },
-        .metadata => |event| hasher.update(&event.semantic_digest),
+        .metadata => |event| {
+            hasher.update(&event.semantic_digest);
+            const present: u8 = @intFromBool(event.observation_probe_nonce != null);
+            hasher.update(&.{present});
+            if (event.observation_probe_nonce) |nonce| hasher.update(std.mem.asBytes(&nonce));
+        },
         .invalidated, .ended => {},
     }
     var digest: Digest = undefined;
@@ -76,6 +81,7 @@ fn metadataViewEql(a: MetadataView, b: MetadataView) bool {
     if (a.process_count > max_process_entries or b.process_count > max_process_entries)
         return false;
     if (a.revision != b.revision or
+        a.observation_probe_nonce != b.observation_probe_nonce or
         !std.meta.eql(a.cwd, b.cwd) or
         !std.meta.eql(a.window_title, b.window_title) or
         !std.meta.eql(a.ssh_remote_dest, b.ssh_remote_dest) or
@@ -208,6 +214,7 @@ pub const SemanticPrompt = runtime_metadata_types.SemanticPrompt;
 
 pub const MetadataView = struct {
     revision: u64,
+    observation_probe_nonce: ?u64 = null,
     cwd: StringSpan,
     window_title: StringSpan,
     ssh_remote_dest: ?StringSpan,
@@ -456,6 +463,7 @@ const RootFields = struct {
     data_seen: bool = false,
     data: DataFields = .{},
     revision: ?u64 = null,
+    observation_probe_nonce: ?u64 = null,
     metadata_seen: bool = false,
     metadata: MetadataFields = .{},
     resource_seen: bool = false,
@@ -662,10 +670,17 @@ fn preflightEventWithDigestOps(
             } };
         },
         .metadata => blk: {
-            if (root.count != 3 or root.unknown_count != 0 or root.revision == null or
+            const expected_count: usize = if (root.observation_probe_nonce == null) 3 else 4;
+            if (root.count != expected_count or root.unknown_count != 0 or root.revision == null or
                 !root.metadata_seen)
                 return .malformed;
-            const view = finishMetadata(root.revision.?, root.metadata, payload, digest_ops) orelse
+            const view = finishMetadata(
+                root.revision.?,
+                root.observation_probe_nonce,
+                root.metadata,
+                payload,
+                digest_ops,
+            ) orelse
                 return .malformed;
             break :blk .{ .metadata = view };
         },
@@ -751,6 +766,7 @@ fn finishSupportedMetadata(
     if (!result.metadata_object or result.metadata_null) return error.Malformed;
     const metadata = finishMetadata(
         revision,
+        null,
         result.metadata,
         payload,
         .production,
@@ -930,6 +946,10 @@ fn parseRoot(
             if (root.revision != null) return error.Malformed;
             root.revision = try readUnsigned(u64, scanner);
             if (root.revision.? == 0) return error.Malformed;
+        } else if (spanEquals(payload, key, "observation_probe_nonce")) {
+            if (root.observation_probe_nonce != null) return error.Malformed;
+            root.observation_probe_nonce = try readUnsigned(u64, scanner);
+            if (root.observation_probe_nonce.? == 0) return error.Malformed;
         } else if (spanEquals(payload, key, "metadata")) {
             if (root.metadata_seen) return error.Malformed;
             root.metadata_seen = true;
@@ -1213,6 +1233,7 @@ fn parseProcess(
 
 fn finishMetadata(
     revision: u64,
+    observation_probe_nonce: ?u64,
     fields: MetadataFields,
     payload: []const u8,
     digest_ops: DigestOps,
@@ -1221,6 +1242,7 @@ fn finishMetadata(
     const foreground = fields.foreground_available orelse return null;
     var view: MetadataView = .{
         .revision = revision,
+        .observation_probe_nonce = observation_probe_nonce,
         .cwd = fields.cwd orelse return null,
         .window_title = fields.window_title orelse return null,
         .ssh_remote_dest = fields.ssh_remote_dest,
@@ -1683,6 +1705,7 @@ fn sha(bytes: []const u8) Digest {
 test "metadata view field inventory forces every manual semantic mapping to be reviewed" {
     const expected = [_][]const u8{
         "revision",
+        "observation_probe_nonce",
         "cwd",
         "window_title",
         "ssh_remote_dest",
@@ -2134,6 +2157,25 @@ test "metadata accepts escapes and scalar unknowns and rejects nested unknowns" 
     ) catch return error.OutOfMemory;
     defer std.testing.allocator.free(nested);
     try std.testing.expect(preflightEvent(nested, .{}) == .malformed);
+}
+
+test "P4 metadata event binds one nonzero observation probe nonce" {
+    const payload =
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"observation_probe_nonce\":48879,\"metadata\":{" ++
+        "\"cwd\":\"/repo\",\"window_title\":\"work\",\"ssh_remote_dest\":null," ++
+        "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+        "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":2," ++
+        "\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null," ++
+        "\"processes\":[]}}";
+    const accepted = switch (preflightEvent(payload, .{})) {
+        .accepted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?u64, 48879), accepted.event.metadata.observation_probe_nonce);
+    try std.testing.expect(preflightEvent(
+        "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"observation_probe_nonce\":0,\"metadata\":{}}",
+        .{},
+    ) == .malformed);
 }
 
 test "decoded duplicate keys use exact fallback under an injected key digest collision" {

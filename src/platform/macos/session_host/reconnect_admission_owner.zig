@@ -224,6 +224,24 @@ pub const Owner = struct {
         dispatch.seal = dispatchSeal(dispatch.*);
     }
 
+    /// Backend callers must validate the final-address dispatch before using any field to select
+    /// or mutate runtimes. `settleDispatch` performs the same proof again at commit time.
+    pub fn preparedProjection(
+        self: *Owner,
+        dispatch: *const PreparedReconnectDispatch,
+    ) Error!Projection {
+        try self.validate();
+        if (!dispatchLifecycleValid(dispatch.lifecycle) or dispatch.lifecycle != .prepared or
+            dispatch.slot_index >= capacity or !validDispatch(self, dispatch))
+            return error.InvalidOwner;
+        const row = &self.rows[dispatch.slot_index];
+        if (row.lifecycle != .claimed or !validRow(row) or row.dispatch_addr != @intFromPtr(dispatch) or
+            row.attempt_generation != dispatch.attempt_generation or row.generation != dispatch.slot_generation or
+            !std.meta.eql(projection(row, dispatch.slot_index), dispatchProjection(dispatch.*)))
+            return error.InvalidOwner;
+        return dispatchProjection(dispatch.*);
+    }
+
     pub fn peekScheduled(self: *Owner) Error!?Projection {
         try self.validate();
         for (&self.rows, 0..) |*row, index| if (row.lifecycle == .scheduled) {
@@ -387,4 +405,19 @@ test "CR0b reconnect admission owner는 repeat와 no-retry를 mutation 없이 �
     input.disposition_raw = @intFromEnum(@import("maru").observability.connection_incident.Disposition.no_retry);
     try std.testing.expectError(error.InvalidOwner, owner.admit(fixtureResult(1, true), input));
     try std.testing.expectEqual(@as(u8, 0), owner.count);
+}
+
+test "CR0b reconnect admission owner는 prepared projection을 mutation 전에 봉인 검증한다" {
+    try @import("client_slot.zig").ClientSlot.initializeProcessRuntime();
+    var owner: Owner = .{};
+    try owner.initInPlace(@import("client_slot.zig").ClientSlot.publicationProcessIdentity().?.process_nonce);
+    try owner.admit(fixtureResult(1, true), fixtureInput(1));
+    var dispatch: PreparedReconnectDispatch = .{};
+    try owner.prepareDispatch(&dispatch);
+    const expected = try owner.preparedProjection(&dispatch);
+    dispatch.incident_id.sequence += 1;
+    try std.testing.expectError(error.InvalidOwner, owner.preparedProjection(&dispatch));
+    dispatch.incident_id.sequence -= 1;
+    try std.testing.expectEqualDeep(expected, try owner.preparedProjection(&dispatch));
+    try owner.settleDispatch(&dispatch, .retry_later);
 }

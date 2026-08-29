@@ -6053,6 +6053,26 @@ retained completion과 idle/running Quit 상태만 닫으며 AppSession caller�
 c3b 전체는 제품 배선과 synthetic actual-socket fixture까지
 닫지만 실제 AppKit process의 disconnect→자동복구는 c3c가 별도로 증명한다.
 
+c3b2 제품 배선은 권위 예약과 CR5 publication을 한 mutation으로 섞지 않고 두 수직 슬라이스로 닫는다.
+**c3b2a**에서 main coordinator는 final-address c1 `Owner`·`JobReceipt`와 c3b1 worker를 앱 전역으로
+설치한다. admission의 sealed dispatch를 먼저 claim하되, 새 host job은 c1 slot을 reversible하게 예약한 뒤
+backend runtime-set preflight·resident lease bind를 수행하고 둘 다 성공한 경우에만 admission을 scheduled로
+소비한다. backend가 stale/retry를 반환하면 그 exact queued reservation만 철회하고 admission을 각각
+stale/retry로 정산한다. resident lease까지 결속된 뒤 worker lane이 찼으면 queued reservation과 최초 bound
+admission을 그대로 보존하고 다음 frame의 dispatch를 기다린다. 같은 host job의 후속 incident는 기존 c1
+snapshot과 모든 runtime에
+남은 최초 bound identity가 일치함을 먼저 확인한 뒤 count만 합치고 후속 admission을 소비한다. 최초
+`incident_sequence`와 이미 dispatch된 absolute deadline은 바꾸지 않는다. 따라서 coalesce 실패가 기존 job을
+변경하거나, c1 capacity 실패가 admission을 잃거나 resident lease를 남기는 경로는 0이다. 한 frame은 worker
+completion claim·c1 settle, admission 한 건, idle worker dispatch 한 건을 이 순서로만 수행하며 wait/join/connect는
+호출하지 않는다.
+
+**c3b2b**에서 main coordinator는 connected completion을 c3a로 adopt한 뒤 CR5 host transaction을 closed state별로
+한 단계씩 전진시킨다. 성공·stale·typed failure·host-wide terminal failure의 모든 끝점은 c1 completion의 최초
+snapshot 및 runtime별 bound projection을 다시 확인하는 제품 release leaf를 통과한다. 이 leaf만 resident lease와
+admission mirror를 exact once 해제하고, terminal `HostReconnectJob`의 summary를 확인한 뒤 job storage를 회수한다.
+frame turn 하나가 여러 CR5 mutation 단계를 건너뛰거나 terminal job을 backend deinit까지 붙잡는 경로는 0이다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**

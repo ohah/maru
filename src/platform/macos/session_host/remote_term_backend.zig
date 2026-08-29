@@ -3156,17 +3156,34 @@ pub const RemoteTermBackend = struct {
             error.NotFound => return .idle,
             else => return err,
         };
+        const result = try self.bindPreparedReconnectAdmission(&dispatch, admissions, budget);
+        if (result == .started) {
+            const projection: reconnect_admission_owner.Projection = .{
+                .slot_index = dispatch.slot_index,
+                .slot_generation = dispatch.slot_generation,
+                .host_id = dispatch.host_id,
+                .host_adapter_generation = dispatch.host_adapter_generation,
+                .connection_generation = dispatch.connection_generation,
+                .incident_id = dispatch.incident_id,
+            };
+            admissions.consumeScheduled(projection) catch
+                process_seal.fatalIntegrity(.incident_authority);
+        }
+        return result;
+    }
+
+    /// c3b2a variant of the existing drain suffix. The caller already owns the final-address
+    /// dispatch and keeps a successful row scheduled until its c1 reservation is committed.
+    pub fn bindPreparedReconnectAdmission(
+        self: *RemoteTermBackend,
+        dispatch: *reconnect_admission_owner.PreparedReconnectDispatch,
+        admissions: *reconnect_admission_owner.Owner,
+        budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+    ) !ReconnectDrainResult {
         var dispatch_settled = false;
-        defer if (!dispatch_settled) admissions.settleDispatch(&dispatch, .retry_later) catch
+        defer if (!dispatch_settled) admissions.settleDispatch(dispatch, .retry_later) catch
             process_seal.fatalIntegrity(.incident_authority);
-        const projection: reconnect_admission_owner.Projection = .{
-            .slot_index = dispatch.slot_index,
-            .slot_generation = dispatch.slot_generation,
-            .host_id = dispatch.host_id,
-            .host_adapter_generation = dispatch.host_adapter_generation,
-            .connection_generation = dispatch.connection_generation,
-            .incident_id = dispatch.incident_id,
-        };
+        const projection = try admissions.preparedProjection(dispatch);
         var selected: [max_remote_backend_runtimes]*RemoteRuntime = undefined;
         var selected_count: usize = 0;
         var iterator = self.runtimes.iterator();
@@ -3175,7 +3192,7 @@ pub const RemoteTermBackend = struct {
             if (row.value_ptr.host_adapter_generation != projection.host_adapter_generation or
                 !RemoteRuntime.backend_api.matchesReconnectAdmission(row.value_ptr.runtime, projection))
             {
-                admissions.settleDispatch(&dispatch, .discarded_stale) catch
+                admissions.settleDispatch(dispatch, .discarded_stale) catch
                     process_seal.fatalIntegrity(.incident_authority);
                 dispatch_settled = true;
                 return .discarded_stale;
@@ -3184,7 +3201,7 @@ pub const RemoteTermBackend = struct {
             selected_count += 1;
         }
         if (selected_count == 0) {
-            admissions.settleDispatch(&dispatch, .discarded_stale) catch
+            admissions.settleDispatch(dispatch, .discarded_stale) catch
                 process_seal.fatalIntegrity(.incident_authority);
             dispatch_settled = true;
             return .discarded_stale;
@@ -3192,13 +3209,13 @@ pub const RemoteTermBackend = struct {
         for (selected[0..selected_count]) |runtime|
             RemoteRuntime.backend_api.preflightReconnectAdmission(runtime, projection) catch |err| switch (err) {
                 error.Busy => {
-                    admissions.settleDispatch(&dispatch, .retry_later) catch
+                    admissions.settleDispatch(dispatch, .retry_later) catch
                         process_seal.fatalIntegrity(.incident_authority);
                     dispatch_settled = true;
                     return .retry_later;
                 },
                 error.StaleAdmission, error.InvalidAuthority => {
-                    admissions.settleDispatch(&dispatch, .discarded_stale) catch
+                    admissions.settleDispatch(dispatch, .discarded_stale) catch
                         process_seal.fatalIntegrity(.incident_authority);
                     dispatch_settled = true;
                     return .discarded_stale;
@@ -3206,7 +3223,7 @@ pub const RemoteTermBackend = struct {
                 else => return err,
             };
         if (!try budget.canReserveBatch(selected_count, reconnect_resident_budget.max_entry_bytes)) {
-            admissions.settleDispatch(&dispatch, .retry_later) catch
+            admissions.settleDispatch(dispatch, .retry_later) catch
                 process_seal.fatalIntegrity(.incident_authority);
             dispatch_settled = true;
             return .retry_later;
@@ -3219,12 +3236,36 @@ pub const RemoteTermBackend = struct {
                 reconnect_resident_budget.max_entry_bytes,
             ) catch process_seal.fatalIntegrity(.proof_loss);
         }
-        admissions.settleDispatch(&dispatch, .scheduled) catch
+        admissions.settleDispatch(dispatch, .scheduled) catch
             process_seal.fatalIntegrity(.incident_authority);
         dispatch_settled = true;
-        admissions.consumeScheduled(projection) catch
-            process_seal.fatalIntegrity(.incident_authority);
         return .started;
+    }
+
+    /// Coalescing never binds a second resident lease. It is legal only while every same-host
+    /// runtime still carries the first c1 snapshot's exact admission identity.
+    pub fn validateBoundReconnectSnapshot(
+        self: *RemoteTermBackend,
+        snapshot: reconnect_worker_owner.Snapshot,
+    ) !void {
+        try self.validateReconnectCoordinatorTarget();
+        var count: usize = 0;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |row| {
+            if (row.value_ptr.host_id != snapshot.host_id) continue;
+            if (row.value_ptr.host_adapter_generation != snapshot.pool_membership_generation or
+                !RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+                    row.value_ptr.runtime,
+                    snapshot.host_id,
+                    snapshot.pool_membership_generation,
+                    snapshot.connection_generation,
+                    snapshot.incident_app_instance_nonce,
+                    snapshot.incident_sequence,
+                ))
+                return error.StaleAdmission;
+            count += 1;
+        }
+        if (count == 0) return error.StaleAdmission;
     }
 
     /// app-quit은 Runtime graph를 해제하기 전에 target host별 shared data connection을 한 번만 terminalize한다.
@@ -3702,6 +3743,14 @@ pub const RemoteTermBackend = struct {
                 .host_adapter_generation = host_adapter_generation,
                 .runtime_generation = runtime_generation,
             });
+        }
+
+        pub fn initReconnectCoordinatorBackend(
+            out: *RemoteTermBackend,
+            allocator: std.mem.Allocator,
+        ) !void {
+            out.* = b5TestBackend(allocator);
+            try out.claimProductSingleton();
         }
 
         pub fn removeEventCursorRuntime(remote_backend: *RemoteTermBackend, handle: RuntimeHandle) bool {

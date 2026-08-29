@@ -67,12 +67,16 @@ pub const Completion = struct {
     /// the main owner has consumed or abandoned the payload may the slot return to pristine for
     /// the next order; accepting an invalid tombstone here would permit completion ABA.
     pub fn resetConsumedAtFinalAddress(self: *Completion) !void {
+        try self.validateConsumedAtFinalAddress();
+        self.* = .{};
+    }
+
+    pub fn validateConsumedAtFinalAddress(self: *const Completion) !void {
         if (self.lifecycle != .consumed or self.self_addr != @intFromPtr(self) or
             self.pid == 0 or self.pid != process_identity.currentProcessId() or
             self.candidate != null or !validOrder(self.order) or
             !std.mem.eql(u8, &self.seal, &consumedSeal(self)))
             return error.InvalidCompletion;
-        self.* = .{};
     }
 
     fn validate(self: *const Completion) !void {

@@ -1279,11 +1279,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    deadline-aware exact-host connect/hello와 move-only candidate completion →
    c3a main owner의 128-bit incident identity·pool/connection generation·bound admission·deadline 재검증과 이미 연결된
    candidate의 비차단 CR5 job adoption → c3b1 app-global final-address physical worker와 cancellation wake/join →
-   c3b2 frame 배선, bound admission 제품 정산과 CR5 host transaction publication →
+   c3b2a admission-loss 없는 main-owner 예약·exact-identity coalesce·worker frame 왕복 →
+   c3b2b bound admission 제품 정산과 closed-state CR5 host transaction publication →
    c3c actual AppKit disconnect→자동복구 E2E
    순서로 닫는다. c2의 thread spawn과 AppSession caller는 0이고, c3 app-global worker가 thread 수·cancellation wake·Quit
    join을 소유한다. frame owner는 connect/hello/backoff/join을 실행하지 않고, worker는 raw runtime/adapter pointer를
    보존하거나 제품 generation을 게시하지 않는다. keep-alive opt-in 밖과 G3 default migration은 이 배선으로 바뀌지 않는다.
+   현재 c3b2a의 final-address coordinator와 admission 선예약·철회·coalesce substrate까지 구현됐고 AppSession frame caller,
+   bound admission terminal 정산과 CR5 driver는 미착수다.
    **CR6f — output wake와 입력 echo 예산:** daemon-global nonblocking self-pipe를 `RuntimeManager`가 소유하고, 각
    `PtyEventQueue`는 성공한 output/terminal publication 뒤 byte wake만 수행한다. `poll_owner.Owner`가 read end를 유일하게
    poll/drain하고 같은 owner turn에서 runtime event drain과 producer sweep을 시작한다. reader thread가 socket, `Connection`,

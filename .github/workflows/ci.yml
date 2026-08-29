@@ -359,7 +359,12 @@ jobs:
     needs: changes
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
-    timeout-minutes: 20
+    # P5d 게이트는 `macos_app_bundle_command` 에 의존해 **ReleaseFast 앱 번들을 빌드**한다
+    # (build.zig `run_session_host_p5d.step.dependOn`). 그래서 `app_host_abi.zig` 처럼 앱 루트에
+    # 닿는 변경이 들어오면 그 빌드가 캐시를 잃고, 20분으로는 게이트가 끝나지 못한다 —
+    # 2026-08-29 실측: main 은 11분에 끝나는데 앱 재빌드가 낀 PR 은 20분 17초에 잘렸고,
+    # 이 잡은 `actions/cache/restore` 만 쓰고 저장을 안 해 **재실행해도 같은 지점에서 잘린다**.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

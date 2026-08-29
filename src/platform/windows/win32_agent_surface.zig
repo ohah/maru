@@ -31,7 +31,9 @@ const draw_host = maru.win32_draw_host;
 const win32_terminal = maru.win32_terminal;
 const d3d11_cells = maru.d3d11_cells;
 /// **이름과 달리 두 OS 를 다 탄다**(§2m.18 이음매). `main.zig` 도 같은 상대 경로로 가져오므로 한
-/// 모듈 안의 한 파일이다.
+/// 모듈 안의 한 파일이다. 아직 `platform/macos/` 에 있는 사정은
+/// [layering-and-portability.md](../../../docs/layering-and-portability.md) §3.4 — 이 파일은 네이티브
+/// 참조가 37 개인 **섞임** 부류라 애초에 이동 후보도 아니다(떼어내는 것은 이동이 아니라 분해다).
 const system_text = @import("../macos/chrome/system_text.zig");
 
 const component = maru.chrome.components.session_dock;

@@ -3058,6 +3058,13 @@ pub fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePrese
         const k = std.fmt.allocPrint(a, "theme.palette.{d}", .{i}) catch continue;
         markConfigKeyRemoved(self, k);
     }
+    // 구문 색 역할 override도 같은 이유로 지운다(native-editor-ui.md §9.0). 이것이 빠지면 메모리에서는
+    // 프리셋이 색을 가져가는데(applyThemePresetIndex가 `config.theme`를 통째로 간다) 파일에는 옛 줄이
+    // 남아, 다음에 열 때 **줄 순서에 따라** 되살아나거나 안 되살아난다 — 위 주석이 말한 "반쪽만 적용"이다.
+    // 키는 `syntaxRoleKey` 단일 출처라 역할이 늘어도 여기서 빠지지 않는다.
+    inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
+        markConfigKeyRemoved(self, comptime config_mod.theme.syntaxRoleKey(@enumFromInt(f.value)));
+    }
 }
 
 /// Swift NSOpenPanel이 고른 파일의 절대경로를 받아 window.background-image에 적용한다 — config arena에 dupe해 setText,

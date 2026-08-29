@@ -185,7 +185,7 @@
 | `input.option-as-meta`·`input.right-click`·`input.mouse-hide-while-typing`·`input.url-click-modifier` | 마우스와 맥 키보드 축이다 |
 | `keyhint.*`·`keybind` | 하드웨어 키보드 축이다. 폰의 기본 입력은 소프트 키보드와 보조 키바다 |
 | `font.family`·`font.family-bold`·`font.family-italic`·`font.fallback` | 폰트를 **번들이 정한다**. 시스템 폴백은 host 가 하고 사용자가 파일을 넣을 자리가 없다 |
-| `editor.wrap`·`editor.tab-width`·`file-panel.external-link-target` | 그 화면이 모바일에 없다 |
+| `editor.wrap`·`editor.tab-width`·`file-panel.external-link-target`·`theme.syntax.keyword` 외 구문 색 열하나(`theme.syntax.<역할>`) | 그 화면이 모바일에 없다. 구문 색은 코드 편집기 전용이고 폰에는 그 편집기가 없다([native-editor-ui.md](native-editor-ui.md) §9.0) |
 | `ssh.server-alive-interval`·`ssh.server-alive-count-max`·`ssh.reconnect` | **`maru ssh` 래퍼 전용이다.** 그 키들은 시스템 `ssh` 바이너리에 `-o` 로 넘어가고 끊기면 셸이 다시 부르는데, 모바일에는 `ssh` 바이너리도 그 셸도 없다 — 우리가 프로토콜을 직접 말한다([SSH 클라이언트](ssh-client.md)). 모바일의 끊김 감지·재접속은 **같은 이름의 키로 흉내 내지 않는다**: 내장 클라이언트에는 keepalive 를 거는 자리가 따로 있고(계약 §4.1), 재접속 여부는 host 가 소켓 수명과 함께 정한다. 필요해지면 그때 모바일 축의 키를 새로 연다 |
 | `notifications.update-check` | 스토어가 한다 |
 | `bell.dock-badge` | dock 이 없다. 앱 배지는 OS 알림 권한이 딸린 **다른 축**이라 이 키로 흉내 내지 않는다 |

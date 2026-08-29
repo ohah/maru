@@ -66,6 +66,7 @@ fn darkTheme() appearance.ResolvedTheme {
     theme.sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 };
     theme.accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e }; // 앰버
     theme.palette = .{null} ** 16;
+    theme.syntax = .{null} ** @import("../config/theme.zig").syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     return theme;
 }
 

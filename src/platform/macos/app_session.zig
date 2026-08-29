@@ -35525,6 +35525,83 @@ test "dispatchBell: 배경(비활성) pane의 BEL도 잡는다 — Dock 배지/�
     try std.testing.expect(!notification_ops.takeBellBadge(session));
 }
 
+test "SC8 프리셋을 고르면 구문 색 줄도 제거 예약된다 — 파일에 남으면 반쪽만 적용된다" {
+    // **적대적 검증 3회차가 찾은 결함이다.** `applyThemePresetIndex`는 메모리에서 `config.theme`를 통째로
+    // 갈아 구문 색을 가져가는데, `persistThemePreset`의 제거 목록에 그 키가 없으면 **파일에는 옛 줄이
+    // 남는다**. 다음에 열 때 줄 순서에 따라 색이 되살아나거나 안 되살아난다 — 그 함수 주석이 이미
+    // 경고한 *"남은 override가 위에 덮어쓰면 반쪽만 적용"*이 정확히 그것이다.
+    //
+    // 팔레트 열여섯과 주 색 넷이 같은 이유로 이미 목록에 있다. 이 판정자가 구문 색 열하나를 그 옆에 묶는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    settings_ops.persistThemePreset(session, .gruvbox_dark);
+
+    inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
+        const key = comptime config_mod.theme.syntaxRoleKey(@enumFromInt(f.value));
+        var found = false;
+        for (session.config_removed_keys.items) |k| {
+            if (std.mem.eql(u8, k, key)) found = true;
+        }
+        if (!found) {
+            std.debug.print("프리셋 영속이 '{s}' 줄을 안 지운다 — 다음 로드에 되살아난다\n", .{key});
+            try std.testing.expect(false);
+        }
+    }
+    // 팔레트도 함께(회귀 가드 — 목록을 만지다 기존 것을 지우는 일을 잡는다).
+    var saw_palette = false;
+    for (session.config_removed_keys.items) |k| {
+        if (std.mem.eql(u8, k, "theme.palette.15")) saw_palette = true;
+    }
+    try std.testing.expect(saw_palette);
+}
+
+test "SC5 follow-system 이 켜지면 구문 색 override 도 함께 무시되고, 끄면 돌아온다" {
+    // **필드 자리가 이 규칙을 지탱한다**(native-editor-ui.md §9.0). `theme.syntax.*`가 `ThemeConfig` 안에
+    // 있기 때문에 `applyFollowSystemTheme`의 통째 교체에 함께 쓸려 나가고, 끌 때 `theme_pre_follow`
+    // 스냅샷으로 함께 돌아온다 — 문서가 정한 *"켜져 있는 동안 개별 theme.* 색은 무시"*가 그렇게 성립한다.
+    //
+    // 누가 이 필드를 struct 밖으로 옮기면 규칙이 **조용히** 깨진다(사용자 색이 시스템 테마 위에 남는다).
+    // 그 자리를 이 판정자가 지킨다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const keyword = @intFromEnum(config_mod.theme.SyntaxRole.keyword);
+    session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
+    session.loaded_config.config.theme.syntax[keyword] = "#c678dd";
+    session.loaded_config.config.theme_follow_system = true;
+    session.loaded_config.config.theme_preset_light = .solarized_light;
+    session.loaded_config.config.theme_preset_dark = .gruvbox_dark;
+
+    session.setSystemAppearance(true); // 다크 → gruvbox-dark 로 통째 교체
+    try std.testing.expect(session.loaded_config.config.theme.syntax[keyword] == null); // override 가 함께 비워졌다
+
+    // 끄면 파일의 값으로 복귀한다(스냅샷 복원 경로 — 위 F2-9 판정자와 같은 함수를 쓴다).
+    session.loaded_config.config.theme_follow_system = false;
+    settings_ops.disableFollowSystemTheme(session);
+    try std.testing.expectEqualStrings("#c678dd", session.loaded_config.config.theme.syntax[keyword].?);
+}
+
 test "setSystemAppearance: follow-system on이면 light/dark 프리셋으로 교체, off면 무시 (F2-9)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

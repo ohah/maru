@@ -8,6 +8,7 @@
 const std = @import("std");
 const color = @import("../color.zig");
 const appearance = @import("../config/appearance.zig");
+const theme_config = @import("../config/theme.zig");
 
 pub const SyntaxColors = struct {
     keyword: color.Rgb,
@@ -47,6 +48,46 @@ fn readable(c: color.Rgb, bg_lum: f32, target: f32) color.Rgb {
     return color.contrastFloor(c, bg_lum, target, .both);
 }
 
+// `SyntaxColors` 필드와 config의 `SyntaxRole`이 **1:1**임을 못박는다. 둘이 갈리면 사용자가 적은
+// `theme.syntax.<역할>`이 조용히 다른 색에 실리거나 아무 데도 안 실린다 — 화면에만 나타나는 종류다.
+//
+// **문서 표 정규식이 이것을 대신 못 잡는다.** `docs/configuration.md`의 키 표는 행마다 **첫 백틱 토큰
+// 하나만** 게이트가 읽으므로(실측: `theme.palette.0`~`.15` 중 `.0`만 검사된다), 한 행에 열하나를 적으면
+// 열은 어느 게이트도 안 본다. 그 구멍을 이 블록이 막는다.
+comptime {
+    const role_fields = @typeInfo(theme_config.SyntaxRole).@"enum".fields;
+    const color_fields = @typeInfo(SyntaxColors).@"struct".fields;
+    if (role_fields.len != color_fields.len) {
+        @compileError("SyntaxRole and SyntaxColors must have the same number of entries");
+    }
+    for (role_fields, color_fields) |rf, cf| {
+        if (!std.mem.eql(u8, rf.name, cf.name)) {
+            @compileError("SyntaxRole and SyntaxColors must list the same roles in the same order: " ++
+                rf.name ++ " vs " ++ cf.name);
+        }
+    }
+}
+
+/// 역할 하나의 색 — override가 있으면 **그 색 그대로**, 없으면 파생에 대비 보정을 건다.
+///
+/// **명시한 색을 보정하지 않는 근거는 같은 resolve 안에 있다.** `background`·`foreground`·`cursor`·
+/// `selection`은 사용자가 적은 값을 그대로 쓰고, 보정을 받는 것은 **ANSI 팔레트뿐**이다 — 그건
+/// *프로그램이* 고르는 색이라 배경과 안 맞을 수 있어서다. 역할 색을 손으로 고른 사용자는 그 자리에
+/// 무엇이 오는지 알고 고른 것이므로 같은 규율을 따른다.
+///
+/// **파생은 반대로 반드시 보정한다.** 그건 기계가 팔레트에서 고른 색이라 배경을 모른다(본문 4.0 ·
+/// comment/punctuation 2.4).
+fn roleColor(
+    theme: appearance.ResolvedTheme,
+    comptime role: theme_config.SyntaxRole,
+    derived: color.Rgb,
+    bg_lum: f32,
+    target: f32,
+) color.Rgb {
+    if (theme.syntax[@intFromEnum(role)]) |explicit| return explicit;
+    return readable(derived, bg_lum, target);
+}
+
 pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
     const fg = theme.foreground;
     const bg = theme.background;
@@ -54,17 +95,17 @@ pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
     const main: f32 = 4.0; // 본문 토큰 — 잘 읽히는 대비.
     const dim: f32 = 2.4; // comment/punctuation — 덜 튀되 읽히는 대비.
     return .{
-        .keyword = readable(ansi(theme, 13), bg_lum, main), // bright magenta
-        .string = readable(ansi(theme, 10), bg_lum, main), // bright green
-        .number = readable(ansi(theme, 11), bg_lum, main), // bright yellow
-        .comment = readable(mix(fg, bg, 48), bg_lum, dim), // fg→bg dim
-        .property = readable(ansi(theme, 12), bg_lum, main), // bright blue(JSON 키 등)
-        .type_name = readable(ansi(theme, 14), bg_lum, main), // bright cyan
-        .function = readable(ansi(theme, 12), bg_lum, main), // bright blue
-        .punctuation = readable(mix(fg, bg, 25), bg_lum, dim), // fg 살짝 dim
-        .tag = readable(ansi(theme, 9), bg_lum, main), // bright red
-        .attribute = readable(ansi(theme, 13), bg_lum, main), // bright magenta
-        .invalid = readable(ansi(theme, 9), bg_lum, main), // bright red
+        .keyword = roleColor(theme, .keyword, ansi(theme, 13), bg_lum, main), // bright magenta
+        .string = roleColor(theme, .string, ansi(theme, 10), bg_lum, main), // bright green
+        .number = roleColor(theme, .number, ansi(theme, 11), bg_lum, main), // bright yellow
+        .comment = roleColor(theme, .comment, mix(fg, bg, 48), bg_lum, dim), // fg→bg dim
+        .property = roleColor(theme, .property, ansi(theme, 12), bg_lum, main), // bright blue(JSON 키 등)
+        .type_name = roleColor(theme, .type_name, ansi(theme, 14), bg_lum, main), // bright cyan
+        .function = roleColor(theme, .function, ansi(theme, 12), bg_lum, main), // bright blue
+        .punctuation = roleColor(theme, .punctuation, mix(fg, bg, 25), bg_lum, dim), // fg 살짝 dim
+        .tag = roleColor(theme, .tag, ansi(theme, 9), bg_lum, main), // bright red
+        .attribute = roleColor(theme, .attribute, ansi(theme, 13), bg_lum, main), // bright magenta
+        .invalid = roleColor(theme, .invalid, ansi(theme, 9), bg_lum, main), // bright red
     };
 }
 
@@ -182,6 +223,7 @@ test "fromTheme keeps every syntax color readable on a dark terminal background"
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 }; // 기본 다크
     theme.palette = .{null} ** 16;
+    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     const c = fromTheme(theme);
     const bg_lum = color.relativeLuminance(theme.background);
     // 회귀 가드(하이라이트 불가시 버그): 모든 본문 토큰이 배경 대비 4.0 이상. 밝은 ANSI + contrastFloor라 성립.
@@ -205,6 +247,7 @@ test "fromTheme darkens vivid colors on a light background" {
     theme.foreground = .{ .r = 0x20, .g = 0x20, .b = 0x20 };
     theme.background = .{ .r = 0xff, .g = 0xff, .b = 0xff }; // 라이트
     theme.palette = .{null} ** 16;
+    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     const c = fromTheme(theme);
     const bg_lum = color.relativeLuminance(theme.background);
     // bright green(0,255,0)은 흰 배경에 저대비 → contrastFloor가 어둡게 보정해 4.0 이상.
@@ -220,6 +263,7 @@ test "syntax colors follow the terminal theme instead of a fixed palette" {
     dark.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     dark.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
     dark.palette = .{null} ** 16;
+    dark.syntax = .{null} ** theme_config.syntax_role_count;
     dark.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
 
     var light = dark;
@@ -259,6 +303,7 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
     theme.palette = .{null} ** 16;
+    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
     const c = fromTheme(theme);
     var buf: [1024]u8 = undefined;
@@ -291,6 +336,7 @@ test "diff 색은 터미널 팔레트에서 파생되고 테마를 따라 바뀐
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
     theme.palette = .{null} ** 16;
+    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
 
     const base = diffFromTheme(theme);
@@ -306,4 +352,75 @@ test "diff 색은 터미널 팔레트에서 파생되고 테마를 따라 바뀐
     const js = writeCssVarsJs(fromTheme(theme), base, theme.selection, "JetBrains Mono", 14, &buf).?;
     try testing.expect(std.mem.indexOf(u8, js, "--maru-diff-added") != null);
     try testing.expect(std.mem.indexOf(u8, js, "--maru-diff-removed") != null);
+}
+
+test "SC2 역할 override 가 파생을 이기고, 안 정한 역할은 파생으로 떨어진다" {
+    // 이 판정자가 기능의 심장이다 — override가 안 먹거나(있으나 마나), 안 정한 역할까지 덮으면
+    // (파생이 사라짐) 둘 다 화면에만 나타난다.
+    var t: appearance.ResolvedTheme = .{
+        .background = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+        .foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .cursor = .{ .r = 0xff, .g = 0xff, .b = 0xff },
+        .selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+        .sidebar_background = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
+        .sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 },
+        .sidebar_foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
+        .min_contrast = 0,
+    };
+    const derived = fromTheme(t);
+
+    t.syntax[@intFromEnum(theme_config.SyntaxRole.keyword)] = .{ .r = 0x12, .g = 0x34, .b = 0x56 };
+    t.syntax[@intFromEnum(theme_config.SyntaxRole.comment)] = .{ .r = 0x65, .g = 0x43, .b = 0x21 };
+    const with_override = fromTheme(t);
+
+    // ⑴ 정한 둘은 정확히 그 색이다.
+    try std.testing.expectEqual(color.Rgb{ .r = 0x12, .g = 0x34, .b = 0x56 }, with_override.keyword);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x65, .g = 0x43, .b = 0x21 }, with_override.comment);
+    // ⑵ **comment 는 팔레트에 자리가 없는 역할이다**(fg↔bg mix 파생) — 그것도 열렸는지 위에서 함께 잰다.
+    try std.testing.expect(!std.meta.eql(derived.comment, with_override.comment));
+    // ⑶ 안 정한 나머지는 파생 그대로다.
+    try std.testing.expectEqual(derived.string, with_override.string);
+    try std.testing.expectEqual(derived.number, with_override.number);
+    try std.testing.expectEqual(derived.function, with_override.function);
+    try std.testing.expectEqual(derived.punctuation, with_override.punctuation);
+    // ⑷ 색을 공유하던 짝이 갈린다(keyword·attribute 는 둘 다 ANSI 13에서 왔다 — §9.0).
+    try std.testing.expectEqual(derived.attribute, with_override.attribute);
+    try std.testing.expect(!std.meta.eql(with_override.keyword, with_override.attribute));
+}
+
+test "SC7 명시한 색은 보정하지 않고, 파생은 보정한다" {
+    // §9.0의 규칙을 못박는다. 같은 resolve 안의 선례와 같은 규율이다 — 명시 테마 색(background·
+    // foreground·cursor·selection)은 그대로 쓰고 **ANSI 팔레트만** 보정한다(프로그램이 고르는 색이라서).
+    //
+    // 이 판정자가 없으면 "사용자가 적은 hex가 화면에 그대로 나오는가"를 아무도 안 잰다 — 보정이
+    // 슬그머니 들어와도 색이 *비슷하게* 나오므로 눈으로는 잘 안 보인다.
+    const bg: color.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    var t: appearance.ResolvedTheme = .{
+        .background = bg,
+        .foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .cursor = .{ .r = 0xff, .g = 0xff, .b = 0xff },
+        .selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+        .sidebar_background = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
+        .sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 },
+        .sidebar_foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
+        .min_contrast = 0,
+    };
+    // 배경과 거의 같은 색이어도 **그대로** 나온다 — 사용자가 그렇게 골랐다.
+    const invisible: color.Rgb = .{ .r = 0x14, .g = 0x14, .b = 0x14 };
+    t.syntax[@intFromEnum(theme_config.SyntaxRole.keyword)] = invisible;
+    try std.testing.expectEqual(invisible, fromTheme(t).keyword);
+
+    // 반대로 **파생**은 보정을 받는다. 라이트 배경에 어두운 팔레트를 두면 그 자리가 움직인다.
+    var light = t;
+    light.syntax = .{null} ** theme_config.syntax_role_count;
+    light.background = .{ .r = 0xfd, .g = 0xf6, .b = 0xe3 };
+    light.foreground = .{ .r = 0x30, .g = 0x30, .b = 0x30 };
+    const bright_magenta = color.xterm256(13);
+    try std.testing.expect(!std.meta.eql(bright_magenta, fromTheme(light).keyword));
 }

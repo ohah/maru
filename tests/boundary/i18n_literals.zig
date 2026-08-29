@@ -87,7 +87,11 @@ const inventory = [_]Entry{
     // 상수를 **함수로** 바꿔야 언어 전환이 다음 프레임에 따라온다. 폭 계산과 그리기가 같은 문자열을
     // 봐야 하므로 한 자리에서 준다.
     .{ .path = "src/chrome/ui/visual_map.zig", .count = 1 },
-    .{ .path = "src/config/loader.zig", .count = 25 },
+    // 25 → 26: `theme.syntax.<역할>`의 **모르는 역할 이름 진단**이 늘었다(native-editor-ui.md §9.0).
+    // 이 파일의 다른 스물다섯과 같은 부류다 — 사용자에게 그리는 문자열이 아니라 config 로더가 파일의
+    // 그 줄을 왜 무시했는지 적는 **진단**이고, 같은 규율으로 한국어를 유지한다(docs/i18n.md §7 — "표시가
+    // 아니면 그 사실을 주석에 적고 원장을 올린다").
+    .{ .path = "src/config/loader.zig", .count = 26 },
     .{ .path = "src/config/schema.zig", .count = 28 },
     .{ .path = "src/platform/macos/agent_session_archive_backend.zig", .count = 3 },
     .{ .path = "src/platform/macos/app_pty_metal_smoke.zig", .count = 1 },
@@ -214,8 +218,8 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 195;
-const header_config_total = 53;
+const header_total = 196;
+const header_config_total = 54;
 
 comptime {
     // 원장이 커서 기본 분기 한도(1000)를 넘는다.

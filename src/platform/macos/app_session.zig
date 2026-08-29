@@ -13572,6 +13572,19 @@ pub const AppSession = struct {
     /// **읽기가 UI 를 안 멈춘다.** fd 를 `O_NONBLOCK` 으로 두고 읽을 것이 없으면 즉시 돌아온다.
     pub fn pumpRemoteAgentChannels(self: *AppSession) void {
         if (!is_macos) return;
+
+        // **게이트가 꺼져 있으면 축 자체를 접는다.** 두 이유가 있고 둘째가 더 무겁다.
+        //
+        // ① 사용자가 «에이전트 훅을 쓰지 않겠다» 고 한 것이다. 그런데도 목적지마다 `ssh` 를 띄우고
+        //    원격에서 스트리머를 돌리는 것은 그 뜻을 정면으로 어긴다.
+        // ② **더 나쁜 것은 소스가 둘이 되는 것이다.** 게이트가 꺼지면 `modeFor` 는 `.observe` 를 주고
+        //    그 가지는 `pollAgentState` 가 `agent_state` 를 쓴다 — 그런데 채널을 계속 돌리면 원격
+        //    소비자도 `applyHookEvent` 로 **같은 자리**에 쓴다. 계약 §1 이 금지한 «한 Term 두 소스» 이고,
+        //    증상은 «배지가 가끔 틀림» 이라 재현되지 않는다.
+        if (!self.loaded_config.config.sidebar.agent_hooks) {
+            self.closeAllRemoteAgentHosts();
+            return;
+        }
         if (self.remote_agent_hosts.count() == 0 and self.tabs.items.len == 0) return;
 
         const now_ms = self.awakeMs();
@@ -13763,6 +13776,29 @@ pub const AppSession = struct {
                         agent_ops.consumeRemoteAgentLines(self, term, lines, now_ms)
                     else
                         term.agent_remote_channel.?.eof();
+                }
+            }
+        }
+    }
+
+    /// 모든 목적지의 자식을 끝내고 Term 들의 채널도 뗀다(게이트 off, 그리고 `deinit`).
+    ///
+    /// **채널까지 떼는 것이 요점이다.** 자식만 죽이고 `Channel` 을 남기면 그 Term 은 `modeFor` 에서
+    /// 계속 «채널이 열렸다» 로 읽혀 훅 모드에 갇힌다 — 게이트를 껐는데 배지가 안 풀리는 모양이 된다.
+    fn closeAllRemoteAgentHosts(self: *AppSession) void {
+        if (self.remote_agent_hosts.count() == 0) return;
+        var it = self.remote_agent_hosts.iterator();
+        while (it.next()) |entry| {
+            ssh_upload.stopAgentEvents(entry.value_ptr.stream);
+            entry.value_ptr.pending.deinit(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.remote_agent_hosts.clearRetainingCapacity();
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    term.agent_remote_channel = null;
+                    term.agent_remote_nonce_len = 0;
                 }
             }
         }
@@ -19882,15 +19918,8 @@ pub const AppSession = struct {
         self.upload_results.deinit(self.allocator);
         // 원격 이벤트 채널의 자식(ssh)을 **전부 끝낸다**. 남기면 GUI 를 껐는데 ssh 가 목적지 수만큼
         // 살아 있는 누수다 — 그 자식은 stdin 이 /dev/null 이라 부모가 죽어도 스스로 안 끝난다.
-        {
-            var it = self.remote_agent_hosts.iterator();
-            while (it.next()) |entry| {
-                ssh_upload.stopAgentEvents(entry.value_ptr.stream);
-                entry.value_ptr.pending.deinit(self.allocator);
-                self.allocator.free(entry.key_ptr.*);
-            }
-            self.remote_agent_hosts.deinit(self.allocator);
-        }
+        self.closeAllRemoteAgentHosts();
+        self.remote_agent_hosts.deinit(self.allocator);
         // 인앱 업데이트 체크 스레드를 join한다(이전 busy-spin 대신 — CPU를 안 쓰고 OS가 대기). 이 스레드가
         // self.update_*·self.allocator를 건드리므로 self 해제 전에 반드시 끝나야 한다. CLOEXEC으로 curl pipe가
         // 다른 fork에 새지 않아 readAllFd가 매달리지 않으므로, join은 curl -m 타임아웃 안에 수렴한다.
@@ -21089,6 +21118,48 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
     session.pumpRemoteAgentChannels();
     try std.testing.expect(term.agent_remote_channel == null);
     try std.testing.expectEqual(@as(u8, 0), term.agent_remote_nonce_len);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+}
+
+test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term 을 두 소스가 쓴다" {
+    // **계약 §1 의 «소스는 Term 마다 정확히 하나» 가 여기서 깨질 뻔했다.** 게이트가 꺼지면 `modeFor` 는
+    // `.observe` 를 주고 그 가지는 `pollAgentState` 가 `agent_state` 를 쓴다. 그런데 채널을 계속 돌리면
+    // 원격 소비자도 `applyHookEvent` 로 **같은 자리**에 쓴다 — 증상은 «배지가 가끔 틀림» 이라 재현되지
+    // 않는다. 그리고 사용자가 «훅을 안 쓴다» 고 한 마당에 목적지마다 ssh 를 띄우는 것 자체가 틀렸다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "gated-box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
+    term.agent_remote_nonce_len = 6;
+
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]);
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .stream = .{ .pid = 0, .out_fd = fds[0] } });
+
+    // 게이트를 끈다 → 다음 펌프가 **자식도 채널도** 거둔다.
+    session.loaded_config.config.sidebar.agent_hooks = false;
+    session.pumpRemoteAgentChannels();
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());
+    // 채널까지 떼야 한다 — 남기면 `modeFor` 가 계속 «채널이 열렸다» 로 읽어 훅 모드에 갇힌다.
+    try std.testing.expect(term.agent_remote_channel == null);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 }
 

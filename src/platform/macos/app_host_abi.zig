@@ -813,37 +813,72 @@ fn appendBytes(buf: []u8, offset: *usize, text: []const u8) void {
     }
 }
 
-/// `label` 뒤에 숫자를 붙이지 않는다는 표시. 시그널 번호 0 은 유효한 값이 아니지만, 그 사실에
-/// 기대는 대신 별도 sentinel 을 둬서 나중에 값이 0 인 축이 생겨도 조용히 깨지지 않게 한다.
-const no_marker_value: u64 = std.math.maxInt(u64);
+/// 음수도 그대로 보인다. `si_code` 는 음수 값(`SI_QUEUE` 등)을 쓰므로, 부호를 버리고 u32 로
+/// 접으면 `-1` 이 `4294967295` 로 보여 읽는 사람이 커널 상수와 대조를 못 한다.
+fn appendSigned(buf: []u8, offset: *usize, value: i64) void {
+    if (value < 0) {
+        appendBytes(buf, offset, "-");
+        appendDecimal(buf, offset, @intCast(-value));
+        return;
+    }
+    appendDecimal(buf, offset, @intCast(value));
+}
 
-/// 마커 한 줄을 만든다. `pid` 를 인자로 받는 이유는 테스트 때문이다 — `getpid` 를 안에서 부르면
-/// 결과가 실행마다 달라져 **무엇을 쓰는지**를 잴 수 없다. 부작용을 `writeExitMarker` 하나로 좁힌
-/// 규율은 `openAppLogFd` 와 같다.
+/// 시그널로 죽은 경우의 마커. `pid` 를 인자로 받는 이유는 테스트 때문이다 — `getpid` 를 안에서
+/// 부르면 결과가 실행마다 달라져 **무엇을 쓰는지**를 잴 수 없다.
+///
+/// `from` 이 핵심이다. `signal=15` 만으로는 "SIGTERM 을 받았다"까지고 **누가 보냈는지**를 모른다 —
+/// 조용한 종료를 추적할 때 정작 알아야 하는 것이 그것이다. `SA_SIGINFO` 로 받은 `siginfo_t.pid` 가
+/// 그 답이고, 실측으로 다른 프로세스의 `kill` 이 그 PID 로 정확히 찍히는 것을 확인했다.
+/// 하드웨어 폴트(SEGV·BUS)에는 보낸 쪽이 없으므로 그때 `from` 은 의미가 없다 — 커널이 준
+/// `si_code` 를 함께 남겨 둘을 구분할 수 있게 한다.
 ///
 /// 버퍼가 모자라면 **자르고 끝낸다**. 진단 한 줄이 짧아지는 것과 핸들러 안에서 죽는 것 중
 /// 후자가 비교할 수 없이 나쁘다.
-fn formatExitMarker(buf: []u8, pid: u64, label: []const u8, value: u64) []const u8 {
+fn formatSignalExitMarker(buf: []u8, pid: u64, signal: u64, code: i64, sender: i64) []const u8 {
     var offset: usize = 0;
     appendBytes(buf, &offset, "=== maru app exit pid=");
     appendDecimal(buf, &offset, pid);
-    appendBytes(buf, &offset, " ");
-    appendBytes(buf, &offset, label);
-    if (value != no_marker_value) appendDecimal(buf, &offset, value);
+    appendBytes(buf, &offset, " signal=");
+    appendDecimal(buf, &offset, signal);
+    appendBytes(buf, &offset, " code=");
+    appendSigned(buf, &offset, code);
+    appendBytes(buf, &offset, " from=");
+    appendSigned(buf, &offset, sender);
     appendBytes(buf, &offset, " ===\n");
+    return buf[0..offset];
+}
+
+/// `exit()` 로 끝난 경우의 마커. 붙일 숫자가 없다.
+fn formatCleanExitMarker(buf: []u8, pid: u64) []const u8 {
+    var offset: usize = 0;
+    appendBytes(buf, &offset, "=== maru app exit pid=");
+    appendDecimal(buf, &offset, pid);
+    appendBytes(buf, &offset, " via=exit ===\n");
     return buf[0..offset];
 }
 
 /// `write(2, …)` 한 번으로 끝낸다. redirect 뒤 fd 2 가 곧 `app.log` 이고, tty 실행이면 콘솔이다 —
 /// 어느 쪽이든 시작 마커가 간 곳과 같은 자리라 짝이 맞는다.
-fn writeExitMarker(label: []const u8, value: u64) void {
-    var buf: [96]u8 = undefined;
-    const line = formatExitMarker(&buf, @intCast(std.c.getpid()), label, value);
+fn writeMarker(line: []const u8) void {
     _ = std.c.write(2, line.ptr, line.len);
 }
 
-fn exitSignalHandler(sig: std.posix.SIG) callconv(.c) void {
-    writeExitMarker("signal=", @intFromEnum(sig));
+/// `SA_SIGINFO` 로 받는다. 세 번째 인자(`ucontext`)는 쓰지 않는다 — 레지스터 덤프는 macOS 크래시
+/// 리포트가 이미 훨씬 잘 남기고, 우리가 필요한 것은 **누가 언제 끝냈는지** 한 줄이다.
+fn exitSignalHandler(
+    sig: std.posix.SIG,
+    info: *const std.c.siginfo_t,
+    _: ?*anyopaque,
+) callconv(.c) void {
+    var buf: [128]u8 = undefined;
+    writeMarker(formatSignalExitMarker(
+        &buf,
+        @intCast(std.c.getpid()),
+        @intFromEnum(sig),
+        info.code,
+        info.pid,
+    ));
 
     // 기본 처분으로 되돌린 뒤 **다시 올린다**. 이 단계를 빼면 우리가 시그널을 삼켜 버려서 macOS 가
     // 크래시 리포트를 못 쓴다 — 진단을 늘리려다 원래 있던 진단을 없애는 교환이 된다.
@@ -857,7 +892,8 @@ fn exitSignalHandler(sig: std.posix.SIG) callconv(.c) void {
 }
 
 fn exitAtexitHandler() callconv(.c) void {
-    writeExitMarker("via=exit", no_marker_value);
+    var buf: [64]u8 = undefined;
+    writeMarker(formatCleanExitMarker(&buf, @intCast(std.c.getpid())));
 }
 
 /// 시작 마커를 찍는 자리에서 함께 건다. 앱 세션은 한 프로세스에서 여러 번 만들어질 수 있으므로
@@ -868,9 +904,10 @@ fn installExitDiagnostics() void {
     exit_diagnostics_installed = true;
 
     const action: std.posix.Sigaction = .{
-        .handler = .{ .handler = exitSignalHandler },
+        .handler = .{ .sigaction = exitSignalHandler },
         .mask = std.posix.sigemptyset(),
-        .flags = 0,
+        // `SA_SIGINFO` 가 없으면 `siginfo_t` 를 못 받아 **보낸 쪽 PID 가 통째로 사라진다**.
+        .flags = std.c.SA.SIGINFO,
     };
     // 크래시 계열과 종료 요청 계열을 함께 건다. `PIPE` 는 **뺀다** — 이 저장소는 곳곳에서 그 처분을
     // 의도적으로 관리하고 있어(`control_relay.zig`·`external_attach_cli.zig`) 여기서 덮으면 그 결정을
@@ -8079,28 +8116,35 @@ test "파일 선택 안내는 UI 언어를 따르고 종류마다 다른 문장�
     try std.testing.expectEqualStrings("", std.mem.span(maru_macos_file_pick_message(9999)));
 }
 
-test "앱 종료 마커는 시그널과 정상 종료를 구분하고, 버퍼가 모자라면 자른다" {
+test "앱 종료 마커는 시그널·보낸 쪽·정상 종료를 구분하고, 버퍼가 모자라면 자른다" {
     // 이 테스트가 증명하는 것: 마커가 **무엇을 쓰는지**. 실제 기록은 `write(2, …)` 라 테스트가
     // 건드릴 수 없으므로, 그 앞의 순수 포맷만이라도 고정하지 않으면 "핸들러는 도는데 로그를 봐도
     // 무슨 뜻인지 모른다"가 된다 — 이 기능을 만든 이유가 정확히 그 상황이었다.
-    var buf: [96]u8 = undefined;
+    var buf: [128]u8 = undefined;
 
-    // 시그널로 죽은 경우: 번호가 붙는다.
+    // 시그널로 죽은 경우: 번호뿐 아니라 **누가 보냈는지**가 남는다. `signal=15` 만으로는
+    // "SIGTERM 을 받았다"까지고, 조용한 종료를 추적할 때 정작 알아야 하는 것은 `from` 이다.
     try std.testing.expectEqualStrings(
-        "=== maru app exit pid=4242 signal=15 ===\n",
-        formatExitMarker(&buf, 4242, "signal=", 15),
+        "=== maru app exit pid=4242 signal=15 code=0 from=4282 ===\n",
+        formatSignalExitMarker(&buf, 4242, 15, 0, 4282),
     );
 
-    // `exit()` 로 끝난 경우: 붙일 숫자가 없다. sentinel 이 그 사실을 나른다.
+    // `si_code` 는 음수 값을 쓴다. 부호를 버리면 커널 상수와 대조가 안 된다.
+    try std.testing.expectEqualStrings(
+        "=== maru app exit pid=9 signal=11 code=-1 from=0 ===\n",
+        formatSignalExitMarker(&buf, 9, 11, -1, 0),
+    );
+
+    // `exit()` 로 끝난 경우: 붙일 숫자가 없다.
     try std.testing.expectEqualStrings(
         "=== maru app exit pid=7 via=exit ===\n",
-        formatExitMarker(&buf, 7, "via=exit", no_marker_value),
+        formatCleanExitMarker(&buf, 7),
     );
 
     // 버퍼가 모자라도 넘치지 않는다. 시그널 핸들러 안에서 도는 코드라 이 성질이 곧 안전성이다.
     var tiny: [8]u8 = undefined;
-    const truncated = formatExitMarker(&tiny, 999999, "signal=", 11);
-    try std.testing.expect(truncated.len <= tiny.len);
+    try std.testing.expect(formatSignalExitMarker(&tiny, 999999, 11, -7, 12345).len <= tiny.len);
+    try std.testing.expect(formatCleanExitMarker(&tiny, 999999).len <= tiny.len);
 }
 
 test "app 진단 로그 fd는 base 아래 app.log를 append로 열고 상한을 넘으면 비운다" {

@@ -459,7 +459,7 @@ fork 자식을 못 잡는 것이었다.) 그래도 렌더 tick에서 돌리지 �
 ### 실측(2026-08-27) — 격리한 host 하나, split 으로 host-backed Term 하나
 
 `MARU_SESSION_HOST_ROOT`(소켓·manifest 루트 override)로 다른 워크트리의 host 와 섞이지 않게 격리하고,
-`MARU_FORCE_SPLIT=1` 로 두 번째 Term 을 만들어(첫 Term 은 backend 가 서기 전에 생겨 항상 in-process 다)
+`MARU_FORCE_SPLIT=1` 로 두 번째 Term 을 만들어(⚠️ 그때 괄호에 적었던 이유 — 「첫 Term 은 backend 가 서기 전에 생겨 항상 in-process 다」 — 는 **틀렸다**: 2026-08-29 재실측. 단일 출처는 아래 §"아직 안 한 것" 의 그 행이다. 이 절차 자체는 유효하다)
 `MARU_FORCE_RESOURCE_MENU=1` 로 팝오버를 찍었다:
 
 ```
@@ -992,7 +992,7 @@ term 수만큼 만든다 — [performance-budget.md](performance-budget.md)가 F
 | strip에 높이 대신 **가장자리**를 넘기기 | §5.2 · 바로 위 | 조건이 붙었다(트리거 셋). 단독으로는 검증이 안 늘고 ABI만 올라간다 |
 | 세션 호스트 행이 **이 창에 host-backed Term이 없으면 안 선다** | §4.1 "세션 호스트 데몬 자신도 센다" | 뿌리(`host_pid`)를 runtime 관측에서 얻는다. backend가 앱 전역이라 **다른 창에 하나라도 있으면 선다** — 남는 구멍은 "어느 창에도 host-backed Term이 없는데 데몬만 살아 있는" 창뿐이고, 그때 데몬은 곧 스스로 정리된다 |
 | 세션 호스트 행의 **자동 골든** | §4.1 실측 | 찍기는 찍힌다(위 실측이 그 캡처다). 다만 **진짜 host 프로세스와 host-backed Term 이 있어야** 하고 값이 매번 다르므로 골든 비교 대상이 아니다. 가짜 행을 심는 것은 `MARU_FORCE_*` 규율(**항목이 실제로 선 뒤에만** 진짜 경로로 연다)과 어긋나므로, 꼬리 산술은 순수 테스트(`partitionPinned`)와 제품 경로 테스트(`SB-A`·`SB-H`)가 대신 덮는다 |
-| 첫 Term 은 **항상 in-process** 다 | §4.1 실측 | `ensureRemoteBackend` 가 첫 Term 생성보다 늦어 `backendForNew` 가 아직 원격을 못 고른다. keep-alive 를 켠 사용자에게 첫 탭만 로컬로 남는 것은 리소스 표시와 무관한 별개 사안이라 여기서 고치지 않고 **관측된 사실로 적어 둔다** |
+| ~~첫 Term 은 **항상 in-process** 다~~ → **틀린 서술이었다(2026-08-29 재실측)** | §4.1 실측 | 적어 둔 이유(`ensureRemoteBackend` 가 첫 Term 생성보다 늦다)가 **코드와 반대**다 — `AppSession.init` 은 `ensureRemoteBackend`(`app_session.zig`)를 첫 탭 `createTab` 보다 **먼저** 부르고(줄 번호는 적지 않는다 — 그 자리는 코드가 자라며 밀린다. `check-doc-line-refs` 규율), 이 문서를 쓴 커밋 시점(2026-08-27)에도 같은 순서였다. 격리 host 를 띄우고 제품 `init` 경로로 창을 연 재실측에서 **첫 탭이 host-backed 였다**(`surface.remote != null`). 재실측의 한계 둘: ⑴ 테스트 빌드는 **첫 창**(`live_app_sessions == 0`)에서 keep-alive 전역을 `test_config_text` 값으로 리셋하므로 「정책이 켜진 채 창을 연다」는 제품 조건을 **두 번째 창**으로 쟀다 ⑵ cold launch 에서 host 를 **새로 spawn** 하다 실패하면 여전히 in-process 폴백이다 — 원래 관측이 본 것이 그쪽일 수 있다. 즉 남는 것은 「첫 탭은 로컬」이라는 **규칙**이 아니라 **host spawn 이 늦거나 실패하는 cold launch** 이고, 그때 사용자에게 알리는 경로는 이미 있다(`host_connect_notice_pending`) |
 | 웹 콘텐츠(WebKit XPC) 메모리 | §4.1 "앱 자신은 센다" | `responsibility_get_pid_responsible_for_pid`가 **비문서 심볼**이고 전체 pid 스캔이 필요하다 |
 | 창이 여럿일 때 **앱·세션 호스트 값이 창마다 중복** | §4.1 "앱 자신은 센다" | 대안(한 창만 표시)이 임의적이라 남긴 결함이다. "모든 창 공유" 라벨이 화면에서 드러낸다 |
 | 스파크라인·트리·디스크·정리 동작 | §4.2 표 | 각각 별개 기능(링버퍼·접기 상태·비동기 스캔·파괴적 동작)이다. 한 줄 목록이 못 답하는 질문이 아직 없다 |

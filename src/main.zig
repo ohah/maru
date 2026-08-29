@@ -3359,9 +3359,16 @@ fn drainAgentItems(
     backend: *agent_archive_backend.Backend,
     archive: *AgentArchive,
     out: *std.ArrayList(maru.chrome.components.session_dock.types.Item),
+    /// **훑기가 끝났는가.** 중간 결과(`partial_progress`)는 아직 도는 중이라 false 다 — 호출자는
+    /// 이 값으로 "분석 중" 표시를 내린다. 결과가 아예 없으면 건드리지 않는다(지금 상태 유지).
+    finished_out: *bool,
+    /// **일부만 훑었는가**(`outcome` 과 직교한다 — 백엔드 doc). 헤더가 "일부" 문구로 바꾼다.
+    partial_out: *bool,
 ) ?[]const u8 {
     var res = backend.takeResult() orelse return null;
     defer res.deinit(scan);
+    if (res.outcome == .completed or res.outcome == .cancelled) finished_out.* = true;
+    partial_out.* = res.partial;
     switch (res.outcome) {
         // **자격이 있는 것만 목록을 갈아 끼운다.** `cancelled` 는 보이는 것을 대체할 자격이 없고
         // `retain_previous` 는 그 이름 그대로 이전을 지키라는 뜻이다(백엔드 doc). 갈아 끼우면
@@ -5319,6 +5326,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // **상주 메모리를 판정으로 낸다.** 이 둘이 갈라져 있는 것이 눈에 안 보이는 성질이라, 수치로
     // 내지 않으면 다음 사람이 arena 하나로 되돌려도 아무 판정이 안 움직인다.
     var agent_scan_kb: usize = 0;
+    // **훑는 중임을 화면에 말한다**(중립이 이미 문구·해골 줄을 갖고 있다 — `loading`/`refreshing`/
+    // `partial`). 예전에는 이 셋을 아무도 안 세워서, 이력이 큰 기계에서 **20 초 동안 빈 목록**이
+    // "세션이 없다" 로 보였다.
+    var agent_scan_finished = false;
+    var agent_scan_partial = false;
+    var agent_loading_frames: usize = 0;
+    var agent_refreshing_frames: usize = 0;
+    var notice_judgeable = false;
+    var notice_items_before: usize = 0;
+    var notice_items_during: usize = 0;
+    var notice_digest_idle: u64 = 0;
+    var notice_digest_busy: u64 = 0;
+    var notice_settled_judgeable = false;
+    var notice_still_busy = false;
     // **이력이 없는 기계는 실패가 아니다.** 카드가 0 인 이유가 "이 기계에 이력이 없다" 인지
     // "훑기가 깨졌다" 인지 갈라 두지 않으면, provider 를 안 쓰는 기계에서 스모크가 **거짓 실패**를
     // 낸다 — 그리고 그 실패를 무시하기 시작하면 진짜 회귀도 같이 묻힌다(§2m.44 의 그 교훈).
@@ -5668,6 +5689,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         frames_total += 1;
         if (agent_settling) settle_frames += 1 else spins += 1;
     }) {
+        // ── 훑는 중임을 화면에 말한다 ────────────────────────────────────────────────────
+        //
+        // **중립이 이미 다 갖고 있다** — `loading` 이면 개수 대신 "분석 중" 을 쓰고 해골 줄을 깔며,
+        // `refreshing` 이면 새로고침 아이콘을 죽인다(`session_dock/view.zig`). Windows 는 그 셋을
+        // **아무도 안 세우고 있었다**: 이력이 큰 기계에서 20 초 동안 빈 목록이 "세션이 없다" 로 보였다.
+        //
+        // **프레임 머리에서 한 번 세운다** — 이벤트 처리 중에 도크를 다시 짓는 자리가 여럿이라
+        // 각각에 넣으면 한 곳이 빠진다.
+        {
+            const scanning = agent_backend != null and !agent_scan_finished;
+            // `loading` 은 **보여 줄 것이 아직 하나도 없는** 첫 훑기다(중립 doc: 그때 개수만 말하면
+            // "0개 표시" 가 되어 세션이 없다는 뜻으로 읽힌다). 목록이 이미 있으면 `refreshing` 이다.
+            agent_opts.loading = scanning and agent_items.items.len == 0;
+            agent_opts.refreshing = scanning and agent_items.items.len > 0;
+            agent_opts.partial = agent_scan_partial;
+            if (agent_opts.loading) agent_loading_frames += 1;
+            if (agent_opts.refreshing) agent_refreshing_frames += 1;
+        }
         if (smoke and spins == 60) {
             // **판정 불가와 실패를 가른다.** 창이 좁아 도크가 없으면 누를 것이 없는데, 그것을
             // `dock_row_clicks=0` 으로만 적으면 고장난 것처럼 읽힌다(이 세션에서 다섯 번째다).
@@ -7101,6 +7140,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **새로고침을 누른다.** 헤더 전체가 refresh action 이고 정렬 토글이 그 오른쪽 끝을 파낸
         // 형태라(`build.zig` 의 그 주석), **왼쪽 4 분의 1** 을 겨눈다 — 가운데를 누르면 무엇을
         // 눌렀는지가 배치에 따라 흔들린다.
+        // ── 훑는 중이라고 말하는가 (보고 결함 ③) ───────────────────────────────────────
+        //
+        // **목록이 그대로인 순간을 고른다.** 새로고침은 같은 이력을 다시 읽으므로 아이템이 안 바뀌고,
+        // 그래서 화면이 달라진다면 그것은 **"분석 중" 문구와 죽은 아이콘**뿐이다 — 아이템 변화에
+        // 묻히지 않는 자리다.
+        if (smoke and spins == 761 and dock_view == .agent_sessions) {
+            notice_items_before = agent_items.items.len;
+            notice_digest_idle = d3d11_cells.cellsDigest(dock_cells.items);
+        }
+        // **끝나면 내려야 한다** — 안 내리면 "분석 중" 이 영영 붙어 있고, 그것은 아무 정보도 없는
+        // 표시가 된다. 목록이 온 뒤의 조용한 순간에 잰다.
+        if (smoke and spins == 940) {
+            notice_settled_judgeable = agent_items.items.len > 0;
+            notice_still_busy = agent_opts.loading or agent_opts.refreshing;
+        }
+        if (smoke and spins == 763 and agent_opts.refreshing) {
+            notice_judgeable = true;
+            notice_items_during = agent_items.items.len;
+            notice_digest_busy = d3d11_cells.cellsDigest(dock_cells.items);
+        }
         if (smoke and spins == 762) if (agent_built) |*b| {
             const id = maru.chrome.components.session_dock.build.NodeIds.header;
             for (b.frame.tree.entries) |e| {
@@ -7482,7 +7541,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 창이 통째로 멈췄다 — 이제 제출만 하고 여기서 받는다. 결과가 없으면 이 줄은 공짜다.
         // 이력 결과도 매 프레임 받는다. 안 왔으면 `null` 이고 이 줄은 공짜다.
         if (agent_backend) |*b| {
-            if (drainAgentItems(agent_counting.allocator(), agent_arena.allocator(), io, b, &agent_archive, &agent_items)) |reason| {
+            if (drainAgentItems(agent_counting.allocator(), agent_arena.allocator(), io, b, &agent_archive, &agent_items, &agent_scan_finished, &agent_scan_partial)) |reason| {
                 agent_list_reason = reason;
                 agent_scan_kb = agent_counting.peak / 1024;
                 agent_applies += 1;
@@ -8221,7 +8280,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         const r = submitAgentScan(agent_counting.allocator(), ab, home);
                                         // 훑는 중이면 백엔드가 거절한다 — 그것은 실패가 아니라
                                         // "이미 하고 있다" 이므로 이유를 덮어쓰지 않는다.
-                                        if (r.len == 0) agent_refresh_submits += 1;
+                                        if (r.len == 0) {
+                                            agent_refresh_submits += 1;
+                                            // **다시 훑기 시작이다** — 이 값을 안 되돌리면 새로고침
+                                            // 동안 아이콘이 안 죽어 "눌렀는데 아무 일도 없다" 가 된다.
+                                            agent_scan_finished = false;
+                                        }
                                     };
                                 }
                                 var intent_arena = std.heap.ArenaAllocator.init(allocator);
@@ -9657,6 +9721,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             track_right,
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("agent_busy: loading_frames={d} refreshing_frames={d} items {d}->{d} digest {x}->{x} settled_busy={} agent_busy_ok={}\n", .{
+            agent_loading_frames,
+            agent_refreshing_frames,
+            notice_items_before,
+            notice_items_during,
+            notice_digest_idle,
+            notice_digest_busy,
+            notice_still_busy,
+            // **첫 훑기에도 말했어야** 하고(`loading_frames > 0`), 새로고침 중에는 **같은 목록인데
+            // 화면이 달라야** 한다 — 그 차이가 곧 "분석 중" 문구와 죽은 아이콘이다.
+            agent_loading_frames > 0 and notice_judgeable and
+                notice_items_during == notice_items_before and notice_digest_busy != notice_digest_idle and
+                // **그리고 끝나면 내린다** — 안 내리면 늘 켜 두는 것과 같아 아무 말도 안 하는 셈이다.
+                notice_settled_judgeable and !notice_still_busy,
         });
         try stdout.print("sidebar_clip: partial={d} clipped={d} over_header={d} clip_ok={}\n", .{
             clip_partial,

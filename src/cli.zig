@@ -15,6 +15,7 @@ pub const incidents_run = @import("cli/incidents_run.zig"); // 위 순수 절반
 pub const attach = @import("cli/attach.zig"); // P5c3: public persistent-runtime attach parser and fail-closed host resolution policy
 pub const browser = @import("cli/browser.zig"); // CLI-1: `maru browser navigate/get-url/exec/get-cookies` — browser.* 클라이언트(파서·wire·렌더, §9.6)
 pub const browser_run = @import("cli/browser/run.zig"); // 위 순수 절반의 impure 짝 — 소켓 왕복·chunk 재조립·`--out` 원자 공개
+pub const agent_events = @import("cli/agent_events.zig"); // RA4: `maru agent-events --stdio` — 원격 훅 로그를 exec 채널로 흘리는 순수 절반(프레임·커서·인자)
 pub const trace = @import("cli/trace.zig"); // `maru trace anonymize` — 캡처 trace의 PII 익명화(fixture 승격용)
 pub const control_relay = @import("cli/control_relay.zig"); // S10c: `maru control --stdio` — 폰이 SSH 채널로 컨트롤 플레인에 닿는 중계
 pub const control_client = @import("cli/control_client.zig"); // cli/의 **유일한 impure 모듈** — 컨트롤 소켓 발견·connect·auth·왕복(sessions·browser 공유)

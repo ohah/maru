@@ -152,6 +152,32 @@ Zig가 `start_helper_job` action을 commit한 monotonic 시각부터 helper 상�
 
 Web의 `renderMermaid` mailbox는 독립 timeout을 갖지 않고 Zig exact terminal/native reply만 기다린다. Native reply fallback은 admission 시점에 arm하지 않으며 `MermaidRenderCoordinator.pump`가 실제 start action을 drain할 때 `deadline_ms + 250ms`로 arm한다. 그러므로 pending queue 대기 시간이 뒤 job의 cold/warm 예산을 깎지 않고, 이미 끝난 exact job의 늦은 fallback은 one-shot table에서 무동작이다.
 
+## 진단 로그: 시작 마커와 종료 마커의 짝
+
+GUI 실행(Dock·Finder)의 stderr 는 `/dev/null` 이라 진단이 통째로 사라진다. `redirectStderrToAppLog`
+(`app_host_abi.zig`)가 fd 2 를 `<cache>/app.log` 로 바꾸고 `=== maru app start pid=N ===` 을 찍어
+어디부터가 이번 실행인지 표시한다. **stderr 가 tty 면 건드리지 않는다** — 터미널에서 띄웠다면 콘솔이
+이미 진단을 받고 있고, 그것을 파일로 가로채면 개발 중 출력을 빼앗는다.
+
+시작 마커만으로는 **어떻게 끝났는지**를 못 본다. 2026-08-29 에 앱 업데이트 직후 여섯 번 연속으로 앱이
+조용히 사라졌는데, `app.log` 에 `workspace checkpoint: final-quit` 이 한 줄도 없고 크래시 리포트도
+없었다 — "정상 종료도 크래시도 아니다"까지만 알고 그 이상 좁힐 재료가 없었다. 그래서
+`installExitDiagnostics` 가 같은 자리에서 종료 마커를 건다:
+
+| 로그 | 뜻 |
+| --- | --- |
+| `=== maru app exit pid=N signal=M ===` | 잡을 수 있는 시그널로 죽었다(크래시·TERM·HUP…) |
+| `=== maru app exit pid=N via=exit ===` | `exit()` 로 끝났다(정상 quit 경로든 조기 반환이든) |
+| 시작 마커만 있고 종료 줄이 없음 | `SIGKILL`·전원 차단처럼 **잡을 수 없는** 경로 — 부재가 곧 증거다 |
+
+- 시그널 핸들러는 마커를 쓴 뒤 **기본 처분으로 되돌리고 다시 올린다**. 이 단계를 빼면 시그널을 삼켜
+  macOS 가 크래시 리포트를 못 쓴다 — 진단을 늘리려다 원래 있던 진단을 없애는 교환이 된다.
+  실측으로 `SIGTERM` 이 종료코드 143(=128+15)으로 그대로 전달되는 것을 확인했다.
+- 핸들러 안에서는 async-signal-safe 한 것만 부를 수 있어 `std.fmt` 를 쓰지 않고 십진 변환을 직접 한다.
+  버퍼가 모자라면 자르고 끝낸다 — 한 줄이 짧아지는 것보다 핸들러 안에서 죽는 것이 비교할 수 없이 나쁘다.
+- `SIGPIPE` 는 **일부러 뺀다**. 이 저장소는 그 처분을 곳곳에서 의도적으로 관리하므로
+  (`control_relay.zig`·`external_attach_cli.zig`) 여기서 덮으면 그 결정을 조용히 뒤집는다.
+
 ## 검증 경로
 
 - `mise run test-macos-app-host-abi`: C header와 Zig extern layout/version이 맞는지 확인한다.

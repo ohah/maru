@@ -22685,7 +22685,7 @@ test "agent hooks install into codex and record trust without touching existing 
         for (slots[0..found]) |placement| {
             const entry = hook_trust.forEvent(placement.json_name).?;
             var matcher: ?[]const u8 = null;
-            for (hook_command.eventsFor(.codex)) |e| {
+            for (hook_command.eventsFor(.codex, .local)) |e| {
                 if (std.mem.eql(u8, e.name, placement.json_name)) matcher = e.matcher;
             }
             var key: std.ArrayListUnmanaged(u8) = .empty;

@@ -1398,7 +1398,7 @@ fn ensureCodexTrust(
         const entry = trust.forEvent(placement.json_name) orelse continue;
         // matcher 는 **세트가 정한 값**이다(파일에 적힌 값이 아니라) — 우리가 넣은 항목이므로 같다.
         var matcher: ?[]const u8 = null;
-        for (hook_command.eventsFor(.codex)) |e| {
+        for (hook_command.eventsFor(.codex, .local)) |e| {
             if (std.mem.eql(u8, e.name, placement.json_name)) matcher = e.matcher;
         }
 

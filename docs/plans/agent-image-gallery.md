@@ -27,6 +27,11 @@
 | IG1-c pane↔파일 매핑 | ✅ 완료 — `Term.agent_image_source` + 훅 `transcript_path` 채택 |
 | IG1-d 뷰에 잇기 | ✅ 완료 — 사슬(훅→소스→스캔→화면)이 이어졌다. 다만 **격자 사각형이 아니라 문구 한 줄**이다(아래) |
 | **IG1-e 스캔 워커** | ✅ 완료 — `agent_image_scan_backend.zig`(refcount·generation·청크별 취소) + tick 수확 |
+| **IG3-a** clamp 계산 | ✅ 완료 — `session/image_scale.zig`(텍스처를 만들지 않는 순수 함수, 단위 11개) |
+| **IG3-b** ImageIO 디코드 | ✅ 완료 — `platform/macos/image_decode.zig`(Zig extern, ObjC 파일 0). ⚠️ `CoreGraphics` 만으로는 심볼이 안 풀려 **29곳에 `ImageIO` 링크 추가** |
+| **IG3-c1** 격자 배치 | ✅ 완료 — `session/image_grid.zig`(순수, letterbox 포함, 단위 9개) |
+| **IG3-c2** GpuImage 배선 | ✅ 완료 — **화면에 이미지가 실린다**. 배경 이미지와 같은 예약 id·live_ids·1회 업로드 패턴 |
+| **IG3-d** 디코드 워커 | ⏳ 다음 — 지금은 tick 당 1장(장당 ~20 ms 로 프레임 예산 초과) |
 | IG2~IG6 | 미착수 |
 
 **순서가 바뀌었다(2026-08-29 실측).** IG1-d 를 낸 뒤 제품 스캐너로 최악 파일을 재니 **3.6 초**였다

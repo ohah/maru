@@ -11027,6 +11027,100 @@ fn applyRemoteHookFile(
     return error.UnsupportedPlatform;
 }
 
+/// tmux 역조회 한 번([계획](../docs/plans/remote-agent-state.md) RA6). **이 프로세스는 이미 그 기계에
+/// 있으므로 ssh 왕복이 없다** — `/bin/sh` 로 스크립트를 돌리고 그 stdout 을 순수 층에 넘긴다.
+///
+/// 실패는 전부 «못 물어봤다» 로 접힌다(`lookup_ran = false`). 그것이 **진짜 detached 와 갈리는** 값이고,
+/// 그 구분이 없으면 「tmux 가 없어서」와 「아무도 안 붙어서」가 같은 결과가 된다.
+/// 그 nonce 의 **옆 파일**(`<nonce>.tmux`)을 읽는다. 없으면 `null`(= tmux 밖이거나 아직 안 쓰였다).
+///
+/// 상한을 둔다 — 이 파일은 한 줄이고, 그보다 크면 우리가 쓴 것이 아니다.
+fn readSidecar(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, nonce: []const u8) ?[]u8 {
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{
+        nonce,
+        maru.session.agent_hook_command.tmux_sidecar_suffix,
+    }) catch return null;
+    return dir.readFileAlloc(io, name, allocator, .limited(4096)) catch null;
+}
+
+fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_route.Observed) ?[]u8 {
+    const rt = maru.session.remote_tmux_route;
+    const socket = obs.socket orelse return null;
+    const pane = obs.pane orelse return null;
+
+    const script = rt.lookupScript(allocator, socket, pane) catch return null;
+    defer allocator.free(script);
+    const out = runShellCapture(allocator, script) catch return null;
+    defer allocator.free(out);
+
+    var buf: [16]rt.Client = undefined;
+    const clients = rt.parseClients(out, &buf) orelse {
+        // 표식이 왔다 = 그 기계에 `tmux` 가 없다. **물어보지도 못했다**로 접는다.
+        _ = rt.route(.{ .pane = pane, .socket = socket, .lookup_ran = false }, &.{});
+        return null;
+    };
+    return switch (rt.route(.{ .pane = pane, .socket = socket }, clients)) {
+        .resolved => |n| allocator.dupe(u8, n) catch null,
+        // **조용히 하나 고르지 않는다.** 여럿이면 귀속을 포기하고 원래 이름으로 둔다 — 그 편이
+        // «남의 pane 배지가 흔들리는» 것보다 낫다(계획: 규칙을 명시한다).
+        .ambiguous, .detached, .unresolved, .direct => null,
+    };
+}
+
+/// `/bin/sh -c <script>` 를 돌려 stdout 을 통째로 받는다(짧은 조회 전용 — 상한 64 KiB).
+fn runShellCapture(allocator: std.mem.Allocator, script: []const u8) ![]u8 {
+    const c_sh = try allocator.dupeZ(u8, "/bin/sh");
+    defer allocator.free(c_sh);
+    const c_flag = try allocator.dupeZ(u8, "-c");
+    defer allocator.free(c_flag);
+    const c_script = try allocator.dupeZ(u8, script);
+    defer allocator.free(c_script);
+    const argv = [_:null]?[*:0]const u8{ c_sh.ptr, c_flag.ptr, c_script.ptr };
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return error.PipeFailed;
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return error.ForkFailed;
+    }
+    if (pid == 0) {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.dup2(out_pipe[1], 1);
+        // ⚠️ **stderr 를 버린다.** 이 프로세스의 stdout 은 오직 wire 이고(계약), 자식의 경고가 그리로
+        // 새면 소비자의 ndjson 파서가 그 프레임을 잃는다.
+        const nullfd = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        if (nullfd >= 0) {
+            _ = std.c.dup2(nullfd, 2);
+            _ = std.c.close(nullfd);
+        }
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.execve("/bin/sh", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var tmp: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(out_pipe[0], &tmp, tmp.len);
+        if (n <= 0) break;
+        try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+        if (buf.items.len > 64 * 1024) break;
+    }
+    _ = std.c.close(out_pipe[0]);
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    return buf.toOwnedSlice(allocator);
+}
+
 fn setDirMode0700(path: []const u8) void {
     // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고 그 아래 전부가 fork·flock·pty 다 —
     // Windows 에 옮길 대상이 아니다. `std.c` 의 그 선언들은 그 타깃에서 **컴파일이 안 되므로**
@@ -11071,6 +11165,23 @@ fn runAgentEvents(
     try stdout.print("{s}\n", .{ae.hello_line});
     try stdout.flush();
 
+    const ae_route = maru.session.remote_tmux_route;
+    // tmux 역조회 결과 캐시(RA6). **옆 파일 내용이 키다** — 그 값이 그대로면 pane 이 안 옮겨 간
+    // 것이므로 다시 묻지 않는다.
+    const RouteCache = struct {
+        seen_sidecar: []u8 = "",
+        resolved: ?[]u8 = null,
+    };
+    var routes: std.StringHashMapUnmanaged(RouteCache) = .empty;
+    defer {
+        var rit = routes.iterator();
+        while (rit.next()) |e| {
+            if (e.value_ptr.resolved) |r| allocator.free(r);
+            if (e.value_ptr.seen_sidecar.len > 0) allocator.free(e.value_ptr.seen_sidecar);
+            allocator.free(e.key_ptr.*);
+        }
+        routes.deinit(allocator);
+    }
     var cursors: std.StringHashMapUnmanaged(ae.Cursor) = .empty;
     defer {
         var it = cursors.keyIterator();
@@ -11172,6 +11283,33 @@ fn runAgentEvents(
             // **우리가 자른 것**이므로, 개행 없는 꼬리를 버리지 않고 다음 회차로 넘긴다(아래 루프가
             // 개행까지만 세므로 두 경우가 같은 코드로 처리된다).
 
+            // **이 파일의 줄이 정말 이 이름의 것인가**(RA6). tmux 안에서는 `LC_MARU_PANE` 이 굳어
+            // 훅이 **남의 파일에 적는다** — 그래서 파일 이름이 아니라 옆 파일의 tmux 좌표로 되찾는다.
+            //
+            // **옆 파일 내용이 그대로면 다시 안 묻는다.** 훅은 매 이벤트마다 그것을 덮어쓰지만 값은
+            // pane 이 옮겨 갈 때만 바뀐다 — 매번 물으면 이벤트마다 `tmux` 프로세스가 둘씩 뜬다.
+            const emit_nonce = blk: {
+                const side = readSidecar(io, allocator, dir, nonce) orelse break :blk nonce;
+                defer allocator.free(side);
+                const obs = ae_route.parseSidecar(side) orelse break :blk nonce; // tmux 밖 → 이름을 믿는다
+                const rgop = routes.getOrPut(allocator, nonce) catch break :blk nonce;
+                if (!rgop.found_existing) {
+                    rgop.key_ptr.* = allocator.dupe(u8, nonce) catch {
+                        _ = routes.remove(nonce);
+                        break :blk nonce;
+                    };
+                    rgop.value_ptr.* = .{};
+                } else if (std.mem.eql(u8, rgop.value_ptr.seen_sidecar, side)) {
+                    break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
+                }
+                // 좌표가 바뀌었다(또는 처음이다) — 한 번 묻는다.
+                if (rgop.value_ptr.resolved) |r| allocator.free(r);
+                rgop.value_ptr.resolved = tmuxResolveNonce(allocator, obs);
+                allocator.free(rgop.value_ptr.seen_sidecar);
+                rgop.value_ptr.seen_sidecar = allocator.dupe(u8, side) catch "";
+                break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
+            };
+
             var consumed: usize = 0;
             var lines = std.mem.splitScalar(u8, chunk, '\n');
             while (lines.next()) |line| {
@@ -11181,7 +11319,7 @@ fn runAgentEvents(
                 consumed += line.len + 1;
                 if (line.len == 0) continue;
                 frame.clearRetainingCapacity();
-                try ae.formatEvent(&frame, allocator, nonce, line);
+                try ae.formatEvent(&frame, allocator, emit_nonce, line);
                 try stdout.writeAll(frame.items);
             }
             const next: ae.Cursor = .{ .offset = cur.offset + consumed, .seen_size = size };

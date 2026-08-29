@@ -104,3 +104,15 @@ test "역조회 값도 다시 거른다 — 남의 프로세스 env 에서 읽�
     const r = route(.{ .pane = "%3", .socket = "/tmp/s" }, &.{ .{ .nonce = "A B" }, .{ .nonce = "4331_7" } });
     try testing.expectEqualStrings("4331_7", r.resolved);
 }
+
+test "pane 은 있는데 소켓만 없으면 절대 direct 로 새지 않는다" {
+    // direct 로 새면 오염된 env 를 믿게 된다 — 이 축이 막으려는 바로 그것이다.
+    try testing.expectEqual(Route.unresolved, route(.{ .pane = "%3" }, &.{.{ .nonce = "4331_7" }}));
+}
+
+test "detached 와 unresolved 를 섞지 않는다 — 원인이 다르면 대응도 다르다" {
+    // 클라이언트 0 개 = detached(에이전트는 돌지만 볼 사람이 없다 — 보류할지 버릴지의 문제).
+    try testing.expectEqual(Route.detached, route(.{ .pane = "%1", .socket = "/s" }, &.{}));
+    // 클라이언트는 있는데 값을 못 읽음 = unresolved(권한·race — 다시 시도할 문제).
+    try testing.expectEqual(Route.unresolved, route(.{ .pane = "%1", .socket = "/s" }, &.{.{ .nonce = null }}));
+}

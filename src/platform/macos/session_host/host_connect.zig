@@ -931,6 +931,15 @@ fn logStaleManifest(site: []const u8, axis: ?host_manifest.DescriptorAxis) void 
 /// "어느 쪽이 옛것인지" 가 안 보여서 upgrade 방향을 판단할 수 없다.
 var last_stale_client_key: u64 = 0;
 
+/// **심각도는 사실에 맞춘다.** `build_id`·`upgrade_epoch`·`lifecycle` 세 축의 불일치는 exec 업그레이드가
+/// 지나가는 **예정된 전환 창**이다 — host 가 새 이미지로 바뀌어 hello 는 새 값을 답하는데 manifest 는 아직
+/// 정정 전이라 어긋난다. `.stale_manifest` 가 재시도 대상인 이유가 그것이고(위 `connectNewHostWithBackoff`),
+/// 실제로 몇십 ms 뒤 수렴한다. 그런데 이 셋을 `err` 로 찍는 바람에 **정상 업데이트마다 `error:` 가 쌓였고**,
+/// 2026-08-29 에 그 줄들을 보고 앱의 조용한 종료와 잘못 연결지어 원인을 헛짚었다. 그래서 전환 창은 `warn`,
+/// 문구도 "stale"(틀렸다)이 아니라 "lag"(아직 안 따라왔다)으로 적는다.
+///
+/// 나머지 축은 그대로 `err` 다 — `host_id` 가 다르면 **다른 host** 가 그 자리를 차지한 것이고,
+/// codec·protocol 불일치는 버전 스큐다. 둘 다 재시도로 낫지 않는다.
 fn logStaleClient(client: client_mod.Client, expected: host_manifest.Descriptor) void {
     if (builtin.is_test) return;
     // 값까지 넣은 키로 연속 중복을 억제한다. 재시도가 500 회까지 돌 수 있으므로 이게 없으면 같은 줄이
@@ -949,22 +958,22 @@ fn logStaleClient(client: client_mod.Client, expected: host_manifest.Descriptor)
     if (client.wire_major != expected.protocol_major) return logStaleManifest("hello", .protocol_major);
     if (client.build_id == null) return logStaleManifest("hello:build_id_absent", .build_id);
     if (!std.mem.eql(u8, client.build_id.?, expected.build_id)) {
-        std.log.err(
-            "session host stale manifest: site=hello axis=build_id got={s} want={s}",
+        std.log.warn(
+            "session host manifest lag: site=hello axis=build_id got={s} want={s}",
             .{ client.build_id.?, expected.build_id },
         );
         return;
     }
     if (client.upgrade_epoch != expected.upgrade_epoch) {
-        std.log.err(
-            "session host stale manifest: site=hello axis=upgrade_epoch got={d} want={d}",
+        std.log.warn(
+            "session host manifest lag: site=hello axis=upgrade_epoch got={d} want={d}",
             .{ client.upgrade_epoch, expected.upgrade_epoch },
         );
         return;
     }
     if (!std.mem.eql(u8, client.lifecycle, @tagName(expected.lifecycle))) {
-        std.log.err(
-            "session host stale manifest: site=hello axis=lifecycle got={s} want={s}",
+        std.log.warn(
+            "session host manifest lag: site=hello axis=lifecycle got={s} want={s}",
             .{ client.lifecycle, @tagName(expected.lifecycle) },
         );
         return;
@@ -1293,8 +1302,18 @@ const TryConnectResult = union(enum) {
 
 /// `handshake_failed` 로 접히기 전에 **원래 에러**를 남긴다. 세 에러가 같은 값으로 나가므로 이 한 줄이
 /// 없으면 "상대가 아직 준비 전"과 "상대가 우리를 거부함"을 영영 구분할 수 없다.
+/// `ConnectionClosed` 는 **exec 업그레이드가 지나가는 정상 경로**다 — host 가 새 이미지로 자기를 교체하며
+/// 연결을 닫는다. 그래서 이것만 `warn` 이다. 진짜로 못 붙고 끝난 경우는 `logUpgradeNotApplied` 가 따로
+/// `err` 로 남기므로 여기서 낮춰도 실패가 조용해지지 않는다.
+///
+/// 나머지 둘은 그대로 `err` 다 — `HandshakeFailed` 는 hello 를 거부당한 것이고 `WriteFailed` 는 쓰지도
+/// 못한 것이라, 어느 쪽도 예정된 전환이 아니다.
 fn logHandshakeFailure(err_name: []const u8) void {
     if (builtin.is_test) return;
+    if (std.mem.eql(u8, err_name, "ConnectionClosed")) {
+        std.log.warn("session host peer closed during handshake: error={s}", .{err_name});
+        return;
+    }
     std.log.err("session host handshake failure: error={s}", .{err_name});
 }
 

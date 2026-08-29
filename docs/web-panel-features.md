@@ -97,5 +97,5 @@
     **뷰어(markdown)·browser 탭**만 다룬다.
 - **컨텍스트 메뉴**: WKWebView 기본 우클릭 메뉴(Inspect Element·**Reload** 포함)는 "chrome는 Zig" 원칙·보안과 충돌하고, 특히 Reload는 편집 중 WebContent를 재시작해 editor recovery latch로 파일 작업을 차단한다 → **신뢰 maru-app 콘텐츠(파일 패널 셸+렌더 iframe)의 셸 entry(`main.ts`)에서 `contextmenu` preventDefault로 억제**한다(브라우저 패널=외부 콘텐츠는 `main.ts`를 로드하지 않아 무영향). 복사·붙여넣기는 메뉴바/⌘ 단축키(§4.2)가 소유한다. maru 자체 메뉴로 대체는 후속.
 - **접근성(AX)**: WKWebView는 네이티브 AX 트리, 터미널·모달(Metal)은 없음 → 혼합 상태. 마크다운 편집기에 AX 필요.
-- **콘텐츠 프로세스 크래시 복구**: `webContentProcessDidTerminate` 시 reload·에러 상태.
+- ~~**콘텐츠 프로세스 크래시 복구**~~ → **구현 완료**(2026-08-29 재확인). `webViewWebContentProcessDidTerminate` 가 kind 로 갈라 — 신뢰 파일 패널은 `loadFreshTrustedDocument` 로 **재로드**하고, browser 패널은 `maru_macos_control_push_browser_crashed` 로 `browser.crashed` 이벤트를 흘린 뒤 컨트롤러에 알린다(5f-3c). 남은 것은 **에러 상태 화면**(사용자에게 보이는 안내)뿐이다.
 - **폰트/줌·인쇄**: 저우선.

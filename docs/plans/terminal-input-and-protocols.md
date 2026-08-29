@@ -58,7 +58,7 @@
 - **HG3 — 렌더·셰이핑 통합**: `coretext_smoke.m`/`coretext_shaper.zig`가 cluster 전체를 CTLine으로 셰이핑(글리프 합성은 CoreText), atlas cache key 정합.
 - **HG4 — 검증·fixture**: NFD `ls`·옛한글·정렬(vim/tmux/htop) fixture-oracle + 렌더 캡처.
 
-각 단계는 작은 PR(progressive enhancement, legacy 공존). **현황: 설계 완료([grapheme-clustering.md](../grapheme-clustering.md)) — 미착수. HG1부터 진행.**
+각 단계는 작은 PR(progressive enhancement, legacy 공존). **현황: HG1~HG4 + HG-후속(ZWJ GB11)까지 구현 완료**(2026-08-29 재확인 — 이 줄이 그때까지 「미착수」로 남아 있었다). 코어에 `Cell.grapheme_id` + `TerminalCore.grapheme_store`, 분절기 `src/grapheme.zig`(UAX#29 GB6/7/8 · Hangul L/V/T · `clusterEnd` · `composeHangul`), recorded oracle `nfd_hangul`, chrome cluster 경계 가드가 모두 서 있다. **남은 것과 보류는 [grapheme-clustering.md](../grapheme-clustering.md) §7 이 단일 출처다** — 옛한글 Extended-A/B(`hangulClass` 범위 밖), chrome 의 ZWJ/RI/skin-tone, page-local 회수(보류).
 
 ## VT 호환성 갭 (G1~G14 — ✅ 전부 구현 완료; 아래는 각 갭의 근거·구현 노트)
 

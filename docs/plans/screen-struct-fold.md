@@ -4,7 +4,7 @@
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§7`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§3·§5 [terminal-core-decomposition.md](../terminal-core-decomposition.md) · §0·§4·§6~§9 [분해 기록](terminal-core-decomposition.md) · §10 [Screen struct fold](screen-struct-fold.md) · §11 [page-aligned storage](page-aligned-storage.md)
 
-## 10. Screen struct fold (방향 B, 2단계) — 설계·합의 대기
+## 10. Screen struct fold (방향 B, 2단계) — B-min(B1~B3) 완결 · B-full(B4~) 진행 (헤딩 정정 2026-08-29)
 
 §2에서 미룬 **2단계**(architecture.md §"스크롤백은 화면에 귀속한다" 종착지)다. 방향 A(연산 추출)는 §5~§9로 소진됐고, 남은 건 **필드를 `Screen` 하위 struct로 접는** 구조 변경이다. 이건 함수 이동과 성격이 다르다 — 동작 변경 없는 **대규모 기계적 필드-접근 rename**(self.cells → self.screen.cells)이고, alt-screen swap 의미까지 건드린다. **고위험 단일 도약**이라 합의 후 착수한다.
 

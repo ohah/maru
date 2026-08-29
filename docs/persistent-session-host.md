@@ -278,6 +278,28 @@ GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하
      **사용자 클립보드가 복원된 셸의 입력 줄에 주입**된다.
   2. **소비는 전달에 성공한 뒤에 기록한다.** seq를 먼저 전진시키면 RPC 실패가 요청을 소비해 사용자의 복사가
      영영 사라진다.
+  3. **`observer_generation`으로 기준선을 다시 잡지 않는다.** 그 값은 재접속 표식이 아니라 **출력 revision**이다 —
+     `TerminalCore`가 PTY 바이트를 받을 때마다 올린다(`terminal/core.zig`: `if (bytes.len > 0) fetchAdd(1)`).
+     기준선은 **커서가 아직 없을 때 한 번만** 잡고(규율 1), 그 뒤로는 generation을 보지 않는다.
+
+     **왜 이 규율이 필요한가**(2026-08-29 실측·재현): 예전 `EventCursor.rebase`는 generation이 **달라질 때마다**
+     커서를 관측 값으로 덮었다. 그런데 **벨(BEL)도 OSC 52도 그 자체가 출력**이라, 이벤트가 도착하는 바로 그
+     관측에서 `bell_count`/`clipboard_write_seq`와 `observer_generation`이 **함께** 오른다. 그래서 자기 이벤트가
+     자기를 침묵시켰다 — 커서만 전진하고(규율 2 위반) 인출 RPC는 나가지 않아, host는 텍스트를 붙든 채
+     아무도 가져가지 않았다. 사용자에게는 "복사했다는데 클립보드가 안 바뀐다"로 보인다. **결정론적이다** —
+     복사는 언제나 출력이므로 두 값이 언제나 함께 오른다.
+
+     host가 exec 교체로 카운터를 0부터 다시 세는 경우는 `prepare`의 `incoming <= current` 재동기화가 흡수하므로,
+     리셋 대응을 위해 generation을 볼 이유도 없다. 같은 이유로 `commit`의 generation 비교도 두지 않는다 —
+     커서 값은 기준선 시점에 고정되는데 `Prepared`는 그 뒤 관측에서 오므로 출력이 한 번이라도 있으면 반드시
+     어긋나고, `rebase`를 고쳐도 commit이 같은 이유로 요청을 버린다.
+
+     **바뀐 계약**: 예전 테스트는 "첫 관측과 **generation 교체**를 재생하지 않는다"였다. 재생 금지가 지키려던 것은
+     **재접속 시 지난 이벤트**이고 그건 기준선 확립 하나로 달성된다 — generation 추적은 그 목적에 불필요하고
+     부작용만 냈다(사용자 결정 2026-08-29).
+
+     **새 RPC를 추가할 때의 함정**: "RPC 왕복을 사이에 두고 `observer_generation`이 그대로인지 확인한다"는 형태를
+     쓰지 않는다. 출력이 흐르는 터미널에서 그 조건은 거의 항상 거짓이라, 가져온 결과를 매번 버린다.
 - **관측에 싣는 값은 반드시 bounded여야 한다.** metadata JSON이 `max_control_json`을 넘으면 attach 응답과 metadata
   이벤트가 **영구히 실패**해 그 runtime에 접속할 수 없게 된다. OSC 52의 Pc(target)는 파서가 길이를 제한하지 않으므로
   host가 잘라서 싣고, 큰 클립보드 텍스트는 관측이 아니라 RPC로 빼되 그마저 넘치면 `too_large`로 알린다(조용한 유실 금지).

@@ -20883,6 +20883,45 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
 // [AT3] **한 배치에 두 턴이 들어오면 사본이 섞이면 안 된다.** 봉인은 배치 끝에 한 번 도는데 캡처는
 // 이벤트마다 열린 버킷에 쓴다 — `Stop` 뒤에 온 다음 턴의 `PreToolUse` 가 **끝난 턴의 사본**에 들어가면
 // 그 턴의 `✎` 와 배지가 남의 편집을 센다. AT2 가 턴 키에서 고친 것과 **같은 모양의 결함**이다.
+test "훅 턴 시각: 중단 뒤 새 프롬프트는 옛 턴의 시각을 물려받지 않는다" {
+    // **첫 구현이 여기서 틀렸다.** `turn_open` 의 불리언 경계만 보면, 중단 뒤 새 프롬프트가 올 때
+    // `reset` 이 턴을 닫았다가 같은 이벤트가 다시 열어 `true → true` 가 되고 경계가 서지 않는다.
+    // 그러면 방금 시작한 턴이 옛 턴의 시각을 그대로 들고 있어 «3 시간 열려 있다» 로 보고된다 —
+    // 하필 이 값이 가장 필요한 경우(중단으로 끊긴 턴)에서 가장 크게 틀린다.
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+
+    // 턴 1 이 열린다 — 시각이 선다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-ts" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-ts", .turn_key = "turn-1" });
+    try std.testing.expect(term.agent_hook_progress.turn_open);
+    const first_open = term.agent_hook_turn_opened_wall_ns;
+    try std.testing.expect(first_open != 0);
+
+    // **`Stop` 없이** 턴 2 가 시작된다(= 중단된 턴 뒤의 새 프롬프트). 옛 시각을 물려받으면 안 된다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-ts", .turn_key = "turn-2" });
+    try std.testing.expect(term.agent_hook_progress.turn_open);
+    try std.testing.expect(term.agent_hook_turn_opened_wall_ns != first_open);
+
+    // 턴이 닫히면 0 으로 돌아간다 — «열려 있지 않다» 를 시각으로 주장하지 않는다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .stop, .session_id = "S-ts", .turn_key = "turn-2" });
+    try std.testing.expect(!term.agent_hook_progress.turn_open);
+    try std.testing.expectEqual(@as(i96, 0), term.agent_hook_turn_opened_wall_ns);
+}
+
 test "훅 캡처: 배치 안에서 다음 턴이 시작돼도 사본이 안 섞인다 (AT3)" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();

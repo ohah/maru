@@ -1714,6 +1714,11 @@ pub fn agentHookMode(self: *AppSession, term: *Term) maru.session.agent_hook_mod
         .agent_present = term.agent_kind != .none,
     });
 }
+/// 이 시간을 넘겨 열려 있는 턴은 진단에 한 줄 남긴다. **판정에는 쓰지 않는다** — 시간으로 턴을 닫는 것은
+/// 계약이 금지한 그것이다(오래 도는 턴을 조용히 완료로 단정한다). 여기서는 «오래 열려 있다» 는 사실만 적어,
+/// 사후에 중단으로 끊긴 턴을 mtime 추정 없이 구분할 수 있게 한다.
+const turn_open_warn_ms: i96 = 10 * std.time.ms_per_s * 60; // 10 분
+
 
 /// 훅 이벤트 로그를 읽어 `term.agent_state` 를 채운다(계약 §4). 관측 모드의 `pollAgentState` 와 **같은 자리에
 /// 같은 값을 쓰는** 대신 소스만 다르다 — 그래서 사이드바·탭 라벨은 아무것도 바뀌지 않는다.
@@ -1800,6 +1805,18 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agenthook).info(
             "hook batch: count={d} dropped={d} recovered={d} more={}",
             .{ batch.count, batch.dropped, batch.recovered, batch.more },
+        );
+    }
+    // **열린 지 오래된 턴을 남긴다.** provider 는 턴 중단에 아무 이벤트도 보내지 않아(계약 «실측 신호
+    // 기록») 그런 턴은 다음 프롬프트까지 «진행 중» 으로 남는다. 그 자체는 정상 동작이지만, 사후에
+    // «얼마나 오래였나» 를 답할 근거가 없었다 — payload 에 시각이 없고 파일 mtime 은 로그 전체의 마지막
+    // 쓰기다. 이 한 줄이 그 근거다. 시각을 주장할 수 있을 때만(=backlog 가 아니었을 때) 찍는다.
+    if (diag_gate.maruDebugEnabled() and term.agent_hook_turn_opened_wall_ns != 0) {
+        const now_ns: i96 = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
+        const open_ms = @divFloor(now_ns - term.agent_hook_turn_opened_wall_ns, std.time.ns_per_ms);
+        if (open_ms >= turn_open_warn_ms) std.log.scoped(.agenthook).info(
+            "hook turn still open: {d}ms (state={s})",
+            .{ open_ms, @tagName(term.agent_state) },
         );
     }
     // **backlog 는 상태만 세우고 알리지 않는다**(계약 §4). 그 이벤트는 창이 없던 시간의 것이라 «지금 막
@@ -1913,7 +1930,31 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     const prev_state = term.agent_state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지
     // 않으면서도 마지막 자식이 끝날 때 배지가 풀린다(계약 §2).
+    const turn_open_before = term.agent_hook_progress.turn_open;
+    var key_before_buf: [@sizeOf(@FieldType(mode_mod.Progress, "turn_buf"))]u8 = undefined;
+    const key_before_src = term.agent_hook_progress.turnKey();
+    @memcpy(key_before_buf[0..key_before_src.len], key_before_src);
+    const key_before = key_before_buf[0..key_before_src.len];
     term.agent_state = mode_mod.advance(&term.agent_hook_progress, term.agent_state, ev);
+
+    // 턴이 **열리는 순간**을 찍는다(session_model 의 필드 주석 — provider payload 에 시각이 없다).
+    //
+    // **불리언 경계만 보면 안 된다.** 중단 뒤 새 프롬프트가 오면 `reset` 이 턴을 닫았다가 같은 이벤트가
+    // 다시 여니 `true → true` 라 경계가 서지 않는다 — 하필 이 값이 가장 필요한 경우이고, 그때 옛 턴의
+    // 시각이 남으면 **방금 시작한 턴이 «3 시간 열려 있다» 로** 보고된다. 그래서 **턴 정체**(turn key)가
+    // 바뀐 것도 새 턴으로 본다.
+    //
+    // backlog 따라잡기 중에는 찍지 않는다: 창이 없던 시간의 이벤트라 지금을 찍으면 몇 시간 전 턴이
+    // «방금 열렸다» 가 된다. 그 구간의 턴은 시각을 주장하지 않고 0 으로 남는다.
+    const open_now = term.agent_hook_progress.turn_open;
+    const key_now = term.agent_hook_progress.turnKey();
+    const turn_changed = !std.mem.eql(u8, key_before, key_now);
+    if (open_now != turn_open_before or (open_now and turn_changed)) {
+        term.agent_hook_turn_opened_wall_ns = if (open_now and !term.agent_hook_backlog_catchup)
+            @intCast(std.Io.Clock.real.now(self.io).nanoseconds)
+        else
+            0;
+    }
 
     // **진행 중 세부**(계약 §2). 훅 모드는 화면·프로세스 관측을 끄므로(§1.1) 이 자리를 안 채우면
     // 배지가 «진행중» 한 마디만 말한다 — 훅을 켠 사용자가 정보를 잃는다(§8).

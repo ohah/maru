@@ -16,7 +16,7 @@ pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 /// v1 슬롯 수. 어떤 뷰가 몇 번째인지는 **호출자(session)가 안다** — chrome은 도메인 enum을 모르고 자리만 센다
 /// (레이어 경계: chrome 컴포넌트는 session을 import하지 않는다). 목업의 나머지 칸은 **그리지 않는다** —
 /// 누를 수 없는 아이콘을 띄우지 않는다(§3.5).
-pub const slot_count: usize = 3;
+pub const slot_count: usize = 4;
 
 /// 슬롯 하나가 차지하는 셀 수. **아이콘이 2셀**(사이드바 에이전트 아이콘과 같은 `width=2` — 합성 아이콘은
 /// 슬롯 크기에 맞춰 스케일되므로 2칸이면 또렷하고 크다)이고 좌우 여백 1셀씩이라 4셀이다.
@@ -112,8 +112,11 @@ test "바가 접혔거나 폭이 모자라면 슬롯을 하나도 그리지 않�
     // 높이 0(낮은 도크에서 접힘)
     try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 200, .h = 0 }, 8, 0) == null);
     // 전체 슬롯이 다 안 들어가는 폭 — 일부만 그리면 눌러도 되는지 알 수 없다.
-    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 92, .h = 18 }, 8, 0) == null);
-    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 96, .h = 18 }, 8, 0) != null); // 3슬롯 × 32px = 96
+    // **폭을 `slot_count` 에서 유도한다.** 숫자를 적어 두면 뷰를 하나 더할 때 이 테스트가 계약이 아니라
+    // 옛 슬롯 수를 지키게 된다(실제로 3→4 에서 그렇게 깨졌다).
+    const slots_px: u32 = @intCast(slot_cols * 8 * slot_count);
+    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = slots_px - 4, .h = 18 }, 8, 0) == null);
+    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = slots_px, .h = 18 }, 8, 0) != null);
     try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 200, .h = 18 }, 0, 0) == null);
 }
 
@@ -143,11 +146,12 @@ test "동작 슬롯은 오른쪽 끝에 이어 붙고 뷰 슬롯과 겹치지 �
 }
 
 test "폭이 모자라면 동작을 하나도 그리지 않는다 — 뷰 전환이 먼저다" {
-    // 뷰 3슬롯(96px) + 동작 2슬롯(64px) = 160px 이 필요하다.
-    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 159, .h = 18 }, 8, 2, 0) == null);
-    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 160, .h = 18 }, 8, 2, 0) != null);
+    // 뷰 전부 + 동작 2칸이 들어갈 폭이 필요하다. 값은 `slot_count` 에서 유도한다(위 테스트와 같은 이유).
+    const need: u32 = @intCast(slot_cols * 8 * (slot_count + 2));
+    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = need - 1, .h = 18 }, 8, 2, 0) == null);
+    try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = need, .h = 18 }, 8, 2, 0) != null);
     // 그 폭에서도 뷰 슬롯은 계속 그려진다(동작만 사라진다).
-    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 159, .h = 18 }, 8, 0) != null);
+    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = need - 1, .h = 18 }, 8, 0) != null);
     try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 320, .h = 0 }, 8, 2, 0) == null);
     try testing.expect(actionRect(.{ .x = 0, .y = 0, .w = 320, .h = 18 }, 0, 2, 0) == null);
 }

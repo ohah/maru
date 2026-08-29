@@ -13,6 +13,8 @@ pub const View = enum {
     explorer,
     source_control,
     agent_sessions,
+    /// IG1: 에이전트와 주고받은 이미지 격자(docs/agent-image-gallery.md). 범위는 **활성 pane**이다.
+    image_gallery,
 
     /// 뷰 스위처 바의 **슬롯 순서**. 화면 왼쪽부터 이 차례다.
     ///
@@ -24,6 +26,7 @@ pub const View = enum {
             0 => .explorer,
             1 => .source_control,
             2 => .agent_sessions,
+            3 => .image_gallery,
             else => null,
         };
     }
@@ -34,6 +37,7 @@ pub const View = enum {
             .explorer => 0,
             .source_control => 1,
             .agent_sessions => 2,
+            .image_gallery => 3,
         };
     }
 

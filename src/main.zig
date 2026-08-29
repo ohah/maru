@@ -10835,10 +10835,9 @@ fn runAgentHooks(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고 그 아래 전부가 fork·flock·pty 다 —
-    // Windows 에 옮길 대상이 아니다. `std.c` 의 그 선언들은 그 타깃에서 **컴파일이 안 되므로**
-    // (실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지친다. 조건이
-    // comptime 이라 그 블록은 분석 자체가 안 된다(이 파일이 Win32 창 코드에 쓰는 패턴과 같다).
+    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고, 그 아래 전부가 fork·flock·
+    // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
+    // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
     if (builtin.os.tag != .windows) {
         const ah = maru.cli.agent_hooks;
         const install = maru.session.agent_hook_install;
@@ -10929,10 +10928,9 @@ fn applyRemoteHookFile(
     hooks_path: [:0]const u8,
     want_command: []const u8,
 ) !bool {
-    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고 그 아래 전부가 fork·flock·pty 다 —
-    // Windows 에 옮길 대상이 아니다. `std.c` 의 그 선언들은 그 타깃에서 **컴파일이 안 되므로**
-    // (실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지친다. 조건이
-    // comptime 이라 그 블록은 분석 자체가 안 된다(이 파일이 Win32 창 코드에 쓰는 패턴과 같다).
+    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고, 그 아래 전부가 fork·flock·
+    // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
+    // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
     if (builtin.os.tag != .windows) {
         const install = maru.session.agent_hook_install;
 
@@ -11070,88 +11068,93 @@ fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_
 
 /// `/bin/sh -c <script>` 를 돌려 stdout 을 통째로 받는다(짧은 조회 전용 — 상한 64 KiB).
 fn runShellCapture(allocator: std.mem.Allocator, script: []const u8) ![]u8 {
-    const c_sh = try allocator.dupeZ(u8, "/bin/sh");
-    defer allocator.free(c_sh);
-    const c_flag = try allocator.dupeZ(u8, "-c");
-    defer allocator.free(c_flag);
-    const c_script = try allocator.dupeZ(u8, script);
-    defer allocator.free(c_script);
-    const argv = [_:null]?[*:0]const u8{ c_sh.ptr, c_flag.ptr, c_script.ptr };
+    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고, 그 아래 전부가 fork·flock·
+    // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
+    // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
+    if (builtin.os.tag != .windows) {
+        const c_sh = try allocator.dupeZ(u8, "/bin/sh");
+        defer allocator.free(c_sh);
+        const c_flag = try allocator.dupeZ(u8, "-c");
+        defer allocator.free(c_flag);
+        const c_script = try allocator.dupeZ(u8, script);
+        defer allocator.free(c_script);
+        const argv = [_:null]?[*:0]const u8{ c_sh.ptr, c_flag.ptr, c_script.ptr };
 
-    var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return error.PipeFailed;
-    const pid = std.c.fork();
-    if (pid < 0) {
-        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
-        return error.ForkFailed;
-    }
-    if (pid == 0) {
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (devnull >= 0) {
-            _ = std.c.dup2(devnull, 0);
-            _ = std.c.close(devnull);
+        var out_pipe: [2]c_int = undefined;
+        if (std.c.pipe(&out_pipe) != 0) return error.PipeFailed;
+        const pid = std.c.fork();
+        if (pid < 0) {
+            for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+            return error.ForkFailed;
         }
-        _ = std.c.dup2(out_pipe[1], 1);
-        // ⚠️ **stderr 를 버린다.** 이 프로세스의 stdout 은 오직 wire 이고(계약), 자식의 경고가 그리로
-        // 새면 소비자의 ndjson 파서가 그 프레임을 잃는다.
-        const nullfd = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
-        if (nullfd >= 0) {
-            _ = std.c.dup2(nullfd, 2);
-            _ = std.c.close(nullfd);
+        if (pid == 0) {
+            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+            if (devnull >= 0) {
+                _ = std.c.dup2(devnull, 0);
+                _ = std.c.close(devnull);
+            }
+            _ = std.c.dup2(out_pipe[1], 1);
+            // ⚠️ **stderr 를 버린다.** 이 프로세스의 stdout 은 오직 wire 이고(계약), 자식의 경고가 그리로
+            // 새면 소비자의 ndjson 파서가 그 프레임을 잃는다.
+            const nullfd = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+            if (nullfd >= 0) {
+                _ = std.c.dup2(nullfd, 2);
+                _ = std.c.close(nullfd);
+            }
+            _ = std.c.close(out_pipe[0]);
+            _ = std.c.close(out_pipe[1]);
+            _ = std.c.execve("/bin/sh", &argv, @ptrCast(std.c.environ));
+            std.c._exit(127);
+        }
+        _ = std.c.close(out_pipe[1]);
+
+        // ⚠️ **시한을 둔다.** 예전에는 `waitpid(…, 0)` 로 그냥 기다렸는데, 그러면 **멎은 tmux 하나가 이
+        // 프로세스 전체를 멈춘다** — 하트비트도 이 루프에서 나가므로 소비자는 침묵을 사망으로 읽고(15 초)
+        // **그 호스트의 채널을 통째로 강등한다.** tmux 와 무관한 pane 까지 함께 죽는다(적대적 검증
+        // 2026-08-29 가 잡았다). 조회 하나 때문에 축 전체를 잃을 이유가 없다.
+        //
+        // 시한을 넘기면 자식을 죽이고 **빈 결과**를 돌려준다 — 순수 층이 그것을 «클라이언트 없음» 으로
+        // 접고, 그러면 파일 이름이 그대로 나가 어느 Term 과도 안 맞아 **버려진다**. 오배달보다 낫다.
+        const fl = std.c.fcntl(out_pipe[0], std.c.F.GETFL, @as(c_int, 0));
+        if (fl >= 0) _ = std.c.fcntl(out_pipe[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(allocator);
+        var tmp: [4096]u8 = undefined;
+        var waited_us: u64 = 0;
+        var timed_out = false;
+        while (true) {
+            const n = std.c.read(out_pipe[0], &tmp, tmp.len);
+            if (n > 0) {
+                try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
+                if (buf.items.len > 64 * 1024) break;
+                continue;
+            }
+            if (n == 0) break; // EOF — 자식이 끝났다
+            // EAGAIN 을 포함한 그 밖 — 잠깐 쉬었다 다시 본다.
+            if (waited_us >= maru.cli.agent_events.lookup_deadline_ms * std.time.us_per_ms) {
+                timed_out = true;
+                break;
+            }
+            _ = usleep(5 * 1000);
+            waited_us += 5 * 1000;
         }
         _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-        _ = std.c.execve("/bin/sh", &argv, @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
-    _ = std.c.close(out_pipe[1]);
-
-    // ⚠️ **시한을 둔다.** 예전에는 `waitpid(…, 0)` 로 그냥 기다렸는데, 그러면 **멎은 tmux 하나가 이
-    // 프로세스 전체를 멈춘다** — 하트비트도 이 루프에서 나가므로 소비자는 침묵을 사망으로 읽고(15 초)
-    // **그 호스트의 채널을 통째로 강등한다.** tmux 와 무관한 pane 까지 함께 죽는다(적대적 검증
-    // 2026-08-29 가 잡았다). 조회 하나 때문에 축 전체를 잃을 이유가 없다.
-    //
-    // 시한을 넘기면 자식을 죽이고 **빈 결과**를 돌려준다 — 순수 층이 그것을 «클라이언트 없음» 으로
-    // 접고, 그러면 파일 이름이 그대로 나가 어느 Term 과도 안 맞아 **버려진다**. 오배달보다 낫다.
-    const fl = std.c.fcntl(out_pipe[0], std.c.F.GETFL, @as(c_int, 0));
-    if (fl >= 0) _ = std.c.fcntl(out_pipe[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var tmp: [4096]u8 = undefined;
-    var waited_us: u64 = 0;
-    var timed_out = false;
-    while (true) {
-        const n = std.c.read(out_pipe[0], &tmp, tmp.len);
-        if (n > 0) {
-            try buf.appendSlice(allocator, tmp[0..@intCast(n)]);
-            if (buf.items.len > 64 * 1024) break;
-            continue;
+        if (timed_out) {
+            _ = std.c.kill(pid, std.c.SIG.KILL);
+            buf.clearRetainingCapacity(); // 반쪽 출력을 목록으로 읽지 않는다
         }
-        if (n == 0) break; // EOF — 자식이 끝났다
-        // EAGAIN 을 포함한 그 밖 — 잠깐 쉬었다 다시 본다.
-        if (waited_us >= maru.cli.agent_events.lookup_deadline_ms * std.time.us_per_ms) {
-            timed_out = true;
-            break;
-        }
-        _ = usleep(5 * 1000);
-        waited_us += 5 * 1000;
+        var status: c_int = 0;
+        _ = std.c.waitpid(pid, &status, 0);
+        return buf.toOwnedSlice(allocator);
     }
-    _ = std.c.close(out_pipe[0]);
-    if (timed_out) {
-        _ = std.c.kill(pid, std.c.SIG.KILL);
-        buf.clearRetainingCapacity(); // 반쪽 출력을 목록으로 읽지 않는다
-    }
-    var status: c_int = 0;
-    _ = std.c.waitpid(pid, &status, 0);
-    return buf.toOwnedSlice(allocator);
+    return error.UnsupportedPlatform;
 }
 
 fn setDirMode0700(path: []const u8) void {
-    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고 그 아래 전부가 fork·flock·pty 다 —
-    // Windows 에 옮길 대상이 아니다. `std.c` 의 그 선언들은 그 타깃에서 **컴파일이 안 되므로**
-    // (실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지친다. 조건이
-    // comptime 이라 그 블록은 분석 자체가 안 된다(이 파일이 Win32 창 코드에 쓰는 패턴과 같다).
+    // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고, 그 아래 전부가 fork·flock·
+    // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
+    // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
     if (builtin.os.tag != .windows) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         if (path.len >= buf.len) return;

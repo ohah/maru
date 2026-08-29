@@ -4,7 +4,7 @@
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§7`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§3·§5 [terminal-core-decomposition.md](../terminal-core-decomposition.md) · §0·§4·§6~§9 [분해 기록](terminal-core-decomposition.md) · §10 [Screen struct fold](screen-struct-fold.md) · §11 [page-aligned storage](page-aligned-storage.md)
 
-## 11. page-aligned storage (architecture.md 진짜 최종 골 — 설계·합의 대기)
+## 11. page-aligned storage (architecture.md 진짜 최종 골 — **A1+A2+P4 구현 완료 · B 불가로 종료**, 헤딩 정정 2026-08-29)
 
 architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈로 분리 + cursor·grid 완전한 Screen에 **page-aligned storage**를 얹는다"(+ §180 mmap/VirtualAlloc backing). 방향 A·B로 Screen 토대가 완성됐으니(grid+sb+cursor+saved_cursor 전부 Screen 귀속) 이제 그 storage 레이아웃을 바꾼다. **A·B와 성격이 다르다 — 순수 리팩터가 아니라 메모리 레이아웃·할당·성능 변경**이라 동작·perf 검증 폭이 넓고, **측정으로 전제 확인 후 단계적**으로 간다(§11.4).
 

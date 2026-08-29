@@ -224,6 +224,10 @@ fn writeText(out: []u8, raw: []const u8) usize {
                             } else continue;
                         } else continue;
                     } else if (cp >= 0xDC00 and cp <= 0xDFFF) continue;
+                    if (isControl(code)) {
+                        pending_space = w > 0;
+                        continue;
+                    }
                     const n = std.unicode.utf8Encode(code, &cp_buf) catch continue;
                     chunk = cp_buf[0..n];
                 },
@@ -260,6 +264,13 @@ fn writeText(out: []u8, raw: []const u8) usize {
         w += chunk.len;
     }
     return w;
+}
+
+/// 제어문자인가(C0 · DEL · C1). **라벨은 사용자 대화 본문**이라 무엇이든 들어올 수 있고, JSON 은
+/// 제어문자를 `\uXXXX` 로 실어 나른다. 그대로 두면 그리기 경로에 코드포인트로 들어가 글자가 아닌
+/// 것을 그리려 하고, `U+0000` 은 빈 칸으로 읽혀 **라벨이 거기서 잘린 것처럼** 보인다.
+fn isControl(cp: u21) bool {
+    return cp < 0x20 or cp == 0x7F or (cp >= 0x80 and cp <= 0x9F);
 }
 
 fn parseHex4(raw: []const u8, at: usize) ?u16 {
@@ -400,4 +411,19 @@ test "provider 상용구 `[Image #N] ` 는 벗긴다 — 사용자가 쓴 말이
         \\{"content":[{"type":"text","text":"[Image #1 아주 긴 무언가] 뒤"},{"type":"image","source":{"type":"base64","data":"
     ;
     try testing.expectEqualStrings("[Image #1 아주 긴 무언가] 뒤", label(not_marker, "").text());
+}
+
+test "제어문자는 그리기 경로로 새지 않는다 — 공백으로 접는다" {
+    // JSON 은 제어문자를 \uXXXX 로 싣는다. 그대로 두면 U+0000 이 빈 칸으로 읽혀 라벨이 거기서
+    // 잘린 것처럼 보이고, ESC 는 글자가 아닌 것을 그리려 한다.
+    const prefix =
+        \\{"content":[{"type":"text","text":"AA \\u001b[31m BB \\u0000 \\u0007 CC"},{"type":"image","source":{"type":"base64","data":"
+    ;
+    const got = label(prefix, "").text();
+    try testing.expect(std.mem.indexOfScalar(u8, got, 0x1b) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, got, 0x00) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, got, 0x07) == null);
+    // 내용은 남는다 — 통째로 버리지 않는다.
+    try testing.expect(std.mem.indexOf(u8, got, "AA") != null);
+    try testing.expect(std.mem.indexOf(u8, got, "CC") != null);
 }

@@ -58,6 +58,11 @@ pub const State = struct {
     /// **이 게이트가 없으면 vim 의 Esc 가 셸이 아니라 크게 보기를 닫는다**(에이전트 도크가 같은
     /// 이유로 같은 게이트를 둔다).
     key_focus: bool = false,
+    /// 격자 세로 스크롤. 도크의 다른 목록과 **같은 상태 타입**을 쓴다(잔여 축적·방향 전환·clamp).
+    scroll: maru.chrome.ui.scroll_area.State = .{},
+    /// `tiles` 의 첫 칸이 인덱스의 몇 번째인가. **타일은 전체가 아니라 «보이는 창»**이다 —
+    /// 실측 세션이 151 장이라 전부 들면 9 MB 를 상주시키고 3 초를 디코드에 쓴다.
+    tiles_base: usize = 0,
     /// 화면에 올린 썸네일. **인덱스와 다르다** — 인덱스는 파일 전체의 «자리» 이고 이것은 지금 보이는
     /// 칸의 «픽셀» 이다. 장당 0.06 MB 라 상한 안에서 상주해도 가볍다(계약 §5.2).
     tiles: std.ArrayList(Tile) = .empty,
@@ -95,6 +100,8 @@ pub const State = struct {
         self.resubmit = false;
         self.decoding = 0;
         self.overflow = 0;
+        self.scroll = .{};
+        self.tiles_base = 0;
     }
 
     pub fn count(self: *const State) usize {
@@ -235,6 +242,17 @@ pub fn poll(self: *AppSession) void {
     }
     self.image_gallery.hits.deinit(self.allocator);
     self.image_gallery.hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
+    // **최신이 먼저다.** 스캐너는 파일 순서(= 오래된 것부터)로 담는데, 이 기능의 물음은
+    // 「**아까** 그 스크린샷 어디 갔지」다. 실제 세션으로 재 보니 151 장 중 4 장만 보이는데
+    // 그 4 장이 세션 맨 처음 것이었다 — 목적과 정확히 반대였다(합성 픽스처는 4 장이 다 보여
+    // 이 결함을 원리적으로 못 본다).
+    std.mem.reverse(index.Hit, self.image_gallery.hits.items);
+    // **인덱스가 갈리면 그 위에 쌓인 것도 버린다.** 지금은 `refresh` 가 `clear` 를 먼저 하므로
+    // 여기 도달할 때 둘 다 비어 있지만, 그 순서에 기대면 나중에 점진 publish 를 붙이는 순간
+    // 타일과 크게 보기가 **옛 인덱스**를 가리킨 채 남는다 — 「엉뚱한 이미지가 뜬다」로 보이지
+    // 「비었다」로 보이지 않아 알아채기 어렵다. 불변식은 가정하지 말고 강제한다.
+    self.image_gallery.dropTiles(self.allocator);
+    self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.partial = result.partial;
     self.image_gallery.scanned_bytes = result.scanned_bytes;
     self.image_gallery.scan_ns = result.scan_ns;
@@ -255,7 +273,7 @@ pub fn poll(self: *AppSession) void {
 /// 장당 ~20 ms 라(계약 §5.2) 24칸을 한 프레임에 풀면 480 ms 가 멈춘다. 한 장씩 차오르게 두면 각 프레임은
 /// 한 장 몫만 쓰고 격자가 눈앞에서 채워진다. **이것은 워커의 대체가 아니라 그 전 단계다** — 한 장 20 ms 도
 /// 프레임 예산(16.7 ms)을 넘으므로, 디코드 워커는 후속에서 붙인다.
-pub fn ensureTiles(self: *AppSession, visible: usize) void {
+pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = decodeBackendPtr(self) orelse return;
     // **크게 보기가 워커를 먼저 쓴다.** 사용자가 방금 누른 것보다 아직 안 보이는 칸이 급할 리 없다.
@@ -263,9 +281,19 @@ pub fn ensureTiles(self: *AppSession, visible: usize) void {
     if (self.image_gallery.decoding != 0) return; // 이미 한 장 도는 중
     if (self.image_gallery.source.isEmpty()) return;
 
-    const want = @min(@min(visible, self.image_gallery.count()), max_tiles);
-    const next: usize = self.image_gallery.tiles.items.len;
-    if (next >= want) return;
+    // 스크롤로 창이 옮겨 갔으면 들고 있던 타일은 다른 칸의 것이다. 버리고 새 창을 채운다.
+    // **다시 디코드하는 비용을 받아들인다**(창 하나 ≈ 8장 × 20 ms). 전부 들고 있으면 실측 세션
+    // 151 장에서 9 MB 상주 · 3 초 디코드이고, LRU 를 지금 만들 근거가 없다.
+    if (first != self.image_gallery.tiles_base) {
+        self.image_gallery.dropTiles(self.allocator);
+        self.image_gallery.tiles_base = first;
+    }
+
+    const want = @min(visible, max_tiles);
+    const next_in_window: usize = self.image_gallery.tiles.items.len;
+    if (next_in_window >= want) return;
+    const next = first + next_in_window;
+    if (next >= self.image_gallery.count()) return;
 
     const hit = self.image_gallery.hits.items[next];
     if (backend.submit(
@@ -306,7 +334,8 @@ fn harvestDecoded(self: *AppSession) void {
 
     if (r.generation != self.image_gallery.decoding) return; // 늦게 온 것
     self.image_gallery.decoding = 0;
-    if (r.hit_index != self.image_gallery.tiles.items.len) return; // 순서가 어긋났다
+    // 순서를 지킨다 — **창 기준**이다. 스크롤로 창이 옮겨 갔으면 이 결과는 남의 칸 것이다.
+    if (r.hit_index != self.image_gallery.tiles_base + self.image_gallery.tiles.items.len) return;
 
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
@@ -522,7 +551,7 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     }
 
     const m = gridMetrics(self);
-    const l = image_grid.layout(gx, m, self.image_gallery.count());
+    const l = gridLayout(self);
     const px: u32 = @intFromFloat(@max(0, x_px));
     const py: u32 = @intFromFloat(@max(0, y_px));
     if (image_grid.hitTest(gx, m, l, px, py)) |n| openAt(self, n);
@@ -706,12 +735,13 @@ pub fn collectLabels(
 
     const area = gridArea(self);
     const m = gridMetrics(self);
-    const l = image_grid.layout(area, m, self.image_gallery.count());
+    const l = gridLayout(self);
     if (l.visible == 0) return;
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
-    for (self.image_gallery.tiles.items, 0..) |*tile, n| {
-        if (n >= l.visible) break;
+    for (self.image_gallery.tiles.items, 0..) |*tile, i| {
+        if (i >= l.visible) break;
+        const n = self.image_gallery.tiles_base + i;
         const text = tile.label.text();
         if (text.len == 0) continue; // 없는 설명을 지어내지 않는다 — 빈 칸이 낫다
         const rect = image_grid.labelRectAt(area, m, l, n) orelse continue;
@@ -724,6 +754,35 @@ pub fn collectLabels(
             .colors = colors,
         } });
     }
+}
+
+/// 지금 프레임의 격자 배치. **그리기·hit-test·스크롤 상한이 모두 이 하나를 쓴다** — 각자 계산하면
+/// 스크롤한 뒤 누른 자리와 열리는 것이 어긋난다.
+pub fn gridLayout(self: *const AppSession) image_grid.Layout {
+    return image_grid.layout(
+        gridArea(self),
+        gridMetrics(self),
+        self.image_gallery.count(),
+        self.image_gallery.scroll.offset_y_px,
+    );
+}
+
+/// 휠로 격자를 굴린다. 크게 보기 중에는 `wheelZoom` 이 가져가므로 여기 오지 않는다.
+pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool) bool {
+    const l = gridLayout(self);
+    if (l.max_scroll == 0) return false; // 굴릴 것이 없다 — 이벤트를 삼키지 않는다
+    // 트랙패드(precise)는 논리 픽셀, 눈금은 한 번에 한 행. 도크 목록과 같은 규약이다.
+    const unit: f64 = if (precise)
+        @as(f64, @floatFromInt(if (self.scale_milli > 0) self.scale_milli else 1000)) / 1000.0
+    else
+        @floatFromInt(gridMetrics(self).tile +| gridMetrics(self).label +| gridMetrics(self).gap);
+    // **부호를 여기서 뒤집지 않는다.** `scrollByWheel` 이 이미 `scrollByPx(-whole)` 로 뒤집으므로
+    // 한 번 더 뒤집으면 위아래가 반대가 된다(에이전트 도크도 `delta_y` 를 그대로 넘긴다).
+    if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, l.max_scroll)) {
+        self.metal_dirty = true;
+        return true;
+    }
+    return true; // 경계에서도 소비한다 — 안 그러면 제스처가 뒤 터미널로 샌다
 }
 
 /// 갤러리 타일을 프레임의 이미지 채널에 얹는다.
@@ -745,7 +804,7 @@ pub fn appendGpuImages(
 
     const area = gridArea(self);
     const m = gridMetrics(self);
-    const l = image_grid.layout(area, m, self.image_gallery.count());
+    const l = gridLayout(self);
     // **자리를 못 얻은 수를 남긴다.** 0 칸이어도(좁은 도크) 남겨야 「없다」로 거짓말하지 않는다.
     self.image_gallery.overflow = l.overflow;
 
@@ -760,8 +819,8 @@ pub fn appendGpuImages(
 
     if (l.visible == 0) return;
 
-    // 보이는 칸만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
-    ensureTiles(self, l.visible);
+    // 보이는 창만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
+    ensureTiles(self, l.first, l.visible);
 
     var new_images: std.ArrayList(metal_frame.GpuImage) = .empty;
     defer new_images.deinit(self.allocator);
@@ -770,13 +829,15 @@ pub fn appendGpuImages(
     var new_pixels: std.ArrayList(u8) = .empty;
     defer new_pixels.deinit(self.allocator);
 
-    for (self.image_gallery.tiles.items, 0..) |*tile, n| {
-        if (n >= l.visible) break;
+    for (self.image_gallery.tiles.items, 0..) |*tile, i| {
+        if (i >= l.visible) break;
+        const n = self.image_gallery.tiles_base + i; // 창 안 위치 → 절대 인덱스
         if (tile.pixels.len == 0) continue; // 못 푼 이미지는 자리만 차지하고 안 그린다
         const cell = image_grid.rectAt(area, m, l, n) orelse continue;
         // **비율을 지켜 가운데**. 늘리면 스크린샷 글자가 찌그러지고 자르면 무엇인지 못 알아본다.
         const r = image_grid.fitInside(cell, tile.width, tile.height);
-        const id: u32 = gallery_image_id_base +| @as(u32, @intCast(n));
+        // id 는 **창 안 위치**로 짓는다 — 절대 인덱스로 지으면 예약 구간(max_tiles)을 넘는다.
+        const id: u32 = gallery_image_id_base +| @as(u32, @intCast(i));
 
         new_images.append(self.allocator, .{
             .image_id = id,
@@ -790,7 +851,7 @@ pub fn appendGpuImages(
             .src_v0 = 0,
             .src_u1 = 1,
             .src_v1 = 1,
-            .z = @intCast(n),
+            .z = @intCast(i),
             .pass = 2, // above_text — 도크 배경 셀 위에 그린다
         }) catch return;
         live_ids.append(self.allocator, id) catch {};

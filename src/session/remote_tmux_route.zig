@@ -22,6 +22,13 @@ pub const Observed = struct {
     /// `$TMUX` 의 소켓 경로. 사용자가 `-L`/`-S` 를 쓰면 기본 소켓이 아니다 — 그때 기본으로 물으면
     /// **엉뚱한 서버**를 본다(2026-08-29 실측: 기본 조회가 남의 세션을 봤다).
     socket: ?[]const u8 = null,
+    /// 역조회를 **실제로 물어봤는가**. 원격에 `tmux` 바이너리가 없으면 물어보지도 못한다.
+    ///
+    /// ⚠️ **이 칸이 없으면 「못 물어봤다」와 「진짜 detached」가 같은 값이 된다**(적대적 검증 2026-08-29 이
+    /// 잡았다). 둘은 대응이 다르다 — detached 는 보류·폐기의 문제이고, 못 물어본 것은 **다시 시도하거나
+    /// 사용자에게 말할** 문제다. `ssh host cmd` 는 로그인 셸이 아니라 PATH 가
+    /// `/usr/bin:/bin:/usr/sbin:/sbin` 뿐인 경우가 흔해 Homebrew tmux 가 실제로 안 잡혔다(실측).
+    lookup_ran: bool = true,
 };
 
 /// tmux 에 물어 얻은 클라이언트 하나.
@@ -51,6 +58,7 @@ pub const Route = union(enum) {
 pub fn route(obs: Observed, clients: []const Client) Route {
     if (obs.pane == null) return .direct; // tmux 밖
     if (obs.socket == null) return .unresolved; // 어느 서버에 물을지 모른다
+    if (!obs.lookup_ran) return .unresolved; // 물어보지도 못했다 — detached 와 섞지 않는다
     if (clients.len == 0) return .detached;
 
     var found: ?[]const u8 = null;
@@ -115,4 +123,17 @@ test "detached 와 unresolved 를 섞지 않는다 — 원인이 다르면 대�
     try testing.expectEqual(Route.detached, route(.{ .pane = "%1", .socket = "/s" }, &.{}));
     // 클라이언트는 있는데 값을 못 읽음 = unresolved(권한·race — 다시 시도할 문제).
     try testing.expectEqual(Route.unresolved, route(.{ .pane = "%1", .socket = "/s" }, &.{.{ .nonce = null }}));
+}
+
+test "물어보지도 못한 것과 진짜 detached 를 구분한다 — 원인이 다르면 대응도 다르다" {
+    // 원격에 tmux 바이너리가 없으면 출력이 통째로 빈다. 그것을 detached 로 접으면 「에이전트는 도는데
+    // 볼 사람이 없다」로 잘못 읽고, 다시 시도할 기회를 잃는다(적대적 검증 2026-08-29).
+    try testing.expectEqual(Route.unresolved, route(.{ .pane = "%0", .socket = "/s", .lookup_ran = false }, &.{}));
+    // 물어봤는데 클라이언트가 0 개면 그때가 진짜 detached 다.
+    try testing.expectEqual(Route.detached, route(.{ .pane = "%0", .socket = "/s", .lookup_ran = true }, &.{}));
+}
+
+test "한 줄만 유효하면 그것으로 정한다 — 나머지가 쓰레기여도" {
+    const clients = [_]Client{ .{ .nonce = null }, .{ .nonce = "../x" }, .{ .nonce = "4331_9" }, .{ .nonce = "A B" } };
+    try testing.expectEqualStrings("4331_9", route(.{ .pane = "%0", .socket = "/s" }, &clients).resolved);
 }

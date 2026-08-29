@@ -172,6 +172,12 @@ pub fn spawnAgentEvents(
 ///
 /// `$TMUX` 소켓 경로를 받는 이유: 사용자가 `-L`/`-S` 를 쓰면 기본 소켓이 아니라 기본으로 물으면 **엉뚱한
 /// 서버**를 본다(실측에서 기본 조회가 남의 세션을 봤다).
+/// 원격에 `tmux` 바이너리가 없을 때 나가는 표식.
+///
+/// **빈 출력으로 두면 「진짜 detached」와 구분이 안 된다**(적대적 검증 2026-08-29). 순수 층은 그 둘을
+/// `unresolved` 와 `detached` 로 가르는데, 실행 측이 신호를 안 주면 그 구분이 무의미해진다.
+pub const no_tmux_marker = "!maru-no-tmux";
+
 pub fn queryTmuxClientNonces(
     allocator: std.mem.Allocator,
     ctl: []const u8,
@@ -186,12 +192,12 @@ pub fn queryTmuxClientNonces(
     // 안 잡혔다). 흔한 자리를 앞에 붙여 찾을 확률을 올리되, **못 찾으면 빈 줄이 나가 순수 층이
     // `unresolved` 로 접는다** — 그것이 안전한 실패다(오배달보다 낫다).
     const cmd = try std.fmt.allocPrint(allocator,
-        \\PATH="/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin:$PATH"; command -v tmux >/dev/null 2>&1 || exit 0;
+        \\PATH="/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin:$PATH"; command -v tmux >/dev/null 2>&1 || { echo '{s}'; exit 0; };
         \\tmux -S '{s}' display -p -t '{s}' '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do
         \\tmux -S '{s}' list-clients -t "$s" -F '#{{client_pid}}' 2>/dev/null | while IFS= read -r p; do
         \\if [ -r "/proc/$p/environ" ]; then tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^LC_MARU_PANE=//p' | head -1;
         \\else ps -E -p "$p" 2>/dev/null | tr ' ' '\n' | sed -n 's/^LC_MARU_PANE=//p' | head -1; fi; echo; done; done
-    , .{ tmux_socket, tmux_pane, tmux_socket });
+    , .{ no_tmux_marker, tmux_socket, tmux_pane, tmux_socket });
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

@@ -3799,6 +3799,17 @@ const OpenFile = struct {
     line_starts: []usize,
     /// 뷰포트 맨 위 줄. 파일마다 따로 산다 — 파일을 오갈 때 자리를 잃으면 안 된다.
     first_line: usize = 0,
+    /// 가로 스크롤 위치(열). **계약은 "가로 스크롤이 기본이고 랩은 토글"** 이다
+    /// (`native-editor-visual-mapping.md` §…: `editor.wrap` 기본 `false`).
+    first_col: u16 = 0,
+    /// 문서에서 **가장 긴 줄**의 표시 폭. 중립이 이 값으로 막대 길이를 정하고, 가로 막대를 세울지도
+    /// 이것으로 판단한다(`showsHorizontalBar`). 여는 순간 한 번 센다 — 읽기 전용이라 안 변한다.
+    max_cols: u32 = 0,
+    /// **오른쪽 끝** — 직전 프레임에서 중립이 세운 가로 막대의 `max_offset_px` 를 열로 바꾼 값이다.
+    /// 여기서 `max_cols - 보이는 열` 로 다시 세지 않는 이유: 본문은 gutter(줄 번호·접기·여백)만큼
+    /// 좁아서 그 산수가 **거터 폭만큼 어긋난다** — 실측으로 끝까지 굴려도 마지막 41 열이 안 왔다.
+    /// 막대가 없으면(넘치지 않으면) 0 이고, 그때는 굴릴 곳도 없다.
+    hmax_col: u16 = 0,
 
     /// 사이드바 카드에 뜨는 이름. **경로 안을 가리킨다**(따로 복사하지 않는다).
     fn name(self: *const OpenFile) []const u8 {
@@ -3864,11 +3875,20 @@ fn openFileFor(
 
     const starts = allocator.alloc(usize, lines.items.len) catch return .out_of_memory;
     var off: usize = 0;
+    var widest: u32 = 0;
     for (lines.items, starts) |l, *st| {
         st.* = off;
         off += l.len + 1;
+        // **표시 폭이다**(바이트 수가 아니다) — 한글·CJK 는 두 칸이라 바이트로 세면 막대가 거짓말을
+        // 한다. 폭 규약은 중립이 소유한다(`overlay_input.displayCols`).
+        // **여기까지만 센다** — 상한도 중립이 소유한다(`frame.max_cols_count_limit`: 그 너머는
+        // `max_first_col` 때문에 어차피 못 가므로 세는 것이 낭비다). 1 MB 짜리 한 줄 파일이 와도
+        // 여는 데 드는 값이 이 상한에 묶인다.
+        const limit = maru.chrome.components.editor_view.frame.max_cols_count_limit;
+        widest = @max(widest, @min(limit, maru.chrome.components.overlay_input.displayCols(l)));
+        if (widest >= limit) break;
     }
-    return .{ .opened = .{ .path = owned_path, .text = text, .lines = lines, .line_starts = starts } };
+    return .{ .opened = .{ .path = owned_path, .text = text, .lines = lines, .line_starts = starts, .max_cols = widest } };
 }
 
 /// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을
@@ -3956,6 +3976,9 @@ fn buildComposedEditor(
         .{ .x = -@as(i32, @intCast(inset)), .y = -@as(i32, @intCast(inset)), .w = rect.w, .h = rect.h },
         rect.x,
         rect.y,
+        file.first_col,
+        // **0 이면 안 준 것과 같다** — 중립은 `null` 을 "아직 안 셌다" 로 읽어 막대를 안 세운다.
+        if (file.max_cols == 0) null else file.max_cols,
         null,
         .{ .line_starts = file.line_starts, .rows = sel_rows, .buf = sel_buf, .spans = sel_spans },
     );
@@ -4718,10 +4741,39 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var editor_build_failures: usize = 0;
     var editor_scrolls: usize = 0;
     var editor_clamps: usize = 0;
+    var editor_hscrolls: usize = 0;
+    var editor_hdrags: usize = 0;
+    // **막대를 끌 수 있어야 한다.** 보이는데 안 잡히면 그것은 장식이다(#2665 가 트리 셰브런에서
+    // 받은 그 지적). 수명·흡수·중복 억제 규율은 중립이 소유한다(`scrollbar.HorizontalDrag`).
+    var hbar_drag: maru.chrome.components.editor_view.scrollbar.HorizontalDrag = .{};
+    var hbar_drag_release = false;
     var editor_atlas_growths: usize = 0;
     var editor_cells_outside_last: usize = 0;
     var editor_cells_outside_max: usize = 0;
     var editor_last_digest: u64 = 0;
+    var hscroll_judgeable = false;
+    var hscroll_col_before: u16 = 0;
+    var hscroll_col_after: u16 = 0;
+    var hscroll_max_cols: u32 = 0;
+    var hscroll_digest_before: u64 = 0;
+    var hscroll_digest_after: u64 = 0;
+    var editor_last_hbar: ?maru.chrome.components.editor_view.scrollbar.HorizontalGeometry = null;
+    var hbar_before: ?maru.chrome.components.editor_view.scrollbar.HorizontalGeometry = null;
+    var hbar_after: ?maru.chrome.components.editor_view.scrollbar.HorizontalGeometry = null;
+    var hend_col: u16 = 0;
+    var hend_max_cols: u32 = 0;
+    var hend_hbar: ?maru.chrome.components.editor_view.scrollbar.HorizontalGeometry = null;
+    var hend_hmax_before: u16 = 0;
+    var hoob_judgeable = false;
+    var hoob_col_after: u16 = 0;
+    var hoob_hmax: u16 = 0;
+    var hoob_cells: usize = 0;
+    var hdrag_judgeable = false;
+    var hdrag_col_before: u16 = 0;
+    var hdrag_col_after: u16 = 0;
+    var hdrag_thumb_before: f32 = 0;
+    var hdrag_thumb_after: f32 = 0;
+    var hdrag_drags: usize = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -5959,7 +6011,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const wy: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
             window.postSyntheticMouseWheel(.wheel, wx, wy, -3);
         };
-        if (smoke and spins == 794) if (active_view == .file) {
+        // **792 로 당겼다**(예전엔 794). 휠은 **던진 그 스핀에** 적용되므로 네 스핀을 끌 이유가
+        // 없고, 끌면 그 사이에 낀 가로 스크롤 판정의 이동까지 이 지문 차이에 섞인다 — 세로가 죽어도
+        // 가로 덕에 초록이 된다.
+        if (smoke and spins == 792) if (active_view == .file) {
             scroll_first_after = open_files.items[active_view.file].first_line;
             scroll_digest_after = editor_last_digest;
         };
@@ -6052,6 +6107,109 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_up, cx4, cy4);
         }
         // **닫은 뒤에 새로 만들면 id 가 겹치나** — 그 자리 주석이 "겹치면 안 된다" 고 못 박는다.
+        // ── 긴 줄을 가로로 굴린다 (W8.17c) ─────────────────────────────────────────────
+        //
+        // **막대가 서는지와 실제로 움직이는지를 함께 본다** — 막대만 서고 안 움직이면 죽은 컨트롤이고,
+        // 움직이기만 하고 막대가 없으면 얼마나 남았는지 알 길이 없다.
+        // **자기 순간을 챙긴다** — 앞뒤가 전부 남의 순간이다. 786 에는 곧 **두 번째 파일**이 열려
+        // 뒤에서 읽으면 다른 문서를 재고, 795 의 구분선 드래그는 터미널 폭을 바꿔 지문을 통째로
+        // 흔들며, 799 는 `first_line` 을, 802 는 활성 뷰를 바꾼다. 세로 판정을 792 로 당겨 비운
+        // **793~795** 가 이 판정의 창이다.
+        if (smoke and spins == 793 and active_view == .file) {
+            hscroll_judgeable = true;
+            hscroll_col_before = open_files.items[active_view.file].first_col;
+            hscroll_max_cols = open_files.items[active_view.file].max_cols;
+            hscroll_digest_before = editor_last_digest;
+            hbar_before = editor_last_hbar;
+            const hx: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const hy: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            // **가로 휠로 찌른다** — Shift+휠은 `GetKeyState` 로 모디파이어를 읽어(창의 규약)
+            // 합성 메시지에 실을 길이 없다. `wheel_h` 는 그 실물 경로를 그대로 밟는다.
+            window.postSyntheticMouseWheel(.wheel_h, hx, hy, 3);
+        }
+        if (smoke and spins == 794 and hscroll_judgeable and active_view == .file) {
+            hscroll_col_after = open_files.items[active_view.file].first_col;
+            hscroll_digest_after = editor_last_digest;
+            hbar_after = editor_last_hbar;
+            // ── 끝은 끝이다 ───────────────────────────────────────────────────────────
+            //
+            // **상한이 없으면 화면이 빈다.** 오른쪽으로 계속 굴리면 `first_col` 이 문서 폭을 지나
+            // 아무 글자도 없는 자리를 보게 되는데, 그때도 "굴러가긴 했다" 는 판정은 초록이다.
+            // 그래서 **끝까지 굴려** 두 가지를 본다: 폭을 안 지났는가, 그리고 중립이 세운 thumb 이
+            // **트랙 오른쪽 끝에 닿았는가**.
+            const bx: i32 = @intCast(geom.terminal.x + geom.terminal.w / 2);
+            const by: i32 = @intCast(geom.terminal.y + geom.terminal.h / 2);
+            var bi: usize = 0;
+            while (bi < 12) : (bi += 1) window.postSyntheticMouseWheel(.wheel_h, bx, by, 3);
+        }
+        if (smoke and spins == 795 and hscroll_judgeable and active_view == .file) {
+            hend_col = open_files.items[active_view.file].first_col;
+            hend_max_cols = open_files.items[active_view.file].max_cols;
+            hend_hbar = editor_last_hbar;
+            hend_hmax_before = open_files.items[active_view.file].hmax_col;
+        }
+        // ── 범위를 넘긴 열은 다음 프레임에 되돌아온다 ─────────────────────────────────
+        //
+        // 세로가 이미 겪은 실패(`first=1000000` 에서 **빈 문서**)의 가로 짝이다. 창이 넓어지면 갈 수
+        // 있는 오른쪽 끝이 줄어드는데, 휠이 올 때만 상한을 잡으면 그때까지 문서 오른쪽에 **빈
+        // 자리**가 남는다. 구분선 드래그(795)로는 이 방향을 못 만든다 — 그것은 터미널을 **좁혀**
+        // 상한을 늘린다. 그래서 세로가 쓰는 방식 그대로 **직접 넘긴 값을 넣어** 되돌아오는지 본다.
+        if (smoke and spins == 796 and hscroll_judgeable and active_view == .file) {
+            hoob_judgeable = true;
+            open_files.items[active_view.file].first_col = 10_000;
+        }
+        if (smoke and spins == 798 and hoob_judgeable and active_view == .file) {
+            hoob_col_after = open_files.items[active_view.file].first_col;
+            hoob_hmax = open_files.items[active_view.file].hmax_col;
+            hoob_cells = editor_last_cells;
+        }
+        // ── 막대를 끈다 (W8.17c) ───────────────────────────────────────────────────────
+        //
+        // **일정의 꼬리에서 한다.** 793~798 은 이미 휠 판정이 쓰고, 802 뒤로는 화면이 터미널이다.
+        // 그래서 여기서 ⑴ 탐색기로 되돌리고 ⑵ 그 파일을 다시 열고 ⑶ 막대를 끈다.
+        if (smoke and spins == 972) {
+            const vbar = geom.view_bar;
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = vbar.x, .y = vbar.y, .w = vbar.w, .h = vbar.h }, cell_w, 0)) |r0| {
+                const vx: i32 = @intCast(r0.x + r0.w / 2);
+                const vy: i32 = @intCast(r0.y + r0.h / 2);
+                window.postSyntheticMouse(.left_down, vx, vy);
+                window.postSyntheticMouse(.left_up, vx, vy);
+            }
+        }
+        if (smoke and spins == 976 and dock_view == .explorer) {
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .file) continue;
+                if (!std.mem.eql(u8, r.file.path, open_target_buf[0..open_target_len])) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const fx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const fy: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, fx, fy);
+                window.postSyntheticMouse(.left_up, fx, fy);
+                break;
+            }
+        }
+        // **thumb 을 잡아서 끈다** — 트랙 빈 자리를 누르면 "뛰기" 가 되어 다른 규칙을 재게 된다.
+        // 자리는 **그린 막대**가 준다(`editor_last_hbar`) — 여기서 산수로 잡으면 그린 자리와 갈린다.
+        if (smoke and spins == 980 and active_view == .file) if (editor_last_hbar) |bar| {
+            hdrag_judgeable = true;
+            hdrag_col_before = open_files.items[active_view.file].first_col;
+            hdrag_thumb_before = bar.thumb_x;
+            const ox: f32 = @floatFromInt(geom.terminal.x);
+            const oy: f32 = @floatFromInt(geom.terminal.y);
+            const gx: i32 = @intFromFloat(ox + bar.thumb_x + bar.thumb_w / 2);
+            const gy: i32 = @intFromFloat(oy + bar.hit_y + bar.hit_h / 2);
+            // 트랙 오른쪽 4 분의 3 지점까지 끈다.
+            const tx: i32 = @intFromFloat(ox + bar.track_x + bar.track_w * 0.75);
+            window.postSyntheticMouse(.left_down, gx, gy);
+            window.postSyntheticMouse(.moved, tx, gy);
+            window.postSyntheticMouse(.left_up, tx, gy);
+        };
+        if (smoke and spins == 984 and hdrag_judgeable and active_view == .file) {
+            hdrag_col_after = open_files.items[active_view.file].first_col;
+            hdrag_thumb_after = if (editor_last_hbar) |b| b.thumb_x else 0;
+            hdrag_drags = editor_hdrags;
+        }
         // ── 확인 모달 (W8.16b) ─────────────────────────────────────────────────────────
         //
         // **프롬프트 마크가 없는 세션**의 ✕ 를 눌러 모달을 띄운다 — 그 갈래가 §2m.77 이 "모달이
@@ -7471,8 +7629,6 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                     .cancel = maru.i18n.t(.common_cancel),
                                                 });
                                                 confirm_shows += 1;
-                                                stderr.print("MODALDBG shown open={} idx={d}{c}", .{ confirm_state.open, src.session, @as(u8, 10) }) catch {};
-                                                stderr.flush() catch {};
                                             },
                                             .last_session => session_close_last += 1,
                                             .out_of_range => {},
@@ -7803,11 +7959,37 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // **상한은 중립이 정한다**(`viewport.clampFirstRow`) — 여기서 산수로 잡으면 편집기
                 // 스모크와 갈린다.
-                if (m.kind == .wheel and active_view == .file and active_view.file < open_files.items.len) {
+                //
+                // ── 가로 축도 같은 자리에서 받는다 (W8.17c) ───────────────────────────
+                //
+                // **가로 스크롤이 기본이고 랩은 토글이다**(`native-editor-visual-mapping.md`) — 그
+                // 기본 축에 입력이 없으면 창보다 긴 줄은 **잘린 채 끝이다**. 둘로 받는다:
+                // 기울임 휠·터치패드의 `wheel_h`, 그리고 평범한 휠에 **Shift**(터미널이 이미 쓰는 관례).
+                if ((m.kind == .wheel or m.kind == .wheel_h) and active_view == .file and active_view.file < open_files.items.len) {
+                    const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
                     const notches = wheel_acc.feed(m.wheel_delta);
                     if (notches == 0) continue;
-                    const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                     const of = &open_files.items[active_view.file];
+                    if (horizontal) {
+                        // **부호가 축마다 다르다**: 세로 휠은 양수가 위(=왼쪽으로 본다), 가로 휠은
+                        // 양수가 오른쪽이다. 한 부호로 뭉치면 한쪽이 거꾸로 간다.
+                        const dir: i64 = if (m.kind == .wheel_h) notches else -@as(i64, notches);
+                        const vis_cols: u32 = @max(1, geom.terminal.w / cell_w);
+                        // 오른쪽 끝을 지나 굴리지 않는다 — 마지막 글자가 왼쪽 끝에 닿으면 거기가 끝이다.
+                        // **끝을 여기서 세지 않는다** — 그린 막대가 알려 준 값을 쓴다(`hmax_col`).
+                        // 산수를 여기 두면 거터 폭을 빼먹어 마지막 열들이 영영 안 온다(실측).
+                        const max_col: u32 = of.hmax_col;
+                        // 한 눈금에 뷰포트 1/4 — 세로가 시스템 설정(줄 수)을 따르는 것과 달리 가로에는
+                        // 그런 설정이 없다. 너무 작으면 긴 줄 끝까지 수십 번을 굴려야 한다.
+                        const step: i64 = dir * @as(i64, @intCast(@max(1, vis_cols / 4)));
+                        const capped: u16 = @intCast(std.math.clamp(@as(i64, of.first_col) + step, 0, @as(i64, max_col)));
+                        if (capped != of.first_col) {
+                            of.first_col = capped;
+                            editor_hscrolls += 1;
+                        }
+                        continue;
+                    }
+                    const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                     const vis: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), @max(1, geom.terminal.h / cell_h)));
                     const next: i64 = @as(i64, @intCast(of.first_line)) - @as(i64, lines);
                     const max_top = editor_view.viewport.clampFirstRow(std.math.maxInt(usize), of.lines.items.len, vis);
@@ -7826,10 +8008,38 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 //
                 // 지금 이 뷰는 읽기 전용이라 삼킨다. 편집기 히트테스트(§2m.24)는 이미 중립에 있고,
                 // 캐럿·선택 모델이 붙는 슬라이스에서 여기에 이어 붙이면 된다.
+                // ── 가로 막대를 끈다 (W8.17c) ─────────────────────────────────────────
+                //
+                // **좌표는 pane 로컬이다** — 중립이 그 사각 안에서 막대를 세웠고(`buildComposedEditor`
+                // 의 `inner`), 그린 자리와 잡히는 자리의 주인이 둘이 되면 안 된다.
+                if (active_view == .file and active_view.file < open_files.items.len) {
+                    const of = &open_files.items[active_view.file];
+                    const lx = @as(f64, @floatFromInt(m.x_px)) - @as(f64, @floatFromInt(geom.terminal.x));
+                    const ly = @as(f64, @floatFromInt(m.y_px)) - @as(f64, @floatFromInt(geom.terminal.y));
+                    switch (m.kind) {
+                        .left_down => if (editor_last_hbar) |bar| {
+                            // thumb 밖을 누르면 **그 자리로 뛴 뒤** 잡은 것으로 친다(중립 규칙).
+                            if (hbar_drag.begin(bar, lx, ly)) |jumped| {
+                                of.first_col = @intCast(@min(@as(u32, of.hmax_col), jumped / @max(1, cell_w)));
+                                editor_hdrags += 1;
+                            }
+                        },
+                        .moved => hbar_drag.absorb(lx, ly),
+                        // **여기서 끝내지 않는다.** 뗀 순간에 `end` 하면 마지막으로 흡수한 자리가
+                        // tick 에 닿기 전에 사라진다 — 빠른 플릭이 통째로 무시된다(실측: 합성
+                        // 제스처가 한 스핀에 다 들어와 `drags=0` 이었다). 적용은 tick 이 하고,
+                        // 그 다음에 끝낸다.
+                        .left_up, .capture_lost => hbar_drag_release = true,
+                        else => {},
+                    }
+                }
                 if (active_view == .file) {
                     mouse_over_file += 1;
                     continue;
                 }
+                // **가로 축을 가진 표면이 아직 편집기뿐이다.** 여기까지 오면 버린다 — 안 버리면
+                // 아래 리포트 변환의 `unreachable` 에 걸린다(터미널에는 가로 휠 리포트가 없다).
+                if (m.kind == .wheel_h) continue;
                 if (m.kind == .wheel) {
                     // **눈금과 줄을 가른다.** 리포팅은 xterm 규약상 눈금당 한 번이고, 사용자 설정
                     // (`SPI_GETWHEELSCROLLLINES`)은 로컬 스크롤백이 한 눈금에 몇 줄을 갈지 정하는 값이다.
@@ -7933,8 +8143,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         .middle_down, .middle_up => win32_mouse.button_middle,
                         .right_down, .right_up => win32_mouse.button_right,
                         .moved => if (dragging) win32_mouse.button_left else win32_mouse.button_none,
-                        // 둘 다 위에서 이미 `continue` 했다.
-                        .wheel, .capture_lost => unreachable,
+                        // 셋 다 위에서 이미 `continue` 했다(가로 휠은 터미널 리포트에 없다).
+                        .wheel, .wheel_h, .capture_lost => unreachable,
                     };
                     const pressed = switch (m.kind) {
                         .left_up, .right_up, .middle_up => false,
@@ -8247,6 +8457,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     of.first_line = capped;
                     editor_clamps += 1;
                 }
+                // **가로도 같다.** 창이 넓어지면 갈 수 있는 오른쪽 끝이 줄어드는데, 휠이 올 때만
+                // 잡으면 그때까지 문서 오른쪽에 **빈 자리**가 남는다(세로가 겪은 그 실패의 짝).
+                // **끌던 막대를 여기서 적용한다**(중립이 말하는 tick) — move 마다 적용하면 한
+                // 프레임에 수십 번 다시 그린다. `takeOffset` 은 결과가 같으면 `null` 을 준다.
+                if (hbar_drag.takeOffset()) |off| {
+                    const want: u32 = @min(@as(u32, of.hmax_col), off / @max(1, cell_w));
+                    if (want != of.first_col) {
+                        of.first_col = @intCast(want);
+                        editor_hdrags += 1;
+                    }
+                }
+                if (hbar_drag_release) {
+                    hbar_drag.end();
+                    hbar_drag_release = false;
+                }
+                // 상한은 **직전 프레임의 막대**가 준다(아래 `hmax_col`) — 첫 프레임에는 0 이라
+                // 못 굴리지만, 그 프레임이 그려지는 즉시 열린다.
+                if (of.first_col > of.hmax_col) {
+                    of.first_col = of.hmax_col;
+                    editor_clamps += 1;
+                }
             }
             const ed_host = EditorHost{
                 .renderer_state = &renderer_state,
@@ -8267,6 +8498,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 editor_last_cells = be.cells.items.len;
                 editor_last_rows = be.written.visual_rows;
                 editor_last_digest = d3d11_cells.cellsDigest(be.cells.items);
+                // **중립이 세운 가로 막대를 그대로 들고 있는다** — 여기서 자리를 다시 계산하면
+                // 그린 것과 판정이 갈린다(막대 자리의 주인은 하나다).
+                editor_last_hbar = be.written.horizontal_scrollbar;
+                // **갈 수 있는 오른쪽 끝은 그린 막대가 안다.** `max_offset_px` 는 중립이 thumb 을
+                // 세운 그 값이라(`scroll_area.thumbSpan`), 여기서 `max_cols - 보이는 열` 을 다시
+                // 세면 **거터 폭만큼 어긋난다** — 실측으로 끝까지 굴려도 마지막 41 열이 안 왔고
+                // thumb 이 트랙 오른쪽에 **안 닿았다**(`thumb_right=310 track_right=342`).
+                of.hmax_col = if (be.written.horizontal_scrollbar) |b|
+                    @intCast(@min(
+                        @as(u32, maru.chrome.components.editor_view.frame.max_first_col),
+                        b.max_offset_px / @max(1, cell_w),
+                    ))
+                else
+                    0;
                 // **자기 사각형 밖으로 나간 셀을 센다**(도크가 이미 쓰는 그 검사). 원점이 틀리면
                 // 화면은 이상한데 개수·행 수 판정은 조용하다 — 편집기는 사이드바·도크보다 **뒤에**
                 // 그려지므로 새면 그것들을 덮는다.
@@ -8334,8 +8579,6 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 곧 "무엇을 못 누르는가" 라, 입력 삼킴과 같은 자리에 있어야 한다.
         confirm_cells_drawn = 0;
         if (confirm_state.open) {
-            stderr.print("MODALDBG draw{c}", .{@as(u8, 10)}) catch {};
-            stderr.flush() catch {};
             if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
                 confirm_cells_drawn = n_drawn;
                 // **그린 셀에서 상자의 가로 중앙을 도로 읽는다** — 내가 넘긴 값을 되읽으면 동어반복이다.
@@ -8884,6 +9127,55 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
     } else {
         try stdout.print("spawn_while_file=unjudgeable reason=no_file_active_or_session_cap\n", .{});
+    }
+    if (hscroll_judgeable) {
+        // **그린 것이 실제로 바뀌었는지**까지 본다 — `first_col` 만 보면 내가 넣은 값을 되읽는다.
+        try stdout.print("editor_hscroll: col {d}->{d} max_cols={d} hscrolls={d} digest {x}->{x} editor_hscroll_ok={}\n", .{
+            hscroll_col_before,
+            hscroll_col_after,
+            hscroll_max_cols,
+            editor_hscrolls,
+            hscroll_digest_before,
+            hscroll_digest_after,
+            hscroll_max_cols > 0 and hscroll_col_after > hscroll_col_before and
+                hscroll_digest_after != hscroll_digest_before,
+        });
+        // **막대가 서고, 그 thumb 이 따라 움직였는가.** 굴러가기만 하고 막대가 없으면 얼마나 남았는지
+        // 알 길이 없고, 막대만 서고 안 따라오면 그것은 장식이다.
+        try stdout.print("editor_hbar: before={?d:.1} after={?d:.1} track={?d:.1} hbar_ok={}\n", .{
+            if (hbar_before) |b| b.thumb_x else null,
+            if (hbar_after) |b| b.thumb_x else null,
+            if (hbar_after) |b| b.track_w else null,
+            hbar_before != null and hbar_after != null and hbar_after.?.thumb_x > hbar_before.?.thumb_x,
+        });
+        const thumb_right: f32 = if (hend_hbar) |b| b.thumb_x + b.thumb_w else 0;
+        const track_right: f32 = if (hend_hbar) |b| b.track_x + b.track_w else 0;
+        try stdout.print("editor_hend: col={d} max_cols={d} thumb_right={d:.1} track_right={d:.1} hend_ok={}\n", .{
+            hend_col,
+            hend_max_cols,
+            thumb_right,
+            track_right,
+            hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
+                @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("editor_hdrag: col {d}->{d} thumb {d:.1}->{d:.1} drags={d} hdrag_ok={}\n", .{
+            hdrag_col_before,
+            hdrag_col_after,
+            hdrag_thumb_before,
+            hdrag_thumb_after,
+            hdrag_drags,
+            // **끌린 자리와 그려진 막대가 같이 움직였는가.** 값만 움직이고 막대가 제자리면 사용자는
+            // 자기가 무엇을 잡고 있는지 못 본다.
+            hdrag_judgeable and hdrag_col_after > hdrag_col_before and hdrag_thumb_after > hdrag_thumb_before,
+        });
+        try stdout.print("editor_hoob: col={d} hmax={d} cells={d} hoob_ok={}\n", .{
+            hoob_col_after,
+            hoob_hmax,
+            hoob_cells,
+            // **판이 통째로 비지는 않았는가**까지 본다 — 값만 되돌리고 화면이 비면 고친 것이 아니다.
+            // (줄 번호까지 포함한 수다 — 본문이 몇 글자 남았는지까지는 이 값으로 못 잰다.)
+            hoob_judgeable and hoob_hmax > 0 and hoob_col_after == hoob_hmax and hoob_cells > 0,
+        });
     }
     if (scroll_judgeable) {
         try stdout.print("editor_scroll: first {d}->{d} scrolls={d} digest {x}->{x} editor_scroll_ok={}\n", .{
@@ -10887,6 +11179,8 @@ fn buildEditorFrame(
     bg: maru.chrome.draw.Rect,
     origin_x: u32,
     origin_y: u32,
+    first_col: u16,
+    content_max_cols: ?u32,
     sel: ?EditorSelRange,
     ss: anytype,
 ) !EditorBuilt {
@@ -10907,9 +11201,19 @@ fn buildEditorFrame(
     }
 
     const w = editor_view.diff_frame.buildSide(
-        .{ .lines = ls, .total_lines = ls.len, .selection_marks = sel_marks },
+        .{
+            .lines = ls,
+            .total_lines = ls.len,
+            .selection_marks = sel_marks,
+            // 가로 스크롤은 **쪽마다**다(그 필드 doc: 공유하면 반대쪽이 엉뚱한 곳을 본다).
+            .first_col = first_col,
+            // 가장 긴 줄의 표시 폭 — 막대 길이와 "막대를 세울지" 를 중립이 이것으로 정한다.
+            .content_max_cols = content_max_cols,
+        },
         .{
             .first_line = first_line,
+            // **랩은 토글이고 기본은 끔**(`native-editor-visual-mapping.md`) — 그래서 가로 스크롤이
+            // 축이 되고, 중립이 그 축으로 막대를 세운다(`showsHorizontalBar`).
             .wrap = false,
             .tab_width = 4,
             .cell_w_px = @intCast(cw),
@@ -11233,7 +11537,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     // 조용히 어긋난다 — 그 필드 doc 이 경고하는 자리가 정확히 이것이다.
     var max_top: usize = 0;
     {
-        var probe = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
+        var probe = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch);
         defer probe.deinit(allocator);
         max_top = probe.written.max_top_line;
     }
@@ -11245,7 +11549,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else
                 before -| @as(usize, @intCast(-delta));
 
-            var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
+            var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch);
             defer built.deinit(allocator);
             const r = try judge(allocator, built.frame, lines.items, first_line, built.written.visual_rows);
             script_steps += 1;
@@ -11295,7 +11599,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
         // 3 번 줄 5 바이트에서 6 번 줄 2 바이트까지.
         const lo = line_starts[3] + 5;
         const hi = line_starts[6] + 2;
-        var built_sel = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, .{ .lo = lo, .hi = hi }, sel_scratch);
+        var built_sel = try buildEditorFrame(allocator, EditorHost.fromHost(&host), 0, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, .{ .lo = lo, .hi = hi }, sel_scratch);
         defer built_sel.deinit(allocator);
 
         // **기대값을 여기서 따로 센다** — 중립 함수를 안 부르고, 줄 범위가 겹치는지만 본다.
@@ -11339,7 +11643,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
     var drag_anchor: ?usize = null;
     var sel_range: ?EditorSelRange = null;
     var caret_at: ?editor_view.hit.Point = null;
-    var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch);
+    var built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, sel_range, sel_scratch);
     defer built.deinit(allocator);
     var frames: usize = 0;
     var wheel_events: usize = 0;
@@ -11403,7 +11707,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
             else => {},
         };
         if (dirty) {
-            var next_built = buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, sel_range, sel_scratch) catch built;
+            var next_built = buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, sel_range, sel_scratch) catch built;
             if (next_built.cells.items.ptr != built.cells.items.ptr) {
                 built.deinit(allocator);
                 built = next_built;
@@ -11417,7 +11721,7 @@ fn runWin32EditorDrawSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *st
                 first_line -| @as(usize, @intCast(-scroll));
             if (next != first_line) {
                 first_line = next;
-                const next_built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, null, sel_scratch);
+                const next_built = try buildEditorFrame(allocator, EditorHost.fromHost(&host), first_line, lines.items, scratch, ops, &tokens, colors, view, inner, cell_w, cell_h, grid, smoke_editor_bg, 0, 0, 0, null, null, sel_scratch);
                 built.deinit(allocator);
                 built = next_built;
             }

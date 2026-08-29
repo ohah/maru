@@ -1259,3 +1259,139 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 | E4 | MCP·커스텀 도구 | `tool_input` 스키마가 제각각이라 경로를 일반적으로 못 뽑는다 | §9-5a 한계로 명시(tree가 잡으므로 유실 아님, 배지만 강등) |
 | E5 | 관측을 끄는 범위 | `agent_kind` 판정은 프로세스 관측이 하고, **그것을 알아야 훅 모드인지 판정**한다 — 끄면 순환 | §1.1에 «끄는 것은 state 입력이지 kind 판정이 아니다» |
 | E6 | D2 대응의 부작용 | "상한을 낮게 두어 잔존을 줄인다"고 했는데 **상한을 낮추면 회전이 잦아져 유실 창이 자주 열린다** | 트레이드오프 명시 + 값은 AH6 측정으로 |
+## 11. 원격(SSH) 세션 — 훅 모드가 성립하지 않는다, 그래서 OSC 가 산다
+
+**실측 2026-08-29.** claude 2.1.250, codex 0.149.0·0.150.1 을 pty 로 띄워 원시 바이트를 떠서
+확인했다. 이 절의 모든 «된다/안 된다» 는 그 캡처가 근거다.
+
+### 11.1 원격에서는 훅 모드가 **구조적으로** 안 선다
+
+세 겹이라 하나만 있어도 막힌다.
+
+1. **모드 판정이 애초에 후보로 안 넣는다.** `agent_hook_mode.modeFor` 의 첫 줄이
+   `if (!probe.agent_present) return .observe` 인데, ssh 너머 원격 process tree 는 로컬에서 안 보여
+   `agent_kind` 가 `none` 이다([agent-session.md](agent-session.md) «agent kind 판정»).
+2. **훅 로그 경로의 두 칸이 원격에 없다.** `MARU_HOOK_INSTANCE`(그 GUI 프로세스 pid)·`MARU_HOOK_PANE`
+   (§4)은 maru 가 **자기가 띄운 pty 에만** 주입하는 예약 키다. 우리 훅 커맨드를 원격에 그대로 복사해도
+   첫 `case` 에서 아무 일 없이 `exit 0` 한다.
+3. **경로가 로컬 절대경로로 박혀 있다.** platform 이 `<cache>/maru/agent-turn-events` 를 미리 만들어
+   그 절대 경로를 커맨드에 넣는다(§4.1). 원격에서 실행되면 **원격 디스크**에 쌓이고 maru 는 로컬 캐시를 읽는다.
+
+**그리고 이것이 손해가 아니라 이 절이 성립하는 이유다.** SSH pane 은 항상 관측 모드로 남으므로
+§1.1 이 훅 모드에서 버리는 **OSC 9/777 알림이 그대로 산다.** 두 경로가 서로를 밟지 않는다.
+
+### 11.2 `maru ssh` 와 무관하다
+
+원격 알림은 **pty 를 타고 오는 바이트**일 뿐이라 접속 방법을 가리지 않는다. 그냥 `ssh` 로 붙어도 같다.
+`notificationLocation` 은 탭·Term 라벨만 보고 `ssh_remote_dest` 를 안 본다(그 관측치를 쓰는 것은 드롭
+업로드 쪽이다 — [ssh-integration.md](ssh-integration.md) §4).
+
+`maru ssh` 가 필요한 것은 terminfo 전파·`COLORTERM`·OSC 5379 원격 인식이지 알림이 아니다.
+
+### 11.3 provider 마다 길이 다르다 — 세트가 다른 것과 같은 축이다
+
+§2 가 «이벤트 세트는 provider 마다 다르다» 를 말했다. **훅 출력 필드와 훅 실행 환경도 같은 축에서 갈린다.**
+
+| | claude | codex |
+| --- | --- | --- |
+| 완료 알림 | `preferredNotifChannel` | `[tui] notifications` |
+| 훅에서 임의 OSC | **`terminalSequence` 출력 필드** | ✗ 필드 없음 |
+| 훅의 제어 터미널 | **없다** — `/dev/tty` 못 연다 | **있다** — `/dev/tty` 로 쓴다 |
+| 훅 실행 전 승인 | 없다 | **있다** — `trusted_hash` |
+
+**두 provider 가 서로 다른 길로 같은 곳에 도착한다.** claude 는 훅에 ctty 가 없어서 정식 출력 필드가
+필요했고, codex 는 ctty 가 있어서 그 필드가 없어도 된다. **`terminalSequence` 부재는 기능 결손이 아니다** —
+이것을 «codex 가 못 한다» 로 적으면 다음 사람이 없는 문제를 고치러 간다.
+
+### 11.4 claude — `preferredNotifChannel` 과 `terminalSequence`
+
+**⑴ 완료 알림.** 원격 `~/.claude/settings.json` 에 채널을 **명시해야** 한다.
+
+```json
+{ "preferredNotifChannel": "ghostty" }
+```
+
+명시가 필요한 이유가 SSH 에 있다. maru 는 자식 pty 에 `TERM_PROGRAM=ghostty` 를 주입해
+(`pty/macos.zig`) provider 의 `auto` 판정이 걸리게 해 두는데, **ssh 는 그 변수를 안 넘긴다.** 그래서 원격의
+`auto` 는 `no_method_available` 로 죽는다([ssh-integration.md](ssh-integration.md) §1 의 `COLORTERM` 과
+같은 기전이다).
+
+값은 `ghostty`(OSC 777) 또는 `iterm2`(OSC 9). 실측 캡처:
+
+```
+\x1b]777;notify;Claude Code;Claude is waiting for your input
+```
+
+**발화 시점은 턴 종료가 아니라 무입력 60 초 뒤**(`messageIdleNotifThresholdMs` 기본 60000)다. 즉시 알림을
+원하면 ⑵ 를 쓴다.
+
+**⑵ 임의 알림 — `terminalSequence`.** 훅 출력 JSON 의 top-level 필드다. 스펙 원문:
+
+> `terminalSequence`: A terminal escape sequence (e.g. OSC 9 / OSC 777 desktop-notification) for Claude Code
+> to emit on your behalf. Only notification/title OSCs (0, 1, 2, 9, 99, 777) and BEL are permitted.
+
+- 허용 밖은 버려지고, **OSC 9 body 는 숫자로 시작할 수 없다**(`9;4` progress 형태만 예외) — maru
+  `osc.zig` 의 `isNotify9Body`/ConEmu 서브커맨드 처리와 **같은 규칙**이라 그대로 들어온다.
+- **tmux/screen passthrough 를 claude 가 자기가 붙인다.** 훅이 raw OSC 를 주면 된다.
+- **훅이 `/dev/tty` 를 직접 열 수는 없다**(실측: `tty` → `not a tty`, `/dev/tty` → `Device not configured`,
+  프로세스 트리를 거슬러 찾은 tty 도 `Operation not permitted`). 이 필드가 있는 이유가 그것이다.
+
+### 11.5 codex — `[tui] notifications` 와 훅의 `/dev/tty`
+
+**⑴ 완료 알림.** 원격 `~/.codex/config.toml`:
+
+```toml
+[tui]
+notifications = true
+notification_method = "osc9"        # osc9 | bel | system | external
+notification_condition = "always"   # unfocused | always
+```
+
+- 타입명이 바이너리에 그대로 있어 값이 확정된다(`NotificationMethod`·`NotificationCondition`).
+- **발화 사건은 `agent-turn-complete` 하나다.** `approval-requested` 계열은 없다 — 내장 경로로는
+  «승인 대기» 를 못 만든다.
+- OSC 9 를 쓰고 tmux passthrough(`ESC Ptmux;`)도 자기가 붙인다.
+
+**⑵ 임의 알림 — 훅에서 직접 쏜다.** codex 훅에는 제어 터미널이 있다(실측 `DEVTTY_OK`).
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command",
+  "command": "printf '\\033]777;notify;…\\033\\\\' > /dev/tty 2>/dev/null || true" } ] } ] } }
+```
+
+`~/.codex/hooks.json` 에 적는다(§5 가 소유하는 그 파일). **이벤트 이름은 PascalCase** 다.
+
+**⚠️ 훅마다 신뢰 승인이 필요하다.** 처음 보는 훅이면 codex 가 TUI 에서 묻고, 승인해야 돈다:
+
+```
+Hooks need review — 1 hook is new or changed
+  1. Review hooks   2. Trust all and continue   3. Continue without trusting (hooks won't run)
+```
+
+승인하면 `config.toml` 에 항목별로 남는다:
+
+```toml
+[hooks.state."<hooks.json 경로>:stop:0:0"]
+trusted_hash = "sha256:…"
+```
+
+**해시가 항목 단위**라 커맨드를 고치면 다시 묻는다. §3 이 «세트를 늘리면 codex 재승인» 이라고 적은 그
+비용이고, 원격에서는 **그 기계에서 사용자가 한 번 눌러야** 한다는 뜻이 된다(2026-08-29 사용자 확인:
+원격에서 사용자가 직접 승인하므로 이 관문은 수용한다).
+
+### 11.6 배지·상태는 여전히 원격에서 못 얻는다
+
+이 절이 여는 것은 **알림 하나**다. `running`/`blocked`/`idle` 배지는 §11.1 의 세 겹이 그대로 막는다.
+그것까지 가려면 원격 이벤트를 로컬로 나르는 축이 필요하고, 그 전송은
+[컨트롤 플레인 §4a](control-plane.md) 가 정한 규율을 따른다 — **포워딩이 아니라 `exec` 채널**이다
+([control-plane-security.md](control-plane-security.md) §8.7). 그 축은 아직 설계 전이다.
+
+**적대적 검증에서 나온, 그 축이 반드시 다뤄야 할 것 셋**(2026-08-29 실측):
+
+- **종료 코드로 채널 사망을 판정할 수 없다.** 정상 종료와 서버 사망이 둘 다 `0`, master 사망과 원격의 진짜
+  255 가 둘 다 `255` 로 겹치고 stderr 는 비어 있다. **하트비트로 침묵을 재는 수밖에 없다.**
+- **`ForceCommand`·`authorized_keys` 의 `command=` 서버는 우리 명령을 갈아치우고 `exit 0` 을 준다.**
+  성공한 척하므로 `hello` 를 상한 안에서 찾아 확인해야 한다(§4a 의 5 초·64 KiB 규약을 그대로 쓴다).
+- **`MaxSessions` 기본값이 10 이고 다중화도 여기 포함된다.** pane 당 터미널 1 + 채널 1 이면 같은 호스트
+  **pane 5 개가 상한**이고, 넘으면 `Session open refused by peer` 와 함께 255 로 죽는다 — 위 사망 판정과
+  값이 겹친다.

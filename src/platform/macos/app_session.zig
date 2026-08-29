@@ -72071,7 +72071,6 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 }
 
-
 test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드한다 (IG3-b)" {
     // **인덱스가 «자리» 만 든다는 계약의 반대편이다.** 오프셋이 한 바이트라도 어긋나면 base64 가
     // 깨지거나 다른 이미지가 나오는데, 개수만 세는 test 는 그것을 못 본다.
@@ -72136,7 +72135,6 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
     try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 1) == null);
     try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 999) == null);
 }
-
 
 test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG3-c2)" {
     // **디코드까지 본 test 와 다른 것을 본다.** 픽셀이 나오는 것과 «그 픽셀이 화면 채널에 실리는 것» 은

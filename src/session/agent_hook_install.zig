@@ -201,9 +201,9 @@ fn entryIsCurrent(
     return have_matcher == null;
 }
 
-/// 그 provider 의 세트에서 이 이벤트를 찾는다(없으면 «세트 밖»).
-fn setEventIndex(provider: command.Provider, name: []const u8) ?usize {
-    for (command.eventsFor(provider, .local), 0..) |e, i| {
+/// 그 provider·scope 의 세트에서 이 이벤트를 찾는다(없으면 «세트 밖»).
+fn setEventIndex(provider: command.Provider, scope: command.Scope, name: []const u8) ?usize {
+    for (command.eventsFor(provider, scope), 0..) |e, i| {
         if (std.mem.eql(u8, e.name, name)) return i;
     }
     return null;
@@ -214,14 +214,14 @@ fn setEventIndex(provider: command.Provider, name: []const u8) ?usize {
 ///
 /// **모양을 모르면 `null` 을 돌려준다.** 배열이어야 할 자리에 문자열이 있는 파일은 우리가 아는 파일이 아니고,
 /// 거기에 쓰면 사용자 설정을 우리 해석대로 뭉갠다. 호출자는 이것을 `State.unreadable` 로 접어 손대지 않는다.
-pub fn scan(provider: command.Provider, hooks_value: ?std.json.Value, want_command: []const u8) ?Known {
+pub fn scan(provider: command.Provider, scope: command.Scope, hooks_value: ?std.json.Value, want_command: []const u8) ?Known {
     var known: Known = .{};
     const hooks = switch (hooks_value orelse return known) {
         .object => |o| o,
         // 키는 있는데 객체가 아니다 — 우리가 아는 모양이 아니다.
         else => return null,
     };
-    const set = command.eventsFor(provider, .local);
+    const set = command.eventsFor(provider, scope);
     // 세트 크기는 provider 마다 다르므로 최대치로 잡고 앞부분만 쓴다(순수 층이라 할당하지 않는다).
     var covered = [_]bool{false} ** max_events;
     for (hooks.keys(), hooks.values()) |name, groups_value| {
@@ -229,7 +229,7 @@ pub fn scan(provider: command.Provider, hooks_value: ?std.json.Value, want_comma
             .array => |arr| arr,
             else => return null,
         };
-        const set_index = setEventIndex(provider, name);
+        const set_index = setEventIndex(provider, scope, name);
         const want_matcher: ?[]const u8 = if (set_index) |i| set[i].matcher else null;
         for (groups.items) |group_value| {
             const group = switch (group_value) {
@@ -376,8 +376,8 @@ fn stripOurs(a: std.mem.Allocator, hooks: *std.json.ObjectMap) ApplyError!void {
 }
 
 /// 세트대로 우리 항목을 **배열 끝에** 붙인다. 사용자 항목이 앞에 그대로 남는다.
-fn appendOurs(provider: command.Provider, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8) ApplyError!void {
-    for (command.eventsFor(provider, .local)) |e| {
+fn appendOurs(provider: command.Provider, scope: command.Scope, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8) ApplyError!void {
+    for (command.eventsFor(provider, scope)) |e| {
         var entry: std.json.ObjectMap = .empty;
         try entry.put(a, "type", .{ .string = "command" });
         try entry.put(a, "command", .{ .string = want_command });
@@ -410,9 +410,9 @@ pub const Mode = enum { install, remove };
 /// 계약이 요구하는 **한 번의 쓰기**가 이렇게 성립한다(중간 상태가 파일에 닿지 않는다).
 ///
 /// 적용 뒤 `hooks` 가 비면 호출자가 그 키를 지운다(빈 객체를 남기지 않는다).
-pub fn apply(provider: command.Provider, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8, mode: Mode) ApplyError!void {
+pub fn apply(provider: command.Provider, scope: command.Scope, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8, mode: Mode) ApplyError!void {
     try stripOurs(a, hooks);
-    if (mode == .install) try appendOurs(provider, a, hooks, want_command);
+    if (mode == .install) try appendOurs(provider, scope, a, hooks, want_command);
 }
 
 const testing = std.testing;
@@ -604,7 +604,7 @@ fn runClaude(a: std.mem.Allocator, json_text: []const u8, want_command: []const 
         .object => |o| o,
         else => return error.Unrecognized,
     };
-    try apply(.claude, a, &hooks, want_command, mode);
+    try apply(.claude, .local, a, &hooks, want_command, mode);
     if (hooks.count() == 0) {
         _ = root.orderedRemove("hooks");
     } else {
@@ -624,7 +624,7 @@ fn scanText(a: std.mem.Allocator, json_text: []const u8, want_command: []const u
         .object => |o| o,
         else => return error.Unrecognized,
     };
-    return scan(.claude, root.get("hooks"), want_command);
+    return scan(.claude, .local, root.get("hooks"), want_command);
 }
 
 fn testArena() std.heap.ArenaAllocator {
@@ -851,14 +851,14 @@ test "codex 세트로 넣으면 Notification 이 들어가지 않는다" {
     const parsed = try std.json.parseFromSlice(std.json.Value, a, "{}", .{});
     var root_obj = parsed.value.object;
     var hooks: std.json.ObjectMap = .empty;
-    try apply(.codex, a, &hooks, want, .install);
+    try apply(.codex, .local, a, &hooks, want, .install);
     try root_obj.put(a, "hooks", .{ .object = hooks });
 
     try testing.expectEqual(@as(usize, command.codex_events.len), hooks.count());
     try testing.expect(hooks.get("Notification") == null); // codex 에 없는 이벤트다
     try testing.expect(hooks.get("SessionStart") != null);
 
-    const known = scan(.codex, root_obj.get("hooks"), want).?;
+    const known = scan(.codex, .local, root_obj.get("hooks"), want).?;
     try testing.expectEqual(@as(usize, command.codex_events.len), known.ours);
     try testing.expectEqual(@as(usize, command.codex_events.len), known.events_covered);
     try testing.expectEqual(@as(usize, 0), known.events_outside);
@@ -874,7 +874,7 @@ test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
     // claude 세트로 넣은 파일을 codex 세트로 훑으면 claude 에만 있는 이벤트가 «세트 밖» 이다.
     // 이 대조가 **세트 분리가 실제로 판정을 바꾼다**는 것을 보인다 — 안 그러면 분리가 장식이다.
     var hooks: std.json.ObjectMap = .empty;
-    try apply(.claude, a, &hooks, want, .install);
+    try apply(.claude, .local, a, &hooks, want, .install);
     var wrapper: std.json.ObjectMap = .empty;
     try wrapper.put(a, "hooks", .{ .object = hooks });
 
@@ -892,11 +892,11 @@ test "provider 를 바꿔 보면 남은 항목이 세트 밖으로 잡힌다" {
         break :blk n;
     };
     try testing.expect(claude_only > 0); // 대조가 성립하는 전제
-    const as_codex = scan(.codex, wrapper.get("hooks"), want).?;
+    const as_codex = scan(.codex, .local, wrapper.get("hooks"), want).?;
     try testing.expectEqual(claude_only, as_codex.events_outside);
     try testing.expectEqual(Plan.refresh, planForSet(.codex, .local, .{ .known = as_codex }, .ensure));
 
-    const as_claude = scan(.claude, wrapper.get("hooks"), want).?;
+    const as_claude = scan(.claude, .local, wrapper.get("hooks"), want).?;
     try testing.expectEqual(@as(usize, 0), as_claude.events_outside);
     try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = as_claude }, .ensure));
 }
@@ -998,4 +998,37 @@ test "provider 별 자리: 환경 변수 우선, 빈 값은 설정하지 않음�
     try testing.expect(!std.mem.eql(u8, homeSubdir(.claude), homeSubdir(.codex)));
     try testing.expect(!std.mem.eql(u8, hooksFileName(.claude), hooksFileName(.codex)));
     try testing.expect(!std.mem.eql(u8, configDirEnv(.claude), configDirEnv(.codex)));
+}
+
+test "apply 도 scope 를 본다 — 판정만 원격이고 적용이 로컬이면 뺀 이벤트가 도로 심긴다" {
+    // **RA1 의 제외가 `planForSet` 에만 닿아 있었다.** `scan`·`appendOurs` 가 `.local` 을 하드코딩해,
+    // 원격 설치가 `PreToolUse` 를 그대로 심었다(실측: 원격 `settings.json` 에 그 키가 들어갔다).
+    // 그러면 셋을 한꺼번에 잃는다 — 턴당 ~90 ms 의 발화가 살아나고, 셸 명령 원문과 소스코드가
+    // **네트워크를 건너며**(계약 §7), codex 는 그 항목만큼 신뢰 승인을 더 묻는다.
+    //
+    // 그리고 조용히 어긋난다: 판정은 «원격 세트만큼 있으면 됐다» 인데 적용은 더 많이 심으므로,
+    // 다음 `scan` 이 세는 수와 계획이 기대하는 수가 갈린다.
+    const a = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(a);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const want = "echo maru-remote";
+    var hooks: std.json.ObjectMap = .empty;
+    try apply(.claude, .remote, arena, &hooks, want, .install);
+
+    try testing.expect(hooks.get("PreToolUse") == null); // 원격에서 뺀 그 이벤트
+    try testing.expectEqual(command.eventsFor(.claude, .remote).len, hooks.count());
+
+    // 같은 트리를 **원격 scope 로 세면** 우리 것이 세트만큼 보인다.
+    const known_remote = scan(.claude, .remote, .{ .object = hooks }, want) orelse return error.UnknownShape;
+    try testing.expectEqual(command.eventsFor(.claude, .remote).len, known_remote.ours);
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .remote, .{ .known = known_remote }, .ensure));
+
+    // 로컬 scope 는 같은 트리를 «부족하다» 고 본다 — 두 세트가 다르다는 사실 자체가 여기서 드러난다.
+    try testing.expect(command.eventsFor(.claude, .local).len > command.eventsFor(.claude, .remote).len);
+
+    // 제거는 scope 와 무관하게 우리 것만 걷어 낸다.
+    try apply(.claude, .remote, arena, &hooks, want, .remove);
+    try testing.expectEqual(@as(usize, 0), hooks.count());
 }

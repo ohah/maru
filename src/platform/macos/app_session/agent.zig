@@ -1233,7 +1233,7 @@ fn reconcileProviderHooks(
                 .object => |o| o,
                 else => break :blk .unreadable,
             };
-            break :blk if (install.scan(provider, root.get("hooks"), cmd.items)) |known|
+            break :blk if (install.scan(provider, .local, root.get("hooks"), cmd.items)) |known|
                 .{ .known = known }
             else
                 .unreadable;
@@ -1287,7 +1287,7 @@ fn reconcileProviderHooks(
         .ensure => .install,
         .uninstall => .remove,
     };
-    install.apply(provider, a, &hooks, cmd.items, mode) catch return;
+    install.apply(provider, .local, a, &hooks, cmd.items, mode) catch return;
     if (hooks.count() == 0) {
         _ = root.orderedRemove("hooks");
     } else {

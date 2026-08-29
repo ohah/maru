@@ -27,11 +27,23 @@ pub const Probe = struct {
     log_present: bool = false,
     /// 그 Term 에 에이전트가 붙어 있는가(`agent_kind != .none`). 에이전트가 없으면 모드를 논할 것도 없다.
     agent_present: bool = false,
+    /// **원격 이벤트 채널이 열려 있는가**([계획](../../docs/plans/remote-agent-state.md) RA5).
+    ///
+    /// ssh 너머는 `agent_kind` 가 `none` 이라(로컬에서 원격 process tree 가 안 보인다) `agent_present` 로는
+    /// 영영 훅 모드가 안 된다 — 계약 §11.1 이 적은 그 세 겹 중 첫째다. 그런데 **채널이 열렸다는 것 자체가
+    /// «저 너머에 에이전트가 있고 훅이 돈다» 는 증거**다: 그 채널은 훅이 쓴 파일을 흘리는 길이고, 파일이
+    /// 없으면 이벤트가 아예 안 온다. 그래서 원격에서는 이 값이 `agent_present` 를 대신한다.
+    ///
+    /// **로컬 판정을 안 건드린다.** 이 값이 `false` 면 예전과 바이트가 같다.
+    remote_channel_open: bool = false,
 };
 
 /// 지금 이 Term 이 어느 모드인가. **파일 유무로 판정한다** — 이벤트 개수로 잡으면 가만히 있는 세션이
 /// 강등되고, 시간으로 잡으면 이미 돌던 세션이 강등된다(계약 §1.2의 두 함정).
 pub fn modeFor(probe: Probe) Mode {
+    // **원격 축**: 채널이 열렸으면 그것이 곧 «훅이 돈다» 는 증거다(RA5). 로컬 로그 파일도
+    // `agent_kind` 도 이 경우엔 원리적으로 얻을 수 없다(계약 §11.1).
+    if (probe.remote_channel_open) return if (probe.gate_on) .hook else .observe;
     if (!probe.agent_present) return .observe;
     if (!probe.gate_on) return .observe;
     return if (probe.log_present) .hook else .observe;
@@ -1720,4 +1732,25 @@ test "세션 base 는 «돌고 있지 않을 때» 의 SessionStart 다" {
     }
     // 자식은 세션을 열지 않는다.
     try std.testing.expect(!opensSessionBase(.unknown, .{ .kind = .session_start, .agent_id = "a5" }));
+}
+
+test "원격 채널이 열리면 훅 모드다 — agent_kind 는 ssh 너머에서 영영 none 이다" {
+    // 계약 §11.1: 원격 process tree 가 로컬에서 안 보여 `agent_present` 가 못 선다. 채널이 그 자리를
+    // 대신한다 — 그 채널은 훅이 쓴 파일을 흘리는 길이라, 열렸다는 것이 곧 훅이 돈다는 증거다.
+    try testing.expectEqual(Mode.hook, modeFor(.{ .remote_channel_open = true, .gate_on = true }));
+    // 게이트가 꺼져 있으면 원격도 관측 모드다 — 사용자가 끈 것을 우회하지 않는다.
+    try testing.expectEqual(Mode.observe, modeFor(.{ .remote_channel_open = true, .gate_on = false }));
+}
+
+test "원격 축이 로컬 판정을 안 건드린다 — false 면 예전과 바이트가 같다" {
+    const cases = [_]Probe{
+        .{},
+        .{ .gate_on = true },
+        .{ .agent_present = true },
+        .{ .agent_present = true, .gate_on = true },
+        .{ .agent_present = true, .gate_on = true, .log_present = true },
+        .{ .gate_on = true, .log_present = true }, // 에이전트 없음
+    };
+    const want = [_]Mode{ .observe, .observe, .observe, .observe, .hook, .observe };
+    for (cases, want) |c, w| try testing.expectEqual(w, modeFor(c));
 }

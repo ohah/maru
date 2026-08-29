@@ -16,6 +16,8 @@ const agent_observer = @import("agent_observer.zig");
 const agent_transcript_mod = @import("agent_transcript.zig");
 const agent_hook_event = @import("agent_hook_event.zig");
 const agent_hook_mode = @import("agent_hook_mode.zig");
+const agent_hook_command = @import("agent_hook_command.zig"); // RA5: 원격 pane 신원 상수·대조
+const remote_agent_stream = @import("remote_agent_stream.zig"); // RA5: 원격 이벤트 채널 수명
 const workspace = @import("workspace.zig"); // OS-중립 직렬화 모델(session.workspace.v1) — TreeNode 변환용
 const control_surface = @import("control_surface.zig");
 const dock_panel = @import("dock_panel.zig"); // FP16: 파일 entry 소유를 Term으로 옮긴다(§1). 의존은 workspace.zig 경유로 이미 존재. // SurfaceKind(terminal|web)·PanelKind 열거 재사용(web-panel.md §6 4e)
@@ -123,6 +125,20 @@ pub fn Model(comptime Rt: type) type {
             /// 아직 띄우지 않은 훅 알림(계약 §6). 전이에서 예약하고 드레인 루프가 꺼내 간다 — 고정 크기라
             /// 힙을 잡지 않는다.
             agent_hook_notice: agent_hook_mode.PendingNotice = .{},
+            /// 원격(SSH) Term 의 이벤트 채널([계획](../../docs/plans/remote-agent-state.md) RA5).
+            ///
+            /// **로컬 훅 경로와 자리를 나눈다.** 로컬은 `agent_hook_cursor` 로 파일을 tail 하지만 원격은
+            /// 그 파일이 저쪽 기계에 있어, `maru agent-events` 가 흘린 wire 를 이 채널이 받는다. 두 입력이
+            /// 한 Term 에 동시에 서면 계약 §1 이 금지하는 «두 소스» 가 되므로, **모드 판정이 그 둘을
+            /// 배타로 가른다**(원격 Term 은 로컬 로그가 애초에 없다).
+            ///
+            /// `null` 이면 이 Term 에는 원격 축이 안 열렸다 — `maru ssh` 가 아니거나, 제한 서버라
+            /// `hello` 가 안 왔거나(§11), 아직 여는 중이다.
+            agent_remote_channel: ?remote_agent_stream.Channel = null,
+            /// 그 Term 에 발급한 원격 pane 신원. 채널에 섞여 오는 이벤트 중 **우리 것**을 고르는 잣대다
+            /// (`agent_hook_command.remoteNonceMatches`). 고정 크기라 힙을 안 잡는다.
+            agent_remote_nonce: [agent_hook_command.remote_pane_nonce_max]u8 = undefined,
+            agent_remote_nonce_len: u8 = 0,
             /// 이 턴의 진행 상태 — 자식이 몇이나 도는지와 lead 가 이미 끝났는지(계약 §2). 자식이 도는
             /// 동안 lead 의 `Stop` 은 턴 끝이 아니고, 그것을 완료로 다루면 «자식이 아직 도는데 완료
             /// 알림» 이 나간다.

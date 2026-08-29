@@ -2153,8 +2153,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   앱이 되돌려 준 exact iteration identity·iteration별 고유 before/after 캡처와 final child/fd/artifact 0을 별도 strict-schema artifact로 기록한다. CR6e-a1/a2는 숫자 상한이나 장시간 완료를 주장하지
   않는다. CR6e-b는 같은 runner의 반복 baseline으로 `performance-budget.md`에 환경·표본·RSS/FD/CPU/latency hard
   cap을 먼저 확정하고, 계약된 long soak에서 deadline 초과·과잉 backoff·marker duplicate·authority/fd/process leak 0과 모든
-  성능 cap을 자동 판정한다. environment mismatch는 skip/pass가 아니라 typed failure다. CR6e-b 전에는 자동 reconnect 제품
-  설정을 배선하지 않는다.
+  성능 cap을 자동 판정한다. environment mismatch는 skip/pass가 아니라 typed failure다. CR6e-b는 구현·통과했고, 후속
+  CR6e-c가 자동 reconnect 제품 배선을 소유한다. c1은 app-global bounded host job/completion과 stale/duplicate/cancel
+  정산, c2는 frame-thread block 0인 worker exact-host connect/hello와 typed failure, c3는 main-owner CR5 publication 및
+  actual AppKit socket 단절 뒤 같은 host/runtime/child PID·output/input/copy/resize·sibling/controller 보존과 모든
+  worker/fd/client/admission final 0을 검증한다. c3 전에는 자동 reconnect 제품 완료로 세지 않는다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지
   않는지, callback이 queue mutex 밖에서 실행되는지 고정한다. daemon/restore는 runtime 생성 전에 process-local nonblocking
   CLOEXEC self-pipe를 만들고, reader는 write end에 byte만 coalesce하며 `poll_owner.Owner`만 read end와 runtime event queue를

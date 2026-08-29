@@ -5924,6 +5924,34 @@ manifest·host-owned artifact 0과 RSS/CPU/latency cap을 함께 판정한다. �
 validator를 먼저 그대로 재실행한 뒤 hard cap을 적용하며, 그보다 약한 복제 판정으로 raw artifact를 통과시키지 않는다.
 CR6e-b가 통과하기 전 자동 reconnect 제품 설정 배선과 default-on 주장은 금지한다.
 
+**CR6e-c 자동 reconnect 제품 배선 계약:** CR6e-b의 예산과 soak는 구현·통과했으므로 connection-scoped
+`disposition=reconnect` admission을 실제 재접속으로 소비한다. AppSession frame owner는 기존
+`SessionHostCoordinator.drainReconnectAdmission`에서 같은 host의 runtime admission을 한 host job으로 합치되,
+`connect`·hello read/write·backoff를 직접 실행하지 않는다. 그 blocking 가능 suffix는 app-global bounded worker가
+소유한다. worker 입력은 raw `RemoteRuntime`/`Client`/`HostAdapter` pointer가 아니라
+`{host_id,pool_membership_generation,connection_generation,incident identity,absolute_deadline}`의 독립 소유
+snapshot 하나다. 같은 host에 active job이 있으면 새 worker를 만들지 않고 incident를 bounded coalesce한다.
+
+worker는 current manifest의 exact host/socket을 deadline-aware `connectExistingHostUntil`로 연결해 완성된 candidate
+`Client` 또는 typed failure만 completion queue에 게시한다. main owner는 completion을 받을 때 HostPool membership,
+old connection generation, 대상 runtime set과 각 reconnect admission을 다시 검증한 뒤에만 기존 CR5 host transaction의
+retirement preparation→shared replacement→runtime별 catch-up/controller publication을 실행한다. stale completion은
+candidate를 exact once 닫고 runtime/screen/input authority mutation 0으로 폐기한다. 한 runtime의 terminal failure는 이미
+성공 게시된 sibling prefix를 남기는 runtime별 반복이 아니라 CR5의 host-wide all-or-frozen 결론으로 수렴한다.
+
+worker queue와 completion queue는 app-global 고정 상한을 가지며 예약 실패는 admission을 `retry_later`로 보존한다.
+App Quit은 새 admission과 worker spawn을 닫고, 진행 중 worker에 cancellation을 요청한 뒤 bounded deadline 안에 join한다.
+deadline 뒤 callback, copied completion, old process/instance nonce, duplicate settle은 mutation 0으로 거부한다. 최초
+connection-fatal 원인과 incident id는 reconnect 성공 뒤에도 진단 ring에서 바뀌지 않으며 UI는 host job 동안 기존 화면을
+그대로 두고 `reconnecting`, 성공 시 `live`, terminal host-wide 실패 시 `unavailable`을 stable generation에서 한 번만
+게시한다. semantic stream 오류, explicit runtime 종료, app-quit detach는 자동 reconnect admission을 만들지 않는다.
+
+CR6e-c는 c1 bounded job/completion owner, c2 worker connect issuer, c3 main-thread CR5 publication과 actual AppKit
+disconnect→자동복구 E2E 순서로 구현한다. c1/c2만 green인 상태를 제품 자동 reconnect 완료로 세지 않는다. c3 제품
+artifact는 실제 host socket 단절 뒤 같은 host/runtime/child PID, 누적 output, input/copy/resize, sibling runtime과
+controller 권위, frame-thread stall 0, worker/fd/client/admission final 0을 검증한다. 이 배선은 keep-alive opt-in 안에서만
+활성화하며 `session.keep-alive-after-quit`의 default나 G3 release migration을 바꾸지 않는다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**

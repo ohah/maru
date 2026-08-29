@@ -21782,6 +21782,49 @@ test "hook mode runs exactly one source and takes over notifications" {
         git_ops.sessionIdentityFor(&session, term.surfaceId()),
     );
 
+    // ── ⑦-b **이미지 갤러리 소스도 payload 가 정한다**(IG1, docs/agent-image-gallery.md §4.4) ────────
+    // `session_id` 와 같은 자리에서 `transcript_path` 를 채택한다. 이것이 없으면 갤러리는 읽을 파일을
+    // 모르고, 예전 방식대로 디렉터리를 조립해 추측하면 «다른 세션의 대화를 붙이는» 사고로 돌아간다.
+    term.agent_image_source.clear();
+    // **커서를 되감아야 새 내용이 읽힌다.** 앞 블록의 poll 이 오프셋을 파일 끝에 두었으므로, 리셋 없이
+    // 덮어쓰면 poll 이 «읽을 것 없음» 으로 지나가고 이 블록은 **아무것도 검증하지 않는다**. 위 ⑦·⑧ 블록이
+    // 같은 이유로 매번 되감는다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"/tmp/ig/a.jsonl\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("/tmp/ig/a.jsonl", term.agent_image_source.path());
+
+    // `/clear` 는 **새 파일**을 만든다(실측: 직전 세션 종료 46 ms 뒤 새 세션). 경로가 갈리면 그대로 따라간다 —
+    // 옛 파일의 바이트 오프셋은 새 파일에서 아무 뜻이 없기 때문이다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"/tmp/ig/b.jsonl\"}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("/tmp/ig/b.jsonl", term.agent_image_source.path());
+
+    // **상한을 넘으면 자르지 않고 비운다.** 자른 경로는 없는 파일이거나 더 나쁘게는 **다른 파일**이다.
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    {
+        const long_path = "/tmp/ig/" ++ ("z" ** maru.session.agent_image_index.max_source_path_bytes) ++ ".jsonl";
+        const line = "claude\t{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"" ++ long_path ++ "\"}\n";
+        try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = line });
+    }
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expect(term.agent_image_source.isEmpty());
+
+    // **이 블록은 신원을 건드리지 않는다.** 갤러리 소스와 세션 신원은 같은 payload 에서 오지만 서로 다른
+    // 축이고, 뒤 블록들이 신원이 `11111111…` 로 남아 있음을 단언한다 — 그래서 여기 훅 줄에 `session_id` 를
+    // 싣지 않는다. 그 사실을 여기서 한 번 못 박아, 나중에 누가 편의로 id 를 넣으면 바로 걸리게 한다.
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+
     // ── ⑧ **한 배치에 다음 턴이 시작돼도 스냅샷은 «끝난 턴» 의 사실을 든다**(AT2 적대적 검증) ────────
     // `Stop(p-1)` 다음 `UserPromptSubmit(p-2)` 가 한 tick 에 함께 올 수 있다(사용자가 곧바로 다음
     // 프롬프트를 넣으면 그렇다). 배치 **끝**에서 진행 상태를 읽으면 그때 `turnKey()` 는 이미 `p-2` 이고
@@ -32299,8 +32342,17 @@ test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다
     const cw: u32 = 10;
     try std.testing.expectEqual(@as(usize, 0), chrome.components.dock_view_bar.slotAtPoint(bar, cw, 110, 50).?);
     try std.testing.expectEqual(@as(usize, 2), chrome.components.dock_view_bar.slotAtPoint(bar, cw, 190, 50).?);
-    // 슬롯 3개 × 4셀 × 10px = 120px → 그 뒤는 여백이라 null(커서도 default가 된다).
-    try std.testing.expect(chrome.components.dock_view_bar.slotAtPoint(bar, cw, 230, 50) == null);
+    // **폭을 `slot_count` 에서 유도한다.** 여기 숫자를 적어 두면 뷰를 하나 더할 때 이 test 가 계약이 아니라
+    // 옛 슬롯 수를 지킨다 — 실제로 3→4 에서 그렇게 깨졌다(x=230 이 여백에서 슬롯 안으로 바뀌었다).
+    const bar_mod = chrome.components.dock_view_bar;
+    const slots_px: u32 = @intCast(bar_mod.slot_cols * cw * bar_mod.slot_count);
+    // 마지막 슬롯 **안**은 그 index 다.
+    try std.testing.expectEqual(
+        @as(usize, bar_mod.slot_count - 1),
+        bar_mod.slotAtPoint(bar, cw, bar.x + slots_px - 1, 50).?,
+    );
+    // 슬롯이 끝나면 그 뒤는 여백이라 null(커서도 default 가 된다).
+    try std.testing.expect(bar_mod.slotAtPoint(bar, cw, bar.x + slots_px, 50) == null);
 }
 
 test "도크 뷰 스위처: 슬롯 index 대응과 포커스 되돌림" {

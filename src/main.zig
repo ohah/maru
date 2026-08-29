@@ -2221,6 +2221,9 @@ fn rebuildSidebarCells(
     /// (실측: 그 뮤턴트가 살아남았다) — `sidebar_cells_outside` 가 **카드 밴드 기준**이라 밴드도
     /// 같이 움직이면 아무것도 안 걸린다. 그래서 헤더 바닥과 견준다.
     card_over_header: *usize,
+    /// **위가 깎인** 목록 셀 수 — 판정이 빈말이 아님을 보이는 값이다(0 이면 자를 것이 없었거나
+    /// 반쯤 걸친 줄을 통째로 버렸다는 뜻이고, 그때 `card_over_header == 0` 은 아무것도 안 지킨다).
+    cells_clipped: *usize,
     /// 실제로 **그려진** 카드 수. 목록보다 적으면 나머지는 화면에 없고 누를 수도 없다 —
     /// 사이드바 스크롤이 붙기 전까지의 한계이고, 조용히 두지 않으려고 밖으로 낸다.
     cards_visible: *usize,
@@ -2258,6 +2261,7 @@ fn rebuildSidebarCells(
     glyphs.* = 0;
     outside.* = 0;
     card_over_header.* = 0;
+    cells_clipped.* = 0;
     cards_visible.* = 0;
     header_h_out.* = 0;
     header_icon_band_out.* = 0;
@@ -2347,10 +2351,12 @@ fn rebuildSidebarCells(
     // 눌리는 자리가 안 갈린다. 카드 높이를 **누적**하는 것도 `slotAt` 과 같은 규칙이다(카드마다
     // 줄 수가 달라 고정 나눗셈을 못 쓴다).
     const list_top = top_y + header_h + m.content_pad_v;
-    // **그린 자리를 헤더 바닥과 견준다.** 계산에 쓴 값이 아니라 밴드가 실제로 앉은 y 다.
-    // **스크롤 중에는 카드가 헤더 아래로 지나가는 것이 정상이다** — 헤더가 그 위를 덮는다.
-    // 그래서 이 판정은 **맨 위에 있을 때만** 뜻이 있다.
-    if (scroll_px == 0 and list_top < top_y + header_h) card_over_header.* += 1;
+    // **목록 셀은 헤더 아래로 잘린다.** 이 지점부터 `out` 에 들어가는 것이 목록이고(헤더 셀은
+    // `header_cells` 에 따로 담겨 맨 나중에 붙는다), 나가기 직전에 한 번 자른다. `defer` 를 헤더
+    // 것보다 **뒤에** 등록해 LIFO 로 **먼저** 돌게 한다 — 헤더는 잘리면 안 된다.
+    const list_cells_start = out.items.len;
+    const list_min_y: f32 = @floatFromInt(top_y + header_h);
+    defer clipSidebarListCells(out, list_cells_start, list_min_y, card_over_header, cells_clipped);
     // **스크롤: 어느 카드부터 보이나.** `slotAt` 이 쓰는 것과 **같은 누적**이다(카드 높이가 줄 수에서
     // 나오므로 고정 나눗셈을 못 쓴다) — 여기서 다른 식을 쓰면 그린 카드와 눌리는 카드가 갈린다.
     var active_window_index: ?usize = null;
@@ -2539,10 +2545,36 @@ fn rebuildSidebarCells(
         // **글자가 사이드바 사각형을 벗어나면 안 된다** — 벗어나면 터미널 위에 얹힌다.
         if (cell.rect[0] < 0 or cell.rect[0] + cell.rect[2] > x1 or
             cell.rect[1] < band_y0 or cell.rect[1] + cell.rect[3] > band_y1) outside.* += 1;
-        if (scroll_px == 0 and cell.rect[1] < @as(f32, @floatFromInt(top_y + header_h))) card_over_header.* += 1;
         glyphs.* += 1;
         out.appendAssumeCapacity(cell);
     }
+}
+
+/// 목록 셀 구간을 헤더 아래로 자른다 — 통째로 위에 있던 셀은 **버리고 그 수를 센다**.
+///
+/// 그 수가 `card_over_header` 다. 예전에는 "맨 위에 있을 때만" 세는 값이라 **굴린 상태를 아무도 안
+/// 재고 있었다**(그래서 겹침이 그대로 나갔다). 이제는 자른 뒤라 **어느 스크롤에서도 0** 이어야 한다.
+fn clipSidebarListCells(
+    out: *std.ArrayList(d3d11_cells.Cell),
+    start: usize,
+    min_y: f32,
+    /// 자른 **뒤에도** 헤더 위에 남은 셀 수 — 어느 스크롤에서도 **0 이어야 한다**.
+    violations: *usize,
+    /// **잘린**(버려진 것이 아니라 위가 깎인) 셀 수. 0 이면 위 판정이 아무것도 안 물었거나,
+    /// 반쯤 걸친 줄을 **통째로 버리고** 있다는 뜻이다 — 그러면 맨 윗줄이 통째로 사라진다.
+    clipped: *usize,
+) void {
+    if (start >= out.items.len) return;
+    var w = start;
+    for (out.items[start..]) |c| {
+        if (d3d11_cells.clipCellTop(c, min_y)) |cc| {
+            if (cc.rect[1] != c.rect[1]) clipped.* += 1;
+            if (cc.rect[1] < min_y - 0.01) violations.* += 1;
+            out.items[w] = cc;
+            w += 1;
+        }
+    }
+    out.items.len = w;
 }
 
 /// 헤더 아이콘 줄을 셀로 낸다 — **차지한 높이(px)** 를 돌려준다(0 이면 안 그렸다).
@@ -3771,6 +3803,8 @@ fn sidebarScrollbarGeometry(
 ///
 /// 자리는 중립이 소유한다(`rowTop`·`rowHeight`) — 여기서 누적을 다시 적으면 그린 자리와 갈린다.
 fn sidebarSlotFullyVisible(
+    allocator: std.mem.Allocator,
+    scratch: *std.ArrayList(maru.chrome.components.sidebar.Row),
     cards: []const SidebarCard,
     view: ActiveView,
     header_h: u32,
@@ -3778,9 +3812,8 @@ fn sidebarSlotFullyVisible(
     sidebar_h: u32,
     scroll_px: u32,
 ) bool {
-    var buf: [16]maru.chrome.components.sidebar.Row = undefined;
     const slot = sidebarActiveSlot(cards, view);
-    const rows = sidebarRowsFor(cards, slot, &buf);
+    const rows = sidebarRowsFor(allocator, scratch, cards, slot);
     if (slot >= rows.len) return false;
     const m = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
     const top = maru.chrome.components.sidebar.rowTop(rows, slot, header_h, m, scroll_px);
@@ -3788,16 +3821,29 @@ fn sidebarSlotFullyVisible(
     return top >= @as(i64, header_h) and bottom <= @as(i64, sidebar_h);
 }
 
+/// 카드 목록을 사이드바 `Row` 로 옮긴다 — **개수 상한이 없다.**
+///
+/// 예전에는 호출부마다 `[16]` 짜리 배열을 잡아 `@min(cards.len, buf.len)` 으로 **말없이 잘랐다.**
+/// 그리기는 `cards` 를 끝까지 훑으므로(그 함수의 `while (first < cards.len)`), 카드가 열여섯을
+/// 넘으면 **그려지는 목록과 기하·히트테스트·스크롤 상한이 갈렸다** — 열일곱 번째 카드는 보이는데
+/// 굴려 갈 수가 없었다. 세션 상한이 `max_win_sessions`(16)이고 **연 파일 수에는 상한이 없어서**
+/// 실제로 닿는 자리다.
+///
+/// **스크래치는 호출부가 준다**(한 벌을 돌려 쓴다). 돌려준 슬라이스는 **다음 호출까지만** 유효하다 —
+/// 두 목록을 동시에 들고 있으면 안 된다. 할당이 실패하면 담긴 만큼만 돌려준다(옛 잘림과 같은 모습).
 fn sidebarRowsFor(
+    allocator: std.mem.Allocator,
+    scratch: *std.ArrayList(maru.chrome.components.sidebar.Row),
     cards: []const SidebarCard,
     active: usize,
-    buf: []maru.chrome.components.sidebar.Row,
 ) []const maru.chrome.components.sidebar.Row {
-    const n = @min(cards.len, buf.len);
-    for (cards[0..n], 0..) |c, i| {
-        buf[i] = .{ .card = .{ .tab = @intCast(i), .label = c.name, .active = i == active, .lines = @intCast(c.lines) } };
+    scratch.clearRetainingCapacity();
+    scratch.ensureTotalCapacity(allocator, cards.len) catch {};
+    for (cards, 0..) |c, i| {
+        if (scratch.items.len == scratch.capacity) break;
+        scratch.appendAssumeCapacity(.{ .card = .{ .tab = @intCast(i), .label = c.name, .active = i == active, .lines = @intCast(c.lines) } });
     }
-    return buf[0..n];
+    return scratch.items;
 }
 
 /// 창이 든 세션 하나 — **표면 · PTY · pump 한 벌**.
@@ -4838,6 +4884,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var leak_sidebar_after: u32 = 0;
     var leak_dock_before: u32 = 0;
     var leak_dock_after: u32 = 0;
+    var cap_cards: usize = 0;
+    var cap_rows: usize = 0;
+    var cap_off: u32 = 0;
+    var cap_last_visible = false;
+    var cap_first_visible: usize = 0;
+    var cap_visible: usize = 0;
+    var clip_partial: u32 = 0;
+    var clip_over: usize = 0;
+    var clip_clipped: usize = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -5351,11 +5406,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var sidebar_header_search_glyphs: usize = 0;
     var sidebar_header_outside: usize = 0;
     var sidebar_card_over_header: usize = 0;
+    var sidebar_cells_clipped: usize = 0;
     var sidebar_cards_visible: usize = 0;
     // ── 사이드바 스크롤 (W8.7 짝) ───────────────────────────────────────────────────────────
     // 도크와 같은 모양이다 — **그리기와 히트테스트가 같은 값을 본다.** 헤더는 스크롤 무관 고정이라
     // `slotAt` 이 그 규칙을 소유한다.
     var sidebar_scroll_px: u32 = 0;
+    // **행 목록은 힙이다**(옛 `[16]` 배열이 아니다) — 그 상한이 카드 열여섯을 넘는 순간 기하와
+    // 그림을 갈라 놓았다(`sidebarRowsFor` doc). 한 벌을 돌려 쓰고, 슬라이스는 다음 호출까지만 산다.
+    var sidebar_rows_scratch: std.ArrayList(maru.chrome.components.sidebar.Row) = .empty;
+    defer sidebar_rows_scratch.deinit(allocator);
     var sidebar_reveals: usize = 0;
     var sidebar_reveal_request = false;
     var last_active_slot: usize = std.math.maxInt(usize);
@@ -5417,7 +5477,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var status_rebuilds: usize = 0;
     rebuildStatusBar(allocator, &status_cells, geom.status_bar, cell_w, cell_h, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &status_uploads, status_items, &status_frames, &status_dropped, &status_placed, &status_outside, &status_mismatch, &status_rebuilds);
     try rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens);
-    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused);
+    try rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused);
 
     var dock_cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     defer dock_cells.deinit(allocator);
@@ -6146,8 +6206,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **가운데 세션을 보게 만든다.** 활성이 마지막이면 색인이 밀려도 clamp 가 우연히 같은 것을
         // 가리켜 판정이 통과한다 — 실측으로 그렇게 한 번 초록이었다.
         if (smoke and spins == 863 and sessions.items.len >= 6) {
-            var rb5: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr5 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb5);
+            const rr5 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm5 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const top5 = maru.chrome.components.sidebar.rowTop(rr5, 4, sidebar_header_h, mm5, sidebar_scroll_px);
             const cy5: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top5) + @as(i64, @intCast(cell_h / 2)));
@@ -6172,8 +6231,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             sclose_active_want_len = @min(sessions.items[app_window.active_tab].label().len, sclose_active_want.len);
             @memcpy(sclose_active_want[0..sclose_active_want_len], sessions.items[app_window.active_tab].label()[0..sclose_active_want_len]);
             @memcpy(sclose_second_name[0..sclose_second_name_len], sessions.items[1].label()[0..sclose_second_name_len]);
-            var rb4: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr4 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb4);
+            const rr4 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm4 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const top4 = maru.chrome.components.sidebar.rowTop(rr4, 0, sidebar_header_h, mm4, sidebar_scroll_px);
             const cy4: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top4) + @as(i64, @intCast(cell_h / 2)));
@@ -6312,6 +6370,118 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, tx, gy);
             window.postSyntheticMouse(.left_up, tx, gy);
         };
+        // ── 굴린 목록이 헤더를 안 뚫는다 (보고 결함 ②) ────────────────────────────────
+        //
+        // 헤더를 맨 나중에 그리는 것만으로는 안 덮인다 — 글리프는 배경이 투명해서 **글자끼리
+        // 포개진다**(실측 캡처: `session 3` 이 `Search` 위에). 이제 목록 셀을 헤더 아래로 자른다.
+        //
+        // **한 눈금은 카드 높이의 배수가 아니다**(190px vs 57px) — 그래서 첫 카드가 반쯤 잘리고,
+        // 그때가 이 판정이 물을 것이 있는 순간이다.
+        // **휠로는 이 순간을 못 만든다** — 한 눈금(10 줄 × 19px = 190px)이 카드 높이(38px)의 **정확히
+        // 다섯 배**라 늘 경계에 떨어진다(실측 `partial=0`). 픽셀로 움직이는 **막대 트랙 클릭**을 쓴다.
+        if (smoke and spins == 1052) if (sidebar_bar) |b| {
+            const tx3: i32 = @intFromFloat(b.hit_x + b.hit_w / 2);
+            const ty3: i32 = @intFromFloat(b.track_y + b.track_h * 0.37);
+            window.postSyntheticMouse(.left_down, tx3, ty3);
+            window.postSyntheticMouse(.left_up, tx3, ty3);
+        };
+        if (smoke and spins == 1055) {
+            clip_partial = sidebar_partial;
+            clip_over = sidebar_card_over_header;
+            clip_clipped = sidebar_cells_clipped;
+        }
+        // ── 카드가 열여섯을 넘어도 끝까지 굴러간다 (보고 결함 ①) ──────────────────────
+        //
+        // 그리기는 `cards` 를 끝까지 훑는데 기하·히트테스트·스크롤 상한은 **`[16]` 짜리 배열**로 만든
+        // 목록을 봤다 — 열일곱 번째 카드부터는 보이는데 **굴려 갈 수가 없었다**. 세션 상한이 16 이고
+        // 연 파일 수에는 상한이 없어 실제로 닿는 자리다.
+        //
+        // 폴더를 펼쳐 텍스트 파일을 여러 개 열어 카드를 열여섯 너머로 민 뒤, 맨 위에서 바닥까지
+        // 굴려 **마지막 카드가 통째로 보이는지** 본다.
+        if (smoke and spins == 1034 and dock_view == .explorer) {
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .directory) continue;
+                if (!std.mem.endsWith(u8, r.directory.path, "tools")) continue;
+                if (r.directory.expanded) break;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const tx2: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const ty2: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, tx2, ty2);
+                window.postSyntheticMouse(.left_up, tx2, ty2);
+                break;
+            }
+        }
+        if (smoke and spins == 1038 and dock_view == .explorer) {
+            var opened: usize = 0;
+            for (dock_rows.items, 0..) |r, ri| {
+                if (opened >= 20) break;
+                if (r != .file) continue;
+                const k = maru.session.file_panel_bridge.openKindForPath(r.file.path) orelse continue;
+                if (k != .text) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const ox2: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const oy2: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, ox2, oy2);
+                window.postSyntheticMouse(.left_up, ox2, oy2);
+                opened += 1;
+            }
+        }
+        // **도크를 한 눈금 내려 다른 줄에서도 연다** — 한 화면 안의 파일만으로는 카드가 열여섯을
+        // 못 넘는다(실측 `cards=16`, 딱 하나 모자랐다).
+        if (smoke and spins == 1040 and dock_view == .explorer) {
+            const wx3: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const wy3: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            window.postSyntheticMouseWheel(.wheel, wx3, wy3, -1);
+        }
+        if (smoke and spins == 1041 and dock_view == .explorer) {
+            var opened2: usize = 0;
+            for (dock_rows.items, 0..) |r, ri| {
+                if (opened2 >= 8) break;
+                if (r != .file) continue;
+                const k = maru.session.file_panel_bridge.openKindForPath(r.file.path) orelse continue;
+                if (k != .text) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                const ox3: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const oy3: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, ox3, oy3);
+                window.postSyntheticMouse(.left_up, ox3, oy3);
+                opened2 += 1;
+            }
+        }
+        // **맨 위로 되돌린 뒤 바닥까지 굴린다** — 여는 순간의 "눈이 따라간다"(W8.18a)가 이미 옮겨
+        // 놓은 자리를 재면 휠 상한을 안 묻게 된다.
+        if (smoke and spins == 1042) {
+            const cx3: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
+            const cy3: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
+            var un: usize = 0;
+            while (un < 20) : (un += 1) window.postSyntheticMouseWheel(.wheel, cx3, cy3, 3);
+        }
+        if (smoke and spins == 1046) {
+            const cx4: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
+            const cy4: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
+            var dn2: usize = 0;
+            while (dn2 < 20) : (dn2 += 1) window.postSyntheticMouseWheel(.wheel, cx4, cy4, -3);
+        }
+        if (smoke and spins == 1050 and sidebar_header_h != 0 and sidebar_cards.items.len > 0) {
+            cap_cards = sidebar_cards.items.len;
+            cap_off = sidebar_scroll_px;
+            // **그린 쪽 값이다**(빌더가 낸다 — 판정이 다시 계산하지 않는다). 마지막 카드까지 그렸으면
+            // `first + visible == cards` 다.
+            cap_first_visible = sidebar_first_visible;
+            cap_visible = sidebar_cards_visible;
+            const rws_cap = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
+            cap_rows = rws_cap.len;
+            if (rws_cap.len > 0) {
+                const m_cap = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+                const last = rws_cap.len - 1;
+                const top_cap = maru.chrome.components.sidebar.rowTop(rws_cap, last, sidebar_header_h, m_cap, sidebar_scroll_px);
+                const bot_cap = top_cap + @as(i64, maru.chrome.components.sidebar.rowHeight(rws_cap[last], m_cap));
+                cap_last_visible = top_cap >= @as(i64, sidebar_header_h) and bot_cap <= @as(i64, geom.sidebar.h);
+            }
+        }
         // ── 목록이 줄어도 도크가 자기 범위 안에 있는다 (W8.18b) ───────────────────────
         //
         // **접기·정렬·새로고침은 목록을 줄인다.** 그때 스크롤을 그대로 두면 내용이 없는 자리를 보게
@@ -6428,7 +6598,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
                 reveal_judgeable = true;
                 reveal_slot = sidebarActiveSlot(sidebar_cards.items, active_view);
-                reveal_visible_before = sidebarSlotFullyVisible(sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
+                reveal_visible_before = sidebarSlotFullyVisible(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
                 reveal_off_before = sidebar_scroll_px;
                 reveal_digest_before = d3d11_cells.cellsDigest(sidebar_cells.items);
                 const fx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
@@ -6440,7 +6610,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 1003 and reveal_judgeable) {
             reveal_slot_after = sidebarActiveSlot(sidebar_cards.items, active_view);
-            reveal_visible_after = sidebarSlotFullyVisible(sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
+            reveal_visible_after = sidebarSlotFullyVisible(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_view, sidebar_header_h, cell_h, geom.sidebar.h, sidebar_scroll_px);
             reveal_off_after = sidebar_scroll_px;
             reveal_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
             reveal_count = sidebar_reveals;
@@ -6497,8 +6667,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 900 and sessions.items.len >= 3 and sidebar_card_columns != null) {
             modal_judgeable = true;
             modal_sessions_before = sessions.items.len;
-            var rb6: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr6 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb6);
+            const rr6 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm6 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const top6 = maru.chrome.components.sidebar.rowTop(rr6, 1, sidebar_header_h, mm6, sidebar_scroll_px);
             const cy6: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top6) + @as(i64, @intCast(cell_h / 2)));
@@ -6512,8 +6681,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // "열려 있는 동안 세션이 안 준다" 와 "일부러 줄인다" 는 한 모달에 같이 못 산다(실측으로
         // `confirm_modal_ok` 를 한 번 빨갛게 만들었다).
         if (smoke and spins == 936 and sessions.items.len >= 3 and sidebar_card_columns != null) {
-            var rb8: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr8 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb8);
+            const rr8 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm8 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const top8 = maru.chrome.components.sidebar.rowTop(rr8, 1, sidebar_header_h, mm8, sidebar_scroll_px);
             const cy8: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top8) + @as(i64, @intCast(cell_h / 2)));
@@ -6529,8 +6697,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **한 번만 열면 쌓이는 것이 안 보인다.** 모달 프레임은 매 프레임 새로 만들고 앞 것을 놓는데,
         // 그 짝이 어긋나면 열 때마다 샌다. 누수 보고와 함께 **여는 데 드는 셀 수가 일정한지**도 본다.
         if (smoke and spins >= 952 and spins <= 968 and @mod(spins, 4) == 0 and sessions.items.len >= 3 and sidebar_card_columns != null and !confirm_state.open) {
-            var rb9: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr9 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb9);
+            const rr9 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm9 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const top9 = maru.chrome.components.sidebar.rowTop(rr9, 1, sidebar_header_h, mm9, sidebar_scroll_px);
             const cy9: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top9) + @as(i64, @intCast(cell_h / 2)));
@@ -6586,8 +6753,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 914 and sessions.items.len >= 3 and sidebar_card_columns != null) {
             cancel_judgeable = true;
             cancel_sessions_before = sessions.items.len;
-            var rb7: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr7 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb7);
+            const rr7 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm7 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const top7 = maru.chrome.components.sidebar.rowTop(rr7, 1, sidebar_header_h, mm7, sidebar_scroll_px);
             const cy7: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top7) + @as(i64, @intCast(cell_h / 2)));
@@ -6863,8 +7029,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             const wn = open_files.items[1].name();
             close_want_len = @min(wn.len, close_want_buf.len);
             @memcpy(close_want_buf[0..close_want_len], wn[0..close_want_len]);
-            var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr3 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb3);
+            const rr3 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const slot = sessions.items.len; // 첫 파일 카드
             const top = maru.chrome.components.sidebar.rowTop(rr3, slot, sidebar_header_h, mm3, sidebar_scroll_px);
@@ -7092,8 +7257,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (sidebar_bar) |b| {
                 bottom_gap = (b.track_y + b.track_h) - (b.thumb_y + b.thumb_h);
                 bar_max = b.max_offset_px;
-                var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
-                const rr3 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb3);
+                const rr3 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
                 const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
                 // **휠이 쓰는 그 식 그대로**(그 자리의 주석: "상한은 콘텐츠가 정한다").
                 wheel_max = maru.chrome.components.sidebar.contentHeight(rr3, mm3) -| (geom.sidebar.h -| sidebar_header_h);
@@ -7113,8 +7277,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **원하는 자리도 이 순간에 계산한다.** 예전에는 끝 상태의 카드 목록으로 다시 계산했다 —
             // 638 이후에 목록이 안 바뀌던 동안만 우연히 맞았고, W8.13 이 그 뒤에 파일 카드를 붙이자
             // 곧바로 어긋났다(실측 `active_ok=false`). 판정은 **자기 순간**을 챙겨야 한다.
-            var rb0: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr0 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb0);
+            const rr0 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm0 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             snap_content_h = maru.chrome.components.sidebar.contentHeight(rr0, mm0);
             snap_view_h = geom.sidebar.h -| sidebar_header_h;
@@ -7203,8 +7366,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         };
         if (smoke and spins == 590 and sidebar_header_h != 0) {
-            var rb: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb);
+            const rr = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             // **넘치는가로 가른다** — 카드 수가 아니라(도크에서 그 가드를 틀렸다).
             if (maru.chrome.components.sidebar.contentHeight(rr, mm) > geom.sidebar.h -| sidebar_header_h) {
@@ -7236,8 +7398,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 635 and sidebar_scroll_judgeable and sidebar_cards_visible > 1) {
             const sx2: i32 = @intCast(sidebar_w / 2);
-            var rb3: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rr3 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb3);
+            const rr3 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm3 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const second_top: i64 = @as(i64, geom.sidebar.y) +
                 maru.chrome.components.sidebar.rowTop(rr3, sidebar_first_visible + 1, sidebar_header_h, mm3, sidebar_scroll_px);
@@ -7252,8 +7413,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             switch_judgeable = true;
             grid_digest_before_switch = activeGridDigest(io, &app_window);
             active_before_switch = app_window.active_tab;
-            var rows_buf: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rws = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rows_buf);
+            const rws = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const m_sw = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             const y0 = maru.chrome.components.sidebar.rowTop(rws, 0, sidebar_header_h, m_sw, 0);
             const cy: i32 = @intCast(geom.sidebar.y + @as(u32, @intCast(@max(0, y0))) + cell_h);
@@ -7374,7 +7534,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {
                     dock_rebuild_failures += 1;
                 };
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                 rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
             },
             .paint => {},
@@ -7409,7 +7569,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
                                         refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                         sidebar_redraws += 1;
-                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                     },
                                     else => {},
                                 }
@@ -7454,7 +7614,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     if (changed_q) {
                         refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                     }
                     continue;
                 }
@@ -7627,7 +7787,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 sidebar_scrolls += 1;
                                 sidebar_redraws += 1;
                                 bar_drag_moves += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                             }
                         }
                         continue;
@@ -7656,7 +7816,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             } else {
                                 sidebar_scroll_px = next;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                             }
                             bar_drag = .{ .which = if (on_dock) .dock else .sidebar, .grab_dy = b.thumb_h / 2 };
                         }
@@ -7747,8 +7907,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     const notches = wheel_acc_sidebar.feed(m.wheel_delta);
                     if (notches != 0 and sidebar_header_h != 0) {
                         const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
-                        var rows_buf2: [16]maru.chrome.components.sidebar.Row = undefined;
-                        const rws2 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rows_buf2);
+                        const rws2 = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
                         const m2 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
                         // **상한은 콘텐츠가 정한다** — 중립이 그 높이를 소유한다(`contentHeight`).
                         const content_h = maru.chrome.components.sidebar.contentHeight(rws2, m2);
@@ -7761,7 +7920,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             sidebar_scroll_px = clamped;
                             sidebar_scrolls += 1;
                             sidebar_redraws += 1;
-                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                         }
                     }
                     continue;
@@ -7783,8 +7942,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     };
                     // **그리는 쪽과 같은 행 목록을 쓴다** — 여기서 따로 만들면 카드 높이가 갈려
                     // 그린 자리와 눌리는 자리가 어긋난다.
-                    var sb_rows_buf: [16]maru.chrome.components.sidebar.Row = undefined;
-                    const sb_rows = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &sb_rows_buf);
+                    const sb_rows = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
                     const next_slot = maru.chrome.components.sidebar.slotAt(
                         local_y,
                         sidebar_header_h,
@@ -7796,7 +7954,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         sidebar_hover_header = next_header;
                         sidebar_hover_slot = next_slot;
                         sidebar_redraws += 1;
-                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                     }
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
@@ -7824,7 +7982,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         agent_search_focus_changes += 1;
                                     }
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                 }
                                 continue;
                             }
@@ -7843,7 +8001,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     _ = app_window.selectTab(sessions.items.len - 1);
                                     active_view = .{ .terminal = sessions.items.len - 1 };
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                 } else |_| {
                                     session_spawn_failures += 1;
                                 }
@@ -7885,7 +8043,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                             };
                                             refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                             sidebar_redraws += 1;
-                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                         }
                                     } else {
                                         // ── 세션을 닫는다 (W8.16) ───────────────────────────
@@ -7906,7 +8064,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                                 if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
                                                 refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                                 sidebar_redraws += 1;
-                                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                             },
                                             .busy_needs_confirm => {
                                                 // **조용히 죽이지 않고 묻는다.** 여기가 §2m.77 이
@@ -7935,7 +8093,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     active_view = .{ .file = fi };
                                     file_view_switches += 1;
                                     sidebar_redraws += 1;
-                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                 }
                                 continue;
                             }
@@ -7946,7 +8104,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 active_view = .{ .terminal = ti };
                                 tab_switches += 1;
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                             }
                         }
                     }
@@ -8054,7 +8212,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         if (search_focused) {
                                             search_focused = false;
                                             search_focus_changes += 1;
-                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                            rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                         }
                                     }
                                 }
@@ -8186,7 +8344,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                         // 떴는데 사이드바에 그 파일 카드가 없었다 — 카드 **수**를
                                         // 보는 판정은 그것을 못 본다(모델은 맞았으니까).
                                         sidebar_redraws += 1;
-                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                        rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                                         continue;
                                     }
                                     const toggle_path: ?[]const u8 = switch (dock_rows.items[row]) {
@@ -8730,8 +8888,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             last_active_slot = active_slot_now;
             sidebar_reveal_request = false;
             if (want_reveal and sidebar_header_h != 0 and geom.sidebar.h > sidebar_header_h) {
-                var rb_rv: [16]maru.chrome.components.sidebar.Row = undefined;
-                const rws_rv = sidebarRowsFor(sidebar_cards.items, active_slot_now, &rb_rv);
+                const rws_rv = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, active_slot_now);
                 const mm_rv = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
                 const next_off = maru.chrome.components.sidebar.scrollToSlot(
                     rws_rv,
@@ -8744,7 +8901,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     sidebar_scroll_px = next_off;
                     sidebar_reveals += 1;
                     // **셀을 다시 짓는다** — 사이드바 셀은 클릭 때 지어져 옛 offset 을 들고 있다.
-                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                    rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                 }
             }
         }
@@ -8767,8 +8924,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (dock_bar) |bar| appendScrollbarCells(allocator, &cells, bar, &chrome_tokens) catch {};
         sidebar_bar = blk: {
             if (sidebar_header_h == 0) break :blk null;
-            var rb: [16]maru.chrome.components.sidebar.Row = undefined;
-            const rws = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb);
+            const rws = sidebarRowsFor(allocator, &sidebar_rows_scratch, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view));
             const mm = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
             break :blk sidebarScrollbarGeometry(geom, sidebar_header_h, maru.chrome.components.sidebar.contentHeight(rws, mm), sidebar_scroll_px);
         };
@@ -8873,7 +9029,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             if (atlas_w != atlas_before_w or atlas_h != atlas_before_h) {
                 editor_atlas_growths += 1;
                 rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
-                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
             }
         } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
@@ -8902,7 +9058,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 if (active_view == .terminal) active_view = .{ .terminal = app_window.active_tab };
                                 refreshSidebarCards(allocator, &sidebar_cards, sessions.items, open_files.items, folder_name, search.query.items) catch {};
                                 sidebar_redraws += 1;
-                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
+                                rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, search.query.items, search_focused) catch {};
                             },
                             else => {},
                         }
@@ -9501,6 +9657,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             track_right,
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("sidebar_clip: partial={d} clipped={d} over_header={d} clip_ok={}\n", .{
+            clip_partial,
+            clip_clipped,
+            clip_over,
+            // **자를 것이 있었어야**(`clipped > 0`) 이 판정이 무언가를 묻는다. 그리고 자른 뒤에는
+            // 헤더 위에 **아무것도 없어야** 한다.
+            clip_partial > 0 and clip_clipped > 0 and clip_over == 0,
+        });
+        try stdout.print("sidebar_rows_cap: cards={d} rows={d} off={d} last_visible={} drawn {d}+{d} rows_cap_ok={}\n", .{
+            cap_cards,
+            cap_rows,
+            cap_off,
+            cap_last_visible,
+            cap_first_visible,
+            cap_visible,
+            // **열여섯을 넘겨 놓고** 물어야 이 판정이 무언가를 묻는다. 행 목록이 카드 수와 같아야
+            // 하고(잘리지 않았다), 바닥까지 굴리면 마지막 카드가 통째로 보여야 한다.
+            // **그린 것으로 판정한다** — 바닥까지 굴렸으면 빌더가 마지막 카드까지 그렸어야 한다.
+            cap_cards > 16 and cap_rows == cap_cards and cap_last_visible and
+                cap_first_visible + cap_visible == cap_cards,
         });
         try stdout.print("wheel_surfaces: sidebar {d}->{d} dock {d}->{d} surfaces_ok={}\n", .{
             leak_sidebar_before,

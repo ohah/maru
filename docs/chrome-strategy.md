@@ -93,7 +93,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 **확정된 사실 3가지(설계 전제):**
 1. chrome 출력은 `NativeMetalCell`(shape) + `RenderFrame`/`PaneFrame`(text glyph)다 — `DrawCell` 아님. semantic draw 백엔드의 **lowering 타깃이 NativeMetalCell**이다.
 2. 컴포넌트 패턴은 이미 존재: `State`(순수) + `build*Frame`(렌더) + `handle*Key`(입력→`?Action`). 빠진 건 **마우스 hit-test 컴포넌트 선례**(palette/find는 키보드 전용; 탭/divider는 `BarMetrics`/`dividerHit` 순수 함수로 따로 존재).
-3. theme 로더: config 파일로 개별 파싱되는 theme key는 **4개뿐**(`background`/`foreground`/`cursor`/`selection`). `search_match*`·`sidebar_*` 5개는 struct·resolver엔 있으나 **개별 로더 case가 없어 `theme.preset`으로만 설정**된다. *(현재는 preset 전용으로 확정 — theme.zig:121. 토큰은 preset이 채운 ResolvedTheme에서 파생하므로 per-key 파싱이 불필요하다.)*
+3. theme 로더: config 파일로 개별 파싱되는 theme key는 **4개뿐**(`background`/`foreground`/`cursor`/`selection`). `search_match*`·`sidebar_*` 5개는 struct·resolver엔 있으나 **개별 로더 case가 없어 `theme.preset`으로만 설정**된다. *(현재는 preset 전용으로 확정 — theme.zig:285. 토큰은 preset이 채운 ResolvedTheme에서 파생하므로 per-key 파싱이 불필요하다.)*
 
 ## 4. 아키텍처 — 레이어와 의존 방향
 
@@ -279,7 +279,7 @@ pub const ChromeHost = struct {
 
 전체 시퀀싱(C0·S1·S2·C1~C4·B)과 의존성 순서는 [레이어링과 이식성 전략 §5](layering-and-portability.md#5-시퀀싱-의존성-순서-각-단계-green)가 단일 출처다. chrome 관점 요약:
 
-- **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome/metal_lowering.zig`의 최초 lowering 범위. Notice는 인터랙티브 영역이 없어(hitTest 불필요) 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→Metal lowerer→replace)을 증명**. 단 Notice는 비-인터랙티브 정보 토스트(자동 닫힘 타이머 없음)라 **아무 입력으로나 닫힌다** — 키는 `notice.handle`(키 종류 무관), 클릭·휠은 platform `mouse()`/`scrollWheel`이 닫는다(닫는 입력은 소비; hitTest는 여전히 불필요). 안 그러면 토스트가 떠 있는 동안 입력이 영구히 막힌다(키/마우스/휠 전부). 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. **`search_match*`·`sidebar_*` 5개 키는 설계상 preset 전용으로 둔다**(개별 config 키 없이 `theme.preset`으로만 설정 — theme.zig:121). 토큰화는 이 5색을 per-key config 파싱으로 "메우는" 게 아니라, preset이 채운 `ResolvedTheme`(→chrome-중립 `ThemeColors`)에서 내부 legacy cell mapping과 Chrome token mapping이 role을 파생할 뿐이다. check-boundaries에 `src/chrome` 경계 추가. (C0는 neutral 모델이라 동작 보존이 아닌 **신규 기능** — "동작 보존"으로 적지 않는다.)
+- **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome/metal_lowering.zig`의 최초 lowering 범위. Notice는 인터랙티브 영역이 없어(hitTest 불필요) 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→Metal lowerer→replace)을 증명**. 단 Notice는 비-인터랙티브 정보 토스트(자동 닫힘 타이머 없음)라 **아무 입력으로나 닫힌다** — 키는 `notice.handle`(키 종류 무관), 클릭·휠은 platform `mouse()`/`scrollWheel`이 닫는다(닫는 입력은 소비; hitTest는 여전히 불필요). 안 그러면 토스트가 떠 있는 동안 입력이 영구히 막힌다(키/마우스/휠 전부). 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. **`search_match*`·`sidebar_*` 5개 키는 설계상 preset 전용으로 둔다**(개별 config 키 없이 `theme.preset`으로만 설정 — theme.zig:285). 토큰화는 이 5색을 per-key config 파싱으로 "메우는" 게 아니라, preset이 채운 `ResolvedTheme`(→chrome-중립 `ThemeColors`)에서 내부 legacy cell mapping과 Chrome token mapping이 role을 파생할 뿐이다. check-boundaries에 `src/chrome` 경계 추가. (C0는 neutral 모델이라 동작 보존이 아닌 **신규 기능** — "동작 보존"으로 적지 않는다.)
 - **S1·S2 (chrome 큰 조각 전에 선결, 상위 문서 소유)** — S1: session-tree **구조-무효화 계약** 형식화(§5.5의 stale 포인터 UAF 선제거). S2: session core(L2) 추출. C2/C3가 이 둘에 의존한다.
 - **C1 — Palette·Find 이주.** 이미 순수 → 이동 + `view`가 ChromeDraw 뱉도록 + 렌더를 tui 백엔드로. 동작·테스트 보존.
 - **C2 — Divider·pane_decor.** hitTest 컴포넌트 첫 도입(`dividerHit` 승계). `divider_drag`/`tab_drag_pane`의 **세션-트리 포인터 수명**은 S1 계약으로 다룬다(props 핸들로 줄이거나, 호스트가 구조-무효화 콜백 소유). **스냅샷 가드는 UAF를 못 잡으니** 명시적 null화 계약 필수.
@@ -400,7 +400,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 - **텍스트 lowering 비용**: tui 백엔드의 text op이 glyph shaping(CoreText) 경로를 타므로, 컴포넌트별 RenderFrame 생성 빈도를 현재처럼 dirty-gated로 유지(여기에 ChromeDraw Op-slice라는 추가 transient tier가 얹히나 chrome 셀 수가 작아 무시 가능).
 - **rich 범위 미정**: 어디까지 고급화(rounded/gradient/icon/shadow)는 C4 착수 전 별도 설계.
 - **atlas 소유권**: 멀티 윈도우 공유는 grid-per-size로 수렴([multi-window-atlas-ownership] 메모리) — chrome glyph도 그 모델 따를지 C3에서.
-- **theme key 5개는 preset 전용(설계 확정)**: `search_match*`·`sidebar_*`는 개별 config 키가 없고 `theme.preset`으로만 설정한다(theme.zig:121, loader에 per-key case 없음). rich 토큰은 이와 무관하게 동작한다 — `Tokens.rich`(와 `tui`)는 preset이 채운 `ResolvedTheme`/`ThemeColors`에서 role을 파생하므로, 이 5색이 per-key로 파싱되지 않아도 rich 토큰셋은 정상이다.
+- **theme key 5개는 preset 전용(설계 확정)**: `search_match*`·`sidebar_*`는 개별 config 키가 없고 `theme.preset`으로만 설정한다(theme.zig:285, loader에 per-key case 없음). rich 토큰은 이와 무관하게 동작한다 — `Tokens.rich`(와 `tui`)는 preset이 채운 `ResolvedTheme`/`ThemeColors`에서 role을 파생하므로, 이 5색이 per-key로 파싱되지 않아도 rich 토큰셋은 정상이다.
 
 ## 11. 다음
 

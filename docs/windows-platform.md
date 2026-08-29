@@ -3620,7 +3620,7 @@ Windows 쪽 리터럴 여섯을 역할로 바꿨다: 사이드바 배경·도크
 폰트에 없는 글자(box-drawing·블록·PUA 합성 아이콘)는 전부 `font_id = 0, glyph_id = 0` 으로 오므로
 키가 같아진다 — **서로 다른 아이콘이 한 슬롯을 나눠 쓴다.**
 
-**그 규칙은 이미 있었다.** measured 경로(`shaped_records.zig:108`)가 `glyph_id == 0` 이면 codepoint
+**그 규칙은 이미 있었다.** measured 경로(`glyph_layout.zig:67`)가 `glyph_id == 0` 이면 codepoint
 로 바꿔 키잉하고, 그 테스트 이름이 그것을 명시한다 — *"shaped records keep synthesized box/block
 glyphs (glyph_id==0) and key cache by codepoint"*. **셀 격자 경로(`glyph_layout.zig`)만 빠져
 있었다.**
@@ -3907,7 +3907,7 @@ sidebar_header_h=19 header_glyphs=4 header_outside=0 header_routed=4/4 header_ok
 §2m.46 을 올리자 CI 가 **세 번째로** 같은 뿌리에서 빨강이었다.
 
 ```text
-src/platform/macos/app_session/sidebar.zig:2418:86: error: expected type 'u32', found 'usize'
+src/platform/cell_text.zig:1045:86: error: expected type 'u32', found 'usize'
 ```
 
 공유 함수의 인자를 `u32` 로 뒀는데 macOS 호출부가 `notification_unread: usize` 를 넘겼다. 값이 아니라
@@ -4543,7 +4543,7 @@ agent_view=true agent_ops=15 agent_ops_dropped=6 agent_cells=47 agent_glyph_byte
 ```text
 thread panic: reached unreachable code
   Threaded.zig: .PENDING => unreachable, // unrecoverable: wrong File nonblocking flag
-  agent_session_archive_backend.zig:775  file.readPositional(io, &.{&buf}, offset)
+  agent_session_archive_backend.zig:727  file.readPositional(io, &.{&buf}, offset)
 ```
 
 **std 가 핸들 모드와 플래그를 어긋나게 준다.** `dirOpenFileWindows` 는 `follow_symlinks = false`
@@ -4860,7 +4860,7 @@ pt 상수와 높이 식이 `platform/macos/app_session.zig` 안에 있었다 —
 
 ```text
 chrome 텍스트 cluster 규율 위반 1건:
-  - src/main.zig:2993: `appendStatusBarCells`가 셀을 만들면서 문자열을 직접 디코드합니다.
+  - src/main.zig:3435: `appendStatusBarCells`가 셀을 만들면서 문자열을 직접 디코드합니다.
 ```
 
 코드포인트를 하나씩 세면 **결합 문자·이모지 ZWJ 에서 어긋나고**, 그 어긋남은 폭을 재는 쪽에서만
@@ -5240,7 +5240,7 @@ if (spins == 490) { … sendInputToActiveSurface(… "MARK-ONE") … }
 
 ```text
 $ (단계 하나의 `smoke` 를 뺀 뮤턴트)
-src/main.zig:4889: 스핀 단계가 `smoke` 로 안 갈렸다 — 제품 실행이 이 각본을 따라 한다
+src/main.zig: 스핀 단계가 `smoke` 로 안 갈렸다 — 제품 실행이 이 각본을 따라 한다
 판정 스캐폴딩 위반 1건 → FAIL (SmokeStepNotGated)
 ```
 
@@ -5795,7 +5795,7 @@ Segmentation fault at address 0xffffffffffffffff
 뮤턴트(마우스 처리 맨 앞으로 이동) → `dock_w 440->440 divider_alive=false`.
 
 **스모크 단계 게이트가 새 단계를 실제로 본다**(§2m.64 의 그 장치). 하나를 안 갈랐더니
-`src/main.zig:5617` 을 짚었다 — 공허하지 않다.
+`src/main.zig` 을 짚었다 — 공허하지 않다.
 
 ## 6회차 — 공유 파일의 파장
 
@@ -7021,7 +7021,7 @@ Windows로 옮길 때 함께 정한다. 지금 조용히 되는 척하면 이식
 **본문을 분석하지 않는다**(실측: 반환 타입이 틀린 함수도, 본문이 `@compileError`인 함수도 통과한다).
 그런데 원래 결함은 **본문 오류**였다. 그래서 테스트는 함수 값을 `_ = &f`로 실제 참조한다 — `_ = f`는
 분석을 강제하지 못한다. 대조군으로 별칭을 되돌리면 정확히 그 자리에서 깨진다 — POSIX 갈래를 깨 보면 `live_pty.zig`뿐 아니라
-`session_host/runtime_manager.zig:362`까지 컴파일 오류가 난다. **"회귀 0"이 말뿐이 아니라 강제된다**는 뜻이다.
+`session_host/runtime_manager.zig`까지 컴파일 오류가 난다. **"회귀 0"이 말뿐이 아니라 강제된다**는 뜻이다.
 
 **백엔드는 셋이다** — macOS·Windows·`UnsupportedPtySession`(그 밖 전부). 합집합은 셋 **모두**가
 만족해야 한다. W7.0에서 Windows에만 넣고 스텁을 빠뜨렸다가 **Linux CI에서 잡혔다**
@@ -7740,7 +7740,7 @@ line1\nline2.log  → [line1][nline2.log]  ← 막아야 하는 것
 
 **⒝ 루트 스트라이핑 두 곳이 구분자를 정확히 한 바이트로 가정한다.**
 `platform/macos/file_tree_mutation_backend.zig:336`의 `parent_path[root.len + 1 ..]`와
-`file_tree_backend.zig:354`의 같은 모양이다. 루트가 `/`일 때 `parent_path[2..]`가 되어 첫 세그먼트가 잘린다
+`path_shape.zig:203`의 같은 모양이다. 루트가 `/`일 때 `parent_path[2..]`가 되어 첫 세그먼트가 잘린다
 (`/Users/x` → `sers/x`). **이 커밋 이전부터 있던 버그**이고 macOS 코드라 W1.5 범위 밖이지만, `pathWithin`이
 받아들이는 "구분자로 끝나는 루트"의 집합이 `{/}`에서 `{/, C:/}`로 넓어졌으므로 **백엔드를 이식할 때 반드시
 함께 고쳐야 한다**(W7). `endsWithSep`를 그대로 쓰면 된다.

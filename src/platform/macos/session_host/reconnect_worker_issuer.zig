@@ -43,6 +43,7 @@ pub const Completion = struct {
         const candidate = self.candidate.?;
         self.candidate = null;
         self.lifecycle = .consumed;
+        self.seal = consumedSeal(self);
         return candidate;
     }
 
@@ -50,6 +51,7 @@ pub const Completion = struct {
         try self.validate();
         if (self.result == .connected or self.candidate != null) return error.CandidatePresent;
         self.lifecycle = .consumed;
+        self.seal = consumedSeal(self);
     }
 
     /// Abandon is the only cleanup path for an untaken successful candidate.
@@ -58,6 +60,19 @@ pub const Completion = struct {
         if (self.candidate) |*candidate| candidate.deinit();
         self.candidate = null;
         self.lifecycle = .consumed;
+        self.seal = consumedSeal(self);
+    }
+
+    /// The app-global worker owns this final address for its whole thread lifetime. Only after
+    /// the main owner has consumed or abandoned the payload may the slot return to pristine for
+    /// the next order; accepting an invalid tombstone here would permit completion ABA.
+    pub fn resetConsumedAtFinalAddress(self: *Completion) !void {
+        if (self.lifecycle != .consumed or self.self_addr != @intFromPtr(self) or
+            self.pid == 0 or self.pid != process_identity.currentProcessId() or
+            self.candidate != null or !validOrder(self.order) or
+            !std.mem.eql(u8, &self.seal, &consumedSeal(self)))
+            return error.InvalidCompletion;
+        self.* = .{};
     }
 
     fn validate(self: *const Completion) !void {
@@ -117,6 +132,10 @@ pub fn executeInto(
     out: *Completion,
 ) !void {
     return executeIntoWith(allocator, io, base_cache_dir, order, cancelled, out, product_connector);
+}
+
+pub fn validateWorkOrder(order: WorkOrder) !void {
+    if (!validOrder(order)) return error.InvalidWorkOrder;
 }
 
 fn executeIntoWith(
@@ -192,6 +211,26 @@ fn completionSeal(completion: *const Completion) [32]u8 {
         const digest = candidate.clientProjectionAuthorityDigest();
         hasher.update(&digest);
     }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn consumedSeal(completion: *const Completion) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("maru.reconnect-worker-completion-consumed.v1\x00");
+    hasher.update(std.mem.asBytes(&completion.self_addr));
+    hasher.update(std.mem.asBytes(&completion.pid));
+    hasher.update(std.mem.asBytes(&completion.order.key.slot));
+    hasher.update(std.mem.asBytes(&completion.order.key.generation));
+    hasher.update(std.mem.asBytes(&completion.order.snapshot.host_id));
+    hasher.update(std.mem.asBytes(&completion.order.snapshot.pool_membership_generation));
+    hasher.update(std.mem.asBytes(&completion.order.snapshot.connection_generation));
+    hasher.update(std.mem.asBytes(&completion.order.snapshot.incident_app_instance_nonce));
+    hasher.update(std.mem.asBytes(&completion.order.snapshot.incident_sequence));
+    hasher.update(std.mem.asBytes(&completion.order.snapshot.absolute_deadline_ns));
+    const result_raw: u8 = @intFromEnum(completion.result);
+    hasher.update(std.mem.asBytes(&result_raw));
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return digest;
@@ -395,4 +434,20 @@ test "CR6e-c2 issuer expired and invalid work orders never call connector" {
         fixture.connector(),
     ));
     try std.testing.expectEqual(@as(usize, 0), fixture.calls);
+}
+
+test "CR6e-c2 consumed completion seal rejects tamper before slot reset" {
+    var cancelled = std.atomic.Value(u8).init(1);
+    var completion: Completion = .{};
+    try executeInto(
+        std.testing.allocator,
+        std.testing.io,
+        "/tmp",
+        testOrder(std.testing.io, 90),
+        &cancelled,
+        &completion,
+    );
+    try completion.consumeFailure();
+    completion.order.snapshot.incident_sequence += 1;
+    try std.testing.expectError(error.InvalidCompletion, completion.resetConsumedAtFinalAddress());
 }

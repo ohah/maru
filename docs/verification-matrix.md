@@ -2157,7 +2157,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   CR6e-c가 자동 reconnect 제품 배선을 소유한다. c1은 app-global bounded host job/completion과 stale/duplicate/cancel
   정산, c2는 thread/queue 비소유 worker entrypoint의 exact-host connect/hello, absolute deadline 보존, typed failure와
   move-only `Client` completion exact-once 정리, c3a는 128-bit incident identity와 pool/connection generation·모든 bound
-  admission·absolute deadline을 재검증한 비차단 CR5 job adoption, c3b/c3c는 app-global worker 수명·frame-thread block 0·main-owner CR5 publication 및
+  admission·absolute deadline을 재검증한 비차단 CR5 job adoption, c3b1은 final-address physical worker와 cancellation
+  wake/join, c3b2/c3c는 frame-thread block 0·bound admission 제품 정산·main-owner CR5 publication 및
   actual AppKit socket 단절 뒤 같은 host/runtime/child PID·output/input/copy/resize·sibling/controller 보존과 모든
   worker/fd/client/admission final 0을 검증한다. c3 전에는 자동 reconnect 제품 완료로 세지 않는다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지

@@ -124,6 +124,10 @@ pub const reconnect_worker_issuer = if (builtin.os.tag == .macos)
     @import("session_host/reconnect_worker_issuer.zig")
 else
     struct {};
+pub const reconnect_worker_runtime = if (builtin.os.tag == .macos)
+    @import("session_host/reconnect_worker_runtime.zig")
+else
+    struct {};
 pub const incident_bootstrap_contract = @import("session_host/incident_bootstrap_contract.zig");
 pub const subscription_identity = @import("session_host/subscription_identity.zig");
 pub const connection_turn = if (builtin.os.tag == .macos)

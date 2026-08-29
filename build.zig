@@ -3956,6 +3956,20 @@ pub fn build(b: *std.Build) void {
             );
         }
     }
+    const session_host_ssh_upload_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_ssh_upload_product_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P3-e4d-3 host-backed SSH upload uses actual AppSession product boundaries"},
+    });
+    const run_session_host_ssh_upload_boundary_tests = b.addRunArtifact(
+        session_host_ssh_upload_boundary_tests,
+    );
+    run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_ssh_upload_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
     const session_host_legacy_metadata_consumers_step = b.step(
         "test-session-host-legacy-metadata-consumers",
         "Verify P3-e4d-2b frozen N-1 hello, attach, and fail-closed metadata consumers",
@@ -11858,12 +11872,37 @@ pub fn build(b: *std.Build) void {
             "Run the P5d bundle PATH and localhost OpenSSH product gate",
         );
         session_host_p5d_step.dependOn(session_host_3d_step);
+        session_host_p5d_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
         const run_session_host_p5d = b.addSystemCommand(&.{
             "sh",
             "tools/session-host/p5d_ssh_smoke.sh",
             "zig-out/Maru.app/Contents/MacOS/maru",
         });
         run_session_host_p5d.addArtifactArg(session_host_3d_product_e2e_tests);
+        const session_host_ssh_upload_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{"P3-e4d-3 actual host-backed file and image uploads reach original surface"},
+        });
+        session_host_ssh_upload_product_tests.root_module.linkFramework("AppKit", .{});
+        session_host_ssh_upload_product_tests.root_module.linkFramework("Metal", .{});
+        session_host_ssh_upload_product_tests.root_module.linkFramework("MetalKit", .{});
+        session_host_ssh_upload_product_tests.root_module.linkFramework("QuartzCore", .{});
+        session_host_ssh_upload_product_tests.root_module.linkFramework("CoreText", .{});
+        session_host_ssh_upload_product_tests.root_module.linkFramework("CoreGraphics", .{});
+        session_host_ssh_upload_product_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        run_session_host_p5d.addArtifactArg(session_host_ssh_upload_product_tests);
         run_session_host_p5d.expectExitCode(0);
         run_session_host_p5d.setCwd(b.path("."));
         run_session_host_p5d.step.dependOn(
@@ -11887,6 +11926,7 @@ pub fn build(b: *std.Build) void {
             p5d_artifact_cli,
         });
         run_session_host_p5d_artifact.addArtifactArg(session_host_3d_product_e2e_tests);
+        run_session_host_p5d_artifact.addArtifactArg(session_host_ssh_upload_product_tests);
         run_session_host_p5d_artifact.expectExitCode(0);
         run_session_host_p5d_artifact.setCwd(b.path("."));
         session_host_p5d_artifact_step.dependOn(&run_session_host_p5d_artifact.step);

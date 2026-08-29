@@ -47,6 +47,7 @@ const reconnect_admission_owner = @import("reconnect_admission_owner.zig");
 const reconnect_resident_budget = @import("reconnect_resident_budget.zig");
 const reconnect_mutation_seal = @import("reconnect_mutation_seal.zig");
 const reconnect_reducer = @import("reconnect_reducer.zig");
+const reconnect_worker_owner = @import("reconnect_worker_owner.zig");
 const host_reconnect_runtime_ledger = @import("host_reconnect_runtime_ledger.zig");
 const host_reconnect_runtime_transaction = @import("host_reconnect_runtime_transaction.zig");
 const host_reconnect_window_transaction = @import("host_reconnect_window_transaction.zig");
@@ -1652,6 +1653,74 @@ pub const RemoteTermBackend = struct {
             .connected => |*connected| job.adoptConnected(self, host_id, phase, connected),
         };
         if (result != .connected) {
+            self.host_reconnect_job = null;
+            return result;
+        }
+        job_owned = false;
+        return .connected;
+    }
+
+    /// Adopts the c2 worker's already-connected Client without repeating connect/hello on the
+    /// AppSession frame thread. Before allocation or ownership transfer, revalidate the exact
+    /// pool generation, old connection generation, and every runtime's bound incident identity.
+    /// Failure leaves `source` owned by the caller so the completion can abandon it exactly once.
+    pub fn beginHostReconnectCandidate(
+        self: *RemoteTermBackend,
+        snapshot: reconnect_worker_owner.Snapshot,
+        phase: attach_phase_deadline.PhaseDeadline,
+        source: *client_mod.Client,
+    ) HostReconnectStart {
+        self.validateReconnectCoordinatorTarget() catch return .invalid_authority;
+        const pool = self.host_pool orelse return .invalid_authority;
+        const adapter = pool.get(snapshot.host_id) orelse return .invalid_authority;
+        if (snapshot.host_id == 0 or snapshot.pool_membership_generation == 0 or
+            snapshot.connection_generation == 0 or snapshot.incident_app_instance_nonce == 0 or
+            snapshot.incident_sequence == 0 or snapshot.absolute_deadline_ns == 0 or
+            pool.adapterGeneration(snapshot.host_id) != snapshot.pool_membership_generation or
+            adapter.connectionGeneration() != snapshot.connection_generation or
+            phase.kind != .connect_hello or phase.absolute.expires_at_ns != snapshot.absolute_deadline_ns or
+            phase.absolute.remainingNs() <= 0 or source.fd < 0 or source.host_id != snapshot.host_id or
+            !source.runtime_catchup_barrier_v1 or source.connection_profile != .gui)
+            return .invalid_authority;
+        if (self.app_quit_shutdown_deadline_ns != 0 or self.app_quit_routing_tombstoned or
+            self.app_quit_connections_terminalized) return .invalid_authority;
+        if (self.host_reconnect_preparing or self.host_reconnect_job != null) return .busy;
+
+        var matching_count: usize = 0;
+        var iterator = self.runtimes.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.host_id != snapshot.host_id) continue;
+            if (entry.value_ptr.host_adapter_generation != snapshot.pool_membership_generation or
+                !RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+                    entry.value_ptr.runtime,
+                    snapshot.host_id,
+                    snapshot.pool_membership_generation,
+                    snapshot.connection_generation,
+                    snapshot.incident_app_instance_nonce,
+                    snapshot.incident_sequence,
+                )) return .invalid_authority;
+            matching_count += 1;
+        }
+        if (matching_count == 0) return .invalid_authority;
+
+        self.host_reconnect_preparing = true;
+        defer self.host_reconnect_preparing = false;
+        const job = self.allocator.create(HostReconnectJob) catch return .{ .failed = .out_of_memory };
+        var job_owned = true;
+        defer if (job_owned) {
+            self.host_reconnect_job = null;
+            self.allocator.destroy(job);
+        };
+        job.* = .{};
+        self.host_reconnect_job = job;
+        job.prepareForConnect(self, snapshot.host_id, phase) catch {
+            job.* = .{};
+            self.host_reconnect_job = null;
+            return .invalid_authority;
+        };
+        const result = job.adoptConnected(self, snapshot.host_id, phase, source);
+        if (result != .connected) {
+            job.* = .{};
             self.host_reconnect_job = null;
             return result;
         }
@@ -4847,7 +4916,7 @@ test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고
     };
     try admissions.admit(.{
         .publication = .{
-            .incident_id = .{ .app_instance_nonce = 1, .sequence = 1 },
+            .incident_id = .{ .app_instance_nonce = (@as(u128, 1) << 96) | 1, .sequence = 1 },
             .detail_present = true,
             .detail_slot = 0,
             .aggregate_slot = 0,
@@ -4885,6 +4954,22 @@ test "CR2e-e3b2 admission drain은 resident cap에서 sealed row를 보존하고
     try testing.expectEqual(@as(usize, 7), (try budget.snapshot()).live_entries);
     for (&fixtures) |*fixture| {
         try testing.expect(remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+        try testing.expect(RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+            &fixture.runtime,
+            1,
+            3,
+            input.connection_generation,
+            (@as(u128, 1) << 96) | 1,
+            1,
+        ));
+        try testing.expect(!RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
+            &fixture.runtime,
+            1,
+            3,
+            input.connection_generation,
+            1,
+            1,
+        ));
         try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixture.runtime, &budget);
     }
     for (incumbents[2..]) |*lease| try budget.release(lease, .candidate);
@@ -5349,6 +5434,160 @@ test "CR5b-1 host job runtime set은 copy membership identity drift와 empty를 
     try testing.expect(empty.pristine());
     try testing.expectEqual(@as(u64, 1), backend_value.next_host_reconnect_job_generation);
     backend_value.host_reconnect_job = null;
+}
+
+test "CR6e-c3 main owner adopts only the exact bound worker candidate" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+    const identity = HostAdapter.publicationProcessIdentity() orelse return error.TestUnexpectedResult;
+
+    var current_fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &current_fds));
+    var current: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = current_fds[0],
+        .host_id = 91,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var attach_peer = try std.Thread.spawn(
+        .{},
+        remote_runtime.testing_api.serveSemanticAttachPeers,
+        .{ current_fds[1], @as(usize, 1) },
+    );
+    var attach_peer_joined = false;
+    defer if (!attach_peer_joined) attach_peer.join();
+
+    var pool = AdapterPool.init(testing.allocator);
+    defer pool.deinit();
+    try testing.expectEqual(@as(u128, 91), try addOwnedClient(&pool, testing.allocator, &current));
+    const adapter = pool.get(91).?;
+    const adapter_generation = pool.adapterGeneration(91).?;
+    const connection_generation = adapter.connectionGeneration();
+    var backend_value = RemoteTermBackend.initAttachOnlyWithPool(
+        testing.allocator,
+        testing.io,
+        &pool,
+        @ptrFromInt(@alignOf(SurfaceRuntime)),
+    );
+    try backend_value.claimProductSingleton();
+    defer backend_value.deinit();
+    var runtime: RemoteRuntime = undefined;
+    try remote_runtime.testing_api.initSemanticRuntimeOnAdapter(
+        &runtime,
+        adapter,
+        testing.allocator,
+        "000000000000000000000000000000c3".*,
+        1,
+    );
+    attach_peer.join();
+    attach_peer_joined = true;
+    defer remote_runtime.testing_api.deinitSemanticRuntimeOnAdapter(&runtime);
+    try backend_value.runtimes.put(testing.allocator, 1, .{
+        .runtime = &runtime,
+        .host_id = 91,
+        .host_adapter_generation = adapter_generation,
+        .runtime_generation = 1,
+    });
+    defer _ = backend_value.runtimes.remove(1);
+
+    const incident_nonce = (@as(u128, 1) << 96) | 0xC3;
+    const projection: reconnect_admission_owner.Projection = .{
+        .slot_index = 0,
+        .slot_generation = 1,
+        .host_id = 91,
+        .host_adapter_generation = adapter_generation,
+        .connection_generation = connection_generation,
+        .incident_id = .{ .app_instance_nonce = incident_nonce, .sequence = 7 },
+    };
+    var budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    try RemoteRuntime.backend_api.bindReconnectAdmission(
+        &runtime,
+        &budget,
+        projection,
+        reconnect_resident_budget.max_entry_bytes,
+    );
+    defer {
+        remote_runtime.testing_api.releaseBoundReconnectAdmission(&runtime, &budget) catch unreachable;
+        budget.deinit() catch unreachable;
+    }
+
+    var fresh_fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fresh_fds));
+    defer _ = c.close(fresh_fds[1]);
+    var fresh: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fresh_fds[0],
+        .host_id = 91,
+        .runtime_catchup_barrier_v1 = true,
+        .connection_profile = .gui,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    var fresh_owned = true;
+    defer if (fresh_owned) fresh.deinit();
+    var clock = struct {
+        now_ns: i128 = 10,
+        fn read(context: *anyopaque) i128 {
+            return @as(*@This(), @ptrCast(@alignCast(context))).now_ns;
+        }
+    }{};
+    const deadline_ns: u64 = 100;
+    const phase = attach_phase_deadline.PhaseDeadline.fromAbsolute(.connect_hello, .fromInjected(
+        .{ .context = &clock, .now_ns = @TypeOf(clock).read },
+        deadline_ns,
+    ));
+    const snapshot: reconnect_worker_owner.Snapshot = .{
+        .host_id = 91,
+        .pool_membership_generation = adapter_generation,
+        .connection_generation = connection_generation,
+        .incident_app_instance_nonce = incident_nonce,
+        .incident_sequence = 7,
+        .absolute_deadline_ns = deadline_ns,
+    };
+    var stale = snapshot;
+    stale.incident_app_instance_nonce = 1;
+    try testing.expectEqual(
+        HostReconnectStart.invalid_authority,
+        backend_value.beginHostReconnectCandidate(stale, phase, &fresh),
+    );
+    try testing.expectEqual(@as(c.fd_t, fresh_fds[0]), fresh.fd);
+    try testing.expectEqual(@as(?*HostReconnectJob, null), backend_value.host_reconnect_job);
+    stale = snapshot;
+    stale.incident_sequence += 1;
+    try testing.expectEqual(
+        HostReconnectStart.invalid_authority,
+        backend_value.beginHostReconnectCandidate(stale, phase, &fresh),
+    );
+    stale = snapshot;
+    stale.connection_generation += 1;
+    try testing.expectEqual(
+        HostReconnectStart.invalid_authority,
+        backend_value.beginHostReconnectCandidate(stale, phase, &fresh),
+    );
+    stale = snapshot;
+    stale.pool_membership_generation += 1;
+    try testing.expectEqual(
+        HostReconnectStart.invalid_authority,
+        backend_value.beginHostReconnectCandidate(stale, phase, &fresh),
+    );
+    stale = snapshot;
+    stale.absolute_deadline_ns += 1;
+    try testing.expectEqual(
+        HostReconnectStart.invalid_authority,
+        backend_value.beginHostReconnectCandidate(stale, phase, &fresh),
+    );
+    try testing.expectEqual(@as(c.fd_t, fresh_fds[0]), fresh.fd);
+    try testing.expectEqual(@as(?*HostReconnectJob, null), backend_value.host_reconnect_job);
+    try testing.expectEqual(
+        HostReconnectStart.connected,
+        backend_value.beginHostReconnectCandidate(snapshot, phase, &fresh),
+    );
+    fresh_owned = false;
+    try testing.expectEqual(@as(c.fd_t, fresh_fds[0]), backend_value.host_reconnect_job.?.client.?.fd);
+    try backend_value.abortHostReconnectConnect();
 }
 
 test "CR5b-2a host job은 three-runtime retirement를 모두 준비한 뒤 mutation 없이 abort한다" {

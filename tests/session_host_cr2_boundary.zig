@@ -1172,7 +1172,9 @@ test "CR2e-e3c2 경계는 typed external receipt와 sole runtime consumer를 고
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn applyDirectReleaseTarget("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn applyDirectReleaseProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "reconnect_reducer.reduce(runtime.reconnect_executor.state.?, .retry_direct_granted)"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, "matchesReconnectAdmission(runtime, admission)"));
+    // e3c2 owns two direct-release checks; CR6e-c3a's exact incident validator deliberately
+    // delegates its connection half to the same canonical predicate instead of cloning it.
+    try std.testing.expectEqual(@as(usize, 3), count(runtime, "matchesReconnectAdmission(runtime, admission)"));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.directReleaseProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "RemoteRuntime.backend_api.applyDirectReleaseProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "backend.directReleaseTarget("));

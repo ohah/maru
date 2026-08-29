@@ -3350,6 +3350,28 @@ pub const RemoteRuntime = struct {
             };
         }
 
+        /// c3 main-owner completion validation must prove that the admission which justified a
+        /// blocking worker is still bound to every runtime. Connection identity alone is too
+        /// weak: a later incident on the same generation must not be allowed to consume an older
+        /// worker completion.
+        pub fn matchesBoundReconnectIdentity(
+            runtime: *RemoteRuntime,
+            host_id: u128,
+            host_adapter_generation: u64,
+            connection_generation: u64,
+            incident_app_instance_nonce: u128,
+            incident_sequence: u64,
+        ) bool {
+            runtime.reconnect_executor.validate(&runtime.generation_owner) catch return false;
+            const admission = runtime.reconnect_executor.admission orelse return false;
+            return admission.host_id == host_id and
+                admission.host_adapter_generation == host_adapter_generation and
+                admission.connection_generation == connection_generation and
+                admission.incident_id.app_instance_nonce == incident_app_instance_nonce and
+                admission.incident_id.sequence == incident_sequence and
+                matchesReconnectAdmission(runtime, admission);
+        }
+
         pub fn bindReconnectAdmission(
             runtime: *RemoteRuntime,
             budget: *reconnect_resident_budget.ReconnectAdmissionBudget,

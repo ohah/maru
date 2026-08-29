@@ -5967,6 +5967,15 @@ artifact는 실제 host socket 단절 뒤 같은 host/runtime/child PID, 누적 
 controller 권위, frame-thread stall 0, worker/fd/client/admission final 0을 검증한다. 이 배선은 keep-alive opt-in 안에서만
 활성화하며 `session.keep-alive-after-quit`의 default나 G3 release migration을 바꾸지 않는다.
 
+**CR6e-c3a main-owner candidate adoption 경계:** c3a는 c2 completion에서 exact once 꺼낸 candidate `Client`를
+frame owner가 기존 CR5 `HostReconnectJob`의 final address로 넘기는 비차단 adoption leaf만 연다. 이 leaf는 worker
+snapshot의 128-bit incident app-instance nonce를 축소하지 않고 HostPool membership generation, old connection
+generation, absolute deadline과 모든 same-host runtime에 남은 exact bound admission identity를 allocation 및 Client
+ownership 이전 전에 다시 확인한다. stale/tampered snapshot은 candidate 소유권, runtime/screen/input과 host job을
+바꾸지 않는다. 성공한 경우에만 기존 CR5 runtime-set capture 뒤 candidate를 job으로 move-by-convention 이전한다.
+c3a에는 thread/queue/Quit join, AppSession 제품 caller, CR5 transaction driver와 actual disconnect E2E가 없으므로 c3 또는
+자동 reconnect 제품 완료를 뜻하지 않는다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**

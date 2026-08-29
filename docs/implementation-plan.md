@@ -1277,7 +1277,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    CR6c·CR6d·CR6e-a1·CR6e-a2·CR6e-b의 제품 증거를 모두 통과한 뒤에만 자동 reconnect를 제품 설정에 연결한다. 후속
    **CR6e-c**는 c1 app-global bounded job/completion owner → c2 thread/queue 비소유 blocking worker entrypoint의
    deadline-aware exact-host connect/hello와 move-only candidate completion →
-   c3 main frame owner의 stale 재검증·기존 CR5 host transaction publication과 actual AppKit disconnect→자동복구 E2E
+   c3a main owner의 128-bit incident identity·pool/connection generation·bound admission·deadline 재검증과 이미 연결된
+   candidate의 비차단 CR5 job adoption → c3b app-global worker/frame 배선과 CR5 host transaction publication →
+   c3c actual AppKit disconnect→자동복구 E2E
    순서로 닫는다. c2의 thread spawn과 AppSession caller는 0이고, c3 app-global worker가 thread 수·cancellation wake·Quit
    join을 소유한다. frame owner는 connect/hello/backoff/join을 실행하지 않고, worker는 raw runtime/adapter pointer를
    보존하거나 제품 generation을 게시하지 않는다. keep-alive opt-in 밖과 G3 default migration은 이 배선으로 바뀌지 않는다.

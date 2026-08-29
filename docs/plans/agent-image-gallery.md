@@ -31,8 +31,12 @@
 | **IG3-b** ImageIO 디코드 | ✅ 완료 — `platform/macos/image_decode.zig`(Zig extern, ObjC 파일 0). ⚠️ `CoreGraphics` 만으로는 심볼이 안 풀려 **29곳에 `ImageIO` 링크 추가** |
 | **IG3-c1** 격자 배치 | ✅ 완료 — `session/image_grid.zig`(순수, letterbox 포함, 단위 9개) |
 | **IG3-c2** GpuImage 배선 | ✅ 완료 — **화면에 이미지가 실린다**. 배경 이미지와 같은 예약 id·live_ids·1회 업로드 패턴 |
-| **IG3-d** 디코드 워커 | ⏳ 다음 — 지금은 tick 당 1장(장당 ~20 ms 로 프레임 예산 초과) |
-| IG2~IG6 | 미착수 |
+| **IG3-d** 디코드 워커 | ✅ 완료 — `agent_image_decode_backend.zig`. main actor 는 요청만 걸고 수확한다 |
+| **IG3 전체** | ✅ **기능이 동작한다** — 도크 4번째 뷰에 활성 pane 의 이미지가 격자로 뜬다 |
+| IG4 크게 보기·팬/줌 | 미착수 |
+| IG5 문맥 복원·세션 점프 | 미착수 |
+| IG6 세션 목록 누적 | 미착수 — 지금은 `/clear` 하면 갤러리가 빈다(알려진 한계) |
+| IG2 이어읽기 | 미착수 — 스캔이 매번 처음부터다 |
 
 **순서가 바뀌었다(2026-08-29 실측).** IG1-d 를 낸 뒤 제품 스캐너로 최악 파일을 재니 **3.6 초**였다
 (1,680 MB / 467 MB/s, 계약 §4.1.1). 초안의 «약 0.7 초» 는 Python SIMD 로 잰 값이라 5배 낙관이었다.

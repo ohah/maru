@@ -144,7 +144,7 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 | `SessionStart` | — | ✅ | 턴 0 스냅샷(`opensSessionBase`), 세션 신원(`session_id`). `transcript_path`는 **파싱만** 한다 — 훅 모드는 transcript 파일을 아예 안 읽는 것이 설계다 |
 | `UserPromptSubmit` | — | ✅ | 턴 시작, `working` 진입, 턴 식별자 |
 | `Stop` | — | ✅ | 턴 종료 스냅샷, 마지막 응답(`last_assistant_message` → 사이드바 대화 줄), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다). **링 항목의 턴 제목은 (AT2)** — `Snapshot`에 아직 제목 슬롯이 없다 |
-| `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. ⚠️ **미검증** — 헤드리스에서 권한 거부가 실제로 일어났는데도 이 이벤트도 `PermissionDenied`도 발화하지 않았다(§8-6) |
+| `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. ⚠️ **미검증** — 헤드리스에서 권한 거부가 실제로 일어났는데도 이 이벤트도 `PermissionDenied`도 발화하지 않았다(§9-6) |
 | `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). **AI 소행 경로(`file_path`)는 (AT3)** — 파싱만 하고 소비자가 없다. **도구 구간 시작은 (AT3b)** — `tool_use_id`가 파서에 아직 없다. **두 provider의 payload 모양이 다르다 — §2.1** |
 | `PostToolUse` | **(AT3b) `Bash`/`exec`만** | 미검증 | **아직 걸지 않는다** — 세트에 없고 test가 그 부재를 단언한다. AT3b가 셸 브래킷과 함께 되돌린다(§3.1 예외) |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |

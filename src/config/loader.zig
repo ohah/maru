@@ -290,6 +290,16 @@ fn applyKey(
         };
         config.theme = theme.presetColors(preset);
         // theme.background/foreground/cursor/selection은 스키마-주도로 이주(CS-1/CS-2). palette.N만 특수(인덱스).
+    } else if (std.mem.startsWith(u8, key, "theme.syntax.")) {
+        // 구문 색 역할별 override: theme.syntax.<역할> = #RRGGBB(native-editor-ui.md §9.0). nullable 색이라
+        // 스키마-주도에서 빠진다(cursor.color와 같은 이유) — 색 검증·arena dupe·진단은 dupValidColor 단일 출처.
+        // 모르는 역할 이름·틀린 색은 forgiving(diagnostic + 기존 값 유지) — 팔레트와 같은 규율이다.
+        const role = theme.parseSyntaxRole(key["theme.syntax.".len..]) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "theme.syntax.<역할>의 역할 이름을 모른다 — 무시" });
+            return;
+        };
+        const validated = try dupValidColor(a, diags, line_no, key, value, "");
+        if (validated.len != 0) config.theme.syntax[@intFromEnum(role)] = validated;
     } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
         // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
         // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
@@ -3021,4 +3031,46 @@ test "parse: workspace.tab/split-inherit-cwd 기본 true, override, forgiving" {
         try std.testing.expect(p.config.workspace.tab_inherit_cwd);
         try std.testing.expectEqual(@as(usize, 1), p.diagnostics.len);
     }
+}
+
+test "SC3 theme.syntax.<역할>: 유효 색은 실리고, 틀린 색·모르는 역할은 forgiving" {
+    const a = std.testing.allocator;
+    var parsed = try parse(a,
+        \\theme.syntax.keyword = #c678dd
+        \\theme.syntax.comment = #5c6370
+        \\theme.syntax.type = #56b6c2
+        \\theme.syntax.string = nope
+        \\theme.syntax.bogus = #ffffff
+    );
+    defer parsed.deinit();
+    const t = parsed.config.theme;
+    try std.testing.expectEqualStrings("#c678dd", t.syntax[@intFromEnum(theme.SyntaxRole.keyword)].?);
+    try std.testing.expectEqualStrings("#5c6370", t.syntax[@intFromEnum(theme.SyntaxRole.comment)].?);
+    // 사용자 키는 `type`이고 필드는 `type_name`이다 — 그 사상이 여기서도 성립한다.
+    try std.testing.expectEqualStrings("#56b6c2", t.syntax[@intFromEnum(theme.SyntaxRole.type_name)].?);
+    // 틀린 색은 그 역할을 **파생인 채로** 둔다(끄지 않는다).
+    try std.testing.expect(t.syntax[@intFromEnum(theme.SyntaxRole.string)] == null);
+    // 진단이 둘(틀린 색·모르는 역할) — 조용히 삼키지 않는다.
+    try std.testing.expect(parsed.diagnostics.len >= 2);
+}
+
+test "SC6 theme.preset 이 뒤 줄에 오면 구문 색 override 가 지워진다 (순차 적용)" {
+    // **이 동작은 지금 우연히 성립한다** — preset 핸들러가 `config.theme`를 통째로 깔기 때문이다.
+    // 누가 그것을 "필드 병합"으로 바꾸면 팔레트·구문 색의 규칙이 **말없이** 달라진다. 규칙을 고정한다
+    // (native-editor-ui.md §9.0 — 팔레트와 같은 규율).
+    const a = std.testing.allocator;
+    var after = try parse(a,
+        \\theme.syntax.keyword = #c678dd
+        \\theme.preset = dracula
+    );
+    defer after.deinit();
+    try std.testing.expect(after.config.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)] == null);
+
+    // 앞 줄에 오면 살아남는다(나중 줄 우선).
+    var before = try parse(a,
+        \\theme.preset = dracula
+        \\theme.syntax.keyword = #c678dd
+    );
+    defer before.deinit();
+    try std.testing.expectEqualStrings("#c678dd", before.config.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)].?);
 }

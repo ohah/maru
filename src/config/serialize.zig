@@ -45,6 +45,14 @@ pub fn configKeyValues(arena: std.mem.Allocator, config: theme.Config) ![]const 
         const color = entry orelse continue; // null = 그 인덱스는 기본 xterm — 줄 안 만든다(parse가 기본 폴백)
         try list.append(arena, .{ .key = try std.fmt.allocPrint(arena, "theme.palette.{d}", .{i}), .value = color });
     }
+    // 구문 색 역할 override: non-null만 emit(팔레트·커서 색과 동형 — null=파생이라 줄을 안 만든다). 키는
+    // theme.syntaxRoleKey 단일 출처라 loader 파싱과 어긋날 수 없다(comptime 문자열이라 allocPrint도 없다).
+    inline for (@typeInfo(theme.SyntaxRole).@"enum".fields) |f| {
+        const role: theme.SyntaxRole = @enumFromInt(f.value);
+        if (config.theme.syntax[f.value]) |c| {
+            try list.append(arena, .{ .key = comptime theme.syntaxRoleKey(role), .value = c });
+        }
+    }
     // 커서 색 override: non-null만 emit한다(null=테마 폴백이라 줄 안 만듦 — palette와 동형). 스키마-주도가
     // nullable을 안 다뤄 여기 수동으로 둔다(loader 수동 핸들러와 짝). 정적/arena 문자열 그대로 빌려준다.
     if (config.cursor.color) |c| try list.append(arena, .{ .key = "cursor.color", .value = c });
@@ -111,6 +119,8 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     cfg.theme.palette[14] = "#70c0b1";
     cfg.cursor.shape = .underline;
     cfg.cursor.blink = false;
+    cfg.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)] = "#c678dd"; // SC4: 구문 색도 같은 대칭(수동 emit ↔ 수동 파싱)
+    cfg.theme.syntax[@intFromEnum(theme.SyntaxRole.type_name)] = "#56b6c2"; // 키가 `type`인 예외 역할도 왕복하는가
     cfg.cursor.color = "#ff5555"; // nullable 색 round-trip(loader 수동 핸들러 ↔ serialize 수동 emit) 대칭 검증
     cfg.cursor.text = "#101010";
     cfg.blink_text = true;
@@ -173,6 +183,10 @@ test "round-trip: configKeyValues → updateConfigText → parse가 모든 필�
     try std.testing.expectEqual(theme.CursorShape.underline, got.cursor.shape);
     try std.testing.expectEqual(false, got.cursor.blink);
     try std.testing.expectEqualStrings("#ff5555", got.cursor.color.?);
+    try std.testing.expectEqualStrings("#c678dd", got.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)].?);
+    try std.testing.expectEqualStrings("#56b6c2", got.theme.syntax[@intFromEnum(theme.SyntaxRole.type_name)].?);
+    // 안 정한 역할은 줄을 만들지 않는다(null=파생 — 파일이 부풀지 않는다).
+    try std.testing.expect(got.theme.syntax[@intFromEnum(theme.SyntaxRole.string)] == null);
     try std.testing.expectEqualStrings("#101010", got.cursor.text.?);
     try std.testing.expectEqual(true, got.blink_text);
     try std.testing.expectEqual(theme.AmbiguousWidth.wide, got.ambiguous_width);

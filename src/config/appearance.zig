@@ -54,6 +54,10 @@ pub const ResolvedTheme = struct {
     // `.indexed` 색을 풀 때 OSC4 override → 이 config base → xterm256 순으로 폴백한다(OSC4가 없을 때만 이 값이 보인다).
     // 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
     palette: [16]?color.Rgb = .{null} ** 16,
+    // 구문 색 역할별 override(resolve된 Rgb, null=파생). **여기서는 대비 보정을 걸지 않는다** —
+    // 역할마다 목표 대비가 다르므로(본문 4.0 · comment/punctuation 2.4) `syntax_theme.fromTheme`가
+    // 자기 자리에서 건다. 여기서 한 번 더 걸면 두 번 보정된다.
+    syntax: [theme.syntax_role_count]?color.Rgb = .{null} ** theme.syntax_role_count,
     // theme.min-contrast 목표 명암비(resolve된 값 그대로). 위 palette는 이 값으로 이미 선보정돼 있고,
     // 렌더(metal_frame)가 팔레트 밖 색(256색 16~255·truecolor)의 per-cell 하한에 같은 값을 쓴다 —
     // 렌더 배선의 단일 출처를 resolve 결과에 둔다(config 원값을 렌더가 따로 읽지 않게). 0=끔.
@@ -203,6 +207,11 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
             if (!std.meta.eql(floored, base)) palette[i] = floored; // floor가 바꾼 default만 seed(안 바뀌면 null=xterm256 폴백)
         }
     }
+    // 구문 색 역할 override를 푼다. 깨진 색은 여기서 막힌다(팔레트와 같은 게이트).
+    var syntax: [theme.syntax_role_count]?color.Rgb = .{null} ** theme.syntax_role_count;
+    for (config.syntax, 0..) |maybe, i| {
+        if (maybe) |hex| syntax[i] = try parseHexColor(hex);
+    }
     const sidebar_foreground = if (config.sidebar_foreground) |s| try parseHexColor(s) else foreground;
     const accent = if (config.accent) |a| try parseHexColor(a) else accent_default;
     return .{
@@ -222,6 +231,7 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
         .accent = accent,
         .accent_foreground = contrastFloor(sidebar_foreground, relativeLuminance(accent), chrome_accent_text_min_contrast, .both),
         .palette = palette,
+        .syntax = syntax,
         .min_contrast = min_contrast,
     };
 }

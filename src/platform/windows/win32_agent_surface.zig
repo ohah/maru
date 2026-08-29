@@ -71,6 +71,10 @@ pub const Options = struct {
     /// 캐럿을 그린다) — 호스트가 할 일은 값을 주는 것뿐이다. 거르는 것은 호스트다(목록을 이미
     /// 걸러 넘긴다).
     search: []const u8 = "",
+    /// **조합 중인 글자**(IME). 확정 전이라 목록을 거르지 않는다 — 중립이 그 사실을 타입으로
+    /// 못 박아 뒀다(`Props.search_preedit`: *"platform 이 `search` 로 확정하기 전까지 표시 전용"*).
+    /// 안 주면 사용자가 **자기가 무엇을 치는지 못 본다**.
+    search_preedit: []const u8 = "",
     search_focused: bool = false,
     /// **훑는 중인가.** `loading` 은 보여 줄 record 가 아직 하나도 없는 첫 훑기고, `refreshing` 은
     /// 목록이 있는 채로 다시 훑는 중이다 — 중립이 그 둘을 다른 문구·다른 아이콘 색으로 그린다
@@ -127,6 +131,7 @@ pub fn build(
         .items = opts.items,
         .sort_order = opts.sort_order,
         .search = opts.search,
+        .search_preedit = opts.search_preedit,
         .search_focused = opts.search_focused,
         .loading = opts.loading,
         .refreshing = opts.refreshing,

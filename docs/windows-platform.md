@@ -6744,6 +6744,65 @@ DBGG 0: cp=65 font=1 glyph=35 … face_says=1                 (셰이퍼 35 ↔ 
 - **`partial` 을 재는 판정이 없다** — 이 기계의 훑기가 늘 완전해서 그 상태를 못 만들었다. 값은
   백엔드 것을 그대로 넘긴다.
 
+### 2m.87 조합 중인 글자가 검색 줄에 뜬다 — 그리고 포커스를 따라간다 (W8.15 잔여, 실측 2026-08-30)
+
+§2m.76 이 *"IME 조합은 `search_preedit` 를 아직 안 준다 — 모델도 props 도 있는데 배선만 없다"* 로
+남겨 둔 자리를 갚는다. 한글을 치면 **확정된 뒤에야** 검색 줄에 나타났다: 조합 중에는 아무 표시가
+없어, 사용자는 자기가 무엇을 치고 있는지 못 봤다.
+
+## 확정은 이미 오고 있었다 — 빠진 것은 미리보기뿐
+
+창은 `WM_IME_COMPOSITION` 의 `GCS_COMPSTR`(조합 중)만 읽고 **확정 문자열(`GCS_RESULTSTR`)은
+`DefWindowProcW` 에 넘긴다**(§2i 의 결정). 그래서 확정된 글자는 `WM_CHAR` 로 와서 이미 `appendChar`
+경로를 탄다. 없던 것은 **조합 중 미리보기**다.
+
+## 조합은 포커스를 따라간다
+
+예전 배선은 조합을 **늘 터미널 코어**로 보냈다(`setPreeditLocked`). 검색 줄에 치는 동안 그러면
+미리보기가 **안 보이는 셸**에 들어간다 — 키 입력이 이미 겪은 그 실패의 IME 판이고, 그때
+`keys_while_file` 판정이 그것을 잡았다.
+
+판정을 **순수 함수**로 뺐다(`preeditTargetFor(sidebar_focused, agent_focused, dock_view)`):
+
+- 사이드바 검색이 포커스면 그쪽,
+- 에이전트 검색이 포커스이고 **그 뷰가 보일 때만** 그쪽(글자 입력과 같은 규칙),
+- 아니면 터미널.
+
+## 그리는 값은 확정 + 조합, **거르는 값은 확정뿐**
+
+중립이 그 분리를 타입으로 못 박아 뒀다 — 사이드바 검색 줄의 `query` 인자 doc 이 *"지금까지 친
+것(확정 + IME 조합)"* 이고, 에이전트 props 의 `search_preedit` doc 이 *"platform 이 `search` 로
+확정하기 전까지 표시 전용"* 이다. 그래서 그리기는 `searchDisplay`(확정 뒤에 조합을 붙인다)를 쓰고,
+`refreshSidebarCards`(거르기)는 **`query.items` 그대로** 둔다. 조합 중에 목록이 흔들리면 안 된다.
+
+## 판정 — 둘로 갈랐다
+
+**진짜 IME 로는 못 민다.** 조합 문자열은 `ImmGetCompositionStringW` 가 OS 에서 읽어 오는 것이라
+합성 메시지를 넣어도 빈 값이다(실측). 그래서 둘로 나눴다:
+
+- **어디로 보내나** → 순수 함수 + 단위 테스트(`main.test.preeditTargetFor`).
+- **그려지나** → 스모크가 모델에 직접 넣고 **그린 것**을 잰다.
+
+```text
+search_ime: glyphs 9->10 digest 1ea53c5…->aa05113… cards 14->14 to_search=0 to_terminal=0 search_ime_ok=true
+```
+
+`cards 14->14` 가 "확정 전에는 안 거른다" 를 지킨다. `to_search`·`to_terminal` 은 이 기계에 IME 조합이
+없어 0 이다 — **그 수가 판정에 안 들어간다**(있으면 초록이 IME 유무에 묶인다).
+
+| 뮤턴트 | 무엇이 빨개지나 |
+|---|---|
+| `searchDisplay` 가 조합을 안 붙인다(**옛 동작**) | `search_ime_ok`(`glyphs 9->9`, 지문 그대로) |
+| 라우팅이 늘 터미널이다(**옛 동작**) | **단위 테스트**(`expected .sidebar_search, found .terminal`) |
+
+## 아직 아닌 것
+
+- **에이전트 검색 쪽은 캡처로 못 봤다** — 배선은 같은 자리에서 함께 했고(`search_preedit` 를 Options 에
+  더해 중립에 넘긴다) 스모크 판정은 사이드바만 잰다.
+- **조합 중 caret 자리**는 중립이 정한 그대로다(`inputLineView`) — Windows 가 따로 안 만진다.
+- `WM_IME_ENDCOMPOSITION` 이 조합을 비우는 것에는 판정이 없다 — 창이 `preedit_len = 0` 을 세우고
+  같은 이벤트를 올리는 한 줄이라 라우팅이 그것을 그대로 태운다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

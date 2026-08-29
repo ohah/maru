@@ -10996,6 +10996,14 @@ pub const AppSession = struct {
                 agent_dock.closeAgentSessionInlineDetail(self);
                 return input_ops.keyConsumedByApp(self);
             }
+            // 갤러리 크게 보기도 같은 게이트다 — 도크를 누른 적이 있어야(`ownsKeys`) Esc 를 가져간다.
+            // 그러지 않으면 이미지를 열어 둔 채 터미널로 돌아간 사용자의 vim Esc 가 사라진다.
+            if (event.key == .escape and !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
+                image_gallery_ops.handleEscape(self))
+            {
+                self.metal_dirty = true;
+                return input_ops.keyConsumedByApp(self);
+            }
         }
         // One plain activation toggles the selected dock card.  The provider remains inert
         // until the later explicit dock-local action has been published as ready.
@@ -12058,6 +12066,11 @@ pub const AppSession = struct {
                     _ = agent_dock.agentSessionDockPointer(self, .down, x_px, y_px);
                     return;
                 }
+                // 갤러리는 자기 격자로 판정한다. 탐색기 행 판정을 그대로 타면 이 뷰에는 그런 행이
+                // 없어 클릭이 통째로 흘러가 버린다(소스 컨트롤이 같은 이유로 자기 분기를 둔다).
+                if (self.dock.view == .image_gallery) {
+                    if (image_gallery_ops.handleDown(self, x_px, y_px)) return;
+                }
                 if (self.dock.view == .explorer) {
                     if (dock_ops.beginDockListScrollbarGesture(self, x_px, y_px)) return;
                     // **down 은 잡기만 하고 여는 것은 up 이다**(FT2). 얻는 것은 두 가지다 — up 이
@@ -12087,6 +12100,7 @@ pub const AppSession = struct {
             // 도크 카드 클릭은 `focus_owner`를 바꾸지 않으므로(계속 `.workspace`) 아래 조건만으로는
             // Session Dock의 component-local keyboard focus가 안 풀린다 — 그것부터 무조건 놓는다.
             agent_dock.releaseAgentSessionDockKeyFocus(self);
+            image_gallery_ops.releaseKeyFocus(self); // 크게 보기는 그대로 두고 키보드만 놓는다
             if (self.focus_owner != .workspace or self.pending_dock_focus != null) workspace_ops.focusWorkspaceInput(self);
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
@@ -72354,4 +72368,144 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
     var total_buf: [24]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&shown_buf, "{d}", .{image_count - l.overflow})) != null);
     try std.testing.expect(std.mem.indexOf(u8, want, try std.fmt.bufPrint(&total_buf, "{d}", .{image_count})) != null);
+}
+
+test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (IG4-b)" {
+    // **격자가 뜨는 것과 «누른 것이 열리는 것» 은 다른 사실이다.** 열기가 빠지면 사용자는 160 px
+    // 썸네일만 보고 내용을 못 읽는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(dock_ops.dockVisible(session));
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+
+    // ── ① **그린 자리를 누른다.** 좌표를 지어내면 이 test 는 배치가 바뀌어도 계속 통과한다.
+    const area = image_gallery_ops.gridArea(session);
+    const m = image_gallery_ops.gridMetrics(session);
+    const l = maru.session.image_grid.layout(area, m, 1);
+    const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
+    try std.testing.expect(image_gallery_ops.handleDown(
+        session,
+        @floatFromInt(cell.x + cell.w / 2),
+        @floatFromInt(cell.y + cell.h / 2),
+    ));
+    try std.testing.expect(session.image_gallery.open != null);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index);
+    try std.testing.expect(session.image_gallery.key_focus); // 도크를 눌렀다 = 키보드도 도크로
+
+    // ── ② 원본이 풀릴 때까지 tick. **워커가 푼다** — main actor 는 수확만 한다.
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.open.?.pixels.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expect(session.image_gallery.open.?.pixels.len > 0);
+    // `target_side = 0` 이므로 **원본 크기 그대로**다(썸네일 경로였다면 여기서 갈린다).
+    try std.testing.expectEqual(@as(u32, 2), session.image_gallery.open.?.width);
+    try std.testing.expectEqual(@as(u32, 2), session.image_gallery.open.?.height);
+
+    // ── ③ 격자가 아니라 **크게 보기 한 장만** 실린다.
+    var images: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels: []u8 = &.{};
+    var live: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images);
+        allocator.free(uploads);
+        allocator.free(pixels);
+        live.deinit(allocator);
+    }
+    // 「처음 그리는 프레임」과 같은 상태로 되돌린다 — 위 spin 이 도는 동안 제품 tick 이 이미 올렸다
+    // (IG3-c2 가 같은 이유로 같은 되돌림을 한다). 여기서 보려는 것은 **무엇이 채널에 실리는가**다.
+    session.image_gallery.open.?.uploaded = false;
+    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    try std.testing.expectEqual(@as(usize, 1), images.len);
+    try std.testing.expectEqual(image_gallery_ops.gallery_open_image_id, images[0].image_id);
+    try std.testing.expectEqual(@as(usize, 1), uploads.len);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 4), pixels.len);
+
+    // **도크 안에 그린다.** 확대하면 UV 로 자르므로, 어떤 상태에서도 뷰포트를 넘지 않아야 한다.
+    const vp = image_gallery_ops.viewportRect(session);
+    try std.testing.expect(images[0].dest_x >= vp.x);
+    try std.testing.expect(images[0].dest_y >= vp.y);
+    try std.testing.expect(images[0].dest_x + images[0].dest_w <= vp.x + vp.w);
+    try std.testing.expect(images[0].dest_y + images[0].dest_h <= vp.y + vp.h);
+    try std.testing.expect(images[0].dest_w > 0 and images[0].dest_h > 0);
+
+    // 크게 보고 있으면 개수 문구를 겹쳐 내지 않는다 — 지금 보는 것과 무관한 수다.
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("", image_gallery_ops.noticeText(session, &buf));
+
+    // ── ④ Esc 로 닫힌다. **소유권 게이트가 있다** — 터미널로 돌아간 뒤의 Esc 는 가져가지 않는다.
+    image_gallery_ops.releaseKeyFocus(session);
+    try std.testing.expect(!image_gallery_ops.handleEscape(session));
+    try std.testing.expect(session.image_gallery.open != null); // 남의 Esc 로 닫히지 않았다
+
+    session.image_gallery.key_focus = true;
+    try std.testing.expect(image_gallery_ops.handleEscape(session));
+    try std.testing.expect(session.image_gallery.open == null);
+
+    // 닫으면 다시 격자다.
+    var images2: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads2: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels2: []u8 = &.{};
+    var live2: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images2);
+        allocator.free(uploads2);
+        allocator.free(pixels2);
+        live2.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    try std.testing.expectEqual(@as(usize, 1), images2.len);
+    try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images2[0].image_id);
 }

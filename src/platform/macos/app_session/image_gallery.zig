@@ -21,6 +21,7 @@ const image_decode = @import("../image_decode.zig");
 const decode_backend = @import("../agent_image_decode_backend.zig");
 const image_scale = maru.session.image_scale;
 const image_grid = maru.session.image_grid;
+const image_view = maru.session.image_view;
 const metal_frame = maru.renderer.metal_frame;
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
@@ -47,11 +48,19 @@ pub const State = struct {
     /// 지금 디코드를 걸어 둔 요청의 generation. 0 이면 없다. **한 번에 한 장만 푼다** —
     /// 여러 스레드를 띄우면 빨리 차지만 CPU 를 그만큼 먹고, 뷰를 떠나면 그 일이 전부 버려진다.
     decoding: u64 = 0,
+    /// 크게 보고 있는 이미지. `null` 이면 격자다. **격자와 배타적**이다 — 둘을 겹쳐 그리면
+    /// 어느 것을 누르는지 알 수 없다.
+    open: ?Open = null,
+    /// 갤러리가 키보드를 쥐고 있나. 도크를 눌렀다는 사실이 소유권이고, 터미널을 누르면 놓는다.
+    /// **이 게이트가 없으면 vim 의 Esc 가 셸이 아니라 크게 보기를 닫는다**(에이전트 도크가 같은
+    /// 이유로 같은 게이트를 둔다).
+    key_focus: bool = false,
     /// 화면에 올린 썸네일. **인덱스와 다르다** — 인덱스는 파일 전체의 «자리» 이고 이것은 지금 보이는
     /// 칸의 «픽셀» 이다. 장당 0.06 MB 라 상한 안에서 상주해도 가볍다(계약 §5.2).
     tiles: std.ArrayList(Tile) = .empty,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.dropOpen(allocator);
         self.hits.deinit(allocator);
         self.dropTiles(allocator);
         self.tiles.deinit(allocator);
@@ -64,7 +73,14 @@ pub const State = struct {
         self.tiles.clearRetainingCapacity();
     }
 
+    /// 크게 보기의 픽셀도 owned 다 — 소스가 갈리거나 닫을 때 반드시 여기서 푼다.
+    pub fn dropOpen(self: *State, allocator: std.mem.Allocator) void {
+        if (self.open) |*op| allocator.free(op.pixels);
+        self.open = null;
+    }
+
     pub fn clear(self: *State, allocator: std.mem.Allocator) void {
+        self.dropOpen(allocator);
         self.dropTiles(allocator);
         self.hits.clearAndFree(allocator);
         self.source.clear();
@@ -103,12 +119,32 @@ pub const Tile = struct {
     uploaded: bool = false,
 };
 
+/// 크게 보고 있는 한 장. 썸네일(`Tile`)과 **다른 픽셀**이다 — 이쪽은 텍스처 상한 안에서 원본 배율로
+/// 푼 것이라 장당 수 MB 다. 그래서 한 장만 들고, 닫으면 바로 푼다.
+pub const Open = struct {
+    /// 인덱스의 몇 번째인가. 격자로 돌아가지 않아도 「무엇을 보고 있는지」의 유일한 키다.
+    hit_index: usize,
+    /// 팬·줌 상태. `scale == 0` 은 「아직 안 정했다」로, `image_view.clamp` 가 fit 으로 채운다.
+    view: image_view.View = .{},
+    width: u32 = 0,
+    height: u32 = 0,
+    /// RGBA8, **owned**. 길이 0 은 「아직 못 풀었다」거나 「못 푼다」이며, `decoding` 이 그 둘을 가른다.
+    pixels: []u8 = &.{},
+    uploaded: bool = false,
+    /// 이 요청의 generation. 0 이면 도는 것이 없다 — `pixels` 가 비어 있는데 이 값도 0 이면 **실패**다.
+    decoding: u64 = 0,
+};
+
 /// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
 /// 사이에 둔다 — 같은 텍스처 캐시를 쓰므로 id 가 겹치면 남의 그림이 나온다.
 pub const gallery_image_id_base: u32 = 0xFFF0_0000;
 
 /// 동시에 픽셀을 들고 있는 타일 수 상한. 장당 0.06 MB 이므로 256장이면 15 MB 다.
 pub const max_tiles: usize = 256;
+
+/// 크게 보기 텍스처의 예약 id. 썸네일 구간(`base .. base+max_tiles`) **뒤**에 둔다 — 겹치면
+/// 크게 보기를 닫았을 때 그 텍스처가 어느 칸의 썸네일로 되살아난다.
+pub const gallery_open_image_id: u32 = gallery_image_id_base +| max_tiles;
 
 /// 활성 Term 의 트랜스크립트 경로. 없으면 null — 에이전트가 붙지 않은 pane(셸만 띄운 창)이 그렇다.
 ///
@@ -180,6 +216,7 @@ pub fn poll(self: *AppSession) void {
     }
 
     harvestDecoded(self);
+    ensureOpen(self);
 
     var result = backend.take() orelse return;
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.
@@ -206,6 +243,8 @@ pub fn poll(self: *AppSession) void {
 pub fn ensureTiles(self: *AppSession, visible: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = decodeBackendPtr(self) orelse return;
+    // **크게 보기가 워커를 먼저 쓴다.** 사용자가 방금 누른 것보다 아직 안 보이는 칸이 급할 리 없다.
+    if (self.image_gallery.open != null) return;
     if (self.image_gallery.decoding != 0) return; // 이미 한 장 도는 중
     if (self.image_gallery.source.isEmpty()) return;
 
@@ -233,6 +272,22 @@ fn harvestDecoded(self: *AppSession) void {
     const backend = decodeBackendPtr(self) orelse return;
     var r = backend.take() orelse return;
     defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
+
+    // **크게 보기 것이 먼저다.** 두 요청은 같은 워커를 쓰므로 generation 으로 가른다.
+    if (self.image_gallery.open) |*op| {
+        if (op.decoding != 0 and r.generation == op.decoding) {
+            op.decoding = 0;
+            self.allocator.free(op.pixels);
+            op.width = r.width;
+            op.height = r.height;
+            op.pixels = r.pixels;
+            r.pixels = &.{}; // 소유가 넘어갔다
+            op.uploaded = false;
+            op.view = .{}; // 새 픽셀이면 fit 부터 — 옛 배율은 다른 이미지의 것이다
+            self.metal_dirty = true;
+            return;
+        }
+    }
 
     if (r.generation != self.image_gallery.decoding) return; // 늦게 온 것
     self.image_gallery.decoding = 0;
@@ -266,6 +321,9 @@ pub fn onLeaveView(self: *AppSession) void {
     self.image_gallery.awaiting = 0;
     self.image_gallery.resubmit = false;
     self.image_gallery.decoding = 0;
+    // 크게 보기도 닫는다 — 원본 픽셀은 수 MB 라, 안 보는 뷰 때문에 들고 있을 이유가 없다.
+    self.image_gallery.dropOpen(self.allocator);
+    self.image_gallery.key_focus = false;
 }
 
 /// 격자 썸네일의 한 변(px). 계약 §5.2 — 장당 0.06 MB 라 200장 상주해도 12 MB 다. 원본 해상도로 들면
@@ -321,6 +379,111 @@ pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
     return image_decode.decode(self.allocator, raw, fit.subsample) catch null;
 }
 
+/// 크게 보기가 쓸 영역(backing px). 격자와 같은 본문에서 여백만 뺀다 — 두 모드가 같은 자리를 쓰므로
+/// 전환할 때 그림이 튀지 않는다.
+pub fn viewportRect(self: *const AppSession) image_view.Rect {
+    const a = gridArea(self);
+    const pad = gridMetrics(self).pad;
+    return .{
+        .x = @floatFromInt(a.x +| pad),
+        .y = @floatFromInt(a.y +| pad),
+        .w = @floatFromInt(a.w -| (pad *| 2)),
+        .h = @floatFromInt(a.h -| (pad *| 2)),
+    };
+}
+
+/// `n` 번째 이미지를 크게 연다. **픽셀은 여기서 안 푼다** — 워커에 요청만 걸고, 그동안 격자가 계속 보인다.
+/// 다 풀리기 전에 격자를 지우면 클릭이 「화면이 비었다」로 보인다.
+pub fn openAt(self: *AppSession, n: usize) void {
+    if (n >= self.image_gallery.count()) return;
+    self.image_gallery.dropOpen(self.allocator);
+    self.image_gallery.open = .{ .hit_index = n };
+    self.metal_dirty = true;
+    ensureOpen(self);
+}
+
+/// 크게 보기를 닫고 격자로 돌아간다. 원본 픽셀(수 MB)을 여기서 푼다.
+pub fn closeOpen(self: *AppSession) void {
+    if (self.image_gallery.open == null) return;
+    self.image_gallery.dropOpen(self.allocator);
+    self.metal_dirty = true;
+}
+
+/// 크게 보기의 원본을 워커에 건다. 워커가 바쁘면 다음 tick 이 다시 건다(`poll`).
+///
+/// **`target_side = 0` 이 썸네일과 다른 전부다** — 목표 크기를 안 주면 `image_scale` 이 텍스처 상한만
+/// 지키고 되도록 원본에 가깝게 푼다(계약 §5.3). 상한을 못 맞추는 이미지는 애초에 안 푼다.
+pub fn ensureOpen(self: *AppSession) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+    if (op.pixels.len > 0 or op.decoding != 0) return;
+    if (self.image_gallery.source.isEmpty()) return;
+    if (op.hit_index >= self.image_gallery.count()) return;
+    const backend = decodeBackendPtr(self) orelse return;
+
+    const hit = self.image_gallery.hits.items[op.hit_index];
+    if (backend.submit(
+        self.image_gallery.source.path(),
+        hit.data_offset,
+        hit.data_len,
+        0, // 원본 배율(상한 안에서)
+        op.hit_index,
+    )) |generation| {
+        op.decoding = generation;
+    }
+}
+
+/// 갤러리가 키보드를 쥐고 있나. 에이전트 도크와 같은 게이트다 — 이것이 없으면 터미널로 돌아간 뒤의
+/// Esc 가 셸이 아니라 크게 보기를 닫는다.
+pub fn ownsKeys(self: *const AppSession) bool {
+    return dock_ops.dockVisible(self) and self.dock.view == .image_gallery and self.image_gallery.key_focus;
+}
+
+/// 터미널을 눌렀다 = 키보드를 놓는다. **크게 보기는 그대로 둔다** — 보던 것을 클릭 한 번에 잃지 않는다.
+pub fn releaseKeyFocus(self: *AppSession) void {
+    if (!self.image_gallery.key_focus) return;
+    self.image_gallery.key_focus = false;
+    self.metal_dirty = true;
+}
+
+/// Esc. 크게 보기를 닫는다. 소비했으면 `true`.
+pub fn handleEscape(self: *AppSession) bool {
+    if (!ownsKeys(self)) return false;
+    if (self.image_gallery.open == null) return false;
+    closeOpen(self);
+    return true;
+}
+
+/// 도크 본문 primary down. 소비했으면 `true`.
+///
+/// 두 모드가 다르다 — 격자에서는 **칸을 눌러 연다**, 크게 보기에서는 **이미지 밖을 눌러 닫는다**.
+/// 이미지 위는 아직 아무 일도 하지 않는다(팬은 IG4-c).
+pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return false;
+    const gx = gridArea(self);
+    if (x_px < @as(f64, @floatFromInt(gx.x)) or y_px < @as(f64, @floatFromInt(gx.y))) return false;
+    if (x_px >= @as(f64, @floatFromInt(gx.x +| gx.w)) or y_px >= @as(f64, @floatFromInt(gx.y +| gx.h))) return false;
+    self.image_gallery.key_focus = true;
+
+    if (self.image_gallery.open) |*op| {
+        if (op.pixels.len == 0) return true; // 아직 못 풀었다 — 격자가 보이지만 클릭은 삼킨다
+        const vp = viewportRect(self);
+        const r = image_view.destRect(op.view, vp, op.width, op.height);
+        const fx: f32 = @floatCast(x_px);
+        const fy: f32 = @floatCast(y_px);
+        const inside = fx >= r.x and fy >= r.y and fx < r.x + r.w and fy < r.y + r.h;
+        if (!inside) closeOpen(self);
+        return true;
+    }
+
+    const m = gridMetrics(self);
+    const l = image_grid.layout(gx, m, self.image_gallery.count());
+    const px: u32 = @intFromFloat(@max(0, x_px));
+    const py: u32 = @intFromFloat(@max(0, y_px));
+    if (image_grid.hitTest(gx, m, l, px, py)) |n| openAt(self, n);
+    return true;
+}
+
 /// 격자가 쓸 영역(backing px). 도크 본문 그대로다.
 pub fn gridArea(self: *const AppSession) image_grid.Rect {
     const g = dock_ops.dockGeometry(self);
@@ -332,6 +495,74 @@ pub fn gridArea(self: *const AppSession) image_grid.Rect {
 pub fn gridMetrics(self: *const AppSession) image_grid.Metrics {
     _ = self;
     return .{ .tile = thumbnail_side, .gap = 8, .pad = 8 };
+}
+
+/// 크게 보기 한 장을 얹는다. **뷰포트 밖은 UV 로 잘라 낸다** — 확대하면 그림이 도크보다 커지는데,
+/// 안 자르면 터미널 위로 넘쳐 흐른다(kitty graphics 이미지 quad 에는 scissor 가 없다).
+fn appendOpenImage(
+    self: *AppSession,
+    op: *Open,
+    images: *[]metal_frame.GpuImage,
+    uploads: *[]metal_frame.GpuImageUpload,
+    pixels: *[]u8,
+    live_ids: *std.ArrayList(u32),
+) void {
+    const vp = viewportRect(self);
+    const r = image_view.destRect(op.view, vp, op.width, op.height);
+    if (r.w <= 0 or r.h <= 0) return;
+
+    // 보이는 부분만 남긴다.
+    const x0 = @max(r.x, vp.x);
+    const y0 = @max(r.y, vp.y);
+    const x1 = @min(r.x + r.w, vp.x + vp.w);
+    const y1 = @min(r.y + r.h, vp.y + vp.h);
+    if (x1 <= x0 or y1 <= y0) return; // 통째로 밖이다 — clamp 가 막지만 한 겹 더 둔다
+
+    const id = gallery_open_image_id;
+    const img: metal_frame.GpuImage = .{
+        .image_id = id,
+        .dest_x = x0,
+        .dest_y = y0,
+        .dest_w = x1 - x0,
+        .dest_h = y1 - y0,
+        .origin_x = 0,
+        .origin_y = 0,
+        .src_u0 = (x0 - r.x) / r.w,
+        .src_v0 = (y0 - r.y) / r.h,
+        .src_u1 = (x1 - r.x) / r.w,
+        .src_v1 = (y1 - r.y) / r.h,
+        .z = 0,
+        .pass = 2, // above_text
+    };
+    live_ids.append(self.allocator, id) catch {};
+
+    const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + 1) catch return;
+    @memcpy(merged_images[0..images.len], images.*);
+    merged_images[images.len] = img;
+    self.allocator.free(images.*);
+    images.* = merged_images;
+
+    if (op.uploaded) return;
+    const merged_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, uploads.len + 1) catch return;
+    const merged_pixels = std.mem.concat(self.allocator, u8, &.{ pixels.*, op.pixels }) catch {
+        self.allocator.free(merged_uploads);
+        return;
+    };
+    @memcpy(merged_uploads[0..uploads.len], uploads.*);
+    merged_uploads[uploads.len] = .{
+        .image_id = id,
+        .width = op.width,
+        .height = op.height,
+        .bpp = 4,
+        .generation = 1,
+        .pixels_offset = pixels.len,
+        .pixels_len = op.pixels.len,
+    };
+    self.allocator.free(uploads.*);
+    self.allocator.free(pixels.*);
+    uploads.* = merged_uploads;
+    pixels.* = merged_pixels;
+    op.uploaded = true;
 }
 
 /// 갤러리 타일을 프레임의 이미지 채널에 얹는다.
@@ -356,6 +587,16 @@ pub fn appendGpuImages(
     const l = image_grid.layout(area, m, self.image_gallery.count());
     // **자리를 못 얻은 수를 남긴다.** 0 칸이어도(좁은 도크) 남겨야 「없다」로 거짓말하지 않는다.
     self.image_gallery.overflow = l.overflow;
+
+    // **크게 보기는 격자를 대체한다.** 겹쳐 그리면 어느 것을 누르는지 알 수 없다. 다만 아직 못 푼
+    // 동안에는 격자를 그대로 둔다 — 클릭 직후 화면이 비면 「눌렀더니 사라졌다」로 보인다.
+    if (self.image_gallery.open) |*op| {
+        if (op.pixels.len > 0) {
+            appendOpenImage(self, op, images, uploads, pixels, live_ids);
+            return;
+        }
+    }
+
     if (l.visible == 0) return;
 
     // 보이는 칸만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
@@ -436,13 +677,19 @@ pub fn appendGpuImages(
 /// **넷을 가른다** — 「에이전트가 없다」·「세는 중」·「훑었는데 없다」·「못 봤다」. 접으면 사용자가
 /// «이미지가 없는 것» 과 «아직 세는 중» 과 «갤러리가 고장난 것» 을 구분할 수 없다.
 pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
+    // **크게 보기가 먼저다.** 열려 있으면 격자 개수는 지금 사용자가 보는 것과 무관하다.
+    if (self.image_gallery.open) |op| {
+        if (op.pixels.len > 0) return "";
+        // 도는 것이 없는데 픽셀도 없다 = 못 풀었다. 조용히 닫으면 클릭이 안 먹은 것처럼 보인다.
+        if (op.decoding == 0) return maru.i18n.t(.image_gallery_open_failed);
+    }
     if (self.image_gallery.source.isEmpty()) return maru.i18n.t(.image_gallery_no_agent);
     if (self.image_gallery.scanning()) return maru.i18n.t(.image_gallery_scanning);
     if (self.image_gallery.partial) return maru.i18n.t(.image_gallery_partial);
     const n = self.image_gallery.count();
     if (n == 0) return maru.i18n.t(.image_gallery_empty);
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
-    // **다 못 보여 줄 때만 말한다**: 「4/12장」. 이 줄이 없으면 사용자는 8장을 놓치고도 모른다.
+    // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.
     if (self.image_gallery.tiles.items.len > 0) {
         if (self.image_gallery.overflow == 0) return "";
         return maru.i18n.format(buf, maru.i18n.t(.image_gallery_shown_of), &.{

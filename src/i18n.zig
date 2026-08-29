@@ -358,6 +358,9 @@ const Table = struct {
     /// 이미지를 놓치고도 모른다(계약 §2). `{0}` 보이는 수, `{1}` 전체 수. 두 언어의 **어순이
     /// 반대**라(en "4 of 12" / ko "12장 중 4장") 조각을 이어 붙이면 한쪽이 반드시 틀린다.
     image_gallery_shown_of: [:0]const u8,
+    /// 크게 보기에서 그 이미지를 못 풀었을 때. **닫고 없던 일로 하지 않는다** — 눌렀는데
+    /// 아무 일도 안 일어나면 사용자는 클릭이 안 먹은 줄 안다.
+    image_gallery_open_failed: [:0]const u8,
     agent_hook_notice_done: [:0]const u8,
     agent_hook_notice_failed: [:0]const u8,
     agent_hook_notice_attention: [:0]const u8,
@@ -1268,6 +1271,7 @@ const en: Table = .{
     .image_gallery_scanning = "Scanning…",
     .image_gallery_count_suffix = " images",
     .image_gallery_shown_of = "{0} of {1} images",
+    .image_gallery_open_failed = "Could not open this image",
     .agent_hook_notice_done = "Turn finished",
     .agent_hook_notice_failed = "Turn ended with an error",
     .agent_hook_notice_attention = "Waiting for your approval",
@@ -1843,6 +1847,7 @@ const ko: Table = .{
     .image_gallery_scanning = "세는 중…",
     .image_gallery_count_suffix = "장",
     .image_gallery_shown_of = "{1}장 중 {0}장",
+    .image_gallery_open_failed = "이 이미지를 열 수 없습니다",
     .agent_hook_notice_done = "턴이 끝났습니다",
     .agent_hook_notice_failed = "턴이 오류로 끝났습니다",
     .agent_hook_notice_attention = "승인을 기다리는 중",

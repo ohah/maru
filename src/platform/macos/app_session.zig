@@ -5824,6 +5824,15 @@ pub const AppSession = struct {
     upload_results: std.ArrayList(UploadResult) = .empty,
     upload_inflight: usize = 0,
     upload_counter: usize = 0, // 클립보드 이미지 paste 파일명(pasted-<pid>-N.png) 세션 내 고유화 카운터(메인 스레드 전용)
+    // 원격 에이전트 이벤트 채널 — **목적지(host) 당 하나**([계획](../../../docs/plans/remote-agent-state.md) RA5).
+    //
+    // **업로드와 달리 스레드가 없다.** 업로드는 «한 번 쓰고 EOF» 라 블로킹이 UI 를 멈추므로 스레드로 뺐지만,
+    // 이쪽은 장수명 자식의 stdout 을 **매 tick 논블로킹으로 훑는** 형태다 — 읽을 것이 없으면 즉시 `EAGAIN`
+    // 으로 돌아온다. 스레드를 두면 오히려 Term 표를 스레드에서 만지게 되어 core 메인 전용 규율을 깬다.
+    //
+    // **pane 당이 아니라 host 당인 이유**는 `MaxSessions`(기본 10, 다중화 포함)다 — pane 마다 띄우면 같은
+    // 호스트 pane 다섯이 상한이 된다(2026-08-29 실측).
+    remote_agent_hosts: std.StringHashMapUnmanaged(RemoteAgentHost) = .empty,
     // 인앱 새 버전 안내(distribution.md "인앱 새 버전 안내") 백그라운드 체크 ↔ 메인 tick 통신. upload 패턴과
     // 동일하다 — 첫 tick에서 별도 스레드가 GitHub releases/latest를 curl로 받아(UI 안 멈춤) 현재 버전과
     // 비교하고, 새 버전이면 mutex 하에 태그를 update_tag_buf에 담는다. 메인 tick(drainUpdateCheck)이 빼서
@@ -13522,6 +13531,240 @@ pub const AppSession = struct {
         }
     };
 
+    /// 한 목적지의 원격 이벤트 채널([계획](../../../docs/plans/remote-agent-state.md) RA5).
+    ///
+    /// `pending` 은 **아직 개행을 못 만난 꼬리**다. 한 `read` 가 줄 가운데서 끊기는 것은 예외가 아니라
+    /// 파이프의 정상이고(64 KiB 경계), 그것을 버리면 훅 이벤트가 조용히 사라진다 — 스트리머(RA4)가 같은
+    /// 규율을 원격에서 이미 지킨다. **상한을 둔다**: 개행 없는 바이트가 계속 오면(잡음 서버·바이너리)
+    /// 무한히 자라므로, 넘으면 채널을 닫고 사유를 남긴다(§1.2 는 조용한 폴백을 금지한다).
+    ///
+    /// `seen_this_tick` 은 **이번 tick 에 이 목적지를 쓰는 Term 이 있었나**다. 없으면 회수한다 — 마지막
+    /// 원격 pane 이 닫혔는데 자식이 남으면 그것이 곧 «ssh 가 하나 늘어난 채 안 죽는» 누수다.
+    const RemoteAgentHost = struct {
+        stream: ssh_upload.Stream,
+        pending: std.ArrayListUnmanaged(u8) = .empty,
+        seen_this_tick: bool = false,
+        /// 자식이 끝났다 — **다시 띄우지 않는다.** 이 표식이 없으면 EOF 로 표를 비운 뒤 다음 tick 의
+        /// `ensure` 가 곧바로 새 `ssh` 를 띄우고, 서버가 계속 거절하면 그것이 곧 **tick 마다 fork 하는
+        /// 접속 폭주**다(계획이 «그 목적지를 캐시해 매 접속마다 왕복하지 않는다» 로 못박은 자리다).
+        /// 표는 그 목적지의 마지막 원격 pane 이 닫힐 때 비워지므로, 다시 여는 것은 **사용자 행동**이다.
+        stopped: bool = false,
+        /// 개행 없이 쌓을 수 있는 상한. 스트리머의 한 줄 상한(128 KiB)과 같은 값이어야 «저쪽이 보낼 수
+        /// 있는 가장 긴 줄» 을 이쪽이 못 받는 일이 안 생긴다.
+        const pending_max = maru.session.remote_agent_stream.max_line_bytes;
+        /// 한 tick 에 쥐고 있을 수 있는 총량. 넘으면 **읽기를 멈춘다** — 버리는 것이 아니라 파이프에
+        /// 남겨 둔다(그러면 저쪽이 파이프 가득참으로 밀리고, 우리는 다음 tick 에 이어 읽는다).
+        /// 버리면 이벤트가 조용히 사라지고, 안 멈추면 폭주 구간에서 이 버퍼가 무한히 자란다.
+        const pending_soft_cap = 4 * pending_max;
+    };
+
+    /// 원격 에이전트 이벤트 채널을 **한 tick 만큼** 돌린다([계획](../../../docs/plans/remote-agent-state.md) RA5).
+    ///
+    /// 세 일을 순서대로 한다: ① 원격 Term 을 훑어 그 목적지의 채널을 보장하고 pane nonce 를 세운다,
+    /// ② 각 목적지의 자식 stdout 을 논블로킹으로 훑어 **완성된 줄만** 그 목적지의 Term 들에 먹인다,
+    /// ③ 이번 tick 에 아무 Term 도 안 쓴 목적지를 회수한다.
+    ///
+    /// **전송은 host 당 하나, 파싱 상태는 Term 당 하나다.** 한 목적지에 pane 이 셋이면 ssh 자식은 하나이고
+    /// `Channel` 은 셋이다 — 각 Term 이 자기 hello·침묵 시한을 따로 재고 자기 nonce 만 먹는다. 전송을 Term
+    /// 당 두면 `MaxSessions` 에 걸리고(pane 5 개가 상한), 파싱 상태를 host 당 두면 한 Term 의 강등이 같은
+    /// 호스트의 남의 Term 까지 끌고 내려간다.
+    ///
+    /// **읽기가 UI 를 안 멈춘다.** fd 를 `O_NONBLOCK` 으로 두고 읽을 것이 없으면 즉시 돌아온다.
+    pub fn pumpRemoteAgentChannels(self: *AppSession) void {
+        if (!is_macos) return;
+        if (self.remote_agent_hosts.count() == 0 and self.tabs.items.len == 0) return;
+
+        const now_ms = self.awakeMs();
+        {
+            var it = self.remote_agent_hosts.valueIterator();
+            while (it.next()) |h| h.seen_this_tick = false;
+        }
+
+        // ① 원격 Term 마다 목적지 채널을 보장한다.
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (!term.rt.live_initialized or term.rt.terminated) continue;
+                    const ctx = self.remoteUploadContextFor(term) orelse continue;
+                    defer ctx.deinit(self.allocator);
+                    self.ensureRemoteAgentTerm(term, ctx, now_ms);
+                }
+            }
+        }
+
+        // ② 목적지마다 읽어 그 목적지의 Term 들에 먹인다.
+        var hosts = self.remote_agent_hosts.iterator();
+        while (hosts.next()) |entry| {
+            const dest = entry.key_ptr.*;
+            const host = entry.value_ptr;
+            self.drainRemoteAgentHost(dest, host, now_ms);
+        }
+
+        // ③ 이번 tick 에 아무도 안 쓴 목적지를 회수한다. **자식을 먼저 죽이고 표에서 뗀다** — 순서를
+        // 뒤집으면 키를 잃어 자식을 영영 못 죽인다.
+        var dead: [8][]const u8 = undefined;
+        var dead_n: usize = 0;
+        var scan = self.remote_agent_hosts.iterator();
+        while (scan.next()) |entry| {
+            if (entry.value_ptr.seen_this_tick) continue;
+            if (dead_n == dead.len) break; // 다음 tick 에 마저 회수한다(한 tick 에 여덟이면 충분하다)
+            dead[dead_n] = entry.key_ptr.*;
+            dead_n += 1;
+        }
+        for (dead[0..dead_n]) |key| self.closeRemoteAgentHost(key);
+    }
+
+    /// 이 Term 의 pane nonce 를 세우고, 그 목적지의 채널·파싱 상태를 보장한다.
+    fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, now_ms: u64) void {
+        const hc = maru.session.agent_hook_command;
+
+        // **nonce 는 이 Term 이 원격에 실어 보낸 그 값이어야 한다.** 만드는 곳을 하나로 둔다 — `maru ssh`
+        // 는 pane 셸 env 에서 읽고 이쪽은 같은 두 값을 Term 에서 읽는다(둘 다 `formatRemotePaneNonce`).
+        if (term.agent_remote_nonce_len == 0) {
+            var buf: [hc.remote_pane_nonce_max]u8 = undefined;
+            const nonce = agent_ops.remotePaneNonceFor(term, &buf) orelse return;
+            @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+            term.agent_remote_nonce_len = @intCast(nonce.len);
+        }
+
+        const gop = self.remote_agent_hosts.getOrPut(self.allocator, ctx.dest) catch return;
+        if (!gop.found_existing) {
+            // 키를 우리가 소유한다 — `ctx` 는 이 호출이 끝나면 해제된다.
+            const key = self.allocator.dupe(u8, ctx.dest) catch {
+                _ = self.remote_agent_hosts.remove(ctx.dest);
+                return;
+            };
+            const remote_dir = std.fmt.allocPrint(self.allocator, "$HOME/{s}", .{hc.remote_log_dir_rel}) catch {
+                self.allocator.free(key);
+                _ = self.remote_agent_hosts.remove(ctx.dest);
+                return;
+            };
+            defer self.allocator.free(remote_dir);
+            const stream = ssh_upload.spawnAgentEvents(self.allocator, ctx.ctl, ctx.dest, "maru", remote_dir) catch {
+                self.allocator.free(key);
+                _ = self.remote_agent_hosts.remove(ctx.dest);
+                return;
+            };
+            // **논블로킹으로 둔다.** 안 그러면 자식이 조용한 동안 tick 이 통째로 멈춘다 — 스트리머는
+            // 하트비트 사이에 몇 초씩 아무것도 안 보내므로 그 멈춤이 곧 UI 정지다.
+            const fl = std.c.fcntl(stream.out_fd, std.c.F.GETFL, @as(c_int, 0));
+            if (fl >= 0) _ = std.c.fcntl(stream.out_fd, std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+            gop.key_ptr.* = key;
+            gop.value_ptr.* = .{ .stream = stream };
+        }
+        gop.value_ptr.seen_this_tick = true;
+
+        // 끝난 목적지에는 **파싱 상태도 새로 안 연다** — 열면 hello 를 5 초 기다렸다 `no_hello` 로 닫히는
+        // 헛도는 채널이 Term 마다 생긴다.
+        if (gop.value_ptr.stopped) return;
+        if (term.agent_remote_channel == null)
+            term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(now_ms);
+    }
+
+    /// 한 목적지의 자식 stdout 을 훑어 **완성된 줄만** 그 목적지의 Term 들에 먹인다.
+    fn drainRemoteAgentHost(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
+        if (host.stopped) return;
+        var buf: [16 * 1024]u8 = undefined;
+        var eof = false;
+        while (host.pending.items.len < RemoteAgentHost.pending_soft_cap) {
+            const n = std.c.read(host.stream.out_fd, &buf, buf.len);
+            if (n > 0) {
+                host.pending.appendSlice(self.allocator, buf[0..@intCast(n)]) catch break;
+                // 개행 없이 한 줄 상한을 넘겼다 — 줄이 아니라 잡음이다. 꼬리를 버리고 사유를 남긴다.
+                if (host.pending.items.len > RemoteAgentHost.pending_max and
+                    std.mem.indexOfScalar(u8, host.pending.items, '\n') == null)
+                {
+                    std.log.scoped(.agent).warn("원격 이벤트 채널: 개행 없는 잡음이 한 줄 상한을 넘었다 — 꼬리를 버린다 dest={s}", .{dest});
+                    host.pending.clearRetainingCapacity();
+                }
+                continue;
+            }
+            if (n == 0) {
+                eof = true;
+                break;
+            }
+            break; // EAGAIN 을 포함한 그 밖 — 이번 tick 은 여기까지다
+        }
+
+        // 완성된 줄을 **남김없이** 훑는다(64 개씩 나눠 먹인다 — 스택에 든 배열이라 크기를 못 박는다).
+        // 한 tick 상한을 두면 폭주 구간에서 꼬리가 계속 밀려 «배지가 몇 초 늦게 뜬다» 가 된다.
+        var lines: [64][]const u8 = undefined;
+        var consumed: usize = 0;
+        while (true) {
+            var count: usize = 0;
+            while (count < lines.len) {
+                const rest = host.pending.items[consumed..];
+                const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse break;
+                lines[count] = rest[0..nl];
+                count += 1;
+                consumed += nl + 1;
+            }
+            if (count == 0) break;
+            self.feedRemoteAgentTerms(dest, lines[0..count], now_ms);
+        }
+        if (consumed > 0) {
+            const rest_len = host.pending.items.len - consumed;
+            std.mem.copyForwards(u8, host.pending.items[0..rest_len], host.pending.items[consumed..]);
+            host.pending.shrinkRetainingCapacity(rest_len);
+        }
+
+        // **줄이 안 와도 시간은 간다.** `Channel` 의 hello 시한(5 초)·침묵 시한(15 초)은 `tick` 에서만
+        // 판정되는데, 그것을 «줄이 왔을 때» 에만 부르면 **정확히 아무것도 안 오는 경우**에 안 불린다 —
+        // 즉 죽은 채널이 영영 `open` 으로 남아 그 Term 은 훅 모드에 갇힌다(관측도 훅도 아닌 상태다).
+        // 계획이 «사망 감지는 하트비트로만 한다» 로 못박은 자리가 여기다.
+        if (!eof) {
+            self.tickRemoteAgentTerms(dest, now_ms);
+            return;
+        }
+        // **EOF 는 조용하지 않다.** 채널을 닫으면 다음 `agentHookMode` 가 관측 모드로 강등한다(§1.2) —
+        // 그 전이가 곧 사용자가 보는 «훅이 죽었다» 다. 그리고 이 목적지는 **다시 안 띄운다**.
+        self.feedRemoteAgentTerms(dest, &.{}, now_ms);
+        std.log.scoped(.agent).warn("원격 이벤트 채널이 끝났다 — 관측 모드로 내린다 dest={s}", .{dest});
+        ssh_upload.stopAgentEvents(host.stream);
+        host.stream = .{ .pid = 0, .out_fd = -1 };
+        host.stopped = true;
+    }
+
+    /// 줄이 없어도 그 목적지의 채널들에 **시간이 갔음을 알린다**(hello·침묵 시한 판정).
+    fn tickRemoteAgentTerms(self: *AppSession, dest: []const u8, now_ms: u64) void {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    var ch = &(term.agent_remote_channel orelse continue);
+                    if (!term.rt.observation.ssh_remote_dest_present) continue;
+                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) continue;
+                    ch.tick(now_ms);
+                }
+            }
+        }
+    }
+
+    /// 한 목적지의 Term 들에 줄을 먹인다. `lines` 가 비면 **EOF 를 알리는 호출**이다.
+    fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.agent_remote_channel == null) continue;
+                    if (!term.rt.observation.ssh_remote_dest_present) continue;
+                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) continue;
+                    if (lines.len > 0)
+                        agent_ops.consumeRemoteAgentLines(self, term, lines, now_ms)
+                    else
+                        term.agent_remote_channel.?.eof();
+                }
+            }
+        }
+    }
+
+    /// 한 목적지의 자식을 끝내고 표에서 뗀다.
+    fn closeRemoteAgentHost(self: *AppSession, dest: []const u8) void {
+        const entry = self.remote_agent_hosts.fetchRemove(dest) orelse return;
+        ssh_upload.stopAgentEvents(entry.value.stream);
+        var host = entry.value;
+        host.pending.deinit(self.allocator);
+        self.allocator.free(entry.key);
+    }
+
     fn remoteUploadContextFor(self: *AppSession, term: *Term) ?RemoteUpload {
         if (term.kind != .terminal or term.rt.observation.availability != .current) return null;
         const dest: ?[]u8 = if (term.rt.observation.ssh_remote_dest_present)
@@ -16152,6 +16395,10 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedBranchMenu(self); // 캡처 전용: 브랜치 목록은 상태바 클릭으로만 열린다
         debug_fixtures.applyForcedScmTab(self); // 캡처 전용: 탭·턴·펼침을 강제한다(env 미설정이면 무동작)
         debug_fixtures.applyForcedScmView(self); // 캡처 전용: 도크를 소스 컨트롤 뷰로 연다(뒤의 pump 들이 그 뷰를 본다)
+        // **`pollAgentKinds` 보다 먼저 돈다.** 채널을 먼저 채워야 그 뒤의 모드 판정이 이번 tick 에 도착한
+        // 이벤트를 본다 — 순서를 뒤집으면 모든 이벤트가 한 tick 씩 늦고, 그 지연은 «배지가 한 박자 늦게
+        // 뜬다» 로만 보여 원인을 못 찾는다.
+        self.pumpRemoteAgentChannels(); // 원격(ssh) 에이전트 이벤트 채널 — 목적지당 자식 하나, 논블로킹
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
@@ -19625,6 +19872,17 @@ pub const AppSession = struct {
             .failure => {},
         };
         self.upload_results.deinit(self.allocator);
+        // 원격 이벤트 채널의 자식(ssh)을 **전부 끝낸다**. 남기면 GUI 를 껐는데 ssh 가 목적지 수만큼
+        // 살아 있는 누수다 — 그 자식은 stdin 이 /dev/null 이라 부모가 죽어도 스스로 안 끝난다.
+        {
+            var it = self.remote_agent_hosts.iterator();
+            while (it.next()) |entry| {
+                ssh_upload.stopAgentEvents(entry.value_ptr.stream);
+                entry.value_ptr.pending.deinit(self.allocator);
+                self.allocator.free(entry.key_ptr.*);
+            }
+            self.remote_agent_hosts.deinit(self.allocator);
+        }
         // 인앱 업데이트 체크 스레드를 join한다(이전 busy-spin 대신 — CPU를 안 쓰고 OS가 대기). 이 스레드가
         // self.update_*·self.allocator를 건드리므로 self 해제 전에 반드시 끝나야 한다. CLOEXEC으로 curl pipe가
         // 다른 fork에 새지 않아 readAllFd가 매달리지 않으므로, join은 curl -m 타임아웃 안에 수렴한다.
@@ -20614,6 +20872,260 @@ fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
 
 /// 게이트를 끈 fixture — 위 `agent_hooks_on_config` 의 짝이다(상태줄 훅도 계속 꺼 둔다).
 const agent_hooks_off_config = "sidebar.agent-hooks = false\n";
+
+test "원격 pane 은 로그 파일 없이도 훅 모드로 선다 — 채널이 그 증거다" {
+    // 계약 §11.1: ssh 너머는 `agent_kind` 가 영영 `none` 이고 로컬 로그 파일도 없다. 그 둘로 판정하면
+    // 원격은 **영원히 관측 모드**다. 채널이 열렸다는 사실이 그 자리를 대신하는지 실제 tick 판정으로 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    // 원격의 진짜 조건: 에이전트가 안 보이고 로그 파일도 없다.
+    term.agent_kind = .none;
+    term.agent_hook_log_present = false;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+
+    // 채널을 열면 훅 모드가 된다.
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term));
+
+    // 채널이 죽으면 즉시 관측 모드로 내려간다 — 조용한 폴백이 아니라 사유가 남는다.
+    term.agent_remote_channel.?.eof();
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+    try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
+}
+
+test "원격 이벤트가 배지·알림을 로컬과 같은 자리에 쓴다 — 남의 pane 것은 안 먹는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false; // 전면 배너 억제가 끼어들지 않게
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    // 이 Term 에 발급한 신원.
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+
+    // 우리 pane 의 프롬프트 → **진행 중**.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"prompt\\\":\\\"질문\\\"}\"}",
+    }, 100);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+    // **남의 pane 것은 상태를 안 흔든다.**
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"9999_9\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 200);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+    // 우리 pane 의 Stop → **완료**로 가고 알림이 예약된다(로컬 훅 모드와 같은 자리).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"last_assistant_message\\\":\\\"끝\\\"}\"}",
+    }, 300);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    try std.testing.expect(term.agent_hook_notice.kind != .none);
+}
+
+test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와도 이어 붙이고, EOF 는 강등으로 보인다" {
+    // **이 테스트가 무는 것은 «소비 규칙» 이 아니라 «배선» 이다.** 앞의 두 테스트는
+    // `consumeRemoteAgentLines` 를 직접 불러 파이프·부분 줄·분배·EOF 를 한 번도 안 건넜다 — 그 셋이
+    // 정확히 tick 통합에서 새로 생긴 자리다. 여기서는 **진짜 fd** 를 만들어 `drainRemoteAgentHost` 에
+    // 먹인다(ssh 자식만 가짜다 — 파이프의 읽는 쪽은 실물이라 부분 읽기가 그대로 재현된다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+
+    const dest = "box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    // 이 Term 이 그 목적지의 원격 pane 이라고 관측이 말한다 — 분배가 보는 유일한 값이다.
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+
+    // 가짜 host: 파이프의 읽는 쪽을 자식 stdout 자리에 둔다. **pid 0 은 신호하지 않는다**(가드).
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    // **제품과 같이 논블로킹으로 둔다.** 안 그러면 드레인이 «더 읽을 것이 없다» 를 EAGAIN 으로 못 받아
+    // 그 자리에서 영영 막힌다(이 테스트가 실제로 그렇게 멈췄다) — 제품에서는 `ensureRemoteAgentTerm`
+    // 이 자식을 띄우며 걸어 주는 값이다.
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .stream = .{ .pid = 0, .out_fd = fds[0] } });
+
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+
+    // ① hello 와 **반 줄**을 보낸다. 반 줄은 아직 아무것도 바꾸면 안 된다.
+    const head = "{\"hello\":\"maru-agent-events\",\"v\":1}\n" ++
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPro";
+    try std.testing.expect(std.c.write(fds[1], head.ptr, head.len) > 0);
+    session.drainRemoteAgentHost(dest, host, 100);
+    try std.testing.expectEqual(maru.session.remote_agent_stream.State.open, term.agent_remote_channel.?.state);
+    try std.testing.expect(term.agent_state != .running); // 아직 줄이 안 끝났다
+
+    // ② 나머지 반 줄이 오면 그때 배지가 선다 — 꼬리를 버렸다면 여기서 영영 안 선다.
+    const tail = "mptSubmit\\\",\\\"prompt\\\":\\\"질문\\\"}\"}\n";
+    try std.testing.expect(std.c.write(fds[1], tail.ptr, tail.len) > 0);
+    session.drainRemoteAgentHost(dest, host, 200);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    // 그리고 그 Term 은 **훅 모드**다 — 로컬 로그 파일은 하나도 없는데도.
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term));
+
+    // ③ 자식이 죽으면(EOF) 조용히 넘어가지 않는다 — 채널이 닫히고 모드가 관측으로 내려간다.
+    _ = std.c.close(fds[1]);
+    session.drainRemoteAgentHost(dest, host, 300);
+    try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+    // **EOF 를 본 목적지는 다시 안 띄운다.** 이 표식이 없으면 다음 tick 의 `ensure` 가 곧바로 새
+    // `ssh` 를 fork 하고, 거절하는 서버에서는 그것이 tick 마다 도는 접속 폭주가 된다.
+    try std.testing.expect(host.stopped);
+    // 그리고 끝난 채널에는 더 읽으러 가지 않는다(닫힌 fd 를 다시 읽지 않는다).
+    session.drainRemoteAgentHost(dest, host, 400);
+    try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
+
+    session.closeRemoteAgentHost(dest);
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());
+}
+
+test "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫힌다 — 침묵이 사망 신호다" {
+    // 계획이 «사망 감지는 하트비트로만 한다» 로 못박은 자리. 종료 코드는 구분력이 없다(정상 종료가 0,
+    // 진짜 실패가 255, 다중화 경합도 255). 그래서 **침묵**이 유일한 신호인데, 시한 판정은 `Channel.tick`
+    // 에서만 일어난다 — 그것을 «줄이 왔을 때» 에만 부르면 정확히 아무것도 안 오는 경우에 안 불려
+    // 죽은 채널이 영영 `open` 으로 남는다. 그 Term 은 훅 모드에 갇혀 배지가 마지막 값으로 굳는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    const ras = maru.session.remote_agent_stream;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "quiet-box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+    term.agent_remote_channel = ras.Channel.init(0);
+
+    // 자식은 살아 있지만(파이프가 안 닫힘) **한 바이트도 안 보낸다**.
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]);
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .stream = .{ .pid = 0, .out_fd = fds[0] } });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+
+    // hello 시한 안에서는 아직 기다린다 — 성급히 닫으면 MOTD 가 긴 서버를 못 쓴다.
+    session.drainRemoteAgentHost(dest, host, ras.hello_deadline_ms - 1);
+    try std.testing.expectEqual(ras.State.waiting_hello, term.agent_remote_channel.?.state);
+
+    // 시한을 넘기면 **줄이 하나도 안 왔는데도** 닫히고 사유가 남는다.
+    session.drainRemoteAgentHost(dest, host, ras.hello_deadline_ms);
+    try std.testing.expectEqual(ras.Closed.no_hello, term.agent_remote_channel.?.closed_reason.?);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+
+    session.closeRemoteAgentHost(dest);
+}
+
+test "원격 nonce 는 로컬 훅 이름과 같은 두 값에서 나온다 — 조립기가 하나여야 귀속이 산다" {
+    // 이 축의 생사가 걸린 계약: `maru ssh` 가 pane 셸 env(`MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE`)에서
+    // 만든 값과, GUI 가 그 Term 에 대해 만든 값이 **바이트로 같아야** 한다. 갈리면 증상은 «배지가 안
+    // 선다» 하나뿐이라 어느 쪽이 틀렸는지 화면에 안 나온다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const hc = maru.session.agent_hook_command;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var got_buf: [hc.remote_pane_nonce_max]u8 = undefined;
+    const got = agent_ops.remotePaneNonceFor(term, &got_buf) orelse return error.MissingNonce;
+
+    // `maru ssh` 가 하는 일을 그대로 재현한다 — 그 pane 의 env 두 값을 합친다. GUI 소유 Term 이므로
+    // 그 둘은 인스턴스 토큰과 surface pane 이다(로컬 훅 로그 이름과 **같은 두 값**).
+    var inst_buf: [hc.instance_token_max]u8 = undefined;
+    var pane_buf: [hc.pane_token_max]u8 = undefined;
+    var want_buf: [hc.remote_pane_nonce_max]u8 = undefined;
+    const want = hc.formatRemotePaneNonce(
+        &want_buf,
+        agent_ops.hookInstanceToken(&inst_buf),
+        hc.formatSurfacePane(&pane_buf, term.surfaceId()),
+    ) orelse return error.MissingNonce;
+    try std.testing.expectEqualStrings(want, got);
+
+    // 그리고 그 값은 **되쪼개진다** — 스트리머가 붙인 nonce 를 우리가 다시 해석할 수 있어야 한다.
+    try std.testing.expect(hc.parseRemotePaneNonce(got) != null);
+}
 
 test "hook mode runs exactly one source and takes over notifications" {
     // **계약 §1의 핵심 규칙을 그 자리에서 본다.** 앞선 제품 테스트는 `pollAgentHookEvents` 를 직접 불러

@@ -588,7 +588,7 @@ test "Known 의 필드가 늘면 판정 누락을 잡는다" {
 /// 지금 세트로 만드는 커맨드(테스트 로그 디렉터리 기준).
 fn wantCommand(a: std.mem.Allocator) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    try command.build(&out, a, "claude", "/tmp/maru-hooks");
+    try command.build(&out, a, "claude", "/tmp/maru-hooks", .local);
     return out.toOwnedSlice(a);
 }
 
@@ -721,7 +721,7 @@ test "낡은 커맨드는 걷어 내고 다시 넣는다 — 한 벌만 남는�
 
     // 경로가 달랐던 시절의 우리 항목(표식은 같다).
     var stale_out: std.ArrayListUnmanaged(u8) = .empty;
-    try command.build(&stale_out, a, "claude", "/tmp/maru-hooks-old");
+    try command.build(&stale_out, a, "claude", "/tmp/maru-hooks-old", .local);
     const stale = try stale_out.toOwnedSlice(a);
 
     const text = try std.fmt.allocPrint(a,

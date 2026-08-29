@@ -20539,7 +20539,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
 
     var want: std.ArrayListUnmanaged(u8) = .empty;
     defer want.deinit(a);
-    try hook_command.build(&want, a, "claude", log_dir);
+    try hook_command.build(&want, a, "claude", log_dir, .local, .local);
 
     const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
     defer a.free(settings_after);
@@ -22644,7 +22644,7 @@ test "agent hooks install into codex and record trust without touching existing 
     defer a.free(log_dir);
     var want: std.ArrayListUnmanaged(u8) = .empty;
     defer want.deinit(a);
-    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir);
+    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, .local, .local);
 
     const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
     defer a.free(hooks_after);
@@ -22765,7 +22765,7 @@ test "agent hooks install into codex and record trust without touching existing 
     {
         var stale: std.ArrayListUnmanaged(u8) = .empty;
         defer stale.deinit(a);
-        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir");
+        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir", .local, .local);
         const stale_json = try std.fmt.allocPrint(a,
             \\{{ "hooks": {{ "Stop": [ {{ "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
         , .{std.json.fmt(std.json.Value{ .string = stale.items }, .{})});
@@ -34119,7 +34119,7 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
         defer allocator.free(log_dir);
         var cmd: std.ArrayListUnmanaged(u8) = .empty;
         defer cmd.deinit(allocator);
-        try hook_command.build(&cmd, allocator, "claude", log_dir);
+        try hook_command.build(&cmd, allocator, "claude", log_dir, .local, .local);
         const script_path = try std.fmt.allocPrintSentinel(allocator, "{s}/hook.sh", .{cache_root}, 0);
         defer allocator.free(script_path);
         {

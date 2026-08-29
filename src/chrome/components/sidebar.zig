@@ -269,6 +269,37 @@ pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, m: Metrics
     return @as(i64, header_height_px) + @as(i64, m.content_pad_v) + off - @as(i64, scroll_offset_px);
 }
 
+/// **그 슬롯이 보이게 하는 새 스크롤 offset** — 이미 보이면 지금 값을 그대로 돌려준다.
+///
+/// 파일을 열거나 세션을 활성으로 만들면 그 카드가 화면 밖일 수 있다. 그때 **활성 표시만 옮기고
+/// 화면을 안 움직이면** 사용자에게는 "눌렀는데 아무 일도 안 났다" 로 보인다(계획서 W8.18⒜).
+///
+/// **가장 적게 움직인다**(편집기 `viewport.scrollToRow` 와 같은 규율): 위로 벗어났으면 카드 위
+/// 끝을, 아래로 벗어났으면 아래 끝을 뷰포트에 맞춘다. 카드가 뷰포트보다 크면 **위를 맞춘다** —
+/// 아래를 맞추면 이름이 있는 첫 줄이 화면 밖으로 나간다.
+///
+/// `view_h_px` 는 **헤더를 뺀** 목록 뷰포트 높이다(헤더는 고정이라 스크롤에 안 든다 — `slotAt` 이
+/// 정한 그 규칙). 카드 구간은 `cardSpanEnd` 가 정한다(에이전트 줄까지 한 카드다).
+pub fn scrollToSlot(rows: []const Row, slot: usize, m: Metrics, view_h_px: u32, scroll_offset_px: u32) u32 {
+    if (slot >= rows.len or view_h_px == 0) return scroll_offset_px;
+    // **자리는 `spanRect` 가 소유한다** — 여기서 높이를 다시 누적하면 밴드와 갈린다(그 함수 doc 이
+    // 겪은 그 드리프트다).
+    const r = spanRect(rows, slot, cardSpanEnd(rows, slot), 0, m);
+    const top: i64 = r.y;
+    const bottom: i64 = top + @as(i64, r.h);
+    const view_h: i64 = @intCast(view_h_px);
+    const max_scroll: i64 = @intCast(contentHeight(rows, m) -| view_h_px);
+    var off: i64 = @intCast(scroll_offset_px);
+    // **큰 카드는 위를 먼저 본다.** 아래 끝을 맞추는 가지에 먼저 걸리면 이름이 있는 첫 줄이
+    // 화면 밖으로 나간다(실측: `expected 40, found 100`).
+    if (top < off or r.h > view_h_px) {
+        off = top;
+    } else if (bottom > off + view_h) {
+        off = bottom - view_h;
+    }
+    return @intCast(std.math.clamp(off, 0, max_scroll));
+}
+
 /// 표시 콘텐츠 전체 높이(px) — 모든 row 높이 합(옛 `rows.len*slot_h`의 가변판). 세로 스크롤 clamp(sidebarMaxScroll)용.
 /// u32 포화(비현실적으로 많은 row에서도 trap 없이 상한)로 clamp 계산이 degenerate하지 않게 한다.
 pub fn contentHeight(rows: []const Row, m: Metrics) u32 {
@@ -1041,6 +1072,34 @@ test "sidebar cardSpanEnd·spanRect: 카드+목록 span 기하가 chrome 단일 
     try std.testing.expectEqual(cardHeight(1, m), past.h);
     // y는 콘텐츠 하단(rowTop의 past-end 값 — contentHeight와 달리 아래 여백을 안 더한다).
     try std.testing.expectEqual(@as(i32, @intCast(rowTop(&rows, rows.len, 0, m, 0))), past.y);
+}
+
+test "sidebar scrollToSlot: 화면 밖 카드를 가장 적게 움직여 보이게 한다" {
+    // 이 함수가 없으면 파일을 열어도 그 카드가 화면 밖에 남는다 — 활성 표시는 옮겨졌는데 사용자
+    // 눈에는 아무 일도 안 난 것으로 보인다(계획서 W8.18⒜).
+    const m = testMetrics(40, 16);
+    const card = Row{ .card = .{ .tab = 0, .label = "c", .active = false } };
+    const rows = [_]Row{ card, card, card, card, card, card }; // 6 × 40 = 240
+    const view_h: u32 = 100;
+
+    // 맨 아래 카드(top=200, bottom=240)를 맨 위에서 부르면 **아래 끝**을 맞춘다.
+    try std.testing.expectEqual(@as(u32, 140), scrollToSlot(&rows, 5, m, view_h, 0));
+    // 이미 보이는 카드는 **안 움직인다** — 이 판정이 없으면 "부를 때마다 튀는" 배선이 지나간다.
+    try std.testing.expectEqual(@as(u32, 0), scrollToSlot(&rows, 1, m, view_h, 0));
+    try std.testing.expectEqual(@as(u32, 60), scrollToSlot(&rows, 2, m, view_h, 60));
+    // 바닥까지 내려간 상태에서 첫 카드를 부르면 **위 끝**을 맞춘다.
+    try std.testing.expectEqual(@as(u32, 0), scrollToSlot(&rows, 0, m, view_h, 140));
+    // 상한을 넘지 않는다 — 목록이 뷰포트보다 짧으면 0 이다.
+    try std.testing.expectEqual(@as(u32, 0), scrollToSlot(&rows, 5, m, 1000, 0));
+    // 범위 밖 슬롯·높이 0 은 지금 값 그대로(부르는 쪽이 매 프레임 불러도 안전하다).
+    try std.testing.expectEqual(@as(u32, 33), scrollToSlot(&rows, 99, m, view_h, 33));
+    try std.testing.expectEqual(@as(u32, 33), scrollToSlot(&rows, 0, m, 0, 33));
+
+    // 카드가 뷰포트보다 크면 **위**를 맞춘다 — 아래를 맞추면 이름이 있는 첫 줄이 밖으로 나간다.
+    const toggle = Row{ .agent_toggle = .{ .tab = 0, .count = 2, .collapsed = false } };
+    const agent = Row{ .agent = .{ .tab = 0, .pane = 0, .term = 0, .lines = 2 } };
+    const tall = [_]Row{ card, card, toggle, agent }; // 카드1 span = 40+40+80 = 160 > view_h
+    try std.testing.expectEqual(@as(u32, 40), scrollToSlot(&tall, 1, m, view_h, 0));
 }
 
 test "sidebar 목록 행 호버 밴드: 글자 블록을 덮고 클릭 행과 같은 크기다(사방 card_gap 인셋으로 쪼그라들지 않음)" {

@@ -199,6 +199,13 @@ flowchart TD
   직접 호출, 가짜 ssh 성공은 이 gate의 증거가 아니다. 테스트 HOME·key·sshd·ControlMaster·remote dropped 파일은
   harness가 소유하고 종료 시 모두 회수하며 host/destination/path/PNG bytes를 artifact나 실패 로그에 남기지 않는다.
   이 gate만으로 재접속 destination 복원 또는 두 Term control-socket 격리를 완료로 표시하지 않는다.
+- **재접속·다중 runtime 격리 gate(P3-e4d-4, 구현 완료)**: 실제 host runtime A/B가 서로 다른 OSC 5379 destination을
+  게시한 뒤 client를 detach한다. AppSession의 공개 recovered-runtime adoption으로 다시 붙었을 때 attach 초기 full-state만으로
+  각 destination이 보여야 하며, child의 OSC 재보고 없이 공개 file/image 동작이 실제 OpenSSH ControlMaster A/B로 전송돼야 한다.
+  두 control path는 다르고 각 업로드의 원격 bytes와 원래 surface 경로가 일치해야 한다. A master만 종료하고 harness client key를
+  제거한 뒤에도 B는 기존 B socket으로 성공해야 하며 A는 종류별 failure notice를 내고 terminal input/local fallback은 0이어야 한다.
+  이 비대칭 결과가 없으면 단순 해시 비교나 두 성공만으로 격리 완료를 주장하지 않는다. harness는 현재 사용자 registry에서
+  충돌하지 않는 임의 host/runtime identity만 임시 등록하고 exact manifest/socket/key/control path/remote bytes를 종료 시 회수한다.
 - **순수 로직 단위**: 세션이 maru ssh 원격인지 판정, 업로드 명령 조립, 원격 경로 생성은 I/O 없는 순수 Zig로 TDD(`ssh.zig`의 기존 셸-구절 단위 테스트와 같은 결).
 - **관측 가능성**: 업로드 시작/성공/실패를 공통 도메인 이벤트로 남겨 로그·trace·E2E가 같은 데이터를 본다(`project-rules.md` §관측 가능성). 자동 검증이 불가능한 부분(실제 GUI 드롭)은 완료 전 수동 검증 방법과 함께 보고.
 - **비동기 user-action gate**: 순수 queue 테스트가 FIFO, 8/9 action, 32MiB exact/+1, 256/257 paths, 64KiB exact/+1, admission 기준 5초 exact/-1, target identity ABA, close 중 late result를 고정한다. actual socket 테스트는 실제 송신 버퍼를 stalled 상태로 만든 managed generation에서 request/poll이 block하지 않고 pending을 반환하는지, 같은 adapter generation·usable connection을 보존하는지, wire FIFO와 timeout abandon 뒤 exact late metadata 소비를 확인한다. 첫 pump 오류도 caller가 `.accepted`를 받기 전에 abandoned tombstone으로 전환한다. AppSession main tick은 blocking connect/RPC/wait 없이 이 facade와 queue clock만 호출한다. 테스트/artifact에는 host·destination·path·PNG를 남기지 않는다.

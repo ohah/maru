@@ -28,10 +28,11 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 저장소 선택, 파일 탐색기 루트, 도크 범위 칩, 제어 평면 `TerminalMeta.cwd`가 함께 빈다(축이 하나라 갈리지는
 > 않는다). 메우려면 host가 관측 payload에 측정한 cwd를 더해야 하고 그건 wire schema 변경이라
 > [session-host-upgrade.md](session-host-upgrade.md)의 호환 규약을 건드린다 — **별도 슬라이스이며 아직 계획에
-> 없다.** **P3-e4a~c와 P3-e4d 자동 parity gate는 구현 완료**다. 실제 host PTY OSC
+> 없다.** **P3-e4a~c와 P3-e4d-1~4 자동 parity gate는 구현 완료**다. 실제 host PTY OSC
 > 7/2/5379 왕복·revision/coalescing·소유권, 다중 runtime 격리, detach 중 변경→재접속과 controlled
 > Claude/Codex foreground→실제 Git·agent·SSH upload 소비자, capability 없는 frozen N-1 protocol fixture의
-> fail-closed 복원까지 별도 제품 E2E가 소유한다. 이 자동 완료는 위 kernel cwd 공백이나 notarized 과거 release
+> fail-closed 복원, 실제 file/image upload 성공·transport 실패, 재접속 initial full-state의 SSH destination을 새 OSC 없이
+> 실제 업로드가 소비하는지와 두 runtime의 destination·ControlMaster 격리까지 별도 제품 E2E가 소유한다. e4d-1~4 완료는 위 kernel cwd 공백이나 notarized 과거 release
 > provenance를 닫았다는 뜻이 아니다. `expectSnapshotParity`는 여전히 renderer DTO만 보호하며 metadata는 별도 gate다.
 > IME marked text 표시는 별도 client-local 계약으로 구현됐다. 각 GUI `Surface`가 host snapshot 위에 같은
 > `PreeditOverlay`를 합성하고, MRSH/runtime/workspace에는 저장하지 않는다. 그래서 다중 클라이언트가 같은

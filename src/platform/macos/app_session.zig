@@ -33297,6 +33297,249 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
     failure_stage = "complete";
 }
 
+fn e4d4SpawnDetachedRuntime(
+    client: *session_host.client.Client,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    handle: app.TermRuntimeHandle,
+    dest: []const u8,
+    marker: []const u8,
+) !u128 {
+    var runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    var live = false;
+    errdefer if (live) runtime.deinit();
+    try runtime.spawn(client, allocator, io, handle, .{ .command = "/bin/cat" }, .{ .cols = 80, .rows = 24 });
+    live = true;
+    const osc = try std.fmt.allocPrint(allocator, "\x1b]5379;ssh;{s}\x07{s}\n", .{ dest, marker });
+    defer allocator.free(osc);
+    try runtime.sendInput(osc);
+    var observed = false;
+    for (0..300) |_| {
+        observed = try runtime.pumpDelta() == .metadata;
+        if (observed) break;
+        _ = usleep(20 * 1000);
+    }
+    if (!observed) return error.MetadataNotObserved;
+    const runtime_id_hex = runtime.runtimeIdHex();
+    const runtime_id = try std.fmt.parseInt(u128, &runtime_id_hex, 16);
+    runtime.detachClientSide();
+    live = false;
+    return runtime_id;
+}
+
+fn e4d4WaitUpload(
+    session: *AppSession,
+    term: *Term,
+    remote_path: []const u8,
+    expected: []const u8,
+    screen_needle: []const u8,
+) !void {
+    for (0..500) |_| {
+        _ = try session.tick();
+        if (e4d3FileEquals(session.io, session.allocator, remote_path, expected) and
+            e4d3SurfaceContains(term, session.io, screen_needle)) return;
+        _ = usleep(20 * 1000);
+    }
+    return error.UploadNotObserved;
+}
+
+// P3-e4d-4는 attach primitive의 metadata 단언에서 멈추지 않는다. 실제 host runtime이 destination을 한 번
+// 게시한 뒤 client를 떼고, 공개 recovered-runtime adoption이 만든 AppSession Term에서 새 OSC 없이 업로드한다.
+// A master만 끊고 key를 제거한 뒤 B 성공/A 실패가 갈려야 control path가 실제로 격리됐다고 말할 수 있다.
+test "P3-e4d-4 reconnected destinations and ControlMasters stay isolated" {
+    if (!is_macos) return error.SkipZigTest;
+    const dest_a_raw = std.c.getenv("MARU_P5D_UPLOAD_DEST_A") orelse return error.SkipZigTest;
+    const dest_b_raw = std.c.getenv("MARU_P5D_UPLOAD_DEST_B") orelse return error.SkipZigTest;
+    const key_raw = std.c.getenv("MARU_P5D_UPLOAD_CLIENT_KEY") orelse return error.SkipZigTest;
+    const home_raw = std.c.getenv("HOME") orelse return error.SkipZigTest;
+    const dest_a = std.mem.span(dest_a_raw);
+    const dest_b = std.mem.span(dest_b_raw);
+    const client_key = std.mem.span(key_raw);
+    const home = std.mem.span(home_raw);
+    if (dest_a.len == 0 or dest_b.len == 0 or client_key.len == 0 or home.len == 0)
+        return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try session_host.short_endpoint.currentUserRootPathIn(&root_buf);
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try session_host.discovery.sessionHostDirPath(&dir_buf, root);
+    const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0x5033_E4D4_4953_4F4C;
+    try session_host.short_endpoint.prepareCurrentUserNamespace();
+    var socket_buf: [128]u8 = undefined;
+    const socket = try session_host.short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+
+    const host_child = std.c.fork();
+    if (host_child < 0) return error.ForkFailed;
+    if (host_child == 0) {
+        _ = std.c.setsid();
+        session_host.daemon.runSessionHostWithIdentity(
+            std.heap.page_allocator,
+            io,
+            dir,
+            socket,
+            host_id,
+        ) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = std.c.kill(host_child, std.posix.SIG.TERM);
+        var status: c_int = 0;
+        _ = std.c.waitpid(host_child, &status, 0);
+        _ = std.c.unlink(socket.ptr);
+        session_host.host_manifest.removeEmptyHostDirectories(dir, host_id);
+    }
+
+    var seed_client: session_host.client.Client = blk: {
+        for (0..250) |_| {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |connected|
+                break :blk connected
+            else |_|
+                _ = usleep(20 * 1000);
+        }
+        return error.HostNotReady;
+    };
+    var seed_client_live = true;
+    defer if (seed_client_live) seed_client.deinit();
+    const runtime_id_a = try e4d4SpawnDetachedRuntime(
+        &seed_client,
+        allocator,
+        io,
+        0xE4D4_0001,
+        dest_a,
+        "E4D4_A_READY",
+    );
+    const runtime_id_b = try e4d4SpawnDetachedRuntime(
+        &seed_client,
+        allocator,
+        io,
+        0xE4D4_0002,
+        dest_b,
+        "E4D4_B_READY",
+    );
+    seed_client.deinit();
+    seed_client_live = false;
+
+    const ctl_a = try maru.cli.ssh.controlSocketPath(allocator, home, dest_a);
+    defer allocator.free(ctl_a);
+    const ctl_b = try maru.cli.ssh.controlSocketPath(allocator, home, dest_b);
+    defer allocator.free(ctl_b);
+    try std.testing.expect(!std.mem.eql(u8, ctl_a, ctl_b));
+    try runE4d3SshControl(allocator, ctl_a, dest_a, .start);
+    var ctl_a_live = true;
+    defer if (ctl_a_live) runE4d3SshControl(allocator, ctl_a, dest_a, .stop) catch {};
+    try runE4d3SshControl(allocator, ctl_b, dest_b, .start);
+    defer runE4d3SshControl(allocator, ctl_b, dest_b, .stop) catch {};
+    const ctl_a_z = try allocator.dupeZ(u8, ctl_a);
+    defer allocator.free(ctl_a_z);
+    const ctl_b_z = try allocator.dupeZ(u8, ctl_b);
+    defer allocator.free(ctl_b_z);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(ctl_a_z.ptr, std.c.F_OK));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.access(ctl_b_z.ptr, std.c.F_OK));
+
+    const previous_keep_alive = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = false;
+    defer app_keep_alive_after_quit = previous_keep_alive;
+    const session = try allocator.create(AppSession);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    session.setPrimaryWindow(true);
+    defer {
+        session.deinit();
+        allocator.destroy(session);
+        host_connect_failed = false;
+        if (app_remote_backend) |*backend| {
+            backend.deinit();
+            app_remote_backend = null;
+        }
+        if (app_remote_host_pool) |*pool| {
+            pool.deinit();
+            app_remote_host_pool = null;
+        }
+    }
+
+    try std.testing.expect(try session.activateNotificationRuntime(host_id, runtime_id_a, .adopt_recovered));
+    const term_a = pane_ops.activePane(session).activeTerm();
+    const surface_a = term_a.surfaceId();
+    try std.testing.expect(term_a.rt.observation.ssh_remote_dest_present);
+    try std.testing.expectEqualStrings(dest_a, term_a.rt.observation.ssh_remote_dest.items);
+
+    var scratch_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scratch = try std.fmt.bufPrintZ(&scratch_buf, "/tmp/maru-e4d4-{d}", .{std.c.getpid()});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(scratch.ptr, 0o700));
+    defer std.Io.Dir.cwd().deleteTree(io, scratch) catch {};
+    const bytes_a = "P3-e4d-4-A-first";
+    var local_a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const local_a = try std.fmt.bufPrintZ(&local_a_buf, "{s}/e4d4-a.bin", .{scratch});
+    try writeE4d2aFixtureFile(local_a, bytes_a, 0o600);
+    session.handleDroppedFiles(local_a[0 .. local_a.len + 1]);
+    var remote_a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const remote_a = try std.fmt.bufPrint(&remote_a_buf, "{s}/.cache/maru/dropped/e4d4-a.bin", .{home});
+    try e4d4WaitUpload(session, term_a, remote_a, bytes_a, "e4d4-a.bin");
+
+    try std.testing.expect(try session.activateNotificationRuntime(host_id, runtime_id_b, .adopt_recovered));
+    const term_b = pane_ops.activePane(session).activeTerm();
+    const surface_b = term_b.surfaceId();
+    try std.testing.expect(surface_a != surface_b);
+    try std.testing.expect(term_b.rt.observation.ssh_remote_dest_present);
+    try std.testing.expectEqualStrings(dest_b, term_b.rt.observation.ssh_remote_dest.items);
+    const bytes_b_image = "\x89PNG\r\n\x1a\nP3-e4d-4-B-image";
+    try std.testing.expect(session.handleDroppedImage("/not-used/e4d4-b.png", bytes_b_image));
+    var image_name_buf: [96]u8 = undefined;
+    const image_name = try std.fmt.bufPrint(&image_name_buf, "pasted-{d}-1.png", .{std.c.getpid()});
+    var remote_image_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const remote_image = try std.fmt.bufPrint(&remote_image_buf, "{s}/.cache/maru/dropped/{s}", .{ home, image_name });
+    try e4d4WaitUpload(session, term_b, remote_image, bytes_b_image, image_name);
+
+    try runE4d3SshControl(allocator, ctl_a, dest_a, .stop);
+    ctl_a_live = false;
+    if (std.c.unlink(key_raw) != 0) return error.KeyRemovalFailed;
+
+    const bytes_b_after = "P3-e4d-4-B-after-A-stop";
+    var local_b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const local_b = try std.fmt.bufPrintZ(&local_b_buf, "{s}/e4d4-b-after.bin", .{scratch});
+    try writeE4d2aFixtureFile(local_b, bytes_b_after, 0o600);
+    try std.testing.expect(session.activateSurfaceById(surface_b));
+    session.handleDroppedFiles(local_b[0 .. local_b.len + 1]);
+    var remote_b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const remote_b = try std.fmt.bufPrint(&remote_b_buf, "{s}/.cache/maru/dropped/e4d4-b-after.bin", .{home});
+    try e4d4WaitUpload(session, term_b, remote_b, bytes_b_after, "e4d4-b-after.bin");
+
+    const input_events_before_a_failure = session.total_terminal_input_events;
+    const bytes_a_failure = "P3-e4d-4-A-must-fail";
+    var local_a_failure_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const local_a_failure = try std.fmt.bufPrintZ(&local_a_failure_buf, "{s}/e4d4-a-failure.bin", .{scratch});
+    try writeE4d2aFixtureFile(local_a_failure, bytes_a_failure, 0o600);
+    try std.testing.expect(session.activateSurfaceById(surface_a));
+    session.handleDroppedFiles(local_a_failure[0 .. local_a_failure.len + 1]);
+    var failure_visible = false;
+    for (0..500) |_| {
+        _ = try session.tick();
+        failure_visible = session.chrome_host.notice.open and std.mem.eql(
+            u8,
+            session.chrome_host.notice.message,
+            maru.i18n.t(.app_file_send_failed),
+        );
+        if (failure_visible) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(failure_visible);
+    try std.testing.expectEqual(input_events_before_a_failure, session.total_terminal_input_events);
+    var forbidden_remote_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const forbidden_remote = try std.fmt.bufPrint(
+        &forbidden_remote_buf,
+        "{s}/.cache/maru/dropped/e4d4-a-failure.bin",
+        .{home},
+    );
+    try std.testing.expect(!e4d3FileEquals(io, allocator, forbidden_remote, bytes_a_failure));
+}
+
 extern "c" fn _NSGetArgc() *c_int;
 extern "c" fn _NSGetArgv() *[*:null]?[*:0]u8;
 

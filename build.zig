@@ -3970,6 +3970,20 @@ pub fn build(b: *std.Build) void {
     run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_ssh_upload_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
+    const session_host_ssh_reconnect_isolation_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_ssh_reconnect_isolation_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = &.{"P3-e4d-4 reconnect upload uses public recovery and asymmetric ControlMaster isolation"},
+    });
+    const run_session_host_ssh_reconnect_isolation_boundary_tests = b.addRunArtifact(
+        session_host_ssh_reconnect_isolation_boundary_tests,
+    );
+    run_session_host_ssh_reconnect_isolation_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_ssh_reconnect_isolation_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_ssh_reconnect_isolation_boundary_tests.step);
     const session_host_legacy_metadata_consumers_step = b.step(
         "test-session-host-legacy-metadata-consumers",
         "Verify P3-e4d-2b frozen N-1 hello, attach, and fail-closed metadata consumers",
@@ -11873,6 +11887,7 @@ pub fn build(b: *std.Build) void {
         );
         session_host_p5d_step.dependOn(session_host_3d_step);
         session_host_p5d_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
+        session_host_p5d_step.dependOn(&run_session_host_ssh_reconnect_isolation_boundary_tests.step);
         const run_session_host_p5d = b.addSystemCommand(&.{
             "sh",
             "tools/session-host/p5d_ssh_smoke.sh",
@@ -11890,7 +11905,10 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{"P3-e4d-3 actual host-backed file and image uploads reach original surface"},
+            .filters = &.{
+                "P3-e4d-3 actual host-backed file and image uploads reach original surface",
+                "P3-e4d-4 reconnected destinations and ControlMasters stay isolated",
+            },
         });
         session_host_ssh_upload_product_tests.root_module.linkFramework("AppKit", .{});
         session_host_ssh_upload_product_tests.root_module.linkFramework("Metal", .{});

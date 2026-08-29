@@ -200,7 +200,7 @@ done
 # harness-owned localhost credentials; the product still computes and selects the ControlPath.
 mkdir -p "$HOME_DIR/.ssh" "$HOME_DIR/.cache/maru"
 cat >"$HOME_DIR/.ssh/config" <<EOF
-Host maru-p5d-upload
+Host maru-p5d-upload maru-p5d-upload-a maru-p5d-upload-b
     HostName 127.0.0.1
     Port $PORT
     User $USER_NAME
@@ -209,7 +209,7 @@ Host maru-p5d-upload
     IdentitiesOnly yes
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
-    LogLevel ERROR
+    LogLevel QUIET
 Host maru-p5d-upload-failure
     HostName 127.0.0.1
     Port 1
@@ -262,6 +262,9 @@ HOME=$HOME_DIR \
 PATH=$MIN_PATH \
 MARU_P5D_UPLOAD_DEST=maru-p5d-upload \
 MARU_P5D_UPLOAD_FAILURE_DEST=maru-p5d-upload-failure \
-"$UPLOAD_TEST" --maru-expect-tests=4
+MARU_P5D_UPLOAD_DEST_A=maru-p5d-upload-a \
+MARU_P5D_UPLOAD_DEST_B=maru-p5d-upload-b \
+MARU_P5D_UPLOAD_CLIENT_KEY=$RUN_DIR/clientkey \
+"$UPLOAD_TEST" --maru-expect-tests=5
 
 echo "p5d: bundle PATH, localhost sshd attach, and host-backed upload product gates passed"

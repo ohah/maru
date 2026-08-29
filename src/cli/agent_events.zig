@@ -350,7 +350,10 @@ test "isStale: 7 일이 넘으면 거두고, 미래 mtime 은 안 건드린다" 
 }
 
 test "shouldRefreshRoute: 시한이 지나면 다시 묻는다 — 옆 파일은 이제 안 바뀌므로 시간이 유일한 무효화다" {
-    try testing.expect(shouldRefreshRoute(0, 0)); // 처음 — 아직 물은 적이 없다
+    // ⚠️ **«처음» 은 이 함수가 다루지 않는다.** 그것은 호출자의 `asked` 플래그가 가른다 — 시각 0 을
+    // «아직 안 물었다» 로 겸하면 시계가 0 근처인 순간(테스트·부팅 직후)에 두 뜻이 겹친다.
+    // 이 함수는 **오직 시간**만 본다.
+    try testing.expect(!shouldRefreshRoute(0, 0));
     try testing.expect(!shouldRefreshRoute(route_ttl_ms - 1, 1));
     try testing.expect(shouldRefreshRoute(route_ttl_ms + 1, 1));
     // 시계가 되돌아가도 터지지 않는다(포화 뺄셈).

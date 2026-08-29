@@ -26,6 +26,7 @@ const text_layout = chrome.text_layout;
 const file_tree_icon = chrome.file_tree_icon;
 const dock_view_bar = chrome.components.dock_view_bar;
 const file_tree = @import("../session.zig").file_tree;
+const dock_panel = @import("../session.zig").dock_panel;
 const icons = @import("../icons.zig");
 const sidebar_glyph_rows = @import("../sidebar_glyph_rows.zig");
 const i18n = @import("../i18n.zig");
@@ -947,6 +948,17 @@ pub fn buildSidebarDrawList(
 /// 도크 뷰 스위처 한 행(docs/file-explorer.md §3.5). 슬롯마다 아이콘 1셀을 그리고 현재 뷰만 강조색을 쓴다.
 /// 새 아이콘 자산을 만들지 않고 기존 `IconKind`(folder·git)를 재사용한다 — 합성 glyph 파이프라인·라이선스 기록을
 /// 건드리지 않기 위해서다. 슬롯 자리는 chrome의 `dock_view_bar`가 계산한 것과 **같은 셀 수**를 쓴다.
+/// 도크 뷰 하나가 뷰 바에서 쓰는 아이콘. **exhaustive switch가 요점이다** — 뷰를 더하면 여기서
+/// 컴파일이 멈춰 아이콘을 정하게 만든다(빈 칸으로 출하되지 않는다).
+fn iconKindForDockView(view: dock_panel.View) file_tree_icon.IconKind {
+    return switch (view) {
+        .explorer => .folder,
+        .source_control => .git,
+        .agent_sessions => .code,
+        .image_gallery => .image,
+    };
+}
+
 pub fn buildDockViewBarDrawList(
     allocator: std.mem.Allocator,
     cols: u16,
@@ -961,9 +973,13 @@ pub fn buildDockViewBarDrawList(
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
-    const kinds = [_]file_tree_icon.IconKind{ .folder, .git, .code };
     const slot_cols: u16 = @intCast(dock_view_bar.slot_cols);
-    for (kinds, 0..) |kind, index| {
+    for (0..dock_view_bar.slot_count) |index| {
+        // **아이콘도 뷰가 정한다.** 예전에는 여기 `{ .folder, .git, .code }` 배열이 있었는데, 그것은
+        // 슬롯 순서를 적어 둔 **세 번째 자리**였다(enum·`slot_count`에 이어). 배열은 뷰를 하나 더해도
+        // 컴파일러가 아무 말을 안 하므로, 칸은 늘고 아이콘은 셋만 그려져 **마지막 칸이 빈다**.
+        // `View`로 받아 exhaustive switch를 태우면 그 부류가 컴파일 에러가 된다.
+        const kind = iconKindForDockView(dock_panel.View.forSlot(index) orelse continue);
         // 아이콘은 슬롯 안 좌측 여백 뒤에 **2칸으로** 놓는다. 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로
         // (icon_glyph.fillCoverage: side = min(w, h)) 2칸이면 1칸일 때보다 또렷하고 크다 — 사이드바 에이전트
         // 아이콘이 같은 이유로 이미 `width = 2`다. 슬롯이 화면 밖이면 그리지 않는다.
@@ -1289,4 +1305,29 @@ test "좁으면 검색 줄도 안 낸다 — 아이콘 줄과 같은 문턱" {
     defer pool.deinit(allocator);
     try appendSidebarSearchRow(allocator, &cells, 1, sidebar_header_min_cols - 1, c0, "", c0, false, &pool);
     try std.testing.expectEqual(@as(usize, 0), cells.items.len);
+}
+
+test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image 아이콘이다 (IG1)" {
+    const allocator = std.testing.allocator;
+    const c: terminal.Color = .{ .rgb = .{ .r = 1, .g = 1, .b = 1 } };
+    // 슬롯이 전부 들어가는 폭. 좁으면 아이콘을 안 그리므로 문턱을 넘겨 준다.
+    const cols: u16 = @intCast(dock_view_bar.slot_cols * dock_view_bar.slot_count);
+    var list = try buildDockViewBarDrawList(allocator, cols, 1, 0, c, c, &.{});
+    defer list.deinit(allocator);
+
+    // **개수가 슬롯 수와 같아야 한다** — 예전처럼 아이콘을 배열로 적어 두면 뷰를 더했을 때
+    // 칸만 늘고 아이콘이 모자라 마지막 칸이 빈다.
+    try std.testing.expectEqual(@as(usize, dock_view_bar.slot_count), list.cells.len);
+
+    // 갤러리 칸의 글리프가 image 아이콘이다.
+    const gallery_slot = dock_panel.View.image_gallery.slot();
+    const want = file_tree_icon.codepointFromRaw(@intFromEnum(file_tree_icon.IconKind.image)).?;
+    try std.testing.expectEqual(want, list.cells[gallery_slot].codepoint);
+
+    // 각 아이콘은 자기 슬롯 안에 있다(그린 자리와 눌리는 자리가 갈라지지 않는다).
+    for (list.cells, 0..) |cell, i| {
+        const slot_start: u16 = @intCast(i * dock_view_bar.slot_cols);
+        try std.testing.expect(cell.col >= slot_start);
+        try std.testing.expect(cell.col < slot_start + dock_view_bar.slot_cols);
+    }
 }

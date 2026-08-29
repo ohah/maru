@@ -4784,6 +4784,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var axis_col_after: u16 = 0;
     var axis_line_before: usize = 0;
     var axis_line_after: usize = 0;
+    var jump_judgeable = false;
+    var jump_col_before: u16 = 0;
+    var jump_col_after: u16 = 0;
+    var jump_local_x: f32 = 0;
+    var jump_on_thumb_before = false;
+    var jump_on_thumb_after = false;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -6249,6 +6255,25 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, tx, gy);
             window.postSyntheticMouse(.left_up, tx, gy);
         };
+        // ── 트랙 빈 자리를 누르면 그 자리로 뛴다 (적대적 검증 3회차) ─────────────────
+        //
+        // 드래그와 **다른 길**이다(`begin` 이 offset 을 돌려주는 쪽). 판정은 "값이 바뀌었나" 가
+        // 아니라 **누른 자리가 새 thumb 안에 들어왔나** 로 본다 — 중립이 약속한 것이 그것이고
+        // (*"그 지점에 thumb 중앙을 놓는다"*), 자리 계산을 여기서 되풀이하면 동어반복이 된다.
+        if (smoke and spins == 992 and active_view == .file) if (editor_last_hbar) |bar| {
+            jump_judgeable = true;
+            jump_col_before = open_files.items[active_view.file].first_col;
+            jump_local_x = bar.track_x + bar.track_w * 0.9;
+            const jx: i32 = @intFromFloat(@as(f32, @floatFromInt(geom.terminal.x)) + jump_local_x);
+            const jy: i32 = @intFromFloat(@as(f32, @floatFromInt(geom.terminal.y)) + bar.hit_y + bar.hit_h / 2);
+            jump_on_thumb_before = bar.thumbContains(jump_local_x);
+            window.postSyntheticMouse(.left_down, jx, jy);
+            window.postSyntheticMouse(.left_up, jx, jy);
+        };
+        if (smoke and spins == 994 and jump_judgeable and active_view == .file) {
+            jump_col_after = open_files.items[active_view.file].first_col;
+            jump_on_thumb_after = if (editor_last_hbar) |b| b.thumbContains(jump_local_x) else false;
+        }
         // ── 축이 나머지를 안 나눠 쓴다 (적대적 검증 2회차) ────────────────────────────
         //
         // 정밀 터치패드는 `WHEEL_DELTA`(120) 미만을 보내고 누적기가 그 나머지를 들고 있는다. 축이
@@ -9222,6 +9247,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             track_right,
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
+        });
+        try stdout.print("hbar_jump: col {d}->{d} on_thumb {}->{} jump_ok={}\n", .{
+            jump_col_before,
+            jump_col_after,
+            jump_on_thumb_before,
+            jump_on_thumb_after,
+            // **누르기 전에는 thumb 밖**이어야 이 판정이 무언가를 묻는다(이미 그 위였다면 안 뛰는
+            // 것이 정답이다). 그리고 누른 뒤에는 그 자리가 thumb 안이어야 한다.
+            jump_judgeable and !jump_on_thumb_before and jump_on_thumb_after and
+                jump_col_after != jump_col_before,
         });
         try stdout.print("wheel_axes: col {d}->{d} line {d}->{d} axes_ok={}\n", .{
             axis_col_before,

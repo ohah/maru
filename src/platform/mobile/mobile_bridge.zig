@@ -4139,7 +4139,7 @@ fn buildUi(width: u32, height: u32, tk: *const tokens.Tokens) !void {
 // **"44 로 세운 설정 목록이 손가락에 어떻게 잡히는가"** 하나이고, 그래서 행·팝업·되돌아가기가
 // 전부 실제로 눌린다.
 
-const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key };
+const Screen = enum { sessions, terminal, settings, servers, server_edit, password, host_key, remote_screen };
 
 /// **화면 스택이다**(UX §3 — "모달을 안 쓴다, 라우터 하나다"). 단일 변수로 두면 화면이 늘 때
 /// "어디로 돌아가나" 를 분기마다 다시 적게 되고, 그 분기 하나를 빠뜨리면 뒤로가기가 갈 곳을
@@ -4148,6 +4148,35 @@ var nav: [4]Screen = .{ .sessions, .terminal, .terminal, .terminal };
 /// 스택에 실제로 쌓인 수. **앱은 터미널에서 시작한다** — 세션 목록은 그 아래에 있고 뒤로
 /// 가면 나온다. 매번 목록을 거치게 하면 이 앱의 주 용도에 탭이 하나 더 붙는다.
 var nav_len: usize = 2;
+
+/// 누른 원격 줄을 연다. **누를 때 잡아 둔 index 를 쓴다** — 뗄 때 좌표로 다시 찾으면 그 사이
+/// 목록이 갱신됐을 때 다른 세션을 열 수 있다.
+fn openRemoteRow() void {
+    const idx = remote_pressed_row orelse return;
+    remote_pressed_row = null;
+    if (idx >= control_row_count) return; // 목록이 줄었다 — 없는 줄을 열지 않는다
+    const row = &control_rows[idx];
+    if (!row.has_runtime) return; // 붙을 수 없는 줄이다(§3 — 필드의 유무가 그 판정이다)
+    wantControl(.{ .screen = row.runtime_id });
+    navPush(.remote_screen);
+}
+
+/// 그 좌표에 있는 **누를 수 있는** 원격 줄. 붙을 수 없는 줄은 null 이다 — 눌리는 것처럼 보이고
+/// 아무 일도 안 일어나면 사용자는 고장으로 읽는다.
+fn remoteRowAt(x: f32, y: f32) ?usize {
+    if (remote_rows_drawn == 0 or remote_row0.h <= 0) return null;
+    if (x < remote_row0.x or x > remote_row0.x + remote_row0.w) return null;
+    if (y < remote_row0.y) return null;
+    const rel = y - remote_row0.y;
+    const pitch = remote_row0.h + 1;
+    const idx_f = @floor(rel / pitch);
+    if (idx_f < 0) return null;
+    const idx: usize = @intFromFloat(idx_f);
+    if (idx >= remote_rows_drawn or idx >= control_row_count) return null;
+    // 줄 사이 divider 를 누른 것은 어느 줄도 아니다.
+    if (rel - idx_f * pitch > remote_row0.h) return null;
+    return if (control_rows[idx].has_runtime) idx else null;
+}
 
 /// 지금 보이는 화면 — 스택의 꼭대기다.
 fn screenTop() Screen {
@@ -4375,7 +4404,10 @@ pub fn sessionsGearSize() struct { w: f32, h: f32 } {
 /// 세션 목록의 톱니·줄 자리. **그리는 자리를 그대로 판정에 쓴다** — 따로 계산하면 갈린다.
 var sess_gear_rect: SetRect = .{};
 var sess_row_rect: SetRect = .{};
-var sess_pressed: enum { none, gear, row, servers } = .none;
+var sess_pressed: enum { none, gear, row, servers, remote_row } = .none;
+/// 누른 원격 줄의 index(누름 판정과 뗌 판정이 **같은 줄**을 봐야 한다 — 그 사이 목록이 갱신되면
+/// 좌표로 다시 찾은 줄은 다른 세션일 수 있다).
+var remote_pressed_row: ?usize = null;
 /// 서버 목록으로 들어가는 줄. **여기서 들어간다** — UX 계약(§2.1)은 서버 목록을 세션 목록
 /// *위*에 두지만, 뿌리를 바꾸면 앱이 뜨는 자리와 뒤로가기 스택이 함께 움직인다(그 재배치는
 /// 다중 세션 U2 가 든다). 그때까지는 이 줄이 그 화면의 입구다.
@@ -4579,6 +4611,84 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
     if (sub.len > 0) pushText(sub, @intFromFloat(win.x + 16), @intFromFloat(y + 30), 13, tk.get(.muted_fg));
 
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(y + row_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+}
+
+/// 원격 세션의 화면. **조립기가 든 run 을 셀로 편다** — 코어 격자를 거치지 않는다(그 바이트는
+/// ANSI 가 아니라 이미 셀이다, §4a).
+///
+/// **읽기 전용이다**(§8 — `--stream` 은 observer). 키보드를 안 올리고 입력도 안 받는다: 뜨는데
+/// 안 들어가면 사용자가 쳐 놓고 잃는다.
+fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
+    // 상단 바 — 어디서 왔는지와 무엇을 보는지.
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+    pushText(maru.i18n.tIn(.ko, .mob_remote_screen_title), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));
+    // **보는 중이라고 말한다** — 조종하는 화면과 헷갈리면 안 친 글자를 찾게 된다.
+    const badge = maru.i18n.tIn(.ko, .mob_remote_screen_readonly);
+    pushText(badge, @intFromFloat(win.x + win.w - 16 - @as(f32, @floatFromInt(textWidth(badge, 13)))), @intFromFloat(win.y + (set_head_h - 13) / 2), 13, tk.get(.muted_fg));
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y + set_head_h), .w = @intFromFloat(win.w), .h = 1 }, tk.get(.divider), 0xFF, 0, 0);
+    const scr = remote_screen orelse {
+        // 조립기가 없는 이유가 둘이다. **아직 안 왔다**(바이트가 오면 생긴다)와 **연결이 끊겼다**
+        // (`control_reset` 이 놓았다)를 가르지 않으면, 끊긴 화면에 "받는 중" 이 영원히 떠서
+        // 사용자가 계속 기다린다. 그 판정은 **아직도 그 화면을 원하는가**로 한다.
+        const still_wanted = control_want == .screen;
+        const msg = if (still_wanted)
+            maru.i18n.tIn(.ko, .mob_remote_screen_waiting)
+        else
+            maru.i18n.tIn(.ko, .mob_remote_screen_off);
+        pushText(msg, @intFromFloat(win.x + 16), @intFromFloat(win.y + set_head_h + 20), 15, tk.get(.muted_fg));
+        remote_screen_shown = if (still_wanted) .waiting else .off;
+        return;
+    };
+    switch (scr.state) {
+        .waiting_first => {
+            // **아직 안 왔다고 말한다** — 빈 화면은 "세션이 비었다" 로 읽힌다.
+            pushText(maru.i18n.tIn(.ko, .mob_remote_screen_waiting), @intFromFloat(win.x + 16), @intFromFloat(win.y + set_head_h + 20), 15, tk.get(.muted_fg));
+            remote_screen_shown = .waiting;
+            return;
+        },
+        .off => {
+            pushText(maru.i18n.tIn(.ko, .mob_remote_screen_off), @intFromFloat(win.x + 16), @intFromFloat(win.y + set_head_h + 20), 15, tk.get(.muted_fg));
+            remote_screen_shown = .off;
+            return;
+        },
+        .ready => {},
+    }
+
+    // 셀 기하는 본문과 같은 규칙이다(§글리프 기하) — 여기서 따로 세면 본문과 갈린다.
+    const line_h: i32 = @max(1, @as(i32, @intCast(cfg().font.size * cfg().font.line_height / 100)));
+    const scale = @as(f32, @floatFromInt(line_h)) / @as(f32, @floatFromInt(atlas_cell_h));
+    const cell_w: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(atlas_cell_w)) * scale * 0.5)));
+    const ox = @as(i32, @intFromFloat(win.x));
+    const oy = @as(i32, @intFromFloat(win.y + set_head_h + 1));
+    const rows_fit: u16 = @intCast(@max(0, @divTrunc(@as(i32, @intFromFloat(win.h - set_head_h - 1)), line_h)));
+
+    var drawn: usize = 0;
+    var row: u16 = 0;
+    while (row < rows_fit) : (row += 1) {
+        const runs = scr.rowRuns(row);
+        if (runs.len == 0) continue;
+        var col: i32 = 0;
+        for (runs) |r| {
+            var k: u32 = 0;
+            while (k < r.count) : (k += 1) {
+                // 화면 밖으로 나가면 그만 그린다 — 둘러보기(팬)는 후속이다(§8 한계).
+                if (ox + col * cell_w > @as(i32, @intFromFloat(win.x + win.w))) break;
+                if (r.grapheme.len > 0 and r.grapheme[0] != ' ') {
+                    pushText(r.grapheme, ox + col * cell_w, oy + @as(i32, row) * line_h, line_h, tk.get(.surface_fg));
+                    drawn += 1;
+                }
+                col += @intCast(@max(1, r.width));
+            }
+        }
+    }
+    remote_screen_shown = if (drawn > 0) .cells else .blank;
+}
+
+/// 원격 화면이 무엇을 보였나(판정용). 그린 결과를 남긴다 — 상태만 재면 화면이 비어도 초록이다.
+pub const RemoteScreenShown = enum { waiting, off, blank, cells };
+var remote_screen_shown: RemoteScreenShown = .waiting;
+pub fn remoteScreenShown() RemoteScreenShown {
+    return remote_screen_shown;
 }
 
 /// 세션 화면 아래에 붙는 **서버 목록 입구**. 화면을 나눠 그리는 이유는 하나다 — 세션 줄과
@@ -5578,7 +5688,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                 if (routeIs(.chrome)) return 1;
                 if (!routeClaim(.chrome)) return 0;
                 sess_press.begin(x, y, time_ms, false); // 이 화면에는 흐르는 것이 없다
-                sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else if (setHit(sess_servers_rect, x, y)) .servers else .none;
+                sess_pressed = if (setHit(sess_gear_rect, x, y)) .gear else if (setHit(sess_row_rect, x, y)) .row else if (setHit(sess_servers_rect, x, y)) .servers else blk: {
+                    // **원격 줄은 눌러서 그 화면을 연다**(§4a). 붙을 수 없는 줄(runtime id 가
+                    // 없는 것 — in-process Term)은 누름 표시도 안 준다: 눌리는 것처럼 보이고
+                    // 아무 일도 안 일어나면 사용자는 고장으로 읽는다.
+                    remote_pressed_row = remoteRowAt(x, y);
+                    break :blk if (remote_pressed_row != null) .remote_row else .none;
+                };
                 return 1;
             },
             1 => {
@@ -5604,6 +5720,7 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
                         set_touch.cancel();
                     },
                     .row => navPush(.terminal),
+                    .remote_row => openRemoteRow(),
                     .servers => {
                         navPush(.servers);
                         srv_sa.reset();
@@ -5971,6 +6088,13 @@ fn chromePointer(phase: u32, pointer_id: u32, x: f32, y: f32, time_ms: u64) u32 
 
 /// Android 하드웨어 뒤로가기 · iOS 좌측 스와이프가 부른다. 뺄 화면이 있었으면 1.
 pub export fn maru_mobile_pop_screen() u32 {
+    if (screenTop() == .remote_screen) {
+        // **화면을 그만 본다는 뜻을 코어에 알린다.** 안 알리면 그 서버에서 `attach` 가 계속 돌고,
+        // 목록으로 돌아와도 축이 화면 레코드를 기다린다(§4a — 원하는 것이 소비자를 정한다).
+        wantControl(.sessions);
+        navPop();
+        return 1;
+    }
     if (screenTop() == .host_key) {
         // **뒤로가기는 거절이다.** 화면만 닫고 답을 안 주면 펌프가 2분을 기다린다.
         rejectHostKey();
@@ -6218,6 +6342,7 @@ pub export fn maru_mobile_build(width: u32, height: u32, time_ms: u64) u32 {
         .server_edit => drawServerEdit(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .password => drawPasswordPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
         .host_key => drawHostKeyPrompt(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
+        .remote_screen => drawRemoteScreen(.{ .x = 0, .y = 0, .w = @floatFromInt(width), .h = @floatFromInt(height) }, &tk),
     }
     return @intCast(quad_count);
 }

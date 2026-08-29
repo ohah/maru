@@ -170,7 +170,7 @@ const inventory = [_]Entry{
     //     모바일 UI 는 아직 언어 해상도를 안 거치고 `.ko` 를 박는다(위 주석의 그 이유).
     // 43: 끊긴 상태를 "붙는 중" 과 갈라 말한다 — 상태만으로 갈리는 자리라 문구가 하나 늘었다.
     // 44: 연결이 없으면 목록이 축의 사유 대신 연결을 말한다 — 그 자리의 폴백 문구다.
-    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 44 },
+    .{ .path = "src/platform/mobile/mobile_bridge.zig", .count = 50 },
     // 모바일 설정 행 목록이 comptime 테이블이라 런타임 조회를 못 쓴다(`mobileDocLabel` 의 doc 주석).
     .{ .path = "src/platform/mobile/mobile_config.zig", .count = 8 },
     // 골든 캡처용 실행 파일. 한국어 화면을 찍는 것이 목적이라 프로세스째 `ko` 로 박는다 —

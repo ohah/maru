@@ -13649,13 +13649,9 @@ pub const AppSession = struct {
                 _ = self.remote_agent_hosts.remove(ctx.dest);
                 return;
             };
-            const remote_dir = std.fmt.allocPrint(self.allocator, "$HOME/{s}", .{hc.remote_log_dir_rel}) catch {
-                self.allocator.free(key);
-                _ = self.remote_agent_hosts.remove(ctx.dest);
-                return;
-            };
-            defer self.allocator.free(remote_dir);
-            const stream = ssh_upload.spawnAgentEvents(self.allocator, ctx.ctl, ctx.dest, "maru", remote_dir) catch {
+            // 홈 기준 **상대** 경로를 넘긴다 — `$HOME` 을 붙이는 것은 원격 셸의 일이고, 그 인용은
+            // `spawnAgentEvents` 가 책임진다(작은따옴표로 감싸면 `$HOME` 이 확장되지 않는다).
+            const stream = ssh_upload.spawnAgentEvents(self.allocator, ctx.ctl, ctx.dest, "maru", hc.remote_log_dir_rel) catch {
                 self.allocator.free(key);
                 _ = self.remote_agent_hosts.remove(ctx.dest);
                 return;

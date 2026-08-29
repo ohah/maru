@@ -4130,12 +4130,15 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        .filters = &.{"P3-e4d-3 host-backed SSH upload uses actual AppSession product boundaries"},
+        .filters = &.{
+            "P3-e4d-3 host-backed SSH upload uses actual AppSession product boundaries",
+            "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작은따옴표는 $HOME 을 리터럴로 굳힌다",
+        },
     });
     const run_session_host_ssh_upload_boundary_tests = b.addRunArtifact(
         session_host_ssh_upload_boundary_tests,
     );
-    run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_ssh_upload_boundary_tests.addArg("--maru-expect-tests=2");
     run_session_host_ssh_upload_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
     const session_host_ssh_reconnect_isolation_boundary_tests = addProjectTest(b, .{

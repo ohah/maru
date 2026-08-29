@@ -28,6 +28,9 @@ const c = @cImport({
     @cInclude("app_host_abi.h");
 });
 
+/// Zig 0.16 의 `std.c` 에는 `atexit` 바인딩이 없어 직접 선언한다.
+extern fn atexit(handler: *const fn () callconv(.c) void) c_int;
+
 pub const abi_version: u32 = session_mod.abi_version;
 const allocator = std.heap.smp_allocator;
 const terminal = maru.terminal;
@@ -764,12 +767,131 @@ fn redirectStderrToAppLog() void {
     _ = std.c.write(2, header.ptr, header.len);
 }
 
+/// 비정상 종료의 **흔적**을 남긴다 — 시작 마커와 짝이 되는 종료 마커다.
+///
+/// 2026-08-29 실측: 앱 업데이트 직후 여섯 번(44227·44753·44784·44833·44906·44915) 연속으로 앱이
+/// 조용히 사라졌는데, `app.log` 에는 `workspace checkpoint: final-quit` 이 **한 줄도 없고**
+/// `~/Library/Logs/DiagnosticReports` 에도 그 시각 리포트가 **하나도 없었다**. 정상 종료도 크래시도
+/// 아니라는 것까지는 알아도 거기서 끝이다 — 시그널로 죽었는지, 종료 경로 앞에서 빠져나갔는지를
+/// 가를 재료가 **하나도 없었다**. 원인을 못 좁혀 코드 수정이 전부 추측이 되는 상태였다.
+///
+/// 그래서 고칠 것은 개별 종료 사유가 아니라 **진단 불가 자체**다. `redirectStderrToAppLog` 이
+/// "GUI 의 stderr 가 /dev/null 이라 진단이 사라진다"를 푼 것과 같은 축의 사각지대다.
+///
+/// 세 가지가 구분된다:
+///   - `signal=N`  — 잡을 수 있는 시그널로 죽었다(크래시·TERM·HUP…).
+///   - `via=exit`  — `exit()` 로 정상 종료했다(정상 quit 경로든 조기 반환이든).
+///   - **아무 종료 줄도 없음** — `SIGKILL`·전원 차단처럼 잡을 수 없는 경로다. 시작 마커만 남으므로
+///     그 부재 자체가 증거가 된다.
+var exit_diagnostics_installed: bool = false;
+
+/// 시그널 핸들러 안에서는 async-signal-safe 한 것만 부를 수 있다. `std.fmt` 는 그 보장이 없으므로
+/// 십진 변환을 직접 한다 — 진단을 남기려다 핸들러 안에서 죽으면 아무것도 못 남긴다.
+fn appendDecimal(buf: []u8, offset: *usize, value: u64) void {
+    var digits: [20]u8 = undefined;
+    var count: usize = 0;
+    var rest = value;
+    while (true) {
+        digits[count] = '0' + @as(u8, @intCast(rest % 10));
+        count += 1;
+        rest /= 10;
+        if (rest == 0) break;
+    }
+    while (count > 0) {
+        count -= 1;
+        if (offset.* >= buf.len) return;
+        buf[offset.*] = digits[count];
+        offset.* += 1;
+    }
+}
+
+fn appendBytes(buf: []u8, offset: *usize, text: []const u8) void {
+    for (text) |ch| {
+        if (offset.* >= buf.len) return;
+        buf[offset.*] = ch;
+        offset.* += 1;
+    }
+}
+
+/// `label` 뒤에 숫자를 붙이지 않는다는 표시. 시그널 번호 0 은 유효한 값이 아니지만, 그 사실에
+/// 기대는 대신 별도 sentinel 을 둬서 나중에 값이 0 인 축이 생겨도 조용히 깨지지 않게 한다.
+const no_marker_value: u64 = std.math.maxInt(u64);
+
+/// 마커 한 줄을 만든다. `pid` 를 인자로 받는 이유는 테스트 때문이다 — `getpid` 를 안에서 부르면
+/// 결과가 실행마다 달라져 **무엇을 쓰는지**를 잴 수 없다. 부작용을 `writeExitMarker` 하나로 좁힌
+/// 규율은 `openAppLogFd` 와 같다.
+///
+/// 버퍼가 모자라면 **자르고 끝낸다**. 진단 한 줄이 짧아지는 것과 핸들러 안에서 죽는 것 중
+/// 후자가 비교할 수 없이 나쁘다.
+fn formatExitMarker(buf: []u8, pid: u64, label: []const u8, value: u64) []const u8 {
+    var offset: usize = 0;
+    appendBytes(buf, &offset, "=== maru app exit pid=");
+    appendDecimal(buf, &offset, pid);
+    appendBytes(buf, &offset, " ");
+    appendBytes(buf, &offset, label);
+    if (value != no_marker_value) appendDecimal(buf, &offset, value);
+    appendBytes(buf, &offset, " ===\n");
+    return buf[0..offset];
+}
+
+/// `write(2, …)` 한 번으로 끝낸다. redirect 뒤 fd 2 가 곧 `app.log` 이고, tty 실행이면 콘솔이다 —
+/// 어느 쪽이든 시작 마커가 간 곳과 같은 자리라 짝이 맞는다.
+fn writeExitMarker(label: []const u8, value: u64) void {
+    var buf: [96]u8 = undefined;
+    const line = formatExitMarker(&buf, @intCast(std.c.getpid()), label, value);
+    _ = std.c.write(2, line.ptr, line.len);
+}
+
+fn exitSignalHandler(sig: std.posix.SIG) callconv(.c) void {
+    writeExitMarker("signal=", @intFromEnum(sig));
+
+    // 기본 처분으로 되돌린 뒤 **다시 올린다**. 이 단계를 빼면 우리가 시그널을 삼켜 버려서 macOS 가
+    // 크래시 리포트를 못 쓴다 — 진단을 늘리려다 원래 있던 진단을 없애는 교환이 된다.
+    const restore: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(sig, &restore, null);
+    _ = std.c.raise(sig);
+}
+
+fn exitAtexitHandler() callconv(.c) void {
+    writeExitMarker("via=exit", no_marker_value);
+}
+
+/// 시작 마커를 찍는 자리에서 함께 건다. 앱 세션은 한 프로세스에서 여러 번 만들어질 수 있으므로
+/// 한 번만 설치한다.
+fn installExitDiagnostics() void {
+    if (builtin.is_test) return;
+    if (exit_diagnostics_installed) return;
+    exit_diagnostics_installed = true;
+
+    const action: std.posix.Sigaction = .{
+        .handler = .{ .handler = exitSignalHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    // 크래시 계열과 종료 요청 계열을 함께 건다. `PIPE` 는 **뺀다** — 이 저장소는 곳곳에서 그 처분을
+    // 의도적으로 관리하고 있어(`control_relay.zig`·`external_attach_cli.zig`) 여기서 덮으면 그 결정을
+    // 조용히 뒤집는다.
+    const watched = [_]std.posix.SIG{
+        .SEGV, .BUS, .ILL, .FPE,  .ABRT, .TRAP, .SYS,
+        .TERM, .HUP, .INT, .QUIT, .XCPU, .XFSZ,
+    };
+    for (watched) |sig| std.posix.sigaction(sig, &action, null);
+
+    _ = atexit(exitAtexitHandler);
+}
+
 pub export fn maru_macos_app_session_create(
     config: ?*const AppSessionConfig,
     out_session: ?*?*AppSession,
 ) c_int {
     // 앱의 가장 이른 Zig 진입점이다. 여기서 걸어야 config 경고를 포함한 시작 단계 진단이 전부 남는다.
     redirectStderrToAppLog();
+    // 종료 마커는 시작 마커와 짝이어야 의미가 있으므로 같은 자리에서 건다.
+    installExitDiagnostics();
     const raw_config = (config orelse return @intFromEnum(Status.null_out)).*;
     const out = out_session orelse return @intFromEnum(Status.null_out);
     out.* = null;
@@ -7955,6 +8077,30 @@ test "파일 선택 안내는 UI 언어를 따르고 종류마다 다른 문장�
 
     // 알 수 없는 종류는 빈 문자열 — 크래시하지 않는다(패널이 안내 없이 뜬다).
     try std.testing.expectEqualStrings("", std.mem.span(maru_macos_file_pick_message(9999)));
+}
+
+test "앱 종료 마커는 시그널과 정상 종료를 구분하고, 버퍼가 모자라면 자른다" {
+    // 이 테스트가 증명하는 것: 마커가 **무엇을 쓰는지**. 실제 기록은 `write(2, …)` 라 테스트가
+    // 건드릴 수 없으므로, 그 앞의 순수 포맷만이라도 고정하지 않으면 "핸들러는 도는데 로그를 봐도
+    // 무슨 뜻인지 모른다"가 된다 — 이 기능을 만든 이유가 정확히 그 상황이었다.
+    var buf: [96]u8 = undefined;
+
+    // 시그널로 죽은 경우: 번호가 붙는다.
+    try std.testing.expectEqualStrings(
+        "=== maru app exit pid=4242 signal=15 ===\n",
+        formatExitMarker(&buf, 4242, "signal=", 15),
+    );
+
+    // `exit()` 로 끝난 경우: 붙일 숫자가 없다. sentinel 이 그 사실을 나른다.
+    try std.testing.expectEqualStrings(
+        "=== maru app exit pid=7 via=exit ===\n",
+        formatExitMarker(&buf, 7, "via=exit", no_marker_value),
+    );
+
+    // 버퍼가 모자라도 넘치지 않는다. 시그널 핸들러 안에서 도는 코드라 이 성질이 곧 안전성이다.
+    var tiny: [8]u8 = undefined;
+    const truncated = formatExitMarker(&tiny, 999999, "signal=", 11);
+    try std.testing.expect(truncated.len <= tiny.len);
 }
 
 test "app 진단 로그 fd는 base 아래 app.log를 append로 열고 상한을 넘으면 비운다" {

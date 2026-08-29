@@ -81,6 +81,7 @@ pub const agent_transcript = @import("session/agent_transcript.zig"); // 세션 
 pub const agent_session_archive = @import("session/agent_session_archive.zig"); // Codex·Claude 과거 세션 JSONL 요약(우측 기록 도크)
 pub const agent_session_archive_view = @import("session/agent_session_archive_view.zig"); // archive workspace group·3줄 카드 순수 투영
 pub const agent_session_archive_detail = @import("session/agent_session_archive_detail.zig"); // 도크 inline disclosure의 최근 turn·action 요약 순수 투영
+pub const agent_image_index = @import("session/agent_image_index.zig"); // IG1: 트랜스크립트 JSONL에서 이미지 **위치**만 찾는 순수 스캐너(바이트를 옮기지 않는다)
 pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 상태줄 훅(§7.2.2 — 옵션 보강)
 pub const agent_hook_command = @import("session/agent_hook_command.zig"); // provider 훅 인라인 커맨드(docs/agent-hooks.md §4.1, 순수)
 pub const agent_hook_event = @import("session/agent_hook_event.zig"); // 훅 이벤트 로그 파서·tail 커서(§4, 순수)

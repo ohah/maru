@@ -4008,9 +4008,22 @@ pub const RemoteTermBackend = struct {
 
     /// host-backed Term(handle)의 대기 중 OSC 52 write 텍스트를 host에서 가져온다(없거나 구 host면 null).
     /// caller가 free. 정책 판정과 실제 NSPasteboard 쓰기는 client(app_session/Swift)가 한다.
+    /// **삼킨 오류를 남긴다.** 이 `catch return null` 이 2026-08-29 에 OSC 52 가 host-backed 에서만
+    /// 조용히 죽는 결함을 진단 불가로 만들었다 — 퀵 터미널(in-process)은 되는데 일반 탭은 안 되고,
+    /// 로그가 한 줄도 없어 코드만 읽어서는 어느 관문이 막았는지 가릴 수 없었다. best-effort 동작은
+    /// 그대로 두고(실패가 세션에 전파되지 않는다) 사실만 기록한다.
+    var last_clipboard_error: []const u8 = "";
     pub fn clipboardWriteFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?remote_runtime.RemoteRuntime.ClipboardWrite {
         const entry = self.runtimes.get(handle) orelse return null;
-        return (entry.runtime.clipboardWrite() catch return null) orelse null;
+        return (entry.runtime.clipboardWrite() catch |err| {
+            // 같은 오류가 tick 마다 쌓이지 않게 종류가 바뀔 때만 찍는다.
+            const name = @errorName(err);
+            if (!builtin.is_test and !std.mem.eql(u8, last_clipboard_error, name)) {
+                last_clipboard_error = name;
+                std.log.warn("host clipboard write fetch failed: error={s}", .{name});
+            }
+            return null;
+        }) orelse null;
     }
 
     pub fn takeBellFor(self: *RemoteTermBackend, handle: RuntimeHandle) bool {

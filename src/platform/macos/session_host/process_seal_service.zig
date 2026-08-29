@@ -164,8 +164,35 @@ pub const IntegrityReason = enum(u8) {
 // Diagnostic evidence only: it grants no cleanup or recovery authority, and the first reason wins.
 var integrity_evidence: std.atomic.Value(u8) = .init(0);
 
+/// **죽기 전에 사유와 호출 지점을 남긴다.** 이 함수는 484 곳에서 불리는데, 사유를 원자 변수에만
+/// 담고 어디에도 쓰지 않은 채 `_exit(86)` 했다 — 바로 위 주석이 "Diagnostic evidence only" 라고
+/// 적어 둔 그 증거가 프로세스와 함께 사라진다.
+///
+/// 2026-08-29~30 실측: 앱이 업데이트마다 조용히 사라졌다. `_exit` 은 `atexit` 도 시그널 핸들러도
+/// 못 잡으므로 앱 로그에 한 줄도 없고 크래시 리포트도 없다. 그래서 종료 마커조차 안 찍혀
+/// «SIGKILL 이다» 라고 오판했고, launchd 의 `exited due to exit(86)` 을 시스템 로그에서 찾고 나서야
+/// 이 함수에 도달했다. 계측을 넣자 사유가 `proof_loss(7)` 로 즉시 드러났다.
+///
+/// 두 줄을 쓴다. 먼저 사유 한 줄 — 이건 실패하지 않는다. 그 다음 스택 추적으로 **호출자의 파일:줄**
+/// 을 남긴다. 사유만으로는 안 좁혀지기 때문이다: `proof_loss` 하나가 339 곳에서 불리고 그중 198 곳이
+/// `remote_term_backend.zig` 한 파일이다. `@returnAddress()` 를 먼저 시도했지만 ReleaseFast 의
+/// tail call 때문에 이 함수 자신을 가리켜 쓸모가 없었다(실측).
+///
+/// 스택 추적은 무겁고 async-signal-safe 하지 않지만 여기는 어차피 죽는 자리다 — 그 비용으로 484 개
+/// 호출처 중 어디였는지를 산다. 실패해도 사유 한 줄은 이미 나간 뒤다. 동작은 그대로 —
+/// 여전히 즉시 `_exit(86)` 하고 아무 정리도 복구도 하지 않는다.
 pub fn fatalIntegrity(reason: IntegrityReason) noreturn {
     _ = integrity_evidence.cmpxchgStrong(0, @intFromEnum(reason), .acq_rel, .acquire);
+    if (!builtin.is_test) {
+        var buf: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &buf,
+            "fatal integrity: reason={s}({d}) — process exits with 86\n",
+            .{ @tagName(reason), @intFromEnum(reason) },
+        ) catch "fatal integrity: reason=<unformattable> — process exits with 86\n";
+        _ = std.c.write(2, line.ptr, line.len);
+        std.debug.dumpCurrentStackTrace(.{});
+    }
     switch (builtin.os.tag) {
         .macos, .linux => std.c._exit(86),
         else => @trap(),

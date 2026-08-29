@@ -752,7 +752,10 @@ pub fn pollAgentKinds(self: *AppSession) void {
                         if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
                     }
                 }
-                if (observer_probe and term.agent_kind != .none) {
+                // **원격 채널이 열린 Term 도 들어온다.** ssh 너머의 프로세스 트리는 로컬에서 안 보여
+                // `agent_kind` 가 영영 `.none` 이라, `!= .none` 만으로 막으면 원격 축은 판정 함수까지
+                // 도달하지도 못한다 — 채널이 열려도 배지가 영영 안 서는 자리였다.
+                if (observer_probe and (term.agent_kind != .none or term.agent_remote_channel != null)) {
                     // **소스는 Term 마다 정확히 하나다**(계약 §1). 훅 모드면 화면·OSC 를 아예 읽지 않고,
                     // 관측 모드면 훅 로그를 읽지 않는다. 여기서 섞으면 «배지가 가끔 틀림» 이 되는데 그
                     // 증상은 재현되지 않는다.
@@ -1712,12 +1715,47 @@ pub fn agentHookMode(self: *AppSession, term: *Term) maru.session.agent_hook_mod
         .gate_on = self.loaded_config.config.sidebar.agent_hooks,
         .log_present = term.agent_hook_log_present,
         .agent_present = term.agent_kind != .none,
+        // **원격 축**([계획](../../../../docs/plans/remote-agent-state.md) RA5). ssh 너머는 `agent_kind` 가
+        // 영영 `none` 이라(로컬에서 원격 process tree 가 안 보인다) 위 두 줄로는 훅 모드가 성립할 수 없다 —
+        // 계약 §11.1 의 세 겹 중 첫째다. 채널이 열렸다는 것 자체가 «저 너머에 훅이 돈다» 는 증거다.
+        .remote_channel_open = if (term.agent_remote_channel) |ch| ch.state == .open else false,
     });
 }
 /// 이 시간을 넘겨 열려 있는 턴은 진단에 한 줄 남긴다. **판정에는 쓰지 않는다** — 시간으로 턴을 닫는 것은
 /// 계약이 금지한 그것이다(오래 도는 턴을 조용히 완료로 단정한다). 여기서는 «오래 열려 있다» 는 사실만 적어,
 /// 사후에 중단으로 끊긴 턴을 mtime 추정 없이 구분할 수 있게 한다.
 const turn_open_warn_ms: i96 = 10 * std.time.ms_per_s * 60; // 10 분
+
+/// 원격 채널에서 온 줄을 소비한다([계획](../../../../docs/plans/remote-agent-state.md) RA5).
+///
+/// **`pollAgentHookEvents` 와 같은 자리에 같은 값을 쓴다** — 소스만 다르다. 그래서 사이드바·탭 라벨은
+/// 아무것도 바뀌지 않고, 상태 전이·알림·대화 줄이 로컬과 **한 벌**로 유지된다(`applyHookEvent` 재사용).
+///
+/// **파일을 안 읽는다.** 원격 로그는 저쪽 기계에 있고, 이 함수는 이미 도착한 바이트만 본다. 채널을
+/// 채우는 것(자식 프로세스 읽기)은 이 함수 밖이다 — 그래야 이 소비 규칙을 파일도 소켓도 없이 시험할 수 있다.
+pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []const u8, now_ms: u64) void {
+    const ras = maru.session.remote_agent_stream;
+    var ch = &(term.agent_remote_channel orelse return);
+
+    const nonce = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
+    for (lines) |line| {
+        switch (ch.feed(line, now_ms)) {
+            .heartbeat, .ignored => {},
+            .event => |e| {
+                // **우리 pane 의 것만 먹는다.** 채널은 host 당 하나라(RA4) 여러 pane 이 섞여 온다.
+                // 형태 검증(경로 문자·대문자 등)은 채널이 이미 했다(`parseFrame`). 여기서는 **우리
+                // 것인가**만 본다 — 발급할 때 쓴 값과 바이트가 같아야 한다.
+                if (nonce.len == 0 or !std.mem.eql(u8, e.nonce, nonce)) continue;
+                var un: std.ArrayListUnmanaged(u8) = .empty;
+                defer un.deinit(self.allocator);
+                ras.unescapeInto(&un, self.allocator, e.line) catch continue;
+                const ev = ras.hookEventFrom(un.items) orelse continue;
+                _ = applyHookEvent(self, term, ev);
+            },
+        }
+    }
+    ch.tick(now_ms);
+}
 
 /// 훅 이벤트 로그를 읽어 `term.agent_state` 를 채운다(계약 §4). 관측 모드의 `pollAgentState` 와 **같은 자리에
 /// 같은 값을 쓰는** 대신 소스만 다르다 — 그래서 사이드바·탭 라벨은 아무것도 바뀌지 않는다.
@@ -2224,6 +2262,34 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
 /// `pub` 인 이유는 **테스트가 이 함수를 직접 물어야 하기 때문**이다. 「훅이 받는 이름 = 여기서 만드는 이름」은
 /// 두 프로세스에 걸친 계약이라, 테스트가 경로를 스스로 조립하면 그 이음매를 한 번도 안 건넌다(그렇게 쓰인
 /// 기존 테스트는 두 이름이 갈려도 초록이다 — 실제 증상은 «훅은 도는데 이벤트가 0» 이다).
+/// 이 Term 이 원격에 실어 보낸 pane nonce([계획](../../../../docs/plans/remote-agent-state.md) RA2).
+///
+/// **`agentHookLogPath` 와 같은 두 이름을 쓴다** — GUI 가 띄운 자식은 `<pid>`/`<surface_id>`, host 가 띄운
+/// 자식은 `host_<hex>`/`<hex runtime_id>`. 그 둘이 곧 `MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE` 이고,
+/// `maru ssh` 는 **그 pane 의 셸 env 에서 같은 두 값을 읽어** `LC_MARU_PANE` 을 만든다. 두 곳이 같은
+/// 조립기(`formatRemotePaneNonce`)를 쓰는 것이 이 축의 전부다 — 갈리면 그 Term 은 자기 이벤트를 영영 못
+/// 받고 증상은 «배지가 안 선다» 뿐이라 어느 쪽이 틀렸는지 화면에 안 나온다(계약 §4 가 로컬에서 겪은 사고다).
+///
+/// observer 창은 여기서도 `null` 이다 — 같은 이유로 한 runtime 의 이벤트를 두 창이 나눠 먹으면 안 된다.
+pub fn remotePaneNonceFor(term: *Term, buf: *[maru.session.agent_hook_command.remote_pane_nonce_max]u8) ?[]const u8 {
+    const hook_command = maru.session.agent_hook_command;
+    var inst_buf: [hook_command.instance_token_max]u8 = undefined;
+    var pane_buf: [hook_command.pane_token_max]u8 = undefined;
+    if (hostOwnedHookIdentity(term)) |owned| {
+        if (owned.observer) return null;
+        return hook_command.formatRemotePaneNonce(
+            buf,
+            hook_command.formatHostInstance(&inst_buf, owned.host_id),
+            hook_command.formatRuntimePane(&pane_buf, owned.runtime_id),
+        );
+    }
+    return hook_command.formatRemotePaneNonce(
+        buf,
+        hookInstanceToken(&inst_buf),
+        hook_command.formatSurfacePane(&pane_buf, term.surfaceId()),
+    );
+}
+
 pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
     const hook_command = maru.session.agent_hook_command;
     if (hostOwnedHookIdentity(term)) |owned| {

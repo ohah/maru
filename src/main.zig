@@ -10980,6 +10980,21 @@ fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.
         };
     } else |_| {}
 
+    // **pane 신원을 실어 보낸다**([계획](docs/plans/remote-agent-state.md) RA2). 값을 여기서 새로 짓지
+    // 않고 **이 pane 의 셸 env 에 이미 있는 두 값**을 합친다 — 그 둘은 maru 가 자식 셸에 주입한 것이고
+    // (`pty/macos.zig`), 로컬 훅이 로그 이름으로 쓰는 바로 그 값이다. 여기서 다시 계산하면 «훅이 쓰는
+    // 이름 ≠ maru 가 읽는 이름» 이 조용히 성립한다(계약 §4 가 이미 겪은 사고다).
+    //
+    // **없으면 안 보낸다.** 사용자가 maru 밖 터미널에서 `maru ssh` 를 쳤을 수도 있다 — 그때는 귀속할
+    // Term 이 애초에 없으므로 빈 값이 옳다(원격 훅은 nonce 가 비면 스스로 나간다).
+    var nonce_buf: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined;
+    session_opts.remote_pane_nonce = blk: {
+        const hc = maru.session.agent_hook_command;
+        const inst = std.c.getenv(hc.instance_env) orelse break :blk null;
+        const pane = std.c.getenv(hc.pane_env) orelse break :blk null;
+        break :blk hc.formatRemotePaneNonce(&nonce_buf, std.mem.span(inst), std.mem.span(pane));
+    };
+
     var scratch: maru.cli.ssh.ArgvScratch = .{};
     const argv = try maru.cli.ssh.buildArgv(allocator, parsed, ctl, session_opts, &scratch);
     defer allocator.free(argv);

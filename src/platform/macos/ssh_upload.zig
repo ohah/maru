@@ -247,7 +247,11 @@ pub fn queryTmuxClientNonces(
 /// 스트리머를 끝낸다. **fd 를 먼저 닫는다** — 자식은 stdout 이 끊기면 다음 write 에서 EPIPE 로 죽는다.
 /// 그래도 안 죽으면 `SIGTERM` 을 보낸다(무한 루프이므로 스스로는 안 끝난다).
 pub fn stopAgentEvents(stream: Stream) void {
-    _ = std.c.close(stream.out_fd);
+    if (stream.out_fd >= 0) _ = std.c.close(stream.out_fd);
+    // ⚠️ **pid 를 검사하고 신호한다.** `kill(0, …)` 은 «호출자의 프로세스 그룹 **전체**» 이고 `kill(-1, …)`
+    // 은 «보낼 수 있는 모든 프로세스» 다. 즉 pid 가 0/음수로 들어오면 이 한 줄이 GUI 자신과 그 아래 모든
+    // 터미널 자식을 죽인다 — fork 실패 경로나 테스트가 만든 가짜 Stream 하나면 닿는 자리라 상한을 둔다.
+    if (stream.pid <= 0) return;
     _ = std.c.kill(stream.pid, std.c.SIG.TERM);
     _ = reapPid(stream.pid);
 }

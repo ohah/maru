@@ -47,6 +47,15 @@ pub const timeout_seconds: u32 = 2;
 /// `mkdir` 이 실패하는 경우를 훅 안에서 처리할 방법도 없다).
 pub const log_dir_rel = "agent-turn-events";
 
+/// 원격 훅이 이벤트를 적는 자리(원격 **홈 기준** 상대 경로). RA3 의 훅 커맨드와 RA5 의 스트리머가 **같은
+/// 값을 봐야 한다** — 갈리면 훅은 도는데 스트리머가 빈 디렉터리를 tail 하고, 증상은 «이벤트가 영영 0» 이라
+/// 어느 쪽이 틀렸는지 화면에 안 나온다. 그래서 상수를 하나만 둔다.
+///
+/// **로컬(`log_dir_rel`)과 자리를 나눈다.** 원격은 pane 칸이 `LC_MARU_PANE`(인스턴스+pane 을 합친 nonce)
+/// 하나뿐이라 디렉터리가 평평하고, 로컬처럼 인스턴스 하위 디렉터리를 두지 않는다. 같은 디렉터리를 쓰면
+/// 같은 기계에 로컬 maru 도 돌 때 두 이름 규칙이 한 디렉터리에서 섞인다.
+pub const remote_log_dir_rel = ".cache/maru/remote-agent-events";
+
 /// 훅에 신원을 넘기는 예약 환경변수 둘. **control-plane 의 `MARU_PANE_ID` 와 갈라 둔다.**
 ///
 /// 예전에는 pane 칸으로 `MARU_PANE_ID` 를 그대로 썼다. 그 값은 control-plane `auth.self` selector 이고

@@ -16,6 +16,10 @@
 OSC는 `AppSession.pendingNotification()`이 `{ title, body, surface_id, foreground_banner }`(`PendingNotification`)로
 드레인해 Swift에 넘기고 동시에 인앱 히스토리에 보관한다. 업데이트 안내는 OS 배너로 보내지 않고 인앱 히스토리에 직접 추가한다.
 
+**원격(SSH) 세션의 에이전트 알림도 이 OSC 행으로 들어온다.** 원격 pane 은 `agent_kind` 가 `none` 이라 훅 모드가
+안 서고, 그래서 훅 모드였다면 버렸을 OSC 가 그대로 산다 — 접속 방법(`maru ssh` 인지 그냥 `ssh` 인지)과도
+무관하다. provider 별 설정과 실측 근거는 [agent-hooks.md](agent-hooks.md) §11 이 단일 출처다.
+
 ### 영속 session host와 GUI 종료 상태
 
 GUI-local funnel은 `AppSession`/Swift가 살아 있을 때 동작한다. 앱이 완전히 종료된 동안의 전달은

@@ -178,7 +178,8 @@ grace 안에 같은 근거가 다시 오면 약한 신호는 버려지고, 다�
 - leader가 node/bun/런처이면 같은 group의 argv/script basename을 확인한다.
 - `comm`이 숫자로 시작하는 버전 문자열이면 argv[0] basename을 사용한다.
 - tmux/ssh 너머 원격 process tree가 로컬에서 보이지 않으면 kind/state는 `none/unknown`으로 남긴다. OSC title만으로
-  agent kind를 승격하지 않는다.
+  agent kind를 승격하지 않는다. **다만 그 Term 의 알림은 산다** — kind 가 `none` 이라 훅 모드가
+  안 서고, 그래서 OSC 경로가 그대로 남기 때문이다([agent-hooks.md](agent-hooks.md) §11).
 
 v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifest 구조는 provider 추가를 허용하지만 새 종류는
 아이콘·상태 fixture·수동 검증을 갖춘 별도 PR로 추가한다.

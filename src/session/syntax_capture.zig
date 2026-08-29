@@ -103,6 +103,44 @@ fn exact(name: []const u8) ?Mapping {
         // 이름 길이가 그것을 정한다.
         .{ "variable.member", Mapping{ .role = .property } },
 
+        // ── 옛 규약 이름 ────────────────────────────────────────────────────────
+        //
+        // **grammar 마다 캡처 규약 세대가 다르다.** zig grammar 는 새 이름(`variable.member`·
+        // `keyword.import`)을 쓰는데, 2026-08-29 에 함께 실은 열일곱 중 다수가 **옛 nvim 규약**을
+        // 쓴다. 표에 없으면 그 토큰은 무색이다 — 문법이 맞아도 화면이 비는 부류다.
+        //
+        // 실측으로 골랐다: 열일곱 grammar 의 `highlights.scm` 에서 캡처 이름을 뽑아(따옴표 안
+        // predicate 인자는 뺀다 — `#eq? @kw "@media"` 의 `@media` 는 캡처가 아니다) 이 표와
+        // 대조하니 **못 받는 이름이 열아홉**이었다. 아래가 그 열아홉이다.
+
+        // **`property` 가 가장 넓다** — 열 개 언어(객체 키·구조체 필드·CSS 속성)가 이 이름을 쓴다.
+        // 위 `variable.member` 와 같은 자리다.
+        .{ "property", Mapping{ .role = .property } },
+        // 대문자로 시작하는 식별자를 생성자로 본다(python 은 `#match? "^[A-Z]"` 로 그렇게 적었다).
+        // 클래스 이름이므로 타입 색이 맞다.
+        .{ "constructor", Mapping{ .role = .type_name } },
+        // 문자열 안의 이스케이프(`\n`). 새 규약의 `string.escape` 와 같은 것이다.
+        .{ "escape", Mapping{ .role = .string } },
+        .{ "delimiter", Mapping{ .role = .punctuation } },
+        .{ "float", Mapping{ .role = .number } },
+        // 제어 흐름 키워드를 따로 부르는 판(kotlin). 우리 어휘로는 전부 keyword 다.
+        .{ "conditional", Mapping{ .role = .keyword } },
+        .{ "repeat", Mapping{ .role = .keyword } },
+        .{ "exception", Mapping{ .role = .keyword } },
+        .{ "include", Mapping{ .role = .keyword } },
+        // `module` 과 같은 자리(패키지·이름공간).
+        .{ "namespace", Mapping{ .role = .type_name } },
+
+        // ── 마크업(markdown) ────────────────────────────────────────────────────
+        // 제목에 슬롯이 없다. **keyword 가 가장 눈에 띄는 자리**라 그것을 쓴다 — 제목이 본문색이면
+        // 문서 구조가 화면에서 안 보인다.
+        .{ "text.title", Mapping{ .role = .keyword } },
+        // 인라인 코드·펜스 블록. 문자열과 같은 성질(그대로 읽는 글자)이다.
+        .{ "text.literal", Mapping{ .role = .string } },
+        // 링크 대상과 라벨. property(파랑)가 링크 관례에 가깝다.
+        .{ "text.uri", Mapping{ .role = .property } },
+        .{ "text.reference", Mapping{ .role = .property } },
+
         // ── 기호 ────────────────────────────────────────────────────────────────
         .{ "punctuation", Mapping{ .role = .punctuation } }, // `.bracket`·`.delimiter`
         // 연산자에 슬롯이 없다. `punctuation`(fg를 살짝 흐린 색)이 가장 가깝다 — 키워드 색으로
@@ -117,6 +155,18 @@ fn exact(name: []const u8) ?Mapping {
         // Neovim 맞춤법 검사용 표시일 뿐 색이 아니다. grammar가 `(comment) @comment @spell`처럼
         // 색 캡처와 **겹쳐서** 낸다.
         .{ "spell", Mapping.uncolored },
+        // 매개변수 이름. 팔레트에 슬롯이 없고 **본문에서 차지하는 넓이가 크다** — 색을 주면
+        // 시그니처가 통째로 칠해진다. `variable.parameter`(새 규약)가 이미 본문색인 것과 같은 판단이다.
+        .{ "parameter", Mapping.uncolored },
+        // 보간·삽입 **영역 전체**를 감싸는 캡처(`"${...}"`). 안쪽 토큰이 각자 색을 갖는데 이것이
+        // 겹쳐 오면 마지막이 이기는 규칙 때문에 그 색을 통째로 덮는다.
+        .{ "embedded", Mapping.uncolored },
+        // grammar 가 **명시적으로 "칠하지 말라"** 고 표시한 자리다.
+        .{ "none", Mapping.uncolored },
+        // 밑줄로 시작하는 이름은 **predicate 조건용 보조 캡처**다(kotlin 이 `#eq? @_function "Regex"`
+        // 처럼 쓴다). 색이 아니라 검사용이므로 칠하지 않는다.
+        .{ "_class", Mapping.uncolored },
+        .{ "_function", Mapping.uncolored },
         // 블록·break 라벨(`outer:`). 팔레트에 마땅한 자리가 없고 빈도가 낮아 본문색으로 둔다 —
         // 겹쳐 보인다는 근거가 생기면 그때 슬롯을 논의한다.
         .{ "label", Mapping.uncolored },
@@ -208,6 +258,59 @@ test "HL4 번들 grammar가 내는 캡처 36개가 전부 의도된 답을 갖�
     };
     try std.testing.expectEqual(@as(usize, 36), grammar_captures.len);
     for (grammar_captures) |cap| {
+        if (lookup(cap) == null) {
+            std.debug.print("표에 없는 grammar 캡처: {s}\n", .{cap});
+            return error.UnmappedCapture;
+        }
+    }
+}
+
+test "HL17 열일곱 언어가 내는 캡처도 전부 표에 있다" {
+    // `HL4`는 **zig grammar** 의 캡처만 지킨다. 2026-08-29 에 열일곱이 더 실리면서 그 목록으로는
+    // 나머지 언어가 무색이 되는 것을 못 잡게 됐다 — 실제로 `property` 하나가 **열 개 언어**에서
+    // 빠져 있었다(객체 키·구조체 필드·CSS 속성).
+    //
+    // 이 목록도 grammar 에서 뽑았다(`highlights.scm` 전수, **따옴표 안은 제외** — `#eq? @kw "@media"`
+    // 의 `@media` 는 캡처가 아니라 predicate 인자다. 그 오탐을 안 걸렀을 때 css at-rule 다섯 개가
+    // 가짜로 "빠진 캡처" 로 잡혔다).
+    //
+    // zig 목록과 겹치는 것은 `HL4` 가 이미 지키므로 여기서는 **zig 에 없는 이름만** 센다.
+    const other_language_captures = [_][]const u8{
+        "_class",
+        "_function",
+        "attribute",
+        "conditional",
+        "constructor",
+        "delimiter",
+        "embedded",
+        "escape",
+        "exception",
+        "float",
+        "function.macro",
+        "function.method",
+        "function.method.builtin",
+        "function.special",
+        "include",
+        "module.builtin",
+        "namespace",
+        "none",
+        "parameter",
+        "property",
+        "punctuation.special",
+        "repeat",
+        "string.regex",
+        "string.special",
+        "string.special.key",
+        "string.special.regex",
+        "string.special.symbol",
+        "tag",
+        "tag.error",
+        "text.literal",
+        "text.reference",
+        "text.title",
+        "text.uri",
+    };
+    for (other_language_captures) |cap| {
         if (lookup(cap) == null) {
             std.debug.print("표에 없는 grammar 캡처: {s}\n", .{cap});
             return error.UnmappedCapture;

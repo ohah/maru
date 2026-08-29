@@ -364,6 +364,10 @@ run = "zig build check-config-docs"
 description = "Check cross-document links and section anchors"
 run = "zig build check-doc-links"
 
+[tasks.check-doc-line-refs]
+description = "Check code line references in docs still hit their symbol"
+run = "zig build check-doc-line-refs"
+
 [tasks."ci:changed-areas-check"]
 description = "Verify the CI changed-area classifier (which jobs a diff must run)"
 run = "sh tools/ci/changed-areas.test.sh"
@@ -380,7 +384,7 @@ description = "Check format, tests, boundaries, config docs, doc links, and buil
 # `struct {}` 로 스텁하므로, 앱 호스트는 Linux 에서 빌드가 **불가능**하다. CI 의 check job 은 ubuntu 라
 # `macos-app-host-abi-lib` 를 직접 걸면 항상 빨갛다(2026-08-28 PR #2803 에서 실측했다 — 로컬 macOS 는
 # 초록이었고 CI 만 8개 컴파일 오류로 죽었다). 그래서 OS 로 갈라지는 `check-macos-app-host` 를 건다.
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "build"]
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "build"]
 
 [tasks."packages:check"]
 # npm 라이브러리 게이트. Zig `check`와 분리된 opt-in 경로다(web:check와 같은 구조) —

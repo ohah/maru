@@ -9906,19 +9906,19 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     rr.direct_input.clearRetainingCapacity();
 
     try rr.testingClient().bufferGenerationEventForTest(8, "{\"event\":\"runtime.ended\"}");
-    try rr.testingClient().pending_batches.append(allocator, .{
+    try rr.testingClient().screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "stale-target"),
         .allocator = allocator,
     });
-    try rr.testingClient().pending_batches.append(allocator, .{
+    try rr.testingClient().screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 8,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "sibling"),
         .allocator = allocator,
     });
-    rr.testingClient().pending_batch_bytes = "stale-target".len + "sibling".len;
+    rr.testingClient().screen_inbox.pending_batch_bytes = "stale-target".len + "sibling".len;
 
     Hook.inject_ended_after_purge = true;
     try std.testing.expectError(
@@ -9929,21 +9929,21 @@ test "CR3a-2c3d C3-2 product drain purges ended generation before screen progres
     try std.testing.expect(ended.ended);
     try std.testing.expectEqual(@as(usize, 1), rr.testingClient().pending_events.items.len);
     try std.testing.expectEqual(@as(u64, 8), rr.testingClient().pending_events.items[0].header.stream_id);
-    try std.testing.expectEqual(@as(usize, 1), rr.testingClient().pending_batches.items.len);
-    try std.testing.expectEqual(@as(u64, 8), rr.testingClient().pending_batches.items[0].stream_id);
-    try std.testing.expectEqualStrings("sibling", rr.testingClient().pending_batches.items[0].bytes);
+    try std.testing.expectEqual(@as(usize, 1), rr.testingClient().screen_inbox.pending_batches.items.len);
+    try std.testing.expectEqual(@as(u64, 8), rr.testingClient().screen_inbox.pending_batches.items[0].stream_id);
+    try std.testing.expectEqualStrings("sibling", rr.testingClient().screen_inbox.pending_batches.items[0].bytes);
     try std.testing.expectEqual(@as(u21, 'x'), rr.currentGeneration().attachment.screenPtr().?.grid.cells[0].codepoint);
     try std.testing.expectEqual(@as(u64, 0), rr.currentGeneration().attachment.generation.event_generation_mirror);
 
     try rr.direct_input.appendSlice(allocator, "must-not-send");
     try rr.testingClient().bufferGenerationEventForTest(7, "{\"event\":\"runtime.ended\"}");
-    try rr.testingClient().pending_batches.append(allocator, .{
+    try rr.testingClient().screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "second-stale-target"),
         .allocator = allocator,
     });
-    rr.testingClient().pending_batch_bytes += "second-stale-target".len;
+    rr.testingClient().screen_inbox.pending_batch_bytes += "second-stale-target".len;
     try std.testing.expectEqual(RemoteRuntime.PumpResult.ended, try rr.pumpDelta());
     try std.testing.expectEqualStrings("must-not-send", rr.direct_input.items);
     try std.testing.expect(rr.currentGeneration().resync_needed);
@@ -15054,10 +15054,10 @@ fn runC3ResponsePredecessor(
         try outcome;
         try testing.expectEqual(@as(u64, 4), runtime.currentGeneration().observation.revision);
         if (expect_snapshot) {
-            try testing.expectEqual(@as(usize, 1), runtime.testingClient().pending_stream.items.len);
+            try testing.expectEqual(@as(usize, 1), runtime.testingClient().screen_inbox.pending_stream.items.len);
             try testing.expectEqualStrings(
                 predecessor.payload,
-                runtime.testingClient().pending_stream.items[0].payload,
+                runtime.testingClient().screen_inbox.pending_stream.items[0].payload,
             );
         }
     }
@@ -15245,7 +15245,7 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
     }
     try testing.expect(runtime.testingClient().unusable);
     try testing.expectEqual(@as(usize, 0), runtime.testingClient().pending_events.items.len);
-    try testing.expectEqual(@as(usize, 0), runtime.testingClient().pending_stream.items.len);
+    try testing.expectEqual(@as(usize, 0), runtime.testingClient().screen_inbox.pending_stream.items.len);
 }
 
 fn runC3InvalidCadence(
@@ -15325,7 +15325,7 @@ fn runC3InvalidCadence(
     try testing.expect(runtime.testingClient().unusable);
     try testing.expectEqual(@as(u64, 0), runtime.currentGeneration().observation.revision);
     try testing.expectEqual(@as(usize, 0), runtime.testingClient().pending_events.items.len);
-    try testing.expectEqual(@as(usize, 0), runtime.testingClient().pending_stream.items.len);
+    try testing.expectEqual(@as(usize, 0), runtime.testingClient().screen_inbox.pending_stream.items.len);
 }
 
 test "2c3e C3 socket cadence는 response 전 revoke를 먼저 settle하고 stale RPC를 게시하지 않는다" {
@@ -18432,21 +18432,21 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     defer client.deinit();
     try client.bufferGenerationEventForTest(9, "{\"event\":\"runtime.ended\"}");
     try client.bufferGenerationEventForTest(10, "{\"event\":\"runtime.ended\"}");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "stale"),
         .allocator = allocator,
     });
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 10,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "sibling"),
         .allocator = allocator,
     });
-    client.pending_batch_bytes = "stale".len + "sibling".len;
-    _ = try client.screen_recovery.invalidate(9);
-    _ = try client.screen_recovery.invalidate(10);
+    client.screen_inbox.pending_batch_bytes = "stale".len + "sibling".len;
+    _ = try client.screen_inbox.recovery.invalidate(9);
+    _ = try client.screen_inbox.recovery.invalidate(10);
     var rr: RemoteRuntime = undefined;
     try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
     rr.pending_event_owner = .{};
@@ -18468,9 +18468,9 @@ test "remote runtime: typed ended event terminates only its stream pump" {
     try testing.expectEqual(RemoteRuntime.PumpResult.ended, try rr.pumpDelta());
     try testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
     try testing.expectEqual(@as(u64, 10), client.pending_events.items[0].header.stream_id);
-    try testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
-    try testing.expectEqual(@as(u64, 10), client.pending_batches.items[0].stream_id);
-    try testing.expectEqualStrings("sibling", client.pending_batches.items[0].bytes);
+    try testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 10), client.screen_inbox.pending_batches.items[0].stream_id);
+    try testing.expectEqualStrings("sibling", client.screen_inbox.pending_batches.items[0].bytes);
     try testing.expectEqual(client_mod.ScreenRecoveryState.valid, client.screenRecoveryState(9));
     try testing.expectEqual(client_mod.ScreenRecoveryState.needs_resync, client.screenRecoveryState(10));
 }

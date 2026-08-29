@@ -578,7 +578,7 @@ test "client screen assembler yields between split snapshot chunks and resumes b
     defer allocator.free(first);
     try socket_server.writeAll(fds[1], first);
     try testing.expect((try client.readStreamBatch(7)) == null);
-    try testing.expect(client.partial_batch != null);
+    try testing.expect(client.screen_inbox.partial_batch != null);
 
     const last = try framing.encodeFrame(
         allocator,
@@ -591,7 +591,7 @@ test "client screen assembler yields between split snapshot chunks and resumes b
     defer batch.deinit();
     try testing.expect(batch.is_snapshot);
     try testing.expectEqualStrings("first-last", batch.bytes);
-    try testing.expect(client.partial_batch == null);
+    try testing.expect(client.screen_inbox.partial_batch == null);
 }
 
 test "CR3a-2b1 buffered batch는 pending charge를 transferred charge로 exact 이동한다" {
@@ -605,35 +605,35 @@ test "CR3a-2b1 buffered batch는 pending charge를 transferred charge로 exact �
     const first = try allocator.dupe(u8, "foreign-a");
     const wanted = try allocator.dupe(u8, "wanted");
     const last = try allocator.dupe(u8, "foreign-b");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 8,
         .bytes = first,
         .allocator = allocator,
     });
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 7,
         .bytes = wanted,
         .allocator = allocator,
     });
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 9,
         .bytes = last,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = first.len + wanted.len + last.len;
+    client.screen_inbox.pending_batch_bytes = first.len + wanted.len + last.len;
 
     var out: generation_batch_registry.OwnedBatch = .{};
     try testing.expectEqual(
         Client.GenerationBatchReadResult.committed,
         try client.readGenerationBatch(&out, 7, 1),
     );
-    try testing.expectEqual(@as(usize, 2), client.pending_batches.items.len);
-    try testing.expectEqual(@as(u64, 8), client.pending_batches.items[0].stream_id);
-    try testing.expectEqual(@as(u64, 9), client.pending_batches.items[1].stream_id);
-    try testing.expectEqual(first.len + last.len, client.pending_batch_bytes);
+    try testing.expectEqual(@as(usize, 2), client.screen_inbox.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 8), client.screen_inbox.pending_batches.items[0].stream_id);
+    try testing.expectEqual(@as(u64, 9), client.screen_inbox.pending_batches.items[1].stream_id);
+    try testing.expectEqual(first.len + last.len, client.screen_inbox.pending_batch_bytes);
     try testing.expectEqual(@as(usize, 1), accounting_ledger.item_count);
     try testing.expectEqual(wanted.len, accounting_ledger.byte_count);
     try testing.expectEqualStrings("wanted", out.bytes);
@@ -655,13 +655,13 @@ test "CR3a-2b1 accounting ledger는 duplicate와 consumed receipt replay를 거�
     try client.bindGenerationAccountingLedger(&accounting_ledger);
     for ([_]u64{ 7, 8 }) |stream_id| {
         const bytes = try allocator.dupe(u8, "x");
-        try client.pending_batches.append(allocator, .{
+        try client.screen_inbox.pending_batches.append(allocator, .{
             .is_snapshot = false,
             .stream_id = stream_id,
             .bytes = bytes,
             .allocator = allocator,
         });
-        client.pending_batch_bytes += bytes.len;
+        client.screen_inbox.pending_batch_bytes += bytes.len;
     }
     var first: generation_batch_registry.OwnedBatch = .{};
     var second: generation_batch_registry.OwnedBatch = .{};
@@ -720,7 +720,7 @@ test "CR3a-2b1 direct parser batch는 queue를 우회해 transferred owner를 pu
         Client.GenerationBatchReadResult.committed,
         try client.readGenerationBatch(&out, 7, 1),
     );
-    try testing.expectEqual(@as(usize, 0), client.pending_batches.items.len);
+    try testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_batches.items.len);
     try testing.expectEqual(@as(usize, 1), accounting_ledger.item_count);
     try testing.expectEqualStrings("direct", out.bytes);
 
@@ -743,13 +743,13 @@ test "CR3a-2b1 pending과 transferred payload는 18 MiB exact cap을 함께 사�
     try client.bindGenerationAccountingLedger(&accounting_ledger);
 
     const large = try allocator.alloc(u8, protocol.max_client_screen_inbox - 1);
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = large,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = large.len;
+    client.screen_inbox.pending_batch_bytes = large.len;
     var first: generation_batch_registry.OwnedBatch = .{};
     try testing.expectEqual(
         Client.GenerationBatchReadResult.committed,
@@ -757,13 +757,13 @@ test "CR3a-2b1 pending과 transferred payload는 18 MiB exact cap을 함께 사�
     );
 
     const last = try allocator.dupe(u8, "x");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 8,
         .bytes = last,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = last.len;
+    client.screen_inbox.pending_batch_bytes = last.len;
     var second: generation_batch_registry.OwnedBatch = .{};
     try testing.expectEqual(
         Client.GenerationBatchReadResult.committed,
@@ -863,7 +863,7 @@ test "CR3a-2b1 partial direct batch는 idle에서 parser owner를 보존하고 �
         try client.readGenerationBatch(&out, 7, 1),
     );
     try testing.expect(out.pristine());
-    try testing.expect(client.partial_batch != null);
+    try testing.expect(client.screen_inbox.partial_batch != null);
     try testing.expectEqual(@as(usize, 0), accounting_ledger.item_count);
 
     const last_wire = try framing.encodeFrame(
@@ -878,7 +878,7 @@ test "CR3a-2b1 partial direct batch는 idle에서 parser owner를 보존하고 �
         try client.readGenerationBatch(&out, 7, 2),
     );
     try testing.expectEqualStrings("partial-complete", out.bytes);
-    try testing.expect(client.partial_batch == null);
+    try testing.expect(client.screen_inbox.partial_batch == null);
     const prepared = try client.prepareGenerationAccountingConsume(out.accounting);
     out.allocator.?.free(out.bytes);
     client.consumeGenerationAccountingUnchecked(prepared);
@@ -1067,6 +1067,115 @@ const GenerationBatchAccounting = struct {
         return ledger_valid;
     }
 };
+
+const PartialBatch = struct {
+    stream_id: u64,
+    is_snapshot: bool,
+    bytes: std.ArrayListUnmanaged(u8) = .empty,
+    chunk_count: usize = 0,
+};
+
+/// Canonical resident owner for every screen record that has left the parser but has not yet
+/// reached a runtime consumer. Keeping storage, transfer charge, and recovery state together makes
+/// the 18 MiB/4,096-item limit one invariant instead of a sum reconstructed from parallel Client
+/// fields. Client remains the transport authority; this aggregate owns only screen-inbox state.
+const ScreenInbox = struct {
+    pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
+    pending_stream_bytes: usize = 0,
+    pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
+    pending_batch_bytes: usize = 0,
+    partial_batch: ?PartialBatch = null,
+    generation_batch_accounting: GenerationBatchAccounting = .{},
+    recovery: screen_inbox.RecoveryTable = .{},
+
+    fn byteCount(self: *const ScreenInbox) error{InvalidState}!usize {
+        const partial = if (self.partial_batch) |batch| batch.bytes.items.len else 0;
+        var total = std.math.add(
+            usize,
+            self.pending_stream_bytes,
+            self.pending_batch_bytes,
+        ) catch return error.InvalidState;
+        total = std.math.add(
+            usize,
+            total,
+            if (self.generation_batch_accounting.ledger) |ledger| ledger.byte_count else 0,
+        ) catch return error.InvalidState;
+        return std.math.add(usize, total, partial) catch error.InvalidState;
+    }
+
+    fn itemCount(self: *const ScreenInbox) error{InvalidState}!usize {
+        const ledger_items = if (self.generation_batch_accounting.ledger) |ledger|
+            ledger.item_count
+        else
+            0;
+        var total = std.math.add(
+            usize,
+            self.pending_stream.items.len,
+            self.pending_batches.items.len,
+        ) catch return error.InvalidState;
+        total = std.math.add(usize, total, ledger_items) catch return error.InvalidState;
+        return std.math.add(
+            usize,
+            total,
+            if (self.partial_batch != null) 1 else 0,
+        ) catch error.InvalidState;
+    }
+
+    fn discardStream(self: *ScreenInbox, allocator: std.mem.Allocator, stream_id: u64) void {
+        var index: usize = 0;
+        while (index < self.pending_batches.items.len) {
+            if (self.pending_batches.items[index].stream_id == stream_id) {
+                const batch = self.pending_batches.orderedRemove(index);
+                self.pending_batch_bytes -= batch.bytes.len;
+                batch.deinit();
+            } else index += 1;
+        }
+        if (self.partial_batch) |*partial| {
+            if (partial.stream_id == stream_id) {
+                partial.bytes.deinit(allocator);
+                self.partial_batch = null;
+            }
+        }
+        index = 0;
+        while (index < self.pending_stream.items.len) {
+            if (self.pending_stream.items[index].header.stream_id == stream_id) {
+                const frame = self.pending_stream.orderedRemove(index);
+                self.pending_stream_bytes -= frame.payload.len;
+                frame.deinit(allocator);
+            } else index += 1;
+        }
+    }
+
+    fn invalidateStream(self: *ScreenInbox, allocator: std.mem.Allocator, stream_id: u64) screen_inbox.Error!void {
+        if (!self.recovery.valid()) return error.InvalidTransition;
+        const recovery_before_cleanup = self.recovery;
+        self.discardStream(allocator, stream_id);
+        if (!std.meta.eql(recovery_before_cleanup, self.recovery)) return error.InvalidTransition;
+        _ = try self.recovery.invalidate(stream_id);
+    }
+
+    fn acceptRecoverySnapshot(self: *ScreenInbox, stream_id: u64) screen_inbox.Error!void {
+        try self.recovery.snapshotAccepted(stream_id);
+    }
+};
+
+const screen_inbox_field_allowlist = [_][]const u8{
+    "pending_stream",
+    "pending_stream_bytes",
+    "pending_batches",
+    "pending_batch_bytes",
+    "partial_batch",
+    "generation_batch_accounting",
+    "recovery",
+};
+comptime {
+    const fields = std.meta.fields(ScreenInbox);
+    if (fields.len != screen_inbox_field_allowlist.len)
+        @compileError("update the P4 R3 ScreenInbox schema for every owner field change");
+    for (fields, screen_inbox_field_allowlist) |field, expected|
+        if (!std.mem.eql(u8, field.name, expected))
+            @compileError("ScreenInbox field order drifted from the P4 R3 owner schema");
+}
 
 fn rawRangesOverlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) bool {
     return a_start < b_end and b_start < a_end;
@@ -1486,7 +1595,7 @@ test "CR3a-2c3d C1 forged ledger pointer cannot replace private scope authority"
     try forged_ledger.bindClient(@intFromPtr(&client));
     const canonical_identity = client.active_generation_allocator_scope.?;
     client.active_generation_allocator_scope.?.previous_allocator = forged_allocator;
-    client.generation_batch_accounting.ledger = &forged_ledger;
+    client.screen_inbox.generation_batch_accounting.ledger = &forged_ledger;
     const temporary_frees_before = temporary_counting.free_calls;
     const payload = try temporary_allocator.dupe(u8, "{\"event\":\"future.event\"}");
     try std.testing.expectError(error.ProtocolError, client.bufferCanonicalEvent(.{
@@ -1503,7 +1612,7 @@ test "CR3a-2c3d C1 forged ledger pointer cannot replace private scope authority"
     try std.testing.expectEqual(@as(usize, 0), forged_counting.free_calls);
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
 
-    client.generation_batch_accounting.ledger = &ledger;
+    client.screen_inbox.generation_batch_accounting.ledger = &ledger;
     client.active_generation_allocator_scope = canonical_identity;
     try client.restoreGenerationAllocatorScope(&scope);
 }
@@ -2444,7 +2553,7 @@ pub const ExternalAdoptionTake = struct {
         ) or !externalListMatchesClient(
             StreamBatch,
             self.pending_batches,
-            client.pending_batches,
+            client.screen_inbox.pending_batches,
         ) or !externalListMatchesSeal(
             framing.Frame,
             self.pending_stream,
@@ -2453,7 +2562,7 @@ pub const ExternalAdoptionTake = struct {
         ) or !externalListMatchesClient(
             framing.Frame,
             self.pending_stream,
-            client.pending_stream,
+            client.screen_inbox.pending_stream,
         ) or !externalListMatchesSeal(
             BufferedEvent,
             self.pending_events,
@@ -2468,7 +2577,7 @@ pub const ExternalAdoptionTake = struct {
             self.partial,
             self.cleanup_partial,
             self.partial_seal,
-            client.partial_batch,
+            client.screen_inbox.partial_batch,
         )) return false;
         const stored_inventory = &(self.plan_inventory orelse return false);
         const cleanup_inventory = &(self.cleanup_plan_inventory orelse return false);
@@ -3147,9 +3256,9 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
     inline for (.{
         @as(usize, @intFromBool(self.build_id != null)),
         @as(usize, @intFromBool(self.pending_outbound != null)),
-        @as(usize, @intFromBool(self.partial_batch != null)),
-        self.pending_batches.items.len,
-        self.pending_stream.items.len,
+        @as(usize, @intFromBool(self.screen_inbox.partial_batch != null)),
+        self.screen_inbox.pending_batches.items.len,
+        self.screen_inbox.pending_stream.items.len,
         self.pending_events.items.len,
         tx_count,
     }) |part| count = std.math.add(usize, count, part) catch
@@ -3192,8 +3301,8 @@ fn fillExternalOuterOwnerRanges(
     const fixed = [_]?ExternalRange{
         try externalRangeForSlice(self.lifecycle, self.lifecycle.len),
         try externalRangeForList(self.parser.buf, u8),
-        try externalRangeForList(self.pending_batches, StreamBatch),
-        try externalRangeForList(self.pending_stream, framing.Frame),
+        try externalRangeForList(self.screen_inbox.pending_batches, StreamBatch),
+        try externalRangeForList(self.screen_inbox.pending_stream, framing.Frame),
         try externalRangeForList(self.pending_events, BufferedEvent),
         try externalRangeForList(self.pending_catchup_barriers, BufferedCatchupBarrier),
         if (self.pending_outbound) |pending|
@@ -3227,10 +3336,10 @@ fn appendExternalNestedOwnerRanges(
 fn externalNestedOwnerRangeCount(
     self: *const Client,
 ) ExternalAdoptionInspectError!usize {
-    var count: usize = @intFromBool(self.partial_batch != null);
+    var count: usize = @intFromBool(self.screen_inbox.partial_batch != null);
     inline for (.{
-        self.pending_batches.items.len,
-        self.pending_stream.items.len,
+        self.screen_inbox.pending_batches.items.len,
+        self.screen_inbox.pending_stream.items.len,
         self.pending_events.items.len,
         switch (self.io_mode) {
             .blocking => 0,
@@ -3246,21 +3355,21 @@ fn externalNestedOwnerRangeAt(
     ordinal: usize,
 ) ExternalAdoptionInspectError!?ExternalRange {
     var index = ordinal;
-    if (self.partial_batch) |partial| {
+    if (self.screen_inbox.partial_batch) |partial| {
         if (index == 0)
             return externalRangeForSlice(partial.bytes.items, partial.bytes.capacity);
         index -= 1;
     }
-    if (index < self.pending_batches.items.len) {
-        const batch = self.pending_batches.items[index];
+    if (index < self.screen_inbox.pending_batches.items.len) {
+        const batch = self.screen_inbox.pending_batches.items[index];
         return externalRangeForSlice(batch.bytes, batch.bytes.len);
     }
-    index -= self.pending_batches.items.len;
-    if (index < self.pending_stream.items.len) {
-        const frame = self.pending_stream.items[index];
+    index -= self.screen_inbox.pending_batches.items.len;
+    if (index < self.screen_inbox.pending_stream.items.len) {
+        const frame = self.screen_inbox.pending_stream.items[index];
         return externalRangeForSlice(frame.payload, frame.payload.len);
     }
-    index -= self.pending_stream.items.len;
+    index -= self.screen_inbox.pending_stream.items.len;
     if (index < self.pending_events.items.len) {
         const frame = self.pending_events.items[index];
         return externalRangeForSlice(frame.payload, frame.payload.len);
@@ -3662,20 +3771,20 @@ const ExternalSourceSealEncoder = struct {
 
         try writeSourceArrayDescriptor(
             &writer,
-            externalArrayDescriptor(client.pending_batches),
+            externalArrayDescriptor(client.screen_inbox.pending_batches),
             @sizeOf(StreamBatch),
             encoding,
             0x1600,
         );
-        try writer.writeUsize(client.pending_batch_bytes);
+        try writer.writeUsize(client.screen_inbox.pending_batch_bytes);
         try writeSourceArrayDescriptor(
             &writer,
-            externalArrayDescriptor(client.pending_stream),
+            externalArrayDescriptor(client.screen_inbox.pending_stream),
             @sizeOf(framing.Frame),
             encoding,
             0x1700,
         );
-        try writer.writeUsize(client.pending_stream_bytes);
+        try writer.writeUsize(client.screen_inbox.pending_stream_bytes);
         try writeSourceArrayDescriptor(
             &writer,
             externalArrayDescriptor(client.pending_events),
@@ -3685,8 +3794,8 @@ const ExternalSourceSealEncoder = struct {
         );
         try writer.writeUsize(client.pending_event_bytes);
 
-        writer.writePresence(client.partial_batch != null);
-        if (client.partial_batch) |partial| {
+        writer.writePresence(client.screen_inbox.partial_batch != null);
+        if (client.screen_inbox.partial_batch) |partial| {
             writer.writeU64(partial.stream_id);
             writer.writeBool(partial.is_snapshot);
             try writeSourceArrayDescriptor(
@@ -3726,8 +3835,8 @@ const ExternalSourceSealEncoder = struct {
         try writer.writeUsize(validated.screen_payload_bytes);
         try writer.writeUsize(client.pending_events.items.len);
         try writer.writeUsize(validated.event_payload_bytes);
-        try writer.writeUsize(client.pending_batches.items.len);
-        try writer.writeUsize(client.pending_stream.items.len);
+        try writer.writeUsize(client.screen_inbox.pending_batches.items.len);
+        try writer.writeUsize(client.screen_inbox.pending_stream.items.len);
         try writer.writeUsize(client.pending_events.items.len);
 
         self.* = .{
@@ -3741,8 +3850,8 @@ const ExternalSourceSealEncoder = struct {
             .screen_source_count = validated.screen_source_count,
             .screen_payload_bytes = validated.screen_payload_bytes,
             .event_payload_bytes = validated.event_payload_bytes,
-            .batch_count = client.pending_batches.items.len,
-            .stream_count = client.pending_stream.items.len,
+            .batch_count = client.screen_inbox.pending_batches.items.len,
+            .stream_count = client.screen_inbox.pending_stream.items.len,
             .event_count = client.pending_events.items.len,
         };
     }
@@ -3756,7 +3865,7 @@ const ExternalSourceSealEncoder = struct {
         if (self.finished) return error.InvalidClientState;
         if (@intFromPtr(client) != self.client_address or
             ordinal != self.next_batch or ordinal >= self.batch_count or
-            batch != &client.pending_batches.items[ordinal] or
+            batch != &client.screen_inbox.pending_batches.items[ordinal] or
             self.next_stream != 0 or self.next_event != 0)
             return error.InvalidClientState;
         try self.writer.writeUsize(ordinal);
@@ -3789,7 +3898,7 @@ const ExternalSourceSealEncoder = struct {
         if (@intFromPtr(client) != self.client_address or
             self.next_batch != self.batch_count or ordinal != self.next_stream or
             ordinal >= self.stream_count or
-            frame != &client.pending_stream.items[ordinal] or self.next_event != 0)
+            frame != &client.screen_inbox.pending_stream.items[ordinal] or self.next_event != 0)
             return error.InvalidClientState;
         try self.writer.writeUsize(ordinal);
         try writeSourceFrame(
@@ -3944,9 +4053,9 @@ fn encodeExternalSourceWithEncodingForTest(
         return narrowExternalSourceSealError(err);
     var encoder: ExternalSourceSealEncoder = undefined;
     try encoder.init(client, target_stream, validated, encoding);
-    for (client.pending_batches.items, 0..) |*batch, ordinal|
+    for (client.screen_inbox.pending_batches.items, 0..) |*batch, ordinal|
         try encoder.writeBatch(client, ordinal, batch);
-    for (client.pending_stream.items, 0..) |*frame, ordinal|
+    for (client.screen_inbox.pending_stream.items, 0..) |*frame, ordinal|
         try encoder.writeStream(client, ordinal, frame);
     for (client.pending_events.items, 0..) |*frame, ordinal|
         try encoder.writeEvent(client, ordinal, frame);
@@ -4195,17 +4304,17 @@ fn rawExternalScreenMetrics(
 ) ExternalSourceSealError!ExternalValidatedScreenSource {
     var count = std.math.add(
         usize,
-        client.pending_batches.items.len,
-        client.pending_stream.items.len,
+        client.screen_inbox.pending_batches.items.len,
+        client.screen_inbox.pending_stream.items.len,
     ) catch return error.ArithmeticOverflow;
     var bytes: usize = 0;
-    for (client.pending_batches.items) |batch|
+    for (client.screen_inbox.pending_batches.items) |batch|
         bytes = std.math.add(usize, bytes, batch.bytes.len) catch
             return error.ArithmeticOverflow;
-    for (client.pending_stream.items) |frame|
+    for (client.screen_inbox.pending_stream.items) |frame|
         bytes = std.math.add(usize, bytes, frame.payload.len) catch
             return error.ArithmeticOverflow;
-    if (client.partial_batch) |partial| {
+    if (client.screen_inbox.partial_batch) |partial| {
         count = std.math.add(usize, count, 1) catch
             return error.ArithmeticOverflow;
         bytes = std.math.add(usize, bytes, partial.bytes.items.len) catch
@@ -4281,9 +4390,9 @@ fn foldExternalAdoptionSourceWithEncoding(
     if (!screen_structure_valid)
         reducer.recordTransportViolation(.screen_structure);
 
-    for (client.pending_batches.items, 0..) |*batch, ordinal|
+    for (client.screen_inbox.pending_batches.items, 0..) |*batch, ordinal|
         try encoder.writeBatch(client, ordinal, batch);
-    for (client.pending_stream.items, 0..) |*frame, ordinal|
+    for (client.screen_inbox.pending_stream.items, 0..) |*frame, ordinal|
         try encoder.writeStream(client, ordinal, frame);
 
     var event_bytes: usize = 0;
@@ -4958,8 +5067,8 @@ fn externalInventoryMetadataBytesForClient(
 ) ExternalAdoptionInspectError!usize {
     var total: usize = 0;
     inline for (.{
-        .{ self.pending_batches.items.len, @sizeOf(ExternalBatchDescriptor) },
-        .{ self.pending_stream.items.len, @sizeOf(ExternalFrameDescriptor) },
+        .{ self.screen_inbox.pending_batches.items.len, @sizeOf(ExternalBatchDescriptor) },
+        .{ self.screen_inbox.pending_stream.items.len, @sizeOf(ExternalFrameDescriptor) },
         .{ self.pending_events.items.len, @sizeOf(ExternalFrameDescriptor) },
     }) |entry| {
         const bytes = std.math.mul(usize, entry[0], entry[1]) catch
@@ -5290,7 +5399,7 @@ fn validateExternalAdoptionScreenSourceQueues(
     var screen_count: usize = 0;
     var screen_bytes: usize = 0;
     var batch_bytes: usize = 0;
-    for (self.pending_batches.items) |batch| {
+    for (self.screen_inbox.pending_batches.items) |batch| {
         if (!std.meta.eql(batch.allocator, self.allocator)) return error.InvalidAllocator;
         if (batch.stream_id != target_stream) return error.InvalidStream;
         if (batch.bytes.len > protocol.max_viewport_snapshot)
@@ -5302,7 +5411,7 @@ fn validateExternalAdoptionScreenSourceQueues(
         screen_count = std.math.add(usize, screen_count, 1) catch
             return error.ArithmeticOverflow;
     }
-    if (batch_bytes != self.pending_batch_bytes) return error.InvalidCounter;
+    if (batch_bytes != self.screen_inbox.pending_batch_bytes) return error.InvalidCounter;
 
     const max_chunks = protocol.max_viewport_snapshot / protocol.max_binary_chunk;
     var active_batch = false;
@@ -5310,7 +5419,7 @@ fn validateExternalAdoptionScreenSourceQueues(
     var active_stream: u64 = 0;
     var active_chunks: usize = 0;
     var active_bytes: usize = 0;
-    if (self.partial_batch) |partial| {
+    if (self.screen_inbox.partial_batch) |partial| {
         if (partial.stream_id != target_stream) return error.InvalidStream;
         if (partial.chunk_count == 0 or partial.chunk_count > max_chunks or
             partial.bytes.items.len > protocol.max_viewport_snapshot)
@@ -5327,7 +5436,7 @@ fn validateExternalAdoptionScreenSourceQueues(
     }
 
     var stream_bytes: usize = 0;
-    for (self.pending_stream.items) |frame| {
+    for (self.screen_inbox.pending_stream.items) |frame| {
         if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk)
             return error.InvalidHeader;
         if (frame.header.major != self.wire_major or
@@ -5361,7 +5470,7 @@ fn validateExternalAdoptionScreenSourceQueues(
             return error.ArithmeticOverflow;
         if (frame.header.flags & protocol.Flags.end_stream != 0) active_batch = false;
     }
-    if (stream_bytes != self.pending_stream_bytes) return error.InvalidCounter;
+    if (stream_bytes != self.screen_inbox.pending_stream_bytes) return error.InvalidCounter;
 
     return .{
         .screen_source_count = screen_count,
@@ -5435,21 +5544,21 @@ fn validateExternalAdoptionStructure(
     self: *const Client,
     catchup_barrier_policy: ExternalCatchupBarrierPolicy,
 ) ExternalAdoptionInspectError!void {
-    if (!self.screen_recovery.valid() or self.screen_recovery.count != 0 or
+    if (!self.screen_inbox.recovery.valid() or self.screen_inbox.recovery.count != 0 or
         self.parser.buf.items.len > self.parser.buf.capacity or
-        self.pending_batches.items.len > self.pending_batches.capacity or
-        self.pending_stream.items.len > self.pending_stream.capacity or
+        self.screen_inbox.pending_batches.items.len > self.screen_inbox.pending_batches.capacity or
+        self.screen_inbox.pending_stream.items.len > self.screen_inbox.pending_stream.capacity or
         self.pending_events.items.len > self.pending_events.capacity or
         self.pending_catchup_barriers.items.len > self.pending_catchup_barriers.capacity or
-        self.pending_batches.items.len > protocol.max_client_screen_items or
-        self.pending_stream.items.len > protocol.max_client_screen_items or
+        self.screen_inbox.pending_batches.items.len > protocol.max_client_screen_items or
+        self.screen_inbox.pending_stream.items.len > protocol.max_client_screen_items or
         self.pending_events.items.len > max_pending_event_count or
         self.pending_catchup_barriers.items.len > protocol.max_client_screen_items or
         (catchup_barrier_policy == .require_empty and
             (self.pending_catchup_barriers.items.len != 0 or
                 self.pending_catchup_barriers.capacity != 0)))
         return error.InvalidClientState;
-    if (self.partial_batch) |partial|
+    if (self.screen_inbox.partial_batch) |partial|
         if (partial.bytes.items.len > partial.bytes.capacity)
             return error.InvalidClientState;
 }
@@ -5500,14 +5609,14 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .parser_expected_major = self.parser.expected_major,
         .parser = externalArrayDescriptor(self.parser.buf),
         .parser_head = self.parser.head,
-        .pending_stream = externalArrayDescriptor(self.pending_stream),
-        .pending_stream_bytes = self.pending_stream_bytes,
+        .pending_stream = externalArrayDescriptor(self.screen_inbox.pending_stream),
+        .pending_stream_bytes = self.screen_inbox.pending_stream_bytes,
         .pending_events = externalArrayDescriptor(self.pending_events),
         .pending_event_bytes = self.pending_event_bytes,
-        .pending_batches = externalArrayDescriptor(self.pending_batches),
-        .pending_batch_bytes = self.pending_batch_bytes,
+        .pending_batches = externalArrayDescriptor(self.screen_inbox.pending_batches),
+        .pending_batch_bytes = self.screen_inbox.pending_batch_bytes,
         .pending_catchup_barriers = externalArrayDescriptor(self.pending_catchup_barriers),
-        .partial = if (self.partial_batch) |partial| .{
+        .partial = if (self.screen_inbox.partial_batch) |partial| .{
             .stream_id = partial.stream_id,
             .is_snapshot = partial.is_snapshot,
             .bytes = externalArrayDescriptor(partial.bytes),
@@ -5574,23 +5683,23 @@ fn externalInventoryMatchesClientExact(
 ) bool {
     const screen_count = std.math.add(
         usize,
-        self.pending_batches.items.len,
-        self.pending_stream.items.len,
+        self.screen_inbox.pending_batches.items.len,
+        self.screen_inbox.pending_stream.items.len,
     ) catch return false;
     const expected_screen_count = std.math.add(
         usize,
         screen_count,
-        @as(usize, @intFromBool(self.partial_batch != null)),
+        @as(usize, @intFromBool(self.screen_inbox.partial_batch != null)),
     ) catch return false;
     const batch_and_stream_bytes = std.math.add(
         usize,
-        self.pending_batch_bytes,
-        self.pending_stream_bytes,
+        self.screen_inbox.pending_batch_bytes,
+        self.screen_inbox.pending_stream_bytes,
     ) catch return false;
     const expected_screen_bytes = std.math.add(
         usize,
         batch_and_stream_bytes,
-        if (self.partial_batch) |partial| partial.bytes.items.len else 0,
+        if (self.screen_inbox.partial_batch) |partial| partial.bytes.items.len else 0,
     ) catch return false;
     const expected_scratch = std.math.mul(
         usize,
@@ -5611,15 +5720,15 @@ fn externalInventoryMatchesClientExact(
         return false;
     if (!std.mem.eql(u8, inventory.build_id_copy, self.build_id orelse &.{}) or
         !std.mem.eql(u8, inventory.lifecycle_copy, self.lifecycle) or
-        inventory.batch_descriptors.len != self.pending_batches.items.len or
-        inventory.stream_descriptors.len != self.pending_stream.items.len or
+        inventory.batch_descriptors.len != self.screen_inbox.pending_batches.items.len or
+        inventory.stream_descriptors.len != self.screen_inbox.pending_stream.items.len or
         inventory.event_descriptors.len != self.pending_events.items.len)
         return false;
-    for (inventory.batch_descriptors, self.pending_batches.items) |expected, actual|
+    for (inventory.batch_descriptors, self.screen_inbox.pending_batches.items) |expected, actual|
         if (!std.meta.eql(expected, externalBatchDescriptor(actual)) or
             actual.stream_id != inventory.target_stream)
             return false;
-    for (inventory.stream_descriptors, self.pending_stream.items) |expected, actual|
+    for (inventory.stream_descriptors, self.screen_inbox.pending_stream.items) |expected, actual|
         if (!std.meta.eql(expected, externalFrameDescriptor(actual)) or
             actual.header.stream_id != inventory.target_stream)
             return false;
@@ -5627,7 +5736,7 @@ fn externalInventoryMatchesClientExact(
         if (!std.meta.eql(expected, externalFrameDescriptor(actual)) or
             actual.header.stream_id != inventory.target_stream)
             return false;
-    if (self.partial_batch) |partial|
+    if (self.screen_inbox.partial_batch) |partial|
         if (partial.stream_id != inventory.target_stream) return false;
     return true;
 }
@@ -5650,8 +5759,8 @@ fn externalRangeOverlapsClient(
     const fixed = [_]?ExternalRange{
         try externalRangeForSlice(self.lifecycle, self.lifecycle.len),
         try externalRangeForList(self.parser.buf, u8),
-        try externalRangeForList(self.pending_batches, StreamBatch),
-        try externalRangeForList(self.pending_stream, framing.Frame),
+        try externalRangeForList(self.screen_inbox.pending_batches, StreamBatch),
+        try externalRangeForList(self.screen_inbox.pending_stream, framing.Frame),
         try externalRangeForList(self.pending_events, BufferedEvent),
         switch (self.io_mode) {
             .blocking => null,
@@ -5663,13 +5772,13 @@ fn externalRangeOverlapsClient(
     };
     for (fixed) |range| if (range) |present|
         if (externalRangesOverlap(target, present)) return true;
-    if (self.partial_batch) |partial|
+    if (self.screen_inbox.partial_batch) |partial|
         if (try externalRangeForSlice(partial.bytes.items, partial.bytes.capacity)) |range|
             if (externalRangesOverlap(target, range)) return true;
-    for (self.pending_batches.items) |batch|
+    for (self.screen_inbox.pending_batches.items) |batch|
         if (try externalRangeForSlice(batch.bytes, batch.bytes.len)) |range|
             if (externalRangesOverlap(target, range)) return true;
-    for (self.pending_stream.items) |frame|
+    for (self.screen_inbox.pending_stream.items) |frame|
         if (try externalRangeForSlice(frame.payload, frame.payload.len)) |range|
             if (externalRangesOverlap(target, range)) return true;
     for (self.pending_events.items) |frame|
@@ -6747,13 +6856,9 @@ pub const Client = struct {
     /// Correlated response frame가 deadline과 request-id 검증을 모두 통과한 뒤에만 게시한다.
     /// `next_request_id - 1`은 write 시도일 뿐 성공 증거가 아니므로 incident projection이 추측하지 않는다.
     last_success_request_id: u64 = 0,
-    // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
-    // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
-    pending_stream: std.ArrayListUnmanaged(framing.Frame) = .empty,
-    pending_stream_bytes: usize = 0,
-    /// R3/R4 pressure is stream-local. This fixed table is allocation-free so an inbox overflow
-    /// can publish deferred recovery without recursively issuing an RPC or killing siblings.
-    screen_recovery: screen_inbox.RecoveryTable = .{},
+    /// Screen frames buffered by blocking RPCs, completed demux batches, the in-progress batch,
+    /// generation transfer charge, and stream-local recovery share one resident owner and cap.
+    screen_inbox: ScreenInbox = .{},
     // screen batch와 별개인 full-state runtime metadata/resize event. 종류별로 최신 한 건을 coalesce한다.
     pending_events: std.ArrayListUnmanaged(BufferedEvent) = .empty,
     pending_event_bytes: usize = 0,
@@ -6762,14 +6867,10 @@ pub const Client = struct {
     // pumpDelta가 남의 배치를 free해 두 번째 이후 터미널 화면이 영구 유실됐다 — code-review #1). host는 배치를 stream별로 연속
     // write하므로(프레임 인터리브 없음) 각 원소는 완결된 한 배치다. 모든 원격 runtime이 **단일 app-전역 backend**를 공유해 한
     // allocator로 이 배치들을 만들고/소비/해제하므로(불변식) 버퍼-소비 간 allocator가 일치한다. deinit이 잔여를 회수한다.
-    pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
-    pending_batch_bytes: usize = 0,
     /// Catch-up barrier는 screen batch와 같은 socket을 공유하지만 screen record가 아니다.
     /// 기존 demux가 sibling barrier를 잃지 않도록 connection-local bounded inbox가 소유한다.
     pending_catchup_barriers: std.ArrayListUnmanaged(BufferedCatchupBarrier) = .empty,
     // Generation GUI로 넘긴 payload도 실제 free callback이 반환할 때까지 같은 18 MiB/4,096 resident budget에 남는다.
-    generation_batch_accounting: GenerationBatchAccounting = .{},
-    partial_batch: ?PartialBatch = null,
     // UI의 non-blocking input/viewport-command 경로가 socket backpressure를 만났을 때 소유하는 **단 하나의 완성 wire
     // frame**. offset은 이미 kernel이 수락한 prefix 뒤를 가리킨다. frame을 이 슬롯에 넣는 순간 payload/command는 caller
     // 관점에서 accepted이므로 재전송하지 않는다. 한 슬롯 + RemoteRuntime의 stream별 sticky intent로 메모리가 고정 상한이다.
@@ -6789,13 +6890,6 @@ pub const Client = struct {
         frame: []u8,
         stream_id: u64,
         offset: usize = 0,
-    };
-
-    const PartialBatch = struct {
-        stream_id: u64,
-        is_snapshot: bool,
-        bytes: std.ArrayListUnmanaged(u8) = .empty,
-        chunk_count: usize = 0,
     };
 
     /// host socket에 connect하고 hello를 왕복한다. 성공하면 `host_id`가 채워진 Client다. host가 없으면 EndpointAbsent
@@ -7214,7 +7308,7 @@ pub const Client = struct {
     fn prepareDeinitGraph(self: *Client, bound_client: bool) bool {
         if (checkedAllocatorReentry(self)) return false;
         if (self.ownership == .moved) return false;
-        if (!self.screen_recovery.valid()) {
+        if (!self.screen_inbox.recovery.valid()) {
             self.poison(.local_invariant_violation);
             return false;
         }
@@ -7232,9 +7326,9 @@ pub const Client = struct {
             self.prepared_request_execution_fence_lease_identity != 0 or
             self.prepared_request_execution_fence_mode != .unbound) return false;
         if (self.active_generation_allocator_scope != null) return false;
-        if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
-            (self.generation_batch_accounting.ledger != null and
-                self.generation_batch_accounting.ledger.?.preflightDeinit() != .cleaned))
+        if (!self.screen_inbox.generation_batch_accounting.valid(@intFromPtr(self)) or
+            (self.screen_inbox.generation_batch_accounting.ledger != null and
+                self.screen_inbox.generation_batch_accounting.ledger.?.preflightDeinit() != .cleaned))
             return false;
         if (bound_client) {
             // A generation-node Client is admitted only in blocking mode and the public external
@@ -7257,10 +7351,10 @@ pub const Client = struct {
             return false;
         const fence = self.operation_fence orelse return false;
         if (fence.intruded(@intFromPtr(self), self.operation_fence_generation)) return false;
-        if (self.pending_stream.items.len != 0 or self.pending_stream_bytes != 0 or
+        if (self.screen_inbox.pending_stream.items.len != 0 or self.screen_inbox.pending_stream_bytes != 0 or
             self.pending_events.items.len != 0 or self.pending_event_bytes != 0 or
-            self.pending_batches.items.len != 0 or self.pending_batch_bytes != 0 or
-            self.partial_batch != null or self.parser.bufferedBytes() != 0)
+            self.screen_inbox.pending_batches.items.len != 0 or self.screen_inbox.pending_batch_bytes != 0 or
+            self.screen_inbox.partial_batch != null or self.parser.bufferedBytes() != 0)
             return false;
         if (self.prepared_request_execution_lease_addr != 0 or
             self.prepared_request_execution_fence_addr != 0 or
@@ -7269,9 +7363,9 @@ pub const Client = struct {
             self.prepared_request_execution_fence_mode != .unbound or
             self.active_generation_allocator_scope != null)
             return false;
-        return self.generation_batch_accounting.valid(@intFromPtr(self)) and
-            (self.generation_batch_accounting.ledger == null or
-                self.generation_batch_accounting.ledger.?.preflightDeinit() == .cleaned);
+        return self.screen_inbox.generation_batch_accounting.valid(@intFromPtr(self)) and
+            (self.screen_inbox.generation_batch_accounting.ledger == null or
+                self.screen_inbox.generation_batch_accounting.ledger.?.preflightDeinit() == .cleaned);
     }
 
     /// R3 prepared destination/source ranges must not alias any backing that Client deinit owns.
@@ -7290,14 +7384,14 @@ pub const Client = struct {
         if (self.build_id) |build_id| self.allocator.free(build_id);
         if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
         self.clearPendingOutbound();
-        for (self.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
-        self.pending_stream.deinit(self.allocator);
+        for (self.screen_inbox.pending_stream.items) |f| f.deinit(self.allocator); // 미소비 버퍼 stream frame 회수.
+        self.screen_inbox.pending_stream.deinit(self.allocator);
         for (self.pending_events.items) |f| f.deinit(self.allocator);
         self.pending_events.deinit(self.allocator);
-        for (self.pending_batches.items) |b| b.deinit(); // 미소비 demux 배치 회수(§9 멀티 runtime).
-        self.pending_batches.deinit(self.allocator);
+        for (self.screen_inbox.pending_batches.items) |b| b.deinit(); // 미소비 demux 배치 회수(§9 멀티 runtime).
+        self.screen_inbox.pending_batches.deinit(self.allocator);
         self.pending_catchup_barriers.deinit(self.allocator);
-        if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
+        if (self.screen_inbox.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
     }
 
@@ -7314,21 +7408,21 @@ pub const Client = struct {
             self.prepared_request_execution_fence_mode != .unbound) return false;
         if (self.active_generation_allocator_scope != null) return false;
         return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
-            self.generation_batch_accounting.valid(@intFromPtr(self)) and
-            (self.generation_batch_accounting.ledger == null or
-                self.generation_batch_accounting.ledger.?.preflightDeinit() == .cleaned) and
+            self.screen_inbox.generation_batch_accounting.valid(@intFromPtr(self)) and
+            (self.screen_inbox.generation_batch_accounting.ledger == null or
+                self.screen_inbox.generation_batch_accounting.ledger.?.preflightDeinit() == .cleaned) and
             self.generationBatchSourceRangesValid();
     }
 
     fn generationBatchSourceRangesValid(self: *const Client) bool {
         const client_start = @intFromPtr(self);
         const client_end = std.math.add(usize, client_start, @sizeOf(Client)) catch return false;
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             if (batch.bytes.len == 0) return false;
             const start = @intFromPtr(batch.bytes.ptr);
             const end = std.math.add(usize, start, batch.bytes.len) catch return false;
             if (rawRangesOverlap(start, end, client_start, client_end)) return false;
-            for (self.pending_batches.items[index + 1 ..]) |sibling| {
+            for (self.screen_inbox.pending_batches.items[index + 1 ..]) |sibling| {
                 const sibling_start = @intFromPtr(sibling.bytes.ptr);
                 const sibling_end = std.math.add(
                     usize,
@@ -7337,7 +7431,7 @@ pub const Client = struct {
                 ) catch return false;
                 if (rawRangesOverlap(start, end, sibling_start, sibling_end)) return false;
             }
-            if (self.partial_batch) |partial| {
+            if (self.screen_inbox.partial_batch) |partial| {
                 const partial_start = @intFromPtr(partial.bytes.items.ptr);
                 const partial_end = std.math.add(
                     usize,
@@ -7355,10 +7449,10 @@ pub const Client = struct {
         self: *Client,
         ledger: *generation_batch_registry.AccountingLedger,
     ) generation_batch_registry.Error!void {
-        if (self.generation_batch_accounting.ledger != null)
+        if (self.screen_inbox.generation_batch_accounting.ledger != null)
             return error.InvalidState;
         try ledger.bindClient(@intFromPtr(self));
-        self.generation_batch_accounting.ledger = ledger;
+        self.screen_inbox.generation_batch_accounting.ledger = ledger;
     }
 
     pub const GenerationAllocatorPurpose = generation_batch_registry.AllocatorScopePurpose;
@@ -7397,7 +7491,7 @@ pub const Client = struct {
         /// 원인 추적이 정확히 여기서 막혔다.
         fn firstInvalidAxis(self: GenerationAllocatorScopeIdentity, client: *const Client) ?ScopeInvalidAxis {
             const purpose_raw = @as(*const u8, @ptrCast(&self.purpose)).*;
-            const ledger = client.generation_batch_accounting.ledger orelse return .ledger_absent;
+            const ledger = client.screen_inbox.generation_batch_accounting.ledger orelse return .ledger_absent;
             if (purpose_raw > @intFromEnum(GenerationAllocatorPurpose.rpc_execute)) return .purpose_out_of_range;
             if (self.token_addr == 0) return .token_addr_zero;
             if (self.client_addr != @intFromPtr(client)) return .client_addr_mismatch;
@@ -7496,7 +7590,7 @@ pub const Client = struct {
         const out_start = @intFromPtr(out);
         const out_end = std.math.add(usize, out_start, @sizeOf(GenerationAllocatorScope)) catch
             return error.InvalidState;
-        if (self.generation_batch_accounting.ledger == null or self.io_mode != .blocking or
+        if (self.screen_inbox.generation_batch_accounting.ledger == null or self.io_mode != .blocking or
             self.ownership != .standalone or !self.parser.usesAllocator(self.allocator) or
             self.active_generation_allocator_scope != null or
             !out.rawDiscriminatorsValid() or out.self_addr != 0 or
@@ -7518,7 +7612,7 @@ pub const Client = struct {
             .previous_allocator = self.allocator,
             .installed_allocator = allocator,
         };
-        try self.generation_batch_accounting.ledger.?.beginAllocatorScope(
+        try self.screen_inbox.generation_batch_accounting.ledger.?.beginAllocatorScope(
             @intFromPtr(self),
             out_start,
             epoch,
@@ -7546,7 +7640,7 @@ pub const Client = struct {
     pub fn requireBufferedGenerationBatch(self: *const Client, stream_id: u64) ClientError!void {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
-        for (self.pending_batches.items) |pending| {
+        for (self.screen_inbox.pending_batches.items) |pending| {
             if (pending.stream_id == stream_id) return;
         }
         return error.AdminBusy;
@@ -7561,9 +7655,9 @@ pub const Client = struct {
         if (stream_id == 0) return error.ProtocolError;
         for (self.pending_events.items) |pending|
             if (pending.header.stream_id == stream_id) return true;
-        for (self.pending_batches.items) |pending|
+        for (self.screen_inbox.pending_batches.items) |pending|
             if (pending.stream_id == stream_id) return true;
-        for (self.pending_stream.items) |pending|
+        for (self.screen_inbox.pending_stream.items) |pending|
             if (pending.header.stream_id == stream_id) return true;
         return false;
     }
@@ -7571,8 +7665,8 @@ pub const Client = struct {
     pub fn hasAnyBufferedRuntimeWork(self: *const Client) ClientError!bool {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
-        return self.pending_events.items.len != 0 or self.pending_batches.items.len != 0 or
-            self.pending_stream.items.len != 0;
+        return self.pending_events.items.len != 0 or self.screen_inbox.pending_batches.items.len != 0 or
+            self.screen_inbox.pending_stream.items.len != 0;
     }
 
     pub fn restoreGenerationAllocatorScope(
@@ -7611,7 +7705,7 @@ pub const Client = struct {
             !allocatorEql(self.allocator, active.installed_allocator) or
             !self.parser.usesAllocator(active.installed_allocator))
             return error.InvalidState;
-        try self.generation_batch_accounting.ledger.?.endAllocatorScope(
+        try self.screen_inbox.generation_batch_accounting.ledger.?.endAllocatorScope(
             active.client_addr,
             active.token_addr,
             active.epoch,
@@ -7681,29 +7775,29 @@ pub const Client = struct {
         writer.writeUsize(self.parser.buf.items.len);
         writer.writeUsize(self.parser.buf.capacity);
         writer.writeUsize(self.parser.head);
-        writeProjectionBatches(&writer, self.pending_batches);
-        writeProjectionFrames(&writer, self.pending_stream);
+        writeProjectionBatches(&writer, self.screen_inbox.pending_batches);
+        writeProjectionFrames(&writer, self.screen_inbox.pending_stream);
         writeProjectionEvents(&writer, self.pending_events);
         writeProjectionCatchupBarriers(&writer, self.pending_catchup_barriers);
-        writer.writeUsize(self.pending_batch_bytes);
-        const generation_ledger = self.generation_batch_accounting.ledger;
+        writer.writeUsize(self.screen_inbox.pending_batch_bytes);
+        const generation_ledger = self.screen_inbox.generation_batch_accounting.ledger;
         writer.writeUsize(if (generation_ledger) |ledger| ledger.item_count else 0);
         writer.writeUsize(if (generation_ledger) |ledger| ledger.byte_count else 0);
-        writer.writeU64(self.generation_batch_accounting.last_transfer_id);
+        writer.writeU64(self.screen_inbox.generation_batch_accounting.last_transfer_id);
         writer.writeUsize(if (generation_ledger) |ledger| ledger.releasing_item_count else 0);
         writer.writeUsize(if (generation_ledger) |ledger| ledger.releasing_byte_count else 0);
-        writer.writeUsize(self.pending_stream_bytes);
-        const recovery_valid = self.screen_recovery.valid();
+        writer.writeUsize(self.screen_inbox.pending_stream_bytes);
+        const recovery_valid = self.screen_inbox.recovery.valid();
         writer.writeBool(recovery_valid);
         if (recovery_valid) {
-            writer.writeUsize(self.screen_recovery.count);
-            for (self.screen_recovery.entries[0..self.screen_recovery.count]) |entry| {
+            writer.writeUsize(self.screen_inbox.recovery.count);
+            for (self.screen_inbox.recovery.entries[0..self.screen_inbox.recovery.count]) |entry| {
                 writer.writeU64(entry.stream_id);
                 writer.writeU8(@intFromEnum(entry.state));
             }
         }
         writer.writeUsize(self.pending_event_bytes);
-        if (self.partial_batch) |partial| {
+        if (self.screen_inbox.partial_batch) |partial| {
             writer.writeBool(true);
             writer.writeU64(partial.stream_id);
             writer.writeBool(partial.is_snapshot);
@@ -7802,12 +7896,12 @@ pub const Client = struct {
                 .catchup_barriers = .allow_bounded,
             },
         ) catch |err| return narrowExternalSourceSealError(err);
-        if (self.pending_batches.items.len > cleanup_scratch.batches.len or
-            self.pending_stream.items.len > cleanup_scratch.stream.len or
+        if (self.screen_inbox.pending_batches.items.len > cleanup_scratch.batches.len or
+            self.screen_inbox.pending_stream.items.len > cleanup_scratch.stream.len or
             self.pending_events.items.len > cleanup_scratch.events.len)
             return error.InvalidClientState;
 
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             cleanup_scratch.batches[index] = .{
                 .stream_id = batch.stream_id,
                 .is_snapshot = batch.is_snapshot,
@@ -7816,7 +7910,7 @@ pub const Client = struct {
                 .allocator = batch.allocator,
             };
         }
-        for (self.pending_stream.items, 0..) |frame, index| {
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index| {
             cleanup_scratch.stream[index] = .{
                 .header = frame.header,
                 .payload_address = externalSliceAddress(frame.payload),
@@ -7830,7 +7924,7 @@ pub const Client = struct {
                 .payload_len = frame.payload.len,
             };
         }
-        cleanup_scratch.partial = if (self.partial_batch) |partial| .{
+        cleanup_scratch.partial = if (self.screen_inbox.partial_batch) |partial| .{
             .stream_id = partial.stream_id,
             .is_snapshot = partial.is_snapshot,
             .bytes = externalArrayDescriptor(partial.bytes),
@@ -7841,18 +7935,18 @@ pub const Client = struct {
             .client_addr = @intFromPtr(self),
             .scratch_addr = @intFromPtr(cleanup_scratch),
             .allocator = self.allocator,
-            .batches = self.pending_batches,
-            .stream = self.pending_stream,
+            .batches = self.screen_inbox.pending_batches,
+            .stream = self.screen_inbox.pending_stream,
             .events = self.pending_events,
             .catchup_barriers = self.pending_catchup_barriers,
-            .partial = if (self.partial_batch) |partial| .{
+            .partial = if (self.screen_inbox.partial_batch) |partial| .{
                 .stream_id = partial.stream_id,
                 .is_snapshot = partial.is_snapshot,
                 .bytes = partial.bytes,
                 .chunk_count = partial.chunk_count,
             } else null,
-            .pending_batch_bytes = self.pending_batch_bytes,
-            .pending_stream_bytes = self.pending_stream_bytes,
+            .pending_batch_bytes = self.screen_inbox.pending_batch_bytes,
+            .pending_stream_bytes = self.screen_inbox.pending_stream_bytes,
             .pending_event_bytes = self.pending_event_bytes,
             .next_request_id = self.next_request_id,
             .lifecycle = .prepared,
@@ -7869,19 +7963,19 @@ pub const Client = struct {
             seal.client_addr != @intFromPtr(self) or
             seal.scratch_addr != @intFromPtr(cleanup_scratch) or
             !std.meta.eql(seal.allocator, self.allocator) or
-            !std.meta.eql(seal.batches, self.pending_batches) or
-            !std.meta.eql(seal.stream, self.pending_stream) or
+            !std.meta.eql(seal.batches, self.screen_inbox.pending_batches) or
+            !std.meta.eql(seal.stream, self.screen_inbox.pending_stream) or
             !std.meta.eql(seal.events, self.pending_events) or
             !std.meta.eql(seal.catchup_barriers, self.pending_catchup_barriers) or
-            seal.pending_batch_bytes != self.pending_batch_bytes or
-            seal.pending_stream_bytes != self.pending_stream_bytes or
+            seal.pending_batch_bytes != self.screen_inbox.pending_batch_bytes or
+            seal.pending_stream_bytes != self.screen_inbox.pending_stream_bytes or
             seal.pending_event_bytes != self.pending_event_bytes or
             seal.next_request_id != self.next_request_id or
-            self.pending_batches.items.len > cleanup_scratch.batches.len or
-            self.pending_stream.items.len > cleanup_scratch.stream.len or
+            self.screen_inbox.pending_batches.items.len > cleanup_scratch.batches.len or
+            self.screen_inbox.pending_stream.items.len > cleanup_scratch.stream.len or
             self.pending_events.items.len > cleanup_scratch.events.len)
             return false;
-        if (!std.meta.eql(seal.partial, if (self.partial_batch) |partial|
+        if (!std.meta.eql(seal.partial, if (self.screen_inbox.partial_batch) |partial|
             ExternalAdoptionTakenPartial{
                 .stream_id = partial.stream_id,
                 .is_snapshot = partial.is_snapshot,
@@ -7890,7 +7984,7 @@ pub const Client = struct {
             }
         else
             null) or
-            !std.meta.eql(cleanup_scratch.partial, if (self.partial_batch) |partial|
+            !std.meta.eql(cleanup_scratch.partial, if (self.screen_inbox.partial_batch) |partial|
                 ExternalPartialDescriptor{
                     .stream_id = partial.stream_id,
                     .is_snapshot = partial.is_snapshot,
@@ -7900,7 +7994,7 @@ pub const Client = struct {
             else
                 null))
             return false;
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             if (!std.meta.eql(cleanup_scratch.batches[index], ExternalBatchDescriptor{
                 .stream_id = batch.stream_id,
                 .is_snapshot = batch.is_snapshot,
@@ -7909,7 +8003,7 @@ pub const Client = struct {
                 .allocator = batch.allocator,
             })) return false;
         }
-        for (self.pending_stream.items, 0..) |frame, index| {
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index| {
             if (!std.meta.eql(cleanup_scratch.stream[index], ExternalFrameDescriptor{
                 .header = frame.header,
                 .payload_address = externalSliceAddress(frame.payload),
@@ -7947,13 +8041,13 @@ pub const Client = struct {
         const stream_count = stream.items.len;
         const event_count = events.items.len;
         seal.* = .{ .lifecycle = .consumed_tombstone };
-        self.pending_batches = .empty;
-        self.pending_stream = .empty;
+        self.screen_inbox.pending_batches = .empty;
+        self.screen_inbox.pending_stream = .empty;
         self.pending_events = .empty;
         self.pending_catchup_barriers = .empty;
-        self.partial_batch = null;
-        self.pending_batch_bytes = 0;
-        self.pending_stream_bytes = 0;
+        self.screen_inbox.partial_batch = null;
+        self.screen_inbox.pending_batch_bytes = 0;
+        self.screen_inbox.pending_stream_bytes = 0;
         self.pending_event_bytes = 0;
         self.next_request_id = 0;
 
@@ -8326,12 +8420,12 @@ pub const Client = struct {
         const allocator = self.allocator;
         const batches = try allocator.alloc(
             ExternalBatchDescriptor,
-            self.pending_batches.items.len,
+            self.screen_inbox.pending_batches.items.len,
         );
         errdefer allocator.free(batches);
         const stream = try allocator.alloc(
             ExternalFrameDescriptor,
-            self.pending_stream.items.len,
+            self.screen_inbox.pending_stream.items.len,
         );
         errdefer allocator.free(stream);
         const events = try allocator.alloc(
@@ -8344,9 +8438,9 @@ pub const Client = struct {
         const lifecycle_copy = try allocator.dupe(u8, self.lifecycle);
         errdefer allocator.free(lifecycle_copy);
 
-        for (self.pending_batches.items, batches) |batch, *descriptor|
+        for (self.screen_inbox.pending_batches.items, batches) |batch, *descriptor|
             descriptor.* = externalBatchDescriptor(batch);
-        for (self.pending_stream.items, stream) |frame, *descriptor|
+        for (self.screen_inbox.pending_stream.items, stream) |frame, *descriptor|
             descriptor.* = externalFrameDescriptor(frame);
         for (self.pending_events.items, events) |frame, *descriptor|
             descriptor.* = externalFrameDescriptor(frame);
@@ -8577,7 +8671,7 @@ pub const Client = struct {
         var initialized: usize = 0;
         errdefer for (out[0..initialized]) |*copy| copy.deinit();
 
-        for (self.pending_batches.items) |batch| {
+        for (self.screen_inbox.pending_batches.items) |batch| {
             out[initialized] = .{
                 .allocator = allocator,
                 .semantic = .{ .completed = .{
@@ -8590,7 +8684,7 @@ pub const Client = struct {
             out[initialized].view = out[initialized].bytes;
             initialized += 1;
         }
-        if (self.partial_batch) |partial| {
+        if (self.screen_inbox.partial_batch) |partial| {
             out[initialized] = .{
                 .allocator = allocator,
                 .semantic = .{ .partial = .{
@@ -8605,7 +8699,7 @@ pub const Client = struct {
             out[initialized].view = out[initialized].bytes;
             initialized += 1;
         }
-        for (self.pending_stream.items) |frame| {
+        for (self.screen_inbox.pending_stream.items) |frame| {
             out[initialized] = .{
                 .allocator = allocator,
                 .semantic = .{ .frame = frame.header },
@@ -8631,7 +8725,7 @@ pub const Client = struct {
             copies.len != expected.screen_source_count)
             return false;
         var index: usize = 0;
-        for (self.pending_batches.items) |batch| {
+        for (self.screen_inbox.pending_batches.items) |batch| {
             const copy = copies[index];
             const semantic = switch (copy.semantic) {
                 .completed => |value| value.stream_id == batch.stream_id and
@@ -8641,7 +8735,7 @@ pub const Client = struct {
             if (!semantic or !std.mem.eql(u8, copy.view, batch.bytes)) return false;
             index += 1;
         }
-        if (self.partial_batch) |partial| {
+        if (self.screen_inbox.partial_batch) |partial| {
             const copy = copies[index];
             const semantic = switch (copy.semantic) {
                 .partial => |value| value.stream_id == partial.stream_id and
@@ -8652,7 +8746,7 @@ pub const Client = struct {
             if (!semantic or !std.mem.eql(u8, copy.view, partial.bytes.items)) return false;
             index += 1;
         }
-        for (self.pending_stream.items) |frame| {
+        for (self.screen_inbox.pending_stream.items) |frame| {
             const copy = copies[index];
             const semantic = switch (copy.semantic) {
                 .frame => |header| std.meta.eql(header, frame.header),
@@ -8758,7 +8852,7 @@ pub const Client = struct {
             return error.InvalidPlan;
         if (out.lifecycle != .empty or out.saved_self_address != 0)
             return error.InvalidPlan;
-        const partial: ?ExternalAdoptionTakenPartial = if (self.partial_batch) |value| .{
+        const partial: ?ExternalAdoptionTakenPartial = if (self.screen_inbox.partial_batch) |value| .{
             .stream_id = value.stream_id,
             .is_snapshot = value.is_snapshot,
             .bytes = value.bytes,
@@ -8782,12 +8876,12 @@ pub const Client = struct {
             .cleanup_allocator = self.allocator,
             .allocator_ptr_addr = @intFromPtr(self.allocator.ptr),
             .allocator_vtable_addr = @intFromPtr(self.allocator.vtable),
-            .pending_batches = self.pending_batches,
-            .cleanup_pending_batches = self.pending_batches,
-            .pending_batches_seal = externalArrayDescriptor(self.pending_batches),
-            .pending_stream = self.pending_stream,
-            .cleanup_pending_stream = self.pending_stream,
-            .pending_stream_seal = externalArrayDescriptor(self.pending_stream),
+            .pending_batches = self.screen_inbox.pending_batches,
+            .cleanup_pending_batches = self.screen_inbox.pending_batches,
+            .pending_batches_seal = externalArrayDescriptor(self.screen_inbox.pending_batches),
+            .pending_stream = self.screen_inbox.pending_stream,
+            .cleanup_pending_stream = self.screen_inbox.pending_stream,
+            .pending_stream_seal = externalArrayDescriptor(self.screen_inbox.pending_stream),
             .pending_events = self.pending_events,
             .cleanup_pending_events = self.pending_events,
             .pending_events_seal = externalArrayDescriptor(self.pending_events),
@@ -8828,11 +8922,11 @@ pub const Client = struct {
         // barrier. Re-validating here would leave a panic branch after payload ownership has
         // already moved to the ledger, where rollback is no longer possible.
         take.lifecycle = .committed;
-        self.pending_batches = .empty;
-        self.pending_batch_bytes = 0;
-        self.partial_batch = null;
-        self.pending_stream = .empty;
-        self.pending_stream_bytes = 0;
+        self.screen_inbox.pending_batches = .empty;
+        self.screen_inbox.pending_batch_bytes = 0;
+        self.screen_inbox.partial_batch = null;
+        self.screen_inbox.pending_stream = .empty;
+        self.screen_inbox.pending_stream_bytes = 0;
         self.pending_events = .empty;
         self.pending_event_bytes = 0;
         self.next_request_id = 0;
@@ -8856,16 +8950,16 @@ pub const Client = struct {
             @panic("invalid sealed external adoption plan");
         plan.lifecycle = .committed;
 
-        for (self.pending_batches.items) |batch| batch.deinit();
-        self.pending_batches.deinit(self.allocator);
-        self.pending_batches = .empty;
-        self.pending_batch_bytes = 0;
-        if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
-        self.partial_batch = null;
-        for (self.pending_stream.items) |frame| frame.deinit(self.allocator);
-        self.pending_stream.deinit(self.allocator);
-        self.pending_stream = .empty;
-        self.pending_stream_bytes = 0;
+        for (self.screen_inbox.pending_batches.items) |batch| batch.deinit();
+        self.screen_inbox.pending_batches.deinit(self.allocator);
+        self.screen_inbox.pending_batches = .empty;
+        self.screen_inbox.pending_batch_bytes = 0;
+        if (self.screen_inbox.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
+        self.screen_inbox.partial_batch = null;
+        for (self.screen_inbox.pending_stream.items) |frame| frame.deinit(self.allocator);
+        self.screen_inbox.pending_stream.deinit(self.allocator);
+        self.screen_inbox.pending_stream = .empty;
+        self.screen_inbox.pending_stream_bytes = 0;
         for (self.pending_events.items) |frame| frame.deinit(self.allocator);
         self.pending_events.deinit(self.allocator);
         self.pending_events = .empty;
@@ -9641,7 +9735,7 @@ pub const Client = struct {
             @panic("prepared execution recovery allocator scope missing");
         if (active_scope.purpose != .rpc_execute or !active_scope.validForClient(self))
             @panic("prepared execution recovery allocator scope drifted");
-        self.generation_batch_accounting.ledger.?.endAllocatorScope(
+        self.screen_inbox.generation_batch_accounting.ledger.?.endAllocatorScope(
             active_scope.client_addr,
             active_scope.token_addr,
             active_scope.epoch,
@@ -10566,7 +10660,7 @@ pub const Client = struct {
                 self.poisonMutationIo(.frame_malformed, execution_lease_held);
                 return error.ProtocolError;
             }
-            if (self.screen_recovery.classify(frame.header.stream_id, frame.header.kind) == .discard) {
+            if (self.screen_inbox.recovery.classify(frame.header.stream_id, frame.header.kind) == .discard) {
                 frame.deinit(allocator);
                 return true;
             }
@@ -10595,14 +10689,14 @@ pub const Client = struct {
             }
             var durable_frame = frame;
             durable_frame.payload_observation_generation = 0;
-            self.pending_stream.append(allocator, durable_frame) catch {
+            self.screen_inbox.pending_stream.append(allocator, durable_frame) catch {
                 frame.deinit(allocator);
                 // The frame is already consumed from the socket. Losing it would break the next
                 // stream delta base, so the whole shared connection must fail closed.
                 self.poisonMutationIo(.local_resource_exhausted, execution_lease_held);
                 return error.OutOfMemory;
             };
-            self.pending_stream_bytes += frame.payload.len;
+            self.screen_inbox.pending_stream_bytes += frame.payload.len;
             return true;
         }
         if (frame.header.kind == .event) {
@@ -10675,7 +10769,7 @@ pub const Client = struct {
                 return error.ProtocolError;
             }
         }
-        if (self.partial_batch) |partial| if (partial.stream_id == frame.header.stream_id) {
+        if (self.screen_inbox.partial_batch) |partial| if (partial.stream_id == frame.header.stream_id) {
             self.poisonMutationIo(.peer_contract_violation, execution_lease_held);
             return error.ProtocolError;
         };
@@ -10684,7 +10778,7 @@ pub const Client = struct {
             return error.EventQueueFull;
         }
         var preceding: u32 = 0;
-        for (self.pending_batches.items) |batch| if (batch.stream_id == frame.header.stream_id) {
+        for (self.screen_inbox.pending_batches.items) |batch| if (batch.stream_id == frame.header.stream_id) {
             preceding = std.math.add(u32, preceding, 1) catch {
                 self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
                 return error.ProtocolError;
@@ -10695,7 +10789,7 @@ pub const Client = struct {
         // `pending_batches`. Freeze the cut at barrier admission, before later same-stream
         // frames can arrive while the RPC waits for its correlated response.
         var target_batch_open = false;
-        for (self.pending_stream.items) |pending| {
+        for (self.screen_inbox.pending_stream.items) |pending| {
             if (pending.header.stream_id != frame.header.stream_id) continue;
             if (pending.header.kind != .snapshot_chunk and pending.header.kind != .delta_chunk) {
                 self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
@@ -11249,9 +11343,9 @@ pub const Client = struct {
         source: GenerationTransferSource,
         transfer_id: u64,
     ) (ClientError || generation_batch_registry.Error)!generation_batch_registry.AccountingReceipt {
-        if (!self.generation_batch_accounting.valid(@intFromPtr(self))) return error.InvalidState;
+        if (!self.screen_inbox.generation_batch_accounting.valid(@intFromPtr(self))) return error.InvalidState;
         if (byte_count == 0) return error.InvalidDescriptor;
-        const accounting = &self.generation_batch_accounting;
+        const accounting = &self.screen_inbox.generation_batch_accounting;
         const ledger = accounting.ledger orelse return error.InvalidState;
         const total_items = try self.screenInboxItems();
         if ((source == .direct and total_items >= protocol.max_client_screen_items) or
@@ -11288,13 +11382,13 @@ pub const Client = struct {
         self: *Client,
         receipt: generation_batch_registry.AccountingReceipt,
     ) generation_batch_registry.Error!PreparedGenerationAccountingConsume {
-        if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
+        if (!self.screen_inbox.generation_batch_accounting.valid(@intFromPtr(self)) or
             receipt.client_addr != @intFromPtr(self) or
             receipt.transfer_id == 0 or receipt.byte_count == 0)
             return error.InvalidDescriptor;
-        if (receipt.transfer_id > self.generation_batch_accounting.last_transfer_id)
+        if (receipt.transfer_id > self.screen_inbox.generation_batch_accounting.last_transfer_id)
             return error.InvalidDescriptor;
-        const ledger = self.generation_batch_accounting.ledger.?;
+        const ledger = self.screen_inbox.generation_batch_accounting.ledger.?;
         if (ledger.item_count == 0 or ledger.byte_count < receipt.byte_count or
             ledger.releasing_item_count == ledger.item_count or
             ledger.releasing_byte_count +| receipt.byte_count > ledger.byte_count)
@@ -11314,7 +11408,7 @@ pub const Client = struct {
     ) void {
         // 모든 identity/counter 검증과 releasing reservation은 allocator callback 전에 끝났다.
         // 이 suffix는 callback을 다시 부르거나 상태를 재검증하지 않고 예약된 scalar만 tombstone한다.
-        self.generation_batch_accounting.ledger.?.consumeUnchecked(.{
+        self.screen_inbox.generation_batch_accounting.ledger.?.consumeUnchecked(.{
             .ledger_slot = prepared.ledger_slot,
             .transfer_id = prepared.transfer_id,
             .byte_count = prepared.byte_count,
@@ -11336,16 +11430,16 @@ pub const Client = struct {
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
         if (self.unusable) return .terminal;
         if (want_stream_id == 0) return error.InvalidStream;
-        if (transfer_id == 0 or transfer_id <= self.generation_batch_accounting.last_transfer_id)
+        if (transfer_id == 0 or transfer_id <= self.screen_inbox.generation_batch_accounting.last_transfer_id)
             return error.InvalidIdentity;
         if (!out.pristine()) return error.DestinationOccupied;
 
         // Buffered owner는 charge publication 뒤 allocation/callback 없는 suffix에서 queue를 tombstone한다.
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             if (batch.stream_id != want_stream_id) continue;
             const receipt = try self.reserveGenerationTransfer(batch.bytes.len, .pending, transfer_id);
-            const owned = self.pending_batches.orderedRemove(index);
-            self.pending_batch_bytes -= owned.bytes.len;
+            const owned = self.screen_inbox.pending_batches.orderedRemove(index);
+            self.screen_inbox.pending_batch_bytes -= owned.bytes.len;
             generation_batch_registry.OwnedBatch.initTransferredUnchecked(
                 out,
                 owned.is_snapshot,
@@ -11381,10 +11475,10 @@ pub const Client = struct {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
         // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
-        for (self.pending_batches.items, 0..) |b, i| {
+        for (self.screen_inbox.pending_batches.items, 0..) |b, i| {
             if (b.stream_id == want_stream_id) {
-                const owned = self.pending_batches.orderedRemove(i);
-                self.pending_batch_bytes -= owned.bytes.len;
+                const owned = self.screen_inbox.pending_batches.orderedRemove(i);
+                self.screen_inbox.pending_batch_bytes -= owned.bytes.len;
                 if (deadlineExpired(io)) {
                     owned.deinit();
                     return error.DeadlineExceeded;
@@ -11420,7 +11514,7 @@ pub const Client = struct {
     }
 
     fn bufferPendingScreenBatch(self: *Client, batch: StreamBatch) ClientError!void {
-        const recovery_state = self.screen_recovery.state(batch.stream_id);
+        const recovery_state = self.screen_inbox.recovery.state(batch.stream_id);
         if (recovery_state == .needs_resync or
             (recovery_state == .awaiting_snapshot and !batch.is_snapshot))
         {
@@ -11450,14 +11544,14 @@ pub const Client = struct {
             try self.invalidateBufferedScreenStream(stream_id);
             return;
         }
-        self.pending_batches.append(self.allocator, batch) catch {
+        self.screen_inbox.pending_batches.append(self.allocator, batch) catch {
             batch.deinit();
             self.poison(.local_resource_exhausted);
             return error.OutOfMemory;
         };
-        self.pending_batch_bytes += batch.bytes.len;
+        self.screen_inbox.pending_batch_bytes += batch.bytes.len;
         if (recovery_state == .awaiting_snapshot) {
-            self.screen_recovery.snapshotAccepted(batch.stream_id) catch {
+            self.screen_inbox.acceptRecoverySnapshot(batch.stream_id) catch {
                 self.poison(.local_invariant_violation);
                 return error.ProtocolError;
             };
@@ -11504,11 +11598,11 @@ pub const Client = struct {
             if (!destination.out.pristine()) return error.DestinationOccupied;
         }
         const allocator = self.allocator;
-        var state = self.partial_batch orelse PartialBatch{
+        var state = self.screen_inbox.partial_batch orelse PartialBatch{
             .stream_id = 0,
             .is_snapshot = false,
         };
-        self.partial_batch = null;
+        self.screen_inbox.partial_batch = null;
         errdefer state.bytes.deinit(allocator);
         var started = state.stream_id != 0;
         while (true) {
@@ -11520,7 +11614,7 @@ pub const Client = struct {
                 fence_mode,
             )) orelse {
                 if (started) {
-                    self.partial_batch = state;
+                    self.screen_inbox.partial_batch = state;
                     return null;
                 }
                 state.bytes.deinit(allocator);
@@ -11570,7 +11664,7 @@ pub const Client = struct {
                 self.poison(.frame_malformed);
                 return error.ProtocolError;
             }
-            if (self.screen_recovery.classify(frame.header.stream_id, frame.header.kind) == .discard)
+            if (self.screen_inbox.recovery.classify(frame.header.stream_id, frame.header.kind) == .discard)
                 continue;
             if (!started) {
                 const inbox_items = self.screenInboxItems() catch {
@@ -11676,9 +11770,9 @@ pub const Client = struct {
                         receipt,
                     );
                     if (state.is_snapshot and
-                        self.screen_recovery.state(state.stream_id) == .awaiting_snapshot)
+                        self.screen_inbox.recovery.state(state.stream_id) == .awaiting_snapshot)
                     {
-                        self.screen_recovery.snapshotAccepted(state.stream_id) catch
+                        self.screen_inbox.acceptRecoverySnapshot(state.stream_id) catch
                             @panic("prevalidated screen recovery transition drifted");
                     }
                     return null;
@@ -11695,9 +11789,9 @@ pub const Client = struct {
                     return error.InvalidState;
                 }
                 if (state.is_snapshot and
-                    self.screen_recovery.state(state.stream_id) == .awaiting_snapshot)
+                    self.screen_inbox.recovery.state(state.stream_id) == .awaiting_snapshot)
                 {
-                    self.screen_recovery.snapshotAccepted(state.stream_id) catch {
+                    self.screen_inbox.acceptRecoverySnapshot(state.stream_id) catch {
                         allocator.free(bytes);
                         self.poison(.local_invariant_violation);
                         return error.ProtocolError;
@@ -11859,42 +11953,11 @@ pub const Client = struct {
     }
 
     fn discardBufferedScreenStream(self: *Client, stream_id: u64) void {
-        var i: usize = 0;
-        while (i < self.pending_batches.items.len) {
-            if (self.pending_batches.items[i].stream_id == stream_id) {
-                const b = self.pending_batches.orderedRemove(i);
-                self.pending_batch_bytes -= b.bytes.len;
-                b.deinit();
-            } else i += 1;
-        }
-        if (self.partial_batch) |*partial| {
-            if (partial.stream_id == stream_id) {
-                partial.bytes.deinit(self.allocator);
-                self.partial_batch = null;
-            }
-        }
-        i = 0;
-        while (i < self.pending_stream.items.len) {
-            if (self.pending_stream.items[i].header.stream_id == stream_id) {
-                const frame = self.pending_stream.orderedRemove(i);
-                self.pending_stream_bytes -= frame.payload.len;
-                frame.deinit(self.allocator);
-            } else i += 1;
-        }
+        self.screen_inbox.discardStream(self.allocator, stream_id);
     }
 
     fn invalidateBufferedScreenStream(self: *Client, stream_id: u64) ClientError!void {
-        if (!self.screen_recovery.valid()) {
-            self.poison(.local_invariant_violation);
-            return error.ProtocolError;
-        }
-        const recovery_before_cleanup = self.screen_recovery;
-        self.discardBufferedScreenStream(stream_id);
-        if (!std.meta.eql(recovery_before_cleanup, self.screen_recovery)) {
-            self.poison(.local_invariant_violation);
-            return error.ProtocolError;
-        }
-        _ = self.screen_recovery.invalidate(stream_id) catch {
+        self.screen_inbox.invalidateStream(self.allocator, stream_id) catch {
             self.poison(.local_invariant_violation);
             return error.ProtocolError;
         };
@@ -11939,40 +12002,15 @@ pub const Client = struct {
                 _ = self.pending_catchup_barriers.orderedRemove(i);
             } else i += 1;
         }
-        self.screen_recovery.remove(stream_id);
+        self.screen_inbox.recovery.remove(stream_id);
     }
 
     fn screenInboxBytes(self: *const Client) error{InvalidState}!usize {
-        const partial = if (self.partial_batch) |batch| batch.bytes.items.len else 0;
-        var total = std.math.add(
-            usize,
-            self.pending_stream_bytes,
-            self.pending_batch_bytes,
-        ) catch return error.InvalidState;
-        total = std.math.add(
-            usize,
-            total,
-            if (self.generation_batch_accounting.ledger) |ledger| ledger.byte_count else 0,
-        ) catch return error.InvalidState;
-        return std.math.add(usize, total, partial) catch error.InvalidState;
+        return self.screen_inbox.byteCount();
     }
 
     fn screenInboxItems(self: *const Client) error{InvalidState}!usize {
-        const ledger_items = if (self.generation_batch_accounting.ledger) |ledger|
-            ledger.item_count
-        else
-            0;
-        var total = std.math.add(
-            usize,
-            self.pending_stream.items.len,
-            self.pending_batches.items.len,
-        ) catch return error.InvalidState;
-        total = std.math.add(usize, total, ledger_items) catch return error.InvalidState;
-        return std.math.add(
-            usize,
-            total,
-            if (self.partial_batch != null) 1 else 0,
-        ) catch error.InvalidState;
+        return self.screen_inbox.itemCount();
     }
 
     fn validateGenerationEventQueue(self: *const Client) bool {
@@ -12291,8 +12329,8 @@ pub const Client = struct {
         if (!std.meta.eql(self.parser.allocator, self.allocator)) return error.InvalidSource;
         const outer_descriptors = [4]ExternalArrayDescriptor{
             externalArrayDescriptor(self.parser.buf),
-            externalArrayDescriptor(self.pending_batches),
-            externalArrayDescriptor(self.pending_stream),
+            externalArrayDescriptor(self.screen_inbox.pending_batches),
+            externalArrayDescriptor(self.screen_inbox.pending_stream),
             externalArrayDescriptor(self.pending_events),
         };
         try validateEndedPurgeOuterRanges(self, scratch, out, null);
@@ -12343,7 +12381,7 @@ pub const Client = struct {
         var target_event_count: usize = 0;
         var demux_owned_extent_bytes: usize = 0;
 
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             if (!std.meta.eql(batch.allocator, self.allocator) or
                 batch.stream_id == 0 or batch.bytes.len > protocol.max_viewport_snapshot)
                 return error.InvalidSource;
@@ -12365,9 +12403,9 @@ pub const Client = struct {
                     return error.ArithmeticOverflow;
             }
         }
-        if (batch_bytes != self.pending_batch_bytes) return error.InvalidSource;
+        if (batch_bytes != self.screen_inbox.pending_batch_bytes) return error.InvalidSource;
 
-        for (self.pending_stream.items, 0..) |frame, index| {
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index| {
             if ((frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) or
                 frame.header.major != self.wire_major or frame.header.request_id != 0 or
                 frame.header.stream_id == 0 or
@@ -12393,7 +12431,7 @@ pub const Client = struct {
                     return error.ArithmeticOverflow;
             }
         }
-        if (stream_bytes != self.pending_stream_bytes) return error.InvalidSource;
+        if (stream_bytes != self.screen_inbox.pending_stream_bytes) return error.InvalidSource;
 
         for (self.pending_events.items, 0..) |event, index| {
             if (event.header.major != self.wire_major or event.header.kind != .event or
@@ -12429,8 +12467,8 @@ pub const Client = struct {
             return error.InvalidSource;
 
         inline for (.{
-            .{ self.pending_batches.capacity, @sizeOf(StreamBatch) },
-            .{ self.pending_stream.capacity, @sizeOf(framing.Frame) },
+            .{ self.screen_inbox.pending_batches.capacity, @sizeOf(StreamBatch) },
+            .{ self.screen_inbox.pending_stream.capacity, @sizeOf(framing.Frame) },
             .{ self.pending_events.capacity, @sizeOf(BufferedEvent) },
         }) |entry| {
             const backing_bytes = std.math.mul(usize, entry[0], entry[1]) catch
@@ -12442,7 +12480,7 @@ pub const Client = struct {
             demux_owned_extent_bytes = std.math.add(usize, demux_owned_extent_bytes, payload_bytes) catch
                 return error.ArithmeticOverflow;
 
-        if (self.partial_batch) |partial| {
+        if (self.screen_inbox.partial_batch) |partial| {
             if (partial.stream_id == 0 or partial.chunk_count == 0 or
                 partial.bytes.items.len > partial.bytes.capacity or
                 partial.bytes.items.len > protocol.max_viewport_snapshot)
@@ -12477,15 +12515,15 @@ pub const Client = struct {
         var stream_writer = owner_seal.Writer.init("maru.ended-purge.stream.v1");
         var event_writer = owner_seal.Writer.init("maru.ended-purge.event.v1");
         var partial_writer = owner_seal.Writer.init("maru.ended-purge.partial.v1");
-        for (self.pending_batches.items, 0..) |batch, index|
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index|
             writeEndedPurgeBatchSeal(&batch_writer, scratch.batches[index], batch.bytes);
-        for (self.pending_stream.items, 0..) |frame, index|
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index|
             writeEndedPurgeFrameSeal(&stream_writer, scratch.stream[index], frame.payload);
         for (self.pending_events.items, 0..) |event, index| {
             if (!event.sealMatches(event_allocator)) return error.InvalidSource;
             writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
         }
-        if (self.partial_batch) |partial|
+        if (self.screen_inbox.partial_batch) |partial|
             writeEndedPurgePartialSeal(&partial_writer, scratch.partial.?, partial.bytes.items);
 
         const build_id = self.build_id orelse &.{};
@@ -12512,8 +12550,8 @@ pub const Client = struct {
             .scratch_addr = scratch_start,
             .target_stream = target_stream,
             .hint_index = hint.event_index,
-            .batches = externalArrayDescriptor(self.pending_batches),
-            .stream = externalArrayDescriptor(self.pending_stream),
+            .batches = externalArrayDescriptor(self.screen_inbox.pending_batches),
+            .stream = externalArrayDescriptor(self.screen_inbox.pending_stream),
             .events = externalArrayDescriptor(self.pending_events),
             .partial = scratch.partial,
             .batch_payload_bytes = batch_bytes,
@@ -12628,16 +12666,16 @@ pub const Client = struct {
             survivors.writeUsize(pending.offset);
             survivors.writeBytes(pending.frame);
         } else survivors.writeBool(false);
-        for (self.pending_batches.items, 0..) |batch, index|
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index|
             if (!scratch.batch_targets.isSet(index))
                 writeEndedPurgeBatchSeal(&survivors, scratch.batches[index], batch.bytes);
-        for (self.pending_stream.items, 0..) |frame, index|
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index|
             if (!scratch.stream_targets.isSet(index))
                 writeEndedPurgeFrameSeal(&survivors, scratch.stream[index], frame.payload);
         for (self.pending_events.items, 0..) |event, index|
             if (!scratch.event_targets.isSet(index))
                 writeEndedPurgeFrameSeal(&survivors, scratch.events[index], event.payload);
-        if (!scratch.partial_target) if (self.partial_batch) |partial|
+        if (!scratch.partial_target) if (self.screen_inbox.partial_batch) |partial|
             writeEndedPurgePartialSeal(&survivors, scratch.partial.?, partial.bytes.items);
 
         prepared.captured_fd = self.fd;
@@ -12717,8 +12755,8 @@ pub const Client = struct {
             self.parser.head > self.parser.buf.items.len)
             return error.Corrupt;
         const current_parser = externalArrayDescriptor(self.parser.buf);
-        const current_batches = externalArrayDescriptor(self.pending_batches);
-        const current_stream = externalArrayDescriptor(self.pending_stream);
+        const current_batches = externalArrayDescriptor(self.screen_inbox.pending_batches);
+        const current_stream = externalArrayDescriptor(self.screen_inbox.pending_stream);
         const current_events = externalArrayDescriptor(self.pending_events);
         const build_id = self.build_id orelse &.{};
         const current_build_id = ExternalArrayDescriptor{
@@ -12738,7 +12776,7 @@ pub const Client = struct {
                 .stream_id = pending.stream_id,
                 .offset = pending.offset,
             } else null;
-        const current_partial: ?ExternalPartialDescriptor = if (self.partial_batch) |partial| .{
+        const current_partial: ?ExternalPartialDescriptor = if (self.screen_inbox.partial_batch) |partial| .{
             .stream_id = partial.stream_id,
             .is_snapshot = partial.is_snapshot,
             .bytes = externalArrayDescriptor(partial.bytes),
@@ -12769,8 +12807,8 @@ pub const Client = struct {
 
         var current_demux_extent: usize = 0;
         inline for (.{
-            .{ self.pending_batches.capacity, @sizeOf(StreamBatch) },
-            .{ self.pending_stream.capacity, @sizeOf(framing.Frame) },
+            .{ self.screen_inbox.pending_batches.capacity, @sizeOf(StreamBatch) },
+            .{ self.screen_inbox.pending_stream.capacity, @sizeOf(framing.Frame) },
             .{ self.pending_events.capacity, @sizeOf(BufferedEvent) },
         }) |entry| {
             const backing_bytes = std.math.mul(usize, entry[0], entry[1]) catch
@@ -12782,10 +12820,10 @@ pub const Client = struct {
             ) catch return error.ArithmeticOverflow;
         }
         inline for (.{
-            self.pending_batch_bytes,
-            self.pending_stream_bytes,
+            self.screen_inbox.pending_batch_bytes,
+            self.screen_inbox.pending_stream_bytes,
             self.pending_event_bytes,
-            if (self.partial_batch) |partial| partial.bytes.capacity else 0,
+            if (self.screen_inbox.partial_batch) |partial| partial.bytes.capacity else 0,
         }) |owned_bytes| current_demux_extent = std.math.add(
             usize,
             current_demux_extent,
@@ -12814,7 +12852,7 @@ pub const Client = struct {
         var target_batch_bytes: usize = 0;
         var target_stream_bytes: usize = 0;
         var target_event_bytes: usize = 0;
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             if (!std.meta.eql(batch.allocator, self.allocator)) return error.Corrupt;
             writeEndedPurgeBatchSeal(&batch_writer, scratch.batches[index], batch.bytes);
             batch_bytes = std.math.add(usize, batch_bytes, batch.bytes.len) catch
@@ -12826,7 +12864,7 @@ pub const Client = struct {
                     batch.bytes.len,
                 ) catch return error.ArithmeticOverflow;
         }
-        for (self.pending_stream.items, 0..) |frame, index| {
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index| {
             writeEndedPurgeFrameSeal(&stream_writer, scratch.stream[index], frame.payload);
             stream_bytes = std.math.add(usize, stream_bytes, frame.payload.len) catch
                 return error.ArithmeticOverflow;
@@ -12849,7 +12887,7 @@ pub const Client = struct {
                     event.payload.len,
                 ) catch return error.ArithmeticOverflow;
         }
-        if (self.partial_batch) |partial|
+        if (self.screen_inbox.partial_batch) |partial|
             writeEndedPurgePartialSeal(&partial_writer, scratch.partial.?, partial.bytes.items);
         const current_batch_seal = batch_writer.finish();
         const current_stream_seal = stream_writer.finish();
@@ -12869,13 +12907,13 @@ pub const Client = struct {
         if (scratch.partial_target) current_target_payload_bytes = std.math.add(
             usize,
             current_target_payload_bytes,
-            if (self.partial_batch) |partial| partial.bytes.items.len else 0,
+            if (self.screen_inbox.partial_batch) |partial| partial.bytes.items.len else 0,
         ) catch return error.ArithmeticOverflow;
         if (batch_bytes != inventory.batch_payload_bytes or
             stream_bytes != inventory.stream_payload_bytes or
             event_bytes != inventory.event_payload_bytes or
-            batch_bytes != self.pending_batch_bytes or
-            stream_bytes != self.pending_stream_bytes or
+            batch_bytes != self.screen_inbox.pending_batch_bytes or
+            stream_bytes != self.screen_inbox.pending_stream_bytes or
             event_bytes != self.pending_event_bytes or
             current_target_payload_bytes != inventory.target_payload_bytes or
             !std.mem.eql(u8, &inventory.batch_seal, &current_batch_seal) or
@@ -12889,7 +12927,7 @@ pub const Client = struct {
             protocol.max_client_screen_items,
             &scratch.batch_targets,
             .{
-                .source_count = self.pending_batches.items.len,
+                .source_count = self.screen_inbox.pending_batches.items.len,
                 .claimed_target_count = inventory.target_batch_count,
                 .source_bytes = batch_bytes,
                 .target_bytes = target_batch_bytes,
@@ -12904,7 +12942,7 @@ pub const Client = struct {
             protocol.max_client_screen_items,
             &scratch.stream_targets,
             .{
-                .source_count = self.pending_stream.items.len,
+                .source_count = self.screen_inbox.pending_stream.items.len,
                 .claimed_target_count = inventory.target_stream_count,
                 .source_bytes = stream_bytes,
                 .target_bytes = target_stream_bytes,
@@ -12932,8 +12970,8 @@ pub const Client = struct {
         };
         var partial_targets = std.StaticBitSet(1).initEmpty();
         if (scratch.partial_target) partial_targets.set(0);
-        const partial_count: usize = @intFromBool(self.partial_batch != null);
-        const partial_bytes = if (self.partial_batch) |partial| partial.bytes.items.len else 0;
+        const partial_count: usize = @intFromBool(self.screen_inbox.partial_batch != null);
+        const partial_bytes = if (self.screen_inbox.partial_batch) |partial| partial.bytes.items.len else 0;
         ended_purge_transaction.buildQueuePlan(
             1,
             &partial_targets,
@@ -12981,11 +13019,11 @@ pub const Client = struct {
         for (0..batch_plan.source_count) |source| {
             if (frozen.batch_targets.isSet(source)) continue;
             if (batch_survivor != source)
-                self.pending_batches.items[batch_survivor] = self.pending_batches.items[source];
+                self.screen_inbox.pending_batches.items[batch_survivor] = self.screen_inbox.pending_batches.items[source];
             batch_survivor += 1;
         }
-        self.pending_batches.items.len = batch_plan.survivor_count;
-        self.pending_batch_bytes = batch_plan.survivor_bytes;
+        self.screen_inbox.pending_batches.items.len = batch_plan.survivor_count;
+        self.screen_inbox.pending_batch_bytes = batch_plan.survivor_bytes;
 
         const stream_plan = prepared.stream_plan.rawPlannedScalars() catch
             @panic("ended purge stream plan state drifted");
@@ -12993,11 +13031,11 @@ pub const Client = struct {
         for (0..stream_plan.source_count) |source| {
             if (frozen.stream_targets.isSet(source)) continue;
             if (stream_survivor != source)
-                self.pending_stream.items[stream_survivor] = self.pending_stream.items[source];
+                self.screen_inbox.pending_stream.items[stream_survivor] = self.screen_inbox.pending_stream.items[source];
             stream_survivor += 1;
         }
-        self.pending_stream.items.len = stream_plan.survivor_count;
-        self.pending_stream_bytes = stream_plan.survivor_bytes;
+        self.screen_inbox.pending_stream.items.len = stream_plan.survivor_count;
+        self.screen_inbox.pending_stream_bytes = stream_plan.survivor_bytes;
 
         const event_plan = prepared.event_plan.rawPlannedScalars() catch
             @panic("ended purge event plan state drifted");
@@ -13011,7 +13049,7 @@ pub const Client = struct {
         self.pending_events.items.len = event_plan.survivor_count;
         self.pending_event_bytes = event_plan.survivor_bytes;
 
-        if (frozen.partial_target) self.partial_batch = null;
+        if (frozen.partial_target) self.screen_inbox.partial_batch = null;
     }
 
     fn cleanupEndedPurgeTargetDirect(
@@ -13045,25 +13083,25 @@ pub const Client = struct {
         const socket = fdSocketIdentity(self.fd) orelse return false;
         if (externalArrayDescriptor(self.parser.buf).address != frozen.parser_backing.address or
             externalArrayDescriptor(self.parser.buf).capacity != frozen.parser_backing.capacity or
-            externalArrayDescriptor(self.pending_batches).address != frozen.batch_backing.address or
-            externalArrayDescriptor(self.pending_batches).capacity != frozen.batch_backing.capacity or
-            externalArrayDescriptor(self.pending_stream).address != frozen.stream_backing.address or
-            externalArrayDescriptor(self.pending_stream).capacity != frozen.stream_backing.capacity or
+            externalArrayDescriptor(self.screen_inbox.pending_batches).address != frozen.batch_backing.address or
+            externalArrayDescriptor(self.screen_inbox.pending_batches).capacity != frozen.batch_backing.capacity or
+            externalArrayDescriptor(self.screen_inbox.pending_stream).address != frozen.stream_backing.address or
+            externalArrayDescriptor(self.screen_inbox.pending_stream).capacity != frozen.stream_backing.capacity or
             externalArrayDescriptor(self.pending_events).address != frozen.event_backing.address or
             externalArrayDescriptor(self.pending_events).capacity != frozen.event_backing.capacity)
             return false;
         const batch_plan = prepared.batch_plan.rawPlannedScalars() catch return false;
         const stream_plan = prepared.stream_plan.rawPlannedScalars() catch return false;
         const event_plan = prepared.event_plan.rawPlannedScalars() catch return false;
-        if (self.pending_batches.items.len != batch_plan.survivor_count or
-            self.pending_stream.items.len != stream_plan.survivor_count or
+        if (self.screen_inbox.pending_batches.items.len != batch_plan.survivor_count or
+            self.screen_inbox.pending_stream.items.len != stream_plan.survivor_count or
             self.pending_events.items.len != event_plan.survivor_count or
-            self.pending_batch_bytes != batch_plan.survivor_bytes or
-            self.pending_stream_bytes != stream_plan.survivor_bytes or
+            self.screen_inbox.pending_batch_bytes != batch_plan.survivor_bytes or
+            self.screen_inbox.pending_stream_bytes != stream_plan.survivor_bytes or
             self.pending_event_bytes != event_plan.survivor_bytes or
-            (frozen.partial_target and self.partial_batch != null) or
+            (frozen.partial_target and self.screen_inbox.partial_batch != null) or
             (!frozen.partial_target and
-                (self.partial_batch != null) != (frozen.partial != null)))
+                (self.screen_inbox.partial_batch != null) != (frozen.partial != null)))
             return false;
 
         const build_id = self.build_id orelse &.{};
@@ -13127,7 +13165,7 @@ pub const Client = struct {
         var survivor_ordinal: usize = 0;
         for (0..batch_plan.source_count) |source| {
             if (frozen.batch_targets.isSet(source)) continue;
-            const batch = self.pending_batches.items[survivor_ordinal];
+            const batch = self.screen_inbox.pending_batches.items[survivor_ordinal];
             const descriptor = frozen.batches[source];
             if (!std.meta.eql(externalBatchDescriptor(batch), descriptor)) return false;
             writeEndedPurgeBatchSeal(&survivors, descriptor, batch.bytes);
@@ -13136,7 +13174,7 @@ pub const Client = struct {
         survivor_ordinal = 0;
         for (0..stream_plan.source_count) |source| {
             if (frozen.stream_targets.isSet(source)) continue;
-            const frame = self.pending_stream.items[survivor_ordinal];
+            const frame = self.screen_inbox.pending_stream.items[survivor_ordinal];
             const descriptor = frozen.stream[source];
             if (!std.meta.eql(externalFrameDescriptor(frame), descriptor)) return false;
             writeEndedPurgeFrameSeal(&survivors, descriptor, frame.payload);
@@ -13153,7 +13191,7 @@ pub const Client = struct {
             writeEndedPurgeFrameSeal(&survivors, descriptor, event.payload);
             survivor_ordinal += 1;
         }
-        if (!frozen.partial_target) if (self.partial_batch) |partial| {
+        if (!frozen.partial_target) if (self.screen_inbox.partial_batch) |partial| {
             const descriptor = frozen.partial orelse return false;
             const current = ExternalPartialDescriptor{
                 .stream_id = partial.stream_id,
@@ -13175,14 +13213,14 @@ pub const Client = struct {
         self.pending_outbound = null;
         self.parser.buf = .empty;
         self.parser.head = 0;
-        self.pending_batches = .empty;
-        self.pending_stream = .empty;
+        self.screen_inbox.pending_batches = .empty;
+        self.screen_inbox.pending_stream = .empty;
         self.pending_events = .empty;
-        self.partial_batch = null;
-        self.pending_batch_bytes = 0;
-        self.pending_stream_bytes = 0;
+        self.screen_inbox.partial_batch = null;
+        self.screen_inbox.pending_batch_bytes = 0;
+        self.screen_inbox.pending_stream_bytes = 0;
         self.pending_event_bytes = 0;
-        self.screen_recovery = .{};
+        self.screen_inbox.recovery = .{};
     }
 
     fn endedPurgeFinalizationSeal(
@@ -13291,8 +13329,8 @@ pub const Client = struct {
             &range_order,
         ) catch @panic("ended purge owner graph drifted before cleanup");
         if (!std.meta.eql(externalArrayDescriptor(self.parser.buf), frozen.parser_backing) or
-            !std.meta.eql(externalArrayDescriptor(self.pending_batches), frozen.batch_backing) or
-            !std.meta.eql(externalArrayDescriptor(self.pending_stream), frozen.stream_backing) or
+            !std.meta.eql(externalArrayDescriptor(self.screen_inbox.pending_batches), frozen.batch_backing) or
+            !std.meta.eql(externalArrayDescriptor(self.screen_inbox.pending_stream), frozen.stream_backing) or
             !std.meta.eql(externalArrayDescriptor(self.pending_events), frozen.event_backing))
             @panic("ended purge owner descriptor drifted before cleanup");
 
@@ -13300,13 +13338,13 @@ pub const Client = struct {
         var stream_writer = owner_seal.Writer.init("maru.ended-purge.stream.v1");
         var event_writer = owner_seal.Writer.init("maru.ended-purge.event.v1");
         var partial_writer = owner_seal.Writer.init("maru.ended-purge.partial.v1");
-        for (self.pending_batches.items, 0..) |batch, index| {
+        for (self.screen_inbox.pending_batches.items, 0..) |batch, index| {
             const descriptor = externalBatchDescriptor(batch);
             if (!std.meta.eql(descriptor, frozen.batches[index]))
                 @panic("ended purge batch descriptor drifted before cleanup");
             writeEndedPurgeBatchSeal(&batch_writer, descriptor, batch.bytes);
         }
-        for (self.pending_stream.items, 0..) |frame, index| {
+        for (self.screen_inbox.pending_stream.items, 0..) |frame, index| {
             const descriptor = externalFrameDescriptor(frame);
             if (!std.meta.eql(descriptor, frozen.stream[index]))
                 @panic("ended purge stream descriptor drifted before cleanup");
@@ -13319,7 +13357,7 @@ pub const Client = struct {
                 @panic("ended purge event descriptor drifted before cleanup");
             writeEndedPurgeFrameSeal(&event_writer, descriptor, event.payload);
         }
-        if (self.partial_batch) |partial| {
+        if (self.screen_inbox.partial_batch) |partial| {
             const descriptor = ExternalPartialDescriptor{
                 .stream_id = partial.stream_id,
                 .is_snapshot = partial.is_snapshot,
@@ -13894,9 +13932,9 @@ pub const Client = struct {
         };
         defer if (operation_fence_held) self.endPublicMutation();
         if (payload_allocator_out) |out| out.* = self.allocator;
-        if (self.pending_stream.items.len > 0) {
-            const owned = self.pending_stream.orderedRemove(0);
-            self.pending_stream_bytes -= owned.payload.len;
+        if (self.screen_inbox.pending_stream.items.len > 0) {
+            const owned = self.screen_inbox.pending_stream.orderedRemove(0);
+            self.screen_inbox.pending_stream_bytes -= owned.payload.len;
             const frame = try self.requireWireMajor(owned);
             if (deadlineExpired(io)) {
                 frame.deinit(if (payload_allocator_out) |out| out.* else self.allocator);
@@ -14101,7 +14139,7 @@ pub const Client = struct {
     }
 
     pub fn screenRecoveryState(self: *const Client, stream_id: u64) ScreenRecoveryState {
-        return self.screen_recovery.state(stream_id);
+        return self.screen_inbox.recovery.state(stream_id);
     }
 
     fn sendResyncNonBlockingGuarded(self: *Client, stream_id: u64, execution_lease_held: bool) ClientError!bool {
@@ -14115,8 +14153,8 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         std.debug.assert(self.pending_outbound == null);
         self.pending_outbound = .{ .frame = frame, .stream_id = stream_id };
-        if (self.screen_recovery.state(stream_id) == .needs_resync) {
-            self.screen_recovery.requestAdmitted(stream_id) catch {
+        if (self.screen_inbox.recovery.state(stream_id) == .needs_resync) {
+            self.screen_inbox.recovery.requestAdmitted(stream_id) catch {
                 self.poisonMutationIo(.local_invariant_violation, execution_lease_held);
                 return error.ProtocolError;
             };
@@ -15289,9 +15327,9 @@ test "CR4a client demux는 sibling screen과 barrier를 보존하고 exact ident
         target_barrier,
         try client.readCatchupBarrierUntil(7, target_identity, deadline),
     );
-    try std.testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
-    try std.testing.expectEqual(@as(u64, 9), client.pending_batches.items[0].stream_id);
-    try std.testing.expectEqualStrings("sibling-screen", client.pending_batches.items[0].bytes);
+    try std.testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_batches.items.len);
+    try std.testing.expectEqual(@as(u64, 9), client.screen_inbox.pending_batches.items[0].stream_id);
+    try std.testing.expectEqualStrings("sibling-screen", client.screen_inbox.pending_batches.items[0].bytes);
     try std.testing.expectEqual(@as(usize, 1), client.pending_catchup_barriers.items.len);
     try std.testing.expectEqual(@as(u64, 8), client.pending_catchup_barriers.items[0].stream_id);
     try std.testing.expectEqualDeep(
@@ -15323,15 +15361,15 @@ test "CR4a client demux는 capability와 identity drift를 barrier 소비 전에
         client.runtime_catchup_barrier_v1 = hostile != 0;
         defer client.deinit();
         if (hostile == 2) {
-            client.partial_batch = .{ .stream_id = 7, .is_snapshot = false };
-            try client.partial_batch.?.bytes.appendSlice(allocator, "unfinished-target");
+            client.screen_inbox.partial_batch = .{ .stream_id = 7, .is_snapshot = false };
+            try client.screen_inbox.partial_batch.?.bytes.appendSlice(allocator, "unfinished-target");
         } else if (hostile == 3) {
             const unfinished = try allocator.dupe(u8, "unfinished-raw-target");
-            try client.pending_stream.append(allocator, .{
+            try client.screen_inbox.pending_stream.append(allocator, .{
                 .header = .{ .kind = .delta_chunk, .stream_id = 7 },
                 .payload = unfinished,
             });
-            client.pending_stream_bytes = unfinished.len;
+            client.screen_inbox.pending_stream_bytes = unfinished.len;
         }
         const payload = try barrier.encode();
         const wire_frame = try framing.encodeFrame(
@@ -15608,7 +15646,7 @@ test "CR4a client demux는 blocking RPC 중 barrier를 canonical inbox에 보존
     const plan = try client.readCatchupBarrierPlanUntil(7, identity, deadline);
     try std.testing.expectEqualDeep(barrier, plan.barrier);
     try std.testing.expectEqual(@as(u32, 1), plan.preceding_screen_batches);
-    try std.testing.expectEqual(@as(usize, 2), client.pending_stream.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.screen_inbox.pending_stream.items.len);
     const before = (try client.readStreamBatch(7)).?;
     defer before.deinit();
     try std.testing.expectEqualStrings("screen-before-barrier", before.bytes);
@@ -15765,16 +15803,10 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "incident_repeat_key",
     "next_request_id",
     "last_success_request_id",
-    "pending_stream",
-    "pending_stream_bytes",
-    "screen_recovery",
+    "screen_inbox",
     "pending_events",
     "pending_event_bytes",
-    "pending_batches",
-    "pending_batch_bytes",
     "pending_catchup_barriers",
-    "generation_batch_accounting",
-    "partial_batch",
     "pending_outbound",
     "io_mode",
     "operation_fence",
@@ -16231,7 +16263,7 @@ test "CR3a-2a checked OOB allocator callback fences a foreign Client before wire
     try std.testing.expectEqual(error.AdminBusy, probe.reentry_error.?);
     try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&foreign_storage));
     try std.testing.expectEqual(@as(u64, 1), foreign.next_request_id);
-    try std.testing.expectEqual(@as(usize, 1), owner.pending_stream.items.len);
+    try std.testing.expectEqual(@as(usize, 1), owner.screen_inbox.pending_stream.items.len);
 }
 
 test "CR3a-2a prepared execution rejects allocator drift while flushing older outbound" {
@@ -16954,8 +16986,8 @@ test "B3-4/5 response-only lease read reassembles fragmented response after stre
     const response = try client.readPreparedResponseUnderExecutionLease(&lease, expected_allocator, null);
     defer response.payload_allocator.free(response.payload);
     try std.testing.expectEqualStrings("{\"result\":true}", response.payload);
-    try std.testing.expectEqual(@as(usize, 1), client.pending_stream.items.len);
-    try std.testing.expectEqualStrings("delta", client.pending_stream.items[0].payload);
+    try std.testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_stream.items.len);
+    try std.testing.expectEqualStrings("delta", client.screen_inbox.pending_stream.items[0].payload);
     try client.finishPreparedRequestExecution(&lease);
 }
 
@@ -17370,13 +17402,13 @@ test "R3 call partial multi-frame cap plus one invalidates only target and prese
     // The first target chunk leaves the unified inbox at exact cap-1. The second chunk crosses
     // cap by one, so recovery must reclaim the already-assembled target prefix as one owner.
     const sibling = try allocator.alloc(u8, protocol.max_client_screen_inbox - 2);
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 10,
         .bytes = sibling,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = sibling.len;
+    client.screen_inbox.pending_batch_bytes = sibling.len;
 
     var peer_ok = false;
     var peer = try std.Thread.spawn(.{}, screenOverflowDuringCallPeer, .{ fds[1], &peer_ok });
@@ -17388,9 +17420,9 @@ test "R3 call partial multi-frame cap plus one invalidates only target and prese
     try testing.expectEqualStrings("{\"result\":{\"ok\":true}}", response);
     try testing.expect(!client.unusable);
     try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
-    try testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
-    try testing.expectEqual(@as(u64, 10), client.pending_batches.items[0].stream_id);
-    try testing.expect(client.partial_batch == null);
+    try testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 10), client.screen_inbox.pending_batches.items[0].stream_id);
+    try testing.expect(client.screen_inbox.partial_batch == null);
 }
 
 test "R3 corrupted unified inbox arithmetic is not recoverable stream pressure" {
@@ -17401,8 +17433,8 @@ test "R3 corrupted unified inbox arithmetic is not recoverable stream pressure" 
         .parser = framing.FrameParser.init(testing.allocator),
     };
     defer client.deinit();
-    client.pending_stream_bytes = std.math.maxInt(usize);
-    client.pending_batch_bytes = 1;
+    client.screen_inbox.pending_stream_bytes = std.math.maxInt(usize);
+    client.screen_inbox.pending_batch_bytes = 1;
     try testing.expectError(error.InvalidState, client.screenInboxBytes());
     try testing.expectEqual(screen_inbox.State.valid, client.screenRecoveryState(9));
 }
@@ -17420,7 +17452,7 @@ test "R3 item cap is unified across raw frames and completed batches" {
     const raw_count = protocol.max_client_screen_items / 2;
     for (0..raw_count) |_| {
         const payload = try allocator.dupe(u8, "");
-        try client.pending_stream.append(allocator, .{
+        try client.screen_inbox.pending_stream.append(allocator, .{
             .header = .{
                 .kind = .delta_chunk,
                 .stream_id = 10,
@@ -17431,7 +17463,7 @@ test "R3 item cap is unified across raw frames and completed batches" {
     }
     for (raw_count..protocol.max_client_screen_items) |_| {
         const payload = try allocator.dupe(u8, "");
-        try client.pending_batches.append(allocator, .{
+        try client.screen_inbox.pending_batches.append(allocator, .{
             .is_snapshot = false,
             .stream_id = 10,
             .bytes = payload,
@@ -17450,7 +17482,7 @@ test "R3 item cap is unified across raw frames and completed batches" {
     try testing.expectEqual(protocol.max_client_screen_items, try client.screenInboxItems());
     try testing.expect(!client.unusable);
 
-    try client.screen_recovery.requestAdmitted(9);
+    try client.screen_inbox.recovery.requestAdmitted(9);
     try client.bufferPendingScreenBatch(.{
         .is_snapshot = true,
         .stream_id = 9,
@@ -17474,8 +17506,8 @@ test "R4 awaiting snapshot discards delta and accepts the first fresh snapshot" 
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    _ = try client.screen_recovery.invalidate(9);
-    try client.screen_recovery.requestAdmitted(9);
+    _ = try client.screen_inbox.recovery.invalidate(9);
+    try client.screen_inbox.recovery.requestAdmitted(9);
 
     const stale = try framing.encodeFrame(
         allocator,
@@ -17510,7 +17542,7 @@ test "R4 resync frame allocation failure preserves the sticky recovery intent" {
         .parser = framing.FrameParser.init(failing.allocator()),
     };
     defer client.deinit();
-    _ = try client.screen_recovery.invalidate(9);
+    _ = try client.screen_inbox.recovery.invalidate(9);
 
     try testing.expectError(error.OutOfMemory, client.sendResyncNonBlocking(9));
     try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
@@ -17530,7 +17562,7 @@ test "R4 recovery never hides a malformed screen header" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
-    _ = try client.screen_recovery.invalidate(9);
+    _ = try client.screen_inbox.recovery.invalidate(9);
 
     const Peer = struct {
         fn run(fd: c.fd_t) void {
@@ -18203,7 +18235,7 @@ test "client deadline partial snapshot batch stalls fail closed" {
         client.readSnapshotUntil(7, deadline),
     );
     try testing.expect(client.unusable);
-    try testing.expect(client.partial_batch == null);
+    try testing.expect(client.screen_inbox.partial_batch == null);
 }
 
 test "client deadline byte drip never extends the absolute response budget" {
@@ -18911,9 +18943,9 @@ test "client stream path rejects a frame with the wrong MRSH header major" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.parser.deinit();
-    defer client.pending_stream.deinit(allocator);
+    defer client.screen_inbox.pending_stream.deinit(allocator);
     defer client.pending_events.deinit(allocator);
-    defer client.pending_batches.deinit(allocator);
+    defer client.screen_inbox.pending_batches.deinit(allocator);
 
     const wire = try framing.encodeFrame(allocator, .{
         .kind = .delta_chunk,
@@ -18935,12 +18967,12 @@ test "client metadata events coalesce by stream and preserve other streams" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.parser.deinit();
-    defer client.pending_stream.deinit(allocator);
+    defer client.screen_inbox.pending_stream.deinit(allocator);
     defer {
         for (client.pending_events.items) |frame| frame.deinit(allocator);
         client.pending_events.deinit(allocator);
     }
-    defer client.pending_batches.deinit(allocator);
+    defer client.screen_inbox.pending_batches.deinit(allocator);
 
     const rev1 =
         \\{"event":"runtime.metadata","metadata_revision":1,"metadata":{"cwd":"/one","window_title":"one","ssh_remote_dest":null,
@@ -19338,21 +19370,21 @@ test "CR3a-2c2b2 prepare inventories mixed target and sibling owners without mut
     };
     defer client.deinit();
 
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "target-batch"),
         .allocator = allocator,
     });
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 10,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "sibling-batch"),
         .allocator = allocator,
     });
-    client.pending_batch_bytes = "target-batch".len + "sibling-batch".len;
+    client.screen_inbox.pending_batch_bytes = "target-batch".len + "sibling-batch".len;
     const target_stream_payload = try allocator.dupe(u8, "target-stream");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 9,
@@ -19361,14 +19393,14 @@ test "CR3a-2c2b2 prepare inventories mixed target and sibling owners without mut
         },
         .payload = target_stream_payload,
     });
-    client.pending_stream_bytes = target_stream_payload.len;
-    client.partial_batch = .{
+    client.screen_inbox.pending_stream_bytes = target_stream_payload.len;
+    client.screen_inbox.partial_batch = .{
         .stream_id = 10,
         .is_snapshot = false,
         .bytes = .empty,
         .chunk_count = 1,
     };
-    try client.partial_batch.?.bytes.appendSlice(allocator, "sibling-partial");
+    try client.screen_inbox.partial_batch.?.bytes.appendSlice(allocator, "sibling-partial");
 
     const ended_payload = "{\"event\":\"runtime.ended\"}";
     try client.bufferLegacyEventForTest(.{
@@ -19382,7 +19414,7 @@ test "CR3a-2c2b2 prepare inventories mixed target and sibling owners without mut
     const hint = (try client.peekEndedEventForStream(9)).candidate;
     var scratch: EndedPurgeScratch = .{};
     var prepared: PreparedEndedPurgeInventory = .{};
-    const batches_ptr = client.pending_batches.items.ptr;
+    const batches_ptr = client.screen_inbox.pending_batches.items.ptr;
     const events_ptr = client.pending_events.items.ptr;
 
     try client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared);
@@ -19394,7 +19426,7 @@ test "CR3a-2c2b2 prepare inventories mixed target and sibling owners without mut
     try std.testing.expect(scratch.stream_targets.isSet(0));
     try std.testing.expect(scratch.event_targets.isSet(0));
     try std.testing.expect(!scratch.partial_target);
-    try std.testing.expectEqual(batches_ptr, client.pending_batches.items.ptr);
+    try std.testing.expectEqual(batches_ptr, client.screen_inbox.pending_batches.items.ptr);
     try std.testing.expectEqual(events_ptr, client.pending_events.items.ptr);
     try std.testing.expect(prepared.abort());
     try std.testing.expect(!prepared.abort());
@@ -19447,13 +19479,13 @@ test "CR3a-2c2b2 prepare rejects exact and partial payload owner aliases before 
     defer client.deinit();
     const first = try allocator.dupe(u8, "first-owner");
     const second = try allocator.dupe(u8, "second-owner");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = first,
         .allocator = allocator,
     });
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 10,
         .is_snapshot = false,
         .bytes = second,
@@ -19468,24 +19500,24 @@ test "CR3a-2c2b2 prepare rejects exact and partial payload owner aliases before 
     var scratch: EndedPurgeScratch = .{};
     var prepared: PreparedEndedPurgeInventory = .{};
 
-    client.pending_batches.items[1].bytes = first;
-    client.pending_batch_bytes = first.len * 2;
+    client.screen_inbox.pending_batches.items[1].bytes = first;
+    client.screen_inbox.pending_batch_bytes = first.len * 2;
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
     try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
 
-    client.pending_batches.items[1].bytes = first[1..];
-    client.pending_batch_bytes = first.len + first.len - 1;
+    client.screen_inbox.pending_batches.items[1].bytes = first[1..];
+    client.screen_inbox.pending_batch_bytes = first.len + first.len - 1;
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
     try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
 
-    client.pending_batches.items[1].bytes = second;
-    client.pending_batch_bytes = first.len + second.len;
+    client.screen_inbox.pending_batches.items[1].bytes = second;
+    client.screen_inbox.pending_batch_bytes = first.len + second.len;
 }
 
 test "CR3a-2c2b2 prepare rejects parser and scratch payload aliases before hashing" {
@@ -19500,7 +19532,7 @@ test "CR3a-2c2b2 prepare rejects parser and scratch payload aliases before hashi
     defer client.deinit();
     try client.parser.push("parser-owner");
     const owned = try allocator.dupe(u8, "batch-owner");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = owned,
@@ -19515,31 +19547,31 @@ test "CR3a-2c2b2 prepare rejects parser and scratch payload aliases before hashi
     var scratch: EndedPurgeScratch = .{};
     var prepared: PreparedEndedPurgeInventory = .{};
 
-    client.pending_batches.items[0].bytes = client.parser.buf.items;
-    client.pending_batch_bytes = client.parser.buf.items.len;
+    client.screen_inbox.pending_batches.items[0].bytes = client.parser.buf.items;
+    client.screen_inbox.pending_batch_bytes = client.parser.buf.items.len;
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
 
     const scratch_bytes = std.mem.asBytes(&scratch);
-    client.pending_batches.items[0].bytes = scratch_bytes[scratch_bytes.len - 8 ..];
-    client.pending_batch_bytes = 8;
+    client.screen_inbox.pending_batches.items[0].bytes = scratch_bytes[scratch_bytes.len - 8 ..];
+    client.screen_inbox.pending_batch_bytes = 8;
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
     const out_bytes = std.mem.asBytes(&prepared);
-    client.pending_batches.items[0].bytes = out_bytes[0..8];
-    client.pending_batch_bytes = 8;
+    client.screen_inbox.pending_batches.items[0].bytes = out_bytes[0..8];
+    client.screen_inbox.pending_batch_bytes = 8;
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
     try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
 
-    client.pending_batches.items[0].bytes = owned;
-    client.pending_batch_bytes = owned.len;
+    client.screen_inbox.pending_batches.items[0].bytes = owned;
+    client.screen_inbox.pending_batch_bytes = owned.len;
 }
 
 test "CR3a-2c2b2 prepare rejects outer list backing aliases before item access" {
@@ -19561,9 +19593,9 @@ test "CR3a-2c2b2 prepare rejects outer list backing aliases before item access" 
     var scratch: EndedPurgeScratch = .{};
     var prepared: PreparedEndedPurgeInventory = .{};
 
-    const original_batches = client.pending_batches;
+    const original_batches = client.screen_inbox.pending_batches;
     const scratch_start: [*]align(@alignOf(StreamBatch)) StreamBatch = @ptrCast(@alignCast(&scratch));
-    client.pending_batches = .{
+    client.screen_inbox.pending_batches = .{
         .items = scratch_start[0..0],
         .capacity = 1,
     };
@@ -19571,7 +19603,7 @@ test "CR3a-2c2b2 prepare rejects outer list backing aliases before item access" 
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
-    client.pending_batches = original_batches;
+    client.screen_inbox.pending_batches = original_batches;
     try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
 }
 
@@ -19592,13 +19624,13 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
     client.build_id = try allocator.alloc(u8, outer_bytes);
     client.lifecycle = try allocator.alloc(u8, outer_bytes + @alignOf(StreamBatch));
     const owned = try allocator.dupe(u8, "batch-owner");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = owned,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = owned.len;
+    client.screen_inbox.pending_batch_bytes = owned.len;
     const ended_payload = "{\"event\":\"runtime.ended\"}";
     try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
@@ -19632,17 +19664,17 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
 
     var scratch: EndedPurgeScratch = .{};
     var prepared: PreparedEndedPurgeInventory = .{};
-    const original_batches = client.pending_batches;
+    const original_batches = client.screen_inbox.pending_batches;
     defer {
-        client.pending_batches = original_batches;
-        client.pending_batches.items[0].bytes = owned;
-        client.pending_batch_bytes = owned.len;
+        client.screen_inbox.pending_batches = original_batches;
+        client.screen_inbox.pending_batches.items[0].bytes = owned;
+        client.screen_inbox.pending_batch_bytes = owned.len;
     }
 
     // Exact build-id backing alias is rejected before a StreamBatch item can be read.
     const build_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(client.build_id.?.ptr));
-    client.pending_batches = .{ .items = build_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = build_batches[0..0], .capacity = 1 };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -19652,7 +19684,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
     const lifecycle_inner = client.lifecycle[@alignOf(StreamBatch)..];
     const lifecycle_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(lifecycle_inner.ptr));
-    client.pending_batches = .{ .items = lifecycle_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = lifecycle_batches[0..0], .capacity = 1 };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -19660,7 +19692,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
 
     const tx_backing_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(tx_backing_bytes.ptr));
-    client.pending_batches = .{ .items = tx_backing_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = tx_backing_batches[0..0], .capacity = 1 };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -19668,29 +19700,29 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
 
     const tx_payload_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(tx_payload.ptr));
-    client.pending_batches = .{ .items = tx_payload_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = tx_payload_batches[0..0], .capacity = 1 };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
     );
 
-    client.pending_batches = original_batches;
+    client.screen_inbox.pending_batches = original_batches;
     inline for (.{
         client.build_id.?,
         client.lifecycle[1..],
         tx_backing_bytes[0..@min(outer_bytes, tx_backing_bytes.len)],
         tx_payload,
     }) |aliased| {
-        client.pending_batches.items[0].bytes = aliased;
-        client.pending_batch_bytes = aliased.len;
+        client.screen_inbox.pending_batches.items[0].bytes = aliased;
+        client.screen_inbox.pending_batch_bytes = aliased.len;
         try std.testing.expectError(
             error.InvalidAlias,
             client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
         );
         try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
     }
-    client.pending_batches.items[0].bytes = owned;
-    client.pending_batch_bytes = owned.len;
+    client.screen_inbox.pending_batches.items[0].bytes = owned;
+    client.screen_inbox.pending_batch_bytes = owned.len;
 }
 
 test "CR3a-2c2b3b prepare commit freezes a final-address blocking owner graph" {
@@ -19773,21 +19805,21 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
     client.build_id = try allocator.dupe(u8, "build");
     client.lifecycle = try allocator.dupe(u8, "running");
 
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "target-batch"),
         .allocator = allocator,
     });
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .stream_id = 10,
         .is_snapshot = false,
         .bytes = try allocator.dupe(u8, "sibling-batch"),
         .allocator = allocator,
     });
-    client.pending_batch_bytes = "target-batch".len + "sibling-batch".len;
+    client.screen_inbox.pending_batch_bytes = "target-batch".len + "sibling-batch".len;
     const target_stream_payload = try allocator.dupe(u8, "target-stream");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 9,
@@ -19797,7 +19829,7 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
         .payload = target_stream_payload,
     });
     const sibling_stream_payload = try allocator.dupe(u8, "sibling-stream");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 10,
@@ -19806,14 +19838,14 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
         },
         .payload = sibling_stream_payload,
     });
-    client.pending_stream_bytes = target_stream_payload.len + sibling_stream_payload.len;
-    client.partial_batch = .{
+    client.screen_inbox.pending_stream_bytes = target_stream_payload.len + sibling_stream_payload.len;
+    client.screen_inbox.partial_batch = .{
         .stream_id = 9,
         .is_snapshot = false,
         .bytes = .empty,
         .chunk_count = 1,
     };
-    try client.partial_batch.?.bytes.appendSlice(allocator, "target-partial");
+    try client.screen_inbox.partial_batch.?.bytes.appendSlice(allocator, "target-partial");
 
     const ended_payload = "{\"event\":\"runtime.ended\"}";
     try client.bufferLegacyEventForTest(.{
@@ -19857,18 +19889,18 @@ test "CR3a-2c2b3b commit stably compacts every queue and consumes clean authorit
     try std.testing.expectEqual(@as(usize, 1), prepared.stream_cleanup_ordinal);
     try std.testing.expectEqual(@as(usize, 1), prepared.event_cleanup_ordinal);
     try std.testing.expectEqual(@as(usize, 1), prepared.partial_cleanup_ordinal);
-    try std.testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
-    try std.testing.expectEqual(@as(u64, 10), client.pending_batches.items[0].stream_id);
-    try std.testing.expectEqualStrings("sibling-batch", client.pending_batches.items[0].bytes);
-    try std.testing.expectEqual("sibling-batch".len, client.pending_batch_bytes);
-    try std.testing.expectEqual(@as(usize, 1), client.pending_stream.items.len);
-    try std.testing.expectEqual(@as(u64, 10), client.pending_stream.items[0].header.stream_id);
-    try std.testing.expectEqualStrings("sibling-stream", client.pending_stream.items[0].payload);
-    try std.testing.expectEqual("sibling-stream".len, client.pending_stream_bytes);
+    try std.testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_batches.items.len);
+    try std.testing.expectEqual(@as(u64, 10), client.screen_inbox.pending_batches.items[0].stream_id);
+    try std.testing.expectEqualStrings("sibling-batch", client.screen_inbox.pending_batches.items[0].bytes);
+    try std.testing.expectEqual("sibling-batch".len, client.screen_inbox.pending_batch_bytes);
+    try std.testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_stream.items.len);
+    try std.testing.expectEqual(@as(u64, 10), client.screen_inbox.pending_stream.items[0].header.stream_id);
+    try std.testing.expectEqualStrings("sibling-stream", client.screen_inbox.pending_stream.items[0].payload);
+    try std.testing.expectEqual("sibling-stream".len, client.screen_inbox.pending_stream_bytes);
     try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
     try std.testing.expectEqual(@as(u64, 10), client.pending_events.items[0].header.stream_id);
     try std.testing.expectEqual(sibling_payload.len, client.pending_event_bytes);
-    try std.testing.expect(client.partial_batch == null);
+    try std.testing.expect(client.screen_inbox.partial_batch == null);
     try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
 }
 
@@ -20933,12 +20965,12 @@ test "client event queue overflow poisons every runtime sharing the connection" 
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.parser.deinit();
-    defer client.pending_stream.deinit(allocator);
+    defer client.screen_inbox.pending_stream.deinit(allocator);
     defer {
         for (client.pending_events.items) |frame| frame.deinit(allocator);
         client.pending_events.deinit(allocator);
     }
-    defer client.pending_batches.deinit(allocator);
+    defer client.screen_inbox.pending_batches.deinit(allocator);
 
     for (0..max_pending_event_count) |i| {
         try client.bufferLegacyEventForTest(.{
@@ -20977,12 +21009,12 @@ test "client ended event replaces same-stream metadata at exact event cap" {
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.parser.deinit();
-    defer client.pending_stream.deinit(allocator);
+    defer client.screen_inbox.pending_stream.deinit(allocator);
     defer {
         for (client.pending_events.items) |frame| frame.deinit(allocator);
         client.pending_events.deinit(allocator);
     }
-    defer client.pending_batches.deinit(allocator);
+    defer client.screen_inbox.pending_batches.deinit(allocator);
 
     for (0..256) |i| try client.bufferLegacyEventForTest(.{
         .header = .{ .kind = .event, .stream_id = @intCast(i + 1) },
@@ -22234,9 +22266,9 @@ test "external mode rejects every legacy socket entry without wire mutation" {
     try std.testing.expectEqual(parser_len, client.parser.buf.items.len);
     try std.testing.expectEqual(next_request_id, client.next_request_id);
     try std.testing.expectEqual(capabilities, client.attachment_capabilities);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_stream.items.len);
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_batches.items.len);
     switch (client.io_mode) {
         .blocking => return error.TestUnexpectedResult,
         .external => |state| {
@@ -22333,7 +22365,7 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
     client.connection_profile = .cli_attach;
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     const stream_payload = try allocator.dupe(u8, "stream");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -22341,7 +22373,7 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
         },
         .payload = stream_payload,
     });
-    client.pending_stream_bytes = stream_payload.len;
+    client.screen_inbox.pending_stream_bytes = stream_payload.len;
     const event_payload = try allocator.dupe(u8, "event");
     try client.pending_events.append(allocator, .{
         .header = .{
@@ -22353,16 +22385,16 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
     });
     client.pending_event_bytes = event_payload.len;
     const batch_payload = try allocator.dupe(u8, "batch");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = batch_payload,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = batch_payload.len;
+    client.screen_inbox.pending_batch_bytes = batch_payload.len;
     var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try partial_bytes.appendSlice(allocator, "partial-batch");
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = partial_bytes,
@@ -22371,10 +22403,10 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
 
     const parser_bytes = try allocator.dupe(u8, client.parser.buf.items);
     defer allocator.free(parser_bytes);
-    const stream_ptr = client.pending_stream.items[0].payload.ptr;
+    const stream_ptr = client.screen_inbox.pending_stream.items[0].payload.ptr;
     const event_ptr = client.pending_events.items[0].payload.ptr;
-    const batch_ptr = client.pending_batches.items[0].bytes.ptr;
-    const partial_ptr = client.partial_batch.?.bytes.items.ptr;
+    const batch_ptr = client.screen_inbox.pending_batches.items[0].bytes.ptr;
+    const partial_ptr = client.screen_inbox.partial_batch.?.bytes.items.ptr;
     var fixture = ConnectedSocketFixture{
         .fd = fds[0],
         .fail_get_at_call = if (transition == .initial_get_failure) 1 else null,
@@ -22398,11 +22430,11 @@ fn checkExternalModePreservesClientState(transition: PreservationTransition) !vo
         compatibility.AttachSchema.granted_roles,
         client.compatibility_profile.?.attach_schema,
     );
-    try std.testing.expectEqual(stream_ptr, client.pending_stream.items[0].payload.ptr);
+    try std.testing.expectEqual(stream_ptr, client.screen_inbox.pending_stream.items[0].payload.ptr);
     try std.testing.expectEqual(event_ptr, client.pending_events.items[0].payload.ptr);
-    try std.testing.expectEqual(batch_ptr, client.pending_batches.items[0].bytes.ptr);
-    try std.testing.expectEqual(partial_ptr, client.partial_batch.?.bytes.items.ptr);
-    try std.testing.expectEqual(@as(usize, 3), client.partial_batch.?.chunk_count);
+    try std.testing.expectEqual(batch_ptr, client.screen_inbox.pending_batches.items[0].bytes.ptr);
+    try std.testing.expectEqual(partial_ptr, client.screen_inbox.partial_batch.?.bytes.items.ptr);
+    try std.testing.expectEqual(@as(usize, 3), client.screen_inbox.partial_batch.?.chunk_count);
     try std.testing.expect(!client.unusable);
     switch (transition) {
         .success => try std.testing.expect(client.io_mode == .external),
@@ -22435,15 +22467,15 @@ test "external adoption inventory seals exact client state and disarms owned que
     client.next_request_id = 91;
 
     const batch_bytes = try allocator.dupe(u8, "batch");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = batch_bytes,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = batch_bytes.len;
+    client.screen_inbox.pending_batch_bytes = batch_bytes.len;
     const stream_bytes = try allocator.dupe(u8, "frame");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -22452,7 +22484,7 @@ test "external adoption inventory seals exact client state and disarms owned que
         },
         .payload = stream_bytes,
     });
-    client.pending_stream_bytes = stream_bytes.len;
+    client.screen_inbox.pending_stream_bytes = stream_bytes.len;
     const event_bytes = try allocator.dupe(u8, "{}");
     try client.pending_events.append(allocator, .{
         .header = .{
@@ -22467,18 +22499,18 @@ test "external adoption inventory seals exact client state and disarms owned que
     client.connection_profile = .gui;
     try std.testing.expectError(error.IneligibleProfile, client.inspectExternalAdoption(7));
     client.connection_profile = .cli_attach;
-    client.pending_batches.items[0].allocator = std.heap.page_allocator;
+    client.screen_inbox.pending_batches.items[0].allocator = std.heap.page_allocator;
     try std.testing.expectError(error.InvalidAllocator, client.inspectExternalAdoption(7));
-    client.pending_batches.items[0].allocator = allocator;
-    client.pending_batch_bytes += 1;
+    client.screen_inbox.pending_batches.items[0].allocator = allocator;
+    client.screen_inbox.pending_batch_bytes += 1;
     try std.testing.expectError(error.InvalidCounter, client.inspectExternalAdoption(7));
-    client.pending_batch_bytes -= 1;
+    client.screen_inbox.pending_batch_bytes -= 1;
     const saved_event_payload = client.pending_events.items[0].payload;
-    client.pending_events.items[0].payload = client.pending_batches.items[0].bytes;
+    client.pending_events.items[0].payload = client.screen_inbox.pending_batches.items[0].bytes;
     client.pending_events.items[0].header.payload_len =
-        @intCast(client.pending_batches.items[0].bytes.len);
+        @intCast(client.screen_inbox.pending_batches.items[0].bytes.len);
     client.pending_events.items[0].header.kind = .response;
-    client.pending_event_bytes = client.pending_batches.items[0].bytes.len;
+    client.pending_event_bytes = client.screen_inbox.pending_batches.items[0].bytes.len;
     try std.testing.expectError(error.InvalidAlias, client.inspectExternalAdoption(7));
     client.pending_events.items[0].payload = saved_event_payload;
     client.pending_events.items[0].header.kind = .event;
@@ -22486,18 +22518,18 @@ test "external adoption inventory seals exact client state and disarms owned que
     client.pending_event_bytes = saved_event_payload.len;
     var invalid_partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try invalid_partial_bytes.appendSlice(allocator, "partial");
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = invalid_partial_bytes,
         .chunk_count = 0,
     };
     try std.testing.expectError(error.InvalidPartial, client.inspectExternalAdoption(7));
-    client.partial_batch.?.bytes.deinit(allocator);
-    client.partial_batch = null;
+    client.screen_inbox.partial_batch.?.bytes.deinit(allocator);
+    client.screen_inbox.partial_batch = null;
     var valid_partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try valid_partial_bytes.appendSlice(allocator, "partial");
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = valid_partial_bytes,
@@ -22532,7 +22564,7 @@ test "external adoption inventory seals exact client state and disarms owned que
     }
     {
         const alias_ptr: *ExternalScreenCopy = @ptrCast(@alignCast(
-            client.pending_batches.items.ptr,
+            client.screen_inbox.pending_batches.items.ptr,
         ));
         try std.testing.expectError(
             error.InvalidAlias,
@@ -22619,14 +22651,14 @@ test "external adoption inventory seals exact client state and disarms owned que
     var copied = plan;
     try std.testing.expect(!client.validateExternalAdoptionPlan(&copied));
     try std.testing.expectError(error.StaleClient, client.sealExternalAdoption(&copied));
-    client.pending_batch_bytes += 1;
+    client.screen_inbox.pending_batch_bytes += 1;
     try std.testing.expect(!client.validateExternalAdoptionPlan(&plan));
-    client.pending_batch_bytes -= 1;
+    client.screen_inbox.pending_batch_bytes -= 1;
     try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
-    const batch_capacity = client.pending_batches.capacity;
-    client.pending_batches.capacity = client.pending_batches.items.len - 1;
+    const batch_capacity = client.screen_inbox.pending_batches.capacity;
+    client.screen_inbox.pending_batches.capacity = client.screen_inbox.pending_batches.items.len - 1;
     try std.testing.expect(!client.validateExternalAdoptionPlan(&plan));
-    client.pending_batches.capacity = batch_capacity;
+    client.screen_inbox.pending_batches.capacity = batch_capacity;
     try std.testing.expect(client.validateExternalAdoptionPlan(&plan));
     const io_mode = client.io_mode;
     client.io_mode = .blocking;
@@ -22648,10 +22680,10 @@ test "external adoption inventory seals exact client state and disarms owned que
     try std.testing.expectEqual(parser_address, @intFromPtr(&client.parser));
     try std.testing.expectEqual(ConnectionProfile.cli_attach, client.connection_profile.?);
     try std.testing.expectEqual(@as(u64, 0), client.next_request_id);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.capacity);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_batches.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_stream.capacity);
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
-    try std.testing.expect(client.partial_batch == null);
+    try std.testing.expect(client.screen_inbox.partial_batch == null);
     try std.testing.expect(plan.inventory == null);
 }
 
@@ -22673,23 +22705,23 @@ test "external adoption typed take moves queue owners without allocator callback
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     client.build_id = try allocator.dupe(u8, "build");
     const payload = try allocator.dupe(u8, "screen");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = payload.len;
+    client.screen_inbox.pending_batch_bytes = payload.len;
     var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try partial_bytes.appendSlice(allocator, "partial");
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = partial_bytes,
         .chunk_count = 1,
     };
     const stream_payload = try allocator.dupe(u8, "stream");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -22697,7 +22729,7 @@ test "external adoption typed take moves queue owners without allocator callback
         },
         .payload = stream_payload,
     });
-    client.pending_stream_bytes = stream_payload.len;
+    client.screen_inbox.pending_stream_bytes = stream_payload.len;
     const event_payload = try allocator.dupe(u8, "{\"event\":\"runtime.ended\"}");
     try client.pending_events.append(allocator, .{
         .header = .{
@@ -22734,15 +22766,15 @@ test "external adoption typed take moves queue owners without allocator callback
         &mirror_owner,
         &mirror_cleanup_owner,
     ));
-    try std.testing.expectEqual(@as(usize, 1), client.pending_batches.items.len);
-    client.pending_batch_bytes += 1;
+    try std.testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_batches.items.len);
+    client.screen_inbox.pending_batch_bytes += 1;
     try std.testing.expect(!take.validate(
         &client,
         &plan,
         &mirror_owner,
         &mirror_cleanup_owner,
     ));
-    client.pending_batch_bytes -= 1;
+    client.screen_inbox.pending_batch_bytes -= 1;
     var prepared_copy = take;
     prepared_copy.deinit();
     try std.testing.expect(take.validate(
@@ -22761,10 +22793,10 @@ test "external adoption typed take moves queue owners without allocator callback
         &take,
     );
     try std.testing.expectEqual(free_calls_before_commit, counting.free_calls);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.capacity);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_batches.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_stream.capacity);
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
-    try std.testing.expect(client.partial_batch == null);
+    try std.testing.expect(client.screen_inbox.partial_batch == null);
     try std.testing.expectEqual(@as(u64, 0), client.next_request_id);
     try std.testing.expect(plan.inventory == null);
     try std.testing.expect(mirror_owner == null);
@@ -22927,18 +22959,18 @@ fn appendExternalTakeQueueFixture(
     for (0..batch_count) |index| {
         const byte = [_]u8{@truncate(index)};
         const payload = try allocator.dupe(u8, &byte);
-        try client.pending_batches.append(allocator, .{
+        try client.screen_inbox.pending_batches.append(allocator, .{
             .is_snapshot = false,
             .stream_id = 7,
             .bytes = payload,
             .allocator = allocator,
         });
-        client.pending_batch_bytes += payload.len;
+        client.screen_inbox.pending_batch_bytes += payload.len;
     }
     for (0..stream_count) |index| {
         const byte = [_]u8{@truncate(index)};
         const payload = try allocator.dupe(u8, &byte);
-        try client.pending_stream.append(allocator, .{
+        try client.screen_inbox.pending_stream.append(allocator, .{
             .header = .{
                 .kind = .delta_chunk,
                 .flags = protocol.Flags.end_stream,
@@ -22947,7 +22979,7 @@ fn appendExternalTakeQueueFixture(
             },
             .payload = payload,
         });
-        client.pending_stream_bytes += payload.len;
+        client.screen_inbox.pending_stream_bytes += payload.len;
     }
     const event_json = "{\"event\":\"runtime.ended\"}";
     for (0..event_count) |_| {
@@ -22983,23 +23015,23 @@ test "external recovery discard freezes queues and preserves transport owners" {
     client.next_request_id = 91;
 
     const batch_bytes = try allocator.dupe(u8, "batch");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = batch_bytes,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = batch_bytes.len;
+    client.screen_inbox.pending_batch_bytes = batch_bytes.len;
     const second_batch_bytes = try allocator.dupe(u8, "batch-2");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = second_batch_bytes,
         .allocator = allocator,
     });
-    client.pending_batch_bytes += second_batch_bytes.len;
+    client.screen_inbox.pending_batch_bytes += second_batch_bytes.len;
     const stream_bytes = try allocator.dupe(u8, "frame");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -23008,7 +23040,7 @@ test "external recovery discard freezes queues and preserves transport owners" {
         },
         .payload = stream_bytes,
     });
-    client.pending_stream_bytes = stream_bytes.len;
+    client.screen_inbox.pending_stream_bytes = stream_bytes.len;
     const event_bytes = try allocator.dupe(u8, "{}");
     try client.pending_events.append(allocator, .{
         .header = .{
@@ -23021,7 +23053,7 @@ test "external recovery discard freezes queues and preserves transport owners" {
     client.pending_event_bytes = event_bytes.len;
     var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try partial_bytes.appendSlice(allocator, "partial");
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = partial_bytes,
@@ -23080,13 +23112,13 @@ test "external recovery discard freezes queues and preserves transport owners" {
     try std.testing.expectEqual(fd_before, client.fd);
     try std.testing.expectEqual(parser_before, client.parser.buf.items.ptr);
     try std.testing.expect(client.io_mode == .external);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_batches.capacity);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_stream.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_batches.capacity);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_stream.capacity);
     try std.testing.expectEqual(@as(usize, 0), client.pending_events.capacity);
     try std.testing.expectEqual(@as(usize, 0), client.pending_catchup_barriers.capacity);
-    try std.testing.expect(client.partial_batch == null);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_batch_bytes);
-    try std.testing.expectEqual(@as(usize, 0), client.pending_stream_bytes);
+    try std.testing.expect(client.screen_inbox.partial_batch == null);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_batch_bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.screen_inbox.pending_stream_bytes);
     try std.testing.expectEqual(@as(usize, 0), client.pending_event_bytes);
     try std.testing.expectEqual(@as(u64, 0), client.next_request_id);
     try std.testing.expect(!client.validateExternalRecoveryDiscard(
@@ -23297,7 +23329,7 @@ test "external adoption validates inherited stream batches across every boundary
     bad.connection_profile = .cli_attach;
     bad.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     const bad_delta = try allocator.dupe(u8, "d");
-    try bad.pending_stream.append(allocator, .{
+    try bad.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -23306,7 +23338,7 @@ test "external adoption validates inherited stream batches across every boundary
         .payload = bad_delta,
     });
     const bad_snapshot = try allocator.dupe(u8, "s");
-    try bad.pending_stream.append(allocator, .{
+    try bad.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .snapshot_chunk,
             .stream_id = 7,
@@ -23315,7 +23347,7 @@ test "external adoption validates inherited stream batches across every boundary
         },
         .payload = bad_snapshot,
     });
-    bad.pending_stream_bytes = 2;
+    bad.screen_inbox.pending_stream_bytes = 2;
     try std.testing.expectError(error.InvalidPartial, bad.inspectExternalAdoption(7));
 
     var good_fds: [2]c.fd_t = undefined;
@@ -23330,15 +23362,15 @@ test "external adoption validates inherited stream batches across every boundary
     good.ownership = .external_pump;
     good.connection_profile = .cli_attach;
     good.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
-    good.partial_batch = .{
+    good.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = .empty,
         .chunk_count = 1,
     };
-    try good.partial_batch.?.bytes.appendSlice(allocator, "prefix");
+    try good.screen_inbox.partial_batch.?.bytes.appendSlice(allocator, "prefix");
     const continuation = try allocator.dupe(u8, "tail");
-    try good.pending_stream.append(allocator, .{
+    try good.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -23348,7 +23380,7 @@ test "external adoption validates inherited stream batches across every boundary
         .payload = continuation,
     });
     const next_batch = try allocator.dupe(u8, "next");
-    try good.pending_stream.append(allocator, .{
+    try good.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .snapshot_chunk,
             .stream_id = 7,
@@ -23357,7 +23389,7 @@ test "external adoption validates inherited stream batches across every boundary
         },
         .payload = next_batch,
     });
-    good.pending_stream_bytes = continuation.len + next_batch.len;
+    good.screen_inbox.pending_stream_bytes = continuation.len + next_batch.len;
     var inventory = try good.inspectExternalAdoption(7);
     defer inventory.deinit();
     try std.testing.expectEqual(@as(usize, 3), inventory.screen_source_count);
@@ -23507,34 +23539,34 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     client.build_id = try allocator.dupe(u8, "build");
     client.lifecycle = try allocator.dupe(u8, "running");
     try client.parser.buf.append(allocator, 0);
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = .empty,
         .chunk_count = 1,
     };
-    try client.partial_batch.?.bytes.append(allocator, 0);
+    try client.screen_inbox.partial_batch.?.bytes.append(allocator, 0);
 
-    try client.pending_batches.ensureTotalCapacityPrecise(
+    try client.screen_inbox.pending_batches.ensureTotalCapacityPrecise(
         allocator,
         protocol.max_client_screen_items,
     );
     for (0..protocol.max_client_screen_items) |_| {
         const payload = try allocator.dupe(u8, "b");
-        client.pending_batches.appendAssumeCapacity(.{
+        client.screen_inbox.pending_batches.appendAssumeCapacity(.{
             .is_snapshot = false,
             .stream_id = 7,
             .bytes = payload,
             .allocator = allocator,
         });
     }
-    try client.pending_stream.ensureTotalCapacityPrecise(
+    try client.screen_inbox.pending_stream.ensureTotalCapacityPrecise(
         allocator,
         protocol.max_client_screen_items,
     );
     for (0..protocol.max_client_screen_items) |_| {
         const payload = try allocator.dupe(u8, "s");
-        client.pending_stream.appendAssumeCapacity(.{
+        client.screen_inbox.pending_stream.appendAssumeCapacity(.{
             .header = .{
                 .kind = .snapshot_chunk,
                 .stream_id = 7,
@@ -23672,30 +23704,30 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try client.parser.buf.appendSlice(allocator, "parser");
 
     const batch_payload = try allocator.dupe(u8, "batch");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = batch_payload,
         .allocator = allocator,
     });
     const second_batch_payload = try allocator.dupe(u8, "batch-two");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 7,
         .bytes = second_batch_payload,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = batch_payload.len + second_batch_payload.len;
+    client.screen_inbox.pending_batch_bytes = batch_payload.len + second_batch_payload.len;
     var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try partial_bytes.appendSlice(allocator, "partial");
-    client.partial_batch = .{
+    client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = partial_bytes,
         .chunk_count = 1,
     };
     const stream_payload = try allocator.dupe(u8, "stream");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -23704,7 +23736,7 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         },
         .payload = stream_payload,
     });
-    client.pending_stream_bytes = stream_payload.len;
+    client.screen_inbox.pending_stream_bytes = stream_payload.len;
     const event_payload = try allocator.dupe(u8, "{}");
     try client.pending_events.append(allocator, .{
         .header = .{
@@ -23776,13 +23808,13 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try std.testing.expectError(error.InvalidClientState, encoder.finish());
     try std.testing.expectError(
         error.InvalidClientState,
-        encoder.writeStream(&client, 0, &client.pending_stream.items[0]),
+        encoder.writeStream(&client, 0, &client.screen_inbox.pending_stream.items[0]),
     );
     try std.testing.expectError(
         error.InvalidClientState,
-        encoder.writeBatch(&client, 1, &client.pending_batches.items[0]),
+        encoder.writeBatch(&client, 1, &client.screen_inbox.pending_batches.items[0]),
     );
-    var foreign_batch = client.pending_batches.items[0];
+    var foreign_batch = client.screen_inbox.pending_batches.items[0];
     try std.testing.expectError(
         error.InvalidClientState,
         encoder.writeBatch(&client, 0, &foreign_batch),
@@ -23790,19 +23822,19 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     var other_client = client;
     try std.testing.expectError(
         error.InvalidClientState,
-        encoder.writeBatch(&other_client, 0, &client.pending_batches.items[0]),
+        encoder.writeBatch(&other_client, 0, &client.screen_inbox.pending_batches.items[0]),
     );
-    try encoder.writeBatch(&client, 0, &client.pending_batches.items[0]);
+    try encoder.writeBatch(&client, 0, &client.screen_inbox.pending_batches.items[0]);
     try std.testing.expectError(
         error.InvalidClientState,
-        encoder.writeBatch(&client, 0, &client.pending_batches.items[0]),
+        encoder.writeBatch(&client, 0, &client.screen_inbox.pending_batches.items[0]),
     );
     try std.testing.expectError(
         error.InvalidClientState,
-        encoder.writeStream(&client, 0, &client.pending_stream.items[0]),
+        encoder.writeStream(&client, 0, &client.screen_inbox.pending_stream.items[0]),
     );
-    try encoder.writeBatch(&client, 1, &client.pending_batches.items[1]);
-    try encoder.writeStream(&client, 0, &client.pending_stream.items[0]);
+    try encoder.writeBatch(&client, 1, &client.screen_inbox.pending_batches.items[1]);
+    try encoder.writeStream(&client, 0, &client.screen_inbox.pending_stream.items[0]);
     try encoder.writeEvent(&client, 0, &client.pending_events.items[0]);
     _ = try encoder.finish();
     try std.testing.expectError(error.InvalidClientState, encoder.finish());
@@ -23883,41 +23915,41 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.parser.head = 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.parser.head = 0;
-    client.pending_batches.items[0].is_snapshot = true;
+    client.screen_inbox.pending_batches.items[0].is_snapshot = true;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.pending_batches.items[0].is_snapshot = false;
-    client.pending_batches.items[0].allocator = std.heap.page_allocator;
+    client.screen_inbox.pending_batches.items[0].is_snapshot = false;
+    client.screen_inbox.pending_batches.items[0].allocator = std.heap.page_allocator;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.pending_batches.items[0].allocator = allocator;
-    client.pending_batches.items[0].bytes[0] ^= 1;
+    client.screen_inbox.pending_batches.items[0].allocator = allocator;
+    client.screen_inbox.pending_batches.items[0].bytes[0] ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.pending_batches.items[0].bytes[0] ^= 1;
+    client.screen_inbox.pending_batches.items[0].bytes[0] ^= 1;
     std.mem.swap(
         StreamBatch,
-        &client.pending_batches.items[0],
-        &client.pending_batches.items[1],
+        &client.screen_inbox.pending_batches.items[0],
+        &client.screen_inbox.pending_batches.items[1],
     );
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     std.mem.swap(
         StreamBatch,
-        &client.pending_batches.items[0],
-        &client.pending_batches.items[1],
+        &client.screen_inbox.pending_batches.items[0],
+        &client.screen_inbox.pending_batches.items[1],
     );
-    client.pending_stream.items[0].header.flags = 0;
+    client.screen_inbox.pending_stream.items[0].header.flags = 0;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.pending_stream.items[0].header.flags = protocol.Flags.end_stream;
-    client.pending_batch_bytes += 1;
+    client.screen_inbox.pending_stream.items[0].header.flags = protocol.Flags.end_stream;
+    client.screen_inbox.pending_batch_bytes += 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.pending_batch_bytes -= 1;
-    client.pending_stream_bytes += 1;
+    client.screen_inbox.pending_batch_bytes -= 1;
+    client.screen_inbox.pending_stream_bytes += 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.pending_stream_bytes -= 1;
-    client.partial_batch.?.chunk_count = 2;
+    client.screen_inbox.pending_stream_bytes -= 1;
+    client.screen_inbox.partial_batch.?.chunk_count = 2;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.partial_batch.?.chunk_count = 1;
-    client.partial_batch.?.bytes.items[0] ^= 1;
+    client.screen_inbox.partial_batch.?.chunk_count = 1;
+    client.screen_inbox.partial_batch.?.bytes.items[0] ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
-    client.partial_batch.?.bytes.items[0] ^= 1;
+    client.screen_inbox.partial_batch.?.bytes.items[0] ^= 1;
     client.pending_events.items[0].payload[0] ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.pending_events.items[0].payload[0] ^= 1;
@@ -24324,7 +24356,7 @@ test "external source fold keeps seed tags and scans terminal FIFO tails" {
         .payload = malformed_payload,
     });
     client.pending_event_bytes = ended_payload.len + malformed_payload.len;
-    client.pending_batch_bytes += 1;
+    client.screen_inbox.pending_batch_bytes += 1;
     const terminal = try client.foldExternalAdoptionSource(
         .{
             .identity = identity,
@@ -24339,7 +24371,7 @@ test "external source fold keeps seed tags and scans terminal FIFO tails" {
     };
     try std.testing.expect(reason == .source);
     try std.testing.expect(reason.source == .malformed);
-    client.pending_batch_bytes -= 1;
+    client.screen_inbox.pending_batch_bytes -= 1;
     const original_digest = terminal.source_seal.digest;
     malformed_payload[0] = '[';
     const mutated = try client.foldExternalAdoptionSource(
@@ -25781,9 +25813,9 @@ test "generation allocator scope 무효 축은 하나씩 구별된다" {
     // ledger가 아예 없으면 다른 어떤 축보다 먼저 걸린다 — 나머지를 잴 근거 자체가 없기 때문이다.
     // Client를 복사해서 재지 않는다: 복사본은 주소가 달라 `client_addr` 축을 먼저 건드리고, 무엇보다
     // 이 타입은 복사를 불변식 위반으로 다룬다. 원본의 ledger만 잠시 떼었다 되돌린다.
-    const saved_ledger = client.generation_batch_accounting.ledger;
-    client.generation_batch_accounting.ledger = null;
+    const saved_ledger = client.screen_inbox.generation_batch_accounting.ledger;
+    client.screen_inbox.generation_batch_accounting.ledger = null;
     try std.testing.expectEqual(Client.ScopeInvalidAxis.ledger_absent, identity.firstInvalidAxis(&client).?);
-    client.generation_batch_accounting.ledger = saved_ledger;
+    client.screen_inbox.generation_batch_accounting.ledger = saved_ledger;
     try std.testing.expectEqual(@as(?Client.ScopeInvalidAxis, null), identity.firstInvalidAxis(&client));
 }

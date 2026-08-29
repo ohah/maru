@@ -26911,13 +26911,13 @@ test "committed teardown transfers Client cleanup reservation before callback" {
     defer fixture.client.deinit();
     const owned_fd = fixture.client.fd;
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -26949,13 +26949,13 @@ test "external pump prepares tracked authority and client ledger adoption withou
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     const init_result = initTestStorage(&storage, &fixture.client, valid_evidence);
     try std.testing.expect(init_result == .initialized);
@@ -27123,13 +27123,13 @@ test "c3c-3a screen consume retires ledger payload without callback until aggreg
     defer fixture.deinitPeer();
     inline for (.{ "first", "second" }) |text| {
         const payload = try fixture.client.allocator.dupe(u8, text);
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes += payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes += payload.len;
     }
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
@@ -27171,13 +27171,13 @@ test "d2b1 whole-turn lease snapshots inherited blockers once at final addresses
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -34155,7 +34155,7 @@ test "d2b3d inherited product owners stop parser and allocation before mutation"
             .committed_screen => {
                 const payload =
                     try fixture.client.allocator.dupe(u8, "inherited");
-                try fixture.client.pending_batches.append(
+                try fixture.client.screen_inbox.pending_batches.append(
                     fixture.client.allocator,
                     .{
                         .is_snapshot = false,
@@ -34164,7 +34164,7 @@ test "d2b3d inherited product owners stop parser and allocation before mutation"
                         .allocator = fixture.client.allocator,
                     },
                 );
-                fixture.client.pending_batch_bytes = payload.len;
+                fixture.client.screen_inbox.pending_batch_bytes = payload.len;
             },
             .metadata => {
                 fixture.client.metadata_support = .supported;
@@ -36577,13 +36577,13 @@ test "d2b1 pending summary reseals after exact screen retirement" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -36615,13 +36615,13 @@ test "d2b1 whole-turn lease rejects committed owner backing as scratch" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -36673,13 +36673,13 @@ test "c3c-3a screen bitmap and ledger retirement drift fail closed in both direc
         var fixture = try TestClient.init();
         defer fixture.deinitPeer();
         const payload = try fixture.client.allocator.dupe(u8, "screen");
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes = payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes = payload.len;
         var storage: ExternalPumpStorage = .{};
         try std.testing.expect(
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -36761,13 +36761,13 @@ test "c3c-2b2 nonempty post-ledger suffix defers allocator callback until public
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -36923,13 +36923,13 @@ test "c3c-2b2 cross-owner screen payload alias terminalizes without double free"
     var fixture = try TestClient.initWithAllocator(std.heap.page_allocator);
     defer fixture.deinitPeer();
     const source_payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = source_payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = source_payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = source_payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -36940,12 +36940,12 @@ test "c3c-2b2 cross-owner screen payload alias terminalizes without double free"
     const transfer = storage.prepared_adoption.backlog.transfer.?;
     const abandoned_payload = transfer.copies[0].bytes;
     var abandoned_inventory = storage.prepared_adoption.backlog.inventory.?;
-    transfer.copies[0].bytes = storage.owned_client.?.pending_batches.items[0].bytes;
-    transfer.copies[0].view = storage.owned_client.?.pending_batches.items[0].bytes;
+    transfer.copies[0].bytes = storage.owned_client.?.screen_inbox.pending_batches.items[0].bytes;
+    transfer.copies[0].view = storage.owned_client.?.screen_inbox.pending_batches.items[0].bytes;
     transfer.wrappers[0].allocation_ptr =
-        storage.owned_client.?.pending_batches.items[0].bytes.ptr;
+        storage.owned_client.?.screen_inbox.pending_batches.items[0].bytes.ptr;
     transfer.wrappers[0].logical_len =
-        storage.owned_client.?.pending_batches.items[0].bytes.len;
+        storage.owned_client.?.screen_inbox.pending_batches.items[0].bytes.len;
     // Even an attacker that recomputes the aggregate transcript cannot turn overlapping owner
     // graphs into a valid permit; the address proof is an independent leaf authority.
     storage.prepared_adoption.final_seal = storage.expectedFinalSeal();
@@ -37004,13 +37004,13 @@ test "c3c-2b2 invalid outer screen descriptors fail before nested dereference" {
         var fixture = try TestClient.init();
         defer fixture.deinitPeer();
         const source_payload = try fixture.client.allocator.dupe(u8, "screen");
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = source_payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes = source_payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes = source_payload.len;
         var storage: ExternalPumpStorage = .{};
         try std.testing.expect(
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -37058,13 +37058,13 @@ test "c3c-2b2 screen cleanup ignores correlated foreign descriptor mirrors" {
         var fixture = try TestClient.init();
         defer fixture.deinitPeer();
         const source_payload = try fixture.client.allocator.dupe(u8, "screen");
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = source_payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes = source_payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes = source_payload.len;
         var storage: ExternalPumpStorage = .{};
         try std.testing.expect(
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -37175,13 +37175,13 @@ test "c3c-2b2 screen cleanup requires majority allocator authority" {
         var fixture = try TestClient.init();
         defer fixture.deinitPeer();
         const source_payload = try fixture.client.allocator.dupe(u8, "screen");
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = source_payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes = source_payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes = source_payload.len;
         var storage: ExternalPumpStorage = .{};
         try std.testing.expect(
             initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -37300,13 +37300,13 @@ test "c3c-2b2 terminal cleanup reserves Client claim across allocator callbacks"
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -37338,13 +37338,13 @@ test "c3c-2b2 cleanup freezes screen authority before first allocator callback" 
     fixture.client.metadata_support = .supported;
     try appendTestEvent(&fixture.client, event_json);
     const screen = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = screen,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = screen.len;
+    fixture.client.screen_inbox.pending_batch_bytes = screen.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -37378,13 +37378,13 @@ test "c3c-2b2 cleanup deep freezes nested screen descriptors before allocator ca
     fixture.client.metadata_support = .supported;
     try appendTestEvent(&fixture.client, event_json);
     const screen = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = screen,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = screen.len;
+    fixture.client.screen_inbox.pending_batch_bytes = screen.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -38053,9 +38053,9 @@ test "c3c-3b scratch and forged owner drift quarantines before owner dereference
                 owned
             else
                 unreachable;
-            client.pending_batches.items.ptr = @ptrFromInt(0x1000);
-            client.pending_batches.items.len = 1;
-            client.pending_batches.capacity = 1;
+            client.screen_inbox.pending_batches.items.ptr = @ptrFromInt(0x1000);
+            client.screen_inbox.pending_batches.items.len = 1;
+            client.screen_inbox.pending_batches.capacity = 1;
             return .applied;
         }
     };
@@ -38114,13 +38114,13 @@ test "c3c-3b projection quarantines deep screen token drift for either callback 
         var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
         defer fixture.deinitPeer();
         const payload = try fixture.client.allocator.dupe(u8, "screen");
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes = payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes = payload.len;
         try appendTestEvent(&fixture.client,
             \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
         );
@@ -38170,13 +38170,13 @@ test "c3c-3b projection quarantines adoption inventory backing element drift" {
     var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     try appendTestEvent(&fixture.client,
         \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
     );
@@ -38257,9 +38257,9 @@ test "c3c-3b projection rejects forged Client list descriptor before dereference
                 owned
             else
                 unreachable;
-            client.pending_batches.items.ptr = @ptrFromInt(0x1000);
-            client.pending_batches.items.len = 1;
-            client.pending_batches.capacity = 1;
+            client.screen_inbox.pending_batches.items.ptr = @ptrFromInt(0x1000);
+            client.screen_inbox.pending_batches.items.len = 1;
+            client.screen_inbox.pending_batches.capacity = 1;
             return .applied;
         }
     };
@@ -38415,13 +38415,13 @@ test "c3c-3b projection rejects deep ledger slot drift after callback" {
     var fixture = try TestClient.initWithAllocator(std.heap.c_allocator);
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     try appendTestEvent(&fixture.client,
         \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
     );
@@ -38536,13 +38536,13 @@ test "c3c-3 aggregate teardown restores caller scratch and is idempotent" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -38575,13 +38575,13 @@ test "c3c-3 aggregate teardown overwrites allocator callback mutation from hidde
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -38633,13 +38633,13 @@ test "C1 aggregate teardown overwrites callback-mutated resident cap" {
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -38698,7 +38698,7 @@ test "c3c-3 aggregate teardown quarantines moved scratch and exhausted generatio
             storage.teardown(target),
         );
         try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
-        try std.testing.expectEqual(@as(usize, 0), fixture.client.pending_batch_bytes);
+        try std.testing.expectEqual(@as(usize, 0), fixture.client.screen_inbox.pending_batch_bytes);
         switch (scenario) {
             .moved_scratch => try std.testing.expectEqual(
                 ExternalPumpCleanupScratchLifecycle.ready,
@@ -39061,18 +39061,18 @@ test "external local screen item cap commits client recovery" {
     var index: usize = 0;
     while (index < batch_count) : (index += 1) {
         const payload = try fixture.client.allocator.dupe(u8, "s");
-        try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
             .is_snapshot = false,
             .stream_id = valid_evidence.stream_id,
             .bytes = payload,
             .allocator = fixture.client.allocator,
         });
-        fixture.client.pending_batch_bytes += payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes += payload.len;
     }
     index = 0;
     while (index < stream_count) : (index += 1) {
         const payload = try fixture.client.allocator.dupe(u8, "s");
-        try fixture.client.pending_stream.append(fixture.client.allocator, .{
+        try fixture.client.screen_inbox.pending_stream.append(fixture.client.allocator, .{
             .header = .{
                 .kind = .delta_chunk,
                 .stream_id = valid_evidence.stream_id,
@@ -39081,7 +39081,7 @@ test "external local screen item cap commits client recovery" {
             },
             .payload = payload,
         });
-        fixture.client.pending_stream_bytes += payload.len;
+        fixture.client.screen_inbox.pending_stream_bytes += payload.len;
     }
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
@@ -39104,7 +39104,7 @@ test "external local screen item cap commits client recovery" {
     try std.testing.expectEqual(StorageLifecycle.live, storage.lifecycle);
     try std.testing.expectEqual(
         @as(usize, 0),
-        storage.owned_client.?.pending_batches.items.len,
+        storage.owned_client.?.screen_inbox.pending_batches.items.len,
     );
     try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
@@ -39395,13 +39395,13 @@ test "terminal discard validation drift quarantines without allocator callbacks"
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -39417,7 +39417,7 @@ test "terminal discard validation drift quarantines without allocator callbacks"
         &cleanup_scratch.range_scratch.source,
         &cleanup_scratch.recovery_discard,
     );
-    storage.owned_client.?.pending_batch_bytes += 1;
+    storage.owned_client.?.screen_inbox.pending_batch_bytes += 1;
     const callbacks_before = probe.callback_count;
 
     try std.testing.expect(
@@ -39453,13 +39453,13 @@ test "external pump composes an event metadata winner with the screen footprint"
     });
     fixture.client.pending_event_bytes = event_payload.len;
     const screen_payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = valid_evidence.stream_id,
         .bytes = screen_payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = screen_payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = screen_payload.len;
 
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
@@ -39678,13 +39678,13 @@ test "external pump teardown ignores forged prepared lifecycle tombstones" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     const payload = try fixture.client.allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(fixture.client.allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = fixture.client.allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var storage: ExternalPumpStorage = .{};
     try std.testing.expect(
         initTestStorage(&storage, &fixture.client, valid_evidence) ==
@@ -39710,23 +39710,23 @@ test "external pump retries the same storage at every adoption allocation index"
         fixture.client.metadata_support = .supported;
         try fixture.client.parser.push("parser");
         const payload = try allocator.dupe(u8, "batch");
-        try fixture.client.pending_batches.append(allocator, .{
+        try fixture.client.screen_inbox.pending_batches.append(allocator, .{
             .is_snapshot = false,
             .stream_id = 7,
             .bytes = payload,
             .allocator = allocator,
         });
-        fixture.client.pending_batch_bytes = payload.len;
+        fixture.client.screen_inbox.pending_batch_bytes = payload.len;
         var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
         try partial_bytes.appendSlice(allocator, "partial");
-        fixture.client.partial_batch = .{
+        fixture.client.screen_inbox.partial_batch = .{
             .stream_id = 7,
             .is_snapshot = false,
             .bytes = partial_bytes,
             .chunk_count = 1,
         };
         const stream_payload = try allocator.dupe(u8, "stream");
-        try fixture.client.pending_stream.append(allocator, .{
+        try fixture.client.screen_inbox.pending_stream.append(allocator, .{
             .header = .{
                 .kind = .delta_chunk,
                 .stream_id = 7,
@@ -39734,7 +39734,7 @@ test "external pump retries the same storage at every adoption allocation index"
             },
             .payload = stream_payload,
         });
-        fixture.client.pending_stream_bytes = stream_payload.len;
+        fixture.client.screen_inbox.pending_stream_bytes = stream_payload.len;
         const event_payload = try allocator.dupe(u8, event_json);
         try fixture.client.pending_events.append(allocator, .{
             .header = .{
@@ -39751,17 +39751,17 @@ test "external pump retries the same storage at every adoption allocation index"
                 .initialized,
         );
         defer _ = teardownForTest(&storage);
-        const batch_before = storage.owned_client.?.pending_batches.items[0];
-        const batch_list_ptr = storage.owned_client.?.pending_batches.items.ptr;
-        const batch_list_len = storage.owned_client.?.pending_batches.items.len;
-        const batch_list_cap = storage.owned_client.?.pending_batches.capacity;
-        const batch_counter = storage.owned_client.?.pending_batch_bytes;
-        const partial_before = storage.owned_client.?.partial_batch.?;
-        const stream_before = storage.owned_client.?.pending_stream.items[0];
-        const stream_list_ptr = storage.owned_client.?.pending_stream.items.ptr;
-        const stream_list_len = storage.owned_client.?.pending_stream.items.len;
-        const stream_list_cap = storage.owned_client.?.pending_stream.capacity;
-        const stream_counter = storage.owned_client.?.pending_stream_bytes;
+        const batch_before = storage.owned_client.?.screen_inbox.pending_batches.items[0];
+        const batch_list_ptr = storage.owned_client.?.screen_inbox.pending_batches.items.ptr;
+        const batch_list_len = storage.owned_client.?.screen_inbox.pending_batches.items.len;
+        const batch_list_cap = storage.owned_client.?.screen_inbox.pending_batches.capacity;
+        const batch_counter = storage.owned_client.?.screen_inbox.pending_batch_bytes;
+        const partial_before = storage.owned_client.?.screen_inbox.partial_batch.?;
+        const stream_before = storage.owned_client.?.screen_inbox.pending_stream.items[0];
+        const stream_list_ptr = storage.owned_client.?.screen_inbox.pending_stream.items.ptr;
+        const stream_list_len = storage.owned_client.?.screen_inbox.pending_stream.items.len;
+        const stream_list_cap = storage.owned_client.?.screen_inbox.pending_stream.capacity;
+        const stream_counter = storage.owned_client.?.screen_inbox.pending_stream_bytes;
         const event_before = storage.owned_client.?.pending_events.items[0];
         const event_list_ptr = storage.owned_client.?.pending_events.items.ptr;
         const event_list_len = storage.owned_client.?.pending_events.items.len;
@@ -39782,33 +39782,33 @@ test "external pump retries the same storage at every adoption allocation index"
         try std.testing.expect(first == .retryable_preserved);
         try std.testing.expectEqual(AdoptionLifecycle.empty, storage.prepared_adoption.lifecycle);
         try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
-        try std.testing.expectEqual(@as(usize, 1), storage.owned_client.?.pending_batches.items.len);
+        try std.testing.expectEqual(@as(usize, 1), storage.owned_client.?.screen_inbox.pending_batches.items.len);
         try std.testing.expectEqualStrings(
             "batch",
-            storage.owned_client.?.pending_batches.items[0].bytes,
+            storage.owned_client.?.screen_inbox.pending_batches.items[0].bytes,
         );
         try std.testing.expect(std.meta.eql(
             batch_before,
-            storage.owned_client.?.pending_batches.items[0],
+            storage.owned_client.?.screen_inbox.pending_batches.items[0],
         ));
-        try std.testing.expectEqual(batch_list_ptr, storage.owned_client.?.pending_batches.items.ptr);
-        try std.testing.expectEqual(batch_list_len, storage.owned_client.?.pending_batches.items.len);
-        try std.testing.expectEqual(batch_list_cap, storage.owned_client.?.pending_batches.capacity);
-        try std.testing.expectEqual(batch_counter, storage.owned_client.?.pending_batch_bytes);
+        try std.testing.expectEqual(batch_list_ptr, storage.owned_client.?.screen_inbox.pending_batches.items.ptr);
+        try std.testing.expectEqual(batch_list_len, storage.owned_client.?.screen_inbox.pending_batches.items.len);
+        try std.testing.expectEqual(batch_list_cap, storage.owned_client.?.screen_inbox.pending_batches.capacity);
+        try std.testing.expectEqual(batch_counter, storage.owned_client.?.screen_inbox.pending_batch_bytes);
         try std.testing.expectEqualStrings(
             "partial",
-            storage.owned_client.?.partial_batch.?.bytes.items,
+            storage.owned_client.?.screen_inbox.partial_batch.?.bytes.items,
         );
-        try std.testing.expect(std.meta.eql(partial_before, storage.owned_client.?.partial_batch.?));
+        try std.testing.expect(std.meta.eql(partial_before, storage.owned_client.?.screen_inbox.partial_batch.?));
         try std.testing.expectEqualStrings(
             "stream",
-            storage.owned_client.?.pending_stream.items[0].payload,
+            storage.owned_client.?.screen_inbox.pending_stream.items[0].payload,
         );
-        try std.testing.expect(std.meta.eql(stream_before, storage.owned_client.?.pending_stream.items[0]));
-        try std.testing.expectEqual(stream_list_ptr, storage.owned_client.?.pending_stream.items.ptr);
-        try std.testing.expectEqual(stream_list_len, storage.owned_client.?.pending_stream.items.len);
-        try std.testing.expectEqual(stream_list_cap, storage.owned_client.?.pending_stream.capacity);
-        try std.testing.expectEqual(stream_counter, storage.owned_client.?.pending_stream_bytes);
+        try std.testing.expect(std.meta.eql(stream_before, storage.owned_client.?.screen_inbox.pending_stream.items[0]));
+        try std.testing.expectEqual(stream_list_ptr, storage.owned_client.?.screen_inbox.pending_stream.items.ptr);
+        try std.testing.expectEqual(stream_list_len, storage.owned_client.?.screen_inbox.pending_stream.items.len);
+        try std.testing.expectEqual(stream_list_cap, storage.owned_client.?.screen_inbox.pending_stream.capacity);
+        try std.testing.expectEqual(stream_counter, storage.owned_client.?.screen_inbox.pending_stream_bytes);
         try std.testing.expectEqualStrings(
             event_json,
             storage.owned_client.?.pending_events.items[0].payload,
@@ -40258,7 +40258,7 @@ test "external pump storage normalize failures preserve every observable source 
         const cap = fixture.client.parser.buf.capacity;
         const head = fixture.client.parser.head;
         const request_id = fixture.client.next_request_id;
-        const stream_ptr = fixture.client.pending_stream.items.ptr;
+        const stream_ptr = fixture.client.screen_inbox.pending_stream.items.ptr;
         var storage: ExternalPumpStorage = .{};
         if (scenario == .oom) failing.fail_index = failing.alloc_index;
         const resident_cap = if (scenario == .cap) cap - 1 else cap;
@@ -40284,7 +40284,7 @@ test "external pump storage normalize failures preserve every observable source 
         try std.testing.expectEqual(cap, fixture.client.parser.buf.capacity);
         try std.testing.expectEqual(head, fixture.client.parser.head);
         try std.testing.expectEqual(request_id, fixture.client.next_request_id);
-        try std.testing.expectEqual(stream_ptr, fixture.client.pending_stream.items.ptr);
+        try std.testing.expectEqual(stream_ptr, fixture.client.screen_inbox.pending_stream.items.ptr);
         try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
     }
 }
@@ -40610,15 +40610,15 @@ test "external pump storage rejects overlap with every source-owned backing befo
     defer fixture.client.deinit();
     var storage: ExternalPumpStorage = .{};
     const original = try allocator.dupe(u8, "x");
-    try fixture.client.pending_batches.append(allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = original,
         .allocator = allocator,
     });
-    fixture.client.pending_batch_bytes = 1;
+    fixture.client.screen_inbox.pending_batch_bytes = 1;
     const storage_bytes = std.mem.asBytes(&storage);
-    fixture.client.pending_batches.items[0].bytes = storage_bytes[0..1];
+    fixture.client.screen_inbox.pending_batches.items[0].bytes = storage_bytes[0..1];
     const byte_before = storage_bytes[0];
 
     const failure = initTestStorage(
@@ -40629,7 +40629,7 @@ test "external pump storage rejects overlap with every source-owned backing befo
     try std.testing.expectEqual(InitFailureReason.overlapping_storage, failure.reason);
     try std.testing.expectEqual(SourceDisposition.preserved, failure.source_disposition);
     try std.testing.expectEqual(byte_before, storage_bytes[0]);
-    fixture.client.pending_batches.items[0].bytes = original;
+    fixture.client.screen_inbox.pending_batches.items[0].bytes = original;
 }
 
 test "external pump storage post-move failure closes destination and tombstones source" {

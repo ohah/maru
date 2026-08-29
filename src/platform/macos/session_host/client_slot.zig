@@ -3635,23 +3635,23 @@ fn prepareManagedPoisonRequestPinned(
     if (!incident_binding_contract.validBindingShape(binding)) return error.InvalidOwner;
     const reason: connection_incident.ConnectionReason = @enumFromInt(request.reason_raw);
     const decision = connection_incident.decisionForReason(reason);
-    const pending_stream_count = std.math.cast(u32, client.pending_stream.items.len) orelse
+    const pending_stream_count = std.math.cast(u32, client.screen_inbox.pending_stream.items.len) orelse
         return error.InvalidInput;
     const pending_event_count = std.math.cast(u32, client.pending_events.items.len) orelse
         return error.InvalidInput;
-    var queue_items = std.math.add(usize, client.pending_stream.items.len, client.pending_events.items.len) catch
+    var queue_items = std.math.add(usize, client.screen_inbox.pending_stream.items.len, client.pending_events.items.len) catch
         return error.InvalidInput;
-    queue_items = std.math.add(usize, queue_items, client.pending_batches.items.len) catch
+    queue_items = std.math.add(usize, queue_items, client.screen_inbox.pending_batches.items.len) catch
         return error.InvalidInput;
-    queue_items = std.math.add(usize, queue_items, @intFromBool(client.partial_batch != null)) catch
+    queue_items = std.math.add(usize, queue_items, @intFromBool(client.screen_inbox.partial_batch != null)) catch
         return error.InvalidInput;
     queue_items = std.math.add(usize, queue_items, @intFromBool(client.pending_outbound != null)) catch
         return error.InvalidInput;
-    var queue_bytes = std.math.add(usize, client.pending_stream_bytes, client.pending_event_bytes) catch
+    var queue_bytes = std.math.add(usize, client.screen_inbox.pending_stream_bytes, client.pending_event_bytes) catch
         return error.InvalidInput;
-    queue_bytes = std.math.add(usize, queue_bytes, client.pending_batch_bytes) catch
+    queue_bytes = std.math.add(usize, queue_bytes, client.screen_inbox.pending_batch_bytes) catch
         return error.InvalidInput;
-    if (client.partial_batch) |partial|
+    if (client.screen_inbox.partial_batch) |partial|
         queue_bytes = std.math.add(usize, queue_bytes, partial.bytes.items.len) catch
             return error.InvalidInput;
     var outbound_offset: u64 = 0;
@@ -16131,13 +16131,13 @@ test "CR3a-2b1 ClientSlot은 buffered batch owner와 accounting을 exact release
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xB201);
     const bytes = try allocator.dupe(u8, "generation-batch");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 7,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
 
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xB201);
@@ -16168,13 +16168,13 @@ test "CR3a-2d1 ClientSlot completed release는 payload와 accounting을 exact �
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0x2D11);
     const bytes = try allocator.dupe(u8, "completed-release");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 31,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0x2D11);
     const token = switch (try slot.readAttachmentBatch(31)) {
@@ -16195,13 +16195,13 @@ test "CR3a-2d2 ClientSlot ordinary teardown은 published handoff를 보존한다
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xD201);
     const bytes = try allocator.dupe(u8, "terminal-batch");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD201);
     const token = switch (try slot.readAttachmentBatch(7)) {
@@ -16239,13 +16239,13 @@ test "CR3a-2d2 ClientSlot typed teardown은 surviving payload와 accounting을 e
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xD202);
     const bytes = try allocator.dupe(u8, "surviving");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 9,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD202);
     const token = switch (try slot.readAttachmentBatch(9)) {
@@ -16275,13 +16275,13 @@ test "CR3a-2d2 ClientSlot typed teardown은 quarantine payload를 free하지 않
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xD203);
     const bytes = try std.heap.page_allocator.dupe(u8, "quarantined");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 11,
         .bytes = bytes,
         .allocator = std.heap.page_allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD203);
     const token = switch (try slot.readAttachmentBatch(11)) {
@@ -16432,9 +16432,9 @@ test "CR3a-2d3 component callback reentry는 같은 attachment teardown을 Busy�
     const bytes = try probe.allocator().dupe(u8, "terminal-callback");
     const sibling_bytes = try allocator.dupe(u8, "terminal-sibling");
     const payload_addr = @intFromPtr(bytes.ptr);
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD301, .bytes = bytes, .allocator = probe.allocator() });
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD304, .bytes = sibling_bytes, .allocator = allocator });
-    source.pending_batch_bytes = bytes.len + sibling_bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD301, .bytes = bytes, .allocator = probe.allocator() });
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD304, .bytes = sibling_bytes, .allocator = allocator });
+    source.screen_inbox.pending_batch_bytes = bytes.len + sibling_bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD301);
     const token = switch (try slot.readAttachmentBatch(0xD301)) {
@@ -16465,8 +16465,8 @@ test "CR3a-2d3 component callback reentry는 같은 attachment teardown을 Busy�
 
     var independent_source = fixtureClient(allocator, 0xD306);
     const independent_bytes = try allocator.dupe(u8, "independent");
-    try independent_source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD306, .bytes = independent_bytes, .allocator = allocator });
-    independent_source.pending_batch_bytes = independent_bytes.len;
+    try independent_source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD306, .bytes = independent_bytes, .allocator = allocator });
+    independent_source.screen_inbox.pending_batch_bytes = independent_bytes.len;
     var independent_slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&independent_slot, allocator, &independent_source, 0xD306);
     const independent_token = switch (try independent_slot.readAttachmentBatch(0xD306)) {
@@ -16505,9 +16505,9 @@ test "CR3a-2d3 component callback reentry는 sibling batch mutation을 Busy로 �
     var source = fixtureClient(allocator, 0xD307);
     const first = try probe.allocator().dupe(u8, "target");
     const sibling = try allocator.dupe(u8, "sibling");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD307, .bytes = first, .allocator = probe.allocator() });
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD308, .bytes = sibling, .allocator = allocator });
-    source.pending_batch_bytes = first.len + sibling.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD307, .bytes = first, .allocator = probe.allocator() });
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD308, .bytes = sibling, .allocator = allocator });
+    source.screen_inbox.pending_batch_bytes = first.len + sibling.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD307);
     const first_token = switch (try slot.readAttachmentBatch(0xD307)) {
@@ -16542,8 +16542,8 @@ test "CR3a-2d3 component callback reentry는 독립 Client read-only operation�
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD309);
     const bytes = try probe.allocator().dupe(u8, "target");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD309, .bytes = bytes, .allocator = probe.allocator() });
-    source.pending_batch_bytes = bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD309, .bytes = bytes, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD309);
     const token = switch (try slot.readAttachmentBatch(0xD309)) {
@@ -16554,8 +16554,8 @@ test "CR3a-2d3 component callback reentry는 독립 Client read-only operation�
 
     var independent_source = fixtureClient(allocator, 0xD30A);
     const independent_bytes = try allocator.dupe(u8, "independent");
-    try independent_source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30A, .bytes = independent_bytes, .allocator = allocator });
-    independent_source.pending_batch_bytes = independent_bytes.len;
+    try independent_source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30A, .bytes = independent_bytes, .allocator = allocator });
+    independent_source.screen_inbox.pending_batch_bytes = independent_bytes.len;
     var independent_slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&independent_slot, allocator, &independent_source, 0xD30A);
     const independent_token = switch (try independent_slot.readAttachmentBatch(0xD30A)) {
@@ -16579,8 +16579,8 @@ test "CR3a-2d3 component preflight 실패는 payload와 accounting과 registry�
     const bytes = try probe.allocator().dupe(u8, "preflight");
     const payload_addr = @intFromPtr(bytes.ptr);
     const payload_digest = std.hash.Wyhash.hash(0, bytes);
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30B, .bytes = bytes, .allocator = probe.allocator() });
-    source.pending_batch_bytes = bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30B, .bytes = bytes, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD30B);
     const token = switch (try slot.readAttachmentBatch(0xD30B)) {
@@ -16608,8 +16608,8 @@ test "CR3a-2d3 component surviving descriptor는 callback과 free를 정확히 �
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD302);
     const bytes = try probe.allocator().dupe(u8, "terminal-once");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD302, .bytes = bytes, .allocator = probe.allocator() });
-    source.pending_batch_bytes = bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD302, .bytes = bytes, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD302);
     const token = switch (try slot.readAttachmentBatch(0xD302)) {
@@ -16629,8 +16629,8 @@ test "CR3a-2d3 component callback 복귀 뒤에만 accounting과 registry row를
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD30C);
     const bytes = try probe.allocator().dupe(u8, "ordered-consume");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30C, .bytes = bytes, .allocator = probe.allocator() });
-    source.pending_batch_bytes = bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30C, .bytes = bytes, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD30C);
     const token = switch (try slot.readAttachmentBatch(0xD30C)) {
@@ -16651,8 +16651,8 @@ test "CR3a-2d3 component quarantine row는 allocator callback을 실행하지 �
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD303);
     const bytes = try probe.allocator().dupe(u8, "terminal-quarantine");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD303, .bytes = bytes, .allocator = probe.allocator() });
-    source.pending_batch_bytes = bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD303, .bytes = bytes, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD303);
     const token = switch (try slot.readAttachmentBatch(0xD303)) {
@@ -16673,8 +16673,8 @@ test "CR3a-2d3 component quarantine row는 accounting과 registry row만 정확�
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD30D);
     const bytes = try probe.allocator().dupe(u8, "quarantine-consume");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30D, .bytes = bytes, .allocator = probe.allocator() });
-    source.pending_batch_bytes = bytes.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD30D, .bytes = bytes, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD30D);
     const token = switch (try slot.readAttachmentBatch(0xD30D)) {
@@ -16798,12 +16798,12 @@ fn dispatchTerminalDrainProofChild(stage: TerminalDrainProofStage) !void {
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD3F0);
     const first = try probe.allocator().dupe(u8, "proof-target");
-    try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD3F0, .bytes = first, .allocator = probe.allocator() });
-    source.pending_batch_bytes = first.len;
+    try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD3F0, .bytes = first, .allocator = probe.allocator() });
+    source.screen_inbox.pending_batch_bytes = first.len;
     if (stage == .callback_reentry) {
         const sibling = try allocator.dupe(u8, "proof-sibling");
-        try source.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD3F1, .bytes = sibling, .allocator = allocator });
-        source.pending_batch_bytes += sibling.len;
+        try source.screen_inbox.pending_batches.append(allocator, .{ .is_snapshot = false, .stream_id = 0xD3F1, .bytes = sibling, .allocator = allocator });
+        source.screen_inbox.pending_batch_bytes += sibling.len;
     }
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xD3F0);
@@ -16886,13 +16886,13 @@ test "CR3a-2d1 ClientSlot 첫 retryable은 payload token accounting을 그대로
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0x2D12);
     const bytes = try allocator.dupe(u8, "retryable-release");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 32,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0x2D12);
     const token = switch (try slot.readAttachmentBatch(32)) {
@@ -16924,13 +16924,13 @@ test "CR3a-2d1 ClientSlot stale token과 wrong stream은 recoverable 결과로 �
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0x2D13);
     const bytes = try allocator.dupe(u8, "strict-release");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 33,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0x2D13);
     const token = switch (try slot.readAttachmentBatch(33)) {
@@ -16959,13 +16959,13 @@ test "CR3a-2b1 ClientSlot batch token은 stream splice를 free 전에 거부한�
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xB202);
     const bytes = try allocator.dupe(u8, "owned");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 11,
         .bytes = bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = bytes.len;
+    source.screen_inbox.pending_batch_bytes = bytes.len;
 
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xB202);
@@ -17003,13 +17003,13 @@ test "CR3a-2b1 ClientSlot polling idle은 4096회 뒤에도 registry cap을 소�
     try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
 
     const bytes = try allocator.dupe(u8, "after-idle");
-    try slot.current.client.pending_batches.append(allocator, .{
+    try slot.current.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 17,
         .bytes = bytes,
         .allocator = allocator,
     });
-    slot.current.client.pending_batch_bytes = bytes.len;
+    slot.current.client.screen_inbox.pending_batch_bytes = bytes.len;
     const token = switch (try slot.readAttachmentBatch(17)) {
         .committed => |token| token,
         else => return error.TestUnexpectedResult,
@@ -17088,21 +17088,21 @@ test "CR3a-2b1 ClientNode move는 overlapping pending payload owner를 거부한
     var source = fixtureClient(allocator, 0xB207);
     const bytes = try allocator.dupe(u8, "aliased");
     for ([_]u64{ 7, 8 }) |stream_id|
-        try source.pending_batches.append(allocator, .{
+        try source.screen_inbox.pending_batches.append(allocator, .{
             .is_snapshot = false,
             .stream_id = stream_id,
             .bytes = bytes,
             .allocator = allocator,
         });
-    source.pending_batch_bytes = bytes.len * 2;
+    source.screen_inbox.pending_batch_bytes = bytes.len * 2;
     var slot: ClientSlot = undefined;
     try std.testing.expectError(
         error.InvalidSource,
         ClientSlot.initInPlace(&slot, allocator, &source, 0xB207),
     );
-    const alias = source.pending_batches.orderedRemove(1);
+    const alias = source.screen_inbox.pending_batches.orderedRemove(1);
     _ = alias;
-    source.pending_batch_bytes -= bytes.len;
+    source.screen_inbox.pending_batch_bytes -= bytes.len;
     source.deinit();
 }
 
@@ -17203,19 +17203,19 @@ test "CR3a-2b1 release allocator callback 동안 charge를 유지하고 sibling 
     var source = fixtureClient(allocator, 0xB203);
     const first = try probe.allocator().dupe(u8, "first");
     const sibling = try allocator.dupe(u8, "sibling");
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 11,
         .bytes = first,
         .allocator = probe.allocator(),
     });
-    try source.pending_batches.append(allocator, .{
+    try source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 12,
         .bytes = sibling,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = first.len + sibling.len;
+    source.screen_inbox.pending_batch_bytes = first.len + sibling.len;
 
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xB203);
@@ -17611,24 +17611,24 @@ test "CR3a-2b1 parser allocator callback은 same과 foreign ClientSlot mutation�
     var source = fixtureClient(checked_allocator, 0xB208);
     source.fd = fds[0];
     const same_sibling_bytes = try allocator.dupe(u8, "same-sibling");
-    try source.pending_batches.append(checked_allocator, .{
+    try source.screen_inbox.pending_batches.append(checked_allocator, .{
         .is_snapshot = false,
         .stream_id = 8,
         .bytes = same_sibling_bytes,
         .allocator = allocator,
     });
-    source.pending_batch_bytes = same_sibling_bytes.len;
+    source.screen_inbox.pending_batch_bytes = same_sibling_bytes.len;
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, checked_allocator, &source, 0xB208);
     var foreign_source = fixtureClient(allocator, 0xB209);
     const foreign_sibling_bytes = try allocator.dupe(u8, "foreign-sibling");
-    try foreign_source.pending_batches.append(allocator, .{
+    try foreign_source.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 9,
         .bytes = foreign_sibling_bytes,
         .allocator = allocator,
     });
-    foreign_source.pending_batch_bytes = foreign_sibling_bytes.len;
+    foreign_source.screen_inbox.pending_batch_bytes = foreign_sibling_bytes.len;
     var foreign: ClientSlot = undefined;
     try ClientSlot.initInPlace(&foreign, allocator, &foreign_source, 0xB209);
     defer foreign.deinit();
@@ -17668,7 +17668,7 @@ test "CR3a-2b1 parser allocator callback은 same과 foreign ClientSlot mutation�
     try std.testing.expectEqual(@as(u64, 1), foreign.current.batch_registry.last_generation);
     try std.testing.expectEqual(@as(usize, 2), try slot.current.batch_registry.count());
     try std.testing.expectEqual(@as(usize, 1), try foreign.current.batch_registry.count());
-    try std.testing.expectEqual(@as(usize, 0), foreign.current.client.pending_batches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), foreign.current.client.screen_inbox.pending_batches.items.len);
     try std.testing.expect(std.meta.eql(checked_allocator, slot.current.client.allocator));
     try std.testing.expect(slot.current.client.parser.usesAllocator(checked_allocator));
     try std.testing.expectEqualStrings("guarded-direct", (try slot.borrowAttachmentBatch(token)).bytes);
@@ -17704,13 +17704,13 @@ test "CR3a-2b1 parser allocator callback은 same과 foreign ClientSlot mutation�
     );
 
     const buffered_outer_bytes = try probe.allocator().dupe(u8, "buffered-outer");
-    try slot.current.client.pending_batches.append(checked_allocator, .{
+    try slot.current.client.screen_inbox.pending_batches.append(checked_allocator, .{
         .is_snapshot = false,
         .stream_id = 10,
         .bytes = buffered_outer_bytes,
         .allocator = probe.allocator(),
     });
-    slot.current.client.pending_batch_bytes += buffered_outer_bytes.len;
+    slot.current.client.screen_inbox.pending_batch_bytes += buffered_outer_bytes.len;
     const buffered_token = switch (try slot.readAttachmentBatch(10)) {
         .committed => |buffered| buffered,
         else => return error.TestUnexpectedResult,
@@ -18012,20 +18012,20 @@ test "CR0b Client incident operation은 managed request를 Client 상태의 cano
     defer slot.deinit();
     const client = &slot.current.client;
     defer {
-        for (client.pending_stream.items) |frame| allocator.free(frame.payload);
-        client.pending_stream.deinit(allocator);
-        client.pending_stream = .empty;
-        client.pending_stream_bytes = 0;
+        for (client.screen_inbox.pending_stream.items) |frame| allocator.free(frame.payload);
+        client.screen_inbox.pending_stream.deinit(allocator);
+        client.screen_inbox.pending_stream = .empty;
+        client.screen_inbox.pending_stream_bytes = 0;
         for (client.pending_events.items) |event| allocator.free(event.payload);
         client.pending_events.deinit(allocator);
         client.pending_events = .empty;
         client.pending_event_bytes = 0;
-        for (client.pending_batches.items) |batch| batch.deinit();
-        client.pending_batches.deinit(allocator);
-        client.pending_batches = .empty;
-        client.pending_batch_bytes = 0;
-        if (client.partial_batch) |*partial| partial.bytes.deinit(allocator);
-        client.partial_batch = null;
+        for (client.screen_inbox.pending_batches.items) |batch| batch.deinit();
+        client.screen_inbox.pending_batches.deinit(allocator);
+        client.screen_inbox.pending_batches = .empty;
+        client.screen_inbox.pending_batch_bytes = 0;
+        if (client.screen_inbox.partial_batch) |*partial| partial.bytes.deinit(allocator);
+        client.screen_inbox.partial_batch = null;
         if (client.pending_outbound) |pending| allocator.free(pending.frame);
         client.pending_outbound = null;
     }
@@ -18039,11 +18039,11 @@ test "CR0b Client incident operation은 managed request를 Client 상태의 cano
     try client.parser.buf.append(allocator, 0xaa);
 
     const stream_payload = try allocator.dupe(u8, "str");
-    try client.pending_stream.append(allocator, .{
+    try client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{ .kind = .delta_chunk, .stream_id = 3, .payload_len = 3 },
         .payload = stream_payload,
     });
-    client.pending_stream_bytes = stream_payload.len;
+    client.screen_inbox.pending_stream_bytes = stream_payload.len;
     const event_payload = try allocator.dupe(u8, "event");
     try client.pending_events.append(allocator, .{
         .header = .{ .kind = .event, .stream_id = 3, .payload_len = 5 },
@@ -18051,16 +18051,16 @@ test "CR0b Client incident operation은 managed request를 Client 상태의 cano
     });
     client.pending_event_bytes = event_payload.len;
     const batch_payload = try allocator.dupe(u8, "batch-7");
-    try client.pending_batches.append(allocator, .{
+    try client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 3,
         .bytes = batch_payload,
         .allocator = allocator,
     });
-    client.pending_batch_bytes = batch_payload.len;
-    client.partial_batch = .{ .stream_id = 3, .is_snapshot = false };
-    try client.partial_batch.?.bytes.appendSlice(allocator, "partial-011");
-    client.partial_batch.?.chunk_count = 1;
+    client.screen_inbox.pending_batch_bytes = batch_payload.len;
+    client.screen_inbox.partial_batch = .{ .stream_id = 3, .is_snapshot = false };
+    try client.screen_inbox.partial_batch.?.bytes.appendSlice(allocator, "partial-011");
+    client.screen_inbox.partial_batch.?.chunk_count = 1;
     client.pending_outbound = .{
         .frame = try allocator.dupe(u8, "outbound-0013"),
         .stream_id = 3,

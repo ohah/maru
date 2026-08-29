@@ -576,7 +576,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   Release asset으로 보존한다. B의 manifest는 SemVer 산술이나 `latest` 조회가 아니라 exact A release를 predecessor로
   지목한다. B 검증기는 그 immutable A와 B 후보를 사용해 `A daemon spawn→B adapter attach→동일 PID exec→B GUI exact
   reattach`를 실행한다. 같은 source tree에서 이름만 바꾸거나 현재 native module과 함께 재컴파일한 fixture는 이 gate를
-  만족하지 않는다.
+  만족하지 않는다. 이 gate의 frozen N-1 업데이트 호환성 책임은 유지한다. `default=false→true` 전환은 별도 G3 release
+  백로그이며 현재 P1~P5 완료 조건이 아니다.
 
   manifest는 UTF-8 JSON object 하나와 마지막 LF 하나인 canonical writer output이다. object key는 아래 표의 순서로
   쓰고 parser는 모든 scope에서 duplicate·unknown key, trailing value, 잘못된 UTF-8과 정수 overflow를 거부한다. 보안 판정은

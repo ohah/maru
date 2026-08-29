@@ -33,7 +33,8 @@ GUI-local funnel은 `AppSession`/Swift가 살아 있을 때 동작한다. 앱이
 - 구조화된 완료 신호가 없는 agent completion은 emit하지 않는다. host가 `running → idle`을 완료로 추측하지 않는다.
 - pre-authorized macOS runner에서 실제 signed `.app`의 GUI 0 OSC 발화→배너→클릭과
   GUI 연결 중 발화→Quit→기존 배너 클릭이 모두 정확한 runtime에 attach한다는 **무인 자동 artifact**가 있어야 P4
-  완료다. runner가 없으면 수동 클릭으로 대체하지 않고 P4와 기본값 전환을 미완료로 둔다.
+  완료다. runner가 없으면 수동 클릭으로 대체하지 않고 P4 notification 제품 gate를 미완료로 둔다. 기본값 전환은
+  이 판정과 별개인 G3 release 백로그다.
 
 **모든 pane·Term을 본다(핵심)**: OSC는 활성 surface만이 아니라 **모든 탭의 모든 split pane·모든 가로탭(Term)**을 본다.
 `pendingNotification`이 각 Term 코어를 훑어 첫 pending을 발신 `surface.id`와 함께 보내므로 클릭이 탭뿐 아니라 해당 split

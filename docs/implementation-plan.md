@@ -1396,7 +1396,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    journal row가 이미 회수됐다는 이유로 attach를 거부하지 않는다. route 없는 local/app-owned 알림만 기존 `wt`/`sid`
    process-local 클릭 경로를 유지한다.
 
-   **G1 config loader provenance:** 기본값 전환 전에 config loader가 resolved bool과 별도로
+   **G1 config loader provenance:** opt-in 설정의 의도를 보존하기 위해 config loader가 resolved bool과 별도로
    `session.keep-alive-after-quit`의 source를 `absent | explicit_valid | explicit_invalid`로 보존한다.
    같은 적용 축에서 마지막 syntactic occurrence가 provenance를 소유하므로 `true` 뒤 invalid는
    resolved bool `true`를 유지한 `explicit_invalid`, invalid 뒤 `false`는 `explicit_valid(false)`다. 즉 invalid는
@@ -1415,9 +1415,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    직전 live bool을 기본값과 같아도 canonical explicit override로 같은 atomic replace에 보존한다. row Reset/Backspace는
    값·snapshot·write-back queue mutation 0 + 수동 Workspace 토글 notice다. lease 없는/중복 bootstrap, 실제 atomic replace
    실패, multi-Window, source-order와 fresh-process loser I/O 0을 Debug·ReleaseFast/product gate로 고정한다. G2는
-   absent→true materialization과 default flip을 하지 않으며 그것은 frozen release A artifact를 쓰는 G3만 소유한다.
+   absent→true materialization과 default flip을 하지 않는다. 그 전환은 현재 실행 순서 밖의 G3 release 백로그만 소유한다.
 
-   **G3 frozen-release default migration:** `session-host-upgrade.md`의 `maru.session-host-release.v1` B manifest가 지목한
+   **백로그 — G3 frozen-release default migration:** 이 항목은 현재 P1~P5 완료 조건과 실행 순서에서 제외한다. 사용자가
+   default-on을 다시 승인한 뒤에만 `session-host-upgrade.md`의 `maru.session-host-release.v1` B manifest가 지목한
    exact immutable A와 provisioned `Session host product / default-on` runner가 모두 준비된 뒤에만 시작한다. B bootstrap은
    `missing|readable_absent`를 atomic explicit true로 materialize한 성공 suffix에서만 app-global snapshot을 true로 publish한다.
    explicit valid는 보존하고 invalid/unreadable/oversize와 write 실패는 false·파일 mutation 0·persistent typed notice다.

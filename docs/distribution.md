@@ -171,7 +171,8 @@ DMG를 `--clobber` 없이 올린 뒤 재다운로드 byte equality를 통과해�
 
 ### Session host 호환 release
 
-영속 session host의 default 전환이나 frozen N-1 지원 창을 여는 release는 위 일반 첨부만으로 출하하지 않는다.
+영속 session host의 frozen N-1 지원 창을 여는 release는 위 일반 첨부만으로 출하하지 않는다. 별도 백로그인 default 전환을
+사용자가 다시 승인하는 경우에도 같은 provenance gate를 재사용한다.
 [Session host upgrade provenance](session-host-upgrade.md#u5--제품-활성화)의 `maru.session-host-release.v1`을 사용하며,
 release workflow는 `signed 후보 attestation → draft 생성 → 제품 gate → evidence/manifest 생성·attestation → manifest와 열거된 모든 asset 첨부 →
 draft 재다운로드 검증 → publish → release attestation 검증` 순서다. publish 전 실패는 draft를 공개하지 않고, publish 뒤에는
@@ -179,7 +180,8 @@ asset 교체·삭제·`--clobber`를 허용하지 않는다. immutable release �
 뒤 켠다.
 
 서명·공증·Aqua/Notification/localhost sshd 자격은 fork PR, `pull_request_target`, caller가 임의 ref를 고를 수 있는 수동
-실행에 노출하지 않는다. G3 source는 immutable A와 provisioned runner가 준비된 뒤 일반 PR로 merge하고, exact `main` commit을
+실행에 노출하지 않는다. G3 source는 현재 release 백로그이며, 사용자 재승인·immutable A·provisioned runner가 모두 준비된 뒤에만
+일반 PR로 merge하고 exact `main` commit을
 trusted tag workflow가 B 후보로 만든다. source가 merge됐다는 사실이나 일반 component CI green은 release evidence가 아니다.
 release workflow의 모든 third-party Action은 full commit SHA로 pin한다.
 release A/B의 실제 준비 상태와 남은 외부 gate는 [검증 매트릭스](verification-matrix.md)가 추적한다.

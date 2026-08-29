@@ -228,9 +228,10 @@ pub fn dispatchAuthenticated(
 
     // ── 비-browser. **ambient self-origin(§8.4 A2b)은 세션 내내 항상 유효하고, 누적 cap이 권한을 *더한다*(cap 제시가
     //    self-access를 revoke하지 않음 — 22차 [1]).** 누적 cap 중 하나가 이 method를 인가하면 그 (surface, scope)로
-    //    라우팅하고, 아무 cap도 인가 못 하면(빈 집합 포함) self-origin 폴백. 폴백은 no-cap 세션과 **바이트 동일** 동작
-    //    (anchor=selector·scope=.self — 자기 surface metadata만, §8.4 tty 게이트가 selector를 검증)이라 over-grant 없다. ──
+    //    라우팅하고, 아무 cap도 인가 못 하면(빈 집합 포함) ambient 폴백. 폴백 scope 는 `ambientScope` 가 정한다 —
+    //    셀렉터를 댔으면 그 surface 하나(종전), **안 댔으면 전체**(§4a 원격). 어느 쪽도 metadata 를 넘지 않는다. ──
     const anchor = selector orelse 0;
+    const ambient = ambientScope(selector);
     if (cap_nonces.len > 0) {
         switch (cap.resolveAny(store, cap_nonces, anchor, 0, req.method, now)) {
             .granted => |g| {
@@ -242,8 +243,26 @@ pub fn dispatchAuthenticated(
             .unauthorized => {}, // 어떤 cap도 이 method를 인가 못 함 → ambient self-origin 폴백(아래). deny로 접지 않음(22차 [1]).
         }
     }
-    // self-origin 폴백: no-cap이거나 누적 cap이 이 method를 인가 못 함. ambient §8.4 self-metadata(회귀 없음).
-    return .{ .immediate = try routeReadOnly(gpa, req, snapshot, anchor, .self) };
+    // ambient 폴백: no-cap이거나 누적 cap이 이 method를 인가 못 함. scope 는 **앵커를 댔는가**가 정한다(위 헬퍼).
+    return .{ .immediate = try routeReadOnly(gpa, req, snapshot, anchor, ambient) };
+}
+
+/// **앵커를 안 댄 연결의 metadata scope.** 셀렉터가 있으면 그 surface 하나(`.self` — 종전 그대로), 없으면 전체
+/// (`.all`).
+///
+/// **왜 없는 쪽이 넓은가.** 셀렉터는 권한이 아니라 **주장**이다("나는 이 surface 다"). 그 주장의 출처는
+/// `MARU_PANE_ID` 인데, 폰이 SSH 로 연 `exec` 채널에는 그 환경이 **없다**([컨트롤 플레인 §4a](../../docs/control-plane.md))
+/// — 그래서 원격은 앵커를 못 댄다. 앵커 없는 연결을 `.self` 로 두면 `anchor=0` 이라 **아무것도 안 맞아** 목록이
+/// 언제나 빈다. 그것이 폰에서 "세션이 하나도 없다" 로 보였다.
+///
+/// **왜 그래도 되는가**(단일 출처 = [보안 §8.4](../../docs/control-plane-security.md)). 이 소켓은 same-uid
+/// peer-cred + 0700 이라 붙은 쪽은 **그 사용자 자신**이다. SSH 로 붙은 폰도 같은 등급이다 — 그 사용자로 아무
+/// 명령이나 돌릴 수 있으므로 목록이 권한을 넓히지 않는다. 좁은 scope 가 보호처럼 보였지만 실효가 없었다:
+/// `surface_id` 가 1부터 단조 증가라 셀렉터를 훑으면 같은 메타데이터가 그대로 나온다(§8.4 가 그 한계를 이미
+/// 적어 뒀고, 실측으로 확인했다). `browser.*`·`session.capture`(read-output)·write 는 이 헬퍼가 안 건드린다 —
+/// 그것들은 cap 이나 target 앵커가 따로 있다.
+fn ambientScope(selector: ?u64) wm.MetadataScope {
+    return if (selector == null) .all else .self;
 }
 
 /// params 오류(shape/타입/범위)를 하나로 접는 sentinel — 호출자가 invalid_params로 매핑한다.
@@ -575,6 +594,39 @@ test "dispatchAuthenticated: nonce 없음 → 기존 self 경로(회귀 없음) 
     defer ids.deinit(testing.allocator);
     try listIds(wire, &ids);
     try testing.expectEqualSlices(u64, &.{10}, ids.items); // cap 없음 = self only(기존 동작)
+}
+
+test "dispatchAuthenticated(§4a): 셀렉터 없는 연결은 sessions.list 로 전체를 본다 — 폰이 목록을 받는 자리" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // 중계(`maru control --stdio`)는 `auth.self` 를 **셀렉터 없이** 보낸다 — 폰의 `exec` 채널엔 `MARU_PANE_ID` 가
+    // 없다. 그때 `.self`(anchor=0)로 두면 아무것도 안 맞아 폰 화면에 "세션이 없다" 만 떴다(실측).
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", null, null, &store);
+    defer testing.allocator.free(wire);
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{ 10, 11, 20, 30 }, ids.items);
+}
+
+test "dispatchAuthenticated(§4a): 셀렉터를 대면 종전대로 그 surface 하나다 — 넓어진 것은 앵커 없는 쪽뿐" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", 20, null, &store);
+    defer testing.allocator.free(wire);
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(testing.allocator);
+    try listIds(wire, &ids);
+    try testing.expectEqualSlices(u64, &.{20}, ids.items);
+}
+
+test "dispatchAuthenticated(§8.3): 셀렉터가 없어도 read-output 은 안 넘는다 — session.capture 는 그대로 unauthorized" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // metadata 를 넓힌 것이 capture 까지 넓히면 화면 내용이 새어 나간다. **경계는 metadata 안쪽에서만 움직였다.**
+    const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}", null, null, &store);
+    defer testing.allocator.free(wire);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "dispatchAuthenticated(§9.6): browser.list → cap·selector 없이 web surface만(ungated 발견, 터미널 제외)" {

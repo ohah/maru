@@ -72663,3 +72663,49 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
     session.mouse(1, cx, @floatCast(vp.y + 1), 0, 0);
     try std.testing.expect(session.image_gallery.open == null);
 }
+
+test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스크립트로 메운다 (IG6-b)" {
+    // 갤러리 소스는 provider 훅이 채우는 것이 기본이다. 훅이 설치 전이거나 codex 승인 대기이거나
+    // 에이전트가 창보다 먼저 떠 있었으면 그 값이 **영영 안 온다** — 그때 갤러리는 「이미지가 없습니다」로
+    // 조용히 비고, 사용자에게는 고장과 구분되지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.isEmpty());
+
+    // ── ① 신원이 없으면 폴백도 없다. **추측하지 않는다**(§7.2 가 기각한 그 폴백을 되살리지 않는다).
+    term.agent_kind = .codex;
+    agent_ops.adoptFallbackImageSource(session, term);
+    try std.testing.expect(term.agent_image_source.isEmpty());
+
+    // ── ② 신원과 파일명이 있으면 그 파일을 가리킨다. codex 이름은 날짜 계층을 포함한 상대경로다.
+    term.agent_transcript.setIdentity("thread-abc");
+    term.agent_transcript.setFileName("2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl");
+    agent_ops.adoptFallbackImageSource(session, term);
+    try std.testing.expect(!term.agent_image_source.isEmpty());
+    // HOME 은 이 test 가 못 정하므로 **꼬리만** 본다 — 앞은 `codexTranscriptPath` 순수 test 가 본다.
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        term.agent_image_source.path(),
+        "/.codex/sessions/2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl",
+    ));
+
+    // ── ③ 이미 소스가 있으면 건드리지 않는다. 훅이 준 값이 이긴다 — 폴백이 그것을 덮으면
+    // 훅을 켠 사용자가 오히려 틀린 파일을 보게 된다.
+    _ = term.agent_image_source.set("/tmp/from-hook.jsonl");
+    agent_ops.adoptFallbackImageSource(session, term);
+    try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.agent_image_source.path());
+}

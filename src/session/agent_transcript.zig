@@ -255,6 +255,24 @@ pub fn claudeDirName(cwd: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..cwd.len];
 }
 
+/// 확정된 트랜스크립트의 **절대경로**(claude). 이름은 호출자가 신원으로 이미 확정한 값이라 여기에
+/// 추측이 없다(계약 2) — 하는 일은 `<claude_dir>/projects/<cwd 슬러그>/<이름>` 조립뿐이다.
+///
+/// 갤러리가 훅 없이도 소스를 얻는 길이다(docs/agent-image-gallery.md §4.4). 빈 입력이나 버퍼 부족은
+/// `null` — 반쯤 만든 경로를 돌려주면 엉뚱한 파일을 열게 된다.
+pub fn claudeTranscriptPath(buf: []u8, claude_dir: []const u8, cwd: []const u8, file_name: []const u8) ?[]const u8 {
+    if (claude_dir.len == 0 or cwd.len == 0 or file_name.len == 0) return null;
+    var slug_buf: [1024]u8 = undefined;
+    const slug = claudeDirName(cwd, &slug_buf) orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/projects/{s}/{s}", .{ claude_dir, slug, file_name }) catch null;
+}
+
+/// 같은 것의 codex 판. codex 의 이름은 `~/.codex/sessions` 아래 **상대경로**다(날짜 계층을 포함한다).
+pub fn codexTranscriptPath(buf: []u8, home: []const u8, file_name: []const u8) ?[]const u8 {
+    if (home.len == 0 or file_name.len == 0) return null;
+    return std.fmt.bufPrint(buf, "{s}/.codex/sessions/{s}", .{ home, file_name }) catch null;
+}
+
 /// codex 세션 파일이 밝히는 신원 — 첫 `session_meta` 레코드에서 뽑는다.
 ///
 /// claude는 디렉터리 **이름**이 작업 디렉터리를 말해주지만 codex는 날짜 계층(`YYYY/MM/DD`)이라 **파일을 열어야**
@@ -781,4 +799,38 @@ test "Owned: 같은 버퍼에 거듭 써도 값이 사라지지 않는다" {
     }
     try testing.expectEqualStrings("배포 스크립트 고쳐줘 — 사용자가 친 문장이 이만큼 길 수 있다", owned.prompt());
     try testing.expectEqualStrings(reply, owned.reply());
+}
+
+test "트랜스크립트 절대경로: claude 는 cwd 슬러그 아래다" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/h/.claude/projects/-Users-me-work/abc.jsonl",
+        claudeTranscriptPath(&buf, "/h/.claude", "/Users/me/work", "abc.jsonl").?,
+    );
+    // 점도 슬러그에서 하이픈이 된다(`claudeDirName` 규칙을 그대로 쓴다 — 여기서 다시 구현하지 않는다).
+    try testing.expectEqualStrings(
+        "/h/.claude/projects/-a-b-c-d/x.jsonl",
+        claudeTranscriptPath(&buf, "/h/.claude", "/a/b.c/d", "x.jsonl").?,
+    );
+}
+
+test "트랜스크립트 절대경로: codex 는 이름이 상대경로다(날짜 계층 포함)" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/home/me/.codex/sessions/2026/08/29/rollout-x-y.jsonl",
+        codexTranscriptPath(&buf, "/home/me", "2026/08/29/rollout-x-y.jsonl").?,
+    );
+}
+
+test "트랜스크립트 절대경로: 빈 입력과 좁은 버퍼는 null — 반쯤 만든 경로를 돌려주지 않는다" {
+    var buf: [512]u8 = undefined;
+    try testing.expect(claudeTranscriptPath(&buf, "", "/a", "x") == null);
+    try testing.expect(claudeTranscriptPath(&buf, "/h", "", "x") == null);
+    try testing.expect(claudeTranscriptPath(&buf, "/h", "/a", "") == null);
+    try testing.expect(codexTranscriptPath(&buf, "", "x") == null);
+    try testing.expect(codexTranscriptPath(&buf, "/h", "") == null);
+    // 버퍼가 모자라면 자르지 않고 포기한다.
+    var tiny: [8]u8 = undefined;
+    try testing.expect(claudeTranscriptPath(&tiny, "/home/me/.claude", "/a", "x.jsonl") == null);
+    try testing.expect(codexTranscriptPath(&tiny, "/home/me", "a/b/c.jsonl") == null);
 }

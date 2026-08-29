@@ -835,6 +835,42 @@ pub fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void
     if (displayed) self.metal_dirty = true;
 }
 
+/// 갤러리 소스를 **훅 없이** 채운다(계약 §4.4 폴백).
+///
+/// 훅이 `transcript_path` 를 주는 것이 기본 경로다. 하지만 훅이 설치 전이거나 codex 승인 대기이거나
+/// 에이전트가 창보다 먼저 떠 있었으면 그 값이 영영 안 온다 — 그때 갤러리는 「이미지가 없습니다」로
+/// 조용히 비고, 사용자에게는 고장과 구분되지 않는다.
+///
+/// **추측은 하지 않는다.** 여기서 쓰는 것은 사이드바 대화 라벨이 이미 자식 env 신원으로 확정해 둔
+/// 바로 그 파일(`term.agent_transcript`)이다. 신원이 없으면 폴백도 없다 — 「그 디렉터리의 최신 파일」
+/// 추측은 §7.2 가 이미 기각했다(새 터미널에 직전 세션 대화가 붙었다).
+///
+/// 이미 소스가 있으면 아무것도 하지 않는다. 훅이 나중에 오면 그 값이 이긴다(같은 파일이면 무동작).
+pub fn adoptFallbackImageSource(self: *AppSession, term: *Term) void {
+    if (!term.agent_image_source.isEmpty()) return;
+    const cache = &term.agent_transcript;
+    if (cache.identity_len == 0 or cache.name_len == 0) return;
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path: []const u8 = switch (term.agent_kind) {
+        .none => return,
+        // codex 는 `fileName()` 이 `~/.codex/sessions` 아래 상대경로다(날짜 계층을 포함한다).
+        .codex => blk: {
+            const home_z = std.c.getenv("HOME") orelse return;
+            break :blk maru.session.agent_transcript.codexTranscriptPath(&buf, std.mem.span(home_z), cache.fileName()) orelse return;
+        },
+        // claude 는 `~/.claude/projects/<cwd 슬러그>/<신원>.jsonl` 이다 — 슬러그 때문에 cwd 가 필요하다.
+        .claude => blk: {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse return;
+            var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const claude_dir = settings_ops.claudeConfigDir(&dir_buf) orelse return;
+            break :blk maru.session.agent_transcript.claudeTranscriptPath(&buf, claude_dir, cwd, cache.fileName()) orelse return;
+        },
+    };
+    _ = term.agent_image_source.set(path);
+}
+
 /// 자식 프로세스 env에서 세션 신원을 읽는다(§7.2.1 — 기본 경로, 사용자 파일 무침습).
 pub fn agentIdentityFromChildEnv(self: *AppSession, term: *Term, key: []const u8, buf: []u8) ?[]const u8 {
     _ = self;

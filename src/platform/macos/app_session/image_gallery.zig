@@ -15,6 +15,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
+const agent_ops = @import("agent.zig");
 const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
 const image_decode = @import("../image_decode.zig");
@@ -153,6 +154,9 @@ pub const gallery_open_image_id: u32 = gallery_image_id_base +| max_tiles;
 fn activeSourcePath(self: *AppSession) ?[]const u8 {
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
     const term = pane_ops.activePane(self).activeTerm();
+    // 훅이 아직 한 번도 안 돌았으면 자식 env 로 확정해 둔 파일로 메운다(추측이 아니다 — 사이드바
+    // 대화 라벨이 읽고 있는 그 파일이다). 훅이 나중에 오면 그 값이 이긴다.
+    agent_ops.adoptFallbackImageSource(self, term);
     if (term.agent_image_source.isEmpty()) return null;
     return term.agent_image_source.path();
 }

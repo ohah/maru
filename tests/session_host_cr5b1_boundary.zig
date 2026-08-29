@@ -40,7 +40,7 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
     const begin = between(
         backend,
         "pub fn beginHostReconnectConnect(",
-        "pub fn abortHostReconnectConnect(",
+        "pub fn beginHostReconnectCandidate(",
     ) orelse return error.TestUnexpectedResult;
     const capture_pos = std.mem.indexOf(u8, begin, "job.prepareForConnect(") orelse
         return error.TestUnexpectedResult;

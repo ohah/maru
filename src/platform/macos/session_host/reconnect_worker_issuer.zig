@@ -221,7 +221,7 @@ fn testOrder(io: std.Io, host_id: u128) WorkOrder {
             .host_id = host_id,
             .pool_membership_generation = 3,
             .connection_generation = 4,
-            .incident_app_instance_nonce = 5,
+            .incident_app_instance_nonce = (@as(u128, 1) << 96) | 5,
             .incident_sequence = 6,
             .absolute_deadline_ns = @intCast(now + 5 * std.time.ns_per_s),
         },

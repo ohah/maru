@@ -12,7 +12,10 @@ pub const Snapshot = struct {
     host_id: u128,
     pool_membership_generation: u64,
     connection_generation: u64,
-    incident_app_instance_nonce: u64,
+    // IncidentId owns a 128-bit app-instance nonce. Narrowing it at the worker handoff would let
+    // two distinct process incidents alias before the main owner performs its stale-completion
+    // check, so the pointer-free snapshot preserves the canonical width exactly.
+    incident_app_instance_nonce: u128,
     incident_sequence: u64,
     absolute_deadline_ns: u64,
 };
@@ -269,7 +272,7 @@ fn fixture(host_id: u128, sequence: u64) Snapshot {
         .host_id = host_id,
         .pool_membership_generation = 3,
         .connection_generation = 7,
-        .incident_app_instance_nonce = 11,
+        .incident_app_instance_nonce = (@as(u128, 1) << 96) | 11,
         .incident_sequence = sequence,
         .absolute_deadline_ns = 1000,
     };
@@ -281,6 +284,7 @@ test "CR6e-c1 reconnect worker owner admits claims settles and consumes exact on
     _ = try owner.admit(fixture(1, 1));
     var job: JobReceipt = .{};
     try owner.claim(&job);
+    try std.testing.expectEqual((@as(u128, 1) << 96) | 11, job.snapshot.incident_app_instance_nonce);
     try owner.settle(&job, .connected);
     try std.testing.expectError(error.InvalidReceipt, owner.settle(&job, .connected));
     var completion: CompletionReceipt = .{};

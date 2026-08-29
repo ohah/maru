@@ -10853,6 +10853,30 @@ fn runAgentEvents(
     var since_hb_ms: u64 = 0;
     const tick_ms: u64 = 200;
 
+    // **스트리머가 없던 동안 자란 파일을 한 번 거둔다**(RA3). 소비자가 없으면 아무도 안 비우므로
+    // 그 구간의 상한이 없다 — 계약 §4 가 «읽는 Term 이 없는 파일은 상한 없이 자랐다» 로 이미 겪었다.
+    // **상한을 넘긴 것만** 거둔다: 이 프로세스는 사용자가 그 pane 을 보고 있는 동안에도 다시 뜨므로
+    // (채널이 죽었다 살아난 경우) 전부 지우면 방금 생긴 이벤트를 버린다.
+    if (std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) |startup_dir| {
+        var sd = startup_dir;
+        defer sd.close(io);
+        var sit = sd.iterate();
+        while ((sit.next(io) catch null) orelse null) |entry| {
+            if (entry.kind != .file) continue;
+            if (ae.nonceFromFileName(entry.name) == null) continue;
+            var f = sd.openFile(io, entry.name, .{}) catch continue;
+            var sbuf: [64]u8 = undefined;
+            var sr = f.reader(io, &sbuf);
+            const sz = sr.getSize() catch {
+                f.close(io);
+                continue;
+            };
+            f.close(io);
+            if (!ae.shouldDropAtStartup(sz)) continue;
+            _ = sd.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } }) catch {};
+        }
+    } else |_| {}
+
     while (true) {
         var dir = std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true }) catch {
             // 디렉터리가 아직 없을 수 있다 — 훅이 한 번도 안 돌았으면 그렇다. 조용히 기다린다

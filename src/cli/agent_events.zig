@@ -162,6 +162,19 @@ pub fn shouldTruncate(cur: Cursor, size: u64) bool {
 /// 그 차이는 사용자가 원격 기계를 들여다보기 전까지 안 보인다.
 pub const truncate_at_bytes: u64 = hook_event.rotate_at_bytes;
 
+/// **스트리머가 없던 동안 자란 파일을 시작할 때 거둔다**([계획](../../docs/plans/remote-agent-state.md)
+/// RA3). 소비자가 없으면 아무도 안 비우므로, 그 구간의 상한은 이 판정이 맡는다.
+///
+/// **로컬처럼 «전부 지우지» 않는다.** 로컬의 시작 시 정리는 「지난 실행의 큐에는 옮길 곳이 없다」가
+/// 근거인데([계약](../../docs/agent-hooks.md) §4.2), 원격 스트리머는 **사용자가 그 pane 을 계속 보고
+/// 있는 동안에도** 다시 뜬다(채널이 죽었다 살아난 경우). 그때 전부 지우면 방금 생긴 이벤트를 버린다.
+///
+/// 그래서 **상한을 넘긴 것만** 거둔다. 그만큼 쌓였다는 것은 소비자가 오래 없었다는 뜻이고, 그 backlog 는
+/// 배지로 옮길 값이 이미 아니다(가장 최근 상태만 뜻이 있는데 그것은 다음 이벤트가 다시 준다).
+pub fn shouldDropAtStartup(size: u64) bool {
+    return size >= truncate_at_bytes;
+}
+
 /// 한 회차에 한 파일에서 읽는 양. **«남은 전부» 를 요구하면 안 된다** — 안 읽은 구간이 그 값을 넘긴
 /// 파일은 읽기가 실패하고, 그 실패가 조용하면 그 파일은 영영 소비도 절단도 안 된다(실측으로 겪었다).
 /// 조각을 고정하면 폭주한 파일도 회차를 거듭하며 따라잡는다.
@@ -258,4 +271,11 @@ test "truncate 상한은 로컬 회전 상한과 같다 — 다르면 원격만 
 
 test "한 회차 읽기 조각은 한 줄 상한보다 넉넉하다 — 아니면 긴 줄이 영영 안 넘어간다" {
     try testing.expect(read_chunk_bytes > hook_event.max_line_bytes);
+}
+
+test "시작 시 정리는 상한을 넘긴 것만 거둔다 — 방금 생긴 이벤트를 버리지 않는다" {
+    try testing.expect(!shouldDropAtStartup(0));
+    try testing.expect(!shouldDropAtStartup(truncate_at_bytes - 1));
+    try testing.expect(shouldDropAtStartup(truncate_at_bytes));
+    try testing.expect(shouldDropAtStartup(truncate_at_bytes * 9));
 }

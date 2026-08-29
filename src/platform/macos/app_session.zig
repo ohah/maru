@@ -20575,7 +20575,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         try std.testing.expectEqual(@as(usize, hook_command.claude_events.len), known.events_covered);
         try std.testing.expectEqual(@as(usize, 0), known.events_outside);
         try std.testing.expect(known.legacy_present);
-        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.claude, .{ .known = known }, .ensure));
+        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.claude, .local, .{ .known = known }, .ensure));
     }
 
     // **다시 띄워도 파일을 건드리지 않는다.** 바이트까지 같아야 한다 — 매 시작마다 사용자 파일의 mtime을 흔들면
@@ -20608,7 +20608,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
 fn testing_expect_leave(known: maru.session.agent_hook_install.Known) !void {
     try std.testing.expectEqual(
         maru.session.agent_hook_install.Plan.leave,
-        maru.session.agent_hook_install.planForSet(.codex, .{ .known = known }, .ensure),
+        maru.session.agent_hook_install.planForSet(.codex, .local, .{ .known = known }, .ensure),
     );
 }
 
@@ -22658,7 +22658,7 @@ test "agent hooks install into codex and record trust without touching existing 
             return error.UnknownShape;
         try std.testing.expectEqual(@as(usize, hook_command.codex_events.len), known.ours_current);
         try std.testing.expect(known.legacy_present); // 과거 표식은 그대로
-        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.codex, .{ .known = known }, .ensure));
+        try std.testing.expectEqual(hook_install.Plan.leave, hook_install.planForSet(.codex, .local, .{ .known = known }, .ensure));
         // 사용자(legacy) 항목이 우리 것보다 **앞**이다.
         const stop = hooks.get("Stop").?.array;
         try std.testing.expectEqualStrings(

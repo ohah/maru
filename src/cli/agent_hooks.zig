@@ -76,6 +76,57 @@ pub fn parseArgs(args: []const []const u8) Mode {
     return .{ .run = .{ .action = action, .provider = p, .dir = d } };
 }
 
+/// 로컬이 ControlMaster 위에서 실행할 **원격 명령 문자열**([계획](../../docs/plans/remote-agent-state.md)
+/// RA3 배선). 이 문자열은 원격 셸이 받으므로 인용 규칙이 전부다.
+///
+/// ⚠️ **디렉터리는 큰따옴표다.** 작은따옴표로 감싸면 `$HOME` 이 확장되지 않아 원격 maru 가 리터럴
+/// `$HOME/...` 이라는 이름의 디렉터리를 만든다 — 그리고 증상은 «훅은 깔렸는데 이벤트가 안 온다» 라
+/// 어느 쪽이 틀렸는지 화면에 안 나온다(스트리머 쪽에서 같은 실수를 한 번 했다). 인용을 아예 빼면 홈에
+/// 공백이 있는 계정에서 인자가 쪼개진다.
+///
+/// ⚠️ **`maru` 가 PATH 에 없을 수 있다.** ssh 비대화형 셸의 PATH 는 로그인 셸보다 좁다(실측). 그때는
+/// `command -v` 가 실패하고 우리는 **표식을 받아** 그 사실을 안다 — 조용히 «설치했다» 로 넘어가지 않는다.
+pub fn remoteShellCommand(
+    allocator: std.mem.Allocator,
+    action: Action,
+    provider_tag: []const u8,
+    remote_dir_rel: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
+            "maru agent-hooks {s} --provider={s} --scope=remote --dir=\"$HOME/{s}\"",
+        .{ no_maru_marker, @tagName(action), provider_tag, remote_dir_rel },
+    );
+}
+
+/// 원격에 `maru` 가 없을 때 나가는 표식. **`exit 0` 으로 끝낸다** — 셸이 «명령 없음» 으로 주는 127 은
+/// 「연결이 끊겼다」와 구분되지 않기 때문이다(스트리머가 종료 코드를 못 믿는 것과 같은 이유).
+pub const no_maru_marker = "!maru-not-installed";
+
+/// 원격이 돌려준 한 줄을 읽는다. **`changed` 까지 본다** — 로컬이 «설치가 끝났다» 를 그것으로 판정한다.
+pub const Outcome = union(enum) {
+    ok: struct { changed: bool },
+    /// 원격에 `maru` 가 없다.
+    no_maru,
+    /// 우리 줄이 아니다(MOTD·rc 잡음, 또는 `ForceCommand` 가 갈아치운 결과).
+    unknown,
+};
+
+pub fn parseOutcome(out: []const u8) Outcome {
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    var result: Outcome = .unknown;
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        // **상한 안에서 찾는다**(첫 줄로 판정하지 않는다) — 정상 서버도 MOTD·rc 잡음을 앞에 붙인다.
+        if (std.mem.eql(u8, line, no_maru_marker)) return .no_maru;
+        if (!std.mem.startsWith(u8, line, "{\"maru-agent-hooks\":1")) continue;
+        result = .{ .ok = .{ .changed = std.mem.indexOf(u8, line, "\"changed\":true") != null } };
+    }
+    return result;
+}
+
 pub const usage =
     \\usage: maru agent-hooks install|uninstall --provider=claude|codex --scope=remote --dir=<absolute path>
     \\
@@ -117,4 +168,37 @@ test "parseArgs: 상대 경로와 빈 경로는 거절한다 — cwd 에 끌려�
     try testing.expect(parseArgs(&.{ "install", "--provider=claude", "--scope=remote", "--dir=" }) == .usage_error);
     try testing.expect(parseArgs(&.{ "install", "--provider=claude", "--scope=remote", "--dir=rel/path" }) == .usage_error);
     try testing.expect(parseArgs(&.{ "install", "--provider=claude", "--scope=remote", "--dir=./x" }) == .usage_error);
+}
+
+test "remoteShellCommand: 홈을 원격 셸이 펴게 두고, maru 가 없으면 표식으로 말한다" {
+    const a = testing.allocator;
+    const cmd = try remoteShellCommand(a, .install, "claude", ".cache/maru/remote-agent-events");
+    defer a.free(cmd);
+
+    // 큰따옴표여야 `$HOME` 이 펴진다. 작은따옴표면 리터럴 디렉터리가 생긴다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "--dir=\"$HOME/.cache/maru/remote-agent-events\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "--dir='") == null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "--scope=remote") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "agent-hooks install") != null);
+    // maru 가 없을 때는 **표식을 내고 0 으로 끝난다** — 127 은 연결 끊김과 구분되지 않는다.
+    try testing.expect(std.mem.indexOf(u8, cmd, no_maru_marker) != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "exit 0") != null);
+
+    const rm = try remoteShellCommand(a, .uninstall, "codex", "x/y");
+    defer a.free(rm);
+    try testing.expect(std.mem.indexOf(u8, rm, "agent-hooks uninstall --provider=codex") != null);
+}
+
+test "parseOutcome: 잡음 뒤에 온 우리 줄을 찾고, 없으면 모른다고 말한다" {
+    try testing.expect(parseOutcome("") == .unknown);
+    try testing.expect(parseOutcome("Welcome to Ubuntu\nLast login: ...\n") == .unknown);
+    try testing.expect(parseOutcome("motd\n" ++ no_maru_marker ++ "\n") == .no_maru);
+
+    const ok = parseOutcome("motd 한 줄\n{\"maru-agent-hooks\":1,\"provider\":\"claude\",\"action\":\"install\",\"changed\":true}\n");
+    try testing.expect(ok == .ok);
+    try testing.expect(ok.ok.changed);
+
+    const same = parseOutcome("{\"maru-agent-hooks\":1,\"provider\":\"claude\",\"action\":\"install\",\"changed\":false}\n");
+    try testing.expect(same == .ok);
+    try testing.expect(!same.ok.changed);
 }

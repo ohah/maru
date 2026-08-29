@@ -164,6 +164,33 @@ pub fn formatRuntimePane(buf: *[pane_token_max]u8, runtime_id: u128) []const u8 
     return std.fmt.bufPrint(buf, "{x:0>32}", .{runtime_id}) catch unreachable;
 }
 
+/// 원격 pane 신원(`LC_MARU_PANE`)의 최대 길이 — `<instance>_<pane>`.
+pub const remote_pane_nonce_max = instance_token_max + 1 + pane_token_max;
+
+/// 원격에 실어 보내는 pane 신원을 만든다([계획](../../docs/plans/remote-agent-state.md) RA2).
+///
+/// **여기가 유일한 조립 자리다.** 로컬 훅 경로의 두 칸을 만드는 곳과 같은 파일에 두는 이유는 §4 가 적어
+/// 둔 그것이다 — 두 곳에서 조립하면 «훅이 쓰는 이름 ≠ maru 가 읽는 이름» 이 조용히 성립한다. 셸에서
+/// 문자열을 이어 붙이지 않고 이 함수가 만든 값을 argv 로 넘긴다.
+///
+/// ⚠️ **인스턴스 칸을 반드시 넣는다.** `surface_id` 는 프로세스마다 1 부터라, 빼면 maru 를 둘 띄운 순간
+/// 두 인스턴스의 첫 pane 이 원격에서 **같은 파일**을 쓴다 — §4 가 로컬에서 겪은 사고를 원격에서 그대로
+/// 재현하는 셈이다.
+///
+/// 두 칸이 각자의 화이트리스트를 통과하지 못하면 **null 을 준다** — 호출자는 그때 이 값을 안 보낸다.
+/// 값이 없는 채로 보내면 원격 훅이 경로를 조립할 수 없고, 그 실패는 원격 파일 이름에서만 드러난다.
+pub fn formatRemotePaneNonce(
+    buf: *[remote_pane_nonce_max]u8,
+    instance: []const u8,
+    pane: []const u8,
+) ?[]const u8 {
+    if (instance.len > instance_token_max or pane.len > pane_token_max) return null;
+    // `accepts` 가 빈 값도 거부한다 — 빈 칸은 경로를 접어 상위 디렉터리에 쓴다(그 함수의 주석).
+    if (!instance_token_class.accepts(instance)) return null;
+    if (!pane_token_class.accepts(pane)) return null;
+    return std.fmt.bufPrint(buf, "{s}_{s}", .{ instance, pane }) catch unreachable;
+}
+
 /// 우리가 거는 이벤트(계약 §2). **한 번에 확정한다** — Codex는 나중에 늘리면 사용자에게 재승인을 요구한다.
 pub const Event = struct {
     name: []const u8,
@@ -534,6 +561,68 @@ test "stdin을 먼저 받고 나머지를 드레인한 뒤에야 가드가 온�
     const guard_at = std.mem.indexOf(u8, cmd, "case \"$" ++ pane_env ++ "\" in").?;
     try testing.expect(read_at < drain_at);
     try testing.expect(drain_at < guard_at);
+}
+
+test "원격 pane 신원은 두 칸을 합쳐 만든다 — 인스턴스를 빼면 maru 둘이 같은 파일을 쓴다" {
+    var buf: [remote_pane_nonce_max]u8 = undefined;
+    var ibuf: [instance_token_max]u8 = undefined;
+    var pbuf: [pane_token_max]u8 = undefined;
+
+    const gui = formatGuiInstance(&ibuf, 4331);
+    const pane = formatSurfacePane(&pbuf, 7);
+    const nonce = formatRemotePaneNonce(&buf, gui, pane).?;
+    try testing.expectEqualStrings("4331_7", nonce);
+
+    // 인스턴스가 다르면 값이 다르다 — 이것이 §4 의 사고를 원격에서 막는 성질이다.
+    var ibuf2: [instance_token_max]u8 = undefined;
+    var buf2: [remote_pane_nonce_max]u8 = undefined;
+    const other = formatRemotePaneNonce(&buf2, formatGuiInstance(&ibuf2, 9002), pane).?;
+    try testing.expect(!std.mem.eql(u8, nonce, other));
+
+    // host 소유 칸도 조립된다(접두 `host_` 와 32 hex).
+    var hbuf: [instance_token_max]u8 = undefined;
+    var rbuf: [pane_token_max]u8 = undefined;
+    var buf3: [remote_pane_nonce_max]u8 = undefined;
+    const host_nonce = formatRemotePaneNonce(&buf3, formatHostInstance(&hbuf, 0xa11ce), formatRuntimePane(&rbuf, 1)).?;
+    try testing.expect(std.mem.startsWith(u8, host_nonce, "host_"));
+}
+
+test "원격 pane 신원은 경로를 벗어나는 값을 거부한다 — 그 값이 원격에서 파일 이름이 된다" {
+    var buf: [remote_pane_nonce_max]u8 = undefined;
+    // 빈 칸·경로 문자·대문자·너무 긴 값은 전부 null 이다.
+    try testing.expect(formatRemotePaneNonce(&buf, "", "7") == null);
+    try testing.expect(formatRemotePaneNonce(&buf, "4331", "") == null);
+    try testing.expect(formatRemotePaneNonce(&buf, "../etc", "7") == null);
+    try testing.expect(formatRemotePaneNonce(&buf, "4331", "../7") == null);
+    try testing.expect(formatRemotePaneNonce(&buf, "4331", "a.b") == null);
+    try testing.expect(formatRemotePaneNonce(&buf, "HOST_1", "7") == null); // 대문자
+    var long: [instance_token_max + 1]u8 = undefined;
+    @memset(&long, 'a');
+    try testing.expect(formatRemotePaneNonce(&buf, &long, "7") == null);
+}
+
+test "maru 가 만드는 네 조합이 모두 원격 신원 조립을 통과한다" {
+    var buf: [remote_pane_nonce_max]u8 = undefined;
+    var ibuf: [instance_token_max]u8 = undefined;
+    var pbuf: [pane_token_max]u8 = undefined;
+    const instances = [_][]const u8{ formatGuiInstance(&ibuf, 1), formatHostInstance(&ibuf, 0) };
+    _ = instances;
+    // 버퍼 재사용을 피해 조합마다 따로 만든다.
+    for ([_]u32{ 1, 99999 }) |pid| {
+        var ib: [instance_token_max]u8 = undefined;
+        for ([_]u64{ 1, 12345 }) |sid| {
+            var pb: [pane_token_max]u8 = undefined;
+            try testing.expect(formatRemotePaneNonce(&buf, formatGuiInstance(&ib, pid), formatSurfacePane(&pb, sid)) != null);
+        }
+    }
+    for ([_]u128{ 0, 0xa11ce }) |hid| {
+        var ib: [instance_token_max]u8 = undefined;
+        for ([_]u128{ 0, 1 }) |rid| {
+            var pb: [pane_token_max]u8 = undefined;
+            try testing.expect(formatRemotePaneNonce(&buf, formatHostInstance(&ib, hid), formatRuntimePane(&pb, rid)) != null);
+        }
+    }
+    _ = &pbuf;
 }
 
 test "원격 세트는 로컬에서 파생된다 — 부분집합이고 차이는 remote_excluded 하나뿐이다" {

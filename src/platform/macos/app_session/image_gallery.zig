@@ -233,6 +233,12 @@ pub fn poll(self: *AppSession) void {
     self.image_gallery.awaiting = 0;
     self.image_gallery.resubmit = false;
     self.metal_dirty = true;
+    // 디버그 훅(`MARU_FORCE_IMAGE_GALLERY_OPEN`)이 예약해 둔 크게 보기를 **여기서** 연다 — 인덱스가
+    // 방금 생겼기 때문이다. 예약은 한 번만 쓴다.
+    if (self.debug_image_gallery_open) |n| {
+        self.debug_image_gallery_open = null;
+        openAt(self, n);
+    }
 }
 
 /// 격자에 보이는 칸만큼 타일을 채운다. **tick 당 최대 하나만 푼다.**
@@ -514,10 +520,23 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     return true;
 }
 
-/// 격자가 쓸 영역(backing px). 도크 본문 그대로다.
+/// 격자가 쓸 영역(backing px). 도크 본문에서 **문구 한 줄을 늘 뺀다.**
+///
+/// 문구(`noticeText`)는 `tree_content` 의 첫 행에 그려진다. 격자가 그 자리를 같이 쓰면 「12장 중 8장」이
+/// 이미지 위에 겹쳐 찍힌다 — letterbox 여백이 있는 이미지는 우연히 안 겹치고 **정사각 이미지에서만**
+/// 드러나, 보고도 재현이 안 되는 종류가 된다.
+///
+/// **「문구가 보일 때만 비운다」로 하지 않는다.** 그러면 비우는 순간 용량이 줄어 `overflow` 가 커지고,
+/// 그 값이 다시 문구를 띄우는 되먹임이 된다 — 한 프레임 안에서 배치의 답이 두 개가 된다.
 pub fn gridArea(self: *const AppSession) image_grid.Rect {
     const g = dock_ops.dockGeometry(self);
-    return .{ .x = g.tree_content.x, .y = g.tree_content.y, .w = g.tree_content.w, .h = g.tree_content.h };
+    const notice_h: u32 = if (self.cell_height_px > 0) self.cell_height_px else app_session_mod.placeholder_cell_height_px;
+    return .{
+        .x = g.tree_content.x,
+        .y = g.tree_content.y +| notice_h,
+        .w = g.tree_content.w,
+        .h = g.tree_content.h -| notice_h,
+    };
 }
 
 /// 타일 한 변(backing px). 썸네일 텍스처(160)와 **다를 수 있다** — 화면 크기는 레이아웃이,

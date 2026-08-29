@@ -19,6 +19,8 @@ const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
 const image_decode = @import("../image_decode.zig");
 const image_scale = maru.session.image_scale;
+const image_grid = maru.session.image_grid;
+const metal_frame = maru.renderer.metal_frame;
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
 /// 다시 훑는다.
@@ -38,13 +40,25 @@ pub const State = struct {
     awaiting: u64 = 0,
     /// 워커가 바빠 아직 못 건 요청이 있다. 다음 tick 이 다시 건다.
     resubmit: bool = false,
+    /// 화면에 올린 썸네일. **인덱스와 다르다** — 인덱스는 파일 전체의 «자리» 이고 이것은 지금 보이는
+    /// 칸의 «픽셀» 이다. 장당 0.06 MB 라 상한 안에서 상주해도 가볍다(계약 §5.2).
+    tiles: std.ArrayList(Tile) = .empty,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.hits.deinit(allocator);
+        self.dropTiles(allocator);
+        self.tiles.deinit(allocator);
         self.* = .{};
     }
 
+    /// 타일 픽셀은 힘이다 — 소스가 갈리거나 창이 닫히면 반드시 여기서 푼다.
+    pub fn dropTiles(self: *State, allocator: std.mem.Allocator) void {
+        for (self.tiles.items) |*t| allocator.free(t.pixels);
+        self.tiles.clearRetainingCapacity();
+    }
+
     pub fn clear(self: *State, allocator: std.mem.Allocator) void {
+        self.dropTiles(allocator);
         self.hits.clearAndFree(allocator);
         self.source.clear();
         self.partial = false;
@@ -65,6 +79,27 @@ pub const State = struct {
         return self.awaiting != 0 or self.resubmit;
     }
 };
+
+/// 화면에 올린 썸네일 하나.
+pub const Tile = struct {
+    /// 인덱스의 몇 번째 이미지인가. 격자 자리와 `hits` 를 잇는 유일한 키다.
+    hit_index: usize,
+    width: u32,
+    height: u32,
+    /// RGBA8, **owned**. `State.dropTiles` 가 푼다.
+    pixels: []u8,
+    /// 이 픽셀의 세대. 렌더러가 `image_id` 로 텍스처를 캐시하므로 **바뀔 때만** 다시 올린다.
+    generation: u64,
+    /// 이미 GPU 로 보냈는가. 매 프레임 보내면 15 MB 를 초당 60번 복사한다.
+    uploaded: bool = false,
+};
+
+/// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
+/// 사이에 둔다 — 같은 텍스처 캐시를 쓰므로 id 가 겹치면 남의 그림이 나온다.
+pub const gallery_image_id_base: u32 = 0xFFF0_0000;
+
+/// 동시에 픽셀을 들고 있는 타일 수 상한. 장당 0.06 MB 이므로 256장이면 15 MB 다.
+pub const max_tiles: usize = 256;
 
 /// 활성 Term 의 트랜스크립트 경로. 없으면 null — 에이전트가 붙지 않은 pane(셸만 띄운 창)이 그렇다.
 ///
@@ -145,6 +180,43 @@ pub fn poll(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
+/// 격자에 보이는 칸만큼 타일을 채운다. **tick 당 최대 하나만 푼다.**
+///
+/// 장당 ~20 ms 라(계약 §5.2) 24칸을 한 프레임에 풀면 480 ms 가 멈춘다. 한 장씩 차오르게 두면 각 프레임은
+/// 한 장 몫만 쓰고 격자가 눈앞에서 채워진다. **이것은 워커의 대체가 아니라 그 전 단계다** — 한 장 20 ms 도
+/// 프레임 예산(16.7 ms)을 넘으므로, 디코드 워커는 후속에서 붙인다.
+pub fn ensureTiles(self: *AppSession, visible: usize) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    const want = @min(@min(visible, self.image_gallery.count()), max_tiles);
+    if (self.image_gallery.tiles.items.len >= want) return;
+
+    const next: usize = self.image_gallery.tiles.items.len;
+    var img = decodeThumbnail(self, next) orelse {
+        // **못 푼 이미지도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
+        // 픽셀 0 인 타일은 그리지 않고 건너뛴다.
+        self.image_gallery.tiles.append(self.allocator, .{
+            .hit_index = next,
+            .width = 0,
+            .height = 0,
+            .pixels = &.{},
+            .generation = 1,
+        }) catch return;
+        self.metal_dirty = true;
+        return;
+    };
+    self.image_gallery.tiles.append(self.allocator, .{
+        .hit_index = next,
+        .width = img.width,
+        .height = img.height,
+        .pixels = img.pixels,
+        .generation = 1,
+    }) catch {
+        img.deinit(self.allocator);
+        return;
+    };
+    self.metal_dirty = true;
+}
+
 /// 훅이 소스를 바꿨을 때. **갤러리를 보고 있을 때만 건다** — 안 보는 뷰 때문에 1.68 GB 를 훑지 않는다.
 /// 보고 있지 않으면 다음에 들어올 때 `refresh` 가 경로 불일치를 보고 알아서 건다.
 pub fn onSourceChanged(self: *AppSession) void {
@@ -214,6 +286,114 @@ pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
     return image_decode.decode(self.allocator, raw, fit.subsample) catch null;
 }
 
+/// 격자가 쓸 영역(backing px). 도크 본문 그대로다.
+pub fn gridArea(self: *const AppSession) image_grid.Rect {
+    const g = dock_ops.dockGeometry(self);
+    return .{ .x = g.tree_content.x, .y = g.tree_content.y, .w = g.tree_content.w, .h = g.tree_content.h };
+}
+
+/// 타일 한 변(backing px). 썸네일 텍스처(160)와 **다를 수 있다** — 화면 크기는 레이아웃이,
+/// 텍스처 크기는 디코드가 정한다. 지금은 같은 값을 쓰되 그 둘을 한 상수로 묶지 않는다.
+pub fn gridMetrics(self: *const AppSession) image_grid.Metrics {
+    _ = self;
+    return .{ .tile = thumbnail_side, .gap = 8, .pad = 8 };
+}
+
+/// 갤러리 타일을 프레임의 이미지 채널에 얹는다.
+///
+/// **배경 이미지(`window.background-image`)와 같은 패턴이다** — 예약 id · `live_ids` 등록 ·
+/// generation 이 바뀐 것만 업로드. 렌더러를 고치지 않고 kitty graphics 의 텍스처 캐시·image quad
+/// 인프라를 그대로 재사용한다(계약 §5.4).
+///
+/// 실패는 조용히 «안 그림» 이다 — 할당이 모자라는 프레임에 도크를 통째로 멈추지 않는다.
+pub fn appendGpuImages(
+    self: *AppSession,
+    images: *[]metal_frame.GpuImage,
+    uploads: *[]metal_frame.GpuImageUpload,
+    pixels: *[]u8,
+    live_ids: *std.ArrayList(u32),
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+
+    const area = gridArea(self);
+    const m = gridMetrics(self);
+    const l = image_grid.layout(area, m, self.image_gallery.count());
+    if (l.visible == 0) return;
+
+    // 보이는 칸만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
+    ensureTiles(self, l.visible);
+
+    var new_images: std.ArrayList(metal_frame.GpuImage) = .empty;
+    defer new_images.deinit(self.allocator);
+    var new_uploads: std.ArrayList(metal_frame.GpuImageUpload) = .empty;
+    defer new_uploads.deinit(self.allocator);
+    var new_pixels: std.ArrayList(u8) = .empty;
+    defer new_pixels.deinit(self.allocator);
+
+    for (self.image_gallery.tiles.items, 0..) |*tile, n| {
+        if (n >= l.visible) break;
+        if (tile.pixels.len == 0) continue; // 못 푼 이미지는 자리만 차지하고 안 그린다
+        const cell = image_grid.rectAt(area, m, l, n) orelse continue;
+        // **비율을 지켜 가운데**. 늘리면 스크린샷 글자가 찌그러지고 자르면 무엇인지 못 알아본다.
+        const r = image_grid.fitInside(cell, tile.width, tile.height);
+        const id: u32 = gallery_image_id_base +| @as(u32, @intCast(n));
+
+        new_images.append(self.allocator, .{
+            .image_id = id,
+            .dest_x = @floatFromInt(r.x),
+            .dest_y = @floatFromInt(r.y),
+            .dest_w = @floatFromInt(r.w),
+            .dest_h = @floatFromInt(r.h),
+            .origin_x = 0,
+            .origin_y = 0,
+            .src_u0 = 0,
+            .src_v0 = 0,
+            .src_u1 = 1,
+            .src_v1 = 1,
+            .z = @intCast(n),
+            .pass = 2, // above_text — 도크 배경 셀 위에 그린다
+        }) catch return;
+        live_ids.append(self.allocator, id) catch {};
+
+        if (!tile.uploaded) {
+            new_uploads.append(self.allocator, .{
+                .image_id = id,
+                .width = tile.width,
+                .height = tile.height,
+                .bpp = 4,
+                .generation = tile.generation,
+                .pixels_offset = pixels.len + new_pixels.items.len,
+                .pixels_len = tile.pixels.len,
+            }) catch return;
+            new_pixels.appendSlice(self.allocator, tile.pixels) catch return;
+            tile.uploaded = true;
+        }
+    }
+    if (new_images.items.len == 0) return;
+
+    // 기존 배열 뒤에 잇는다(배경 이미지가 앞에 prepend 되는 것과 짝 — pass 순서를 지킨다).
+    const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + new_images.items.len) catch return;
+    @memcpy(merged_images[0..images.len], images.*);
+    @memcpy(merged_images[images.len..], new_images.items);
+    self.allocator.free(images.*);
+    images.* = merged_images;
+
+    if (new_uploads.items.len > 0) {
+        const merged_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, uploads.len + new_uploads.items.len) catch return;
+        const merged_pixels = std.mem.concat(self.allocator, u8, &.{ pixels.*, new_pixels.items }) catch {
+            self.allocator.free(merged_uploads);
+            return;
+        };
+        @memcpy(merged_uploads[0..uploads.len], uploads.*);
+        @memcpy(merged_uploads[uploads.len..], new_uploads.items);
+        self.allocator.free(uploads.*);
+        self.allocator.free(pixels.*);
+        uploads.* = merged_uploads;
+        pixels.* = merged_pixels;
+    }
+}
+
 /// 도크 본문에 낼 한 줄. 아직 격자가 없으므로 개수와 상태만 말한다.
 ///
 /// **넷을 가른다** — 「에이전트가 없다」·「세는 중」·「훑었는데 없다」·「못 봤다」. 접으면 사용자가
@@ -224,6 +404,8 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     if (self.image_gallery.partial) return maru.i18n.t(.image_gallery_partial);
     const n = self.image_gallery.count();
     if (n == 0) return maru.i18n.t(.image_gallery_empty);
+    // 격자가 그려지고 있으면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
+    if (self.image_gallery.tiles.items.len > 0) return "";
     // 문구가 안 들어가면 개수를 지어내지 않는다 — 빈 문자열이 낫다.
     return std.fmt.bufPrint(buf, "{d}{s}", .{ n, maru.i18n.t(.image_gallery_count_suffix) }) catch buf[0..0];
 }

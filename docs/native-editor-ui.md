@@ -168,12 +168,76 @@ git diff 본문 렌더, 컨텍스트 메뉴·자동완성 팝업·호버 박스 
 | 설정 | 관계 |
 |---|---|
 | 폰트 face | **공유** — 사용자 `font.family`를 platform adapter가 해석([font-strategy.md](font-strategy.md)) |
-| 색·테마 | **공유 파생** — `syntax_theme.zig` |
+| 색·테마 | **공유 파생 + 역할별 override** — `syntax_theme.zig` (§9.0) |
 | 폰트 크기·줄간격 | **상속 + override** — 편집기 키가 없으면 터미널 값을 쓴다 |
 | 커서 스타일·blink | **상속 + override** — 같은 근거 |
 | 탭 폭·랩 토글·미니맵 표시 | **편집기 전용** |
 
 **상속 + override인 근거**: 터미널과 diff가 나란히 놓이면 크기가 같아야 자연스럽고, 코드만 다른 크기로 보려는 요구도 정당하다. 기본값을 상속하면 설정 없이도 일관되고, 원하면 뗄 수 있다.
+
+### 9.0 구문 색 역할별 override (설계 — **미구현**)
+
+**2026-07-22 결정(*"색은 공유 파생"*)을 뒤집지 않는다.** 파생이 기본이고, 원하는 역할만 뗀다 — 폰트 크기·커서가
+이미 쓰는 **상속 + override**와 같은 모양이다. 색 언어를 창 안에서 통일한다는 원래 목적은 아무것도 안 정한
+사용자에게 그대로 성립한다.
+
+**왜 필요한가 — 지금 막힌 것은 둘로 갈린다.** `syntax_theme.fromTheme`가 ANSI 팔레트에서 파생하므로:
+
+| 역할 | 지금 |
+|---|---|
+| keyword·string·number·function·property·type·tag·attribute·invalid (9) | `theme.palette.9`~`.14`로 **바꿀 수 있다**. 다만 터미널 ANSI 의미와 **묶여 있다** — 키워드 색을 고치면 `ls` 출력의 그 색도 바뀐다 |
+| **comment · punctuation (2)** | `mix(fg, bg, 48/25)` 파생이라 **config 경로가 아예 없다** |
+
+즉 이 기능은 ⑴ 아홉의 **결합을 끊고** ⑵ 둘을 **처음 연다**.
+
+**역할 셋은 지금 색을 공유한다** — keyword·attribute가 ANSI 13, function·property가 12, tag·invalid가 9다.
+하나만 override하면 **의도적으로 같았던 짝이 갈린다**. 역할은 독립 축이고, 그것이 이 기능의 요점이다.
+
+#### 키
+
+`theme.syntax.<역할>` 열하나 — `keyword`·`string`·`number`·`comment`·`property`·`type`·`function`·
+`punctuation`·`tag`·`attribute`·`invalid`. `SyntaxColors` 필드와 **1:1**이고, 둘이 갈리면 `comptime`이 죽인다
+(`Role`↔`SyntaxColors`에 이미 쓴 방식). 캡처 이름 단위(`keyword.return` 등 36개)로는 열지 **않는다** — 색 축은
+역할이고, 캡처→역할 사상은 grammar를 따라 움직인다.
+
+#### 이 설계가 상속하는 규칙 넷
+
+이 키들은 `Theme` 안에 산다. 그 자리 하나가 아래 넷을 **공짜로** 성립시킨다 — 그래서 자리가 설계다.
+
+1. **`theme.follow-system`이 켜져 있으면 무시된다.** [configuration.md](configuration.md)가 정한 *"개별 `theme.*`
+   색은 무시되고 시스템이 색을 정한다"*가 그대로 적용된다 — `applyFollowSystemTheme`이 `config.theme`를 통째로
+   프리셋 색으로 갈아 끼우기 때문이다. 끄면 `theme_pre_follow` 스냅샷으로 함께 돌아온다.
+2. **`theme.preset`이 뒤 줄에 오면 지워진다.** preset 핸들러도 `config.theme`를 통째로 깐다(순차 적용 — 나중 줄
+   우선). 팔레트와 같은 규칙이다.
+3. **우선순위**는 `theme.syntax.<역할>` > `theme.palette.N` 파생 > xterm 기본색. **OSC 4는 여기 안 온다** —
+   `fromTheme`가 읽는 것은 config에서 resolve된 팔레트라, 앱이 런타임에 팔레트를 바꿔도 구문 색은 안 흔들린다.
+4. **프리셋 판정을 흔들지 않는다.** `detectThemePreset`은 background·foreground·cursor·selection 넷만 비교하므로,
+   구문 색을 정해도 테마가 "사용자 지정"으로 뒤집히지 않는다.
+
+#### 명시한 색은 보정하지 않는다 — 파생만 보정한다
+
+**근거는 같은 `resolve` 안에 있다.** `theme.background`·`theme.foreground`·`theme.cursor`·`theme.selection`은
+사용자가 적은 값을 **그대로** 쓴다. 대비 보정(`contrastFloor`)을 받는 것은 **ANSI 팔레트뿐**이고, 이유는 그
+색을 *프로그램이* 고르기 때문이다 — 배경과 안 맞아도 프로그램은 모른다. 역할 색을 손으로 고른 사용자는 그
+자리에 무엇이 오는지 알고 고른 것이므로, 명시 테마 색과 같은 규율을 따른다.
+
+**파생은 반대로 반드시 보정한다.** 그건 기계가 팔레트에서 고른 색이라 배경을 모른다(본문 4.0 ·
+comment·punctuation 2.4).
+
+> **처음에 이 절은 반대로 적혀 있었다** — *"명시 색도 보정하고 `theme.min-contrast = 0`으로 끈다"*. 판정자를
+> 쓰자마자 틀린 것이 드러났다: `readable()`은 `min_contrast`가 아니라 하드코딩된 4.0/2.4를 쓰므로 **그 탈출구는
+> 애초에 없었다**. 팔레트 선례만 보고 같은 `resolve` 안의 더 가까운 선례(명시 테마 색)를 안 봤다.
+
+#### 한 자리만 고치면 둘이 같이 바뀐다
+
+`fromTheme` 소비처는 셋이고 전부 이 함수를 지난다 — chrome 토큰 둘(`chrome_theme.zig`)과 웹 편집기 CSS 변수
+하나(`app_host_abi.zig`의 `maru_macos_app_session_syntax_style_js`). 네이티브 편집기와 파일 패널의 CM6 편집기가
+**같은 override를 자동으로 받는다**.
+
+#### 슬라이스
+
+설정 화면(GUI) 행은 **다음 슬라이스**다 — nullable 색이라 팔레트처럼 bespoke 행이 필요하고, *프리셋이 활성일 때
+잠글 것인가*를 거기서 정한다([config-gui.md](config-gui.md)).
 
 **폰트 크기는 런타임에도 바뀐다.** 설정 파일을 고치지 않고 키로 키우고 줄이는 것(그리고 기본값으로 되돌리는 것)은 편집기의 일상 동작이다. **이 조절이 터미널 폰트 크기를 함께 바꾸는지는 §9.1의 충돌 판정 대상**이다 — 터미널에 같은 키가 이미 배정돼 있을 수 있고, 편집기만 커지는 것과 창 전체가 커지는 것은 사용자 기대가 갈린다.
 

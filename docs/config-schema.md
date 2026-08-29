@@ -123,6 +123,7 @@ struct 필드로 안 떨어지는 키는 **명시 핸들러**로 둔다(지금 �
 | `cursor.color` / `cursor.text` | **nullable 색**(스키마 제너릭은 non-null 필드만) | `dupValidColor` 재사용 명시 핸들러 — 유효할 때만 슬롯 갱신(palette와 동형) |
 | `window.padding-x` / `-y` | **alias**(두 필드 동시) | `padding-x`→left+right 같은 값 — 현행 유지(제너릭은 1키=1필드) |
 | `theme.palette.N` | **인덱스 키**(N=0~15) | suffix 파싱 + 색 검증 — 현행 유지. GUI는 16칸 팔레트 에디터(bespoke) |
+| `theme.syntax.<역할>` | **nullable 색 계열**(11키 — `cursor.color`와 같은 이유로 제너릭 밖) | `dupValidColor` 재사용 명시 핸들러. `Theme` 안에 두어 follow-system·preset 덮기 규칙을 상속한다([native-editor-ui.md](native-editor-ui.md) §9.0). GUI는 bespoke 색 행(다음 슬라이스) |
 | `env.<KEY>` | **동적 prefix**(임의 KEY) | prefix 누적 → `Config.env` 리스트 — 현행 유지. GUI는 KEY/VALUE 리스트 에디터(bespoke) |
 | `keybind` | 별도 문법(chord=action) | `KeyBindingResolver` + action 카탈로그 — 현행 유지. GUI는 카탈로그 기반 리바인더(bespoke) |
 | `workspace.root` | **경로 검증**(절대경로/`~`만) | 형식 규칙을 `loader.isValidWorkspaceRoot` **단일 헬퍼**로 뽑아 loader 파싱과 세팅 GUI 커밋(`setWorkspaceRoot`)이 공유(드리프트 방지). 제너릭 text 경로엔 없는 특수 검증이라 명시 핸들러 유지. GUI는 Workspace 섹션 합성 text 행(shell.args 동형, config-gui.md §6.6a) |

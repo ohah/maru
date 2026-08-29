@@ -18,6 +18,7 @@ const pane_ops = @import("pane.zig");
 const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
 const image_decode = @import("../image_decode.zig");
+const decode_backend = @import("../agent_image_decode_backend.zig");
 const image_scale = maru.session.image_scale;
 const image_grid = maru.session.image_grid;
 const metal_frame = maru.renderer.metal_frame;
@@ -40,6 +41,9 @@ pub const State = struct {
     awaiting: u64 = 0,
     /// 워커가 바빠 아직 못 건 요청이 있다. 다음 tick 이 다시 건다.
     resubmit: bool = false,
+    /// 지금 디코드를 걸어 둔 요청의 generation. 0 이면 없다. **한 번에 한 장만 푼다** —
+    /// 여러 스레드를 띄우면 빨리 차지만 CPU 를 그만큼 먹고, 뷰를 떠나면 그 일이 전부 버려진다.
+    decoding: u64 = 0,
     /// 화면에 올린 썸네일. **인덱스와 다르다** — 인덱스는 파일 전체의 «자리» 이고 이것은 지금 보이는
     /// 칸의 «픽셀» 이다. 장당 0.06 MB 라 상한 안에서 상주해도 가볍다(계약 §5.2).
     tiles: std.ArrayList(Tile) = .empty,
@@ -67,6 +71,7 @@ pub const State = struct {
         self.built = false;
         self.awaiting = 0;
         self.resubmit = false;
+        self.decoding = 0;
     }
 
     pub fn count(self: *const State) usize {
@@ -117,6 +122,11 @@ fn backendPtr(self: *AppSession) ?*scan_backend.Backend {
     return null;
 }
 
+fn decodeBackendPtr(self: *AppSession) ?*decode_backend.Backend {
+    if (self.image_gallery_decode_backend) |*b| return b;
+    return null;
+}
+
 /// 갤러리 인덱스를 활성 pane 에 맞춘다. **파일을 여기서 읽지 않는다** — 워커에 요청만 건다.
 ///
 /// 호출자는 둘이다: 뷰에 들어올 때(`setDockView`)와 소스가 바뀐 것을 훅이 알려 줬을 때.
@@ -126,6 +136,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
     const path = activeSourcePath(self) orelse {
         if (self.image_gallery.built or self.image_gallery.scanning() or !self.image_gallery.source.isEmpty()) {
             backend.cancel();
+            if (decodeBackendPtr(self)) |d| d.cancel();
             self.image_gallery.clear(self.allocator);
             self.metal_dirty = true;
         }
@@ -137,6 +148,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
     backend.cancel();
+    if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
     self.image_gallery.clear(self.allocator);
     _ = self.image_gallery.source.set(path);
     self.metal_dirty = true;
@@ -163,6 +175,8 @@ pub fn poll(self: *AppSession) void {
         }
     }
 
+    harvestDecoded(self);
+
     var result = backend.take() orelse return;
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.
     if (result.generation != self.image_gallery.awaiting) {
@@ -187,33 +201,48 @@ pub fn poll(self: *AppSession) void {
 /// 프레임 예산(16.7 ms)을 넘으므로, 디코드 워커는 후속에서 붙인다.
 pub fn ensureTiles(self: *AppSession, visible: usize) void {
     if (!builtin.target.os.tag.isDarwin()) return;
-    const want = @min(@min(visible, self.image_gallery.count()), max_tiles);
-    if (self.image_gallery.tiles.items.len >= want) return;
+    const backend = decodeBackendPtr(self) orelse return;
+    if (self.image_gallery.decoding != 0) return; // 이미 한 장 도는 중
+    if (self.image_gallery.source.isEmpty()) return;
 
+    const want = @min(@min(visible, self.image_gallery.count()), max_tiles);
     const next: usize = self.image_gallery.tiles.items.len;
-    var img = decodeThumbnail(self, next) orelse {
-        // **못 푼 이미지도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
-        // 픽셀 0 인 타일은 그리지 않고 건너뛴다.
-        self.image_gallery.tiles.append(self.allocator, .{
-            .hit_index = next,
-            .width = 0,
-            .height = 0,
-            .pixels = &.{},
-            .generation = 1,
-        }) catch return;
-        self.metal_dirty = true;
-        return;
-    };
+    if (next >= want) return;
+
+    const hit = self.image_gallery.hits.items[next];
+    if (backend.submit(
+        self.image_gallery.source.path(),
+        hit.data_offset,
+        hit.data_len,
+        thumbnail_side,
+        next,
+    )) |generation| {
+        self.image_gallery.decoding = generation;
+    }
+}
+
+/// 디코드 완료본을 수확한다. `poll` 이 tick 마다 부른다.
+///
+/// **순서를 지킨다** — 다음에 채울 칸(`tiles.len`)의 것이 아니면 버린다. 순서가 어긋나면 격자의 그림과
+/// 인덱스가 갈리는데, 그것은 「엉뚱한 이미지가 뜬다」로 보이지 「비었다」로 보이지 않아 알아채기 어렵다.
+fn harvestDecoded(self: *AppSession) void {
+    const backend = decodeBackendPtr(self) orelse return;
+    var r = backend.take() orelse return;
+    defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
+
+    if (r.generation != self.image_gallery.decoding) return; // 늦게 온 것
+    self.image_gallery.decoding = 0;
+    if (r.hit_index != self.image_gallery.tiles.items.len) return; // 순서가 어긋났다
+
+    // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
-        .hit_index = next,
-        .width = img.width,
-        .height = img.height,
-        .pixels = img.pixels,
+        .hit_index = r.hit_index,
+        .width = r.width,
+        .height = r.height,
+        .pixels = r.pixels,
         .generation = 1,
-    }) catch {
-        img.deinit(self.allocator);
-        return;
-    };
+    }) catch return;
+    r.pixels = &.{}; // 소유가 타일로 넘어갔다 — defer 가 두 번 풀지 않게 비운다
     self.metal_dirty = true;
 }
 
@@ -229,8 +258,10 @@ pub fn onLeaveView(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
     backend.cancel();
+    if (decodeBackendPtr(self)) |d| d.cancel();
     self.image_gallery.awaiting = 0;
     self.image_gallery.resubmit = false;
+    self.image_gallery.decoding = 0;
 }
 
 /// 격자 썸네일의 한 변(px). 계약 §5.2 — 장당 0.06 MB 라 200장 상주해도 12 MB 다. 원본 해상도로 들면

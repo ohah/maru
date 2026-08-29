@@ -100,7 +100,8 @@ const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
 pub const image_gallery_ops = @import("app_session/image_gallery.zig");
-const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
+const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
+const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
@@ -5105,6 +5106,8 @@ pub const AppSession = struct {
     /// 갤러리 스캔 워커(계약 §4.1.1). init 실패는 «갤러리만 안 됨» 으로 접는다 — 세션 전체를
     /// 못 열 이유가 아니다. null 이면 `refresh` 가 조용히 물러난다.
     image_gallery_backend: ?agent_image_scan_backend.Backend = null,
+    /// 갤러리 **디코드** 워커(계약 §5.2). 스캔과 별개다 — 작업 단위가 파일이 아니라 이미지 한 장이다.
+    image_gallery_decode_backend: ?agent_image_decode_backend.Backend = null,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
     agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
@@ -6005,6 +6008,7 @@ pub const AppSession = struct {
             // **실패해도 세션은 연다.** 갤러리 하나 때문에 창을 못 여는 것이 더 나쁘다 — null 이면
             // `image_gallery_ops.refresh` 가 조용히 물러나고 그 뷰만 빈다(계약 §2 의 빈 상태와 같은 자리).
             self.image_gallery_backend = agent_image_scan_backend.Backend.init(allocator, io) catch null;
+            self.image_gallery_decode_backend = agent_image_decode_backend.Backend.init(allocator, io) catch null;
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -19887,6 +19891,8 @@ pub const AppSession = struct {
         // 워커는 detached 다 — 여기서 파괴하지 않고 refcount 에 맡긴다(취소만 건다).
         if (self.image_gallery_backend) |*b| b.deinit();
         self.image_gallery_backend = null;
+        if (self.image_gallery_decode_backend) |*b| b.deinit();
+        self.image_gallery_decode_backend = null;
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
@@ -72028,15 +72034,22 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
         live.deinit(allocator);
     }
     // ── ① **제품 경로가 이미 했다.** ─────────────────────────────────────────────────────
-    // `tick()` 이 프레임을 조립하며 `appendGpuImages` 를 부르므로, 위 spin 을 도는 동안 타일이 이미
-    // 풀려 GPU 로 갔다. 그것을 먼저 못박는다 — 이 test 가 「수동 호출만 된다」를 보는 것이 아니다.
+    // `tick()` 이 프레임을 조립하며 `appendGpuImages` → `ensureTiles` 를 부르고, 디코드 워커가 푼 것을
+    // 다음 tick 의 `poll` 이 수확한다. 위 spin 을 도는 동안 그 왕복이 끝났다.
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
     try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
     try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
 
     // ── ② 무엇이 실리는지 값으로 본다 ────────────────────────────────────────────────────
-    // 타일을 버리고 다시 시키면 「처음 그리는 프레임」과 같은 상태가 된다.
-    session.image_gallery.dropTiles(allocator);
+    // 「처음 그리는 프레임」과 같은 상태로 되돌린다. 타일을 버리면 디코드를 다시 기다려야 하므로
+    // **업로드 표시만** 되돌린다 — 이 단계가 보려는 것은 디코드가 아니라 **무엇이 채널에 실리는가**다.
+    session.image_gallery.tiles.items[0].uploaded = false;
     image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
 
     try std.testing.expectEqual(@as(usize, 1), images.len);

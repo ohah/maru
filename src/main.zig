@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1000;
+const smoke_spin_cap: usize = 1010;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4696,6 +4696,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var capmodal_before = false;
     var capmodal_after = false;
     var probe_victim_id: u64 = 0;
+    // 모달이 창 크기 변화를 따라오는가.
+    var resize_cells_before: usize = 0;
+    var resize_cells_after: usize = 0;
+    var resize_center_before: i64 = 0;
+    var resize_center_after: i64 = 0;
+    var resize_client_before: u32 = 0;
+    var resize_client_after: u32 = 0;
+    var resize_open_after = false;
+    var cycle_opens: usize = 0;
+    var cycle_closes: usize = 0;
+    var cycle_first_cells: usize = 0;
+    var cycle_last_cells: usize = 0;
     var shift_judgeable = false;
     var shift_target_survived = true;
     var file_closes: usize = 0;
@@ -4793,6 +4805,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var confirm_cells_drawn: usize = 0;
     var confirm_draw_failures: usize = 0;
     var confirm_unpainted: usize = 0;
+    var confirm_center_x: i64 = 0;
     var confirm_frame: ?maru.renderer.RenderFrame = null;
     defer if (confirm_frame) |*f| f.deinit(allocator);
     var next_session_id: usize = 0;
@@ -6060,7 +6073,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **자기 모달 주기를 연다.** 앞선 판정과 같은 모달을 쓰면 서로의 기대를 깨뜨린다 —
         // "열려 있는 동안 세션이 안 준다" 와 "일부러 줄인다" 는 한 모달에 같이 못 산다(실측으로
         // `confirm_modal_ok` 를 한 번 빨갛게 만들었다).
-        if (smoke and spins == 926 and sessions.items.len >= 3 and sidebar_card_columns != null) {
+        if (smoke and spins == 936 and sessions.items.len >= 3 and sidebar_card_columns != null) {
             var rb8: [16]maru.chrome.components.sidebar.Row = undefined;
             const rr8 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb8);
             const mm8 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
@@ -6072,13 +6085,37 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, cx8, cy8);
             window.postSyntheticMouse(.left_up, cx8, cy8);
         }
-        if (smoke and spins == 934 and shift_judgeable) window.postSyntheticVirtualKey(win32_keys.vk_return);
+        if (smoke and spins == 944 and shift_judgeable) window.postSyntheticVirtualKey(win32_keys.vk_return);
+        // ── 열고 닫기를 되풀이한다 (적대적 검증 5회차) ─────────────────────────────────
+        //
+        // **한 번만 열면 쌓이는 것이 안 보인다.** 모달 프레임은 매 프레임 새로 만들고 앞 것을 놓는데,
+        // 그 짝이 어긋나면 열 때마다 샌다. 누수 보고와 함께 **여는 데 드는 셀 수가 일정한지**도 본다.
+        if (smoke and spins >= 952 and spins <= 968 and @mod(spins, 4) == 0 and sessions.items.len >= 3 and sidebar_card_columns != null and !confirm_state.open) {
+            var rb9: [16]maru.chrome.components.sidebar.Row = undefined;
+            const rr9 = sidebarRowsFor(sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &rb9);
+            const mm9 = maru.chrome.components.sidebar.Metrics.init(cell_h, cell_h);
+            const top9 = maru.chrome.components.sidebar.rowTop(rr9, 1, sidebar_header_h, mm9, sidebar_scroll_px);
+            const cy9: i32 = @intCast(@as(i64, @intCast(geom.sidebar.y)) + @as(i64, top9) + @as(i64, @intCast(cell_h / 2)));
+            const rng9 = sidebar_card_columns.?.closeXRange(cell_w);
+            const cx9: i32 = @intCast(@as(i64, @intFromFloat(rng9.start)) + @as(i64, @intCast(cell_w / 2)));
+            window.postSyntheticMouse(.moved, cx9, cy9);
+            window.postSyntheticMouse(.left_down, cx9, cy9);
+            window.postSyntheticMouse(.left_up, cx9, cy9);
+            cycle_opens += 1;
+        }
+        // 연 뒤 Esc — 열고 닫기를 되풀이한다.
+        if (smoke and spins >= 954 and spins <= 970 and @mod(spins, 4) == 2 and confirm_state.open) {
+            if (cycle_first_cells == 0) cycle_first_cells = confirm_cells_drawn;
+            cycle_last_cells = confirm_cells_drawn;
+            window.postSyntheticVirtualKey(win32_keys.vk_escape);
+            cycle_closes += 1;
+        }
         // ── 목록이 밀려도 지목한 그것이 닫히나 (적대적 검증 3회차) ────────────────────
         //
         // 모달이 떠 있는 동안 **다른** 세션이 사라지면 보류한 대상이 무엇을 가리키나. 번호를 들면
         // 밀려서 **엉뚱한 세션이 죽는다** — 지금은 입력을 삼켜 그 일이 안 일어나지만, 셸이 끝난
         // 세션을 걷어내는 한 줄만 생겨도 도달한다. id 를 들면 안 밀린다.
-        if (smoke and spins == 930 and confirm_state.open and sessions.items.len >= 3) {
+        if (smoke and spins == 940 and confirm_state.open and sessions.items.len >= 3) {
             shift_judgeable = true;
             const victim = sessions.items[1].surface.id;
             const s0 = sessions.items[0];
@@ -6090,7 +6127,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             pump = sessions.items[0].pump;
             probe_victim_id = victim;
         }
-        if (smoke and spins == 938 and shift_judgeable) {
+        if (smoke and spins == 948 and shift_judgeable) {
             var still: bool = false;
             for (sessions.items) |s| if (s.surface.id == probe_victim_id) {
                 still = true;
@@ -6129,6 +6166,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 916 and cancel_judgeable and confirm_state.open) {
             capmodal_judgeable = true;
             capmodal_before = window.isMaximized();
+            // **모달이 창을 따라오는가.** 창이 커졌는데 상자가 옛 자리에 남으면 가운데가 아니게 된다 —
+            // 셀 수만 보면 같은 글자라 안 움직인다. **지문**과 **가로 중앙**을 함께 본다.
+            resize_cells_before = confirm_cells_drawn;
+            resize_center_before = confirm_center_x;
+            resize_client_before = client_w;
             const caps = captionButtonRects(client_w, titlebar_px, caption_btn_w);
             const mx: i32 = @intCast(caps[1].x + caps[1].w / 2); // ☐ 최대화
             const my: i32 = @intCast(caps[1].y + caps[1].h / 2);
@@ -6138,6 +6180,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 921 and capmodal_judgeable) {
             capmodal_after = window.isMaximized();
+            resize_cells_after = confirm_cells_drawn;
+            resize_center_after = confirm_center_x;
+            resize_client_after = client_w;
+            resize_open_after = confirm_state.open;
             // **되돌린다.** 최대화한 채로 두면 뒤따르는 판정이 다른 크기의 창을 본다 — 실측으로
             // `dock_scroll` 이 `content_fits` 로 바뀌었다.
             const caps2 = captionButtonRects(client_w, titlebar_px, caption_btn_w);
@@ -6147,11 +6193,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.left_down, rx, ry);
             window.postSyntheticMouse(.left_up, rx, ry);
         }
-        if (smoke and spins == 918 and cancel_judgeable) {
+        if (smoke and spins == 926 and cancel_judgeable) {
             cancel_open_before = confirm_state.open;
             window.postSyntheticVirtualKey(win32_keys.vk_escape);
         }
-        if (smoke and spins == 922 and cancel_judgeable) {
+        if (smoke and spins == 930 and cancel_judgeable) {
             cancel_open_after = confirm_state.open;
             cancel_sessions_after = sessions.items.len;
         }
@@ -8292,6 +8338,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             stderr.flush() catch {};
             if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
                 confirm_cells_drawn = n_drawn;
+                // **그린 셀에서 상자의 가로 중앙을 도로 읽는다** — 내가 넘긴 값을 되읽으면 동어반복이다.
+                var minx: f32 = std.math.floatMax(f32);
+                var maxx: f32 = 0;
+                for (cells.items[cells.items.len - n_drawn ..]) |c| {
+                    minx = @min(minx, c.rect[0]);
+                    maxx = @max(maxx, c.rect[0] + c.rect[2]);
+                }
+                confirm_center_x = @intFromFloat((minx + maxx) / 2);
             } else |_| confirm_draw_failures += 1;
         }
         last_cells = cells.items.len;
@@ -8591,6 +8645,30 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         });
         // 관측값이다(판정 아님) — 이 작업부하에서는 0 이라 판정으로 내면 공허하다.
         try stdout.print("editor_atlas_growths={d}{c}", .{ editor_atlas_growths, @as(u8, 10) });
+    }
+    if (cycle_opens > 0) {
+        // **셀 수가 일정해야 한다** — 열 때마다 늘면 앞 프레임의 것이 남아 쌓이는 것이다.
+        try stdout.print("modal_cycles: opens={d} closes={d} cells first={d} last={d} cycles_ok={}\n", .{
+            cycle_opens,
+            cycle_closes,
+            cycle_first_cells,
+            cycle_last_cells,
+            cycle_opens >= 3 and cycle_closes >= 3 and cycle_first_cells > 0 and cycle_first_cells == cycle_last_cells,
+        });
+    }
+    if (capmodal_judgeable) {
+        // **창이 커졌으면 상자도 따라와야 한다.** 열려 있는지, 중앙이 창 중앙으로 옮겨졌는지 본다.
+        try stdout.print("modal_follows_resize: client {d}->{d} center {d}->{d} cells {d}->{d} open={} follows={}\n", .{
+            resize_client_before,
+            resize_client_after,
+            resize_center_before,
+            resize_center_after,
+            resize_cells_before,
+            resize_cells_after,
+            resize_open_after,
+            resize_open_after and resize_client_after > resize_client_before and
+                resize_center_after > resize_center_before,
+        });
     }
     if (shift_judgeable) {
         // **지목한 그것이 죽어야 한다.** 개수만 보면 하나 줄었으니 초록인데, 죽은 것이 다른

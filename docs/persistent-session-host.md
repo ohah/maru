@@ -5976,6 +5976,45 @@ ownership 이전 전에 다시 확인한다. stale/tampered snapshot은 candidat
 c3a에는 thread/queue/Quit join, AppSession 제품 caller, CR5 transaction driver와 actual disconnect E2E가 없으므로 c3 또는
 자동 reconnect 제품 완료를 뜻하지 않는다.
 
+**CR6e-c3b app-global worker와 제품 정산 경계:** c3b는 c3b1 physical worker와 c3b2 제품 배선으로 닫는다.
+c3b1의 물리 worker는 앱 프로세스당 하나이며 c1의 32개
+logical job owner와 별개다. worker runtime은 final-address inline c2 `Completion` 한 칸만 소유하고, c3b2의
+main coordinator가 c1 `Owner`와 final-address `JobReceipt`를 별도로 소유한다. condition-variable는
+`idle -> queued -> running -> completed -> claimed -> idle|joined`를 직렬화한다. c2는 그 completion의
+최종 주소에 직접 결과를 쓰며 임시 completion 복사, detached thread, frame-thread wait와 owner mutex를 잡은 채 backend
+호출하는 경로는 0이다. completion slot이 차 있거나 worker 시작/queue 예약이 실패하면 c1 job을 실행 중으로 잃지 않고
+admission을 `retry_later`로 보존한다. worker 입력은 c1 receipt에서 복사한 pointer-free `WorkOrder`와 process-global cache
+base뿐이며 runtime/backend/pool/admission owner 주소를 받지 않는다.
+
+frame owner는 한 turn에 completion을 먼저 exact claim·settle한 뒤 새 admission을 최대 하나만 c1에 넣고 idle worker에
+최대 하나만 dispatch한다. connected completion은 c3a revalidation 뒤 기존 CR5 host-wide transaction을 시작하고, 이후
+CR5 단계는 job의 closed state에 따라 전진한다. 성공·stale·typed failure·terminal host-wide failure는 모두 같은 bound
+incident identity를 재검증한 제품 release leaf로 runtime별 reconnect resident lease와 admission mirror를 exact once
+정산한다. 새 connection publication 뒤 old connection generation이 더는 current와 일치하지 않는다는 이유로 이 정산을
+생략하거나 test-only release를 호출하면 안 된다. `retry_later`만 fresh incident publication 권위를 만들지 않고 기존
+admission을 다시 admitted 상태로 돌려 후속 frame이 같은 요청을 재시도한다.
+
+App Quit은 다음 세로 순서를 지킨다.
+
+```mermaid
+flowchart TD
+    A[새 admission 차단] --> B[c1 queued job 취소]
+    B --> C[worker cancel flag 게시]
+    C --> D[idle worker condition wake]
+    D --> E[absolute deadline 안에서 worker 반환]
+    E --> G[worker join]
+    G --> F[동일 final-address completion abandon]
+    G --> H[bound admission과 resident lease 정산]
+    H --> I[backend와 HostPool deinit]
+```
+
+join 전에 backend/pool/cache-base storage를 해제하거나 blocking worker가 `AppSession`을 역참조하는 경로는 0이다.
+Quit deadline은 worker order의 기존 absolute deadline을 연장하지 않으며, idle wake 뒤 callback 0과 worker/client/job/
+completion/admission/resident lease final 0을 제품 gate가 검증한다. c3b1은 final-address completion, invalid order,
+retained completion과 idle/running Quit 상태만 닫으며 AppSession caller와 admission/CR5 publication은 c3b2가 소유한다.
+c3b 전체는 제품 배선과 synthetic actual-socket fixture까지
+닫지만 실제 AppKit process의 disconnect→자동복구는 c3c가 별도로 증명한다.
+
 **현재 구현 범위:** 1–6의 deferred/attach/rollback과 stale host·missing runtime fail-closed는 P3 core에 구현됐다.
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**

@@ -1081,9 +1081,11 @@ test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole pr
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},"));
-    // e3c1부터 AppSession은 backend leaf를 직접 호출하지 않고 coordinator sole drain을 탄다.
+    // CR6e부터 AppSession은 backend leaf나 옛 coordinator drain을 직접 호출하지 않고
+    // product coordinator의 bounded turn owner를 탄다.
     try std.testing.expectEqual(@as(usize, 0), count(app, "backend.drainReconnectAdmission("));
-    try std.testing.expectEqual(@as(usize, 1), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 0), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "app_reconnect_product_coordinator.turnOne("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn drainReconnectAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "test \"CR2e-e3b2 admission drain은"));
     // 실패 복구 defer, runtime Busy, resident cap의 세 경로가 모두 같은 sealed row를 재시도 상태로 돌린다.
@@ -1121,12 +1123,15 @@ test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고�
     try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_admissions: reconnect_owner_mod.Owner = .{},"));
     try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},"));
     try std.testing.expectEqual(@as(usize, 0), count(app, "backend.drainReconnectAdmission("));
-    try std.testing.expectEqual(@as(usize, 1), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 0), count(app, "app_session_host_coordinator.drainReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "app_reconnect_product_coordinator.turnOne("));
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "return backend.drainReconnectAdmission(admissions, budget);"));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn validateReconnectCoordinatorTarget("));
-    try std.testing.expectEqual(@as(usize, 1), count(product_coordinator, "validateReconnectCoordinatorTarget("));
+    // Product coordinator revalidates the canonical backend at both admission and shutdown;
+    // neither turn may act through a stale singleton address.
+    try std.testing.expectEqual(@as(usize, 2), count(product_coordinator, "validateReconnectCoordinatorTarget("));
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         try countProductSourcesExceptTwo(
             allocator,
             "validateReconnectCoordinatorTarget(",

@@ -42,7 +42,7 @@ test "CR6e-c3b worker boundary keeps one final-address lane pointer-free" {
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn progressHostReconnectOne("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn preflightHostReconnectTerminal("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn finalizeCompletedHostReconnectNoFail("));
-    try std.testing.expectEqual(@as(usize, 0), count(app_session, "app_reconnect_product_coordinator"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, "var app_reconnect_product_coordinator:"));
     try std.testing.expect(std.mem.indexOf(u8, docs, "CR6e-c3b app-global worker와 제품 정산 경계") != null);
     try std.testing.expect(std.mem.indexOf(u8, docs, "flowchart TD") != null);
 }

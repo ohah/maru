@@ -64,9 +64,11 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         .{ .identifier = "prepareHostRetirement", .runtime_count = 1, .attachment_count = 1 },
         .{ .identifier = "hostRetirementPreparedExact", .runtime_count = 1, .attachment_count = 3 },
         .{ .identifier = "abortHostRetirement", .runtime_count = 2, .attachment_count = 1 },
-        .{ .identifier = "prepareUnavailableFromLive", .runtime_count = 1, .screen_count = 1 },
+        // One additional screen-local caller is the regression proving that a prepared receipt
+        // releases the writer gate before the next AppKit frame can read the surface.
+        .{ .identifier = "prepareUnavailableFromLive", .runtime_count = 1, .screen_count = 2 },
         .{ .identifier = "preparedUnavailableExact", .runtime_count = 1, .screen_count = 3 },
-        .{ .identifier = "abortPreparedUnavailable", .runtime_count = 1, .screen_count = 1 },
+        .{ .identifier = "abortPreparedUnavailable", .runtime_count = 1, .screen_count = 2 },
     };
     for (owner_inventory) |entry| {
         try std.testing.expectEqual(entry.backend_count, countIdentifier(backend, entry.identifier));
@@ -119,7 +121,7 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"test-session-host-cr5b2a\""));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr5b2a_step.dependOn(session_host_cr5b1_step);"));
-    try std.testing.expectEqual(@as(usize, 2), count(gate, "--maru-expect-tests=1"));
+    try std.testing.expectEqual(@as(usize, 3), count(gate, "--maru-expect-tests=1"));
 }
 
 fn between(source: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

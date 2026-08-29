@@ -242,10 +242,16 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
+// 178: c3c actual-AppKit gate가 reconnect worker/receipt/CR5/admission/resident owner의 read-only
+// snapshot을 읽는다. action identity나 pointer는 노출하지 않는다.
+// 179: recovered-session probe에 c3c continuity counter와 grid size를 덧붙여 실제 AppKit
+// input/copy/resize exact-once 결과를 같은 ABI record에서 관측한다.
+// 180: CR6e-c3c actual-AppKit probe가 별도 sibling runtime의 live/controller 상태를 disconnect
+// 전후에 읽는다. canonical runtime ID만 입력이고 action/handle authority는 계속 노출하지 않는다.
 // 177: drop_image가 Swift가 먼저 atomic 저장한 로컬 임시 PNG 경로를 PNG 바이트와 함께 받는다. host-backed
 // 비동기 freshness barrier가 로컬로 판정된 뒤에도 원래 이미지를 재생성하지 않고 정확한 target surface에 경로를
 // 붙일 수 있게 하는 수명 계약이다. export 시그니처를 바꾸므로 낡은 Swift/new Zig 조합은 ABI 가드에서 실패해야 한다.
-pub const abi_version: u32 = 177;
+pub const abi_version: u32 = 180;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2709,7 +2715,7 @@ const IncidentOwnerTerminationOutcome = enum(u32) {
 // AppHost termination ABI가 정산한다.
 var app_process_incident_owner: session_host.app_process_incident_owner.AppProcessIncidentOwner = .{};
 const incident_publication_port = session_host.app_process_incident_owner;
-var app_session_host_coordinator: session_host.session_host_coordinator.SessionHostCoordinator = .{};
+var app_reconnect_product_coordinator: session_host.reconnect_product_coordinator.Coordinator = .{};
 // CR6a-1 Recovered Sessions는 Window별 상태가 아니라 앱 전역 derived projection이다. 실제 launch collector는
 // CR6a-2에서 이 owner를 갱신하며, secondary/quick은 별도 사본을 만들지 않고 primary가 이 rows를 빌려 렌더한다.
 var app_recovered_sessions_projection: session_host.recovered_sessions_projection.Projection = .{};
@@ -3664,6 +3670,13 @@ pub const AppSession = struct {
         active_remote: bool = false,
         marker_present: bool = false,
         async_wake_marker_present: bool = false,
+        c3c_historical_count: u32 = 0,
+        c3c_disconnect_after_count: u32 = 0,
+        c3c_input_count: u32 = 0,
+        c3c_sibling_live: bool = false,
+        c3c_sibling_controller: bool = false,
+        cols: u16 = 0,
+        rows: u16 = 0,
         keep_alive_enabled: bool = false,
         discovered_candidates: u32 = 0,
         ready_adapters: u32 = 0,
@@ -3691,6 +3704,23 @@ pub const AppSession = struct {
             .live_session_count = @intCast(@min(live_app_sessions, std.math.maxInt(u32))),
             .target_activation_dispatched = app_recovery_smoke_last_activated_runtime_id == expected_runtime_id,
         };
+        if (std.c.getenv("MARU_SESSION_HOST_CR6E_C3C_SIBLING_RUNTIME_ID")) |sibling_raw| {
+            const sibling_text = std.mem.span(sibling_raw);
+            if (sibling_text.len == 32) sibling: {
+                for (sibling_text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f'))
+                    break :sibling;
+                const remote = if (app_remote_backend) |*backend| backend else break :sibling;
+                for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                    if (term.surface.remote == null) continue;
+                    const runtime_id = remote.runtimeIdFor(term.rt.handle) orelse continue;
+                    if (!std.mem.eql(u8, &runtime_id, sibling_text)) continue;
+                    out.c3c_sibling_live = remote.currentAttachmentLive(term.rt.handle);
+                    out.c3c_sibling_controller = out.c3c_sibling_live and
+                        !remote.attachedAsObserver(term.rt.handle);
+                    break :sibling;
+                };
+            }
+        }
         for (self.sidebar_rows.items, 0..) |row, index| switch (row) {
             .recovered_session => |candidate| {
                 const rows = self.recoveredSessionsRows(self.is_primary_window);
@@ -3732,6 +3762,20 @@ pub const AppSession = struct {
         defer self.allocator.free(recent);
         out.marker_present = std.mem.indexOf(u8, recent, "CR6C-RECOVERED-MARKER") != null;
         out.async_wake_marker_present = std.mem.indexOf(u8, recent, "E3C-APPKIT-ASYNC-WAKE") != null;
+        out.c3c_historical_count = @intCast(@min(
+            std.mem.count(u8, recent, "CR6E-C3C-HISTORICAL-ONCE"),
+            std.math.maxInt(u32),
+        ));
+        out.c3c_disconnect_after_count = @intCast(@min(
+            std.mem.count(u8, recent, "CR6E-C3C-AUTO-RECONNECTED"),
+            std.math.maxInt(u32),
+        ));
+        out.c3c_input_count = @intCast(@min(
+            std.mem.count(u8, recent, "CR6E-C3C-INPUT-ONCE"),
+            std.math.maxInt(u32),
+        ));
+        out.cols = term.rt.observation.size.cols;
+        out.rows = term.rt.observation.size.rows;
         return out;
     }
 
@@ -6854,6 +6898,37 @@ pub const AppSession = struct {
         return term_ops.termBackend(self);
     }
 
+    /// Routes a core mutation through the backend that owns this exact Term. A host-backed Term's
+    /// `surface.core` is only a render projection; sending its command to the in-process runtime
+    /// silently mutates that placeholder and leaves the authoritative host core unchanged.
+    pub fn enqueueCoreCommandForTerm(
+        self: *AppSession,
+        term: *Term,
+        command: maru.session.core_command.CoreCommand,
+    ) !void {
+        try self.backendFor(term).enqueueCoreCommand(term.rt.handle, command, self.io);
+    }
+
+    pub fn enqueueCoreCommandForSurface(
+        self: *AppSession,
+        surface_id: u64,
+        command: maru.session.core_command.CoreCommand,
+    ) !void {
+        // Local active surfaces retain the old O(1) route. Besides avoiding a tree walk on mouse
+        // and scroll hot paths, this preserves low-level fixtures that intentionally construct an
+        // AppWindow without a full Term tree. A remote projection can never enter this fallback.
+        if (self.app_window.active()) |active| if (active.id == surface_id and active.remote == null)
+            return self.runtime.enqueueCoreCommand(surface_id, command, self.io);
+        const location = term_ops.findTermWhere(self, surface_id, struct {
+            fn pred(want: u64, term: *Term) bool {
+                return term.kind == .terminal and term.surface.id == want;
+            }
+        }.pred) orelse {
+            return error.UnknownSurface;
+        };
+        try self.enqueueCoreCommandForTerm(location.pane.terms.items[location.term_index], command);
+    }
+
     /// **앱 전역** 원격 backend를 보장한다(§10). 이미 세워져 있으면(다른 창이) 재사용하고, 아니면 connect-or-launch로
     /// 세운다. best-effort — 실패면 모듈-var가 null로 남아 in-process로 폴백한다. exe=형제 `maru` CLI(launcher가 exec),
     /// base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`(discovery가 그 아래 `session-host/`를 씀). **allocator=`smp_allocator`**
@@ -6887,6 +6962,10 @@ pub const AppSession = struct {
             };
             const base = sessionHostRuntimeBase(a) orelse {
                 self.markHostConnectFailed(.cache_base);
+                return;
+            };
+            self.ensureReconnectProductCoordinator(base) catch |err| {
+                self.markHostConnectFailedError(.adapter, err);
                 return;
             };
             // §6 L291: host 연결/spawn 실패 시 조용히 in-process로 폴백하지 않고 사용자에게 알린다("유지된다" 오인 방지).
@@ -7277,6 +7356,7 @@ pub const AppSession = struct {
     fn ensureRestoreHostAdapterAtBase(self: *AppSession, base: []const u8, wanted_host_id: u128) RestoreHostOutcome {
         self.ensureProcessIncidentOwner() catch return .unavailable;
         if (builtin.is_test and app_incident_testing.stop_after_bootstrap) return .ready;
+        self.ensureReconnectProductCoordinator(base) catch return .unavailable;
         if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return .ready;
         // 같은 창의 Term 여러 개가 같은 죽은 host를 가리키는 것이 §7의 정상 케이스다(예: 12개 Term = 12번 복원).
         // 성공만 pool이 캐시하므로 host_gone을 기억하지 않으면 surface마다 connectExactWithBackoff(10회 × 20ms
@@ -7375,6 +7455,16 @@ pub const AppSession = struct {
         return true;
     }
 
+    fn ensureReconnectProductCoordinator(self: *AppSession, base: []const u8) !void {
+        const identity = RemoteSessionAdapter.publicationProcessIdentity() orelse return error.InvalidOwner;
+        try app_reconnect_product_coordinator.ensureReady(
+            std.heap.smp_allocator,
+            self.io,
+            base,
+            identity.process_nonce,
+        );
+    }
+
     /// GUI process incident owner의 유일한 bootstrap leaf. caller는 실제 current/restore 제품 entrypoint 두 곳뿐이다.
     /// runtime은 전달받은 directory FD를 복제하므로 이 함수는 성공·실패 모두 자기 FD를 닫을 수 있다.
     fn ensureProcessIncidentOwner(self: *AppSession) !void {
@@ -7388,7 +7478,7 @@ pub const AppSession = struct {
                 app_process_incident_nonce,
             );
             try incident_publication_port.installPublicationPort(&app_process_incident_owner);
-            return app_session_host_coordinator.ensureReady(identity.process_nonce);
+            return;
         }
         if (app_process_incident_nonce == 0) {
             var bytes: [16]u8 = undefined;
@@ -7409,7 +7499,6 @@ pub const AppSession = struct {
             app_process_incident_nonce,
         );
         try incident_publication_port.installPublicationPort(&app_process_incident_owner);
-        try app_session_host_coordinator.ensureReady(identity.process_nonce);
         app_process_incident_owner_thread.store(@intCast(std.Thread.getCurrentId()), .release);
     }
 
@@ -7432,7 +7521,7 @@ pub const AppSession = struct {
         try RemoteSessionAdapter.initializeProcessRuntime();
         incident_publication_port.publication_port_testing_api.reset();
         app_process_incident_owner = .{};
-        app_session_host_coordinator = .{};
+        app_reconnect_product_coordinator = .{};
         app_process_incident_nonce = 0;
         app_process_incident_owner_thread.store(0, .release);
         app_process_incident_termination_consumed.store(0, .release);
@@ -7448,7 +7537,9 @@ pub const AppSession = struct {
             _ = app_process_incident_owner.shutdown() catch unreachable;
         }
         app_process_incident_owner = .{};
-        app_session_host_coordinator = .{};
+        if (app_reconnect_product_coordinator.ready)
+            app_reconnect_product_coordinator.shutdownAndDeinit() catch unreachable;
+        app_reconnect_product_coordinator = .{};
         app_process_incident_nonce = 0;
         app_process_incident_owner_thread.store(0, .release);
         app_process_incident_termination_consumed.store(0, .release);
@@ -8862,12 +8953,16 @@ pub const AppSession = struct {
                     return;
                 }
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
-                self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .select_all, self.io) catch {};
+                const term = pane_ops.activePane(self).activeTerm();
+                self.backendFor(term).enqueueCoreCommand(term.rt.handle, .select_all, self.io) catch {};
             },
             // 화면+스크롤백 비우기(⌘K). host-backed의 surface.core는 placeholder이므로 local/remote 모두 runtime의
             // reader queue로 위임한다. 권위 core의 prompt 판정과 조건부 ^L 주입을 같은 input fence에서 처리해야
             // clear와 다음 사용자 입력 사이에 ^L이 끼거나 다음 observation이 지운 화면을 되살리지 않는다.
-            .clear_screen => self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .clear_screen, self.io) catch {},
+            .clear_screen => {
+                const term = pane_ops.activePane(self).activeTerm();
+                self.backendFor(term).enqueueCoreCommand(term.rt.handle, .clear_screen, self.io) catch {};
+            },
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             .toggle_settings => settings_ops.toggleSettings(self),
@@ -10780,7 +10875,7 @@ pub const AppSession = struct {
         const surface = term_ops.activeSurface(self);
         // local/host-backed 모두 권위 reader에 위임한다. host-backed의 client core는 빈 placeholder이고, local도
         // main thread 직접 mutate 대신 기존 input fence를 타야 `기존 입력 → reset → 새 입력` 순서가 보존된다.
-        self.runtime.enqueueCoreCommand(surface.id, .reset_input_modes, self.io) catch {};
+        self.enqueueCoreCommandForSurface(surface.id, .reset_input_modes) catch {};
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
@@ -11080,7 +11175,7 @@ pub const AppSession = struct {
                 break :blk surface.baseViewportScrolledLocked();
             };
             if (scrolled == true) {
-                self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
+                self.enqueueCoreCommandForSurface(surface.id, .scroll_to_bottom) catch {};
                 self.metal_dirty = true;
             }
         }
@@ -11332,7 +11427,7 @@ pub const AppSession = struct {
         // Phase 3 위임(docs/plans/io-render-threading.md §9 P3-3): reportFocus는 코어 mutate(+response 생성)라 메인이
         // 직접 안 하고 reader로 위임한다 — reader가 적용 후 pendingResponse를 PTY로 흘린다(non-interactive 폴백은
         // enqueueCoreCommand가 직접 흘림). focus→응답 인과는 그 명령 처리 시 응답 생성으로 보존.
-        self.runtime.enqueueCoreCommand(active.id, .{ .report_focus = gained }, self.io) catch {};
+        self.enqueueCoreCommandForSurface(active.id, .{ .report_focus = gained }) catch {};
     }
 
     /// host-backed 활성 터미널의 일반 key 인코딩 모드(DECCKM·DECKPAM·kitty keyboard)를 runtime observation에서 만든다.
@@ -11423,7 +11518,7 @@ pub const AppSession = struct {
         // 꺼도 reportMouse 자체가 mouse_tracking 가드(.none이면 무동작)라 안전.
         // xterm modifier(shift=4, option=8, ctrl=16)만 wire로 넘긴다. command(32)은 그룹 드래그 전용이고,
         // ABI에서 들어온 알 수 없는 상위/음수 비트도 제거해야 i32→u8 변환이 trap하지 않는다.
-        self.runtime.enqueueCoreCommand(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods & (4 | 8 | 16)) } }, self.io) catch {};
+        self.enqueueCoreCommandForSurface(active.id, .{ .report_mouse = .{ .button = 3, .col = cell.col, .row = cell.row, .x_px = cell.term_x_px, .y_px = cell.term_y_px, .pressed = true, .motion = true, .mods = @intCast(mods & (4 | 8 | 16)) } }) catch {};
     }
 
     /// 스크린 px → 셀 변환 결과. 순수 산술·CellHit는 session/layout_math.zig로 분리(b2) — 여긴 alias.
@@ -12554,7 +12649,7 @@ pub const AppSession = struct {
             // (shift/option은 위 do_report 게이트가 이미 선택 override로 빼놨다). 드래그 motion(kind 2)은
             // 버튼 이벤트가 아니라 제외한다(60~120Hz라 매번 큐에 넣을 일도 아니다 — Ghostty도 cursorPos에선 안 지운다).
             if (kind != 2) term_ops.clearSurfaceSelection(self, click_surface.id);
-            self.runtime.enqueueCoreCommand(click_surface.id, .{
+            self.enqueueCoreCommandForSurface(click_surface.id, .{
                 .report_mouse = .{
                     .button = @intCast(button),
                     .col = col,
@@ -12567,7 +12662,7 @@ pub const AppSession = struct {
                     // 32가 SGR motion 비트(input_report.zig:68)와 겹쳐 press가 motion으로 오인되거나 cb가 부풀어 리포트가 오염된다(R1 회귀 가드).
                     .mods = @intCast(mods & ~@as(i32, 32)),
                 },
-            }, self.io) catch {};
+            }) catch {};
             return;
         }
         // 셀렉션은 left 버튼(0)만 시작한다 — tracking 아닌 상태의 right/middle 클릭은 무시(셀렉션·context 메뉴 없음).
@@ -12581,7 +12676,7 @@ pub const AppSession = struct {
             1 => {
                 self.mouse_drag_selecting = true;
                 self.drag_autoscroll = 0;
-                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_start = .{ .row = row, .col = col, .block = (mods & 8) != 0 } }, self.io) catch {};
+                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_start = .{ .row = row, .col = col, .block = (mods & 8) != 0 } }) catch {};
             },
             2 => {
                 // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). grid 높이용 rows는
@@ -12595,14 +12690,14 @@ pub const AppSession = struct {
                 const grid_height: f64 = @as(f64, @floatFromInt(rows)) * ch;
                 self.drag_autoscroll = if (y_px < pane_top) 1 else if (y_px > pane_top + grid_height) -1 else 0;
                 self.last_drag_col = col;
-                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_extend = .{ .row = row, .col = col } }, self.io) catch {};
+                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_extend = .{ .row = row, .col = col } }) catch {};
             },
             3 => {
                 self.drag_autoscroll = 0;
                 // 더블/트리플클릭 직후의 up은 그 선택을 건드리면 안 된다(단어가 1칸이면 "이동 없는 클릭" 판정에 걸려 즉시 해제).
                 if (!self.mouse_drag_selecting) return;
                 self.mouse_drag_selecting = false;
-                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_extend_or_collapse = .{ .row = row, .col = col } }, self.io) catch {};
+                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_extend_or_collapse = .{ .row = row, .col = col } }) catch {};
             },
             4 => {
                 self.mouse_drag_selecting = false;
@@ -12616,11 +12711,11 @@ pub const AppSession = struct {
                 // 무시되기 때문이다(F2-8). 반환은 ≤ sep_buf.len(64)이라 u8 안전.
                 const n: u8 = @intCast(terminal.width.truncateToBoundary(sep, sep_buf.len));
                 @memcpy(sep_buf[0..n], sep[0..n]);
-                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_word = .{ .row = row, .col = col, .separators = sep_buf, .sep_len = n } }, self.io) catch {};
+                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_word = .{ .row = row, .col = col, .separators = sep_buf, .sep_len = n } }) catch {};
             },
             5 => {
                 self.mouse_drag_selecting = false;
-                self.runtime.enqueueCoreCommand(click_surface.id, .{ .select_line = row }, self.io) catch {};
+                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_line = row }) catch {};
             },
             else => return,
         }
@@ -14851,7 +14946,7 @@ pub const AppSession = struct {
         // host가 자기 core에 적용해 추출한다. 원격 판정 SSOT=surface.remote. placeholder 선택 읽기는 메인스레드라 락 불요.
         if (is_macos and term_ops.activeSurface(self).remote != null) {
             const rs = term_ops.activeSurface(self);
-            const span = rs.core.selectionViewportSpan() orelse return &.{};
+            const span = rs.core.selectionViewportSpan();
             if (app_remote_backend) |*rb| {
                 if (rb.selectedTextFor(rs.id, span)) |text| {
                     self.copy_buffer = text; // owned(host 추출 바이트 dupe) — 다음 copyText까지 유효.
@@ -15412,7 +15507,7 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         // view_offset mutate라 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4) — 위임된 scroll과 같은
         // 큐를 타 순서 보존(메인 직접 mutate면 reader scroll과 view_offset race). "스크롤됨" 최적화는 reader 렌더 트리거로 대체.
-        self.runtime.enqueueCoreCommand(term_ops.activeSurface(self).id, .{ .jump_to_prompt = dir }, self.io) catch {};
+        self.enqueueCoreCommandForSurface(term_ops.activeSurface(self).id, .{ .jump_to_prompt = dir }) catch {};
         self.metal_dirty = true;
     }
 
@@ -16766,16 +16861,6 @@ pub const AppSession = struct {
         // (routing은 surface_id로 각 surface에 가고, frame은 아래에서 활성 탭만 빌드한다). summary는 보고용.
         var drain_summary: app.RuntimePumpDrainSummary = .{};
         // 전역 remote backend가 frame owner 집합을 한 번만 선택해야 Term별 pump 순서가 Busy owner를 재실행하지 않는다.
-        if (is_macos) if (app_remote_backend) |*backend| {
-            if (app_process_incident_owner.publisher() != null) {
-                _ = app_session_host_coordinator.drainReconnectAdmission(
-                    backend,
-                    &app_process_incident_owner.reconnect_admissions,
-                    &app_process_incident_owner.reconnect_budget,
-                ) catch @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
-            }
-            backend.maintenanceEventTick();
-        };
         // 활성 surface **자신의** 출력만 따로 센다(커서 blink 리셋 판정용 — 아래 루프 주석). 활성 탭이 없는 빈 창
         // (마지막 워크스페이스를 옮겨 비운 창)은 `active()`가 null이라 id 비교를 건너뛴다(그 창엔 그릴 커서도 없다).
         const active_surface_id: ?u64 = if (self.app_window.active()) |s| s.id else null;
@@ -20491,6 +20576,108 @@ pub const AppSession = struct {
         }
     }
 };
+
+pub const ReconnectProductTurnOutcome = enum(u32) {
+    inactive = 0,
+    idle = 1,
+    progressed = 2,
+};
+
+pub const ReconnectProductSmokeProbe = struct {
+    coordinator_ready: bool = false,
+    worker_state_raw: u8 = 0,
+    active_jobs: u32 = 0,
+    job_receipt_present: bool = false,
+    completion_receipt_present: bool = false,
+    cr5_job_present: bool = false,
+    cr5_preparing: bool = false,
+    cr5_state_raw: u8 = 0,
+    runtime_count: u32 = 0,
+    admission_count: u32 = 0,
+    resident_entries: u32 = 0,
+};
+
+pub fn reconnectProductSmokeProbe() ReconnectProductSmokeProbe {
+    if (comptime !is_macos) return .{};
+    const owner_thread = app_process_incident_owner_thread.load(.acquire);
+    if (owner_thread == 0 or owner_thread != @as(u64, @intCast(std.Thread.getCurrentId()))) return .{};
+    const coordinator = app_reconnect_product_coordinator.diagnosticSnapshot() catch return .{};
+    const budget = app_process_incident_owner.reconnect_budget.snapshot() catch return .{};
+    const backend = if (app_remote_backend) |*value| value.reconnectProductSnapshot() else session_host.remote_term_backend.RemoteTermBackend.ReconnectProductSnapshot{
+        .job_present = false,
+        .preparing = false,
+        .job_state_raw = 0,
+        .runtime_count = 0,
+    };
+    return .{
+        .coordinator_ready = coordinator.ready,
+        .worker_state_raw = coordinator.worker_state_raw,
+        .active_jobs = @intCast(coordinator.active_jobs),
+        .job_receipt_present = coordinator.job_receipt_present,
+        .completion_receipt_present = coordinator.completion_receipt_present,
+        .cr5_job_present = backend.job_present,
+        .cr5_preparing = backend.preparing,
+        .cr5_state_raw = backend.job_state_raw,
+        .runtime_count = @intCast(backend.runtime_count),
+        .admission_count = app_process_incident_owner.reconnect_admissions.count,
+        .resident_entries = @intCast(budget.live_entries),
+    };
+}
+
+/// AppHost's single global timer owner calls this once before iterating Window/quick sessions.
+/// The worker owns blocking connect/hello; this leaf advances only bounded main-owner states.
+pub fn tickReconnectProductCoordinator() ReconnectProductTurnOutcome {
+    if (comptime !is_macos) return .inactive;
+    const owner_thread = app_process_incident_owner_thread.load(.acquire);
+    if (owner_thread == 0 or owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())))
+        return .inactive;
+    const backend = if (app_remote_backend) |*value| value else return .inactive;
+    defer backend.maintenanceEventTick();
+    if (!app_reconnect_product_coordinator.ready or app_process_incident_owner.publisher() == null)
+        return .inactive;
+    const phase = session_host.attach_phase_deadline.PhaseDeadline.start(
+        backend.io,
+        .connect_hello,
+    ) catch @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+    const expires_at_ns = std.math.cast(u64, phase.absolute.expires_at_ns) orelse
+        @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+    const result = app_reconnect_product_coordinator.turnOne(
+        backend,
+        &app_process_incident_owner.reconnect_admissions,
+        &app_process_incident_owner.reconnect_budget,
+        expires_at_ns,
+    ) catch |err| {
+        // The coordinator is fail-stop because continuing after authority drift could publish a
+        // split reconnect generation. Preserve the typed cause in the local app log first so an
+        // actual signed-product E2E can distinguish proof loss from a transport failure.
+        std.log.err("reconnect product coordinator turn failed: {s}", .{@errorName(err)});
+        @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+    };
+    return switch (result) {
+        .idle => .idle,
+        .progressed => .progressed,
+    };
+}
+
+pub fn shutdownReconnectProductCoordinator() RemoteBackendSettlementOutcome {
+    if (comptime !is_macos) return .inactive;
+    const owner_thread = app_process_incident_owner_thread.load(.acquire);
+    if (owner_thread == 0 or owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())) or
+        !app_reconnect_product_coordinator.ready)
+        return .inactive;
+    if (app_remote_backend) |*backend| {
+        if (app_process_incident_owner.publisher() == null)
+            @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+        app_reconnect_product_coordinator.shutdownProductAndDeinit(
+            backend,
+            &app_process_incident_owner.reconnect_budget,
+        ) catch @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+    } else {
+        app_reconnect_product_coordinator.shutdownAndDeinit() catch
+            @import("session_host/process_seal_service.zig").fatalIntegrity(.incident_authority);
+    }
+    return .settled;
+}
 
 pub fn normalizeConfig(config: SessionConfig) !NormalizedConfig {
     if (config.abi_version != abi_version) return error.UnsupportedAbi;
@@ -63740,6 +63927,13 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
     const product_runtime = session.runtime;
     session.runtime = &capture_runtime;
     defer session.runtime = product_runtime;
+    // The command path now resolves the exact Term backend instead of assuming every remote-marked
+    // surface belongs to `session.runtime`. This fixture has no real RemoteTermBackend, so point its
+    // in-process adapter at the capture runtime explicitly; the `surface.remote` marker continues to
+    // exercise the host observation gate while command encoding remains deterministic and local.
+    const product_backend_runtime = session.term_backend.runtime;
+    session.term_backend.runtime = &capture_runtime;
+    defer session.term_backend.runtime = product_backend_runtime;
     {
         surface.lockCore(session.io);
         defer surface.unlockCore(session.io);

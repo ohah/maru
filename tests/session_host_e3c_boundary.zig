@@ -74,7 +74,9 @@ test "P4 E3c client idle pump owns actual generation-backed scale evidence" {
     try std.testing.expectEqual(@as(usize, 0), count(swift, "Darwin.close(row.fd)"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "fileDescriptor: row.fd"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "self.sessionHostWakeHandlerCount += 1"));
-    try std.testing.expectEqual(@as(usize, 3), count(swift, "probe.async_wake_marker_present != 0"));
+    // Baseline capture, wake timing, primary reconnect completion, and sibling post-reconnect
+    // continuity each require the same native wake evidence.
+    try std.testing.expectEqual(@as(usize, 4), count(swift, "probe.async_wake_marker_present != 0"));
     try std.testing.expectEqual(@as(usize, 1), count(ci, "run: zig build test-session-host-e3c"));
     try std.testing.expectEqual(
         @as(usize, 1),

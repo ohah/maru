@@ -64,9 +64,10 @@ test "CR6e-a2 경계는 exact AppKit fixture root와 반복 raw artifact만 연�
     try std.testing.expectEqual(@as(usize, 1), count(harness, "for (0..iteration_count)"));
     try std.testing.expectEqual(@as(usize, 2), count(harness, "MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION"));
     try std.testing.expectEqual(@as(usize, 1), count(harness, ".swift_iteration ="));
-    try std.testing.expectEqual(@as(usize, 1), count(harness, ".fd_before ="));
-    try std.testing.expectEqual(@as(usize, 1), count(harness, ".fd_after ="));
-    try std.testing.expectEqual(@as(usize, 1), count(harness, ".child_processes_remaining ="));
+    // Recovery-baseline and auto-reconnect artifacts each seal the same process cleanup axes.
+    try std.testing.expectEqual(@as(usize, 2), count(harness, ".fd_before ="));
+    try std.testing.expectEqual(@as(usize, 2), count(harness, ".fd_after ="));
+    try std.testing.expectEqual(@as(usize, 2), count(harness, ".child_processes_remaining ="));
     try std.testing.expectEqual(@as(usize, 1), count(validator, "std.json.parseFromSlice"));
     try std.testing.expectEqual(@as(usize, 1), count(validator, "const iteration_count: usize = 5;"));
     try std.testing.expectEqual(@as(usize, 1), count(budget, "const expected_os_release = \"25.5.0\";"));

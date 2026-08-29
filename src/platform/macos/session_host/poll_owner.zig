@@ -160,6 +160,13 @@ pub const Owner = struct {
         self.reactor.resetFixturePeaksToCurrent();
     }
 
+    /// Private daemon-fixture fault seam. The caller is an in-process `FixtureProbe`, never a
+    /// wire method: close every currently admitted peer through the canonical owner teardown so
+    /// an actual GUI observes EOF while the daemon, PTYs, registry, and listener stay alive.
+    pub fn disconnect_fixture_clients(self: *Owner) void {
+        self.destroyAll();
+    }
+
     fn syncClientCount(self: *Owner) void {
         self.server.host_status.client_count = self.activeCount();
     }

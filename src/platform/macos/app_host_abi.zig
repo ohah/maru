@@ -130,8 +130,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v177 session config bootstrap and notification cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 177), abi_version);
+test "ABI v180 session config bootstrap and notification cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 180), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -658,6 +658,47 @@ pub export fn maru_macos_remote_backend_settle() u32 {
     return @intFromEnum(session_mod.settleProcessRemoteBackendForTermination());
 }
 
+pub export fn maru_macos_reconnect_product_tick() u32 {
+    return @intFromEnum(session_mod.tickReconnectProductCoordinator());
+}
+
+pub export fn maru_macos_reconnect_product_shutdown() u32 {
+    return @intFromEnum(session_mod.shutdownReconnectProductCoordinator());
+}
+
+pub const ReconnectProductSmokeProbe = extern struct {
+    coordinator_ready: u32,
+    worker_state_raw: u32,
+    active_jobs: u32,
+    job_receipt_present: u32,
+    completion_receipt_present: u32,
+    cr5_job_present: u32,
+    cr5_preparing: u32,
+    cr5_state_raw: u32,
+    runtime_count: u32,
+    admission_count: u32,
+    resident_entries: u32,
+};
+
+pub export fn maru_macos_reconnect_product_smoke_probe(out_probe: ?*ReconnectProductSmokeProbe) c_int {
+    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const probe = session_mod.reconnectProductSmokeProbe();
+    out.* = .{
+        .coordinator_ready = @intFromBool(probe.coordinator_ready),
+        .worker_state_raw = probe.worker_state_raw,
+        .active_jobs = probe.active_jobs,
+        .job_receipt_present = @intFromBool(probe.job_receipt_present),
+        .completion_receipt_present = @intFromBool(probe.completion_receipt_present),
+        .cr5_job_present = @intFromBool(probe.cr5_job_present),
+        .cr5_preparing = @intFromBool(probe.cr5_preparing),
+        .cr5_state_raw = probe.cr5_state_raw,
+        .runtime_count = probe.runtime_count,
+        .admission_count = probe.admission_count,
+        .resident_entries = probe.resident_entries,
+    };
+    return @intFromEnum(Status.ok);
+}
+
 pub const SessionHostWakeSource = extern struct {
     fd: i32,
     reserved: u32 = 0,
@@ -1117,6 +1158,13 @@ pub const RecoveredSessionSmokeProbe = extern struct {
     active_remote: u32,
     marker_present: u32,
     async_wake_marker_present: u32,
+    c3c_historical_count: u32,
+    c3c_disconnect_after_count: u32,
+    c3c_input_count: u32,
+    c3c_sibling_live: u32,
+    c3c_sibling_controller: u32,
+    cols: u32,
+    rows: u32,
     keep_alive_enabled: u32,
     discovered_candidates: u32,
     ready_adapters: u32,
@@ -1154,6 +1202,13 @@ pub export fn maru_macos_app_session_recovered_session_smoke_probe(
         .active_remote = @intFromBool(probe.active_remote),
         .marker_present = @intFromBool(probe.marker_present),
         .async_wake_marker_present = @intFromBool(probe.async_wake_marker_present),
+        .c3c_historical_count = probe.c3c_historical_count,
+        .c3c_disconnect_after_count = probe.c3c_disconnect_after_count,
+        .c3c_input_count = probe.c3c_input_count,
+        .c3c_sibling_live = @intFromBool(probe.c3c_sibling_live),
+        .c3c_sibling_controller = @intFromBool(probe.c3c_sibling_controller),
+        .cols = probe.cols,
+        .rows = probe.rows,
         .keep_alive_enabled = @intFromBool(probe.keep_alive_enabled),
         .discovered_candidates = probe.discovered_candidates,
         .ready_adapters = probe.ready_adapters,

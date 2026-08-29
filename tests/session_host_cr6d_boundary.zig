@@ -22,11 +22,11 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     const input_source_restore = try read(allocator, "src/platform/macos/SessionHostInputSourceRestore.swift");
     defer allocator.free(input_source_restore);
 
-    // ABI 177 retains the read-only record. The record exposes four scalar observations and no
+    // ABI 178 retains the read-only record. The record exposes four scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
-    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 177;"));
-    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 177), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 177u"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 180;"));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 180), abi_version)"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 180u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",

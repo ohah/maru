@@ -954,7 +954,7 @@ pub fn activeTerminalSurface(self: *AppSession) ?*maru.session.Surface {
 /// 남는다(클릭이 리포팅으로 빠져 선택을 손도 안 댄다). 베이스: Ghostty Surface.zig — 같은 세 지점에서
 /// `setSelection(null)`. 선택이 없으면 코어의 `selectionClear`가 즉시 return하므로 반복 호출은 무해하다.
 pub fn clearSurfaceSelection(self: *AppSession, surface_id: u64) void {
-    self.runtime.enqueueCoreCommand(surface_id, .select_clear, self.io) catch {};
+    self.enqueueCoreCommandForSurface(surface_id, .select_clear) catch {};
     self.metal_dirty = true; // 해제된 하이라이트가 한 프레임 더 남지 않게(다른 선택 사이트와 같은 규율)
 }
 

@@ -302,7 +302,7 @@ pub fn imeBegin(self: *AppSession) void {
             break :blk surface.baseViewportScrolledLocked();
         };
         if (scrolled == true) {
-            self.runtime.enqueueCoreCommand(surface.id, .scroll_to_bottom, self.io) catch {};
+            self.enqueueCoreCommandForSurface(surface.id, .scroll_to_bottom) catch {};
             self.metal_dirty = true;
         }
         if (self.ime_terminal_target_id == null) self.ime_terminal_target_id = surface.id;

@@ -2160,11 +2160,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   admission·absolute deadline을 재검증한 비차단 CR5 job adoption, c3b1은 final-address physical worker와 cancellation
   wake/join, c3b2a는 admission-loss 없는 reversible c1 예약·최초 identity 보존 coalesce·한 frame당 completion/admission/dispatch
   각 최대 하나, c3b2b/c3c는 frame-thread block 0·bound admission 제품 정산·main-owner CR5 publication 및
-  actual AppKit socket 단절 뒤 같은 host/runtime/child PID·output/input/copy/resize·sibling/controller 보존과 모든
-  worker/fd/client/admission final 0을 검증한다. c3 전에는 자동 reconnect 제품 완료로 세지 않는다.
-  c3b2a의 final-address main coordinator, prepared-dispatch 선행 seal 검증, reversible queued reservation과 synthetic
-  actual-runtime resident bind/coalesce는 구현됐다. AppSession frame caller와 terminal release/CR5 driver는 아직 구현 전이라
-  제품 connection-fatal event는 물리 worker로 dispatch되지 않는다.
+  actual AppKit socket 단절 뒤 같은 host/runtime/child PID·output/input/copy/resize·서로 다른 sibling runtime의
+  단절 전후 live/controller 보존과 모든 worker/fd/client/admission final 0을 검증한다.
+  **CR6e-c1~c3c 구현·제품 actual-AppKit 검증 완료.** strict `maru.session-host-cr6e-c3c-appkit.v1` validator는
+  unknown/duplicate/missing field를 거부하고 identity·continuity·sibling authority·blocking operation 0·cleanup을 판정한다.
+  AppSession의 terminal core mutation은 `enqueueCoreCommandForTerm` 또는 `enqueueCoreCommandForSurface`에서 exact Term backend를
+  선택하며, scroll/focus/mouse/selection/find/config/reset이 host-backed placeholder core로 새는 제품 경로는 source boundary 0이다.
+  direct in-process enqueue는 같은 helper의 active local O(1) fallback 하나만 허용한다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지
   않는지, callback이 queue mutex 밖에서 실행되는지 고정한다. daemon/restore는 runtime 생성 전에 process-local nonblocking
   CLOEXEC self-pipe를 만들고, reader는 write end에 byte만 coalesce하며 `poll_owner.Owner`만 read end와 runtime event queue를

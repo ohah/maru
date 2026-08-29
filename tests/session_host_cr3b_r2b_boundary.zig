@@ -46,6 +46,7 @@ test "CR3b R2b 경계는 final cleanup handle move와 gate 밖 exact once 정산
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn abortRetirementCleanup("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn finishRetirementCleanup("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "test \"CR3b R2b prepared cleanup handle은 invalid raw"));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "test \"CR3b R2b cleanup receipt는 stateless allocator의 zero context를"));
     try std.testing.expectEqual(@as(usize, 1), count(seal_contract, "pub const PreparedRetirementCleanupSealInput"));
     try std.testing.expectEqual(@as(usize, 1), count(seal_service, "pub fn preparedRetirementCleanupSeal("));
     try std.testing.expectEqual(

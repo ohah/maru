@@ -1223,7 +1223,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    runtime add/remove/address·generation·runtime-id drift는 후속 Client publication 전에 거부한다. 이 단계는 목록의 각 행을
    아직 takeover하거나 terminal summary로 닫지 않는다. CR5b-2는 이 동일 owner를 바꾸지 않고 다음 세 단계로 닫는다.
    CR5b-2a는 모든 captured runtime의 old attachment retirement와 unavailable publication 권위를 먼저 final-address job에
-   준비하며, k번째 preflight 실패에서 앞선 runtime·공유 Client·screen·ledger를 하나도 바꾸지 않는다. CR5b-2b는 모든
+   준비하며, k번째 preflight 실패에서 앞선 runtime·공유 Client·screen·ledger를 하나도 바꾸지 않는다. 이 준비 receipt는
+   frame 사이에 stable-screen writer gate를 보유하지 않는다. CR5 coordinator가 closed state를 frame당 하나만 전진시키므로
+   gate를 다음 turn까지 잡으면 그 사이의 평범한 화면 읽기가 막혀 다음 coordinator turn 자체에 도달하지 못하기 때문이다.
+   CR5b-2b commit owner가 게시 직전에 gate를 다시 잡고 exact live target과 receipt를 재검증한다. CR5b-2b는 모든
    prepared runtime을 no-fail suffix로 unavailable에 전환한 뒤 공유 old Client를 한 번만 정산하고 같은 adapter에 replacement를
    exact 한 번 게시한다. replacement node backing과 identity는 old graph가 live인 준비 구간에서 final-address reserved receipt로
    먼저 확보하고, commit suffix 안에서는 allocation·identity 발급·callback 없이 전 runtime unavailable → shared old Client
@@ -1286,12 +1289,19 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    순서로 닫는다. c2의 thread spawn과 AppSession caller는 0이고, c3 app-global worker가 thread 수·cancellation wake·Quit
    join을 소유한다. frame owner는 connect/hello/backoff/join을 실행하지 않고, worker는 raw runtime/adapter pointer를
    보존하거나 제품 generation을 게시하지 않는다. keep-alive opt-in 밖과 G3 default migration은 이 배선으로 바뀌지 않는다.
-   현재 c3b2b까지 final-address coordinator의 admission 선예약·철회·coalesce, stored admission/budget identity의
+   **CR6e-c1~c3c 완료.** final-address coordinator의 admission 선예약·철회·coalesce, stored admission/budget identity의
    terminal 정산, actual daemon candidate의 CR5 adoption과 closed-state driver를 구현했다. c3b2b는 (1) stored admission/budget identity의
    all-runtime preflight와 no-fail release, (2) terminal failed logical completion 정산과 `retry_later` 동일 c1 snapshot 재큐잉,
-   (3) connected candidate의 CR5 job move 뒤 logical 정산, (4) frame당 CR5 closed-state 한 단계 driver 순서로 TDD한다.
-   CR5c `host_failure_complete` retry job은 c3b2b finalizer가 파기하지 않는다. 남은 AppSession caller와 actual disconnect E2E는
-   이 네 계약과 actual daemon coordinator E2E가 green인 뒤 c3c에서만 연다.
+   (3) connected candidate의 CR5 job move 뒤 logical 정산, (4) frame당 CR5 closed-state 한 단계 driver를 고정한다.
+   CR5c `host_failure_complete` retry job은 c3b2b finalizer가 파기하지 않는다. c3c는 `MaruAppHost.tickAppSession()`의
+   Window/quick 순회 전 process-global ABI caller exact 1, `attach_phase_deadline.budget_ns` 5초 SSOT, completion 정산 →
+   CR5 closed state 최대 한 단계 → admission 최대 하나 → dispatch 최대 하나의 app-global turn을 고정한다. App Quit은 모든
+   frame timer 정지 직후 runtime graph가 살아 있을 때 reconnect coordinator cancel/wake/join과 CR5/admission 정산을 먼저
+   끝낸다. 그 뒤 AppSession teardown, backend/HostPool/client, incident owner 순서로 해제한다. actual AppKit gate는 실제
+   socket 단절 뒤 동일 PID·누적 화면·입력/copy/resize·서로 다른 sibling runtime의 단절 전후 live/controller 권위와
+   frame blocking operation 0 및 모든 worker/client/admission owner final 0을 제품 ABI와 strict JSON validator로 증명한다.
+   AppSession의 scroll/focus/mouse/selection/find/config/reset `CoreCommand`도 exact Term backend로 라우팅하며 제품 경로의
+   direct in-process enqueue는 helper의 active local O(1) fallback 하나를 제외하고 source boundary에서 0이다.
    **CR6f — output wake와 입력 echo 예산:** daemon-global nonblocking self-pipe를 `RuntimeManager`가 소유하고, 각
    `PtyEventQueue`는 성공한 output/terminal publication 뒤 byte wake만 수행한다. `poll_owner.Owner`가 read end를 유일하게
    poll/drain하고 같은 owner turn에서 runtime event drain과 producer sweep을 시작한다. reader thread가 socket, `Connection`,

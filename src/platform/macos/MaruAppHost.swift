@@ -4035,6 +4035,38 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostRecoverySmokeAsyncWakeAppliedNs: UInt64 = 0
     private var sessionHostRecoverySmokeBeforeCapture = false
     private var sessionHostRecoverySmokeAfterCapture = false
+    private var sessionHostAutoReconnectTriggerPublished = false
+    private var sessionHostAutoReconnectMarkerPresent = false
+    private var sessionHostAutoReconnectHistoricalCount: UInt32 = 0
+    private var sessionHostAutoReconnectHistoricalBeforeCount: UInt32 = 0
+    private var sessionHostAutoReconnectDisconnectAfterCount: UInt32 = 0
+    private var sessionHostAutoReconnectInputCount: UInt32 = 0
+    private var sessionHostAutoReconnectCopyCount: UInt32 = 0
+    private var sessionHostAutoReconnectSelectMenuActions: UInt32 = 0
+    private var sessionHostAutoReconnectCopyMenuActions: UInt32 = 0
+    private var sessionHostAutoReconnectCopyBytes: UInt32 = 0
+    private var sessionHostAutoReconnectResizeCount: UInt32 = 0
+    private var sessionHostAutoReconnectColsBefore: UInt32 = 0
+    private var sessionHostAutoReconnectRowsBefore: UInt32 = 0
+    private var sessionHostAutoReconnectPrimaryTargetSelected = false
+    private var sessionHostAutoReconnectSiblingLiveBefore = false
+    private var sessionHostAutoReconnectSiblingLiveAfter = false
+    private var sessionHostAutoReconnectSiblingControllerBefore = false
+    private var sessionHostAutoReconnectSiblingControllerAfter = false
+    private var sessionHostReconnectTickInactive: UInt64 = 0
+    private var sessionHostReconnectTickIdle: UInt64 = 0
+    private var sessionHostReconnectTickProgressed: UInt64 = 0
+    private var sessionHostReconnectTickMaxElapsedNs: UInt64 = 0
+    private var sessionHostReconnectBlockingOperations: UInt32 = 0
+    private var sessionHostReconnectPreShutdownReady = false
+    private var sessionHostReconnectPreShutdownRuntimeCount: UInt32 = 0
+    private var sessionHostReconnectFinalWorker: UInt32 = 0
+    private var sessionHostReconnectFinalJobs: UInt32 = 0
+    private var sessionHostReconnectFinalCompletion: UInt32 = 0
+    private var sessionHostReconnectFinalCR5Jobs: UInt32 = 0
+    private var sessionHostReconnectFinalAdmissions: UInt32 = 0
+    private var sessionHostReconnectFinalResidentLeases: UInt32 = 0
+    private var sessionHostReconnectFinalBackendRuntimes: UInt32 = 0
     private var sessionHostRecoverySmokeFailure = ""
     private var sessionHostRecoverySmokePrepareOutcome: UInt32 = 0
     private var sessionHostRecoverySmokeKeepAliveEnabled = false
@@ -4099,6 +4131,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var isSessionHostRecoveryBaselineMode: Bool {
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"] != nil
+    }
+    private var isSessionHostAutoReconnectSmokeMode: Bool {
+        isSessionHostRecoverySmokeMode &&
+            ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6E_C3C_AUTO_RECONNECT_ARTIFACT"] != nil
     }
     private var sessionHostRecoveryBaselineIteration: UInt32? {
         guard isSessionHostRecoveryBaselineMode,
@@ -4678,6 +4714,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             if quick?.window?.styleMask.contains(.fullScreen) == false { quick?.window?.orderOut(nil) }
         })
+        terminationTiming.record(.teardown, elapsedNs: measureElapsedNs {
+            if isSessionHostAutoReconnectSmokeMode {
+                var before = MaruReconnectProductSmokeProbe()
+                if maru_macos_reconnect_product_smoke_probe(&before) == Self.statusOK {
+                    sessionHostReconnectPreShutdownReady = before.coordinator_ready != 0
+                    sessionHostReconnectPreShutdownRuntimeCount = before.runtime_count
+                }
+            }
+            _ = maru_macos_reconnect_product_shutdown()
+        })
         terminationTiming.record(.mermaid, elapsedNs: measureElapsedNs {
             cancelAllMermaidReplies(error: "application terminating")
             mermaidRenderCoordinator.shutdown()
@@ -4710,6 +4756,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 모든 AppSession이 자기 runtime을 remove/detach한 뒤 app-global backend/pool/client를 exact once 정산한다.
         // incident leaf도 이 전역들이 남아 있으면 latch를 소비하지 않아 source 순서 회귀를 fail-close한다.
         _ = maru_macos_remote_backend_settle()
+        if isSessionHostAutoReconnectSmokeMode {
+            var final = MaruReconnectProductSmokeProbe()
+            if maru_macos_reconnect_product_smoke_probe(&final) == Self.statusOK {
+                sessionHostReconnectFinalWorker = final.worker_state_raw
+                sessionHostReconnectFinalJobs = final.active_jobs
+                sessionHostReconnectFinalCompletion = final.completion_receipt_present
+                sessionHostReconnectFinalCR5Jobs = final.cr5_job_present
+                sessionHostReconnectFinalAdmissions = final.admission_count
+                sessionHostReconnectFinalResidentLeases = final.resident_entries
+                sessionHostReconnectFinalBackendRuntimes = final.runtime_count
+            }
+        }
         // 모든 AppSession과 remote backend close/detach settlement가 끝난 뒤에만 incident owner를 revoke한다.
         // ordinary Window close에서는 부르지 않으며 AppHost termination이 process-global writer를 exact 한 번 정산한다.
         _ = maru_macos_incident_owner_shutdown()
@@ -6121,6 +6179,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // explicitSurface로 지정해, 세션별 forwarder(window/appSession/메트릭/draw)가 그 surface를 대상으로 돈다.
     private func tickAppSession() {
         refreshSessionHostWakeSources()
+        let reconnectStartedNs = isSessionHostAutoReconnectSmokeMode ? DispatchTime.now().uptimeNanoseconds : 0
+        let reconnectOutcome = maru_macos_reconnect_product_tick()
+        if reconnectStartedNs != 0 {
+            let reconnectFinishedNs = DispatchTime.now().uptimeNanoseconds
+            let elapsed = reconnectFinishedNs >= reconnectStartedNs ? reconnectFinishedNs - reconnectStartedNs : 0
+            sessionHostReconnectTickMaxElapsedNs = max(sessionHostReconnectTickMaxElapsedNs, elapsed)
+        }
+        switch reconnectOutcome {
+        case 0: sessionHostReconnectTickInactive += 1
+        case 1: sessionHostReconnectTickIdle += 1
+        case 2: sessionHostReconnectTickProgressed += 1
+        default: break
+        }
         guard !windows.isEmpty || quick != nil else { return }
         prepareSessionHostInputSmokePasteboard()
 
@@ -7424,6 +7495,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard maru_macos_app_session_copy_text(session, &ptr, &len) == Self.statusOK,
               let bytes = ptr, len > 0 else { return }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
+        if isSessionHostAutoReconnectSmokeMode {
+            sessionHostAutoReconnectCopyBytes = UInt32(clamping: len)
+        }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -8645,6 +8719,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String, let session = appSession else { return }
+        if isSessionHostAutoReconnectSmokeMode, key == "select_all" {
+            sessionHostAutoReconnectSelectMenuActions += 1
+        }
         // Select All(⌘A)은 keyEquivalent가 first responder와 무관하게 발화하므로, 웹 패널 포커스면 터미널 전체 선택
         // 대신 WebKit selectAll:을 responder chain으로 넘긴다([web-panel.md] §4.2). 다른 카탈로그 액션은 불변.
         if key == "select_all", let panel = firstResponderWebPanel() {
@@ -8796,6 +8873,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     @objc private func menuCopy(_ sender: Any?) {
         _ = sender
+        if isSessionHostAutoReconnectSmokeMode {
+            sessionHostAutoReconnectCopyMenuActions += 1
+        }
         // 웹 패널(도크·브라우저)이 first responder면 WebKit이 자기 DOM 선택을 복사하도록 표준 copy:를 responder
         // chain으로 넘긴다([web-panel.md] §4.2). 아니면 터미널/주소창 선택 복사.
         if firstResponderWebPanel() != nil {
@@ -9210,7 +9290,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// CR6c는 실제 제품 launch와 sidebar mouse 경계를 통과한다. ABI probe는 이미
     /// 발행된 rect/aggregate만 읽고, action은 이 NSEvent가 유일하게 시작한다.
     private func maybeRunSessionHostRecoverySmoke() {
-        guard isSessionHostRecoverySmokeMode, sessionHostRecoverySmokeStage < 3,
+        guard isSessionHostRecoverySmokeMode, sessionHostRecoverySmokeFailure.isEmpty,
+              sessionHostRecoverySmokeStage < (isSessionHostAutoReconnectSmokeMode ? 6 : 3),
               let surface = primary, let session = surface.appSession,
               let view = surface.view, let window = surface.window else { return }
         var probe = MaruAppHostRecoveredSessionSmokeProbe()
@@ -9219,6 +9300,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             sessionHostRecoverySmokeStage = 3
             return
         }
+        defer { writeSessionHostAutoReconnectDiagnostic(probe) }
         sessionHostRecoverySmokeKeepAliveEnabled = probe.keep_alive_enabled != 0
         sessionHostRecoverySmokeDiscoveredCandidates = probe.discovered_candidates
         sessionHostRecoverySmokeReadyAdapters = probe.ready_adapters
@@ -9232,6 +9314,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         sessionHostRecoverySmokeActiveRemoteObserved = probe.active_remote != 0
         sessionHostRecoverySmokeMarkerObserved = probe.marker_present != 0
         sessionHostRecoverySmokeAsyncWakeMarkerPresent = probe.async_wake_marker_present != 0
+        sessionHostAutoReconnectHistoricalCount = probe.c3c_historical_count
+        sessionHostAutoReconnectDisconnectAfterCount = probe.c3c_disconnect_after_count
+        sessionHostAutoReconnectInputCount = probe.c3c_input_count
         if probe.async_wake_marker_present != 0, sessionHostWakeHandlerActive,
            sessionHostRecoverySmokeAsyncWakeAppliedNs == 0 {
             sessionHostRecoverySmokeAsyncWakeHandlerStartedNs = sessionHostWakeHandlerStartedNs
@@ -9296,9 +9381,45 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             sessionHostRecoverySmokeClickNs = DispatchTime.now().uptimeNanoseconds
             sessionHostRecoverySmokeStage = 1
         case 1:
-            guard probe.recovered_count == 0, probe.tab_count >= 1,
-                  probe.surface_initialized != 0, probe.active_remote != 0,
+            guard probe.tab_count >= 1, probe.surface_initialized != 0, probe.active_remote != 0,
                   probe.marker_present != 0 else { return }
+            if isSessionHostAutoReconnectSmokeMode {
+                if !sessionHostAutoReconnectPrimaryTargetSelected {
+                    // `recovered_count` is exact-target count, not the total projection length.
+                    // The sibling row was just consumed, so zero proves that exact adoption while
+                    // the primary row remains addressable after switching the target environment.
+                    guard probe.recovered_count == 0,
+                          probe.c3c_sibling_live != 0,
+                          probe.c3c_sibling_controller != 0,
+                          let primaryRuntime = ProcessInfo.processInfo.environment[
+                            "MARU_SESSION_HOST_CR6E_C3C_PRIMARY_RUNTIME_ID"
+                          ], primaryRuntime.count == 32,
+                          setenv("MARU_SESSION_HOST_CR6C_RUNTIME_ID", primaryRuntime, 1) == 0 else { return }
+                    sessionHostAutoReconnectSiblingLiveBefore = true
+                    sessionHostAutoReconnectSiblingControllerBefore = true
+                    sessionHostAutoReconnectPrimaryTargetSelected = true
+                    sessionHostRecoverySmokeStage = 0
+                    return
+                }
+                guard probe.recovered_count == 0,
+                      probe.c3c_sibling_live != 0,
+                      probe.c3c_sibling_controller != 0 else { return }
+                sessionHostRecoverySmokeRemotePublished = true
+                sessionHostRecoverySmokeMarkerPresent = true
+                sessionHostAutoReconnectHistoricalBeforeCount = probe.c3c_historical_count
+                if sessionHostRecoverySmokeRemoteVisibleNs == 0 {
+                    sessionHostRecoverySmokeRemoteVisibleNs = DispatchTime.now().uptimeNanoseconds
+                }
+                sessionHostRecoverySmokeAfterCapture = captureSessionHostRecoverySmokeFrame("attached-before-auto", in: surface)
+                guard sessionHostRecoverySmokeAfterCapture else { return }
+                guard armSessionHostAutoReconnectDisconnect() else {
+                    failSessionHostRecoverySmoke("auto-disconnect-arm")
+                    return
+                }
+                sessionHostAutoReconnectTriggerPublished = true
+                sessionHostRecoverySmokeStage = 2
+                return
+            }
             if sessionHostRecoverySmokeWakeHandlerBaseline == nil {
                 sessionHostRecoverySmokeWakeHandlerBaseline = sessionHostWakeHandlerCount
                 guard armSessionHostNativeWakeSmoke() else {
@@ -9342,9 +9463,128 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 is_repeat: 0,
                 raw_key_code: 36
             ))
+        case 2:
+            guard isSessionHostAutoReconnectSmokeMode,
+                  probe.recovered_count == 0, probe.tab_count >= 1,
+                  probe.surface_initialized != 0, probe.active_remote != 0,
+                  probe.async_wake_marker_present != 0,
+                  probe.c3c_sibling_live != 0,
+                  probe.c3c_sibling_controller != 0 else { return }
+            sessionHostAutoReconnectSiblingLiveAfter = true
+            sessionHostAutoReconnectSiblingControllerAfter = true
+            sessionHostAutoReconnectMarkerPresent = true
+            sessionHostRecoverySmokeAsyncWakeMarkerPresent = true
+            guard probe.c3c_historical_count == 1, probe.c3c_disconnect_after_count == 1,
+                  probe.cols > 0, probe.rows > 0 else { return }
+            sessionHostAutoReconnectColsBefore = probe.cols
+            sessionHostAutoReconnectRowsBefore = probe.rows
+            guard window.makeFirstResponder(view),
+                  sendSessionHostAutoReconnectInput(view: view, window: window) else {
+                failSessionHostRecoverySmoke("auto-input")
+                return
+            }
+            window.setContentSize(NSSize(
+                width: window.contentLayoutRect.width + 96,
+                height: window.contentLayoutRect.height + 48
+            ))
+            sessionHostRecoverySmokeStage = 3
+        case 3:
+            guard isSessionHostAutoReconnectSmokeMode,
+                  probe.c3c_input_count == 1,
+                  (probe.cols != sessionHostAutoReconnectColsBefore ||
+                    probe.rows != sessionHostAutoReconnectRowsBefore) else { return }
+            sessionHostAutoReconnectResizeCount = 1
+            guard dispatchSessionHostAutoReconnectCommand("a", keyCode: 0, window: window) else {
+                failSessionHostRecoverySmoke("auto-select-all")
+                return
+            }
+            sessionHostRecoverySmokeStage = 4
+        case 4:
+            guard isSessionHostAutoReconnectSmokeMode else { return }
+            guard dispatchSessionHostAutoReconnectCommand("c", keyCode: 8, window: window) else {
+                failSessionHostRecoverySmoke("auto-copy")
+                return
+            }
+            sessionHostRecoverySmokeStage = 5
+        case 5:
+            guard isSessionHostAutoReconnectSmokeMode else { return }
+            let copied = NSPasteboard.general.string(forType: .string) ?? ""
+            let copyReady = copied.components(separatedBy: "CR6E-C3C-HISTORICAL-ONCE").count - 1 == 1 &&
+                copied.components(separatedBy: "CR6E-C3C-AUTO-RECONNECTED").count - 1 == 1 &&
+                copied.components(separatedBy: "CR6E-C3C-INPUT-ONCE").count - 1 == 1
+            guard copyReady else { return }
+            sessionHostAutoReconnectCopyCount = 1
+            sessionHostRecoverySmokeBeforeCapture = captureSessionHostRecoverySmokeFrame("after-auto", in: surface)
+            guard sessionHostRecoverySmokeBeforeCapture else { return }
+            sessionHostRecoverySmokeStage = 6
+            maru_macos_app_session_request_app_quit(session)
+            sendKeyEvent(MaruAppHostKeyEvent(
+                codepoint: 0,
+                base_codepoint: 0,
+                key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
+                modifier_shift: 0,
+                modifier_control: 0,
+                modifier_option: 0,
+                modifier_command: 0,
+                is_repeat: 0,
+                raw_key_code: 36
+            ))
         default:
             break
         }
+    }
+
+    private func sendSessionHostAutoReconnectInput(
+        view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        dispatchSessionHostInputKey(
+            keyCode: 0,
+            characters: "CR6E-C3C-INPUT-ONCE",
+            modifiers: [],
+            view: view,
+            window: window
+        ) && dispatchSessionHostInputKey(
+            keyCode: 36,
+            characters: "\r",
+            modifiers: [],
+            view: view,
+            window: window
+        )
+    }
+
+    private func dispatchSessionHostAutoReconnectCommand(
+        _ characters: String,
+        keyCode: UInt16,
+        window: NSWindow
+    ) -> Bool {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { return false }
+        // Cmd+A/C are Edit-menu key equivalents in the shipped app. Sending them
+        // straight to the terminal view skips Select All's catalog action, so the
+        // smoke deliberately enters through the installed product menu as a real
+        // AppKit shortcut does.
+        guard let mainMenu = NSApp.mainMenu else { return false }
+        // The smoke driver itself runs from the frame timer. A physical shortcut is
+        // delivered as a separate AppKit event between ticks; schedule the menu event
+        // likewise so a blocking remote selection RPC cannot re-enter pumpDelta.
+        DispatchQueue.main.async { [weak self] in
+            guard mainMenu.performKeyEquivalent(with: event) else {
+                self?.failSessionHostRecoverySmoke("auto-command-menu-route")
+                return
+            }
+        }
+        return true
     }
 
     /// Scrolls the real sidebar input route until the exact recovered target is visible. The
@@ -9380,7 +9620,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard isSessionHostRecoverySmokeMode, let renderer = surface.metalRenderer else { return false }
         guard let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
         let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
-        let expectedRoot = if isSessionHostInputContinuitySmokeMode {
+        let expectedRoot = if isSessionHostAutoReconnectSmokeMode {
+            "session-host-cr6e-c3c-home"
+        } else if isSessionHostInputContinuitySmokeMode {
             "session-host-cr6d-home"
         } else if isSessionHostRecoveryBaselineMode {
             "session-host-cr6e-home"
@@ -9425,6 +9667,58 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return FileManager.default.createFile(atPath: marker.path, contents: Data(), attributes: nil)
     }
 
+    /// The private daemon fixture consumes this rendezvous only after the real remote surface is
+    /// visible. The file does not request or complete reconnect; it merely tells the out-of-process
+    /// fault owner when closing the current GUI socket is non-vacuous.
+    private func armSessionHostAutoReconnectDisconnect() -> Bool {
+        guard isSessionHostAutoReconnectSmokeMode,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6e-c3c-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let marker = root.appendingPathComponent("c3c-disconnect-ready", isDirectory: false).standardizedFileURL
+        guard marker.deletingLastPathComponent() == root,
+              !FileManager.default.fileExists(atPath: marker.path) else { return false }
+        return FileManager.default.createFile(atPath: marker.path, contents: Data(), attributes: nil)
+    }
+
+    private func writeSessionHostAutoReconnectDiagnostic(_ probe: MaruAppHostRecoveredSessionSmokeProbe) {
+        guard isSessionHostAutoReconnectSmokeMode,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6e-c3c-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return }
+        let target = root.appendingPathComponent("c3c-live-diagnostic.txt").standardizedFileURL
+        guard target.deletingLastPathComponent() == root else { return }
+        var reconnect = MaruReconnectProductSmokeProbe()
+        _ = maru_macos_reconnect_product_smoke_probe(&reconnect)
+        let text = """
+        stage=\(sessionHostRecoverySmokeStage)
+        active_remote=\(probe.active_remote)
+        marker_present=\(probe.marker_present)
+        async_marker_present=\(probe.async_wake_marker_present)
+        sibling_live=\(probe.c3c_sibling_live)
+        sibling_controller=\(probe.c3c_sibling_controller)
+        trigger_published=\(sessionHostAutoReconnectTriggerPublished)
+        tick_inactive=\(sessionHostReconnectTickInactive)
+        tick_idle=\(sessionHostReconnectTickIdle)
+        tick_progressed=\(sessionHostReconnectTickProgressed)
+        coordinator_ready=\(reconnect.coordinator_ready)
+        worker_state=\(reconnect.worker_state_raw)
+        active_jobs=\(reconnect.active_jobs)
+        job_receipt_present=\(reconnect.job_receipt_present)
+        completion_receipt_present=\(reconnect.completion_receipt_present)
+        cr5_job_present=\(reconnect.cr5_job_present)
+        cr5_preparing=\(reconnect.cr5_preparing)
+        cr5_state=\(reconnect.cr5_state_raw)
+        runtime_count=\(reconnect.runtime_count)
+        admission_count=\(reconnect.admission_count)
+        resident_entries=\(reconnect.resident_entries)
+        failure=\(sessionHostRecoverySmokeFailure)
+        """
+        try? text.write(to: target, atomically: true, encoding: .utf8)
+    }
+
     /// CR6d may legitimately spend most of its deadline waiting for the user to foreground the
     /// test window. A generic smoke termination here would bypass the keep-alive detach snapshot
     /// and replace the primary focus/TCC timeout with a misleading dead-runtime failure.
@@ -9433,13 +9727,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             failSessionHostInputSmoke("smoke-timeout")
             return
         }
+        if isSessionHostAutoReconnectSmokeMode, sessionHostRecoverySmokeStage < 6 {
+            failSessionHostRecoverySmoke("auto-reconnect-timeout")
+            return
+        }
         NSApp.terminate(nil)
     }
 
     private func failSessionHostRecoverySmoke(_ reason: String) {
         sessionHostRecoverySmokeFailure = reason
-        sessionHostRecoverySmokeStage = 3
+        sessionHostRecoverySmokeStage = isSessionHostAutoReconnectSmokeMode ? 6 : 3
         exitCode = 1
+        if isSessionHostAutoReconnectSmokeMode, let session = primary?.appSession {
+            maru_macos_app_session_request_app_quit(session)
+            sendKeyEvent(MaruAppHostKeyEvent(
+                codepoint: 0,
+                base_codepoint: 0,
+                key_code: UInt32(MaruAppHostKeyCodeEnter.rawValue),
+                modifier_shift: 0,
+                modifier_control: 0,
+                modifier_option: 0,
+                modifier_command: 0,
+                is_repeat: 0,
+                raw_key_code: 36
+            ))
+            return
+        }
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
@@ -11621,6 +11934,35 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_recovery_smoke_async_wake_apply_latency_ns=\(sessionHostRecoverySmokeAsyncWakeAppliedNs >= sessionHostRecoverySmokeAsyncWakeHandlerStartedNs ? sessionHostRecoverySmokeAsyncWakeAppliedNs - sessionHostRecoverySmokeAsyncWakeHandlerStartedNs : 0)
         session_host_recovery_smoke_before_capture=\(sessionHostRecoverySmokeBeforeCapture)
         session_host_recovery_smoke_after_capture=\(sessionHostRecoverySmokeAfterCapture)
+        session_host_auto_reconnect_trigger_published=\(sessionHostAutoReconnectTriggerPublished)
+        session_host_auto_reconnect_marker_present=\(sessionHostAutoReconnectMarkerPresent)
+        session_host_auto_reconnect_historical_count=\(sessionHostAutoReconnectHistoricalCount)
+        session_host_auto_reconnect_historical_before_count=\(sessionHostAutoReconnectHistoricalBeforeCount)
+        session_host_auto_reconnect_disconnect_after_count=\(sessionHostAutoReconnectDisconnectAfterCount)
+        session_host_auto_reconnect_input_count=\(sessionHostAutoReconnectInputCount)
+        session_host_auto_reconnect_copy_count=\(sessionHostAutoReconnectCopyCount)
+        session_host_auto_reconnect_select_menu_actions=\(sessionHostAutoReconnectSelectMenuActions)
+        session_host_auto_reconnect_copy_menu_actions=\(sessionHostAutoReconnectCopyMenuActions)
+        session_host_auto_reconnect_copy_bytes=\(sessionHostAutoReconnectCopyBytes)
+        session_host_auto_reconnect_resize_count=\(sessionHostAutoReconnectResizeCount)
+        session_host_auto_reconnect_sibling_live_before=\(sessionHostAutoReconnectSiblingLiveBefore)
+        session_host_auto_reconnect_sibling_live_after=\(sessionHostAutoReconnectSiblingLiveAfter)
+        session_host_auto_reconnect_sibling_controller_before=\(sessionHostAutoReconnectSiblingControllerBefore)
+        session_host_auto_reconnect_sibling_controller_after=\(sessionHostAutoReconnectSiblingControllerAfter)
+        session_host_reconnect_tick_inactive=\(sessionHostReconnectTickInactive)
+        session_host_reconnect_tick_idle=\(sessionHostReconnectTickIdle)
+        session_host_reconnect_tick_progressed=\(sessionHostReconnectTickProgressed)
+        session_host_reconnect_tick_max_elapsed_ns=\(sessionHostReconnectTickMaxElapsedNs)
+        session_host_reconnect_blocking_operations=\(sessionHostReconnectBlockingOperations)
+        session_host_reconnect_pre_shutdown_ready=\(sessionHostReconnectPreShutdownReady)
+        session_host_reconnect_pre_shutdown_runtime_count=\(sessionHostReconnectPreShutdownRuntimeCount)
+        session_host_reconnect_final_worker=\(sessionHostReconnectFinalWorker)
+        session_host_reconnect_final_jobs=\(sessionHostReconnectFinalJobs)
+        session_host_reconnect_final_completion=\(sessionHostReconnectFinalCompletion)
+        session_host_reconnect_final_cr5_jobs=\(sessionHostReconnectFinalCR5Jobs)
+        session_host_reconnect_final_admissions=\(sessionHostReconnectFinalAdmissions)
+        session_host_reconnect_final_resident_leases=\(sessionHostReconnectFinalResidentLeases)
+        session_host_reconnect_final_backend_runtimes=\(sessionHostReconnectFinalBackendRuntimes)
         session_host_recovery_smoke_failure=\(sessionHostRecoverySmokeFailure)
         session_host_recovery_smoke_prepare_outcome=\(sessionHostRecoverySmokePrepareOutcome)
         session_host_recovery_smoke_keep_alive_enabled=\(sessionHostRecoverySmokeKeepAliveEnabled)

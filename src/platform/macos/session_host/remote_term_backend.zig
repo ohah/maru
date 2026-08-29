@@ -1312,6 +1312,7 @@ pub const RemoteTermBackend = struct {
     host_reconnect_job: ?*HostReconnectJob = null,
     host_reconnect_preparing: bool = false,
     next_host_reconnect_job_generation: u64 = 0,
+    shutdown_reclaim_host_id: u128 = 0,
     host_reconnect_window_owner: host_reconnect_window_transaction.Owner = .{},
     host_reconnect_window_transaction: host_reconnect_window_transaction.Transaction = .{},
     next_host_reconnect_window_action_generation: u64 = 0,
@@ -1349,6 +1350,22 @@ pub const RemoteTermBackend = struct {
         .refresh_observation = refreshObservation,
         .dump_recent_text = dumpRecentText,
     };
+
+    pub const ReconnectProductSnapshot = struct {
+        job_present: bool,
+        preparing: bool,
+        job_state_raw: u8,
+        runtime_count: usize,
+    };
+
+    pub fn reconnectProductSnapshot(self: *const RemoteTermBackend) ReconnectProductSnapshot {
+        return .{
+            .job_present = self.host_reconnect_job != null,
+            .preparing = self.host_reconnect_preparing,
+            .job_state_raw = if (self.host_reconnect_job) |job| job.state_raw else 0,
+            .runtime_count = self.runtimes.count(),
+        };
+    }
 
     const input_vtable = InputOwnerVTable{
         .write = writeInput,
@@ -1488,96 +1505,109 @@ pub const RemoteTermBackend = struct {
     /// surface_runtime은 borrowed라 안 건드린다(소유는 caller).
     pub fn deinit(self: *RemoteTermBackend) void {
         if (self.host_reconnect_preparing) process_seal.fatalIntegrity(.proof_loss);
-        var published_reclaim_adapter: ?*host_adapter_mod.HostAdapter = null;
-        if (self.host_reconnect_job) |job| {
-            if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
-            if (job.state_raw == @intFromEnum(HostReconnectJobState.candidate_staged) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.mutation_sealed) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.controller_promoted))
-            {
-                const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
-                const adapter = pool.get(job.host_id) orelse process_seal.fatalIntegrity(.proof_loss);
-                const entry = self.runtimes.get(job.runtime_handle) orelse
-                    process_seal.fatalIntegrity(.proof_loss);
-                if (job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced)) {
-                    RemoteRuntime.backend_api.abortReconnectControllerEvidence(
-                        entry.runtime,
-                        adapter,
-                        &job.replacement,
-                        &job.reconnect,
-                        job.stage.?,
-                        job.controller_generation,
-                    ) catch process_seal.fatalIntegrity(.proof_loss);
-                } else if (job.state_raw == @intFromEnum(HostReconnectJobState.controller_promoted)) {
-                    RemoteRuntime.backend_api.abortReconnectPromotedController(
-                        entry.runtime,
-                        adapter,
-                        &job.replacement,
-                        &job.reconnect,
-                        job.stage.?,
-                        job.controller_generation,
-                    ) catch process_seal.fatalIntegrity(.proof_loss);
-                } else {
-                    RemoteRuntime.backend_api.abortReconnectObserverStage(
-                        entry.runtime,
-                        adapter,
-                        &job.replacement,
-                        &job.reconnect,
-                        job.stage.?,
-                        job.deadline.?.absolute,
-                    ) catch process_seal.fatalIntegrity(.proof_loss);
-                }
-                job.stage = null;
-                published_reclaim_adapter = adapter;
-                job.state_raw = @intFromEnum(HostReconnectJobState.idle);
-                job.seal = [_]u8{0} ** 32;
-                job.* = .{};
-            } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_published) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.shared_replacement_published) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.runtime_transactions_complete) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.host_failure_complete) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.authority_conflict) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.takeover_sent_unknown) or
-                job.state_raw == @intFromEnum(HostReconnectJobState.pre_takeover_failed))
-            {
-                const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
-                const adapter = pool.get(job.host_id) orelse process_seal.fatalIntegrity(.proof_loss);
-                published_reclaim_adapter = adapter;
-                job.state_raw = @intFromEnum(HostReconnectJobState.idle);
-                job.seal = [_]u8{0} ** 32;
-                job.* = .{};
-            } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_failed)) {
-                var owned = job.client;
-                job.client = null;
-                job.state_raw = @intFromEnum(HostReconnectJobState.idle);
-                job.seal = [_]u8{0} ** 32;
-                job.* = .{};
-                if (owned) |*client| client.deinit();
-            } else {
-                job.abort(self) catch process_seal.fatalIntegrity(.proof_loss);
-            }
-            self.host_reconnect_job = null;
-            self.allocator.destroy(job);
-        }
+        if (self.host_reconnect_job != null) self.cancelHostReconnectForProcessShutdownNoFail();
         var it = self.runtimes.iterator();
         while (it.next()) |kv| {
             self.destroyRuntimeEntry(kv.key_ptr.*, kv.value_ptr.*, .terminate);
         }
-        if (published_reclaim_adapter) |adapter| while (adapter.slot.retiredClientCount() != 0) {
-            var reclaim: client_slot_mod.PreparedRetiredClientReclaim = .{};
-            adapter.prepareRetiredClientReclaim(&reclaim) catch
+        if (self.shutdown_reclaim_host_id != 0) {
+            const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
+            const adapter = pool.get(self.shutdown_reclaim_host_id) orelse
                 process_seal.fatalIntegrity(.proof_loss);
-            adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim);
-        };
+            while (adapter.slot.retiredClientCount() != 0) {
+                var reclaim: client_slot_mod.PreparedRetiredClientReclaim = .{};
+                adapter.prepareRetiredClientReclaim(&reclaim) catch
+                    process_seal.fatalIntegrity(.proof_loss);
+                adapter.commitRetiredClientReclaimAtTickEndNoFail(&reclaim);
+            }
+            self.shutdown_reclaim_host_id = 0;
+        }
         self.runtimes.deinit(self.allocator);
         if (self.reserved_runtime_count != 0 or self.close_operation_owner.active)
             process_seal.fatalIntegrity(.proof_loss);
         if (self.paused_paste_budget.initialized()) self.paused_paste_budget.deinit();
         self.releaseProductSingleton();
         self.* = undefined;
+    }
+
+    /// App Quit calls this while runtime entries still exist. It consumes every CR5 stage using
+    /// the same state-specific cleanup as `deinit`, but defers retired Client reclamation until
+    /// AppSession teardown has removed all runtime readers.
+    pub fn cancelHostReconnectForProcessShutdownNoFail(self: *RemoteTermBackend) void {
+        if (self.host_reconnect_preparing or self.shutdown_reclaim_host_id != 0)
+            process_seal.fatalIntegrity(.proof_loss);
+        const job = self.host_reconnect_job orelse process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+        if (job.state_raw == @intFromEnum(HostReconnectJobState.candidate_staged) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.mutation_sealed) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.controller_promoted))
+        {
+            const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
+            const adapter = pool.get(job.host_id) orelse process_seal.fatalIntegrity(.proof_loss);
+            const entry = self.runtimes.get(job.runtime_handle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            if (job.state_raw == @intFromEnum(HostReconnectJobState.controller_evidenced)) {
+                RemoteRuntime.backend_api.abortReconnectControllerEvidence(
+                    entry.runtime,
+                    adapter,
+                    &job.replacement,
+                    &job.reconnect,
+                    job.stage.?,
+                    job.controller_generation,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            } else if (job.state_raw == @intFromEnum(HostReconnectJobState.controller_promoted)) {
+                RemoteRuntime.backend_api.abortReconnectPromotedController(
+                    entry.runtime,
+                    adapter,
+                    &job.replacement,
+                    &job.reconnect,
+                    job.stage.?,
+                    job.controller_generation,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            } else {
+                RemoteRuntime.backend_api.abortReconnectObserverStage(
+                    entry.runtime,
+                    adapter,
+                    &job.replacement,
+                    &job.reconnect,
+                    job.stage.?,
+                    job.deadline.?.absolute,
+                ) catch process_seal.fatalIntegrity(.proof_loss);
+            }
+            job.stage = null;
+            self.shutdown_reclaim_host_id = job.host_id;
+            job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+            job.seal = [_]u8{0} ** 32;
+            job.* = .{};
+        } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_published) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.shared_replacement_published) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.runtime_transactions_complete) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.host_failure_complete) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.authority_conflict) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.takeover_sent_unknown) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.pre_takeover_failed))
+        {
+            const pool = self.host_pool orelse process_seal.fatalIntegrity(.proof_loss);
+            _ = pool.get(job.host_id) orelse process_seal.fatalIntegrity(.proof_loss);
+            self.shutdown_reclaim_host_id = job.host_id;
+            job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+            job.seal = [_]u8{0} ** 32;
+            job.* = .{};
+        } else if (job.state_raw == @intFromEnum(HostReconnectJobState.replacement_failed)) {
+            var owned = job.client;
+            job.client = null;
+            job.state_raw = @intFromEnum(HostReconnectJobState.idle);
+            job.seal = [_]u8{0} ** 32;
+            job.* = .{};
+            if (owned) |*client| client.deinit();
+        } else {
+            job.abort(self) catch process_seal.fatalIntegrity(.proof_loss);
+        }
+        self.host_reconnect_job = null;
+        self.allocator.destroy(job);
     }
 
     /// AppHost의 process-global owner settlement는 남은 runtime을 terminate하는 일반 deinit을 준비 검사로 쓰지 않는다.
@@ -4160,6 +4190,11 @@ pub const RemoteTermBackend = struct {
         return entry.runtime.attachedAsObserver();
     }
 
+    pub fn currentAttachmentLive(self: *RemoteTermBackend, handle: RuntimeHandle) bool {
+        const entry = self.runtimes.get(handle) orelse return false;
+        return entry.runtime.currentAttachmentLive();
+    }
+
     /// host-backed Term(handle)의 대기 OSC 9/777 데스크톱 알림을 host에서 pull한다(§6.32 GUI surfacing). 없거나 연결 오류면
     /// null(**best-effort** — 알림은 부가 기능이라 오류를 세션에 전파하지 않는다). 반환 `Notification.title/body`는 이 backend의
     /// allocator 소유(caller가 `deinit`). host core가 파싱한 알림(placeholder client core엔 없음)을 app_session 알림 경로에 잇는다.
@@ -4171,9 +4206,9 @@ pub const RemoteTermBackend = struct {
     /// host-backed Term(handle)의 현재 뷰포트 선택 텍스트를 host에서 뽑는다(§6b — host의 `extractSelection` 재사용). 없거나
     /// 연결 오류면 null(best-effort — 복사는 부가라 세션에 전파 않음). caller가 free. 선택 span은 placeholder core가 렌더용으로
     /// 든 것을 app_session이 넘긴다(하이라이트=client 좌표, 복사 콘텐츠=host 해석).
-    pub fn selectedTextFor(self: *RemoteTermBackend, handle: RuntimeHandle, span: maru.terminal.SelectionSpan) ?[]u8 {
+    pub fn selectedTextFor(self: *RemoteTermBackend, handle: RuntimeHandle, span: ?maru.terminal.SelectionSpan) ?[]u8 {
         const entry = self.runtimes.get(handle) orelse return null;
-        return (entry.runtime.selectedText(span) catch return null) orelse null;
+        return (entry.runtime.selectedTextCurrent(span) catch return null) orelse null;
     }
 
     /// host-backed Term(handle)의 (row,col)에 있는 링크를 host가 추출·검증해 돌려준다(원격 Cmd+클릭 열기).
@@ -6185,6 +6220,15 @@ test "CR5b-2b host job은 three-runtime을 unavailable로 만든 뒤 shared Clie
         &fresh,
     ));
     try backend_value.prepareHostReconnectRuntimeRetirements();
+    // CR5 advances this prepared state and the shared-replacement state on separate AppKit
+    // frames. An ordinary surface read between them must neither block nor invalidate the sealed
+    // job; this is the product ordering that exposed the retained stable-screen writer gate.
+    for (&runtimes) |*runtime| {
+        runtime.surface.lockCore(testing.io);
+        _ = runtime.surface.renderSnapshot();
+        runtime.surface.unlockCore(testing.io);
+    }
+    try testing.expect(job.valid(&backend_value));
     try backend_value.prepareHostReconnectSharedReplacement();
     try testing.expect(job.valid(&backend_value));
     try testing.expectEqual(

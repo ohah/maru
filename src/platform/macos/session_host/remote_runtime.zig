@@ -3618,7 +3618,9 @@ pub const RemoteRuntime = struct {
             max_rows: usize,
             max_bytes: usize,
         ) ![]u8 {
-            return runtime.currentGeneration().attachment.screenPtr().?.dumpRecentTextUtf8(
+            const screen = runtime.currentGeneration().attachment.screenPtr() orelse
+                return error.ConnectionClosed;
+            return screen.dumpRecentTextUtf8(
                 allocator,
                 io,
                 max_rows,
@@ -4400,6 +4402,13 @@ pub const RemoteRuntime = struct {
     /// 마주한다. 강등 자체를 막지 않고(계약대로다) 관측만 가능하게 한다.
     pub fn attachedAsObserver(self: *const RemoteRuntime) bool {
         return !self.currentGenerationConst().attachment.allowsMutation();
+    }
+
+    /// A retained Term is not proof that its transport survived or reconnected. Product-level
+    /// AppKit evidence therefore treats only a non-terminal current generation as live; controller
+    /// authority is reported separately through `attachedAsObserver`.
+    pub fn currentAttachmentLive(self: *const RemoteRuntime) bool {
+        return !self.currentAttachmentTerminal();
     }
 
     pub fn usesGenerationAttachment(self: *const RemoteRuntime) bool {
@@ -6248,6 +6257,25 @@ pub const RemoteRuntime = struct {
         return output;
     }
 
+    /// Extracts the current remote selection even when a freshly published screen delta has
+    /// replaced the client placeholder and erased its render-only span. Once the host owns an
+    /// authoritative selection (or Select All intent), the coordinates in selected_text are
+    /// deliberately ignored by the host; requiring a client span here would make Cmd+A then
+    /// Cmd+C race the next projection refresh.
+    pub fn selectedTextCurrent(self: *RemoteRuntime, span: ?terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
+        const effective = span orelse blk: {
+            if (!self.selection_all and !self.selection_host_authoritative) {
+                return null;
+            }
+            break :blk terminal.SelectionSpan{
+                .start = .{ .row = 0, .col = 0 },
+                .end = .{ .row = 0, .col = 0 },
+                .block = false,
+            };
+        };
+        return self.selectedText(effective);
+    }
+
     fn applySelectedTextResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
         const output: *?[]u8 = @ptrCast(@alignCast(raw_output));
         output.* = try runtime.decodeSelectedTextResponse(bytes);
@@ -6587,9 +6615,17 @@ pub const RemoteRuntime = struct {
             &output,
             applySelectResponse,
         );
-        if (kind == .all) self.selection_all = output.viewport != null;
-        if (self.connectionCapabilities().runtime_selection_state and output.viewport != null)
+        // A successful all request is the semantic selection authority. The returned
+        // viewport span is only a render projection and may be absent while the host
+        // still owns a valid full-history selection (for example across a projection
+        // refresh). Coupling these two made Cmd+A then Cmd+C lose the all intent.
+        if (kind == .all) {
+            self.selection_all = true;
+            if (self.connectionCapabilities().runtime_selection_state)
+                self.selection_host_authoritative = true;
+        } else if (self.connectionCapabilities().runtime_selection_state and output.viewport != null) {
             self.selection_host_authoritative = true;
+        }
         return output.viewport;
     }
 
@@ -18769,7 +18805,7 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
 // code-review #6b-2 end-to-end — 단어/줄 선택. 빈 client placeholder는 단어/줄 경계를 모르므로 host가 콘텐츠로 계산해
 // span을 돌려준다(selectContentAware → runtime.select_op). 그 span으로 selectedText를 부르면(=client가 placeholder에 적용 후
 // #6b-1 복사와 같은 경로) 그 단어/줄 텍스트가 나온다. 실 fork host로 왕복 고정. macOS opt-in.
-test "remote runtime: selectContentAware computes word/line/all boundaries on the host (§6b-2)" {
+test "CR6e-c3c remote select-all copy survives projection refresh (§6b-2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;
@@ -18868,6 +18904,17 @@ test "remote runtime: selectContentAware computes word/line/all boundaries on th
     defer allocator.free(all_text);
     try testing.expect(std.mem.indexOf(u8, all_text, "EARLY-00") != null);
     try testing.expect(std.mem.indexOf(u8, all_text, "EARLY-11") != null);
+
+    // A following screen publication may replace the client projection and erase its
+    // render-only span. The host still owns Select All, so copy must remain available.
+    rr.surface.core.selectionClear();
+    const after_projection_refresh = (try rr.selectedTextCurrent(null)) orelse {
+        try testing.expect(false);
+        return;
+    };
+    defer allocator.free(after_projection_refresh);
+    try testing.expect(std.mem.indexOf(u8, after_projection_refresh, "EARLY-00") != null);
+    try testing.expect(std.mem.indexOf(u8, after_projection_refresh, "EARLY-11") != null);
 }
 
 // code-review #6c end-to-end — 원격 검색. 빈 client placeholder는 검색을 못 하므로 host가 자기 core(콘텐츠·스크롤백)에서
@@ -19092,6 +19139,38 @@ test "CR2b RemoteRuntime attach는 Surface에 stable proxy를 한 번 게시한�
     const snapshot = fixture.runtime.surface.renderSnapshot();
     try testing.expectEqual(@as(u21, 'x'), snapshot.cells[0].codepoint);
     fixture.runtime.surface.unlockCore(std.testing.io);
+}
+
+test "CR6e-c3c reconnect 전환 중 recent text 조회는 nullable screen을 fail-closed 한다" {
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(testing.allocator),
+    };
+    defer client.deinit();
+    var runtime: RemoteRuntime = undefined;
+    try testing_api.initializeGenerationForConnection(&runtime, .{ .legacy = &client });
+    runtime.allocator = testing.allocator;
+    runtime.io = testing.io;
+    runtime.currentGeneration().attachment = .init(testing.allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 1,
+    });
+    defer runtime.currentGeneration().attachment.deinit();
+
+    try testing.expectError(
+        error.ConnectionClosed,
+        RemoteRuntime.backend_api.dumpRecentText(
+            &runtime,
+            testing.allocator,
+            testing.io,
+            8,
+            4096,
+        ),
+    );
 }
 
 test "CR2e-e2a 제품 runtime은 최초 inline slot payload와 stable screen을 결속한다" {

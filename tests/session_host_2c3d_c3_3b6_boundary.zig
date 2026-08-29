@@ -58,7 +58,11 @@ test "C3-3b6 shutdown boundary는 제품 caller와 중립 layering을 고정한�
     try std.testing.expectEqual(@as(usize, 1), count(compatibility, "@import(\"shutdown_n1_baseline.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(connector, ".connectFrozenShutdownUntil("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn connectFrozenShutdownUntil("));
-    try std.testing.expectEqual(@as(usize, 2), count(client, "allow_attested_legacy_hello: bool"));
+    // Legacy hello authority is a closed policy domain: normal callers remain strict, while the
+    // frozen shutdown and GUI paths cannot be confused through an ambient boolean.
+    try std.testing.expectEqual(@as(usize, 1), count(client, "const LegacyHelloPolicy = enum {"));
+    try std.testing.expectEqual(@as(usize, 3), count(client, "legacy_hello_policy: LegacyHelloPolicy"));
+    try std.testing.expectEqual(@as(usize, 2), count(client, ".frozen_shutdown"));
     try std.testing.expectEqual(@as(usize, 1), count(baseline, "314b7912613c2e84cbf11e2cc8b0775e9e3f99fb"));
     try std.testing.expectEqual(@as(usize, 1), count(baseline, "4004256667fee2b40d41c7fe678ef44c7b5385fd4ff25410c40a9198344ce64c"));
     try std.testing.expectEqual(@as(usize, 1), count(baseline_manifest, "314b7912613c2e84cbf11e2cc8b0775e9e3f99fb"));

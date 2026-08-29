@@ -620,6 +620,25 @@ test "dispatchAuthenticated(§4a): 셀렉터를 대면 종전대로 그 surface 
     try testing.expectEqualSlices(u64, &.{20}, ids.items);
 }
 
+test "dispatchAuthenticated(§8.3): 셀렉터가 없어도 없는 id 는 여전히 균일 unauthorized — 존재 oracle 이 안 생긴다" {
+    var store: cap.CapabilityStore = .{};
+    defer store.deinit(testing.allocator);
+    // **넓힌 scope 가 존재 여부를 새게 하면 안 된다.** `.all` 은 "무엇이든 참" 이 아니라 **창 멤버십**이라
+    // 없는 id 는 안 맞고(`window_membership.scopeAllowsSurface`), 그래서 존재 확인 **전에** unauthorized 로 접힌다.
+    // 이 성질은 코드를 읽어 확인했을 뿐 묶여 있지 않았다 — `.all` 을 "언제나 참" 으로 바꾸는 리팩터가 오면
+    // `process_exited` 가 새어 나오고, 그때 이 테스트가 잡는다.
+    const missing = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":9999}}", null, null, &store);
+    defer testing.allocator.free(missing);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(missing));
+
+    // 대조: **있는** id 는 셀렉터 없이도 보인다(그것이 이 변경의 목적이다).
+    const present = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":20}}", null, null, &store);
+    defer testing.allocator.free(present);
+    var pm = try cp.parseMessage(testing.allocator, present);
+    defer pm.deinit();
+    try testing.expect(pm.message.response.result != null);
+}
+
 test "dispatchAuthenticated(§8.3): 셀렉터가 없어도 read-output 은 안 넘는다 — session.capture 는 그대로 unauthorized" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);

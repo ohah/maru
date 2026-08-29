@@ -78,7 +78,7 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 
 **A1 확정 세부**: `ROWS_PER_PAGE` 고정(예 512), uniform-width 페이지(폭 변경=새 페이지), page **pool**로 steady-state 0 할당 유지(ring과 동률), row-count cap 유지(바이트 cap은 A2/config 후속), 논리 행 i→(page,row)는 cumulative 인덱스.
 
-### 11.7 A2 설계 — 가변폭/trailing-trim (실제 메모리 절감, 설계·합의 대기)
+### 11.7 A2 설계 — 가변폭/trailing-trim (실제 메모리 절감, **구현 완료** — 위 §11 종료 노트가 단일 출처)
 
 **목표**: 스크롤백 행을 끝 default-cell까지 잘라 **가변폭**으로 저장 → 전형 출력(짧은 줄 다수)에서 메모리 ~10×↓. A1은 할당 수만 줄였고(데이터는 여전히 cap×cols×Cell), **A2가 실제 메모리를 줄여** 수백만 줄 viability에 기여한다.
 
@@ -116,7 +116,7 @@ architecture.md §192/§211 종착지: "scrollback/page 책임을 별도 모듈�
 
 > **정정(§11.10 발견 반영)**: 이 계획의 **vehicle인 B(활성 grid 통일)가 A2와 충돌해 불가**해졌다(§11.10). 따라서 "B의 한 step으로 grapheme page-local"은 진행 불가. 남는 길은 (a) 위에서 "더 나쁨"으로 평가한 **split 모델**(스크롤백만 page-local grapheme + 전역 활성), 또는 (b) **현 전역 dedup store 유지**(브리지)다. **결정: (b) 유지·보류** — dedup이 distinct cluster 수로 메모리를 bound하고(100만 줄이라도 고유 cluster는 보통 수천~수만·각 몇 코드포인트 → MB급), **측정된 grapheme 메모리 병목이 없다**(measure-first). grapheme **렌더링** 작업(dedup·무손실 cluster 저장·NFD 한글·CoreText 셰이퍼)은 이미 완료·유효하며, **회수(page-local)만 보류**다 — huge history에서 grapheme 메모리가 실제로 커짐이 측정되면 그때 split 모델(스크롤백 page-local, 활성 grid 안 건드림)로 재개한다.
 
-### 11.9 P4 설계 — mmap backing for 스크롤백 page arena (설계·합의 대기)
+### 11.9 P4 설계 — mmap backing for 스크롤백 page arena (**구현 완료** — 위 §11 종료 노트가 단일 출처)
 
 **목표**: A2가 만든 **고정 크기 cell arena**(ScrollbackPage.cells)를 일반 allocator 대신 **mmap/VirtualAlloc 기반 page allocator**로 받쳐, (1) demand-commit(안 쓴 arena tail은 물리 메모리 미점유), (2) 메모리 압박 시 콜드 히스토리 arena가 OS swap으로 디스크에 내려감(= history > RAM 가능), (3) free 시 즉시 OS 반납(general allocator의 caching과 달리)을 얻는다. architecture.md §180("hot terminal page backing → mmap/VirtualAlloc 직접, hot storage가 명확해지면 그 책임만 교체")의 실현. A1/A2로 hot storage(=고정 arena)가 명확해진 지금이 교체 시점.
 

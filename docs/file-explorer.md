@@ -210,10 +210,16 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   hit-test(`sidebar.headerHit`)도 같은 밴드 경계를 본다. "그려진 것 = 클릭되는 것"이 이 컴포넌트의 규약이므로, 렌더가
   밴드로 옮겨 가면 hit-test가 셀 row에 남아 있을 수 없다.
 
-  **남은 결함과 그 이관 계획.** 위 밴드는 *위치*만 정한다. 밴드 안 텍스트는 여전히 terminal 셀 그리드로 그려지므로,
+  ~~**남은 결함과 그 이관 계획.**~~ → **이관 완료(2026-08-29 재확인).** 아래는 착수 전 서술이고, 그 결함은 이미 닫혔다 — 검색 줄과 pane 탭 제목이 **둘 다 chrome measured 경로로 옮겨 갔다**(`sidebarSearchCaretRect` 가 "렌더가 measured로 옮겨 갔으므로 셰이핑된 advance에서 얻는다"고 적고, pane 탭 제목도 measured 높이를 쓴다). 아래 선행 조건 셋은 **그때 무엇이 필요했는지의 기록**으로 남긴다.
+
+  <details><summary>착수 전 서술(보존)</summary>
+
+  위 밴드는 *위치*만 정한다. 밴드 안 텍스트는 여전히 terminal 셀 그리드로 그려지므로,
   큰 폰트에서 셀이 40pt 바를 넘으면 검색 글자와 탭 제목이 밴드 아래로 삐져나온다. 근본 해법은 그 텍스트를 chrome
   measured 경로(`platform/macos/chrome/system_text.zig`)로 옮기는 것이다 — measured 텍스트의 line box는 role 토큰(pt)에서
   나와 폰트에 불변이므로 밴드 안에 정확히 들어간다.
+
+  </details>
 
   착수 전에 **다음 세 가지가 선행 조건**이다. 검증에서 드러난 순서이며, 건너뛰면 되돌아온다.
 

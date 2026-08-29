@@ -23,7 +23,9 @@ const decode_backend = @import("../agent_image_decode_backend.zig");
 const image_scale = maru.session.image_scale;
 const image_grid = maru.session.image_grid;
 const image_view = maru.session.image_view;
+const image_context = maru.session.agent_image_context;
 const metal_frame = maru.renderer.metal_frame;
+const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
 /// 다시 훑는다.
@@ -118,6 +120,9 @@ pub const Tile = struct {
     generation: u64,
     /// 이미 GPU 로 보냈는가. 매 프레임 보내면 15 MB 를 초당 60번 복사한다.
     uploaded: bool = false,
+    /// 「이게 무엇이었는지」 한 줄(§2.2). **타일마다 한 번만 읽는다** — 매 프레임 파일을 열면
+    /// 도크가 초당 60번 IO 를 한다. 빈 라벨도 「읽어 봤고 없었다」로 확정된 값이다.
+    label: image_context.Label = .{},
 };
 
 /// 크게 보고 있는 한 장. 썸네일(`Tile`)과 **다른 픽셀**이다 — 이쪽은 텍스처 상한 안에서 원본 배율로
@@ -310,6 +315,7 @@ fn harvestDecoded(self: *AppSession) void {
         .height = r.height,
         .pixels = r.pixels,
         .generation = 1,
+        .label = readLabel(self, r.hit_index),
     }) catch return;
     r.pixels = &.{}; // 소유가 타일로 넘어갔다 — defer 가 두 번 풀지 않게 비운다
     self.metal_dirty = true;
@@ -523,6 +529,65 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     return true;
 }
 
+/// 이 이미지의 한 줄 설명을 파일에서 읽는다(§2.2). **두 조각만** 읽는다 —
+/// ⑴ 이미지 줄의 시작부터 base64 앞까지, ⑵ 그 **직전 줄**.
+///
+/// 직전 줄을 찾으려고 스캐너를 고치지 않는다. `line_offset` 앞 64 KiB 를 한 번 읽어 마지막 개행을
+/// 찾으면 그 뒤가 직전 줄이다 — 실측 직전 줄이 최대 2.3 KB 라 이 창이면 언제나 통째로 들어오고,
+/// NVMe 에서 64 KiB 는 0.015 ms 다(인덱스에 필드를 더해 아끼는 값보다 코드가 싸다).
+///
+/// 실패는 **빈 라벨**이다 — 없는 설명을 지어내지 않는다.
+fn readLabel(self: *AppSession, hit_index: usize) image_context.Label {
+    if (hit_index >= self.image_gallery.hits.items.len) return .{};
+    if (self.image_gallery.source.isEmpty()) return .{};
+    const hit = self.image_gallery.hits.items[hit_index];
+
+    const io = self.io;
+    const file = std.Io.Dir.cwd().openFile(io, self.image_gallery.source.path(), .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return .{};
+    defer file.close(io);
+
+    // ⑴ 이미지 줄의 앞부분. base64 는 절대 안 읽는다(수 MB 다).
+    const prefix_len: usize = @intCast(@min(
+        hit.data_offset -| hit.line_offset,
+        @as(u64, image_context.max_prefix_bytes),
+    ));
+    // ⑵ 직전 줄을 품는 창. 파일 앞머리면 그만큼만.
+    const back: u64 = @min(hit.line_offset, @as(u64, image_context.max_prev_line_bytes));
+
+    const buf = self.allocator.alloc(u8, prefix_len + @as(usize, @intCast(back))) catch return .{};
+    defer self.allocator.free(buf);
+
+    var prev: []const u8 = &.{};
+    if (back > 0) {
+        const window = buf[0..@intCast(back)];
+        if (readAllAt(io, file, window, hit.line_offset - back)) {
+            // 창의 마지막 바이트는 이미지 줄 바로 앞의 개행이다. 그 앞의 개행을 찾으면 그 사이가 직전 줄.
+            const without_nl = if (window.len > 0 and window[window.len - 1] == '\n') window[0 .. window.len - 1] else window;
+            prev = if (std.mem.lastIndexOfScalar(u8, without_nl, '\n')) |at| without_nl[at + 1 ..] else without_nl;
+        }
+    }
+    var prefix: []const u8 = &.{};
+    if (prefix_len > 0) {
+        const slot = buf[@intCast(back)..];
+        if (readAllAt(io, file, slot, hit.line_offset)) prefix = slot;
+    }
+    return image_context.label(prefix, prev);
+}
+
+fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, offset: u64) bool {
+    var got: usize = 0;
+    while (got < dest.len) {
+        const n = file.readPositional(io, &.{dest[got..]}, offset + got) catch return false;
+        if (n == 0) return false;
+        got += n;
+    }
+    return true;
+}
+
 /// 격자가 쓸 영역(backing px). 도크 본문에서 **문구 한 줄을 늘 뺀다.**
 ///
 /// 문구(`noticeText`)는 `tree_content` 의 첫 행에 그려진다. 격자가 그 자리를 같이 쓰면 「12장 중 8장」이
@@ -545,8 +610,13 @@ pub fn gridArea(self: *const AppSession) image_grid.Rect {
 /// 타일 한 변(backing px). 썸네일 텍스처(160)와 **다를 수 있다** — 화면 크기는 레이아웃이,
 /// 텍스처 크기는 디코드가 정한다. 지금은 같은 값을 쓰되 그 둘을 한 상수로 묶지 않는다.
 pub fn gridMetrics(self: *const AppSession) image_grid.Metrics {
-    _ = self;
-    return .{ .tile = thumbnail_side, .gap = 8, .pad = 8 };
+    return .{ .tile = thumbnail_side, .gap = 8, .pad = 8, .label = labelHeightPx(self) };
+}
+
+/// 타일 아래 라벨 한 줄의 높이(backing px). 도크 글자 한 줄과 같다 — 다른 값을 쓰면 글자가
+/// 자기 자리 밖으로 나가거나 빈 띠가 남는다.
+pub fn labelHeightPx(self: *const AppSession) u32 {
+    return if (self.cell_height_px > 0) self.cell_height_px else app_session_mod.placeholder_cell_height_px;
 }
 
 /// 크게 보기 한 장을 얹는다. **뷰포트 밖은 UV 로 잘라 낸다** — 확대하면 그림이 도크보다 커지는데,
@@ -615,6 +685,45 @@ fn appendOpenImage(
     uploads.* = merged_uploads;
     pixels.* = merged_pixels;
     op.uploaded = true;
+}
+
+/// 썸네일 **아래 라벨**을 프레임에 얹는다(§2.2). 그림만으로는 비슷한 스크린샷 열두 장에서 원하는
+/// 것을 못 고른다 — 이 한 줄이 그 문제를 푼다.
+///
+/// **자리는 `image_grid` 가 준다**(`labelRectAt`). 여기서 좌표를 다시 풀면 글자가 그림에서 밀린다.
+/// 크게 보기 중에는 아무것도 그리지 않는다 — 그때 격자는 화면에 없다.
+pub fn collectLabels(
+    self: *AppSession,
+    collected: *std.ArrayList(AppSession.CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (self.image_gallery.open != null) return;
+    if (self.image_gallery.tiles.items.len == 0) return;
+
+    const area = gridArea(self);
+    const m = gridMetrics(self);
+    const l = image_grid.layout(area, m, self.image_gallery.count());
+    if (l.visible == 0) return;
+    const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+
+    for (self.image_gallery.tiles.items, 0..) |*tile, n| {
+        if (n >= l.visible) break;
+        const text = tile.label.text();
+        if (text.len == 0) continue; // 없는 설명을 지어내지 않는다 — 빈 칸이 낫다
+        const rect = image_grid.labelRectAt(area, m, l, n) orelse continue;
+        const cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), rect.w / self.cell_width_px));
+        if (cols == 0) continue;
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, text, fg) catch continue;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = rect.x,
+            .origin_y = rect.y,
+            .colors = colors,
+        } });
+    }
 }
 
 /// 갤러리 타일을 프레임의 이미지 채널에 얹는다.

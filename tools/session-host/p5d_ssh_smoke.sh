@@ -3,13 +3,14 @@
 # drives the existing current-product PTY oracle through `/usr/bin/ssh -tt`.
 set -eu
 
-if [ "$#" -ne 2 ]; then
-	echo "usage: $0 <bundle-cli> <product-e2e-test>" >&2
+if [ "$#" -ne 3 ]; then
+	echo "usage: $0 <bundle-cli> <attach-product-e2e-test> <ssh-upload-product-e2e-test>" >&2
 	exit 2
 fi
 
 BUNDLE_CLI=$1
 PRODUCT_TEST=$2
+UPLOAD_TEST=$3
 SSHD=/usr/sbin/sshd
 SSH=/usr/bin/ssh
 SSH_KEYGEN=/usr/bin/ssh-keygen
@@ -24,6 +25,8 @@ done
 BUNDLE_CLI=$(CDPATH= cd -- "$(dirname -- "$BUNDLE_CLI")" && pwd -P)/$(basename -- "$BUNDLE_CLI")
 PRODUCT_TEST=$(CDPATH= cd -- "$(dirname -- "$PRODUCT_TEST")" && pwd)/$(basename -- "$PRODUCT_TEST")
 [ -x "$PRODUCT_TEST" ] || { echo "p5d: product E2E driver is not executable" >&2; exit 1; }
+UPLOAD_TEST=$(CDPATH= cd -- "$(dirname -- "$UPLOAD_TEST")" && pwd)/$(basename -- "$UPLOAD_TEST")
+[ -x "$UPLOAD_TEST" ] || { echo "p5d: SSH upload product E2E driver is not executable" >&2; exit 1; }
 
 APP_ROOT=$(CDPATH= cd -- "$(dirname -- "$BUNDLE_CLI")/../.." && pwd)
 /usr/bin/codesign --verify --strict "$BUNDLE_CLI"
@@ -137,6 +140,17 @@ USER_NAME=$(/usr/bin/id -un)
 case "$USER_NAME" in
 	*[!A-Za-z0-9._-]*|'') echo "p5d: unsafe local account name" >&2; exit 1 ;;
 esac
+# sshd가 실행하는 명령도 harness HOME에 가둔다. uploadShellCommand의 `$HOME/.cache/maru/dropped`
+# 가 개발자 계정의 실제 HOME으로 새면 테스트 자체가 권한 경계를 어기는 셈이다. SSH_ORIGINAL_COMMAND는
+# OpenSSH가 제공하고, 명령 문자열은 제품의 uploadShellCommand 또는 아래 closed attach grammar에서만 온다.
+REMOTE_COMMAND=$RUN_DIR/remote-command
+cat >"$REMOTE_COMMAND" <<EOF
+#!/bin/sh
+set -eu
+export HOME='$HOME_DIR'
+exec /bin/sh -c "\${SSH_ORIGINAL_COMMAND:?}"
+EOF
+chmod 700 "$REMOTE_COMMAND"
 PORT_BASE=$((24000 + ($$ % 12000)))
 PORT=""
 _try=0
@@ -164,6 +178,7 @@ X11Forwarding no
 PermitTunnel no
 GatewayPorts no
 MaxAuthTries 1
+ForceCommand $REMOTE_COMMAND
 EOF
 	rm -f "$RUN_DIR/sshd.pid"
 	"$SSHD" -f "$RUN_DIR/sshd_config" -E "$RUN_DIR/sshd.log" 2>/dev/null || true
@@ -180,6 +195,43 @@ EOF
 	_try=$((_try + 1))
 done
 [ -n "$PORT" ] || { sed -n '1,20p' "$RUN_DIR/sshd.log" >&2 || true; echo "p5d: sshd did not start" >&2; exit 1; }
+
+# Product upload invokes `ssh -S <computed path> <dest> <command>`. The alias supplies only
+# harness-owned localhost credentials; the product still computes and selects the ControlPath.
+mkdir -p "$HOME_DIR/.ssh" "$HOME_DIR/.cache/maru"
+cat >"$HOME_DIR/.ssh/config" <<EOF
+Host maru-p5d-upload
+    HostName 127.0.0.1
+    Port $PORT
+    User $USER_NAME
+    IdentityFile $RUN_DIR/clientkey
+    BatchMode yes
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+Host maru-p5d-upload-failure
+    HostName 127.0.0.1
+    Port 1
+    User $USER_NAME
+    IdentityFile $RUN_DIR/clientkey
+    BatchMode yes
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    ConnectTimeout 1
+    ConnectionAttempts 1
+    LogLevel QUIET
+EOF
+chmod 700 "$HOME_DIR/.ssh"
+chmod 600 "$HOME_DIR/.ssh/config"
+# OpenSSH는 일부 실행 경로에서 getenv(HOME)가 아니라 passwd home을 기준으로 기본 config를 찾는다.
+# 제품은 의도대로 PATH의 `ssh`를 실행하고, 이 harness shim은 실제 OpenSSH에 격리 config만 명시한다.
+cat >"$BIN_DIR/ssh" <<EOF
+#!/bin/sh
+exec '$SSH' -F '$HOME_DIR/.ssh/config' "\$@"
+EOF
+chmod 700 "$BIN_DIR/ssh"
 
 # Every argument accepted here comes from the closed public attach grammar used by the Zig oracle.
 # Rejecting anything else keeps OpenSSH's remote-shell command joining from becoming an injection path.
@@ -206,4 +258,10 @@ MARU_SESSION_HOST_PRODUCT_EXE=$BUNDLE_CLI \
 MARU_SESSION_HOST_ATTACH_EXE=$WRAPPER \
 "$PRODUCT_TEST" --maru-expect-tests=2
 
-echo "p5d: bundle PATH and localhost sshd product PTY gates passed"
+HOME=$HOME_DIR \
+PATH=$MIN_PATH \
+MARU_P5D_UPLOAD_DEST=maru-p5d-upload \
+MARU_P5D_UPLOAD_FAILURE_DEST=maru-p5d-upload-failure \
+"$UPLOAD_TEST" --maru-expect-tests=4
+
+echo "p5d: bundle PATH, localhost sshd attach, and host-backed upload product gates passed"

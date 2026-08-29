@@ -186,11 +186,19 @@ flowchart TD
 ## 7. 검증·관측
 
 - **통합 테스트**: `ssh localhost`로 업로드→원격 파일 존재→경로 paste 왕복을 검증한다(`terminal-strategy.md` #13 연장). control socket 유무·캐시 hit/miss 분기를 단위로 고정.
-- **persistent host parity gate(P3-e4, 부분 완료)**: 실제 독립 host PTY의 OSC 5379가 후속 event로 GUI observation까지
-  도착하고, capability-negotiated event와 user-action barrier revision, stale/unsupported/업로드 준비 실패 시
-  드롭·이미지 로컬 fallback을 막는 분기는 구현됐다. 아직 재접속 시 원격의
-  재보고 없이 기존 destination 복원, 두 Term destination/control socket 격리, 실제 host-backed file drop·clipboard
-  image upload branch E2E를 자동 검증해야 전체 gate가 끝난다.
+- **persistent host parity gate(P3-e4)**: 전체 gate는 실제 독립 host PTY의 OSC 5379가 후속 event로 GUI observation까지
+  도착하는 경로, capability-negotiated event와 user-action barrier revision, stale/unsupported/업로드 준비 실패 시
+  드롭·이미지 로컬 fallback 금지, 재접속 시 원격의 재보고 없는 기존 destination 복원, 두 Term의
+  destination/control socket 격리를 모두 자동 검증한다. 구현·검증 상태는 `verification-matrix.md`의 P3-e4d 행들이 소유한다.
+- **실제 업로드 제품 gate(P3-e4d-3)**: harness-owned localhost `sshd`와 실제 OpenSSH ControlMaster를 사용한다.
+  별도 daemon의 host-owned `/bin/cat` PTY가 OSC 5379 destination을 게시한 뒤, AppSession의 공개
+  `handleDroppedFiles`·`handleDroppedImage`에서 managed-generation freshness request/poll을 지나야 한다. 파일과 PNG는
+  각각 실제 SSH worker가 원격 `$HOME/.cache/maru/dropped/`에 byte-for-byte 쓰고, worker 결과의 원격 절대경로는
+  **동작을 시작한 원래 surface**의 PTY 화면에 나타나야 한다. worker가 실제 transport 실패를 반환하면 결과를
+  조용히 버리지 않고 파일·이미지 종류에 맞는 사용자 notice를 메인 tick에서 표시한다. observation 직접 주입, `applyUserAction`·`startUploadBytes`
+  직접 호출, 가짜 ssh 성공은 이 gate의 증거가 아니다. 테스트 HOME·key·sshd·ControlMaster·remote dropped 파일은
+  harness가 소유하고 종료 시 모두 회수하며 host/destination/path/PNG bytes를 artifact나 실패 로그에 남기지 않는다.
+  이 gate만으로 재접속 destination 복원 또는 두 Term control-socket 격리를 완료로 표시하지 않는다.
 - **순수 로직 단위**: 세션이 maru ssh 원격인지 판정, 업로드 명령 조립, 원격 경로 생성은 I/O 없는 순수 Zig로 TDD(`ssh.zig`의 기존 셸-구절 단위 테스트와 같은 결).
 - **관측 가능성**: 업로드 시작/성공/실패를 공통 도메인 이벤트로 남겨 로그·trace·E2E가 같은 데이터를 본다(`project-rules.md` §관측 가능성). 자동 검증이 불가능한 부분(실제 GUI 드롭)은 완료 전 수동 검증 방법과 함께 보고.
 - **비동기 user-action gate**: 순수 queue 테스트가 FIFO, 8/9 action, 32MiB exact/+1, 256/257 paths, 64KiB exact/+1, admission 기준 5초 exact/-1, target identity ABA, close 중 late result를 고정한다. actual socket 테스트는 실제 송신 버퍼를 stalled 상태로 만든 managed generation에서 request/poll이 block하지 않고 pending을 반환하는지, 같은 adapter generation·usable connection을 보존하는지, wire FIFO와 timeout abandon 뒤 exact late metadata 소비를 확인한다. 첫 pump 오류도 caller가 `.accepted`를 받기 전에 abandoned tombstone으로 전환한다. AppSession main tick은 blocking connect/RPC/wait 없이 이 facade와 queue clock만 호출한다. 테스트/artifact에는 host·destination·path·PNG를 남기지 않는다.

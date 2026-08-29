@@ -13137,13 +13137,17 @@ pub const AppSession = struct {
         dest: []u8,
         name: []u8,
         bytes: []u8,
+        kind: UploadKind,
         /// 완료된 원격 경로를 붙일 surface id — **드롭 시점**에 고정한다(업로드가 끝날 때의 활성 pane이 아니라).
         target_id: u64,
     };
 
-    /// 완료된 업로드 결과(원격 절대경로 + 드롭 시점에 고정한 대상 surface). 메인 tick이 빼서 그 surface에 붙인다.
+    const UploadKind = enum { file, image };
+
+    /// 완료된 업로드 결과(성공 원격 경로 또는 종류별 실패 + 드롭 시점에 고정한 대상 surface).
+    /// 메인 tick이 빼서 성공 경로를 해당 surface에 붙이거나 실패 notice를 표시한다.
     const UploadResult = struct {
-        path: []u8,
+        outcome: union(enum) { success: []u8, failure: UploadKind },
         target_id: u64,
     };
 
@@ -13430,7 +13434,7 @@ pub const AppSession = struct {
                     self.showNoticeKey(.app_image_send_oom);
                     return;
                 };
-                self.startUploadBytes(rup.ctl, rup.dest, name, bytes, action.target.surface_id) catch
+                self.startUploadBytes(rup.ctl, rup.dest, name, bytes, action.target.surface_id, .image) catch
                     self.showNoticeKey(.app_image_send_start_failed);
             },
         }
@@ -13557,12 +13561,20 @@ pub const AppSession = struct {
             self.allocator.free(bytes);
             return e;
         };
-        try self.startUploadBytes(ctl, dest, name, bytes, target_id); // name/bytes 소유 이전
+        try self.startUploadBytes(ctl, dest, name, bytes, target_id, .file); // name/bytes 소유 이전
     }
 
     /// 업로드(ssh 자식 프로세스)를 백그라운드 스레드에 맡긴다. name/bytes는 호출자가 소유를 넘긴 owned
     /// 슬라이스다(이 함수가 책임 — 성공 시 job으로, 실패 시 free). ctl/dest는 빌려와 여기서 dupe한다.
-    fn startUploadBytes(self: *AppSession, ctl: []const u8, dest: []const u8, name: []u8, bytes: []u8, target_id: u64) !void {
+    fn startUploadBytes(
+        self: *AppSession,
+        ctl: []const u8,
+        dest: []const u8,
+        name: []u8,
+        bytes: []u8,
+        target_id: u64,
+        kind: UploadKind,
+    ) !void {
         errdefer self.allocator.free(name);
         errdefer self.allocator.free(bytes);
         const ctl_owned = try self.allocator.dupe(u8, ctl);
@@ -13572,7 +13584,15 @@ pub const AppSession = struct {
 
         const job = try self.allocator.create(UploadJob);
         errdefer self.allocator.destroy(job);
-        job.* = .{ .session = self, .ctl = ctl_owned, .dest = dest_owned, .name = name, .bytes = bytes, .target_id = target_id };
+        job.* = .{
+            .session = self,
+            .ctl = ctl_owned,
+            .dest = dest_owned,
+            .name = name,
+            .bytes = bytes,
+            .kind = kind,
+            .target_id = target_id,
+        };
 
         self.upload_mutex.lockUncancelable(self.io);
         self.upload_inflight += 1;
@@ -13592,17 +13612,20 @@ pub const AppSession = struct {
     /// std.process.Child가 0.16에서 io 기반이라 회피) 스레드 안전하다.
     fn uploadWorker(job: *UploadJob) void {
         const self = job.session;
-        const result: ?[]u8 = ssh_upload.uploadBytes(self.allocator, job.ctl, job.dest, job.name, job.bytes) catch null;
+        const uploaded: ?[]u8 = ssh_upload.uploadBytes(self.allocator, job.ctl, job.dest, job.name, job.bytes) catch null;
         self.allocator.free(job.ctl);
         self.allocator.free(job.dest);
         self.allocator.free(job.name);
         self.allocator.free(job.bytes);
         const target_id = job.target_id;
+        const kind = job.kind;
         self.allocator.destroy(job); // **inflight 감소 전에** job까지 정리한다 — 아래 참조
         self.upload_mutex.lockUncancelable(self.io);
-        if (result) |r| {
-            self.upload_results.append(self.allocator, .{ .path = r, .target_id = target_id }) catch self.allocator.free(r);
-        }
+        const result: UploadResult = .{
+            .outcome = if (uploaded) |path| .{ .success = path } else .{ .failure = kind },
+            .target_id = target_id,
+        };
+        self.upload_results.append(self.allocator, result) catch if (uploaded) |path| self.allocator.free(path);
         // inflight 감소는 **이 스레드가 self를 마지막으로 만지는 지점**이어야 한다: deinit이 "inflight==0"을 보면
         // 곧바로 AppSession(과 그 allocator)을 해제하므로, 감소 뒤에 self.allocator를 또 만지면 use-after-free다
         // (⌘Q/창 닫기가 업로드 완료와 겹치는 순간 — code-review). 그래서 free/destroy를 전부 위에서 끝냈다.
@@ -13620,17 +13643,27 @@ pub const AppSession = struct {
         self.upload_mutex.unlock(self.io);
         defer self.allocator.free(results);
         for (results) |r| {
-            defer self.allocator.free(r.path);
+            const path = switch (r.outcome) {
+                .failure => |kind| {
+                    self.showNoticeKey(switch (kind) {
+                        .file => .app_file_send_failed,
+                        .image => .app_image_send_failed,
+                    });
+                    continue;
+                },
+                .success => |path| path,
+            };
+            defer self.allocator.free(path);
             // **드롭 시점에 고정한 대상**에 붙인다(완료 시점의 활성 pane이 아니라) — 업로드 비동기 구간을 묶는다.
             if (term_ops.terminalSurfaceById(self, r.target_id) != null) {
-                self.pasteTextTo(r.target_id, r.path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
+                self.pasteTextTo(r.target_id, path, false); // 원격 절대경로(sanitize되어 공백 없음) raw paste
                 continue;
             }
             // 대상이 사라졌다(그 Term이 닫혔거나 워크스페이스가 다른 창으로 옮겨감 — findTermWhere는 이 창의 탭
             // 트리만 본다). **다른 pane에 붙이지 않는다** — 사용자가 드롭하지도 않은 pane의 명령줄 한복판에 경로가
             // 꽂히는 것이 이 PR이 없애려는 오삽입 그 자체다(code-review). 그렇다고 조용히 버리면 파일은 원격에
             // 올라갔는데 경로를 참조할 방법이 없으니, **notice 토스트로 경로를 보여준다**(붙이지 않고 알린다).
-            self.showNoticeFmt(.app_upload_done_pane_closed, &.{.{ .s = r.path }});
+            self.showNoticeFmt(.app_upload_done_pane_closed, &.{.{ .s = path }});
         }
     }
 
@@ -19576,7 +19609,10 @@ pub const AppSession = struct {
             if (n == 0) break;
             std.atomic.spinLoopHint(); // 미완 업로드 완료 대기 — 보통 inflight=0이라 즉시 break(드물고 짧다)
         }
-        for (self.upload_results.items) |r| self.allocator.free(r.path);
+        for (self.upload_results.items) |r| switch (r.outcome) {
+            .success => |path| self.allocator.free(path),
+            .failure => {},
+        };
         self.upload_results.deinit(self.allocator);
         // 인앱 업데이트 체크 스레드를 join한다(이전 busy-spin 대신 — CPU를 안 쓰고 OS가 대기). 이 스레드가
         // self.update_*·self.allocator를 건드리므로 self 해제 전에 반드시 끝나야 한다. CLOEXEC으로 curl pipe가
@@ -32898,6 +32934,356 @@ fn signalE4d2aFifo(path: [:0]const u8) !void {
     if (fd < 0) return error.FixtureSignalFailed;
     defer _ = std.c.close(fd);
     if (std.c.write(fd, "go\n", 3) != 3) return error.FixtureSignalFailed;
+}
+
+fn runE4d3SshControl(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    operation: enum { start, stop },
+) !void {
+    const env_z = try allocator.dupeZ(u8, "env");
+    defer allocator.free(env_z);
+    const ssh_z = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(ssh_z);
+    const ctl_z = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(ctl_z);
+    const dest_z = try allocator.dupeZ(u8, dest);
+    defer allocator.free(dest_z);
+    const flag_s = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(flag_s);
+    const argv = switch (operation) {
+        .start => blk: {
+            const flags = try allocator.dupeZ(u8, "-MNf");
+            // fork 뒤까지 argv backing이 살아 있어야 한다. parent는 waitpid 뒤 해제한다.
+            defer allocator.free(flags);
+            const batch = try allocator.dupeZ(u8, "BatchMode=yes");
+            defer allocator.free(batch);
+            const option = try allocator.dupeZ(u8, "-o");
+            defer allocator.free(option);
+            const args = [_:null]?[*:0]const u8{
+                env_z.ptr, ssh_z.ptr, flags.ptr, option.ptr, batch.ptr, flag_s.ptr, ctl_z.ptr, dest_z.ptr,
+            };
+            break :blk try runE4d3Child(&args);
+        },
+        .stop => blk: {
+            const quiet_z = try allocator.dupeZ(u8, "-q");
+            defer allocator.free(quiet_z);
+            const operation_z = try allocator.dupeZ(u8, "-O");
+            defer allocator.free(operation_z);
+            const exit_z = try allocator.dupeZ(u8, "exit");
+            defer allocator.free(exit_z);
+            const args = [_:null]?[*:0]const u8{
+                env_z.ptr, ssh_z.ptr, quiet_z.ptr, flag_s.ptr, ctl_z.ptr, operation_z.ptr, exit_z.ptr, dest_z.ptr,
+            };
+            break :blk try runE4d3Child(&args);
+        },
+    };
+    if (argv != 0) return error.SshControlFailed;
+}
+
+fn runE4d3Child(argv: [*:null]const ?[*:0]const u8) !c_int {
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = std.c.execve("/usr/bin/env", argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    var status: c_int = 0;
+    if (std.c.waitpid(pid, &status, 0) != pid) return error.WaitFailed;
+    const bits: u32 = @bitCast(status);
+    if (!std.c.W.IFEXITED(bits)) return -1;
+    return @intCast(std.c.W.EXITSTATUS(bits));
+}
+
+fn e4d3SurfaceContains(term: *Term, io: std.Io, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    term.surface.lockCore(io);
+    defer term.surface.unlockCore(io);
+    const snapshot = term.surface.renderSnapshot();
+    var matched: usize = 0;
+    for (snapshot.cells) |cell| {
+        const cp = cell.codepoint;
+        const byte: ?u8 = if (cp <= 0x7f) @intCast(cp) else null;
+        if (byte != null and byte.? == needle[matched]) {
+            matched += 1;
+            if (matched == needle.len) return true;
+        } else {
+            matched = if (byte != null and byte.? == needle[0]) 1 else 0;
+        }
+    }
+    return false;
+}
+
+fn e4d3FileEquals(io: std.Io, allocator: std.mem.Allocator, path: []const u8, expected: []const u8) bool {
+    const actual = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(maru.cli.ssh.max_upload_bytes)) catch return false;
+    defer allocator.free(actual);
+    return std.mem.eql(u8, actual, expected);
+}
+
+// P3-e4d-3은 ssh_upload primitive가 아니라 공개 AppSession 사용자 동작의 끝까지를 닫는다. 실제 host PTY가
+// OSC 5379를 출력하고, managed connection의 freshness barrier가 그 관측을 확정한 뒤에만 localhost
+// ControlMaster upload가 시작된다. 원격 바이트와 **동작을 시작한 surface 화면**의 경로를 둘 다 본다.
+test "P3-e4d-3 actual host-backed file and image uploads reach original surface" {
+    if (!is_macos) return error.SkipZigTest;
+    const dest_raw = std.c.getenv("MARU_P5D_UPLOAD_DEST") orelse return error.SkipZigTest;
+    const failure_dest_raw = std.c.getenv("MARU_P5D_UPLOAD_FAILURE_DEST") orelse return error.SkipZigTest;
+    const home_raw = std.c.getenv("HOME") orelse return error.SkipZigTest;
+    const dest = std.mem.span(dest_raw);
+    const failure_dest = std.mem.span(failure_dest_raw);
+    const home = std.mem.span(home_raw);
+    if (dest.len == 0 or failure_dest.len == 0 or home.len == 0) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var failure_stage: []const u8 = "fixture";
+    errdefer std.debug.print("P3-e4d-3 failure stage={s}\n", .{failure_stage});
+    var base_buf: [192]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e4d3-{d}", .{std.c.getpid()});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(base.ptr, 0o700));
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    var dir_buf: [256]u8 = undefined;
+    const dir = try session_host.discovery.sessionHostDirPath(&dir_buf, base);
+    const fixture_host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0x5033_E4D3_5550_4C44;
+    try session_host.short_endpoint.prepareCurrentUserNamespace();
+    var socket_buf: [128]u8 = undefined;
+    const socket = try session_host.short_endpoint.currentSocketPathIn(&socket_buf, fixture_host_id);
+
+    const host_child = std.c.fork();
+    if (host_child < 0) return error.ForkFailed;
+    if (host_child == 0) {
+        _ = std.c.setsid();
+        session_host.daemon.runSessionHostWithIdentity(
+            std.heap.page_allocator,
+            io,
+            dir,
+            socket,
+            fixture_host_id,
+        ) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = std.c.kill(host_child, std.posix.SIG.TERM);
+        var status: c_int = 0;
+        _ = std.c.waitpid(host_child, &status, 0);
+        _ = std.c.unlink(socket.ptr);
+        session_host.host_manifest.removeEmptyHostDirectories(dir, fixture_host_id);
+    }
+    var host_ready = false;
+    for (0..250) |_| {
+        if (session_host.client.Client.connect(allocator, socket, .gui)) |connected| {
+            var probe = connected;
+            probe.deinit();
+            host_ready = true;
+            break;
+        } else |_| _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(host_ready);
+
+    const previous_keep_alive = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = false;
+    defer app_keep_alive_after_quit = previous_keep_alive;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    failure_stage = "host-adapter";
+    var client = try session_host.client.Client.connect(allocator, socket, .gui);
+    const host_id = client.host_id;
+    try std.testing.expectEqual(fixture_host_id, host_id);
+    const owned_adapter = try allocator.create(RemoteSessionAdapter);
+    var adapter_transferred = false;
+    errdefer if (!adapter_transferred) allocator.destroy(owned_adapter);
+    const init_fixture_adapter = RemoteSessionAdapter.initInPlace;
+    try init_fixture_adapter(owned_adapter, allocator, &client);
+    var manifest = try session_host.host_manifest.load(allocator, dir, host_id);
+    defer manifest.deinit();
+    try owned_adapter.bindShutdownManifest(manifest.descriptor());
+    app_remote_host_pool = RemoteHostPool.init(allocator);
+    try @field(RemoteHostPool, "addOwned")(&app_remote_host_pool.?, host_id, owned_adapter);
+    adapter_transferred = true;
+    try @field(RemoteHostPool, "setSpawnHost")(&app_remote_host_pool.?, host_id);
+    app_remote_backend = try session_host.remote_term_backend.RemoteTermBackend.initWithPool(
+        allocator,
+        io,
+        &app_remote_host_pool.?,
+        session.runtime,
+    );
+    defer {
+        host_connect_failed = false;
+        if (app_remote_backend) |*backend| {
+            backend.deinit();
+            app_remote_backend = null;
+        }
+        if (app_remote_host_pool) |*pool| {
+            pool.deinit();
+            app_remote_host_pool = null;
+        }
+    }
+    app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+
+    failure_stage = "runtime-spawn";
+    const term = try term_ops.createTerm(
+        session,
+        .{ .command = "/bin/cat" },
+        .{ .cols = 80, .rows = 24 },
+        16,
+        "upload-e2e",
+        "/bin/cat",
+    );
+    try std.testing.expect(term.surface.remote != null);
+    const pane = session.tabs.items[0].panes.items[0];
+    try pane.terms.append(allocator, term);
+    term_ops.focusTerm(session, pane.terms.items.len - 1);
+    defer {
+        term_ops.focusTerm(session, 0);
+        _ = pane.terms.pop();
+        term_ops.destroyTerm(session, term);
+    }
+
+    failure_stage = "control-master";
+    const ctl = try maru.cli.ssh.controlSocketPath(allocator, home, dest);
+    defer allocator.free(ctl);
+    try runE4d3SshControl(allocator, ctl, dest, .start);
+    var control_master_live = true;
+    defer if (control_master_live) runE4d3SshControl(allocator, ctl, dest, .stop) catch {};
+
+    failure_stage = "metadata-observation";
+    const osc = try std.fmt.allocPrint(allocator, "\x1b]5379;ssh;{s}\x07E4D3_READY\n", .{dest});
+    defer allocator.free(osc);
+    try session.runtime.writeInput(term.surface.id, .{ .bytes = osc });
+    var observed = false;
+    for (0..300) |_| {
+        _ = try session.tick();
+        session.backendFor(term).readObservation(term.rt.handle, allocator, &term.rt.observation, false) catch {};
+        observed = term.rt.observation.availability == .current and
+            term.rt.observation.ssh_remote_dest_present and
+            std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest);
+        if (observed) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(observed);
+    try std.testing.expect(!app_remote_backend.?.attachedAsObserver(term.rt.handle));
+
+    failure_stage = "file-upload";
+    const file_bytes = "P3-e4d-3-file-proof";
+    var local_file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const local_file = try std.fmt.bufPrintZ(&local_file_buf, "{s}/host-file-proof.bin", .{base});
+    try writeE4d2aFixtureFile(local_file, file_bytes, 0o600);
+    session.handleDroppedFiles(local_file[0 .. local_file.len + 1]);
+    try std.testing.expectEqual(@as(usize, 1), session.user_action_queue.len);
+    try std.testing.expect(session.userActionSlot(1) != null);
+
+    var remote_file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const remote_file = try std.fmt.bufPrint(&remote_file_buf, "{s}/.cache/maru/dropped/host-file-proof.bin", .{home});
+    var file_done = false;
+    for (0..500) |_| {
+        _ = try session.tick();
+        file_done = e4d3FileEquals(io, allocator, remote_file, file_bytes) and
+            e4d3SurfaceContains(term, io, "host-file-proof.bin");
+        if (file_done) break;
+        _ = usleep(20 * 1000);
+    }
+    if (!file_done) {
+        session.upload_mutex.lockUncancelable(io);
+        const inflight = session.upload_inflight;
+        const results = session.upload_results.items.len;
+        session.upload_mutex.unlock(io);
+        std.debug.print(
+            "P3-e4d-3 file terminal state remote_bytes={any} screen_path={any} queue_active={any} inflight={d} results={d} notice={any}:{s}\n",
+            .{
+                e4d3FileEquals(io, allocator, remote_file, file_bytes),
+                e4d3SurfaceContains(term, io, "host-file-proof.bin"),
+                session.user_action_queue.active_id,
+                inflight,
+                results,
+                session.chrome_host.notice.open,
+                session.chrome_host.notice.message,
+            },
+        );
+    }
+    try std.testing.expect(file_done);
+    try session.runtime.writeInput(term.surface.id, .{ .bytes = "\n" });
+
+    failure_stage = "image-upload";
+    const image_bytes = "\x89PNG\r\n\x1a\nP3-e4d-3-image-proof";
+    try std.testing.expect(session.handleDroppedImage("/not-used/p5d-image.png", image_bytes));
+    var image_name_buf: [96]u8 = undefined;
+    const image_name = try std.fmt.bufPrint(&image_name_buf, "pasted-{d}-1.png", .{std.c.getpid()});
+    var remote_image_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const remote_image = try std.fmt.bufPrint(&remote_image_buf, "{s}/.cache/maru/dropped/{s}", .{ home, image_name });
+    var image_done = false;
+    for (0..500) |_| {
+        _ = try session.tick();
+        image_done = e4d3FileEquals(io, allocator, remote_image, image_bytes) and
+            e4d3SurfaceContains(term, io, image_name);
+        if (image_done) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(image_done);
+
+    // 실제 transport가 upload 시작 뒤 실패해도 결과를 버리지 않는다. ControlMaster를 끊은 다음 같은 공개
+    // 이미지 드롭 경계를 다시 지나, worker 실패가 메인 tick의 사용자 notice까지 도달하는지 확인한다.
+    failure_stage = "transport-failure-notice";
+    try runE4d3SshControl(allocator, ctl, dest, .stop);
+    control_master_live = false;
+    const failure_osc = try std.fmt.allocPrint(allocator, "\x1b]5379;ssh;{s}\x07E4D3_FAILURE_READY\n", .{failure_dest});
+    defer allocator.free(failure_osc);
+    try session.runtime.writeInput(term.surface.id, .{ .bytes = failure_osc });
+    var failure_dest_observed = false;
+    for (0..300) |_| {
+        _ = try session.tick();
+        session.backendFor(term).readObservation(term.rt.handle, allocator, &term.rt.observation, false) catch {};
+        failure_dest_observed = term.rt.observation.availability == .current and
+            term.rt.observation.ssh_remote_dest_present and
+            std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, failure_dest);
+        if (failure_dest_observed) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(failure_dest_observed);
+    const input_events_before_failure = session.total_terminal_input_events;
+    const failure_bytes = "P3-e4d-3-must-not-upload";
+    try std.testing.expect(session.handleDroppedImage("/not-used/p5d-failure.png", failure_bytes));
+    var failure_visible = false;
+    for (0..500) |_| {
+        _ = try session.tick();
+        failure_visible = session.chrome_host.notice.open and std.mem.eql(
+            u8,
+            session.chrome_host.notice.message,
+            maru.i18n.t(.app_image_send_failed),
+        );
+        if (failure_visible) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(failure_visible);
+    try std.testing.expectEqual(input_events_before_failure, session.total_terminal_input_events);
+
+    var failure_file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const failure_file = try std.fmt.bufPrintZ(&failure_file_buf, "{s}/host-file-failure.bin", .{base});
+    try writeE4d2aFixtureFile(failure_file, failure_bytes, 0o600);
+    session.handleDroppedFiles(failure_file[0 .. failure_file.len + 1]);
+    var file_failure_visible = false;
+    for (0..500) |_| {
+        _ = try session.tick();
+        file_failure_visible = session.chrome_host.notice.open and std.mem.eql(
+            u8,
+            session.chrome_host.notice.message,
+            maru.i18n.t(.app_file_send_failed),
+        );
+        if (file_failure_visible) break;
+        _ = usleep(20 * 1000);
+    }
+    try std.testing.expect(file_failure_visible);
+    try std.testing.expectEqual(input_events_before_failure, session.total_terminal_input_events);
+    failure_stage = "complete";
 }
 
 extern "c" fn _NSGetArgc() *c_int;

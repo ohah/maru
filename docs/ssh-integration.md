@@ -50,12 +50,11 @@
   - 원격 셸을 maru 가 실행해 `env` 로 주입하는 방식은 채택하지 않았다 — `ForceCommand`/`RemoteCommand` 와
     부딪히고 로그인 셸 실행 방식을 maru 가 정하게 된다.
 
-**같은 기전이 원격 에이전트 알림도 죽인다**(2026-08-29 실측). ssh 가 `TERM_PROGRAM` 을 안 넘기므로, maru 가
-자식 pty 에 심어 두는 `TERM_PROGRAM=ghostty`(`pty/macos.zig` — provider 가 «알림 보낼 터미널» 을 이 화이트
-리스트로 고른다)가 원격에 도달하지 않는다. 그래서 원격 claude 의 `preferredNotifChannel: "auto"` 판정이
-`no_method_available` 로 죽어 **알림이 하나도 안 나온다.** 고치는 방법은 `COLORTERM` 과 달리 서버 협조가
-필요 없다 — 원격 설정에 채널을 **명시**하면 된다. 계약과 provider 별 값은
-[agent-hooks.md](agent-hooks.md) §11 이 소유한다.
+**같은 기전이 원격 에이전트 알림도 죽인다**(2026-08-29 실측). ssh 가 `TERM_PROGRAM` 을 안 넘겨
+데스크톱 알림 식별값이 원격에 도달하지 않기 때문이다 — 그 값의 단일 출처는
+[터미널 호환성/보안 정책](terminal-compatibility-policy.md) «데스크톱 알림 식별» 이고, 원격에서 무엇을
+설정해야 하는지는 [agent-hooks.md](agent-hooks.md) §11 이 소유한다. **`COLORTERM` 과 달리 서버 협조가
+필요 없다** — 원격 provider 설정에 채널을 명시하면 끝난다.
 
 **베이스/clean-room**: terminfo `tic`은 공개 도구, ControlMaster는 OpenSSH 공개 기능이다. 같은 문제를 푸는 Ghostty `ghostty +ssh`(MIT)는 **동작 비교**로만 확인했고 셸 구절·idiom은 maru가 독립 작성했다(코드 미복사).
 

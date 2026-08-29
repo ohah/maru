@@ -16,7 +16,9 @@
 OSC는 `AppSession.pendingNotification()`이 `{ title, body, surface_id, foreground_banner }`(`PendingNotification`)로
 드레인해 Swift에 넘기고 동시에 인앱 히스토리에 보관한다. 업데이트 안내는 OS 배너로 보내지 않고 인앱 히스토리에 직접 추가한다.
 
-**원격(SSH) 세션의 에이전트 알림도 이 OSC 행으로 들어온다.** 원격 pane 은 `agent_kind` 가 `none` 이라 훅 모드가
+**원격(SSH) 세션의 에이전트 알림도 이 OSC 행으로 들어온다.** 머리말의 «에이전트 완료 알림은 제공하지
+않는다» 와 어긋나지 않는다 — 그것은 **maru 가 관측으로 완료를 판정해 만들지 않는다**는 뜻이고, 여기서는
+**provider 가 스스로 쏜 OSC 를 받는 것**이다(발신 판정이 provider 안에 있다). 원격 pane 은 `agent_kind` 가 `none` 이라 훅 모드가
 안 서고, 그래서 훅 모드였다면 버렸을 OSC 가 그대로 산다 — 접속 방법(`maru ssh` 인지 그냥 `ssh` 인지)과도
 무관하다. provider 별 설정과 실측 근거는 [agent-hooks.md](agent-hooks.md) §11 이 단일 출처다.
 

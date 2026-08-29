@@ -1176,7 +1176,7 @@ const P5c3c2b3PreparedFixture = struct {
         errdefer fixture.deinit();
         const owned = try allocator.dupe(u8, bytes);
         errdefer allocator.free(owned);
-        try fixture.prepared.client.pending_batches.append(
+        try fixture.prepared.client.screen_inbox.pending_batches.append(
             allocator,
             .{
                 .is_snapshot = is_snapshot,
@@ -1185,7 +1185,7 @@ const P5c3c2b3PreparedFixture = struct {
                 .allocator = allocator,
             },
         );
-        fixture.prepared.client.pending_batch_bytes = owned.len;
+        fixture.prepared.client.screen_inbox.pending_batch_bytes = owned.len;
         return fixture;
     }
 

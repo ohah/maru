@@ -1266,12 +1266,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     }{
         .{
             .path = "src/platform/macos/session_host/client.zig",
-            .baseline_count = 535,
+            .baseline_count = 533,
             // Event publication selector와 negotiated selection-state capability를 포함한
             // current Client declaration inventory를 고정한다. poison capture 두 곳이 사유 drift 를
             // 죽이지 않고 기록하게 되면서 로깅 함수 둘이 늘었다(530 → 532). E3c는 계측 import와
-            // buffered runtime/connection 관측 둘만 추가한다(532 → 535).
-            .baseline_digest = .{ 0xfe, 0xf5, 0xd4, 0x92, 0x3e, 0x89, 0x02, 0xee, 0xbc, 0x6f, 0x72, 0xca, 0x14, 0xba, 0xca, 0x7e, 0x82, 0x53, 0x39, 0x85, 0xf7, 0x5b, 0x7f, 0x77, 0x94, 0xc9, 0x83, 0x4e, 0xf5, 0x4b, 0xae, 0xfa },
+            // buffered runtime/connection 관측 둘을 추가했다(532 → 535). P4 R3는 Client의
+            // screen 평행 필드를 단일 aggregate로 접어 reviewed inventory가 533으로 수렴했다.
+            .baseline_digest = .{ 0x65, 0x03, 0x47, 0xed, 0xb4, 0x25, 0x63, 0x2c, 0x9c, 0x19, 0xbc, 0xe4, 0xc3, 0xfa, 0xda, 0xc5, 0xbd, 0x86, 0x9d, 0x9b, 0x79, 0xb5, 0x94, 0x0f, 0xc9, 0xbd, 0x20, 0x39, 0x8c, 0x91, 0xa7, 0xba },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{

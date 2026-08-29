@@ -2153,14 +2153,14 @@ test "prepared external adoption binds final address and exact screen seed" {
     const payload = try std.testing.allocator.dupe(u8, "screen");
     var client_owns_payload = false;
     errdefer if (!client_owns_payload) std.testing.allocator.free(payload);
-    try fixture.client.pending_batches.append(std.testing.allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(std.testing.allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = std.testing.allocator,
     });
     client_owns_payload = true;
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var prepared_ledger: ledger_mod.ExternalInboxLedger = .{};
     var prepared: PreparedScreenBacklog = .{};
     defer prepared.deinit();
@@ -2199,9 +2199,9 @@ test "prepared external adoption binds final address and exact screen seed" {
     try std.testing.expect(!prepared.validate(&fixture.client, &prepared_ledger));
     prepared.transfer.?.wrappers[0].logical_len = wrapper_len;
     try std.testing.expect(prepared.validate(&fixture.client, &prepared_ledger));
-    fixture.client.pending_batches.items[0].bytes[0] = 'X';
+    fixture.client.screen_inbox.pending_batches.items[0].bytes[0] = 'X';
     try std.testing.expect(!prepared.validate(&fixture.client, &prepared_ledger));
-    fixture.client.pending_batches.items[0].bytes[0] = 's';
+    fixture.client.screen_inbox.pending_batches.items[0].bytes[0] = 's';
     try std.testing.expect(prepared.validate(&fixture.client, &prepared_ledger));
     const copies = prepared.transfer.?.copies;
     prepared.transfer.?.copies = prepared.transfer.?.copies[0..0];
@@ -2250,13 +2250,13 @@ test "prepared external adoption cleanup uses sealed owners after persistent fie
     defer _ = c.close(fixture.peer_fd);
     defer fixture.client.deinit();
     const payload = try allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var prepared_ledger: ledger_mod.ExternalInboxLedger = .{};
     var prepared: PreparedScreenBacklog = .{};
     try PreparedScreenBacklog.initInPlace(
@@ -2305,13 +2305,13 @@ test "prepared external adoption transfers payload cleanup authority to the ledg
     defer _ = c.close(fixture.peer_fd);
     defer fixture.client.deinit();
     const payload = try allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var ledger: ledger_mod.ExternalInboxLedger = .{};
     var prepared: PreparedScreenBacklog = .{};
     try PreparedScreenBacklog.initInPlace(
@@ -2362,13 +2362,13 @@ test "c3c-2b1 committed screen destination is final-address bound and moves with
     defer _ = c.close(fixture.peer_fd);
     defer fixture.client.deinit();
     const payload = try allocator.dupe(u8, "screen");
-    try fixture.client.pending_batches.append(allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = allocator,
     });
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var ledger: ledger_mod.ExternalInboxLedger = .{};
     var prepared: PreparedScreenBacklog = .{};
     var committed: CommittedScreenBacklog = .{};
@@ -2686,12 +2686,12 @@ test "prepared external adoption uses a typed transfer-null recovery above item 
     var fixture = try makePreparedClient(allocator);
     defer _ = c.close(fixture.peer_fd);
     defer fixture.client.deinit();
-    try fixture.client.pending_batches.ensureTotalCapacityPrecise(
+    try fixture.client.screen_inbox.pending_batches.ensureTotalCapacityPrecise(
         allocator,
         ledger_mod.max_items,
     );
     for (0..ledger_mod.max_items) |_| {
-        fixture.client.pending_batches.appendAssumeCapacity(.{
+        fixture.client.screen_inbox.pending_batches.appendAssumeCapacity(.{
             .is_snapshot = false,
             .stream_id = 7,
             .bytes = &.{},
@@ -2711,7 +2711,7 @@ test "prepared external adoption uses a typed transfer-null recovery above item 
     try std.testing.expectEqual(ledger_mod.max_items, exact.transfer.?.wrappers.len);
     exact.deinit();
 
-    fixture.client.partial_batch = .{
+    fixture.client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = .empty,
@@ -2739,17 +2739,17 @@ test "prepared external adoption distinguishes exact screen byte cap from cap pl
     defer fixture.client.deinit();
     const completed = try allocator.alloc(u8, ledger_mod.max_batch_bytes);
     @memset(completed, 'b');
-    try fixture.client.pending_batches.append(allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = completed,
         .allocator = allocator,
     });
-    fixture.client.pending_batch_bytes = completed.len;
+    fixture.client.screen_inbox.pending_batch_bytes = completed.len;
     const partial_len = ledger_mod.max_bytes - ledger_mod.max_batch_bytes;
     const partial_backing = try allocator.alloc(u8, partial_len + 1);
     @memset(partial_backing, 'p');
-    fixture.client.partial_batch = .{
+    fixture.client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = .{
@@ -2771,8 +2771,8 @@ test "prepared external adoption distinguishes exact screen byte cap from cap pl
     try std.testing.expect(exact.transfer != null);
     exact.deinit();
 
-    fixture.client.partial_batch.?.bytes.items = partial_backing;
-    fixture.client.partial_batch.?.chunk_count = 3;
+    fixture.client.screen_inbox.partial_batch.?.bytes.items = partial_backing;
+    fixture.client.screen_inbox.partial_batch.?.chunk_count = 3;
     var over: PreparedScreenBacklog = .{};
     defer over.deinit();
     try PreparedScreenBacklog.initInPlace(
@@ -2794,26 +2794,26 @@ fn checkPreparedScreenBacklogAllocation(allocator: std.mem.Allocator) !void {
     const payload = try allocator.dupe(u8, "batch");
     var client_owns_payload = false;
     errdefer if (!client_owns_payload) allocator.free(payload);
-    try fixture.client.pending_batches.append(allocator, .{
+    try fixture.client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 7,
         .bytes = payload,
         .allocator = allocator,
     });
     client_owns_payload = true;
-    fixture.client.pending_batch_bytes = payload.len;
+    fixture.client.screen_inbox.pending_batch_bytes = payload.len;
     var partial_bytes: std.ArrayListUnmanaged(u8) = .empty;
     try partial_bytes.appendSlice(allocator, "partial");
-    fixture.client.partial_batch = .{
+    fixture.client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = partial_bytes,
         .chunk_count = 1,
     };
     const stream_payload = try allocator.dupe(u8, "stream");
-    errdefer if (fixture.client.pending_stream.items.len == 0)
+    errdefer if (fixture.client.screen_inbox.pending_stream.items.len == 0)
         allocator.free(stream_payload);
-    try fixture.client.pending_stream.append(allocator, .{
+    try fixture.client.screen_inbox.pending_stream.append(allocator, .{
         .header = .{
             .kind = .delta_chunk,
             .stream_id = 7,
@@ -2821,7 +2821,7 @@ fn checkPreparedScreenBacklogAllocation(allocator: std.mem.Allocator) !void {
         },
         .payload = stream_payload,
     });
-    fixture.client.pending_stream_bytes = stream_payload.len;
+    fixture.client.screen_inbox.pending_stream_bytes = stream_payload.len;
     const event_payload = try allocator.dupe(u8, "event");
     errdefer if (fixture.client.pending_events.items.len == 0)
         allocator.free(event_payload);
@@ -2835,19 +2835,19 @@ fn checkPreparedScreenBacklogAllocation(allocator: std.mem.Allocator) !void {
     });
     fixture.client.pending_event_bytes = event_payload.len;
     const payload_ptr = payload.ptr;
-    const batch_items_ptr = fixture.client.pending_batches.items.ptr;
-    const batch_capacity = fixture.client.pending_batches.capacity;
-    const batch_len = fixture.client.pending_batches.items.len;
-    const batch_counter = fixture.client.pending_batch_bytes;
-    const batch_before = fixture.client.pending_batches.items[0];
-    const partial_ptr = fixture.client.partial_batch.?.bytes.items.ptr;
-    const partial_capacity = fixture.client.partial_batch.?.bytes.capacity;
-    const partial_before = fixture.client.partial_batch.?;
-    const stream_items_ptr = fixture.client.pending_stream.items.ptr;
-    const stream_capacity = fixture.client.pending_stream.capacity;
-    const stream_len = fixture.client.pending_stream.items.len;
-    const stream_counter = fixture.client.pending_stream_bytes;
-    const stream_before = fixture.client.pending_stream.items[0];
+    const batch_items_ptr = fixture.client.screen_inbox.pending_batches.items.ptr;
+    const batch_capacity = fixture.client.screen_inbox.pending_batches.capacity;
+    const batch_len = fixture.client.screen_inbox.pending_batches.items.len;
+    const batch_counter = fixture.client.screen_inbox.pending_batch_bytes;
+    const batch_before = fixture.client.screen_inbox.pending_batches.items[0];
+    const partial_ptr = fixture.client.screen_inbox.partial_batch.?.bytes.items.ptr;
+    const partial_capacity = fixture.client.screen_inbox.partial_batch.?.bytes.capacity;
+    const partial_before = fixture.client.screen_inbox.partial_batch.?;
+    const stream_items_ptr = fixture.client.screen_inbox.pending_stream.items.ptr;
+    const stream_capacity = fixture.client.screen_inbox.pending_stream.capacity;
+    const stream_len = fixture.client.screen_inbox.pending_stream.items.len;
+    const stream_counter = fixture.client.screen_inbox.pending_stream_bytes;
+    const stream_before = fixture.client.screen_inbox.pending_stream.items[0];
     const event_items_ptr = fixture.client.pending_events.items.ptr;
     const event_capacity = fixture.client.pending_events.capacity;
     const event_len = fixture.client.pending_events.items.len;
@@ -2870,23 +2870,23 @@ fn checkPreparedScreenBacklogAllocation(allocator: std.mem.Allocator) !void {
         7,
     ) catch |err| {
         if (err == error.OutOfMemory) {
-            try std.testing.expectEqual(payload_ptr, fixture.client.pending_batches.items[0].bytes.ptr);
-            try std.testing.expectEqualStrings("batch", fixture.client.pending_batches.items[0].bytes);
-            try std.testing.expectEqual(batch_items_ptr, fixture.client.pending_batches.items.ptr);
-            try std.testing.expectEqual(batch_capacity, fixture.client.pending_batches.capacity);
-            try std.testing.expectEqual(batch_len, fixture.client.pending_batches.items.len);
-            try std.testing.expectEqual(batch_counter, fixture.client.pending_batch_bytes);
-            try std.testing.expect(std.meta.eql(batch_before, fixture.client.pending_batches.items[0]));
-            try std.testing.expectEqual(partial_ptr, fixture.client.partial_batch.?.bytes.items.ptr);
-            try std.testing.expectEqual(partial_capacity, fixture.client.partial_batch.?.bytes.capacity);
-            try std.testing.expect(std.meta.eql(partial_before, fixture.client.partial_batch.?));
-            try std.testing.expectEqualStrings("partial", fixture.client.partial_batch.?.bytes.items);
-            try std.testing.expectEqual(stream_items_ptr, fixture.client.pending_stream.items.ptr);
-            try std.testing.expectEqual(stream_capacity, fixture.client.pending_stream.capacity);
-            try std.testing.expectEqual(stream_len, fixture.client.pending_stream.items.len);
-            try std.testing.expectEqual(stream_counter, fixture.client.pending_stream_bytes);
-            try std.testing.expect(std.meta.eql(stream_before, fixture.client.pending_stream.items[0]));
-            try std.testing.expectEqualStrings("stream", fixture.client.pending_stream.items[0].payload);
+            try std.testing.expectEqual(payload_ptr, fixture.client.screen_inbox.pending_batches.items[0].bytes.ptr);
+            try std.testing.expectEqualStrings("batch", fixture.client.screen_inbox.pending_batches.items[0].bytes);
+            try std.testing.expectEqual(batch_items_ptr, fixture.client.screen_inbox.pending_batches.items.ptr);
+            try std.testing.expectEqual(batch_capacity, fixture.client.screen_inbox.pending_batches.capacity);
+            try std.testing.expectEqual(batch_len, fixture.client.screen_inbox.pending_batches.items.len);
+            try std.testing.expectEqual(batch_counter, fixture.client.screen_inbox.pending_batch_bytes);
+            try std.testing.expect(std.meta.eql(batch_before, fixture.client.screen_inbox.pending_batches.items[0]));
+            try std.testing.expectEqual(partial_ptr, fixture.client.screen_inbox.partial_batch.?.bytes.items.ptr);
+            try std.testing.expectEqual(partial_capacity, fixture.client.screen_inbox.partial_batch.?.bytes.capacity);
+            try std.testing.expect(std.meta.eql(partial_before, fixture.client.screen_inbox.partial_batch.?));
+            try std.testing.expectEqualStrings("partial", fixture.client.screen_inbox.partial_batch.?.bytes.items);
+            try std.testing.expectEqual(stream_items_ptr, fixture.client.screen_inbox.pending_stream.items.ptr);
+            try std.testing.expectEqual(stream_capacity, fixture.client.screen_inbox.pending_stream.capacity);
+            try std.testing.expectEqual(stream_len, fixture.client.screen_inbox.pending_stream.items.len);
+            try std.testing.expectEqual(stream_counter, fixture.client.screen_inbox.pending_stream_bytes);
+            try std.testing.expect(std.meta.eql(stream_before, fixture.client.screen_inbox.pending_stream.items[0]));
+            try std.testing.expectEqualStrings("stream", fixture.client.screen_inbox.pending_stream.items[0].payload);
             try std.testing.expectEqual(event_items_ptr, fixture.client.pending_events.items.ptr);
             try std.testing.expectEqual(event_capacity, fixture.client.pending_events.capacity);
             try std.testing.expectEqual(event_len, fixture.client.pending_events.items.len);
@@ -3008,27 +3008,27 @@ test "adoption preflight closes request partial stream counter tx and parser edg
     max_request.deinit();
     fixture.client.next_request_id = 1;
 
-    fixture.client.partial_batch = .{
+    fixture.client.screen_inbox.partial_batch = .{
         .stream_id = 7,
         .is_snapshot = false,
         .bytes = .empty,
         .chunk_count = 0,
     };
     try std.testing.expectError(error.InvalidPartial, preflightMetadata(&fixture.client, 7));
-    fixture.client.partial_batch.?.chunk_count = ledger_mod.max_batch_chunks;
+    fixture.client.screen_inbox.partial_batch.?.chunk_count = ledger_mod.max_batch_chunks;
     _ = try preflightMetadata(&fixture.client, 7);
-    fixture.client.partial_batch.?.chunk_count = ledger_mod.max_batch_chunks + 1;
+    fixture.client.screen_inbox.partial_batch.?.chunk_count = ledger_mod.max_batch_chunks + 1;
     try std.testing.expectError(error.InvalidPartial, preflightMetadata(&fixture.client, 7));
-    fixture.client.partial_batch.?.chunk_count = std.math.maxInt(usize);
+    fixture.client.screen_inbox.partial_batch.?.chunk_count = std.math.maxInt(usize);
     try std.testing.expectError(error.InvalidPartial, preflightMetadata(&fixture.client, 7));
-    fixture.client.partial_batch.?.chunk_count = 1;
-    fixture.client.partial_batch.?.stream_id = 8;
+    fixture.client.screen_inbox.partial_batch.?.chunk_count = 1;
+    fixture.client.screen_inbox.partial_batch.?.stream_id = 8;
     try std.testing.expectError(error.InvalidStream, preflightMetadata(&fixture.client, 7));
-    fixture.client.partial_batch = null;
+    fixture.client.screen_inbox.partial_batch = null;
 
-    fixture.client.pending_stream_bytes = 1;
+    fixture.client.screen_inbox.pending_stream_bytes = 1;
     try std.testing.expectError(error.InvalidCounter, preflightMetadata(&fixture.client, 7));
-    fixture.client.pending_stream_bytes = 0;
+    fixture.client.screen_inbox.pending_stream_bytes = 0;
     fixture.client.parser.expected_major += 1;
     try std.testing.expectError(error.InvalidClientState, preflightMetadata(&fixture.client, 7));
     fixture.client.parser.expected_major -= 1;

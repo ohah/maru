@@ -8016,14 +8016,14 @@ test "CR3a-2c3b actual socket retires OOB observation before exact target public
     const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
     const result = try owner.transport.executePreparedRequest(receipt, &owner.response);
     try std.testing.expect(result == .accepted);
-    try std.testing.expectEqual(@as(usize, 1), slot.logicalClient().pending_stream.items.len);
+    try std.testing.expectEqual(@as(usize, 1), slot.logicalClient().screen_inbox.pending_stream.items.len);
     try std.testing.expectEqual(
         @as(u64, 0),
-        slot.logicalClient().pending_stream.items[0].payload_observation_generation,
+        slot.logicalClient().screen_inbox.pending_stream.items[0].payload_observation_generation,
     );
     try std.testing.expectEqualStrings(
         "oob-delta",
-        slot.logicalClient().pending_stream.items[0].payload,
+        slot.logicalClient().screen_inbox.pending_stream.items[0].payload,
     );
     try std.testing.expectEqual(
         executed_response_mod.DeinitOutcome.cleaned,

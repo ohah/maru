@@ -3524,6 +3524,55 @@ pub fn build(b: *std.Build) void {
     run_i18n_pinned_language_boundary_tests.setCwd(b.path("."));
 
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
+    const session_host_p4_r3_screen_inbox_step = b.step(
+        "test-session-host-p4-r3-screen-inbox",
+        "P4 R3 single-owner screen inbox boundary gates",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |p4_r3_optimize| {
+        const p4_r3_client_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+                .target = target,
+                .optimize = p4_r3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{ "R3 ", "R4 " },
+        });
+        const run_p4_r3_client_tests = b.addRunArtifact(p4_r3_client_tests);
+        // client.zig imports screen_inbox.zig, so the six integration cases intentionally carry
+        // the same three recovery-state tests in this root as well.
+        run_p4_r3_client_tests.addArg("--maru-expect-tests=9");
+        run_p4_r3_client_tests.setCwd(b.path("."));
+        session_host_p4_r3_screen_inbox_step.dependOn(&run_p4_r3_client_tests.step);
+
+        const p4_r3_recovery_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/screen_inbox.zig"),
+                .target = target,
+                .optimize = p4_r3_optimize,
+            }),
+            .filters = &.{ "R3 ", "R4 " },
+        });
+        const run_p4_r3_recovery_tests = b.addRunArtifact(p4_r3_recovery_tests);
+        run_p4_r3_recovery_tests.addArg("--maru-expect-tests=3");
+        run_p4_r3_recovery_tests.setCwd(b.path("."));
+        session_host_p4_r3_screen_inbox_step.dependOn(&run_p4_r3_recovery_tests.step);
+
+        const p4_r3_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_p4_r3_screen_inbox_boundary.zig"),
+                .target = target,
+                .optimize = p4_r3_optimize,
+            }),
+            .filters = &.{"P4 R3 screen inbox"},
+        });
+        const run_p4_r3_boundary_tests = b.addRunArtifact(p4_r3_boundary_tests);
+        run_p4_r3_boundary_tests.addArg("--maru-expect-tests=1");
+        run_p4_r3_boundary_tests.setCwd(b.path("."));
+        session_host_p4_r3_screen_inbox_step.dependOn(&run_p4_r3_boundary_tests.step);
+        if (p4_r3_optimize == .Debug) boundary_step.dependOn(&run_p4_r3_boundary_tests.step);
+    }
     const session_host_cr6d_global_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_cr6d_boundary.zig"),

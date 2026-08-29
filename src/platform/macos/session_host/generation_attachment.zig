@@ -3304,19 +3304,19 @@ test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct 
     const first_batch_bytes = try allocator.dupe(u8, snapshot.items);
     const second_batch_bytes = try allocator.dupe(u8, snapshot.items);
     const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2B5,
         .bytes = first_batch_bytes,
         .allocator = allocator,
     });
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2B5,
         .bytes = second_batch_bytes,
         .allocator = allocator,
     });
-    logical_client.pending_batch_bytes = first_batch_bytes.len + second_batch_bytes.len;
+    logical_client.screen_inbox.pending_batch_bytes = first_batch_bytes.len + second_batch_bytes.len;
 
     for (0..2) |_| {
         try std.testing.expectEqual(
@@ -3363,13 +3363,13 @@ test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     attachment.payload.?.allocator = failing.allocator();
     const oom_bytes = try allocator.dupe(u8, snapshot.items);
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2B5,
         .bytes = oom_bytes,
         .allocator = allocator,
     });
-    logical_client.pending_batch_bytes = oom_bytes.len;
+    logical_client.screen_inbox.pending_batch_bytes = oom_bytes.len;
     try std.testing.expectError(error.OutOfMemory, attachment.pumpScreen(std.testing.io));
     attachment.payload.?.allocator = allocator;
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
@@ -3444,13 +3444,13 @@ test "CR3a-2d1 generation attachment는 첫 retryable token을 teardown fresh pe
     release_probe.target_addr = @intFromPtr(bytes.ptr);
     release_probe.target_len = bytes.len;
     const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2D24,
         .bytes = bytes,
         .allocator = release_probe.allocator(),
     });
-    logical_client.pending_batch_bytes = bytes.len;
+    logical_client.screen_inbox.pending_batch_bytes = bytes.len;
 
     const batch_registry_mod = @import("generation_batch_registry.zig");
     const pending_lease = (try attachment.batch_adapter.interface().read_batch(
@@ -3471,18 +3471,18 @@ test "CR3a-2d1 generation attachment는 첫 retryable token을 teardown fresh pe
     try std.testing.expectEqual(@as(usize, 1), adapter.slot.current.accounting_ledger.item_count);
 
     const sibling_bytes = try allocator.dupe(u8, "sibling-after-retryable");
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 0x2D24,
         .bytes = sibling_bytes,
         .allocator = allocator,
     });
-    logical_client.pending_batch_bytes += sibling_bytes.len;
-    const sibling_count = logical_client.pending_batches.items.len;
-    const sibling_bytes_count = logical_client.pending_batch_bytes;
+    logical_client.screen_inbox.pending_batch_bytes += sibling_bytes.len;
+    const sibling_count = logical_client.screen_inbox.pending_batches.items.len;
+    const sibling_bytes_count = logical_client.screen_inbox.pending_batch_bytes;
     try std.testing.expectError(error.LedgerInvariant, attachment.pumpScreen(std.testing.io));
-    try std.testing.expectEqual(sibling_count, logical_client.pending_batches.items.len);
-    try std.testing.expectEqual(sibling_bytes_count, logical_client.pending_batch_bytes);
+    try std.testing.expectEqual(sibling_count, logical_client.screen_inbox.pending_batches.items.len);
+    try std.testing.expectEqual(sibling_bytes_count, logical_client.screen_inbox.pending_batch_bytes);
     try std.testing.expectEqual(@as(usize, 0), release_probe.target_free_count);
 
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
@@ -3534,13 +3534,13 @@ test "CR3a-2d2 GenerationAttachment는 두 번째 retryable을 node terminal han
     release_probe.target_addr = @intFromPtr(bytes.ptr);
     release_probe.target_len = bytes.len;
     const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 0x2D34,
         .bytes = bytes,
         .allocator = release_probe.allocator(),
     });
-    logical_client.pending_batch_bytes = bytes.len;
+    logical_client.screen_inbox.pending_batch_bytes = bytes.len;
     const pending_lease = (try attachment.batch_adapter.interface().read_batch(
         &attachment.batch_adapter,
         0x2D34,
@@ -3616,13 +3616,13 @@ test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
 
     const malformed_bytes = try allocator.dupe(u8, "malformed-screen-record");
     const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = true,
         .stream_id = 0x2D5,
         .bytes = malformed_bytes,
         .allocator = allocator,
     });
-    logical_client.pending_batch_bytes = malformed_bytes.len;
+    logical_client.screen_inbox.pending_batch_bytes = malformed_bytes.len;
     try std.testing.expectError(error.Truncated, attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
@@ -3715,13 +3715,13 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     // canonical drop의 exact 순서를 고정한다.
     const pending_bytes = try allocator.dupe(u8, "pending-generation-batch");
     const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
-    try logical_client.pending_batches.append(allocator, .{
+    try logical_client.screen_inbox.pending_batches.append(allocator, .{
         .is_snapshot = false,
         .stream_id = 0x2C4,
         .bytes = pending_bytes,
         .allocator = allocator,
     });
-    logical_client.pending_batch_bytes = pending_bytes.len;
+    logical_client.screen_inbox.pending_batch_bytes = pending_bytes.len;
     const generation_transport = attachment.payload.?.transport.?;
     const pending_lease = (try generation_transport.read_batch(
         generation_transport.context,

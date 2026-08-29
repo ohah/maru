@@ -250,6 +250,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "agent-events")) {
+        try runAgentEvents(io, allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "browser")) {
         try maru.cli.browser_run.run(io, allocator, &args, stdout, stderr);
         return;
@@ -10797,6 +10802,126 @@ fn runControl(
             return error.UnknownCommand;
         },
         .stdio => try maru.cli.control_relay.relay(io, allocator, stderr),
+    }
+}
+
+/// `maru agent-events --stdio --dir=<절대경로>` — RA4 의 impure 절반.
+///
+/// 순수 절반(`cli/agent_events.zig`)이 인자·프레임·커서를 갖고, 여기서는 디렉터리 열거·파일 읽기·
+/// stdout 쓰기·시계만 한다. **stdout 은 오직 wire 다** — 진단은 전부 stderr 로 간다.
+fn runAgentEvents(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: *std.process.Args.Iterator,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    const ae = maru.cli.agent_events;
+    var rest: std.ArrayList([]const u8) = .empty;
+    defer rest.deinit(allocator);
+    while (args.next()) |a| try rest.append(allocator, a);
+
+    const opts = switch (ae.parseArgs(rest.items)) {
+        .help => {
+            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N]\n");
+            try stdout.flush();
+            return;
+        },
+        .usage_error => {
+            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required\n");
+            try stderr.flush();
+            return error.UnknownCommand;
+        },
+        .stdio => |o| o,
+    };
+
+    // hello 를 **가장 먼저** 보낸다 — 소비자가 제한 서버(`ForceCommand`)를 이것으로 가른다.
+    try stdout.print("{s}\n", .{ae.hello_line});
+    try stdout.flush();
+
+    var cursors: std.StringHashMapUnmanaged(ae.Cursor) = .empty;
+    defer {
+        var it = cursors.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        cursors.deinit(allocator);
+    }
+
+    var frame: std.ArrayListUnmanaged(u8) = .empty;
+    defer frame.deinit(allocator);
+
+    var hb_seq: u64 = 0;
+    var since_hb_ms: u64 = 0;
+    const tick_ms: u64 = 200;
+
+    while (true) {
+        var dir = std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true }) catch {
+            // 디렉터리가 아직 없을 수 있다 — 훅이 한 번도 안 돌았으면 그렇다. 조용히 기다린다
+            // (그 사실은 소비자가 «이벤트가 없다» 로 이미 안다).
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(tick_ms), .awake) catch {};
+            since_hb_ms += tick_ms;
+            if (opts.heartbeat_ms != 0 and since_hb_ms >= opts.heartbeat_ms) {
+                frame.clearRetainingCapacity();
+                try ae.formatHeartbeat(&frame, allocator, hb_seq);
+                hb_seq += 1;
+                since_hb_ms = 0;
+                try stdout.writeAll(frame.items);
+                try stdout.flush();
+            }
+            continue;
+        };
+        defer dir.close(io);
+
+        var it = dir.iterate();
+        while ((it.next(io) catch null) orelse null) |entry| {
+            const nonce = ae.nonceFromFileName(entry.name) orelse continue;
+            var file = dir.openFile(io, entry.name, .{}) catch continue;
+            defer file.close(io);
+            var rbuf: [4096]u8 = undefined;
+            var reader = file.reader(io, &rbuf);
+            const size = reader.getSize() catch continue;
+
+            const gop = cursors.getOrPut(allocator, nonce) catch continue;
+            if (!gop.found_existing) {
+                gop.key_ptr.* = allocator.dupe(u8, nonce) catch {
+                    _ = cursors.remove(nonce);
+                    continue;
+                };
+                gop.value_ptr.* = .{};
+            }
+            const cur = ae.advance(gop.value_ptr.*, size);
+            if (size <= cur.offset) {
+                gop.value_ptr.* = cur;
+                continue;
+            }
+            reader.seekTo(cur.offset) catch continue;
+            const chunk = reader.interface.allocRemaining(allocator, .limited(1 << 20)) catch continue;
+            defer allocator.free(chunk);
+
+            var consumed: usize = 0;
+            var lines = std.mem.splitScalar(u8, chunk, '\n');
+            while (lines.next()) |line| {
+                // 마지막 조각이 개행으로 안 끝나면 **아직 쓰는 중**이다 — 다음 tick 에 다시 본다.
+                if (consumed + line.len >= chunk.len) break;
+                consumed += line.len + 1;
+                if (line.len == 0) continue;
+                frame.clearRetainingCapacity();
+                try ae.formatEvent(&frame, allocator, nonce, line);
+                try stdout.writeAll(frame.items);
+            }
+            gop.value_ptr.* = .{ .offset = cur.offset + consumed, .seen_size = size };
+        }
+        try stdout.flush();
+
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(tick_ms), .awake) catch {};
+        since_hb_ms += tick_ms;
+        if (opts.heartbeat_ms != 0 and since_hb_ms >= opts.heartbeat_ms) {
+            frame.clearRetainingCapacity();
+            try ae.formatHeartbeat(&frame, allocator, hb_seq);
+            hb_seq += 1;
+            since_hb_ms = 0;
+            try stdout.writeAll(frame.items);
+            try stdout.flush();
+        }
     }
 }
 

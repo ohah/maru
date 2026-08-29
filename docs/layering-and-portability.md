@@ -146,6 +146,11 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 | `platform/macos/chrome/system_text.zig` | 1670 | 37 | 섞임 |
 | `platform/macos/coretext_frame_builder.zig` | 3766 | 54 | 섞임 |
 
+> **표의 수는 주석까지 센 문자열 일치다**(2026-08-29 재측정으로 확인). 코드 참조만 세면
+> `chrome_draw_lowering` 은 **0** 이다 — 그 파일의 10 은 전부 CoreText 를 **설명하는 주석**이다.
+> 재면서 "카테고리가 바뀌었나" 로 한 번 헛짚었으므로 계수 방식을 적어 둔다. 어느 쪽으로 세도
+> **결론은 안 바뀐다** — 아래가 말하듯 막는 것은 네이티브 참조가 아니라 모듈 그래프다.
+
 앞의 둘은 `std`·`builtin`·`maru` 배럴만 import 하고, 부르는 자리도 각각 둘뿐이다(`src/main.zig`,
 `platform/macos/app_session.zig`). **뒤의 셋은 옮기면 안 된다** — 이름만 macOS 인 게 아니라 실제로
 네이티브가 섞여 있어서, 중립 부분을 떼어내는 것은 이동이 아니라 분해다.

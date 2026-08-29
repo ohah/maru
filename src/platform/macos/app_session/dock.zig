@@ -664,14 +664,15 @@ pub fn dockListTextWidthPx(self: *const AppSession) u32 {
     return dockGeometry(self).tree_content.w -| dockListScrollGutterPx(self);
 }
 
-/// 현재 뷰가 스위처의 몇 번째 슬롯인지. chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 이 대응은
-/// session 쪽인 여기가 소유한다 — 순서가 두 곳에 흩어지면 그린 자리와 눌리는 자리가 어긋난다.
+/// 현재 뷰가 스위처의 몇 번째 슬롯인지. chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 이 자리가
+/// 대응을 **노출**하지만, 순서 자체는 `dock_panel.View` 가 소유한다 — 바로 위 `dockViewForSlot` 이
+/// `View.forSlot` 에 위임하는 것과 같은 규율이다.
+///
+/// **손으로 미러링하지 않는다.** 예전에는 여기가 `switch` 를 다시 적었는데, 그러면 `View.slot` 과 이 함수가
+/// 각자 순서를 갖게 되어 뷰를 하나 더할 때 한쪽만 고쳐질 수 있다. 정방향(`forSlot`)은 이미 위임하고 있었고
+/// 역방향만 복사본이었다 — 그 비대칭이 드리프트의 자리다.
 pub fn dockViewSlotIndex(self: *const AppSession) usize {
-    return switch (self.dock.view) {
-        .explorer => 0,
-        .source_control => 1,
-        .agent_sessions => 2,
-    };
+    return self.dock.view.slot();
 }
 
 /// 복원된 `DockPanel`의 평탄 목록에서 소유를 가져온다(panel은 비워진다). 와이어 파싱·검증·mode clamp는

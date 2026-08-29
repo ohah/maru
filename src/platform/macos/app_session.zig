@@ -99,7 +99,8 @@ const command_palette = @import("command_palette.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
-pub const image_gallery_ops = @import("app_session/image_gallery.zig"); // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
+pub const image_gallery_ops = @import("app_session/image_gallery.zig");
+const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
@@ -5108,6 +5109,9 @@ pub const AppSession = struct {
     /// 이미지 갤러리 도크 뷰의 인덱스(docs/agent-image-gallery.md). **메모리 전용**이라 앱을 끄면
     /// 사라진다 — 계약 §4.5 가 디스크에 아무것도 남기지 않기로 한 결과다.
     image_gallery: image_gallery_ops.State = .{},
+    /// 갤러리 스캔 워커(계약 §4.1.1). init 실패는 «갤러리만 안 됨» 으로 접는다 — 세션 전체를
+    /// 못 열 이유가 아니다. null 이면 `refresh` 가 조용히 물러난다.
+    image_gallery_backend: ?agent_image_scan_backend.Backend = null,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
     agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
@@ -6005,6 +6009,9 @@ pub const AppSession = struct {
             errdefer self.agent_session_archive_detail_backend.deinit();
             self.agent_session_archive_scope_backend = try agent_session_archive_scope_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_scope_backend.deinit();
+            // **실패해도 세션은 연다.** 갤러리 하나 때문에 창을 못 여는 것이 더 나쁘다 — null 이면
+            // `image_gallery_ops.refresh` 가 조용히 물러나고 그 뷰만 빈다(계약 §2 의 빈 상태와 같은 자리).
+            self.image_gallery_backend = agent_image_scan_backend.Backend.init(allocator, io) catch null;
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -16675,6 +16682,9 @@ pub const AppSession = struct {
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
         workspace_ops.advancePendingWindowClose(self);
+        // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
+        // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
+        image_gallery_ops.poll(self);
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -19986,6 +19996,9 @@ pub const AppSession = struct {
         // 갤러리 인덱스도 힙이다 — `Source`는 고정 배열이지만 `hits`는 아니다. 뷰를 열어 둔 채 창을 닫으면
         // 여기 말고 푸는 자리가 없다(상한 `max_hits_per_file` 4,096개 × `Hit`이라 한 창에 100 KB 급이다).
         self.image_gallery.deinit(self.allocator);
+        // 워커는 detached 다 — 여기서 파괴하지 않고 refcount 에 맡긴다(취소만 건다).
+        if (self.image_gallery_backend) |*b| b.deinit();
+        self.image_gallery_backend = null;
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
@@ -71897,8 +71910,8 @@ test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재�
     try std.testing.expectEqual(gens[1], gens[gens.len - 1]);
 }
 
-test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실제로 이어진다 (IG1-d)" {
-    // 이 슬라이스가 보이려는 것은 하나다: `Term.agent_image_source` → 스캔 → 화면 문구.
+test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 실제로 이어진다 (IG1-e)" {
+    // 이 슬라이스가 보이려는 것은 하나다: `Term.agent_image_source` → 워커 스캔 → tick 수확 → 화면 문구.
     // 훅이 소스를 채우는 부분은 「hook mode runs exactly one source」의 ⑦-b 가 따로 본다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -71907,7 +71920,7 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // **구조는 실측, 값은 합성**(계획 §P2). 아래 두 줄의 레코드 모양은 실제 provider 기록에서 확인한 것이고
+    // **구조는 실측, 값은 합성**(계획 §P2). 레코드 모양은 실제 provider 기록에서 확인한 것이고
     // base64 와 문구만 합성이다. 사용자 기록을 fixture 로 쓰지 않는다(계약 §6).
     const transcript =
         "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
@@ -71934,8 +71947,22 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
     });
     defer session.deinit();
 
+    // 워커 결과를 기다린다. **spin 이지만 상한이 있다** — 안 오면 무한히 도는 대신 실패한다.
+    // **`tick()` 을 돈다 — `poll` 을 직접 부르지 않는다.** 직접 부르면 「워커가 결과를 낸다」만 보고
+    // «tick 이 그것을 수확한다» 는 안 보게 된다. 수확 지점이 빠진 채로도 통과하는 test 는 검증하는 척만
+    // 하는 것이다(IG1-c 에서 그 부류를 한 번 냈다).
+    const Wait = struct {
+        fn until(sess: *AppSession) !void {
+            var spins: usize = 0;
+            while (spins < 200_000) : (spins += 1) {
+                _ = sess.tick() catch {};
+                if (sess.image_gallery.built) return;
+            }
+            return error.ScanNeverFinished;
+        }
+    };
+
     // ── 에이전트가 없으면 「없다」가 아니라 「에이전트가 없다」다 ────────────────────────────
-    // 셋을 한 문구로 접으면 사용자가 «이미지가 없는 것» 과 «갤러리가 고장난 것» 을 구분할 수 없다.
     image_gallery_ops.refresh(session, false);
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
     {
@@ -71946,14 +71973,27 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
         );
     }
 
-    // ── 소스가 붙으면 훑는다 ────────────────────────────────────────────────────────────
+    // ── 소스가 붙으면 워커가 훑는다 ─────────────────────────────────────────────────────
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
 
+    // **거는 즉시 「세는 중」이다.** 3.6 초짜리 스캔 동안 「이미지가 없습니다」라고 거짓말하지 않는다.
+    try std.testing.expect(session.image_gallery.scanning());
+    {
+        var buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            maru.i18n.t(.image_gallery_scanning),
+            image_gallery_ops.noticeText(session, &buf),
+        );
+    }
+
+    try Wait.until(session);
+
     // 이미지 둘: user 메시지 하나 + tool_result 하나. 두 번째는 media_type 이 없다.
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
     try std.testing.expect(!session.image_gallery.partial);
+    try std.testing.expect(!session.image_gallery.scanning());
     try std.testing.expectEqual(@as(u64, transcript.len), session.image_gallery.scanned_bytes);
     try std.testing.expectEqual(
         maru.session.agent_image_index.Mime.png,
@@ -71974,11 +72014,10 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
         try std.testing.expect(std.mem.startsWith(u8, notice, "2"));
     }
 
-    // ── 같은 소스면 다시 훑지 않는다 ────────────────────────────────────────────────────
-    // 매번 훑으면 실측 최대 1,626 MB 파일을 뷰에 들어올 때마다 다시 읽는다.
-    session.image_gallery.scanned_bytes = 0;
+    // ── 같은 소스면 다시 걸지 않는다 ────────────────────────────────────────────────────
+    // 매번 걸면 실측 3.6 초짜리를 뷰에 들어올 때마다 다시 훑는다.
     image_gallery_ops.refresh(session, false);
-    try std.testing.expectEqual(@as(u64, 0), session.image_gallery.scanned_bytes);
+    try std.testing.expect(!session.image_gallery.scanning());
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 
     // ── 소스가 갈리면(= `/clear` 로 새 파일) 통째로 버리고 다시 훑는다 ──────────────────
@@ -71987,6 +72026,7 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
     defer allocator.free(path2);
     try std.testing.expect(term.agent_image_source.set(path2));
     image_gallery_ops.refresh(session, false);
+    try Wait.until(session);
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
     try std.testing.expect(!session.image_gallery.partial); // 「비었다」이지 「못 봤다」가 아니다
     {
@@ -72002,6 +72042,7 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
     defer allocator.free(missing);
     try std.testing.expect(term.agent_image_source.set(missing));
     image_gallery_ops.refresh(session, false);
+    try Wait.until(session);
     try std.testing.expect(session.image_gallery.partial);
     {
         var buf: [64]u8 = undefined;
@@ -72016,5 +72057,6 @@ test "이미지 갤러리: 소스를 훑어 개수를 낸다 — 사슬이 실�
     // 실제 경로가 바로 이 모양이다. test 할당자가 누수를 잡게 인덱스가 살아 있는 상태로 둔다.
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
+    try Wait.until(session);
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 }

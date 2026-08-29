@@ -483,6 +483,8 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     // 남아 다음에 돌아왔을 때 그대로 떠 있고(입력기는 이미 그 조합을 잊었다), 포커스 플래그도
     // 클릭 없이 살아난다 — Session Dock 키 포커스를 같은 이유로 놓는 자리다.
     if (self.dock.view == .source_control and view != .source_control) scm_dock_ops.blurCommit(self);
+    // 갤러리를 떠나면 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
+    if (self.dock.view == .image_gallery and view != .image_gallery) image_gallery_ops.onLeaveView(self);
     self.dock.view = view;
     // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
     // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.

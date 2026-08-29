@@ -350,6 +350,8 @@ const Table = struct {
     image_gallery_no_agent: [:0]const u8,
     image_gallery_empty: [:0]const u8,
     image_gallery_partial: [:0]const u8,
+    /// 워커가 아직 훑는 중. 3.6초 동안 「없습니다」라고 거짓말하지 않기 위해 따로 든다.
+    image_gallery_scanning: [:0]const u8,
     /// 개수 뒤에 붙는 단위. 「12장」처럼 숫자와 이어 붙인다.
     image_gallery_count_suffix: [:0]const u8,
     agent_hook_notice_done: [:0]const u8,
@@ -1259,6 +1261,7 @@ const en: Table = .{
     .image_gallery_no_agent = "No agent session in this pane",
     .image_gallery_empty = "No images in this session",
     .image_gallery_partial = "Could not read the whole session",
+    .image_gallery_scanning = "Scanning…",
     .image_gallery_count_suffix = " images",
     .agent_hook_notice_done = "Turn finished",
     .agent_hook_notice_failed = "Turn ended with an error",
@@ -1832,6 +1835,7 @@ const ko: Table = .{
     .image_gallery_no_agent = "이 pane에 에이전트 세션이 없습니다",
     .image_gallery_empty = "이 세션에는 이미지가 없습니다",
     .image_gallery_partial = "세션을 다 읽지 못했습니다",
+    .image_gallery_scanning = "세는 중…",
     .image_gallery_count_suffix = "장",
     .agent_hook_notice_done = "턴이 끝났습니다",
     .agent_hook_notice_failed = "턴이 오류로 끝났습니다",

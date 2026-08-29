@@ -102,6 +102,63 @@ pub fn forPath(path: []const u8) Language {
     return .plain;
 }
 
+/// **구문 grammar 축**(`docs/plans/native-editor.md`의 번들 목록이 단일 출처다). 위 `Language`와 **다른
+/// 축**이다 — 그쪽은 *주석 문법*을 정하고(§3.7) 이쪽은 *어느 파서로 파는가*를 정한다. 한 값이 둘을
+/// 겸하면 `c_like` 하나가 C·Java·Go·Rust·PHP 를 뭉쳐 파서를 고를 수 없다.
+///
+/// 여기 없는 확장자는 `.none`이고 그 문서는 무색이다(§5 — 실패가 아니라 저하).
+pub const Grammar = enum {
+    none,
+    zig,
+    json,
+    markdown,
+    javascript,
+    typescript,
+    tsx,
+    c,
+    cpp,
+    python,
+    go,
+    rust,
+    java,
+    ruby,
+    php,
+    kotlin,
+    bash,
+    css,
+    html,
+};
+
+/// 파일 경로 → grammar. `forPath`와 **같은 확장자 추출**을 쓴다(마지막 점 뒤 — `app.min.js`는 js다).
+pub fn grammarForPath(path: []const u8) Grammar {
+    const slash = std.mem.lastIndexOfAny(u8, path, "/\\");
+    const name = if (slash) |i| path[i + 1 ..] else path;
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return .none;
+    const ext = name[dot + 1 ..];
+
+    if (eqlIgnoreCase(ext, "zig")) return .zig;
+    if (eqlIgnoreCase(ext, "json")) return .json;
+    if (anyIgnoreCase(ext, &.{ "md", "markdown" })) return .markdown;
+    if (anyIgnoreCase(ext, &.{ "js", "mjs", "cjs", "jsx" })) return .javascript;
+    if (anyIgnoreCase(ext, &.{ "ts", "mts", "cts" })) return .typescript;
+    if (eqlIgnoreCase(ext, "tsx")) return .tsx;
+    // **`.h`는 C로 판다.** C++ 헤더일 수도 있지만 확장자만으로는 못 가른다 — C 쿼리가 C++ 쿼리의
+    // 기반이기도 해서(아래 상속) 틀려도 색이 크게 어긋나지 않는다.
+    if (anyIgnoreCase(ext, &.{ "c", "h" })) return .c;
+    if (anyIgnoreCase(ext, &.{ "cc", "cpp", "cxx", "hpp", "hh", "hxx" })) return .cpp;
+    if (anyIgnoreCase(ext, &.{ "py", "pyi" })) return .python;
+    if (eqlIgnoreCase(ext, "go")) return .go;
+    if (eqlIgnoreCase(ext, "rs")) return .rust;
+    if (eqlIgnoreCase(ext, "java")) return .java;
+    if (anyIgnoreCase(ext, &.{ "rb", "rake", "gemspec" })) return .ruby;
+    if (anyIgnoreCase(ext, &.{ "php", "phtml" })) return .php;
+    if (anyIgnoreCase(ext, &.{ "kt", "kts" })) return .kotlin;
+    if (anyIgnoreCase(ext, &.{ "sh", "bash", "zsh" })) return .bash;
+    if (anyIgnoreCase(ext, &.{ "css", "scss", "less" })) return .css;
+    if (anyIgnoreCase(ext, &.{ "html", "htm", "xhtml" })) return .html;
+    return .none;
+}
+
 fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
@@ -176,4 +233,42 @@ test "LANG4: 줄 주석 문법이 언어마다 갈린다 (§3.7)" {
     // **HTML·CSS는 줄 주석이 없다** — 블록만 있다. 없는 것을 있다고 하면 `<!--`가 반쪽만 들어간다.
     try testing.expect(Language.html.lineComment() == null);
     try testing.expect(Language.css.lineComment() == null);
+}
+
+test "LANG10 확장자가 grammar를 정한다 — 번들 목록과 1:1" {
+    // **`Language`(주석 축)와 갈린다.** `c_like` 하나가 C·Java·Go·Rust·PHP 를 뭉치므로 그 축으로는
+    // 파서를 못 고른다. 이 판정자가 두 축이 서로 대체될 수 없음을 값으로 고정한다.
+    try testing.expectEqual(Grammar.zig, grammarForPath("src/main.zig"));
+    try testing.expectEqual(Grammar.json, grammarForPath("a/b/package.json"));
+    try testing.expectEqual(Grammar.markdown, grammarForPath("docs/x.md"));
+    try testing.expectEqual(Grammar.javascript, grammarForPath("web/app.min.js")); // 마지막 점 뒤
+    try testing.expectEqual(Grammar.typescript, grammarForPath("a.ts"));
+    try testing.expectEqual(Grammar.tsx, grammarForPath("a.tsx"));
+    try testing.expectEqual(Grammar.c, grammarForPath("a.c"));
+    try testing.expectEqual(Grammar.c, grammarForPath("a.h")); // 헤더는 C로 판다(주석 참고)
+    try testing.expectEqual(Grammar.cpp, grammarForPath("a.cpp"));
+    try testing.expectEqual(Grammar.python, grammarForPath("a.py"));
+    try testing.expectEqual(Grammar.go, grammarForPath("a.go"));
+    try testing.expectEqual(Grammar.rust, grammarForPath("a.rs"));
+    try testing.expectEqual(Grammar.java, grammarForPath("A.java"));
+    try testing.expectEqual(Grammar.ruby, grammarForPath("a.rb"));
+    try testing.expectEqual(Grammar.php, grammarForPath("a.php"));
+    try testing.expectEqual(Grammar.kotlin, grammarForPath("A.kt"));
+    try testing.expectEqual(Grammar.bash, grammarForPath("a.sh"));
+    try testing.expectEqual(Grammar.css, grammarForPath("a.css"));
+    try testing.expectEqual(Grammar.html, grammarForPath("a.html"));
+
+    // 대소문자를 안 가린다(`forPath`와 같은 규율).
+    try testing.expectEqual(Grammar.zig, grammarForPath("MAIN.ZIG"));
+
+    // 번들에 없는 것은 무색이다 — **`Language`는 이것들을 알아도** grammar 는 없다.
+    try testing.expectEqual(Grammar.none, grammarForPath("a.lua"));
+    try testing.expectEqual(Grammar.none, grammarForPath("a.sql"));
+    try testing.expectEqual(Grammar.none, grammarForPath("a.swift"));
+    try testing.expectEqual(Grammar.none, grammarForPath("README"));
+    try testing.expectEqual(Grammar.none, grammarForPath("a."));
+
+    // 두 축이 실제로 다르다: `.go`는 주석 축에서 `c_like`, grammar 축에서 `go`다.
+    try testing.expectEqual(Language.c_like, forPath("a.go"));
+    try testing.expectEqual(Grammar.go, grammarForPath("a.go"));
 }

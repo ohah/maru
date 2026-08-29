@@ -638,6 +638,19 @@ const cases = [_]Case{
         .rect = .{ .x = 0, .y = 0, .w = 480, .h = 128 },
     },
     .{
+        .name = "editor-typescript-colors",
+        .capture = "editor-typescript.ppm",
+        // **zig 말고 다른 grammar 가 실제로 색을 내는가.** 이것이 없으면 골든이 지키는 언어가
+        // zig 하나뿐이고, 나머지 열일곱은 회귀해도 아무도 모른다 — 적대적 검증에서 Lab 의 언어를
+        // 다시 `.zig` 로 박는 뮤턴트가 **살아남아** 그 사실이 드러났다.
+        //
+        // TypeScript 를 고른 이유는 그 쿼리가 javascript 를 **상속하는 구조**라서다(35줄 대 204줄).
+        // 상속을 안 이으면 문자열·주석이 통째로 빠지는데, 값 판정자는 "색이 있다"만 보고 지나칠 수
+        // 있고 여기서는 즉시 보인다.
+        .contract = "TypeScript 파일이 keyword·string·type·function·number 로 갈려 칠해진다(상속한 js 쿼리 포함)",
+        .rect = .{ .x = 0, .y = 0, .w = 480, .h = 128 },
+    },
+    .{
         .name = "editor-wrap-stale-scroll-keeps-line",
         .capture = "editor-wrap-stale-scroll.ppm",
         .contract = "first_piece가 범위를 넘어도 첫 논리 줄이 처음부터 그려진다(줄이 사라지지 않는다)",

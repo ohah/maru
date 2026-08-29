@@ -115,7 +115,8 @@ pub fn build(b: *std.Build) void {
     // **번들에 넣을 라이선스 전문**(third-party-licenses.md — *"컴파일 산출물이 들어가므로
     // 라이선스 전문을 앱 리소스에 동봉한다"*). 코어와 grammar가 exe에 링크되므로 의무가 생겼다.
     var ts_core_license: ?std.Build.LazyPath = null;
-    var ts_grammar_license: ?std.Build.LazyPath = null;
+    const GrammarLicense = struct { dep: []const u8, file: []const u8, path: std.Build.LazyPath };
+    var grammar_licenses: std.ArrayList(GrammarLicense) = .empty;
 
     const syntax_mod = b.addModule("syntax", .{
         .root_source_file = b.path("src/syntax/tree_sitter.zig"),
@@ -158,20 +159,86 @@ pub fn build(b: *std.Build) void {
             },
         });
     }
-    if (b.lazyDependency("tree_sitter_zig", .{})) |ts_zig_dep| {
-        ts_grammar_license = ts_zig_dep.path("LICENSE");
-        // **지금 grammar에는 이 경로가 없어도 된다** — `parser.c`가 `#include "tree_sitter/parser.h"`로
-        // 인용 형식이라 자기 디렉터리 기준으로 풀린다(적대적 검증: 뗀 뮤턴트가 양쪽에서 살아남았다).
-        // 그래도 두는 것은 생성된 파서가 꺾쇠 형식(`<tree_sitter/parser.h>`)을 쓰는 판도 있어서다 —
-        // 번들 언어를 늘릴 때 그쪽이 오면 이 줄이 없을 때만 깨진다.
-        syntax_mod.addIncludePath(ts_zig_dep.path("src"));
-        syntax_mod.addCSourceFile(.{
-            .file = ts_zig_dep.path("src/parser.c"),
-            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
-        });
-        // **하이라이트 쿼리는 grammar가 소유한다**(`queries/highlights.scm`). 우리가 베껴 두면
-        // grammar를 올릴 때마다 조용히 낡는다 — `maru_terminfo`가 같은 이유로 같은 패턴을 쓴다.
-        syntax_mod.addAnonymousImport("zig_highlights_scm", .{ .root_source_file = ts_zig_dep.path("queries/highlights.scm") });
+    // **번들 grammar 표**(`docs/plans/native-editor.md`가 목록을 소유한다 — 열린 집합이 아니다).
+    //
+    // **왜 표인가.** 언어마다 `lazyDependency` 블록을 손으로 적으면 열일곱 벌이 되고, 하나를 늘릴 때
+    // 빠뜨리는 자리가 생긴다(include path·scanner·쿼리 import 중 하나만 빠져도 그 언어만 조용히
+    // 무색이다). 표 하나를 돌면 그 축이 한 줄로 는다.
+    //
+    // - `dep`: `build.zig.zon`의 이름. `src`: `parser.c`가 있는 디렉터리(대부분 `src`).
+    // - `scanner`: 외부 스캐너 파일 이름(없으면 `null`). `.c`와 `.cc`가 섞여 있다.
+    // - `queries`: `highlights.scm` 경로. markdown 처럼 하위 grammar 마다 따로 든 판이 있다.
+    // - `import`: `syntax` 모듈이 `@embedFile`로 받는 이름 — `tree_sitter.zig`의 표와 **같은 문자열**이다.
+    const Grammar = struct {
+        dep: []const u8,
+        src: []const u8,
+        scanner: ?[]const u8 = null,
+        queries: []const u8 = "queries/highlights.scm",
+        import: []const u8,
+    };
+    const grammars = [_]Grammar{
+        .{ .dep = "tree_sitter_zig", .src = "src", .import = "zig_highlights_scm" },
+        .{ .dep = "tree_sitter_json", .src = "src", .import = "json_highlights_scm" },
+        // markdown 은 블록·인라인 두 grammar 다. 지금은 **블록만** 싣는다 — 제목·펜스·목록이 거기 있다.
+        .{ .dep = "tree_sitter_markdown", .src = "tree-sitter-markdown/src", .scanner = "scanner.c", .queries = "tree-sitter-markdown/queries/highlights.scm", .import = "markdown_highlights_scm" },
+        .{ .dep = "tree_sitter_javascript", .src = "src", .scanner = "scanner.c", .import = "javascript_highlights_scm" },
+        .{ .dep = "tree_sitter_typescript", .src = "typescript/src", .scanner = "scanner.c", .import = "typescript_highlights_scm" },
+        .{ .dep = "tree_sitter_typescript", .src = "tsx/src", .scanner = "scanner.c", .import = "tsx_highlights_scm" },
+        // **`examples/parser.c` 가 함께 들어 있다** — 그건 예제이지 grammar 가 아니다. `src` 만 쓴다.
+        .{ .dep = "tree_sitter_c", .src = "src", .import = "c_highlights_scm" },
+        .{ .dep = "tree_sitter_cpp", .src = "src", .scanner = "scanner.c", .import = "cpp_highlights_scm" },
+        .{ .dep = "tree_sitter_python", .src = "src", .scanner = "scanner.c", .import = "python_highlights_scm" },
+        .{ .dep = "tree_sitter_go", .src = "src", .import = "go_highlights_scm" },
+        .{ .dep = "tree_sitter_rust", .src = "src", .scanner = "scanner.c", .import = "rust_highlights_scm" },
+        .{ .dep = "tree_sitter_java", .src = "src", .import = "java_highlights_scm" },
+        .{ .dep = "tree_sitter_ruby", .src = "src", .scanner = "scanner.c", .import = "ruby_highlights_scm" },
+        // php 는 `php`(HTML 섞임)와 `php_only` 둘이다. 파일 하나가 통째로 PHP 인 경우가 흔하지만
+        // `<?php` 밖 텍스트도 흔해 **섞인 쪽**을 싣는다.
+        .{ .dep = "tree_sitter_php", .src = "php/src", .scanner = "scanner.c", .import = "php_highlights_scm" },
+        .{ .dep = "tree_sitter_kotlin", .src = "src", .scanner = "scanner.c", .import = "kotlin_highlights_scm" },
+        .{ .dep = "tree_sitter_bash", .src = "src", .scanner = "scanner.c", .import = "bash_highlights_scm" },
+        .{ .dep = "tree_sitter_css", .src = "src", .scanner = "scanner.c", .import = "css_highlights_scm" },
+        .{ .dep = "tree_sitter_html", .src = "src", .scanner = "scanner.c", .import = "html_highlights_scm" },
+    };
+    for (grammars) |g| {
+        if (b.lazyDependency(g.dep, .{})) |dep| {
+            // 라이선스는 **grammar 마다** 확인해 번들한다(third-party-licenses.md). 지금은 zig 것을
+            // 대표로 들고, 나머지는 아래 설치 스텝이 각자 넣는다.
+            // **grammar 마다 라이선스를 모은다**(third-party-licenses.md §번들 코드 라이브러리).
+            // 열여덟이 컴파일 산출물로 exe 에 들어가므로 재배포 의무가 각자 있다 — 하나를 빠뜨리면
+            // 아무 테스트도 안 깨지고 번들만 조용히 위반이 된다(폰트 쪽 `lic_found` 와 같은 규율).
+            // **dep 단위로 한 번만** 모은다 — typescript/tsx 처럼 한 저장소가 두 grammar 를 내는 판이
+            // 있고, 그때 라이선스는 하나다.
+            var seen = false;
+            for (grammar_licenses.items) |l| {
+                if (std.mem.eql(u8, l.dep, g.dep)) seen = true;
+            }
+            if (!seen) {
+                grammar_licenses.append(b.allocator, .{
+                    .dep = g.dep,
+                    // `tree_sitter_json` → `tree-sitter-json-LICENSE`
+                    .file = b.fmt("tree-sitter-{s}-LICENSE", .{g.dep["tree_sitter_".len..]}),
+                    .path = dep.path("LICENSE"),
+                }) catch @panic("OOM");
+            }
+            // **지금 grammar 에는 이 경로가 없어도 되는 판이 많다** — `parser.c` 가 인용 형식으로
+            // `tree_sitter/parser.h` 를 부르면 자기 디렉터리 기준으로 풀린다. 그래도 두는 것은 생성된
+            // 파서가 꺾쇠 형식을 쓰는 판이 있어서다(번들 언어를 늘릴 때 그쪽이 오면 여기서만 깨진다).
+            syntax_mod.addIncludePath(dep.path(g.src));
+            syntax_mod.addCSourceFile(.{
+                .file = dep.path(b.fmt("{s}/parser.c", .{g.src})),
+                .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+            });
+            if (g.scanner) |sc| {
+                syntax_mod.addCSourceFile(.{
+                    .file = dep.path(b.fmt("{s}/{s}", .{ g.src, sc })),
+                    .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+                });
+            }
+            // **하이라이트 쿼리는 grammar 가 소유한다**. 우리가 베껴 두면 grammar 를 올릴 때마다
+            // 조용히 낡는다 — `maru_terminfo` 가 같은 이유로 같은 패턴을 쓴다.
+            syntax_mod.addAnonymousImport(g.import, .{ .root_source_file = dep.path(g.queries) });
+        }
     }
 
     const maru_mod = b.addModule("maru", .{
@@ -676,7 +743,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-selection", "editor-find", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "context-menu-checked", "context-menu-unchecked", "scm-rows", "scm-history", "scm-row-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "context-menu-checked", "context-menu-unchecked", "scm-rows", "scm-history", "scm-row-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
@@ -1832,70 +1899,93 @@ pub fn build(b: *std.Build) void {
         // .app 번들을 만들고 그 안의 바이너리를 직접 실행하면, AppKit이 실행파일 경로에서
         // Contents/Info.plist를 찾아 HiDPI를 켜고(Retina에서 또렷), open과 달리 CWD가 유지돼
         // summary 상대 경로 기록도 정상 동작한다.
+        // **번들 스크립트가 쓸 두 조각을 표에서 만든다.** 복사와 확인이 같은 목록에서 나와야
+        // 갈리지 않는다 — 손으로 적으면 언어를 늘릴 때 한쪽만 빠지고, 그 누락은 아무 테스트도
+        // 안 깨뜨린다(재배포 의무의 성질이다).
+        var cp_buf: std.ArrayList(u8) = .empty;
+        var names_buf: std.ArrayList(u8) = .empty;
+        for (grammar_licenses.items, 0..) |lic, i| {
+            // `$2`가 코어 라이선스이므로 grammar 는 `$3`부터다.
+            // **중괄호가 필수다.** POSIX sh 에서 `"$10"` 은 `$1` 뒤에 문자 `0` 으로 읽힌다 — grammar 가
+            // 아홉을 넘는 순간 열 번째부터 엉뚱한 경로를 복사하려다 죽는다(실측으로 그랬다).
+            cp_buf.print(b.allocator, "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Resources/Licenses/{s}; ", .{ i + 3, lic.file }) catch @panic("OOM");
+            names_buf.print(b.allocator, "{s} ", .{lic.file}) catch @panic("OOM");
+        }
+        const grammar_license_cp = cp_buf.items;
+        const grammar_license_names = names_buf.items;
+
         const macos_app_bundle = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
-            // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
-            // 에러를 낸다.
-            "ttfs=$(ls assets/fonts/*/*.ttf 2>/dev/null) || true; " ++
-                "[ -n \"$ttfs\" ] || { echo 'error: no .ttf under assets/fonts/*/ (font assets missing)' >&2; exit 1; }; " ++
-                // 기본 폰트(JetBrains Mono)는 항상 있어야 한다(config 기본값 theme.zig). 누락이면 self-contained 보장이 깨진다.
-                "[ -f assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf ] || { echo 'error: default font assets/fonts/JetBrainsMono missing' >&2; exit 1; }; " ++
-                "rm -rf zig-out/Maru.app; " ++
-                "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Helpers zig-out/Maru.app/Contents/Resources/Fonts; " ++
-                "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
-                "cp -R zig-out/MaruMermaidRenderer.app zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
-                // 형제 `maru` CLI도 번들에 넣는다 — 커맨드 팝업 "Install CLI"가 GUI 바이너리 옆 형제 maru를
-                // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
-                "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
-                "cp \"$1\" zig-out/Maru.app/Contents/Info.plist; " ++
-                // **번들 코드 라이브러리의 라이선스 전문**(third-party-licenses.md §번들 코드 라이브러리).
-                // tree-sitter 코어와 grammar가 컴파일 산출물로 exe에 들어가므로 재배포 의무가 있다 —
-                // 폰트가 `Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리·같은 이유다.
-                "mkdir -p zig-out/Maru.app/Contents/Resources/Licenses; " ++
-                "cp \"$2\" zig-out/Maru.app/Contents/Resources/Licenses/tree-sitter-LICENSE; " ++
-                "cp \"$3\" zig-out/Maru.app/Contents/Resources/Licenses/tree-sitter-zig-LICENSE; " ++
-                // **넣었는지 확인한다** — 재배포 의무는 빠뜨려도 아무 테스트가 안 깨지는 부류라
-                // 조용히 넘어가면 안 된다. 폰트 쪽 `lic_found`와 같은 규율이다.
-                "for lic in tree-sitter-LICENSE tree-sitter-zig-LICENSE; do " ++
-                "[ -s \"zig-out/Maru.app/Contents/Resources/Licenses/$lic\" ] || " ++
-                "{ echo \"error: bundled code library license missing or empty: $lic — 재배포 의무\" >&2; exit 1; }; done; " ++
-                // 모든 폰트 패밀리(assets/fonts/<Family>/)의 .ttf를 Fonts/에 평평하게 복사한다 — ATSApplicationFontsPath가
-                // 그 디렉터리를 스캔해 전부 자동 등록하므로 사용자는 config의 font.family에 패밀리명만 적으면 된다.
-                // 라이선스(OFL.txt·LICENSE.*)는 평평화 시 충돌하지 않게 패밀리명 프리픽스로 동봉한다(재배포 의무).
-                // 새 패밀리는 디렉터리만 추가하면 자동 포함된다(이 build.zig 수정 불필요).
-                "for d in assets/fonts/*/; do fam=$(basename \"$d\"); " ++
-                // .ttf 없는 디렉터리는 폰트 패밀리가 아니므로 건너뛴다(폰트 자산만 처리). glob 미매치면 $1=리터럴 패턴.
-                "set -- \"$d\"*.ttf; [ -e \"$1\" ] || continue; " ++
-                // .ttf 복사 — 실패(권한/IO)하면 set -e로 빌드 중단(빈/불완전 Fonts 번들로 조용히 출하 방지, code-review).
-                "cp \"$d\"*.ttf zig-out/Maru.app/Contents/Resources/Fonts/; " ++
-                // 라이선스(재배포 의무)는 패밀리명 프리픽스로 동봉하고, .ttf가 있는데 라이선스가 하나도 없으면 빌드를
-                // 실패시킨다 — '번들 폰트는 라이선스 동봉' 보장(code-review: best-effort로 새 폰트가 무-라이선스 출하되던 구멍).
-                "lic_found=0; for lic in \"$d\"OFL.txt \"$d\"LICENSE.md \"$d\"LICENSE.txt; do " ++
-                "if [ -f \"$lic\" ]; then cp \"$lic\" \"zig-out/Maru.app/Contents/Resources/Fonts/$fam-$(basename \"$lic\")\"; lic_found=1; fi; " ++
-                "done; " ++
-                "[ \"$lic_found\" = 1 ] || { echo \"error: font family $fam has .ttf but no license (OFL.txt/LICENSE.md/LICENSE.txt) — 재배포 의무\" >&2; exit 1; }; " ++
-                "done; " ++
-                // FP4: zntc가 만든 실 file-panel bundle(index/render HTML·SRI bundle·CSS)을 Resources/web/에 복사한다.
-                // 스킴 핸들러가 Bundle.main.resourceURL/web 아래만 서빙한다(경로 샌드박스·realpath 탈출 방어=Zig 정책).
-                "mkdir -p zig-out/Maru.app/Contents/Resources/web; " ++
-                // scheme same-fd reader의 flat-only closed-set과 build output을 일치시킨다. 새 nested asset은 조용히
-                // 번들된 뒤 404가 되지 않고 여기서 즉시 실패하며, 채택하려면 descriptor component-walk 설계를 먼저 한다.
-                "[ -z \"$(find web/dist -mindepth 1 -type d -print -quit)\" ] || { echo 'error: web/dist must remain flat for maru-app scheme safety' >&2; exit 1; }; " ++
-                "for asset in web/dist/*; do " ++
-                "[ \"$(basename \"$asset\")\" = mermaid-helper.js ] && continue; " ++
-                "cp \"$asset\" zig-out/Maru.app/Contents/Resources/web/; done; " ++
-                "[ ! -e zig-out/Maru.app/Contents/Resources/web/mermaid-helper.js ] || { echo 'error: helper-only Mermaid runtime leaked into main app resources' >&2; exit 1; }; " ++
-                "[ ! -e zig-out/Maru.app/Contents/Helpers/MaruMermaidRendererDigestMismatch.app ] || { echo 'error: test-only digest mismatch helper leaked into product app' >&2; exit 1; }; " ++
-                "cmp web/dist/mermaid-helper.js zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app/Contents/Resources/web/mermaid-helper.js; " ++
-                "[ \"$(find zig-out/Maru.app -name mermaid-helper.js -type f | wc -l | tr -d ' ')\" = 1 ] || { echo 'error: Mermaid runtime must have exactly one nested-helper copy' >&2; exit 1; }; " ++
-                "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo; " ++
-                // 개발/CI bundle도 release와 같은 inside-out 순서를 검증한다. ad-hoc 서명이라 비밀/인증서는 필요 없다.
-                "codesign --force --sign - --entitlements src/platform/macos/MaruMermaidRenderer.entitlements zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
-                "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru; " ++
-                "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
-                "codesign --force --sign - zig-out/Maru.app; " ++
-                "codesign --verify --strict --deep zig-out/Maru.app",
+            b.fmt("{s}{s}{s}{s}{s}", .{
+                // ⑴ 번들 앞부분(정적)
+                // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
+                // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
+                // 에러를 낸다.
+                "ttfs=$(ls assets/fonts/*/*.ttf 2>/dev/null) || true; " ++
+                    "[ -n \"$ttfs\" ] || { echo 'error: no .ttf under assets/fonts/*/ (font assets missing)' >&2; exit 1; }; " ++
+                    // 기본 폰트(JetBrains Mono)는 항상 있어야 한다(config 기본값 theme.zig). 누락이면 self-contained 보장이 깨진다.
+                    "[ -f assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf ] || { echo 'error: default font assets/fonts/JetBrainsMono missing' >&2; exit 1; }; " ++
+                    "rm -rf zig-out/Maru.app; " ++
+                    "mkdir -p zig-out/Maru.app/Contents/MacOS zig-out/Maru.app/Contents/Helpers zig-out/Maru.app/Contents/Resources/Fonts; " ++
+                    "cp zig-out/bin/maru-macos-app zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
+                    "cp -R zig-out/MaruMermaidRenderer.app zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
+                    // 형제 `maru` CLI도 번들에 넣는다 — 커맨드 팝업 "Install CLI"가 GUI 바이너리 옆 형제 maru를
+                    // ~/.local/bin에 symlink하므로, 번들에 없으면 "maru CLI 바이너리를 찾지 못했습니다"로 실패한다.
+                    "cp zig-out/bin/maru zig-out/Maru.app/Contents/MacOS/maru; " ++
+                    "cp \"$1\" zig-out/Maru.app/Contents/Info.plist; " ++
+                    // **번들 코드 라이브러리의 라이선스 전문**(third-party-licenses.md §번들 코드 라이브러리).
+                    // tree-sitter 코어와 grammar가 컴파일 산출물로 exe에 들어가므로 재배포 의무가 있다 —
+                    // 폰트가 `Fonts/<Family>-OFL.txt`로 동봉되는 것과 같은 자리·같은 이유다.
+                    "mkdir -p zig-out/Maru.app/Contents/Resources/Licenses; " ++
+                    "cp \"$2\" zig-out/Maru.app/Contents/Resources/Licenses/tree-sitter-LICENSE; " ++
+                    "",
+                // ⑵ grammar 라이선스 복사 — **표에서 만든다**($3부터 순서대로). 손으로 적으면 언어를
+                //    늘릴 때 여기만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다.
+                grammar_license_cp,
+                // ⑶ 확인 목록도 같은 표에서 — 복사와 검사가 갈리면 검사가 헛돈다.
+                "for lic in tree-sitter-LICENSE ",
+                grammar_license_names,
+                // ⑷ 나머지(정적)
+                "; do " ++
+                    "[ -s \"zig-out/Maru.app/Contents/Resources/Licenses/$lic\" ] || " ++
+                    "{ echo \"error: bundled code library license missing or empty: $lic — 재배포 의무\" >&2; exit 1; }; done; " ++
+                    // 모든 폰트 패밀리(assets/fonts/<Family>/)의 .ttf를 Fonts/에 평평하게 복사한다 — ATSApplicationFontsPath가
+                    // 그 디렉터리를 스캔해 전부 자동 등록하므로 사용자는 config의 font.family에 패밀리명만 적으면 된다.
+                    // 라이선스(OFL.txt·LICENSE.*)는 평평화 시 충돌하지 않게 패밀리명 프리픽스로 동봉한다(재배포 의무).
+                    // 새 패밀리는 디렉터리만 추가하면 자동 포함된다(이 build.zig 수정 불필요).
+                    "for d in assets/fonts/*/; do fam=$(basename \"$d\"); " ++
+                    // .ttf 없는 디렉터리는 폰트 패밀리가 아니므로 건너뛴다(폰트 자산만 처리). glob 미매치면 $1=리터럴 패턴.
+                    "set -- \"$d\"*.ttf; [ -e \"$1\" ] || continue; " ++
+                    // .ttf 복사 — 실패(권한/IO)하면 set -e로 빌드 중단(빈/불완전 Fonts 번들로 조용히 출하 방지, code-review).
+                    "cp \"$d\"*.ttf zig-out/Maru.app/Contents/Resources/Fonts/; " ++
+                    // 라이선스(재배포 의무)는 패밀리명 프리픽스로 동봉하고, .ttf가 있는데 라이선스가 하나도 없으면 빌드를
+                    // 실패시킨다 — '번들 폰트는 라이선스 동봉' 보장(code-review: best-effort로 새 폰트가 무-라이선스 출하되던 구멍).
+                    "lic_found=0; for lic in \"$d\"OFL.txt \"$d\"LICENSE.md \"$d\"LICENSE.txt; do " ++
+                    "if [ -f \"$lic\" ]; then cp \"$lic\" \"zig-out/Maru.app/Contents/Resources/Fonts/$fam-$(basename \"$lic\")\"; lic_found=1; fi; " ++
+                    "done; " ++
+                    "[ \"$lic_found\" = 1 ] || { echo \"error: font family $fam has .ttf but no license (OFL.txt/LICENSE.md/LICENSE.txt) — 재배포 의무\" >&2; exit 1; }; " ++
+                    "done; " ++
+                    // FP4: zntc가 만든 실 file-panel bundle(index/render HTML·SRI bundle·CSS)을 Resources/web/에 복사한다.
+                    // 스킴 핸들러가 Bundle.main.resourceURL/web 아래만 서빙한다(경로 샌드박스·realpath 탈출 방어=Zig 정책).
+                    "mkdir -p zig-out/Maru.app/Contents/Resources/web; " ++
+                    // scheme same-fd reader의 flat-only closed-set과 build output을 일치시킨다. 새 nested asset은 조용히
+                    // 번들된 뒤 404가 되지 않고 여기서 즉시 실패하며, 채택하려면 descriptor component-walk 설계를 먼저 한다.
+                    "[ -z \"$(find web/dist -mindepth 1 -type d -print -quit)\" ] || { echo 'error: web/dist must remain flat for maru-app scheme safety' >&2; exit 1; }; " ++
+                    "for asset in web/dist/*; do " ++
+                    "[ \"$(basename \"$asset\")\" = mermaid-helper.js ] && continue; " ++
+                    "cp \"$asset\" zig-out/Maru.app/Contents/Resources/web/; done; " ++
+                    "[ ! -e zig-out/Maru.app/Contents/Resources/web/mermaid-helper.js ] || { echo 'error: helper-only Mermaid runtime leaked into main app resources' >&2; exit 1; }; " ++
+                    "[ ! -e zig-out/Maru.app/Contents/Helpers/MaruMermaidRendererDigestMismatch.app ] || { echo 'error: test-only digest mismatch helper leaked into product app' >&2; exit 1; }; " ++
+                    "cmp web/dist/mermaid-helper.js zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app/Contents/Resources/web/mermaid-helper.js; " ++
+                    "[ \"$(find zig-out/Maru.app -name mermaid-helper.js -type f | wc -l | tr -d ' ')\" = 1 ] || { echo 'error: Mermaid runtime must have exactly one nested-helper copy' >&2; exit 1; }; " ++
+                    "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo; " ++
+                    // 개발/CI bundle도 release와 같은 inside-out 순서를 검증한다. ad-hoc 서명이라 비밀/인증서는 필요 없다.
+                    "codesign --force --sign - --entitlements src/platform/macos/MaruMermaidRenderer.entitlements zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
+                    "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru; " ++
+                    "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
+                    "codesign --force --sign - zig-out/Maru.app; " ++
+                    "codesign --verify --strict --deep zig-out/Maru.app",
+            }),
         });
         // `sh -c` 뒤 첫 인자는 $0이므로 label을 하나 두고 generated plist를 $1로 전달한다.
         macos_app_bundle.addArg("maru-app-bundle");
@@ -1904,7 +1994,9 @@ pub fn build(b: *std.Build) void {
         // 조용히 건너뛰지 않고 **소리 내어 죽는다** — 재배포 의무는 빠뜨려도 아무 테스트가 안
         // 깨지는 부류이고, 폰트 쪽이 같은 이유로 `lic_found` 검사를 둔다.
         macos_app_bundle.addFileArg(ts_core_license orelse @panic("tree-sitter LICENSE missing"));
-        macos_app_bundle.addFileArg(ts_grammar_license orelse @panic("tree-sitter-zig LICENSE missing"));
+        // **순서가 위에서 만든 `$3`부터와 같아야 한다.** 표 하나를 두 번 도므로 어긋날 수 없다.
+        if (grammar_licenses.items.len == 0) @panic("no grammar LICENSE collected");
+        for (grammar_licenses.items) |lic| macos_app_bundle.addFileArg(lic.path);
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(&macos_mermaid_helper_bundle.step);

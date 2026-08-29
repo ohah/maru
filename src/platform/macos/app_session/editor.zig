@@ -1168,7 +1168,7 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // 증분이라 65µs다.
     term.rt.editor_syntax = syntax_color.open(
         term.rt.editor_doc.?.file.content,
-        maru.session.editor.language.forPath(prepared.path),
+        maru.session.editor.language.grammarForPath(prepared.path),
     );
 
     // **탭 폭을 config에서 받는다**(§9). 아래 파생값(접힘 겹수·`max_cols`)이 이 값에 달렸으므로

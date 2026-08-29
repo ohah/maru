@@ -190,6 +190,10 @@ pub const ScenarioId = enum {
     /// 것은 그 다음 구간이다 — 읽은 줄이 셀 격자에 놓이기까지 경로가 이어져 있는가. BOM을 안 떼면
     /// §3.8 가시화가 `<U+FEFF>`를 첫 줄에 그리고, 탭 전개가 틀리면 들여쓴 행의 열이 어긋난다.
     editor_real_file,
+    /// **여러 언어의 색이 실제로 다르게 붙는가**(N4 §5.3 · 번들 grammar 표). zig 하나만 캡처하면
+    /// 나머지 열일곱은 골든이 안 지킨다 — TypeScript 는 `; inherits: javascript` 구조라 상속을
+    /// 안 이으면 문자열·주석이 통째로 빠지는데, 그 회귀가 정확히 여기서 보인다.
+    editor_typescript,
     /// N1 §4.1g — **본문 텍스트 선택**을 픽셀로 본다. 띠가 글자 위가 아니라 **뒤**에 서고(알파로
     /// 얹으므로 글자가 읽혀야 한다), 줄을 걸친 선택이 첫 줄은 중간부터·끝 줄은 머리부터 칠해지고,
     /// gutter를 침범하지 않는지가 단위 테스트로 안 보이는 부분이다 — 열을 셀 폭으로 환산해 놓는
@@ -304,7 +308,7 @@ pub fn buildFrame(
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -575,7 +579,7 @@ const LabSyntax = struct {
     }
 };
 
-fn editorSyntaxColors(lines: []const []const u8, tab_width: u16) LabSyntax {
+fn editorSyntaxColors(lines: []const []const u8, tab_width: u16, grammar: maru.session.editor.language.Grammar) LabSyntax {
     const a = std.heap.page_allocator;
     var out: LabSyntax = .{ .allocator = a };
 
@@ -596,7 +600,7 @@ fn editorSyntaxColors(lines: []const []const u8, tab_width: u16) LabSyntax {
     out.file = maru.session.editor.edit_doc.EditableFile.init(a, doc, true) catch {
         return out;
     };
-    out.state = editor_syntax.open(out.file.?.content, .zig);
+    out.state = editor_syntax.open(out.file.?.content, grammar);
     out.colors = editor_syntax.lineColors(
         &out.state,
         a,
@@ -763,7 +767,13 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // **색 계약은 다른 골든이 지킨다**(`editor-real-file`·`editor-content-text` 등). 여기서
     // 재는 것은 폭이지 색이 아니다.
     const paints_syntax = scenario.id != .editor_wide_glyph;
-    var syn = if (paints_syntax) editorSyntaxColors(lines, lab_tab_width) else LabSyntax{ .allocator = std.heap.page_allocator };
+    // **장면이 언어를 정한다.** 예전엔 `.zig`가 박혀 있었는데, grammar가 열여덟이 된 뒤로는 그러면
+    // 다른 언어의 색이 **캡처에 영원히 안 나타난다** — 골든이 지키는 것이 zig 하나뿐이 된다.
+    const scenario_grammar: maru.session.editor.language.Grammar = switch (scenario.id) {
+        .editor_typescript => .typescript,
+        else => .zig,
+    };
+    var syn = if (paints_syntax) editorSyntaxColors(lines, lab_tab_width, scenario_grammar) else LabSyntax{ .allocator = std.heap.page_allocator };
     defer syn.deinit();
 
     const fw = chrome.components.editor_view.frame.build(.{
@@ -1033,7 +1043,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

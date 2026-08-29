@@ -28,9 +28,44 @@ const c = @cImport({
 
 /// grammar가 내보내는 진입점. `parser.c`가 이 이름으로 정의한다.
 extern fn tree_sitter_zig() *const c.TSLanguage;
+extern fn tree_sitter_json() *const c.TSLanguage;
+extern fn tree_sitter_markdown() *const c.TSLanguage;
+extern fn tree_sitter_javascript() *const c.TSLanguage;
+extern fn tree_sitter_typescript() *const c.TSLanguage;
+extern fn tree_sitter_tsx() *const c.TSLanguage;
+extern fn tree_sitter_c() *const c.TSLanguage;
+extern fn tree_sitter_cpp() *const c.TSLanguage;
+extern fn tree_sitter_python() *const c.TSLanguage;
+extern fn tree_sitter_go() *const c.TSLanguage;
+extern fn tree_sitter_rust() *const c.TSLanguage;
+extern fn tree_sitter_java() *const c.TSLanguage;
+extern fn tree_sitter_ruby() *const c.TSLanguage;
+extern fn tree_sitter_php() *const c.TSLanguage;
+extern fn tree_sitter_kotlin() *const c.TSLanguage;
+extern fn tree_sitter_bash() *const c.TSLanguage;
+extern fn tree_sitter_css() *const c.TSLanguage;
+extern fn tree_sitter_html() *const c.TSLanguage;
 
-/// grammar의 하이라이트 쿼리 — **grammar가 소유한다**(빌드가 익명 import로 꽂는다).
+/// 하이라이트 쿼리 — **grammar가 소유한다**(빌드가 익명 import로 꽂는다. `build.zig`의 grammar 표가
+/// 같은 이름을 쓴다 — 둘이 갈리면 컴파일이 죽는다).
 const zig_highlights = @embedFile("zig_highlights_scm");
+const json_highlights = @embedFile("json_highlights_scm");
+const markdown_highlights = @embedFile("markdown_highlights_scm");
+const javascript_highlights = @embedFile("javascript_highlights_scm");
+const typescript_highlights = @embedFile("typescript_highlights_scm");
+const tsx_highlights = @embedFile("tsx_highlights_scm");
+const c_highlights = @embedFile("c_highlights_scm");
+const cpp_highlights = @embedFile("cpp_highlights_scm");
+const python_highlights = @embedFile("python_highlights_scm");
+const go_highlights = @embedFile("go_highlights_scm");
+const rust_highlights = @embedFile("rust_highlights_scm");
+const java_highlights = @embedFile("java_highlights_scm");
+const ruby_highlights = @embedFile("ruby_highlights_scm");
+const php_highlights = @embedFile("php_highlights_scm");
+const kotlin_highlights = @embedFile("kotlin_highlights_scm");
+const bash_highlights = @embedFile("bash_highlights_scm");
+const css_highlights = @embedFile("css_highlights_scm");
+const html_highlights = @embedFile("html_highlights_scm");
 
 /// **파싱 상한**(§5.3 — "파싱 대상 크기·시간 상한"). 이 크기를 넘는 문서는 무색이다.
 ///
@@ -52,7 +87,7 @@ pub const Span = struct {
 
 /// `session/editor/language.zig`의 열거와 **같은 축**을 쓰되, 이 모듈은 maru를 못 들여오므로
 /// (모듈이 다르다) 필요한 것만 다시 적는다. 값을 늘릴 때 두 곳이 갈리지 않게 **호출자가 옮긴다**.
-pub const Language = enum { zig, other };
+pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, other };
 
 /// 한 언어를 파싱하는 데 필요한 것 전부 — grammar 진입점 · 그 쿼리 캐시 칸 · 쿼리 원문.
 const Slot = struct {
@@ -66,11 +101,51 @@ const Slot = struct {
 /// 열어 `.other`도 zig grammar로 파도록 뒤집었는데 뒤 관문이 막아 판정자가 **아무 차이도 못 봤다**
 /// (뮤턴트 생존). 규칙이 두 곳에 있으면 갈리고, 갈려도 안 보인다. 늘리는 자리도 여기 하나다.
 fn slotFor(lang: Language) ?Slot {
-    return switch (lang) {
-        .zig => .{ .language = tree_sitter_zig(), .query_cell = &zig_query, .scm = zig_highlights },
-        .other => null,
-    };
+    inline for (grammar_table, 0..) |g, i| {
+        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm };
+    }
+    return null;
 }
+
+/// 번들 grammar 표. **목록의 단일 출처는 `docs/plans/native-editor.md`**이고, 여기와 `build.zig`의
+/// 표가 그것을 따른다(셋이 갈리면 그 언어만 조용히 무색이 되거나 컴파일이 죽는다).
+const GrammarEntry = struct {
+    lang: Language,
+    get: *const fn () callconv(.c) *const c.TSLanguage,
+    scm: []const u8,
+};
+
+const grammar_table = [_]GrammarEntry{
+    .{ .lang = .zig, .get = tree_sitter_zig, .scm = zig_highlights },
+    .{ .lang = .json, .get = tree_sitter_json, .scm = json_highlights },
+    .{ .lang = .markdown, .get = tree_sitter_markdown, .scm = markdown_highlights },
+    .{ .lang = .javascript, .get = tree_sitter_javascript, .scm = javascript_highlights },
+    // **상속을 우리가 잇는다.** Neovim 이 `; inherits: javascript` 로 잇는 그 구조인데 tree-sitter
+    // 자체에는 그 기능이 없다 — 쿼리 파일이 그냥 텍스트다. 안 이으면 TypeScript 파일에서 문자열·주석
+    // 같은 **JS 층 색이 통째로 빠진다**(ts 쿼리는 35줄이고 js 는 204줄이다).
+    //
+    // **기본을 앞에 둔다** — 겹치는 범위는 `collect`가 마지막 캡처를 택하므로(§5.3 겹침 규칙),
+    // 언어 고유 패턴이 뒤에 와야 기본을 이긴다.
+    .{ .lang = .typescript, .get = tree_sitter_typescript, .scm = javascript_highlights ++ "\n" ++ typescript_highlights },
+    .{ .lang = .tsx, .get = tree_sitter_tsx, .scm = javascript_highlights ++ "\n" ++ tsx_highlights },
+    .{ .lang = .c, .get = tree_sitter_c, .scm = c_highlights },
+    // C++ 도 같다(`; inherits: c` — cpp 쿼리는 70줄이고 c 는 81줄이다). 안 이으면 `int main(void)`
+    // 같은 C 층 구문이 무색이라 **파일 대부분이 색을 잃는다**(`SYN18`이 그것을 잡았다).
+    .{ .lang = .cpp, .get = tree_sitter_cpp, .scm = c_highlights ++ "\n" ++ cpp_highlights },
+    .{ .lang = .python, .get = tree_sitter_python, .scm = python_highlights },
+    .{ .lang = .go, .get = tree_sitter_go, .scm = go_highlights },
+    .{ .lang = .rust, .get = tree_sitter_rust, .scm = rust_highlights },
+    .{ .lang = .java, .get = tree_sitter_java, .scm = java_highlights },
+    .{ .lang = .ruby, .get = tree_sitter_ruby, .scm = ruby_highlights },
+    .{ .lang = .php, .get = tree_sitter_php, .scm = php_highlights },
+    .{ .lang = .kotlin, .get = tree_sitter_kotlin, .scm = kotlin_highlights },
+    .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights },
+    .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights },
+    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights },
+};
+
+/// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
+var query_cells = [_]std.atomic.Value(?*c.TSQuery){.init(null)} ** grammar_table.len;
 
 /// 언어별 하이라이트 쿼리 — **프로세스 수명 동안 한 번만 만든다.** 두 가지가 이것을 요구한다:
 ///
@@ -84,8 +159,6 @@ fn slotFor(lang: Language) ?Slot {
 /// 해제 시점을 두지 않는다 — grammar 수만큼(§5.3 번들 언어는 **명시 목록**이다)이고 프로그램이
 /// 끝날 때 OS가 걷는다. tree-sitter는 자기 allocator(기본 `malloc`)를 쓰므로 `std.testing.allocator`의
 /// 누수 검사 대상이 아니다.
-var zig_query: std.atomic.Value(?*c.TSQuery) = .init(null);
-
 fn queryFor(slot: Slot) ?*c.TSQuery {
     if (slot.query_cell.load(.acquire)) |cached| return cached;
 
@@ -1023,4 +1096,45 @@ test "SYN17 예산 0은 안 끊는다 — 기존 동기 경로가 그대로다" 
     defer spans.deinit(allocator);
     prov.spansForRange(allocator, src, .{ .start = 0, .end = 200 }, &spans);
     try std.testing.expect(spans.items.len > 0);
+}
+
+test "SYN18 번들한 grammar 열여덟이 전부 실제로 색을 낸다" {
+    // **링크만 되고 파싱이 안 되면 그 언어만 조용히 무색이다.** grammar 진입점 이름이 틀렸거나
+    // 쿼리가 grammar와 안 맞으면(버전 어긋남) 정확히 그렇게 된다 — 화면에만 나타난다.
+    // 표에 든 **모든** 언어를 한 줄씩 태워 그 자리를 막는다.
+    const allocator = std.testing.allocator;
+    const samples = [_]struct { lang: Language, src: []const u8 }{
+        .{ .lang = .zig, .src = "const x = \"a\"; // c\n" },
+        .{ .lang = .json, .src = "{\"a\": 1, \"b\": \"s\"}\n" },
+        .{ .lang = .markdown, .src = "# 제목\n\n본문 `코드`\n" },
+        .{ .lang = .javascript, .src = "const x = 'a'; // c\n" },
+        .{ .lang = .typescript, .src = "const x: string = 'a'; // c\n" },
+        .{ .lang = .tsx, .src = "const A = () => <div/>; // c\n" },
+        .{ .lang = .c, .src = "int main(void) { return 0; } // c\n" },
+        .{ .lang = .cpp, .src = "#include <vector>\nint main() { return 0; }\n" },
+        .{ .lang = .python, .src = "def f(x):\n    return \"a\"  # c\n" },
+        .{ .lang = .go, .src = "package main\nfunc main() { _ = \"a\" }\n" },
+        .{ .lang = .rust, .src = "fn main() { let x = \"a\"; } // c\n" },
+        .{ .lang = .java, .src = "class A { void f() { String s = \"a\"; } }\n" },
+        .{ .lang = .ruby, .src = "def f\n  x = \"a\" # c\nend\n" },
+        .{ .lang = .php, .src = "<?php\n$x = \"a\"; // c\n" },
+        .{ .lang = .kotlin, .src = "fun main() { val x = \"a\" } // c\n" },
+        .{ .lang = .bash, .src = "x=\"a\" # c\necho $x\n" },
+        .{ .lang = .css, .src = "a { color: #fff; } /* c */\n" },
+        .{ .lang = .html, .src = "<div class=\"a\">t</div>\n" },
+    };
+    // 표에 든 언어 수와 샘플 수가 같아야 한다 — grammar를 늘리고 샘플을 안 더하면 그 언어가 안 돈다.
+    try std.testing.expectEqual(grammar_table.len, samples.len);
+
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+    var failed: usize = 0;
+    for (samples) |s| {
+        highlights(allocator, s.lang, s.src, &spans);
+        if (spans.items.len == 0) {
+            std.debug.print("grammar '{s}'가 색을 하나도 못 냈다 — 진입점·쿼리를 확인하라\n", .{@tagName(s.lang)});
+            failed += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failed);
 }

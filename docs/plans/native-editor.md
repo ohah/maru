@@ -434,13 +434,41 @@
   - **번들 언어 목록(이 문서가 소유한다)**. 열린 집합이 아니다 — 여기 없는 확장자는 무색이고, 늘리려면
     이 표에 행을 더하면서 [third-party-licenses.md](../third-party-licenses.md)의 라이선스 확인을 함께 한다.
 
-    | 언어 | grammar | 버전 | `parser.c` object 크기 |
+    | 언어 | grammar | 버전 | object 크기(파서+스캐너) |
     | --- | --- | --- | --- |
     | Zig | `tree-sitter-grammars/tree-sitter-zig` | v1.1.2 | 736KB |
+    | JSON | `tree-sitter/tree-sitter-json` | v0.24.8 | 19KB |
+    | Markdown | `tree-sitter-grammars/tree-sitter-markdown` | v0.5.1 | 990KB |
+    | JavaScript | `tree-sitter/tree-sitter-javascript` | v0.25.0 | 502KB |
+    | TypeScript · TSX | `tree-sitter/tree-sitter-typescript` | v0.23.2 | 3026KB |
+    | C | `tree-sitter/tree-sitter-c` | v0.24.1 | 689KB |
+    | C++ | `tree-sitter/tree-sitter-cpp` | v0.23.4 | 3488KB |
+    | Python | `tree-sitter/tree-sitter-python` | v0.25.0 | 519KB |
+    | Go | `tree-sitter/tree-sitter-go` | v0.25.0 | 266KB |
+    | Rust | `tree-sitter/tree-sitter-rust` | v0.24.0 | 1186KB |
+    | Java | `tree-sitter/tree-sitter-java` | v0.23.5 | 476KB |
+    | Ruby | `tree-sitter/tree-sitter-ruby` | v0.23.1 | 2162KB |
+    | PHP | `tree-sitter/tree-sitter-php` | v0.24.2 | 2254KB |
+    | Kotlin | `fwcd/tree-sitter-kotlin` | 0.3.8 | 0KB |
+    | Bash | `tree-sitter/tree-sitter-bash` | v0.25.0 | 1543KB |
+    | CSS | `tree-sitter/tree-sitter-css` | v0.23.2 | 179KB |
+    | HTML | `tree-sitter/tree-sitter-html` | v0.23.2 | 63KB |
 
-    **Zig 하나로 시작한다.** 이 저장소를 이 편집기로 여는 것이 첫 소비이고, grammar가 실제로 붙는지를
-    재는 데 하나면 충분하다. 코어(896KB)는 언어 수와 무관한 **고정 비용**이라 두 번째 언어부터가 진짜
-    증가분이다 — 그래서 하나씩 판단한다.
+    **합계 약 17.7MB**(코어 896KB 별도). ~~Zig 하나로 시작한다~~ — 2026-08-29 사용자 결정으로 **메이저
+    언어를 한 번에 싣는다**. 크기 대비가 극단적으로 갈린다는 것을 실측으로 확인하고 그 위에서 정했다:
+    JSON 19KB·HTML 63KB·Go 266KB는 거의 공짜인데 **C++ 3.5MB · TypeScript 3.0MB · PHP 2.3MB ·
+    Ruby 2.2MB 넷이 전체의 65%**를 먹는다. 코어는 언어 수와 무관한 고정 비용이다.
+
+    **상속을 우리가 잇는다.** C++ 쿼리(70줄)는 C(81줄)를, TypeScript(35줄)는 JavaScript(204줄)를
+    전제한다 — Neovim 이 `; inherits:` 로 잇는 그 구조인데 tree-sitter 자체에는 그 기능이 없다(쿼리
+    파일이 그냥 텍스트다). 안 이으면 그 언어가 **거의 무색**이 되고, 실제로 `SYN18`이 C++에서 색이
+    하나도 안 나오는 것을 잡았다. 기본을 앞에 두어 언어 고유 패턴이 뒤에서 이기게 한다(§5.3 겹침 규칙).
+
+    **한 저장소가 두 grammar 를 내는 판이 있다** — TypeScript/TSX(같은 쿼리), Markdown 블록/인라인,
+    PHP `php`/`php_only`. 지금 싣는 것은 TS·TSX 둘 다, Markdown **블록만**, PHP 는 HTML 이 섞인 쪽이다.
+
+    **크기는 `zig build-obj -OReleaseFast` 산출물 실측이다**(배포 `macos-dmg` 가 쓰는 모드). 링크·strip
+    전 값이라 `.app` 증가분의 상한으로 읽는다.
 
     **크기는 `zig build-obj -OReleaseFast`(배포 `macos-dmg`가 쓰는 모드) 산출물 실측이다.** 링크·strip
     전 값이라 `.app` 증가분의 상한으로 읽는다. 모드에 따라 크게 갈린다 — 같은 방법으로 `Debug`는

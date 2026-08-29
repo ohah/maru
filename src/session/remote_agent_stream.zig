@@ -343,3 +343,41 @@ test "RA4 가 실제로 뱉은 wire 를 그대로 먹는다 — 두 층의 계�
     try testing.expectEqual(@as(usize, 3), beats);
     try testing.expect(saw_prompt and saw_permission and saw_stop_with_quotes);
 }
+
+test "이벤트 트래픽도 생존 신호다 — 하트비트가 없어도 죽었다고 하지 않는다" {
+    var ch = Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    var t: u64 = 0;
+    while (t < 60_000) : (t += 5_000) {
+        _ = ch.feed("{\"nonce\":\"4331_7\",\"line\":\"claude\\tx\"}", t);
+        ch.tick(t);
+    }
+    try testing.expectEqual(State.open, ch.state);
+}
+
+test "닫힌 뒤에는 사유가 안 덮인다 — 첫 사유가 진짜 원인이다" {
+    var ch = Channel.init(0);
+    ch.tick(hello_deadline_ms); // no_hello
+    try testing.expectEqual(Closed.no_hello, ch.closed_reason.?);
+    ch.eof();
+    ch.tick(1_000_000);
+    try testing.expectEqual(Closed.no_hello, ch.closed_reason.?);
+}
+
+test "깨진 프레임은 무시하되 채널을 죽이지 않는다 — 한 줄 때문에 축이 닫히면 안 된다" {
+    var ch = Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    var big: [max_line_bytes + 10]u8 = undefined;
+    @memset(&big, 'x');
+    try testing.expectEqual(Frame.ignored, ch.feed(&big, 1)); // 상한 초과
+    try testing.expectEqual(Frame.ignored, ch.feed("{\"nonce\":\"4331_7\",\"line\":\"unterminated", 2)); // 잘림
+    try testing.expectEqual(Frame.ignored, ch.feed("{\"nonce\":\"4331_7\"}", 3)); // line 없음
+    try testing.expectEqual(State.open, ch.state);
+}
+
+test "시계가 뒤로 가도 죽었다고 하지 않는다 — 포화 뺄셈이 그것을 막는다" {
+    var ch = Channel.init(1_000_000);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 1_000_000);
+    ch.tick(0);
+    try testing.expectEqual(State.open, ch.state);
+}

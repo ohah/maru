@@ -10955,10 +10955,21 @@ fn applyRemoteHookFile(
 
         const lock_fd = std.c.open(lock_path.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
         if (lock_fd >= 0) {
-            // **경합이면 물러난다.** 다른 인스턴스가 지금 같은 일을 하고 있고, 그쪽이 끝내면 결과는 같다.
-            if (std.c.flock(lock_fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
-                _ = std.c.close(lock_fd);
-                return error.Contended;
+            // **경합이면 잠깐 기다린다 — 물러나지 않는다.** 임계구역은 작은 파일 하나를 다시 쓰는
+            // 일이라 곧 풀린다. 여기서 나가면 호출자가 그것을 «설치 못 했다» 로 읽고 그 목적지의 축을
+            // 영영 안 연다(다시 안 두드리는 것이 폭주 방지 규칙이라 더 그렇다) — 실측에서 동시 여섯 중
+            // 다섯이 그렇게 나갔다.
+            //
+            // ⚠️ **무한히 기다리지는 않는다.** 락을 쥔 쪽이 멎으면 이 프로세스도 함께 멎고, 그것은
+            // 「멎은 tmux 가 채널을 죽였다」와 같은 실패다.
+            var waited_ms: u64 = 0;
+            while (std.c.flock(lock_fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+                if (waited_ms >= maru.cli.agent_hooks.lock_wait_ms) {
+                    _ = std.c.close(lock_fd);
+                    return error.Contended;
+                }
+                _ = usleep(10 * 1000);
+                waited_ms += 10;
             }
         }
         defer if (lock_fd >= 0) {

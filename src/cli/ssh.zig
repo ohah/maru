@@ -201,7 +201,16 @@ pub const wrapper_script =
     // 원격 pane 신원(계획 RA2). **조립은 Zig 가 했다** — 셸에서 이어 붙이면 «훅이 쓰는 이름 ≠ maru 가
     // 읽는 이름» 이 조용히 성립한다(계약 §4). 값이 없으면 옵션을 **아예 안 붙인다**: 항상 붙이면
     // 사용자 `~/.ssh/config` 의 `SendEnv` 목록에 빈 이름이 끼어 든다(keepalive 가 0 일 때와 같은 규율).
-    "lce=\"\"; [ -n \"$lcp\" ] && lce=\"-o SendEnv=LC_MARU_PANE\"; " ++
+    // ⚠️ **nonce 가 없어도 `SendEnv` 는 항상 붙인다.** 예전에는 값이 있을 때만 붙였는데, 그러면
+    // **ControlMaster 를 만든 첫 호출**이 그 옵션 없이 뜨는 경우가 생긴다(maru 밖 터미널에서 친
+    // `maru ssh`). 그 마스터는 `ControlPersist` 동안 살아 있고, 그 뒤에 열린 **maru pane 이 그것을
+    // 재사용하면 자기 값을 조용히 잃는다** — 훅은 빈 nonce 를 보고 그냥 나가므로 이벤트가 0 이고,
+    // 화면에도 로그에도 아무것도 안 남는다(2026-08-30 실서버 실측으로 재현했다: 마스터를 SendEnv
+    // 없이 띄우면 이후 세션의 값이 빈 채로 도착한다).
+    //
+    // 빈 값을 보내는 것은 무해하다 — 원격 훅의 첫 가드가 빈 nonce 를 거른다. 서버가 `LC_*` 를 안
+    // 받으면 그때도 무해하다(그 옵션은 그냥 무시된다).
+    "lce=\"-o SendEnv=LC_MARU_PANE\"; " ++
     "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\" 2>/dev/null; " ++
     // keepalive는 **값이 0이면 아예 안 붙인다**. ssh는 커맨드라인 `-o`가 설정 파일보다 우선이라, 항상
     // 붙이면 사용자가 `~/.ssh/config`에 적어 둔 ServerAlive* 를 말없이 덮는다(`ssh -G` 실측 규칙과 같은 결).
@@ -756,7 +765,10 @@ test "buildArgv: 원격 pane 신원이 있으면 $7 에 실리고 스크립트�
     // 스크립트는 값이 있을 때만 옵션을 붙인다 — 없으면 사용자 `~/.ssh/config` 의 SendEnv 목록을
     // 빈 이름으로 어지럽힌다(keepalive 가 0 일 때 `-o` 를 아예 안 붙이는 것과 같은 규율).
     const s2 = scriptFor(false);
-    try std.testing.expect(std.mem.indexOf(u8, s2, "lce=\"\"; [ -n \"$lcp\" ] && lce=\"-o SendEnv=LC_MARU_PANE\";") != null);
+    // **조건 없이 붙는다** — 마스터를 만든 첫 호출에 이 옵션이 없으면 그 마스터를 재사용하는
+    // 이후 pane 들이 자기 값을 조용히 잃는다(실서버 실측).
+    try std.testing.expect(std.mem.indexOf(u8, s2, "lce=\"-o SendEnv=LC_MARU_PANE\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s2, "[ -n \"$lcp\" ] && lce=") == null);
     // 세 갈래 모두 그 값을 env 로 싣고 옵션 자리를 갖는다.
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, s2, "LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce"));
 }

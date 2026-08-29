@@ -269,7 +269,8 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
    연 Term은 PTY와 그 자식이 `maru-sessiond` 프로세스에 살아서 GUI 프로세스의 `proc_pidinfo`가 닿지 않는다
    (pid 네임스페이스 문제가 아니라 소유 프로세스가 다른 문제다 — `session_host/remote_term_backend.zig`의
    `processCwd`가 그래서 `null`을 낸다). 그 Term에서는 OSC 7이 **유일한** 출처다. 메우려면 host가 관측
-   payload에 cwd를 실어야 하고 그건 wire schema 변경이라 별도 슬라이스다. **축이 갈리지는 않는다** — 폴백이
+   payload에 cwd authority를 실어야 하고 그 순서는
+   [Session host kernel cwd parity 구현 계획](plans/session-host-kernel-cwd.md)이 소유한다. **축이 갈리지는 않는다** — 폴백이
    없어도 GUI와 제어 평면이 같은 지점을 거치므로 둘 다 함께 비고, 한쪽만 아는 상태가 되지 않는다.
 
    **이 2단 규칙은 게이트가 강제한다**(`tests/boundary/cwd_axis.zig`, `check-boundaries`). 규칙이 주석에만

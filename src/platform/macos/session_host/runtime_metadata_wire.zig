@@ -95,6 +95,7 @@ pub const OwnedMetadataDto = struct {
     child_pid: i32,
     host_pid: i32,
     cwd_range: Range,
+    cwd_host_range: Range,
     title_range: Range,
     ssh_range: ?Range,
     clipboard_target_range: Range,
@@ -108,6 +109,10 @@ pub const OwnedMetadataDto = struct {
 
     pub fn cwd(self: *const OwnedMetadataDto) []const u8 {
         return self.slice(self.cwd_range);
+    }
+
+    pub fn cwdHost(self: *const OwnedMetadataDto) []const u8 {
+        return self.slice(self.cwd_host_range);
     }
 
     pub fn windowTitle(self: *const OwnedMetadataDto) []const u8 {
@@ -161,6 +166,7 @@ pub const OwnedMetadataDto = struct {
             a.child_pid != b.child_pid or
             a.host_pid != b.host_pid or
             !std.mem.eql(u8, a.cwd(), b.cwd()) or
+            !std.mem.eql(u8, a.cwdHost(), b.cwdHost()) or
             !std.mem.eql(u8, a.windowTitle(), b.windowTitle()) or
             !optionalStringEql(a.sshRemoteDest(), b.sshRemoteDest()) or
             !std.mem.eql(u8, a.clipboardReadTarget(), b.clipboardReadTarget()) or
@@ -258,6 +264,11 @@ pub fn ownedMetadataSemanticEqlEvent(
             event_payload,
             event.cwd,
             dto.cwd(),
+        ) or
+        !runtime_event_wire.decodedStringSpanEqualsBytes(
+            event_payload,
+            event.cwd_host,
+            dto.cwdHost(),
         ) or
         !runtime_event_wire.decodedStringSpanEqualsBytes(
             event_payload,
@@ -472,6 +483,7 @@ fn validateCurrentMetadataStructure(dto: *const OwnedMetadataDto) bool {
     const backing_len = if (dto.backing) |backing| backing.len else 0;
     var offset: usize = 0;
     if (!rangeIsCanonical(dto.cwd_range, &offset, backing_len)) return false;
+    if (!rangeIsCanonical(dto.cwd_host_range, &offset, backing_len)) return false;
     if (!rangeIsCanonical(dto.title_range, &offset, backing_len)) return false;
     if (dto.ssh_range) |range| {
         if (!rangeIsCanonical(range, &offset, backing_len)) return false;
@@ -525,6 +537,7 @@ fn metadataSemanticDigest(
     hashInt(&hasher, i32, dto.child_pid);
     hashInt(&hasher, i32, dto.host_pid);
     hashRange(&hasher, dto.cwd_range, backing);
+    hashRange(&hasher, dto.cwd_host_range, backing);
     hashRange(&hasher, dto.title_range, backing);
     hashBool(&hasher, dto.ssh_range != null);
     if (dto.ssh_range) |range| hashRange(&hasher, range, backing);
@@ -659,7 +672,7 @@ pub fn decodeObservationEnvelope(
 }
 
 /// Materializes an allocation-free event preflight into the single owning DTO used by GUI and
-/// external adoption. There is exactly one heap allocation, sized to the four retained strings;
+/// external adoption. There is exactly one heap allocation, sized to the five retained strings;
 /// process names stay in the fixed zero-tailed array.
 fn materializePreflight(
     allocator: std.mem.Allocator,
@@ -671,6 +684,8 @@ fn materializePreflight(
     if (!std.mem.eql(u8, &actual_digest, &source_digest)) return error.Malformed;
     var backing_len: usize = 0;
     backing_len = std.math.add(usize, backing_len, metadata.cwd.decoded_len) catch
+        return error.ResourceExhausted;
+    backing_len = std.math.add(usize, backing_len, metadata.cwd_host.decoded_len) catch
         return error.ResourceExhausted;
     backing_len = std.math.add(usize, backing_len, metadata.window_title.decoded_len) catch
         return error.ResourceExhausted;
@@ -725,6 +740,7 @@ fn materializePreflight(
         .child_pid = metadata.child_pid,
         .host_pid = metadata.host_pid,
         .cwd_range = undefined,
+        .cwd_host_range = undefined,
         .title_range = undefined,
         .ssh_range = null,
         .clipboard_target_range = undefined,
@@ -734,6 +750,7 @@ fn materializePreflight(
 
     var offset: usize = 0;
     dto.cwd_range = try copySpan(backing, &offset, payload, metadata.cwd);
+    dto.cwd_host_range = try copySpan(backing, &offset, payload, metadata.cwd_host);
     dto.title_range = try copySpan(backing, &offset, payload, metadata.window_title);
     if (metadata.ssh_remote_dest) |ssh| dto.ssh_range = try copySpan(backing, &offset, payload, ssh);
     dto.clipboard_target_range = try copySpan(
@@ -947,6 +964,7 @@ fn materializePreparedEventMetadata(
         .child_pid = recipe.child_pid,
         .host_pid = recipe.host_pid,
         .cwd_range = ownedRange(projection.cwd),
+        .cwd_host_range = ownedRange(projection.cwd_host),
         .title_range = ownedRange(projection.window_title),
         .ssh_range = if (projection.ssh_remote_dest_present_raw == 1)
             ownedRange(projection.ssh_remote_dest)
@@ -1053,26 +1071,59 @@ test "runtime metadata seal inventory covers every OwnedMetadataDto field" {
     // desynchronise the exact-once cleanup mirror without any compile error. This list is the
     // reminder: extend the seal, then extend this list.
     const expected = [_][]const u8{
-        "allocator",              "backing",
-        "revision",               "observer_generation",
-        "title_generation",       "cols",
-        "rows",                   "semantic_state",
-        "alt_active",             "app_cursor_keys",
-        "app_keypad",             "kitty_flags",
-        "alternate_scroll",       "mouse_tracking",
-        "mouse_tracking_mode",    "bracketed_paste",
-        "bell_count",             "clipboard_write_seq",
-        "clipboard_read_seq",     "foreground_available",
-        "foreground_pgid",        "child_pid",
-        "host_pid",               "cwd_range",
-        "title_range",            "ssh_range",
-        "clipboard_target_range", "processes",
-        "process_count",
+        "allocator",           "backing",
+        "revision",            "observer_generation",
+        "title_generation",    "cols",
+        "rows",                "semantic_state",
+        "alt_active",          "app_cursor_keys",
+        "app_keypad",          "kitty_flags",
+        "alternate_scroll",    "mouse_tracking",
+        "mouse_tracking_mode", "bracketed_paste",
+        "bell_count",          "clipboard_write_seq",
+        "clipboard_read_seq",  "foreground_available",
+        "foreground_pgid",     "child_pid",
+        "host_pid",            "cwd_range",
+        "cwd_host_range",      "title_range",
+        "ssh_range",           "clipboard_target_range",
+        "processes",           "process_count",
     };
     const fields = @typeInfo(OwnedMetadataDto).@"struct".fields;
     try std.testing.expectEqual(expected.len, fields.len);
     inline for (fields, expected) |field, name|
         try std.testing.expectEqualStrings(name, field.name);
+}
+
+test "K1 cwd authority is optional strict and owned beside cwd" {
+    const allocator = std.testing.allocator;
+    const with_authority =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","cwd_host":"devbox","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    var current = try decodeMetadataEvent(allocator, with_authority, .supported);
+    defer current.deinit();
+    try std.testing.expectEqualStrings("/repo", current.current.cwd());
+    try std.testing.expectEqualStrings("devbox", current.current.cwdHost());
+
+    const legacy =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    var old = try decodeMetadataEvent(allocator, legacy, .supported);
+    defer old.deinit();
+    try std.testing.expectEqualStrings("", old.current.cwdHost());
+
+    const wrong_type =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","cwd_host":7,"window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try std.testing.expectError(error.Malformed, decodeMetadataEvent(allocator, wrong_type, .supported));
+
+    const duplicate =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","cwd_host":"a","cwd_host":"b","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try std.testing.expectError(error.Malformed, decodeMetadataEvent(allocator, duplicate, .supported));
+
+    const authority_without_cwd =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"","cwd_host":"devbox","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    try std.testing.expectError(error.Malformed, decodeMetadataEvent(allocator, authority_without_cwd, .supported));
 }
 
 test "runtime metadata transfer seal binds address descriptor raw bytes scalars and processes" {

@@ -60,6 +60,7 @@ pub const MetadataPreparationRecipe = struct {
     child_pid: i32 = 0,
     host_pid: i32 = 0,
     cwd: StringRecipe = .{},
+    cwd_host: StringRecipe = .{},
     window_title: StringRecipe = .{},
     ssh_remote_dest_present_raw: u8 = 0,
     ssh_remote_dest: StringRecipe = .{},
@@ -101,6 +102,7 @@ pub const FilledRange = struct {
 
 pub const MetadataFillProjection = struct {
     cwd: FilledRange,
+    cwd_host: FilledRange,
     window_title: FilledRange,
     ssh_remote_dest_present_raw: u8,
     ssh_remote_dest: FilledRange,
@@ -185,6 +187,7 @@ pub fn fillMetadataRecipe(
 
     processes.* = [_]FilledProcess{.{}} ** max_process_entries;
     try decodeInto(payload, metadata.cwd, recipe.cwd, backing);
+    try decodeInto(payload, metadata.cwd_host, recipe.cwd_host, backing);
     try decodeInto(payload, metadata.window_title, recipe.window_title, backing);
     if (metadata.ssh_remote_dest) |span|
         try decodeInto(payload, span, recipe.ssh_remote_dest, backing);
@@ -212,6 +215,7 @@ pub fn fillMetadataRecipe(
     )) return error.Malformed;
     return .{
         .cwd = filledRange(recipe.cwd),
+        .cwd_host = filledRange(recipe.cwd_host),
         .window_title = filledRange(recipe.window_title),
         .ssh_remote_dest_present_raw = recipe.ssh_remote_dest_present_raw,
         .ssh_remote_dest = filledRange(recipe.ssh_remote_dest),
@@ -295,6 +299,7 @@ fn buildMetadataRecipe(
     };
     var destination: usize = 0;
     result.cwd = try stringRecipe(payload, metadata.cwd, &destination);
+    result.cwd_host = try stringRecipe(payload, metadata.cwd_host, &destination);
     result.window_title = try stringRecipe(payload, metadata.window_title, &destination);
     if (metadata.ssh_remote_dest) |span|
         result.ssh_remote_dest = try stringRecipe(payload, span, &destination);
@@ -376,6 +381,7 @@ fn validateFillPlan(
 
     var destination: u32 = 0;
     try validateStringPlan(payload, metadata.cwd, recipe.cwd, &destination);
+    try validateStringPlan(payload, metadata.cwd_host, recipe.cwd_host, &destination);
     try validateStringPlan(payload, metadata.window_title, recipe.window_title, &destination);
     if ((metadata.ssh_remote_dest != null) != (recipe.ssh_remote_dest_present_raw == 1))
         return error.Malformed;
@@ -475,7 +481,7 @@ const test_authority: runtime_event_types.EventAuthorityView = .{
     .generation = .{ .tracked = 3 },
 };
 const test_metadata_payload =
-    \\{"event":"runtime.metadata","metadata_revision":9,"metadata":{"cwd":"\/repo\u002Fsrc","window_title":"work","ssh_remote_dest":"dev@example.test","semantic_state":1,"alt_active":false,"app_cursor_keys":true,"app_keypad":false,"kitty_flags":3,"alternate_scroll":true,"mouse_tracking":true,"mouse_tracking_mode":2,"bracketed_paste":true,"bell_count":11,"clipboard_write_seq":12,"clipboard_read_seq":13,"clipboard_read_target":"c","observer_generation":14,"title_generation":15,"cols":120,"rows":40,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"zsh"}]}}
+    \\{"event":"runtime.metadata","metadata_revision":9,"metadata":{"cwd":"\/repo\u002Fsrc","cwd_host":"devbox","window_title":"work","ssh_remote_dest":"dev@example.test","semantic_state":1,"alt_active":false,"app_cursor_keys":true,"app_keypad":false,"kitty_flags":3,"alternate_scroll":true,"mouse_tracking":true,"mouse_tracking_mode":2,"bracketed_paste":true,"bell_count":11,"clipboard_write_seq":12,"clipboard_read_seq":13,"clipboard_read_target":"c","observer_generation":14,"title_generation":15,"cols":120,"rows":40,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"zsh"}]}}
 ;
 const test_probe_metadata_payload =
     \\{"event":"runtime.metadata","metadata_revision":9,"observation_probe_nonce":48879,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":false,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
@@ -613,17 +619,18 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
         .{ "pid", i32 }, .{ "name_len", u8 }, .{ "name_digest", Digest },
     });
     try expectExactFields(std.meta.fields(MetadataPreparationRecipe), .{
-        .{ "payload_digest", Digest },              .{ "semantic_digest", Digest },                       .{ "observation_probe_nonce", u64 },
-        .{ "backing_bytes", u32 },                  .{ "revision", u64 },                                 .{ "observer_generation", u64 },
-        .{ "title_generation", u32 },               .{ "cols", u16 },                                     .{ "rows", u16 },
-        .{ "semantic_state_raw", u8 },              .{ "alt_active_raw", u8 },                            .{ "app_cursor_keys_raw", u8 },
-        .{ "app_keypad_raw", u8 },                  .{ "kitty_flags_raw", u8 },                           .{ "alternate_scroll_raw", u8 },
-        .{ "mouse_tracking_raw", u8 },              .{ "mouse_tracking_mode", u8 },                       .{ "bracketed_paste_raw", u8 },
-        .{ "bell_count", u64 },                     .{ "clipboard_write_seq", u64 },                      .{ "clipboard_read_seq", u64 },
-        .{ "foreground_available_raw", u8 },        .{ "foreground_pgid_present_raw", u8 },               .{ "foreground_pgid", i32 },
-        .{ "child_pid", i32 },                      .{ "host_pid", i32 },                                 .{ "cwd", StringRecipe },
-        .{ "window_title", StringRecipe },          .{ "ssh_remote_dest_present_raw", u8 },               .{ "ssh_remote_dest", StringRecipe },
-        .{ "clipboard_read_target", StringRecipe }, .{ "processes", [max_process_entries]ProcessRecipe }, .{ "process_count", u8 },
+        .{ "payload_digest", Digest },        .{ "semantic_digest", Digest },             .{ "observation_probe_nonce", u64 },
+        .{ "backing_bytes", u32 },            .{ "revision", u64 },                       .{ "observer_generation", u64 },
+        .{ "title_generation", u32 },         .{ "cols", u16 },                           .{ "rows", u16 },
+        .{ "semantic_state_raw", u8 },        .{ "alt_active_raw", u8 },                  .{ "app_cursor_keys_raw", u8 },
+        .{ "app_keypad_raw", u8 },            .{ "kitty_flags_raw", u8 },                 .{ "alternate_scroll_raw", u8 },
+        .{ "mouse_tracking_raw", u8 },        .{ "mouse_tracking_mode", u8 },             .{ "bracketed_paste_raw", u8 },
+        .{ "bell_count", u64 },               .{ "clipboard_write_seq", u64 },            .{ "clipboard_read_seq", u64 },
+        .{ "foreground_available_raw", u8 },  .{ "foreground_pgid_present_raw", u8 },     .{ "foreground_pgid", i32 },
+        .{ "child_pid", i32 },                .{ "host_pid", i32 },                       .{ "cwd", StringRecipe },
+        .{ "cwd_host", StringRecipe },        .{ "window_title", StringRecipe },          .{ "ssh_remote_dest_present_raw", u8 },
+        .{ "ssh_remote_dest", StringRecipe }, .{ "clipboard_read_target", StringRecipe }, .{ "processes", [max_process_entries]ProcessRecipe },
+        .{ "process_count", u8 },
     });
     try expectExactUnionFields(std.meta.fields(AcceptedPreparationRecipe), .{
         .{ "revoked", u64 },                        .{ "invalidated", void }, .{ "resized", resize_wire.Event },
@@ -636,9 +643,9 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
         .{ "start", u32 }, .{ "len", u32 },
     });
     try expectExactFields(std.meta.fields(MetadataFillProjection), .{
-        .{ "cwd", FilledRange },                   .{ "window_title", FilledRange },
-        .{ "ssh_remote_dest_present_raw", u8 },    .{ "ssh_remote_dest", FilledRange },
-        .{ "clipboard_read_target", FilledRange }, .{ "process_count", u8 },
+        .{ "cwd", FilledRange },                .{ "cwd_host", FilledRange },        .{ "window_title", FilledRange },
+        .{ "ssh_remote_dest_present_raw", u8 }, .{ "ssh_remote_dest", FilledRange }, .{ "clipboard_read_target", FilledRange },
+        .{ "process_count", u8 },
     });
     const recipe = try buildEventPreparationRecipe(
         testClassification(test_metadata_payload),
@@ -647,16 +654,18 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
     const metadata = testMetadataRecipe(&recipe);
     try std.testing.expectEqual(@as(u32, 9), metadata.cwd.decoded_len);
     try std.testing.expectEqual(@as(u32, 0), metadata.cwd.destination_start);
-    try std.testing.expectEqual(@as(u32, 9), metadata.window_title.destination_start);
-    try std.testing.expectEqual(@as(u32, 13), metadata.ssh_remote_dest.destination_start);
-    try std.testing.expectEqual(@as(u32, 29), metadata.clipboard_read_target.destination_start);
-    try std.testing.expectEqual(@as(u32, 30), metadata.backing_bytes);
+    try std.testing.expectEqual(@as(u32, 6), metadata.cwd_host.decoded_len);
+    try std.testing.expectEqual(@as(u32, 9), metadata.cwd_host.destination_start);
+    try std.testing.expectEqual(@as(u32, 15), metadata.window_title.destination_start);
+    try std.testing.expectEqual(@as(u32, 19), metadata.ssh_remote_dest.destination_start);
+    try std.testing.expectEqual(@as(u32, 35), metadata.clipboard_read_target.destination_start);
+    try std.testing.expectEqual(@as(u32, 36), metadata.backing_bytes);
 }
 
 test "C3-3b2b2 metadata fill decodes strings and process values into caller storage" {
     const classification = testClassification(test_metadata_payload);
     const recipe = try buildEventPreparationRecipe(classification, test_metadata_payload);
-    var backing: [30]u8 = [_]u8{0xcc} ** 30;
+    var backing: [36]u8 = [_]u8{0xcc} ** 36;
     var processes = [_]FilledProcess{.{}} ** max_process_entries;
     const projection = try fillMetadataRecipe(
         testMetadataRecipe(&recipe),
@@ -666,6 +675,7 @@ test "C3-3b2b2 metadata fill decodes strings and process values into caller stor
         &processes,
     );
     try std.testing.expectEqualStrings("/repo/src", backing[projection.cwd.start..][0..projection.cwd.len]);
+    try std.testing.expectEqualStrings("devbox", backing[projection.cwd_host.start..][0..projection.cwd_host.len]);
     try std.testing.expectEqualStrings("work", backing[projection.window_title.start..][0..projection.window_title.len]);
     try std.testing.expectEqualStrings("dev@example.test", backing[projection.ssh_remote_dest.start..][0..projection.ssh_remote_dest.len]);
     try std.testing.expectEqualStrings("c", backing[projection.clipboard_read_target.start..][0..projection.clipboard_read_target.len]);
@@ -796,7 +806,7 @@ test "C3-3b2b2 accepted metadata cannot be paired with different payload bytes" 
         post_copy_classification,
         &post_copy_payload,
     );
-    var post_copy_backing: [30]u8 = [_]u8{0xa5} ** 30;
+    var post_copy_backing: [36]u8 = [_]u8{0xa5} ** 36;
     var post_copy_processes = [_]FilledProcess{.{}} ** max_process_entries;
     var mutation: PostCopyMutation = .{
         .payload = &post_copy_payload,
@@ -816,9 +826,10 @@ test "C3-3b2b2 accepted metadata cannot be paired with different payload bytes" 
         ),
     );
     try std.testing.expectEqualStrings("/repo/src", post_copy_backing[0..9]);
-    try std.testing.expectEqualStrings("work", post_copy_backing[9..13]);
-    try std.testing.expectEqualStrings("dev@example.test", post_copy_backing[13..29]);
-    try std.testing.expectEqualStrings("c", post_copy_backing[29..30]);
+    try std.testing.expectEqualStrings("devbox", post_copy_backing[9..15]);
+    try std.testing.expectEqualStrings("work", post_copy_backing[15..19]);
+    try std.testing.expectEqualStrings("dev@example.test", post_copy_backing[19..35]);
+    try std.testing.expectEqualStrings("c", post_copy_backing[35..36]);
     try std.testing.expectEqual(@as(i32, 77), post_copy_processes[0].pid);
     try std.testing.expectEqualStrings("zsh", post_copy_processes[0].slice());
 }
@@ -826,7 +837,7 @@ test "C3-3b2b2 accepted metadata cannot be paired with different payload bytes" 
 test "C3-3b2b2 fill rejects wrong destination size before changing either scratch" {
     const classification = testClassification(test_metadata_payload);
     const recipe = try buildEventPreparationRecipe(classification, test_metadata_payload);
-    var backing: [31]u8 = [_]u8{0xa5} ** 31;
+    var backing: [37]u8 = [_]u8{0xa5} ** 37;
     var processes = [_]FilledProcess{.{}} ** max_process_entries;
     const backing_before = backing;
     const processes_before = processes;
@@ -850,15 +861,15 @@ test "C3-3b2b2 fill rejects wrong destination size before changing either scratc
         .accepted => |*accepted| &accepted.metadata,
         .violation => unreachable,
     };
-    var ordinary_backing: [30]u8 = [_]u8{0xa5} ** 30;
+    var ordinary_backing: [36]u8 = [_]u8{0xa5} ** 36;
     var ordinary_processes = [_]FilledProcess{.{}} ** max_process_entries;
 
-    const payload_backing = mutable_payload[0..30];
+    const payload_backing = mutable_payload[0..36];
     try std.testing.expectError(
         error.DestinationOverlap,
         fillMetadataRecipe(metadata, mutable_classification, &mutable_payload, payload_backing, &ordinary_processes),
     );
-    const recipe_backing = std.mem.asBytes(metadata)[0..30];
+    const recipe_backing = std.mem.asBytes(metadata)[0..36];
     try std.testing.expectError(
         error.DestinationOverlap,
         fillMetadataRecipe(metadata, mutable_classification, &mutable_payload, recipe_backing, &ordinary_processes),
@@ -873,7 +884,7 @@ test "C3-3b2b2 fill rejects wrong destination size before changing either scratc
         error.DestinationOverlap,
         fillMetadataRecipe(metadata, mutable_classification, &mutable_payload, &ordinary_backing, recipe_processes),
     );
-    const process_backing = std.mem.asBytes(&ordinary_processes)[0..30];
+    const process_backing = std.mem.asBytes(&ordinary_processes)[0..36];
     try std.testing.expectError(
         error.DestinationOverlap,
         fillMetadataRecipe(metadata, mutable_classification, &mutable_payload, process_backing, &ordinary_processes),
@@ -893,13 +904,13 @@ test "C3-3b2b2 fill rejects wrong destination size before changing either scratc
     );
 
     const fake_start = std.math.maxInt(usize) - 10;
-    const overflowing: []u8 = @as([*]u8, @ptrFromInt(fake_start))[0..30];
+    const overflowing: []u8 = @as([*]u8, @ptrFromInt(fake_start))[0..36];
     try std.testing.expectError(
         error.DestinationOverlap,
         fillMetadataRecipe(metadata, mutable_classification, &mutable_payload, overflowing, &ordinary_processes),
     );
 
-    var adjacent: [test_metadata_payload.len + 30]u8 = undefined;
+    var adjacent: [test_metadata_payload.len + 36]u8 = undefined;
     @memcpy(adjacent[0..test_metadata_payload.len], test_metadata_payload);
     const adjacent_payload = adjacent[0..test_metadata_payload.len];
     const adjacent_backing = adjacent[test_metadata_payload.len..];
@@ -925,7 +936,7 @@ test "C3-3b2b2 fill rejects noncanonical raw recipe state before changing scratc
         .violation => unreachable,
     };
     metadata.alt_active_raw = 2;
-    var backing: [30]u8 = [_]u8{0xa5} ** 30;
+    var backing: [36]u8 = [_]u8{0xa5} ** 36;
     var processes = [_]FilledProcess{.{}} ** max_process_entries;
     const backing_before = backing;
     const processes_before = processes;
@@ -962,7 +973,7 @@ test "C3-3b2b2 fill rejects noncanonical raw recipe state before changing scratc
             .process_tail => candidate_metadata.processes[1].pid = 1,
             .digest => candidate_metadata.semantic_digest[0] ^= 1,
         }
-        var candidate_backing: [30]u8 = [_]u8{0xa5} ** 30;
+        var candidate_backing: [36]u8 = [_]u8{0xa5} ** 36;
         var candidate_processes = [_]FilledProcess{.{}} ** max_process_entries;
         const candidate_backing_before = candidate_backing;
         const candidate_processes_before = candidate_processes;

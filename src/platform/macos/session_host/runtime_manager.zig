@@ -1674,12 +1674,18 @@ pub const RuntimeManager = struct {
         const core = &surface.core;
         const cwd = try allocator.dupe(u8, core.currentCwd());
         errdefer allocator.free(cwd);
+        // K1 carries the paired authority through every owner/wire boundary. K2 will populate it
+        // from OSC 7 or the host-side kernel sampler; keeping it empty here leaves product cwd
+        // selection unchanged while the ownership contract is established.
+        const cwd_host = try allocator.dupe(u8, "");
+        errdefer allocator.free(cwd_host);
         const title = try allocator.dupe(u8, core.windowTitle());
         errdefer allocator.free(title);
         const ssh_dest: ?[]u8 = if (core.sshRemoteDest()) |dest| try allocator.dupe(u8, dest) else null;
         errdefer if (ssh_dest) |dest| allocator.free(dest);
         const result = server.RuntimeObservation{
             .cwd = cwd,
+            .cwd_host = cwd_host,
             .window_title = title,
             .ssh_remote_dest = ssh_dest,
             .semantic_state = @intFromEnum(core.semantic_state),

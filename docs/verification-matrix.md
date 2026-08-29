@@ -2177,6 +2177,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   구조 배선만으로 CR6f 완료 또는 default-on 가능을 주장하지 않는다. 현재 제품 gate는 1초 idle wake delta 0과 CPU
   cap, actual 1·10·100 runtime screen projector exact-zero, 7 active marker의 notifier/write/drain 증가를 소유하며,
   장시간 idle soak는 운영 백로그로 남긴다. E3b metadata visit 제거는 별도 E3b 제품·artifact gate에서 구현·검증됐다.
+- **K1 cwd authority model/wire: 구현, 제품 kernel cwd parity 미완.** MRSH v2 metadata의 optional `cwd_host`는
+  부재를 legacy unknown authority로 정규화하며, non-empty authority는 non-empty cwd와 같은 observation transaction에서만
+  소유·교체한다. type/duplicate/authority-without-cwd는 fail-close하고 server·wire·owning DTO·prepared reducer·GUI projection의
+  digest/equality/allocation rollback에 함께 결속했다. K1 producer는 의도적으로 empty authority만 게시하므로 현재 제품 동작은
+  바뀌지 않는다. `test-session-host-kernel-cwd-k1`이 Debug·ReleaseFast wire와 source/status boundary를 검증한다. host-side
+  500ms kernel sampler와 실제 daemon의 shell-integration 없는 bash/sh·detach/reattach parity는 K2·K3이며 완료 증거가 아니다.
 - **P4 input parity micro-gate: 구현.** `test-session-host-input-parity`가 Debug·ReleaseFast에서 host-backed
   AppSession의 DECSET 1003 exact-mode/중복·modifier·chrome 억제, 실제 forkpty host reader의 xterm SGR no-button motion
   byte, `selection_scroll_and_extend` 두 번 뒤 authoritative copy와 source boundary를 exact-count한다. AppSession 행은

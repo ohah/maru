@@ -1290,10 +1290,11 @@ fn metadataEqualsCurrent(
         current.bell_count != metadata.bell_count or current.clipboard_write_seq != metadata.clipboard_write_seq or
         current.clipboard_read_seq != metadata.clipboard_read_seq or current.foreground_available != (metadata.foreground_available_raw == 1) or
         (current.foreground_pgid != null) != (metadata.foreground_pgid_present_raw == 1) or
-        (current.foreground_pgid orelse 0) != metadata.foreground_pgid or current.cwd_host.items.len != 0 or
+        (current.foreground_pgid orelse 0) != metadata.foreground_pgid or
         current.agent_progress.items.len != 0 or current.foreground_processes.items.len != fill.process_count)
         return false;
     if (!std.mem.eql(u8, current.cwd.items, filledBytes(backing, fill.cwd)) or
+        !std.mem.eql(u8, current.cwd_host.items, filledBytes(backing, fill.cwd_host)) or
         !std.mem.eql(u8, current.window_title.items, filledBytes(backing, fill.window_title)) or
         !std.mem.eql(u8, current.ssh_remote_dest.items, filledBytes(backing, fill.ssh_remote_dest)) or
         !std.mem.eql(u8, current.clipboard_read_target.items, filledBytes(backing, fill.clipboard_read_target))) return false;
@@ -1313,7 +1314,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
         current.agent_progress.capacity == current.agent_progress.items.len;
     const next_capacity = [_]u64{
         metadata.cwd.decoded_len,
-        0,
+        metadata.cwd_host.decoded_len,
         metadata.window_title.decoded_len,
         metadata.ssh_remote_dest.decoded_len,
         metadata.clipboard_read_target.decoded_len,
@@ -1380,7 +1381,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
     const counts = [_]usize{
         0,
         fill.cwd.len,
-        0,
+        fill.cwd_host.len,
         fill.window_title.len,
         fill.ssh_remote_dest.len,
         fill.clipboard_read_target.len,
@@ -1412,6 +1413,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
     next.foreground_available = metadata.foreground_available_raw == 1;
     next.foreground_pgid = if (metadata.foreground_pgid_present_raw == 1) metadata.foreground_pgid else null;
     next.cwd.appendSliceAssumeCapacity(filledBytes(frame.scratch.dto_backing.items, fill.cwd));
+    next.cwd_host.appendSliceAssumeCapacity(filledBytes(frame.scratch.dto_backing.items, fill.cwd_host));
     next.window_title.appendSliceAssumeCapacity(filledBytes(frame.scratch.dto_backing.items, fill.window_title));
     next.ssh_remote_dest.appendSliceAssumeCapacity(filledBytes(frame.scratch.dto_backing.items, fill.ssh_remote_dest));
     next.clipboard_read_target.appendSliceAssumeCapacity(filledBytes(frame.scratch.dto_backing.items, fill.clipboard_read_target));

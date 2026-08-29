@@ -283,3 +283,63 @@ test "eof 는 닫고 사유를 남긴다 — 조용한 폴백은 금지다" {
     // 닫힌 뒤에는 아무것도 안 받는다.
     try testing.expectEqual(Frame.ignored, ch.feed("{\"nonce\":\"4331_7\",\"line\":\"x\"}", 1));
 }
+
+test "RA4 가 실제로 뱉은 wire 를 그대로 먹는다 — 두 층의 계약을 여기서 잠근다" {
+    // 아래 줄들은 `maru agent-events --stdio` 가 **실제로 출력한 바이트**다(2026-08-29).
+    // 스트리머 쪽 포맷이 바뀌면 이 테스트가 먼저 깨진다 — 그것이 이 테스트의 목적이다.
+    const wire = [_][]const u8{
+        "{\"hello\":\"maru-agent-events\",\"v\":1}",
+        "{\"nonce\":\"4331_9\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"PermissionRequest\\\",\\\"tool_name\\\":\\\"Bash\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"prompt\\\":\\\"원격 프롬프트\\\"}\"}",
+        "{\"hb\":0}",
+        "{\"hb\":1}",
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"last_assistant_message\\\":\\\"따옴표 \\\\\\\"안\\\\\\\" 과 탭\\\\t까지\\\"}\"}",
+        "{\"hb\":2}",
+    };
+    var ch = Channel.init(0);
+    var events: usize = 0;
+    var beats: usize = 0;
+    var saw_prompt = false;
+    var saw_permission = false;
+    var saw_stop_with_quotes = false;
+
+    var now: u64 = 0;
+    for (wire) |line| {
+        now += 100;
+        switch (ch.feed(line, now)) {
+            .heartbeat => beats += 1,
+            .event => |e| {
+                events += 1;
+                var out: std.ArrayListUnmanaged(u8) = .empty;
+                defer out.deinit(testing.allocator);
+                try unescapeInto(&out, testing.allocator, e.line);
+                const ev = hookEventFrom(out.items) orelse return error.ParseFailed;
+                switch (ev.kind) {
+                    .user_prompt_submit => {
+                        saw_prompt = true;
+                        try testing.expectEqualStrings("4331_7", e.nonce);
+                    },
+                    .permission_request => {
+                        saw_permission = true;
+                        try testing.expectEqualStrings("4331_9", e.nonce);
+                    },
+                    .stop => {
+                        saw_stop_with_quotes = true;
+                        // 본문이 **원래 바이트로** 복원되어야 한다. payload JSON 안의 이스케이프는
+                        // 그대로 남는다(우리는 wire 한 겹만 벗긴다 — payload 는 안 파싱한다).
+                        try testing.expect(std.mem.indexOf(u8, out.items, "\\\"안\\\"") != null);
+                        // provider 구분자 탭은 진짜 탭으로 살아 있어야 한다.
+                        try testing.expect(std.mem.indexOfScalar(u8, out.items, '\t') != null);
+                        try testing.expect(std.mem.startsWith(u8, out.items, "claude\t{"));
+                    },
+                    else => {},
+                }
+            },
+            .ignored => {},
+        }
+    }
+    try testing.expectEqual(State.open, ch.state); // hello 를 봤다
+    try testing.expectEqual(@as(usize, 3), events);
+    try testing.expectEqual(@as(usize, 3), beats);
+    try testing.expect(saw_prompt and saw_permission and saw_stop_with_quotes);
+}

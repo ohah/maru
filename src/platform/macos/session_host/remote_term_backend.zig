@@ -1338,6 +1338,15 @@ pub const RemoteTermBackend = struct {
 
     /// Borrowed host socket identities for native read sources. Client/ClientSlot still own and
     /// close every descriptor; callers must replace a source whenever its identity tuple changes.
+    /// 이 host 연결을 실제로 pump 하는 runtime 이 있는가. 없으면 그 fd 를 읽을 주체가 없다.
+    fn hasRuntimeForHost(self: *RemoteTermBackend, host_id: u128) bool {
+        var it = self.runtimes.iterator();
+        while (it.next()) |row| {
+            if (row.value_ptr.host_id == host_id) return true;
+        }
+        return false;
+    }
+
     pub fn wakeSources(self: *RemoteTermBackend, out: []WakeSource) usize {
         if (self.host_pool) |pool| {
             var adapters: [max_remote_backend_runtimes]AdapterPool.AdapterSnapshot = undefined;
@@ -1346,6 +1355,11 @@ pub const RemoteTermBackend = struct {
             var count: usize = 0;
             for (adapters[0..adapter_count]) |snapshot| {
                 const source = snapshot.adapter.wakeSource() orelse continue;
+                // 읽는 주체가 없는 연결은 감시하지 않는다. `DispatchSourceRead` 는 레벨 트리거라
+                // 핸들러가 소비하지 않으면 무한 재발화한다(Apple: "schedules its event handler
+                // repeatedly while there is still data to read"). pump 는 `self.runtimes` 만 도므로
+                // runtime 이 없는 adapter 의 fd 는 영원히 안 읽히고 그대로 폭주가 된다.
+                if (!self.hasRuntimeForHost(source.host_id)) continue;
                 if (count < out.len) out[count] = .{
                     .fd = source.fd,
                     .host_id = source.host_id,

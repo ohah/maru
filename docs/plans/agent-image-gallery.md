@@ -80,7 +80,7 @@ grep -E '\.\.\.FAIL|^FAIL \(' /tmp/t.log | grep -vc SocketPathTooLong   # 그중
 | 가드(`== .agent_sessions` 일 때만 실행 / `!= …` 이면 조기 반환) | **28** | **안전** — 에이전트 전용 코드가 안 돌 뿐이다 |
 | 이분 분기 후보 | 1 | **안전**(오탐) — `if (…) captureAnchor() else null`이라 새 뷰는 `null`을 받는다 |
 
-`main.zig:1973`의 도크 셀 조립도 안전하다 — `view != .explorer` 안에서 뷰마다 **각각** 분기하고 모르는 뷰는 뷰 바만 그리고 반환한다. `setDockView`도 이탈/진입 훅이 뷰별로 갈려 있어 새 뷰는 훅이 없을 뿐이다.
+`main.zig`의 도크 셀 조립도 안전하다 — `view != .explorer` 안에서 뷰마다 **각각** 분기하고 모르는 뷰는 뷰 바만 그리고 반환한다. `setDockView`도 이탈/진입 훅이 뷰별로 갈려 있어 새 뷰는 훅이 없을 뿐이다.
 
 **그래서 29곳을 건드리지 않는다.** 기계적 변환은 노이즈만 남기고 잡는 결함이 0이다.
 
@@ -94,15 +94,15 @@ grep -E '\.\.\.FAIL|^FAIL \(' /tmp/t.log | grep -vc SocketPathTooLong   # 그중
 | `zig build macos-app-host-abi-lib` | **2** |
 
 ```
-src/platform/macos/app_session/dock.zig:670   switch (self.dock.view)
-src/session/dock_layout.zig:265               defaultRightPtForView
+src/platform/macos/app_session/dock.zig   switch (self.dock.view)
+src/session/dock_layout.zig               defaultRightPtForView
 ```
 
 **IG1을 `zig build`로만 확인하면 통과하고 제품이 깨진다.** 완료 조건에 이 타깃을 명시한다.
 
 ### 2.3 실제로 고칠 것 — 손-미러 하나
 
-`dockViewSlotIndex`(`dock.zig:670`)가 `View.slot()`을 **손으로 다시 적어** 두고 있었다. 바로 위 `dockViewForSlot`은 `View.forSlot`에 위임하는데 **역방향만 복사본**이었다 — 그 비대칭이 드리프트의 자리다.
+`dockViewSlotIndex`(`dock.zig`)가 `View.slot()`을 **손으로 다시 적어** 두고 있었다. 바로 위 `dockViewForSlot`은 `View.forSlot`에 위임하는데 **역방향만 복사본**이었다 — 그 비대칭이 드리프트의 자리다.
 
 ```zig
 pub fn dockViewSlotIndex(self: *const AppSession) usize {
@@ -110,7 +110,7 @@ pub fn dockViewSlotIndex(self: *const AppSession) usize {
 }
 ```
 
-`defaultRightPtForView`(`dock_layout.zig:265`)는 그대로 둔다. exhaustive인 것이 **정상**이다 — 새 뷰의 기본 폭을 정하도록 컴파일러가 강제하는 게 맞고, IG1이 그 case를 더한다.
+`defaultRightPtForView`(`dock_layout.zig`)는 그대로 둔다. exhaustive인 것이 **정상**이다 — 새 뷰의 기본 폭을 정하도록 컴파일러가 강제하는 게 맞고, IG1이 그 case를 더한다.
 
 **완료 조건**: `zig build macos-app-host-abi-lib`와 `zig build test` 통과. 동작 변화 0(같은 값을 돌려주는 위임이다). 리팩터가 실제로 드리프트를 막는지 확인하려면 더미 4번째 값을 넣어 **에러가 `defaultRightPtForView` 한 곳만** 나오는지 보고 되돌린다.
 
@@ -136,7 +136,7 @@ pub fn dockViewSlotIndex(self: *const AppSession) usize {
 
 - `dock_panel.View`에 `image_gallery` 추가, `forSlot`/`slot`에 3번 슬롯, `dock_view_bar.slot_count` 3→4.
 - 아이콘 하나를 SVG→coverage 파이프라인에 추가(PUA 0xF0000~ 등록 집합).
-- workspace 영속은 기존 `View.parse` 경로가 그대로 처리한다(`workspace.zig:614`의 clamp가 이미 있다).
+- workspace 영속은 기존 `View.parse` 경로가 그대로 처리한다(`workspace.zig`의 clamp가 이미 있다).
 - 격자는 **자리표시자 사각형**만 그린다. 디코드는 IG3이다.
 
 **완료 조건**: `zig build macos-app-host-abi-lib`(§2.2 — `zig build`로는 안 잡힌다) 통과. 도크에서 4번째 아이콘을 눌러 갤러리로 전환되고, 실제 인덱스 개수만큼 자리표시자가 뜨며, 창을 닫았다 열어도 그 뷰가 복원된다. 인덱스 단위 테스트는 합성 fixture로 하되 **구조는 실측을 따른다**(§P2).
@@ -205,7 +205,7 @@ pub fn clampToTextureLimit(w: u32, h: u32, limit: u32) struct { w: u32, h: u32, 
 | 회차 | 공격 관점 | 발견한 결함 | 반영 |
 | --- | --- | --- | --- |
 | **P1** | 슬라이스 순서가 죽은 코드를 쌓는다 | 초안은 인덱스·이어읽기·문맥을 **순수 모듈 3 PR**로 먼저 내고 뷰를 나중에 붙였다. 그러면 소비자 없는 코드가 세 번 머지되고, **첫 사용자 가시 결과가 5번째 PR에야** 나온다 | IG1을 **세로 슬라이스**로 재편 — 인덱스 코어 + 도크 뷰 + 자리표시자를 한 PR에. 나머지는 그 위에 얹는다 |
-| **P2** | 개인정보 규칙이 테스트를 무력화한다 | 계약 §6이 "fixture는 synthetic만"인데, 파서는 **실제 provider 포맷**을 맞춰야 한다. 내가 상상한 합성 포맷은 통과하는데 제품이 깨질 수 있다 | **구조는 실측, 값은 합성.** 계약 §3.2에 실측한 레코드 모양을 박아 두고 fixture가 그 구조를 따른다. `agent_hook_event.zig:829`의 "실측 payload 모양을 그대로 읽는다" 테스트가 선례다 |
+| **P2** | 개인정보 규칙이 테스트를 무력화한다 | 계약 §6이 "fixture는 synthetic만"인데, 파서는 **실제 provider 포맷**을 맞춰야 한다. 내가 상상한 합성 포맷은 통과하는데 제품이 깨질 수 있다 | **구조는 실측, 값은 합성.** 계약 §3.2에 실측한 레코드 모양을 박아 두고 fixture가 그 구조를 따른다. `agent_hook_event.zig`의 "실측 payload 모양을 그대로 읽는다" 테스트가 선례다 |
 | **P4** | 슬라이스 의존성이 역전돼 있다 | 범위를 활성 pane으로 좁히자(계약 §2.1) **IG1이 IG6에 의존**하게 됐다 — 어느 파일을 읽을지 모르면 뼈대가 아무것도 못 그린다. 초안대로면 IG1이 머지돼도 빈 화면이다 | **최소 매핑을 IG1로 끌어올린다**(§3.2). IG6은 "라이브 갱신"이 아니라 **목록 누적 + env 폴백**으로 역할을 다시 정의했다 |
 | **P3** | 완료 조건이 "동작한다"로 뭉개진다 | GPU 픽셀은 이 환경에서 헤드리스 캡처가 막혀 있어(`zig build macos-app`이 `web:build` 실패) "수동 검증"이 실질적 무검증이 된다. 특히 **clamp 테스트가 실제 텍스처를 만들면 상한 초과에서 CI가 abort로 죽는다** | 슬라이스마다 **CI 몫과 수동 몫을 표로 분리**(§1). clamp를 **텍스처를 만들지 않는 순수 함수**로 빼서 경계값만 CI에서 확인(§5.1) |
 

@@ -1158,15 +1158,14 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
        PermissionRequest(Bash)   mode=default      ← 같은 초
        Notification              type=permission_prompt   ← 6 초 뒤
 
+   **여섯 회차에서 같은 순서가 나왔다.** `Notification` 의 6 초 지연도 매번 같았다.
+
    `permission_suggestions` 라는 키가 `PermissionRequest` payload 에 함께 온다(문서 어디에도 없던 필드다).
    그리고 `Notification(permission_prompt)` 의 지연은 **6 초**로, `idle_prompt` 의 60 초와 **다른 타이머**다.
 
    그래도 **§6 이 `Notification` 을 함께 쓰는 규율은 유지한다** — 둘 다 와야 하는 것이 아니라 **어느 쪽이
    와도** 같은 전이라, 하나만 와도 배지는 선다. 한쪽이 사라져도 배지에 소스가 남는다는 것이 그 이유다.
 
-   ⚠️ **재실측에서 설명 못 한 것 하나**: 승인을 누르지 않았는데 38 초 뒤 `mode=acceptEdits` 로 바뀌며
-   도구가 실행됐다(`PostToolUse` 도착, 대상 파일이 실제로 생겼다). 무엇이 모드를 옮겼는지는 모른다 —
-   추측하지 않고 남긴다.
 7. 비용 측정은 **우리가 `sh` 를 띄워** 잰 것이다(§3). 샌드박스 안팎에는 차이가 없었으나(AH6 재측정),
    provider 가 자기 프로세스에서 fork·exec 하는 경로는 다를 수 있다 — 그 차이는 spawn 비용이지 우리
    스크립트의 몫이 아니므로 「스크립트 최적화 여지가 없다」는 결론은 그대로다.

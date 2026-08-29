@@ -126,8 +126,9 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
 - **「입력 대기」의 소스는 둘이다** — `PermissionRequest` 와 `Notification`(계약 §6). 후자는 **아는 종류**
   다섯(`permission_prompt`·`worker_permission_prompt`·`elicitation_dialog`·`elicitation_url_dialog`·
   `agent_needs_input`)만 배지를 옮기고, 모르는 종류·유휴 알림은 «모르는 이벤트» 와 같이 상태를 안 흔든다.
-  둘을 두는 이유는 `PermissionRequest` 가 우리 실측에서 **한 번도 발화하지 않았기** 때문이다 — 그것 하나에만
-  걸면 대화형에서도 안 올 경우 그 배지에 소스가 없다. codex 에는 `Notification` 이 없어 소스가 하나뿐이다.
+  둘을 두는 이유는 **어느 쪽이 와도 같은 전이**라 하나만 와도 배지가 서기 때문이다. (이 자리에
+  「`PermissionRequest` 가 한 번도 발화하지 않았다」고 적혀 있었으나 낡은 문장이라 2026-08-29 재실측으로
+  걷어냈다 — 대화형에서는 여섯 회차 모두 왔다. 계약 §9-6.) codex 에는 `Notification` 이 없어 소스가 하나뿐이다.
 - **`Stop.background_tasks`에 `status: running`인 항목이 있으면 완료로 단정하지 않는다** — 턴은 끝났어도
   셸 작업이 돌고 있다(실측으로 `{id, type: shell, status: running, description}` 형태를 확인했다).
   «비어 있나»로 보면 끝난 항목 하나가 배지를 영원히 붙잡는다. **claude 전용 필드다** — codex 바이너리에는

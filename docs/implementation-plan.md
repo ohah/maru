@@ -41,6 +41,7 @@ macOS 로컬 shell 1개 surface
 - [9·10단계 — Workspace restore와 Plugin/Wasm 구현 계획](plans/workspace-restore.md)
 - [백로그 — New Window와 chrome 고급화 (설계 근거 보존)](plans/new-window-and-chrome.md)
 - [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)
+- [원격 에이전트 상태(배지·대화 줄) 구현 계획](plans/remote-agent-state.md)
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md)
 - [에디터 Surface 단계 계획](plans/editor-surface.md)

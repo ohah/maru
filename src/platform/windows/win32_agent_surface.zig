@@ -69,6 +69,15 @@ pub const Options = struct {
     /// 걸러 넘긴다).
     search: []const u8 = "",
     search_focused: bool = false,
+    /// **훑는 중인가.** `loading` 은 보여 줄 record 가 아직 하나도 없는 첫 훑기고, `refreshing` 은
+    /// 목록이 있는 채로 다시 훑는 중이다 — 중립이 그 둘을 다른 문구·다른 아이콘 색으로 그린다
+    /// (`session_dock/view.zig`: 개수 대신 "분석 중", 해골 줄, 죽은 새로고침 아이콘).
+    /// 둘을 안 주면 큰 이력에서 **빈 목록이 "세션이 없다" 로 보인다**.
+    loading: bool = false,
+    refreshing: bool = false,
+    /// 훑기가 사용자 이력의 **일부만** 봤다(read budget 소진·크기 초과·읽기 실패). 헤더가 "일부"
+    /// 문구로 바꾼다 — 목록이 전부가 아님을 사용자가 알아야 한다.
+    partial: bool = false,
 };
 
 pub const Built = struct {
@@ -116,6 +125,9 @@ pub fn build(
         .sort_order = opts.sort_order,
         .search = opts.search,
         .search_focused = opts.search_focused,
+        .loading = opts.loading,
+        .refreshing = opts.refreshing,
+        .partial = opts.partial,
         // **캐럿은 포커스일 때만** — 중립이 `search_focused and search_cursor_visible` 로 판정한다.
         // 깜빡임은 아직 없다(타이머가 없다) — 항상 켜 둔다.
         .search_cursor_visible = opts.search_focused,

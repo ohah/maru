@@ -84,7 +84,8 @@ test "CR4c C2 경계는 forced resize 뒤 generation publication과 ordered recl
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "preflightExternalPublication"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "publishExternalNoFail"));
     // Declaration + CR4 success/expired/replay + CR5b-2c multi-runtime product reuse.
-    try std.testing.expectEqual(@as(usize, 5), countIdentifier(backend, "publishHostReconnectGeneration"));
+    // CR6e-c3b2b adds the reviewed one-state frame driver caller.
+    try std.testing.expectEqual(@as(usize, 6), countIdentifier(backend, "publishHostReconnectGeneration"));
     try std.testing.expectEqual(@as(usize, 4), countIdentifier(backend, "cr4c_publication_drift"));
     try std.testing.expectEqual(@as(usize, 2), count(backend, "test \"CR4c C2 actual host job은"));
     try std.testing.expectEqual(@as(usize, 1), count(

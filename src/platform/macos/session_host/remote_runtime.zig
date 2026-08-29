@@ -889,9 +889,11 @@ const ReconnectProductExecutor = struct {
         next_shell_generation: u64,
     ) !u64 {
         try self.validate(owner);
-        if (!std.meta.eql(self.prepared, PreparedReconnect{}) or self.admission != null or
-            self.resident_budget_addr != 0 or
-            !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
+        // Legacy CR5 callers have no resident admission. CR6e-c3b2b deliberately retains a
+        // fully validated bound admission through publication and releases it only after the
+        // all-runtime terminal summary. `validate` above authenticates either complete shape and
+        // rejects every partial lease/admission combination.
+        if (!std.meta.eql(self.prepared, PreparedReconnect{}))
             return error.InvalidAuthority;
         const job_generation = switch (self.state.?.phase) {
             .healthy => |value| value,
@@ -3370,6 +3372,46 @@ pub const RemoteRuntime = struct {
                 admission.incident_id.app_instance_nonce == incident_app_instance_nonce and
                 admission.incident_id.sequence == incident_sequence and
                 matchesReconnectAdmission(runtime, admission);
+        }
+
+        /// Terminal settlement authenticates the stored admission and resident lease without
+        /// consulting the mutable current connection. A successful CR5 publication has already
+        /// advanced that generation, but it must still release the original incident's lease.
+        pub fn preflightBoundReconnectSettlement(
+            runtime: *RemoteRuntime,
+            budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+            host_id: u128,
+            host_adapter_generation: u64,
+            connection_generation: u64,
+            incident_app_instance_nonce: u128,
+            incident_sequence: u64,
+        ) !void {
+            try runtime.reconnect_executor.validate(&runtime.generation_owner);
+            const admission = runtime.reconnect_executor.admission orelse return error.InvalidAuthority;
+            if (runtime.reconnect_executor.resident_budget_addr != @intFromPtr(budget) or
+                admission.host_id != host_id or
+                admission.host_adapter_generation != host_adapter_generation or
+                admission.connection_generation != connection_generation or
+                admission.incident_id.app_instance_nonce != incident_app_instance_nonce or
+                admission.incident_id.sequence != incident_sequence)
+                return error.InvalidAuthority;
+            try budget.validateLeaseRole(
+                &runtime.reconnect_executor.resident_lease,
+                runtime.reconnect_executor.resident_lease.role,
+            );
+        }
+
+        pub fn settleBoundReconnectAdmissionNoFail(
+            runtime: *RemoteRuntime,
+            budget: *reconnect_resident_budget.ReconnectAdmissionBudget,
+        ) void {
+            budget.release(
+                &runtime.reconnect_executor.resident_lease,
+                runtime.reconnect_executor.resident_lease.role,
+            ) catch process_seal_service.fatalIntegrity(.proof_loss);
+            runtime.reconnect_executor.resident_budget_addr = 0;
+            runtime.reconnect_executor.admission = null;
+            runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
         }
 
         pub fn bindReconnectAdmission(

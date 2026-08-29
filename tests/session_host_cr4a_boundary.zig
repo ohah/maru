@@ -521,7 +521,8 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(runtime, "prepareObserverReconnectCandidateUntil"));
     // CR5b-2c reuses the product observer-stage entry for success, usable
     // kth-failure rows, and the shared-Client terminal-after-success guard.
-    try std.testing.expectEqual(@as(usize, 10), countIdentifier(remote_backend, "prepareHostReconnectObserverStage"));
+    // CR6e-c3b2b adds the reviewed one-state frame driver caller.
+    try std.testing.expectEqual(@as(usize, 11), countIdentifier(remote_backend, "prepareHostReconnectObserverStage"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "pub fn catchupProjection("));
     try std.testing.expectEqual(@as(usize, 3), countIdentifier(transport, "catchupProjection"));
     // CR4a prepare/validate 두 경로와 CR4b controller-evidence 재검증 한 경로.

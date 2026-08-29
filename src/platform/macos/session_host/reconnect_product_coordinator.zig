@@ -15,6 +15,8 @@ const process_seal = @import("process_seal_service.zig");
 
 pub const PollResult = enum(u8) { idle, connected_ready, logical_completion_ready };
 pub const AdmissionResult = enum(u8) { idle, admitted, coalesced, retry_later, discarded_stale };
+pub const ConnectedSettlement = enum(u8) { adopted, retry_later };
+pub const ConnectedProgress = enum(u8) { advanced, retry_later, completed, retained_terminal };
 
 pub const Coordinator = struct {
     self_addr: usize = 0,
@@ -191,6 +193,88 @@ pub const Coordinator = struct {
         try self.jobs.resetConsumedCompletionReceipt(&self.completion_receipt);
     }
 
+    /// Settles a retained non-connected result only after every bound resident admission can be
+    /// released as one no-fail suffix. The logical receipt is the last owner consumed.
+    pub fn settleLogicalCompletion(
+        self: *Coordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        budget: *budget_mod.ReconnectAdmissionBudget,
+    ) !owner_mod.Outcome {
+        try self.validate();
+        const completion = try self.logicalCompletion();
+        if (completion.outcome == .connected) return error.InvalidOutcome;
+        const outcome = completion.outcome;
+        const snapshot = completion.snapshot;
+        if (outcome == .retry_later) {
+            try self.consumeLogicalCompletion();
+            const result = try self.jobs.admit(snapshot);
+            if (result != .admitted) return error.InvalidCoordinator;
+            return outcome;
+        }
+        try backend.settleBoundReconnectSnapshot(completion.snapshot, budget);
+        try self.consumeLogicalCompletion();
+        return outcome;
+    }
+
+    /// Moves a connected candidate into the existing CR5 final-address job. All admission rows
+    /// are preflighted before `takeClient`; after a successful move the lease release and both
+    /// physical/logical receipt consumptions are a forward-only suffix.
+    pub fn settleConnectedCompletion(
+        self: *Coordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        budget: *budget_mod.ReconnectAdmissionBudget,
+    ) !ConnectedSettlement {
+        try self.validate();
+        if (!std.meta.eql(self.completion_receipt, owner_mod.CompletionReceipt{}))
+            return error.InvalidCoordinator;
+        const completion = try self.claimedPhysicalCompletion();
+        if (!sameOrder(completion.order, self.job_receipt) or try completion.outcome() != .connected)
+            return error.InvalidOutcome;
+        const snapshot = self.job_receipt.snapshot;
+        try backend.preflightBoundReconnectSnapshotSettlement(snapshot, budget);
+        var candidate = try completion.takeClient();
+        var candidate_owned = true;
+        defer if (candidate_owned) candidate.deinit();
+        const adopted = backend.adoptReconnectCoordinatorCandidate(snapshot, &candidate);
+        const logical_outcome: owner_mod.Outcome = switch (adopted) {
+            .connected => blk: {
+                candidate_owned = false;
+                break :blk .connected;
+            },
+            .busy, .invalid_authority, .failed => .retry_later,
+        };
+        try self.finishConnected(logical_outcome);
+        if (logical_outcome == .connected) return .adopted;
+        _ = try self.settleLogicalCompletion(backend, budget);
+        return .retry_later;
+    }
+
+    /// Drives one CR5 state per call. Only a terminal summary opens the all-runtime admission
+    /// release; completed jobs are reclaimed, while CR5c retained-terminal jobs stay backend-owned.
+    pub fn progressConnectedOne(
+        self: *Coordinator,
+        backend: *backend_mod.RemoteTermBackend,
+        budget: *budget_mod.ReconnectAdmissionBudget,
+    ) !ConnectedProgress {
+        try self.validate();
+        const completion = try self.logicalCompletion();
+        if (completion.outcome != .connected) return error.InvalidOutcome;
+        return switch (try backend.progressHostReconnectOne()) {
+            .advanced => .advanced,
+            .retry_later => .retry_later,
+            .completed_ready, .retained_terminal_ready => |progress| blk: {
+                const terminal = try backend.preflightHostReconnectTerminal();
+                if ((progress == .completed_ready) != (terminal == .completed))
+                    return error.InvalidCoordinator;
+                try backend.preflightBoundReconnectSnapshotSettlement(completion.snapshot, budget);
+                backend.settleBoundReconnectSnapshotNoFail(completion.snapshot, budget);
+                if (terminal == .completed) backend.finalizeCompletedHostReconnectNoFail();
+                try self.consumeLogicalCompletion();
+                break :blk if (terminal == .completed) .completed else .retained_terminal;
+            },
+        };
+    }
+
     /// Product Quit calls this before backend/pool teardown. It wakes and joins the worker first,
     /// abandons a retained candidate at its final address, then drains every cancelled c1 slot.
     pub fn shutdownAndDeinit(self: *Coordinator) !void {
@@ -337,7 +421,7 @@ test "CR6e-c3b2a admission reservation binds once and coalesces on the first ide
     );
     defer coordinator.shutdownAndDeinit() catch @panic("c3b2a coordinator shutdown failed");
     const connection_generation = fixture.adapter.connectionGeneration();
-    try admitFixture(&admissions, connection_generation, 1);
+    try admitFixture(&admissions, 1, 3, connection_generation, 1);
     try std.testing.expectEqual(
         AdmissionResult.admitted,
         try coordinator.admitOne(
@@ -348,7 +432,7 @@ test "CR6e-c3b2a admission reservation binds once and coalesces on the first ide
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), (try budget.snapshot()).live_entries);
-    try admitFixture(&admissions, connection_generation, 2);
+    try admitFixture(&admissions, 1, 3, connection_generation, 2);
     try std.testing.expectEqual(
         AdmissionResult.coalesced,
         try coordinator.admitOne(
@@ -370,13 +454,138 @@ test "CR6e-c3b2a admission reservation binds once and coalesces on the first ide
     try remote_runtime.testing_api.releaseBoundReconnectAdmission(&fixture.runtime, &budget);
 }
 
-fn admitFixture(admissions: *admission_mod.Owner, connection_generation: u64, sequence: u64) !void {
+test "CR6e-c3b2b failed completion releases every bound admission before logical consume" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const host_adapter = @import("host_adapter.zig");
+    const remote_runtime = @import("remote_runtime.zig");
+    try host_adapter.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var fixture: remote_runtime.testing_api.SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    var backend: backend_mod.RemoteTermBackend = undefined;
+    try backend_mod.RemoteTermBackend.testing_api.initReconnectCoordinatorBackend(
+        &backend,
+        std.testing.allocator,
+    );
+    defer backend.deinit();
+    try backend_mod.RemoteTermBackend.testing_api.installReconnectRuntime(
+        &backend,
+        1,
+        &fixture.runtime,
+        1,
+        3,
+    );
+    defer _ = backend_mod.RemoteTermBackend.testing_api.removeEventCursorRuntime(&backend, 1);
+    var admissions: admission_mod.Owner = .{};
+    try admissions.initInPlace(identity.process_nonce);
+    var budget: budget_mod.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    defer budget.deinit() catch @panic("c3b2b budget leak");
+    var coordinator: Coordinator = .{};
+    try coordinator.initInPlace(std.testing.allocator, std.testing.io, "/tmp", identity.process_nonce);
+    defer coordinator.shutdownAndDeinit() catch @panic("c3b2b coordinator shutdown failed");
+    const connection_generation = fixture.adapter.connectionGeneration();
+    try admitFixture(&admissions, 1, 3, connection_generation, 1);
+    const now = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    try std.testing.expectEqual(
+        AdmissionResult.admitted,
+        try coordinator.admitOne(&backend, &admissions, &budget, @intCast(@max(1, now - 1))),
+    );
+    try std.testing.expect(try coordinator.dispatchOne());
+    while (try coordinator.pollCompletion() == .idle) std.Thread.yield() catch {};
+    try std.testing.expectEqual(
+        owner_mod.Outcome.deadline_exceeded,
+        try coordinator.settleLogicalCompletion(&backend, &budget),
+    );
+    try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
+    try std.testing.expect(!remote_runtime.testing_api.hasBoundReconnectAdmission(&fixture.runtime));
+    try std.testing.expectError(error.NotFound, coordinator.logicalCompletion());
+}
+
+test "CR6e-c3b2b coordinator adopts an actual daemon candidate through terminal settlement" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try backend_mod.RemoteTermBackend.testing_api.runActualReconnectCoordinatorFixture(
+        actualReconnectCoordinatorHook,
+    );
+}
+
+fn actualReconnectCoordinatorHook(
+    backend: *backend_mod.RemoteTermBackend,
+    fixture: backend_mod.RemoteTermBackend.testing_api.ActualReconnectFixture,
+) !void {
+    const host_adapter = @import("host_adapter.zig");
+    try host_adapter.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+    var admissions: admission_mod.Owner = .{};
+    try admissions.initInPlace(identity.process_nonce);
+    var budget: budget_mod.ReconnectAdmissionBudget = .{};
+    try budget.initInPlace(identity.process_nonce);
+    defer budget.deinit() catch @panic("c3b2b actual budget leak");
+    var coordinator: Coordinator = .{};
+    try coordinator.initInPlace(
+        std.testing.allocator,
+        std.testing.io,
+        fixture.cache_base,
+        identity.process_nonce,
+    );
+    defer coordinator.shutdownAndDeinit() catch @panic("c3b2b actual coordinator shutdown failed");
+    try admitFixture(
+        &admissions,
+        fixture.host_id,
+        fixture.host_adapter_generation,
+        fixture.connection_generation,
+        1,
+    );
+    try std.testing.expectEqual(
+        AdmissionResult.admitted,
+        try coordinator.admitOne(backend, &admissions, &budget, std.math.maxInt(u64)),
+    );
+    try std.testing.expect(try coordinator.dispatchOne());
+    var poll: PollResult = .idle;
+    for (0..100_000) |_| {
+        poll = try coordinator.pollCompletion();
+        if (poll != .idle) break;
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(PollResult.connected_ready, poll);
+    try std.testing.expectEqual(
+        ConnectedSettlement.adopted,
+        try coordinator.settleConnectedCompletion(backend, &budget),
+    );
+    try std.testing.expectEqual(@as(usize, 3), (try budget.snapshot()).live_entries);
+    var terminal: ?ConnectedProgress = null;
+    for (0..100_000) |_| {
+        const progress = try coordinator.progressConnectedOne(backend, &budget);
+        switch (progress) {
+            .advanced, .retry_later => std.Thread.yield() catch {},
+            .completed, .retained_terminal => {
+                terminal = progress;
+                break;
+            },
+        }
+    }
+    try std.testing.expectEqual(ConnectedProgress.completed, terminal orelse
+        return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(usize, 0), (try budget.snapshot()).live_entries);
+    try std.testing.expectError(error.NotFound, coordinator.logicalCompletion());
+}
+
+fn admitFixture(
+    admissions: *admission_mod.Owner,
+    host_id: u128,
+    host_adapter_generation: u64,
+    connection_generation: u64,
+    sequence: u64,
+) !void {
     const publication = @import("maru").observability.incident_publication_contract;
     const incident = @import("maru").observability.connection_incident;
     const input: publication.IncidentInput = .{
         .timestamp_ns = sequence,
-        .host_id = 1,
-        .host_adapter_generation = 3,
+        .host_id = host_id,
+        .host_adapter_generation = host_adapter_generation,
         .connection_generation = connection_generation,
         .wire_major = 1,
         .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),

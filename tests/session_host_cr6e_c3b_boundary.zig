@@ -30,8 +30,18 @@ test "CR6e-c3b worker boundary keeps one final-address lane pointer-free" {
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn admitOne("));
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn dispatchOne("));
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn pollCompletion("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn settleLogicalCompletion("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn settleConnectedCompletion("));
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub fn progressConnectedOne("));
     try std.testing.expectEqual(@as(usize, 1), count(admissions, "pub fn preparedProjection("));
     try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn bindPreparedReconnectAdmission("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn settleBoundReconnectSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn preflightBoundReconnectSnapshotSettlement("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn settleBoundReconnectSnapshotNoFail("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn adoptReconnectCoordinatorCandidate("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn progressHostReconnectOne("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn preflightHostReconnectTerminal("));
+    try std.testing.expectEqual(@as(usize, 1), count(backend, "pub fn finalizeCompletedHostReconnectNoFail("));
     try std.testing.expectEqual(@as(usize, 0), count(app_session, "app_reconnect_product_coordinator"));
     try std.testing.expect(std.mem.indexOf(u8, docs, "CR6e-c3b app-global worker와 제품 정산 경계") != null);
     try std.testing.expect(std.mem.indexOf(u8, docs, "flowchart TD") != null);

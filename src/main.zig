@@ -1793,7 +1793,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1010;
+const smoke_spin_cap: usize = 1060;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -4823,6 +4823,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var reveal_path_len: usize = 0;
     var reveal_digest_before: u64 = 0;
     var reveal_digest_after: u64 = 0;
+    var dclamp_row: usize = 0;
+    var dclamp_expanded = false;
+    var dclamp_judgeable = false;
+    var dclamp_off_before: u32 = 0;
+    var dclamp_off_after: u32 = 0;
+    var dclamp_rows_before: usize = 0;
+    var dclamp_rows_after: usize = 0;
+    var dclamp_drawn_after: u16 = 0;
+    var dclamp_draw_start_after: usize = 0;
+    var dock_clamps: usize = 0;
+    var leak_judgeable = false;
+    var leak_sidebar_before: u32 = 0;
+    var leak_sidebar_after: u32 = 0;
+    var leak_dock_before: u32 = 0;
+    var leak_dock_after: u32 = 0;
     var scroll_judgeable = false;
     var scroll_first_before: usize = 0;
     var scroll_first_after: usize = 0;
@@ -5520,10 +5535,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var dragging = false;
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
-    // **가로는 자기 나머지를 갖는다.** 누적기는 `WHEEL_DELTA` 미만을 다음 메시지로 넘기는데(정밀
-    // 터치패드), 축이 그것을 나눠 쓰면 **가로로 조금 민 것이 세로 한 줄로 튄다** — 대각선 제스처가
-    // 흔한 트랙패드에서 늘 일어난다.
+    // **표면마다 자기 나머지를 갖는다.** 누적기는 `WHEEL_DELTA` 미만을 다음 메시지로 넘기는데(정밀
+    // 터치패드), 그것을 나눠 쓰면 **한 표면에서 조금 민 것이 다른 표면에서 한 줄로 튄다.** 축도
+    // 같다(가로로 민 것이 세로로 튄다) — 대각선 제스처가 흔한 트랙패드에서 늘 일어난다.
+    //
+    // 실측으로 이 슬라이스의 시험이 그것에 막혔다: 사이드바에 남은 `+40` 이 도크의 첫 눈금(`-120`)을
+    // 먹어 도크가 **안 굴러갔다**(§2m.84).
     var wheel_acc_h: win32_mouse.WheelAccumulator = .{};
+    var wheel_acc_sidebar: win32_mouse.WheelAccumulator = .{};
+    var wheel_acc_dock: win32_mouse.WheelAccumulator = .{};
+    var wheel_acc_editor: win32_mouse.WheelAccumulator = .{};
     var last_ime_caret: ?win32_mouse.Cell = null;
     // 마지막으로 계산한 마우스 셀. **휠 좌표가 화면 기준으로 오는 것을 놓치면 창 위치만큼 어긋나는데**,
     // 카운터만으로는 그것이 안 보인다 — 이 줄이 그 자리를 지킨다.
@@ -6291,6 +6312,77 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticMouse(.moved, tx, gy);
             window.postSyntheticMouse(.left_up, tx, gy);
         };
+        // ── 목록이 줄어도 도크가 자기 범위 안에 있는다 (W8.18b) ───────────────────────
+        //
+        // **접기·정렬·새로고침은 목록을 줄인다.** 그때 스크롤을 그대로 두면 내용이 없는 자리를 보게
+        // 된다 — 편집기가 겪은 그 실패(`first=1000000` 에서 빈 문서)의 도크 짝이고, macOS 는 행을
+        // 다시 지을 때마다 `clampFileTreeScroll` 을 부른다.
+        //
+        // 큰 폴더를 펼쳐 굴릴 여지를 만든 뒤(끝의 트리는 31 행이라 52px 밖에 안 굴러간다) 바닥까지
+        // 굴리고, 그 폴더를 다시 접는다.
+        if (smoke and spins == 1012 and dock_view == .explorer) {
+            // **아래쪽 폴더를 고른다.** 위쪽 줄을 고르면 굴린 뒤 그 줄이 화면 밖이라 되접을 수가
+            // 없다(실측: 판정이 통째로 unjudgeable 이었다). 한 눈금이 190px 이므로 그보다 아래.
+            for (dock_rows.items, 0..) |r, ri| {
+                if (r != .directory) continue;
+                if (r.directory.expanded) continue;
+                if (ri * cell_h < 220) continue;
+                const local = @as(i64, @intCast(ri * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+                if (local < 0 or local >= @as(i64, @intCast(geom.tree_content.h))) continue;
+                dclamp_row = ri;
+                dclamp_expanded = true;
+                const ex: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const ey: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, ex, ey);
+                window.postSyntheticMouse(.left_up, ex, ey);
+                break;
+            }
+        }
+        // ── 표면마다 나머지가 따로다 (W8.18b 에서 걸린 것) ─────────────────────────────
+        //
+        // **한 눈금 미만을 사이드바에 흘린 뒤 도크를 한 눈금 굴린다.** 누적기를 나눠 쓰면 그 나머지가
+        // 도크의 첫 눈금을 먹어 **도크가 안 굴러간다** — 실측으로 이 슬라이스의 시험이 거기 막혔다.
+        if (smoke and spins == 1016) {
+            leak_judgeable = true;
+            leak_sidebar_before = sidebar_scroll_px;
+            leak_dock_before = dock_scroll_px;
+            const lx: i32 = @intCast(geom.sidebar.x + geom.sidebar.w / 2);
+            const ly: i32 = @intCast(geom.sidebar.y + geom.sidebar.h / 2);
+            window.postSyntheticMouseWheelDelta(.wheel, lx, ly, 40);
+        }
+        if (smoke and spins == 1018 and leak_judgeable) leak_sidebar_after = sidebar_scroll_px;
+        if (smoke and spins == 1022 and leak_judgeable) leak_dock_after = dock_scroll_px;
+        if (smoke and spins == 1020 and dclamp_expanded) {
+            const dsx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+            const dsy: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+            // **한 눈금만 굴린다**(= 10 줄 × 19px = 190px). 접힌 뒤 상한(52px)을 넘기면 충분하고,
+            // 더 굴리면 되접을 줄이 화면 밖으로 나간다.
+            window.postSyntheticMouseWheel(.wheel, dsx, dsy, -1);
+        }
+        if (smoke and spins == 1024 and dclamp_expanded and dclamp_row < dock_rows.items.len) {
+            dclamp_judgeable = true;
+            dclamp_off_before = dock_scroll_px;
+            dclamp_rows_before = dock_rows.items.len;
+            // **같은 폴더 줄을 다시 누른다** — 그 사이 굴렸으므로 화면 자리는 다시 잰다.
+            const local = @as(i64, @intCast(dclamp_row * cell_h)) - @as(i64, @intCast(dock_scroll_px)) + @as(i64, @intCast(cell_h / 2));
+            if (local >= 0 and local < @as(i64, @intCast(geom.tree_content.h))) {
+                const cx2: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const cy2: i32 = @intCast(@as(i64, @intCast(geom.tree_content.y)) + local);
+                window.postSyntheticMouse(.left_down, cx2, cy2);
+                window.postSyntheticMouse(.left_up, cx2, cy2);
+            } else {
+                // 접을 줄이 화면 밖이면 이 판정은 아무것도 안 묻는다 — 그렇게 말한다.
+                dclamp_judgeable = false;
+            }
+        }
+        if (smoke and spins == 1030 and dclamp_judgeable) {
+            dclamp_off_after = dock_scroll_px;
+            dclamp_rows_after = dock_rows.items.len;
+            dclamp_drawn_after = dock_rows_drawn;
+            // **빌더가 실제로 쓴 첫 행**이다(여기서 다시 계산하지 않는다) — 값만 되돌리고 셀을 다시
+            // 안 지으면 이 값이 옛 offset 그대로다.
+            dclamp_draw_start_after = dock_draw_start;
+        }
         // ── 눈이 따라간다 (W8.18a) ───────────────────────────────────────────────────
         //
         // **먼저 목록을 맨 위로 굴린다** — 세션이 열셋이라 파일 카드는 바닥에 있고, 위에서 보면
@@ -7652,7 +7744,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 }
                 if (region == .sidebar and m.kind == .wheel) {
                     // **헤더는 안 굴린다** — 고정이다(`slotAt` 이 정한 규칙). 목록만 움직인다.
-                    const notches = wheel_acc.feed(m.wheel_delta);
+                    const notches = wheel_acc_sidebar.feed(m.wheel_delta);
                     if (notches != 0 and sidebar_header_h != 0) {
                         const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                         var rows_buf2: [16]maru.chrome.components.sidebar.Row = undefined;
@@ -7866,7 +7958,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 그것이 이 저장소의 다른 영역 판정(`regionAt`)과 같은 규칙이고, 마우스를 도크에
                 // 두고 굴렸는데 터미널이 굴러가면 놀란다.
                 if (region == .dock_content and m.kind == .wheel) {
-                    const notches = wheel_acc.feed(m.wheel_delta);
+                    const notches = wheel_acc_dock.feed(m.wheel_delta);
                     if (notches != 0) {
                         const lines = win32_mouse.WheelAccumulator.linesForNotches(notches, wheel_lines_per_notch);
                         // **상한은 콘텐츠가 정한다.** 넘겨 굴리면 빈 바닥이 보이고, 못 굴리면 마지막
@@ -8167,7 +8259,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // 기울임 휠·터치패드의 `wheel_h`, 그리고 평범한 휠에 **Shift**(터미널이 이미 쓰는 관례).
                 if ((m.kind == .wheel or m.kind == .wheel_h) and active_view == .file and active_view.file < open_files.items.len) {
                     const horizontal = m.kind == .wheel_h or (m.mods & win32_mouse.mod_shift) != 0;
-                    const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc.feed(m.wheel_delta);
+                    const notches = if (horizontal) wheel_acc_h.feed(m.wheel_delta) else wheel_acc_editor.feed(m.wheel_delta);
                     if (notches == 0) continue;
                     const of = &open_files.items[active_view.file];
                     if (horizontal) {
@@ -8604,6 +8696,24 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 왼쪽 위에서 시작해 도크 밑으로 깔린다.
         maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
 
+        // ── 목록이 줄면 도크도 자기 범위로 돌아온다 (W8.18b) ────────────────────────────
+        //
+        // **접기·새로고침·정렬은 목록을 줄인다.** 그때 스크롤을 그대로 두면 내용이 없는 자리를 보게
+        // 된다 — 편집기가 겪은 그 실패(`first=1000000` 에서 빈 문서)의 도크 짝이다. macOS 는 행을
+        // 다시 지을 때마다 `clampFileTreeScroll` 을 부르는데(그 함수 doc: *"호출부에 인라인으로 두면
+        // 테스트가 이 산술을 복제한다"*), Windows 는 **휠이 올 때만** 상한을 봤다.
+        //
+        // **그리기 직전에 한 번 본다** — 목록을 바꾸는 자리가 여럿이라(펼치기·접기·스캔 결과·검색)
+        // 그 각각에 넣으면 한 곳이 빠진다. 창이 커져 뷰포트가 넓어지는 경우도 여기서 함께 잡힌다.
+        if (dock_view == .explorer) {
+            const dock_content_h: u32 = @intCast(dock_rows.items.len *| cell_h);
+            const dock_max: u32 = dock_content_h -| geom.tree_content.h;
+            if (dock_scroll_px > dock_max) {
+                dock_scroll_px = dock_max;
+                dock_clamps += 1;
+                rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+            }
+        }
         // ── 눈이 따라간다 (W8.18a) ──────────────────────────────────────────────────────
         //
         // **활성 카드가 화면 밖이면 옮겨 준다.** 파일을 열면 그 카드가 활성이 되는데 세션이 쌓이면
@@ -9392,6 +9502,38 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
         });
+        try stdout.print("wheel_surfaces: sidebar {d}->{d} dock {d}->{d} surfaces_ok={}\n", .{
+            leak_sidebar_before,
+            leak_sidebar_after,
+            leak_dock_before,
+            leak_dock_after,
+            // 사이드바는 **한 눈금이 안 됐으니 안 움직여야** 하고, 그 나머지가 도크로 새지 않았다면
+            // 도크는 자기 한 눈금으로 **움직여야** 한다.
+            leak_judgeable and leak_sidebar_after == leak_sidebar_before and leak_dock_after != leak_dock_before,
+        });
+        {
+            // **상한은 접힌 뒤의 목록이 정한다** — 판정이 앞 값을 쓰면 아무것도 안 묻는다.
+            const dc_content: u32 = @intCast(dclamp_rows_after *| cell_h);
+            const dc_max: u32 = dc_content -| geom.tree_content.h;
+            try stdout.print("dock_clamp: rows {d}->{d} off {d}->{d} max_after={d} drawn={d} draw_start={d}/{d} clamps={d} dock_clamp_ok={}\n", .{
+                dclamp_rows_before,
+                dclamp_rows_after,
+                dclamp_off_before,
+                dclamp_off_after,
+                dc_max,
+                dclamp_drawn_after,
+                dclamp_draw_start_after,
+                dclamp_off_after / @max(1, cell_h),
+                dock_clamps,
+                // **접기 전에 그 상한을 넘고 있어야** 이 판정이 무언가를 묻는다. 그리고 되돌아온
+                // 자리에 **행이 그려져 있어야** 한다 — 값만 맞고 화면이 비면 고친 것이 아니다.
+                dclamp_judgeable and dclamp_off_before > dc_max and dclamp_off_after <= dc_max and
+                    dclamp_drawn_after > 0 and
+                    // **그린 첫 행이 되돌아온 자리와 같은가** — 값만 고치고 셀을 다시 안 지으면
+                    // 여기가 갈린다(뮤턴트가 그렇게 살아남았다).
+                    dclamp_draw_start_after == dclamp_off_after / @max(1, cell_h),
+            });
+        }
         try stdout.print("sidebar_reveal: slot {d}->{d} visible {}->{} off {d}->{d} digest {x}->{x} reveals={d} reveal_ok={}\n", .{
             reveal_slot,
             reveal_slot_after,

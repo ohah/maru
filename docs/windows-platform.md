@@ -644,10 +644,17 @@ Win32 메시지를 그 명령으로 **번역하는 것뿐**이고, 메인 스레
 | `WM_LBUTTONDOWN` | 1 (down) | `select_start{row, col, block}` |
 | `WM_MOUSEMOVE`(버튼 눌림) | 2 (drag) | `select_extend{row, col}` |
 | `WM_LBUTTONUP` | 3 (up) | `select_extend_or_collapse{row, col}` |
-| `WM_LBUTTONDBLCLK` | 4 | `select_word{row, col, separators}` |
-| 같은 자리 3연타 | 5 | `select_line{row}` |
+| 같은 자리 2연타(`ClickTracker`) | 4 | `select_word{row, col, separators}` |
+| 같은 자리 3연타(`ClickTracker`) | 5 | `select_line{row}` |
+| `WM_RBUTTONDOWN`/`UP` | — | `input.right-click` 이 정한다(기본 `paste`. `menu` 는 미구현이라 세기만 한다) |
+| `WM_MBUTTONDOWN`/`UP` | — | 리포팅 중일 때만 — **로컬 선택은 좌버튼뿐이다** |
 | `WM_MOUSEWHEEL` | — | `scroll{lines}` 또는 alt 화면이면 화살표 키 |
 | `WM_MOUSEHWHEEL` | — | 편집기 가로 스크롤(`first_col`). 터미널에는 가로 축이 없어 버린다 |
+
+**연타는 `WM_LBUTTONDBLCLK` 로 안 받는다**(2026-08-29 정정 — 표가 그 메시지를 적고 있었는데 창은
+그것을 **처리하지 않는다**). Win32 는 **트리플을 알려 주지 않는데** 터미널에는 줄 선택이 있어서,
+단·더블·트리플을 한 규칙으로 세는 쪽이 맞다 — 창은 평범한 `WM_LBUTTONDOWN` 만 올리고 판정은 순수
+`ClickTracker.classify`(시간·거리 임계)가 한다.
 
 **모디파이어 비트는 중립 규약을 따른다** — 4=shift, 8=meta(alt), 16=ctrl, 32=command.
 
@@ -2684,8 +2691,8 @@ sel_bands=4/4 first_cols=81 last_cols=2 match=true
 **아직 없는 것**: 키보드 커서 이동(Shift+화살표)·단어 단위 선택·클립보드 복사. 셋 다 `Selection` 을
 바꾸는 축이라 `session/editor/selection.zig` 가 이미 갖고 있고, 붙이는 것은 배선이다.
 
-> **§2m.26 은 비어 있다**(2026-08-29 확인). 번호를 건너뛴 채로 굳었고 아무 문서도 그것을 참조하지
-> 않는다 — 번호는 이력 참조에 쓰이므로 **다시 쓰지 않고** 빈 채로 둔다.
+> **§2m.26 은 비어 있다**(2026-08-29 확인). 번호를 건너뛴 채로 굳었고 **이 줄 말고는** 아무 문서도
+> 그것을 참조하지 않는다 — 번호는 이력 참조에 쓰이므로 **다시 쓰지 않고** 빈 채로 둔다.
 
 ### 2m.27 measured 텍스트의 마지막 한 걸음 (실측 2026-08-23)
 
@@ -5971,7 +5978,8 @@ PROBE archive_after_ms=20237
 
 ## 남은 것
 
-- **훑는 중 표시가 없다**(위). 중립에 `loading`·`refreshing` props 가 **이미 있다** — 값을 안 주고 있을 뿐이다.
+- ~~**훑는 중 표시가 없다**(위). 중립에 `loading`·`refreshing` props 가 **이미 있다** — 값을 안 주고
+  있을 뿐이다.~~ → **갚았다**(§2m.86 — 그 셋에 `partial` 까지 배선했다).
 - **결과 없음 안내**는 에이전트 쪽에는 있다(중립이 그린다). 사이드바에는 없다(§2m.75).
 - **IME 조합**은 `search_preedit` 를 아직 안 준다 — 모델도 props 도 있는데 배선만 없다.
 

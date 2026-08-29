@@ -175,7 +175,7 @@ flowchart TD
   host-backed Term에서는 P3-e4 metadata snapshot/event가 이 값을 GUI로 전달하고, drop/paste 직전
   `runtime.observation` barrier가 100ms periodic event보다 최신인 host 상태를 확인한다. 지원 여부가 불명하거나 barrier가
   실패한 상태를 로컬 세션으로 오판해 로컬 경로를 원격 셸에 붙이지 않도록 fail-closed한다. 현재 barrier는 main thread의
-  local socket RPC라 stalled host에서 최대 5초 recv timeout까지 UI를 막을 수 있으며 async 전환은 기본값 전환 전 gate다.
+  local socket RPC라 stalled host에서 최대 5초 recv timeout까지 UI를 막을 수 있으며 async 전환은 opt-in P4의 UI 비차단 gate다.
 
 ### 보안 기본값 (사용자 결정 2026-06-21)
 

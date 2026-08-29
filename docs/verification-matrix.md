@@ -2316,14 +2316,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `lease → G2 bootstrap → duplicate reject → AppKit/AppSession`과 loser의 bootstrap 전 exit/config·workspace·cache mutation 0,
   `SIGKILL` 뒤 successor 재획득/bootstrap을 검증한다. G1 parser fixture나 in-process owner 단위만으로 제품 순서를 완료
   처리하지 않는다.
-- **범위 밖:** absent explicit `true` materialization, persistent retry notice, default `true` 전환과 frozen A rollback은 G3다.
+- **범위 밖:** absent explicit `true` materialization, persistent retry notice, default `true` 전환과 frozen A rollback은 G3 백로그다.
 
 ### Session default G3 frozen-release migration
 
+- **상태: 별도 release 백로그, P1~P5 완료 조건 밖.** 현재 제품은 `default=false` opt-in을 유지한다. 사용자가 default-on을
+  다시 승인하기 전에는 아래 trust 결정이나 제품 config 구현을 시작하지 않으며, component 선결조건의 기존 자동 gate만 보존한다.
 - **남은 trust 결정:** environment 설정 REST와 deployment의 `sha/ref/environment`만으로는 current
   `run_id/run_attempt/job`의 protection 통과를 증명하지 못한다. current job에 결속된 OIDC/attestation을 검증할지 exact
   workflow를 신뢰 경계로 둘지 결정하기 전에는 release adapter가 `protected_environment=true`를 만들지 않는다.
-- **상태: 선결조건 부분 구현, 외부 gate 미준비.** G3 제품 config 코드는 provisioned `Session host product / default-on` runner와 immutable
+- **선결조건 상태: 부분 구현, 외부 gate 미준비.** G3 제품 config 코드는 provisioned `Session host product / default-on` runner와 immutable
   release A manifest가 모두 준비된 뒤에만 시작한다. `build.zig.zon` version SSOT는 generated macOS plist와 tag gate까지
   연결됐다. OS 중립 `release_manifest.zig`는 canonical A/B JSON, bounded parser/writer와 intrinsic repository/release/source/
   build/compatibility/signing/asset/evidence/predecessor 정책을 단일 소유한다. 같은 모듈의 typed observation policy는 실제

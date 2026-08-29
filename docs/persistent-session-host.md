@@ -549,16 +549,17 @@ session.keep-alive-after-quit = true
 
 | 값 | 새 terminal runtime | `Quit Maru` |
 | --- | --- | --- |
-| `true` (**기능 완성 뒤 기본값**) | 새 일반 Window의 Workspace/Term/split은 `maru-sessiond`에 생성. quick은 항상 in-process | 일반 persistent runtime은 GUI만 detach, quick은 종료 |
+| `true` (**사용자 opt-in**) | 새 일반 Window의 Workspace/Term/split은 `maru-sessiond`에 생성. quick은 항상 in-process | 일반 persistent runtime은 GUI만 detach, quick은 종료 |
 | `false` | 현재처럼 GUI process 안에 생성 | 현재 AppSession에 연결된 persistent runtime도 terminate |
 
 - 이 키는 config schema·`configuration.md`에 있고, **설정 GUI(workspace 섹션 토글)에도 노출된다**(과거 실험적이라 숨겼던 것을
-  원격 렌더 패리티 완성 후 해제). CLI help는 후속. **기본값은 여전히 `false`** — 전환은 남은 선결(echo 지연 이벤트-push 등) 뒤 별개 결정이다.
+  원격 렌더 패리티 완성 후 해제). CLI help는 후속. **기본값은 `false`인 opt-in으로 유지한다.** 자동 default-on은
+  현재 P1~P5 완료 조건이 아니라 별도 release-backlog G3이며, 사용자가 다시 승인하기 전에는 시작하지 않는다.
 - backend 선택은 **새로 만드는 runtime에만** 적용한다. 살아 있는 runtime을 process 사이에서 migrate하거나 설정 토글
   즉시 terminate하지는 않는다. 토글을 켜면 host를 준비해 이후 일반 Term부터 persistent로 만들고, 끄면 이후 Term부터
   in-process로 만든다. 바뀐 quit 의미는 다음 app-wide `Quit Maru`부터 적용한다.
 - **현재 opt-in 구현:** `true`인데 host launch/handshake가 실패하면 notice를 예약하고 in-process terminal로 폴백한다.
-  기본 전환 전에는 해당 Term에 종료까지 남는 `not preserved` 상태를 표시하고, 그 Term에 `runtime-handle`을 쓰지 않으며,
+  해당 Term에는 종료까지 남는 `not preserved` 상태를 표시하고, 그 Term에 `runtime-handle`을 쓰지 않으며,
   checkpoint/quit structured artifact에 fallback 원인을 남겨야 한다.
 - persistent와 in-process runtime이 과도기 한 workspace에 함께 있어도 각 Term의 typed backend binding으로 구분한다.
 - 설정의 앱 전역 snapshot 하나를 모든 Window가 공유한다. 따라서 `false` 상태의 다음 Quit은 창별 stale config와 무관하게
@@ -570,10 +571,10 @@ session.keep-alive-after-quit = true
   파괴를 `Quit and End All Sessions`라는 명시적 경로로 분리한 위 원칙을 리셋이 우회하는 셈이다(실측 사고: 리셋 뒤
   일반 Quit으로 runtime 12개 소멸, workspace의 `host_id:runtime_id` 12개가 dangling). `resetAllSettings`는 app-global
   snapshot의 값과 live 정책을 보존한다. `absent`는 줄을 만들지 않고 explicit valid/invalid는 현재 `Config{}` 기본값과
-  같아도 canonical session bool override를 atomic replace에 포함해 B→A rollback에서도 의미가 유지되게 한다.
-  끄는 결정은 사용자 몫이라 notice로 수동 변경 경로를 안내한다. 기본값이 `true`로 전환된 뒤에도 같은 규칙이라
+  같아도 canonical session bool override를 atomic replace에 포함해 미래 기본값 변경에서도 의미가 유지되게 한다.
+  끄는 결정은 사용자 몫이라 notice로 수동 변경 경로를 안내한다. 미래에 기본값이 바뀌더라도 같은 규칙이라
   "사용자가 명시적으로 끈 `false`"를 리셋이 도로 켜지 않는다(리터럴이 아니라 기본값과 비교하는 이유).
-- 기본 전환은 두 release로 나눈다. 준비 release A는 default `false`를 유지한 채 durable tombstone reader/writer,
+- **별도 이니셔티브 — G3 백로그 계약:** 기본 전환을 다시 승인하면 두 release로 나눈다. 준비 release A는 default `false`를 유지한 채 durable tombstone reader/writer,
   반복 relaunch, config provenance와 explicit override retention을 먼저 배포한다. release B만 default를 `true`로
   바꾼다. B loader는 key
   `absent`/`explicit_valid`/`explicit_invalid`와 config file `missing`/`unreadable`/`oversize`를 구분한다. readable
@@ -6717,10 +6718,11 @@ redaction과 GUI 없이 replay 가능한 의미를 고정한 뒤 version을 유�
 
 ## 13. 구현 단계와 종료 gate
 
-이 계획의 제품 범위는 P1~P5지만 **기본값 전환 owner는 P4**다. P4가 일반 Window의 기본 영속 세션
+이 계획의 제품 범위는 P1~P5다. P4가 opt-in 일반 Window의 영속 세션
 (멀티윈도우·manifest·background 알림)을 완성하고, P5는 다른 terminal/SSH의 개별 runtime attach를 독립적으로 완성한다.
-P5 CLI와 U5 자동 host migration 전체는 `session.keep-alive-after-quit=true`의 선결이 아니다. 단 기본 전환 전 실제 frozen
-N-1 host에 current GUI가 attach하거나 안전하게 side-by-side로 유지하는 release E2E 하나는 필요하다. P6 전체 workspace
+P5 CLI와 U5 자동 host migration 전체는 `session.keep-alive-after-quit=true`의 선결이 아니다. 실제 frozen
+N-1 host에 current GUI가 attach하거나 안전하게 side-by-side로 유지하는 release E2E는 업데이트 호환성 gate로 유지하되,
+`false→true` 자동 기본값 전환과 그 release trust/provenance는 P1~P5 완료 조건 밖의 G3 백로그다. P6 전체 workspace
 TUI와 tmux import adapter는 선택적 후속이다.
 
 각 구현 slice는 TDD로 진행한다. 먼저 해당 phase의 실패 상태를 표현하는 red unit/contract/process E2E를 추가하고, 최소 구현으로
@@ -6732,7 +6734,7 @@ green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.
 - quick persistent/restore/upgrade 결합은 명시적 비목표로 제거하고 local quick 회귀 gate만 남긴다.
 - durable tombstone wire(후속 R1에서 구현), unsupported host 분류, checkpoint 실패 시 Quit 취소, GUI-crash까지만 지원하는 checkpoint
-  실패 범위, default flip config provenance/rollback을 구현 전 계약으로 고정한다.
+  실패 범위와 opt-in config provenance/explicit override retention을 구현 전 계약으로 고정한다. default flip은 G3 백로그다.
 - current evidence와 종료 gate를 분리하고, green fixture가 실제 frozen release/두 번째 재실행을 증명한다고 쓰지 않는다.
 - current `main`의 종료-placeholder 테스트는 registry endpoint를 못 찾으면 곧바로 tombstone이 된다고 기대하지만 제품
   코드는 이를 `PersistentRuntimeUnavailable`로 보수 분류해 red다. 구현 첫 slice는 이 stale expectation을
@@ -7097,7 +7099,7 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     additive-field degradation을 자동 검증한다. cwd/SSH destination/raw process argv는
     trace와 실패 artifact에 남기지 않는다.
     현재 SSH drop/paste barrier는 GUI main thread에서 local host RPC를 기다리며 transport timeout 상한은 5초다. 정상 local
-    socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 기본값 전환 전 성능 gate다.
+    socket에서는 즉시 끝나지만, stalled host에서도 UI를 멈추지 않는 async user-action state machine은 opt-in P4의 성능 gate다.
 
 P3 core의 현재 종료 gate는 무인 실제 별도 process smoke, detach 중 output, reconnect first snapshot,
 input/resize roundtrip, bounded shutdown이다. **runtime metadata parity 자동 gate는 완료됐다.** 실제 host PTY의
@@ -7357,7 +7359,7 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
     metadata stream producer visit도 0이다.
   - **E3c client idle-pump evidence:** host producer가 idle에서 projection 0이어도 GUI가 display cadence마다
     `RemoteTermBackend.maintenanceEventTick`에서 원격 runtime을 선택해 `RemoteRuntime.pumpDelta`의 authority·transport
-    경로를 반복하면 default-on의 유휴 예산은 닫히지 않는다. ReleaseFast 제품 계측은 실제 독립 host와 generation-backed
+    경로를 반복하면 opt-in 세션을 여러 개 연 사용자의 유휴 예산은 닫히지 않는다. ReleaseFast 제품 계측은 실제 독립 host와 generation-backed
     `RemoteTermBackend`를 사용해 1·10·15·100 runtime을 붙이고, 60Hz와 같은 1초 turn에서 client process의 user/system CPU,
     selected owner 수, `pumpDelta` 진입 수, publication timestamp seal 수, `ClientSlot` 전역 registry visit 수, socket read 수와
     적용된 metadata/screen/ended 수를 기록한다. 15 runtime 행은 `max_owners_per_frame` 아래에서 매 frame 전부 선택되는
@@ -7485,14 +7487,14 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
     limits, runtime membership과 전량 검증한 candidate를 final manager에 결합한 뒤에만 publish한다. 손상·중복 key·cap 초과,
     foreign host, allocation failure는 부분 restore나 ID reset 없이 upgrade 전체를 fail-close한다. N1 이전 writer의 section
     부재는 빈 journal로 호환되지만, section을 광고한 writer의 손상은 조용히 버리지 않는다.
-- 준비 release A에서 durable tombstone과 typed config provenance/explicit override retention을 default `false`로
-  배포하고, release B에서만
-  absent materialization 성공 뒤 default `true`를 적용한다.
-- 이미 구현된 app quit detach/terminate 분기를 signed-app E2E로 검증한 뒤 기본값 전환은 별도 작은 PR로 수행한다.
+- durable tombstone과 typed config provenance/explicit override retention은 default `false` opt-in 제품 계약으로 유지한다.
+- 자동 default-on은 현재 제품 완료 뒤에도 자동 착수하지 않는다. 별도 G3 백로그에서 사용자 재승인, immutable predecessor와
+  provisioned release runner가 모두 준비된 경우에만 독립 release initiative로 연다.
 
 **P4 완료는 위 목록 전체의 gate를 포함한다.** durable tombstone/reconciliation, L0 lease/checkpoint/Quit 취소,
 `ConnectionSlot`, `ScreenInbox`/deferred resync, 100-runtime wake·cache·echo-latency perf, 남은 P3 parity와 async SSH,
-host-backed notification, release A→B config migration을 각각 L2/L3/L4 또는 명시된 product/perf gate로 통과해야 한다.
+host-backed notification을 각각 L2/L3/L4 또는 명시된 product/perf gate로 통과해야 한다. G3 default-on migration은
+이 완료 판정에 포함하지 않는다.
 
 **이 중 어디까지 왔는지(2026-08-28 코드·실측 대조).**
 
@@ -7503,7 +7505,8 @@ host-backed notification, release A→B config migration을 각각 L2/L3/L4 또�
 | 남은 P3 parity | **async SSH 만 남음**(위 항목). |
 | `ScreenInbox`/deferred resync | **부분** — 상한 자체는 **이미 강제된다**(`protocol.max_client_screen_inbox` 18 MiB·`max_client_screen_items` 를 `client.zig` 가 검사). 남은 것은 `pending_stream`·`partial_batch`·`pending_batches` 를 **한 owner 로 합치는 것**과 그 위의 통일된 overflow/deferred resync 계약이다. 즉 무한 증가 위험이 아니라 소유권 정리다. |
 | host-backed notification | **구현은 끝났고 OS gate 만 남았다.** daemon 안에 전 경로가 있다 — journal → `notification_os_delivery`(bounded 재시도·degraded) → `notification_macos_adapter` → `session_host_notification_adapter.m` 의 실제 `UNUserNotificationCenter.addNotificationRequest`. 배너는 `{hid,rid,eid}` stable route 를 싣고, 클릭 핸들러가 그 route 로 cold-launch attach 한다. 번들 밖 실행은 `bundleIdentifier == nil` 로 **명시적 degraded**(조용한 유실 아님)이며, 제품 daemon 은 GUI 형제 경로(`siblingMaruPath`)라 `.app` 안에서 뜬다. 남은 것은 **provisioned signed runner 의 실제 Notification Center artifact** 다(상세: [검증 매트릭스](verification-matrix.md) §P4 N3). |
-| durable tombstone / release A→B | **미통과 — 코드가 아니라 릴리스 체제가 막는다.** Developer ID 서명 자체는 `release.yml` 이 갖고 있지만 **그 위에서 세션호스트 E2E 를 돌지 않는다** — tombstone·checkpoint 게이트는 `ci.yml` 의 ad-hoc 서명 빌드에서만 돈다. `Session host product / default-on` 러너도 아직 없다. |
+| durable tombstone | **제품 gate 미통과.** Developer ID 서명 자체는 `release.yml` 이 갖고 있지만 그 위에서 세션호스트 E2E를 돌지 않는다. tombstone·checkpoint 게이트는 현재 `ci.yml`의 ad-hoc 서명 빌드에서만 돈다. |
+| G3 release A→B default-on | **별도 백로그.** P4 완료 판정 밖이며 사용자 재승인, immutable A와 provisioned `Session host product / default-on` runner가 모두 준비된 뒤에만 연다. |
 아래 통합 E2E는 이 개별 gate의 대체재가 아니라 마지막 조합 검증이다.
 
 종료 gate: 무인 signed app의 clean profile/explicit false/토글 mixed backend, 2 windows + 3 workspaces topology hash,
@@ -7522,9 +7525,8 @@ R2a manifest validator(core/ABI/source-order/actual AppKit file E2E 완료) → 
 R3 `ScreenInbox`/R4 deferred resync →
 T0 single-connection `ConnectionSlot` → C1 pure checkpoint coordinator/C2 file adapter failure injection/C3 dirty wiring/
 C4 AppKit terminate handshake → E1 event wake(`CR6f`) → E2a cache transaction/E2b product wiring/E2c perf → parity micro-PR → N1 journal/N2 sink/N3 cold route →
-G1 loader provenance/G2 explicit override materialization·retention/G3 default flip 순이다. 각 slice는 한 invariant
-owner와 red→green gate를 갖고,
-G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는다.
+G1 loader provenance/G2 explicit override materialization·retention 순이다. 각 slice는 한 invariant owner와 red→green gate를 갖는다.
+G3 default flip은 이 실행 순서 밖의 release 백로그이며, 사용자 재승인과 provisioned runner·frozen A artifact 없이는 시작하지 않는다.
 
 **G1 loader provenance 계약.** `Config`의 resolved bool은 실행 정책이고 provenance가 아니다. loader는
 `session.keep-alive-after-quit`에 대해 `absent | explicit_valid(value) | explicit_invalid`를 별도 보존하며,
@@ -7558,7 +7560,8 @@ Workspace 토글과 외부 config reload만 app-global snapshot을 새 `explicit
 absent/valid/invalid, exact-one/duplicate init, 실제 atomic replace 실패와 dirty/remove queue 0을 검증하고, AppHost source-order
 fixture와 실제 fresh process는 `lease → G2 bootstrap → AppKit/AppSession` 순서 및 두 번째 instance의 config I/O 0을 검증한다.
 
-**G3 frozen-release default migration 계약.** G3는 [upgrade release provenance](session-host-upgrade.md#u5--제품-활성화)가
+**별도 이니셔티브 — G3 frozen-release default migration 계약.** G3는 P1~P5 완료 조건이나 현재 실행 순서가 아니다. 사용자가
+default-on을 다시 승인한 뒤에만 [upgrade release provenance](session-host-upgrade.md#u5--제품-활성화)가
 지목한 exact immutable A와 provisioned `Session host product / default-on` runner가 모두 존재할 때만 코드를 시작한다. B의
 SemVer가 A에 산술적으로 인접하다는 가정이나 `latest` 조회는 migration 권위가 아니다. B manifest의 exact predecessor
 release ID·tag·commit·manifest SHA-256만 A 선택 권위이며, B→A rollback도 그 exact A 하나만 지원한다.
@@ -15542,11 +15545,11 @@ localhost sshd 등 runner 사전 조건이 없으면 해당 SSH gate를 미완�
 개발자가 창을 눌러 성공 여부를 판단하는 manual-only gate는 허용하지 않는다. OS 경계는 test double만으로 완료하지 않고,
 pre-authorized 전용 macOS runner에서 signed app·Notification Center·별도 PTY client·localhost SSH를 자동 조작하고 구조화된
 artifact를 판정한다. runner provision 자체는 CI 인프라 작업일 수 있지만 한 번 준비된 뒤 각 PR/run에는 사람 개입이 없어야 한다.
-일반 PR gate는 GitHub-hosted `macos-15`의 pure/process test까지다. 기본값 전환 gate
+일반 PR gate는 GitHub-hosted `macos-15`의 pure/process test까지다. 별도 백로그인 기본값 전환 gate
 `Session host product / default-on`은 logged-in Aqua session, 고정 signed test bundle ID, Notification 권한,
 localhost sshd/key가 사전 준비된 self-hosted runner에서 serialized로 실행한다. artifact에는 OS build, bundle/team/signature,
 permission/sshd 상태와 test UUID를 기록하고 run 뒤 notification/runtime을 정리한다. 이 runner가 없으면 component PR은
-merge할 수 있어도 G3 default flip은 blocked다. “한 명령”은 준비된 환경의 재실행을 뜻하며 인프라 provisioning까지
+merge할 수 있어도 G3 default flip은 계속 백로그다. “한 명령”은 준비된 환경의 재실행을 뜻하며 인프라 provisioning까지
 portable하게 수행한다고 주장하지 않는다.
 
 | 층 | 반드시 자동화할 범위 | 대표 실패 주입/산출물 |
@@ -15605,7 +15608,7 @@ runtime change sampler로 옮겼다.
 lost wake는 periodic full projection으로 숨기지 않고 queue publication과 wake token의 acquire/release handshake 및 actual race
 fixture로 검출한다. same-PID exec migration은 pipe/notifier/fd를 직렬화하지 않고 target process에서 새로 만든 뒤 reader를
 재개한다. 실제 input→delta latency와 idle wake/CPU hard cap은 [성능 예산](performance-budget.md)이 소유하며, 그 artifact가
-통과하기 전에는 default `keep-alive-after-quit=true` 전환 조건을 충족한 것으로 세지 않는다.
+통과하기 전에는 opt-in P4의 latency/idle 예산을 충족한 것으로 세지 않는다. default-on 판단은 별도 G3 백로그다.
 
 ## 15. 구현 전 남은 사용자 결정
 

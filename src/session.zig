@@ -87,6 +87,7 @@ pub const agent_hook_event = @import("session/agent_hook_event.zig"); // 훅 이
 pub const agent_hook_install = @import("session/agent_hook_install.zig"); // 훅 설치 계획 판정(§5, 순수)
 pub const agent_hook_trust = @import("session/agent_hook_trust.zig"); // codex 훅 신뢰 값 계산(§2.1, 순수)
 pub const agent_hook_mode = @import("session/agent_hook_mode.zig"); // 훅 모드 판정·상태 전이(§1.2·§4, 순수)
+pub const remote_agent_stream = @import("session/remote_agent_stream.zig"); // RA5: 원격 스트리머 wire 소비·채널 수명(hello·하트비트·강등, 순수)
 pub const session_model = @import("session/session_model.zig");
 pub const split_tree = @import("session/split_tree.zig");
 pub const dock_panel = @import("session/dock_panel.zig"); // FP1: 창 레벨 파일 도크의 OS-중립 소유 모델 + 단일 그룹 영속 DTO

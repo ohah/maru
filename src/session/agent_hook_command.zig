@@ -232,12 +232,68 @@ pub const codex_events = [_]Event{
     .{ .name = "SubagentStop" },
 };
 
-/// 그 provider 가 거는 이벤트. **전역 세트를 두지 않는다** — 하나로 두면 codex 에 없는 이벤트가
-/// 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다.
-pub fn eventsFor(provider: Provider) []const Event {
-    return switch (provider) {
-        .claude => &claude_events,
-        .codex => &codex_events,
+/// 훅을 **어디에 거는가**. provider 와 함께 세트를 정하는 두 번째 축이다
+/// ([계획](../../docs/plans/remote-agent-state.md) RA1).
+pub const Scope = enum {
+    /// maru 가 자기 pty 에 띄운 에이전트. 지금까지의 유일한 경우다.
+    local,
+    /// ssh 너머에서 도는 에이전트. 배지·대화 줄만 쓰고 턴 스냅샷은 안 만든다
+    /// (사용자 결정 2026-08-29 — 계약 [§11](../../docs/agent-hooks.md)).
+    remote,
+};
+
+/// 원격에서 **빼는** 이벤트. **이 목록 하나가 단일 출처다.**
+///
+/// 원격 세트를 배열로 따로 적지 않는 이유가 여기 있다 — 그러면 로컬 세트가 늘 때 원격이 **조용히
+/// 뒤처지고**, 그 어긋남이 드러나는 자리는 사용자의 원격 설정 파일뿐이다(§2 가 provider 세트에서
+/// 이미 겪은 실패 방식이다). 그래서 원격은 로컬에서 **파생**시키고, 무엇을 왜 빼는지만 여기 적는다.
+///
+/// **`PreToolUse` 를 빼는 근거는 셋이다.**
+/// 1. 그것이 만드는 `→ running` 은 `UserPromptSubmit` 이 이미 만든다(`agent_hook_mode.next`).
+///    그것만 주는 두 가지(진행 중 세부·AI 소행 경로)는 턴 스냅샷 축이고, 원격 범위 밖이다.
+/// 2. **비용**: 도구 호출마다 도는 발화가 계약 §3 의 주범이다(턴당 ~90 ms).
+/// 3. **보안**: payload 에 `tool_input.command`(셸 명령 원문)와 `oldString`/`newString`(소스코드)이
+///    실린다(계약 §7). 원격 축에서는 그것이 **네트워크를 건너므로** 로컬보다 훨씬 무겁게 걸린다.
+pub const remote_excluded = [_][]const u8{"PreToolUse"};
+
+fn isRemoteExcluded(name: []const u8) bool {
+    for (remote_excluded) |x| {
+        if (std.mem.eql(u8, x, name)) return true;
+    }
+    return false;
+}
+
+/// 로컬 세트에서 `remote_excluded` 를 걷어낸 원격 세트를 comptime 에 만든다.
+fn deriveRemote(comptime src: []const Event) []const Event {
+    comptime {
+        var out: [src.len]Event = undefined;
+        var n: usize = 0;
+        for (src) |e| {
+            if (isRemoteExcluded(e.name)) continue;
+            out[n] = e;
+            n += 1;
+        }
+        const frozen = out[0..n].*;
+        return &frozen;
+    }
+}
+
+pub const claude_remote_events = deriveRemote(&claude_events);
+pub const codex_remote_events = deriveRemote(&codex_events);
+
+/// 그 provider 가 그 자리에서 거는 이벤트. **전역 세트를 두지 않는다** — 하나로 두면 codex 에 없는
+/// 이벤트가 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다. **스코프 없는
+/// 접근자도 두지 않는다** — 같은 이유로 «조용히 로컬 세트를 쓰는 원격 경로» 가 생긴다.
+pub fn eventsFor(provider: Provider, scope: Scope) []const Event {
+    return switch (scope) {
+        .local => switch (provider) {
+            .claude => &claude_events,
+            .codex => &codex_events,
+        },
+        .remote => switch (provider) {
+            .claude => claude_remote_events,
+            .codex => codex_remote_events,
+        },
     };
 }
 
@@ -480,6 +536,101 @@ test "stdin을 먼저 받고 나머지를 드레인한 뒤에야 가드가 온�
     try testing.expect(drain_at < guard_at);
 }
 
+test "원격 세트는 로컬에서 파생된다 — 부분집합이고 차이는 remote_excluded 하나뿐이다" {
+    for ([_]Provider{ .claude, .codex }) |provider| {
+        const local = eventsFor(provider, .local);
+        const remote = eventsFor(provider, .remote);
+        try testing.expect(remote.len < local.len);
+        for (remote) |r| {
+            var found = false;
+            for (local) |l| {
+                if (!std.mem.eql(u8, l.name, r.name)) continue;
+                try testing.expectEqual(l.matcher == null, r.matcher == null);
+                if (l.matcher) |m| try testing.expectEqualStrings(m, r.matcher.?);
+                found = true;
+            }
+            try testing.expect(found);
+        }
+        for (local) |l| {
+            var in_remote = false;
+            for (remote) |r| {
+                if (std.mem.eql(u8, l.name, r.name)) in_remote = true;
+            }
+            try testing.expectEqual(!isRemoteExcluded(l.name), in_remote);
+        }
+    }
+}
+
+test "원격 세트에 PreToolUse 가 없다 — 명령 원문과 소스코드가 네트워크를 안 건넌다" {
+    for ([_]Provider{ .claude, .codex }) |provider| {
+        for (eventsFor(provider, .remote)) |e| {
+            try testing.expect(!std.mem.eql(u8, e.name, "PreToolUse"));
+        }
+        var local_has = false;
+        for (eventsFor(provider, .local)) |e| {
+            if (std.mem.eql(u8, e.name, "PreToolUse")) local_has = true;
+        }
+        try testing.expect(local_has); // 원격 축이 로컬 동작을 바꾸지 않는다
+    }
+}
+
+test "원격 세트도 배지와 대화 줄에 필요한 것을 모두 갖는다" {
+    const needed = [_][]const u8{ "SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest", "SubagentStart", "SubagentStop" };
+    for ([_]Provider{ .claude, .codex }) |provider| {
+        for (needed) |want| {
+            var found = false;
+            for (eventsFor(provider, .remote)) |e| {
+                if (std.mem.eql(u8, e.name, want)) found = true;
+            }
+            try testing.expect(found);
+        }
+    }
+    for ([_][]const u8{ "Notification", "StopFailure" }) |want| {
+        var found = false;
+        for (eventsFor(.claude, .remote)) |e| {
+            if (std.mem.eql(u8, e.name, want)) found = true;
+        }
+        try testing.expect(found);
+        for (eventsFor(.codex, .remote)) |e| try testing.expect(!std.mem.eql(u8, e.name, want));
+    }
+}
+
+test "remote_excluded 의 이름은 실제 세트에 있는 것이어야 한다 — 오타는 조용히 아무것도 안 뺀다" {
+    for (remote_excluded) |x| {
+        var found = false;
+        for ([_]Provider{ .claude, .codex }) |provider| {
+            for (eventsFor(provider, .local)) |e| {
+                if (std.mem.eql(u8, e.name, x)) found = true;
+            }
+        }
+        try testing.expect(found);
+    }
+}
+
+test "파생 배열이 런타임에도 제 값을 갖는다 — comptime 저장소가 승격되는지" {
+    var seen: usize = 0;
+    for (claude_remote_events) |e| {
+        try testing.expect(e.name.len > 0);
+        try testing.expect(!std.mem.eql(u8, e.name, "PreToolUse"));
+        seen += 1;
+    }
+    try testing.expectEqual(claude_events.len - remote_excluded.len, seen);
+    seen = 0;
+    for (codex_remote_events) |e| {
+        try testing.expect(e.name.len > 0);
+        seen += 1;
+    }
+    try testing.expectEqual(codex_events.len - remote_excluded.len, seen);
+    // 두 파생본이 같은 저장소를 가리키면 codex 가 claude 세트를 쓴다.
+    try testing.expect(claude_remote_events.len != codex_remote_events.len);
+}
+
+test "max_events 는 두 스코프를 모두 담는다 — 원격이 부분집합이라 로컬 상한이 곧 상한이다" {
+    for ([_]Provider{ .claude, .codex }) |provider| {
+        try testing.expect(eventsFor(provider, .remote).len <= eventsFor(provider, .local).len);
+    }
+}
+
 test "provider 이름을 우리가 붙인다 — payload에는 그 정보가 없다" {
     const claude = try buildAlloc("claude", "/tmp/ev");
     defer testing.allocator.free(claude);
@@ -560,7 +711,7 @@ test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
     }
 
     for ([_]Provider{ .claude, .codex }) |provider| {
-        const set = eventsFor(provider);
+        const set = eventsFor(provider, .local);
         var star: usize = 0;
         for (set) |e| {
             if (e.matcher) |m| {

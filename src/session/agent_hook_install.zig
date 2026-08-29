@@ -144,7 +144,7 @@ pub fn planFor(state: State, intent: Intent, want_events: usize) Plan {
 ///
 /// **provider 는 넘겨받는다** — 세트가 그것으로 갈리기 때문이다(codex 에는 `Notification` 이 없다).
 pub fn planForSet(provider: command.Provider, state: State, intent: Intent) Plan {
-    return planFor(state, intent, command.eventsFor(provider).len);
+    return planFor(state, intent, command.eventsFor(provider, .local).len);
 }
 
 /// 이 계획이 사용자 파일을 **바꾸는가**. platform 이 락·백업·atomic write 를 준비할지 정하는 데 쓴다.
@@ -201,7 +201,7 @@ fn entryIsCurrent(
 
 /// 그 provider 의 세트에서 이 이벤트를 찾는다(없으면 «세트 밖»).
 fn setEventIndex(provider: command.Provider, name: []const u8) ?usize {
-    for (command.eventsFor(provider), 0..) |e, i| {
+    for (command.eventsFor(provider, .local), 0..) |e, i| {
         if (std.mem.eql(u8, e.name, name)) return i;
     }
     return null;
@@ -219,7 +219,7 @@ pub fn scan(provider: command.Provider, hooks_value: ?std.json.Value, want_comma
         // 키는 있는데 객체가 아니다 — 우리가 아는 모양이 아니다.
         else => return null,
     };
-    const set = command.eventsFor(provider);
+    const set = command.eventsFor(provider, .local);
     // 세트 크기는 provider 마다 다르므로 최대치로 잡고 앞부분만 쓴다(순수 층이라 할당하지 않는다).
     var covered = [_]bool{false} ** max_events;
     for (hooks.keys(), hooks.values()) |name, groups_value| {
@@ -375,7 +375,7 @@ fn stripOurs(a: std.mem.Allocator, hooks: *std.json.ObjectMap) ApplyError!void {
 
 /// 세트대로 우리 항목을 **배열 끝에** 붙인다. 사용자 항목이 앞에 그대로 남는다.
 fn appendOurs(provider: command.Provider, a: std.mem.Allocator, hooks: *std.json.ObjectMap, want_command: []const u8) ApplyError!void {
-    for (command.eventsFor(provider)) |e| {
+    for (command.eventsFor(provider, .local)) |e| {
         var entry: std.json.ObjectMap = .empty;
         try entry.put(a, "type", .{ .string = "command" });
         try entry.put(a, "command", .{ .string = want_command });

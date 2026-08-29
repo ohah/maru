@@ -94,6 +94,80 @@ pub fn uploadBytes(
     return allocator.dupe(u8, trimmed); // remote는 defer로 해제, trim 결과만 복사
 }
 
+/// 원격 이벤트 스트리머를 띄운다([계획](../../../docs/plans/remote-agent-state.md) RA5).
+///
+/// `uploadBytes` 와 **같은 방식**(fork + `/usr/bin/env ssh -S <ctl> <dest> <cmd>`)이지만 수명이 다르다 —
+/// 업로드는 한 번 쓰고 EOF 를 기다리는 단발이고, 이쪽은 **계속 읽는 장수명 자식**이다. 그래서 fd 와 pid 를
+/// 돌려주고 호출자가 읽기·수확을 맡는다.
+///
+/// **host 당 하나만 띄운다**(계약 §11.6 — `MaxSessions` 기본 10 에 다중화도 포함된다). pane 마다 띄우면
+/// 같은 호스트 pane 다섯이 상한이 된다.
+pub const Stream = struct {
+    pid: std.c.pid_t,
+    /// 자식 stdout. 호출자가 읽고 **닫는다**.
+    out_fd: c_int,
+};
+
+pub fn spawnAgentEvents(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    remote_maru: []const u8,
+    remote_dir: []const u8,
+) !Stream {
+    // `<maru> agent-events --stdio --dir=<절대경로>`. 경로는 셸을 거치므로 인용한다 — 공백이 든 경로가
+    // 있으면 원격 셸이 인자를 쪼갠다.
+    const cmd = try std.fmt.allocPrint(allocator, "{s} agent-events --stdio --dir='{s}'", .{ remote_maru, remote_dir });
+    defer allocator.free(cmd);
+
+    const c_env0 = try allocator.dupeZ(u8, "env");
+    defer allocator.free(c_env0);
+    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    defer allocator.free(c_ssh);
+    const c_flag = try allocator.dupeZ(u8, "-S");
+    defer allocator.free(c_flag);
+    const c_ctl = try allocator.dupeZ(u8, ctl);
+    defer allocator.free(c_ctl);
+    const c_dest = try allocator.dupeZ(u8, dest);
+    defer allocator.free(c_dest);
+    const c_cmd = try allocator.dupeZ(u8, cmd);
+    defer allocator.free(c_cmd);
+    const argv = [_:null]?[*:0]const u8{ c_env0.ptr, c_ssh.ptr, c_flag.ptr, c_ctl.ptr, c_dest.ptr, c_cmd.ptr };
+
+    var out_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+
+    const pid = std.c.fork();
+    if (pid < 0) {
+        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
+        return UploadError.ForkFailed;
+    }
+    if (pid == 0) {
+        // child: stdout→pipe. **stdin 은 /dev/null 로 막는다** — 스트리머는 입력을 안 읽고, 열어 두면
+        // 부모가 죽었을 때 그 fd 가 남아 자식이 영영 안 끝난다.
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.dup2(out_pipe[1], 1);
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    _ = std.c.close(out_pipe[1]);
+    return .{ .pid = pid, .out_fd = out_pipe[0] };
+}
+
+/// 스트리머를 끝낸다. **fd 를 먼저 닫는다** — 자식은 stdout 이 끊기면 다음 write 에서 EPIPE 로 죽는다.
+/// 그래도 안 죽으면 `SIGTERM` 을 보낸다(무한 루프이므로 스스로는 안 끝난다).
+pub fn stopAgentEvents(stream: Stream) void {
+    _ = std.c.close(stream.out_fd);
+    _ = std.c.kill(stream.pid, std.c.SIG.TERM);
+    _ = reapPid(stream.pid);
+}
+
 /// fd에 data를 전부 쓴다(부분 write 루프). child가 죽어 write가 실패하면(EPIPE 등) 중단한다 — 실패는
 /// exit code로 판정하므로 여기선 조용히 멈춘다.
 fn writeAllFd(fd: c_int, data: []const u8) void {

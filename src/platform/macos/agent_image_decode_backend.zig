@@ -46,6 +46,12 @@ const State = struct {
     /// `next_generation` 을 넣으면 바로 뒤에 거는 요청까지 죽는다.
     cancelled_upto: std.atomic.Value(u64) = .init(0),
     shutting_down: std.atomic.Value(bool) = .init(false),
+    /// 마지막으로 띄운 워커. **detach 하지 않는다** — 떼어 놓으면 그 스레드가 들고 있는 할당(경로 사본)이
+    /// 세션보다 오래 살 수 있고, 그러면 테스트의 누수 검사가 그것을 «샜다» 로 보고한다. 실제로 CI 에서
+    /// `dupe` 한 경로가 leaked 로 잡혔다(로컬은 경합이라 통과했다).
+    ///
+    /// 한 번에 하나만 도므로(`inflight`) 핸들도 하나면 된다. 다음 제출 전과 `deinit` 에서 join 한다.
+    worker_thread: ?std.Thread = null,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -76,6 +82,16 @@ pub const Backend = struct {
 
     pub fn deinit(self: *Backend) void {
         self.state.shutting_down.store(true, .release);
+        // **워커를 거두고 나간다.** 남겨 두면 그 스레드의 경로 사본이 우리 할당자보다 오래 살아
+        // 누수로 보고된다(그리고 실제로 그 메모리를 아무도 안 푼다).
+        //
+        // 기다리는 시간은 **한 장 디코드**로 한정된다(~20 ms 실측). 이 워커는 시작에서만 취소를 보므로
+        // 도는 중이면 그 한 장은 끝난다 — 스캔 워커처럼 중간에 끊을 수는 없지만, 한 장이라 상한이 작다.
+        if (self.state.worker_thread) |t| {
+            self.state.cancelled_upto.store(std.math.maxInt(u64), .release);
+            t.join();
+            self.state.worker_thread = null;
+        }
         self.state.cancelled_upto.store(std.math.maxInt(u64), .release);
         self.state.release();
         self.* = undefined;
@@ -105,6 +121,12 @@ pub const Backend = struct {
         state.inflight = true;
         state.mutex.unlock(state.io);
 
+        // 앞 워커가 남아 있으면 먼저 거둔다. `inflight` 가 false 라 그 스레드는 이미 끝났거나
+        // 끝나는 중이므로 여기서 멈추는 시간은 사실상 0 이다.
+        if (state.worker_thread) |t| {
+            t.join();
+            state.worker_thread = null;
+        }
         const owned = state.allocator.dupe(u8, path) catch {
             finish(state, null);
             return null;
@@ -131,7 +153,7 @@ pub const Backend = struct {
             finish(state, null);
             return null;
         };
-        thread.detach();
+        state.worker_thread = thread;
         return generation;
     }
 

@@ -5282,6 +5282,125 @@ test "이미 선 축이면 다시 열어 달라고 하지 않는다" {
     bridge.maru_mobile_control_reset();
 }
 
+test "화면을 보는 중 연결이 끊기면 끊겼다고 말한다 — 영영 기다리게 두지 않는다" {
+    // `control_reset` 이 조립기를 놓으면 화면이 비는데, 그때 "받는 중" 을 계속 보이면 사용자는
+    // 오지 않을 것을 기다린다. **아직도 그 화면을 원하는가**로 두 상태를 가른다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_take_control_open();
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"a\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    const row = bridge.remoteRowCenter(0).?;
+    tapAt(row.x, row.y);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteScreenShown.waiting, bridge.remoteScreenShown());
+
+    // 연결이 새로 선다(끊겼다) — 화면은 그 자리에 남지만 **말이 바뀌어야** 한다.
+    bridge.maru_mobile_control_reset();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteScreenShown.off, bridge.remoteScreenShown());
+}
+
+test "누른 뒤 목록이 갱신되면 그 자리를 안 연다" {
+    // **누름과 뗌 사이에 목록이 바뀔 수 있다**(원격이 갱신을 보낸다). 그때 뗄 때 좌표로 다시
+    // 찾으면 다른 세션을 열고, index 만 믿으면 못 붙는 줄을 연다 — 둘 다 사용자가 안 고른 것이다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    _ = bridge.maru_mobile_take_control_open();
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"a\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+
+    // 누른다(아직 안 뗐다).
+    const row = bridge.remoteRowCenter(0).?;
+    bridge.maru_mobile_pointer(0, 1, row.x, row.y, now());
+
+    // 그 사이 목록이 갱신돼 그 줄이 **못 붙는 세션**으로 바뀐다.
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":[" ++
+            "{\"id\":{\"surface_id\":9},\"title\":\"in-process\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+
+    // 뗀다 — **화면이 안 열려야 한다**. 가드가 없으면 `wantControl` 이 id 를 걸러도 `navPush` 는
+    // 되어, **원하는 것은 없는데 화면만 열린** 상태가 된다(영영 "받는 중").
+    bridge.maru_mobile_pointer(2, 1, row.x, row.y, now());
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+    // 목록을 그렸다는 것은 세션 화면으로 안 밀렸다는 뜻이다 — 밀렸으면 그쪽을 그린다.
+    try std.testing.expectEqual(@as(c_int, 0), bridge.maru_mobile_take_control_open());
+}
+
+test "줄을 누르면 그 세션 화면이 뜨고, 나가면 목록으로 돌아간다" {
+    // **이 슬라이스가 처음으로 사용자에게 보이는 동작이다.** 누름→want→조립→그리기→뒤로가기가
+    // 한 줄로 이어지는지 여기서 잰다 — 조각마다 초록인데 이어지지 않는 상태를 여러 번 겪었다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    // **전이를 만들어야 여는 판정이 돈다** — 이미 목록 화면이면 `noteControlScreen` 이 그대로
+    // 돌아간다(앞 테스트가 그 상태로 넘겨줄 수 있다).
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+
+    // host 가 실제로 채널을 열었다고 알린다 — 그래야 "돌리고 있는 명령" 이 선다(§4a).
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // host-backed 한 줄 + 못 붙는 한 줄.
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"host-backed\",\"runtime_id\":\"00000000000000000000000000000abc\"}," ++
+            "{\"id\":{\"surface_id\":8},\"title\":\"in-process\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+
+    // **못 붙는 줄은 눌러도 안 열린다** — 눌리는 것처럼 보이고 아무 일도 안 나면 고장으로 읽는다.
+    const second = bridge.remoteRowCenter(1).?;
+    tapAt(second.x, second.y);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+
+    // 붙을 수 있는 줄을 누르면 그 화면으로 간다.
+    const first = bridge.remoteRowCenter(0).?;
+    tapAt(first.x, first.y);
+    advanceFrame(402, 874, 16);
+    // 아직 레코드가 안 왔다 — **빈 화면이 아니라 "받는 중"** 이라고 말해야 한다.
+    try std.testing.expectEqual(bridge.RemoteScreenShown.waiting, bridge.remoteScreenShown());
+    // **다른 명령을 원하므로 먼저 닫는다**(§4a — 같은 채널이니까).
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_close());
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+
+    // 화면 레코드가 오면 셀을 그린다.
+    const frame = try makeScreenFrame(std.testing.allocator);
+    defer std.testing.allocator.free(frame);
+    _ = feedControl(frame);
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteScreenShown.cells, bridge.remoteScreenShown());
+
+    // 나가면 목록으로 돌아가고, **그 화면을 그만 본다는 뜻**도 함께 선다.
+    _ = bridge.maru_mobile_pop_screen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(bridge.RemoteShown.rows, bridge.remoteSessionsShown());
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_remote_screen_state());
+}
+
 test "화면을 원할 때 그 바이트는 ndjson 파서로 안 간다" {
     // **S11-4 가 한계로 남긴 자리다.** 화면 레코드를 ndjson 파서에 먹이면 파서가 그것을 잡음으로
     // 세다가 축을 꺼 버리고(`too_much_noise`), 그러면 목록으로 돌아와도 축이 다시 안 선다

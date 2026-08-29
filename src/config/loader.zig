@@ -3074,3 +3074,37 @@ test "SC6 theme.preset 이 뒤 줄에 오면 구문 색 override 가 지워진�
     defer before.deinit();
     try std.testing.expectEqualStrings("#c678dd", before.config.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)].?);
 }
+
+test "PAL1 팔레트는 문서가 광고하는 범위와 로더가 받는 범위가 같다" {
+    // **문서 게이트가 이 열여섯을 못 본다.** `configuration.md` 키 표를 읽는 두 게이트(config 문서 정합성
+    // A, 모바일 키 커버리지)는 행마다 **첫 백틱 토큰 하나만** 뽑으므로, 압축 행으로 적힌
+    // `theme.palette.0`~`theme.palette.15` 중 **`.0`만** 검사된다(2026-08-29 실측). 나머지 열다섯은
+    // 문서가 광고만 하고 아무도 안 지키는 상태였다.
+    //
+    // 키를 하나씩 문자열로 찾는 방식은 여기서 안 통한다 — 압축 행에는 양 끝(`.0`·`.15`)만 적혀 있다.
+    // 그래서 **계약 자체**를 잰다: 문서가 적은 범위 표기와 로더가 실제로 받는 범위가 같은가.
+    // 한쪽만 바꾸면 이 판정자가 죽는다.
+    //
+    // 구문 색(`SC1`)이 같은 구멍을 다른 방법으로 막는다 — 그쪽은 키가 열하나 다 적혀 있어 문자열로 센다.
+    const doc = @embedFile("config_doc_md");
+    try std.testing.expect(std.mem.indexOf(u8, doc, "`theme.palette.0`~`theme.palette.15`") != null);
+
+    const a = std.testing.allocator;
+    // ⑴ 문서가 적은 두 끝과 그 사이가 전부 실린다.
+    for (0..16) |i| {
+        const line = try std.fmt.allocPrint(a, "theme.palette.{d} = #010203", .{i});
+        defer a.free(line);
+        var p = try parse(a, line);
+        defer p.deinit();
+        if (p.config.theme.palette[i] == null) {
+            std.debug.print("문서가 광고한 theme.palette.{d} 를 로더가 안 받는다\n", .{i});
+            try std.testing.expect(false);
+        }
+        try std.testing.expectEqual(@as(usize, 0), p.diagnostics.len); // 조용히 받는다
+    }
+    // ⑵ 범위 밖은 받지 않고 **진단을 남긴다**(조용히 삼키면 사용자가 오타를 못 찾는다).
+    var over = try parse(a, "theme.palette.16 = #010203");
+    defer over.deinit();
+    try std.testing.expect(over.diagnostics.len > 0);
+    for (over.config.theme.palette) |c| try std.testing.expect(c == null);
+}

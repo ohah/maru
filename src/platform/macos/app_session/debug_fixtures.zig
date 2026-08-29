@@ -28,7 +28,8 @@ const term_ops = @import("term.zig");
 const notification_ops = @import("notification.zig");
 const pane_ops = @import("pane.zig");
 const find_ops = @import("find.zig");
-const git_ops = @import("git.zig"); // applyForcedScmTab 이 저장소 루트를 찾을 때 쓴다
+const git_ops = @import("git.zig");
+const image_gallery_ops = @import("image_gallery.zig"); // MARU_FORCE_IMAGE_GALLERY 가 갤러리를 첫 frame 에 세울 때 쓴다
 
 /// 시각 확인 디버그 훅 — MARU_OPEN_SETTINGS env가 설정됐고 surface가 준비됐으면 세팅 화면을 한 번 자동으로 연다.
 /// 스크린샷 하니스(MARU_SCREENSHOT)가 입력 없이 모달 상태를 캡처하도록(self-verify). env 미설정이면 무동작 —
@@ -66,6 +67,17 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             null;
     }
     // MARU_FORCE_BLOCKED=1 — 활성 Term을 blocked로 세워 상태바 blocked 항목을 헤드리스로 찍는다.
+    // MARU_FORCE_IMAGE_GALLERY=<트랜스크립트 절대경로> — 도크를 갤러리 뷰로 열고 활성 Term 의 소스를
+    // 그 파일로 세운다. **실제 픽셀을 헤드리스로 찍기 위한 유일한 길**이다 — 갤러리 소스는 provider 훅이
+    // 채우는데, 첫 frame 에는 훅이 아직 한 번도 안 돌았다(MARU_FORCE_AGENT 가 필요한 것과 같은 이유).
+    if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY")) |raw| {
+        const path = std.mem.span(raw);
+        const t = pane_ops.activePane(self).activeTerm();
+        if (t.agent_image_source.set(path)) {
+            dock_ops.openDockTo(self, .image_gallery);
+            image_gallery_ops.refresh(self, true);
+        }
+    }
     if (std.c.getenv("MARU_FORCE_BLOCKED") != null) {
         const t = pane_ops.activePane(self).activeTerm();
         t.agent_state = .blocked;

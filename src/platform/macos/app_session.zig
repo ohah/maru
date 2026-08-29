@@ -72032,23 +72032,30 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
 
     try Wait.until(session);
 
-    // 이미지 둘: user 메시지 하나 + tool_result 하나. 두 번째는 media_type 이 없다.
+    // 이미지 둘: user 메시지 하나(media_type 있음) + tool_result 하나(없음).
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
     try std.testing.expect(!session.image_gallery.partial);
     try std.testing.expect(!session.image_gallery.scanning());
     try std.testing.expectEqual(@as(u64, transcript.len), session.image_gallery.scanned_bytes);
+    // **최신이 먼저다**(IG7). 스캐너는 파일 순서로 담지만 갤러리는 뒤집어 든다 — 이 기능의 물음이
+    // 「**아까** 그 스크린샷」이기 때문이다. 그래서 `[0]` 은 파일의 **마지막** 이미지(= media_type
+    // 없는 tool_result 쪽)이고 `[1]` 이 첫 이미지다. 이 순서가 바뀌면 실제 세션에서 세션 맨 처음
+    // 이미지만 보이게 된다(실측으로 그 상태를 확인하고 뒤집었다).
     try std.testing.expectEqual(
-        maru.session.agent_image_index.Mime.png,
+        maru.session.agent_image_index.Mime.unknown,
         session.image_gallery.hits.items[0].mime,
     );
     try std.testing.expectEqual(
-        maru.session.agent_image_index.Mime.unknown,
+        maru.session.agent_image_index.Mime.png,
         session.image_gallery.hits.items[1].mime,
     );
     // **오프셋이 파일 절대값인지 그 자리에서 본다.** 상대값이면 나중에 그 구간을 읽어 디코드할 때
     // 엉뚱한 바이트가 나오는데, 그때는 원인이 여기라는 것을 알기 어렵다.
-    const h0 = session.image_gallery.hits.items[0];
-    try std.testing.expectEqualStrings("AAAABBBB", transcript[h0.data_offset..][0..h0.data_len]);
+    // `[1]` 이 파일의 **첫** 이미지다(최신 우선이라 뒤집혀 있다).
+    const h_first = session.image_gallery.hits.items[1];
+    try std.testing.expectEqualStrings("AAAABBBB", transcript[h_first.data_offset..][0..h_first.data_len]);
+    const h_last = session.image_gallery.hits.items[0];
+    try std.testing.expectEqualStrings("CCCC", transcript[h_last.data_offset..][0..h_last.data_len]);
 
     {
         var buf: [64]u8 = undefined;
@@ -72223,7 +72230,7 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
 
     // 격자에 자리가 있어야 한다 — 없으면 이 test 는 아무것도 검증하지 않는다(그 사실을 먼저 못박는다).
     const area = image_gallery_ops.gridArea(session);
-    const l = maru.session.image_grid.layout(area, image_gallery_ops.gridMetrics(session), 1);
+    const l = maru.session.image_grid.layout(area, image_gallery_ops.gridMetrics(session), 1, 0);
     try std.testing.expect(l.visible == 1);
 
     var images: []maru.renderer.metal_frame.GpuImage = &.{};
@@ -72357,6 +72364,7 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
         image_gallery_ops.gridArea(session),
         image_gallery_ops.gridMetrics(session),
         image_count,
+        0,
     );
     // 이 test 가 볼 것이 실제로 있는지 먼저 못박는다 — 다 들어가면 검증할 게 없다.
     try std.testing.expect(l.overflow > 0);
@@ -72448,7 +72456,7 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     // ── ① **그린 자리를 누른다.** 좌표를 지어내면 이 test 는 배치가 바뀌어도 계속 통과한다.
     const area = image_gallery_ops.gridArea(session);
     const m = image_gallery_ops.gridMetrics(session);
-    const l = maru.session.image_grid.layout(area, m, 1);
+    const l = maru.session.image_grid.layout(area, m, 1, 0);
     const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
     try std.testing.expect(image_gallery_ops.handleDown(
         session,
@@ -72589,7 +72597,7 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
 
     const area = image_gallery_ops.gridArea(session);
     const m = image_gallery_ops.gridMetrics(session);
-    const l = maru.session.image_grid.layout(area, m, 1);
+    const l = maru.session.image_grid.layout(area, m, 1, 0);
     const cell = maru.session.image_grid.rectAt(area, m, l, 0).?;
     session.mouse(1, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
     session.mouse(3, @floatFromInt(cell.x + cell.w / 2), @floatFromInt(cell.y + cell.h / 2), 0, 0);
@@ -72780,16 +72788,17 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
     }
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.tiles.items.len);
 
-    // 붙여넣기 = 같은 줄 텍스트, 상용구는 벗겨진다.
-    try std.testing.expectEqualStrings("이 화면", session.image_gallery.tiles.items[0].label.text());
+    // **최신이 먼저다**(IG7) — 뒤에 온 도구 읽기가 첫 칸이다.
     // 도구 읽기 = **직전 줄**의 file_path 파일명.
-    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[1].label.text());
+    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[0].label.text());
+    // 붙여넣기 = 같은 줄 텍스트, 상용구는 벗겨진다.
+    try std.testing.expectEqualStrings("이 화면", session.image_gallery.tiles.items[1].label.text());
 
     // 격자가 라벨 자리를 실제로 잡는다 — 안 그러면 글자를 그릴 곳이 없다.
     const area = image_gallery_ops.gridArea(session);
     const m = image_gallery_ops.gridMetrics(session);
     try std.testing.expect(m.label > 0);
-    const l = maru.session.image_grid.layout(area, m, 2);
+    const l = maru.session.image_grid.layout(area, m, 2, 0);
     const tile0 = maru.session.image_grid.rectAt(area, m, l, 0).?;
     const lab0 = maru.session.image_grid.labelRectAt(area, m, l, 0).?;
     try std.testing.expectEqual(tile0.y + tile0.h, lab0.y);
@@ -72798,4 +72807,115 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
         @as(?usize, 0),
         maru.session.image_grid.hitTest(area, m, l, lab0.x + 2, lab0.y + 2),
     );
+}
+
+test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 닿는다 (IG7)" {
+    // **실측이 이 test 를 쓰게 했다.** 실제 세션(151장)을 태워 보니 4장(2.6%)만 보였고, 그 4장이
+    // 하필 «세션 맨 처음» 것이었다 — 「아까 그 스크린샷」을 찾는 기능이 정반대를 보여주고 있었다.
+    // 합성 픽스처는 4장이 다 보여 이 결함을 원리적으로 못 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 30 장. 각 줄의 텍스트가 **몇 번째인지**를 말하므로 라벨로 순서를 확인할 수 있다.
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(allocator);
+    for (0..30) |i| {
+        const line = try std.fmt.allocPrint(
+            allocator,
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[" ++
+                "{{\"type\":\"text\",\"text\":\"n{d}\"}}," ++
+                "{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{s}\"}}}}]}}}}\n",
+            .{ i, png_b64 },
+        );
+        defer allocator.free(line);
+        try transcript.appendSlice(allocator, line);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 30), session.image_gallery.count());
+
+    // ── ① **최신이 먼저다.** 첫 타일이 마지막 이미지(n29)여야 한다.
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqualStrings("n29", session.image_gallery.tiles.items[0].label.text());
+
+    // ── ② 스크롤할 곳이 있다(30장이 한 화면에 안 들어간다).
+    const l0 = image_gallery_ops.gridLayout(session);
+    try std.testing.expect(l0.max_scroll > 0);
+    try std.testing.expectEqual(@as(usize, 0), l0.first);
+
+    // ── ③ 휠로 내리면 **다른 칸**이 보인다. 제품 진입점으로 들어간다.
+    const dg = dock_ops.dockGeometry(session);
+    const cx: f64 = @floatFromInt(dg.tree_content.x + dg.tree_content.w / 2);
+    const cy: f64 = @floatFromInt(dg.tree_content.y + dg.tree_content.h / 2);
+    scroll_ops.scrollWheel(session, -3.0, 0, false, cx, cy); // 아래로
+    const l1 = image_gallery_ops.gridLayout(session);
+    try std.testing.expect(l1.first > 0);
+    try std.testing.expect(l1.scroll_px > 0);
+
+    // ── ④ **끝까지 내리면 마지막(= 가장 오래된) 것에 닿는다.** 스크롤이 없던 동안 못 보던 것들이다.
+    {
+        var guard: usize = 0;
+        while (guard < 200 and image_gallery_ops.gridLayout(session).scroll_px < l0.max_scroll) : (guard += 1) {
+            scroll_ops.scrollWheel(session, -3.0, 0, false, cx, cy);
+        }
+    }
+    const lend = image_gallery_ops.gridLayout(session);
+    try std.testing.expectEqual(l0.max_scroll, lend.scroll_px);
+    try std.testing.expectEqual(@as(usize, 30), lend.first + lend.visible); // 마지막 칸이 창 안에 있다
+
+    // ── ⑤ **누른 자리와 열리는 것이 같다.** 스크롤을 되더하지 않으면 여기서 어긋난다.
+    const area = image_gallery_ops.gridArea(session);
+    const m = image_gallery_ops.gridMetrics(session);
+    const target = lend.first + lend.visible - 1; // 마지막 칸 = 가장 오래된 이미지
+    const r = maru.session.image_grid.rectAt(area, m, lend, target).?;
+    try std.testing.expect(image_gallery_ops.handleDown(
+        session,
+        @floatFromInt(r.x + r.w / 2),
+        @floatFromInt(r.y + r.h / 2),
+    ));
+    try std.testing.expect(session.image_gallery.open != null);
+    try std.testing.expectEqual(target, session.image_gallery.open.?.hit_index);
+    // 그 칸은 **가장 오래된** 이미지(n0)다 — 최신 우선 정렬의 반대쪽 끝.
+    try std.testing.expectEqual(@as(usize, 29), target);
 }

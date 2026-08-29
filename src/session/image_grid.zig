@@ -28,14 +28,24 @@ pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 pub const Layout = struct {
     /// 한 행에 몇 칸인가. 0 이면 폭이 모자라 하나도 못 그린다.
     cols: u32,
-    /// 실제로 자리를 얻은 칸 수.
+    /// 화면에 자리를 얻은 **첫 칸의 절대 인덱스**(스크롤이 정한다).
+    first: usize = 0,
+    /// 그 뒤로 몇 칸이 보이는가.
     visible: usize,
-    /// 자리를 못 얻은 칸 수. **「이미지가 없다」와 「화면에 안 들어간다」를 가르는 값**이다.
+    /// 지금 화면 밖에 있는 칸 수(위아래 합). **「이미지가 없다」와 「화면에 안 들어간다」를 가른다.**
     overflow: usize,
+    /// 세로로 더 내려갈 수 있는 최대 오프셋(px). 0 이면 스크롤할 것이 없다.
+    max_scroll: u32 = 0,
+    /// 이 배치가 반영한 스크롤 오프셋(px). `rectAt` 이 y 에서 뺀다 — 배치와 그리기가 **같은 값**을
+    /// 쓰게 묶어 둔다(따로 넘기면 한쪽만 갱신된 프레임이 생긴다).
+    scroll_px: u32 = 0,
 };
 
-/// 격자에 몇 칸이 들어가는지 센다. 사각형은 `rectAt` 이 준다.
-pub fn layout(area: Rect, m: Metrics, count: usize) Layout {
+/// 격자 배치. `scroll_px` 만큼 내려간 상태에서 **보이는 창**을 센다. 사각형은 `rectAt` 이 준다.
+///
+/// 스크롤은 계약 §2 의 「가상 스크롤」이다. 없으면 실제 세션(실측 151 장)에서 **2.6%**만 닿을 수
+/// 있었다 — 기능이 성립하지 않는 수준이다.
+pub fn layout(area: Rect, m: Metrics, count: usize, scroll_px: u32) Layout {
     if (m.tile == 0 or count == 0) return .{ .cols = 0, .visible = 0, .overflow = count };
     // 여백을 빼고 남는 폭·높이. `-|` 로 음수 대신 0 이 되게 한다 — 좁은 도크에서 언더플로가 나면
     // 열 수가 거대해져 화면 밖에 칸을 그린다.
@@ -50,22 +60,48 @@ pub fn layout(area: Rect, m: Metrics, count: usize) Layout {
     const step = m.tile +| m.gap;
     const step_y = cell_h +| m.gap;
     const cols = 1 + (inner_w - m.tile) / step;
-    const rows = 1 + (inner_h - cell_h) / step_y;
-    const capacity = @as(usize, cols) *| @as(usize, rows);
-    const visible = @min(count, capacity);
-    return .{ .cols = cols, .visible = visible, .overflow = count - visible };
+    const rows_in_view = 1 + (inner_h - cell_h) / step_y;
+    const total_rows = (count + cols - 1) / cols;
+
+    // **스크롤은 행 단위로 스냅한다.** `Rect.y` 가 `u32` 라 음수를 표현할 수 없어서, 반쯤 걸친 행을
+    // 허용하면 그 행이 «위로 -42» 대신 **0 으로 포화**되어 도크 밖(탭 바 위)에 그려진다. 실제로
+    // 그렇게 냈다가 test 가 잡았다. 행 단위로 끊으면 그 표현 불가능이 사라지고, 잘라 그릴 수 없는
+    // 글자(라벨) 문제도 함께 없어진다 — 썸네일 격자에서는 흔한 동작이기도 하다.
+    const scrollable_rows: u32 = @intCast(@min(
+        @as(u64, std.math.maxInt(u32)),
+        @as(u64, total_rows) -| @as(u64, rows_in_view),
+    ));
+    const max_scroll = scrollable_rows *| step_y;
+    const first_row: u32 = @min(scroll_px, max_scroll) / step_y;
+    const scroll = first_row *| step_y;
+
+    const first = @as(usize, first_row) *| @as(usize, cols);
+    if (first >= count) return .{ .cols = cols, .first = count, .visible = 0, .overflow = count, .max_scroll = max_scroll, .scroll_px = scroll };
+    const capacity = @as(usize, rows_in_view) *| @as(usize, cols);
+    const visible = @min(count - first, capacity);
+    return .{
+        .cols = cols,
+        .first = first,
+        .visible = visible,
+        .overflow = count - visible,
+        .max_scroll = max_scroll,
+        .scroll_px = scroll,
+    };
 }
 
-/// `n` 번째 칸의 사각형. `layout` 이 센 `visible` 밖이면 `null` — 화면 밖에 그리지 않는다.
+/// `n` 번째(**절대 인덱스**) 칸의 사각형. 보이는 창 밖이면 `null` — 화면 밖에 그리지 않는다.
 pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
-    if (l.cols == 0 or n >= l.visible) return null;
+    if (l.cols == 0 or n < l.first or n >= l.first + l.visible) return null;
     const step = m.tile +| m.gap;
     const step_y = m.tile +| m.label +| m.gap;
     const col: u32 = @intCast(n % l.cols);
     const row: u32 = @intCast(n / l.cols);
+    const top = area.y +| m.pad +| row *| step_y;
+    // 스크롤만큼 올린다. `layout` 이 행 단위로 스냅해 두므로 이 뺄셈은 **절대 음수가 되지 않는다**
+    // (`first` 행의 top 이 정확히 `scroll_px` 만큼 앞서 있다).
     return .{
         .x = area.x +| m.pad +| col *| step,
-        .y = area.y +| m.pad +| row *| step_y,
+        .y = top -| l.scroll_px,
         .w = m.tile,
         .h = m.tile,
     };
@@ -77,7 +113,11 @@ pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
 pub fn labelRectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     if (m.label == 0) return null;
     const tile = rectAt(area, m, l, n) orelse return null;
-    return .{ .x = tile.x, .y = tile.y +| tile.h, .w = tile.w, .h = m.label };
+    const y = tile.y +| tile.h;
+    // 행 단위 스냅 덕에 여기 걸리는 경우는 없다. 그래도 남겨 둔다 — 스냅을 나중에 풀면 이 한 줄이
+    // 글자가 도크 밖으로 삐져나가는 것을 막는 마지막 방어선이다(글자는 잘라 그릴 수 없다).
+    if (y < area.y or y +| m.label > area.y +| area.h) return null;
+    return .{ .x = tile.x, .y = y, .w = tile.w, .h = m.label };
 }
 
 /// `(px, py)` 위에 있는 칸. 없으면 `null` — 간격·여백을 누르면 아무 일도 없다.
@@ -91,11 +131,19 @@ pub fn hitTest(area: Rect, m: Metrics, l: Layout, px: u32, py: u32) ?usize {
     if (step == 0 or step_y == 0) return null;
     const ox = area.x +| m.pad;
     const oy = area.y +| m.pad;
-    if (px < ox or py < oy) return null;
+    if (px < ox) return null;
     const col = (px - ox) / step;
-    const row = (py - oy) / step_y;
     if (col >= l.cols) return null;
-    const n = @as(usize, row) *| @as(usize, l.cols) +| @as(usize, col);
+    // **스크롤을 되더한다** — 그리기가 뺀 값을 여기서 도로 넣지 않으면 누른 자리와 열리는 것이
+    // 스크롤한 만큼 어긋난다(깊이 내릴수록 크게 어긋나 재현이 헷갈린다).
+    //
+    // 더하는 쪽으로 계산한다. 원점에서 빼면 `u32` 포화로 스크롤이 여백보다 클 때 0 으로 눌리고,
+    // 그 순간 행 계산이 통째로 틀어진다 — 실제로 그렇게 냈다가 test 가 `expected 44, found null`
+    // 로 잡았다.
+    const abs_y = @as(u64, py) +| @as(u64, l.scroll_px);
+    if (abs_y < oy) return null;
+    const row: u64 = (abs_y - oy) / step_y;
+    const n = @as(usize, @intCast(@min(row, @as(u64, std.math.maxInt(u32))))) *| @as(usize, l.cols) +| @as(usize, col);
     // 후보를 **그리는 함수에 되물어** 확인한다 — 간격에 떨어진 점은 여기서 걸러진다.
     // **라벨도 그 칸이다**: 그림 아래 글자를 눌렀는데 아무 일이 없으면 어디를 눌러야 하는지 알 수 없다.
     const r = rectAt(area, m, l, n) orelse return null;
@@ -137,21 +185,21 @@ const m80 = Metrics{ .tile = 80, .gap = 8, .pad = 8 };
 test "열·행 수는 여백과 간격을 뺀 자리에서 나온다" {
     // inner = 400-16 = 384, step = 88 → 1 + (384-80)/88 = 1+3 = 4열
     // inner_h = 300-16 = 284 → 1 + (284-80)/88 = 1+2 = 3행 → 12칸
-    const l = layout(area_400x300, m80, 100);
+    const l = layout(area_400x300, m80, 100, 0);
     try testing.expectEqual(@as(u32, 4), l.cols);
     try testing.expectEqual(@as(usize, 12), l.visible);
     try testing.expectEqual(@as(usize, 88), l.overflow);
 }
 
 test "칸이 자리보다 적으면 넘치는 것이 없다" {
-    const l = layout(area_400x300, m80, 5);
+    const l = layout(area_400x300, m80, 5, 0);
     try testing.expectEqual(@as(usize, 5), l.visible);
     try testing.expectEqual(@as(usize, 0), l.overflow);
 }
 
 test "폭이 모자라면 하나도 안 그린다 — 반쪽 칸을 만들지 않는다" {
     const narrow = Rect{ .x = 0, .y = 0, .w = 90, .h = 300 }; // inner 74 < tile 80
-    const l = layout(narrow, m80, 10);
+    const l = layout(narrow, m80, 10, 0);
     try testing.expectEqual(@as(u32, 0), l.cols);
     try testing.expectEqual(@as(usize, 0), l.visible);
     // **「없다」가 아니라 「안 보인다」다.** 이 구분이 없으면 좁은 도크에서 「이미지가 없습니다」로 거짓말한다.
@@ -160,13 +208,13 @@ test "폭이 모자라면 하나도 안 그린다 — 반쪽 칸을 만들지 �
 
 test "언더플로가 열 수를 폭주시키지 않는다 — 여백이 폭보다 큰 경우" {
     const tiny = Rect{ .x = 0, .y = 0, .w = 4, .h = 4 };
-    const l = layout(tiny, m80, 10);
+    const l = layout(tiny, m80, 10, 0);
     try testing.expectEqual(@as(u32, 0), l.cols);
     try testing.expectEqual(@as(usize, 0), l.visible);
 }
 
 test "사각형은 왼쪽 위부터 행 우선으로 놓이고 서로 겹치지 않는다" {
-    const l = layout(area_400x300, m80, 12);
+    const l = layout(area_400x300, m80, 12, 0);
     const r0 = rectAt(area_400x300, m80, l, 0).?;
     const r1 = rectAt(area_400x300, m80, l, 1).?;
     const r4 = rectAt(area_400x300, m80, l, 4).?;
@@ -184,7 +232,7 @@ test "사각형은 왼쪽 위부터 행 우선으로 놓이고 서로 겹치지 
 }
 
 test "보이는 범위 밖은 null — 화면 밖에 그리지 않는다" {
-    const l = layout(area_400x300, m80, 3);
+    const l = layout(area_400x300, m80, 3, 0);
     try testing.expect(rectAt(area_400x300, m80, l, 3) == null);
     try testing.expect(rectAt(area_400x300, m80, l, 999) == null);
 }
@@ -228,7 +276,7 @@ test "letterbox 결과는 언제나 타일 안에 있다" {
 }
 
 test "hitTest: 그린 자리를 누르면 그 칸이 나온다" {
-    const l = layout(area_400x300, m80, 12);
+    const l = layout(area_400x300, m80, 12, 0);
     for (0..l.visible) |n| {
         const r = rectAt(area_400x300, m80, l, n).?;
         // 왼쪽 위 모서리·가운데·오른쪽 아래 직전 — 세 점 다 같은 칸이어야 한다.
@@ -239,7 +287,7 @@ test "hitTest: 그린 자리를 누르면 그 칸이 나온다" {
 }
 
 test "hitTest: 간격·여백·바깥은 아무 칸도 아니다" {
-    const l = layout(area_400x300, m80, 12);
+    const l = layout(area_400x300, m80, 12, 0);
     const r0 = rectAt(area_400x300, m80, l, 0).?;
     // 칸 바로 오른쪽(간격 안).
     try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, r0.x + r0.w, r0.y));
@@ -253,8 +301,8 @@ test "hitTest: 간격·여백·바깥은 아무 칸도 아니다" {
 
 test "hitTest: 자리는 있는데 칸이 없으면 null — overflow 자리를 누르지 않는다" {
     // 12칸이 들어가는 격자에 이미지가 3장뿐이다. 4번째 자리를 눌러도 열 것이 없다.
-    const l = layout(area_400x300, m80, 3);
-    const full = layout(area_400x300, m80, 12);
+    const l = layout(area_400x300, m80, 3, 0);
+    const full = layout(area_400x300, m80, 12, 0);
     const r3 = rectAt(area_400x300, m80, full, 3).?;
     try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m80, l, r3.x + 2, r3.y + 2));
     try testing.expectEqual(@as(?usize, 2), hitTest(area_400x300, m80, l, r3.x - 88 + 2, r3.y + 2));
@@ -263,7 +311,7 @@ test "hitTest: 자리는 있는데 칸이 없으면 null — overflow 자리를 
 test "라벨 띠: 세로 칸이 라벨만큼 커지고 그 자리가 타일 바로 아래다" {
     const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
     // inner_h = 284, cell_h = 96, step_y = 104 → 1 + (284-96)/104 = 1+1 = 2행(라벨 없을 때는 3행이었다)
-    const l = layout(area_400x300, m, 100);
+    const l = layout(area_400x300, m, 100, 0);
     try testing.expectEqual(@as(u32, 4), l.cols);
     try testing.expectEqual(@as(usize, 8), l.visible);
 
@@ -281,8 +329,8 @@ test "라벨 띠: 세로 칸이 라벨만큼 커지고 그 자리가 타일 바�
 
 test "라벨 띠: 라벨이 0 이면 예전 배치 그대로다" {
     const with_label = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 0 };
-    const l = layout(area_400x300, with_label, 100);
-    const old = layout(area_400x300, m80, 100);
+    const l = layout(area_400x300, with_label, 100, 0);
+    const old = layout(area_400x300, m80, 100, 0);
     try testing.expectEqual(old.cols, l.cols);
     try testing.expectEqual(old.visible, l.visible);
     try testing.expectEqual(rectAt(area_400x300, m80, old, 7).?.y, rectAt(area_400x300, with_label, l, 7).?.y);
@@ -291,7 +339,7 @@ test "라벨 띠: 라벨이 0 이면 예전 배치 그대로다" {
 
 test "라벨 띠: 마지막 행이 영역 안에 들어간다 — 글자가 도크 밖으로 안 나간다" {
     const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
-    const l = layout(area_400x300, m, 100);
+    const l = layout(area_400x300, m, 100, 0);
     const last = l.visible - 1;
     const lab = labelRectAt(area_400x300, m, l, last).?;
     try testing.expect(lab.y + lab.h <= area_400x300.y + area_400x300.h);
@@ -299,7 +347,7 @@ test "라벨 띠: 마지막 행이 영역 안에 들어간다 — 글자가 도�
 
 test "라벨 띠: 그림 아래 글자를 눌러도 그 칸이 열린다" {
     const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
-    const l = layout(area_400x300, m, 8);
+    const l = layout(area_400x300, m, 8, 0);
     for (0..l.visible) |n| {
         const lab = labelRectAt(area_400x300, m, l, n).?;
         try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m, l, lab.x + 2, lab.y + 2));
@@ -308,4 +356,75 @@ test "라벨 띠: 그림 아래 글자를 눌러도 그 칸이 열린다" {
     // 라벨 아래 간격은 여전히 아무 칸도 아니다.
     const lab0 = labelRectAt(area_400x300, m, l, 0).?;
     try testing.expectEqual(@as(?usize, null), hitTest(area_400x300, m, l, lab0.x, lab0.y + lab0.h));
+}
+
+test "스크롤: 내려가면 다른 칸이 보인다 — 전부 닿을 수 있다" {
+    // 실제 세션(151장)에서 스크롤 없이는 4장(2.6%)만 닿을 수 있었다. 그게 이 test 의 이유다.
+    const l0 = layout(area_400x300, m80, 100, 0);
+    try testing.expectEqual(@as(usize, 0), l0.first);
+    try testing.expect(l0.max_scroll > 0); // 100칸이면 내려갈 곳이 있다
+
+    // 끝까지 내리면 **마지막 칸이 보인다**.
+    const lend = layout(area_400x300, m80, 100, l0.max_scroll);
+    try testing.expect(lend.first + lend.visible == 100);
+    try testing.expect(rectAt(area_400x300, m80, lend, 99) != null);
+
+    // 상한을 넘겨 넣어도 그 자리에서 멈춘다(호출자가 clamp 를 잊어도 안전하다).
+    const over = layout(area_400x300, m80, 100, l0.max_scroll + 10_000);
+    try testing.expectEqual(lend.first, over.first);
+    try testing.expectEqual(lend.scroll_px, over.scroll_px);
+}
+
+test "스크롤: 다 들어가면 내려갈 곳이 없다" {
+    const l = layout(area_400x300, m80, 4, 0);
+    try testing.expectEqual(@as(u32, 0), l.max_scroll);
+    try testing.expectEqual(@as(usize, 0), l.overflow);
+    // 내리려 해도 배치가 안 바뀐다.
+    const l2 = layout(area_400x300, m80, 4, 500);
+    try testing.expectEqual(@as(u32, 0), l2.scroll_px);
+    try testing.expectEqual(rectAt(area_400x300, m80, l, 0).?.y, rectAt(area_400x300, m80, l2, 0).?.y);
+}
+
+test "스크롤: 그린 자리와 눌리는 자리가 함께 움직인다" {
+    // **여기가 갈리면 스크롤한 만큼 어긋난 이미지가 열린다** — 깊이 내릴수록 크게 어긋나 재현이 헷갈린다.
+    const l0 = layout(area_400x300, m80, 100, 0);
+    const scrolled = layout(area_400x300, m80, 100, l0.max_scroll / 2);
+    try testing.expect(scrolled.first > 0);
+    var n = scrolled.first;
+    while (n < scrolled.first + scrolled.visible) : (n += 1) {
+        const r = rectAt(area_400x300, m80, scrolled, n) orelse continue;
+        // 영역 안에 있는 점만 본다(반쯤 걸친 첫 행은 위로 나가 있다).
+        if (r.y < area_400x300.y) continue;
+        try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, m80, scrolled, r.x + 2, r.y + 2));
+    }
+}
+
+test "스크롤: 행 단위로 스냅한다 — 반쯤 걸친 행을 만들지 않는다" {
+    // `Rect.y` 가 u32 라 음수를 표현할 수 없다. 반쯤 걸친 행을 허용하면 그 행이 0 으로 포화되어
+    // **도크 밖에 그려진다**(실제로 그렇게 냈다).
+    const step_y = m80.tile + m80.label + m80.gap;
+    const l = layout(area_400x300, m80, 100, step_y / 2);
+    try testing.expectEqual(@as(u32, 0), l.scroll_px); // 반 칸은 0 으로 스냅
+    const l2 = layout(area_400x300, m80, 100, step_y + 3);
+    try testing.expectEqual(step_y, l2.scroll_px);
+    // 첫 칸이 언제나 영역 안에서 시작한다.
+    try testing.expect(rectAt(area_400x300, m80, l2, l2.first).?.y >= area_400x300.y);
+    // max_scroll 도 행의 배수다.
+    try testing.expectEqual(@as(u32, 0), l.max_scroll % step_y);
+}
+
+test "스크롤: 어느 깊이에서도 라벨이 영역 안에 있다" {
+    // 행 단위 스냅의 결과다 — 글자는 이미지와 달리 잘라 그릴 수 없으므로 이것이 지켜져야 한다.
+    const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
+    const base = layout(area_400x300, m, 100, 0);
+    var scroll: u32 = 0;
+    while (scroll <= base.max_scroll) : (scroll += 7) { // 행 배수가 아닌 값도 섞어 넣는다
+        const l = layout(area_400x300, m, 100, scroll);
+        var n = l.first;
+        while (n < l.first + l.visible) : (n += 1) {
+            const lab = labelRectAt(area_400x300, m, l, n) orelse continue;
+            try testing.expect(lab.y >= area_400x300.y);
+            try testing.expect(lab.y + lab.h <= area_400x300.y + area_400x300.h);
+        }
+    }
 }

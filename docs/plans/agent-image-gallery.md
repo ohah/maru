@@ -82,6 +82,11 @@ grep -E '\.\.\.FAIL|^FAIL \(' /tmp/t.log | grep -vc SocketPathTooLong   # 그중
 다른 저장소로 옮겨 가면…` 하나가 **두 test 바이너리에 각각** 들어 있다(워크트리에서 `.git` 이 디렉터리가
 아니라 파일이다). 전체 건수는 바이너리 구성에 따라 흔들리므로 **비-`SocketPathTooLong` 수만** 비교한다.
 
+**`macos-app-host-abi-lib` 는 test 를 컴파일하지 않는다.** 제품 코드를 고칠 때는 그 타깃이 빠른 게이트로
+쓸 만하지만, **test 를 더하거나 고쳤으면 그것으로 «컴파일 통과» 를 말할 수 없다** — 이 세션에서 두 번
+그렇게 넘어갔고, 두 번째는 `ArrayList.writer(allocator)`(Zig 0.16 unmanaged 에 없는 API)가 통과한 것처럼
+보였다. test 를 건드렸으면 게이트는 `zig build test` 하나다.
+
 **그리고 종료 코드를 먼저 본다.** 컴파일이 깨지면 FAIL 줄이 **0** 이라 위 grep 이 «전부 통과» 로 읽힌다 —
 실제로 `i64` 캐스트 누락으로 한 번 그렇게 읽을 뻔했다. `zig build test; echo $?` 가 0 이 아니면
 `grep -n 'error:'` 로 컴파일 에러부터 확인한다.

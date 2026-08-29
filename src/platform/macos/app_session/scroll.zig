@@ -273,11 +273,16 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // 갤러리 크게 보기 위의 휠은 **확대·축소**다. 목록이 아니라 한 장을 보고 있으므로 굴릴 것이
     // 없고, 아무 일도 안 하면 「휠이 안 먹는다」로 읽힌다. 격자일 때는 아직 스크롤이 없어 흘려보낸다.
     if (dock_ops.dockVisible(self) and self.dock.view == .image_gallery and
-        self.image_gallery.open != null and
         layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content))
     {
-        image_gallery_ops.wheelZoom(self, delta_y * @as(f64, self.appearance.scroll_multiplier), precise, x_px, y_px);
-        return;
+        const scaled = delta_y * @as(f64, self.appearance.scroll_multiplier);
+        if (self.image_gallery.open != null) {
+            image_gallery_ops.wheelZoom(self, scaled, precise, x_px, y_px);
+            return;
+        }
+        // 격자에서는 **굴린다**. 굴릴 것이 없으면 소비하지 않고 흘려보낸다(도크 위에서 휠이
+        // 통째로 막히면 뒤 터미널 스크롤백이 죽는다).
+        if (image_gallery_ops.wheelScroll(self, scaled, precise)) return;
     }
     const session_dock_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and
         layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);

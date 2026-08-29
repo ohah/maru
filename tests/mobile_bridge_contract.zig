@@ -5401,6 +5401,56 @@ test "줄을 누르면 그 세션 화면이 뜨고, 나가면 목록으로 돌�
     try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_remote_screen_state());
 }
 
+test "원격 화면은 창을 통째로 덮는다 — 아래 터미널도 보조 키바도 비치면 안 된다" {
+    // **실기에서 잡은 결함이다**(시뮬레이터 캡처). 밀린 화면은 터미널 chrome **위에** 서는데,
+    // 이 화면만 창 전체를 안 칠했다. 그래서 원격 글자가 폰 자기 터미널 글자와 겹쳐 찍혔고
+    // (빈칸은 안 그리므로 그 자리에 아래 글자가 남는다) 읽기 전용인데 보조 키바가 떠 있었다.
+    //
+    // **판정은 "덮는 quad 가 있는가" 로 한다** — `remoteScreenShown()` 은 무엇을 그렸는지만 알고
+    // 그 아래가 비치는지는 모른다. 실제로 그 값은 결함이 있는 동안에도 `.cells` 로 초록이었다.
+    bridge.maru_mobile_control_reset();
+    defer bridge.maru_mobile_control_reset();
+    gotoTerminalScreen();
+    advanceFrame(402, 874, 16);
+    gotoSessionsScreen();
+    advanceFrame(402, 874, 16);
+    try std.testing.expectEqual(@as(c_int, 1), bridge.maru_mobile_take_control_open());
+    _ = feedControl(hello_wire);
+    _ = feedControl(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[" ++
+            "{\"id\":{\"surface_id\":7},\"title\":\"host-backed\",\"runtime_id\":\"00000000000000000000000000000abc\"}]}\n",
+    );
+    advanceFrame(402, 874, 16);
+    const first = bridge.remoteRowCenter(0).?;
+    tapAt(first.x, first.y);
+    fake_ms += 16;
+    const n = bridge.maru_mobile_build(402, 874, fake_ms);
+    try std.testing.expectEqual(bridge.RemoteScreenShown.waiting, bridge.remoteScreenShown());
+
+    // **순서로 잰다.** "덮는 quad 가 있는가" 로는 못 잡는다 — 터미널 자기 배경이 이미 창을
+    // 덮고 있어서, 결함이 있는 동안에도 그 판정은 초록이었다(변이 검사로 확인). 아래에 그려진
+    // 것이 비치느냐는 **덮개가 그것들보다 뒤에 오는가**로만 갈린다.
+    const quads = bridge.maru_mobile_quads();
+
+    // 보조 키바 칸 하나를 아래 층의 대표로 삼는다 — 실기에서 눈에 띈 것이 그것이었다.
+    const kb = bridge.maru_mobile_keybar_rect(0);
+    try std.testing.expect(kb != 0); // 키바가 안 섰으면 이 테스트가 재는 게 없다
+    const kbx: f32 = @floatFromInt((kb >> 48) & 0xFFFF);
+    const kby: f32 = @floatFromInt((kb >> 32) & 0xFFFF);
+
+    var last_below: ?u32 = null;
+    var cover: ?u32 = null;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const q = quads[i];
+        if (q.x >= kbx and q.x < kbx + 40 and q.y >= kby and q.y < kby + 40) last_below = i;
+        if (q.kind == 0 and q.x <= 0 and q.y <= 0 and q.w >= 402 and q.h >= 874) cover = i;
+    }
+    try std.testing.expect(last_below != null);
+    try std.testing.expect(cover != null);
+    try std.testing.expect(cover.? > last_below.?);
+}
+
 test "화면을 원할 때 그 바이트는 ndjson 파서로 안 간다" {
     // **S11-4 가 한계로 남긴 자리다.** 화면 레코드를 ndjson 파서에 먹이면 파서가 그것을 잡음으로
     // 세다가 축을 꺼 버리고(`too_much_noise`), 그러면 목록으로 돌아와도 축이 다시 안 선다

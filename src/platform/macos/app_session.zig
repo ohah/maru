@@ -71887,3 +71887,69 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     try Wait.until(session);
     try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
 }
+
+
+test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드한다 (IG3-b)" {
+    // **인덱스가 «자리» 만 든다는 계약의 반대편이다.** 오프셋이 한 바이트라도 어긋나면 base64 가
+    // 깨지거나 다른 이미지가 나오는데, 개수만 세는 test 는 그것을 못 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 2×2 RGBA PNG(빨강·초록/파랑·흰색)를 base64 로. **합성이라 사용자 기록을 fixture 로 쓰지 않는다.**
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"앞에 글자가 있어야 오프셋이 0이 아니다\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "img.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/img.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expect(session.image_gallery.built);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // **오프셋이 정확한지는 디코드가 증명한다.** 한 바이트만 어긋나도 base64 가 깨져 null 이 온다.
+    var img = image_gallery_ops.decodeThumbnail(session, 0) orelse return error.DecodeReturnedNull;
+    defer img.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 2), img.width);
+    try std.testing.expectEqual(@as(u32, 2), img.height);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 4), img.pixels.len);
+
+    // 값까지 본다 — 크기만 보면 「검은 이미지」도 통과한다.
+    var saw_red = false;
+    var i: usize = 0;
+    while (i + 3 < img.pixels.len) : (i += 4) {
+        if (img.pixels[i] > 200 and img.pixels[i + 1] < 60 and img.pixels[i + 2] < 60) saw_red = true;
+    }
+    try std.testing.expect(saw_red);
+
+    // 범위 밖은 null — 지어내지 않는다.
+    try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 1) == null);
+    try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 999) == null);
+}

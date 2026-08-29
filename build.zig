@@ -641,6 +641,7 @@ pub fn build(b: *std.Build) void {
         macos_metal_smoke.root_module.linkFramework("Foundation", .{});
         macos_metal_smoke.root_module.linkFramework("CoreText", .{});
         macos_metal_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_metal_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_metal_smoke.root_module.linkFramework("Metal", .{});
         macos_metal_smoke.root_module.linkFramework("QuartzCore", .{});
 
@@ -739,6 +740,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("Foundation", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("CoreText", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_chrome_lab_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_chrome_lab_smoke.root_module.linkFramework("Metal", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
@@ -785,6 +787,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke_tests.root_module.linkFramework("Foundation", .{});
         macos_chrome_lab_smoke_tests.root_module.linkFramework("CoreText", .{});
         macos_chrome_lab_smoke_tests.root_module.linkFramework("CoreGraphics", .{});
+        macos_chrome_lab_smoke_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
 
         const test_macos_chrome_lab_smoke_step = b.step("test-macos-chrome-lab-smoke", "Run Chrome Lab readback artifact contract tests");
         const run_macos_chrome_lab_smoke_tests = b.addRunArtifact(macos_chrome_lab_smoke_tests);
@@ -818,6 +821,7 @@ pub fn build(b: *std.Build) void {
         macos_app_pty_metal_smoke.root_module.linkFramework("Foundation", .{});
         macos_app_pty_metal_smoke.root_module.linkFramework("CoreText", .{});
         macos_app_pty_metal_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_app_pty_metal_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_app_pty_metal_smoke.root_module.linkFramework("Metal", .{});
         macos_app_pty_metal_smoke.root_module.linkFramework("QuartzCore", .{});
 
@@ -900,6 +904,7 @@ pub fn build(b: *std.Build) void {
         macos_coretext_smoke.root_module.linkFramework("Foundation", .{});
         macos_coretext_smoke.root_module.linkFramework("CoreText", .{});
         macos_coretext_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_coretext_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
 
         const macos_coretext_smoke_step = b.step("macos-coretext-smoke", "Run the macOS CoreText font shaping/raster smoke");
         const macos_coretext_smoke_cmd = b.addRunArtifact(macos_coretext_smoke);
@@ -928,6 +933,7 @@ pub fn build(b: *std.Build) void {
         macos_coretext_smoke_tests.root_module.linkFramework("Foundation", .{});
         macos_coretext_smoke_tests.root_module.linkFramework("CoreText", .{});
         macos_coretext_smoke_tests.root_module.linkFramework("CoreGraphics", .{});
+        macos_coretext_smoke_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
 
         const test_macos_coretext_smoke_step = b.step("test-macos-coretext-smoke", "Run macOS CoreText smoke contract tests");
         const run_macos_coretext_smoke_tests = b.addRunArtifact(macos_coretext_smoke_tests);
@@ -953,6 +959,7 @@ pub fn build(b: *std.Build) void {
         macos_glyph_texture_smoke.root_module.linkFramework("Foundation", .{});
         macos_glyph_texture_smoke.root_module.linkFramework("CoreText", .{});
         macos_glyph_texture_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_glyph_texture_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_glyph_texture_smoke.root_module.linkFramework("Metal", .{});
 
         const macos_glyph_texture_smoke_step = b.step("macos-glyph-texture-smoke", "Run the macOS CoreText-to-Metal glyph texture smoke");
@@ -996,6 +1003,7 @@ pub fn build(b: *std.Build) void {
         macos_glyph_text_smoke.root_module.linkFramework("Cocoa", .{});
         macos_glyph_text_smoke.root_module.linkFramework("CoreText", .{});
         macos_glyph_text_smoke.root_module.linkFramework("CoreGraphics", .{});
+        macos_glyph_text_smoke.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         macos_glyph_text_smoke.root_module.linkFramework("Metal", .{});
         macos_glyph_text_smoke.root_module.linkFramework("QuartzCore", .{});
 
@@ -1230,6 +1238,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_abi_tests.root_module.linkFramework("Foundation", .{});
         macos_app_host_abi_tests.root_module.linkFramework("CoreText", .{});
         macos_app_host_abi_tests.root_module.linkFramework("CoreGraphics", .{});
+        macos_app_host_abi_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     }
     const run_macos_app_host_abi_tests = b.addRunArtifact(macos_app_host_abi_tests);
     run_macos_app_host_abi_tests.setEnvironmentVariable(
@@ -1279,6 +1288,7 @@ pub fn build(b: *std.Build) void {
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("Foundation", .{});
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("CoreText", .{});
     macos_chrome_face_cache_fresh_tests.root_module.linkFramework("CoreGraphics", .{});
+    macos_chrome_face_cache_fresh_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     const run_macos_chrome_face_cache_fresh_tests = b.addRunArtifact(macos_chrome_face_cache_fresh_tests);
     // wrapper의 이름 없는 import sentinel 1 + 실제 성능 판정자 1.
     run_macos_chrome_face_cache_fresh_tests.addArg("--maru-expect-tests=2");
@@ -3125,6 +3135,7 @@ pub fn build(b: *std.Build) void {
         editor_test_module.linkFramework("Foundation", .{});
         editor_test_module.linkFramework("CoreText", .{});
         editor_test_module.linkFramework("CoreGraphics", .{});
+        editor_test_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
     }
     const editor_tests = addProjectTest(b, .{
         .root_module = editor_test_module,
@@ -4108,6 +4119,7 @@ pub fn build(b: *std.Build) void {
             session_host_metadata_consumers_product_tests.root_module.linkFramework("QuartzCore", .{});
             session_host_metadata_consumers_product_tests.root_module.linkFramework("CoreText", .{});
             session_host_metadata_consumers_product_tests.root_module.linkFramework("CoreGraphics", .{});
+            session_host_metadata_consumers_product_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
             session_host_metadata_consumers_product_tests.root_module.addCSourceFile(.{
                 .file = b.path("src/platform/macos/coretext_smoke.m"),
                 .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -4195,6 +4207,7 @@ pub fn build(b: *std.Build) void {
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("QuartzCore", .{});
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("CoreText", .{});
             session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("CoreGraphics", .{});
+            session_host_legacy_metadata_consumers_product_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
             session_host_legacy_metadata_consumers_product_tests.root_module.addCSourceFile(.{
                 .file = b.path("src/platform/macos/coretext_smoke.m"),
                 .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -4251,6 +4264,7 @@ pub fn build(b: *std.Build) void {
         input_parity_app_tests.root_module.linkFramework("QuartzCore", .{});
         input_parity_app_tests.root_module.linkFramework("CoreText", .{});
         input_parity_app_tests.root_module.linkFramework("CoreGraphics", .{});
+        input_parity_app_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         input_parity_app_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -4704,6 +4718,7 @@ pub fn build(b: *std.Build) void {
             retention_app_tests.root_module.linkFramework("QuartzCore", .{});
             retention_app_tests.root_module.linkFramework("CoreText", .{});
             retention_app_tests.root_module.linkFramework("CoreGraphics", .{});
+            retention_app_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
             retention_app_tests.root_module.addCSourceFile(.{
                 .file = b.path("src/platform/macos/coretext_smoke.m"),
                 .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -5578,6 +5593,7 @@ pub fn build(b: *std.Build) void {
         cr0b_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr0b_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr0b_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr0b_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         const run_cr0b_app_session_tests = b.addRunArtifact(cr0b_app_session_tests);
         // app_session root/import sentinel 3개와 이름 있는 제품 증거 5개를 함께 실행한다.
         run_cr0b_app_session_tests.addArg("--maru-expect-tests=8");
@@ -5602,6 +5618,7 @@ pub fn build(b: *std.Build) void {
         cr0b_gui_bootstrap_tests.root_module.linkFramework("QuartzCore", .{});
         cr0b_gui_bootstrap_tests.root_module.linkFramework("CoreText", .{});
         cr0b_gui_bootstrap_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr0b_gui_bootstrap_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -5669,6 +5686,7 @@ pub fn build(b: *std.Build) void {
         cr0b_bootstrap4_gui_child.root_module.linkFramework("QuartzCore", .{});
         cr0b_bootstrap4_gui_child.root_module.linkFramework("CoreText", .{});
         cr0b_bootstrap4_gui_child.root_module.linkFramework("CoreGraphics", .{});
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         const cr0b_bootstrap4_daemon_child = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/daemon.zig"),
@@ -6014,6 +6032,7 @@ pub fn build(b: *std.Build) void {
         cr2d1_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr2d1_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr2d1_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr2d1_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr2d1_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -6126,6 +6145,7 @@ pub fn build(b: *std.Build) void {
         cr2d3_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr2d3_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr2d3_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr2d3_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr2d3_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -6175,6 +6195,7 @@ pub fn build(b: *std.Build) void {
         cr2d4_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr2d4_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr2d4_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr2d4_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr2d4_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -7900,6 +7921,7 @@ pub fn build(b: *std.Build) void {
         cr5d2_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr5d2_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr5d2_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr5d2_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr5d2_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -7949,6 +7971,7 @@ pub fn build(b: *std.Build) void {
         cr6a1_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr6a1_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr6a1_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr6a1_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr6a1_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -8011,6 +8034,7 @@ pub fn build(b: *std.Build) void {
         cr6a2_app_session_tests.root_module.linkFramework("QuartzCore", .{});
         cr6a2_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr6a2_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr6a2_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr6a2_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -8043,6 +8067,7 @@ pub fn build(b: *std.Build) void {
             cr6a2_abi_tests.root_module.linkFramework("Foundation", .{});
             cr6a2_abi_tests.root_module.linkFramework("CoreText", .{});
             cr6a2_abi_tests.root_module.linkFramework("CoreGraphics", .{});
+            cr6a2_abi_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         }
         const run_cr6a2_abi_tests = b.addRunArtifact(cr6a2_abi_tests);
         run_cr6a2_abi_tests.addArg("--maru-expect-tests=6");
@@ -8129,6 +8154,7 @@ pub fn build(b: *std.Build) void {
         cr6b_product_tests.root_module.linkFramework("QuartzCore", .{});
         cr6b_product_tests.root_module.linkFramework("CoreText", .{});
         cr6b_product_tests.root_module.linkFramework("CoreGraphics", .{});
+        cr6b_product_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         cr6b_product_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -8757,6 +8783,7 @@ pub fn build(b: *std.Build) void {
             event_c3_3b5_app_session_module.linkFramework("Foundation", .{});
             event_c3_3b5_app_session_module.linkFramework("CoreText", .{});
             event_c3_3b5_app_session_module.linkFramework("CoreGraphics", .{});
+            event_c3_3b5_app_session_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         }
         // app_session root의 세 무명 module sentinel도 Zig filter와 함께 항상 materialize된다.
         B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_app_session_module, "C3-3b5 AppSession", 7);
@@ -8813,6 +8840,7 @@ pub fn build(b: *std.Build) void {
             event_c3_3b4_async_close_module.linkFramework("Foundation", .{});
             event_c3_3b4_async_close_module.linkFramework("CoreText", .{});
             event_c3_3b4_async_close_module.linkFramework("CoreGraphics", .{});
+            event_c3_3b4_async_close_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         }
         // app_session root의 무명 module sentinel 3개가 filter와 함께 materialize되며, named 제품 행은 4개다.
         B3SettlementTest.add(
@@ -9249,6 +9277,7 @@ pub fn build(b: *std.Build) void {
             event_c3_3b6_app_session_module.linkFramework("Foundation", .{});
             event_c3_3b6_app_session_module.linkFramework("CoreText", .{});
             event_c3_3b6_app_session_module.linkFramework("CoreGraphics", .{});
+            event_c3_3b6_app_session_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
         }
         // app_session root의 무명 module sentinel 3개와 b6 제품 행 8개가 함께 materialize된다.
         B3SettlementTest.add(

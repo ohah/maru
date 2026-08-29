@@ -1742,15 +1742,29 @@ test "원격 채널이 열리면 훅 모드다 — agent_kind 는 ssh 너머에�
     try testing.expectEqual(Mode.observe, modeFor(.{ .remote_channel_open = true, .gate_on = false }));
 }
 
-test "원격 축이 로컬 판정을 안 건드린다 — false 면 예전과 바이트가 같다" {
-    const cases = [_]Probe{
-        .{},
-        .{ .gate_on = true },
-        .{ .agent_present = true },
-        .{ .agent_present = true, .gate_on = true },
-        .{ .agent_present = true, .gate_on = true, .log_present = true },
-        .{ .gate_on = true, .log_present = true }, // 에이전트 없음
-    };
-    const want = [_]Mode{ .observe, .observe, .observe, .observe, .hook, .observe };
-    for (cases, want) |c, w| try testing.expectEqual(w, modeFor(c));
+test "원격 축이 로컬 판정을 안 건드린다 — 여덟 조합 전수로 옛 규칙과 대조한다" {
+    // 손으로 고른 몇 개가 아니라 gate·log·agent 의 **모든** 조합을 옛 규칙과 나란히 놓는다.
+    for ([_]bool{ false, true }) |gate| {
+        for ([_]bool{ false, true }) |log| {
+            for ([_]bool{ false, true }) |agent| {
+                const got = modeFor(.{ .gate_on = gate, .log_present = log, .agent_present = agent });
+                const want: Mode = if (!agent) .observe else if (!gate) .observe else if (log) .hook else .observe;
+                try testing.expectEqual(want, got);
+            }
+        }
+    }
+    // 그리고 기본값이 원격을 안 켠다 — 새 필드가 기존 호출자를 안 바꾼다.
+    const p: Probe = .{};
+    try testing.expect(!p.remote_channel_open);
+}
+
+test "원격이 켜지면 다른 셋이 무엇이든 게이트만 본다" {
+    for ([_]bool{ false, true }) |log| {
+        for ([_]bool{ false, true }) |agent| {
+            try testing.expectEqual(Mode.hook, modeFor(.{ .remote_channel_open = true, .gate_on = true, .log_present = log, .agent_present = agent }));
+            try testing.expectEqual(Mode.observe, modeFor(.{ .remote_channel_open = true, .gate_on = false, .log_present = log, .agent_present = agent }));
+        }
+    }
+    // 채널이 죽으면 원격 Term 은 로컬 로그가 없으므로 즉시 관측 모드로 내려간다.
+    try testing.expectEqual(Mode.observe, modeFor(.{ .remote_channel_open = false, .gate_on = true }));
 }

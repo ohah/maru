@@ -26,6 +26,7 @@ pub const Outcome = enum(u8) {
     connected,
     host_gone,
     deadline_exceeded,
+    retry_later,
     cancelled,
 };
 

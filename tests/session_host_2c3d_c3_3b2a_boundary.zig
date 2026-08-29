@@ -49,6 +49,11 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
         "src/platform/macos/session_host/reconnect_worker_owner.zig",
     );
     defer allocator.free(reconnect_worker_owner);
+    const reconnect_worker_issuer = try readSource(
+        allocator,
+        "src/platform/macos/session_host/reconnect_worker_issuer.zig",
+    );
+    defer allocator.free(reconnect_worker_issuer);
 
     try std.testing.expectEqual(@as(usize, 0), count(identity, "capability_key_secret"));
     try std.testing.expectEqual(@as(usize, 0), count(identity, "capability_key_secret_initialized"));
@@ -58,13 +63,14 @@ test "CR3a-2c3d C3-3b2a process seal migration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, "return process_seal_service.currentProcessId();"));
     try std.testing.expectEqual(@as(usize, 1), count(service, "return process_identity.currentProcessId();"));
     try std.testing.expectEqual(@as(usize, 1), count(process_identity, ".macos, .linux => @intCast(std.c.getpid()),"));
-    try std.testing.expectEqual(@as(usize, 8), try countSessionHostSources(allocator, "@import(\"process_identity.zig\")"));
+    try std.testing.expectEqual(@as(usize, 9), try countSessionHostSources(allocator, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(service, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(transport, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(snapshot_owner, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(batch_registry, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(quarantine, "@import(\"process_identity.zig\")"));
     try std.testing.expectEqual(@as(usize, 1), count(reconnect_worker_owner, "@import(\"process_identity.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(reconnect_worker_issuer, "@import(\"process_identity.zig\")"));
     const fence_identity = client[std.mem.indexOf(u8, client, "fn identityMatches(") orelse
         return error.TestUnexpectedResult ..];
     const fence_identity_end = std.mem.indexOf(u8, fence_identity, "\n    }\n};") orelse

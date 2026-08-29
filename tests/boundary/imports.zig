@@ -605,6 +605,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "clientProjectionAuthorityDigest", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "projectOwnerEventInternal", .count = 2 },
             .{ .path = "src/platform/macos/session_host/remote_term_backend.zig", .enclosing_container = "HostReconnectJob", .enclosing_fn = "sealInput" },
+            .{ .path = "src/platform/macos/session_host/reconnect_worker_issuer.zig", .enclosing_fn = "completionSeal" },
         } },
         .{ .receiver = "externalTransferProfile", .kind = .external_transfer, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "prepareExternalPumpTransfer" },

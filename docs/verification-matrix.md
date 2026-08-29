@@ -2155,7 +2155,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   cap을 먼저 확정하고, 계약된 long soak에서 deadline 초과·과잉 backoff·marker duplicate·authority/fd/process leak 0과 모든
   성능 cap을 자동 판정한다. environment mismatch는 skip/pass가 아니라 typed failure다. CR6e-b는 구현·통과했고, 후속
   CR6e-c가 자동 reconnect 제품 배선을 소유한다. c1은 app-global bounded host job/completion과 stale/duplicate/cancel
-  정산, c2는 frame-thread block 0인 worker exact-host connect/hello와 typed failure, c3는 main-owner CR5 publication 및
+  정산, c2는 thread/queue 비소유 worker entrypoint의 exact-host connect/hello, absolute deadline 보존, typed failure와
+  move-only `Client` completion exact-once 정리, c3는 app-global worker 수명·frame-thread block 0·main-owner CR5 publication 및
   actual AppKit socket 단절 뒤 같은 host/runtime/child PID·output/input/copy/resize·sibling/controller 보존과 모든
   worker/fd/client/admission final 0을 검증한다. c3 전에는 자동 reconnect 제품 완료로 세지 않는다.
 - **CR6f output-wake: 구현.** `PtyEventQueue`의 성공 publication만 notifier를 부르고 QueueFull/QueueClosed는 wake를 만들지

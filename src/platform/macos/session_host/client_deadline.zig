@@ -47,6 +47,14 @@ pub const AbsoluteDeadline = struct {
         };
     }
 
+    /// Carries a caller-owned monotonic absolute deadline across a worker handoff without
+    /// manufacturing a fresh phase budget.
+    pub fn fromAbsolute(io: std.Io, expires_at_ns: i128) Error!AbsoluteDeadline {
+        if (expires_at_ns <= std.Io.Clock.awake.now(io).nanoseconds)
+            return error.InvalidDeadline;
+        return .{ .clock = .{ .io = io }, .expires_at_ns = expires_at_ns };
+    }
+
     pub fn fromInjected(source: ClockSource, expires_at_ns: i128) AbsoluteDeadline {
         return .{ .clock = .{ .injected = source }, .expires_at_ns = expires_at_ns };
     }

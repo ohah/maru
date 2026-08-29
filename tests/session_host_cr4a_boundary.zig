@@ -375,6 +375,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
         try countProductIdentifiersExcept(allocator, "connectExistingHostUntil", &.{
             "platform/macos/session_host/host_connect.zig",
             "platform/macos/session_host/remote_term_backend.zig",
+            "platform/macos/session_host/reconnect_worker_issuer.zig",
         }),
     );
     try std.testing.expectEqual(

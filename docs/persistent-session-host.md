@@ -5946,6 +5946,21 @@ connection-fatal 원인과 incident id는 reconnect 성공 뒤에도 진단 ring
 그대로 두고 `reconnecting`, 성공 시 `live`, terminal host-wide 실패 시 `unavailable`을 stable generation에서 한 번만
 게시한다. semantic stream 오류, explicit runtime 종료, app-quit detach는 자동 reconnect admission을 만들지 않는다.
 
+**CR6e-c2 issuer 경계:** c2는 thread나 queue 정책을 만들지 않는 blocking worker entrypoint 하나다. c3의
+app-global worker가 c1 `JobReceipt`에서 복사한 `{Key, Snapshot}`과 thread-safe allocator, cache base를 넘기면 c2는
+snapshot의 absolute deadline을 새로 연장하지 않고 `.connect_hello` `PhaseDeadline`으로 복원해
+`connectExistingHostUntil`을 정확히 한 번 호출한다. 입력에는 c1 owner 주소나 `RemoteRuntime`/`HostAdapter` pointer가 없고,
+issuer는 HostPool membership·runtime set·제품 generation을 읽거나 게시하지 않는다. c2 자체의 `std.Thread.spawn`과
+`AppSession` 제품 caller는 0이며 thread 수, cancellation wake, Quit join은 c3가 소유한다.
+
+성공 `Client`는 `host_connect` 결과 union이 소유권을 relinquish한 뒤 final-address `Completion` 하나로
+move-by-convention 이전한다.
+main이 exact completion을 claim하기 전까지 worker completion이 유일한 fd/parser/buffer owner다. copied/moved/stale
+completion의 take와 duplicate take는 mutation 0으로 거부하며, abandon과 connect 반환 뒤 관측된 cancel은 남은
+candidate를 exact once 닫는다. `host_gone`과 `deadline_exceeded`는 각각 terminal typed outcome이고, 그 밖의 connect/hello 실패는
+`retry_later`로 보존한다. c2 green은 worker 실행 함수와 소유권 이동의 증거일 뿐, frame-thread block 0·Quit join·자동
+reconnect 제품 배선의 증거가 아니다.
+
 CR6e-c는 c1 bounded job/completion owner, c2 worker connect issuer, c3 main-thread CR5 publication과 actual AppKit
 disconnect→자동복구 E2E 순서로 구현한다. c1/c2만 green인 상태를 제품 자동 reconnect 완료로 세지 않는다. c3 제품
 artifact는 실제 host socket 단절 뒤 같은 host/runtime/child PID, 누적 output, input/copy/resize, sibling runtime과

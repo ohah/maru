@@ -427,6 +427,18 @@ pub fn build(
             remote_pane_env,
             comptime instance_token_class.shellClass(),
         });
+        // **tmux 안이면 파일 이름을 pane 으로 한 칸 더 가른다**([계획](../../docs/plans/remote-agent-state.md) RA6).
+        //
+        // ⚠️ 오염은 «한 pane 이 남의 이름을 쓴다» 가 아니라 **«그 tmux 서버의 모든 pane 이 같은 이름을
+        // 쓴다»** 이다(서버 생성 시 env 가 자식 전부에게 간다). 그래서 이 칸이 없으면 pane 셋의 이벤트가
+        // **한 파일에 섞이고**, 옆 파일은 마지막에 쓴 pane 만 가리켜 역조회로도 못 가른다 — 셋 중 하나에
+        // 전부 귀속된다. 이름을 가르면 그 문제가 애초에 안 생긴다.
+        //
+        // `${{TMUX_PANE#%}}` 로 앞의 `%` 를 뗀다 — 그 글자는 파일 이름 문자 클래스 밖이라 스트리머가
+        // 그 파일을 아예 안 읽는다. 뗀 값도 **검증한다**: tmux 는 `%<숫자>` 만 만들지만, 검증 없는 env 를
+        // 경로에 넣지 않는다는 규율이 여기서도 같다.
+        try out.appendSlice(allocator, "mh_t=\"\"; if [ -n \"$TMUX_PANE\" ]; then mh_t=\"${TMUX_PANE#%}\"; " ++
+            "case \"$mh_t\" in ''|*[!0-9]*) exit 0 ;; esac; mh_t=\"_t$mh_t\"; fi; ");
     } else try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
         pane_env,
         comptime pane_token_class.shellClass(),
@@ -478,7 +490,7 @@ pub fn build(
     // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
     if (scope == .remote) {
         // 원격 경로는 **평평하다** — 인스턴스 칸이 이미 nonce 안에 들어 있다(`formatRemotePaneNonce`).
-        try out.print(allocator, "\"/${s}.ndjson\"", .{remote_pane_env});
+        try out.print(allocator, "\"/${s}$mh_t.ndjson\"", .{remote_pane_env});
         // **tmux 좌표를 옆 파일로 남긴다**([계획](../../docs/plans/remote-agent-state.md) RA6).
         //
         // tmux 안에서는 `LC_MARU_PANE` 이 서버 생성 시 값으로 굳어 **남의 값이 온다** — 즉 훅은 B 의
@@ -494,7 +506,7 @@ pub fn build(
         // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
         try out.appendSlice(allocator, "; printf '%s\t%s\n' \"$TMUX\" \"$TMUX_PANE\" > ");
         try appendQuoted(out, allocator, log_dir_abs);
-        try out.print(allocator, "\"/${s}{s}\"; }} 2>/dev/null; exit 0 ", .{ remote_pane_env, tmux_sidecar_suffix });
+        try out.print(allocator, "\"/${s}$mh_t{s}\"; }} 2>/dev/null; exit 0 ", .{ remote_pane_env, tmux_sidecar_suffix });
     } else try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
     try out.appendSlice(allocator, marker_comment);
 }
@@ -655,8 +667,12 @@ test "원격 커맨드는 칸이 하나고 경로가 평평하다 — 로컬과 
     try testing.expect(std.mem.indexOf(u8, local, remote_pane_env) == null);
     try testing.expect(std.mem.indexOf(u8, local, instance_env) != null);
 
-    // 경로: 원격은 평평하고(`/<nonce>.ndjson`) 로컬은 인스턴스 디렉터리를 낀다.
-    try testing.expect(std.mem.indexOf(u8, remote, "\"/$" ++ remote_pane_env ++ ".ndjson\"") != null);
+    // 경로: 원격은 평평하고(`/<nonce><tmux 칸>.ndjson`) 로컬은 인스턴스 디렉터리를 낀다.
+    //
+    // **tmux 칸(`$mh_t`)이 이름에 붙는다**(RA6). tmux 밖에서는 빈 문자열이라 이름이 예전과 같고, 안에서는
+    // `_t<pane>` 이 붙어 **같은 서버의 pane 들이 한 파일에 안 섞인다** — 그 칸이 없던 동안 셋의 이벤트가
+    // 한 파일에 쌓였다(적대적 검증이 잡고 실측이 확인했다).
+    try testing.expect(std.mem.indexOf(u8, remote, "\"/$" ++ remote_pane_env ++ "$mh_t.ndjson\"") != null);
     try testing.expect(std.mem.indexOf(u8, local, "/$" ++ instance_env ++ "/$" ++ pane_env ++ ".ndjson") != null);
 
     // 나머지 규율은 그대로다 — umask·구분자·상한 표식·조용한 실패.
@@ -1125,4 +1141,31 @@ test "원격 커맨드는 tmux 좌표를 옆 파일에 남긴다 — 줄 형식�
     const local = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(local);
     try testing.expect(std.mem.indexOf(u8, local, "TMUX") == null);
+}
+
+test "원격 커맨드는 tmux pane 으로 파일 이름을 한 칸 더 가른다 — 안 그러면 pane 셋이 한 파일에 섞인다" {
+    // ⚠️ **오염의 범위를 잘못 읽으면 이 칸을 안 만든다.** `LC_MARU_PANE` 오염은 «한 pane 이 남의 이름을
+    // 쓴다» 가 아니라 **«그 tmux 서버의 모든 pane 이 같은 이름을 쓴다»** 이다(서버 생성 시 env 가 자식
+    // 전부에게 간다). 그래서 이 칸이 없으면 pane 셋의 이벤트가 **한 파일에 섞이고**, 옆 파일은 마지막에
+    // 쓴 pane 만 가리켜 역조회로도 못 가른다 — 셋 모두가 한 Term 에 귀속된다.
+    //
+    // 적대적 검증이 이것을 잡았고, 실측으로 확인했다(같은 서버의 pane 둘이 각자 파일을 갖고 각자
+    // 주인으로 되찾아졌다).
+    const cmd = try buildAlloc("claude", "/tmp/ev", .remote);
+    defer testing.allocator.free(cmd);
+
+    // 앞의 `%` 를 뗀다 — 그 글자는 파일 이름 문자 클래스 밖이라 스트리머가 그 파일을 아예 안 읽는다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "${TMUX_PANE#%}") != null);
+    // 뗀 값도 **검증한다**. 검증 없는 env 를 경로에 넣지 않는다는 규율이 여기서도 같다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "case \"$mh_t\" in ''|*[!0-9]*) exit 0 ;; esac;") != null);
+    // 이벤트 로그와 옆 파일이 **같은 칸**을 쓴다 — 갈리면 옆 파일이 남의 파일을 설명한다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "$LC_MARU_PANE$mh_t.ndjson") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "$LC_MARU_PANE$mh_t" ++ tmux_sidecar_suffix) != null);
+    // tmux 밖이면 그 칸이 빈 문자열이라 이름이 예전과 같다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_t=\"\";") != null);
+
+    // 로컬은 이 축과 무관하다.
+    const local = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(local);
+    try testing.expect(std.mem.indexOf(u8, local, "mh_t") == null);
 }

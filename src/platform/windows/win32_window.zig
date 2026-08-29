@@ -94,6 +94,9 @@ pub const MouseEvent = struct {
         /// 버튼이 눌렸든 아니든 움직였다. 눌림 여부는 `mods`가 아니라 호출자의 드래그 상태가 안다.
         moved,
         wheel,
+        /// **가로 휠**(`WM_MOUSEHWHEEL`) — 기울임 휠과 정밀 터치패드의 좌우 제스처가 이것으로 온다.
+        /// 세로와 **부호 규약이 반대다**: 양수가 **오른쪽**이다(세로는 양수가 위).
+        wheel_h,
         /// 남이 마우스 캡처를 가져갔다(Alt+Tab 등). **`left_up`과 다르다** — 버튼을 뗀 자리를 모르므로
         /// 좌표가 없다. `left_up`으로 올리면 좌표 0,0 이 실려 선택이 **좌상단으로 튄다**. 호출자는
         /// 드래그만 끝내고 선택은 건드리지 않는다.
@@ -238,6 +241,7 @@ const WM_RBUTTONUP: UINT = 0x0205;
 const WM_MBUTTONDOWN: UINT = 0x0207;
 const WM_MBUTTONUP: UINT = 0x0208;
 const WM_MOUSEWHEEL: UINT = 0x020A;
+const WM_MOUSEHWHEEL: UINT = 0x020E;
 /// 캡처를 잃었다(다른 창이 가져가거나 Alt+Tab). **드래그를 여기서 끝내야 한다** — 안 그러면 버튼을 뗀
 /// 적이 없는 채로 드래그 상태가 남아 다음 이동이 전부 선택 확장이 된다.
 const WM_CAPTURECHANGED: UINT = 0x0215;
@@ -729,11 +733,13 @@ pub const Window = struct {
             .left_down => WM_LBUTTONDOWN,
             .left_up => WM_LBUTTONUP,
             .wheel => WM_MOUSEWHEEL,
+            .wheel_h => WM_MOUSEHWHEEL,
             else => return,
         };
+        const is_wheel = msg == WM_MOUSEWHEEL or msg == WM_MOUSEHWHEEL;
         var x = x_px;
         var y = y_px;
-        if (msg == WM_MOUSEWHEEL) {
+        if (is_wheel) {
             var pt = POINT{ .x = x_px, .y = y_px };
             if (ClientToScreen(self.hwnd, &pt) != 0) {
                 x = pt.x;
@@ -744,7 +750,7 @@ pub const Window = struct {
         const lo: u32 = @as(u16, @bitCast(@as(i16, @truncate(x))));
         const hi: u32 = @as(u16, @bitCast(@as(i16, @truncate(y))));
         // 휠 델타는 wParam **상위 16 비트**다(한 눈금 = 120).
-        const wparam: WPARAM = if (msg == WM_MOUSEWHEEL)
+        const wparam: WPARAM = if (is_wheel)
             @as(WPARAM, @as(u32, @bitCast(@as(i32, notches) * 120)) << 16 >> 16 << 16)
         else
             0;
@@ -997,6 +1003,19 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
                 // 사실상 안 일어나고, 일어나도 좌표가 밀릴 뿐 크래시는 없다.
                 _ = ScreenToClient(hwnd, &pt);
                 w.pushMousePoint(.wheel, pt.x, pt.y, win32_mouse.wheelDeltaFromWparam(wparam));
+            }
+            return 0;
+        },
+        WM_MOUSEHWHEEL => {
+            // 좌표 규약은 세로 휠과 같다(화면 기준) — 위 주석 그대로 클라이언트로 바꿔 올린다.
+            //
+            // **드라이버가 아니라 사용자가 보낸다**: 기울임 휠과 정밀 터치패드의 좌우 스와이프가
+            // 이 메시지로 온다. 안 받으면 긴 줄을 볼 길이 트랙패드에 없는 샘이 된다.
+            if (self) |w| {
+                const screen = win32_mouse.pointFromLparam(lparam);
+                var pt = POINT{ .x = screen.x, .y = screen.y };
+                _ = ScreenToClient(hwnd, &pt);
+                w.pushMousePoint(.wheel_h, pt.x, pt.y, win32_mouse.wheelDeltaFromWparam(wparam));
             }
             return 0;
         },

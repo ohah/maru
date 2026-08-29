@@ -40,12 +40,20 @@ IG1-c 에서 **두 번 틀렸고**, 원인이 둘 다 «세는 방법» 이었�
 그래서 "FAIL 이 있나" 로는 아무것도 알 수 없다. 이렇게 센다.
 
 ```sh
-# 변경 있는 상태
-zig build test 2>&1 | grep "FAIL" | grep -v SocketPathTooLong | wc -l
+zig build test > /tmp/t.log 2>&1
+grep -cE '\.\.\.FAIL|^FAIL \(' /tmp/t.log                      # 전체 실패
+grep -E '\.\.\.FAIL|^FAIL \(' /tmp/t.log | grep -vc SocketPathTooLong   # 그중 새것 후보
 # 베이스라인(변경을 stash 한 상태)에서 같은 수를 재서 **차이**를 본다
 ```
 
+**`grep "FAIL"` 로 세면 안 된다.** 통과한 테스트 이름에 `CHANNEL_FAILURE`·`OPEN_FAILURE` 같은 대문자
+`FAIL` 이 들어 있어 **성공을 실패로 센다** — 실제로 그렇게 1건을 3건으로 잘못 읽고 회귀를 찾아 헤맸다.
+러너가 실패를 찍는 모양은 `…FAIL (Error)`(같은 줄) 또는 줄 첫머리 `FAIL (Error)` 둘뿐이다.
+
 뮤테이션도 같다 — "실패했다" 가 아니라 **"실패 수가 늘었다"** 를 본다.
+
+현재 베이스라인(2026-08-29, 이 워크트리): 전체 69건, 비-`SocketPathTooLong` **1건**
+(`소스 컨트롤: 활성 터미널이 다른 저장소로 옮겨 가면…` — 워크트리에서 `.git` 이 디렉터리가 아니라 파일이다).
 
 ## 2. IG0 — `View` 분기 선행 정리
 

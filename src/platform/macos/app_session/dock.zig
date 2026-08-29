@@ -34,6 +34,7 @@ const dock_view_bar = app_session_mod.dock_view_bar;
 const icons = app_session_mod.icons;
 const AgentSessionArchiveSmokeProbe = app_session_mod.AgentSessionArchiveSmokeProbe;
 const scm_dock_ops = @import("scm_dock.zig");
+const image_gallery_ops = @import("image_gallery.zig");
 const agent_dock = app_session_mod.agent_dock;
 const dock_list_scroll_ids = app_session_mod.dock_list_scroll_ids;
 const dock_list_scroll_max_entries = app_session_mod.dock_list_scroll_max_entries;
@@ -492,6 +493,9 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     if (view != .explorer and file_panel_ops.fileTreeFocused(self)) file_panel_ops.restoreFileTreeFocus(self);
     // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
     if (view == .source_control) git_ops.refreshGitStatus(self);
+    // 갤러리는 **들어올 때 한 번** 훑는다(계약 §4.1) — 소스 컨트롤·아카이브와 같은 자리·같은 규율이다.
+    // 폴링하지 않는다: 파일이 자란 것은 훅이 알려 준다.
+    if (view == .image_gallery) image_gallery_ops.refresh(self, false);
     if (view == .agent_sessions) {
         agent_dock.refreshAgentSessionArchiveScopeSnapshots(self);
         self.agent_session_archive_project_scope_surface_id = term_ops.activeSurface(self).id;

@@ -344,6 +344,14 @@ const Table = struct {
     cfg_sidebar_show_branch: [:0]const u8,
     cfg_sidebar_show_folder: [:0]const u8,
     cfg_sidebar_agent_hooks: [:0]const u8,
+    /// 이미지 갤러리 도크(docs/agent-image-gallery.md §2). **셋을 가른다** — 「에이전트가 없다」·
+    /// 「훑었는데 없다」·「못 봤다」. 한 문구로 접으면 사용자가 «이미지가 없는 것» 과 «갤러리가 고장난 것» 을
+    /// 구분할 수 없다(SCM 도크의 3-상태 안내와 같은 규율).
+    image_gallery_no_agent: [:0]const u8,
+    image_gallery_empty: [:0]const u8,
+    image_gallery_partial: [:0]const u8,
+    /// 개수 뒤에 붙는 단위. 「12장」처럼 숫자와 이어 붙인다.
+    image_gallery_count_suffix: [:0]const u8,
     agent_hook_notice_done: [:0]const u8,
     agent_hook_notice_failed: [:0]const u8,
     agent_hook_notice_attention: [:0]const u8,
@@ -1248,6 +1256,10 @@ const en: Table = .{
     .cfg_sidebar_show_branch = "Show git branch on sidebar cards",
     .cfg_sidebar_show_folder = "Show folder path on sidebar cards",
     .cfg_sidebar_agent_hooks = "Install provider hooks for agent state, notifications and turns",
+    .image_gallery_no_agent = "No agent session in this pane",
+    .image_gallery_empty = "No images in this session",
+    .image_gallery_partial = "Could not read the whole session",
+    .image_gallery_count_suffix = " images",
     .agent_hook_notice_done = "Turn finished",
     .agent_hook_notice_failed = "Turn ended with an error",
     .agent_hook_notice_attention = "Waiting for your approval",
@@ -1817,6 +1829,10 @@ const ko: Table = .{
     .cfg_sidebar_show_branch = "사이드바 카드에 git 브랜치 표시",
     .cfg_sidebar_show_folder = "사이드바 카드에 폴더 경로 표시",
     .cfg_sidebar_agent_hooks = "에이전트 상태·알림·턴을 받는 provider 훅 설치",
+    .image_gallery_no_agent = "이 pane에 에이전트 세션이 없습니다",
+    .image_gallery_empty = "이 세션에는 이미지가 없습니다",
+    .image_gallery_partial = "세션을 다 읽지 못했습니다",
+    .image_gallery_count_suffix = "장",
     .agent_hook_notice_done = "턴이 끝났습니다",
     .agent_hook_notice_failed = "턴이 오류로 끝났습니다",
     .agent_hook_notice_attention = "승인을 기다리는 중",

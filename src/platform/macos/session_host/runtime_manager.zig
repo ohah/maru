@@ -3314,7 +3314,7 @@ test "runtime manager: 실 자식이 **진짜 훅 커맨드**를 돌리면 우�
     defer allocator.free(log_dir);
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
     defer cmd.deinit(allocator);
-    try hook_command.build(&cmd, allocator, "claude", log_dir);
+    try hook_command.build(&cmd, allocator, "claude", log_dir, .local, .local);
 
     // 자식은 payload 를 stdin 으로 흘려 그 커맨드를 돌린다(provider 가 하는 그대로 — 계약 §4.1).
     //

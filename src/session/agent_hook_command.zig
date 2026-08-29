@@ -57,6 +57,14 @@ pub const log_dir_rel = "agent-turn-events";
 /// 그래서 훅은 자기 변수를 갖는다. `MARU_PANE_ID` 는 selector 로만 남고, 훅 경로는 이 둘만 본다 —
 /// 소유자가 GUI 든 host 든 **같은 규칙으로** 채워지는 칸이다(계약 §4).
 pub const instance_env = "MARU_HOOK_INSTANCE";
+
+/// 원격 훅이 읽는 **하나뿐인** 칸. `maru ssh` 가 `SendEnv` 로 보낸다(계획 RA2·RA3).
+///
+/// 로컬은 인스턴스·pane 두 칸을 각각 주입하지만 원격에는 **합쳐진 값 하나**만 간다 — ssh 로 보내는
+/// 변수는 적을수록 좋고(서버 `AcceptEnv` 를 그만큼 덜 요구한다), 합치는 일은 이미
+/// `formatRemotePaneNonce` 가 한다. 이름에 `LC_` 를 붙인 이유는 stock sshd 가 `AcceptEnv LANG LC_*` 를
+/// 기본으로 열어 두기 때문이다(2026-08-29 실측 — `COLORTERM` 은 같은 서버에서 막혔다).
+pub const remote_pane_env = "LC_MARU_PANE";
 pub const pane_env = "MARU_HOOK_PANE";
 
 /// 경로 한 칸에 허용되는 글자를 **한 곳에서** 정한다.
@@ -351,6 +359,7 @@ pub fn build(
     allocator: std.mem.Allocator,
     provider: []const u8,
     log_dir_abs: []const u8,
+    scope: Scope,
 ) error{ OutOfMemory, InvalidProvider }!void {
     // **provider 이름을 검증한다.** 이 값은 줄 앞에 그대로 적히므로 탭이나 개행이 들어오면 **모든 줄이
     // 깨진다**(구분자가 둘이 되거나 줄이 둘로 갈린다). 파서와 같은 규칙을 쓴다 — 두 곳이 기준이 다르면
@@ -368,7 +377,15 @@ pub fn build(
     // 실측(2026-08-20)에서 `../outside/pwned` 가 로그 디렉터리 **밖에** 파일을 만들었다. 지키는 성질은
     // «숫자만» 이 아니라 «`/` 와 `.` 가 없다» 이고, 클래스가 그것을 보장한다. 문자 클래스는 `pane_token_class`
     // 에서 렌더한다 — 여기 손으로 적으면 maru 쪽 판정과 갈린다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
-    try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+    if (scope == .remote) {
+        // **원격은 칸이 하나다.** 합쳐진 값이므로 두 클래스의 합집합으로 검증한다 —
+        // `instance_token_class`(숫자·소문자·`_`)가 `pane_token_class`(숫자·hex)를 덮는 상위집합이다.
+        // 지키는 성질은 로컬과 같다: `/` 와 `.` 가 없어 경로를 벗어나지 못한다.
+        try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+            remote_pane_env,
+            comptime instance_token_class.shellClass(),
+        });
+    } else try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
         pane_env,
         comptime pane_token_class.shellClass(),
     });
@@ -378,7 +395,7 @@ pub fn build(
     // 시작 시 정리가 남의 살아 있는 로그를 지운다. 그래서 파일 이름 앞에 인스턴스 칸을 하나 둔다.
     // 값은 GUI 소유면 그 pid, host 소유면 `host_<hex host_id>` 다(`formatGuiInstance`/`formatHostInstance`).
     // 그 밖의 모양이면 우리 세션이 아니라고 보고 나간다 — 경로 탈출 방어는 pane 칸과 같은 이유·같은 방법이다.
-    try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+    if (scope == .local) try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
         instance_env,
         comptime instance_token_class.shellClass(),
     });
@@ -417,7 +434,10 @@ pub fn build(
     // 경로는 `<로그 디렉터리>/<인스턴스>/<pane>.ndjson` 이다 — 따옴표 밖에서 확장해야 값이 들어간다.
     // 인스턴스 칸이 있어야 maru 를 여러 개 띄워도 이름이 안 겹친다(위 가드 주석). 디렉터리는 maru 가
     // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
-    try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
+    if (scope == .remote) {
+        // 원격 경로는 **평평하다** — 인스턴스 칸이 이미 nonce 안에 들어 있다(`formatRemotePaneNonce`).
+        try out.print(allocator, "\"/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{remote_pane_env});
+    } else try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
     try out.appendSlice(allocator, marker_comment);
 }
 
@@ -441,16 +461,16 @@ pub fn isLegacy(command: []const u8) bool {
 
 const testing = std.testing;
 
-fn buildAlloc(provider: []const u8, dir: []const u8) ![]u8 {
+fn buildAlloc(provider: []const u8, dir: []const u8, scope: Scope) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(testing.allocator);
-    try build(&out, testing.allocator, provider, dir);
+    try build(&out, testing.allocator, provider, dir, scope);
     return out.toOwnedSlice(testing.allocator);
 }
 
 test "두 칸 모두 파일에 쓰기 전에 검증한다 — 그 값이 그대로 파일명이 되므로" {
     // 실측: 검증이 없을 때 `../outside/pwned` 가 로그 디렉터리 밖에 파일을 만들었다.
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     const write = std.mem.indexOf(u8, cmd, "printf").?;
     for ([_][]const u8{ pane_env, instance_env }) |name| {
@@ -462,7 +482,7 @@ test "두 칸 모두 파일에 쓰기 전에 검증한다 — 그 값이 그대�
 test "셸 가드의 문자 클래스는 maru 쪽 판정과 같은 값에서 나온다" {
     // 두 곳에 손으로 적으면 «커맨드는 거부하는데 maru 는 통과시키는» 드리프트가 조용히 생긴다. 렌더된
     // 클래스가 커맨드 안에 그대로 있는지 본다 — 그러면 한 상수를 고치는 것으로 양쪽이 함께 움직인다.
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime pane_token_class.shellClass() ++ "]*") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime instance_token_class.shellClass() ++ "]*") != null);
@@ -533,7 +553,7 @@ test "pane 칸은 host 소유일 때 32 hex 로 고정 폭이다 — 앞자리 0
 test "훅 경로는 control-plane selector 를 더 이상 참조하지 않는다" {
     // `MARU_PANE_ID` 는 GUI process-local surface id 이고 host 가 띄운 자식에는 실을 수 없다. 훅이 그 값을
     // 계속 보면 host-backed 터미널은 영원히 훅 모드 밖에 남는다 — 그래서 커맨드에서 그 이름을 떼어 낸다.
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     try testing.expect(std.mem.indexOf(u8, cmd, "MARU_PANE_ID") == null);
     try testing.expect(std.mem.indexOf(u8, cmd, pane_env) != null);
@@ -543,7 +563,7 @@ test "훅 경로는 control-plane selector 를 더 이상 참조하지 않는다
 test "커맨드는 추가 프로세스를 하나도 띄우지 않는다" {
     // 비용의 65%가 sh spawn이라 스크립트가 프로세스를 더 부르면 그만큼 도구 호출마다 얹힌다.
     // `cat`·`mkdir`·`head`·`tr`·`jq`는 모두 프로세스다 — 셸 내장(`read`·`printf`·`${#var}`)으로만 짠다.
-    const cmd = try buildAlloc("claude", "/home/u/.cache/maru/agent-turn-events");
+    const cmd = try buildAlloc("claude", "/home/u/.cache/maru/agent-turn-events", .local);
     defer testing.allocator.free(cmd);
     for ([_][]const u8{ "cat ", "mkdir", "head ", "tr ", "jq ", "sed ", "curl" }) |bad| {
         try testing.expect(std.mem.indexOf(u8, cmd, bad) == null);
@@ -554,13 +574,53 @@ test "커맨드는 추가 프로세스를 하나도 띄우지 않는다" {
 
 test "stdin을 먼저 받고 나머지를 드레인한 뒤에야 가드가 온다" {
     // 가드를 먼저 두면 pane 식별자가 없는 세션에서 stdin을 안 읽고 나가 provider 파이프가 막힌다.
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     const read_at = std.mem.indexOf(u8, cmd, "read -r mh_p").?;
     const drain_at = std.mem.indexOf(u8, cmd, "while IFS= read -r mh_x").?;
     const guard_at = std.mem.indexOf(u8, cmd, "case \"$" ++ pane_env ++ "\" in").?;
     try testing.expect(read_at < drain_at);
     try testing.expect(drain_at < guard_at);
+}
+
+test "원격 커맨드는 칸이 하나고 경로가 평평하다 — 로컬과 갈리는 자리는 그 둘뿐이다" {
+    const remote = try buildAlloc("claude", "/tmp/ev", .remote);
+    defer testing.allocator.free(remote);
+    const local = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(local);
+
+    // 원격은 `LC_MARU_PANE` 하나만 보고, 로컬 두 칸은 아예 안 나온다.
+    try testing.expect(std.mem.indexOf(u8, remote, remote_pane_env) != null);
+    try testing.expect(std.mem.indexOf(u8, remote, instance_env) == null);
+    try testing.expect(std.mem.indexOf(u8, remote, pane_env) == null);
+    // 로컬은 반대다 — 원격 축이 로컬 커맨드를 바꾸지 않는다.
+    try testing.expect(std.mem.indexOf(u8, local, remote_pane_env) == null);
+    try testing.expect(std.mem.indexOf(u8, local, instance_env) != null);
+
+    // 경로: 원격은 평평하고(`/<nonce>.ndjson`) 로컬은 인스턴스 디렉터리를 낀다.
+    try testing.expect(std.mem.indexOf(u8, remote, "\"/$" ++ remote_pane_env ++ ".ndjson\"") != null);
+    try testing.expect(std.mem.indexOf(u8, local, "/$" ++ instance_env ++ "/$" ++ pane_env ++ ".ndjson") != null);
+
+    // 나머지 규율은 그대로다 — umask·구분자·상한 표식·조용한 실패.
+    for ([_][]const u8{ remote, local }) |cmd| {
+        try testing.expect(std.mem.indexOf(u8, cmd, "umask 077;") != null);
+        try testing.expect(std.mem.indexOf(u8, cmd, "claude\\t%s\\n") != null);
+        try testing.expect(std.mem.indexOf(u8, cmd, "2>/dev/null; exit 0") != null);
+        try testing.expect(std.mem.indexOf(u8, cmd, event.oversized_marker) != null);
+    }
+}
+
+test "원격 커맨드의 가드는 합쳐진 nonce 를 통과시키고 경로 탈출은 막는다" {
+    const remote = try buildAlloc("claude", "/tmp/ev", .remote);
+    defer testing.allocator.free(remote);
+    // 가드 클래스에 `/` 와 `.` 가 없어야 한다 — 그것이 지키는 성질이다(계약 §4.1).
+    const guard_start = std.mem.indexOf(u8, remote, "case \"$" ++ remote_pane_env ++ "\" in ''|*[!").?;
+    const guard_end = std.mem.indexOfPos(u8, remote, guard_start, "]*) exit 0").?;
+    const class = remote[guard_start + ("case \"$" ++ remote_pane_env ++ "\" in ''|*[!").len .. guard_end];
+    try testing.expect(std.mem.indexOfScalar(u8, class, '/') == null);
+    try testing.expect(std.mem.indexOfScalar(u8, class, '.') == null);
+    // 합쳐진 nonce 가 쓰는 글자(숫자·소문자·`_`)는 모두 들어 있어야 한다.
+    for ("0123456789abcdef_") |c| try testing.expect(std.mem.indexOfScalar(u8, class, c) != null);
 }
 
 test "원격 pane 신원은 두 칸을 합쳐 만든다 — 인스턴스를 빼면 maru 둘이 같은 파일을 쓴다" {
@@ -721,16 +781,16 @@ test "max_events 는 두 스코프를 모두 담는다 — 원격이 부분집�
 }
 
 test "provider 이름을 우리가 붙인다 — payload에는 그 정보가 없다" {
-    const claude = try buildAlloc("claude", "/tmp/ev");
+    const claude = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(claude);
-    const codex = try buildAlloc("codex", "/tmp/ev");
+    const codex = try buildAlloc("codex", "/tmp/ev", .local);
     defer testing.allocator.free(codex);
     try testing.expect(std.mem.indexOf(u8, claude, "printf 'claude\\t%s\\n'") != null);
     try testing.expect(std.mem.indexOf(u8, codex, "printf 'codex\\t%s\\n'") != null);
 }
 
 test "상한을 넘긴 payload는 표식으로 바뀐다 — 파서가 아는 그 이름이다" {
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     try testing.expect(std.mem.indexOf(u8, cmd, event.oversized_marker) != null);
     // 파서가 그 줄을 실제로 oversized로 읽는지까지 본다(두 모듈이 같은 이름을 쓴다는 증명).
@@ -739,7 +799,7 @@ test "상한을 넘긴 payload는 표식으로 바뀐다 — 파서가 아는 �
 }
 
 test "어떤 경로로 나가든 exit 0이다" {
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     // 가드 탈출도, 정상 종료도 0이어야 훅이 에이전트 턴을 물지 않는다.
     try testing.expect(std.mem.indexOf(u8, cmd, ") exit 0 ;; esac") != null);
@@ -748,13 +808,13 @@ test "어떤 경로로 나가든 exit 0이다" {
 }
 
 test "디렉터리 경로의 따옴표가 커맨드를 깨지 않는다" {
-    const cmd = try buildAlloc("claude", "/home/o'brien/.cache/maru/ev");
+    const cmd = try buildAlloc("claude", "/home/o'brien/.cache/maru/ev", .local);
     defer testing.allocator.free(cmd);
     try testing.expect(std.mem.indexOf(u8, cmd, "'/home/o'\\''brien/.cache/maru/ev'") != null);
 }
 
 test "표식으로 우리 항목만 고른다 — 사용자 항목과 legacy는 남는다" {
-    const cmd = try buildAlloc("claude", "/tmp/ev");
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     try testing.expect(isOurs(cmd));
     try testing.expect(!isLegacy(cmd));
@@ -830,7 +890,7 @@ test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
     // (`tests/golden/agent_hook_command.sh`)와 **같은 구조**여야 한다. 파일을 직접 비교하지 못하는 것은
     // `@embedFile` 이 패키지 경로 밖을 못 읽기 때문이고, 대신 ⑴ 여기서 구조 불변식을 고정하고 ⑵ 셸 게이트가
     // 표식 버전으로 fixture 의 신선도를 본다. 두 검사가 만나는 지점이 `marker` 다.
-    const cmd = try buildAlloc("claude", "__LOG_DIR__");
+    const cmd = try buildAlloc("claude", "__LOG_DIR__", .local);
     defer testing.allocator.free(cmd);
     // 리다이렉션 실패까지 삼키는 그룹으로 감쌌는지 — 감싸지 않으면 디렉터리가 없을 때 셸 에러가
     // provider 화면으로 샌다(실측으로 잡은 결함).
@@ -854,7 +914,7 @@ test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
 test "커맨드가 쓴 줄을 파서가 읽는다 — 형식이 두 곳에 따로 적히면 조용히 깨진다" {
     // 셸 게이트는 «파일에 이 모양으로 적혔다» 까지 보고, 파서 테스트는 «이 모양을 읽는다» 를 본다.
     // 그 사이가 비면 형식 드리프트가 «모든 이벤트가 파싱 실패» 로만 드러난다. 여기서 양쪽을 잇는다.
-    const cmd = try buildAlloc("codex", "/tmp/ev");
+    const cmd = try buildAlloc("codex", "/tmp/ev", .local);
     defer testing.allocator.free(cmd);
     // 커맨드가 만드는 줄 모양: <provider><구분자><payload>
     try testing.expect(std.mem.indexOf(u8, cmd, "printf 'codex\\t%s\\n'") != null);
@@ -921,13 +981,13 @@ test "provider 이름이 줄을 깨뜨릴 수 있으면 거절한다" {
     // 커맨드를 만들면 **그 provider 의 모든 이벤트가 조용히 파싱 실패**한다.
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(testing.allocator);
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\taude", "/tmp/ev"));
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\naude", "/tmp/ev"));
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "", "/tmp/ev"));
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "Claude", "/tmp/ev"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\taude", "/tmp/ev", .local));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\naude", "/tmp/ev", .local));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "", "/tmp/ev", .local));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "Claude", "/tmp/ev", .local));
 
     // 우리가 쓰는 이름은 통과한다.
     out.clearRetainingCapacity();
-    try build(&out, testing.allocator, "claude", "/tmp/ev");
+    try build(&out, testing.allocator, "claude", "/tmp/ev", .local);
     try testing.expect(out.items.len > 0);
 }

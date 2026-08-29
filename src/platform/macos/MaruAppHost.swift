@@ -7249,16 +7249,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             sendPasteText(text, escapeItems: false)
             return
         }
-        if let pngData = clipboardImagePng(pb) {
+        if let pngData = clipboardImagePng(pb), let imagePath = saveTempPng(pngData) {
             // 비트맵 이미지(스크린샷·복사, 파일 아님) — URL·text가 없을 때만(리치 콘텐츠는 텍스트 우선해 의도치
             // 않은 이미지 삽입 방지). 원격 maru ssh면 PNG 바이트를 control socket으로 업로드하고(Zig가 판정,
             // true면 끝), 로컬이면 임시 PNG로 저장해 경로를 붙인다(escapeItems=true → bracketed paste로
             // claude/codex가 [Image] 인식). 둘 다 같은 PNG로 정규화해 넘기므로 원격 저장 파일(pasted-<pid>-N.png)도
             // 확장자/내용이 일치한다(스크린샷은 흔히 TIFF로만 와서, raw로 .png 저장하면 디코드가 깨진다).
-            if sendDropImage(pngData) { return }
-            if let imagePath = saveTempPng(pngData) {
-                sendPasteText(imagePath, escapeItems: true)
-            }
+            if sendDropImage(pngData, tempPath: imagePath) { return }
+            sendPasteText(imagePath, escapeItems: true)
         }
     }
 
@@ -7400,12 +7398,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return true
     }
 
-    /// 클립보드 이미지 바이트를 Zig로 보낸다. 원격 maru ssh면 업로드+경로 paste 후 true, 로컬이면 false.
-    private func sendDropImage(_ data: Data) -> Bool {
-        guard let session = appSession, !data.isEmpty else { return false }
-        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
-            guard let base = raw.baseAddress else { return false }
-            return maru_macos_app_session_drop_image(session, base.assumingMemoryBound(to: UInt8.self), raw.count) != 0
+    /// 임시 PNG 경로와 같은 PNG 바이트를 Zig로 보낸다. host-backed면 비동기 판정이 소유하고,
+    /// in-process 로컬이면 false를 돌려 caller가 임시 경로를 paste한다.
+    private func sendDropImage(_ data: Data, tempPath: String) -> Bool {
+        guard let session = appSession, !data.isEmpty, !tempPath.isEmpty else { return false }
+        let path = Array(tempPath.utf8)
+        return path.withUnsafeBufferPointer { pathBuf in
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+                guard let pathBase = pathBuf.baseAddress, let base = raw.baseAddress else { return false }
+                return maru_macos_app_session_drop_image(
+                    session,
+                    pathBase,
+                    pathBuf.count,
+                    base.assumingMemoryBound(to: UInt8.self),
+                    raw.count
+                ) != 0
+            }
         }
     }
 

@@ -268,7 +268,7 @@ pub const GlobalPasteBudget = struct {
     }
 };
 
-pub const SealKind = enum(u8) { key_bytes, paste, ime_commit, osc52_response, scroll_to_bottom, core_command };
+pub const SealKind = enum(u8) { key_bytes, paste, ime_commit, osc52_response, scroll_to_bottom, core_command, observation_probe };
 
 pub const SealEntry = struct {
     kind: SealKind,

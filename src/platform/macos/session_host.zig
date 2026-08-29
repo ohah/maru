@@ -95,6 +95,7 @@ pub const recovered_session_adopt = if (builtin.os.tag == .macos)
 else
     struct {};
 pub const connection_slot = @import("session_host/connection_slot.zig");
+pub const user_action_queue = @import("session_host/user_action_queue.zig");
 // 창 닫기 graph는 syscall이나 backend 포인터를 갖지 않는 scalar 권위 leaf라 ABI 교차 빌드에서도 같은
 // 저장 형식과 전이를 검사한다. 실제 RemoteRuntime 실행 경로만 아래 macOS 전용 barrel에 남긴다.
 pub const pending_term_close_graph = @import("session_host/pending_term_close_graph.zig");

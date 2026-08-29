@@ -42,6 +42,7 @@ pub const Projection = struct {
     cols: u16 = 0,
     rows: u16 = 0,
     semantic_generation: u64 = 0,
+    observation_probe_nonce: u64 = 0,
 };
 
 pub fn canonical(value: Projection, retained_observation: bool) bool {
@@ -50,19 +51,25 @@ pub fn canonical(value: Projection, retained_observation: bool) bool {
     const tag = std.enums.fromInt(PreparedEventTag, value.prepared_tag_raw) orelse return false;
     const effect = std.enums.fromInt(EffectTag, value.effect_tag_raw) orelse return false;
     return switch (tag) {
-        .ignored, .ended, .invalidated, .resize_noop, .metadata_noop => !retained_observation and effect == .none and value.failure_raw == 0 and
+        .ignored, .ended, .invalidated, .resize_noop => !retained_observation and effect == .none and value.failure_raw == 0 and
+            value.connection_reason_raw == 0 and value.cols == 0 and value.rows == 0 and
+            value.semantic_generation == 0 and value.observation_probe_nonce == 0,
+        .metadata_noop => !retained_observation and effect == .none and value.failure_raw == 0 and
             value.connection_reason_raw == 0 and value.cols == 0 and value.rows == 0 and
             value.semantic_generation == 0,
         .resize_commit => !retained_observation and effect == .none and
             value.failure_raw == 0 and value.connection_reason_raw == 0 and
-            value.cols >= 2 and value.rows != 0 and value.semantic_generation != 0,
+            value.cols >= 2 and value.rows != 0 and value.semantic_generation != 0 and
+            value.observation_probe_nonce == 0,
         .metadata_commit => retained_observation and effect == .none and
             value.failure_raw == 0 and value.connection_reason_raw == 0 and
             value.cols == 0 and value.rows == 0 and value.semantic_generation == 0,
         .revoked => !retained_observation and effect == .revoke_fence and
             value.failure_raw == 0 and value.connection_reason_raw == 0 and
-            value.cols == 0 and value.rows == 0 and value.semantic_generation != 0,
+            value.cols == 0 and value.rows == 0 and value.semantic_generation != 0 and
+            value.observation_probe_nonce == 0,
         .failure => !retained_observation and value.cols == 0 and value.rows == 0 and value.semantic_generation == 0 and
+            value.observation_probe_nonce == 0 and
             switch (std.enums.fromInt(
                 PreparationFailure,
                 value.failure_raw,
@@ -77,5 +84,5 @@ pub fn canonical(value: Projection, retained_observation: bool) bool {
 }
 
 comptime {
-    if (std.meta.fields(Projection).len != 8) @compileError("decision seal projection ABI drift");
+    if (std.meta.fields(Projection).len != 9) @compileError("decision seal projection ABI drift");
 }

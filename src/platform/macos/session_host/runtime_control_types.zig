@@ -66,10 +66,11 @@ pub const RawCorePayload = extern union {
     selection_scroll: extern struct { row: u16, col: u16, delta: i8 },
 };
 pub const RawCoreCommand = extern struct { tag: u8, payload: RawCorePayload };
-pub const RuntimeControlTag = enum(u8) { scroll_to_bottom, core_command };
+pub const RuntimeControlTag = enum(u8) { scroll_to_bottom, core_command, observation_probe };
 pub const RawRuntimeControlPayload = extern union {
     empty: u8,
     core_command: RawCoreCommand,
+    nonce: u64,
 };
 
 pub const RuntimeControl = extern struct {
@@ -89,12 +90,23 @@ pub const RuntimeControl = extern struct {
         return result;
     }
 
+    pub fn observationProbe(nonce: u64) RuntimeControl {
+        var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
+        result.tag = @intFromEnum(RuntimeControlTag.observation_probe);
+        result.payload.nonce = nonce;
+        return result;
+    }
+
     pub fn decode(self: *const RuntimeControl) ?ValidatedRuntimeControl {
         return switch (self.tag) {
             @intFromEnum(RuntimeControlTag.scroll_to_bottom) => .scroll_to_bottom,
             @intFromEnum(RuntimeControlTag.core_command) => .{
                 .core_command = decodeRawCoreCommand(&self.payload.core_command) orelse return null,
             },
+            @intFromEnum(RuntimeControlTag.observation_probe) => if (self.payload.nonce != 0)
+                .{ .observation_probe = self.payload.nonce }
+            else
+                null,
             else => null,
         };
     }
@@ -103,6 +115,7 @@ pub const RuntimeControl = extern struct {
 pub const ValidatedRuntimeControl = union(RuntimeControlTag) {
     scroll_to_bottom,
     core_command: CoreCommandRequest,
+    observation_probe: u64,
 };
 
 fn encodeRawOptional(value: ?u32) RawOptionalU32 {
@@ -288,6 +301,8 @@ test "C3-3b2b3 integration runtime control raw discriminators fail closed and en
         outer.tag = @intCast(raw);
         if (outer.decode() != null) valid_outer += 1;
     }
+    // The sweep starts from zeroed scroll backing, so observation_probe's required nonzero nonce
+    // deliberately keeps that raw tag invalid.
     try std.testing.expectEqual(@as(usize, 2), valid_outer);
 
     var nested = RuntimeControl.coreCommand(.scroll_to_bottom);
@@ -307,4 +322,30 @@ test "C3-3b2b3 integration runtime control raw discriminators fail closed and en
         if (index == outer_offset or index == core_offset) continue;
         try std.testing.expectEqual(@as(u8, 0), byte);
     }
+}
+
+test "P4 async observation probe is pointer-free nonce control and rejects zero nonce" {
+    const control = RuntimeControl.observationProbe(0xA11CE);
+    const decoded = control.decode().?;
+    try std.testing.expectEqual(RuntimeControlTag.observation_probe, std.meta.activeTag(decoded));
+    try std.testing.expectEqual(@as(u64, 0xA11CE), decoded.observation_probe);
+    try std.testing.expect(RuntimeControl.observationProbe(0).decode() == null);
+    try std.testing.expect(!containsPointer(RuntimeControl));
+}
+
+fn containsPointer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => true,
+        .array => |a| containsPointer(a.child),
+        .optional => |o| containsPointer(o.child),
+        .@"struct" => |s| blk: {
+            inline for (s.fields) |field| if (containsPointer(field.type)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |u| blk: {
+            inline for (u.fields) |field| if (containsPointer(field.type)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
 }

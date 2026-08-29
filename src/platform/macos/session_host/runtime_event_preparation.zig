@@ -31,6 +31,9 @@ pub const ProcessRecipe = struct {
 pub const MetadataPreparationRecipe = struct {
     payload_digest: Digest = [_]u8{0} ** 32,
     semantic_digest: Digest = [_]u8{0} ** 32,
+    /// Correlates a fresh metadata snapshot with one fire-and-forget observation probe. This is
+    /// Transport settlement evidence, not part of the semantic observation contents.
+    observation_probe_nonce: u64 = 0,
     backing_bytes: u32 = 0,
     revision: u64 = 0,
     observer_generation: u64 = 0,
@@ -264,6 +267,7 @@ fn buildMetadataRecipe(
     var result: MetadataPreparationRecipe = .{
         .payload_digest = preflight.raw_digest,
         .semantic_digest = metadata.semantic_digest,
+        .observation_probe_nonce = metadata.observation_probe_nonce orelse 0,
         .revision = metadata.revision,
         .observer_generation = metadata.observer_generation,
         .title_generation = metadata.title_generation,
@@ -473,6 +477,9 @@ const test_authority: runtime_event_types.EventAuthorityView = .{
 const test_metadata_payload =
     \\{"event":"runtime.metadata","metadata_revision":9,"metadata":{"cwd":"\/repo\u002Fsrc","window_title":"work","ssh_remote_dest":"dev@example.test","semantic_state":1,"alt_active":false,"app_cursor_keys":true,"app_keypad":false,"kitty_flags":3,"alternate_scroll":true,"mouse_tracking":true,"mouse_tracking_mode":2,"bracketed_paste":true,"bell_count":11,"clipboard_write_seq":12,"clipboard_read_seq":13,"clipboard_read_target":"c","observer_generation":14,"title_generation":15,"cols":120,"rows":40,"foreground_available":true,"foreground_pgid":77,"processes":[{"pid":77,"name":"zsh"}]}}
 ;
+const test_probe_metadata_payload =
+    \\{"event":"runtime.metadata","metadata_revision":9,"observation_probe_nonce":48879,"metadata":{"cwd":"/repo","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":false,"observer_generation":1,"title_generation":1,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+;
 
 fn testClassification(payload: []const u8) runtime_event_types.Classification {
     return runtime_event_types.classifyEventView(
@@ -606,17 +613,17 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
         .{ "pid", i32 }, .{ "name_len", u8 }, .{ "name_digest", Digest },
     });
     try expectExactFields(std.meta.fields(MetadataPreparationRecipe), .{
-        .{ "payload_digest", Digest },                        .{ "semantic_digest", Digest },       .{ "backing_bytes", u32 },
-        .{ "revision", u64 },                                 .{ "observer_generation", u64 },      .{ "title_generation", u32 },
-        .{ "cols", u16 },                                     .{ "rows", u16 },                     .{ "semantic_state_raw", u8 },
-        .{ "alt_active_raw", u8 },                            .{ "app_cursor_keys_raw", u8 },       .{ "app_keypad_raw", u8 },
-        .{ "kitty_flags_raw", u8 },                           .{ "alternate_scroll_raw", u8 },      .{ "mouse_tracking_raw", u8 },
-        .{ "mouse_tracking_mode", u8 },                       .{ "bracketed_paste_raw", u8 },       .{ "bell_count", u64 },
-        .{ "clipboard_write_seq", u64 },                      .{ "clipboard_read_seq", u64 },       .{ "foreground_available_raw", u8 },
-        .{ "foreground_pgid_present_raw", u8 },               .{ "foreground_pgid", i32 },          .{ "child_pid", i32 },
-        .{ "host_pid", i32 },                                 .{ "cwd", StringRecipe },             .{ "window_title", StringRecipe },
-        .{ "ssh_remote_dest_present_raw", u8 },               .{ "ssh_remote_dest", StringRecipe }, .{ "clipboard_read_target", StringRecipe },
-        .{ "processes", [max_process_entries]ProcessRecipe }, .{ "process_count", u8 },
+        .{ "payload_digest", Digest },              .{ "semantic_digest", Digest },                       .{ "observation_probe_nonce", u64 },
+        .{ "backing_bytes", u32 },                  .{ "revision", u64 },                                 .{ "observer_generation", u64 },
+        .{ "title_generation", u32 },               .{ "cols", u16 },                                     .{ "rows", u16 },
+        .{ "semantic_state_raw", u8 },              .{ "alt_active_raw", u8 },                            .{ "app_cursor_keys_raw", u8 },
+        .{ "app_keypad_raw", u8 },                  .{ "kitty_flags_raw", u8 },                           .{ "alternate_scroll_raw", u8 },
+        .{ "mouse_tracking_raw", u8 },              .{ "mouse_tracking_mode", u8 },                       .{ "bracketed_paste_raw", u8 },
+        .{ "bell_count", u64 },                     .{ "clipboard_write_seq", u64 },                      .{ "clipboard_read_seq", u64 },
+        .{ "foreground_available_raw", u8 },        .{ "foreground_pgid_present_raw", u8 },               .{ "foreground_pgid", i32 },
+        .{ "child_pid", i32 },                      .{ "host_pid", i32 },                                 .{ "cwd", StringRecipe },
+        .{ "window_title", StringRecipe },          .{ "ssh_remote_dest_present_raw", u8 },               .{ "ssh_remote_dest", StringRecipe },
+        .{ "clipboard_read_target", StringRecipe }, .{ "processes", [max_process_entries]ProcessRecipe }, .{ "process_count", u8 },
     });
     try expectExactUnionFields(std.meta.fields(AcceptedPreparationRecipe), .{
         .{ "revoked", u64 },                        .{ "invalidated", void }, .{ "resized", resize_wire.Event },
@@ -664,6 +671,14 @@ test "C3-3b2b2 metadata fill decodes strings and process values into caller stor
     try std.testing.expectEqualStrings("c", backing[projection.clipboard_read_target.start..][0..projection.clipboard_read_target.len]);
     try std.testing.expectEqual(@as(i32, 77), processes[0].pid);
     try std.testing.expectEqualStrings("zsh", processes[0].slice());
+}
+
+test "async observation probe nonce remains separate from metadata semantics in preparation recipe" {
+    const recipe = try buildEventPreparationRecipe(
+        testClassification(test_probe_metadata_payload),
+        test_probe_metadata_payload,
+    );
+    try std.testing.expectEqual(@as(u64, 48879), testMetadataRecipe(&recipe).observation_probe_nonce);
 }
 
 test "C3-3b2b2 SSH absent and present-empty remain distinct canonical recipes" {

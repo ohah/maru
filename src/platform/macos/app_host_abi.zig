@@ -127,8 +127,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v176 session config bootstrap and notification cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 176), abi_version);
+test "ABI v177 session config bootstrap and notification cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 177), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1404,18 +1404,20 @@ pub export fn maru_macos_app_session_drop_files(
     return @intFromEnum(Status.ok);
 }
 
-// 클립보드 이미지(Cmd+V)를 paste한다. maru ssh 원격이면 control socket으로 업로드 후 원격 절대경로를 paste하고
-// 1을 돌려준다(Swift는 더 안 함). 로컬/미처리면 0(Swift가 기존 텍스트·URL paste 진행). 파일 드롭과 달리
-// 경로가 없어 바이트를 직접 받는다(app_session.handleDroppedImage). (v69)
+// 클립보드 이미지(Cmd+V): Swift가 먼저 만든 임시 PNG 경로와 같은 PNG 바이트를 넘긴다.
+// host-backed이면 비동기 freshness 판정이 둘을 소유하고, in-process 로컬이면 0을 돌려 Swift가 경로를 paste한다. (v177)
 pub export fn maru_macos_app_session_drop_image(
     session: ?*AppSession,
+    temp_path: ?[*]const u8,
+    temp_path_len: usize,
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
     const app_session = session orelse return 0;
-    if (len == 0) return 0;
+    if (temp_path_len == 0 or len == 0) return 0;
+    const path_ptr = temp_path orelse return 0;
     const ptr = bytes orelse return 0;
-    return if (app_session.handleDroppedImage(ptr[0..len])) 1 else 0;
+    return if (app_session.handleDroppedImage(path_ptr[0..temp_path_len], ptr[0..len])) 1 else 0;
 }
 
 // chrome Notice 모달(부분 복원 실패 등)을 연다. 세션이 복사 소유하므로 호출 뒤 버퍼는 free해도 된다.

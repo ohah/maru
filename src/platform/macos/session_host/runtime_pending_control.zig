@@ -18,6 +18,14 @@ pub const RawQueuedRuntimeControl = extern struct {
             .control = .coreCommand(projectCoreCommand(command)),
         };
     }
+
+    pub fn observationProbe(barrier: usize, nonce: u64) ?RawQueuedRuntimeControl {
+        if (nonce == 0) return null;
+        return .{
+            .barrier = std.math.cast(u64, barrier) orelse return null,
+            .control = .observationProbe(nonce),
+        };
+    }
 };
 
 pub const Decoded = struct {
@@ -104,4 +112,12 @@ test "C3-3b2b3 integration queued controls use checked barriers and preserve sem
     const value = decode(&raw).?;
     try std.testing.expectEqual(@as(u64, 17), value.barrier);
     try std.testing.expect(toCoreCommand(value.control.core_command).report_focus);
+}
+
+test "P4 async observation probe retains input barrier and nonce" {
+    const raw = RawQueuedRuntimeControl.observationProbe(23, 0xBEEF).?;
+    const value = decode(&raw).?;
+    try std.testing.expectEqual(@as(u64, 23), value.barrier);
+    try std.testing.expectEqual(@as(u64, 0xBEEF), value.control.observation_probe);
+    try std.testing.expect(RawQueuedRuntimeControl.observationProbe(23, 0) == null);
 }

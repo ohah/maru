@@ -39,6 +39,7 @@ pub const QueueRecordKind = enum(u8) {
     key_bytes = 4,
     scroll_to_bottom = 5,
     core_command = 6,
+    observation_probe = 7,
 
     pub fn fromBatch(kind: InputBatchKind) QueueRecordKind {
         return switch (kind) {
@@ -49,7 +50,7 @@ pub const QueueRecordKind = enum(u8) {
     }
 
     pub fn isControl(self: QueueRecordKind) bool {
-        return self == .scroll_to_bottom or self == .core_command;
+        return self == .scroll_to_bottom or self == .core_command or self == .observation_probe;
     }
 };
 

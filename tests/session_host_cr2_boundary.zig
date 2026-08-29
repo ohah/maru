@@ -71,8 +71,8 @@ test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 �
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
     // 네 값은 `RemoteRuntime` 이 커질 때마다 함께 움직인다. macOS 둘은 **실측**이고, linux 둘은 이
     // 모듈이 macOS 전용이라(session_host.zig 배럴) 이 트리에서 컴파일되지 않아 잴 수 없다.
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11360,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11296,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11440,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11376,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11328,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11280,"));
 }
@@ -321,7 +321,7 @@ test "CR2d2 경계는 key와 control의 단일 epoch sequence transcript를 고�
     try std.testing.expectEqual(@as(usize, 1), count(key_admission, ".kind = .key_bytes,"));
     try std.testing.expectEqual(@as(usize, 1), count(scroll_admission, ".kind = .scroll_to_bottom,"));
     try std.testing.expectEqual(@as(usize, 1), count(command_admission, ".kind = .core_command,"));
-    try std.testing.expectEqual(@as(usize, 5), count(runtime, "const sequence = try self.nextInputSequence();"));
+    try std.testing.expectEqual(@as(usize, 6), count(runtime, "const sequence = try self.nextInputSequence();"));
     const testing_queue = between(runtime, "const queue_testing = if (builtin.is_test) struct {", "fn failControlAdmission(") orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(testing_queue, "const sequence = try self.nextInputSequence();"));
@@ -842,8 +842,8 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
     );
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "pub const ReconnectResidentLedger"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn reconnectCandidateResidentBytes() !usize"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3536,"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3520,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3568,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3552,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "else => error.SkipZigTest,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e3a1"));
     const e3a_tests = between(

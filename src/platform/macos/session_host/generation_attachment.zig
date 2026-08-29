@@ -102,6 +102,9 @@ pub const GenerationAttachment = struct {
     pub fn pendingEventReleaseCallbackActive(self: *const GenerationAttachment) bool {
         return self.transport.pendingEventReleaseCallbackActive();
     }
+    pub fn capabilities(self: *const GenerationAttachment) !contract.GenerationCapabilities {
+        return self.transport.capabilities();
+    }
     self_addr: usize = 0,
     lifecycle: Lifecycle = .pristine,
     transport: generation_transport_mod.GenerationTransport = .{},
@@ -1156,8 +1159,8 @@ pub const GenerationAttachment = struct {
             self.poison(.read_timeout) catch {};
             return .pre_takeover_failed;
         }
-        const capabilities = self.transport.capabilities() catch return error.InvalidAuthority;
-        if (!capabilities.controller_transfer or self.payloadConst().state.role != .observer) {
+        const generation_capabilities = self.transport.capabilities() catch return error.InvalidAuthority;
+        if (!generation_capabilities.controller_transfer or self.payloadConst().state.role != .observer) {
             self.poison(.local_invariant_violation) catch {};
             return .pre_takeover_failed;
         }

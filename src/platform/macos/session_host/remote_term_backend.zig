@@ -50,6 +50,7 @@ const reconnect_reducer = @import("reconnect_reducer.zig");
 const host_reconnect_runtime_ledger = @import("host_reconnect_runtime_ledger.zig");
 const host_reconnect_runtime_transaction = @import("host_reconnect_runtime_transaction.zig");
 const host_reconnect_window_transaction = @import("host_reconnect_window_transaction.zig");
+const user_action_queue = @import("user_action_queue.zig");
 const core_command = maru.session.core_command; // §6a 원격 스크롤 명령 라우팅
 
 const Surface = maru.session.Surface;
@@ -3790,6 +3791,58 @@ pub const RemoteTermBackend = struct {
         return entry.host_id;
     }
 
+    /// Captures the immutable routing identity before a user action admits an async observation
+    /// request. Completion must compare the whole tuple again; a recycled handle or same runtime
+    /// ID on a newer backend generation is not the original drop target.
+    pub fn userActionProbeIdentity(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        surface_id: u64,
+    ) ?user_action_queue.TargetIdentity {
+        const entry = self.runtimes.get(handle) orelse return null;
+        if (surface_id == 0 or entry.host_id == 0 or entry.runtime_generation == 0) return null;
+        return .{
+            .surface_id = surface_id,
+            .runtime_handle = handle,
+            .host_id = entry.host_id,
+            .runtime_id = entry.runtime.runtimeIdHex(),
+            .runtime_generation = entry.runtime_generation,
+        };
+    }
+
+    pub const ObservationProbeAdmission = RemoteRuntime.ObservationProbeAdmission;
+    pub const ObservationProbePoll = RemoteRuntime.ObservationProbePoll;
+
+    /// Starts a response-free freshness barrier on the runtime's existing managed connection.
+    /// AppSession owns the action payload and deadline; this facade owns only exact handle routing.
+    pub fn requestUserActionObservationProbe(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        nonce: u64,
+    ) !ObservationProbeAdmission {
+        const entry = self.runtimes.get(handle) orelse return error.UnknownSurface;
+        return entry.runtime.requestObservationProbe(nonce);
+    }
+
+    /// Polls one exact correlation without blocking or consuming a different action's result.
+    pub fn pollUserActionObservationProbe(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        nonce: u64,
+    ) ObservationProbePoll {
+        const entry = self.runtimes.get(handle) orelse return .stale;
+        return entry.runtime.pollObservationProbe(nonce);
+    }
+
+    pub fn abandonUserActionObservationProbe(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        nonce: u64,
+    ) bool {
+        const entry = self.runtimes.get(handle) orelse return false;
+        return entry.runtime.abandonObservationProbe(nonce);
+    }
+
     /// 이 handle이 controller를 못 얻고 observer로 붙었는가(§9 — 두 번째 controller는 조용히 강등된다).
     /// host-backed가 아니면 false다. GUI가 "화면은 나오는데 입력이 안 된다"를 사용자에게 설명하는 근거다.
     pub fn attachedAsObserver(self: *RemoteTermBackend, handle: RuntimeHandle) bool {
@@ -7524,6 +7577,14 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     _ = try be.attach(22, true);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(11).?);
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
+    const action_identity = be_impl.userActionProbeIdentity(11, 700).?;
+    try testing.expectEqual(@as(u64, 700), action_identity.surface_id);
+    try testing.expectEqual(@as(RuntimeHandle, 11), action_identity.runtime_handle);
+    try testing.expectEqual(host_a, action_identity.host_id);
+    try testing.expectEqual(be_impl.runtimeIdFor(11).?, action_identity.runtime_id);
+    try testing.expect(action_identity.runtime_generation != 0);
+    try testing.expect(be_impl.userActionProbeIdentity(999, 700) == null);
+    try testing.expect(be_impl.userActionProbeIdentity(11, 0) == null);
     try testing.expectError(error.HostInUse, pool.remove(host_a));
     const runtime_a_id = be_impl.runtimeIdFor(11).?;
 
@@ -7553,6 +7614,8 @@ test "C3-3b5 remote backend는 두 host 창 ticket을 예약하고 pending targe
     var pump_a = try be.pump(33);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
     try testing.expectEqual(host_b, be_impl.runtimeHostId(22).?);
+    const reattached_identity = be_impl.userActionProbeIdentity(33, 700).?;
+    try testing.expect(!std.meta.eql(action_identity, reattached_identity));
     try surface_runtime.writeInput(22, .{ .bytes = "after\n" });
     var saw_after = false;
     attempts = 0;

@@ -591,6 +591,10 @@ pub const RemoteGeneration = struct {
     // 공유하므로 각 runtime pump가 자기 surface를 exited로 latch하되 매 frame 같은 read_error를 재방출하지 않는다.
     pump_ended: bool,
     resync_needed: bool,
+    observation_probe_active: u64 = 0,
+    /// Timed-out correlation retained until its late event arrives. A new probe cannot overtake it.
+    observation_probe_abandoned: u64 = 0,
+    observation_probe_completed: u64 = 0,
     frame_summary_ready: bool = false,
     frame_summary: runtime_pump_mod.DrainSummary = .{},
     observation: term_backend.RuntimeObservation, // host attach/event에서 받은 화면 외 full-state owned cache.
@@ -3620,6 +3624,7 @@ pub const RemoteRuntime = struct {
                     .controller_transfer = client.attachment_capabilities.negotiated_controller_transfer,
                     .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
                     .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
+                    .async_observation_probe = client.async_observation_probe_v1,
                     .notification_stream_auth = client.notification_stream_auth_v1,
                     .notification_delivery = client.notification_delivery_v1,
                     .runtime_clipboard = client.runtime_clipboard_v1,
@@ -4393,6 +4398,7 @@ pub const RemoteRuntime = struct {
             .osc52_response => .osc52_response,
             .scroll_to_bottom => .scroll_to_bottom,
             .core_command => .core_command,
+            .observation_probe => .observation_probe,
         };
     }
 
@@ -4717,6 +4723,89 @@ pub const RemoteRuntime = struct {
         _ = try self.pumpQueuedInput();
     }
 
+    pub const ObservationProbeAdmission = enum { accepted, busy, unsupported };
+    pub const ObservationProbePoll = enum { pending, completed, stale };
+
+    /// Queues one fresh metadata barrier on the existing managed generation connection. The
+    /// nonce becomes active in the same stable mutation that publishes its input barrier, so an
+    /// event can never complete an action that was not admitted locally.
+    pub fn requestObservationProbe(
+        self: *RemoteRuntime,
+        nonce: u64,
+    ) client_mod.ClientError!ObservationProbeAdmission {
+        try self.admitRuntimeOperation();
+        if (!self.mutationAllowed()) return error.Unauthorized;
+        if (nonce == 0) return error.ProtocolError;
+        const generation = self.currentGeneration();
+        if (generation.connection != .generation or
+            !self.connectionCapabilities().async_observation_probe)
+            return .unsupported;
+        if (generation.observation_probe_active != 0 or generation.observation_probe_abandoned != 0 or
+            generation.observation_probe_completed != 0)
+            return .busy;
+        var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
+        try self.beginStableMutation(&mutation_lease);
+        defer self.finishStableMutation(&mutation_lease);
+        if (self.pending_controls.items.len >= max_pending_controls) {
+            try self.failControlAdmission();
+            unreachable;
+        }
+        const sequence = try self.nextInputSequence();
+        const barrier = self.direct_input.items.len;
+        const raw = runtime_pending_control.RawQueuedRuntimeControl.observationProbe(barrier, nonce) orelse
+            return error.ProtocolError;
+        self.pending_controls.ensureUnusedCapacity(self.allocator, 1) catch {
+            try self.failControlAdmission();
+            unreachable;
+        };
+        self.input_batches.records.ensureUnusedCapacity(self.allocator, 1) catch {
+            try self.failControlAdmission();
+            unreachable;
+        };
+        self.pending_controls.appendAssumeCapacity(raw);
+        self.input_batches.records.appendAssumeCapacity(.{
+            .kind = .observation_probe,
+            .epoch = self.input_batches.epoch,
+            .sequence = sequence,
+            .end_offset = barrier,
+        });
+        self.input_batches.next_sequence = sequence;
+        generation.observation_probe_active = nonce;
+        _ = self.pumpQueuedInput() catch |err| {
+            // The control may already be resident in the managed Client or on the socket. The
+            // caller has not observed `.accepted`, so it cannot own cancellation; retain only an
+            // abandoned correlation that consumes an exact late metadata event without applying
+            // it to a later user action. A terminal/reconnected generation discards this state.
+            generation.observation_probe_active = 0;
+            generation.observation_probe_abandoned = nonce;
+            return err;
+        };
+        return .accepted;
+    }
+
+    pub fn pollObservationProbe(self: *RemoteRuntime, nonce: u64) ObservationProbePoll {
+        if (nonce == 0) return .stale;
+        const generation = self.currentGeneration();
+        if (generation.observation_probe_completed == nonce) {
+            generation.observation_probe_completed = 0;
+            return .completed;
+        }
+        if (generation.observation_probe_active == nonce) return .pending;
+        return .stale;
+    }
+
+    /// Stops publishing a timed-out result to AppSession while retaining exact late-event
+    /// correlation. This avoids poisoning the shared managed connection merely because the host
+    /// answered after the user-action deadline.
+    pub fn abandonObservationProbe(self: *RemoteRuntime, nonce: u64) bool {
+        if (nonce == 0 or self.currentGeneration().observation_probe_active != nonce or
+            self.currentGeneration().observation_probe_abandoned != 0)
+            return false;
+        self.currentGeneration().observation_probe_active = 0;
+        self.currentGeneration().observation_probe_abandoned = nonce;
+        return true;
+    }
+
     fn connectionSupportsClearScreen(self: *const RemoteRuntime) bool {
         return switch (self.currentGenerationConst().connection) {
             .legacy => |client| client.runtime_clear_screen_v1,
@@ -4779,6 +4868,7 @@ pub const RemoteRuntime = struct {
                     else => return err,
                 };
             },
+            .observation_probe => return error.ProtocolError,
         };
     }
 
@@ -4901,7 +4991,11 @@ pub const RemoteRuntime = struct {
                 }
                 const decoded = runtime_pending_control.decode(&control) orelse return error.ProtocolError;
                 try self.validateControlRecord(
-                    if (decoded.control == .scroll_to_bottom) .scroll_to_bottom else .core_command,
+                    switch (decoded.control) {
+                        .scroll_to_bottom => .scroll_to_bottom,
+                        .core_command => .core_command,
+                        .observation_probe => .observation_probe,
+                    },
                     barrier,
                 );
                 if (!(try self.admitControl(control))) return .blocked;
@@ -4973,7 +5067,11 @@ pub const RemoteRuntime = struct {
                 }
                 const decoded = runtime_pending_control.decode(&control) orelse return error.ProtocolError;
                 try self.validateControlRecord(
-                    if (decoded.control == .scroll_to_bottom) .scroll_to_bottom else .core_command,
+                    switch (decoded.control) {
+                        .scroll_to_bottom => .scroll_to_bottom,
+                        .core_command => .core_command,
+                        .observation_probe => .observation_probe,
+                    },
                     barrier,
                 );
                 try self.flushControlBlocking(control);
@@ -5018,6 +5116,7 @@ pub const RemoteRuntime = struct {
                 defer self.allocator.free(params);
                 try self.legacyConnection().sendCoreCommand(self.currentGeneration().attachment.streamId(), params);
             },
+            .observation_probe => return error.ProtocolError,
         }
     }
 
@@ -5594,6 +5693,14 @@ pub const RemoteRuntime = struct {
     ) client_mod.ClientError!void {
         const borrowed = self.pending_event_owner.borrowPrepared() catch
             return error.ProtocolError;
+        if (borrowed.observation_probe_nonce != 0 and
+            ((self.currentGeneration().observation_probe_active != borrowed.observation_probe_nonce and
+                self.currentGeneration().observation_probe_abandoned != borrowed.observation_probe_nonce) or
+                self.currentGeneration().observation_probe_completed != 0))
+        {
+            self.poisonConnection(.peer_contract_violation);
+            return error.ProtocolError;
+        }
         if (hook) |run| if (run(self, stage) == .busy) return error.AdminBusy;
         remote_runtime_pending_event_mod.settlePreparedEvent(
             &self.runtime_lifetime,
@@ -5683,6 +5790,21 @@ pub const RemoteRuntime = struct {
         self.pending_event_owner.recordSemanticPostNoFail(&permit, post_digest);
         self.pending_event_owner.finishSemanticCommitNoFail(&permit);
 
+        if (decision.observation_probe_nonce != 0) {
+            if (self.currentGeneration().observation_probe_active == decision.observation_probe_nonce and
+                self.currentGeneration().observation_probe_abandoned == 0 and
+                self.currentGeneration().observation_probe_completed == 0)
+            {
+                self.currentGeneration().observation_probe_active = 0;
+                self.currentGeneration().observation_probe_completed = decision.observation_probe_nonce;
+            } else if (self.currentGeneration().observation_probe_abandoned == decision.observation_probe_nonce and
+                self.currentGeneration().observation_probe_active == 0 and
+                self.currentGeneration().observation_probe_completed == 0)
+            {
+                self.currentGeneration().observation_probe_abandoned = 0;
+            } else process_seal_service.fatalIntegrity(.proof_loss);
+        }
+
         if (tag == .failure) {
             const failure = std.enums.fromInt(
                 runtime_event_prepared_types_mod.PreparationFailure,
@@ -5749,6 +5871,21 @@ pub const RemoteRuntime = struct {
         payload: []const u8,
         verdict: runtime_event_wire.Verdict,
     ) client_mod.ClientError!void {
+        const observation_probe_nonce: ?u64 = switch (verdict) {
+            .accepted => |accepted| switch (accepted.event) {
+                .metadata => |metadata| metadata.observation_probe_nonce,
+                else => null,
+            },
+            else => null,
+        };
+        if (observation_probe_nonce) |nonce| {
+            if (self.currentGeneration().observation_probe_active != nonce or
+                self.currentGeneration().observation_probe_completed != 0)
+            {
+                self.poisonConnection(.peer_contract_violation);
+                return error.ProtocolError;
+            }
+        }
         const classification = runtime_metadata_wire.classifyAndMaterializeEvent(
             self.allocator,
             .{
@@ -5834,6 +5971,10 @@ pub const RemoteRuntime = struct {
                     self.poisonConnection(.peer_contract_violation);
                     return err;
                 }) or result.metadata;
+                if (observation_probe_nonce) |nonce| {
+                    self.currentGeneration().observation_probe_active = 0;
+                    self.currentGeneration().observation_probe_completed = nonce;
+                }
             },
             .ended => result.ended = true,
         }
@@ -8014,6 +8155,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             switch (decoded) {
                 .core_command => |value| value,
                 .scroll_to_bottom => return error.TestExpectedEqual,
+                .observation_probe => return error.TestExpectedEqual,
             },
         ));
     }
@@ -10049,6 +10191,13 @@ const b4_metadata_stale =
     "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
     "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
     "\"foreground_pgid\":null,\"processes\":[]}}";
+const b4_metadata_probe_noop =
+    "{\"event\":\"runtime.metadata\",\"metadata_revision\":4,\"observation_probe_nonce\":48879,\"metadata\":{" ++
+    "\"cwd\":\"/base\",\"window_title\":\"base\",\"ssh_remote_dest\":null," ++
+    "\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false," ++
+    "\"alternate_scroll\":true,\"observer_generation\":1,\"title_generation\":1," ++
+    "\"cols\":80,\"rows\":24,\"foreground_available\":false," ++
+    "\"foreground_pgid\":null,\"processes\":[]}}";
 
 test "C3-3b4 proof-loss subprocess는 metadata old owner callback 뒤 seal drift를 fail-stop한다" {
     try expectB4ProofLoss(.old_owner_callback);
@@ -10146,6 +10295,31 @@ test "C3-3b4 실제 Runtime event metadata_commit은 새 observation을 원자 �
     try std.testing.expect(result.metadata);
     try std.testing.expectEqual(@as(u64, 4), fixture.runtime.currentGeneration().observation.revision);
     try std.testing.expectEqualStrings("/base", fixture.runtime.currentGeneration().observation.cwd.items);
+}
+
+test "managed runtime completes async observation probe only after correlated metadata noop commits" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    _ = try fixture.publish(b4_metadata_base);
+    fixture.runtime.currentGeneration().observation_probe_active = 48879;
+    const result = try fixture.publish(b4_metadata_probe_noop);
+    try std.testing.expect(!result.metadata);
+    try std.testing.expectEqual(@as(u64, 0), fixture.runtime.currentGeneration().observation_probe_active);
+    try std.testing.expectEqual(@as(u64, 48879), fixture.runtime.currentGeneration().observation_probe_completed);
+}
+
+test "managed runtime retires a late abandoned observation without publishing completion" {
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    _ = try fixture.publish(b4_metadata_base);
+    fixture.runtime.currentGeneration().observation_probe_active = 48879;
+    try std.testing.expect(fixture.runtime.abandonObservationProbe(48879));
+    _ = try fixture.publish(b4_metadata_probe_noop);
+    try std.testing.expectEqual(@as(u64, 0), fixture.runtime.currentGeneration().observation_probe_active);
+    try std.testing.expectEqual(@as(u64, 0), fixture.runtime.currentGeneration().observation_probe_abandoned);
+    try std.testing.expectEqual(@as(u64, 0), fixture.runtime.currentGeneration().observation_probe_completed);
 }
 
 test "C3-3b4 실제 Runtime event revoked는 fence effect 뒤 의미 결과를 게시한다" {
@@ -12021,8 +12195,8 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3536,
-        .ReleaseFast => 3520,
+        .Debug => 3568,
+        .ReleaseFast => 3552,
         else => error.SkipZigTest,
     };
 }
@@ -15367,13 +15541,13 @@ test "C3-3b2b3 DTO role callback drift는 fresh artifact에서 fail-stop한다" 
 }
 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
-    try testing.expectEqual(@as(usize, 2720), @sizeOf(pending_event_owner_mod.PendingEventOwner));
+    try testing.expectEqual(@as(usize, 2736), @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
-            .Debug => 11360,
-            .ReleaseFast => 11296,
+            .Debug => 11440,
+            .ReleaseFast => 11376,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -15388,8 +15562,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8640,
-            .ReleaseFast => 8576,
+            .Debug => 8704,
+            .ReleaseFast => 8640,
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -15406,7 +15580,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
         @sizeOf(RemoteRuntime) - @sizeOf(pending_event_owner_mod.PendingEventOwner),
     );
     try testing.expectEqual(
-        @as(usize, 11_141_120),
+        @as(usize, 11_206_656),
         @sizeOf(pending_event_owner_mod.PendingEventOwner) * 4096,
     );
     const generation_transport_mod = @import("generation_transport.zig");
@@ -16161,6 +16335,125 @@ test "remote runtime retains direct key behind async scroll barrier under socket
     try testing.expectEqualSlices(u8, b_frame, received[offset..][0..b_frame.len]);
     try testing.expectEqual(@as(usize, 0), rr.direct_input.items.len);
     try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+}
+
+test "managed observation probe stays nonblocking on an actual stalled socket and retires its late event" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .async_observation_probe_v1 = true,
+        .metadata_support = .supported,
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    const managed_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+
+    var rr: RemoteRuntime = undefined;
+    try testing_api.initializeGenerationForConnection(&rr, .{ .generation = &adapter });
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner();
+    rr.allocator = allocator;
+    rr.io = testing.io;
+    rr.runtime_id_hex = "00000000000000000000000000000001".*;
+    rr.direct_input = .empty;
+    rr.input_batches = .{};
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.input_batches.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    defer rr.currentGeneration().observation.deinit(allocator);
+
+    try testing.expectEqual(
+        generation_attachment_mod.DeinitOutcome.cleaned,
+        rr.currentGeneration().attachment.generation.tryDeinit(&adapter),
+    );
+    rr.currentGeneration().attachment.generation = .{};
+    try generation_attachment_mod.testing_api.initAttached(
+        &rr.currentGeneration().attachment.generation,
+        &adapter,
+        allocator,
+        1,
+        94,
+    );
+    defer rr.currentGeneration().attachment.generation.deinit(&adapter);
+    const connection_generation = adapter.connectionGeneration();
+
+    const filler_len = try fillRemoteTestSendBuffer(fds[0]);
+    try testing.expect(filler_len > 0);
+    try testing.expectEqual(@as(usize, 1), try managed_client.sendInputNonBlocking(94, "X"));
+
+    const nonce: u64 = 0xBEEF;
+    try testing.expectEqual(RemoteRuntime.ObservationProbeAdmission.accepted, try rr.requestObservationProbe(nonce));
+    try testing.expectEqual(RemoteRuntime.ObservationProbePoll.pending, rr.pollObservationProbe(nonce));
+    try testing.expectEqual(connection_generation, adapter.connectionGeneration());
+    try testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
+    try testing.expect(rr.abandonObservationProbe(nonce));
+    try testing.expectEqual(RemoteRuntime.ObservationProbePoll.stale, rr.pollObservationProbe(nonce));
+
+    const filler = try allocator.alloc(u8, filler_len);
+    defer allocator.free(filler);
+    try readRemoteTestExact(fds[1], filler);
+    while (!(try managed_client.pumpPendingOutput())) {}
+    while (!(try rr.pumpQueuedInput())) {}
+    while (!(try managed_client.pumpPendingOutput())) {}
+
+    const input_frame = try framing.encodeFrame(allocator, .{ .kind = .input_bytes, .stream_id = 94 }, "X");
+    defer allocator.free(input_frame);
+    var nonce_wire: [8]u8 = undefined;
+    std.mem.writeInt(u64, &nonce_wire, nonce, .big);
+    const probe_frame = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .observation_probe, .stream_id = 94, .flags = protocol.Flags.optional },
+        &nonce_wire,
+    );
+    defer allocator.free(probe_frame);
+    const received = try allocator.alloc(u8, input_frame.len + probe_frame.len);
+    defer allocator.free(received);
+    try readRemoteTestExact(fds[1], received);
+    try testing.expectEqualSlices(u8, input_frame, received[0..input_frame.len]);
+    try testing.expectEqualSlices(u8, probe_frame, received[input_frame.len..]);
+
+    const event_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .event, .stream_id = 94 },
+        b4_metadata_probe_noop,
+    );
+    defer allocator.free(event_wire);
+    try socket_server.writeAll(fds[1], event_wire);
+    _ = try rr.pumpDelta();
+    try testing.expectEqual(@as(u64, 0), rr.currentGeneration().observation_probe_active);
+    try testing.expectEqual(@as(u64, 0), rr.currentGeneration().observation_probe_abandoned);
+    try testing.expectEqual(@as(u64, 0), rr.currentGeneration().observation_probe_completed);
+    try testing.expectEqual(connection_generation, adapter.connectionGeneration());
+    try testing.expect(!host_adapter_mod.HostAdapter.testing.rawClient(&adapter).unusable);
+
+    // If the first pump rejects a pre-existing queue transcript after admission, the caller has
+    // never received `.accepted`. The runtime must nevertheless retain a tombstone because the
+    // just-admitted frame may already have crossed an ownership boundary.
+    try rr.pending_controls.append(
+        allocator,
+        runtime_pending_control.RawQueuedRuntimeControl.scrollToBottom(0).?,
+    );
+    const failed_nonce: u64 = 0xCAFE;
+    try testing.expectError(error.ProtocolError, rr.requestObservationProbe(failed_nonce));
+    try testing.expectEqual(@as(u64, 0), rr.currentGeneration().observation_probe_active);
+    try testing.expectEqual(failed_nonce, rr.currentGeneration().observation_probe_abandoned);
 }
 
 test "CR2d1 remote input owner는 paste IME OSC52 batch를 epoch sequence golden queue로 소유한다" {
@@ -18615,8 +18908,8 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3488,
-        .ReleaseFast => 3472,
+        .Debug => 3520,
+        .ReleaseFast => 3504,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
@@ -18624,8 +18917,8 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
         .macos => switch (builtin.mode) {
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
-            .Debug => 11360,
-            .ReleaseFast => 11296,
+            .Debug => 11440,
+            .ReleaseFast => 11376,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -18649,6 +18942,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
         "resize_baseline_present",
         "pump_ended",
         "resync_needed",
+        "observation_probe_active",
+        "observation_probe_abandoned",
+        "observation_probe_completed",
         "frame_summary_ready",
         "frame_summary",
         "observation",

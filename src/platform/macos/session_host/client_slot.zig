@@ -4985,6 +4985,7 @@ pub fn projectGenerationCapabilities(
         .controller_transfer = node.client.attachment_capabilities.negotiated_controller_transfer,
         .screen_viewport_scrolled = node.client.screen_viewport_scrolled_v1,
         .async_scroll_to_bottom = node.client.async_scroll_to_bottom_v1,
+        .async_observation_probe = node.client.async_observation_probe_v1,
         .notification_stream_auth = node.client.notification_stream_auth_v1,
         .notification_delivery = node.client.notification_delivery_v1,
         .runtime_clipboard = node.client.runtime_clipboard_v1,
@@ -5219,6 +5220,7 @@ pub fn sendGenerationControl(
             ) catch |err|
                 return mapGenerationControlClientError(err);
         },
+        .observation_probe => return error.Unsupported,
     }
 }
 
@@ -5287,6 +5289,23 @@ pub fn sendGenerationControlNonBlocking(
                 encoded,
             ) catch |err|
                 return mapGenerationControlClientError(err);
+        },
+        .observation_probe => |nonce| blk: {
+            if (!node.client.async_observation_probe_v1) return error.Unsupported;
+            var transaction: FinalAdmissionTransaction = .{};
+            const decision = try finalAdmissionTransactionWithOperationPermitAndRegistry(
+                &admission.operation,
+                permit,
+                &transaction,
+                &.{},
+            );
+            if (decision == .blocked) break :blk false;
+            defer transaction.finish() catch @panic("generation observation probe admission settlement failed");
+            break :blk node.client.sendObservationProbeNonBlockingUnderRegisteredOperationExecutionLease(
+                transaction.execution_handle.?,
+                request.bound_stream_id,
+                nonce,
+            ) catch |err| return mapGenerationControlClientError(err);
         },
     };
 }

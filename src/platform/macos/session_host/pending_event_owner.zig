@@ -89,6 +89,7 @@ pub const RawPreparedEventStorage = struct {
     cols: u16 = 0,
     rows: u16 = 0,
     semantic_generation: u64 = 0,
+    observation_probe_nonce: u64 = 0,
     next_observation: RuntimeObservation = .{},
 };
 
@@ -154,6 +155,7 @@ pub const PreparedEvent = union(prepared_types.PreparedEventTag) {
 pub const BorrowedPrepared = struct {
     event: PreparedEvent,
     effect: prepared_types.EffectRequest,
+    observation_probe_nonce: u64,
 };
 
 pub const SemanticCommitPhase = enum(u8) {
@@ -173,6 +175,7 @@ pub const SemanticCommitDecision = struct {
     rows: u16 = 0,
     resize_generation: u64 = 0,
     revoke_fence: u64 = 0,
+    observation_probe_nonce: u64 = 0,
     failure_raw: u8 = 0,
     reserved_tail: [7]u8 = [_]u8{0} ** 7,
 };
@@ -603,6 +606,7 @@ pub const PendingEventOwner = struct {
                 .revoked => |fence| fence,
                 else => 0,
             },
+            .observation_probe_nonce = borrowed.observation_probe_nonce,
             .failure_raw = switch (borrowed.event) {
                 .failure => |failure| @intFromEnum(failure),
                 else => 0,
@@ -818,7 +822,7 @@ pub const PendingEventOwner = struct {
                 } };
             },
             .metadata_noop => blk: {
-                try self.expectInactiveScalars();
+                try self.expectInactiveScalarsAllowProbe();
                 break :blk .metadata_noop;
             },
             .metadata_commit => blk: {
@@ -859,7 +863,14 @@ pub const PendingEventOwner = struct {
             .revoke_fence => .{ .revoke_fence = self.prepared.semantic_generation },
         };
         if (!effectMatchesEvent(event, effect)) return error.InvalidOwner;
-        return .{ .event = event, .effect = effect };
+        if (self.prepared.observation_probe_nonce != 0 and
+            tag != .metadata_noop and tag != .metadata_commit)
+            return error.InvalidOwner;
+        return .{
+            .event = event,
+            .effect = effect,
+            .observation_probe_nonce = self.prepared.observation_probe_nonce,
+        };
     }
 
     fn publish(
@@ -895,6 +906,7 @@ pub const PendingEventOwner = struct {
         var raw: RawPreparedEventStorage = .{};
         raw.prepared_tag_raw = @intFromEnum(std.meta.activeTag(value.projection));
         raw.effect_tag_raw = @intFromEnum(std.meta.activeTag(value.effect));
+        raw.observation_probe_nonce = value.observation_probe_nonce;
         switch (value.projection) {
             .resize_commit => |resize| {
                 raw.cols = resize.size.cols;
@@ -1037,6 +1049,13 @@ pub const PendingEventOwner = struct {
             return error.InvalidOwner;
     }
 
+    fn expectInactiveScalarsAllowProbe(self: *const PendingEventOwner) OwnerError!void {
+        if (self.prepared.failure_raw != 0 or self.prepared.cols != 0 or
+            self.prepared.rows != 0 or self.prepared.semantic_generation != 0 or
+            !observationIsCanonicalEmpty(&self.prepared.next_observation))
+            return error.InvalidOwner;
+    }
+
     fn prepareSourcePublication(
         self: *const PendingEventOwner,
         attempt: u64,
@@ -1081,6 +1100,7 @@ fn semanticCommitSeal(value: PreparedSemanticCommit) process_seal.ReadyError!cle
         .prepared_tag_raw = value.decision.prepared_tag_raw,
         .publish_raw = value.decision.publish_raw,
         .resize_generation = value.decision.resize_generation,
+        .observation_probe_nonce = value.decision.observation_probe_nonce,
         .phase_raw = value.phase_raw,
         .observation_moved_raw = value.observation_moved_raw,
         .semantic_post_digest = value.semantic_post_digest,
@@ -1254,7 +1274,8 @@ fn rawStoragePristine(raw: *const RawPreparedEventStorage) bool {
     return raw.prepared_tag_raw == 0 and raw.effect_tag_raw == 0 and
         raw.failure_raw == 0 and raw.connection_reason_raw == 0 and
         allZero(&raw.reserved) and raw.cols == 0 and raw.rows == 0 and
-        raw.semantic_generation == 0 and observationIsCanonicalEmpty(&raw.next_observation);
+        raw.semantic_generation == 0 and raw.observation_probe_nonce == 0 and
+        observationIsCanonicalEmpty(&raw.next_observation);
 }
 
 fn sourceLeasePristine(lease: *const PendingEventSourceLease) bool {
@@ -1450,6 +1471,10 @@ fn effectMatchesEvent(event: PreparedEvent, effect: prepared_types.EffectRequest
 }
 
 fn decisionEffectValid(value: prepared_types.PreparedDecision) bool {
+    if (value.observation_probe_nonce != 0) switch (value.projection) {
+        .metadata_noop, .metadata_commit => {},
+        else => return false,
+    };
     return switch (value.projection) {
         .revoked => |fence| switch (value.effect) {
             .revoke_fence => |effect_fence| effect_fence == fence,
@@ -1777,6 +1802,7 @@ const SettlementFixture = struct {
         self.owner.prepared = .{};
         self.owner.prepared.prepared_tag_raw = @intFromEnum(std.meta.activeTag(decision.projection));
         self.owner.prepared.effect_tag_raw = @intFromEnum(std.meta.activeTag(decision.effect));
+        self.owner.prepared.observation_probe_nonce = decision.observation_probe_nonce;
         switch (decision.projection) {
             .resize_commit => |resize| {
                 self.owner.prepared.cols = resize.size.cols;
@@ -1930,6 +1956,7 @@ fn expectSemanticCommit(
     const commit = try fixture.owner.beginSemanticCommit(&permit);
     try std.testing.expectEqual(@intFromEnum(std.meta.activeTag(decision.projection)), commit.prepared_tag_raw);
     try std.testing.expectEqual(@intFromBool(disposition == .publish_prepared), commit.publish_raw);
+    try std.testing.expectEqual(decision.observation_probe_nonce, commit.observation_probe_nonce);
     var moved: RuntimeObservation = .{};
     if (std.meta.activeTag(decision.projection) == .metadata_commit)
         fixture.owner.moveCommittedObservationNoFail(&permit, &moved);
@@ -1984,6 +2011,17 @@ test "C3-3b4 Pending semantic commit은 metadata_noop을 exact once 소비한다
         .semantic_equal = true,
         .content_equal = true,
     } }), .publish_prepared);
+}
+
+test "Pending semantic commit seals async observation probe correlation through metadata noop" {
+    var decision = prepared_types.decide(.{ .metadata = .{
+        .current_revision = 2,
+        .incoming_revision = 2,
+        .semantic_equal = true,
+        .content_equal = true,
+    } });
+    decision.observation_probe_nonce = 48879;
+    try expectSemanticCommit(46, decision, .publish_prepared);
 }
 
 test "C3-3b4 Pending semantic commit은 metadata_commit 소유권을 exact once 이전한다" {

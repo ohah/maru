@@ -4619,6 +4619,13 @@ fn drawSessionRow(win: SetRect, tk: *const tokens.Tokens, row: *const SessionRow
 /// **읽기 전용이다**(§8 — `--stream` 은 observer). 키보드를 안 올리고 입력도 안 받는다: 뜨는데
 /// 안 들어가면 사용자가 쳐 놓고 잃는다.
 fn drawRemoteScreen(win: SetRect, tk: *const tokens.Tokens) void {
+    // **먼저 창을 덮는다.** 밀린 화면은 터미널 **위에** 서고(위 `switch (screenTop())` 주석),
+    // 터미널 chrome 은 그 아래에 이미 그려져 있다 — 목록·설정처럼 창 전체를 칠하지 않으면
+    // 그 아래가 그대로 비친다. 실기에서 그것이 두 가지로 보였다(실측, 시뮬레이터 캡처):
+    // 원격 화면의 글자가 **폰 자기 터미널 글자와 겹쳐** 찍혔고(빈칸은 안 그리므로 그 자리에
+    // 아래 글자가 남는다), 읽기 전용인데 **보조 키바가 그대로 떠** 있었다. 둘 다 원인이 하나다.
+    push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(win.h) }, tk.get(.surface_bg), 0xFF, 0, 0);
+
     // 상단 바 — 어디서 왔는지와 무엇을 보는지.
     push(.{ .x = @intFromFloat(win.x), .y = @intFromFloat(win.y), .w = @intFromFloat(win.w), .h = @intFromFloat(set_head_h) }, tk.get(.surface_bg), 0xFF, 0, 0);
     pushText(maru.i18n.tIn(.ko, .mob_remote_screen_title), @intFromFloat(win.x + set_head_h), @intFromFloat(win.y + (set_head_h - 20) / 2), 20, tk.get(.surface_fg));

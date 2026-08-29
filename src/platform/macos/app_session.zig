@@ -17817,6 +17817,10 @@ pub const AppSession = struct {
                         }
                     }
                 }
+                // IG3-c2 이미지 갤러리 타일: 배경 이미지와 **같은 패턴**으로 프레임 이미지 채널에 얹는다
+                // (예약 id·live 집합·generation 1회 업로드). 렌더러를 고치지 않고 kitty graphics 의
+                // 텍스처 캐시·image quad 인프라를 그대로 재사용한다. 갤러리 뷰가 아니면 즉시 돌아온다.
+                image_gallery_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
@@ -71952,4 +71956,119 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
     // 범위 밖은 null — 지어내지 않는다.
     try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 1) == null);
     try std.testing.expect(image_gallery_ops.decodeThumbnail(session, 999) == null);
+}
+
+
+test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG3-c2)" {
+    // **디코드까지 본 test 와 다른 것을 본다.** 픽셀이 나오는 것과 «그 픽셀이 화면 채널에 실리는 것» 은
+    // 다른 사실이고, 후자가 빠지면 사용자에게는 여전히 아무것도 안 보인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000); // 격자가 들어갈 만한 창
+
+    // `dockVisible` 은 넷을 다 본다 — `dock_initialized` 를 빼면 `appendGpuImages` 가 조용히 물러나고
+    // 이 test 는 «아무것도 안 실렸다» 를 정상으로 읽는다(실제로 그렇게 한 번 걸렸다).
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+    try std.testing.expect(dock_ops.dockVisible(session));
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 격자에 자리가 있어야 한다 — 없으면 이 test 는 아무것도 검증하지 않는다(그 사실을 먼저 못박는다).
+    const area = image_gallery_ops.gridArea(session);
+    const l = maru.session.image_grid.layout(area, image_gallery_ops.gridMetrics(session), 1);
+    try std.testing.expect(l.visible == 1);
+
+    var images: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels: []u8 = &.{};
+    var live: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images);
+        allocator.free(uploads);
+        allocator.free(pixels);
+        live.deinit(allocator);
+    }
+    // ── ① **제품 경로가 이미 했다.** ─────────────────────────────────────────────────────
+    // `tick()` 이 프레임을 조립하며 `appendGpuImages` 를 부르므로, 위 spin 을 도는 동안 타일이 이미
+    // 풀려 GPU 로 갔다. 그것을 먼저 못박는다 — 이 test 가 「수동 호출만 된다」를 보는 것이 아니다.
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
+    try std.testing.expect(session.image_gallery.tiles.items[0].uploaded);
+
+    // ── ② 무엇이 실리는지 값으로 본다 ────────────────────────────────────────────────────
+    // 타일을 버리고 다시 시키면 「처음 그리는 프레임」과 같은 상태가 된다.
+    session.image_gallery.dropTiles(allocator);
+    image_gallery_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+
+    try std.testing.expectEqual(@as(usize, 1), images.len);
+    try std.testing.expectEqual(@as(usize, 1), uploads.len);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 4), pixels.len); // 2×2 RGBA
+    try std.testing.expectEqual(@as(usize, 1), live.items.len);
+
+    // id 가 예약 범위이고 live 집합에 들어 있다 — 안 그러면 eviction 이 텍스처를 거둬 간다.
+    try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images[0].image_id);
+    try std.testing.expectEqual(images[0].image_id, live.items[0]);
+    try std.testing.expectEqual(images[0].image_id, uploads[0].image_id);
+    try std.testing.expectEqual(@as(u32, 4), uploads[0].bpp);
+
+    // **도크 안에 그린다.** 좌표가 어긋나면 창 밖이나 터미널 위에 그림이 뜬다.
+    try std.testing.expect(images[0].dest_x >= @as(f32, @floatFromInt(area.x)));
+    try std.testing.expect(images[0].dest_y >= @as(f32, @floatFromInt(area.y)));
+    try std.testing.expect(images[0].dest_x + images[0].dest_w <= @as(f32, @floatFromInt(area.x + area.w)));
+    try std.testing.expect(images[0].dest_w > 0 and images[0].dest_h > 0);
+
+    // **두 번째 프레임은 다시 올리지 않는다.** 매 프레임 올리면 15 MB 를 초당 60번 복사한다.
+    var images2: []maru.renderer.metal_frame.GpuImage = &.{};
+    var uploads2: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+    var pixels2: []u8 = &.{};
+    var live2: std.ArrayList(u32) = .empty;
+    defer {
+        allocator.free(images2);
+        allocator.free(uploads2);
+        allocator.free(pixels2);
+        live2.deinit(allocator);
+    }
+    image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    try std.testing.expectEqual(@as(usize, 1), images2.len); // 그리기는 계속한다
+    try std.testing.expectEqual(@as(usize, 0), uploads2.len); // 업로드는 한 번뿐이다
+    try std.testing.expectEqual(@as(usize, 0), pixels2.len);
 }

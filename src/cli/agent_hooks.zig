@@ -104,6 +104,31 @@ pub fn remoteShellCommand(
 /// 「연결이 끊겼다」와 구분되지 않기 때문이다(스트리머가 종료 코드를 못 믿는 것과 같은 이유).
 pub const no_maru_marker = "!maru-not-installed";
 
+/// 훅 파일 락을 기다리는 시간.
+///
+/// ⚠️ **경합을 실패로 보고하면 안 된다.** 임계구역은 작은 파일 하나를 다시 쓰는 일(수 ms)인데, 경합
+/// 하나로 나가면 호출자는 그것을 «설치 못 했다» 로 읽고 **그 목적지의 축을 영영 안 연다**(다시 안
+/// 두드리는 것이 폭주 방지 규칙이라 더 그렇다). 실측: 동시 여섯 중 다섯이 그렇게 나갔다.
+///
+/// ⚠️ **그렇다고 무한히 기다리면 안 된다.** 락을 쥔 쪽이 멎으면 이 프로세스도 함께 멎고, 그것은
+/// 「멎은 tmux 가 채널을 죽였다」와 같은 실패다. 그래서 상한을 둔다 — 넘기면 그때는 진짜 실패다.
+pub const lock_wait_ms: u64 = 2_000;
+
+/// 원격 설치 한 번에 줄 수 있는 시간.
+///
+/// ⚠️ **시한이 없으면 축이 영영 안 열리고 자식이 남는다.** 결과 판정은 «자식이 stdout 을 닫았는가»
+/// (EOF)로 하는데, 원격이 안 닫으면 그 조건이 영영 안 온다 — 적대적 원격이 아니어도 `ForceCommand`
+/// 서버나 멎은 링크면 그렇다. 그러면 그 목적지는 «설치 중» 에 머물러 채널이 안 열리고, `ssh` 자식은
+/// 세션이 끝날 때까지 살아 있다.
+///
+/// 이미 선 ControlMaster 위의 exec 하나 + 작은 JSON 편집이라 정상이면 1 초 안쪽이다. 15 초는 느린
+/// 링크까지 넉넉히 덮고, 그것을 넘겼다면 **포기하는 쪽이 옳다**.
+pub const install_deadline_ms: u64 = 15_000;
+
+/// 설치 출력으로 받아 줄 최대 바이트. 넘으면 «우리 줄이 아니다» 로 접는다 — MOTD 가 이만큼 긴 서버는
+/// 없고, 있다면 그것은 우리가 아는 서버가 아니다.
+pub const install_output_max: usize = 64 * 1024;
+
 /// 원격이 돌려준 한 줄을 읽는다. **`changed` 까지 본다** — 로컬이 «설치가 끝났다» 를 그것으로 판정한다.
 pub const Outcome = union(enum) {
     ok: struct { changed: bool },
@@ -201,4 +226,17 @@ test "parseOutcome: 잡음 뒤에 온 우리 줄을 찾고, 없으면 모른다�
     const same = parseOutcome("{\"maru-agent-hooks\":1,\"provider\":\"claude\",\"action\":\"install\",\"changed\":false}\n");
     try testing.expect(same == .ok);
     try testing.expect(!same.ok.changed);
+}
+
+test "락 대기 상한은 임계구역보다 훨씬 크고, 무한하지 않다" {
+    // 임계구역은 작은 파일 재작성 하나다 — 밀리초 단위. 2 초는 그 수백 배다.
+    try testing.expect(lock_wait_ms >= 1_000);
+    // 그리고 유한하다 — 락을 쥔 쪽이 멎어도 이 프로세스는 빠져나온다.
+    try testing.expect(lock_wait_ms <= 10_000);
+}
+
+test "설치 시한은 유한하고, 락 대기보다 넉넉하다" {
+    // 락 대기는 설치 안에서 일어난다 — 시한이 그보다 짧으면 정상 경합에서도 못 끝낸다.
+    try testing.expect(install_deadline_ms > lock_wait_ms);
+    try testing.expect(install_deadline_ms <= 60_000); // 유한하다
 }

@@ -95,11 +95,16 @@ const inventory = [_]Entry{
     .{ .path = "src/config/schema.zig", .count = 28 },
     .{ .path = "src/platform/macos/agent_session_archive_backend.zig", .count = 3 },
     .{ .path = "src/platform/macos/app_pty_metal_smoke.zig", .count = 1 },
-    // 22 = 16 + 원격(ssh) 축의 **진단 로그 여섯**(§7 의 «표시가 아니면 원장을 올린다»).
+    // 26 = 16 + 원격(ssh) 축의 **진단 로그 열**(§7 의 «표시가 아니면 원장을 올린다»).
     // 전부 `std.log.scoped(.agent)` 이고 사용자 화면에 안 나온다 — 채널이 잡음으로 막혔을 때, 자식이
     // 끝나 관측 모드로 내려갈 때, 원격 훅을 심었을 때·이미 있을 때, 원격에 maru 가 없을 때, 설치 결과를
-    // 못 읽었을 때 **원인을 남기는 줄**이다. 계약 §1.2 가 조용한 폴백을 금지하므로 그 줄들은 있어야 한다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 22 },
+    // 못 읽었을 때, 설치가 시한 안에 안 끝났을 때, `HOME` 이 없을 때, control socket 경로를 못 만들 때,
+    // 스트리머를 못 띄웠을 때 **원인을 남기는 줄**이다.
+    //
+    // ⚠️ **이 줄들을 «없어도 되는 것» 으로 읽으면 안 된다.** 계약 §1.2 가 조용한 폴백을 금지하고,
+    // 적대적 검증이 실제로 «사유 없이 끝나는 막다른 길» 셋을 그 규칙으로 잡아냈다 — 늘어난 넷 중
+    // 셋이 그것이다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 26 },
     .{ .path = "src/platform/macos/app_session/debug_fixtures.zig", .count = 3 },
     // **표시 문자열이 아니라 판정자의 진단 출력이다**(§7 "표시가 아니면 그 사실을 적고 원장을
     // 올린다"). DSEL3가 그려진 글자와 클릭이 답한 byte를 대조하다 어긋나면 그 자리를 사람이 읽을
@@ -224,7 +229,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 203;
+const header_total = 207;
 const header_config_total = 54;
 
 comptime {

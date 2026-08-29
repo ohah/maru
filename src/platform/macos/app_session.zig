@@ -13701,6 +13701,8 @@ pub const AppSession = struct {
         install_out: std.ArrayListUnmanaged(u8) = .empty,
         /// 설치가 끝났나(성공·실패 모두 포함 — 끝났다는 뜻이다).
         install_done: bool = false,
+        /// 설치를 띄운 시각. **EOF 만으로는 끝을 못 정한다** — 원격이 stdout 을 안 닫는 경우가 있다.
+        install_started_ms: u64 = 0,
         /// 스트리머를 실제로 띄웠나. **pid 로 판정하지 않는다** — `pid` 는 신호 대상이라 «가짜 자식» 을
         /// 만드는 테스트가 0 을 쓰고(그래야 `kill` 이 프로세스 그룹을 안 친다), 그러면 두 뜻이 겹친다.
         stream_started: bool = false,
@@ -13868,11 +13870,19 @@ pub const AppSession = struct {
     }
 
     /// 설치 자식의 stdout 을 논블로킹으로 훑는다. EOF 면 결과를 판정하고, 성공이면 **그때 스트리머를 띄운다**.
-    fn pumpRemoteHookInstall(self: *AppSession, dest: []const u8, host: *RemoteAgentHost) void {
+    fn pumpRemoteHookInstall(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
+        const ah = maru.cli.agent_hooks;
         const st = host.install orelse return;
+        if (host.install_started_ms == 0) host.install_started_ms = now_ms;
+
         var buf: [4096]u8 = undefined;
         var eof = false;
-        while (host.install_out.items.len < 64 * 1024) {
+        var overflow = false;
+        while (true) {
+            if (host.install_out.items.len >= ah.install_output_max) {
+                overflow = true;
+                break;
+            }
             const n = std.c.read(st.out_fd, &buf, buf.len);
             if (n > 0) {
                 host.install_out.appendSlice(self.allocator, buf[0..@intCast(n)]) catch break;
@@ -13881,12 +13891,26 @@ pub const AppSession = struct {
             if (n == 0) eof = true;
             break;
         }
-        if (!eof) return;
+
+        // ⚠️ **EOF 만 기다리면 영영 안 끝난다.** 원격이 stdout 을 안 닫으면(적대적 원격이 아니어도
+        // `ForceCommand` 서버나 멎은 링크면 그렇다) 그 목적지는 «설치 중» 에 머물러 채널이 안 열리고
+        // `ssh` 자식은 세션 내내 살아 있다. 출력이 상한을 넘긴 경우도 같은 교착이었다.
+        const timed_out = now_ms -| host.install_started_ms >= ah.install_deadline_ms;
+        if (!eof and !overflow and !timed_out) return;
+        if (!eof) std.log.scoped(.agent).warn(
+            "원격 훅 설치가 끝나지 않았다 — 축을 안 연다 dest={s} overflow={} timeout={}",
+            .{ dest, overflow, timed_out },
+        );
 
         ssh_upload.stopAgentEvents(st);
         host.install = null;
         host.install_done = true;
 
+        if (!eof) {
+            host.stopped = true;
+            host.install_out.clearAndFree(self.allocator);
+            return;
+        }
         switch (maru.cli.agent_hooks.parseOutcome(host.install_out.items)) {
             .ok => |o| {
                 if (o.changed)
@@ -13910,8 +13934,21 @@ pub const AppSession = struct {
         host.install_out.clearAndFree(self.allocator);
 
         // 설치가 끝났다 — **이제** 스트리머를 띄운다.
-        const home = std.c.getenv("HOME") orelse return;
-        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch return;
+        //
+        // ⚠️ 여기서 실패하면 **사유를 남기고 축을 닫는다.** 그냥 `return` 하면 그 목적지는
+        // `install_done = true, stopped = false, stream_started = false` 인 **조용한 막다른 길**에
+        // 남는다 — 다시는 아무 일도 안 일어나는데 화면에도 로그에도 아무것도 없다(계약 §1.2 가
+        // 금지하는 그 모양이다. 적대적 검증 4 회차가 잡았다).
+        const home = std.c.getenv("HOME") orelse {
+            std.log.scoped(.agent).warn("HOME 이 없어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
+            host.stopped = true;
+            return;
+        };
+        const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch {
+            std.log.scoped(.agent).warn("control socket 경로를 못 만들어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
+            host.stopped = true;
+            return;
+        };
         defer self.allocator.free(ctl);
         const stream = ssh_upload.spawnAgentEvents(
             self.allocator,
@@ -13920,6 +13957,7 @@ pub const AppSession = struct {
             "maru",
             maru.session.agent_hook_command.remote_log_dir_rel,
         ) catch {
+            std.log.scoped(.agent).warn("원격 이벤트 스트리머를 못 띄웠다 dest={s}", .{dest});
             host.stopped = true;
             return;
         };
@@ -13935,7 +13973,7 @@ pub const AppSession = struct {
         if (host.stopped) return;
         // 설치가 아직이면 그것부터 훑는다 — 끝나면 그 안에서 스트리머가 뜬다.
         if (!host.install_done) {
-            self.pumpRemoteHookInstall(dest, host);
+            self.pumpRemoteHookInstall(dest, host, now_ms);
             return;
         }
         if (!host.stream_started) return; // 설치는 끝났는데 스트리머를 못 띄웠다
@@ -21554,6 +21592,60 @@ test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그
     // **다시 두드리지 않는다.** 다음 tick 이 와도 새 자식을 안 띄운다.
     session.drainRemoteAgentHost(dest, host, 300);
     try std.testing.expect(host.install == null);
+
+    session.closeRemoteAgentHost(dest);
+}
+
+test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 축이 영영 «설치 중» 이고 자식이 남는다" {
+    // **결과 판정을 EOF 에만 걸면 영영 안 끝난다.** 적대적 원격이 아니어도 `ForceCommand` 서버나 멎은
+    // 링크면 stdout 이 안 닫힌다. 그러면 그 목적지는 «설치 중» 에 머물러 채널이 안 열리고, `ssh` 자식은
+    // 세션이 끝날 때까지 살아 있다(적대적 검증 3 회차가 잡았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    const ah = maru.cli.agent_hooks;
+
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = undefined;
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dest = "mute-box";
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+
+    // 자식이 살아는 있는데(파이프가 안 닫힘) **아무것도 안 낸다.**
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]);
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .install = .{ .pid = 0, .out_fd = fds[0] } });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+
+    // 시한 안에서는 기다린다 — 느린 링크를 성급히 포기하지 않는다.
+    session.drainRemoteAgentHost(dest, host, 1);
+    try std.testing.expect(!host.install_done);
+    session.drainRemoteAgentHost(dest, host, ah.install_deadline_ms - 1);
+    try std.testing.expect(!host.install_done);
+
+    // 시한을 넘기면 **끝낸다**: 자식을 놓고, 축을 안 열고, 다시 안 두드린다.
+    session.drainRemoteAgentHost(dest, host, ah.install_deadline_ms + 1);
+    try std.testing.expect(host.install_done);
+    try std.testing.expect(host.install == null); // 자식을 거뒀다
+    try std.testing.expect(host.stopped); // 축을 안 연다
+    try std.testing.expect(!host.stream_started); // 스트리머를 안 띄운다
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
     session.closeRemoteAgentHost(dest);
 }

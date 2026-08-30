@@ -12264,6 +12264,11 @@ pub const AppSession = struct {
                 // **도크 안일 때만 소비한다.** 좌표를 안 보면 도크가 열려 있는 동안 창의 **모든** primary
                 // down이 여기서 끝나, 탭 바를 눌러도 탭이 안 바뀌고 터미널 선택도 시작되지 않는다
                 // (사용자 보고 2026-08-17 — 에이전트 뷰는 처음부터 `dg.dock`으로 감싸 있었다).
+                // **뷰별 분기보다 먼저** 키보드 소유권을 넘긴다 — Page/Home/End 가 목록을 겨누게 하는
+                // 신호다(ScrollArea 계약 §4.5). ⚠️ 아래 소스 컨트롤 분기는 `return` 하므로 이 줄을 그
+                // 뒤에 두면 **소스 컨트롤에서는 영영 실행되지 않는다** — 실제로 그렇게 넣었다가 제품에서
+                // 키가 하나도 안 먹는 것을 사용자가 잡았다(2026-08-30). 판정자는 아래 포인터 테스트다.
+                if (layout_math.pointInRect(x_px, y_px, dg.dock)) agent_dock.takeAgentSessionDockKeyFocus(self);
                 if (self.dock.view == .source_control and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // **published tree 하나가 히트테스트를 소유한다**(P1b). 예전에는 여기서 행 높이를
                     // 다시 곱해 좌표를 인덱스로 바꿨는데, 그 산술이 렌더와 갈리는 순간 누른 것과 열리는
@@ -12275,10 +12280,6 @@ pub const AppSession = struct {
                     _ = scm_dock_ops.scmDockPointer(self, .down, x_px, y_px);
                     return;
                 }
-                // 뷰와 **무관하게** 도크 안 primary down 은 키보드를 도크로 넘긴다 — Page/Home/End 가
-                // 탐색기·소스 컨트롤에서도 목록을 겨누게 하는 소유권 신호다(아래 archive intent 처리는
-                // 그대로 agent_sessions 뷰 전용이라 이 한 줄만 앞에 둔다).
-                if (layout_math.pointInRect(x_px, y_px, dg.dock)) agent_dock.takeAgentSessionDockKeyFocus(self);
                 if (self.dock.view == .agent_sessions and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // 도크를 눌렀다 = 키보드도 도크로. 아래 dispatch가 세우는 component-local focus는
                     // 같은 클릭이 일으키는 snapshot 무효화에 곧바로 지워지므로 소유권 신호가 못 된다.

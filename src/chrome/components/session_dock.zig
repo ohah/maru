@@ -7,3 +7,5 @@ pub const types = @import("session_dock/types.zig");
 pub const ids = @import("session_dock/ids.zig");
 pub const build = @import("session_dock/build.zig");
 pub const view = @import("session_dock/view.zig");
+/// 항목 높이 규칙과 스크롤 투영 — `build` 가 노드를 놓는 높이와 **같은 값**을 낸다.
+pub const scroll = @import("session_dock/scroll.zig");

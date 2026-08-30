@@ -7117,6 +7117,148 @@ agent_clip: judgeable=true cut=171 outside=0 over_px=232 agent_clip_ok=true
 - **SCM 은 넘치는 상태를 못 만들어 봤다** — 배선은 같이 했지만 판정은 에이전트만 잰다.
 - **좌우 clip 은 여전히 없다**(의도).
 
+### 2m.92 에이전트 목록이 굴러간다 — 그리고 굴리자마자 헤더를 뚫고 나왔다 (W8.22, 실측 2026-08-30)
+
+§2m.91 이 목록을 자르면서 **함께 드러낸 것**을 갚는다: 두 목록 표면에 스크롤이 **아예 없어**
+(`grep scroll` 0 건) 뷰포트보다 긴 목록의 뒷부분에 **닿을 방법이 없었다**. 예전에는 넘친 부분이
+상태바 밑으로 흘러 존재만 했고, 자르고 나니 그 사실이 드러났다.
+
+## 중립은 이미 다 갖고 있었다
+
+`chrome.ui.scroll_area` 가 잔여 픽셀(`wheel_residue_px`)·clamp·투영(`project`)·스크롤바 기하를
+전부 소유하고, `session_dock` 은 `scroll_offset_px`·`scroll_content_height_px`·
+`content_first_item_origin_y_px` 세 props 로 그것을 받는다. **Windows 는 셋 다 안 주고 있었다.**
+
+없던 것 하나는 **항목 높이 규칙**이다. `project` 는 높이가 균일하다고 가정하지 않고 comptime 함수로
+물어보는데(docs/scroll-area.md §3), 그 답 — 그룹 헤더·카드·**펼친 카드** — 을 macOS 는
+`app_session/agent_dock.zig` 의 `ArchiveScrollItems` 로 자기 타입 위에 적어 두고 있었다. 그 규칙은
+`types.Item` 과 `types.DockMetrics` 만 있으면 나오므로 **중립이 소유할 수 있다**:
+`components/session_dock/scroll.zig` 를 새로 세우고 단위 테스트 둘로 묶었다(`build.zig` 가 노드를
+놓는 높이와 **같은 값**을 내는지, 끝까지 굴리면 마지막 항목 바닥이 뷰포트 바닥에 오는지).
+
+## 가상화를 안 한다 — 대신 origin 을 민다
+
+macOS 는 보이는 항목만 넘기는 **가상화** 호스트다. Windows 는 그러지 않는다:
+
+- 목록을 **전부** 넘기고 `content_first_item_origin_y_px = -offset` 을 준다. 중립이 첫 항목을 그 자리에
+  놓으므로 결과는 같은 그림이다.
+- 그러면 발행된 rect 가 **이미 스크롤된 자리**라 **히트테스트가 offset 을 따로 빼지 않아도 된다** —
+  그리는 자리와 눌리는 자리의 주인이 하나로 남는다(§2m.31 이 이름 붙인 실패의 예방).
+- 길이와 offset 은 그래도 준다. 스크롤바가 *"얼마나 긴 목록의 어디"* 를 그 둘로만 안다.
+
+투영에 쓰는 뷰포트 높이는 **지난 프레임이 발행한** 스크롤 뷰포트다(`build.scrollTextViewport`).
+짓기 전에 필요한 값이 짓고 나야 나오기 때문이고, 그 지연은 clamp 가 매 프레임 서므로 화면에 안 남는다.
+
+## 굴리자마자 헤더를 뚫고 나왔다
+
+목록이 움직이기 시작하자 카드 글자와 배경이 **고정 헤더(제목·개수·탭·검색 줄) 위로 겹쳐** 보였다.
+§2m.85 가 사이드바에서 본 것과 같은 그림이다 — 글리프는 배경이 투명해 나중에 그려도 안 가린다.
+
+**중립은 이 자리도 이미 알려 주고 있었다:**
+
+- 글자: `draw.Op.Text.scroll_clipped`(스크롤 소속) / `above_scroll`(떠 있는 헤더, 자기 rect 로 자른다).
+  `system_text.Artifact.appendGpuGlyphs` 가 그 규칙을 **이미 구현**해 두고 `clip` 인자를 받는데,
+  Windows 는 거기에 **`null` 을 주고 있었다** — 즉 아무것도 안 자르고 있었다.
+- quad: `draw.Op.Quad.clip`(발행 tree 의 `effective_clip` 그대로). `appendChromeOps` 가 그 필드를
+  **안 읽고 있었다**.
+
+둘 다 한 자리씩 고쳤다. 이제 자르기는 **위에서** 끝나고, §2m.91 이 붙이는 자리에 둔 자르기는 **뒷문**
+으로 남는다 — 그 뒷문이 일하면(`cut > 0`) 위층이 샌 것이다.
+
+## 판정
+
+```text
+agent_scroll: judgeable=true max=267 off=190(want 190) moved=190 scrolls=2 end_off=267 last_bottom=517 view_bottom=517 agent_scroll_ok=true
+agent_clip:   judgeable=true overflow_max=267 cut=0 outside=0 over_px=0 agent_clip_ok=true
+```
+
+- **`moved` 가 핵심이다.** `offset` 만 보면 속 빈다 — 상태를 올려 두고 그리는 곳에서 안 쓰면 그대로
+  통과한다. 그래서 **발행된 첫 카드의 y 가 그만큼 올라갔는지**를 함께 본다.
+- **`last_bottom == view_bottom`** 이 *"닿을 수 있다"* 의 뜻이다. 끝까지 굴렸을 때 마지막 카드의
+  바닥이 뷰포트 바닥에 정확히 온다(넘겨 굴리면 빈 바닥이 보이고, 못 굴리면 마지막 카드에 못 닿는다).
+- `agent_clip` 의 무장 조건이 §2m.91 에서 **바뀌었다**: 예전에는 *"자를 것이 있었나"*(`over_px > 0`)
+  였는데 이제 위층이 막아 그 값이 0 이다. 지금 무장은 *"목록이 뷰포트보다 긴가"* 이고, 그 상태에서
+  `cut == 0` 과 `outside == 0` 을 **함께** 요구한다 — 두 층을 다 재는 자리가 됐다.
+
+| 뮤턴트 | 무엇이 빨개지나 |
+|---|---|
+| 그린 자리에 offset 을 안 쓴다(`origin = 0`) | `moved=0`, `last_bottom=784 > view_bottom=517` |
+| 목록 뷰포트를 도크 높이로 잰다 | `max=37`(267 이어야 한다) → **마지막 카드에 못 닿는다** |
+| 글자 clip 을 `null` 로 되돌린다(**옛 동작**) | `agent_clip`: `cut=171 over_px=232` |
+
+## 아직 아닌 것
+
+- **SCM 뷰는 안 했다.** 같은 세 props 가 있지만 항목 모델이 다르고(섹션·파일 행·커밋 행), §2m.91 의
+  실측에서 **그쪽은 넘치지 않았다**(`bottom=0`). 계획서 W8.22 에 남긴다.
+- **스크롤바를 손으로 끌 수 없다.** 중립이 track/thumb 과 드래그 payload 를 발행하지만 Windows 는
+  그 액션을 아직 안 받는다 — 지금은 휠뿐이다.
+- **가상화도 안 한다**(위). 목록이 아주 길면 안 보이는 카드까지 매 프레임 조립한다.
+- **키보드**(Page/Home/End)도 아직이다.
+- **카드 펼침 상세가 안 그려진다** — Windows 는 `Item.card.expanded` 를 아무 데서도 안 채운다
+  (적대적 검증 1회차에 걸렸다, §2m.93). 이 슬라이스 밖의 빈자리다.
+
+### 2m.93 스크롤 적대적 검증 5회 — 결함 하나와 **속 빈 판정 셋** (실측 2026-08-30)
+
+§2m.92 가 초록으로 끝난 뒤 다섯 번 두들겼다. **가장 큰 셋은 결함이 아니라 판정이 아무것도 안 재고
+있던 것**이었다.
+
+## 1회차 — 높이 규칙이 `build.zig` 와 **다른 조건**을 보고 있었다
+
+새로 세운 `session_dock/scroll.zig` 가 펼친 카드를 이렇게 갈랐다:
+
+```zig
+.card => |c| if (self.expanded_identity != null and c.identity == self.expanded_identity.? and c.expanded != null)
+```
+
+그런데 `build.zig` 는 **`card.expanded` 하나로** 갈래를 탄다(`if (card.expanded) |expanded|`).
+`Props.expanded_identity` 는 host 가 detail 캡처를 붙이는 **신원**이지 높이를 정하는 값이 아니다.
+둘이 어긋나는 순간 **투영이 재는 길이와 실제로 그려지는 길이가 갈린다** — 끝까지 굴려도 마지막
+카드에 못 닿거나 빈 바닥이 보인다. 조건을 하나로 줄이고 단위 테스트도 그 사실을 재게 고쳤다.
+
+> **함께 보고한다**: Windows 는 `Item.card.expanded` 를 **아무 데서도 안 채운다**(`state.expanded_identity`
+> 만 토글한다). 즉 카드를 펼쳐도 상세가 안 그려진다 — 이 슬라이스 밖의 빈자리다.
+
+## 2회차 — 판정이 **"마지막 항목"** 을 안 보고 있었다
+
+`last` 를 *"rect 가 있는 마지막 index"* 로 찾고 있었다. 꼬리 노드가 빠지면 그 값이 **중간 카드**가 되고,
+중간 카드의 바닥은 당연히 뷰포트 안이라 **초록**이 된다. 이제 마지막 index 를 직접 묻고 없으면
+판정을 접는다(`last_index_ok`).
+
+## 3회차 — 뷰를 바꿔도 **휠 잔여가 남았다**
+
+`scroll_area` 가 규약을 적어 뒀다: *"포인터가 이 스크롤 영역을 떠났거나 다른 입구가 위치를 확정했을
+때 부른다"*(`dropWheelResidue`). 뷰 스위처로 갈아 끼울 때 그것을 안 불러, 돌아왔을 때 **첫 눈금이
+남은 조각만큼 더/덜** 움직였다. §2m.84 가 표면 사이 누적기에서 겪은 그 실패의 **뷰 판**이다.
+
+## 4회차 — quad clip 을 읽기 시작한 것이 **다른 표면을 깨뜨리는가**
+
+`appendChromeOps` 는 편집기·SCM 이 함께 쓴다(그 함수 doc 이 그렇게 적어 뒀다). SCM 뷰를 띄워 찍었다 —
+변경 목록·배지 pill·탭·브랜치 줄 전부 그대로다. 스모크의 편집기·SCM 판정도 초록이다.
+
+## 5회차 — **"다른 표면을 안 건드렸다" 가 공짜로 참이었다**
+
+3회차에서 세운 `tree_untouched`(에이전트를 굴리는 동안 탐색기 offset 이 그대로인가)가 **뮤턴트를
+못 잡았다**. 갈래를 안 가르는 뮤턴트를 넣어도 초록이었다:
+
+```text
+tree_off=641->641   ← 트리가 이미 상한(641)이라 아래로는 더 못 간다
+```
+
+**아래로만 재고 있었다.** 위로 한 눈금을 더 굴리는 단계를 넣자 그 뮤턴트가 드러났다:
+
+```text
+정상:   up_off=77(want 77) tree_off=641->641  agent_scroll_ok=true
+뮤턴트: up_off=77(want 77) tree_off=641->451  agent_scroll_ok=false
+```
+
+그 눈금은 **위쪽 스크롤 자체**도 함께 잰다(`up_off == max - 한 눈금`) — 아래로만 재던 판정의 빈자리다.
+
+## 남은 자리
+
+- **SCM 목록 스크롤**(계획서 W8.22).
+- **스크롤바 드래그·키보드·가상화**(§2m.92 의 "아직 아닌 것").
+- **카드 펼침 상세**(위 1회차 보고) — `Item.card.expanded` 를 채우는 슬라이스가 따로 필요하다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

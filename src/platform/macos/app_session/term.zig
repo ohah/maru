@@ -57,6 +57,7 @@ const app = app_session_mod.app;
 const pane_ops = @import("pane.zig");
 const editor_ops = @import("editor.zig");
 const tab_ops = @import("tab.zig");
+const git_ops = @import("git.zig");
 const terminal = app_session_mod.terminal;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
 const workspace_ops = @import("workspace.zig");
@@ -998,9 +999,17 @@ pub fn bracketedPasteFor(self: *AppSession, target_id: u64) ?bool {
 
 /// 이 창에서 **보낼 수 있는 대상**들을 §5 순서로 모은다(에이전트 먼저 · 그 안에서 화면 순서).
 /// 정렬·라벨 정책은 `session/agent_selection.zig` 가 소유한다 — 여기서는 열거만 한다.
+///
+/// **폴더 문자열은 호출자 버퍼에 쓴다**(`folder_bufs`). `termCwdForDisplay` 가 버퍼를 받는 API 라
+/// 어딘가에 자리가 있어야 하고, 그 자리는 **후보가 사는 동안** 살아 있어야 한다 — 스택 임시에
+/// 쓰면 돌아가는 순간 슬라이스가 매달린다.
+///
+/// **브랜치는 캐시다.** `termGitBranch` 는 cwd 가 바뀔 때만 `.git/HEAD` 를 다시 읽으므로(사이드바가
+/// 매 프레임 쓰는 그 함수) 우클릭 경로에서 불러도 된다.
 pub fn collectAgentTargets(
     self: *AppSession,
     out: []maru.session.agent_selection.Candidate,
+    folder_bufs: [][std.fs.max_path_bytes]u8,
 ) []maru.session.agent_selection.Candidate {
     var n: usize = 0;
     var order: u32 = 0;
@@ -1008,7 +1017,11 @@ pub fn collectAgentTargets(
     for (tab.panes.items) |pane| {
         for (pane.terms.items) |term| {
             if (term.kind != .terminal) continue;
-            if (n >= out.len) break;
+            if (n >= out.len or n >= folder_bufs.len) break;
+            // **폴더와 브랜치로 가른다**(§5) — 사이드바 카드가 쓰는 그 두 축이다. 같은 정보를 두
+            // 곳에서 다르게 부르면 사용자가 다른 것으로 읽는다. 폴더가 없으면(원격·비-repo) 그 자리를
+            // 비우고 Term 이름으로 대신한다 — 이름조차 없는 줄을 만들지 않는다.
+            const folder = git_ops.termCwdForDisplay(self, term, &folder_bufs[n]);
             out[n] = .{
                 .surface_id = term.surface.id,
                 .kind = switch (term.agent_kind) {
@@ -1018,8 +1031,8 @@ pub fn collectAgentTargets(
                 },
                 // 실제 셸 이름(zsh 등)은 아직 안 읽는다(§한계) — 지금은 종류만 말한다.
                 .shell_name = maru.i18n.t(.ctx_target_shell),
-                .where = app_session_mod.termLabel(term),
-                .branch = null,
+                .where = folder orelse app_session_mod.termLabel(term),
+                .branch = git_ops.termGitBranch(self, term),
                 .order = order,
             };
             n += 1;

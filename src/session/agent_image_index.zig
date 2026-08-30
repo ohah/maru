@@ -959,3 +959,76 @@ test "compacted 판정이 청크 경계에 쪼개져도 같다" {
         );
     }
 }
+
+test "쓰는 도중에 읽어도 반쪽 이미지를 만들지 않는다 — 자동 갱신이 새로 만든 상황" {
+    // 자동 갱신(IG2)이 붙은 뒤로 스캔은 **에이전트가 쓰는 도중에** 돈다. 한 바이트씩 자라는 파일을
+    // 매 단계 처음부터 다시 훑으며, 나온 히트가 언제나 **완성된 줄** 안에 있는지 본다.
+    const allocator = testing.allocator;
+    const doc =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\"," ++
+        "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"QUJDREVG\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\"," ++
+        "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"WFlaWFla\"}}]}}\n";
+
+    var grown: usize = 1;
+    while (grown <= doc.len) : (grown += 1) {
+        const seen = doc[0..grown];
+        // **제품 경로로 읽는다.** 처음에는 `scanBuffer`(전량 스캔 헬퍼)를 썼는데, 제품은
+        // `StreamScanner.feed` 로 읽는다 — 뮤테이션이 그것을 짚어 줬다: `feed` 를 망가뜨렸는데
+        // 이 test 가 통과했다. **테스트가 제품이 안 쓰는 길을 지키고 있었다.**
+        var out: std.ArrayList(Hit) = .empty;
+        defer out.deinit(allocator);
+        var scanner: StreamScanner = .{};
+        defer scanner.deinit(allocator);
+        var fed: usize = 0;
+        while (fed < seen.len) : (fed += 13) {
+            try scanner.feed(allocator, seen[fed..@min(seen.len, fed + 13)], &out);
+        }
+
+        // 지금까지 **완성된** 줄(마지막 개행까지)의 길이.
+        const complete = if (std.mem.lastIndexOfScalar(u8, seen, '\n')) |nl| nl + 1 else 0;
+        for (out.items) |hit| {
+            // ① 히트는 완성된 줄 안에서만 나온다 — 반쪽 줄을 인덱싱하지 않는다.
+            try testing.expect(hit.data_offset + hit.data_len <= complete);
+            // ② payload 가 온전하다: 뒤에 닫는 따옴표가 있다.
+            try testing.expect(hit.data_offset + hit.data_len < seen.len);
+            try testing.expectEqual(@as(u8, '"'), seen[hit.data_offset + hit.data_len]);
+        }
+        // ③ 완성된 줄 수만큼만 나온다.
+        const want: usize = if (complete >= doc.len) 2 else if (complete > 0) 1 else 0;
+        try testing.expectEqual(want, out.items.len);
+    }
+}
+
+test "쓰는 도중에 읽어도 스트리밍이 같은 답을 낸다 — 청크 경계와 무관" {
+    // 위 test 는 「매번 처음부터」다. 제품은 청크로 먹이므로 그쪽도 같은 답을 내야 한다.
+    // 자동 갱신은 파일이 자랄 때마다 **새 스캐너**로 처음부터 훑으므로 둘이 어긋나면 안 된다.
+    const allocator = testing.allocator;
+    const doc =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\"," ++
+        "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"QUJDREVG\"}}]}}\n";
+
+    var grown: usize = 1;
+    while (grown <= doc.len) : (grown += 1) {
+        const seen = doc[0..grown];
+
+        var whole: std.ArrayList(Hit) = .empty;
+        defer whole.deinit(allocator);
+        _ = try scanBuffer(allocator, seen, 0, &whole);
+
+        var streamed: std.ArrayList(Hit) = .empty;
+        defer streamed.deinit(allocator);
+        var scanner: StreamScanner = .{};
+        defer scanner.deinit(allocator);
+        var i: usize = 0;
+        while (i < seen.len) : (i += 7) {
+            try scanner.feed(allocator, seen[i..@min(seen.len, i + 7)], &streamed);
+        }
+
+        try testing.expectEqual(whole.items.len, streamed.items.len);
+        for (whole.items, streamed.items) |a, b| {
+            try testing.expectEqual(a.data_offset, b.data_offset);
+            try testing.expectEqual(a.data_len, b.data_len);
+        }
+    }
+}

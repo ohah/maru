@@ -928,8 +928,8 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   제품 rollback 증거의 집합이므로 signed frozen release provenance나 아직 목록에 없는 manifest/socket/FD 전 구간
   failure를 대신하지 않으며, 이 첫 matrix만으로 U5 failure injection 완료를 주장하지 않는다.
 - **failure matrix의 두 번째 component gate:** `test-session-host-upgrade-component-failure-matrix`는
-  `handoff_store.zig` 8개, `exec_fd_set.zig` 6개, `host_authority.zig` 3개,
-  `upgrade_target.zig` 5개의 exact module inventory를 한 진입점에서 실행한다. 이 22개는 primary/backup
+  `handoff_store.zig` 9개, `exec_fd_set.zig` 6개, `host_authority.zig` 3개,
+  `upgrade_target.zig` 5개의 exact module inventory를 한 진입점에서 실행한다. 이 23개는 primary/backup
   commit·reservation·residue cleanup, reserved slot/CLOEXEC rollback, discovery manifest CAS,
   target staging·pin·replacement cleanup의 현재 component seam을 고정한다. boundary inventory는 네 source의
   exact test title·개수와 named step의 네 dependency를 함께 검사한다. 이 gate는 existing component 증거가
@@ -966,6 +966,17 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   typed 값으로만 전달하고, 제품 entrypoint와 공개 coordinator `Context`에는 주입 필드를 추가하지 않는다. 이 gate는
   실제 kernel pathname 교체 한 종류와 daemon unwind를 증명하지만 disk-full, fsync, 다중 cleanup syscall fault나 실제 서명
   release artifact를 대신하지 않는다.
+  `test-session-host-upgrade-kernel-cleanup-faults` 집중 gate는 synthetic pre-syscall failpoint 대신 실제 macOS filesystem
+  조건을 만든다. component 행은 reservation의 열린 attempt directory를 읽기 전용으로 바꾼 뒤 제품
+  `Reservation.cancel`을 호출한다. pinned primary/backup 제거는 실제 kernel에서 `EACCES`, 파일이 남은 attempt directory
+  제거는 `ENOTEMPTY`여야 하며, cleanup은 두 번째 실패 뒤에도 owner sync/close까지 진행해 aggregate `CleanupFailed`, terminal
+  inactive와 reservation fd 전량 폐쇄로 수렴해야 한다. test-only observation은 syscall 직후 errno만 기록하며 syscall 결과를
+  대신 만들거나 제품 error mapping을 바꾸지 않는다. 같은 named gate의 process 행은 budget reservation 직후 동일 권한 조건을
+  만드는 typed fixture를 실제 fork daemon의 제품 `Client.prepareUpgrade` 경로에 연결한다. daemon 행은 각 errno를 직접
+  노출한다고 주장하지 않고 coordinator `invariant_violation`→outer-loop `fail_stop`→`ManifestFailed` exact nonzero exit와 기존
+  sibling, 새 연결, socket pathname, owner lease pathname의 폐쇄를 증명한다. fixture는 `builtin.is_test`로 닫히고 ambient
+  environment, MRSH command, 공개 coordinator `Context`를 넓히지 않는다. 이 component+process 결합으로 두 개 이상의 실제
+  kernel cleanup syscall fault와 daemon fail-stop은 닫지만 disk-full, fsync fault와 실제 서명 release artifact는 여전히 별도다.
 
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서

@@ -3503,6 +3503,47 @@ test "scrollback disabled when max_scrollback is zero" {
     try std.testing.expectEqual(@as(usize, 0), core.scrollbackLen());
 }
 
+test "renderSnapshot은 스크롤 중에도 스크롤바 근거(scrollback_len·view_offset)를 싣는다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
+    defer core.deinit();
+    try core.write("a\r\nb\r\nc\r\nd"); // 스크롤백=[a,b], 활성=[c,d]
+
+    // 바닥: 두 값이 실린다(이 갈래는 `snapshot()` 을 그대로 쓴다).
+    {
+        const snap = core.renderSnapshot();
+        try std.testing.expectEqual(@as(usize, 2), snap.scrollback_len);
+        try std.testing.expectEqual(@as(usize, 0), snap.view_offset);
+    }
+
+    // **스크롤 중에도 실려야 한다.** 이 둘이 빠지면 기본값 0이 나가고, 스크롤바 thumb 기하가
+    // `sb_count == 0` 으로 null 이 되어 **스크롤하는 순간 스크롤바가 사라진다**(2026-08-30 사용자
+    // 보고 — 실측 로그에서 바닥 sb=235 / 스크롤 중 sb=0 으로 갈렸다). 합성 갈래가 자기 return 을
+    // 따로 들기 때문에 생긴 누락이라, 바닥만 보는 판정자로는 안 잡힌다.
+    core.scrollViewport(1);
+    {
+        const snap = core.renderSnapshot();
+        try std.testing.expectEqual(@as(usize, 1), snap.view_offset);
+        try std.testing.expectEqual(@as(usize, 2), snap.scrollback_len);
+        try std.testing.expect(snap.viewport_scrolled);
+    }
+
+    // 맨 위까지 올려도 마찬가지다(clamp 된 offset 이 그대로 실린다).
+    core.scrollViewport(5);
+    {
+        const snap = core.renderSnapshot();
+        try std.testing.expectEqual(@as(usize, 2), snap.view_offset);
+        try std.testing.expectEqual(@as(usize, 2), snap.scrollback_len);
+    }
+
+    // 바닥으로 돌아오면 다시 0 이다.
+    core.scrollToBottom();
+    {
+        const snap = core.renderSnapshot();
+        try std.testing.expectEqual(@as(usize, 0), snap.view_offset);
+        try std.testing.expectEqual(@as(usize, 2), snap.scrollback_len);
+    }
+}
+
 test "scrollViewport reveals scrollback at the top and scrollToBottom returns to active" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();

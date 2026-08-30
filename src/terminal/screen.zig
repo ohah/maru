@@ -2157,5 +2157,11 @@ pub fn renderSnapshot(self: *TerminalCore) types.RenderSnapshot {
         .placements = self.buildPlacementViews(top_abs),
         .images = self.buildImageViews(),
         .dirty = self.dirty,
+        // **스크롤 중에도 스크롤바 근거를 싣는다.** 이 둘이 빠져 기본값 0으로 나가던 것이
+        // 「스크롤하면 스크롤바가 사라진다」의 원인이었다 — 바닥 갈래는 `snapshot()` 을 쓰므로
+        // 채워지는데, 위로 올라간 갈래만 이 자리에서 누락돼 `scrollbarThumbGeom` 이
+        // `sb_count == 0` 으로 null 을 냈다(2026-08-30 실측: 바닥 sb=235 / 스크롤 중 sb=0).
+        .scrollback_len = self.screen.sb.count,
+        .view_offset = self.view_offset,
     };
 }

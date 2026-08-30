@@ -11287,6 +11287,36 @@ pub fn build(b: *std.Build) void {
         session_host_product_rollback_step.dependOn(&run_session_host_product_rollback_tests.step);
         run_session_host_tests.step.dependOn(session_host_product_rollback_step);
 
+        // U5 non-empty rollback은 codec fixture가 아니라 source-host가 직접 만든 실제 PTY의
+        // parent/runtime/screen/input/exit 수명을 같은 process artifact에서 증명한다.
+        const session_host_nonempty_rollback_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/upgrade_bootstrap.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"product rollback preserves one real PTY through exit"},
+        });
+        const run_session_host_nonempty_rollback_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_session_host_nonempty_rollback_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_session_host_nonempty_rollback_tests.addArg(
+            "MARU_SESSION_HOST_NONEMPTY_PRODUCT_ROLLBACK_GATE=maru-test-only-v1",
+        );
+        run_session_host_nonempty_rollback_tests.addArtifactArg(session_host_nonempty_rollback_tests);
+        run_session_host_nonempty_rollback_tests.addArg("--maru-expect-tests=1");
+        run_session_host_nonempty_rollback_tests.setCwd(b.path("."));
+        const session_host_nonempty_rollback_step = b.step(
+            "test-session-host-upgrade-nonempty-rollback",
+            "Run non-empty PTY product rollback lifecycle E2E (macOS)",
+        );
+        session_host_nonempty_rollback_step.dependOn(&run_session_host_nonempty_rollback_tests.step);
+        run_session_host_tests.step.dependOn(session_host_nonempty_rollback_step);
+
         // 릴리스 signer 경계까지 포함한 제품 N-1→current 검증은 서명 아티팩트가 있어야 하므로
         // 기본 CI에서 실행하지 않는다. 대신 driver 자체는 기본 session-host test에서 컴파일·순수
         // helper test까지 실행해 opt-in 경로가 소스 드리프트로 썩지 않게 한다.

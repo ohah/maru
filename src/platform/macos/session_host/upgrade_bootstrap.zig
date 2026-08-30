@@ -19,10 +19,13 @@ const upgrade_attempt_record = @import("upgrade_attempt_record.zig");
 const upgrade_deadline = @import("upgrade_deadline.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
+const sol_local: c_int = 0;
+const local_peerpid: c_int = 0x002;
 extern "c" fn getdtablesize() c_int;
 extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const Error = error{
     InvalidFd,
@@ -531,6 +534,20 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     const digest_hex = std.fmt.bytesToHex(restore_identity.sha256, .lower);
     const build_id = try std.fmt.allocPrint(std.testing.allocator, "sha256:{s}", .{&digest_hex});
     defer std.testing.allocator.free(build_id);
+    const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
+    const product_raw_path = try std.Io.Dir.cwd().realPathFileAlloc(
+        std.testing.io,
+        std.mem.span(product_raw),
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(product_raw_path);
+    const product = try std.testing.allocator.dupeZ(u8, product_raw_path);
+    defer std.testing.allocator.free(product);
+    const product_identity = try staged_image.inspect(product);
+    const product_rollback_gate = if (c.getenv("MARU_SESSION_HOST_PRODUCT_ROLLBACK_GATE")) |value|
+        std.mem.eql(u8, std.mem.span(value), "maru-test-only-v1")
+    else
+        false;
 
     const host_id: u128 = 0xA11CE;
     const attempt_id: u128 = 0;
@@ -555,8 +572,8 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     }
     var rollback_authority = try rollback_image.Authority.prepare(
         std.testing.allocator,
-        restore_executable,
-        restore_identity,
+        if (product_rollback_gate) product else restore_executable,
+        if (product_rollback_gate) product_identity else restore_identity,
         host_dir,
     );
     defer rollback_authority.deinit();
@@ -638,6 +655,10 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     try inherited.prepare(pair.primary_fd, layout.primarySlot());
     try inherited.prepare(pair.backup_fd, layout.backupSlot());
     try inherited.prepare(lease.descriptor(), layout.ownerSlot());
+    // Validation-only children never bind the endpoint, but the product rollback child does.
+    // Model the real daemon launch prerequisite instead of depending on a directory left by
+    // another test or a user's running Maru instance.
+    try short_endpoint.prepareCurrentUserNamespace();
     var socket_buf: [128]u8 = undefined;
     const socket_path = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
 
@@ -687,8 +708,10 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     try std.testing.expect(rollback_exec.consume());
     try std.testing.expect(!rollback_exec.consume());
     try runRestoreGateChild(target_invocation, target_path, true);
-    try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
-    try runRestoreGateChild(rollback_invocation, target_path, false);
+    if (!product_rollback_gate) {
+        try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
+        try runRestoreGateChild(rollback_invocation, target_path, false);
+    }
 
     _ = c.close(layout.primarySlot());
     const corrupt_primary = try openTruncatedUnlinkedCopy(host_dir, handoff);
@@ -704,23 +727,16 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     // 실제 restore child는 inherited allowlist만 남긴 process에서 공용
     // rollback-arm 단계를 먼저 통과한다. 깨진 primary 때문에 target role
     // validation은 실패해도 같은 backup/owner arm으로 rollback은 성공한다.
-    try runRestoreGateChild(target_invocation, target_path, false);
-    try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
+    if (!product_rollback_gate) {
+        try runRestoreGateChild(target_invocation, target_path, false);
+        try runRestoreGateChild(rollback_invocation, rollback_authority.image.path, true);
+    }
 
     // 제품 `maru`도 같은 identity-valid restore를 validation-only로 끝내지
     // 않고 full zero-runtime activation을 수행한다. oneshot 환경에서 closed
     // admission→ready commit→FD cleanup→serve loop까지 성공 종료한다.
     corrupt_slot.rollback();
     _ = c.close(layout.backupSlot());
-    const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
-    const product_raw_path = try std.Io.Dir.cwd().realPathFileAlloc(
-        std.testing.io,
-        std.mem.span(product_raw),
-        std.testing.allocator,
-    );
-    defer std.testing.allocator.free(product_raw_path);
-    const product = try std.testing.allocator.dupeZ(u8, product_raw_path);
-    defer std.testing.allocator.free(product);
     var product_target = try staged_image.stageExclusive(
         std.testing.allocator,
         product,
@@ -801,7 +817,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     product_invocation.attempt_id = 1;
     const restoring_descriptor: host_manifest.Descriptor = .{
         .host_id = host_id,
-        .build_id = build_id,
+        .build_id = if (product_rollback_gate) product_build_id else build_id,
         .protocol_major = @import("protocol.zig").version_major,
         .screen_codec_version = @import("maru").session.screen_stream.codec_version,
         .upgrade_epoch = 4,
@@ -833,26 +849,25 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     // precommit unwind가 owner pathname을 지우면 뒤이은 canonical rollback
     // fixture의 owner fd/path 교차검증이 실패하므로 child 성공이 cleanup
     // authority를 durable ready commit 전에는 갖지 않음을 증명한다.
-    var ready_before_target = restoring_descriptor;
-    ready_before_target.lifecycle = .ready;
-    try restoring_manifest.republish(ready_before_target);
-    try runRestoreGateChild(product_invocation, product_target.path, true);
-    const precommit_marker = c.open(
-        activation_marker.ptr,
-        .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
-        @as(c.mode_t, 0),
-    );
-    if (precommit_marker >= 0) {
-        _ = c.close(precommit_marker);
-        return error.TestUnexpectedResult;
+    if (!product_rollback_gate) {
+        var ready_before_target = restoring_descriptor;
+        ready_before_target.lifecycle = .ready;
+        try restoring_manifest.republish(ready_before_target);
+        try runRestoreGateChild(product_invocation, product_target.path, true);
+        const precommit_marker = c.open(
+            activation_marker.ptr,
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+            @as(c.mode_t, 0),
+        );
+        if (precommit_marker >= 0) {
+            _ = c.close(precommit_marker);
+            return error.TestUnexpectedResult;
+        }
+        try restoring_manifest.republish(restoring_descriptor);
     }
-    try restoring_manifest.republish(restoring_descriptor);
 
     // Target primary가 손상돼도 backup/owner authority를 먼저 arm한 같은
-    // product process가 canonical rollback image를 one-shot exec한다.
-    // rollback fixture는 validation-only라 disk authority를 소비하지 않고
-    // 성공 종료해, 이어지는 정상 target activation도 같은 fixture에서
-    // 검증할 수 있다.
+    // product process가 canonical product rollback image를 one-shot exec한다.
     product_slots.rollback();
     const corrupt_product_primary = try openTruncatedUnlinkedCopy(
         host_dir,
@@ -864,14 +879,80 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         layout.primarySlot(),
     );
     try product_slots.prepare(product_pair.backup_fd, layout.backupSlot());
-    try runRestoreGateChild(product_invocation, product_target.path, true);
-    const absent_marker = c.open(
+    if (product_rollback_gate) {
+        const rollback_pid = try spawnRestoreGateChild(product_invocation, product_target.path, true);
+        var rollback_reaped = false;
+        defer if (!rollback_reaped) stopRestoreGateChild(rollback_pid);
+        const client_mod = @import("client.zig");
+        var marker_attempt: usize = 0;
+        while (marker_attempt < 10_000) : (marker_attempt += 1) {
+            var early_status: c_int = undefined;
+            const early_wait = c.waitpid(rollback_pid, &early_status, c.W.NOHANG);
+            if (early_wait == rollback_pid) {
+                rollback_reaped = true;
+                return error.TestUnexpectedResult;
+            }
+            if (early_wait < 0 and posix.errno(early_wait) != .INTR)
+                return error.TestUnexpectedResult;
+            const marker_fd = c.open(
+                activation_marker.ptr,
+                .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+                @as(c.mode_t, 0),
+            );
+            if (marker_fd >= 0) {
+                _ = c.close(marker_fd);
+                break;
+            }
+            _ = usleep(1000);
+        }
+        if (marker_attempt == 10_000) return error.TestUnexpectedResult;
+        var restored_client: ?client_mod.Client = null;
+        var connect_attempt: usize = 0;
+        while (connect_attempt < 750) : (connect_attempt += 1) {
+            restored_client = client_mod.Client.connect(
+                std.testing.allocator,
+                socket_path,
+                .gui,
+            ) catch null;
+            if (restored_client != null) break;
+            _ = usleep(1000);
+        }
+        var client = restored_client orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(rollback_pid, try peerPid(client.fd));
+        try std.testing.expectEqual(host_id, client.host_id);
+        try std.testing.expectEqual(@as(u64, 4), client.upgrade_epoch);
+        try std.testing.expect(client.build_id != null);
+        try std.testing.expectEqualStrings(product_build_id, client.build_id.?);
+        try std.testing.expect(client.host_exec_upgrade_v1);
+        const report = (try client.upgradeStatus(1)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@import("upgrade_wire.zig").AttemptStatus.rolled_back, report.status);
+        try std.testing.expectEqual(@import("upgrade_wire.zig").AttemptReason.restore_failed, report.reason);
+        var inventory = try client.runtimeInventory();
+        switch (inventory) {
+            .complete => |*complete| {
+                defer complete.deinit(std.testing.allocator);
+                try std.testing.expectEqual(@as(usize, 0), complete.runtime_ids.len);
+            },
+            .unavailable => return error.TestUnexpectedResult,
+        }
+        client.deinit();
+        try waitRestoreGateChild(rollback_pid, true);
+        rollback_reaped = true;
+    } else {
+        try runRestoreGateChild(product_invocation, product_target.path, true);
+    }
+    const rollback_marker = c.open(
         activation_marker.ptr,
         .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
         @as(c.mode_t, 0),
     );
-    if (absent_marker >= 0) {
-        _ = c.close(absent_marker);
+    if (product_rollback_gate) {
+        if (rollback_marker < 0) return error.TestUnexpectedResult;
+        _ = c.close(rollback_marker);
+        return;
+    }
+    if (rollback_marker >= 0) {
+        _ = c.close(rollback_marker);
         return error.TestUnexpectedResult;
     }
 
@@ -936,6 +1017,15 @@ fn runRestoreGateChild(
     executable_path: [:0]const u8,
     expect_success: bool,
 ) !void {
+    const pid = try spawnRestoreGateChild(invocation, executable_path, expect_success);
+    return waitRestoreGateChild(pid, expect_success);
+}
+
+fn spawnRestoreGateChild(
+    invocation: entrypoint.RestoreInvocation,
+    executable_path: [:0]const u8,
+    expect_success: bool,
+) !c.pid_t {
     const pid = c.fork();
     if (pid < 0) return error.TestUnexpectedResult;
     if (pid == 0) {
@@ -973,6 +1063,10 @@ fn runRestoreGateChild(
         _ = execv(executable_path.ptr, &argv);
         c._exit(2);
     }
+    return pid;
+}
+
+fn waitRestoreGateChild(pid: c.pid_t, expect_success: bool) !void {
     var status: c_int = undefined;
     while (true) {
         const waited = c.waitpid(pid, &status, 0);
@@ -984,4 +1078,24 @@ fn runRestoreGateChild(
         try std.testing.expectEqual(@as(c_int, 0), status)
     else
         try std.testing.expect(status != 0);
+}
+
+fn stopRestoreGateChild(pid: c.pid_t) void {
+    _ = c.kill(pid, posix.SIG.TERM);
+    var status: c_int = undefined;
+    while (true) {
+        const waited = c.waitpid(pid, &status, 0);
+        if (waited == pid) return;
+        if (waited < 0 and posix.errno(waited) == .INTR) continue;
+        return;
+    }
+}
+
+fn peerPid(fd: c.fd_t) !c.pid_t {
+    var pid: c.pid_t = 0;
+    var len: c.socklen_t = @sizeOf(c.pid_t);
+    if (c.getsockopt(fd, sol_local, local_peerpid, &pid, &len) != 0 or
+        len != @sizeOf(c.pid_t) or pid <= 0)
+        return error.TestUnexpectedResult;
+    return pid;
 }

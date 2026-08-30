@@ -28,6 +28,57 @@ const context = maru.session.agent_image_context;
 const metal_frame = maru.renderer.metal_frame;
 const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 
+/// 갤러리를 보고 있는 동안 **파일이 자랐는지** 이따금 본다.
+///
+/// 훅에 기대지 않는 이유: 훅이 꺼져 있을 수 있고(계약 §4.4), 켜져 있어도 `UserPromptSubmit` 은
+/// 이미지가 파일에 적히기 **전에** 올 수 있다. `stat` 은 싸므로 직접 본다.
+///
+/// **스로틀이 필요하다**: 이 함수는 60 Hz 로 불린다. 그대로 두면 초당 60 번 파일을 연다.
+fn pollFreshness(self: *AppSession) void {
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (self.image_gallery.chain.isEmpty() or !self.image_gallery.built) return;
+    if (self.image_gallery.scanning()) return;
+    // **크게 보기 중에는 미룬다.** 다시 훑으면 새 이미지가 맨 앞에 와 인덱스가 전부 밀리므로
+    // (최신 우선, §IG7) 열어 둔 칸이 다른 그림이 된다. 닫으면 다음 tick 이 잡는다 —
+    // 에이전트가 줄 하나 적었다고 보던 이미지가 바뀌는 것보다 잠깐 낡은 편이 낫다.
+    if (self.image_gallery.open != null) return;
+
+    const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_ms));
+    if (now_ms -| self.image_gallery.last_stat_ms < freshness_interval_ms) return;
+    self.image_gallery.last_stat_ms = now_ms;
+
+    const path = activeSourcePath(self) orelse return;
+    if (!headChanged(self, path)) return;
+    refresh(self, true); // 자랐다 — 다시 훑는다(`force` 로 위 게이트를 지나간다)
+}
+
+/// 신선도를 보는 간격(ms). `stat` 은 싸지만(실측 54,296 배 저렴) 60 Hz 로 열 이유는 없다.
+/// 사람이 「방금 붙인 것이 안 보인다」고 느끼기 전에 잡히는 선이다.
+const freshness_interval_ms: i64 = 500;
+
+/// 지금 그 파일의 자국. 열지 못하면 «모름» 이다.
+fn stampOf(self: *AppSession, path: []const u8) Stamp {
+    if (!builtin.target.os.tag.isDarwin()) return .{};
+    const file = std.Io.Dir.cwd().openFile(self.io, path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return .{};
+    defer file.close(self.io);
+    const st = file.stat(self.io) catch return .{};
+    return .{
+        .inode = @intCast(st.inode),
+        .size = st.size,
+        .mtime_ns = st.mtime.nanoseconds,
+        .known = true,
+    };
+}
+
+/// 마지막으로 훑은 뒤 현재 세션 파일이 달라졌는가. **모르면 「달라졌다」**다 — 낡은 채로 두지 않는다.
+fn headChanged(self: *AppSession, path: []const u8) bool {
+    return !Stamp.eql(self.image_gallery.head_stamp, stampOf(self, path));
+}
+
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
 /// 다시 훑는다.
 pub const State = struct {
@@ -59,6 +110,13 @@ pub const State = struct {
     /// 마지막 스캔이 읽은 바이트와 걸린 시간. 계약 §4.1.1 의 근거가 이 자리에서 나왔다.
     scanned_bytes: u64 = 0,
     scan_ns: u64 = 0,
+    /// 마지막으로 훑은 **현재 세션 파일**의 자국. 이것과 지금 `stat` 이 다르면 다시 훑는다.
+    ///
+    /// **머리 파일만 든다.** 체인의 뒤쪽은 이미 끝난 세션이라 자라지 않는다(§3.3) — 지금 대화가
+    /// 붙는 곳은 언제나 첫 파일이다.
+    head_stamp: Stamp = .{},
+    /// 마지막으로 `stat` 한 tick. 매 프레임 부르지 않으려는 스로틀이다.
+    last_stat_ms: i64 = 0,
     /// 결과를 받아 반영했는가. `hits.len == 0` 과 다르다 — 이미지가 없는 파일도 훑은 것이다.
     built: bool = false,
     /// 기다리는 요청의 generation. 0 이면 기다리는 것이 없다. **늦게 온 결과를 버리는 근거**다 —
@@ -134,6 +192,7 @@ pub const State = struct {
         self.search.clear();
         self.search_active = false;
         self.chain.clear();
+        self.head_stamp = .{};
         self.partial = false;
         self.scanned_bytes = 0;
         self.scan_ns = 0;
@@ -231,6 +290,22 @@ pub const State = struct {
     /// 「이미지가 없습니다」라고 거짓말하지 않기 위해 필요하다.
     pub fn scanning(self: *const State) bool {
         return self.awaiting != 0 or self.resubmit;
+    }
+};
+
+/// 파일이 그때 그 파일이고 그만큼인가. 계약 §4.2 의 세 갈래를 이 셋으로 가른다.
+///
+/// **`mtime` 만으로는 모자란다**: 같은 초 안에 두 번 붙으면 못 잡는다. **`size` 만으로도 모자란다**:
+/// 파일이 교체되면서 우연히 같은 크기일 수 있다. 셋을 함께 본다.
+pub const Stamp = struct {
+    inode: u64 = 0,
+    size: u64 = 0,
+    mtime_ns: i128 = 0,
+    /// 한 번도 못 찍었으면 «모름» 이다 — 모르면 다시 훑는다(낡은 채로 두지 않는다).
+    known: bool = false,
+
+    pub fn eql(a: Stamp, b: Stamp) bool {
+        return a.known and b.known and a.inode == b.inode and a.size == b.size and a.mtime_ns == b.mtime_ns;
     }
 };
 
@@ -399,16 +474,41 @@ pub fn refresh(self: *AppSession, force: bool) void {
         return;
     };
     const same = std.mem.eql(u8, self.image_gallery.chain.head(), path);
+    // 같은 파일을 이미 훑었거나 훑는 중이면 여기서 물러난다.
+    //
+    // **신선도는 여기서 안 본다.** 파일이 자랐는지 보는 일은 `pollFreshness` 하나가 맡는다 —
+    // 두 곳에서 같은 판정을 하면 갈리고(이 저장소에서 반복해 본 모양), 실제로 뮤테이션이 그것을
+    // 짚었다: 이 자리에 신선도 검사를 두어도 `pollFreshness` 가 `force` 로 부르므로 **test 가
+    // 지키지 못하는 코드**가 된다. 뷰에 다시 들어오면 다음 tick 의 `pollFreshness` 가 곧바로 잡는다
+    // (첫 검사는 스로틀에 안 걸린다).
     if (!force and same and (self.image_gallery.built or self.image_gallery.scanning())) return;
 
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
     // 아무 뜻이 없으므로 통째로 버리고 다시 건다. 도는 스캔도 취소한다.
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
+
+    // **같은 파일을 다시 훑는 것뿐이면 검색어를 넘겨 준다.** `clear` 는 「다른 세션이 됐다」를 뜻해
+    // 검색까지 비우는데, 자란 파일을 다시 읽는 것은 그것이 아니다 — 사용자가 친 글자를 뺏지 않는다.
+    var keep: [max_query_bytes]u8 = undefined;
+    var keep_len: usize = 0;
+    const keep_active = same and self.image_gallery.search_active;
+    if (same) {
+        const q = self.image_gallery.queryText();
+        keep_len = @min(q.len, keep.len);
+        @memcpy(keep[0..keep_len], q[0..keep_len]);
+    }
+
     self.image_gallery.clear(self.allocator);
     self.image_gallery.chain = buildChain(self, path);
+    if (keep_len > 0 or keep_active) {
+        self.image_gallery.search.query.appendSlice(self.allocator, keep[0..keep_len]) catch {};
+        self.image_gallery.search_active = keep_active;
+    }
     self.metal_dirty = true;
 
+    // **훑기 직전의 자국을 찍는다.** 훑은 뒤에 찍으면 그 사이 붙은 줄을 「이미 봤다」로 오해한다.
+    self.image_gallery.head_stamp = stampOf(self, path);
     if (backend.submit(self.image_gallery.chain)) |generation| {
         self.image_gallery.awaiting = generation;
     } else {
@@ -433,6 +533,7 @@ pub fn poll(self: *AppSession) void {
 
     harvestDecoded(self);
     ensureOpen(self);
+    pollFreshness(self);
 
     var result = backend.take() orelse return;
     // **늦게 온 것은 버린다.** 소스가 그 사이 바뀌었으면 이 결과는 남의 파일 것이다.

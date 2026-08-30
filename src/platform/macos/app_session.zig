@@ -74271,3 +74271,190 @@ test "이미지 갤러리: 할당이 실패해도 라벨이 밀리지 않는다 
         }
     }
 }
+
+test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 따라온다 (IG2-a)" {
+    // **이 test 는 지금 «무엇이 사실인가» 를 가리려고 쓴다.**
+    //
+    // 코드를 읽으면 이렇다: `refresh(force=false)` 는 「같은 경로 and built」면 조기 반환하고,
+    // `built` 는 경로가 바뀔 때(`State.clear`)만 풀린다. 훅은 매 턴 `transcript_path` 를 주지만
+    // `Source.set` 이 **경로가 같으면 false** 를 돌려주므로 `onSourceChanged` 까지 가지 않는다.
+    // 그러면 대화 중에 붙인 이미지는 «다음 세션» 까지 안 보인다.
+    //
+    // 읽기가 맞는지 제품 경로로 확인한다: 훅 이벤트 → 뷰 재진입. 둘 다 갱신을 못 만들면
+    // 그것이 IG2(이어읽기)가 메울 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]},\"timestamp\":\"2026-08-30T01:00:00.000Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // ── 대화가 이어진다: **같은 파일**에 이미지가 하나 더 붙는다.
+    {
+        var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{one}, one.len);
+    }
+
+    // ── ① 훅이 같은 경로를 다시 알려 준다(매 턴 오는 그것).
+    _ = agent_ops.testApplyHookEvent(session, term, .{
+        .kind = .user_prompt_submit,
+        .session_id = "S-live",
+        .turn_key = "turn-2",
+        .transcript_path = path,
+    });
+    {
+        var spins: usize = 0;
+        while (spins < 50_000) : (spins += 1) _ = session.tick() catch {};
+    }
+
+    // ── ② 갤러리를 떠났다가 다시 들어온다.
+    dock_ops.setDockView(session, .agent_sessions);
+    dock_ops.setDockView(session, .image_gallery);
+    {
+        var spins: usize = 0;
+        while (spins < 50_000) : (spins += 1) _ = session.tick() catch {};
+    }
+
+    // **여기가 이 test 의 물음이다.** 2 장이면 갤러리가 따라온 것이고, 1 장이면 낡은 것이다.
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+}
+
+test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 보기 중에는 미룬다 (IG2-b)" {
+    // **자동 갱신을 붙이면서 밟을 뻔한 둘을 못박는다.**
+    //  · `refresh` 가 부르는 `clear` 는 검색어까지 비운다 — 대화 중이면 파일이 수시로 자라므로
+    //    사용자가 친 글자가 계속 사라진다.
+    //  · 다시 훑으면 새 이미지가 **맨 앞**에 와 인덱스가 전부 밀린다(최신 우선) — 크게 보기를
+    //    열어 둔 채 훑으면 보던 것이 다른 그림이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const line =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_A\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/u/shots/keep.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_A\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = line });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // ── ① 검색어를 친 채로 파일이 자란다 → 검색어가 남아 있어야 한다.
+    session.image_gallery.key_focus = true;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.image_gallery.search_active);
+    for ("keep") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
+
+    {
+        var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{line}, line.len);
+    }
+    image_gallery_ops.refresh(session, true);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    // 다시 훑었어도 **친 글자는 그대로**다.
+    try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
+    try std.testing.expect(session.image_gallery.search_active);
+
+    // ── ② 크게 보기를 열어 두면 자동 갱신이 미뤄진다 — 보던 그림이 안 바뀐다.
+    session.image_gallery.search.clear();
+    image_gallery_ops.rebuildFilter(session);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    image_gallery_ops.openAt(session, 0);
+    try std.testing.expect(session.image_gallery.open != null);
+    const before = session.image_gallery.count();
+
+    {
+        var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{line}, line.len * 2);
+    }
+    {
+        var spins: usize = 0;
+        while (spins < 200_000) : (spins += 1) _ = session.tick() catch {};
+    }
+    // 크게 보기가 살아 있고, 개수도 안 바뀌었다(갱신을 미뤘다).
+    try std.testing.expect(session.image_gallery.open != null);
+    try std.testing.expectEqual(before, session.image_gallery.count());
+}

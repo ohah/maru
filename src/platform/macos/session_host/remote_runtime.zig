@@ -6822,6 +6822,22 @@ pub const RemoteRuntime = struct {
             return error.ProtocolError;
         };
         defer obj.deinit();
+        // error envelope는 알려진 코드일 때만 "적용 안 됨"으로 접는다(모르는 코드 = schema 드리프트).
+        // host는 이 RPC의 실패를 **전부** typed error로 답한다 — `{"applied":false}`를 보내는 경로가
+        // server에 없다. 그래서 아래 success schema 검사에 걸리는 유일한 실제 응답이 error envelope이고,
+        // 이걸 계약 위반으로 읽으면 controller_generation 경합(재접속·exec 업그레이드) 같은 **정상**
+        // 거절이 connection poison으로, 다시 앱 abort(proof_loss)로 승격된다. 형제 디코더
+        // (selected_text/link_at/clipboard_write/notification)와 같은 모양을 지킨다.
+        if (obj.string("error")) |code| {
+            if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
+                runtime.poisonConnection(.peer_contract_violation);
+                return error.ProtocolError;
+            }
+            if (!builtin.is_test)
+                std.log.warn("host rejected config.update: code={s}", .{code});
+            output.* = false;
+            return;
+        }
         if (obj.boolean("applied") != true or obj.hasUnknownKey(&.{"applied"})) {
             runtime.poisonConnection(.peer_contract_violation);
             return error.ProtocolError;
@@ -8441,6 +8457,77 @@ test "remote runtime: clipboardWrite는 base64로 임의 바이트를 복원하�
     // 선언 밖 키·깨진 base64는 schema 드리프트로 fail-close 한다.
     try std.testing.expectError(error.ProtocolError, rr.decodeClipboardWriteResponse("{\"b64\":\"\",\"too_large\":0,\"extra\":\"x\"}"));
     try std.testing.expectError(error.ProtocolError, rr.decodeClipboardWriteResponse("{\"b64\":\"!!!!\",\"too_large\":0}"));
+}
+
+test "remote runtime: config.update의 typed error는 poison 없이 «적용 안 됨»으로 접힌다" {
+    const allocator = std.testing.allocator;
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var rr: RemoteRuntime = undefined;
+    try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner();
+    rr.allocator = allocator;
+
+    // host는 이 RPC의 실패를 전부 typed error로 답한다(`{"applied":false}` 경로가 server에 없다).
+    // 예전 디코더는 error envelope에 `applied`가 없다는 이유로 계약 위반으로 읽어 connection을
+    // poison했고, attachment가 전환 중이면 그 poison이 앱 abort(proof_loss)까지 승격됐다.
+    // 재접속·exec 업그레이드 중의 generation 경합은 **정상** 거절이므로 연결을 죽이지 않는다.
+    for ([_][]const u8{
+        "{\"error\":\"invalid_generation\"}",
+        "{\"error\":\"unauthorized\"}",
+        "{\"error\":\"runtime_not_found\"}",
+    }) |body| {
+        var applied = true;
+        try rr.applyNotificationConfigUpdateResponse(@ptrCast(&applied), body);
+        try std.testing.expect(!applied);
+        try std.testing.expect(client.first_poison_reason == null);
+    }
+
+    // 성공 schema는 그대로 적용된다.
+    var applied = false;
+    try rr.applyNotificationConfigUpdateResponse(@ptrCast(&applied), "{\"applied\":true}");
+    try std.testing.expect(applied);
+    try std.testing.expect(client.first_poison_reason == null);
+}
+
+test "remote runtime: config.update의 schema 드리프트는 여전히 연결을 닫는다" {
+    const allocator = std.testing.allocator;
+    // 모르는 error 코드와 선언 밖 키는 «같은 major» 불변식 위반이라 fail-close를 유지한다.
+    for ([_][]const u8{
+        "{\"error\":\"no_such_code\"}",
+        "{\"error\":\"unauthorized\",\"extra\":1}",
+        "{\"applied\":false}",
+        "{\"applied\":true,\"extra\":1}",
+        "{}",
+    }) |body| {
+        var client = client_mod.Client{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 1,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        defer client.deinit();
+        var rr: RemoteRuntime = undefined;
+        try testing_api.initializeGenerationForConnection(&rr, .{ .legacy = &client });
+        rr.pending_event_owner = .{};
+        rr.runtime_lifetime = .{};
+        try rr.initializePendingEventOwner();
+        rr.allocator = allocator;
+
+        var applied = false;
+        try std.testing.expectError(
+            error.ProtocolError,
+            rr.applyNotificationConfigUpdateResponse(@ptrCast(&applied), body),
+        );
+        try std.testing.expect(client.first_poison_reason != null);
+    }
 }
 
 test "remote runtime: 응답 객체 디코더는 strict다(escape·미종료·trailing·중복 키 거부)" {

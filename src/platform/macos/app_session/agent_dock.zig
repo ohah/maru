@@ -2224,4 +2224,43 @@ test "fade alpha 가 바뀌어도 발행 tree 는 불변이다(계약 §7 — �
         faint.tree.entries,
         faint.actions,
     ));
+
+    // **그리고 alpha 는 실제로 draw 에 반영돼야 한다**(적대적 검증 1회차 — tree 불변만 재면 「아무 데도
+    // 안 얹히는」 판도 통과한다). view 를 태워 스크롤바 quad 의 alpha 를 직접 본다.
+    var ops: [512]chrome.draw.Op = undefined;
+    var runs: [64]chrome.draw.Run = undefined;
+    var text_bytes: [4096]u8 = undefined;
+    // Tokens 는 팔레트가 필요하고 `Rgb` 가 비공개라 손으로 못 만든다 — 제품이 쓰는 자리를 그대로 빌린다.
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const tk = session.buildChromeTokens();
+    const drawn = try component.view.view(base, faint, .{}, &tk, .{
+        .ops = &ops,
+        .runs = &runs,
+        .text_bytes = &text_bytes,
+    });
+    const thumb_rect = faint.tree.entries[faint.tree.find(component.build.NodeIds.scroll_thumb).?].rect;
+    var saw_faint = false;
+    for (drawn.ops) |op| switch (op) {
+        .quad => |q| {
+            const qx: f32 = @floatFromInt(q.rect.x);
+            const qy: f32 = @floatFromInt(q.rect.y);
+            if (@abs(qx - thumb_rect.x) < 1.5 and @abs(qy - thumb_rect.y) < 1.5) {
+                try std.testing.expectEqual(@as(u8, 0x4D), q.alpha);
+                saw_faint = true;
+            }
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_faint); // thumb quad 를 실제로 찾았다 — 못 찾으면 위 단언이 헛돈다
 }

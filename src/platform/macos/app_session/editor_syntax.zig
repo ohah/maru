@@ -415,6 +415,24 @@ fn roleOf(capture: []const u8) ?tokens.ColorRole {
 
 // ── 판정자 ──────────────────────────────────────────────────────────────────────
 
+/// 판정자용 — 문서를 열고 **다 팔 때까지 몰아 준다**.
+///
+/// **왜 필요한가.** §2.1a 예산이 붙은 뒤로 `open` 은 파싱을 끝내지 않을 수 있다 — 예산(4ms) 안에
+/// 못 끝내면 `pending` 으로 남고 트리가 아직 없다. 제품은 프레임마다 `resumeParse` 가 이어 파므로
+/// 곧 색이 오지만, **판정자가 `open` 직후에 재면 "아직 안 굳은" 상태를 재게 된다**.
+///
+/// 실제로 그것이 CI 에서만 빨간 실패를 냈다(`ES7`, `expected 400, found 0`) — 로컬은 빠르게 끝나
+/// 초록이고 느린 러너에서만 예산을 넘겼다. 값이 틀린 게 아니라 **시간에 의존하는 측정**이었다.
+///
+/// 상한을 두는 이유는 방어다. `resumeParse` 는 provider 가 없으면 스스로 접고, 있으면 매 호출마다
+/// 파서가 앞으로 나아가므로 끝난다 — 그래도 무한 루프로 판정자가 멈추는 것보다 실패가 낫다.
+fn openParsed(source: []const u8, g: editor_language.Grammar) State {
+    var st = open(source, g);
+    var rounds: usize = 0;
+    while (st.pending and rounds < 100_000) : (rounds += 1) _ = resumeParse(&st, source);
+    return st;
+}
+
 const testing = std.testing;
 const edit_doc = maru.session.editor.edit_doc;
 
@@ -428,7 +446,7 @@ test "ES1 zig 문서를 열면 보이는 줄에 색이 붙는다 — 배선 전�
     var doc = try openDoc("const x = 1;\npub fn f() void {}\n");
     defer doc.deinit();
 
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider != null);
 
@@ -452,7 +470,7 @@ test "ES2 grammar 없는 언어는 무색이다 — provider 자체가 안 선�
     // 예였는데, 2026-08-29 에 열여덟이 실리며 CSS 에도 grammar 가 생겨 이 판정자가 깨졌다.
     // 판정자의 **의도**(번들 목록 밖은 무색이다)는 그대로이므로 예를 `.none` 으로 옮긴다 —
     // 그 값은 정의상 앞으로도 grammar 를 갖지 않는다.
-    var st = open(doc.content, .none);
+    var st = openParsed(doc.content, .none);
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider == null);
 
@@ -465,7 +483,7 @@ test "ES3 겹치는 캡처는 마지막이 이긴다 — 한 열에 역할이 �
     // 렌더가 run을 쪼갤 수 있고, 그 하나가 **뒤엣것**이라는 것이 이 모듈의 규칙이다.
     var doc = try openDoc("const x = 1;\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
@@ -485,7 +503,7 @@ test "ES4 탭이 있는 줄에서 색 경계가 열로 선다 — byte 가 아�
     // 색이 네 칸 왼쪽으로 밀린다(화면에만 나타나는 어긋남).
     var doc = try openDoc("\tconst x = 1;\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
@@ -525,7 +543,7 @@ test "ES6 겹침에서 마지막 캡처가 이긴다 — 값으로 잰다" {
     // `constant`(→`number`)가 이겨야 한다. 처음이 이기면 `type_name`이 된다.
     var doc = try openDoc("const x = 1;\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);
@@ -553,7 +571,7 @@ test "ES7 저장소가 자라도 앞줄 색이 안 매달린다 — 슬라이스
 
     var doc = try openDoc(buf);
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4);
@@ -578,7 +596,7 @@ test "ES8 화면이 문서 중간에서 시작해도 색이 그 줄에 붙는다
     // 그 결함이 안 보인다 — 적대적 검증에서 그 뮤턴트가 살아남았다.
     var doc = try openDoc("// a\n// b\n// c\nconst x = 1;\npub fn f() void {}\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 2, 4);
@@ -610,7 +628,7 @@ test "ES9 여러 줄 토큰은 줄마다 자기 줄 안에서 끝난다" {
     ;
     var doc = try openDoc(src);
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const n = doc.lines.lineCount();
@@ -640,7 +658,7 @@ test "ES10 색이 개행을 넘지 않는다 — 줄 끝이 내용 끝이다" {
     // 더 간다. 화면에서는 줄 끝에 **빈 칸 하나가 칠해진** 것으로 보인다(2회차 `E18`).
     var doc = try openDoc("// abc\nconst x = 1;\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4);
@@ -661,7 +679,7 @@ test "ES11 앞줄 색이 다음 줄로 안 샌다 — 짧은 줄 다음에 긴 �
     // 앞부분에 첫 줄의 주석 색이 남는다.
     var doc = try openDoc("// c\n    xyz = abcdefghijklmnop;\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4);
@@ -691,7 +709,7 @@ test "ES12 열 경계 방어가 두 겹이다 — 어느 하나를 지워도 화
     // 뮤턴트 결과만 보고 "안 쓰는 코드"라고 읽지 않게.
     var doc = try openDoc("const x = 1;\n");
     defer doc.deinit();
-    var st = open(doc.content, .zig);
+    var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
     const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4);

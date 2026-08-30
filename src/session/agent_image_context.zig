@@ -81,6 +81,33 @@ pub const Label = struct {
     }
 };
 
+/// 이 라벨이 검색어에 걸리는가. **대소문자를 가리지 않고 부분 일치**다.
+///
+/// 파일명(`dock-layout.png`)과 사람이 쓴 문장(「이 배치가 이상합니다」)이 한 목록에 섞여 있으므로,
+/// 접두사 일치로 좁히면 문장 쪽을 못 찾는다. 반대로 fuzzy 로 넓히면 151 장에서 관계없는 것이 잔뜩
+/// 걸린다 — 부분 일치가 그 사이다.
+///
+/// **빈 검색어는 전부 통과**다(필터가 꺼진 상태와 같다).
+///
+/// 대소문자 접기는 ASCII 만 한다. 한글에는 대소문자가 없고, 그 밖의 문자를 제대로 접으려면 유니코드
+/// 케이스 테이블이 필요한데 이 기능이 그것을 정당화하지 않는다.
+pub fn matches(label_text: []const u8, query: []const u8) bool {
+    if (query.len == 0) return true;
+    if (label_text.len < query.len) return false;
+    var i: usize = 0;
+    while (i + query.len <= label_text.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < query.len) : (j += 1) {
+            if (foldAscii(label_text[i + j]) != foldAscii(query[j])) break;
+        } else return true;
+    }
+    return false;
+}
+
+fn foldAscii(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
 const tool_use_id_key = "\"tool_use_id\":\"";
 const id_key = "\"id\":\"";
 const file_path_key = "\"file_path\":\"";
@@ -532,4 +559,26 @@ test "창의 첫 줄이 잘려 있어도 안전하다 — 반쪽 값을 쓰지 �
         \\{"payload":{"type":"function_call_output","call_id":"call_9","output":[{"type":"input_image","image_url":"data:image/png;base64,
     ;
     try testing.expectEqualStrings("ok.png", label(prefix, prev).text());
+}
+
+test "검색: 대소문자 없이 부분 일치, 빈 검색어는 전부" {
+    // 파일명과 사람이 쓴 문장이 한 목록에 섞여 있다 — 접두사만 보면 문장 쪽을 못 찾는다.
+    try testing.expect(matches("dock-layout.png", "dock"));
+    try testing.expect(matches("dock-layout.png", "LAYOUT")); // 대소문자 무시
+    try testing.expect(matches("dock-layout.png", ".png")); // 가운데·끝도 걸린다
+    try testing.expect(matches("이 화면 배치가 이상합니다", "배치"));
+    try testing.expect(!matches("dock-layout.png", "sidebar"));
+    // 빈 검색어 = 필터 꺼짐.
+    try testing.expect(matches("아무거나", ""));
+    try testing.expect(matches("", ""));
+    // 라벨이 비면(설명을 못 만든 이미지) 검색어가 있는 한 안 걸린다 — 지어내지 않는다.
+    try testing.expect(!matches("", "dock"));
+    // 검색어가 라벨보다 길면 걸릴 수 없다.
+    try testing.expect(!matches("ab", "abc"));
+}
+
+test "검색: 한글은 접지 않는다 — 바이트 그대로 본다" {
+    // 한글에는 대소문자가 없다. ASCII 접기가 한글 바이트를 건드리면 엉뚱한 것이 걸린다.
+    try testing.expect(matches("배치가 이상합니다", "이상"));
+    try testing.expect(!matches("배치가 이상합니다", "정상"));
 }

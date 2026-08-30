@@ -16,6 +16,7 @@ const AppSession = app_session_mod.AppSession;
 const dock_ops = @import("dock.zig");
 const pane_ops = @import("pane.zig");
 const agent_ops = @import("agent.zig");
+const chrome = maru.chrome;
 const index = maru.session.agent_image_index;
 const scan_backend = @import("../agent_image_scan_backend.zig");
 const image_decode = @import("../image_decode.zig");
@@ -33,6 +34,19 @@ pub const State = struct {
     /// 이 인덱스를 만든(또는 만들고 있는) 파일 **묶음**. 첫 파일이 현재 세션이고, 재개면 부모가
     /// 뒤에 붙는다(§3.3). 활성 Term 의 것과 첫 파일이 다르면 무효다.
     chain: index.Chain = .{},
+    /// 스캔이 찾은 **전부**. 필터의 원본이라 여기서는 아무것도 빼지 않는다.
+    all_hits: std.ArrayList(index.Hit) = .empty,
+    all_labels: std.ArrayList(context.Label) = .empty,
+    /// 검색어(+IME 조합). 비면 필터가 꺼진 것이고 `hits` 는 `all_hits` 와 같다.
+    ///
+    /// 사이드바·find·아카이브 검색과 **같은 `OverlayInput`** 이다 — 한글은 IME 조합으로 들어오므로
+    /// 직접 만든 바이트 버퍼로는 애초에 못 받는다. 거르는 데 쓰는 것은 확정된 `query` 뿐이고
+    /// `preedit` 는 그리기 전용이다(아카이브 검색과 같은 규율).
+    search: chrome.components.overlay_input.OverlayInput = .{},
+    /// 검색창이 키를 받고 있나.
+    search_active: bool = false,
+    /// **지금 보여줄 것**. 필터를 여기에 적용하므로 인덱스 도메인이 하나다 — 타일·크게보기·호버가
+    /// 「전체 인덱스인가 표시 인덱스인가」를 물을 필요가 없다.
     hits: std.ArrayList(index.Hit) = .empty,
     /// `hits` 와 **같은 순서·같은 길이**. 스캔 워커가 함께 만든다(§2.2) — 필터가 전부의 라벨을
     /// 필요로 하는데 main actor 에서 읽으면 실측 40.2 ms 다.
@@ -80,6 +94,9 @@ pub const State = struct {
         self.dropOpen(allocator);
         self.hits.deinit(allocator);
         self.labels.deinit(allocator);
+        self.all_hits.deinit(allocator);
+        self.all_labels.deinit(allocator);
+        self.search.deinit(allocator);
         self.dropTiles(allocator);
         self.tiles.deinit(allocator);
         self.* = .{};
@@ -112,6 +129,10 @@ pub const State = struct {
         self.dropTiles(allocator);
         self.hits.clearAndFree(allocator);
         self.labels.clearAndFree(allocator);
+        self.all_hits.clearAndFree(allocator);
+        self.all_labels.clearAndFree(allocator);
+        self.search.clear();
+        self.search_active = false;
         self.chain.clear();
         self.partial = false;
         self.scanned_bytes = 0;
@@ -149,6 +170,35 @@ pub const State = struct {
             }
             allocator.free(self.tiles.items[worst].pixels);
             _ = self.tiles.swapRemove(worst);
+        }
+    }
+
+    /// 지금 **거르는 데 쓰는** 검색어. 조합 중인 글자(`preedit`)는 아직 확정이 아니라 뺀다.
+    pub fn queryText(self: *const State) []const u8 {
+        return self.search.query.items;
+    }
+
+    /// 검색어에 맞는 것만 `hits`/`labels` 에 남긴다. **원본은 안 건드린다.**
+    ///
+    /// 실패(할당)하면 **필터를 끈 상태**로 되돌린다 — 걸러진 목록을 반쯤 만들어 두면 사용자는 왜 어떤
+    /// 이미지가 사라졌는지 알 수 없다. 전부 보여주는 쪽이 정직하다.
+    pub fn applyFilter(self: *State, allocator: std.mem.Allocator) void {
+        self.hits.clearRetainingCapacity();
+        self.labels.clearRetainingCapacity();
+        const q = self.queryText();
+        const paired = self.all_labels.items.len == self.all_hits.items.len;
+        for (self.all_hits.items, 0..) |hit, i| {
+            const label: context.Label = if (paired) self.all_labels.items[i] else .{};
+            if (q.len > 0 and !context.matches(label.text(), q)) continue;
+            self.hits.append(allocator, hit) catch {
+                self.search.clear();
+                self.hits.clearRetainingCapacity();
+                self.labels.clearRetainingCapacity();
+                self.hits.appendSlice(allocator, self.all_hits.items) catch {};
+                self.labels.appendSlice(allocator, self.all_labels.items) catch {};
+                return;
+            };
+            self.labels.append(allocator, label) catch {};
         }
     }
 
@@ -199,6 +249,9 @@ pub const Open = struct {
 /// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
 /// 사이에 둔다 — 같은 텍스처 캐시를 쓰므로 id 가 겹치면 남의 그림이 나온다.
 pub const gallery_image_id_base: u32 = 0xFFF0_0000;
+
+/// 검색어 상한(바이트). 아카이브 검색과 같은 값이다.
+pub const max_query_bytes: usize = 256;
 
 /// 동시에 픽셀을 들고 있는 타일 수 상한. 장당 0.06 MB 이므로 256장이면 15 MB 다.
 pub const max_tiles: usize = 256;
@@ -366,23 +419,25 @@ pub fn poll(self: *AppSession) void {
         result.deinit(self.allocator);
         return;
     }
-    self.image_gallery.hits.deinit(self.allocator);
-    self.image_gallery.hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
-    self.image_gallery.labels.deinit(self.allocator);
-    self.image_gallery.labels = result.labels;
+    self.image_gallery.all_hits.deinit(self.allocator);
+    self.image_gallery.all_hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
+    self.image_gallery.all_labels.deinit(self.allocator);
+    self.image_gallery.all_labels = result.labels;
     // 길이가 어긋나면 라벨을 통째로 버린다 — 남의 이미지에 붙은 설명보다 없는 편이 낫다.
-    if (self.image_gallery.labels.items.len != self.image_gallery.hits.items.len) {
-        self.image_gallery.labels.clearRetainingCapacity();
+    if (self.image_gallery.all_labels.items.len != self.image_gallery.all_hits.items.len) {
+        self.image_gallery.all_labels.clearRetainingCapacity();
     }
     // **최신이 먼저다.** 스캐너는 파일 순서(= 오래된 것부터)로 담는데, 이 기능의 물음은
     // 「**아까** 그 스크린샷 어디 갔지」다. 실제 세션으로 재 보니 151 장 중 4 장만 보이는데
     // 그 4 장이 세션 맨 처음 것이었다 — 목적과 정확히 반대였다(합성 픽스처는 4 장이 다 보여
     // 이 결함을 원리적으로 못 본다).
-    std.mem.reverse(index.Hit, self.image_gallery.hits.items);
+    std.mem.reverse(index.Hit, self.image_gallery.all_hits.items);
     // **라벨도 같이 뒤집는다.** 안 뒤집으면 첫 칸에 마지막 이미지의 설명이 붙는다.
-    if (self.image_gallery.labels.items.len == self.image_gallery.hits.items.len) {
-        std.mem.reverse(context.Label, self.image_gallery.labels.items);
+    if (self.image_gallery.all_labels.items.len == self.image_gallery.all_hits.items.len) {
+        std.mem.reverse(context.Label, self.image_gallery.all_labels.items);
     }
+    // 원본이 바뀌었으니 보여줄 목록을 다시 만든다(검색어가 비면 전부).
+    self.image_gallery.applyFilter(self.allocator);
     // **인덱스가 갈리면 그 위에 쌓인 것도 버린다.** 지금은 `refresh` 가 `clear` 를 먼저 하므로
     // 여기 도달할 때 둘 다 비어 있지만, 그 순서에 기대면 나중에 점진 publish 를 붙이는 순간
     // 타일과 크게 보기가 **옛 인덱스**를 가리킨 채 남는다 — 「엉뚱한 이미지가 뜬다」로 보이지
@@ -505,6 +560,7 @@ pub fn onSourceChanged(self: *AppSession) void {
 
 /// 갤러리를 떠날 때. 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
 pub fn onLeaveView(self: *AppSession) void {
+    self.image_gallery.search_active = false;
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
     backend.cancel();
@@ -613,6 +669,7 @@ pub fn openAt(self: *AppSession, n: usize) void {
 /// 본다 — 151 장짜리 실제 세션에서는 그 차이가 크다.
 pub fn navigateOpen(self: *AppSession, delta: i32) bool {
     if (!ownsKeys(self)) return false;
+    if (self.image_gallery.search_active) return false; // 타이핑 중 화살표는 검색창 것이다
     const op = if (self.image_gallery.open) |o| o else return false;
     const count = self.image_gallery.count();
     if (count == 0) return false;
@@ -681,6 +738,115 @@ pub fn panDrag(self: *AppSession, dx: f64, dy: f64) void {
     if (!std.math.isFinite(dx) or !std.math.isFinite(dy)) return;
     op.view = image_view.panBy(op.view, viewportRect(self), op.width, op.height, @floatCast(dx), @floatCast(dy));
     self.metal_dirty = true;
+}
+
+/// 검색어가 바뀐 뒤 목록을 다시 만든다.
+///
+/// **그 위에 쌓인 것을 전부 버린다.** 타일·크게보기·호버는 옛 인덱스를 가리키고 필터는 순서를 통째로
+/// 바꾼다 — 안 버리면 「엉뚱한 이미지가 뜬다」가 되는데 그 증상은 원인을 짐작하기 어렵다. 스크롤도
+/// 처음으로 돌린다(걸러진 목록의 세 번째 행부터 보여 줄 이유가 없다).
+pub fn rebuildFilter(self: *AppSession) void {
+    self.image_gallery.applyFilter(self.allocator);
+    self.image_gallery.dropTiles(self.allocator);
+    self.image_gallery.dropOpen(self.allocator);
+    self.image_gallery.hovered = null;
+    self.image_gallery.scroll = .{};
+    self.metal_dirty = true;
+}
+
+/// 검색창을 연다(⌘F). 갤러리를 보고 있을 때만 뜻이 있다.
+pub fn focusSearch(self: *AppSession) bool {
+    // **갤러리가 키를 쥐고 있을 때만**이다. 도크가 보인다는 것만으로 열면, 터미널에 타이핑하던 사용자의
+    // ⌘F 가 터미널 찾기 대신 갤러리 검색을 연다.
+    if (!ownsKeys(self)) return false;
+    self.image_gallery.search_active = true;
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 검색창이 키·IME 를 쥐고 있나. `AppSession.inputFocus` 의 유일한 근거다 — 조합 글자가 뒤 터미널로
+/// 새지 않으려면 이 판정이 focus 표에 올라 있어야 한다(설정 검색이 한때 빠져 있어 새던 그 자리다).
+pub fn searchOwnsInput(self: *const AppSession) bool {
+    return self.image_gallery.search_active and ownsKeys(self);
+}
+
+/// 검색창이 키를 받는다. 소비했으면 `true`.
+///
+/// **검색 중에는 Esc 도 화살표도 검색창 것이다** — 타이핑하다 Esc 로 검색을 접는 것이 자연스럽고,
+/// 그 사이 크게 보기 넘기기가 끼어들면 놀랍다. 여기 오는 `.char` 는 ASCII 직접 입력뿐이고, 한글을
+/// 비롯한 조합 입력은 `imeSetPreedit`/`commitPreedit` 로 들어온다.
+pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
+    if (!searchOwnsInput(self)) {
+        self.image_gallery.search_active = false; // 뷰가 바뀌었다 — 창은 닫고 키는 넘긴다
+        return false;
+    }
+    switch (event.key) {
+        .escape => {
+            // 첫 Esc 는 **검색어만** 지운다(창은 열어 둔다). 다 지운 뒤 Esc 면 창을 닫는다 —
+            // 한 번에 닫으면 오타 하나 물리려다 검색을 통째로 잃는다.
+            if (self.image_gallery.search.query.items.len > 0 or
+                self.image_gallery.search.preedit.items.len > 0)
+            {
+                self.image_gallery.search.clear();
+                rebuildFilter(self);
+            } else {
+                self.image_gallery.search_active = false;
+                self.metal_dirty = true;
+            }
+        },
+        .enter => {
+            // 확정 = 창만 닫고 **검색어는 유지**한다. 걸러진 목록에서 그대로 고르게 된다.
+            self.image_gallery.search_active = false;
+            self.metal_dirty = true;
+        },
+        .backspace => {
+            if (self.image_gallery.search.query.items.len == 0) return true;
+            self.image_gallery.search.backspace(); // codepoint 단위 — 바이트로 지우면 한글이 깨진다
+            rebuildFilter(self);
+        },
+        .char => |codepoint| {
+            if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return false;
+            if (self.image_gallery.search.query.items.len + 4 > max_query_bytes) return true;
+            self.image_gallery.search.appendChar(self.allocator, codepoint) catch return true;
+            rebuildFilter(self);
+        },
+        // **그 밖의 키는 삼키지 않는다.** 검색 중이라는 이유로 전부 먹으면 도크에서 나갈 길이 막힌다.
+        else => return false,
+    }
+    return true;
+}
+
+/// IME 후보창을 띄울 자리 — 검색줄 caret 셀. 검색 중이 아니면 `null`(터미널 커서로 폴백).
+///
+/// **조합 중인 글자 뒤에 둔다**: 후보창이 preedit 앞에 붙으면 한글을 고르는 동안 후보창이 자기가 친
+/// 글자를 가린다.
+/// 검색줄이 쓸 수 있는 칸 수. 알림 줄과 **같은 폭**이다(같은 자리를 쓰므로).
+fn searchLineCols(self: *const AppSession) u32 {
+    const cw = self.cell_width_px;
+    if (cw == 0) return 0;
+    return dock_ops.dockGeometry(self).tree_content.w / cw;
+}
+
+pub fn searchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
+    if (!searchOwnsInput(self)) return null;
+    const cw = self.cell_width_px;
+    const ch = self.cell_height_px;
+    if (cw == 0 or ch == 0) return null;
+    const content = dock_ops.dockGeometry(self).tree_content;
+    // 그려진 줄(`noticeText`)과 **같은 셈법**이어야 한다 — 다르면 후보창이 글자와 어긋난 자리에 뜬다.
+    const prompt_cols = chrome.components.overlay_input.displayCols(maru.i18n.t(.image_gallery_search_prompt));
+    const pre_cols = chrome.components.overlay_input.displayCols(self.image_gallery.search.preedit.items);
+    const text_cols = searchLineCols(self) -| prompt_cols;
+    const q_tail = chrome.components.overlay_input.tailWindow(self.image_gallery.search.query.items, text_cols -| pre_cols);
+    const cols = prompt_cols +| chrome.components.overlay_input.displayCols(q_tail.text) +| pre_cols;
+    // 줄 끝을 넘지 않게 — 넘으면 후보창이 도크 밖에 뜬다.
+    const max_x = content.x +| content.w -| cw;
+    return .{
+        .x = @intCast(@min(content.x +| cols *| cw, max_x)),
+        .y = @intCast(content.y),
+        .w = cw,
+        .h = ch,
+    };
 }
 
 /// 갤러리가 키보드를 쥐고 있나. 에이전트 도크와 같은 게이트다 — 이것이 없으면 터미널로 돌아간 뒤의
@@ -1159,6 +1325,20 @@ pub fn appendGpuImages(
 /// **넷을 가른다** — 「에이전트가 없다」·「세는 중」·「훑었는데 없다」·「못 봤다」. 접으면 사용자가
 /// «이미지가 없는 것» 과 «아직 세는 중» 과 «갤러리가 고장난 것» 을 구분할 수 없다.
 pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
+    // **검색줄이 가장 먼저다.** 타이핑 중인데 「12장 중 8장」이 떠 있으면 자기가 친 글자를 못 본다.
+    // 조합 중인 글자(`preedit`)도 붙여 그린다 — 한글은 확정 전에 보이지 않으면 못 친다.
+    if (searchOwnsInput(self)) {
+        const prompt = maru.i18n.t(.image_gallery_search_prompt);
+        const q = self.image_gallery.search.query.items;
+        const pre = self.image_gallery.search.preedit.items;
+        // 도크는 좁다. 길어지면 **뒤쪽**을 보인다 — 앞을 보이면 방금 친 글자가 화면 밖이라 자기가
+        // 무엇을 치고 있는지 알 수 없다(`tailWindow` 가 아카이브 검색에서 하는 것과 같은 일).
+        const line_cols = searchLineCols(self);
+        const prompt_cols = chrome.components.overlay_input.displayCols(prompt);
+        const text_cols = line_cols -| prompt_cols;
+        const q_tail = chrome.components.overlay_input.tailWindow(q, text_cols -| chrome.components.overlay_input.displayCols(pre));
+        return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ prompt, q_tail.text, pre }) catch buf[0..0];
+    }
     // **크게 보기가 먼저다.** 열려 있으면 격자 개수는 지금 사용자가 보는 것과 무관하다.
     if (self.image_gallery.open) |op| {
         if (op.pixels.len > 0) return "";
@@ -1177,7 +1357,12 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     if (self.image_gallery.partial and (n > 0 or self.image_gallery.scanned_bytes == 0)) {
         return maru.i18n.t(.image_gallery_partial);
     }
-    if (n == 0) return maru.i18n.t(.image_gallery_empty);
+    if (n == 0) {
+        // 거르고 있는데 0 이면 「세션에 이미지가 없다」가 **아니다**. 그렇게 말하면 사용자는 검색어를
+        // 지울 생각을 못 하고 갤러리가 고장났다고 읽는다.
+        if (self.image_gallery.queryText().len > 0) return maru.i18n.t(.image_gallery_no_match);
+        return maru.i18n.t(.image_gallery_empty);
+    }
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
     // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.
     if (self.image_gallery.tiles.items.len > 0) {

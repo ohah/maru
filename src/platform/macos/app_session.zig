@@ -43159,8 +43159,25 @@ test "file tree ET-CWD: 자동 root 전환은 mutation·비탐색기 view에서 
     try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?); // 표시하지 않는다 → 재시도가 남는다
     try std.testing.expect(session.file_tree.rootIsExactly(away)); // 트리는 그대로다
 
-    // ④ 탐색기로 돌아오면 **`cd` 없이도** 그 tick이 밀린 전환을 건다.
+    //    **미룰 때는 스크롤 pending도 끈다.** 살려 두면 지금 cwd와 무관한 옛 대상으로 스크롤한다 —
+    //    이 단언이 없으면 그 클리어를 지워도 테스트가 통과한다(적대적 검증 1회차).
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
+
+    // ④ **제출 자체가 실패해도 재시도로 남긴다.** `provideFileTreeRootPick`은 backend busy·할당 실패·
+    //    request id 소진에서 검증을 안 세우고 조용히 빠져나온다(자동 경로라 알림도 없다). 그때 이 cwd를
+    //    "따라간 것"으로 표시하면 다음 `cd` 전까지 영영 재시도되지 않는다 — §1.1의 규율과 같은 상황인데
+    //    실패 지점만 한 단계 안쪽이다(적대적 검증 2회차가 잡은 실제 버그).
     session.dock.view = .explorer;
+    const saved_request_id = session.file_tree_root_request_id;
+    session.file_tree_root_request_id = std.math.maxInt(u64); // request id 소진 경로를 강제한다
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation == null); // 검증은 안 걸렸고
+    try std.testing.expectEqual(FileTreeRootOutcome.request_id_exhausted, file_panel_ops.fileTreeRootOutcome(session));
+    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?); // followed로 표시하지 않는다
+    session.file_tree_root_request_id = saved_request_id;
+    session.file_tree_root_outcome = .none;
+
+    // ⑤ 조건이 풀리면 **`cd` 없이도** 그 tick이 밀린 전환을 건다.
     try file_panel_ops.updateFileTree(session);
     {
         const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
@@ -43192,6 +43209,11 @@ test "file tree ET-CWD: root는 활성 pane cwd를 그대로 따라간다 (하�
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(session.io, "project", .default_dir);
+    // **project를 실제 저장소로 만든다.** 이게 없으면 `repoRootFor`가 어차피 null을 돌려줘 cwd로 떨어지고,
+    // 그러면 "저장소 루트로 올려 세우지 않는다"는 이 슬라이스의 절반이 **테스트로 고정되지 않는다** —
+    // `followRootSwitch`에 옛 `repoRootFor(cwd) orelse cwd`를 되돌려 놔도 초록이었다(적대적 검증 1회차).
+    // `repoRootFor`는 `<dir>/.git`의 존재만 보므로 빈 디렉터리로 충분하다.
+    try tmp.dir.createDir(session.io, "project/.git", .default_dir);
     try tmp.dir.createDir(session.io, "project/one", .default_dir);
     try tmp.dir.createDir(session.io, "project/two", .default_dir);
     try tmp.dir.createDir(session.io, "outside", .default_dir);
@@ -43222,8 +43244,9 @@ test "file tree ET-CWD: root는 활성 pane cwd를 그대로 따라간다 (하�
     try std.testing.expectEqualStrings(project, session.file_tree_followed_cwd.?);
     try std.testing.expectEqual(generation_before, session.file_tree.rootGeneration());
 
-    // ② **하위로 들어가도 교체한다** — 이 슬라이스의 핵심이다. 옛 계약에서는 root 안이라 reveal만 했고,
-    //    그 규칙이 홈에서 흡수 상태를 만들었다.
+    // ② **하위로 들어가도 교체하고, 저장소 루트로 올려 세우지 않는다** — 이 슬라이스의 핵심 둘이 여기서
+    //    함께 닫힌다. 옛 계약에서는 root 안이라 reveal만 했고(교체 없음), 그 앞 판은 교체하되 `project`(=
+    //    저장소 루트)를 세웠다. 지금은 `one`이 그대로 root다.
     try testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
     {
@@ -43234,11 +43257,19 @@ test "file tree ET-CWD: root는 활성 pane cwd를 그대로 따라간다 (하�
     }
     try testWaitForFileTreeRootCompletion(session);
     try std.testing.expect(session.file_tree.rootIsExactly(one)); // ★ 트리 최상위가 곧 cwd다
+    try std.testing.expect(!session.file_tree.rootIsExactly(project)); // ★ 저장소 루트로 올라가지 않았다
     try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
 
     // ③ 관측은 tick마다 같은 cwd를 되풀이한다. 같은 값에서 또 교체를 걸면 트리가 매 프레임 재구성된다.
+    //    **교체가 없다는 것만으로는 부족하다** — `followed_cwd` 대조를 지워도 `rootIsExactly`가 참이라
+    //    교체는 여전히 안 걸리고, 대신 매 tick 재투영과 스크롤 보정이 돈다(사용자에게는 트리가 계속
+    //    깜빡이고 스크롤이 안 잡히는 것으로 보인다). 그래서 그 둘을 함께 고정한다(적대적 검증 1회차).
+    session.file_tree_rows_dirty = false;
+    session.file_tree_follow_scroll_pending = false;
     try file_panel_ops.updateFileTree(session);
     try std.testing.expect(session.file_tree_root_validation == null);
+    try std.testing.expect(!session.file_tree_rows_dirty);
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
 
     // ④ 형제로 이동 — 공통 조상으로 올려 세우지 않고 그 폴더 자체가 root다.
     try testWriteActiveTermCwd(session, two);

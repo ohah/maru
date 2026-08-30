@@ -90,8 +90,8 @@ const IDWriteFontFamily = extern struct {
         Release: *const anyopaque,
         // IDWriteFontList
         GetFontCollection: *const anyopaque,
-        GetFontCount: *const anyopaque,
-        GetFont: *const anyopaque,
+        GetFontCount: *const fn (*IDWriteFontFamily) callconv(abi.winapi) UINT,
+        GetFont: *const fn (*IDWriteFontFamily, UINT, *?*IDWriteFont) callconv(abi.winapi) HRESULT,
         // IDWriteFontFamily
         GetFamilyNames: *const anyopaque,
         GetFirstMatchingFont: *const fn (*IDWriteFontFamily, UINT, UINT, UINT, *?*IDWriteFont) callconv(abi.winapi) HRESULT,
@@ -133,6 +133,10 @@ const IDWriteFontFace = extern struct {
         GetGlyphCount: *const anyopaque,
         GetDesignGlyphMetrics: *const fn (*IDWriteFontFace, [*]const u16, UINT, [*]GlyphMetrics, BOOL) callconv(abi.winapi) HRESULT,
         GetGlyphIndices: *const fn (*IDWriteFontFace, [*]const u32, UINT, [*]u16) callconv(abi.winapi) HRESULT,
+        /// 슬롯 12. OpenType 테이블 하나를 **빌려 온다**. 성공하면 `ctx` 를 `ReleaseFontTable` 로
+        /// 돌려줘야 한다 — 안 그러면 face 가 그 메모리를 붙들고 있는다.
+        TryGetFontTable: *const fn (*IDWriteFontFace, UINT, *?*const anyopaque, *UINT, *?*anyopaque, *BOOL) callconv(abi.winapi) HRESULT,
+        ReleaseFontTable: *const fn (*IDWriteFontFace, *anyopaque) callconv(abi.winapi) void,
     };
 };
 
@@ -490,6 +494,122 @@ pub fn grayFromClearType(r: u8, g: u8, b: u8) u8 {
     return @intCast((@as(u32, r) + @as(u32, g) + @as(u32, b)) / 3);
 }
 
+/// OpenType `name` 테이블 태그. `DWRITE_MAKE_OPENTYPE_TAG` 와 같은 바이트 순서다(첫 글자가 최하위).
+const tag_name: UINT = @as(UINT, 'n') | (@as(UINT, 'a') << 8) | (@as(UINT, 'm') << 16) | (@as(UINT, 'e') << 24);
+
+fn readBe16(bytes: []const u8, at: usize) ?u16 {
+    if (at + 2 > bytes.len) return null;
+    return std.mem.readInt(u16, bytes[at..][0..2], .big);
+}
+
+/// OpenType `name` 테이블에서 **PostScript 이름**(name ID 6)을 꺼낸다. 없으면 `null`.
+///
+/// **이름 하나가 face 를 하나로 정해야 한다.** measured 크롬 텍스트는 폰트를
+/// `FontIdentity.postscript_name` 으로 가리키고, 래스터라이저는 그 이름으로 face 를 되찾아 셰이퍼가
+/// 정한 **글리프 번호**를 굽는다. 글리프 번호는 face 마다 다르므로, 이름이 face 를 못 정하면 다른
+/// face 의 번호를 굽는다. **family 이름은 그 일을 못 한다** — 같은 family 의 Regular 와 Bold 는 다른
+/// face 다. 실측(§2m.90): 굵은 도크 제목이 Regular 로 구워져 글자가 **한 칸씩 밀려** 나왔다.
+/// PostScript 이름은 face 마다 다르므로 그 일을 한다.
+///
+/// 표는 OpenType `name` 명세 그대로다 — 헤더 6 바이트(version·count·storageOffset) 뒤에 12 바이트
+/// NameRecord 가 count 개, 문자열은 `storageOffset + stringOffset` 에 있고 전부 big-endian 이다.
+/// **Windows 판(platform 3)을 먼저** 본다(UTF-16BE, 거의 모든 폰트에 있다). 없으면 Macintosh 판
+/// (platform 1, 1 바이트). PostScript 이름은 명세가 ASCII 로 제한하므로 그 밖의 바이트가 나오면 그
+/// 레코드를 버린다 — **깨진 이름을 쓰면 엉뚱한 face 에 붙는다**.
+pub fn postScriptNameFromNameTable(bytes: []const u8, out: []u8) ?[]const u8 {
+    if (postScriptNameForPlatform(bytes, 3, out)) |s| return s;
+    return postScriptNameForPlatform(bytes, 1, out);
+}
+
+fn postScriptNameForPlatform(bytes: []const u8, want_platform: u16, out: []u8) ?[]const u8 {
+    const count = readBe16(bytes, 2) orelse return null;
+    const storage = readBe16(bytes, 4) orelse return null;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const rec = 6 + @as(usize, i) * 12;
+        if (rec + 12 > bytes.len) return null;
+        if ((readBe16(bytes, rec) orelse return null) != want_platform) continue;
+        if ((readBe16(bytes, rec + 6) orelse return null) != 6) continue; // nameID 6 = PostScript 이름
+        const len: usize = readBe16(bytes, rec + 8) orelse return null;
+        const off: usize = @as(usize, storage) + (readBe16(bytes, rec + 10) orelse return null);
+        const step: usize = if (want_platform == 3) 2 else 1;
+        if (len == 0 or len % step != 0 or off + len > bytes.len) continue;
+        const raw = bytes[off..][0..len];
+        var n: usize = 0;
+        var k: usize = 0;
+        const ok = while (k < raw.len) : (k += step) {
+            const c = raw[k + step - 1];
+            if (step == 2 and raw[k] != 0) break false;
+            if (c < 0x20 or c > 0x7e or n == out.len) break false;
+            out[n] = c;
+            n += 1;
+        } else true;
+        if (ok and n > 0) return out[0..n];
+    }
+    return null;
+}
+
+/// face 하나의 PostScript 이름. **컬렉션이 필요 없다** — 파일에서 바로 연 번들 face 와 시스템 face 가
+/// 같은 길을 쓴다(`IDWriteFont` 를 거치면 파일 face 는 답을 못 얻는다).
+fn facePostScriptName(face: *IDWriteFontFace, out: []u8) ?[]const u8 {
+    var data: ?*const anyopaque = null;
+    var size: UINT = 0;
+    var ctx: ?*anyopaque = null;
+    var exists: BOOL = 0;
+    if (d3d11.failed(face.vtable.TryGetFontTable(face, tag_name, &data, &size, &ctx, &exists))) return null;
+    // **빌린 것은 성공/실패와 무관하게 돌려준다.** `exists = 0` 이어도 `ctx` 가 올 수 있다.
+    defer if (ctx) |cx| face.vtable.ReleaseFontTable(face, cx);
+    if (exists == 0 or size == 0) return null;
+    const raw = data orelse return null;
+    return postScriptNameFromNameTable(@as([*]const u8, @ptrCast(raw))[0..size], out);
+}
+
+test "postScriptNameFromNameTable: Windows 판을 먼저 읽는다" {
+    // 레코드 둘 — Macintosh(platform 1) 가 앞, Windows(platform 3) 가 뒤. 뒤엣것이 이겨야 한다.
+    const mac = "MacName";
+    const win = "WinName";
+    var t: [6 + 12 * 2 + 7 + 14]u8 = undefined;
+    const storage: u16 = 6 + 12 * 2;
+    std.mem.writeInt(u16, t[0..2], 0, .big);
+    std.mem.writeInt(u16, t[2..4], 2, .big);
+    std.mem.writeInt(u16, t[4..6], storage, .big);
+    inline for (.{ .{ 6, 1, 0, mac.len, 0 }, .{ 18, 3, 1, win.len * 2, mac.len } }) |r| {
+        std.mem.writeInt(u16, t[r[0]..][0..2], r[1], .big); // platform
+        std.mem.writeInt(u16, t[r[0] + 2 ..][0..2], r[2], .big); // encoding
+        std.mem.writeInt(u16, t[r[0] + 4 ..][0..2], 0, .big); // language
+        std.mem.writeInt(u16, t[r[0] + 6 ..][0..2], 6, .big); // nameID
+        std.mem.writeInt(u16, t[r[0] + 8 ..][0..2], @intCast(r[3]), .big); // length
+        std.mem.writeInt(u16, t[r[0] + 10 ..][0..2], @intCast(r[4]), .big); // offset
+    }
+    @memcpy(t[storage..][0..mac.len], mac);
+    for (win, 0..) |c, i| {
+        t[storage + mac.len + i * 2] = 0;
+        t[storage + mac.len + i * 2 + 1] = c;
+    }
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("WinName", postScriptNameFromNameTable(&t, &out).?);
+    // Windows 판을 지우면(count 를 1 로) Macintosh 판으로 내려간다 — 차선이 살아 있다는 뜻.
+    std.mem.writeInt(u16, t[2..4], 1, .big);
+    try std.testing.expectEqualStrings("MacName", postScriptNameFromNameTable(&t, &out).?);
+}
+
+test "postScriptNameFromNameTable: 못 믿을 표는 null 이다" {
+    var out: [64]u8 = undefined;
+    try std.testing.expect(postScriptNameFromNameTable("", &out) == null);
+    try std.testing.expect(postScriptNameFromNameTable(&[_]u8{ 0, 0, 0, 9, 0, 6 }, &out) == null); // 레코드가 없다
+    // nameID 가 6 이 아니면(= family 이름 자리) 안 준다 — 그 혼동이 이 결함의 뿌리였다.
+    var t: [6 + 12 + 4]u8 = @splat(0);
+    std.mem.writeInt(u16, t[2..4], 1, .big);
+    std.mem.writeInt(u16, t[4..6], 18, .big);
+    std.mem.writeInt(u16, t[6..8], 1, .big); // platform 1
+    std.mem.writeInt(u16, t[12..14], 1, .big); // nameID 1 = family
+    std.mem.writeInt(u16, t[14..16], 4, .big);
+    @memcpy(t[18..], "Abcd");
+    try std.testing.expect(postScriptNameFromNameTable(&t, &out) == null);
+    std.mem.writeInt(u16, t[12..14], 6, .big);
+    try std.testing.expectEqualStrings("Abcd", postScriptNameFromNameTable(&t, &out).?);
+}
+
 /// DirectWrite로 글리프를 그리는 래스터라이저. 중립 계약(`renderer/glyph_raster.zig`의 덕 타이핑
 /// `rasterize`)에 맞출 수 있도록 **코드포인트 하나 → RGBA8 버퍼 하나**를 하는 함수를 노출한다.
 pub const Rasterizer = struct {
@@ -506,6 +626,14 @@ pub const Rasterizer = struct {
     /// 접혀 **화면에 글자가 하나도 안 나온다**(실측으로 그렇게 됐다).
     face_names: [max_faces][64]u8 = @splat(@splat(0)),
     face_name_len: [max_faces]usize = @splat(0),
+    /// 열린 face 마다의 **PostScript 이름**. `face_names` 는 우리가 **찾을 때 쓴 family 이름**이라
+    /// face 를 하나로 못 정한다(같은 family 의 Regular·Bold). 셰이퍼가 싣는 신원은 이쪽이다
+    /// (`postScriptNameFromNameTable` 의 doc, §2m.90).
+    face_ps_names: [max_faces][64]u8 = @splat(@splat(0)),
+    face_ps_name_len: [max_faces]usize = @splat(0),
+    /// 시스템 폰트 컬렉션. **`create` 가 끝난 뒤에도 들고 있다** — 셰이퍼가 우리가 안 연 face
+    /// (같은 family 의 다른 굵기)로 셰이핑하면 그때 그 face 를 열어야 한다.
+    system: ?*IDWriteFontCollection = null,
     /// 실제로 고른 주 폰트 이름(진단·보고용). `family_name_buf`를 가리킨다.
     family: []const u8,
     family_name_buf: [128]u8 = undefined,
@@ -519,10 +647,19 @@ pub const Rasterizer = struct {
     design: DesignMetrics = .{},
     allocator: std.mem.Allocator,
 
-    fn rememberFaceName(self: *Rasterizer, index: usize, name: []const u8) void {
+    fn rememberFaceName(self: *Rasterizer, index: usize, name: []const u8, face: *IDWriteFontFace) void {
         const n = @min(name.len, self.face_names[index].len);
         @memcpy(self.face_names[index][0..n], name[0..n]);
         self.face_name_len[index] = n;
+        // PostScript 이름은 **없을 수 있다**(테이블이 없거나 ASCII 밖) — 그러면 0 이고,
+        // `faceIndexForName` 이 family 이름으로 내려간다(예전 동작).
+        self.face_ps_name_len[index] = 0;
+        var buf: [64]u8 = undefined;
+        if (facePostScriptName(face, &buf)) |ps| {
+            const m = @min(ps.len, self.face_ps_names[index].len);
+            @memcpy(self.face_ps_names[index][0..m], ps[0..m]);
+            self.face_ps_name_len[index] = m;
+        }
     }
 
     /// 이름으로 열린 face 를 찾는다. **measured 텍스트가 쓰는 길이다** — 그쪽은 폰트를
@@ -530,11 +667,81 @@ pub const Rasterizer = struct {
     ///
     /// 대소문자를 무시한다 — DirectWrite 가 돌려주는 가족 이름과 config·티어에 적힌 이름이 늘 같은
     /// 표기는 아니다(`fallbackCandidates` 도 같은 이유로 그렇게 비교한다).
-    pub fn faceIndexForName(self: *const Rasterizer, name: []const u8) ?usize {
+    pub fn faceIndexForName(self: *Rasterizer, name: []const u8) ?usize {
         if (name.len == 0) return null;
+        // **PostScript 이름이 먼저다.** 그것이 face 를 하나로 정하는 유일한 이름이다.
+        for (0..self.face_count) |i| {
+            const have = self.face_ps_names[i][0..self.face_ps_name_len[i]];
+            if (std.ascii.eqlIgnoreCase(have, name)) return i;
+        }
+        // family 이름으로도 받는다 — PostScript 이름을 못 읽은 face(테이블이 없는 것)가 그리로 온다.
         for (0..self.face_count) |i| {
             const have = self.face_names[i][0..self.face_name_len[i]];
             if (std.ascii.eqlIgnoreCase(have, name)) return i;
+        }
+        return self.openFaceForPostScriptName(name);
+    }
+
+    /// 아직 안 연 face 를 **그 이름으로** 연다. 못 열면 `null` — 호출부가 `RasterizerFailed` 로
+    /// 접어 `error_skip` 으로 센다(조용히 다른 face 로 굽지 않는다).
+    ///
+    /// **이미 연 face 들의 family 안만 뒤진다.** 이 결함의 모양이 늘 "같은 family, 다른 굵기" 이고
+    /// (셰이퍼도 우리가 준 목록으로 셰이핑한다), 컬렉션 전체를 훑으면 폰트 수백 개의 `name` 테이블을
+    /// 읽어야 한다. 목록 밖의 face 로 셰이핑된 글자는 **못 찾은 채로 보고된다** — 그 편이 엉뚱한
+    /// face 로 굽는 것보다 낫다.
+    fn openFaceForPostScriptName(self: *Rasterizer, name: []const u8) ?usize {
+        if (self.face_count >= max_faces) return null;
+        const known = self.face_count;
+        for (0..known) |i| {
+            const family = self.face_names[i][0..self.face_name_len[i]];
+            if (family.len == 0) continue;
+            for ([_]?*IDWriteFontCollection{ self.bundled, self.system }) |maybe| {
+                const coll = maybe orelse continue;
+                const f = faceInFamilyByPostScriptName(coll, family, name) orelse continue;
+                if (!faceIsUsable(f, false)) {
+                    d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
+                    continue;
+                }
+                self.faces[self.face_count] = f;
+                self.rememberFaceName(self.face_count, family, f);
+                self.face_count += 1;
+                return self.face_count - 1;
+            }
+        }
+        return null;
+    }
+
+    /// family 하나 안의 face 들을 훑어 **PostScript 이름이 같은 것**을 연다. 없으면 `null`.
+    fn faceInFamilyByPostScriptName(collection: *IDWriteFontCollection, family: []const u8, want: []const u8) ?*IDWriteFontFace {
+        var wide: [128]u16 = undefined;
+        const wlen = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], family) catch return null;
+        wide[wlen] = 0;
+        var index: UINT = 0;
+        var exists: BOOL = 0;
+        if (d3d11.failed(collection.vtable.FindFamilyName(collection, @ptrCast(&wide), &index, &exists))) return null;
+        if (exists == 0) return null;
+        var fam: ?*IDWriteFontFamily = null;
+        if (d3d11.failed(collection.vtable.GetFontFamily(collection, index, &fam))) return null;
+        const family_obj = fam orelse return null;
+        defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(family_obj)));
+
+        const n = family_obj.vtable.GetFontCount(family_obj);
+        var i: UINT = 0;
+        while (i < n) : (i += 1) {
+            var font: ?*IDWriteFont = null;
+            if (d3d11.failed(family_obj.vtable.GetFont(family_obj, i, &font))) continue;
+            const fo = font orelse continue;
+            defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(fo)));
+            var f: ?*IDWriteFontFace = null;
+            if (d3d11.failed(fo.vtable.CreateFontFace(fo, &f))) continue;
+            const face = f orelse continue;
+            var buf: [64]u8 = undefined;
+            const ps = facePostScriptName(face, &buf) orelse {
+                d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(face)));
+                continue;
+            };
+            if (std.ascii.eqlIgnoreCase(ps, want)) return face;
+            d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(face)));
         }
         return null;
     }
@@ -778,7 +985,8 @@ pub const Rasterizer = struct {
         var collection: ?*IDWriteFontCollection = null;
         // `false` = 시스템에 새로 설치된 폰트를 다시 훑지 않는다(시작이 빨라진다).
         try check(factory.vtable.GetSystemFontCollection(factory, &collection, 0), error.NoFontFound);
-        defer d3d11.releaseOpt(collection);
+        // `self` 로 넘기기 전까지만 우리가 책임진다(넘긴 뒤에는 `releaseFaces` 가 놓는다).
+        errdefer d3d11.releaseOpt(collection);
 
         var buf: [windows_font_tier.len + 1][]const u8 = undefined;
         const candidates = fontCandidates(configured, &buf);
@@ -794,6 +1002,10 @@ pub const Rasterizer = struct {
         };
         // 여기서부터 face를 열기 시작하므로, 이후 실패는 열린 것을 전부 놓아야 한다.
         errdefer self.releaseFaces();
+        // **소유권만 넘긴다** — 아래 두 루프는 여전히 이 컬렉션을 쓴다(`coll`).
+        const coll = collection.?;
+        self.system = collection;
+        collection = null; // 위 errdefer 가 두 번 놓지 않게 한다.
 
         // **번들 컬렉션은 한 번만 만든다.** 이름마다 파일을 뒤지면 후보 수만큼 디스크를 친다.
         // 못 만들면 `null` 이고 시스템 폰트로만 간다 — 오류가 아니다.
@@ -801,9 +1013,9 @@ pub const Rasterizer = struct {
 
         var chosen: []const u8 = "";
         for (candidates) |name| {
-            if (resolveFaceAnywhere(collection.?, self.bundled, name, true)) |f| {
+            if (resolveFaceAnywhere(coll, self.bundled, name, true)) |f| {
                 self.faces[0] = f;
-                self.rememberFaceName(0, name);
+                self.rememberFaceName(0, name, f);
                 self.face_count = 1;
                 chosen = name;
                 break;
@@ -815,9 +1027,9 @@ pub const Rasterizer = struct {
         var fb_buf: [max_faces][]const u8 = undefined;
         for (fallbackCandidates(fallback_csv, chosen, &fb_buf)) |name| {
             if (self.face_count == max_faces) break;
-            if (resolveFaceAnywhere(collection.?, self.bundled, name, false)) |f| {
+            if (resolveFaceAnywhere(coll, self.bundled, name, false)) |f| {
                 self.faces[self.face_count] = f;
-                self.rememberFaceName(self.face_count, name);
+                self.rememberFaceName(self.face_count, name, f);
                 self.face_count += 1;
             }
         }
@@ -861,6 +1073,8 @@ pub const Rasterizer = struct {
         self.face_count = 0;
         d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.bundled)));
         self.bundled = null;
+        d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(self.system)));
+        self.system = null;
     }
 
     pub fn destroy(self: *Rasterizer) void {
@@ -888,6 +1102,20 @@ pub const Rasterizer = struct {
             if (glyph[0] != 0) return .{ .face_index = i, .glyph_id = glyph[0] };
         }
         return null;
+    }
+
+    /// **face 하나가 말하는** 글리프 번호. 없으면 `null`.
+    ///
+    /// `glyphFor` 는 face 를 스스로 고르므로 *"셰이퍼가 고른 face 와 우리가 되찾은 face 가 같은 답을
+    /// 내는가"* 에 답하지 못한다 — §2m.90 의 결함이 정확히 그 둘이 갈린 것이었다. 그것을 재려면
+    /// **face 를 지정해서** 물어야 한다.
+    pub fn glyphIdIn(self: *const Rasterizer, face_index: usize, cp: u32) ?u16 {
+        if (face_index >= self.face_count) return null;
+        const f = self.faces[face_index] orelse return null;
+        const cps = [_]u32{cp};
+        var glyph: [1]u16 = undefined;
+        if (d3d11.failed(f.vtable.GetGlyphIndices(f, &cps, 1, &glyph))) return null;
+        return glyph[0];
     }
 
     /// 코드포인트를 `pixels`(RGBA8, `bytes_per_row` 간격)에 그린다. **중립 규약을 그대로 지킨다** —

@@ -711,7 +711,7 @@ pub const Shaper = struct {
         for (all_runs) |run| {
             const face = run.face orelse continue;
             var name_buf: [128]u8 = @splat(0);
-            self.familyName(face, &name_buf);
+            self.identityName(face, &name_buf);
             const is_color = faceHasColor(face);
 
             var fm: FontMetrics = undefined;
@@ -769,6 +769,21 @@ pub const Shaper = struct {
         return result;
     }
 
+    /// 이 런을 셰이핑한 face 의 **신원**을 싣는다. 이 값이 `ShapedGlyph.font_name` 이 되고, 측정 결과를
+    /// 읽는 쪽(`system_text.resolveArtifact`)이 그것을 `FontIdentity.postscript_name` 으로 intern 해,
+    /// 래스터라이저가 **그 이름으로 face 를 되찾아** 여기서 정한 글리프 번호를 굽는다.
+    ///
+    /// **그래서 이름이 face 를 하나로 정해야 한다.** 예전에는 family 이름을 실었는데, family 는 굵기·
+    /// 스타일마다 다른 face 를 묶은 이름이라 그 일을 못 한다 — 굵은 크롬 제목이 Regular face 로 구워져
+    /// 글자가 **한 칸씩 밀렸다**(§2m.90 의 실측). PostScript 이름은 face 마다 다르므로 그것을 싣는다.
+    ///
+    /// 못 읽으면(`name` 테이블이 없거나 ASCII 밖) **family 로 내려간다** — 예전 동작이고, 래스터라이저는
+    /// 두 이름을 다 받는다.
+    fn identityName(self: *Shaper, face: *IDWriteFontFace, out: *[128]u8) void {
+        if (postScriptName(face, out)) return;
+        self.familyName(face, out);
+    }
+
     /// face 의 가족 이름을 UTF-8 로. **번들 컬렉션을 먼저 본다** — 번들 face 는 시스템 컬렉션에 없어서
     /// `GetFontFromFontFace` 가 `DWRITE_E_NOFONT` 를 낸다(§2m.14 실측).
     fn familyName(self: *Shaper, face: *IDWriteFontFace, out: *[128]u8) void {
@@ -812,6 +827,28 @@ fn faceHasColor(face: *IDWriteFontFace) bool {
     return faceHasTable(face, "COLR") or faceHasTable(face, "sbix");
 }
 
+/// face 의 PostScript 이름을 `out` 에 채운다. 채웠으면 `true`.
+///
+/// **표 읽기는 순수 함수가 한다**(`dwrite_font.postScriptNameFromNameTable`) — 여기서는 OS 에서
+/// 테이블 바이트를 빌려 오고 **반드시 돌려주는** 일만 한다(`faceHasTable` 과 같은 규약).
+fn postScriptName(face: *IDWriteFontFace, out: *[128]u8) bool {
+    const t: UINT = @as(UINT, 'n') | (@as(UINT, 'a') << 8) | (@as(UINT, 'm') << 16) | (@as(UINT, 'e') << 24);
+    var data: ?*const anyopaque = null;
+    var size: UINT = 0;
+    var ctx: ?*anyopaque = null;
+    var exists: BOOL = 0;
+    if (d3d11.failed(face.vtable.TryGetFontTable(face, t, &data, &size, &ctx, &exists))) return false;
+    defer if (ctx) |q| face.vtable.ReleaseFontTable(face, q);
+    if (exists == 0 or size == 0) return false;
+    const raw = data orelse return false;
+    var buf: [128]u8 = undefined;
+    const ps = dwrite_font.postScriptNameFromNameTable(@as([*]const u8, @ptrCast(raw))[0..size], &buf) orelse return false;
+    const n = @min(ps.len, out.len - 1);
+    @memcpy(out[0..n], ps[0..n]);
+    out[n] = 0;
+    return true;
+}
+
 fn faceHasTable(face: *IDWriteFontFace, tag: *const [4]u8) bool {
     const t: UINT = @as(UINT, tag[0]) | (@as(UINT, tag[1]) << 8) | (@as(UINT, tag[2]) << 16) | (@as(UINT, tag[3]) << 24);
     var data: ?*const anyopaque = null;
@@ -837,7 +874,23 @@ test "셰이퍼: 빈 family 는 터미널 티어가 아니라 번들 기본으�
     const got = std.mem.sliceTo(&out[0].font_name, 0);
     std.debug.print("  [실측] 빈 family -> \"{s}\"", .{got});
     // 값을 손으로 안 적는다 — config 기본값이 바뀌면 함께 움직여야 한다.
-    try std.testing.expectEqualStrings(maru.config.theme.bundled_fonts[0].family, got);
+    //
+    // **이제 싣는 것은 face 신원(PostScript 이름)이라 family 와 글자가 같지 않다** — PostScript
+    // 이름은 공백을 빼고 스타일 꼬리를 붙인다(`JetBrains Mono` → `JetBrainsMono-Regular`, §2m.90).
+    // 그래도 **어느 family 로 갔는지**는 그 이름이 말한다: 공백을 뺀 family 로 시작해야 한다
+    // (터미널 티어로 떨어졌다면 `CascadiaMono…` 라 안 맞는다 — 이 테스트가 지키던 그 사실이다).
+    const family = maru.config.theme.bundled_fonts[0].family;
+    var want: [64]u8 = undefined;
+    var wn: usize = 0;
+    for (family) |c| {
+        if (c == ' ') continue;
+        want[wn] = c;
+        wn += 1;
+    }
+    try std.testing.expect(std.ascii.startsWithIgnoreCase(got, want[0..wn]));
+    // **family 이름 그대로면 안 된다.** 그것이 §2m.90 의 결함이었다 — family 는 같은 가족의 다른
+    // 굵기를 못 가르고, 래스터라이저가 그 이름으로 되찾은 face 는 셰이핑한 face 가 아닐 수 있다.
+    try std.testing.expect(!std.mem.eql(u8, got, family));
 }
 
 test "셰이퍼: 1024 유닛을 넘는 긴 줄이 한 글자도 안 잘린다" {
@@ -1052,6 +1105,36 @@ test "셰이퍼: 말줄임이 글리프를 줄인다" {
     }, &out));
 }
 
+test "셰이퍼가 실은 이름으로 래스터라이저가 같은 face 를 되찾는다 — 굵은 런도" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // **§2m.90 의 결함을 그대로 재현하는 배치다.** 굵은 크롬 제목은 같은 family 의 **다른 face** 로
+    // 셰이핑되는데, 신원이 family 이름이면 래스터라이저는 Regular 를 되찾아 **다른 번호 체계**로
+    // 굽는다 — 실측으로 `Agent session history` 가 `@f dms rdrrhmr ghrsnqx` 로 그려졌다(글자마다
+    // 하나씩 앞). 그래서 재는 것은 *"이름이 돌아오나"* 가 아니라 **"셰이퍼와 래스터라이저가 같은
+    // 번호를 말하나"** 다.
+    var sh = try Shaper.create(std.testing.allocator);
+    defer sh.destroy();
+    var out: [16]GlyphRecord = undefined;
+    const res = try sh.shape(.{
+        .text = "A",
+        .family = "Malgun Gothic",
+        .fallback_csv = "",
+        .size_px = 16,
+        .weight = .semibold,
+    }, &out);
+    if (res.count == 0) return error.SkipZigTest;
+    const name = std.mem.sliceTo(&out[0].font_name, 0);
+    // 그 폰트가 없는 기계에서는 DirectWrite 가 딴 것을 고른다 — 그러면 이 판정의 전제가 없다.
+    if (!std.ascii.startsWithIgnoreCase(name, "Malgun")) return error.SkipZigTest;
+
+    const ras = try dwrite_font.Rasterizer.create(std.testing.allocator, "Malgun Gothic", "", 16);
+    defer ras.destroy();
+    const idx = ras.faceIndexForName(name) orelse return error.NoFaceForShapedName;
+    const says = ras.glyphIdIn(idx, 'A') orelse return error.NoGlyphIndex;
+    std.debug.print("\n  [실측] 굵은 런 신원 = \"{s}\" 셰이퍼={d} 그 face={d}\n", .{ name, out[0].glyph_id, says });
+    try std.testing.expectEqual(out[0].glyph_id, @as(u32, says));
+}
+
 test "셰이퍼: 폴백 목록이 번들 폰트를 고른다" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var sh = try Shaper.create(std.testing.allocator);
@@ -1064,7 +1147,10 @@ test "셰이퍼: 폴백 목록이 번들 폰트를 고른다" {
     try std.testing.expect(res.count >= 2);
     const z = std.mem.indexOfScalar(u8, &out[0].font_name, 0) orelse out[0].font_name.len;
     std.debug.print("\n  SHAPE 한글 폰트 = \"{s}\"\n", .{out[0].font_name[0..z]});
-    try std.testing.expectEqualStrings("Jetendard", out[0].font_name[0..z]);
+    // 싣는 값은 **face 신원**이다(§2m.90) — family `Jetendard` 의 face 하나를 가리키는 PostScript
+    // 이름이라 `Jetendard-…` 로 시작하고, family 이름 그대로는 아니다.
+    try std.testing.expect(std.ascii.startsWithIgnoreCase(out[0].font_name[0..z], "Jetendard"));
+    try std.testing.expect(!std.mem.eql(u8, out[0].font_name[0..z], "Jetendard"));
 }
 
 // ── 프로세스 하나짜리 셰이퍼 ─────────────────────────────────────────────────────────────────

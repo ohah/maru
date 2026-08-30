@@ -11541,6 +11541,24 @@ pub fn build(b: *std.Build) void {
         kernel_cleanup_faults_step.dependOn(&run_kernel_cleanup_boundary_tests.step);
         run_session_host_tests.step.dependOn(kernel_cleanup_faults_step);
 
+        const disk_full_admission_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_disk_full_admission_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_disk_full_admission_boundary_tests =
+            b.addRunArtifact(disk_full_admission_boundary_tests);
+        run_disk_full_admission_boundary_tests.addArg("--maru-expect-tests=1");
+        run_disk_full_admission_boundary_tests.setCwd(b.path("."));
+        const disk_full_admission_step = b.step(
+            "test-session-host-upgrade-disk-full-admission",
+            "Verify actual disk-full admission resumes before quiesce (macOS)",
+        );
+        disk_full_admission_step.dependOn(&run_disk_full_admission_boundary_tests.step);
+        run_session_host_tests.step.dependOn(disk_full_admission_step);
+
         // U3/U5 failure evidence used to be reachable only through separate leaf steps or the
         // full session-host aggregate. Keep one exact named matrix so release validation cannot
         // accidentally omit a process failure class while every individual test still exists.

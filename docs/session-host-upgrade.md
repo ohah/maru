@@ -10,7 +10,7 @@
 > caller가 frozen N-1/current라고 증명한 signed executable의 non-empty PTY 성공 경로를 실행할 opt-in E2E
 > 하네스는 구현했지만, 저장소에는
 > 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 최대치 근처 multi-runtime 제품 restore,
-> non-empty PTY rollback activation, 전 구간 failure injection, 업그레이드 결과 notice와 soak gate도 열려 있으므로
+> 전 구간 failure injection, 업그레이드 결과 notice와 soak gate도 열려 있으므로
 > U5 완료는 주장하지 않는다.**
 > **앱 재실행 orchestration은 연결됐다** — GUI는 시작할 때 같은 build의 host가 없으면, build_id만 다른 살아 있는
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
@@ -876,7 +876,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   capture한다. target primary를 preflight 뒤 손상시켜 canonical product rollback을 실행한 다음, 검증자는 같은
   peer PID와 old build/epoch·`rolled_back/restore_failed`, exact runtime ID 하나를 확인한다. PTY child PID는 rollback
   host의 실제 direct child로 남아야 하며, attach snapshot에는 rollback 전 marker가 있어야 하고 새 input marker도
-  같은 runtime에서 출력돼야 한다. 마지막에는 shell을 known exit status로 끝내고 host가 child를 reap해 runtime
+  같은 runtime에서 출력돼야 한다. 마지막에는 exit 23을 수행하는 명령으로 shell을 끝내고 host가 child를 reap해 runtime
   inventory에서 정확히 한 번 제거한 뒤에만 client/oneshot daemon을 종료한다. 단순 codec round-trip, parent가 test
   runner인 inherited PTY, 화면 marker만 보이는 fixture는 이 gate의 증거가 아니다.
   이 test-only 수명 제어와 marker 환경은 launcher가
@@ -885,9 +885,14 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   성공 marker를 위조할 수 없어야 한다. zero-runtime gate는 `test-session-host-upgrade-product-rollback`에서
   canonical product rollback exec 뒤 동일 peer PID의 실제 client handshake, old build/epoch, `rolled_back/restore_failed`,
   upgrade capability와 exact empty inventory를 자동 검증한다. 따라서 zero-runtime의 실제 제품 rollback activation과
-  listener 재접속은 구현·실행됐으며, 위 non-empty PTY 보존은 아래 남은 gate로 구분한다.
+  listener 재접속은 구현·실행됐다. `test-session-host-upgrade-nonempty-rollback`은 supervised source-host가
+  production `RuntimeManager`로 만든 실제 PTY를 quiesce/capture한 뒤 corrupt primary→canonical product rollback을
+  같은 PID에서 실행한다. wire 검증은 exact runtime ID, direct-child PID, rollback 전 snapshot marker, rollback 뒤
+  input marker, exit-23 명령 뒤 host-owned child reap/runtime 제거를 함께 단언한다. exit status 숫자 자체는 현재 wire로
+  노출하지 않으므로 이 gate의 관측 증거라고 주장하지 않는다. 따라서 non-empty PTY rollback 종료 gate도
+  구현·실행됐다.
 - **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
-  N-1/current artifact를 사용한 위 성공 gate의 실제 통과, non-empty PTY rollback activation, 1개·최대치 근처
+  N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
   failure injection, 장시간 soak와 **업그레이드 결과 notice**가 남아 있다(자동 orchestration 자체는 GUI의
   connect 경로에 연결됐다 — 위 상태 블록). macOS 공개 API에는 fd-based

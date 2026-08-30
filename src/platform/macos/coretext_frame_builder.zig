@@ -572,8 +572,15 @@ pub fn buildFilePanelHeaderDrawList(
     errdefer pool.deinit(allocator);
     if (cols >= 1) {
         if (dock_layout.headerCellLayout(cols, dirty, external_change)) |header| {
+            // **꼬리를 지킨다**(`.tail`) — 넘치면 앞에서 버린다. 그래야 `경로 › 바깥 › 안쪽` 한 줄에서
+            // 심볼이 살아남고(native-editor-ui.md §7.5 「체인이 밴드에 선다」), 체인이 없을 때도 상위
+            // 디렉터리 대신 **파일 이름**이 남는다.
+            //
+            // **`.head` 였고, 그것이 정반대였다.** `app_session` 의 옛 주석이 *"넘칠 때 앞을 생략하므로
+            // `.head`"* 라고 적어 두었는데 `text_layout.plan` 은 그 반대다 — `.head` 는 선두를 고정하고
+            // 마지막 칸을 `…` 로 만든다. 주석을 근거로 §7.5 의 우선순위를 적었다가 `BAND1` 이 잡았다.
             if (header.control_start > 1)
-                _ = try appendEllipsizedTitle(allocator, &cells, &pool, path, 0, 1, header.control_start, .{ .foreground = fg }, false, .head);
+                _ = try appendEllipsizedTitle(allocator, &cells, &pool, path, 0, 1, header.control_start, .{ .foreground = fg }, false, .tail);
             for (dock_layout.modesForKind(kind)) |descriptor| {
                 const range = dock_layout.headerModeCellRange(header, kind, descriptor.mode) orelse continue;
                 if (range.end > range.start + 1)
@@ -2931,4 +2938,68 @@ test "SB1-S3b: NFD 한글 브랜치명도 cluster 풀을 싣고 나간다" {
         if (c.grapheme_count > 0) refs += 1;
     }
     try std.testing.expect(refs > 0);
+}
+
+/// 밴드에 실제로 그려진 글자를 열 순서로 다시 읽는다 — 아래 두 판정자가 "무엇이 남았나"를 본다.
+fn bandTextAlloc(allocator: std.mem.Allocator, dl: renderer.DrawList, end_col: u16) ![]u8 {
+    var cols: std.ArrayList(struct { col: u16, cp: u32 }) = .empty;
+    defer cols.deinit(allocator);
+    for (dl.cells) |cell| {
+        if (cell.col >= end_col) continue;
+        try cols.append(allocator, .{ .col = cell.col, .cp = cell.codepoint });
+    }
+    std.mem.sort(@TypeOf(cols.items[0]), cols.items, {}, struct {
+        fn lt(_: void, a: @TypeOf(cols.items[0]), b: @TypeOf(cols.items[0])) bool {
+            return a.col < b.col;
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var buf: [4]u8 = undefined;
+    for (cols.items) |e| {
+        const n = std.unicode.utf8Encode(@intCast(e.cp), &buf) catch continue;
+        try out.appendSlice(allocator, buf[0..n]);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "BAND1 밴드가 좁으면 경로가 먼저 깎이고 심볼이 남는다 (native-editor-ui.md §7.5)" {
+    // **§7.5 의 우선순위 규칙 전체가 이 성질 하나에 걸려 있다** — *"한 문자열로 넘기면 앞(경로)부터
+    // 깎이고 뒤(심볼)가 남는다"*. 그 근거는 밴드가 `.head` 로 생략한다는 것인데, 그것은 주석의
+    // 주장이었지 잰 값이 아니었다. 여기서 잰다. 이 성질이 깨지면 문서의 규칙이 거짓이 된다.
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    const label = "src/config/theme.zig \u{203A} ThemeConfig \u{203A} parseSyntaxRole";
+
+    var dl = try buildFilePanelHeaderDrawList(allocator, label, .text, .source_edit, false, false, 30, dim, bright);
+    defer dl.deinit(allocator);
+    const layout = dock_layout.headerCellLayout(30, false, false).?;
+    const drawn = try bandTextAlloc(allocator, dl, layout.control_start);
+    defer allocator.free(drawn);
+
+    // **안쪽 심볼이 남는다** — 가장 구체적인 것이다.
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "Role") != null);
+    // **경로 앞은 사라진다** — 파일 이름은 pane 탭에도 있어 중복이다.
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "src/config") == null);
+}
+
+test "BAND2 넓으면 경로와 심볼이 함께 보인다 — 좁을 때만 깎는다" {
+    // 위 규칙이 "항상 경로를 버린다"로 읽히면 안 된다. 폭이 되면 둘 다 있어야 한다.
+    const allocator = std.testing.allocator;
+    const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
+    const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
+    const label = "a.zig \u{203A} Widget \u{203A} draw";
+
+    var dl = try buildFilePanelHeaderDrawList(allocator, label, .text, .source_edit, false, false, 60, dim, bright);
+    defer dl.deinit(allocator);
+    const layout = dock_layout.headerCellLayout(60, false, false).?;
+    const drawn = try bandTextAlloc(allocator, dl, layout.control_start);
+    defer allocator.free(drawn);
+
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "a.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "Widget") != null);
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "draw") != null);
+    // 구분자가 두 축을 가른다 — 경로는 `/`, 심볼은 `›`.
+    try std.testing.expect(std.mem.indexOf(u8, drawn, "\u{203A}") != null);
 }

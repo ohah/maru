@@ -17842,12 +17842,23 @@ pub const AppSession = struct {
                             }
                         }
                         const cols: u16 = @intCast(@min(band.band.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-                        // **좁은 밴드를 의미 있는 구간에 쓴다.** 절대경로를 그대로 주면 넘칠 때 앞을
-                        // 생략하므로(`.head`) 폭이 `/Users/이름/Documents/...`에 먹히고, 정작 저장소 안
-                        // 위치가 밀려 나간다(native-editor-ui.md §7.5 — 경로 축).
+                        // **좁은 밴드를 의미 있는 구간에 쓴다.** 절대경로를 그대로 주면 폭이
+                        // `/Users/이름/Documents/...`에 먹히고, 정작 저장소 안 위치가 밀려 나간다
+                        // (native-editor-ui.md §7.5 — 경로 축). 그래서 저장소 상대경로를 넘긴다.
+                        //
+                        // (이 자리에 *"넘칠 때 앞을 생략하므로 `.head`"* 라고 적혀 있었는데 **틀렸다** —
+                        //  `.head` 는 선두를 고정하고 끝을 자른다. 빌더는 이제 `.tail` 을 쓴다.)
+                        // **경로 뒤에 심볼 체인이 붙는다**(native-editor-ui.md §7.5 「체인이 밴드에 선다」).
+                        // 새 UI 층은 없다 — 같은 한 줄, 같은 빌더다. 체인이 없으면(편집기가 아닌 파일 Term·
+                        // grammar 없음·파싱 미완·커서가 심볼 밖) `bandPathFor` 결과가 그대로 와서 지금까지와
+                        // 글자 하나 다르지 않다.
+                        //
+                        // **폭이 모자라면 경로가 먼저 깎인다** — 아래 빌더가 `.head` 로 생략해서 꼬리를
+                        // 지키므로, 한 문자열로 넘기는 것이 곧 그 우선순위다(파일 이름은 pane 탭에도 있어
+                        // 중복이지만 심볼은 다른 데 없다).
                         const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
                             self.allocator,
-                            bandPathFor(self, band.entry),
+                            editor_ops.headerBreadcrumb(self, lr.leaf.activeTerm(), bandPathFor(self, band.entry)),
                             band.entry.kind,
                             band.entry.mode,
                             band.entry.dirty,

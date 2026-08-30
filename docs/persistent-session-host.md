@@ -6755,7 +6755,9 @@ ambiguous하게 만들어 실제 앱이 살아 있는 runtime을 복구하지 �
 캐시는 캐시고, registry는 registry다.
 
 테스트 실행은 사용자의 공용 `/tmp/maru-<uid>`를 **읽기·쓰기·정리 대상으로 사용하지 않는다**. `builtin.is_test`인
-프로세스는 PID별 root를 기본으로 쓰고, 제품 executable을 자식으로 띄우는 테스트는 같은
+프로세스는 PID별 root를 기본으로 쓴다. 공용 test runner는 부모 셸에서 같은 이름의 변수를 상속했더라도
+그 값을 신뢰하지 않고 자기 PID별 root로 **항상 덮어쓴다**. 그렇지 않으면 개발자가 제품 root를 가리키는
+변수를 둔 셸에서 gate를 실행한 순간 테스트의 정리 코드가 실제 manifest를 지울 수 있다. 제품 executable을 자식으로 띄우는 테스트는 같은
 `MARU_SESSION_HOST_ROOT`를 명시적으로 상속시켜야 한다. 테스트용 launcher API는 격리 root를 인자로 받아 이 전파를
 강제하며, 공용 test runner가 이 환경을 만들지 못하면 어떤 테스트도 시작하지 않고 nonzero로 끝난다. root가 공용 UID
 namespace와 같으면 제품 child 실행 전에 거부한다. 이 판정은 문자열 prefix에 머물지 않는다. root는
@@ -6765,7 +6767,7 @@ override 하나만 새로 만들고 activation/oneshot/upgrade executable 등 �
 canonicalize해 같은 기준으로 비교한다. 그렇지 않으면 `/tmp/격리/../maru-<uid>` 또는 symlink가 공용 namespace를
 가리키면서 문자열 검사만 통과할 수 있기 때문이다. 격리 override를 알지 못하는 역사적 frozen N-1
 binary의 실제 실행은 이 불변식을 만족할 수 없으므로 일반 `test-session-host`와 개발자 로컬 gate에 포함하지 않는다.
-그 호환성 증거는 사용자 세션이 없는 일회용 CI runner에서만 명시적 위험 승인과 함께 실행하며, current 코드의
+그 호환성 증거는 로그인한 GUI 사용자의 UID와 다른 전용 OS 계정인 일회용 CI runner에서만 명시적 위험 승인과 함께 실행하며, current 코드의
 단위·wire fixture 검증과 구분해 보고한다. 테스트 성공을 위해 실제 앱의 manifest·socket·host process를 잠시라도
 빌리거나, 실행 전후 snapshot 복원으로 공유 namespace 변경을 정당화하지 않는다.
 

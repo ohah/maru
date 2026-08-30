@@ -590,6 +590,12 @@ thumb을 끌면 thumb rect가 바뀌므로 tree는 **반드시** 매 프레임 �
   snapshot generation이고 fade는 그 값을 바꾸지 않는다. 즉 이것은 정확성 문제가 아니라 churn이며, 동시에
   carry 조건이 나중에 조금이라도 좁아지면 곧바로 정확성 문제가 되는 자리다. alpha는 tree 값이 아니라
   **paint 시점에 얹는 값**으로 두고 tree는 fade 동안 불변으로 유지한다.
+- **그 자리는 `paint.paintWithAlphaOverrides`다(2026-08-30 구현).** 노드 id로 alpha를 덮어쓰는 얇은 축이고,
+  기존 `paint`는 오버라이드 없는 래퍼로 남아 호출부가 안 바뀐다(`appendBackgroundQuadsWithTerminalOpacity`와
+  같은 선례). 도크 컴포넌트의 **`view`가** 그것을 부르며 스크롤바 track·thumb 두 id에만 host가 계산한
+  alpha를 얹는다 — **`build`는 그 값을 모른다.** 그래서 tree는 fade 내내 불변이고 발행 경로의 동등 비교
+  (`agentSessionDockFrameEql`)가 살아 있다. 이 불변을 판정자가 못 박는다(alpha만 다른 두 build가 같은
+  entry·action을 내는지) — 한 번 tree에 실었다가 그 판정자에 잡혀 되돌린 이력이 `plans/scroll-area.md`에 있다.
 
 ## 8. z 축 — 이미 ad hoc으로 자라고 있다
 

@@ -171,6 +171,10 @@ pub const Props = struct {
     /// 아이템만 받으므로, scrollbar가 얼마나 긴 목록의 어디를 보고 있는지는 이 두 값으로만 알 수 있다.
     /// 둘 다 host의 `scroll_area.project` 결과이며, 0이면 scrollbar를 발행하지 않는다.
     scroll_content_height_px: u32 = 0,
+    /// 스크롤바 fade 의 최종 alpha(0xFF=선명). **`view` 만 읽는다 — `build` 는 쓰지 않는다.**
+    /// tree 에 실으면 프레임마다 tree 가 달라져 발행 경로의 동등 비교가 매번 실패한다
+    /// (계약 §7 — 그래서 이 값은 paint 시점에 얹는다). 산술은 host 가 소유한다.
+    scrollbar_alpha: u8 = 0xFF,
     scroll_offset_px: u32 = 0,
     items: []const Item = &.{},
     /// null이면 상단에 걸린 그룹이 없다 — 첫 그룹에 닿기 전이라 흐름 위의 행이 그대로 보인다.

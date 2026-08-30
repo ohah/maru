@@ -770,6 +770,50 @@ pub fn updateScrollbarFade(self: *AppSession) void {
         self.dock_list_scrollbar_idle_ticks += 1;
         if (self.dock_list_scrollbar_idle_ticks > visible_ticks) self.metal_dirty = true;
     }
+    updateDockScrollAreaFade(self, visible_ticks, fade_done_ticks);
+}
+
+/// **ScrollArea 컴포넌트가 그리는 도크 스크롤바**(에이전트 세션·소스 컨트롤)의 fade. 위 셋과 같은
+/// 규율이고 다른 것은 offset 의 출처뿐이다 — 도크는 하나이고 뷰만 갈아 끼우므로 **지금 그려지는 뷰의
+/// offset** 을 본다(뷰가 바뀌면 값이 달라져 자연히 리셋된다).
+fn updateDockScrollAreaFade(self: *AppSession, visible_ticks: u32, fade_done_ticks: u32) void {
+    const offset: u32 = if (!dock_ops.dockVisible(self)) 0 else switch (self.dock.view) {
+        .agent_sessions => self.agent_session_archive_scroll.offset_y_px,
+        .source_control => scmEffectiveScrollPx(self),
+        // 갤러리는 아직 ScrollArea 스크롤바를 발행하지 않는다(격자를 직접 그린다) — 발행이 붙는 날
+        // 이 갈래가 그냥 돌게 자리만 둔다.
+        .image_gallery => self.image_gallery.scroll.offset_y_px,
+        .explorer => 0, // 탐색기 스크롤바는 host 가 그린다(위 dock_list 갈래)
+    };
+    if (!dock_ops.dockVisible(self) or self.dock.view == .explorer) {
+        // 그릴 것이 없으면 다음 등장이 full 로 시작하게 타이머를 되돌린다(위 갈래와 같은 규율).
+        self.dock_scroll_area_idle_ticks = fade_done_ticks;
+        self.dock_scroll_area_last_offset = offset;
+        return;
+    }
+    if (offset != self.dock_scroll_area_last_offset) {
+        self.dock_scroll_area_last_offset = offset;
+        if (self.dock_scroll_area_idle_ticks != 0) self.metal_dirty = true;
+        self.dock_scroll_area_idle_ticks = 0;
+        return;
+    }
+    // **잡고 있는 동안은 full 로 핀한다.** 다른 세 갈래가 이미 그렇게 하는데 여기만 빠지면 thumb 을
+    // 쥔 채 멈춰 있을 때 손 밑에서 흐려진다 — offset 이 안 변하니 위 갈래가 그 상황을 못 본다.
+    if (self.agent_session_dock_scroll_drag.active or self.scm_scroll_drag.active or scrollbarCaptureActive(self)) {
+        if (self.dock_scroll_area_idle_ticks != 0) self.metal_dirty = true;
+        self.dock_scroll_area_idle_ticks = 0;
+        return;
+    }
+    if (self.dock_scroll_area_idle_ticks < fade_done_ticks) {
+        self.dock_scroll_area_idle_ticks += 1;
+        if (self.dock_scroll_area_idle_ticks > visible_ticks) self.metal_dirty = true; // fade 창 — alpha 변함
+    }
+}
+
+/// 위 fade 가 만든 alpha. 도크 두 뷰의 **view**(paint 시점)가 props 로 받아 스크롤바 quad 에만 얹는다 —
+/// **tree 에는 안 실린다**(계약 §7). 산술은 여기 한 곳이다.
+pub fn dockScrollAreaAlpha(self: *const AppSession) u8 {
+    return scrollbarAlpha(self, self.dock_scroll_area_idle_ticks);
 }
 
 /// down 좌표가 활성 pane 스크롤바(thumb 또는 트랙)에 있으면 잡은 grab offset(y_px - thumb_top, px)을 돌려준다.
@@ -1150,3 +1194,56 @@ pub const overlay_scroll_ids = struct {
 };
 
 pub const overlay_scrollbar_min_thumb_px: u32 = dock_list_scrollbar_min_thumb_px;
+
+test "도크 ScrollArea 스크롤바 fade: 굴리면 선명 · 두면 흐려짐 · 잡으면 핀 · 탐색기면 안 셈" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.dock_initialized = true;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.view = .agent_sessions;
+    const visible = scrollbarVisibleTicks(session);
+    const fade_done = scrollbarFadeCompleteTicks(session);
+
+    // ① 굴리면 선명해진다.
+    session.dock_scroll_area_idle_ticks = fade_done;
+    session.agent_session_archive_scroll.offset_y_px = 120;
+    updateDockScrollAreaFade(session, visible, fade_done);
+    try std.testing.expectEqual(@as(u32, 0), session.dock_scroll_area_idle_ticks);
+    try std.testing.expectEqual(scrollbar_alpha_full, dockScrollAreaAlpha(session));
+
+    // ② 가만두면 흐려져 idle 값으로 정착한다.
+    while (session.dock_scroll_area_idle_ticks < fade_done) updateDockScrollAreaFade(session, visible, fade_done);
+    try std.testing.expectEqual(scrollbar_alpha_idle, dockScrollAreaAlpha(session));
+
+    // ③ **잡고 있으면 full 로 핀한다** — offset 이 안 변하니 ①의 갈래가 이 상황을 못 본다.
+    session.agent_session_dock_scroll_drag.active = true;
+    updateDockScrollAreaFade(session, visible, fade_done);
+    try std.testing.expectEqual(@as(u32, 0), session.dock_scroll_area_idle_ticks);
+    session.agent_session_dock_scroll_drag.active = false;
+
+    // ④ 탐색기 뷰는 이 갈래가 안 센다 — 그쪽 스크롤바는 host 가 직접 그리고 자기 타이머를 든다.
+    session.dock.view = .explorer;
+    session.dock_scroll_area_idle_ticks = 0;
+    updateDockScrollAreaFade(session, visible, fade_done);
+    try std.testing.expectEqual(fade_done, session.dock_scroll_area_idle_ticks);
+
+    // ⑤ 도크가 안 보이면 다음 등장이 full 로 시작하지 않게 되돌린다.
+    session.dock.view = .agent_sessions;
+    session.dock.presented = false;
+    session.dock_scroll_area_idle_ticks = 0;
+    updateDockScrollAreaFade(session, visible, fade_done);
+    try std.testing.expectEqual(fade_done, session.dock_scroll_area_idle_ticks);
+}

@@ -28,7 +28,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         loaded += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 6), testCount(sources[0]));
+    try std.testing.expectEqual(@as(usize, 7), testCount(sources[0]));
     try std.testing.expectEqual(@as(usize, 6), testCount(sources[1]));
     try std.testing.expectEqual(@as(usize, 3), testCount(sources[2]));
     try std.testing.expectEqual(@as(usize, 5), testCount(sources[3]));
@@ -40,6 +40,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         .{ .source = 0, .title = "handoff store rejects malformed or divergent state and removes attempt residue" },
         .{ .source = 0, .title = "handoff store directory fd stays on the approved generation after path replacement" },
         .{ .source = 0, .title = "handoff store exact cleanup preserves a swapped replacement leaf" },
+        .{ .source = 0, .title = "reserved handoff syscall failures publish no pair and leave no attempt residue" },
         .{ .source = 1, .title = "exec fd set exposes only reserved duplicate and rollback preserves CLOEXEC source" },
         .{ .source = 1, .title = "exec fd set rejects occupied and duplicate reserved slots without changing source" },
         .{ .source = 1, .title = "restore inherited close token consumes the exact non-cloexec set" },
@@ -69,4 +70,6 @@ test "U5 second failure matrix keeps the exact component inventory" {
     try std.testing.expect(contains(build, "component_failure_matrix_step.dependOn(&run_exec_fd_set_tests.step)"));
     try std.testing.expect(contains(build, "component_failure_matrix_step.dependOn(&run_host_authority_tests.step)"));
     try std.testing.expect(contains(build, "component_failure_matrix_step.dependOn(&run_upgrade_target_tests.step)"));
+    try std.testing.expect(contains(build, "test-session-host-upgrade-reserved-handoff-failures"));
+    try std.testing.expect(contains(build, "run_reserved_handoff_failure_tests.addArg(\"--maru-expect-tests=1\")"));
 }

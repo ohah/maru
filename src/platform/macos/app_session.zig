@@ -11137,11 +11137,26 @@ pub const AppSession = struct {
                 agent_dock.closeAgentSessionInlineDetail(self);
                 return input_ops.keyConsumedByApp(self);
             }
-            // 갤러리 크게 보기도 같은 게이트다 — 도크를 누른 적이 있어야(`ownsKeys`) Esc 를 가져간다.
-            // 그러지 않으면 이미지를 열어 둔 채 터미널로 돌아간 사용자의 vim Esc 가 사라진다.
-            if (event.key == .escape and !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
-                image_gallery_ops.handleEscape(self))
-            {
+        }
+        // **갤러리 키는 에이전트 도크 블록 «밖» 이다.** 그 블록은 `dock.view == .agent_sessions` 로
+        // 닫혀 있어 갤러리 뷰에서는 아예 들어가지 못한다 — 처음에 Esc 를 그 안에 넣어 두어 제품에서
+        // 안 먹고 있었고, IG4-b test 가 `handleEscape` 를 **직접 불러** 통과하는 바람에 못 봤다.
+        // 제품 키 경로를 타는 test 를 쓰고서야 드러났다.
+        //
+        // 게이트는 함수 안에 있다(`ownsKeys` + 열려 있는가) — 여기서 다시 판정하면 두 곳이 갈린다.
+        if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift) {
+            if (event.key == .escape and image_gallery_ops.handleEscape(self)) {
+                self.metal_dirty = true;
+                return input_ops.keyConsumedByApp(self);
+            }
+            // ←→(↑↓)는 **크게 보기 중일 때만** 가져간다. 격자만 보고 있을 때 삼키면 터미널의
+            // 히스토리 탐색이 사라진다 — `navigateOpen` 이 열려 있지 않으면 `false` 를 준다.
+            const gallery_step: i32 = switch (event.key) {
+                .arrow_right, .arrow_down => 1,
+                .arrow_left, .arrow_up => -1,
+                else => 0,
+            };
+            if (gallery_step != 0 and image_gallery_ops.navigateOpen(self, gallery_step)) {
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
             }
@@ -73463,4 +73478,107 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
     try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
     // 라벨도 **부모 파일** 안에서 읽는다(`call_id` → 앞선 줄의 `path`).
     try std.testing.expectEqualStrings("from-parent.png", session.image_gallery.tiles.items[0].label.text());
+}
+
+test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에서는 화살표를 안 가져간다 (IG9)" {
+    // **가장 큰 위험은 기능이 아니라 회귀다.** 화살표를 잘못 삼키면 터미널의 히스토리 탐색이 사라진다.
+    // 그래서 이 test 의 절반은 「안 가져간다」를 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    const image_count: usize = 30; // 한 화면에 안 들어간다 — 스크롤 따라가기도 같이 본다
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(allocator);
+    for (0..image_count) |_| try transcript.appendSlice(allocator, one);
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(image_count, session.image_gallery.count());
+
+    // ── ① **격자만 보고 있을 때는 화살표를 안 가져간다.** 여기가 회귀 지점이다.
+    session.image_gallery.key_focus = true; // 도크가 키를 쥐어도
+    try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1)); // 열린 것이 없으면 안 가져간다
+
+    // ── ② 열고 나면 넘어간다.
+    image_gallery_ops.openAt(session, 0);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index);
+    try std.testing.expect(image_gallery_ops.navigateOpen(session, 1));
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.open.?.hit_index);
+    try std.testing.expect(image_gallery_ops.navigateOpen(session, -1));
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index);
+
+    // ── ③ **끝에서 멈춘다(순환하지 않는다).** 순환하면 끝에 닿은 것을 모르고 같은 것을 두 번 본다.
+    try std.testing.expect(image_gallery_ops.navigateOpen(session, -1)); // 소비는 한다
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.open.?.hit_index); // 그대로
+
+    // ── ④ **터미널로 돌아가면 화살표를 놓는다.** 이미지는 열린 채다.
+    image_gallery_ops.releaseKeyFocus(session);
+    try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1));
+    try std.testing.expect(session.image_gallery.open != null);
+    session.image_gallery.key_focus = true;
+
+    // ── ⑤ 멀리 넘어가면 **격자가 따라온다.** 안 그러면 닫는 순간 옛 자리를 보여준다.
+    var guard: usize = 0;
+    while (guard < 100 and session.image_gallery.open.?.hit_index < image_count - 1) : (guard += 1) {
+        _ = image_gallery_ops.navigateOpen(session, 1);
+    }
+    const last = image_count - 1;
+    try std.testing.expectEqual(last, session.image_gallery.open.?.hit_index);
+    const l = image_gallery_ops.gridLayout(session);
+    try std.testing.expect(last >= l.first and last < l.first + l.visible);
+    try std.testing.expect(l.scroll_px > 0); // 실제로 내려갔다
+
+    // ── ⑥ **제품 키 경로**로도 같은 일이 일어난다(배선이 빠지면 여기서 잡힌다).
+    image_gallery_ops.openAt(session, 5);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.open.?.hit_index);
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 5), session.image_gallery.open.?.hit_index);
+
+    // ── ⑦ **Esc 도 제품 키 경로로 닫힌다.** 이 단언이 없어서 Esc 가 에이전트 도크 전용 블록 안에
+    // 갇힌 채 머지됐다 — IG4-b test 가 `handleEscape` 를 **직접 불러** 통과하는 바람에 못 봤다.
+    try std.testing.expect(session.image_gallery.open != null);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(session.image_gallery.open == null);
+
+    // ── ⑧ 닫으면 화살표를 놓는다.
+    try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1));
 }

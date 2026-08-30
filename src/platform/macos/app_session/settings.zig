@@ -1462,6 +1462,45 @@ pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
 
 /// 터미널 본문 (x,y backing px)에 복사/붙여넣기 컨텍스트 메뉴를 띄운다(input.right-click=menu). 항목 선택은
 /// acceptContextMenu가 terminal_context_menu 분기로 pending_clipboard_action을 세운다(Swift가 OS 클립보드 실행).
+/// 편집기 본문 우클릭 메뉴를 연다(NS4). 열렸으면 true — 호출자가 그때 이벤트를 소비한다.
+///
+/// **항목 정책은 `session/content_menu.zig` 가 소유한다**(파일 패널 웹이 쓰는 그 모듈). 두 표면이
+/// 같은 메뉴를 다른 규칙으로 채우면 사용자가 "여기서는 되는데 저기서는 안 되네" 를 겪는다 —
+/// [선택 영역 보내기](../../../../docs/send-selection-to-agent.md) 가 "그 뒤는 한 벌" 로 정한 것과
+/// 같은 결이다.
+///
+/// **선택이 없어도 복사를 낸다.** 편집기의 복사는 선택이 없으면 caret 이 있는 줄을 담으므로
+/// (문서 모델 §3.4), 그 자리에서 항목을 감추면 `⌘C` 와 메뉴가 서로 다른 말을 한다.
+pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_px: f64, y_px: f64) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 이 메뉴의 대상이 아니다(§8.1 대상 판정)
+    const doc = term.rt.editor_doc orelse return false;
+
+    var buf: [maru.session.content_menu.max_items]maru.session.content_menu.Item = undefined;
+    const built = maru.session.content_menu.build(
+        .text,
+        if (doc.file.read_only) .read else .source_edit,
+        true, // 위 주석 — 편집기는 선택이 없어도 복사·잘라내기 대상이 있다
+        &buf,
+    );
+    if (built.len == 0) return false;
+
+    var stored: @typeInfo(@FieldType(AppSession, "editor_context_menu")).optional.child = .{
+        .surface_id = term.surface.id,
+        .items = undefined,
+        .len = @min(built.len, 4),
+    };
+    for (built[0..stored.len], 0..) |item, i| {
+        stored.items[i] = item;
+        self.context_menu_items_buf[i] = item.label();
+    }
+    self.context_menu_items_len = stored.len;
+    self.editor_context_menu = stored;
+    self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), stored.len);
+    self.metal_dirty = true;
+    return true;
+}
+
 pub fn showTerminalContextMenu(self: *AppSession, x_px: f64, y_px: f64) void {
     self.terminal_context_menu = true;
     const items = buildTerminalContextMenuItems(self);
@@ -1578,6 +1617,9 @@ pub fn closeContextMenu(self: *AppSession) void {
     self.file_tree_background_menu = false;
     self.view_options_menu = false;
     self.terminal_context_menu = false;
+    // **값 자체를 비운다** — 이 메뉴는 플래그가 아니라 대상(surface id)과 굳힌 항목을 든다.
+    // 남겨 두면 다음 우클릭이 다른 메뉴를 열어도 accept 가 이 분기로 먼저 들어온다.
+    self.editor_context_menu = null;
     self.branch_menu_open = false; // 목록 텍스트는 다음 요청까지 살려 둔다(재열기 비용 절약)
     self.scm_remote_menu_open = false; // 도크 `∨`도 같은 규율(P6b)
     // **항목 표는 여기서 지우지 않는다.** accept 경로가 **닫은 뒤에** 고른 자리를 뜻으로 되돌리기
@@ -1705,6 +1747,28 @@ pub fn acceptContextMenu(self: *AppSession) void {
                 // 이미지 저장은 저장 패널 ABI가 필요해 이 슬라이스에 없다(§2.6) — 항목도 만들지 않는다.
                 .save_image, .copy, .cut, .paste, .select_all => closeContextMenu(self),
             },
+        }
+        return;
+    }
+    // 편집기 본문 메뉴 — 열 때 굳힌 항목으로 실행한다(고를 때 다시 계산하면 그 사이 선택이 바뀌어
+    // 다른 항목이 돈다). 클립보드는 OS 것이라 잘라내기·복사·붙여넣기는 Swift 로 넘기고, 전체 선택만
+    // 그 자리에서 한다.
+    if (self.editor_context_menu) |menu| {
+        const selected = self.chrome_host.context_menu.selected;
+        const item: ?maru.session.content_menu.Item = if (selected < menu.len) menu.items[selected] else null;
+        const target = term_ops.termBySurfaceId(self, menu.surface_id);
+        closeContextMenu(self);
+        const t = target orelse return; // 메뉴가 떠 있는 동안 닫힌 Term — 조용히 접는다
+        switch (item orelse return) {
+            // 잘라내기·복사는 **편집기 것**이다 — 터미널 선택을 집는 `ClipboardAction.copy` 로 보내면
+            // 편집기 선택이 아니라 터미널 선택이 클립보드에 간다. 두 경로가 이름만 같고 대상이 다르다.
+            .cut => _ = editor_ops.cutSelection(self, t),
+            .copy => _ = editor_ops.copySelection(self),
+            // 붙여넣기는 OS 클립보드를 읽어야 해서 Swift 를 거친다. 되돌아온 바이트는
+            // `AppSession.pasteText` 가 §3.4 대로 편집기 Term 으로 라우팅한다.
+            .paste => self.pending_clipboard_action = .paste,
+            .select_all => _ = editor_ops.selectAll(self, t),
+            else => {},
         }
         return;
     }

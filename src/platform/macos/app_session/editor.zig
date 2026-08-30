@@ -4741,6 +4741,29 @@ fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor
 ///
 /// **선택이 없으면 줄 전체를 잘라낸다** — 복사 쪽이 그렇게 담으므로(§3.4) 지우는 것도 같은 범위여야
 /// "복사한 것이 사라졌다"가 성립한다. 다른 편집기도 `⌘X`가 줄을 자른다.
+/// 문서 전체를 고른다(⌘A·컨텍스트 메뉴 "전체 선택").
+///
+/// **편집기에는 이 자리가 없었다**(2026-08-30 코드 확인). `select_all` 액션이 주소창·커밋 상자는
+/// 분기하는데 편집기 Term 만 빠져, 코어 큐로 `.select_all` 을 보내고 있었다 — 편집기 Term 의
+/// 코어는 sentinel 이라 그 명령이 닿을 곳이 없다. 같은 파일에서 `pasteText` 는 §3.4 대로 편집기를
+/// 알아보는데 이것만 안 따라갔다.
+///
+/// **멀티 커서를 정리한다** — 전체를 고르는 것은 커서를 하나로 되돌리는 일이다. 남겨 두면 그 다음
+/// 편집이 여러 자리에 들어간다.
+pub fn selectAll(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false; // 비교 뷰는 문서가 둘이라 "전체" 가 안 정해진다
+    const doc = term.rt.editor_doc orelse return false;
+    clearExtraSelections(self, term);
+    term.rt.editor_selection = .{
+        .anchor_start = 0,
+        .anchor_end = 0,
+        .focus = doc.file.content.len,
+    };
+    self.metal_dirty = true;
+    return true;
+}
+
 pub fn cutSelection(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
@@ -15773,4 +15796,121 @@ test "ES20 화면 맨 윗줄도 칠해진다 — 한 줄 어긋남을 잡는다"
         body_first = @min(body_first, @as(i32, @intCast(c.row)));
     }
     try testing.expect(rows.contains(body_first));
+}
+
+// ── NS4: 편집기 본문 우클릭 (docs/send-selection-to-agent.md §6.1) ─────────────────────────────
+
+/// 활성 pane 본문 안의 한 점(창 좌표). **고정 좌표를 찍으면 안 된다** — 사이드바 폭·pane 바 높이가
+/// 레이아웃에서 오므로 손으로 적은 값은 chrome 위로 떨어지거나 pane 밖이 된다(실제로 그랬다).
+fn bodyPointInActivePane(session: *AppSession) ?struct { x: f64, y: f64 } {
+    var rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
+    defer rects.deinit(session.allocator);
+    tab_ops.activeTabLeafRects(session, session.allocator, session.termRect(), &rects) catch return null;
+    const active = pane_ops.activePane(session);
+    for (rects.items) |lr| {
+        if (lr.leaf != active) continue;
+        const bar_h: f64 = if (pane_ops.paneBar(session, lr.rect, lr.leaf)) |pb|
+            @floatFromInt(pb.full.h)
+        else
+            0;
+        return .{
+            .x = @as(f64, @floatFromInt(lr.rect.x)) + @as(f64, @floatFromInt(lr.rect.w)) / 2,
+            .y = @as(f64, @floatFromInt(lr.rect.y)) + bar_h + @as(f64, @floatFromInt(lr.rect.h - @as(u32, @intFromFloat(bar_h)))) / 2,
+        };
+    }
+    return null;
+}
+
+test "NS4 편집기 본문 우클릭은 붙여넣기를 요청하지 않고 메뉴를 띄운다" {
+    // **이것이 이 조각이 막는 자리다.** 그 전에는 편집기 본문 우클릭이 터미널 본문 분기로 내려가
+    // `input.right-click` 기본값 `paste` 에서 클립보드를 요청했고, 그 바이트는 `pasteText` 가
+    // 편집기로 라우팅해 **문서에 붙었다**. 그래서 판정자는 둘을 함께 본다 — 메뉴가 떴는가, 그리고
+    // 붙여넣기를 **요청하지 않았는가**. 하나만 보면 "메뉴도 뜨고 붙여넣기도 됐다" 를 놓친다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // **창 크기를 준다** — 픽스처는 렌더 상태만 세우므로 `termRect()` 가 0×0 이고, 그러면 pane 사각이
+    // 비어 포인터가 어느 pane 에도 안 맞는다(같은 함정이 스크롤 테스트에도 적혀 있다).
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    fx.session.pending_clipboard_action = .none;
+
+    // 먼저 **재료**를 확인한다 — 이것이 틀리면 라우팅을 봐야 할 이유가 없다.
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm().kind == .editor);
+    try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
+    settings_ops.closeContextMenu(fx.session);
+
+    const pt = bodyPointInActivePane(fx.session) orelse return error.SkipZigTest;
+    fx.session.mouse(1, pt.x, pt.y, 2, 0);
+
+    try testing.expect(fx.session.editor_context_menu != null);
+    try testing.expect(fx.session.chrome_host.context_menu.open);
+    try testing.expectEqual(app_session_mod.ClipboardAction.none, fx.session.pending_clipboard_action);
+}
+
+test "NS4 항목은 편집 가능 여부를 따른다 — 읽기 전용이면 잘라내기·붙여넣기가 없다" {
+    // 항목 정책은 `session/content_menu.zig` 가 소유한다(파일 패널 웹과 한 벌). 여기서 재구현하면
+    // 두 표면이 같은 메뉴를 다른 규칙으로 채운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    const pt = bodyPointInActivePane(fx.session) orelse return error.SkipZigTest;
+    fx.session.mouse(1, pt.x, pt.y, 2, 0);
+    const editable = fx.session.editor_context_menu.?;
+    try testing.expectEqual(@as(usize, 4), editable.len); // 잘라내기·복사·붙여넣기·전체 선택
+    settings_ops.closeContextMenu(fx.session);
+
+    fx.term.rt.editor_doc.?.file.read_only = true;
+    fx.session.mouse(1, pt.x, pt.y, 2, 0);
+    const read_only = fx.session.editor_context_menu.?;
+    try testing.expectEqual(@as(usize, 2), read_only.len); // 복사·전체 선택만
+    for (read_only.items[0..read_only.len]) |item| {
+        try testing.expect(item != .cut);
+        try testing.expect(item != .paste);
+    }
+}
+
+test "NS4 전체 선택은 편집기 문서를 고른다 — 코어 큐로 새지 않는다" {
+    // `select_all` 액션이 주소창·커밋 상자는 분기하는데 **편집기만 빠져** 있었다. 편집기 Term 의
+    // 코어는 sentinel 이라 그 명령이 닿을 곳이 없었고, 그래서 ⌘A 가 아무 일도 안 했다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const len = fx.term.rt.editor_doc.?.file.content.len;
+    try testing.expect(len > 0);
+    fx.term.rt.editor_selection = null;
+
+    try testing.expect(selectAll(fx.session, fx.term));
+    const sel = fx.term.rt.editor_selection.?;
+    try testing.expectEqual(@as(usize, 0), sel.anchorLo());
+    try testing.expectEqual(len, sel.focus);
+}
+
+test "NS4 편집기가 아닌 Term 에서는 이 메뉴가 안 뜬다" {
+    // 같은 pane 에 터미널 Term 과 편집기 Term 이 함께 있다. 우클릭이 **활성 Term 의 종류**로
+    // 갈리지 않으면 터미널 위에서 편집기 메뉴가 뜨거나 그 반대가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const pane = pane_ops.activePane(fx.session);
+    var terminal: ?*Term = null;
+    for (pane.terms.items) |t| {
+        if (t.kind != .editor) terminal = t;
+    }
+    const term = terminal orelse return error.SkipZigTest; // 픽스처에 터미널이 없으면 잴 것이 없다
+
+    try testing.expect(!settings_ops.showEditorContextMenu(fx.session, term, 300, 300));
+    try testing.expect(fx.session.editor_context_menu == null);
+    try testing.expect(!selectAll(fx.session, term)); // 전체 선택도 편집기 것이 아니다
 }

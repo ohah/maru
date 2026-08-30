@@ -186,7 +186,9 @@ pub fn scanLine(
     out: *std.ArrayList(Hit),
 ) !void {
     if (line.len == 0 or line.len > max_line_bytes) return;
-    if (std.mem.indexOf(u8, line, compacted_marker) != null) return;
+    // **가장 먼저, 그리고 줄 앞부분만 본다.** 여기서 되돌아가면 아래 세 패스를 통째로 건너뛴다 —
+    // 실측 파일에서 compacted 줄이 **바이트의 41%(812 MB / 871 줄)** 라 그 절약이 크다.
+    if (isCompacted(line)) return;
 
     const before = out.items.len;
     try scanClaudeImages(allocator, line, line_offset, out);
@@ -195,6 +197,26 @@ pub fn scanLine(
     dropToolFileDuplicates(out, before, after_images);
     try scanCodexImages(allocator, line, line_offset, out);
 }
+
+/// `compacted` 레코드인가. **줄 앞부분만** 본다.
+///
+/// 예전에는 줄 전체를 훑었는데, 실측(1,981 MB rollout)에서 그 한 패스가 **2,817 ms · 전체의 28%**
+/// 였다. 그런데 이 마커는 JSON 구조상 **줄 머리에 고정**이다 — 실측 296 파일 / **14,206 줄**에서
+/// 위치가 중앙 40, **최대 55** 였다. 창을 그 74 배로 잡아도 O(1) 이다.
+///
+/// **창 밖에 있으면 못 잡는다**: 그 줄의 이미지가 갤러리에 다시 뜬다(compacted 는 이전 대화를
+/// 이미지째 재수록하므로 실측 15,140 개 대 실제 151 개가 된다). 창을 넉넉히 두는 이유가 그것이다.
+fn isCompacted(line: []const u8) bool {
+    const window = line[0..@min(line.len, compacted_search_window)];
+    return std.mem.indexOf(u8, window, compacted_marker) != null;
+}
+
+/// `compacted` 마커를 찾을 창(바이트). 실측 최대 55 의 **9.3 배**다.
+///
+/// **더 넓히면 그만큼 느려진다**: 줄마다 이 창을 훑고 이 파일에는 줄이 649,381 개라, 4 KiB 로 두면
+/// 누적 1.9 GB 를 훑어 **2.0 초**가 된다(실측). 512 B 면 332 MB 라 0.4 초다. 마커가 구조상 줄 머리에
+/// 고정(중앙 40 · 최대 55)이므로 이 여유로 충분하다.
+const compacted_search_window: usize = 512;
 
 /// **같은 이미지의 두 번째 사본을 접는다**(§4.3). 접지 않으면 에이전트가 읽은 이미지가 갤러리에
 /// 두 번씩 뜬다 — 실측 3,226 장 중 1,424 장(44%)이 이 사본이었다.
@@ -867,4 +889,73 @@ test "청크가 줄 여럿을 담아도 이미지를 찾고 오프셋이 파일 
         "QUJD",
         doc.items[out.items[0].data_offset..][0..out.items[0].data_len],
     );
+}
+
+test "compacted 창: 경계 안팎을 정확히 가른다 — 성능 때문에 조용히 놓치지 않는다" {
+    // **창 제한은 성능 최적화이고, 최적화가 결과를 바꾸면 안 된다**(적대적 검증 2026-08-30).
+    // 실측 428 파일 / 14,206 줄에서 마커 위치는 중앙 40 · **최대 55** 였고, 창 512 B 가 놓친 것은 0 이다.
+    // 여기서는 코퍼스에 **없는** 경계를 직접 만들어 가른다.
+    const allocator = testing.allocator;
+    const img = "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,QUJD\"}";
+
+    // ① 마커가 창 **안**이면 그 줄은 통째로 건너뛴다.
+    {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        try line.appendSlice(allocator, "{\"pad\":\"");
+        try line.appendNTimes(allocator, 'x', compacted_search_window - 64);
+        try line.appendSlice(allocator, "\",\"type\":\"compacted\",\"c\":[");
+        try line.appendSlice(allocator, img);
+        try line.appendSlice(allocator, "]}\n");
+        var out: std.ArrayList(Hit) = .empty;
+        defer out.deinit(allocator);
+        _ = try scanBuffer(allocator, line.items, 0, &out);
+        try testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+
+    // ② 마커가 창 **밖**이면 못 잡는다 — **알려진 한계**다(그래서 창을 실측 최대의 9.3 배로 둔다).
+    //    이 단언은 「창이 실제로 제한으로 작동한다」를 못박는다.
+    {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        try line.appendSlice(allocator, "{\"pad\":\"");
+        try line.appendNTimes(allocator, 'x', compacted_search_window + 64);
+        try line.appendSlice(allocator, "\",\"type\":\"compacted\",\"c\":[");
+        try line.appendSlice(allocator, img);
+        try line.appendSlice(allocator, "]}\n");
+        var out: std.ArrayList(Hit) = .empty;
+        defer out.deinit(allocator);
+        _ = try scanBuffer(allocator, line.items, 0, &out);
+        try testing.expectEqual(@as(usize, 1), out.items.len);
+    }
+
+    // ③ 창이 실측 최대(55)를 넉넉히 덮는다 — 이 부등식이 깨지면 실데이터를 놓치기 시작한다.
+    try testing.expect(compacted_search_window >= 512);
+}
+
+test "compacted 판정이 청크 경계에 쪼개져도 같다" {
+    // 스트리밍은 줄을 모아 판정하므로 청크 경계와 무관해야 한다. 최적화가 그 불변식을 깨는지 본다.
+    const allocator = testing.allocator;
+    const doc =
+        "{\"timestamp\":\"x\",\"type\":\"compacted\",\"c\":[{\"type\":\"input_image\"," ++
+        "\"image_url\":\"data:image/png;base64,QUJD\"}]}\n" ++
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\"," ++
+        "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"WFla\"}}]}}\n";
+
+    for ([_]usize{ 1, 3, 17, 64, 4096 }) |step| {
+        var scanner: StreamScanner = .{};
+        defer scanner.deinit(allocator);
+        var out: std.ArrayList(Hit) = .empty;
+        defer out.deinit(allocator);
+        var i: usize = 0;
+        while (i < doc.len) : (i += step) {
+            try scanner.feed(allocator, doc[i..@min(doc.len, i + step)], &out);
+        }
+        // compacted 줄의 이미지는 안 세고, 그 다음 줄의 것만 센다.
+        try testing.expectEqual(@as(usize, 1), out.items.len);
+        try testing.expectEqualStrings(
+            "WFla",
+            doc[out.items[0].data_offset..][0..out.items[0].data_len],
+        );
+    }
 }

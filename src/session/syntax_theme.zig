@@ -109,6 +109,46 @@ pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
     };
 }
 
+/// 역할 하나의 색을 꺼낸다. **설정 화면이 스와치를 그리려면 역할로 색인해야 한다** — 그 자리가
+/// 여기 하나여야 `SyntaxColors` 필드가 늘 때 두 곳이 갈리지 않는다.
+///
+/// **반영(`@field`)을 쓰지 않는다** — 제품 코드의 반영은 경계 재고가 막는다(`chrome_theme.zig`가 같은
+/// 이유로 열한 줄을 손으로 적는다). 열거와 필드가 1:1이라는 것은 이 파일 위의 `comptime` 블록이 이미
+/// 못박았으므로, 여기서 빠뜨리면 컴파일이 죽는다(switch 가 exhaustive 다).
+pub fn colorFor(colors: SyntaxColors, role: theme_config.SyntaxRole) color.Rgb {
+    return switch (role) {
+        .keyword => colors.keyword,
+        .string => colors.string,
+        .number => colors.number,
+        .comment => colors.comment,
+        .property => colors.property,
+        .type_name => colors.type_name,
+        .function => colors.function,
+        .punctuation => colors.punctuation,
+        .tag => colors.tag,
+        .attribute => colors.attribute,
+        .invalid => colors.invalid,
+    };
+}
+
+/// 역할의 사람이 읽는 이름 — 설정 화면 행 라벨. **영어로 둔다**: 이 이름들은 config 키
+/// (`theme.syntax.keyword`)와 같은 어휘라, 번역하면 사용자가 파일에서 찾을 이름과 화면이 갈린다.
+pub fn roleLabel(role: theme_config.SyntaxRole) []const u8 {
+    return switch (role) {
+        .keyword => "keyword",
+        .string => "string",
+        .number => "number",
+        .comment => "comment",
+        .property => "property",
+        .type_name => "type",
+        .function => "function",
+        .punctuation => "punctuation",
+        .tag => "tag",
+        .attribute => "attribute",
+        .invalid => "invalid",
+    };
+}
+
 /// diff 본문의 추가·삭제 색(docs/editor-surface-structure.md §3). syntax와 같은 규율으로 **터미널 팔레트에서 파생**한다 —
 /// 사용자가 테마를 바꾸면 diff도 같이 바뀌어야 한 창 안에서 색 언어가 갈리지 않는다. 초록=추가·빨강=삭제는
 /// git/GitHub과 같은 관례이고, 팔레트의 그 자리(bright green/red)를 그대로 쓴다.

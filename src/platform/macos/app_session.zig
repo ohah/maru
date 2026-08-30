@@ -74470,10 +74470,14 @@ test "이미지 갤러리: 자동 갱신이 워커를 쉬지 않게 돌리지 �
     try std.testing.expectEqual(@as(i64, 500), g.testFreshnessIntervalMs(11)); // 중앙 세션
     try std.testing.expectEqual(@as(i64, 11750), g.testFreshnessIntervalMs(1175)); // p99
     try std.testing.expectEqual(@as(i64, 90070), g.testFreshnessIntervalMs(9007)); // 최대
-    // **점유율 상한**: 일한 시간 대비 쉬는 시간이 언제나 10 배 이상이다.
-    for ([_]u64{ 1, 50, 500, 1175, 9007, 60_000 }) |ms| {
+    // **점유율 보장은 «상한 아래에서만» 산다.** 처음에는 60,000 ms 까지 10 배를 요구했는데, 그것은
+    // 4 회차에 넣은 상한(120 초)과 정면으로 부딪힌다 — 둘 다 가질 수는 없다. 「병리적으로 비싼
+    // 스캔에서는 점유율을 포기하고 기능을 살린다」가 우리가 고른 쪽이고, 그것을 여기 적어 둔다.
+    for ([_]u64{ 1, 50, 500, 1175, 9007 }) |ms| { // 전부 상한 아래(9,007 × 10 = 90,070 < 120,000)
         try std.testing.expect(g.testFreshnessIntervalMs(ms) >= @as(i64, @intCast(ms)) * 10);
     }
+    // 상한을 넘는 구간에서는 상한이 이긴다.
+    try std.testing.expectEqual(@as(i64, 120_000), g.testFreshnessIntervalMs(60_000));
 }
 
 test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 적대적)" {
@@ -74601,4 +74605,90 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
     }
     try std.testing.expect(!session.image_gallery.scanning());
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+}
+
+test "이미지 갤러리: 쉬는 시간에 상한이 있다 — 조용히 죽지 않는다 (IG2 적대적)" {
+    // **적대적 검증 4 회차.** `scan_ns` 는 벽시계 경과라 스캔 중에 기계가 잠들면 그 시간이 통째로
+    // 들어간다 — 1 시간 자면 쉬는 시간이 10 시간이 되어 그 세션 내내 갱신이 안 온다. 상한에 걸리면
+    // 점유율 보장은 깨지지만, **기능이 멈추는 것보다 낫다**.
+    const g = image_gallery_ops;
+    try std.testing.expect(g.testFreshnessIntervalMs(60 * 60 * 1000) <= 120_000); // 1 시간 스캔
+    try std.testing.expect(g.testFreshnessIntervalMs(std.math.maxInt(u64)) <= 120_000); // 말도 안 되는 값
+    // 실측 최악(9,007 ms → 90 초)은 상한 아래라 점유율 보장이 그대로 산다.
+    try std.testing.expectEqual(@as(i64, 90070), g.testFreshnessIntervalMs(9007));
+}
+
+test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG2 적대적)" {
+    // **적대적 검증 5 회차.** 결과가 오면 타일을 통째로 버리고 있었다. 소스가 갈릴 때는 맞지만,
+    // 자동 갱신이 붙은 뒤로 그 길은 「같은 파일이 자랐다」에도 쓰인다 — 대화가 이어지는 내내 격자가
+    // 매 턴 비었다 다시 찬다(장당 ~20 ms). 인덱스는 밀려도 정체는 그대로다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    const kept_pixels = session.image_gallery.tiles.items[0].pixels.ptr;
+
+    // 파일이 자란다 → 새 이미지가 **맨 앞**에 오므로 옛 이미지는 인덱스 0 → 1 로 밀린다.
+    {
+        var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{one}, one.len);
+    }
+    image_gallery_ops.refresh(session, true);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.count() < 2) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+
+    // **옛 타일이 살아 있고, 새 인덱스(1)로 옮겨졌다.** 픽셀 포인터가 같다 = 다시 디코드하지 않았다.
+    const tile = session.image_gallery.tileFor(1) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(kept_pixels, tile.pixels.ptr);
+    try std.testing.expectEqual(@as(usize, 1), tile.hit_index);
+    // (`uploaded` 는 단언하지 않는다 — remap 이 내려 두지만 그 뒤 렌더가 곧바로 다시 올리므로
+    //  **중간 상태**다. 여기서 짚으면 「제품이 옳게 진행한 것」을 실패로 읽는다.)
 }

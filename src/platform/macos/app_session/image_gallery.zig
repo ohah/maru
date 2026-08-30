@@ -43,7 +43,12 @@ fn pollFreshness(self: *AppSession) void {
     // 에이전트가 줄 하나 적었다고 보던 이미지가 바뀌는 것보다 잠깐 낡은 편이 낫다.
     if (self.image_gallery.open != null) return;
 
-    const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_ms));
+    // **단조 시계다.** 벽시계(`Clock.real`)는 NTP 보정으로 뒤로 갈 수 있고, 그러면 아래 뺄셈이
+    // 0 으로 포화해 자동 갱신이 그 시간만큼 **조용히 멈춘다**. 「얼마나 지났나」는 `awake` 가 답한다.
+    const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.awake.now(self.io).nanoseconds, std.time.ns_per_ms));
+    // 그래도 뒤로 간 값이 보이면(시계 구현이 보장을 못 지키면) **밀린 것으로 보고 지금을 기준으로
+    // 다시 잡는다** — 영원히 이른 상태로 갇히지 않는다.
+    if (now_ms < self.image_gallery.last_stat_ms) self.image_gallery.last_stat_ms = now_ms;
     if (now_ms -| self.image_gallery.last_stat_ms < freshnessIntervalMs(self)) return;
     self.image_gallery.last_stat_ms = now_ms;
 
@@ -68,7 +73,11 @@ fn freshnessIntervalMs(self: *const AppSession) i64 {
 /// 위 규칙의 **순수** 부분 — 화면 없이 짚을 수 있게 갈라 둔다.
 pub fn restIntervalMs(last_scan_ms: u64) i64 {
     const last: i64 = @intCast(@min(@as(u64, std.math.maxInt(i32)), last_scan_ms));
-    return @max(freshness_interval_ms, last *| freshness_rest_multiplier);
+    const want = @max(freshness_interval_ms, last *| freshness_rest_multiplier);
+    // **상한이 없으면 조용히 죽는다.** `scan_ns` 는 벽시계 경과라 스캔 중에 기계가 잠들면 그 시간이
+    // 통째로 들어간다 — 1 시간 자면 쉬는 시간이 10 시간이 되어 그 세션 내내 갱신이 안 온다.
+    // 상한에 걸리는 경우 점유율 보장은 깨지지만, 기능이 멈추는 것보다 낫다.
+    return @min(want, freshness_max_ms);
 }
 
 /// `restIntervalMs` 의 test 창구.
@@ -81,6 +90,39 @@ pub fn testFreshnessIntervalMs(last_scan_ms: u64) i64 {
 const freshness_interval_ms: i64 = 500;
 /// 직전 스캔 시간의 몇 배를 쉬는가. 위 doc 참조.
 const freshness_rest_multiplier: i64 = 10;
+/// 쉬는 시간의 **상한**(ms). 실측 최악(9,007 ms → 90 초)은 이 아래라 점유율 보장이 그대로 산다.
+/// 이 값을 넘기는 것은 병리적인 경우(스캔 중 절전)뿐이고, 그때는 「느리게라도 온다」를 택한다.
+const freshness_max_ms: i64 = 120_000;
+
+/// 다시 훑은 뒤 타일을 **새 인덱스에 다시 잇는다**. 못 찾은 타일만 버린다.
+///
+/// 타일 수는 상한이 있고(`max_tiles`) 실측 세션도 수백 장이라 선형 탐색으로 충분하다.
+fn remapTiles(self: *AppSession) void {
+    const hits = self.image_gallery.hits.items;
+    var write: usize = 0;
+    for (self.image_gallery.tiles.items) |tile| {
+        var found: ?usize = null;
+        for (hits, 0..) |hit, i| {
+            if (hit.file_index == tile.file_index and hit.data_offset == tile.data_offset) {
+                found = i;
+                break;
+            }
+        }
+        if (found) |n| {
+            var kept = tile;
+            kept.hit_index = n;
+            // **id 는 인덱스로 짓는다**(`appendGpuImages`). 자리가 바뀌었으면 새 id 로 다시 올려야
+            // 빈 칸이 안 된다 — 픽셀은 그대로라 다시 디코드하지는 않는다.
+            kept.uploaded = false;
+            kept.label = labelFor(self, n);
+            self.image_gallery.tiles.items[write] = kept;
+            write += 1;
+        } else {
+            self.allocator.free(tile.pixels); // 사라진 이미지 — 픽셀을 여기서 푼다
+        }
+    }
+    self.image_gallery.tiles.shrinkRetainingCapacity(write);
+}
 
 /// 지금 그 파일의 자국. 열지 못하면 «모름» 이다.
 fn stampOf(self: *AppSession, path: []const u8) Stamp {
@@ -343,8 +385,13 @@ pub const Stamp = struct {
 
 /// 화면에 올린 썸네일 하나.
 pub const Tile = struct {
-    /// 인덱스의 몇 번째 이미지인가. 격자 자리와 `hits` 를 잇는 유일한 키다.
+    /// 인덱스의 몇 번째 이미지인가. 격자 자리와 `hits` 를 잇는 키다. **다시 훑으면 밀린다** —
+    /// 새 이미지가 맨 앞에 오므로(최신 우선). 그때 아래 정체로 다시 잇는다.
     hit_index: usize,
+    /// 이 픽셀이 **어느 이미지**의 것인가. 인덱스와 달리 파일 안에서 변하지 않으므로, 다시 훑은 뒤
+    /// 타일을 버리지 않고 새 인덱스에 이어 붙일 수 있다(`remapTiles`).
+    file_index: u8 = 0,
+    data_offset: u64 = 0,
     width: u32,
     height: u32,
     /// RGBA8, **owned**. `State.dropTiles` 가 푼다.
@@ -583,11 +630,12 @@ pub fn poll(self: *AppSession) void {
     }
     // 원본이 바뀌었으니 보여줄 목록을 다시 만든다(검색어가 비면 전부).
     self.image_gallery.applyFilter(self.allocator);
-    // **인덱스가 갈리면 그 위에 쌓인 것도 버린다.** 지금은 `refresh` 가 `clear` 를 먼저 하므로
-    // 여기 도달할 때 둘 다 비어 있지만, 그 순서에 기대면 나중에 점진 publish 를 붙이는 순간
-    // 타일과 크게 보기가 **옛 인덱스**를 가리킨 채 남는다 — 「엉뚱한 이미지가 뜬다」로 보이지
-    // 「비었다」로 보이지 않아 알아채기 어렵다. 불변식은 가정하지 말고 강제한다.
-    self.image_gallery.dropTiles(self.allocator);
+    // **타일은 버리지 않고 새 인덱스에 다시 잇는다.** 자동 갱신이 붙은 뒤로 이 길은 「같은 파일이
+    // 자랐다」에도 쓰이는데, 통째로 버리면 대화가 이어지는 내내 격자가 매 턴 비었다 다시 찬다
+    // (장당 ~20 ms). 인덱스는 밀려도 `(file_index, data_offset)` 은 그대로다.
+    remapTiles(self);
+    // 크게 보기는 그대로 버린다 — 자동 갱신은 애초에 열려 있으면 미루므로(`pollFreshness`) 여기
+    // 도달하는 것은 소스가 갈렸을 때뿐이고, 그때는 다른 세션이라 닫는 것이 맞다.
     self.image_gallery.dropOpen(self.allocator);
     // **호버도 옛 인덱스다.** 이미지가 줄면 없는 칸을 가리키고, 안 줄어도 그 자리엔 다른 이미지가
     // 온다(최신 우선이라 순서가 통째로 바뀐다). 다음 마우스 이동이 다시 잡는다.
@@ -686,9 +734,18 @@ fn harvestDecoded(self: *AppSession) void {
     if (r.hit_index != self.image_gallery.decoding_index) return;
     if (self.image_gallery.tileFor(r.hit_index) != null) return; // 이미 있다(중복 제출 방어)
 
+    // 이 픽셀이 **어느 이미지**의 것인지 함께 적어 둔다 — 다시 훑은 뒤 인덱스가 밀려도
+    // 그 정체로 타일을 다시 이을 수 있다(`remapTiles`).
+    const src = if (r.hit_index < self.image_gallery.hits.items.len)
+        self.image_gallery.hits.items[r.hit_index]
+    else
+        return;
+
     // **못 푼 것도 자리를 차지한다.** 안 그러면 그 칸에서 매 tick 다시 시도해 뒤 칸이 영영 안 찬다.
     self.image_gallery.tiles.append(self.allocator, .{
         .hit_index = r.hit_index,
+        .file_index = src.file_index,
+        .data_offset = src.data_offset,
         .width = r.width,
         .height = r.height,
         .pixels = r.pixels,

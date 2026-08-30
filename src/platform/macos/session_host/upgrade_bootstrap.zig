@@ -562,9 +562,20 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     // The product rollback gate opens a real listener. Keep it out of the user's live Maru
     // namespace and out of sibling test processes; a fixed public host-id socket could otherwise
     // connect this assertion to an unrelated daemon and manufacture a false success.
+    const previous_root = if (c.getenv("MARU_SESSION_HOST_ROOT")) |value|
+        try std.testing.allocator.dupeZ(u8, std.mem.span(value))
+    else
+        null;
+    defer {
+        if (previous_root) |value| {
+            _ = setenv("MARU_SESSION_HOST_ROOT", value.ptr, 1);
+            std.testing.allocator.free(value);
+        } else {
+            _ = unsetenv("MARU_SESSION_HOST_ROOT");
+        }
+    }
     if (setenv("MARU_SESSION_HOST_ROOT", session_dir.ptr, 1) != 0)
         return error.TestUnexpectedResult;
-    defer _ = unsetenv("MARU_SESSION_HOST_ROOT");
     try short_endpoint.prepareCurrentUserNamespace();
     var socket_dir_buf: [272]u8 = undefined;
     const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);

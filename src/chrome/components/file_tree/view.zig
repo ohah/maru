@@ -799,7 +799,7 @@ test "아주 긴 라벨도 예산 안에서 그려진다" {
     try testing.expectEqual(@as(usize, 2), labels);
 }
 
-test "FTCLIP 트리가 낸 글자는 전부 스크롤 뷰포트에 잘린다 — measured 경로가 그 표시로만 자른다" {
+test "FTCLIP 트리가 낸 글자는 라벨도 아이콘도 스크롤 뷰포트에 잘린다" {
     // **`Text.clip` 과 `Text.scroll_clipped` 는 다른 채널이다.** 앞엣것은 셀 격자로 낮추는 경로가
     // 쓰고, measured(CoreText/GPU) 글리프를 자르는 것은 뒤엣것 하나뿐이다 —
     // `system_text.glyphClipFor` 가 `if (placement.scroll_clipped) viewport else null` 이다.
@@ -812,19 +812,31 @@ test "FTCLIP 트리가 낸 글자는 전부 스크롤 뷰포트에 잘린다 —
     //
     // **떠 있는 머리가 없으므로 예외가 없다.** 생기면 `above_clip` 을 쓰고 이 판정자를 갈라야 한다.
     var h = Harness{};
+    // **`icon_kind = 0`(= `none`)이면 아이콘이 안 그려진다.** 처음 이 값으로 썼다가 아이콘 op 이
+    // 하나도 없는 채로 초록이었다 — 판정자 제목이 "라벨도 아이콘도" 인데 라벨만 재고 있었다.
+    // `expandable` 은 chevron 아이콘까지 낸다.
     const rows = [_]types.Row{
-        .{ .kind = .directory, .label = "src", .icon_kind = 0 },
-        .{ .kind = .file, .label = "build.zig", .icon_kind = 0 },
-        .{ .kind = .file, .label = "AGENTS.md", .icon_kind = 0 },
+        .{ .kind = .directory, .label = "src", .expandable = true, .icon_kind = @intFromEnum(file_tree_icon.IconKind.folder) },
+        .{ .kind = .file, .label = "build.zig", .icon_kind = @intFromEnum(file_tree_icon.IconKind.file) },
+        .{ .kind = .file, .label = "AGENTS.md", .icon_kind = @intFromEnum(file_tree_icon.IconKind.file) },
     };
     const painted = try h.run(&rows);
-    var texts: usize = 0;
+    var labels: usize = 0;
+    var icon_ops: usize = 0;
     for (painted.ops) |op| switch (op) {
         .text => |t| {
-            texts += 1;
             try testing.expect(t.scroll_clipped);
+            // **무조건 `true` 의 전제를 여기서 지킨다.** 두 표시는 배타적인데(`draw.zig`) 그 배타성을
+            // 재는 것이 저장소에 없었다(적대적 검증 4회차). 트리에 떠 있는 머리가 생기면 이 단언이
+            // 먼저 깨져서, 넣는 사람이 `above_scroll` 과 조건을 갈라야 한다는 것을 알게 된다.
+            try testing.expect(!t.above_scroll);
+            if (t.placement == .origin) labels += 1 else icon_ops += 1;
         },
         else => {},
     };
-    try testing.expect(texts > 0); // 아무 글자도 안 나왔으면 위 단언은 아무것도 안 잰다
+    // **둘 다 나왔는지 센다.** 라벨만 세면 아이콘이 하나도 안 나온 픽스처에서도 초록이고,
+    // 그러면 "아이콘도 잘린다" 는 이 판정자의 제목이 거짓이 된다 — 표시는 라벨과 아이콘이
+    // **같은 `emit`** 을 지나므로 한쪽만 보면 그 사실을 안 재는 것이다.
+    try testing.expect(labels > 0);
+    try testing.expect(icon_ops > 0);
 }

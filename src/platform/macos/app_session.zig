@@ -74387,6 +74387,25 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
     const allocator = std.testing.allocator;
+    const Wait = struct {
+        fn built(sess: *AppSession) !void {
+            for (0..5_000) |_| {
+                _ = sess.tick() catch {};
+                if (sess.image_gallery.built) return;
+                std.Io.sleep(sess.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+            return error.ScanNeverFinished;
+        }
+
+        fn settled(sess: *AppSession) !void {
+            for (0..5_000) |_| {
+                _ = sess.tick() catch {};
+                if (!sess.image_gallery.scanning()) return;
+                std.Io.sleep(sess.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+            return error.ScanNeverFinished;
+        }
+    };
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -74425,10 +74444,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     const term = pane_ops.activePane(session).activeTerm();
     try std.testing.expect(term.agent_image_source.set(path));
     image_gallery_ops.refresh(session, false);
-    {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
-    }
+    try Wait.built(session);
     try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
 
     // ── ① 검색어를 친 채로 파일이 자란다 → 검색어가 남아 있어야 한다.
@@ -74444,10 +74460,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
         _ = try f.writePositional(io, &.{line}, line.len);
     }
     image_gallery_ops.refresh(session, true);
-    {
-        var spins: usize = 0;
-        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
-    }
+    try Wait.settled(session);
     // 다시 훑었어도 **친 글자는 그대로**다.
     try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
     try std.testing.expect(session.image_gallery.search_active);
@@ -74455,12 +74468,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     // ── ② 크게 보기를 열어 두면 자동 갱신이 미뤄진다 — 보던 그림이 안 바뀐다.
     session.image_gallery.search.clear();
     image_gallery_ops.rebuildFilter(session);
-    {
-        var spins: usize = 0;
-        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
-            _ = session.tick() catch {};
-        }
-    }
+    // `openAt`은 index hit만 필요하고 decode를 비동기로 건다. 썸네일 생성은 이 계약과 무관하다.
     image_gallery_ops.openAt(session, 0);
     try std.testing.expect(session.image_gallery.open != null);
     const before = session.image_gallery.count();
@@ -74470,10 +74478,9 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
         defer f.close(io);
         _ = try f.writePositional(io, &.{line}, line.len * 2);
     }
-    {
-        var spins: usize = 0;
-        while (spins < 200_000) : (spins += 1) _ = session.tick() catch {};
-    }
+    // `pollFreshness`는 크게 보기 상태를 시계·stat보다 먼저 검사한다. 한 번의 제품 tick이면 이
+    // 불변을 전부 지나며, wall-clock 간격을 채우려고 20만 frame을 재생하는 것은 증거를 더하지 않는다.
+    _ = try session.tick();
     // 크게 보기가 살아 있고, 개수도 안 바뀌었다(갱신을 미뤘다).
     try std.testing.expect(session.image_gallery.open != null);
     try std.testing.expectEqual(before, session.image_gallery.count());

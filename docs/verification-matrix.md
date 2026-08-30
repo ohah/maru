@@ -2420,9 +2420,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 
 - **상태: 별도 release 백로그, P1~P5 완료 조건 밖.** 현재 제품은 `default=false` opt-in을 유지한다. 사용자가 default-on을
   다시 승인하기 전에는 아래 trust 결정이나 제품 config 구현을 시작하지 않으며, component 선결조건의 기존 자동 gate만 보존한다.
-- **남은 trust 결정:** environment 설정 REST와 deployment의 `sha/ref/environment`만으로는 current
-  `run_id/run_attempt/job`의 protection 통과를 증명하지 못한다. current job에 결속된 OIDC/attestation을 검증할지 exact
-  workflow를 신뢰 경계로 둘지 결정하기 전에는 release adapter가 `protected_environment=true`를 만들지 않는다.
+- **확정한 trust 결속:** environment 설정 REST나 deployment의 `sha/ref/environment`만으로 protection 통과를 주장하지 않는다.
+  attempt-scoped jobs의 exact current `run_id/run_attempt/job` URL과 deployment status의 같은 job URL을 결속하고,
+  `waiting` 뒤 `queued|in_progress` 전이 및 newest `in_progress`를 environment의 recognized protection rule과 함께 요구한다.
+  component resolver만으로는 transport·pagination·현재 실행 executable·workflow 배선을 증명하지 않으므로 이 네 권위까지
+  실제 adapter가 결속하기 전에는 `protected_environment=true`를 만들지 않는다.
 - **선결조건 상태: 부분 구현, 외부 gate 미준비.** G3 제품 config 코드는 provisioned `Session host product / default-on` runner와 immutable
   release A manifest가 모두 준비된 뒤에만 시작한다. `build.zig.zon` version SSOT는 generated macOS plist와 tag gate까지
   연결됐다. OS 중립 `release_manifest.zig`는 canonical A/B JSON, bounded parser/writer와 intrinsic repository/release/source/
@@ -2475,8 +2477,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   보호 증거로 세지 않는다. `test-session-host-release-adapter-github-environment`가 malformed/missing/type/duplicate/trailing,
   foreign/zero identity, duplicate/incoherent/empty policy와 allocation fail-index를 Debug·ReleaseFast에서 검증한다. 이 parser는
   configured environment component만 증명하며 current workflow run/job이 그 protection을 통과했다는 증거는 아니다.
-  실제 GitHub release/
-  deployment API·codesign·DMG 결과의 의미 해석과 typed observation 조립, canonical summary encoding, release workflow 배선은
+  `release_adapter_github_deployment.zig`는 attempt-scoped jobs, source/tag/environment로 좁힌 deployments와 각 status 전체 이력을
+  함께 해석해 exact release signing job과 `waiting` 뒤 `queued|in_progress` 전이를 가진 deployment 하나만 environment observation에
+  결속한다. malformed URL·foreign repository/app·stale/완료 job·누락/중복 backing·0개/복수 match를 fail-close하며
+  `test-session-host-release-adapter-github-deployment`가 Debug·ReleaseFast와 allocation fail-index에서 검증한다. 이 resolver도
+  이미 획득한 component bytes의 의미만 증명하며 transport·pagination·workflow 배선을 대신하지 않는다.
+  실제 GitHub release/deployment 호출과 codesign·DMG 관측의 typed observation 조립, canonical summary encoding, release workflow 배선은
   아직 없으므로 외부 release 검증은 후속 슬라이스가
   추가한다. 현재 일반 PR의
   component/fixture green은 이 선결조건들을 대신하지 않는다. 일반 DMG release의 draft-first·no-clobber·재다운로드 byte

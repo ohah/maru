@@ -981,6 +981,11 @@ pub fn followActiveTerminalCwd(self: *AppSession) void {
 ///
 /// **in-flight면 건너뛴다.** 검증은 비동기라 tick마다 다시 밀어 넣으면 요청이 쌓인다. 호출자가 `followed_cwd`를
 /// 이미 갱신했으므로 같은 cwd로는 다시 오지 않고, 다음 `cd`가 자연히 재시도가 된다.
+///
+/// **반환값은 "제출을 시도했다"가 아니라 "검증이 실제로 걸렸다"다.** `provideFileTreeRootPick`은 backend busy·
+/// 할당 실패·request id 소진에서 검증을 세우지 않고 조용히 빠져나온다(자동 경로라 알림도 없다). 그때 true를
+/// 돌려주면 호출자가 이 cwd를 "따라간 것"으로 표시해 **다음 `cd` 전까지 영영 재시도되지 않는다** — §1.1이
+/// mutation busy에 대해 정한 규율과 같은 상황인데 실패 지점만 한 단계 안쪽인 것이다(적대적 검증 2회차).
 fn followRootSwitch(self: *AppSession, cwd: []const u8) bool {
     // **탐색기를 보고 있을 때만 바꾼다.** 도크는 보이지만 view가 소스 컨트롤·에이전트면 트리는 화면에
     // 없다. 그때 root를 갈면 **보이지도 않는 트리**의 접힘·스크롤을 버리고 `dock-tree-roots` 영속까지
@@ -994,7 +999,7 @@ fn followRootSwitch(self: *AppSession, cwd: []const u8) bool {
     self.file_tree_root_picker_inflight = .replace;
     self.file_tree_root_auto_follow = true;
     provideFileTreeRootPick(self, cwd);
-    return true;
+    return self.file_tree_root_validation != null;
 }
 
 /// 이 Term이 **browser 웹 패널**인가(파일 패널 web Term은 제외). browser 전용 기능(nav 단축키·주소창 밴드·

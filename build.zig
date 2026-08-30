@@ -11291,11 +11291,11 @@ pub fn build(b: *std.Build) void {
         // parent/runtime/screen/input/exit 수명을 같은 process artifact에서 증명한다.
         const session_host_nonempty_rollback_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/macos/session_host/upgrade_bootstrap.zig"),
+                .root_source_file = b.path("tests/session_host_nonempty_rollback_e2e.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
             }),
             .filters = &.{"product rollback preserves one real PTY through exit"},
         });

@@ -702,6 +702,21 @@ pub const Window = struct {
         self.postSyntheticMouseWheel(kind, x_px, y_px, 0);
     }
 
+    /// **합성 조합 문자열을 자기 큐에 넣는다** — 판정용이다.
+    ///
+    /// 진짜 조합은 `ImmGetCompositionStringW` 가 OS 에서 읽어 오므로 합성 메시지(`WM_IME_COMPOSITION`)
+    /// 를 넣어도 **빈 값**이다(실측). 그래서 버퍼를 직접 채우고 같은 이벤트를 올린다 — 그러면
+    /// **창 → `preedit_changed` → 라우팅 → 그리기**가 그대로 밟힌다. 안 그러면 그 라우팅 한 줄에
+    /// 판정이 없어, 조합을 통째로 버리는 뮤턴트가 지나간다(적대적 검증 5회차 실측).
+    ///
+    /// **한계**: IME 자체(`Imm*` 호출·조합 상태 전이)는 안 밟는다 — 마우스·키 합성과 같은 한계다.
+    pub fn setSyntheticPreedit(self: *Window, text: []const u8) void {
+        const n = @min(text.len, self.preedit_buf.len);
+        @memcpy(self.preedit_buf[0..n], text[0..n]);
+        self.preedit_len = n;
+        self.push(.preedit_changed);
+    }
+
     /// **합성 문자 입력을 자기 큐에 넣는다** — 판정용이다.
     ///
     /// 마우스 쪽과 같은 이유다: "파일을 보는 중에 친 글자가 **안 보이는 셸**로 가지 않는가" 를

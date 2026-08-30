@@ -6795,6 +6795,43 @@ search_ime: glyphs 9->10 digest 1ea53c5…->aa05113… cards 14->14 to_search=0 
 | `searchDisplay` 가 조합을 안 붙인다(**옛 동작**) | `search_ime_ok`(`glyphs 9->9`, 지문 그대로) |
 | 라우팅이 늘 터미널이다(**옛 동작**) | **단위 테스트**(`expected .sidebar_search, found .terminal`) |
 
+## 적대적 검증 5 회 — 판정 셋을 고쳤다 (2026-08-30)
+
+**1회차 · 에이전트 쪽도 그리는가.** 한계에 *"캡처로 못 봤다"* 고 적은 자리를 쟀다. 그리기는 되는데
+**내 기대식이 틀렸다** — `text 648->636` 로 **글자 수가 줄었다**. 조합이 들어오면 중립이
+placeholder 갈래를 안 타므로(`empty` 가 거짓), 조합 한 글자가 긴 안내를 밀어낸다. 길이가 아니라
+**"안내가 물러났는가"** 로 잰다.
+
+**2회차 · 조합이 목록을 거르지 않는가.** 사이드바는 거르기 열 자리가 전부 `query.items` 를 쓰고
+(표시만 `searchDisplay`), 에이전트는 `agent_archive.query = agent_search.query.items` 다 — 판정에
+**항목 수 앞뒤 비교**(`items 8->8`)를 더했다.
+
+**3회차 · 수명.** `search`·`agent_search`·표시 스크래치 둘 다 `defer deinit` 이 있고 스모크 누수
+보고가 비어 있다.
+
+**4회차 · `found` 가 속 비어 있었다.** 조합 fixture 로 `한` 을 썼는데 **이 저장소의 세션 제목이
+한글**이라, 조합을 안 넘기는 뮤턴트에서도 `found=true` 였다. 완성형 제목에 안 나오는 **자모**
+(`ㄴㅡ`)로 바꾸니 그 뮤턴트가 죽는다.
+
+**5회차 · 라우팅 한 줄에 판정이 없었다.** 스모크가 모델에 직접 `setPreedit` 을 넣고 있어
+**`preedit_changed` → 라우팅**을 안 밟았다 — 그래서 라우팅이 조합을 버리는 뮤턴트가 그대로
+지나갔다. 창에 **합성 조합**(`setSyntheticPreedit`)을 넣어 마우스·키와 같은 방식으로 밀게 했다.
+
+```text
+search_ime: glyphs 9->11 digest 4c03836…->a1e9233… cards 14->14 routed=1 to_search=1 to_terminal=0 ok=true
+agent_ime:  text 648->639 placeholder true->false found=true items 8->8 agent_ime_ok=true
+```
+
+| 뮤턴트 | 무엇이 빨개지나 |
+|---|---|
+| 라우팅이 조합을 버린다 | `search_ime_ok`(`glyphs 9->9`, 지문 그대로) |
+| 라우팅이 늘 터미널로 보낸다 | `search_ime_ok`(`routed=0 to_terminal=1`) + 단위 테스트 |
+| 에이전트 opts 에 조합을 안 넘긴다 | `agent_ime_ok`(`placeholder true->true found=false`) |
+| `searchDisplay` 가 조합을 안 붙인다 | `search_ime_ok` |
+
+> **판정이 무엇을 안 밟는지 세어 본다.** 이번에 고친 셋 다 "초록인데 그 줄을 안 지난다" 였다 —
+> fixture 가 편할수록 실제 경로에서 멀어진다.
+
 ## 게이트 하나를 로컬에서 안 돌리고 있었다
 
 CI 의 `check` 가 빨갛게 왔다:

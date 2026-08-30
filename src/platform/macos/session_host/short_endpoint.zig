@@ -34,12 +34,19 @@ pub const legacy_shared_fixture_value = "ephemeral-runner-v1";
 
 pub const LegacyFixtureError = error{ Disabled, SharedUserNamespace, InvalidDirectory, PathTooLong };
 
+fn currentLoginUserOwnsSharedNamespace() bool {
+    var console_stat: StatInfo = undefined;
+    if (statAtNoFollow("/dev/console", &console_stat) != .SUCCESS) return true;
+    return console_stat.uid == std.c.getuid();
+}
+
 /// Override를 모르는 frozen N-1 실행 전용이다. 공용 root가 이미 있으면 그것이 실제 앱 소유인지
 /// 구분하려 하지 않고 거부한다. 성공한 mkdir만 이 테스트가 소유하므로 release 때 전체 삭제할 수 있다.
 pub fn claimEmptySharedLegacyFixture() LegacyFixtureError!void {
     if (!builtin.is_test) return error.Disabled;
     const marker = std.c.getenv(legacy_shared_fixture_env) orelse return error.Disabled;
     if (!std.mem.eql(u8, std.mem.span(marker), legacy_shared_fixture_value)) return error.Disabled;
+    if (currentLoginUserOwnsSharedNamespace()) return error.SharedUserNamespace;
     var root_buf: [64]u8 = undefined;
     const root = userRootPathIn(&root_buf, std.c.getuid()) catch return error.PathTooLong;
     if (std.c.mkdir(root.ptr, 0o700) != 0) return error.SharedUserNamespace;

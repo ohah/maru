@@ -37,9 +37,10 @@ extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int
 /// 에 가짜 host socket 을 남겼고, 그 가짜가 `maru host status` 를 ambiguous 로 만들어 **실행 중인 앱이
 /// 복구 세션을 adopt 하지 못하고 크래시 로그도 없이 종료**됐다. 두 번 반복된 사고다.
 ///
-/// `overwrite=0` 이라 이미 값을 정한 실행(전용 격리 하니스)은 그대로 존중한다. 실패하면 test process는
-/// 시작하지 않는다. 라이브러리의 `builtin.is_test` 기본값은 이 process만 보호하며, 환경을 못 받은 제품
-/// child는 사용자 공용 namespace로 돌아가므로 여기서 계속 실행할 안전한 fallback은 없다.
+/// inherited roots are untrusted: 부모 셸의 값이 제품 root를 가리킬 수 있으므로 언제나 이 process의
+/// PID root로 덮어쓴다. 실패하면 test process는 시작하지 않는다. 라이브러리의 `builtin.is_test`
+/// 기본값은 이 process만 보호하며, 환경을 못 받은 제품 child는 사용자 공용 namespace로 돌아가므로
+/// 여기서 계속 실행할 안전한 fallback은 없다.
 fn isolateSessionHostRoot() error{IsolationFailed}!void {
     // **macOS 전용이다.** session host 자체가 macOS 기능이고, 무엇보다 `setenv` 는 libc 심볼이라
     // libc 를 링크하지 않는 Linux test 바이너리에서는 **링크 단계에서 실패한다**(CI 의 ubuntu 오라클
@@ -48,7 +49,7 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
     var buf: [64]u8 = undefined;
     const root = std.fmt.bufPrintZ(&buf, "/tmp/maru-t{d}", .{std.c.getpid()}) catch
         return error.IsolationFailed;
-    if (setenv("MARU_SESSION_HOST_ROOT", root.ptr, 0) != 0)
+    if (setenv("MARU_SESSION_HOST_ROOT", root.ptr, 1) != 0)
         return error.IsolationFailed;
 }
 

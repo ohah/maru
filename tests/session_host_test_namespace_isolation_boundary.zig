@@ -91,7 +91,7 @@ test "default product fixtures do not reconstruct uid-keyed sockets" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         endpoint,
-        "if (console_stat.uid == std.c.getuid()) return error.SharedUserNamespace;",
+        "if (currentLoginUserOwnsSharedNamespace()) return error.SharedUserNamespace;",
     ) != null);
 }
 

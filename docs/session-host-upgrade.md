@@ -285,6 +285,24 @@ host crash 비목표다.
 GUI 재실행이 업그레이드를 유발할 때는 runtime attach보다 upgrade preflight를 먼저 한다. `upgrade_busy`면 current/N-1
 adapter로 정상 attach하고, 마지막 attachment가 떨어진 뒤 다시 시도한다. 사용자 입력을 끊어서 업그레이드를 강행하지 않는다.
 
+connect-or-launch 결과는 최종 `Client`와 별개인 bounded `UpgradeNotice`를 함께 돌려준다. 이 값은 같은 앱 실행에서
+실제로 선택한 기존 host 하나에 대한 결정만 담고, host scan 중 지나친 후보들의 진단을 합치지 않는다. 분류는 다음과 같다.
+
+- `upgraded`: accepted 뒤 same `host_id`, target build와 증가한 epoch를 재검증한 연결을 채택했다.
+- `upgrade_busy`: prepare가 attachment/connection 권위 때문에 rejected되어 side-by-side current host를 사용한다.
+- `legacy_unavailable`: 호환 host가 `host_exec_upgrade_v1`을 광고하지 않아 기존 host를 건드리지 않고 side-by-side current
+  host를 사용한다.
+- `upgrade_failed`: accepted/completed 뒤 rollback·resume·nonretryable status, status 조회 실패 또는 bounded reconnect 실패로
+  target build를 채택하지 못하고 side-by-side current host를 사용한다. wire report가 있으면 exact `AttemptStatus`와
+  `AttemptReason`을 보존하고, 없으면 typed local failure를 보존한다.
+
+`UpgradeNotice`는 process-global 변수나 로그 문자열이 아니라 `connectOrLaunchDetailed` 반환값이 소유한다. 호출자는 최종
+current host 연결이 성공한 경우에만 그 값을 `AppSession`의 한 칸 pending state로 옮긴다. 첫 UI tick은 modal overlay가
+없을 때 localized notice를 정확히 한 번 표시하고 값을 소비한다. 최종 current host 연결도 실패하면 “터미널이 앱 종료 뒤
+유지되지 않는다”는 기존 host-connect failure notice가 더 강한 결과이므로 upgrade notice를 버린다. 정상 current-build
+재사용과 upgrade 후보가 전혀 없던 fresh launch는 notice를 만들지 않는다. 구조화 로그와 화면 notice는 같은 typed
+`UpgradeNotice`에서 파생하며, `host_id`와 status/reason 또는 local failure tag를 그대로 남긴다.
+
 P5의 multi-fd reactor가 들어간 뒤 `active connection`은 accept-loop의 지역 변수가 아니라 모든
 `ConnectionSlot`의 전역 상태다. `prepare accepted`의 linearization point에서 global frame admission을 닫고,
 그 전에 dispatch된 non-upgrade operation이 0인지 확인한다. accepted reply를 완전히 flush한 뒤 upgrade request

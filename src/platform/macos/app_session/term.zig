@@ -972,6 +972,65 @@ pub fn clearSurfaceSelection(self: *AppSession, surface_id: u64) void {
     self.metal_dirty = true; // 해제된 하이라이트가 한 프레임 더 남지 않게(다른 선택 사이트와 같은 규율)
 }
 
+/// 그 대상이 bracketed paste 를 켜 두었는가. 터미널 Term 이 아니면 null.
+///
+/// **`submitPaste` 가 안에서 쓰는 그 판정을 밖에서도 읽어야 한다** — [선택 영역 보내기]
+/// (../../../../docs/send-selection-to-agent.md) §4 가 "꺼진 대상에는 여러 줄을 보내지 않는다" 로
+/// 정했고, 그 결정은 **페이로드를 만들기 전에** 내려야 하기 때문이다(만든 뒤에 자르면 잘린 인용이
+/// 나간다). 판정 규칙 자체는 여기가 아니라 `submitPaste` 와 **같은 두 갈래**를 그대로 쓴다 —
+/// host-backed 는 관측, 로컬은 코어 lock 아래 bool 하나.
+pub fn bracketedPasteFor(self: *AppSession, target_id: u64) ?bool {
+    const loc = findTermWhere(self, target_id, struct {
+        fn pred(want: u64, term: *Term) bool {
+            return term.kind == .terminal and term.surface.id == want;
+        }
+    }.pred) orelse return null;
+    const term = loc.pane.terms.items[loc.term_index];
+    if (term.surface.remote != null) {
+        // **별칭을 안 만든다** — `const obs = &term.rt.observation` 는 cwd 축 게이트가 세는 우회로다
+        // (그 게이트가 이 자리를 잡았다). 두 필드를 직접 읽으면 재고를 올릴 이유가 없다.
+        return term.rt.observation.availability != .unavailable and term.rt.observation.bracketed_paste;
+    }
+    term.surface.lockCore(self.io);
+    defer term.surface.unlockCore(self.io);
+    return term.surface.core.bracketedPasteEnabled();
+}
+
+/// 이 창에서 **보낼 수 있는 대상**들을 §5 순서로 모은다(에이전트 먼저 · 그 안에서 화면 순서).
+/// 정렬·라벨 정책은 `session/agent_selection.zig` 가 소유한다 — 여기서는 열거만 한다.
+pub fn collectAgentTargets(
+    self: *AppSession,
+    out: []maru.session.agent_selection.Candidate,
+) []maru.session.agent_selection.Candidate {
+    var n: usize = 0;
+    var order: u32 = 0;
+    const tab = self.tabs.items[self.app_window.active_tab];
+    for (tab.panes.items) |pane| {
+        for (pane.terms.items) |term| {
+            if (term.kind != .terminal) continue;
+            if (n >= out.len) break;
+            out[n] = .{
+                .surface_id = term.surface.id,
+                .kind = switch (term.agent_kind) {
+                    .claude => .claude,
+                    .codex => .codex,
+                    .none => .shell,
+                },
+                // 실제 셸 이름(zsh 등)은 아직 안 읽는다(§한계) — 지금은 종류만 말한다.
+                .shell_name = maru.i18n.t(.ctx_target_shell),
+                .where = app_session_mod.termLabel(term),
+                .branch = null,
+                .order = order,
+            };
+            n += 1;
+            order += 1;
+        }
+    }
+    const items = out[0..n];
+    maru.session.agent_selection.orderCandidates(items);
+    return items;
+}
+
 pub fn terminalSurfaceById(self: *AppSession, id: u64) ?*maru.session.Surface {
     const loc = findTermWhere(self, id, struct {
         fn pred(want: u64, term: *Term) bool {

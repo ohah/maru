@@ -203,8 +203,20 @@ attempt도 같은 ID·identity의 write retry만 기존 all-or-none preflight를
   `host_exec_upgrade_v1` 광고를 즉시 내리고 owner에 permanent new-attempt latch를 걸어 이미 연결되어 ops를 복사한
   client도 다음 live upgrade를 시작하지 못하게 한다. 이미 끝난 attempt의 exact idempotent replay와 terminal
   status를 읽는 status-only ops는 유지한다. rollback self-image는 host lifetime 동안 유지하고 정상 host 종료 때
-  삭제한다. 다음 host 시작은 owner-only directory의 non-secret stale attempt metadata와 staged target 잔해를
-  no-follow identity 검증 뒤 정리한다.
+  삭제한다. 다음 host 시작은 새 process가 exact host owner lock을 얻은 뒤, capability를 광고하거나 target을
+  staging하기 전에 owner-only host directory의 stale attempt와 staged target 잔해를 정리한다. sweep 대상 이름은
+  `attempt-<32 lowercase hex>` directory와 `target-<32 lowercase hex>.image` regular file뿐이다. attempt directory는
+  no-follow로 연 뒤 owner UID·0700과 parent에서 관측한 dev/inode가 일치하고, 내부가 owner UID의 regular
+  `primary|backup` leaf 최대 두 개뿐일 때만 각 leaf를 pinned fd의 dev/inode와 다시 대조해 unlink한다. staged target도
+  owner UID regular file, link count 1, parent에서 연 pinned fd와 같은 dev/inode일 때만 unlink한다. symlink, hard link,
+  이름은 맞지만 종류·소유자·mode가 다른 entry, unknown child, 중복/초과 child, identity drift는 건드리지 않고 startup을
+  fail-close한다. 각 unlink와 attempt `rmdir` 뒤 host directory를 fsync하며, 하나라도 실패하면 upgrade capability를
+  광고하지 않고 새 attempt를 받지 않는다. `rollback-current`, `rollback-previous`, manifest, owner lock과 이름이 다른
+  사용자 파일은 sweep 대상이 아니다. pathname 교체를 막기 위해 canonical entry는 동일 directory의
+  `.sweep-attempt-<id>` / `.sweep-target-<id>.image` tomb로 no-replace rename한 뒤 pinned identity를 다시 확인하고
+  제거한다. attempt 내부 `primary|backup`도 `.sweep-primary|.sweep-backup`을 거친다. sweep 도중 process가 죽으면 다음
+  시작은 이 exact tomb 이름도 같은 원래 종류·identity 규칙으로 검증해 이어서 정리한다. canonical과 같은 ID의 tomb가
+  동시에 있거나 tomb vocabulary가 어긋나면 어느 쪽도 추측해 지우지 않는다.
 
 fd 번호는 durable identity가 아니다. handoff manifest의 runtime record가 inherited fd slot을 가리키고, 새 process가
 실제 open fd의 type/flags를 다시 검증한 뒤 새 `PtySession`에 결합한다.

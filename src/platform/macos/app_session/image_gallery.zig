@@ -624,9 +624,10 @@ fn readLabel(self: *AppSession, hit_index: usize) image_context.Label {
     if (back > 0) {
         const window = buf[0..@intCast(back)];
         if (readAllAt(io, file, window, hit.line_offset - back)) {
-            // 창의 마지막 바이트는 이미지 줄 바로 앞의 개행이다. 그 앞의 개행을 찾으면 그 사이가 직전 줄.
-            const without_nl = if (window.len > 0 and window[window.len - 1] == '\n') window[0 .. window.len - 1] else window;
-            prev = if (std.mem.lastIndexOfScalar(u8, without_nl, '\n')) |at| without_nl[at + 1 ..] else without_nl;
+            // **창을 통째로 넘긴다.** 예전에는 마지막 한 줄만 잘라 줬는데, Codex 의 `view_image` 는
+            // 호출이 **2줄 뒤**라(실측 12/16) 그 규칙으로는 라벨이 비었다. 파서가 줄로 쪼개
+            // 뒤에서부터 보고, **id 가 든 줄 안에서만** 경로를 뽑는다.
+            prev = if (window.len > 0 and window[window.len - 1] == '\n') window[0 .. window.len - 1] else window;
         }
     }
     var prefix: []const u8 = &.{};

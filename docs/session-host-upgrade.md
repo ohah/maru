@@ -352,7 +352,9 @@ U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전**
 
 예약 owner는 attempt 하나이며 성공 commit, 모든 in-process retryable rollback과 deadline 경로에서 primary/backup
 pathname과 fd를 exact-once 정리한다. 정리가 실패하면 정상 재개로 축소하지 않고 invariant violation으로 fail-stop한다.
-`SIGKILL`·전원 손실은 userspace cleanup을 실행할 수 없으므로 crash 뒤 owner-only stale attempt sweep은 별도 이니셔티브다.
+`SIGKILL`·전원 손실은 userspace cleanup을 실행할 수 없으므로 다음 exact host owner가 시작할 때 위 owner-only stale
+attempt sweep을 실행한다. sweep이 residue를 신뢰할 수 없으면 keep-alive service는 계속 열되 upgrade capability와 새
+attempt admission만 닫는다.
 이 pre-admission은 기존 `handoff_store.commit`의 길이·identity·deadline 검증을 대체하지 않고 그 앞에 추가된다.
 
 이 순서에서 upgrade snapshot 시점은 “모든 admitted outbound가 PTY에 적용됐고, 마지막 read chunk가 core에 적용된 직후”다.

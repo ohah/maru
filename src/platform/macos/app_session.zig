@@ -18055,7 +18055,7 @@ pub const AppSession = struct {
                         if (self.dock.view == .image_gallery and tree_content_cols > 0 and visible_rows > 0) {
                             // 검색줄(검색어 상한 + 앞머리 + 조합 글자)까지 담는다 — 모자라면
                             // `bufPrint` 가 실패해 **빈 줄**이 되고, 사용자는 자기가 친 글자를 잃는다.
-                            var notice_buf: [image_gallery_ops.max_query_bytes + 128]u8 = undefined;
+                            var notice_buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
                             const notice = image_gallery_ops.noticeText(self, &notice_buf);
                             if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
                                 self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
@@ -74067,7 +74067,7 @@ test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)
     try session.image_gallery.search.query.appendSlice(allocator, "zzzz");
     image_gallery_ops.rebuildFilter(session);
     try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
-    var notice_buf: [image_gallery_ops.max_query_bytes + 128]u8 = undefined;
+    var notice_buf: [image_gallery_ops.notice_buf_bytes]u8 = undefined;
     session.image_gallery.search_active = false; // 검색줄 대신 결과 문구를 본다
     try std.testing.expectEqualStrings(
         maru.i18n.t(.image_gallery_no_match),
@@ -74174,4 +74174,100 @@ test "이미지 갤러리: 시각은 오늘이면 시:분, 아니면 날짜까�
     );
     // epoch 이전은 그릴 값이 아니다.
     try std.testing.expectEqualStrings("", image_gallery_ops.testFormatImageTime(&buf, -1, 0, 0, 0));
+}
+
+test "이미지 갤러리: 시각 창이 줄을 넘지 않는다 — 다음 항목의 시각을 읽지 않는다 (IG12)" {
+    // **실데이터가 잡은 결함이다**(적대적 검증 4회차): payload 뒤 256 B 를 읽는데 그 줄이 곧 끝나면
+    // 창이 **다음 줄**로 넘어가 남의 시각을 읽는다. 실측 Codex 이미지 줄의 2.4%(313/13,200)가 그
+    // 모양이고, 그중 65 건이 실제로 틀린 시각을 받았다(줄 끝에서 자르면 13,200/13,200 정답).
+    //
+    // Codex 는 시각이 payload **앞**이라, 뒤 창이 비어 있어야 앞 창까지 내려간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 이미지 줄: 시각이 **앞**에 있고 payload 뒤에는 몇 바이트뿐이다(줄이 곧 끝난다).
+    // 다음 줄: **다른 시각**. 창이 줄을 넘으면 이쪽을 읽는다.
+    const transcript =
+        "{\"timestamp\":\"2026-08-30T01:00:00.000000Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\"," ++
+        "\"content\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ png_b64 ++ "\"}]}}\n" ++
+        "{\"timestamp\":\"2026-08-30T23:59:59.000000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"note\"}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "rollout-2026-08-30T01-00-00-abc.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/rollout-2026-08-30T01-00-00-abc.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    // **그 줄 자신의 시각**이어야 한다. 01:00:00Z = 1788051600.
+    // 줄 끝에서 안 자르면 다음 줄의 23:59:59Z(1788134399)를 읽는다 — 하루가 통째로 틀린다.
+    try std.testing.expectEqual(@as(i64, 1788051600), session.image_gallery.labels.items[0].time_s);
+}
+
+test "이미지 갤러리: 할당이 실패해도 라벨이 밀리지 않는다 (IG11)" {
+    // **내가 주석에 경고해 놓고 직접 낸 구멍이다**(적대적 검증 1회차): `labels.append` 실패를 삼켜서
+    // OOM 한 번이면 그 뒤 전부가 **한 칸씩 밀린 라벨·시각**을 갖는다. 화면에는 「설명이 틀렸다」로
+    // 보이지 「인덱스가 어긋났다」로 보이지 않아 찾기 어렵다.
+    //
+    // 실패 지점을 옮겨 가며 **언제나 `hits.len == labels.len`** 인지 본다.
+    const gpa = std.testing.allocator;
+    var fail_at: usize = 0;
+    while (fail_at < 8) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = fail_at });
+        const a = failing.allocator();
+
+        var st: image_gallery_ops.State = .{};
+        defer st.deinit(gpa); // 정리는 성공하는 할당자로 — 누수 검사가 진짜 결함만 보게 한다
+        // 원본은 성공하는 할당자로 채운다(필터가 읽기만 하는 쪽이다).
+        for (0..6) |i| {
+            try st.all_hits.append(gpa, .{
+                .line_offset = i,
+                .data_offset = i + 1,
+                .data_len = 1,
+                .kind = .claude_image,
+                .mime = .png,
+            });
+            var lb: maru.session.agent_image_context.Label = .{};
+            lb.len = 1;
+            lb.buf[0] = 'a' + @as(u8, @intCast(i));
+            try st.all_labels.append(gpa, lb);
+        }
+        st.applyFilter(a);
+        // **길이는 언제나 같다.** 못 만들었으면 둘 다 비어 있어야 하고, 만들었으면 짝이 맞아야 한다.
+        try std.testing.expectEqual(st.hits.items.len, st.labels.items.len);
+        // 만들었다면 **내용도 짝이 맞는다** — 밀리면 여기서 걸린다.
+        for (st.hits.items, 0..) |hit, i| {
+            try std.testing.expectEqual(hit.line_offset, st.all_hits.items[i].line_offset);
+            try std.testing.expectEqualStrings(st.all_labels.items[i].text(), st.labels.items[i].text());
+        }
+    }
 }

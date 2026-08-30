@@ -185,20 +185,41 @@ pub const State = struct {
     pub fn applyFilter(self: *State, allocator: std.mem.Allocator) void {
         self.hits.clearRetainingCapacity();
         self.labels.clearRetainingCapacity();
+        const total = self.all_hits.items.len;
+        // **자리를 먼저 잡는다.** 루프 안에서 한쪽만 실패하면 그 뒤 전부가 «한 칸 밀린 라벨» 을
+        // 갖는다 — 남의 이미지에 남의 설명·시각이 붙고, 그 증상은 「설명이 틀렸다」로 보이지
+        // 「인덱스가 어긋났다」로 보이지 않는다. 미리 잡아 두면 append 는 실패할 수 없다.
+        self.hits.ensureTotalCapacity(allocator, total) catch return self.showAll(allocator);
+        self.labels.ensureTotalCapacity(allocator, total) catch return self.showAll(allocator);
+
         const q = self.queryText();
-        const paired = self.all_labels.items.len == self.all_hits.items.len;
+        const paired = self.all_labels.items.len == total;
         for (self.all_hits.items, 0..) |hit, i| {
             const label: context.Label = if (paired) self.all_labels.items[i] else .{};
             if (q.len > 0 and !context.matches(label.text(), q)) continue;
-            self.hits.append(allocator, hit) catch {
-                self.search.clear();
-                self.hits.clearRetainingCapacity();
-                self.labels.clearRetainingCapacity();
-                self.hits.appendSlice(allocator, self.all_hits.items) catch {};
-                self.labels.appendSlice(allocator, self.all_labels.items) catch {};
-                return;
-            };
-            self.labels.append(allocator, label) catch {};
+            self.hits.appendAssumeCapacity(hit);
+            self.labels.appendAssumeCapacity(label);
+        }
+    }
+
+    /// 거를 자리를 못 잡았을 때의 물러날 자리 — **필터를 끄고 전부 보여준다**.
+    ///
+    /// 반쯤 걸러 두면 사용자는 왜 어떤 이미지가 사라졌는지 알 수 없다. 여기서도 자리를 못 잡으면
+    /// 목록은 비지만, **`hits` 와 `labels` 는 언제나 같은 길이다**(둘 다 비어 있다).
+    fn showAll(self: *State, allocator: std.mem.Allocator) void {
+        self.search.clear();
+        self.hits.clearRetainingCapacity();
+        self.labels.clearRetainingCapacity();
+        const total = self.all_hits.items.len;
+        self.hits.ensureTotalCapacity(allocator, total) catch return;
+        self.labels.ensureTotalCapacity(allocator, total) catch {
+            self.hits.clearRetainingCapacity();
+            return;
+        };
+        const paired = self.all_labels.items.len == total;
+        for (self.all_hits.items, 0..) |hit, i| {
+            self.hits.appendAssumeCapacity(hit);
+            self.labels.appendAssumeCapacity(if (paired) self.all_labels.items[i] else .{});
         }
     }
 
@@ -447,6 +468,10 @@ pub fn poll(self: *AppSession) void {
     // **호버도 옛 인덱스다.** 이미지가 줄면 없는 칸을 가리키고, 안 줄어도 그 자리엔 다른 이미지가
     // 온다(최신 우선이라 순서가 통째로 바뀐다). 다음 마우스 이동이 다시 잡는다.
     self.image_gallery.hovered = null;
+    // **스크롤을 새 상한으로 끌어내린다.** 목록이 줄었는데 옛 위치가 남으면, 위로 굴려도 한동안
+    // 화면이 안 움직인다 — `scrollByPx` 는 내려갈 때만 상한을 보기 때문이다(올라갈 때는 그냥 뺀다).
+    // 리셋이 아니라 clamp 라, 보던 행이 아직 있으면 그 자리에 그대로 있는다.
+    clampScroll(self);
     self.image_gallery.partial = result.partial;
     self.image_gallery.scanned_bytes = result.scanned_bytes;
     self.image_gallery.scan_ns = result.scan_ns;
@@ -833,21 +858,51 @@ pub fn searchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
     const ch = self.cell_height_px;
     if (cw == 0 or ch == 0) return null;
     const content = dock_ops.dockGeometry(self).tree_content;
-    // 그려진 줄(`noticeText`)과 **같은 셈법**이어야 한다 — 다르면 후보창이 글자와 어긋난 자리에 뜬다.
-    const prompt_cols = chrome.components.overlay_input.displayCols(maru.i18n.t(.image_gallery_search_prompt));
-    const pre_cols = chrome.components.overlay_input.displayCols(self.image_gallery.search.preedit.items);
-    const text_cols = searchLineCols(self) -| prompt_cols;
-    const q_tail = chrome.components.overlay_input.tailWindow(self.image_gallery.search.query.items, text_cols -| pre_cols);
-    const cols = prompt_cols +| chrome.components.overlay_input.displayCols(q_tail.text) +| pre_cols;
+    // **그린 줄에서 곧장 받는다.** 예전에는 같은 공식을 여기 한 번 더 썼는데, 한쪽만 고치면 후보창이
+    // 글자와 어긋난 자리에 뜬다 — 화면을 봐야만 보이는 어긋남이라 test 로 잡기도 어렵다.
+    var buf: [notice_buf_bytes]u8 = undefined;
+    const line = searchLine(self, &buf);
     // 줄 끝을 넘지 않게 — 넘으면 후보창이 도크 밖에 뜬다.
     const max_x = content.x +| content.w -| cw;
     return .{
-        .x = @intCast(@min(content.x +| cols *| cw, max_x)),
+        .x = @intCast(@min(content.x +| line.caret_cols *| cw, max_x)),
         .y = @intCast(content.y),
         .w = cw,
         .h = ch,
     };
 }
+
+/// 검색줄을 **한 번만** 만든다 — 그린 글자와 caret 자리가 같은 계산에서 나온다.
+///
+/// 도크는 좁다. 길어지면 **뒤쪽**을 보인다(`tailWindow`) — 앞을 보이면 방금 친 글자가 화면 밖이라
+/// 자기가 무엇을 치고 있는지 알 수 없다.
+pub const SearchLine = struct { text: []const u8, caret_cols: u32 };
+fn searchLine(self: *const AppSession, buf: []u8) SearchLine {
+    const prompt = maru.i18n.t(.image_gallery_search_prompt);
+    const pre = self.image_gallery.search.preedit.items;
+    const prompt_cols = chrome.components.overlay_input.displayCols(prompt);
+    const pre_cols = chrome.components.overlay_input.displayCols(pre);
+    const text_cols = searchLineCols(self) -| prompt_cols;
+    const q_tail = chrome.components.overlay_input.tailWindow(
+        self.image_gallery.search.query.items,
+        text_cols -| pre_cols,
+    );
+
+    // **자르되 비우지 않는다.** 예전에는 `bufPrint` 한 방이라, 조합 글자가 길어 자리가 모자라면
+    // 빈 문자열이 되어 **검색줄이 통째로 사라졌다** — 한글을 치는 도중에 그러면 무엇을 치는지 못 본다.
+    var len: usize = 0;
+    var cols: u32 = 0;
+    for ([_][]const u8{ prompt, q_tail.text, pre }, [_]u32{ prompt_cols, chrome.components.overlay_input.displayCols(q_tail.text), pre_cols }) |part, part_cols| {
+        if (len + part.len > buf.len) break;
+        @memcpy(buf[len..][0..part.len], part);
+        len += part.len;
+        cols +|= part_cols;
+    }
+    return .{ .text = buf[0..len], .caret_cols = cols };
+}
+
+/// 알림 줄 버퍼 크기. 검색어 상한 + 앞머리 + 조합 글자가 들어갈 만큼이다.
+pub const notice_buf_bytes: usize = max_query_bytes + 128;
 
 /// 갤러리가 키보드를 쥐고 있나. 에이전트 도크와 같은 게이트다 — 이것이 없으면 터미널로 돌아간 뒤의
 /// Esc 가 셸이 아니라 크게 보기를 닫는다.
@@ -1206,6 +1261,15 @@ fn utcOffsetAt(unix_s: i64) i64 {
     return @intCast(tm.gmtoff);
 }
 
+/// 스크롤 위치를 지금 목록의 상한 안으로 끌어내린다. 목록이 **줄어든** 뒤에 부른다.
+fn clampScroll(self: *AppSession) void {
+    const max = gridLayout(self).max_scroll;
+    if (self.image_gallery.scroll.offset_y_px > max) {
+        self.image_gallery.scroll.offset_y_px = max;
+        self.image_gallery.scroll.dropWheelResidue(); // 가는 도중의 잔여는 위치가 확정되면 뜻이 없다
+    }
+}
+
 /// 지금 프레임의 격자 배치. **그리기·hit-test·스크롤 상한이 모두 이 하나를 쓴다** — 각자 계산하면
 /// 스크롤한 뒤 누른 자리와 열리는 것이 어긋난다.
 pub fn gridLayout(self: *const AppSession) image_grid.Layout {
@@ -1225,7 +1289,9 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_
     const unit: f64 = if (precise)
         @as(f64, @floatFromInt(if (self.scale_milli > 0) self.scale_milli else 1000)) / 1000.0
     else
-        @floatFromInt(gridMetrics(self).tile +| gridMetrics(self).label +| gridMetrics(self).gap);
+        // **행 높이는 배치가 안다.** 예전엔 `Metrics.tile`(칸 **가로**의 최소치)을 세로로 썼는데,
+        // 비율이 2:1 이라 두 배였고 늘리기 뒤에는 더 어긋난다. 눈금은 한 곳에서만 나와야 한다.
+        @floatFromInt(l.tile_h +| gridMetrics(self).label +| gridMetrics(self).gap);
     // **부호를 여기서 뒤집지 않는다.** `scrollByWheel` 이 이미 `scrollByPx(-whole)` 로 뒤집으므로
     // 한 번 더 뒤집으면 위아래가 반대가 된다(에이전트 도크도 `delta_y` 를 그대로 넘긴다).
     if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, l.max_scroll)) {
@@ -1434,18 +1500,7 @@ pub fn appendGpuImages(
 pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     // **검색줄이 가장 먼저다.** 타이핑 중인데 「12장 중 8장」이 떠 있으면 자기가 친 글자를 못 본다.
     // 조합 중인 글자(`preedit`)도 붙여 그린다 — 한글은 확정 전에 보이지 않으면 못 친다.
-    if (searchOwnsInput(self)) {
-        const prompt = maru.i18n.t(.image_gallery_search_prompt);
-        const q = self.image_gallery.search.query.items;
-        const pre = self.image_gallery.search.preedit.items;
-        // 도크는 좁다. 길어지면 **뒤쪽**을 보인다 — 앞을 보이면 방금 친 글자가 화면 밖이라 자기가
-        // 무엇을 치고 있는지 알 수 없다(`tailWindow` 가 아카이브 검색에서 하는 것과 같은 일).
-        const line_cols = searchLineCols(self);
-        const prompt_cols = chrome.components.overlay_input.displayCols(prompt);
-        const text_cols = line_cols -| prompt_cols;
-        const q_tail = chrome.components.overlay_input.tailWindow(q, text_cols -| chrome.components.overlay_input.displayCols(pre));
-        return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ prompt, q_tail.text, pre }) catch buf[0..0];
-    }
+    if (searchOwnsInput(self)) return searchLine(self, buf).text;
     // **크게 보기가 먼저다.** 열려 있으면 격자 개수는 지금 사용자가 보는 것과 무관하다.
     if (self.image_gallery.open) |op| {
         if (op.pixels.len > 0) return "";

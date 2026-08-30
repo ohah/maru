@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const host_log = @import("host_log.zig");
 const c = std.c;
 const startup_readiness = @import("startup_readiness.zig");
 const posix = std.posix;
@@ -443,6 +444,13 @@ fn raiseFileDescriptorLimit() void {
     posix.setrlimit(.NOFILE, limit) catch {};
 }
 
+/// host 가 뜰 때 자기 신원을 남긴다. 이 한 줄이 있으면 `host-<id>.log` 가 비어 있지 않다는 사실만으로
+/// 「이 host 는 진단을 남길 수 있는 이미지다」가 확정된다.
+// build_id 를 바꿔 업그레이드를 유발하기 위한 표식(2026-08-31 진단 사이클 2단계).
+fn logHostStartup() void {
+    host_log.line("session host started: pid={d} diagnostics=v1", .{std.c.getpid()});
+}
+
 fn runSessionHostImpl(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -459,6 +467,13 @@ fn runSessionHostImpl(
     raiseFileDescriptorLimit();
     // 그다음 진단 출력을 파일로 돌린다 — 이후 단계의 실패도 기록에 남아야 한다.
     redirectStderrToHostLog(dir_path, exact_host_id);
+    // 로그를 연 직후 **자기 신원부터** 남긴다.
+    //
+    // 2026-08-30: 사용자 PTY 22 개를 쥔 host 가 업그레이드에 반복 실패했는데, `host-<id>.log` 가
+    // 0 바이트여서 원인을 캘 수 없었다. 그 host 는 진단이 들어오기 **전** 이미지로 떠 있었고,
+    // 업그레이드가 막힌 탓에 영원히 그 코드였다 — 그런데 로그가 비어 있으니 「진단이 없는 빌드」인지
+    // 「진단은 있는데 아무 일도 없었던 것」인지조차 갈리지 않았다. 시작 한 줄이 그 구분을 준다.
+    logHostStartup();
     // 제품 launcher argv를 실제 `maru` 바이너리까지 관통하는 process smoke가 detached orphan을 남기지 않도록,
     // 테스트가 명시한 경우 첫 client 연결을 처리한 뒤 정상 종료한다. 일반 제품 환경에는 이 변수가 없어 기존의 영속
     // accept loop를 그대로 돈다. 환경은 시작 시 한 번만 읽어 parent가 spawn 직후 unset해도 child의 동작이 안정적이다.

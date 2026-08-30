@@ -11170,6 +11170,20 @@ pub const AppSession = struct {
         // 제품 키 경로를 타는 test 를 쓰고서야 드러났다.
         //
         // 게이트는 함수 안에 있다(`ownsKeys` + 열려 있는가) — 여기서 다시 판정하면 두 곳이 갈린다.
+        // **검색창이 먼저다.** 열려 있으면 글자·Backspace·Esc·Enter 를 가져간다(그 밖의 키는 안 삼킨다).
+        if (image_gallery_ops.handleSearchKey(self, event)) {
+            return input_ops.keyConsumedByApp(self);
+        }
+        // ⌘F 로 검색창을 연다 — 터미널 찾기와 같은 손가락이다. **게이트는 `focusSearch` 안에 있다**
+        // (위 Esc 와 같은 규율): 여기서 다시 판정하면 두 곳이 갈린다.
+        if (event.modifiers.command and !event.modifiers.control and !event.modifiers.option and
+            switch (event.key) {
+                .char => |cp| cp == 'f' or cp == 'F',
+                else => false,
+            } and image_gallery_ops.focusSearch(self))
+        {
+            return input_ops.keyConsumedByApp(self);
+        }
         if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift) {
             if (event.key == .escape and image_gallery_ops.handleEscape(self)) {
                 self.metal_dirty = true;
@@ -11479,7 +11493,8 @@ pub const AppSession = struct {
         // 텍스트 노드가 아닌 것을 덮어 버려 접었다(§2.6). 그래서 그리게 두는 대신 **포커스를 안 뺏는다.**
         if (settings_ops.fileContentMenuHoldsWebFocus(self)) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
-            self.sidebar_search_active or self.agentSessionSearchOwnsInput() or self.scmCommitOwnsInput() or
+            self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
+            image_gallery_ops.searchOwnsInput(self) or self.scmCommitOwnsInput() or
             file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
@@ -12999,7 +13014,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, find, palette, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, image_gallery_search, find, palette, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -13010,6 +13025,8 @@ pub const AppSession = struct {
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
         if (self.agentSessionSearchOwnsInput()) return .agent_session_search;
+        // 갤러리 검색줄. 아카이브 검색과 같은 자리(도크 상주 입력)이고, 둘은 뷰가 달라 배타적이다.
+        if (image_gallery_ops.searchOwnsInput(self)) return .image_gallery_search;
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
@@ -13065,6 +13082,9 @@ pub const AppSession = struct {
             .sidebar_search => if (self.sidebar_search_input.commitPreedit(self.allocator)) {
                 sidebar_ops.rebuildSidebar(self) catch {}; // 확정 글자로 필터 재적용
                 self.metal_dirty = true;
+            },
+            .image_gallery_search => if (self.image_gallery.search.commitPreedit(self.allocator)) {
+                image_gallery_ops.rebuildFilter(self);
             },
             .agent_session_search => if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
                 agent_dock.rebuildAgentSessionArchiveFilter(self);
@@ -17965,7 +17985,9 @@ pub const AppSession = struct {
                         // 스캔은 여기서 하지 않는다(`image_gallery_ops.refresh` 가 뷰 진입·소스 변경 때만 돈다) —
                         // 프레임에서 읽으면 실측 최대 1,626 MB 파일을 초당 60번 훑는다.
                         if (self.dock.view == .image_gallery and tree_content_cols > 0 and visible_rows > 0) {
-                            var notice_buf: [64]u8 = undefined;
+                            // 검색줄(검색어 상한 + 앞머리 + 조합 글자)까지 담는다 — 모자라면
+                            // `bufPrint` 가 실패해 **빈 줄**이 되고, 사용자는 자기가 친 글자를 잃는다.
+                            var notice_buf: [image_gallery_ops.max_query_bytes + 128]u8 = undefined;
                             const notice = image_gallery_ops.noticeText(self, &notice_buf);
                             if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
                                 self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
@@ -70506,6 +70528,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .rename,
         .sidebar_search,
         .agent_session_search,
+        .image_gallery_search,
         .find,
         .palette,
         .addr_edit,
@@ -70543,6 +70566,19 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
             dock_ops.setDockView(session, .agent_sessions);
             session.agent_session_archive_initialized = true;
             session.agent_session_archive_search_active = true;
+        },
+        .image_gallery_search => {
+            session.dock_initialized = true;
+            session.chrome_minimal = false;
+            session.dock.presented = true;
+            session.dock.collapsed = false;
+            session.dock.side = .right;
+            dock_ops.setDockView(session, .image_gallery);
+            // **키보드를 쥔 상태까지 만들어야 한다.** `searchOwnsInput` 은 `ownsKeys`(도크를 눌렀다)
+            // 위에 서 있다 — 그것 없이 `search_active` 만 켜면 터미널을 클릭한 뒤에도 키를 훔치는
+            // 상태가 되고, 이 표는 그 잘못된 상태를 기대값으로 굳혀 버린다.
+            session.image_gallery.key_focus = true;
+            session.image_gallery.search_active = true;
         },
         // pending dock focus는 live entry + async epoch가 맞아야 참이 된다(`pendingDockEntryOwnsInput`).
         // 그 조합은 파일 패널 fixture가 소유하므로 여기서는 만들지 않는다 — 기대표에는 남아 있어
@@ -73812,4 +73848,135 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     const before2 = session.gpu_quads.items.len;
     image_gallery_ops.appendHoverQuad(session);
     try std.testing.expectEqual(before2, session.gpu_quads.items.len);
+}
+
+test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)" {
+    // **제품 키 경로로 친다.** 이 세션에서 「함수는 맞는데 제품이 거기 못 간다」를 세 번 봤다
+    // (Esc·isCodexRolloutOf·dirty=null). 그래서 `handleSearchKey` 를 직접 부르지 않고
+    // `session.handleKeyEvent` 로 ⌘F → 글자 → Backspace 를 그대로 친다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 라벨이 서로 다른 셋 — dock.png / tab.png / 붙여넣기 텍스트.
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"[Image #1] 붙여넣은 화면\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ png_b64 ++ "\"}}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01AA\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/Users/me/shots/dock.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_01AA\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ png_b64 ++
+        "\"}}]}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01BB\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/Users/me/shots/TAB.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_01BB\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ png_b64 ++
+        "\"}}]}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
+    // 라벨은 **스캔 워커가** 만든다(IG11-a) — 타일이 아직 없어도 전부 있어야 거를 수 있다.
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.labels.items.len);
+
+    // ── ① 도크를 안 쥐고 있으면 ⌘F 는 갤러리 것이 **아니다** — 터미널 찾기가 주인이다.
+    //
+    // 갤러리가 아니라 **찾기 오버레이가 열리는 것**까지 확인한다. 「갤러리가 안 열렸다」만 보면
+    // ⌘F 를 아무도 안 받는 상태와 구분이 안 되는데, 그러면 터미널 찾기를 훔쳐 놓고도 통과한다.
+    session.image_gallery.key_focus = false;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(!session.image_gallery.search_active);
+    try std.testing.expect(session.chrome_host.find.open);
+    find_ops.toggleFind(session); // 열린 찾기를 닫는다 — 안 닫으면 다음 ⌘F 를 오버레이가 먼저 먹는다
+    try std.testing.expect(!session.chrome_host.find.open);
+
+    // ── ② 도크를 쥐면 ⌘F 가 검색창을 연다.
+    session.image_gallery.key_focus = true;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    try std.testing.expect(session.image_gallery.search_active);
+    // 조합 글자가 뒤 터미널로 새지 않는다 — focus 표에 올라 있어야 한다.
+    try std.testing.expectEqual(AppSession.InputFocus.image_gallery_search, session.inputFocus());
+
+    // ── ③ 글자를 치면 그 자리에서 걸러진다. **대소문자를 안 가린다**(TAB.png 가 "tab" 에 걸린다).
+    for ("tab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqualStrings("TAB.png", session.image_gallery.labels.items[0].text());
+    // 걸러진 목록도 **인덱스 도메인이 하나**다 — 0번을 열면 걸린 그것이 열린다.
+    image_gallery_ops.openAt(session, 0);
+    try std.testing.expect(session.image_gallery.open != null);
+
+    // ── ④ Backspace 는 **글자 하나**다. "ta" 면 TAB.png 만 남는다.
+    _ = try session.handleKeyEvent(.{ .key = .backspace, .modifiers = .{} });
+    try std.testing.expectEqualStrings("ta", session.image_gallery.queryText());
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    // 필터가 바뀌면 **크게 보기를 버린다** — 옛 인덱스를 가리키던 것이 남으면 엉뚱한 게 뜬다.
+    try std.testing.expect(session.image_gallery.open == null);
+
+    // ── ⑤ 한글도 걸린다(붙여넣기 라벨). 여기서는 확정 텍스트 경로를 흉내낸다.
+    session.image_gallery.search.clear();
+    try session.image_gallery.search.query.appendSlice(allocator, "붙여넣은");
+    image_gallery_ops.rebuildFilter(session);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqualStrings("붙여넣은 화면", session.image_gallery.labels.items[0].text());
+
+    // ── ⑥ 안 걸리면 「없다」가 아니라 **「걸린 것이 없다」**라고 말한다.
+    session.image_gallery.search.clear();
+    try session.image_gallery.search.query.appendSlice(allocator, "zzzz");
+    image_gallery_ops.rebuildFilter(session);
+    try std.testing.expectEqual(@as(usize, 0), session.image_gallery.count());
+    var notice_buf: [image_gallery_ops.max_query_bytes + 128]u8 = undefined;
+    session.image_gallery.search_active = false; // 검색줄 대신 결과 문구를 본다
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.image_gallery_no_match),
+        image_gallery_ops.noticeText(session, &notice_buf),
+    );
+    session.image_gallery.search_active = true;
+
+    // ── ⑦ 첫 Esc 는 검색어만 지운다 → 전부 돌아온다. 창은 아직 열려 있다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 3), session.image_gallery.count());
+    try std.testing.expect(session.image_gallery.search_active);
+    // ── ⑧ 빈 상태에서 Esc 면 창이 닫힌다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.image_gallery.search_active);
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
+    // ── ⑨ 터미널을 누르면 검색창이 키를 놓는다 — 도크가 보인다는 이유로 계속 훔치면 안 된다.
+    session.image_gallery.search_active = true;
+    session.image_gallery.key_focus = false;
+    try std.testing.expect(!image_gallery_ops.searchOwnsInput(session));
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }

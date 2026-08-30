@@ -361,6 +361,10 @@ const Table = struct {
     /// 크게 보기에서 그 이미지를 못 풀었을 때. **닫고 없던 일로 하지 않는다** — 눌렀는데
     /// 아무 일도 안 일어나면 사용자는 클릭이 안 먹은 줄 안다.
     image_gallery_open_failed: [:0]const u8,
+    /// 검색줄의 앞머리. 뒤에 사용자가 친 글자가 붙는다.
+    image_gallery_search_prompt: [:0]const u8,
+    /// 검색어에 걸린 것이 없을 때. 「이 세션에 이미지가 없다」와 **다른 사실**이라 나눈다.
+    image_gallery_no_match: [:0]const u8,
     agent_hook_notice_done: [:0]const u8,
     agent_hook_notice_failed: [:0]const u8,
     agent_hook_notice_attention: [:0]const u8,
@@ -1274,6 +1278,8 @@ const en: Table = .{
     .image_gallery_count_suffix = " images",
     .image_gallery_shown_of = "{0} of {1} images",
     .image_gallery_open_failed = "Could not open this image",
+    .image_gallery_search_prompt = "Filter: ",
+    .image_gallery_no_match = "No image matches",
     .agent_hook_notice_done = "Turn finished",
     .agent_hook_notice_failed = "Turn ended with an error",
     .agent_hook_notice_attention = "Waiting for your approval",
@@ -1851,6 +1857,8 @@ const ko: Table = .{
     .image_gallery_count_suffix = "장",
     .image_gallery_shown_of = "{1}장 중 {0}장",
     .image_gallery_open_failed = "이 이미지를 열 수 없습니다",
+    .image_gallery_search_prompt = "거르기: ",
+    .image_gallery_no_match = "걸린 이미지가 없습니다",
     .agent_hook_notice_done = "턴이 끝났습니다",
     .agent_hook_notice_failed = "턴이 오류로 끝났습니다",
     .agent_hook_notice_attention = "승인을 기다리는 중",

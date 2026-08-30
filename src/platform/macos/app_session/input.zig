@@ -34,6 +34,7 @@ const editor_ops = @import("editor.zig");
 const settings_ops = @import("settings.zig");
 const shouldReplayAfterCommit = AppSession.shouldReplayAfterCommit;
 const sidebar_ops = @import("sidebar.zig");
+const image_gallery_ops = @import("image_gallery.zig");
 const workspace_ops = @import("workspace.zig");
 const EventKind = app_session_mod.EventKind;
 const FrameSummary = app_session_mod.FrameSummary;
@@ -213,6 +214,7 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
         .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
         .agent_session_search => self.agent_session_archive_search.setPreedit(self.allocator, bytes) catch {},
+        .image_gallery_search => self.image_gallery.search.setPreedit(self.allocator, bytes) catch {},
         // **조합은 포커스를 따라간다**(§5.1 — "두 입력 사이 포커스 이동과 IME 조합이 각각 독립").
         // 검색어 칸에 고정하면 바꿀 문자열을 한글로 치는 동안 조합 글자가 **위 줄에 쌓인다**
         // (적대적 검증 2026-08-27이 계약 문장을 근거로 잡았다).
@@ -252,6 +254,7 @@ pub fn imeComposingActive(self: *AppSession) bool {
         .rename => self.rename_input.preedit.items.len > 0,
         .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
         .agent_session_search => self.agent_session_archive_search.preedit.items.len > 0,
+        .image_gallery_search => self.image_gallery.search.preedit.items.len > 0,
         .find => self.chrome_host.find.focused().preedit.items.len > 0,
         .palette => self.chrome_host.palette.input.preedit.items.len > 0,
         .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
@@ -950,6 +953,7 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         .settings => self.settings_search_caret,
         .sidebar_search => sidebar_ops.sidebarSearchCaretRect(self),
         .agent_session_search => agent_dock.agentSessionDockSearchCaretRect(self),
+        .image_gallery_search => image_gallery_ops.searchCaretRect(self),
         .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
         .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
         // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가

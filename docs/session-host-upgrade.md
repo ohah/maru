@@ -926,6 +926,12 @@ exact runtime ID를 제거해야 한다. 검증자는 같은 연결에서 invent
 shell의 `exit 23` 숫자 자체를 관측했다고 주장하지 않고, 명령 전달·child 종료·host-owned reap·inventory exact-once
 제거를 증거로 삼는다.
 
+1-runtime 제품 성공 gate의 복원 후 소비자는 raw `runtime.attach` 시험 클라이언트가 아니라 GUI가 실제로 쓰는
+`RemoteRuntime.attachExisting`이어야 한다. 저장된 exact `runtime_id`로 새 GUI-side runtime을 만들고, 최초 full-state에
+업그레이드 전 marker가 있으며 그 객체의 `sendInput`/`pumpDelta`로 업그레이드 후 marker가 보이는지 확인한다. raw client로
+inventory와 stream만 읽는 것은 host restore 증거일 뿐 GUI exact reattach 증거로 세지 않는다. 이 하네스가 구현돼도 실제
+signed frozen release artifact 실행 전에는 1-runtime 제품 gate를 통과했다고 주장하지 않는다.
+
 U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완료”를 제품/PR에 쓰지 않는다. 자동 시도가 기본
 경로에 연결된 것과 “migration이 검증됐다”는 것은 다르다 — 전자는 연결됐고, 후자는 위 gate가 닫혀야 성립한다.
 U1~U4와 현재 U5 component seam은 제품 완료가 아니라 기반 증거다.

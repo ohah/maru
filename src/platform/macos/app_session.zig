@@ -18110,6 +18110,10 @@ pub const AppSession = struct {
                             } else |_| {}
                             // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
                             image_gallery_ops.collectLabels(self, &collected, pane_frame_builder, tabbar_colors);
+                            // 크게 보기 아래 「그때 무슨 얘기였나」. 터미널이 alt screen 이라 그 이력을
+                            // 안 갖고 있고 훅·CLI 어디에도 「그 자리로 가라」가 없으므로, 트랜스크립트를
+                            // 읽는 갤러리가 직접 보여준다(실측 94%에서 나오고 전부 라벨과 다른 정보다).
+                            image_gallery_ops.collectOpenContext(self, &collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and draw_window.count > 0) {
                             // **행은 이제 typed component가 그린다**(FT1). 셀 격자 경로는 비례 폰트·행
@@ -74976,4 +74980,143 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
         const l = image_gallery_ops.gridLayout(session);
         try std.testing.expect(session.image_gallery.scroll.offset_y_px <= l.max_scroll);
     }
+}
+
+test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 보여준다 (IG13)" {
+    // **터미널은 그 이력을 안 갖고 있다.** Claude·Codex 는 alt screen 전체화면 TUI 라 스크롤백이
+    // 없고(maru core.zig §alternate_scroll), 훅은 관찰 전용이며(9 개 이벤트 전부 알림), CLI 제어
+    // 표면에도 뷰포트가 없다(Codex app-server 요청 93 개 실측). 그래서 「그 자리로 스크롤」은
+    // 원리적으로 불가능하고, **트랜스크립트를 읽는 갤러리가 직접 보여주는 것**이 유일한 길이다.
+    //
+    // 순수 파서가 도는 것과 **그게 화면까지 가는 것**은 다른 사실이다(IG5-c 가 밟은 길) —
+    // 여기서는 제품 경로로 연 뒤 상태와 레이아웃을 함께 짚는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 라벨은 `dock.png`(무엇인가), 문맥은 그 앞의 대화(어떤 얘기였나) — **둘은 다른 정보다**.
+    const transcript =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\"," ++
+        "\"text\":\"사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다\"}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_A\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/u/shots/dock.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_A\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    // 격자에서는 라벨이 「무엇인가」에 답한다.
+    try std.testing.expectEqualStrings("dock.png", session.image_gallery.tiles.items[0].label.text());
+
+    // ── 크게 보기를 열면 문맥이 실린다.
+    const vp_before = image_gallery_ops.viewportRect(session);
+    image_gallery_ops.openAt(session, 0);
+    const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    try std.testing.expectEqualStrings(
+        "사이드바 정렬이 틀어진 것 같아 화면을 보겠습니다",
+        op.contextText(),
+    );
+    // **라벨과 다른 정보다** — 같으면 굳이 띄울 이유가 없다(실측에서도 겹침 0%였다).
+    try std.testing.expect(!std.mem.eql(u8, op.contextText(), "dock.png"));
+
+    // ── 문맥이 있으면 그림 자리가 그만큼 줄어든다. 안 줄이면 글자가 그림 위에 얹힌다.
+    const vp_after = image_gallery_ops.viewportRect(session);
+    try std.testing.expect(vp_after.h < vp_before.h);
+
+    // ── 문맥이 없으면 빈 띠를 남기지 않는다.
+    op.context_len = 0;
+    const vp_none = image_gallery_ops.viewportRect(session);
+    try std.testing.expectEqual(vp_before.h, vp_none.h);
+}
+
+test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
+    // 실측 6% 는 앞에 읽을 텍스트가 없다. 그때 빈 값이어야 하고, 화면도 그림만 남아야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // 앞선 줄이 아예 없다(파일 첫 줄이 이미지다).
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    const vp_before = image_gallery_ops.viewportRect(session);
+    image_gallery_ops.openAt(session, 0);
+    const op = &(session.image_gallery.open orelse return error.TestExpectedEqual);
+    try std.testing.expectEqualStrings("", op.contextText());
+    // 빈 띠를 남기지 않는다 — 그림이 그만큼 커야 한다.
+    try std.testing.expectEqual(vp_before.h, image_gallery_ops.viewportRect(session).h);
 }

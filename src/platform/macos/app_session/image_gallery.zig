@@ -25,6 +25,7 @@ const image_scale = maru.session.image_scale;
 const image_grid = maru.session.image_grid;
 const image_view = maru.session.image_view;
 const context = maru.session.agent_image_context;
+const context_mod = context;
 const metal_frame = maru.renderer.metal_frame;
 const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 
@@ -93,6 +94,43 @@ const freshness_rest_multiplier: i64 = 10;
 /// 쉬는 시간의 **상한**(ms). 실측 최악(9,007 ms → 90 초)은 이 아래라 점유율 보장이 그대로 산다.
 /// 이 값을 넘기는 것은 병리적인 경우(스캔 중 절전)뿐이고, 그때는 「느리게라도 온다」를 택한다.
 const freshness_max_ms: i64 = 120_000;
+
+/// 크게 보기의 문맥을 **한 번** 읽는다. 실패는 빈 문맥이다 — 없는 대화를 지어내지 않는다.
+///
+/// 여기서만 파일을 연다: 격자는 문맥을 안 쓰고(라벨이 답한다), 크게 보기는 한 번에 한 장이라
+/// 열 때 한 번 읽으면 끝난다. 라벨처럼 워커가 미리 만들지 않는 이유도 그것이다 — 4,096 장어치
+/// 512 B 를 늘 들고 있을 이유가 없다(2 MB).
+fn loadOpenContext(self: *AppSession, n: usize) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+    op.context_len = 0;
+    if (n >= self.image_gallery.hits.items.len) return;
+    const hit = self.image_gallery.hits.items[n];
+    const path = pathFor(self, hit) orelse return;
+
+    const back: u64 = @min(hit.line_offset, @as(u64, context_mod.max_prev_line_bytes));
+    if (back == 0) return;
+    const win = self.allocator.alloc(u8, @intCast(back)) catch return;
+    defer self.allocator.free(win);
+
+    const file = std.Io.Dir.cwd().openFile(self.io, path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return;
+    defer file.close(self.io);
+
+    var read: usize = 0;
+    while (read < win.len) {
+        const got = file.readPositional(self.io, &.{win[read..]}, hit.line_offset - back + read) catch break;
+        if (got == 0) break;
+        read += got;
+    }
+    if (read == 0) return;
+
+    const text = context_mod.contextText(win[0..read], &op.context);
+    op.context_len = text.len;
+}
 
 /// 다시 훑은 뒤 타일을 **새 인덱스에 다시 잇는다**. 못 찾은 타일만 버린다.
 ///
@@ -416,6 +454,14 @@ pub const Open = struct {
     uploaded: bool = false,
     /// 이 요청의 generation. 0 이면 도는 것이 없다 — `pixels` 가 비어 있는데 이 값도 0 이면 **실패**다.
     decoding: u64 = 0,
+    /// 「그때 무슨 얘기였나」. 열 때 **한 번만** 읽는다 — 매 프레임 파일을 열면 초당 60 번 IO 다.
+    /// 빈 값은 「읽어 봤고 없었다」로 확정된 상태다(실측 6% 가 그렇다).
+    context: [context_mod.max_context_bytes]u8 = undefined,
+    context_len: usize = 0,
+
+    pub fn contextText(self: *const Open) []const u8 {
+        return self.context[0..self.context_len];
+    }
 };
 
 /// 갤러리 썸네일용 예약 kitty image id 시작점. 배경(`0xFFFF_FFFF`)과 kitty 프로그램 id(보통 작은 값)
@@ -835,13 +881,27 @@ pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
 pub fn viewportRect(self: *const AppSession) image_view.Rect {
     const a = gridArea(self);
     const pad = gridMetrics(self).pad;
+    // **문맥 줄만큼 아래를 비운다.** 안 비우면 글자가 그림 위에 얹혀 둘 다 못 읽는다.
+    // 팬·줌은 이 사각형을 기준으로 계산하므로(`image_view`) 여기만 줄이면 나머지는 따라온다.
+    const reserved = contextRows(self) *| labelHeightPx(self);
     return .{
         .x = @floatFromInt(a.x +| pad),
         .y = @floatFromInt(a.y +| pad),
         .w = @floatFromInt(a.w -| (pad *| 2)),
-        .h = @floatFromInt(a.h -| (pad *| 2)),
+        .h = @floatFromInt(a.h -| (pad *| 2) -| reserved),
     };
 }
+
+/// 문맥에 내줄 줄 수. 없으면 0 — 빈 띠를 남기지 않는다.
+fn contextRows(self: *const AppSession) u32 {
+    const op = if (self.image_gallery.open) |*o| o else return 0;
+    if (op.contextText().len == 0) return 0;
+    return max_context_rows;
+}
+
+/// 문맥에 내줄 최대 줄 수. 실측 길이 p90 이 311 B 라 도크 폭에서 서너 줄이면 담긴다 —
+/// 그보다 키우면 그림 자리를 먹는다(크게 보기의 본체는 그림이다).
+pub const max_context_rows: u32 = 3;
 
 /// `n` 번째 이미지를 크게 연다. **픽셀은 여기서 안 푼다** — 워커에 요청만 걸고, 그동안 격자가 계속 보인다.
 /// 다 풀리기 전에 격자를 지우면 클릭이 「화면이 비었다」로 보인다.
@@ -849,6 +909,7 @@ pub fn openAt(self: *AppSession, n: usize) void {
     if (n >= self.image_gallery.count()) return;
     self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.open = .{ .hit_index = n };
+    loadOpenContext(self, n);
     // **격자를 그 칸으로 맞춰 둔다.** 클릭으로 열 때는 이미 보이므로 아무 일도 없고, ←→ 로 멀리
     // 넘어갔을 때만 움직인다 — 그러지 않으면 닫는 순간 격자가 **옛 자리**를 보여주고 방금 보던
     // 이미지가 화면 밖에 있다. 여는 자리 한 곳에서 하므로 두 입구가 갈리지 않는다.
@@ -1299,6 +1360,81 @@ fn appendOpenImage(
 ///
 /// **자리는 `image_grid` 가 준다**(`labelRectAt`). 여기서 좌표를 다시 풀면 글자가 그림에서 밀린다.
 /// 크게 보기 중에는 아무것도 그리지 않는다 — 그때 격자는 화면에 없다.
+/// 크게 보기 아래에 「그때 무슨 얘기였나」를 띄운다. 격자 라벨과 **같은 그리기 경로**다.
+///
+/// 줄바꿈은 **칸 수로만** 자른다 — 낱말 경계를 찾으려면 폭을 알아야 하는데, 그 폭은 CoreText 가
+/// shaping 한 뒤에야 정해진다(비례 폰트·한글 2 칸). 여기서 흉내 내면 그린 자리와 어긋난다.
+pub fn collectOpenContext(
+    self: *AppSession,
+    collected: *std.ArrayList(AppSession.CollectedPane),
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    colors: metal_frame.CellColors,
+) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    const op = if (self.image_gallery.open) |*o| o else return;
+    const text = op.contextText();
+    if (text.len == 0) return;
+
+    const area = gridArea(self);
+    const pad = gridMetrics(self).pad;
+    const row_h = labelHeightPx(self);
+    const cols: u16 = @intCast(@min(
+        @as(u32, std.math.maxInt(u16)),
+        (area.w -| (pad *| 2)) / self.cell_width_px,
+    ));
+    if (cols == 0) return;
+
+    // 문맥은 라벨보다 **흐리게**. 그림이 주인공이고 이것은 곁말이다.
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        context_dim_percent,
+    ) };
+
+    // 뷰포트가 비워 둔 아래쪽 띠에 그린다 — `viewportRect` 와 **같은 값**(`contextRows`)을 쓴다.
+    const rows = contextRows(self);
+    var y = area.y +| area.h -| pad -| (rows *| row_h);
+    var rest = text;
+    var drawn: u32 = 0;
+    while (drawn < rows and rest.len > 0) : (drawn += 1) {
+        const take = chrome.components.overlay_input.truncateToCols(self.allocator, rest, cols) catch break;
+        defer self.allocator.free(take);
+        if (take.len == 0) break;
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, take, dim) catch break;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = area.x +| pad,
+            .origin_y = y,
+            .colors = colors,
+        } });
+        y +|= row_h;
+        // `truncateToCols` 가 «…» 를 붙일 수 있으므로 원문에서 얼마를 먹었는지는 길이로 못 센다.
+        // 마지막 줄이면 어차피 여기서 끝이고, 아니면 그만큼 잘라 이어 간다.
+        const eaten = @min(rest.len, consumedBytes(rest, cols));
+        if (eaten == 0) break;
+        rest = rest[eaten..];
+    }
+}
+
+/// `cols` 칸에 들어가는 **원문 바이트 수**. 줄바꿈이 원문의 어디까지 먹었는지 세는 유일한 자리다.
+fn consumedBytes(text: []const u8, cols: u16) usize {
+    var used: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const end = @min(text.len, i + len);
+        const w = chrome.components.overlay_input.displayCols(text[i..end]);
+        if (used + w > cols) break;
+        used += w;
+        i = end;
+    }
+    return if (i == 0) text.len else i;
+}
+
+/// 문맥을 배경 쪽으로 얼마나 죽일지(%). 라벨(45)보다 더 물러난다 — 곁말이다.
+const context_dim_percent: u8 = 55;
+
 pub fn collectLabels(
     self: *AppSession,
     collected: *std.ArrayList(AppSession.CollectedPane),

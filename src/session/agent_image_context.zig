@@ -666,3 +666,91 @@ test "시각: 윤년과 연·월 경계를 넘는다" {
     const jan = parseIso8601("2027-01-01T00:00:00Z");
     try std.testing.expectEqual(dec + 1, jan);
 }
+
+/// 문맥 한 조각의 상한. 실측 p90 이 178 B 라 넉넉하고, 최대 2,483 B 는 잘린다 —
+/// 크게 보기에 몇 줄 띄우는 것이 목적이지 대화를 통째로 옮기는 것이 아니다.
+pub const max_context_bytes: usize = 512;
+
+/// 이미지 **앞**에서 가장 가까운, 사람이 읽을 텍스트. 없으면 빈 슬라이스.
+///
+/// `label` 과 무엇이 다른가: 라벨은 「이게 **무엇**인가」(파일명·붙여넣은 한 줄)이고, 이것은
+/// 「그때 **무슨 얘기**였나」다. 도구가 읽은 이미지에서 특히 벌어진다 — 라벨은 `dock.png` 인데
+/// 문맥은 「이 화면에서 정렬이 틀어졌어요」 같은 실제 대화다.
+///
+/// **가장 가까운 것 하나만** 고른다. 여러 개를 이으면 어디서 어디까지가 한 사람의 말인지 알 수 없고,
+/// 그 모호함은 「엉뚱한 문맥이 붙었다」로 보인다.
+pub fn contextText(prev_lines: []const u8, out: []u8) []const u8 {
+    const prev = prev_lines[0..@min(prev_lines.len, max_prev_line_bytes)];
+    var at: usize = prev.len;
+    // 뒤에서부터 찾는다 — 가장 가까운 것이 그때의 대화다.
+    while (std.mem.lastIndexOf(u8, prev[0..at], text_key)) |k| {
+        at = k;
+        const span = findValueFrom(prev, text_key, k) orelse continue;
+        // **너무 짧은 것은 문맥이 아니다.** `""` 나 `"ok"` 는 붙여도 아무것도 안 알려준다.
+        if (span.value.len < min_context_bytes) continue;
+        const stripped = stripImageMarkers(span.value);
+        // **마커뿐이면 문맥이 아니다.** `stripImageMarkers` 는 그때 벗기지 않고 그대로 둔다 —
+        // 라벨에서는 그것이 맞다(빈 칸보다 `[Image #1]` 이 낫다). 그러나 여기서는 반대다:
+        // 이미 크게 띄운 그림 아래에 「[Image #1]」은 아무것도 안 알려준다. 더 앞을 본다.
+        if (isOnlyImageMarker(stripped)) continue;
+        const n = writeText(out, stripped);
+        if (n >= min_context_bytes) return out[0..n];
+    }
+    return out[0..0];
+}
+
+/// 문맥으로 칠 최소 길이. 이보다 짧으면 붙여도 아무것도 안 알려준다.
+const min_context_bytes: usize = 8;
+
+/// 이 텍스트가 이미지 마커(`[Image #1]`)뿐인가. `stripImageMarkers` 가 벗기기를 포기한 모양이다.
+fn isOnlyImageMarker(text: []const u8) bool {
+    if (!std.mem.startsWith(u8, text, "[Image #")) return false;
+    const close = std.mem.indexOfScalar(u8, text, ']') orelse return false;
+    if (close > 16) return false;
+    var rest = text[close + 1 ..];
+    while (rest.len > 0 and (rest[0] == ' ' or rest[0] == '\t')) rest = rest[1..];
+    return rest.len == 0;
+}
+
+test "문맥: 이미지 앞의 가장 가까운 대화를 고른다" {
+    var buf: [max_context_bytes]u8 = undefined;
+    const prev =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"먼저 사이드바를 보겠습니다\"}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"이 화면에서 정렬이 틀어졌어요\"}]}}";
+    // **가장 가까운 것**(뒤엣것)이어야 한다 — 앞엣것을 고르면 오래된 얘기가 붙는다.
+    try std.testing.expectEqualStrings("이 화면에서 정렬이 틀어졌어요", contextText(prev, &buf));
+}
+
+test "문맥: 짧은 것은 건너뛰고 그 앞의 뜻 있는 말을 고른다" {
+    var buf: [max_context_bytes]u8 = undefined;
+    const prev =
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"여기 스크린샷을 봐주세요\"}]}}\n" ++
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"네\"}]}}";
+    // `"네"` 는 문맥이 아니다 — 붙여도 아무것도 안 알려준다.
+    try std.testing.expectEqualStrings("여기 스크린샷을 봐주세요", contextText(prev, &buf));
+}
+
+test "문맥: 없으면 빈 값 — 지어내지 않는다" {
+    var buf: [max_context_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("", contextText("", &buf));
+    try std.testing.expectEqualStrings("", contextText("{\"type\":\"user\"}", &buf));
+    // 이미지 표식만 있는 줄도 문맥이 아니다(상용구를 벗기면 남는 것이 없다).
+    try std.testing.expectEqualStrings(
+        "",
+        contextText("{\"type\":\"text\",\"text\":\"[Image #1]\"}", &buf),
+    );
+}
+
+test "문맥: 상한을 넘으면 자르되 UTF-8 을 깨지 않는다" {
+    var buf: [max_context_bytes]u8 = undefined;
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(testing.allocator);
+    try line.appendSlice(testing.allocator, "{\"type\":\"text\",\"text\":\"");
+    var i: usize = 0;
+    while (i < 400) : (i += 1) try line.appendSlice(testing.allocator, "한"); // 3 B × 400 = 1,200 B
+    try line.appendSlice(testing.allocator, "\"}");
+
+    const got = contextText(line.items, &buf);
+    try std.testing.expect(got.len > 0 and got.len <= max_context_bytes);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(got)); // 잘린 자리가 글자 한가운데가 아니다
+}

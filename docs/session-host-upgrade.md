@@ -954,6 +954,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   `invariant_violation`으로 덮어써야 한다. 같은 named gate는 `upgrade_loop`의 exact test도 함께 실행해
   `invariant_violation`이 retryable terminal이 아니라 `fail_stop`으로만 분류되는지 고정한다. 이는 실제 coordinator와
   outer-loop 분류의 실행 증거지만 daemon process가 socket을 닫고 nonzero로 종료하는 process E2E는 별도다.
+  `test-session-host-upgrade-daemon-cleanup-fail-stop` 집중 gate는 그 별도 process E2E를 소유한다. 부모 test는 실제
+  fork child에서 exact-identity daemon과 제품 `SocketServer`/poll owner/coordinator를 띄우고, GUI profile client가
+  제품 `host.upgrade.prepare` wire 요청을 보낸다. child에 명시적으로 전달한 test-only fault는 budget reservation 직후
+  primary pathname을 다른 inode로 교체한다. 따라서 실제 coordinator가 old graph를 재개한 뒤 cleanup identity 실패를
+  `invariant_violation`으로 만들고, 공유 outer loop가 이를 `fail_stop`으로 분류해 daemon을 `ManifestFailed`로 반환해야 한다.
+  child wrapper는 이 exact error만 전용 nonzero exit code로 바꾸며 다른 error와 정상 반환을 별도 code로 구분한다.
+  부모는 deadline 안의 그 exact exit, 기존 sibling 연결의 typed 폐쇄 실패, listener 재접속 거부, socket pathname 부재,
+  owner lease pathname 부재를 모두 관측해야 성공한다. fault는 ambient environment나 MRSH test command가 아니라
+  `builtin.is_test`로 닫힌 fixture entrypoint의
+  typed 값으로만 전달하고, 제품 entrypoint와 공개 coordinator `Context`에는 주입 필드를 추가하지 않는다. 이 gate는
+  실제 kernel pathname 교체 한 종류와 daemon unwind를 증명하지만 disk-full, fsync, 다중 cleanup syscall fault나 실제 서명
+  release artifact를 대신하지 않는다.
 
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서

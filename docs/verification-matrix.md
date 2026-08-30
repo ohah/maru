@@ -990,13 +990,20 @@ fail-stop 증거는 아니므로 handoff 전 구간 완료 판정을 바꾸지 �
 `test-session-host-upgrade-reservation-cleanup-failure`는 reserved primary pathname을 다른 inode로 교체한 뒤
 `Reservation.cancel`을 실행해 replacement 보존, `CleanupFailed`, terminal inactive와 original/backup/attempt/owner/readback
 fd 전량 회수를 검증한다. boundary inventory는 coordinator가 이 cleanup 오류를 `invariant_violation` 외의 retryable
-terminal로 축소하지 못하게 한다. 실제 outer-loop process fail-stop E2E와 복수 kernel cleanup syscall fault는 여전히
-미검증이므로 U5 완료 판정을 바꾸지 않는다.
+terminal로 축소하지 못하게 한다. 이 component gate만으로는 실제 outer-loop process fail-stop E2E와 복수 kernel cleanup
+syscall fault가 검증되지 않으므로 U5 완료 판정을 바꾸지 않는다.
 `test-session-host-upgrade-coordinator-cleanup-fail-stop`은 coordinator-private hook으로 budget reservation 직후
 primary identity를 교체해 reserved commit failure와 `Reservation.cancel` failure를 한 actual `processArmed` 호출에서
 연속 발생시킨다. 결과는 기존 resumed report가 아니라 `invariant_violation`이어야 하며, 같은 gate의 `upgrade_loop`
-exact test가 이를 `fail_stop`으로만 분류한다. public `Context`와 제품 caller는 hook을 보지 않는다. 실제 daemon process의
-nonzero exit와 listener/socket closure는 여전히 미검증이므로 U5 완료 판정을 바꾸지 않는다.
+exact test가 이를 `fail_stop`으로만 분류한다. public `Context`와 제품 caller는 hook을 보지 않는다. 이 gate만으로는 실제
+daemon process의 nonzero exit와 listener/socket closure가 검증되지 않으므로 U5 완료 판정을 바꾸지 않는다.
+`test-session-host-upgrade-daemon-cleanup-fail-stop`은 실제 fork daemon에 제품 `Client.prepareUpgrade` 요청을 보내 같은
+primary identity 교체를 coordinator까지 관통시킨다. `invariant_violation`→outer-loop `fail_stop`→`ManifestFailed`가
+exact child exit 73으로 수렴하고, 기존 sibling의 typed `WriteFailed`, 새 연결의 `EndpointAbsent`, socket과 owner lease
+pathname 부재를 deadline 안에 함께 검증한다. fault 선택자는 `builtin.is_test` fixture entrypoint에만 있고 ambient env,
+MRSH command, 공개 coordinator `Context`에는 없다. 이로써 단일 실제 pathname identity 충돌의 daemon process E2E는
+닫혔지만 disk-full/fsync와 복수 kernel cleanup syscall fault, signed frozen release provenance는 여전히 미검증이므로
+U5 완료 판정을 바꾸지 않는다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

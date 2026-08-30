@@ -948,6 +948,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   제품 coordinator가 이 오류를 `invariant_violation` 외의 retryable terminal로 축소하지 않는 source boundary도 같은
   inventory가 고정한다. 이는 실제 pathname identity 충돌의 component 증거와 제품 mapping 경계이며, 제품 process가
   outer loop에서 실제 fail-stop하는 E2E나 두 개 이상의 실제 kernel cleanup syscall fault 주입을 대신하지 않는다.
+  `test-session-host-upgrade-coordinator-cleanup-fail-stop` 집중 gate는 공개 `Context`를 넓히지 않는 coordinator-private
+  test hook으로 budget reservation 직후 같은 primary identity 충돌을 만든다. 실제 `processArmed` 흐름은 reserved commit
+  실패 뒤 old graph를 재개하고 terminal report를 만든 다음 reservation cleanup도 실패하므로 최종 결과를
+  `invariant_violation`으로 덮어써야 한다. 같은 named gate는 `upgrade_loop`의 exact test도 함께 실행해
+  `invariant_violation`이 retryable terminal이 아니라 `fail_stop`으로만 분류되는지 고정한다. 이는 실제 coordinator와
+  outer-loop 분류의 실행 증거지만 daemon process가 socket을 닫고 nonzero로 종료하는 process E2E는 별도다.
 
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서

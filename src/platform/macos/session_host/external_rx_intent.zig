@@ -2195,6 +2195,28 @@ pub fn appendBoundOwnerRanges(
     handle: *ExternalRxIntentHandle,
     ranges: *external_owner_range.Scratch,
 ) external_owner_range.Error!void {
+    return appendBoundOwnerRangesInternal(handle, null, ranges);
+}
+
+/// Exports the intent-owned ranges after screen payloads have moved into one prepared aggregate.
+/// A staged screen remains a sealed source receipt, but its allocation is now owned by the
+/// aggregate/live ledger and is therefore exported by that owner rather than duplicated here.
+/// The aggregate address is mandatory authority: accepting a staging receipt without it would
+/// turn an arbitrary union tag into permission to omit a live allocation from alias validation.
+pub fn appendBoundOwnerRangesForAggregate(
+    handle: *ExternalRxIntentHandle,
+    aggregate_addr: usize,
+    ranges: *external_owner_range.Scratch,
+) external_owner_range.Error!void {
+    if (aggregate_addr == 0) return error.InvalidRange;
+    return appendBoundOwnerRangesInternal(handle, aggregate_addr, ranges);
+}
+
+fn appendBoundOwnerRangesInternal(
+    handle: *ExternalRxIntentHandle,
+    aggregate_addr: ?usize,
+    ranges: *external_owner_range.Scratch,
+) external_owner_range.Error!void {
     const scratch = validateHandleAnyReadyState(handle) orelse
         return error.InvalidRange;
     try ranges.append(
@@ -2210,14 +2232,25 @@ pub fn appendBoundOwnerRanges(
         return;
     }
     if (scratch.lifecycle != .ready) return error.InvalidRange;
-    for (scratch.intents[0..scratch.intent_count]) |*intent| {
-        const owner = switch (intent.*) {
-            .classified => |*classified| classified,
+    for (scratch.intents[0..scratch.intent_count], 0..) |*intent, index| {
+        switch (intent.*) {
+            .classified => |*owner| {
+                if (!ownerValid(owner, scratch)) return error.InvalidRange;
+                if (owner.payload_len != 0)
+                    try ranges.append(owner.payload_addr, owner.payload_len);
+            },
+            .screen_staging => |*staged| {
+                const destination = aggregate_addr orelse return error.InvalidRange;
+                if (!stagedScreenIntentValid(
+                    staged,
+                    scratch,
+                    @intFromPtr(&scratch.intents[index]),
+                    destination,
+                )) return error.InvalidRange;
+                continue;
+            },
             else => return error.InvalidRange,
-        };
-        if (!ownerValid(owner, scratch)) return error.InvalidRange;
-        if (owner.payload_len != 0)
-            try ranges.append(owner.payload_addr, owner.payload_len);
+        }
     }
 }
 

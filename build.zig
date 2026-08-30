@@ -4047,6 +4047,54 @@ pub fn build(b: *std.Build) void {
     run_session_host_kernel_cwd_k1_boundary_tests.setCwd(b.path("."));
     session_host_kernel_cwd_k1_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_kernel_cwd_k1_boundary_tests.step);
+    const session_host_kernel_cwd_k2_step = b.step(
+        "test-session-host-kernel-cwd-k2",
+        "Verify K2 bounded host-side kernel cwd sampling and authority precedence",
+    );
+    session_host_kernel_cwd_k2_step.dependOn(session_host_kernel_cwd_k1_step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |k2_optimize| {
+        const session_host_kernel_cwd_k2_wire_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_metadata_wire.zig"),
+                .target = target,
+                .optimize = k2_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"external metadata footprint charges cwd authority bytes"},
+        });
+        const run_session_host_kernel_cwd_k2_wire_tests =
+            b.addRunArtifact(session_host_kernel_cwd_k2_wire_tests);
+        run_session_host_kernel_cwd_k2_wire_tests.addArg("--maru-expect-tests=1");
+        session_host_kernel_cwd_k2_step.dependOn(&run_session_host_kernel_cwd_k2_wire_tests.step);
+        const session_host_kernel_cwd_k2_manager_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = k2_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"K2 "},
+        });
+        const run_session_host_kernel_cwd_k2_manager_tests =
+            b.addRunArtifact(session_host_kernel_cwd_k2_manager_tests);
+        // runtime_manager imports the sampler, so the filter selects two manager tests plus the
+        // cwd-generation-only sampler test in one product-root executable.
+        run_session_host_kernel_cwd_k2_manager_tests.addArg("--maru-expect-tests=3");
+        session_host_kernel_cwd_k2_step.dependOn(&run_session_host_kernel_cwd_k2_manager_tests.step);
+    }
+    const session_host_kernel_cwd_k2_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_kernel_cwd_k2_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_kernel_cwd_k2_boundary_tests =
+        b.addRunArtifact(session_host_kernel_cwd_k2_boundary_tests);
+    run_session_host_kernel_cwd_k2_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_kernel_cwd_k2_boundary_tests.setCwd(b.path("."));
+    session_host_kernel_cwd_k2_step.dependOn(&run_session_host_kernel_cwd_k2_boundary_tests.step);
+    boundary_step.dependOn(&run_session_host_kernel_cwd_k2_boundary_tests.step);
     const session_host_e3c_step = b.step(
         "test-session-host-e3c",
         "Measure P4 E3c generation-backed GUI client idle pump in ReleaseFast",
@@ -11211,6 +11259,7 @@ pub fn build(b: *std.Build) void {
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
     session_host_step.dependOn(session_host_kernel_cwd_k1_step);
+    session_host_step.dependOn(session_host_kernel_cwd_k2_step);
     const session_host_release_manifest_step = b.step(
         "test-session-host-release-manifest",
         "Validate canonical session-host release manifests in Debug and ReleaseFast",

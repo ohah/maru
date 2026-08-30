@@ -783,6 +783,7 @@ pub fn preflightEventMaterialization(
     var backing_bytes: usize = 0;
     const fixed = [_]runtime_event_wire.StringSpan{
         metadata.cwd,
+        metadata.cwd_host,
         metadata.window_title,
         metadata.clipboard_read_target,
     };
@@ -1124,6 +1125,25 @@ test "K1 cwd authority is optional strict and owned beside cwd" {
         \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"","cwd_host":"devbox","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
     ;
     try std.testing.expectError(error.Malformed, decodeMetadataEvent(allocator, authority_without_cwd, .supported));
+}
+
+test "external metadata footprint charges cwd authority bytes" {
+    const payload =
+        \\{"event":"runtime.metadata","metadata_revision":2,"metadata":{"cwd":"/repo","cwd_host":"devbox","window_title":"work","ssh_remote_dest":null,"semantic_state":0,"alt_active":false,"app_cursor_keys":false,"alternate_scroll":true,"observer_generation":1,"title_generation":2,"cols":80,"rows":24,"foreground_available":false,"foreground_pgid":null,"processes":[]}}
+    ;
+    const preflight = switch (runtime_event_wire.preflightEvent(
+        payload,
+        .{ .stream_id = 1 },
+    )) {
+        .accepted => |accepted| accepted,
+        else => return error.TestUnexpectedResult,
+    };
+    const footprint = try preflightEventMaterialization(payload, preflight);
+    try std.testing.expectEqual(@as(usize, 5 + 6 + 4), footprint.backing_bytes);
+    try std.testing.expectEqual(
+        @sizeOf(OwnedMetadataDto) + footprint.backing_bytes,
+        footprint.resident_bytes,
+    );
 }
 
 test "runtime metadata transfer seal binds address descriptor raw bytes scalars and processes" {

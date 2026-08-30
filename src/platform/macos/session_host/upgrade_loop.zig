@@ -30,11 +30,29 @@ pub fn processPreclosed(
     marker: connection_turn.ArmedUpgrade,
     ctx: Context,
 ) Outcome {
+    return processPreclosedMode(.product, marker, ctx);
+}
+
+/// 실제 daemon process fixture가 제품과 같은 context/layout을 쓰되 coordinator-private fault만 선택한다.
+pub fn processPreclosedCleanupCollisionFixture(
+    marker: connection_turn.ArmedUpgrade,
+    ctx: Context,
+) Outcome {
+    if (!@import("builtin").is_test) @compileError("cleanup collision fixture is test-only");
+    return processPreclosedMode(.cleanup_collision_fixture, marker, ctx);
+}
+
+const ProcessMode = enum { product, cleanup_collision_fixture };
+
+fn processPreclosedMode(
+    comptime mode: ProcessMode,
+    marker: connection_turn.ArmedUpgrade,
+    ctx: Context,
+) Outcome {
     if (!marker.gate_preclosed) return .fail_stop;
-    const layout = upgrade_product.findAvailableLayout(40) orelse {
+    const layout = upgrade_product.findAvailableLayout(40) orelse
         return finishPreclosedWithoutLayout(marker, ctx);
-    };
-    return classify(upgrade_product.processArmedPreclosed(.{
+    const product_context: upgrade_product.Context = .{
         .allocator = ctx.allocator,
         .io = ctx.io,
         .owner = ctx.owner,
@@ -48,7 +66,14 @@ pub fn processPreclosed(
         .session_dir = ctx.session_dir,
         .socket_path = ctx.socket_path,
         .layout = layout,
-    }, marker.attempt_id));
+    };
+    return classify(switch (mode) {
+        .product => upgrade_product.processArmedPreclosed(product_context, marker.attempt_id),
+        .cleanup_collision_fixture => upgrade_product.processArmedPreclosedCleanupCollisionFixture(
+            product_context,
+            marker.attempt_id,
+        ),
+    });
 }
 
 fn finishPreclosedWithoutLayout(marker: connection_turn.ArmedUpgrade, ctx: Context) Outcome {

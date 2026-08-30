@@ -74,6 +74,8 @@ test "daemon cleanup identity failure exits nonzero and removes listener authori
         _ = c.kill(child, posix.SIG.KILL);
         return err;
     };
+    var sibling = try sh.client.Client.connect(allocator, socket_path, .cli_probe);
+    defer sibling.deinit();
     const outcome = try gui.prepareUpgrade(.{
         .attempt_id = attempt_id,
         .target_path = product_path,
@@ -100,9 +102,10 @@ test "daemon cleanup identity failure exits nonzero and removes listener authori
     const wait_status: u32 = @bitCast(status);
     try std.testing.expect(c.W.IFEXITED(wait_status));
     try std.testing.expectEqual(manifest_fail_exit, c.W.EXITSTATUS(wait_status));
+    try std.testing.expectError(error.WriteFailed, sibling.call("host.info", null));
     try std.testing.expectEqual(@as(c_int, -1), c.access(socket_path.ptr, c.F_OK));
     try std.testing.expectEqual(posix.E.NOENT, posix.errno(-1));
-    try std.testing.expectError(error.ConnectFailed, sh.client.Client.connect(allocator, socket_path, .gui));
+    try std.testing.expectError(error.EndpointAbsent, sh.client.Client.connect(allocator, socket_path, .gui));
     try std.testing.expectEqual(@as(c_int, -1), c.access(owner_path.ptr, c.F_OK));
     try std.testing.expectEqual(posix.E.NOENT, posix.errno(-1));
 }

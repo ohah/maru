@@ -149,7 +149,7 @@ pub fn runSessionHost(
     dir_path: [:0]const u8,
     socket_path: [:0]const u8,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null, null, null);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, null, null, null, null);
 }
 
 /// 별도 ReleaseFast fixture executable만 사용하는 entrypoint. ambient env나 public MRSH
@@ -161,7 +161,7 @@ pub fn runSessionHostForFixture(
     socket_path: [:0]const u8,
     probe: FixtureProbe,
 ) RunError!void {
-    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe, null, null);
+    return runSessionHostImpl(allocator, io, dir_path, socket_path, null, false, probe, null, null, null);
 }
 
 /// Exact-identity counterpart used only by a separately linked process fixture. This preserves
@@ -178,7 +178,7 @@ pub fn runSessionHostWithIdentityForFixture(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, probe, null, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, probe, null, null, null);
 }
 
 /// Product host별 discovery 경로. Launcher가 먼저 발급한 host_id가 short endpoint, owner lease, manifest, hello에서
@@ -193,7 +193,7 @@ pub fn runSessionHostWithIdentity(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, null, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, null, null, null);
 }
 
 /// Fresh detached launch 전용 entrypoint. notifier는 startup 결과만 소유하며 accept loop 수명이나
@@ -209,7 +209,7 @@ pub fn runSessionHostWithIdentityStartup(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier, null, null);
 }
 
 /// Product fresh-launch path with the process-local macOS notification adapter. Keeping the adapter
@@ -226,7 +226,7 @@ pub fn runSessionHostWithIdentityStartupAndNotificationAdapter(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier, adapter);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, false, null, notifier, adapter, null);
 }
 
 /// Process fixture entrypoint. It changes only the release-signer decision; staging, typed
@@ -243,8 +243,36 @@ pub fn runSessionHostWithIdentityTestAuthorizer(
     if (host_id == 0) return error.ManifestFailed;
     short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
     short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
-    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null, null, null);
+    return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null, null, null, null);
 }
+
+/// 실제 daemon unwind를 검증하는 process fixture. 제품 protocol/environment에는 fault 선택자를 추가하지 않는다.
+pub fn runSessionHostWithIdentityCleanupCollisionFixture(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+) RunError!void {
+    if (!builtin.is_test) @compileError("cleanup collision fixture is test-only");
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(
+        allocator,
+        io,
+        session_dir,
+        socket_path,
+        host_id,
+        true,
+        null,
+        null,
+        null,
+        .cleanup_collision,
+    );
+}
+
+const UpgradeFixtureFault = enum { cleanup_collision };
 
 /// exec layout(연속 `exec_fd_set.max_slots`개 슬롯) + 최대 runtime의 PTY master/wake pipe + listener·lease 여유.
 /// 무한대를 요청하지 않는 이유는 아래 `raiseFileDescriptorLimit` 주석 참고.
@@ -461,6 +489,7 @@ fn runSessionHostImpl(
     fixture_probe: ?FixtureProbe,
     startup_notifier: ?*startup_readiness.Notifier,
     notification_adapter: ?notification_os_delivery.Adapter,
+    upgrade_fixture_fault: ?UpgradeFixtureFault,
 ) RunError!void {
     // exec 업그레이드 layout을 확보할 수 있도록 가장 먼저 올린다. 이후 열리는 socket/PTY/lease fd가 상한에
     // 걸리지 않게 하려면 어떤 fd를 열기 전이어야 한다.
@@ -737,21 +766,30 @@ fn runSessionHostImpl(
         switch (fd_owner.pollOnce(poll_timeout_ms) catch return error.OutOfMemory) {
             .upgrade_ready => {
                 const marker = fd_owner.takeArmedUpgrade() orelse return error.ManifestFailed;
-                if (upgrade_attempt_owner == null or rollback_authority == null or
-                    upgrade_loop.processPreclosed(marker, .{
-                        .allocator = allocator,
-                        .io = io,
-                        .owner = &upgrade_attempt_owner.?,
-                        .manager = &manager,
-                        .gate = &admission_gate,
-                        .lifetime_owner = &lifetime_owner,
-                        .rollback_authority = &rollback_authority.?,
-                        .authority = authority.?.upgradeAuthority(),
-                        .executor = product_executor.ops(),
-                        .owner_dir = host_dir,
-                        .session_dir = dir_path,
-                        .socket_path = socket_path,
-                    }) == .fail_stop)
+                if (upgrade_attempt_owner == null or rollback_authority == null or authority == null)
+                    return error.ManifestFailed;
+                const upgrade_context: upgrade_loop.Context = .{
+                    .allocator = allocator,
+                    .io = io,
+                    .owner = &upgrade_attempt_owner.?,
+                    .manager = &manager,
+                    .gate = &admission_gate,
+                    .lifetime_owner = &lifetime_owner,
+                    .rollback_authority = &rollback_authority.?,
+                    .authority = authority.?.upgradeAuthority(),
+                    .executor = product_executor.ops(),
+                    .owner_dir = host_dir,
+                    .session_dir = dir_path,
+                    .socket_path = socket_path,
+                };
+                const upgrade_outcome = if (comptime builtin.is_test)
+                    if (upgrade_fixture_fault == .cleanup_collision)
+                        upgrade_loop.processPreclosedCleanupCollisionFixture(marker, upgrade_context)
+                    else
+                        upgrade_loop.processPreclosed(marker, upgrade_context)
+                else
+                    upgrade_loop.processPreclosed(marker, upgrade_context);
+                if (upgrade_outcome == .fail_stop)
                     return error.ManifestFailed;
             },
             .idle => {

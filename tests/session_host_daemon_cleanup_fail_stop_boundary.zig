@@ -29,15 +29,34 @@ test "daemon cleanup fail-stop fixture stays test-only and exact" {
     const build = try read(allocator, "build.zig", 1024 * 1024);
     defer allocator.free(build);
 
-    try std.testing.expectEqual(@as(usize, 1), count(daemon, "pub fn runSessionHostWithIdentityCleanupCollisionFixture("));
-    try std.testing.expect(std.mem.indexOf(u8, daemon, "if (!builtin.is_test) @compileError") != null);
+    const fixture_start = std.mem.indexOf(
+        u8,
+        daemon,
+        "pub fn runSessionHostWithIdentityCleanupCollisionFixture(",
+    ) orelse return error.MissingFixtureEntrypoint;
+    const fixture_tail = daemon[fixture_start..];
+    const fixture_end = std.mem.indexOf(u8, fixture_tail, "\nconst UpgradeFixtureFault") orelse
+        return error.MissingFixtureEntrypointEnd;
+    const fixture = fixture_tail[0..fixture_end];
+    try std.testing.expectEqual(@as(usize, 1), count(
+        daemon,
+        "pub fn runSessionHostWithIdentityCleanupCollisionFixture(",
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        fixture,
+        "if (!builtin.is_test) @compileError(\"cleanup collision fixture is test-only\")",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 1), count(fixture, ".cleanup_collision"));
+    try std.testing.expect(std.mem.indexOf(u8, daemon, "MARU_SESSION_HOST_UPGRADE_CLEANUP") == null);
     try std.testing.expectEqual(@as(usize, 1), count(loop, "processPreclosedCleanupCollisionFixture("));
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "processArmedPreclosedCleanupCollisionFixture("));
-    try std.testing.expect(std.mem.indexOf(u8, coordinator, "after_budget_prepare:") == null);
+    try std.testing.expectEqual(@as(usize, 1), count(coordinator, "after_budget_prepare:"));
     try std.testing.expect(std.mem.indexOf(u8, process_test, "host.upgrade.prepare") == null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "prepareUpgrade(") != null);
     try std.testing.expect(std.mem.indexOf(u8, process_test, "c.W.EXITSTATUS") != null);
-    try std.testing.expect(std.mem.indexOf(u8, process_test, "error.ConnectFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, process_test, "error.WriteFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, process_test, "error.EndpointAbsent") != null);
     try std.testing.expect(std.mem.indexOf(u8, build, "test-session-host-upgrade-daemon-cleanup-fail-stop") != null);
     try std.testing.expect(std.mem.indexOf(u8, build, "run_daemon_cleanup_fail_stop_tests.addArg(\"--maru-expect-tests=1\")") != null);
 }

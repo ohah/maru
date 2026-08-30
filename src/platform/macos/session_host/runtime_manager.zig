@@ -81,6 +81,7 @@ pub const max_clipboard_wire_bytes: usize = 160 * 1024;
 const max_clipboard_target_bytes: usize = 32;
 
 const foreground_refresh_ns: i128 = 500 * std.time.ns_per_ms;
+const kernel_cwd_refresh_ns: i128 = 500 * std.time.ns_per_ms;
 
 /// One daemon-global nonblocking self-pipe. PTY readers only publish a byte; the sole poll owner
 /// drains runtime queues and projects deltas. This keeps core/socket ownership on the owner thread.
@@ -200,6 +201,65 @@ const ForegroundCache = struct {
     generation: u64 = 0,
 };
 
+const KernelCwdCache = struct {
+    cwd: [posix.PATH_MAX]u8 = undefined,
+    cwd_len: usize = 0,
+    hostname: [posix.HOST_NAME_MAX]u8 = undefined,
+    hostname_len: usize = 0,
+    refreshed_at_ns: i128 = 0,
+    generation: u64 = 0,
+
+    fn cwdSlice(self: *const KernelCwdCache) []const u8 {
+        return self.cwd[0..self.cwd_len];
+    }
+
+    fn hostnameSlice(self: *const KernelCwdCache) []const u8 {
+        return self.hostname[0..self.hostname_len];
+    }
+
+    fn replace(
+        self: *KernelCwdCache,
+        cwd: []const u8,
+        hostname: []const u8,
+        now_ns: i128,
+    ) error{ InvalidKernelCwd, KernelCwdTooLong, KernelCwdGenerationExhausted }!bool {
+        if (cwd.len == 0 or hostname.len == 0 or cwd.len > self.cwd.len or hostname.len > self.hostname.len)
+            return error.KernelCwdTooLong;
+        if (cwd[0] != '/' or
+            !std.unicode.utf8ValidateSlice(cwd) or
+            !std.unicode.utf8ValidateSlice(hostname))
+            return error.InvalidKernelCwd;
+        const changed = !std.mem.eql(u8, self.cwdSlice(), cwd) or
+            !std.mem.eql(u8, self.hostnameSlice(), hostname);
+        const next_generation = if (changed)
+            std.math.add(u64, self.generation, 1) catch
+                return error.KernelCwdGenerationExhausted
+        else
+            self.generation;
+        @memcpy(self.cwd[0..cwd.len], cwd);
+        @memcpy(self.hostname[0..hostname.len], hostname);
+        self.cwd_len = cwd.len;
+        self.hostname_len = hostname.len;
+        self.refreshed_at_ns = now_ns;
+        self.generation = next_generation;
+        return changed;
+    }
+
+    fn clear(self: *KernelCwdCache, now_ns: i128) error{KernelCwdGenerationExhausted}!bool {
+        const changed = self.cwd_len != 0 or self.hostname_len != 0;
+        const next_generation = if (changed)
+            std.math.add(u64, self.generation, 1) catch
+                return error.KernelCwdGenerationExhausted
+        else
+            self.generation;
+        self.cwd_len = 0;
+        self.hostname_len = 0;
+        self.refreshed_at_ns = now_ns;
+        self.generation = next_generation;
+        return changed;
+    }
+};
+
 const ObservationCacheRecord = struct {
     cache: runtime_observation_cache.Cache,
     refreshed_at_ns: i128 = 0,
@@ -210,6 +270,9 @@ const ObservationCacheRecord = struct {
     // advance it before cachedObservation materializes JSON, so a transient `changed` bool is not
     // enough: the record must remember which exact foreground generation its bytes contain.
     foreground_generation: u64 = 0,
+    /// Kernel cwd is another non-core source. Its fixed cache changes independently of OSC/title,
+    /// so canonical metadata must remember the exact paired generation it serialized.
+    cwd_generation: u64 = 0,
 
     fn deinit(self: *ObservationCacheRecord, allocator: std.mem.Allocator) void {
         self.cache.deinit() catch @panic("runtime observation cache retained a prepared value");
@@ -310,6 +373,9 @@ pub const RuntimeManager = struct {
     /// observation은 client/창/stream마다 100ms cadence로 호출될 수 있지만 OS process 열거는 runtime당 최대 2Hz다.
     /// cwd/title/OSC 상태는 계속 100ms full-state로 읽고, 비싼 foreground syscall 결과만 공유 cache한다.
     foreground_cache: std.AutoHashMapUnmanaged(RuntimeHandle, ForegroundCache) = .empty,
+    /// OSC 7이 없는 local runtime만 쓰는 fixed-buffer kernel cwd pair. 값 변화는 metadata source
+    /// generation으로 승격하며 syscall은 runtime당 최대 2 Hz다.
+    kernel_cwd_cache: std.AutoHashMapUnmanaged(RuntimeHandle, KernelCwdCache) = .empty,
     /// Heap-pinned runtime-global canonical metadata. Hash-map growth moves only pointers, never a
     /// cache owner while a prepared transaction or borrowed view exists.
     observation_caches: std.AutoHashMapUnmanaged(RuntimeHandle, *ObservationCacheRecord) = .empty,
@@ -388,6 +454,7 @@ pub const RuntimeManager = struct {
         self.screen_core_lock_acquisitions = 0;
         self.next_handle = 1;
         self.foreground_cache = .empty;
+        self.kernel_cwd_cache = .empty;
         self.observation_caches = .empty;
         self.metadata_samplers = .empty;
         self.next_metadata_sample_ns = 0;
@@ -525,6 +592,7 @@ pub const RuntimeManager = struct {
     /// 전까지 host는 SIGTERM으로 내려가 OS가 자식·스레드를 회수하므로 이 deinit은 clean-return 경로용이다.
     pub fn deinit(self: *RuntimeManager) void {
         self.foreground_cache.deinit(self.allocator);
+        self.kernel_cwd_cache.deinit(self.allocator);
         {
             var it = self.observation_caches.valueIterator();
             while (it.next()) |record| record.*.deinit(self.allocator);
@@ -1260,6 +1328,7 @@ pub const RuntimeManager = struct {
     fn discardRestoredItem(self: *RuntimeManager, item: RestoredGraphItem) void {
         _ = self.metadata_samplers.remove(item.runtime_id);
         _ = self.foreground_cache.remove(item.handle);
+        _ = self.kernel_cwd_cache.remove(item.handle);
         _ = self.screen_changes.remove(item.runtime_id);
         self.host_registry.unregister(item.runtime_id);
         item.terminal.live_pty.discardPreparedAdoption(&self.surface_runtime);
@@ -1641,6 +1710,7 @@ pub const RuntimeManager = struct {
 
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         _ = try self.refreshForegroundCache(handle, now_ns);
+        _ = try self.refreshKernelCwdCache(handle, now_ns, true);
         const foreground = self.foreground_cache.getPtr(handle) orelse
             return error.TransientObservationUnavailable;
         const process_count = foreground.count;
@@ -1672,12 +1742,15 @@ pub const RuntimeManager = struct {
             surface.unlockCore(self.io);
         }
         const core = &surface.core;
-        const cwd = try allocator.dupe(u8, core.currentCwd());
+        const osc_cwd = core.currentCwd();
+        const kernel_cwd = self.kernel_cwd_cache.getPtr(handle);
+        const use_kernel_cwd = osc_cwd.len == 0 and core.sshRemoteDest() == null and
+            kernel_cwd != null and kernel_cwd.?.cwd_len != 0;
+        const cwd_source = if (use_kernel_cwd) kernel_cwd.?.cwdSlice() else osc_cwd;
+        const cwd_host_source = if (use_kernel_cwd) kernel_cwd.?.hostnameSlice() else core.currentCwdHost();
+        const cwd = try allocator.dupe(u8, cwd_source);
         errdefer allocator.free(cwd);
-        // K1 carries the paired authority through every owner/wire boundary. K2 will populate it
-        // from OSC 7 or the host-side kernel sampler; keeping it empty here leaves product cwd
-        // selection unchanged while the ownership contract is established.
-        const cwd_host = try allocator.dupe(u8, "");
+        const cwd_host = try allocator.dupe(u8, cwd_host_source);
         errdefer allocator.free(cwd_host);
         const title = try allocator.dupe(u8, core.windowTitle());
         errdefer allocator.free(title);
@@ -1760,20 +1833,75 @@ pub const RuntimeManager = struct {
         return changed;
     }
 
+    fn kernelCwdEligible(self: *RuntimeManager, handle: RuntimeHandle) !bool {
+        const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
+        surface.lockCore(self.io);
+        defer surface.unlockCore(self.io);
+        return surface.core.currentCwd().len == 0 and surface.core.sshRemoteDest() == null;
+    }
+
+    fn refreshKernelCwdCache(
+        self: *RuntimeManager,
+        handle: RuntimeHandle,
+        now_ns: i128,
+        force_eligibility_check: bool,
+    ) !bool {
+        if (!force_eligibility_check) if (self.kernel_cwd_cache.get(handle)) |cache| {
+            const due = cache.refreshed_at_ns == 0 or
+                now_ns < cache.refreshed_at_ns or
+                now_ns - cache.refreshed_at_ns >= kernel_cwd_refresh_ns;
+            if (!due) return false;
+        };
+        const eligible = try self.kernelCwdEligible(handle);
+        if (!eligible) {
+            const cache = self.kernel_cwd_cache.getPtr(handle) orelse return false;
+            return cache.clear(now_ns);
+        }
+
+        // A product materialization must fail closed immediately when OSC/SSH takes precedence,
+        // but it must not turn an output wake into a proc_pidinfo/gethostname sampling point. Once
+        // the eligible cache exists, the independent 500ms metadata cadence remains its sole
+        // refresher. The no-cache initial observation still falls through and seeds the pair.
+        if (force_eligibility_check and self.kernel_cwd_cache.contains(handle)) return false;
+
+        const gop = try self.kernel_cwd_cache.getOrPut(self.allocator, handle);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const cache = gop.value_ptr;
+        const due = cache.refreshed_at_ns == 0 or
+            now_ns < cache.refreshed_at_ns or
+            now_ns - cache.refreshed_at_ns >= kernel_cwd_refresh_ns;
+        if (!due) return false;
+
+        var cwd_buffer: [posix.PATH_MAX]u8 = undefined;
+        const cwd = self.backend_impl.backend().processCwd(handle, &cwd_buffer) orelse
+            return cache.clear(now_ns);
+        var hostname_buffer: [posix.HOST_NAME_MAX]u8 = undefined;
+        const hostname = posix.gethostname(&hostname_buffer) catch
+            return cache.clear(now_ns);
+        if (hostname.len == 0) return cache.clear(now_ns);
+        return cache.replace(cwd, hostname, now_ns) catch |err| switch (err) {
+            error.InvalidKernelCwd, error.KernelCwdTooLong => cache.clear(now_ns),
+            error.KernelCwdGenerationExhausted => error.KernelCwdGenerationExhausted,
+        };
+    }
+
     fn metadataSource(
         self: *RuntimeManager,
         handle: RuntimeHandle,
         now_ns: u64,
     ) !runtime_metadata_sampler.Source {
         _ = try self.refreshForegroundCache(handle, now_ns);
+        _ = try self.refreshKernelCwdCache(handle, now_ns, false);
         const foreground = self.foreground_cache.getPtr(handle) orelse
             return error.RuntimeNotFound;
+        const kernel_cwd = self.kernel_cwd_cache.get(handle);
         const surface = self.backend_impl.surfaceFor(handle) orelse
             return error.RuntimeNotFound;
         return .{
             .observer_generation = surface.core.observerGeneration(),
             .title_generation = surface.core.title_generation.load(.monotonic),
             .foreground_generation = foreground.generation,
+            .cwd_generation = if (kernel_cwd) |cache| cache.generation else 0,
         };
     }
 
@@ -1896,25 +2024,32 @@ pub const RuntimeManager = struct {
         // A cadence is only a sampling opportunity. It must not itself become a source change:
         // otherwise N idle runtimes still take N core locks and serialize N observations every
         // 100ms. TerminalCore publishes both generations atomically, so this preflight is lock-free.
-        // Foreground process identity is the sole non-core source and retains its independent 500ms
-        // refresh deadline. Equal/older epochs reuse the first view chosen for that producer sweep.
+        // Foreground process identity and kernel cwd are the two non-core sources. Both retain an
+        // independent 500ms refresh deadline. Equal/older epochs reuse the first view chosen for
+        // that producer sweep.
         const may_sample_source = switch (request) {
             .current => true,
             .cadence_epoch => cadence_epoch_advanced,
             .fresh => false,
         };
         var foreground_changed = false;
-        if (may_sample_source and record.cache.view() != null)
+        var kernel_cwd_changed = false;
+        if (may_sample_source and record.cache.view() != null) {
             foreground_changed = try self.refreshForegroundCache(handle, now_ns);
+            kernel_cwd_changed = try self.refreshKernelCwdCache(handle, now_ns, false);
+        }
         const foreground_generation = if (self.foreground_cache.get(handle)) |foreground|
             foreground.generation
         else
             return error.RuntimeNotFound;
+        const cwd_generation = if (self.kernel_cwd_cache.get(handle)) |cache| cache.generation else 0;
         const source_changed = may_sample_source and record.cache.view() != null and
             (surface.core.observerGeneration() != record.observer_generation or
                 surface.core.title_generation.load(.monotonic) != record.title_generation or
                 foreground_changed or
-                foreground_generation != record.foreground_generation);
+                foreground_generation != record.foreground_generation or
+                kernel_cwd_changed or
+                cwd_generation != record.cwd_generation);
         const refresh = switch (request) {
             .fresh => true,
             .current => record.cache.view() == null or
@@ -1948,6 +2083,7 @@ pub const RuntimeManager = struct {
             record.observer_generation = observation.observer_generation;
             record.title_generation = observation.title_generation;
             record.foreground_generation = foreground_generation;
+            record.cwd_generation = if (self.kernel_cwd_cache.get(handle)) |cache| cache.generation else 0;
             switch (request) {
                 .cadence_epoch => |epoch| {
                     if (record.cadence_epoch == null or epoch > record.cadence_epoch.?)
@@ -2551,6 +2687,7 @@ pub const RuntimeManager = struct {
         if (be.remove(handle) != .removed)
             @panic("runtime manager teardown lost its runtime"); // reader join → surface/live_pty 번들 deinit → 슬롯 회수.
         _ = self.foreground_cache.remove(handle);
+        _ = self.kernel_cwd_cache.remove(handle);
         if (self.observation_caches.fetchRemove(handle)) |kv|
             kv.value.deinit(self.allocator);
         _ = self.bell_counts.remove(handle);
@@ -3114,6 +3251,134 @@ test "runtime manager: broken output wake read end cannot raise SIGPIPE and dein
     wake.deinit();
     try std.testing.expect(c.fcntl(write_fd, c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+}
+
+test "K2 kernel cwd cache owns a checked paired generation and clears atomically" {
+    var cache: KernelCwdCache = .{};
+    try std.testing.expect(try cache.replace("/repo", "devbox", 100));
+    try std.testing.expectEqual(@as(u64, 1), cache.generation);
+    try std.testing.expectEqualStrings("/repo", cache.cwdSlice());
+    try std.testing.expectEqualStrings("devbox", cache.hostnameSlice());
+    try std.testing.expect(!try cache.replace("/repo", "devbox", 200));
+    try std.testing.expectEqual(@as(u64, 1), cache.generation);
+    try std.testing.expect(try cache.clear(300));
+    try std.testing.expectEqual(@as(u64, 2), cache.generation);
+    try std.testing.expectEqualStrings("", cache.cwdSlice());
+    try std.testing.expectEqualStrings("", cache.hostnameSlice());
+
+    try std.testing.expectError(error.InvalidKernelCwd, cache.replace("relative", "devbox", 350));
+    try std.testing.expectError(error.InvalidKernelCwd, cache.replace("/repo", "\xff", 350));
+
+    cache.generation = std.math.maxInt(u64);
+    const before = cache;
+    try std.testing.expectError(
+        error.KernelCwdGenerationExhausted,
+        cache.replace("/next", "devbox", 400),
+    );
+    try std.testing.expectEqualDeep(before, cache);
+}
+
+test "K2 runtime manager publishes bounded kernel cwd only for local OSC-empty runtimes" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buffer: [posix.PATH_MAX]u8 = undefined;
+    const expected_cwd_len = try tmp.dir.realPath(std.testing.io, &cwd_buffer);
+    const expected_cwd = cwd_buffer[0..expected_cwd_len];
+
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+    const ops = mgr.runtimeOps();
+
+    const local_rid = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cwd = expected_cwd,
+        .cols = 40,
+        .rows = 10,
+    });
+    const local_handle = mgr.handleFor(local_rid) orelse return error.TestUnexpectedResult;
+    var local = try ops.observation(ops.ctx, local_rid, allocator);
+    defer local.deinit(allocator);
+    var hostname_buffer: [posix.HOST_NAME_MAX]u8 = undefined;
+    const expected_hostname = try posix.gethostname(&hostname_buffer);
+    try std.testing.expectEqualStrings(expected_cwd, local.cwd);
+    try std.testing.expectEqualStrings(expected_hostname, local.cwd_host);
+
+    const sampled = mgr.kernel_cwd_cache.get(local_handle) orelse return error.TestUnexpectedResult;
+    const sampled_at = sampled.refreshed_at_ns;
+    const sampled_generation = sampled.generation;
+    try std.testing.expect(!try mgr.refreshKernelCwdCache(
+        local_handle,
+        sampled_at + 100 * std.time.ns_per_ms,
+        false,
+    ));
+    const throttled = mgr.kernel_cwd_cache.get(local_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(sampled_at, throttled.refreshed_at_ns);
+    try std.testing.expectEqual(sampled_generation, throttled.generation);
+
+    // Materialization must recheck OSC/SSH eligibility, but an existing eligible cache remains
+    // the cadence sampler's responsibility. Otherwise the first output wake after 500ms can block
+    // on proc_pidinfo/gethostname and violate the slow-observer latency budget.
+    try std.testing.expect(!try mgr.refreshKernelCwdCache(
+        local_handle,
+        sampled_at + 600 * std.time.ns_per_ms,
+        true,
+    ));
+    const materialized = mgr.kernel_cwd_cache.get(local_handle) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(sampled_at, materialized.refreshed_at_ns);
+    try std.testing.expectEqual(sampled_generation, materialized.generation);
+
+    const first_cached = try ops.cached_observation(ops.ctx, local_rid, .fresh);
+    const cache_now = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    const cache = mgr.kernel_cwd_cache.getPtr(local_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try cache.replace("/synthetic-k2-change", expected_hostname, cache_now));
+    const changed_cached = try ops.cached_observation(ops.ctx, local_rid, .{ .cadence_epoch = 1 });
+    try std.testing.expect(changed_cached.change_token != first_cached.change_token);
+    try std.testing.expect(std.mem.indexOf(u8, changed_cached.canonical_json, "/synthetic-k2-change") != null);
+
+    const surface = mgr.backend_impl.surfaceFor(local_handle) orelse return error.TestUnexpectedResult;
+    surface.lockCore(std.testing.io);
+    surface.core.write("\x1b]7;file://remote.example/remote/repo\x07") catch |err| {
+        surface.unlockCore(std.testing.io);
+        return err;
+    };
+    surface.unlockCore(std.testing.io);
+    var remote_osc = try ops.observation(ops.ctx, local_rid, allocator);
+    defer remote_osc.deinit(allocator);
+    try std.testing.expectEqualStrings("/remote/repo", remote_osc.cwd);
+    try std.testing.expectEqualStrings("remote.example", remote_osc.cwd_host);
+    const hidden = mgr.kernel_cwd_cache.get(local_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), hidden.cwd_len);
+    try std.testing.expect(hidden.generation > sampled_generation);
+
+    ops.terminate(ops.ctx, local_rid);
+    try std.testing.expect(mgr.kernel_cwd_cache.get(local_handle) == null);
+
+    const ssh_rid = try ops.spawn(ops.ctx, .{
+        .argv = &.{"/bin/cat"},
+        .cwd = expected_cwd,
+        .cols = 40,
+        .rows = 10,
+    });
+    defer ops.terminate(ops.ctx, ssh_rid);
+    const ssh_handle = mgr.handleFor(ssh_rid) orelse return error.TestUnexpectedResult;
+    const ssh_surface = mgr.backend_impl.surfaceFor(ssh_handle) orelse return error.TestUnexpectedResult;
+    ssh_surface.lockCore(std.testing.io);
+    ssh_surface.core.write("\x1b]5379;ssh;user@remote.example\x07") catch |err| {
+        ssh_surface.unlockCore(std.testing.io);
+        return err;
+    };
+    ssh_surface.unlockCore(std.testing.io);
+    var ssh = try ops.observation(ops.ctx, ssh_rid, allocator);
+    defer ssh.deinit(allocator);
+    try std.testing.expectEqualStrings("", ssh.cwd);
+    try std.testing.expectEqualStrings("", ssh.cwd_host);
+    try std.testing.expectEqualStrings("user@remote.example", ssh.ssh_remote_dest.?);
 }
 
 test "runtime manager: spawns a real PTY runtime through RuntimeOps and terminates it" {

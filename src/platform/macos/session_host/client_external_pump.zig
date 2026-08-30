@@ -7831,8 +7831,9 @@ fn prepareEventAggregateCleanup(
         metadata_content_digest = metadata_range.content_digest;
         if (metadata_range.len != 0) {
             var existing_ranges: external_owner_range.Scratch = .{};
-            external_rx_intent.appendBoundOwnerRanges(
+            external_rx_intent.appendBoundOwnerRangesForAggregate(
                 intent_handle,
+                @intFromPtr(aggregate),
                 &existing_ranges,
             ) catch return false;
             storage.inbox_ledger.appendActiveOwnerRanges(

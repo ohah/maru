@@ -17,19 +17,35 @@
 
 ## 구현 순서
 
-### K1 - authority model과 wire
+### K1 - authority model과 wire (완료)
 
 - host `RuntimeObservation`, JSON metadata, owning DTO, immutable preparation/reducer, GUI `RuntimeObservation`에 optional `cwd_host`를 추가한다.
-- current producer는 K1에서 빈 authority만 보내므로 제품 cwd 선택은 바뀌지 않는다.
+- K1에서는 producer가 빈 authority만 보내 제품 cwd 선택을 바꾸지 않았다. 현재 producer 상태는 K2 절이 소유한다.
 - unknown field를 허용하는 same-major 규율과 frozen N-1의 field-absence degradation을 유지한다.
 - focused Debug/ReleaseFast wire·ownership·boundary gate가 cwd/cwd_host paired replace, malformed type, cap+1, allocation rollback을 고정한다.
 
-### K2 - host-side kernel sampler
+### K2 - host-side kernel sampler (완료)
 
 - `RuntimeManager`가 runtime별 fixed `PATH_MAX` buffer와 monotonic sample time을 소유한다.
 - OSC 7 cwd가 비고 SSH destination도 없을 때만 `PtySession.processCwd`를 core lock 밖에서 최대 2 Hz 호출한다.
 - 성공한 local fallback은 daemon의 local hostname과 한 쌍으로 observation에 게시한다. 실패·runtime 종료·handle 재사용은 cached pair를 비운다.
 - OSC 7 값이 생기면 같은 observation에서 즉시 OSC cwd/cwd_host가 우선하며 kernel cache는 화면에 노출되지 않는다.
+- kernel cache의 paired value가 바뀌거나 비워지면 runtime metadata source generation을 올린다. 이 generation은
+  `runtime_metadata_sampler.Source`와 change token에 포함되어, core의 OSC/title/foreground가 그대로여도 client가 새 cwd를 받는다.
+- eligibility 판정은 core lock 안에서 OSC cwd·SSH destination의 존재만 복사하고 즉시 lock을 놓는다. `processCwd`와
+  `gethostname` syscall, cache 비교·갱신은 core lock 밖에서 실행한다.
+- 500ms deadline 전의 metadata source preflight는 core lock 없이 기존 generation만 읽는다. 실제 observation을
+  materialize할 때는 deadline과 무관하게 eligibility를 다시 확인해 OSC/SSH 전환 중 stale kernel pair를 노출하지 않는다.
+  단, 이 재확인은 이미 cache가 있는 runtime의 `processCwd`/`gethostname`을 output materialization에서 다시
+  실행하지 않고 500ms metadata cadence에 남겨 slow-observer wake latency와 sampling 소유권을 보존한다.
+- hostname은 process-lifetime 상수가 아니므로 sample 성공 때마다 같은 cadence 안에서 다시 읽는다. 조회 실패는
+  authority 없는 local로 낮추지 않고 sample 실패로 처리해 cached pair를 비운다.
+- 외부 attach의 metadata allocation preflight는 `cwd_host` decoded bytes를 실제 owning DTO와 같은 backing
+  footprint에 포함한다. 예약값과 실제 소유값이 갈리면 inbox ledger가 정상 metadata를 invariant failure로 닫으므로,
+  Debug/ReleaseFast wire gate가 non-empty authority의 exact byte charge를 고정한다.
+- 한 RX aggregate에 metadata와 screen이 같이 들어와 screen payload가 ledger로 이동한 뒤에도 cleanup alias 검증은
+  aggregate 주소로 봉인된 `screen_staging` receipt를 인정한다. staged payload range는 현재 소유자인 ledger가 한 번만
+  내보내며, intent exporter가 중복 소유하지 않는다. 기존 P5c3d built-product E2E가 이 mixed delta와 이후 입력·stream을 검증한다.
 
 ### K3 - 제품 parity gate
 

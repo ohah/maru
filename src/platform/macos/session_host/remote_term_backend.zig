@@ -4855,9 +4855,9 @@ pub const RemoteTermBackend = struct {
 
     /// **원격 runtime은 커널 cwd 폴백이 없다.** PTY와 그 자식 프로세스가 host 데몬 프로세스에 살아서 GUI
     /// 프로세스의 `proc_pidinfo`가 닿지 않는다(pid 네임스페이스가 아니라 소유 프로세스가 다른 문제다).
-    /// 그래서 원격 Term의 cwd는 지금은 host가 observation으로 실어 보내는 OSC 7 값이 유일한 출처다 — bash/fish나
-    /// TUI가 화면을 리셋한 뒤에는 비어 있을 수 있다. K1은 cwd authority wire만 마련했고 kernel fallback은 아직
-    /// 활성화하지 않았다. K2·K3 순서는 docs/plans/session-host-kernel-cwd.md가 소유한다.
+    /// 그래서 원격 Term은 GUI process tree를 다시 훑지 않고 host가 observation에 넣은 paired cwd를 단독 출처로 쓴다.
+    /// OSC 7이 없을 때의 kernel fallback도 PTY를 소유한 host에서 측정해 같은 observation으로 온다. 여기서 별도
+    /// fallback을 열면 SSH 억제·authority·cadence가 둘로 갈리므로 계속 null이다.
     fn processCwd(ctx: *anyopaque, handle: RuntimeHandle, out: []u8) ?[]const u8 {
         _ = ctx;
         _ = handle;

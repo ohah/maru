@@ -16,7 +16,7 @@ fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
 }
 
-test "K1 cwd authority is wired without claiming kernel cwd product parity" {
+test "K1 cwd authority remains the sole paired wire foundation" {
     const allocator = std.testing.allocator;
     const manager = try read(allocator, "src/platform/macos/session_host/runtime_manager.zig", 512 * 1024);
     defer allocator.free(manager);
@@ -29,16 +29,16 @@ test "K1 cwd authority is wired without claiming kernel cwd product parity" {
     const verification = try read(allocator, "docs/verification-matrix.md", 3 * 1024 * 1024);
     defer allocator.free(verification);
 
-    // K1 only establishes paired ownership. K2 is the sole phase allowed to
-    // populate the authority or replace the remote backend's null fallback.
-    try std.testing.expectEqual(@as(usize, 1), count(manager, "const cwd_host = try allocator.dupe(u8, \"\");"));
+    // Later phases may populate the field, but they must keep using K1's paired
+    // observation and must not add a GUI-side process cwd syscall.
+    try std.testing.expectEqual(@as(usize, 1), count(manager, ".cwd_host = cwd_host,"));
     try std.testing.expectEqual(@as(usize, 1), count(
         remote_backend,
         "fn processCwd(ctx: *anyopaque, handle: RuntimeHandle, out: []u8) ?[]const u8",
     ));
     try std.testing.expectEqual(@as(usize, 1), count(
         remote_backend,
-        "K1은 cwd authority wire만 마련했고 kernel fallback은 아직",
+        "host가 observation에 넣은 paired cwd를 단독 출처로 쓴다",
     ));
     try std.testing.expectEqual(@as(usize, 1), count(index, "plans/session-host-kernel-cwd.md"));
     try std.testing.expectEqual(@as(usize, 1), count(plan, "K1 - authority model과 wire"));

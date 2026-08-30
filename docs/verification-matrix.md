@@ -2180,9 +2180,25 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
 - **K1 cwd authority model/wire: 구현, 제품 kernel cwd parity 미완.** MRSH v2 metadata의 optional `cwd_host`는
   부재를 legacy unknown authority로 정규화하며, non-empty authority는 non-empty cwd와 같은 observation transaction에서만
   소유·교체한다. type/duplicate/authority-without-cwd는 fail-close하고 server·wire·owning DTO·prepared reducer·GUI projection의
-  digest/equality/allocation rollback에 함께 결속했다. K1 producer는 의도적으로 empty authority만 게시하므로 현재 제품 동작은
-  바뀌지 않는다. `test-session-host-kernel-cwd-k1`이 Debug·ReleaseFast wire와 source/status boundary를 검증한다. host-side
-  500ms kernel sampler와 실제 daemon의 shell-integration 없는 bash/sh·detach/reattach parity는 K2·K3이며 완료 증거가 아니다.
+  digest/equality/allocation rollback에 함께 결속했다. K1 단계에서는 producer가 의도적으로 empty authority만 게시해 제품
+  동작을 바꾸지 않았고, 현재 producer 상태는 아래 K2 행이 소유한다. `test-session-host-kernel-cwd-k1`이 Debug·ReleaseFast
+  wire와 source/status boundary를 검증한다. 이 K1 gate 자체는 500ms kernel sampler나 실제 daemon의
+  shell-integration 없는 bash/sh·detach/reattach parity의
+  완료 증거가 아니며, 각각 아래 K2 상태와 후속 K3 제품 gate를 본다.
+- **K2 host-side kernel cwd sampler: 구현, K3 제품 parity 미완.** `RuntimeManager`가 runtime별 fixed
+  `PATH_MAX` cwd와 `HOST_NAME_MAX` authority cache를 소유하고 OSC 7 cwd가 비며 SSH destination이 없을 때만
+  core lock 밖에서 `PtySession.processCwd`와 fresh `gethostname`을 최대 2 Hz 호출한다. 실패·비 UTF-8·비절대 경로,
+  OSC/SSH 우선 전환, runtime 종료·restore rollback은 cached pair를 비우거나 제거한다. paired cache generation은
+  `runtime_metadata_sampler.Source`와 canonical observation cache generation에 함께 들어가 core generation이 그대로여도
+  client metadata token과 JSON이 갱신된다. deadline 전 source preflight는 core lock 없이 generation만 읽고, 실제
+  materialization은 eligibility를 강제 재확인하되 기존 eligible cache의 syscall refresh는 500ms metadata cadence에
+  남겨 output wake를 막지 않는다. 외부 attach preflight는 non-empty `cwd_host` backing bytes를 exact charge하고,
+  metadata+screen mixed delta에서는 aggregate-bound `screen_staging`을 검증한 뒤 moved payload range를 ledger 한 곳만
+  소유하게 해 정상 update를 invariant failure로 닫지 않는다. `test-session-host-kernel-cwd-k2`가 Debug·ReleaseFast에서 fixed cache,
+  checked generation, 500ms throttle, local fallback, OSC authority 우선, SSH 억제, token/materialization, lifecycle과
+  exact metadata footprint 및 source boundary를 검증하고, 기존 P5c3d built-product E2E가 mixed delta 뒤
+  controller/observer 입력·reattach·`--stream` 지속을 검증한다. 실제 독립 daemon·detach/reattach·sibling·frozen N-1
+  소비자 parity는 K3 완료 증거가 필요하다.
 - **P4 input parity micro-gate: 구현.** `test-session-host-input-parity`가 Debug·ReleaseFast에서 host-backed
   AppSession의 DECSET 1003 exact-mode/중복·modifier·chrome 억제, 실제 forkpty host reader의 xterm SGR no-button motion
   byte, `selection_scroll_and_extend` 두 번 뒤 authoritative copy와 source boundary를 exact-count한다. AppSession 행은

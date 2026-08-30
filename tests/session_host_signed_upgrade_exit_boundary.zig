@@ -28,6 +28,11 @@ test "U5 signed success proves PTY exit and host-owned reap without terminate sh
     );
     try std.testing.expectEqual(@as(usize, 1), count(source, "fn waitForRuntimeGone("));
     try std.testing.expectEqual(@as(usize, 0), count(source, "fn terminateRuntime("));
+    try std.testing.expectEqual(@as(usize, 1), count(source, "client.runtimeInventory()"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(source, "if (count < 0) return error.ChildInventoryUnavailable;"),
+    );
     try std.testing.expectEqual(@as(usize, 1), count(source, ".runtime_reaped_after_exit = true"));
     try std.testing.expectEqual(
         @as(usize, 1),

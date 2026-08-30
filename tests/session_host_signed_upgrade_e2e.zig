@@ -12,6 +12,12 @@ const session_host = @import("session_host");
 const connect_attempts: usize = 500;
 const marker_attempts: usize = 240;
 const poll_delay_us: c_uint = 20 * 1000;
+const marker_exit = "MARU_SIGNED_UPGRADE_EXIT_23";
+const runtime_spawn_params =
+    "{\"argv\":[\"/bin/sh\",\"-c\",\"/bin/stty -echo || exit 70; " ++
+    "printf MARU_SIGNED_UPGRADE_READY; while IFS= read -r line; do if [ \\\"$line\\\" = " ++
+    marker_exit ++
+    " ]; then exit 23; fi; printf '%s\\\\r\\\\n' \\\"$line\\\"; done\"],\"cols\":80,\"rows\":12}";
 const sol_local: c_int = 0;
 const local_peerpid: c_int = 0x002;
 
@@ -201,10 +207,8 @@ fn run(
     const epoch_before = before.upgrade_epoch;
 
     var children_before: [64]c.pid_t = undefined;
-    const children_before_len = listChildren(host_pid_before, &children_before);
-    const spawn_response = try before.call("runtime.spawn",
-        \\{"argv":["/bin/sh","-c","/bin/stty -echo || exit 70; printf MARU_SIGNED_UPGRADE_READY; exec /bin/cat"],"cols":80,"rows":12}
-    );
+    const children_before_len = try listChildren(host_pid_before, &children_before);
+    const spawn_response = try before.call("runtime.spawn", runtime_spawn_params);
     defer allocator.free(spawn_response);
     const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse
         return error.RuntimeSpawnFailed;
@@ -228,7 +232,7 @@ fn run(
         &screen_before,
         "MARU_SIGNED_UPGRADE_READY",
     );
-    try waitForProcessName(runtime_pid_before, "cat");
+    try waitForProcessName(runtime_pid_before, "sh");
     const marker_before = "MARU_SIGNED_UPGRADE_BEFORE";
     try before.sendInput(stream_before, marker_before ++ "\r");
     try waitForMarker(&before, stream_before, &screen_before, marker_before);
@@ -265,7 +269,7 @@ fn run(
     if (after.build_id == null or !std.mem.eql(u8, after.build_id.?, target_build_id))
         return error.TargetBuildMismatch;
     if (!after.host_exec_upgrade_v1) return error.UpgradeCapabilityLost;
-    const runtime_pid_after = if (childStillPresent(host_pid_after, runtime_pid_before))
+    const runtime_pid_after = if (try childStillPresent(host_pid_after, runtime_pid_before))
         runtime_pid_before
     else
         return error.RuntimePidChanged;
@@ -293,8 +297,8 @@ fn run(
     const marker_after = "MARU_SIGNED_UPGRADE_AFTER";
     try after.sendInput(stream_after, marker_after ++ "\r");
     try waitForMarker(&after, stream_after, &screen_after, marker_after);
-    try detachRuntime(allocator, &after, stream_after);
-    try terminateRuntime(allocator, &after, &runtime_id);
+    try after.sendInput(stream_after, marker_exit ++ "\r");
+    try waitForRuntimeGone(allocator, &after, &runtime_id, host_pid_after, runtime_pid_after);
 
     return .{
         .host_id = host_id,
@@ -359,19 +363,35 @@ fn detachRuntime(
     allocator.free(response);
 }
 
-fn terminateRuntime(
+fn waitForRuntimeGone(
     allocator: std.mem.Allocator,
     client: *session_host.client.Client,
     runtime_id: *const [32]u8,
+    host_pid: c.pid_t,
+    runtime_pid: c.pid_t,
 ) !void {
-    const params = try std.fmt.allocPrint(
-        allocator,
-        "{{\"runtime_id\":\"{s}\"}}",
-        .{runtime_id},
-    );
-    defer allocator.free(params);
-    const response = try client.call("runtime.terminate", params);
-    allocator.free(response);
+    var consecutive_absent: u8 = 0;
+    var attempt: usize = 0;
+    while (attempt < marker_attempts) : (attempt += 1) {
+        var inventory = try client.runtimeInventory();
+        const absent = switch (inventory) {
+            .complete => |*complete| blk: {
+                defer complete.deinit(allocator);
+                const runtime_numeric = std.fmt.parseInt(u128, runtime_id, 16) catch
+                    return error.RuntimeIdentityInvalid;
+                break :blk std.mem.indexOfScalar(u128, complete.runtime_ids, runtime_numeric) == null;
+            },
+            .unavailable => false,
+        };
+        if (absent and !try childStillPresent(host_pid, runtime_pid)) {
+            consecutive_absent += 1;
+            if (consecutive_absent == 2) return;
+        } else {
+            consecutive_absent = 0;
+        }
+        _ = usleep(poll_delay_us);
+    }
+    return error.RuntimeReapTimeout;
 }
 
 fn waitForMarker(
@@ -425,13 +445,14 @@ fn peerPid(fd: c.fd_t) !c.pid_t {
     return pid;
 }
 
-fn listChildren(parent: c.pid_t, buffer: *[64]c.pid_t) usize {
+fn listChildren(parent: c.pid_t, buffer: *[64]c.pid_t) !usize {
     @memset(buffer, 0);
     // libproc returns a PID count here, not the number of bytes written. Keep
     // this oracle aligned with the product process-tree walker so one live PTY
     // child cannot be mistaken for zero children during an upgrade.
     const count = proc_listchildpids(parent, buffer, @intCast(@sizeOf(@TypeOf(buffer.*))));
-    if (count <= 0) return 0;
+    if (count < 0) return error.ChildInventoryUnavailable;
+    if (count == 0) return 0;
     return @min(buffer.len, @as(usize, @intCast(count)));
 }
 
@@ -439,7 +460,7 @@ fn waitForNewChild(parent: c.pid_t, before: []const c.pid_t) !c.pid_t {
     var attempt: usize = 0;
     while (attempt < marker_attempts) : (attempt += 1) {
         var current: [64]c.pid_t = undefined;
-        const count = listChildren(parent, &current);
+        const count = try listChildren(parent, &current);
         for (current[0..count]) |pid| {
             if (pid > 0 and std.mem.indexOfScalar(c.pid_t, before, pid) == null) return pid;
         }
@@ -448,9 +469,9 @@ fn waitForNewChild(parent: c.pid_t, before: []const c.pid_t) !c.pid_t {
     return error.RuntimePidUnavailable;
 }
 
-fn childStillPresent(parent: c.pid_t, child: c.pid_t) bool {
+fn childStillPresent(parent: c.pid_t, child: c.pid_t) !bool {
     var current: [64]c.pid_t = undefined;
-    const count = listChildren(parent, &current);
+    const count = try listChildren(parent, &current);
     return std.mem.indexOfScalar(c.pid_t, current[0..count], child) != null;
 }
 
@@ -557,6 +578,8 @@ fn writeArtifact(
         .same_runtime_pid = evidence.runtime_pid_before == evidence.runtime_pid_after,
         .runtime_screen_before_preserved = true,
         .runtime_screen_after_writable = true,
+        .runtime_reaped_after_exit = true,
+        .runtime_inventory_absent_observations = 2,
         .status_committed = true,
         .status_reason = "none",
         .upgrade_capability_preserved = true,
@@ -576,6 +599,21 @@ test "signed upgrade E2E helper rejects a marker absent from empty screen" {
     var assembler = session_host.screen_assembler.ScreenAssembler.init(std.testing.allocator);
     defer assembler.deinit();
     try std.testing.expect(!screenContains(&assembler, "missing"));
+}
+
+test "signed upgrade runtime command is valid JSON and owns the exit marker once" {
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        std.testing.allocator,
+        runtime_spawn_params,
+        .{},
+    );
+    defer parsed.deinit();
+    const argv = parsed.value.object.get("argv").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), argv.len);
+    try std.testing.expectEqualStrings("/bin/sh", argv[0].string);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, argv[2].string, marker_exit));
+    try std.testing.expect(std.mem.indexOf(u8, argv[2].string, "then exit 23") != null);
 }
 
 test "signed upgrade artifact invalidates stale success and pins auditable identities" {
@@ -635,5 +673,10 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
         object.get("signer_requirement_sha256").?.string,
     );
     try std.testing.expect(object.get("upgrade_capability_preserved").?.bool);
+    try std.testing.expect(object.get("runtime_reaped_after_exit").?.bool);
+    try std.testing.expectEqual(
+        @as(i64, 2),
+        object.get("runtime_inventory_absent_observations").?.integer,
+    );
     try std.testing.expectEqual(@as(i64, 5), object.get("duration_ms").?.integer);
 }

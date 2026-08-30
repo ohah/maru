@@ -80,6 +80,16 @@ test "recognized environment protection and actual waiting history are both mand
         expected,
         unprotected,
     ));
+    var forged = environment;
+    forged.required_reviewer_count = 7;
+    try std.testing.expectError(error.UnprotectedEnvironment, github_deployment.parseAndBind(
+        std.testing.allocator,
+        jobs,
+        deployments,
+        &backing,
+        expected,
+        forged,
+    ));
 
     const no_wait = std.mem.replaceOwned(
         u8,
@@ -206,6 +216,32 @@ test "malformed duplicate wrong type trailing and response caps fail closed" {
         oversized,
         deployments,
         &backing,
+        expected,
+        environment,
+    ));
+
+    const malformed_deployments = [_][]const u8{
+        "{",
+        deployments ++ "null",
+        "[{\"id\":1,\"id\":1,\"sha\":\"" ++ source_sha ++ "\",\"ref\":\"v1.2.3\",\"task\":\"deploy\",\"environment\":\"release\",\"original_environment\":\"release\",\"statuses_url\":\"x\",\"repository_url\":\"x\",\"performed_via_github_app\":{\"id\":1,\"slug\":\"github-actions\",\"owner\":{\"login\":\"github\"}}}]",
+    };
+    for (malformed_deployments) |bytes| try std.testing.expectError(error.InvalidJson, github_deployment.parseAndBind(
+        std.testing.allocator,
+        jobs,
+        bytes,
+        &backing,
+        expected,
+        environment,
+    ));
+    const malformed_status_backing = [_]github_deployment.StatusBacking{.{
+        .deployment_id = 5_659_920_837,
+        .bytes = statuses ++ "null",
+    }};
+    try std.testing.expectError(error.InvalidJson, github_deployment.parseAndBind(
+        std.testing.allocator,
+        jobs,
+        deployments,
+        &malformed_status_backing,
         expected,
         environment,
     ));

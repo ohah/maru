@@ -8,6 +8,8 @@ const std = @import("std");
 
 pub const summary_schema = "maru.session-host-release-validation.v1";
 pub const protected_environment_name = "release";
+pub const release_workflow_name = "Release";
+pub const release_signing_job_name = "universal dmg (signed + notarized)";
 pub const accepts_observation_json_input = false;
 pub const repository_name = "ohah/maru";
 pub const max_cli_value_bytes: usize = 4 * 1024;

@@ -971,6 +971,11 @@ GUI exact reattach를 주장하지 않는다. 하네스 구현/compile 성공과
 아티팩트가 없어 후자는 여전히 미검증이며, 위 U5 미완료 판정을 바꾸지 않는다.
 near-max gate는 별도 named release step에서 `max_runtime_count - 1` 실제 PTY의 고유 marker, exact typed inventory set,
 각 ID의 GUI `RemoteRuntime` 재접속과 전량 reap을 요구한다. 한 runtime 반복이나 codec-only 255-row fixture는 제품 증거가 아니다.
+`test-session-host-upgrade-failure-matrix`는 U3 same-PID failure 14개와 U5 zero/non-empty 제품 rollback activation을
+한 named entrypoint로 묶고 boundary inventory로 exact 포함을 고정한다. corrupt primary·backup·divergence,
+preflight fail/hang, exec 반환, adoption/path identity, 연속 rollback과 promotion failure가 첫 matrix의 범위다.
+이는 기존 leaf 증거의 누락 방지와 공통 실행 진입점이며, signed provenance나 아직 연결하지 않은
+manifest/socket/FD 전 구간 failure injection을 완료로 승격하지 않는다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

@@ -919,6 +919,15 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   pathname object identity 재검증+same-designated-requirement signer+same-UID owner boundary를 제품 계약으로 쓴다.
   이 종료 gate가 닫히기 전에는 U5 완료를 주장하지 않는다.
 
+- **failure matrix의 첫 named gate:** `test-session-host-upgrade-failure-matrix`는 이미 독립적으로 존재하던
+  U3 same-PID process failure 14개와 U5 zero/non-empty 제품 rollback activation을 한 진입점에서 실행한다.
+  이 gate는 corrupt primary·corrupt/divergent backup, incompatible/hung target preflight, old/second exec 반환,
+  target adoption 실패, target pathname identity 교체, 연속 upgrade rollback, promotion 실패와 실제 제품
+  rollback listener/runtime 수명을 고정한다. 목록은 boundary inventory가 exact test 이름과 build dependency를
+  검사하므로 테스트가 조용히 빠진 green을 허용하지 않는다. 다만 같은 source에서 빌드한 U3 fixture와 current
+  제품 rollback 증거의 집합이므로 signed frozen release provenance나 아직 목록에 없는 manifest/socket/FD 전 구간
+  failure를 대신하지 않으며, 이 첫 matrix만으로 U5 failure injection 완료를 주장하지 않는다.
+
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서
 exact runtime ID를 제거해야 한다. 검증자는 같은 연결에서 inventory 부재를 두 번 관측하고 direct-child 부재도

@@ -582,3 +582,82 @@ test "검색: 한글은 접지 않는다 — 바이트 그대로 본다" {
     try testing.expect(matches("배치가 이상합니다", "이상"));
     try testing.expect(!matches("배치가 이상합니다", "정상"));
 }
+
+/// 시각을 찾을 창 크기(2026-08-30 실측, 위 모듈 주석).
+pub const time_window_after: usize = 256;
+pub const time_window_before: usize = 16 * 1024;
+
+const timestamp_key = "\"timestamp\":\"";
+
+/// `"timestamp":"2026-08-30T09:13:22.123Z"` → Unix 초. 못 읽으면 **0**(모름).
+///
+/// **UTC 로만 읽는다.** 두 provider 다 `Z` 로 끝나는 것을 실측으로 확인했고, 오프셋이 붙은 표기는
+/// 여기서 0 을 준다 — 틀린 시각을 그리는 것보다 안 그리는 편이 낫다.
+pub fn timestampSeconds(window: []const u8) i64 {
+    const raw = findValue(window, timestamp_key) orelse return 0;
+    return parseIso8601(raw);
+}
+
+/// `YYYY-MM-DDThh:mm:ss` 앞부분만 본다(소수 초·`Z` 는 무시). 모양이 어긋나면 0.
+pub fn parseIso8601(raw: []const u8) i64 {
+    if (raw.len < 19) return 0;
+    if (raw[4] != '-' or raw[7] != '-' or raw[13] != ':' or raw[16] != ':') return 0;
+    if (raw[10] != 'T' and raw[10] != ' ') return 0;
+    const year = twoOrFour(raw[0..4]) orelse return 0;
+    const month = twoOrFour(raw[5..7]) orelse return 0;
+    const day = twoOrFour(raw[8..10]) orelse return 0;
+    const hour = twoOrFour(raw[11..13]) orelse return 0;
+    const minute = twoOrFour(raw[14..16]) orelse return 0;
+    const second = twoOrFour(raw[17..19]) orelse return 0;
+    if (year < 1970 or year > 9999) return 0;
+    if (month < 1 or month > 12 or day < 1 or day > 31) return 0;
+    if (hour > 23 or minute > 59 or second > 60) return 0; // 윤초 60 을 거절하지 않는다
+
+    // 1970-01-01 부터의 날 수. `std.time.epoch` 의 윤년 규칙을 쓴다.
+    var days: i64 = 0;
+    var y: u16 = 1970;
+    while (y < year) : (y += 1) days += if (std.time.epoch.isLeapYear(y)) 366 else 365;
+    var mo: u16 = 1;
+    while (mo < month) : (mo += 1) {
+        days += std.time.epoch.getDaysInMonth(year, @enumFromInt(@as(u4, @intCast(mo))));
+    }
+    days += @as(i64, day) - 1;
+    return days * std.time.s_per_day + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);
+}
+
+fn twoOrFour(digits: []const u8) ?u16 {
+    var v: u16 = 0;
+    for (digits) |c| {
+        if (c < '0' or c > '9') return null;
+        v = v * 10 + (c - '0');
+    }
+    return v;
+}
+
+test "시각: 두 provider 의 실제 모양을 읽는다" {
+    // Claude(소수 초 3자리)·Codex(소수 초 6자리) 둘 다 `Z` 로 끝난다.
+    const claude = "{\"type\":\"user\",\"timestamp\":\"2026-08-30T09:13:22.123Z\"}";
+    const codex = "{\"timestamp\":\"2026-08-30T09:13:22.123456Z\",\"payload\":{}}";
+    const want: i64 = 1788081202; // 2026-08-30T09:13:22Z
+    try std.testing.expectEqual(want, timestampSeconds(claude));
+    try std.testing.expectEqual(want, timestampSeconds(codex));
+}
+
+test "시각: 모양이 어긋나면 0 — 없는 시각을 지어내지 않는다" {
+    try std.testing.expectEqual(@as(i64, 0), timestampSeconds("{}"));
+    try std.testing.expectEqual(@as(i64, 0), timestampSeconds("{\"timestamp\":\"어제\"}"));
+    try std.testing.expectEqual(@as(i64, 0), timestampSeconds("{\"timestamp\":\"2026-13-01T00:00:00Z\"}")); // 13월
+    try std.testing.expectEqual(@as(i64, 0), timestampSeconds("{\"timestamp\":\"1969-12-31T23:59:59Z\"}")); // epoch 이전
+    try std.testing.expectEqual(@as(i64, 0), parseIso8601("2026-08-30"));
+}
+
+test "시각: 윤년과 연·월 경계를 넘는다" {
+    // 2028 은 윤년이라 2-29 가 있다. 하루를 잘못 세면 여기서 걸린다.
+    try std.testing.expectEqual(@as(i64, 1835395200), parseIso8601("2028-02-29T00:00:00Z"));
+    try std.testing.expectEqual(@as(i64, 0), parseIso8601("1970-01-01T00:00:00Z"));
+    try std.testing.expectEqual(@as(i64, 86399), parseIso8601("1970-01-01T23:59:59Z"));
+    // 연 경계 — 12-31 다음이 다음 해 01-01 이다.
+    const dec = parseIso8601("2026-12-31T23:59:59Z");
+    const jan = parseIso8601("2027-01-01T00:00:00Z");
+    try std.testing.expectEqual(dec + 1, jan);
+}

@@ -17,6 +17,16 @@ const unexpected_success_exit: u8 = 74;
 const unexpected_error_exit: u8 = 75;
 
 test "daemon cleanup identity failure exits nonzero and removes listener authority" {
+    try runDaemonCleanupFailStop(.identity_collision);
+}
+
+test "daemon kernel cleanup faults exit nonzero and remove listener authority" {
+    try runDaemonCleanupFailStop(.kernel_permission);
+}
+
+const Fault = enum { identity_collision, kernel_permission };
+
+fn runDaemonCleanupFailStop(fault: Fault) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
@@ -32,7 +42,10 @@ test "daemon cleanup identity failure exits nonzero and removes listener authori
     const target_build_id = try sh.host_manifest.buildIdForExecutable(allocator, product_z);
     defer allocator.free(target_build_id);
 
-    const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | 0x4641494c53544f50;
+    const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | switch (fault) {
+        .identity_collision => @as(u128, 0x4641494c53544f50),
+        .kernel_permission => @as(u128, 0x4b45524e454c4641),
+    };
     const attempt_id: u128 = host_id ^ 0x434c45414e555046;
     var base_buf: [160]u8 = undefined;
     const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-daemon-fail-stop-{d}", .{c.getpid()}) catch return error.SkipZigTest;
@@ -45,6 +58,14 @@ test "daemon cleanup identity failure exits nonzero and removes listener authori
     const socket_path = try sh.short_endpoint.currentSocketPathIn(&socket_buf, host_id);
     var owner_buf: [832]u8 = undefined;
     const owner_path = try sh.host_manifest.ownerLockPathIn(&owner_buf, session_dir, host_id);
+    var host_dir_buf: [768]u8 = undefined;
+    const host_dir = try sh.host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id);
+    var attempt_buf: [896]u8 = undefined;
+    const attempt_path = try std.fmt.bufPrintZ(
+        &attempt_buf,
+        "{s}/attempt-{x:0>32}",
+        .{ host_dir, attempt_id },
+    );
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -54,19 +75,29 @@ test "daemon cleanup identity failure exits nonzero and removes listener authori
             _ = c.kill(child, posix.SIG.KILL);
             _ = c.waitpid(child, null, 0);
         }
+        _ = c.chmod(attempt_path.ptr, 0o700);
         _ = c.unlink(socket_path.ptr);
         std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     }
     if (child == 0) {
         var inherited_fd: c_int = 3;
         while (inherited_fd < getdtablesize()) : (inherited_fd += 1) _ = c.close(inherited_fd);
-        sh.daemon.runSessionHostWithIdentityCleanupCollisionFixture(
-            std.heap.page_allocator,
-            std.testing.io,
-            session_dir,
-            socket_path,
-            host_id,
-        ) catch |err| c._exit(if (err == error.ManifestFailed) manifest_fail_exit else unexpected_error_exit);
+        (switch (fault) {
+            .identity_collision => sh.daemon.runSessionHostWithIdentityCleanupCollisionFixture(
+                std.heap.page_allocator,
+                std.testing.io,
+                session_dir,
+                socket_path,
+                host_id,
+            ),
+            .kernel_permission => sh.daemon.runSessionHostWithIdentityKernelCleanupFaultFixture(
+                std.heap.page_allocator,
+                std.testing.io,
+                session_dir,
+                socket_path,
+                host_id,
+            ),
+        }) catch |err| c._exit(if (err == error.ManifestFailed) manifest_fail_exit else unexpected_error_exit);
         c._exit(unexpected_success_exit);
     }
 
@@ -102,6 +133,19 @@ test "daemon cleanup identity failure exits nonzero and removes listener authori
     const wait_status: u32 = @bitCast(status);
     try std.testing.expect(c.W.IFEXITED(wait_status));
     try std.testing.expectEqual(manifest_fail_exit, c.W.EXITSTATUS(wait_status));
+    if (fault == .kernel_permission) {
+        const attempt_fd = c.open(
+            attempt_path.ptr,
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true },
+            @as(c.mode_t, 0),
+        );
+        if (attempt_fd < 0) return error.TestUnexpectedResult;
+        defer _ = c.close(attempt_fd);
+        var attempt_stat: posix.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.fstat(attempt_fd, &attempt_stat));
+        try std.testing.expectEqual(@as(c.mode_t, 0o500), attempt_stat.mode & 0o777);
+        try std.testing.expectEqual(@as(c_int, 0), c.chmod(attempt_path.ptr, 0o700));
+    }
     try std.testing.expectError(error.WriteFailed, sibling.call("host.info", null));
     try std.testing.expectEqual(@as(c_int, -1), c.access(socket_path.ptr, c.F_OK));
     try std.testing.expectEqual(posix.E.NOENT, posix.errno(-1));

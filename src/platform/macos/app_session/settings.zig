@@ -1500,22 +1500,29 @@ pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_p
     // **보낼 것이 없으면 구획도 없다** — 편집기 하나만 열린 창에서 머리글만 뜨면 그 줄이 "눌러도
     // 아무 일 없는 줄" 이 된다.
     var target_buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
-    const targets = term_ops.collectAgentTargets(self, &target_buf);
+    // 폴더 문자열이 살 자리 — 후보가 라벨로 굳을 때까지 살아 있어야 한다(스택이지만 이 함수가
+    // 끝나기 전에 `writeLabel` 이 전부 복사한다).
+    var folder_bufs: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const targets = term_ops.collectAgentTargets(self, &target_buf, &folder_bufs);
     var row: usize = 0;
     if (targets.len > 0) {
         self.context_menu_items_buf[row] = maru.i18n.t(.ctx_send_selection);
         row += 1;
-        for (targets, 0..) |cand, i| {
-            stored.targets[i] = cand;
-            // 라벨은 **행마다 자기 버퍼**를 쓴다 — 공유 버퍼 하나에 쓰면 다음 행이 앞 행을 덮는다.
-            self.context_menu_items_buf[row] = maru.session.agent_selection.writeLabel(
-                &self.agent_target_label_buf[i],
-                cand,
-            ) orelse continue;
-            row += 1;
-        }
-        stored.target_len = targets.len;
-        stored.send_rows = row; // 머리글 + 실제로 실린 대상 줄
+        // **줄과 id 의 1:1 은 `writeRows` 가 든다** — 여기서 두 배열을 각자 채우다가 어긋났었다
+        // (라벨이 자리에 안 들어가면 줄만 건너뛰고 목록에는 남겨, 그 뒤가 한 칸씩 밀렸다).
+        // 라벨은 **행마다 자기 버퍼**를 쓴다 — 공유 버퍼 하나면 다음 행이 앞 행을 덮는다.
+        var label_bufs: [app_session_mod.max_agent_targets][]u8 = undefined;
+        for (&label_bufs, 0..) |*b, i| b.* = &self.agent_target_label_buf[i];
+        const stored_n = maru.session.agent_selection.writeRows(
+            targets,
+            &label_bufs,
+            stored.targets[0..],
+            self.context_menu_items_buf[row..][0..app_session_mod.max_agent_targets],
+        );
+        row += stored_n;
+        stored.target_len = stored_n;
+        stored.send_rows = if (stored_n == 0) 0 else row; // 대상이 하나도 못 실렸으면 머리글도 뺀다
+        if (stored_n == 0) row = 0; // 머리글 줄을 되돌린다 — 눌러도 아무 일 없는 줄을 남기지 않는다
     }
 
     for (built[0..stored.len], 0..) |item, i| {
@@ -1530,6 +1537,16 @@ pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_p
         self.context_menu_items_len,
         if (stored.send_rows > 0) 1 else 0, // 머리글 한 줄만 고를 수 없다
     );
+    // **마지막으로 보낸 대상이 아직 있으면 그 줄에서 시작한다**(§5 — "다음 호출의 기본값").
+    // `show` 는 첫 고를 수 있는 줄을 고르므로 그 뒤에 덮어쓴다. 그 Term 이 닫혔으면 못 찾고
+    // 기본값 그대로다.
+    if (@as(?u64, null)) |last| { // MUTANT: 기억 무시
+        for (stored.targets[0..stored.target_len], 0..) |id, i| {
+            if (id != last) continue;
+            self.chrome_host.context_menu.selected = 1 + i; // 머리글 한 줄
+            break;
+        }
+    }
     self.metal_dirty = true;
     return true;
 }
@@ -1792,11 +1809,14 @@ pub fn acceptContextMenu(self: *AppSession) void {
         // 를 눌렀는데 "복사" 가 도는 그 한 칸 밀림이 된다(리소스 팝오버가 같은 실수를 했다).
         if (menu.send_rows > 0 and selected < menu.send_rows) {
             const target_index = selected - 1; // 머리글 한 줄
-            const cand: ?maru.session.agent_selection.Candidate =
-                if (target_index < menu.target_len) menu.targets[target_index] else null;
+            const target_id: ?u64 = if (target_index < menu.target_len) menu.targets[target_index] else null;
             const source = term_ops.termBySurfaceId(self, menu.surface_id);
             closeContextMenu(self);
-            if (cand) |c| if (source) |src| editor_ops.sendSelectionToAgent(self, src, c.surface_id);
+            if (target_id) |tid| if (source) |src| {
+                // **보낸 뒤에만 기억한다.** 못 보낸 대상을 기본값으로 두면 다음 메뉴가 안 되는 줄에서
+                // 시작한다(대상이 터미널이 아니거나 선택이 없으면 `sendSelectionToAgent` 가 접힌다).
+                if (editor_ops.sendSelectionToAgent(self, src, tid)) self.last_agent_target = tid;
+            };
             return;
         }
         const edit_index = selected -| menu.send_rows;

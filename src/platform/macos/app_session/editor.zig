@@ -4773,14 +4773,17 @@ pub fn selectAll(self: *AppSession, term: *Term) bool {
 ///
 /// **bracketed 를 먼저 읽는 이유**: 만든 뒤에 자르면 잘린 인용이 나간다. 그 판정이 페이로드의
 /// 모양을 정하므로 순서가 뒤집히면 안 된다.
-pub fn sendSelectionToAgent(self: *AppSession, source: *Term, target_id: u64) void {
+/// 보냈으면 true. **호출자가 그것으로 "마지막 대상" 을 기억한다** — 못 보낸 대상을 기억하면
+/// 다음 메뉴가 되지 않는 줄에서 시작한다.
+pub fn sendSelectionToAgent(self: *AppSession, source: *Term, target_id: u64) bool {
     // **bracketed 를 먼저 읽는다** — 그 값이 페이로드의 모양을 정한다(§4). 만든 뒤에 자르면 잘린
     // 인용이 나간다. `null` 이면 그 대상이 터미널이 아니다.
-    const bracketed = term_ops.bracketedPasteFor(self, target_id) orelse return;
+    const bracketed = term_ops.bracketedPasteFor(self, target_id) orelse return false;
     var payload_buf: [maru.session.agent_selection.max_quote_bytes + 1024]u8 = undefined;
-    const payload = buildSelectionPayload(self, source, bracketed, &payload_buf) orelse return;
+    const payload = buildSelectionPayload(self, source, bracketed, &payload_buf) orelse return false;
     // 대상은 **id 로 고정**된다 — `submitPaste` 가 그 계약을 든다(뒤에 탭이 바뀌어도 원래 surface 로).
     term_ops.submitPaste(self, payload, false, target_id);
+    return true;
 }
 
 /// 보낼 바이트를 만든다.
@@ -16054,7 +16057,7 @@ test "NS5 편집기가 아니거나 대상이 터미널이 아니면 아무것�
 
     // 대상이 편집기(=터미널 아님) → `bracketedPasteFor` 가 null 이라 접힌다.
     fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
-    sendSelectionToAgent(fx.session, fx.term, fx.term.surface.id);
+    try testing.expect(!sendSelectionToAgent(fx.session, fx.term, fx.term.surface.id));
     try testing.expect(fx.session.pending_pastes.getPtr(fx.term.surface.id) == null);
 }
 
@@ -16087,7 +16090,80 @@ test "NS5 후보는 그 창의 터미널만이고 편집기는 대상이 아니�
     defer fx.deinit(allocator);
 
     var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
-    const targets = term_ops.collectAgentTargets(fx.session, &buf);
+    var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const targets = term_ops.collectAgentTargets(fx.session, &buf, &folders);
     try testing.expect(targets.len > 0);
     for (targets) |c| try testing.expect(c.surface_id != fx.term.surface.id);
+}
+
+// ── NS6: 라벨 표기와 마지막 대상 ──────────────────────────────────────────────────────────────
+
+test "NS6 표시된 줄과 저장된 대상은 1:1 이다 — 라벨이 하나 빠져도 안 어긋난다" {
+    // **적대적 검증이 잡은 결함이다.** 라벨을 못 만든 대상을 목록에는 남기고 줄만 건너뛰면, 그 뒤
+    // 줄이 전부 한 칸씩 밀려 **고른 것과 다른 터미널**로 보낸다. 여기서는 그 불변식을 직접 잰다 —
+    // 대상 수는 **실제로 그려진 줄 수**와 같아야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
+    const menu = fx.session.editor_context_menu.?;
+    try testing.expect(menu.target_len > 0);
+    // 머리글 1 + 대상 줄들 = send_rows.
+    try testing.expectEqual(menu.send_rows, 1 + menu.target_len);
+    // 전체 줄 수도 맞는다(보내기 구획 + 편집 항목).
+    try testing.expectEqual(fx.session.context_menu_items_len, menu.send_rows + menu.len);
+    settings_ops.closeContextMenu(fx.session);
+}
+
+test "NS6 라벨은 폴더와 브랜치로 가른다 — 사이드바가 쓰는 그 두 축이다" {
+    // §5 는 "같은 정보를 두 곳에서 다르게 부르지 않는다" 로 정했다. 사이드바 카드가 쓰는 축을
+    // 코드로 확인했더니 **폴더 + 브랜치**였다(워크스페이스 이름이 아니다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const targets = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    try testing.expect(targets.len > 0);
+
+    // `where` 가 비어 있으면 라벨이 이름만 남아 여러 대상을 못 가른다 — 그 자리가 §5 의 핵심이다.
+    for (targets) |c| try testing.expect(c.where.len > 0);
+}
+
+test "NS6 마지막으로 보낸 대상이 다음 메뉴의 기본 선택이다" {
+    // §5: "마지막으로 보낸 대상을 창별로 기억해 다음 호출의 기본값으로 둔다." 표식(`⏎`)이 아니라
+    // 기본 선택인 이유는 `last_agent_target` 주석에 적었다(표식 축을 켜면 메뉴 전체가 들여쓰기된다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+
+    // 기억이 없으면 첫 고를 수 있는 줄(머리글 다음)이 기본이다.
+    try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.context_menu.selected);
+    const first = fx.session.editor_context_menu.?.targets[0];
+    settings_ops.closeContextMenu(fx.session);
+
+    // **없는 id 를 기억해 두면 무시된다** — 닫힌 Term 을 기억한 상태다.
+    fx.session.last_agent_target = 0xDEAD_BEEF;
+    try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
+    try testing.expectEqual(@as(usize, 1), fx.session.chrome_host.context_menu.selected);
+    settings_ops.closeContextMenu(fx.session);
+
+    // 살아 있는 대상을 기억하면 그 줄에서 시작한다.
+    fx.session.last_agent_target = first;
+    try testing.expect(settings_ops.showEditorContextMenu(fx.session, fx.term, 10, 10));
+    const menu = fx.session.editor_context_menu.?;
+    const sel = fx.session.chrome_host.context_menu.selected;
+    try testing.expect(sel >= 1 and sel - 1 < menu.target_len);
+    try testing.expectEqual(first, menu.targets[sel - 1]);
+    settings_ops.closeContextMenu(fx.session);
 }

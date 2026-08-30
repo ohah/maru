@@ -157,6 +157,33 @@ pub fn writeLabel(out: []u8, c: Candidate) ?[]const u8 {
     return writer.buffered();
 }
 
+/// 후보들을 **메뉴 줄로 편다** — 라벨과 id 를 **같은 걸음으로** 채운다.
+///
+/// **이 함수가 존재하는 이유는 그 1:1 을 잴 수 있게 하려는 것이다.** 처음에는 호출부에서 두 배열을
+/// 각자 채웠고, 라벨이 자리에 안 들어가면 줄만 건너뛰고 목록에는 남겼다 — 그러면 그 뒤 줄이 전부
+/// 한 칸씩 밀려 **고른 것과 다른 대상**으로 간다. 적대적 검증이 그것을 잡았는데, **판정자는 못
+/// 잡았다**: 실제 픽스처에서는 라벨이 절대 안 넘쳐 두 수가 우연히 같았다. 잴 수 없는 계약은
+/// 계약이 아니라 우연이라, 버퍼 크기를 **인자로** 받는 자리로 옮겨 작은 버퍼로 강제할 수 있게 했다.
+///
+/// `label_bufs[i]` 에 i 번째 **실린** 줄의 라벨을 쓴다(후보 인덱스가 아니다). 반환은 실린 줄 수.
+pub fn writeRows(
+    cands: []const Candidate,
+    label_bufs: [][]u8,
+    out_ids: []u64,
+    out_labels: [][]const u8,
+) usize {
+    var n: usize = 0;
+    for (cands) |c| {
+        if (n >= label_bufs.len or n >= out_ids.len or n >= out_labels.len) break;
+        // **자리에 안 들어가면 자르지 않고 뺀다** — 잘린 라벨은 다른 대상으로 읽힌다.
+        const label = writeLabel(label_bufs[n], c) orelse continue;
+        out_labels[n] = label;
+        out_ids[n] = c.surface_id;
+        n += 1;
+    }
+    return n;
+}
+
 const testing = std.testing;
 
 test "reference collapses a single-line range and keeps the closed interval otherwise" {
@@ -360,4 +387,39 @@ test "라벨은 자리가 모자라면 잘라 내지 않고 접는다" {
     // 잘린 라벨은 **다른 대상**으로 읽힌다 — `Claude — maru-a` 와 `Claude — maru-b` 가 같아진다.
     var tiny: [8]u8 = undefined;
     try testing.expect(writeLabel(&tiny, .{ .surface_id = 1, .kind = .claude, .where = "maru", .branch = "main" }) == null);
+}
+
+test "줄과 id 는 같은 걸음으로 늘어난다 — 라벨이 빠져도 안 어긋난다" {
+    // **작은 버퍼로 실패를 강제한다.** 실제 메뉴 버퍼(128B)로는 이 경로가 안 돌아 판정이 성립하지
+    // 않는다 — 그것이 이 함수를 뺀 이유다.
+    const cands = [_]Candidate{
+        .{ .surface_id = 11, .kind = .claude, .where = "a", .order = 0 },
+        .{ .surface_id = 22, .kind = .codex, .where = "이 라벨은 아주 길어서 작은 버퍼에 절대 안 들어간다", .order = 1 },
+        .{ .surface_id = 33, .kind = .shell, .shell_name = "z", .where = "b", .order = 2 },
+    };
+    var storage: [3][24]u8 = undefined;
+    var bufs: [3][]u8 = .{ &storage[0], &storage[1], &storage[2] };
+    var ids: [3]u64 = undefined;
+    var labels: [3][]const u8 = undefined;
+
+    const n = writeRows(&cands, &bufs, &ids, &labels);
+    try testing.expectEqual(@as(usize, 2), n); // 가운데는 자리에 안 들어가 빠졌다
+    // **남은 둘의 라벨과 id 가 짝이다** — 빠진 것이 뒤 줄을 밀지 않았다.
+    try testing.expectEqual(@as(u64, 11), ids[0]);
+    try testing.expectEqual(@as(u64, 33), ids[1]);
+    try testing.expect(std.mem.startsWith(u8, labels[0], "Claude"));
+    try testing.expect(std.mem.startsWith(u8, labels[1], "z"));
+}
+
+test "출력 배열이 짧으면 거기서 멈춘다 — 넘겨 쓰지 않는다" {
+    const cands = [_]Candidate{
+        .{ .surface_id = 1, .kind = .claude, .where = "a", .order = 0 },
+        .{ .surface_id = 2, .kind = .claude, .where = "b", .order = 1 },
+    };
+    var storage: [1][64]u8 = undefined;
+    var bufs: [1][]u8 = .{&storage[0]};
+    var ids: [1]u64 = undefined;
+    var labels: [1][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 1), writeRows(&cands, &bufs, &ids, &labels));
+    try testing.expectEqual(@as(u64, 1), ids[0]);
 }

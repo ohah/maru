@@ -4923,6 +4923,15 @@ pub const AppSession = struct {
     // 복사/붙여넣기 메뉴다(rename 대상·view_options와 배타). buildContextMenuItems/acceptContextMenu/closeContextMenu가
     // 이 플래그로 분기한다. 항목 선택 시 pending_clipboard_action을 세워 Swift가 OS 클립보드 동작을 한다(F2-5).
     terminal_context_menu: bool = false,
+    /// **이 창에서 마지막으로 보낸 대상**(§5). 다음 메뉴가 그 줄을 **기본 선택**으로 연다.
+    ///
+    /// **표식(`⏎`)이 아니라 기본 선택인 이유**: 컴포넌트의 표식 축(`checked_mask`)을 켜면
+    /// `markCols()` 가 2 를 돌려줘 **메뉴 전체**(잘라내기·복사까지)가 두 칸 들여쓰기된다. 라벨에
+    /// 글자를 섞는 것은 i18n §6.2 가 금지한다("라벨은 이름만, 켜짐은 상태로"). §5 가 요구하는 것은
+    /// "다음 호출의 기본값" 이고 `⏎` 는 모형의 장식이다.
+    ///
+    /// **id 라 죽어도 안전하다** — 그 Term 이 닫히면 다음 메뉴에서 그냥 못 찾고 첫 줄이 기본이 된다.
+    last_agent_target: ?u64 = null,
     /// 보내기 대상 줄의 라벨 버퍼 — **행마다 자기 칸**이다. 하나를 돌려 쓰면 다음 행이 앞 행을 덮어
     /// 메뉴가 같은 이름을 여러 줄 보여 준다(항목 표는 슬라이스만 빌린다).
     agent_target_label_buf: [max_agent_targets][128]u8 = undefined,
@@ -4941,7 +4950,14 @@ pub const AppSession = struct {
         /// **보낼 대상들**(NS5 — §5). 머리글 한 줄 뒤에 이 줄들이 오고, 그 뒤가 편집 항목이다.
         /// 대상도 열 때 굳힌다 — 고를 때 다시 모으면 그 사이 Term 이 열리거나 닫혀 **다른 줄이
         /// 실행된다**(누른 뒤 목록이 갱신되는 그 함정과 같은 모양이다).
-        targets: [max_agent_targets]maru.session.agent_selection.Candidate = undefined,
+        ///
+        /// **`Candidate` 가 아니라 id 만 든다.** 라벨용 폴더 문자열은 스택 임시에 만들어지므로
+        /// `Candidate` 를 통째로 저장하면 그 슬라이스가 죽은 스택을 가리킨다. accept 가 쓰는 것은
+        /// `surface_id` 하나뿐이라, 그것만 들면 그 위험이 아예 없다.
+        ///
+        /// **표시된 줄과 1:1 이어야 한다.** 라벨을 못 만든 대상은 줄도 안 만들고 여기도 안 들어간다 —
+        /// 한쪽만 건너뛰면 `selected` 가 **다른 터미널**을 가리킨다(적대적 검증이 그 어긋남을 잡았다).
+        targets: [max_agent_targets]u64 = undefined,
         target_len: usize = 0,
         /// 보내기 구획이 차지하는 줄 수(머리글 1 + 대상들). 0 이면 그 구획이 없다.
         send_rows: usize = 0,

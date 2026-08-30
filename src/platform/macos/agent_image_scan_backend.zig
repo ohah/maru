@@ -62,7 +62,10 @@ const State = struct {
     }
 };
 
-const Job = struct { state: *State, path: []u8, generation: u64 };
+/// 워커가 훑을 **파일 묶음**. 재개 세션이면 부모까지다(계약 §3.3).
+///
+/// 경로 사본을 든다 — 워커는 `AppSession` 을 모른다. `Chain` 은 고정 배열이라 그대로 복사한다.
+const Job = struct { state: *State, chain: index.Chain, generation: u64 };
 
 pub const Backend = struct {
     state: *State,
@@ -97,7 +100,7 @@ pub const Backend = struct {
     ///
     /// 이미 도는 job 이 있으면 새로 띄우지 않고 취소만 걸고 `null` 을 돌려준다 — 3.6 초짜리를 둘 돌리면
     /// CPU 만 두 배 먹는다. 호출자는 다음 tick 에 다시 건다.
-    pub fn submit(self: *Backend, path: []const u8) ?u64 {
+    pub fn submit(self: *Backend, chain: index.Chain) ?u64 {
         const state = self.state;
         if (state.shutting_down.load(.acquire)) return null;
 
@@ -120,20 +123,14 @@ pub const Backend = struct {
             t.join();
             state.worker_thread = null;
         }
-        const owned = state.allocator.dupe(u8, path) catch {
-            finish(state, null);
-            return null;
-        };
         const job = state.allocator.create(Job) catch {
-            state.allocator.free(owned);
             finish(state, null);
             return null;
         };
-        job.* = .{ .state = state, .path = owned, .generation = generation };
+        job.* = .{ .state = state, .chain = chain, .generation = generation };
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             _ = state.refs.fetchSub(1, .acq_rel);
-            state.allocator.free(owned);
             state.allocator.destroy(job);
             finish(state, null);
             return null;
@@ -187,7 +184,6 @@ fn finish(state: *State, result: ?Result) void {
 fn worker(job: *Job) void {
     const state = job.state;
     defer {
-        state.allocator.free(job.path);
         state.allocator.destroy(job);
         state.release();
     }
@@ -199,14 +195,23 @@ fn worker(job: *Job) void {
 
     const io = state.io;
     const started_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
-    scan: {
-        const file = std.Io.Dir.cwd().openFile(io, job.path, .{
+    // **파일마다 처음부터 다시 센다.** 오프셋은 파일 절대값이고, 어느 파일인지는 `Hit.file_index` 가
+    // 든다 — 그 둘을 섞으면 디코드가 엉뚱한 바이트를 읽는다.
+    scan: for (0..job.chain.len) |fi| {
+        const path = job.chain.get(fi) orelse continue;
+        // 파일이 바뀌면 스캐너의 이월 버퍼도 새로 시작해야 한다 — 앞 파일의 잘린 꼬리가 다음 파일의
+        // 첫 줄에 이어 붙으면 없던 이미지가 생긴다.
+        scanner.deinit(state.allocator);
+        scanner = .{};
+        const first_hit = result.hits.items.len;
+
+        const file = std.Io.Dir.cwd().openFile(io, path, .{
             .mode = .read_only,
             .follow_symlinks = false,
             .allow_directory = false,
         }) catch {
             result.partial = true;
-            break :scan;
+            continue; // 부모가 지워졌을 수 있다 — 그 파일만 건너뛴다
         };
         defer file.close(io);
 
@@ -220,20 +225,22 @@ fn worker(job: *Job) void {
             }
             const n = file.readPositional(io, &.{&buf}, offset) catch {
                 result.partial = true;
-                break :scan;
+                break;
             };
             if (n == 0) break;
             offset += n;
             scanner.feed(state.allocator, buf[0..n], &result.hits) catch {
                 result.partial = true;
-                break :scan;
+                break;
             };
         }
-        result.scanned_bytes = offset;
+        result.scanned_bytes += offset;
+        // 이 파일에서 나온 것들에 **누가 준 오프셋인지** 표시한다.
+        for (result.hits.items[first_hit..]) |*h| h.file_index = @intCast(fi);
+        if (scanner.partial) result.partial = true;
     }
     const ended_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
     result.scan_ns = @intCast(@max(0, ended_ns - started_ns));
-    if (scanner.partial) result.partial = true;
 
     if (!ok) {
         result.deinit(state.allocator);

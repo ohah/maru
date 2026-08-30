@@ -52,6 +52,7 @@ const Evidence = struct {
     old_sha256: [32]u8,
     current_sha256: [32]u8,
     signer_requirement_sha256: [32]u8,
+    gui_exact_reattach: bool = false,
     duration_ms: u64 = 0,
 };
 
@@ -274,30 +275,30 @@ fn run(
     else
         return error.RuntimePidChanged;
 
-    const list_response = try after.call("runtime.list", null);
-    defer allocator.free(list_response);
-    if (std.mem.indexOf(u8, list_response, &runtime_id) == null)
+    if (!try inventoryContains(allocator, &after, &runtime_id))
         return error.RuntimeIdentityLost;
 
     const report = try waitForCommitted(allocator, &after, attempt_id);
     if (report.status != .committed or report.reason != .none)
         return error.UpgradeNotCommitted;
 
-    const stream_after = try attachRuntime(allocator, &after, &runtime_id);
-    var screen_after = session_host.screen_assembler.ScreenAssembler.initForCodec(
+    var gui_runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+    try gui_runtime.attachExisting(
+        &after,
         allocator,
-        after.screen_codec_version,
+        io,
+        1,
+        runtime_id,
+        .{ .cols = 80, .rows = 12 },
     );
-    defer screen_after.deinit();
-    const restored = try after.readSnapshot(stream_after);
-    defer allocator.free(restored);
-    try screen_after.applySnapshot(restored);
-    if (!screenContains(&screen_after, marker_before)) return error.PreUpgradeScreenLost;
+    defer gui_runtime.deinit();
+    if (!guiSurfaceContains(&gui_runtime, io, marker_before))
+        return error.PreUpgradeScreenLost;
 
     const marker_after = "MARU_SIGNED_UPGRADE_AFTER";
-    try after.sendInput(stream_after, marker_after ++ "\r");
-    try waitForMarker(&after, stream_after, &screen_after, marker_after);
-    try after.sendInput(stream_after, marker_exit ++ "\r");
+    try gui_runtime.sendInput(marker_after ++ "\r");
+    try waitForGuiMarker(&gui_runtime, io, marker_after);
+    try gui_runtime.sendInput(marker_exit ++ "\r");
     try waitForRuntimeGone(allocator, &after, &runtime_id, host_pid_after, runtime_pid_after);
 
     return .{
@@ -313,7 +314,60 @@ fn run(
         .old_sha256 = old_identity.sha256,
         .current_sha256 = target_identity.sha256,
         .signer_requirement_sha256 = old_requirement,
+        .gui_exact_reattach = true,
     };
+}
+
+fn inventoryContains(
+    allocator: std.mem.Allocator,
+    client: *session_host.client.Client,
+    runtime_id: *const [32]u8,
+) !bool {
+    var inventory = try client.runtimeInventory();
+    return switch (inventory) {
+        .complete => |*complete| blk: {
+            defer complete.deinit(allocator);
+            const numeric = std.fmt.parseInt(u128, runtime_id, 16) catch
+                return error.RuntimeIdentityInvalid;
+            break :blk std.mem.indexOfScalar(u128, complete.runtime_ids, numeric) != null;
+        },
+        .unavailable => error.RuntimeInventoryUnavailable,
+    };
+}
+
+fn waitForGuiMarker(
+    runtime: *session_host.remote_runtime.RemoteRuntime,
+    io: std.Io,
+    marker: []const u8,
+) !void {
+    var attempt: usize = 0;
+    while (attempt < marker_attempts) : (attempt += 1) {
+        if (guiSurfaceContains(runtime, io, marker)) return;
+        _ = try runtime.pumpDelta();
+        _ = usleep(poll_delay_us);
+    }
+    return error.MarkerTimeout;
+}
+
+fn guiSurfaceContains(
+    runtime: *session_host.remote_runtime.RemoteRuntime,
+    io: std.Io,
+    marker: []const u8,
+) bool {
+    const surface = runtime.surfacePtr();
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    const cells = surface.renderSnapshot().cells;
+    var matched: usize = 0;
+    for (cells) |cell| {
+        if (cell.codepoint == marker[matched]) {
+            matched += 1;
+            if (matched == marker.len) return true;
+        } else {
+            matched = if (cell.codepoint == marker[0]) 1 else 0;
+        }
+    }
+    return false;
 }
 
 fn connectExact(
@@ -373,16 +427,7 @@ fn waitForRuntimeGone(
     var consecutive_absent: u8 = 0;
     var attempt: usize = 0;
     while (attempt < marker_attempts) : (attempt += 1) {
-        var inventory = try client.runtimeInventory();
-        const absent = switch (inventory) {
-            .complete => |*complete| blk: {
-                defer complete.deinit(allocator);
-                const runtime_numeric = std.fmt.parseInt(u128, runtime_id, 16) catch
-                    return error.RuntimeIdentityInvalid;
-                break :blk std.mem.indexOfScalar(u128, complete.runtime_ids, runtime_numeric) == null;
-            },
-            .unavailable => false,
-        };
+        const absent = !try inventoryContains(allocator, client, runtime_id);
         if (absent and !try childStillPresent(host_pid, runtime_pid)) {
             consecutive_absent += 1;
             if (consecutive_absent == 2) return;
@@ -578,6 +623,7 @@ fn writeArtifact(
         .same_runtime_pid = evidence.runtime_pid_before == evidence.runtime_pid_after,
         .runtime_screen_before_preserved = true,
         .runtime_screen_after_writable = true,
+        .gui_exact_reattach = evidence.gui_exact_reattach,
         .runtime_reaped_after_exit = true,
         .runtime_inventory_absent_observations = 2,
         .status_committed = true,
@@ -648,6 +694,7 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
         .old_sha256 = [_]u8{0x11} ** 32,
         .current_sha256 = [_]u8{0x22} ** 32,
         .signer_requirement_sha256 = [_]u8{0x33} ** 32,
+        .gui_exact_reattach = true,
         .duration_ms = 5,
     });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
@@ -673,6 +720,7 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
         object.get("signer_requirement_sha256").?.string,
     );
     try std.testing.expect(object.get("upgrade_capability_preserved").?.bool);
+    try std.testing.expect(object.get("gui_exact_reattach").?.bool);
     try std.testing.expect(object.get("runtime_reaped_after_exit").?.bool);
     try std.testing.expectEqual(
         @as(i64, 2),

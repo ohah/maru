@@ -100,6 +100,27 @@ pub fn remoteShellCommand(
     );
 }
 
+/// **두 provider 를 한 번의 왕복으로** 깐다.
+///
+/// 나눠 부르면 `ssh` 자식이 둘이 되고, 그 둘이 각각 `MaxSessions` 를 먹는다(기본 10, 다중화 포함) —
+/// RA4 가 «host 당 하나» 로 좁혀 둔 예산을 설치가 도로 먹는 셈이다. 그리고 결과를 두 번 기다려야 해서
+/// 축이 서는 시각이 늦어진다.
+///
+/// `maru` 가 없으면 **표식 하나만 내고 끝낸다** — 두 번 낼 이유가 없다.
+pub fn remoteShellCommandAll(
+    allocator: std.mem.Allocator,
+    action: Action,
+    remote_dir_rel: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
+            "maru agent-hooks {s} --provider=claude --scope=remote --dir=\"$HOME/{s}\"; " ++
+            "maru agent-hooks {s} --provider=codex --scope=remote --dir=\"$HOME/{s}\"",
+        .{ no_maru_marker, @tagName(action), remote_dir_rel, @tagName(action), remote_dir_rel },
+    );
+}
+
 /// 원격에 `maru` 가 없을 때 나가는 표식. **`exit 0` 으로 끝낸다** — 셸이 «명령 없음» 으로 주는 127 은
 /// 「연결이 끊겼다」와 구분되지 않기 때문이다(스트리머가 종료 코드를 못 믿는 것과 같은 이유).
 pub const no_maru_marker = "!maru-not-installed";
@@ -239,4 +260,23 @@ test "설치 시한은 유한하고, 락 대기보다 넉넉하다" {
     // 락 대기는 설치 안에서 일어난다 — 시한이 그보다 짧으면 정상 경합에서도 못 끝낸다.
     try testing.expect(install_deadline_ms > lock_wait_ms);
     try testing.expect(install_deadline_ms <= 60_000); // 유한하다
+}
+
+test "remoteShellCommandAll: 두 provider 를 한 번에 깔고, maru 가 없으면 표식은 한 번만 낸다" {
+    const a = testing.allocator;
+    const cmd = try remoteShellCommandAll(a, .install, ".cache/maru/remote-agent-events");
+    defer a.free(cmd);
+
+    try testing.expect(std.mem.indexOf(u8, cmd, "--provider=claude") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "--provider=codex") != null);
+    // 왕복은 하나다 — 자식이 둘이면 `MaxSessions` 예산을 설치가 도로 먹는다.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, cmd, no_maru_marker));
+    // 홈은 원격 셸이 편다(큰따옴표). 작은따옴표면 리터럴 디렉터리가 생긴다.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, cmd, "--dir=\"$HOME/"));
+    try testing.expect(std.mem.indexOf(u8, cmd, "--dir='") == null);
+
+    const rm = try remoteShellCommandAll(a, .uninstall, "x/y");
+    defer a.free(rm);
+    try testing.expect(std.mem.indexOf(u8, rm, "uninstall --provider=claude") != null);
+    try testing.expect(std.mem.indexOf(u8, rm, "uninstall --provider=codex") != null);
 }

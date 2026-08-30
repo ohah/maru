@@ -907,3 +907,96 @@ test "모양을 못 읽으면 null 이다 — 거짓 경고를 만들지 않는�
     try testing.expect(hasTrustEntry(only_comment, key));
     try testing.expect(storedHash(only_comment, key) == null);
 }
+
+/// 신뢰 항목 하나를 만들 자리. `agent_hook_install.Placement` 에 **세트가 정한 matcher** 를 붙인 것이다
+/// (파일에 적힌 값이 아니라 — 우리가 넣은 항목이므로 세트의 값이 맞다).
+///
+/// `Placement` 를 그대로 안 받는 이유: 이 모듈은 `agent_hook_install` 을 들여오지 않는다(그쪽이 이쪽을
+/// 쓰는 방향이다). 필드 넷을 호출자가 옮겨 담는 편이 그 방향을 지킨다.
+pub const Slot = struct {
+    json_name: []const u8,
+    group_index: usize,
+    handler_index: usize,
+    matcher: ?[]const u8,
+};
+
+/// 이 판정이 세운 수. **개수는 «지금» 의 값이다** — «있었던 적이 있다» 가 아니다(latch 금지).
+pub const Stats = struct {
+    /// 새로 붙인 항목.
+    added: usize = 0,
+    /// 값 한 줄만 갈아 끼운 항목.
+    refreshed: u32 = 0,
+    /// 모양을 못 읽어 **손대지 않은** 항목. 사용자에게 「codex 에서 승인하라」고 말할 근거다.
+    stale: u32 = 0,
+    /// 우리 값을 써 봤는데 누군가(거의 언제나 **승인을 받은 codex**)가 다른 값으로 되돌린 항목.
+    /// **«안 돈다» 가 아니다** — 그때 파일의 값이 codex 의 정답이므로 훅은 정상으로 돌고 있다.
+    diverged: u32 = 0,
+};
+
+/// `config.toml` 본문에 우리 신뢰 항목들을 반영한다. **순수하다** — 파일을 안 읽고 안 쓴다.
+///
+/// **로컬 GUI 설치기와 원격 CLI 가 이 함수를 함께 쓴다.** 이 판정에는 두 겹의 미묘함이 있어(값이 낡았을
+/// 때의 갱신, 그리고 «이미 써 본 값» 을 다시 안 쓰는 루프 방지) 두 곳에 따로 적으면 반드시 갈린다 —
+/// 갈린 쪽은 **매 실행 승인 프롬프트가 뜨는 무한 루프**가 되고, 그 증상은 원격에서 더 늦게 발견된다.
+///
+/// `out` 은 **호출자가 원본 본문으로 채워 둔** 상태로 들어온다(그 위에서 고친다).
+pub fn applyEntries(
+    out: *std.ArrayListUnmanaged(u8),
+    a: std.mem.Allocator,
+    hooks_real: []const u8,
+    slots: []const Slot,
+    cmd: []const u8,
+    timeout_seconds: u32,
+) !Stats {
+    var stats: Stats = .{};
+    for (slots) |slot| {
+        const entry = forEvent(slot.json_name) orelse continue;
+
+        var key: std.ArrayListUnmanaged(u8) = .empty;
+        defer key.deinit(a);
+        try appendKey(&key, a, hooks_real, entry, slot.group_index, slot.handler_index);
+
+        var hash: std.ArrayListUnmanaged(u8) = .empty;
+        defer hash.deinit(a);
+        try appendHash(&hash, a, entry, cmd, timeout_seconds, slot.matcher);
+
+        if (hasTrustEntry(out.items, key.items)) {
+            // 이미 있다. 그런데 **값이 다르면 그 훅은 안 돈다**: 키는 항목의 자리로 만들어져 커맨드가
+            // 바뀌어도 그대로이므로, 커맨드를 고친 뒤에는 키가 있는 채로 값만 낡는다. codex 는 그것을
+            // `modified` 로 보고 실행하지 않는다(계약 §2.1).
+            //
+            // 못 읽으면(`null`) **아무것도 하지 않는다** — 모르는 것을 어긋남으로 세면 거짓 경고가 되고,
+            // 모르는 것을 덮으면 남의 값을 지운다.
+            const stored = storedHash(out.items, key.items) orelse continue;
+            if (std.mem.eql(u8, stored, hash.items)) continue; // 멀쩡하다
+
+            // **이 값을 이미 써 봤으면 다시 안 쓴다.** 그때는 누군가(= 사용자 승인을 받은 codex)가 우리
+            // 값을 되돌린 것이고, 그 모양이 곧 «우리 공식이 틀렸다» 다. 다시 쓰면 매 실행 승인 프롬프트가
+            // 뜨는 무한 루프가 된다 — §2.1 이 값을 매겨 둔 바로 그 위험이다. 값 하나당 시도는 한 번뿐이다.
+            if (triedHash(out.items, key.items)) |tried| {
+                if (std.mem.eql(u8, tried, hash.items)) {
+                    stats.diverged += 1;
+                    continue;
+                }
+            }
+
+            // 갱신한다 — **덧붙이지 않고 값 한 줄만** 바꾼다(같은 테이블을 두 번 적으면 codex 가
+            // `config.toml` 전체를 못 읽는다).
+            var next: std.ArrayListUnmanaged(u8) = .empty;
+            defer next.deinit(a);
+            const done = rewriteTrustEntry(&next, a, out.items, key.items, hash.items) catch false;
+            if (!done) {
+                stats.stale += 1; // 모양을 못 읽었다 — 손대지 않고 알린다
+                continue;
+            }
+            out.clearRetainingCapacity();
+            try out.appendSlice(a, next.items);
+            stats.refreshed += 1;
+            continue;
+        }
+
+        try appendTrustEntry(out, a, out.items, key.items, hash.items);
+        stats.added += 1;
+    }
+    return stats;
+}

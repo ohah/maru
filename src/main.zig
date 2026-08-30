@@ -11104,6 +11104,20 @@ fn runAgentHooks(
             std.process.exit(1);
         };
 
+        // **codex 는 신뢰 항목까지 써야 훅이 돈다**(계약 §11.5). 안 쓰면 codex 가 그 훅을 «처음 보는
+        // 것» 으로 보고 TUI 에서 묻는데, **원격 세션에는 그 TUI 를 볼 사람이 없다** — 그래서 훅은
+        // 영영 안 돌고 증상은 「이벤트가 0」 하나뿐이다.
+        //
+        // 값은 로컬 GUI 설치기와 **같은 순수 판정**(`agent_hook_trust.applyEntries`)이 만든다 — 그
+        // 결정에는 루프 방지와 드리프트 감지가 들어 있어 두 곳에 적으면 반드시 갈린다.
+        if (opts.provider == .codex) switch (opts.action) {
+            .install => applyRemoteCodexTrust(io, allocator, config_dir, hooks_path, cmd.items) catch {},
+            // **잔재를 거둔다.** 훅을 빼고 신뢰 항목을 남기면 `config.toml` 이 없는 파일의 없는 자리를
+            // 가리키는 표를 계속 들고 있게 된다 — 나중에 다시 깔면 그 낡은 값이 «키는 있는데 값이 다른»
+            // 상태를 만들어 그 훅이 안 돈다(로컬 설치기가 같은 이유로 같은 일을 한다).
+            .uninstall => removeRemoteCodexTrust(io, allocator, config_dir) catch {},
+        };
+
         // **stdout 은 호출자가 읽는 결과다.** 한 줄로 못 박아 두면 로컬이 그것으로 성공을 판정할 수 있다.
         try stdout.print("{{\"maru-agent-hooks\":1,\"provider\":\"{s}\",\"action\":\"{s}\",\"changed\":{s}}}\n", .{
             opts.provider.tag(),
@@ -11363,6 +11377,101 @@ fn runShellCapture(allocator: std.mem.Allocator, script: []const u8) ![]u8 {
         return buf.toOwnedSlice(allocator);
     }
     return error.UnsupportedPlatform;
+}
+
+/// codex 신뢰 항목을 이 기계의 `config.toml` 에 반영한다([계약](../docs/agent-hooks.md) §11.5).
+///
+/// **판정은 순수 층이 한다** — 로컬 GUI 설치기와 같은 함수다. 여기서는 읽고·쓰는 일만 한다.
+///
+/// ⚠️ **compare-and-swap 으로 쓴다.** 훅 파일 락이 대부분을 직렬화하지만 훅 파일이 아직 없을 때는
+/// 잠글 것이 없어 두 프로세스가 동시에 여기 올 수 있다. 그대로 두면 같은 테이블이 두 번 적히고,
+/// 그 순간 codex 는 `config.toml` **전체**를 못 읽는다 — 훅이 아니라 사용자의 설정이 통째로 죽는다.
+fn applyRemoteCodexTrust(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    config_dir: []const u8,
+    hooks_path: [:0]const u8,
+    cmd: []const u8,
+) !void {
+    if (builtin.os.tag != .windows) {
+        const install = maru.session.agent_hook_install;
+        const trust = maru.session.agent_hook_trust;
+        const hook_command = maru.session.agent_hook_command;
+
+        // 방금 쓴 파일을 **다시 읽어** 자리를 잡는다 — 메모리의 트리를 그대로 쓰면 다른 프로세스가
+        // 끼어든 경우에도 «썼다» 고 믿게 된다.
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, hooks_path, allocator, .limited(8 * 1024 * 1024));
+        defer allocator.free(text);
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const value = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch return;
+        const root_obj = switch (value) {
+            .object => |o| o,
+            else => return,
+        };
+        var slots: [install.max_events]install.Placement = undefined;
+        const found = install.ourPlacements(root_obj.get("hooks"), cmd, &slots);
+        if (found == 0 or found > slots.len) return; // 넘치면 어느 것이 빠졌는지 모른다 — 손대지 않는다
+
+        // **키는 실체 경로로 만든다** — 심링크 경로로 적으면 codex 가 정규화한 키와 어긋나 그 훅이
+        // 영영 미신뢰로 남는다(계약 §2.1 실측).
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const hooks_real = if (std.Io.Dir.realPathFileAbsolute(io, hooks_path, &real_buf)) |len|
+            real_buf[0..len]
+        else |_|
+            @as([]const u8, hooks_path);
+
+        var slot_buf: [install.max_events]trust.Slot = undefined;
+        for (slots[0..found], 0..) |placement, i| {
+            var matcher: ?[]const u8 = null;
+            // **원격 세트로 찾는다** — 로컬 세트에는 원격이 빼는 이벤트가 들어 있다.
+            for (hook_command.eventsFor(.codex, .remote)) |e| {
+                if (std.mem.eql(u8, e.name, placement.json_name)) matcher = e.matcher;
+            }
+            slot_buf[i] = .{
+                .json_name = placement.json_name,
+                .group_index = placement.group_index,
+                .handler_index = placement.handler_index,
+                .matcher = matcher,
+            };
+        }
+
+        const config_path = try std.fmt.allocPrint(arena, "{s}/config.toml", .{config_dir});
+        const before: []const u8 = std.Io.Dir.cwd().readFileAlloc(io, config_path, arena, .limited(8 * 1024 * 1024)) catch "";
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        try out.appendSlice(arena, before);
+        const stats = try trust.applyEntries(&out, arena, hooks_real, slot_buf[0..found], cmd, hook_command.timeout_seconds);
+        if (stats.added == 0 and stats.refreshed == 0) return; // 쓸 것이 없으면 mtime 을 안 흔든다
+
+        const now: []const u8 = std.Io.Dir.cwd().readFileAlloc(io, config_path, arena, .limited(8 * 1024 * 1024)) catch "";
+        if (!std.mem.eql(u8, before, now)) return; // 그 사이 누가 고쳤다 — 다음 기회에 맞춘다
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = out.items, .flags = .{ .truncate = true } });
+    }
+}
+
+/// codex 신뢰 잔재를 거둔다(제거 경로). 판정은 순수 층(`removeTrustEntries`)이 한다.
+fn removeRemoteCodexTrust(io: std.Io, allocator: std.mem.Allocator, config_dir: []const u8) !void {
+    if (builtin.os.tag != .windows) {
+        const trust = maru.session.agent_hook_trust;
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const config_path = try std.fmt.allocPrint(arena, "{s}/config.toml", .{config_dir});
+        const before = std.Io.Dir.cwd().readFileAlloc(io, config_path, arena, .limited(8 * 1024 * 1024)) catch return;
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        const changed = trust.removeTrustEntries(&out, arena, before) catch return;
+        if (!changed) return; // 우리 것이 없다 — 사용자 파일의 mtime 을 안 흔든다
+
+        // 설치 경로와 같은 compare-and-swap.
+        const now = std.Io.Dir.cwd().readFileAlloc(io, config_path, arena, .limited(8 * 1024 * 1024)) catch return;
+        if (!std.mem.eql(u8, before, now)) return;
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = out.items, .flags = .{ .truncate = true } });
+    }
 }
 
 fn setDirMode0700(path: []const u8) void {

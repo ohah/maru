@@ -23,7 +23,7 @@ const decode_backend = @import("../agent_image_decode_backend.zig");
 const image_scale = maru.session.image_scale;
 const image_grid = maru.session.image_grid;
 const image_view = maru.session.image_view;
-const image_context = maru.session.agent_image_context;
+const context = maru.session.agent_image_context;
 const metal_frame = maru.renderer.metal_frame;
 const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 
@@ -34,6 +34,12 @@ pub const State = struct {
     /// 뒤에 붙는다(§3.3). 활성 Term 의 것과 첫 파일이 다르면 무효다.
     chain: index.Chain = .{},
     hits: std.ArrayList(index.Hit) = .empty,
+    /// `hits` 와 **같은 순서·같은 길이**. 스캔 워커가 함께 만든다(§2.2) — 필터가 전부의 라벨을
+    /// 필요로 하는데 main actor 에서 읽으면 실측 40.2 ms 다.
+    ///
+    /// **`hits` 를 건드리는 자리는 이것도 같이 건든다.** 어긋나면 라벨이 남의 이미지에 붙는데,
+    /// 그 증상은 「설명이 틀렸다」로 보이지 「인덱스가 어긋났다」로 보이지 않는다.
+    labels: std.ArrayList(context.Label) = .empty,
     /// 상한(줄 길이·이미지 수)에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
     partial: bool = false,
     /// 마지막 스캔이 읽은 바이트와 걸린 시간. 계약 §4.1.1 의 근거가 이 자리에서 나왔다.
@@ -73,6 +79,7 @@ pub const State = struct {
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.dropOpen(allocator);
         self.hits.deinit(allocator);
+        self.labels.deinit(allocator);
         self.dropTiles(allocator);
         self.tiles.deinit(allocator);
         self.* = .{};
@@ -104,6 +111,7 @@ pub const State = struct {
         self.dropOpen(allocator);
         self.dropTiles(allocator);
         self.hits.clearAndFree(allocator);
+        self.labels.clearAndFree(allocator);
         self.chain.clear();
         self.partial = false;
         self.scanned_bytes = 0;
@@ -169,7 +177,7 @@ pub const Tile = struct {
     uploaded: bool = false,
     /// 「이게 무엇이었는지」 한 줄(§2.2). **타일마다 한 번만 읽는다** — 매 프레임 파일을 열면
     /// 도크가 초당 60번 IO 를 한다. 빈 라벨도 「읽어 봤고 없었다」로 확정된 값이다.
-    label: image_context.Label = .{},
+    label: context.Label = .{},
 };
 
 /// 크게 보고 있는 한 장. 썸네일(`Tile`)과 **다른 픽셀**이다 — 이쪽은 텍스처 상한 안에서 원본 배율로
@@ -360,11 +368,21 @@ pub fn poll(self: *AppSession) void {
     }
     self.image_gallery.hits.deinit(self.allocator);
     self.image_gallery.hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
+    self.image_gallery.labels.deinit(self.allocator);
+    self.image_gallery.labels = result.labels;
+    // 길이가 어긋나면 라벨을 통째로 버린다 — 남의 이미지에 붙은 설명보다 없는 편이 낫다.
+    if (self.image_gallery.labels.items.len != self.image_gallery.hits.items.len) {
+        self.image_gallery.labels.clearRetainingCapacity();
+    }
     // **최신이 먼저다.** 스캐너는 파일 순서(= 오래된 것부터)로 담는데, 이 기능의 물음은
     // 「**아까** 그 스크린샷 어디 갔지」다. 실제 세션으로 재 보니 151 장 중 4 장만 보이는데
     // 그 4 장이 세션 맨 처음 것이었다 — 목적과 정확히 반대였다(합성 픽스처는 4 장이 다 보여
     // 이 결함을 원리적으로 못 본다).
     std.mem.reverse(index.Hit, self.image_gallery.hits.items);
+    // **라벨도 같이 뒤집는다.** 안 뒤집으면 첫 칸에 마지막 이미지의 설명이 붙는다.
+    if (self.image_gallery.labels.items.len == self.image_gallery.hits.items.len) {
+        std.mem.reverse(context.Label, self.image_gallery.labels.items);
+    }
     // **인덱스가 갈리면 그 위에 쌓인 것도 버린다.** 지금은 `refresh` 가 `clear` 를 먼저 하므로
     // 여기 도달할 때 둘 다 비어 있지만, 그 순서에 기대면 나중에 점진 publish 를 붙이는 순간
     // 타일과 크게 보기가 **옛 인덱스**를 가리킨 채 남는다 — 「엉뚱한 이미지가 뜬다」로 보이지
@@ -471,7 +489,7 @@ fn harvestDecoded(self: *AppSession) void {
         .height = r.height,
         .pixels = r.pixels,
         .generation = 1,
-        .label = readLabel(self, r.hit_index),
+        .label = labelFor(self, r.hit_index),
     }) catch return;
     r.pixels = &.{}; // 소유가 타일로 넘어갔다 — defer 가 두 번 풀지 않게 비운다
     self.image_gallery.evictFarthest(self.allocator, r.hit_index);
@@ -762,65 +780,11 @@ fn pathFor(self: *const AppSession, hit: index.Hit) ?[]const u8 {
     return self.image_gallery.chain.get(hit.file_index);
 }
 
-/// 이 이미지의 한 줄 설명을 파일에서 읽는다(§2.2). **두 조각만** 읽는다 —
-/// ⑴ 이미지 줄의 시작부터 base64 앞까지, ⑵ 그 **직전 줄**.
-///
-/// 직전 줄을 찾으려고 스캐너를 고치지 않는다. `line_offset` 앞 64 KiB 를 한 번 읽어 마지막 개행을
-/// 찾으면 그 뒤가 직전 줄이다 — 실측 직전 줄이 최대 2.3 KB 라 이 창이면 언제나 통째로 들어오고,
-/// NVMe 에서 64 KiB 는 0.015 ms 다(인덱스에 필드를 더해 아끼는 값보다 코드가 싸다).
-///
-/// 실패는 **빈 라벨**이다 — 없는 설명을 지어내지 않는다.
-fn readLabel(self: *AppSession, hit_index: usize) image_context.Label {
-    if (hit_index >= self.image_gallery.hits.items.len) return .{};
-    if (self.image_gallery.chain.isEmpty()) return .{};
-    const hit = self.image_gallery.hits.items[hit_index];
-
-    const io = self.io;
-    const path = pathFor(self, hit) orelse return .{};
-    const file = std.Io.Dir.cwd().openFile(io, path, .{
-        .mode = .read_only,
-        .follow_symlinks = false,
-        .allow_directory = false,
-    }) catch return .{};
-    defer file.close(io);
-
-    // ⑴ 이미지 줄의 앞부분. base64 는 절대 안 읽는다(수 MB 다).
-    const prefix_len: usize = @intCast(@min(
-        hit.data_offset -| hit.line_offset,
-        @as(u64, image_context.max_prefix_bytes),
-    ));
-    // ⑵ 직전 줄을 품는 창. 파일 앞머리면 그만큼만.
-    const back: u64 = @min(hit.line_offset, @as(u64, image_context.max_prev_line_bytes));
-
-    const buf = self.allocator.alloc(u8, prefix_len + @as(usize, @intCast(back))) catch return .{};
-    defer self.allocator.free(buf);
-
-    var prev: []const u8 = &.{};
-    if (back > 0) {
-        const window = buf[0..@intCast(back)];
-        if (readAllAt(io, file, window, hit.line_offset - back)) {
-            // **창을 통째로 넘긴다.** 예전에는 마지막 한 줄만 잘라 줬는데, Codex 의 `view_image` 는
-            // 호출이 **2줄 뒤**라(실측 12/16) 그 규칙으로는 라벨이 비었다. 파서가 줄로 쪼개
-            // 뒤에서부터 보고, **id 가 든 줄 안에서만** 경로를 뽑는다.
-            prev = if (window.len > 0 and window[window.len - 1] == '\n') window[0 .. window.len - 1] else window;
-        }
-    }
-    var prefix: []const u8 = &.{};
-    if (prefix_len > 0) {
-        const slot = buf[@intCast(back)..];
-        if (readAllAt(io, file, slot, hit.line_offset)) prefix = slot;
-    }
-    return image_context.label(prefix, prev);
-}
-
-fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, offset: u64) bool {
-    var got: usize = 0;
-    while (got < dest.len) {
-        const n = file.readPositional(io, &.{dest[got..]}, offset + got) catch return false;
-        if (n == 0) return false;
-        got += n;
-    }
-    return true;
+/// 그 칸의 라벨. **스캔 워커가 이미 만들어 뒀다** — 예전에는 타일이 생길 때 파일을 열어 읽었는데,
+/// 그러면 보이는 칸만 라벨이 있어 필터가 성립하지 않는다(§2.2).
+fn labelFor(self: *const AppSession, hit_index: usize) context.Label {
+    const labels = self.image_gallery.labels.items;
+    return if (hit_index < labels.len) labels[hit_index] else .{};
 }
 
 /// 격자가 쓸 영역(backing px). 도크 본문에서 **문구 한 줄을 늘 뺀다.**

@@ -321,6 +321,27 @@ handoff store API는 absolute deadline을 필수로 받고 decode 전후, 두 co
 못하므로 제품 coordinator는 quiesce 전에 I/O budget을 보수적으로 admission해야 한다. 이 예산을 넘는 큰 runtime
 state는 8 GiB codec hard cap 안이더라도 live upgrade 대상이 아니며 side-by-side drain을 쓴다.
 
+U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전** 다음 증거를 한 번에 만든다.
+
+1. 현재 live graph를 core lock 아래 read-only로 encode해 attempt record와 notification section까지 포함한 exact
+   preview byte 수를 구한다. preview는 PTY fd를 adopt하거나 reader/admission 상태를 바꾸지 않는다.
+2. preview가 64 MiB operational cap 안인지 확인하고, owner-only attempt directory에 그 길이의 primary/backup 두
+   파일을 `O_EXCL|O_NOFOLLOW`, `0600`, `F_PREALLOCATE`로 전량 예약한다. `statfs`의 가용량 추정만으로 통과시키지
+   않는다. 예약 실패는 `state_too_large`로 old graph를 그대로 serve한다.
+3. 같은 owner directory에서 bounded, incompressible sample을 write+sync+read-back한 durable probe를 quiesce 전에
+   수행한다. elapsed가 probe 자체 deadline을 넘거나, 측정된 처리율에 보수적 safety factor를 적용해도 preview 두
+   copy가 남은 5,000ms budget 안에 끝나지 않으면 live migration을 거부한다. 최근 같은 filesystem에서 성공한
+   handoff 처리율은 더 느린 값일 때만 추가 상한으로 쓸 수 있으며, 임의의 낙관적 기본 처리율은 두지 않는다.
+   probe pathname/fd도 attempt reservation owner가 exact-once 정리한다.
+4. quiesce 뒤 authoritative encode 결과는 preview보다 클 수 있다. 이미 예약한 길이를 넘거나 preview가 묶은
+   host/runtime membership이 달라졌으면 예약을 폐기하고 reader/admission을 재개한다. reader가 계속 처리하는 동안
+   화면·notification의 logical generation이 전진하는 것은 정상이며, 최종 bytes가 예약 안에 있으면 commit할 수
+   있다. 최종 bytes 자체의 codec·checksum·read-back 검증은 생략하지 않는다.
+
+예약 owner는 attempt 하나이며 성공 commit, 모든 retryable rollback, deadline, process teardown에서 primary/backup
+pathname과 fd를 exact-once 정리한다. 이 pre-admission은 기존 `handoff_store.commit`의 길이·identity·deadline 검증을
+대체하지 않고 그 앞에 추가된다.
+
 이 순서에서 upgrade snapshot 시점은 “모든 admitted outbound가 PTY에 적용됐고, 마지막 read chunk가 core에 적용된 직후”다.
 새 binary는 같은 fd에서 다음 unread byte부터 시작한다. 화면 generation은 보존하고 restore 뒤 첫 client에는 full snapshot을
 보내므로 client delta base는 이전 connection에서 이어 쓰지 않는다.

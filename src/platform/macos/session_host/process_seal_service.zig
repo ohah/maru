@@ -159,6 +159,11 @@ pub const IntegrityReason = enum(u8) {
     active_close_operation = 11,
     incident_authority = 12,
     unexpected_connection_poison = 13,
+    // connection poison 전달의 두 갈래(호출자는 이 파일을 모르는 상위 레이어다). 둘 다 예전에는 `proof_loss` 로 찍혀 로그만으로
+    // 갈라지지 않았고, 2026-08-30 사고에서 스택을 일일이 떠서야 어느 쪽인지 알았다. `proof_loss` 는
+    // 339 곳이 쓰므로 사유 하나로는 좁혀지지 않는다.
+    poison_kind_mismatch = 14,
+    poison_undeliverable = 15,
 };
 
 // Diagnostic evidence only: it grants no cleanup or recovery authority, and the first reason wins.

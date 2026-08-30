@@ -4358,3 +4358,44 @@ test "소스 컨트롤 키보드 스크롤: 한 행을 남기고 · 끝으로 �
     _ = try session.handleKeyEvent(.{ .key = .home, .modifiers = .{} });
     try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
 }
+
+test "소스 컨트롤 도크: 클릭이 키보드 소유권을 준다 — 그래야 Page/Home/End 가 먹는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // **이 테스트가 없어서 기능이 통째로 죽어 있었다(2026-08-30).** 키 핸들러도 라우팅도 맞았는데
+    // 소유권을 주는 한 줄이 소스 컨트롤 분기의 `return` **뒤**에 있어 영영 실행되지 않았다. 상태를
+    // 손으로 세우는 판정자는 그 자리를 못 본다 — 포인터를 실제로 태워야 보인다.
+    session.backing_width_px = 1400;
+    session.backing_height_px = 900;
+    session.dock_initialized = true;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.view = .source_control;
+    try std.testing.expect(dock_ops.dockVisible(session));
+    try std.testing.expect(!session.dockKeyFocus()); // 누르기 전에는 도크가 키를 안 든다
+
+    const dock_rect = dock_ops.dockGeometry(session).dock;
+    try std.testing.expect(dock_rect.w > 0 and dock_rect.h > 0); // 기하가 0이면 아래 클릭이 아무 데도 안 닿는다
+    const x: f64 = @as(f64, @floatFromInt(dock_rect.x)) + @as(f64, @floatFromInt(dock_rect.w)) / 2;
+    const y: f64 = @as(f64, @floatFromInt(dock_rect.y)) + @as(f64, @floatFromInt(dock_rect.h)) / 2;
+    session.mouse(1, x, y, 0, 0); // primary down — 제품과 같은 진입점
+
+    try std.testing.expect(session.dockKeyFocus()); // ← 이 한 줄이 이번 회귀를 잡는다
+
+    // 소유권이 섰으니 그 키가 실제로 목록을 옮긴다(상한은 마지막 투영이 남긴 자리에서 온다).
+    session.scm_scroll_extent = .{ .content_h_px = 1400, .viewport_h_px = 400, .max_offset_px = 1000 };
+    _ = try session.handleKeyEvent(.{ .key = .end, .modifiers = .{} });
+    try std.testing.expectEqual(@as(u32, 1000), session.scm_scroll.offset_y_px);
+}

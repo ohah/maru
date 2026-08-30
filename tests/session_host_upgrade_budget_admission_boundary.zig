@@ -42,6 +42,14 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         256 * 1024,
     );
     defer allocator.free(store);
+    const outer_loop = try read(
+        allocator,
+        "src/platform/macos/session_host/upgrade_loop.zig",
+        128 * 1024,
+    );
+    defer allocator.free(outer_loop);
+    const build = try read(allocator, "build.zig", 1024 * 1024);
+    defer allocator.free(build);
     const barrel = try read(
         allocator,
         "src/platform/macos/session_host.zig",
@@ -57,6 +65,12 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
     const process_end = std.mem.indexOf(u8, process_tail, "\n/// The readiness owner") orelse
         return error.MissingProductCoordinatorEnd;
     const process = process_tail[0..process_end];
+    const context_start = std.mem.indexOf(u8, coordinator, "pub const Context = struct {") orelse
+        return error.MissingProductContext;
+    const context_tail = coordinator[context_start..];
+    const context_end = std.mem.indexOf(u8, context_tail, "\n};") orelse
+        return error.MissingProductContextEnd;
+    const public_context = context_tail[0..context_end];
     const prepare = std.mem.indexOf(u8, process, "budget_admission.prepare(") orelse
         return error.MissingBudgetAdmission;
     const freeze = std.mem.indexOf(u8, process, "upgrade_attempt.freeze") orelse
@@ -77,6 +91,33 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
     try std.testing.expect(std.mem.indexOf(u8, store, "pub fn commitReserved(") != null);
     try std.testing.expect(std.mem.indexOf(u8, store, "pub fn cancel(") != null);
     try std.testing.expect(std.mem.indexOf(u8, coordinator, "budget_reservation.cancel() catch return .invariant_violation") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        coordinator,
+        "product coordinator cleanup identity failure overrides resumed report with invariant violation",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, coordinator, "fn processArmedWithDeadlineHook(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, public_context, "after_budget_prepare") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        outer_loop,
+        "outer loop fail-stops every nonretryable coordinator terminal",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "test-session-host-upgrade-coordinator-cleanup-fail-stop",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "run_upgrade_coordinator_cleanup_failure_tests.addArg(\"--maru-expect-tests=1\")",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "run_upgrade_loop_cleanup_fail_stop_tests.addArg(\"--maru-expect-tests=1\")",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, coordinator, "handoff_store.commit(") == null);
     try std.testing.expect(std.mem.indexOf(u8, barrel, "upgrade_budget_admission") == null);
     try std.testing.expect(std.mem.indexOf(u8, contract, "accepted reply를 flush하고 reader를 멈추기 **전**") != null);

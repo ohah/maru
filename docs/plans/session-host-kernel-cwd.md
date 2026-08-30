@@ -47,12 +47,20 @@
   aggregate 주소로 봉인된 `screen_staging` receipt를 인정한다. staged payload range는 현재 소유자인 ledger가 한 번만
   내보내며, intent exporter가 중복 소유하지 않는다. 기존 P5c3d built-product E2E가 이 mixed delta와 이후 입력·stream을 검증한다.
 
-### K3 - 제품 parity gate
+### K3 - 제품 parity gate (완료)
 
 - 실제 독립 daemon과 shell-integration 없는 `/bin/bash` 또는 `/bin/sh` runtime에서 `cd` 뒤 cwd/cwd_host가 current client에 도달하는지 검증한다.
 - detach 중 `cd` 후 reattach initial metadata가 최신 pair인지, sibling runtime과 cache가 섞이지 않는지 검증한다.
 - OSC 7 우선, known SSH destination 억제, remote OSC authority, runtime terminate/handle reuse, frozen N-1 field absence를 교차한다.
 - AppSession의 sidebar/display/control-plane 소비자가 기존 `termCwd`/`termCwdForDisplay` 축을 그대로 쓰며 direct metadata 우회가 0인지 boundary로 고정한다.
 
-K1~K3와 전체 `zig build test-session-host`, `mise run check`가 모두 green이기 전에는
-host-backed kernel cwd parity 완료를 주장하지 않는다.
+K3 제품 gate는 기존 OSC 기반 P3-e4d-1 fixture의 성공을 kernel fallback 증거로 대신하지 않는다. 별도 실제 daemon에서
+`shell_integration = null`인 `/bin/sh` 두 runtime을 만들고, shell builtin `cd` 뒤 500ms host cadence를 건넌 observation을
+검증한다. A를 client-side detach한 뒤에도 child가 cwd를 바꾸고 host가 이를 샘플링하도록 하며, 다음
+`RemoteRuntime.attachExistingWithAdapter`가 반환하는 initial full-state를 추가 `pumpDelta` 없이 단언한다. 같은 동안 B의
+paired cwd/authority가 유지되어야 한다. 이후 실제 PTY echo로 OSC 7 local/remote authority와 OSC 5379 known SSH 억제를
+교차한다. K2의 terminate/handle-reuse focused test, K1의 frozen N-1 field-absence gate, 기존 `cwd_axis` consumer boundary를
+K3 step의 선행 증거로 묶되, 어느 것도 위 실제 daemon gate를 대체하지 않는다.
+
+K1~K3와 전체 `zig build test-session-host`, `mise run check`가 모두 green인 병합 후보에서만
+host-backed kernel cwd parity 완료를 주장한다.

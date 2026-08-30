@@ -2199,6 +2199,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   exact metadata footprint 및 source boundary를 검증하고, 기존 P5c3d built-product E2E가 mixed delta 뒤
   controller/observer 입력·reattach·`--stream` 지속을 검증한다. 실제 독립 daemon·detach/reattach·sibling·frozen N-1
   소비자 parity는 K3 완료 증거가 필요하다.
+- **K3 actual daemon kernel cwd parity: 구현.** 별도 실제 daemon, generation-backed `HostAdapter`,
+  `shell_integration = null`인 `/bin/sh` runtime 두 개를 쓰는 Debug·ReleaseFast 제품 gate가 current client의 paired
+  kernel cwd/hostname, A detach 중 cwd 변경 뒤 pump 없는 initial reattach, B sibling observation 불변, 실제 PTY
+  echo로 들어온 local/remote OSC 7 우선과 known SSH destination 억제를 한 흐름에서 검증한다. K2
+  lifecycle/handle-reuse와 K1 frozen N-1 absence, `cwd_axis`의 `termCwd`/`termCwdForDisplay` 단일 소비자 축도 같은
+  K3 completion step의 선행 증거이며, 어느 것도 실제 daemon gate를 대신하지 않는다.
 - **P4 input parity micro-gate: 구현.** `test-session-host-input-parity`가 Debug·ReleaseFast에서 host-backed
   AppSession의 DECSET 1003 exact-mode/중복·modifier·chrome 억제, 실제 forkpty host reader의 xterm SGR no-button motion
   byte, `selection_scroll_and_extend` 두 번 뒤 authoritative copy와 source boundary를 exact-count한다. AppSession 행은

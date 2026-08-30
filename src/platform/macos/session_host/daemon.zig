@@ -32,6 +32,7 @@ const protocol = @import("protocol.zig");
 const host_authority = @import("host_authority.zig");
 const staged_image = @import("staged_image.zig");
 const rollback_image = @import("rollback_image.zig");
+const upgrade_stale_sweep = @import("upgrade_stale_sweep.zig");
 const upgrade_target = @import("upgrade_target.zig");
 const code_signature = @import("code_signature.zig");
 const upgrade_owner = @import("upgrade_owner.zig");
@@ -570,6 +571,13 @@ fn runSessionHostImpl(
             return error.ManifestFailed
     else
         dir_path;
+    // exact host owner lease를 이미 획득한 뒤이고, upgrade target/capability owner를 만들기 전이다.
+    // 이전 image가 SIGKILL/power-loss로 남긴 residue가 불명확하면 keep-alive service는 살리되
+    // upgrade만 fail-close한다.
+    const upgrade_residue_clean = if (exact_host_id != null)
+        if (upgrade_stale_sweep.sweep(host_dir)) |_| true else |_| false
+    else
+        false;
     var rollback_authority: ?rollback_image.Authority = null;
     defer if (rollback_authority) |*rollback| rollback.deinit();
     var signature_authorizer = code_signature.Authorizer{
@@ -596,7 +604,7 @@ fn runSessionHostImpl(
     var product_executor: upgrade_executor.ProductExecutor = .{
         .allocator = allocator,
     };
-    if (exact_host_id != null) {
+    if (exact_host_id != null and upgrade_residue_clean) {
         if (staged_image.inspect(executable_path)) |running_identity| {
             if (rollback_image.Authority.prepare(
                 allocator,

@@ -1084,19 +1084,126 @@ pub fn collectLabels(
     if (l.visible == 0) return;
     const fg: maru.terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
 
+    // 시각은 라벨보다 **흐리게**. 같은 밝기로 두면 눈이 파일명 대신 숫자를 먼저 읽는다.
+    const dim: maru.terminal.Color = .{ .rgb = towardBg(
+        self.appearance.theme.sidebar_foreground,
+        self.appearance.theme.sidebar_background,
+        time_dim_percent,
+    ) };
+    const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
+    const now_off = utcOffsetAt(now_s);
+
     for (self.image_gallery.tiles.items) |*tile| {
         const text = tile.label.text();
         if (text.len == 0) continue; // 없는 설명을 지어내지 않는다 — 빈 칸이 낫다
         const rect = image_grid.labelRectAt(area, m, l, tile.hit_index) orelse continue;
-        const cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), rect.w / self.cell_width_px));
-        if (cols == 0) continue;
-        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, cols, text, fg) catch continue;
+        const all_cols: u16 = @intCast(@min(@as(u32, std.math.maxInt(u16)), rect.w / self.cell_width_px));
+        if (all_cols == 0) continue;
+
+        // **시각 자리를 먼저 뗀다**(있고, 줄이 넉넉할 때만).
+        var time_buf: [16]u8 = undefined;
+        var time_text: []const u8 = &.{};
+        if (tile.label.time_s != 0) {
+            const off = utcOffsetAt(tile.label.time_s);
+            time_text = formatImageTime(&time_buf, tile.label.time_s, off, now_s, now_off);
+        }
+        var label_cols = all_cols;
+        var time_cols: u16 = 0;
+        if (time_text.len > 0) {
+            time_cols = @intCast(@min(
+                @as(usize, std.math.maxInt(u16)),
+                chrome.components.overlay_input.displayCols(time_text),
+            ));
+            const want = time_cols +| time_gap_cols;
+            // **모자라면 시각을 버린다** — 파일명을 잘라 시계를 넣지 않는다.
+            if (all_cols >= want +| min_label_cols) {
+                label_cols = all_cols - want;
+            } else {
+                time_text = &.{};
+                time_cols = 0;
+            }
+        }
+
+        const dl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, label_cols, text, fg) catch continue;
         self.collectShaped(collected, dl, builder, .{ .pane = .{
             .origin_x = rect.x,
             .origin_y = rect.y,
             .colors = colors,
         } });
+        if (time_text.len == 0) continue;
+        const tdl = coretext_frame_builder.buildDockTileLabelDrawList(self.allocator, time_cols, time_text, dim) catch continue;
+        self.collectShaped(collected, tdl, builder, .{ .pane = .{
+            .origin_x = rect.x +| (@as(u32, label_cols) +| time_gap_cols) *| self.cell_width_px,
+            .origin_y = rect.y,
+            .colors = colors,
+        } });
     }
+}
+
+/// 시각과 라벨 사이 최소 간격, 그리고 시각을 넣기 위해 남겨야 할 라벨 최소 폭(칸).
+const time_gap_cols: u16 = 1;
+const min_label_cols: u16 = 6;
+/// 전경색을 배경 쪽으로 `percent` 만큼 당긴다. 어두운 테마·밝은 테마 어느 쪽에서도 «흐리게» 가 된다 —
+/// 고정 회색을 쓰면 한쪽 테마에서 배경과 붙거나 오히려 더 튄다.
+fn towardBg(fg: maru.color.Rgb, bg: maru.color.Rgb, percent: u8) maru.color.Rgb {
+    const a: u16 = percent;
+    const inv: u16 = 100 - a;
+    return .{
+        .r = @intCast((@as(u16, fg.r) * inv + @as(u16, bg.r) * a) / 100),
+        .g = @intCast((@as(u16, fg.g) * inv + @as(u16, bg.g) * a) / 100),
+        .b = @intCast((@as(u16, fg.b) * inv + @as(u16, bg.b) * a) / 100),
+    };
+}
+
+/// 시각을 배경 쪽으로 얼마나 죽일지(%). 라벨보다 뒤로 물러나되 읽히는 선이다.
+const time_dim_percent: u8 = 45;
+
+/// 이 이미지가 적힌 **시각**. 오늘이면 `14:32`, 아니면 `08-22 14:32`.
+///
+/// SCM 도크의 턴 줄과 **같은 표기**다(2026-08-23 사용자 결정: 목록에서 알고 싶은 것은 «얼마나
+/// 지났나» 가 아니라 «언제 것인가» 다). 갤러리도 같은 물음이라 같은 답을 쓴다.
+///
+/// **순수 함수다** — 오프셋은 호출자가 넘긴다. 두 시점의 오프셋을 따로 받는 이유는 서머타임이다:
+/// 하나로 합치면 경계를 넘은 이미지에서 「오늘」 판정이 틀린다.
+fn formatImageTime(buf: []u8, at_s: i64, at_off: i64, now_s: i64, now_off: i64) []const u8 {
+    const local = at_s + at_off;
+    if (local < 0) return "";
+    const day: i64 = @divFloor(local, std.time.s_per_day);
+    const secs_in_day: u17 = @intCast(local - day * std.time.s_per_day);
+    const hour = secs_in_day / 3600;
+    const minute = (secs_in_day % 3600) / 60;
+    const now_day: i64 = @divFloor(now_s + now_off, std.time.s_per_day);
+    if (day == now_day) return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}", .{ hour, minute }) catch "";
+    const year_day = (std.time.epoch.EpochDay{ .day = @intCast(day) }).calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+        month_day.month.numeric(),
+        @as(u32, month_day.day_index) + 1, // `day_index` 는 0-based 다
+        hour,
+        minute,
+    }) catch "";
+}
+
+const CTm = extern struct {
+    sec: c_int,
+    min: c_int,
+    hour: c_int,
+    mday: c_int,
+    mon: c_int,
+    year: c_int,
+    wday: c_int,
+    yday: c_int,
+    isdst: c_int,
+    gmtoff: c_long,
+    zone: ?[*:0]const u8,
+};
+extern "c" fn localtime_r(timep: *const i64, result: *CTm) ?*CTm;
+
+/// 그 시점의 UTC 오프셋(초). OS 가 서머타임까지 안다 — 우리가 규칙을 흉내 내지 않는다.
+fn utcOffsetAt(unix_s: i64) i64 {
+    var tm: CTm = undefined;
+    if (localtime_r(&unix_s, &tm) == null) return 0;
+    return @intCast(tm.gmtoff);
 }
 
 /// 지금 프레임의 격자 배치. **그리기·hit-test·스크롤 상한이 모두 이 하나를 쓴다** — 각자 계산하면
@@ -1374,4 +1481,9 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     }
     // 문구가 안 들어가면 개수를 지어내지 않는다 — 빈 문자열이 낫다.
     return std.fmt.bufPrint(buf, "{d}{s}", .{ n, maru.i18n.t(.image_gallery_count_suffix) }) catch buf[0..0];
+}
+
+/// `formatImageTime` 의 test 창구. 순수 함수라 화면 없이 표기를 짚을 수 있다.
+pub fn testFormatImageTime(buf: []u8, at_s: i64, at_off: i64, now_s: i64, now_off: i64) []const u8 {
+    return formatImageTime(buf, at_s, at_off, now_s, now_off);
 }

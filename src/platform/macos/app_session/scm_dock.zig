@@ -4239,14 +4239,21 @@ test "턴 요약: 캡처가 센 편집 수를 tree 의 수와 **나란히** 말�
 
 /// 도크가 **소스 컨트롤 뷰로 키를 들고 있을 때**의 PageUp/PageDown/Home/End.
 ///
-/// 탐색기(`file_tree_dock.handleFileTreeDockScrollKey`)와 같은 규율이고, 다른 것은 상한의 출처뿐이다 —
+/// Session Dock(`agent_dock.handleAgentSessionDockScrollKey`)과 같은 규율이고, 다른 것은 상한의 출처뿐이다 —
 /// 여기서는 마지막 투영이 남긴 `scmScrollExtent`를 읽는다(세 탭의 목록 출처가 달라 그 자리가 유일한
-/// 단일 출처다). 커밋 상자가 편집 중이면 그 상자가 키의 주인이라 넘기지 않는다.
+/// 단일 출처다).
+///
+/// **커밋 상자가 편집 중이어도 양보하지 않는다(적대적 검증 1회차 정정).** 처음엔 "Home/End 는 caret 의
+/// 것"이라며 `scmCommitOwnsInput()` 에서 물러났는데, 상자를 읽어 보니 **그 넷을 아무도 안 먹는다** —
+/// `handleCommitKey` 는 escape·enter·←→↑↓ 만 다루고, 애초에 `chromeInputFromKeyEvent` 가 Page/Home/End 를
+/// `.other` 로 축약해 상자까지 가지도 않는다(줄 처음·끝은 ⌘←/⌘→ 다). 그래서 양보하면 그 키는 상자도
+/// 목록도 아닌 **터미널로 새어** 뒤의 셸이 스크롤백을 감는다 — 이 함수가 막으려던 바로 그 증상이다.
+/// 커밋 라우팅은 이 함수보다 **앞**이므로(`scmCommitOwnsInput()` 블록) 상자가 실제로 쓰는 키는 여기 오지도
+/// 않는다. 모달도 같다 — `anyOverlayOpen()` 이 앞에서 모든 키를 소비한다.
 pub fn handleScmDockScrollKey(self: *AppSession, event: terminal.KeyEvent) bool {
     if (!dock_ops.dockVisible(self) or self.dock.view != .source_control or !self.dockKeyFocus()) return false;
     if (event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
         return false;
-    if (self.scmCommitOwnsInput()) return false; // 커밋 메시지 편집 중이면 Home/End 는 caret 의 것이다
     const extent = scroll_ops.scmScrollExtent(self);
     const row_h = component.types.DockMetrics.resolve(scmDockScaleMilli(self)).row_h;
     const step = chrome.ui.scroll_area.pageStepPx(extent.viewport_h_px, row_h);
@@ -4324,4 +4331,30 @@ test "소스 컨트롤 키보드 스크롤: 한 행을 남기고 · 끝으로 �
 
     // ⑥ 스크롤 키가 아닌 것은 그대로 흘려보낸다.
     try std.testing.expect(!handleScmDockScrollKey(session, .{ .key = .enter, .modifiers = .{} }));
+
+    // ⑦ **커밋 상자가 편집 중이어도 목록이 먹는다**(적대적 검증 1회차). 상자는 이 넷을 안 다루고
+    //    (`handleCommitKey` = escape·enter·←→↑↓), `chromeInputFromKeyEvent` 가 Page/Home/End 를
+    //    `.other` 로 축약해 거기까지 가지도 않는다. 여기서 물러나면 그 키는 상자도 목록도 아닌
+    //    **터미널로 샌다** — 이 함수가 막으려던 바로 그 증상이다.
+    const repo = try session.allocator.dupe(u8, "/tmp/repo");
+    session.scm_commit_focus_repo = repo;
+    defer {
+        session.allocator.free(repo);
+        session.scm_commit_focus_repo = null;
+    }
+    session.scm_tab = .changes;
+    try std.testing.expect(session.scmCommitOwnsInput()); // 상자가 입력 주인인 상태를 실제로 만든다
+    try std.testing.expect(handleScmDockScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expectEqual(viewport_h - row_h, session.scm_scroll.offset_y_px);
+
+    // ⑧ **제품 키 경로로도 태운다**(적대적 검증 2회차). 위 ①~⑦ 은 핸들러를 직접 부르므로 라우팅
+    //    줄이 지워져도 초록으로 남는다 — 그러면 테스트는 통과하는데 제품에서는 키가 안 듣는다.
+    //    `handleKeyEvent` 를 지나면 그 앞의 게이트들(모달·커밋 상자·`input.page-keys` 터미널 스크롤)과의
+    //    **순서**까지 함께 고정된다.
+    session.scm_commit_focus_repo = null; // 상자 라우팅이 앞에서 먹지 않게 되돌린다
+    _ = session.scm_scroll.setOffsetPx(0, max_offset);
+    _ = try session.handleKeyEvent(.{ .key = .end, .modifiers = .{} });
+    try std.testing.expectEqual(max_offset, session.scm_scroll.offset_y_px);
+    _ = try session.handleKeyEvent(.{ .key = .home, .modifiers = .{} });
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
 }

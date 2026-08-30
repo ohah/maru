@@ -789,6 +789,28 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   observation을 결속하기 전에는 `PublicationObservation.protected_environment=true`를 만들 수 없다. 근거는 GitHub REST API의
   [Deployment environments schema](https://docs.github.com/en/rest/deployments/environments)다.
 
+  current job과 environment deployment의 결속은 GitHub REST의 attempt-scoped jobs, deployments, deployment statuses 세 응답을
+  한 판정자가 함께 해석한다. jobs 응답에서는 이미 검증한 `run_id`와 `run_attempt` 아래 exact release signing job name이 하나뿐이고,
+  그 job의 nonzero ID, exact source SHA, `status=in_progress`, `conclusion=null`, canonical GitHub job URL을 보존해야 한다. deployments
+  응답의 후보는 exact repository URL, source SHA, `ref=<canonical-tag>`, `task=deploy`,
+  `environment=original_environment=release`, nonzero deployment ID, `performed_via_github_app.slug=github-actions`에 결속한다.
+  각 후보의 statuses 응답은 newest-first 전체 이력이어야 하고, 각 status의 canonical status URL·deployment URL·repository URL이
+  그 후보와 exact하게 결속돼야 한다. 현재 job URL과 exact environment를 공유하는 `waiting` 뒤 `queued|in_progress` 전이를 포함하며
+  newest status가 `in_progress`여야 한다. 같은 job URL에 결속되는 deployment가 0개 또는
+  2개 이상이면 replay/ambiguity로 거부한다. deployment creator는 workflow를 시작한 사용자일 수 있으므로 bot identity의 근거로
+  사용하지 않고, status의 optional app도 보호 증거로 승격하지 않는다. unknown status는 wire compatibility를 위해 보존할 수 있지만
+  어느 필수 전이도 충족하지 않는다.
+
+  최종 보호 판정은 위 exact-one deployment 결속과 environment observation의 recognized protection rule 하나 이상을 모두 요구한다.
+  현재 environment 설정을 다시 읽은 사실만으로 과거 job에 정책이 적용됐다고 주장하지 않으며, deployment status의 `waiting`
+  이력으로 실제 protection wait를 교차검증한다. 반대로 pending-deployments endpoint는 보호 규칙을 통과한 뒤 job 안에서 더는 현재
+  deployment를 반환하지 않으므로 사후 증거로 쓰지 않는다. API bytes parser와 resolver는 transport authority, endpoint URL,
+  pagination 완결성, 현재 실행 중인 executable 자체를 증명하지 않는다. bounded GitHub API transport와 release workflow의
+  `environment: release` 배선이 추가되고 repository에 실제 recognized protection이 설정되기 전에는
+  `PublicationObservation.protected_environment=true`를 만들 수 없다. 근거는 GitHub REST API의
+  [workflow jobs](https://docs.github.com/en/rest/actions/workflow-jobs),
+  [deployments와 statuses](https://docs.github.com/en/rest/deployments/deployments)다.
+
   A의 evidence는 default-false baseline·signed app quit/reattach 결과를 가리킨다. B의 evidence는 frozen A 호환성과
   default-on 제품 matrix를 모두 포함하는 aggregate summary를 가리키며, 그 summary가 다시 두 leaf summary의 SHA-256과
   동일 `test_uuid`를 결속한다. manifest 자체나 evidence를 build 뒤 사람이 고쳐 넣을 수 없도록 같은 trusted release run이

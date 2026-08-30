@@ -29,7 +29,10 @@ const workload_iterations_max: usize = 8;
 const baseline_sample_count = 10;
 const pressure_sample_count_min = 20;
 const post_sample_count = 10;
-const wake_sample_count = 7;
+/// **validator 와 같은 값이라야 한다** — 다르면 validator 의 `wake_sample_count` 대조가 잡는다
+/// (그것이 이 중복의 안전장치다). 7 에서 40 으로 올린 근거는 validator 쪽 주석이 든다:
+/// 꼬리를 `max` 대신 p95 로 재려면 표본이 그만큼 필요하다.
+const wake_sample_count = 40;
 const idle_wake_observation_ms: u64 = 1_000;
 const target_interval_us: c_uint = 20_000;
 const deadline_ms: u64 = 30_000;
@@ -126,6 +129,7 @@ const Artifact = struct {
     wake_sample_count: u64,
     wake_latency_min_ns: u64,
     wake_latency_median_ns: u64,
+    wake_latency_p95_ns: u64,
     wake_latency_max_ns: u64,
     wake_samples: []const WakeSample,
     idle_wake_observation_ns: u64,
@@ -1039,6 +1043,9 @@ pub fn main(init: std.process.Init) !void {
         .wake_sample_count = wake_sample_count,
         .wake_latency_min_ns = wake_latencies[0],
         .wake_latency_median_ns = wake_latencies[wake_sample_count / 2],
+        // nearest-rank p95 — validator 의 `p95Index` 와 같은 식이다(모듈을 공유하지 않으므로
+        // 값 대조로 어긋남을 잡는다).
+        .wake_latency_p95_ns = wake_latencies[(wake_sample_count * 95 + 99) / 100 - 1],
         .wake_latency_max_ns = wake_latencies[wake_sample_count - 1],
         .wake_samples = &wake_samples,
         .idle_wake_observation_ns = idle_wake_ended_at - idle_wake_started_at,

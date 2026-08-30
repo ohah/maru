@@ -16,12 +16,31 @@ const mib: u64 = 1024 * 1024;
 const workload_bytes_per_iteration: u64 = 2 * mib;
 const workload_iterations_max: u64 = 8;
 const marker_input_bytes: u64 = 33; // 128-bit nonce의 lowercase hex 32 byte + LF.
-const wake_sample_count: usize = 7;
+/// 깨우기 지연 표본 수. **7 이었다** — 그때는 꼬리를 `max` 로 쟀고, 공유 러너에서 스케줄링이 한 번
+/// 튀면 그대로 게이트가 빨개졌다(2026-08-30 실측: 실패 회차 28.3 ms vs 재실행 8.3 ms, median 은 둘 다
+/// 1 ms 아래로 상한의 열 배 여유였다 — 즉 회귀가 아니라 **통계 선택**의 문제였다).
+///
+/// p95 가 뜻을 가지려면 표본이 그만큼 있어야 한다. 40 이면 p95 가 index 37 이라 **가장 나쁜 둘을
+/// 뺀다** — 러너 딸꾹질 한두 번은 흡수하고 그 이상은 그대로 잡는다.
+const wake_sample_count: usize = 40;
+
+/// nearest-rank p95 의 0-based index. `ceil(0.95 n) - 1`.
+pub fn p95Index(n: usize) usize {
+    std.debug.assert(n > 0);
+    const rank = (n * 95 + 99) / 100; // ceil(0.95 n)
+    return @min(n, @max(1, rank)) - 1;
+}
 const idle_wake_observation_min_ns: u64 = 1_000 * std.time.ns_per_ms;
 const screen_idle_cpu_total_cap_ns: u64 = 100 * std.time.ns_per_ms;
 pub const idle_cpu_total_cap_ns: u64 = 25 * std.time.ns_per_ms;
 pub const output_wake_median_cap_ns: u64 = 10 * std.time.ns_per_ms;
+/// **꼬리 성능 계약** — p95 에 건다(옛날에는 `max` 에 걸었다, 위 `wake_sample_count` 주석).
 pub const output_wake_tail_cap_ns: u64 = 20 * std.time.ns_per_ms;
+
+/// **최댓값은 성능이 아니라 살아 있음을 잰다.** p95 로 옮기면서 `max` 를 아예 안 보면 진짜 멈춤
+/// (몇 초짜리)이 지나간다. 그래서 훨씬 느슨한 상한 하나를 남긴다 — 이 값을 넘으면 스케줄링
+/// 딸꾹질이 아니라 무언가 막힌 것이다.
+pub const output_wake_hang_cap_ns: u64 = 200 * std.time.ns_per_ms;
 pub const observation_core_lock_hold_cap_ns: u64 = 25 * std.time.ns_per_ms;
 const baseline_sample_count: usize = 10;
 const pressure_sample_count_min: usize = 20;
@@ -132,6 +151,7 @@ const Artifact = struct {
     wake_sample_count: u64,
     wake_latency_min_ns: u64,
     wake_latency_median_ns: u64,
+    wake_latency_p95_ns: u64,
     wake_latency_max_ns: u64,
     wake_samples: []const WakeSample,
     idle_wake_observation_ns: u64,
@@ -476,9 +496,13 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
     std.mem.sort(u64, &wake_latencies, {}, std.sort.asc(u64));
     if (artifact.wake_latency_min_ns != wake_latencies[0] or
         artifact.wake_latency_median_ns != wake_latencies[wake_sample_count / 2] or
+        artifact.wake_latency_p95_ns != wake_latencies[p95Index(wake_sample_count)] or
         artifact.wake_latency_max_ns != wake_latencies[wake_sample_count - 1] or
         artifact.wake_latency_median_ns > output_wake_median_cap_ns or
-        artifact.wake_latency_max_ns > output_wake_tail_cap_ns)
+        // **꼬리는 p95 다.** `max` 는 아래에서 훨씬 느슨한 상한으로 따로 본다 — 그 둘은 재는 것이
+        // 다르다(하나는 성능 계약, 하나는 멈춤 감지).
+        artifact.wake_latency_p95_ns > output_wake_tail_cap_ns or
+        artifact.wake_latency_max_ns > output_wake_hang_cap_ns)
         return error.InvalidProgress;
     if (artifact.idle_wake_observation_ns < idle_wake_observation_min_ns or
         artifact.idle_wake_notify_delta != 0 or
@@ -728,14 +752,27 @@ fn sampleSeries(
 const baseline_fixture = sampleSeries(10, 1_000_000_000, 20_000_000, 100_000_000);
 const pressure_fixture = sampleSeries(20, 1_200_000_000, 10_000_000, 120_000_000);
 const post_fixture = sampleSeries(10, 1_500_000_000, 20_000_000, 110_000_000);
-const wake_fixture = [_]WakeSample{
-    .{ .input_at_ns = 900_000_000, .input_accepted_at_ns = 901_000_000, .marker_at_ns = 905_000_000, .end_to_end_latency_ns = 5_000_000, .delivery_latency_ns = 4_000_000 },
-    .{ .input_at_ns = 910_000_000, .input_accepted_at_ns = 911_000_000, .marker_at_ns = 916_000_000, .end_to_end_latency_ns = 6_000_000, .delivery_latency_ns = 5_000_000 },
-    .{ .input_at_ns = 920_000_000, .input_accepted_at_ns = 921_000_000, .marker_at_ns = 927_000_000, .end_to_end_latency_ns = 7_000_000, .delivery_latency_ns = 6_000_000 },
-    .{ .input_at_ns = 930_000_000, .input_accepted_at_ns = 931_000_000, .marker_at_ns = 938_000_000, .end_to_end_latency_ns = 8_000_000, .delivery_latency_ns = 7_000_000 },
-    .{ .input_at_ns = 940_000_000, .input_accepted_at_ns = 941_000_000, .marker_at_ns = 949_000_000, .end_to_end_latency_ns = 9_000_000, .delivery_latency_ns = 8_000_000 },
-    .{ .input_at_ns = 950_000_000, .input_accepted_at_ns = 951_000_000, .marker_at_ns = 960_000_000, .end_to_end_latency_ns = 10_000_000, .delivery_latency_ns = 9_000_000 },
-    .{ .input_at_ns = 970_000_000, .input_accepted_at_ns = 971_000_000, .marker_at_ns = 981_000_000, .end_to_end_latency_ns = 11_000_000, .delivery_latency_ns = 10_000_000 },
+/// 정상 픽스처. **손으로 마흔 줄을 적지 않는다** — 표본 수가 바뀔 때마다 낡고, 낡으면 그 배열이
+/// 계약이 아니라 상수 더미가 된다.
+///
+/// 지연은 0.2 ms 씩 늘려 min·median·p95·max 가 **전부 다른 값**이 되게 한다(같으면 어느 통계를
+/// 재는지 판정자가 못 가른다). 간격이 이 값인 이유는 상한이다 — 1 ms 씩 늘리면 median 이
+/// 21 ms 가 되어 정상 픽스처가 `output_wake_median_cap_ns`(10 ms)에 걸린다(처음에 그렇게 썼다가
+/// 정상 케이스가 빨개졌다).
+const wake_fixture = blk: {
+    var out: [wake_sample_count]WakeSample = undefined;
+    for (&out, 0..) |*sample, index| {
+        const delivery: u64 = (index + 1) * 200 * std.time.ns_per_us;
+        const input: u64 = 900_000_000 + index * 30_000_000;
+        sample.* = .{
+            .input_at_ns = input,
+            .input_accepted_at_ns = input + 1_000_000,
+            .marker_at_ns = input + 1_000_000 + delivery,
+            .end_to_end_latency_ns = 1_000_000 + delivery,
+            .delivery_latency_ns = delivery,
+        };
+    }
+    break :blk out;
 };
 const screen_idle_scale_fixture = [_]ScreenIdleScaleSample{
     .{ .runtime_count = 1, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 1_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0, .metadata_producer_visit_delta = 0, .metadata_materialization_delta = 0, .metadata_core_lock_acquisition_delta = 0 },
@@ -785,9 +822,10 @@ fn goodArtifact() Artifact {
         .slow_pollout_absent_count = 0,
         .stall_at_ns = 1_250_000_000,
         .wake_sample_count = wake_sample_count,
-        .wake_latency_min_ns = 4_000_000,
-        .wake_latency_median_ns = 7_000_000,
-        .wake_latency_max_ns = 10_000_000,
+        .wake_latency_min_ns = wake_fixture[0].delivery_latency_ns,
+        .wake_latency_median_ns = wake_fixture[wake_sample_count / 2].delivery_latency_ns,
+        .wake_latency_p95_ns = wake_fixture[p95Index(wake_sample_count)].delivery_latency_ns,
+        .wake_latency_max_ns = wake_fixture[wake_sample_count - 1].delivery_latency_ns,
         .wake_samples = &wake_fixture,
         .idle_wake_observation_ns = idle_wake_observation_min_ns,
         .idle_wake_notify_delta = 0,
@@ -1153,6 +1191,7 @@ test "timestamp reversal and pressure gap allow runner jitter to 125ms" {
         validateArtifact(testing.allocator, artifact),
     );
 
+    // median 이 상한을 넘으면 거절한다 — 절반 넘게 느린 것은 딸꾹질이 아니다.
     artifact = goodArtifact();
     var wake_median = wake_fixture;
     for (&wake_median, 0..) |*sample, index| {
@@ -1168,21 +1207,55 @@ test "timestamp reversal and pressure gap allow runner jitter to 125ms" {
     artifact.wake_samples = &wake_median;
     artifact.wake_latency_min_ns = 5_000_000;
     artifact.wake_latency_median_ns = output_wake_median_cap_ns + 1;
+    artifact.wake_latency_p95_ns = output_wake_median_cap_ns + 1;
     artifact.wake_latency_max_ns = output_wake_median_cap_ns + 1;
     try testing.expectError(
         error.InvalidProgress,
         validateArtifact(testing.allocator, artifact),
     );
 
+    // **딸꾹질 하나는 통과한다** — 이 회차가 고치는 자리다. 가장 나쁜 표본 하나가 옛 꼬리 상한을
+    // 넘어도 p95 가 그것을 빼므로 게이트는 초록이다(실측: 28.3 ms 한 번에 게이트가 빨갰다).
+    artifact = goodArtifact();
+    var wake_hiccup = wake_fixture;
+    {
+        const last = &wake_hiccup[wake_hiccup.len - 1];
+        last.delivery_latency_ns = output_wake_tail_cap_ns + 8 * std.time.ns_per_ms;
+        last.marker_at_ns = last.input_accepted_at_ns + last.delivery_latency_ns;
+        last.end_to_end_latency_ns = last.marker_at_ns - last.input_at_ns;
+    }
+    artifact.wake_samples = &wake_hiccup;
+    artifact.wake_latency_max_ns = wake_hiccup[wake_hiccup.len - 1].delivery_latency_ns;
+    try validateArtifact(testing.allocator, artifact);
+
+    // **꼬리가 진짜로 느리면 거절한다.** 딸꾹질 하나가 아니라 상위 구간이 통째로 느려야 p95 가
+    // 움직인다 — 위 `wake_hiccup` 과 짝을 이루는 대조군이다(하나는 통과, 여럿은 거절).
     artifact = goodArtifact();
     var wake_tail = wake_fixture;
-    wake_tail[wake_tail.len - 1].marker_at_ns =
-        wake_tail[wake_tail.len - 1].input_accepted_at_ns + output_wake_tail_cap_ns + 1;
-    wake_tail[wake_tail.len - 1].end_to_end_latency_ns =
-        wake_tail[wake_tail.len - 1].marker_at_ns - wake_tail[wake_tail.len - 1].input_at_ns;
-    wake_tail[wake_tail.len - 1].delivery_latency_ns = output_wake_tail_cap_ns + 1;
+    for (wake_tail[p95Index(wake_sample_count)..]) |*sample| {
+        sample.delivery_latency_ns = output_wake_tail_cap_ns + 1;
+        sample.marker_at_ns = sample.input_accepted_at_ns + sample.delivery_latency_ns;
+        sample.end_to_end_latency_ns = sample.marker_at_ns - sample.input_at_ns;
+    }
     artifact.wake_samples = &wake_tail;
+    artifact.wake_latency_p95_ns = output_wake_tail_cap_ns + 1;
     artifact.wake_latency_max_ns = output_wake_tail_cap_ns + 1;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    // **멈춤은 p95 가 아니라 max 가 잡는다.** 표본 하나가 몇 백 ms 면 딸꾹질이 아니다.
+    artifact = goodArtifact();
+    var wake_hang = wake_fixture;
+    {
+        const last = &wake_hang[wake_hang.len - 1];
+        last.delivery_latency_ns = output_wake_hang_cap_ns + 1;
+        last.marker_at_ns = last.input_accepted_at_ns + last.delivery_latency_ns;
+        last.end_to_end_latency_ns = last.marker_at_ns - last.input_at_ns;
+    }
+    artifact.wake_samples = &wake_hang;
+    artifact.wake_latency_max_ns = output_wake_hang_cap_ns + 1;
     try testing.expectError(
         error.InvalidProgress,
         validateArtifact(testing.allocator, artifact),

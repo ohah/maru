@@ -44,7 +44,7 @@ fn pollFreshness(self: *AppSession) void {
     if (self.image_gallery.open != null) return;
 
     const now_ms: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_ms));
-    if (now_ms -| self.image_gallery.last_stat_ms < freshness_interval_ms) return;
+    if (now_ms -| self.image_gallery.last_stat_ms < freshnessIntervalMs(self)) return;
     self.image_gallery.last_stat_ms = now_ms;
 
     const path = activeSourcePath(self) orelse return;
@@ -52,9 +52,35 @@ fn pollFreshness(self: *AppSession) void {
     refresh(self, true); // 자랐다 — 다시 훑는다(`force` 로 위 게이트를 지나간다)
 }
 
-/// 신선도를 보는 간격(ms). `stat` 은 싸지만(실측 54,296 배 저렴) 60 Hz 로 열 이유는 없다.
+/// 다음 신선도 검사까지 쉬는 시간(ms). **직전 스캔이 비쌌으면 그만큼 더 쉰다.**
+///
+/// 이것이 없으면 큰 세션에서 워커가 **쉬지 않는다**: 9 초짜리 스캔이 끝나는 순간 그 사이 파일이 또
+/// 자라 있어 곧바로 다시 훑는다. 대화가 이어지는 동안 코어 하나를 계속 먹는다 — 계약 §9 의 A2
+/// 「활성 세션 재읽기 폭발」이 바로 이것이고, 델타 읽기(IG2-c)를 안 했으므로 여기서 막는다.
+///
+/// 배수 10 은 **일하는 시간의 10 배는 쉰다** = 워커 점유율 상한 약 9% 라는 뜻이다. 실측 분포에
+/// 대면: 중앙 11 ms → 그대로 500 ms · p99 1,175 ms → 11.8 초 · 최대 9,007 ms → 90 초.
+/// 흔한 세션은 영향이 없고, 비싼 세션만 느리게 따라온다.
+fn freshnessIntervalMs(self: *const AppSession) i64 {
+    return restIntervalMs(self.image_gallery.scan_ns / std.time.ns_per_ms);
+}
+
+/// 위 규칙의 **순수** 부분 — 화면 없이 짚을 수 있게 갈라 둔다.
+pub fn restIntervalMs(last_scan_ms: u64) i64 {
+    const last: i64 = @intCast(@min(@as(u64, std.math.maxInt(i32)), last_scan_ms));
+    return @max(freshness_interval_ms, last *| freshness_rest_multiplier);
+}
+
+/// `restIntervalMs` 의 test 창구.
+pub fn testFreshnessIntervalMs(last_scan_ms: u64) i64 {
+    return restIntervalMs(last_scan_ms);
+}
+
+/// 신선도를 보는 **최소** 간격(ms). `stat` 은 싸지만(실측 54,296 배 저렴) 60 Hz 로 열 이유는 없다.
 /// 사람이 「방금 붙인 것이 안 보인다」고 느끼기 전에 잡히는 선이다.
 const freshness_interval_ms: i64 = 500;
+/// 직전 스캔 시간의 몇 배를 쉬는가. 위 doc 참조.
+const freshness_rest_multiplier: i64 = 10;
 
 /// 지금 그 파일의 자국. 열지 못하면 «모름» 이다.
 fn stampOf(self: *AppSession, path: []const u8) Stamp {
@@ -74,9 +100,15 @@ fn stampOf(self: *AppSession, path: []const u8) Stamp {
     };
 }
 
-/// 마지막으로 훑은 뒤 현재 세션 파일이 달라졌는가. **모르면 「달라졌다」**다 — 낡은 채로 두지 않는다.
+/// 마지막으로 훑은 뒤 현재 세션 파일이 달라졌는가.
+///
+/// **못 읽는 파일은 「안 달라졌다」로 본다.** 자국이 «모름» 이면 `eql` 이 false 라 「달라졌다」가
+/// 되는데, 못 읽는 파일은 다시 훑어도 못 읽는다 — 그대로 두면 지워진 파일을 500 ms 마다 다시 훑는
+/// 무한 루프가 된다. 파일이 돌아오면 그때 자국이 서고 달라진 것으로 잡힌다.
 fn headChanged(self: *AppSession, path: []const u8) bool {
-    return !Stamp.eql(self.image_gallery.head_stamp, stampOf(self, path));
+    const now = stampOf(self, path);
+    if (!now.known) return false;
+    return !Stamp.eql(self.image_gallery.head_stamp, now);
 }
 
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
@@ -488,23 +520,14 @@ pub fn refresh(self: *AppSession, force: bool) void {
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
 
-    // **같은 파일을 다시 훑는 것뿐이면 검색어를 넘겨 준다.** `clear` 는 「다른 세션이 됐다」를 뜻해
-    // 검색까지 비우는데, 자란 파일을 다시 읽는 것은 그것이 아니다 — 사용자가 친 글자를 뺏지 않는다.
-    var keep: [max_query_bytes]u8 = undefined;
-    var keep_len: usize = 0;
-    const keep_active = same and self.image_gallery.search_active;
-    if (same) {
-        const q = self.image_gallery.queryText();
-        keep_len = @min(q.len, keep.len);
-        @memcpy(keep[0..keep_len], q[0..keep_len]);
-    }
-
-    self.image_gallery.clear(self.allocator);
+    // **같은 파일이면 보이던 것을 그대로 둔다.** `clear` 는 「다른 세션이 됐다」를 뜻하고, 자란 파일을
+    // 다시 읽는 것은 그것이 아니다. 여기서 비우면 다시 훑는 내내 갤러리가 **빈 화면**이 된다 —
+    // 큰 세션은 9 초다. 자동으로 일어나는 일이라 사용자는 이유를 알 수 없다.
+    //
+    // 결과가 오면 `poll` 이 목록을 통째로 바꾸고 그 위에 쌓인 것(타일·크게보기·호버)도 그때 버린다.
+    // 그때까지는 조금 낡은 목록이 보인다 — 빈 화면보다 정직하다. 검색어도 자연히 남는다.
+    if (!same) self.image_gallery.clear(self.allocator);
     self.image_gallery.chain = buildChain(self, path);
-    if (keep_len > 0 or keep_active) {
-        self.image_gallery.search.query.appendSlice(self.allocator, keep[0..keep_len]) catch {};
-        self.image_gallery.search_active = keep_active;
-    }
     self.metal_dirty = true;
 
     // **훑기 직전의 자국을 찍는다.** 훑은 뒤에 찍으면 그 사이 붙은 줄을 「이미 봤다」로 오해한다.

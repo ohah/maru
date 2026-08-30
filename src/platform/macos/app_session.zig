@@ -74478,3 +74478,147 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     try std.testing.expect(session.image_gallery.open != null);
     try std.testing.expectEqual(before, session.image_gallery.count());
 }
+
+test "이미지 갤러리: 자동 갱신이 워커를 쉬지 않게 돌리지 않는다 (IG2 적대적)" {
+    // **적대적 검증 1 회차가 잡았다.** 9 초짜리 스캔이 끝나면 그 사이 파일이 또 자라 있어 곧바로
+    // 다시 훑는다 — 대화가 이어지는 동안 코어 하나를 계속 먹는다(계약 §9 A2 「활성 세션 재읽기
+    // 폭발」). 델타 읽기를 안 했으므로 **쉬는 시간**으로 막았고, 그 규칙을 여기서 못박는다.
+    //
+    // 순수 계산이라 화면 없이 짚는다: 「직전 스캔 시간의 10 배는 쉰다, 최소 500 ms」.
+    const g = image_gallery_ops;
+    try std.testing.expectEqual(@as(i64, 500), g.testFreshnessIntervalMs(0));
+    try std.testing.expectEqual(@as(i64, 500), g.testFreshnessIntervalMs(11)); // 중앙 세션
+    try std.testing.expectEqual(@as(i64, 11750), g.testFreshnessIntervalMs(1175)); // p99
+    try std.testing.expectEqual(@as(i64, 90070), g.testFreshnessIntervalMs(9007)); // 최대
+    // **점유율 상한**: 일한 시간 대비 쉬는 시간이 언제나 10 배 이상이다.
+    for ([_]u64{ 1, 50, 500, 1175, 9007, 60_000 }) |ms| {
+        try std.testing.expect(g.testFreshnessIntervalMs(ms) >= @as(i64, @intCast(ms)) * 10);
+    }
+}
+
+test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 적대적)" {
+    // **적대적 검증 3 회차가 잡았다.** `refresh` 는 「다른 세션이 됐다」를 전제로 `clear` 를 부르는데,
+    // 자동 갱신이 그 길을 같은 파일에도 쓰게 되면서 다시 훑는 내내 갤러리가 빈다. 큰 세션은 9 초다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 파일이 자란 뒤 **다시 훑기를 걸자마자** 화면을 본다 — 결과가 오기 전이다.
+    {
+        var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{one}, one.len);
+    }
+    image_gallery_ops.refresh(session, true);
+    // **보이던 것이 그대로 있다.** 0 이면 그 사이 갤러리가 빈 것이다.
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expect(session.image_gallery.built);
+
+    // 결과가 오면 바뀐다.
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and session.image_gallery.count() < 2) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+}
+
+test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (IG2 적대적)" {
+    // **적대적 검증 2 회차가 잡았다.** 자국이 «모름» 이면 `eql` 이 false 라 「달라졌다」가 되는데,
+    // 못 읽는 파일은 다시 훑어도 못 읽는다 — 지워진 파일을 500 ms 마다 훑는 무한 루프가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 파일이 사라진다. 갤러리는 **보던 것을 그대로 두고** 다시 훑지 않는다.
+    try tmp.dir.deleteFile(io, "s.jsonl");
+    {
+        var spins: usize = 0;
+        while (spins < 100_000) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expect(!session.image_gallery.scanning());
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+}

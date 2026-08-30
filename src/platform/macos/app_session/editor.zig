@@ -197,6 +197,144 @@ const diff_frame = chrome_editor.diff_frame;
 ///
 /// **비교 뷰는 빈 것을 낸다** — 문서가 둘이라 provider도 둘이어야 하고, 그 축을 가르는 것은 좌우
 /// 히트테스트가 선 뒤의 일이다(`search_marks`가 같은 이유로 같은 자리에 있다).
+/// 이동 스택 한 항목(§5.2). **Term 포인터가 아니라 surface id 다** — 그 Term 이 닫힐 수 있다.
+pub const NavMark = struct {
+    surface_id: u64,
+    offset: usize,
+};
+
+/// 이동 대상(§5.2). **출처는 여기 안 온다** — 정의로 이동이든 진단 클릭이든 심볼 피커든 같은 값을
+/// 넘기고, 이 경로는 누가 불렀는지 모른다. 출처마다 분기가 생기면 「경로는 하나다」가 이름만 남는다.
+pub const NavTarget = struct {
+    /// `null` 이면 **지금 문서 안**의 이동이다(줄 번호로 이동·심볼 피커). 파일 열기가 없을 뿐 같은 경로다.
+    path: ?[]const u8 = null,
+    /// range 의 **시작** byte offset. 끝은 지금 쓰지 않는다 — §5.2 가 요구하는 것은 「caret 을 range
+    /// 시작에 놓는다」 이고, 범위 선택은 그 위에 얹을 별도 결정이다.
+    offset: usize,
+};
+
+pub const NavError = error{
+    /// root 밖이라 열지 않았다(§5.2 — 표시와 접근을 가른다).
+    OutsideRoot,
+    /// 그 경로를 못 열었다.
+    Unopenable,
+    /// 편집기 Term 이 아니거나 문서가 없다.
+    NoDocument,
+};
+
+/// **`(URI?, range)` 하나로 수렴하는 진입점**(§5.2). 정의로 이동·진단 클릭·검색 결과·심볼로 이동이
+/// 전부 여기로 온다.
+///
+/// **순서가 계약이다 — 열기 → 펴기 → caret → 스크롤.** 뒤집으면 「화면에 없는 곳으로 caret 만
+/// 옮기는」 상태가 되고, 사용자는 아무 일도 안 일어난 것으로 본다.
+///
+/// **이미 있는 것을 다시 짓지 않는다.** 열기·유일성은 `pane.openFileTermInActivePane` 이, 펴기와
+/// 스크롤은 `revealFoldedLine`·`revealPrimaryCaretRows` 가 갖고 있고 **그 둘은 이미 적대적 검증을
+/// 거쳤다**(각자의 머리말이 그 이력을 든다). 새 경로가 그것을 우회하면 그 결함들이 되돌아온다.
+pub fn navigateTo(self: *AppSession, target: NavTarget) NavError!void {
+    // ⑴ **떠나기 전 자리를 먼저 잡는다.** 아래에서 pane 활성이 바뀌면 「직전 위치」를 못 구한다.
+    const from = currentNavMark(self);
+
+    // ⑵ 열기. 경로가 없으면 지금 Term 안의 이동이다.
+    const term = if (target.path) |path| blk: {
+        if (!withinNavRoot(self, path)) return error.OutsideRoot;
+        const opened = pane_ops.openFileTermInActivePane(self, path, .text) catch return error.Unopenable;
+        break :blk opened.term;
+    } else pane_ops.activePane(self).activeTerm();
+
+    if (term.kind != .editor) return error.NoDocument;
+    const doc = term.rt.editor_doc orelse return error.NoDocument;
+    const offset = @min(target.offset, doc.file.content.len);
+
+    // ⑶ **실제로 움직일 때만 쌓는다.** 같은 자리를 여러 번 부른 뒤 뒤로가 먹통처럼 보이지 않게.
+    if (from) |mark| {
+        const same_spot = mark.surface_id == term.surfaceId() and mark.offset == offset;
+        if (!same_spot) {
+            pushNavMark(self, mark);
+            // **새로 이동하면 앞으로 스택을 버린다**(브라우저와 같은 규약).
+            self.editor_nav_forward.clearRetainingCapacity();
+        }
+    }
+
+    placeCaretAndReveal(self, term, offset);
+}
+
+/// caret 을 놓고 그 자리를 드러낸다 — 위 ⑷⑸에 해당한다. **`revealPrimaryCaretRows` 가 펴기까지
+/// 한다**(그 함수가 `revealFoldedLine` 을 먼저 부른다) — 여기서 또 펴면 같은 일을 두 번 한다.
+fn placeCaretAndReveal(self: *AppSession, term: *Term, offset: usize) void {
+    clearExtraSelections(self, term);
+    term.rt.editor_selection = editor_selection.Selection.at(offset);
+    revealPrimaryCaret(self, term);
+    self.metal_dirty = true;
+}
+
+/// 지금 커서 자리를 스택 항목으로. 편집기가 아니거나 커서가 없으면 `null`(쌓을 것이 없다).
+fn currentNavMark(self: *AppSession) ?NavMark {
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return null;
+    _ = term.rt.editor_doc orelse return null;
+    const sel = term.rt.editor_selection orelse return null;
+    return .{ .surface_id = term.surfaceId(), .offset = sel.focus };
+}
+
+/// **상한을 둔다.** 무한히 쌓으면 오래 켜 둔 창에서 계속 자란다 — 오래된 쪽부터 버린다.
+pub const nav_stack_max: usize = 64;
+
+fn pushNavMark(self: *AppSession, mark: NavMark) void {
+    self.editor_nav_back.append(self.allocator, mark) catch return;
+    if (self.editor_nav_back.items.len > nav_stack_max) {
+        _ = self.editor_nav_back.orderedRemove(0);
+    }
+}
+
+/// **root 밖은 열지 않는다**(§5.2 — 표시와 접근을 가른다). 판정의 단일 출처는
+/// `repo_path.underRoot` 이고, breadcrumb 표시가 쓰는 그 함수다.
+///
+/// **root 를 모르면 막지 않는다** — 저장소 밖에서 파일 하나만 열어 쓰는 경우가 그것이고, 그때
+/// 「밖」이라는 개념 자체가 없다.
+fn withinNavRoot(self: *AppSession, path: []const u8) bool {
+    const root = self.git_repo orelse (self.file_tree.rootAt(0) orelse return true);
+    if (root.len == 0) return true;
+    return maru.session.repo_path.underRoot(path, root);
+}
+
+/// **뒤로 간다**(§5.2). 닫힌 Term 을 가리키는 항목은 **버리고 다음으로** 간다 — 닫힌 파일을
+/// 되살리는 것은 「이동」이 아니라 「열기」다. 갈 곳이 없으면 `false`.
+pub fn navigateBack(self: *AppSession) bool {
+    return navigateStep(self, &self.editor_nav_back, &self.editor_nav_forward);
+}
+
+/// **앞으로 간다**(§5.2).
+pub fn navigateForward(self: *AppSession) bool {
+    return navigateStep(self, &self.editor_nav_forward, &self.editor_nav_back);
+}
+
+fn navigateStep(
+    self: *AppSession,
+    from_stack: *std.ArrayList(NavMark),
+    to_stack: *std.ArrayList(NavMark),
+) bool {
+    while (from_stack.items.len > 0) {
+        const mark = from_stack.pop().?;
+        const term = term_ops.termBySurfaceId(self, mark.surface_id) orelse continue; // 닫혔다 — 버린다
+        if (term.kind != .editor) continue;
+        const doc = term.rt.editor_doc orelse continue;
+
+        // **반대쪽에 지금 자리를 남긴다** — 그러지 않으면 한 번 뒤로 간 뒤 돌아올 수 없다.
+        if (currentNavMark(self)) |here| to_stack.append(self.allocator, here) catch {};
+
+        focusTermForNav(self, term);
+        placeCaretAndReveal(self, term, @min(mark.offset, doc.file.content.len));
+        return true;
+    }
+    return false;
+}
+
+/// 그 Term 이 있는 pane/탭으로 옮긴다 — 열기 경로가 쓰는 것과 같은 단일 출처다.
+fn focusTermForNav(self: *AppSession, term: *Term) void {
+    _ = self.activateExistingFileTerm(term);
+}
+
 /// 헤더 밴드에 그릴 `경로 › 바깥 › 안쪽` 한 줄(§7.5 「체인이 밴드에 선다」). 체인이 없으면 `path` 를
 /// 그대로 돌려주므로 **호출자는 분기하지 않는다** — 그 경우 밴드는 지금까지와 글자 하나 다르지 않다.
 ///
@@ -16322,4 +16460,232 @@ test "ES32 구문 접힘 승격이 보이는 줄 표를 다시 만든다 — 「
         try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len);
         try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_numbers.len);
     }
+}
+
+test "NAV1 이동은 열기→펴기→caret→스크롤 순서로 간다 — 접힌 자리로도 갈 수 있다 (§5.2)" {
+    // §5.2 「순서가 계약이다」. 접힘을 안 펴고 caret 만 옮기면 **화면에 없는 곳**으로 가고,
+    // 사용자는 아무 일도 안 일어난 것으로 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n    _ = x;\n}\n\npub fn b() void {\n    const y = 2;\n    _ = y;\n}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    const target = std.mem.indexOf(u8, doc.file.content, "_ = y").?;
+
+    try navigateTo(fx.session, .{ .offset = target });
+
+    const sel = fx.term.rt.editor_selection orelse return error.NoSel;
+    try testing.expectEqual(target, sel.focus);
+    // **여러 커서를 남기지 않는다** — 이동은 커서를 하나로 놓는다.
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_extra_selections.len);
+}
+
+test "NAV2 뒤로 가면 떠난 자리로 돌아오고, 앞으로가 그것을 되짚는다 (§5.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n\npub fn b() void {\n    const y = 2;\n}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    const first = std.mem.indexOf(u8, doc.file.content, "const x").?;
+    const second = std.mem.indexOf(u8, doc.file.content, "const y").?;
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(first);
+    try navigateTo(fx.session, .{ .offset = second });
+    try testing.expectEqual(second, (fx.term.rt.editor_selection orelse return error.NoSel).focus);
+
+    // 뒤로 — 떠난 자리다.
+    try testing.expect(navigateBack(fx.session));
+    try testing.expectEqual(first, (fx.term.rt.editor_selection orelse return error.NoSel).focus);
+
+    // 앞으로 — 다시 그 자리다.
+    try testing.expect(navigateForward(fx.session));
+    try testing.expectEqual(second, (fx.term.rt.editor_selection orelse return error.NoSel).focus);
+
+    // 더 갈 곳이 없다.
+    try testing.expect(!navigateForward(fx.session));
+}
+
+test "NAV3 같은 자리로 가면 스택이 안 쌓인다 — 뒤로가 먹통처럼 보이지 않게 (§5.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    const spot = std.mem.indexOf(u8, doc.file.content, "const x").?;
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(spot);
+    try navigateTo(fx.session, .{ .offset = spot }); // 지금 자리 그대로
+    try navigateTo(fx.session, .{ .offset = spot });
+    try navigateTo(fx.session, .{ .offset = spot });
+
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+    try testing.expect(!navigateBack(fx.session)); // 갈 곳이 없다
+}
+
+test "NAV4 새로 이동하면 앞으로 스택을 버린다 — 가지 않은 미래를 가리키지 않는다 (§5.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n\npub fn b() void {\n    const y = 2;\n}\n\npub fn c() void {\n    const z = 3;\n}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    const a = std.mem.indexOf(u8, doc.file.content, "const x").?;
+    const b = std.mem.indexOf(u8, doc.file.content, "const y").?;
+    const c = std.mem.indexOf(u8, doc.file.content, "const z").?;
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(a);
+    try navigateTo(fx.session, .{ .offset = b });
+    try testing.expect(navigateBack(fx.session)); // a 로 돌아왔다 — 앞으로에 b 가 있다
+    try testing.expect(fx.session.editor_nav_forward.items.len > 0);
+
+    try navigateTo(fx.session, .{ .offset = c }); // 새 이동
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_forward.items.len);
+    try testing.expect(!navigateForward(fx.session));
+}
+
+test "NAV5 root 밖 경로는 열지 않는다 — 표시와 접근을 가른다 (§5.2)" {
+    // §5.2: *"서버가 준 경로라는 것은 열어도 된다는 근거가 아니다"*. 판정의 단일 출처는
+    // `repo_path.underRoot` 이고, 그것이 이 경로에 실제로 붙었는지 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // **root 를 모르면 안 막는다** — 저장소 밖에서 파일 하나만 열어 쓰는 경우이고, 그때 「밖」이라는
+    // 개념 자체가 없다. 픽스처는 그 상태로 시작하므로 여기서 먼저 그 갈래를 못박는다.
+    try testing.expect(fx.session.git_repo == null and fx.session.file_tree.rootCount() == 0);
+    if (navigateTo(fx.session, .{ .path = "/etc/passwd", .offset = 0 })) |_| {
+        // 열렸다 — root 를 모르니 막지 않았다는 뜻이고, 그것이 이 갈래의 계약이다.
+    } else |e| {
+        try testing.expect(e != error.OutsideRoot); // 못 열 수는 있어도 **막혀서**는 아니다
+    }
+
+    // 이제 root 를 세운다 — 세션이 소유하므로 `dupe` 로 넘긴다(`deinit` 이 free 한다).
+    fx.session.git_repo = try allocator.dupe(u8, "/private/tmp/maru-nav-root-fixture");
+
+    const before = fx.session.tabs.items[fx.session.app_window.active_tab].panes.items.len;
+    try testing.expectError(error.OutsideRoot, navigateTo(fx.session, .{
+        .path = "/etc/passwd",
+        .offset = 0,
+    }));
+    // 아무것도 안 열렸다.
+    try testing.expectEqual(before, fx.session.tabs.items[fx.session.app_window.active_tab].panes.items.len);
+}
+
+test "NAV6 닫힌 Term 을 가리키는 항목은 버리고 다음으로 간다 — 멈추지 않는다 (§5.2)" {
+    // §5.2: *"못 찾으면 그 항목을 버리고 다음으로 간다 — 닫힌 파일을 되살리지 않는다"*.
+    // **거기서 멈추면 뒤로가 영영 막힌다** — 닫은 파일 하나가 스택 전체를 봉한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn a() void {\n    const x = 1;\n}\n\npub fn b() void {\n    const y = 2;\n}\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    const first = std.mem.indexOf(u8, doc.file.content, "const x").?;
+    const second = std.mem.indexOf(u8, doc.file.content, "const y").?;
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(first);
+    try navigateTo(fx.session, .{ .offset = second });
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+
+    // **닫힌 Term 을 가리키는 항목을 스택 맨 위에 끼운다.** 존재하지 않는 surface id 는 `termBySurfaceId`
+    // 가 못 찾는 자리 그대로다 — 실제로 Term 을 닫으면 픽스처의 유일한 편집기가 사라져 갈 곳도 없어진다.
+    try fx.session.editor_nav_back.append(allocator, .{ .surface_id = std.math.maxInt(u64), .offset = 0 });
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_nav_back.items.len);
+
+    // 죽은 항목을 지나 **살아 있는 자리로** 간다.
+    try testing.expect(navigateBack(fx.session));
+    try testing.expectEqual(first, (fx.term.rt.editor_selection orelse return error.NoSel).focus);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len); // 둘 다 소비됐다
+}
+
+test "NAV7 이동은 그 자리를 화면에 드러낸다 — caret 만 옮기지 않는다 (§5.2)" {
+    // §5.2: *"화면에 없는 곳으로 caret 만 옮기면 사용자는 아무 일도 안 일어난 것으로 본다"*.
+    // 스크롤을 빼도 selection 은 맞으므로 **위 판정자들이 전부 통과한다** — 뮤테이션이 그것을 보였다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    var i: usize = 0;
+    while (i < 400) : (i += 1) _ = insertText(fx.session, fx.term, "const line = 1;\n");
+
+    // **맨 위로 되돌린다.** 삽입이 커서를 문서 끝으로 끌고 갔고 화면도 따라갔다 — 그대로 재면
+    // 「이동이 화면을 옮겼다」와 「이미 거기 있었다」가 구별되지 않는다(첫 판에서 370행이 나왔다).
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.term.rt.editor_first_line = 0;
+
+    // 한 프레임 그려 스냅숏을 만든다 — 스크롤 판정이 그것을 읽는다(§4.1g ②).
+    var d0 = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.NoFrame;
+    d0.dl.deinit(allocator);
+    fx.session.editor_nav_back.clearRetainingCapacity();
+    fx.session.editor_nav_forward.clearRetainingCapacity();
+
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    const far_line: u32 = 380;
+    const far = doc.file.lines.line(far_line) orelse return error.NoLine;
+
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_first_line); // 맨 위에서 시작
+    try navigateTo(fx.session, .{ .offset = far.start });
+
+    // **화면이 따라갔다.** 첫 줄이 그대로면 그 자리는 화면 밖이다.
+    try testing.expect(fx.term.rt.editor_first_line > 0);
+    try testing.expect(fx.term.rt.editor_first_line <= far_line);
+}
+
+test "NAV8 이동은 커서를 하나로 놓는다 — 멀티커서가 남지 않는다 (§5.2)" {
+    // 이동은 「지금 여기」를 하나로 만드는 동작이다. 남은 커서가 있으면 다음 타이핑이 **화면 밖
+    // 여러 곳**을 고친다. `NAV1` 이 이것을 보긴 하지만 애초에 커서가 하나여서 뮤턴트를 못 잡았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "aa\nbb\naa\nbb\naa\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+
+    // **커서를 실제로 여럿 만든다** — 그래야 지우는 규율을 잴 수 있다.
+    const extras = try allocator.alloc(editor_selection.Selection, 2);
+    extras[0] = editor_selection.Selection.at(3);
+    extras[1] = editor_selection.Selection.at(6);
+    fx.term.rt.editor_extra_selections = extras;
+    try testing.expectEqual(@as(usize, 2), fx.term.rt.editor_extra_selections.len);
+
+    try navigateTo(fx.session, .{ .offset = @min(9, doc.file.content.len) });
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_extra_selections.len);
+}
+
+test "NAV9 스택은 상한에서 오래된 것부터 버린다 — 오래 켠 창에서 안 자란다 (§5.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n");
+
+    // 상한보다 넉넉히 많이 옮긴다 — 매번 다른 자리라 매번 쌓인다.
+    var i: usize = 0;
+    while (i < nav_stack_max + 20) : (i += 1) {
+        try navigateTo(fx.session, .{ .offset = i + 1 });
+    }
+    try testing.expectEqual(nav_stack_max, fx.session.editor_nav_back.items.len);
+
+    // **오래된 쪽을 버렸다** — 맨 아래가 0번 자리가 아니다.
+    try testing.expect(fx.session.editor_nav_back.items[0].offset > 1);
 }

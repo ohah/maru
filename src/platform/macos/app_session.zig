@@ -4423,6 +4423,17 @@ pub const AppSession = struct {
     // 스크롤백은 절대 (행, 열)이고 이쪽은 (문서 줄, 줄 안 byte)다. 둘을 한 배열로 합치지 않는 이유가
     // 그 축이다: 좌표계가 다른 값을 한 목록에 담으면 읽는 쪽마다 어느 쪽인지 물어야 하고, 그 질문을
     // 빠뜨린 자리가 곧 결함이 된다. 대신 **한 번에 하나만 비어 있지 않다**(활성 Term이 하나다).
+    /// 이동 스택(§5.2 「되돌아가기 스택 — 창 하나에 하나」). **Term 마다 두지 않는다** — 이동의
+    /// 절반이 파일을 건너뛰므로 Term 별로 나누면 그 이동이 어느 스택에도 온전히 안 남는다.
+    ///
+    /// **항목이 Term 포인터가 아니라 `surface_id` 인 이유**는 그 Term 이 닫힐 수 있어서다.
+    /// 되돌아갈 때 `termBySurfaceId` 로 되찾고 **못 찾으면 버리고 다음으로 간다** — 닫힌 파일을
+    /// 되살리는 것은 「이동」이 아니라 「열기」다.
+    editor_nav_back: std.ArrayList(editor_ops.NavMark) = .empty,
+    /// 뒤로 간 뒤 다시 앞으로 갈 자리. **새로 이동하면 통째로 버린다**(브라우저와 같은 규약) —
+    /// 안 버리면 「앞으로」가 가지 않은 미래를 가리킨다.
+    editor_nav_forward: std.ArrayList(editor_ops.NavMark) = .empty,
+
     editor_find_matches: std.ArrayList(maru.session.editor.find.Match) = .empty,
     // 위 매치들이 **어느 Term의 것인가**(그 Term의 surface id, 0 = 없음). 활성 편집기가 바뀌면
     // 매치는 남의 문서 것이 되므로 다시 계산해야 하는데, 그 사실을 알 방법이 이것뿐이다 —
@@ -20629,6 +20640,8 @@ pub const AppSession = struct {
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
+        self.editor_nav_back.deinit(self.allocator);
+        self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
         self.find_view_spans.deinit(self.allocator);
         self.remote_find_spans.deinit(self.allocator); // §6c host-backed 검색 캐시

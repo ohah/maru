@@ -966,7 +966,8 @@ requirement digest 및 reap 증거를 담은 JSON artifact를 남긴다. 입력�
 [`maru.session-host-release.v1`](session-host-upgrade.md#u5--제품-활성화)의 exact predecessor·compatibility·서명·asset·attestation
 계약을 summary와 교차검증해야 한다. 실제 배포 artifact A를 보존해 B job에서 A daemon→B adapter→same-PID exec→B GUI
 attach를 실행하는 named release gate와 artifact owner가 없으면 provenance 미검증이다.
-하네스 구현/compile 성공과 실제 signed release artifact 실행 성공은 다른 증거다. 현재 저장소와 일반 CI에는 해당
+하네스의 1-runtime 복원 소비자는 GUI 제품 경계인 `RemoteRuntime.attachExisting`이어야 하며, raw MRSH attach만으로는
+GUI exact reattach를 주장하지 않는다. 하네스 구현/compile 성공과 실제 signed release artifact 실행 성공은 다른 증거다. 현재 저장소와 일반 CI에는 해당
 아티팩트가 없어 후자는 여전히 미검증이며, 위 U5 미완료 판정을 바꾸지 않는다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새

@@ -207,7 +207,12 @@ fn renormalizeGlyphCellUvs(cells: []NativeMetalCell, atlas_width_px: u32, atlas_
 /// GpuGlyph joins the same shared atlas as NativeMetalCell but bypasses the cell DTO. Keep its
 /// UVs tied to the final frame atlas rather than the size that happened to exist when one pane
 /// finished; otherwise a later pane growth corrupts only rich Chrome text.
-fn renormalizeGpuGlyphUvs(glyphs: []GpuGlyph, atlas_width_px: u32, atlas_height_px: u32) void {
+/// **Lab 스모크도 이것을 부른다**(2026-08-31). 캡처가 이 단계를 건너뛰면 `clipGlyphQuad` 가 좁힌
+/// `atlas_*_px` 가 UV 에 반영되지 않아, **부분적으로 보이는 행의 글자가 잘리는 대신 찌그러진다** —
+/// 기하만 줄고 텍스처는 원본 슬롯이 남기 때문이다. 제품은 `replace` 가 매 프레임 불러서 안 보였고,
+/// 파일 트리 라벨에 스크롤 clip 을 켜자 **Lab 캡처에서만** 드러났다. 캡처가 제품을 예고하려면
+/// 두 경로가 같은 단계를 지나야 한다.
+pub fn renormalizeGpuGlyphUvs(glyphs: []GpuGlyph, atlas_width_px: u32, atlas_height_px: u32) void {
     const tex = renderer.AtlasTextureSize{ .width_px = atlas_width_px, .height_px = atlas_height_px };
     for (glyphs) |*glyph| {
         const rect = renderer.glyph_quads.uvRectForPx(glyph.atlas_x_px, glyph.atlas_y_px, glyph.atlas_width_px, glyph.atlas_height_px, tex) catch continue;

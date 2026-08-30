@@ -358,6 +358,9 @@ pub const StreamScanner = struct {
     consumed: u64 = 0,
     /// 상한에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
     partial: bool = false,
+    /// 이월 버퍼를 앞으로 당긴 **횟수**. 진단용이자 회귀 가드다 — 개행을 못 만난 청크에서 이 값이
+    /// 오르면 긴 줄 하나가 O(N²) 로 바이트를 옮기고 있다는 뜻이다(실측 52.9 초 → 10.1 초 수정).
+    carry_moves: u64 = 0,
 
     pub fn deinit(self: *StreamScanner, allocator: std.mem.Allocator) void {
         self.carry.deinit(allocator);
@@ -401,10 +404,17 @@ pub const StreamScanner = struct {
         }
 
         // 소비한 만큼 앞을 버리고 꼬리만 남긴다.
+        //
+        // **아무것도 안 소비했으면 옮길 것도 없다.** 이 `if` 가 없으면 개행을 못 만난 청크마다 버퍼
+        // **전체**를 자기 자신에게 memcpy 한다 — 긴 줄 하나가 64 KiB 청크 N 개로 쌓이는 동안
+        // O(N²) 바이트를 옮긴다. 실측(1,980 MB 파일): 이 한 줄로 **52.9 초 → 아래 참조**.
         self.consumed += used;
-        const rest = buf.len - used;
-        std.mem.copyForwards(u8, self.carry.items[0..rest], buf[used..]);
-        self.carry.shrinkRetainingCapacity(rest);
+        if (used > 0) {
+            self.carry_moves += 1;
+            const rest = buf.len - used;
+            std.mem.copyForwards(u8, self.carry.items[0..rest], buf[used..]);
+            self.carry.shrinkRetainingCapacity(rest);
+        }
 
         // **꼬리가 한 줄 상한을 넘으면 그 줄을 버린다.** 개행 없는 바이트가 무한히 오면(손상 파일·바이너리)
         // 이 버퍼가 파일 크기만큼 자란다. 버리는 대신 `partial` 로 밝힌다.
@@ -801,4 +811,60 @@ test "Hit.file_index 기본값은 0 — 스캐너는 파일 하나만 훑는다"
     try scanLine(allocator, line, 0, &out);
     try testing.expectEqual(@as(usize, 1), out.items.len);
     try testing.expectEqual(@as(u8, 0), out.items[0].file_index);
+}
+
+test "긴 줄이 청크로 쪼개져 와도 이월 버퍼를 옮기지 않는다 — O(N²) 회귀 가드" {
+    // **실측이 잡은 결함이다**(2026-08-30, 1,980 MB 실제 rollout): 개행을 못 만난 청크마다 이월
+    // 버퍼 **전체**를 자기 자신에게 memcpy 했다. 긴 줄 하나가 64 KiB 청크 N 개로 쌓이는 동안
+    // O(N²) 바이트를 옮긴다 — 그 한 줄을 고치니 **52.9 초 → 10.1 초** 였다.
+    //
+    // 시간으로 재면 기계마다 달라 불안정하다. **옮긴 횟수**로 못박는다: 개행이 오기 전에는 0 이다.
+    const allocator = testing.allocator;
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+
+    const chunk = "x" ** 4096;
+    for (0..64) |_| try scanner.feed(allocator, chunk, &out);
+    // 아직 한 줄도 안 끝났다 — 옮길 것이 없다.
+    try testing.expectEqual(@as(u64, 0), scanner.carry_moves);
+    try testing.expectEqual(@as(u64, 0), scanner.consumed);
+    try testing.expectEqual(@as(usize, 64 * 4096), scanner.carry.items.len);
+
+    // 개행이 오면 그때 한 번 옮긴다(꼬리만).
+    try scanner.feed(allocator, "\n", &out);
+    try testing.expectEqual(@as(u64, 1), scanner.carry_moves);
+    try testing.expectEqual(@as(u64, 64 * 4096 + 1), scanner.consumed);
+    try testing.expectEqual(@as(usize, 0), scanner.carry.items.len);
+}
+
+test "청크가 줄 여럿을 담아도 이미지를 찾고 오프셋이 파일 절대다" {
+    // 위 가드가 「안 옮긴다」만 보므로, **옮기는 쪽이 여전히 맞는지**도 같이 본다 —
+    // 최적화가 정확성을 깨는 자리가 정확히 여기다.
+    const allocator = testing.allocator;
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+
+    const filler = "{\"type\":\"user\",\"message\":{\"content\":[]}}\n";
+    const img =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\"," ++
+        "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"QUJD\"}}]}}\n";
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    try doc.appendSlice(allocator, filler);
+    const img_at = doc.items.len;
+    try doc.appendSlice(allocator, img);
+    try doc.appendSlice(allocator, filler);
+
+    // 한 바이트씩 먹여도(가장 잔인한 쪼개기) 결과가 같아야 한다.
+    for (doc.items) |b| try scanner.feed(allocator, &.{b}, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u64, img_at), out.items[0].line_offset);
+    try testing.expectEqualStrings(
+        "QUJD",
+        doc.items[out.items[0].data_offset..][0..out.items[0].data_len],
+    );
 }

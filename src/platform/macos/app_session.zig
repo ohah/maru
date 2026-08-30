@@ -13847,9 +13847,14 @@ pub const AppSession = struct {
     fn spawnRemoteHookInstall(self: *AppSession, host: *RemoteAgentHost, ctx: RemoteUpload) void {
         const ah = maru.cli.agent_hooks;
         const hc = maru.session.agent_hook_command;
-        // provider 는 claude 로 시작한다 — codex 는 **그 기계에서 사용자가 신뢰를 눌러야** 하므로
-        // (계약 §11.5) 조용히 깔아 두는 것이 뜻이 없다. 그 축은 사용자 행동과 함께 별도로 다룬다.
-        const cmd = ah.remoteShellCommand(self.allocator, .install, hc.Provider.claude.tag(), hc.remote_log_dir_rel) catch {
+
+        // **두 provider 를 한 번의 왕복으로** 깐다. 나눠 부르면 `ssh` 자식이 둘이 되고 그 둘이 각각
+        // `MaxSessions` 를 먹는다 — RA4 가 «host 당 하나» 로 좁혀 둔 예산을 설치가 도로 먹는 셈이다.
+        //
+        // codex 도 우리가 깐다: 신뢰 항목까지 원격 `maru` 가 직접 쓰므로(로컬과 같은 순수 판정)
+        // 그 기계에서 사용자가 TUI 를 눌러야 하는 일이 없다 — 원격 세션에는 그 TUI 를 볼 사람이 없으니
+        // 그것이 곧 「훅이 영영 안 돈다」였다.
+        const cmd = ah.remoteShellCommandAll(self.allocator, .install, hc.remote_log_dir_rel) catch {
             host.install_done = true;
             host.stopped = true;
             return;

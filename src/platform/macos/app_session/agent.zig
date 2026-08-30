@@ -1439,72 +1439,28 @@ fn ensureCodexTrust(
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(a);
     out.appendSlice(a, before) catch return;
-    var added: usize = 0;
-    var stale: u32 = 0;
-    var refreshed: u32 = 0;
-    var diverged: u32 = 0;
-    for (slots[0..found]) |placement| {
-        const entry = trust.forEvent(placement.json_name) orelse continue;
+    // **판정은 순수 층 하나가 한다.** 이 결정에는 두 겹의 미묘함이 있고(값이 낡았을 때의 갱신, «이미
+    // 써 본 값» 을 다시 안 쓰는 루프 방지) 원격 설치기(`maru agent-hooks`)도 같은 결정을 해야 한다 —
+    // 두 곳에 적으면 반드시 갈리고, 갈린 쪽은 매 실행 승인 프롬프트가 뜨는 무한 루프가 된다.
+    var slot_buf: [install.max_events]trust.Slot = undefined;
+    for (slots[0..found], 0..) |placement, i| {
         // matcher 는 **세트가 정한 값**이다(파일에 적힌 값이 아니라) — 우리가 넣은 항목이므로 같다.
         var matcher: ?[]const u8 = null;
         for (hook_command.eventsFor(.codex, .local)) |e| {
             if (std.mem.eql(u8, e.name, placement.json_name)) matcher = e.matcher;
         }
-
-        var key: std.ArrayListUnmanaged(u8) = .empty;
-        defer key.deinit(a);
-        trust.appendKey(&key, a, hooks_real, entry, placement.group_index, placement.handler_index) catch return;
-
-        var hash: std.ArrayListUnmanaged(u8) = .empty;
-        defer hash.deinit(a);
-        trust.appendHash(&hash, a, entry, cmd, hook_command.timeout_seconds, matcher) catch return;
-
-        if (trust.hasTrustEntry(out.items, key.items)) {
-            // 이미 있다. 그런데 **값이 다르면 그 훅은 안 돈다**: 키는 항목의 자리로 만들어져 커맨드가
-            // 바뀌어도 그대로이므로, 커맨드를 고친 뒤에는 키가 있는 채로 값만 낡는다. codex 는 그것을
-            // `modified` 로 보고 실행하지 않는다(계약 §2.1).
-            //
-            // 못 읽으면(`null`) **아무것도 하지 않는다** — 모르는 것을 어긋남으로 세면 거짓 경고가 되고,
-            // 모르는 것을 덮으면 남의 값을 지운다.
-            const stored = trust.storedHash(out.items, key.items) orelse continue;
-            if (std.mem.eql(u8, stored, hash.items)) continue; // 멀쩡하다
-
-            // **이 값을 이미 써 봤으면 다시 안 쓴다.** 그때는 누군가(= 사용자 승인을 받은 codex) 우리 값을
-            // 되돌린 것이고, 그 모양이 곧 «우리 공식이 틀렸다» 다. 다시 쓰면 매 실행 승인 프롬프트가 뜨는
-            // 무한 루프가 된다 — §2.1 이 값을 매겨 둔 바로 그 위험이다. 값 하나당 시도는 한 번뿐이다.
-            if (trust.triedHash(out.items, key.items)) |tried| {
-                if (std.mem.eql(u8, tried, hash.items)) {
-                    // **이 상태는 «안 돈다» 가 아니다.** 우리가 쓴 직후 같은 커맨드에 대해 누군가 **다른 값**을
-                    // 써 넣었다는 뜻이고, 그 누군가는 거의 언제나 **사용자 승인을 받은 codex** 다. 그러면 파일의
-                    // 값이 codex 의 정답이므로 훅은 **정상으로 돌고 있다** — 그때 「승인하라」고 말하면 방금
-                    // 승인한 사람에게 거짓을 말하는 것이다.
-                    //
-                    // 동시에 이 자리가 **공짜 드리프트 감지기**다: 같은 커맨드에 대해 codex 가 우리와 다른 값을
-                    // 냈다는 확정 증거가 파일 안에 있다(프로세스를 하나도 안 띄우고 얻는다). 그래서 `stale` 과
-                    // 갈라 세고 문구도 갈라 준다 — 손으로 고친 경우도 같은 모양이라 **단정하지 않고 확인을 청한다**.
-                    diverged += 1;
-                    continue;
-                }
-            }
-
-            // 갱신한다 — **덧붙이지 않고 값 한 줄만** 바꾼다(같은 테이블을 두 번 적으면 codex 가
-            // `config.toml` 전체를 못 읽는다).
-            var next: std.ArrayListUnmanaged(u8) = .empty;
-            defer next.deinit(a);
-            const done = trust.rewriteTrustEntry(&next, a, out.items, key.items, hash.items) catch false;
-            if (!done) {
-                stale += 1; // 모양을 못 읽었다 — 손대지 않고 알린다
-                continue;
-            }
-            out.clearRetainingCapacity();
-            out.appendSlice(a, next.items) catch return;
-            refreshed += 1;
-            continue;
-        }
-
-        trust.appendTrustEntry(&out, a, out.items, key.items, hash.items) catch return;
-        added += 1;
+        slot_buf[i] = .{
+            .json_name = placement.json_name,
+            .group_index = placement.group_index,
+            .handler_index = placement.handler_index,
+            .matcher = matcher,
+        };
     }
+    const stats = trust.applyEntries(&out, a, hooks_real, slot_buf[0..found], cmd, hook_command.timeout_seconds) catch return;
+    const added = stats.added;
+    const stale = stats.stale;
+    const refreshed = stats.refreshed;
+    const diverged = stats.diverged;
     // 쓰기 성패와 무관하게 알린다 — 어긋남은 «쓸 것이 없어서» 안 쓰는 경로에서 생긴다.
     //
     // **0 도 그대로 쓴다(latch 금지).** `if (stale != 0)` 로 두면 한 번 세워진 수가 안 내려가서, 사용자가

@@ -17361,6 +17361,7 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
+            self.dropQuadsByLayer(image_gallery_ops.hover_layer); // 갤러리 호버 테두리도 per-frame — drop 과 append 를 짝짓는다.
             self.dropQuadsByLayer(status_bar_layer); // 상태바 배경(bottom)도 per-frame — drop과 append를 짝짓는다.
             // 위 layer2 drop과 값이 같아 지금은 중복이지만, status_bar_layer가 바뀌어도 짝이 남도록 둔다.
             // 모달·스크롤바가 상태바를 덮는 것은 **버킷이 정한다**(bottom이 over 아래) — 배열 순서가 아니다.
@@ -73797,8 +73798,14 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.x)), q.x);
     try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.y)), q.y);
     try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.w)), q.w);
-    // **이미지보다 뒤에 깐다** — 위에 깔면 그림이 그 색에 잠긴다.
-    try std.testing.expectEqual(@as(u32, 0), q.layer);
+    // **프레임 레이어다**(사용자 보고 회귀 방지). 예전엔 0 이었는데 그 값은 사이드바가 소유한
+    // «유지» 버킷이라 `dropQuadsByLayer` 가 안 건드려, 얹은 칸마다 강조가 영구히 쌓였다.
+    try std.testing.expectEqual(image_gallery_ops.hover_layer, q.layer);
+    try std.testing.expect(q.layer != 0);
+    // **채우지 않는다** — 이 레이어는 그림 «위» 라 채우면 썸네일이 그 색에 잠긴다. 테두리만 그린다.
+    try std.testing.expectEqual(@as(u32, 0), q.fill_color0);
+    try std.testing.expect(q.border_color != 0);
+    try std.testing.expect(q.border_widths[0] > 0);
 
     // 얹힌 칸이 없으면 아무것도 안 그린다.
     _ = image_gallery_ops.clearHover(session);

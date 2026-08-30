@@ -976,6 +976,12 @@ near-max gate는 별도 named release step에서 `max_runtime_count - 1` 실제 
 preflight fail/hang, exec 반환, adoption/path identity, 연속 rollback과 promotion failure가 첫 matrix의 범위다.
 이는 기존 leaf 증거의 누락 방지와 공통 실행 진입점이며, signed provenance나 아직 연결하지 않은
 manifest/socket/FD 전 구간 failure injection을 완료로 승격하지 않는다.
+`test-session-host-upgrade-component-failure-matrix`는 그 다음 component inventory로 `handoff_store` 6개,
+`exec_fd_set` 6개, `host_authority` 3개, `upgrade_target` 5개를 exact named gate에 묶는다. primary/backup
+commit과 residue cleanup, reserved fd slot/CLOEXEC rollback, manifest authority CAS, target staging/pin/path
+replacement의 기존 module 증거가 release 검증에서 빠지지 않게 한다. 다만 이것은 component seam의 집합이며
+socket/product coordinator를 관통하는 failure injection과 실제 `fsync`/unlink syscall failure 증거가 아니므로
+manifest/reader/socket/FD/promotion 전 구간 완료 판정을 바꾸지 않는다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

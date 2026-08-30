@@ -11452,10 +11452,11 @@ pub fn build(b: *std.Build) void {
                 "handoff store directory fd stays on the approved generation after path replacement",
                 "handoff store exact cleanup preserves a swapped replacement leaf",
                 "reserved handoff syscall failures publish no pair and leave no attempt residue",
+                "reservation cleanup identity failure closes descriptors and preserves replacement",
             },
         });
         const run_handoff_store_tests = b.addRunArtifact(handoff_store_tests);
-        run_handoff_store_tests.addArg("--maru-expect-tests=7");
+        run_handoff_store_tests.addArg("--maru-expect-tests=8");
         run_handoff_store_tests.setCwd(b.path("."));
 
         const reserved_handoff_failure_tests = addProjectTest(b, .{
@@ -11478,6 +11479,27 @@ pub fn build(b: *std.Build) void {
             "Inject reserved handoff sync and cleanup failures (macOS)",
         );
         reserved_handoff_failure_step.dependOn(&run_reserved_handoff_failure_tests.step);
+
+        const reservation_cleanup_failure_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_store.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "reservation cleanup identity failure closes descriptors and preserves replacement",
+            },
+        });
+        const run_reservation_cleanup_failure_tests = b.addRunArtifact(reservation_cleanup_failure_tests);
+        run_reservation_cleanup_failure_tests.addArg("--maru-expect-tests=1");
+        run_reservation_cleanup_failure_tests.setCwd(b.path("."));
+        const reservation_cleanup_failure_step = b.step(
+            "test-session-host-upgrade-reservation-cleanup-failure",
+            "Verify reserved handoff cleanup identity failure (macOS)",
+        );
+        reservation_cleanup_failure_step.dependOn(&run_reservation_cleanup_failure_tests.step);
 
         const exec_fd_set_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

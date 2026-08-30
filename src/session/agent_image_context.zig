@@ -4,7 +4,7 @@
 //!
 //! - `image_line_prefix` — 이미지가 든 줄의 시작부터 **base64 시작 전까지**. payload 는 수 MB 라
 //!   절대 넘겨받지 않는다.
-//! - `prev_line` — 그 **직전 줄** 전체(없으면 빈 슬라이스).
+//! - `prev_lines` — 그 앞의 **줄 몇 개**(없으면 빈 슬라이스). 줄로 쪼개 뒤에서부터 본다.
 //!
 //! ## 왜 직전 줄 하나인가 (2026-08-29 실측, 실제 트랜스크립트 2,548 파일)
 //!
@@ -21,8 +21,24 @@
 //! | `tool_use_id` 가 base64 **앞**에 오는 비율 | 1,076 / 1,076 |
 //! | 직전 줄 크기 | 중앙 1.5 KB, 최대 2.3 KB |
 //!
-//! 그래서 창도 id 맵도 없다. 그리고 마지막 줄(직전 줄 크기)이 «호출자가 64 KiB 만 거슬러 읽으면
-//! 된다» 를 정한다 — 실측 최대의 28배 여유다.
+//! 그래서 id 맵이 없다. 그리고 마지막 줄(직전 줄 크기)이 «호출자가 64 KiB 만 거슬러 읽으면 된다» 를
+//! 정한다 — 실측 최대의 28배 여유다.
+//!
+//! ## Codex 는 «직전 줄 하나» 가 아니다 (2026-08-30 실측)
+//!
+//! Claude 는 언제나 1줄 뒤였지만 Codex 의 `view_image` 는 다르다:
+//!
+//! | 잰 것 | 값 |
+//! | --- | --- |
+//! | `view_image` 결과 레코드 | 16 |
+//! | 그 줄에 텍스트가 **없는** 것 | 13 — 옛 규칙으로는 **빈 라벨** |
+//! | 호출이 **2줄 뒤** | 12 |
+//! | 호출이 1줄 뒤 | 4 |
+//! | 호출 줄에 `payload.path` | 13 |
+//!
+//! 그래서 창을 «앞선 줄들» 로 넓히고, **id 가 든 줄 안에서만** 경로를 뽑는다. 창을 통째로 훑어
+//! `path` 를 집으면 id 는 A 레코드에서, 경로는 B 레코드에서 나올 수 있다 — 그것이 바로 이 모듈이
+//! 처음부터 막으려던 «틀린 라벨» 이다.
 //!
 //! **그래도 id 를 대조한다.** 「언제나 1개」에 기대어 직전 줄의 `file_path` 를 그냥 집으면, 그 가정이
 //! 깨지는 날 **엉뚱한 파일 이름**이 이미지에 붙는다. 빈 라벨은 아무 말도 안 하지만 틀린 라벨은
@@ -68,19 +84,33 @@ pub const Label = struct {
 const tool_use_id_key = "\"tool_use_id\":\"";
 const id_key = "\"id\":\"";
 const file_path_key = "\"file_path\":\"";
+/// Codex `view_image` 는 Claude 와 다른 이름을 쓴다 — 호출 상관 키도, 경로 키도.
+const call_id_key = "\"call_id\":\"";
+const path_key = "\"path\":\"";
 const text_key = "\"text\":\"";
 const wrapper_open = "<image ";
 const wrapper_path_key = "path=\\\"";
 
 /// 이 이미지의 한 줄 설명. 못 만들면 **빈 라벨**이다 — 지어내지 않는다(계약 1).
-pub fn label(image_line_prefix: []const u8, prev_line: []const u8) Label {
+pub fn label(image_line_prefix: []const u8, prev_lines: []const u8) Label {
     const prefix = image_line_prefix[0..@min(image_line_prefix.len, max_prefix_bytes)];
-    const prev = prev_line[0..@min(prev_line.len, max_prev_line_bytes)];
+    const prev = prev_lines[0..@min(prev_lines.len, max_prev_line_bytes)];
 
-    // ① 에이전트가 읽은 이미지 — 직전 줄의 도구 호출이 그 정체다.
+    // ① 에이전트가 읽은 이미지 — 앞선 도구 호출이 그 정체다. provider 마다 키가 다르다.
+    //    Claude: `tool_use_id` → `"id"` 가 같은 줄의 `file_path`
+    //    Codex : `call_id`     → 그 id 가 든 줄의 `path`
     if (findValue(prefix, tool_use_id_key)) |tid| {
-        if (tid.len > 0 and matchesToolUse(prev, tid)) {
-            if (findValue(prev, file_path_key)) |raw| {
+        if (tid.len > 0) {
+            if (pathInLineWith(prev, tid, file_path_key)) |raw| {
+                var out: Label = .{ .source = .tool_file_path };
+                out.len = writeText(&out.buf, basenameOf(raw));
+                if (out.len > 0) return out;
+            }
+        }
+    }
+    if (findValue(prefix, call_id_key)) |cid| {
+        if (cid.len > 0) {
+            if (pathInLineWith(prev, cid, path_key)) |raw| {
                 var out: Label = .{ .source = .tool_file_path };
                 out.len = writeText(&out.buf, basenameOf(raw));
                 if (out.len > 0) return out;
@@ -122,13 +152,33 @@ pub fn label(image_line_prefix: []const u8, prev_line: []const u8) Label {
     return .{};
 }
 
-/// 직전 줄이 **이 `tool_use_id` 의** 도구 호출인가. `"id":"<tid>"` 를 그대로 찾는다 —
-/// 실측상 그 줄의 `tool_use` 는 언제나 하나지만, 대조를 빼면 그 가정이 깨질 때 틀린 라벨이 붙는다.
-fn matchesToolUse(prev: []const u8, tid: []const u8) bool {
-    var i: usize = 0;
-    while (findValueFrom(prev, id_key, i)) |found| {
-        i = found.end;
-        if (std.mem.eql(u8, found.value, tid)) return true;
+/// 앞선 줄들 중 **그 id 가 든 줄**에서만 경로를 뽑는다. 뒤에서부터 본다(가까운 호출이 그 이미지의 것이다).
+///
+/// **줄을 넘나들지 않는 것이 핵심이다.** 창을 통째로 훑어 경로를 집으면 id 는 A 레코드에서, 경로는
+/// B 레코드에서 나올 수 있다 — 빈 라벨은 아무 말도 안 하지만 틀린 라벨은 거짓말이다.
+///
+/// 창의 첫 줄은 잘려 있을 수 있는데, 잘린 값은 `findValueFrom` 이 닫는 따옴표가 없어 거부한다.
+fn pathInLineWith(prev: []const u8, id: []const u8, key: []const u8) ?[]const u8 {
+    var end: usize = prev.len;
+    while (end > 0) {
+        const start = if (std.mem.lastIndexOfScalar(u8, prev[0 .. end - 1], '\n')) |at| at + 1 else 0;
+        const line = prev[start .. end - 1 + @intFromBool(prev[end - 1] != '\n')];
+        if (lineHasId(line, id)) return findValue(line, key);
+        if (start == 0) break;
+        end = start;
+    }
+    return null;
+}
+
+/// 그 줄이 이 id 의 레코드인가. `"id":"<v>"` 와 `"call_id":"<v>"` 둘 다 본다 — Claude 는 앞을,
+/// Codex 는 뒤를 쓴다.
+fn lineHasId(line: []const u8, id: []const u8) bool {
+    for ([_][]const u8{ id_key, call_id_key }) |k| {
+        var i: usize = 0;
+        while (findValueFrom(line, k, i)) |found| {
+            i = found.end;
+            if (std.mem.eql(u8, found.value, id)) return true;
+        }
     }
     return false;
 }
@@ -426,4 +476,60 @@ test "제어문자는 그리기 경로로 새지 않는다 — 공백으로 접�
     // 내용은 남는다 — 통째로 버리지 않는다.
     try testing.expect(std.mem.indexOf(u8, got, "AA") != null);
     try testing.expect(std.mem.indexOf(u8, got, "CC") != null);
+}
+
+test "codex 가 읽은 이미지: 앞선 `view_image` 호출의 path 가 정체다" {
+    // 실측(2026-08-30): `view_image` 결과 16건 중 13건이 그 줄에 텍스트가 없어 옛 규칙으로는 빈 라벨이었다.
+    // 그리고 호출이 **2줄 뒤**인 것이 12건이라 「직전 줄 하나」로는 못 잡았다.
+    const prev =
+        \\{"type":"response_item","payload":{"type":"function_call","call_id":"call_77","name":"view_image","path":"/Users/me/shots/wide.png"}}
+        \\{"type":"event_msg","payload":{"type":"token_count","info":{}}}
+    ;
+    const prefix =
+        \\{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_77","output":[{"type":"input_image","image_url":"data:image/png;base64,
+    ;
+    const l = label(prefix, prev);
+    try testing.expectEqual(Source.tool_file_path, l.source);
+    try testing.expectEqualStrings("wide.png", l.text());
+}
+
+test "id 는 맞는데 경로가 **다른 줄**에 있으면 쓰지 않는다 — 줄을 넘나들지 않는다" {
+    // 창을 통째로 훑어 `path` 를 집으면 id 는 A 레코드에서, 경로는 B 레코드에서 나온다.
+    // 그것이 이 모듈이 처음부터 막으려던 「틀린 라벨」이다.
+    const prev =
+        \\{"payload":{"type":"function_call","call_id":"call_77","name":"view_image"}}
+        \\{"payload":{"type":"other","path":"/Users/me/shots/NOT-MINE.png"}}
+    ;
+    const prefix =
+        \\{"payload":{"type":"function_call_output","call_id":"call_77","output":[{"type":"input_image","image_url":"data:image/png;base64,
+    ;
+    try testing.expect(label(prefix, prev).isEmpty());
+}
+
+test "여러 호출이 쌓여 있으면 **가까운** 것을 쓴다" {
+    const prev =
+        \\{"payload":{"type":"function_call","call_id":"call_1","name":"view_image","path":"/a/old.png"}}
+        \\{"payload":{"type":"function_call","call_id":"call_2","name":"view_image","path":"/a/near.png"}}
+    ;
+    const prefix =
+        \\{"payload":{"type":"function_call_output","call_id":"call_2","output":[{"type":"input_image","image_url":"data:image/png;base64,
+    ;
+    try testing.expectEqualStrings("near.png", label(prefix, prev).text());
+    // 앞쪽 호출을 가리키면 그것을 쓴다(가까운 것만 보는 게 아니라 **맞는 것**을 본다).
+    const prefix1 =
+        \\{"payload":{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,
+    ;
+    try testing.expectEqualStrings("old.png", label(prefix1, prev).text());
+}
+
+test "창의 첫 줄이 잘려 있어도 안전하다 — 반쪽 값을 쓰지 않는다" {
+    // 64 KiB 창은 레코드 한가운데서 시작할 수 있다.
+    const prev =
+        \\path":"/a/truncated
+        \\{"payload":{"type":"function_call","call_id":"call_9","name":"view_image","path":"/a/ok.png"}}
+    ;
+    const prefix =
+        \\{"payload":{"type":"function_call_output","call_id":"call_9","output":[{"type":"input_image","image_url":"data:image/png;base64,
+    ;
+    try testing.expectEqualStrings("ok.png", label(prefix, prev).text());
 }

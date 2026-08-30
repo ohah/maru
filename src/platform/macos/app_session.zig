@@ -73541,8 +73541,21 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
     try std.testing.expectEqual(image_count, session.image_gallery.count());
 
     // ── ① **격자만 보고 있을 때는 화살표를 안 가져간다.** 여기가 회귀 지점이다.
+    //
+    // **제품 키 경로로 본다.** 직전에 Esc 가 「함수는 맞는데 제품이 그 함수에 안 닿는」 상태로 머지된
+    // 적이 있다 — 회귀 가드가 같은 함정에 빠지면 지키는 것이 없다. `total_app_key_events` 는 앱이
+    // 삼킨 키 수이므로, 안 늘면 그 키는 터미널로 갔다는 뜻이다.
     session.image_gallery.key_focus = true; // 도크가 키를 쥐어도
     try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1)); // 열린 것이 없으면 안 가져간다
+    {
+        const before = session.total_app_key_events;
+        _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
+        _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{} });
+        _ = try session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{} });
+        _ = try session.handleKeyEvent(.{ .key = .arrow_down, .modifiers = .{} });
+        // 넷 다 터미널로 갔다 — 하나라도 삼키면 셸 히스토리 탐색이 사라진다.
+        try std.testing.expectEqual(before, session.total_app_key_events);
+    }
 
     // ── ② 열고 나면 넘어간다.
     image_gallery_ops.openAt(session, 0);
@@ -73586,6 +73599,23 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
     _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
     try std.testing.expect(session.image_gallery.open == null);
 
-    // ── ⑧ 닫으면 화살표를 놓는다.
+    // ── ⑧ 닫으면 화살표를 놓는다 — 이것도 **제품 경로**로 본다.
     try std.testing.expect(!image_gallery_ops.navigateOpen(session, 1));
+    {
+        const before = session.total_app_key_events;
+        _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{} });
+        try std.testing.expectEqual(before, session.total_app_key_events);
+    }
+
+    // ── ⑨ **수식키가 붙은 화살표는 갤러리 것이 아니다.** ⌥←(단어 이동)·⇧←(선택) 같은 것을 삼키면
+    // 터미널 편집이 망가진다.
+    image_gallery_ops.openAt(session, 3);
+    session.image_gallery.key_focus = true;
+    {
+        const before = session.total_app_key_events;
+        _ = try session.handleKeyEvent(.{ .key = .arrow_right, .modifiers = .{ .option = true } });
+        _ = try session.handleKeyEvent(.{ .key = .arrow_left, .modifiers = .{ .shift = true } });
+        try std.testing.expectEqual(before, session.total_app_key_events);
+        try std.testing.expectEqual(@as(usize, 3), session.image_gallery.open.?.hit_index); // 안 움직였다
+    }
 }

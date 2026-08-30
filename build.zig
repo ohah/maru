@@ -4289,6 +4289,19 @@ pub fn build(b: *std.Build) void {
     run_session_host_upgrade_notice_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_upgrade_notice_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_upgrade_notice_boundary_tests.step);
+
+    const session_host_signed_upgrade_exit_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_signed_upgrade_exit_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_signed_upgrade_exit_boundary_tests =
+        b.addRunArtifact(session_host_signed_upgrade_exit_boundary_tests);
+    run_session_host_signed_upgrade_exit_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_signed_upgrade_exit_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_signed_upgrade_exit_boundary_tests.step);
     if (target.result.os.tag == .macos) {
         const session_host_upgrade_stale_sweep_product_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

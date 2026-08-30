@@ -969,6 +969,8 @@ attach를 실행하는 named release gate와 artifact owner가 없으면 provena
 하네스의 1-runtime 복원 소비자는 GUI 제품 경계인 `RemoteRuntime.attachExisting`이어야 하며, raw MRSH attach만으로는
 GUI exact reattach를 주장하지 않는다. 하네스 구현/compile 성공과 실제 signed release artifact 실행 성공은 다른 증거다. 현재 저장소와 일반 CI에는 해당
 아티팩트가 없어 후자는 여전히 미검증이며, 위 U5 미완료 판정을 바꾸지 않는다.
+near-max gate는 별도 named release step에서 `max_runtime_count - 1` 실제 PTY의 고유 marker, exact typed inventory set,
+각 ID의 GUI `RemoteRuntime` 재접속과 전량 reap을 요구한다. 한 runtime 반복이나 codec-only 255-row fixture는 제품 증거가 아니다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

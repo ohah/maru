@@ -932,6 +932,14 @@ shell의 `exit 23` 숫자 자체를 관측했다고 주장하지 않고, 명령 
 inventory와 stream만 읽는 것은 host restore 증거일 뿐 GUI exact reattach 증거로 세지 않는다. 이 하네스가 구현돼도 실제
 signed frozen release artifact 실행 전에는 1-runtime 제품 gate를 통과했다고 주장하지 않는다.
 
+near-max 제품 성공 gate는 `max_runtime_count - 1`인 255개의 **실제 PTY child**를 한 제품 daemon에 만들고 같은
+attempt로 전량 restore한다. 각 runtime은 index가 들어간 서로 다른 pre/post marker를 가져야 하며, restore 뒤 typed
+inventory는 저장한 255개 exact ID와 중복·누락 없이 같아야 한다. 검증자는 각 ID를 차례로
+`RemoteRuntime.attachExisting`해 자기 pre marker만 가진 최초 full-state와 자기 post input/delta를 확인한다. 한 runtime의
+화면이나 ID를 255번 재사용하거나 codec DTO 255개만 round-trip하는 것은 이 gate의 증거가 아니다. 종료도 모든 child에
+각자의 exit marker를 보내고 inventory와 direct-child set이 모두 비어야 끝난다. 이 부하 gate는 1-runtime gate와 별도
+named release step/artifact로 실행하며, 실제 frozen signed artifact가 없으면 skip이나 fixture 성공으로 대체하지 않는다.
+
 U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완료”를 제품/PR에 쓰지 않는다. 자동 시도가 기본
 경로에 연결된 것과 “migration이 검증됐다”는 것은 다르다 — 전자는 연결됐고, 후자는 위 gate가 닫혀야 성립한다.
 U1~U4와 현재 U5 component seam은 제품 완료가 아니라 기반 증거다.

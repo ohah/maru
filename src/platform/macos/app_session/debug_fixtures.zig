@@ -81,6 +81,9 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_OPEN")) |raw_n| {
                 self.debug_image_gallery_open = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
             }
+            if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY_HOVER")) |raw_n| {
+                self.debug_image_gallery_hover = std.fmt.parseInt(usize, std.mem.span(raw_n), 10) catch null;
+            }
         }
     }
     if (std.c.getenv("MARU_FORCE_BLOCKED") != null) {

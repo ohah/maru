@@ -11,7 +11,10 @@ const std = @import("std");
 
 /// 도크 안 격자의 여백과 간격(backing px). 값 자체는 디자인이 정할 일이라 호출자가 넘긴다.
 pub const Metrics = struct {
-    /// 타일 **가로**. 썸네일 픽셀(160)과 **다를 수 있다** — 화면 크기는 레이아웃이, 텍스처 크기는 디코드가 정한다.
+    /// 타일 **최소 가로**. 이 값이 **열 수를 정하고**, 실제로 그리는 폭은 `Layout.tile_w` 다(남는 폭을
+    /// 열에 나눠 주므로 늘 이 값 이상이다).
+    ///
+    /// 썸네일 픽셀(160)과 **다를 수 있다** — 화면 크기는 레이아웃이, 텍스처 크기는 디코드가 정한다.
     tile: u32,
     /// 타일 **세로**. 0 이면 정사각(`tile`).
     ///
@@ -50,7 +53,30 @@ pub const Layout = struct {
     /// 이 배치가 반영한 스크롤 오프셋(px). `rectAt` 이 y 에서 뺀다 — 배치와 그리기가 **같은 값**을
     /// 쓰게 묶어 둔다(따로 넘기면 한쪽만 갱신된 프레임이 생긴다).
     scroll_px: u32 = 0,
+    /// **실제로 그리는** 칸 크기. `Metrics.tile` 은 최소치일 뿐이고, 남는 폭을 열에 나눠 여기서 늘린다 —
+    /// 그래야 2열일 때 좌우가 꽉 찬다.
+    ///
+    /// 배치·라벨·hit-test 가 **모두 이 값**을 쓴다. 한 곳이라도 `Metrics.tile` 로 남으면 그린 자리와
+    /// 눌리는 자리가 갈라진다.
+    tile_w: u32 = 0,
+    tile_h: u32 = 0,
 };
+
+/// 남는 폭을 열에 나눠 실제 칸 크기를 정한다. 세로는 최소치의 비율을 그대로 따른다.
+fn resolveTile(m: Metrics, inner_w: u32, cols: u32) struct { w: u32, h: u32 } {
+    if (cols == 0) return .{ .w = m.tile, .h = tileHeight(m) };
+    // 간격은 열 사이에만 들어간다(첫 칸 앞·마지막 칸 뒤는 `pad` 가 맡는다).
+    const gaps = m.gap *| (cols -| 1);
+    const w = (inner_w -| gaps) / cols;
+    if (w <= m.tile) return .{ .w = m.tile, .h = tileHeight(m) }; // 늘릴 폭이 없다
+    const base_h = tileHeight(m);
+    // 비율 유지. u64 로 올려 곱셈이 넘치지 않게 한다.
+    const h: u32 = @intCast(@min(
+        @as(u64, std.math.maxInt(u32)),
+        (@as(u64, w) *| @as(u64, base_h)) / @max(@as(u64, 1), @as(u64, m.tile)),
+    ));
+    return .{ .w = w, .h = @max(1, h) };
+}
 
 /// 격자 배치. `scroll_px` 만큼 내려간 상태에서 **보이는 창**을 센다. 사각형은 `rectAt` 이 준다.
 ///
@@ -68,10 +94,18 @@ pub fn layout(area: Rect, m: Metrics, count: usize, scroll_px: u32) Layout {
     // **세로는 라벨까지가 한 칸이다** — 라벨 높이를 빼먹으면 마지막 행 글자가 도크 밖으로 나간다.
     const cell_h = tileHeight(m) +| m.label;
     if (inner_h < cell_h) return .{ .cols = 0, .visible = 0, .overflow = count };
-    const step = m.tile +| m.gap;
-    const step_y = cell_h +| m.gap;
-    const cols = 1 + (inner_w - m.tile) / step;
-    const rows_in_view = 1 + (inner_h - cell_h) / step_y;
+    const cols = 1 + (inner_w - m.tile) / (m.tile +| m.gap);
+
+    // **여기서 늘린다.** 열 수를 정한 뒤라야 한 칸이 얼마를 더 가져갈 수 있는지 알 수 있다.
+    var tile = resolveTile(m, inner_w, cols);
+    // 늘린 세로가 도크 높이를 넘으면 거기까지만 — 안 그러면 한 행도 못 그려 「없다」처럼 보인다.
+    // 그림 자체는 `fitInside` 가 비율을 지키므로 칸이 조금 납작해지는 것은 해롭지 않다.
+    if (tile.h +| m.label > inner_h) tile.h = inner_h -| m.label;
+    if (tile.h == 0) return .{ .cols = 0, .visible = 0, .overflow = count };
+
+    const cell_h2 = tile.h +| m.label;
+    const step_y = cell_h2 +| m.gap;
+    const rows_in_view = 1 + (inner_h - cell_h2) / step_y;
     const total_rows = (count + cols - 1) / cols;
 
     // **스크롤은 행 단위로 스냅한다.** `Rect.y` 가 `u32` 라 음수를 표현할 수 없어서, 반쯤 걸친 행을
@@ -87,7 +121,7 @@ pub fn layout(area: Rect, m: Metrics, count: usize, scroll_px: u32) Layout {
     const scroll = first_row *| step_y;
 
     const first = @as(usize, first_row) *| @as(usize, cols);
-    if (first >= count) return .{ .cols = cols, .first = count, .visible = 0, .overflow = count, .max_scroll = max_scroll, .scroll_px = scroll };
+    if (first >= count) return .{ .cols = cols, .first = count, .visible = 0, .overflow = count, .max_scroll = max_scroll, .scroll_px = scroll, .tile_w = tile.w, .tile_h = tile.h };
     const capacity = @as(usize, rows_in_view) *| @as(usize, cols);
     const visible = @min(count - first, capacity);
     return .{
@@ -97,14 +131,16 @@ pub fn layout(area: Rect, m: Metrics, count: usize, scroll_px: u32) Layout {
         .overflow = count - visible,
         .max_scroll = max_scroll,
         .scroll_px = scroll,
+        .tile_w = tile.w,
+        .tile_h = tile.h,
     };
 }
 
 /// `n` 번째(**절대 인덱스**) 칸의 사각형. 보이는 창 밖이면 `null` — 화면 밖에 그리지 않는다.
 pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     if (l.cols == 0 or n < l.first or n >= l.first + l.visible) return null;
-    const step = m.tile +| m.gap;
-    const step_y = tileHeight(m) +| m.label +| m.gap;
+    const step = l.tile_w +| m.gap;
+    const step_y = l.tile_h +| m.label +| m.gap;
     const col: u32 = @intCast(n % l.cols);
     const row: u32 = @intCast(n / l.cols);
     const top = area.y +| m.pad +| row *| step_y;
@@ -113,8 +149,8 @@ pub fn rectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     return .{
         .x = area.x +| m.pad +| col *| step,
         .y = top -| l.scroll_px,
-        .w = m.tile,
-        .h = tileHeight(m),
+        .w = l.tile_w,
+        .h = l.tile_h,
     };
 }
 
@@ -140,7 +176,7 @@ pub fn scrollToShow(area: Rect, m: Metrics, count: usize, scroll_px: u32, n: usi
     const l = layout(area, m, count, scroll_px);
     if (l.cols == 0) return scroll_px;
     if (n >= l.first and n < l.first + l.visible) return l.scroll_px; // 이미 보인다
-    const step_y = tileHeight(m) +| m.label +| m.gap;
+    const step_y = l.tile_h +| m.label +| m.gap;
     const row: u32 = @intCast(n / l.cols);
     if (n < l.first) {
         // 위로 간다 — 그 행이 첫 행이 되게.
@@ -158,8 +194,8 @@ pub fn scrollToShow(area: Rect, m: Metrics, count: usize, scroll_px: u32, n: usi
 /// 갈라지고, 그때 사용자에게는 「엉뚱한 이미지가 열린다」로 보인다 — 화면 없이는 못 잡는 종류의 버그다.
 pub fn hitTest(area: Rect, m: Metrics, l: Layout, px: u32, py: u32) ?usize {
     if (l.cols == 0 or l.visible == 0) return null;
-    const step = m.tile +| m.gap;
-    const step_y = tileHeight(m) +| m.label +| m.gap;
+    const step = l.tile_w +| m.gap;
+    const step_y = l.tile_h +| m.label +| m.gap;
     if (step == 0 or step_y == 0) return null;
     const ox = area.x +| m.pad;
     const oy = area.y +| m.pad;
@@ -215,12 +251,34 @@ const area_400x300 = Rect{ .x = 100, .y = 50, .w = 400, .h = 300 };
 const m80 = Metrics{ .tile = 80, .gap = 8, .pad = 8 };
 
 test "열·행 수는 여백과 간격을 뺀 자리에서 나온다" {
-    // inner = 400-16 = 384, step = 88 → 1 + (384-80)/88 = 1+3 = 4열
-    // inner_h = 300-16 = 284 → 1 + (284-80)/88 = 1+2 = 3행 → 12칸
+    // **열 수는 최소 폭이 정한다**: inner = 400-16 = 384, 최소 step = 88 → 1 + (384-80)/88 = 4열.
+    // 그 다음 남는 폭을 나눠 칸을 늘린다: (384 - 간격 24)/4 = 90. 세로도 비율을 따라 90 이 된다.
+    // inner_h = 284, step_y = 98 → 1 + (284-90)/98 = 2행 → 8칸.
     const l = layout(area_400x300, m80, 100, 0);
     try testing.expectEqual(@as(u32, 4), l.cols);
-    try testing.expectEqual(@as(usize, 12), l.visible);
-    try testing.expectEqual(@as(usize, 88), l.overflow);
+    try testing.expectEqual(@as(u32, 90), l.tile_w);
+    try testing.expectEqual(@as(usize, 8), l.visible);
+    try testing.expectEqual(@as(usize, 92), l.overflow);
+}
+
+test "칸을 늘려 한 행이 폭을 꽉 채운다 — 오른쪽에 띠가 남지 않는다" {
+    // 사용자 요청: 2열이면 좌우가 꽉 차야 한다. 늘리기 전에는 열 수를 정하고 **남은 폭이 통째로**
+    // 오른쪽 여백이 됐다(2열 도크에서 눈에 띄는 띠였다).
+    //
+    // 여러 폭에서 「마지막 칸의 오른쪽 끝 = 영역 오른쪽 - pad」를 요구한다. 나눗셈 나머지(열 수보다
+    // 작다)만 허용한다 — 그 이상 남으면 나누지 않았다는 뜻이다.
+    for ([_]u32{ 200, 260, 333, 400, 640, 901 }) |w| {
+        const area = Rect{ .x = 0, .y = 0, .w = w, .h = 400 };
+        const m = Metrics{ .tile = 80, .tile_h = 40, .gap = 8, .pad = 8, .label = 16 };
+        const l = layout(area, m, 40, 0);
+        if (l.cols == 0) continue;
+        const last_in_row = @min(l.cols - 1, l.visible - 1);
+        const r = rectAt(area, m, l, last_in_row).?;
+        const right_edge = area.x + area.w - m.pad;
+        try testing.expect(r.x + r.w <= right_edge);
+        try testing.expect(right_edge - (r.x + r.w) < l.cols); // 남는 것은 나머지뿐
+        try testing.expect(l.tile_w >= m.tile); // 줄이지는 않는다
+    }
 }
 
 test "칸이 자리보다 적으면 넘치는 것이 없다" {
@@ -253,10 +311,11 @@ test "사각형은 왼쪽 위부터 행 우선으로 놓이고 서로 겹치지 
 
     try testing.expectEqual(@as(u32, 108), r0.x); // 100 + pad 8
     try testing.expectEqual(@as(u32, 58), r0.y); // 50 + pad 8
-    try testing.expectEqual(r0.x + 88, r1.x); // 같은 행, 한 칸 옆
+    // 한 칸 옆·한 행 아래는 **늘린 크기 + 간격**만큼이다(최소 폭이 아니다).
+    try testing.expectEqual(r0.x + l.tile_w + m80.gap, r1.x);
     try testing.expectEqual(r0.y, r1.y);
     try testing.expectEqual(r0.x, r4.x); // 4열이라 5번째는 다음 행 첫 칸
-    try testing.expectEqual(r0.y + 88, r4.y);
+    try testing.expectEqual(r0.y + l.tile_h + m80.gap, r4.y);
 
     // 겹치지 않는다 — 간격이 0 이 되면 여기서 걸린다.
     try testing.expect(r0.x + r0.w <= r1.x);
@@ -342,10 +401,11 @@ test "hitTest: 자리는 있는데 칸이 없으면 null — overflow 자리를 
 
 test "라벨 띠: 세로 칸이 라벨만큼 커지고 그 자리가 타일 바로 아래다" {
     const m = Metrics{ .tile = 80, .gap = 8, .pad = 8, .label = 16 };
-    // inner_h = 284, cell_h = 96, step_y = 104 → 1 + (284-96)/104 = 1+1 = 2행(라벨 없을 때는 3행이었다)
+    // 늘린 뒤 cell_h = tile_h + label, step_y = cell_h + gap 로 행 수가 나온다.
     const l = layout(area_400x300, m, 100, 0);
     try testing.expectEqual(@as(u32, 4), l.cols);
-    try testing.expectEqual(@as(usize, 8), l.visible);
+    try testing.expectEqual(@as(u32, 90), l.tile_h); // 정사각이라 늘린 가로와 같다
+    try testing.expectEqual(@as(usize, 8), l.visible); // 1 + (284-106)/114 = 2행 × 4열
 
     const r0 = rectAt(area_400x300, m, l, 0).?;
     const lab0 = labelRectAt(area_400x300, m, l, 0).?;
@@ -356,7 +416,7 @@ test "라벨 띠: 세로 칸이 라벨만큼 커지고 그 자리가 타일 바�
 
     // 두 번째 행은 라벨 높이만큼 더 내려간다 — 안 그러면 글자가 다음 행 그림 위에 얹힌다.
     const r4 = rectAt(area_400x300, m, l, 4).?;
-    try testing.expectEqual(r0.y + 80 + 16 + 8, r4.y);
+    try testing.expectEqual(r0.y + l.tile_h + 16 + 8, r4.y);
 }
 
 test "라벨 띠: 라벨이 0 이면 예전 배치 그대로다" {
@@ -434,7 +494,9 @@ test "스크롤: 그린 자리와 눌리는 자리가 함께 움직인다" {
 test "스크롤: 행 단위로 스냅한다 — 반쯤 걸친 행을 만들지 않는다" {
     // `Rect.y` 가 u32 라 음수를 표현할 수 없다. 반쯤 걸친 행을 허용하면 그 행이 0 으로 포화되어
     // **도크 밖에 그려진다**(실제로 그렇게 냈다).
-    const step_y = m80.tile + m80.label + m80.gap;
+    // **늘린 세로**로 step 을 잡는다 — 최소 폭으로 잡으면 배치와 다른 눈금을 재게 된다.
+    const base = layout(area_400x300, m80, 100, 0);
+    const step_y = base.tile_h + m80.label + m80.gap;
     const l = layout(area_400x300, m80, 100, step_y / 2);
     try testing.expectEqual(@as(u32, 0), l.scroll_px); // 반 칸은 0 으로 스냅
     const l2 = layout(area_400x300, m80, 100, step_y + 3);
@@ -474,11 +536,13 @@ test "비정사각 타일: 세로가 tile_h 를 따르고 같은 높이에 더 �
     try testing.expect(lw.visible > ls.visible); // 세로로 더 들어간다
 
     const r = rectAt(area_400x300, wide, lw, 0).?;
-    try testing.expectEqual(@as(u32, 80), r.w);
-    try testing.expectEqual(@as(u32, 40), r.h);
-    // 두 번째 행은 tile_h 기준으로 내려간다.
+    // 늘린 뒤에도 **비율은 그대로 2:1** 이다 — 늘리면서 납작해지면 실측 비율과 어긋난다.
+    try testing.expectEqual(lw.tile_w, r.w);
+    try testing.expectEqual(lw.tile_w / 2, r.h);
+    try testing.expect(r.w > wide.tile); // 실제로 늘어났다
+    // 두 번째 행은 늘린 세로 기준으로 내려간다.
     const r2 = rectAt(area_400x300, wide, lw, lw.cols).?;
-    try testing.expectEqual(r.y + 40 + 8, r2.y);
+    try testing.expectEqual(r.y + lw.tile_h + 8, r2.y);
 }
 
 test "비정사각 타일: 라벨과 hitTest 가 같은 세로를 쓴다" {
@@ -489,7 +553,7 @@ test "비정사각 타일: 라벨과 hitTest 가 같은 세로를 쓴다" {
     while (n < l.visible) : (n += 1) {
         const r = rectAt(area_400x300, wide, l, n).?;
         const lab = labelRectAt(area_400x300, wide, l, n).?;
-        try testing.expectEqual(r.y + 40, lab.y); // 라벨은 타일 **세로** 바로 아래
+        try testing.expectEqual(r.y + l.tile_h, lab.y); // 라벨은 타일 **세로** 바로 아래
         try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, wide, l, r.x + 2, r.y + 2));
         try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, wide, l, lab.x + 2, lab.y + 2));
     }
@@ -517,8 +581,8 @@ test "scrollToShow: 보이면 그대로, 안 보이면 그 칸이 보이게" {
 test "scrollToShow: 상한을 넘지 않고 행 배수다" {
     const m = Metrics{ .tile = 80, .tile_h = 40, .gap = 8, .pad = 8, .label = 16 };
     const count: usize = 200;
-    const step_y = tileHeight(m) + m.label + m.gap;
     const base = layout(area_400x300, m, count, 0);
+    const step_y = base.tile_h + m.label + m.gap; // 배치가 쓴 눈금과 **같은 값**이어야 한다
     var n: usize = 0;
     while (n < count) : (n += 7) {
         const sc = scrollToShow(area_400x300, m, count, 0, n);

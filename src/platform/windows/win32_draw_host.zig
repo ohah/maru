@@ -421,6 +421,16 @@ pub fn uploadFrameRegions(pipeline: *d3d11_cells.CellPipeline, frame: renderer.R
 ///
 /// 그라디언트·테두리는 이 셰이더에 없으므로 **세어서 남긴다**(`dropped`) — 조용히 단색으로 그리면
 /// 화면이 틀린 채로 그럴듯해진다.
+/// 두 사각형의 교집합. 겹치지 않으면 `null` — 호출부가 그 op 을 버린다.
+fn intersect(a: chrome.draw.Rect, b: chrome.draw.Rect) ?chrome.draw.Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + @as(i32, @intCast(a.w)), b.x + @as(i32, @intCast(b.w)));
+    const y1 = @min(a.y + @as(i32, @intCast(a.h)), b.y + @as(i32, @intCast(b.h)));
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{ .x = x0, .y = y0, .w = @intCast(x1 - x0), .h = @intCast(y1 - y0) };
+}
+
 pub fn appendChromeOps(
     allocator: std.mem.Allocator,
     ops: []const chrome.draw.Op,
@@ -440,9 +450,16 @@ pub fn appendChromeOps(
             },
             .clip => continue,
             .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-            .quad => |q| if (q.gradient == .solid and q.border_role == null)
-                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
-            else {
+            .quad => |q| if (q.gradient == .solid and q.border_role == null) blk: {
+                // **quad 는 자기 뷰포트를 싣고 온다**(`draw.Op.Quad.clip` — published tree 의
+                // `effective_clip` 그대로). 그것을 안 쓰면 스크롤 목록의 배경·pill 이 헤더 위로
+                // 올라온다 — 목록이 굴러가기 시작한 순간 보였다(§2m.92).
+                const r = if (q.clip) |c| intersect(q.rect, c) orelse {
+                    n_drop += 1;
+                    continue;
+                } else q.rect;
+                break :blk .{ r, q.fill_role, q.alpha, q.corner_radii };
+            } else {
                 n_drop += 1;
                 continue;
             },

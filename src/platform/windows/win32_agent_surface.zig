@@ -85,6 +85,17 @@ pub const Options = struct {
     /// 훑기가 사용자 이력의 **일부만** 봤다(read budget 소진·크기 초과·읽기 실패). 헤더가 "일부"
     /// 문구로 바꾼다 — 목록이 전부가 아님을 사용자가 알아야 한다.
     partial: bool = false,
+    /// 스크롤 — **셋이 한 벌이다**(`session_dock/types.zig` 의 그 필드 doc).
+    ///
+    /// Windows 는 **가상화를 안 한다** — 보이는 것을 고르지 않고 목록을 전부 넘기고, 첫 항목의 origin 을
+    /// `-offset` 으로 주어 중립이 그 자리에 놓게 한다. 넘친 셀은 호스트가 콘텐츠 사각형으로 자른다
+    /// (§2m.91). 그러면 published rect 가 **이미 스크롤된 자리**라 히트테스트가 따로 offset 을 빼지
+    /// 않아도 되고, 그리는 자리와 눌리는 자리의 주인이 하나로 남는다.
+    ///
+    /// 길이와 offset 은 그래도 줘야 한다 — 스크롤바가 *"얼마나 긴 목록의 어디"* 를 그 둘로만 안다.
+    scroll_offset_px: u32 = 0,
+    scroll_content_height_px: u32 = 0,
+    content_first_item_origin_y_px: i32 = 0,
 };
 
 pub const Built = struct {
@@ -140,6 +151,9 @@ pub fn build(
         // 깜빡임은 아직 없다(타이머가 없다) — 항상 켜 둔다.
         .search_cursor_visible = opts.search_focused,
         .expanded_identity = state.expanded_identity,
+        .scroll_offset_px = opts.scroll_offset_px,
+        .scroll_content_height_px = opts.scroll_content_height_px,
+        .content_first_item_origin_y_px = opts.content_first_item_origin_y_px,
     };
     const frame = component.build.build(props, .{
         .nodes = try a.alloc(maru.chrome.ui.tree.UiNode, bs.nodes),
@@ -211,7 +225,17 @@ pub fn build(
     var cells: std.ArrayList(d3d11_cells.Cell) = .empty;
     const counted = try draw_host.appendChromeOps(a, draws.ops, opts.tokens, view_w, view_h, &cells);
     var gpu_glyphs: std.ArrayList(maru.renderer.metal_frame.GpuGlyph) = .empty;
-    try artifact.appendGpuGlyphs(a, render_frame, ctx.renderer_state.atlas.config, 0, 0, null, 0, &gpu_glyphs);
+    // **스크롤 목록의 글자만 뷰포트로 자른다.** 그 판정은 중립이 이미 실어 보낸다
+    // (`draw.Op.Text.scroll_clipped`, 떠 있는 헤더는 `above_scroll` + 자기 rect) — `appendGpuGlyphs`
+    // 가 그 규칙을 갖고 있는데 Windows 는 `null` 을 주어 **아무것도 안 자르고 있었다**. 목록이
+    // 굴러가기 시작하자 카드 글자가 고정 헤더 위로 겹쳐 보였다(§2m.92).
+    const list_clip: ?maru.renderer.metal_frame.ClipPx = if (component.build.scrollTextViewport(frame.tree)) |vp| .{
+        .x = @intFromFloat(@max(vp.x, 0)),
+        .y = @intFromFloat(@max(vp.y, 0)),
+        .w = @intFromFloat(@max(vp.width, 0)),
+        .h = @intFromFloat(@max(vp.height, 0)),
+    } else null;
+    try artifact.appendGpuGlyphs(a, render_frame, ctx.renderer_state.atlas.config, 0, 0, list_clip, 0, &gpu_glyphs);
     for (gpu_glyphs.items) |g| {
         try cells.append(a, win32_terminal.cellFromGpuGlyph(g, ctx.atlas_w.*, ctx.atlas_h.*));
     }

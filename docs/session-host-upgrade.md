@@ -978,6 +978,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   environment, MRSH command, 공개 coordinator `Context`를 넓히지 않는다. 이 component+process 결합으로 두 개 이상의 실제
   kernel cleanup syscall fault와 daemon fail-stop은 닫지만 disk-full, fsync fault와 실제 서명 release artifact는 여전히 별도다.
 
+  `test-session-host-upgrade-disk-full-admission` 집중 gate는 user-owned HFS+ disk image에 실제 fork daemon의 owner
+  directory를 만들고 제품 target staging이 끝난 뒤에만 coordinator-private typed fixture로 같은 volume의 bounded
+  incompressible filler를 실제 kernel `ENOSPC`까지 쓴다. 그 다음 호출은 synthetic error가 아니라 제품
+  `budget_admission.prepare`여야 하며, two-copy `F_PREALLOCATE` 또는 durable probe write가 실패해 reader pause 전에
+  `resumed/state_too_large`로 끝나야 한다. 부모는 accepted reply 뒤 새 제품 connection에서 terminal attempt status를
+  읽고, accepted drain의 기존 sibling은 typed 폐쇄되지만 새 연결의 daemon PID·listener·`host.info`·exact runtime
+  inventory가 유지되며 attempt reservation residue가 없음을 검증한다. disk image detach와 filler 정리는 harness owner가
+  exact path로 수행한다. fixture는 `builtin.is_test`로 닫고
+  ambient environment, MRSH command, 공개 coordinator `Context`와 제품 error mapping을 넓히지 않는다. 이 gate는 실제
+  write-side disk-full admission과 pre-quiesce 생존만 닫는다. ENOSPC 뒤 성공하는 fsync를 fsync fault로 세지 않으며 delayed
+  fsync fault와 실제 서명 release artifact는 여전히 별도다.
+
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서
 exact runtime ID를 제거해야 한다. 검증자는 같은 연결에서 inventory 부재를 두 번 관측하고 direct-child 부재도

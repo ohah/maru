@@ -1013,6 +1013,14 @@ fixture로 실제 fork daemon의 제품 `Client.prepareUpgrade` 경로에 만들
 세지 않으며 component의 exact errno와 process의 종료/권위 소멸을 결합한 증거다. ambient env, MRSH command와 공개
 coordinator `Context`에는 fault selector가 없어야 한다. 이로써 복수 실제 kernel cleanup syscall fault의 fail-stop은 닫지만
 disk-full/fsync, signed frozen release provenance는 여전히 미검증이므로 U5 완료 판정을 바꾸지 않는다.
+`test-session-host-upgrade-disk-full-admission`은 user-owned HFS+ disk image의 실제 fork daemon에서 target staging 뒤
+coordinator-private typed fixture가 같은 volume을 incompressible bytes로 실제 `ENOSPC`까지 채운 다음 제품
+`budget_admission.prepare`를 호출한다. terminal 결과는 quiesce 전 `resumed/state_too_large`여야 한다. accepted drain의
+기존 sibling은 typed 폐쇄되고, 새 연결의 같은 PID/listener, `host.info`, exact runtime inventory가 계속 살아 있으며
+attempt reservation residue가 없어야 한다.
+boundary는 `builtin.is_test` compile guard, ambient env/MRSH test command/public `Context` selector 부재와 fill-before-prepare
+순서를 고정한다. 이 gate는 write-side disk-full을 닫지만 ENOSPC 뒤 성공한 fsync를 fault로 오인하지 않으며 delayed fsync
+fault와 signed frozen release provenance는 여전히 미검증이므로 U5 완료 판정을 바꾸지 않는다.
 
 모든 단계에서 host crash/SIGKILL 뒤 복구는 비목표지만, upgrade가 시작되기 전·quiesce 중·`exec` syscall 실패·새
 binary pre-commit restore 실패는 자동 failure injection으로 구 host 재개 또는 staged rollback을 증명해야 한다.

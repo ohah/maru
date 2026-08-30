@@ -912,11 +912,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 - **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
   N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
-  failure injection, 장시간 soak와 **업그레이드 결과 notice**가 남아 있다(자동 orchestration 자체는 GUI의
-  connect 경로에 연결됐다 — 위 상태 블록). macOS 공개 API에는 fd-based
+  failure injection, 실제 앱 재실행 notice와 장시간 soak가 남아 있다(typed 업그레이드 결과는 GUI의
+  connect 경로와 one-shot notice에 연결됐지만 실제 두 앱 이미지 재실행 화면 증거는 별도다). macOS 공개 API에는 fd-based
   exec가 없으므로 kernel-loaded-image pin은 목표에서 제거하고, 마지막
   pathname object identity 재검증+same-designated-requirement signer+same-UID owner boundary를 제품 계약으로 쓴다.
   이 종료 gate가 닫히기 전에는 U5 완료를 주장하지 않는다.
+
+signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
+복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서
+exact runtime ID를 제거해야 한다. 검증자는 같은 연결에서 inventory 부재를 두 번 관측하고 direct-child 부재도
+확인해 stale 한 번이나 client-side 숨김을 성공으로 세지 않는다. 현재 wire는 exit status를 노출하지 않으므로
+shell의 `exit 23` 숫자 자체를 관측했다고 주장하지 않고, 명령 전달·child 종료·host-owned reap·inventory exact-once
+제거를 증거로 삼는다.
 
 U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완료”를 제품/PR에 쓰지 않는다. 자동 시도가 기본
 경로에 연결된 것과 “migration이 검증됐다”는 것은 다르다 — 전자는 연결됐고, 후자는 위 gate가 닫혀야 성립한다.

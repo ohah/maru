@@ -532,7 +532,15 @@ pub fn presetColors(preset: ThemePreset) ThemeConfig {
             .foreground = "#ffffff",
             // cursor/selection은 Ghostty가 안 정하므로 maru 기본과 같게 명시(프리셋 전환 시 리셋 일관성).
             .cursor = "#ffffff",
-            .selection = "#334455",
+            // **selection 만 maru 기본값을 안 쓴다**(2026-08-31 사용자 제보 — 선택해도 티가 안 났다).
+            // 원래 `#334455`(maru 기본)를 그대로 두었는데, 그 값은 maru 기본 배경 `#101010` 을 전제로
+            // 고른 것이다. ghostty 배경은 `#282c34` 라 **대비가 1.40** 까지 떨어진다 — 값만 복사하고
+            // 그 값이 서 있던 **배경을 복사하지 않은** 것이 결함이다.
+            //
+            // 스킴 원값을 보존하는 다른 프리셋과 달리 여기는 **Ghostty 가 selection 을 정하지 않으므로**
+            // 우리가 고르는 자리다. 배경에서 밝힌 같은 계열로 대비 **1.93**(tokyo-night 1.88 과 같은 대)에
+            // 맞춘다. 흰 글자 대비는 7.26 이라 선택 위 글자도 그대로 읽힌다.
+            .selection = "#4a5678",
             // sidebar_*는 null 유지 → resolveTheme이 background(#282c34)에서 파생(+24/+48).
             .accent = "#81a2be", // Tomorrow Night 블루(ghostty 톤)
             .palette = ghostty_palette,
@@ -1643,4 +1651,25 @@ test "SC1b 역할 이름과 키가 어긋나지 않는다 — type 만 예외다
     try std.testing.expectEqualStrings("theme.syntax.type", comptime syntaxRoleKey(.type_name));
     try std.testing.expect(parseSyntaxRole("type_name") == null); // 필드 이름으로는 안 열린다
     try std.testing.expect(parseSyntaxRole("nope") == null);
+}
+
+test "TSEL 고스티 프리셋의 선택 배경은 그 프리셋 배경과 구분된다" {
+    // **값만 복사하고 배경을 복사하지 않으면 이렇게 된다.** 이 프리셋은 selection 을 Ghostty 가
+    // 정하지 않아 maru 기본값(`#334455`)을 그대로 실어 두었는데, 그 값은 maru 기본 배경 `#101010` 을
+    // 전제로 고른 것이다. ghostty 배경 `#282c34` 위에서는 대비가 1.40 이라 **선택해도 티가 안 났다**
+    // (2026-08-31 사용자 제보).
+    //
+    // **다른 프리셋은 이 판정자가 안 본다.** 그쪽 selection 은 iTerm2-Color-Schemes 원값이고 이 저장소
+    // 방침은 *"업스트림 표준값을 그대로 보존"* 이다(팔레트 대비 하한 주석과 같은 자리). 대비가 낮은
+    // 것을 알고도 두는 것이라 게이트로 강제하면 그 방침과 부딪힌다. **ghostty 만 우리가 고른 값**이라
+    // 우리가 책임진다.
+    const color = @import("../color.zig");
+    // **이름을 `preset` 으로 두지 않는다** — `check-doc-line-refs` 가 문서의 좌표 심볼을 찾을 때
+    // 이 지역 변수를 그 심볼의 정의로 골라 엉뚱한 줄을 가리킨다(그 게이트가 실제로 잡았다).
+    const ghostty = presetColors(.ghostty);
+    const bg = color.parseHex(ghostty.background) orelse return error.TestUnexpectedResult;
+    const sel = color.parseHex(ghostty.selection) orelse return error.TestUnexpectedResult;
+    const ratio = color.contrastRatio(color.relativeLuminance(bg), color.relativeLuminance(sel));
+    // 하한 1.8 — tokyo-night(1.88)·gruvbox(2.26) 와 같은 대. 그 아래는 실측으로 "선택한 티가 안 난다".
+    try std.testing.expect(ratio >= 1.8);
 }

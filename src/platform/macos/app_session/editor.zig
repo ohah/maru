@@ -4834,6 +4834,17 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     pushUndo(self, term, inverse, before, before_primary, .insert);
 
     writeBackSelections(self, term, sels);
+    // **조합 중이면 조합 자리도 함께 옮긴다.** 자리는 조합을 시작할 때 한 번만 잡는데(IME4), 이어
+    // 치는 한글에서는 그 "시작"이 **키 트랜잭션 한가운데**다 — `insertText`(확정)는 `ime_inserted`에
+    // 쌓였다가 `imeEnd`에서야 문서에 들어가므로, 그 사이에 오는 `setMarkedText`는 **확정이 아직
+    // 안 들어간** caret을 읽는다. 그러면 다음 음절이 방금 확정한 글자 **앞**에 그려진다
+    // (실측: "가나다…카타파"를 치면 조합 "하"가 "…카타하파"로 섰다 — IME7).
+    //
+    // 자리를 여기서 다시 잡는다. **어디로 들어갔는지는 이 편집이 안다** — caret을 다시 읽는 것이
+    // 아니라 편집이 정한 결과를 그대로 쓴다(위 "커서는 넣은 글자 뒤로 간다"와 같은 출처).
+    if (term.rt.editor_preedit.len > 0) {
+        if (term.rt.editor_selection) |sel| term.rt.editor_preedit_at = sel.start();
+    }
     const edit_span = syntax_color.spanFromInverse(inverse.changes);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
@@ -5888,6 +5899,39 @@ test "IME4 조합 자리는 시작할 때 한 번만 잡는다 (N3)" {
     term.rt.editor_selection = editor_selection.Selection.at(9);
     setEditorPreedit(fx.session, term, "\xed\x95\x9c"); // "한"
     try testing.expectEqual(@as(usize, 5), term.rt.editor_preedit_at);
+}
+
+test "IME7 이어 치는 한글: 조합 글자는 방금 확정한 글자 뒤에 선다" {
+    // **음절 경계**를 아무도 안 봤다. IME4는 한 음절 안(ㅎ→하→한)만 본다.
+    // 실제 키 트랜잭션은 `insertText`(확정)를 **큐에 쌓고** `imeEnd`에서야 문서에 넣는데,
+    // 그 사이에 `setMarkedText`(다음 조합)가 온다 — 그때 caret은 아직 확정 앞이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    setEditorPreedit(fx.session, term, "\xea\xb0\x80"); // 조합 "가"
+
+    // 다음 키: 입력기가 "가"를 확정하고 "나" 조합을 시작한다. 확정은 아직 큐에 있다.
+    setEditorPreedit(fx.session, term, ""); // 조합 해제
+    setEditorPreedit(fx.session, term, "\xeb\x82\x98"); // 새 조합 "나"
+    _ = insertText(fx.session, term, "\xea\xb0\x80"); // imeEnd가 이제 확정을 넣는다
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    var col_ga: ?u16 = null;
+    var col_na: ?u16 = null;
+    for (drawn.dl.cells) |c| {
+        if (c.row == 0 and c.codepoint == 0xAC00) col_ga = c.col; // 가
+        if (c.row == 0 and c.codepoint == 0xB098) col_na = c.col; // 나
+    }
+    const ga = col_ga orelse return error.CommittedNotDrawn;
+    const na = col_na orelse return error.PreeditNotDrawn;
+    // 조합 글자는 확정 글자 **뒤**에 서야 한다. 한글은 EAW wide라 두 칸을 차지한다.
+    try testing.expectEqual(ga + 2, na);
 }
 
 const PaneFixture = struct {

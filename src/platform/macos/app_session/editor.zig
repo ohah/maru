@@ -3913,6 +3913,24 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     term.rt.editor_folded_prev = folded_prev;
     term.rt.editor_folded_len = 0; // 접어 둔 것은 푼다(위 주석)
     term.rt.editor_syntax_folds_applied = true;
+
+    // **보이는 줄 표를 다시 만든다.** 위에서 접어 둔 것을 풀었으므로 `rebuildVisible` 의 불변식
+    // (「접힌 것이 없으면 보이는 줄 배열은 비어 있다」 = 원본을 그대로 그리라는 표시)이 지금
+    // 깨져 있다 — 그 배열은 **접힌 상태로 만든 부분집합**이다.
+    //
+    // **그것이 사용자 제보 결함이었다**(2026-08-30 — 「커서 위치와 실제 입력 위치가 다르다」).
+    // 파싱이 끝나기 전에 접으면(큰 문서는 예산 파싱이 여러 프레임 걸린다 — §2.1a) 본문은 부분집합을
+    // 그리는데 접힘 상태는 「없음」이라 화면의 행과 문서의 줄이 어긋난다. 입력은 문서 offset 을,
+    // 커서는 시각 행을 쓰므로 그 어긋남이 곧 그 증상이다. `ES32` 가 그 순서를 그대로 잰다.
+    rebuildVisible(self, term) catch {
+        // 못 만들면 **부분집합을 그대로 두지 않는다** — 틀린 표보다 없는 편이 낫다(`rebuildVisible`
+        // 자신이 실패 갈래에서 같은 판단을 한다).
+        if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
+        if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
+        term.rt.editor_visible_lines = &.{};
+        term.rt.editor_visible_numbers = &.{};
+        invalidateFoldDerived(self, term);
+    };
     self.metal_dirty = true;
 }
 
@@ -16245,4 +16263,63 @@ test "ES31 비교 뷰는 체인을 그리지 않는다 — 문서가 둘이다 (
     fx.term.rt.editor_diff = .{ .requested_ms = 0 };
     defer fx.term.rt.editor_diff = null;
     try testing.expectEqualStrings("a.zig", headerBreadcrumb(fx.session, fx.term, "a.zig"));
+}
+
+test "ES32 구문 접힘 승격이 보이는 줄 표를 다시 만든다 — 「접힌 것 없음」과 부분집합이 함께 살 수 없다" {
+    // **사용자 제보 결함의 가설을 확정하는 자리**(2026-08-30 — 「커서 위치와 실제 입력 위치가 다르다」).
+    //
+    // `rebuildVisible` 의 구조가 불변식 하나를 말한다: **접힌 것이 없으면 `editor_visible_lines` 는
+    // 비어 있다**(원본을 그대로 그리라는 표시). 그런데 `promoteFoldRangesToSyntax` 는 범위를 갈아
+    // 끼우며 `editor_folded_len = 0` 으로 되돌리면서 그 배열을 안 건드린다.
+    //
+    // 그래서 **파싱이 끝나기 전에 접으면** 「접힌 것 없음 + 보이는 줄은 부분집합」이라는 모순이 남는다.
+    // 큰 문서는 예산 파싱이 여러 프레임 걸리므로(§2.1a) 실제로 도달한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 들여쓰기 접힘이 잡히고 구문 접힘도 잡히는 문서.
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term,
+        \\pub fn outer() void {
+        \\    const a = 1;
+        \\    const b = 2;
+        \\    _ = a;
+        \\    _ = b;
+        \\}
+        \\
+        \\pub fn other() void {
+        \\    const c = 3;
+        \\    _ = c;
+        \\}
+        \\
+    );
+
+    // ⑴ **파싱 전에 접는다** — 그 순간 들여쓰기 층의 범위로 접힌다.
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = .{};
+    fx.term.rt.editor_syntax_folds_applied = false;
+    try ensureFoldRanges(fx.session, fx.term);
+    if (fx.term.rt.editor_fold_ranges.len == 0) return error.SkipZigTest; // 접을 것이 없다 — 잴 것이 없다
+    const head = fx.term.rt.editor_fold_ranges[0].head;
+    _ = toggleFoldHead(fx.session, fx.term, head);
+    try testing.expect(fx.term.rt.editor_folded_len > 0);
+    try testing.expect(fx.term.rt.editor_visible_lines.len > 0); // 부분집합이 섰다
+
+    // ⑵ 이제 파싱이 끝나고 승격이 돈다.
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    promoteFoldRangesToSyntax(fx.session, fx.term);
+    try testing.expect(fx.term.rt.editor_syntax_folds_applied);
+
+    // ⑶ **불변식**: 접힌 것이 없으면 보이는 줄 배열도 비어 있어야 한다.
+    if (fx.term.rt.editor_folded_len == 0) {
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_lines.len);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_visible_numbers.len);
+    }
 }

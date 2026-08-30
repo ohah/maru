@@ -73118,3 +73118,111 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     // 그 칸은 **가장 오래된** 이미지(n0)다 — 최신 우선 정렬의 반대쪽 끝.
     try std.testing.expectEqual(@as(usize, 29), target);
 }
+
+test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8)" {
+    // **실측이 요구한 슬라이스다.** `compacted` 를 건너뛰는 규칙은 「원본이 같은 파일에 있다」를
+    // 전제하는데, fork/재개에서는 그 원본이 부모 파일에 있다 — 실제 코퍼스 90 파일 중 20개(22%)에서
+    // 42 장을 잃고, 최악은 살아 있는 것이 0 장이라 갤러리가 「이미지가 없습니다」라고 말했다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    // 실측 구조를 따른다: `.codex/sessions/<년>/<월>/<일>/rollout-<시각>-<thread_id>.jsonl`
+    try tmp.dir.createDirPath(io, ".codex/sessions/2026/07/20");
+    const parent_id = "019f7e7a-0000-4000-8000-parent000001";
+    const child_id = "019f80f1-0000-4000-8000-child0000001";
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+
+    // 부모: 살아 있는 이미지 1장(`view_image` 결과 — 에이전트가 읽은 것)
+    const parent =
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" ++ parent_id ++ "\",\"cwd\":\"/tmp/x\"}}\n" ++
+        "{\"payload\":{\"type\":\"function_call\",\"call_id\":\"call_p\",\"name\":\"view_image\"," ++
+        "\"path\":\"/tmp/shots/from-parent.png\"}}\n" ++
+        "{\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_p\",\"output\":[" ++
+        "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," ++ png_b64 ++ "\"}]}}\n";
+    // 자식: 살아 있는 이미지 **0장**. `compacted` 안에 부모 사본만 있다(스캐너가 건너뛴다).
+    const child =
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" ++ child_id ++ "\",\"cwd\":\"/tmp/x\"," ++
+        "\"parent_thread_id\":\"" ++ parent_id ++ "\"}}\n" ++
+        "{\"type\":\"compacted\",\"payload\":{\"content\":[{\"type\":\"input_image\"," ++
+        "\"image_url\":\"data:image/png;base64," ++ png_b64 ++ "\"}]}}\n";
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".codex/sessions/2026/07/20/rollout-2026-07-20T16-42-50-" ++ parent_id ++ ".jsonl",
+        .data = parent,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".codex/sessions/2026/07/20/rollout-2026-07-21T04-12-43-" ++ child_id ++ ".jsonl",
+        .data = child,
+    });
+
+    const child_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.codex/sessions/2026/07/20/rollout-2026-07-21T04-12-43-" ++ child_id ++ ".jsonl",
+        .{home},
+    );
+    defer allocator.free(child_path);
+
+    // `buildChain` 은 HOME 아래 `.codex/sessions` 만 본다 — 그 홈을 이 tmp 로 돌려놓는다.
+    const saved_home = std.c.getenv("HOME");
+    const home_z = try allocator.dupeZ(u8, home);
+    defer allocator.free(home_z);
+    _ = setenv("HOME", home_z.ptr, 1);
+    defer if (saved_home) |h| {
+        _ = setenv("HOME", h, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(child_path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+
+    // ── ① 체인이 부모까지 잇는다.
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.chain.len);
+    try std.testing.expectEqualStrings(child_path, session.image_gallery.chain.head());
+
+    // ── ② **자식에는 살아 있는 이미지가 0장인데 1장이 보인다** — 부모에서 왔다.
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    const hit = session.image_gallery.hits.items[0];
+    try std.testing.expectEqual(@as(u8, 1), hit.file_index); // 0 이면 자식 — 그럼 오프셋이 남의 것이다
+
+    // ── ③ 그 오프셋으로 **부모 파일**을 열어 실제로 푼다. 파일을 잘못 고르면 여기서 깨진다.
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.tiles.items.len);
+    try std.testing.expect(session.image_gallery.tiles.items[0].pixels.len > 0);
+    // 라벨도 **부모 파일** 안에서 읽는다(`call_id` → 앞선 줄의 `path`).
+    try std.testing.expectEqualStrings("from-parent.png", session.image_gallery.tiles.items[0].label.text());
+}

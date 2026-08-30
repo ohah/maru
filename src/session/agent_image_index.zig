@@ -68,6 +68,55 @@ pub const Hit = struct {
     data_len: u32,
     kind: Kind,
     mime: Mime,
+    /// **어느 파일**의 오프셋인가(`Chain` 안 위치). 재개 세션은 부모 rollout 까지 훑으므로(§3.3)
+    /// 오프셋만으로는 어느 파일인지 알 수 없다 — 그 값으로 디코드·라벨이 파일을 연다.
+    ///
+    /// 0 이 현재 세션이다. 스캐너 자신은 이 값을 안 건드린다(파일 하나를 훑을 뿐이다) — 여러 파일을
+    /// 이어 담는 호출자가 채운다.
+    file_index: u8 = 0,
+};
+
+/// 활성 pane 이 읽을 트랜스크립트 **묶음**. 재개 세션이면 부모까지다(§3.3).
+///
+/// **상한이 3인 근거는 실측이다**(2026-08-30): 체인 깊이가 중앙 1, 최대 2 였다. 하나를 더 두어
+/// 최대를 넘겨도 잘리지 않게 한다. 무한히 따라가면 1.8 GB 짜리 부모가 줄줄이 붙는다.
+pub const max_chain: usize = 3;
+
+pub const Chain = struct {
+    files: [max_chain]Source = [_]Source{.{}} ** max_chain,
+    len: usize = 0,
+
+    pub fn get(self: *const Chain, i: usize) ?[]const u8 {
+        if (i >= self.len) return null;
+        const p = self.files[i].path();
+        return if (p.len == 0) null else p;
+    }
+
+    /// 뒤에 잇는다. 이미 있는 경로면 **더하지 않는다** — 부모가 자기 자신을 가리키는 기록이 오면
+    /// 같은 파일을 두 번 훑고 이미지가 두 배로 뜬다.
+    pub fn append(self: *Chain, value: []const u8) bool {
+        if (self.len >= max_chain) return false;
+        for (0..self.len) |i| {
+            if (std.mem.eql(u8, self.files[i].path(), value)) return false;
+        }
+        if (!self.files[self.len].set(value)) return false;
+        self.len += 1;
+        return true;
+    }
+
+    pub fn clear(self: *Chain) void {
+        for (&self.files) |*f| f.clear();
+        self.len = 0;
+    }
+
+    pub fn isEmpty(self: *const Chain) bool {
+        return self.len == 0;
+    }
+
+    /// 첫 파일(= 현재 세션). 갤러리가 「소스가 갈렸나」를 판정하는 기준이다.
+    pub fn head(self: *const Chain) []const u8 {
+        return if (self.len == 0) "" else self.files[0].path();
+    }
 };
 
 /// 이 Term 이 읽을 트랜스크립트의 **절대 경로**. 훅 `SessionStart`/`UserPromptSubmit` 이 `transcript_path` 로
@@ -323,12 +372,19 @@ pub const StreamScanner = struct {
         out: *std.ArrayList(Hit),
     ) !void {
         if (chunk.len == 0) return;
+        // **이전 이월 버퍼에는 개행이 없다** — 있었으면 그때 소비됐다. 그래서 새로 붙은 곳부터만 찾는다.
+        //
+        // 처음에는 매번 `used`(=0)부터 찾았는데, 그것이 **O(n²)** 였다: 6.9 MB 짜리 줄은 64 KiB 청크
+        // 108 개로 쌓이고 그때마다 이월 전체를 다시 훑어 **한 줄에 373 MB** 를 스캔한다. 실측 파일에
+        // 1 MB 넘는 줄이 17 개라 120 MB 파일 하나가 0.3 초가 아니라 십수 초였다.
+        const old_len = self.carry.items.len;
         try self.carry.appendSlice(allocator, chunk);
         const base = self.consumed;
         const buf = self.carry.items;
 
         var used: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, buf, used, '\n')) |nl| {
+        var search: usize = old_len;
+        while (std.mem.indexOfScalarPos(u8, buf, search, '\n')) |nl| {
             if (out.items.len < max_hits_per_file) {
                 const before = out.items.len;
                 try scanLine(allocator, buf[used..nl], base + used, out);
@@ -341,6 +397,7 @@ pub const StreamScanner = struct {
                 self.partial = true;
             }
             used = nl + 1;
+            search = used;
         }
 
         // 소비한 만큼 앞을 버리고 꼬리만 남긴다.
@@ -698,4 +755,50 @@ test "2중 저장 접기: 앞 줄에서 찾은 것은 건드리지 않는다" {
     try std.testing.expectEqual(Mime.jpeg, out.items[0].mime);
     try std.testing.expectEqual(@as(u64, 0), out.items[0].line_offset);
     try std.testing.expectEqual(@as(u64, 200), out.items[1].line_offset);
+}
+
+test "Chain: 뒤에 잇고, 같은 경로는 두 번 담지 않는다" {
+    // 부모가 자기 자신을 가리키는 기록이 오면 같은 파일을 두 번 훑어 이미지가 두 배로 뜬다.
+    var c: Chain = .{};
+    try testing.expect(c.isEmpty());
+    try testing.expect(c.append("/a/one.jsonl"));
+    try testing.expect(c.append("/a/two.jsonl"));
+    try testing.expect(!c.append("/a/one.jsonl")); // 중복은 거부
+    try testing.expectEqual(@as(usize, 2), c.len);
+    try testing.expectEqualStrings("/a/one.jsonl", c.get(0).?);
+    try testing.expectEqualStrings("/a/two.jsonl", c.get(1).?);
+    try testing.expect(c.get(2) == null);
+    try testing.expectEqualStrings("/a/one.jsonl", c.head());
+}
+
+test "Chain: 상한에서 멈춘다 — 1.8 GB 부모가 줄줄이 붙지 않게" {
+    var c: Chain = .{};
+    try testing.expect(c.append("/a/1"));
+    try testing.expect(c.append("/a/2"));
+    try testing.expect(c.append("/a/3"));
+    try testing.expect(!c.append("/a/4")); // max_chain = 3
+    try testing.expectEqual(max_chain, c.len);
+    c.clear();
+    try testing.expect(c.isEmpty());
+    try testing.expectEqualStrings("", c.head());
+}
+
+test "Chain: 상대 경로·빈 값은 담기지 않는다 — Source 규칙을 그대로 쓴다" {
+    var c: Chain = .{};
+    try testing.expect(!c.append(""));
+    try testing.expect(!c.append("relative/path.jsonl"));
+    try testing.expect(c.isEmpty());
+}
+
+test "Hit.file_index 기본값은 0 — 스캐너는 파일 하나만 훑는다" {
+    // 스캐너가 이 값을 건드리면 여러 파일을 이어 담는 호출자와 싸운다.
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(allocator);
+    const line =
+        \\{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}
+    ;
+    try scanLine(allocator, line, 0, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.len);
+    try testing.expectEqual(@as(u8, 0), out.items[0].file_index);
 }

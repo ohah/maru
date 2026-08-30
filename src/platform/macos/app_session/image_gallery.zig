@@ -30,8 +30,9 @@ const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 /// 갤러리가 지금 보여 주는 것. **인덱스는 메모리 전용**이다(계약 §4.5) — 앱을 끄면 사라지고 다음 실행에서
 /// 다시 훑는다.
 pub const State = struct {
-    /// 이 인덱스를 만든(또는 만들고 있는) 파일. 활성 Term 의 것과 다르면 무효다.
-    source: index.Source = .{},
+    /// 이 인덱스를 만든(또는 만들고 있는) 파일 **묶음**. 첫 파일이 현재 세션이고, 재개면 부모가
+    /// 뒤에 붙는다(§3.3). 활성 Term 의 것과 첫 파일이 다르면 무효다.
+    chain: index.Chain = .{},
     hits: std.ArrayList(index.Hit) = .empty,
     /// 상한(줄 길이·이미지 수)에 걸려 못 본 것이 있다. 「비었다」와 「못 봤다」는 다른 사실이라 나눠 든다.
     partial: bool = false,
@@ -90,7 +91,7 @@ pub const State = struct {
         self.dropOpen(allocator);
         self.dropTiles(allocator);
         self.hits.clearAndFree(allocator);
-        self.source.clear();
+        self.chain.clear();
         self.partial = false;
         self.scanned_bytes = 0;
         self.scan_ns = 0;
@@ -203,6 +204,79 @@ fn activeSourcePath(self: *AppSession) ?[]const u8 {
     return term.agent_image_source.path();
 }
 
+/// 이 트랜스크립트가 재개/fork 라면 **부모까지** 잇는다(계약 §3.3).
+///
+/// **왜 필요한가**: `compacted` 를 건너뛰는 규칙은 「원본이 같은 파일 앞쪽에 있다」를 전제하는데,
+/// 재개 세션에서는 그 원본이 **부모 파일**에 있다. 실측 90 파일 중 20개(22%)에서 42 장을 잃고,
+/// 최악은 살아 있는 것이 0 장이라 갤러리가 「이미지가 없습니다」라고 말한다.
+///
+/// **비용은 실측으로 안다**: fork 가 172/296(58%), 체인 깊이 중앙 1·최대 2, 부모 크기 중앙 338 MB·
+/// 최대 1.8 GB. 그래서 상한은 `max_chain`(3)이고, 스캔은 **현재 파일부터** 끝낸다(§4.1.1).
+///
+/// codex 전용이다 — claude 는 `/clear` 가 새 파일을 만들 뿐 이전 대화를 압축해 싣지 않으므로 잃는
+/// 것이 없다(그리고 부모를 가리키는 기록도 없다).
+fn buildChain(self: *AppSession, head_path: []const u8) index.Chain {
+    var chain: index.Chain = .{};
+    if (!chain.append(head_path)) return chain;
+    if (!builtin.target.os.tag.isDarwin()) return chain;
+
+    const io = self.io;
+    const home_z = std.c.getenv("HOME") orelse return chain;
+    const home = std.mem.span(home_z);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_path = std.fmt.bufPrint(&root_buf, "{s}/.codex/sessions", .{home}) catch return chain;
+    // head 가 codex rollout 이 아니면 볼 것이 없다(claude 는 부모 개념이 없다).
+    if (!std.mem.startsWith(u8, head_path, root_path)) return chain;
+
+    var cur_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var cur: []const u8 = head_path;
+    while (chain.len < index.max_chain) {
+        var id_buf: [128]u8 = undefined;
+        const parent_id = readCodexParentId(self, cur, &id_buf);
+        if (parent_id.len == 0) break;
+
+        const root = std.Io.Dir.openDirAbsolute(io, root_path, .{}) catch break;
+        defer root.close(io);
+        var rel_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var suffix_buf: [160]u8 = undefined;
+        const suffix = std.fmt.bufPrint(&suffix_buf, "{s}.jsonl", .{parent_id}) catch break;
+        // **`findCodexByThreadId` 는 단순 `endsWith` 다.** 그대로 믿으면 `…-Xparent-id.jsonl` 이
+        // `parent-id` 의 것으로 잡힌다. 찾은 이름을 `isCodexRolloutOf` 로 한 번 더 본다 —
+        // id 앞이 구분자여야 그 세션의 파일이다.
+        const rel = maru.session.agent_transcript.findCodexByThreadId(io, root, suffix, &rel_buf) orelse break;
+        const base = if (std.mem.lastIndexOfScalar(u8, rel, '/')) |at| rel[at + 1 ..] else rel;
+        if (!maru.session.agent_transcript.isCodexRolloutOf(base, parent_id)) break;
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ root_path, rel }) catch break;
+        if (!chain.append(abs)) break; // 상한이거나 이미 담긴 경로(자기 자신을 가리키는 기록)
+
+        // 다음 바퀴를 위해 방금 담은 경로를 들고 간다(`abs_buf` 는 이 반복에서 죽는다).
+        if (abs.len > cur_buf.len) break;
+        @memcpy(cur_buf[0..abs.len], abs);
+        cur = cur_buf[0..abs.len];
+    }
+    return chain;
+}
+
+/// 그 rollout 의 첫 줄에서 부모 신원을 읽는다. **첫 줄만** 읽는다 — `session_meta` 가 첫 줄이고,
+/// 뒤 레코드의 같은 키를 집으면 남의 부모가 붙는다.
+fn readCodexParentId(self: *AppSession, path: []const u8, out: []u8) []const u8 {
+    const io = self.io;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{
+        .mode = .read_only,
+        .follow_symlinks = false,
+        .allow_directory = false,
+    }) catch return "";
+    defer file.close(io);
+    // **실측이 크기를 정한다**: `session_meta` 첫 줄이 중앙 18,994 B · 최대 22,079 B 이고 296개 중
+    // 292개가 8 KiB 를 넘는다. 8 KiB 였을 때 부모 키가 창 안에 든 것은 **운**이었다(초과 0건) —
+    // `instructions` 가 조금만 길어지면 조용히 못 읽는다. 최대의 3배로 잡는다.
+    var head: [64 * 1024]u8 = undefined;
+    const n = file.readPositional(io, &.{&head}, 0) catch return "";
+    if (n == 0) return "";
+    return maru.session.agent_transcript.parseCodexParentId(head[0..n], out);
+}
+
 fn backendPtr(self: *AppSession) ?*scan_backend.Backend {
     if (self.image_gallery_backend) |*b| return b;
     return null;
@@ -220,7 +294,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
     const path = activeSourcePath(self) orelse {
-        if (self.image_gallery.built or self.image_gallery.scanning() or !self.image_gallery.source.isEmpty()) {
+        if (self.image_gallery.built or self.image_gallery.scanning() or !self.image_gallery.chain.isEmpty()) {
             backend.cancel();
             if (decodeBackendPtr(self)) |d| d.cancel();
             self.image_gallery.clear(self.allocator);
@@ -228,7 +302,7 @@ pub fn refresh(self: *AppSession, force: bool) void {
         }
         return;
     };
-    const same = std.mem.eql(u8, self.image_gallery.source.path(), path);
+    const same = std.mem.eql(u8, self.image_gallery.chain.head(), path);
     if (!force and same and (self.image_gallery.built or self.image_gallery.scanning())) return;
 
     // 소스가 갈렸다 = 다른 세션이다(`/clear` 는 새 파일을 만든다). 옛 파일의 오프셋은 새 파일에서
@@ -236,10 +310,10 @@ pub fn refresh(self: *AppSession, force: bool) void {
     backend.cancel();
     if (decodeBackendPtr(self)) |d| d.cancel(); // 옛 파일의 오프셋으로 도는 디코드를 버린다
     self.image_gallery.clear(self.allocator);
-    _ = self.image_gallery.source.set(path);
+    self.image_gallery.chain = buildChain(self, path);
     self.metal_dirty = true;
 
-    if (backend.submit(path)) |generation| {
+    if (backend.submit(self.image_gallery.chain)) |generation| {
         self.image_gallery.awaiting = generation;
     } else {
         // 워커가 바쁘다(직전 스캔이 아직 도는 중). 다음 tick 이 다시 건다.
@@ -254,8 +328,8 @@ pub fn poll(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
 
-    if (self.image_gallery.resubmit and !self.image_gallery.source.isEmpty()) {
-        if (backend.submit(self.image_gallery.source.path())) |generation| {
+    if (self.image_gallery.resubmit and !self.image_gallery.chain.isEmpty()) {
+        if (backend.submit(self.image_gallery.chain)) |generation| {
             self.image_gallery.awaiting = generation;
             self.image_gallery.resubmit = false;
         }
@@ -309,7 +383,7 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     // **크게 보기가 워커를 먼저 쓴다.** 사용자가 방금 누른 것보다 아직 안 보이는 칸이 급할 리 없다.
     if (self.image_gallery.open != null) return;
     if (self.image_gallery.decoding != 0) return; // 이미 한 장 도는 중
-    if (self.image_gallery.source.isEmpty()) return;
+    if (self.image_gallery.chain.isEmpty()) return;
 
     // **보이는 칸 중 아직 없는 것**을 채운다. 창을 통째로 버리지 않는 이유는 그렇게 하면 스크롤할
     // 때마다 격자가 ~160 ms(8장 × 20 ms) 비어 깜빡이기 때문이다. 상한(`max_tiles` = 15 MB)은
@@ -322,8 +396,9 @@ pub fn ensureTiles(self: *AppSession, first: usize, visible: usize) void {
     if (next >= last) return; // 보이는 칸이 다 찼다
 
     const hit = self.image_gallery.hits.items[next];
+    const path = pathFor(self, hit) orelse return;
     if (backend.submit(
-        self.image_gallery.source.path(),
+        path,
         hit.data_offset,
         hit.data_len,
         thumbnail_side,
@@ -416,11 +491,12 @@ pub const thumbnail_side: u32 = 160;
 pub fn decodeThumbnail(self: *AppSession, n: usize) ?image_decode.Decoded {
     if (!builtin.target.os.tag.isDarwin()) return null;
     if (n >= self.image_gallery.hits.items.len) return null;
-    if (self.image_gallery.source.isEmpty()) return null;
+    if (self.image_gallery.chain.isEmpty()) return null;
     const hit = self.image_gallery.hits.items[n];
 
     const io = self.io;
-    const file = std.Io.Dir.cwd().openFile(io, self.image_gallery.source.path(), .{
+    const path = pathFor(self, hit) orelse return null;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{
         .mode = .read_only,
         .follow_symlinks = false,
         .allow_directory = false,
@@ -492,13 +568,14 @@ pub fn ensureOpen(self: *AppSession) void {
     if (!builtin.target.os.tag.isDarwin()) return;
     const op = if (self.image_gallery.open) |*o| o else return;
     if (op.pixels.len > 0 or op.decoding != 0) return;
-    if (self.image_gallery.source.isEmpty()) return;
+    if (self.image_gallery.chain.isEmpty()) return;
     if (op.hit_index >= self.image_gallery.count()) return;
     const backend = decodeBackendPtr(self) orelse return;
 
     const hit = self.image_gallery.hits.items[op.hit_index];
+    const path = pathFor(self, hit) orelse return;
     if (backend.submit(
-        self.image_gallery.source.path(),
+        path,
         hit.data_offset,
         hit.data_len,
         0, // 원본 배율(상한 안에서)
@@ -588,6 +665,12 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     return true;
 }
 
+/// 그 hit 의 오프셋이 가리키는 **파일**. 체인이 여럿이면 `file_index` 가 유일한 답이다 —
+/// 첫 파일로 고정하면 부모 이미지를 현재 파일에서 읽어 엉뚱한 바이트를 디코드한다.
+fn pathFor(self: *const AppSession, hit: index.Hit) ?[]const u8 {
+    return self.image_gallery.chain.get(hit.file_index);
+}
+
 /// 이 이미지의 한 줄 설명을 파일에서 읽는다(§2.2). **두 조각만** 읽는다 —
 /// ⑴ 이미지 줄의 시작부터 base64 앞까지, ⑵ 그 **직전 줄**.
 ///
@@ -598,11 +681,12 @@ pub fn handleDown(self: *AppSession, x_px: f64, y_px: f64) bool {
 /// 실패는 **빈 라벨**이다 — 없는 설명을 지어내지 않는다.
 fn readLabel(self: *AppSession, hit_index: usize) image_context.Label {
     if (hit_index >= self.image_gallery.hits.items.len) return .{};
-    if (self.image_gallery.source.isEmpty()) return .{};
+    if (self.image_gallery.chain.isEmpty()) return .{};
     const hit = self.image_gallery.hits.items[hit_index];
 
     const io = self.io;
-    const file = std.Io.Dir.cwd().openFile(io, self.image_gallery.source.path(), .{
+    const path = pathFor(self, hit) orelse return .{};
+    const file = std.Io.Dir.cwd().openFile(io, path, .{
         .mode = .read_only,
         .follow_symlinks = false,
         .allow_directory = false,
@@ -942,7 +1026,7 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
         // 도는 것이 없는데 픽셀도 없다 = 못 풀었다. 조용히 닫으면 클릭이 안 먹은 것처럼 보인다.
         if (op.decoding == 0) return maru.i18n.t(.image_gallery_open_failed);
     }
-    if (self.image_gallery.source.isEmpty()) return maru.i18n.t(.image_gallery_no_agent);
+    if (self.image_gallery.chain.isEmpty()) return maru.i18n.t(.image_gallery_no_agent);
     if (self.image_gallery.scanning()) return maru.i18n.t(.image_gallery_scanning);
     if (self.image_gallery.partial) return maru.i18n.t(.image_gallery_partial);
     const n = self.image_gallery.count();

@@ -255,6 +255,43 @@ pub fn claudeDirName(cwd: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..cwd.len];
 }
 
+/// codex `session_meta` 가 밝히는 **부모 세션**. 재개/fork 로 이어진 세션이면 이전 대화가 그쪽에 있다.
+///
+/// 실측(2026-08-30, rollout 296 파일): fork/재개가 **172개(58%)**로 일상이고, 부모 id 가 파일명에 박혀
+/// 있는 비율이 **100%**다. 그래서 파일을 열어 볼 필요 없이 **이름으로** 찾는다.
+pub fn parseCodexParentId(head: []const u8, out: []u8) []const u8 {
+    // `session_meta` 는 첫 줄이다 — 그 줄만 본다. 뒤 레코드에도 같은 키가 있으면 남의 부모를 집는다.
+    const line = head[0..(std.mem.indexOfScalar(u8, head, '\n') orelse head.len)];
+    if (std.mem.indexOf(u8, line, "\"session_meta\"") == null) return "";
+    // `parent_thread_id` 가 먼저다 — `forked_from_id` 는 같은 값을 다른 이름으로 싣는 경우가 있어
+    // 하나를 골라야 하고, 실측에서 둘 다 있을 때 값이 같았다.
+    for ([_][]const u8{ "\"parent_thread_id\":\"", "\"forked_from_id\":\"" }) |key| {
+        const at = std.mem.indexOf(u8, line, key) orelse continue;
+        const start = at + key.len;
+        const end = std.mem.indexOfScalarPos(u8, line, start, '"') orelse continue;
+        const v = line[start..end];
+        if (v.len == 0 or v.len > out.len) continue;
+        @memcpy(out[0..v.len], v);
+        return out[0..v.len];
+    }
+    return "";
+}
+
+/// 그 파일명이 이 thread id 의 rollout 인가. 실측 이름 꼴은
+/// `rollout-<ISO 시각>-<thread_id>.jsonl` 이라 **접미사**로 판정한다.
+///
+/// 접두사(`rollout-`)까지 요구하지 않는 이유는 이름 규칙이 바뀌어도 id 만 맞으면 그 파일이 맞기 때문이고,
+/// 그렇다고 «id 를 포함» 으로 느슨하게 보면 다른 세션의 이름 안에 우연히 들어간 경우를 집는다.
+pub fn isCodexRolloutOf(file_name: []const u8, thread_id: []const u8) bool {
+    if (thread_id.len == 0) return false;
+    if (!std.mem.endsWith(u8, file_name, ".jsonl")) return false;
+    const stem = file_name[0 .. file_name.len - ".jsonl".len];
+    if (!std.mem.endsWith(u8, stem, thread_id)) return false;
+    // id 앞은 구분자여야 한다 — 안 그러면 `…-Xabc123` 이 `abc123` 의 것으로 읽힌다.
+    const at = stem.len - thread_id.len;
+    return at == 0 or stem[at - 1] == '-';
+}
+
 /// 확정된 트랜스크립트의 **절대경로**(claude). 이름은 호출자가 신원으로 이미 확정한 값이라 여기에
 /// 추측이 없다(계약 2) — 하는 일은 `<claude_dir>/projects/<cwd 슬러그>/<이름>` 조립뿐이다.
 ///
@@ -833,4 +870,44 @@ test "트랜스크립트 절대경로: 빈 입력과 좁은 버퍼는 null — �
     var tiny: [8]u8 = undefined;
     try testing.expect(claudeTranscriptPath(&tiny, "/home/me/.claude", "/a", "x.jsonl") == null);
     try testing.expect(codexTranscriptPath(&tiny, "/home/me", "a/b/c.jsonl") == null);
+}
+
+test "codex 부모 신원: session_meta 첫 줄에서만 읽는다" {
+    var buf: [64]u8 = undefined;
+    const forked =
+        \\{"type":"session_meta","payload":{"id":"child-1","parent_thread_id":"parent-9","cwd":"/x"}}
+        \\{"type":"response_item","payload":{"parent_thread_id":"NOT-MINE"}}
+    ;
+    try testing.expectEqualStrings("parent-9", parseCodexParentId(forked, &buf));
+
+    // `forked_from_id` 만 있어도 읽는다.
+    const only_forked =
+        \\{"type":"session_meta","payload":{"id":"c","forked_from_id":"p-2"}}
+    ;
+    try testing.expectEqualStrings("p-2", parseCodexParentId(only_forked, &buf));
+
+    // 부모가 없으면 빈 값 — 독립 세션이다(실측 296 중 124개).
+    const plain =
+        \\{"type":"session_meta","payload":{"id":"solo","cwd":"/x"}}
+    ;
+    try testing.expectEqualStrings("", parseCodexParentId(plain, &buf));
+
+    // **첫 줄이 session_meta 가 아니면 안 본다.** 뒤 레코드의 같은 키를 집으면 남의 부모가 붙는다.
+    const not_meta =
+        \\{"type":"response_item","payload":{"parent_thread_id":"NOT-MINE"}}
+    ;
+    try testing.expectEqualStrings("", parseCodexParentId(not_meta, &buf));
+    try testing.expectEqualStrings("", parseCodexParentId("", &buf));
+}
+
+test "codex rollout 이름 판정: 접미사이고 앞이 구분자여야 한다" {
+    try testing.expect(isCodexRolloutOf("rollout-2026-07-25T02-26-31-abc-123.jsonl", "abc-123"));
+    // 앞이 구분자가 아니면 남의 파일이다(`Xabc-123` 이 `abc-123` 으로 읽히면 안 된다).
+    try testing.expect(!isCodexRolloutOf("rollout-2026-07-25T02-26-31-Xabc-123.jsonl", "abc-123"));
+    // 가운데에 있는 것도 아니다.
+    try testing.expect(!isCodexRolloutOf("rollout-abc-123-more.jsonl", "abc-123"));
+    try testing.expect(!isCodexRolloutOf("rollout-abc-123.txt", "abc-123"));
+    try testing.expect(!isCodexRolloutOf("rollout-abc-123.jsonl", ""));
+    // id 만으로 된 이름도 받는다(이름 규칙이 바뀌어도 id 가 맞으면 그 파일이다).
+    try testing.expect(isCodexRolloutOf("abc-123.jsonl", "abc-123"));
 }

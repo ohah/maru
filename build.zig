@@ -11251,6 +11251,42 @@ pub fn build(b: *std.Build) void {
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_UPGRADE_NEXT_EXE=", session_host_upgrade_next);
         run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_RESTORE_TEST_EXE=", session_host_restore_test);
 
+        // U5 product rollback activation은 전체 2,000+ session-host aggregate의 부수 효과가 아니다.
+        // 제품 target 실패가 canonical product rollback exec→ready/listener 복구까지 실제로 도달하는 한 테스트를
+        // 독립 exact-count gate로 둬 로컬 TDD와 macOS CI가 같은 증거를 직접 실행한다.
+        const session_host_product_rollback_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/upgrade_bootstrap.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"target and rollback bootstrap validate exact zero-runtime inherited process graph"},
+        });
+        const run_session_host_product_rollback_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_session_host_product_rollback_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_session_host_product_rollback_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_RESTORE_TEST_EXE=",
+            session_host_restore_test,
+        );
+        run_session_host_product_rollback_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
+        run_session_host_product_rollback_tests.addArg(
+            "MARU_SESSION_HOST_PRODUCT_ROLLBACK_GATE=maru-test-only-v1",
+        );
+        run_session_host_product_rollback_tests.addArtifactArg(session_host_product_rollback_tests);
+        run_session_host_product_rollback_tests.addArg("--maru-expect-tests=1");
+        run_session_host_product_rollback_tests.setCwd(b.path("."));
+        const session_host_product_rollback_step = b.step(
+            "test-session-host-upgrade-product-rollback",
+            "Run product rollback activation and listener recovery E2E (macOS)",
+        );
+        session_host_product_rollback_step.dependOn(&run_session_host_product_rollback_tests.step);
+        run_session_host_tests.step.dependOn(session_host_product_rollback_step);
+
         // 릴리스 signer 경계까지 포함한 제품 N-1→current 검증은 서명 아티팩트가 있어야 하므로
         // 기본 CI에서 실행하지 않는다. 대신 driver 자체는 기본 session-host test에서 컴파일·순수
         // helper test까지 실행해 opt-in 경로가 소스 드리프트로 썩지 않게 한다.

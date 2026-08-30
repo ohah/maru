@@ -387,6 +387,16 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     );
 }
 
+/// 설정의 caret 모양을 chrome 컴포넌트의 enum으로 옮긴다. **chrome은 config를 안 들여온다**(L3) —
+/// 이름이 같으므로 옮겨 담기만 한다. 새 값이 한쪽에만 생기면 여기서 컴파일이 깨져 드러난다.
+fn caretShape(self: *AppSession) chrome_editor.frame.CaretShape {
+    return switch (self.loaded_config.config.editor.cursor_shape) {
+        .bar => .bar,
+        .block => .block,
+        .underline => .underline,
+    };
+}
+
 pub fn buildPaneOps(
     lines: []const []const u8,
     numbers: ?[]const ?u32,
@@ -417,6 +427,9 @@ pub fn buildPaneOps(
     carets: ?[]const []const u32,
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다.
     caret_visible: bool,
+    /// caret 모양(`editor.cursor-shape`). **호출자가 넘긴다** — `tab_width`와 같은 이유로
+    /// 기본값을 여기서 다시 쓰면 두 번째 출처가 된다.
+    caret_shape: chrome_editor.frame.CaretShape,
     wrap: bool,
     /// 탭 폭(열). **호출자가 넘긴다** — 기본값을 여기서 다시 쓰면 그것이 두 번째 출처가 되고,
     /// hit-test가 "렌더가 쓰는 값"이라 부르는 것과 조용히 갈린다. 인자로 뚫은 이유는 하나 더 있다:
@@ -437,7 +450,7 @@ pub fn buildPaneOps(
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
         .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .line_colors = line_colors },
-        .{ .first_line = first_line, .first_piece = first_piece, .carets = carets, .caret_visible = caret_visible, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
+        .{ .first_line = first_line, .first_piece = first_piece, .carets = carets, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
         // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
@@ -1038,6 +1051,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // **세는 쪽과 그리는 쪽이 같은 크기를 쓴다**(`content.count_scratch_bytes`) — 갈리면 같은 줄의
     // 행 수가 달라진다.
     var count_scratch: [chrome_editor.content.count_scratch_bytes]u8 = undefined;
+    // **블록 caret 반전 자리**(`Scratch.caret_cols`). 화면에 보이는 줄 수보다 넉넉히 잡는다 —
+    // 멀티 커서가 한 화면에 이보다 많이 서면 뒤쪽 커서는 사각만 그려지고 글자가 반전되지 않는다.
+    var caret_cols: [256]u32 = undefined;
 
     // **원점은 0,0이다.** 컴포넌트가 내는 좌표는 pane **상대**여야 한다 — 창 절대 좌표를 주면
     // `buildTextDrawList`가 셀 인덱스로 바꿀 때 pane 폭을 넘어 글자가 잘린다. 화면상의 자리는
@@ -1062,6 +1078,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         .gutter_rows = &gutter_rows,
         .row_counts = &counts,
         .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
     };
 
     // **캐시 자리는 필요할 때 잡고, 못 잡으면 없이 그린다**(§2.1의 "저하 동작"과 같은 결) — 캐시는
@@ -1110,7 +1127,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1127,7 +1144,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
-    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+    } else buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), effectiveFirstCol(wrap, term, false), maxColsForRender(term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, syntaxColors(self, term), buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
@@ -6409,6 +6426,7 @@ const DiffFixture = struct {
     gutter_rows: [256]chrome_editor.gutter.Row = undefined,
     counts: [4096]u32 = undefined,
     count_scratch: [8192]u8 = undefined,
+    caret_cols: [256]u32 = undefined,
 
     fn scratch(self: *DiffFixture) FrameScratch {
         return .{
@@ -6420,6 +6438,7 @@ const DiffFixture = struct {
             .gutter_rows = &self.gutter_rows,
             .row_counts = &self.counts,
             .count_scratch = &self.count_scratch,
+            .caret_cols = &self.caret_cols,
         };
     }
 };

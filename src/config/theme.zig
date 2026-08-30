@@ -1089,7 +1089,18 @@ pub const EditorConfig = struct {
     /// 방어하지만 설정에서 그 값이 오는 것 자체를 허용하지 않는다.
     tab_width: u32 = 4,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width
+    /// 편집기 caret **모양**(§9). 터미널의 `cursor.shape`와 **같은 값 이름**(`block`·`bar`·
+    /// `underline`)을 쓰되 **키는 따로 둔다** — 그쪽은 *"앱이 DECSCUSR로 지정하지 않았을 때의
+    /// 기본값"*이고 이쪽은 **그냥 그 모양**이다. 편집기에는 모양을 지정할 앱이 없으므로 "기본값"과
+    /// "값"이 갈릴 자리가 없다. 한 키로 묶으면 터미널을 block으로 두고 편집기는 막대로 쓰는
+    /// 조합을 표현할 수 없어진다.
+    ///
+    /// **기본 `bar`** — 지금까지의 동작이다(폭 2px 막대). 터미널 기본이 `block`인 것과 다른데,
+    /// 그쪽은 셀 격자 위에서 "어느 칸에 있는가"가 중요하고 편집기는 글자 **사이**에 서기 때문이다
+    /// (코드 편집기 관례: VSCode·Zed·Vim의 insert 모드 모두 막대).
+    cursor_shape: CursorShape = .bar,
+
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1101,6 +1112,9 @@ pub const EditorConfig = struct {
         // **이쪽은 `hidden`이 아니다.** 위 `wrap`이 가려진 이유는 *"값이 렌더에 닿는 경로가 없어
         // 토글해도 아무 일이 없다"*였는데, 탭 폭은 이 슬라이스에서 그 경로가 선다.
         .tab_width = Meta{ .key_seg = "tab-width", .doc = .cfg_editor_tab_width, .range = .{ 1, 16 }, .widget = .number, .section = .editor },
+        // 필드명은 `cursor_shape`지만 키는 `editor.cursor-shape`(key_seg). `cursor.shape`와 **같은
+        // enum**을 쓰므로 값 파싱·GUI dropdown이 그대로 공유된다.
+        .cursor_shape = Meta{ .key_seg = "cursor-shape", .doc = .cfg_editor_cursor_shape, .widget = .dropdown, .section = .editor },
     };
 };
 

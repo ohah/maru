@@ -23,9 +23,10 @@ test "U5 signed success proves PTY exit and host-owned reap without terminate sh
     defer std.testing.allocator.free(source);
 
     try std.testing.expectEqual(
-        @as(usize, 1),
-        count(source, "const marker_exit = \"MARU_SIGNED_UPGRADE_EXIT_23\";"),
+        @as(usize, 3),
+        count(source, "\"EXIT_23\""),
     );
+    try std.testing.expectEqual(@as(usize, 0), count(source, "MARU_SIGNED_UPGRADE_EXIT_23"));
     try std.testing.expectEqual(@as(usize, 1), count(source, "fn waitForRuntimeGone("));
     try std.testing.expectEqual(@as(usize, 0), count(source, "fn terminateRuntime("));
     try std.testing.expectEqual(@as(usize, 1), count(source, "client.runtimeInventory()"));

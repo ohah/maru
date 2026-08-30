@@ -4256,6 +4256,59 @@ pub fn build(b: *std.Build) void {
                 &run_session_host_upgrade_budget_product.step,
             );
         }
+
+        const upgrade_coordinator_cleanup_failure_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/upgrade_product_coordinator.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "product coordinator cleanup identity failure overrides resumed report with invariant violation",
+            },
+        });
+        const run_upgrade_coordinator_cleanup_failure_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_upgrade_coordinator_cleanup_failure_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_upgrade_coordinator_cleanup_failure_tests.addArtifactArg(
+            upgrade_coordinator_cleanup_failure_tests,
+        );
+        run_upgrade_coordinator_cleanup_failure_tests.addArg("--maru-expect-tests=1");
+        run_upgrade_coordinator_cleanup_failure_tests.expectExitCode(0);
+        run_upgrade_coordinator_cleanup_failure_tests.setCwd(b.path("."));
+
+        const upgrade_loop_cleanup_fail_stop_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/upgrade_loop.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"outer loop fail-stops every nonretryable coordinator terminal"},
+        });
+        const run_upgrade_loop_cleanup_fail_stop_tests = b.addRunArtifact(
+            upgrade_loop_cleanup_fail_stop_tests,
+        );
+        run_upgrade_loop_cleanup_fail_stop_tests.addArg("--maru-expect-tests=1");
+        run_upgrade_loop_cleanup_fail_stop_tests.setCwd(b.path("."));
+
+        const coordinator_cleanup_fail_stop_step = b.step(
+            "test-session-host-upgrade-coordinator-cleanup-fail-stop",
+            "Verify coordinator cleanup failure reaches outer-loop fail-stop (macOS)",
+        );
+        coordinator_cleanup_fail_stop_step.dependOn(
+            &run_upgrade_coordinator_cleanup_failure_tests.step,
+        );
+        coordinator_cleanup_fail_stop_step.dependOn(
+            &run_upgrade_loop_cleanup_fail_stop_tests.step,
+        );
     }
     const session_host_upgrade_stale_sweep_step = b.step(
         "test-session-host-upgrade-stale-sweep",

@@ -7529,6 +7529,38 @@ test "에이전트 경로는 절대경로 확인 없이 디렉터리를 열지 �
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(gallery_src, "if (!std.fs.path.isAbsolute(root_path)) break;"));
 }
 
+// **위 게이트의 거울.** host 가 뷰포트를 넘겨도 **컴포넌트가 `scroll_clipped` 를 안 달면 아무 데도
+// 안 잘린다** — `system_text.glyphClipFor` 가 `if (placement.scroll_clipped) viewport else null` 이다.
+//
+// 2026-08-25 에 host 쪽만 배선하고 이 절반을 안 봤다. SCM·agent 도크는 자기 `view` 가 이미 달고
+// 있어 나았지만 **파일 트리는 한 번도 안 달았고**, 그 상태로 6일간 초록이었다 — 반쯤 스크롤된 첫
+// 행의 라벨이 뷰 바 위에 그려지는 채로(사용자 제보 2026-08-31). 위 게이트는 "host 가 넘겼는가" 만
+// 재고 "컴포넌트가 표시했는가" 를 안 본다.
+//
+// 새 스크롤 목록 컴포넌트를 더하면 여기서 실패한다. 그때 할 일은 그 컴포넌트의 `view` 에
+// `scroll_clipped` 를 다는 것이다.
+test "스크롤 뷰포트를 내는 컴포넌트는 자기 글자에 scroll_clipped 를 단다" {
+    const allocator = std.testing.allocator;
+
+    // `pub fn scrollTextViewport` 를 정의하는 컴포넌트 = 스크롤 목록. 그 셋이 전부다.
+    const components = [_]struct { build: []const u8, view: []const u8 }{
+        .{ .build = "src/chrome/components/scm_dock/build.zig", .view = "src/chrome/components/scm_dock/view.zig" },
+        .{ .build = "src/chrome/components/file_tree/build.zig", .view = "src/chrome/components/file_tree/view.zig" },
+        .{ .build = "src/chrome/components/session_dock/build.zig", .view = "src/chrome/components/session_dock/view.zig" },
+    };
+    for (components) |c| {
+        const build_src = try readZigFileZ(allocator, c.build);
+        defer allocator.free(build_src);
+        try std.testing.expect(countOccurrences(build_src, "pub fn scrollTextViewport(") == 1);
+
+        const view_src = try readZigFileZ(allocator, c.view);
+        defer allocator.free(view_src);
+        // **값이 참으로 실리는 자리가 있어야 한다.** 필드 이름만 있는 것으로는 안 된다 —
+        // `scroll_clipped: bool = false` 는 어느 writer 에나 있고, 그것은 "안 자른다" 이다.
+        try std.testing.expect(countOccurrences(view_src, "scroll_clipped = true") >= 1);
+    }
+}
+
 test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 넘긴다" {
     const allocator = std.testing.allocator;
 

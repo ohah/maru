@@ -137,6 +137,20 @@ fn processArmedWithDeadline(
     deadline: upgrade_deadline.Deadline,
     gate_preclosed: bool,
 ) Outcome {
+    return processArmedWithDeadlineHook(ctx, attempt_id, deadline, gate_preclosed, null);
+}
+
+const AfterBudgetPrepare = *const fn (
+    reservation: *budget_admission.Reservation,
+) error{HookFailed}!void;
+
+fn processArmedWithDeadlineHook(
+    ctx: Context,
+    attempt_id: u128,
+    deadline: upgrade_deadline.Deadline,
+    gate_preclosed: bool,
+    after_budget_prepare: ?AfterBudgetPrepare,
+) Outcome {
     const execution = ctx.owner.beginExecution(attempt_id) orelse {
         const report = ctx.owner.status(attempt_id) orelse return .not_armed;
         if (report.status == .pending) return .not_armed;
@@ -212,6 +226,10 @@ fn processArmedWithDeadline(
         gate_preclosed,
         reportForBudgetError(err),
     );
+    if (after_budget_prepare) |hook| hook(&budget_reservation) catch {
+        budget_reservation.cancel() catch {};
+        return .invariant_violation;
+    };
     const outcome = processBudgetReserved(
         ctx,
         attempt_id,
@@ -979,7 +997,7 @@ const TestStager = struct {
     }
 };
 
-test "product coordinator uses one graph capture then rolls back exact slots and authority on exec return" {
+fn runProductCoordinatorTest(cleanup_collision: bool) !void {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
@@ -1006,7 +1024,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
     defer {
         _ = lifetime_owner.unlinkOwnedWhileLocked(owner_path) catch {};
         lifetime_owner.deinit();
-        _ = c.rmdir(owner_dir.ptr);
+        std.Io.Dir.cwd().deleteTree(std.testing.io, owner_dir) catch {};
     }
     var rollback_authority = rollback_image.Authority.prepare(
         allocator,
@@ -1033,7 +1051,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
 
     var owner = upgrade_owner.UpgradeOwner.init(allocator, TestStager.ops(), null);
     defer owner.deinit();
-    const attempt_id: u128 = 0xA1;
+    const attempt_id: u128 = if (cleanup_collision) 0xA2 else 0xA1;
     const request: upgrade_wire.PrepareRequest = .{
         .attempt_id = attempt_id,
         .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
@@ -1122,7 +1140,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
             if (request_value.runtime_slots.len != 1 or
                 request_value.runtime_slots[0].runtime_id == 0 or
                 request_value.restore.role != .target or
-                request_value.restore.attempt_id != 0xA1)
+                request_value.restore.attempt_id == 0)
                 return error.ExecFailed;
             var buffers: entrypoint.RestoreArgBuffers = .{};
             const args = entrypoint.formatRestoreArgs(request_value.restore, &buffers) catch
@@ -1150,7 +1168,7 @@ test "product coordinator uses one graph capture then rolls back exact slots and
     };
     const layout = findAvailableLayout(40) orelse return error.SkipZigTest;
     const requested_slots = layout.requested().?;
-    const outcome = processArmed(.{
+    const context: Context = .{
         .allocator = allocator,
         .io = std.testing.io,
         .owner = &owner,
@@ -1174,17 +1192,53 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         .session_dir = owner_dir,
         .socket_path = "/tmp/maru-0/sh/000000000000000000000000000000b2.sock",
         .layout = layout,
-    }, attempt_id);
-    const report = switch (outcome) {
-        .terminal => |value| value,
-        .not_armed, .invariant_violation => return error.TestUnexpectedResult,
     };
-    try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
-    try std.testing.expectEqual(upgrade_wire.AttemptReason.exec_failed, report.reason);
-    try std.testing.expectEqual(@as(usize, 1), fake_authority.begin_count);
-    try std.testing.expectEqual(@as(usize, 2), fake_authority.rollback_count);
-    try std.testing.expectEqual(@as(usize, 1), fake_executor.preflight_count);
-    try std.testing.expectEqual(@as(usize, 1), fake_executor.execute_count);
+    const Collision = struct {
+        fn replace(reservation: *budget_admission.Reservation) error{HookFailed}!void {
+            const attempt_fd = reservation.store.attempt_fd;
+            if (c.renameat(attempt_fd, "primary", attempt_fd, "saved") != 0)
+                return error.HookFailed;
+            const replacement_fd = c.openat(
+                attempt_fd,
+                "primary",
+                .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+                @as(c.mode_t, 0o600),
+            );
+            if (replacement_fd < 0) return error.HookFailed;
+            _ = c.close(replacement_fd);
+        }
+    };
+    const outcome = if (cleanup_collision)
+        processArmedWithDeadlineHook(
+            context,
+            attempt_id,
+            try upgrade_deadline.Deadline.after(std.testing.io, upgrade_limits.pause_budget_ns),
+            false,
+            Collision.replace,
+        )
+    else
+        processArmed(context, attempt_id);
+    if (cleanup_collision) {
+        try std.testing.expectEqual(Outcome.invariant_violation, outcome);
+        const report = owner.status(attempt_id) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
+        try std.testing.expectEqual(upgrade_wire.AttemptReason.handoff_failed, report.reason);
+        try std.testing.expectEqual(@as(usize, 0), fake_authority.begin_count);
+        try std.testing.expectEqual(@as(usize, 0), fake_authority.rollback_count);
+        try std.testing.expectEqual(@as(usize, 0), fake_executor.preflight_count);
+        try std.testing.expectEqual(@as(usize, 0), fake_executor.execute_count);
+    } else {
+        const report = switch (outcome) {
+            .terminal => |value| value,
+            .not_armed, .invariant_violation => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(upgrade_wire.AttemptStatus.resumed, report.status);
+        try std.testing.expectEqual(upgrade_wire.AttemptReason.exec_failed, report.reason);
+        try std.testing.expectEqual(@as(usize, 1), fake_authority.begin_count);
+        try std.testing.expectEqual(@as(usize, 2), fake_authority.rollback_count);
+        try std.testing.expectEqual(@as(usize, 1), fake_executor.preflight_count);
+        try std.testing.expectEqual(@as(usize, 1), fake_executor.execute_count);
+    }
     try std.testing.expect(gate.snapshot().open);
     try std.testing.expect(!manager.upgradeQuiesceReached());
     for (requested_slots) |slot| try std.testing.expect(!exec_fd_set.isOpen(slot));
@@ -1198,4 +1252,12 @@ test "product coordinator uses one graph capture then rolls back exact slots and
         if (!saw_output) _ = usleep(10 * 1000);
     }
     try std.testing.expect(saw_output);
+}
+
+test "product coordinator uses one graph capture then rolls back exact slots and authority on exec return" {
+    try runProductCoordinatorTest(false);
+}
+
+test "product coordinator cleanup identity failure overrides resumed report with invariant violation" {
+    try runProductCoordinatorTest(true);
 }

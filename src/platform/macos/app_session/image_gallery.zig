@@ -55,6 +55,9 @@ pub const State = struct {
     /// 크게 보고 있는 이미지. `null` 이면 격자다. **격자와 배타적**이다 — 둘을 겹쳐 그리면
     /// 어느 것을 누르는지 알 수 없다.
     open: ?Open = null,
+    /// 포인터가 얹힌 칸. **`hitTest` 한 곳에서 온다** — 그리기·클릭·호버가 같은 판정을 쓰지 않으면
+    /// 강조된 칸과 열리는 칸이 갈린다.
+    hovered: ?usize = null,
     /// 갤러리가 키보드를 쥐고 있나. 도크를 눌렀다는 사실이 소유권이고, 터미널을 누르면 놓는다.
     /// **이 게이트가 없으면 vim 의 Esc 가 셸이 아니라 크게 보기를 닫는다**(에이전트 도크가 같은
     /// 이유로 같은 게이트를 둔다).
@@ -81,6 +84,16 @@ pub const State = struct {
         self.tiles.clearRetainingCapacity();
     }
 
+    /// **이 프레임에 안 그린 타일은 다시 올려야 한다.** 렌더러는 `live_ids` 에 없는 텍스처를 evict
+    /// 하므로(kitty K4c), 한 프레임이라도 빼먹으면 그 텍스처가 사라진다. 그런데 `uploaded` 가 참으로
+    /// 남아 있으면 다음에 그릴 때 **업로드 없이 id 만** 실어 **빈 자리**가 된다.
+    ///
+    /// 실제로 그렇게 났다: 크게 보기를 열면 격자 타일이 한 프레임도 안 실려 전부 evict 되고, 닫으면
+    /// 라벨(글자)만 보이고 그림이 없다. 스크롤로 창 밖에 나갔다 돌아올 때도 같다.
+    pub fn markAllNeedUpload(self: *State) void {
+        for (self.tiles.items) |*tile| tile.uploaded = false;
+    }
+
     /// 크게 보기의 픽셀도 owned 다 — 소스가 갈리거나 닫을 때 반드시 여기서 푼다.
     pub fn dropOpen(self: *State, allocator: std.mem.Allocator) void {
         if (self.open) |*op| allocator.free(op.pixels);
@@ -102,6 +115,7 @@ pub const State = struct {
         self.overflow = 0;
         self.scroll = .{};
         self.decoding_index = 0;
+        self.hovered = null;
     }
 
     /// 그 칸의 타일이 있으면 준다. **`hit_index` 가 유일 키다** — 배열 위치가 아니다.
@@ -357,6 +371,9 @@ pub fn poll(self: *AppSession) void {
     // 「비었다」로 보이지 않아 알아채기 어렵다. 불변식은 가정하지 말고 강제한다.
     self.image_gallery.dropTiles(self.allocator);
     self.image_gallery.dropOpen(self.allocator);
+    // **호버도 옛 인덱스다.** 이미지가 줄면 없는 칸을 가리키고, 안 줄어도 그 자리엔 다른 이미지가
+    // 온다(최신 우선이라 순서가 통째로 바뀐다). 다음 마우스 이동이 다시 잡는다.
+    self.image_gallery.hovered = null;
     self.image_gallery.partial = result.partial;
     self.image_gallery.scanned_bytes = result.scanned_bytes;
     self.image_gallery.scan_ns = result.scan_ns;
@@ -369,6 +386,12 @@ pub fn poll(self: *AppSession) void {
     if (self.debug_image_gallery_open) |n| {
         self.debug_image_gallery_open = null;
         openAt(self, n);
+    }
+    // `MARU_FORCE_IMAGE_GALLERY_HOVER=<n>` — 그 칸에 포인터가 얹힌 것처럼 세운다. 실제 호버는 마우스
+    // 이동이 필요해 헤드리스로는 만들 수 없다(상태바 호버가 같은 이유로 같은 게이트를 둔다).
+    if (self.debug_image_gallery_hover) |n| {
+        self.debug_image_gallery_hover = null;
+        if (n < self.image_gallery.count()) self.image_gallery.hovered = n;
     }
 }
 
@@ -663,6 +686,42 @@ pub fn handleEscape(self: *AppSession) bool {
     return true;
 }
 
+/// 포인터가 얹힌 칸을 갱신한다. 얹힌 칸이 있으면 `true` — 호출자가 커서를 손가락으로 바꾼다.
+///
+/// **판정은 `handleDown` 과 같은 `hitTest` 다.** 여기서 따로 재면 강조된 칸과 열리는 칸이 갈리는데,
+/// 그 어긋남은 「누른 것과 다른 게 열린다」로 보이지 「호버가 틀렸다」로 보이지 않아 찾기 어렵다.
+///
+/// 크게 보기 중에는 격자가 없으므로 호버도 없다.
+pub fn handleHover(self: *AppSession, x_px: f64, y_px: f64) bool {
+    if (!builtin.target.os.tag.isDarwin()) return false;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return clearHover(self);
+    if (self.image_gallery.open != null) return clearHover(self);
+
+    const area = gridArea(self);
+    if (x_px < @as(f64, @floatFromInt(area.x)) or y_px < @as(f64, @floatFromInt(area.y))) return clearHover(self);
+    if (x_px >= @as(f64, @floatFromInt(area.x +| area.w)) or y_px >= @as(f64, @floatFromInt(area.y +| area.h))) {
+        return clearHover(self);
+    }
+
+    const px: u32 = @intFromFloat(@max(0, x_px));
+    const py: u32 = @intFromFloat(@max(0, y_px));
+    const hit = image_grid.hitTest(area, gridMetrics(self), gridLayout(self), px, py);
+    if (hit != self.image_gallery.hovered) {
+        self.image_gallery.hovered = hit;
+        self.metal_dirty = true;
+    }
+    return hit != null;
+}
+
+/// 호버를 놓는다. 얹힌 칸이 없다는 뜻이므로 `false`.
+pub fn clearHover(self: *AppSession) bool {
+    if (self.image_gallery.hovered != null) {
+        self.image_gallery.hovered = null;
+        self.metal_dirty = true;
+    }
+    return false;
+}
+
 /// 도크 본문 primary down. 소비했으면 `true`.
 ///
 /// 두 모드가 다르다 — 격자에서는 **칸을 눌러 연다**, 크게 보기에서는 **이미지 밖을 눌러 닫는다**.
@@ -922,7 +981,7 @@ pub fn gridLayout(self: *const AppSession) image_grid.Layout {
 }
 
 /// 휠로 격자를 굴린다. 크게 보기 중에는 `wheelZoom` 이 가져가므로 여기 오지 않는다.
-pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool) bool {
+pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool, x_px: f64, y_px: f64) bool {
     const l = gridLayout(self);
     if (l.max_scroll == 0) return false; // 굴릴 것이 없다 — 이벤트를 삼키지 않는다
     // 트랙패드(precise)는 논리 픽셀, 눈금은 한 번에 한 행. 도크 목록과 같은 규약이다.
@@ -933,11 +992,53 @@ pub fn wheelScroll(self: *AppSession, delta_y: f64, precise: bool) bool {
     // **부호를 여기서 뒤집지 않는다.** `scrollByWheel` 이 이미 `scrollByPx(-whole)` 로 뒤집으므로
     // 한 번 더 뒤집으면 위아래가 반대가 된다(에이전트 도크도 `delta_y` 를 그대로 넘긴다).
     if (self.image_gallery.scroll.scrollByWheel(delta_y, unit, l.max_scroll)) {
+        // **굴리면 커서 아래 칸이 바뀐다.** 포인터는 그대로인데 격자가 움직였으므로, 옛 칸이 강조된 채
+        // 남거나(다른 그림이 그 자리에 온다) 강조가 사라진다. 마우스가 다시 움직일 때까지 그 상태로
+        // 있으므로 여기서 같은 좌표로 다시 잡는다.
+        _ = handleHover(self, x_px, y_px);
         self.metal_dirty = true;
         return true;
     }
     return true; // 경계에서도 소비한다 — 안 그러면 제스처가 뒤 터미널로 샌다
 }
+
+/// 얹힌 칸 **뒤에 판을 깐다.** 그림만 있으면 누를 수 있는 것인지 알 수 없다 — 커서 변화와 짝이다.
+///
+/// **이미지에 색을 입히지 않는다.** `GpuImage` 에 tint 를 더하려면 extern 구조체 ABI 와 셰이더까지
+/// 건드려야 하고, 무엇보다 원본 색이 달라지면 「그 스크린샷 색이 이랬나」가 흔들린다 — 갤러리는 바로
+/// 그것을 보는 곳이다. 판은 **칸 전체**를 덮으므로 letterbox 여백까지 밝아져 호버 범위가 그대로 보인다.
+///
+/// 크게 보기 중에는 격자가 없으니 아무것도 안 그린다.
+pub fn appendHoverQuad(self: *AppSession) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    if (self.image_gallery.open != null) return;
+    const n = self.image_gallery.hovered orelse return;
+
+    const area = gridArea(self);
+    const l = gridLayout(self);
+    const cell = image_grid.rectAt(area, gridMetrics(self), l, n) orelse return;
+
+    // 전경색을 옅게. 배경색을 쓰면 어두운 테마에서 판이 안 보이고, 강조색을 새로 정하면 테마와 논다.
+    const color: u32 = app_session_mod.packRgbAlpha(self.appearance.theme.sidebar_foreground, hover_plate_alpha);
+    self.gpu_quads.append(self.allocator, .{
+        .x = @floatFromInt(cell.x),
+        .y = @floatFromInt(cell.y),
+        .w = @floatFromInt(cell.w),
+        .h = @floatFromInt(cell.h),
+        .corner_radii = .{ 4, 4, 4, 4 },
+        .border_widths = .{ 0, 0, 0, 0 },
+        .fill_color0 = color,
+        .fill_color1 = color,
+        .border_color = 0,
+        .gradient_kind = 0,
+        // **이미지보다 뒤다.** 위에 깔면 그림이 그 색에 잠긴다.
+        .layer = 0,
+    }) catch {};
+}
+
+/// 얹힌 칸 판의 불투명도. 보이되 **원본을 가리지 않는** 선이다.
+pub const hover_plate_alpha: u8 = 46;
 
 /// 갤러리 타일을 프레임의 이미지 채널에 얹는다.
 ///
@@ -954,7 +1055,11 @@ pub fn appendGpuImages(
     live_ids: *std.ArrayList(u32),
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
-    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) return;
+    // 도크가 안 보이거나 다른 뷰면 이 프레임에 타일이 하나도 안 실린다 = 전부 evict 된다.
+    if (!dock_ops.dockVisible(self) or self.dock.view != .image_gallery) {
+        self.image_gallery.markAllNeedUpload();
+        return;
+    }
 
     const area = gridArea(self);
     const m = gridMetrics(self);
@@ -966,12 +1071,17 @@ pub fn appendGpuImages(
     // 동안에는 격자를 그대로 둔다 — 클릭 직후 화면이 비면 「눌렀더니 사라졌다」로 보인다.
     if (self.image_gallery.open) |*op| {
         if (op.pixels.len > 0) {
+            // 크게 보기가 격자를 **대체**하므로 타일이 하나도 안 실린다 — 닫을 때 다시 올려야 한다.
+            self.image_gallery.markAllNeedUpload();
             appendOpenImage(self, op, images, uploads, pixels, live_ids);
             return;
         }
     }
 
-    if (l.visible == 0) return;
+    if (l.visible == 0) {
+        self.image_gallery.markAllNeedUpload();
+        return;
+    }
 
     // 보이는 창만큼 채운다(tick 당 한 장). 다 차기 전에도 있는 것부터 그린다.
     ensureTiles(self, l.first, l.visible);
@@ -986,7 +1096,11 @@ pub fn appendGpuImages(
     for (self.image_gallery.tiles.items, 0..) |*tile, i| {
         const n = tile.hit_index; // **자리는 인덱스가 정한다** — 배열 순서가 아니다
         if (tile.pixels.len == 0) continue; // 못 푼 이미지는 자리만 차지하고 안 그린다
-        const cell = image_grid.rectAt(area, m, l, n) orelse continue; // 창 밖이면 안 그린다
+        const cell = image_grid.rectAt(area, m, l, n) orelse {
+            // 창 밖이라 안 그린다 = 이 프레임에 evict 된다. 돌아올 때 다시 올려야 한다.
+            tile.uploaded = false;
+            continue;
+        };
         // **비율을 지켜 가운데**. 늘리면 스크린샷 글자가 찌그러지고 자르면 무엇인지 못 알아본다.
         const r = image_grid.fitInside(cell, tile.width, tile.height);
         // id 는 **인덱스**로 짓는다 — 배열 위치는 퇴출·추가로 바뀐다(위 주석).
@@ -1006,7 +1120,10 @@ pub fn appendGpuImages(
             .src_v1 = 1,
             .z = @intCast(@min(i, 255)),
             .pass = 2, // above_text — 도크 배경 셀 위에 그린다
-        }) catch return;
+        }) catch {
+            self.image_gallery.markAllNeedUpload();
+            return;
+        };
         live_ids.append(self.allocator, id) catch {};
 
         if (!tile.uploaded) {
@@ -1018,24 +1135,40 @@ pub fn appendGpuImages(
                 .generation = tile.generation,
                 .pixels_offset = pixels.len + new_pixels.items.len,
                 .pixels_len = tile.pixels.len,
-            }) catch return;
-            new_pixels.appendSlice(self.allocator, tile.pixels) catch return;
+            }) catch {
+                self.image_gallery.markAllNeedUpload();
+                return;
+            };
+            new_pixels.appendSlice(self.allocator, tile.pixels) catch {
+                self.image_gallery.markAllNeedUpload();
+                return;
+            };
             tile.uploaded = true;
         }
     }
     if (new_images.items.len == 0) return;
 
     // 기존 배열 뒤에 잇는다(배경 이미지가 앞에 prepend 되는 것과 짝 — pass 순서를 지킨다).
-    const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + new_images.items.len) catch return;
+    // **여기서 나가면 이 프레임에 아무것도 안 실린다** = 전부 evict 인데 `uploaded` 는 참이다.
+    // 방금 고친 것과 같은 결함이라 같은 규율로 막는다 — 안 그리고 나가는 길은 예외 없이 표시한다.
+    const merged_images = self.allocator.alloc(metal_frame.GpuImage, images.len + new_images.items.len) catch {
+        self.image_gallery.markAllNeedUpload();
+        return;
+    };
     @memcpy(merged_images[0..images.len], images.*);
     @memcpy(merged_images[images.len..], new_images.items);
     self.allocator.free(images.*);
     images.* = merged_images;
 
     if (new_uploads.items.len > 0) {
-        const merged_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, uploads.len + new_uploads.items.len) catch return;
+        // 이미지는 이미 실렸지만 **업로드가 빠지면** 텍스처 없는 id 가 실려 빈 자리가 된다.
+        const merged_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, uploads.len + new_uploads.items.len) catch {
+            self.image_gallery.markAllNeedUpload();
+            return;
+        };
         const merged_pixels = std.mem.concat(self.allocator, u8, &.{ pixels.*, new_pixels.items }) catch {
             self.allocator.free(merged_uploads);
+            self.image_gallery.markAllNeedUpload();
             return;
         };
         @memcpy(merged_uploads[0..uploads.len], uploads.*);

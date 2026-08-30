@@ -282,7 +282,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
         }
         // 격자에서는 **굴린다**. 굴릴 것이 없으면 소비하지 않고 흘려보낸다(도크 위에서 휠이
         // 통째로 막히면 뒤 터미널 스크롤백이 죽는다).
-        if (image_gallery_ops.wheelScroll(self, scaled, precise)) return;
+        if (image_gallery_ops.wheelScroll(self, scaled, precise, x_px, y_px)) return;
     }
     const session_dock_wheel_target = dock_ops.dockVisible(self) and self.dock.view == .agent_sessions and
         layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content);

@@ -5017,6 +5017,8 @@ pub const AppSession = struct {
     /// MARU_FORCE_IMAGE_GALLERY_OPEN=<n> — 스캔이 끝나면 n 번째를 크게 연다. **첫 frame 에 열 수 없다** —
     /// 스캔이 워커라 그때는 인덱스가 비어 있다. 그래서 값을 남겨 두고 `poll` 이 결과를 받은 tick 에 연다.
     debug_image_gallery_open: ?usize = null,
+    /// MARU_FORCE_IMAGE_GALLERY_HOVER=<n> — 그 칸에 포인터가 얹힌 것처럼 세운다(헤드리스 확인용).
+    debug_image_gallery_hover: ?usize = null,
     /// 캡처 전용 — `MARU_FORCE_TAB_COUNT` 이 탭을 이미 늘렸나(`applyForcedTabCount`, 한 번만).
     debug_tab_count_applied: bool = false,
     // 4e-1 디버그 훅(maybeDebugOpenWebPanel) 1회성 가드 — MARU_WEB_PANEL=1이면 활성 pane에 web Term을 한 번만 append한다.
@@ -14805,6 +14807,16 @@ pub const AppSession = struct {
                     return if (self.agent_session_dock_interaction.hovered != null) .link else .default;
                 }
             }
+            // 갤러리도 자기 격자로 판정한다 — 같은 이유다. 그리고 **호버 갱신과 커서 판정이 한 호출**이라
+            // 강조된 칸과 열리는 칸이 갈릴 수 없다.
+            if (self.dock.view == .image_gallery) {
+                if (layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                    tab_ops.setHoveredTab(self, null);
+                    self.clearHoverUrlAnchor();
+                    return if (image_gallery_ops.handleHover(self, x_px, y_px)) .link else .default;
+                }
+                _ = image_gallery_ops.clearHover(self);
+            }
             // 소스 컨트롤은 자기 tree로 판정한다. 탐색기 행 판정(`fileTreeRowAt`)을 그대로 쓰면 이 뷰에는
             // 그런 행이 없어 **도크 전체가 화살표**가 된다(사용자 지적 2026-08-17).
             if (self.dock.view == .source_control) {
@@ -18216,6 +18228,7 @@ pub const AppSession = struct {
                 // (예약 id·live 집합·generation 1회 업로드). 렌더러를 고치지 않고 kitty graphics 의
                 // 텍스처 캐시·image quad 인프라를 그대로 재사용한다. 갤러리 뷰가 아니면 즉시 돌아온다.
                 image_gallery_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
+                image_gallery_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
@@ -73014,6 +73027,15 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     try std.testing.expect(image_gallery_ops.handleEscape(session));
     try std.testing.expect(session.image_gallery.open == null);
 
+    // ── **열었다 닫으면 텍스처를 다시 올린다.** 안 그러면 라벨만 남고 그림이 사라진다.
+    //
+    // 렌더러는 `live_ids` 에 없는 텍스처를 evict 한다(kitty K4c). 크게 보기가 격자를 대체하는 동안
+    // 타일 id 가 한 프레임도 안 실리므로 전부 evict 되는데, `uploaded` 가 참으로 남으면 다음에
+    // **업로드 없이 id 만** 실어 빈 자리가 된다. 사용자가 실제로 그 화면을 보고 신고했다.
+    for (session.image_gallery.tiles.items) |tile| {
+        try std.testing.expect(!tile.uploaded); // 크게 보기를 지나며 「다시 올려야 함」으로 바뀌었다
+    }
+
     // 닫으면 다시 격자다.
     var images2: []maru.renderer.metal_frame.GpuImage = &.{};
     var uploads2: []maru.renderer.metal_frame.GpuImageUpload = &.{};
@@ -73028,6 +73050,9 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     image_gallery_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(image_gallery_ops.gallery_image_id_base, images2[0].image_id);
+    // **업로드가 함께 실린다** — 텍스처가 evict 됐으므로 id 만 실으면 아무것도 안 그려진다.
+    try std.testing.expectEqual(@as(usize, 1), uploads2.len);
+    try std.testing.expect(pixels2.len > 0);
 }
 
 test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 민다 (IG4-c)" {
@@ -73658,4 +73683,126 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
         try std.testing.expectEqual(before, session.total_app_key_events);
         try std.testing.expectEqual(@as(usize, 3), session.image_gallery.open.?.hit_index); // 안 움직였다
     }
+}
+
+test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
+    // **누를 수 있다는 것이 보여야 한다**(사용자 요청). 그림만 있으면 클릭 가능한지 알 수 없다.
+    // 그리고 호버 판정은 **클릭과 같은 `hitTest`** 여야 한다 — 갈리면 강조된 칸과 열리는 칸이 달라지고,
+    // 그 증상은 「누른 것과 다른 게 열린다」로 보이지 「호버가 틀렸다」로 보이지 않아 찾기 어렵다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(allocator);
+    for (0..6) |_| try transcript.appendSlice(allocator, one);
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript.items });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 6), session.image_gallery.count());
+
+    const area = image_gallery_ops.gridArea(session);
+    const m = image_gallery_ops.gridMetrics(session);
+    const l = image_gallery_ops.gridLayout(session);
+    const cell1 = maru.session.image_grid.rectAt(area, m, l, 1).?;
+
+    // ── ① 칸 위면 얹힌 것으로 보고 **누를 수 있다고 답한다**(호출자가 커서를 손가락으로 바꾼다).
+    try std.testing.expect(image_gallery_ops.handleHover(
+        session,
+        @floatFromInt(cell1.x + cell1.w / 2),
+        @floatFromInt(cell1.y + cell1.h / 2),
+    ));
+    try std.testing.expectEqual(@as(?usize, 1), session.image_gallery.hovered);
+
+    // ── ② **강조되는 칸 = 눌리는 칸.** 같은 점을 눌러 그 칸이 열리는지 본다.
+    try std.testing.expect(image_gallery_ops.handleDown(
+        session,
+        @floatFromInt(cell1.x + cell1.w / 2),
+        @floatFromInt(cell1.y + cell1.h / 2),
+    ));
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.open.?.hit_index);
+
+    // ── ③ **크게 보기 중에는 호버가 없다** — 격자가 화면에 없다.
+    try std.testing.expect(!image_gallery_ops.handleHover(
+        session,
+        @floatFromInt(cell1.x + cell1.w / 2),
+        @floatFromInt(cell1.y + cell1.h / 2),
+    ));
+    try std.testing.expect(session.image_gallery.hovered == null);
+    image_gallery_ops.closeOpen(session);
+
+    // ── ④ 간격·여백은 얹힌 것이 아니다 — 칸이 아닌 곳에서 손가락 커서가 뜨면 거짓말이다.
+    try std.testing.expect(!image_gallery_ops.handleHover(
+        session,
+        @floatFromInt(area.x),
+        @floatFromInt(area.y),
+    ));
+    try std.testing.expect(session.image_gallery.hovered == null);
+
+    // ── ⑤ 도크 밖도 마찬가지.
+    try std.testing.expect(image_gallery_ops.handleHover(
+        session,
+        @floatFromInt(cell1.x + 2),
+        @floatFromInt(cell1.y + 2),
+    ));
+    try std.testing.expect(!image_gallery_ops.handleHover(session, 10, 10));
+    try std.testing.expect(session.image_gallery.hovered == null);
+
+    // ── ⑥ **판이 실제로 그려진다.** 상태만 있고 안 그리면 사용자에게는 아무 변화가 없다.
+    _ = image_gallery_ops.handleHover(
+        session,
+        @floatFromInt(cell1.x + 2),
+        @floatFromInt(cell1.y + 2),
+    );
+    const before = session.gpu_quads.items.len;
+    image_gallery_ops.appendHoverQuad(session);
+    try std.testing.expectEqual(before + 1, session.gpu_quads.items.len);
+    const q = session.gpu_quads.items[session.gpu_quads.items.len - 1];
+    try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.x)), q.x);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.y)), q.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(cell1.w)), q.w);
+    // **이미지보다 뒤에 깐다** — 위에 깔면 그림이 그 색에 잠긴다.
+    try std.testing.expectEqual(@as(u32, 0), q.layer);
+
+    // 얹힌 칸이 없으면 아무것도 안 그린다.
+    _ = image_gallery_ops.clearHover(session);
+    const before2 = session.gpu_quads.items.len;
+    image_gallery_ops.appendHoverQuad(session);
+    try std.testing.expectEqual(before2, session.gpu_quads.items.len);
 }

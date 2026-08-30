@@ -2959,3 +2959,133 @@ pub fn applyFontSpacing(
     // Ghostty도 일반 텍스트를 자연 bearing으로 두고 셀폭 조정은 배치에만 적용한다(face.zig "left-aligned within the cell").
     return .{ .advance_width_px = advance_width_px, .glyph_width_px = base_width_px, .height_px = height_px };
 }
+
+/// **사이드바 검색이 열려 있을 때**의 PageUp/PageDown/Home/End — 카드 목록을 굴린다.
+///
+/// 도크 둘(`agent_dock`·`scm_dock`)과 같은 규율이되 **키를 언제 갖는가가 다르다.** 사이드바는 늘
+/// 보이지만 그것이 소유권은 아니다 — 터미널에서 친 Page 가 카드 목록을 굴리면 안 된다. 사이드바가
+/// 키를 드는 상태는 **검색이 열린 동안** 하나뿐이고(`sidebar_search_active` — 그 라우팅이
+/// `handleKeyEvent` 에서 모든 키를 소비한다), 그래서 이 함수도 그 안에서만 산다.
+///
+/// **지금 그 넷은 삼켜지고 있다.** `handleSidebarSearchKey` 는 escape·enter·글자만 다루고 나머지를
+/// `else => {}` 로 버리는데, 그 블록은 무조건 소비하고 돌아간다 — 즉 검색 중 PageDown 은 목록도 안
+/// 굴리고 터미널로도 안 간다. 그래서 이 변경은 **잃는 것이 없다**(탐색기가 그 넷을 「선택 이동」으로
+/// 이미 쓰고 있어 대상에서 빠진 것과 대비된다 — ScrollArea 계약 §4.5).
+pub fn handleSidebarScrollKey(self: *AppSession, event: terminal.KeyEvent) bool {
+    if (!self.sidebar_search_active) return false;
+    if (event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
+        return false;
+    const max_offset = sidebarMaxScroll(self);
+    // 한 카드를 화면에 남긴다 — 다만 **사이드바 카드는 높이가 고정이 아니다**(이름만인 카드부터
+    // 이름+브랜치+경로+상태까지, `cardHeight(lines, m)`). 그래서 «가장 작은 카드»(한 줄)를 기준으로
+    // 둔다: 남는 것이 한 줄짜리면 정확히 하나, 여러 줄짜리면 그 일부다. page step 의 목적은 읽던
+    // 자리를 남기는 것이므로 이 정도면 족하고, 반대로 가장 큰 카드로 재면 화면이 거의 안 넘어간다.
+    const min_card_h = chrome.components.sidebar.cardHeight(1, sidebarMetrics(self));
+    const step = chrome.ui.scroll_area.pageStepPx(sidebarViewport(self).height(), min_card_h);
+    const next = sidebarScrollKeyOffset(event.key, self.sidebar_scroll_offset_px, step, max_offset) orelse return false;
+    // `setSidebarScrollOffsetPx` 가 clamp·재빌드·metal_dirty 를 한 자리에서 한다(휠·스크롤바와 같은 문).
+    setSidebarScrollOffsetPx(self, next);
+    return true;
+}
+
+/// 위 핸들러의 **산술만** 떼어낸 순수 함수. 키가 스크롤 대상이 아니면 `null`(호출자가 흘려보낸다).
+///
+/// **왜 떼어냈나 — 상태 주입으로는 못 잰다.** `setSidebarScrollOffsetPx` 는 `rebuildSidebar` 를
+/// 부르고 그것이 `recomputeVisibleTabs` 로 `sidebar_rows` 를 **실제 탭에서 다시 만든다**. 그래서
+/// 테스트가 카드를 손으로 채워 스크롤 상한을 만들어도 첫 적용에서 그 행들이 사라지고 상한이 0 이
+/// 되어 값이 도로 clamp 된다(적대적 검증에서 `expected 600, found 0` 으로 잡혔다). 산술을 여기 두면
+/// 그 재생성과 무관하게 **값 자체**를 못 박을 수 있고, 핸들러는 게이트와 적용만 남는다.
+pub fn sidebarScrollKeyOffset(key: terminal.Key, current_px: u32, step_px: u32, max_offset_px: u32) ?u32 {
+    return switch (key) {
+        .page_up => current_px -| step_px, // 포화 뺄셈 — 맨 위에서 더 올려도 0 아래로 안 간다
+        .page_down => @intCast(@min(@as(u64, current_px) + @as(u64, step_px), @as(u64, max_offset_px))),
+        .home => 0,
+        .end => max_offset_px,
+        else => null,
+    };
+}
+
+test "사이드바 키보드 스크롤 산술: 한 카드를 남기고 · 끝으로 가고 · 0 아래로 안 간다" {
+    const max: u32 = 1000;
+    const step: u32 = 600;
+
+    // PageDown 은 한 카드를 남긴 만큼 내려가고 상한에서 멈춘다.
+    try std.testing.expectEqual(@as(?u32, 600), sidebarScrollKeyOffset(.page_down, 0, step, max));
+    try std.testing.expectEqual(@as(?u32, 1000), sidebarScrollKeyOffset(.page_down, 600, step, max));
+    try std.testing.expectEqual(@as(?u32, 1000), sidebarScrollKeyOffset(.page_down, 1000, step, max));
+
+    // PageUp 은 **포화 뺄셈**이다 — 맨 위에서 더 올려도 0 아래로 안 간다(u32 언더플로 방지).
+    try std.testing.expectEqual(@as(?u32, 400), sidebarScrollKeyOffset(.page_up, 1000, step, max));
+    try std.testing.expectEqual(@as(?u32, 0), sidebarScrollKeyOffset(.page_up, 400, step, max));
+    try std.testing.expectEqual(@as(?u32, 0), sidebarScrollKeyOffset(.page_up, 0, step, max));
+
+    // Home/End 는 양 끝이다.
+    try std.testing.expectEqual(@as(?u32, 0), sidebarScrollKeyOffset(.home, 700, step, max));
+    try std.testing.expectEqual(@as(?u32, 1000), sidebarScrollKeyOffset(.end, 0, step, max));
+
+    // step 이 0 이면(뷰포트가 카드보다 작다) 자리에 머문다 — 고정 chrome 치수에서 움직임을 만들지 않는다.
+    try std.testing.expectEqual(@as(?u32, 300), sidebarScrollKeyOffset(.page_down, 300, 0, max));
+    try std.testing.expectEqual(@as(?u32, 300), sidebarScrollKeyOffset(.page_up, 300, 0, max));
+
+    // 스크롤 키가 아니면 null — 호출자가 그대로 흘려보낸다.
+    try std.testing.expectEqual(@as(?u32, null), sidebarScrollKeyOffset(.enter, 0, step, max));
+    try std.testing.expectEqual(@as(?u32, null), sidebarScrollKeyOffset(.escape, 0, step, max));
+}
+
+test "사이드바 키보드 스크롤 게이트: 검색이 열렸을 때만 · 수식키는 넘긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // ① **검색이 닫혀 있으면 안 잡는다.** 사이드바는 늘 보이지만 그것이 키 소유권은 아니다 —
+    //    여기서 true 를 돌리면 터미널에서 친 PageDown 이 카드 목록을 굴린다.
+    session.sidebar_search_active = false;
+    try std.testing.expect(!handleSidebarScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expect(!handleSidebarScrollKey(session, .{ .key = .end, .modifiers = .{} }));
+
+    // ② 검색이 열리면 그 넷을 가져간다(값은 위 산술 테스트가 못 박는다 — 여기서는 소유권만).
+    session.sidebar_search_active = true;
+    try std.testing.expect(handleSidebarScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expect(handleSidebarScrollKey(session, .{ .key = .home, .modifiers = .{} }));
+
+    // ③ 수식키가 붙으면 넘긴다(⌘Home 등은 다른 주인이 있다). ④ 스크롤 키가 아닌 것도 흘린다.
+    try std.testing.expect(!handleSidebarScrollKey(session, .{ .key = .end, .modifiers = .{ .command = true } }));
+    try std.testing.expect(!handleSidebarScrollKey(session, .{ .key = .enter, .modifiers = .{} }));
+
+    // ⑤ **제품 키 경로로도 태운다**(적대적 검증 — 변이로 확인). 위 ①~④ 는 핸들러를 직접 부르므로
+    //    `handleKeyEvent` 의 라우팅 줄을 지워도 초록으로 남는다(실제로 그렇게 잡혔다). 여기서는
+    //    **진짜 탭**으로 목록을 넘치게 만들어(주입한 `sidebar_rows` 는 `rebuildSidebar` →
+    //    `recomputeVisibleTabs` 가 실제 탭에서 다시 만들어 지운다) 오프셋이 움직이는 것을 잰다.
+    session.backing_height_px = 320; // 뷰포트를 좁혀 적은 탭으로도 넘치게 한다
+    var made: usize = 0;
+    while (made < 8) : (made += 1) {
+        _ = try tab_ops.createTab(
+            session,
+            .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 20, .rows = 5 } },
+            .{ .cols = 20, .rows = 5 },
+            16,
+            "w",
+            "sh",
+        );
+    }
+    try rebuildSidebar(session);
+    const max_offset = sidebarMaxScroll(session);
+    try std.testing.expect(max_offset > 0); // fixture 가 실제로 넘치는지 — 0 이면 아래가 아무것도 안 잰다
+
+    session.sidebar_search_active = true;
+    setSidebarScrollOffsetPx(session, 0);
+    _ = try session.handleKeyEvent(.{ .key = .end, .modifiers = .{} });
+    try std.testing.expectEqual(max_offset, session.sidebar_scroll_offset_px);
+    _ = try session.handleKeyEvent(.{ .key = .home, .modifiers = .{} });
+    try std.testing.expectEqual(@as(u32, 0), session.sidebar_scroll_offset_px);
+}

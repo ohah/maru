@@ -10964,6 +10964,13 @@ pub const AppSession = struct {
         // **모달 오버레이가 열려 있으면 양보한다**(rename·addr_edit과 같은 게이트 — ⌘Q 종료 모달 첫 Enter가 검색
         // 이동으로 새는 걸 막고 아래 모달 핸들러가 받게; 검색 상태는 유지, 리뷰 [2]). 비-모달 notice는 제외(14차 리뷰 [3]).
         if (self.sidebar_search_active and !self.anyModalOverlayOpen()) {
+            // 검색이 열린 동안이 사이드바가 키를 드는 유일한 상태다 — 그때 Page/Home/End 는 카드
+            // 목록을 굴린다(ScrollArea 계약 §4.5). **검색보다 먼저** 본다: 아래 `handleSidebarSearchKey`
+            // 는 escape·enter·글자만 다루고 나머지를 `else => {}` 로 버리므로, 순서를 바꾸면 그 넷이
+            // 다시 삼켜진다.
+            if (sidebar_ops.handleSidebarScrollKey(self, event)) {
+                return input_ops.keyConsumedByApp(self);
+            }
             sidebar_ops.handleSidebarSearchKey(self, input_ops.chromeInputFromKeyEvent(event));
             self.metal_dirty = true;
             return input_ops.keyConsumedByApp(self); // 검색(앱)이 소비

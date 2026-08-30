@@ -5589,10 +5589,6 @@ pub const AppSession = struct {
     /// 다음 `provideFileTreeRootPick`가 **자동 따라가기**임을 알리는 one-shot. 그 호출이 소비한다.
     /// 자동 경로는 실패해도 알림을 띄우지 않는다 — 사용자가 시킨 적 없는 동작의 실패를 알릴 이유가 없다.
     file_tree_root_auto_follow: bool = false,
-    /// 자동 root 전환이 **커밋된 직후 한 번** reveal을 다시 시도하게 하는 one-shot. 전환은 비동기라 요청
-    /// 시점엔 새 root가 없어 그때의 reveal이 거절됐다 — 이게 없으면 깊은 하위 디렉터리에서 `cd` 했을 때
-    /// 트리가 저장소 루트에 접힌 채 멈춘다. one-shot이라 심볼릭 링크로 계속 거절돼도 루프가 되지 않는다.
-    file_tree_auto_follow_reveal_pending: bool = false,
     file_tree_root_picker_inflight: FileTreeRootOperation = .none,
     file_tree_root_validation: ?PendingFileTreeRootValidation = null,
     file_tree_root_request_id: u64 = 0,
@@ -43196,8 +43192,8 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
 }
 
-// 적대적 검증이 잡은 셋을 고정한다. 셋 다 "조용히 안 따라간다"로만 드러나 눈으로는 구분되지 않는다.
-test "file tree ET-CWD: 자동 root 전환은 mutation 중엔 미루고, 미룬 cwd를 다시 시도하며, one-shot이 다른 cwd에 삼켜지지 않는다" {
+// 적대적 검증이 잡은 넷을 고정한다. 전부 "조용히 안 따라간다"로만 드러나 눈으로는 구분되지 않는다.
+test "file tree ET-CWD: 자동 root 전환은 mutation·비탐색기 view에서 미루고, 미룬 cwd를 다시 시도한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -43234,19 +43230,34 @@ test "file tree ET-CWD: 자동 root 전환은 mutation 중엔 미루고, 미룬 
 
     session.file_tree_edit_inflight = false;
     try file_panel_ops.updateFileTree(session); // 같은 cwd 그대로 — 이제는 걸려야 한다
-    const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
-    try std.testing.expect(pending.auto);
-    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?);
+    {
+        const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+        try std.testing.expect(pending.auto);
+        try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?);
+    }
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(away));
 
-    // ③ **커밋 뒤 재시도 one-shot은 그 cwd의 것이다.** 도크가 숨어 있으면 소비되지 않고 남는데, 그 사이
-    //    `cd`가 일어나면 다른 cwd가 그것을 먹고 자기 전환을 억제당한 채 followed로 표시돼 버렸다.
-    session.file_tree_root_validation = null; // 검증 완료를 흉내내고
-    session.file_tree_auto_follow_reveal_pending = true; // one-shot만 남긴다
-    try testWriteActiveTermCwd(session, other); // 그 사이 다른 곳으로 이동
+    // ③ **탐색기를 보고 있지 않으면 미룬다.** 트리가 화면에 없는데 root를 갈면 보이지도 않는 접힘·스크롤을
+    //    버리고 `dock-tree-roots` 영속까지 덮는다. reveal 모델에서는 비파괴적이라 상관없었지만 이제
+    //    모든 `cd`가 교체라 이 게이트가 유일한 방어다(file-explorer.md §1.1).
+    session.dock.view = .source_control;
+    try testWriteActiveTermCwd(session, other);
     try file_panel_ops.updateFileTree(session);
-    const after = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
-    try std.testing.expect(after.auto); // one-shot에 삼켜지지 않고 제 전환을 건다
-    try std.testing.expectEqualStrings(other, session.file_tree_followed_cwd.?);
+    try std.testing.expect(session.file_tree_root_validation == null);
+    try std.testing.expectEqualStrings(away, session.file_tree_followed_cwd.?); // 표시하지 않는다 → 재시도가 남는다
+    try std.testing.expect(session.file_tree.rootIsExactly(away)); // 트리는 그대로다
+
+    // ④ 탐색기로 돌아오면 **`cd` 없이도** 그 tick이 밀린 전환을 건다.
+    session.dock.view = .explorer;
+    try file_panel_ops.updateFileTree(session);
+    {
+        const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+        try std.testing.expect(pending.auto);
+        try std.testing.expectEqualStrings(other, session.file_tree_followed_cwd.?);
+    }
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(other));
 }
 
 fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
@@ -43257,9 +43268,11 @@ fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
     try pane_ops.activePane(session).activeTerm().surface.core.write(bytes);
 }
 
-test "file tree ET-CWD follows the active pane observation and keeps an old reveal inert for an outside cwd" {
-    // 활성 pane의 OSC 7 관측만 소비하고, root 밖 CWD는 root/watch/persistence를 바꾸지 않으며 이전
-    // file-open/reveal intent를 새 CWD의 scroll 대상으로 오인하지 않는 제품 경로 회귀다.
+test "file tree ET-CWD: root는 활성 pane cwd를 그대로 따라간다 (하위·형제·상위·홈 구분 없이)" {
+    // 2026-08-31 사용자 결정(docs/file-explorer.md §1)의 제품 경로 회귀다. 앞의 두 판은 root **밖**일
+    // 때만(그것도 저장소 루트로) 갈아끼웠고, 그래서 홈이 한 번 root가 되면 그 아래 어디로 `cd` 해도
+    // 빠져나오지 못했다. 이 테스트가 닫는 것은 **하위로 들어갈 때도 교체된다**는 것 — 옛 계약에서는
+    // 정확히 그 경우가 reveal(무교체)이었다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -43284,105 +43297,84 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
 
     file_panel_ops.activateFilePanelDockControl(session);
     try session.file_tree.replaceExplicitRoots(&.{project});
-    const root_generation = session.file_tree.rootGeneration();
-    const root_count = session.file_tree.rootCount();
     const initial_scan = session.file_tree.takeScanRequest().?;
     allocator.free(initial_scan);
-    try session.file_tree.applySnapshotWithIdentity(project, try testFileTreeScanIdentity(project), &.{
-        .{ .name = "one", .kind = .directory, .identity = try testFileTreeIdentity(one) },
-        .{ .name = "two", .kind = .directory, .identity = try testFileTreeIdentity(two) },
-    });
-    session.file_tree_rows_dirty = true;
-    session.file_tree_watch_reset_pending = false;
 
-    // updateFileTree는 renderer보다 먼저 run한다. 따라서 내부에서 observation을 refresh하지 않으면 OSC 7이
-    // 아직 Term cache에 안 들어와 이 첫 reveal을 놓친다.
+    // ① **이미 그 자리면 아무것도 하지 않는다.** 복원된 root가 마침 터미널 cwd와 같은, 앱을 켤 때마다
+    //    도는 경로다. 가드가 없으면 시작하자마자 재스캔·watcher 재등록이 헛돌아 트리가 이유 없이 깜빡인다.
+    //    updateFileTree는 renderer보다 먼저 run하므로, 내부에서 observation을 refresh하지 않으면 이 OSC 7이
+    //    아직 Term cache에 안 들어와 첫 따라가기를 통째로 놓친다.
+    const generation_before = session.file_tree.rootGeneration();
+    try testWriteActiveTermCwd(session, project);
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation == null);
+    try std.testing.expectEqualStrings(project, session.file_tree_followed_cwd.?);
+    try std.testing.expectEqual(generation_before, session.file_tree.rootGeneration());
+
+    // ② **하위로 들어가도 교체한다** — 이 슬라이스의 핵심이다. 옛 계약에서는 root 안이라 reveal만 했고,
+    //    그 규칙이 홈에서 흡수 상태를 만들었다.
     try testWriteActiveTermCwd(session, one);
     try file_panel_ops.updateFileTree(session);
-    try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
-    // 비동기 `one` scan이 이 tick 전에 끝났다면 reveal intent는 정상적으로 이미 소멸한다. 남아 있는 경우에만
-    // 이전 target인지 확인한다. 여기서 닫아야 하는 계약은 root 밖 `outside`가 기존 intent를 덮지 않는다는 것이다.
-    if (session.file_tree.revealTarget()) |target| {
-        try std.testing.expectEqualStrings(one, target);
-        try std.testing.expect(!std.mem.eql(u8, outside, target));
+    {
+        const pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
+        try std.testing.expect(pending.auto); // 사용자 조작이 아니라 따라가기다
+        try std.testing.expectEqual(FileTreeRootOperation.replace, pending.operation);
+        try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     }
-    // one은 초기 viewport 안의 행이다. follow가 보이는 대상을 다시 위로 당기면 사용자의 탐색 위치를
-    // 빼앗으므로 pending을 끝내고 scroll=0을 보존해야 한다.
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    try std.testing.expectEqual(@as(u32, 0), session.file_tree_scroll.offset_y_px);
-    try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
-    try std.testing.expectEqual(root_count, session.file_tree.rootCount());
-    try std.testing.expect(!session.file_tree_watch_reset_pending);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(one)); // ★ 트리 최상위가 곧 cwd다
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree.rootCount());
 
-    // 관측은 tick마다 같은 CWD를 되풀이한다. 같은 값에서 rows 재투영이나 scroll을 다시 걸면 사용자가
-    // 탐색 중인 위치를 빼앗으므로, raw scroll과 dirty/pending 상태가 그대로여야 한다.
-    session.file_tree_scroll.offset_y_px = 2 * file_tree_dock_ops.fileTreeRowHeightPx(session);
+    // ③ 관측은 tick마다 같은 cwd를 되풀이한다. 같은 값에서 또 교체를 걸면 트리가 매 프레임 재구성된다.
     try file_panel_ops.updateFileTree(session);
-    try std.testing.expect(!session.file_tree_rows_dirty);
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    try std.testing.expectEqual(2 * file_tree_dock_ops.fileTreeRowHeightPx(session), session.file_tree_scroll.offset_y_px);
-    try std.testing.expect(!session.file_tree_watch_reset_pending);
+    try std.testing.expect(session.file_tree_root_validation == null);
 
-    // **root 밖 CWD는 root 전환을 건다**(2026-08-11 결정 — docs/file-explorer.md §1). 예전에는 무동작이었다.
-    // 전환은 사용자가 "폴더 열기…"로 고를 때와 같은 검증 파이프라인을 타므로 **비동기**다 — 이 시점의 트리는
-    // 아직 그대로이고, 바뀐 것은 "자동 전환이 걸렸다"는 사실이다. 그 사실을 단언하지 않으면 이 테스트는
-    // 옛 계약("root 밖 무동작")을 그대로 통과시켜 회귀를 못 잡는다.
+    // ④ 형제로 이동 — 공통 조상으로 올려 세우지 않고 그 폴더 자체가 root다.
+    try testWriteActiveTermCwd(session, two);
+    try file_panel_ops.updateFileTree(session);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(two));
+
+    // ⑤ 상위로 이동(`cd ..`)도 같다. 옛 계약에서는 root 밖이라 교체됐지만 저장소 루트로 올라갔다 —
+    //    지금은 저장소 여부를 묻지 않으므로 그 폴더가 그대로 선다.
+    try testWriteActiveTermCwd(session, project);
+    try file_panel_ops.updateFileTree(session);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(project));
+
+    // ⑥ 완전히 다른 가지로 나가도 같은 한 규칙이다.
     try testWriteActiveTermCwd(session, outside);
     try file_panel_ops.updateFileTree(session);
-    try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    if (session.file_tree.revealTarget()) |target| {
-        try std.testing.expectEqualStrings(one, target);
-        try std.testing.expect(!std.mem.eql(u8, outside, target));
-    }
-    const auto_pending = session.file_tree_root_validation orelse return error.TestUnexpectedResult;
-    try std.testing.expect(auto_pending.auto); // 사용자 조작이 아니라 따라가기다
-    try std.testing.expectEqual(FileTreeRootOperation.replace, auto_pending.operation);
-    // 아직 적용 전이라 트리·watcher는 그대로다(적용은 검증 완료 뒤 `updateFileTree`가 한다).
-    try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
-    try std.testing.expectEqual(root_count, session.file_tree.rootCount());
-    try std.testing.expect(!session.file_tree_watch_reset_pending);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(outside));
 
-    // **사용자 조작이 자동 전환을 밀어낸다.** 자동 검증이 슬롯을 잡은 채로 폴더 열기를 거절하면, 사용자는
-    // 방금 누른 메뉴가 왜 안 먹는지 알 수 없다(docs/file-explorer.md §1.1).
+    // ⑦ **사용자 조작이 자동 전환을 밀어낸다.** 자동 검증이 슬롯을 잡은 채로 폴더 열기를 거절하면,
+    //    사용자는 방금 누른 메뉴가 왜 안 먹는지 알 수 없다(docs/file-explorer.md §1.1).
+    try testWriteActiveTermCwd(session, one);
+    try file_panel_ops.updateFileTree(session);
+    try std.testing.expect(session.file_tree_root_validation != null);
     file_panel_ops.requestFileTreeRootPick(session, .add);
     try std.testing.expect(session.file_tree_root_validation == null); // 자동 검증은 자리를 내준다
     try std.testing.expectEqual(FileTreeRootOperation.add, session.takeFileTreeRootPickRequest());
     file_panel_ops.provideFileTreeRootPick(session, &.{}); // picker 취소로 정리
     session.file_tree_root_outcome = .none;
 
-    // 기존 file-open intent와 같은 CWD로 돌아와도 root 밖 거부와 혼동하면 안 된다. offscreen scroll 위치를
-    // 강제로 만들어, `already_target`이 실제 viewport 보정을 다시 요청하는지 증명한다. fixture의 행은
-    // root+자식 둘뿐이므로 실제 도크 높이를 그대로 쓰면 raw scroll이 먼저 0으로 clamp되어 offscreen
-    // 전제가 성립하지 않는다. 이 구간만 한 행 viewport로 고정해 제품의 clamp→follow 순서를 검증한다.
-    const saved_backing_height_px = session.backing_height_px;
-    // 고정 chrome 높이를 공식으로 다시 쓰지 않고 **실제 기하에서 읽는다**. 예전에는
-    // `titlebar_strip_px + paneBarHeightPx()`로 적어 뒀는데, 그 둘은 도크 기하의 입력이 아니게 됐다
-    // (도크 시작선과 view bar는 이제 terminal cell이 아니라 Chrome metric에서 나온다).
-    // 상태바가 창 바닥을 먹으므로 그만큼 더 줘야 **한 행 viewport**라는 이 셋업의 의도가 유지된다. 안 더하면
-    // 도크가 22px 짧아져 뷰 바가 접히고(낮은 도크 규칙) 본문이 오히려 커진다 — 전제가 뒤집힌다.
-    session.backing_height_px = dock_ops.dockGeometry(session).tree.y + file_tree_dock_ops.fileTreeRowHeightPx(session) + session.statusBarHeightPx();
-    try std.testing.expectEqual(file_tree_dock_ops.fileTreeRowHeightPx(session), dock_ops.dockGeometry(session).tree_content.h);
-    session.file_tree_scroll.offset_y_px = 6 * file_tree_dock_ops.fileTreeRowHeightPx(session);
-    try testWriteActiveTermCwd(session, one);
-    try file_panel_ops.updateFileTree(session);
-    try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
-    try std.testing.expect(!session.file_tree_follow_scroll_pending);
-    // 한 행 viewport라 index 1을 넣는 최소 이동은 그 행의 top(= 한 행 높이)이다.
-    try std.testing.expectEqual(file_tree_dock_ops.fileTreeRowHeightPx(session), session.file_tree_scroll.offset_y_px);
-    session.backing_height_px = saved_backing_height_px;
-
-    // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
+    // ⑧ 새 split pane을 active로 바꾸면 이전 pane의 cwd가 아니라 새 active Term의 cwd만 따라간다.
+    //    도크는 창 전역인데 cwd는 Term별이라, 이 축이 갈리면 트리가 어느 pane의 것인지 알 수 없다.
     try pane_ops.splitActivePane(session, .horizontal);
     try testWriteActiveTermCwd(session, two);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
+    try testWaitForFileTreeRootCompletion(session);
+    try std.testing.expect(session.file_tree.rootIsExactly(two));
 
-    // 파일/브라우저 Term은 CWD가 없으므로 직전 local CWD와 Tree 상태를 지우지 않는다.
+    // ⑨ 파일/브라우저 Term은 cwd가 없으므로 직전 값을 지우지 않는다 — 문서를 보다 터미널로 돌아왔을 때
+    //    트리가 리셋되면 안 된다.
     session.dispatchAppAction(.new_web_tab);
     try std.testing.expect(pane_ops.activePane(session).activeTerm().kind == .web);
     try file_panel_ops.updateFileTree(session);
     try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
+    try std.testing.expect(session.file_tree.rootIsExactly(two));
 }
 
 fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {
@@ -43669,7 +43661,7 @@ test "file tree는 retained 첫 scan을 게시하고 stale namespace 행 activat
     try tmp.dir.writeFile(session.io, .{ .sub_path = "selected/same.md", .data = "# replacement" });
     // **탐색기의 "활성 터미널 따라가기"를 이 구간에서 끈다.** root pick commit이 도크를 펴고
     // (`file_panel.zig`의 committed 갈래가 `dock.presented = true`), **같은 `updateFileTree` 호출** 꼬리에서
-    // `followActiveTerminalCwd`가 돈다. 터미널 cwd는 이 임시 root **밖**(테스트 프로세스의 저장소)이라
+    // `followActiveTerminalCwd`가 돈다. 터미널 cwd는 이 임시 root가 **아니라** 테스트 프로세스의 저장소라
     // `followRootSwitch`가 root를 갈아끼우고, 그러면 `same.md`가 영영 안 나와 폴링이 소진된다. 그건 제품이
     // 맞게 동작한 것이지(docs/file-explorer.md §1) 이 테스트의 주제가 아니다.
     //

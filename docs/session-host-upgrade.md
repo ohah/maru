@@ -863,6 +863,18 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   기존 build/epoch ready authority로 같은 순서를 수행한다. `allow_validation_only_restore=true`인 별도 fixture는
   bootstrap만 검사하고, 제품 artifact의 zero-runtime process gate는 restoring manifest와 activation marker로 실제
   commit 경로와 rollback fallback을 구분한다.
+- **제품 rollback activation 종료 gate:** target role의 primary handoff를 손상시켜 pre-commit validation을 실패시키고,
+  target process가 attempt에 고정된 canonical `rollback-current` **제품 binary**를 정확히 한 번 `exec`하게 한다.
+  rollback child는 validation-only fixture에서 종료하지 않고 backup handoff로 `RestoreActivation` 전체를 수행해
+  기존 `host_id`·PID·epoch/build를 가진 `ready` manifest를 다시 게시하고 같은 endpoint에 listener를 bind한다.
+  검증자는 activation marker나 socket pathname 존재만으로 성공을 판정하지 않는다. 실제 MRSH client로 재접속해
+  peer PID와 `host.info`의 host/build/epoch, `host.upgrade.status`의 `rolled_back/restore_failed`, upgrade capability,
+  `runtime.list`의 exact restored set을 읽은 뒤 연결을 정상 종료한다. 그 client가 빠진 뒤에만 bounded oneshot
+  daemon 종료를 허용하며 child를 reap한다. zero-runtime 첫 gate는 exact empty list를, 후속 non-empty gate는 PTY
+  child/runtime ID와 pre/post I/O를 같은 방식으로 단언한다. 이 test-only 수명 제어와 marker 환경은 launcher가
+  일반 detached product launch 전에 지우는 목록에 계속 포함하고, fixture가 직접 fork/exec한 owner-only 임시
+  session/socket root에서만 허용한다. 따라서 ambient environment만으로 실제 사용자 daemon을 oneshot으로 만들거나
+  성공 marker를 위조할 수 없어야 한다.
 - **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
   N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 실제 제품 rollback activation, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간

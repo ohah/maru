@@ -2532,6 +2532,10 @@ pub const FileTreePerfCounters = struct {
 /// OS 클립보드 1회성 동작 신호(input.right-click paste·menu). Zig가 우클릭/터미널 메뉴에서 세우고, Swift가 매 tick
 /// take_clipboard_action으로 drain해 실행한다(copy=copySelectionToPasteboard, paste=pastePasteboardText). ABI는
 /// u32로 전달(none=0/copy=1/paste=2) — 끝의 take_clipboard_action 주석과 1:1. 클립보드는 OS 소유라 Swift가 실행.
+/// 보내기 메뉴가 한 번에 보일 대상 수. **상한이 없으면 메뉴가 화면을 넘고** 라벨 버퍼(공유)도 넘친다.
+/// 넘치는 대상은 그냥 안 보인다 — 잘라 보내는 것보다 낫다(§한계에 적었다).
+pub const max_agent_targets: usize = 8;
+
 pub const ClipboardAction = enum(u8) {
     none = 0,
     copy = 1,
@@ -4919,6 +4923,9 @@ pub const AppSession = struct {
     // 복사/붙여넣기 메뉴다(rename 대상·view_options와 배타). buildContextMenuItems/acceptContextMenu/closeContextMenu가
     // 이 플래그로 분기한다. 항목 선택 시 pending_clipboard_action을 세워 Swift가 OS 클립보드 동작을 한다(F2-5).
     terminal_context_menu: bool = false,
+    /// 보내기 대상 줄의 라벨 버퍼 — **행마다 자기 칸**이다. 하나를 돌려 쓰면 다음 행이 앞 행을 덮어
+    /// 메뉴가 같은 이름을 여러 줄 보여 준다(항목 표는 슬라이스만 빌린다).
+    agent_target_label_buf: [max_agent_targets][128]u8 = undefined,
     /// 편집기 본문 우클릭 메뉴(NS4 — docs/send-selection-to-agent.md §6.1, 계약은
     /// native-editor-ui.md §8.1). 다른 메뉴들과 `chrome_host.context_menu` 를 공유하되 이 값이
     /// non-null 이면 그 분기다.
@@ -4931,6 +4938,13 @@ pub const AppSession = struct {
         /// 열 때 굳힌 항목들. 고를 때 다시 계산하면 그 사이 선택이 바뀌어 **다른 항목이 실행된다**.
         items: [4]maru.session.content_menu.Item,
         len: usize,
+        /// **보낼 대상들**(NS5 — §5). 머리글 한 줄 뒤에 이 줄들이 오고, 그 뒤가 편집 항목이다.
+        /// 대상도 열 때 굳힌다 — 고를 때 다시 모으면 그 사이 Term 이 열리거나 닫혀 **다른 줄이
+        /// 실행된다**(누른 뒤 목록이 갱신되는 그 함정과 같은 모양이다).
+        targets: [max_agent_targets]maru.session.agent_selection.Candidate = undefined,
+        target_len: usize = 0,
+        /// 보내기 구획이 차지하는 줄 수(머리글 1 + 대상들). 0 이면 그 구획이 없다.
+        send_rows: usize = 0,
     } = null,
     // 파일 Term 본문 우클릭 메뉴(docs/file-panel-kinds.md §2.6). 다른 메뉴들과 chrome_host.context_menu를 공유하되
     // 이게 non-null이면 그 분기다. web이 올린 대상·좌표로 항목을 정하고, 실행 주인은 항목마다 갈린다.

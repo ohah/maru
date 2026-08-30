@@ -506,6 +506,10 @@ const Table = struct {
     // 있는 키를 **재사용**한다 — 같은 문장을 두 키로 두면 이중 출처가 된다.
     ctx_cut: [:0]const u8,
     ctx_select_all: [:0]const u8,
+    /// 편집기 우클릭 메뉴의 보내기 구획 머리글(NS5 — docs/send-selection-to-agent.md §5.1).
+    ctx_send_selection: [:0]const u8,
+    /// 보내기 대상 줄에서 **에이전트가 아닌** Term 을 부르는 말(§5 — 일반 셸도 후보다).
+    ctx_target_shell: [:0]const u8,
     ctx_open_link: [:0]const u8,
     ctx_copy_link: [:0]const u8,
     ctx_save_image: [:0]const u8,
@@ -1023,6 +1027,8 @@ const en: Table = .{
     .scm_load_failed = "Failed to load",
     .ctx_cut = "Cut",
     .ctx_select_all = "Select All",
+    .ctx_send_selection = "Send selection to",
+    .ctx_target_shell = "Shell",
     .ctx_open_link = "Open Link",
     .ctx_copy_link = "Copy Link Address",
     .ctx_save_image = "Save Image",
@@ -1600,6 +1606,8 @@ const ko: Table = .{
     .scm_load_failed = "읽지 못함",
     .ctx_cut = "잘라내기",
     .ctx_select_all = "전체 선택",
+    .ctx_send_selection = "선택 영역 보내기",
+    .ctx_target_shell = "셸",
     .ctx_open_link = "링크 열기",
     .ctx_copy_link = "주소 복사",
     .ctx_save_image = "이미지 저장",

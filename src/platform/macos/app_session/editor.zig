@@ -4764,6 +4764,67 @@ pub fn selectAll(self: *AppSession, term: *Term) bool {
     return true;
 }
 
+/// 고른 부분을 그 대상 터미널에 붙여넣는다(NS5 — docs/send-selection-to-agent.md).
+///
+/// **안전 계약은 전부 아래 층이 든다**(§4): 페이로드 끝에 개행을 안 붙이는 것과 bracketed 가 꺼진
+/// 대상에 여러 줄을 안 보내는 것은 `session/agent_selection.zig` 가, 붙여넣기 보호와 실제 인코딩은
+/// `submitPaste` 가 소유한다. 이 함수가 하는 것은 **잇는 것**뿐이다 — 선택을 줄 범위로, 경로를
+/// 루트 기준으로, 그리고 대상의 bracketed 를 **페이로드를 만들기 전에** 읽는 것.
+///
+/// **bracketed 를 먼저 읽는 이유**: 만든 뒤에 자르면 잘린 인용이 나간다. 그 판정이 페이로드의
+/// 모양을 정하므로 순서가 뒤집히면 안 된다.
+pub fn sendSelectionToAgent(self: *AppSession, source: *Term, target_id: u64) void {
+    // **bracketed 를 먼저 읽는다** — 그 값이 페이로드의 모양을 정한다(§4). 만든 뒤에 자르면 잘린
+    // 인용이 나간다. `null` 이면 그 대상이 터미널이 아니다.
+    const bracketed = term_ops.bracketedPasteFor(self, target_id) orelse return;
+    var payload_buf: [maru.session.agent_selection.max_quote_bytes + 1024]u8 = undefined;
+    const payload = buildSelectionPayload(self, source, bracketed, &payload_buf) orelse return;
+    // 대상은 **id 로 고정**된다 — `submitPaste` 가 그 계약을 든다(뒤에 탭이 바뀌어도 원래 surface 로).
+    term_ops.submitPaste(self, payload, false, target_id);
+}
+
+/// 보낼 바이트를 만든다.
+///
+/// **주입에서 갈라 둔 이유는 그것만이 관측 가능하기 때문이다** — 주입은 큐에 넣고 곧바로
+/// 흘려보내므로(`flushPendingPaste`) 판정자가 큐를 들여다볼 틈이 없다. 안전 계약(§4)이 걸린
+/// 자리라 "보낸 바이트가 무엇인가" 를 반드시 잴 수 있어야 한다.
+pub fn buildSelectionPayload(
+    self: *AppSession,
+    source: *Term,
+    bracketed: bool,
+    out: []u8,
+) ?[]const u8 {
+    if (source.kind != .editor) return null;
+    if (source.rt.editor_diff != null) return null; // 비교 뷰는 "그 파일의 그 줄" 이 하나로 안 정해진다(§3)
+    const doc = source.rt.editor_doc orelse return null;
+    const path = source.rt.editor_path orelse return null; // 핀된 경로가 없으면 참조를 못 만든다
+    const bytes = doc.file.content;
+
+    // **주 선택 하나만 보낸다**(§3). 멀티 커서면 나머지는 안 간다 — 조용히 첫 조각만 보내면
+    // 사용자는 나머지가 갔다고 믿는다.
+    const sel = source.rt.editor_selection orelse return null;
+    const lo = @min(sel.anchorLo(), bytes.len);
+    const hi = @min(@max(sel.anchorHi(), sel.focus), bytes.len);
+    const start = @min(lo, hi);
+    // 선택이 없으면 caret 이 있는 줄 하나다(§3 — 복사가 §3.4 로 정한 규칙과 같다).
+    const line_lo = doc.file.lines.lineAt(start);
+    const line_hi = doc.file.lines.lineAt(if (hi > start) hi -| 1 else start);
+    const text: []const u8 = if (hi > start) bytes[start..hi] else blk: {
+        const line = doc.file.lines.line(line_lo) orelse break :blk "";
+        break :blk bytes[line.start..line.contentEnd()];
+    };
+
+    // **트리 루트 기준으로 접는다**(§2). 루트가 여럿이면 첫 번째를 쓴다 — 그 안이 아니면
+    // `relativePath` 가 절대 경로를 그대로 돌려주므로 잘못 접힐 일은 없다.
+    const root: []const u8 = self.file_tree.rootAt(0) orelse "";
+    return maru.session.agent_selection.build(.{
+        .path = maru.session.agent_selection.relativePath(root, path),
+        .start_line = @intCast(line_lo + 1), // 1-based 닫힌 구간
+        .end_line = @intCast(line_hi + 1),
+        .text = text,
+    }, .{ .bracketed_paste = bracketed }, out);
+}
+
 pub fn cutSelection(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
@@ -15913,4 +15974,120 @@ test "NS4 편집기가 아닌 Term 에서는 이 메뉴가 안 뜬다" {
     try testing.expect(!settings_ops.showEditorContextMenu(fx.session, term, 300, 300));
     try testing.expect(fx.session.editor_context_menu == null);
     try testing.expect(!selectAll(fx.session, term)); // 전체 선택도 편집기 것이 아니다
+}
+
+// ── NS5: 선택 영역 보내기 ─────────────────────────────────────────────────────────────────────
+
+test "NS5 보낸 페이로드는 개행으로 안 끝난다 — 그 개행이 실행 트리거다" {
+    // **이 기능의 유일한 진짜 위험이다**(§4). 터미널에 쓰는 바이트는 셸의 표준 입력이고, 끝에 개행이
+    // 있으면 사용자가 프롬프트를 보기 전에 그 자리에서 실행된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    var buf: [8192]u8 = undefined;
+    const payload = buildSelectionPayload(fx.session, fx.term, true, &buf).?;
+    try testing.expect(payload.len > 0);
+    try testing.expect(payload[payload.len - 1] != '\n');
+    try testing.expect(std.mem.startsWith(u8, payload, "@"));
+}
+
+test "NS5 bracketed 가 꺼진 대상에는 인용 없이 참조 한 줄만 간다" {
+    // 여러 줄을 보내면 중간 개행이 실행 트리거가 된다(§4). 안전한 축약이 가능한데 위험을 감수할
+    // 이유가 없다 — 참조만으로도 에이전트가 그 파일 그 줄을 연다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 30 }; // 여러 줄
+    var on_buf: [8192]u8 = undefined;
+    var off_buf: [8192]u8 = undefined;
+    const on = buildSelectionPayload(fx.session, fx.term, true, &on_buf).?;
+    const off = buildSelectionPayload(fx.session, fx.term, false, &off_buf).?;
+
+    try testing.expect(std.mem.indexOf(u8, on, "> ") != null); // 켜져 있으면 인용이 간다
+    try testing.expect(std.mem.indexOf(u8, off, "> ") == null); // 꺼져 있으면 안 간다
+    try testing.expect(std.mem.indexOf(u8, off, "@") != null); // 참조는 그래도 간다
+    try testing.expect(off.len < on.len);
+}
+
+test "NS5 줄 범위는 1-based 닫힌 구간이고, 선택이 없으면 caret 줄 하나다" {
+    // 0-based 로 보내면 에이전트가 **한 줄 위**를 연다. 그리고 선택이 없을 때 caret 줄을 담는 것은
+    // 복사(§3.4)가 정한 규칙과 같아야 한다 — 같은 표면에서 같은 손동작이 두 뜻을 가지면 안 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var buf: [8192]u8 = undefined;
+
+    // **참조 줄만 본다.** 경로에 `:` 나 `-` 가 들어갈 수 있어(임시 디렉터리) 페이로드 전체에서
+    // 부분 문자열을 찾으면 우연히 맞거나 우연히 틀린다.
+    const refLine = struct {
+        fn of(payload: []const u8) []const u8 {
+            const nl = std.mem.indexOfScalar(u8, payload, '\n') orelse payload.len;
+            return payload[0..nl];
+        }
+    }.of;
+
+    // 첫 줄 안에서만 고른다 → 참조가 `:1` 로 끝난다.
+    fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    try testing.expect(std.mem.endsWith(u8, refLine(buildSelectionPayload(fx.session, fx.term, true, &buf).?), ":1"));
+
+    // 선택 없이 caret 만 둘째 줄에 → 그 줄 하나(`:2`). **범위를 접는다** — `:2-2` 가 아니다.
+    fx.term.rt.editor_selection = .{ .anchor_start = 14, .anchor_end = 14, .focus = 14 };
+    try testing.expect(std.mem.endsWith(u8, refLine(buildSelectionPayload(fx.session, fx.term, true, &buf).?), ":2"));
+
+    // 두 줄에 걸치면 닫힌 구간이다 → `:1-2`.
+    fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 20 };
+    try testing.expect(std.mem.endsWith(u8, refLine(buildSelectionPayload(fx.session, fx.term, true, &buf).?), ":1-2"));
+}
+
+test "NS5 편집기가 아니거나 대상이 터미널이 아니면 아무것도 안 보낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+
+    // 대상이 편집기(=터미널 아님) → `bracketedPasteFor` 가 null 이라 접힌다.
+    fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    sendSelectionToAgent(fx.session, fx.term, fx.term.surface.id);
+    try testing.expect(fx.session.pending_pastes.getPtr(fx.term.surface.id) == null);
+}
+
+test "NS5 대상의 bracketed 를 읽어 그대로 페이로드에 쓴다 — 배선이 끊기면 인용이 새 나간다" {
+    // **`buildSelectionPayload` 를 직접 부르는 판정자는 이 배선을 못 잰다** — 그 함수는 bool 을
+    // 받기만 하기 때문이다. 끊긴 배선(늘 `true`)은 bracketed 가 꺼진 대상에 여러 줄을 보내고, 그것이
+    // §4 가 막으려는 바로 그 상황이다. 그래서 **읽는 쪽**을 따로 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const pane = pane_ops.activePane(fx.session);
+    var terminal: ?*Term = null;
+    for (pane.terms.items) |t| {
+        if (t.kind == .terminal) terminal = t;
+    }
+    const term = terminal orelse return error.SkipZigTest;
+
+    // 터미널은 bool 을 답하고, 편집기는 **null 이다**(붙일 PTY 가 없다 — 그때는 아무것도 안 보낸다).
+    try testing.expect(term_ops.bracketedPasteFor(fx.session, term.surface.id) != null);
+    try testing.expect(term_ops.bracketedPasteFor(fx.session, fx.term.surface.id) == null);
+}
+
+test "NS5 후보는 그 창의 터미널만이고 편집기는 대상이 아니다" {
+    // 편집기가 후보에 들면 "문서를 문서에 보내기" 가 메뉴에 뜬다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    const targets = term_ops.collectAgentTargets(fx.session, &buf);
+    try testing.expect(targets.len > 0);
+    for (targets) |c| try testing.expect(c.surface_id != fx.term.surface.id);
 }

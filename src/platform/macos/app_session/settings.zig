@@ -1490,13 +1490,46 @@ pub fn showEditorContextMenu(self: *AppSession, term: *app_session_mod.Term, x_p
         .items = undefined,
         .len = @min(built.len, 4),
     };
+
+    // ── 보내기 구획(NS5 — §5). **머리글 + 대상 줄들이고 위에 온다.**
+    //
+    // 컴포넌트는 머리글을 **앞에서만** 센다(`header_count`) — 가운데에 고를 수 없는 줄을 둘 방법이
+    // 없다. 그래서 §5.1 의 모양(라벨 + 그 아래 대상들)을 지키려면 이 구획이 위로 온다. 아래에 두고
+    // 라벨 없이 대상만 나열하면 `→ Claude` 가 "그쪽으로 전환" 으로도 읽힌다.
+    //
+    // **보낼 것이 없으면 구획도 없다** — 편집기 하나만 열린 창에서 머리글만 뜨면 그 줄이 "눌러도
+    // 아무 일 없는 줄" 이 된다.
+    var target_buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    const targets = term_ops.collectAgentTargets(self, &target_buf);
+    var row: usize = 0;
+    if (targets.len > 0) {
+        self.context_menu_items_buf[row] = maru.i18n.t(.ctx_send_selection);
+        row += 1;
+        for (targets, 0..) |cand, i| {
+            stored.targets[i] = cand;
+            // 라벨은 **행마다 자기 버퍼**를 쓴다 — 공유 버퍼 하나에 쓰면 다음 행이 앞 행을 덮는다.
+            self.context_menu_items_buf[row] = maru.session.agent_selection.writeLabel(
+                &self.agent_target_label_buf[i],
+                cand,
+            ) orelse continue;
+            row += 1;
+        }
+        stored.target_len = targets.len;
+        stored.send_rows = row; // 머리글 + 실제로 실린 대상 줄
+    }
+
     for (built[0..stored.len], 0..) |item, i| {
         stored.items[i] = item;
-        self.context_menu_items_buf[i] = item.label();
+        self.context_menu_items_buf[row + i] = item.label();
     }
-    self.context_menu_items_len = stored.len;
+    self.context_menu_items_len = row + stored.len;
     self.editor_context_menu = stored;
-    self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), stored.len);
+    self.chrome_host.context_menu.showWithHeaders(
+        @intFromFloat(x_px),
+        @intFromFloat(y_px),
+        self.context_menu_items_len,
+        if (stored.send_rows > 0) 1 else 0, // 머리글 한 줄만 고를 수 없다
+    );
     self.metal_dirty = true;
     return true;
 }
@@ -1755,7 +1788,19 @@ pub fn acceptContextMenu(self: *AppSession) void {
     // 그 자리에서 한다.
     if (self.editor_context_menu) |menu| {
         const selected = self.chrome_host.context_menu.selected;
-        const item: ?maru.session.content_menu.Item = if (selected < menu.len) menu.items[selected] else null;
+        // **보내기 구획이 앞에 있다** — 편집 항목 인덱스는 그만큼 밀려 있다. 빼지 않으면 "붙여넣기"
+        // 를 눌렀는데 "복사" 가 도는 그 한 칸 밀림이 된다(리소스 팝오버가 같은 실수를 했다).
+        if (menu.send_rows > 0 and selected < menu.send_rows) {
+            const target_index = selected - 1; // 머리글 한 줄
+            const cand: ?maru.session.agent_selection.Candidate =
+                if (target_index < menu.target_len) menu.targets[target_index] else null;
+            const source = term_ops.termBySurfaceId(self, menu.surface_id);
+            closeContextMenu(self);
+            if (cand) |c| if (source) |src| editor_ops.sendSelectionToAgent(self, src, c.surface_id);
+            return;
+        }
+        const edit_index = selected -| menu.send_rows;
+        const item: ?maru.session.content_menu.Item = if (edit_index < menu.len) menu.items[edit_index] else null;
         const target = term_ops.termBySurfaceId(self, menu.surface_id);
         closeContextMenu(self);
         const t = target orelse return; // 메뉴가 떠 있는 동안 닫힌 Term — 조용히 접는다

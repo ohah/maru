@@ -945,6 +945,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "sort-toggle-pressed")) return .sort_toggle_pressed;
     if (std.mem.eql(u8, raw, "context-menu-checked")) return .context_menu_checked;
     if (std.mem.eql(u8, raw, "context-menu-unchecked")) return .context_menu_unchecked;
+    if (std.mem.eql(u8, raw, "context-menu-send")) return .context_menu_send;
     return null;
 }
 
@@ -965,6 +966,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .sort_toggle_pressed => "sort-toggle-pressed",
         .context_menu_checked => "context-menu-checked",
         .context_menu_unchecked => "context-menu-unchecked",
+        .context_menu_send => "context-menu-send",
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",

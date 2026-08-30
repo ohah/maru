@@ -179,6 +179,15 @@ pub const ScenarioId = enum {
     /// 그래서 재는 쪽(`menuRect`)과 그리는 쪽(`view`)이 갈려 가장 긴 줄이 테두리에 닿는 결함이 골든 없이
     /// 나갔다. 켜짐 하나·꺼짐 하나를 한 캡처에 담아 마크 폭과 상자 폭이 함께 보이게 한다.
     context_menu_checked,
+    /// **보내기 구획이 붙은 편집기 우클릭 메뉴**(NS4~NS6 — send-selection-to-agent.md §5.1).
+    /// 머리글 한 줄 + 대상 줄들 + 편집 항목이고, **대상 라벨이 이 메뉴에서 가장 긴 줄**이다 —
+    /// 위 두 시나리오가 잡으려던 "가장 긴 줄이 테두리에 닿는가" 가 여기서 되살아난다.
+    ///
+    /// **선택 강조는 이 캡처가 답하지 못한다.** 그것은 `.fill` op 인데 Lab 의 lowering
+    /// (`appendBackgroundQuads`)은 `.quad` 만 내린다 — 제품은 `metal_lowering` 이 `.fill` 을 셀
+    /// 배경으로 칠하지만 Lab 에는 그 경로가 없다. **랩의 한계이지 제품 결함이 아니다**(토큰을 확인했다 —
+    /// `tab_active_bg` 는 `surface_bg` 와 다른 색이다). 선택 자리는 제품 테스트가 잰다.
+    context_menu_send,
     /// 같은 메뉴에서 **둘 다 꺼진** 상태. 예전에는 `checked_mask == 0` 이 "체크 열 없음"과 같은 뜻이라
     /// 이 상태에서 라벨이 두 칸 왼쪽으로 튀었다 — 위 캡처와 **같은 폭**이어야 한다는 것이 계약이다.
     context_menu_unchecked,
@@ -307,7 +316,7 @@ pub fn buildFrame(
         .scm_rows, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled => buildFileTreeFrame(scenario, tokens, buffers),
-        .context_menu_checked, .context_menu_unchecked => buildContextMenuFrame(scenario, tokens, buffers),
+        .context_menu_checked, .context_menu_unchecked, .context_menu_send => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
@@ -1043,7 +1052,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1105,12 +1114,48 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
     // 정하고, 그 줄이 테두리에 닿는지가 이 캡처의 판정 대상이다.
     // **제품이 쓰는 그 키를 읽는다** — Lab 이 자기 리터럴을 들면 문구가 바뀔 때 캡처만 옛 폭에 머문다.
     // Lab 은 `.ko` 를 고정하므로(`chrome_lab_smoke.zig`) 제품의 한국어 화면과 같은 폭이 나온다.
-    const items = [_][]const u8{ maru.i18n.t(.set_show_branch), maru.i18n.t(.set_show_folder) };
+    const view_items = [_][]const u8{ maru.i18n.t(.set_show_branch), maru.i18n.t(.set_show_folder) };
+
+    // **보내기 메뉴는 줄 구성이 다르다**(§5.1) — 머리글 한 줄 + 대상 줄들 + 편집 항목. 대상 라벨은
+    // 제품이 `agent_selection.writeLabel` 로 만드는 그 모양(`이름 — 폴더 (브랜치)`)을 그대로 쓴다 —
+    // 여기서 리터럴을 새로 지으면 제품 폭과 캡처 폭이 갈린다.
+    // **arena 에 잡는다 — 스택이면 안 된다.** `view` 는 라벨을 **빌리는** draw op 을 만들고 그것이
+    // 이 함수가 돌아간 **뒤에** 렌더된다. 처음에 스택 배열로 썼더니 캡처에서 두 대상 줄이 `(` 하나와
+    // 빈 줄로 나왔다(죽은 스택 바이트). **시각 확인이 그것을 잡았다** — 헤드리스로는 안 보였다.
+    const send_bufs = try arena.alloc([128]u8, 2);
+    const send_items = [_][]const u8{
+        maru.i18n.t(.ctx_send_selection),
+        maru.session.agent_selection.writeLabel(&send_bufs[0], .{
+            .surface_id = 1,
+            .kind = .claude,
+            .where = "~/Documents/workspace/maru",
+            .branch = "feat/send-selection",
+        }) orelse "",
+        maru.session.agent_selection.writeLabel(&send_bufs[1], .{
+            .surface_id = 2,
+            .kind = .shell,
+            .shell_name = maru.i18n.t(.ctx_target_shell),
+            .where = "~/work",
+        }) orelse "",
+        maru.i18n.t(.ctx_cut),
+        maru.i18n.t(.ctx_copy),
+        maru.i18n.t(.ctx_paste),
+        maru.i18n.t(.ctx_select_all),
+    };
+    const items: []const []const u8 = if (scenario.id == .context_menu_send) &send_items else &view_items;
 
     var state: chrome.components.context_menu.State = .{};
-    state.show(context_menu_fixture_anchor_x, context_menu_fixture_anchor_y, items.len);
-    // 켜짐 하나·꺼짐 하나 → 마크 두 종류가 한 캡처에 든다. 둘 다 꺼짐 시나리오는 **같은 폭**이어야 한다.
-    state.checked_mask = if (scenario.id == .context_menu_checked) 0b01 else 0b00;
+    if (scenario.id == .context_menu_send) {
+        // 머리글 한 줄만 고를 수 없다. 선택은 **둘째 대상**에 둔다 — "마지막으로 보낸 대상이
+        // 기본 선택" 을 그림으로 보이려면 첫 줄이 아니어야 하고(첫 줄은 기본값과 구별이 안 된다),
+        // 머리글에 강조가 안 붙는 것도 같은 캡처에서 보인다.
+        state.showWithHeaders(context_menu_fixture_anchor_x, context_menu_fixture_anchor_y, items.len, 1);
+        state.selected = 2;
+    } else {
+        state.show(context_menu_fixture_anchor_x, context_menu_fixture_anchor_y, items.len);
+        // 켜짐 하나·꺼짐 하나 → 마크 두 종류가 한 캡처에 든다. 둘 다 꺼짐 시나리오는 **같은 폭**이어야 한다.
+        state.checked_mask = if (scenario.id == .context_menu_checked) 0b01 else 0b00;
+    }
 
     const p: chrome.props.ChromeProps = .{ .metrics = .{
         .cell_width_px = scenario.cell_w_px,
@@ -1121,7 +1166,7 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
     } };
 
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
-    try chrome.components.context_menu.view(&state, &items, p, tokens, arena, &ops);
+    try chrome.components.context_menu.view(&state, items, p, tokens, arena, &ops);
 
     return .{
         // 메뉴는 자기 hit-test 를 `itemAt` 으로 한다(트리를 안 쓴다) — 빈 트리를 낸다.

@@ -49,7 +49,13 @@ pub const Buffers = struct {
 pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, InsufficientTextBuffer, MissingRect };
 
 pub fn view(props: types.Props, frame: build.Frame, state: interaction.InteractionState, tk: *const tokens.Tokens, buffers: Buffers) ViewError!draw.ChromeDraw {
-    const painted = try ui_paint.paint(frame.tree, state, tk, .sidebar, .{ .ops = buffers.ops });
+    // 스크롤바 fade 는 **여기서** 얹는다 — tree(`frame`)는 alpha 를 모른 채 불변으로 남아야
+    // 발행 경로의 동등 비교가 살아 있다(계약 §7).
+    const scrollbar_alpha = [_]ui_paint.IdAlpha{
+        .{ .id = build.NodeIds.scroll_track, .alpha = props.scrollbar_alpha },
+        .{ .id = build.NodeIds.scroll_thumb, .alpha = props.scrollbar_alpha },
+    };
+    const painted = try ui_paint.paintWithAlphaOverrides(frame.tree, state, tk, .sidebar, .{ .ops = buffers.ops }, &scrollbar_alpha);
     var writer = Writer{
         .props = props,
         .ops = buffers.ops,

@@ -5250,6 +5250,13 @@ pub const AppSession = struct {
     /// 이번 tick에 reveal을 새로 건 경로(rows 재투영 뒤 그 행을 뷰포트에 넣을 때만 쓴다). 소유는 위 필드.
     file_tree_follow_scroll_pending: bool = false,
     dock_list_scrollbar_idle_ticks: u32 = default_scrollbar_visible_ticks + default_scrollbar_fade_ticks,
+    /// **ScrollArea 컴포넌트가 그리는 도크 스크롤바**(에이전트 세션·소스 컨트롤)의 fade 상태. 위
+    /// `dock_list_scrollbar_idle_ticks` 는 host 가 직접 그리는 탐색기 목록 것이라 짝이 다르다 — 도크는
+    /// 하나이고 뷰만 갈아 끼우므로 이 값 하나가 그 두 뷰를 함께 든다. 이 값이 만드는 alpha 는 **tree 가
+    /// 아니라 view(paint 시점)** 로 간다(계약 §7 — tree 에 실으면 발행 동등 비교가 매 프레임 실패한다).
+    dock_scroll_area_idle_ticks: u32 = default_scrollbar_visible_ticks + default_scrollbar_fade_ticks,
+    /// 위 fade 가 변화를 감지하는 기준값(직전 프레임의 도크 스크롤 offset).
+    dock_scroll_area_last_offset: u32 = 0,
     dock_list_scrollbar_last_offset_px: u32 = 0,
     dock_list_scrollbar_hovered: bool = false,
     /// 포인터가 사이드바 막대 위인가. 커서 종류는 **안 바꾸고**(얇은 띠라 깜빡임 방지 — pane·도크와 같은

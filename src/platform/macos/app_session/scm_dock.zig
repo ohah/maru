@@ -1248,6 +1248,8 @@ fn propsFor(self: *AppSession, projection: Projection, window: []const component
             .height = @floatFromInt(content.h),
         },
         .scale_milli = scmDockScaleMilli(self),
+        // fade 는 host 가 계산하고 **view 가 paint 시점에** 얹는다 — build(tree)는 모른다(계약 §7).
+        .scrollbar_alpha = scroll_ops.dockScrollAreaAlpha(self),
         .cell_width_px = self.cell_width_px,
         // **face 의 포인트당 advance.** 자연 글리프 폭(자간 보정 전)을 터미널 point size 로 나눈 값이다 —
         // 등폭 face 라 advance 는 크기에 비례하므로, 컴포넌트가 role 크기로 곱하면 실제 폭이 나온다.

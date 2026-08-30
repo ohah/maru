@@ -266,6 +266,9 @@ pub const Summary = struct {
 pub const Props = struct {
     /// 도크 content rect(도크-로컬 좌표, 원점 0,0).
     viewport_px: layout.UiRect,
+    /// 스크롤바 fade 의 최종 alpha(0xFF=선명). **`view` 만 읽는다 — `build` 는 쓰지 않는다**(계약 §7 —
+    /// tree 에 실으면 발행 동등 비교가 매 프레임 실패한다). 산술은 host 가 소유한다.
+    scrollbar_alpha: u8 = 0xFF,
     /// Dock UI zoom. Session Dock과 같은 축이라 두 뷰의 행 높이가 함께 움직인다.
     scale_milli: u32 = 1000,
     /// 등폭 셀 폭. **`build`와 `view`가 같은 값을 봐야 한다** — 개수 배지의 자리는 이 값에서 나오고,

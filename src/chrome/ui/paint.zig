@@ -37,12 +37,39 @@ pub const resolveText = paint_style.resolveText;
 /// semantic Card/Button마다 Quad 하나를 preorder로 낸다. 실제 CoreText layout 산출물이 배선되기
 /// 전까지 텍스트는 의도적으로 내지 않으며, caller는 그래도 `resolveText`로 typed 시각 스타일을 얻을
 /// 수 있다. 결과는 단위 테스트에서 snapshot하기에는 안전하지만 제품 frame은 아니다.
+/// **시간에 따라 변하는 alpha 를 노드 id 로 얹는다**(fade). 계약([ScrollArea](../../../docs/scroll-area.md) §7)이
+/// 「fade alpha 는 published tree 에 넣지 않는다」고 못 박은 이유가 이 타입의 존재 이유다 — tree 에 실으면
+/// 프레임마다 tree 가 달라져 발행 경로의 동등 비교(예: `agentSessionDockFrameEql`)가 매번 실패하고,
+/// 그 자리에 붙어 있는 드래그 carry 판정까지 흔든다. alpha 는 **paint 시점에 얹는 값**이다.
+pub const IdAlpha = struct { id: ui_tree.UiId, alpha: u8 };
+
+/// 오버라이드가 있으면 그 값, 없으면 선언된 opacity.
+fn alphaFor(overrides: []const IdAlpha, id: ui_tree.UiId, declared: u8) u8 {
+    for (overrides) |o| if (o.id == id) return o.alpha;
+    return declared;
+}
+
+/// 기존 호출부를 위한 얇은 래퍼(오버라이드 없음). 인자를 늘리는 대신 이름을 나누는 것은
+/// `appendBackgroundQuadsWithTerminalOpacity` 와 같은 선례다.
 pub fn paint(
     tree: ui_tree.UiRectTree,
     state: interaction.InteractionState,
     tk: *const tokens.Tokens,
     layer: draw.Layer,
     buffers: PaintBuffers,
+) PaintError!draw.ChromeDraw {
+    return paintWithAlphaOverrides(tree, state, tk, layer, buffers, &.{});
+}
+
+/// `overrides` 에 든 id 의 quad 는 그 alpha 로 **덮어쓴다**(곱하지 않는다 — fade 는 이미 최종 값이다).
+/// 목록이 짧다는 전제로 선형 탐색한다(스크롤바 track·thumb 둘).
+pub fn paintWithAlphaOverrides(
+    tree: ui_tree.UiRectTree,
+    state: interaction.InteractionState,
+    tk: *const tokens.Tokens,
+    layer: draw.Layer,
+    buffers: PaintBuffers,
+    overrides: []const IdAlpha,
 ) PaintError!draw.ChromeDraw {
     clearOps(buffers.ops);
     var count: usize = 0;
@@ -66,7 +93,7 @@ pub fn paint(
                     .corner_radii = style.corner_radii_px,
                     .border_widths = style.border_widths_px,
                     .border_role = style.border,
-                    .alpha = style.opacity,
+                    .alpha = alphaFor(overrides, entry.id, style.opacity),
                     .clip = clipRectOf(entry),
                 } };
                 count += 1;
@@ -84,7 +111,7 @@ pub fn paint(
                     .corner_radii = style.corner_radii_px,
                     .border_widths = style.border_widths_px,
                     .border_role = style.border,
-                    .alpha = style.opacity,
+                    .alpha = alphaFor(overrides, entry.id, style.opacity),
                     .clip = clipRectOf(entry),
                 } };
                 count += 1;

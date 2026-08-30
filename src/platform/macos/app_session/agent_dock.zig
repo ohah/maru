@@ -26,6 +26,7 @@ const agent_session_archive_backend = @import("../agent_session_archive_backend.
 const agent_session_archive_detail_backend = @import("../agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("../agent_session_archive_scope_backend.zig");
 const chrome_system_text = @import("../chrome/system_text.zig");
+const scroll_ops = @import("scroll.zig"); // 스크롤바 fade alpha(host 소유 · view 가 얹는다)
 const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 const metal_frame = maru.renderer.metal_frame;
 const icons = maru.icons;
@@ -1279,6 +1280,8 @@ pub fn agentSessionDockProps(
         // 가상화 때문에 component는 보이는 아이템만 받는다. scrollbar가 "얼마나 긴 목록의 어디"인지
         // 알 수 있는 유일한 입력이 이 두 값이다.
         .scroll_content_height_px = scroll_projection.content_height_px,
+        // fade 는 host 가 계산하고 **view 가 paint 시점에** 얹는다 — build(tree)는 이 값을 모른다(계약 §7).
+        .scrollbar_alpha = scroll_ops.dockScrollAreaAlpha(self),
         .scroll_offset_px = scroll_projection.offset_y_px,
         .expanded_identity = if (self.agent_session_inline_detail != null and self.agent_session_archive_selected != null)
             @intCast(self.agent_session_archive_selected.?)
@@ -2164,4 +2167,61 @@ test "가려진 턴의 문구는 그리는 시점의 언어로 풀린다" {
 
     // 가리지 않은 턴은 원문 그대로다 — 모든 턴을 가림 문구로 바꿔도 위 단언은 통과하기 때문이다.
     try std.testing.expectEqualStrings("본문 그대로", turnText(plain));
+}
+
+test "fade alpha 가 바뀌어도 발행 tree 는 불변이다(계약 §7 — 동등 비교가 살아 있어야 한다)" {
+    const component = chrome.components.session_dock;
+    // 기존 「publishes no scrollbar when the list fits」와 **같은 모양**으로 두고 content 만 넘치게 한다 —
+    // 카드를 많이 넣으면 레이아웃 조건이 달라져 스크롤바 발행 자체가 갈린다(첫 판에서 그렇게 잡혔다).
+    const items = [_]component.types.Item{
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = .{ .messages = "c" } } },
+    };
+    var base = component.types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 1,
+        .items = &items,
+        .scroll_content_height_px = 4000,
+        .scrollbar_alpha = 0xFF,
+    };
+    var nodes: [512]chrome.ui.tree.UiNode = undefined;
+    var entries: [512]chrome.ui.tree.RectEntry = undefined;
+    var layout_items: [512]chrome.ui.layout.Item = undefined;
+    var flex_scratch: [512]chrome.ui.layout.FlexScratch = undefined;
+    var child_rects: [512]chrome.ui.layout.UiRect = undefined;
+    var actions: [512]component.ids.Entry = undefined;
+    const buffers = component.build.Buffers{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    };
+
+    const full = try component.build.build(base, buffers);
+    // entry·action 은 다음 build 가 같은 버퍼를 덮어쓰므로 값으로 떠 둔다.
+    var full_entries: [512]chrome.ui.tree.RectEntry = undefined;
+    var full_actions: [512]component.ids.Entry = undefined;
+    @memcpy(full_entries[0..full.tree.entries.len], full.tree.entries);
+    @memcpy(full_actions[0..full.actions.len], full.actions);
+    const full_len = full.tree.entries.len;
+    const full_alen = full.actions.len;
+    try std.testing.expect(full.tree.find(component.build.NodeIds.scroll_thumb) != null); // 스크롤바가 실제로 발행됐다
+
+    // **alpha 만 다르게** 다시 만든다. fade 가 도는 매 프레임이 이 상황이다.
+    base.scrollbar_alpha = 0x4D;
+    const faint = try component.build.build(base, buffers);
+
+    // ⚠️ 이것이 이 테스트의 본체다 — alpha 를 tree 에 실으면 여기서 false 가 되고,
+    // `publishAgentSessionDockFrame` 의 early return 이 fade 내내 무산된다(그 함수에 드래그 carry
+    // 판정이 붙어 있어 계약이 「좁아지면 정확성 문제」라고 경고한 자리다).
+    try std.testing.expect(agentSessionDockFrameEql(
+        full_entries[0..full_len],
+        full_actions[0..full_alen],
+        faint.tree.entries,
+        faint.actions,
+    ));
 }

@@ -267,16 +267,30 @@ const Writer = struct {
         // **원본을 그대로 넘긴다.** 여기서 미리 자르면 measured 경로가 실제 advance로 말줄임을
         // 정할 정보를 잃는다(Session Dock 주석과 같은 이유).
         self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count], .bold = bold };
-        self.ops[self.op_count] = .{ .text = .{
-            .origin = .{ .x = x, .y = y },
-            .runs = self.runs[self.run_count .. self.run_count + 1],
-            .role = role,
-            .text_role = text_role,
-            .anchor = .head,
-            .max_width_px = max_width_px,
-            .placement = placement,
-            .clip = clip,
-        } };
+        self.ops[self.op_count] = .{
+            .text = .{
+                .origin = .{ .x = x, .y = y },
+                .runs = self.runs[self.run_count .. self.run_count + 1],
+                .role = role,
+                .text_role = text_role,
+                .anchor = .head,
+                .max_width_px = max_width_px,
+                .placement = placement,
+                .clip = clip,
+                // **measured 글자는 이 표시가 있어야 잘린다**(`draw.zig` `scroll_clipped` 계약).
+                // 바로 위 `clip` 은 **셀 격자 경로**의 채널이라 GPU 글리프를 자르지 않는다 —
+                // `system_text.glyphClipFor` 가 `if (placement.scroll_clipped) viewport else null` 이므로,
+                // 이 표시가 없으면 host 가 뷰포트를 넘겨도 **아무 데도 안 잘린다**.
+                //
+                // 그래서 반쯤 스크롤된 첫 행의 라벨이 트리 위 고정 chrome(뷰 바) 위에 그려졌다
+                // (2026-08-31 사용자 제보). 2026-08-25 에 host 쪽(뷰포트 전달)만 배선하고 이쪽을
+                // 빠뜨렸다 — SCM 도크는 자기 `view` 가 이미 달고 있어서 그쪽만 나았다.
+                //
+                // **트리의 글자는 전부 스크롤 콘텐츠다.** 떠 있는 머리(`above_clip`)가 없으므로
+                // 조건 없이 참이다 — 생기면 그때 그 자리에서 갈라야 한다(둘은 배타적이다).
+                .scroll_clipped = true,
+            },
+        };
         self.run_count += 1;
         self.op_count += 1;
     }
@@ -783,4 +797,34 @@ test "아주 긴 라벨도 예산 안에서 그려진다" {
         labels += 1;
     };
     try testing.expectEqual(@as(usize, 2), labels);
+}
+
+test "FTCLIP 트리가 낸 글자는 전부 스크롤 뷰포트에 잘린다 — measured 경로가 그 표시로만 자른다" {
+    // **`Text.clip` 과 `Text.scroll_clipped` 는 다른 채널이다.** 앞엣것은 셀 격자로 낮추는 경로가
+    // 쓰고, measured(CoreText/GPU) 글리프를 자르는 것은 뒤엣것 하나뿐이다 —
+    // `system_text.glyphClipFor` 가 `if (placement.scroll_clipped) viewport else null` 이다.
+    //
+    // 그 표시가 없어서 **반쯤 스크롤된 첫 행의 라벨이 트리 위 고정 chrome(뷰 바) 위에 그려졌다**
+    // (2026-08-31 사용자 제보). host 는 2026-08-25 부터 뷰포트를 넘기고 있었고, quad 와 셀은
+    // 제대로 잘리고 있었다 — **글리프만** 안 잘렸다. 그래서 그때 세운 판정자 둘(필수 인자·소스
+    // 게이트)이 전부 초록이었다. 그것들은 "host 가 넘겼는가" 를 재지 "컴포넌트가 표시했는가" 를
+    // 안 본다.
+    //
+    // **떠 있는 머리가 없으므로 예외가 없다.** 생기면 `above_clip` 을 쓰고 이 판정자를 갈라야 한다.
+    var h = Harness{};
+    const rows = [_]types.Row{
+        .{ .kind = .directory, .label = "src", .icon_kind = 0 },
+        .{ .kind = .file, .label = "build.zig", .icon_kind = 0 },
+        .{ .kind = .file, .label = "AGENTS.md", .icon_kind = 0 },
+    };
+    const painted = try h.run(&rows);
+    var texts: usize = 0;
+    for (painted.ops) |op| switch (op) {
+        .text => |t| {
+            texts += 1;
+            try testing.expect(t.scroll_clipped);
+        },
+        else => {},
+    };
+    try testing.expect(texts > 0); // 아무 글자도 안 나왔으면 위 단언은 아무것도 안 잰다
 }

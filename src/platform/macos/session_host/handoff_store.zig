@@ -59,6 +59,18 @@ pub const Failpoint = enum {
 
 const ReserveFailpoint = enum { none, after_primary };
 
+const ReservedCommitFailpoint = enum {
+    none,
+    primary_sync,
+    backup_sync,
+    attempt_pre_readback_sync,
+    primary_unlink,
+    backup_unlink,
+    attempt_post_unlink_sync,
+    attempt_rmdir,
+    owner_sync,
+};
+
 pub const Pair = struct {
     primary_fd: c.fd_t,
     backup_fd: c.fd_t,
@@ -258,6 +270,24 @@ pub fn commitReserved(
     bytes: []const u8,
     budget: CommitBudget,
 ) Error!Pair {
+    return commitReservedWithFailpoint(
+        allocator,
+        reservation,
+        expected,
+        bytes,
+        budget,
+        .none,
+    );
+}
+
+fn commitReservedWithFailpoint(
+    allocator: std.mem.Allocator,
+    reservation: *Reservation,
+    expected: ExpectedAuthority,
+    bytes: []const u8,
+    budget: CommitBudget,
+    failpoint: ReservedCommitFailpoint,
+) Error!Pair {
     if (!reservation.active or expected.attempt_id != reservation.attempt_id or
         bytes.len > reservation.reserved_len)
         return error.InvalidState;
@@ -267,8 +297,19 @@ pub fn commitReserved(
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidState,
     };
-    try writeReservedFile(reservation.primary_fd, bytes, budget);
-    try writeReservedFile(reservation.backup_fd, bytes, budget);
+    try writeReservedFile(
+        reservation.primary_fd,
+        bytes,
+        budget,
+        failpoint == .primary_sync,
+    );
+    try writeReservedFile(
+        reservation.backup_fd,
+        bytes,
+        budget,
+        failpoint == .backup_sync,
+    );
+    if (failpoint == .attempt_pre_readback_sync) return error.SyncFailed;
     if (c.fsync(reservation.attempt_fd) != 0) return error.SyncFailed;
     try checkDeadline(budget);
 
@@ -281,14 +322,17 @@ pub fn commitReserved(
         return error.StateMismatch;
     try readbackEqual(primary_read, bytes, budget);
     try readbackEqual(backup_read, bytes, budget);
+    if (failpoint == .primary_unlink) return error.CleanupFailed;
     try removePinnedLeaf(reservation.attempt_fd, "primary", reservation.primary_fd);
     reservation.primary_present = false;
+    if (failpoint == .backup_unlink) return error.CleanupFailed;
     try removePinnedLeaf(reservation.attempt_fd, "backup", reservation.backup_fd);
     reservation.backup_present = false;
     _ = c.close(reservation.primary_fd);
     reservation.primary_open = false;
     _ = c.close(reservation.backup_fd);
     reservation.backup_open = false;
+    if (failpoint == .attempt_post_unlink_sync) return error.SyncFailed;
     if (c.fsync(reservation.attempt_fd) != 0) return error.SyncFailed;
     _ = c.close(reservation.attempt_fd);
     reservation.attempt_open = false;
@@ -298,8 +342,10 @@ pub fn commitReserved(
         "attempt-{x:0>32}",
         .{reservation.attempt_id},
     ) catch return error.CleanupFailed;
+    if (failpoint == .attempt_rmdir) return error.CleanupFailed;
     if (c.unlinkat(reservation.owner_fd, leaf.ptr, at_removedir) != 0) return error.CleanupFailed;
     reservation.attempt_present = false;
+    if (failpoint == .owner_sync) return error.SyncFailed;
     if (c.fsync(reservation.owner_fd) != 0) return error.SyncFailed;
     _ = c.close(reservation.owner_fd);
     reservation.owner_open = false;
@@ -563,7 +609,12 @@ fn createReservedFile(dir_fd: c.fd_t, leaf: [:0]const u8, len: usize) Error!c.fd
     return fd;
 }
 
-fn writeReservedFile(fd: c.fd_t, bytes: []const u8, budget: CommitBudget) Error!void {
+fn writeReservedFile(
+    fd: c.fd_t,
+    bytes: []const u8,
+    budget: CommitBudget,
+    fail_sync: bool,
+) Error!void {
     if (c.lseek(fd, 0, c.SEEK.SET) < 0) return error.WriteFailed;
     var offset: usize = 0;
     while (offset < bytes.len) {
@@ -579,6 +630,7 @@ fn writeReservedFile(fd: c.fd_t, bytes: []const u8, budget: CommitBudget) Error!
     const exact = std.math.cast(i64, bytes.len) orelse return error.LimitExceeded;
     if (c.ftruncate(fd, exact) != 0) return error.WriteFailed;
     try checkDeadline(budget);
+    if (fail_sync) return error.SyncFailed;
     if (c.fsync(fd) != 0) return error.SyncFailed;
     try checkDeadline(budget);
 }
@@ -779,6 +831,17 @@ fn testExpected(host_id: u128, attempt_id: u128, next_handle: u64) ExpectedAutho
     };
 }
 
+fn testOpenFdCount() !u32 {
+    var dir = try std.Io.Dir.openDirAbsolute(std.testing.io, "/dev/fd", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var iterator = dir.iterate();
+    var count: u32 = 0;
+    while (try iterator.next(std.testing.io)) |_| {
+        count = std.math.add(u32, count, 1) catch return error.TooManyOpenFds;
+    }
+    return count;
+}
+
 test "handoff store commits identical primary backup and unlinks secret paths before exec" {
     var dir_buf: [192]u8 = undefined;
     const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store");
@@ -889,6 +952,65 @@ test "reserved handoff commits into pre-quiesce files and cleans the private att
         .{ dir, @as(u128, 0x13) },
     );
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
+}
+
+test "reserved handoff syscall failures publish no pair and leave no attempt residue" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-reserved-failures");
+    defer test_scratch.close(std.testing.io, dir);
+    const attempt_id: u128 = 0x1313;
+    const record = try testAttemptRecord(std.testing.allocator, 0xAC, attempt_id);
+    defer std.testing.allocator.free(record);
+    const bytes = try handoff.encodeHost(std.testing.allocator, .{
+        .host_id = 0xAC,
+        .upgrade_epoch = 3,
+        .next_handle = 4,
+        .runtimes = &.{},
+        .attempt_record = record,
+    });
+    defer std.testing.allocator.free(bytes);
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    const cases = [_]struct { failpoint: ReservedCommitFailpoint, expected: Error }{
+        .{ .failpoint = .primary_sync, .expected = error.SyncFailed },
+        .{ .failpoint = .backup_sync, .expected = error.SyncFailed },
+        .{ .failpoint = .attempt_pre_readback_sync, .expected = error.SyncFailed },
+        .{ .failpoint = .primary_unlink, .expected = error.CleanupFailed },
+        .{ .failpoint = .backup_unlink, .expected = error.CleanupFailed },
+        .{ .failpoint = .attempt_post_unlink_sync, .expected = error.SyncFailed },
+        .{ .failpoint = .attempt_rmdir, .expected = error.CleanupFailed },
+        .{ .failpoint = .owner_sync, .expected = error.SyncFailed },
+    };
+    for (cases) |case| {
+        const fd_count_before = try testOpenFdCount();
+        var reservation = try reserve(dir, attempt_id, bytes.len + 128, deadline);
+        const primary_fd = reservation.primary_fd;
+        const backup_fd = reservation.backup_fd;
+        try std.testing.expectError(
+            case.expected,
+            commitReservedWithFailpoint(
+                std.testing.allocator,
+                &reservation,
+                testExpected(0xAC, attempt_id, 4),
+                bytes,
+                .{ .deadline = deadline },
+                case.failpoint,
+            ),
+        );
+        try reservation.cancel();
+        try std.testing.expect(!reservation.active);
+        try std.testing.expect(c.fcntl(primary_fd, c.F.GETFD, @as(c_int, 0)) < 0);
+        try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+        try std.testing.expect(c.fcntl(backup_fd, c.F.GETFD, @as(c_int, 0)) < 0);
+        try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+        var attempt_buf: [256]u8 = undefined;
+        const attempt_path = try std.fmt.bufPrintZ(
+            &attempt_buf,
+            "{s}/attempt-{x:0>32}",
+            .{ dir, attempt_id },
+        );
+        try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
+        try std.testing.expectEqual(fd_count_before, try testOpenFdCount());
+    }
 }
 
 test "partial reservation failure removes the first copy and private attempt" {

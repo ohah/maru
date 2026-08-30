@@ -11451,11 +11451,33 @@ pub fn build(b: *std.Build) void {
                 "handoff store rejects malformed or divergent state and removes attempt residue",
                 "handoff store directory fd stays on the approved generation after path replacement",
                 "handoff store exact cleanup preserves a swapped replacement leaf",
+                "reserved handoff syscall failures publish no pair and leave no attempt residue",
             },
         });
         const run_handoff_store_tests = b.addRunArtifact(handoff_store_tests);
-        run_handoff_store_tests.addArg("--maru-expect-tests=6");
+        run_handoff_store_tests.addArg("--maru-expect-tests=7");
         run_handoff_store_tests.setCwd(b.path("."));
+
+        const reserved_handoff_failure_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_store.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "reserved handoff syscall failures publish no pair and leave no attempt residue",
+            },
+        });
+        const run_reserved_handoff_failure_tests = b.addRunArtifact(reserved_handoff_failure_tests);
+        run_reserved_handoff_failure_tests.addArg("--maru-expect-tests=1");
+        run_reserved_handoff_failure_tests.setCwd(b.path("."));
+        const reserved_handoff_failure_step = b.step(
+            "test-session-host-upgrade-reserved-handoff-failures",
+            "Inject reserved handoff sync and cleanup failures (macOS)",
+        );
+        reserved_handoff_failure_step.dependOn(&run_reserved_handoff_failure_tests.step);
 
         const exec_fd_set_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

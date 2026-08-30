@@ -41,6 +41,15 @@ pub const Row = struct {
     /// **오름차순이고 겹치지 않아야 한다.** 겹치면 뒤엣것이 조용히 무시된다 — tree-sitter는 한
     /// 범위에 캡처를 여럿 내므로(그 모듈 머리말 참고) **겹침 해소는 호출자의 일**이다.
     colors: []const ColorSpan = &.{},
+    /// **배경색으로 그릴 열들**(오름차순) — `block` caret이 선 자리다.
+    ///
+    /// quad는 글자를 덮지 못하므로(`draw.zig`: *"quad와 text가 서로 다른 레이어"*) 블록 커서를
+    /// 채우기만 하면 그 위에 원래 글자색이 그대로 남아 읽히지 않는다. 터미널이 커서 칸의 전경·배경을
+    /// 맞바꾸는 것과 같은 자리이며, 여기서는 그 칸의 글자만 `terminal_bg`로 낸다.
+    ///
+    /// **열 기준이다**(byte가 아니다) — `colors`와 같은 축이다. 이 모듈이 보는 본문은 탭이 전개된
+    /// 사본이라 원본 byte offset이 안 맞는다.
+    caret_cols: []const u32 = &.{},
 };
 
 /// 한 색 구간. `end_col`은 **배타적**이다.
@@ -94,10 +103,11 @@ pub const text_role: tokens.ColorRole = .surface_fg;
 /// 그러려면 **마지막 칸을 미리 비워 둬야 한다**(`written + 1 >= out_runs.len`에서 멈춘다).
 /// 처음에는 그냥 `written >= out_runs.len`에서 멈췄는데, 그러면 꼬리를 쓸 칸이 없어 **줄 끝이
 /// 조용히 사라졌다** — `HL14`가 그것을 잡았고, 위 주석은 코드가 안 하는 일을 적고 있었다.
-fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, out_runs: []draw.Run) usize {
+fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, out_runs: []draw.Run) usize {
     if (out_runs.len == 0) return 0;
-    // **색이 없으면 한 run이다.** 흔한 경우(grammar 없음·무색 줄)라 걷지 않고 빠져나간다.
-    if (colors.len == 0) {
+    // **색이 없고 반전할 칸도 없으면 한 run이다.** 흔한 경우(grammar 없음·무색 줄, 막대 커서)라
+    // 걷지 않고 빠져나간다.
+    if (colors.len == 0 and caret_cols.len == 0) {
         out_runs[0] = .{ .text = text };
         return 1;
     }
@@ -107,13 +117,15 @@ fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, out_ru
     var col: u32 = start_col;
     var seg_start: usize = 0;
     var cursor: usize = 0; // colors 를 앞으로만 훑는다 — 줄당 한 번 지나간다
-    var seg_role: ?tokens.ColorRole = roleAt(colors, &cursor, col);
+    // **반전 칸도 앞으로만 훑는다** — `colors`와 같은 이유다(줄당 한 번 지나간다).
+    var caret_cursor: usize = 0;
+    var seg_role: ?tokens.ColorRole = roleAtWithCaret(colors, &cursor, caret_cols, &caret_cursor, col);
 
     while (i < text.len) {
         const base = text_layout.decodeCodepoint(text, i);
         const end = @min(text_layout.clusterEndAfter(text, i, base.advance), text.len);
         const n = @max(1, end - i);
-        const role = roleAt(colors, &cursor, col);
+        const role = roleAtWithCaret(colors, &cursor, caret_cols, &caret_cursor, col);
         if (role != seg_role) {
             if (i > seg_start) {
                 // **마지막 칸은 꼬리 몫이다.** 여기서 다 쓰면 남은 글자를 실을 자리가 없다.
@@ -146,6 +158,27 @@ fn roleAt(colors: []const ColorSpan, cursor: *usize, col: u32) ?tokens.ColorRole
     if (cursor.* >= colors.len) return null;
     const c = colors[cursor.*];
     return if (col >= c.start_col and col < c.end_col) c.role else null;
+}
+
+/// 구문 색 위에 **블록 caret 반전**을 얹는다. caret이 선 칸은 구문 색이 무엇이든 배경색으로
+/// 그린다 — 그 칸은 커서가 채우고 있으므로 원래 전경색으로 두면 커서색 위에 겹쳐 안 읽힌다.
+///
+/// **caret이 이긴다.** 반대로 두면 강조된 토큰 위에서만 커서가 글자를 못 덮어, 커서가 어디 있는지가
+/// 문법에 따라 달라진다.
+fn roleAtWithCaret(
+    colors: []const ColorSpan,
+    cursor: *usize,
+    caret_cols: []const u32,
+    caret_cursor: *usize,
+    col: u32,
+) ?tokens.ColorRole {
+    while (caret_cursor.* < caret_cols.len and caret_cols[caret_cursor.*] < col) caret_cursor.* += 1;
+    if (caret_cursor.* < caret_cols.len and caret_cols[caret_cursor.*] == col) {
+        // **구문 커서도 함께 밀어 둔다** — 이 칸을 건너뛰면 다음 칸에서 `colors`가 뒤처진다.
+        _ = roleAt(colors, cursor, col);
+        return .terminal_bg;
+    }
+    return roleAt(colors, cursor, col);
 }
 
 /// gutter와 같은 이유로 각 저장소에서 쓴 양을 돌려준다(`gutter.Written` 참고).
@@ -328,7 +361,7 @@ pub fn build(
             if (run_used >= runs.len or op_count >= out.len) continue;
 
             const run_start = run_used;
-            run_used += writeRuns(text, @max(src_col, start_col), row.colors, runs[run_used..]);
+            run_used += writeRuns(text, @max(src_col, start_col), row.colors, row.caret_cols, runs[run_used..]);
             const run_slice = runs[run_start..run_used];
 
             out[op_count] = .{
@@ -2660,7 +2693,7 @@ fn joinRuns(out: []u8, rs: []const draw.Run) []const u8 {
 
 test "HL10 색 구간이 없으면 run 하나 — 흔한 경로가 안 느려진다" {
     var rs: [8]draw.Run = undefined;
-    const n = writeRuns("const x = 1;", 0, &.{}, &rs);
+    const n = writeRuns("const x = 1;", 0, &.{}, &.{}, &rs);
     try testing.expectEqual(@as(usize, 1), n);
     try testing.expectEqualStrings("const x = 1;", rs[0].text);
     // 역할이 없어야 op 의 본문색이 그대로 쓰인다(`run.role orelse text.role`).
@@ -2674,7 +2707,7 @@ test "HL11 색 경계에서 쪼개지고, 이어 붙이면 원본이다" {
         .{ .start_col = 10, .end_col = 11, .role = .syntax_number }, // 1
     };
     var rs: [16]draw.Run = undefined;
-    const n = writeRuns(text, 0, &colors, &rs);
+    const n = writeRuns(text, 0, &colors, &.{}, &rs);
 
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
@@ -2699,7 +2732,7 @@ test "HL12 2칸 글자에서 경계가 안 밀린다 — 글자 수가 아니라
     const text = "가나ab"; // 열: 가=0..2, 나=2..4, a=4, b=5
     const colors = [_]ColorSpan{.{ .start_col = 2, .end_col = 5, .role = .syntax_string }};
     var rs: [16]draw.Run = undefined;
-    const n = writeRuns(text, 0, &colors, &rs);
+    const n = writeRuns(text, 0, &colors, &.{}, &rs);
 
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
@@ -2718,7 +2751,7 @@ test "HL13 시작 열이 0이 아니어도 맞는다 — 가로 스크롤·랩�
     const text = "x = 1;"; // 이 조각이 논리 열 6 에서 시작한다고 하자
     const colors = [_]ColorSpan{.{ .start_col = 10, .end_col = 11, .role = .syntax_number }};
     var rs: [16]draw.Run = undefined;
-    const n = writeRuns(text, 6, &colors, &rs);
+    const n = writeRuns(text, 6, &colors, &.{}, &rs);
 
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));
@@ -2740,7 +2773,7 @@ test "HL14 run 예산이 모자라도 글자를 잃지 않는다" {
         .{ .start_col = 4, .end_col = 5, .role = .syntax_number },
     };
     var rs: [2]draw.Run = undefined; // 일부러 모자라게
-    const n = writeRuns(text, 0, &colors, &rs);
+    const n = writeRuns(text, 0, &colors, &.{}, &rs);
     try testing.expect(n <= rs.len);
 
     var buf: [64]u8 = undefined;
@@ -2793,7 +2826,7 @@ test "HL16 줄 끝 토큰의 색도 실린다 — 꼬리 run 이 무색이 되�
         .{ .start_col = 4, .end_col = 6, .role = .syntax_number },
     };
     var rs: [16]draw.Run = undefined;
-    const n = writeRuns(text, 0, &colors, &rs);
+    const n = writeRuns(text, 0, &colors, &.{}, &rs);
 
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings(text, joinRuns(&buf, rs[0..n]));

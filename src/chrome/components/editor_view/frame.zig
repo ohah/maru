@@ -154,6 +154,12 @@ pub const Props = struct {
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다 —
     /// rename·검색 caret이 쓰는 값과 같은 것이라 **깜빡임 위상이 화면 안에서 하나다.**
     caret_visible: bool = true,
+    /// caret **모양**(`editor.cursor-shape`). 기본 `bar`는 지금까지의 폭 2px 막대다.
+    ///
+    /// **`block`은 셀을 채운다** — 그 자리에 글자가 있으므로 본문이 그 글자를 **배경색으로**
+    /// 그려야 읽힌다(`content.Props.invert_carets`). quad는 글자를 덮지 못하므로(draw.zig의
+    /// "quad와 text는 서로 다른 레이어") 반전 없이 채우면 커서색 위에 원래 글자색이 그대로 남는다.
+    caret_shape: CaretShape = .bar,
     /// **줄 번호를 밖에서 준다**(논리 줄 인덱스로 읽는 표, `null` 항목 = 번호 없음). diff 본문이
     /// 쓴다 — 좌우가 나란히 서지만 번호는 각자 문서의 것이고, 짝을 맞추려 넣은 빈 행에는 번호가
     /// 없다. `null`이면 지금까지대로 `first_line + 줄 + 1`이다.
@@ -258,6 +264,12 @@ pub const Scratch = struct {
     row_counts: []u32,
     /// 그 계수에 쓰는 탭 전개 버퍼. 줄마다 재사용한다.
     count_scratch: []u8,
+    /// **블록 caret이 선 열**(줄별로 잘라 쓴다). `caret_shape == .block`일 때만 채운다 —
+    /// 본문이 그 칸의 글자를 배경색으로 그려야 커서가 글자를 덮는다(`content.Row.caret_cols`).
+    ///
+    /// 모자라면 뒤쪽 커서 몇 개가 반전을 못 받는다(커서 사각은 그대로 그려진다) — 이 파일의
+    /// 다른 저장소와 같은 판단이다(*"모자라면 그 부분이 잘릴 뿐 죽지 않는다"*).
+    caret_cols: []u32 = &.{},
 };
 
 /// 줄마다의 시각 행 수를 **프레임 사이에 살려 두는** 호출자 소유 캐시.
@@ -393,12 +405,14 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **gutter보다 먼저 돈다.** 랩이 켜지면 어느 논리 줄이 몇 행으로 접히는지는 전개해 나눠 본
     // 쪽만 알기 때문이다(§4 세로 축) — 둘이 각자 세면 랩된 줄에서 번호가 본문과 어긋난다.
     var n: usize = 0;
+    var caret_cols_used: usize = 0;
     while (n < scratch.content_rows.len and props.first_line + n < props.lines.len) : (n += 1) {
         const li = props.first_line + n;
         scratch.content_rows[n] = .{
             .bytes = props.lines[li],
             // **짧은 배열을 허용한다** — 없는 줄은 무색이다(위 `line_colors` 계약).
             .colors = if (li < props.line_colors.len) props.line_colors[li] else &.{},
+            .caret_cols = caretColsFor(props, scratch.caret_cols, &caret_cols_used, li),
         };
     }
     const visual_budget = @min(props.visible_rows, scratch.visual_rows.len);
@@ -849,12 +863,34 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
             if (on_screen >= layout.content.width) continue; // 이 행보다 뒤다
             const x = props.rect.x +
                 @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px));
+            // **`block`·`underline`은 글자 폭을 덮는다** — 한글·이모지는 두 칸이라 한 칸만 칠하면
+            // 글자의 절반에 걸친다. 폭은 `stepColumn`이 준다(§5.4 — 열 산술의 단일 출처. 여기서
+            // `2`를 다시 세면 탭·위험 문자에서 본문과 갈린다).
+            const cells: u32 = if (props.caret_shape == .bar or off >= line.len) 1 else cw: {
+                const st = content.stepColumn(line, off, col, props.tab_width);
+                break :cw @max(1, st.next_col -| col);
+            };
+            // 화면 오른쪽 끝을 넘지 않게 자른다 — 넘으면 이웃 pane 위로 번진다.
+            const span = @min(cells, layout.content.width - on_screen);
             // **불투명하게 그린다.** 띠·검색은 글자를 읽어야 해서 알파로 얹지만, 커서는 그 자리에
-            // 글자가 없다(글자 **사이**다) — 반투명하게 두면 배경색이 비쳐 흐릿한 막대가 된다.
-            out[n] = .{ .quad = .{
-                .rect = .{ .x = x, .y = y, .w = caret_width_px, .h = props.cell_h_px },
-                .fill_role = .cursor,
-            } };
+            // 글자가 없거나(막대 — 글자 **사이**다) 본문이 그 글자를 배경색으로 그린다(`block`).
+            // 반투명하게 두면 배경색이 비쳐 흐릿해진다.
+            out[n] = .{
+                .quad = .{
+                    .rect = switch (props.caret_shape) {
+                        .bar => .{ .x = x, .y = y, .w = caret_width_px, .h = props.cell_h_px },
+                        .block => .{ .x = x, .y = y, .w = span * props.cell_w_px, .h = props.cell_h_px },
+                        // **글자 밑에 붙인다** — 셀 아래쪽 `caret_width_px`만큼.
+                        .underline => .{
+                            .x = x,
+                            .y = y + @as(i32, @intCast(props.cell_h_px -| caret_width_px)),
+                            .w = span * props.cell_w_px,
+                            .h = caret_width_px,
+                        },
+                    },
+                    .fill_role = .cursor,
+                },
+            };
             n += 1;
         }
     }
@@ -862,7 +898,36 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
 }
 
 /// 커서 막대 폭(px). **셀 폭과 무관한 상수다** — 폰트를 키워도 커서가 뚱뚱해지지 않는다.
+/// `underline`의 두께도 같은 값을 쓴다 — 둘 다 "선 하나"이고 두께가 갈릴 이유가 없다.
 pub const caret_width_px: u32 = 2;
+
+/// caret 모양. 값 이름은 터미널 `cursor.shape`(`config.theme.CursorShape`)와 **같다** — 이 컴포넌트는
+/// config를 안 들여오므로(chrome은 L3) 이름만 맞추고 제품이 옮겨 담는다.
+pub const CaretShape = enum { bar, block, underline };
+
+/// 한 줄의 **블록 caret 열들**을 저장소에 담아 그 조각을 돌려준다. `block`이 아니거나 커서가
+/// 안 보이는 순간이면 빈 조각이다 — 그때는 본문이 반전할 것이 없다.
+///
+/// **열 변환은 `columnOfOffset` 하나가 한다**(§5.4). 여기서 다시 세면 탭스톱 규칙이 두 곳에 생긴다.
+fn caretColsFor(props: Props, store: []u32, used: *usize, line_idx: usize) []const u32 {
+    if (props.caret_shape != .block or !props.caret_visible) return &.{};
+    const rows = props.carets orelse return &.{};
+    if (line_idx >= rows.len) return &.{};
+    const offsets = rows[line_idx];
+    if (offsets.len == 0) return &.{};
+    const line = if (line_idx < props.lines.len) props.lines[line_idx] else return &.{};
+
+    const start = used.*;
+    for (offsets) |off| {
+        if (used.* >= store.len) break; // 저장소 끝 — 남은 커서는 반전 없이 사각만 그려진다
+        // **줄 끝의 커서는 반전할 글자가 없다.** 빈 칸을 반전 목록에 넣으면 다음 줄의 훑기가
+        // 헛돌 뿐이라 아예 안 넣는다.
+        if (off >= line.len) continue;
+        store[used.*] = columnOfOffset(line, props.tab_width, off, std.math.maxInt(u32));
+        used.* += 1;
+    }
+    return store[start..used.*];
+}
 
 /// 줄 안 byte offset이 몇 열인가. `columnsAtOffsets`를 하나짜리로 부르는 얇은 감쌈이다 —
 /// **열 계산을 여기서 다시 짜지 않는다**(§5.4: 하나의 픽셀-레이아웃 소스).
@@ -2486,6 +2551,172 @@ test "CRT3 랩이 걸린 줄에서 caret은 한 번만, 제 행에 선다 (§4.1
     try std.testing.expectEqual(@as(usize, 1), n);
     // **둘째 시각 행**이다 — 첫 행(y=0)에 서면 랩을 무시한 것이다.
     try std.testing.expect(y >= 16);
+}
+
+test "CRT4 모양마다 커서 사각이 다르다 — bar는 막대, block은 셀, underline은 밑선" {
+    // **모양이 안 먹으면 「설정이 있는데 아무 일도 안 난다」가 된다** — 이 저장소가 여러 번 겪은
+    // 모양이라(`resolved-config-field-with-no-consumer`) 값마다 실제 사각을 잰다.
+    var buf: TestBuffers = .{};
+    var caret_cols: [16]u32 = undefined;
+
+    const lines = [_][]const u8{"abc"};
+    const row_carets = [_]u32{1}; // 'b' 위
+    const carets = [_][]const u32{&row_carets};
+
+    const cell_w: u16 = 8;
+    const cell_h: u16 = 16;
+
+    for ([_]CaretShape{ .bar, .block, .underline }) |shape| {
+        var sc = buf.scratch();
+        sc.caret_cols = &caret_cols;
+        const w = build(.{
+            .lines = &lines,
+            .first_line = 0,
+            .total_lines = 1,
+            .carets = &carets,
+            .caret_visible = true,
+            .caret_shape = shape,
+            .visible_rows = 2,
+            .wrap = false,
+            .tab_width = default_tab_width,
+            .rect = .{ .x = 0, .y = 0, .w = 40 * @as(u32, cell_w), .h = 32 },
+            .cell_w_px = cell_w,
+            .cell_h_px = cell_h,
+            .font_px = 16,
+            .total_cols = 40,
+            .scrollbar_gutter_px = 0,
+            .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+        }, sc);
+
+        var found: ?draw.Rect = null;
+        for (buf.ops[0..w.ops]) |op| {
+            if (op != .quad or op.quad.fill_role != .cursor) continue;
+            found = op.quad.rect;
+        }
+        const r = found orelse return error.CaretNotDrawn;
+        switch (shape) {
+            // 막대는 셀 폭과 **무관**하다 — 폰트를 키워도 안 뚱뚱해진다.
+            .bar => {
+                try std.testing.expectEqual(caret_width_px, r.w);
+                try std.testing.expectEqual(@as(u32, cell_h), r.h);
+            },
+            // 블록은 글자 한 칸을 통째로 덮는다.
+            .block => {
+                try std.testing.expectEqual(@as(u32, cell_w), r.w);
+                try std.testing.expectEqual(@as(u32, cell_h), r.h);
+            },
+            // 밑줄은 셀 **아래쪽**에 두께 `caret_width_px`로 붙는다.
+            .underline => {
+                try std.testing.expectEqual(@as(u32, cell_w), r.w);
+                try std.testing.expectEqual(caret_width_px, r.h);
+                try std.testing.expectEqual(@as(i32, @intCast(cell_h - caret_width_px)), r.y);
+            },
+        }
+    }
+}
+
+test "CRT5 block은 한글 두 칸을 덮는다 — 반 칸에 걸치지 않는다" {
+    // **EAW wide 글자에서 한 칸만 칠하면 글자 절반에 걸친다.** 폭을 `stepColumn`에서 가져오는지
+    // 재는 자리다 — 여기서 `1`을 박으면 이 판정자가 죽는다.
+    var buf: TestBuffers = .{};
+    var caret_cols: [16]u32 = undefined;
+
+    const lines = [_][]const u8{"가나"};
+    const row_carets = [_]u32{0}; // '가' 위 (3 byte)
+    const carets = [_][]const u32{&row_carets};
+
+    var sc = buf.scratch();
+    sc.caret_cols = &caret_cols;
+    const w = build(.{
+        .lines = &lines,
+        .first_line = 0,
+        .total_lines = 1,
+        .carets = &carets,
+        .caret_visible = true,
+        .caret_shape = .block,
+        .visible_rows = 2,
+        .wrap = false,
+        .tab_width = default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = 40 * 8, .h = 32 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 16,
+        .total_cols = 40,
+        .scrollbar_gutter_px = 0,
+        .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+    }, sc);
+
+    var found: ?draw.Rect = null;
+    for (buf.ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .cursor) continue;
+        found = op.quad.rect;
+    }
+    const r = found orelse return error.CaretNotDrawn;
+    try std.testing.expectEqual(@as(u32, 16), r.w); // 두 칸 = 8px × 2
+}
+
+test "CRT6 block이 선 글자는 배경색으로 그려진다 — 커서 밑에 묻히지 않는다" {
+    // **quad는 글자를 못 덮는다**(`draw.zig`: quad와 text는 서로 다른 레이어). 그래서 채우기만
+    // 하면 커서색 위에 원래 글자색이 그대로 남아 **그 한 글자만 안 읽힌다.** 터미널이 커서 칸의
+    // 전경·배경을 맞바꾸는 것과 같은 자리다.
+    //
+    // **`bar`에서는 반전이 없어야 한다** — 막대는 글자 사이에 서므로 덮는 글자가 없다.
+    var buf: TestBuffers = .{};
+    var caret_cols: [16]u32 = undefined;
+
+    const lines = [_][]const u8{"abc"};
+    const row_carets = [_]u32{1}; // 'b' 위
+    const carets = [_][]const u32{&row_carets};
+    // **구문 강조가 걸린 칸에서도 반전이 이겨야 한다.** 지면 강조된 토큰 위에서만 커서가 글자를
+    // 못 덮어, 커서가 어디 있는지가 문법에 따라 달라진다. 'b'(열 1)에 다른 role을 씌운다.
+    const spans = [_]content.ColorSpan{.{ .start_col = 1, .end_col = 2, .role = .syntax_keyword }};
+    const line_colors = [_][]const content.ColorSpan{&spans};
+
+    for ([_]CaretShape{ .block, .bar }) |shape| {
+        var sc = buf.scratch();
+        sc.caret_cols = &caret_cols;
+        const w = build(.{
+            .lines = &lines,
+            .line_colors = &line_colors,
+            .first_line = 0,
+            .total_lines = 1,
+            .carets = &carets,
+            .caret_visible = true,
+            .caret_shape = shape,
+            .visible_rows = 2,
+            .wrap = false,
+            .tab_width = default_tab_width,
+            .rect = .{ .x = 0, .y = 0, .w = 40 * 8, .h = 32 },
+            .cell_w_px = 8,
+            .cell_h_px = 16,
+            .font_px = 16,
+            .total_cols = 40,
+            .scrollbar_gutter_px = 0,
+            .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+        }, sc);
+
+        // 'b' 를 담은 run 의 role 을 찾는다.
+        var b_role: ??tokens.ColorRole = null;
+        for (buf.ops[0..w.ops]) |op| {
+            if (op != .text) continue;
+            for (op.text.runs) |run| {
+                if (std.mem.eql(u8, run.text, "b")) b_role = run.role;
+            }
+        }
+        switch (shape) {
+            .block => {
+                const role = b_role orelse return error.CaretGlyphNotItsOwnRun;
+                try std.testing.expectEqual(@as(?tokens.ColorRole, .terminal_bg), role);
+            },
+            // **막대면 'b' 는 구문색 그대로다** — 막대는 글자 사이에 서므로 덮는 글자가 없다.
+            // 여기서 `terminal_bg`가 나오면 커서가 없는 자리까지 반전된 것이다.
+            .bar => {
+                const role = b_role orelse return error.SyntaxRunMissing;
+                try std.testing.expectEqual(@as(?tokens.ColorRole, .syntax_keyword), role);
+            },
+            .underline => unreachable,
+        }
+    }
 }
 
 test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제로 작동하는가)" {

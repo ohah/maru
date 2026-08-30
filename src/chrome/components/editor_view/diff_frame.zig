@@ -200,6 +200,9 @@ pub const Shared = struct {
     /// 이 구조를 함께 쓰므로 자리만 뚫어 둔다.
     carets: ?[]const []const u32 = null,
     caret_visible: bool = true,
+    /// caret 모양(`editor.cursor-shape`). 비교 뷰의 양쪽이 **같은 모양**을 쓴다 — 좌우가 다르면
+    /// 어느 쪽에 커서가 있는지가 아니라 "왜 모양이 다르지"가 먼저 읽힌다.
+    caret_shape: frame.CaretShape = .bar,
     /// **기본값이 없다 — 호출자가 반드시 넘긴다.** 기본값을 두면 그것이 두 번째 출처가 되고,
     /// "렌더가 쓰는 값"을 참조하는 쪽(hit-test)이 조용히 갈린다. 두 번 그렇게 갈렸다: 2차 적대적
     /// 검증은 이 자리가 `4`를 하드코딩해 `frame.default_tab_width`를 바꿔도 렌더가 안 따라오는 것을
@@ -256,6 +259,7 @@ pub fn buildSide(
         .wrap = shared.wrap,
         .carets = shared.carets,
         .caret_visible = shared.caret_visible,
+        .caret_shape = shared.caret_shape,
         .tab_width = shared.tab_width,
         .rect = rect,
         .background_rect = background,

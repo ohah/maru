@@ -11047,6 +11047,14 @@ pub const AppSession = struct {
             self.metal_dirty = true;
             return input_ops.keyConsumedByApp(self); // chrome(앱)이 소비
         }
+        // 소스 컨트롤도 같은 Page/Home/End 를 얻는다(ScrollArea 계약 §4.5 — 이관 때 딸려오지 않았던
+        // 동작이다). **탐색기는 대상이 아니다** — 그쪽은 같은 키를 이미 «선택 이동»으로 쓴다
+        // (`file_panel.fileTreeNavigationIntent`: home=.first · end=.last · page_up/page_down). 스크롤을
+        // 얹으면 그 축을 뺏는다. 핸들러가 "도크가 보이나 · 그 뷰인가 · 도크가 키를 들었나"를 스스로
+        // 판정하므로 여기서는 뷰를 다시 가르지 않는다.
+        if (scm_dock_ops.handleScmDockScrollKey(self, event)) {
+            return input_ops.keyConsumedByApp(self);
+        }
         // Session Dock keyboard focus remains with the dock while an inline detail is expanded.
         // Page keys therefore keep reaching the visible scroll owner.
         if (dock_ops.dockVisible(self) and self.dock.view == .agent_sessions) {
@@ -11367,6 +11375,15 @@ pub const AppSession = struct {
     /// 커밋 메시지 상자가 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은
     /// 게이트**를 쓰게 하는 단일 출처다(Session Dock 검색과 같은 규율) — 플래그만 보면 도크를 닫거나
     /// 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이 first responder를 요구한다.
+    /// **도크가 키보드를 들고 있는가.** 필드 이름은 Session Dock 시절 것이지만 소유자는 도크 하나이고
+    /// 뷰만 갈아 끼운다(`DockView`) — 그래서 탐색기·소스 컨트롤도 같은 값을 본다. 뷰별 판정(어느 뷰가
+    /// 지금 그려졌나)은 각 핸들러가 따로 하고, 이 값은 "터미널이 아니라 도크가 키의 주인"만 답한다.
+    /// 이름을 `dock_key_focus`로 바꾸는 것이 정직하지만, 지금 그 필드를 여러 세션이 함께 만지고 있어
+    /// rename diff를 미룬다(후속).
+    pub fn dockKeyFocus(self: *const AppSession) bool {
+        return self.agent_session_dock_key_focus;
+    }
+
     pub fn scmCommitOwnsInput(self: *const AppSession) bool {
         // **탭까지 본다**(P4 적대적 검증). 히스토리·에이전트 탭에는 상자가 그려지지 않는데 플래그만
         // 보면 키가 계속 그 상자로 가고, 사용자는 자기가 친 글자가 어디로 갔는지 알 수 없다(도크를
@@ -12165,6 +12182,10 @@ pub const AppSession = struct {
                     _ = scm_dock_ops.scmDockPointer(self, .down, x_px, y_px);
                     return;
                 }
+                // 뷰와 **무관하게** 도크 안 primary down 은 키보드를 도크로 넘긴다 — Page/Home/End 가
+                // 탐색기·소스 컨트롤에서도 목록을 겨누게 하는 소유권 신호다(아래 archive intent 처리는
+                // 그대로 agent_sessions 뷰 전용이라 이 한 줄만 앞에 둔다).
+                if (layout_math.pointInRect(x_px, y_px, dg.dock)) agent_dock.takeAgentSessionDockKeyFocus(self);
                 if (self.dock.view == .agent_sessions and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // 도크를 눌렀다 = 키보드도 도크로. 아래 dispatch가 세우는 component-local focus는
                     // 같은 클릭이 일으키는 snapshot 무효화에 곧바로 지워지므로 소유권 신호가 못 된다.

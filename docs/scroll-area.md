@@ -387,8 +387,18 @@ ScrollArea는 **전자를 흡수하고 후자에는 seam만 준다.**
   item이 없으면 기존 숫자 offset을 새 상한으로 clamp한다.
 
 키보드 스크롤(PageUp/PageDown/Home/End)도 같은 offset을 움직이는 동작이므로 ScrollArea가 제공한다.
-지금은 Session Dock에만 있고, 이관하면 탐색기·소스 컨트롤·사이드바가 함께 얻는다 — **동작이 늘어나는
-변경**이므로 각 이관 단계에서 그 사실을 적는다.
+Session Dock에 이어 **소스 컨트롤**이 같은 넷을 얻었다(2026-08-30). **동작이 늘어나는 변경**이므로 각
+이관 단계에서 그 사실을 적는다.
+
+**⚠️ 「탐색기도 함께 얻는다」던 초판 문장은 틀렸다(2026-08-30 실측 정정).** 탐색기는 그 넷을 **이미
+쓰고 있고 의미가 다르다** — `file_panel.fileTreeNavigationIntent` 가 `home → .first` · `end → .last` ·
+`page_up`/`page_down` 을 **선택 이동**으로 매핑한다(선택이 옮겨 가고 화면은 그것을 따라간다). 거기에
+스크롤을 얹으면 그 축을 뺏는다. 실제로 얹어 보니 「file tree keyboard focus preserves identity
+navigates scrolls」 판정자가 곧바로 빨개졌다 — **그 테스트가 없었으면 쓰던 기능을 조용히 죽였다.**
+그러므로 이 절이 말하는 대상은 **「목록을 굴리는 것 말고 그 키에 다른 주인이 없는」 소비처**다.
+
+사이드바는 남아 있으나 **모델이 다르다** — 스크롤 상태가 `scroll_area.State` 가 아니라 세션의
+`sidebar_scroll_offset_px` 단독이고, 워크스페이스 카드 선택 이동과 그 키가 부딪힐 수 있어 별도 판단이다.
 
 ### 4.6 소유자 판정은 ScrollArea 밖이다
 

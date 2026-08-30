@@ -125,6 +125,18 @@ pub fn processArmedPreclosed(
     return processArmedMode(ctx, attempt_id, true);
 }
 
+/// Process E2E 전용이다. 제품 `Context`를 넓히지 않고 실제 preclosed coordinator에서 reservation
+/// pathname identity 충돌을 만든다. 비-test artifact가 이 선언을 참조하면 컴파일 단계에서 닫힌다.
+pub fn processArmedPreclosedCleanupCollisionFixture(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    if (!builtin.is_test) @compileError("cleanup collision fixture is test-only");
+    const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
+        return .invariant_violation;
+    return processArmedWithDeadlineHook(ctx, attempt_id, deadline, true, replaceReservedPrimaryForFixture);
+}
+
 fn processArmedMode(ctx: Context, attempt_id: u128, gate_preclosed: bool) Outcome {
     const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
         return .invariant_violation;
@@ -143,6 +155,22 @@ fn processArmedWithDeadline(
 const AfterBudgetPrepare = *const fn (
     reservation: *budget_admission.Reservation,
 ) error{HookFailed}!void;
+
+fn replaceReservedPrimaryForFixture(
+    reservation: *budget_admission.Reservation,
+) error{HookFailed}!void {
+    const attempt_fd = reservation.store.attempt_fd;
+    if (c.renameat(attempt_fd, "primary", attempt_fd, "saved") != 0)
+        return error.HookFailed;
+    const replacement_fd = c.openat(
+        attempt_fd,
+        "primary",
+        .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (replacement_fd < 0) return error.HookFailed;
+    _ = c.close(replacement_fd);
+}
 
 fn processArmedWithDeadlineHook(
     ctx: Context,
@@ -1193,28 +1221,13 @@ fn runProductCoordinatorTest(cleanup_collision: bool) !void {
         .socket_path = "/tmp/maru-0/sh/000000000000000000000000000000b2.sock",
         .layout = layout,
     };
-    const Collision = struct {
-        fn replace(reservation: *budget_admission.Reservation) error{HookFailed}!void {
-            const attempt_fd = reservation.store.attempt_fd;
-            if (c.renameat(attempt_fd, "primary", attempt_fd, "saved") != 0)
-                return error.HookFailed;
-            const replacement_fd = c.openat(
-                attempt_fd,
-                "primary",
-                .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
-                @as(c.mode_t, 0o600),
-            );
-            if (replacement_fd < 0) return error.HookFailed;
-            _ = c.close(replacement_fd);
-        }
-    };
     const outcome = if (cleanup_collision)
         processArmedWithDeadlineHook(
             context,
             attempt_id,
             try upgrade_deadline.Deadline.after(std.testing.io, upgrade_limits.pause_budget_ns),
             false,
-            Collision.replace,
+            replaceReservedPrimaryForFixture,
         )
     else
         processArmed(context, attempt_id);

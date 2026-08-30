@@ -4395,6 +4395,19 @@ pub fn build(b: *std.Build) void {
     run_session_host_upgrade_failure_matrix_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_upgrade_failure_matrix_boundary_tests.step);
 
+    const session_host_daemon_cleanup_fail_stop_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_daemon_cleanup_fail_stop_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_daemon_cleanup_fail_stop_boundary_tests =
+        b.addRunArtifact(session_host_daemon_cleanup_fail_stop_boundary_tests);
+    run_session_host_daemon_cleanup_fail_stop_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_daemon_cleanup_fail_stop_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_daemon_cleanup_fail_stop_boundary_tests.step);
+
     const session_host_upgrade_component_failure_matrix_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_upgrade_component_failure_matrix_boundary.zig"),
@@ -11449,6 +11462,31 @@ pub fn build(b: *std.Build) void {
         );
         session_host_nonempty_rollback_step.dependOn(&run_session_host_nonempty_rollback_tests.step);
         run_session_host_tests.step.dependOn(session_host_nonempty_rollback_step);
+
+        const daemon_cleanup_fail_stop_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_daemon_cleanup_fail_stop_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
+            }),
+            .filters = &.{"daemon cleanup identity failure exits nonzero and removes listener authority"},
+        });
+        const run_daemon_cleanup_fail_stop_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_daemon_cleanup_fail_stop_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_daemon_cleanup_fail_stop_tests.addArtifactArg(daemon_cleanup_fail_stop_tests);
+        run_daemon_cleanup_fail_stop_tests.addArg("--maru-expect-tests=1");
+        run_daemon_cleanup_fail_stop_tests.setCwd(b.path("."));
+        const daemon_cleanup_fail_stop_step = b.step(
+            "test-session-host-upgrade-daemon-cleanup-fail-stop",
+            "Run daemon cleanup identity fail-stop process E2E (macOS)",
+        );
+        daemon_cleanup_fail_stop_step.dependOn(&run_daemon_cleanup_fail_stop_tests.step);
+        run_session_host_tests.step.dependOn(daemon_cleanup_fail_stop_step);
 
         // U3/U5 failure evidence used to be reachable only through separate leaf steps or the
         // full session-host aggregate. Keep one exact named matrix so release validation cannot

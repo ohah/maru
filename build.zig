@@ -12386,6 +12386,80 @@ pub fn build(b: *std.Build) void {
         session_host_step.dependOn(&run_github_environment_tests.step);
         test_step.dependOn(&run_github_environment_tests.step);
     }
+    const session_host_release_adapter_github_deployment_step = b.step(
+        "test-session-host-release-adapter-github-deployment",
+        "Bind the current release job to one protected GitHub environment deployment",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |github_deployment_optimize| {
+        const release_manifest_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_manifest.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+        });
+        const identity_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+        });
+        const context_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_context.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+            .imports = &.{
+                .{ .name = "release_manifest", .module = release_manifest_mod },
+                .{ .name = "release_adapter_identity", .module = identity_mod },
+            },
+        });
+        const contract_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_contract.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+        });
+        const github_json_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_json.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+            .imports = &.{.{ .name = "release_manifest", .module = release_manifest_mod }},
+        });
+        const github_environment_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_environment.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+            .imports = &.{
+                .{ .name = "release_adapter_contract", .module = contract_mod },
+                .{ .name = "release_adapter_github_json", .module = github_json_mod },
+            },
+        });
+        const github_deployment_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_github_deployment.zig"),
+            .target = target,
+            .optimize = github_deployment_optimize,
+            .imports = &.{
+                .{ .name = "release_adapter_context", .module = context_mod },
+                .{ .name = "release_adapter_contract", .module = contract_mod },
+                .{ .name = "release_adapter_github_json", .module = github_json_mod },
+                .{ .name = "release_adapter_github_environment", .module = github_environment_mod },
+            },
+        });
+        const github_deployment_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_github_deployment.zig"),
+                .target = target,
+                .optimize = github_deployment_optimize,
+                .imports = &.{
+                    .{ .name = "release_adapter_context", .module = context_mod },
+                    .{ .name = "release_adapter_github_deployment", .module = github_deployment_mod },
+                    .{ .name = "release_adapter_github_environment", .module = github_environment_mod },
+                },
+            }),
+        });
+        const run_github_deployment_tests = b.addRunArtifact(github_deployment_tests);
+        run_github_deployment_tests.addArg("--maru-expect-tests=6");
+        run_github_deployment_tests.setCwd(b.path("."));
+        session_host_release_adapter_github_deployment_step.dependOn(&run_github_deployment_tests.step);
+        session_host_step.dependOn(&run_github_deployment_tests.step);
+        test_step.dependOn(&run_github_deployment_tests.step);
+    }
     const session_host_release_adapter_github_git_step = b.step(
         "test-session-host-release-adapter-github-git",
         "Validate bounded GitHub Git ref and annotated tag responses for the release adapter",

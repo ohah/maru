@@ -127,13 +127,10 @@ fn remapTiles(self: *AppSession) void {
 /// 지금 그 파일의 자국. 열지 못하면 «모름» 이다.
 fn stampOf(self: *AppSession, path: []const u8) Stamp {
     if (!builtin.target.os.tag.isDarwin()) return .{};
-    const file = std.Io.Dir.cwd().openFile(self.io, path, .{
-        .mode = .read_only,
-        .follow_symlinks = false,
-        .allow_directory = false,
-    }) catch return .{};
-    defer file.close(self.io);
-    const st = file.stat(self.io) catch return .{};
+    // **열지 않는다.** 이 함수는 main actor 에서 500 ms 마다 돈다 — 스캔을 워커로 옮긴 이유(계약
+    // §4.1.1)가 「프레임에서 파일을 만지지 않는다」였고, 여는 것은 그중 가장 비싼 조각이다.
+    // `statFile` 은 POSIX 에서 syscall 하나다.
+    const st = std.Io.Dir.cwd().statFile(self.io, path, .{ .follow_symlinks = false }) catch return .{};
     return .{
         .inode = @intCast(st.inode),
         .size = st.size,

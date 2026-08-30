@@ -74712,3 +74712,173 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
     // (`uploaded` 는 단언하지 않는다 — remap 이 내려 두지만 그 뒤 렌더가 곧바로 다시 올리므로
     //  **중간 상태**다. 여기서 짚으면 「제품이 옳게 진행한 것」을 실패로 읽는다.)
 }
+
+test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤가 맞는다 (IG2 적대적)" {
+    // **자동 갱신은 사용자가 만들어 둔 상태 «위에서» 돈다.** 검색·스크롤·타일이 동시에 살아 있을 때
+    // 결과가 오면, 걸러진 목록·타일 인덱스·라벨이 **서로 다른 세대**를 가리킬 수 있다.
+    // 그 어긋남은 화면에서 「설명이 틀렸다」로 보이지 「인덱스가 어긋났다」로 보이지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+
+    // 라벨이 서로 다른 두 이미지 — keep.png / other.png
+    const keep_pair =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_K\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/u/keep.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_K\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}]}}\n";
+    const other_pair =
+        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_O\"," ++
+        "\"name\":\"Read\",\"input\":{\"file_path\":\"/u/other.png\"}}]}}\n" ++
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_O\",\"type\":\"tool_result\"," ++
+        "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = keep_pair });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.tiles.items.len == 0) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // 검색을 켜고 keep 만 남긴다.
+    session.image_gallery.key_focus = true;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } });
+    for ("keep") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+
+    // **다른 라벨**의 이미지가 붙는다 → 걸러지므로 목록은 그대로 1 이어야 한다.
+    {
+        var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+        defer f.close(io);
+        _ = try f.writePositional(io, &.{other_pair}, keep_pair.len);
+    }
+    image_gallery_ops.refresh(session, true);
+    {
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.all_hits.items.len < 2) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+    }
+    // 원본은 둘, 보여줄 것은 하나 — **인덱스 도메인이 하나**라는 불변식이 여기서 시험된다.
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.all_hits.items.len);
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    try std.testing.expectEqualStrings("keep", session.image_gallery.queryText());
+    // **라벨과 목록이 같은 세대다.** 어긋나면 남의 설명이 붙는다.
+    try std.testing.expectEqual(session.image_gallery.hits.items.len, session.image_gallery.labels.items.len);
+    try std.testing.expectEqualStrings("keep.png", session.image_gallery.labels.items[0].text());
+
+    // 검색을 지우면 둘 다 보인다.
+    session.image_gallery.search.clear();
+    image_gallery_ops.rebuildFilter(session);
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.count());
+    try std.testing.expectEqual(@as(usize, 2), session.image_gallery.labels.items.len);
+}
+
+test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 않는다 (IG2 적대적)" {
+    // **한 번 맞는 것과 계속 맞는 것은 다르다.** 자동 갱신은 대화 내내 반복되므로, 여러 번 돌린 뒤에도
+    // 불변식(목록·라벨 길이 일치 · 타일 인덱스가 범위 안 · 스크롤이 상한 안)이 서야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    const one =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
+        png_b64 ++ "\"}}]}}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/s.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+
+    // 대화가 여덟 턴 이어진다.
+    var turn: usize = 1;
+    while (turn <= 8) : (turn += 1) {
+        {
+            var f = try tmp.dir.openFile(io, "s.jsonl", .{ .mode = .write_only });
+            defer f.close(io);
+            _ = try f.writePositional(io, &.{one}, one.len * turn);
+        }
+        image_gallery_ops.refresh(session, true);
+        var spins: usize = 0;
+        while (spins < 400_000 and session.image_gallery.count() < turn + 1) : (spins += 1) {
+            _ = session.tick() catch {};
+        }
+        try std.testing.expectEqual(turn + 1, session.image_gallery.count());
+
+        // ── 매 턴 불변식을 짚는다.
+        try std.testing.expectEqual(
+            session.image_gallery.hits.items.len,
+            session.image_gallery.labels.items.len,
+        );
+        for (session.image_gallery.tiles.items) |tile| {
+            try std.testing.expect(tile.hit_index < session.image_gallery.count());
+        }
+        const l = image_gallery_ops.gridLayout(session);
+        try std.testing.expect(session.image_gallery.scroll.offset_y_px <= l.max_scroll);
+    }
+}

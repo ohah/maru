@@ -18,7 +18,8 @@ test "U5 upgrade result stays typed through connect and one-shot AppSession noti
 
     try std.testing.expectEqual(@as(usize, 1), count(connect, "pub const UpgradeNotice = union(enum)"));
     try std.testing.expectEqual(@as(usize, 1), count(connect, "pub const DetailedOutcome = struct"));
-    try std.testing.expectEqual(@as(usize, 1), count(connect, "upgrade_notice: ?UpgradeNotice"));
+    // One field in DetailedOutcome and one local accumulator in connect-or-launch.
+    try std.testing.expectEqual(@as(usize, 2), count(connect, "upgrade_notice: ?UpgradeNotice"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "session_host_upgrade_notice_pending: ?"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "fn showPendingSessionHostUpgradeNotice("));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "self.showPendingSessionHostUpgradeNotice();"));

@@ -187,6 +187,7 @@ const Table = struct {
 
     // ── 분기·보간형 notice (I3a 슬라이스 4) ──
     app_host_connect_failed: [:0]const u8,
+    app_session_host_upgrade_result: [:0]const u8,
     app_agent_hook_trust_stale: [:0]const u8,
     app_agent_hook_trust_refreshed: [:0]const u8,
     app_agent_hook_trust_diverged: [:0]const u8,
@@ -916,6 +917,7 @@ const en: Table = .{
     .term_remote_clipboard_too_large = "The remote session's clipboard copy was too large to deliver (about {0}KB max).",
 
     .app_host_connect_failed = "Could not connect to the persistent session host ({0}). Terminals in this session will not persist (they close with the app).",
+    .app_session_host_upgrade_result = "Persistent session host update result: {0}",
     .app_agent_hook_trust_diverged = "Codex stores a different approval value than maru computes for {0} of its hooks. If you approved them in codex, they are running and this needs nothing. Otherwise start codex once and check whether it still asks to review hooks.",
     .app_agent_hook_trust_refreshed = "Refreshed the codex approval for {0} of maru's hooks, which had gone stale. They run again the next time codex starts.",
     .app_agent_hook_trust_stale = "Codex has not approved {0} of maru's hooks, so they will not run — agent status falls back to reading the screen. Start codex once and choose \"Trust all and continue\".",
@@ -1495,6 +1497,7 @@ const ko: Table = .{
     .term_remote_clipboard_too_large = "원격 세션의 클립보드 복사가 너무 커서 전달되지 않았습니다(최대 약 {0}KB).",
 
     .app_host_connect_failed = "영속 세션 host에 연결하지 못했습니다({0}). 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).",
+    .app_session_host_upgrade_result = "영속 세션 host 업데이트 결과: {0}",
     .app_agent_hook_trust_diverged = "codex에 저장된 승인 값이 maru가 계산한 값과 다릅니다(훅 {0}개). codex에서 승인하셨다면 정상 동작 중이며 하실 일이 없습니다. 그게 아니라면 codex를 한 번 실행해 훅 검토를 다시 묻는지 확인하세요.",
     .app_agent_hook_trust_refreshed = "낡아 있던 maru 훅 {0}개의 codex 승인을 갱신했습니다. 다음 codex 실행부터 다시 동작합니다.",
     .app_agent_hook_trust_stale = "codex가 maru 훅 {0}개를 승인하지 않아 실행되지 않습니다 — 에이전트 상태를 화면 관측으로 대신합니다. codex를 한 번 실행해 \"Trust all and continue\"를 고르세요.",

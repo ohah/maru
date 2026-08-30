@@ -607,11 +607,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 - 앱 재실행 connect 경로가 upgrade 가능/호환 attach/upgrade busy/legacy 불가를 구분해 notice와 구조화 로그를 남긴다.
 - signed app update 전후 E2E와 soak가 통과한 뒤에만 자동 upgrade를 기본 활성화한다.
 - **구현된 opt-in signed 성공 gate:** 아래 명령은 개발 fixture가 아니라 명시적으로 전달한 두 제품 executable의
-  strict code signature와 exact designated requirement를 먼저 대조한다. N-1 daemon에 실제 `/bin/cat` runtime을
+  strict code signature와 exact designated requirement를 먼저 대조한다. N-1 daemon에 종료 marker를 읽는 실제 PTY shell runtime을
   spawn/attach해 화면 marker를 확인하고 attachment를 0으로 만든 뒤 `host.upgrade.prepare`를 보낸다. 재접속 뒤에는
   Unix peer PID, direct PTY child PID, `host_id`, `runtime_id`가 전부 같고 epoch/build가 current로 전진했는지,
   pre-upgrade 화면과 post-upgrade child output이 모두 보이는지, status가 `committed/none`이고 다음 upgrade
-  capability도 유지되는지 단언한다. Harness 자체의 서로 다른 SHA/signature 확인만으로 두 입력이 실제 frozen
+  capability도 유지되는지 단언한다. 마지막에는 PTY 입력으로 child를 종료하고 typed inventory 연속 부재와 direct-child
+  부재를 함께 확인한다. Harness 자체의 서로 다른 SHA/signature 확인만으로 두 입력이 실제 frozen
   N-1/current release이고 방향·인접성이 맞다는 provenance를 증명할 수는 없다.
 
   ```sh

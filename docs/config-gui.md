@@ -94,7 +94,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 | `keybind` | `command_catalog` 행 목록 + **인라인 키 캡처(recorder)** — 카탈로그가 단일 출처라 행은 공짜 |
 | `shell.args` | 토큰 리스트(공백 분리/조립) |
 | `theme.preset` | 프리셋 드롭다운(개별 색 위에 base) |
-| `theme.syntax.<역할>` | 11칸 색 행(color input 재사용) — **다음 슬라이스**. 프리셋 활성 시 잠그는지는 그때 정한다(`detectThemePreset`은 이 색을 안 보므로 자동으로 안 잠긴다) |
+| `theme.syntax.<역할>` | **라벨 있는 색 행 열하나**(color input 재사용). 그리드 한 행이 아닌 이유는 **검색**이다 — 그리드면 `keyword` 를 검색해도 안 걸린다(팔레트는 0~15 라 번호로 찾지만 역할은 이름으로 찾는다). **프리셋 활성이면 잠근다**(팔레트·주 색과 같은 규율 — 구문 색은 팔레트에서 파생하므로 프리셋이 정하는 것과 같다. 행을 편집하면 "사용자 지정" 으로 자동 전환된다). **되돌리기는 줄을 지운다**(`removeConfigLines`) — 슬롯만 비우면 파일에 남아 다음 로드에 되살아난다 |
 | `window.padding-x/y` | (alias라 GUI는 4방 개별만 노출, x/y는 숨김) |
 
 ## 6. 재사용 가능한 chrome 패턴 vs 신규

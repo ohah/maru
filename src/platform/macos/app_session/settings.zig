@@ -489,6 +489,32 @@ pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrom
         rows[i] = .{ .label = try settingsRowLabel(arena, cross, c.section, if (c.doc.len > 0) c.doc else c.key), .kind = .{ .color = .{ .hex = c.value, .rgb = rgb } }, .disabled = preset_active, .is_default = is_def };
         i += 1;
     }
+    // 구문 색 역할 행(§9.0). **효과색을 보여 준다** — override 가 있으면 그 색, 없으면 팔레트에서
+    // 파생한 색이다(그래야 스와치가 화면에 실제로 뜨는 색과 같다). `is_default` 는 override 가
+    // 없을 때 참이므로, 안 정한 역할에는 ↺ 가 안 뜬다.
+    if (cf.syntax_roles > 0) {
+        const derived = maru.session.syntax_theme.fromTheme(self.appearance.theme);
+        inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
+            const role: config_mod.theme.SyntaxRole = @enumFromInt(f.value);
+            const label_text = maru.session.syntax_theme.roleLabel(role);
+            // **마스크가 정본이다** — 여기서 검색 일치를 다시 계산하면 `keyAtRow`·핸들러와 갈릴 수 있다.
+            if (cf.syntax_mask & (@as(u32, 1) << @intCast(f.value)) != 0) {
+                const override = self.loaded_config.config.theme.syntax[f.value];
+                const rgb = if (override) |hex|
+                    (config_mod.appearance.parseHexColor(hex) catch maru.session.syntax_theme.colorFor(derived, role))
+                else
+                    maru.session.syntax_theme.colorFor(derived, role);
+                const hex_text = try rgbToHex(arena, rgb);
+                rows[i] = .{
+                    .label = try settingsRowLabel(arena, cross, .theme, label_text),
+                    .kind = .{ .color = .{ .hex = hex_text, .rgb = rgb } },
+                    .is_default = override == null,
+                    .disabled = preset_active,
+                };
+                i += 1;
+            }
+        }
+    }
     if (cf.has_palette) {
         // ANSI 16색 팔레트 그리드(theme.palette.0~15). 각 셀의 효과색 = config override 있으면 그 hex, 없으면 표준
         // xterm256 기본(index<16=ansi16). hex는 편집 시드용(override는 그대로, 기본은 RGB→#rrggbb 포맷). 선택 셀은
@@ -748,6 +774,19 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
         }
         return;
     }
+    if (syntaxRoleAt(cf, sel)) |role| {
+        // 색 행과 같은 규율: 프리셋 잠금이면 "사용자 지정" 으로 전환한 뒤 편집한다.
+        if (self.themePresetActive()) self.theme_user_custom = true;
+        const derived = maru.session.syntax_theme.fromTheme(self.appearance.theme);
+        const cur = self.loaded_config.config.theme.syntax[@intFromEnum(role)];
+        const rgb = if (cur) |hex|
+            (config_mod.appearance.parseHexColor(hex) catch maru.session.syntax_theme.colorFor(derived, role))
+        else
+            maru.session.syntax_theme.colorFor(derived, role);
+        self.chrome_host.settings.openPicker(rgb);
+        self.metal_dirty = true;
+        return;
+    }
     if (cf.paletteRowIndex()) |pi| if (sel == pi) {
         // 팔레트 그리드 행 — Enter/Space = 선택 셀 hex 인라인 편집 시작(현재 효과색 시드). 커밋은 commitSelectedText.
         if (self.themePresetActive()) self.theme_user_custom = true; // 프리셋 잠금이면 사용자 지정으로 전환 후 편집
@@ -855,6 +894,22 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
     const after_texts = after_enums + cf.texts.len;
     if (sel >= after_enums and sel < after_texts) {
         resetSelectedTextRow(self, cf.texts[sel - after_enums], defaults);
+        return;
+    }
+    // 구문 색 행 되돌리기 — **파생으로 되돌린다**(기본값이 따로 없다. `null` 이 곧 "팔레트에서 판다").
+    //
+    // **줄을 지우는 것이 핵심이다.** 슬롯만 비우면 직렬화가 그 키를 안 쓸 뿐 **파일에 있던 줄은
+    // 그대로 남아** 다음 로드에 되살아난다(적대적 검증 2회차에서 확인한 자리). `markConfigKeyRemoved`
+    // 가 `removeConfigLines` 로 그 줄을 지운다 — 팔레트 셀 되돌리기가 같은 규율을 쓴다.
+    if (syntaxRoleAt(cf, sel)) |role| {
+        if (self.themePresetActive()) return; // 잠금 행은 ↺가 안 뜨므로 Backspace로도 금지(위 색 행과 같다)
+        const idx = @intFromEnum(role);
+        if (self.loaded_config.config.theme.syntax[idx] != null) {
+            self.loaded_config.config.theme.syntax[idx] = null;
+            reapplyLoadedConfig(self);
+            markConfigKeyRemoved(self, syntaxRoleKeyOf(role));
+            self.metal_dirty = true;
+        }
         return;
     }
     const after_colors = after_texts + cf.colors.len;
@@ -2184,6 +2239,15 @@ fn keyAtRow(cf: SettingsSectionFields, i: usize, buf: []u8) ?[]const u8 {
     n -= cf.texts.len;
     if (n < cf.colors.len) return cf.colors[n].key;
     n -= cf.colors.len;
+    // 구문 색 행 — **행 순서와 같은 순회**로 역할을 찾는다(검색으로 걸러진 것만 센다). 이 가지가 없으면
+    // 행은 `total()` 에 잡히는데 키가 없어, 행을 훑는 쪽이 `null` 을 받고 죽는다(실측으로 그랬다).
+    if (cf.syntax_roles > 0) {
+        if (n < cf.syntax_roles) {
+            const ri = cf.syntaxRoleIndexAt(n) orelse return null;
+            return syntaxRoleKeyOf(@enumFromInt(ri));
+        }
+        n -= cf.syntax_roles;
+    }
     if (cf.has_palette) {
         if (n == 0) return synthKey(buf, palette_row_key, "");
         n -= 1;
@@ -2750,13 +2814,26 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
         for (command_catalog.entries) |entry| if (settingsRowMatches(null, entry.title, entry.key, q)) try keybinds.append(arena, entry);
     }
     const palette_on = (cross or sel_sec == .theme) and settingsRowMatches(.set_ansi_palette, "", "theme.palette", q);
+    // 구문 색 역할 행 — theme 섹션이고 검색에 걸린 것만 센다. **검색이 역할 이름으로 걸린다**
+    // (`keyword`·`string` — 그것이 행을 그리드가 아니라 열하나로 둔 이유다).
+    var syntax_rows: usize = 0;
+    var syntax_mask: u32 = 0;
+    if (cross or sel_sec == .theme) {
+        inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
+            const role: config_mod.theme.SyntaxRole = @enumFromInt(f.value);
+            if (settingsRowMatches(.set_syntax_color, maru.session.syntax_theme.roleLabel(role), comptime config_mod.theme.syntaxRoleKey(role), q)) {
+                syntax_rows += 1;
+                syntax_mask |= @as(u32, 1) << @intCast(f.value);
+            }
+        }
+    }
     // `.global_hotkey` 섹션엔 전역(OS) 단축키 녹음 행(GlobalEntry별 한 행 — schema 필드 아님, keybind 특수 행 선례).
     // 검색 쿼리로도 필터(매칭 액션만). 핸들러가 selected>=globalKeybindRowStart면 global_entries로 라우팅.
     var globals: std.ArrayList(command_catalog.GlobalEntry) = .empty;
     if (cross or sel_sec == .global_hotkey) {
         for (command_catalog.global_entries) |entry| if (settingsRowMatches(entry.title_key, "", entry.key, q)) try globals.append(arena, entry);
     }
-    return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .keybind_entries = keybinds.items, .global_entries = globals.items };
+    return .{ .bools = bools.items, .nums = nums.items, .enums = enums.items, .texts = texts.items, .colors = colors.items, .has_palette = palette_on, .syntax_roles = syntax_rows, .syntax_mask = syntax_mask, .keybind_entries = keybinds.items, .global_entries = globals.items };
 }
 
 /// 드롭다운 팝업의 **선택 행 변형을 절대 인덱스(idx)로 config에 set + 라이브 적용**한다(팝업은 안 닫음). enum=setEnumIndex,
@@ -2917,6 +2994,23 @@ pub fn commitSelectedText(self: *AppSession) void {
 /// HSV picker 확정(Enter → settings_color_picked) — settings.pickerRgb()를 #rrggbb로 직렬화해 선택 color 행 키에
 /// setText로 적용(commitSelectedText의 color 분기와 같은 인덱스 매핑·setter). 라이브 재resolve + write-back 예약 후
 /// picker 닫기. hex 문자열은 loaded_config.arena 소유(라이브/직렬화가 계속 읽는다). picker 외 행이면 무동작.
+/// 역할 → config 키. `syntaxRoleKey` 는 `comptime role` 을 받으므로 런타임 값에서 쓰려면 이 다리가
+/// 필요하다 — 문자열은 여전히 그 함수 하나에서 나온다(두 곳에 적지 않는다).
+fn syntaxRoleKeyOf(role: config_mod.theme.SyntaxRole) []const u8 {
+    return switch (role) {
+        inline else => |r| comptime config_mod.theme.syntaxRoleKey(r),
+    };
+}
+
+/// 선택 인덱스가 **구문 색 행**이면 그 역할을 돌려준다. 세 핸들러(열기·커밋·되돌리기)가 같은 함수를
+/// 써야 인덱싱이 갈리지 않는다 — 색 행이 검색으로 걸러지므로 **보이는 행만 세어** 순서를 맞춘다.
+fn syntaxRoleAt(cf: anytype, sel: usize) ?config_mod.theme.SyntaxRole {
+    const start = cf.syntaxRowStart() orelse return null;
+    if (sel < start or sel >= start + cf.syntax_roles) return null;
+    const ri = cf.syntaxRoleIndexAt(sel - start) orelse return null;
+    return @enumFromInt(ri);
+}
+
 pub fn commitPickerColor(self: *AppSession) void {
     defer self.chrome_host.settings.closePicker(); // 성공/실패 무관 picker 종료(폼 복귀)
     var scratch = std.heap.ArenaAllocator.init(self.allocator);
@@ -2927,6 +3021,16 @@ pub fn commitPickerColor(self: *AppSession) void {
     const after_colors = after_texts + cf.colors.len;
     // sel<after_texts면 다음 줄 `sel - after_texts`가 usize 언더플로(panic)라 그 범위 가드는 필수다(방어가 아니라
     // 언더플로 안전). picker는 color 행에서만 열리므로 sel은 [after_texts, after_colors)이지만, 호출 계약을 코드로 못박는다.
+    // 구문 색 행에서 열린 picker — schema 키가 아니라 `theme.syntax[role]` 슬롯에 담는다.
+    if (syntaxRoleAt(cf, sel)) |role| {
+        const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;
+        self.loaded_config.config.theme.syntax[@intFromEnum(role)] = hex;
+        // 키는 `syntaxRoleKey` 단일 출처다 — 손으로 적으면 로더와 갈린다.
+        markConfigKeyDirty(self, syntaxRoleKeyOf(role));
+        reapplyLoadedConfig(self);
+        self.metal_dirty = true;
+        return;
+    }
     if (sel < after_texts or sel >= after_colors) return;
     const ci = sel - after_texts;
     if (ci >= cf.colors.len) return;

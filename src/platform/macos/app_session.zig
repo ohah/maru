@@ -9850,6 +9850,18 @@ pub const AppSession = struct {
         /// theme 섹션이면 ANSI 16색 팔레트 그리드 한 행을 color 뒤(마지막)에 추가한다(theme.palette.0~15 — 특수 키, schema
         /// 필드 아님). 핸들러가 selected==after_colors면 팔레트 행으로 라우팅한다.
         has_palette: bool = false,
+        /// theme 섹션이면 **구문 색 역할 행 열하나**를 color 뒤·palette 앞에 둔다(`theme.syntax.<역할>` —
+        /// nullable 색이라 schema 필드가 아니다. `cursor.color` 와 같은 처지다).
+        ///
+        /// **그리드 한 행이 아니라 행 열하나인 이유**: 설정 화면에 검색이 있고(키·doc 필터) 그리드로
+        /// 두면 `keyword` 를 검색해도 안 걸린다. 팔레트는 0~15 라 번호로 찾지만 역할은 이름으로 찾는다.
+        syntax_roles: usize = 0,
+        /// 필터를 통과한 역할의 **비트마스크**(역할 열거 인덱스). `syntax_roles` 는 그 인구수다.
+        ///
+        /// **마스크를 들고 다니는 이유**: 행 만들기·키 조회·세 핸들러가 각자 검색 일치를 다시 계산하면
+        /// 그 넷이 갈릴 수 있다(그리고 `keyAtRow` 는 애초에 검색어를 못 본다). 한 번 정한 집합을
+        /// 그대로 넘긴다.
+        syntax_mask: u32 = 0,
         /// input 섹션이면 command_catalog 액션의 keybind 행을 schema 필드 뒤에 둔다(단축키 재바인딩 — 특수, schema 필드
         /// 아님). **검색 쿼리로 필터된 부분집합**이라 목록으로 보관한다(필터 후 인덱스가 view·핸들러에서 일관). palette와
         /// 배타(다른 섹션). 핸들러가 selected>=keybindRowStart면 keybind_entries[selected-start]로 라우팅.
@@ -9857,24 +9869,44 @@ pub const AppSession = struct {
         /// `.global_hotkey` 섹션이면 전역(OS) 단축키 녹음 행을 맨 끝에 둔다(전역 액션별 한 행 — keybind_entries와 평행하되
         /// GlobalEntry라 별도 풀). 핸들러가 selected>=globalKeybindRowStart면 global_entries[selected-start]로 라우팅.
         global_entries: []const command_catalog.GlobalEntry = &.{},
+        /// 마스크에서 `n` 번째로 켜진 역할의 열거 인덱스. 없으면 null.
+        pub fn syntaxRoleIndexAt(self: SettingsSectionFields, n: usize) ?u5 {
+            var seen: usize = 0;
+            var bit: u5 = 0;
+            while (bit < 31) : (bit += 1) {
+                if (self.syntax_mask & (@as(u32, 1) << bit) != 0) {
+                    if (seen == n) return bit;
+                    seen += 1;
+                }
+            }
+            return null;
+        }
         fn nonSpecialTotal(self: SettingsSectionFields) usize {
             return self.bools.len + self.nums.len + self.enums.len + self.texts.len + self.colors.len;
         }
+        /// 구문 색 행들의 첫 selected 인덱스(있으면 color 바로 뒤). 없으면 null.
+        pub fn syntaxRowStart(self: SettingsSectionFields) ?usize {
+            return if (self.syntax_roles > 0) self.nonSpecialTotal() else null;
+        }
+        /// 구문 색 행까지 포함한 오프셋 — palette·keybind 가 그 뒤에 선다.
+        fn afterSyntax(self: SettingsSectionFields) usize {
+            return self.nonSpecialTotal() + self.syntax_roles;
+        }
         pub fn total(self: SettingsSectionFields) usize {
-            return self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len + self.global_entries.len;
+            return self.afterSyntax() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len + self.global_entries.len;
         }
         /// 팔레트 그리드 행의 selected 인덱스(있으면 항상 마지막 = 다른 필드 다음). 없으면 null.
         pub fn paletteRowIndex(self: SettingsSectionFields) ?usize {
-            return if (self.has_palette) self.nonSpecialTotal() else null;
+            return if (self.has_palette) self.afterSyntax() else null;
         }
         /// keybind 행들의 첫 selected 인덱스(있으면 schema 필드 + palette 다음). 교차 섹션 검색에선 palette(theme)와
         /// keybind(input)가 같이 나올 수 있어 palette 한 행을 오프셋에 더한다(없으면 0). 없으면 null.
         pub fn keybindRowStart(self: SettingsSectionFields) ?usize {
-            return if (self.keybind_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) else null;
+            return if (self.keybind_entries.len > 0) self.afterSyntax() + @as(usize, if (self.has_palette) 1 else 0) else null;
         }
         /// 전역 단축키 행들의 첫 selected 인덱스(있으면 항상 **맨 끝** = schema 필드 + palette + in-app keybind 다음). 없으면 null.
         pub fn globalKeybindRowStart(self: SettingsSectionFields) ?usize {
-            return if (self.global_entries.len > 0) self.nonSpecialTotal() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len else null;
+            return if (self.global_entries.len > 0) self.afterSyntax() + @as(usize, if (self.has_palette) 1 else 0) + self.keybind_entries.len else null;
         }
     };
 
@@ -54706,6 +54738,94 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     session.mouse(1, out_x, out_y, 0, 0);
     try std.testing.expect(!session.view_options_menu);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
+test "SYNSET1 설정 화면에 구문 색 행 열하나가 선다 — 검색으로도 걸린다" {
+    // `theme.syntax.<역할>` 은 **nullable 색이라 스키마 필드가 아니다** — 스키마-주도 폼이 자동으로
+    // 만들어 주지 않으므로 손으로 배선했고, 그 배선이 실제로 도는지 행 목록으로 잰다.
+    //
+    // **검색으로 걸리는지도 함께 본다.** 그것이 이 행들을 팔레트처럼 그리드 한 행이 아니라 **열하나**로
+    // 둔 이유다 — 그리드면 `keyword` 를 검색해도 안 걸린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
+    for (sections, 0..) |entry, index| if (entry.section == .theme) {
+        session.chrome_host.settings.section = index;
+    };
+
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
+    const role_count = @typeInfo(config_mod.theme.SyntaxRole).@"enum".fields.len;
+    try std.testing.expectEqual(role_count, cf.syntax_roles);
+    try std.testing.expect(cf.syntaxRowStart() != null);
+    // 팔레트 행은 구문 색 **뒤**에 선다 — 오프셋이 갈리면 클릭이 엉뚱한 행으로 간다.
+    if (cf.paletteRowIndex()) |pi| try std.testing.expect(pi >= cf.syntaxRowStart().? + role_count);
+
+    // 검색: 역할 이름으로 한 행만 남는다.
+    session.chrome_host.settings.startSearch();
+    for ("punctuation") |cp| session.chrome_host.settings.appendSearchCp(cp);
+    const filtered = try settings_ops.currentSectionFields(session, scratch.allocator());
+    try std.testing.expectEqual(@as(usize, 1), filtered.syntax_roles);
+}
+
+test "SYNSET2 구문 색 행을 되돌리면 파일 줄도 지운다 — 안 지우면 되살아난다" {
+    // **슬롯만 비우면 모자란다.** 직렬화가 그 키를 안 쓸 뿐 파일에 있던 줄은 남아 다음 로드에
+    // 되살아난다. `markConfigKeyRemoved` 가 `removeConfigLines` 로 그 줄을 지우는지 값으로 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try settings_ops.buildSectionList(session, scratch.allocator());
+    for (sections, 0..) |entry, index| if (entry.section == .theme) {
+        session.chrome_host.settings.section = index;
+    };
+
+    // **프리셋 잠금을 먼저 푼다.** 기본 config 는 `maru` 프리셋과 색이 같아 `themePresetActive()` 가
+    // 참이고, 그 상태에서는 색 행이 잠겨 되돌리기가 막힌다(팔레트·주 색과 같은 규율). 사용자는 행을
+    // 편집하는 순간 자동으로 "사용자 지정" 으로 전환되므로, 판정자도 그 상태에서 시작한다.
+    session.theme_user_custom = true;
+
+    // 값을 넣고(파일에 줄이 생긴 상태를 흉내) 그 행을 고른다.
+    const idx = @intFromEnum(config_mod.theme.SyntaxRole.keyword);
+    session.loaded_config.config.theme.syntax[idx] = "#c678dd";
+    const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
+    const start = cf.syntaxRowStart() orelse return error.NoSyntaxRows;
+    session.chrome_host.settings.selected = start; // 첫 역할 = keyword
+
+    settings_ops.resetSelectedSettingRow(session);
+    try std.testing.expect(session.loaded_config.config.theme.syntax[idx] == null);
+
+    var removed = false;
+    for (session.config_removed_keys.items) |k| {
+        if (std.mem.eql(u8, k, "theme.syntax.keyword")) removed = true;
+    }
+    if (!removed) {
+        std.debug.print("되돌렸는데 줄 삭제가 예약되지 않았다 — 다음 로드에 되살아난다\n", .{});
+        try std.testing.expect(false);
+    }
 }
 
 test "settings exposes chrome.tab-style and no removed chrome key comes back" {

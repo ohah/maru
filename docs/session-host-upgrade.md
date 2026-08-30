@@ -10,7 +10,7 @@
 > caller가 frozen N-1/current라고 증명한 signed executable의 non-empty PTY 성공 경로를 실행할 opt-in E2E
 > 하네스는 구현했지만, 저장소에는
 > 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 최대치 근처 multi-runtime 제품 restore,
-> 실제 제품 rollback activation, 전 구간 failure injection, 업그레이드 결과 notice와 soak gate도 열려 있으므로
+> non-empty PTY rollback activation, 전 구간 failure injection, 업그레이드 결과 notice와 soak gate도 열려 있으므로
 > U5 완료는 주장하지 않는다.**
 > **앱 재실행 orchestration은 연결됐다** — GUI는 시작할 때 같은 build의 host가 없으면, build_id만 다른 살아 있는
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
@@ -874,9 +874,12 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   child/runtime ID와 pre/post I/O를 같은 방식으로 단언한다. 이 test-only 수명 제어와 marker 환경은 launcher가
   일반 detached product launch 전에 지우는 목록에 계속 포함하고, fixture가 직접 fork/exec한 owner-only 임시
   session/socket root에서만 허용한다. 따라서 ambient environment만으로 실제 사용자 daemon을 oneshot으로 만들거나
-  성공 marker를 위조할 수 없어야 한다.
+  성공 marker를 위조할 수 없어야 한다. zero-runtime gate는 `test-session-host-upgrade-product-rollback`에서
+  canonical product rollback exec 뒤 동일 peer PID의 실제 client handshake, old build/epoch, `rolled_back/restore_failed`,
+  upgrade capability와 exact empty inventory를 자동 검증한다. 따라서 zero-runtime의 실제 제품 rollback activation과
+  listener 재접속은 구현·실행됐으며, non-empty PTY 보존은 아래 남은 gate로 구분한다.
 - **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
-  N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 실제 제품 rollback activation, 1개·최대치 근처
+  N-1/current artifact를 사용한 위 성공 gate의 실제 통과, non-empty PTY rollback activation, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
   failure injection, 장시간 soak와 **업그레이드 결과 notice**가 남아 있다(자동 orchestration 자체는 GUI의
   connect 경로에 연결됐다 — 위 상태 블록). macOS 공개 API에는 fd-based

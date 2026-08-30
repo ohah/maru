@@ -5011,14 +5011,40 @@ test "P4 E2c observation materialization follows runtime source changes at 1 10 
         }
         mgr.fixtureEnableObservationPerformanceEvidence();
 
-        // Two product consumers in one sweep and the next idle sweep must still materialize once
-        // per runtime, not once per subscriber or once per cadence tick.
+        // **첫 훑기는 runtime 당 정확히 한 번이다** — 캐시가 비어 있으므로 source 상태와 무관하게
+        // refresh 한다. 이 단언만이 spawn 직후에도 결정적이다.
+        var settle_epoch: u64 = 1;
+        for (runtime_ids[0..runtime_count]) |rid|
+            _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = settle_epoch });
+        try std.testing.expectEqual(@as(u64, @intCast(runtime_count)), mgr.fixtureObservationMaterializations());
+
+        // **그 다음 판정은 source 가 가라앉은 뒤라야 한다.** 갓 spawn 한 `/bin/cat` 은 exec 를 마칠
+        // 때까지 foreground pgid·cwd·title generation 이 아직 움직이고, 그 움직임이 `source_changed`
+        // 를 참으로 만들어 **두 번째·세 번째 호출도 materialize 한다**. 그것은 캐시 결함이 아니라
+        // 아직 안 정해진 것을 잰 것이다 — 실측으로 100 을 기대한 자리에 101·102·103 이 나왔고
+        // (세 세션이 각자 겪었다), 러너가 느릴수록 잦았다.
+        //
+        // **기다리지 않고 «가라앉았음» 을 확인한다.** 한 훑기가 아무것도 materialize 하지 않으면
+        // 그 순간 모든 runtime 의 source 가 캐시와 같다는 뜻이다. 시간을 재는 대신 그 사실을 본다.
+        const settle_pass_max = 16;
+        while (settle_epoch < settle_pass_max) {
+            settle_epoch += 1;
+            mgr.fixtureEnableObservationPerformanceEvidence(); // 카운터 0 — 이 훑기만 센다
+            for (runtime_ids[0..runtime_count]) |rid|
+                _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = settle_epoch });
+            if (mgr.fixtureObservationMaterializations() == 0) break;
+        } else return error.TestUnexpectedResult; // 열여섯 번을 훑어도 안 가라앉으면 그건 결함이다
+
+        mgr.fixtureEnableObservationPerformanceEvidence(); // 여기서부터가 판정 창이다
+
+        // **구독자 수도 cadence tick 수도 materialize 를 안 늘린다**(이 테스트의 주제). 같은 epoch 를
+        // 두 번, 그리고 다음 epoch 를 한 번 물어도 캐시가 답해야 한다.
         for (runtime_ids[0..runtime_count]) |rid| {
             _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });
             _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });
             _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 101 });
         }
-        try std.testing.expectEqual(@as(u64, @intCast(runtime_count)), mgr.fixtureObservationMaterializations());
+        try std.testing.expectEqual(@as(u64, 0), mgr.fixtureObservationMaterializations());
 
         // Exactly one changed runtime adds exactly one materialization on the following sweep.
         const changed_handle = mgr.handleFor(runtime_ids[runtime_count - 1]) orelse
@@ -5033,15 +5059,16 @@ test "P4 E2c observation materialization follows runtime source changes at 1 10 
         changed_surface.unlockCore(std.testing.io);
         for (runtime_ids[0..runtime_count]) |rid|
             _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 102 });
-        try std.testing.expectEqual(
-            @as(u64, @intCast(runtime_count + 1)),
-            mgr.fixtureObservationMaterializations(),
-        );
+        // **바뀐 하나만 늘어난다.** 판정 창이 위에서 0 이었으므로 이 값이 곧 «그 훑기가 만든 것» 이다.
+        try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
         const evidence = mgr.fixtureObservationPerformanceEvidence();
-        try std.testing.expectEqual(
-            @as(u64, @intCast(3 * (runtime_count + 1))),
-            evidence.core_lock_acquisitions,
-        );
+        // **코어 잠금은 materialize 한 번당 셋이고, 캐시가 답한 호출은 아예 안 잡는다.**
+        // 판정 창의 materialize 는 하나(바뀐 runtime)이므로 셋이고, **규모와 무관하다** — 1·10·100
+        // 어디서나 3 이다. 그것이 이 게이트의 요점이다: 구독자와 tick 이 늘어도 코어를 더 잠그지 않는다.
+        //
+        // 옛 단언 `3 × (N + 1)` 이 바로 이 곱이었다(첫 훑기의 N 번 + 바뀐 하나). 판정 창을 첫 훑기
+        // 뒤로 옮기면서 그 N 이 빠졌다. 실측으로 확인했다 — 규모 1 과 10 에서 둘 다 3 이다.
+        try std.testing.expectEqual(@as(u64, 3), evidence.core_lock_acquisitions);
         try std.testing.expect(evidence.core_lock_hold_total_ns >= evidence.core_lock_hold_max_ns);
 
         while (spawned != 0) {

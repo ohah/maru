@@ -6771,6 +6771,14 @@ binary의 실제 실행은 이 불변식을 만족할 수 없으므로 일반 `t
 단위·wire fixture 검증과 구분해 보고한다. 테스트 성공을 위해 실제 앱의 manifest·socket·host process를 잠시라도
 빌리거나, 실행 전후 snapshot 복원으로 공유 namespace 변경을 정당화하지 않는다.
 
+같은 불변식은 앱의 재접속 열쇠인 workspace checkpoint에도 적용한다. 공용 test runner는
+`CFFIXED_USER_HOME`을 부모 값과 무관하게 같은 PID별 격리 home으로 덮어써, 테스트가 띄운 실제
+`maru-macos-app`이 사용자의 `~/Library/Application Support/maru/workspace.v1`을 읽거나 교체하지 못하게 한다.
+session-host root만 옮기고 workspace home을 그대로 두면 테스트 host 자체는 격리되어도 자식 앱 종료 시 그 격리
+host의 handle 하나가 실제 checkpoint 전체를 대체해, 살아 있는 제품 host/runtime의 재접속 정보가 사라진다.
+격리 home 주입에 실패해도 테스트를 시작하지 않는다. 셸의 `HOME`은 PTY·shell 동작 fixture의 입력일 수 있으므로
+공용 runner가 바꾸지 않으며, 제품 앱의 Application Support 저장 위치만 `CFFIXED_USER_HOME`으로 분리한다.
+
 Unix socket은 macOS `sockaddr_un.sun_path`의
 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
 `/tmp/maru-<uid>/sh/<32-hex-host_id>.sock`으로 고정하고, per-UID directory를 mode `0700`으로 생성하기 전에 `lstat`으로

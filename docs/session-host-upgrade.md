@@ -870,14 +870,22 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   검증자는 activation marker나 socket pathname 존재만으로 성공을 판정하지 않는다. 실제 MRSH client로 재접속해
   peer PID와 `host.info`의 host/build/epoch, `host.upgrade.status`의 `rolled_back/restore_failed`, upgrade capability,
   `runtime.list`의 exact restored set을 읽은 뒤 연결을 정상 종료한다. 그 client가 빠진 뒤에만 bounded oneshot
-  daemon 종료를 허용하며 child를 reap한다. zero-runtime 첫 gate는 exact empty list를, 후속 non-empty gate는 PTY
-  child/runtime ID와 pre/post I/O를 같은 방식으로 단언한다. 이 test-only 수명 제어와 marker 환경은 launcher가
+  daemon 종료를 허용하며 child를 reap한다. zero-runtime 첫 gate는 exact empty list를 단언한다.
+- **non-empty PTY rollback 종료 gate:** test runner가 PTY를 만든 뒤 다른 process에 fd만 넘기지 않는다. rollback과
+  같은 PID가 될 supervised source-host process가 production `RuntimeManager`로 실제 PTY child를 spawn하고 quiesce·
+  capture한다. target primary를 preflight 뒤 손상시켜 canonical product rollback을 실행한 다음, 검증자는 같은
+  peer PID와 old build/epoch·`rolled_back/restore_failed`, exact runtime ID 하나를 확인한다. PTY child PID는 rollback
+  host의 실제 direct child로 남아야 하며, attach snapshot에는 rollback 전 marker가 있어야 하고 새 input marker도
+  같은 runtime에서 출력돼야 한다. 마지막에는 shell을 known exit status로 끝내고 host가 child를 reap해 runtime
+  inventory에서 정확히 한 번 제거한 뒤에만 client/oneshot daemon을 종료한다. 단순 codec round-trip, parent가 test
+  runner인 inherited PTY, 화면 marker만 보이는 fixture는 이 gate의 증거가 아니다.
+  이 test-only 수명 제어와 marker 환경은 launcher가
   일반 detached product launch 전에 지우는 목록에 계속 포함하고, fixture가 직접 fork/exec한 owner-only 임시
   session/socket root에서만 허용한다. 따라서 ambient environment만으로 실제 사용자 daemon을 oneshot으로 만들거나
   성공 marker를 위조할 수 없어야 한다. zero-runtime gate는 `test-session-host-upgrade-product-rollback`에서
   canonical product rollback exec 뒤 동일 peer PID의 실제 client handshake, old build/epoch, `rolled_back/restore_failed`,
   upgrade capability와 exact empty inventory를 자동 검증한다. 따라서 zero-runtime의 실제 제품 rollback activation과
-  listener 재접속은 구현·실행됐으며, non-empty PTY 보존은 아래 남은 gate로 구분한다.
+  listener 재접속은 구현·실행됐으며, 위 non-empty PTY 보존은 아래 남은 gate로 구분한다.
 - **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
   N-1/current artifact를 사용한 위 성공 gate의 실제 통과, non-empty PTY rollback activation, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간

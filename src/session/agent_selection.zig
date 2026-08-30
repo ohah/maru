@@ -72,6 +72,91 @@ pub fn build(sel: Selection, options: Options, out: []u8) ?[]const u8 {
     return writer.buffered();
 }
 
+// ── NS3: 후보와 경로 (docs/send-selection-to-agent.md §5) ──────────────────────────────────────
+
+/// 트리 루트 기준으로 경로를 접는다. **루트 밖이면 절대 경로 그대로**다.
+///
+/// **에이전트가 그 자리에서 열 수 있어야 한다**(§2). 에이전트 CLI 의 cwd 는 보통 저장소 루트라
+/// 상대 경로가 짧고 바로 열린다. 루트 밖 파일을 상대로 접으면 `../../..` 가 되어 오히려 못 연다 —
+/// 그때는 절대 경로가 맞다.
+///
+/// **접두 문자열 비교만으로 접으면 안 된다.** `/a/bc` 는 `/a/b` 로 시작하지만 그 안이 아니다.
+/// 경계에 `/` 가 오는지까지 봐야 한다(실제로 그 실수가 흔하다).
+pub fn relativePath(root: []const u8, path: []const u8) []const u8 {
+    if (root.len == 0 or path.len == 0) return path;
+    const trimmed = if (root.len > 1 and root[root.len - 1] == '/') root[0 .. root.len - 1] else root;
+    if (path.len <= trimmed.len) return path;
+    if (!std.mem.startsWith(u8, path, trimmed)) return path;
+    if (path[trimmed.len] != '/') return path; // `/a/bc` 는 `/a/b` 안이 아니다
+    const rest = path[trimmed.len + 1 ..];
+    return if (rest.len == 0) path else rest;
+}
+
+/// 후보 종류. **정렬 순서를 이 enum 이 든다** — 값이 작을수록 위다.
+///
+/// 에이전트를 먼저 올리는 이유는 §5 가 적었다. 일반 셸도 후보로 두는 이유도 거기 있다 —
+/// `tail -f` 를 보는 창에 보내고 싶을 수 있다.
+pub const CandidateKind = enum(u8) {
+    claude = 0,
+    codex = 1,
+    shell = 2,
+
+    /// 라벨 앞머리. 에이전트는 이름, 셸은 그 셸 이름을 호출자가 준다.
+    pub fn agentName(self: CandidateKind) ?[]const u8 {
+        return switch (self) {
+            .claude => "Claude",
+            .codex => "Codex",
+            .shell => null,
+        };
+    }
+};
+
+pub const Candidate = struct {
+    /// 앱 전역 surface id. 주입 대상은 **이 값으로만** 지정된다.
+    surface_id: u64,
+    kind: CandidateKind,
+    /// 화면 순서(0부터). **호출자가 준다** — 여기서 알 방법이 없다(pane 배치는 위층 것이다).
+    ///
+    /// **이것이 없으면 순서 계약을 잴 수 없다.** 처음에는 이 필드 없이 "안정 정렬이니 원래 순서가
+    /// 유지된다" 로 두었는데, 그 성질은 **판정자가 원리적으로 못 잰다** — `sortUnstable` 로 바꾼
+    /// 변이가 다섯·스물넷·512 개 입력에서 **전부 살아남았다**(pdqsort 가 이미 정렬된 입력을
+    /// 알아채 순서를 지켰다). 잴 수 없는 것에 기대는 계약은 계약이 아니라 우연이다.
+    order: u32 = 0,
+    /// 셸 이름(`zsh` 등). 에이전트면 안 쓴다 — 이름은 `kind` 가 든다.
+    shell_name: []const u8 = "",
+    /// 워크스페이스 이름(에이전트) 또는 폴더(셸).
+    where: []const u8 = "",
+    /// 저장소 브랜치. 없으면 라벨에서 괄호를 뺀다.
+    branch: ?[]const u8 = null,
+};
+
+/// 후보를 §5 순서로 **제자리 정렬**한다 — 에이전트 먼저, 그 안에서는 **화면 순서**(`order`).
+///
+/// **키가 둘이라 정렬의 안정성에 안 기댄다.** 그것이 이 설계의 요점이다 — 안정성은 판정자가
+/// 원리적으로 못 재는 성질이라(위 `order` 주석의 실측), 못 재는 것에 기대는 대신 **순서를 값으로**
+/// 받는다. 그러면 같은 입력이 언제나 같은 출력을 내고, 그 사실을 테스트가 잰다.
+pub fn orderCandidates(items: []Candidate) void {
+    std.mem.sort(Candidate, items, {}, struct {
+        fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+            if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+            return a.order < b.order;
+        }
+    }.lessThan);
+}
+
+/// 한 행의 라벨을 쓴다 — `Claude — maru (feat/rich)` · `zsh — ~/work/maru`.
+///
+/// **표기를 여기서 새로 정하지 않는다**(§5) — 폴더·브랜치 표기는 사이드바 에이전트 목록이 이미
+/// 쓰는 것과 같아야 한다. 같은 정보를 두 곳에서 다르게 부르면 사용자가 다른 것으로 읽는다.
+pub fn writeLabel(out: []u8, c: Candidate) ?[]const u8 {
+    var writer = std.Io.Writer.fixed(out);
+    const head = c.kind.agentName() orelse c.shell_name;
+    writer.writeAll(head) catch return null;
+    if (c.where.len > 0) writer.print(" — {s}", .{c.where}) catch return null;
+    if (c.branch) |b| if (b.len > 0) writer.print(" ({s})", .{b}) catch return null;
+    return writer.buffered();
+}
+
 const testing = std.testing;
 
 test "reference collapses a single-line range and keeps the closed interval otherwise" {
@@ -176,4 +261,103 @@ test "build fails closed when the buffer cannot hold the reference" {
         .{ .bracketed_paste = true },
         &tiny,
     ) == null);
+}
+
+// ── NS3 테스트 ────────────────────────────────────────────────────────────────────────────────
+
+test "경로는 루트 안일 때만 접힌다 — 이름이 겹치는 형제는 안 접힌다" {
+    // 접두 비교만 하면 `/a/bc` 가 `/a/b` 안으로 보인다. 경계의 `/` 까지 봐야 한다.
+    try testing.expectEqualStrings("src/main.zig", relativePath("/repo", "/repo/src/main.zig"));
+    try testing.expectEqualStrings("src/main.zig", relativePath("/repo/", "/repo/src/main.zig")); // 끝 슬래시 허용
+    try testing.expectEqualStrings("/repo-old/x.zig", relativePath("/repo", "/repo-old/x.zig")); // 형제
+    try testing.expectEqualStrings("/other/x.zig", relativePath("/repo", "/other/x.zig"));
+    // 루트 **자기 자신**은 접으면 빈 문자열이 되어 `@:12` 가 된다 — 그대로 둔다.
+    try testing.expectEqualStrings("/repo", relativePath("/repo", "/repo"));
+    // 루트를 모르면 손대지 않는다.
+    try testing.expectEqualStrings("/repo/x.zig", relativePath("", "/repo/x.zig"));
+}
+
+test "후보는 에이전트가 먼저이고, 같은 종류끼리는 화면 순서를 지킨다" {
+    // **입력을 일부러 흐트러 둔다.** 화면 순서대로 넣어 두면 아무것도 안 하는 구현도 통과한다 —
+    // 실제로 그렇게 썼다가 `sortUnstable` 변이가 다섯·스물넷·512 개에서 전부 살아남았다.
+    // 여기서는 `order` 가 입력 순서와 **반대**라, 종류별 tiebreak 을 빼면 곧바로 어긋난다.
+    var items = [_]Candidate{
+        .{ .surface_id = 10, .kind = .shell, .order = 5 },
+        .{ .surface_id = 11, .kind = .codex, .order = 4 },
+        .{ .surface_id = 12, .kind = .shell, .order = 3 },
+        .{ .surface_id = 13, .kind = .claude, .order = 2 },
+        .{ .surface_id = 14, .kind = .codex, .order = 1 },
+        .{ .surface_id = 15, .kind = .claude, .order = 0 },
+    };
+    orderCandidates(&items);
+
+    // claude(order 0,2) → codex(1,4) → shell(3,5).
+    const got = [_]u64{
+        items[0].surface_id, items[1].surface_id, items[2].surface_id,
+        items[3].surface_id, items[4].surface_id, items[5].surface_id,
+    };
+    try testing.expectEqualSlices(u64, &.{ 15, 13, 14, 11, 12, 10 }, &got);
+}
+
+test "같은 입력은 언제나 같은 순서를 낸다 — 정렬의 안정성에 안 기댄다" {
+    // 키가 (종류, 화면 순서) 둘이라 **전순서**다. 원소가 많고 같은 종류가 잔뜩이어도 답이 하나다.
+    const n = 512;
+    var a: [n]Candidate = undefined;
+    var b: [n]Candidate = undefined;
+    for (0..n) |i| {
+        const c: Candidate = .{
+            .surface_id = @intCast(1000 + i),
+            .kind = switch (i % 3) {
+                0 => .shell,
+                1 => .codex,
+                else => .claude,
+            },
+            .order = @intCast(n - i), // 입력 순서와 반대
+        };
+        a[i] = c;
+        b[n - 1 - i] = c; // 같은 집합, 뒤집어 넣는다
+    }
+    orderCandidates(&a);
+    orderCandidates(&b);
+    for (a, b) |x, y| try testing.expectEqual(x.surface_id, y.surface_id);
+
+    // 그리고 그 답이 §5 다 — 에이전트가 먼저, 그 안에서 화면 순서.
+    var prev_kind: ?CandidateKind = null;
+    var prev_order: u32 = 0;
+    for (a) |c| {
+        if (prev_kind) |pk| {
+            try testing.expect(@intFromEnum(pk) <= @intFromEnum(c.kind));
+            if (pk == c.kind) try testing.expect(c.order > prev_order);
+        }
+        prev_kind = c.kind;
+        prev_order = c.order;
+    }
+}
+
+test "라벨은 §5 모양이고, 없는 축은 자리도 안 만든다" {
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "Claude — maru (feat/rich)",
+        writeLabel(&buf, .{ .surface_id = 1, .kind = .claude, .where = "maru", .branch = "feat/rich" }).?,
+    );
+    // 브랜치가 없으면 **빈 괄호를 남기지 않는다** — `maru ()` 는 저장소가 아닌 것처럼 읽힌다.
+    try testing.expectEqualStrings(
+        "Codex — maru",
+        writeLabel(&buf, .{ .surface_id = 2, .kind = .codex, .where = "maru", .branch = null }).?,
+    );
+    try testing.expectEqualStrings(
+        "Codex — maru",
+        writeLabel(&buf, .{ .surface_id = 2, .kind = .codex, .where = "maru", .branch = "" }).?,
+    );
+    // 셸은 이름을 호출자가 준다.
+    try testing.expectEqualStrings(
+        "zsh — ~/work/maru",
+        writeLabel(&buf, .{ .surface_id = 3, .kind = .shell, .shell_name = "zsh", .where = "~/work/maru" }).?,
+    );
+}
+
+test "라벨은 자리가 모자라면 잘라 내지 않고 접는다" {
+    // 잘린 라벨은 **다른 대상**으로 읽힌다 — `Claude — maru-a` 와 `Claude — maru-b` 가 같아진다.
+    var tiny: [8]u8 = undefined;
+    try testing.expect(writeLabel(&tiny, .{ .surface_id = 1, .kind = .claude, .where = "maru", .branch = "main" }) == null);
 }

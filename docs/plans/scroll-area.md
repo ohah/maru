@@ -425,7 +425,7 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
    | --- | --- |
    | **탐색기** | 넷이 **이미 있다 — 의미가 다르다.** `file_panel.fileTreeNavigationIntent` 가 `home → .first`·`end → .last`·`page_up`/`page_down` 을 **선택 이동**으로 쓴다. 스크롤을 얹으면 그 축을 뺏는다 |
    | **소스 컨트롤** | 정말 없었다 → `scm_dock.handleScmDockScrollKey` 로 넷을 얹었다 |
-   | **사이드바** | 없지만 **모델이 다르다** — `scroll_area.State` 가 아니라 `sidebar_scroll_offset_px` 단독이고, 카드 선택 이동과 키가 부딪힐 수 있어 별도 판단 |
+   | **사이드바** | 없었다 → `sidebar.handleSidebarScrollKey` 로 얹었다(2026-08-30). 모델이 달라(`sidebar_scroll_offset_px` 단독) 산술을 순수 함수 `sidebarScrollKeyOffset` 로 분리했고, **검색이 열린 동안**에만 키를 갖는다 |
 
    **`pageStepPx` 소비처를 세는 것만으로는 이 갈림이 안 보인다.** 그 함수를 안 쓰고 같은 키를 다른
    의미로 쓰는 소비처가 있기 때문이다 — 실제로 탐색기에 얹었다가 「file tree keyboard focus preserves

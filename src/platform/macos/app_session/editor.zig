@@ -197,6 +197,22 @@ const diff_frame = chrome_editor.diff_frame;
 ///
 /// **비교 뷰는 빈 것을 낸다** — 문서가 둘이라 provider도 둘이어야 하고, 그 축을 가르는 것은 좌우
 /// 히트테스트가 선 뒤의 일이다(`search_marks`가 같은 이유로 같은 자리에 있다).
+/// 헤더 밴드에 그릴 `경로 › 바깥 › 안쪽` 한 줄(§7.5 「체인이 밴드에 선다」). 체인이 없으면 `path` 를
+/// 그대로 돌려주므로 **호출자는 분기하지 않는다** — 그 경우 밴드는 지금까지와 글자 하나 다르지 않다.
+///
+/// **비교 뷰는 체인이 없다** — 문서가 둘이라 provider 도 둘이어야 하고, 그 축을 가르는 것은 좌우
+/// 히트테스트가 선 뒤의 일이다(`syntaxColors` 가 같은 이유로 같은 자리에서 같은 판정을 한다).
+///
+/// **커서가 여럿이면 primary 만 본다.** 체인은 "지금 여기" 를 말하는 표시인데 커서마다 하나씩 그리면
+/// 그 문장이 성립하지 않는다.
+pub fn headerBreadcrumb(self: *AppSession, term: *Term, path: []const u8) []const u8 {
+    if (term.rt.editor_diff != null) return path;
+    const doc = term.rt.editor_doc orelse return path;
+    const sel = term.rt.editor_selection orelse return path;
+    const focus = @min(sel.focus, doc.file.content.len);
+    return syntax_color.breadcrumb(&term.rt.editor_syntax, self.allocator, path, doc.file.content, focus);
+}
+
 fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
     if (term.rt.editor_diff != null) return &.{};
     const doc = term.rt.editor_doc orelse return &.{};
@@ -16166,4 +16182,67 @@ test "NS6 마지막으로 보낸 대상이 다음 메뉴의 기본 선택이다"
     try testing.expect(sel >= 1 and sel - 1 < menu.target_len);
     try testing.expectEqual(first, menu.targets[sel - 1]);
     settings_ops.closeContextMenu(fx.session);
+}
+
+test "ES30 헤더 체인은 primary caret 을 따라간다 — 선택이 있으면 anchor 가 아니라 focus 다 (§7.5)" {
+    // **`headerBreadcrumb` 를 재는 자리다.** 위 `ES25`~`ES29` 는 `breadcrumb` 을 직접 부르므로 이 함수의
+    // 배선(비교 뷰 건너뛰기·문서 조회·어느 끝을 커서로 보나)이 통째로 안 재졌다 — 뮤테이션에서
+    // `focus` 를 `anchor_start` 로 바꿔도 아무 판정자가 안 죽었다.
+    //
+    // **focus 여야 하는 이유**: 선택을 끌면 anchor 는 시작한 자리에 남고 caret 은 focus 쪽이다. 사용자가
+    // 보는 "지금 여기" 는 caret 이므로, anchor 를 보면 **드래그 중에 체인이 출발지에 얼어붙는다**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n        x += 1;\n    }\n};\n");
+
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+
+    const src = doc.file.content;
+    const anchor_off = std.mem.indexOf(u8, src, "pub const").?; // 바깥(Widget)만 품는다
+    const focus_off = std.mem.indexOf(u8, src, "x += 1").?; // 안쪽(draw)까지 품는다
+
+    // **anchor 는 밖, focus 는 안** — 둘을 보는 차이가 화면에 나타나는 선택이다.
+    fx.term.rt.editor_selection = editor_selection.Selection.fromPoints(anchor_off, focus_off);
+    const label = headerBreadcrumb(fx.session, fx.term, "a.zig");
+    try testing.expectEqualStrings("a.zig \u{203A} Widget \u{203A} draw", label);
+}
+
+test "ES31 비교 뷰는 체인을 그리지 않는다 — 문서가 둘이다 (§7.5)" {
+    // §7.5 저하 표의 마지막 줄. `syntaxColors` 가 같은 이유로 같은 판정을 하는데(문서가 둘이라
+    // provider 도 둘이어야 한다), 그 규율이 이 함수에도 서 있는지 잰다 — 뮤테이션에서 이 분기를
+    // 지워도 아무 판정자가 안 죽었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub const Widget = struct {\n    pub fn draw() void {\n        var x: u8 = 0;\n    }\n};\n");
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
+    var rounds: usize = 0;
+    while (fx.term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&fx.term.rt.editor_syntax, doc.file.content);
+    }
+    const inside = std.mem.indexOf(u8, doc.file.content, "var x").?;
+    fx.term.rt.editor_selection = editor_selection.Selection.at(inside);
+
+    // 평소에는 체인이 나온다 — 아래 대비의 기준선이다.
+    try testing.expect(!std.mem.eql(u8, "a.zig", headerBreadcrumb(fx.session, fx.term, "a.zig")));
+
+    // 비교 뷰로 들어가면 **경로만** 남는다.
+    fx.term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer fx.term.rt.editor_diff = null;
+    try testing.expectEqualStrings("a.zig", headerBreadcrumb(fx.session, fx.term, "a.zig"));
 }

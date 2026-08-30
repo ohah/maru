@@ -727,6 +727,53 @@ const testing = std.testing;
 ///
 /// 반쯤 걸친 셀은 **지우지 않고 자른다**: 위 절반이 사라지고 아래 절반이 남는다. UV 도 같은 비율로
 /// 밀어야 글자가 늘어나 보이지 않는다(`v0` 를 자른 만큼 내린다).
+/// **위아래로 잘라 낸다** — `clipCellTop` 의 짝이고 규칙은 같다(반쯤 걸치면 자르고 UV 를 같은 비율로
+/// 민다, 통째로 밖이면 버린다).
+///
+/// 도크 트리가 이것을 쓴다: 그 목록은 위로는 **뷰 바**, 아래로는 **상태바** 자리로 새고 있었다
+/// (실측 2026-08-30: 트리 y 가 76 인데 글자가 62 까지 올라갔다 — 위 153 셀·아래 16 셀).
+pub fn clipCellVertical(c: Cell, min_y: f32, max_y: f32) ?Cell {
+    const top = clipCellTop(c, min_y) orelse return null;
+    const h = top.rect[3];
+    if (h <= 0) return null;
+    const bottom = top.rect[1] + h;
+    if (bottom <= max_y) return top;
+    if (top.rect[1] >= max_y) return null; // 통째로 아래 — 버린다
+    const dy = bottom - max_y;
+    var out = top;
+    out.rect[3] = h - dy;
+    // 아래를 자를 때는 `v1` 을 같은 비율만큼 올린다(위를 자를 때 `v0` 를 내리는 것의 짝).
+    const v0 = top.uv[1];
+    const v1 = top.uv[3];
+    out.uv[3] = v1 - (v1 - v0) * (dy / h);
+    return out;
+}
+
+test "clipCellVertical: 아래를 자르면 v1 이 같은 비율로 올라간다" {
+    const c: Cell = .{
+        .rect = .{ 10, 100, 8, 20 },
+        .uv = .{ 0.0, 0.0, 1.0, 1.0 },
+        .fg = .{ 1, 1, 1, 1 },
+        .bg = .{ 0, 0, 0, 0 },
+    };
+    // 온전히 안 — 그대로.
+    try std.testing.expect(clipCellVertical(c, 90, 130).?.rect[3] == 20);
+    // 아래 5px 을 깎는다 — 높이 15, `v1` 은 0.75.
+    const cut = clipCellVertical(c, 90, 115).?;
+    try std.testing.expectEqual(@as(f32, 100), cut.rect[1]);
+    try std.testing.expectEqual(@as(f32, 15), cut.rect[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), cut.uv[3], 0.0001);
+    try std.testing.expectEqual(@as(f32, 0.0), cut.uv[1]);
+    // 위아래를 함께 — 105..115 만 남는다(높이 10, v 는 0.25~0.75).
+    const both = clipCellVertical(c, 105, 115).?;
+    try std.testing.expectEqual(@as(f32, 10), both.rect[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), both.uv[1], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), both.uv[3], 0.0001);
+    // 통째로 밖이면 버린다.
+    try std.testing.expect(clipCellVertical(c, 121, 200) == null);
+    try std.testing.expect(clipCellVertical(c, 0, 100) == null);
+}
+
 pub fn clipCellTop(c: Cell, min_y: f32) ?Cell {
     const y = c.rect[1];
     const h = c.rect[3];

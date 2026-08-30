@@ -559,6 +559,16 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     ) catch return error.SkipZigTest;
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
     defer _ = c.rmdir(session_dir.ptr);
+    // The product rollback gate opens a real listener. Keep it out of the user's live Maru
+    // namespace and out of sibling test processes; a fixed public host-id socket could otherwise
+    // connect this assertion to an unrelated daemon and manufacture a false success.
+    if (setenv("MARU_SESSION_HOST_ROOT", session_dir.ptr, 1) != 0)
+        return error.TestUnexpectedResult;
+    defer _ = unsetenv("MARU_SESSION_HOST_ROOT");
+    try short_endpoint.prepareCurrentUserNamespace();
+    var socket_dir_buf: [272]u8 = undefined;
+    const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
+    defer _ = c.rmdir(socket_dir.ptr);
     try host_manifest.prepareHostDirectory(session_dir, host_id);
     defer host_manifest.removeEmptyHostDirectories(session_dir, host_id);
     var host_dir_buf: [768]u8 = undefined;
@@ -655,10 +665,6 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     try inherited.prepare(pair.primary_fd, layout.primarySlot());
     try inherited.prepare(pair.backup_fd, layout.backupSlot());
     try inherited.prepare(lease.descriptor(), layout.ownerSlot());
-    // Validation-only children never bind the endpoint, but the product rollback child does.
-    // Model the real daemon launch prerequisite instead of depending on a directory left by
-    // another test or a user's running Maru instance.
-    try short_endpoint.prepareCurrentUserNamespace();
     var socket_buf: [128]u8 = undefined;
     const socket_path = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
 

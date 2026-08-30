@@ -103,6 +103,10 @@ test "product rollback preserves one real PTY through exit" {
         "nonempty-target",
     );
     defer target.deinit();
+    const rollback_record = rollback.record();
+    try std.testing.expect(!std.mem.eql(u8, target.path, rollback_record.path));
+    try std.testing.expect(target.identity.dev != rollback_record.dev or
+        target.identity.ino != rollback_record.ino);
     const layout = sh.upgrade_product_coordinator.findAvailableLayout(40) orelse
         return error.SkipZigTest;
     var socket_buf: [128]u8 = undefined;
@@ -136,7 +140,7 @@ test "product rollback preserves one real PTY through exit" {
             product,
             product_build_id,
             target,
-            rollback.record(),
+            rollback_record,
             session_dir,
             host_dir,
             socket_path,

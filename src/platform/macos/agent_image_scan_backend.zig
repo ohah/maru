@@ -232,7 +232,11 @@ fn readTime(
         var buf: [context.time_window_after]u8 = undefined;
         const got = readUpTo(io, file, &buf, hit.data_offset +| hit.data_len);
         if (got > 0) {
-            const t = context.timestampSeconds(buf[0..got]);
+            // **줄 끝에서 자른다.** 안 자르면 창이 다음 항목으로 넘어가 **남의 시각**을 읽는다 —
+            // 실측 Codex 이미지 줄의 2.4%(313/13,200)가 payload 뒤 256 B 안에서 끝난다.
+            const window = buf[0..got];
+            const line_end = std.mem.indexOfScalar(u8, window, '\n') orelse window.len;
+            const t = context.timestampSeconds(window[0..line_end]);
             if (t != 0) return t;
         }
     }
@@ -333,10 +337,9 @@ fn worker(job: *Job) void {
     // 스캔이 끝난 뒤 **같은 워커에서** 만든다. 파일별로 한 번만 열고 positional read 로 창을 읽는다 —
     // hit 마다 열면 151 번 여는 셈이다.
     if (ok) labels: {
-        result.labels.ensureTotalCapacity(state.allocator, result.hits.items.len) catch {
-            result.partial = true;
-            break :labels;
-        };
+        // **`partial` 을 세우지 않는다.** 그 깃발은 「이미지를 다 못 봤다」는 뜻이고, 여기서 실패한
+        // 것은 라벨(덧붙임)뿐이다. 세우면 이미지를 다 읽고도 「다 읽지 못했습니다」라고 말하게 된다.
+        result.labels.ensureTotalCapacity(state.allocator, result.hits.items.len) catch break :labels;
         var open_index: ?usize = null;
         var open_file: ?std.Io.File = null;
         defer if (open_file) |f| f.close(io);

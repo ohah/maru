@@ -3301,10 +3301,34 @@ test "K2 runtime manager publishes bounded kernel cwd only for local OSC-empty r
         .rows = 10,
     });
     const local_handle = mgr.handleFor(local_rid) orelse return error.TestUnexpectedResult;
-    var local = try ops.observation(ops.ctx, local_rid, allocator);
-    defer local.deinit(allocator);
     var hostname_buffer: [posix.HOST_NAME_MAX]u8 = undefined;
     const expected_hostname = try posix.gethostname(&hostname_buffer);
+    // forkpty returns before the child necessarily completes its chdir. Exercise the product
+    // cadence until the kernel reports the requested directory instead of making scheduler order
+    // part of K2's contract.
+    const cwd_deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
+        5 * std.time.ns_per_s;
+    while (true) {
+        const current = mgr.kernel_cwd_cache.get(local_handle) orelse KernelCwdCache{};
+        _ = try mgr.refreshKernelCwdCache(
+            local_handle,
+            current.refreshed_at_ns + kernel_cwd_refresh_ns,
+            false,
+        );
+        const cached = mgr.kernel_cwd_cache.get(local_handle) orelse
+            return error.TestUnexpectedResult;
+        if (std.mem.eql(u8, expected_cwd, cached.cwdSlice()) and
+            std.mem.eql(u8, expected_hostname, cached.hostnameSlice())) break;
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= cwd_deadline)
+            return error.KernelCwdTestDeadlineExceeded;
+        try std.Io.sleep(
+            std.testing.io,
+            std.Io.Duration.fromMilliseconds(10),
+            .awake,
+        );
+    }
+    var local = try ops.observation(ops.ctx, local_rid, allocator);
+    defer local.deinit(allocator);
     try std.testing.expectEqualStrings(expected_cwd, local.cwd);
     try std.testing.expectEqualStrings(expected_hostname, local.cwd_host);
 

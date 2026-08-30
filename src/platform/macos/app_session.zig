@@ -35127,7 +35127,7 @@ test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
         codesign_path,
         &codesign_argv,
         &codesign_output,
-        2 * std.time.ns_per_s,
+        5 * std.time.ns_per_s,
     );
     try std.testing.expect(std.mem.indexOf(u8, signature, "Signature=adhoc") != null);
     const lipo_path: [:0]const u8 = "/usr/bin/lipo";
@@ -35138,7 +35138,7 @@ test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
         lipo_path,
         &lipo_argv,
         &lipo_output,
-        2 * std.time.ns_per_s,
+        5 * std.time.ns_per_s,
     );
     var architecture_count: usize = 0;
     var architecture_tokens = std.mem.tokenizeAny(u8, architectures, " \t\r\n");

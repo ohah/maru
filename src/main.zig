@@ -4803,6 +4803,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var ime_digest_after: u64 = 0;
     var ime_cards_before: usize = 0;
     var ime_cards_after: usize = 0;
+    var ime_routed: usize = 0;
+    var aime_judgeable = false;
+    var aime_text_before: usize = 0;
+    var aime_text_after: usize = 0;
+    var aime_found = false;
+    var aime_items: usize = 0;
+    var aime_ph_before = false;
+    var aime_ph_after = false;
+    var aime_items_before: usize = 0;
     var asearch_judgeable = false;
     var asearch_focused = false;
     var asearch_items_before: usize = 0;
@@ -7101,14 +7110,51 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // 한국어 리터럴 **0** 으로 못 박아 둔 파일이고(§7.1 — 영어 고정 표면), 예전에 0 으로
             // 갚아 원장에서 빠졌다. 이건 표시가 아니라 **조합 fixture** 라 그 빚을 다시 지지 않는다
             // — 바이트는 같으므로 두 칸 폭·멀티바이트라는 시험의 뜻도 그대로다.
-            search.setPreedit(allocator, "\u{d55c}") catch {};
+            // **창을 통해 민다**(모델에 직접 넣지 않는다) — 그래야 `preedit_changed` → 라우팅 →
+            // 그리기가 다 밟힌다. 모델에 직접 넣으면 라우팅 한 줄에 판정이 없어, 조합을 버리는
+            // 뮤턴트가 그대로 지나간다(적대적 검증 5회차 실측).
+            window.setSyntheticPreedit("\u{3134}" ++ "\u{3161}");
             rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
+        }
+        // ── 에이전트 검색도 조합을 그리는가 (적대적 검증 1회차) ──────────────────────
+        //
+        // PR 한계에 "에이전트 쪽은 캡처로 못 봤다" 고 적은 자리를 잰다. 중립은 그 값을 쓰고 있다
+        // (`view.zig` 가 `search`·`search_preedit` 를 이어 붙여 그린다) — Windows 가 값을 주는지가
+        // 물음이다. **그린 글자 목록**(`Built.text`)에 조합이 들어오는지로 본다.
+        if (smoke and spins == 758 and dock_view == .agent_sessions) if (agent_built) |*b| {
+            aime_judgeable = true;
+            aime_text_before = b.text.len;
+            // **placeholder 가 있었는가** — 조합이 들어오면 그 자리를 조합이 차지한다(중립
+            // `searchField`: `empty` 가 거짓이 되어 placeholder 갈래를 안 탄다). 길이 비교는
+            // 틀린 기대였다(실측 `648->636` — 조합 한 글자가 긴 안내를 밀어낸다).
+            aime_ph_before = std.mem.indexOf(u8, b.text, maru.i18n.t(.sd_search)) != null;
+            // **거르기는 확정만 본다**(`agent_archive.query`). 조합이 그쪽으로 새면 목록이 흔들린다 —
+            // 항목 수를 앞뒤로 견준다(적대적 검증 2회차).
+            aime_items_before = b.items.len;
+            agent_search.setPreedit(allocator, "\u{3134}" ++ "\u{3161}") catch {};
+            agent_opts.search_preedit = agent_search.preedit.items;
+            rebuildDockAll(allocator, &dock_cells, geom, &renderer_state, builder, dock_rows.items, cell_w, cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .status = scm_status, .state = &scm_state, .opts = scm_opts, .built = &scm_built }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built }) catch {};
+        };
+        if (smoke and spins == 760 and aime_judgeable) {
+            if (agent_built) |*b| {
+                aime_text_after = b.text.len;
+                // **그 글자가 실제로 그려졌나** — 코드포인트 목록에서 찾는다.
+                // **제목에 없을 글자여야 한다.** 처음엔 `한` 을 썼는데 이 저장소의 세션 제목이 한글이라
+                // 조합을 안 넘기는 뮤턴트에서도 `found=true` 였다(적대적 검증 4회차). 자모
+                // `ㄴㅡ` 는 완성형 제목에 안 나온다.
+                aime_found = std.mem.indexOf(u8, b.text, "\u{3134}" ++ "\u{3161}") != null;
+                aime_items = b.items.len;
+                aime_ph_after = std.mem.indexOf(u8, b.text, maru.i18n.t(.sd_search)) != null;
+            }
+            agent_search.preedit.clearRetainingCapacity(); // 시험은 자기가 바꾼 것을 되돌린다
+            agent_opts.search_preedit = agent_search.preedit.items;
         }
         if (smoke and spins == 821 and ime_judgeable) {
             ime_glyphs_after = sidebar_header_search_glyphs;
             ime_digest_after = d3d11_cells.cellsDigest(sidebar_cells.items);
             // **거르지는 않는다** — 확정 전이라 목록이 흔들리면 안 된다(중립 계약).
             ime_cards_after = sidebar_cards.items.len;
+            ime_routed = preedit_to_search;
             search.preedit.clearRetainingCapacity(); // 시험은 자기가 바꾼 것을 되돌린다
         }
         if (smoke and spins == 824) {
@@ -9848,17 +9894,34 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             hend_hbar != null and hend_col > hscroll_col_after and hend_col < hend_max_cols and
                 @abs(thumb_right - track_right) <= 1.0,
         });
-        try stdout.print("search_ime: glyphs {d}->{d} digest {x}->{x} cards {d}->{d} to_search={d} to_terminal={d} search_ime_ok={}\n", .{
+        try stdout.print("agent_ime: text {d}->{d} placeholder {}->{} found={} items {d}->{d} agent_ime_ok={}\n", .{
+            aime_text_before,
+            aime_text_after,
+            aime_ph_before,
+            aime_ph_after,
+            aime_found,
+            aime_items_before,
+            aime_items,
+            // **그린 글자에 조합이 들어왔는가.** 항목 수는 그대로여야 한다(확정 전이라 안 거른다).
+            // **조합이 그려졌고, 그 자리에 있던 안내가 물러났는가.** 길이로는 못 잰다 — 조합 한
+            // 글자가 긴 안내를 밀어내 전체 글자 수는 오히려 준다.
+            aime_judgeable and aime_found and aime_ph_before and !aime_ph_after and
+                aime_items == aime_items_before,
+        });
+        try stdout.print("search_ime: glyphs {d}->{d} digest {x}->{x} cards {d}->{d} routed={d} to_search={d} to_terminal={d} search_ime_ok={}\n", .{
             ime_glyphs_before,
             ime_glyphs_after,
             ime_digest_before,
             ime_digest_after,
             ime_cards_before,
             ime_cards_after,
+            ime_routed,
             preedit_to_search,
             preedit_to_terminal,
             // **글자가 늘고 화면이 바뀌었는가**, 그리고 **목록은 안 흔들렸는가**(확정 전이므로).
-            ime_judgeable and ime_glyphs_after > ime_glyphs_before and
+            // **창에서 온 조합이 검색으로 갔는가**(라우팅), 그리고 **그려졌는가**, 그리고 목록은
+            // 안 흔들렸는가.
+            ime_judgeable and ime_routed > 0 and ime_glyphs_after > ime_glyphs_before and
                 ime_digest_after != ime_digest_before and ime_cards_after == ime_cards_before,
         });
         try stdout.print("agent_busy: loading_frames={d} refreshing_frames={d} items {d}->{d} digest {x}->{x} settled_busy={} agent_busy_ok={}\n", .{

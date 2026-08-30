@@ -4919,6 +4919,19 @@ pub const AppSession = struct {
     // 복사/붙여넣기 메뉴다(rename 대상·view_options와 배타). buildContextMenuItems/acceptContextMenu/closeContextMenu가
     // 이 플래그로 분기한다. 항목 선택 시 pending_clipboard_action을 세워 Swift가 OS 클립보드 동작을 한다(F2-5).
     terminal_context_menu: bool = false,
+    /// 편집기 본문 우클릭 메뉴(NS4 — docs/send-selection-to-agent.md §6.1, 계약은
+    /// native-editor-ui.md §8.1). 다른 메뉴들과 `chrome_host.context_menu` 를 공유하되 이 값이
+    /// non-null 이면 그 분기다.
+    ///
+    /// **Term 포인터가 아니라 surface id 를 든다.** 메뉴가 떠 있는 동안 그 Term 이 닫힐 수 있고,
+    /// 그러면 포인터는 매달린다 — rename 대상이 teardown 마다 자기를 비우는 규율을 지는 이유가
+    /// 그것인데, 여기서는 **애초에 죽지 않는 값**을 들면 그 규율 자체가 필요 없다.
+    editor_context_menu: ?struct {
+        surface_id: u64,
+        /// 열 때 굳힌 항목들. 고를 때 다시 계산하면 그 사이 선택이 바뀌어 **다른 항목이 실행된다**.
+        items: [4]maru.session.content_menu.Item,
+        len: usize,
+    } = null,
     // 파일 Term 본문 우클릭 메뉴(docs/file-panel-kinds.md §2.6). 다른 메뉴들과 chrome_host.context_menu를 공유하되
     // 이게 non-null이면 그 분기다. web이 올린 대상·좌표로 항목을 정하고, 실행 주인은 항목마다 갈린다.
     file_content_menu: ?FileContentMenu = null,
@@ -8954,6 +8967,10 @@ pub const AppSession = struct {
                 }
                 // 선택 코어 mutate는 reader로 위임(full (a), docs/plans/io-render-threading.md §9 P3-4).
                 const term = pane_ops.activePane(self).activeTerm();
+                // **편집기 Term 은 코어가 sentinel 이다** — 주소창·커밋 상자와 같은 자리·같은 이유로
+                // 여기서 갈라야 한다(§3.4 가 `pasteText` 에 정한 것과 같은 라우팅). 이 분기가 없어서
+                // 편집기에서 ⌘A 가 아무 일도 안 했다(2026-08-30).
+                if (editor_ops.selectAll(self, term)) return;
                 self.backendFor(term).enqueueCoreCommand(term.rt.handle, .select_all, self.io) catch {};
             },
             // 화면+스크롤백 비우기(⌘K). host-backed의 surface.core는 placeholder이므로 local/remote 모두 runtime의
@@ -12117,6 +12134,28 @@ pub const AppSession = struct {
                 return;
             }
             if (self.pointOnChrome(x_px, y_px)) return; // chrome 위: consume
+            // **편집기 본문이면 편집기 메뉴다**(NS4 — docs/send-selection-to-agent.md §6.1, 계약은
+            // native-editor-ui.md §8.1). 이 분기가 없어서 편집기 본문 우클릭이 아래 터미널 분기로
+            // 내려갔고, `input.right-click` 기본값 `paste` 에서 **문서에 클립보드가 붙었다**. 그
+            // 설정의 계약은 configuration.md 가 "터미널 본문 우클릭" 이라 적어 두었으므로 편집기
+            // 본문은 그 설정이 말하는 표면이 아니다.
+            //
+            // **포인터 밑 pane 을 쓴다** — 활성 pane 으로 고정하면 다른 pane 을 우클릭했을 때 엉뚱한
+            // 문서의 메뉴가 뜬다(포인터 조회는 pane 으로 라우팅한다는 그 규율).
+            {
+                var editor_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+                defer editor_rects.deinit(self.allocator);
+                if (tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &editor_rects)) |_| {
+                    for (editor_rects.items) |lr| {
+                        if (!layout_math.pointInRect(x_px, y_px, lr.rect)) continue;
+                        const hit = lr.leaf.activeTerm();
+                        if (hit.kind != .editor) break; // 그 pane 은 편집기가 아니다 — 아래로 흘린다
+                        _ = pane_ops.focusPaneByPtr(self, lr.leaf);
+                        if (settings_ops.showEditorContextMenu(self, hit, x_px, y_px)) return;
+                        break; // 열 항목이 없으면(비교 뷰 등) 아래로 흘리지 않고 그냥 소비한다
+                    }
+                } else |_| {}
+            }
             // 터미널 본문 우클릭: 트래킹 앱(DECSET 1000~1003)이 마우스를 캡처 중이면 **리포팅 우선**(아래 reporting
             // 경로로 fall through — 우-down도 리포트해 drag/up과 비대칭이 안 되게). 트래킹이 .none이면 input.right-click
             // (paste|menu|reporting)을 적용한다(F2-5). 트래킹 읽기는 락 아래(리더 core.write와 경합 방지, §9.1).

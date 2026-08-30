@@ -760,6 +760,20 @@ pub fn notifySurfaceClosed(self: *AppSession, surface_id: u64) void {
 /// id는 재사용하지 않으므로(surface_ids 단조 증가) stale id가 다른 surface로 오인 활성화될 위험이 없다 — 알림 후
 /// 그 Term이 닫혔으면 못 찾아 false(무동작). 클릭 시점에 실시간 3중 순회하므로 알림 도착 후 탭/pane이 재배치돼도
 /// 인덱스 캐시 없이 정확히 현재 위치로 점프한다.
+/// surface id 로 살아 있는 Term 을 찾는다. 없으면 null(닫힌 Term).
+///
+/// **떠 있는 UI 가 대상을 포인터가 아니라 이 id 로 들게 하려고 낸다.** 포인터를 들면 그 Term 이
+/// 닫힐 때마다 비워 주는 규율이 하나 더 생기고, 그 규율은 빠뜨리기 쉽다(rename 대상이 그 규율을
+/// 진다). id 는 재사용되지 않으므로 stale 이면 그냥 못 찾는다.
+pub fn termBySurfaceId(self: *AppSession, id: u64) ?*Term {
+    const loc = findTermWhere(self, id, struct {
+        fn pred(want: u64, term: *Term) bool {
+            return term.surface.id == want;
+        }
+    }.pred) orelse return null;
+    return loc.pane.terms.items[loc.term_index];
+}
+
 pub fn activateSurfaceById(self: *AppSession, id: u64) bool {
     const loc = findTermWhere(self, id, struct {
         fn pred(want: u64, term: *Term) bool {

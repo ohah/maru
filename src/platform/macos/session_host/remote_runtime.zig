@@ -17488,6 +17488,7 @@ const daemon = @import("daemon.zig");
 
 extern "c" fn usleep(usec: c_uint) c_int;
 extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+extern "c" fn mkdir(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 fn signalMetadataParityFifo(path: [:0]const u8) !void {
     var attempts: usize = 0;
@@ -17920,6 +17921,209 @@ test "P3-e4d-1 actual metadata events stay isolated and reattach starts current"
     try testing.expect(metadataParitySurfaceContains(&reattached, io, "A2"));
     try testing.expectEqual(b_after_update_revision, runtime_b.currentGeneration().observation.revision);
     try testing.expectEqualStrings("/tmp/e4d-b1", runtime_b.currentGeneration().observation.cwd.items);
+}
+
+test "K3 actual daemon kernel cwd survives detach and preserves authority isolation" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var control_dir_buf: [256]u8 = undefined;
+    const control_dir = std.fmt.bufPrintZ(&control_dir_buf, "/tmp/maru-sh-k3-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var socket_buf: [320]u8 = undefined;
+    const socket_path = std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{control_dir}) catch
+        return error.SkipZigTest;
+    var cwd_a0_buf: [256]u8 = undefined;
+    const cwd_a0 = std.fmt.bufPrintZ(&cwd_a0_buf, "/private/tmp/maru-k3-a0-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var cwd_a1_buf: [256]u8 = undefined;
+    const cwd_a1 = std.fmt.bufPrintZ(&cwd_a1_buf, "/private/tmp/maru-k3-a1-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var cwd_b_buf: [256]u8 = undefined;
+    const cwd_b = std.fmt.bufPrintZ(&cwd_b_buf, "/private/tmp/maru-k3-b-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var fifo_buf: [256]u8 = undefined;
+    const fifo = std.fmt.bufPrintZ(&fifo_buf, "/tmp/maru-k3-{d}.fifo", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var detached_commit_buf: [256]u8 = undefined;
+    const detached_commit = std.fmt.bufPrintZ(&detached_commit_buf, "/tmp/maru-k3-{d}.detached", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    var cat_ready_buf: [256]u8 = undefined;
+    const cat_ready = std.fmt.bufPrintZ(&cat_ready_buf, "/tmp/maru-k3-{d}.cat", .{c.getpid()}) catch
+        return error.SkipZigTest;
+
+    _ = c.unlink(fifo.ptr);
+    _ = c.unlink(detached_commit.ptr);
+    _ = c.unlink(cat_ready.ptr);
+    _ = c.rmdir(cwd_a0.ptr);
+    _ = c.rmdir(cwd_a1.ptr);
+    _ = c.rmdir(cwd_b.ptr);
+    if (mkdir(cwd_a0.ptr, 0o700) != 0) return error.SkipZigTest;
+    defer _ = c.rmdir(cwd_a0.ptr);
+    if (mkdir(cwd_a1.ptr, 0o700) != 0) return error.SkipZigTest;
+    defer _ = c.rmdir(cwd_a1.ptr);
+    if (mkdir(cwd_b.ptr, 0o700) != 0) return error.SkipZigTest;
+    defer _ = c.rmdir(cwd_b.ptr);
+    if (mkfifo(fifo.ptr, 0o600) != 0) return error.SkipZigTest;
+    defer _ = c.unlink(fifo.ptr);
+    defer _ = c.unlink(detached_commit.ptr);
+    defer _ = c.unlink(cat_ready.ptr);
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        daemon.runSessionHost(std.heap.page_allocator, io, control_dir, socket_path) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        _ = c.rmdir(control_dir.ptr);
+    }
+
+    var client: client_mod.Client = blk: {
+        var attempts: usize = 0;
+        while (attempts < 150) : (attempts += 1) {
+            if (client_mod.Client.connect(allocator, socket_path, .gui)) |value| break :blk value else |_| {
+                _ = usleep(20 * 1000);
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var command_a_buf: [1536]u8 = undefined;
+    const command_a = try std.fmt.bufPrint(
+        &command_a_buf,
+        "cd '{s}'; IFS= read -r _ < '{s}'; " ++
+            "cd '{s}'; sleep 1; : > '{s}'; IFS= read -r _ < '{s}'; : > '{s}'; exec /bin/cat",
+        .{ cwd_a0, fifo, cwd_a1, detached_commit, fifo, cat_ready },
+    );
+    var command_b_buf: [512]u8 = undefined;
+    const command_b = try std.fmt.bufPrint(&command_b_buf, "cd '{s}'; exec /bin/cat", .{cwd_b});
+
+    var runtime_a: RemoteRuntime = undefined;
+    var runtime_a_live = false;
+    defer if (runtime_a_live) runtime_a.deinit();
+    try runtime_a.spawnWithAdapter(&adapter, allocator, io, 1, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", command_a },
+        .shell_integration = null,
+    }, .{ .cols = 80, .rows = 24 }, null);
+    runtime_a_live = true;
+    var runtime_b: RemoteRuntime = undefined;
+    try runtime_b.spawnWithAdapter(&adapter, allocator, io, 2, .{
+        .command = "/bin/sh",
+        .args = &.{ "-c", command_b },
+        .shell_integration = null,
+    }, .{ .cols = 80, .rows = 24 }, null);
+    defer runtime_b.deinit();
+
+    var attempts: usize = 0;
+    while (attempts < 200) : (attempts += 1) {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        const a = &runtime_a.currentGeneration().observation;
+        const b = &runtime_b.currentGeneration().observation;
+        if (std.mem.eql(u8, a.cwd.items, cwd_a0) and a.cwd_host.items.len != 0 and
+            std.mem.eql(u8, b.cwd.items, cwd_b) and b.cwd_host.items.len != 0) break;
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(attempts < 200);
+    const authority = try allocator.dupe(u8, runtime_a.currentGeneration().observation.cwd_host.items);
+    defer allocator.free(authority);
+    try testing.expectEqualStrings(authority, runtime_b.currentGeneration().observation.cwd_host.items);
+
+    // Cross another full sampler interval before freezing B. A's detached update must not advance or
+    // replace the sibling observation, even though both runtimes share one HostAdapter and connection.
+    for (0..35) |_| {
+        _ = try runtime_a.pumpDelta();
+        _ = try runtime_b.pumpDelta();
+        _ = usleep(20 * 1000);
+    }
+    const b_revision = runtime_b.currentGeneration().observation.revision;
+    const b_cwd_ptr = runtime_b.currentGeneration().observation.cwd.items.ptr;
+    const b_host_ptr = runtime_b.currentGeneration().observation.cwd_host.items.ptr;
+
+    const runtime_id_a = runtime_a.runtimeIdHex();
+    runtime_a.detachClientSide();
+    runtime_a_live = false;
+    try signalMetadataParityFifo(fifo);
+    attempts = 0;
+    while (attempts < 150 and c.access(detached_commit.ptr, c.F_OK) != 0) : (attempts += 1)
+        _ = usleep(20 * 1000);
+    try testing.expect(c.access(detached_commit.ptr, c.F_OK) == 0);
+
+    var reattached: RemoteRuntime = undefined;
+    try RemoteRuntime.attachExistingWithAdapter(
+        &reattached,
+        &adapter,
+        allocator,
+        io,
+        3,
+        runtime_id_a,
+        .{ .cols = 80, .rows = 24 },
+    );
+    defer reattached.deinit();
+    // attachExisting assembles the initial full-state before returning. A pump here would weaken the
+    // restore contract by allowing a later delta to hide stale attach metadata.
+    const current = &reattached.currentGeneration().observation;
+    try testing.expectEqualStrings(cwd_a1, current.cwd.items);
+    try testing.expectEqualStrings(authority, current.cwd_host.items);
+    try testing.expectEqual(b_revision, runtime_b.currentGeneration().observation.revision);
+    try testing.expectEqual(b_cwd_ptr, runtime_b.currentGeneration().observation.cwd.items.ptr);
+    try testing.expectEqual(b_host_ptr, runtime_b.currentGeneration().observation.cwd_host.items.ptr);
+    try testing.expectEqualStrings(cwd_b, runtime_b.currentGeneration().observation.cwd.items);
+    try testing.expectEqualStrings(authority, runtime_b.currentGeneration().observation.cwd_host.items);
+
+    try signalMetadataParityFifo(fifo);
+    attempts = 0;
+    while (attempts < 150 and c.access(cat_ready.ptr, c.F_OK) != 0) : (attempts += 1)
+        _ = usleep(20 * 1000);
+    try testing.expect(c.access(cat_ready.ptr, c.F_OK) == 0);
+
+    try reattached.sendInput("\x1b]7;file://localhost/tmp/maru-k3-osc\x07\n");
+    attempts = 0;
+    while (attempts < 150) : (attempts += 1) {
+        _ = try reattached.pumpDelta();
+        const observation = &reattached.currentGeneration().observation;
+        if (std.mem.eql(u8, observation.cwd.items, "/tmp/maru-k3-osc") and
+            std.mem.eql(u8, observation.cwd_host.items, "localhost")) break;
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(attempts < 150);
+
+    // RIS clears OSC cwd, then the known SSH destination must suppress the still-valid local kernel
+    // cache. Waiting beyond 500ms proves a later sampler tick cannot leak the local ssh-client cwd.
+    try reattached.sendInput("\x1bc\x1b]5379;ssh;user@remote\x07\n");
+    for (0..45) |_| {
+        _ = try reattached.pumpDelta();
+        _ = usleep(20 * 1000);
+    }
+    const ssh_observation = &reattached.currentGeneration().observation;
+    try testing.expect(ssh_observation.ssh_remote_dest_present);
+    try testing.expectEqualStrings("user@remote", ssh_observation.ssh_remote_dest.items);
+    try testing.expectEqual(@as(usize, 0), ssh_observation.cwd.items.len);
+    try testing.expectEqual(@as(usize, 0), ssh_observation.cwd_host.items.len);
+
+    try reattached.sendInput("\x1b]5379;ssh-end\x07\x1b]7;file://remote.example/tmp/remote-k3\x07\n");
+    attempts = 0;
+    while (attempts < 150) : (attempts += 1) {
+        _ = try reattached.pumpDelta();
+        const observation = &reattached.currentGeneration().observation;
+        if (!observation.ssh_remote_dest_present and
+            std.mem.eql(u8, observation.cwd.items, "/tmp/remote-k3") and
+            std.mem.eql(u8, observation.cwd_host.items, "remote.example")) break;
+        _ = usleep(20 * 1000);
+    }
+    try testing.expect(attempts < 150);
 }
 
 test "remote runtime: attachExisting reconnects to a pre-existing host runtime and renders its screen" {

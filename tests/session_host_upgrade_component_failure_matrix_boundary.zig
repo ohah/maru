@@ -28,7 +28,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         loaded += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 8), testCount(sources[0]));
+    try std.testing.expectEqual(@as(usize, 9), testCount(sources[0]));
     try std.testing.expectEqual(@as(usize, 6), testCount(sources[1]));
     try std.testing.expectEqual(@as(usize, 3), testCount(sources[2]));
     try std.testing.expectEqual(@as(usize, 5), testCount(sources[3]));
@@ -42,6 +42,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         .{ .source = 0, .title = "handoff store exact cleanup preserves a swapped replacement leaf" },
         .{ .source = 0, .title = "reserved handoff syscall failures publish no pair and leave no attempt residue" },
         .{ .source = 0, .title = "reservation cleanup identity failure closes descriptors and preserves replacement" },
+        .{ .source = 0, .title = "reservation cleanup observes consecutive kernel permission and nonempty failures" },
         .{ .source = 1, .title = "exec fd set exposes only reserved duplicate and rollback preserves CLOEXEC source" },
         .{ .source = 1, .title = "exec fd set rejects occupied and duplicate reserved slots without changing source" },
         .{ .source = 1, .title = "restore inherited close token consumes the exact non-cloexec set" },

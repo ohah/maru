@@ -11488,6 +11488,59 @@ pub fn build(b: *std.Build) void {
         daemon_cleanup_fail_stop_step.dependOn(&run_daemon_cleanup_fail_stop_tests.step);
         run_session_host_tests.step.dependOn(daemon_cleanup_fail_stop_step);
 
+        const kernel_cleanup_component_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_store.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"reservation cleanup observes consecutive kernel permission and nonempty failures"},
+        });
+        const run_kernel_cleanup_component_tests = b.addRunArtifact(kernel_cleanup_component_tests);
+        run_kernel_cleanup_component_tests.addArg("--maru-expect-tests=1");
+        run_kernel_cleanup_component_tests.setCwd(b.path("."));
+
+        const kernel_cleanup_process_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_daemon_cleanup_fail_stop_e2e.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "session_host", .module = session_host_fixture_mod }},
+            }),
+            .filters = &.{"daemon kernel cleanup faults exit nonzero and remove listener authority"},
+        });
+        const run_kernel_cleanup_process_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_kernel_cleanup_process_tests.addPrefixedArtifactArg(
+            "MARU_SESSION_HOST_PRODUCT_EXE=",
+            exe,
+        );
+        run_kernel_cleanup_process_tests.addArtifactArg(kernel_cleanup_process_tests);
+        run_kernel_cleanup_process_tests.addArg("--maru-expect-tests=1");
+        run_kernel_cleanup_process_tests.setCwd(b.path("."));
+
+        const kernel_cleanup_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_kernel_cleanup_faults_boundary.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_kernel_cleanup_boundary_tests = b.addRunArtifact(kernel_cleanup_boundary_tests);
+        run_kernel_cleanup_boundary_tests.addArg("--maru-expect-tests=1");
+        run_kernel_cleanup_boundary_tests.setCwd(b.path("."));
+
+        const kernel_cleanup_faults_step = b.step(
+            "test-session-host-upgrade-kernel-cleanup-faults",
+            "Verify consecutive real kernel cleanup faults reach daemon fail-stop (macOS)",
+        );
+        kernel_cleanup_faults_step.dependOn(&run_kernel_cleanup_component_tests.step);
+        kernel_cleanup_faults_step.dependOn(&run_kernel_cleanup_process_tests.step);
+        kernel_cleanup_faults_step.dependOn(&run_kernel_cleanup_boundary_tests.step);
+        run_session_host_tests.step.dependOn(kernel_cleanup_faults_step);
+
         // U3/U5 failure evidence used to be reachable only through separate leaf steps or the
         // full session-host aggregate. Keep one exact named matrix so release validation cannot
         // accidentally omit a process failure class while every individual test still exists.
@@ -11544,10 +11597,11 @@ pub fn build(b: *std.Build) void {
                 "handoff store exact cleanup preserves a swapped replacement leaf",
                 "reserved handoff syscall failures publish no pair and leave no attempt residue",
                 "reservation cleanup identity failure closes descriptors and preserves replacement",
+                "reservation cleanup observes consecutive kernel permission and nonempty failures",
             },
         });
         const run_handoff_store_tests = b.addRunArtifact(handoff_store_tests);
-        run_handoff_store_tests.addArg("--maru-expect-tests=8");
+        run_handoff_store_tests.addArg("--maru-expect-tests=9");
         run_handoff_store_tests.setCwd(b.path("."));
 
         const reserved_handoff_failure_tests = addProjectTest(b, .{

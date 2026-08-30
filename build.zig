@@ -4341,6 +4341,21 @@ pub fn build(b: *std.Build) void {
     run_session_host_upgrade_failure_matrix_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_upgrade_failure_matrix_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_upgrade_failure_matrix_boundary_tests.step);
+
+    const session_host_upgrade_component_failure_matrix_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_upgrade_component_failure_matrix_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_upgrade_component_failure_matrix_boundary_tests =
+        b.addRunArtifact(session_host_upgrade_component_failure_matrix_boundary_tests);
+    run_session_host_upgrade_component_failure_matrix_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_upgrade_component_failure_matrix_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(
+        &run_session_host_upgrade_component_failure_matrix_boundary_tests.step,
+    );
     if (target.result.os.tag == .macos) {
         const session_host_upgrade_stale_sweep_product_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -11420,6 +11435,94 @@ pub fn build(b: *std.Build) void {
         failure_matrix_step.dependOn(&run_session_host_upgrade_failure_process_tests.step);
         failure_matrix_step.dependOn(&run_session_host_product_rollback_tests.step);
         failure_matrix_step.dependOn(&run_session_host_nonempty_rollback_tests.step);
+
+        const handoff_store_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/handoff_store.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "handoff store commits identical primary backup and unlinks secret paths before exec",
+                "reserved handoff commits into pre-quiesce files and cleans the private attempt",
+                "partial reservation failure removes the first copy and private attempt",
+                "handoff store rejects malformed or divergent state and removes attempt residue",
+                "handoff store directory fd stays on the approved generation after path replacement",
+                "handoff store exact cleanup preserves a swapped replacement leaf",
+            },
+        });
+        const run_handoff_store_tests = b.addRunArtifact(handoff_store_tests);
+        run_handoff_store_tests.addArg("--maru-expect-tests=6");
+        run_handoff_store_tests.setCwd(b.path("."));
+
+        const exec_fd_set_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/exec_fd_set.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{
+                "exec fd set exposes only reserved duplicate and rollback preserves CLOEXEC source",
+                "exec fd set rejects occupied and duplicate reserved slots without changing source",
+                "restore inherited close token consumes the exact non-cloexec set",
+                "exec fd set capacity includes maximum runtime graph and fixed upgrade roles",
+                "slot reservation pins the full namespace before exact replacement and rolls back all slots",
+                "slot reservation handles the product maximum of 256 PTYs plus state and owner roles",
+            },
+        });
+        const run_exec_fd_set_tests = b.addRunArtifact(exec_fd_set_tests);
+        run_exec_fd_set_tests.addArg("--maru-expect-tests=6");
+        run_exec_fd_set_tests.setCwd(b.path("."));
+
+        const host_authority_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_authority.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "host authority owns wire build and endpoint strings",
+                "host authority adapter CASes restoring and rollback through one disk and wire SSOT",
+                "prepared host authority activates a stable restoring manifest after all allocation",
+            },
+        });
+        const run_host_authority_tests = b.addRunArtifact(host_authority_tests);
+        run_host_authority_tests.addArg("--maru-expect-tests=3");
+        run_host_authority_tests.setCwd(b.path("."));
+
+        const upgrade_target_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/upgrade_target.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "upgrade target stages an exact executable inode and cancellation removes it",
+                "upgrade target rejects hash build reader and executable mismatches without residue",
+                "real target stager and upgrade owner release cancel and terminal artifacts",
+                "real target restore reopens a CLOEXEC pin and terminal finish closes it exactly once",
+                "pinned target fd keeps the approved inode while path replacement is rejected and preserved",
+            },
+        });
+        const run_upgrade_target_tests = b.addRunArtifact(upgrade_target_tests);
+        run_upgrade_target_tests.addArg("--maru-expect-tests=5");
+        run_upgrade_target_tests.setCwd(b.path("."));
+
+        const component_failure_matrix_step = b.step(
+            "test-session-host-upgrade-component-failure-matrix",
+            "Run the exact U5 upgrade component failure matrix (macOS)",
+        );
+        component_failure_matrix_step.dependOn(&run_handoff_store_tests.step);
+        component_failure_matrix_step.dependOn(&run_exec_fd_set_tests.step);
+        component_failure_matrix_step.dependOn(&run_host_authority_tests.step);
+        component_failure_matrix_step.dependOn(&run_upgrade_target_tests.step);
 
         // 릴리스 signer 경계까지 포함한 제품 N-1→current 검증은 서명 아티팩트가 있어야 하므로
         // 기본 CI에서 실행하지 않는다. 대신 driver 자체는 기본 session-host test에서 컴파일·순수

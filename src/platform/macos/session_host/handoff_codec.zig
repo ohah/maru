@@ -204,6 +204,7 @@ comptime {
 
 const Writer = struct {
     allocator: std.mem.Allocator,
+    max_bytes: u64 = max_total_bytes,
     bytes: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Writer) void {
@@ -212,7 +213,8 @@ const Writer = struct {
 
     fn append(self: *Writer, data: []const u8) Error!void {
         const next = std.math.add(usize, self.bytes.items.len, data.len) catch return error.IntegerOverflow;
-        if (@as(u64, @intCast(next)) > max_total_bytes) return error.LimitExceeded;
+        if (@as(u64, @intCast(next)) > @min(max_total_bytes, self.max_bytes))
+            return error.LimitExceeded;
         try self.bytes.appendSlice(self.allocator, data);
     }
 
@@ -925,8 +927,23 @@ fn encodeTaggedBytes(writer: *Writer, tag: u32, bytes: []const u8) Error!void {
     try writer.endTlv(start);
 }
 
+pub fn encodedAttemptSectionBytes(record_len: usize) Error!usize {
+    if (record_len == 0 or record_len > max_attempt_record_bytes) return error.LimitExceeded;
+    return std.math.add(usize, tlv_header_len, record_len) catch return error.IntegerOverflow;
+}
+
 /// Host 전체 logical DTO. Runtime section은 반복 가능하지만 각 runtime 내부 field tag는 exactly-once다.
 pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
+    return encodeHostWithMaxBytes(allocator, host, max_total_bytes);
+}
+
+pub fn encodeHostWithMaxBytes(
+    allocator: std.mem.Allocator,
+    host: HostView,
+    max_bytes: usize,
+) Error![]u8 {
+    if (max_bytes == 0 or @as(u64, @intCast(max_bytes)) > max_total_bytes)
+        return error.LimitExceeded;
     if (host.host_id == 0 or host.authority_generation == 0 or host.membership_generation == 0)
         return error.InvalidValue;
     if (host.runtimes.len > max_runtime_count or
@@ -944,7 +961,7 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
         if (runtime.surface_id == 0 or runtime.surface_id >= host.next_handle)
             return error.InvalidValue;
     }
-    var writer: Writer = .{ .allocator = allocator };
+    var writer: Writer = .{ .allocator = allocator, .max_bytes = @intCast(max_bytes) };
     errdefer writer.deinit();
     try writer.append(&([_]u8{0} ** envelope_header_len));
 
@@ -959,7 +976,7 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
     try writer.endTlv(host_start);
 
     if (host.attempt_record) |record| {
-        if (record.len == 0 or record.len > max_attempt_record_bytes) return error.LimitExceeded;
+        _ = try encodedAttemptSectionBytes(record.len);
         const attempt_start = try writer.beginTlv(section_attempt_record, flag_optional);
         try writer.append(record);
         try writer.endTlv(attempt_start);
@@ -1001,6 +1018,24 @@ pub fn encodeHost(allocator: std.mem.Allocator, host: HostView) Error![]u8 {
     return finishEnvelope(&writer, @intCast(host.runtimes.len + 1 +
         @intFromBool(host.attempt_record != null) + @intFromBool(host.notification_handoff != null) +
         @intFromBool(host.notification_metadata_handoff != null)));
+}
+
+test "budget preview encoder stops at the operational allocation cap" {
+    const host: HostView = .{
+        .host_id = 1,
+        .upgrade_epoch = 2,
+        .next_handle = 3,
+        .runtimes = &.{},
+    };
+    const encoded = try encodeHost(std.testing.allocator, host);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectError(
+        error.LimitExceeded,
+        encodeHostWithMaxBytes(std.testing.allocator, host, encoded.len - 1),
+    );
+    const exact = try encodeHostWithMaxBytes(std.testing.allocator, host, encoded.len);
+    defer std.testing.allocator.free(exact);
+    try std.testing.expectEqualSlices(u8, encoded, exact);
 }
 
 fn readTagged(comptime T: type, field: *Reader, allocator: std.mem.Allocator) Error!T {

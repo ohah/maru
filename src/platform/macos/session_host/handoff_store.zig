@@ -57,6 +57,8 @@ pub const Failpoint = enum {
     corrupt_backup_after_sync,
 };
 
+const ReserveFailpoint = enum { none, after_primary };
+
 pub const Pair = struct {
     primary_fd: c.fd_t,
     backup_fd: c.fd_t,
@@ -65,6 +67,66 @@ pub const Pair = struct {
         _ = c.close(self.primary_fd);
         _ = c.close(self.backup_fd);
         self.* = undefined;
+    }
+};
+
+/// Pre-quiesce disk reservation. The private attempt directory is not a publication point; only
+/// this owner can turn the two preallocated writable files into validated read-only handoff fds.
+pub const Reservation = struct {
+    owner_fd: c.fd_t,
+    attempt_fd: c.fd_t,
+    primary_fd: c.fd_t,
+    backup_fd: c.fd_t,
+    attempt_id: u128,
+    reserved_len: usize,
+    active: bool = true,
+    owner_open: bool = true,
+    attempt_open: bool = true,
+    primary_open: bool = true,
+    backup_open: bool = true,
+    primary_present: bool = true,
+    backup_present: bool = true,
+    attempt_present: bool = true,
+
+    pub fn deinit(self: *Reservation) void {
+        self.cancel() catch @panic("upgrade handoff reservation cleanup failed");
+    }
+
+    /// Cancels the reservation exactly once and reports any cleanup failure. Product callers must
+    /// turn that failure into fail-stop instead of claiming that the old graph resumed cleanly.
+    pub fn cancel(self: *Reservation) Error!void {
+        if (!self.active) return;
+        var cleanup_failed = false;
+        if (self.attempt_open and self.primary_open and self.primary_present) {
+            removePinnedLeaf(self.attempt_fd, "primary", self.primary_fd) catch {
+                cleanup_failed = true;
+            };
+        }
+        if (self.attempt_open and self.backup_open and self.backup_present) {
+            removePinnedLeaf(self.attempt_fd, "backup", self.backup_fd) catch {
+                cleanup_failed = true;
+            };
+        }
+        if (self.primary_open) _ = c.close(self.primary_fd);
+        if (self.backup_open) _ = c.close(self.backup_fd);
+        if (self.attempt_open) {
+            if (c.fsync(self.attempt_fd) != 0) cleanup_failed = true;
+            _ = c.close(self.attempt_fd);
+        }
+        var leaf_buf: [64]u8 = undefined;
+        const leaf = std.fmt.bufPrintZ(&leaf_buf, "attempt-{x:0>32}", .{self.attempt_id}) catch {
+            if (self.owner_open) _ = c.close(self.owner_fd);
+            self.active = false;
+            return error.CleanupFailed;
+        };
+        if (self.owner_open) {
+            if (self.attempt_present and c.unlinkat(self.owner_fd, leaf.ptr, at_removedir) != 0)
+                cleanup_failed = true;
+            if (c.fsync(self.owner_fd) != 0) cleanup_failed = true;
+            _ = c.close(self.owner_fd);
+        }
+        self.active = false;
+        if (cleanup_failed) return error.CleanupFailed;
     }
 };
 
@@ -107,6 +169,195 @@ pub fn commit(
     budget: CommitBudget,
 ) Error!Pair {
     return commitWithFailpoint(allocator, owner_dir, expected, bytes, budget, .none);
+}
+
+/// Reserves both durable copies before readers are paused. `commitReserved` remains responsible
+/// for semantic validation, final exact length, fsync, read-back, and unlink-before-exec.
+pub fn reserve(
+    owner_dir: [:0]const u8,
+    attempt_id: u128,
+    reserved_len: usize,
+    deadline: upgrade_deadline.Deadline,
+) Error!Reservation {
+    return reserveWithFailpoint(owner_dir, attempt_id, reserved_len, deadline, .none);
+}
+
+fn reserveWithFailpoint(
+    owner_dir: [:0]const u8,
+    attempt_id: u128,
+    reserved_len: usize,
+    deadline: upgrade_deadline.Deadline,
+    failpoint: ReserveFailpoint,
+) Error!Reservation {
+    try validateLength(reserved_len, .{ .deadline = deadline });
+    try checkDeadline(.{ .deadline = deadline });
+    const owner_fd = try openOwnerDir(owner_dir);
+    var close_owner = true;
+    defer {
+        if (close_owner) _ = c.close(owner_fd);
+    }
+    var leaf_buf: [64]u8 = undefined;
+    const leaf = std.fmt.bufPrintZ(&leaf_buf, "attempt-{x:0>32}", .{attempt_id}) catch
+        return error.OpenFailed;
+    if (c.mkdirat(owner_fd, leaf.ptr, 0o700) != 0) {
+        if (posix.errno(-1) == .EXIST) return error.AlreadyExists;
+        return error.OpenFailed;
+    }
+    const attempt_fd = openOwnerDirAt(owner_fd, leaf) catch |err| {
+        if (c.unlinkat(owner_fd, leaf.ptr, at_removedir) != 0 or c.fsync(owner_fd) != 0)
+            return error.CleanupFailed;
+        return err;
+    };
+    var reservation: Reservation = .{
+        .owner_fd = owner_fd,
+        .attempt_fd = attempt_fd,
+        .primary_fd = -1,
+        .backup_fd = -1,
+        .attempt_id = attempt_id,
+        .reserved_len = reserved_len,
+        .primary_open = false,
+        .backup_open = false,
+        .primary_present = false,
+        .backup_present = false,
+    };
+    reservation.primary_fd = createReservedFile(attempt_fd, "primary", reserved_len) catch |err| {
+        cancelReserveFailure(&reservation, &close_owner) catch return error.CleanupFailed;
+        return err;
+    };
+    reservation.primary_open = true;
+    reservation.primary_present = true;
+    if (failpoint == .after_primary) {
+        cancelReserveFailure(&reservation, &close_owner) catch return error.CleanupFailed;
+        return error.WriteFailed;
+    }
+    reservation.backup_fd = createReservedFile(attempt_fd, "backup", reserved_len) catch |err| {
+        cancelReserveFailure(&reservation, &close_owner) catch return error.CleanupFailed;
+        return err;
+    };
+    reservation.backup_open = true;
+    reservation.backup_present = true;
+    checkDeadline(.{ .deadline = deadline }) catch |err| {
+        cancelReserveFailure(&reservation, &close_owner) catch return error.CleanupFailed;
+        return err;
+    };
+    close_owner = false;
+    return reservation;
+}
+
+fn cancelReserveFailure(reservation: *Reservation, close_owner: *bool) Error!void {
+    // `Reservation.cancel` closes owner_fd. Disable the outer pre-transfer guard first so a
+    // concurrently reused descriptor number can never be closed a second time on return.
+    close_owner.* = false;
+    try reservation.cancel();
+}
+
+pub fn commitReserved(
+    allocator: std.mem.Allocator,
+    reservation: *Reservation,
+    expected: ExpectedAuthority,
+    bytes: []const u8,
+    budget: CommitBudget,
+) Error!Pair {
+    if (!reservation.active or expected.attempt_id != reservation.attempt_id or
+        bytes.len > reservation.reserved_len)
+        return error.InvalidState;
+    try validateLength(bytes.len, budget);
+    try checkDeadline(budget);
+    validateHandoff(allocator, expected, bytes) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidState,
+    };
+    try writeReservedFile(reservation.primary_fd, bytes, budget);
+    try writeReservedFile(reservation.backup_fd, bytes, budget);
+    if (c.fsync(reservation.attempt_fd) != 0) return error.SyncFailed;
+    try checkDeadline(budget);
+
+    const primary_read = try openReadOnlyExact(reservation.attempt_fd, "primary", bytes.len);
+    errdefer _ = c.close(primary_read);
+    const backup_read = try openReadOnlyExact(reservation.attempt_fd, "backup", bytes.len);
+    errdefer _ = c.close(backup_read);
+    if (!sameFile(reservation.primary_fd, primary_read) or
+        !sameFile(reservation.backup_fd, backup_read))
+        return error.StateMismatch;
+    try readbackEqual(primary_read, bytes, budget);
+    try readbackEqual(backup_read, bytes, budget);
+    try removePinnedLeaf(reservation.attempt_fd, "primary", reservation.primary_fd);
+    reservation.primary_present = false;
+    try removePinnedLeaf(reservation.attempt_fd, "backup", reservation.backup_fd);
+    reservation.backup_present = false;
+    _ = c.close(reservation.primary_fd);
+    reservation.primary_open = false;
+    _ = c.close(reservation.backup_fd);
+    reservation.backup_open = false;
+    if (c.fsync(reservation.attempt_fd) != 0) return error.SyncFailed;
+    _ = c.close(reservation.attempt_fd);
+    reservation.attempt_open = false;
+    var leaf_buf: [64]u8 = undefined;
+    const leaf = std.fmt.bufPrintZ(
+        &leaf_buf,
+        "attempt-{x:0>32}",
+        .{reservation.attempt_id},
+    ) catch return error.CleanupFailed;
+    if (c.unlinkat(reservation.owner_fd, leaf.ptr, at_removedir) != 0) return error.CleanupFailed;
+    reservation.attempt_present = false;
+    if (c.fsync(reservation.owner_fd) != 0) return error.SyncFailed;
+    _ = c.close(reservation.owner_fd);
+    reservation.owner_open = false;
+    reservation.active = false;
+    return .{ .primary_fd = primary_read, .backup_fd = backup_read };
+}
+
+/// Measures the same filesystem and one of the already preallocated files without publishing it.
+/// The caller supplies incompressible bytes; the later authoritative commit overwrites this prefix.
+pub fn probeReservation(
+    reservation: *Reservation,
+    sample: []const u8,
+    deadline: upgrade_deadline.Deadline,
+) Error!i128 {
+    if (!reservation.active or sample.len == 0 or sample.len > reservation.reserved_len)
+        return error.InvalidState;
+    const started = deadline.nowNs();
+    var offset: usize = 0;
+    while (offset < sample.len) {
+        if (deadline.expired()) return error.DeadlineExceeded;
+        const n = c.pwrite(
+            reservation.primary_fd,
+            sample.ptr + offset,
+            sample.len - offset,
+            @intCast(offset),
+        );
+        if (n < 0) {
+            if (posix.errno(n) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (n == 0) return error.WriteFailed;
+        offset += @intCast(n);
+    }
+    if (c.fsync(reservation.primary_fd) != 0) return error.SyncFailed;
+    var checked: usize = 0;
+    var buffer: [64 * 1024]u8 = undefined;
+    while (checked < sample.len) {
+        if (deadline.expired()) return error.DeadlineExceeded;
+        const wanted = @min(buffer.len, sample.len - checked);
+        const n = c.pread(
+            reservation.primary_fd,
+            &buffer,
+            wanted,
+            @intCast(checked),
+        );
+        if (n < 0) {
+            if (posix.errno(n) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) return error.ReadFailed;
+        const got: usize = @intCast(n);
+        if (!std.mem.eql(u8, buffer[0..got], sample[checked .. checked + got]))
+            return error.StateMismatch;
+        checked += got;
+    }
+    const finished = deadline.nowNs();
+    if (finished <= started) return error.InvalidState;
+    return finished - started;
 }
 
 fn commitWithFailpoint(
@@ -294,6 +545,42 @@ fn writeAtomicExclusive(
     if (!sameFile(fd, read_fd)) return error.StateMismatch;
     final_exists = false;
     return read_fd;
+}
+
+fn createReservedFile(dir_fd: c.fd_t, leaf: [:0]const u8, len: usize) Error!c.fd_t {
+    const fd = c.openat(
+        dir_fd,
+        leaf.ptr,
+        .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fd < 0) return error.OpenFailed;
+    errdefer _ = c.close(fd);
+    reserveExact(fd, len) catch |err| {
+        removePinnedLeaf(dir_fd, leaf, fd) catch return error.CleanupFailed;
+        return err;
+    };
+    return fd;
+}
+
+fn writeReservedFile(fd: c.fd_t, bytes: []const u8, budget: CommitBudget) Error!void {
+    if (c.lseek(fd, 0, c.SEEK.SET) < 0) return error.WriteFailed;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        try checkDeadline(budget);
+        const n = c.write(fd, bytes.ptr + offset, bytes.len - offset);
+        if (n < 0) {
+            if (posix.errno(n) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (n == 0) return error.WriteFailed;
+        offset += @intCast(n);
+    }
+    const exact = std.math.cast(i64, bytes.len) orelse return error.LimitExceeded;
+    if (c.ftruncate(fd, exact) != 0) return error.WriteFailed;
+    try checkDeadline(budget);
+    if (c.fsync(fd) != 0) return error.SyncFailed;
+    try checkDeadline(budget);
 }
 
 fn reserveExact(fd: c.fd_t, len: usize) Error!void {
@@ -566,6 +853,60 @@ test "handoff store commits identical primary backup and unlinks secret paths be
     try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
     try std.testing.expect(c.fcntl(backup_fd, c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+}
+
+test "reserved handoff commits into pre-quiesce files and cleans the private attempt" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-reserved");
+    defer test_scratch.close(std.testing.io, dir);
+    const record = try testAttemptRecord(std.testing.allocator, 0xAC, 0x13);
+    defer std.testing.allocator.free(record);
+    const bytes = try handoff.encodeHost(std.testing.allocator, .{
+        .host_id = 0xAC,
+        .upgrade_epoch = 3,
+        .next_handle = 4,
+        .runtimes = &.{},
+        .attempt_record = record,
+    });
+    defer std.testing.allocator.free(bytes);
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    var reservation = try reserve(dir, 0x13, bytes.len + 128, deadline);
+    defer reservation.deinit();
+    var pair = try commitReserved(
+        std.testing.allocator,
+        &reservation,
+        testExpected(0xAC, 0x13, 4),
+        bytes,
+        .{ .deadline = deadline },
+    );
+    defer pair.deinit();
+    try readbackEqual(pair.primary_fd, bytes, .{ .deadline = deadline });
+    try readbackEqual(pair.backup_fd, bytes, .{ .deadline = deadline });
+    var attempt_buf: [256]u8 = undefined;
+    const attempt_path = try std.fmt.bufPrintZ(
+        &attempt_buf,
+        "{s}/attempt-{x:0>32}",
+        .{ dir, @as(u128, 0x13) },
+    );
+    try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
+}
+
+test "partial reservation failure removes the first copy and private attempt" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-partial-reserve");
+    defer test_scratch.close(std.testing.io, dir);
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    try std.testing.expectError(
+        error.WriteFailed,
+        reserveWithFailpoint(dir, 0x14, 4096, deadline, .after_primary),
+    );
+    var attempt_buf: [256]u8 = undefined;
+    const attempt_path = try std.fmt.bufPrintZ(
+        &attempt_buf,
+        "{s}/attempt-{x:0>32}",
+        .{ dir, @as(u128, 0x14) },
+    );
+    try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
 }
 
 test "handoff store rejects malformed or divergent state and removes attempt residue" {

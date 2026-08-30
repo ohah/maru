@@ -338,9 +338,10 @@ U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전**
    화면·notification의 logical generation이 전진하는 것은 정상이며, 최종 bytes가 예약 안에 있으면 commit할 수
    있다. 최종 bytes 자체의 codec·checksum·read-back 검증은 생략하지 않는다.
 
-예약 owner는 attempt 하나이며 성공 commit, 모든 retryable rollback, deadline, process teardown에서 primary/backup
-pathname과 fd를 exact-once 정리한다. 이 pre-admission은 기존 `handoff_store.commit`의 길이·identity·deadline 검증을
-대체하지 않고 그 앞에 추가된다.
+예약 owner는 attempt 하나이며 성공 commit, 모든 in-process retryable rollback과 deadline 경로에서 primary/backup
+pathname과 fd를 exact-once 정리한다. 정리가 실패하면 정상 재개로 축소하지 않고 invariant violation으로 fail-stop한다.
+`SIGKILL`·전원 손실은 userspace cleanup을 실행할 수 없으므로 crash 뒤 owner-only stale attempt sweep은 별도 이니셔티브다.
+이 pre-admission은 기존 `handoff_store.commit`의 길이·identity·deadline 검증을 대체하지 않고 그 앞에 추가된다.
 
 이 순서에서 upgrade snapshot 시점은 “모든 admitted outbound가 PTY에 적용됐고, 마지막 read chunk가 core에 적용된 직후”다.
 새 binary는 같은 fd에서 다음 unread byte부터 시작한다. 화면 generation은 보존하고 restore 뒤 첫 client에는 full snapshot을
@@ -848,8 +849,7 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   기존 build/epoch ready authority로 같은 순서를 수행한다. `allow_validation_only_restore=true`인 별도 fixture는
   bootstrap만 검사하고, 제품 artifact의 zero-runtime process gate는 restoring manifest와 activation marker로 실제
   commit 경로와 rollback fallback을 구분한다.
-- **아직 미구현 또는 미실행인 제품 종료 gate:** quiesce 전 handoff-size/disk/I/O budget admission, release manifest로
-  provenance가 고정된 signed frozen
+- **아직 미구현 또는 미실행인 제품 종료 gate:** release manifest로 provenance가 고정된 signed frozen
   N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 실제 제품 rollback activation, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
   failure injection, 장시간 soak와 **업그레이드 결과 notice**가 남아 있다(자동 orchestration 자체는 GUI의

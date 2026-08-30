@@ -661,6 +661,118 @@ pub const RuntimeManager = struct {
         }
     };
 
+    pub const UpgradeHandoffPreview = struct {
+        encoded_bytes_without_attempt: usize,
+        membership_generation: u64,
+        runtime_ids: [upgrade_limits.max_runtime_count]u128 = undefined,
+        runtime_count: usize,
+
+        pub fn sortedRuntimeIds(self: *const UpgradeHandoffPreview) []const u128 {
+            return self.runtime_ids[0..self.runtime_count];
+        }
+
+        pub fn totalBytesWithAttempt(self: UpgradeHandoffPreview, attempt_record_len: usize) !usize {
+            const attempt_section = handoff_codec.encodedAttemptSectionBytes(attempt_record_len) catch
+                return error.LimitExceeded;
+            const total = std.math.add(
+                usize,
+                self.encoded_bytes_without_attempt,
+                attempt_section,
+            ) catch return error.LimitExceeded;
+            if (total > upgrade_limits.max_handoff_commit_bytes) return error.LimitExceeded;
+            return total;
+        }
+    };
+
+    /// U5 pre-quiesce admission preview. This is a read-only encode of the current graph: it does
+    /// not request a reader pause, adopt an fd, or mutate admission. The authoritative encode still
+    /// happens after quiesce and must fit the resulting reservation.
+    pub fn previewUpgradeHandoff(
+        self: *RuntimeManager,
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        upgrade_epoch: u64,
+        authority_generation: u64,
+        first_fd_slot: u16,
+    ) (QuiesceError || handoff_codec.Error)!UpgradeHandoffPreview {
+        _ = self.drainOwnedEvents();
+        const layout = upgrade_fd_layout.Layout.init(first_fd_slot) catch return error.LimitExceeded;
+        if (self.host_registry.count() > upgrade_limits.max_runtime_count) return error.TooManyRuntimes;
+
+        var items: [upgrade_limits.max_runtime_count]UpgradeItem = undefined;
+        const count = try self.collectLiveUpgradeItems(&items);
+        std.mem.sort(UpgradeItem, items[0..count], {}, struct {
+            fn lessThan(_: void, a: UpgradeItem, b: UpgradeItem) bool {
+                return a.handle < b.handle;
+            }
+        }.lessThan);
+
+        var views: [upgrade_limits.max_runtime_count]handoff_codec.RuntimeView = undefined;
+        var preview: UpgradeHandoffPreview = .{
+            .encoded_bytes_without_attempt = 0,
+            .membership_generation = self.host_registry.membershipGeneration() catch
+                return error.UnsafeFrontier,
+            .runtime_count = count,
+        };
+        const notification_handoff = self.notification_journal.encodeHandoff(
+            allocator,
+            self.notification_permanent_drops,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.LimitExceeded => return error.LimitExceeded,
+            error.InvalidOwner => return error.UnsafeFrontier,
+        };
+        defer allocator.free(notification_handoff);
+        const notification_metadata_handoff = self.notification_metadata.encodeHandoff(allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsafeFrontier,
+        };
+        defer allocator.free(notification_metadata_handoff);
+
+        var locked: usize = 0;
+        defer for (items[0..locked]) |item| item.terminal_slot.surface.unlockCore(self.io);
+        for (items[0..count], 0..) |item, index| {
+            if (item.entry.controller != null or item.entry.observers.items.len != 0)
+                return error.Attached;
+            if (!item.terminal_slot.live_pty.upgradeEligible()) return error.RuntimeNotLive;
+            item.terminal_slot.surface.lockCore(self.io);
+            locked += 1;
+            const session = item.terminal_slot.live_pty.session;
+            const size = session.canonicalSize();
+            const identity = session.masterIdentity() catch return error.UnsafeFrontier;
+            if (size.cols != item.entry.cols or size.rows != item.entry.rows) return error.UnsafeFrontier;
+            const inherited_slot: u16 = @intCast(layout.runtimeSlot(index) orelse return error.LimitExceeded);
+            preview.runtime_ids[index] = item.entry.id;
+            views[index] = .{
+                .runtime_id = item.entry.id,
+                .surface_id = item.handle,
+                .child_pid = session.childPid(),
+                .cols = item.entry.cols,
+                .rows = item.entry.rows,
+                .resize_generation = item.entry.resize_generation,
+                .fd_slot = inherited_slot,
+                .pty_dev = identity.dev,
+                .pty_ino = identity.ino,
+                .pty_rdev = identity.rdev,
+                .core = &item.terminal_slot.surface.core,
+            };
+        }
+        std.mem.sort(u128, preview.runtime_ids[0..count], {}, std.sort.asc(u128));
+        const encoded = try handoff_codec.encodeHostWithMaxBytes(allocator, .{
+            .host_id = host_id,
+            .upgrade_epoch = upgrade_epoch,
+            .authority_generation = authority_generation,
+            .membership_generation = preview.membership_generation,
+            .next_handle = self.next_handle,
+            .runtimes = views[0..count],
+            .notification_handoff = notification_handoff,
+            .notification_metadata_handoff = notification_metadata_handoff,
+        }, upgrade_limits.max_handoff_commit_bytes);
+        defer allocator.free(encoded);
+        preview.encoded_bytes_without_attempt = encoded.len;
+        return preview;
+    }
+
     /// 한 번 열거한 paused graph의 logical views와 실제 PTY fd mapping. Attempt record의 sorted runtime set과
     /// outer handoff를 이 candidate 하나에서 만들어 두 결과가 서로 다른 registry snapshot을 보지 않게 한다.
     pub const QuiescedCapture = struct {
@@ -2807,6 +2919,25 @@ test "P4 N2b2 daemon owner tick delivers OS notification through typed adapter w
     try std.testing.expect(manager.notification_journal.oldestPending(.os) == null);
     try std.testing.expect(manager.notification_journal.peek(key).?.pending_gui);
     try std.testing.expectEqual(@as(u64, 1), manager.notificationOsCounters().accepted);
+}
+
+test "U5 budget preview is read-only and includes every non-attempt section" {
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.initWithHostId(allocator, std.testing.io, &host_registry, 0xAB, null);
+    defer manager.deinit();
+
+    const before_count = host_registry.count();
+    const preview = try manager.previewUpgradeHandoff(allocator, 0xAB, 3, 1, 40);
+    try std.testing.expectEqual(before_count, host_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), preview.runtime_count);
+    try std.testing.expect(preview.encoded_bytes_without_attempt > 0);
+    try std.testing.expectEqual(
+        preview.encoded_bytes_without_attempt + try handoff_codec.encodedAttemptSectionBytes(128),
+        try preview.totalBytesWithAttempt(128),
+    );
 }
 
 test "P4 N2a product owner admits real PTY OSC into stable host journal" {

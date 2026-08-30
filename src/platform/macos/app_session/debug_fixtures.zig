@@ -1291,3 +1291,30 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
         self.metal_dirty = true;
     }
 }
+
+/// 심볼 피커를 연다(캡처 전용 debug-gate — native-editor-ui.md §7.5).
+///
+/// **파일 패널 훅과 따로 둔다.** 그쪽은 「이 실행에서 새로 열었을 때」만 끝까지 가는데(복원된 작업
+/// 공간에 그 파일이 이미 있으면 중간에 돌아온다), 피커는 **이미 열려 있는 문서**에도 떠야 한다.
+/// 처음에 그 함수 안에 두었다가 캡처가 빈 화면으로 나와서 알았다.
+///
+/// **사용자와 같은 경로를 태운다**(`toggleSymbolPicker`) — 상태를 심지 않으므로 저하 판정
+/// (편집기 아님·심볼 없음·파싱 미완)도 제품이 정한 대로 돈다.
+pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {
+    if (!self.dock_initialized) return;
+    if (std.c.getenv("MARU_OPEN_SYMBOL_PICKER") == null) return;
+    // **한 번만 열지 않는다.** 작업 공간 복원 알림처럼 **나중에 뜨는 오버레이**가 단일-오버레이
+    // 불변식으로 피커를 닫는다(`dismissMessageOverlays`) — 한 번만 열면 캡처에 안 남는다. 실제로
+    // 그렇게 빈 화면이 나왔다. 열릴 때까지 매 tick 다시 연다(캡처 전용이라 상한만 둔다).
+    if (self.chrome_host.symbol_picker.open) return;
+    if (self.debug_symbol_picker_opened) return;
+    self.debug_symbol_picker_tries +%= 1;
+    if (self.debug_symbol_picker_tries > 240) self.debug_symbol_picker_opened = true; // 4초쯤이면 포기
+    editor_ops.toggleSymbolPicker(self);
+    // MARU_OPEN_SYMBOL_PICKER_QUERY=<쿼리> — 필터된 목록을 캡처한다.
+    if (std.c.getenv("MARU_OPEN_SYMBOL_PICKER_QUERY")) |qv| {
+        self.chrome_host.symbol_picker.input.query.appendSlice(self.allocator, std.mem.span(qv)) catch {};
+        editor_ops.recomputeSymbolPicker(self);
+    }
+    self.metal_dirty = true;
+}

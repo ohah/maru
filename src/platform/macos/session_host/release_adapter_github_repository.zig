@@ -10,11 +10,11 @@ const github_json = @import("release_adapter_github_json");
 
 pub const max_response_bytes = github_json.max_response_bytes;
 
-const ApiOwner = struct {
+pub const WireOwner = struct {
     login: []const u8,
 };
 
-const StrictU64 = struct {
+pub const StrictU64 = struct {
     value: u64,
 
     pub fn jsonParse(
@@ -29,11 +29,11 @@ const StrictU64 = struct {
     }
 };
 
-const ApiRepository = struct {
+pub const WireRepository = struct {
     id: StrictU64,
     name: []const u8,
     full_name: []const u8,
-    owner: ApiOwner,
+    owner: WireOwner,
 };
 
 pub const Error = error{
@@ -43,7 +43,7 @@ pub const Error = error{
 } || std.mem.Allocator.Error;
 
 pub const Parsed = struct {
-    inner: std.json.Parsed(ApiRepository),
+    inner: std.json.Parsed(WireRepository),
     bound_repository: release_manifest.Repository,
 
     pub fn deinit(self: *Parsed) void {
@@ -64,7 +64,7 @@ pub fn parseAndBind(
 ) Error!Parsed {
     github_json.validateCompleteResponse(bytes) catch |err| return err;
 
-    var inner = std.json.parseFromSlice(ApiRepository, allocator, bytes, .{
+    var inner = std.json.parseFromSlice(WireRepository, allocator, bytes, .{
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
         .duplicate_field_behavior = .@"error",
@@ -75,12 +75,7 @@ pub fn parseAndBind(
     errdefer inner.deinit();
 
     const value = inner.value;
-    if (value.id.value == 0 or expected.id == 0 or
-        value.id.value != expected.id or
-        !std.mem.eql(u8, value.owner.login, expected.owner) or
-        !std.mem.eql(u8, value.name, expected.name) or
-        !fullNameMatches(value.full_name, value.owner.login, value.name))
-        return error.RepositoryMismatch;
+    if (!matchesWire(value, expected)) return error.RepositoryMismatch;
 
     return .{
         .inner = inner,
@@ -90,6 +85,16 @@ pub fn parseAndBind(
             .name = value.name,
         },
     };
+}
+
+/// Shared nested repository identity check for endpoint responses that embed the same REST shape.
+/// Keeping this here prevents each endpoint from weakening owner/name/full-name consistency.
+pub fn matchesWire(value: WireRepository, expected: release_manifest.Repository) bool {
+    return value.id.value != 0 and expected.id != 0 and
+        value.id.value == expected.id and
+        std.mem.eql(u8, value.owner.login, expected.owner) and
+        std.mem.eql(u8, value.name, expected.name) and
+        fullNameMatches(value.full_name, value.owner.login, value.name);
 }
 
 fn fullNameMatches(full_name: []const u8, owner: []const u8, name: []const u8) bool {

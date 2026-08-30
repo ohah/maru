@@ -8,6 +8,7 @@
 //! 그 값을 스크롤 투영에 그대로 넘긴다(옛 셀 그리드 경로가 갈려서 "그린 자리와 눌리는 자리"가 어긋났다).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 
 const chrome = maru.chrome;
@@ -17,6 +18,7 @@ const CollectedPane = AppSession.CollectedPane;
 const coretext_frame_builder = app_session_mod.coretext_frame_builder;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const metal_frame = app_session_mod.metal_frame;
+const terminal = maru.terminal; // Page/Home/End 키 이벤트 타입
 const dock_ops = @import("dock.zig");
 const git_ops = @import("git.zig");
 const scroll_ops = @import("scroll.zig"); // 목록 스크롤 상한(스크롤바 기하의 max_offset)
@@ -4233,4 +4235,93 @@ test "턴 요약: 캡처가 센 편집 수를 tree 의 수와 **나란히** 말�
     // **tree 가 0이면 캡처가 있어도 줄이 빈다** — 그 자리는 「못 읽었다」와 구분되지 않는다.
     var zero: maru.session.turn_snapshot.Snapshot = .{ .files_known = true, .changed_files = 0 };
     try std.testing.expectEqualStrings("", turnSummary(a, &zero, 5));
+}
+
+/// 도크가 **소스 컨트롤 뷰로 키를 들고 있을 때**의 PageUp/PageDown/Home/End.
+///
+/// 탐색기(`file_tree_dock.handleFileTreeDockScrollKey`)와 같은 규율이고, 다른 것은 상한의 출처뿐이다 —
+/// 여기서는 마지막 투영이 남긴 `scmScrollExtent`를 읽는다(세 탭의 목록 출처가 달라 그 자리가 유일한
+/// 단일 출처다). 커밋 상자가 편집 중이면 그 상자가 키의 주인이라 넘기지 않는다.
+pub fn handleScmDockScrollKey(self: *AppSession, event: terminal.KeyEvent) bool {
+    if (!dock_ops.dockVisible(self) or self.dock.view != .source_control or !self.dockKeyFocus()) return false;
+    if (event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
+        return false;
+    if (self.scmCommitOwnsInput()) return false; // 커밋 메시지 편집 중이면 Home/End 는 caret 의 것이다
+    const extent = scroll_ops.scmScrollExtent(self);
+    const row_h = component.types.DockMetrics.resolve(scmDockScaleMilli(self)).row_h;
+    const step = chrome.ui.scroll_area.pageStepPx(extent.viewport_h_px, row_h);
+    const changed = switch (event.key) {
+        .page_up => self.scm_scroll.scrollByPx(-@as(i64, step), extent.max_offset_px),
+        .page_down => self.scm_scroll.scrollByPx(@as(i64, step), extent.max_offset_px),
+        .home => self.scm_scroll.setOffsetPx(0, extent.max_offset_px),
+        .end => self.scm_scroll.setOffsetPx(extent.max_offset_px, extent.max_offset_px),
+        else => return false,
+    };
+    self.scm_scroll.dropWheelResidue();
+    if (changed) self.metal_dirty = true;
+    return true;
+}
+
+test "소스 컨트롤 키보드 스크롤: 한 행을 남기고 · 끝으로 가고 · 주인이 아니면 안 잡는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 마지막 투영이 남기는 자리를 직접 채운다 — 이 핸들러가 읽는 유일한 상한 출처다(`scrollExtent`).
+    const viewport_h: u32 = 400;
+    const max_offset: u32 = 1000;
+    session.scm_scroll_extent = .{
+        .content_h_px = viewport_h + max_offset,
+        .viewport_h_px = viewport_h,
+        .max_offset_px = max_offset,
+    };
+    const row_h = component.types.DockMetrics.resolve(scmDockScaleMilli(session)).row_h;
+    try std.testing.expect(viewport_h > row_h);
+
+    // ① **주인이 아니면 안 잡는다.** 도크가 안 보이거나 다른 뷰이거나 키를 안 들었으면 그 키는
+    //    터미널 것이다 — 여기서 true를 돌리면 셸에서 친 PageDown이 사라진다.
+    session.dock_initialized = true;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.view = .source_control;
+    try std.testing.expect(dock_ops.dockVisible(session));
+    session.agent_session_dock_key_focus = false;
+    try std.testing.expect(!handleScmDockScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
+    session.agent_session_dock_key_focus = true;
+    session.dock.view = .explorer;
+    try std.testing.expect(!handleScmDockScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
+    session.dock.view = .source_control;
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
+
+    // ② PageDown은 **한 행을 남긴다** — 한 화면을 통째로 넘기면 읽던 자리가 끊긴다(`pageStepPx` 계약).
+    try std.testing.expect(handleScmDockScrollKey(session, .{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expectEqual(viewport_h - row_h, session.scm_scroll.offset_y_px);
+
+    // ③ End는 정확히 상한, Home은 0이다.
+    try std.testing.expect(handleScmDockScrollKey(session, .{ .key = .end, .modifiers = .{} }));
+    try std.testing.expectEqual(max_offset, session.scm_scroll.offset_y_px);
+    try std.testing.expect(handleScmDockScrollKey(session, .{ .key = .home, .modifiers = .{} }));
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
+
+    // ④ **경계에서도 소비한다.** 맨 위에서 PageUp은 픽셀을 못 움직이지만 true여야 한다 — 안 그러면
+    //    보이는 목록을 겨눈 키가 뒤의 터미널로 새어 스크롤백이 감긴다.
+    try std.testing.expect(handleScmDockScrollKey(session, .{ .key = .page_up, .modifiers = .{} }));
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
+
+    // ⑤ 수식키가 붙으면 넘기지 않는다 — ⌘Home 같은 조합은 다른 주인이 있다.
+    try std.testing.expect(!handleScmDockScrollKey(session, .{ .key = .end, .modifiers = .{ .command = true } }));
+    try std.testing.expectEqual(@as(u32, 0), session.scm_scroll.offset_y_px);
+
+    // ⑥ 스크롤 키가 아닌 것은 그대로 흘려보낸다.
+    try std.testing.expect(!handleScmDockScrollKey(session, .{ .key = .enter, .modifiers = .{} }));
 }

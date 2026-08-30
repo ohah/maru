@@ -209,6 +209,40 @@ $ infocmp xterm-256color
 - OS나 다른 앱이 이미 선점한 global shortcut은 등록 실패로 보고하고, 조용히 무시하지 않는다.
 - 사용자가 명시적으로 `send_text` 또는 `send_escape_sequence`를 설정한 조합은 app action과 동시에 사용할 수 없다.
 
+### 목록 스크롤 키(`PageUp`/`PageDown`/`Home`/`End`)의 주인 — 그리고 notice 비대칭
+
+같은 넷을 여러 소비처가 노린다. `handleKeyEvent` 의 **순차 판정 순서**가 곧 정책이고(responder chain
+이 아니라 한 함수의 if 체인이다), 그 순서는 이렇다:
+
+| 순서 | 누가 | 조건 | 그 키로 무엇을 |
+| --- | --- | --- | --- |
+| 1 | rename · 주소창 · **사이드바 검색** · 커밋 상자 | 각자 활성 + `!anyModalOverlayOpen()` | 사이드바 검색만 목록을 굴린다(나머지 셋은 이 넷을 안 쓴다) |
+| 2 | **오버레이 일괄**(`anyOverlayOpen()`) | 모달 또는 **notice** 가 열림 | 모든 키를 소비 — notice 는 아무 키로나 닫힌다 |
+| 3 | **소스 컨트롤 도크** | 도크 보임 + 그 뷰 + `dockKeyFocus()` | 목록을 굴린다 |
+| 4 | **에이전트 세션 도크** | 〃 | 목록을 굴린다 |
+| 5 | **파일 탐색기** | `file_tree_focus` | **선택 이동**이다(스크롤이 아니다 — 위 표) |
+| 6 | 터미널 | `input.page-keys = scroll` | 스크롤백 |
+
+**탐색기가 스크롤 대상이 아닌 이유**는 5번이다 — 그 넷이 이미 선택 이동의 주인이라, 스크롤을 얹으면
+그 축을 뺏는다([ScrollArea](scroll-area.md) §4.5 가 그 정정을 소유한다).
+
+**알려진 비대칭 — 사이드바만 notice 를 앞지른다(고치지 않는다).** 1번은 `anyModalOverlayOpen()`
+(notice **제외**)을 보고 2번은 `anyOverlayOpen()`(notice **포함**)을 본다. 그래서 notice 토스트가 떠
+있을 때 도크 둘은 키를 못 먹고 notice 가 닫히는데, **사이드바 검색 중에는 목록이 굴러가고 notice 는
+안 닫힌다**(클릭·휠로는 닫힌다 — mouse/scrollWheel 이 같은 규율을 건다).
+
+**순서를 바꾸는 것은 답이 아니다.** ⑴ 1번의 넷이 **같은 게이트를 공유**하므로 사이드바만 뒤로 옮기면
+지금 비대칭을 다른 비대칭으로 바꾼다. ⑵ 그 게이트가 notice 를 제외하는 것은 의도다 — *"지나가는
+토스트가 활성 편집을 끊으면 안 된다"* 이고, Swift focus-sync override(`terminalOwnsInput`)도 같은
+판정을 써서 **둘이 어긋나면 웹 포커스 동기가 깨진다**. ⑶ 스크롤 핸들러만 물러나도 검색 블록 자체가
+2번보다 앞이라 notice 는 여전히 안 닫히고, 스크롤만 사라져 **더 나빠진다**.
+
+**근본 해법은 notice 쪽에 있다.** 표준 토스트는 몇 초 뒤 스스로 사라지는데(ARIA live region ·
+Material snackbar — 포커스도 키도 뺏지 않는다) 이 notice 에는 **자동 타임아웃이 없어서** 「아무 키로나
+닫는다」는 규율로 그 자리를 메웠다. 타임아웃이 생기면 notice 가 키 라우팅에서 통째로 빠지고 이
+비대칭도 함께 사라진다. 다만 *어떤 notice 는 사용자가 반드시 읽어야 하는가*는 [알림 전략](notifications.md)
+의 결정이라 여기서 정하지 않는다.
+
 ### 파일 도크·트리 키 소유권과 우선순위
 
 Zig의 `FocusOwner` tagged union은 구조 입력 축인 `.workspace`(terminal·browser·파일 Term 공통), `.dock_pending { EntryId }`(파일 WebView publish를 기다리는 짧은 fail-closed barrier), `.file_tree { restore_surface }` 셋이다. FP16(2026-07-28)에서 `.dock_surface { surface_id }`와 `.dock_group { runtime_id }`는 사라졌다 — 파일이 워크스페이스 pane 탭이 되면서 "어느 파일 WebView가 native focus인가"는 별도 축이 아니라 **활성 pane의 활성 Term**에서 파생된다(docs/file-panel-dock-ui.md §3.4).

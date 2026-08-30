@@ -28,7 +28,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         loaded += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 7), testCount(sources[0]));
+    try std.testing.expectEqual(@as(usize, 8), testCount(sources[0]));
     try std.testing.expectEqual(@as(usize, 6), testCount(sources[1]));
     try std.testing.expectEqual(@as(usize, 3), testCount(sources[2]));
     try std.testing.expectEqual(@as(usize, 5), testCount(sources[3]));
@@ -41,6 +41,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
         .{ .source = 0, .title = "handoff store directory fd stays on the approved generation after path replacement" },
         .{ .source = 0, .title = "handoff store exact cleanup preserves a swapped replacement leaf" },
         .{ .source = 0, .title = "reserved handoff syscall failures publish no pair and leave no attempt residue" },
+        .{ .source = 0, .title = "reservation cleanup identity failure closes descriptors and preserves replacement" },
         .{ .source = 1, .title = "exec fd set exposes only reserved duplicate and rollback preserves CLOEXEC source" },
         .{ .source = 1, .title = "exec fd set rejects occupied and duplicate reserved slots without changing source" },
         .{ .source = 1, .title = "restore inherited close token consumes the exact non-cloexec set" },
@@ -65,6 +66,13 @@ test "U5 second failure matrix keeps the exact component inventory" {
         .limited(1024 * 1024),
     );
     defer std.testing.allocator.free(build);
+    const coordinator = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "src/platform/macos/session_host/upgrade_product_coordinator.zig",
+        std.testing.allocator,
+        .limited(256 * 1024),
+    );
+    defer std.testing.allocator.free(coordinator);
     try std.testing.expect(contains(build, "test-session-host-upgrade-component-failure-matrix"));
     try std.testing.expect(contains(build, "component_failure_matrix_step.dependOn(&run_handoff_store_tests.step)"));
     try std.testing.expect(contains(build, "component_failure_matrix_step.dependOn(&run_exec_fd_set_tests.step)"));
@@ -72,4 +80,10 @@ test "U5 second failure matrix keeps the exact component inventory" {
     try std.testing.expect(contains(build, "component_failure_matrix_step.dependOn(&run_upgrade_target_tests.step)"));
     try std.testing.expect(contains(build, "test-session-host-upgrade-reserved-handoff-failures"));
     try std.testing.expect(contains(build, "run_reserved_handoff_failure_tests.addArg(\"--maru-expect-tests=1\")"));
+    try std.testing.expect(contains(build, "test-session-host-upgrade-reservation-cleanup-failure"));
+    try std.testing.expect(contains(build, "run_reservation_cleanup_failure_tests.addArg(\"--maru-expect-tests=1\")"));
+    try std.testing.expect(contains(
+        coordinator,
+        "budget_reservation.cancel() catch return .invariant_violation",
+    ));
 }

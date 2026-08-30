@@ -7,6 +7,7 @@
 const std = @import("std");
 // cli/ssh.zig를 직접 import하면 root와 maru 두 모듈에 중복되므로(빌드 에러) maru 모듈을 통해 쓴다.
 const ssh = @import("maru").cli.ssh;
+const agent_hooks = @import("maru").cli.agent_hooks; // 원격 `maru` 를 찾는 PATH 처방(설치와 같은 값)
 
 pub const UploadError = error{
     PipeFailed, // pipe(2) 실패
@@ -178,7 +179,16 @@ pub fn spawnAgentEvents(
     //
     // 큰따옴표 안에 들어가는 값이 **우리 상수 하나**라는 점이 이 인용을 안전하게 만든다 — 사용자 입력이
     // 여기 들어오게 되면 그때는 인용이 아니라 검증이 필요하다.
-    const cmd = try std.fmt.allocPrint(allocator, "{s} agent-events --stdio --dir=\"$HOME/{s}\"", .{ remote_maru, remote_dir_rel });
+    // ⚠️ **PATH 를 앞에 붙인다 — 설치 명령과 같은 이유다.** `ssh host cmd` 의 PATH 는 흔히
+    // `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이라 `~/.local/bin` 이나 Homebrew 의 `maru` 를 못 찾는다.
+    // 설치만 고치고 여기를 안 고치면 **설치는 되는데 스트리머가 안 뜨는** 상태가 된다 — 그러면 훅은
+    // 쌓이는데 이벤트가 하나도 안 나오고, 증상은 「배지가 안 선다」로 앞의 실패와 구분되지 않는다.
+    // 덮지 않고 앞에 붙이므로 사용자가 PATH 로 고른 `maru` 가 있으면 그쪽이 이긴다.
+    const cmd = try std.fmt.allocPrint(
+        allocator,
+        "PATH=\"{s}:$PATH\"; exec {s} agent-events --stdio --dir=\"$HOME/{s}\"",
+        .{ agent_hooks.remote_path_prefix, remote_maru, remote_dir_rel },
+    );
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

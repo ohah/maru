@@ -94,9 +94,9 @@ pub fn remoteShellCommand(
 ) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
+        "PATH=\"{s}:$PATH\"; command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
             "maru agent-hooks {s} --provider={s} --scope=remote --dir=\"$HOME/{s}\"",
-        .{ no_maru_marker, @tagName(action), provider_tag, remote_dir_rel },
+        .{ remote_path_prefix, no_maru_marker, @tagName(action), provider_tag, remote_dir_rel },
     );
 }
 
@@ -114,15 +114,28 @@ pub fn remoteShellCommandAll(
 ) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
+        "PATH=\"{s}:$PATH\"; command -v maru >/dev/null 2>&1 || {{ printf '%s\\n' '{s}'; exit 0; }}; " ++
             "maru agent-hooks {s} --provider=claude --scope=remote --dir=\"$HOME/{s}\"; " ++
             "maru agent-hooks {s} --provider=codex --scope=remote --dir=\"$HOME/{s}\"",
-        .{ no_maru_marker, @tagName(action), remote_dir_rel, @tagName(action), remote_dir_rel },
+        .{ remote_path_prefix, no_maru_marker, @tagName(action), remote_dir_rel, @tagName(action), remote_dir_rel },
     );
 }
 
 /// 원격에 `maru` 가 없을 때 나가는 표식. **`exit 0` 으로 끝낸다** — 셸이 «명령 없음» 으로 주는 127 은
 /// 「연결이 끊겼다」와 구분되지 않기 때문이다(스트리머가 종료 코드를 못 믿는 것과 같은 이유).
+/// 원격에서 `maru` 를 찾기 전에 **PATH 앞에 붙이는 자리들**.
+///
+/// ⚠️ **`ssh host cmd` 의 PATH 는 로그인 셸보다 좁다.** 흔히 `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이라
+/// 사용자가 `~/.local/bin` 이나 Homebrew 에 깐 `maru` 가 **안 잡힌다.** 그러면 우리 명령의 첫 줄이
+/// 표식을 내고 로컬은 「원격에 maru 가 없다」로 축을 안 연다 — 실제로 그렇게 한 번 안 열렸다
+/// (2026-08-30 실측: `maru` 가 `~/.local/bin/maru` 에 있는데 비대화형 PATH 에서 못 찾았다).
+///
+/// tmux 역조회 스크립트는 **같은 함정을 이미 배워** 이 처방을 쓰고 있었는데(RA6), `maru` 를 찾는
+/// 자리에는 안 옮겨져 있었다. 한 곳에서만 막은 실패는 다른 곳에서 그대로 난다.
+///
+/// **PATH 를 덮지 않고 앞에 붙인다** — 사용자가 PATH 로 고른 `maru` 가 있으면 그쪽이 이긴다.
+pub const remote_path_prefix = "$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin";
+
 pub const no_maru_marker = "!maru-not-installed";
 
 /// 훅 파일 락을 기다리는 시간.
@@ -279,4 +292,27 @@ test "remoteShellCommandAll: 두 provider 를 한 번에 깔고, maru 가 없으
     defer a.free(rm);
     try testing.expect(std.mem.indexOf(u8, rm, "uninstall --provider=claude") != null);
     try testing.expect(std.mem.indexOf(u8, rm, "uninstall --provider=codex") != null);
+}
+
+test "원격 명령은 PATH 를 앞에 붙여 maru 를 찾는다 — 비대화형 PATH 는 좁다" {
+    // ⚠️ **실제로 이것 때문에 축이 안 열렸다**(2026-08-30 실측). `maru` 가 `~/.local/bin/maru` 에
+    // 있는데 `ssh host cmd` 의 PATH 는 `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이라 못 찾았고, 우리 명령의
+    // 첫 줄이 «없다» 표식을 내 로컬이 축을 안 열었다. tmux 역조회는 같은 함정을 이미 배워 이 처방을
+    // 쓰고 있었는데 여기에는 안 옮겨져 있었다.
+    const a = testing.allocator;
+    for ([_][]const u8{
+        try remoteShellCommand(a, .install, "claude", "x/y"),
+        try remoteShellCommandAll(a, .install, "x/y"),
+    }) |cmd| {
+        defer a.free(cmd);
+        // PATH 를 **덮지 않고 앞에 붙인다** — 사용자가 PATH 로 고른 maru 가 있으면 그쪽이 이긴다.
+        try testing.expect(std.mem.indexOf(u8, cmd, "PATH=\"" ++ remote_path_prefix ++ ":$PATH\";") != null);
+        // 흔한 두 자리는 반드시 들어 있어야 한다(실측이 걸린 자리와 Homebrew).
+        try testing.expect(std.mem.indexOf(u8, cmd, "$HOME/.local/bin") != null);
+        try testing.expect(std.mem.indexOf(u8, cmd, "/opt/homebrew/bin") != null);
+        // PATH 를 손보는 것이 `command -v` **앞**이어야 뜻이 있다.
+        const path_at = std.mem.indexOf(u8, cmd, "PATH=").?;
+        const lookup_at = std.mem.indexOf(u8, cmd, "command -v maru").?;
+        try testing.expect(path_at < lookup_at);
+    }
 }

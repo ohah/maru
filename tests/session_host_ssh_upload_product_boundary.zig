@@ -65,4 +65,12 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     try std.testing.expect(std.mem.indexOf(u8, fn_body, "--dir='") == null);
     // 받는 값이 **상대 경로**임을 이름으로도 못박는다 — 절대 경로를 넘기면 `$HOME` 이 앞에 또 붙는다.
     try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_dir_rel") != null);
+
+    // ⚠️ **스트리머도 PATH 를 앞에 붙여야 한다.** 설치만 고치고 여기를 빠뜨리면 «설치는 되는데
+    // 스트리머가 안 뜨는» 상태가 되고, 증상은 앞의 실패와 구분되지 않는다(둘 다 「배지가 안 선다」).
+    // 값은 설치와 **같은 상수**여야 한다 — 두 곳에 따로 적으면 한쪽만 고쳐진다.
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_path_prefix") != null);
+    // **한 문자열로 순서까지 함께 문다.** 따로 찾으면 위 문서 주석에 있는 `agent-events --stdio` 가
+    // 먼저 걸려 «PATH 가 뒤에 있다» 고 잘못 읽는다(실제로 그렇게 한 번 빨갰다).
+    try std.testing.expect(std.mem.indexOf(u8, fn_body, "PATH=\\\"{s}:$PATH\\\"; exec {s} agent-events --stdio") != null);
 }

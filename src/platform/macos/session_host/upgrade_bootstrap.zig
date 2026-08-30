@@ -986,6 +986,15 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     _ = c.close(ready_marker);
 }
 
+test "product rollback preserves one real PTY through exit" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const gate = c.getenv("MARU_SESSION_HOST_NONEMPTY_PRODUCT_ROLLBACK_GATE") orelse
+        return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(gate), "maru-test-only-v1"))
+        return error.SkipZigTest;
+    return error.NonEmptyProductRollbackNotImplemented;
+}
+
 fn openTruncatedUnlinkedCopy(owner_dir: [:0]const u8, bytes: []const u8) !c.fd_t {
     var path_buf: [1024]u8 = undefined;
     const path = std.fmt.bufPrintZ(

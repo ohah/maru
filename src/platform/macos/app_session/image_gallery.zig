@@ -983,26 +983,36 @@ pub fn appendHoverQuad(self: *AppSession) void {
     const l = gridLayout(self);
     const cell = image_grid.rectAt(area, gridMetrics(self), l, n) orelse return;
 
-    // 전경색을 옅게. 배경색을 쓰면 어두운 테마에서 판이 안 보이고, 강조색을 새로 정하면 테마와 논다.
-    const color: u32 = app_session_mod.packRgbAlpha(self.appearance.theme.sidebar_foreground, hover_plate_alpha);
+    // 전경색을 옅게. 배경색을 쓰면 어두운 테마에서 안 보이고, 강조색을 새로 정하면 테마와 논다.
+    const color: u32 = app_session_mod.packRgbAlpha(self.appearance.theme.sidebar_foreground, hover_ring_alpha);
     self.gpu_quads.append(self.allocator, .{
         .x = @floatFromInt(cell.x),
         .y = @floatFromInt(cell.y),
         .w = @floatFromInt(cell.w),
         .h = @floatFromInt(cell.h),
         .corner_radii = .{ 4, 4, 4, 4 },
-        .border_widths = .{ 0, 0, 0, 0 },
-        .fill_color0 = color,
-        .fill_color1 = color,
-        .border_color = 0,
+        // **테두리만** 그린다(네 변). 채우면 그림 위에 얹히는 층이라 썸네일이 그 색에 잠긴다 —
+        // 셰이더가 fill alpha 0 과 border alpha 를 섞으므로 테두리만 남는다.
+        .border_widths = .{ hover_ring_px, hover_ring_px, hover_ring_px, hover_ring_px },
+        .fill_color0 = 0,
+        .fill_color1 = 0,
+        .border_color = color,
         .gradient_kind = 0,
-        // **이미지보다 뒤다.** 위에 깔면 그림이 그 색에 잠긴다.
-        .layer = 0,
+        // **프레임 레이어다.** 예전에는 0 이었는데 그 값은 사이드바가 소유한 «유지» 버킷이라
+        // `dropQuadsByLayer` 가 안 건드린다 — 얹은 칸마다 테두리가 영구히 쌓였다(사용자 보고).
+        .layer = hover_layer,
     }) catch {};
 }
 
-/// 얹힌 칸 판의 불투명도. 보이되 **원본을 가리지 않는** 선이다.
-pub const hover_plate_alpha: u8 = 46;
+/// 얹힌 칸 테두리의 레이어. **프레임마다 비운다** — `renderFrame` 의 drop 과 짝이다.
+///
+/// 값이 0·1·2·3·4 가 아니면 렌더러는 «over» 버킷에 넣는다(기본 분기). 0 을 쓰면 안 된다: 그 값은
+/// 사이드바 밴드가 소유하는 유지 버킷이라 비워지지 않는다.
+pub const hover_layer: u32 = 6;
+
+/// 얹힌 칸 테두리의 두께·불투명도. 보이되 **원본을 가리지 않는** 선이다.
+pub const hover_ring_px: f32 = 2;
+pub const hover_ring_alpha: u8 = 140;
 
 /// 갤러리 타일을 프레임의 이미지 채널에 얹는다.
 ///
@@ -1157,8 +1167,16 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     }
     if (self.image_gallery.chain.isEmpty()) return maru.i18n.t(.image_gallery_no_agent);
     if (self.image_gallery.scanning()) return maru.i18n.t(.image_gallery_scanning);
-    if (self.image_gallery.partial) return maru.i18n.t(.image_gallery_partial);
     const n = self.image_gallery.count();
+    // **「못 읽었다」는 찾은 것이 있을 때만 말한다**(사용자 보고). 대화 기록이 비어 있으면 스캔이
+    // partial 로 끝나기 쉬운데, 그때 「세션을 다 읽지 못했습니다」라고 하면 사용자에게는 갤러리가
+    // 고장난 것으로 보인다 — 실제로는 **없는 것**이다.
+    //
+    // 다만 **한 바이트도 못 읽었으면**(`scanned_bytes == 0`) 그건 진짜로 못 읽은 것이다(파일 없음·
+    // 열기 실패). 그때까지 「없다」로 뭉개면 갤러리가 멀쩡한 줄 안다 — IG1-e 가 그 자리를 잡았다.
+    if (self.image_gallery.partial and (n > 0 or self.image_gallery.scanned_bytes == 0)) {
+        return maru.i18n.t(.image_gallery_partial);
+    }
     if (n == 0) return maru.i18n.t(.image_gallery_empty);
     // 격자가 다 보여 주면 문구를 겹쳐 내지 않는다 — 개수는 격자 자체가 말한다.
     // **다 못 보여 줄 때만 말한다**: 「12장 중 8장」. 이 줄이 없으면 사용자는 4장을 놓치고도 모른다.

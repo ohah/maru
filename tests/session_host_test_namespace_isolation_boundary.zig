@@ -62,6 +62,25 @@ test "product-child fixtures require an isolated root and the default suite neve
         runner,
         "inherited roots are untrusted",
     ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        runner,
+        "if (setenv(\"CFFIXED_USER_HOME\", root.ptr, 1) != 0)",
+    ) != null);
+}
+
+test "common runner binds session registry and app workspace to the same pid root" {
+    if (@import("builtin").os.tag != .macos) return;
+
+    const session_root = std.c.getenv("MARU_SESSION_HOST_ROOT") orelse
+        return error.MissingSessionHostRoot;
+    const app_home = std.c.getenv("CFFIXED_USER_HOME") orelse
+        return error.MissingFixedUserHome;
+    var expected_buf: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrintZ(&expected_buf, "/tmp/maru-t{d}", .{std.c.getpid()});
+
+    try std.testing.expectEqualStrings(expected, std.mem.span(session_root));
+    try std.testing.expectEqualStrings(expected, std.mem.span(app_home));
 }
 
 test "default product fixtures do not reconstruct uid-keyed sockets" {

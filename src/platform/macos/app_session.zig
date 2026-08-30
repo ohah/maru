@@ -2961,6 +2961,10 @@ const HostConnectFailureReason = if (is_macos)
     session_host.host_connect.FailureReason
 else
     enum { unavailable };
+const SessionHostUpgradeNotice = if (is_macos)
+    session_host.host_connect.UpgradeNotice
+else
+    enum { unavailable };
 var host_connect_failure_reason: ?HostConnectFailureReason = null;
 /// 실패가 **어느 단계**에서 났는지. `FailureReason`은 connect 시도가 시작된 뒤의 사유만 담으므로 그 이전(형제 실행
 /// 파일 경로·캐시 base 확인)과 연결 성공 이후(adapter/pool/backend 구성, 런타임 중 host 사망)를 같은 어휘로 담지
@@ -4318,6 +4322,9 @@ pub const AppSession = struct {
     // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
     // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
     host_connect_notice_pending: bool = false,
+    /// A successful current-host connection can still mean that an older host was not migrated.
+    /// Keep that independent result as a bounded value until a modal-free frame presents it once.
+    session_host_upgrade_notice_pending: ?SessionHostUpgradeNotice = null,
     /// attach가 controller를 못 얻고 observer로 강등된 Term이 있다(§9). 다음 tick에 한 번 알린다 — 알리지
     /// 않으면 사용자는 화면만 갱신되고 입력이 전부 무시되는 터미널을 이유도 모른 채 쓰게 된다.
     observer_attach_notice_pending: bool = false,
@@ -6998,7 +7005,8 @@ pub const AppSession = struct {
                 return;
             };
             // §6 L291: host 연결/spawn 실패 시 조용히 in-process로 폴백하지 않고 사용자에게 알린다("유지된다" 오인 방지).
-            var client = switch (session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{})) {
+            const connect_result = session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{});
+            var client = switch (connect_result.outcome) {
                 .connected => |connected| connected,
                 .failed => |reason| {
                     self.markHostConnectFailedReason(.connect, reason);
@@ -7050,6 +7058,7 @@ pub const AppSession = struct {
                     self.markHostConnectFailedReason(.adapter, .resource_exhausted);
                     return;
                 };
+                self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
                 return;
             }
             // backend 하나가 host pool을 통해 old/current runtime을 host_id별로 라우팅한다.
@@ -7076,6 +7085,7 @@ pub const AppSession = struct {
             // backend가 runtime을 받기 전에 현재 app config 완전본을 심는다. restore-only 앱과 달리 current-first도
             // 첫 spawn의 PTY reader publication 전에 같은 값이 들어가야 한다.
             app_remote_backend.?.configureNotifications(self.loaded_config.config.notifications.osc) catch {};
+            self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
         }
     }
 
@@ -7633,6 +7643,9 @@ pub const AppSession = struct {
         host_connect_failure_reason = reason;
         host_connect_failure_error = error_name;
         self.host_connect_notice_pending = true;
+        // A final current-host failure is stronger than an earlier migration result: the session is
+        // not persistent at all. Do not let a stale upgrade notice overwrite that user-visible fact.
+        self.session_host_upgrade_notice_pending = null;
         if (!builtin.is_test) {
             var buf: [96]u8 = undefined;
             std.log.err(
@@ -7696,6 +7709,19 @@ pub const AppSession = struct {
             host_connect_failure_error,
         );
         self.showNoticeFmt(.app_host_connect_failed, &.{.{ .s = detail }});
+    }
+
+    fn showPendingSessionHostUpgradeNotice(self: *AppSession) void {
+        const notice = self.session_host_upgrade_notice_pending orelse return;
+        if (self.host_connect_notice_pending or host_connect_failed) {
+            self.session_host_upgrade_notice_pending = null;
+            return;
+        }
+        if (self.anyModalOverlayOpen()) return;
+        self.session_host_upgrade_notice_pending = null;
+        if (!is_macos) return;
+        var detail_buf: [256]u8 = undefined;
+        self.showNoticeFmt(.app_session_host_upgrade_result, &.{.{ .s = notice.detail(&detail_buf) }});
     }
 
     /// codex 훅의 신뢰 값이 낡아 **그 훅이 돌지 않는** 상태를 첫 tick에 한 번 알린다(계약 §2.1).
@@ -16761,6 +16787,7 @@ pub const AppSession = struct {
             self.startUpdateCheck();
         }
         self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
+        self.showPendingSessionHostUpgradeNotice(); // U5: old-host upgrade 결과를 modal-free frame에서 정확히 한 번 표시한다.
         self.showPendingAgentHookTrustNotice(); // 계약 §2.1: codex 신뢰 값이 낡아 훅이 안 도는 상태를 알린다.
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
@@ -37273,6 +37300,48 @@ test "P4 keep-alive host 실패: notice pending이 사용자 notice로 표시되
     session.showPendingHostConnectNotice(); // tick이 부르는 것과 동일.
     try std.testing.expect(session.chrome_host.notice.open); // 사용자에게 "유지 안 됨" notice가 떴다(조용한 폴백 아님).
     try std.testing.expect(!session.host_connect_notice_pending); // 한 번 표시 후 클리어(매 tick 반복 안 함).
+}
+
+test "U5 host upgrade 결과는 modal 뒤까지 보존하고 정확히 한 번 표시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const saved_host_connect_failed = host_connect_failed;
+    defer host_connect_failed = saved_host_connect_failed;
+    host_connect_failed = false;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.session_host_upgrade_notice_pending = .{ .upgrade_failed = .{
+        .host_id = 42,
+        .failure = .{ .report = .{ .status = .rolled_back, .reason = .restore_failed } },
+    } };
+    session.chrome_host.settings.open = true;
+    session.showPendingSessionHostUpgradeNotice();
+    try std.testing.expect(session.session_host_upgrade_notice_pending != null);
+    try std.testing.expect(!session.chrome_host.notice.open);
+
+    session.chrome_host.settings.open = false;
+    session.showPendingSessionHostUpgradeNotice();
+    try std.testing.expect(session.session_host_upgrade_notice_pending == null);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.chrome_host.notice.dismiss();
+
+    session.showPendingSessionHostUpgradeNotice();
+    try std.testing.expect(!session.chrome_host.notice.open);
+
+    session.session_host_upgrade_notice_pending = .{ .upgrade_busy = 42 };
+    session.host_connect_notice_pending = true;
+    session.showPendingSessionHostUpgradeNotice();
+    try std.testing.expect(session.session_host_upgrade_notice_pending == null);
+    try std.testing.expect(!session.chrome_host.notice.open);
 }
 
 // P4 §6.32 GUI surfacing(code-review #10) — host-backed 터미널의 OSC 9/777 알림은 **host core**가 파싱하므로 client

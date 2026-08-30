@@ -24,6 +24,7 @@ const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const client_deadline = @import("client_deadline.zig");
 const staged_image = @import("staged_image.zig");
 const compatibility = @import("compatibility.zig");
+const upgrade_wire = @import("upgrade_wire.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -73,6 +74,63 @@ pub const Outcome = union(enum) {
     failed: FailureReason,
 };
 
+pub const UpgradeLocalFailure = enum {
+    status_query_failed,
+    no_attempt_record,
+};
+
+pub const UpgradeFailure = union(enum) {
+    report: upgrade_wire.AttemptReport,
+    reconnect: FailureReason,
+    local: UpgradeLocalFailure,
+};
+
+/// A bounded value copied from the connect owner to AppSession. It contains no borrowed manifest,
+/// JSON, or Client storage, so the UI can defer presentation until a modal-free frame.
+pub const UpgradeNotice = union(enum) {
+    upgraded: u128,
+    upgrade_busy: u128,
+    legacy_unavailable: u128,
+    upgrade_failed: struct {
+        host_id: u128,
+        failure: UpgradeFailure,
+    },
+
+    pub fn detail(self: UpgradeNotice, buf: []u8) []const u8 {
+        return switch (self) {
+            .upgraded => |host_id| std.fmt.bufPrint(buf, "result=upgraded host={x:0>32}", .{host_id}),
+            .upgrade_busy => |host_id| std.fmt.bufPrint(buf, "result=upgrade_busy host={x:0>32}", .{host_id}),
+            .legacy_unavailable => |host_id| std.fmt.bufPrint(buf, "result=legacy_unavailable host={x:0>32}", .{host_id}),
+            .upgrade_failed => |failed| switch (failed.failure) {
+                .report => |report| std.fmt.bufPrint(
+                    buf,
+                    "result=upgrade_failed host={x:0>32} status={s} reason={s}",
+                    .{ failed.host_id, @tagName(report.status), @tagName(report.reason) },
+                ),
+                .reconnect => |reason| std.fmt.bufPrint(
+                    buf,
+                    "result=upgrade_failed host={x:0>32} reconnect={s}",
+                    .{ failed.host_id, @tagName(reason) },
+                ),
+                .local => |reason| std.fmt.bufPrint(
+                    buf,
+                    "result=upgrade_failed host={x:0>32} local={s}",
+                    .{ failed.host_id, @tagName(reason) },
+                ),
+            },
+        } catch "result=upgrade_failed detail=truncated";
+    }
+};
+
+pub const DetailedOutcome = struct {
+    outcome: Outcome,
+    upgrade_notice: ?UpgradeNotice = null,
+};
+
+fn plain(outcome: Outcome) DetailedOutcome {
+    return .{ .outcome = outcome };
+}
+
 /// host에 연결하거나(있으면) detached helper를 띄워 연결한다(§10 connect-first→start-lock→spawn). 반환 `Client`는
 /// **caller 소유**(deinit 책임). `null`이면 host를 못 얻었다(권한 거부·spawn 실패·denied 등) — caller는 in-process로
 /// 폴백한다. `exe_path`=현재 maru 실행 파일(helper로 exec), `base_cache_dir`=user cache dir(그 아래 `session-host/`).
@@ -82,7 +140,7 @@ pub fn connectOrLaunch(
     base_cache_dir: []const u8,
     opts: Options,
 ) ?client_mod.Client {
-    return switch (connectOrLaunchDetailed(allocator, exe_path, base_cache_dir, opts)) {
+    return switch (connectOrLaunchDetailed(allocator, exe_path, base_cache_dir, opts).outcome) {
         .connected => |client| client,
         .failed => null,
     };
@@ -93,38 +151,38 @@ pub fn connectOrLaunchDetailed(
     exe_path: [:0]const u8,
     base_cache_dir: []const u8,
     opts: Options,
-) Outcome {
-    if (builtin.os.tag != .macos) return .{ .failed = .invalid_endpoint };
+) DetailedOutcome {
+    if (builtin.os.tag != .macos) return plain(.{ .failed = .invalid_endpoint });
 
     var dir_buf: [512]u8 = undefined;
-    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return .{ .failed = .invalid_endpoint };
+    const dir = discovery.sessionHostDirPath(&dir_buf, base_cache_dir) catch return plain(.{ .failed = .invalid_endpoint });
 
     // Manifest-capable host는 host별 short endpoint를 쓰므로 fixed major socket보다 registry를 먼저 본다.
-    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
+    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return plain(outcome);
 
     var sock_buf: [640]u8 = undefined;
-    const socket = discovery.socketPathIn(&sock_buf, dir) catch return .{ .failed = .invalid_endpoint };
+    const socket = discovery.socketPathIn(&sock_buf, dir) catch return plain(.{ .failed = .invalid_endpoint });
     var legacy_sock_buf: [640]u8 = undefined;
-    const legacy_socket = discovery.legacySocketPathIn(&legacy_sock_buf, dir) catch return .{ .failed = .invalid_endpoint };
+    const legacy_socket = discovery.legacySocketPathIn(&legacy_sock_buf, dir) catch return plain(.{ .failed = .invalid_endpoint });
 
     // 1. connect-first(§10): 있으면 바로 쓴다.
     switch (tryConnect(allocator, socket)) {
-        .connected => |client| return .{ .connected = client },
+        .connected => |client| return plain(.{ .connected = client }),
         .absent => {},
-        .transient => return connectWithBackoffDetailed(allocator, socket, opts),
-        .failed => |reason| return .{ .failed = reason },
+        .transient => return plain(connectWithBackoffDetailed(allocator, socket, opts)),
+        .failed => |reason| return plain(.{ .failed = reason }),
     }
 
     // versioned endpoint 전환 이전의 current-major host는 그대로 재사용한다. legacy endpoint의 다른 major는
     // current header handshake를 닫으므로 새 versioned host를 side-by-side로 시작하고, saved runtime restore가
     // 별도 N-1 adapter로 legacy endpoint를 찾는다.
     switch (tryConnect(allocator, legacy_socket)) {
-        .connected => |client| return .{ .connected = client },
+        .connected => |client| return plain(.{ .connected = client }),
         .absent => {},
-        .transient => return connectWithBackoffDetailed(allocator, legacy_socket, opts),
+        .transient => return plain(connectWithBackoffDetailed(allocator, legacy_socket, opts)),
         .failed => |reason| switch (reason) {
             .incompatible_version, .handshake_failed, .protocol_error => {},
-            else => return .{ .failed = reason },
+            else => return plain(.{ .failed = reason }),
         },
     }
 
@@ -132,42 +190,55 @@ pub fn connectOrLaunchDetailed(
     // spawn+재connect가 끝날 때까지(defer) 잡고 있어 동시 시작자들이 하나의 host로 수렴하게 한다(daemon은 socket bind가
     // liveness라 lock을 안 쓴다 — 순수 시작 직렬화용).
     ensureDir(dir);
-    const lock_fd = openLock(dir) orelse return .{ .failed = .endpoint_denied };
+    const lock_fd = openLock(dir) orelse return plain(.{ .failed = .endpoint_denied });
     defer _ = c.close(lock_fd);
     const lock_probe: discovery.LockProbe = if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0) .acquired else .contended;
 
     // 3. lock 취득/경합 뒤 다시 connect(§10 "lock 직전 race"): 그 사이 다른 프로세스가 bind했을 수 있다.
     switch (tryConnect(allocator, socket)) {
-        .connected => |client| return .{ .connected = client },
-        .transient => return connectWithBackoffDetailed(allocator, socket, opts),
-        .failed => |reason| return .{ .failed = reason },
+        .connected => |client| return plain(.{ .connected = client }),
+        .transient => return plain(connectWithBackoffDetailed(allocator, socket, opts)),
+        .failed => |reason| return plain(.{ .failed = reason }),
         .absent => {},
     }
     if (lock_probe == .contended) {
         if (connectManifestRegistryWithBackoff(allocator, exe_path, base_cache_dir, dir, opts)) |outcome|
-            return outcome;
+            return plain(outcome);
         // 이전 winner가 publish 전에 실패했으면 loser가 영구 fallback하지 않고 lock을 한 번 재획득해 launch owner가 된다.
-        if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) return .{ .failed = .startup_timeout };
+        if (flock(lock_fd, LOCK_EX | LOCK_NB) != 0) return plain(.{ .failed = .startup_timeout });
     }
 
     // Lock 취득 뒤 registry도 다시 읽는다. 다른 process가 manifest를 publish한 직후 fixed endpoint가 비어 있는
     // host-specific 모델에서도 중복 spawn을 막는다.
-    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
+    if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return plain(outcome);
 
     // 같은 build의 host가 없다면, **다른 build의 살아 있는 host**를 새 이미지로 exec 교체해 그 runtime을 그대로
     // 이어받는다. 여기(start lock 획득 뒤)에서 하는 이유: lock이 동시 시작자를 직렬화하므로 두 GUI가 같은 host에
     // 동시에 upgrade를 걸지 않는다. 실패하면 아래 spawn 경로가 그대로 새 host를 띄운다(회귀 없음).
-    if (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
+    var upgrade_notice: ?UpgradeNotice = null;
+    switch (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir)) {
+        .none => {},
+        .connected => |client| {
+            const upgraded_host_id = client.host_id;
+            return .{ .outcome = .{ .connected = client }, .upgrade_notice = .{ .upgraded = upgraded_host_id } };
+        },
+        .fallback => |notice| upgrade_notice = notice,
+        .failed => |reason| return plain(.{ .failed = reason }),
+    }
 
-    short_endpoint.prepareCurrentUserNamespace() catch return .{ .failed = .endpoint_denied };
+    short_endpoint.prepareCurrentUserNamespace() catch return plain(.{ .failed = .endpoint_denied });
     var host_id: u128 = 0;
     while (host_id == 0) arc4random_buf(std.mem.asBytes(&host_id).ptr, @sizeOf(u128));
     var short_socket_buf: [128]u8 = undefined;
     const short_socket = short_endpoint.currentSocketPathIn(&short_socket_buf, host_id) catch
-        return .{ .failed = .invalid_endpoint };
+        return plain(.{ .failed = .invalid_endpoint });
     launcher.spawnSessionHostDetached(allocator, exe_path, dir, short_socket, host_id) catch
-        return .{ .failed = .launch_failed };
-    return connectNewHostWithBackoff(allocator, base_cache_dir, host_id, opts);
+        return plain(.{ .failed = .launch_failed });
+    const launched = connectNewHostWithBackoff(allocator, base_cache_dir, host_id, opts);
+    return switch (launched) {
+        .connected => |client| .{ .outcome = .{ .connected = client }, .upgrade_notice = upgrade_notice },
+        .failed => |reason| plain(.{ .failed = reason }),
+    };
 }
 
 fn findCurrentManifestHost(
@@ -216,19 +287,18 @@ fn findCurrentManifestHost(
 const upgrade_reconnect_delay_ms: u32 = 20;
 const upgrade_reconnect_attempts: usize = 500; // × 20ms = 10s (pause budget 5s + 부팅·복원 여유)
 
-/// 업그레이드가 **왜 적용되지 않았는지**를 한 줄로 남긴다.
-///
-/// host는 실패 사유를 wire로 이미 보내 준다(`AttemptReason` 12종 — `exec_failed`·`target_invalid`·`handoff_failed`
-/// 등). 그런데 지금까지 그 값을 받고도 버려서, "accepted를 받았는데 이미지가 안 바뀌었다"는 상황에서 원인을 알
-/// 길이 전혀 없었다. GUI의 stdout/stderr는 `/dev/null`이라(Dock·Finder 실행) 이 로그는 터미널에서 앱을 직접
-/// 띄울 때만 보이지만, 실제로 이 경로의 회귀를 그렇게 잡았다 — 사유를 버리지 않는 것 자체가 진단의 출발점이다.
-fn logUpgradeNotApplied(host_id: u128, status: []const u8, reason: []const u8) void {
+/// Structured logging and the UI notice share this exact bounded value. Formatting a second model
+/// here would let the two surfaces disagree about whether the old PTYs were migrated.
+fn logUpgradeNotice(notice: UpgradeNotice) void {
     if (builtin.is_test) return;
-    std.log.err(
-        "session host upgrade did not take effect: host={x:0>32} status={s} reason={s}",
-        .{ host_id, status, reason },
-    );
+    var buf: [256]u8 = undefined;
+    std.log.info("session host upgrade result: {s}", .{notice.detail(&buf)});
 }
+
+const UpgradeReconnect = union(enum) {
+    connected: client_mod.Client,
+    failed: UpgradeNotice,
+};
 
 /// 재연결한 host를 업그레이드 결과로 **채택해도 되는가**. hello ack의 build_id가 target과 정확히 같아야 한다.
 ///
@@ -255,7 +325,7 @@ fn reconnectUpgradedHost(
     host_id: u128,
     target_build_id: []const u8,
     attempt_id: u128,
-) ?Outcome {
+) UpgradeReconnect {
     var restored = switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, .{
         .connect_attempts = upgrade_reconnect_attempts,
         .connect_delay_ms = upgrade_reconnect_delay_ms,
@@ -263,25 +333,29 @@ fn reconnectUpgradedHost(
         .connected => |client| client,
         // 재연결조차 못 했으면 물어볼 상대가 없다. host가 exec 도중 죽었을 수도, 아직 restoring일 수도 있다.
         .failed => |reason| {
-            logUpgradeNotApplied(host_id, "unreachable", @tagName(reason));
-            return null;
+            const notice: UpgradeNotice = .{ .upgrade_failed = .{
+                .host_id = host_id,
+                .failure = .{ .reconnect = reason },
+            } };
+            logUpgradeNotice(notice);
+            return .{ .failed = notice };
         },
     };
     if (!upgradedHostMatches(restored.build_id, target_build_id)) {
         // **왜 안 바뀌었는지 host에게 직접 묻는다.** 이 조회가 없으면 "재연결은 됐는데 옛 이미지"라는 사실만 알고
         // 그 이유(exec_failed·rolled_back·target_invalid…)는 영영 알 수 없다 — 정확히 그 상태로 이 회귀를 한참
         // 추적했다. 조회 자체가 실패해도 그 사실을 남겨 "묻지 못했음"과 "물었는데 기록이 없음"을 구분한다.
-        if (restored.upgradeStatus(attempt_id)) |maybe_report| {
-            if (maybe_report) |report|
-                logUpgradeNotApplied(host_id, @tagName(report.status), @tagName(report.reason))
-            else
-                logUpgradeNotApplied(host_id, "no_attempt_record", "none");
-        } else |_| {
-            logUpgradeNotApplied(host_id, "status_query_failed", "none");
-        }
+        const failure: UpgradeFailure = if (restored.upgradeStatus(attempt_id)) |maybe_report|
+            if (maybe_report) |report| .{ .report = report } else .{ .local = .no_attempt_record }
+        else |_|
+            .{ .local = .status_query_failed };
         restored.deinit();
-        return null;
+        const notice: UpgradeNotice = .{ .upgrade_failed = .{ .host_id = host_id, .failure = failure } };
+        logUpgradeNotice(notice);
+        return .{ .failed = notice };
     }
+    const notice: UpgradeNotice = .{ .upgraded = host_id };
+    logUpgradeNotice(notice);
     return .{ .connected = restored };
 }
 
@@ -324,24 +398,32 @@ pub fn isUpgradeCandidate(
 ///
 /// 실패는 전부 조용히 `null`이다 — 업그레이드는 **최적화**이고, 안 되면 호출자가 기존대로 새 host를 spawn하면
 /// 된다. 여기서 오류를 올리면 "업그레이드 불가"가 곧 "터미널을 못 엶"이 되어 회귀가 된다.
+const UpgradeSearch = union(enum) {
+    none,
+    connected: client_mod.Client,
+    fallback: UpgradeNotice,
+    failed: FailureReason,
+};
+
 fn tryUpgradeExistingHost(
     allocator: std.mem.Allocator,
     exe_path: [:0]const u8,
     base_cache_dir: []const u8,
     session_dir: [:0]const u8,
-) ?Outcome {
-    const target_identity = staged_image.inspect(exe_path) catch return null;
+) UpgradeSearch {
+    const target_identity = staged_image.inspect(exe_path) catch return .none;
     // build id를 **같은 inspect 결과에서** 유도한다(`buildIdForExecutable`은 경로를 한 번 더 읽는다). 두 번 읽으면
     // 그 사이 번들이 교체될 때(앱 업데이트가 실행 중에 끝나는 경우) build_id와 sha256이 서로 다른 바이트를 가리켜
     // host의 staging 해시 검증이 실패한다 — 게다가 같은 파일을 두 번 SHA-256하는 낭비다.
     const target_hex = std.fmt.bytesToHex(target_identity.sha256, .lower);
-    const target_build_id = std.fmt.allocPrint(allocator, "sha256:{s}", .{&target_hex}) catch return null;
+    const target_build_id = std.fmt.allocPrint(allocator, "sha256:{s}", .{&target_hex}) catch return .none;
     defer allocator.free(target_build_id);
 
     var hosts_buf: [640]u8 = undefined;
-    const hosts_root = host_manifest.hostsRootPathIn(&hosts_buf, session_dir) catch return null;
-    const directory = c.opendir(hosts_root.ptr) orelse return null;
+    const hosts_root = host_manifest.hostsRootPathIn(&hosts_buf, session_dir) catch return .none;
+    const directory = c.opendir(hosts_root.ptr) orelse return .none;
     defer _ = c.closedir(directory);
+    var legacy_notice: ?UpgradeNotice = null;
     while (c.readdir(directory)) |entry| {
         const name = std.mem.sliceTo(entry.name[0..], 0);
         if (name.len != 32) continue;
@@ -369,6 +451,7 @@ fn tryUpgradeExistingHost(
         // 살아 있고, capability 없는 host를 종료해 migration처럼 보이게 하지 않는다(session-host-upgrade.md).
         if (!client.host_exec_upgrade_v1) {
             client.deinit();
+            if (legacy_notice == null) legacy_notice = .{ .legacy_unavailable = host_id };
             continue;
         }
         var attempt_id: u128 = 0;
@@ -386,7 +469,10 @@ fn tryUpgradeExistingHost(
             // exec한다. 그때 다른 host로 스캔을 이어 가면 이미 교체 중인 host를 두고 또 다른 host를 흔든다 —
             // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다.
             client.deinit();
-            return reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
+            return switch (reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id)) {
+                .connected => |connected| .{ .connected = connected },
+                .failed => |notice| .{ .fallback = notice },
+            };
         };
         client.deinit();
         // **prepare를 한 번 보낸 뒤에는 결과와 무관하게 스캔을 끝낸다.** 한 번의 GUI 실행이 여러 host에 연쇄로
@@ -395,28 +481,52 @@ fn tryUpgradeExistingHost(
         // 그건 "지금은 안 된다"이지 "이 host는 못 쓴다"가 아니다.
         switch (outcome) {
             // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙는다.
-            .accepted_reconnect_required => return reconnectUpgradedHost(
+            .accepted_reconnect_required => return switch (reconnectUpgradedHost(
                 allocator,
                 base_cache_dir,
                 host_id,
                 target_build_id,
                 attempt_id,
-            ),
+            )) {
+                .connected => |connected| .{ .connected = connected },
+                .failed => |notice| .{ .fallback = notice },
+            },
             // host가 이미 끝난 attempt를 보고했다 — `AttemptReason`이 왜 못 바꿨는지 말해 준다. 이 값을 버리면
             // 사용자는 "업데이트했는데 세션이 안 이어진다"만 겪고 우리는 이유를 못 본다.
             .completed => |report| {
-                logUpgradeNotApplied(host_id, @tagName(report.status), @tagName(report.reason));
-                return null;
+                if (report.status == .committed) {
+                    return switch (reconnectUpgradedHost(
+                        allocator,
+                        base_cache_dir,
+                        host_id,
+                        target_build_id,
+                        attempt_id,
+                    )) {
+                        .connected => |connected| .{ .connected = connected },
+                        .failed => |notice| .{ .fallback = notice },
+                    };
+                }
+                const notice: UpgradeNotice = .{ .upgrade_failed = .{
+                    .host_id = host_id,
+                    .failure = .{ .report = report },
+                } };
+                logUpgradeNotice(notice);
+                return .{ .fallback = notice };
             },
             // 거절에는 이유가 실려 오지 않는다(문서 §240: 다른 attachment가 남아 있으면 거절). 적어도 "거절당했다"는
             // 사실은 남겨, 조용한 폴백과 구분되게 한다.
             .rejected => {
-                logUpgradeNotApplied(host_id, "rejected", "none");
-                return null;
+                const notice: UpgradeNotice = .{ .upgrade_busy = host_id };
+                logUpgradeNotice(notice);
+                return .{ .fallback = notice };
             },
         }
     }
-    return null;
+    if (legacy_notice) |notice| {
+        logUpgradeNotice(notice);
+        return .{ .fallback = notice };
+    }
+    return .none;
 }
 
 /// owner lease 관측 결과. bool로 뭉개면 **"lease가 없다"(host가 죽었다는 증거)** 와 **"우리가 볼 수 없었다"**(fd 고갈·
@@ -2176,4 +2286,38 @@ test "업그레이드 재연결 채택: build_id가 target과 같을 때만, 모
     // 접두사만 겹치는 경우도 정확 일치가 아니면 거부한다.
     try testing.expect(!upgradedHostMatches("sha256:ne", target));
     try testing.expect(!upgradedHostMatches("sha256:neww", target));
+}
+
+// The UI and structured log must not independently translate wire state. These representative
+// values prove the bounded DTO preserves the exact host/status/reason vocabulary and remains safe
+// when a caller supplies a buffer too small for diagnostic text.
+test "upgrade notice detail is bounded and preserves typed result" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "result=upgraded host=0000000000000000000000000000002a",
+        (UpgradeNotice{ .upgraded = 42 }).detail(&buf),
+    );
+    try testing.expectEqualStrings(
+        "result=upgrade_busy host=0000000000000000000000000000002a",
+        (UpgradeNotice{ .upgrade_busy = 42 }).detail(&buf),
+    );
+    try testing.expectEqualStrings(
+        "result=legacy_unavailable host=0000000000000000000000000000002a",
+        (UpgradeNotice{ .legacy_unavailable = 42 }).detail(&buf),
+    );
+    try testing.expectEqualStrings(
+        "result=upgrade_failed host=0000000000000000000000000000002a status=rolled_back reason=restore_failed",
+        (UpgradeNotice{ .upgrade_failed = .{
+            .host_id = 42,
+            .failure = .{ .report = .{ .status = .rolled_back, .reason = .restore_failed } },
+        } }).detail(&buf),
+    );
+    var tiny: [1]u8 = undefined;
+    try testing.expectEqualStrings(
+        "result=upgrade_failed detail=truncated",
+        (UpgradeNotice{ .upgrade_failed = .{
+            .host_id = 42,
+            .failure = .{ .local = .status_query_failed },
+        } }).detail(&tiny),
+    );
 }

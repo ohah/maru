@@ -3663,9 +3663,12 @@ pub const RemoteRuntime = struct {
         switch (self.currentGeneration().connection) {
             .legacy => |client| client.poison(reason),
             .generation => switch (self.currentGeneration().attachment) {
-                .legacy => process_seal_service.fatalIntegrity(.proof_loss),
+                // generation connection 에 legacy attachment 는 성립할 수 없는 조합이다(손상).
+                .legacy => process_seal_service.fatalIntegrity(.poison_kind_mismatch),
+                // poison 을 전달하지 못했다. seal 손상일 수도, 이미 끝난 전이일 수도 있다 —
+                // 지금은 둘 다 치명으로 남기되 사유만 갈라 다음 사고에서 로그로 판별되게 한다.
                 .generation => |*attachment| attachment.poison(reason) catch
-                    process_seal_service.fatalIntegrity(.proof_loss),
+                    process_seal_service.fatalIntegrity(.poison_undeliverable),
             },
         }
     }

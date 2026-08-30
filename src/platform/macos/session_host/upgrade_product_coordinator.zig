@@ -5,6 +5,7 @@
 //! 재개하거나 authority-poisoned terminal 상태를 기록한다.
 
 const builtin = @import("builtin");
+const host_log = @import("host_log.zig");
 const std = @import("std");
 const c = std.c;
 const entrypoint = @import("entrypoint.zig");
@@ -142,11 +143,13 @@ fn processArmedWithDeadline(
         if (gate_preclosed and report.status == .resumed) ctx.gate.cancelClose();
         return .{ .terminal = report };
     };
-    if (!ctx.rollback_image.revalidate())
+    if (!ctx.rollback_image.revalidate()) {
+        noteUpgradeStage("rollback_image_revalidate_pre_freeze");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .handoff_failed,
         });
+    }
     if (deadline.expired())
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
@@ -180,10 +183,13 @@ fn processArmedWithDeadline(
         ctx.rollback_image.record(),
         preview.sortedRuntimeIds(),
         deadline.expiresAtNs(),
-    ) catch return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
-        .status = .resumed,
-        .reason = .handoff_failed,
-    });
+    ) catch {
+        noteUpgradeStage("attempt_record_build");
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .handoff_failed,
+        });
+    };
     defer ctx.allocator.free(record);
     const preview_bytes = preview.totalBytesWithAttempt(record.len) catch
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
@@ -235,17 +241,21 @@ fn processBudgetReserved(
             .status = .resumed,
             .reason = .state_too_large,
         });
-    assertNoUnexpectedInherited() catch
+    assertNoUnexpectedInherited() catch {
+        noteUpgradeStage("unexpected_inherited_fd");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .handoff_failed,
         });
+    };
     var reservation: exec_fd_set.SlotReservation = .{};
-    reservation.reserve(&requested) catch
+    reservation.reserve(&requested) catch {
+        noteUpgradeStage("fd_slot_reserve");
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
             .reason = .handoff_failed,
         });
+    };
 
     var frozen = (if (gate_preclosed)
         upgrade_attempt.freezePreclosed(ctx.manager, ctx.gate, deadline)
@@ -335,11 +345,13 @@ fn processBudgetReserved(
             .status = .resumed,
             .reason = .target_invalid,
         }, deadline);
-    if (!ctx.rollback_image.revalidate())
+    if (!ctx.rollback_image.revalidate()) {
+        noteUpgradeStage("rollback_image_revalidate_post_freeze");
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .handoff_failed,
         }, deadline);
+    }
     ctx.manager.revalidateQuiescedCapture(&capture) catch
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
@@ -570,6 +582,17 @@ fn replaceAll(
     return true;
 }
 
+/// upgrade 가 **어느 단계에서** 되돌려졌는지 남긴다.
+///
+/// `handoff_failed` 하나가 이 파일에서 12 곳에 쓰인다. 그래서 `logUpgradeRollback` 이 사유를 남겨도
+/// 「exec 준비 중 어딘가」까지만 좁혀지고, rollback 이미지 검증인지 fd 슬롯 확보인지 상속 fd 검사인지는
+/// 갈리지 않는다. 2026-08-30 실측: 사용자 PTY 25 개를 쥔 host 가 업그레이드에 반복 실패해 빌드마다 새
+/// host 가 뜨고 세션이 고아가 됐는데, 이 구분이 없어 원인을 특정하지 못했다.
+fn noteUpgradeStage(stage: []const u8) void {
+    if (builtin.is_test) return;
+    host_log.line("session host upgrade stage failed: stage={s}", .{stage});
+}
+
 /// upgrade 가 **왜 되돌려졌는지** host 로그에 남긴다.
 ///
 /// 이 파일에는 `std.log` 가 한 줄도 없었다. 그래서 `redirectStderrToHostLog` 가 만든
@@ -580,7 +603,9 @@ fn replaceAll(
 /// 되돌림 사유 한 줄이 있었다면 exec 실패인지 target 문제인지 즉시 갈렸다.
 fn logUpgradeRollback(attempt_id: u128, reason: upgrade_wire.AttemptReason) void {
     if (builtin.is_test) return;
-    std.log.err(
+    // 2026-08-27 에 `std.log.err` 로 들어왔으나 그 호출이 host 를 SIGSEGV 로 죽여 로그는 계속
+    // 0 바이트였다. 이유와 대안은 `host_log` 참고.
+    host_log.line(
         "session host upgrade rolled back: attempt={x:0>32} reason={s}",
         .{ attempt_id, @tagName(reason) },
     );
@@ -718,7 +743,10 @@ fn reportForCaptureError(
 ) upgrade_wire.AttemptReport {
     return switch (err) {
         error.TooManyRuntimes, error.LimitExceeded => .{ .status = .resumed, .reason = .state_too_large },
-        error.OutOfMemory => .{ .status = .resumed, .reason = .handoff_failed },
+        error.OutOfMemory => blk: {
+            noteUpgradeStage("exec_prepare_out_of_memory");
+            break :blk .{ .status = .resumed, .reason = .handoff_failed };
+        },
         else => .{ .status = .resumed, .reason = .runtime_changed },
     };
 }
@@ -744,7 +772,10 @@ fn reportForPreflightError(err: PreflightError) upgrade_wire.AttemptReport {
         error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
         error.InvalidTarget => .{ .status = .resumed, .reason = .target_invalid },
         error.ResourceExhausted => .{ .status = .resumed, .reason = .state_too_large },
-        error.Failed => .{ .status = .resumed, .reason = .handoff_failed },
+        error.Failed => blk: {
+            noteUpgradeStage("exec_failed");
+            break :blk .{ .status = .resumed, .reason = .handoff_failed };
+        },
     };
 }
 

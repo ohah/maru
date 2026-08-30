@@ -6777,6 +6777,15 @@ pub const RemoteRuntime = struct {
     /// 실행 중 runtime의 daemon-owned notification snapshot을 현재 controller generation에 묶어 교체한다.
     /// capability가 없는 구 host에는 RPC를 보내지 않는다. 이 경우 daemon 내부 OS sink도 존재하지 않으므로 local
     /// 설정만 바꾸는 것이 호환 동작이다.
+    /// `config.update` 는 controller_generation 을 CAS 처럼 실어 보낸다. 그 값은 attach 로 오르고
+    /// attach rollback·controller revoke 로 **내려가므로**, RPC 왕복 중 어긋나 host 가
+    /// `invalid_generation` 으로 거절하는 것은 손상이 아니라 **정상 경합**이다.
+    ///
+    /// 2026-08-30 실측: 재접속 복원에서 이 거절이 10 회 중 2 회 났고, 재시도가 없어서 그 탭의 attach 가
+    /// 통째로 실패했다. 실패는 거기서 멈추지 않는다 — 복원이 불완전해지고, 종료 시 그 부분 상태가
+    /// workspace checkpoint 를 덮어써 창·탭 배치를 잃는다. 경합 한 번에 세션 배치를 잃지 않도록
+    /// 최신 generation 을 다시 읽어 유한 재시도한다. `callDecoded` 가 응답 처리 전에 버퍼된 이벤트를
+    /// 배수하므로(`preDecodeBufferedEvents`) 재시도 시점의 로컬 값은 갱신돼 있다.
     pub fn updateNotificationConfig(
         self: *RemoteRuntime,
         config_generation: u64,
@@ -6786,39 +6795,72 @@ pub const RemoteRuntime = struct {
         try self.admitRuntimeOperation();
         if (!self.mutationAllowed()) return error.Unauthorized;
         if (!self.connectionCapabilities().notification_delivery) return;
-        const controller_generation = self.currentGeneration().attachment.statePtr().controller_generation;
-        const update = generation_contract.NotificationConfigUpdateRequest.init(
-            controller_generation,
-            config_generation,
-            notifications_osc,
-            display_label,
-        ) orelse return error.ProtocolError;
-        var params_buffer: [768]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&params_buffer);
-        var json: std.json.Stringify = .{ .writer = &writer, .options = .{} };
-        json.write(.{
-            .stream_id = self.currentGeneration().attachment.streamId(),
-            .expected_controller_generation = controller_generation,
-            .config_generation = config_generation,
-            .notifications_osc = notifications_osc,
-            .display_label = display_label,
-        }) catch return error.OutOfMemory;
         var mutation_lease: reconnect_mutation_seal.MutationLease = .{};
         try self.beginStableMutation(&mutation_lease);
         defer self.finishStableMutation(&mutation_lease);
-        var applied = false;
-        try self.callDecoded(
-            generation_contract.RuntimeRequest.notificationConfigUpdate(update),
-            "config.update",
-            writer.buffered(),
-            &applied,
-            applyNotificationConfigUpdateResponse,
-        );
-        if (!applied) return error.ProtocolError;
+        var attempt: u8 = 0;
+        while (true) : (attempt += 1) {
+            const controller_generation = self.currentGeneration().attachment.statePtr().controller_generation;
+            const update = generation_contract.NotificationConfigUpdateRequest.init(
+                controller_generation,
+                config_generation,
+                notifications_osc,
+                display_label,
+            ) orelse return error.ProtocolError;
+            var params_buffer: [768]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&params_buffer);
+            var json: std.json.Stringify = .{ .writer = &writer, .options = .{} };
+            json.write(.{
+                .stream_id = self.currentGeneration().attachment.streamId(),
+                .expected_controller_generation = controller_generation,
+                .config_generation = config_generation,
+                .notifications_osc = notifications_osc,
+                .display_label = display_label,
+            }) catch return error.OutOfMemory;
+            var outcome: NotificationConfigOutcome = .{};
+            try self.callDecoded(
+                generation_contract.RuntimeRequest.notificationConfigUpdate(update),
+                "config.update",
+                writer.buffered(),
+                &outcome,
+                applyNotificationConfigUpdateResponse,
+            );
+            if (outcome.applied) return;
+            if (!outcome.stale_generation or attempt + 1 >= max_config_update_attempts) {
+                if (!builtin.is_test)
+                    std.log.warn("cfgupd gave up rt={s} gen={d} attempts={d} stale={}", .{
+                        self.runtime_id_hex[0..8],
+                        controller_generation,
+                        attempt + 1,
+                        outcome.stale_generation,
+                    });
+                return error.ProtocolError;
+            }
+            if (!builtin.is_test)
+                std.log.warn("cfgupd retry rt={s} gen={d} attempt={d}", .{
+                    self.runtime_id_hex[0..8],
+                    controller_generation,
+                    attempt + 1,
+                });
+        }
     }
 
+    /// `config.update` 의 generation 경합 재시도 상한. 경합은 attach rollback/revoke 와 겹칠 때만
+    /// 나므로 한두 번이면 수렴한다. 무한 재시도는 host 가 진짜로 값을 못 맞추는 상황을 숨긴다.
+    const max_config_update_attempts: u8 = 3;
+
+    /// `config.update` 한 번의 결과. host 는 실패를 전부 typed error 로 답하므로 «적용 안 됨» 만으로는
+    /// 재시도해도 되는 경합인지, 손 쓸 수 없는 거절인지 가릴 수 없다. 그 구분을 여기서 실어 올린다.
+    const NotificationConfigOutcome = struct {
+        applied: bool = false,
+        /// `invalid_generation` — 보낸 `expected_controller_generation` 이 host 의 현재 값과 어긋났다.
+        /// controller_generation 은 attach 로 오르고 rollback/revoke 로 내려가므로 RPC 왕복 중 어긋나는
+        /// 것은 CAS 실패와 같은 **정상** 경합이다. 최신 값으로 다시 보내면 된다.
+        stale_generation: bool = false,
+    };
+
     fn applyNotificationConfigUpdateResponse(runtime: *RemoteRuntime, raw_output: *anyopaque, bytes: []const u8) client_mod.ClientError!void {
-        const output: *bool = @ptrCast(@alignCast(raw_output));
+        const output: *NotificationConfigOutcome = @ptrCast(@alignCast(raw_output));
         const obj = decodeStrictObject(runtime.allocator, bytes) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             runtime.poisonConnection(.peer_contract_violation);
@@ -6836,16 +6878,15 @@ pub const RemoteRuntime = struct {
                 runtime.poisonConnection(.peer_contract_violation);
                 return error.ProtocolError;
             }
-            if (!builtin.is_test)
-                std.log.warn("host rejected config.update: code={s}", .{code});
-            output.* = false;
+            output.applied = false;
+            output.stale_generation = std.mem.eql(u8, code, "invalid_generation");
             return;
         }
         if (obj.boolean("applied") != true or obj.hasUnknownKey(&.{"applied"})) {
             runtime.poisonConnection(.peer_contract_violation);
             return error.ProtocolError;
         }
-        output.* = true;
+        output.applied = true;
     }
 
     /// host에 대기 중인 OSC 9/777 데스크톱 알림을 뺀다(§6.32 — host가 core와 함께 알림을 소유·전달). 없으면 null. host-backed
@@ -8482,21 +8523,24 @@ test "remote runtime: config.update의 typed error는 poison 없이 «적용 안
     // 예전 디코더는 error envelope에 `applied`가 없다는 이유로 계약 위반으로 읽어 connection을
     // poison했고, attachment가 전환 중이면 그 poison이 앱 abort(proof_loss)까지 승격됐다.
     // 재접속·exec 업그레이드 중의 generation 경합은 **정상** 거절이므로 연결을 죽이지 않는다.
-    for ([_][]const u8{
-        "{\"error\":\"invalid_generation\"}",
-        "{\"error\":\"unauthorized\"}",
-        "{\"error\":\"runtime_not_found\"}",
-    }) |body| {
-        var applied = true;
-        try rr.applyNotificationConfigUpdateResponse(@ptrCast(&applied), body);
-        try std.testing.expect(!applied);
+    // invalid_generation 만 재시도 가능한 경합으로 표시된다 — 나머지 typed error 는 접히되 재시도하지 않는다.
+    for ([_]struct { body: []const u8, stale: bool }{
+        .{ .body = "{\"error\":\"invalid_generation\"}", .stale = true },
+        .{ .body = "{\"error\":\"unauthorized\"}", .stale = false },
+        .{ .body = "{\"error\":\"runtime_not_found\"}", .stale = false },
+    }) |case| {
+        var outcome: RemoteRuntime.NotificationConfigOutcome = .{ .applied = true };
+        try rr.applyNotificationConfigUpdateResponse(@ptrCast(&outcome), case.body);
+        try std.testing.expect(!outcome.applied);
+        try std.testing.expectEqual(case.stale, outcome.stale_generation);
         try std.testing.expect(client.first_poison_reason == null);
     }
 
     // 성공 schema는 그대로 적용된다.
-    var applied = false;
-    try rr.applyNotificationConfigUpdateResponse(@ptrCast(&applied), "{\"applied\":true}");
-    try std.testing.expect(applied);
+    var outcome: RemoteRuntime.NotificationConfigOutcome = .{};
+    try rr.applyNotificationConfigUpdateResponse(@ptrCast(&outcome), "{\"applied\":true}");
+    try std.testing.expect(outcome.applied);
+    try std.testing.expect(!outcome.stale_generation);
     try std.testing.expect(client.first_poison_reason == null);
 }
 
@@ -8524,10 +8568,10 @@ test "remote runtime: config.update의 schema 드리프트는 여전히 연결�
         try rr.initializePendingEventOwner();
         rr.allocator = allocator;
 
-        var applied = false;
+        var outcome: RemoteRuntime.NotificationConfigOutcome = .{};
         try std.testing.expectError(
             error.ProtocolError,
-            rr.applyNotificationConfigUpdateResponse(@ptrCast(&applied), body),
+            rr.applyNotificationConfigUpdateResponse(@ptrCast(&outcome), body),
         );
         try std.testing.expect(client.first_poison_reason != null);
     }

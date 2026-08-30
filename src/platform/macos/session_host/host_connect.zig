@@ -260,14 +260,31 @@ fn findCurrentManifestHost(
         if (host_id == 0) continue;
         var manifest = host_manifest.load(allocator, session_dir, host_id) catch continue;
         defer manifest.deinit();
-        if (manifest.protocol_major != protocol.version_major or
-            manifest.screen_codec_version != screen_stream.codec_version or
-            manifest.lifecycle != .ready or
-            !std.mem.eql(u8, manifest.build_id, build_id) or
+        // 후보를 **왜** 건너뛰었는지 남긴다.
+        //
+        // 2026-08-30: 사용자 PTY 22 개를 쥔 host 를 두고 앱이 새 host 를 띄웠는데, 이 루프가 조용히
+        // `continue` 만 해서 build_id 때문인지 lease 때문인지 lifecycle 때문인지 로그로 갈리지 않았다.
+        // 코드를 읽어 추론할 수는 있지만 그때의 manifest 상태는 이미 사라진 뒤다. 후보마다 한 줄이면
+        // 「어느 host 를 어떤 이유로 버렸는가」가 사후에 재구성된다.
+        const skip_reason: ?[]const u8 = if (manifest.protocol_major != protocol.version_major)
+            "protocol_major"
+        else if (manifest.screen_codec_version != screen_stream.codec_version)
+            "screen_codec"
+        else if (manifest.lifecycle != .ready)
+            "lifecycle"
+        else if (!std.mem.eql(u8, manifest.build_id, build_id))
+            "build_id"
+        else if (ownerLeaseState(session_dir, host_id) != .held)
             // 여기서는 `held`(생존이 확인된 host)만 재사용 대상이다. `.unknown`(우리가 못 봄)에 새 spawn을 붙이는 쪽이
             // 기존 세션에 안전하다 — 이 경로의 오판 비용은 host 하나를 더 띄우는 것뿐이다(restore 경로와 대비).
-            ownerLeaseState(session_dir, host_id) != .held)
+            "owner_lease"
+        else
+            null;
+        if (skip_reason) |reason| {
+            if (!builtin.is_test)
+                std.log.info("session host candidate skipped: host={x:0>32} reason={s}", .{ host_id, reason });
             continue;
+        }
         switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |client| return .{ .connected = client },
             .failed => |reason| if (reason == .out_of_memory) return .{ .failed = reason },
@@ -436,7 +453,17 @@ fn tryUpgradeExistingHost(
             .screen_codec_version = manifest.screen_codec_version,
             .lifecycle = manifest.lifecycle,
             .build_id = manifest.build_id,
-        }, target_build_id, ownerLeaseState(session_dir, host_id))) continue;
+        }, target_build_id, ownerLeaseState(session_dir, host_id))) {
+            // 스캔이 조용히 넘어가면 「살아 있는 host 를 두고 왜 새로 띄웠나」가 사후에 재구성되지 않는다.
+            // 형제 스캔(`findCurrentManifestHost`)과 같은 이유로 후보마다 한 줄 남긴다.
+            if (!builtin.is_test)
+                std.log.info("session host upgrade candidate rejected: host={x:0>32} lifecycle={s} lease={s}", .{
+                    host_id,
+                    @tagName(manifest.lifecycle),
+                    @tagName(ownerLeaseState(session_dir, host_id)),
+                });
+            continue;
+        }
 
         var client = switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |connected| connected,

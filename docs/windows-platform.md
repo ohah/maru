@@ -6959,6 +6959,87 @@ dock_clip: cut_top=153 cut_bottom=16 outside=0 partial=14 top_px=62(tree_y=76) d
   탐색기 트리만 셌다. 같은 겹침이 그쪽에 있는지는 **여전히 안 재 봤다**.
 - **좌우는 안 자른다** — 가로로 벗어나는 것은 자를 일이 아니라 원점 배선이 틀린 것이다(§2m.31).
 - **부분 오프셋을 만드는 캡처 하네스가 없다** — 도크 막대 thumb 을 정확히 집는 스크립트가 필요하다.
+### 2m.90 이름이 face 를 못 정하고 있었다 — 굵은 제목이 한 칸씩 밀린 이유 (W8.21⒢, 실측 2026-08-30)
+
+§2m.86 이 *"번들 폰트를 못 찾으면 크롬 제목이 엉뚱한 글리프로 그려진다 — 제목만 겪는 이유는 아직
+모른다"* 로 남긴 자리를 갚는다. **이유는 굵기였다.**
+
+## 무엇이 어긋났나
+
+번들 폰트를 못 찾는 배치에서 도크 제목의 첫 글자들을 셰이퍼 값과 **face 마다의 답**으로 나란히 찍었다:
+
+```text
+DBGA face[0]=[Cascadia Mono] face[1]=[Malgun Gothic] face[2]=[Noto Sans KR] …
+DBGF id=1 name=[Malgun Gothic] face=1
+DBGG 0: cp=65  font=1 shaper_glyph=35  f0=1   f1=36 f2=34 f3=39 …
+DBGG 1: cp=103 font=1 shaper_glyph=73  f0=284 f1=74 f2=72 f3=77 …
+```
+
+셰이퍼가 준 번호가 **어느 face 의 답과도 안 맞으면서** 우리가 고른 face 와는 **정확히 1 씩** 어긋난다.
+그래서 화면에는 **바로 앞 글자**가 나온다 — `Agent session history` → `@f dms rdrrhmr ghrsnqx`.
+
+## 왜 — **family 이름은 face 를 하나로 못 정한다**
+
+셰이퍼는 런마다 `familyName(face, …)` 을 실었고, 그 값을 `resolveArtifact` 가
+`registry.intern(.{ .postscript_name = name })` 로 **PostScript 이름 자리에** 넣었다. 래스터라이저는
+그 이름을 face 목록에서 찾아(`faceIndexForName`) 그 face 로 굽는다.
+
+**같은 family 에도 굵기마다 다른 face 가 있고, 글리프 번호는 face 마다 다르다.** 크롬 제목은
+`semibold`(600) 로 셰이핑되어 DirectWrite 가 **Malgun Gothic Bold** 를 골랐는데, 우리 face 목록에는
+`GetFirstMatchingFont(normal…)` 로 연 **Regular** 만 있었다. 이름이 같아 찾기는 성공하고, 번호 체계만
+갈렸다 — **오류가 하나도 안 나는 채로** 틀린 글자가 그려진 이유다.
+
+- **제목만 겪은 이유**: 굵은 것이 제목뿐이다. 같은 화면의 `Local`·`Newest first`·`0 shown · analyzing`
+  는 regular 라 Regular face 와 맞아 멀쩡했다(캡처로 확인).
+- **번들이 있으면 안 겪는 이유**: 그때 크롬 주 폰트는 우리가 파일로 실어 만든 face 하나뿐이라 셰이퍼가
+  고르는 face 와 우리가 만드는 face 가 **같은 것**이다.
+- macOS 는 이 문제가 없다 — CoreText 경로는 그 필드에 진짜 PostScript 이름을 싣는다. **계약
+  (`FontIdentity.postscript_name`)은 처음부터 옳은 것을 요구하고 있었고, Windows 배선만 어겼다.**
+
+## 고친 방법 — 정직한 신원을 싣는다
+
+⑴ **셰이퍼가 PostScript 이름을 싣는다.** face 의 OpenType `name` 테이블(name ID 6)을 빌려 읽는다
+   (`IDWriteFont` 를 거치면 파일에서 바로 연 번들 face 는 답을 못 얻는다 — 두 갈래가 한 길을 쓰게
+   `IDWriteFontFace.TryGetFontTable` 로 간다). 표 해석은 **순수 함수**가 하고 단위 테스트가 지킨다.
+   못 읽으면 예전처럼 family 로 내려간다.
+⑵ **래스터라이저가 face 마다 PostScript 이름을 기억한다**(`face_ps_names`). 찾을 때 그 이름을 **먼저**
+   보고, 없으면 family 로 내려간다(테이블이 없는 face 를 위한 길).
+⑶ **그래도 없으면 그 face 를 연다.** 이미 연 face 들의 **family 안만** 훑어 PostScript 이름이 같은
+   것을 찾는다(`openFaceForPostScriptName`). 이 결함의 모양이 늘 "같은 family, 다른 굵기" 이고,
+   컬렉션 전체를 훑으면 폰트 수백 개의 `name` 테이블을 읽어야 한다. **목록 밖의 face 로 셰이핑된
+   글자는 못 찾은 채로 보고된다**(`error_skip`) — 조용히 다른 face 로 굽는 것보다 낫다.
+
+`create` 가 시스템 컬렉션을 **놓지 않고 들고 있게** 됐다(⑶ 이 나중에 쓴다).
+
+## 판정
+
+**단위 판정 하나가 두 반쪽을 잇는다** — 굵은 런을 셰이핑해 얻은 이름으로 래스터라이저가 face 를
+되찾고, **그 face 가 말하는 번호**가 셰이퍼가 정한 번호와 같은지 본다:
+
+```text
+[실측] 굵은 런 신원 = "MalgunGothicBold" 셰이퍼=35 그 face=35
+```
+
+재는 것이 *"이름이 돌아오나"* 가 아니라 **"둘이 같은 번호를 말하나"** 인 것이 중요하다 — 앞엣것은
+family 를 실어도 통과한다.
+
+| 뮤턴트 | 무엇이 빨개지나 |
+|---|---|
+| 셰이퍼가 family 를 싣는다(**옛 동작**) | `셰이퍼=35 그 face=36` → `expected 35, found 36` |
+| 없는 face 를 안 연다(⑶ 제거) | `NoFaceForShapedName` — 신원은 옳은데 되찾을 face 가 없다 |
+| 신원이 family 이름 그대로다 | 셰이퍼 테스트 둘(`JetBrainsMono-Regular`·`Jetendard-Regular`) |
+
+`name` 표 파서는 따로 판정한다 — Windows 판(platform 3)을 먼저 읽고, 없으면 Macintosh 판으로
+내려가며, nameID 가 6 이 아닌 레코드(= family 이름 자리)는 **안 준다**.
+
+## 아직 아닌 것
+
+- **정상 설치에서는 이 결함이 안 보인다.** 그래서 스모크(저장소 안에서 돈다)에는 관측점이 없고,
+  판정은 시스템 폰트(Malgun Gothic)를 쓰는 **단위 테스트**가 진다. 그 폰트가 없는 기계에서는
+  스스로 skip 한다.
+- **목록 밖 face 는 여전히 못 굽는다** — DirectWrite 폴백이 우리 티어에 없는 폰트를 고르면
+  `error_skip` 으로 센다. 세는 것이 먼저고, 여는 것은 그 수가 실제로 나오면 그때 정한다.
+- **크롬 텍스트 캐시 키**는 그대로다 — 신원 문자열이 바뀌었을 뿐 자료 구조는 안 건드렸다.
 
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 

@@ -96,6 +96,8 @@ const Slot = struct {
     scm: []const u8,
     /// 접을 노드 종류(§4.1f). 비면 그 언어는 구문 접힘이 없다.
     fold_kinds: []const []const u8 = &.{},
+    /// 심볼로 볼 노드 종류(§7.5). 비면 그 언어는 심볼 목록이 없다.
+    symbol_kinds: []const []const u8 = &.{},
 };
 
 /// **지원 언어의 관문은 이 함수 하나다.** 처음에는 grammar를 고르는 `switch`와 쿼리 캐시를 고르는
@@ -104,7 +106,7 @@ const Slot = struct {
 /// (뮤턴트 생존). 규칙이 두 곳에 있으면 갈리고, 갈려도 안 보인다. 늘리는 자리도 여기 하나다.
 fn slotFor(lang: Language) ?Slot {
     inline for (grammar_table, 0..) |g, i| {
-        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm, .fold_kinds = g.fold_kinds };
+        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm, .fold_kinds = g.fold_kinds, .symbol_kinds = g.symbol_kinds };
     }
     return null;
 }
@@ -121,6 +123,13 @@ const GrammarEntry = struct {
     /// **"두 줄 이상 노드를 다 접는" 규칙은 실측이 반박했다** — markdown 에서 화살표의 76%가
     /// 목록 항목·문단이었다(§4.1f 표). 코드에서 잘 맞는 규칙이 산문에서 망가진다.
     fold_kinds: []const []const u8 = &.{},
+    /// **심볼로 볼 노드 종류**(native-editor-ui.md §7.5 — "이 파일 안에 무엇이 있나"). 비어 있으면
+    /// 그 언어는 심볼 목록이 없다.
+    ///
+    /// **접힘 종류와 다른 목록이다.** 접힘은 *"접으면 뭐가 줄어드나"* 를 묻고 심볼은 *"이름이 붙은
+    /// 것이 무엇인가"* 를 묻는다 — 블록은 접히지만 심볼이 아니고, 한 줄짜리 선언은 심볼이지만
+    /// 접히지 않는다. 한 목록으로 겸하면 둘 중 하나가 늘 틀린다.
+    symbol_kinds: []const []const u8 = &.{},
 };
 
 // 종류 이름은 grammar 가 정한다(`ts_node_type`). 아래는 **접었을 때 의미가 있는 것**만 골랐고,
@@ -129,32 +138,35 @@ const GrammarEntry = struct {
 const brace_block = [_][]const u8{ "block", "compound_statement", "statement_block", "declaration_list", "field_declaration_list", "class_body", "enum_body", "switch_body", "argument_list", "arguments", "parameter_list", "formal_parameters", "initializer_list", "array", "object" };
 
 const grammar_table = [_]GrammarEntry{
-    .{ .lang = .zig, .get = tree_sitter_zig, .scm = zig_highlights, .fold_kinds = &.{ "block", "switch_expression", "initializer_list", "asm_expression", "multiline_string", "if_statement", "while_statement", "for_statement", "if_expression", "else_clause", "for_expression", "container_declaration", "function_declaration", "variable_declaration", "test_declaration", "labeled_statement", "switch_case", "struct_declaration", "enum_declaration" } },
-    .{ .lang = .json, .get = tree_sitter_json, .scm = json_highlights, .fold_kinds = &.{ "object", "array" } },
-    .{ .lang = .markdown, .get = tree_sitter_markdown, .scm = markdown_highlights, .fold_kinds = &.{ "section", "list", "fenced_code_block", "pipe_table", "block_quote" } },
-    .{ .lang = .javascript, .get = tree_sitter_javascript, .scm = javascript_highlights, .fold_kinds = &brace_block },
+    .{ .lang = .zig, .get = tree_sitter_zig, .scm = zig_highlights, .fold_kinds = &.{ "block", "switch_expression", "initializer_list", "asm_expression", "multiline_string", "if_statement", "while_statement", "for_statement", "if_expression", "else_clause", "for_expression", "container_declaration", "function_declaration", "variable_declaration", "test_declaration", "labeled_statement", "switch_case", "struct_declaration", "enum_declaration" }, .symbol_kinds = &.{ "function_declaration", "test_declaration", "variable_declaration" } },
+    .{ .lang = .json, .get = tree_sitter_json, .scm = json_highlights, .fold_kinds = &.{ "object", "array" }, .symbol_kinds = &.{} },
+    // **markdown 은 심볼 목록이 비어 있다.** `section` 에는 이름 노드가 없고(제목 글자는 `inline`
+    // 자식이다) 식별자 기반 명명 규칙과 다르다 — 넣어 두면 "지원하는 척" 하면서 목록이 늘 빈다.
+    // 제목을 이름으로 뽑는 것은 별도 슬라이스다(§7.5 의 아웃라인이 산문까지 덮을 때).
+    .{ .lang = .markdown, .get = tree_sitter_markdown, .scm = markdown_highlights, .fold_kinds = &.{ "section", "list", "fenced_code_block", "pipe_table", "block_quote" }, .symbol_kinds = &.{} },
+    .{ .lang = .javascript, .get = tree_sitter_javascript, .scm = javascript_highlights, .fold_kinds = &brace_block, .symbol_kinds = &.{ "function_declaration", "generator_function_declaration", "class_declaration", "method_definition" } },
     // **상속을 우리가 잇는다.** Neovim 이 `; inherits: javascript` 로 잇는 그 구조인데 tree-sitter
     // 자체에는 그 기능이 없다 — 쿼리 파일이 그냥 텍스트다. 안 이으면 TypeScript 파일에서 문자열·주석
     // 같은 **JS 층 색이 통째로 빠진다**(ts 쿼리는 35줄이고 js 는 204줄이다).
     //
     // **기본을 앞에 둔다** — 겹치는 범위는 `collect`가 마지막 캡처를 택하므로(§5.3 겹침 규칙),
     // 언어 고유 패턴이 뒤에 와야 기본을 이긴다.
-    .{ .lang = .typescript, .get = tree_sitter_typescript, .scm = javascript_highlights ++ "\n" ++ typescript_highlights, .fold_kinds = &brace_block },
-    .{ .lang = .tsx, .get = tree_sitter_tsx, .scm = javascript_highlights ++ "\n" ++ tsx_highlights, .fold_kinds = &brace_block },
-    .{ .lang = .c, .get = tree_sitter_c, .scm = c_highlights, .fold_kinds = &brace_block },
+    .{ .lang = .typescript, .get = tree_sitter_typescript, .scm = javascript_highlights ++ "\n" ++ typescript_highlights, .fold_kinds = &brace_block, .symbol_kinds = &.{ "function_declaration", "class_declaration", "method_definition", "interface_declaration", "type_alias_declaration", "enum_declaration" } },
+    .{ .lang = .tsx, .get = tree_sitter_tsx, .scm = javascript_highlights ++ "\n" ++ tsx_highlights, .fold_kinds = &brace_block, .symbol_kinds = &.{ "function_declaration", "class_declaration", "method_definition", "interface_declaration", "type_alias_declaration", "enum_declaration" } },
+    .{ .lang = .c, .get = tree_sitter_c, .scm = c_highlights, .fold_kinds = &brace_block, .symbol_kinds = &.{ "function_definition", "struct_specifier", "enum_specifier", "type_definition" } },
     // C++ 도 같다(`; inherits: c` — cpp 쿼리는 70줄이고 c 는 81줄이다). 안 이으면 `int main(void)`
     // 같은 C 층 구문이 무색이라 **파일 대부분이 색을 잃는다**(`SYN18`이 그것을 잡았다).
-    .{ .lang = .cpp, .get = tree_sitter_cpp, .scm = c_highlights ++ "\n" ++ cpp_highlights, .fold_kinds = &brace_block },
-    .{ .lang = .python, .get = tree_sitter_python, .scm = python_highlights, .fold_kinds = &.{ "block", "dictionary", "list", "set", "tuple", "argument_list", "parameters" } },
-    .{ .lang = .go, .get = tree_sitter_go, .scm = go_highlights, .fold_kinds = &.{ "block", "field_declaration_list", "composite_literal", "argument_list", "parameter_list", "literal_value", "expression_switch_statement", "type_switch_statement", "const_declaration", "var_declaration", "import_declaration" } },
-    .{ .lang = .rust, .get = tree_sitter_rust, .scm = rust_highlights, .fold_kinds = &.{ "block", "declaration_list", "field_declaration_list", "arguments", "parameters", "match_block", "use_list", "token_tree" } },
-    .{ .lang = .java, .get = tree_sitter_java, .scm = java_highlights, .fold_kinds = &.{ "block", "class_body", "enum_body", "interface_body", "argument_list", "formal_parameters", "array_initializer", "switch_block" } },
-    .{ .lang = .ruby, .get = tree_sitter_ruby, .scm = ruby_highlights, .fold_kinds = &.{ "body_statement", "do_block", "block", "hash", "array", "argument_list", "then", "else" } },
-    .{ .lang = .php, .get = tree_sitter_php, .scm = php_highlights, .fold_kinds = &.{ "compound_statement", "declaration_list", "array_creation_expression", "arguments", "formal_parameters", "switch_block", "enum_declaration_list" } },
-    .{ .lang = .kotlin, .get = tree_sitter_kotlin, .scm = kotlin_highlights, .fold_kinds = &.{ "class_body", "function_body", "control_structure_body", "statements", "value_arguments", "function_value_parameters", "when_expression", "lambda_literal" } },
-    .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights, .fold_kinds = &.{ "compound_statement", "do_group", "if_statement", "case_statement", "function_definition", "subshell" } },
-    .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights, .fold_kinds = &.{ "block", "keyframe_block_list", "declaration" } },
-    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights, .fold_kinds = &.{ "element", "script_element", "style_element" } },
+    .{ .lang = .cpp, .get = tree_sitter_cpp, .scm = c_highlights ++ "\n" ++ cpp_highlights, .fold_kinds = &brace_block, .symbol_kinds = &.{ "function_definition", "class_specifier", "struct_specifier", "enum_specifier", "namespace_definition" } },
+    .{ .lang = .python, .get = tree_sitter_python, .scm = python_highlights, .fold_kinds = &.{ "block", "dictionary", "list", "set", "tuple", "argument_list", "parameters" }, .symbol_kinds = &.{ "function_definition", "class_definition" } },
+    .{ .lang = .go, .get = tree_sitter_go, .scm = go_highlights, .fold_kinds = &.{ "block", "field_declaration_list", "composite_literal", "argument_list", "parameter_list", "literal_value", "expression_switch_statement", "type_switch_statement", "const_declaration", "var_declaration", "import_declaration" }, .symbol_kinds = &.{ "function_declaration", "method_declaration", "type_declaration" } },
+    .{ .lang = .rust, .get = tree_sitter_rust, .scm = rust_highlights, .fold_kinds = &.{ "block", "declaration_list", "field_declaration_list", "arguments", "parameters", "match_block", "use_list", "token_tree" }, .symbol_kinds = &.{ "function_item", "struct_item", "enum_item", "trait_item", "impl_item", "mod_item" } },
+    .{ .lang = .java, .get = tree_sitter_java, .scm = java_highlights, .fold_kinds = &.{ "block", "class_body", "enum_body", "interface_body", "argument_list", "formal_parameters", "array_initializer", "switch_block" }, .symbol_kinds = &.{ "class_declaration", "interface_declaration", "enum_declaration", "method_declaration", "constructor_declaration" } },
+    .{ .lang = .ruby, .get = tree_sitter_ruby, .scm = ruby_highlights, .fold_kinds = &.{ "body_statement", "do_block", "block", "hash", "array", "argument_list", "then", "else" }, .symbol_kinds = &.{ "method", "singleton_method", "class", "module" } },
+    .{ .lang = .php, .get = tree_sitter_php, .scm = php_highlights, .fold_kinds = &.{ "compound_statement", "declaration_list", "array_creation_expression", "arguments", "formal_parameters", "switch_block", "enum_declaration_list" }, .symbol_kinds = &.{ "function_definition", "method_declaration", "class_declaration", "interface_declaration", "trait_declaration" } },
+    .{ .lang = .kotlin, .get = tree_sitter_kotlin, .scm = kotlin_highlights, .fold_kinds = &.{ "class_body", "function_body", "control_structure_body", "statements", "value_arguments", "function_value_parameters", "when_expression", "lambda_literal" }, .symbol_kinds = &.{ "function_declaration", "class_declaration", "object_declaration" } },
+    .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights, .fold_kinds = &.{ "compound_statement", "do_group", "if_statement", "case_statement", "function_definition", "subshell" }, .symbol_kinds = &.{"function_definition"} },
+    .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights, .fold_kinds = &.{ "block", "keyframe_block_list", "declaration" }, .symbol_kinds = &.{} },
+    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights, .fold_kinds = &.{ "element", "script_element", "style_element" }, .symbol_kinds = &.{} },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -467,6 +479,166 @@ pub const Provider = struct {
     pub fn lineCount(self: *Provider) usize {
         const tree = self.tree orelse return 0;
         return @as(usize, c.ts_node_end_point(c.ts_tree_root_node(tree)).row) + 1;
+    }
+
+    /// 문서 안 심볼 하나(native-editor-ui.md §7.5 — "이 파일 안에 무엇이 있나").
+    ///
+    /// **이름을 문자열로 복사하지 않는다** — 소스의 byte 범위만 든다. 호출자가 그 문서를 이미 들고
+    /// 있으므로 자르면 되고, 복사하면 편집마다 그 문자열의 수명을 따로 관리해야 한다.
+    pub const Symbol = struct {
+        /// 이름의 byte 범위(`source[name_start..name_end]`).
+        name_start: u32,
+        name_end: u32,
+        /// 심볼 **전체**의 byte 범위. 커서가 이 안에 있으면 그 심볼 안이다(체인 조회).
+        start: u32,
+        end: u32,
+        /// 시작 줄(0-based) — 목록이 줄 번호를 보여 준다.
+        start_row: u32,
+        /// 중첩 깊이(0부터). 트리 모양을 그리는 데 쓴다.
+        depth: u16,
+        /// grammar 가 부른 노드 이름(`function_declaration` 등). 아이콘·분류에 쓴다 — 우리 어휘로
+        /// 접는 것은 소비처의 몫이다(캡처→역할과 같은 규율).
+        kind: []const u8,
+    };
+
+    /// 문서의 심볼을 **문서 순서**로 모은다. 없으면 빈 목록이다(§5의 저하).
+    ///
+    /// **정규식으로 긁지 않는다**(§7.5) — 언어마다 틀리고, 틀린 목록은 *"이 파일에 뭐가 있나"* 라는
+    /// 질문에 **조용히 거짓말**을 한다. grammar 가 없으면 목록이 비는 것이 옳은 답이다.
+    ///
+    /// **이름은 `name` 필드에서 꺼낸다.** tree-sitter grammar 는 선언 노드에 그 필드를 두는 것이
+    /// 관례다. 없으면 그 심볼은 **건너뛴다** — 이름 없는 항목을 목록에 넣으면 사용자가 고를 수 없다.
+    pub fn symbols(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(Symbol)) void {
+        out.clearRetainingCapacity();
+        const tree = self.tree orelse return;
+        const kinds = self.slot.symbol_kinds;
+        if (kinds.len == 0) return;
+
+        var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
+        defer c.ts_tree_cursor_delete(&cursor);
+
+        // 깊이는 **심볼 사이의** 중첩이다(노드 깊이가 아니다) — 클래스 안 메서드가 1이어야지, 그
+        // 사이에 낀 `class_body` 같은 노드까지 세면 언어마다 숫자가 달라진다.
+        var stack: [64]u32 = undefined; // 열린 심볼의 끝 offset
+        var depth: usize = 0;
+
+        while (true) {
+            const node = c.ts_tree_cursor_current_node(&cursor);
+            const sb = c.ts_node_start_byte(node);
+            const eb = c.ts_node_end_byte(node);
+            while (depth > 0 and stack[depth - 1] <= sb) depth -= 1;
+
+            if (hasKind(kinds, c.ts_node_type(node)) and isSymbolWorthy(node)) {
+                const name_node = symbolNameNode(node);
+                if (!c.ts_node_is_null(name_node)) {
+                    out.append(allocator, .{
+                        .name_start = c.ts_node_start_byte(name_node),
+                        .name_end = c.ts_node_end_byte(name_node),
+                        .start = sb,
+                        .end = eb,
+                        .start_row = c.ts_node_start_point(node).row,
+                        .depth = @intCast(@min(depth, std.math.maxInt(u16))),
+                        .kind = std.mem.span(c.ts_node_type(node)),
+                    }) catch return;
+                    if (depth < stack.len) {
+                        stack[depth] = eb;
+                        depth += 1;
+                    }
+                }
+            }
+
+            if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
+            while (true) {
+                if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
+                if (!c.ts_tree_cursor_goto_parent(&cursor)) return;
+            }
+        }
+    }
+
+    /// 종류가 맞아도 **목록에 넣을 값인가**. §7.5 가 심볼로 부른 것은 *"함수·클래스·메서드·테스트
+    /// 블록"* 이지 지역 변수가 아니다.
+    ///
+    /// **실측이 이 문을 낳았다.** zig 의 `variable_declaration` 을 종류 목록에 넣었더니 `_ = self;`
+    /// 까지 심볼이 됐다(이름이 `_` 인 심볼이 체인의 가장 깊은 항목이 됐다). 그런데 그 종류를 통째로
+    /// 빼면 `pub const Widget = struct {...}` — zig 에서 **타입을 선언하는 유일한 형태** — 가 사라진다.
+    ///
+    /// 그래서 **값이 컨테이너일 때만** 심볼로 본다. 그것이 §7.5 의 "클래스" 에 해당하는 자리다.
+    fn isSymbolWorthy(node: c.TSNode) bool {
+        const kind = std.mem.span(c.ts_node_type(node));
+        if (!std.mem.eql(u8, kind, "variable_declaration")) return true;
+
+        const count = c.ts_node_named_child_count(node);
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            const child_kind = std.mem.span(c.ts_node_type(c.ts_node_named_child(node, i)));
+            inline for (.{ "struct_declaration", "enum_declaration", "union_declaration", "opaque_declaration", "error_set_declaration" }) |container| {
+                if (std.mem.eql(u8, child_kind, container)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// 심볼의 **이름 노드**를 찾는다. 없으면 null 노드.
+    ///
+    /// **`name` 필드가 정본이지만 모든 grammar 가 달지는 않는다** — 실측: zig 는 `function_declaration`
+    /// 에는 달고 `test_declaration`·`variable_declaration` 에는 안 단다(이름이 그냥 자식이다).
+    /// 그래서 필드를 먼저 보고, 없으면 **이름처럼 생긴 첫 자식**을 쓴다.
+    ///
+    /// 목록을 넓게 두지 않는 이유: 아무 자식이나 이름으로 쓰면 `pub`·`const` 같은 키워드나 값이
+    /// 이름 자리에 온다 — 사용자가 고를 수 없는 항목이 목록에 섞인다.
+    fn symbolNameNode(node: c.TSNode) c.TSNode {
+        const field = c.ts_node_child_by_field_name(node, "name", 4);
+        if (!c.ts_node_is_null(field)) return field;
+
+        // **C 계열은 이름이 `declarator` 사슬 안에 있다** — `function_definition → declarator
+        // (function_declarator) → declarator (identifier)`. 실측으로 확인했고, 이 사슬이 없으면 C·C++ 가
+        // 심볼 0개가 된다(`SYN25` 가 그것을 잡았다). 포인터 반환처럼 사슬이 더 깊은 판도 있어 반복한다.
+        var decl = c.ts_node_child_by_field_name(node, "declarator", 10);
+        var hops: usize = 0;
+        while (!c.ts_node_is_null(decl) and hops < 8) : (hops += 1) {
+            const kind = std.mem.span(c.ts_node_type(decl));
+            if (std.mem.endsWith(u8, kind, "identifier")) return decl;
+            decl = c.ts_node_child_by_field_name(decl, "declarator", 10);
+        }
+
+        const count = c.ts_node_named_child_count(node);
+        var i: u32 = 0;
+        while (i < count) : (i += 1) {
+            const child = c.ts_node_named_child(node, i);
+            const kind = std.mem.span(c.ts_node_type(child));
+            if (std.mem.endsWith(u8, kind, "identifier")) return child;
+            // zig `test "이름"` 처럼 문자열이 이름인 판. **따옴표를 뺀 안쪽**을 쓴다 — 목록에 따옴표가
+            // 보이면 그것은 이름이 아니라 리터럴이다.
+            if (std.mem.eql(u8, kind, "string")) {
+                const inner_count = c.ts_node_named_child_count(child);
+                if (inner_count > 0) {
+                    const inner = c.ts_node_named_child(child, 0);
+                    if (std.mem.eql(u8, std.mem.span(c.ts_node_type(inner)), "string_content")) return inner;
+                }
+                return child;
+            }
+        }
+        return c.ts_node_named_child(node, count); // 범위를 넘는 색인 = null 노드
+    }
+
+    /// 커서 offset 을 품는 심볼 체인 — **루트부터 가장 깊은 것까지**. 담은 개수를 돌려준다.
+    ///
+    /// **조회이지 저장이 아니다**(§7.5). 체인을 따로 캐시하면 편집과 파싱 두 축으로 무효화해야 하고,
+    /// 그 값은 이미 문서 순서로 담긴 목록에서 싸게 나온다.
+    ///
+    /// **목록이 문서 순서라는 것을 쓴다.** 시작 offset 이 커서를 넘어선 뒤로는 볼 필요가 없고, 그
+    /// 전까지 중 커서를 품는 것만 모으면 그것이 곧 체인이다(바깥 심볼이 먼저 나오므로 순서도 맞다).
+    pub fn chainAt(list: []const Symbol, offset: u32, out: []usize) usize {
+        var n: usize = 0;
+        for (list, 0..) |sym, i| {
+            if (sym.start > offset) break;
+            if (offset < sym.end) {
+                if (n >= out.len) break;
+                out[n] = i;
+                n += 1;
+            }
+        }
+        return n;
     }
 
     /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
@@ -1389,4 +1561,242 @@ test "SYN22 산문은 과하게 접지 않는다 — 문단·목록 항목에 �
     if (list_end) |e| try std.testing.expect(e >= 8); // 항목이 아니라 목록 전체다
     // 그리고 **절**은 접힌다 — 아무것도 안 접으면 기능이 없는 것이다.
     try std.testing.expect(spans.items.len > 0);
+}
+
+test "SYN23 심볼 목록이 문서 순서로 서고 이름·범위·깊이가 맞는다 (§7.5)" {
+    // §7.5: *"심볼 목록은 하나, 표시는 여럿"* — 그 하나가 이것이다. breadcrumb·오버레이·아웃라인이
+    // 각자 심볼을 구하지 않으므로, 이 목록이 틀리면 셋이 함께 틀린다.
+    const allocator = std.testing.allocator;
+    const src =
+        \\const std = @import("std");
+        \\
+        \\pub fn outer() void {
+        \\    inner();
+        \\}
+        \\
+        \\test "이름 있는 테스트" {
+        \\    try inner();
+        \\}
+    ;
+    var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var list: std.ArrayList(Provider.Symbol) = .empty;
+    defer list.deinit(allocator);
+    prov.symbols(allocator, &list);
+
+    try std.testing.expect(list.items.len >= 2);
+
+    // 문서 순서 — 소비처가 이분 탐색·체인 조회에서 그것을 전제한다.
+    var prev: u32 = 0;
+    for (list.items) |sym| {
+        try std.testing.expect(sym.start >= prev);
+        prev = sym.start;
+        // 범위가 뒤집히지 않는다.
+        try std.testing.expect(sym.end > sym.start);
+        // 이름이 심볼 범위 안에 있다.
+        try std.testing.expect(sym.name_start >= sym.start and sym.name_end <= sym.end);
+        try std.testing.expect(sym.name_end > sym.name_start);
+    }
+
+    // 이름이 실제로 그 글자다 — byte 범위만 들고 다니므로 그 계약이 깨지면 목록이 엉뚱한 글자를 낸다.
+    var found_outer = false;
+    for (list.items) |sym| {
+        if (std.mem.eql(u8, src[sym.name_start..sym.name_end], "outer")) found_outer = true;
+    }
+    if (!found_outer) {
+        std.debug.print("심볼 {d}개: ", .{list.items.len});
+        for (list.items) |sym| std.debug.print("{s}({s}) ", .{ src[sym.name_start..sym.name_end], sym.kind });
+        std.debug.print("\n", .{});
+    }
+    try std.testing.expect(found_outer);
+
+    // **깊이를 정확히 못박는다.** "0 이상" 같은 느슨한 성질은 깊이를 통째로 0으로 만들어도(SM3),
+    // 깊이 스택을 안 닫아 단조 증가시켜도(SM8) 통과한다 — 둘 다 breadcrumb 을 망가뜨리는데.
+    // 여기 둘은 **형제**이므로 **둘 다 0** 이어야 한다.
+    for (list.items) |sym| {
+        try std.testing.expectEqual(@as(u16, 0), sym.depth);
+    }
+}
+
+test "SYN24 커서가 어느 심볼 안에 있는지 조회한다 — 체인은 바깥부터다 (§7.5)" {
+    // §7.5: *"체인은 커서 offset 을 품는 가장 깊은 심볼부터 루트까지이며 편집마다 다시 구한다"* —
+    // **조회이지 저장이 아니다**. 그 성질을 값으로 고정한다.
+    const allocator = std.testing.allocator;
+    // **커서 뒤에 형제 심볼이 있어야 한다.** 이것이 없으면 `chainAt` 이 offset 을 지나서도 계속
+    // 훑는 결함(break 제거)이 **표본상 구별되지 않는다** — 실제로 뮤테이션에서 살아남았다.
+    const src =
+        \\pub const Widget = struct {
+        \\    pub fn draw(self: Widget) void {
+        \\        _ = self;
+        \\    }
+        \\};
+        \\
+        \\pub fn after() void {}
+    ;
+    var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var list: std.ArrayList(Provider.Symbol) = .empty;
+    defer list.deinit(allocator);
+    prov.symbols(allocator, &list);
+    try std.testing.expect(list.items.len >= 2);
+
+    // `_ = self;` 안쪽 offset — 바깥(Widget)과 안쪽(draw) 둘 다 품는다.
+    const inside = @as(u32, @intCast(std.mem.indexOf(u8, src, "_ = self").?));
+    var chain: [8]usize = undefined;
+    const n = Provider.chainAt(list.items, inside, &chain);
+    try std.testing.expect(n >= 2);
+
+    // **체인은 정확히 둘이다** — `after` 는 커서보다 뒤에서 시작하므로 들어오면 안 된다.
+    try std.testing.expectEqual(@as(usize, 2), n);
+
+    // 체인의 모든 항목이 실제로 커서를 품는다.
+    for (chain[0..n]) |ci| {
+        try std.testing.expect(list.items[ci].start <= inside and inside < list.items[ci].end);
+    }
+
+    // **바깥부터다** — breadcrumb 이 `Widget > draw` 순으로 그린다. 깊이도 정확히 본다.
+    try std.testing.expectEqual(@as(u16, 0), list.items[chain[0]].depth);
+    try std.testing.expectEqual(@as(u16, 1), list.items[chain[1]].depth);
+    try std.testing.expectEqualStrings("Widget", src[list.items[chain[0]].name_start..list.items[chain[0]].name_end]);
+    try std.testing.expectEqualStrings("draw", src[list.items[chain[n - 1]].name_start..list.items[chain[n - 1]].name_end]);
+
+    // **형제는 자기 자리에서만 잡힌다** — `after` 안에서는 체인이 그것 하나다.
+    const in_after = @as(u32, @intCast(std.mem.indexOf(u8, src, "after() void").?));
+    const m = Provider.chainAt(list.items, in_after, &chain);
+    try std.testing.expectEqual(@as(usize, 1), m);
+    try std.testing.expectEqualStrings("after", src[list.items[chain[0]].name_start..list.items[chain[0]].name_end]);
+
+    // 어느 심볼에도 안 든 자리(문서 맨 끝)는 빈 체인이다.
+    try std.testing.expectEqual(@as(usize, 0), Provider.chainAt(list.items, @intCast(src.len), &chain));
+}
+
+test "SYN25 심볼 종류 목록이 실재하는 노드 이름이다 — 언어마다 하나 이상 나온다" {
+    // **종류 이름이 낡으면 그 언어만 조용히 목록이 빈다.** `SYN21`(접힘)과 같은 그물이고, 같은
+    // 이유로 필요하다 — grammar 를 올릴 때 이름이 바뀌면 화면에서만 드러난다.
+    //
+    // 목록이 **일부러 빈** 언어(json·css·html·markdown)는 여기서 뺀다 — 그 사실은 표의 주석이 갖는다.
+    const allocator = std.testing.allocator;
+    const samples = [_]struct { lang: Language, src: []const u8, want: []const u8 }{
+        .{ .lang = .zig, .src = "pub fn f() void {}\n", .want = "f" },
+        .{ .lang = .javascript, .src = "function f() {}\n", .want = "f" },
+        .{ .lang = .typescript, .src = "function f(): void {}\n", .want = "f" },
+        .{ .lang = .tsx, .src = "function f() {}\n", .want = "f" },
+        .{ .lang = .c, .src = "int f(void) { return 0; }\n", .want = "f" },
+        .{ .lang = .cpp, .src = "int f() { return 0; }\n", .want = "f" },
+        .{ .lang = .python, .src = "def f():\n    pass\n", .want = "f" },
+        .{ .lang = .go, .src = "package m\nfunc f() {}\n", .want = "f" },
+        .{ .lang = .rust, .src = "fn f() {}\n", .want = "f" },
+        .{ .lang = .java, .src = "class A { void f() {} }\n", .want = "A" },
+        .{ .lang = .ruby, .src = "def f\nend\n", .want = "f" },
+        .{ .lang = .php, .src = "<?php\nfunction f() {}\n", .want = "f" },
+        .{ .lang = .kotlin, .src = "fun f() {}\n", .want = "f" },
+        .{ .lang = .bash, .src = "f() {\n  echo 1\n}\n", .want = "f" },
+    };
+    // **표본이 없는 언어는 종류를 선언할 수 없다.** 이것이 없으면 "종류는 적어 뒀는데 목록은 늘
+    // 비는" 상태가 조용히 산다 — markdown 의 `section` 이 정확히 그랬다(이름 노드가 없다). 뮤테이션에서
+    // 그것을 되살렸는데 아무 판정자도 안 죽었다. 선언과 실제를 잇는 것은 이 한 줄이다.
+    for (grammar_table) |slot| {
+        if (slot.symbol_kinds.len == 0) continue;
+        var covered = false;
+        for (samples) |s| {
+            if (s.lang == slot.lang) covered = true;
+        }
+        if (!covered) {
+            std.debug.print("'{s}' 가 심볼 종류를 선언했는데 표본이 없다 — 목록이 늘 비어도 아무도 모른다\n", .{@tagName(slot.lang)});
+            return error.SymbolKindsWithoutSample;
+        }
+    }
+
+    var list: std.ArrayList(Provider.Symbol) = .empty;
+    defer list.deinit(allocator);
+    var bad: usize = 0;
+    for (samples) |s| {
+        var prov = Provider.init(s.src, s.lang, 0) orelse {
+            std.debug.print("provider 없음: {s}\n", .{@tagName(s.lang)});
+            bad += 1;
+            continue;
+        };
+        defer prov.deinit();
+        prov.symbols(allocator, &list);
+        var found = false;
+        for (list.items) |sym| {
+            if (std.mem.eql(u8, s.src[sym.name_start..sym.name_end], s.want)) found = true;
+        }
+        if (!found) {
+            std.debug.print("'{s}' 에서 심볼 '{s}' 를 못 찾았다 (심볼 {d}개) — 종류 이름을 확인하라\n", .{ @tagName(s.lang), s.want, list.items.len });
+            bad += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "SYN26 예산에 끊긴 전체 파싱 동안 심볼 목록은 비어 있다 — 반쯤 판 트리로 답하지 않는다" {
+    // **이 성질은 검사가 아니라 구조가 준다** — `setSourceBudgeted` 가 시작할 때 옛 트리를 버리므로
+    // pending 동안 트리가 없고, `symbols()` 는 트리가 없으면 빈 목록을 낸다. 구조가 바뀌면(예: 옛
+    // 트리를 살려 두도록) 이 판정자가 죽는다. 그때 문서(§7.5)도 같이 고쳐야 한다.
+    const allocator = std.testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    var i: usize = 0;
+    while (i < 400) : (i += 1) try src.print(allocator, "pub fn f{d}() void {{ _ = {d}; }}\n", .{ i, i });
+
+    var prov = Provider.init("", .zig, 0) orelse return error.SkipZigTest;
+    defer prov.deinit();
+
+    var list: std.ArrayList(Provider.Symbol) = .empty;
+    defer list.deinit(allocator);
+
+    // 1ns 예산 = 사실상 첫 콜백에서 끊긴다.
+    var status = prov.setSourceBudgeted(src.items, 1);
+    if (status == .done) return error.SkipZigTest; // 너무 빨라 못 끊었다 — 이 판정자가 잴 것이 없다
+
+    prov.symbols(allocator, &list);
+    try std.testing.expectEqual(@as(usize, 0), list.items.len);
+    try std.testing.expectEqual(@as(usize, 0), Provider.chainAt(list.items, 0, &.{}));
+
+    // 다 끝나면 목록이 돌아온다 — "영영 빈다" 가 아니라 "끝날 때까지 빈다" 임을 못박는다.
+    var rounds: usize = 0;
+    while (status == .pending and rounds < 100_000) : (rounds += 1) {
+        status = prov.setSourceBudgeted(src.items, 0);
+    }
+    try std.testing.expectEqual(Provider.ParseStatus.done, status);
+    prov.symbols(allocator, &list);
+    try std.testing.expectEqual(@as(usize, 400), list.items.len);
+}
+
+test "SYN27 이름 없는 노드는 심볼이 아니다 — zig 익명 test 블록이 목록에 안 든다" {
+    // **이름 없는 심볼은 심볼이 아니다**(§7.5) — 목록의 항목은 이름을 가져야 클릭할 수 있다.
+    // 그 규율은 `symbolNameNode` 가 null 을 내면 건너뛰는 한 줄인데, **표본에 이름 없는 노드가
+    // 없으면 그 줄을 지워도 아무 판정자가 안 죽는다**(뮤테이션에서 실제로 살아남았다).
+    // zig 의 익명 `test { }` 가 그 모양이다 — `test_declaration` 인데 이름 문자열이 없다.
+    const allocator = std.testing.allocator;
+    const src =
+        \\test {
+        \\    _ = 1;
+        \\}
+        \\
+        \\test "이름 있다" {
+        \\    _ = 2;
+        \\}
+    ;
+    var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var list: std.ArrayList(Provider.Symbol) = .empty;
+    defer list.deinit(allocator);
+    prov.symbols(allocator, &list);
+
+    // 이름 있는 것 하나만 남는다.
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqualStrings("이름 있다", src[list.items[0].name_start..list.items[0].name_end]);
+
+    // 그리고 **어느 항목도 빈 이름을 갖지 않는다** — 범위가 [0,0) 인 유령이 끼면 여기서 죽는다.
+    for (list.items) |sym| {
+        try std.testing.expect(sym.name_end > sym.name_start);
+        try std.testing.expect(sym.name_start >= sym.start);
+    }
+
+    // 익명 블록 안에서는 체인이 비어 있다 — 심볼이 아니므로.
+    const in_anon = @as(u32, @intCast(std.mem.indexOf(u8, src, "_ = 1").?));
+    var chain: [4]usize = undefined;
+    try std.testing.expectEqual(@as(usize, 0), Provider.chainAt(list.items, in_anon, &chain));
 }

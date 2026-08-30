@@ -15,6 +15,7 @@ const owner_lease = @import("owner_lease.zig");
 const rollback_image = @import("rollback_image.zig");
 const runtime_manager = @import("runtime_manager.zig");
 const upgrade_attempt = @import("upgrade_attempt.zig");
+const budget_admission = @import("upgrade_budget_admission.zig");
 const upgrade_deadline = @import("upgrade_deadline.zig");
 const upgrade_fd_layout = @import("upgrade_fd_layout.zig");
 const upgrade_limits = @import("upgrade_limits.zig");
@@ -152,6 +153,83 @@ fn processArmedWithDeadline(
             .reason = .deadline_exceeded,
         });
 
+    const ready_authority = ctx.authority.snapshot(ctx.authority.ctx);
+    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready)
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .runtime_changed,
+        });
+
+    const preview = ctx.manager.previewUpgradeHandoff(
+        ctx.allocator,
+        ready_authority.host_id,
+        ready_authority.upgrade_epoch,
+        ready_authority.authority_generation,
+        @intCast(ctx.layout.first_runtime_slot),
+    ) catch |err| return finishBeforeFreeze(
+        ctx,
+        attempt_id,
+        gate_preclosed,
+        reportForCaptureError(err),
+    );
+    const record = ctx.owner.encodeRunningRecordWithDeadline(
+        ctx.allocator,
+        execution,
+        ready_authority.host_id,
+        ready_authority.upgrade_epoch,
+        ctx.rollback_image.record(),
+        preview.sortedRuntimeIds(),
+        deadline.expiresAtNs(),
+    ) catch return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+        .status = .resumed,
+        .reason = .handoff_failed,
+    });
+    defer ctx.allocator.free(record);
+    const preview_bytes = preview.totalBytesWithAttempt(record.len) catch
+        return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
+            .status = .resumed,
+            .reason = .state_too_large,
+        });
+    var budget_reservation = budget_admission.prepare(
+        ctx.allocator,
+        ctx.owner_dir,
+        attempt_id,
+        .{
+            .bytes = preview_bytes,
+            .membership_generation = preview.membership_generation,
+            .runtime_ids = preview.sortedRuntimeIds(),
+        },
+        deadline,
+    ) catch |err| return finishBeforeFreeze(
+        ctx,
+        attempt_id,
+        gate_preclosed,
+        reportForBudgetError(err),
+    );
+    const outcome = processBudgetReserved(
+        ctx,
+        attempt_id,
+        execution,
+        ready_authority,
+        record,
+        deadline,
+        gate_preclosed,
+        &budget_reservation,
+    );
+    budget_reservation.cancel() catch return .invariant_violation;
+    return outcome;
+}
+
+fn processBudgetReserved(
+    ctx: Context,
+    attempt_id: u128,
+    execution: upgrade_owner.Execution,
+    ready_authority: AuthoritySnapshot,
+    record: []const u8,
+    deadline: upgrade_deadline.Deadline,
+    gate_preclosed: bool,
+    budget_reservation: *budget_admission.Reservation,
+) Outcome {
     const requested = ctx.layout.requested() orelse
         return finishBeforeFreeze(ctx, attempt_id, gate_preclosed, .{
             .status = .resumed,
@@ -181,8 +259,8 @@ fn processArmedWithDeadline(
             finish(ctx.owner, attempt_id, report);
     };
     defer reservation.rollback();
-    const ready_authority = ctx.authority.snapshot(ctx.authority.ctx);
-    if (ready_authority.host_id == 0 or ready_authority.lifecycle != .ready)
+    const frozen_authority = ctx.authority.snapshot(ctx.authority.ctx);
+    if (!std.meta.eql(frozen_authority, ready_authority))
         return resumeAndFinish(ctx, &frozen, attempt_id, .{ .status = .resumed, .reason = .runtime_changed }, deadline);
 
     var capture = frozen.prepareCapture(
@@ -196,19 +274,6 @@ fn processArmedWithDeadline(
     var runtime_id_buf: [upgrade_limits.max_runtime_count]u128 = undefined;
     const runtime_ids = capture.sortedRuntimeIds(&runtime_id_buf);
     const next_handle = capture.next_handle;
-    const record = ctx.owner.encodeRunningRecordWithDeadline(
-        ctx.allocator,
-        execution,
-        ready_authority.host_id,
-        ready_authority.upgrade_epoch,
-        ctx.rollback_image.record(),
-        runtime_ids,
-        deadline.expiresAtNs(),
-    ) catch return resumeAndFinish(ctx, &frozen, attempt_id, .{
-        .status = .resumed,
-        .reason = .handoff_failed,
-    }, deadline);
-    defer ctx.allocator.free(record);
     const handoff_bytes = capture.encode(record) catch
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
@@ -221,9 +286,17 @@ fn processArmedWithDeadline(
             .reason = .deadline_exceeded,
         }, deadline);
 
-    var pair = handoff_store.commit(
+    if (!budget_reservation.matches(
+        capture.membership_generation,
+        runtime_ids,
+        handoff_bytes.len,
+    )) return resumeAndFinish(ctx, &frozen, attempt_id, .{
+        .status = .resumed,
+        .reason = .runtime_changed,
+    }, deadline);
+
+    var pair = budget_reservation.commit(
         ctx.allocator,
-        ctx.owner_dir,
         .{
             .host_id = ready_authority.host_id,
             .attempt_id = attempt_id,
@@ -242,7 +315,7 @@ fn processArmedWithDeadline(
             .reader_max = execution.target.reader_max,
         },
         handoff_bytes,
-        .{ .deadline = deadline },
+        deadline,
     ) catch |err| return resumeAndFinish(ctx, &frozen, attempt_id, reportForStoreError(err), deadline);
     defer pair.deinit();
 
@@ -654,6 +727,14 @@ fn reportForStoreError(err: handoff_store.Error) upgrade_wire.AttemptReport {
     return switch (err) {
         error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
         error.LimitExceeded, error.InsufficientSpace => .{ .status = .resumed, .reason = .state_too_large },
+        else => .{ .status = .resumed, .reason = .handoff_failed },
+    };
+}
+
+fn reportForBudgetError(err: budget_admission.Error) upgrade_wire.AttemptReport {
+    return switch (err) {
+        error.DeadlineExceeded => .{ .status = .resumed, .reason = .deadline_exceeded },
+        error.LimitExceeded, error.InsufficientSpace, error.InsufficientIoBudget => .{ .status = .resumed, .reason = .state_too_large },
         else => .{ .status = .resumed, .reason = .handoff_failed },
     };
 }

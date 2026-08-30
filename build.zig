@@ -4693,6 +4693,19 @@ pub fn build(b: *std.Build) void {
     run_session_host_ssh_reconnect_isolation_boundary_tests.addArg("--maru-expect-tests=1");
     run_session_host_ssh_reconnect_isolation_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_ssh_reconnect_isolation_boundary_tests.step);
+    const session_host_test_namespace_isolation_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_test_namespace_isolation_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_test_namespace_isolation_boundary_tests = b.addRunArtifact(
+        session_host_test_namespace_isolation_boundary_tests,
+    );
+    run_session_host_test_namespace_isolation_boundary_tests.addArg("--maru-expect-tests=2");
+    run_session_host_test_namespace_isolation_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_session_host_test_namespace_isolation_boundary_tests.step);
     const session_host_legacy_metadata_consumers_step = b.step(
         "test-session-host-legacy-metadata-consumers",
         "Verify P3-e4d-2b frozen N-1 hello, attach, and fail-closed metadata consumers",

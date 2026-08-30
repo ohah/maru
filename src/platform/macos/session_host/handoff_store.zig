@@ -1013,6 +1013,62 @@ test "reserved handoff syscall failures publish no pair and leave no attempt res
     }
 }
 
+test "reservation cleanup identity failure closes descriptors and preserves replacement" {
+    var dir_buf: [192]u8 = undefined;
+    const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-reservation-cleanup-failure");
+    defer test_scratch.close(std.testing.io, dir);
+    const fd_count_before = try testOpenFdCount();
+    const attempt_id: u128 = 0x1414;
+    const deadline = try upgrade_deadline.Deadline.after(std.testing.io, 5 * std.time.ns_per_s);
+    var reservation = try reserve(dir, attempt_id, 4096, deadline);
+    const primary_fd = reservation.primary_fd;
+    const backup_fd = reservation.backup_fd;
+    const attempt_fd = reservation.attempt_fd;
+    const owner_fd = reservation.owner_fd;
+
+    if (renameatx_np(attempt_fd, "primary", attempt_fd, "saved", rename_excl) != 0)
+        return error.TestUnexpectedResult;
+    const replacement_fd = c.openat(
+        attempt_fd,
+        "primary",
+        .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (replacement_fd < 0) return error.TestUnexpectedResult;
+    var replacement_open = true;
+    defer {
+        if (replacement_open) _ = c.close(replacement_fd);
+    }
+    try std.testing.expectEqual(@as(isize, 1), c.write(replacement_fd, "b", 1));
+
+    try std.testing.expectError(error.CleanupFailed, reservation.cancel());
+    try std.testing.expect(!reservation.active);
+    try readbackEqual(replacement_fd, "b", CommitBudget.testing());
+    for ([_]c.fd_t{ primary_fd, backup_fd, attempt_fd, owner_fd }) |fd| {
+        try std.testing.expect(c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0);
+        try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
+    }
+    var attempt_buf: [256]u8 = undefined;
+    const attempt_path = try std.fmt.bufPrintZ(
+        &attempt_buf,
+        "{s}/attempt-{x:0>32}",
+        .{ dir, attempt_id },
+    );
+    try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) == 0);
+    var primary_path_buf: [288]u8 = undefined;
+    const primary_path = try std.fmt.bufPrintZ(&primary_path_buf, "{s}/primary", .{attempt_path});
+    var saved_path_buf: [288]u8 = undefined;
+    const saved_path = try std.fmt.bufPrintZ(&saved_path_buf, "{s}/saved", .{attempt_path});
+    var backup_path_buf: [288]u8 = undefined;
+    const backup_path = try std.fmt.bufPrintZ(&backup_path_buf, "{s}/backup", .{attempt_path});
+    try std.testing.expect(c.access(primary_path.ptr, c.F_OK) == 0);
+    try std.testing.expect(c.access(saved_path.ptr, c.F_OK) == 0);
+    try std.testing.expect(c.access(backup_path.ptr, c.F_OK) != 0);
+    _ = c.close(replacement_fd);
+    replacement_open = false;
+    try std.testing.expectEqual(fd_count_before, try testOpenFdCount());
+}
+
 test "partial reservation failure removes the first copy and private attempt" {
     var dir_buf: [192]u8 = undefined;
     const dir = try test_scratch.open(std.testing.io, &dir_buf, "handoff-store-partial-reserve");

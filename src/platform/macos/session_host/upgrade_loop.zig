@@ -42,7 +42,15 @@ pub fn processPreclosedCleanupCollisionFixture(
     return processPreclosedMode(.cleanup_collision_fixture, marker, ctx);
 }
 
-const ProcessMode = enum { product, cleanup_collision_fixture };
+pub fn processPreclosedKernelCleanupFaultFixture(
+    marker: connection_turn.ArmedUpgrade,
+    ctx: Context,
+) Outcome {
+    if (!@import("builtin").is_test) @compileError("kernel cleanup fault fixture is test-only");
+    return processPreclosedMode(.kernel_cleanup_fault_fixture, marker, ctx);
+}
+
+const ProcessMode = enum { product, cleanup_collision_fixture, kernel_cleanup_fault_fixture };
 
 fn processPreclosedMode(
     comptime mode: ProcessMode,
@@ -70,6 +78,10 @@ fn processPreclosedMode(
     return classify(switch (mode) {
         .product => upgrade_product.processArmedPreclosed(product_context, marker.attempt_id),
         .cleanup_collision_fixture => upgrade_product.processArmedPreclosedCleanupCollisionFixture(
+            product_context,
+            marker.attempt_id,
+        ),
+        .kernel_cleanup_fault_fixture => upgrade_product.processArmedPreclosedKernelCleanupFaultFixture(
             product_context,
             marker.attempt_id,
         ),

@@ -137,6 +137,17 @@ pub fn processArmedPreclosedCleanupCollisionFixture(
     return processArmedWithDeadlineHook(ctx, attempt_id, deadline, true, replaceReservedPrimaryForFixture);
 }
 
+/// 실제 kernel permission/non-empty cleanup 실패를 만드는 process E2E 전용 경로다.
+pub fn processArmedPreclosedKernelCleanupFaultFixture(
+    ctx: Context,
+    attempt_id: u128,
+) Outcome {
+    if (!builtin.is_test) @compileError("kernel cleanup fault fixture is test-only");
+    const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
+        return .invariant_violation;
+    return processArmedWithDeadlineHook(ctx, attempt_id, deadline, true, makeReservedAttemptReadOnlyForFixture);
+}
+
 fn processArmedMode(ctx: Context, attempt_id: u128, gate_preclosed: bool) Outcome {
     const deadline = upgrade_deadline.Deadline.after(ctx.io, upgrade_limits.pause_budget_ns) catch
         return .invariant_violation;
@@ -170,6 +181,12 @@ fn replaceReservedPrimaryForFixture(
     );
     if (replacement_fd < 0) return error.HookFailed;
     _ = c.close(replacement_fd);
+}
+
+fn makeReservedAttemptReadOnlyForFixture(
+    reservation: *budget_admission.Reservation,
+) error{HookFailed}!void {
+    if (c.fchmod(reservation.store.attempt_fd, 0o500) != 0) return error.HookFailed;
 }
 
 fn processArmedWithDeadlineHook(

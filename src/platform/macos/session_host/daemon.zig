@@ -272,7 +272,32 @@ pub fn runSessionHostWithIdentityCleanupCollisionFixture(
     );
 }
 
-const UpgradeFixtureFault = enum { cleanup_collision };
+pub fn runSessionHostWithIdentityKernelCleanupFaultFixture(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_dir: [:0]const u8,
+    socket_path: [:0]const u8,
+    host_id: u128,
+) RunError!void {
+    if (!builtin.is_test) @compileError("kernel cleanup fault fixture is test-only");
+    if (host_id == 0) return error.ManifestFailed;
+    short_endpoint.validateCurrentSocketPath(socket_path, host_id) catch return error.ManifestFailed;
+    short_endpoint.prepareCurrentUserNamespace() catch return error.ManifestFailed;
+    return runSessionHostImpl(
+        allocator,
+        io,
+        session_dir,
+        socket_path,
+        host_id,
+        true,
+        null,
+        null,
+        null,
+        .kernel_cleanup_fault,
+    );
+}
+
+const UpgradeFixtureFault = enum { cleanup_collision, kernel_cleanup_fault };
 
 /// exec layout(연속 `exec_fd_set.max_slots`개 슬롯) + 최대 runtime의 PTY master/wake pipe + listener·lease 여유.
 /// 무한대를 요청하지 않는 이유는 아래 `raiseFileDescriptorLimit` 주석 참고.
@@ -783,10 +808,10 @@ fn runSessionHostImpl(
                     .socket_path = socket_path,
                 };
                 const upgrade_outcome = if (comptime builtin.is_test)
-                    if (upgrade_fixture_fault == .cleanup_collision)
-                        upgrade_loop.processPreclosedCleanupCollisionFixture(marker, upgrade_context)
-                    else
-                        upgrade_loop.processPreclosed(marker, upgrade_context)
+                    if (upgrade_fixture_fault) |fault| switch (fault) {
+                        .cleanup_collision => upgrade_loop.processPreclosedCleanupCollisionFixture(marker, upgrade_context),
+                        .kernel_cleanup_fault => upgrade_loop.processPreclosedKernelCleanupFaultFixture(marker, upgrade_context),
+                    } else upgrade_loop.processPreclosed(marker, upgrade_context)
                 else
                     upgrade_loop.processPreclosed(marker, upgrade_context);
                 if (upgrade_outcome == .fail_stop)

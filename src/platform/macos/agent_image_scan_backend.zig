@@ -211,7 +211,54 @@ fn readLabel(io: std.Io, file: std.Io.File, hit: index.Hit, allocator: std.mem.A
         const slot = buf[@intCast(back)..];
         if (readAllAt(io, file, slot, hit.line_offset)) prefix = slot;
     }
-    return context.label(prefix, prev);
+    var out = context.label(prefix, prev);
+    out.time_s = readTime(io, file, hit, prefix, allocator);
+    return out;
+}
+
+/// 이 이미지가 적힌 **시각**. 못 찾으면 0(모름) — 지어내지 않는다.
+///
+/// **창을 앞뒤 둘 다 본다**(IG12-a 실측): Claude 는 payload 뒤, Codex 는 앞이다. 앞창은 라벨이 이미
+/// 읽어 둔 `prefix` 에 들어 있을 때가 많아 그것부터 보고, 없을 때만 payload 바로 앞을 따로 읽는다.
+fn readTime(
+    io: std.Io,
+    file: std.Io.File,
+    hit: index.Hit,
+    prefix: []const u8,
+    allocator: std.mem.Allocator,
+) i64 {
+    // ① payload **뒤** — Claude. 파일 끝에 걸릴 수 있어 「읽힌 만큼」을 쓴다.
+    {
+        var buf: [context.time_window_after]u8 = undefined;
+        const got = readUpTo(io, file, &buf, hit.data_offset +| hit.data_len);
+        if (got > 0) {
+            const t = context.timestampSeconds(buf[0..got]);
+            if (t != 0) return t;
+        }
+    }
+    // ② payload **앞** — Codex. 라벨이 읽어 둔 앞부분에 이미 있으면 읽지 않는다.
+    {
+        const t = context.timestampSeconds(prefix);
+        if (t != 0) return t;
+    }
+    // ③ 그래도 없으면 payload 바로 앞 창을 따로 읽는다(긴 줄이라 `prefix` 가 그 자리까지 못 간 경우).
+    const back: u64 = @min(hit.data_offset -| hit.line_offset, @as(u64, context.time_window_before));
+    if (back == 0) return 0;
+    const win = allocator.alloc(u8, @intCast(back)) catch return 0;
+    defer allocator.free(win);
+    if (!readAllAt(io, file, win, hit.data_offset - back)) return 0;
+    return context.timestampSeconds(win);
+}
+
+/// `readAllAt` 과 달리 **짧게 읽혀도 성공**이다 — 파일 끝에 닿는 창에 쓴다. 읽은 바이트 수를 준다.
+fn readUpTo(io: std.Io, file: std.Io.File, dest: []u8, offset: u64) usize {
+    var got: usize = 0;
+    while (got < dest.len) {
+        const n = file.readPositional(io, &.{dest[got..]}, offset + got) catch break;
+        if (n == 0) break;
+        got += n;
+    }
+    return got;
 }
 
 fn readAllAt(io: std.Io, file: std.Io.File, dest: []u8, offset: u64) bool {

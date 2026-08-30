@@ -71,6 +71,11 @@ pub const Label = struct {
     buf: [max_label_bytes]u8 = undefined,
     len: usize = 0,
     source: Source = .none,
+    /// 이 이미지가 트랜스크립트에 적힌 **시각**(Unix 초, UTC). **0 이면 모른다** — 그때는 안 그린다.
+    ///
+    /// 라벨과 한 몸으로 다닌다. 따로 배열을 들면 `hits` 를 건드리는 자리마다 «셋» 을 맞춰야 하고,
+    /// 어긋나면 남의 이미지에 남의 시각이 붙는다.
+    time_s: i64 = 0,
 
     pub fn text(self: *const Label) []const u8 {
         return self.buf[0..self.len];

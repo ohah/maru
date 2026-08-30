@@ -73980,3 +73980,88 @@ test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)
     try std.testing.expect(!image_gallery_ops.searchOwnsInput(session));
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 }
+
+test "이미지 갤러리: 라벨과 함께 「언제」도 붙는다 (IG12)" {
+    // **순수 파서가 도는 것과 «그 시각이 타일에 붙는 것» 은 다른 사실이다** — 배선이 빠지면
+    // agent_image_context 의 test 는 전부 통과하는데 화면에는 시각이 없다(IG5-c 가 라벨에서 밟은 길).
+    //
+    // 그리고 provider 마다 **자리가 반대**라 둘 다 본다: Claude 는 payload 뒤, Codex 는 앞.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+    // ① Claude 모양 — `timestamp` 가 base64 **뒤**에 있다.
+    const transcript =
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[" ++
+        "{\"type\":\"text\",\"text\":\"[Image #1] 붙여넣은 화면\"}," ++
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++ png_b64 ++
+        "\"}}]},\"timestamp\":\"2026-08-30T09:13:22.123Z\"}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "g.jsonl", .data = transcript });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fmt.allocPrint(allocator, "{s}/g.jsonl", .{root});
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.dock_initialized = true;
+    session.chrome_minimal = false;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    dock_ops.setDockView(session, .image_gallery);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expect(term.agent_image_source.set(path));
+    image_gallery_ops.refresh(session, false);
+    {
+        var spins: usize = 0;
+        while (spins < 200_000 and !session.image_gallery.built) : (spins += 1) _ = session.tick() catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.image_gallery.count());
+    // **워커가 시각까지 만들었다.** 2026-08-30T09:13:22Z = 1788081202.
+    try std.testing.expectEqual(@as(i64, 1788081202), session.image_gallery.labels.items[0].time_s);
+    // 라벨과 한 몸으로 다닌다 — 따로 배열을 들면 어긋난다.
+    try std.testing.expectEqualStrings("붙여넣은 화면", session.image_gallery.labels.items[0].text());
+}
+
+test "이미지 갤러리: 시각은 오늘이면 시:분, 아니면 날짜까지 (IG12)" {
+    // 표기는 SCM 도크 턴 줄과 같다. 오프셋을 **두 시점 따로** 받는 이유는 서머타임이다 —
+    // 하나로 합치면 경계를 넘은 이미지에서 「오늘」 판정이 틀린다.
+    const day: i64 = 24 * 3600;
+    const noon: i64 = 12 * 3600 + 34 * 60; // 1970-01-01 12:34 UTC
+    var buf: [16]u8 = undefined;
+
+    // 같은 날이면 시:분만.
+    try std.testing.expectEqualStrings(
+        "12:34",
+        image_gallery_ops.testFormatImageTime(&buf, noon, 0, noon + 60, 0),
+    );
+    // 하루 전이면 날짜가 붙는다.
+    try std.testing.expectEqualStrings(
+        "01-01 12:34",
+        image_gallery_ops.testFormatImageTime(&buf, noon, 0, noon + day, 0),
+    );
+    // **오프셋이 「오늘」 판정을 바꾼다.** UTC 23:30 은 +09:00 에서 다음 날 08:30 이다.
+    const late: i64 = 23 * 3600 + 30 * 60;
+    const kst: i64 = 9 * 3600;
+    try std.testing.expectEqualStrings(
+        "08:30",
+        image_gallery_ops.testFormatImageTime(&buf, late, kst, late + 3600, kst),
+    );
+    // epoch 이전은 그릴 값이 아니다.
+    try std.testing.expectEqualStrings("", image_gallery_ops.testFormatImageTime(&buf, -1, 0, 0, 0));
+}

@@ -131,6 +131,27 @@ pub fn labelRectAt(area: Rect, m: Metrics, l: Layout, n: usize) ?Rect {
     return .{ .x = tile.x, .y = y, .w = tile.w, .h = m.label };
 }
 
+/// `n` 번째 칸이 보이도록 만드는 스크롤 오프셋. 이미 보이면 **지금 값을 그대로** 돌려준다 —
+/// 보이는데도 움직이면 사용자가 보던 자리가 이유 없이 흔들린다.
+///
+/// 크게 보기에서 ←→ 로 넘길 때 쓴다. 그것이 없으면 넘기다 닫았을 때 격자가 **옛 자리**를 보여주고,
+/// 방금 보던 이미지가 화면 밖에 있다.
+pub fn scrollToShow(area: Rect, m: Metrics, count: usize, scroll_px: u32, n: usize) u32 {
+    const l = layout(area, m, count, scroll_px);
+    if (l.cols == 0) return scroll_px;
+    if (n >= l.first and n < l.first + l.visible) return l.scroll_px; // 이미 보인다
+    const step_y = tileHeight(m) +| m.label +| m.gap;
+    const row: u32 = @intCast(n / l.cols);
+    if (n < l.first) {
+        // 위로 간다 — 그 행이 첫 행이 되게.
+        return @min(row *| step_y, l.max_scroll);
+    }
+    // 아래로 간다 — 그 행이 **마지막** 보이는 행이 되게(한 행만 겨우 넘어갔을 때 덜 움직인다).
+    const rows_in_view = @max(1, l.visible / @max(1, @as(usize, l.cols)));
+    const first_row = row -| @as(u32, @intCast(rows_in_view -| 1));
+    return @min(first_row *| step_y, l.max_scroll);
+}
+
 /// `(px, py)` 위에 있는 칸. 없으면 `null` — 간격·여백을 누르면 아무 일도 없다.
 ///
 /// **`rectAt` 에서 파생한다.** 좌표를 여기서 따로 풀면 배치를 바꿀 때 그린 자리와 눌리는 자리가
@@ -472,4 +493,45 @@ test "비정사각 타일: 라벨과 hitTest 가 같은 세로를 쓴다" {
         try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, wide, l, r.x + 2, r.y + 2));
         try testing.expectEqual(@as(?usize, n), hitTest(area_400x300, wide, l, lab.x + 2, lab.y + 2));
     }
+}
+
+test "scrollToShow: 보이면 그대로, 안 보이면 그 칸이 보이게" {
+    const m = m80;
+    const count: usize = 100;
+    const l0 = layout(area_400x300, m, count, 0);
+    // 이미 보이는 칸은 스크롤을 안 건드린다 — 흔들리면 보던 자리를 잃는다.
+    try testing.expectEqual(@as(u32, 0), scrollToShow(area_400x300, m, count, 0, 0));
+    try testing.expectEqual(@as(u32, 0), scrollToShow(area_400x300, m, count, 0, l0.visible - 1));
+
+    // 아래쪽 칸으로 가면 그 칸이 창에 든다.
+    const s99 = scrollToShow(area_400x300, m, count, 0, 99);
+    const l99 = layout(area_400x300, m, count, s99);
+    try testing.expect(99 >= l99.first and 99 < l99.first + l99.visible);
+
+    // 거기서 다시 0 번으로 오면 위로 올라온다.
+    const back = scrollToShow(area_400x300, m, count, s99, 0);
+    const lb = layout(area_400x300, m, count, back);
+    try testing.expectEqual(@as(usize, 0), lb.first);
+}
+
+test "scrollToShow: 상한을 넘지 않고 행 배수다" {
+    const m = Metrics{ .tile = 80, .tile_h = 40, .gap = 8, .pad = 8, .label = 16 };
+    const count: usize = 200;
+    const step_y = tileHeight(m) + m.label + m.gap;
+    const base = layout(area_400x300, m, count, 0);
+    var n: usize = 0;
+    while (n < count) : (n += 7) {
+        const sc = scrollToShow(area_400x300, m, count, 0, n);
+        try testing.expect(sc <= base.max_scroll);
+        try testing.expectEqual(@as(u32, 0), sc % step_y);
+        // 그 칸이 실제로 보인다.
+        const l = layout(area_400x300, m, count, sc);
+        try testing.expect(n >= l.first and n < l.first + l.visible);
+    }
+}
+
+test "scrollToShow: 다 들어가면 움직이지 않는다" {
+    const l = layout(area_400x300, m80, 4, 0);
+    try testing.expectEqual(@as(u32, 0), l.max_scroll);
+    try testing.expectEqual(@as(u32, 0), scrollToShow(area_400x300, m80, 4, 0, 3));
 }

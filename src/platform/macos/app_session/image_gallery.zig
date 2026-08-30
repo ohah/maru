@@ -549,8 +549,40 @@ pub fn openAt(self: *AppSession, n: usize) void {
     if (n >= self.image_gallery.count()) return;
     self.image_gallery.dropOpen(self.allocator);
     self.image_gallery.open = .{ .hit_index = n };
+    // **격자를 그 칸으로 맞춰 둔다.** 클릭으로 열 때는 이미 보이므로 아무 일도 없고, ←→ 로 멀리
+    // 넘어갔을 때만 움직인다 — 그러지 않으면 닫는 순간 격자가 **옛 자리**를 보여주고 방금 보던
+    // 이미지가 화면 밖에 있다. 여는 자리 한 곳에서 하므로 두 입구가 갈리지 않는다.
+    self.image_gallery.scroll.offset_y_px = image_grid.scrollToShow(
+        gridArea(self),
+        gridMetrics(self),
+        self.image_gallery.count(),
+        self.image_gallery.scroll.offset_y_px,
+        n,
+    );
     self.metal_dirty = true;
     ensureOpen(self);
+}
+
+/// 크게 보기에서 다음(+1)·이전(-1)으로 넘긴다. 소비했으면 `true`.
+///
+/// **이 기능의 목적이 「비슷한 것 여럿에서 고르기」다.** 썸네일은 160 px 라 내용을 못 읽으니 결국
+/// 하나씩 열어 보게 되는데, 넘기기가 없으면 열고 닫기를 반복해야 한다.
+///
+/// 끝에서는 **멈춘다**(순환하지 않는다). 순환하면 끝에 닿았다는 것을 알 수 없어 같은 것을 두 번
+/// 본다 — 151 장짜리 실제 세션에서는 그 차이가 크다.
+pub fn navigateOpen(self: *AppSession, delta: i32) bool {
+    if (!ownsKeys(self)) return false;
+    const op = if (self.image_gallery.open) |o| o else return false;
+    const count = self.image_gallery.count();
+    if (count == 0) return false;
+
+    const cur: i64 = @intCast(op.hit_index);
+    const next = cur + delta;
+    if (next < 0 or next >= @as(i64, @intCast(count))) return true; // 끝 — 소비는 하되 안 움직인다
+    const target: usize = @intCast(next);
+    if (target == op.hit_index) return true;
+    openAt(self, target);
+    return true;
 }
 
 /// 크게 보기를 닫고 격자로 돌아간다. 원본 픽셀(수 MB)을 여기서 푼다.

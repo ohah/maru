@@ -21,7 +21,30 @@ const idle_wake_observation_min_ns: u64 = 1_000 * std.time.ns_per_ms;
 const screen_idle_cpu_total_cap_ns: u64 = 100 * std.time.ns_per_ms;
 pub const idle_cpu_total_cap_ns: u64 = 25 * std.time.ns_per_ms;
 pub const output_wake_median_cap_ns: u64 = 10 * std.time.ns_per_ms;
+/// **개별 tail 상한 — 단, 표본 하나의 초과는 허용한다**(아래 `output_wake_outlier_cap_ns` 가 그 하나의
+/// 천장이다).
+///
+/// ⚠️ **7 표본의 «최댓값» 은 우리 코드가 아니라 러너를 잰다.** 공유 CI 러너에서 스케줄러 딸꾹질 하나가
+/// 그 값을 통째로 정한다 — 실측(2026-08-30):
+///
+///     0.366 · 0.439 · 0.444 · 0.453 · 0.496 · 1.426 · **24.234** ms
+///
+/// 여섯이 1.5 ms 미만인데 하나가 24 ms 다. 이 분포를 «지연이 나쁘다» 로 읽을 수 없다. 이 잡은 그렇게
+/// 여러 PR 과 main 에서 반복해 실패했고, 매번 재실행으로 통과했다 — 그것은 게이트가 아니라 소음이다.
+///
+/// **그런데 상한을 그냥 올리면 안 된다.** 이 값은 [성능 예산](../../docs/performance-budget.md) 이
+/// 「cadence-only 구조의 21~23 ms floor 를 잡는다」로 근거를 적어 둔 값이다. 24 ms 로 올리면 그 회귀가
+/// 그대로 통과한다.
+///
+/// 그래서 **적용 대상을 바꾼다**: 두 번째로 큰 표본에 이 상한을 건다. 회귀는 **floor** 이므로(모든 표본이
+/// 21 ms 이상) 두 번째 값도 21 ms 를 넘어 **그대로 잡힌다.** 반면 딸꾹질 하나는 통과한다. 위 실측에서
+/// 두 번째 값은 1.426 ms 로 이 상한의 1/14 이다.
 pub const output_wake_tail_cap_ns: u64 = 20 * std.time.ns_per_ms;
+
+/// 허용한 그 «하나» 의 천장. 이것마저 넘으면 스케줄러 소음으로 설명할 수 없다.
+///
+/// 관측된 딸꾹질이 24 ms 였고 이 값은 그 10 배다 — 그 사이라면 러너를 의심하고, 넘으면 우리를 의심한다.
+pub const output_wake_outlier_cap_ns: u64 = 250 * std.time.ns_per_ms;
 pub const observation_core_lock_hold_cap_ns: u64 = 25 * std.time.ns_per_ms;
 const baseline_sample_count: usize = 10;
 const pressure_sample_count_min: usize = 20;
@@ -478,7 +501,11 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
         artifact.wake_latency_median_ns != wake_latencies[wake_sample_count / 2] or
         artifact.wake_latency_max_ns != wake_latencies[wake_sample_count - 1] or
         artifact.wake_latency_median_ns > output_wake_median_cap_ns or
-        artifact.wake_latency_max_ns > output_wake_tail_cap_ns)
+        // **두 번째로 큰 표본**에 tail 상한을 건다 — 표본 하나의 스케줄러 딸꾹질은 우리 지연이 아니다.
+        // 이 게이트가 잡으려는 회귀는 **floor** 라(모든 표본이 21~23 ms) 두 번째 값도 함께 넘어 잡힌다.
+        wake_latencies[wake_sample_count - 2] > output_wake_tail_cap_ns or
+        // 그 «하나» 에도 천장은 있다. 넘으면 러너 소음으로 설명이 안 된다.
+        artifact.wake_latency_max_ns > output_wake_outlier_cap_ns)
         return error.InvalidProgress;
     if (artifact.idle_wake_observation_ns < idle_wake_observation_min_ns or
         artifact.idle_wake_notify_delta != 0 or
@@ -645,6 +672,13 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
     {
         return error.CleanupIncomplete;
     }
+}
+
+/// 표본 하나의 delivery 지연을 바꾸고 그에 딸린 값들을 일관되게 맞춘다(판정자가 그 일관성도 본다).
+fn setSampleDelivery(sample: *WakeSample, delivery_ns: u64) void {
+    sample.marker_at_ns = sample.input_accepted_at_ns + delivery_ns;
+    sample.delivery_latency_ns = delivery_ns;
+    sample.end_to_end_latency_ns = sample.marker_at_ns - sample.input_at_ns;
 }
 
 fn validateBytes(allocator: std.mem.Allocator, bytes: []const u8) !void {
@@ -1174,15 +1208,35 @@ test "timestamp reversal and pressure gap allow runner jitter to 125ms" {
         validateArtifact(testing.allocator, artifact),
     );
 
+    // **표본 하나가 tail 상한을 넘는 것은 통과한다** — 공유 러너의 스케줄러 딸꾹질이고 우리 지연이
+    // 아니다(실측 분포: 여섯이 1.5 ms 미만, 하나가 24 ms). 예전에는 여기서 실패했고, 그래서 이 잡이
+    // 여러 PR 과 main 에서 반복 실패하고 매번 재실행으로 통과했다.
     artifact = goodArtifact();
     var wake_tail = wake_fixture;
-    wake_tail[wake_tail.len - 1].marker_at_ns =
-        wake_tail[wake_tail.len - 1].input_accepted_at_ns + output_wake_tail_cap_ns + 1;
-    wake_tail[wake_tail.len - 1].end_to_end_latency_ns =
-        wake_tail[wake_tail.len - 1].marker_at_ns - wake_tail[wake_tail.len - 1].input_at_ns;
-    wake_tail[wake_tail.len - 1].delivery_latency_ns = output_wake_tail_cap_ns + 1;
+    setSampleDelivery(&wake_tail[wake_tail.len - 1], output_wake_tail_cap_ns + 1);
     artifact.wake_samples = &wake_tail;
     artifact.wake_latency_max_ns = output_wake_tail_cap_ns + 1;
+    try validateArtifact(testing.allocator, artifact);
+
+    // **그 하나에도 천장은 있다.**
+    artifact = goodArtifact();
+    var wake_outlier = wake_fixture;
+    setSampleDelivery(&wake_outlier[wake_outlier.len - 1], output_wake_outlier_cap_ns + 1);
+    artifact.wake_samples = &wake_outlier;
+    artifact.wake_latency_max_ns = output_wake_outlier_cap_ns + 1;
+    try testing.expectError(
+        error.InvalidProgress,
+        validateArtifact(testing.allocator, artifact),
+    );
+
+    // **둘이 넘으면 딸꾹질이 아니다** — 이 게이트가 잡으려는 회귀(cadence-only 의 21~23 ms **floor**)는
+    // 모든 표본이 함께 올라가므로 두 번째 값에서 걸린다. 그 성질을 여기서 못박는다.
+    artifact = goodArtifact();
+    var wake_two = wake_fixture;
+    setSampleDelivery(&wake_two[wake_two.len - 1], output_wake_tail_cap_ns + 2);
+    setSampleDelivery(&wake_two[wake_two.len - 2], output_wake_tail_cap_ns + 1);
+    artifact.wake_samples = &wake_two;
+    artifact.wake_latency_max_ns = output_wake_tail_cap_ns + 2;
     try testing.expectError(
         error.InvalidProgress,
         validateArtifact(testing.allocator, artifact),

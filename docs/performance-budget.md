@@ -147,8 +147,19 @@ runner overshoot를 제품 지연으로 귀속하지 않는다. marker가 들어
 모든 observer의 wake delta를 비운 뒤 stall telemetry를 reset한다. 이 구간은 slow observer pressure와 RSS sampling 전에
 측정해 stall 격리 비용을 입력 echo 예산으로 잘못 귀속하지 않는다.
 
-output-wake 소유 구간은 `tools/perf/session_host_slow_observer_validator.zig`가 7표본 median **10ms**와 개별 tail **20ms**
-hard cap을 소유한다. 기존 cadence-only 구조의 21~23ms floor는 두 gate에서 실패한다. wake 측정은 일반 80×24에서 수행한 뒤
+output-wake 소유 구간은 `tools/perf/session_host_slow_observer_validator.zig`가 7표본 median **10ms**와 tail **20ms**
+cap을 소유한다. 기존 cadence-only 구조의 21~23ms floor는 두 gate에서 실패한다.
+
+⚠️ **tail cap 은 «최댓값» 이 아니라 «두 번째로 큰 표본» 에 건다**(2026-08-30 정정). 7표본의 최댓값은 우리 코드가
+아니라 **러너를 잰다** — 공유 CI 러너에서 스케줄러 딸꾹질 하나가 그 값을 통째로 정한다. 실측 분포가 그것을 보여
+준다: `0.366 · 0.439 · 0.444 · 0.453 · 0.496 · 1.426 · **24.234** ms` — 여섯이 1.5ms 미만인데 하나가 24ms 다.
+그 하나 때문에 이 gate 가 여러 PR 과 main 에서 반복 실패했고 **매번 재실행으로 통과**했다. 그것은 gate 가 아니라
+소음이다.
+
+**상한 값을 올리지 않은 이유**: 24ms 로 올리면 이 gate 가 잡으려는 21~23ms floor 회귀가 그대로 통과한다. 대신
+적용 대상을 바꿨다 — 회귀는 **floor** 이므로 모든 표본이 함께 올라가고, 그러면 두 번째 값도 20ms 를 넘어 **그대로
+잡힌다**. 허용한 그 «하나» 에도 천장(`output_wake_outlier_cap_ns` **250ms**)이 있어, 스케줄러 소음으로 설명할 수
+없는 값은 여전히 실패한다. wake 측정은 일반 80×24에서 수행한 뒤
 slow-observer/RSS pressure 전에 512×256으로 resize한다. 대형 화면 projection을 wake 책임에 섞었던 격리 전 표본은 최대
 99.9ms였지만, phase를 분리한 5회 연속 35표본은 median 2.8~3.1ms, 전체 max 5.2ms였다. validator는 7개 raw 표본의
 개수·순서·exact subtraction·min/median/max 재계산과 median/tail cap+1 실패를 검증한다.

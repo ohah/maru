@@ -6711,6 +6711,15 @@ product update E2E는 아직 없다. 따라서 release 호환 완료로 선언�
    public `--take-over`는 host 업데이트가 필요하다는 typed unsupported notice로 거부한다. 이 거부와 실제 frozen binary
    observer 호환은 P5c3에서 검증한다. P5b3 merge 뒤 `controller_transfer_v1` 계약과 최초 session-host release부터는 이
    예외를 닫고 같은-major additive 규칙을 적용한다.
+
+   **typed error envelope은 schema 위반이 아니다.** host는 실패를 `{"error":"<code>"}` **하나**로 답하고, 그건
+   성공 body와 같은 `.response` 프레임이라 body로만 갈린다 — 계약을 어긴 게 아니라 **지킨** 응답이다. 그래서 모든
+   런타임 RPC 디코더는 success schema를 재기 **전에** error envelope을 먼저 접어야 한다: 알려진 코드면 그 RPC의
+   "값 없음/적용 안 됨"으로 접고, 모르는 코드거나 키가 더 붙었을 때만 드리프트로 fail-close한다. 런타임 RPC 경로에는
+   transport 단계의 error 필터가 없으므로(`decodeWireError`는 attach/status/takeover 전용) 이 인식은 **디코더마다**
+   해야 한다. 빠뜨리면 `invalid_generation` 같은 **정상** 경합 거절이 `peer_contract_violation` poison으로 읽히고,
+   재접속·exec 업그레이드 전환 중이라 poison 자체가 실패하면 앱 abort(`proof_loss`)까지 승격된다. 2026-08-30 실측:
+   `config.update` 디코더에만 이 블록이 없어 host exec 업그레이드 직후 attach가 앱을 조용히 죽였다.
 2. **지원하는 이전 major(N-1):** 새 앱은 current와 직전 major codec/adapter를 함께 제공한다. 직전 release는
    해당 screen body fingerprint capability(현재 N-1은 `screen_stream_v1_current_body`)를 hello에서 광고해야 하며,
    capability 없는 같은-major 개발 빌드를 body-compatible이라고 추측하지 않는다. 지원되는 기존 runtime은 구 host에

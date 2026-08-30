@@ -98,6 +98,7 @@ pub const entries = [_]Entry{
     .{ .action = .fold_level_1, .key = "fold_level_1", .title = "Editor: Fold Level 1" },
     .{ .action = .fold_level_2, .key = "fold_level_2", .title = "Editor: Fold Level 2" },
     .{ .action = .fold_level_3, .key = "fold_level_3", .title = "Editor: Fold Level 3" },
+    .{ .action = .toggle_symbol_picker, .key = "toggle_symbol_picker", .title = "Editor: Go to Symbol in File" },
     .{ .action = .find_next, .key = "find_next", .title = "Find Next" },
     .{ .action = .find_previous, .key = "find_previous", .title = "Find Previous" },
     .{ .action = .{ .select_tab = 0 }, .key = "select_tab:0", .title = "Select Workspace 1" },

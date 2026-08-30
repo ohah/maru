@@ -96,6 +96,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+const symbol_picker = @import("symbol_picker.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
@@ -2135,6 +2136,7 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .confirm => .{ .routes_text = .confirm },
         .find => .{ .routes_text = .find },
         .palette => .{ .routes_text = .palette },
+        .symbol_picker => .{ .routes_text = .symbol_picker },
         .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
         .notice => .{ .transient_toast = .notice },
@@ -3325,6 +3327,10 @@ pub const AppSession = struct {
         return debug_fixtures.maybeDebugOpenFilePanel(self);
     }
     /// 본문 분리: app_session/debug_fixtures.zig(후속). ABI가 직접 부르므로 진입만 남긴다.
+    pub fn maybeDebugOpenSymbolPicker(self: *AppSession) void {
+        return debug_fixtures.maybeDebugOpenSymbolPicker(self);
+    }
+
     pub fn maybeDebugOpenSettings(self: *AppSession) void {
         return debug_fixtures.maybeDebugOpenSettings(self);
     }
@@ -4429,6 +4435,12 @@ pub const AppSession = struct {
     /// **항목이 Term 포인터가 아니라 `surface_id` 인 이유**는 그 Term 이 닫힐 수 있어서다.
     /// 되돌아갈 때 `termBySurfaceId` 로 되찾고 **못 찾으면 버리고 다음으로 간다** — 닫힌 파일을
     /// 되살리는 것은 「이동」이 아니라 「열기」다.
+    /// 심볼 피커의 굳힌 행(§7.5). **공유 심볼 버퍼의 인덱스가 아니라 값이다** — breadcrumb 이 그
+    /// 버퍼를 프레임마다 다시 채우므로 인덱스를 들면 그 수명에 매달린다.
+    symbol_picker_rows: symbol_picker.List = .{},
+    symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
+    symbol_picker_followed_selected: ?usize = null,
+
     editor_nav_back: std.ArrayList(editor_ops.NavMark) = .empty,
     /// 뒤로 간 뒤 다시 앞으로 갈 자리. **새로 이동하면 통째로 버린다**(브라우저와 같은 규약) —
     /// 안 버리면 「앞으로」가 가지 않은 미래를 가리킨다.
@@ -5634,6 +5646,8 @@ pub const AppSession = struct {
     /// 같은 host를 가리키므로 슬롯 하나로 충분하다).
     restore_gone_host_id: u128 = 0,
     debug_file_panel_opened: bool = false,
+    debug_symbol_picker_opened: bool = false,
+    debug_symbol_picker_tries: u16 = 0,
     /// `MARU_NATIVE_EDITOR` 훅을 한 번만 돌린다(N1 — 파일 열기 확인).
     debug_native_editor_opened: bool = false,
     /// 캡처 전용 훅(`MARU_OPEN_SCM_DIFF`)이 비교를 이미 열었는가. **성공했을 때만** 세운다 —
@@ -8230,11 +8244,12 @@ pub const AppSession = struct {
     /// confirm을 **제외한** 다른 오버레이(notice/find/palette/context_menu/settings)와 그 platform 부수상태를 닫는다 — 새
     /// 모달을 열기 전 단일-오버레이 불변식(collectDraws·inputFocus가 한 번에 하나 가정)을 한 곳에서 강제한다. confirm/보류
     /// 닫기를 건드리지 않으므로, requestClose가 pending_close를 세운 뒤 showConfirm을 불러도 보류가 보존된다.
-    fn dismissMessageOverlays(self: *AppSession) void {
+    pub fn dismissMessageOverlays(self: *AppSession) void {
         self.chrome_host.notice.dismiss();
         self.chrome_host.find.hide();
         find_ops.clearAllFindMatches(self); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일. 목록은 둘이다)
         self.chrome_host.palette.hide();
+        self.chrome_host.symbol_picker.hide(); // §7.5 — 같은 불변식 아래 산다
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
@@ -9089,6 +9104,7 @@ pub const AppSession = struct {
             .fold_level_1 => _ = editor_ops.foldLevel(self, 1),
             .fold_level_2 => _ = editor_ops.foldLevel(self, 2),
             .fold_level_3 => _ = editor_ops.foldLevel(self, 3),
+            .toggle_symbol_picker => editor_ops.toggleSymbolPicker(self), // §7.5 — 편집기 아님·심볼 없음이면 안 연다
             // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
             // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
             .find_next => if (web_ops.activeWebSurfaceIdAnyKind(self) != 0) web_ops.submitWebFind(self, false) else self.findNavigate(true),
@@ -10635,6 +10651,11 @@ pub const AppSession = struct {
             // 생길 때 조용히 빠진다. 대신 렌더 직전 `followPaletteSelection`이 **값 비교**로 잡는다.
             .palette_selection_changed => {},
             .palette_accept => self.acceptPalette(), // 선택 명령 해석·닫기·dispatch
+            // 심볼 피커(§7.5) — 팔레트와 같은 모양이되 확정이 §5.2 이동으로 간다.
+            .symbol_picker_close => {}, // hide 는 컴포넌트가 이미 했다
+            .symbol_picker_query_changed => editor_ops.recomputeSymbolPicker(self),
+            .symbol_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
+            .symbol_picker_accept => editor_ops.acceptSymbolPicker(self), // 닫고 나서 간다
             .context_menu_accept => settings_ops.acceptContextMenu(self), // selected 항목 실행(현재 "Rename" → 대상 rename)
             .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
                 self.context_menu_target = null;
@@ -11507,7 +11528,7 @@ pub const AppSession = struct {
     /// 자동 닫힘 타이머가 없어 아무 입력으로나 닫지 않으면 토스트 동안 입력이 영구히 막히기 때문이다.
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.symbol_picker.open or h.settings.open;
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -13003,7 +13024,7 @@ pub const AppSession = struct {
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
-        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open;
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
@@ -13088,7 +13109,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, image_gallery_search, find, palette, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, image_gallery_search, find, palette, symbol_picker, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -13103,6 +13124,7 @@ pub const AppSession = struct {
         if (image_gallery_ops.searchOwnsInput(self)) return .image_gallery_search;
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
+        if (self.chrome_host.symbol_picker.open) return .symbol_picker;
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
         // (평문 타이핑이 IME→routeCommittedText 경로라 handleKeyEvent 인터셉트만으론 안 잡혔던 버그). 모달·rename·find·
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
@@ -13186,6 +13208,10 @@ pub const AppSession = struct {
             },
             .palette => if (self.chrome_host.palette.input.commitPreedit(self.allocator)) {
                 self.recomputePalette(); // 필터가 바뀜
+                self.metal_dirty = true;
+            },
+            .symbol_picker => if (self.chrome_host.symbol_picker.input.commitPreedit(self.allocator)) {
+                editor_ops.recomputeSymbolPicker(self); // 필터가 바뀜(§7.5)
                 self.metal_dirty = true;
             },
         }
@@ -19001,31 +19027,60 @@ pub const AppSession = struct {
     /// 팔레트 선택이 창 밖이면 **최소로** 당긴다. 창 안이면 움직이지 않는다 — 휠·드래그로 굴린 자리를
     /// 존중하는 것이 offset을 저장하게 된 이유다(SV5d).
     fn followPaletteSelection(self: *AppSession) void {
+        followListSelection(
+            self.chrome_host.palette.selected,
+            self.palette_filtered.items.len,
+            @max(self.cell_height_px, 1),
+            &self.palette_scroll,
+            &self.palette_followed_selected,
+        );
+    }
+
+    /// 심볼 피커도 같은 역학을 쓴다(native-editor-ui.md §7.5 「목록이 화면보다 길다」).
+    fn followSymbolPickerSelection(self: *AppSession) void {
+        followListSelection(
+            self.chrome_host.symbol_picker.selected,
+            self.symbol_picker_rows.rows.items.len,
+            @max(self.cell_height_px, 1),
+            &self.symbol_picker_scroll,
+            &self.symbol_picker_followed_selected,
+        );
+    }
+
+    /// **목록 피커의 스크롤 따라가기 — 단일 출처.** 명령 팔레트와 심볼 피커가 함께 쓴다.
+    ///
+    /// **새 추상화 층을 만들지 않고 인자로 받게만 했다**(§7.5). 이 역학에 명령에 관한 내용이 하나도
+    /// 없는데(선택·전체 수·셀 높이·스크롤 상태뿐) 피커마다 복사하면 저장소가 반복해서 지적하는
+    /// 「같은 규율이 두 자리에」가 된다.
+    fn followListSelection(
+        selected: usize,
+        total: usize,
+        ch: u32,
+        scroll: *chrome.ui.scroll_area.State,
+        followed: *?usize,
+    ) void {
         // 선택이 그대로면 아무것도 하지 않는다 — 휠·드래그로 굴린 자리를 지킨다. 이 한 줄이 없으면
         // 매 프레임 당겨 휠이 무효화된다(제품에서 실측).
-        const selected_now = self.chrome_host.palette.selected;
-        if (self.palette_followed_selected) |seen| {
-            if (seen == selected_now) return;
+        if (followed.*) |seen| {
+            if (seen == selected) return;
         }
-        self.palette_followed_selected = selected_now;
-        const ch = @max(self.cell_height_px, 1);
-        const total = self.palette_filtered.items.len;
+        followed.* = selected;
         const visible = @min(total, chrome.components.palette.max_visible);
         if (total <= visible or visible == 0) {
-            self.palette_scroll = .{};
+            scroll.* = .{};
             return;
         }
         const max_offset: u32 = @intCast((total - visible) * ch);
-        const top: u32 = @intCast(@min(self.chrome_host.palette.selected, total -| 1) * ch);
+        const top: u32 = @intCast(@min(selected, total -| 1) * ch);
         const bottom = top + ch;
-        var offset = @min(self.palette_scroll.offset_y_px, max_offset);
+        var offset = @min(scroll.offset_y_px, max_offset);
         const viewport_h: u32 = @intCast(visible * ch);
         if (top < offset) {
             offset = top;
         } else if (bottom > offset + viewport_h) {
             offset = bottom - viewport_h;
         }
-        self.palette_scroll.offset_y_px = @min(offset, max_offset);
+        scroll.offset_y_px = @min(offset, max_offset);
     }
 
     /// 이름 앞에 running이면 "● "(1칸 정적 플래그 + 공백)를 붙인 owned 라벨을 만든다(아니면 base 복제). 탭바 pane 라벨·Term
@@ -20166,6 +20221,30 @@ pub const AppSession = struct {
         return rows;
     }
 
+    /// 심볼 피커의 가시 행. 팔레트와 **같은 윈도잉**이되 행의 출처가 다르다 — 라벨은 이미 굳어 있고
+    /// (§7.5 — 공유 버퍼를 안 본다) 줄 번호가 우측 보조 텍스트로 간다.
+    fn buildSymbolPickerRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
+        const Row = chrome.components.palette.Row;
+        const rows_all = self.symbol_picker_rows.rows.items;
+        const max_visible = chrome.components.palette.max_visible;
+        const total = rows_all.len;
+        const visible_count = @min(total, max_visible);
+        const ch = @max(self.cell_height_px, 1);
+        const win_start = @min(self.symbol_picker_scroll.offset_y_px / ch, total -| visible_count);
+        const rows = try arena.alloc(Row, visible_count);
+        var i: usize = 0;
+        while (i < visible_count) : (i += 1) {
+            const fi = win_start + i;
+            const src = rows_all[fi];
+            rows[i] = .{
+                .title = src.label,
+                .binding = try std.fmt.allocPrint(arena, "{d}", .{src.line}),
+                .selected = (fi == self.chrome_host.symbol_picker.selected),
+            };
+        }
+        return rows;
+    }
+
     /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find·Palette)의 ChromeDraw를 수집해(실제
     /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
     /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
@@ -20190,6 +20269,11 @@ pub const AppSession = struct {
             self.followPaletteSelection(); // 선택이 바뀌었으면 창을 당긴다(값 비교 — 위 필드 주석)
             const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
             try self.chrome_host.collectPaletteDraws(rows, props, &tokens, arena, &draws);
+        }
+        if (self.chrome_host.symbol_picker.open) {
+            self.followSymbolPickerSelection(); // 팔레트와 같은 역학(§7.5)
+            const rows = try self.buildSymbolPickerRows(arena);
+            try self.chrome_host.collectSymbolPickerDraws(rows, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
@@ -20640,6 +20724,7 @@ pub const AppSession = struct {
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
+        self.symbol_picker_rows.deinit(self.allocator);
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
@@ -70661,6 +70746,8 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .image_gallery_search,
         .find,
         .palette,
+        // 심볼 피커도 텍스트를 받는 모달이라 터미널이 first responder 를 내줘야 한다(§7.5).
+        .symbol_picker,
         .addr_edit,
         .scm_commit,
         .file_tree,
@@ -70678,6 +70765,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .settings => session.chrome_host.settings.open = true,
         .find => session.chrome_host.find.open = true,
         .palette => session.chrome_host.palette.open = true,
+        .symbol_picker => session.chrome_host.symbol_picker.open = true,
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,

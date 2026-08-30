@@ -38,6 +38,12 @@ pub const HostAction = union(enum) {
     palette_accept,
     palette_query_changed,
     palette_selection_changed,
+    // 심볼 피커(native-editor-ui.md §7.5) — 팔레트와 같은 컴포넌트이지만 host 가 다른 것을 한다
+    // (필터는 심볼, 확정은 §5.2 이동). 그래서 의도도 따로 낸다.
+    symbol_picker_close,
+    symbol_picker_accept,
+    symbol_picker_query_changed,
+    symbol_picker_selection_changed,
     context_menu_accept, // 우클릭 메뉴 항목 선택 — platform이 selected→대상 액션(rename) 해석·실행
     context_menu_close,
     context_menu_selection_changed,
@@ -75,6 +81,10 @@ pub const ChromeHost = struct {
     confirm: confirm.State = .{},
     find: find.State = .{},
     palette: palette.State = .{},
+    /// 심볼 피커(native-editor-ui.md §7.5 「피커는 팔레트를 다시 쓴다」). **팔레트와 같은 컴포넌트를
+    /// 쓰되 State 는 따로 둔다** — 명령 카탈로그 필터와 심볼 필터는 무관한 책임이라 모드 플래그로
+    /// 가르지 않는다(project-rules.md §구조와 파일 분리). 오버레이당 배관은 `modalInputRole` 한 줄이다.
+    symbol_picker: palette.State = .{},
     context_menu: context_menu.State = .{},
     notifications: notifications.State = .{},
     settings: settings.State = .{},
@@ -85,6 +95,7 @@ pub const ChromeHost = struct {
     pub fn deinit(self: *ChromeHost, allocator: std.mem.Allocator) void {
         self.find.deinit(allocator);
         self.palette.deinit(allocator);
+        self.symbol_picker.deinit(allocator);
     }
 
     /// 각 컴포넌트 view를 호출해 (layer, ops) = ChromeDraw를 arena에 빌드한다. 빈(닫힌) 컴포넌트는 건너뛴다.
@@ -127,6 +138,21 @@ pub const ChromeHost = struct {
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
         try palette.view(&self.palette, rows, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
+    }
+
+    /// 심볼 피커 — **같은 컴포넌트, 다른 State**(native-editor-ui.md §7.5). 행을 platform 이 주입해야
+    /// 하는 것도 팔레트와 같아서 generic `collectDraws` 로는 못 부른다.
+    pub fn collectSymbolPickerDraws(
+        self: *ChromeHost,
+        rows: []const palette.Row,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try palette.view(&self.symbol_picker, rows, p, tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
     }
 
@@ -253,6 +279,14 @@ pub const ChromeHost = struct {
                         .accept => .palette_accept,
                         .query_changed => .palette_query_changed,
                         .selection_changed => .palette_selection_changed,
+                    };
+                }
+                if (self.symbol_picker.open) {
+                    return switch (palette.handle(allocator, k, &self.symbol_picker)) {
+                        .close => .symbol_picker_close,
+                        .accept => .symbol_picker_accept,
+                        .query_changed => .symbol_picker_query_changed,
+                        .selection_changed => .symbol_picker_selection_changed,
                     };
                 }
                 if (self.settings.open) {

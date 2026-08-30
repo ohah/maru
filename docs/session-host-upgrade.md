@@ -928,14 +928,20 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
   제품 rollback 증거의 집합이므로 signed frozen release provenance나 아직 목록에 없는 manifest/socket/FD 전 구간
   failure를 대신하지 않으며, 이 첫 matrix만으로 U5 failure injection 완료를 주장하지 않는다.
 - **failure matrix의 두 번째 component gate:** `test-session-host-upgrade-component-failure-matrix`는
-  `handoff_store.zig` 6개, `exec_fd_set.zig` 6개, `host_authority.zig` 3개,
-  `upgrade_target.zig` 5개의 exact module inventory를 한 진입점에서 실행한다. 이 20개는 primary/backup
+  `handoff_store.zig` 7개, `exec_fd_set.zig` 6개, `host_authority.zig` 3개,
+  `upgrade_target.zig` 5개의 exact module inventory를 한 진입점에서 실행한다. 이 21개는 primary/backup
   commit·reservation·residue cleanup, reserved slot/CLOEXEC rollback, discovery manifest CAS,
   target staging·pin·replacement cleanup의 현재 component seam을 고정한다. boundary inventory는 네 source의
   exact test title·개수와 named step의 네 dependency를 함께 검사한다. 이 gate는 existing component 증거가
   release 검증에서 빠지는 것을 막지만, socket owner와 제품 coordinator를 통과하는 end-to-end failure
-  injection이나 실제 syscall `fsync`/unlink 실패를 새로 증명하지 않는다. 따라서 이 두 번째 matrix만으로도
+  injection을 새로 증명하지 않는다. 따라서 이 두 번째 matrix만으로도
   위의 manifest/reader/socket/FD/promotion 전 구간 종료 gate를 닫았다고 주장하지 않는다.
+  추가된 `test-session-host-upgrade-reserved-handoff-failures` 집중 gate는 제품이 쓰는 pre-quiesce
+  `Reservation`→`commitReserved` 경로에서 primary/backup file sync, attempt directory pre/post-readback sync,
+  primary/backup unlink, attempt directory removal, owner directory sync 실패를 각 syscall 직전의 test-only
+  one-shot seam으로 주입한다. 모든 행은 `Pair`를 publish하지 않고 caller의 `Reservation.cancel`이 열린 fd와
+  owner-pinned attempt residue를 exact cleanup하는지 검증한다. 이는 syscall 경계 오류 처리 증거이지 실제 disk
+  fault를 일으킨 kernel integration test가 아니며, cleanup syscall 자체가 연속으로 실패하는 fail-stop 축은 별도다.
 
 signed non-empty 성공 gate는 복원 뒤 화면 marker만 확인하고 `runtime.terminate`로 정리해서는 닫히지 않는다.
 복원된 PTY가 읽는 명시적 종료 marker를 입력하고, 그 child가 종료된 뒤 host가 직접 reap하여 `runtime.list`에서

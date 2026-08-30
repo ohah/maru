@@ -12,12 +12,9 @@ const session_host = @import("session_host");
 const connect_attempts: usize = 500;
 const marker_attempts: usize = 240;
 const poll_delay_us: c_uint = 20 * 1000;
-const marker_exit = "MARU_SIGNED_UPGRADE_EXIT_23";
-const runtime_spawn_params =
-    "{\"argv\":[\"/bin/sh\",\"-c\",\"/bin/stty -echo || exit 70; " ++
-    "printf MARU_SIGNED_UPGRADE_READY; while IFS= read -r line; do if [ \\\"$line\\\" = " ++
-    marker_exit ++
-    " ]; then exit 23; fi; printf '%s\\\\r\\\\n' \\\"$line\\\"; done\"],\"cols\":80,\"rows\":12}";
+const near_max_runtime_count = session_host.upgrade_limits.max_runtime_count - 1;
+const child_capacity = session_host.upgrade_limits.max_runtime_count + 64;
+const ChildBuffer = [child_capacity]c.pid_t;
 const sol_local: c_int = 0;
 const local_peerpid: c_int = 0x002;
 
@@ -30,6 +27,7 @@ const Config = struct {
     n1_executable: [:0]u8,
     current_executable: [:0]u8,
     artifact_path: []u8,
+    runtime_count: usize,
 
     fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         allocator.free(self.n1_executable);
@@ -37,6 +35,12 @@ const Config = struct {
         allocator.free(self.artifact_path);
         self.* = undefined;
     }
+};
+
+const RuntimeRecord = struct {
+    runtime_id: [32]u8,
+    runtime_pid: c.pid_t,
+    index: usize,
 };
 
 const Evidence = struct {
@@ -53,6 +57,9 @@ const Evidence = struct {
     current_sha256: [32]u8,
     signer_requirement_sha256: [32]u8,
     gui_exact_reattach: bool = false,
+    all_runtime_pids_preserved: bool = false,
+    runtime_count: usize = 1,
+    runtime_set_sha256: [32]u8 = [_]u8{0} ** 32,
     duration_ms: u64 = 0,
 };
 
@@ -91,8 +98,10 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
     const n1_raw = args.next() orelse return usage(stderr);
     const current_raw = args.next() orelse return usage(stderr);
     const artifact_raw = args.next() orelse return usage(stderr);
+    const runtime_count_raw = args.next() orelse return usage(stderr);
     if (args.next() != null or artifact_raw.len == 0)
         return usage(stderr);
+    const runtime_count = try parseRuntimeCount(runtime_count_raw);
     const artifact_path = try allocator.dupe(u8, artifact_raw);
     errdefer allocator.free(artifact_path);
     try invalidateArtifact(allocator, artifact_path);
@@ -112,13 +121,21 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
         .n1_executable = n1_executable,
         .current_executable = current_executable,
         .artifact_path = artifact_path,
+        .runtime_count = runtime_count,
     };
+}
+
+fn parseRuntimeCount(raw: []const u8) !usize {
+    if (std.mem.eql(u8, raw, "near-max")) return near_max_runtime_count;
+    const count = std.fmt.parseInt(usize, raw, 10) catch return error.InvalidRuntimeCount;
+    if (count == 0 or count > near_max_runtime_count) return error.InvalidRuntimeCount;
+    return count;
 }
 
 fn usage(stderr: *std.Io.Writer) anyerror {
     try stderr.writeAll(
         "usage: maru-session-host-signed-upgrade-e2e " ++
-            "<signed-n1-maru> <signed-current-maru> <artifact.json>\n",
+            "<signed-n1-maru> <signed-current-maru> <artifact.json> <runtime-count>\n",
     );
     return error.MissingSignedArtifact;
 }
@@ -207,37 +224,47 @@ fn run(
         return error.SourceBuildMismatch;
     const epoch_before = before.upgrade_epoch;
 
-    var children_before: [64]c.pid_t = undefined;
-    const children_before_len = try listChildren(host_pid_before, &children_before);
-    const spawn_response = try before.call("runtime.spawn", runtime_spawn_params);
-    defer allocator.free(spawn_response);
-    const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse
-        return error.RuntimeSpawnFailed;
-    const runtime_pid_before = try waitForNewChild(
-        host_pid_before,
-        children_before[0..children_before_len],
-    );
+    const records = try allocator.alloc(RuntimeRecord, config.runtime_count);
+    defer allocator.free(records);
 
-    const stream_before = try attachRuntime(allocator, &before, &runtime_id);
-    var screen_before = session_host.screen_assembler.ScreenAssembler.initForCodec(
-        allocator,
-        before.screen_codec_version,
-    );
-    defer screen_before.deinit();
-    const initial = try before.readSnapshot(stream_before);
-    defer allocator.free(initial);
-    try screen_before.applySnapshot(initial);
-    try waitForMarker(
-        &before,
-        stream_before,
-        &screen_before,
-        "MARU_SIGNED_UPGRADE_READY",
-    );
-    try waitForProcessName(runtime_pid_before, "sh");
-    const marker_before = "MARU_SIGNED_UPGRADE_BEFORE";
-    try before.sendInput(stream_before, marker_before ++ "\r");
-    try waitForMarker(&before, stream_before, &screen_before, marker_before);
-    try detachRuntime(allocator, &before, stream_before);
+    var children_before: ChildBuffer = undefined;
+    const children_before_len = try listChildren(host_pid_before, &children_before);
+    var known_children_len = children_before_len;
+    for (records, 0..) |*record, index| {
+        const spawn_params = try buildRuntimeSpawnParams(allocator, index);
+        defer allocator.free(spawn_params);
+        const spawn_response = try before.call("runtime.spawn", spawn_params);
+        defer allocator.free(spawn_response);
+        const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse
+            return error.RuntimeSpawnFailed;
+        const runtime_pid = try waitForNewChild(
+            host_pid_before,
+            children_before[0..known_children_len],
+        );
+        if (known_children_len == children_before.len) return error.ChildInventoryOverflow;
+        children_before[known_children_len] = runtime_pid;
+        known_children_len += 1;
+        record.* = .{ .runtime_id = runtime_id, .runtime_pid = runtime_pid, .index = index };
+
+        const stream_before = try attachRuntime(allocator, &before, &record.runtime_id);
+        var screen_before = session_host.screen_assembler.ScreenAssembler.initForCodec(
+            allocator,
+            before.screen_codec_version,
+        );
+        defer screen_before.deinit();
+        const initial = try before.readSnapshot(stream_before);
+        defer allocator.free(initial);
+        try screen_before.applySnapshot(initial);
+        var marker_buf: [96]u8 = undefined;
+        const ready = try runtimeMarker(&marker_buf, "READY", index);
+        try waitForMarker(&before, stream_before, &screen_before, ready);
+        try waitForProcessName(runtime_pid, "sh");
+        const marker_before = try runtimeMarker(&marker_buf, "BEFORE", index);
+        try before.sendInput(stream_before, marker_before);
+        try before.sendInput(stream_before, "\r");
+        try waitForMarker(&before, stream_before, &screen_before, marker_before);
+        try detachRuntime(allocator, &before, stream_before);
+    }
     before.deinit();
     before_open = false;
 
@@ -270,52 +297,138 @@ fn run(
     if (after.build_id == null or !std.mem.eql(u8, after.build_id.?, target_build_id))
         return error.TargetBuildMismatch;
     if (!after.host_exec_upgrade_v1) return error.UpgradeCapabilityLost;
-    const runtime_pid_after = if (try childStillPresent(host_pid_after, runtime_pid_before))
-        runtime_pid_before
-    else
-        return error.RuntimePidChanged;
-
-    if (!try inventoryContains(allocator, &after, &runtime_id))
-        return error.RuntimeIdentityLost;
+    for (records) |record| {
+        if (!try childStillPresent(host_pid_after, record.runtime_pid))
+            return error.RuntimePidChanged;
+    }
+    try verifyExactRuntimeSet(allocator, &after, records);
+    const runtime_set_sha256 = try runtimeSetDigest(records);
 
     const report = try waitForCommitted(allocator, &after, attempt_id);
     if (report.status != .committed or report.reason != .none)
         return error.UpgradeNotCommitted;
 
-    var gui_runtime: session_host.remote_runtime.RemoteRuntime = undefined;
-    try gui_runtime.attachExisting(
-        &after,
-        allocator,
-        io,
-        1,
-        runtime_id,
-        .{ .cols = 80, .rows = 12 },
-    );
-    defer gui_runtime.deinit();
-    if (!guiSurfaceContains(&gui_runtime, io, marker_before))
-        return error.PreUpgradeScreenLost;
-
-    const marker_after = "MARU_SIGNED_UPGRADE_AFTER";
-    try gui_runtime.sendInput(marker_after ++ "\r");
-    try waitForGuiMarker(&gui_runtime, io, marker_after);
-    try gui_runtime.sendInput(marker_exit ++ "\r");
-    try waitForRuntimeGone(allocator, &after, &runtime_id, host_pid_after, runtime_pid_after);
+    for (records) |*record| {
+        var gui_runtime: session_host.remote_runtime.RemoteRuntime = undefined;
+        try gui_runtime.attachExisting(
+            &after,
+            allocator,
+            io,
+            @as(u64, @intCast(record.index + 1)),
+            record.runtime_id,
+            .{ .cols = 80, .rows = 12 },
+        );
+        defer gui_runtime.deinit();
+        var marker_buf: [96]u8 = undefined;
+        const marker_before = try runtimeMarker(&marker_buf, "BEFORE", record.index);
+        if (!guiSurfaceContains(&gui_runtime, io, marker_before))
+            return error.PreUpgradeScreenLost;
+        const marker_after = try runtimeMarker(&marker_buf, "AFTER", record.index);
+        try gui_runtime.sendInput(marker_after);
+        try gui_runtime.sendInput("\r");
+        try waitForGuiMarker(&gui_runtime, io, marker_after);
+        const marker_exit = try runtimeMarker(&marker_buf, "EXIT_23", record.index);
+        try gui_runtime.sendInput(marker_exit);
+        try gui_runtime.sendInput("\r");
+        try waitForRuntimeGone(
+            allocator,
+            &after,
+            &record.runtime_id,
+            host_pid_after,
+            record.runtime_pid,
+        );
+    }
+    try verifyExactRuntimeSet(allocator, &after, &[_]RuntimeRecord{});
 
     return .{
         .host_id = host_id,
-        .runtime_id = runtime_id,
+        .runtime_id = records[0].runtime_id,
         .attempt_id = attempt_id,
         .host_pid_before = host_pid_before,
         .host_pid_after = host_pid_after,
-        .runtime_pid_before = runtime_pid_before,
-        .runtime_pid_after = runtime_pid_after,
+        .runtime_pid_before = records[0].runtime_pid,
+        .runtime_pid_after = records[0].runtime_pid,
         .epoch_before = epoch_before,
         .epoch_after = after.upgrade_epoch,
         .old_sha256 = old_identity.sha256,
         .current_sha256 = target_identity.sha256,
         .signer_requirement_sha256 = old_requirement,
         .gui_exact_reattach = true,
+        .all_runtime_pids_preserved = true,
+        .runtime_count = records.len,
+        .runtime_set_sha256 = runtime_set_sha256,
     };
+}
+
+fn runtimeMarker(buffer: []u8, kind: []const u8, index: usize) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "MARU_SIGNED_UPGRADE_{s}_{d}", .{ kind, index });
+}
+
+fn buildRuntimeSpawnParams(allocator: std.mem.Allocator, index: usize) ![]u8 {
+    var ready_buf: [96]u8 = undefined;
+    var exit_buf: [96]u8 = undefined;
+    const ready = try runtimeMarker(&ready_buf, "READY", index);
+    const marker_exit = try runtimeMarker(&exit_buf, "EXIT_23", index);
+    const command = try std.fmt.allocPrint(
+        allocator,
+        "/bin/stty -echo || exit 70; printf '{s}'; " ++
+            "while IFS= read -r line; do if [ \"$line\" = '{s}' ]; then exit 23; fi; " ++
+            "printf '%s\\r\\n' \"$line\"; done",
+        .{ ready, marker_exit },
+    );
+    defer allocator.free(command);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try json.write(.{
+        .argv = &[_][]const u8{ "/bin/sh", "-c", command },
+        .cols = 80,
+        .rows = 12,
+    });
+    return out.toOwnedSlice();
+}
+
+fn verifyExactRuntimeSet(
+    allocator: std.mem.Allocator,
+    client: *session_host.client.Client,
+    records: []const RuntimeRecord,
+) !void {
+    var inventory = try readRuntimeInventory(client);
+    switch (inventory) {
+        .complete => |*complete| {
+            defer complete.deinit(allocator);
+            if (complete.runtime_ids.len != records.len) return error.RuntimeSetMismatch;
+            for (records, 0..) |record, index| {
+                const numeric = std.fmt.parseInt(u128, &record.runtime_id, 16) catch
+                    return error.RuntimeIdentityInvalid;
+                if (std.mem.indexOfScalar(u128, complete.runtime_ids, numeric) == null)
+                    return error.RuntimeSetMismatch;
+                for (records[0..index]) |prior| {
+                    if (std.mem.eql(u8, &prior.runtime_id, &record.runtime_id))
+                        return error.DuplicateRuntimeIdentity;
+                }
+            }
+        },
+        .unavailable => return error.RuntimeInventoryUnavailable,
+    }
+}
+
+fn runtimeSetDigest(records: []const RuntimeRecord) ![32]u8 {
+    var ids: [near_max_runtime_count]u128 = undefined;
+    for (records, 0..) |record, index| {
+        ids[index] = std.fmt.parseInt(u128, &record.runtime_id, 16) catch
+            return error.RuntimeIdentityInvalid;
+    }
+    std.mem.sort(u128, ids[0..records.len], {}, std.sort.asc(u128));
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (ids[0..records.len]) |runtime_id| {
+        var bytes: [16]u8 = undefined;
+        std.mem.writeInt(u128, &bytes, runtime_id, .big);
+        hasher.update(&bytes);
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
 
 fn inventoryContains(
@@ -323,7 +436,7 @@ fn inventoryContains(
     client: *session_host.client.Client,
     runtime_id: *const [32]u8,
 ) !bool {
-    var inventory = try client.runtimeInventory();
+    var inventory = try readRuntimeInventory(client);
     return switch (inventory) {
         .complete => |*complete| blk: {
             defer complete.deinit(allocator);
@@ -333,6 +446,12 @@ fn inventoryContains(
         },
         .unavailable => error.RuntimeInventoryUnavailable,
     };
+}
+
+fn readRuntimeInventory(
+    client: *session_host.client.Client,
+) @typeInfo(@TypeOf(session_host.client.Client.runtimeInventory)).@"fn".return_type.? {
+    return client.runtimeInventory();
 }
 
 fn waitForGuiMarker(
@@ -490,7 +609,7 @@ fn peerPid(fd: c.fd_t) !c.pid_t {
     return pid;
 }
 
-fn listChildren(parent: c.pid_t, buffer: *[64]c.pid_t) !usize {
+fn listChildren(parent: c.pid_t, buffer: *ChildBuffer) !usize {
     @memset(buffer, 0);
     // libproc returns a PID count here, not the number of bytes written. Keep
     // this oracle aligned with the product process-tree walker so one live PTY
@@ -504,7 +623,7 @@ fn listChildren(parent: c.pid_t, buffer: *[64]c.pid_t) !usize {
 fn waitForNewChild(parent: c.pid_t, before: []const c.pid_t) !c.pid_t {
     var attempt: usize = 0;
     while (attempt < marker_attempts) : (attempt += 1) {
-        var current: [64]c.pid_t = undefined;
+        var current: ChildBuffer = undefined;
         const count = try listChildren(parent, &current);
         for (current[0..count]) |pid| {
             if (pid > 0 and std.mem.indexOfScalar(c.pid_t, before, pid) == null) return pid;
@@ -515,7 +634,7 @@ fn waitForNewChild(parent: c.pid_t, before: []const c.pid_t) !c.pid_t {
 }
 
 fn childStillPresent(parent: c.pid_t, child: c.pid_t) !bool {
-    var current: [64]c.pid_t = undefined;
+    var current: ChildBuffer = undefined;
     const count = try listChildren(parent, &current);
     return std.mem.indexOfScalar(c.pid_t, current[0..count], child) != null;
 }
@@ -605,6 +724,7 @@ fn writeArtifact(
     const old_sha = std.fmt.bytesToHex(evidence.old_sha256, .lower);
     const current_sha = std.fmt.bytesToHex(evidence.current_sha256, .lower);
     const signer_sha = std.fmt.bytesToHex(evidence.signer_requirement_sha256, .lower);
+    const runtime_set_sha = std.fmt.bytesToHex(evidence.runtime_set_sha256, .lower);
     const old_build_id = try std.fmt.allocPrint(allocator, "sha256:{s}", .{&old_sha});
     defer allocator.free(old_build_id);
     const current_build_id = try std.fmt.allocPrint(allocator, "sha256:{s}", .{&current_sha});
@@ -613,6 +733,8 @@ fn writeArtifact(
         .schema = "maru.session-host-signed-upgrade-e2e.v1",
         .host_id = host,
         .runtime_id = &evidence.runtime_id,
+        .runtime_count = evidence.runtime_count,
+        .runtime_set_sha256 = &runtime_set_sha,
         .attempt_id = attempt,
         .old_sha256 = &old_sha,
         .current_sha256 = &current_sha,
@@ -621,6 +743,7 @@ fn writeArtifact(
         .signer_requirement_sha256 = &signer_sha,
         .same_host_pid = evidence.host_pid_before == evidence.host_pid_after,
         .same_runtime_pid = evidence.runtime_pid_before == evidence.runtime_pid_after,
+        .all_runtime_pids_preserved = evidence.all_runtime_pids_preserved,
         .runtime_screen_before_preserved = true,
         .runtime_screen_after_writable = true,
         .gui_exact_reattach = evidence.gui_exact_reattach,
@@ -648,6 +771,8 @@ test "signed upgrade E2E helper rejects a marker absent from empty screen" {
 }
 
 test "signed upgrade runtime command is valid JSON and owns the exit marker once" {
+    const runtime_spawn_params = try buildRuntimeSpawnParams(std.testing.allocator, 17);
+    defer std.testing.allocator.free(runtime_spawn_params);
     var parsed = try std.json.parseFromSlice(
         std.json.Value,
         std.testing.allocator,
@@ -658,8 +783,25 @@ test "signed upgrade runtime command is valid JSON and owns the exit marker once
     const argv = parsed.value.object.get("argv").?.array.items;
     try std.testing.expectEqual(@as(usize, 3), argv.len);
     try std.testing.expectEqualStrings("/bin/sh", argv[0].string);
+    var marker_buf: [96]u8 = undefined;
+    const marker_exit = try runtimeMarker(&marker_buf, "EXIT_23", 17);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, argv[2].string, marker_exit));
+    try std.testing.expect(std.mem.indexOf(u8, argv[2].string, "MARU_SIGNED_UPGRADE_READY_17") != null);
     try std.testing.expect(std.mem.indexOf(u8, argv[2].string, "then exit 23") != null);
+}
+
+test "signed upgrade runtime count derives near-max from the product cap" {
+    try std.testing.expectEqual(near_max_runtime_count, try parseRuntimeCount("near-max"));
+    try std.testing.expectEqual(@as(usize, 1), try parseRuntimeCount("1"));
+    try std.testing.expectError(error.InvalidRuntimeCount, parseRuntimeCount("0"));
+    var over_cap_buf: [32]u8 = undefined;
+    const over_cap = try std.fmt.bufPrint(
+        &over_cap_buf,
+        "{d}",
+        .{session_host.upgrade_limits.max_runtime_count},
+    );
+    try std.testing.expectError(error.InvalidRuntimeCount, parseRuntimeCount(over_cap));
+    try std.testing.expectError(error.InvalidRuntimeCount, parseRuntimeCount("invalid"));
 }
 
 test "signed upgrade artifact invalidates stale success and pins auditable identities" {
@@ -695,6 +837,9 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
         .current_sha256 = [_]u8{0x22} ** 32,
         .signer_requirement_sha256 = [_]u8{0x33} ** 32,
         .gui_exact_reattach = true,
+        .all_runtime_pids_preserved = true,
+        .runtime_count = 255,
+        .runtime_set_sha256 = [_]u8{0x44} ** 32,
         .duration_ms = 5,
     });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(
@@ -721,6 +866,12 @@ test "signed upgrade artifact invalidates stale success and pins auditable ident
     );
     try std.testing.expect(object.get("upgrade_capability_preserved").?.bool);
     try std.testing.expect(object.get("gui_exact_reattach").?.bool);
+    try std.testing.expect(object.get("all_runtime_pids_preserved").?.bool);
+    try std.testing.expectEqual(@as(i64, 255), object.get("runtime_count").?.integer);
+    try std.testing.expectEqualStrings(
+        "4444444444444444444444444444444444444444444444444444444444444444",
+        object.get("runtime_set_sha256").?.string,
+    );
     try std.testing.expect(object.get("runtime_reaped_after_exit").?.bool);
     try std.testing.expectEqual(
         @as(i64, 2),

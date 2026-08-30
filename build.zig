@@ -11396,24 +11396,42 @@ pub fn build(b: *std.Build) void {
         const run_signed_upgrade_e2e = b.addRunArtifact(signed_upgrade_e2e);
         run_signed_upgrade_e2e.setCwd(b.path("."));
         run_signed_upgrade_e2e.has_side_effects = true;
+        const signed_n1_exe_option = b.option(
+            []const u8,
+            "session-host-signed-n1-exe",
+            "Absolute path to a caller-attested signed N-1 maru executable",
+        ) orelse "";
+        const signed_current_exe_option = b.option(
+            []const u8,
+            "session-host-signed-current-exe",
+            "Absolute path to a signed current maru executable",
+        ) orelse "";
         run_signed_upgrade_e2e.addArgs(&.{
-            b.option(
-                []const u8,
-                "session-host-signed-n1-exe",
-                "Absolute path to a caller-attested signed N-1 maru executable",
-            ) orelse "",
-            b.option(
-                []const u8,
-                "session-host-signed-current-exe",
-                "Absolute path to a signed current maru executable",
-            ) orelse "",
+            signed_n1_exe_option,
+            signed_current_exe_option,
             "zig-out/session-host-signed-upgrade/summary.json",
+            "1",
         });
         const signed_upgrade_e2e_step = b.step(
             "test-session-host-signed-upgrade",
             "Run signed N-1 to current live PTY session-host upgrade E2E (macOS)",
         );
         signed_upgrade_e2e_step.dependOn(&run_signed_upgrade_e2e.step);
+
+        const run_signed_upgrade_near_max_e2e = b.addRunArtifact(signed_upgrade_e2e);
+        run_signed_upgrade_near_max_e2e.setCwd(b.path("."));
+        run_signed_upgrade_near_max_e2e.has_side_effects = true;
+        run_signed_upgrade_near_max_e2e.addArgs(&.{
+            signed_n1_exe_option,
+            signed_current_exe_option,
+            "zig-out/session-host-signed-upgrade-near-max/summary.json",
+            "near-max",
+        });
+        const signed_upgrade_near_max_e2e_step = b.step(
+            "test-session-host-signed-upgrade-near-max",
+            "Run signed N-1 to current near-max PTY restore E2E (macOS)",
+        );
+        signed_upgrade_near_max_e2e_step.dependOn(&run_signed_upgrade_near_max_e2e.step);
 
         // P5b2b2는 Debug test runner RSS가 아니라 별도 ReleaseFast host PID를 잰다.
         // 제품 daemon/runtime/poll owner를 재사용하되 private inherited socketpair만

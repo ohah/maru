@@ -50,7 +50,20 @@ pub fn processPreclosedKernelCleanupFaultFixture(
     return processPreclosedMode(.kernel_cleanup_fault_fixture, marker, ctx);
 }
 
-const ProcessMode = enum { product, cleanup_collision_fixture, kernel_cleanup_fault_fixture };
+pub fn processPreclosedDiskFullAdmissionFixture(
+    marker: connection_turn.ArmedUpgrade,
+    ctx: Context,
+) Outcome {
+    if (!@import("builtin").is_test) @compileError("disk full admission fixture is test-only");
+    return processPreclosedMode(.disk_full_admission_fixture, marker, ctx);
+}
+
+const ProcessMode = enum {
+    product,
+    cleanup_collision_fixture,
+    kernel_cleanup_fault_fixture,
+    disk_full_admission_fixture,
+};
 
 fn processPreclosedMode(
     comptime mode: ProcessMode,
@@ -82,6 +95,10 @@ fn processPreclosedMode(
             marker.attempt_id,
         ),
         .kernel_cleanup_fault_fixture => upgrade_product.processArmedPreclosedKernelCleanupFaultFixture(
+            product_context,
+            marker.attempt_id,
+        ),
+        .disk_full_admission_fixture => upgrade_product.processArmedPreclosedDiskFullAdmissionFixture(
             product_context,
             marker.attempt_id,
         ),
